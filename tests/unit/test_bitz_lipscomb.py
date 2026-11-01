@@ -356,9 +356,9 @@ def test_ice_forming_open_water_gradients_match_main_and_lane_difference():
     zero = jnp.zeros((1,), dtype=jnp.float64)
     zero_layers = jnp.zeros((1, 3), dtype=jnp.float64)
 
-    def run(concentration, qlead, t_bottom, sss):
+    def run(concentration, h_ice, qlead, t_bottom, sss):
         state = SI3ColumnArrays(
-            jnp.asarray([concentration]), jnp.asarray([0.5]), zero,
+            jnp.asarray([concentration]), jnp.asarray([h_ice]), zero,
             jnp.asarray([c.T0]), zero_layers, zero_layers,
             zero, zero_layers, zero,
         )
@@ -375,7 +375,7 @@ def test_ice_forming_open_water_gradients_match_main_and_lane_difference():
         ).exit
 
     def ice_volume(qlead, t_bottom, sss):
-        out = run(0.0, qlead, t_bottom, sss)
+        out = run(0.0, 0.0, qlead, t_bottom, sss)
         return out.h_ice[0] * out.concentration[0]
 
     args = (-40.0, 271.27, 34.7)
@@ -400,18 +400,58 @@ def test_ice_forming_open_water_gradients_match_main_and_lane_difference():
         )
 
     concentration_gradient = jax.grad(
-        lambda concentration: run(concentration, *args).concentration[0]
+        lambda concentration: run(concentration, 0.5, *args).concentration[0]
     )(5.0e-11)
     # Stay wholly below epsi10 while avoiding subtractive cancellation in the
     # source-rounded forward expression.
     epsilon = 4.0e-11
     concentration_difference = (
-        run(5.0e-11 + epsilon, *args).concentration[0]
-        - run(5.0e-11 - epsilon, *args).concentration[0]
+        run(5.0e-11 + epsilon, 0.5, *args).concentration[0]
+        - run(5.0e-11 - epsilon, 0.5, *args).concentration[0]
     ) / (2.0 * epsilon)
     np.testing.assert_allclose(
         float(concentration_gradient), float(concentration_difference),
         rtol=5e-11, atol=0.0,
+    )
+
+    # The dh stage clears a genuinely empty column, so equality of its zero
+    # output with the zero entry value must not manufacture an identity path.
+    def empty_outputs(concentration):
+        out = run(concentration, 0.0, 0.0, args[1], args[2])
+        return jnp.stack((out.concentration[0], out.age_volume[0]))
+
+    np.testing.assert_array_equal(
+        np.asarray(jax.jacrev(empty_outputs)(0.0)), np.zeros(2),
+    )
+
+    age_identity = jax.grad(
+        lambda age: si3_column_step_arrays(
+            SI3ColumnArrays(
+                zero, zero, zero, jnp.asarray([c.T0]), zero_layers,
+                zero_layers, zero, zero_layers, jnp.asarray([age]),
+            ),
+            SI3SurfaceForcing(
+                qns_ice=zero, qsr_ice=zero, dqns_ice=zero,
+                qtr_ice_top=zero, t_bottom=jnp.asarray([args[1]]),
+                sss=jnp.asarray([args[2]]), evaporation=zero,
+                snow_precipitation=zero, qprec_ice=zero,
+                qcn_ice_bottom=zero, qsb_ice_bottom=zero, fhld=zero,
+                qlead=zero,
+            ),
+            3600.0, c, si3=SI3ThermoConfig(),
+        ).exit.age_volume[0]
+    )(0.0)
+    assert float(age_identity) == 1.0
+
+    thickness_gradient = jax.grad(
+        lambda h_ice: run(5.0e-11, h_ice, *args).h_ice[0]
+    )(0.5)
+    thickness_difference = (
+        run(5.0e-11, 0.5 + 1.0e-5, *args).h_ice[0]
+        - run(5.0e-11, 0.5 - 1.0e-5, *args).h_ice[0]
+    ) / 2.0e-5
+    np.testing.assert_allclose(
+        float(thickness_gradient), float(thickness_difference), rtol=1e-6,
     )
 
 
@@ -426,6 +466,68 @@ def test_inactive_column_guard_stops_h_ice_cotangent():
     )(h_ice)
     assert bool(jnp.all(gradient[:8] == 0.0)), gradient
     assert bool(jnp.all(gradient[8:] == 1.0)), gradient
+
+
+def test_si3_column_step_mixed_dtypes_match_lane_and_differentiate():
+    """The reverse-only guards preserve 920c61d884 dtype promotion."""
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        si3_column_step_arrays,
+    )
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    zero64 = jnp.zeros((1,), dtype=jnp.float64)
+    zero_layers64 = jnp.zeros((1, 3), dtype=jnp.float64)
+    state = SI3ColumnArrays(
+        jnp.asarray([5.0e-11], dtype=jnp.float64),
+        jnp.asarray([0.5], dtype=jnp.float64),
+        zero64,
+        jnp.asarray([c.T0], dtype=jnp.float64),
+        zero_layers64,
+        zero_layers64,
+        zero64,
+        zero_layers64,
+        zero64,
+    )
+
+    def forcing(qlead_dtype):
+        return SI3SurfaceForcing(
+            qns_ice=zero64, qsr_ice=zero64, dqns_ice=zero64,
+            qtr_ice_top=zero64, t_bottom=jnp.asarray([271.27]),
+            sss=jnp.asarray([34.7]), evaporation=zero64,
+            snow_precipitation=zero64, qprec_ice=zero64,
+            qcn_ice_bottom=zero64, qsb_ice_bottom=zero64, fhld=zero64,
+            qlead=jnp.asarray([-40.0], dtype=qlead_dtype),
+        )
+
+    def step(value, surface_forcing):
+        return si3_column_step_arrays(
+            value, surface_forcing, 3600.0, c, si3=SI3ThermoConfig(),
+        )
+
+    mixed = step(state, forcing(jnp.float32))
+    all64 = step(state, forcing(jnp.float64))
+    for mixed_stage, all64_stage in (
+        (mixed.post_do, all64.post_do), (mixed.exit, all64.exit),
+    ):
+        for mixed_leaf, all64_leaf in zip(mixed_stage, all64_stage, strict=True):
+            np.testing.assert_array_equal(
+                np.asarray(mixed_leaf), np.asarray(all64_leaf),
+            )
+
+    state32_concentration = state._replace(
+        concentration=state.concentration.astype(jnp.float32),
+    )
+    gradient = jax.grad(
+        lambda concentration: step(
+            state32_concentration._replace(concentration=concentration),
+            forcing(jnp.float64),
+        ).exit.concentration[0]
+    )(state32_concentration.concentration)
+    assert gradient.dtype == jnp.float32
+    assert bool(jnp.all(jnp.isfinite(gradient)))
 
 
 def test_cumulative_remap_reverse_mode_finite_at_zero_thickness():

@@ -2099,6 +2099,9 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     def guard_inactive_leaf(value):
         return _guard_inactive_columns(value, gathered_at_entry, dtype)
     thermo_state = jax.tree.map(guard_inactive_leaf, state)
+    thermo_state = thermo_state._replace(
+        h_ice=jnp.asarray(state.h_ice, dtype=dtype),
+    )
     thermo_forcing = jax.tree.map(guard_inactive_leaf, forcing)
     e_ice = jnp.asarray(thermo_state.e_ice)
     h_ice = jnp.asarray(thermo_state.h_ice, dtype=dtype)
@@ -2208,7 +2211,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         o10.o9.dh.e_s,
         o10.o9.dh.s_i,
         o10.o9.dh.sz_i,
-        thermo_state.age_volume,
+        state.age_volume,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
@@ -2227,22 +2230,25 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
             thermo_state, post_temp2, thermo_forcing, si3, dt, constants
         )
         da_out = None
-    # Preserve the lane's literal forward expression into ice_thd_do.  Only the
-    # reverse pass for an inactive concentration is supplied by the live entry
-    # concentration: the guarded thermodynamic path has no valid cotangent
-    # there, while finite differences of this exact forward expression do.
+    # Preserve the lane's literal forward expression into ice_thd_do.  Supply
+    # the safe entry paths that NEMO's inactive gather leaves live without
+    # changing the guarded thermodynamic primal.  ``dh`` clears concentration
+    # when its ice thickness is zero, so that structural condition—not value
+    # equality—determines whether the entry concentration was carried.
     post_da = post_da._replace(
         concentration=_inactive_reverse_from_entry(
             post_da.concentration,
             state.concentration,
-            gathered_at_entry,
             (~gathered_at_entry)
-            & (post_da.concentration == state.concentration),
-        )
+            & (post_dh.h_ice != 0.0),
+        ),
     )
+    do_qlead = jnp.asarray(forcing.qlead, dtype=dtype)
+    do_t_bottom = jnp.asarray(forcing.t_bottom, dtype=dtype)
+    do_sss = jnp.asarray(forcing.sss, dtype=dtype)
     # `ice_thd_frazil` supplies ht_i_new (O7_REF ppsrc `icethd.f90:174`).
     frazil = si3_ice_thd_frazil(
-        forcing.qlead,
+        do_qlead,
         rn_hinew=float(nml["rn_hinew"]),
         ln_frazil=bool(nml["ln_frazil"]),
     )
@@ -2257,8 +2263,8 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         sv_i=sv_do,
         e_i=e_do,
         szv_i=szv_do,
-        qlead=forcing.qlead,
-        t_bo=forcing.t_bottom,
+        qlead=do_qlead,
+        t_bo=do_t_bottom,
         sfx_opw=zero,
         wfx_opw=zero,
         ht_i_new=frazil.ht_i_new,
@@ -2266,7 +2272,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         hfx_thd=zero,
         hfx_opw=zero,
         rn_amax_2d=jnp.full_like(zero, _MAXIMUM_ICE_CONCENTRATION),
-        sss_m=forcing.sss,
+        sss_m=do_sss,
         hi_max=jnp.asarray([0.0, float("inf")], dtype=dtype),
         nn_icesal=nn_icesal,
         rn_sinew=float(nml["rn_sinew"]),
@@ -2430,28 +2436,27 @@ def _guard_inactive_columns(value, active_columns, dtype):
 
 @jax.custom_vjp
 def _inactive_reverse_from_entry(
-    updated, entry, active_columns, inactive_entry_columns,
+    updated, entry, entry_columns,
 ):
-    """Return ``updated`` exactly; route only inactive cotangents to ``entry``."""
-    del entry, active_columns, inactive_entry_columns
+    """Return ``updated`` exactly; route selected cotangents to ``entry``."""
+    del entry, entry_columns
     return updated
 
 
 def _inactive_reverse_from_entry_fwd(
-    updated, entry, active_columns, inactive_entry_columns,
+    updated, entry, entry_columns,
 ):
-    del entry
-    return updated, (active_columns, inactive_entry_columns)
+    return updated, (entry, entry_columns)
 
 
-def _inactive_reverse_from_entry_bwd(masks, cotangent):
-    active_columns, inactive_entry_columns = masks
-    active = jnp.asarray(active_columns)
-    inactive_entry = jnp.asarray(inactive_entry_columns)
+def _inactive_reverse_from_entry_bwd(residual, cotangent):
+    entry, entry_columns = residual
+    entry_columns = jnp.asarray(entry_columns)
     return (
-        jnp.where(active, cotangent, 0.0),
-        jnp.where(inactive_entry, cotangent, 0.0),
-        None,
+        cotangent,
+        jnp.asarray(
+            jnp.where(entry_columns, cotangent, 0.0), dtype=entry.dtype,
+        ),
         None,
     )
 
