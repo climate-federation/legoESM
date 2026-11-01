@@ -58,6 +58,36 @@ def test_orca2_l5_selects_fct_and_nemo_association():
     assert cfg.through_fct is True
     assert cfg.nemo_association is True
 
+
+def test_through_fct_selector_reaches_the_model_route_guard():
+    """Neutering the selector at the model consumer makes this stop raising."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_recipe import nemo_lat_lon_model_config
+
+    cfg = nemo_lat_lon_model_config()
+    cfg = cfg._replace(
+        tracer_time_integrator="euler", tracer_advection="centered",
+        physics=cfg.physics._replace(mle=MLEConfig(through_fct=True)))
+    with pytest.raises(ValueError, match="stage-3 transport route"):
+        LatLonCGridOceanModel._validate_config(cfg)
+
+
+def test_nemo_association_selector_changes_the_executed_coefficient():
+    """Pin the written denominator association, not just the config bit."""
+    omega = 7.292115083046062e-5
+    cfg = MLEConfig(nemo_association=True)
+    got = float(mle_coefficient(
+        cfg.ce, cfg.lat_ref_deg, omega=omega,
+        nemo_association=cfg.nemo_association))
+    want = (cfg.ce / (_O_RC_F_LENGTH_M * 2.0 * omega
+                      * math.sin(mle._NEMO_RAD * cfg.lat_ref_deg)))
+    generic = float(mle_coefficient(
+        cfg.ce, cfg.lat_ref_deg, omega=omega, nemo_association=False))
+    assert got == want
+    assert got != generic
+
 jax.config.update("jax_enable_x64", True)
 
 # --- NEMO tramle.F90 fixed constants (typed from source; canaried below) ---

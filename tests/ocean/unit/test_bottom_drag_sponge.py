@@ -63,6 +63,39 @@ class TestSpongeForcing:
         assert sf.gamma.shape == (10, 20)
         assert sf.u_ref is None
         assert sf.v_ref is None
+        assert sf.nemo_kt is None
+
+    def test_nemo_kt_is_carried_and_checked_by_the_l6_entry_guard(self):
+        """The step stamp is data, and the model guard consumes that data."""
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+
+        card = recipe.build_nemo_testcase_card("VORTEX-zco")
+        cfg_kw = recipe.orca2_l8_krhs_selection()
+        cfg_kw.update(
+            rk3_stage3_heat_nemo_written=True,
+            rk3_stage3_salt_nemo_written=True,
+            rk3_stage3_tracer_nemo_stored_thickness=True,
+            tracer_time_integrator="rk3_ws",
+            tracer_advection="fct2",
+            gm_redi=recipe.orca2_l2_isoneutral_gm_redi(),
+        )
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord,
+            card.recipe.model_config._replace(**cfg_kw))
+        state = card.recipe.initial_state
+        sf = SpongeForcing(
+            gamma=jnp.zeros_like(state.T.data),
+            T_ref=jnp.zeros_like(state.T.data),
+            S_ref=jnp.zeros_like(state.S.data), nemo_kt=17)
+        assert sf.nemo_kt == 17
+        # A stale stamp is rejected before compiled dynamics begin, so this
+        # exercises the live consumer without an ORCA deck or NEMO record.
+        with pytest.raises(ValueError, match="target kt=17.*requested kt=18"):
+            model.step(
+                state, dt=card.dt_s, sponge=sf, nemo_kt=18)
 
     def test_compute_sponge_gamma_latlon_shape(self, latlon_grid):
         """Gamma field has correct shape."""
@@ -210,5 +243,3 @@ class TestSharedSpongeKernel:
         assert g2d.shape == (grid.n_lat, grid.n_lon)
         np.testing.assert_array_equal(g2d, np.broadcast_to(
             g1d[:, None], (grid.n_lat, grid.n_lon)))
-
-

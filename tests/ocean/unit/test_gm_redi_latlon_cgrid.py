@@ -216,6 +216,100 @@ def test_orca2_l2_config_selects_every_new_redi_operand_route():
     assert cfg.redi_flux_stored_face_ratios is True
 
 
+def test_orca2_l2_new_routes_reach_the_record_free_operator(monkeypatch):
+    """Exercise the five formerly attribute-only fields at their consumers."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        orca2_l2_isoneutral_gm_redi,
+    )
+
+    setup = _stratified_with_meridional_tilt(n_lat=5, n_lon=7, nlev=4)
+    (grid, base_z, mask, u_mask, v_mask, eta, H_bathy, _, _, T, S, _) = setup
+    raw = np.broadcast_to(np.asarray(base_z.dz_ref), T.shape).copy()
+    z_coord = create_partial_cell_coordinate(
+        create_z_star_from_thicknesses(
+            np.asarray(base_z.dz_ref), nemo_e3t_0_m=raw,
+            nemo_e3w_0_m=raw),
+        H_bathy)
+    cfg = orca2_l2_isoneutral_gm_redi()._replace(
+        nemo_slope_north_fold=False,
+        slope_prd_evaluation="density_roundtrip",
+        redi_w_slope_stage_evaluation="redi_tuple",
+    )
+    seen = {"source_round": [], "mesh": 0, "preserve": [], "operator": []}
+    from types import SimpleNamespace
+
+    def depth_spy(ssh, bathy, zc, dtype, **kwargs):
+        seen["source_round"].append(kwargs["source_round"])
+        stretch = 1.0 + jnp.asarray(ssh, dtype=dtype) / bathy
+        dz = jnp.asarray(zc.dz_ref, dtype=dtype)
+        gdept = jnp.cumsum(dz) - 0.5 * dz
+        gdepw = jnp.cumsum(dz) - dz
+        return (gdept * stretch[..., None],
+                gdepw * stretch[..., None], stretch)
+
+    def mesh_spy(_zc, _grid, umask3, vmask3, dtype, nlev):
+        seen["mesh"] += 1
+        e3 = jnp.asarray(_zc.nemo_e3t_0, dtype=dtype)[..., :nlev]
+        e3u = jnp.broadcast_to(e3[:, :1], umask3.shape)
+        e3v = jnp.broadcast_to(e3[:1, :1], vmask3.shape)
+        return SimpleNamespace(
+            e3u_0=e3u, e3v_0=e3v,
+            umask3=umask3, vmask3=vmask3)
+
+    def face_spy(*args, **kwargs):
+        if "preserve_north_fold" in kwargs:
+            seen["preserve"].append(kwargs["preserve_north_fold"])
+        # The downstream operator is spied too; retaining the resolved native
+        # reference arrays is enough to prove this routing boundary.
+        return args[2], args[3]
+
+    def operator_spy(q, *_args, **kwargs):
+        seen["operator"].append(kwargs)
+        return jnp.zeros_like(q)
+
+    monkeypatch.setattr(gm_module, "_nemo_qco_live_slope_depths", depth_spy)
+    monkeypatch.setattr(gm_module, "nemo_qco_resolved_mesh_operands", mesh_spy)
+    monkeypatch.setattr(gm_module, "nemo_qco_live_face_thicknesses", face_spy)
+    monkeypatch.setattr(
+        gm_module, "nemo_iso_lap_tracer_tendency_latlon_cgrid", operator_spy)
+    gm_redi_tracer_tendency_latlon(
+        T, S, eta, H_bathy, grid, z_coord, cfg,
+        eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+        redi_flux_eta=eta + 0.125)
+
+    assert seen["source_round"] == [True]
+    assert seen["mesh"] == 1
+    assert seen["preserve"] == [True]
+    assert len(seen["operator"]) == 2
+    for routed in seen["operator"]:
+        assert routed["face_thickness_u"] is not None
+        assert routed["face_thickness_v"] is not None
+        assert routed["a33_source_ordering"] is True
+
+
+def test_orca2_l2_north_fold_selector_reaches_the_slope_guard():
+    """A non-fold grid cannot silently ignore the ORCA pivot selection."""
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        orca2_l2_isoneutral_gm_redi,
+    )
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_nemo_native_slopes,
+    )
+
+    setup = _stratified_with_meridional_tilt(n_lat=5, n_lon=7, nlev=4)
+    (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+     rho, T, S, _) = setup
+    cfg = orca2_l2_isoneutral_gm_redi()._replace(
+        slope_prd_evaluation="density_roundtrip",
+        slope_depth_evaluation="legacy_jacobian_t_surface")
+    with pytest.raises(ValueError, match="stored ORCA T-pivot"):
+        compute_nemo_native_slopes(
+            rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
+            make_eos_fn("linear", None), jacobian=jacobian,
+            eta=eta, H_bathy=H_bathy)
+
+
 def test_nemo_iso_lap_defaults_and_latlon_callers_are_fail_closed():
     """The shared NEMO bottom closure reaches every package-level caller."""
     assert inspect.signature(

@@ -16,6 +16,7 @@ from legoesm.training.param_collector import (
     _resolve_shape,
     _seed_raw,
     build_registry,
+    build_orca2_rung10_trainable_params,
     build_trainable_params,
 )
 from legoesm.core.param_overrides import apply_param_overrides
@@ -421,3 +422,35 @@ def test_explicit_only_request_that_is_inactive_or_excluded_is_refused() -> None
             active_scheme_keys={_GM_REDI_KEY}, tier=0, include=(_RN_UD,),
             exclude=(_RN_UD,), init_values={_RN_UD: _ORCA2_RN_UD},
             dtype=jnp.float64)
+
+
+def test_orca2_rung10_builder_refuses_every_explicit_frozen_request() -> None:
+    """The ORCA2 wrapper, not only the generic collector, owns the freeze."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        ORCA2_RUNG10_FROZEN_PARAMS,
+    )
+
+    frozen = next(iter(ORCA2_RUNG10_FROZEN_PARAMS))
+    for kwargs in (
+        {"include": (frozen,)},
+        {"include_tier0": (frozen,)},
+        {"init_values": {frozen: 1.0}},
+    ):
+        with pytest.raises(ValueError, match="frozen on ORCA2 rung 10"):
+            build_orca2_rung10_trainable_params(**kwargs)
+
+
+def test_orca2_rung10_builder_excludes_frozen_but_keeps_explicit_rn_ud() -> None:
+    """The wrapper delegates the live selection after adding its exclusions."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        ORCA2_RUNG10_FROZEN_PARAMS,
+    )
+
+    params = build_orca2_rung10_trainable_params(
+        active_scheme_keys={_GM_REDI_KEY}, tier=0, include=(_RN_UD,),
+        init_values={_RN_UD: _ORCA2_RN_UD}, dtype=jnp.float64)
+    names = {c.name for c in params.constraints}
+    assert names == {_RN_UD}
+    assert names.isdisjoint(ORCA2_RUNG10_FROZEN_PARAMS)
+    np.testing.assert_allclose(
+        float(params.as_dict()[_RN_UD]), _ORCA2_RN_UD, rtol=1e-12)
