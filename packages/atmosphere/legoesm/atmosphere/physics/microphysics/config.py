@@ -198,6 +198,7 @@ __param_spec__ = {
             "mg2_qi_limit_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_presence_ramp_top": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_frozen_rain_ice_ramp_frac": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_drop_readjust_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -1193,6 +1194,14 @@ class MorrisonConfig(NamedTuple):
     # it; 0 = MG2's hard test (user decision 2026-10-22, 15a; KNOWN DIFFERENCE
     # in _warm_rain.mg2_frozen_rain_ice_fraction).
     mg2_frozen_rain_ice_ramp_frac: float = 0.1
+    # RULE 5 smoothing of MG2's FINAL droplet mean-size readjust (in-cloud
+    # mean diameter held in [2, 50] um and ncic <= qcic/1e-20,
+    # micro_mg2_0.F90:2743-2835; prognostic droplet number only): LogSumExp
+    # width in ln space of both limits, the cloud-optics value
+    # (CloudConfig.mg2_drop_*_log_width); 0 = MG2's hard clip
+    # (#2216, codex + GLM 2026-11-01; KNOWN DIFFERENCE in
+    # _warm_rain.mg2_droplet_number_readjust).
+    mg2_drop_readjust_log_width: float = 0.01
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,

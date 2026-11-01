@@ -2407,7 +2407,8 @@ def morrison_microphysics(
         _dnc_pre = dN_c_dt
         dN_c_dt = mg2_droplet_number_readjust(
             q_c + dq_c_dt * dt, N_c + dN_c_dt * dt, N_c, cf_eff, rho, dt, dN_c_dt,
-            presence_top=config.mg2_presence_ramp_top)
+            presence_top=config.mg2_presence_ramp_top,
+            log_width=config.mg2_drop_readjust_log_width)
         if _nc_pub:
             _nc_terms["size_readjust"] = dN_c_dt - _dnc_pre
             _dnc_pre = dN_c_dt

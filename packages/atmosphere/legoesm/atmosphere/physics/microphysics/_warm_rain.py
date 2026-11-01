@@ -1253,7 +1253,7 @@ def mg2_instant_ice_melt_homog_freeze(q_c, N_c_kg, q_i, N_i_kg, T, T_homog,
     return q_c2, N_c2, q_i2, N_i2, T2, melt, frz, fired_m | fired_h
 
 def mg2_droplet_number_readjust(q_c_post, N_c_post, N_c, cf, rho, dt, dN_c_dt, *,
-                                presence_top):
+                                presence_top, log_width=0.0):
     """CAM6 MG2 final droplet mean-size re-adjust (micro_mg2_0.F90:2743-2753,
     :2812-2835) on the grid-mean post-step state (per-volume number): in-cloud
     dumc = min(max(q_post,0)/cf, 5e-3), dumnc = max(N_post,0)/cf; where
@@ -1261,11 +1261,37 @@ def mg2_droplet_number_readjust(q_c_post, N_c_post, N_c, cf, rho, dt, dN_c_dt, *
     becomes (dumnc_adj*cf - N_c)/dt.  At dumc == qsmall exactly the size
     routine (qcic > qsmall) leaves the number, so a negative one survives, as
     in MG2.
+
+    ``log_width`` (``MorrisonConfig.mg2_drop_readjust_log_width``) is the
+    RULE 5 width of both size limits (:func:`mg2_droplet_psd`); 0 = MG2.
+
+    KNOWN DIFFERENCE (RULE 5, #2216).  MG2 clips: the in-cloud mean diameter
+    is set to exactly 2 um (or 50 um) where it leaves [2, 50] um, the number
+    to qcic/1e-20 kg where it exceeds that, and the number is left untouched
+    inside the bounds.  At ``log_width > 0`` the port rounds both limits by a
+    LogSumExp in ln space and applies the result in every cell with cloud
+    water (the "number moved" test is dropped: with rounded limits it is a
+    jump of up to the rounding offset).  Measured at the default 0.01 on the
+    prognostic-number oracle fixtures (x64; readjust inputs of the real call):
+    the readjusted number departs from MG2's by up to 1.4e-2 relative (7.1e-3
+    in cells MG2 leaves untouched), the whole-call droplet tendency by up to
+    9.7e-3 of the column's largest MG2 droplet tendency (per-column gaps
+    stored in tests/atmosphere/microphysics/unit/
+    test_morrison_mg2_drop_readjust_smooth.py).  The bounds still hold: the
+    rounded limits never pass the hard ones (LogSumExp max >= max, min <=
+    min), so the mean diameter stays in [2, 50] um and the number at or
+    below qcic/1e-20 kg (measured excursion <= 2e-15 in ln D, round-off);
+    what changes is that cells within a few ``log_width`` of a bound (in ln
+    lambda) are moved inward too.
+    ``log_width = 0`` recovers MG2 exactly.
     """
     q_ic = jnp.minimum(jnp.maximum(q_c_post, 0.0) / cf, KK2000_CAM6_QC_MAX)
     n_ic = jnp.maximum(N_c_post, 0.0) / cf
-    n_adj = mg2_size_bounded_nc(q_ic, n_ic, rho)
-    f = mg2_presence(q_ic, presence_top) * jnp.where(n_adj != n_ic, 1.0, 0.0)
+    n_adj = mg2_size_bounded_nc(q_ic, n_ic, rho, number_cap_log_width=log_width,
+                                slope_log_width=log_width)
+    f = mg2_presence(q_ic, presence_top)
+    if log_width == 0.0:
+        f = f * jnp.where(n_adj != n_ic, 1.0, 0.0)
     return f * ((n_adj * cf - N_c) / dt) + (1.0 - f) * dN_c_dt
 
 
