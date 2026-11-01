@@ -432,6 +432,18 @@ class KesslerConfig(NamedTuple):
     hard_saturation_adjustment: bool = False
     hard_sat_adjust_threshold: float = 1.1      # RH trigger q_v > thr*q_sat [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
+    # --- Warm-rain parameter set ---
+    # "classic"    = Kessler (1969) autoconversion/accretion, Klemp & Wilhelmson
+    #                (1978) rain evaporation, constant rain_fall_speed (the
+    #                published BOMEX/RICO/DYCOMS/ASTEX cases run this).
+    # "cloudbench" = the CloudBench LES one-moment warm rain (Chammas et al.
+    #                2026, Sci. Adv. doi 10.1126/sciadv.aec8488) as coded in
+    #                swirl-lm, with the Azimi et al. (2024) EKI calibration and
+    #                the Chen et al. (2022) rain fall speed. Its coefficients are
+    #                fixed module constants in ``kessler.py`` (provenance there);
+    #                the float fields above are NOT read in this set except the
+    #                saturation-adjustment ones. Unknown names raise.
+    parameter_set: str = "classic"
 
 
 class SundqvistConfig(NamedTuple):
