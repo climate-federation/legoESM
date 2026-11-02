@@ -388,7 +388,7 @@ def _store_size_gb(path):
 
 
 def _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times, snaps_per_day,
-                     stride, rank, nproc, lead_stride=None):
+                     stride, rank, nproc, lead_offsets=None):
     """Local ``(ds, cloud_ds, flux_ds, at)`` replacing the remote stores, or
     None when the deck names no cache. ``at`` maps a remote time index to its
     position in the local state store; every mapping is verified by timestamp.
@@ -399,10 +399,10 @@ def _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times, snaps_per_day,
     from legoesm.training.era5_to_state import open_era5_zarr
 
     # Multi-lead samples read every intermediate lead's analysis too.
-    _step = int(lead_stride or stride)
-    all_idx = sorted({i for _, a, b in _training_sample_indices(
+    _offs = tuple(lead_offsets or (stride,))
+    all_idx = sorted({i for _, a, _b in _training_sample_indices(
         cfg, yml, times, snaps_per_day, stride)
-        for i in (*range(a, b, _step), b)})
+        for i in (a, *(a + o for o in _offs))})
     if not all_idx:
         return None
     stamps = times[np.asarray(all_idx)]
@@ -467,19 +467,21 @@ def _assert_same_sample(remote, cached):
 
 
 def _sample_inputs(era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at,
-                   lead_stride=None):
+                   lead_offsets=None):
     """The three ERA5 slices one WB sample is built from (IC, target, and the
     IC-time surface/forcing slice). The loaders build from these and the cache
     gate compares them, so the gate checks exactly what training reads.
 
-    With ``lead_stride`` the target is the TUPLE of every lead's slice,
-    ``i_ic + lead_stride, ..., i_tg``."""
+    With ``lead_offsets`` (snapshots after ``i_ic``) the target is the TUPLE
+    of every lead's slice; the last offset is ``i_tg - i_ic``."""
     from legoesm.training.era5_to_state import load_era5_slice
 
     def _state(i):
         return load_era5_slice(era5_cfg, at(i), ds=ds, cloud_ds=cloud_ds)
-    tg = (_state(i_tg) if lead_stride is None else tuple(
-        _state(i) for i in range(i_ic + lead_stride, i_tg + 1, lead_stride)))
+    if lead_offsets is not None and i_ic + lead_offsets[-1] != i_tg:
+        raise ValueError(f"last lead offset {lead_offsets[-1]} != {i_tg - i_ic}")
+    tg = (_state(i_tg) if lead_offsets is None else tuple(
+        _state(i_ic + o) for o in lead_offsets))
     return (_state(i_ic), tg,
             load_era5_slice(sst_cfg, at(i_ic), ds=ds, flux_ds=flux_ds))
 
@@ -1511,15 +1513,16 @@ def rollout_hours(cfg, yml):
 
 
 def wb_lead_strides(cfg, yml, cadence_hours) -> tuple:
-    """``(leads, stride, lead_stride)`` in ERA5 snapshots: the sample's full
-    horizon and the spacing of its supervised leads."""
+    """``(leads, stride, lead_offsets)`` in ERA5 snapshots: the sample's full
+    horizon and each supervised lead's offset from the initial time."""
     leads = supervised_leads(yml, getattr(cfg, "training_core", "spectral"))
     if leads and leads[0] % int(cadence_hours):
         raise ValueError(f"train_leads_hours {list(leads)} are not on the "
                          f"{cadence_hours} h ERA5 cadence.")
     roll_h = leads[-1] if leads else rollout_hours(cfg, yml)
     stride = int(roll_h) // int(cadence_hours)
-    return leads, stride, ((leads[0] // int(cadence_hours)) if leads else stride)
+    return leads, stride, (tuple(h // int(cadence_hours) for h in leads)
+                           if leads else (stride,))
 
 
 def supervised_leads(yml, training_core="spectral") -> tuple:
@@ -1531,8 +1534,9 @@ def supervised_leads(yml, training_core="spectral") -> tuple:
     scored with the same equal-weight mean, so non-uniform
     ``multi_step_weights`` are refused.  The lat-lon core keeps the first lead.
 
-    Leads must be consecutive multiples of the first, ``(h, 2h, ..., Kh)``: the
-    forecast is one chained rollout scored after every segment."""
+    Leads must be increasing multiples of the first, e.g. ``(6, 12, 24, 72)``
+    (owner 2026-11-02): the forecast is one chained rollout of first-lead
+    segments, scored after the segments that end on a lead."""
     lb = yml.get("loss", {}) or {}
     raw = list(lb.get("train_leads_hours") or ())
     if any(isinstance(h, bool) or not isinstance(h, int) or h < 1 for h in raw):
@@ -1551,16 +1555,18 @@ def supervised_leads(yml, training_core="spectral") -> tuple:
             raise ValueError("loss.train_curriculum_hours needs "
                              "loss.train_leads_hours (it selects among them).")
         return ()
-    if hrs != tuple(hrs[0] * (k + 1) for k in range(len(hrs))):
+    if (any(h % hrs[0] for h in hrs)
+            or list(hrs) != sorted(set(hrs))):
         raise ValueError(
-            f"loss.train_leads_hours {list(hrs)} must be consecutive multiples "
-            "of the first lead (e.g. [6, 12, 18, 24]): each lead is one more "
-            "segment of the same rollout.")
+            f"loss.train_leads_hours {list(hrs)} must be increasing multiples "
+            "of the first lead (e.g. [6, 12, 24, 72]): the rollout is chained "
+            "first-lead segments.")
     return hrs
 
 
 def curriculum_n_segs(yml, leads, n_epochs) -> tuple:
-    """Leads scored in each curriculum stage, from ``loss.train_curriculum_hours``.
+    """Number of leads scored in each curriculum stage, from
+    ``loss.train_curriculum_hours``.
 
     ``[6, 12, 24]`` = three stages of EQUAL length (the run's epochs split in
     thirds), stage k scoring every lead up to its horizon.  Absent = one stage
@@ -1584,8 +1590,11 @@ def curriculum_n_segs(yml, leads, n_epochs) -> tuple:
 
 def multi_lead_loss(run_seg, ic, targets, forcing, *, n_segs, seg_steps,
                     sigma_full, grid, sigma, loss_config, diagnose_fn,
-                    adjoint_steps=0, terms=False):
+                    adjoint_steps=0, terms=False, lead_segs=None):
     """Mean over the first ``n_segs`` supervised leads of the per-lead loss.
+
+    ``lead_segs[k]`` = segments of ``seg_steps`` up to lead k (default
+    ``1, 2, ...``); the rollout runs to the last scored lead's segment.
 
     One chained forecast (``run_seg.raw_multi``) is scored after every
     segment against ``targets[k] = (carry, near-surface fields)``: the carry
@@ -1600,8 +1609,13 @@ def multi_lead_loss(run_seg, ic, targets, forcing, *, n_segs, seg_steps,
     n = int(n_segs)
     if not 1 <= n <= len(targets):
         raise ValueError(f"n_segs={n} outside 1..{len(targets)} loaded leads")
-    preds = run_seg.raw_multi(ic, seg_steps, n, forcing,
-                              adjoint_steps=adjoint_steps)
+    segs = tuple(lead_segs) if lead_segs is not None else tuple(
+        range(1, len(targets) + 1))
+    if len(segs) != len(targets) or list(segs) != sorted(set(segs)) or segs[0] < 1:
+        raise ValueError(f"lead_segs {segs} must be increasing, one per target")
+    rolled = run_seg.raw_multi(ic, seg_steps, segs[n - 1], forcing,
+                               adjoint_steps=adjoint_steps)
+    preds = [rolled[k - 1] for k in segs[:n]]
     total, acc = 0.0, {}
     for pred, (tgt, sfc) in zip(preds, targets[:n]):
         loss, t = combined_loss_terms(pred, tgt, sigma_full, grid=grid,
@@ -1997,7 +2011,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
             "(owner decision 2026-09-15).")
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
-    leads, stride, lead_stride = wb_lead_strides(cfg, yml, era5_cfg.dt_hours)
+    leads, stride, lead_offsets = wb_lead_strides(cfg, yml, era5_cfg.dt_hours)
     # The condensate store is opened ONCE and threaded through every slice --
     # re-opening a remote zarr per sample would dominate the load.
     cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
@@ -2022,7 +2036,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     def build(year, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
         s_ic, s_tg, sst_src = _sample_inputs(
             era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at,
-            lead_stride=lead_stride if leads else None)
+            lead_offsets=lead_offsets if leads else None)
         s_leads = s_tg if leads else None
         if leads:
             s_tg = s_leads[-1]
@@ -2047,18 +2061,18 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
         cfg, yml, times, snaps_per_day, stride, rank, nproc))
     if wb_state_cache_root(yml) is not None:
         return _state_cached_samples(
-            cfg, yml, grid, sigma, mine, leads, lead_stride, times, ds,
+            cfg, yml, grid, sigma, mine, leads, lead_offsets, times, ds,
             cloud_ds, flux_ds, _micro, _aerosol)
     src = (ds, cloud_ds, flux_ds, int)
     local = _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times,
                              snaps_per_day, stride, rank, nproc,
-                             lead_stride=lead_stride)
+                             lead_offsets=lead_offsets)
     if local is not None and mine:
         _, i0, t0 = mine[0]
-        _ls = lead_stride if leads else None
+        _ls = lead_offsets if leads else None
         _assert_same_sample(
-            _sample_inputs(era5_cfg, sst_cfg, i0, t0, *src, lead_stride=_ls),
-            _sample_inputs(era5_cfg, sst_cfg, i0, t0, *local, lead_stride=_ls))
+            _sample_inputs(era5_cfg, sst_cfg, i0, t0, *src, lead_offsets=_ls),
+            _sample_inputs(era5_cfg, sst_cfg, i0, t0, *local, lead_offsets=_ls))
         src = local
     samples = []
     for year, i_ic, i_tg in mine:
@@ -2070,7 +2084,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     return samples
 
 
-def _state_cached_samples(cfg, yml, grid, sigma, mine, leads, lead_stride,
+def _state_cached_samples(cfg, yml, grid, sigma, mine, leads, lead_offsets,
                           times, ds, cloud_ds, flux_ds, micro, aerosol):
     """The spectral samples, read lazily from the model-grid state cache.
 
@@ -2084,8 +2098,8 @@ def _state_cached_samples(cfg, yml, grid, sigma, mine, leads, lead_stride,
         return _CachedSamples([], None)
 
     def times_of(i_ic, i_tg):
-        step = lead_stride if leads else (i_tg - i_ic)
-        return [i_ic, *range(i_ic + step, i_tg + 1, step)]
+        offs = lead_offsets if leads else (i_tg - i_ic,)
+        return [i_ic, *(i_ic + o for o in offs)]
 
     _, i0, t0 = mine[0]
     fresh = {i: wb_state_record(i, era5_cfg, sst_cfg, ds, cloud_ds, flux_ds,

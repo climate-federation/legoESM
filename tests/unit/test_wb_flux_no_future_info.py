@@ -66,7 +66,7 @@ def test_uncached_sample_reads_its_forcing_slice_at_the_initial_time():
     state = _synthetic_era5_multitime()
     flux = _time_coded_fluxes(state)
     _, tg, f = sb._sample_inputs(_flux_config(), _flux_config(load_surface_fluxes=True),
-                                 0, 1, state, None, flux, int, lead_stride=1)
+                                 0, 1, state, None, flux, int, lead_offsets=(1,))
     np.testing.assert_array_equal(f.sfc_shf, -100.0)      # time 0, not 1
     assert len(tg) == 1
 

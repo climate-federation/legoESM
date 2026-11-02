@@ -336,12 +336,12 @@ def test_multi_lead_cache_holds_every_lead_and_gate_compares_them(tmp_path, monk
     era5 = TrainingERA5Config(zarr_store=str(tmp_path / "src.zarr"), levels=(500, 850))
     ds_l, cloud_l, flux_l, at = sb._wb_local_stores(
         SimpleNamespace(), {"cache_dir": str(tmp_path / "cache")}, era5, era5,
-        times, 4, 3, rank=0, nproc=1, lead_stride=1)
+        times, 4, 3, rank=0, nproc=1, lead_offsets=(1, 2, 3))
     assert [int(np.datetime64(t, "h").astype(int)) for t in ds_l.time.values] == [
         int(np.datetime64(times[i], "h").astype(int)) for i in (3, 4, 5, 6)]
     remote = xr.open_zarr(str(tmp_path / "src.zarr"))
-    a = sb._sample_inputs(era5, era5, 3, 6, remote, None, None, int, lead_stride=1)
-    b = sb._sample_inputs(era5, era5, 3, 6, ds_l, cloud_l, flux_l, at, lead_stride=1)
+    a = sb._sample_inputs(era5, era5, 3, 6, remote, None, None, int, lead_offsets=(1, 2, 3))
+    b = sb._sample_inputs(era5, era5, 3, 6, ds_l, cloud_l, flux_l, at, lead_offsets=(1, 2, 3))
     assert isinstance(a[1], tuple) and len(a[1]) == 3
     sb._assert_same_sample(a, b)
     np.testing.assert_array_equal(a[1][1].p_s, remote["surface_pressure"].isel(time=5).values)

@@ -1270,7 +1270,7 @@ def _main(argv=None):
                 n_segs=n_segs or _curriculum[0], seg_steps=roll_steps, sigma_full=sigma_full,
                 grid=grid, sigma=sigma, loss_config=loss_config,
                 diagnose_fn=_diagnose, adjoint_steps=cfg.adjoint_steps or 0,
-                terms=terms)
+                terms=terms, lead_segs=tuple(h // _leads[0] for h in _leads))
         # Only the spectral segment takes the kwarg (checked above).
         _kw = {"adjoint_steps": cfg.adjoint_steps} if cfg.adjoint_steps else {}
         pred = make_run_seg(trainable).raw(ic, roll_steps, forcing, **_kw)

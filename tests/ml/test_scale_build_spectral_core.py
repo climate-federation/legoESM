@@ -408,8 +408,13 @@ def test_supervised_leads_and_curriculum():
     assert curriculum_n_segs({"loss": {}}, leads, 5) == (4,)
     with pytest.raises(ValueError, match="equal curriculum"):
         curriculum_n_segs(yml, leads, 10)
-    with pytest.raises(ValueError, match="consecutive multiples"):
-        supervised_leads({"loss": {"train_leads_hours": [6, 12, 24]}})
+    sparse = {"loss": {"train_leads_hours": [6, 12, 24, 72],
+                       "train_curriculum_hours": [6, 12, 24, 72]}}
+    assert supervised_leads(sparse) == (6, 12, 24, 72)
+    assert curriculum_n_segs(sparse, (6, 12, 24, 72), 8) == (1, 2, 3, 4)
+    for bad in ([6, 10], [12, 6], [6, 6, 12]):
+        with pytest.raises(ValueError, match="increasing multiples"):
+            supervised_leads({"loss": {"train_leads_hours": bad}})
     with pytest.raises(ValueError, match="increasing"):
         curriculum_n_segs({"loss": {"train_curriculum_hours": [12, 6, 24]}}, leads, 12)
     with pytest.raises(ValueError, match="must end at the last lead"):
@@ -444,6 +449,39 @@ def test_multi_lead_loss_is_mean_over_scored_leads():
         np.testing.assert_allclose(float(got), want, rtol=1e-12)
     with pytest.raises(ValueError, match="outside"):
         multi_lead_loss(_Seg(), base, tgts, None, n_segs=4, **kw)
+
+
+def test_multi_lead_loss_scores_sparse_leads_at_their_segments():
+    """Leads (6, 12, 24) h on 6 h segments: the rollout runs 4 segments and
+    scores segments 1, 2 and 4, not 1, 2, 3."""
+    from legoesm.training.losses import LossConfig, combined_loss
+    from legoesm.training.scale_build import multi_lead_loss
+
+    grid = create_gaussian_grid(10, dealiasing="quadratic")
+    sigma = create_sigma_coordinate(8)
+    sf = jnp.asarray(sigma.sigma_full)
+    base = _synthetic_carry(grid, 8)
+    rolled = tuple(base._replace(T=base.T + d) for d in (0.5, 1.0, 2.0, 4.0))
+    asked = []
+
+    class _Seg:
+        def raw_multi(self, ic, seg_steps, n, forcing, adjoint_steps=0):
+            asked.append(n)
+            return rolled[:n]
+
+    cfg = LossConfig()
+    kw = dict(seg_steps=1, sigma_full=sf, grid=grid, sigma=sigma,
+              loss_config=cfg, diagnose_fn=None, lead_segs=(1, 2, 4))
+    tgts = tuple((base, {}) for _ in range(3))
+    got = multi_lead_loss(_Seg(), base, tgts, None, n_segs=3, **kw)
+    want = sum(float(combined_loss(rolled[k], base, sf, grid=grid, config=cfg))
+               for k in (0, 1, 3)) / 3
+    np.testing.assert_allclose(float(got), want, rtol=1e-12)
+    multi_lead_loss(_Seg(), base, tgts, None, n_segs=2, **kw)
+    assert asked == [4, 2]
+    with pytest.raises(ValueError, match="increasing"):
+        multi_lead_loss(_Seg(), base, tgts, None, n_segs=3,
+                        **{**kw, "lead_segs": (1, 3, 2)})
 
 
 def test_curriculum_without_leads_is_refused():
