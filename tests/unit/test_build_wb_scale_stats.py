@@ -53,10 +53,7 @@ def test_accumulate_matches_a_direct_weighted_std():
     ins = [_rec(i)[0].q_v[..., -3:] for i, _ in pairs]
     np.testing.assert_allclose(out["head_inputs"]["q_v"]["std"],
                                _wstd(ins, a[:, :, None]), rtol=1e-12)
-    land = (_rec(0)[2]["land_frac"].reshape(NL, NO) >= 0.5)
-    sm = [_rec(i)[2]["soil_moisture"].reshape(NL, NO) for i, _ in pairs]
-    np.testing.assert_allclose(out["head_inputs"]["soil_moisture"]["std"],
-                               _wstd(sm, a * land), rtol=1e-12)
+    assert "soil_moisture" not in out["head_inputs"]
     gap = [_rec(i)[1]["u10"] - _rec(i)[0].u[..., -1] for i, _ in pairs]
     np.testing.assert_allclose(out["head_outputs"]["u10_gap_std"], _wstd(gap, a), rtol=1e-12)
     assert len(out["loss"]["q_resid_scale_lev"]) == NZ

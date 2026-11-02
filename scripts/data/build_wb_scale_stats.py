@@ -10,9 +10,8 @@ numbers so every run names its scales explicitly.
   p_s and the ERA5 t2m, u10, v10, mslp targets (pairs of cached analyses
   exactly 6 h apart, both inside the years);
 * head inputs: mean and std of every input (lowest three levels of T, u, v, q,
-  p_s, soil moisture over land only -- ERA5 land fraction >= 0.5, the eval's
-  land split --, land fraction, surface geopotential, sin/cos latitude and
-  sin/cos local time);
+  p_s, land fraction, surface geopotential, sin/cos latitude and sin/cos
+  local time; no soil moisture, owner 2026-11-02);
 * head outputs: std of the gap ERA5 minus the eval's current estimate
   (``diagnose_headline_fields``) for t2m, u10, v10.
 
@@ -32,7 +31,6 @@ import numpy as np
 _REPO = Path(__file__).resolve().parents[2]
 YEARS = (2015, 2019)
 N_HEAD_LEVELS = 3
-LAND_FRAC_MIN = 0.5
 
 
 class Moments:
@@ -73,7 +71,7 @@ def accumulate(records, pairs, grid, diagnose):
     lev = {k: Moments() for k in ("T", "u", "v", "q_v")}
     one = {k: Moments() for k in ("p_s", "t2m", "u10", "v10", "mslp")}
     head = {k: Moments() for k in (
-        "T", "u", "v", "q_v", "p_s", "soil_moisture", "land_frac", "phis",
+        "T", "u", "v", "q_v", "p_s", "land_frac", "phis",
         "sin_lat", "cos_lat", "sin_local_time", "cos_local_time")}
     gap = {k: Moments() for k in ("t2m", "u10", "v10")}
     a3 = a[:, :, None]
@@ -87,8 +85,6 @@ def accumulate(records, pairs, grid, diagnose):
         head["phis"].add(c.phis, a)
         land = np.asarray(f["land_frac"]).reshape(n_lat, n_lon)
         head["land_frac"].add(land, a)
-        head["soil_moisture"].add(np.asarray(f["soil_moisture"]).reshape(n_lat, n_lon),
-                                  a * (land >= LAND_FRAC_MIN))
         head["sin_lat"].add(np.broadcast_to(np.sin(lat), a.shape), a)
         head["cos_lat"].add(np.broadcast_to(np.cos(lat), a.shape), a)
         utc = 2.0 * np.pi * float(f["seconds_of_day"]) / 86400.0
@@ -197,7 +193,6 @@ def main(argv=None):
         "n_analyses": len(pairs), "n_pairs_6h": sum(j is not None for _, j in pairs),
         "first": str(times[pairs[0][0]]), "last": str(times[pairs[-1][0]]),
         "head_levels": f"lowest {N_HEAD_LEVELS} model levels, top to bottom",
-        "soil_moisture_mask": f"land_frac >= {LAND_FRAC_MIN}",
         "weights": "Gaussian quadrature weight per cell",
         "std": "about the area-weighted mean",
     }
