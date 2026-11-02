@@ -343,7 +343,7 @@ def test_o17_run_and_admit_supply_real_stub_scores_and_preflight_runs_the_run_br
     assert 'export O17_STUB_FAIL_SCORE_JSON="$dir/synthetic/one_ulp_t_si.json"' in o17
     pre = o17[o17.index("preflight() {"):o17.index("with_synthetic_scores() {")]
     assert 'env "${dry[@]}" "$0" --run' in pre  # the operator branch itself, not a copy
-    assert "O8O16_STOP_BEFORE_BUILD=1" in pre and "-u O17_STUB_SCORE_JSON" in pre
+    assert "O8O16_STOP_BEFORE_BUILD=1" in pre and "unset O17_STUB_SCORE_JSON" in pre
     assert master.count("stub run needs the real scorer report O17_STUB_SCORE_JSON") == 2
     stop = master.index("DRY_RUN_STOPPED_BEFORE_BUILD_AND_NEMO")
     gates = master.index('required_preflight\nram_gate "$MIN_FREE_RAM_GB"')

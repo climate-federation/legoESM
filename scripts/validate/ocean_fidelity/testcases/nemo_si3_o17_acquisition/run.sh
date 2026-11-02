@@ -64,14 +64,13 @@ preflight() {
     --numerical-plant drop-deformation-fold > "$scratch/fold.json"
   local -a dry=(O17_OPERATOR_ACK=RUN_UNMODIFIED_ORCA2_SAS_ICE_100X10800
     O8O16_STOP_BEFORE_BUILD=1 EVIDENCE_ROOT="$scratch/root" REFUSED_DIR="$scratch/refused")
-  # Plant: the 2b1921abc4 --run handed the master no stub score; it must refuse.
-  if env -u O17_STUB_SCORE_JSON -u O17_STUB_FAIL_SCORE_JSON "${dry[@]}" O17_EXTENDED=1 \
-    EVIDENCE="$scratch/si3_rounds/round0/plant" "$master" --run "$scratch/si3_rounds/round0/plant" \
-    > "$scratch/plant.log" 2>&1; then
+  # Plant: 2b1921abc4's --run was run_master without the stub scores; it must refuse.
+  if (unset O17_STUB_SCORE_JSON O17_STUB_FAIL_SCORE_JSON; export "${dry[@]}"
+      run_master "$scratch/si3_rounds/round0/plant") > "$scratch/plant.log" 2>&1; then
     refuse 'master --run without the stub score reports was not refused'
   fi
   grep -q 'stub run needs the real scorer report O17_STUB_SCORE_JSON' "$scratch/plant.log" \
-    || refuse 'stub-score plant was refused for another reason'
+    || { cat "$scratch/plant.log" >&2; refuse 'stub-score plant was refused for another reason'; }
   # The exact operator --run branch (same env, branch and master entry), stopped
   # by the master after its full preflight and resource gates, before any build.
   env "${dry[@]}" "$0" --run "$scratch/si3_rounds/round0/oracle_o17_dry" > "$scratch/dry_run.log" 2>&1 \
