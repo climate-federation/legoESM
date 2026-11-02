@@ -5329,6 +5329,40 @@ def test_clubb_liquid_partition_requires_clubb_and_the_prognostic_path():
         turbulence_config_for(diagnostic)
 
 
+def test_clubb_host_omega_flag_reaches_the_turbulence_kernel():
+    """--clubb-host-omega round-trips, reaches TurbulenceConfig.host_omega, and
+    needs CLUBB on the prognostic path; default off."""
+    import pytest
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--turbulence", "clubb",
+            "--clubb-prognostic"]
+    cfg_plain = build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser))
+    assert cfg_plain.clubb_host_omega is False
+    assert materialize_sub_config(
+        turbulence_config_for(cfg_plain)).host_omega is False
+    cfg_on = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--clubb-host-omega"]), parser))
+    assert cfg_on.clubb_host_omega is True
+    assert turbulence_config_for(cfg_on).host_omega is True
+
+    wrong = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+        "--clubb-host-omega"]), parser))
+    with pytest.raises(ValueError, match="requires turbulence='clubb'"):
+        turbulence_config_for(wrong)
+    diag = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "clubb",
+        "--clubb-host-omega"]), parser))
+    with pytest.raises(ValueError, match="requires clubb_prognostic=True"):
+        turbulence_config_for(diag)
+
+
 def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
     """``--microphysics kessler`` on the duo argv reaches the config and
     passes the lane's default-deny wall (Kessler alone is the one routed

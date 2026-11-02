@@ -827,6 +827,14 @@ class TurbulenceConfig(NamedTuple):
     # q_c to the kernel and routes its dq_c_dt to the tracer; the kernel keys on
     # q_c being supplied.  Selected by ExperimentConfig.clubb_liquid_partition.
     liquid_partition: bool = False
+    # CAM6 hands CLUBB the host's large-scale pressure velocity
+    # (clubb_intr.F90:1677-1679, 1778 cam_cesm2_1_rel_60: wm_zt = -omega /
+    # (rho_in g)).  On, the MPAS bridge passes omega to prognostic CLUBB:
+    # forcing["clubb_host_omega"] when the host supplies it (a column model
+    # prescribing its subsidence), else the closed continuity diagnostic of
+    # the pre-physics edge winds.  Off (default): wm = 0, as before.
+    # Selected by ExperimentConfig.clubb_host_omega.
+    host_omega: bool = False
     # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
     # turbulence runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1

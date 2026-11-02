@@ -1284,6 +1284,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "and the two disagree. Requires --turbulence clubb "
                              "and --clubb-prognostic. Default off = the "
                              "historical bridge (byte-identical).")
+    parser.add_argument("--clubb-host-omega", dest="clubb_host_omega",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Hand prognostic CLUBB the host's large-scale "
+                             "pressure velocity, as CAM6 does (wm_zt = "
+                             "-omega/(rho g)), so its fluxes and variances feel "
+                             "the subsidence. MPAS lane. Requires --turbulence "
+                             "clubb and --clubb-prognostic. Default off = wm 0, "
+                             "the historical bridge (byte-identical).")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -3213,6 +3221,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         clubb_prognostic=args.clubb_prognostic,
         clubb_liquid_partition=args.clubb_liquid_partition,
+        clubb_host_omega=args.clubb_host_omega,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         **{_f: getattr(args, _f)
            for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS,

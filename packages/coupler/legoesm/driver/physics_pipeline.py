@@ -5219,6 +5219,18 @@ def turbulence_config_for(config):
                     "the liquid handed back is the post-advance PDF closure's "
                     "rcm, which the diagnostic path does not produce.")
             tc = tc._replace(liquid_partition=True)
+        # CLUBB's mean vertical velocity from the host omega (CAM
+        # clubb_intr.F90:1677-1679).  Same threading and refusals.
+        if getattr(config, "clubb_host_omega", False):
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_host_omega=True requires turbulence='clubb', got "
+                    f"{tc.scheme!r}. The host omega is CLUBB's wm input.")
+            if not getattr(config, "clubb_prognostic", False):
+                raise ValueError(
+                    "clubb_host_omega=True requires clubb_prognostic=True: only "
+                    "the prognostic closure takes the host omega.")
+            tc = tc._replace(host_omega=True)
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
         # => the scheme's own default stands (CLUBBConfig, CAM6 100 Pa).
@@ -5353,6 +5365,15 @@ def turbulence_config_for(config):
                 f"{getattr(tc, 'liquid_partition', None)!r}). The override is "
                 "authoritative, so set TurbulenceConfig(liquid_partition=True) "
                 "on it rather than relying on the experiment-level flag.")
+    if getattr(config, "clubb_host_omega", False):
+        if tc.scheme != "clubb" or not getattr(tc, "host_omega", False):
+            raise ValueError(
+                "clubb_host_omega=True but an explicit turbulence_override is "
+                "in force and does not select it (override "
+                f"scheme={tc.scheme!r}, host_omega="
+                f"{getattr(tc, 'host_omega', None)!r}). The override is "
+                "authoritative, so set TurbulenceConfig(host_omega=True) on it "
+                "rather than relying on the experiment-level flag.")
     if getattr(config, "clubb_q_flux_scale", None) is not None:
         # Same reason as the prognostic refusal above, and the same rule as
         # validate_strict: the override is authoritative, so the

@@ -959,6 +959,12 @@ class ExperimentConfig(NamedTuple):
     # Turning this on MOVES water between two host tracers and changes the
     # cloud radiative state, so it is a prognostic change, not a diagnostic one.
     clubb_liquid_partition: bool = False
+    # CAM6 hands prognostic CLUBB the host's large-scale pressure velocity
+    # (clubb_intr.F90:1677-1679, 1778 cam_cesm2_1_rel_60), so its flux,
+    # variance and wp2/wp3 equations feel the subsidence.  False (default) =
+    # wm 0, the historical bridge (byte-identical).  MPAS lane; requires
+    # turbulence='clubb' and clubb_prognostic=True.
+    clubb_host_omega: bool = False
     # CLUBB's upper domain limit [Pa] (CAM ``trop_cloud_top_press``): the
     # scheme's mixing is tapered to zero above this pressure.  None (default)
     # keeps the scheme's own default (CLUBBConfig: CAM6's 100 Pa).
