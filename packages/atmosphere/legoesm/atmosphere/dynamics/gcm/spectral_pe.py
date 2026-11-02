@@ -2003,10 +2003,15 @@ class SpectralPrimitiveEquationModel:
         inputs lets XLA capture them as runtime tensors without
         recompilation.
         """
-        result = self._advance_dynamics(state, dt, tendency_fn, si_data)
-        return self._post_step(result, target_mass)
+        result, sfc_rate = self._advance_dynamics(
+            state, dt, tendency_fn, si_data, sfc=sfc)
+        result = self._post_step(result, target_mass)
+        if sfc:
+            return result, sfc_rate
+        return result
 
-    def _advance_dynamics(self, state, dt, tendency_fn, si_data=None):
+    def _advance_dynamics(self, state, dt, tendency_fn, si_data=None,
+                          sfc=False):
         """The integrator alone (explicit RK or semi-implicit RK3 substeps):
         the first half of :meth:`_do_step`."""
         if si_data is None:
@@ -2050,7 +2055,7 @@ class SpectralPrimitiveEquationModel:
             result = dispatch_integrator(
                 state, tendency_fn, dt, self.config.time_integrator,
             )
-        return result
+        return result, sfc_rate
 
     def _post_step(self, result, target_mass=None):
         """Sponge, spectral filter, 2/3 state truncation, implicit
@@ -2105,9 +2110,6 @@ class SpectralPrimitiveEquationModel:
                 and self.config.anchor_mass_to_initial
                 and target_mass is not None):
             result = self._apply_mass_fixer(result, target_mass)
-
-        if sfc:
-            return result, sfc_rate
         return result
 
     def _apply_state_truncation(self, state):
@@ -2318,7 +2320,7 @@ class SpectralPrimitiveEquationModel:
         (:func:`apply_grid_physics_increments`), then the tracer filter /
         positivity and the anchored dry-mass fixer -- the lat-lon C-grid
         step's order.  Returns ``(state, phys_state_out, tend, diag)``."""
-        res = self._advance_dynamics(state, dt, self._make_tendency_fn(None))
+        res, _ = self._advance_dynamics(state, dt, self._make_tendency_fn(None))
         # the dissipative chain (sponge / filter / truncation / hyperdiffusion)
         # is DYNAMICS: inside the energy fixer's window and before the
         # physics, as the lat-lon C-grid step's diffusion is
