@@ -1112,7 +1112,7 @@ def test_rk3_stage3_salt_geothermal_and_krhs_order_change_model_step_qsr_sites()
             scheme="nemo_qsr_2bd",
         )
         cfg_2bd = base_cfg._replace(
-            rk3_stage3_heat_nemo_written=False, rk3_stage3_tracer_krhs_nemo_order=False,
+            rk3_stage3_heat_nemo_written=False, rk3_stage3_salt_nemo_written=False, rk3_stage3_geothermal_nemo_written=False, rk3_stage3_tracer_krhs_nemo_order=False,
             rk3_stage3_tracer_nemo_stored_thickness=False, physics=base_cfg.physics._replace(shortwave_penetration=sw_2bd))
         with pytest.raises(
             _SelectorTouched, match="nemo_qsr_stage3_kmm_source_association",
