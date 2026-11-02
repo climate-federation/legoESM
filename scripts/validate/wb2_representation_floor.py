@@ -142,6 +142,13 @@ def deck_init_windows(times, eval_year, n_inits, init_stride_hours, cadence):
         i0 = base + k * stride
         if i0 - 1 < 0 or i0 + n_sub >= len(times):
             raise SystemExit(f"date {k} window falls outside the ERA5 store")
+        date = np.datetime64(f"{eval_year}-01-01T00") + np.timedelta64(
+            k * init_stride_hours, "h")
+        want = date + np.timedelta64(cadence, "h") * np.arange(-1, n_sub + 1)
+        got = np.asarray(times[i0 - 1:i0 + n_sub + 1], dtype="datetime64[h]")
+        if not np.array_equal(got, want.astype("datetime64[h]")):
+            raise SystemExit(f"date {k}: store times {got} are not the "
+                             f"{cadence}-hourly run {want}")
         hours = [int(str(times[i0 + j])[11:13]) for j in range(n_sub)]
         out.append(((i0 - 1, i0 + n_sub + 1), hours))
     return out
@@ -211,12 +218,11 @@ def main_deck(args):
             eval_year=int(str(t_sub[0])[:4]), n_inits=n_sub + 1,
             init_stride_hours=cadence, resolution_deg=args.resolution_deg,
             ds=sub, microphysics=wb_ic_microphysics(args.mode, yml))
-        # build_forecast_cases puts case j at its anchor + j cadences; the
-        # pairing is right only if that anchor is the slice's first time.
-        anchor = int(np.searchsorted(
-            t_sub, np.datetime64(f"{str(t_sub[0])[:4]}-01-01")))
-        if anchor != 0 or len(cases) != n_sub + 1:
-            raise SystemExit(f"window {a}:{b}: case anchor {anchor} != 0")
+        # Case j sits at slice index j (anchor <= t_sub[0] always lands on 0)
+        # and the window's times were asserted cadence-spaced above, so case
+        # j's lead-cadence truth is case j+1's init.
+        if len(cases) != n_sub + 1:
+            raise SystemExit(f"window {a}:{b}: {len(cases)} cases, want {n_sub + 1}")
         dates.append(str(t_sub[1]))
         for j in range(n_sub):
             verif = cases[j].verif_by_lead[cadence]

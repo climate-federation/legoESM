@@ -24,6 +24,15 @@ def test_deck_windows_reproduce_scorecard_dates_across_new_year():
         assert times[a] == date - np.timedelta64(6, "h")
 
 
+
+def test_deck_windows_refuse_a_missing_record():
+    times = np.arange(np.datetime64("2019-12-30T00"), np.datetime64("2020-03-01T00"),
+                      np.timedelta64(6, "h")).astype("datetime64[ns]")
+    gap = np.delete(times, np.searchsorted(times, np.datetime64("2020-01-16T06")))
+    floor.deck_init_windows(times, 2020, 3, 360, 6)
+    with pytest.raises(SystemExit, match="not the 6-hourly run"):
+        floor.deck_init_windows(gap, 2020, 3, 360, 6)
+
 def test_split_scores_separates_land_and_ocean():
     lat = np.linspace(-60, 60, 5)
     verif = {"t2m": np.zeros((5, 8))}
