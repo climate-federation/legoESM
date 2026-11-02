@@ -93,6 +93,14 @@ class OpenBoundaryData(NamedTuple):
     # points per step (OBC_RADIATION_MAX, 1 in MOM6).  T and S keep the CROCO
     # form.
     velocity_rx_max: jnp.ndarray | None = None
+    # Any non-None value: the tangential velocity in the ring row is not
+    # radiated; its previous value is nudged toward the data with tau_in
+    # (weight dt / (tau_in + dt)), and the model's own update of it is not
+    # kept.  In MOM6 the tangential boundary velocity is not stepped by the
+    # model (it enters vorticity and strain only, NUDGED_TAN); in this ring
+    # layout it is, and the MOM6 1-D form left it free at a corner (docs/88
+    # 6.6 of the ENSO project).  A structural switch, static under jit.
+    tangential_nudge_only: object | None = None
 
 
 def _characteristic(ub_old, u1_old, zb_old, z1_old, z1_new, hb, h1, dn, dt_s, g,
@@ -340,7 +348,10 @@ def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, d
             wet = (hf > 0).astype(hf.dtype)
             w = hf / jnp.maximum(jnp.sum(hf, axis=0, keepdims=True), _EPS)
             mean_cur = jnp.sum(w * _side(new, side, b0, 0), axis=0, keepdims=True)    # barotropic part kept
-            if ob.velocity_rx_max is None:
+            if not is_normal and ob.tangential_nudge_only is not None:
+                g_in = r_in / (1.0 + r_in)
+                rad = (1.0 - g_in) * _side(old, side, b0, 0) + g_in * data
+            elif ob.velocity_rx_max is None:
                 rad = _orlanski(_side(old, side, b0, 0), _side(old, side, b0, 1), _side(new, side, b0, 1),
                                 _side(new, side, b0, 2), data, r_in, r_out)
             else:

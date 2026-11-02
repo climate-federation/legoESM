@@ -98,3 +98,22 @@ def test_full_step_changes_only_the_velocity_rows():
     w = w / w.sum(0, keepdims=True)
     assert np.allclose((w * np.asarray(a.v.data[1]).T).sum(0), (w * np.asarray(new.v.data[1]).T).sum(0))
     assert np.allclose((w * np.asarray(b.v.data[1]).T).sum(0), (w * np.asarray(new.v.data[1]).T).sum(0))
+
+
+def test_tangential_nudge_only():
+    """The ring-row tangential velocity is the previous value nudged toward the data with tau_in (before the
+    depth mean correction, which keeps the model's depth mean); the normal velocity and T, S are unchanged."""
+    old, new, ob, h = _states()
+    b = apply_baroclinic_open_boundary(old, new, ob._replace(velocity_rx_max=1.0), 1800.0, h)
+    c = apply_baroclinic_open_boundary(old, new, ob._replace(velocity_rx_max=1.0, tangential_nudge_only=True), 1800.0, h)
+    assert np.array_equal(np.asarray(b.v.data), np.asarray(c.v.data))
+    assert np.array_equal(np.asarray(b.T.data), np.asarray(c.T.data))
+    g = RI / (1 + RI)
+    rad = (1 - g) * np.asarray(old.u.data[0]).T + g * np.asarray(ob.south_t3)          # (nlev, along)
+    ring = np.asarray(h[0]).T
+    inner = np.minimum(ring[:, :-1], ring[:, 1:])
+    hf = np.concatenate([np.zeros((ring.shape[0], 1)), inner, np.zeros((ring.shape[0], 1))], axis=1)
+    w = hf / np.maximum(hf.sum(0, keepdims=True), 1e-20)
+    expect = (rad - (w * rad).sum(0, keepdims=True) + (w * np.asarray(new.u.data[0]).T).sum(0, keepdims=True)) * (hf > 0)
+    assert np.allclose(np.asarray(c.u.data[0]).T, expect, rtol=0, atol=1e-13)
+    assert np.max(np.abs(np.asarray(c.u.data[0]) - np.asarray(b.u.data[0]))) > 0
