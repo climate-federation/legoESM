@@ -37,6 +37,7 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.vertical_mixing._shared import (
+    eos_salinity,
     surface_buoyancy_flux,
     compute_N2,
     latitude_background_diffusivity,
@@ -653,7 +654,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         A_v = jnp.full(shape, cfg.A_v, dtype=dtype)
         return K_v, A_v, None
 
-    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn,
+    # KPP: sqrt(S) EOSes have an infinite dRho/dS at S = 0 (land / fill
+    # cells), so its density sees the floored salinity, as ePBL's does and
+    # as the explicit KPP factory's does; Wright as is (#2243).
+    rho_state = (state._replace(
+        S=state.S.replace(data=eos_salinity(state.S.data, eos_fn)))
+        if scheme == "kpp" else state)
+    rho = _compute_rho(rho_state, z_coord, J, eos_fn=eos_fn,
                        g=constants_config.g,
                        rho0=constants_config.rho_0)
 
@@ -1230,7 +1237,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         )
         grid = _EPBLGridShim(lat_deg)
         fn = make_vertical_mixing_physics(
-            vmix_cfg, apply_diffusion=False, constants_config=constants_config)
+            vmix_cfg, apply_diffusion=False, constants_config=constants_config,
+            eos_fn=eos_fn)
         tend = fn(state, grid, z_coord, surface_forcing)
         return tend.K_v, tend.A_v, None
 

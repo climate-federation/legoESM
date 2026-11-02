@@ -672,10 +672,15 @@ def morrison_microphysics(
         # ``-dq_c_au·rho/x_c`` sink below is used instead.
         dq_c_au, dN_r_au, x_c = autoconversion_sb2001(
             q_c_ic, q_r_ic, N_c_ic, rho,
+            ramp_top=config.sb2001_autoconv_ramp_top,
         )
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff
-        dq_c_ac = accretion_sb2001(q_c_ic, q_r_ic, rho) * cf_eff
+        dq_c_ac = accretion_sb2001(
+            q_c_ic, q_r_ic, rho,
+            qr_ramp_top=config.sb2001_accretion_qr_ramp_top,
+            qc_ramp_top=config.sb2001_accretion_qc_ramp_top,
+        ) * cf_eff
     else:
         raise ValueError(
             f"Unknown warm_rain_scheme: {config.warm_rain_scheme!r}; choose "

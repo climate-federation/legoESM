@@ -295,6 +295,9 @@ def build_coupler_config(args):
         gustiness_w_zi=args.surface_gustiness_zi,
         thermo_convention=args.bulk_thermo_convention,
         stability_scheme=args.surface_stability_scheme,
+        large_yeager_neutral_width=args.surface_large_yeager_neutral_width,
+        large_yeager_dthv_width=args.surface_large_yeager_dthv_width,
+        large_yeager_cd_cutoff_width=args.surface_large_yeager_cd_cutoff_width,
     )
 
 
@@ -498,8 +501,10 @@ def build_parser():
         VALID_MICROPHYSICS,
         VALID_SURFACE_BULK,
         VALID_TURBULENCE,
+        ExperimentConfig,
         parse_gwd_spec,
     )
+    _EXPERIMENT_DEFAULTS = ExperimentConfig()
 
     parser = argparse.ArgumentParser(
         description="Run a fully coupled ESM simulation",
@@ -750,6 +755,33 @@ def build_parser():
                              "(fixes the persistent tropical hfls<<Earth / R_TOA "
                              "imbalance). Applied to the atmosphere surface layer "
                              "AND the slab ocean heat budget (kept consistent).")
+    # Large-Yeager (--surface-bulk-scheme large_yeager) RULE 5 smooth-switch
+    # widths (#2241).  Defaults = the ExperimentConfig values (bit-identical);
+    # 0 = AeroBulk's hard switch.  Read only by large_yeager.
+    parser.add_argument("--surface-large-yeager-neutral-width",
+                        dest="surface_large_yeager_neutral_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_large_yeager_neutral_width,
+                        help="Large-Yeager smoothing half-width of the neutral "
+                             "Stanton-number switch, in zeta_u. 0 = AeroBulk "
+                             "hard switch. Read only by large_yeager; applied "
+                             "to the atmosphere surface layer AND the coupler "
+                             "ocean tile.")
+    parser.add_argument("--surface-large-yeager-dthv-width",
+                        dest="surface_large_yeager_dthv_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_large_yeager_dthv_width,
+                        help="Large-Yeager smoothing half-width of the "
+                             "first-guess stability switch [K of virtual "
+                             "potential temperature difference]. 0 = AeroBulk "
+                             "hard switch. Read only by large_yeager; applied "
+                             "to the atmosphere surface layer AND the coupler "
+                             "ocean tile.")
+    parser.add_argument("--surface-large-yeager-cd-cutoff-width",
+                        dest="surface_large_yeager_cd_cutoff_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_large_yeager_cd_cutoff_width,
+                        help="Large-Yeager smoothing band of the 33 m/s drag "
+                             "cutoff [m/s]. 0 = AeroBulk hard cutoff. Read only "
+                             "by large_yeager; applied to the atmosphere "
+                             "surface layer AND the coupler ocean tile.")
     parser.add_argument("--bulk-thermo-convention", dest="bulk_thermo_convention",
                         type=str, default="legoesm",
                         choices=["legoesm", "aerobulk"],
@@ -780,7 +812,9 @@ def build_parser():
                              "Arctic/strong-stable forms; "
                              "'beljaars_holtslag1991' avoids the stable flux "
                              "collapse of -5*zeta. Unstable branch stays "
-                             "Businger-Dyer (Fairall blend on coare3).")
+                             "Businger-Dyer (Fairall blend on coare3; heat "
+                             "scaled by Pr0 = 0.98 for gryanik2020 on "
+                             "most/large_yeager, as in SurfaceFluxes.jl).")
     # `choices=` cannot express the '+'-joined composites validate_strict
     # accepts (#834), so this list silently made them unreachable here while
     # run_amip allowed them. The shared validator restores composites AND keeps
@@ -1195,6 +1229,31 @@ def build_parser():
         "--cmip-resolution-deg", type=float, default=5.0,
         help="Lat-lon grid spacing for CMIP output [deg] (default: 5.0)",
     )
+    # CMOR writer identity / layout: same OutputConfig fields and flags as
+    # run_amip, defaults read from OutputConfig itself.
+    from legoesm.driver.config import OutputConfig as _OutputDefaults
+    _out0 = _OutputDefaults()
+    parser.add_argument(
+        "--cmip-drs-tree", action=argparse.BooleanOptionalAction,
+        default=_out0.cmip_drs_tree,
+        help="Write CMOR files into the ESGF DRS directory tree instead of "
+             f"<output>/cmor/<table>/ (default: {_out0.cmip_drs_tree})",
+    )
+    parser.add_argument(
+        "--cmip-institution-id", type=str, default=_out0.cmip_institution_id,
+        help="CMIP6 institution_id of the CMOR files (must be registered in "
+             f"the CMIP6 CV to publish; default: {_out0.cmip_institution_id!r})",
+    )
+    parser.add_argument(
+        "--cmip-source-id", type=str, default=_out0.cmip_source_id,
+        help="CMIP6 source_id of the CMOR files (must be registered in the "
+             f"CMIP6 CV to publish; default: {_out0.cmip_source_id!r})",
+    )
+    parser.add_argument(
+        "--cmip-variant-label", type=str, default=_out0.cmip_variant_label,
+        help="CMIP6 variant_label r<k>i<l>p<m>f<n> of the CMOR files "
+             f"(default: {_out0.cmip_variant_label!r})",
+    )
 
     # Devices
     parser.add_argument(
@@ -1288,6 +1347,16 @@ def require_forcing_files(args) -> None:
         raise SystemExit("--ghg-file is required with --ghg-forcing external")
     if args.aerosol_forcing == "external" and not args.aerosol_file:
         raise SystemExit("--aerosol-file is required with --aerosol-forcing external")
+
+
+def cmip_writer_output_kwargs(args) -> dict:
+    """OutputConfig CMOR-writer fields from the parsed --cmip-* flags."""
+    return dict(
+        cmip_drs_tree=args.cmip_drs_tree,
+        cmip_institution_id=args.cmip_institution_id,
+        cmip_source_id=args.cmip_source_id,
+        cmip_variant_label=args.cmip_variant_label,
+    )
 
 
 def main(argv=None, *, build_only=False):
@@ -1456,6 +1525,7 @@ def main(argv=None, *, build_only=False):
             diag_days=args.diag_days,
             cmip_output=args.cmip_output,
             cmip_resolution_deg=args.cmip_resolution_deg,
+            **cmip_writer_output_kwargs(args),
             # Periodic checkpoint cadence (days) + a wallclock budget that
             # triggers a clean checkpoint+exit before SLURM kills the job — both
             # needed so a long dynamic-3D-ocean equilibration survives an abrupt
@@ -1501,6 +1571,9 @@ def main(argv=None, *, build_only=False):
         turbulence=args.turbulence,
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_large_yeager_neutral_width=args.surface_large_yeager_neutral_width,
+        surface_large_yeager_dthv_width=args.surface_large_yeager_dthv_width,
+        surface_large_yeager_cd_cutoff_width=args.surface_large_yeager_cd_cutoff_width,
         surface_thermo_convention=args.bulk_thermo_convention,
         surface_stability_scheme=args.surface_stability_scheme,
         gravity_wave_drag=args.gravity_wave_drag,

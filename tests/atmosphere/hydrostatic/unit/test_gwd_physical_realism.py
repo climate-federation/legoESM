@@ -93,6 +93,9 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import (
 from legoesm.atmosphere.physics.gravity_wave_drag.rayleigh import rayleigh_gwd
 from legoesm.atmosphere.physics.gravity_wave_drag.lindzen import lindzen_gwd
 from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd
+
+# one all-land column (lf = 1 is CAM6 gw_oro's unscaled drag)
+_LAND1 = jnp.ones(1)
 from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
 from legoesm.atmosphere.physics.gravity_wave_drag.prognostic_spectral import (
     prognostic_spectral_gwd,
@@ -396,7 +399,7 @@ def test_lindzen_grad_jit_vmap():
 def test_mcfarlane_finite_sign_heating_breaking():
     u, v, T, pf, ph, zf, zh, rho = _idealized_column()
     out = mcfarlane_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0,
-                        McFarlaneConfig(h_topo=500.0), p_ref_half=ph[0])
+                        McFarlaneConfig(h_topo=500.0), p_ref_half=ph[0], land_frac_col=_LAND1)
     _assert_finite_and_bounded(out)
     _assert_drag_opposes_flow(out, u)
     # CAM6 heating = local KE return (>= 0) + zero-flux eddy diffusion of dse
@@ -411,7 +414,7 @@ def test_mcfarlane_momentum_sink_bounded_by_launch():
     u, v, T, pf, ph, zf, zh, rho = _idealized_column()
     cfg = McFarlaneConfig(h_topo=500.0)
     out = mcfarlane_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0, cfg,
-                        p_ref_half=ph[0])
+                        p_ref_half=ph[0], land_frac_col=_LAND1)
     rho_sfc = float(rho[0, -1])
     U_sfc = float(jnp.abs(u[0, -1]))
     N = _surface_brunt_vaisala(T, pf, zf)
@@ -444,7 +447,7 @@ def test_mcfarlane_froude_cap_active():
     # under test is orthogonal to the source-averaging choice.
     tall = McFarlaneConfig(h_topo=5000.0, use_depth_averaged_source=False)
     out = mcfarlane_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0, tall,
-                        p_ref_half=ph[0])
+                        p_ref_half=ph[0], land_frac_col=_LAND1)
     mom = abs(_column_momentum(out, rho, zh))
     # Uncapped launch (raw h^2) would be enormous; the Froude cap holds the
     # column sink below the capped launch, which is ~ (U/N)^2/h^2 smaller.
@@ -460,7 +463,7 @@ def test_mcfarlane_froude_cap_active():
 def test_mcfarlane_critical_level_absorption():
     u, v, T, pf, ph, zf, zh, rho = _idealized_column(u_profile="critical")
     out = mcfarlane_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0,
-                        McFarlaneConfig(h_topo=500.0), p_ref_half=ph[0])
+                        McFarlaneConfig(h_topo=500.0), p_ref_half=ph[0], land_frac_col=_LAND1)
     assert jnp.all(jnp.isfinite(out.du_dt)), "NaN at critical level"
     du = np.array(out.du_dt[0])
     u0 = np.array(u[0])
@@ -507,7 +510,7 @@ def test_mcfarlane_sharp_reversal_absorption():
     u = jnp.where(z_full < 20000.0, 15.0, -15.0)[None, :]
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full[None, :],
                         z_half[None, :], rho, jnp.zeros(1), 1800.0,
-                        McFarlaneConfig(h_topo=500.0), p_ref_half=p_half[0])
+                        McFarlaneConfig(h_topo=500.0), p_ref_half=p_half[0], land_frac_col=_LAND1)
     assert jnp.all(jnp.isfinite(out.du_dt)), "NaN at sharp critical level"
     du = np.array(out.du_dt[0])
     u0 = np.array(u[0])
@@ -529,14 +532,14 @@ def test_mcfarlane_grad_jit_vmap():
     u, v, T, pf, ph, zf, zh, rho = _idealized_column()
     cfg = McFarlaneConfig(h_topo=500.0)
     fn = lambda uu: mcfarlane_gwd(uu, v, T, pf, ph, zf, zh, rho, jnp.zeros(1),
-                                  1800.0, cfg, p_ref_half=ph[0])
+                                  1800.0, cfg, p_ref_half=ph[0], land_frac_col=_LAND1)
     _assert_grad_finite_nonzero(lambda uu: jnp.sum(fn(uu).du_dt ** 2), u)
     eager = fn(u)
     jitted = jax.jit(fn)(u)
     np.testing.assert_allclose(np.array(jitted.du_dt), np.array(eager.du_dt),
                                rtol=1e-12, atol=1e-15)
     _assert_real_vmap_parity(
-        functools.partial(mcfarlane_gwd, p_ref_half=ph[0]), cfg)
+        functools.partial(mcfarlane_gwd, p_ref_half=ph[0], land_frac_col=_LAND1), cfg)
 
 
 # ===========================================================================

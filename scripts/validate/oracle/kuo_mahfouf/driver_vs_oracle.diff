@@ -1,0 +1,329 @@
+1c1,11
+< program kuo_schemes
+---
+> ! Standalone driver for J.-F. Mahfouf MOIST_CONVECTION_KUO src/kuo_schemes.f90
+> ! (github AJFMAHFOUF/MOIST_CONVECTION_KUO @ 79b78f58f793fbf7849bca51d8ec0a92f39ec170).
+> ! Mechanical edits ONLY (see README "driver diff"):
+> !   * reads ncol columns (nlev, klev_max runtime) from a text file instead of
+> !     profiles.dat (profile 900) + input_model_mean_values.dat
+> !   * arrays allocatable; constants via cpp (CONST_LEGO selects legoESM values)
+> !   * zcv1 = zcv2 = 1 (outputs in K/s, kg/kg/s, kg/m2/s instead of /day)
+> !   * Kuo-Geleyn and Kuo-symmetric variants dropped (not ported in legoESM);
+> !     prints removed; per-column outputs written at full precision.
+> ! Kuo-1965 and Kuo-Anthes algorithm lines are verbatim from the oracle.
+> program kuo_driver
+3,4c13,18
+<  integer, parameter :: nlev=60, nprof=1535, klev_max=20
+<  real, parameter :: Lv0=2.501E6, Cp=1005.0, Rd=287.06 
+---
+> #ifdef CONST_LEGO
+>  real, parameter :: Lv0=2.501E6, Cp=1004.64, Rd=287.05
+>  real, parameter :: Eps=5.0E-5, Cpv=1846.0, Cl=4218.0, rg=9.80616
+>  real, parameter :: VTC = 461.51/287.05 - 1.0
+> #else
+>  real, parameter :: Lv0=2.501E6, Cp=1005.0, Rd=287.06
+6,16c20,31
+< ! Values above are consistent with Marquet and Malardel + ECMWF constants 
+< ! Other constants proposed by Emanuel (1994) : Cpv=1870 - Cl=4190 
+<  real, dimension(nlev) :: p, t, qv, gz, w, u, v, tc, qvc, ptent, ptenq, &
+<                        &  dtdt, dqdt, qwb, twb, rh, alpha_env, Cps_env, tve
+<  real ::  bkuo, Cps, cvgh, cvgu, dt, dummy, dz, gz2, p2, ps, qc, qv1, qv2, qw, rain, &
+<         & rhmean, t1, t2, ts, zlat, zlon, zlsm, tvc, zcape, zcv1, zcv2, zint, zint2, &
+<         & zint_t, zint_q, zlam, zmean, s1, tw, qsat, dqsat, alpha_w, Lh, w_lcl,  &
+<         & t_excess, q_excess 
+<  integer :: kdummy, i, irec, k                      
+<  real, dimension(nlev+1) :: ph, gzh
+<  integer, dimension(nlev) :: icond
+---
+>  real, parameter :: VTC = 0.608
+> #endif
+>  integer :: nlev, klev_max, ncol, icol
+>  real, allocatable, dimension(:) :: p, t, qv, gz, w, tc, qvc, ptenq, &
+>                        &  dtdt, dqdt, dtdtA, dqdtA, rh, alpha_env, Cps_env, tve
+>  real ::  bkuo, Cps, cvgu, dt, dz, gz2, p2, ps, qc, qv1, qv2, rain, rainA, &
+>         & rhmean, t1, t2, tvc, zcape, zcv1, zcv2, zint, &
+>         & zint_t, zint_q, zlam, zmean, s1, qsat, dqsat, Lh, w_lcl,  &
+>         & t_excess, q_excess
+>  integer :: i, k
+>  real, allocatable, dimension(:) :: ph, gzh
+>  integer, allocatable, dimension(:) :: icond
+18,31c33,41
+<  character*3 :: expid
+<  
+<  expid='004'
+< !
+<  open (unit=20,file='../data_in/profiles.dat',status='old')
+<  open (unit=21,file='../data_in/input_model_mean_values.dat',status='old')
+<  open (unit=200,file='../data_out/conv_tendencies_kuo65_'//expid//'.dat')
+<  open (unit=201,file='../data_out/conv_tendencies_kuogeleyn_'//expid//'.dat')
+<  open (unit=202,file='../data_out/conv_tendencies_kuosymmetric_'//expid//'.dat')
+<  open (unit=203,file='../data_out/conv_tendencies_kuoanthes_'//expid//'.dat')
+<  open (unit=300,file='../data_out/atmospheric_profiles_'//expid//'.dat')
+< !
+< ! Model time step
+< !
+---
+>  character(len=512) :: fin, fout
+>  call get_command_argument(1, fin)
+>  call get_command_argument(2, fout)
+>  open (unit=20,file=trim(fin),status='old')
+>  open (unit=200,file=trim(fout))
+>  read(20,*) ncol, nlev, klev_max
+>  allocate(p(nlev), t(nlev), qv(nlev), gz(nlev), w(nlev), tc(nlev), qvc(nlev), ptenq(nlev), &
+>    & dtdt(nlev), dqdt(nlev), dtdtA(nlev), dqdtA(nlev), rh(nlev), alpha_env(nlev), Cps_env(nlev), tve(nlev), &
+>    & ph(nlev+1), gzh(nlev+1), icond(nlev))
+33,35d42
+< !
+< ! Logical to account for latent heat of sublimation 
+< ! 
+37,44c44,45
+< !
+< ! Conversion factors for heating and moistening rates
+< ! 
+<  zcv1 = 86400.0
+<  zcv2 = zcv1*1.0E3
+< !
+< ! Possibility of modifying (T,q) properties of the parcel (from surface fluxes)
+< ! 
+---
+>  zcv1 = 1.0
+>  zcv2 = 1.0
+47,66c48,50
+< !
+< ! Read atmospheric profiles
+< !  
+<  do irec=1,900
+<    read(20,*)
+<    read(20,*) zlat, zlon, zlsm, ts, ps
+<    read(20,*)
+<    do k=1,nlev
+<      read(20,*) t(k),qv(k),p(k),ph(k),w(k),u(k),v(k)
+<      rh(k) = qv(k)/qsat(p(k),t(k))
+<      Cps_env(k) = Cp*(1.0 - qv(k)) + qv(k)*Cpv
+<      alpha_env(k) = Lh(t(k),lsub)/Cps_env(k)
+<    enddo
+<    ph(nlev+1) = ps  
+<  enddo 
+< ! 
+<  close(unit=20)
+< !
+< ! Read dynamical tendencies for T and q
+< !
+---
+>  write(200,'(3I8)') ncol, nlev, klev_max
+>  do icol = 1, ncol
+>  read(20,*) ps
+68,72c52,58
+<    read(21,*) kdummy,dummy,dummy,ptent(k),ptenq(k)
+<  enddo 
+<  ptent = 0.25*ptent 
+< ! 
+<  close(unit=21)
+---
+>    read(20,*) t(k),qv(k),p(k),ph(k),w(k),ptenq(k)
+>    rh(k) = qv(k)/qsat(p(k),t(k))
+>    Cps_env(k) = Cp*(1.0 - qv(k)) + qv(k)*Cpv
+>    alpha_env(k) = Lh(t(k),lsub)/Cps_env(k)
+>  enddo
+>  ph(nlev+1) = ps
+>  w_lcl = -999.0   ! oracle leaves w_lcl uninitialised (never read before first LCL capture)
+78c64
+<    tve(k) = t(k)*(1. + 0.608*qv(k))
+---
+>    tve(k) = t(k)*(1. + VTC*qv(k))
+81c67
+<  enddo 
+---
+>  enddo
+83c69
+< ! Define moist pseudo adiabat (condensed water is removed after being created) 
+---
+> ! Define moist pseudo adiabat (condensed water is removed after being created)
+88c74
+<  qv2 = qv1 
+---
+>  qv2 = qv1
+93,95d78
+< !
+< ! Initialise cloud values to environmental properties
+< ! 
+97,100c80
+<  qvc = qv 
+<  twb = t
+<  qwb = qv
+< ! 
+---
+>  qvc = qv
+108,110c88
+<    qv2 = qv1 
+<    tw = t(k)
+<    alpha_w = Lh(tw,lsub)/(Cp*(1.0 - qsat(p2,tw)) + qsat(p2,tw)*Cpv)
+---
+>    qv2 = qv1
+114,121c92,94
+<         & ((Cps + Lh(t2,lsub)*dqsat(p2,t2) + (Cpv - Cp)*dqsat(p2,t2)*t2 + & 
+<         & (Cpv - Cl)*qsat(p2,t2))*(1.0 - Eps*dz))           
+<      tw = tw - (tw + alpha_w*qsat(p2,tw) - t(k) - alpha_w*qv(k))/ &
+<         & (1.0 + alpha_w*dqsat(p2,tw))   
+<    enddo 
+<    qw = qsat(p2,tw)
+<    qwb(k) = qw
+<    twb(k) = tw
+---
+>         & ((Cps + Lh(t2,lsub)*dqsat(p2,t2) + (Cpv - Cp)*dqsat(p2,t2)*t2 + &
+>         & (Cpv - Cl)*qsat(p2,t2))*(1.0 - Eps*dz))
+>    enddo
+130c103
+<      qv1 = qv2 
+---
+>      qv1 = qv2
+132,137c105,106
+<    endif 
+< !
+< !  Estimate regions with positive buoyancy from virtual temperature
+< !  Activate convection only when the vertical velocity is positive at LCL
+< !    
+<    tvc = t2*(1.0 + 0.608*qv1 - qc) ! inclusion of water loading in virtual temperature
+---
+>    endif
+>    tvc = t2*(1.0 + VTC*qv1 - qc) ! inclusion of water loading in virtual temperature
+139c108
+<      if (w_lcl > 0.0) icond(k) = 2  
+---
+>      if (w_lcl > 0.0) icond(k) = 2
+141,144c110
+<    endif 
+< !
+< ! Compute new moist static energy at level (k+1) for level (k)
+< !   
+---
+>    endif
+147,149d112
+< !
+< !  Save T and q in-cloud properties
+< !   
+152,155c115
+<  enddo 
+< !
+< ! Moist static energy integral + Convergence of humidity and MSE
+< ! 
+---
+>  enddo
+157d116
+<  cvgh = 0.0
+159d117
+<  zint2 = 0.0
+167d124
+<       cvgh = cvgh + max(0.0,(ptent(k) + alpha_env(k)*ptenq(k)))*(ph(k+1) - ph(k))/rg
+169d125
+<       zint2 = zint2 + (tc(k) - t(k) + alpha_env(k)*(qvc(k) - qv(k)))*(ph(k+1) - ph(k))/rg
+180,184c136
+<    print *,"Warning : no convective layer has been found ! RH mean set to zero"
+<  endif    
+< !
+< ! Empirical moistening parameter for Kuo-Anthes scheme
+< ! 
+---
+>  endif
+186,189d137
+< !print *,'**** kuo moistening parameter *****',bkuo
+< ! 
+< !  T and q tendencies for Kuo (1965) convection scheme
+< ! 
+198,202c146
+<      print *,'convective tendencies KUO',p(k),k,dtdt(k),dqdt(k),ptenq(k)*zcv2
+<    endif 
+<  enddo
+<  do k=nlev,1,-1   
+<    write (200,*) p(k),dtdt(k),dqdt(k)
+---
+>    endif
+204,211c148,150
+<  print *,'surface rainfall',rain,zcape ! mm/jour
+< ! write (150,*) imax,zlat,zlon,rain,zcape
+< ! 
+< !  T and q tendencies for Kuo-Geleyn (1985) convection scheme
+< ! 
+<  rain = 0.0
+<  dtdt = 0.0
+<  dqdt = 0.0
+---
+>  rainA = 0.0
+>  dtdtA = 0.0
+>  dqdtA = 0.0
+214,244c153,156
+<      dtdt(k) = cvgu/zint*((tc(k) - t(k)) + alpha_env(k)*(qvc(k) - qwb(k)))*zcv1
+<      rain = rain + dtdt(k)*(ph(k+1) - ph(k))/(rg*alpha_env(k))
+<      dqdt(k) = (-ptenq(k)+ cvgu/zint*(qwb(k) - qv(k)))*zcv2
+<      print *,'convective tendencies KUO-GELEYN',p(k),k,dtdt(k),dqdt(k),ptent(k)*zcv1
+<    endif 
+<    Cps = Cp*(1.0 - qv(k)) + qv(k)*Cpv
+<    write (300,*) p(k)/100.,t(k),twb(k),tc(k),qv(k),qwb(k),qvc(k),gz(k), &
+<                & Cps*t(k) + Lh(t(k),lsub)*qv(k) + gz(k)
+<  enddo
+<  do k=nlev,1,-1   
+<    write (201,*) p(k),dtdt(k),dqdt(k)
+<  enddo
+<  print *,'surface rainfall',rain,zcape ! mm/jour
+< ! write (151,*) imax,zlat,zlon,rain,zcape
+< ! 
+< !  T and q tendencies for Kuo symmetric convection scheme
+< ! 
+<  rain = 0.0
+<  dtdt = 0.0
+<  dqdt = 0.0
+<  print *,'zint2=',zint2,'cvgh=',cvgh
+<  do k=nlev,klev_max,-1
+<    if (icond(k) == 2 .and. (ptent(k) + alpha_env(k)*ptenq(k)) > 0.0 .and. ptent(k) < 0.0) then
+<      dtdt(k) = (-ptent(k) + cvgh/zint2*(tc(k) - t(k)))*zcv1 
+<      rain = rain + dtdt(k)*(ph(k+1) - ph(k))/(rg*alpha_env(k))
+<      dqdt(k) = (-ptenq(k)+ cvgh/zint2*(qvc(k) - qv(k)))*zcv2
+<      print *,'convective tendencies KUO SYMMETRIC',p(k),k,dtdt(k),dqdt(k),ptent(k)*zcv1
+<    endif 
+<  enddo
+<  do k=nlev,1,-1   
+<    write (202,*) p(k),dtdt(k),dqdt(k)
+---
+>      dtdtA(k) = alpha_env(k)*(1.- bkuo)*cvgu/zint_t*(tc(k) - t(k))*zcv1
+>      rainA = rainA + dtdtA(k)*(ph(k+1) - ph(k))/(rg*alpha_env(k))
+>      dqdtA(k) = (-ptenq(k)+ bkuo*cvgu/zint_q*(qvc(k) - qv(k)))*zcv2
+>    endif
+246,260c158,160
+<  print *,'surface rainfall',rain,zcape,cvgh, cvgu ! mm/jour
+< ! write (152,*) imax,zlat,zlon,rain,zcape
+< ! 
+< !  T and q tendencies for Kuo-Anthes 1977 convection scheme
+< ! 
+<  rain = 0.0
+<  dtdt = 0.0
+<  dqdt = 0.0
+<  do k=nlev,klev_max,-1
+<    if (icond(k) == 2 .and. ptenq(k) > 0.0) then
+<      dtdt(k) = alpha_env(k)*(1.- bkuo)*cvgu/zint_t*(tc(k) - t(k))*zcv1 
+<      rain = rain + dtdt(k)*(ph(k+1) - ph(k))/(rg*alpha_env(k))
+<      dqdt(k) = (-ptenq(k)+ bkuo*cvgu/zint_q*(qvc(k) - qv(k)))*zcv2
+<      print *,'convective tendencies KUO-ANTHES',p(k),k,dtdt(k),dqdt(k),ptent(k)*zcv1
+<    endif 
+---
+>  write(200,'(10ES26.17E3,I6)') cvgu, zint, zint_t, zint_q, rhmean, bkuo, rain, rainA, zcape, w_lcl, count(icond==2)
+>  do k=1,nlev
+>    write(200,'(I3,6ES26.17E3,ES26.17E3)') icond(k), tc(k), qvc(k), dtdt(k), dqdt(k), dtdtA(k), dqdtA(k), gz(k)
+262,263d161
+<  do k=nlev,1,-1   
+<    write (203,*) p(k),dtdt(k),dqdt(k)
+265,275c163,165
+<  print *,'surface rainfall',rain,zcape,cvgh, cvgu ! mm/jour
+< ! write (153,*) imax,zlat,zlon,rain,zcape 
+< !
+<  close (unit=200)
+<  close (unit=201)
+<  close (unit=202)
+<  close (unit=203)
+<  close (unit=300)
+< !
+<  stop
+< end program kuo_schemes
+---
+>  close(20)
+>  close(200)
+> end program kuo_driver

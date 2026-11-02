@@ -187,7 +187,7 @@ def test_overhead_with_mcica_and_fused_clear_sky():
     liq = jnp.zeros((NCOL, NLEV)).at[:, 4:6].set(0.08)   # in-cloud paths
     ice = jnp.zeros((NCOL, NLEV))
     fused = on.solve_columns(**inp, o3_top_vmr=o3_top, cloud_path_liq=liq,
-                             cloud_path_ice=ice, mcica_cloud_fraction=cf,
+                             cloud_path_ice=ice, mcica_cloud_fraction=cf, mcica_mask_width=0.0,
                              clear_sky=True)
     for leaf in jax.tree_util.tree_leaves(fused):
         assert np.all(np.isfinite(np.asarray(leaf)))
@@ -215,8 +215,8 @@ def test_mcica_model_layer_mask_is_identical_with_overhead_on_or_off(
     orig = sub.generate_subcolumns
     calls = {}
 
-    def spy(cf, n_sub, shift=None):
-        mask = orig(cf, n_sub, shift=shift)
+    def spy(cf, n_sub, shift=None, *, width):
+        mask = orig(cf, n_sub, shift=shift, width=width)
         calls.setdefault(spy.tag, []).append(
             (np.asarray(cf), None if shift is None else np.asarray(shift),
              np.asarray(mask)))
@@ -233,7 +233,7 @@ def test_mcica_model_layer_mask_is_identical_with_overhead_on_or_off(
         RRTMGP.from_legoesm_config(
             RRTMGPConfig(overhead_layer=ov, include_clouds=True)).solve_columns(
             **inp, o3_top_vmr=jnp.full((NCOL,), 3e-6), cloud_path_liq=liq,
-            cloud_path_ice=ice, mcica_cloud_fraction=cf)
+            cloud_path_ice=ice, mcica_cloud_fraction=cf, mcica_mask_width=0.0)
     assert len(calls["off"]) == len(calls["on"]) == 2          # LW + SW
     for (cf0, s0, m0), (cf1, s1, m1) in zip(calls["off"], calls["on"]):
         assert cf0.shape == cf1.shape == (NCOL, NLEV)
@@ -242,5 +242,5 @@ def test_mcica_model_layer_mask_is_identical_with_overhead_on_or_off(
         np.testing.assert_array_equal(m0, m1)                   # bit-identical
         # control: the nlev+1 draw with the top row dropped is NOT the same
         cf_pad = jnp.concatenate([jnp.zeros((NCOL, 1)), jnp.asarray(cf0)], 1)
-        m_pad = np.asarray(orig(cf_pad, m0.shape[0], shift=jnp.asarray(s0)))
+        m_pad = np.asarray(orig(cf_pad, m0.shape[0], shift=jnp.asarray(s0), width=0.0))
         assert not np.array_equal(m_pad[:, :, 1:], m0)

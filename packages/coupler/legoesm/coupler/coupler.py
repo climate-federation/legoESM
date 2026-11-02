@@ -17,6 +17,7 @@ from legoesm import constants
 from legoesm.core.precision import get_policy
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes, compute_most_fluxes, compute_sam_oceflx_fluxes,
+    large_yeager_widths,
     surface_reference_state,
     apply_gustiness,
     ocean_surface_q_sat,
@@ -367,6 +368,7 @@ def ocean_tile_response(
             gustiness_w_zi=config.gustiness_w_zi,
             thermo_convention=_thermo_conv,
             stability_scheme=config.stability_scheme,
+            **large_yeager_widths(config),
         )
     else:
         # Constant neutral coefficients (original behavior).  Sub-grid

@@ -31,17 +31,27 @@ _WL2 = np.array([1.242, 0.625, 0.345])
 _LAT = np.linspace(-90.0, 90.0, 7)
 
 
-def _kinne_file(path, band_aod, edges=True):
-    """(time=12, lnwl, lat) AOD file, band values constant in time/lat."""
+_LON = np.array([0.0, 120.0, 240.0])
+
+
+def _kinne_file(path, band_aod, edges=True, lon=False):
+    """(time=12, lnwl, lat[, lon]) AOD file, band values constant in
+    time/lat/lon.  The driver reads aerosol at column longitudes and refuses a
+    file without longitude, so driver tests pass ``lon=True``."""
     nb = len(band_aod)
+    dims = ("time", "lnwl", "lat") + (("lon",) if lon else ())
+    shape = (12, nb, _LAT.size) + ((_LON.size,) if lon else ())
     with netCDF4.Dataset(path, "w") as ds:
         ds.createDimension("time", 12)
         ds.createDimension("lnwl", nb)
         ds.createDimension("lat", _LAT.size)
         ds.createVariable("time", "f8", ("time",))[:] = 15.5 + 30.4375 * np.arange(12)
         ds.createVariable("lat", "f8", ("lat",))[:] = _LAT
-        ds.createVariable("aod", "f8", ("time", "lnwl", "lat"))[:] = np.broadcast_to(
-            np.asarray(band_aod, float)[None, :, None], (12, nb, _LAT.size))
+        if lon:
+            ds.createDimension("lon", _LON.size)
+            ds.createVariable("lon", "f8", ("lon",))[:] = _LON
+        band = np.asarray(band_aod, float).reshape((1, nb) + (1,) * (len(shape) - 2))
+        ds.createVariable("aod", "f8", dims)[:] = np.broadcast_to(band, shape)
         if edges:
             ds.createVariable("wl1_sun", "f8", ("lnwl",))[:] = _WL1[:nb]
             ds.createVariable("wl2_sun", "f8", ("lnwl",))[:] = _WL2[:nb]
@@ -112,7 +122,7 @@ def _driver_forcing(cfg, ncol=_LAT.size, temp_fn=None, **kw):
     fake._owned_temp = lambda: ModelDriver._owned_temp(fake)
     fake.radiation_ghg_vmr = lambda day: ModelDriver.radiation_ghg_vmr(fake, day)
     lat = jnp.radians(jnp.asarray(_LAT))
-    fake._grid_lon = jnp.zeros_like(lat)  # zonal test files: no lon to resolve
+    fake._grid_lon = jnp.zeros_like(lat)  # test files are constant in lon
     fake._owned_lon = lambda: ModelDriver._owned_lon(fake)
     _, aer, _ = ModelDriver._precompute_external_forcing(fake, 15.5, p_s, lat, **kw)
     p_full = np.asarray(fake.sigma.pressure_at_full(p_s)).reshape(ncol, -1)
@@ -125,7 +135,7 @@ def _cfg(**kw):
 
 
 def test_volcanic_sw_above_tropopause_and_out_of_ccn(tmp_path):
-    trop = _kinne_file(tmp_path / "t.nc", [0.05, 0.20, 0.40])
+    trop = _kinne_file(tmp_path / "t.nc", [0.05, 0.20, 0.40], lon=True)
     volc = _volc_file(tmp_path / "v.nc")  # 17-25 km, column ~0.08
     f0, aer0, _ = _driver_forcing(_cfg(aerosol_file=trop))
     f1, aer1, p_full = _driver_forcing(_cfg(aerosol_file=trop, volcanic_aerosol_file=volc))
@@ -161,8 +171,8 @@ def test_ccn_aod_used_when_present_byte_identical_when_absent():
 
 def test_ccn_file_flows_from_cli_to_ccn(tmp_path):
     from scripts.run import run_amip
-    fine = _kinne_file(tmp_path / "fin.nc", [0.05, 0.10, 0.40])
-    tot = _kinne_file(tmp_path / "tot.nc", [0.15, 0.30, 0.50])
+    fine = _kinne_file(tmp_path / "fin.nc", [0.05, 0.10, 0.40], lon=True)
+    tot = _kinne_file(tmp_path / "tot.nc", [0.15, 0.30, 0.50], lon=True)
     parser = run_amip.build_arg_parser()
     assert run_amip.build_config_from_args(parser.parse_args([])).aerosol_ccn_file == ""
     cli = run_amip.build_config_from_args(parser.parse_args(
@@ -256,7 +266,7 @@ def test_driver_volcanic_cut_at_state_tropopause(tmp_path):
     """The driver threads the state T: a 19 km (~60 hPa) WMO tropopause cuts
     part of the 18-24 km volcanic layer the climatological (100 hPa) one keeps."""
     volc = _volc_file(tmp_path / "v.nc")
-    trop = _kinne_file(tmp_path / "t.nc", [0.05, 0.20, 0.40])
+    trop = _kinne_file(tmp_path / "t.nc", [0.05, 0.20, 0.40], lon=True)
     cfg = _cfg(aerosol_file=trop, volcanic_aerosol_file=volc)
     _, aer0, _ = _driver_forcing(_cfg(aerosol_file=trop))
     _, aer_c, _ = _driver_forcing(cfg)

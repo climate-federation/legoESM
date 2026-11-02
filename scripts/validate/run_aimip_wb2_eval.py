@@ -534,16 +534,15 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
 
     if variant == "classical":
         # The ERA5 land-sea mask run_aimip trains on, read from the same
-        # store/dataset as the verification cases: ZM requires it on the
+        # store/dataset as the verification cases: every run carries it on the
         # grid, and the spatial surface fields are gated by it.
         from legoesm.training.aimip_spatial import (
-            era5_land_fraction, grid_with_zm_land_fraction,
+            era5_land_fraction, grid_with_land_fraction,
         )
         conv = str(cfg.get("aimip_convection", "tiedtke"))
         spatial = parse_bool_flag(cfg.get("aimip_spatial_surface", False))
-        land = (era5_land_fraction(grid, era5_cfg, ds=ds)
-                if spatial or conv == "zhang_mcfarlane" else None)
-        grid = grid_with_zm_land_fraction(grid, conv, land)
+        land = era5_land_fraction(grid, era5_cfg, ds=ds)
+        grid = grid_with_land_fraction(grid, land)
         rad_update_interval = int(cfg.get("aimip_rad_update_interval", 1))
         split_rad = rad_update_interval > 1
         built = make_aimip_classical_spectral_physics(

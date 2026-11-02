@@ -36,6 +36,97 @@ class CheckpointStructureError(RuntimeError):
     """A checkpoint's pytree does not match the current model skeleton."""
 
 
+# Sidecar record of a checkpoint's AIMIP knobs (user 2026-10-28, R1): which
+# knobs were frozen and the range each was trained with.
+KNOB_RECORD_FORMAT = "legoesm-aimip-knobs"
+KNOB_RECORD_VERSION = 1
+
+
+def knob_record_path(path) -> Path:
+    """``epoch_0003.eqx`` -> ``epoch_0003.knobs.json``."""
+    return checkpoint_path(path).with_suffix(".knobs.json")
+
+
+def knob_record(model) -> dict | None:
+    """The knob record of the AIMIP parameter module(s) in ``model``, or None
+    when there is none.  Optimizer-moment copies (None / masked slots at
+    frozen knobs) are skipped; two different records in one tree raise."""
+    import jax.tree_util as jtu
+
+    has = lambda x: hasattr(x, "knob_record")  # noqa: E731
+    recs = []
+    jtu.tree_map(lambda x: recs.append(x.knob_record()) if has(x) else None,
+                 model, is_leaf=has)
+    recs = [r for r in recs if r is not None]
+    if not recs:
+        return None
+    if any(r != recs[0] for r in recs[1:]):
+        raise ValueError("checkpoint holds AIMIP parameter modules with "
+                         "different frozen sets or ranges; no single record")
+    return {"format": KNOB_RECORD_FORMAT, "version": KNOB_RECORD_VERSION,
+            **recs[0]}
+
+
+def write_knob_record(model, path) -> None:
+    """Write ``model``'s knob record beside checkpoint ``path`` (atomic), or
+    remove a stale one when the model has no AIMIP knobs."""
+    import json
+    import os
+
+    rec, side = knob_record(model), knob_record_path(path)
+    if rec is None:
+        side.unlink(missing_ok=True)
+        return
+    tmp = side.with_name(f"{side.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(rec, sort_keys=True))
+    os.replace(tmp, side)
+
+
+def read_knob_record(path) -> dict | None:
+    """The record beside ``path``; None for a checkpoint written without one
+    (legacy).  An unknown format or version raises."""
+    import json
+
+    side = knob_record_path(path)
+    if not side.exists():
+        return None
+    rec = json.loads(side.read_text())
+    if (rec.get("format") != KNOB_RECORD_FORMAT
+            or rec.get("version") != KNOB_RECORD_VERSION):
+        raise CheckpointStructureError(
+            f"{side}: unknown knob record format/version "
+            f"{rec.get('format')!r}/{rec.get('version')!r}")
+    return rec
+
+
+def knob_filter_spec(path, skeleton):
+    """The equinox filter spec for loading ``path`` into ``skeleton``: each
+    AIMIP module's ``checkpoint_load_spec`` (fed the record beside ``path``,
+    or None), equinox's default for every other leaf."""
+    import equinox as eqx
+    import jax.tree_util as jtu
+
+    record = read_knob_record(path)
+    has = lambda x: hasattr(x, "checkpoint_load_spec")  # noqa: E731
+    return jtu.tree_map(
+        lambda x: (x.checkpoint_load_spec(record) if has(x)
+                   else eqx.default_deserialise_filter_spec),
+        skeleton, is_leaf=has)
+
+
+def deserialise_knob_aware(path, skeleton):
+    """For loaders that call equinox directly (trainer mid-epoch and EMA
+    resume, WB resume and FD check): ``eqx.tree_deserialise_leaves`` with the
+    same knob spec as :func:`load_checkpoint_or_fail`, so the dtype and range
+    rules match it (non-AIMIP leaves, e.g. optimizer moments, keep equinox's
+    exact-dtype check, as there).  Errors propagate unwrapped; no
+    trailing-bytes check."""
+    import equinox as eqx
+
+    return eqx.tree_deserialise_leaves(
+        str(checkpoint_path(path)), skeleton, knob_filter_spec(path, skeleton))
+
+
 def checkpoint_path(path) -> Path:
     """The file :func:`load_checkpoint_or_fail` opens for ``path``.
 
@@ -91,8 +182,9 @@ def load_checkpoint_or_fail(path, skeleton: Any, *, what: str = "") -> Any:
         # happen to line up loads SILENTLY and wrong, which is exactly what a
         # 59-knob file does against the 50-knob skeleton when the dropped
         # entries sit at the end.
+        spec = knob_filter_spec(path, skeleton)
         with open(path, "rb") as handle:
-            loaded = eqx.tree_deserialise_leaves(handle, skeleton)
+            loaded = eqx.tree_deserialise_leaves(handle, skeleton, spec)
             leftover = handle.read(1)
         if leftover:
             n_expected = len(jtu.tree_leaves(skeleton))
@@ -110,9 +202,13 @@ def load_checkpoint_or_fail(path, skeleton: Any, *, what: str = "") -> Any:
     except (RuntimeError, EOFError, ValueError) as exc:
         n_expected = len(jtu.tree_leaves(skeleton))
         label = f" for {what}" if what else ""
+        root = exc   # equinox re-raises a filter-spec error as a bare leaf path
+        while root.__cause__ is not None or root.__context__ is not None:
+            root = root.__cause__ or root.__context__
+        cause = "" if root is exc else f" ({type(root).__name__}: {root})"
         raise CheckpointStructureError(
             f"checkpoint {path} does not match the current parameter set"
             f"{label}: the skeleton has {n_expected} array leaves, and equinox "
-            f"rejected the file with: {exc}\n"
+            f"rejected the file with: {exc}{cause}\n"
             + _KNOWN_LAYOUT_BREAKS
         ) from exc

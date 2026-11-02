@@ -133,6 +133,42 @@ MOM6 reference: `ocean_only` single column (`BUOY_CONFIG="const"`,
 `WIND_CONFIG="const"`), ePBL as the only mixing, the same parameters as above
 in `MOM_override`.
 
+**Committed fixture (#2181).** MOM6 0e9a561 was rebuilt and the six cases
+rerun; the inputs, the MOM6 parameter record, the MOM6 temperature profiles and
+the build provenance are in `tests/ocean/unit/fixtures/mom6_epbl_scm/`, and
+`tests/ocean/unit/test_epbl_mom6_oracle.py` reruns legoESM (MOM6 order) against
+them. The MOM6 side sets, beyond the table above: a 2x2 doubly periodic 1-degree
+f-plane (`F_0 = 2 OMEGA sin 40`), 50 uniform 1 m Z* layers,
+`EQN_OF_STATE="WRIGHT_REDUCED"` (legoESM's Wright coefficients),
+`VON_KARMAN_CONST=0.4` (legoESM's value; MOM6's default is 0.41),
+`BBL_EFFIC=0` (no bottom-drag diffusivity), and the momentum-only `HBBL=10`,
+`HMIX_FIXED=0.01`, `NIHALO=NJHALO=2`, `UPWIND_1ST_CONTINUITY=True` of the
+MOM6-examples single column, plus output-only settings (8 h run via
+`TIMEUNIT`/`DAYMAX`, `SAVE_INITIAL_CONDS`, `ENERGYSAVEDAYS`, `RESTART_CONTROL`);
+everything else is MOM6's default (`MOM_parameter_doc.all` in the fixture). The test
+runs legoESM under the fp64 precision policy. The rebuilt gaps reproduce the
+table below (MOM6-order column) to the digits shown, except Q = 0, where they
+are round-off (2.6e-13 and 1.0e-12 at 1200 s and 300 s, vs 1.1e-7 and 5.2e-8;
+under the default fp32 policy the rebuild gives 1.0e-7 and 4.9e-8).
+
+**Shortwave cases (#2178).** Four more MOM6 runs of the same column add
+200 W/m^2 of penetrating shortwave (sensible Q = -200 / 0 W/m^2, dt 1200 /
+300 s; `BUOY_CONFIG="file"`, `EXP_OPACITY_SCHEME="DOUBLE_EXP"` with Jerlov
+type I bands 0.35 m / 23 m, ratio 0.58): `mom6_epbl_scm_sw_0e9a561.npz` plus
+the per-case overrides, forcing generator and parameter record in the same
+fixture directory (`provenance.json`, `shortwave_cases`).  legoESM runs them
+with `shortwave_penetration=ShortwavePenetrationConfig(water_type="I")` and
+`sw_down=200`; ePBL then counts the shortwave in its buoyancy flux and adds
+its per-layer TKE (MOM6 `absorbRemainingSW`).  Measured max |T_legoESM -
+T_MOM6| at 8 h (exact switches, fp64): 5.75e-2 / 5.77e-2 degC (dt 1200 / 300),
+always in the bottom layer, where legoESM deposits the light reaching the
+seabed while MOM6 spreads it over the column (a KNOWN DIFFERENCE of the
+deposit kernel, not of ePBL); 6.2e-3 / 6.1e-3 over levels 0-48 (at level 48);
+1.3e-3 at the surface.  Before the fix (ePBL ignoring the shortwave) the gap
+was 0.27-0.44 degC at 10-11 m.  `test_epbl_mom6_oracle.py` stores each
+case's per-level |T_legoESM - T_MOM6| vector (50 values) to 1e-6 relative
+(1e-12 degC floor).
+
 legoESM side:
 
 ```python

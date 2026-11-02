@@ -169,6 +169,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
     depth_averaged_oro_source,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+from legoesm.core.smooth import pnorm_smooth_min, smoothstep_quintic
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). Applies
 # to the top-level driver ``e3sm_cam_gwd``; the ``gw_*`` functions above/below
@@ -373,8 +374,18 @@ def gw_oro_src(
     fcrit2: float,
     oro_min_h: float,
     oro_min_wind: float,
+    oro_wind_ramp_width: float = 0.0,
 ):
     """McFarlane (1987) orographic source (single c=0 wave).
+
+    ``oro_wind_ramp_width = w`` [m/s] (static Python float): ``0.0`` is E3SM's
+    hard ``U > oro_min_wind`` launch gate (the stress jumps from tau(U) to 0);
+    ``w > 0`` (RULE 5, the Lindzen scheme's default, #2241) multiplies the
+    launch stress by ``smoothstep_quintic((U - oro_min_wind)/w)``: exactly 0 at
+    and below the gate, exact from ``oro_min_wind + w``, never above the hard
+    stress.  The launch level keeps the hard test (the weight is 0 there).
+    The mountain-height gate ``hdsp > oro_min_h`` stays hard: ``hdsp`` is
+    static orography, not model state.
 
     Faithful to ``gw_oro_src`` (gw_oro.F90).  Returns the launched stress
     profile (ncol, nlev+1), source/tend levels, projection unit vectors,
@@ -415,6 +426,11 @@ def gw_oro_src(
         oroko2 * jnp.minimum(hdsp ** 2, sghmax) * rsrc * nsrc * ubi_sfc
     )
     active = (ubi_sfc > oro_min_wind) & (hdsp > oro_min_h)
+    if oro_wind_ramp_width != 0.0:
+        if not (math.isfinite(oro_wind_ramp_width) and oro_wind_ramp_width > 0.0):
+            raise ValueError(
+                f"oro_wind_ramp_width must be finite and >= 0, got {oro_wind_ramp_width!r}")
+        tauoro = tauoro * smoothstep_quintic((ubi_sfc - oro_min_wind) / oro_wind_ramp_width)
     tauoro = jnp.where(active, tauoro, 0.0)             # (ncol,)
     # Where orographic term is zero, E3SM sets src_level = pver (no waves).
     src_level = jnp.where(active, src_level, nlev).astype(jnp.int32)
@@ -1013,6 +1029,11 @@ def gw_drag_prof(
     orographic_only: bool,
     do_taper: bool = False,
     alpha_iface: jax.Array | None = None,
+    *,
+    softmin_sharpness: float | None = None,
+    crit_level_sharpness: float | None = None,
+    crit_level_floor: float = 0.0,
+    tndmax_per_day: float | None = None,
 ):
     """Stress-profile + tendency solver, faithful to ``gw_drag_prof``.
 
@@ -1030,6 +1051,16 @@ def gw_drag_prof(
         Height-dependent Newtonian-cooling coefficient [1/s] at interfaces
         (E3SM ``alpha(0:pver)``).  ``None`` -> uniform ``cfg.alpha_newtonian``
         at every interface (the default clean-oracle behaviour).
+    softmin_sharpness, crit_level_sharpness, crit_level_floor : optional
+        Smoothing used by callers that carry their own sharpness fields
+        (``lindzen.py``): a p-norm smooth min (p = ``softmin_sharpness``) for
+        ``min(taudmp, tausat)``, and, in the form ``mcfarlane.py`` uses, a smooth XNOR of the two
+        ``(u - c) - crit_level_floor`` sign tests for the critical level.
+        Each reduces to the E3SM hard switch at infinite sharpness (floor 0).
+        ``None`` (default) = the exact E3SM kinks, unchanged.
+    tndmax_per_day : optional
+        Tendency ceiling [m/s/day] overriding the E3SM value selected by
+        ``orographic_only`` (500 orographic-only, else ``cfg.tndmax_per_day``).
 
     Returns
     -------
@@ -1053,7 +1084,8 @@ def gw_drag_prof(
     kwv = cfg.kwv
     # E3SM: tndmax = 400/86400 for spectral (multi-source), 500/86400 when
     # orographic_only (gw_common.F90:156).  (codex iter-1 finding #4)
-    tndmax_per_day = _TNDMAX_ORO_PER_DAY if orographic_only else cfg.tndmax_per_day
+    if tndmax_per_day is None:
+        tndmax_per_day = _TNDMAX_ORO_PER_DAY if orographic_only else cfg.tndmax_per_day
     tndmax = tndmax_per_day / 86400.0
     # Newtonian cooling: a height profile (E3SM alpha(k)) when supplied, else
     # a single uniform value at every interface.  alpha_arr is (ncol, nlev+1).
@@ -1093,12 +1125,22 @@ def gw_drag_prof(
         ubmc = ubi_k - c_col                     # (ncol,nwav)  (u-c) at k
         ubmc_below = ubi_kp1 - c_col             # (u-c) at k+1
 
-        same_sign = (ubmc * ubmc_below) > 0.0
         tausat = jnp.abs(
             effkwv * rhoi[:, k][:, None] * ubmc ** 3
             / (2.0 * ni[:, k][:, None])
         )
-        tausat = jnp.where(same_sign, tausat, 0.0)
+        if crit_level_sharpness is None:
+            same_sign = (ubmc * ubmc_below) > 0.0
+            tausat = jnp.where(same_sign, tausat, 0.0)
+        else:
+            # Smooth XNOR of the two sign tests (mcfarlane.py form).
+            s_top = jax.nn.sigmoid(crit_level_sharpness * (ubmc - crit_level_floor))
+            s_bot = jax.nn.sigmoid(
+                crit_level_sharpness * (ubmc_below - crit_level_floor))
+            tausat = tausat * (s_top * s_bot + (1.0 - s_top) * (1.0 - s_bot))
+            # E3SM's strict test (product > 0) fails at an exactly zero wind,
+            # where the sigmoids sit at 1/2 for any sharpness.
+            tausat = jnp.where(ubmc * ubmc_below == 0.0, 0.0, tausat)
         tausat = jnp.where(tausat <= cfg.taumin, 0.0, tausat)
 
         # diffusivity: d = max(dback, dscal*dsat) over waves.  alpha is the
@@ -1139,7 +1181,15 @@ def gw_drag_prof(
         )
         taudmp = tau_below * jnp.exp(wrk)
         taudmp = jnp.where(taudmp <= cfg.taumin, 0.0, taudmp)
-        tau_computed = jnp.minimum(taudmp, tausat)
+        if softmin_sharpness is None:
+            tau_computed = jnp.minimum(taudmp, tausat)
+        else:
+            # Smooth min(taudmp, tausat): p-norm (taudmp^-p + tausat^-p)^(-1/p),
+            # p = softmin_sharpness (shared with mcfarlane.py; user decision
+            # 2026-10-28).  C-infinity for positive stresses, in
+            # [0, min(taudmp, tausat)]; exact min at p -> inf.
+            tau_computed = pnorm_smooth_min(taudmp, tausat, softmin_sharpness, cfg.taumin)
+            tau_computed = jnp.where(tausat > 0.0, tau_computed, 0.0)
         # In the source region keep the launched value at interface k.
         tau_k = jnp.where(active, tau_computed, tau_launched_iface[:, :, k])
 
@@ -1411,13 +1461,8 @@ def gw_diff_tridiag_coeffs(
     # interfaces (E3SM ktop+2..kbot+1 in 1-based -> our interior interfaces).
     # tmpi[i] uses midpoints i-1 (above) and i (below): pmid[i]-pmid[i-1].
     dpmid = pmid[:, 1:] - pmid[:, :-1]                     # (ncol, nlev-1) iface 1..nlev-1
-    # E3SM divides by pmid(k)-pmid(k-1) directly.  We floor the magnitude at
-    # 1 Pa (codex ediff-1 #3): a SAFETY floor only — on any physical
-    # monotone-pressure grid the midpoint spacing is >> 1 Pa, so this is a
-    # no-op and the coefficients are bit-faithful to E3SM; it only guards a
-    # pathological/degenerate column from a divide-by-zero (same pattern as the
-    # dpm/piln floors used elsewhere in this module).
-    dpmid = jnp.where(jnp.abs(dpmid) < 1.0, 1.0, dpmid)
+    # Unfloored, as CAM/E3SM: Coords1D rdst = 1/(mid(k+1)-mid(k))
+    # (CAM cam_cesm2_1_rel_60 src/utils/coords_1d.F90:81-83).
     tmpi_int = dt * (gravit * rhoi_kludge[:, 1:nlev]) ** 2 / dpmid  # iface 1..nlev-1
     tmpi = jnp.zeros((ncol, nlev + 1), dtype=pmid.dtype)
     tmpi = tmpi.at[:, 1:nlev].set(tmpi_int)

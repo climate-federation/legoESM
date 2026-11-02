@@ -247,7 +247,8 @@ class _TilePhysicsGrid(tuple):
         return int(self[0].shape[1] * self[0].shape[2])
 
 
-def build_tile_step_unified(grid, sigma, config, kt: int):
+def build_tile_step_unified(grid, sigma, config, kt: int, *,
+                            run_has_no_land: bool = False):
     """Build the unified physics ``step_unified`` at TILE ncol — the
     tiled-cube analogue of the lat-band lane's band-grid build ("ONE
     band-grid build serves every band"; cube tiles are uniform windows,
@@ -293,6 +294,9 @@ def build_tile_step_unified(grid, sigma, config, kt: int):
             "build_tile_step_unified: land-active pipeline (f_land is a "
             "per-column bake that differs per tile) — no tile-wise land "
             "packing yet; run land-free or the face-only lane.")
+    # the driver's land-free mark (McFarlane zero land fraction); unmarked
+    # keeps None, which McFarlane refuses
+    pipeline.run_has_no_land = run_has_no_land
     return pipeline.build_step_unified(static_need_rad=True), pipeline
 
 
@@ -461,7 +465,7 @@ def make_tiled_operator_split_step(
             carry_t.step_index, start_day, dt, rad_update_steps)
         tile_statics = dataclasses.replace(
             statics, grid=TileGridView(ar_t),
-            lat=lat_t, lon=lon_t, forcing=forcing_t)
+            lat=lat_t, lon=lon_t, cell_area=ar_t, forcing=forcing_t)
         if ghg_keys is not None:
             # Transient GHG: rebuild the override from THIS segment's
             # forcing (the lat-band factory's contract — a baked statics

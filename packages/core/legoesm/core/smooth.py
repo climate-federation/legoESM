@@ -98,6 +98,26 @@ def smooth_min(a: jax.Array, b: jax.Array, sharpness: float = 100.0) -> jax.Arra
     return -smooth_max(-a, -b, sharpness)
 
 
+def pnorm_smooth_min(a: jax.Array, b: jax.Array, p: float, eps: float) -> jax.Array:
+    """p-norm smooth min of two NON-NEGATIVE arrays: ``(a^-p + b^-p)^(-1/p)``.
+
+    Written overflow-free as ``lo*(1 + (lo/hi)^p)^(-1/p)`` (``lo``/``hi`` =
+    elementwise min/max); the ratio is 0 where ``hi <= eps`` (where-before-
+    divide, AD-safe), so there the result is the exact ``min`` and it jumps
+    (from ``eps`` to ``2^(-1/p)*eps`` where ``a = b``) as ``hi`` crosses
+    ``eps``: callers zero inputs ``<= eps`` first (both GWD callers zero
+    stresses ``<= taumin = eps``).  Above ``eps``: scale-free (unlike the
+    additive :func:`smooth_min`), C-infinity, never above ``min(a, b)``,
+    equal to ``2^(-1/p)*a`` where ``a = b``; exact ``min`` as ``p -> inf``.
+    Used for the GWD stress cap ``min(taudmp, tausat)`` (Lindzen, McFarlane).
+    """
+    lo = jnp.minimum(a, b)
+    hi = jnp.maximum(a, b)
+    ok = hi > eps
+    ratio = jnp.where(ok, lo / jnp.where(ok, hi, jnp.ones_like(hi)), jnp.zeros_like(lo))
+    return lo * (1.0 + ratio ** p) ** (-1.0 / p)
+
+
 def smooth_clamp(
     x: jax.Array, lo: float, hi: float, sharpness: float = 100.0
 ) -> jax.Array:
@@ -127,6 +147,23 @@ def smooth_relu(x: jax.Array, sharpness: float = 100.0) -> jax.Array:
     if _hard(sharpness):
         return jnp.maximum(x, 0.0)
     return jax.nn.softplus(x * sharpness) / sharpness
+
+
+def positive_part_c1(x: jax.Array, sharpness: float) -> jax.Array:
+    """C1 positive part, EXACTLY 0 for ``x <= 0`` and exactly ``x`` above ``1/s``.
+
+    ``0`` for ``x <= 0``; ``t**2 (2 - t)/s`` with ``t = s*x`` on
+    ``0 < x < 1/s`` (value and slope match at both joins); ``x`` above.
+    Monotone and never above ``max(x, 0)`` (the shortfall is at most
+    ``4/(27 s)``, at ``x = 1/(3s)``).  Unlike :func:`smooth_relu` (softplus,
+    positive everywhere, offset everywhere) it creates nothing from a
+    non-positive input and is exact for ``x >= 1/s``; exactly ``max(x, 0)``
+    at ``sharpness = inf``.
+    """
+    if _hard(sharpness):
+        return jnp.maximum(x, 0.0)
+    t = jnp.clip(x * sharpness, 0.0, 1.0)
+    return jnp.where(t >= 1.0, x, t * t * (2.0 - t) / sharpness)
 
 
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:

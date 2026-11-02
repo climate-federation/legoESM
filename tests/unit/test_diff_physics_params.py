@@ -227,7 +227,8 @@ class TestConvectionParams:
         def loss(e):
             cfg = KuoConfig()._replace(entrainment=e)
             out = kuo_convection(T, q_v, p_full, p_half, 900.0, config=cfg,
-                                 moisture_convergence=ptenq)
+                                 moisture_convergence=ptenq,
+                                 w_grid=jnp.full_like(ptenq, 0.01))
             return jnp.sum(out.dT_dt ** 2)
 
         assert_param_grad_ok(loss, KuoConfig().entrainment, "Kuo entrainment")
@@ -238,7 +239,8 @@ class TestConvectionParams:
         def loss(o):
             cfg = KuoConfig(partition="anthes")._replace(anthes_rh_offset=o)
             out = kuo_convection(T, q_v, p_full, p_half, 900.0, config=cfg,
-                                 moisture_convergence=ptenq)
+                                 moisture_convergence=ptenq,
+                                 w_grid=jnp.full_like(ptenq, 0.01))
             return jnp.sum(out.dT_dt ** 2)
 
         assert_param_grad_ok(loss, KuoConfig().anthes_rh_offset,

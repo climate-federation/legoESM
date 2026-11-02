@@ -1,0 +1,87 @@
+! MOM6 0e9a561 single-column ePBL case (legoESM issue #2181, rebuild of the PR #2122 case).
+! Only the case parameters are set here; every other parameter is MOM6's default
+! (see MOM_parameter_doc.all). Per-case DT and SENSIBLE_HEAT_FLUX are in MOM_override.
+
+! --- grid: 2x2 reentrant f-plane at 40N ---
+GRID_CONFIG = "cartesian"
+NIGLOBAL = 2
+NJGLOBAL = 2
+NIHALO = 2
+NJHALO = 2
+UPWIND_1ST_CONTINUITY = True   ! 2-point halo on the 2x2 grid needs 1st-order continuity (as MOM6-examples single_column)
+REENTRANT_X = True
+REENTRANT_Y = True
+SOUTHLAT = 39.5
+LENLAT = 1.0
+LENLON = 1.0
+ROTATION = "betaplane"
+F_0 = 9.374414499668488E-05     ! 2*OMEGA*sin(40 deg), OMEGA = 7.292e-5
+BETA = 0.0
+TOPO_CONFIG = "flat"
+MAXIMUM_DEPTH = 50.0
+MINIMUM_DEPTH = 0.0
+
+! --- vertical: 50 uniform 1 m Z* layers ---
+NK = 50
+USE_REGRIDDING = True
+REGRIDDING_COORDINATE_MODE = "Z*"
+ALE_COORDINATE_CONFIG = "UNIFORM"
+
+! --- constants matched to legoESM ---
+G_EARTH = 9.80616
+RHO_0 = 1025.0
+C_P = 3994.0
+OMEGA = 7.292E-05
+EQN_OF_STATE = "WRIGHT_REDUCED"
+VON_KARMAN_CONST = 0.4
+
+! --- initial state: T 20 -> 15 degC linear, S = 35, at rest ---
+TS_CONFIG = "linear"
+T_TOP = 20.0
+T_RANGE = 5.0
+S_TOP = 35.0
+S_RANGE = 0.0
+SAVE_INITIAL_CONDS = True
+
+! --- mixing: ePBL only, backgrounds KD/KV, no bottom-drag BBL diffusivity ---
+ENERGETICS_SFC_PBL = True
+KD = 1.0E-05
+KV = 1.0E-04
+BBL_EFFIC = 0.0
+
+! --- ePBL options of the PR case ---
+EPBL_MSTAR_SCHEME = "REICHL_H18"
+EPBL_VEL_SCALE_SCHEME = "REICHL_H18"
+NSTAR = 0.06
+ML_OMEGA_FRAC = 0.001
+TKE_DECAY = 0.001
+MSTAR_CONV_ADJ = 0.66
+RH18_MSTAR_CN3 = -6.0
+WSTAR_USTAR_COEF = 15.0
+MSTAR = 0.0
+MIX_LEN_EXPONENT = 1.0
+EPBL_TRANSITION_SCALE = 0.01
+EPBL_VEL_SCALE_FACTOR = 0.5477
+VSTAR_SURF_FAC = 1.8258
+USE_MLD_ITERATION = True
+EPBL_MLD_BISECTION = True
+EPBL_MLD_TOLERANCE = 0.1
+EPBL_EQD_DIFFUSIVITY_SHAPE = True
+EPBL_EQD_DIFFUSIVITY_VELOCITY_H = True
+
+! --- forcing: constant wind stress and non-penetrating heat flux ---
+BUOY_CONFIG = "const"
+WIND_CONFIG = "const"
+CONST_WIND_TAUX = 0.2
+CONST_WIND_TAUY = 0.0
+
+! --- run length: 8 hours ---
+TIMEUNIT = 3600.0
+DAYMAX = 8.0
+ENERGYSAVEDAYS = 1.0
+RESTART_CONTROL = 1
+
+! --- required by MOM6 (no default); momentum-only here: bottom-drag layer and
+! near-surface viscosity depth (values of MOM6-examples ocean_only/single_column) ---
+HBBL = 10.0
+HMIX_FIXED = 0.01
