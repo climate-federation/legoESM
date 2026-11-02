@@ -190,3 +190,20 @@ def test_empty_validation_block_is_an_error_and_builder_always_validates():
     idx = mod.needed_indices(cfg, {"train_windows": [[2015, 0, 1]], "eval_years": [2020]},
                              times)
     assert {0, 60 * 23} <= set(idx.tolist())     # implicit 2014 validation inits
+
+
+def test_every_lead_uses_the_initial_time_forcing(tmp_path, monkeypatch):
+    """A multi-lead sample carries ONE forcing: the initial time's record."""
+    monkeypatch.setattr(sb, "wb_state_record", lambda i, *a: _rec(i))
+    monkeypatch.setattr(sb, "wb_state_cache_configs", lambda cfg, yml: (None, None, "none"))
+    monkeypatch.setattr(sb, "validate_carry_holds_scheme", lambda *a, **k: 3)
+    p = _store(tmp_path, [0, 1, 2, 3, 4])
+    monkeypatch.setattr(sb, "wb_state_cache_path", lambda *a: p)
+    for i in range(5):
+        wsc.write_time(p, i, wsc.record_arrays(*_rec(i))[0])
+    s = sb._state_cached_samples(SimpleNamespace(mode="physics"), {}, None, None,
+                                 [(2015, 2, 4)], (6, 12), 1, _times(), None, None,
+                                 None, "none", None)
+    _, target, forcing = s[0]
+    assert float(forcing["day_of_year"]) == 2.0          # _rec(i) codes i here
+    assert len(target) == 2
