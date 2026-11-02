@@ -228,14 +228,14 @@ def test_through_fct_changes_the_full_model_route_on_a_live_front():
             card.recipe.grid, card.recipe.z_coord, config(True),
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_l5_mle_transport=True)).step(state, dt=card.dt_s)
-        centred = LatLonCGridOceanModel(
-            card.recipe.grid, card.recipe.z_coord, config(False)).step(
-                state, dt=card.dt_s)
         trace = staged.mass_flux_w
         assert float(jnp.max(jnp.abs(trace.delta_u))) == pytest.approx(
             10863.304248497367, rel=1.0e-13)
         assert float(jnp.max(jnp.abs(trace.delta_v))) == pytest.approx(
             0.01969529183197949, rel=1.0e-13)
+        centred = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, config(False)).step(
+                state, dt=card.dt_s)
         assert not np.array_equal(
             np.asarray(staged.T.data), np.asarray(centred.T.data))
     finally:

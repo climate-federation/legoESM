@@ -105,7 +105,7 @@ def test_substeps_receive_nemos_bottom_tfield(vortex, monkeypatch):
     out = model.step(s0, dt=vortex.dt_s, surface_forcing=OceanSurfaceForcing(
         tau_x=zero, tau_y=zero, ice_ocean_top_drag_rCdu=_field(vortex, 1.5e-3, 5)))
     assert np.all(np.isfinite(np.asarray(out.eta.data)))
-    assert seen, "the substeps never passed rCdU_bot"
+    assert len(seen) == 2, "the substeps never passed rCdU_bot"
     wet = np.asarray(vortex.recipe.z_coord.bottom_level) >= 0
     want = np.where(wet, -(recipe._SMT2_RN_CD0 * recipe._SMT2_RN_UC0), -0.0)
     for got in seen:

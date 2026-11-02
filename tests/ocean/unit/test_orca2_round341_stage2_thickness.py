@@ -266,6 +266,8 @@ def test_stage2_transport_uses_stored_h_s2_kmm_and_fails_on_revert() -> None:
     h_prod_off = spies["off"][1][3]
     assert _hex64(h_prod_on[1, 1, 3]) == "0x40234d4bd6440687"
     assert _hex64(h_prod_off[1, 1, 3]) == "0x40234d4bd6440686"
+    assert _hex64(h_prod_on[1, 1, 2]) == "0x40248d5e5fb43e1f"
+    assert _hex64(h_prod_off[1, 1, 2]) == "0x40248d5e5fb43e1e"
 
 
 def test_stage1_stage3_and_legacy_caller_stay_bit_identical() -> None:

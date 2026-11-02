@@ -100,7 +100,7 @@ class TestSpongeForcing:
         with pytest.raises(ValueError, match="target kt=17.*requested kt=18"):
             model.step(
                 state, dt=card.dt_s, sponge=sf, nemo_kt=18)
-        with pytest.raises(ValueError, match="target kt=17.*requested kt=18"):
+        with pytest.raises(ValueError, match="step 0 target kt=17.*requested kt=18"):
             model._integrate_scan_inputs(
                 state, n_steps=1, dt=card.dt_s, t0_seconds=0.0,
                 step_inputs=[{"sponge": sf}], nemo_kt0=18, tide_on=False)

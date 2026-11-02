@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -113,9 +114,12 @@ def test_vortex_step_consumes_each_early_stage_selector(field):
 def test_gyre_step_consumes_each_staged_selector(gyre_card, field):
     cfg = gyre_card.recipe.model_config._replace(**{field: _BoolProbe(field)})
     with pytest.raises(_SelectorTouched, match=field):
-        LatLonCGridOceanModel(
+        model = LatLonCGridOceanModel(
             gyre_card.recipe.grid, gyre_card.recipe.z_coord, cfg,
-        ).step(gyre_card.recipe.initial_state, dt=gyre_card.dt_s)
+        )
+        jax.make_jaxpr(lambda s: model.step(s, dt=gyre_card.dt_s))(
+            gyre_card.recipe.initial_state
+        )
 
 
 @pytest.mark.parametrize("field", [
@@ -129,9 +133,12 @@ def test_gyre_step_consumes_each_new_gm_redi_selector(gyre_card, field):
         **{field: _BoolProbe(field)})
     cfg = gyre_card.recipe.model_config._replace(gm_redi=gm)
     with pytest.raises(_SelectorTouched, match=field):
-        LatLonCGridOceanModel(
+        model = LatLonCGridOceanModel(
             gyre_card.recipe.grid, gyre_card.recipe.z_coord, cfg,
-        ).step(gyre_card.recipe.initial_state, dt=gyre_card.dt_s)
+        )
+        jax.make_jaxpr(lambda s: model.step(s, dt=gyre_card.dt_s))(
+            gyre_card.recipe.initial_state
+        )
 
 
 @pytest.mark.parametrize("field", [
@@ -205,11 +212,17 @@ def test_stage_wzv_clock_pair_changes_the_executed_wzv_clock(
     v_mask = jnp.broadcast_to(
         state.v_mask.data[..., None], state.v.data.shape)
     seen = []
+    seen_kw = []
 
     def fake_wzv(*args, **kwargs):
         clock = float(args[9])
-        after_level = int(kwargs["stage_after_level"])
+        after_level = int(kwargs.get("stage_after_level", 0))
         seen.append((clock, after_level))
+        seen_kw.append((
+            bool(kwargs.get("stored_r3_ratios", False)),
+            int(kwargs.get("stored_kmm_level", 0)),
+            bool(kwargs.get("half_step_after_ratio", False)),
+        ))
         value = clock + after_level
         return jnp.full_like(h_ref, value), None, None
 
@@ -234,6 +247,39 @@ def test_stage_wzv_clock_pair_changes_the_executed_wzv_clock(
     assert float(on[0, 0, 0]) == 5402.0
     assert float(off[0, 0, 0]) == 10800.0
     assert not np.array_equal(on, off)
+
+    def call_both(
+        *,
+        r3=False,
+        tracer_kmm=False,
+        mom_half=False,
+        mom_kmm=False,
+    ):
+        seen_kw.clear()
+        cfg = gyre_card.recipe.model_config._replace(
+            nemo_wzv_stored_r3_ratios=r3,
+            rk3_stage_tracer_wzv_stored_kmm_ratios=tracer_kmm,
+            nemo_stage2_momentum_wzv_half_step=mom_half,
+            nemo_stage_momentum_wzv_stored_kmm_ratios=mom_kmm,
+        )
+        omlc._nemo_ws_stage_transport(
+            (state.u.data, state.v.data), h_ref, 1,
+            eta_stage=state.eta.data, stored_h_stage=True,
+            h_ref=h_ref, Hu_avg=jnp.zeros_like(state.u.data[..., 0]),
+            Hv_avg=jnp.zeros_like(state.v.data[..., 0]),
+            u_mask_3d=u_mask, v_mask_3d=v_mask, grid=grid,
+            z_coord=z_coord, H_bathy=state.H_bathy.data,
+            config=cfg, dt=10800.0, eta_before=state.eta.data,
+            eta_after=state.eta.data, literal_wzv=True,
+            momentum_velocity_form_w=True)
+        return list(seen_kw)
+
+    assert call_both(r3=True) == [(True, 0, False), (True, 0, False)]
+    assert call_both(tracer_kmm=True) == [(True, 1, False), (False, 0, False)]
+    assert call_both(mom_half=True, mom_kmm=True) == [
+        (False, 0, False),
+        (False, 1, True),
+    ]
 
 
 def test_nemo_ldf_fold_rows_changes_the_executed_fold_operator():
@@ -861,6 +907,46 @@ def test_rk3_stage3_salt_geothermal_and_krhs_order_change_model_step():
         assert np.count_nonzero(t_krhs_on != t_geo_off) == 11
         assert t_krhs_on[0, 1, 0] == np.uint64(4626263631292573473)
         assert t_geo_off[0, 1, 0] == np.uint64(4626263631292573474)
+
+        sw_2bd = base_cfg.physics.shortwave_penetration._replace(
+            scheme="nemo_qsr_2bd",
+        )
+        cfg_2bd = base_cfg._replace(
+            physics=base_cfg.physics._replace(shortwave_penetration=sw_2bd),
+        )
+        with pytest.raises(
+            _SelectorTouched, match="nemo_qsr_stage3_kmm_source_association",
+        ):
+            m_qsr = LatLonCGridOceanModel(
+                grid,
+                z_coord,
+                cfg_2bd._replace(
+                    nemo_qsr_stage3_kmm_source_association=_BoolProbe(
+                        "nemo_qsr_stage3_kmm_source_association"
+                    )
+                ),
+            )
+            jax.make_jaxpr(
+                lambda s: m_qsr.step(s, 300.0, surface_forcing=forcing)
+            )(state)
+        with pytest.raises(
+            _SelectorTouched, match="nemo_qsr_kbb_live_stretch",
+        ):
+            sw_probe = sw_2bd._replace(
+                nemo_qsr_kbb_live_stretch=_BoolProbe("nemo_qsr_kbb_live_stretch")
+            )
+            m_kbb = LatLonCGridOceanModel(
+                grid,
+                z_coord,
+                cfg_2bd._replace(
+                    physics=cfg_2bd.physics._replace(
+                        shortwave_penetration=sw_probe
+                    )
+                ),
+            )
+            jax.make_jaxpr(
+                lambda s: m_kbb.step(s, 300.0, surface_forcing=forcing)
+            )(state)
     finally:
         set_policy(prev_policy)
 
@@ -986,6 +1072,62 @@ def test_l4b_and_l6_geothermal_and_damping_validator_coupling_and_valid_pair_ste
         assert t_l4b_on[1, 0, 0] == np.uint64(4626466981215184375)
         assert s_l6_on[1, 0, 0] == np.uint64(4630131660021248911)
         assert s_l4b_on[1, 0, 0] == np.uint64(4630132926647489180)
+
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            latlon_cgrid_ocean_baroclinic_tendencies,
+        )
+
+        pe_l6 = latlon_cgrid_ocean_baroclinic_tendencies(
+            state, grid, z_coord, cfg_l6_on, sponge=sponge,
+        )
+        pe_l4b = latlon_cgrid_ocean_baroclinic_tendencies(
+            state, grid, z_coord, cfg_l4b_on, sponge=sponge,
+        )
+        assert not np.array_equal(
+            np.asarray(pe_l6.dT_dt.data), np.asarray(pe_l4b.dT_dt.data)
+        )
+
+        eiv_cfg = l2_cfg._replace(
+            rk3_stage3_tracer_krhs_nemo_order=False,
+            gm_redi=gm._replace(
+                gm_bolus_advection="through_fct",
+                kappa_GM=1000.0,
+            ),
+        )
+        with pytest.raises(
+            ValueError,
+            match="NEMO rk3_ws eddy-induced velocity \\(GM bolus through FCT\\) requires rk3_stage3_tracer_krhs_nemo_order",
+        ):
+            LatLonCGridOceanModel._check_l3_krhs_route(eiv_cfg)
+        model_eiv = LatLonCGridOceanModel(grid, z_coord, l2_cfg)
+        model_eiv.prime_step_caches(state)
+        with pytest.raises(
+            ValueError,
+            match="NEMO rk3_ws eddy-induced velocity requires rk3_stage3_tracer_krhs_nemo_order",
+        ):
+            jax.make_jaxpr(
+                lambda s: model_eiv._step_impl(
+                    s, 300.0, surface_forcing=forcing, config=eiv_cfg
+                )
+            )(state)
+
+        m_zdf = LatLonCGridOceanModel(
+            grid,
+            z_coord,
+            l2_cfg._replace(
+                implicit_vertical_mixing=True,
+                gm_redi=gm._replace(
+                    redi_a33_source_ordering=_BoolProbe("redi_a33_source_ordering")
+                ),
+            ),
+        )
+        with pytest.raises(_SelectorTouched, match="redi_a33_source_ordering"):
+            m_zdf._apply_implicit_vertical_mixing(
+                state,
+                dt=300.0,
+                surface_forcing=forcing,
+                K33_iso=jnp.ones((4, 6, 2), dtype=jnp.float64),
+            )
     finally:
         set_policy(prev_policy)
 
