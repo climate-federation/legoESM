@@ -67,6 +67,7 @@ cross-checked against CliMA ``SurfaceFluxes.jl`` (``UniversalFunctions``).
 
 from __future__ import annotations
 
+import functools
 import math
 import numbers
 
@@ -1148,12 +1149,6 @@ def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_sche
     last iteration, as AeroBulk returns it), the AeroBulk-sign scales theta*,
     q*, 1/L and the last-iteration relative u* change.
     """
-    def _pm(z):
-        return psi_m(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta)
-
-    def _ph(z):
-        return psi_h(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta)
-
     Ub = jnp.maximum(_AB_NCAR_UB_MIN, _safe_sqrt(W2))
     log_zt_zu = jnp.log(z_t / z_u)
     log_zu_10 = jnp.log(z_u / 10.0)
@@ -1170,58 +1165,91 @@ def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_sche
     q_zu = jnp.maximum(q_zt, _AB_Q_MIN)
     zero = jnp.zeros_like(Ub)
 
-    def body(_, c):
-        Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, _us, _ts, _qs, _inv_L, _resid = c
-        dt = t_zu - T_s
-        dq = q_zu - q_s
-        us = sqrt_Cd * Ub
-        ts = Ch / sqrt_Cd * dt
-        qs = Ce / sqrt_Cd * dq
-        inv_L = _one_on_l_aerobulk(t_zu, q_zu, us, ts, qs)
-        zeta_u = jnp.clip(z_u * inv_L, -_AB_NCAR_ZETA_ABS_MAX, _AB_NCAR_ZETA_ABS_MAX)
-        psih_u = _ph(zeta_u)
-        if equal is not True:
-            zeta_t = jnp.clip(z_t * inv_L, -_AB_NCAR_ZETA_ABS_MAX, _AB_NCAR_ZETA_ABS_MAX)
-            tmp = log_zt_zu + psih_u - _ph(zeta_t)
-            t_zu = jnp.where(equal, t_zu, t_zt - ts / KAPPA * tmp)
-            q_zu = jnp.where(equal, q_zu, jnp.maximum(0.0, q_zt - qs / KAPPA * tmp))
-        psim = _pm(zeta_u)
-        # UN10_from_CD: sqrt(Cd) Ub / kappa * ln(10 / z0_from_Cd(zu, Cd, psi_m))
-        sq = jnp.sqrt(Cd)
-        z0 = z_u * jnp.exp(-(KAPPA / sq + psim))
-        un10 = jnp.maximum(_AB_NCAR_UN10_MIN, sq * Ub / KAPPA * jnp.log(10.0 / z0))
-        CdN = _cd_n10_ncar(un10, cd_cutoff_width)
-        sqrt_CdN = jnp.sqrt(CdN)
-        tmp = 1.0 + sqrt_CdN / KAPPA * (log_zu_10 - psim)
-        Cd = jnp.maximum(CdN / (tmp * tmp), _AB_CX_MIN)
-        sqrt_Cd = jnp.sqrt(Cd)
-        tmp = (log_zu_10 - psih_u) / KAPPA / sqrt_CdN
-        tmp2 = sqrt_Cd / sqrt_CdN
-        stab = _ncar_stable_weight(zeta_u, neutral_width)
-        ChN = 1.0e-3 * sqrt_CdN * (_AB_NCAR_CHN_STABLE * stab
-                                   + _AB_NCAR_CHN_UNSTABLE * (1.0 - stab))
-        CeN = 1.0e-3 * (_AB_NCAR_CEN * sqrt_CdN)
-        Ch = jnp.maximum(ChN * tmp2 / (1.0 + ChN * tmp), _AB_CX_MIN)
-        Ce = jnp.maximum(CeN * tmp2 / (1.0 + CeN * tmp), _AB_CX_MIN)
-        if coeff_cap is not None:
-            sqrt_Cd = jnp.minimum(sqrt_Cd, coeff_cap)
-            Cd = sqrt_Cd * sqrt_Cd
-            Ch = jnp.minimum(Ch, coeff_cap * sqrt_Cd)
-            Ce = jnp.minimum(Ce, coeff_cap * sqrt_Cd)
-        resid = jnp.abs(sqrt_Cd * Ub - us) / jnp.maximum(jnp.abs(sqrt_Cd * Ub), 1e-6)
-        return (Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, us, ts, qs, inv_L, resid)
-
     carry = (Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, zero, zero, zero, zero, jnp.ones_like(Ub))
+    dtypes = tuple(jnp.result_type(c) for c in carry)
+    carry = tuple(jnp.asarray(c).astype(d) for c, d in zip(carry, dtypes))
+    k = dict(T_s=T_s, q_s=q_s, Ub=Ub, t_zt=t_zt, q_zt=q_zt, z_u=z_u, z_t=z_t,
+             equal=equal, log_zt_zu=log_zt_zu, log_zu_10=log_zu_10,
+             stability_scheme=stability_scheme, unstable_gamma=unstable_gamma,
+             stable_beta=stable_beta, coeff_cap=coeff_cap,
+             neutral_width=neutral_width, cd_cutoff_width=cd_cutoff_width)
+    # Key on type and repr too: 5.0 vs np.float64(5.0) promote differently,
+    # and 0.0 == -0.0, so equality alone could reuse the wrong literal.
+    static = tuple((n, type(v), repr(v), v) for n, v in k.items() if _is_static_value(v))
+    dyn = {n: v for n, v in k.items() if not _is_static_value(v)}
+    Cd, Ch, Ce, _sqrt_Cd, t_zu, q_zu, us, ts, qs, inv_L, resid = _ncar_iterate(
+        carry, dyn, n_iter=n_iter, static=static)
+    return dict(Cd=Cd, Ch=Ch, Ce=Ce, t_zu=t_zu, q_zu=q_zu, Ub=Ub, us=us, ts=ts, qs=qs,
+                inv_L=inv_L, resid=resid)
+
+
+def _is_static_value(v):
+    return v is None or isinstance(v, (str, bool, numbers.Number))
+
+
+# One module-level jit, keyed on the Python scalars, so an eager caller (the 2 m
+# temperature diagnostic) reuses the compiled loop; a per-call closure body made
+# the eager fori_loop retrace and recompile on every call.
+@functools.partial(jax.jit, static_argnames=("n_iter", "static"))
+def _ncar_iterate(carry, dyn, *, n_iter, static):
+    k = {**{n: v for n, _, _, v in static}, **dyn}
     dtypes = tuple(jnp.result_type(c) for c in carry)
 
     def body_pinned(i, c):
-        return tuple(jnp.asarray(o).astype(d) for o, d in zip(body(i, c), dtypes))
+        return tuple(jnp.asarray(o).astype(d)
+                     for o, d in zip(_ncar_body(c, **k), dtypes))
 
-    carry = tuple(jnp.asarray(c).astype(d) for c, d in zip(carry, dtypes))
-    Cd, Ch, Ce, _sqrt_Cd, t_zu, q_zu, us, ts, qs, inv_L, resid = jax.lax.fori_loop(
-        0, n_iter, body_pinned, carry)
-    return dict(Cd=Cd, Ch=Ch, Ce=Ce, t_zu=t_zu, q_zu=q_zu, Ub=Ub, us=us, ts=ts, qs=qs,
-                inv_L=inv_L, resid=resid)
+    return jax.lax.fori_loop(0, n_iter, body_pinned, carry)
+
+
+def _ncar_body(c, *, T_s, q_s, Ub, t_zt, q_zt, z_u, z_t, equal, log_zt_zu,
+               log_zu_10, stability_scheme, unstable_gamma, stable_beta,
+               coeff_cap, neutral_width, cd_cutoff_width):
+    def _pm(z):
+        return psi_m(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+
+    def _ph(z):
+        return psi_h(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+
+    Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, _us, _ts, _qs, _inv_L, _resid = c
+    dt = t_zu - T_s
+    dq = q_zu - q_s
+    us = sqrt_Cd * Ub
+    ts = Ch / sqrt_Cd * dt
+    qs = Ce / sqrt_Cd * dq
+    inv_L = _one_on_l_aerobulk(t_zu, q_zu, us, ts, qs)
+    zeta_u = jnp.clip(z_u * inv_L, -_AB_NCAR_ZETA_ABS_MAX, _AB_NCAR_ZETA_ABS_MAX)
+    psih_u = _ph(zeta_u)
+    if equal is not True:
+        zeta_t = jnp.clip(z_t * inv_L, -_AB_NCAR_ZETA_ABS_MAX, _AB_NCAR_ZETA_ABS_MAX)
+        tmp = log_zt_zu + psih_u - _ph(zeta_t)
+        t_zu = jnp.where(equal, t_zu, t_zt - ts / KAPPA * tmp)
+        q_zu = jnp.where(equal, q_zu, jnp.maximum(0.0, q_zt - qs / KAPPA * tmp))
+    psim = _pm(zeta_u)
+    # UN10_from_CD: sqrt(Cd) Ub / kappa * ln(10 / z0_from_Cd(zu, Cd, psi_m))
+    sq = jnp.sqrt(Cd)
+    z0 = z_u * jnp.exp(-(KAPPA / sq + psim))
+    un10 = jnp.maximum(_AB_NCAR_UN10_MIN, sq * Ub / KAPPA * jnp.log(10.0 / z0))
+    CdN = _cd_n10_ncar(un10, cd_cutoff_width)
+    sqrt_CdN = jnp.sqrt(CdN)
+    tmp = 1.0 + sqrt_CdN / KAPPA * (log_zu_10 - psim)
+    Cd = jnp.maximum(CdN / (tmp * tmp), _AB_CX_MIN)
+    sqrt_Cd = jnp.sqrt(Cd)
+    tmp = (log_zu_10 - psih_u) / KAPPA / sqrt_CdN
+    tmp2 = sqrt_Cd / sqrt_CdN
+    stab = _ncar_stable_weight(zeta_u, neutral_width)
+    ChN = 1.0e-3 * sqrt_CdN * (_AB_NCAR_CHN_STABLE * stab
+                               + _AB_NCAR_CHN_UNSTABLE * (1.0 - stab))
+    CeN = 1.0e-3 * (_AB_NCAR_CEN * sqrt_CdN)
+    Ch = jnp.maximum(ChN * tmp2 / (1.0 + ChN * tmp), _AB_CX_MIN)
+    Ce = jnp.maximum(CeN * tmp2 / (1.0 + CeN * tmp), _AB_CX_MIN)
+    if coeff_cap is not None:
+        sqrt_Cd = jnp.minimum(sqrt_Cd, coeff_cap)
+        Cd = sqrt_Cd * sqrt_Cd
+        Ch = jnp.minimum(Ch, coeff_cap * sqrt_Cd)
+        Ce = jnp.minimum(Ce, coeff_cap * sqrt_Cd)
+    resid = jnp.abs(sqrt_Cd * Ub - us) / jnp.maximum(jnp.abs(sqrt_Cd * Ub), 1e-6)
+    return (Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, us, ts, qs, inv_L, resid)
 
 
 # ============================================================================
