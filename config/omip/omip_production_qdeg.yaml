@@ -1,0 +1,48 @@
+# legoESM OMIP-style production run, 0.25 deg lat-lon, 60 levels, JRA55-do RYF 1990/91 (Stewart 2020).
+#   python scripts/run/run_omip.py --config config/omip/omip_production_qdeg.yaml
+# Needs --B-h-barotropic (branch ggn/omip-barotropic-biharmonic-option).
+
+# --- grid and time
+grid: latlon
+resolution: 720x1440
+nlev: 60
+dz_ref_file: /work/bb1596/b384036/diffESM/data/dz_L60_tanh_2m_5500m.txt   # 2.3 m top, 22 levels in top 200 m
+H_max: 5500.0
+dt: 300.0
+days: 10950.0                 # 30 years: 1-10 spin-up, 11-30 analysis
+checkpoint_days: 30.0
+precision: fp64
+output: results/omip_production_qdeg_L60
+
+# --- bathymetry: ETOPO 0.25 deg, no equatorial smoothing (removed on main)
+bathymetry: /work/bb1596/b384036/diffESM/data/bathy/bathy_025deg_etopo.nc
+smoothing_passes: 2
+eq_smoothing_passes: 0         # keep real sills (Sulu Sea, Indonesian straits)
+r_factor_max: 0.999
+north_cap_lat: 80.0
+south_cap_lat: -80.0
+
+# --- initial state: WOA13 v2 0.25 deg annual mean (unfilled; main fills gaps itself), at rest
+woa_init: true
+woa_t: /work/bb1596/b384036/diffESM/data/woa13v2_thetao_annual_025deg.nc
+woa_t_var: thetao
+woa_s: /work/bb1596/b384036/diffESM/data/woa13v2_so_annual_025deg.nc
+woa_s_var: so
+
+# --- forcing: JRA55-do RYF 1990/91 on the 0.25-deg grid, bulk fluxes
+forcing_mode: jra55_do_tropical
+jra55_cache: /work/bb1596/b384036/diffESM/data/jra55_ryf9091_0p25deg_noleap.zarr
+jra55_cycle: true
+physics: full
+
+# --- lateral mixing (eddy-permitting)
+A_h: 5.0e4                    # 2e4 lets a jet grow in the Nordic Seas (74N) on the 4-GPU path; 5e4 is stable
+K_h: 250.0
+B_h_barotropic: 4.0e11        # 1e14 x (0.25)^4: same stability margin as 1 deg
+no_gm_redi: true
+
+# --- vertical mixing
+vertical_mixing_scheme: kpp
+kpp_k_bg: 1.0e-6
+implicit_vertical_mixing: true
+no_conservation_fixer: true

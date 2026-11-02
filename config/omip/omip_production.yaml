@@ -1,0 +1,56 @@
+# legoESM OMIP-style production run, 1 degree lat-lon, JRA55-do RYF 1990/91 (Stewart 2020).
+# Port of the ggn/bgc_modelling "v4" configuration to main (Nov 2026).
+#
+#   python scripts/run/run_omip.py --config config/omip/omip_production.yaml
+#
+# Keys are run_omip.py argument dests (dashes -> underscores). CLI flags override.
+
+# --- grid and time --------------------------------------------------------
+grid: latlon
+resolution: 180x360
+nlev: 60                      # 60 levels, 2.3 m top layer, 22 levels in top 200 m
+dz_ref_file: /work/bb1596/b384036/diffESM/data/dz_L60_tanh_2m_5500m.txt
+H_max: 5500.0
+dt: 300.0
+days: 5475.0                  # 15 years: 1-5 spin-up, 6-15 analysis
+checkpoint_days: 30.0
+precision: fp64
+output: results/omip_production_1deg_L60
+
+# --- bathymetry -----------------------------------------------------------
+bathymetry: /work/bb1596/b384036/diffESM/data/bathy/bathy_1deg_etopo_itf.nc   # ETOPO 1 deg + Indonesian straits capped
+smoothing_passes: 2
+r_factor_max: 0.999           # limiter effectively off (v4); main default 0.2
+north_cap_lat: 80.0           # as in v4; main default 90 = open Arctic
+south_cap_lat: -80.0
+
+# --- initial state: WOA13 v2 annual mean, at rest -------------------------
+woa_init: true
+woa_t: /work/bb1596/b384036/diffESM/data/woa13v2_thetao_annual_degC.nc
+woa_t_var: thetao
+woa_s: /work/bd0854/DATA/ESMValTool2/OBS/Tier2/WOA/OBS_WOA_clim_2013v2_Omon_so_200001-200012.nc
+woa_s_var: so
+
+# --- forcing: JRA55-do RYF 1990/91, bulk fluxes (Large & Yeager) ---------
+forcing_mode: jra55_do_tropical
+jra55_cache: /work/bb1596/b384036/diffESM/data/jra55_ryf9091_1deg_noleap.zarr
+jra55_cycle: true
+physics: full
+
+# --- lateral mixing -------------------------------------------------------
+A_h: 2.0e5                    # Laplacian, scaled by cos^2(lat)
+K_h: 1000.0
+no_gm_redi: true              # as in v4 (GM off); candidate for a 1-degree GM test
+
+# --- vertical mixing ------------------------------------------------------
+vertical_mixing_scheme: kpp
+kpp_k_bg: 1.0e-6              # v4: LEGOESM_KPP K_bg (with LEGOESM_KV=0)
+implicit_vertical_mixing: true
+no_conservation_fixer: true
+
+# --- new on main, not used in v4 (enable deliberately, one at a time) ----
+# jra55_sea_ice: true         # prognostic slab sea ice instead of the polar sponge
+# runoff_routing: spread      # spread river runoff around the mouths
+# sw_penetration: jerlov_2band
+# monthly_mld_sst: true       # monthly-mean SST and MLD output
+# max_wallclock_seconds: 41400   # clean checkpoint+exit before a 12 h limit
