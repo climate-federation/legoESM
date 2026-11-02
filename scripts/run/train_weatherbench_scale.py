@@ -1753,6 +1753,11 @@ def _main(argv=None):
                     "val_loss": None if val_loss is None else float(val_loss),
                     "val_terms": val_terms,
                     "params": _physical_params(eqx.combine(cur_arr, _static_h))}
+            if _leads:
+                # What each loss scored: the stage's leads vs the full horizon.
+                _row["train_leads_hours"] = list(
+                    _leads[:_curriculum[_stage_of(epoch)]])
+                _row["val_leads_hours"] = list(_leads)
             # A link killed after this row but before the manifest replays the
             # epoch, so the row is replaced rather than appended twice.
             _rows = []

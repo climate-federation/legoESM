@@ -41,3 +41,11 @@ def test_terms_figure_written_only_when_terms_logged(tmp_path):
     subprocess.run([sys.executable, str(ROOT / "scripts/plot/plot_wb_training_history.py"),
                     "--history", str(h)], check=True)
     assert not (old / "training_history_terms.png").exists()
+
+
+def test_lead_label_names_what_each_curve_scored():
+    rows = [{"train_leads_hours": [6], "val_leads_hours": [6, 12, 18, 24]},
+            {"train_leads_hours": [6, 12], "val_leads_hours": [6, 12, 18, 24]}]
+    assert p.lead_label(rows, "train_leads_hours") == " (6 h / 6-12 h)"
+    assert p.lead_label(rows, "val_leads_hours") == " (6-12-18-24 h)"
+    assert p.lead_label([{"epoch": 0}], "val_leads_hours") == ""

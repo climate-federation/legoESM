@@ -42,6 +42,14 @@ _VAR_COLOR = {"T": "#E69F00", "u": "#56B4E9", "v": "#009E73",
 _KIND_STYLE = {"mse": "-", "crps": "--", "bias": ":"}
 
 
+def lead_label(rows, key):
+    """`` (6 h / 6-12 h ...)``: the lead sets a loss curve was scored on, or ""
+    for a run that records none (one objective throughout)."""
+    sets = sorted({tuple(r[key]) for r in rows if r.get(key)}, key=len)
+    return (" (" + " / ".join("-".join(map(str, x)) + " h" for x in sets) + ")"
+            if sets else "")
+
+
 def term_series(rows: list[dict]) -> dict[str, list]:
     """{term: [value or None per epoch]} from each row's ``val_terms``."""
     names = sorted({k for r in rows for k in (r.get("val_terms") or {})})
@@ -120,11 +128,11 @@ def main() -> int:
     has_val = any(v is not None for v in val)
 
     fig, ax = plt.subplots(figsize=(7.0, 4.2))
-    ax.plot(epochs, train, "o-", label="training")
+    ax.plot(epochs, train, "o-", label="training" + lead_label(rows, "train_leads_hours"))
     if has_val:
         ve = [e for e, v in zip(epochs, val) if v is not None]
         vv = [v for v in val if v is not None]
-        ax.plot(ve, vv, "s--", label="held out")
+        ax.plot(ve, vv, "s--", label="held out" + lead_label(rows, "val_leads_hours"))
     ax.set_xlabel("epoch")
     ax.set_ylabel("loss")
     ax.set_title("WeatherBench training" + ("" if has_val
