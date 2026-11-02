@@ -392,9 +392,10 @@ def _thermo_entries(
     h = int(nn_hls)
     sr = nemo_source_round
     entries = []
+    owned_mask = _owned_mask(state.a_i.shape[:2], h)  # icethd.F90:130 DO_2D(0,0,0,0)
     for jl in range(state.a_i.shape[-1]):
         a_i = state.a_i[..., jl]
-        active = a_i > 1.0e-10  # icethd.F90:121-138
+        active = (a_i > 1.0e-10) & owned_mask  # icethd.F90:130-134; halos refilled at :188-190
         h_i = eq.h_i[..., jl]
         h_s = eq.h_s[..., jl]
         ice_area_volume = sr(h_i * a_i)  # icethd.F90:423-424
@@ -478,6 +479,13 @@ def _thermo_entries(
 
 def _pack_categories(stages: SI3O12Stages, field: str) -> jnp.ndarray:
     return jnp.stack([getattr(c, field) for c in stages.categories], axis=-1)
+
+
+def _owned_mask(shape: tuple[int, int], h: int) -> jnp.ndarray:
+    """NEMO's ``DO_2D(0,0,0,0)`` owned columns on the lane's full-halo arrays."""
+    if not h:
+        return jnp.ones(shape, dtype=bool)
+    return jnp.zeros(shape, dtype=bool).at[h:-h, h:-h].set(True)
 
 
 def _scatter(full: jnp.ndarray, interior: jnp.ndarray, h: int) -> jnp.ndarray:
@@ -624,11 +632,8 @@ def si3_o17_step(
         fold=card.fold,
         differentiable=card.differentiable,
     )
-    aevp = aevp._replace(  # icedyn_rhg_evp.F90:1093-1102 assigns literal +0
-        stress1_t=jnp.where(aevp.stress1_t == 0.0, 0.0, aevp.stress1_t),  # icedyn_rhg_evp.F90:1093,1100
-        stress2_t=jnp.where(aevp.stress2_t == 0.0, 0.0, aevp.stress2_t),  # icedyn_rhg_evp.F90:1094,1101
-        stress12_f=jnp.where(aevp.stress12_f == 0.0, 0.0, aevp.stress12_f),  # icedyn_rhg_evp.F90:1095,1102
-    )
+    # icedyn_rhg_evp.F90:838-843 stores the lbc-linked zs1/zs2/zs12 arithmetic
+    # result, signed zeros included; no canonicalisation follows.
     state = state._replace(u_ice=aevp.u_ice_u, v_ice=aevp.v_ice_v)
     divu, delta = si3_cgrid_deformation(  # icedyn_rhg_evp.F90:788-836
         aevp,
@@ -637,8 +642,9 @@ def si3_o17_step(
         card.aevp,
         fold=None if _plant_drop_deformation_fold else card.fold,  # icedyn_rhg_evp.F90:791-838
     )
-    divu = jnp.where(divu == 0.0, 0.0, divu)  # icedyn_rhg_evp.F90:821-824
-    delta = jnp.where(delta == 0.0, 0.0, delta)  # icedyn_rhg_evp.F90:829-832
+    # pdivu_i is the arithmetic product at icedyn_rhg_evp.F90:822-824 (a
+    # negative bracket times zmsk=0 stores -0); pdelta_i's +0 is the ELSE of
+    # :830-831, which the deformation kernel's SQRT(...)*mask never makes -0.
     zeros = jnp.zeros_like(state.u_ice)
     # icestp.diag_set0 assigns +0 to every SI3 flux accumulator at step
     # entry.  They are not live forcing and cannot be injected mid-step.
@@ -850,6 +856,7 @@ def si3_o17_step(
             state.a_i, divu, delta,  # icedyn.F90:133-134
             other.qlead, other.fhld, t_bo,  # icesbc.F90:450-464; icestp.F90:136
             u_ice_b, v_ice_b, a_i_b, at_i_b,  # icestp.F90:151,184
+            surface, aevp,  # icestp.F90:159,168,201 (O7 products and aEVP exit)
         )
 
     frazil = si3_ice_thd_frazil(other.qlead, rn_hinew=card.rn_hinew, ln_frazil=card.ln_frazil)
@@ -1108,10 +1115,6 @@ def si3_o17_step(
         config=card.state,
         surface_config=card.surface,
     )
-    final_fluxes = SI3Fluxes(  # icestp.F90:429-464 initializes literal +0
-        *(jnp.where(value == 0.0, 0.0, value) for value in final.fluxes)  # icestp.F90:440-464
-    )
-    final = final._replace(fluxes=final_fluxes)  # icestp.F90:440-464
     final_state = final.state._replace(  # iceupdate.F90:189-194
         snwice_mass=final.outputs.snwice_mass,  # iceupdate.F90:191-192
         snwice_mass_b=final.outputs.snwice_mass_b,  # iceupdate.F90:190

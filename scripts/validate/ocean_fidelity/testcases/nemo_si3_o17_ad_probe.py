@@ -42,7 +42,8 @@ DEFAULT_MASTER = Path(
 )
 
 
-def _case(master: Path):
+def _case(master: Path, shape: tuple[int, int] = (7, 7)):
+    """Mixed-regime O17 step entry; ``shape`` (184, 152) is the real ORCA2 rank grid."""
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     run = master / "record_100step"
     nml = parse_resolved_ice_namelist(
@@ -54,7 +55,7 @@ def _case(master: Path):
     card = build_orca2_sas_ice_o17_card(surface=surface_cfg, thermo_namelist=nml)
     # The owned tile exercises three regimes at separated columns: open water,
     # active ice, and a nonzero category column below epsi10 (icethd.F90:121-138).
-    ni, nj, h = 7, 7, 2
+    (ni, nj), h = shape, 2
     ii = (ni - 2 * h, nj - 2 * h)
     full = (ni, nj)
     zf, of = jnp.zeros(full, jnp.float64), jnp.ones(full, jnp.float64)
@@ -74,10 +75,11 @@ def _case(master: Path):
             ldfull=True,
         )
 
-    ice_owned = jnp.asarray(  # icethd.F90:123,131
-        [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0e-12]],
-        dtype=jnp.float64,
+    pattern = np.asarray(  # icethd.F90:123,131: ice, open water, nonzero <= epsi10
+        [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0e-12]], dtype=np.float64
     )
+    reps = (-(-ii[0] // 3), -(-ii[1] // 3))
+    ice_owned = jnp.asarray(np.tile(pattern, reps)[: ii[0], : ii[1]])
     ice_mask = lbc(zf.at[h:-h, h:-h].set(ice_owned))
     category_area = jnp.asarray([0.12, 0.16, 0.18, 0.14, 0.10])
     category_thickness = jnp.asarray([0.25, 0.80, 1.60, 2.80, 4.50])
@@ -484,56 +486,72 @@ def probe(master: Path, *, execution_mode: str = "compiled") -> dict:
     }
 
 
-def forward_resource_probe(master: Path, *, execution_mode: str) -> dict:
-    """Time one production-card O17 step at the writer's ORCA2 extent."""
-    if execution_mode not in {"compiled", "eager"}:
-        raise ValueError(f"unknown forward execution mode {execution_mode!r}")
-    entry, forcing, card = _case(master)
+def eager_jit_probe(master: Path, shape: tuple[int, int] = (184, 152)) -> dict:
+    """One production-card O17 step (100 aEVP subcycles) eager and compiled, bit-compared.
 
-    def expand(value):
-        if not hasattr(value, "shape") or len(value.shape) < 2:
-            return value
-        shape = tuple(value.shape[:2])
-        target = (186, 153) if shape == (7, 7) else (182, 149) if shape == (3, 3) else None
-        if target is None:
-            return value
-        resized = np.resize(np.asarray(value), (*target, *value.shape[2:]))
-        return jnp.asarray(resized)
-
-    entry = jax.tree_util.tree_map(expand, entry)
-    dynamic = jax.tree_util.tree_map(expand, forcing[1:])
+    The entry is the mixed-regime fixture laid out on the real ORCA2 rank grid
+    (jpi=184, jpj=152 from Ni0glo=180, Nj0glo=148, nn_hls=2), with its fold LBC
+    applied, so ice-covered, open-water and nonzero-below-epsi10 columns all occur.
+    """
+    entry, forcing, card = _case(master, shape)
+    h = card.state.nn_hls
+    conc = np.asarray(entry.ice.a_i)[h:-h, h:-h].sum(axis=-1)
+    dynamic = tuple(forcing[1:])
 
     def step(step_entry, live_dynamic):
         return si3_o17_step(step_entry, SI3O17LiveForcing(1, *live_dynamic), card)
 
-    compile_seconds = 0.0
-    if execution_mode == "compiled":
-        compile_started = time.monotonic()
-        executable = jax.jit(step).lower(entry, dynamic).compile()
-        compile_seconds = time.monotonic() - compile_started
-        execute_started = time.monotonic()
-        result = executable(entry, dynamic)
-    else:
-        execute_started = time.monotonic()
-        with jax.disable_jit():
-            result = step(entry, dynamic)
-    jax.block_until_ready(result)
-    execute_seconds = time.monotonic() - execute_started
-    leaves = [
-        np.asarray(x)
-        for x in jax.tree_util.tree_leaves(result)
-        if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
-    ]
+    started = time.monotonic()
+    with jax.disable_jit():
+        eager = step(entry, dynamic)
+    jax.block_until_ready(eager)
+    eager_seconds = time.monotonic() - started
+    eager_rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    started = time.monotonic()
+    executable = jax.jit(step).lower(entry, dynamic).compile()
+    compile_seconds = time.monotonic() - started
+    started = time.monotonic()
+    compiled = executable(entry, dynamic)
+    jax.block_until_ready(compiled)
+    execute_seconds = time.monotonic() - started
+    mismatched, leaves, nonfinite = [], 0, []
+    for (path, a), (_, b) in zip(
+        jax.tree_util.tree_flatten_with_path(eager)[0],
+        jax.tree_util.tree_flatten_with_path(compiled)[0],
+        strict=True,
+    ):
+        a, b = np.asarray(a), np.asarray(b)
+        leaves += 1
+        bits = (a.view(np.uint64) != b.view(np.uint64)) if a.dtype == np.float64 else (a != b)
+        if a.shape != b.shape or np.count_nonzero(bits):
+            signed_zero_only = bool(a.dtype == np.float64 and np.all(a[bits] == 0.0) and np.all(b[bits] == 0.0))
+            mismatched.append({
+                "leaf": jax.tree_util.keystr(path), "count": int(np.count_nonzero(bits)),
+                "signed_zero_only": signed_zero_only,
+                "eager_negative_zero": int(np.count_nonzero(np.signbit(a[bits]))) if signed_zero_only else None,
+                "jit_negative_zero": int(np.count_nonzero(np.signbit(b[bits]))) if signed_zero_only else None,
+            })
+        if a.dtype.kind == "f" and not np.isfinite(a).all():
+            nonfinite.append(jax.tree_util.keystr(path))
     return {
-        "status": "PASS" if all(np.isfinite(x).all() for x in leaves) else "FAIL",
-        "execution_mode": execution_mode,
-        "full_shape": [186, 153],
-        "owned_shape": [182, 149],
+        "status": "PASS" if not mismatched and not nonfinite else "FAIL",
+        "full_shape": list(shape),
+        "owned_shape": [shape[0] - 2 * h, shape[1] - 2 * h],
         "aevp_subcycles": card.aevp.n_subcycles,
-        "compile_seconds": compile_seconds,
-        "execute_seconds": execute_seconds,
-        "total_seconds": compile_seconds + execute_seconds,
-        "peak_rss_kib": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),
+        "owned_columns": {
+            "ice_covered": int(np.count_nonzero(conc > 1.0e-10)),
+            "ice_free": int(np.count_nonzero(conc == 0.0)),
+            "near_empty_le_epsi10": int(np.count_nonzero((conc > 0.0) & (conc <= 1.0e-10))),
+        },
+        "leaves_compared": leaves,
+        "bitwise_mismatched_leaves": mismatched,
+        "all_mismatches_signed_zero_only": all(row["signed_zero_only"] for row in mismatched),
+        "nonfinite_leaves": nonfinite,
+        "eager_seconds": eager_seconds,
+        "eager_peak_rss_kib": eager_rss,
+        "jit_compile_seconds": compile_seconds,
+        "jit_execute_seconds": execute_seconds,
+        "process_peak_rss_kib": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),
     }
 
 
@@ -542,11 +560,11 @@ def main() -> int:
     parser.add_argument("--master", type=Path, default=DEFAULT_MASTER)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--execution-mode", choices=("compiled", "eager"), default="compiled")
-    parser.add_argument("--forward-resource-probe", action="store_true")
+    parser.add_argument("--eager-jit-probe", action="store_true")
     args = parser.parse_args()
     report = (
-        forward_resource_probe(args.master, execution_mode=args.execution_mode)
-        if args.forward_resource_probe
+        eager_jit_probe(args.master)
+        if args.eager_jit_probe
         else probe(args.master, execution_mode=args.execution_mode)
     )
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"

@@ -24,8 +24,11 @@ readonly REC_CFG=${REC_CFG:-ORCA2_SAS_ICE_O8O16_REC}
 readonly EVIDENCE_ROOT=${EVIDENCE_ROOT:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18}
 EVIDENCE=${EVIDENCE:-$EVIDENCE_ROOT/oracle_o8_o16_master}
 readonly REFUSED_DIR=${REFUSED_DIR:-$EVIDENCE_ROOT/refused}
+export PYTHONPATH="$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/ice:$REPO/packages/atmosphere:$REPO/packages/land:$REPO/packages/coupler:$REPO/packages/driver"
 read -r DERIVED_O17_RECORD_BYTES DERIVED_O17_DISK_KB <<< \
   "$("$PY" "$here/../nemo_si3_o17_record_budget.py" --shell)"
+[[ "$DERIVED_O17_RECORD_BYTES" =~ ^[0-9]+$ && "$DERIVED_O17_DISK_KB" =~ ^[0-9]+$ ]] \
+  || { printf 'REFUSE: O17 record budget calculator failed\n' >&2; exit 64; }
 readonly DERIVED_O17_RECORD_BYTES DERIVED_O17_DISK_KB
 if [[ "$O17_EXTENDED" == 1 ]]; then
   readonly DEFAULT_RUN_TIMEOUT_SEC=21600 DEFAULT_DISK_KB=$DERIVED_O17_DISK_KB
@@ -40,7 +43,6 @@ readonly ORCA2_BUNDLE=${ORCA2_BUNDLE:-/data/abyssal/dbalwada/nemo-testcases-l4/i
 readonly ORCA2_BUNDLE_SHA256=${ORCA2_BUNDLE_SHA256:-5d47eab85c591fe0fd7e63a80892f3264b6387edf93cbb975a71b2f2f5fdf1a4}
 readonly SAS_BUNDLE=${SAS_BUNDLE:-/data/abyssal/dbalwada/nemo-testcases-l4/inputs/SAS_v5.0.0_download/SAS_v5.0.0.tar.gz}
 readonly SAS_BUNDLE_SHA256=${SAS_BUNDLE_SHA256:-ee00646832ea89f468d0f01bf537ed231d21f23bba77ab1a9aab26147ecec6cf}
-export PYTHONPATH="$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/ice:$REPO/packages/atmosphere:$REPO/packages/land:$REPO/packages/coupler:$REPO/packages/driver"
 readonly GATE=$here/../nemo_si3_o8_o16_master_gate.py
 readonly PASSIVITY=$here/../nemo_si3_o8_o16_master_passivity.py
 readonly O17_PASSIVITY=$here/../nemo_si3_o17_master_passivity.py
@@ -435,6 +437,16 @@ stub_driver_fixture() {
   [[ -d "$root/cfgs/STUB_O8O16_REF" && -d "$root/cfgs/STUB_O8O16_REC" ]] \
     || refuse 'stub failure builds were not retained'
   "${envs[@]}" "$0" --move-aside-builds
+  if [[ "$O17_EXTENDED" == 1 ]]; then
+    [[ -f "${O17_STUB_FAIL_SCORE_JSON:-}" ]] || refuse 'O17 stub plant needs O17_STUB_FAIL_SCORE_JSON'
+    if "${envs[@]}" O17_STUB_SCORE_JSON="$O17_STUB_FAIL_SCORE_JSON" EVIDENCE="$scratch/stub_score_fail" \
+      "$0" --run > "$scratch/stub_score_fail.log" 2>&1; then
+      refuse 'stub driver admitted a FAIL O17 score'
+    fi
+    grep -q 'O17 scorer did not produce a PASS report' "$scratch/stub_score_fail.log" \
+      || refuse 'FAIL O17 score was refused for another reason'
+    "${envs[@]}" "$0" --move-aside-builds
+  fi
   printf 'PASS_100_STEP_STUB_DRIVER_RETENTION\n'
 }
 
@@ -689,15 +701,28 @@ done
 ACQUISITION_STOPPED_EPOCH=$(date +%s)
 if [[ "$O17_EXTENDED" == 1 ]]; then
   if [[ ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} == 1 ]]; then
-    printf '{"status": "PASS", "scope": "stub driver after separate numerical preflight"}\n' \
-      > "$EVIDENCE/manifest/o17_score.json"
+    # Stub NEMO writes no scoreable trajectory.  The outer O17 preflight scored a
+    # writer-shaped synthetic record with the real scorer; its report is used verbatim.
+    [[ -f "${O17_STUB_SCORE_JSON:-}" ]] || refuse 'stub run needs the real scorer report O17_STUB_SCORE_JSON'
+    cp "$O17_STUB_SCORE_JSON" "$EVIDENCE/manifest/o17_score.json"
+    score_steps=0
   else
     "$PY" "$here/../nemo_si3_o17_composition_scorer.py" \
       --evidence "$EVIDENCE" --labels INDEPENDENT GIVEN-NEMO-ENTRY \
-      > "$EVIDENCE/manifest/o17_score.json"
+      > "$EVIDENCE/manifest/o17_score.json" || true
+    score_steps=100
   fi
-  grep -q '"status": "PASS"' "$EVIDENCE/manifest/o17_score.json" \
+  "$PY" - "$EVIDENCE/manifest/o17_score.json" "$score_steps" <<'PY' \
     || refuse 'O17 scorer did not produce a PASS report'
+import json,sys
+report=json.load(open(sys.argv[1])); want=int(sys.argv[2])
+labels=report.get('labels',{})
+ok=(report.get('status')=='PASS' and set(labels)=={'INDEPENDENT','GIVEN-NEMO-ENTRY'}
+    and all(v.get('status')=='PASS' for v in labels.values())
+    and report.get('production_entry')=='legoesm.ice.si3_o17.si3_o17_step'
+    and len(report.get('steps',[]))>=2 and (want==0 or report['steps']==list(range(1,want+1))))
+sys.exit(0 if ok else 1)
+PY
 fi
 "$PY" - "$EVIDENCE" "$RUN_STARTED_EPOCH" "$ACQUISITION_STOPPED_EPOCH" "$MASTER_BYTES" \
   "$MAX_EVIDENCE_DISK_KB" "$RUN_TIMEOUT_SEC" "$O17_EXTENDED" "$O17_RECORD_BYTES_GATE" \

@@ -12,31 +12,38 @@ readonly master=$here/../nemo_si3_o8_o16_master_acquisition/run.sh
 readonly scorer=$here/../nemo_si3_o17_composition_scorer.py
 readonly default_root=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step
 readonly default_fixture=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/oracle_o8_o16_master
+export PYTHONPATH="$repo:$repo/packages/core:$repo/packages/ocean:$repo/packages/ice:$repo/packages/atmosphere:$repo/packages/land:$repo/packages/coupler:$repo/packages/driver"
 read -r o17_record_bytes o17_disk_kib <<< \
   "$("$py" "$here/../nemo_si3_o17_record_budget.py" --shell)"
+[[ "$o17_record_bytes" =~ ^[0-9]+$ && "$o17_disk_kib" =~ ^[0-9]+$ ]] \
+  || { printf 'REFUSE: O17 record budget calculator failed\n' >&2; exit 64; }
 readonly o17_record_bytes o17_disk_kib
-export PYTHONPATH="$repo:$repo/packages/core:$repo/packages/ocean:$repo/packages/ice:$repo/packages/atmosphere:$repo/packages/land:$repo/packages/coupler:$repo/packages/driver"
 
 refuse() { printf 'REFUSE: %s\n' "$*" >&2; return 1; }
 expect_refusal() { if "$@" >/dev/null 2>&1; then refuse "plant survived: $*"; fi; }
 
 preflight() {
   local scratch
-  scratch=$(mktemp -d /tmp/si3_o17_preflight.XXXXXX)
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/si3_o17_preflight.XXXXXX")
   trap 'rm -rf -- "$scratch"' RETURN
   "$py" "$here/preflight.py" --repo "$repo" > "$scratch/structure.json"
   expect_refusal "$py" "$here/preflight.py" --repo "$repo" --plant swap-rheology-advection
   expect_refusal "$py" "$here/preflight.py" --repo "$repo" --plant drop-redistribution
   "$py" "$scorer" --schema > "$scratch/schema.json"
-  "$py" "$scorer" --self-test > "$scratch/scorer_self_test.json"
-  expect_refusal "$py" "$scorer" --self-test --plant-one-ulp
+  # Real scorer on a writer-shaped ORCA2 record built from the model (2 steps):
+  # identical -> PASS; one-ULP t_si and signed-zero plants -> FAIL.
+  "$py" "$here/../nemo_si3_o17_synthetic_record.py" --out "$scratch/synthetic" --steps 2 \
+    > "$scratch/synthetic.json"
+  grep -q '"status": "PASS_O17_SYNTHETIC_RECORD_SCORER"' "$scratch/synthetic.json"
   "$py" "$here/preflight.py" --repo "$repo" --numerical --master "$default_fixture" \
     > "$scratch/numerical.json"
   "$py" "$here/preflight.py" --repo "$repo" --numerical --master "$default_fixture" \
     --numerical-plant swap-rheology-advection > "$scratch/swap.json"
   "$py" "$here/preflight.py" --repo "$repo" --numerical --master "$default_fixture" \
     --numerical-plant drop-deformation-fold > "$scratch/fold.json"
-  O17_EXTENDED=1 EVIDENCE_ROOT="$scratch/root" EVIDENCE="$scratch/evidence" \
+  O17_STUB_SCORE_JSON="$scratch/synthetic/identical.json" \
+    O17_STUB_FAIL_SCORE_JSON="$scratch/synthetic/one_ulp_t_si.json" \
+    O17_EXTENDED=1 EVIDENCE_ROOT="$scratch/root" EVIDENCE="$scratch/evidence" \
     REFUSED_DIR="$scratch/refused" REF_CFG="O17_PREFLIGHT_${BASHPID}_REF" \
     REC_CFG="O17_PREFLIGHT_${BASHPID}_REC" "$master" --preflight-only
   printf 'PASS_O17_UNIFIED_MASTER_PREFLIGHT_AND_NUMERICAL_PLANTS\n'

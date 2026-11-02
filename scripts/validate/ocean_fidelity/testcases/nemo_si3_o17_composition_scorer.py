@@ -1,19 +1,32 @@
 #!/usr/bin/env python3
-"""Score unified O17 records by executing the production O17 entry."""
+"""Score unified O17 records by executing the production O17 entry.
+
+Extents are never assumed: every record field carries its own shape.  NEMO
+allocates many SI3/SBC arrays on the owned interior only (``A2D(0)``, e.g.
+``t_si`` at ``ice.F90:451``, the flux accumulators at ``ice.F90:400-412``,
+``utau_oce`` at ``iceupdate.F90:55``) while the lane's state carries full-halo
+arrays.  Owned entries are padded with the lane's halo convention (zero, as
+``si3_orca2_state.py`` builds ``t_si``); owned records are compared on the owned
+interior only.  Records are streamed one step at a time.
+"""
 
 from __future__ import annotations
 
 import argparse
+import ctypes
+import gc
 import json
+import re
 import resource
 import struct
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import numpy as np
-
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ice.dynamics import SI3CGridAEVPForcing, SI3CGridAEVPState, SI3CGridMetrics
 from legoesm.ice.si3_finalize import SI3StressInputs
@@ -34,6 +47,7 @@ from legoesm.ice.si3_orca2_state import (
     si3_var_glo2eqv,
 )
 from legoesm.ice.si3_surface import SI3SurfaceConfig
+
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer import (
     DEFAULT_PPSRC,
     parse_resolved_ice_namelist,
@@ -42,12 +56,14 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer imp
 MAGIC = b"O17S0001"
 VERSION = 1
 VALID_LABELS = ("INDEPENDENT", "GIVEN-NEMO-ENTRY")
+TRAJECTORY_BAR = 1.0e-15
 KINDS = {
     22: "step_entry", 23: "after_rheology", 24: "after_advection",
     25: "after_rdgrft", 26: "after_dyn_cor", 27: "after_thermo",
     28: "step_exit", 29: "prather_entry", 30: "prather_exit",
-    31: "after_flx_other", 32: "raw_blk1", 33: "raw_blk2", 34: "tau_private_exit",
+    31: "after_flx_other", 32: "raw_blk1", 33: "raw_blk2", 34: "tau_private",
 }
+_NAME = re.compile(r"o17_kind(\d{2})_(\w+?)_step(\d{4})_rank(\d{4})\.bin$")
 STATE_FIELDS = (
     "v_i", "v_s", "sv_i", "a_i", "t_su", "u_ice", "v_ice", "oa_i",
     "a_ip", "v_ip", "v_il", "e_s", "e_i", "szv_i", "t_si",
@@ -62,10 +78,22 @@ FLUX_FIELDS = (
     "hfx_dif", "hfx_snw", "hfx_err_dif", "hfx_sub", "hfx_spr", "hfx_thd",
     "hfx_dyn", "hfx_res", "qlead", "qsb_ice_bot", "fhld",
 )
+# Kind 25 is written after ice_dyn_rdgrft (icedyn.F90:134), kind 26 after
+# ice_cor(kt,1) (icedyn.F90:135); these are the recorded members of each carry.
+RDGRFT_FIELDS = (
+    "a_i", "v_i", "v_s", "oa_i", "a_ip", "v_ip", "v_il", "e_s", "e_i", "szv_i",
+    "wfx_dyn", "sfx_dyn", "hfx_dyn", "wfx_pnd",
+)
+DYN_COR_FIELDS = (
+    "a_i", "v_i", "v_s", "oa_i", "a_ip", "v_ip", "v_il", "e_s", "e_i", "szv_i",
+    "t_su", "wfx_res", "sfx_res", "hfx_res",
+)
 PRATHER_PREFIX = {
     "ice": "ice", "sn": "sn", "a": "a", "age": "age", "sal": "sal",
     "ap": "ap", "vp": "vp", "vl": "vl", "c0": "c0", "e": "e", "si": "si",
 }
+METRICS = ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f",
+           "e1e2t", "e1e2u", "e1e2v", "e1e2f")
 
 
 def read_record(path: Path) -> dict[str, Any]:
@@ -108,323 +136,404 @@ def read_record(path: Path) -> dict[str, Any]:
     }
 
 
-def _record_index(root: Path) -> dict[tuple[int, int, int], dict[str, Any]]:
-    index: dict[tuple[int, int, int], dict[str, Any]] = {}
+def record_paths(root: Path) -> dict[tuple[int, int], dict[int, Path]]:
+    """Index file NAMES only (no payload is loaded); require a complete grid."""
+    index: dict[tuple[int, int], dict[int, Path]] = {}
     for path in sorted(root.glob("o17_kind*.bin")):
-        record = read_record(path)
-        meta = record["meta"]
-        key = meta["kind"], meta["kt"], meta["rank"]
-        if key in index:
-            raise ValueError(f"duplicate O17 record {key}")
-        index[key] = record
+        match = _NAME.search(path.name)
+        if not match:
+            raise ValueError(f"unparsable O17 record name: {path.name}")
+        kind, label, kt, rank = int(match[1]), match[2], int(match[3]), int(match[4])
+        if KINDS.get(kind) != label:
+            raise ValueError(f"O17 record label {label!r} is not kind {kind}")
+        slot = index.setdefault((kt, rank), {})
+        if kind in slot:
+            raise ValueError(f"duplicate O17 record {(kind, kt, rank)}")
+        slot[kind] = path
     if not index:
         raise ValueError(f"no O17 records in {root}")
-    steps = sorted({key[1] for key in index})
-    ranks = sorted({key[2] for key in index})
-    expected = {(kind, kt, rank) for kind in KINDS for kt in steps for rank in ranks}
-    if set(index) != expected:
-        raise ValueError(f"O17 index incomplete; missing={sorted(expected-set(index))[:8]}")
+    steps = sorted({kt for kt, _ in index})
+    ranks = sorted({rank for _, rank in index})
+    missing = [(kind, kt, rank) for kt in steps for rank in ranks for kind in KINDS
+               if kind not in index.get((kt, rank), {})]
+    if missing:
+        raise ValueError(f"O17 index incomplete; missing={missing[:8]}")
     return index
 
 
-def _full(value: np.ndarray, shape: tuple[int, int], h: int, fill: float = 0.0) -> jnp.ndarray:
+def load_step(paths: dict[int, Path], kt: int, rank: int) -> dict[int, dict[str, Any]]:
+    records = {kind: read_record(path) for kind, path in paths.items()}
+    for kind, record in records.items():
+        if (record["meta"]["kind"], record["meta"]["kt"], record["meta"]["rank"]) != (kind, kt, rank):
+            raise ValueError(f"O17 header {record['meta']} disagrees with its name")
+    return records
+
+
+def _as_full(value: np.ndarray, full: tuple[int, int], h: int) -> jnp.ndarray:
+    """A2D(0) record -> lane full-halo array (halo zero, the lane's t_si convention)."""
     value = np.asarray(value)
-    if value.shape[:2] == shape:
+    if value.shape[:2] == full:
         return jnp.asarray(value)
-    interior = shape[0] - 2 * h, shape[1] - 2 * h
-    if value.shape[:2] != interior:
-        raise ValueError(f"cannot place {value.shape} in halo shape {shape}")
-    out = jnp.full(shape + value.shape[2:], fill, dtype=jnp.float64)
-    return out.at[h:-h, h:-h, ...].set(value)
+    if value.shape[:2] != (full[0] - 2 * h, full[1] - 2 * h):
+        raise ValueError(f"cannot place {value.shape} on the {full} grid")
+    out = np.zeros(full + value.shape[2:], dtype=np.float64)
+    out[h:-h, h:-h, ...] = value
+    return jnp.asarray(out)
 
 
-def _owned(value: np.ndarray, shape: tuple[int, int], h: int) -> jnp.ndarray:
+def _as_owned(value: np.ndarray, full: tuple[int, int], h: int) -> jnp.ndarray:
+    """Full-halo record -> owned interior consumed by an A2D(0) kernel argument."""
     value = np.asarray(value)
-    return jnp.asarray(value[h:-h, h:-h, ...] if value.shape[:2] == shape else value)
+    if value.shape[:2] == full:
+        return jnp.asarray(value[h:-h, h:-h, ...])
+    if value.shape[:2] != (full[0] - 2 * h, full[1] - 2 * h):
+        raise ValueError(f"cannot read {value.shape} as owned on the {full} grid")
+    return jnp.asarray(value)
 
 
-def _moments(fields: dict[str, np.ndarray]) -> SI3AllPratherMoments:
+def _moments(fields: dict[str, np.ndarray], full, h) -> SI3AllPratherMoments:
     def family(prefix: str) -> SI3PratherMoments:
         names = (f"sx{prefix}", f"sy{prefix}", f"sxx{prefix}", f"syy{prefix}", f"sxy{prefix}")
-        return SI3PratherMoments(*(jnp.asarray(fields[name]) for name in names))
+        return SI3PratherMoments(*(_as_full(fields[name], full, h) for name in names))
     return SI3AllPratherMoments(**{name: family(prefix) for name, prefix in PRATHER_PREFIX.items()})
 
 
-def _entry_state(entry: dict[str, Any], prather: dict[str, Any], card) -> SI3O17StepState:
-    f = entry["fields"]
-    jpi, jpj = entry["meta"]["jpi"], entry["meta"]["jpj"]
-    base = SI3State.zeros(jpi, jpj, card.state)
+def _grid(record: dict[str, Any], card) -> tuple[tuple[int, int], int]:
+    return (record["meta"]["jpi"], record["meta"]["jpj"]), int(card.state.nn_hls)
+
+
+def entry_state(records: dict[int, dict[str, Any]], card) -> SI3O17StepState:
+    """Kinds 22 (state) and 29 (Prather entry) -> the lane's full-halo step entry."""
+    f = records[22]["fields"]
+    full, h = _grid(records[22], card)
+    def F(name):  # noqa: N802
+        return _as_full(f[name], full, h)
+    state_cfg = card.state
     eqv = si3_var_glo2eqv(
-        v_i=jnp.asarray(f["v_i"]), v_s=jnp.asarray(f["v_s"]), sv_i=jnp.asarray(f["sv_i"]),
-        a_i=jnp.asarray(f["a_i"]), oa_i=jnp.asarray(f["oa_i"]), a_ip=jnp.asarray(f["a_ip"]),
-        v_ip=jnp.asarray(f["v_ip"]), v_il=jnp.asarray(f["v_il"]), e_s=jnp.asarray(f["e_s"]),
-        e_i=jnp.asarray(f["e_i"]), szv_i=jnp.asarray(f["szv_i"]), kn=2,
-        hi_max_top=float(np.asarray(f["hi_max"])[-1]), sss_m=jnp.asarray(f["sss_m"]), config=card.state,
+        v_i=F("v_i"), v_s=F("v_s"), sv_i=F("sv_i"), a_i=F("a_i"), oa_i=F("oa_i"),
+        a_ip=F("a_ip"), v_ip=F("v_ip"), v_il=F("v_il"), e_s=F("e_s"), e_i=F("e_i"),
+        szv_i=F("szv_i"), kn=2, hi_max_top=float(np.asarray(f["hi_max"])[-1]),
+        sss_m=F("sss_m"), config=state_cfg,
     )
     agg = si3_var_agg(
-        v_i=jnp.asarray(f["v_i"]), v_s=eqv.v_s, sv_i=jnp.asarray(f["sv_i"]), a_i=eqv.a_i,
-        oa_i=jnp.asarray(f["oa_i"]), a_ip=jnp.asarray(f["a_ip"]), v_ip=jnp.asarray(f["v_ip"]),
-        v_il=jnp.asarray(f["v_il"]), t_su=jnp.asarray(f["t_su"]), t_si=jnp.asarray(f["t_si"]),
-        e_s=jnp.asarray(f["e_s"]), e_i=jnp.asarray(f["e_i"]), szv_i=jnp.asarray(f["szv_i"]),
-        a_ip_eff=eqv.a_ip_eff, t_i=eqv.t_i, t_s=eqv.t_s, kn=2, config=card.state,
+        v_i=F("v_i"), v_s=eqv.v_s, sv_i=F("sv_i"), a_i=eqv.a_i, oa_i=F("oa_i"),
+        a_ip=F("a_ip"), v_ip=F("v_ip"), v_il=F("v_il"), t_su=F("t_su"), t_si=F("t_si"),
+        e_s=F("e_s"), e_i=F("e_i"), szv_i=F("szv_i"), a_ip_eff=eqv.a_ip_eff,
+        t_i=eqv.t_i, t_s=eqv.t_s, kn=2, config=state_cfg,
     )
-    state = base._replace(
-        **{name: jnp.asarray(f[name]) for name in STATE_FIELDS},
-        prather=_moments(prather["fields"]), equivalent=eqv, aggregated=agg,
+    state = SI3State.zeros(*full, state_cfg)._replace(
+        **{name: F(name) for name in STATE_FIELDS},
+        prather=_moments(records[29]["fields"], full, h), equivalent=eqv, aggregated=agg,
         bounds=SI3CategoryBounds(jnp.asarray(f["hi_max"]), jnp.asarray(f["hi_mean"])),
-        cflice_delayed=(
+        cflice_delayed=(  # mpp_allreduce_generic.h90:147-152; unallocated at kt=1
             jnp.asarray(f["cflice_delayed"]) if "cflice_delayed" in f else None
-        ),  # mpp_allreduce_generic.h90:147-152; unallocated at kt=1
+        ),
     )
-    aevp = SI3CGridAEVPState(
-        state.u_ice, state.v_ice, jnp.asarray(f["stress1_i"]),
-        jnp.asarray(f["stress2_i"]), jnp.asarray(f["stress12_i"]),
-    )
+    aevp = SI3CGridAEVPState(state.u_ice, state.v_ice, F("stress1_i"), F("stress2_i"), F("stress12_i"))
     return SI3O17StepState(state, aevp)
 
 
-def _forcing(
-    entry: dict[str, Any], rheology: dict[str, Any], raw1: dict[str, Any], raw2: dict[str, Any], card
-) -> SI3O17LiveForcing:
-    f, masks, r1, r2 = entry["fields"], rheology["fields"], raw1["fields"], raw2["fields"]
-    shape = entry["meta"]["jpi"], entry["meta"]["jpj"]
-    h = int(card.state.nn_hls)
-    metrics = SI3CGridMetrics(*(jnp.asarray(f[name]) for name in (
-        "e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f",
-        "e1e2t", "e1e2u", "e1e2v", "e1e2f",
-    )))
+def live_forcing(records: dict[int, dict[str, Any]], card) -> SI3O17LiveForcing:
+    """Kinds 22, 23 (icedyn masks), 32/33 (raw bulk arguments) -> live forcing."""
+    f, masks = records[22]["fields"], records[23]["fields"]
+    r1, r2 = records[32]["fields"], records[33]["fields"]
+    full, h = _grid(records[22], card)
+    def F(src, name):  # noqa: N802
+        return _as_full(src[name], full, h)
+
+    def O(src, name):  # noqa: N802, E743
+        return _as_owned(src[name], full, h)
+
+    zero = jnp.zeros(full, jnp.float64)
+    metrics = SI3CGridMetrics(*(F(f, name) for name in METRICS))
     grid = SI3ORCA2AdvectionGrid(
-        e1u=jnp.asarray(f["e1u"]), e2v=jnp.asarray(f["e2v"]),
-        r1_e1u=jnp.asarray(f["r1_e1u"]), r1_e2v=jnp.asarray(f["r1_e2v"]),
-        e2u=jnp.asarray(f["e2u"]), e1v=jnp.asarray(f["e1v"]), e1e2t=jnp.asarray(f["e1e2t"]),
-        r1_e1e2t=jnp.asarray(f["r1_e1e2t"]), tmask=jnp.asarray(f["tmask"]),
-        umask=jnp.asarray(f["umask"]), vmask=jnp.asarray(f["vmask"]),
+        e1u=F(f, "e1u"), e2v=F(f, "e2v"), r1_e1u=F(f, "r1_e1u"), r1_e2v=F(f, "r1_e2v"),
+        e2u=F(f, "e2u"), e1v=F(f, "e1v"), e1e2t=F(f, "e1e2t"), r1_e1e2t=F(f, "r1_e1e2t"),
+        tmask=F(f, "tmask"), umask=F(f, "umask"), vmask=F(f, "vmask"),
     )
-    zero = jnp.zeros(shape, jnp.float64)
-    aevp_forcing = SI3CGridAEVPForcing(
-        *(zero for _ in range(7)), jnp.asarray(f["drag_io"]), jnp.asarray(f["u_oce"]),
-        jnp.asarray(f["v_oce"]), jnp.asarray(f["ssh_m"]), jnp.asarray(f["ff_t"]),
-        jnp.asarray(f["tmask"]), jnp.asarray(f["umask"]), jnp.asarray(f["vmask"]),
-        jnp.asarray(masks["fast_tmask"]), zero, zero, zero,
-        jnp.asarray(masks["icb_tmask"]), jnp.asarray(masks["icb_umask"]),
-        jnp.asarray(masks["icb_vmask"]),
+    aevp_forcing = SI3CGridAEVPForcing(  # first seven are overwritten in-step (si3_o17.py)
+        *(zero for _ in range(7)), F(f, "drag_io"), F(f, "u_oce"), F(f, "v_oce"),
+        None,  # ssh_t: the ORCA2 solver derives it from ssh_m (icedyn_rhg_evp.F90:268)
+        F(f, "ff_t"), F(f, "tmask"), F(f, "umask"), F(f, "vmask"),
+        F(masks, "fast_tmask"), zero, zero, zero,
+        F(masks, "icb_tmask"), F(masks, "icb_umask"), F(masks, "icb_vmask"),
     )
     surface = SI3O17SurfaceForcing(
-        wndi=jnp.asarray(r1["wndi"]), wndj=jnp.asarray(r1["wndj"]),
-        theta_air_zt=jnp.asarray(r1["tair"]), q_air_zt=jnp.asarray(r1["qair"]),
-        slp=jnp.asarray(r1["slp"]), rhoa=jnp.asarray(r1["rhoa"]),
-        cloud_fra=_owned(f["cloud_fra"], shape, h), smask0=jnp.asarray(r1["smask"]),
-        qlw=jnp.asarray(r2["qlw"]), precip=jnp.asarray(r2["precip"]), snow=jnp.asarray(r2["snow"]),
-        qsr=jnp.asarray(r2["qsr"]), emp=jnp.asarray(r2["emp"]),
-        qns_oce=_owned(f["qns_oce"], shape, h), qsr_oce=_owned(f["qsr_oce"], shape, h),
-        ssu_m=jnp.asarray(f["ssu_m"]), ssv_m=jnp.asarray(f["ssv_m"]),
-        utau=_owned(f["utau"], shape, h), vtau=_owned(f["vtau"], shape, h),
-        frq_m=_owned(f["frq_m"], shape, h), e3t_m=_owned(f["e3t_m"], shape, h),
+        wndi=O(r1, "wndi"), wndj=O(r1, "wndj"), theta_air_zt=O(r1, "tair"),
+        q_air_zt=O(r1, "qair"), slp=O(r1, "slp"), rhoa=O(r1, "rhoa"),
+        cloud_fra=O(f, "cloud_fra"), smask0=O(r1, "smask"), qlw=O(r2, "qlw"),
+        precip=O(r2, "precip"), snow=O(r2, "snow"), qsr=O(r2, "qsr"), emp=O(r2, "emp"),
+        qns_oce=O(f, "qns_oce"), qsr_oce=O(f, "qsr_oce"), ssu_m=F(f, "ssu_m"),
+        ssv_m=F(f, "ssv_m"), utau=O(f, "utau"), vtau=O(f, "vtau"), frq_m=O(f, "frq_m"),
+        e3t_m=O(f, "e3t_m"),
     )
     stress = SI3StressInputs(
-        uu_kbb=jnp.asarray(f["uu_kbb"]), vv_kbb=jnp.asarray(f["vv_kbb"]),
-        umask_k1=jnp.asarray(f["umask"]), vmask_k1=jnp.asarray(f["vmask"]),
-        u_ice=jnp.asarray(f["u_ice"]), v_ice=jnp.asarray(f["v_ice"]),
-        u_oce=jnp.asarray(f["u_oce"]), v_oce=jnp.asarray(f["v_oce"]),
-        drag_io=jnp.asarray(f["drag_io"]), at_i=zero,
-        utau=_full(f["utau"], shape, h), vtau=_full(f["vtau"], shape, h), tmod_io=zero,
-        taum=_owned(f["taum"], shape, h), utau_oce=_owned(f["utau"], shape, h),
-        vtau_oce=_owned(f["vtau"], shape, h),
+        uu_kbb=F(f, "uu_kbb"), vv_kbb=F(f, "vv_kbb"), umask_k1=F(f, "umask"),
+        vmask_k1=F(f, "vmask"), u_ice=F(f, "u_ice"), v_ice=F(f, "v_ice"),
+        u_oce=F(f, "u_oce"), v_oce=F(f, "v_oce"), drag_io=F(f, "drag_io"), at_i=zero,
+        utau=F(f, "utau"), vtau=F(f, "vtau"), tmod_io=zero, taum=O(f, "taum"),
+        utau_oce=O(f, "utau"), vtau_oce=O(f, "vtau"),
     )
     return SI3O17LiveForcing(
-        kt=int(entry["meta"]["kt"]), sss_m=jnp.asarray(f["sss_m"]), sst_m=jnp.asarray(f["sst_m"]),
-        rn_amax_2d=_full(f["rn_amax_2d"], shape, h, fill=1.0), advection_grid=grid,
-        aevp_forcing=aevp_forcing, aevp_metrics=metrics, ssh_m=jnp.asarray(f["ssh_m"]),
-        surface=surface, stress=stress,
+        kt=int(records[22]["meta"]["kt"]), sss_m=F(f, "sss_m"), sst_m=F(f, "sst_m"),
+        rn_amax_2d=F(f, "rn_amax_2d"), advection_grid=grid, aevp_forcing=aevp_forcing,
+        aevp_metrics=metrics, ssh_m=F(f, "ssh_m"), surface=surface, stress=stress,
     )
 
 
-def _comparison(actual: Any, expected: Any, exact: bool) -> tuple[int, float]:
-    a, b = np.asarray(actual, dtype=np.float64), np.asarray(expected, dtype=np.float64)
-    if a.shape != b.shape:
-        return max(a.size, b.size), float("inf")
-    different = np.count_nonzero(a.view(np.uint64) != b.view(np.uint64)) if exact else np.count_nonzero(a != b)
-    scale = np.maximum(np.abs(b), np.finfo(np.float64).tiny)
-    return int(different), float(np.max(np.abs(a-b)/scale, initial=0.0))
+def record_inputs(entry: SI3O17StepState, forcing: SI3O17LiveForcing) -> dict[int, dict[str, Any]]:
+    """Inverse of ``entry_state``/``live_forcing``: model inputs as writer fields."""
+    s, g, a, sf, st = entry.ice, forcing.advection_grid, forcing.aevp_forcing, forcing.surface, forcing.stress
+    k22 = {name: getattr(s, name) for name in STATE_FIELDS}
+    k22.update(stress1_i=entry.aevp.stress1_t, stress2_i=entry.aevp.stress2_t,
+               stress12_i=entry.aevp.stress12_f, hi_max=s.bounds.hi_max, hi_mean=s.bounds.hi_mean,
+               sss_m=forcing.sss_m, sst_m=forcing.sst_m, rn_amax_2d=forcing.rn_amax_2d,
+               ssh_m=forcing.ssh_m, drag_io=a.drag_io_t, u_oce=a.ocean_u_u, v_oce=a.ocean_v_v,
+               ff_t=a.coriolis_t, tmask=g.tmask, umask=g.umask, vmask=g.vmask,
+               r1_e1u=g.r1_e1u, r1_e2v=g.r1_e2v, r1_e1e2t=g.r1_e1e2t,
+               cloud_fra=sf.cloud_fra, qns_oce=sf.qns_oce, qsr_oce=sf.qsr_oce, ssu_m=sf.ssu_m,
+               ssv_m=sf.ssv_m, frq_m=sf.frq_m, e3t_m=sf.e3t_m, utau=st.utau, vtau=st.vtau,
+               taum=st.taum, uu_kbb=st.uu_kbb, vv_kbb=st.vv_kbb)
+    k22.update(zip(METRICS, forcing.aevp_metrics))
+    if s.cflice_delayed is not None:
+        k22["cflice_delayed"] = s.cflice_delayed
+    k29 = {f"{stem}{prefix}": getattr(getattr(s.prather, family), member)
+           for family, prefix in PRATHER_PREFIX.items()
+           for member, stem in zip(SI3PratherMoments._fields, ("sx", "sy", "sxx", "syy", "sxy"), strict=True)}
+    return {
+        22: k22,
+        23: {"fast_tmask": a.fast_tmask, "icb_tmask": a.iceberg_tmask,
+             "icb_umask": a.iceberg_umask, "icb_vmask": a.iceberg_vmask},
+        29: k29,
+        32: {"wndi": sf.wndi, "wndj": sf.wndj, "tair": sf.theta_air_zt, "qair": sf.q_air_zt,
+             "slp": sf.slp, "rhoa": sf.rhoa, "smask": sf.smask0},
+        33: {"tair": sf.theta_air_zt, "qair": sf.q_air_zt, "slp": sf.slp, "qlw": sf.qlw,
+             "precip": sf.precip, "snow": sf.snow, "qsr": sf.qsr, "emp": sf.emp},
+    }
 
 
-def _align_owned(actual: Any, expected: Any, shape: tuple[int, int], h: int = 2) -> Any:
-    """Align a full-halo writer field with an A2D(0) model output."""
-    actual_array, expected_array = np.asarray(actual), np.asarray(expected)
-    if (
-        expected_array.ndim >= 2
-        and expected_array.shape[:2] == shape
-        and actual_array.shape[:2] == (shape[0] - 2 * h, shape[1] - 2 * h)
-    ):
-        return expected_array[h:-h, h:-h, ...]
-    return expected
-
-
-def scorer_self_test(*, plant_one_ulp: bool = False) -> dict[str, Any]:
-    """Full-ORCA2 synthetic owned/full-halo scorer control."""
-    shape = (186, 153)
-    actual = np.zeros((182, 149), dtype=np.float64)
-    expected = np.full(shape, -7.0, dtype=np.float64)
-    expected[2:-2, 2:-2] = actual
-    if plant_one_ulp:
-        expected[2, 2] = np.nextafter(0.0, 1.0)
-    different, relative = _comparison(actual, _align_owned(actual, expected, shape), True)
-    if plant_one_ulp:
-        if different != 1:
-            raise ValueError("one-ULP scorer plant did not produce exactly one differing value")
-        return {"status": "FAIL", "different": different, "max_relative": relative}
-    if different != 0 or relative != 0.0:
-        raise ValueError("identical full-ORCA2 synthetic record did not pass")
-    return {"status": "PASS", "shape": list(shape), "owned_shape": list(actual.shape)}
-
-
-def _score_output(
-    out: SI3O17StepState,
-    trace,
-    record: dict[str, Any],
-    prather_exit: dict[str, Any],
-    tau_private: dict[str, Any],
-    exact: bool,
-) -> dict[str, Any]:
-    f = record["fields"]
-    shape = record["meta"]["jpi"], record["meta"]["jpj"]
-    h = 2
-    rows: dict[str, dict[str, Any]] = {}
-    def add(key: str, actual: Any, expected: Any) -> None:
-        expected = _align_owned(actual, expected, shape, h)  # A2D(0) owned extent
-        different, relative = _comparison(actual, expected, exact)
-        rows[key] = {"different": different, "max_relative": relative}
-    for name in STATE_FIELDS:
-        add(f"state.{name}", getattr(out.ice, name), f[name])
+def scored_fields(out: SI3O17StepState, trace) -> list[tuple[int, str, Any]]:
+    """Every (kind, record field, model value) compared; also the synthetic writer's source."""
+    rows: list[tuple[int, str, Any]] = []
+    aevp = trace.aevp
+    rows += [(23, "u_ice", aevp.u_ice_u), (23, "v_ice", aevp.v_ice_v),
+             (23, "stress1_i", aevp.stress1_t), (23, "stress2_i", aevp.stress2_t),
+             (23, "stress12_i", aevp.stress12_f)]
+    rows += [(24, n, getattr(trace.advection_state, n)) for n in STATE_FIELDS]
+    rows += [(25, n, getattr(trace.redistribution.state, n)) for n in RDGRFT_FIELDS]
+    rows += [(26, n, getattr(trace.postdyn_correction, n)) for n in DYN_COR_FIELDS]
+    # Kind 27 follows `CALL ice_thd(kt)` (icestp.F90:206); ice_thd itself ends with
+    # ice_cor(kt,2) and the ageing/LBC/velocity tail (icethd.F90:183-201).
+    rows += [(27, n, getattr(trace.finalize.correction.state, n)) for n in STATE_FIELDS]
+    rows += [(28, n, getattr(out.ice, n)) for n in STATE_FIELDS]
+    rows += [(28, n, getattr(trace.finalize.final.fluxes, n)) for n in FLUX_FIELDS]
+    rows += [(28, n, getattr(trace.finalize.final.outputs, n))
+             for n in ("qsr", "qns", "emp", "sfx", "snwice_mass", "snwice_mass_b", "snwice_fmass")]
+    rows += [(28, n, getattr(trace.finalize.stress, n)) for n in ("utau", "vtau", "taum")]
     for family, prefix in PRATHER_PREFIX.items():
-        actual_family = getattr(out.ice.prather, family)
-        for member, stem in zip(actual_family._fields, ("sx", "sy", "sxx", "syy", "sxy"), strict=True):
-            add(f"prather.{family}.{member}", getattr(actual_family, member), prather_exit["fields"][f"{stem}{prefix}"])
-    for name in FLUX_FIELDS:
-        add(f"fluxes.{name}", getattr(trace.finalize.final.fluxes, name), f[name])
-    for name in ("qsr", "qns", "emp", "sfx", "snwice_mass", "snwice_mass_b", "snwice_fmass"):
-        add(f"outputs.{name}", getattr(trace.finalize.final.outputs, name), f[name])
-    for name in ("utau", "vtau", "taum"):
-        add(f"stress.{name}", getattr(trace.finalize.stress, name), f[name])
-    for name in ("tmod_io", "utau_oce", "vtau_oce"):
-        add(f"stress.{name}", getattr(trace.finalize.stress, name), tau_private["fields"][name])
-    return {"different": sum(row["different"] for row in rows.values()),
-            "max_relative": max(row["max_relative"] for row in rows.values()), "fields": rows}
+        moments = getattr(out.ice.prather, family)
+        for member, stem in zip(moments._fields, ("sx", "sy", "sxx", "syy", "sxy"), strict=True):
+            rows.append((30, f"{stem}{prefix}", getattr(moments, member)))
+    rows += [(31, n, getattr(trace.surface_stress.flx_other, n)) for n in ("qlead", "qsb_ice_bot", "fhld")]
+    rows += [(34, n, getattr(trace.finalize.stress, n)) for n in ("tmod_io", "utau_oce", "vtau_oce")]
+    return rows
 
 
-def _score_boundaries(trace, index, kt: int, rank: int, exact: bool) -> dict[str, Any]:
-    """Use the recorded NEMO call boundaries to localise the first divergence."""
-
-    rows: dict[str, dict[str, Any]] = {}
-    def add(boundary: str, name: str, actual: Any) -> None:
-        record = index[(boundary, kt, rank)]
-        expected = record["fields"][name]
-        shape = record["meta"]["jpi"], record["meta"]["jpj"]
-        expected = _align_owned(actual, expected, shape)  # A2D(0) owned extent
-        different, relative = _comparison(actual, expected, exact)
-        rows[f"{KINDS[boundary]}.{name}"] = {"different": different, "max_relative": relative}
-
-    for name, actual in (
-        ("u_ice", trace.aevp.u_ice_u), ("v_ice", trace.aevp.v_ice_v),
-        ("stress1_i", trace.aevp.stress1_t), ("stress2_i", trace.aevp.stress2_t),
-        ("stress12_i", trace.aevp.stress12_f),
-    ):
-        add(23, name, actual)
-    for name in STATE_FIELDS:
-        add(24, name, getattr(trace.advection_state, name))
-    for name in trace.redistribution.state._fields:
-        if name in index[(25, kt, rank)]["fields"]:
-            add(25, name, getattr(trace.redistribution.state, name))
-    for name in trace.postdyn_correction._fields:
-        if name in index[(26, kt, rank)]["fields"]:
-            add(26, name, getattr(trace.postdyn_correction, name))
-    for name in STATE_FIELDS:
-        add(27, name, getattr(trace.finalize.correction.state, name))
-    for name in ("qlead", "qsb_ice_bot", "fhld"):
-        add(31, name, getattr(trace.surface_stress.flx_other, name))  # icestp.F90:182-189
-    return {"different": sum(row["different"] for row in rows.values()),
-            "max_relative": max(row["max_relative"] for row in rows.values()), "fields": rows}
+def compare(actual: Any, expected: Any, full: tuple[int, int], h: int) -> dict[str, Any]:
+    """Exact-bit and relative comparison; an owned operand restricts both to the owned interior."""
+    a, b = np.asarray(actual, dtype=np.float64), np.asarray(expected, dtype=np.float64)
+    owned = (full[0] - 2 * h, full[1] - 2 * h)
+    if a.shape != b.shape and a.shape[2:] == b.shape[2:]:
+        if a.shape[:2] == full and b.shape[:2] == owned:
+            a = a[h:-h, h:-h, ...]
+        elif b.shape[:2] == full and a.shape[:2] == owned:
+            b = b[h:-h, h:-h, ...]
+    if a.shape != b.shape:
+        return {"shape_mismatch": [list(a.shape), list(b.shape)], "different": max(a.size, b.size),
+                "nonfinite": 0, "max_relative": float("inf")}
+    nonfinite = int(np.count_nonzero(~np.isfinite(a)) + np.count_nonzero(~np.isfinite(b)))
+    different = int(np.count_nonzero(a.view(np.uint64) != b.view(np.uint64)))
+    with np.errstate(invalid="ignore", over="ignore"):
+        rel = np.abs(a - b) / np.maximum(np.abs(b), np.finfo(np.float64).tiny)
+    max_relative = float("inf") if nonfinite else float(np.max(rel, initial=0.0))
+    return {"different": different, "nonfinite": nonfinite, "max_relative": max_relative}
 
 
-def score(evidence: Path, labels: list[str]) -> dict[str, Any]:
+def _passes(row: dict[str, Any], label: str) -> bool:
+    if "shape_mismatch" in row or row["nonfinite"]:
+        return False  # any non-finite compared value fails the step (both labels)
+    if label == "GIVEN-NEMO-ENTRY":
+        return row["different"] == 0
+    return row["max_relative"] <= TRAJECTORY_BAR
+
+
+def score_step(out, trace, records: dict[int, dict[str, Any]], card, label: str) -> dict[str, Any]:
+    full, h = _grid(records[22], card)
+    fields: dict[str, Any] = {}
+    for kind, name, actual in scored_fields(out, trace):
+        row = compare(actual, records[kind]["fields"][name], full, h)
+        row["pass"] = _passes(row, label)
+        fields[f"{KINDS[kind]}.{name}"] = row
+    return {"pass": all(row["pass"] for row in fields.values()),
+            "different": sum(row["different"] for row in fields.values()),
+            "nonfinite": sum(row["nonfinite"] for row in fields.values()),
+            "failed_fields": [key for key, row in fields.items() if not row["pass"]],
+            "fields": fields}
+
+
+def kt_program(kt: int, nn_fsbc: int) -> int:
+    """Representative kt of the same compiled program.
+
+    The O17 graph reads ``kt`` only through ``si3_dyn_orca2`` -> Prather's sweep
+    parity ``MOD((kt-1)/nn_fsbc, 2)`` (``icedyn_adv_pra.F90:267-367``,
+    ``si3_orca2_state.py`` ``kt_parity``) and its ``kt >= 1`` guard.
+    """
+    return 1 + ((kt - 1) // nn_fsbc) % 2 * nn_fsbc
+
+
+def make_runner(card, execution: str) -> Callable[[SI3O17StepState, SI3O17LiveForcing], Any]:
+    """One production step.  ``jit`` compiles once per (sweep parity, pytree structure).
+
+    Eager is the default: compiled XLA rewrites ``x * convert(mask)`` into a select
+    and stores +0 where NEMO's arithmetic (and eager) store -0 (Resume 5 receipt).
+    """
+    if execution == "eager":
+        def eager(entry, forcing):
+            with jax.disable_jit():
+                return si3_o17_step(entry, forcing, card)
+        return eager
+    if execution != "jit":
+        raise ValueError(f"unknown execution mode {execution!r}")
+    compiled: dict[int, Any] = {}
+
+    def run(entry, forcing):
+        kt = kt_program(forcing.kt, card.state.nn_fsbc)
+        if kt not in compiled:
+            compiled[kt] = jax.jit(
+                lambda e, d, kt=kt: si3_o17_step(e, SI3O17LiveForcing(kt, *d), card)
+            )
+        return compiled[kt](entry, tuple(forcing[1:]))
+    return run
+
+
+def _same_bits(left: Any, right: Any) -> bool:
+    a, at = jax.tree_util.tree_flatten(left)
+    b, bt = jax.tree_util.tree_flatten(right)
+    return at == bt and all(
+        np.asarray(x).shape == np.asarray(y).shape
+        and np.asarray(x).tobytes() == np.asarray(y).tobytes()
+        for x, y in zip(a, b, strict=True)
+    )
+
+
+def _release_free_heap() -> None:
+    """Return freed heap pages to the OS so VmRSS samples live memory (glibc only)."""
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except OSError:
+        pass
+
+
+def _rss_kib() -> int:
+    for line in Path("/proc/self/status").read_text().splitlines():
+        if line.startswith("VmRSS:"):
+            return int(line.split()[1])
+    return -1
+
+
+def card_for(run: Path):
+    nml = parse_resolved_ice_namelist(run / "output.namelist.ice", run / "output.namelist.dyn", DEFAULT_PPSRC)
+    surface_cfg = SI3SurfaceConfig.from_resolved_namelists(run / "output.namelist.dyn", run / "output.namelist.ice")
+    return build_orca2_sas_ice_o17_card(surface=surface_cfg, thermo_namelist=nml)
+
+
+def score(
+    evidence: Path,
+    labels: list[str],
+    *,
+    execution: str = "eager",
+    expect_steps: int = 100,
+    card=None,
+    runner=None,
+) -> dict[str, Any]:
     started = time.monotonic()
-    if labels != list(VALID_LABELS):
+    if list(labels) != list(VALID_LABELS):
         raise ValueError(f"labels must be exactly {VALID_LABELS}")
     run = evidence / "record_100step"
-    index = _record_index(run / "o17_master_records")
-    ranks = sorted({key[2] for key in index})
-    steps = sorted({key[1] for key in index})
-    if steps != list(range(1, 101)):
-        raise ValueError(f"O17 requires steps 1..100, got {steps[:3]}..{steps[-3:]}")
-    nml = parse_resolved_ice_namelist(run/"output.namelist.ice", run/"output.namelist.dyn", DEFAULT_PPSRC)
-    surface_cfg = SI3SurfaceConfig.from_resolved_namelists(run/"output.namelist.dyn", run/"output.namelist.ice")
-    card = build_orca2_sas_ice_o17_card(surface=surface_cfg, thermo_namelist=nml)
+    index = record_paths(run / "o17_master_records")
+    ranks = sorted({rank for _, rank in index})
+    steps = sorted({kt for kt, _ in index})
+    if steps != list(range(1, expect_steps + 1)):
+        raise ValueError(f"O17 requires steps 1..{expect_steps}, got {steps[:3]}..{steps[-3:]}")
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    card = card if card is not None else card_for(run)
+    runner = runner if runner is not None else make_runner(card, execution)
     per_label: dict[str, Any] = {label: {"steps": {}} for label in labels}
     independent: dict[int, SI3O17StepState] = {}
+    rss_after_step: list[int] = []
     for kt in steps:
         for rank in ranks:
-            nemo_entry = _entry_state(index[(22, kt, rank)], index[(29, kt, rank)], card)
-            forcing = _forcing(
-                index[(22, kt, rank)], index[(23, kt, rank)],
-                index[(32, kt, rank)], index[(33, kt, rank)], card,
-            )
+            records = load_step(index[(kt, rank)], kt, rank)
+            given_entry = entry_state(records, card)
+            forcing = live_forcing(records, card)
+            given = runner(given_entry, forcing)
+            entries = {"GIVEN-NEMO-ENTRY": given_entry,
+                       "INDEPENDENT": given_entry if kt == steps[0] else independent[rank]}
             for label in labels:
-                entry = nemo_entry if label == "GIVEN-NEMO-ENTRY" or kt == 1 else independent[rank]
-                out, trace = si3_o17_step(entry, forcing, card)
-                row = _score_output(
-                    out, trace, index[(28, kt, rank)], index[(30, kt, rank)],
-                    index[(34, kt, rank)],
-                    label == "GIVEN-NEMO-ENTRY",
-                )
-                row["boundaries"] = _score_boundaries(
-                    trace, index, kt, rank, label == "GIVEN-NEMO-ENTRY"
-                )
-                row["different"] += row["boundaries"]["different"]
-                row["max_relative"] = max(row["max_relative"], row["boundaries"]["max_relative"])
+                entry = entries[label]
+                reused = label == "INDEPENDENT" and _same_bits(entry, given_entry)
+                out, trace = given if reused else runner(entry, forcing)
+                row = score_step(out, trace, records, card, label)
+                row["reused_bitwise_identical_entry"] = reused
                 per_label[label]["steps"][f"{kt}:{rank}"] = row
                 if label == "INDEPENDENT":
                     independent[rank] = out
+                del out, trace, entry
+            # Only the INDEPENDENT state crosses a step; records and traces are dropped.
+            del records, given, given_entry, forcing, entries
+        gc.collect()
+        _release_free_heap()
+        rss_after_step.append(_rss_kib())
     for label in labels:
         rows = list(per_label[label]["steps"].values())
-        maximum = max(row["max_relative"] for row in rows)
-        different = sum(row["different"] for row in rows)
-        passed = different == 0 if label == "GIVEN-NEMO-ENTRY" else maximum <= 1.0e-15
-        per_label[label].update(status="PASS" if passed else "FAIL", different=different,
-                                max_relative=maximum, ulp_bar=0,
-                                trajectory_relative_bar=1.0e-15)
+        per_label[label].update(
+            status="PASS" if all(row["pass"] for row in rows) else "FAIL",
+            different=sum(row["different"] for row in rows),
+            nonfinite=sum(row["nonfinite"] for row in rows),
+            max_relative=max((r["max_relative"] for row in rows for r in row["fields"].values()),
+                             default=0.0),
+            ulp_bar=0, trajectory_relative_bar=TRAJECTORY_BAR,
+        )
     status = "PASS" if all(per_label[label]["status"] == "PASS" for label in labels) else "FAIL"
     return {"status": status, "labels": per_label, "steps": steps, "ranks": ranks,
-            "production_entry": "legoesm.ice.si3_o17.si3_o17_step",
+            "execution": execution, "production_entry": "legoesm.ice.si3_o17.si3_o17_step",
             "scorer_wall_seconds": time.monotonic() - started,
+            "scorer_rss_kib_after_each_step": rss_after_step,
             "scorer_peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
 
 
 def schema() -> dict[str, Any]:
     return {"status": "PASS", "magic": MAGIC.decode(), "version": VERSION, "kinds": KINDS,
             "state_fields": STATE_FIELDS, "flux_fields": FLUX_FIELDS, "labels": VALID_LABELS,
-            "bars": {"local_ulp": 0, "trajectory_relative": 1.0e-15}}
+            "bars": {"local_ulp": 0, "trajectory_relative": TRAJECTORY_BAR}}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--labels", nargs=2, default=list(VALID_LABELS))
+    parser.add_argument("--execution", choices=("jit", "eager"), default="eager")
     parser.add_argument("--schema", action="store_true")
     parser.add_argument("--read-record", type=Path)
-    parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--plant-one-ulp", action="store_true")
     args = parser.parse_args()
     try:
-        if args.self_test:
-            result = scorer_self_test(plant_one_ulp=args.plant_one_ulp)
-        elif args.schema:
+        if args.schema:
             result = schema()
         elif args.read_record:
             record = read_record(args.read_record)
             result = {"status": "PASS", "meta": record["meta"], "fields": sorted(record["fields"])}
         elif args.evidence:
-            result = score(args.evidence.resolve(), args.labels)
+            result = score(args.evidence.resolve(), args.labels, execution=args.execution)
         else:
             raise ValueError("one of --schema, --read-record, or --evidence is required")
     except (OSError, ValueError, KeyError, struct.error) as exc:

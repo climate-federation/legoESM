@@ -5,7 +5,8 @@ No NEMO build, launch, or integration was run.
 
 ## Outcome
 
-**ACQUISITION_NEEDED; the unified O17 producer is now scorable.** The admitted O8--O16 master has
+**ACQUISITION_NEEDED; the unified O17 producer is now scorable.** Resume 5 below is the
+authoritative closure of the `6e02036e3f` review. The admitted O8--O16 master has
 the correct unmodified production deck, 100-step window, dynamics disposition,
 thermodynamic stage frames, exchange outputs, and restart. It does not have a
 complete ice-step-entry state or raw O7 meteorology at every step. The O1--O7
@@ -147,6 +148,204 @@ schema/source findings. `PLAUSIBLE`: none promoted to an O17 physics verdict.
   `JAX_PLATFORMS=cpu`, and `JAX_ENABLE_X64=1`. No NEMO or GPU command ran.
 
 independent review: operator (Claude)
+
+## Resume 5 review-HOLD closure
+
+This section is authoritative for the review of `6e02036e3f`. No NEMO
+command was run; only the stub-binary preflight. All numbers are CPU
+binary64 (`CUDA_VISIBLE_DEVICES=""`, `JAX_PLATFORMS=cpu`, `JAX_ENABLE_X64=1`),
+and every reviewer item was reproduced on the parent before any change.
+
+### First correction: the ORCA2 rank grid is 184 x 152, owned 180 x 148
+
+The parent's scorer self-test, byte budget and resource probe all used
+186 x 153 with a 182 x 149 interior. The admitted deck log gives
+`Ni0glo = 180`, `Nj0glo = 148` and `nn_hls = 2`
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o7_orca2_sas_acquisition/ocean.output.excerpt:40-46`),
+so `jpi x jpj = 184 x 152` and `A2D(0) = 180 x 148`. The round-18 master
+records carry exactly those headers (kind 20 `utau` (184,152), `taum`
+(180,148)). The reviewers' `(182,149,5)` against `(186,153,5)` is the same
+defect measured at the parent's wrong extent. Every Resume-5 number uses the
+real grid.
+
+### Items 1-10
+
+1. **Scorer extents.** Reproduced on the parent with a writer-extent kind-22
+   record at 184 x 152: `_entry_state` raised `TypeError: mul got incompatible
+   shapes for broadcasting: (180, 148, 5), (184, 152, 5)`, and its
+   `_align_owned` scored an owned `t_si` record against the identical
+   full-halo model array as `(different, max_relative) = (139840, inf)`.
+   Every record field now drives its own extent. Owned (`A2D(0)`) entries are
+   padded with zero, the lane's `t_si` halo convention, and fed to the
+   full-halo state; owned kernel arguments take the owned slice of any
+   full-halo record; a comparison with one owned operand restricts both to
+   the owned interior, otherwise it compares the full arrays
+   (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:172-191`
+   and `:342-367`).
+   The same identical-value comparison now gives `(0, 0.0)`. Padding cannot
+   reach an owned output: the unit test re-runs step 1 with every halo `t_si`
+   set to 123.0 instead of the padded 0.0 and the GIVEN-NEMO-ENTRY score of
+   the owned records still passes bit for bit. Two parts of the finding are
+   refuted by the source. `snwice_fmass` is allocated `(jpi,jpj)`
+   (`src/OCE/SBC/sbc_ice.F90:125`), not on `A2D(0)`; and `snwice_mass`,
+   `snwice_mass_b`, `snwice_fmass` are updated on `DO_2D(nn_hls, nn_hls,
+   nn_hls, nn_hls)` (`src/ICE/iceupdate.F90:189-194`), so they stay full-grid
+   comparisons. The rewritten reader also exposed a second parent defect that
+   the TypeError had hidden: it passed `ssh_m` as the aEVP `ssh_t`, which the
+   ORCA2 solver refuses because it builds that field itself from
+   `ice_var_sshdyn(ssh_m, ...)` (`src/ICE/icedyn_rhg_evp.F90:268`); the
+   reader now passes `None`.
+2. **Boundary 27: refuted.** In the real patched and preprocessed source,
+   `CALL o17_state(27)` is two lines after `CALL ice_thd( kt )`
+   (`icestp.f90` 264 and 266), and `ice_thd` itself calls
+   `ice_cor( kt , 2 )`, ages `oa_i` and links the halos before it returns
+   (`src/ICE/icethd.F90:183-201`). Kind 27 is therefore the state after
+   `ice_cor(kt,2)` and the tail, which is `trace.finalize.correction.state`.
+   `trace.thermodynamics` is the category-stage tuple from before remapping,
+   open-water growth and `ice_cor(kt,2)`; it has no `t_si` or snow-mass
+   member. The mapping is unchanged; a plant that points kind 27 at another
+   boundary fails the identical record.
+3. **Halo thermodynamics.** Parent, 7 x 7 mixed card: 7 halo columns were
+   gathered in each of the five categories, they saw `t_bo = 0 K`, and 35 halo
+   `t_si` values were overwritten. The gather predicate is now
+   `a_i > epsi10` on owned columns only, NEMO's `DO_2D(0,0,0,0)`
+   (`src/ICE/icethd.F90:128-135`,
+   `packages/ice/legoesm/ice/si3_o17.py:395-398` and `:484-488`); after it,
+   0 halo `t_si` values change.
+   NEMO's later halo refresh is the existing tail link
+   (`src/ICE/icethd.F90:188-190,201`), which the test checks as a fixed point
+   of `lbc_lnk` on `a_i`, `v_i`, `oa_i`, `t_su`, `e_i`, `u_ice` and `v_ice`.
+4. **One source-derived byte budget.** The parent budgeted the private tau
+   record as three full fields at 186 x 153 (683,244 bytes) and 964,823,300
+   bytes per step. The layout is now derived from source: each writer `put`
+   resolves through the shared allocation catalog over the real ORCA2 ppsrc,
+   and each writer dummy is followed to the observer patch or writer call that
+   passes it and then to the caller's NEMO declaration. That gives `tmod_io`
+   (184,152) with `utau_oce` and `vtau_oce` (180,148)
+   (`src/ICE/iceupdate.F90:55`), raw `emp` full and raw `qsr` owned, and
+   `t_si` owned (`src/ICE/ice.F90:451`). Per kind, the tau record is 650,236
+   bytes; one step is 948,127,092 bytes; the exact 100-step maximum is
+   94,812,709,200 bytes; with the 140,965,556,460-byte O8-O16 master that is
+   235,778,265,660 bytes and one 4% disk budget of 239,462,302 KiB. The
+   wrapper and the master read the calculator's `--shell` line and the gate
+   imports the same function.
+5. **Streaming scorer.** Parent, on the 3-step writer-shaped ORCA2 record
+   below: `_record_index` alone peaked at 1,140,624, 2,067,036 and
+   2,988,912 KiB for 1, 2 and 3 steps, so it grows about 0.92 GB per step,
+   or about 92 GB for 100 steps before any model evaluation. The scorer now
+   indexes file names only; it loads one step's 13 records, scores them and
+   drops them. The unit test proves this by counting one load per step. A
+   first 3-step ORCA2 run still grew, with resident set 12,357,240,
+   15,686,332 and 18,205,892 KiB after steps 1-3: each step's 1.29 GB trace
+   (measured with `jax.eval_shape`) stayed referenced into the next step. The
+   loop now keeps only the 0.27 GB INDEPENDENT state across steps and samples
+   the resident set after `gc.collect()` and `malloc_trim(0)`. The re-measured
+   per-step resident set is in the final verification below. That same run
+   scored the identical 3-step record PASS under both labels, with 0
+   differing values. INDEPENDENT entries at steps 2 and 3 were not bitwise
+   equal to the record entries (the record carries owned `t_si` only), so
+   they ran as separate evaluations and still matched every scored owned
+   value bit for bit. Measured record bytes per step were 946,784,256 at step
+   1 (no delayed CFL, no icedyn masks yet) and 948,127,092 at steps 2-3,
+   which is the calculator's per-step maximum.
+6. **Compiled is not bitwise equal to eager; the scorer stays eager.** One
+   production-card step (100 aEVP subcycles) on the 184 x 152 grid with 3000
+   ice-covered, 20,700 ice-free and 2940 near-empty owned columns: eager
+   519.8 s, peak RSS 7,544,464 KiB; compiled 583.5 s compile plus 74.5 s
+   execute, peak 27,284,040 KiB. 62 of 1209 leaves differ. Most differences
+   are signed zeros from two XLA rewrites, each reproduced in isolation:
+   `x * convert(mask)` becomes a select and stores +0 where NEMO's
+   multiplication by its REAL 0/1 mask stores -0
+   (`src/ICE/icedyn_rhg_evp.F90:189-192,459-461,822-824`), and an add into a
+   compile-time zero accumulator is folded away, storing -0 where NEMO's
+   runtime +0 accumulator stores +0. But 47 `delta` values and the ridging
+   fluxes they feed (32-36 values in `wfx_dyn`, `sfx_dyn`, `hfx_dyn`,
+   `wfx_snw_dyn`, then `wfx_snw`) differ in value. PLAUSIBLE: fused or
+   re-associated arithmetic in the deformation kernel, which has no
+   source-rounding barrier. Eager scoring costs 519.8 s per step: 100 steps
+   take 14.4 h when INDEPENDENT stays bitwise on the NEMO entry, because a
+   bitwise-identical entry reuses the GIVEN-NEMO-ENTRY result, and up to
+   199 steps, 28.7 h, after it diverges. This runs after the acquisition
+   clock stops.
+7. **Preflight runs the real scorer.** The scorer self-test that compared zero
+   arrays is deleted, and so is the stub driver's literal PASS report. The O17
+   preflight now builds a 2-step, writer-shaped record at 184 x 152 from the
+   model, with owned extents where NEMO has them, and runs the real scorer on
+   it: the identical record passes; a 1-ULP change in step-2 exit `t_si`
+   fails, and so does a +0 to -0 flip in step-2 exit `wfx_bog`, each failing
+   at its planted field. The stub driver hands that real report to the
+   driver, and the preflight now also runs the stub driver with the real FAIL
+   report; it refuses, and it refuses for that reason. The driver parses the
+   score as JSON: the old `grep '"status": "PASS"'` matched a nested label
+   status, so a FAIL report whose INDEPENDENT label passed would have been
+   admitted. The preflight's final lines are quoted in the verification
+   section below.
+8. **Code-revert plants.** Every plant now changes code, not results:
+   monkeypatched production functions or a skipped call. The plants are
+   `t_bo` (the freezing-point call dropped), `u_ice_b` (the store_fields
+   velocities not passed to aEVP), `a_i_b` (the second store_fields skipped),
+   the thermodynamic tail call skipped, the tail's halo links skipped, the
+   full-grid gather (item 3), the scorer without padding or without owned
+   alignment (item 1), and kind 27 pointed at the wrong boundary (item 2).
+   Each fails the same production assertions the unplanted step passes;
+   the failing line of each is quoted in the verification section below. The
+   checks are pinned digests of the
+   eager surface boundary and full-step scorer projection, a reference
+   evaluation of the `t_bo` statement, the `src/ICE/icethd.F90:185` ageing, the halo
+   fixed points, and halo `t_si`.
+9. **Signed-zero canonicalisation removed.** NEMO assigns `zmsk` as a REAL 0
+   or 1 (`src/ICE/icedyn_rhg_evp.F90:189-192`). It multiplies the stress
+   update by it (`:459-461`), stores the linked stresses unchanged
+   (`:838-843`), and forms `pdivu_i` as the product with `zmsk`
+   (`:822-824`). None of these canonicalises a zero, so a negative bracket
+   stores -0. Its only literal +0 there is the `ELSE` of `pdelta_i`
+   (`:830-831`), and the deformation kernel's `SQRT(...)*mask` cannot produce
+   -0. On the 7 x 7 card, eager raw values have 31 -0 in `stress2` and 2 in
+   `divu`; NEMO's arithmetic stores them. Both canonicalisations are removed.
+   The same class at the end of the step, which cited the step-entry
+   `diag_set0` (`src/ICE/icestp.F90:438-464`), is also removed: eager raw
+   final fluxes had no -0 on the card, so that removal changes no eager bit
+   there. The canonicalisation had been hiding item 6.
+10. **Non-finite values fail.** The parent's Python `max` returned 0.0 for
+    `[0.0, nan]`, so its INDEPENDENT test passed. Every compared field now
+    counts non-finite values, and any count fails the step under both labels.
+    A planted NaN in step-2 exit `qns` fails INDEPENDENT.
+
+### Choices
+
+- Scorer execution stays eager, as item 6 instructs when the compiled step is
+  not bitwise. ASKED (item 6).
+- The halo pad value is zero, the lane's existing `t_si` convention, and the
+  test shows it cannot reach an owned output. ASKED (item 1: "the way the
+  lane's state convention requires").
+- The end-of-step flux canonicalisation was removed with the item-9 pair. It
+  is the same unmeasured class with no NEMO counterpart, and it changes no
+  eager bit on the card. UNASKED; offered for revert.
+- The synthetic preflight writes +0 into writer fields the scorer never
+  reads, to keep the writer's exact size and order. UNASKED; offered for
+  revert.
+
+Finding, not fixed: the preregistration says every recorded field is scored
+at every step, but the scorer compares only a named subset at kinds 23-31,
+plus the complete exit and tau records.
+
+`CONFIRMED`: items 1-5 and 7-10 are measured as stated. Item 6: the
+compiled/eager mismatch census and both signed-zero mechanisms are CONFIRMED;
+the cause of the 47 value differences is PLAUSIBLE.
+
+### Decision needed
+
+1. Make the compiled O17 step bitwise equal to eager, which is IEEE per
+   operation like NEMO's unfused gfortran build. That means a barrier on the
+   0/1 mask operands in the shared aEVP and deformation kernels, runtime
+   (not compile-time) zeros for the `diag_set0` accumulators, and source
+   rounding in the deformation arithmetic. Then re-measure O5, lane 3 and O6,
+   and switch scoring to the compiled step (about 75 s per step after three
+   compiles of about 580 s). **Pick.** It changes shared certified kernels,
+   so it is the user's decision.
+2. Keep eager scoring (14.4-28.7 h after NEMO stops) and leave production JIT
+   as it is. The real record can be acquired and scored now under either
+   option.
 
 ## Resume 4 final verification
 

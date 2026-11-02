@@ -13900,6 +13900,61 @@ CITATION_MAP.update({
 })
 
 
+# SI3 round 29 Resume 5 rewrote the O17 entry, scorer, budget and tests that
+# the Resume-4 section cites.  Those receipt citations are immutable evidence
+# of the reviewed parent 6e02036e3f, so each is content-pinned to that blob.
+for _key, _blob in {
+    'packages/ice/legoesm/ice/si3_o17.py:933-940': 'fe619d85d804a35dddf6afd0dab3ad8fdf827833',
+    'packages/ice/legoesm/ice/si3_o17.py:395-473': 'fe619d85d804a35dddf6afd0dab3ad8fdf827833',
+    'packages/ice/legoesm/ice/si3_o17.py:660-683': 'fe619d85d804a35dddf6afd0dab3ad8fdf827833',
+    'tests/ice/unit/test_si3_o17.py:301-305': '7c4d57e845098bfd3bd631899035c2c356bff795',
+    'packages/ice/legoesm/ice/si3_o17.py:1115-1120': 'fe619d85d804a35dddf6afd0dab3ad8fdf827833',
+    'tests/ice/unit/test_si3_o17.py:278-285': '7c4d57e845098bfd3bd631899035c2c356bff795',
+    'packages/ice/legoesm/ice/si3_o17.py:501-543': 'fe619d85d804a35dddf6afd0dab3ad8fdf827833',
+    'tests/ice/unit/test_si3_o17.py:215-224': '7c4d57e845098bfd3bd631899035c2c356bff795',
+    'packages/ice/legoesm/ice/si3_o17.py:489-499': 'fe619d85d804a35dddf6afd0dab3ad8fdf827833',
+    'tests/ice/unit/test_si3_o17.py:29-48,157-158,200-208,264': '7c4d57e845098bfd3bd631899035c2c356bff795',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_ad_probe.py:55-90': 'de00d5e4cee39eeac52eb7345337bcbdb0fcad74',
+    'tests/ice/unit/test_si3_o17.py:230-285': '7c4d57e845098bfd3bd631899035c2c356bff795',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:248-278,287-350': 'b0f62e81960f8437fed47b6c0176048294cb230f',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:170-177': 'b0f62e81960f8437fed47b6c0176048294cb230f',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_record_budget.py:13-67': '5fcb01ffaf738d9d3b7bce4fba44235d468a50f7',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:351-400': 'b0f62e81960f8437fed47b6c0176048294cb230f',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_acquisition/run.sh:24-43': '65f06ad2e020eea1e96754778e907369039f5dda',
+}.items():
+    _pin_blob(_key, _blob)
+
+# SI3 round 29 Resume 5: files first cited by the Resume-5 closure.
+FILES.update({
+    'src/ICE/ice.F90': NEMO / 'src/ICE/ice.F90',
+    'src/OCE/SBC/sbc_ice.F90': NEMO / 'src/OCE/SBC/sbc_ice.F90',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o7_orca2_sas_acquisition/ocean.output.excerpt':
+        REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o7_orca2_sas_acquisition/ocean.output.excerpt',
+})
+
+
+# SI3 round 29 Resume 5 closure citations (generated from each cited line's text).
+CITATION_MAP.update({
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o7_orca2_sas_acquisition/ocean.output.excerpt:40-46': ['Ni0glo =          180', 'halo width (applies to both rows and columns)       nn_hls =            2', 7],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:172-191': ['def _as_full(value: np.ndarray, full: tuple[int, int], h: int) -> jnp.ndarray:', ('return jnp.asarray(value)', 2), 20],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:342-367': ['def compare(actual: Any, expected: Any, full: tuple[int, int], h: int) -> dict[str, Any]:', 'return row["max_relative"] <= TRAJECTORY_BAR', 26],
+    'src/OCE/SBC/sbc_ice.F90:125': ['ALLOCATE( snwice_mass(jpi,jpj) , snwice_mass_b(jpi,jpj), snwice_fmass(jpi,jpj) , STAT=ierr(ii) )'],
+    'src/ICE/icedyn_rhg_evp.F90:268': ['zsshdyn(:,:) = ice_var_sshdyn( ssh_m, snwice_mass, snwice_mass_b)'],
+    'src/ICE/icethd.F90:128-135': [('! select ice covered grid points', 2), ('END_2D', 1), 8],
+    'packages/ice/legoesm/ice/si3_o17.py:395-398': ['owned_mask = _owned_mask(state.a_i.shape[:2], h)  # icethd.F90:130 DO_2D(0,0,0,0)', 'active = (a_i > 1.0e-10) & owned_mask  # icethd.F90:130-134; halos refilled at :188-190', 4],
+    'packages/ice/legoesm/ice/si3_o17.py:484-488': ['def _owned_mask(shape: tuple[int, int], h: int) -> jnp.ndarray:', 'return jnp.zeros(shape, dtype=bool).at[h:-h, h:-h].set(True)', 5],
+    'src/ICE/icethd.F90:188-190,201': ["CALL lbc_lnk( 'icethd', a_i , 'T', 1._wp, v_i , 'T', 1._wp, v_s , 'T', 1._wp, sv_i, 'T', 1._wp, oa_i, 'T', 1._wp, &", "CALL lbc_lnk( 'icethd', e_i , 'T', 1._wp, e_s , 'T', 1._wp, szv_i , 'T', 1._wp )", "CALL lbc_lnk( 'icethd', u_ice, 'U', -1.0_wp, v_ice, 'V', -1.0_wp )", 4],
+    'src/ICE/iceupdate.F90:55': ['ALLOCATE( utau_oce(A2D(0)), vtau_oce(A2D(0)), tmod_io(jpi,jpj), STAT=ice_update_alloc )'],
+    'src/ICE/ice.F90:451': ['ALLOCATE( t_si(A2D(0),jpl) , tm_si(A2D(0)) , qcn_ice_bot(A2D(0),jpl) , qcn_ice_top(A2D(0),jpl) , STAT = ierr(ii) )'],
+    'src/ICE/icedyn_rhg_evp.F90:189-192,459-461,822-824': [('DO_2D( nn_hls, nn_hls, nn_hls, nn_hls )', 1), ('END_2D', 1), '&         * z1_alph1 * zmsk(ji,jj) ! zmsk is for reducing cpu', '&         * z1_alph2 * zmsk(ji,jj) ! zmsk is for reducing cpu', 'pdivu_i(ji,jj) = ( ( e2u(ji,jj) * u_ice(ji,jj) - e2u(ji-1,jj) * u_ice(ji-1,jj) )  & ! add () for NP repro', '&             ) * r1_e1e2t(ji,jj) * zmsk(ji,jj) * (1._wp - fast_tmask(ji,jj)) * (1._wp - icb_tmask(ji,jj))', 10],
+    'src/ICE/icedyn_rhg_evp.F90:189-192': [('DO_2D( nn_hls, nn_hls, nn_hls, nn_hls )', 1), ('END_2D', 1), 4],
+    'src/ICE/icedyn_rhg_evp.F90:459-461': ['&         * z1_alph1 * zmsk(ji,jj) ! zmsk is for reducing cpu', '&         * z1_alph2 * zmsk(ji,jj) ! zmsk is for reducing cpu', 3],
+    'src/ICE/icedyn_rhg_evp.F90:838-843': ["CALL lbc_lnk( 'icedyn_rhg_evp', zs1   , 'T', 1._wp, zs2   , 'T', 1._wp, zs12  , 'F', 1._wp )", 'pstress12_i(:,:) = zs12(:,:)', 6],
+    'src/ICE/icedyn_rhg_evp.F90:822-824': ['pdivu_i(ji,jj) = ( ( e2u(ji,jj) * u_ice(ji,jj) - e2u(ji-1,jj) * u_ice(ji-1,jj) )  & ! add () for NP repro', '&             ) * r1_e1e2t(ji,jj) * zmsk(ji,jj) * (1._wp - fast_tmask(ji,jj)) * (1._wp - icb_tmask(ji,jj))', 3],
+    'src/ICE/icedyn_rhg_evp.F90:830-831': ['IF( zdelta(ji,jj) > 0._wp ) THEN   ;   pdelta_i(ji,jj) = zdelta(ji,jj) !!clem + rn_creepl', 'ELSE                               ;   pdelta_i(ji,jj) = 0._wp', 2],
+    'src/ICE/icestp.F90:438-464': [('DO_2D( 0, 0, 0, 0 )', 2), 'wfx_err_sub(ji,jj) = 0._wp', 27],
+})
+
 _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"
          r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|namelist_ice_cfg|namelist_ice_ref|ocean\.output\.excerpt|ocean\.output)"
          r"|cfgs/ref_cfgs\.txt"
