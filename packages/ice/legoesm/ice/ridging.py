@@ -669,7 +669,7 @@ def _rdgrft_shift(s: dict, cells, prep, sst, sss, hi_max, cfg: SI3RdgrftConfig) 
         m = mask[..., None] if x.ndim == 4 else mask
         s[name] = x.at[..., jl].set(jnp.where(m, value, x[..., jl]))
 
-    for jl1 in range(jpl):  # :722
+    def donor(jl1):  # one ``DO jl1 = 1, jpl`` donor-category pass (:722-939)
         ll = cells & (apartf[..., jl1 + 1] > 0.0) & (cg > 0.0)  # :727-729
         a1 = col("a_i", jl1)
         oka = a1 > _RDG_EPSI10
@@ -795,6 +795,19 @@ def _rdgrft_shift(s: dict, cells, prep, sst, sss, hi_max, cfg: SI3RdgrftConfig) 
             add("e_i", eirdg, fvol, eirft)  # :927
             add("szv_i", sirdg, fvol, sirft)  # :929
 
+    if any(isinstance(x, jax.core.Tracer) for x in jax.tree_util.tree_leaves((s, prep, cells))):
+        # DECISION 198: traced callers run the donor loop as one static-trip
+        # fori_loop (same statements, same jl1 order, the jl2 loop unrolled
+        # inside); ``s`` is the carry.  Eager calls keep the Python loop.
+        def body(jl1, carry):
+            s.update(carry)
+            donor(jl1)
+            return dict(s)
+
+        s.update(jax.lax.fori_loop(0, jpl, body, dict(s)))
+    else:
+        for jl1 in range(jpl):  # :722
+            donor(jl1)
     return si3_var_roundoff(s, cells, ln_pnd=cfg.ln_pnd, ln_pnd_lids=cfg.ln_pnd_lids,
                             nn_icesal=cfg.nn_icesal)  # :944
 

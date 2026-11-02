@@ -32,13 +32,29 @@ PRE_D194_9998276020 = {
     "si3_dyn_orca2": 48_325,
     "remaining_named_and_inlined": 133_998,
 }
-# DECISION 194: category scan, layer fori_loops, shared vremap fori_loop.
-EXPECTED = {
+# DECISION 194 (48526f950c): category scan, layer fori_loops, shared vremap fori_loop.
+D194_48526F950C = {
     "recursive_total": 227_840,
     "_thermo_category_loop": 35_858,
     "si3_ice_thd_do": 9_659,
     "si3_dyn_orca2": 48_325,
     "remaining_named_and_inlined": 133_998,
+}
+# DECISION 194 resume 1 (b17f14b73c): vremap thickness and SSL transmission barriers.
+D194_RESUME1_B17F14B73C = {
+    "recursive_total": 228_050,
+    "_thermo_category_loop": 35_918,
+    "si3_ice_thd_do": 9_809,
+    "si3_dyn_orca2": 48_325,
+    "remaining_named_and_inlined": 133_998,
+}
+# DECISION 198 round 1: O6 redistribution donor loop as a fori_loop.
+EXPECTED = {
+    "recursive_total": 198_323,
+    "_thermo_category_loop": 35_918,
+    "si3_ice_thd_do": 9_809,
+    "si3_dyn_orca2": 48_325,
+    "remaining_named_and_inlined": 104_271,
 }
 OWNERS = ("_thermo_category_loop", "si3_ice_thd_do", "si3_dyn_orca2")
 
@@ -124,6 +140,8 @@ def count(master: Path) -> dict[str, Any]:
         "expected": EXPECTED,
         "reviewed_ea3e570_snapshot": REVIEWED_EA3E570,
         "pre_d194_9998276020_snapshot": PRE_D194_9998276020,
+        "d194_48526f950c_snapshot": D194_48526F950C,
+        "d194_resume1_b17f14b73c_snapshot": D194_RESUME1_B17F14B73C,
         "delta_from_pre_d194": {
             name: measured[name] - PRE_D194_9998276020[name] for name in EXPECTED
         },
