@@ -1,0 +1,7 @@
+}
+box              ours_clubb  cesm2_cl cesm2_cls cesm2_clc  ours_qc cesm2_clw  (fraction; g/kg)
+trades_N              0.049     0.119     0.069     0.050   0.0085    0.0141
+trades_S              0.009     0.092     0.028     0.065   0.0006    0.0044
+southern_ocean        0.207     0.397     0.380     0.017   0.0219    0.0425
+peru_sc               0.008     0.064     0.062     0.002   0.0006    0.0128
+namibia_sc            0.013     0.082     0.081     0.001   0.0012    0.0157
