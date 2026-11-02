@@ -262,6 +262,20 @@ def ocean_tile_response(
     # freshwater INTO ocean.
     evap_rate = lhflx / constants.L_v   # kg/m²/s, positive = up (ocean → atm)
     freshwater_flux = forcing.precip_total - evap_rate
+
+    # OMIP-2 / CORE-II bulk fluxes (LEGOESM_BULK=ly04 | ly04_tau)  [patch_bulk_ly04]
+    _bulk_mode = __import__("os").environ.get("LEGOESM_BULK", "")
+    if _bulk_mode in ("ly04", "ly04_tau"):
+        _sh, _lh, _tx, _ty = _ly04_omip_fluxes(
+            forcing.u_lowest - ocean_u, forcing.v_lowest - ocean_v,
+            forcing.T_lowest, forcing.q_lowest, ocean_sst)
+        shflx, lhflx = _sh.astype(ocean_sst.dtype), _lh.astype(ocean_sst.dtype)
+        if _bulk_mode == "ly04_tau":
+            tau_x, tau_y = _tx.astype(ocean_sst.dtype), _ty.astype(ocean_sst.dtype)
+        alpha_ocean = jnp.full(shape, 0.066, dtype=ocean_sst.dtype)
+        lw_up = constants.sigma_sb * ocean_sst ** 4
+        evap_rate = lhflx / constants.L_v
+        freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(
         T_surface=ocean_sst,
         albedo=alpha_ocean,
@@ -471,3 +485,59 @@ def make_coupler(
         return new_state, blended_out
 
     return step_surface
+
+
+# ----------------------------------------------------------------------------- [patch_bulk_ly04]
+def _ly04_omip_fluxes(u, v, t2, q2, sst, zt=2.0, n_iter=5):
+    """CORE-II / OMIP-2 Large & Yeager (2004) bulk fluxes.  Wind at 10 m; t2 [K], q2 [kg/kg] at zt
+    (shifted to 10 m); sst [K].  Returns (shflx, lhflx) positive upward and (tau_x, tau_y)."""
+    import jax.numpy as _jnp
+    kappa, grav = 0.4, 9.81
+    rho_a, cp_a, L_v = 1.22, 1000.5, 2.5e6
+
+    def psi_m(z):
+        x = _jnp.sqrt(_jnp.sqrt(_jnp.maximum(1.0 - 16.0 * z, 1e-12)))
+        un = 2.0 * _jnp.log((1 + x) / 2) + _jnp.log((1 + x * x) / 2) - 2.0 * _jnp.arctan(x) + _jnp.pi / 2
+        return _jnp.where(z < 0, un, -5.0 * z)
+
+    def psi_h(z):
+        x = _jnp.sqrt(_jnp.sqrt(_jnp.maximum(1.0 - 16.0 * z, 1e-12)))
+        return _jnp.where(z < 0, 2.0 * _jnp.log((1 + x * x) / 2), -5.0 * z)
+
+    def cdn(W):
+        return (2.7 / W + 0.142 + 0.0764 * W) / 1e3
+
+    U = _jnp.maximum(_jnp.sqrt(u * u + v * v), 0.5)
+    qs = 0.98 * 640380.0 / rho_a * _jnp.exp(-5107.4 / sst)
+    th = t2 + 0.0098 * zt
+    th10, q10 = th, q2
+    cd_n = cdn(U)
+    rt = _jnp.sqrt(cd_n)
+    stab = (th - sst > 0).astype(sst.dtype)
+    cd, ch, ce = cd_n, (18.0 * stab + 32.7 * (1 - stab)) * rt / 1e3, 34.6 * rt / 1e3
+    for _ in range(n_iter):
+        cd_rt = _jnp.sqrt(cd)
+        ustar = cd_rt * U
+        tstar = ch / cd_rt * (th10 - sst)
+        qstar = ce / cd_rt * (q10 - qs)
+        tv = th10 * (1 + 0.608 * q10)
+        bstar = grav * (tstar / tv + qstar / (q10 + 1 / 0.608))
+        z10 = _jnp.clip(kappa * bstar * 10.0 / ustar ** 2, -10.0, 10.0)
+        ztt = _jnp.clip(kappa * bstar * zt / ustar ** 2, -10.0, 10.0)
+        shift = _jnp.log(zt / 10.0) - psi_h(ztt) + psi_h(z10)
+        th10 = th - tstar / kappa * shift
+        q10 = q2 - qstar / kappa * shift
+        U10N = _jnp.maximum(U / (1 + rt * (-psi_m(z10)) / kappa), 0.5)
+        cd_n = cdn(U10N)
+        rt = _jnp.sqrt(cd_n)
+        stab = (z10 > 0).astype(sst.dtype)
+        ch_n, ce_n = (18.0 * stab + 32.7 * (1 - stab)) * rt / 1e3, 34.6 * rt / 1e3
+        cd = (rt / (1 + rt * (-psi_m(z10)) / kappa)) ** 2
+        xx = -psi_h(z10) / kappa
+        ch = ch_n / (1 + ch_n * xx / rt) * _jnp.sqrt(cd / cd_n)
+        ce = ce_n / (1 + ce_n * xx / rt) * _jnp.sqrt(cd / cd_n)
+    shflx = -rho_a * cp_a * ch * U * (th10 - sst)
+    lhflx = -rho_a * L_v * ce * U * (q10 - qs)
+    tau_x = rho_a * cd * U * u
+    tau_y = rho_a * cd * U * v
+    return shflx, lhflx, tau_x, tau_y

@@ -475,13 +475,35 @@ def build_jra55_cache(
     sample_da = _ascending_lat(ds[sample_var], _resolve_lat_lon_dims(ds[sample_var])[0])
     lat_name, lon_name = _resolve_lat_lon_dims(sample_da)
     src_lat_edges = _grid_edges_from_centers(sample_da[lat_name].values)
+    # _lat_pole_: the outermost source rows stop short of the poles; clamp the
+    # outer edges to +-90 deg so polar target rows are fully covered.
+    _H = 0.5 * np.pi if np.max(np.abs(src_lat_edges)) <= np.pi else 90.0
+    src_lat_edges = np.asarray(src_lat_edges, dtype=np.float64).copy()
+    src_lat_edges[0], src_lat_edges[-1] = -_H, _H
     src_lon_edges = _grid_edges_from_centers(sample_da[lon_name].values)
+    # Periodic longitude: the last source cell ends short of 360 deg (359.72 for
+    # JRA55-do), so the last target cell was only partly covered and scaled by
+    # the covered fraction (~0.44 at 0.5 deg).  Add one wrap-around source cell
+    # (the first column shifted by 360 deg); _regrid_and_align_variable pads the data.
+    _dlon = src_lon_edges[1] - src_lon_edges[0]
+    if abs((src_lon_edges[-1] - src_lon_edges[0]) - 2.0 * np.pi) < 0.5 * _dlon:
+        src_lon_edges = np.concatenate([[src_lon_edges[0] - _dlon], src_lon_edges, [src_lon_edges[-1] + _dlon]])
 
     weights = compute_overlap_weights(
         src_lat_edges, src_lon_edges,
         config.target_lat_edges, config.target_lon_edges,
     )
 
+    # Coverage check: regridding a field of ones must give ones (away from poles).
+    _ones = np.asarray(apply_conservative_regrid(
+        jnp.ones((1,) + tuple(weights.src_shape)), weights))[0]
+    _lat_c = np.rad2deg(0.5 * (config.target_lat_edges[1:] + config.target_lat_edges[:-1]))
+    _err = np.abs(_ones - 1.0)
+    if not np.all(np.isfinite(_err)) or float(np.max(_err)) > 1e-6:
+        raise ValueError(f'conservative weights do not sum to 1 (max err {np.nanmax(_err):.3g}); '
+                         'check lon/lat coverage of source vs target edges')
+    if progress:
+        print(f'[jra55_do] weight-sum check OK (max err {float(np.max(_err)):.2e})', flush=True)
     # Allocate output arrays on the cache axis.
     n_dst_lat = config.target_lat_edges.size - 1
     n_dst_lon = config.target_lon_edges.size - 1
@@ -500,42 +522,49 @@ def build_jra55_cache(
             n_records, n_dst_lat, n_dst_lon,
         )
         _check_plausible(var, out_arr)
-        dst_arrays[var] = out_arr
+        _write_cache_var(out, var, out_arr, config, first=(var == JRA55_VARIABLES[0]))
+        del out_arr
 
-    # Assemble xarray Dataset and write Zarr.
-    lat_centers = 0.5 * (config.target_lat_edges[1:] + config.target_lat_edges[:-1])
-    lon_centers = 0.5 * (config.target_lon_edges[1:] + config.target_lon_edges[:-1])
-    cache_ds = xr.Dataset(
-        {var: (("time", "lat", "lon"), dst_arrays[var]) for var in JRA55_VARIABLES},
-        coords={
-            "time": np.arange(n_records, dtype=np.int64),
-            "lat": np.rad2deg(lat_centers),
-            "lon": np.rad2deg(lon_centers),
-        },
-        attrs={
-            "source": config.source_path,
-            "year_start": config.years[0],
-            "year_end": config.years[1],
-            "ref_year": config.ref_year,
-            "calendar": "noleap",
-            "records_per_day": RECORDS_PER_DAY,
-            "n_records": n_records,
-            "description": (
-                "JRA55-do v1.4+ corrected forcing, leap-day-dropped, "
-                "conservatively regridded to the legoESM model grid, "
-                "linearly interpolated to a 3-hourly axis."
-            ),
-        },
-    )
-
-    chunks = {"time": RECORDS_PER_DAY,  # 1 day of 3-hourly = ~4 MB/var
-              "lat": n_dst_lat, "lon": n_dst_lon}
-    cache_ds.chunk(chunks).to_zarr(
-        str(out), mode="w", consolidated=True,
-    )
     if progress:
         print(f"[jra55_do] cache written: {out}")
     return out
+
+
+def _write_cache_var(out, var, arr, config, first):
+    """Write one regridded variable to the Zarr cache (first call creates the
+    store with coordinates and attributes; later calls append), so the full
+    set of variables never has to be held in memory at once."""
+    import xarray as xr
+    n_records, n_dst_lat, n_dst_lon = arr.shape
+    chunks = {"time": RECORDS_PER_DAY, "lat": n_dst_lat, "lon": n_dst_lon}
+    if first:
+        lat_c = 0.5 * (config.target_lat_edges[1:] + config.target_lat_edges[:-1])
+        lon_c = 0.5 * (config.target_lon_edges[1:] + config.target_lon_edges[:-1])
+        ds = xr.Dataset(
+            {var: (("time", "lat", "lon"), arr)},
+            coords={"time": np.arange(n_records, dtype=np.int64),
+                    "lat": np.rad2deg(lat_c), "lon": np.rad2deg(lon_c)},
+            attrs={
+                "source": config.source_path,
+                "year_start": config.years[0],
+                "year_end": config.years[1],
+                "ref_year": config.ref_year,
+                "calendar": "noleap",
+                "records_per_day": RECORDS_PER_DAY,
+                "n_records": n_records,
+                "description": (
+                    "JRA55-do v1.4+ corrected forcing, leap-day-dropped, "
+                    "conservatively regridded to the legoESM model grid, "
+                    "linearly interpolated to a 3-hourly axis."
+                ),
+            },
+        )
+        ds.to_zarr(str(out), mode="w", consolidated=True, encoding={var: {"chunks": (RECORDS_PER_DAY, n_dst_lat, n_dst_lon)}})
+    else:
+        # _keep_attrs_: mode="a" rewrites group attrs, so re-supply them
+        _attrs = dict(xr.open_zarr(str(out)).attrs)
+        xr.Dataset({var: (("time", "lat", "lon"), arr)}, attrs=_attrs).to_zarr(
+            str(out), mode="a", consolidated=True, encoding={var: {"chunks": (RECORDS_PER_DAY, n_dst_lat, n_dst_lon)}})
 
 
 def _regrid_and_align_variable(
@@ -559,23 +588,29 @@ def _regrid_and_align_variable(
     """
     lat_name, lon_name = _resolve_lat_lon_dims(da)
     da = _ascending_lat(da, lat_name)
-    src_data = np.asarray(da.values)  # shape (n_time_src, n_src_lat, n_src_lon)
-    n_src_lat = src_data.shape[1]
-    n_src_lon = src_data.shape[2]
-    if (n_src_lat, n_src_lon) != weights.src_shape:
+    time_dim = next(d for d in da.dims if d not in (lat_name, lon_name))
+    da = da.transpose(time_dim, lat_name, lon_name)
+    n_src_lat = int(da.sizes[lat_name])
+    n_src_lon = int(da.sizes[lon_name])
+    pad_lon = weights.src_shape[1] == n_src_lon + 2   # periodic wrap columns at both ends, see build_jra55_cache
+    if (n_src_lat, n_src_lon + 2 * int(pad_lon)) != tuple(weights.src_shape):
         raise ValueError(
             f"{var}: source shape {(n_src_lat, n_src_lon)} does not "
             f"match weights.src_shape {weights.src_shape}"
         )
 
-    # Use the JAX apply for vectorised conservative regrid.
-    src_jnp = jnp.asarray(src_data[keep_mask], dtype=jnp.float64)
-    regridded = np.asarray(apply_conservative_regrid(src_jnp, weights))
-
-    # Allocate the cache-axis array filled with NaN; populate from
-    # mapped indices, then linearly fill the rest.
-    out = np.full((n_records, n_dst_lat, n_dst_lon), np.nan, dtype=np.float64)
-    out[cache_index[keep_mask]] = regridded
+    # Regrid in blocks of source records so only one block is in memory at a
+    # time, and store float32 (forcing precision; halves memory and cache size).
+    keep_idx = np.nonzero(keep_mask)[0]
+    dst_idx = cache_index[keep_mask]
+    out = np.full((n_records, n_dst_lat, n_dst_lon), np.nan, dtype=np.float32)
+    block = 240
+    for s in range(0, keep_idx.size, block):
+        blk = np.asarray(da.isel({time_dim: keep_idx[s:s + block]}).values)
+        if pad_lon:
+            blk = np.concatenate([blk[..., -1:], blk, blk[..., :1]], axis=-1)
+        reg = apply_conservative_regrid(jnp.asarray(blk, dtype=jnp.float64), weights)
+        out[dst_idx[s:s + block]] = np.asarray(reg, dtype=np.float32)
 
     if var not in _NATIVE_3HOURLY:
         out = _linfill_time_axis(out)

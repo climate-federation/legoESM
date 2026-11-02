@@ -219,3 +219,5 @@ Recurring mistakes caught by slopbuster. Check before submitting code:
 5. Run /codex:review --wait again
 6. Issues remain: go to step 4
 7. Stop when review clean or after 30 iterations
+## Levante rules (ggn)
+- Never run training or long simulations on the login node; submit via sbatch with --account=bb1596

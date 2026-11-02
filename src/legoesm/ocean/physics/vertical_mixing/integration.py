@@ -191,3 +191,10 @@ def _wrap_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state,
     if K_v is not None or A_v is not None:
         t = t._replace(K_v=K_v, A_v=A_v)
     return t
+
+
+# --- from our tree (MARBL work), re-added after the colleague merge 2026-10-16 ---
+from legoesm.ocean.physics.vertical_mixing.kpp import (
+    kpp_surface_fluxes,
+    kpp_vertical_mixing,
+)

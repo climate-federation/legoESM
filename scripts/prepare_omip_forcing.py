@@ -95,6 +95,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--lon-offset-cells", type=float, default=0.0,
+        help=(
+            "Shift the target longitude edges by this fraction of a cell. "
+            "Use -0.5 for the legoESM lat-lon grid, whose cell centres sit on "
+            "whole multiples of the resolution (0, 1, ..., 359 at 1 deg)."
+        ),
+    )
+    p.add_argument(
         "--cache-dir", type=str, required=True,
         help="Directory in which to write the Zarr cache.",
     )
@@ -196,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     from legoesm.forcing.time_utils import NOLEAP_DAYS_PER_YEAR
 
     lat_edges, lon_edges = _build_target_edges(args.target_resolution_deg)
+    lon_edges = lon_edges + np.deg2rad(args.lon_offset_cells * args.target_resolution_deg)
     n_lat = lat_edges.size - 1
     n_lon = lon_edges.size - 1
     n_years = args.years[1] - args.years[0] + 1

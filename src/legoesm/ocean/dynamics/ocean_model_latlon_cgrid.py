@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from functools import partial
 
+import os
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -271,6 +272,99 @@ def _ssp_rk3_tracer_step(
     return tr_new
 
 
+def _is_marbl_tracers(bgc) -> bool:
+    """True when ``bgc`` is the 32-tracer MARBL state (transported by the model)."""
+    if bgc is None:
+        return False
+    from legoesm.ocean.biogeochemistry.marbl.config import MarblTracers
+    return isinstance(bgc, MarblTracers)
+
+
+def _marbl_flux_form_diffusion(grid, h, act, K_h, dt, radius=6.371229e6):
+    """Conservative horizontal diffusion for MARBL tracers on the lat-lon C-grid.
+
+    Flux form with face thickness min(h_left, h_right) and zero flux across faces
+    touching an inactive (land / below-bottom) cell, so sum(area * h * f) is
+    conserved exactly.  Returns f -> dt * df/dt (same shape as f)."""
+    lat = jnp.asarray(grid.lat).reshape(-1)
+    lon = jnp.asarray(grid.lon).reshape(-1)
+    dlam = jnp.abs(lon[1] - lon[0])
+    dphi = jnp.abs(lat[1] - lat[0])
+    cos_c = jnp.cos(lat)[:, None, None]
+    cos_f = jnp.cos(0.5 * (lat[1:] + lat[:-1]))[:, None, None]
+    a = (act > 0.5).astype(h.dtype)
+    hx = jnp.minimum(h, jnp.roll(h, 1, axis=1)) * a * jnp.roll(a, 1, axis=1)
+    hy = jnp.minimum(h[1:], h[:-1]) * a[1:] * a[:-1]
+    cx = K_h * hx * dphi / (cos_c * dlam)
+    cy = K_h * hy * cos_f * dlam / dphi
+    vol = radius ** 2 * cos_c * dlam * dphi * jnp.maximum(h, 1e-10)
+
+    def apply(f):
+        f = jnp.where(a > 0, f, 0.0)              # inactive cells never enter the fluxes
+        tx = cx * (f - jnp.roll(f, 1, axis=1))
+        ty = cy * (f[1:] - f[:-1])
+        div = jnp.roll(tx, -1, axis=1) - tx
+        div = div.at[:-1].add(ty).at[1:].add(-ty)
+        return jnp.where(a > 0, dt * div / vol, 0.0)
+
+    return apply
+
+
+def _transport_marbl_tracers(bgc, config, grid, mass_flux_u, mass_flux_v, w_baro,
+                             h_k_old, h_k_new, h_u_old, h_v_old, active_3d, dt, gm_ctx=None):
+    """Move MARBL tracers like T and S: K_h Laplacian diffusion, then the same
+    flux-form advection (scheme, integrator, mass fluxes, layer thicknesses).
+    Vertical mixing is applied in ``_apply_implicit_vertical_mixing``."""
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import laplacian_cgrid
+
+    if config.tracer_advection == "som":
+        raise NotImplementedError("MARBL tracers: tracer_advection='som' is not supported")
+    if config.tracer_time_integrator == "ab2":
+        raise NotImplementedError("MARBL tracers: use tracer_time_integrator 'euler' or 'rk3'")
+    if config.gm_redi is not None and gm_ctx is None:
+        raise NotImplementedError("MARBL tracers: GM/Redi needs gm_ctx [patch_marbl_gm_redi]")
+    if not config.implicit_vertical_mixing:
+        raise NotImplementedError("MARBL tracers need implicit_vertical_mixing=True")
+
+    K_h = float(config.K_h or 0.0)
+    _diff = (_marbl_flux_form_diffusion(grid, h_k_old, active_3d, K_h, dt)
+             if K_h > 0.0 and __import__("os").environ.get("MARBL_NO_HDIFF", "0") != "1" else None)
+
+    def _one(tr):
+        dtype = tr.dtype
+        if _diff is not None:
+            tr = tr + _diff(tr).astype(dtype)
+        if __import__("os").environ.get("MARBL_NO_ADV", "0") == "1":
+            return tr.astype(dtype)
+        if config.tracer_time_integrator == "rk3":
+            tr_new = _ssp_rk3_tracer_step(
+                tr, config.tracer_advection,
+                mass_flux_u, mass_flux_v, w_baro,
+                h_k_old, h_k_new, h_u_old, h_v_old,
+                grid, dt, active_3d,
+            )
+        else:
+            div_hut, vert_flux_div = _compute_advection_flux_div(
+                tr, config.tracer_advection,
+                mass_flux_u, mass_flux_v, w_baro,
+                h_k_old, h_u_old, h_v_old, grid, dt,
+            )
+            tr_new = (h_k_old * tr - dt * (div_hut + vert_flux_div)) / jnp.maximum(h_k_new, 1e-10)
+            tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
+        return tr_new.astype(dtype)
+
+    # One compiled copy of the transport, looped over the stacked tracers.
+    leaves, treedef = jax.tree_util.tree_flatten(bgc)
+    _stack = jnp.stack(leaves)
+    if (config.gm_redi is not None and gm_ctx is not None
+            and __import__("os").environ.get("MARBL_NO_GM", "0") != "1"):   # [patch_marbl_gm_redi]
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import gm_redi_tendencies_many_latlon
+        _gm = gm_redi_tendencies_many_latlon(_stack, **gm_ctx)
+        _stack = (_stack + dt * _gm * (active_3d > 0.5)).astype(_stack.dtype)
+    out = jax.lax.map(_one, _stack)
+    return jax.tree_util.tree_unflatten(treedef, [out[i] for i in range(len(leaves))])
+
+
 def _forward_backward_coriolis_3d(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -433,7 +527,7 @@ class LatLonCGridOceanModel:
         self.grid = ensure_geometry(grid)
         self.z_coord = z_coord
         self.config   = config
-        self._bgc_cfg = bgc_cfg or LatLonCGridOceanConfig()
+        self._bgc_cfg = bgc_cfg  # BiogeoConfig | None
         self._validate_config(self.config)
         self._cfl_checked = False
 
@@ -916,6 +1010,15 @@ class LatLonCGridOceanModel:
         T_mid = state_new.T.data  # tracer after diffusion+physics Euler step
         S_mid = state_new.S.data
 
+        # MARBL tracers get GM/Redi with the same arguments as T/S  [patch_marbl_gm_redi]
+        _gm_ctx_marbl = None
+        if self.config.gm_redi is not None:
+            _gm_ctx_marbl = dict(
+                T=T_mid, S=S_mid, eta=state_new.eta.data, H_bathy=state_new.H_bathy.data,
+                grid=self.grid, z_coord=self.z_coord, cfg=self.config.gm_redi,
+                eos=self.config.eos, eos_linear=self.config.eos_linear,
+                mask=state.land_mask.data, u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+        )
         # GM/Redi isopycnal mixing (if configured)
         if self.config.gm_redi is not None:
             dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
@@ -1056,6 +1159,42 @@ class LatLonCGridOceanModel:
                         dims=_dims_fd, units="m/s"),
                 )
 
+            # ── BGC tracers: identical flux-form advection to T/S ──────
+            # (added 2026-10-13: previously the biogeo fields were never
+            # advected or mixed by the dynamics — column-local only.)
+            _bio = getattr(state_new, "biogeo", None)
+            if _bio is not None and not _is_marbl_tracers(_bio) and not os.environ.get("LEGOESM_BGC_NO_ADV"):
+                _bio_new = {}
+                for _bf in _bio._fields:
+                    _arr = getattr(_bio, _bf)
+                    if _arr is None or getattr(_arr, "ndim", 0) != 3:
+                        continue
+                    if _tti == "rk3":
+                        _tn = _ssp_rk3_tracer_step(
+                            _arr, _adv, mass_flux_u, mass_flux_v, w_baro,
+                            h_k_old, h_k_new, h_u_old, h_v_old,
+                            self.grid, dt, active_3d,
+                        )
+                    else:
+                        _dh, _dv = _compute_advection_flux_div(
+                            _arr, _adv, mass_flux_u, mass_flux_v, w_baro,
+                            h_k_old, h_u_old, h_v_old, self.grid, dt,
+                        )
+                        _tn = ((h_k_old * _arr - dt * (_dh + _dv))
+                               / jnp.maximum(h_k_new, 1e-10))
+                        _tn = jnp.where(active_3d > 0.5, _tn, _arr)
+                    _bio_new[_bf] = _tn
+                state_new = state_new._replace(biogeo=_bio._replace(**_bio_new))
+
+        # MARBL tracers: same horizontal diffusion and advection as T and S
+        # (older BGC schemes in state.biogeo are not transported, as before).
+        if _is_marbl_tracers(state.biogeo):
+            state_new = state_new._replace(biogeo=_transport_marbl_tracers(
+                state.biogeo, self.config, self.grid,
+                mass_flux_u, mass_flux_v, w_baro,
+                h_k_old, h_k_new, h_u_old, h_v_old,
+                active_3d * (state_new.land_mask.data[..., jnp.newaxis] > 0.5).astype(active_3d.dtype), dt, gm_ctx=_gm_ctx_marbl))
+
         # Include vertical velocity diagnostic in state
         # w_baro has shape (..., nlev+1) on half levels, interpolate to full levels (..., nlev)
         w_full = 0.5 * (w_baro[..., :-1] + w_baro[..., 1:])  # Average adjacent half levels
@@ -1120,16 +1259,11 @@ class LatLonCGridOceanModel:
             )
 
         # ── BGC source/sink step ─────────────────────────────────────────
-        if state_new.biogeo is not None and self._bgc_cfg is not None:
-            from legoesm.ocean.biogeochemistry import step_ocean_biogeochemistry
-            biogeo_new, _ = step_ocean_biogeochemistry(
-                state_new.biogeo,
-                state_new.T.data, state_new.S.data,
-                self.z_coord.dz_ref, self.z_coord.z_full_ref,
-                state_new.land_mask.data,
-                dt, self._bgc_cfg,
-            )
-            state_new = state_new._replace(biogeo=biogeo_new)
+        # Disabled here: BGC is stepped in run_omip.py with seasonal PAR.
+        # Keeping this block active would run BGC twice per step and with
+        # a constant PAR=200 W/m² (no seasonal cycle).
+        # if state_new.biogeo is not None and self._bgc_cfg is not None:
+        #     ...
 
         return cast_pytree(state_new, None, "storage", allow_downcast=True)
 
@@ -1258,6 +1392,30 @@ class LatLonCGridOceanModel:
         T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
         S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
 
+        # ---- BGC tracers: same K_v, same solver ----
+        _bio = getattr(state, "biogeo", None)
+        _bio_mixed = _bio
+        if _bio is not None and not _is_marbl_tracers(_bio) and not os.environ.get("LEGOESM_BGC_NO_VMIX"):
+            # Sub-bottom / land cells of the BGC fields hold initial values
+            # (not maintained like T/S).  Fill them with the column's deepest
+            # wet value first so the solver sees no gradient across the floor
+            # and nothing leaks in; mask afterwards.
+            _wet = mask_3d > 0.5
+            _nwet = jnp.sum(_wet, axis=-1).astype(jnp.int32)             # (ny, nx)
+            _kb = jnp.clip(_nwet - 1, 0, mask_3d.shape[-1] - 1)
+            _upd = {}
+            for _bf in _bio._fields:
+                _arr = getattr(_bio, _bf)
+                if _arr is None or getattr(_arr, "ndim", 0) != 3:
+                    continue
+                _bottom = jnp.take_along_axis(_arr, _kb[..., None], axis=-1)   # (ny, nx, 1)
+                _filled = jnp.where(_wet, _arr, _bottom).astype(K_v_cell.dtype)
+                _m = implicit_vertical_diffusion_ocean(
+                    _filled, K_v_cell, dz_cell, dz_half_cell, dt,
+                )
+                _upd[_bf] = jnp.where(_wet, _m, _arr).astype(_arr.dtype)
+            _bio_mixed = _bio._replace(**_upd)
+
         # ---- Momentum (u at u-faces, v at v-faces) ----
         # Interpolate A_v and dz from cell centers to face centers.  The
         # solver only needs dz to be positive (it clips internally) and
@@ -1281,12 +1439,40 @@ class LatLonCGridOceanModel:
         u_new = jnp.where(u_mask_3d > 0.5, u_new, state.u.data)
         v_new = jnp.where(v_mask_3d > 0.5, v_new, state.v.data)
 
-        return state._replace(
+        state = state._replace(
             u=state.u.replace(data=u_new),
             v=state.v.replace(data=v_new),
             T=state.T.replace(data=T_new),
             S=state.S.replace(data=S_new),
+            biogeo=_bio_mixed,
         )
+        if _is_marbl_tracers(state.biogeo) and __import__("os").environ.get("MARBL_NO_VMIX", "0") != "1":
+            # Same backward-Euler K_v solve for every MARBL tracer.
+            # Partial-cell geometry, as in the tracer advection: actual layer
+            # thicknesses and no mixing across the sea floor -> sum(h * c) conserved.
+            _act = (self.z_coord.is_active if hasattr(self.z_coord, "is_active")
+                    else jnp.broadcast_to(mask_3d, state.T.data.shape)) > 0.5
+            _act = _act & (mask_3d > 0.5)
+            _h = compute_layer_thickness(state.eta.data, state.H_bathy.data, self.z_coord,
+                                         min_water_column_m=self.config.min_water_column_m)
+            _dz_m = jnp.where(_act, jnp.maximum(_h, 1e-3), dz_cell)
+            _dzh_m = build_dz_half(_dz_m)
+            if K_v_cell.shape[-1] == _act.shape[-1] - 1:
+                _K_m = K_v_cell * (_act[..., :-1] & _act[..., 1:])
+            else:
+                _K_m = K_v_cell * _act
+
+            def _mix(f):
+                f_new = implicit_vertical_diffusion_ocean(
+                    f, _K_m.astype(f.dtype), _dz_m.astype(f.dtype),
+                    _dzh_m.astype(f.dtype), dt,
+                )
+                return jnp.where(_act, f_new, f)
+            _leaves, _treedef = jax.tree_util.tree_flatten(state.biogeo)
+            _mixed = jax.lax.map(_mix, jnp.stack(_leaves))
+            state = state._replace(biogeo=jax.tree_util.tree_unflatten(
+                _treedef, [_mixed[i] for i in range(len(_leaves))]))
+        return state
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: LatLonCGridOceanState, dt: float,

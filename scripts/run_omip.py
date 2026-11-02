@@ -21,6 +21,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+
+# Seawater reference density and heat capacity, for the surface heat flux.
+_RHO_SW, _CP_SW = 1026.0, 3996.0
+import os
 import json
 import sys
 import time
@@ -82,8 +86,21 @@ def parse_args():
     p.add_argument("--output", type=str, default="results/omip")
     p.add_argument("--checkpoint-days", type=float, default=30.0)
     p.add_argument("--biogeo", type=str, default="none",
-                   choices=["none", "abiotic", "npzd", "npzd_v2"],
+                   choices=["none", "abiotic", "npzd", "npzd_v2", "marbl_cesm", "marbl"],
                    help="BGC scheme (default: none)")
+    p.add_argument("--marbl-ic", type=str, default=None,
+                   help="MARBL initial state on the model grid (scripts/build_marbl_ic.py)")
+    p.add_argument("--marbl-forcing", type=str, default=None,
+                   help="Monthly dust/iron/NOx/NHy deposition and sea-ice fraction on the "
+                        "model grid; without it: no deposition, ice where SST < -1 C")
+    p.add_argument("--marbl-every", type=int, default=1,
+                   help="Apply MARBL sources/sinks every N ocean steps (dt_bgc = N*dt)")
+    p.add_argument("--marbl-batch-size", type=int, default=4096,
+                   help="Water columns per MARBL batch (memory vs speed)")
+    p.add_argument("--marbl-diag-days", type=float, default=30.0,
+                   help="Averaging period of the MARBL 2-D diagnostics [days]")
+    p.add_argument("--marbl-write-grid", type=str, default=None,
+                   help="Write the model grid to this .npz (for build_marbl_ic.py) and exit")
     p.add_argument("--pco2-atm", type=float, default=400.0,
                    help="Atmospheric pCO2 [uatm] (default: 400)")
     p.add_argument("--woa-t", type=str, default=None,
@@ -157,6 +174,8 @@ def parse_args():
     p.add_argument("--pgf-scheme", type=str, default=None,
                    choices=["adcroft", "smc03"],
                    help="PGF scheme override (default smc03 with bathymetry).")
+    p.add_argument("--eq-smoothing-passes", type=int, default=30,
+                   help="Extra wet-only Laplacian bathymetry passes within +-15 deg of the equator (default 30; 0 disables).")
     p.add_argument("--slope-foot-alpha", type=float, default=0.0,
                    help=(
                        "Slope-foot viscosity enhancement (MOM6 OM4 KH_BG_2D analog). "
@@ -180,7 +199,7 @@ def parse_args():
     p.add_argument("--sw-down", type=float, default=200.0,
                    help="Constant downwelling SW [W/m²]")
     p.add_argument("--physics", type=str, default="full",
-                   choices=["full", "minimal", "none"])
+                   choices=["full", "full_bulk", "minimal", "none"])
     p.add_argument("--water-type", type=str, default="II",
                    choices=["I", "IA", "IB", "II", "III"])
     p.add_argument("--no-conservation-fixer", action="store_true")
@@ -227,6 +246,11 @@ def parse_args():
                    help="Sponge-zone width inside the active domain [°].")
     p.add_argument("--sponge-tau-days", type=float, default=5.0,
                    help="Sponge relaxation timescale at the boundary [days].")
+    p.add_argument("--sea-ice-clim", type=str, default=None,
+                   help=("Monthly sea-ice concentration climatology (NetCDF, var "
+                         "'siconc' (month,lat,lon), fraction 0-1). Shortwave, "
+                         "turbulent+longwave heat flux and evaporation are scaled "
+                         "by (1 - f_ice). Stand-in for a sea-ice model."))
     p.add_argument("--sss-piston-velocity", type=float, default=5.0e-7,
                    help=(
                        "SSS restoring piston velocity [m/s] "
@@ -322,7 +346,9 @@ def _build_physics_config(preset: str, water_type: str):
     return OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="kpp"),
         lateral_mixing=LateralMixingConfig(scheme="gm_redi"),
-        surface_forcing=SurfaceForcingConfig(scheme="restoring"),
+        # full_bulk: surface fluxes come from the JRA55-do bulk path only
+        surface_forcing=SurfaceForcingConfig(
+            scheme="none" if preset == "full_bulk" else "restoring"),
         bottom_drag=BottomDragConfig(scheme="quadratic"),
         convection=OceanConvectionConfig(scheme="enhanced_diffusion"),
         shortwave_penetration=ShortwavePenetrationConfig(water_type=water_type),
@@ -382,7 +408,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
     # explicit K_h because the discrete Laplacian has truncation error;
     # spectral grids are spectrally accurate and rely on hyperdiffusion.
     A_v = 1.0e-3  # vertical viscosity [m²/s] (all grids)
-    K_v = 1.0e-4  # vertical tracer diffusivity [m²/s] (all grids)
+    K_v = float(__import__("os").environ.get("LEGOESM_KV", "1.0e-4"))  # vertical tracer diffusivity [m²/s] (all grids)
     if grid_type == "spectral":
         A_h = 1.0e4   # spectral Laplacian is exact: less needed
         K_h = 1.0e3
@@ -440,7 +466,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             bathy_physics = OceanPhysicsConfig(
                 vertical_mixing=VerticalMixingConfig(
                     scheme="kpp",
-                    kpp=KPPConfig(),
+                    kpp=KPPConfig(**__import__("json").loads(__import__("os").environ.get("LEGOESM_KPP", "{}"))),
                 ),
                 convection=OceanConvectionConfig(
                     scheme="enhanced_diffusion",
@@ -454,7 +480,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 lateral_mixing=LateralMixingConfig(scheme="none"),
                 # Disable shortwave penetration — q_net already includes
                 # SW, so the physics SW module would double-count.
-                shortwave_penetration=None,
+                shortwave_penetration=(__import__("legoesm.ocean.physics.shortwave_penetration",fromlist=["x"]).ShortwavePenetrationConfig(water_type=water_type) if __import__("os").environ.get("LEGOESM_SWPEN","0")=="1" else None),
             )
             bathy_gm_redi = GMRediConfig(
                 kappa_GM=800.0,
@@ -477,7 +503,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 A_h_floor=A_h_floor,
                 A_h_eq_boost=A_h_eq_boost,
                 A_h_eq_sigma_deg=A_h_eq_sigma_deg,
-                K_h=_K_h, A_v=A_v, K_v=K_v,
+                K_h=_K_h, A_v=A_v, K_v=K_v, tracer_advection=__import__("os").environ.get("LEGOESM_TRACER_ADV", "tvd"),
                 B_h=_B_h,
                 C_smag=_C_smag,
                 C_smag_lap=C_smag_lap,
@@ -492,7 +518,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # BIHARMONIC_BAROTROPIC analog at 1° global resolution.
                 # Scaled per Griffies-Hallberg 2000: ν₄ ≈ Δx³·U/8.
                 # At 1° (Δx≈111 km, U≈1 m/s) that's 1.7e14 m⁴/s.
-                B_h_barotropic=1.0e14,
+                B_h_barotropic=float(__import__("os").environ.get("LEGOESM_BH_BT", "1.0e14")),
                 bottom_drag_r=2.5e-3,
                 bottom_drag_bbl_thickness=100.0,
                 # MOM6 OM4 DRAG_BG_VEL — quadratic-with-floor drag.
@@ -525,7 +551,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             )
         # ── BGC setup (latlon) ───────────────────────────────────────────
         _bgc_cfg = None
-        if biogeo != "none":
+        if biogeo not in ("none", "marbl"):
             from legoesm.ocean.biogeochemistry import BiogeoConfig
             _no3_tgt = _WOA_BGC_PATHS.get('NO3_target')
             _bgc_cfg = BiogeoConfig(
@@ -535,11 +561,16 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 NO3_target=_WOA_BGC_PATHS.get('NO3_target'),
                 PO4_target=_WOA_BGC_PATHS.get('PO4_target'),
                 Si_target =_WOA_BGC_PATHS.get('Si_target'),
+                Fe_clim=(None if not __import__('os').environ.get('LEGOESM_FE_CLIM') else
+                         __import__('xarray').open_dataset(__import__('os').environ['LEGOESM_FE_CLIM'])['dfe'].transpose('lat', 'lon', 'lev').values),
             )
             # Store WOA nutrient paths in module-level dict for BGC init
             _WOA_BGC_PATHS["no3"] = woa_no3
             _WOA_BGC_PATHS["po4"] = woa_po4
             _WOA_BGC_PATHS["si"]  = woa_si
+            if _bgc_cfg.Fe_clim is not None:
+                print(f"  BGC Fe: prescribed climatology {__import__('os').environ['LEGOESM_FE_CLIM']} "
+                      f"shape={_bgc_cfg.Fe_clim.shape} surface median={float(__import__('numpy').median(_bgc_cfg.Fe_clim[..., 0]))*1e9:.3f} nM")
         model = LatLonCGridOceanModel(grid, z_coord, config, bgc_cfg=_bgc_cfg)
         return grid, z_coord, config, model, "latlon"
 
@@ -779,8 +810,13 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         )
 
     # Build 2-D lat/lon (in radians) for cos_zenith / atm_to_surface.
-    lat_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lat))[:, None])
-    lon_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lon))[None, :])
+    # grid.lat/lon may be stored in degrees or radians depending on the grid class
+    def _as_rad(a):
+        a = np.asarray(a, dtype=np.float64).reshape(-1)
+        return a if np.nanmax(np.abs(a)) <= 2.0 * np.pi + 1e-6 else np.deg2rad(a)
+    _lat_rad = _as_rad(grid.lat); _lon_rad = _as_rad(grid.lon)
+    lat_2d = jnp.asarray(_lat_rad[:, None])
+    lon_2d = jnp.asarray(_lon_rad[None, :])
 
     # Coupler config: LY09 bulk flux at 10 m winds, 2 m T/q (the JRA55-do
     # convention). The Item 1 fixes (LY09 U^6 term, 0.98 q_sat, separate
@@ -838,11 +874,43 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         and S_woa is not None
         and z_coord is not None
     )
+    # Top-layer thickness: needed by the SSS piston step AND by the
+    # surface heat-flux application in the step functions.
+    if z_coord is not None:
+        state["dz_top"] = float(np.asarray(z_coord.dz_ref)[0])
     if sss_restoring_enabled:
         state["sss_target_2d"] = jnp.asarray(S_woa[..., 0])
         state["sss_piston_velocity"] = float(args.sss_piston_velocity)
         state["dz_top"] = float(np.asarray(z_coord.dz_ref)[0])
     state["enable_sss_restoring"] = sss_restoring_enabled
+
+    # Prescribed sea-ice concentration climatology (12, ny, nx), fraction.
+    ice_path = getattr(args, "sea_ice_clim", None)
+    if ice_path:
+        import xarray as _xr
+        from scipy.interpolate import RegularGridInterpolator as _RGI
+        _ds = _xr.open_dataset(ice_path)["siconc"].transpose("month", "lat", "lon")
+        _la = np.asarray(_ds["lat"]); _lo = np.asarray(_ds["lon"]) % 360.0
+        _o = np.argsort(_lo); _lo = _lo[_o]; _v = np.asarray(_ds.values, dtype=np.float64)[:, :, _o]
+        _lo_p = np.concatenate([[_lo[-1] - 360.0], _lo, [_lo[0] + 360.0]])      # periodic in lon
+        _v_p = np.concatenate([_v[:, :, -1:], _v, _v[:, :, :1]], axis=2)
+        _LA = np.degrees(_lat_rad)[:, None]; _LO = np.degrees(_lon_rad)[None, :]
+        if _LA.ndim == 1 and _LO.ndim == 1:
+            _LA, _LO = np.meshgrid(_LA, _LO, indexing="ij")
+        _LA, _LO = np.broadcast_arrays(_LA, _LO)
+        _q = np.stack([np.clip(_LA, _la.min(), _la.max()), _LO % 360.0], axis=-1)
+        ice = np.stack([_RGI((_la, _lo_p), _v_p[m], bounds_error=False, fill_value=0.0)(_q)
+                        for m in range(12)])
+        ice = np.clip(np.nan_to_num(ice), 0.0, 1.0)
+        state["ice_clim"] = jnp.asarray(ice)
+        state["enable_sea_ice"] = True
+        print(f"  Sea ice: prescribed climatology {ice_path} -> {ice.shape}, "
+              f"Dec/Sep area-mean f_ice poleward of 60S: "
+              f"{ice[11][_LA < -60].mean():.2f}/{ice[8][_LA < -60].mean():.2f} "
+              f"[grid lat {np.nanmin(_LA):.1f}..{np.nanmax(_LA):.1f} shape {_LA.shape} nan={int(np.isnan(_LA).sum())}; "
+              f"ice max {ice.max():.2f}]")
+    else:
+        state["enable_sea_ice"] = False
 
     # T_freeze cap — stand-in for the missing sea-ice model.
     # When a sponge is active, cap only inside the sponge zone.
@@ -867,6 +935,23 @@ def _build_sponge_forcing(jra55_state):
         T_ref=jra55_state["sponge_T_ref_3d"],
         S_ref=jra55_state["sponge_S_ref_3d"],
     )
+
+
+def _apply_surface_heat_flux(state, jra55_state, q_ns, dt):
+    """Add a surface heat flux [W/m^2, + into ocean] to the top layer.
+
+    Post-step operator split, same top-layer thickness and land mask as
+    _apply_sss_restoring:  T_top += dt * q_ns / (rho_0 * c_p * dz_top)
+    """
+    from legoesm import constants as _c
+    rho0 = float(getattr(_c, "rho_0", 1025.0))
+    cp = float(getattr(_c, "c_sw", getattr(_c, "c_p_sw", 3992.0)))
+    T = state.T.data
+    mask = jnp.asarray(state.land_mask.data, dtype=T.dtype)
+    fac = jnp.asarray(dt / (rho0 * cp * max(jra55_state["dz_top"], 1e-6)), dtype=T.dtype)
+    dT = fac * jnp.asarray(q_ns, dtype=T.dtype) * mask
+    T_new = T.at[..., 0].add(dT)
+    return state._replace(T=state.T.replace(data=T_new))
 
 
 def _apply_sss_restoring(state, jra55_state, dt):
@@ -934,6 +1019,21 @@ def _apply_freeze_cap(state, jra55_state):
     return state._replace(T=state.T.replace(data=T_new))
 
 
+_TILE_RESPONSE_JIT = {}
+
+
+def _jit_tile_response(atm, sst_K, u_o, v_o, coupler_cfg):
+    """ocean_tile_response compiled once per coupler config (single-step path)."""
+    import jax as _jax
+    from legoesm.coupler.coupler import ocean_tile_response
+    key = id(coupler_cfg)
+    f = _TILE_RESPONSE_JIT.get(key)
+    if f is None:
+        f = _jax.jit(lambda a, s, u, v: ocean_tile_response(a, s, u, v, coupler_cfg))
+        _TILE_RESPONSE_JIT[key] = f
+    return f(atm, sst_K, u_o, v_o)
+
+
 def _jra55_step(state, step_idx, dt, model, jra55_state):
     """One forced-ocean step under JRA55-do bulk-flux forcing.
 
@@ -989,7 +1089,7 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
     u_o = jnp.zeros_like(sst_K)
     v_o = jnp.zeros_like(sst_K)
 
-    tile_resp = ocean_tile_response(
+    tile_resp = _jit_tile_response(
         atm, sst_K, u_o, v_o, jra55_state["coupler_cfg"],
     )
 
@@ -1015,7 +1115,7 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
 
     fw = jra55_to_freshwater(slc, tile_resp.lhflx)
     sf = OceanSurfaceForcing(
-        sw_down=atm.sw_down,
+        sw_down=sw_net,  # absorbed SW for penetration (was gross sw_down)
         q_net=q_net,
         tau_x=tile_resp.tau_x * ramp,
         tau_y=tile_resp.tau_y * ramp,
@@ -1037,11 +1137,42 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         sponge=sponge,
     )
 
+    # merged: LEGOESM_HEATFLUX=ours -> non-solar flux only (SW via penetration); default colleague (q_net)
+    if __import__("os").environ.get("LEGOESM_HEATFLUX", "colleague") == "ours":
+        # Non-solar surface heat flux into the top layer. q_net only reaches KPP
+        # (buoyancy / non-local transport), which adds no net heat, so LW/SH/LH
+        # must be applied explicitly. SW enters via shortwave penetration.
+        q_ns = atm.lw_down - tile_resp.lw_up - tile_resp.shflx - tile_resp.lhflx
+        state = _apply_surface_heat_flux(state, jra55_state, q_ns, dt)
+
+    else:
+        # --- surface heat flux -> top layer ---
+        # q_net reaches the model only as KPP's surface buoyancy forcing;
+        # nothing adds it to dT_dt.  Apply it here, before the SSS restoring
+        # and the freeze cap, so the cap can still bound the result.
+        _dz_top = float(jra55_state.get("dz_top", 20.0))
+        _T_sfc = state.T.data
+        _m_sfc = jnp.asarray(state.land_mask.data, dtype=_T_sfc.dtype)
+        _dT_sfc = jnp.asarray(
+            q_net * dt / (_RHO_SW * _CP_SW * _dz_top),
+            dtype=_T_sfc.dtype,
+        )
+        state = state._replace(
+            T=state.T.replace(data=_T_sfc.at[..., 0].add(_dT_sfc * _m_sfc)),
+        )
+
     # Post-step closure-domain operations.
     if jra55_state.get("enable_sss_restoring", False):
         state = _apply_sss_restoring(state, jra55_state, dt)
     if jra55_state.get("enable_freeze_cap", False):
         state = _apply_freeze_cap(state, jra55_state)
+
+    # MARBL sources and sinks (transport happens inside model.step).
+    from legoesm.ocean.biogeochemistry.marbl import omip_coupling as _marbl_omip
+    if _marbl_omip.active():
+        state = _marbl_omip.marbl_jra55_step(
+            state, step_idx, dt, model, jra55_state, atm, tile_resp,
+        )
 
     return state
 
@@ -1165,7 +1296,10 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
 
     i_first = int(np.floor(start_day_c * RECORDS_PER_DAY))
     i_last = int(np.floor(end_day_c * RECORDS_PER_DAY)) + 1  # +1 for upper bracket
-    i_last = min(i_last, n_cache_records - 1)
+    if cycle:
+        i_last = i_last % n_cache_records   # last day of a cycle brackets with record 0 of the next
+    else:
+        i_last = min(i_last, n_cache_records - 1)
 
     # Handle wrap-around for cycling
     if cycle and i_last < i_first:
@@ -1184,10 +1318,23 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
 
     ds.close()
 
-    # Record fractional days (for interpolation inside scan)
+    # Record fractional days (for interpolation inside scan).  These must
+    # be ABSOLUTE model days, comparable to ``day`` in the scan body: with
+    # ``--jra55-cycle`` the cache index wraps every cycle, so add the cycle
+    # offset and use the unwrapped position (i_first + k) so a block that
+    # straddles the cache boundary stays monotonic.  (Bug fixed 2026-10-10:
+    # in-cycle days made every block after the first cycle clip to one
+    # record -> forcing frozen at a single time of day from day 365 on.)
+    cycle_offset = (np.floor(start_day / cache_length_days) * cache_length_days
+                    if cycle else 0.0)
     record_days = jnp.asarray(
-        [idx / RECORDS_PER_DAY for idx in indices], dtype=jnp.float64,
+        [cycle_offset + (i_first + k) / RECORDS_PER_DAY
+         for k in range(len(indices))], dtype=jnp.float64,
     )
+    assert float(record_days[0]) <= start_day + 1e-9 < float(record_days[0]) + 1.0 / RECORDS_PER_DAY + 1e-9, \
+        f"record_days[0]={float(record_days[0])} does not bracket start_day={start_day}"
+    assert float(record_days[-1]) + 1e-9 >= end_day or not cycle, \
+        f"record_days[-1]={float(record_days[-1])} < end_day={end_day}"
 
     raw_stack = {var: var_data[var] for var in JRA55_VARIABLES}
     runoff_stack = var_data["friver"]
@@ -1237,6 +1384,9 @@ def _build_jra55_block_fn(model, jra55_state, dt):
         sss_alpha_static = 0.0
         sss_target_static = None
 
+    # Top-layer thickness for the surface heat-flux application.
+    dz_top_static = float(jra55_state.get("dz_top", 20.0))
+
     if enable_freeze:
         sponge_gamma = jra55_state.get("sponge_gamma_2d", None)
         if sponge_gamma is not None and np.any(np.asarray(sponge_gamma) > 0):
@@ -1253,6 +1403,10 @@ def _build_jra55_block_fn(model, jra55_state, dt):
     # 3D velocity clip — caps ALL velocity components (barotropic +
     # baroclinic) after each step.  The barotropic-only MAXVEL inside
     # the split-explicit solver doesn't prevent baroclinic blowup.
+    from legoesm import constants as _hc
+    _heat_fac = dt / (float(getattr(_hc, "rho_0", 1025.0))
+                      * float(getattr(_hc, "c_sw", getattr(_hc, "c_p_sw", 3992.0)))
+                      * max(float(jra55_state["dz_top"]), 1e-6))
     _maxvel_3d = model.config.maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
 
@@ -1305,7 +1459,7 @@ def _build_jra55_block_fn(model, jra55_state, dt):
                 ice_fw=jnp.zeros_like(runoff_stack[idx]),
             )
             sf = OceanSurfaceForcing(
-                sw_down=atm.sw_down,
+                sw_down=sw_net,
                 q_net=q_net,
                 tau_x=tau_x,
                 tau_y=tau_y,
@@ -1320,6 +1474,19 @@ def _build_jra55_block_fn(model, jra55_state, dt):
             new_state = model._step_impl(
                 state_in, dt,
                 freshwater=fw, surface_forcing=sf, sponge=sponge_step,
+            )
+
+            # --- surface heat flux -> top layer ---
+            _T_sfc = new_state.T.data
+            _m_sfc = jnp.asarray(new_state.land_mask.data,
+                                 dtype=_T_sfc.dtype)
+            _dT_sfc = jnp.asarray(
+                q_net * dt / (_RHO_SW * _CP_SW * dz_top_static),
+                dtype=_T_sfc.dtype,
+            )
+            new_state = new_state._replace(
+                T=new_state.T.replace(
+                    data=_T_sfc.at[..., 0].add(_dT_sfc * _m_sfc)),
             )
 
             # SSS restoring (gated at compile time via Python `if`).
@@ -1408,6 +1575,9 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
         sss_alpha_static = 0.0
         sss_target_static = None
 
+    # Top-layer thickness for the surface heat-flux application.
+    dz_top_static = float(jra55_state.get("dz_top", 20.0))
+
     if enable_freeze:
         sponge_gamma = jra55_state.get("sponge_gamma_2d", None)
         if sponge_gamma is not None and np.any(np.asarray(sponge_gamma) > 0):
@@ -1419,12 +1589,22 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
         freeze_mask_static = None
         T_freeze_C_static = -1.8
 
+    from legoesm import constants as _hc
+    _heat_fac = dt / (float(getattr(_hc, "rho_0", 1025.0))
+                      * float(getattr(_hc, "c_sw", getattr(_hc, "c_p_sw", 3992.0)))
+                      * max(float(jra55_state["dz_top"]), 1e-6))
     _maxvel_3d = model.config.maxvel_barotropic
+    # BGC (JRA55 path): constants hoisted out of the scan body
+    from legoesm.ocean.biogeochemistry import step_ocean_biogeochemistry
+    _dz_ref_bgc = jnp.asarray(model.z_coord.dz_ref)
+    _zf_ref_bgc = jnp.asarray(model.z_coord.z_full_ref)
     enable_maxvel = _maxvel_3d > 0.0
 
     lat_2d = jra55_state["lat_2d"]
     lon_2d = jra55_state["lon_2d"]
     _rpd = float(RECORDS_PER_DAY)
+    enable_ice = bool(jra55_state.get("enable_sea_ice", False))
+    ice_clim = jra55_state.get("ice_clim", None)          # (12, ny, nx) or None
 
     def _make_block_fn(n_steps_block):
         """Create a JIT-compiled block function for a fixed block size."""
@@ -1498,11 +1678,23 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                     ramp = 1.0
 
                 sw_net = atm.sw_down * (1.0 - tile.albedo)
-                q_net = (sw_net + atm.lw_down - tile.lw_up
-                         - tile.shflx - tile.lhflx)
+                q_turb = atm.lw_down - tile.lw_up - tile.shflx - tile.lhflx
+                lhflx_eff = tile.lhflx
+                if enable_ice:
+                    # Monthly climatology, linear in time between mid-months.
+                    pos = (doy - 15.5) / (365.0 / 12.0)
+                    m0 = jnp.floor(pos).astype(jnp.int32)
+                    frac = pos - m0
+                    f_ice = ((1.0 - frac) * ice_clim[jnp.mod(m0, 12)]
+                             + frac * ice_clim[jnp.mod(m0 + 1, 12)])
+                    open_w = 1.0 - f_ice
+                    sw_net = sw_net * open_w           # PAR follows (0.43 * sw_net)
+                    q_turb = q_turb * open_w
+                    lhflx_eff = tile.lhflx * open_w
+                q_net = sw_net + q_turb
 
                 _dtype = state_in.T.data.dtype
-                E_rate = tile.lhflx / jnp.asarray(_const.L_v, dtype=_dtype)
+                E_rate = lhflx_eff / jnp.asarray(_const.L_v, dtype=_dtype)
                 fw = FreshwaterForcing(
                     precip=jnp.asarray(prra + prsn, dtype=_dtype),
                     evap=jnp.asarray(E_rate, dtype=_dtype),
@@ -1510,7 +1702,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                     ice_fw=jnp.zeros_like(sst_K, dtype=_dtype),
                 )
                 sf = OceanSurfaceForcing(
-                    sw_down=atm.sw_down, q_net=q_net,
+                    sw_down=sw_net, q_net=q_net,
                     tau_x=tile.tau_x * ramp, tau_y=tile.tau_y * ramp,
                     freshwater=None,
                 )
@@ -1521,6 +1713,54 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                     state_in, dt, freshwater=fw,
                     surface_forcing=sf, sponge=sponge_k,
                 )
+
+                # merged: LEGOESM_HEATFLUX=ours -> non-solar flux only (SW via penetration); default colleague (q_net)
+                if __import__("os").environ.get("LEGOESM_HEATFLUX", "colleague") == "ours":
+                    # Non-solar heat flux into the top layer (q_net only reaches KPP).
+                    q_ns_blk = atm.lw_down - tile.lw_up - tile.shflx - tile.lhflx
+                    _Tb = new_state.T.data
+                    _mb = jnp.asarray(new_state.land_mask.data, dtype=_Tb.dtype)
+                    _Tb_top = _Tb[..., 0] + jnp.asarray(_heat_fac, dtype=_Tb.dtype) * (
+                        jnp.asarray(q_ns_blk, dtype=_Tb.dtype) * _mb)
+                    new_state = new_state._replace(
+                        T=new_state.T.replace(data=_Tb.at[..., 0].set(_Tb_top)))
+
+                else:
+                    # --- surface heat flux -> top layer ---
+                    _T_sfc = new_state.T.data
+                    _m_sfc = jnp.asarray(new_state.land_mask.data,
+                                         dtype=_T_sfc.dtype)
+                    _dT_sfc = jnp.asarray(
+                        q_net * dt / (_RHO_SW * _CP_SW
+                                      * dz_top_static),
+                        dtype=_T_sfc.dtype,
+                    )
+                    new_state = new_state._replace(
+                        T=new_state.T.replace(
+                            data=_T_sfc.at[..., 0].add(_dT_sfc * _m_sfc)),
+                    )
+
+                # Opt-in: JRA55 wind stress into the top layer (otherwise only used for KPP u*).
+                if __import__("os").environ.get("LEGOESM_WINDSTRESS", "0") == "1":
+                    _U = new_state.u.data
+                    _V = new_state.v.data
+                    _lm = jnp.asarray(new_state.land_mask.data, dtype=_U.dtype)   # 1 = ocean
+                    _um = _lm * jnp.roll(_lm, 1, axis=1)
+                    _um = jnp.concatenate([_um, _um[:, :1]], axis=1)
+                    _vm = jnp.concatenate([jnp.zeros_like(_lm[:1]), _lm[:-1] * _lm[1:],
+                                           jnp.zeros_like(_lm[:1])], axis=0)
+                    _tx = jnp.asarray(-tile.tau_x * ramp, dtype=_U.dtype)
+                    _ty = jnp.asarray(-tile.tau_y * ramp, dtype=_V.dtype)
+                    _tx_u = 0.5 * (jnp.roll(_tx, 1, axis=1) + _tx)
+                    _tx_u = jnp.concatenate([_tx_u, _tx_u[:, :1]], axis=1)
+                    _ty_v = jnp.concatenate([jnp.zeros_like(_ty[:1]),
+                                             0.5 * (_ty[:-1, :] + _ty[1:, :]),
+                                             jnp.zeros_like(_ty[:1])], axis=0)
+                    _mf = dt / (_RHO_SW * dz_top_static)
+                    _U = _U.at[..., 0].add(jnp.asarray(_mf, _U.dtype) * _tx_u * _um)
+                    _V = _V.at[..., 0].add(jnp.asarray(_mf, _V.dtype) * _ty_v * _vm.astype(_V.dtype))
+                    new_state = new_state._replace(u=new_state.u.replace(data=_U),
+                                                   v=new_state.v.replace(data=_V))
 
                 if enable_sss:
                     S = new_state.S.data
@@ -1547,6 +1787,20 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                         v=new_state.v.replace(
                             data=jnp.clip(new_state.v.data,
                                           -_maxvel_3d, _maxvel_3d)))
+
+                # --- BGC source/sink step (JRA55 path) ------------------------
+                # The model's own BGC call is disabled (see _step_impl); the
+                # restoring path steps BGC in the generic loop, so the JRA55
+                # path must do it here.  Light: PAR = 0.43 x net shortwave
+                # entering the ocean [W/m2]; wind speed from the same forcing.
+                if model._bgc_cfg is not None and new_state.biogeo is not None:
+                    _par = 0.43 * jnp.maximum(sw_net, 0.0)
+                    _u10 = jnp.sqrt(uas ** 2 + vas ** 2)
+                    _bio, _ = step_ocean_biogeochemistry(
+                        new_state.biogeo, new_state.T.data, new_state.S.data,
+                        _dz_ref_bgc, _zf_ref_bgc, new_state.land_mask.data,
+                        dt, model._bgc_cfg, U10=_u10, PAR_surf=_par)
+                    new_state = new_state._replace(biogeo=_bio)
 
                 return new_state, None
 
@@ -1577,6 +1831,9 @@ def _extract_bgc_scalars(state, mask):
     """Extract surface BGC diagnostics from biogeo state (if present)."""
     result = {}
     b = getattr(state, "biogeo", None)
+    from legoesm.ocean.biogeochemistry.marbl import omip_coupling as _marbl_omip
+    if _marbl_omip.is_marbl(b):
+        return _marbl_omip.surface_scalars(b, state.land_mask.data)
     if b is None:
         return result
     import numpy as np
@@ -1776,7 +2033,27 @@ def _save_restart(state, day, step, output_dir):
             if arr is not None:
                 payload[f"biogeo_{bf}"] = np.asarray(arr)
     fname = output_dir / f"restart_day{int(round(day)):06d}.npz"
-    np.savez_compressed(fname, **payload)
+    tmp = output_dir / f".restart_day{int(round(day)):06d}.npz.tmp"
+    with open(tmp, "wb") as fh:            # write fully, then rename: a kill mid-write
+        np.savez_compressed(fh, **payload)  # can never leave a half-written restart
+    os.replace(tmp, fname)
+    return fname
+
+
+def _dump_transport(state, day, output_dir):
+    """Daily physics snapshot (float32) for offline tracer transport:
+    u, v, w, T, S, eta.  Enabled by env LEGOESM_DUMP_TRANSPORT=<dir>."""
+    output_dir = Path(output_dir); output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"time_days": float(day)}
+    for f in ("u", "v", "w", "T", "S", "eta"):
+        obj = getattr(state, f, None)
+        if obj is not None and hasattr(obj, "data"):
+            payload[f] = np.asarray(obj.data, dtype=np.float32)
+    fname = output_dir / f"transport_day{int(round(day)):06d}.npz"
+    tmp = output_dir / f".{fname.name}.tmp"
+    with open(tmp, "wb") as fh:
+        np.savez(fh, **payload)
+    os.replace(tmp, fname)
     return fname
 
 
@@ -1820,6 +2097,22 @@ def _load_restart(restart_path, template_state):
         replacements[f] = obj.replace(data=arr)
 
     state = template_state._replace(**replacements)
+
+    # Restore biogeo state from restart if present
+    biogeo_keys = [k for k in data.keys() if k.startswith("biogeo_")]
+    if biogeo_keys and hasattr(state, "biogeo") and state.biogeo is not None:
+        import jax.numpy as _jnp
+        from legoesm.ocean.biogeochemistry.config import OceanBiogeoState
+        bgc = state.biogeo
+        kwargs = {}
+        for bf in bgc._fields:
+            key = f"biogeo_{bf}"
+            if key in data and data[key] is not None:
+                kwargs[bf] = _jnp.asarray(data[key], dtype=bgc.DIC.dtype)
+            else:
+                kwargs[bf] = getattr(bgc, bf)
+        state = state._replace(biogeo=type(bgc)(**kwargs))
+
     return state, restart_day, restart_step
 
 
@@ -1827,8 +2120,86 @@ def _load_restart(restart_path, template_state):
 # Time loop
 # ===========================================================================
 
+def _seasonal_par(t_days: float, grid) -> "jnp.ndarray":
+    """Latitude-dependent seasonal PAR [W/m2] at simulation day t_days."""
+    import numpy as _np
+    phase = 2.0 * _np.pi * (t_days % 365.25) / 365.25 - _np.pi / 2.0
+    lat_r = _np.asarray(grid.lat)          # (n_lat,) radians
+    par_mean = 100.0 + 180.0 * (1.0 - _np.abs(lat_r) / (_np.pi / 2.0))
+    phase_2d = phase - _np.where(lat_r < 0, _np.pi, 0.0)
+    par_1d = par_mean * _np.maximum(_np.sin(phase_2d), 0.0)
+    n_lon = int(grid.lon.shape[0]) if hasattr(grid, "lon") else 1
+    par_2d = _np.broadcast_to(par_1d[:, None], (par_1d.shape[0], n_lon))
+    return jnp.array(par_2d)
+
+
+def _load_wind_stress_clim(path: str):
+    """Load precomputed monthly wind stress climatology [Pa]."""
+    d = np.load(path)
+    return d["tauu"], d["tauv"]   # both (12, nlat, nlon)
+
+
+def _apply_wind_stress(state, tauu_2d, tauv_2d, dt, z_coord, grid_type):
+    """Apply monthly wind stress to top-layer u, v."""
+    from legoesm import constants
+    from scipy.interpolate import RegularGridInterpolator
+    rho0   = float(constants.rho_ocean)
+    dz_top = float(np.asarray(z_coord.dz_ref)[0])
+    alpha  = dt / (rho0 * dz_top)
+    if grid_type == "latlon":
+        u = np.asarray(state.u.data, dtype=np.float64).copy()
+        v = np.asarray(state.v.data, dtype=np.float64).copy()
+        mask_u = np.asarray(state.u_mask.data, dtype=np.float64)
+        mask_v = np.asarray(state.v_mask.data, dtype=np.float64)
+
+        # Model grid shape
+        n_lat_m = u.shape[0]
+        n_lon_m = u.shape[1] - 1  # u has nlon+1 faces
+
+        # Wind stress grid
+        n_lat_w, n_lon_w = tauu_2d.shape
+        lat_w = np.linspace(-87.5 if n_lat_w==36 else -89.5, 
+                             87.5 if n_lat_w==36 else  89.5, n_lat_w)
+        lon_w = np.linspace(2.5 if n_lat_w==36 else 0.5,
+                            357.5 if n_lat_w==36 else 359.5, n_lon_w)
+
+        # Regrid if shapes differ
+        if tauu_2d.shape != (n_lat_m, n_lon_m):
+            lat_m = np.linspace(-87.5 if n_lat_m==36 else -89.5,
+                                  87.5 if n_lat_m==36 else  89.5, n_lat_m)
+            lon_m = np.linspace(2.5 if n_lat_m==36 else 0.5,
+                                357.5 if n_lat_m==36 else 359.5, n_lon_m)
+            lo2d, la2d = np.meshgrid(lon_m, lat_m)
+            pts = np.column_stack([la2d.ravel(), lo2d.ravel()])
+            lon_ext   = np.append(lon_w, lon_w[0]+360.)
+            tauu_ext  = np.concatenate([tauu_2d, tauu_2d[:,0:1]], axis=1)
+            tauv_ext  = np.concatenate([tauv_2d, tauv_2d[:,0:1]], axis=1)
+            tauu_2d   = RegularGridInterpolator(
+                (lat_w, lon_ext), tauu_ext,
+                method="linear", bounds_error=False, fill_value=0.0)(pts).reshape(n_lat_m, n_lon_m)
+            tauv_2d   = RegularGridInterpolator(
+                (lat_w, lon_ext), tauv_ext,
+                method="linear", bounds_error=False, fill_value=0.0)(pts).reshape(n_lat_m, n_lon_m)
+
+        tau_u = np.zeros((n_lat_m, n_lon_m + 1))
+        tau_u[:, 1:-1] = 0.5 * (tauu_2d[:, :-1] + tauu_2d[:, 1:])
+        tau_u[:, 0] = tauu_2d[:, 0]; tau_u[:, -1] = tauu_2d[:, -1]
+        tau_v = np.zeros((n_lat_m + 1, n_lon_m))
+        tau_v[1:-1, :] = 0.5 * (tauv_2d[:-1, :] + tauv_2d[1:, :])
+        tau_v[0, :] = tauv_2d[0, :]; tau_v[-1, :] = tauv_2d[-1, :]
+
+        u[..., 0] += alpha * tau_u * mask_u
+        v[..., 0] += alpha * tau_v * mask_v
+        return state._replace(
+            u=state.u.replace(data=jnp.asarray(u)),
+            v=state.v.replace(data=jnp.asarray(v)),
+        )
+    return state
+
+
 def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    diag_every, label="",
+                   _wind_clim=None,
                    restoring_targets=None, restoring_tau_s=None,
                    jra55_state=None,
                    checkpoint_days=None, checkpoint_dir=None,
@@ -1894,14 +2265,25 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     _bgc_cfg_active = getattr(model, "_bgc_cfg", None)
     if _bgc_cfg_active is not None and hasattr(_bgc_cfg_active, "scheme") and _bgc_cfg_active.scheme != "none":
         from legoesm.ocean.biogeochemistry import BiogeoConfig, init_biogeo_state
+        from legoesm.ocean.biogeochemistry.diagnostics import BGCDiagnosticWriter
         shape_3d = state.T.data.shape
-        biogeo = init_biogeo_state(shape_3d, z_coord.z_full_ref, _bgc_cfg_active)
+        # On a restart the BGC state was restored by _load_restart: keep it.
+        # (Bug fixed 2026-10-14: this block re-initialised the biology on
+        # every restart, so chained runs silently reset the ecosystem.)
+        _bgc_restored = (start_step > 0
+                         and getattr(state, "biogeo", None) is not None)
+        if _bgc_restored:
+            biogeo = state.biogeo
+            print(f"  BGC state restored from restart (step {start_step}); "
+                  f"skipping initialisation and WOA nutrient override")
+        else:
+            biogeo = init_biogeo_state(shape_3d, z_coord.z_full_ref, _bgc_cfg_active)
 
         # Override nutrient ICs from WOA18 if paths provided
         _woa_no3 = _WOA_BGC_PATHS.get("no3")
         _woa_po4 = _WOA_BGC_PATHS.get("po4")
         _woa_si  = _WOA_BGC_PATHS.get("si")
-        if _bgc_cfg_active.scheme == "npzd_v2" and (
+        if (not _bgc_restored) and _bgc_cfg_active.scheme == "npzd_v2" and (
             _woa_no3 or _woa_po4 or _woa_si
         ):
             from legoesm.ocean.init_woa import init_bgc_from_woa
@@ -1937,8 +2319,20 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             print(f"    Fe  surface mean: {float(woa_bgc['Fe' ][...,0].mean()):.2e} mol/m3")
 
         state = state._replace(biogeo=biogeo)
-        print(f"  BGC state initialised: scheme={_bgc_cfg_active.scheme} "
-              f"tracers={len([f for f in biogeo._fields if getattr(biogeo,f) is not None])}")
+        n_tracers = len([f for f in biogeo._fields if getattr(biogeo,f) is not None])
+        print(f"  BGC state initialised: scheme={_bgc_cfg_active.scheme} tracers={n_tracers}")
+        print(f"  BGC check: state.biogeo is None = {state.biogeo is None}")
+        print(f"  BGC NO3 mean = {float(biogeo.NO3.mean())*1e3:.3f} mmol/m3")
+
+        # Initialise BGC diagnostic writer
+        _lat = np.linspace(-89.5, 89.5, state.T.data.shape[0])
+        _lon = np.linspace(0.5, 359.5, state.T.data.shape[1])
+        _z   = np.asarray(z_coord.z_full_ref)
+        _bgc_writer = BGCDiagnosticWriter(
+            str(checkpoint_dir.parent), _lat, _lon, _z,
+            np.asarray(state.land_mask.data) > 0.5
+        )
+        print(f"  BGC diagnostics → {checkpoint_dir.parent}/bgc_diagnostics/")
 
     scalars = _extract_scalars(state, grid_type, grid, z_coord)
     for k, v in scalars.items():
@@ -1969,6 +2363,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     use_gpu_interp = (jra55_state is not None
                       and jra55_state.get("_gpu_interp", False))
     if use_scan_blocks:
+        from legoesm.ocean.biogeochemistry.marbl import omip_coupling as _marbl_omip
+        if _marbl_omip.active():
+            print("  MARBL: using the single-step JRA55 path (scan blocks not wired for MARBL)")
+            use_scan_blocks = False
+    if use_scan_blocks:
         if use_gpu_interp:
             _get_block_fn_interp = _build_jra55_block_fn_interp(
                 model, jra55_state, dt)
@@ -1996,6 +2395,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 )
             io_dt = time.time() - t_io_start
 
+            _prev_state = state  # last finite state, saved on BLOWUP
             t_compute_start = time.time()
             if use_gpu_interp:
                 bfn = _get_block_fn_interp(actual)
@@ -2018,6 +2418,22 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
             if not _check_finite(state, grid_type):
                 print(f"  BLOWUP at step {step}")
+                try:
+                    import os as _os
+                    _d = {}
+                    for _k in _prev_state._fields:
+                        _a = getattr(getattr(_prev_state, _k), 'data', getattr(_prev_state, _k))
+                        try:
+                            _a = np.asarray(_a)
+                            if _a.ndim >= 2:
+                                _d[_k] = _a
+                        except Exception:
+                            pass
+                    _f = _os.path.join(str(checkpoint_dir or '.'), f'blowup_laststate_step{step - actual:06d}.npz')
+                    np.savez(_f, **_d)
+                    print(f'  last finite state (step {step - actual}) saved: {_f}  fields: {sorted(_d)}')
+                except Exception as _e:
+                    print(f'  could not save last finite state: {_e}')
                 blown_up = True
                 break
 
@@ -2087,6 +2503,9 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 flush=True,
             )
 
+            _dump_dir = os.environ.get("LEGOESM_DUMP_TRANSPORT")
+            if _dump_dir and abs(day - round(day)) < 0.5 * dt / 86400.0:
+                _dump_transport(state, day, _dump_dir)
             if (steps_per_ckpt is not None and
                     (step % steps_per_ckpt == 0 or step == n_steps)):
                 fname = _save_restart(state, day, step, checkpoint_dir)
@@ -2099,7 +2518,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             jax.block_until_ready(state.T.data)
         wall = time.time() - t0
         ok = not blown_up and _check_finite(state, grid_type)
-        return state, diag, wall, ok
+        return state, diag, wall, ok, None
     # --------------------------------------------------------------------
 
     # ----- JRA55-do single-step path (partial-cell fallback) -----------
@@ -2142,11 +2561,18 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         jax.block_until_ready(state.T.data)
         wall = time.time() - t0
         ok = not blown_up and _check_finite(state, grid_type)
-        return state, diag, wall, ok
+        return state, diag, wall, ok, None
     # --------------------------------------------------------------------
 
     for i in range(start_step, n_steps):
         state = model.step(state, dt)
+
+        # Apply climatological wind stress
+        if _wind_clim is not None and grid_type == 'latlon':
+            _month = int((i * dt / 86400.0) % 365.25 / 365.25 * 12) % 12
+            state = _apply_wind_stress(
+                state, _wind_clim[0][_month], _wind_clim[1][_month],
+                dt, z_coord, grid_type)
 
         # Apply SST/SSS restoring (grid-agnostic, after dynamics step)
         if restoring_targets is not None:
@@ -2155,6 +2581,36 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 state, grid_type, grid, T_tgt, S_tgt,
                 dt, restoring_tau_s,
             )
+
+        # BGC source/sink step (restoring path)
+        if (_bgc_cfg_active is not None
+                and getattr(state, "biogeo", None) is not None
+                and grid_type not in ("spectral",)):
+            from legoesm.ocean.biogeochemistry import step_ocean_biogeochemistry
+            _t_days = i * dt / 86400.0
+            _par = _seasonal_par(_t_days, grid)
+            _biogeo_new, _ = step_ocean_biogeochemistry(
+                state.biogeo,
+                state.T.data,
+                state.S.data,
+                jnp.array(z_coord.dz_ref),
+                jnp.array(z_coord.z_full_ref),
+                state.land_mask.data,
+                dt,
+                _bgc_cfg_active,
+                PAR_surf=_par,
+            )
+            state = state._replace(biogeo=_biogeo_new)
+
+        # Accumulate BGC diagnostics (every 5 days to save compute)
+        if _bgc_cfg_active is not None and "_bgc_writer" in dir():
+            if step % (5 * int(86400 / dt)) == 0:
+                _bgc_writer.accumulate(
+                    state,
+                    np.asarray(state.T.data),
+                    np.asarray(state.S.data),
+                    i * dt / 86400.0,
+                )
 
         step = i + 1
 
@@ -2530,7 +2986,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         # full strength at the equator to zero at the band edge, and
         # average only over wet neighbours (don't pull from land).
         eq_band = 15.0          # smooth within ±15° of equator
-        eq_passes = 30           # extra Laplacian passes at the equator
+        eq_passes = args.eq_smoothing_passes  # extra equatorial passes (CLI, default 30)
         H_np = np.asarray(H_bathy_init)
         ocean_mask = np.asarray(land_mask_init) > 0.5
         # Cell-center latitudes (axis 0)
@@ -2794,7 +3250,9 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"{n_snapped} cells snapped, {n_new_land} → land")
         z_coord_partial = create_partial_cell_coordinate(z_coord, H_bathy_init)
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-        model = LatLonCGridOceanModel(grid, z_coord_partial, config)
+        _bgc_cfg_bathy = getattr(model, "_bgc_cfg", None)
+        model = LatLonCGridOceanModel(grid, z_coord_partial, config,
+                                      bgc_cfg=_bgc_cfg_bathy)
         # The scan body calls model._step_impl() (no inner JIT) so
         # partial-cell + lax.scan now works correctly.
 
@@ -2804,6 +3262,14 @@ def run_omip_single(grid_type: str, args) -> dict:
         grid_type, grid, z_coord, args.H_max,
         H_bathy=H_bathy_init, land_mask=land_mask_init,
     )
+    # SOM advection: pre-create zero moments so the scan carry keeps a fixed pytree
+    if __import__("os").environ.get("LEGOESM_TRACER_ADV", "tvd") == "som" and getattr(state, "T_som", None) is None:
+        from legoesm.core.field import Field as _FieldSOM
+        _dm = ("lat", "lon", "level", "moment")
+        state = state._replace(
+            T_som=_FieldSOM(data=jnp.zeros((*state.T.data.shape, 9), dtype=state.T.data.dtype), name="T_som", dims=_dm, units=""),
+            S_som=_FieldSOM(data=jnp.zeros((*state.S.data.shape, 9), dtype=state.S.data.dtype), name="S_som", dims=_dm, units=""),
+        )
     if args.woa_init and T_woa is not None and S_woa is not None:
         # Replace rest-state T/S with WOA18 climatology.
         # Keep zero velocity, zero eta — let the model adjust.
@@ -2817,6 +3283,20 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"{float(T_woa_masked[state.land_mask.data > 0.5].max()):.1f}]°C, "
               f"S=[{float(S_woa_masked[state.land_mask.data > 0.5].min()):.1f}, "
               f"{float(S_woa_masked[state.land_mask.data > 0.5].max()):.1f}] PSU")
+    if args.biogeo == "marbl":
+        from legoesm.ocean.biogeochemistry.marbl import omip_coupling as _marbl_omip
+        state = _marbl_omip.setup_marbl(args, state, grid, z_coord, model)
+
+    # Initialise biogeo on template state BEFORE loading restart,
+    # so _load_restart can find state.biogeo and restore fields into it.
+    _bgc_cfg_pre = getattr(model, "_bgc_cfg", None)
+    if (_bgc_cfg_pre is not None
+            and hasattr(_bgc_cfg_pre, "scheme")
+            and _bgc_cfg_pre.scheme != "none"):
+        from legoesm.ocean.biogeochemistry import init_biogeo_state as _ibs
+        _biogeo_pre = _ibs(state.T.data.shape, z_coord.z_full_ref, _bgc_cfg_pre)
+        state = state._replace(biogeo=_biogeo_pre)
+
     if args.restart is not None:
         state, restart_day, restart_step = _load_restart(
             args.restart, state,
@@ -2922,6 +3402,16 @@ def run_omip_single(grid_type: str, args) -> dict:
             f"→ {checkpoint_dir}"
         )
 
+    # Load wind stress climatology
+    _wind_clim = None
+    _wind_path = ("results/ncep_wind_stress_clim_1deg.npz"
+                   if grid_type == 'latlon' and Path('results/ncep_wind_stress_clim_1deg.npz').exists()
+                   else 'results/ncep_wind_stress_clim_5deg.npz')
+    if grid_type == 'latlon' and Path(_wind_path).exists():
+        _tauu, _tauv = _load_wind_stress_clim(_wind_path)
+        _wind_clim = (_tauu, _tauv)
+        print(f'  Wind stress: loaded NCEP climatology')
+
     # Run time loop
     state, diag, wall_time, ok, blowup_info = _run_omip_loop(
         model, state, grid_type, grid, z_coord,
@@ -2933,6 +3423,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         checkpoint_days=checkpoint_days,
         checkpoint_dir=checkpoint_dir,
         start_step=start_step,
+        _wind_clim=_wind_clim,
         nudge_woa_tau=args.nudge_woa_tau,
         T_woa_3d=(T_woa * state.land_mask.data[..., jnp.newaxis]).astype(
             state.T.data.dtype) if args.nudge_woa_tau > 0 and T_woa is not None else None,

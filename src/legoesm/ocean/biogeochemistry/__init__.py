@@ -27,6 +27,10 @@ from legoesm.ocean.biogeochemistry.npzd import (
     par_profile,
     npzd_source_sink,
 )
+from legoesm.ocean.biogeochemistry.marbl_lite import (
+    par_profile_v2,
+    npzd_v2_source_sink,
+)
 from legoesm.ocean.biogeochemistry.carbon_cycle import (
     compute_biogeo_tendencies,
     step_ocean_biogeochemistry,

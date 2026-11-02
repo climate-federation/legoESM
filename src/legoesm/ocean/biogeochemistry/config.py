@@ -6,7 +6,7 @@ Two schemes:
 - ``"npzd"``: Nutrient-Phytoplankton-Zooplankton-Detritus ecosystem model
   coupled to the inorganic carbon cycle. Adds N, P, Z, D tracers with
   light-limited growth, grazing, mortality, and remineralization.
-- ``"npzd_v2"``: Extended 16-tracer scheme adding two phytoplankton
+- ``"npzd_v2"`` / ``"marbl_lite"``: Extended multi-PFT MARBL-lite scheme adding two phytoplankton
   functional types (diatoms + nanophyto each with prognostic Chl), NH4
   cycle with nitrification, DOP, POC, DOC, and ALK.
 - ``"none"``: Disabled (default).
@@ -111,7 +111,7 @@ class BiogeoConfig(NamedTuple):
     mu_max: float = 1.5
     k_N: float = 0.7e-3
     k_PAR: float = 30.0
-    alpha_P: float = 0.025
+    alpha_P: float = 0.30         # initial slope P-I curve (MARBL: 0.30)
     g_max: float = 0.6
     k_P: float = 0.2e-3
     gamma_Z: float = 0.7
@@ -128,6 +128,10 @@ class BiogeoConfig(NamedTuple):
     R_ON: float = 10.625
     R_CaP: float = 0.07
     R_NP: float = 16.0          # Redfield N:P ratio [mol N / mol P]
+    # O2 parameters
+    O2_atm: float = 0.2095
+    O2_init_surf: float = 0.300
+    O2_init_deep: float = 0.150
     # Nutrient nudging toward WOA climatology
     nudge_nutrients: bool = False  # enable nutrient nudging
     tau_nudge_days: float = 365.0  # nudging timescale [days]
@@ -140,7 +144,7 @@ class BiogeoConfig(NamedTuple):
     # ------------------------------------------------------------------ #
 
     # Diatoms (PFT 1)
-    mu_max_d: float = 0.25        # max growth rate [1/day]
+    mu_max_d: float = 0.85        # max growth rate [1/day] (MARBL: 0.85)
     k_N_d: float = 1.0e-4        # NO3+NH4 half-saturation [mol N/m^3]
     k_NH4_d: float = 5.0e-5      # NH4 half-saturation [mol N/m^3]
     k_Fe_d: float = 80.0e-12     # Fe half-saturation [mol Fe/m^3]  (80 nmol/m3 in SI)
@@ -151,7 +155,7 @@ class BiogeoConfig(NamedTuple):
     theta_max_d: float = 5.0e-3  # max Chl:N [kg Chl / mol N]
 
     # Nanophyto (PFT 2)
-    mu_max_n: float = 0.20        # max growth rate [1/day]
+    mu_max_n: float = 0.65        # max growth rate [1/day] (MARBL: 0.65)
     k_N_n: float = 1.0e-4        # NO3+NH4 half-saturation [mol N/m^3]
     k_NH4_n: float = 5.0e-5      # NH4 half-saturation [mol N/m^3]
     k_Fe_n: float = 50.0e-12     # Fe half-saturation [mol Fe/m^3]
@@ -160,8 +164,8 @@ class BiogeoConfig(NamedTuple):
     theta_max_n: float = 4.0e-3  # max Chl:N [kg Chl / mol N]
 
     # Shared phyto
-    m_Pl: float = 0.15           # linear mortality [1/day]
-    m_Pq_v2: float = 1.0         # quadratic aggregation [m^3/(mol N)/day] — increased to damp initial bloom
+    m_Pl: float = 0.05           # linear mortality [1/day] (MARBL: 0.05)
+    m_Pq_v2: float = 0.15        # quadratic aggregation [m^3/(mol N)/day] (MARBL: 0.15)
     psi_coeff: float = 1.5e3     # NH4 inhibition coefficient [m^3/mol N]
 
     # Nitrification
@@ -230,6 +234,7 @@ class OceanBiogeoState(NamedTuple):
     DOP: jax.Array | None = None       # Dissolved organic P [mol P/m^3]
     POC: jax.Array | None = None       # Particulate organic C [mol C/m^3]
     DOC: jax.Array | None = None       # Dissolved organic C [mol C/m^3]
+    O2:  jax.Array | None = None       # Dissolved oxygen [mol O2/m^3]
 
 
 class BiogeoTendencies(NamedTuple):
@@ -258,6 +263,7 @@ class BiogeoTendencies(NamedTuple):
     dDOP_dt: jax.Array | None = None
     dPOC_dt: jax.Array | None = None
     dDOC_dt: jax.Array | None = None
+    dO2_dt:  jax.Array | None = None   # Dissolved oxygen tendency [mol O2/m^3/s]
 
 
 class AirSeaCO2Diagnostics(NamedTuple):
@@ -327,7 +333,7 @@ def init_biogeo_state(
 _orig_init_biogeo_state = init_biogeo_state
 
 def init_biogeo_state(shape_3d, z_full_ref, cfg):
-    if cfg.scheme != "npzd_v2":
+    if cfg.scheme not in ("npzd_v2", "marbl_cesm"):
         return _orig_init_biogeo_state(shape_3d, z_full_ref, cfg)
 
     import jax.numpy as _jnp
@@ -358,4 +364,5 @@ def init_biogeo_state(shape_3d, z_full_ref, cfg):
         DOP    = _jnp.full(shape_3d, 1.0e-4 / cfg.R_NP),
         POC    = _jnp.full(shape_3d, cfg.Det_init * cfg.R_CN),
         DOC    = _jnp.full(shape_3d, 1.0e-3),
+        O2     = _bc(cfg.O2_init_surf + (cfg.O2_init_deep - cfg.O2_init_surf) * z_norm),
     )

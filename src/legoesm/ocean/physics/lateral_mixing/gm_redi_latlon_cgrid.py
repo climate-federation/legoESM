@@ -832,3 +832,56 @@ def gm_redi_lateral_mixing_latlon(
         dT_dt=dT_dt,
         dS_dt=dS_dt,
     )
+
+
+# ----------------------------------------------------------------------------- [patch_marbl_gm_redi]
+def gm_redi_tendencies_many_latlon(
+    Q, T, S, eta, H_bathy, grid, z_coord, cfg, *,
+    eos="wright", eos_linear=None, mask=None, u_mask=None, v_mask=None, f_coriolis=None,
+):
+    """GM/Redi tendencies for a stack of passive tracers Q (n, n_lat, n_lon, nlev).
+
+    Density, slopes and kappa_GM come from T and S exactly as in gm_redi_tracer_tendency_latlon,
+    and every tracer gets the same per-tracer operator as T and S (so q = T gives dT_dt)."""
+    import jax as _jax
+    if mask is None:
+        mask = jnp.ones(T.shape[:2], dtype=T.dtype)
+    if u_mask is None:
+        u_mask = jnp.ones((T.shape[0], T.shape[1] + 1), dtype=T.dtype)
+    if v_mask is None:
+        v_mask = jnp.ones((T.shape[0] + 1, T.shape[1]), dtype=T.dtype)
+    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    eos_fn = make_eos_fn(eos, eos_linear)
+    fill_fn = lambda field: _neumann_fill_cgrid(field, mask)  # noqa: E731
+    rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, _RHO_0, constants.g, n_iter=2,
+    )
+    S_x, S_y, _taper = compute_isopycnal_slopes_latlon_cgrid(rho, mask, z_coord, jacobian, grid, cfg)
+    if cfg.visbeck.enabled:
+        if f_coriolis is None:
+            f_coriolis = 2.0 * constants.Omega * jnp.sin(grid.lat[:, jnp.newaxis])
+            f_coriolis = jnp.broadcast_to(f_coriolis, mask.shape)
+        kappa_GM = compute_visbeck_kappa_gm(rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg.visbeck)
+    else:
+        kappa_GM = cfg.kappa_GM
+    scheme = getattr(cfg, "slope_scheme", "triads")
+    if scheme not in ("triads", "centered"):
+        raise ValueError(f"Unknown GMRediConfig.slope_scheme={scheme!r}")
+
+    def _one(q):
+        if scheme == "triads":
+            return gm_redi_tracer_tendency_triads_latlon_cgrid(
+                q, rho, mask, u_mask, v_mask, z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi, cfg.S_max)
+        d = gm_redi_tracer_tendency_latlon_cgrid(
+            q, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi)
+        if cfg.surface_complement:
+            complement = jnp.where(jnp.abs(z_coord.z_full_ref) < cfg.surface_complement_depth, 1.0, 0.0)
+            q_filled = _neumann_fill_cgrid(q, mask)
+            dq_dx_u = gradient_x_cgrid(q_filled, grid) * u_mask[:, :, jnp.newaxis]
+            dq_dy_v = gradient_y_cgrid(q_filled, grid) * v_mask[:, :, jnp.newaxis]
+            F_x = cfg.kappa_Redi * complement * dq_dx_u
+            F_y = cfg.kappa_Redi * complement * dq_dy_v
+            d = d + divergence_cgrid(F_x, F_y, grid) * mask[:, :, jnp.newaxis]
+        return d
+
+    return _jax.lax.map(_one, Q)

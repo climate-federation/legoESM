@@ -504,3 +504,92 @@ def compute_ocean_rho_and_pressure(state, z_coord, jacobian, eos_fn=None):
         h_actual=h_actual,
     )
     return rho, p_hydro
+
+
+# --- from our tree (MARBL work), re-added after the colleague merge 2026-10-16 ---
+def locally_referenced_buoyancy_frequency(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p_half: jnp.ndarray,
+    dz_half: jnp.ndarray,
+    eos_fn=None,
+    rho_ref: float = rho_0,
+    g: float = constants.g,
+) -> jnp.ndarray:
+    """Locally referenced N^2 at interior interfaces.
+
+    Both cells adjacent to interface k+1/2 are evaluated at the interface
+    pressure, so the compressibility of seawater does not enter N^2.
+    Differencing in-situ density (``compute_buoyancy_frequency``) adds
+    ~ g^2 / c_s^2 ~ 4e-5 s^-2 to N^2 everywhere.
+
+    Parameters
+    ----------
+    T, S : array (..., nlev)
+        Potential temperature [degC], salinity [PSU]; k=0 is the surface.
+    p_half : array (..., nlev-1)
+        Pressure at interior interfaces [Pa].
+    dz_half : array (..., nlev-1)
+        Distance between adjacent cell centres [m].
+    eos_fn : callable or None
+        ``fn(T, S, p) -> rho``; defaults to ``wright_eos``.
+
+    Returns
+    -------
+    array : N^2 [1/s^2], shape (..., nlev-1), positive for stable stratification.
+    """
+    if eos_fn is None:
+        eos_fn = wright_eos
+    rho_up = eos_fn(T[..., :-1], S[..., :-1], p_half)
+    rho_dn = eos_fn(T[..., 1:], S[..., 1:], p_half)
+    return (g / rho_ref) * (rho_dn - rho_up) / dz_half
+
+
+def adiabatic_temperature_gradient(
+    S: jnp.ndarray,
+    T: jnp.ndarray,
+    p_bar: jnp.ndarray,
+) -> jnp.ndarray:
+    """Adiabatic lapse rate of seawater [degC/bar] (Bryden 1973; UNESCO 1983).
+
+    T is in-situ temperature [degC], p_bar sea pressure [bar].
+    UNESCO check value: S = 40, T = 40 degC, p = 1000 bar -> 3.255976e-3 degC/bar.
+    """
+    # Bryden's coefficients are per 1000 dbar (= 100 bar) with p in dbar.
+    k = 1.0e-2
+    Sm = S - 35.0
+    p = p_bar * 10.0  # dbar
+    return k * (0.35803e-1 + T * (0.85258e-2 + T * (-0.68360e-4 + T * 0.66228e-6))
+                + Sm * (0.18932e-2 - 0.42393e-4 * T)
+                + p * (0.18741e-4 + T * (-0.67795e-6 + T * (0.87330e-8 - T * 0.54481e-10))
+                       + Sm * (-0.11351e-6 + 0.27759e-8 * T)
+                       + p * (-0.46206e-9 + T * (0.18676e-10 - T * 0.21687e-12))))
+
+
+def potential_temperature(
+    S: jnp.ndarray,
+    T: jnp.ndarray,
+    p_bar: jnp.ndarray,
+    p_ref_bar: jnp.ndarray,
+) -> jnp.ndarray:
+    """Temperature of a parcel moved adiabatically from p_bar to p_ref_bar [degC].
+
+    Fofonoff (1977) fourth-order Runge-Kutta integration of the adiabatic
+    lapse rate.  With p_bar = 0 and p_ref_bar = sea pressure this converts
+    potential temperature to in-situ temperature.
+    UNESCO check value: S = 40, T = 40 degC, p = 1000 bar, p_ref = 0 -> 36.89073 degC.
+    """
+    sqrt2 = jnp.sqrt(2.0)
+    dp = p_ref_bar - p_bar
+    p_mid = p_bar + 0.5 * dp
+    dtheta = dp * adiabatic_temperature_gradient(S, T, p_bar)
+    theta = T + 0.5 * dtheta
+    q = dtheta
+    dtheta = dp * adiabatic_temperature_gradient(S, theta, p_mid)
+    theta = theta + (1.0 - 1.0 / sqrt2) * (dtheta - q)
+    q = (2.0 - sqrt2) * dtheta + (-2.0 + 3.0 / sqrt2) * q
+    dtheta = dp * adiabatic_temperature_gradient(S, theta, p_mid)
+    theta = theta + (1.0 + 1.0 / sqrt2) * (dtheta - q)
+    q = (2.0 + sqrt2) * dtheta + (-2.0 - 3.0 / sqrt2) * q
+    dtheta = dp * adiabatic_temperature_gradient(S, theta, p_ref_bar)
+    return theta + (dtheta - 2.0 * q) / 6.0

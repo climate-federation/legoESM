@@ -123,3 +123,17 @@ nu_air = 1.5e-5                 # Kinematic viscosity of air at 15°C [m^2/s]
 # Shallow Water Test Case Constants
 # ==============================================================================
 H_MEAN = 1.0e4                  # Mean fluid depth for shallow water [m]
+
+# --- MARBL constants (our tree), re-added after the colleague merge 2026-10-16 ---
+k_Boltzmann_eV = 8.617333262e-5
+M_C = 12.01
+M_N = 14.0067
+M_P = 30.974
+M_Si = 28.085
+M_Fe = 55.845
+M_CaCO3 = 100.09
+M_SiO2 = 60.08
+V_molar_O2 = 22.3916
+rho_sw_marbl = 1026.0
+seconds_per_day = 86400.0
+days_per_year = 365.0

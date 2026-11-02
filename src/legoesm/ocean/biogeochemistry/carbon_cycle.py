@@ -22,8 +22,11 @@ from legoesm.ocean.biogeochemistry.config import (
 )
 from legoesm.ocean.biogeochemistry.gas_exchange import air_sea_co2_flux
 from legoesm.ocean.biogeochemistry.npzd import (
-    npzd_source_sink, par_profile,
+    npzd_source_sink, par_profile)
+from legoesm.ocean.biogeochemistry.npzd import (
     npzd_v2_source_sink, par_profile_v2)
+from legoesm.ocean.biogeochemistry.marbl_cesm_simplified import (
+    marbl_cesm_source_sink, par_profile_marbl)
 
 
 def compute_biogeo_tendencies(
@@ -129,7 +132,7 @@ def compute_biogeo_tendencies(
     dPd_dt = dPn_dt = dChl_d_dt = dChl_n_dt = None
     dDON_dt = dDOP_dt = dPOC_dt = dDOC_dt = None
 
-    if cfg.scheme == "npzd_v2" and state.Pd is not None:
+    if cfg.scheme in ("npzd_v2", "marbl_cesm") and state.Pd is not None:
         PAR = par_profile_v2(PAR_surf, state.Chl_d, state.Chl_n, dz_ref, cfg)
 
         (dNO3_v2, dNH4_v2, dPO4_v2, dSi_v2, dFe_v2,
@@ -161,6 +164,53 @@ def compute_biogeo_tendencies(
         dPOC_dt   = dPOC_v2  * mask_3d
         dDOC_dt   = dDOC_v2  * mask_3d
 
+    # ---- 4. MARBL-CESM simplified source/sink ----
+    dO2_dt = None
+    if cfg.scheme == "marbl_cesm" and state.Pd is not None:
+        PAR = par_profile_marbl(PAR_surf, state.Chl_d, state.Chl_n, dz_ref, cfg)
+        O2_in = state.O2 if state.O2 is not None else jnp.zeros_like(state.DIC)
+
+        (dNO3_m, dNH4_m, dPO4_m, dSi_m, dFe_m,
+         dPd_m, dPn_m, dChl_d_m, dChl_n_m,
+         dZoo_m, dDet_m, dDON_m, dDOP_m,
+         dDIC_m, dPOC_m, dDOC_m, dALK_m, dO2_m) = marbl_cesm_source_sink(
+            state.NO3, state.NH4, state.PO4, state.Si, state.Fe,
+            state.Pd, state.Pn, state.Chl_d, state.Chl_n,
+            state.Zoo, state.Det, state.DON, state.DOP,
+            state.DIC, state.POC, state.DOC, state.ALK,
+            O2_in, T_degC, PAR, dz_ref, cfg,
+        )
+        dDIC_dt   = dDIC_dt + dDIC_m  * mask_3d
+        dALK_dt   = dALK_dt + dALK_m  * mask_3d
+        dNO3_dt   = dNO3_m  * mask_3d
+        dNH4_dt   = dNH4_m  * mask_3d
+        dPO4_dt   = dPO4_m  * mask_3d
+        dSi_dt    = dSi_m   * mask_3d
+        dFe_dt    = dFe_m   * mask_3d
+        dPd_dt    = dPd_m   * mask_3d
+        dPn_dt    = dPn_m   * mask_3d
+        dChl_d_dt = dChl_d_m * mask_3d
+        dChl_n_dt = dChl_n_m * mask_3d
+        dZoo_dt   = dZoo_m  * mask_3d
+        dDet_dt   = dDet_m  * mask_3d
+        dDON_dt   = dDON_m  * mask_3d
+        dDOP_dt   = dDOP_m  * mask_3d
+        dPOC_dt   = dPOC_m  * mask_3d
+        dDOC_dt   = dDOC_m  * mask_3d
+        # O2 biological tendency + air-sea flux
+        dO2_bio   = dO2_m   * mask_3d
+        from legoesm.ocean.biogeochemistry.gas_exchange import air_sea_o2_flux
+        # O2_atm is the O2 mole fraction; scaling the 1-atm saturation by
+        # O2_atm / 0.2095 is equivalent to a pressure factor.
+        _flux_o2  = air_sea_o2_flux(
+            state.O2[..., 0] if state.O2 is not None else jnp.zeros_like(T_degC[..., 0]),
+            T_degC[..., 0], S_psu[..., 0], U10 ** 2,
+            P_atm=getattr(cfg, "O2_atm", 0.2095) / 0.2095,
+        )
+        dO2_bio   = dO2_bio.at[..., 0].add(
+            _flux_o2 / jnp.clip(dz_ref[0], 1.0, None) * ocean_mask)
+        dO2_dt    = dO2_bio
+
     # Mask land
     dDIC_dt = dDIC_dt * mask_3d
     dALK_dt = dALK_dt * mask_3d
@@ -184,6 +234,7 @@ def compute_biogeo_tendencies(
         dDOP_dt=dDOP_dt,
         dPOC_dt=dPOC_dt,
         dDOC_dt=dDOC_dt,
+        dO2_dt=dO2_dt,
     )
 
     return tendencies, co2_diag
@@ -269,7 +320,7 @@ def step_ocean_biogeochemistry(
     PO4_new = Si_new = Fe_new = None
     DON_new = DOP_new = POC_new = DOC_new = None
 
-    if cfg.scheme == "npzd_v2" and state.Pd is not None:
+    if cfg.scheme in ("npzd_v2", "marbl_cesm") and state.Pd is not None:
         NO3_new   = _soft_pos(state.NO3   + dt * tend.dNO3_dt)
         NH4_new   = _soft_pos(state.NH4   + dt * tend.dNH4_dt)
         PO4_new   = _soft_pos(state.PO4   + dt * tend.dPO4_dt)
@@ -302,20 +353,12 @@ def step_ocean_biogeochemistry(
         DOP_new   = _soft_pos(state.DOP   + dt * tend.dDOP_dt)
         POC_new   = _soft_pos(state.POC   + dt * tend.dPOC_dt)
         DOC_new   = _soft_pos(state.DOC   + dt * tend.dDOC_dt)
-
-    # ---- Nutrient nudging toward WOA climatology (tau=365 days) ----
-    # Prevents surface nutrient collapse from insufficient upwelling
-    if cfg.scheme == 'npzd_v2' and getattr(cfg, 'nudge_nutrients', False):
-        tau_nut = 365.0 * 86400.0   # 1-year relaxation
-        if NO3_new is not None and cfg.NO3_target is not None:
-            NO3_new = NO3_new + dt * (cfg.NO3_target - NO3_new) / tau_nut
-        if PO4_new is not None and cfg.PO4_target is not None:
-            PO4_new = PO4_new + dt * (cfg.PO4_target - PO4_new) / tau_nut
-        if Si_new is not None and cfg.Si_target is not None:
-            Si_new  = Si_new  + dt * (cfg.Si_target  - Si_new)  / tau_nut
+        O2_new    = (_soft_pos(state.O2 + dt * tend.dO2_dt)
+                     if state.O2 is not None and tend.dO2_dt is not None
+                     else state.O2)
 
     # ---- Nutrient nudging toward WOA climatology ----
-    if (cfg.scheme == 'npzd_v2' and cfg.nudge_nutrients
+    if (cfg.scheme in ('npzd_v2', 'marbl_lite', 'marbl_cesm') and cfg.nudge_nutrients
             and cfg.NO3_target is not None):
         import jax.numpy as _jnp
         _tau = cfg.tau_nudge_days * 86400.0
@@ -345,4 +388,5 @@ def step_ocean_biogeochemistry(
         DOP=DOP_new,
         POC=POC_new,
         DOC=DOC_new,
+        O2=O2_new if 'O2_new' in dir() else None,
     ), co2_diag

@@ -213,6 +213,29 @@ def _nearest_neighbor_2d(
     return result.reshape(out_shape)
 
 
+def _drown_woa(a: np.ndarray) -> np.ndarray:
+    """Fill NaNs (land / below local bottom) in a (lat, lon, depth) WOA field
+    level by level from the nearest valid ocean point at the SAME depth
+    ("drowning", as in NEMO/MOM initial-condition preprocessing).  Prevents
+    deep model columns next to shallow WOA columns from inheriting shelf water.
+    A level with no valid points at all is copied from the level above."""
+    from scipy import ndimage
+    a = np.array(a, dtype=np.float64, copy=True)
+    a[np.abs(a) > 1.0e10] = np.nan                       # undecoded fill values
+    for k in range(a.shape[-1]):
+        lay = a[..., k]
+        bad = ~np.isfinite(lay)
+        if bad.all():
+            if k > 0:
+                a[..., k] = a[..., k - 1]
+            continue
+        if bad.any():
+            idx = ndimage.distance_transform_edt(bad, return_distances=False,
+                                                 return_indices=True)
+            a[..., k] = lay[tuple(idx)]
+    return a
+
+
 def init_ocean_from_woa(
     grid,
     z_coord: OceanZStarCoordinate,
@@ -259,6 +282,10 @@ def init_ocean_from_woa(
     if T_path is not None and S_path is not None:
         # Load from WOA18 NetCDF files
         T_woa, S_woa, lat_woa, lon_woa = load_woa18(T_path, S_path)
+        # Drown WOA before interpolation (see _drown_woa).
+        assert T_woa.ndim == 3, f'expected (lat, lon, depth) WOA, got {T_woa.shape}'
+        T_woa = _drown_woa(T_woa)
+        S_woa = _drown_woa(S_woa)
 
         # Nearest-neighbor horizontal interpolation
         T_woa_horiz = _nearest_neighbor_2d(
@@ -383,6 +410,7 @@ def init_bgc_from_woa(
         # Reorder to (lat, lon, depth)
         var = var.transpose(lat_name, lon_name, depth_coord)
         field  = np.asarray(var.values, dtype=np.float64)
+        field  = _drown_woa(field)   # nutrients: same drowning as T/S
         lat_1d = np.asarray(ds[lat_name].values, dtype=np.float64)
         lon_1d = np.asarray(ds[lon_name].values, dtype=np.float64)
         # Standardise lon to [0, 360)

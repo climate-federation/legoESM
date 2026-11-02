@@ -465,3 +465,105 @@ def kpp_vertical_mixing(
         K_v=K_v,
         A_v=A_v,
     )
+
+
+# --- from our tree (MARBL work), re-added after the colleague merge 2026-10-16 ---
+from typing import Callable
+
+
+from legoesm.ocean.eos import (
+    wright_eos,
+    locally_referenced_buoyancy_frequency,
+    thermal_expansion_coeff,
+    haline_contraction_coeff,
+    rho_0 as rho_0_ref,
+    c_sw as c_sw_ref,
+)
+
+
+_TINY = 1e-30
+
+
+def kpp_surface_fluxes(
+    T_sfc: jnp.ndarray,
+    S_sfc: jnp.ndarray,
+    q_net: jnp.ndarray | None = None,
+    freshwater: jnp.ndarray | None = None,
+    g: float = constants.g,
+):
+    """Surface kinematic fluxes and buoyancy flux for KPP.
+
+    Parameters
+    ----------
+    T_sfc, S_sfc : array
+        Top-layer potential temperature [degC] and salinity [PSU].
+    q_net : array or None
+        Net surface heat flux into the ocean [W/m^2].
+    freshwater : array or None
+        Net freshwater flux into the ocean (P - E + R) [kg/m^2/s].
+
+    Returns
+    -------
+    (B_f, Q_sfc_T, Q_sfc_S)
+        B_f [m^2/s^3], positive = destabilizing; Q_sfc_T [K m/s], positive
+        warms; Q_sfc_S [PSU m/s], positive salts.  Each entry is None when
+        the flux it depends on is None (B_f is None only if both are None).
+    """
+    p_sfc = jnp.zeros_like(T_sfc)
+    B_f = None
+    Q_sfc_T = None
+    Q_sfc_S = None
+    if q_net is not None:
+        Q_sfc_T = q_net / (rho_0_ref * c_sw_ref)
+        alpha = thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
+        # Warming (Q_T > 0) is stabilizing, so it enters B_f with a minus sign.
+        B_f = -g * alpha * Q_sfc_T
+    if freshwater is not None:
+        # Freshening (fw > 0) is a negative salt flux and is stabilizing.
+        Q_sfc_S = -S_sfc * freshwater / rho_0_ref
+        beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
+        B_salt = g * beta * Q_sfc_S
+        B_f = B_salt if B_f is None else (B_f + B_salt)
+    return B_f, Q_sfc_T, Q_sfc_S
+
+
+def kpp_turbulent_velocity_scale(
+    d: jnp.ndarray,
+    u_star: jnp.ndarray,
+    B_f: jnp.ndarray,
+    cfg: KPPConfig,
+) -> jnp.ndarray:
+    """LMD94 turbulent velocity scale for scalars, w_s [m/s] (App. B).
+
+    With zeta = d / L and L = -u_star^3 / (kappa B_f) (LMD sign, B_f > 0 here
+    means destabilizing):
+
+    - stable (zeta >= 0):      w_s = kappa u_star / (1 + phi_stable zeta)
+    - weakly unstable:          w_s = kappa u_star (1 - phi_unstable zeta)^(1/2)
+    - convective (zeta < zeta_s): w_s = kappa (a_s u_star^3 - c_s zeta u_star^3)^(1/3)
+
+    The branches are written in terms of X = kappa d B_f = -zeta u_star^3 so
+    nothing is divided by zeta and w_s stays finite as u_star -> 0.
+    The caller applies the surface-layer limit d = min(sigma, epsilon) h.
+
+    Parameters
+    ----------
+    d : array
+        Depth at which w_s is evaluated [m, positive down].
+    u_star, B_f : array
+        Friction velocity [m/s] and surface buoyancy flux [m^2/s^3],
+        broadcastable against ``d``.
+    """
+    kappa = cfg.kappa_vk
+    U3 = jnp.maximum(u_star**3, _TINY)
+    X = kappa * d * B_f
+    X_stab = jnp.maximum(-X, 0.0)
+    X_unst = jnp.maximum(X, 0.0)
+    w_stable = kappa * u_star * U3 / (U3 + cfg.phi_stable * X_stab)
+    w_weak = kappa * u_star * jnp.sqrt(1.0 + cfg.phi_unstable * X_unst / U3)
+    w_conv = kappa * jnp.power(
+        jnp.maximum(cfg.a_s * U3 + cfg.c_s * X_unst, _TINY), 1.0 / 3.0)
+    strongly_convective = X_unst > -cfg.zeta_s * U3
+    return jnp.where(X > 0.0,
+                     jnp.where(strongly_convective, w_conv, w_weak),
+                     w_stable)

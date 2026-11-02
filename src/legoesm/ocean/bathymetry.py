@@ -49,7 +49,7 @@ CRITICAL_STRAITS = [
     ("Bab el Mandeb",             12.5,  43.3,  40.0,  150.0),
     ("Hormuz",                    26.5,  56.5,  40.0,  100.0),
     ("Malacca",                    2.5, 101.5,  40.0,   50.0),
-    ("Indonesian Throughflow",    -3.0, 120.0, 200.0, 1500.0),
+    ("Indonesian Throughflow",    -3.0, 120.0, 200.0, float(__import__("os").environ.get("LEGOESM_ITF_STRAIT_DEPTH", "1500"))),
     ("Mozambique Channel",       -17.0,  41.0, 200.0, 2500.0),
     ("Denmark Strait",            66.0, -27.0, 150.0,  600.0),
     ("Faroe Bank Channel",        61.5,  -8.5, 100.0,  800.0),
