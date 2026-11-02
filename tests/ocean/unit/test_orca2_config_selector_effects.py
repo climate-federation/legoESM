@@ -1133,7 +1133,7 @@ def test_rk3_stage3_salt_geothermal_and_krhs_order_change_model_step_qsr_sites()
             _SelectorTouched, match="nemo_qsr_kbb_live_stretch",
         ):
             sw_probe = sw_2bd._replace(
-                nemo_qsr_kbb_live_stretch=_BoolProbe("nemo_qsr_kbb_live_stretch")
+                nemo_qsr_kbb_live_stretch=type("_P", (), {"c": 0, "__bool__": lambda s: (setattr(s, "c", s.c + 1), (_ for _ in ()).throw(_SelectorTouched("nemo_qsr_kbb_live_stretch")) if s.c >= 2 else True)[1]})()
             )
             m_kbb = LatLonCGridOceanModel(
                 grid,
