@@ -168,8 +168,9 @@ def main(argv=None):
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     store_index = np.asarray(zarr.open_group(str(path), mode="r")["era5_index"])
     pairs = pairs_in_years(store_index, times)
-    if not pairs:
-        raise SystemExit(f"{path} holds no analysis in {YEARS[0]}-{YEARS[1]}")
+    if not any(j is not None for _, j in pairs):
+        raise SystemExit(f"{path} holds no 6 h pair of analyses in "
+                         f"{YEARS[0]}-{YEARS[1]}")
     cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
                 if era5_cfg.load_cloud_condensate else None)
     flux_ds = ((open_era5_zarr(sst_cfg.flux_zarr) if sst_cfg.flux_zarr else ds)
