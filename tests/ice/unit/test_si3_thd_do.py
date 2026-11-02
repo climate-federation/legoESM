@@ -16,7 +16,7 @@ from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG  # noqa: E402
 
 
 # Frozen independently from NEMO 5.0.2 phycst/eos and the admitted namelist.
-T0 = 273.15
+T0 = 273.15  # const-ok: independent oracle copy of NEMO phycst rt0, not the model constant
 RHOI = 917.0
 RCPI = 2096.7
 RCP = 3991.86795711963
