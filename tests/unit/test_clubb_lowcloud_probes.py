@@ -36,16 +36,6 @@ def test_interp_logp_any_vertical_order_and_nan_outside():
     assert np.isclose(out[0, 0], np.log(85000.0)) and np.isnan(out[0, 1])
 
 
-def test_moist_top_pressure_contiguous_from_surface():
-    A = _load("clubb_column_ab")
-    p = np.array([[50000.0, 80000.0, 90000.0, 100000.0]] * 3)   # top-down
-    rh = np.array([[0.9, 0.85, 0.9, 0.95],     # wet all the way up
-                   [0.9, 0.5, 0.9, 0.95],      # dry gap at 800 hPa
-                   [0.9, 0.9, 0.9, 0.5]])      # dry lowest level
-    out = A.moist_top_pressure(rh, p)
-    assert out[0] == 50000.0 and out[1] == 90000.0 and np.isnan(out[2])
-
-
 def test_box_columns_ocean_only_and_capped(tmp_path):
     A = _load("clubb_column_ab")
     f = tmp_path / "m.npz"
@@ -53,3 +43,10 @@ def test_box_columns_ocean_only_and_capped(tmp_path):
              land=np.array([False, True, False, False, False]))
     assert A.box_columns(f, (-20, -10, -90, -80), 10).tolist() == [0, 2, 3]
     assert len(A.box_columns(f, (-20, -10, -90, -80), 2)) == 2
+
+
+def test_inversion_pressure_finds_the_strongest_theta_jump():
+    A = _load("clubb_column_ab")
+    p = np.array([[60000.0, 80000.0, 85000.0, 90000.0, 100000.0]])
+    T = np.array([[275.0, 288.0, 289.0, 285.0, 293.0]])   # warm lid between 850 and 900 hPa
+    assert A.inversion_pressure(T, p)[0] == 87500.0

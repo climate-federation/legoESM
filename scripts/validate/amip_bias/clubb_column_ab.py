@@ -19,8 +19,8 @@ checkpoint's lagged values and no other physics or advection. Arms:
 The omega profile is CESM2 AMIP's box-mean ``wap`` for the month (a stand-in:
 the checkpoint carries no omega). Reported per arm, box mean: cloud fraction
 and grid-mean liquid over 950-850 hPa (time mean over the last half of the
-calls and at the end), and the moist-layer top (highest level of the
-contiguous RH >= 0.8 layer above the surface) as pressure.
+calls and at the end), and the inversion pressure (interface of largest
+-dtheta/dp below 700 hPa).
 """
 from __future__ import annotations
 
@@ -59,15 +59,15 @@ def box_columns(mesh_npz, box, max_cols):
     return sel
 
 
-def moist_top_pressure(rh, p, thresh=0.8):
-    """Top-down (ncol, nlev): pressure of the highest level of the contiguous
-    rh >= thresh layer that starts at the lowest level; NaN if the lowest
-    level is below thresh."""
-    wet = rh[:, ::-1] >= thresh                       # bottom-up
-    run = np.cumprod(wet, axis=1).astype(bool)
-    n = run.sum(1)
-    pb = p[:, ::-1]
-    return np.where(n > 0, pb[np.arange(len(n)), np.maximum(n - 1, 0)], np.nan)
+def inversion_pressure(T, p, p_min=70000.0):
+    """Top-down (ncol, nlev): pressure of the layer interface with the largest
+    potential-temperature lapse -dtheta/dp between p_min and the surface."""
+    from legoesm import constants
+    th = T * (constants.p_ref / p) ** constants.kappa
+    s = -(th[:, 1:] - th[:, :-1]) / (p[:, 1:] - p[:, :-1])   # > 0 where theta falls with p
+    pm = 0.5 * (p[:, 1:] + p[:, :-1])
+    s = np.where(pm >= p_min, s, -np.inf)
+    return pm[np.arange(len(pm)), np.argmax(s, axis=1)]
 
 
 def cesm2_omega(month, box, p_target):
@@ -158,7 +158,7 @@ def run_box(tool, a, box_name):
     res = {"ncol": int(len(pick)), "init": {
         "cf_950_850": lay(np.asarray(d["physstate_cloud_fraction"], float)[pick]),
         "qc_950_850_gkg": lay(np.asarray(L.qc0)) * 1e3,
-        "moist_top_hPa": float(np.nanmean(moist_top_pressure(rh_of(L.T0, L.qv0), p_full))) / 100}}
+        "inversion_hPa": float(np.mean(inversion_pressure(np.asarray(L.T0), p_full))) / 100}}
     for arm in ARMS:
         first, jstep = make_step(arm)
         s = (L.u0, L.v0, L.T0, L.qv0, L.qc0, L.mom0)
@@ -171,11 +171,11 @@ def run_box(tool, a, box_name):
             if n >= a.steps // 2:
                 cfs.append(lay(np.asarray(cf)))
                 qcs.append(lay(np.asarray(s[4])) * 1e3)
-                tops.append(float(np.nanmean(moist_top_pressure(rh_of(s[2], s[3]), p_full))) / 100)
+                tops.append(float(np.mean(inversion_pressure(np.asarray(s[2]), p_full))) / 100)
         else:
             res[arm] = {"cf_950_850": float(np.mean(cfs)), "qc_950_850_gkg": float(np.mean(qcs)),
-                        "moist_top_hPa": float(np.mean(tops)), "cf_end": cfs[-1],
-                        "moist_top_end_hPa": tops[-1]}
+                        "inversion_hPa": float(np.mean(tops)), "cf_end": cfs[-1],
+                        "inversion_end_hPa": tops[-1]}
         print(box_name, arm, json.dumps(res[arm]), flush=True)
     return res
 
