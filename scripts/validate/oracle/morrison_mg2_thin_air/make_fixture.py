@@ -183,11 +183,12 @@ RFZ_RAINFRZE_OFFSET = 40.0      # MG2 rainfrze = tmelt - 40 K (:331)
 RFZ_HEAT_K = 0.3                 # heating before the freezing over the step [K]
 RFZ_OFF = (-5.0, -0.5, -0.05, 0.5)       # t + tlat/cpp dt - rainfrze [K]
 RFZ_QR = (1.0e-8, 1.0e-5, 1.0e-3)        # grid rain [kg/kg]
-RFZ_DROP = (100.0e-6, 1.0e-3)            # mean drop 1/lamr [m]
+RFZ_DROP = (100.0e-6, 480.0e-6, 1.0e-3)  # mean drop 1/lamr [m]; 1 mm is bounded to 500 um
 # Dcs [m]: CAM6's 500 um, where MG2's rain slope bound (1/500 um) puts every
-# large drop exactly on 1/Dcs (cloud ice in MG2), and 200 um, where 1 mm
-# drops go to snow
-RFZ_DCS = (DCS, 200.0e-6)
+# large drop exactly on 1/Dcs (cloud ice in MG2, :2596-2602) and 480 um drops
+# sit just below; 450 um, with the 480 um drop just above Dcs and the bound
+# drop above 1.1 Dcs; 200 um, all but the 100 um drop well above
+RFZ_DCS = (DCS, 450.0e-6, 200.0e-6)
 
 
 # Start-of-step rain freezing points (rfp_*, the same driver's minstrf columns,

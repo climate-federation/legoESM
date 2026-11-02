@@ -479,7 +479,7 @@ def _rain_freeze(fx, width_K, cap, ramp_frac):
     nd = W.mg2_instant_rain_freeze(jnp.asarray(T_test), jnp.asarray(fx["rfz_in_dumr"]),
                                    n_adj, width_K, cap)[1]
     f = np.asarray(W.mg2_frozen_rain_ice_fraction(lamr, jnp.asarray(fx["rfz_in_dcs"]),
-                                                  ramp_frac))
+                                                  ramp_frac, ice_at_dcs=True))
     m, n, nd = np.asarray(m) / dt, np.asarray(n) / dt, np.asarray(nd) / dt
     return dict(qrfrz=m, nrfrz=n, qifrz=f * m, nifrz=f * nd, qsfrz=m - f * m,
                 nsfrz=nd - f * nd, lamr=np.asarray(lamr),
@@ -491,42 +491,60 @@ def test_rain_freeze_after_sedimentation_against_mg2():
     micro_mg2_0.F90:2571-2610 verbatim) at the hard limits: 48 points from
     5 K below rainfrze = tmelt - 40 K (:331) to 0.5 K above, the rain the
     grid pool after sedimentation (:2511-2512, :2527), heat-limited freezing
-    near rainfrze, mean drops of 100 um and 1 mm (slope-bounded to 500 um) at
-    Dcs 500 and 200 um.  Frozen rain and number, rain slope, the snow and ice
-    shares and the heating match.  KNOWN DIFFERENCE, inherited from the
-    frozen-rain size switch (mg2_frozen_rain_ice_fraction, used by the Bigg
-    freezing too): a drop exactly at 1/lamr = Dcs, which is where MG2's rain
-    slope bound puts every large drop at CAM6's Dcs of 500 um, goes to cloud
-    ice in MG2 (lamr < 1/Dcs is false there) and to snow in the hard switch
-    (1/lamr < Dcs is false too); the 9 such frozen points are asserted as
-    that swap."""
+    near rainfrze, mean drops of 100 um, 480 um and 1 mm (slope-bounded to
+    500 um) at Dcs 500, 450 and 200 um.  MG2 sends the frozen rain to snow
+    where lamr < 1/Dcs and to cloud ice otherwise (:2596-2602, the
+    ice_at_dcs test of the size switch), so a drop at the slope bound
+    1/lamr = 500 um goes to ice at CAM6's Dcs of 500 um.  Covered: drops at
+    the bound and on each side of Dcs (480 um below Dcs 500, 480 um and the
+    bound above Dcs 450).  Frozen rain and number, rain slope, the snow and
+    ice shares and the heating match on every point."""
     fx = _fx()
     lg = _rain_freeze(fx, _DT_FORM_S, math.inf, 0.0)
-    assert (fx["rfz_out_qifrz"] > 0).sum() >= 9 and (fx["rfz_out_qsfrz"] > 0).sum() >= 9
-    assert (fx["rfz_out_qrfrz"] == 0).sum() >= 12        # above rainfrze: no freezing
-    eq = (np.abs(fx["rfz_out_lamr"] * fx["rfz_in_dcs"] - 1.0) < 1e-12) & (fx["rfz_out_qrfrz"] > 0)
-    assert eq.sum() == 9, eq.sum()
-    errs = {k: float(np.max(_rel(lg[k], fx[f"rfz_out_{k}"]))) for k in
-            ("qrfrz", "nrfrz", "tlat")}
     on = fx["rfz_out_qrfrz"] > 0
+    assert (fx["rfz_out_qrfrz"] == 0).sum() >= 12        # above rainfrze: no freezing
+    d, dcs = 1.0 / np.where(on, fx["rfz_out_lamr"], 1.0), fx["rfz_in_dcs"]
+    bound = on & (np.abs(d * 2000.0 - 1.0) < 1e-12)      # 1/lamr at the 500 um bound
+    for sel, dest in ((bound & (dcs == 500.0e-6), "qifrz"),   # at the bound = Dcs: ice
+                      (on & (d < dcs), "qifrz"),             # below Dcs: ice
+                      (on & (d > dcs), "qsfrz")):            # above Dcs: snow
+        assert sel.sum() >= 9 and (fx[f"rfz_out_{dest}"][sel] > 0).all(), dest
+    assert (on & (d > dcs) & (d < 1.1 * dcs)).sum() >= 9  # just above Dcs (480 um at 450)
+    errs = {k: float(np.max(_rel(lg[k], fx[f"rfz_out_{k}"]))) for k in
+            ("qrfrz", "nrfrz", "tlat", "qifrz", "nifrz", "qsfrz", "nsfrz")}
     errs["lamr"] = float(np.max(_rel(lg["lamr"][on], fx["rfz_out_lamr"][on])))
-    for k in ("qifrz", "nifrz", "qsfrz", "nsfrz"):
-        errs[k] = float(np.max(_rel(lg[k][~eq], fx[f"rfz_out_{k}"][~eq])))
     print("max relative error", errs)
     assert max(errs.values()) <= TOL, errs
-    assert float(np.max(_rel(lg["qsfrz"][eq], fx["rfz_out_qifrz"][eq]))) <= TOL
-    assert (lg["qifrz"][eq] == 0).all()
     # each pair of shares sums to the rain loss bit for bit (the scheme takes
     # the loss as the sum of its shares)
     np.testing.assert_array_equal(lg["qifrz"] + lg["qsfrz"], lg["qrfrz"])
 
 
-# Default-switch gap per rfz point (relative error of the frozen rain against
-# MG2): the 0.2 K switch-on of the homogeneous-freezing width and the rounded
-# heat cap (cap_sharpness 100).  Measured 2026-11-02 on this fixture: 0 on
-# every point but the six 0.05 K below rainfrze at each Dcs, where the
-# switch-on is at 0.05/0.2 of its width (0.8965 of the freezing missing).
-_RFZ_DEFAULT_GAP = np.array(([0.0] * 12 + [0.8964843749999399] * 6 + [0.0] * 6) * 2)
+# Default-switch gap per rfz point (relative error of the frozen rain, and of
+# its cloud-ice share, against MG2): the 0.2 K switch-on of the
+# homogeneous-freezing width, the rounded heat cap (cap_sharpness 100) and the
+# size ramp from Dcs to 1.1 Dcs.  Measured 2026-11-02 on this fixture.  Point
+# order: Dcs (500, 450, 200 um) > offset (-5, -0.5, -0.05, +0.5 K) > rain
+# (1e-8, 1e-5, 1e-3) > drop (100 um, 480 um, bound).  Frozen rain: 0.8965 of
+# it missing on the nine points 0.05 K below rainfrze per Dcs (the switch-on),
+# 0 elsewhere.  Ice share: those points, wherever MG2 makes ice, and the whole
+# share (1.0) on the 480 um drops at Dcs 450 um, 1.067 Dcs, which MG2 sends to
+# snow and the ramp partly to ice.
+_SW = 0.8964843749999399
+
+
+def _rfz_gap(ice):
+    g = np.zeros((3, 4, 3, 3))
+    g[:, 2] = _SW
+    if ice:
+        g[1, 2, :, 2] = 0.0             # Dcs 450: the bound drop goes to snow
+        g[2, 2, :, 1:] = 0.0            # Dcs 200: 480 um and the bound to snow
+        g[1, :3, :, 1] = 1.0            # Dcs 450, 480 um, frozen: in the ramp
+    return g.ravel()
+
+
+_RFZ_DEFAULT_GAP = _rfz_gap(False)
+_RFZ_DEFAULT_GAP_ICE = _rfz_gap(True)
 
 
 def test_rain_freeze_default_gap_per_point():
@@ -539,8 +557,10 @@ def test_rain_freeze_default_gap_per_point():
     width = W.RAMP_WIDTH_PER_SHARPNESS / cfg.homogeneous_freeze_sharpness
     lg = _rain_freeze(fx, width, W.MG2_CAP_SHARPNESS, cfg.mg2_frozen_rain_ice_ramp_frac)
     gap = _rel(lg["qrfrz"], fx["rfz_out_qrfrz"])
-    print("default gap", repr(gap.tolist()))
+    gap_ice = _rel(lg["qifrz"], fx["rfz_out_qifrz"])
+    print("default gap", repr(gap.tolist()), "ice", repr(gap_ice.tolist()))
     np.testing.assert_allclose(gap, _RFZ_DEFAULT_GAP, rtol=1e-6, atol=1e-12)
+    np.testing.assert_allclose(gap_ice, _RFZ_DEFAULT_GAP_ICE, rtol=1e-6, atol=1e-12)
 
 
 def test_rain_freeze_gradient_at_default():

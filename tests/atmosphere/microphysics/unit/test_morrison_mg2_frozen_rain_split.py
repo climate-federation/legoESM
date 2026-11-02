@@ -92,9 +92,9 @@ def test_scheme_routes_the_share(monkeypatch):
     seen = []
     real = M.mg2_frozen_rain_ice_fraction
 
-    def spy(*a):
-        seen.append(np.asarray(real(*a)))
-        return real(*a)
+    def spy(*a, **k):
+        seen.append(np.asarray(real(*a, **k)))
+        return real(*a, **k)
 
     monkeypatch.setattr(M, "mg2_frozen_rain_ice_fraction", spy)
     hyd = dict(q_i=jnp.asarray(fx["col_q_i"]), N_i=jnp.asarray(fx["col_ni_kg"]),
@@ -130,9 +130,9 @@ def test_scheme_hard_routing_is_mg2s(monkeypatch):
     seen = []
     real = M.mg2_frozen_rain_ice_fraction
 
-    def spy(*a):
-        seen.append(np.asarray(real(*a)))
-        return real(*a)
+    def spy(*a, **k):
+        seen.append(np.asarray(real(*a, **k)))
+        return real(*a, **k)
 
     monkeypatch.setattr(M, "mg2_frozen_rain_ice_fraction", spy)
     hyd = dict(q_i=jnp.asarray(fx["col_q_i"]), N_i=jnp.asarray(fx["col_ni_kg"]),

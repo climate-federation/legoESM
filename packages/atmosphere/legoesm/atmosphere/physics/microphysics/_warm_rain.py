@@ -2625,7 +2625,7 @@ def bigg_cold_step(T, config):
                               / RAMP_WIDTH_PER_SHARPNESS)
 
 
-def mg2_frozen_rain_ice_fraction(lamr, dcs, ramp_frac):
+def mg2_frozen_rain_ice_fraction(lamr, dcs, ramp_frac, ice_at_dcs=False):
     """Share of MG2's frozen rain that becomes cloud ice, the rest snow.
 
     CAM6 MG2 (micro_mg2_0.F90:1648-1656) sends ALL of it to cloud ice where
@@ -2638,9 +2638,24 @@ def mg2_frozen_rain_ice_fraction(lamr, dcs, ramp_frac):
     per-column share difference is 0.75-1.0 (a 499 um drop: all ice in CAM,
     almost none here; test_morrison_mg2_frozen_rain_split.py).  Active only
     with do_graupel=False; the production deck has do_graupel=True.
+
+    ``ice_at_dcs`` (static) selects the test of MG2's post-sedimentation rain
+    freezing, which sends the frozen rain to snow where ``lamr < 1/Dcs`` and to
+    cloud ice otherwise (micro_mg2_0.F90:2596-2602): a mean drop of exactly
+    Dcs goes to ice there, where the Bigg freezing above (``1/lamr < Dcs``,
+    :1651) sends it to snow.  That matters because MG2's rain slope bound puts
+    every large drop exactly at 1/lamr = 500 um, CAM6's Dcs.  The smooth form
+    is then 1 up to ``1/lamr = Dcs`` and 0 from ``(1 + ramp_frac) Dcs``, so it
+    matches MG2 on every drop up to Dcs, the slope bound included; the hard
+    limit is MG2's ``lamr >= 1/Dcs``.
     """
     has = lamr > MG2_QSMALL
     d = 1.0 / jnp.where(has, lamr, 1.0)
+    if ice_at_dcs:
+        if ramp_frac <= 0.0:
+            return jnp.where(has & (lamr >= 1.0 / dcs), 1.0, 0.0)
+        return jnp.where(has, smoothstep_quintic(((1.0 + ramp_frac) * dcs - d)
+                                                 / (ramp_frac * dcs)), 0.0)
     if ramp_frac <= 0.0:
         return jnp.where(has & (d < dcs), 1.0, 0.0)
     return jnp.where(has, smoothstep_quintic((dcs - d) / (ramp_frac * dcs)), 0.0)

@@ -2517,9 +2517,10 @@ def morrison_microphysics(
         # MG2 freezing of rain below rainfrze = -40 C after sedimentation
         # (micro_mg2_0.F90:2571-2610) on t + tlat/cpp dt, the sedimentation
         # heating and the snow-melt cooling included, heat-limited so the air
-        # is not warmed above rainfrze.  The frozen drops go to snow, or to
-        # cloud ice where the mean drop 1/lamr of the grid-mean rain is below
-        # Dcs (:2591-2602, the size switch of mg2_frozen_rain_ice_fraction).
+        # is not warmed above rainfrze.  The frozen drops go to snow where
+        # lamr < 1/Dcs, the slope of the grid-mean rain, and to cloud ice
+        # otherwise (:2591-2602), so a drop at the slope bound 1/lamr = Dcs
+        # (500 um) goes to ice: the size switch with ice_at_dcs.
         # Graupel takes none of it, with do_graupel too: the CAM6 reference has
         # no graupel.  The ice share is added after the instant ice melt below,
         # which sees MG2's dumi, the ice before this freezing.  The rain loss
@@ -2534,7 +2535,8 @@ def morrison_microphysics(
         _fr_n_dest = mg2_instant_rain_freeze(T + dT_dt * dt, _dumr, _dumnr_adj / rho,
                                              _fr_w)[1]
         _to_ice = mg2_frozen_rain_ice_fraction(
-            _lamr_g, config.ice_snow_d_auto, config.mg2_frozen_rain_ice_ramp_frac)
+            _lamr_g, config.ice_snow_d_auto, config.mg2_frozen_rain_ice_ramp_frac,
+            ice_at_dcs=True)
         _postfrz_ice = _to_ice * _fr_m
         _postfrz_snow = _fr_m - _postfrz_ice
         _postfrz_N_ice = _to_ice * _fr_n_dest
