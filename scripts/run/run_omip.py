@@ -683,6 +683,11 @@ def parse_args(argv: list[str] | None = None):
                    help="Minimum ocean depth [m]; shallower cells become land (default 10).")
     p.add_argument("--smoothing-passes", type=int, default=2,
                    help="Laplacian smoothing passes for bathymetry (default 2).")
+    p.add_argument("--eq-smoothing-passes", type=int, default=None, dest="eq_smoothing_passes",
+                   help=("Extra wet-only Laplacian bathymetry passes within the equatorial band "
+                         "(lat-lon bathymetry lane; default 30). At 0.25 deg these passes deepen "
+                         "shallow sills toward neighbouring basins (Sulu Sea 50 m -> ~1700 m) and "
+                         "drive spurious 10+ m/s jets; use 0 at eddy-permitting resolution."))
     p.add_argument("--r-factor-max", type=float, default=0.2,
                    help="Maximum bathymetric slope r-factor for partial cells (default 0.2).")
     p.add_argument("--north-cap-lat", type=float, default=90.0,
@@ -6357,7 +6362,8 @@ def run_omip_single(grid_type: str, args) -> dict:
         # full strength at the equator to zero at the band edge, and
         # average only over wet neighbours (don't pull from land).
         eq_band = 15.0          # smooth within ±15° of equator
-        eq_passes = 30           # extra Laplacian passes at the equator
+        eq_passes = (args.eq_smoothing_passes
+                     if getattr(args, 'eq_smoothing_passes', None) is not None else 30)
         H_np = np.asarray(H_bathy_init)
         ocean_mask = np.asarray(land_mask_init) > 0.5
         # Cell-center latitudes (axis 0)
