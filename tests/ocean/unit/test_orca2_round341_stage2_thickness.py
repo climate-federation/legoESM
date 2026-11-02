@@ -307,6 +307,22 @@ def test_stage1_stage3_and_legacy_caller_stay_bit_identical() -> None:
                 eta_before=eta_b,
                 eta_after=eta_a,
             )
+    with jax.disable_jit(), pytest.raises(ValueError, match="stage_entry_override"):
+        omlc.LatLonCGridOceanModel(
+            grid,
+            zc,
+            model_on.config,
+            _nemo_ws_test_hooks=omlc._NEMOWSRK3TestHooks(
+                stage_entry_override=(
+                    2,
+                    state.u.data,
+                    state.v.data,
+                    state.T.data,
+                    state.S.data,
+                    eta_b,
+                )
+            ),
+        ).step(state, dt)
 
     # Stage 1 (:9341, stage_index=0) in production _step_impl is bit-identical across all 12 tuple slots
     spies = _run_production_step_spies()

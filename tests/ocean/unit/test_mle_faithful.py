@@ -69,6 +69,9 @@ def test_through_fct_selector_reaches_the_model_route_guard():
         LatLonCGridOceanModel,
     )
     from legoesm.ocean.fidelity.nemo_recipe import nemo_lat_lon_model_config
+    from legoesm.ocean.physics.lateral_mixing.mle_latlon_cgrid import (
+        mle_tracer_tendency_latlon_cgrid,
+    )
 
     cfg = nemo_lat_lon_model_config()
     cfg = cfg._replace(
@@ -76,6 +79,10 @@ def test_through_fct_selector_reaches_the_model_route_guard():
         physics=cfg.physics._replace(mle=MLEConfig(through_fct=True)))
     with pytest.raises(ValueError, match="stage-3 transport route"):
         LatLonCGridOceanModel._validate_config(cfg)
+    with pytest.raises(ValueError, match="no_mle_in_convection"):
+        mle_tracer_tendency_latlon_cgrid(
+            jnp.zeros((2, 2, 2)), *(None,) * 9,
+            MLEConfig(through_fct=True, no_mle_in_convection=True))
 
 
 def test_nemo_association_selector_changes_the_executed_coefficient():
@@ -303,7 +310,7 @@ def test_vertical_structure_full_curve_matches_nemo():
 
 def test_vertical_structure_5_21_coefficient_canary():
     # The 5/21 factor is the NEMO value; 1/3 (a plausible transcription) shifts
-    # mu measurably at mid-column (proves the pin canaries R5_21).
+    # mu measurably at mid-column (proves the pin canaries _R5_21).
     frac = np.array([0.25, 0.5, 0.75])
     got = np.asarray(mle_vertical_structure(jnp.asarray(frac)))
     zeta = 1.0 - 2.0 * frac

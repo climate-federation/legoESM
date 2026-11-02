@@ -103,7 +103,7 @@ def test_source_rounded_refuses_the_simplified_eos():
             source_rounded=True)
 
 
-def test_flag_refuses_a_closure_that_never_builds_the_step_entry_bundle():
+def test_flag_refuses_a_closure_that_never_builds_the_step_entry_bundle(monkeypatch):
     cfg = SimpleNamespace(
         physics=SimpleNamespace(vertical_mixing=SimpleNamespace(
             scheme="tke", tke=TKEConfig(nemo_bn2_source_rounded=True))),
@@ -111,3 +111,46 @@ def test_flag_refuses_a_closure_that_never_builds_the_step_entry_bundle():
     model = SimpleNamespace(z_coord=None, config=cfg)
     with pytest.raises(ValueError, match="nemo_bn2_source_rounded=True needs"):
         LatLonCGridOceanModel._tke_step_entry_n2_bundle(model, None)
+    from legoesm.core.field import Field
+    from legoesm.ocean.vertical import (
+        create_partial_cell_coordinate, create_z_star_from_thicknesses,
+    )
+
+    seen = []
+    orig = eos_mod.compute_buoyancy_frequency_nemo_bn2
+
+    def spy(*a, **kw):
+        seen.append(bool(kw.get("source_rounded", False)))
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(eos_mod, "compute_buoyancy_frequency_nemo_bn2", spy)
+    raw = create_z_star_from_thicknesses(
+        [10.0, 20.0, 30.0],
+        nemo_gdept_0_m=np.broadcast_to([5.0, 20.0, 45.0], (2, 2, 3)).copy(),
+        nemo_gdepw_0_m=np.broadcast_to([0.0, 10.0, 30.0], (2, 2, 3)).copy(),
+        nemo_e3t_0_m=np.broadcast_to([10.0, 20.0, 30.0], (2, 2, 3)).copy(),
+        nemo_e3w_0_m=np.broadcast_to([10.0, 15.0, 25.0], (2, 2, 3)).copy())
+    z = create_partial_cell_coordinate(raw, jnp.full((2, 2), raw.H_max))
+    d3, d2 = ("lat", "lon", "level"), ("lat", "lon")
+    state = SimpleNamespace(
+        T=Field(jnp.ones((2, 2, 3)) * 10.0, "T", d3, "degC"),
+        S=Field(jnp.ones((2, 2, 3)) * 35.0, "S", d3, "psu"),
+        eta=Field(jnp.zeros((2, 2)), "eta", d2, "m"),
+        H_bathy=Field(jnp.full((2, 2), raw.H_max), "H_bathy", d2, "m"))
+    for flag in (True, False):
+        cfg_s = SimpleNamespace(
+            physics=SimpleNamespace(vertical_mixing=SimpleNamespace(
+                scheme="tke", tke=TKEConfig(
+                    tke_n2_evaluation_stage="step_entry",
+                    n2_mode="nemo_bn2", n2_eos_form="eos80",
+                    nemo_bn2_source_rounded=flag))),
+            gm_redi=None, eos_nemo_seos=None,
+            constants=SimpleNamespace(g=constants.g))
+        m_s = SimpleNamespace(
+            z_coord=z, config=cfg_s,
+            _nemo_ws_test_hooks=SimpleNamespace(
+                bn2_tracer_override=None, bn2_intermediate="",
+                bn2_alpha_beta_override=None),
+            _n2_nemo_before_tracers=lambda *a, **k: None)
+        LatLonCGridOceanModel._tke_step_entry_n2_bundle(m_s, state)
+    assert seen == [True, False]
