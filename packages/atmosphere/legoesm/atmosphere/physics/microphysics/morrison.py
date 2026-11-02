@@ -2430,24 +2430,11 @@ def morrison_microphysics(
     if mg2_snow:
         dN_i_dt = dN_i_dt + nsacwi      # unscaled source, no nimax cap (decision 4a)
 
-    if mg2_snow:
-        dN_s_mg2 = dN_s_src + sed_N_s
-        if config.do_snow_melting:
-            # MG2 melting of snow AFTER sedimentation (micro_mg2_0.F90:2513-
-            # 2566), on the post-step snow and temperature, before the final
-            # size re-adjustments: melted snow -> rain, flakes -> drops.
-            _dums = jnp.maximum(q_s + dq_s_dt * dt, 0.0)
-            _dumns = jnp.where(_dums < MG2_QSMALL, 0.0,
-                               jnp.maximum(N_s + dN_s_mg2 * dt, 0.0))
-            _m2, _n2 = mg2_instant_snow_melt(
-                T + dT_dt * dt, _dums, _dumns,
-                RAMP_WIDTH_PER_SHARPNESS / config.melt_sharpness)
-            dq_s_dt = dq_s_dt - _m2 / dt
-            dN_s_mg2 = dN_s_mg2 - _n2 / dt
-            dq_r_dt = dq_r_dt + _m2 / dt
-            dN_r_dt = dN_r_dt + _n2 * rho / dt          # N_r per-volume
-            dT_dt = dT_dt - L_f * _m2 / dt / c_pd
-
+    # MG2 order (micro_mg2_0.F90:2232-2377, then :2536-2700): the heating of
+    # the ice and droplet sedimentation (the sublimated / evaporated inflow
+    # into a smaller cloud fraction, tlat :2296, :2367) is in t + tlat/cpp
+    # dt before the post-sedimentation snow melt, ice melt and homogeneous
+    # freezing test it, so it is added first.
     if _mg2_ice_sed:
         # vapour and latent cooling of the ice that falls into clear air
         # during the MG2 ice sedimentation above (qvlat, tlat, :2290-2296)
@@ -2482,6 +2469,24 @@ def morrison_microphysics(
             _nc_terms["sedimentation"] = sed_nc_kg * rho
         dq_v_dt = dq_v_dt + sed_qv
         dT_dt = dT_dt + sed_T
+    if mg2_snow:
+        dN_s_mg2 = dN_s_src + sed_N_s
+        if config.do_snow_melting:
+            # MG2 melting of snow AFTER sedimentation (micro_mg2_0.F90:2536-
+            # 2566), on the post-step snow and temperature, sedimentation
+            # heating included, before the final size re-adjustments: melted
+            # snow -> rain, flakes -> drops.
+            _dums = jnp.maximum(q_s + dq_s_dt * dt, 0.0)
+            _dumns = jnp.where(_dums < MG2_QSMALL, 0.0,
+                               jnp.maximum(N_s + dN_s_mg2 * dt, 0.0))
+            _m2, _n2 = mg2_instant_snow_melt(
+                T + dT_dt * dt, _dums, _dumns,
+                RAMP_WIDTH_PER_SHARPNESS / config.melt_sharpness)
+            dq_s_dt = dq_s_dt - _m2 / dt
+            dN_s_mg2 = dN_s_mg2 - _n2 / dt
+            dq_r_dt = dq_r_dt + _m2 / dt
+            dN_r_dt = dN_r_dt + _n2 * rho / dt          # N_r per-volume
+            dT_dt = dT_dt - L_f * _m2 / dt / c_pd
     if mg2_snow:
         # MG2 instant ice melt -> droplets and homogeneous freezing on the
         # post-sedimentation state (micro_mg2_0.F90:2503-2685; decisions 4b, 1a,

@@ -6,11 +6,17 @@
 ! UNMODIFIED micro_mg_utils.F90 size_dist_param_basic (cam_cesm2_1_rel_60);
 ! the rhosu, rhof, ain, ajn lines (:326, :895, :900-901), the fall-speed block
 ! and the ice part of the sedimentation loop are copied verbatim, the column
-! index kept and the cloud-water, rain and snow parts left out.
+! index kept and the cloud-water, rain and snow parts left out.  Then the
+! post-sedimentation snow melt at +2 C (:2536-2566, verbatim) tests
+! t + tlat/cpp*deltat, tlat holding the processes' heating (input) and the
+! sedimentation's: MG2's order.
 !
 ! Input (first line: ncol nlev deltat, then per column nlev lines, top first):
-!   qi ni qitend nitend icldm rho pdel     ([kg/kg], [#/kg], per second, -, kg/m3, Pa)
-! Output (per column nlev lines): qitend nitend qisedten qvlat tlat
+!   qi ni qitend nitend icldm rho pdel t tlat dums dumns
+!   ([kg/kg], [#/kg], per second, -, kg/m3, Pa, K, W/kg, kg/kg, #/kg; tlat the
+!   heating before sedimentation, dums/dumns the grid snow after it)
+! Output (per column nlev lines): qitend nitend qisedten qvlat tlat smelt nsmelt
+!   (tlat after sedimentation and snow melt; smelt, nsmelt the melt rates)
 ! then one line per column: preci nstep   (preci in m/s as MG2 reports it).
 ! usage: mg2_ice_sed_cols cols_in.txt cols_out.txt dcs
 program mg2_ice_sed_cols
@@ -25,11 +31,12 @@ program mg2_ice_sed_cols
   character(len=512) :: fin, fout, adcs
   character(128) :: err
   character(len=16) :: pfm = 'in_cloud'
-  real(r8) :: dcs, deltat, rhosu, irad, ifrac, xxls
-  real(r8) :: dum1, faltndi, faltndni, faltndqie
+  real(r8) :: dcs, deltat, rhosu, irad, ifrac, xxls, cpp, xlf, snowmelt
+  real(r8) :: dum, dum1, faltndi, faltndni, faltndqie
   real(r8) :: gamma_bi_plus1, gamma_bi_plus4, gamma_bj_plus1, gamma_bj_plus4
   real(r8), allocatable, dimension(:,:) :: qi, ni, qitend, nitend, icldm, rho, pdel, pdel_inv, &
-       dumi, dumni, lami, rhof, ain, ajn, vtrmi, fi, fni, qisedten, qvlat, tlat
+       dumi, dumni, lami, rhof, ain, ajn, vtrmi, fi, fni, qisedten, qvlat, tlat, &
+       t, dums, dumns, smelt, nsmelt
   real(r8), allocatable :: falouti(:), faloutni(:), preci(:)
   integer, allocatable :: nsteps(:)
   call get_command_argument(1, fin)
@@ -45,6 +52,10 @@ program mg2_ice_sed_cols
        ncnst_in=1.e8_r8, ninst_in=0._r8, errstring=err)
   ! micro_mg2_0.F90:317 (xxlv = latvap, xlf = latice as micro_mg_init sets them)
   xxls = latvap + latice
+  ! micro_mg2_0.F90:300, :316, :329 (cpp = cpair, xlf = latice, snowmelt = tmelt + 2)
+  cpp = cpair
+  xlf = latice
+  snowmelt = tmelt + 2._r8
   ! verbatim micro_mg2_0.F90:341-344
   gamma_bi_plus1=gamma(1._r8+bi)
   gamma_bi_plus4=gamma(4._r8+bi)
@@ -55,15 +66,17 @@ program mg2_ice_sed_cols
        icldm(ncol,nlev), rho(ncol,nlev), pdel(ncol,nlev), pdel_inv(ncol,nlev), &
        dumi(ncol,nlev), dumni(ncol,nlev), lami(ncol,nlev), rhof(ncol,nlev), &
        ain(ncol,nlev), ajn(ncol,nlev), vtrmi(ncol,nlev), fi(ncol,nlev), fni(ncol,nlev), &
-       qisedten(ncol,nlev), qvlat(ncol,nlev), tlat(ncol,nlev))
+       qisedten(ncol,nlev), qvlat(ncol,nlev), tlat(ncol,nlev), t(ncol,nlev), &
+       dums(ncol,nlev), dumns(ncol,nlev), smelt(ncol,nlev), nsmelt(ncol,nlev))
   allocate(falouti(nlev), faloutni(nlev), preci(ncol), nsteps(ncol))
   do i = 1, ncol
      do k = 1, nlev
-        read(10, *) qi(i,k), ni(i,k), qitend(i,k), nitend(i,k), icldm(i,k), rho(i,k), pdel(i,k)
+        read(10, *) qi(i,k), ni(i,k), qitend(i,k), nitend(i,k), icldm(i,k), rho(i,k), pdel(i,k), &
+             t(i,k), tlat(i,k), dums(i,k), dumns(i,k)
      end do
   end do
   close(10)
-  qisedten = 0._r8; qvlat = 0._r8; tlat = 0._r8; preci = 0._r8
+  qisedten = 0._r8; qvlat = 0._r8; preci = 0._r8; smelt = 0._r8; nsmelt = 0._r8
   ! verbatim micro_mg2_0.F90:326, :895, :900-901
   rhosu = 85000._r8/(rair * tmelt)
   rhof=(rhosu/rho)**0.54_r8
@@ -191,10 +204,41 @@ program mg2_ice_sed_cols
 
      end do
   end do
+  ! verbatim micro_mg2_0.F90:2538-2566 (melting of snow at +2 C); the
+  ! qstend/nstend/qrtend/nrtend updates are kept as the melt rates smelt and
+  ! nsmelt, meltsdttot is left out
+  do k=1,nlev
+
+     do i=1,ncol
+
+        if (t(i,k)+tlat(i,k)/cpp*deltat > snowmelt) then
+           if (dums(i,k) > 0._r8) then
+
+              ! make sure melting snow doesn't reduce temperature below threshold
+              dum = -xlf/cpp*dums(i,k)
+              if (t(i,k)+tlat(i,k)/cpp*deltat+dum.lt. snowmelt) then
+                 dum = (t(i,k)+tlat(i,k)/cpp*deltat-snowmelt)*cpp/xlf
+                 dum = dum/dums(i,k)
+                 dum = max(0._r8,dum)
+                 dum = min(1._r8,dum)
+              else
+                 dum = 1._r8
+              end if
+
+              smelt(i,k)=smelt(i,k)+dum*dums(i,k)/deltat
+              nsmelt(i,k)=nsmelt(i,k)+dum*dumns(i,k)/deltat
+
+              dum1=-xlf*dum*dums(i,k)/deltat
+              tlat(i,k)=tlat(i,k)+dum1
+           end if
+        end if
+     enddo
+  enddo
   open(11, file=trim(fout), status='replace')
   do i = 1, ncol
      do k = 1, nlev
-        write(11, '(5(1x,es25.16e3))') qitend(i,k), nitend(i,k), qisedten(i,k), qvlat(i,k), tlat(i,k)
+        write(11, '(7(1x,es25.16e3))') qitend(i,k), nitend(i,k), qisedten(i,k), qvlat(i,k), tlat(i,k), &
+             smelt(i,k), nsmelt(i,k)
      end do
   end do
   do i = 1, ncol

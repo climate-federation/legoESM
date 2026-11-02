@@ -15,6 +15,7 @@ ice MG2 sizes them from (:2063-2064, :2088).
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import jax
@@ -308,16 +309,15 @@ def _col_rel(a, b):
     return np.abs(a - b) / np.where(s > 0, s, 1.0)
 
 
-def _mg2_ice_sed_columns(fx, q, n):
-    from legoesm.atmosphere.physics.microphysics import _warm_rain as W
+def _mg2_ice_sed_columns(fx, q, n, tag="isc"):
     cfg = _cfg()
-    pdel = fx["isc_in_pdel"]
+    pdel = fx[f"{tag}_in_pdel"]
     p_half = jnp.asarray(np.concatenate([np.zeros_like(pdel[:, :1]), np.cumsum(pdel, axis=1)],
                                         axis=1))
     return W.mg2_ice_sedimentation(
-        jnp.asarray(q), jnp.asarray(n), jnp.asarray(fx["isc_in_icldm"]),
-        jnp.asarray(fx["isc_in_rho"]), p_half, float(fx["isc_dt"]),
-        int(fx["isc_out_nstep"].max()) + 1, cfg, cfg.ice_snow_d_auto,
+        jnp.asarray(q), jnp.asarray(n), jnp.asarray(fx[f"{tag}_in_icldm"]),
+        jnp.asarray(fx[f"{tag}_in_rho"]), p_half, float(fx["isc_dt"]),
+        int(fx[f"{tag}_out_nstep"].max()) + 1, cfg, cfg.ice_snow_d_auto,
         presence_top=W.MG2_QSMALL, slope_log_width=0.0)
 
 
@@ -351,3 +351,113 @@ def test_ice_sedimentation_columns_against_mg2():
     acts = np.any(fx["isc_in_qitend"] != 0, axis=1)
     miss = _col_rel(dq0, fx["isc_out_qisedten"]).max(axis=1)
     assert acts.sum() == 12 and (miss[acts] > 0.05).all() and (miss[~acts] <= TOL).all(), miss
+
+
+def _snow_melt_after_sedimentation(fx, with_sed_heat):
+    """The MG2 helpers chained as micro_mg2_0.F90 runs them on the ism
+    columns: ice sedimentation, then the +2 C snow melt tested on
+    t + tlat/cpp dt with (MG2's order) or without the sedimentation heating."""
+    dt = float(fx["isc_dt"])
+    dT_sed = np.asarray(_mg2_ice_sed_columns(fx, fx["ism_in_qi"], fx["ism_in_ni"], "ism")[3])
+    T_test = fx["ism_in_t"] + (fx["ism_in_tlat"] / constants.c_pd
+                               + (dT_sed if with_sed_heat else 0.0)) * dt
+    m, n = W.mg2_instant_snow_melt(jnp.asarray(T_test), jnp.asarray(fx["ism_in_dums"]),
+                                   jnp.asarray(fx["ism_in_dumns"]), _DT_FORM_S, math.inf)
+    return np.asarray(m) / dt, np.asarray(n) / dt, dT_sed
+
+
+def test_snow_melt_sees_the_sedimentation_heating_as_mg2():
+    """MG2 order against MG2 (ism_*: mg2_ice_sed_cols.F90, the ice
+    sedimentation loop :2232-2316 then the snow melt :2536-2566, verbatim):
+    27 two-level columns near 0 C, ice falling from a full cloud into a 5 %
+    one where 95 % of the inflow sublimates and cools the snowy air by 0.12
+    or 0.49 K, the air 0.2, 0.6 or 3 K above snowmelt.  The melt rates and
+    the final heating match with the sedimentation cooling in the melt's
+    temperature; without it (the order before) the melt is wrong in 8
+    columns, by up to the whole melt."""
+    fx = _fx()
+    m, n, dT_sed = _snow_melt_after_sedimentation(fx, True)
+    terms = (fx["ism_in_tlat"], constants.c_pd * dT_sed, -constants.L_f * m)
+    tlat = terms[0] + terms[1] + terms[2]
+    # scale: the column's largest heating term (a heat-limited melt cancels
+    # the rest to round-off)
+    scale = np.max(sum(np.abs(t) for t in terms), axis=1, keepdims=True)
+    errs = {"smelt": float(np.max(_rel(m, fx["ism_out_smelt"]))),
+            "nsmelt": float(np.max(_rel(n, fx["ism_out_nsmelt"]))),
+            "tlat": float(np.max(np.abs(tlat - fx["ism_out_tlat"]) / scale))}
+    print("max relative error", errs)
+    assert max(errs.values()) <= TOL, errs
+    m0 = _snow_melt_after_sedimentation(fx, False)[0]
+    miss = np.max(_rel(m0, fx["ism_out_smelt"]), axis=1)
+    assert (miss > 0.05).sum() == 8 and miss.max() == 1.0, miss
+
+
+def _melt_column(monkeypatch, zero=()):
+    """One two-level MG2-mode column near 0 C: cloud at +1 C with small ice
+    on top (cloud fraction 1), snowy air 0.1 K above snowmelt below it
+    (cloud fraction 0.05), where falling ice sublimates and falling droplets
+    evaporate.  Returns the temperature the post-sedimentation snow melt
+    tests, its melt, and the ice and droplet sedimentation heating; the
+    sedimentation heating named in ``zero`` ("ice", "drop") is set to 0."""
+    from legoesm.atmosphere.physics.microphysics import morrison as M
+    from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+    from tests.atmosphere.microphysics.unit.test_mg2_warm_rain_oracle import (
+        HARD_LIMIT, _production_morrison)
+    T = jnp.array([[constants.T_freeze + 1.0, constants.T_freeze + 2.1]])
+    p = jnp.array([[60000.0, 64000.0]])
+    ph = jnp.array([[58500.0, 61500.0, 66500.0]])
+    rho = p / (constants.R_d * T)
+    dz = (ph[:, 1:] - ph[:, :-1]) / (constants.g * rho)
+    cf = jnp.array([[1.0, 0.05]])
+    lam_i, lam_s = 1.5 / 40.0e-6, 2000.0   # small ice: little of it turns to snow
+    q_i = jnp.array([[2.0e-4, 0.0]])
+    q_s = jnp.array([[0.0, 2.0e-3]])
+    hyd = HydrometeorState(
+        q_c=jnp.array([[5.0e-4, 0.0]]), q_r=jnp.zeros_like(T), q_i=q_i, q_s=q_s,
+        q_g=jnp.zeros_like(T), N_c=jnp.full_like(T, 1.0e8), N_r=jnp.zeros_like(T),
+        N_i=lam_i ** 3 * q_i / (np.pi * 500.0), N_s=lam_s ** 3 * q_s / (np.pi * 250.0))
+    qv = saturation_specific_humidity_goff_gratch(T, p) * jnp.array([[1.0, 0.9]])
+    seen = {"T": [], "melt": []}
+    real_m, real_i, real_c = (M.mg2_instant_snow_melt, M.mg2_ice_sedimentation,
+                              M.mg2_cloud_sedimentation)
+
+    def spy_m(T_, q, n, *a, **k):
+        res = real_m(T_, q, n, *a, **k)
+        seen["T"].append(np.asarray(T_))
+        seen["melt"].append(np.asarray(res[0]))
+        return res
+
+    def wrap(real, key):
+        def f(*a, **k):
+            res = list(real(*a, **k))
+            seen[key] = np.asarray(res[3])
+            if key in zero:
+                res[3] = 0.0 * res[3]
+            return tuple(res)
+        return f
+    monkeypatch.setattr(M, "mg2_instant_snow_melt", spy_m)
+    monkeypatch.setattr(M, "mg2_ice_sedimentation", wrap(real_i, "ice"))
+    monkeypatch.setattr(M, "mg2_cloud_sedimentation", wrap(real_c, "drop"))
+    cfg = _production_morrison()._replace(**HARD_LIMIT, warm_rain_scheme="kk2000_cam6",
+                                          specified_nc_droplet_sedimentation=True)
+    M.morrison_microphysics(T, qv, hyd, p, ph, rho, dz, 1800.0, cfg, cloud_fraction=cf)
+    assert len(seen["T"]) == 2            # start-of-step melt, post-sedimentation melt
+    return seen["T"][1][0], seen["melt"][1][0], seen["ice"][0], seen["drop"][0]
+
+
+def test_post_sedimentation_snow_melt_temperature_has_the_sedimentation_heating(monkeypatch):
+    """MG2 order in the scheme (micro_mg2_0.F90:2296, :2367 before :2543):
+    the temperature the post-sedimentation snow melt tests carries the ice
+    and droplet sedimentation heating; removing either heating moves it by
+    exactly that heating x dt.  In the order before, the melt saw neither,
+    and this fails.  (The start-of-step melt brings the snowy air back to
+    snowmelt and no process here warms it at +2 C, so the melt after
+    sedimentation is 0 in both; the melt itself is checked against MG2
+    above.)"""
+    dt = 1800.0
+    T0, m0, dT_ice, dT_drop = _melt_column(monkeypatch)
+    assert dT_ice[1] < -1.0e-5 and dT_drop[1] < -1.0e-5, (dT_ice, dT_drop)
+    for key, dT in (("ice", dT_ice), ("drop", dT_drop)):
+        with monkeypatch.context() as mp:
+            T1, m1, _, _ = _melt_column(mp, zero=(key,))
+        np.testing.assert_allclose(T0 - T1, dT * dt, rtol=1.0e-9, atol=1.0e-12, err_msg=key)
