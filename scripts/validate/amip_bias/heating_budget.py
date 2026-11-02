@@ -289,7 +289,7 @@ def cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backe
           f"(radius moved {rows['Nc x2']['reff'] * 1e6:.2f} -> {rows['Nc x0.5']['reff'] * 1e6:.2f} um)")
     return 0
 
-def era5_snapshot_on_cells(swap_dir, day, cell_lat, cell_lon):
+def era5_snapshot_on_cells(swap_dir, day, cell_lat, cell_lon, origin):
     """#2303: ERA5 00-UTC T, q and surface pressure of snapshot ``day``
     (``era5_prep.sbatch`` output: cdo ``setgridtype,regular`` of the N320
     hourly analyses) area-averaged onto the Voronoi cells.  Every ERA5 point
@@ -311,6 +311,15 @@ def era5_snapshot_on_cells(swap_dir, day, cell_lat, cell_lon):
             raise SystemExit(f"expected one field in {ds.encoding.get('source')}, got {names}")
         return ds[names[0]].isel(time=0)
     T, Q, PS = one(t), one(q), one(s)
+    if T.dims != ("plev", "lat", "lon") or Q.dims != T.dims or PS.dims != ("lat", "lon"):
+        raise SystemExit(f"unexpected ERA5 dims T{T.dims} q{Q.dims} ps{PS.dims}")
+    for a in (Q, PS):
+        if not (np.array_equal(a["lat"], T["lat"]) and np.array_equal(a["lon"], T["lon"])):
+            raise SystemExit("ERA5 T, q and ps are on different lat/lon coordinates")
+    want = np.datetime64(origin, "s") + np.timedelta64(int(day) * 86400, "s")
+    for a in (T, Q, PS):
+        if np.datetime64(a["time"].values, "s") != want:
+            raise SystemExit(f"ERA5 snapshot time {a['time'].values} != {want} (origin {origin} + day {day})")
     plev = np.asarray(T["plev"], dtype=np.float64)
     if not np.array_equal(plev, np.asarray(Q["plev"], dtype=np.float64)):
         raise SystemExit("ERA5 T and q pressure levels differ")
@@ -362,7 +371,8 @@ def swap_on_layers(plev, prof, ps, p_full, model):
 
 
 def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backend,
-                  ref_run, era5_dir, target, swap_dir=None, day=None, out_json=None):
+                  ref_run, era5_dir, target, swap_dir=None, day=None, out_json=None,
+                  swap_origin=None):
     """#2109: clear-sky OLR of the PRODUCTION clear-sky radiation call on the
     captured state, re-solved with temperature and/or humidity corrected to
     ERA5 by the global-mean profile ``rlutcs_kernel.bias_profiles`` measures
@@ -398,7 +408,7 @@ def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_back
     else:
         cell_lat = np.asarray(mesh.latCell, dtype=np.float64)
         cell_lon = np.asarray(mesh.lonCell, dtype=np.float64)
-        eplev, eT, eq, eps = era5_snapshot_on_cells(swap_dir, day, cell_lat, cell_lon)
+        eplev, eT, eq, eps = era5_snapshot_on_cells(swap_dir, day, cell_lat, cell_lon, swap_origin)
         print(f"#2303 swap: ERA5 00 UTC snapshot of day {day} from {swap_dir}, "
               f"{eplev.size} levels, area-averaged onto {cell_lat.size} cells")
         kept = {}
@@ -419,8 +429,11 @@ def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_back
             pf = np.asarray(b["p_full"], dtype=np.float64)
             T = np.asarray(b["T"], dtype=np.float64)
             if swap_dir is not None:
-                gate(np.allclose(np.asarray(b["lat"], dtype=np.float64).ravel(), cell_lat),
-                     "radiation columns are the mesh cells, in order")
+                if b.get("lon") is None:
+                    raise SystemExit("radiation call carries no lon: column order unverifiable")
+                gate(np.allclose(np.asarray(b["lat"], dtype=np.float64).ravel(), cell_lat)
+                     and np.allclose(np.asarray(b["lon"], dtype=np.float64).ravel(), cell_lon),
+                     "radiation columns are the mesh cells, in order (lat and lon)")
             if mode in ("dT", "both"):
                 if swap_dir is None:
                     T = T + rk._on_columns(plev, dT, pf, 0.0)
@@ -557,6 +570,9 @@ def main(argv=None):
                          "00-UTC snapshot of --day in DIR (era5_snapshot_on_cells) instead of "
                          "the global-mean bias profile")
     ap.add_argument("--swap-json", default=None, help="write the --era5-swap global means here")
+    ap.add_argument("--swap-origin", default=None,
+                    help="UTC datetime of model day 0 (e.g. 1979-01-01T00:00); the ERA5 files "
+                         "must be stamped origin + --day")
     ap.add_argument("--target", type=float, default=None,
                     help="rlutcs model-minus-obs error to be explained [W/m2]")
     ap.add_argument("--n-times", type=int, default=8)
@@ -583,6 +599,8 @@ def main(argv=None):
         ap.error("--no-graupel-riming needs --nc-budget")
     if args.reset_field != "mg2_drop_early_reset_log_width" and not args.reset_width_ab:
         ap.error("--reset-field needs --reset-width-ab")
+    if args.era5_swap and not args.swap_origin:
+        ap.error("--era5-swap needs --swap-origin")
     if args.reset_width_ab and (args.nc_budget or args.rlutcs_replay):
         ap.error("--reset-width-ab is its own mode (not with --nc-budget / --rlutcs-replay)")
     t0 = time.time()
@@ -680,7 +698,8 @@ def main(argv=None):
     if args.rlutcs_replay:
         return rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backend,
                              args.ref_run or args.run, args.profile_era5, args.target,
-                             swap_dir=args.era5_swap, day=args.day, out_json=args.swap_json)
+                             swap_dir=args.era5_swap, day=args.day, out_json=args.swap_json,
+                             swap_origin=args.swap_origin)
     if args.reset_width_ab:
         return NCB.run_reset_ab(model, state, DT, pf_full, forcing, phys_state, micro_calls,
                                 out_dir, f"{args.run}_d{args.day:04d}")

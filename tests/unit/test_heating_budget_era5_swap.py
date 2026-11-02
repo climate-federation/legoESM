@@ -55,9 +55,22 @@ def test_snapshot_area_average_excludes_below_ground_points(tmp_path):
                coords={"time": t, "lat": lat, "lon": lon}).to_netcdf(tmp_path / "sf134_day5.nc")
     # two cells: southern and northern hemisphere generators
     cl, cn = np.deg2rad([-45.0, 45.0]), np.deg2rad([90.0, 90.0])
-    p, Tc, qc, psc = hb.era5_snapshot_on_cells(tmp_path, 5, cl, cn)
+    p, Tc, qc, psc = hb.era5_snapshot_on_cells(tmp_path, 5, cl, cn, "1979-01-01")
     np.testing.assert_array_equal(p, [50000.0, 100000.0])
     np.testing.assert_allclose(Tc[0], [250.0, 281.0])
     np.testing.assert_allclose(Tc[1], [250.0, 284.0])     # below-ground 286 excluded
     np.testing.assert_allclose(qc[1, 1], 284e-5)
     np.testing.assert_allclose(psc, [101000.0, 95500.0])
+
+
+def test_snapshot_refuses_wrong_date(tmp_path):
+    xr = pytest.importorskip("xarray")
+    t = [np.datetime64("1979-01-07")]
+    c = {"time": t, "lat": [0.0], "lon": [0.0]}
+    for name, v in (("pl130", "t"), ("pl133", "q")):
+        xr.Dataset({v: (("time", "plev", "lat", "lon"), np.ones((1, 1, 1, 1)))},
+                   coords={**c, "plev": [1e5]}).to_netcdf(tmp_path / f"{name}_day5.nc")
+    xr.Dataset({"sp": (("time", "lat", "lon"), np.ones((1, 1, 1)))},
+               coords=c).to_netcdf(tmp_path / "sf134_day5.nc")
+    with pytest.raises(SystemExit, match="snapshot time"):
+        hb.era5_snapshot_on_cells(tmp_path, 5, np.zeros(1), np.zeros(1), "1979-01-01")
