@@ -50,3 +50,35 @@ def test_inversion_pressure_finds_the_strongest_theta_jump():
     p = np.array([[60000.0, 80000.0, 85000.0, 90000.0, 100000.0]])
     T = np.array([[275.0, 288.0, 289.0, 285.0, 293.0]])   # warm lid between 850 and 900 hPa
     assert A.inversion_pressure(T, p)[0] == 87500.0
+
+
+def test_physics_only_arms_add_one_process_per_step():
+    import sys
+    sys.path.insert(0, str(_D))
+    A = _load("physics_only_arms")
+    order = list(A.ARMS)
+    sizes = [len(A.ARMS[k]) for k in order]
+    assert order[0] == "clubb" and "turbulence" not in A.ARMS["clubb"]
+    for prev, cur in zip(order, order[1:]):
+        dropped = set(A.ARMS[prev]) - set(A.ARMS[cur])
+        assert set(A.ARMS[cur]) <= set(A.ARMS[prev]) and len(dropped) <= 1, (prev, cur)
+    assert sizes[-1] == sizes[-2]                       # +fixers changes the step, not the physics
+
+
+def test_arm_config_switches_only_the_named_modules():
+    from typing import NamedTuple
+    import sys
+    sys.path.insert(0, str(_D))
+    A = _load("physics_only_arms")
+
+    class Sub(NamedTuple):
+        scheme: str = "x"
+
+    class Cfg(NamedTuple):
+        radiation: Sub = Sub()
+        convection: Sub = Sub()
+        turbulence: Sub = Sub()
+
+    out = A.arm_config(Cfg(), ("radiation",))
+    assert out.radiation.scheme == "none" and out.convection.scheme == "x" \
+        and out.turbulence.scheme == "x"
