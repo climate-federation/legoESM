@@ -8,7 +8,7 @@ the prescribed-forcing planes -- as float32 (owner decision 2026-11-01), about
 2 % of the raw volume.
 
 Layout: one zarr store per configuration tag, time axis = the ERA5 indices the
-configuration needs, one array per pytree leaf (``c###`` carry, ``s_<key>``
+configuration needs (sorted, then any added by a later extension appended), one array per pytree leaf (``c###`` carry, ``s_<key>``
 near-surface targets, ``f###`` forcing), each chunked one time per chunk so
 SLURM array tasks write disjoint regions.  ``done`` marks every time a task has
 finished; the reader refuses a time that is not marked.  The pytree structure
@@ -55,19 +55,28 @@ def record_arrays(carry, sfc, forcing) -> tuple[dict, dict]:
 
 
 def create_store(path, era5_indices, example, structure, meta) -> None:
-    """Empty store sized for ``era5_indices``; a no-op if it already exists
-    with the same index list, structure and metadata, else a hard error."""
+    """Empty store sized for ``era5_indices``.  An existing store with the same
+    structure and metadata is EXTENDED: indices it lacks are appended (unwritten,
+    not done) and every time it holds is kept; a different structure is a hard
+    error."""
     import zarr
 
     path = Path(path)
     idx = np.asarray(sorted(int(i) for i in era5_indices), dtype=np.int64)
     attrs = {"format": STORE_FORMAT, "structure": structure, "meta": meta}
     if path.exists():
-        g = zarr.open_group(str(path), mode="r")
-        if (dict(g.attrs) != json.loads(json.dumps(attrs))
-                or not np.array_equal(np.asarray(g["era5_index"]), idx)):
+        g = zarr.open_group(str(path), mode="r+")
+        have = np.asarray(g["era5_index"])
+        if dict(g.attrs) != json.loads(json.dumps(attrs)):
             raise RuntimeError(f"state cache {path} exists with a different "
-                               "index list or structure; delete it and rebuild.")
+                               "structure; delete it and rebuild.")
+        new = idx[~np.isin(idx, have)]
+        if len(new):
+            n = len(have) + len(new)
+            for name in ["done", *example]:
+                g[name].resize((n, *g[name].shape[1:]))
+            g["era5_index"].resize((n,))
+            g["era5_index"][len(have):] = new
         return
     g = zarr.open_group(str(path), mode="w")
     g.attrs.update(attrs)
@@ -84,18 +93,18 @@ def write_time(path, era5_index, arrays) -> None:
     import zarr
 
     g = zarr.open_group(str(path), mode="r+")
-    pos = _position(g, era5_index)
+    pos = _position(np.asarray(g["era5_index"]), era5_index)
     for name, v in arrays.items():
         g[name][pos] = v
     g["done"][pos] = True
 
 
-def _position(g, era5_index) -> int:
-    idx = np.asarray(g["era5_index"])
-    pos = int(np.searchsorted(idx, int(era5_index)))
-    if pos >= len(idx) or idx[pos] != int(era5_index):
+def _position(store_index, era5_index) -> int:
+    # Not sorted once a store has been extended.
+    hit = np.flatnonzero(store_index == int(era5_index))
+    if not len(hit):
         raise KeyError(f"ERA5 index {era5_index} is not in this state cache")
-    return pos
+    return int(hit[0])
 
 
 class StateCache:
@@ -132,7 +141,7 @@ class StateCache:
         """``(carry, sfc, forcing)`` for one ERA5 index, host numpy leaves."""
         import jax
 
-        pos = _position(self._g, era5_index)
+        pos = _position(self._idx, era5_index)
         if not self._done[pos]:
             raise RuntimeError(f"state cache {self.path}: ERA5 index "
                                f"{era5_index} was never written (task killed?).")

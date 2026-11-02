@@ -6,7 +6,8 @@ is converted to the model grid ONCE (``scale_build.wb_state_record``) and
 written as float32 to ``state_cache_dir`` (``legoesm.training.wb_state_cache``).
 
 Run under SLURM, never on a login node:
-  --init            create the empty store (one job, before the array);
+  --init            create the empty store, or extend an existing one with
+                    the times it lacks (one job, before the array);
   --task K --n-tasks N   write every N-th time starting at K (array tasks);
   --check           print how many needed times are written (exit 1 if any
                     is missing).
@@ -43,7 +44,7 @@ def needed_indices(cfg, yml, times):
     from legoesm.training import scale_build as sb
 
     cadence = int(yml.get("era5_cadence_hours", 6))
-    _, stride, step = sb.wb_lead_strides(cfg, yml, cadence)
+    _, stride, offsets = sb.wb_lead_strides(cfg, yml, cadence)
     # Every deck validates (its block or the legacy 2014 protocol).
     decks = [yml, sb.wb_validation_yaml(
         yml, int(sb.wb_validation_spec(yml)["n_inits"]))]
@@ -51,7 +52,7 @@ def needed_indices(cfg, yml, times):
     for d in decks:
         for _, a, b in sb._training_sample_indices(cfg, d, times, 24 // cadence,
                                                    stride):
-            out.update([a, *range(a + step, b + 1, step)])
+            out.update([a, *(a + o for o in offsets)])
     return np.asarray(sorted(out), dtype=np.int64)
 
 
@@ -102,13 +103,16 @@ def main(argv=None):
     if not 0 <= a.task < a.n_tasks:
         raise SystemExit(f"--task {a.task} outside 0..{a.n_tasks - 1}")
     import zarr
-    done = np.asarray(zarr.open_group(str(path), mode="r")["done"])
-    for k in range(a.task, len(idx), a.n_tasks):
-        if done[k]:
-            continue
-        arrays, _ = wsc.record_arrays(*record(idx[k]))
-        wsc.write_time(path, idx[k], arrays)
-        print(f"wrote {k + 1}/{len(idx)} {times[idx[k]]}", flush=True)
+    g = zarr.open_group(str(path), mode="r")
+    have = dict(zip(np.asarray(g["era5_index"]).tolist(),
+                    np.asarray(g["done"]).tolist()))
+    if not set(idx.tolist()) <= set(have):
+        raise SystemExit(f"{path} lacks needed times; re-run --init to extend it")
+    todo = [int(i) for i in idx if not have[int(i)]]
+    for k in range(a.task, len(todo), a.n_tasks):
+        arrays, _ = wsc.record_arrays(*record(todo[k]))
+        wsc.write_time(path, todo[k], arrays)
+        print(f"wrote {k + 1}/{len(todo)} {times[todo[k]]}", flush=True)
     return 0
 
 

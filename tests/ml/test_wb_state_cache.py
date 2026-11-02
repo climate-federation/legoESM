@@ -50,6 +50,24 @@ def test_round_trip_float32_and_done_marks(tmp_path):
         c.read(13)
 
 
+
+def test_extending_a_store_keeps_written_times(tmp_path):
+    p = _store(tmp_path, [10, 12])
+    wsc.write_time(p, 12, wsc.record_arrays(*_rec(12))[0])
+    arrays, structure = wsc.record_arrays(*_rec(10))
+    wsc.create_store(p, [10, 11, 13], arrays, structure, {})   # adds 11, 13; keeps 12
+    c = wsc.StateCache(p, _rec(10))
+    assert c.missing([10, 11, 12, 13]) == [10, 11, 13]
+    wsc.write_time(p, 13, wsc.record_arrays(*_rec(13))[0])
+    c = wsc.StateCache(p, _rec(10))
+    for i in (12, 13):
+        np.testing.assert_array_equal(
+            c.read(i)[0].p_s, _rec(i)[0].p_s.astype(np.float32).astype(np.float64))
+    with pytest.raises(RuntimeError, match="never written"):
+        c.read(11)
+    with pytest.raises(RuntimeError, match="different structure"):
+        wsc.create_store(p, [10], arrays, structure, {"other": 1})
+
 def test_gate_catches_one_float32_ulp_and_structure(tmp_path):
     p = _store(tmp_path, [10])
     arr = wsc.record_arrays(*_rec(10))[0]
@@ -62,8 +80,6 @@ def test_gate_catches_one_float32_ulp_and_structure(tmp_path):
     other = (_rec(10)[0], {"t2m": _rec(10)[1]["t2m"]}, _rec(10)[2])
     with pytest.raises(RuntimeError, match="different sample structure"):
         wsc.StateCache(p, other)
-    with pytest.raises(RuntimeError, match="different index list"):
-        wsc.create_store(p, [10, 11], *wsc.record_arrays(*_rec(10)), {})
 
 
 def _times(start="2019-12-30", n=40):
@@ -111,7 +127,7 @@ def test_cached_samples_gate_assembly_and_missing(tmp_path, monkeypatch):
         wsc.write_time(p, i, wsc.record_arrays(*_rec(i))[0])
     cfg = SimpleNamespace(mode="sfno")
     mine = [(2015, 0, 2), (2015, 2, 4)]
-    s = sb._state_cached_samples(cfg, {}, None, None, mine, (6, 12), 1,
+    s = sb._state_cached_samples(cfg, {}, None, None, mine, (6, 12), (1, 2),
                                  _times(), None, None, None, "none", None)
     assert len(s) == 2
     ic, target, forcing = s[1]
@@ -119,8 +135,12 @@ def test_cached_samples_gate_assembly_and_missing(tmp_path, monkeypatch):
     np.testing.assert_array_equal(target[1][0].p_s,
                                   _rec(4)[0].p_s.astype(np.float32).astype(np.float64))
     assert [x[0].T.shape for x in s] == [(3, 4, 2)] * 2
+    sp = sb._state_cached_samples(cfg, {}, None, None, [(2015, 0, 4)], (6, 12, 24),
+                                  (1, 2, 4), _times(), None, None, None, "none", None)
+    np.testing.assert_array_equal(  # third lead is time 4, not 3
+        sp[0][1][2][0].p_s, _rec(4)[0].p_s.astype(np.float32).astype(np.float64))
     with pytest.raises(RuntimeError, match="lacks 1"):
-        sb._state_cached_samples(cfg, {}, None, None, [(2015, 3, 5)], (6, 12), 1,
+        sb._state_cached_samples(cfg, {}, None, None, [(2015, 3, 5)], (6, 12), (1, 2),
                                  _times(), None, None, None, "none", None)
 
 
@@ -146,6 +166,13 @@ def test_builder_needs_train_leads_and_validation_times():
     assert set(range(base15, base15 + 6)) <= set(idx.tolist())     # 4 ICs + 2 leads
     assert {0, 1, 2, 60, 61, 62} <= set(idx.tolist())               # 2014 inits + leads
     assert len(idx) == 6 + 6
+
+    sparse = {**yml, "loss": {"train_leads_hours": [6, 12, 24]}}
+    idx = set(mod.needed_indices(cfg, sparse, times).tolist())
+    # 4 ICs at base15+0..3, leads +1, +2, +4: offset 3 (18 h) only as another IC.
+    assert idx == ({base15 + k for k in range(4)} | {base15 + k + o for k in range(4)
+                                                     for o in (1, 2, 4)}
+                   | {0, 1, 2, 4, 60, 61, 62, 64})
 
 
 def test_validation_init_that_cannot_be_scored_is_an_error():
@@ -203,7 +230,7 @@ def test_every_lead_uses_the_initial_time_forcing(tmp_path, monkeypatch):
     for i in range(5):
         wsc.write_time(p, i, wsc.record_arrays(*_rec(i))[0])
     s = sb._state_cached_samples(SimpleNamespace(mode="physics"), {}, None, None,
-                                 [(2015, 2, 4)], (6, 12), 1, _times(), None, None,
+                                 [(2015, 2, 4)], (6, 12), (1, 2), _times(), None, None,
                                  None, "none", None)
     _, target, forcing = s[0]
     assert float(forcing["day_of_year"]) == 2.0          # _rec(i) codes i here
