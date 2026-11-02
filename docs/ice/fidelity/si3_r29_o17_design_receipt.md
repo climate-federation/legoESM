@@ -239,8 +239,18 @@ real grid.
    15,686,332 and 18,205,892 KiB after steps 1-3: each step's 1.29 GB trace
    (measured with `jax.eval_shape`) stayed referenced into the next step. The
    loop now keeps only the 0.27 GB INDEPENDENT state across steps and samples
-   the resident set after `gc.collect()` and `malloc_trim(0)`. The re-measured
-   per-step resident set is in the final verification below. That same run
+   the resident set after `gc.collect()` and `malloc_trim(0)`. Re-measured at
+   `cd5fd47d69`, the live resident set still grew. Scoring the same record
+   twice in one process gave 3,841,044, 5,568,464 and 6,917,784 KiB on the
+   first pass, then 7,580,020, 8,674,820 and 9,739,944 KiB on the second.
+   Over the same six steps, JAX's eager per-primitive executable cache held
+   497, 1140, 1782, 1886, 2528 and 3170 entries, every one a miss: the
+   repeated steps 2 and 3 added 642 new entries again. The growth is that
+   cache, which JAX bounds only by a 4096-entry LRU (`jax/_src/util.py` 263,
+   `jax/_src/dispatch.py` 100). It is not data the scorer keeps. Which
+   primitive rebuilds its cache key on every call is not identified. The
+   scorer now clears JAX's caches after each eagerly scored step; the final
+   per-step resident set is in the verification section below. The first run
    scored the identical 3-step record PASS under both labels, with 0
    differing values. INDEPENDENT entries at steps 2 and 3 were not bitwise
    equal to the record entries (the record carries owned `t_si` only), so
@@ -265,8 +275,10 @@ real grid.
    source-rounding barrier. Eager scoring costs 519.8 s per step: 100 steps
    take 14.4 h when INDEPENDENT stays bitwise on the NEMO entry, because a
    bitwise-identical entry reuses the GIVEN-NEMO-ENTRY result, and up to
-   199 steps, 28.7 h, after it diverges. This runs after the acquisition
-   clock stops.
+   199 steps, 28.7 h, after it diverges. The scorer's own 3-step runs took
+   4,224-4,476 s for 5 evaluations including record I/O, alongside other jobs,
+   which is about 880 s per evaluation. At that rate the bound is 24-49 h. All
+   of this runs after the acquisition clock stops.
 7. **Preflight runs the real scorer.** The scorer self-test that compared zero
    arrays is deleted, and so is the stub driver's literal PASS report. The O17
    preflight now builds a 2-step, writer-shaped record at 184 x 152 from the
@@ -315,6 +327,8 @@ real grid.
 
 - Scorer execution stays eager, as item 6 instructs when the compiled step is
   not bitwise. ASKED (item 6).
+- The scorer clears JAX's caches after every eagerly scored step to bound
+  its memory. ASKED (item 5).
 - The halo pad value is zero, the lane's existing `t_si` convention, and the
   test shows it cannot reach an owned output. ASKED (item 1: "the way the
   lane's state convention requires").
@@ -343,9 +357,81 @@ the cause of the 47 value differences is PLAUSIBLE.
    and switch scoring to the compiled step (about 75 s per step after three
    compiles of about 580 s). **Pick.** It changes shared certified kernels,
    so it is the user's decision.
-2. Keep eager scoring (14.4-28.7 h after NEMO stops) and leave production JIT
+2. Keep eager scoring (14-49 h after NEMO stops) and leave production JIT
    as it is. The real record can be acquired and scored now under either
    option.
+
+## Resume 5 final verification
+
+Run from a fresh clone under the round scratch directory: the full battery at
+`cd5fd47d69`, then the O17 unit file and the preflight again at `7f8e3f99f7`
+(the only later code change is the scorer's per-step cache clear), on
+CPU binary64 with `CUDA_VISIBLE_DEVICES=""`, `JAX_PLATFORMS=cpu` and
+`JAX_ENABLE_X64=1`. Every pytest command named its file, ran serially in a
+foreground child bounded by `timeout`, and used no xdist worker. No NEMO
+command ran.
+
+- O17 unit file at `7f8e3f99f7`: `15 passed, 1 xfailed in 3312.26s (0:55:12)`;
+  at `cd5fd47d69`: `15 passed, 1 xfailed in 3263.16s (0:54:23)`. The xfail is
+  the strict compiled-equals-eager test (item 6). The code-revert plants
+  failed at these lines. `t_bo`: `Arrays are not equal | t_bo
+  icestp.F90:136-138`. `u_ice_b` and `a_i_b`: `surface-boundary digest ...
+  != pinned 7e6ff54d...`. Thermodynamic tail: `icethd.F90:185 ageing after
+  ice_cor(kt,2)`. Tail halo links: `a_i halo not refreshed
+  (icethd.F90:188-190)`. Full-grid gather: `halo columns ran thermodynamics
+  (icethd.F90:130 DO_2D(0,0,0,0))`. The scorer plants (no padding, no owned
+  alignment, wrong kind-27 boundary, 1 ULP, signed zero, NaN) all fail
+  inside the passing scorer test. After the run, `git status --porcelain` in
+  the clone was empty.
+- `tests/ocean/fidelity/test_nemo_si3_*.py`, 17 files, one process each: 206
+  passed. The O4 Prather file passed its 8 forward cases with only its
+  full-step AD case deselected (the Decision 194 boundary). The scalarmath-v2
+  file had 4 passed and the pre-existing external-state failure `A MY_SRC is
+  not verbatim`.
+- `tests/ice/unit/test_si3_*.py`, the other 15 files: 397 passed, 2
+  deselected by the repository markers (O5 and O6 files), 1 xfailed. The only
+  failure is the pre-existing
+  `test_production_path_plants_fire[sum_first_category]` (`test_si3_surface.py`
+  line 531, `assert [] != []`).
+- O8-O12 master scorer: `30 passed in 724.39s`. O8-O16/O17 master
+  acquisition: `28 passed in 498.28s`. O5: `17 passed`. O7: `19 passed`.
+- Landing battery, one process per file: receipt citations 45, private
+  imports 6, TKE terms 71, NEMO recipe 25, freshwater closure 16, stage-face
+  masks 2, prognostic barotropic state 8; all passed.
+- Ten ratchet files: `11 failed, 13183 passed, 4 skipped`. The 11 are the
+  established set, none in a Resume-5 file. Three are hardcoded-constant rows
+  (`test_si3_o13_itd_remap.py`, `test_si3_thd_do.py`, the O4 stub writer).
+  Five are inline-coefficient rows (`bitz_lipscomb.py`, `si3_orca2_state.py`,
+  `geothermal.py`, `mle.py`, `mle_latlon_cgrid.py`). Three are parameter-spec
+  rows (`si3_orca2_state.py`, `mle.py`, `shortwave_penetration.py`).
+- Item 5, the scorer's own memory, at `7f8e3f99f7`: the 3-step record scored
+  twice in one process (six steps) left a live resident set of 1,567,192,
+  1,611,868, 1,620,208, 1,529,428, 1,671,252 and 1,628,668 KiB after the
+  successive steps. That is flat, with JAX's eager cache emptied every step.
+  Peak RSS was 15,657,944 and 16,754,884 KiB for the two passes, which took
+  4,416 and 4,565 s; both passes scored PASS. Before the cache clear the
+  same two passes took 4,396 and 4,475 s, so clearing costs no measured
+  time.
+- Memory-rule disclosure: the O17 unit file peaks at about 25 GB because of
+  the 7 x 7 full-step compile behind its compiled-versus-eager census. It ran
+  alongside the preflight and the RSS probe, about 60 GB combined with over
+  900 GB available. This breaks the standing note's "over 20 GB runs alone"
+  rule; no command approached 100 GB.
+- Read-only acquisition preflight, `run.sh --preflight-only`: exit 0 in 3591 s
+  at `7f8e3f99f7` and 3762 s at `cd5fd47d69`. In the `cd5fd47d69` run the
+  synthetic part ran 2 eager steps at 184 x 152 in 2939 s with
+  peak RSS 15,525,592 KiB. The identical record passed under both labels with
+  0 differing values. The 1-ULP plant (step-2 exit `t_si` at owned index
+  (90,0,0)) failed GIVEN-NEMO-ENTRY at `step_exit.t_si` with 1 differing
+  value. The signed-zero plant (step-2 exit `wfx_bog` at (0,1)) failed at
+  `step_exit.wfx_bog`. Final lines: `PASS_100_STEP_STUB_DRIVER_RETENTION`,
+  `PASS_EXISTING_CFG_DIGESTS_UNCHANGED`, `PREFLIGHT_OK: no real NEMO
+  integration was run; worst-case master 140965556460 bytes (131.28 GiB)`,
+  `PASS_O17_UNIFIED_MASTER_PREFLIGHT_AND_NUMERICAL_PLANTS`.
+
+The acquisition tool writes the unified record within the derived
+239,462,302 KiB disk budget and the 21,600 s NEMO wall clock, then scores it
+with the real eager scorer.
 
 ## Resume 4 final verification
 
