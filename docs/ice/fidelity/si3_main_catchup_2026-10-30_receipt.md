@@ -506,23 +506,25 @@ global `3e-6` absolute floor gated 4,614 of 4,968 entries.
    on `LANE_SHA`), and `build_oracle` raises `ValueError` if `"jacobian"` is
    present in the lane sample.  Every scored entry targets either `main_ad`
    (`3,744` entries where main and lane forwards agree in the sampled
-   neighbourhood and `main_ad` agrees with `lane_fd` within `1e-6` relative or
-   the entry's own FD rounding bound) or a finite difference of the lane
-   forward (`389` `lane_fd_central`, `734` `lane_fd_forward`, `26`
-   `lane_fd_backward`).  Specifically, smooth entries `[18,3,11]`
-   (`target = 0.050971963040420495`) and `[22,3,7]`
-   (`target = -542.6813269341213`) use `lane_fd_central`, and `[19,1,2]`
-   (`target = 6.869234348006378e-6`, vs tip eager AD `6.869232846652797e-6` and
-   JIT AD `6.869232846683276e-6`, relative error `2.186e-7`) uses
-   `lane_fd_backward` at step `1e-6` after a 4-step backward FD refinement
-   (`1e-8`: `6.869504964868e-6`; `1e-7`: `6.869296798051e-6`; `1e-6`:
-   `6.869234348006e-6`; `1e-5`: `6.869232960227e-6`) confirmed the AD was right
-   and the `1e-7` difference was float64 subtraction noise on `exit.h_ice ~ 0.05`.
-   Only the `75` genuine non-differentiable statement-boundary entries where
-   measured left and right one-sided lane FDs (`fd_left` and `fd_right`)
-   disagree are excluded (`method = 4`, `excluded_nondifferentiable_boundary`,
-   `target = NaN`), each recorded by `[case, output, input]` index with both
-   one-sided values in `oracle["excluded_nondifferentiable"]`.
+   neighbourhood and `main_ad` agrees with `lane_fd` within `1e-6` relative) or
+   a finite difference of the lane forward (`389` `lane_fd_central`, `734`
+   `lane_fd_forward`, `26` `lane_fd_backward`).  Specifically, smooth entries
+   `[18,3,11]` (`target = 0.050971963040420495`, `lane_fd_central`), `[22,3,11]`
+   (`target = 0.050971963040420495`, `lane_fd_central`), and `[22,3,7]`
+   (`target = 1014193910.4272546`, `main_ad`, agreeing with `lane_fd`
+   `1014194314.9225268` to relative error `3.988e-7`) use no lane AD, and
+   `[19,1,2]` (`target = 6.869234348006378e-6`, vs tip eager AD
+   `6.869232846652797e-6` and JIT AD `6.869232846683276e-6`, relative error
+   `2.186e-7`) uses `lane_fd_backward` at step `1e-6` after a 4-step backward
+   FD refinement (`1e-8`: `6.869504964868e-6`; `1e-7`: `6.869296798051e-6`;
+   `1e-6`: `6.869234348006e-6`; `1e-5`: `6.869232960227e-6`) confirmed the AD
+   was right and the `1e-7` difference was float64 subtraction noise on
+   `exit.h_ice ~ 0.05`.  Only the `75` genuine non-differentiable
+   statement-boundary entries where measured left and right one-sided lane FDs
+   (`fd_left` and `fd_right`) disagree are excluded (`method = 4`,
+   `excluded_nondifferentiable_boundary`, `target = NaN`), each recorded by
+   `[case, output, input]` index with both one-sided values in
+   `oracle["excluded_nondifferentiable"]`.
 3. **19 `S_layers` entries at `S = 0` (`input_index = 7`):**
    Setting `_INPUT_STEPS[7] = 5.0e-15` with a central stencil resolves the
    smooth `S_layers ~ 1.146e-11` nonlinearity scale at `S = 0`: across all 216
@@ -530,17 +532,19 @@ global `3e-6` absolute floor gated 4,614 of 4,968 entries.
    `lane_fd` now agrees with `main_ad` and `tip_ad` to a worst relative
    difference of `3.990e-7 < 1e-6`.
 4. **Per-entry FD rounding bound (`fd_rounding_bound`):**
-   The global `3e-6` floor is removed.  Each entry stores its own bound
-   `2*spacing(max(|y(x0)|, |y_pert|)) / denom` (`denom = 2*|delta|` for central,
-   `|delta|` for one-sided, `mean(1/delta_primary, 1/delta_refinement)` for
-   two-step evaporation averaging), plus the output ulp `spacing(|y(x0)|)` when
-   the forward output is identically constant across the stencil (`target == 0`).
-   Every scored entry must satisfy `rel <= 1e-6` or `|err| <= 1.0 * fd_rounding_bound`.
-   Entry `[18,1,0]` (`h_ice / concentration` at `(2e-10, 0.5, 0.0)`,
-   `target = 0.0`, eager `4.76837158203125e-7`, JIT `5.873817268728301e-7`) has
-   `exit.h_ice = 0.5` (`spacing(0.5) = 5.551115123125783e-17`) and central step
-   `delta = 2e-11`, so its own FD rounding bound is
-   `2 * 5.551115123125783e-17 / (4e-11) + 5.551115123125783e-17 = 2.7755575616184025e-6`,
+   The global `3e-6` floor is removed.  Each entry stores its own float64
+   subtraction rounding bound (`FD_ROUNDING_BOUND_FORMULA`):
+   `(|spacing(f(x+d))| + |spacing(f(x-d))|) / (2*d)` for central differences,
+   `(|spacing(f(x+d))| + |spacing(f(x))|) / d` for forward differences,
+   `(|spacing(f(x))| + |spacing(f(x-d))|) / d` for backward differences, and the
+   `0.5`-weighted sum of the two forward-step bounds for two-step averaged
+   evaporation differences.  Every scored entry must satisfy `rel <= 1e-6` or
+   `|err| <= 1.0 * fd_rounding_bound`.  Entry `[18,1,0]` (`h_ice / concentration`
+   at `(2e-10, 0.5, 0.0)`, `target = 0.0`, eager `4.76837158203125e-7`, JIT
+   `5.873817268728301e-7`) has `exit.h_ice = 0.5`
+   (`spacing(0.5) = 5.551115123125783e-17`) and central step `d = 2e-11`, so its
+   own FD rounding bound is
+   `(5.551115123125783e-17 + 5.551115123125783e-17) / (4e-11) = 2.7755575615628914e-6`,
    which covers both eager and JIT errors directly without any global floor or
    per-entry patch.
 5. **Rebuilt sweep and restored citation spans:**
@@ -559,18 +563,18 @@ global `3e-6` absolute floor gated 4,614 of 4,968 entries.
 
 | Selection | Final line |
 |---|---|
-| Every requested `test_si3_o*.py` / `test_nemo_si3_*.py` file | each file started in a fresh serial process: 37 files completed green; scalar math emitted its unchanged `1 failed, 4 passed`; O6 ridging emitted 16 passing dots and O4 Prather emitted eight passing dots before their separate 30-minute command timeouts; the completed final lines account for `1 failed, 587 passed, 2 deselected`, plus those 24 timeout-prefix passes, with no timeout-file failure output |
-| `test_bitz_lipscomb.py` | `19 passed in 296.15s` |
-| Operator forward probe | byte-identical to `fwd_old.txt` (`cmp_status=0`) |
-| `test_sea_ice_precip_routing.py` | `7 passed in 3.56s` |
-| `test_si3_surface.py` | `1 failed, 23 passed, 1 xfailed in 53.15s`; only the reproduced lane-parent `sum_first_category` plant |
-| Certified O8–O16 exactness scorer | `30 passed in 741.84s`; the O8–O16 acquisition file separately emitted `28 passed in 1114.96s (0:18:34)` |
+| Every requested `test_si3_o*.py` / `test_nemo_si3_*.py` file | each file started in a fresh serial process (excluding `test_si3_o6_rdgrft_cor.py` and `test_nemo_si3_o4_orca2_prather.py`, run by the operator with O6 already `28 passed` on `006f20b57c`): 36 files completed green; scalar math emitted its unchanged `1 failed, 4 passed in 1.11s`; O8–O16 acquisition emitted `27 passed` plus the `timeout=1200` subprocess limit on `test_preflight_compiles_and_runs_real_patched_source_without_nemo` (`1 failed, 27 passed in 1210.96s (0:20:10)`, previously `28 passed in 1114.96s (0:18:34)`) |
+| `test_bitz_lipscomb.py` | `19 passed in 253.76s (0:04:13)` |
+| Operator forward probe | byte-identical to `fwd_old.txt` in both eager and JIT (`eager_cmp_status=0 jit_cmp_status=0`) |
+| `test_sea_ice_precip_routing.py` | `7 passed in 2.48s` |
+| `test_si3_surface.py` | `1 failed, 23 passed, 1 xfailed in 38.94s`; only the reproduced lane-parent `sum_first_category` plant |
+| Certified O8–O16 exactness scorer | `30 passed in 786.57s (0:13:06)` |
 | O5 slow parent/current control | `1 passed in 599.22s` |
 | O6 slow merge-parent/current control | `1 passed in 774.76s` |
 | CEN2 direct-caller wrappers | ORCA2 `10 passed`; GYRE `4 passed` |
-| Landing battery | 7/7 files in fresh serial processes; `172 passed` (component final lines: `44`, `6`, `71`, `25`, `16`, `2`, and `8` passed) |
-| Receipt citation gate | `44 passed in 8.90s` |
-| Provenance SHA gate | `1517 passed in 22.81s` |
+| Landing battery | 7/7 files in fresh serial processes; `172 passed` (component final lines: `44 passed in 9.32s`, `6 passed in 5.47s`, `71 passed in 43.45s`, `25 passed in 322.97s (0:05:22)`, `16 passed in 6.43s`, `2 passed in 537.90s (0:08:57)`, and `8 passed in 64.79s (0:01:04)`) |
+| Receipt citation gate | `44 passed in 9.32s` |
+| Provenance SHA gate | `1517 passed in 23.70s` |
 
 ## Failure inventory and attribution
 
