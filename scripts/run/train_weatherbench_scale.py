@@ -1233,7 +1233,7 @@ def _main(argv=None):
         supervised_leads,
         wb_needs_surface_targets,
     )
-    _leads = supervised_leads(yml)
+    _leads = supervised_leads(yml, cfg.training_core)
     if wb_needs_surface_targets(yml) and not _leads:
         raise SystemExit("the near-surface loss (w_t2m/u10/v10/mslp) needs "
                          "loss.train_leads_hours: it is scored per lead.")

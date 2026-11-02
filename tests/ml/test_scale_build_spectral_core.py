@@ -499,3 +499,15 @@ def test_lead_hours_must_be_integers():
 
     with pytest.raises(ValueError, match="integer hours"):
         supervised_leads({"loss": {"train_leads_hours": [6.9, 12.9]}})
+
+
+def test_legacy_multi_step_hours_train_every_lead_on_spectral_only():
+    from legoesm.training.scale_build import supervised_leads
+
+    old = {"loss": {"multi_step_hours": [6, 12], "multi_step_weights": [1.0, 1.0]}}
+    assert supervised_leads(old) == (6, 12)
+    assert supervised_leads(old, "latlon") == ()
+    assert supervised_leads({"loss": {"multi_step_hours": [6]}}) == ()
+    with pytest.raises(ValueError, match="weighted"):
+        supervised_leads({"loss": {"multi_step_hours": [6, 12],
+                                   "multi_step_weights": [1.0, 0.5]}})

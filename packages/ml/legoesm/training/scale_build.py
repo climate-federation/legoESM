@@ -161,7 +161,11 @@ _VAL_INITS_KEY = "_val_inits"
 
 def wb_validation_spec(yml: dict) -> dict:
     """The deck's validation protocol (its block, or the legacy default)."""
-    return yml["validation"] if "validation" in yml else dict(_LEGACY_VALIDATION)
+    val = yml["validation"] if "validation" in yml else dict(_LEGACY_VALIDATION)
+    if not isinstance(val, dict) or not {"years", "n_inits",
+                                         "init_stride_hours"} <= set(val):
+        raise ValueError("validation needs years, n_inits and init_stride_hours.")
+    return val
 
 
 def wb_validation_yaml(yml: dict, n_windows: int) -> dict:
@@ -175,10 +179,7 @@ def wb_validation_yaml(yml: dict, n_windows: int) -> dict:
     a validation loss computed under a different protocol than the training
     loss is not comparable to it.
     """
-    val = yml["validation"] if "validation" in yml else dict(_LEGACY_VALIDATION)
-    if not isinstance(val, dict) or not {"years", "n_inits",
-                                         "init_stride_hours"} <= set(val):
-        raise ValueError("validation needs years, n_inits and init_stride_hours.")
+    val = wb_validation_spec(yml)
     years = [int(y) for y in val["years"]]
     n, stride = int(val["n_inits"]), int(val["init_stride_hours"])
     if set(years) & {int(y) for y in (yml.get("eval_years") or [])}:
@@ -1512,7 +1513,7 @@ def rollout_hours(cfg, yml):
 def wb_lead_strides(cfg, yml, cadence_hours) -> tuple:
     """``(leads, stride, lead_stride)`` in ERA5 snapshots: the sample's full
     horizon and the spacing of its supervised leads."""
-    leads = supervised_leads(yml)
+    leads = supervised_leads(yml, getattr(cfg, "training_core", "spectral"))
     if leads and leads[0] % int(cadence_hours):
         raise ValueError(f"train_leads_hours {list(leads)} are not on the "
                          f"{cadence_hours} h ERA5 cadence.")
@@ -1521,10 +1522,14 @@ def wb_lead_strides(cfg, yml, cadence_hours) -> tuple:
     return leads, stride, ((leads[0] // int(cadence_hours)) if leads else stride)
 
 
-def supervised_leads(yml) -> tuple:
-    """The deck's ``loss.train_leads_hours`` [h]: every lead the forecast is
-    scored at, or () for the legacy single-target path (``multi_step_hours``,
-    of which training reads only the first entry).
+def supervised_leads(yml, training_core="spectral") -> tuple:
+    """Every lead [h] the forecast is scored at, or () for the single-target path.
+
+    ``loss.train_leads_hours`` when given; else, on the spectral core, the
+    deck's legacy ``multi_step_hours`` when it lists more than one lead (owner
+    2026-11-01: every listed lead trains -- it used to train the first only),
+    scored with the same equal-weight mean, so non-uniform
+    ``multi_step_weights`` are refused.  The lat-lon core keeps the first lead.
 
     Leads must be consecutive multiples of the first, ``(h, 2h, ..., Kh)``: the
     forecast is one chained rollout scored after every segment."""
@@ -1534,6 +1539,13 @@ def supervised_leads(yml) -> tuple:
         raise ValueError(f"loss.train_leads_hours {raw} must be positive "
                          "integer hours.")
     hrs = tuple(raw)
+    legacy = [int(h) for h in (lb.get("multi_step_hours") or ())]
+    if not hrs and training_core == "spectral" and len(legacy) > 1:
+        w = [float(x) for x in (lb.get("multi_step_weights") or ())]
+        if w and len(set(w)) != 1:
+            raise ValueError(f"multi_step_weights {w}: every lead is weighted "
+                             "equally (1/N); remove or equalise them.")
+        hrs = tuple(legacy)
     if not hrs:
         if lb.get("train_curriculum_hours"):
             raise ValueError("loss.train_curriculum_hours needs "
@@ -2133,7 +2145,7 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
         return _load_era5_samples_spectral(
             cfg, yml, grid, sigma,
             rank=rank, nproc=nproc, host_resident=host_resident)
-    if (supervised_leads(yml) or wb_needs_surface_targets(yml)
+    if (supervised_leads(yml, "latlon") or wb_needs_surface_targets(yml)
             or yml.get("era5_soil_moisture")):
         raise ValueError("loss.train_leads_hours, the near-surface loss and "
                          "era5_soil_moisture are implemented on the spectral "
