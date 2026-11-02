@@ -268,15 +268,12 @@ def test_nemo_ldf_fold_rows_changes_the_executed_fold_operator():
     assert off_u.view(np.uint64)[7, 0, 0] == np.uint64(4503684672064473110)
 
 
-def test_fct_fold_exchange_changes_a_full_tripole_ws_rk3_step():
-    """Exercise the model call-site on a record-free stored-pivot fold."""
-    from legoesm.core.precision import PrecisionPolicy, set_policy
+def _ws_rk3_tripole_pivot_fixture():
     from legoesm.grids.tripole import create_synthetic_tripole_pivot
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
     from legoesm.ocean.state import LatLonCGridOceanConfig
     from legoesm.ocean.vertical import create_partial_cell_coordinate
 
-    set_policy(PrecisionPolicy.fp64())
     grid = create_synthetic_tripole_pivot(8, 12, dtype=jnp.float64)
     base_z = create_ocean_z_star(3, 600.0)
     state = rest_state_latlon_cgrid_ocean(
@@ -309,45 +306,274 @@ def test_fct_fold_exchange_changes_a_full_tripole_ws_rk3_step():
         n_barotropic_substeps=3,
         enable_runtime_checks=False,
     )
+    return grid, z_coord, state, base
 
-    def selected(flag):
-        return LatLonCGridOceanModel(
-            grid, z_coord, base._replace(fct_fold_exchange=flag),
-        ).step(state, 600.0)
 
-    on, off = selected(True), selected(False)
-    on_t, off_t = np.asarray(on.T.data), np.asarray(off.T.data)
-    on_s, off_s = np.asarray(on.S.data), np.asarray(off.S.data)
-    assert np.count_nonzero(
-        on_t.view(np.uint64) != off_t.view(np.uint64)) == 29
-    assert np.count_nonzero(
-        on_s.view(np.uint64) != off_s.view(np.uint64)) == 48
-    assert on_t.view(np.uint64)[6, 6, 1] == np.uint64(4625908986858152799)
-    assert off_t.view(np.uint64)[6, 6, 1] == np.uint64(4625908986858152689)
+def test_fct_fold_exchange_changes_a_full_tripole_ws_rk3_step():
+    """Exercise the model call-site on a record-free stored-pivot fold."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    prev_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid, z_coord, state, base = _ws_rk3_tripole_pivot_fixture()
+
+        def selected(flag):
+            return LatLonCGridOceanModel(
+                grid, z_coord, base._replace(fct_fold_exchange=flag),
+            ).step(state, 600.0)
+
+        on, off = selected(True), selected(False)
+        on_t, off_t = np.asarray(on.T.data), np.asarray(off.T.data)
+        on_s, off_s = np.asarray(on.S.data), np.asarray(off.S.data)
+        assert np.count_nonzero(
+            on_t.view(np.uint64) != off_t.view(np.uint64)) == 29
+        assert np.count_nonzero(
+            on_s.view(np.uint64) != off_s.view(np.uint64)) == 48
+        assert on_t.view(np.uint64)[6, 6, 1] == np.uint64(4625908986858152799)
+        assert off_t.view(np.uint64)[6, 6, 1] == np.uint64(4625908986858152689)
+    finally:
+        set_policy(prev_policy)
+
+
+def test_rk3_end_of_stage_pivot_fold_changes_a_full_tripole_ws_rk3_step():
+    """Exercise rk3_end_of_stage_pivot_fold on a record-free tripole step."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    prev_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid, z_coord, state, base = _ws_rk3_tripole_pivot_fixture()
+
+        def selected(flag):
+            return LatLonCGridOceanModel(
+                grid, z_coord, base._replace(rk3_end_of_stage_pivot_fold=flag),
+            ).step(state, 600.0)
+
+        on, off = selected(True), selected(False)
+        on_t, off_t = np.asarray(on.T.data), np.asarray(off.T.data)
+        on_u, off_u = np.asarray(on.u.data), np.asarray(off.u.data)
+        assert np.count_nonzero(
+            on_t.view(np.uint64) != off_t.view(np.uint64)) == 62
+        assert np.count_nonzero(
+            on_u.view(np.uint64) != off_u.view(np.uint64)) == 48
+        assert on_t.view(np.uint64)[5, 7, 0] == np.uint64(4626600210828169908)
+        assert off_t.view(np.uint64)[5, 7, 0] == np.uint64(4626600210828170265)
+        assert on_u.view(np.uint64)[6, 0, 0] == np.uint64(4580213822658509297)
+        assert off_u.view(np.uint64)[6, 0, 0] == np.uint64(4580213822683598223)
+    finally:
+        set_policy(prev_policy)
+
+
+def test_rk3_stage_transport_fold_exchanges_changes_a_full_tripole_ws_rk3_step():
+    """Exercise rk3_stage_transport_fold_exchanges on a record-free tripole step."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    prev_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid, z_coord, state, base = _ws_rk3_tripole_pivot_fixture()
+
+        def selected(flag):
+            return LatLonCGridOceanModel(
+                grid, z_coord,
+                base._replace(rk3_stage_transport_fold_exchanges=flag),
+            ).step(state, 600.0)
+
+        on, off = selected(True), selected(False)
+        on_t, off_t = np.asarray(on.T.data), np.asarray(off.T.data)
+        on_s, off_s = np.asarray(on.S.data), np.asarray(off.S.data)
+        on_u, off_u = np.asarray(on.u.data), np.asarray(off.u.data)
+        on_v, off_v = np.asarray(on.v.data), np.asarray(off.v.data)
+        assert np.count_nonzero(
+            on_t.view(np.uint64) != off_t.view(np.uint64)) == 22
+        assert np.count_nonzero(
+            on_s.view(np.uint64) != off_s.view(np.uint64)) == 20
+        assert np.count_nonzero(
+            on_u.view(np.uint64) != off_u.view(np.uint64)) == 27
+        assert np.count_nonzero(
+            on_v.view(np.uint64) != off_v.view(np.uint64)) == 21
+        assert on_t.view(np.uint64)[6, 6, 2] == np.uint64(4624101206129409913)
+        assert off_t.view(np.uint64)[6, 6, 2] == np.uint64(4624101206129407921)
+        assert on_u.view(np.uint64)[7, 0, 0] == np.uint64(4575974430849054534)
+        assert off_u.view(np.uint64)[7, 0, 0] == np.uint64(4575974430849064564)
+    finally:
+        set_policy(prev_policy)
+
+
+def test_rk3_vector_raw_vmask_changes_a_full_tripole_ws_rk3_step():
+    """Exercise rk3_vector_raw_vmask on a record-free tripole step."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    prev_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid, z_coord, state, base = _ws_rk3_tripole_pivot_fixture()
+
+        def selected(flag):
+            return LatLonCGridOceanModel(
+                grid, z_coord, base._replace(rk3_vector_raw_vmask=flag),
+            ).step(state, 600.0)
+
+        on, off = selected(True), selected(False)
+        on_t, off_t = np.asarray(on.T.data), np.asarray(off.T.data)
+        on_s, off_s = np.asarray(on.S.data), np.asarray(off.S.data)
+        on_u, off_u = np.asarray(on.u.data), np.asarray(off.u.data)
+        on_v, off_v = np.asarray(on.v.data), np.asarray(off.v.data)
+        assert np.count_nonzero(
+            on_t.view(np.uint64) != off_t.view(np.uint64)) == 22
+        assert np.count_nonzero(
+            on_s.view(np.uint64) != off_s.view(np.uint64)) == 20
+        assert np.count_nonzero(
+            on_u.view(np.uint64) != off_u.view(np.uint64)) == 27
+        assert np.count_nonzero(
+            on_v.view(np.uint64) != off_v.view(np.uint64)) == 21
+        assert on_t.view(np.uint64)[6, 6, 2] == np.uint64(4624101206129409913)
+        assert off_t.view(np.uint64)[6, 6, 2] == np.uint64(4624101206129407921)
+        assert on_v.view(np.uint64)[7, 0, 0] == np.uint64(13796485353636929082)
+        assert off_v.view(np.uint64)[7, 0, 0] == np.uint64(13796485353636929150)
+    finally:
+        set_policy(prev_policy)
+
+
+def _stage3_tracer_step_fixture():
+    from legoesm.grids.tripole import create_synthetic_tripole
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig,
+    )
+    from legoesm.ocean.state import (
+        LatLonCGridOceanConfig,
+        OceanSurfaceForcing,
+    )
+    from legoesm.ocean.vertical import create_partial_cell_coordinate
+
+    grid = create_synthetic_tripole(4, 6, dtype=jnp.float64)
+    base_z = create_ocean_z_star(3, 300.0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, base_z, T_water_init_C=20.0, T_deep=2.0,
+        S_uniform=35.0, H_max=300.0)
+    z_coord = create_partial_cell_coordinate(base_z, state.H_bathy.data)
+    rng = np.random.default_rng(92)
+    state = state._replace(
+        u=state.u.replace(data=jnp.asarray(
+            0.05 * rng.standard_normal(state.u.data.shape))),
+        v=state.v.replace(data=jnp.asarray(
+            0.05 * rng.standard_normal(state.v.data.shape))),
+        T=state.T.replace(data=state.T.data + jnp.asarray(
+            0.4 * rng.standard_normal(state.T.data.shape))),
+        S=state.S.replace(data=state.S.data + jnp.asarray(
+            0.1 * rng.standard_normal(state.S.data.shape))),
+        eta=state.eta.replace(data=jnp.asarray(
+            0.03 * rng.standard_normal(state.eta.data.shape))),
+    )
+    base_cfg = LatLonCGridOceanConfig.from_flat(
+        barotropic_solver="explicit_substep",
+        momentum_time_integrator="rk3_ws",
+        tracer_time_integrator="rk3_ws",
+        tracer_advection="fct2",
+        momentum_advection="flux_form",
+        momentum_flux_scheme="none",
+        vertical_momentum_scheme="none",
+        barotropic_slow_forcing_depth_evaluation="min_rule_live",
+        barotropic_face_depth="nemo_ssh_avg",
+        surface_stress_implicit=True,
+        rk3_stage3_heat_nemo_written=True,
+        rk3_stage3_salt_nemo_written=True,
+        rk3_stage3_geothermal_nemo_written=False,
+        rk3_stage3_tracer_krhs_nemo_order=True,
+        rk3_stage3_tracer_nemo_stored_thickness=True,
+        n_barotropic_substeps=2,
+        enable_runtime_checks=False,
+        physics=OceanPhysicsConfig(
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            shortwave_penetration=ShortwavePenetrationConfig(
+                scheme="nemo_qsr_rgb", nemo_time_step_s=300.0),
+        ),
+    )
+    forcing = OceanSurfaceForcing(
+        q_nonsolar=jnp.asarray(
+            -120.0 + 15.0 * rng.standard_normal((4, 6)), dtype=jnp.float64),
+        sw_down=jnp.asarray(
+            180.0 + 20.0 * rng.standard_normal((4, 6)), dtype=jnp.float64),
+        chl=jnp.full((4, 6), 0.1, dtype=jnp.float64),
+        salt_flux_sfx=jnp.asarray(
+            2.5e-5 + 1.0e-5 * rng.standard_normal((4, 6)), dtype=jnp.float64),
+        geothermal_heat_flux_mwm2=jnp.asarray(
+            65.0 + 10.0 * rng.standard_normal((4, 6)), dtype=jnp.float64),
+    )
+    return grid, z_coord, state, forcing, base_cfg
 
 
 def test_surface_salt_flux_sfx_changes_written_stage3_salt_source():
-    """Pin the recorded sfx operand's stage-3 written source effect."""
-    from legoesm.core.source_rounding import nemo_source_round
-    from legoesm.ocean.state import OceanSurfaceForcing
+    """Pin the recorded sfx operand's stage-3 written source effect via model step."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
-    rho0 = jnp.asarray(1026.0, dtype=jnp.float64)
-    e3t_kmm = jnp.asarray([[7.25]], dtype=jnp.float64)
+    prev_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid, z_coord, state, forcing, base_cfg = _stage3_tracer_step_fixture()
+        model = LatLonCGridOceanModel(grid, z_coord, base_cfg)
+        on = model.step(state, 300.0, surface_forcing=forcing)
+        off = model.step(
+            state, 300.0,
+            surface_forcing=forcing._replace(
+                salt_flux_sfx=jnp.zeros((4, 6), dtype=jnp.float64)),
+        )
+        on_s = np.asarray(on.S.data).view(np.uint64)
+        off_s = np.asarray(off.S.data).view(np.uint64)
+        assert np.count_nonzero(on_s != off_s) == 48
+        assert on_s[0, 0, 0] == np.uint64(4630119873119761462)
+        assert off_s[0, 0, 0] == np.uint64(4630119872943128958)
+    finally:
+        set_policy(prev_policy)
 
-    def selected(value):
-        forcing = OceanSurfaceForcing(
-            salt_flux_sfx=jnp.asarray([[value]], dtype=jnp.float64))
-        reciprocal = nemo_source_round(
-            nemo_source_round(1.0 / rho0) / e3t_kmm)
-        return nemo_source_round(forcing.salt_flux_sfx * reciprocal)
 
-    on = np.asarray(selected(2.5e-6))
-    off = np.asarray(selected(0.0))
-    expected = np.float64(2.5e-6) * (
-        np.float64(1.0) / np.float64(1026.0) / np.float64(7.25))
-    assert on[0, 0] == pytest.approx(expected, rel=2.0e-16)
-    assert off[0, 0] == 0.0
-    assert not np.array_equal(on, off)
+def test_rk3_stage3_salt_geothermal_and_krhs_order_change_model_step():
+    """Exercise rk3_stage3_salt_nemo_written, rk3_stage3_geothermal_nemo_written, and rk3_stage3_tracer_krhs_nemo_order on a record-free step."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    prev_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid, z_coord, state, forcing, base_cfg = _stage3_tracer_step_fixture()
+
+        def step_with(**kw):
+            return LatLonCGridOceanModel(
+                grid, z_coord, base_cfg._replace(**kw),
+            ).step(state, 300.0, surface_forcing=forcing)
+
+        salt_on = step_with(rk3_stage3_tracer_krhs_nemo_order=False)
+        salt_off = step_with(
+            rk3_stage3_tracer_krhs_nemo_order=False,
+            rk3_stage3_salt_nemo_written=False,
+        )
+        s_on = np.asarray(salt_on.S.data).view(np.uint64)
+        s_off = np.asarray(salt_off.S.data).view(np.uint64)
+        assert np.count_nonzero(s_on != s_off) == 48
+        assert s_on[0, 0, 0] == np.uint64(4630119873119761461)
+        assert s_off[0, 0, 0] == np.uint64(4630119872943128958)
+
+        geo_on = step_with(
+            rk3_stage3_tracer_krhs_nemo_order=False,
+            rk3_stage3_geothermal_nemo_written=True,
+        )
+        t_geo_on = np.asarray(geo_on.T.data).view(np.uint64)
+        t_geo_off = np.asarray(salt_on.T.data).view(np.uint64)
+        assert np.count_nonzero(t_geo_on != t_geo_off) == 48
+        assert t_geo_on[0, 0, 1] == np.uint64(4626009601048700807)
+        assert t_geo_off[0, 0, 1] == np.uint64(4626009601048700780)
+
+        krhs_on = LatLonCGridOceanModel(grid, z_coord, base_cfg).step(
+            state, 300.0, surface_forcing=forcing)
+        t_krhs_on = np.asarray(krhs_on.T.data).view(np.uint64)
+        assert np.count_nonzero(t_krhs_on != t_geo_off) == 11
+        assert t_krhs_on[0, 1, 0] == np.uint64(4626263631292573473)
+        assert t_geo_off[0, 1, 0] == np.uint64(4626263631292573474)
+    finally:
+        set_policy(prev_policy)
 
 
 def test_stage_transport_stored_r3uv_pair_runs_the_written_ratio_path(

@@ -24,36 +24,69 @@ class _Grid:
 
 
 def test_een_fold_image_row_and_disabled_plant():
-    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-        _een_fold_image_v_row,
-    )
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.grids.tripole import create_synthetic_tripole
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.vertical import create_ocean_z_star
 
-    size = 6
-    values = jnp.arange(30.0).reshape(5, size, 1)
-    thickness = values + 100.0
-    mask = jnp.ones_like(values).at[-1].set(0.0).at[-2, 2].set(0.0)
-    sentinel = object()
-    off_cfg = LatLonCGridOceanConfig(een_fold_image_v_row=False)
-    on_cfg = off_cfg._replace(een_fold_image_v_row=True)
-    off = _een_fold_image_v_row(
-        off_cfg.een_fold_image_v_row, _Grid(_Fold(size)), thickness, values,
-        sentinel, sentinel, sentinel, mask)
-    assert off[0] is thickness and off[1] is values and off[5] is mask
+    prev_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid = create_synthetic_tripole(6, 8, dtype=jnp.float64)
+        grid = grid._replace(ff_f=grid.f_v[1:])
+        zc = create_ocean_z_star(3, 300.0)
+        st = rest_state_latlon_cgrid_ocean(
+            grid, zc, T_water_init_C=20.0, T_deep=2.0,
+            S_uniform=35.0, H_max=300.0)
+        rng = np.random.default_rng(19)
+        st = st._replace(
+            u=st.u.replace(data=jnp.asarray(
+                0.1 * rng.standard_normal(st.u.data.shape))),
+            v=st.v.replace(data=jnp.asarray(
+                0.1 * rng.standard_normal(st.v.data.shape))),
+            T=st.T.replace(data=st.T.data + jnp.asarray(
+                0.3 * rng.standard_normal(st.T.data.shape))),
+            S=st.S.replace(data=st.S.data + jnp.asarray(
+                0.05 * rng.standard_normal(st.S.data.shape))),
+            eta=st.eta.replace(data=jnp.asarray(
+                0.02 * rng.standard_normal(st.eta.data.shape))),
+        )
+        for adv, flux_scheme, vort, want_on, want_off in [
+            ("flux_form", "none", "een_planetary",
+             np.uint64(4506226019843816725), np.uint64(13749299632200641326)),
+            ("vector_invariant", "centered", "een_total",
+             np.uint64(4506002909676158083), np.uint64(13749304629572458198)),
+        ]:
+            cfg_on = LatLonCGridOceanConfig.from_flat(
+                momentum_advection=adv,
+                momentum_flux_scheme=flux_scheme,
+                vorticity_scheme=vort,
+                een_fold_image_v_row=True,
+            )
+            cfg_off = cfg_on._replace(een_fold_image_v_row=False)
+            res_on = pe.latlon_cgrid_ocean_baroclinic_tendencies(
+                st, grid, zc, cfg_on, momentum_only=True)
+            res_off = pe.latlon_cgrid_ocean_baroclinic_tendencies(
+                st, grid, zc, cfg_off, momentum_only=True)
+            du_on = np.asarray(res_on.du_dt.data).view(np.uint64)
+            du_off = np.asarray(res_off.du_dt.data).view(np.uint64)
+            assert np.count_nonzero(du_on != du_off) == 27
+            assert du_on[5, 0, 0] == want_on
+            assert du_off[5, 0, 0] == want_off
 
-    moved = _een_fold_image_v_row(
-        on_cfg.een_fold_image_v_row, _Grid(_Fold(size)), thickness, values,
-        sentinel, sentinel, sentinel, mask)
-    perm = (size - np.arange(size)) % size
-    wet = np.asarray(mask)[-2][perm]
-    np.testing.assert_array_equal(np.asarray(moved[5])[-1], wet)
-    np.testing.assert_array_equal(
-        np.asarray(moved[1])[-1], -np.asarray(values)[-2][perm] * wet)
-    np.testing.assert_array_equal(
-        np.asarray(moved[0])[-1], np.asarray(thickness)[-2][perm])
-    with pytest.raises(ValueError, match="active north fold"):
-        _een_fold_image_v_row(
-            on_cfg.een_fold_image_v_row, _Grid(None), thickness, values,
-            sentinel, sentinel, sentinel, mask)
+        with pytest.raises(ValueError, match="active north fold"):
+            pe.latlon_cgrid_ocean_baroclinic_tendencies(
+                st, grid._replace(fold=None), zc,
+                LatLonCGridOceanConfig.from_flat(
+                    momentum_advection="vector_invariant",
+                    vorticity_scheme="een_total",
+                    een_fold_image_v_row=True,
+                ),
+                momentum_only=True,
+            )
+    finally:
+        set_policy(prev_policy)
 
 
 def test_fold_top_v_operands_and_disabled_plant():
@@ -113,30 +146,75 @@ def test_literal_flux_update_matches_written_order_and_legacy_plant_moves():
 
 
 def test_ascending_level_sum_is_written_order_and_control_can_fail():
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.grids.tripole import create_synthetic_tripole
     from legoesm.ocean.dynamics.barotropic_common import ascending_level_sum
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.vertical import (
+        create_ocean_z_star,
+        create_partial_cell_coordinate,
+    )
 
-    # Thirty-three levels force XLA's generic reduction tree to differ from
-    # NEMO's explicitly ascending scalar accumulation for this fixed input.
-    rng = np.random.default_rng(1)
-    values = rng.standard_normal((20, 33))
-    values *= np.exp(rng.uniform(-50.0, 50.0, values.shape))
-    expected = np.zeros(values.shape[:-1], dtype=np.float64)
-    for level in range(values.shape[-1]):
-        expected = expected + values[..., level]
-    base = LatLonCGridOceanConfig()
-    off_cfg = base._replace(barotropic_rhs_ascending_level_sum=False)
-    on_cfg = base._replace(barotropic_rhs_ascending_level_sum=True)
-    def selected(cfg, operand):
-        if cfg.barotropic_rhs_ascending_level_sum:
-            return ascending_level_sum(operand)
-        return jnp.sum(operand, axis=-1)
+    prev_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        # Thirty-three levels force XLA's generic reduction tree to differ from
+        # NEMO's explicitly ascending scalar accumulation for this fixed input.
+        rng = np.random.default_rng(1)
+        values = rng.standard_normal((20, 33))
+        values *= np.exp(rng.uniform(-50.0, 50.0, values.shape))
+        expected = np.zeros(values.shape[:-1], dtype=np.float64)
+        for level in range(values.shape[-1]):
+            expected = expected + values[..., level]
+        ordered = np.asarray(jax.jit(ascending_level_sum)(jnp.asarray(values)))
+        np.testing.assert_array_equal(ordered, expected)
 
-    ordered = np.asarray(jax.jit(
-        lambda operand: selected(on_cfg, operand))(jnp.asarray(values)))
-    generic = np.asarray(jax.jit(
-        lambda operand: selected(off_cfg, operand))(jnp.asarray(values)))
-    np.testing.assert_array_equal(ordered, expected)
-    assert np.count_nonzero(generic != ordered) > 0
+        grid_bt = create_synthetic_tripole(4, 6, dtype=jnp.float64)
+        base_z_bt = create_ocean_z_star(33, 3300.0)
+        st_bt = rest_state_latlon_cgrid_ocean(
+            grid_bt, base_z_bt, T_water_init_C=20.0, T_deep=2.0,
+            S_uniform=35.0, H_max=3300.0)
+        zc_bt = create_partial_cell_coordinate(base_z_bt, st_bt.H_bathy.data)
+        rng_bt = np.random.default_rng(1)
+        v_vals = rng_bt.standard_normal(st_bt.v.data.shape) * np.exp(
+            rng_bt.uniform(-50.0, 0.0, st_bt.v.data.shape))
+        st_bt = st_bt._replace(
+            u=st_bt.u.replace(data=jnp.zeros_like(st_bt.u.data)),
+            v=st_bt.v.replace(data=jnp.asarray(v_vals)),
+        )
+
+        def run_bt(asc):
+            cfg = LatLonCGridOceanConfig.from_flat(
+                barotropic_solver="explicit_substep",
+                outer_integrator="ab2",
+                momentum_time_integrator="euler",
+                tracer_time_integrator="euler",
+                tracer_advection="none",
+                momentum_advection="flux_form",
+                momentum_flux_scheme="none",
+                vertical_momentum_scheme="none",
+                coriolis_scheme="explicit_ab2",
+                barotropic_coriolis_split="frozen",
+                barotropic_slow_forcing_depth_evaluation="nemo_literal",
+                barotropic_rhs_ascending_level_sum=asc,
+                surface_stress_implicit=True,
+                implicit_vertical_mixing=False,
+                n_barotropic_substeps=1,
+                enable_runtime_checks=False,
+            )
+            return LatLonCGridOceanModel(grid_bt, zc_bt, cfg).step(
+                st_bt, 1.0e-6)
+
+        on_u = np.asarray(run_bt(True).u.data).view(np.uint64)
+        off_u = np.asarray(run_bt(False).u.data).view(np.uint64)
+        assert np.count_nonzero(on_u != off_u) == 127
+        assert on_u[0, 2, 0] == np.uint64(4421695770371195880)
+        assert off_u[0, 2, 0] == np.uint64(4421695770371195878)
+    finally:
+        set_policy(prev_policy)
 
 
 def test_npcrv_area_selector_changes_live_relative_vorticity_by_area_ratio(

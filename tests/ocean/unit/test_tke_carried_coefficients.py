@@ -479,15 +479,23 @@ def test_terminal_e3t_flag_reaches_the_closure_lengths_and_refuses_unused_paths(
 @pytest.mark.parametrize("coordinate_kind", ["zstar", "partial"])
 def test_coordinate_nemo_e3t_jpk_changes_literal_terminal_length(
         coordinate_kind):
-    """Exercise nemo_e3t_jpk from both coordinate classes into the sweep."""
+    """Exercise nemo_e3t_jpk from both coordinate classes through tke_vertical_mixing."""
     from legoesm.ocean.vertical import (
         create_partial_cell_coordinate, create_z_star_from_thicknesses,
     )
 
-    cfg = dino_mod._dino_vertical_mixing_config(
-        dino_config_for_recipe("nemo_dino_kamm_mlf")).tke._replace(
-            tke_mxl_choice=3, nemo_mxl_terminal_e3t=True,
-            tke_mxl_raw_evaluation="nemo_literal")
+    cfg = TKEConfig(
+        prognostic=True,
+        n2_mode="nemo_bn2",
+        tke_n2_evaluation_stage="step_entry",
+        tke_mxl_choice=3,
+        nemo_mxl_terminal_e3t=True,
+        tke_mxl_raw_evaluation="nemo_literal",
+        kappaM_min=0.0,
+        kappaH_min=0.0,
+        kappaM_max=1.0e8,
+        enable_kappaH_profile=False,
+    )
     model, state = _step_entry_helper_fixture(cfg)
     partial = model.z_coord
     base = create_z_star_from_thicknesses(
@@ -505,24 +513,37 @@ def test_coordinate_nemo_e3t_jpk_changes_literal_terminal_length(
                 coordinate, state.H_bathy.data)
         bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
             model, state, z_coord=coordinate)
-        e = jnp.full((*state.eta.data.shape, 2), 1.0e8)
-        n2 = jnp.full_like(e, 1.0e-12)
-        dz_cell = jnp.concatenate(
-            [bundle.e3t_Kmm, bundle.e3t_jpk[..., None]], axis=-1)
-        floor = tke_mod._mixing_length_floor(cfg)
-        length, _ = tke_mod.compute_mixing_lengths(
-            e, n2, jnp.ones_like(e), cfg, dz_cell=dz_cell,
-            l_surface_anchor=jnp.full(state.eta.data.shape, floor))
-        return bundle, np.asarray(length)
+        z3 = jnp.zeros_like(state.T.data)
+        e_old = jnp.full((*state.eta.data.shape, 2), 1.0e8)
+        res = tke_mod.tke_vertical_mixing(
+            u_cell=z3,
+            v_cell=z3,
+            T_cell=state.T.data,
+            S_cell=state.S.data,
+            rho_cell=jnp.full_like(z3, 1026.0),
+            dz_half=bundle.e3w_Kmm,
+            tke_old=e_old,
+            tau_x_surface=jnp.zeros(state.eta.data.shape),
+            tau_y_surface=jnp.zeros(state.eta.data.shape),
+            dt=2.0,
+            cfg=cfg,
+            n_iterations=1,
+            precomputed_n2_bundle=bundle,
+            dz_ref=coordinate.dz_ref,
+            jacobian=jnp.ones(state.eta.data.shape),
+        )
+        return bundle, np.asarray(res.K_M)
 
     on_bundle, on = selected(7.0)
     off_bundle, off = selected(3.0)
     np.testing.assert_array_equal(on_bundle.e3t_jpk, np.full((2, 2), 7.0))
     np.testing.assert_array_equal(off_bundle.e3t_jpk, np.full((2, 2), 3.0))
-    assert not np.array_equal(on, off)
-    assert on[0, 0, -1] == pytest.approx(3.11)
-    assert off[0, 0, -1] == pytest.approx(3.01)
-    assert np.count_nonzero(on[..., -1] > off[..., -1]) == 3
+    on_bits = on.view(np.uint64)
+    off_bits = off.view(np.uint64)
+    assert int(np.count_nonzero(on_bits != off_bits)) == 8
+    assert on_bits[0, 0, -1] == np.uint64(4635417765172050131)
+    assert off_bits[0, 0, -1] == np.uint64(4634036713372483349)
+    assert np.count_nonzero(on[..., -1] > off[..., -1]) == 4
 
 
 @pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")

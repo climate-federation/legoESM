@@ -94,20 +94,23 @@ def test_nemo_association_selector_changes_the_executed_coefficient():
 
 
 def _association_front():
-    """Small record-free front whose written associations differ in bits."""
-    grid = create_latlon_grid(4, 5, radius=constants.R_earth)
+    """Small record-free tripole front whose written associations differ at every site."""
+    from legoesm.grids.tripole import create_synthetic_tripole
+
+    grid = create_synthetic_tripole(4, 6, dtype=jnp.float64)
     z_coord = create_ocean_z_star(
         n_levels=6, H_max=600.0, dz_surface=50.0, dz_deep=150.0)
-    mask = jnp.ones((4, 5))
+    mask = jnp.ones((4, 6), dtype=jnp.float64)
     u_mask, v_mask = compute_face_masks(mask, grid)
-    jacobian = jnp.ones((4, 5))
-    surface = 20.0 - 6.0 * jnp.linspace(0.0, 1.0, 5)
-    temperature = jnp.stack([
-        jnp.broadcast_to(surface, (4, 5)) if k < 3
-        else jnp.full((4, 5), 4.0)
-        for k in range(6)
-    ], axis=-1)
-    salinity = jnp.full_like(temperature, 35.0)
+    rng = np.random.default_rng(7)
+    jacobian = jnp.asarray(1.0 + 0.03 * rng.standard_normal((4, 6)))
+    base_t = 18.0 + 2.5 * rng.standard_normal((4, 6, 1))
+    offsets = jnp.asarray(
+        [0.0, -0.005, -0.012, -12.0, -13.0, -14.0])[None, None, :]
+    temperature = (
+        base_t + offsets
+        + jnp.asarray(0.001 * rng.standard_normal((4, 6, 6))))
+    salinity = jnp.asarray(35.0 + 0.0005 * rng.standard_normal((4, 6, 6)))
     density = wright_eos(
         temperature, salinity, jnp.zeros_like(temperature))
     n2 = compute_buoyancy_frequency(
@@ -130,12 +133,26 @@ def test_nemo_association_changes_the_full_mle_transport_operator():
         *args, MLEConfig(nemo_association=True), **common)
     off_u, off_v = mle_tracer_tendency_latlon_cgrid(
         *args, MLEConfig(nemo_association=False), **common)
-    on_bits = np.asarray(on_u).view(np.uint64)
-    off_bits = np.asarray(off_u).view(np.uint64)
-    assert np.count_nonzero(on_bits != off_bits) == 30
-    assert on_bits[0, 1, 0] == np.uint64(4707647587911164757)
-    assert off_bits[0, 1, 0] == np.uint64(4707647587911164756)
-    np.testing.assert_array_equal(np.asarray(on_v), np.asarray(off_v))
+    on_u_bits = np.asarray(on_u).view(np.uint64)
+    off_u_bits = np.asarray(off_u).view(np.uint64)
+    on_v_bits = np.asarray(on_v).view(np.uint64)
+    off_v_bits = np.asarray(off_v).view(np.uint64)
+    assert np.count_nonzero(on_u_bits != off_u_bits) == 43
+    assert np.count_nonzero(on_v_bits != off_v_bits) == 68
+    assert on_u_bits[2, 1, 0] == np.uint64(13929099124633363463)
+    assert off_u_bits[2, 1, 0] == np.uint64(13929099124633363460)
+    assert on_u_bits[2, 0, 1] == np.uint64(4682153500426748076)
+    assert off_u_bits[2, 0, 1] == np.uint64(4682153500426748080)
+    assert on_v_bits[1, 0, 0] == np.uint64(4710355582343766974)
+    assert off_v_bits[1, 0, 0] == np.uint64(4710355582343766972)
+    assert on_v_bits[2, 0, 0] == np.uint64(13935000791283399640)
+    assert off_v_bits[2, 0, 0] == np.uint64(13935000791283399641)
+    assert on_v_bits[1, 0, 1] == np.uint64(4701939001072589096)
+    assert off_v_bits[1, 0, 1] == np.uint64(4701939001072589100)
+    assert on_v_bits[4, 0, 0] == np.uint64(4688585550535374621)
+    assert off_v_bits[4, 0, 0] == np.uint64(0)
+    assert np.count_nonzero(np.asarray(on_v)[-1]) == 18
+    assert np.count_nonzero(np.asarray(off_v)[-1]) == 0
 
 
 def test_through_fct_removes_the_standalone_combined_physics_route(
@@ -165,7 +182,7 @@ def test_through_fct_removes_the_standalone_combined_physics_route(
 
 def test_through_fct_changes_the_full_model_route_on_a_live_front():
     """Run both MLE routes; the staged arm must add nonzero FCT transport."""
-    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
         _NEMOWSRK3TestHooks,
@@ -175,43 +192,47 @@ def test_through_fct_changes_the_full_model_route_on_a_live_front():
         orca2_l5_mle,
     )
 
-    set_policy(PrecisionPolicy.fp64())
-    card = build_gyre_zco_lane_certified_card()
-    state = card.recipe.initial_state
-    front = 20.0 - 6.0 * jnp.linspace(0.0, 1.0, state.T.data.shape[1])
-    temperature = state.T.data.at[..., :3].set(jnp.broadcast_to(
-        front[None, :, None], state.T.data[..., :3].shape))
-    temperature = temperature.at[..., 3:].set(4.0)
-    state = state._replace(
-        T=state.T.replace(data=temperature),
-        S=state.S.replace(data=jnp.full_like(temperature, 35.0)))
-    base = card.recipe.model_config
+    prev_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        card = build_gyre_zco_lane_certified_card()
+        state = card.recipe.initial_state
+        front = 20.0 - 6.0 * jnp.linspace(0.0, 1.0, state.T.data.shape[1])
+        temperature = state.T.data.at[..., :3].set(jnp.broadcast_to(
+            front[None, :, None], state.T.data[..., :3].shape))
+        temperature = temperature.at[..., 3:].set(4.0)
+        state = state._replace(
+            T=state.T.replace(data=temperature),
+            S=state.S.replace(data=jnp.full_like(temperature, 35.0)))
+        base = card.recipe.model_config
 
-    def config(through_fct):
-        # The legacy standalone route has no model-constant bridge for the
-        # NEMO association's explicit omega.  Keep that route runnable with
-        # its generic association; the staged arm below exercises the full
-        # certified NEMO association and, critically, the through-FCT guard.
-        mle_cfg = orca2_l5_mle()._replace(
-            through_fct=through_fct,
-            nemo_association=through_fct,
-        )
-        return base._replace(physics=base.physics._replace(mle=mle_cfg))
+        def config(through_fct):
+            # The legacy standalone route has no model-constant bridge for the
+            # NEMO association's explicit omega.  Keep that route runnable with
+            # its generic association; the staged arm below exercises the full
+            # certified NEMO association and, critically, the through-FCT guard.
+            mle_cfg = orca2_l5_mle()._replace(
+                through_fct=through_fct,
+                nemo_association=through_fct,
+            )
+            return base._replace(physics=base.physics._replace(mle=mle_cfg))
 
-    staged = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, config(True),
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-            expose_l5_mle_transport=True)).step(state, dt=card.dt_s)
-    centred = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, config(False)).step(
-            state, dt=card.dt_s)
-    trace = staged.mass_flux_w
-    assert float(jnp.max(jnp.abs(trace.delta_u))) == pytest.approx(
-        10863.304248497367, rel=1.0e-13)
-    assert float(jnp.max(jnp.abs(trace.delta_v))) == pytest.approx(
-        0.01969529183197949, rel=1.0e-13)
-    assert not np.array_equal(
-        np.asarray(staged.T.data), np.asarray(centred.T.data))
+        staged = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, config(True),
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_l5_mle_transport=True)).step(state, dt=card.dt_s)
+        centred = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, config(False)).step(
+                state, dt=card.dt_s)
+        trace = staged.mass_flux_w
+        assert float(jnp.max(jnp.abs(trace.delta_u))) == pytest.approx(
+            10863.304248497367, rel=1.0e-13)
+        assert float(jnp.max(jnp.abs(trace.delta_v))) == pytest.approx(
+            0.01969529183197949, rel=1.0e-13)
+        assert not np.array_equal(
+            np.asarray(staged.T.data), np.asarray(centred.T.data))
+    finally:
+        set_policy(prev_policy)
 
 jax.config.update("jax_enable_x64", True)
 

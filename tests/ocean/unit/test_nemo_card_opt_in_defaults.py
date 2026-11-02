@@ -609,6 +609,7 @@ def test_slow_forcing_depth_evaluation_has_no_default_and_unset_raises():
 
 def test_gyre_routing_choices_do_not_leak_to_orca2_tanks_or_vortex():
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        GYRERouting,
         build_gyre_zco_card,
         build_gyre_zco_lane_certified_card,
         build_lock_exchange_zco_card,
@@ -628,6 +629,19 @@ def test_gyre_routing_choices_do_not_leak_to_orca2_tanks_or_vortex():
     assert lane.physics.shortwave_penetration.nemo_qsr_kbb_live_stretch is False
     assert lane.nemo_qsr_stage3_kmm_source_association is False
     assert lane.vmix_eos_use_config_rho0 is False
+
+    mixed = build_gyre_zco_card(
+        routing=GYRERouting(
+            tke_shear_step_entry_ssh=False,
+            qsr_kbb_live_stretch=True,
+            qsr_kmm_source_association=False,
+            vmix_eos_use_config_rho0=True,
+        )
+    ).recipe.model_config
+    assert mixed.physics.vertical_mixing.tke.nemo_sh2_step_entry_ssh is False
+    assert mixed.physics.shortwave_penetration.nemo_qsr_kbb_live_stretch is True
+    assert mixed.nemo_qsr_stage3_kmm_source_association is False
+    assert mixed.vmix_eos_use_config_rho0 is True
 
     off_cards = (
         build_lock_exchange_zco_card(),
