@@ -1150,6 +1150,24 @@ class SI3IceCorState(NamedTuple):
     wfx_res: jnp.ndarray
 
 
+def _si3_traced(*trees) -> bool:
+    return any(isinstance(x, jax.core.Tracer) for x in jax.tree_util.tree_leaves(trees))
+
+
+def _si3_loop(n: int, body, carry, traced: bool):
+    """``for k in range(n): carry = body(k, carry)``.
+
+    DECISION 198: traced callers run the same body as a static-trip
+    ``fori_loop`` (same statements in the same order); eager calls keep the
+    Python loop, so their op-by-op bits are unchanged.
+    """
+    if traced:
+        return jax.lax.fori_loop(0, n, body, carry)
+    for k in range(n):
+        carry = body(k, carry)
+    return carry
+
+
 def si3_interior_mask(shape2d, nn_hls: int) -> jnp.ndarray:
     mask = jnp.zeros(shape2d, dtype=bool)
     return mask.at[nn_hls:-nn_hls, nn_hls:-nn_hls].set(True)
@@ -1252,17 +1270,23 @@ def si3_ice_itd_reb(s: dict, *, interior, hi_max, hi_mean, amax, cfg: SI3IceCorC
     from legoesm.core.source_rounding import nemo_source_round as sr
 
     jpl = s["a_i"].shape[-1]
-    for jl in range(jpl - 1):  # :628 DO jl = 1, jpl-1 (0-based jl)
+    traced = _si3_traced(s, interior, hi_max, hi_mean, amax)
+
+    def thick_to_upper(jl, s):  # :628 DO jl = 1, jpl-1 (0-based jl)
         a, v = s["a_i"][..., jl], s["v_i"][..., jl]
         cells = interior & (a > 0.0) & (v > sr(a * hi_max[jl + 1]))  # :632
         dai = sr(_SI3_HALF * a)  # :650
         dvi = sr(v - sr(sr((1.0 - _SI3_HALF) * a) * hi_mean[jl]))  # :651
-        s = _si3_itd_shiftice(s, cells, jl, False, dai, dvi, amax, cfg)  # :654
-    for jl in range(jpl - 2, -1, -1):  # :664 DO jl = jpl-1, 1, -1
+        return _si3_itd_shiftice(s, cells, jl, False, dai, dvi, amax, cfg)  # :654
+
+    def thin_to_lower(k, s):  # :664 DO jl = jpl-1, 1, -1
+        jl = jpl - 2 - k
         a, v = s["a_i"][..., jl + 1], s["v_i"][..., jl + 1]
         cells = interior & (a > 0.0) & (v <= sr(a * hi_max[jl + 1]))  # :668
-        s = _si3_itd_shiftice(s, cells, jl, True, a, v, amax, cfg)  # :678-683
-    return s
+        return _si3_itd_shiftice(s, cells, jl, True, a, v, amax, cfg)  # :678-683
+
+    s = _si3_loop(jpl - 1, thick_to_upper, s, traced)
+    return _si3_loop(jpl - 1, thin_to_lower, s, traced)
 
 
 def si3_var_zapsmall(s: dict, *, interior, sss_m, sst_m, cfg: SI3IceCorConfig) -> dict:
@@ -1281,23 +1305,36 @@ def si3_var_zapsmall(s: dict, *, interior, sss_m, sst_m, cfg: SI3IceCorConfig) -
     jpl = s["a_i"].shape[-1]
     sfx, hfx, wfx = s["sfx_res"], s["hfx_res"], s["wfx_res"]
     sz_new = fmin(cfg.rn_simin, sr(cfg.rn_sinew * sss_m))  # :642
-    for jl in range(jpl):  # :633-645
-        for jk in range(s["szv_i"].shape[-2]):
+    traced = _si3_traced(s, interior, sss_m, sst_m)
+
+    def salt_category(jl, sfx):  # :633-645 DO jl
+        def salt_layer(jk, sfx):  # DO jk
             m = small[..., jl]
-            sfx = jnp.where(m, sr(sfx + sr(sr(s["szv_i"][..., jk, jl] * cfg.rhoi) * r1)), sfx)
+            return jnp.where(m, sr(sfx + sr(sr(s["szv_i"][..., jk, jl] * cfg.rhoi) * r1)), sfx)
+        return _si3_loop(s["szv_i"].shape[-2], salt_layer, sfx, traced)
+
+    sfx = _si3_loop(jpl, salt_category, sfx, traced)
     s["szv_i"] = jnp.where(small[..., None, :], 0.0, s["szv_i"])
     s["sz_i"] = jnp.where(small[..., None, :], sz_new[..., None, None], s["sz_i"])
     for name, t_name in (("e_i", "t_i"), ("e_s", "t_s")):  # :664-690, e_i before e_s
-        for jl in range(jpl):
-            for jk in range(s[name].shape[-2]):
-                hfx = jnp.where(small[..., jl], sr(hfx - sr(s[name][..., jk, jl] * r1)), hfx)
+        e = s[name]
+
+        def heat_category(jl, hfx):  # DO jl
+            def heat_layer(jk, hfx):  # DO jk
+                return jnp.where(small[..., jl], sr(hfx - sr(e[..., jk, jl] * r1)), hfx)
+            return _si3_loop(e.shape[-2], heat_layer, hfx, traced)
+
+        hfx = _si3_loop(jpl, heat_category, hfx, traced)
         s[name] = jnp.where(small[..., None, :], 0.0, s[name])
         s[t_name] = jnp.where(small[..., None, :], cfg.rt0, s[t_name])
-    for jl in range(jpl):  # :695-722
+
+    def water_category(jl, wfx):  # :695-722 DO jl
         m = small[..., jl]
         wfx = jnp.where(m, sr(wfx + sr(sr(s["v_i"][..., jl] * cfg.rhoi) * r1)), wfx)
         wfx = jnp.where(m, sr(wfx + sr(sr(s["v_s"][..., jl] * cfg.rhos) * r1)), wfx)
-        wfx = jnp.where(m, sr(wfx + sr(sr(sr(s["v_ip"][..., jl] + s["v_il"][..., jl]) * cfg.rhow) * r1)), wfx)
+        return jnp.where(m, sr(wfx + sr(sr(sr(s["v_ip"][..., jl] + s["v_il"][..., jl]) * cfg.rhow) * r1)), wfx)
+
+    wfx = _si3_loop(jpl, water_category, wfx, traced)
     for name in ("a_i", "v_i", "v_s", "oa_i", "h_i", "h_s", "a_ip", "v_ip", "v_il", "h_ip", "h_il"):
         s[name] = jnp.where(small, 0.0, s[name])
     s["t_su"] = jnp.where(small, sr(sst_m + cfg.rt0)[..., None], s["t_su"])  # :709
@@ -1356,17 +1393,22 @@ def si3_ice_cor_dyn(state: SI3IceCorState, *, rn_amax_2d, sss_m, sst_m, hi_max, 
         s = si3_ice_itd_reb(s, interior=interior, hi_max=hi_max, hi_mean=hi_mean, amax=amax, cfg=config)
     r1 = 1.0 / config.rdt_ice
     r1_nlay = 1.0 / s["szv_i"].shape[-2]
-    sfx = s["sfx_res"]
-    for jl in range(s["a_i"].shape[-1]):  # :114-122
+    traced = _si3_traced(s, amax, sss_m, sst_m, hi_max, hi_mean)
+
+    def salt_category(jl, carry):  # :114-122 DO jl
         v = s["v_i"][..., jl]
         lo = sr(sr(config.rn_simin * v) * r1_nlay)
         hi = sr(sr(sr(config.rn_sinew * sss_m) * v) * r1_nlay)
-        for jk in range(s["szv_i"].shape[-2]):
-            zsal = s["szv_i"][..., jk, jl]
+
+        def salt_layer(jk, carry):  # DO jk
+            sfx, szv_i = carry
+            zsal = szv_i[..., jk, jl]
             new = fmin(fmax(zsal, lo), hi)  # :117-118, the kn /= 0 copy
             new = jnp.where(interior, new, zsal)
             sfx = jnp.where(interior, sr(sfx - sr(sr(sr(new - zsal) * config.rhoi) * r1)), sfx)
-            s["szv_i"] = s["szv_i"].at[..., jk, jl].set(new)
-    s["sfx_res"] = sfx
+            return sfx, szv_i.at[..., jk, jl].set(new)
+        return _si3_loop(s["szv_i"].shape[-2], salt_layer, carry, traced)
+
+    s["sfx_res"], s["szv_i"] = _si3_loop(s["a_i"].shape[-1], salt_category, (s["sfx_res"], s["szv_i"]), traced)
     s = si3_var_zapsmall(s, interior=interior, sss_m=sss_m, sst_m=sst_m, cfg=config)  # :128
     return SI3IceCorState(**{k: s[k] for k in SI3IceCorState._fields})
