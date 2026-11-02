@@ -238,3 +238,10 @@ With the O6 redistribution donor loop also traced (commit b7c4412990), the AD
 probe was run once more under a 120 GiB watchdog: it was stopped by its
 10,800 s limit while still compiling, at 79.8 GiB peak.  No gradient was
 produced, so every count above remains `UNMEASURED_TIMEOUT`.
+
+## DECISION 198 round 2 re-measurement
+
+With the O4 Prather subcycles also traced (commit 8e6046678f), the AD probe
+was run once more under a 120 GiB watchdog: it was stopped by its 10,800 s
+limit while still compiling, at 50.3 GiB peak (79.8 GiB in round 1).  No
+gradient was produced, so every count above remains `UNMEASURED_TIMEOUT`.

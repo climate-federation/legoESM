@@ -692,3 +692,99 @@ DECISION 194 file `3 passed`; the DECISION 198 file `2 passed`; the O12 file
 `PASS_O14_0_ULP`, `PASS_ALL_O15_O16_0_ULP`.  The O4 Prather file was not run.
 
 independent review: pending (author: Claude)
+
+## DECISION 198 round 2 — traced O4 Prather subcycles
+
+Round 1 (743146b590) is under review; this round works on top of it and
+touches O4 Prather advection only (O6 `ice_cor`, O15 and O16 untouched).
+DECISION 200 accepts compiled sign-of-zero and NaN-sign changes; none occurred
+here.
+
+What changed (read off the code): under a JAX transform the subcycle loop
+(`DO jt = 1, icycle`, icedyn_adv_pra.f90 lines 156–498) runs as one
+three-step `lax.scan` whose body is checkpointed; each step uses the same
+halo width, sweep parity and `icycle >= jt` selection as the three unrolled
+calls it replaces.  The alternating sweep order (lines 267–367) becomes a
+`lax.cond` on the traced parity; both branches hold the same two sweep calls
+in the same order as before.  Eager calls keep the three unrolled calls and a
+Python branch.  No statement, barrier or MIN/MAX operand order changed.  An
+object-code audit of the compiled forward finds no FMA instruction, before or
+after (probe tile through the O4 step, and the two-dimensional fixture below).
+
+Measurements (CPU fp64, libm arm; every command that could pass 20 GB ran
+under a watchdog that kills only its own child above 120 GiB, after checking
+at least 250 GiB available and no process above 100 GiB):
+
+- **Forward bits.**  The O4 step on the probe tile at one, two and three
+  subcycles (both sweep parities): eager and `jax.jit` bit-identical to
+  743146b590 (134 leaves each).  A 12 × 10 all-ocean fixture with ice in every
+  cell, two-dimensional velocities and the O17 card's configuration (5
+  categories, 10/5 layers, LEV ponds, salinity option 4) at two and three
+  subcycles: eager and jit digests equal the parent's.  The full O17 step:
+  eager and jit bit-identical to 743146b590 on all 1,209 trace leaves, signed
+  zeros and NaN bits included.
+- **Equations** (the committed counter): 198,323 at 743146b590 → 178,146;
+  the Prather owner 48,325 → 28,148 (the six traced sweep substeps become
+  four: two per `lax.cond` branch); the other owners unchanged.  The round-1
+  snapshot is kept.
+- **Compile.**  Isolated O4 reverse pass on the probe's recorded inputs (the
+  per-rung instrument that gave 878 s): 743146b590 13.7 s to lower and 846.9 s
+  to compile, 39.0 GiB peak; now 19.4 s and 223.1 s, 16.2 GiB.  (The earlier
+  50 GB came from a process that had already compiled eight other rungs.)
+  Forward jit of the O4 step on the probe tile, compile and run: about 55 s →
+  12 s.
+- **Full-step `value_and_grad`** (the AD probe's program; allowed because the
+  isolated O4 reverse compile stayed under 30 GB; run once): stopped by its
+  10,800 s limit while still compiling, peak 50.3 GiB (79.8 GiB in round 1),
+  so the per-leaf table stays unmeasured.  O6 `ice_cor` (396 s), O15 (96 s)
+  and O16 (46 s) are the rungs not yet traced.
+- **FD** on the two-dimensional fixture at three subcycles (relative step
+  1e-4, objective = outputs weighted by 1/(1+max|output|), each case by its
+  own relative error; rounding noise at most 2.3e-9 of the gradient):
+
+| input | AD | FD | rel. error |
+|---|---:|---:|---:|
+| `v_i` (6,5) cat 3 | 205.3812379 | 205.3812381 | 9.7e-10 |
+| `a_i` (6,5) cat 3 | 8.589927548 | 8.589927551 | 3.0e-10 |
+| `v_s` (4,6) cat 5 | 153.8986185 | 153.8986184 | 6.3e-10 |
+| `e_i` (6,5) layer 3, cat 3 | 6.268041510e-9 | 6.268041516e-9 | 9.8e-10 |
+| `v_ip` (4,6) cat 5 | 787.3811739 | 787.3811754 | 1.9e-9 |
+| `u_ice` (4,6) | −19.09890745 | −19.09890748 | 1.5e-9 |
+| `v_ice` (4,6) | −17.90208879 | −17.90208892 | 7.5e-9 |
+
+  Reverse-mode values equal the parent's to 1.6e-15 relative on all 33
+  scanned cases.  Two scanned cases disagree with central differences in
+  both programs: `v_i` and `a_i` at cell (5,4), category 1 (AD 5.864 vs FD
+  4.775; 3.667 vs 6.731).  Measured one-sided slopes differ there at steps
+  from 1e-3 to 1e-7 (8.13e-8 and 0 for one area output against `v_i`), so the
+  input sits on a branch boundary; reverse and forward mode both return the
+  slope of the branch taken.  PLAUSIBLE, read off the code: the
+  thickness-capping test in `Hbig_pra` compares h after the sweep with the
+  pre-advection maximum, which is equal at a local-maximum cell that only
+  exports.  These cases are left out of the test.
+- **Plants** (new test, each restored afterwards): reversing the traced
+  subcycle order changes the compiled digest to `79ddec22…` (on the probe
+  tile, whose meridional velocity is zero, it changed nothing, which is why
+  the test uses the two-dimensional fixture); removing the barrier around one
+  product of the pre-advection mass diagnostic changes the compiled digest to
+  `c702ec2b…`; stopping the gradient on the scan carry fails all seven FD
+  cases (zero gradient for the five state inputs); scaling the carry tangent
+  by 1 + 1e-5 per subcycle gives relative errors of 3.0e-5 in all seven.
+- **Citations.**  The traced subcycles moved every later line of the state
+  module; 24 citations into it are re-lined live through the DECISION 194
+  mechanism (two re-pin a closing-parenthesis occurrence number) and the
+  grown dispatcher anchors on HEAD's text, with a note in the r8 O4 receipt.
+  The gate logic is unchanged and passes (274 citations).
+- **O4 file** (run once, alone, under the watchdog): `9 passed in 1897.02s`,
+  13.5 GiB peak (2 h 58 min before DECISION 194, 60–148 GB at the parent per
+  the round brief).
+
+Final checks from a clean checkout of 67137462f8 (this commit adds only this
+section and the leaf-table note), serial, CPU fp64: the DECISION 194 file
+`3 passed`; the DECISION 198 round-1 file `2 passed`; the new O4 file
+`2 passed`; the O12 file `81 passed`; the O6 file `28 passed, 1 deselected`;
+the citation gate `45 passed` and its default run `PASS`; the O8–O16
+master-scorer tests `30 passed`; master scorer over 100 steps
+`PASS_ALL_O8_O13_0_ULP`, `PASS_O14_0_ULP`, `PASS_ALL_O15_O16_0_ULP`.
+
+independent review: pending (author: Claude)
