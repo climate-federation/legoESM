@@ -5311,7 +5311,7 @@ def _bc_external_surface_forcing(
 
 
 def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
-                          *, include_tracers=True):
+                          *, include_tracers=True, active=None):
     """Stage 10c: sponge-layer relaxation of T/S (and optionally u/v) toward
     reference fields. Pure verbatim extraction (Q8). Returns ``(du_dt, dv_dt,
     dT_dt, dS_dt, diag_sponge_u, diag_sponge_v)``.
@@ -5341,10 +5341,20 @@ def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
                 "tracer relaxation only; u_ref/v_ref require a 2-D "
                 "horizontal gamma (the momentum sponge interpolates gamma "
                 "to velocity faces).")
-        if include_tracers:
+        if include_tracers and active is None:
             dT_dt, dS_dt = apply_sponge_tracer_relaxation(
                 dT_dt, dS_dt, T, S, sponge, mask=None, expand_gamma_axis=-1,
             )
+        elif include_tracers:
+            # partial cells: relax wet cells only.  With the 2-D land mask
+            # alone the sponge filled the cells below the seafloor with
+            # target values, which other operators may read as water.
+            _sT, _sS = apply_sponge_tracer_relaxation(
+                jnp.zeros_like(dT_dt), jnp.zeros_like(dS_dt), T, S, sponge,
+                mask=None, expand_gamma_axis=-1,
+            )
+            dT_dt = dT_dt + _sT * active
+            dS_dt = dS_dt + _sS * active
         _dt = T.dtype
         if sponge.u_ref is not None:
             gamma_u = interp_cell_to_uface(sponge.gamma.astype(_dt))[..., jnp.newaxis]
@@ -6635,6 +6645,8 @@ def _latlon_tendencies_outside_core(
     du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v = _bc_sponge_relaxation(
         du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
         include_tracers=not (_sponge_implicit or _sponge_stage3_damping),
+        active=(z_coord.is_active.astype(T.dtype)
+                if isinstance(z_coord, OceanPartialCellCoordinate) else None),
     )
     tracer_source = None
     if _sponge_implicit:
