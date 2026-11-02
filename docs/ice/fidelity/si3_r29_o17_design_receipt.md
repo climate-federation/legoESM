@@ -740,7 +740,7 @@ at least 250 GiB available and no process above 100 GiB):
   and O16 (46 s) are the rungs not yet traced.
 - **FD** on the two-dimensional fixture at three subcycles (relative step
   1e-4, objective = outputs weighted by 1/(1+max|output|), each case by its
-  own relative error; rounding noise at most 2.3e-9 of the gradient):
+  own relative error; rounding noise at most 5.1e-9 of the gradient):
 
 | input | AD | FD | rel. error |
 |---|---:|---:|---:|
@@ -757,8 +757,10 @@ at least 250 GiB available and no process above 100 GiB):
   both programs: `v_i` and `a_i` at cell (5,4), category 1 (AD 5.864 vs FD
   4.775; 3.667 vs 6.731).  Measured one-sided slopes differ there at steps
   from 1e-3 to 1e-7 (8.13e-8 and 0 for one area output against `v_i`), so the
-  input sits on a branch boundary; reverse and forward mode both return the
-  slope of the branch taken.  PLAUSIBLE, read off the code: the
+  input sits on a branch boundary; reverse and forward mode both return one
+  of the two one-sided slopes (the right one for that output against `v_i`,
+  the left one for an area output against `a_i`).  PLAUSIBLE, read off the
+  code: the
   thickness-capping test in `Hbig_pra` compares h after the sweep with the
   pre-advection maximum, which is equal at a local-maximum cell that only
   exports.  These cases are left out of the test.
@@ -781,8 +783,9 @@ at least 250 GiB available and no process above 100 GiB):
   13.5 GiB peak (2 h 58 min before DECISION 194, 60–148 GB at the parent per
   the round brief).
 
-Final checks from a clean checkout of 67137462f8 (this commit adds only this
-section and the leaf-table note), serial, CPU fp64: the DECISION 194 file
+Final checks from a clean checkout of 67137462f8 (the round's later commits
+change only this receipt, the leaf table and comments in the new test),
+serial, CPU fp64: the DECISION 194 file
 `3 passed`; the DECISION 198 round-1 file `2 passed`; the new O4 file
 `2 passed`; the O12 file `81 passed`; the O6 file `28 passed, 1 deselected`;
 the citation gate `45 passed` and its default run `PASS`; the O8–O16

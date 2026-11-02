@@ -95,11 +95,11 @@ def test_traced_prather_keeps_parent_forward_bits():
 # (input, index, relative step): thickness, area, snow, enthalpy, pond and both
 # velocity components at interior cells.  Each case is judged by its own
 # relative error; with |f| ~ 3.9e3 the quotient's rounding noise,
-# eps |f| / (2 h |AD|), is at most 2.3e-9.  Measured: 9.7e-10, 3.0e-10, 6.3e-10,
-# 9.8e-10, 1.9e-9, 1.5e-9, 7.5e-9.  Cells avoided: a local-maximum cell that
-# only exports keeps h = v/a after the sweep, so ``Hbig_pra``'s ``h > hmax``
-# test sits on its tie there and the one-sided slopes differ (v_i, a_i at
-# (5,4,0)); there reverse mode returns the slope of the branch taken.
+# eps |f| / (2 h |AD|), is at most 5.1e-9.  Measured: 9.7e-10, 3.0e-10, 6.3e-10,
+# 9.8e-10, 1.9e-9, 1.5e-9, 7.5e-9.  Cells avoided: v_i and a_i at (5,4,0),
+# where the measured one-sided slopes differ and reverse mode returns one of
+# them (plausibly ``Hbig_pra``'s ``h > hmax`` test at its tie: a local-maximum
+# cell that only exports keeps h = v/a through the sweep).
 FD_CASES = (
     ("v_i", (6, 5, 2), 1.0e-4),
     ("a_i", (6, 5, 2), 1.0e-4),
