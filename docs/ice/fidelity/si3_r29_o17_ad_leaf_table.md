@@ -215,3 +215,19 @@ No leaf is classified as a zero gradient without a completed reverse pass.
 | `forcing.stress.taum` | 4 × 3 | float64 | UNMEASURED_TIMEOUT | UNMEASURED_TIMEOUT | UNMEASURED_TIMEOUT | UNMEASURED_TIMEOUT |
 | `forcing.stress.utau_oce` | 4 × 3 | float64 | UNMEASURED_TIMEOUT | UNMEASURED_TIMEOUT | UNMEASURED_TIMEOUT | UNMEASURED_TIMEOUT |
 | `forcing.stress.vtau_oce` | 4 × 3 | float64 | UNMEASURED_TIMEOUT | UNMEASURED_TIMEOUT | UNMEASURED_TIMEOUT | UNMEASURED_TIMEOUT |
+
+## DECISION 194 re-measurement
+
+After the O9–O12 category, layer-pass, vremap and permeability loops were
+traced (commit 48526f950c), the AD probe at the current source (6 × 5 tile,
+2 × 1 owned: one ice column with five categories, snow and ponds beside one
+open column) was run twice more: under `timeout 3600` it returned exit 124, and
+under `timeout 10800` it again returned exit 124 (at least 62 GB resident when
+last observed).  Neither run produced a gradient, so every count in the table
+above remains `UNMEASURED_TIMEOUT` and no leaf is classified as zero.
+
+The traced O12 composition itself now differentiates: on the five-category
+6 × 6 fixture of the DECISION 194 unit test its compiled reverse pass (141 s,
+7.3 GB) is finite on all 171 floating input leaves and non-zero on 157 of them.
+That is a different program from the probe's full step and is not a substitute
+for the rows above.

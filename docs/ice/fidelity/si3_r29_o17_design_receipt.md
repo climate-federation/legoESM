@@ -392,3 +392,157 @@ state.  Resume 2 above replaces it with the active mixed-regime state and
 records the bounded compiled/eager measurements and per-leaf disposition.
 
 independent review: operator (Claude)
+
+## DECISION 194 — traced O9–O12 loops
+
+DECISION 194 (option 1 of the Resume 2 decision) converted the O9–O12
+category, layer and iteration Python loops to JAX control flow with static trip
+counts.  Every converted loop keeps its statements, their order and their
+source-rounding barriers; only the iteration mechanism changes, and only when
+the call is traced (`jax.jit`, `jax.grad`): an eager call still runs the Python
+loop.  No default, configuration field, scheme selection or physics changed,
+no knob was added, and the O17 composition module was not edited.
+
+What was converted (read off the code):
+
+- the O12 composer's `DO jl = 1, jpl` category loop (O9 + O10 + O11 +
+  `ice_thd_1d2d(jl, 2)`) and the `pnd_LEV` category loop: one shared helper
+  runs them as a `lax.scan` over the stacked category inputs with the body
+  under `jax.checkpoint`, so reverse mode keeps only the category carry;
+- the `ice_thd_dh` surface melt/sublimation and basal melt layer passes:
+  static-trip `fori_loop`s over the stacked layer carriers;
+- the shared `ice_var_vremap`/`snw_ent` old-segment loop: a `fori_loop`
+  updating every new interface elementwise in the same old-segment order
+  (O14 open-water growth uses the same helper);
+- the salinity-4 harmonic-mean permeability: one `fori_loop` over the inner
+  layer with all start layers carried together.
+
+One barrier was added.  With the category body scanned, XLA contracted the
+BL99 bottom conductive flux into fused multiply-adds in its two consumers (the
+`ice_thd_dh` available bottom heat and the `hfx_err_dif` budget): 1–12 ULP in
+the basal-growth fluxes and `hfx_err_dif` on the five-category fixture
+(measured).  NEMO's object code does not fuse there (DECISION 158), so the
+product is now materialised like its neighbours; the fixture is then 0 ULP.
+
+Left as Python loops (small; inside an already-traced body or a few
+statements each): the `ice_thd_dh` snow loops, the salinity-4 per-layer and
+RJW velocity loops, the `ice_perm_eff` layer loop, the `ice_thd_pnd`
+vanished-pond loop, the vremap cumulative sums, and the BL99 matrix rows
+inside the existing Picard `fori_loop`.  No checkpoint was placed between the
+O17 rung calls (that module is being edited by another round, and a measured
+checkpoint variant compiled slower; see below).
+
+### Measurements (CPU fp64, libm arm, probe tile unless stated)
+
+Recursive JAXPR equations of the O17 objective, by owner (the committed
+counter, parent 9998276020 → this round):
+
+| owner | parent | DECISION 194 |
+|---|---:|---:|
+| O9–O12 thermodynamic owner | 342,170 | 35,858 |
+| O14 open water (shares vremap) | 53,489 | 9,659 |
+| O4 Prather dynamics | 48,325 | 48,325 |
+| everything else | 133,998 | 133,998 |
+| total | 577,982 | 227,840 |
+
+Forward bits:
+
+- five-category O12 composition fixture (6 × 6, live flux carry, 499 output
+  leaves): eager and `jax.jit` both bit-identical to the parent; the committed
+  test pins that digest (`e74fcfa0…73bf`);
+- full O17 step, eager: all 679 published leaves bit-identical to the parent;
+- full O17 step, `jax.jit`: no finite non-zero value changed; 588 elements in
+  51 leaves differ only in the sign of zero (572) or of a NaN (16).  581 of the
+  588 now equal the parent's eager value (the parent's compiled program had
+  folded `0 + (-0)` against compile-time-zero flux accumulators, which the
+  scanned carry no longer exposes — mechanism plausible, not instrumented); the
+  other 7 are NaN signs in the known open-water NaN columns.  Parent eager vs
+  parent jit differed in 607 elements; final jit vs parent eager differs in 33.
+
+Compile cost (wall, peak RSS):
+
+| program | parent | DECISION 194 |
+|---|---:|---:|
+| O12 composition fixture, forward jit (compile + run) | 254 s | 16 s |
+| full O17 step, forward jit | 568 s, 22.4 GB | 230 s, 7.2 GB |
+| O12 composition fixture, reverse mode | not measured | 141 s, 7.3 GB |
+| one O9 category, reverse mode | not measured | 27.5 s |
+| full O17 step, the AD probe's `value_and_grad`, `timeout 3600` | exit 124 | exit 124 |
+| same program, `timeout 10800` | — | exit 124 (≥ 62 GB observed) |
+| finite-masked full-step `value_and_grad`, `timeout 10800` | — | exit 124 (≥ 173 GB observed) |
+
+Before the `ice_thd_dh` layer passes were traced (category scan, vremap and
+permeability already traced) the O12 reverse mode took 729 s and 43.9 GB and
+one O9 category 216 s: the straight-line layer passes dominated the reverse
+compile.  The parent's own O9 reverse compile aborted before finishing, so no
+parent number is quoted for those rows.
+
+The full step still does not compile.  Isolated per-rung reverse-mode
+compiles on recorded probe inputs: `ice_update_tau` 0.8 s, O12 composition
+119 s, O13 remap 11 s, O14 open water 12 s, O16 46 s, O15 96 s, aEVP 19 s,
+O6 `ice_cor` 396 s, O4 Prather 878 s (50 GB), and O6 redistribution did
+not finish within about 2.4 h (at least 148 GB observed).  The pre-thermodynamics half of the step alone (O7 → O5 →
+O4 → O6 → O7, no O8–O16) needs 82 s to lower and 1131 s to compile (55 GB);
+with `jax.checkpoint` around the aEVP, Prather, redistribution and
+`ice_cor` calls it needed 1292 s (60 GB).  The remaining compile cost is
+therefore outside the O9–O12 owner, and the whole program compiles far
+slower than the sum of its rungs.
+
+Gradient checks: the AD probe produced no per-leaf counts (both runs timed
+out), so the per-leaf table stays unmeasured.  At the O12 composition level
+the reverse pass is finite on all 171 floating input leaves (157 carry a
+non-zero gradient).  Central differences of the same compiled forward
+(relative step 1e-4, objective = output sum weighted by 1/(1+max|leaf|)):
+
+| leaf | step | AD | FD | rel. error |
+|---|---:|---:|---:|---:|
+| category 3 `h_i`, cell (3,2) | 2.34e-4 | 4.184320186 | 4.184320175 | 2.6e-9 |
+| category 1 `a_i`, cell (3,2) | 2.48e-5 | 16.23678458 | 16.23678420 | 2.4e-8 |
+| category 3 `e_i`, cell (3,2), layer 4 | 3.31e+4 | −3.317754415e-7 | −3.317754416e-7 | 2.6e-10 |
+| category 2 `h_s`, cell (2,3) | 8.65e-6 | 104.0114698 | 104.0114690 | 7.1e-9 |
+| pond `a_ip`, cell (2,3), category 1 | 6.53e-6 | 2.648828360 | 2.648828386 | 9.9e-9 |
+| category 1 `qns_ice` forcing, cell (3,2) | 6.94e-3 | 0.06519869983 | 0.06519869923 | 9.1e-9 |
+
+A full-step finite-difference check was not possible: it needs the full-step
+reverse pass, which did not compile within 10800 s.  (A trial with every rung
+under its own `jax.jit` and no outer `jit` aborted after 19 min with LLVM
+"Cannot allocate memory"; not pursued.)
+
+Plants (the committed test's forward pin): reversing the category scan, reversing
+the `ice_thd_dh` layer order, skipping the first vremap segment, joining a
+permeability start layer one step late, and removing the new bottom-flux
+barrier each change the digest; stopping the gradient on the scanned category
+inputs zeroes the checked thickness gradient.
+
+Exactness battery, run serially file by file (default `-m 'not slow'`, CPU
+fp64), parent 9998276020 against 17caeb46bf: every one of the 33 SI3 unit and
+fidelity files, the receipt-citation gate, the four lane-3 `si3thd` gates and
+the two shared-kernel unit files reports the same summary line before and
+after (the new DECISION 194 file: 2 passed).  The three failures are present in
+both runs and unrelated: one `test_si3_surface` production-path plant
+(`sum_first_category`), the `scalarmath_v2` gate's "MY_SRC is not verbatim"
+host check, and an atmosphere-config tail assertion in `test_pr_f_fixes`.  The
+O4 file needed 2 h 58 min before and 3 h 58 min after on the shared host (its
+reverse-mode test; the per-file limit was raised from 3 h to 4 h for the after
+run only).  The O8–O16 master scorer over all 100 steps: before and after,
+`PASS_ALL_O8_O13_0_ULP`, `PASS_O14_0_ULP` and `PASS_ALL_O15_O16_0_ULP`.
+
+### Decision needed
+
+1. The full-step reverse pass still does not compile, and the remaining cost
+   is outside O9–O12: O6 redistribution alone did not compile in about 2.4 h,
+   O4 Prather needs 878 s and O6 `ice_cor` 396 s, and the whole step compiles
+   far slower than the sum of its rungs.
+   1. Apply the same bit-pinned loop tracing to the O6 redistribution, O6
+      `ice_cor`, O4 Prather, O15 and O16 rungs, one rung per round, largest
+      first.  **Pick.**
+   2. Keep each admitted rung in its own XLA compile unit and let JAX chain
+      the true full-step gradient through them (no hand-written VJP); this
+      needs O17 glue changes, and an eager-glue trial aborted with an LLVM
+      memory error.
+   3. Stop here and use rung-level gradients.
+2. The compiled full-step forward changes only zero and NaN signs (581 of 588
+   now match the eager program).  Accept as is (**pick**), or require the
+   parent's compiled signed zeros.
+
+independent review: pending (author: Claude; reviewers to be assigned)
