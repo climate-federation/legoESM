@@ -457,6 +457,19 @@ def morrison_microphysics(
     # Droplet-number budget publication (``MicrophysicsOutput.nc_budget``):
     # the same static switch as ``qc_budget``, MG2 prognostic number only.
     _nc_pub = _prog_nc and bool(getattr(config, "publish_qc_budget", False))
+    # CAM6 MG2 with a SPECIFIED droplet number (nccons=.true.) still sediments
+    # cloud water (micro_mg2_0.F90:2056-2377), its fall speeds taken from the
+    # constant number (:2074-2076).  Static config; checked at start-up.
+    _sed_spec = bool(getattr(config, "specified_nc_droplet_sedimentation", False))
+    if _sed_spec:
+        _bad = [msg for ok, msg in (
+            (config.warm_rain_incloud, "warm_rain_incloud=True"),
+            (not _prog_nc, "prognostic_droplet_number=False"),
+            (not getattr(config, "predict_Nc", False), "predict_Nc=False"),
+        ) if not ok]
+        if _bad:
+            raise ValueError("MorrisonConfig.specified_nc_droplet_sedimentation=True "
+                             "needs " + ", ".join(_bad) + ".")
     if _prog_nc:
         # Start-up guards (static config; user decisions 2026-10-19 2a, Q-I/10a,
         # Q-B 3a, 18a; 2026-10-20 Q4): CAM6 MG2 droplet number lives only on the MG2 warm-rain
@@ -2504,14 +2517,24 @@ def morrison_microphysics(
         # during the MG2 ice sedimentation above (qvlat, tlat, :2290-2296)
         dq_v_dt = dq_v_dt + sed_qv_i
         dT_dt = dT_dt + sed_T_i
-    if _prog_nc:
+    if _prog_nc or _sed_spec:
         # MG2 cloud-droplet sedimentation on the post-process state
         # (micro_mg2_0.F90:2056-2377; user decision 9a), sharing the
         # sedimentation sub-step cap, its required-count report and strict
         # error (user decision 2026-10-20).  N_c is per volume here.
+        if _prog_nc:
+            _nc_sed_kg = (N_c + dN_c_dt * dt) / rho
+        else:
+            # MG2 nccons: the fall speeds see the in-cloud number ncnst/rho
+            # (:2074-2076), here N_c_eff (the specified number every other
+            # warm-rain rate reads, per volume, in cloud), handed over as the
+            # grid mean because the routine divides by lcldm.  The number
+            # sediments too in MG2, but the specified number is not evolved
+            # here, so only the mass, vapour, heat and surface terms are kept.
+            _nc_sed_kg = N_c_eff / rho * cf_eff
         (sed_c, sed_nc_kg, sed_qv, sed_T, precip_c,
          _req_c) = mg2_cloud_sedimentation(
-            q_c + dq_c_dt * dt, (N_c + dN_c_dt * dt) / rho, cf_eff, T, rho,
+            q_c + dq_c_dt * dt, _nc_sed_kg, cf_eff, T, rho,
             p_half, dt, _nsub, presence_top=config.mg2_presence_ramp_top,
             # RULE 5: the fall-speed size reset rounded by its width (0 = MG2's
             # hard clip; KNOWN DIFFERENCE in mg2_droplet_fall_coefficients)
@@ -2528,9 +2551,10 @@ def morrison_microphysics(
                     f"{_nsub_max}; shorten the physics sub-step or raise the cap")
                 _sed_poison = jnp.where(_overflow_c, jnp.nan, _sed_poison)
         dq_c_dt = dq_c_dt + sed_c
-        dN_c_dt = dN_c_dt + sed_nc_kg * rho
-        if _nc_pub:
-            _nc_terms["sedimentation"] = sed_nc_kg * rho
+        if _prog_nc:
+            dN_c_dt = dN_c_dt + sed_nc_kg * rho
+            if _nc_pub:
+                _nc_terms["sedimentation"] = sed_nc_kg * rho
         dq_v_dt = dq_v_dt + sed_qv
         dT_dt = dT_dt + sed_T
     if mg2_snow:
@@ -2892,7 +2916,7 @@ def morrison_microphysics(
     # surface flux from ``sedimentation_tendency`` so column water
     # conservation holds exactly when the CFL limiter fires.
     precipitation = precip_r + precip_i + precip_s + precip_g
-    if _prog_nc:
+    if _prog_nc or _sed_spec:
         # droplets reaching the surface count as precipitation (CAM6 prect;
         # user decision 2026-10-20)
         precipitation = precipitation + precip_c
@@ -2972,7 +2996,8 @@ def morrison_microphysics(
         # the residual, so a term added to ``dq_c_dt`` without being listed
         # here is caught rather than hidden.  Cloud droplets sediment only
         # under prognostic_droplet_number (MG2), where "sedimentation" is
-        # listed; otherwise cloud water does not sediment.
+        # listed, and under specified_nc_droplet_sedimentation; otherwise
+        # cloud water does not sediment.
         out = out._replace(qc_budget={
             "condensation": condensation,
             "autoconversion": -dq_c_au,
@@ -2988,7 +3013,7 @@ def morrison_microphysics(
             # post-step M2005 small-condensate removal (the preamble one is
             # inside "condensation", relative to the input q_c)
             out.qc_budget["small_removal"] = small_removal_c
-        if _prog_nc:
+        if _prog_nc or _sed_spec:
             out.qc_budget["sedimentation"] = sed_c
         if mg2_snow:
             out.qc_budget["ice_melt"] = _qc_ice_melt

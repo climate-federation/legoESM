@@ -4790,11 +4790,15 @@ def thread_morrison_scalars(config, scheme, micro_config):
                        _ExpCfg._field_defaults["morrison_warm_rain_incloud"])
     _prog_nc = getattr(config, "morrison_prognostic_droplet_number",
                        _ExpCfg._field_defaults["morrison_prognostic_droplet_number"])
+    _sed_spec = getattr(config, "morrison_specified_nc_droplet_sedimentation",
+                        _ExpCfg._field_defaults[
+                            "morrison_specified_nc_droplet_sedimentation"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
                     ("morrison_sed_cfl_substeps_strict", _sed_strict),
                     ("morrison_do_graupel", _graupel),
                     ("morrison_warm_rain_incloud", _incloud),
-                    ("morrison_prognostic_droplet_number", _prog_nc)):
+                    ("morrison_prognostic_droplet_number", _prog_nc),
+                    ("morrison_specified_nc_droplet_sedimentation", _sed_spec)):
         if not isinstance(_v, bool):
             raise TypeError(f"{_nm} must be a bool, got {_v!r}")
     if not isinstance(_sed_max, int) or isinstance(_sed_max, bool) or _sed_max < 1:
@@ -4819,9 +4823,12 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _prog_nc = (None if _prog_nc
                 is _ExpCfg._field_defaults["morrison_prognostic_droplet_number"]
                 else _prog_nc)
+    _sed_spec = (None if _sed_spec is _ExpCfg._field_defaults[
+        "morrison_specified_nc_droplet_sedimentation"] else _sed_spec)
     if (not _touched and _flavor is None and _sed_sub is None
             and _sed_strict is None and _sed_max is None and _graupel is None
-            and _wrs is None and _incloud is None and _prog_nc is None):
+            and _wrs is None and _incloud is None and _prog_nc is None
+            and _sed_spec is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4833,7 +4840,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
         morrison_sed_cfl_substeps_strict=_sed_strict,
         morrison_do_graupel=_graupel, morrison_warm_rain_scheme=_wrs,
         morrison_warm_rain_incloud=_incloud,
-        morrison_prognostic_droplet_number=_prog_nc)
+        morrison_prognostic_droplet_number=_prog_nc,
+        morrison_specified_nc_droplet_sedimentation=_sed_spec)
 
 
 def _resolve_microphysics(config):

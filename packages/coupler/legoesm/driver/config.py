@@ -2271,6 +2271,10 @@ class ExperimentConfig(NamedTuple):
     # MorrisonConfig.prognostic_droplet_number: CAM6 MG2 prognostic droplet
     # number with prescribed-aerosol activation (microp_aero_run); MPAS lane.
     morrison_prognostic_droplet_number: bool = False
+    # MorrisonConfig.specified_nc_droplet_sedimentation: CAM6 MG2 cloud-droplet
+    # sedimentation with the specified droplet number (MG2 nccons=.true.).
+    # Needs morrison_warm_rain_incloud and the specified-droplet mode.
+    morrison_specified_nc_droplet_sedimentation: bool = False
     # Directory of the sha256-pinned CAM6 PPE member-000 aerosol climatology +
     # MAM4 property files read by that activation; None = unset.
     cam6_aerosol_dir: str | None = None

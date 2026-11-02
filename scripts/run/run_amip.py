@@ -2543,6 +2543,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="CAM6 MG2 prognostic droplet number with CAM6 "
                              "prescribed-aerosol activation (MPAS lane). "
                              "Needs --cam6-aerosol-dir.")
+    parser.add_argument("--morrison-specified-nc-droplet-sedimentation",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_specified_nc_droplet_sedimentation"],
+                        dest="morrison_specified_nc_droplet_sedimentation",
+                        help="CAM6 MG2 cloud-droplet sedimentation with the "
+                             "specified droplet number (MG2 nccons). Needs "
+                             "--morrison-warm-rain-incloud and specified "
+                             "droplets. Default off = no cloud-water "
+                             "sedimentation under specified droplets.")
     parser.add_argument("--cam6-aerosol-dir", type=str,
                         default=ExperimentConfig._field_defaults["cam6_aerosol_dir"],
                         dest="cam6_aerosol_dir",
@@ -3423,6 +3433,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_do_graupel=args.morrison_do_graupel,
         morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
         morrison_prognostic_droplet_number=args.morrison_prognostic_droplet_number,
+        morrison_specified_nc_droplet_sedimentation=(
+            args.morrison_specified_nc_droplet_sedimentation),
         cam6_aerosol_dir=args.cam6_aerosol_dir,
         land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
         land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,
