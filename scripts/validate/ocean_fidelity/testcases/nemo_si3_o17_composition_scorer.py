@@ -491,6 +491,11 @@ def score(
                 del out, trace, entry
             # Only the INDEPENDENT state crosses a step; records and traces are dropped.
             del records, given, given_entry, forcing, entries
+        if execution == "eager":
+            # JAX's eager per-primitive executable cache gained ~640 entries per
+            # step even when the same step was scored again (receipt Resume 5,
+            # item 5); it is bounded only by a 4096-entry LRU.  Drop it each step.
+            jax.clear_caches()
         gc.collect()
         _release_free_heap()
         rss_after_step.append(_rss_kib())
