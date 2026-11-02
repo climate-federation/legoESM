@@ -708,6 +708,11 @@ def parse_args(argv: list[str] | None = None):
                    help="Override Laplacian viscosity A_h [m²/s] (default: grid-dependent).")
     p.add_argument("--B-h", type=float, default=None,
                    help="Override biharmonic viscosity B_h [m⁴/s] (default: 5e9 for bathymetry).")
+    p.add_argument("--B-h-barotropic", type=float, default=None, dest="B_h_barotropic",
+                   help=("Lat-lon bathymetry lane: biharmonic viscosity on the depth-mean "
+                         "flow [m^4/s] (default 1e14, tuned at 1 deg). Biharmonic stability "
+                         "scales with dx^4, so finer grids need it reduced: ~1e14*(res/1deg)^4, "
+                         "e.g. 4e11 at 0.25 deg; 1e14 blows up a 0.25-deg run on day 1."))
     p.add_argument("--B-h-gamma0", type=float, default=None, dest="B_h_gamma0",
                    help=("Tripole lane: FESOM2's resolution-scaled biharmonic "
                          "B = gamma0*h^3 on the local face size (fesom_jax gamma0 = "
@@ -1734,6 +1739,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   tripole_fold_convention: str = "auto",
                   A_h_override: float = None,
                   B_h_override: float = None,
+                  B_h_barotropic_override: float = None,
                   K_h_override: float = None,
                   A_h_eq_boost: float = 1.0,
                   A_h_eq_sigma_deg: float = 5.0,
@@ -1969,7 +1975,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # BIHARMONIC_BAROTROPIC analog at 1° global resolution.
                 # Scaled per Griffies-Hallberg 2000: ν₄ ≈ Δx³·U/8.
                 # At 1° (Δx≈111 km, U≈1 m/s) that's 1.7e14 m⁴/s.
-                B_h_barotropic=1.0e14,
+                B_h_barotropic=(B_h_barotropic_override
+                                if B_h_barotropic_override is not None else 1.0e14),
                 bottom_drag_r=2.5e-3,
                 bottom_drag_bbl_thickness=100.0,
                 # MOM6 OM4 DRAG_BG_VEL — quadratic-with-floor drag.
@@ -6137,6 +6144,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             args, "tripole_fold_convention", "auto"),
         A_h_override=args.A_h,
         B_h_override=args.B_h,
+        B_h_barotropic_override=args.B_h_barotropic,
         K_h_override=args.K_h,
         A_h_eq_boost=args.A_h_eq_boost,
         A_h_eq_sigma_deg=args.A_h_eq_sigma,
