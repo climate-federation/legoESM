@@ -9,7 +9,11 @@ grid spans rho from about 0.03 to 0.4 kg/m3 so it crosses 0.1 kg/m3, and runs
     evaporation (pre, am), snow fall speeds, self-aggregation, riming,
     Bergeron onto snow, snow sublimation;
   * ice_*: mg2_ice_fall_procs.F90: the cloud-ice fall speeds of the
-    post-process state (:2088-2089, :2119-2147).
+    post-process state (:2088-2089, :2119-2147);
+  * isc_*: mg2_ice_sed_cols.F90: cloud-ice sedimentation of whole columns in
+    MG2's order, the post-process ice qi + qitend dt sized and transported
+    (:2063-2064, :2206-2214, :2232-2314), with sub-steps, clear-air
+    sublimation and the surface ice flux.
 The points are physical states only as far as the kernels need (warm rain at
 low pressure isolates the density factor from freezing).
 
@@ -84,6 +88,44 @@ def build_ice_points(R_d):
     return np.array(pts)
 
 
+ISC_IN = ("qi", "ni", "qitend", "nitend", "icldm", "rho", "pdel")
+ISC_OUT = ("qitend", "nitend", "qisedten", "qvlat", "tlat")
+ISC_DT = 1800.0          # CAM6 physics step [s]
+ISC_P = (5000.0, 15000.0, 25000.0, 35000.0, 45000.0, 55000.0)   # level pressures, top first [Pa]
+ISC_T = (210.0, 215.0, 222.0, 230.0, 238.0, 246.0)              # [K]
+ISC_DP = (6000.0, 10000.0, 10000.0, 5000.0, 4000.0, 3000.0)     # layer thickness [Pa]
+ISC_CLD = ((1.0, 1.0, 1.0, 1.0, 1.0, 1.0),          # uniform
+           (1.0, 0.8, 0.5, 0.5, 0.2, 0.05),         # shrinking downward: ice falls into clear air
+           (0.1, 0.3, 0.6, 1.0, 1.0, 1.0))          # growing downward
+ISC_QIC = (2.0e-5, 1.0e-4, 0.0, 3.0e-5, 1.0e-6, 2.0e-4)          # in-cloud ice [kg/kg]; level 3 empty
+ISC_R = ((150.0e-6, 60.0e-6, 40.0e-6, 25.0e-6, 19.0e-6, 8.0e-6),  # mean radius 1.5/lam [m]
+         (1.0e-3, 600.0e-6, 400.0e-6, 1.5e-3, 1.0e-3, 1.5e-3))     # fast: several sub-steps
+
+
+def build_ice_columns(R_d):
+    """Ice columns for the MG2 sedimentation order: grid ice and number, and
+    process tendencies before sedimentation that grow, deplete or leave the
+    ice (the empty level 3 gains ice only through its tendency)."""
+    rows = []
+    for cld in ISC_CLD:
+        for radii in ISC_R:
+            for kind in ("none", "grow", "deplete"):
+                for k in range(len(ISC_P)):
+                    rho = ISC_P[k] / (R_d * ISC_T[k])
+                    lam = 1.5 / radii[k]
+                    qi = ISC_QIC[k] * cld[k]
+                    ni = lam ** 3 * qi / (math.pi * RHOI)
+                    if kind == "grow":
+                        new = 5.0e-5 * cld[k]
+                        qt, nt = (qi + new) / ISC_DT, (ni + lam ** 3 * new / (math.pi * RHOI)) / ISC_DT
+                    elif kind == "deplete":
+                        qt, nt = -0.6 * qi / ISC_DT, -0.3 * ni / ISC_DT
+                    else:
+                        qt = nt = 0.0
+                    rows.append((qi, ni, qt, nt, cld[k], rho, ISC_DP[k]))
+    return np.array(rows), len(ISC_CLD) * len(ISC_R) * 3, len(ISC_P)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--cam", required=True, type=Path)
@@ -112,6 +154,20 @@ def main(argv=None):
         fx[f"ice_in_{k}"] = ice[:, i]
     for i, k in enumerate(ICE_OUT):
         fx[f"ice_out_{k}"] = io[:, i]
+    cols, ncol, nlev = build_ice_columns(C.R_d)
+    cin, cout = a.build / "isc_in.txt", a.build / "isc_out.txt"
+    np.savetxt(cin, cols, fmt="%.17e", header=f"{ncol} {nlev} {ISC_DT!r}", comments="")
+    subprocess.run([str(a.build / "mg2_ice_sed_cols"), str(cin), str(cout), repr(DCS)],
+                   check=True)
+    lines = cout.read_text().split("\n")
+    body = np.array([[float(x) for x in ln.split()] for ln in lines[:ncol * nlev]])
+    tail = np.array([[float(x) for x in ln.split()] for ln in lines[ncol * nlev:] if ln.strip()])
+    fx["isc_dt"] = np.array(ISC_DT)
+    for i, k in enumerate(ISC_IN):
+        fx[f"isc_in_{k}"] = cols[:, i].reshape(ncol, nlev)
+    for i, k in enumerate(ISC_OUT):
+        fx[f"isc_out_{k}"] = body[:, i].reshape(ncol, nlev)
+    fx["isc_out_preci"], fx["isc_out_nstep"] = tail[:, 0], tail[:, 1].astype(int)
     files = ["src/physics/cam/micro_mg2_0.F90", "src/physics/cam/micro_mg_utils.F90",
              "src/physics/cam/wv_sat_methods.F90"]
     meta = dict(oracle="ESCOMP/CAM", tag="cam_cesm2_1_rel_60",
@@ -123,7 +179,8 @@ def main(argv=None):
     fx["meta"] = np.array(json.dumps(meta))
     a.out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(a.out, **fx)
-    print("FIXTURE_OK", a.out, a.out.stat().st_size, "bytes", len(pts), "points", len(ice), "ice")
+    print("FIXTURE_OK", a.out, a.out.stat().st_size, "bytes", len(pts), "points", len(ice), "ice",
+          ncol, "ice columns")
 
 
 if __name__ == "__main__":

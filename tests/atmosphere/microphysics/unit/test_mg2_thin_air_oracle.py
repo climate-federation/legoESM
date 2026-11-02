@@ -9,6 +9,9 @@ spans rho 0.03 to 0.4 kg/m3.  Three places in the MG2 mode used
 rho floored at 0.1 kg/m3: the rain evaporation ventilation (arn), the snow
 density factor (rhof, asn: fall speeds, aggregation, riming, Bergeron,
 sublimation) and the cloud-ice fall speed (ain).  Bound 1e-10 relative, x64.
+The cloud-ice fall speeds are also checked at every point (MG2's small-ice
+blend and 1.2 rhof cap, micro_mg2_0.F90:2119-2147) and on the post-process
+ice MG2 sizes them from (:2063-2064, :2088).
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.atmosphere.physics.microphysics import _warm_rain as W  # noqa: E402
 from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig  # noqa: E402
 from legoesm.atmosphere.physics.microphysics.morrison import resolve_morrison_flavor  # noqa: E402
+from legoesm import constants  # noqa: E402
 from legoesm.thermo import (saturation_specific_humidity_goff_gratch,  # noqa: E402
                             saturation_specific_humidity_ice_goff_gratch)
 
@@ -113,10 +117,30 @@ def test_snow_kernels_thin_air():
     assert worst <= TOL, w
 
 
-def _lego_ice_fall_speeds(fx, monkeypatch):
+# MG2 sizes the ice fall speeds from the post-process ice dumi = qi + qitend dt
+# (micro_mg2_0.F90:2063-2064, :2088), and so does the MG2 mode.  The oracle's
+# state is the input state, so the form tests run one step this short: the
+# process change of the ice over it moves the speeds by 2.7e-12 relative.
+_DT_FORM_S = 1.0e-12
+
+
+# The 600 s columns are one layer 0.8 p thick, so the ice falls out at MG2's
+# sub-step count below the model's cap (a 100 Pa layer would empty many times
+# over in one step).
+_THICK_HALF = 0.4
+
+
+def _lego_ice_fall_speeds(fx, monkeypatch, dt=_DT_FORM_S, qv_frac=0.5, full=False,
+                          half_dp=None):
     """legoESM's MG2-mode ice fall speeds (V_t_i, V_n_i) for the oracle's ice
-    state, read at the sedimentation call (one level per column, ice only,
-    ice-subsaturated so nothing nucleates)."""
+    state, read where the MG2 ice sedimentation computes them (one level per
+    column, ice only, ice-subsaturated so nothing nucleates, unless
+    ``qv_frac > 1``).  ``full`` also returns the ice mass and number the
+    sedimentation transports, its mass and number tendencies, the outputs
+    and the resolved config.  A model that sediments the ice through the
+    generic ``sedimentation_tendency`` (the order before the MG2 port) is
+    read there instead."""
+    from legoesm.atmosphere.physics.microphysics import _warm_rain as W
     from legoesm.atmosphere.physics.microphysics import morrison as M
     from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
     from tests.atmosphere.microphysics.unit.test_mg2_warm_rain_oracle import (
@@ -126,25 +150,53 @@ def _lego_ice_fall_speeds(fx, monkeypatch):
     rho = jnp.asarray(fx["ice_in_rho"])[:, None]
     q_i = jnp.asarray(fx["ice_in_dumi"])[:, None]
     N_i = jnp.asarray(fx["ice_in_dumni"])[:, None]
-    ph = jnp.concatenate([p - 50.0, p + 50.0], axis=1)
-    dz = (ph[:, 1:] - ph[:, :-1]) / (9.80616 * rho)
+    h = 50.0 if half_dp is None else half_dp * p
+    ph = jnp.concatenate([p - h, p + h], axis=1)
+    dz = (ph[:, 1:] - ph[:, :-1]) / (constants.g * rho)
     z = jnp.zeros_like(T)
-    qv = 0.5 * saturation_specific_humidity_ice_goff_gratch(T, p)
-    seen = []
-    orig = M.sedimentation_tendency
+    qv = qv_frac * saturation_specific_humidity_ice_goff_gratch(T, p)
+    seen, speeds, mg2 = [], [], []
+    orig, orig_v = M.sedimentation_tendency, getattr(W, "mg2_ice_fall_speeds", None)
+    orig_s = getattr(M, "mg2_ice_sedimentation", None)
 
     def spy(q, rho_, V, dz_, **kw):
-        seen.append((np.asarray(q), np.asarray(V)))
-        return orig(q, rho_, V, dz_, **kw)
+        res = orig(q, rho_, V, dz_, **kw)
+        seen.append((np.asarray(q), np.asarray(V), res))
+        return res
+
+    def spy_v(*a):
+        res = orig_v(*a)
+        speeds.append(tuple(np.asarray(v) for v in res))
+        return res
+
+    def spy_s(q, n, *a, **k):
+        res = orig_s(q, n, *a, **k)
+        mg2.append((np.asarray(q), np.asarray(n), res))
+        return res
     monkeypatch.setattr(M, "sedimentation_tendency", spy)
+    if orig_s is not None:
+        monkeypatch.setattr(W, "mg2_ice_fall_speeds", spy_v)
+        monkeypatch.setattr(M, "mg2_ice_sedimentation", spy_s)
     cfg = _production_morrison()._replace(**HARD_LIMIT, warm_rain_scheme="kk2000_cam6")
     hyd = HydrometeorState(q_c=z, q_r=z, q_i=q_i, q_s=z, q_g=z, N_c=z + 1e8, N_r=z, N_i=N_i,
                            N_s=z)
-    M.morrison_microphysics(T, qv, hyd, p, ph, rho, dz, 600.0, cfg, cloud_fraction=z + 1.0)
-    vt = [V for q, V in seen if np.array_equal(q, np.asarray(q_i))]
-    vn = [V for q, V in seen if np.array_equal(q, np.asarray(jnp.clip(N_i, 0.0)))]
-    assert len(vt) == 1 and len(vn) == 1, (len(vt), len(vn))
-    return vt[0][:, 0], vn[0][:, 0]
+    out = M.morrison_microphysics(T, qv, hyd, p, ph, rho, dz, dt, cfg,
+                                  cloud_fraction=z + 1.0)
+    if mg2:
+        assert len(mg2) == 1 and len(speeds) == 1, (len(mg2), len(speeds))
+        (q_tr, n_tr, res), (vt, vn) = mg2[0], speeds[0]
+        sed_q, sed_n = res[0], res[1]
+    else:   # the generic path: the ice read at its sedimentation call
+        vt = [(V, r) for q, V, r in seen if np.array_equal(q, np.asarray(q_i))]
+        vn = [(V, r) for q, V, r in seen if np.array_equal(q, np.asarray(jnp.clip(N_i, 0.0)))]
+        assert len(vt) == 1 and len(vn) == 1, (len(vt), len(vn))
+        q_tr, n_tr, sed_q, sed_n = q_i, jnp.clip(N_i, 0.0), vt[0][1][0], vn[0][1]
+        vt, vn = vt[0][0], vn[0][0]
+    if not full:
+        return vt[:, 0], vn[:, 0]
+    return dict(vt=vt[:, 0], vn=vn[:, 0], q_tr=np.asarray(q_tr)[:, 0],
+                n_tr=np.asarray(n_tr)[:, 0], sed_q=np.asarray(sed_q)[:, 0],
+                sed_n=np.asarray(sed_n)[:, 0], out=out, cfg=M.resolve_morrison_flavor(cfg))
 
 
 def _ice_subset_density_only(fx):
@@ -170,13 +222,132 @@ def test_ice_fall_speed_density_factor_thin_air(monkeypatch):
     assert worst <= TOL, w
 
 
-@pytest.mark.xfail(strict=True, reason="MG2 mode keeps the SAM ice fall speed: no small-ice "
-                   "blend to aj, bj below 20 um (micro_mg2_0.F90:2133-2147) and a 1.2 "
-                   "(rhosu/rho)^0.35 cap where MG2 caps at 1.2 rhof (:2121-2128); not ported")
 def test_ice_fall_speed_all_points(monkeypatch):
-    """All ice points, small ice and capped speeds included."""
+    """All ice points, small ice (the blend to aj, bj below 20 um,
+    :2133-2147) and capped speeds (1.2 rhof, :2121-2128) included."""
     fx = _fx()
     vt, vn = _lego_ice_fall_speeds(fx, monkeypatch)
     errs = {"vtrmi": _rel(vt, fx["ice_out_vtrmi"]), "vni": _rel(vn, fx["ice_out_vni"])}
     worst, w = _report(errs, fx["ice_in_rho"])
     assert worst <= TOL, w
+
+
+def test_ice_fall_speed_post_process_state(monkeypatch):
+    """Over a 600 s step the speeds are MG2's form (checked above) on the
+    post-process ice, rebuilt here from the step's outputs as
+    q + (tendency - sedimentation tendency) dt for mass and number.  The
+    column is ice-supersaturated (q_v = 1.2 q_sat,i), so the ice grows by up
+    to 4466 times.  In a subsaturated column the step's final
+    ice-number adjustments rewrite N_i after the ice has nearly all
+    sublimated, so the outputs no longer carry the sizing state."""
+    from legoesm.atmosphere.physics.microphysics import _warm_rain as W
+    fx = _fx()
+    dt = 600.0
+    r = _lego_ice_fall_speeds(fx, monkeypatch, dt=dt, qv_frac=1.2, full=True,
+                              half_dp=_THICK_HALF)
+    out, cfg = r["out"], r["cfg"]
+    q_post = fx["ice_in_dumi"] + (np.asarray(out.dq_i_dt)[:, 0] - r["sed_q"]) * dt
+    n_post = fx["ice_in_dumni"] + (np.asarray(out.dN_i_dt)[:, 0] - r["sed_n"]) * dt
+    _, lami = W.mg2_ice_slope(jnp.asarray(q_post), jnp.maximum(jnp.asarray(n_post), 0.0),
+                              cfg.rho_cloud_ice, cfg.ice_snow_d_auto)
+    vt, vn = W.mg2_ice_fall_speeds(lami, jnp.asarray(fx["ice_in_rho"]), cfg)
+    assert np.max(_rel(r["vt"], fx["ice_out_vtrmi"])) > 0.5   # the state did change
+    m = _number_kept(fx, r, dt)
+    errs = {"vtrmi": _rel(r["vt"][m], np.asarray(vt)[m]),
+            "vni": _rel(r["vn"][m], np.asarray(vn)[m])}
+    worst, w = _report(errs, fx["ice_in_rho"][m])
+    assert worst <= TOL, w
+
+
+def _number_kept(fx, r, dt):
+    """Cells whose ice number the step's last size re-adjustment left alone:
+    where the end-of-step slope sits on an MG2 bound (1/[2 dcs, 1 um]), that
+    re-adjustment (micro_mg2_0.F90:2778) rewrites N_i after sedimentation,
+    so the outputs no longer give the transported number there (32 of the
+    180 cells, ice that sedimentation left with too many crystals)."""
+    from legoesm.atmosphere.physics.microphysics import _warm_rain as W
+    out, cfg = r["out"], r["cfg"]
+    q_end = fx["ice_in_dumi"] + np.asarray(out.dq_i_dt)[:, 0] * dt
+    n_end = fx["ice_in_dumni"] + np.asarray(out.dN_i_dt)[:, 0] * dt
+    lam = (np.pi * cfg.rho_cloud_ice * n_end / q_end) ** (1.0 / 3.0)
+    lo, hi = W.mg2_ice_lambda_bounds(cfg.ice_snow_d_auto)
+    m = (lam < hi * (1.0 - 1.0e-9)) & (lam > lo * (1.0 + 1.0e-9))
+    assert m.sum() >= 120, m.sum()
+    return m
+
+
+def test_ice_sediments_the_post_process_state(monkeypatch):
+    """MG2 order (micro_mg2_0.F90:2206-2214): the ice transported is the
+    post-process dumi = qi + qitend dt, dumni = max(ni + nitend dt, 0), with
+    no sink reserved; the same 600 s supersaturated column as above, the
+    post-process state rebuilt from the step's outputs.  The order before
+    (the input ice, its sinks reserved) transports q_i and fails."""
+    fx = _fx()
+    dt = 600.0
+    r = _lego_ice_fall_speeds(fx, monkeypatch, dt=dt, qv_frac=1.2, full=True,
+                              half_dp=_THICK_HALF)
+    out = r["out"]
+    q_post = fx["ice_in_dumi"] + (np.asarray(out.dq_i_dt)[:, 0] - r["sed_q"]) * dt
+    n_post = np.maximum(fx["ice_in_dumni"] + (np.asarray(out.dN_i_dt)[:, 0] - r["sed_n"]) * dt,
+                        0.0)
+    assert np.max(_rel(q_post, fx["ice_in_dumi"])) > 0.5      # the ice changed in the step
+    m = _number_kept(fx, r, dt)
+    errs = {"dumi": _rel(r["q_tr"], q_post)}
+    worst, w = _report(errs, fx["ice_in_rho"])
+    assert worst <= TOL, w
+    errs = {"dumni": _rel(r["n_tr"][m], n_post[m])}
+    worst, w = _report(errs, fx["ice_in_rho"][m])
+    assert worst <= TOL, w
+
+
+def _col_rel(a, b):
+    """|a - b| over the column's largest |b| (tendencies cancel level by level)."""
+    a, b = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+    assert np.all(np.isfinite(a)) and np.all(np.isfinite(b))
+    s = np.max(np.abs(b), axis=1, keepdims=True)
+    return np.abs(a - b) / np.where(s > 0, s, 1.0)
+
+
+def _mg2_ice_sed_columns(fx, q, n):
+    from legoesm.atmosphere.physics.microphysics import _warm_rain as W
+    cfg = _cfg()
+    pdel = fx["isc_in_pdel"]
+    p_half = jnp.asarray(np.concatenate([np.zeros_like(pdel[:, :1]), np.cumsum(pdel, axis=1)],
+                                        axis=1))
+    return W.mg2_ice_sedimentation(
+        jnp.asarray(q), jnp.asarray(n), jnp.asarray(fx["isc_in_icldm"]),
+        jnp.asarray(fx["isc_in_rho"]), p_half, float(fx["isc_dt"]),
+        int(fx["isc_out_nstep"].max()) + 1, cfg, cfg.ice_snow_d_auto,
+        presence_top=W.MG2_QSMALL, slope_log_width=0.0)
+
+
+def test_ice_sedimentation_columns_against_mg2():
+    """mg2_ice_sedimentation against MG2's own ice sedimentation of 18
+    columns (isc_*, mg2_ice_sed_cols.F90: micro_mg2_0.F90:2063-2147,
+    :2206-2316 verbatim), three cloud-fraction profiles (ice falling into
+    clear air sublimates), slow and fast ice (1 and 7 sub-steps at 1800 s),
+    process tendencies that leave, grow or deplete the ice, thin air on top.
+    Fed MG2's post-process ice it reproduces the mass and number
+    sedimentation tendencies, the vapour and heat of the sublimated inflow,
+    the surface ice flux and the sub-step count.  Fed the pre-process ice
+    (the order before) it misses wherever the processes act."""
+    fx = _fx()
+    dt = float(fx["isc_dt"])
+    q_post = fx["isc_in_qi"] + fx["isc_in_qitend"] * dt
+    n_post = np.maximum(fx["isc_in_ni"] + fx["isc_in_nitend"] * dt, 0.0)
+    dq, dn, dqv, dT, sfc, req = _mg2_ice_sed_columns(fx, q_post, n_post)
+    assert (fx["isc_out_nstep"] > 1).sum() >= 6 and (np.abs(fx["isc_out_qvlat"]) > 0).any()
+    np.testing.assert_array_equal(np.asarray(req), fx["isc_out_nstep"])
+    errs = {"qisedten": _col_rel(dq, fx["isc_out_qisedten"]),
+            "nised": _col_rel(dn, fx["isc_out_nitend"] - fx["isc_in_nitend"]),
+            "qvlat": _col_rel(dqv, fx["isc_out_qvlat"]),
+            "tlat": _col_rel(dT, fx["isc_out_tlat"] / constants.c_pd)}
+    worst = {k: float(v.max()) for k, v in errs.items()}
+    worst["preci"] = float(np.max(_rel(sfc, fx["isc_out_preci"] * constants.rho_water)))
+    print("max column-relative error", worst)
+    assert max(worst.values()) <= TOL, worst
+    # the order before: the input ice transported
+    dq0 = _mg2_ice_sed_columns(fx, fx["isc_in_qi"], fx["isc_in_ni"])[0]
+    acts = np.any(fx["isc_in_qitend"] != 0, axis=1)
+    miss = _col_rel(dq0, fx["isc_out_qisedten"]).max(axis=1)
+    assert acts.sum() == 12 and (miss[acts] > 0.05).all() and (miss[~acts] <= TOL).all(), miss
