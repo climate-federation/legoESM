@@ -52,6 +52,7 @@ from legoesm.grids.gaussian import (
     uv_from_vordiv_3d,
     spectral_hyperdiffusion_3d,
     sh_synthesis_H,
+    spectral_gradient_3d,
 )
 from legoesm.grids.vertical import (
     SigmaCoordinate,
@@ -60,6 +61,7 @@ from legoesm.grids.vertical import (
     dp_from_hybrid,
     compute_geopotential,
     compute_geopotential_hybrid,
+    sb81_full_level_ln_p,
     compute_mass_flux_from_cumsum,
     vertical_advection,
     vertical_advection_hybrid,
@@ -809,17 +811,25 @@ def spectral_pe_tendencies(
     # flux-form continuity needs it before the surface-pressure tendency;
     # the PGF correction below reuses the same arrays.
 
-    # PGF correction: -∇·(R_d·T'·∇_eta(lnp)) computed as spectral div of grid product
-    # In sigma coords: ∇_eta(ln p) = ∇(ln p_s).
-    # In hybrid coords: ∇_eta(ln p) = (B*p_s/p) * ∇(ln p_s).
-    T_prime_pgf = T - T_ref
-    _pgf_dlnps_dx = dlnps_dx[..., None]
-    _pgf_dlnps_dy = dlnps_dy[..., None]
+    # PGF correction computed as spectral div of a grid product:
+    # sigma: -∇·(R_d·T'·∇ln p_s) (T_ref part is the spectral term below);
+    # hybrid: -∇·(R_d·T·∇ln p_k), SB81 ln p_k, no T_ref split.
     if _hybrid:
-        B_full = sigma_coord.B_full  # (nlev,)
-        _hf = B_full * p_s[..., None] / p_full  # (n_lat, n_lon, nlev)
-        _pgf_dlnps_dx = _pgf_dlnps_dx * _hf
-        _pgf_dlnps_dy = _pgf_dlnps_dy * _hf
+        # The whole R_d·T·∇ln p_k through this grid-product path, with ln p_k
+        # the SB81 full-level log-pressure that compute_geopotential_hybrid
+        # integrates, so -∇Φ - R_d T ∇ln p cancels at isothermal rest over
+        # terrain (lat-lon #1029).  No spectral T_ref split here: that term
+        # carried ∇ln p_s on every level, a residual R_d T_ref (1 - B p_s/p)
+        # ∇ln p_s at rest.
+        _dlnp_dx, _dlnp_dy = spectral_gradient_3d(
+            grid, sh_analysis_3d(grid, sb81_full_level_ln_p(sigma_coord, p_s)))
+        T_prime_pgf = T
+        _pgf_dlnps_dx = _dlnp_dx
+        _pgf_dlnps_dy = _dlnp_dy
+    else:
+        T_prime_pgf = T - T_ref
+        _pgf_dlnps_dx = dlnps_dx[..., None]
+        _pgf_dlnps_dy = dlnps_dy[..., None]
     pgf_Fx_cos = R_d * T_prime_pgf * _pgf_dlnps_dx * cos_lat_3d
     pgf_Fy_cos = R_d * T_prime_pgf * _pgf_dlnps_dy * cos_lat_3d
 
@@ -874,12 +884,10 @@ def spectral_pe_tendencies(
     # Build ``ddiv_hat`` with the KE contribution to ``KPhi_hat``
     # already in place; the geopotential ``Phi`` contribution is added
     # after the batched sh_analysis_3d below (Loop 145).
-    ddiv_hat = (
-        flux_vor_curl
-        - grid.lap[:, None] * KPhi_oc2
-        - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
-        - pgf_correction_hat
-    )
+    ddiv_hat = flux_vor_curl - grid.lap[:, None] * KPhi_oc2
+    if not _hybrid:
+        ddiv_hat = ddiv_hat - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
+    ddiv_hat = ddiv_hat - pgf_correction_hat
 
     flux_T_div = (
         im_over_a[:, None] * _oc2_triple[..., 1]
@@ -903,11 +911,10 @@ def spectral_pe_tendencies(
     adiabatic = kappa * T * omega / p_adiab
 
     # Material derivative correction: kappa * T * v . grad_eta(ln p)
-    # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
-    # Reuses the unscaled v·∇lnps hoisted to step 7 (flux-form continuity).
+    # Sigma reuses the v·∇lnps hoisted to step 7; hybrid uses the SB81 ∇ln p_k.
     v_dot_grad_lnps = v_grad_lnps
     if _hybrid:
-        v_dot_grad_lnps = v_dot_grad_lnps * (sigma_coord.B_full * p_s[..., None] / p_adiab)
+        v_dot_grad_lnps = u * _dlnp_dx + v * _dlnp_dy  # same SB81 ∇ln p as the PGF
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     # Combine the three grid-space contributions to dT/dt before the SH
@@ -1321,6 +1328,26 @@ def advective_cfl_courant(n_max: int, dt_step: float,
     return u_ref * float(n_max) * float(dt_step) / constants.R_earth
 
 
+def refuse_semi_implicit_hybrid(config: SpectralPEConfig, sigma_coord) -> None:
+    """Refuse the semi-implicit path on hybrid levels.
+
+    The SI temperature-coupling matrix (``compute_tau_matrix``) uses the sigma
+    omega, while the hybrid explicit tendency uses the hybrid omega; they
+    differ by ~8.7% on CAM6 L32, so the implicit and explicit gravity-wave
+    terms do not cancel.  Refuse until that matrix is made hybrid-consistent.
+    """
+    uses_si = config.semi_implicit or str(config.time_integrator).lower() in (
+        "leapfrog", "leapfrog_si")  # leapfrog always builds the SI matrices
+    if uses_si and isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        raise NotImplementedError(
+            "spectral semi-implicit stepping (semi_implicit=True or a leapfrog "
+            "integrator) on hybrid sigma-pressure levels is "
+            "refused: the semi-implicit temperature-coupling matrix assumes "
+            "sigma levels (~8.7% off the hybrid tendency on CAM6 L32).  Use "
+            "time_integrator='ssp_rk54' (semi_implicit=False) or sigma levels."
+        )
+
+
 def check_advective_cfl(n_max: int, dt: float, config: SpectralPEConfig) -> None:
     """Refuse a spectral configuration whose explicit advection is unstable.
 
@@ -1731,6 +1758,7 @@ class SpectralPrimitiveEquationModel:
             raise ValueError(
                 f"si_substeps must be >= 1, got {self.config.si_substeps!r}",
             )
+        refuse_semi_implicit_hybrid(self.config, self.sigma_coord)
 
     def _ensure_si_data(self, dt: float):
         """Lazily precompute semi-implicit matrices and refresh when dt changes."""
