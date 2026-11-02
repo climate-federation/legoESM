@@ -13906,6 +13906,50 @@ for _key, _lines, _extent, _anchors in _D194_LINE_MOVES + _D194_REPLACED:
     _resume3_reline(_key, _lines, _extent, anchors=list(_anchors))
 
 
+# DECISION 198 round 2 traced the O4 Prather subcycles in si3_orca2_state.py:
+# the sweep-order branches (+11 lines) and the subcycle scan (+24 lines) moved
+# every later line of the file.  Pure line moves keep their anchors:
+_D198_LINE_MOVES = (
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3244-3251', '3279-3286'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3374-3804', '3409-3839'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3450-3500', '3485-3535'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3807-3910', '3842-3945'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:3807-3960', '3842-3995'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4027-4080', '4062-4115'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4027-4134', '4062-4169'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4027-4812', '4062-4847'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4083-4117', '4118-4152'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4121-4134', '4156-4169'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4138-4241', '4173-4276'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4153-4181', '4188-4216'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4184-4202', '4219-4237'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4206-4241', '4241-4276'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4294-4403', '4329-4438'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4321', '4356'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4410-4524', '4445-4559'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4528-4713', '4563-4748'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4528-4812', '4563-4847'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4542-4723', '4577-4758'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4692-4699', '4727-4734'),
+    ('packages/ice/legoesm/ice/si3_orca2_state.py:4754-4768', '4789-4803'),
+)
+for _key, _lines in _D198_LINE_MOVES:
+    _resume3_reline(_key, _lines, None, anchors=CITATION_MAP[_key])
+# Two of them end on an (')', nth) anchor; the 19 inserted lines containing ')'
+# move that occurrence number, so they are re-pinned to the same lines:
+_resume3_reline('packages/ice/legoesm/ice/si3_orca2_state.py:3140-3317', '3175-3352', 178,
+                anchors=['def si3_dyn_adv_pra_orca2(', (')', 1174), 178])
+_resume3_reline('packages/ice/legoesm/ice/si3_orca2_state.py:4804-4811', '4839-4846', 8,
+                anchors=['new_state = si3_o1_step(', (')', 1638), 8])
+# The subcycle dispatcher itself grew by the traced scan; it anchors on HEAD's
+# text (the si3_r8_o4 receipt carries a DECISION 198 note saying so).
+_resume3_reline(
+    'packages/ice/legoesm/ice/si3_orca2_state.py:3055-3125', '3066-3160', 95,
+    anchors=['def _si3_pra_subcycle_cond_dispatch(',
+             'ops_2_cand = _call_step(ops_1, 2, jnp.int32(max(0, nn_hls - 2)))', 95],
+)
+
+
 _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"
          r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|namelist_ice_cfg|namelist_ice_ref|ocean\.output\.excerpt|ocean\.output)"
          r"|cfgs/ref_cfgs\.txt"

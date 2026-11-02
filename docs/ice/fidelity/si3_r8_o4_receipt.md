@@ -438,3 +438,14 @@ Verification, CPU, float64, production `jit`:
 
 The O4 gradient test was not re-run: the sum change is a `+0` add, and no
 input it uses has an all-`-0` sum (census above).
+
+## DECISION 198 note (citation into changed code)
+
+DECISION 198 round 2 (2026-11-02) added a traced path to the O4 subcycle
+dispatcher this receipt cites: under a JAX transform the three subcycles run as
+one checkpointed scan with the same per-subcycle halo width, sweep parity and
+icycle selection, and eager calls keep the three unrolled calls.  The text
+above describes the code when this round ran; through the citation gate the
+following citation now resolves to the grown dispatcher at HEAD:
+
+- si3_orca2_state.py:3055-3125 now resolves to lines 3066-3160 of the same file
