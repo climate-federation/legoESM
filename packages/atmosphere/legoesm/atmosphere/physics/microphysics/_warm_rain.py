@@ -1609,7 +1609,7 @@ def mg2_inprecip_snow(q_s, N_s, precip_frac, config, psd_sharpness=None):
 def mg2_snow_rhof_asn(rho, config):
     """MG2 ``rhof = (rhosu/rho)^0.54`` and ``asn = as*rhof``
     (micro_mg2_0.F90:940-944)."""
-    rhof = safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
+    rhof = safe_pow(config.rho_su / rho, _FALL_RHO_EXPONENT)   # no floor, as MG2 (:895)
     return rhof, config.fall_a_s * rhof
 
 

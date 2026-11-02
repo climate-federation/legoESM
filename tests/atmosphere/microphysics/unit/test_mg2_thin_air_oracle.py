@@ -84,7 +84,6 @@ def test_rain_evaporation_thin_air():
     assert worst <= TOL, w
 
 
-@pytest.mark.xfail(strict=True, reason="mg2_snow_rhof_asn floors rho at 0.1")
 def test_snow_kernels_thin_air():
     """MG2 snow kernels with the density factor (rhof, asn) in thin air."""
     fx = _fx()
