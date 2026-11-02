@@ -145,8 +145,8 @@ def deck_init_windows(times, eval_year, n_inits, init_stride_hours, cadence):
         date = np.datetime64(f"{eval_year}-01-01T00") + np.timedelta64(
             k * init_stride_hours, "h")
         want = date + np.timedelta64(cadence, "h") * np.arange(-1, n_sub + 1)
-        got = np.asarray(times[i0 - 1:i0 + n_sub + 1], dtype="datetime64[h]")
-        if not np.array_equal(got, want.astype("datetime64[h]")):
+        got = np.asarray(times[i0 - 1:i0 + n_sub + 1], dtype="datetime64[ns]")
+        if not np.array_equal(got, want.astype("datetime64[ns]")):
             raise SystemExit(f"date {k}: store times {got} are not the "
                              f"{cadence}-hourly run {want}")
         hours = [int(str(times[i0 + j])[11:13]) for j in range(n_sub)]

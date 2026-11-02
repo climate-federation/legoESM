@@ -32,6 +32,10 @@ def test_deck_windows_refuse_a_missing_record():
     floor.deck_init_windows(times, 2020, 3, 360, 6)
     with pytest.raises(SystemExit, match="not the 6-hourly run"):
         floor.deck_init_windows(gap, 2020, 3, 360, 6)
+    late = times.copy()
+    late[np.searchsorted(times, np.datetime64("2020-01-16T06"))] += np.timedelta64(1, "m")
+    with pytest.raises(SystemExit, match="not the 6-hourly run"):
+        floor.deck_init_windows(late, 2020, 3, 360, 6)
 
 def test_split_scores_separates_land_and_ocean():
     lat = np.linspace(-60, 60, 5)
