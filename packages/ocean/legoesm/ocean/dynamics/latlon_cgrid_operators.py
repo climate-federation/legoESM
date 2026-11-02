@@ -3456,6 +3456,7 @@ def om4p25_lateral_friction_tendency_cgrid(
     resolution_fn: tuple | None = None,
     bound_coef: float = 0.0,
     dt: float | None = None,
+    nu2_sponge_h: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """OM4p25 lateral-friction closure (GFDL OM4.0, Adcroft et al. 2019) — the
     Silvestri et al. 2024 "SM2" comparison case. A Laplacian + biharmonic
@@ -3497,6 +3498,13 @@ def om4p25_lateral_friction_tendency_cgrid(
     to rectangular cells).  With ``resolution_fn`` given, the Smagorinsky and
     static terms use MOM6's grid spacing Δ² = 2 dx² dy² / (dx² + dy²).
 
+    ``nu2_sponge_h`` (n_lat, n_lon) [m²/s], OM4p5 form only: a sponge
+    viscosity next to open sides (CROCO SPONGE_VIS2, set_nudgcof.F), ADDED
+    to the Laplacian after the bound caps and not scaled by the resolution
+    function (CROCO has neither); q points take the mean of the four cells
+    around them (CROCO's psi points), zonally periodic as the strain-rate
+    corners (``jnp.roll``), the edge rows repeated meridionally.
+
     Returns ``(tend_u, tend_v)`` already combining Laplacian (added) and
     biharmonic (subtracted); the caller ADDS these to du/dt.
     """
@@ -3505,7 +3513,10 @@ def om4p25_lateral_friction_tendency_cgrid(
             u, v, grid, C2=C2, Cu2=Cu2, C4=C4, Cu4=Cu4, Kh_sin_lat=Kh_sin_lat,
             Kh_sin_power=Kh_sin_power, bound_coriolis_vel=bound_coriolis_vel,
             resolution_fn=resolution_fn, bound_coef=bound_coef, dt=dt,
-            mask=mask, u_mask=u_mask, v_mask=v_mask)
+            mask=mask, u_mask=u_mask, v_mask=v_mask, nu2_sponge_h=nu2_sponge_h)
+    if nu2_sponge_h is not None:
+        raise ValueError("nu2_sponge_h needs resolution_fn (the OM4p5 form of "
+                         "om4p25_lateral_friction_tendency_cgrid)")
     if Kh_sin_lat != 0.0 or bound_coriolis_vel != 0.0 or bound_coef != 0.0:
         raise ValueError("Kh_sin_lat, bound_coriolis_vel and bound_coef need resolution_fn "
                          "(the OM4p5 form of om4p25_lateral_friction_tendency_cgrid)")
@@ -3609,7 +3620,8 @@ def om4_resolution_function(c1, grid, mask=None, coef=1.0, gill_equatorial=True)
 
 
 def _om4_mom6_tendency(u, v, grid, *, C2, Cu2, C4, Cu4, Kh_sin_lat, Kh_sin_power, bound_coriolis_vel,
-                       resolution_fn, bound_coef, dt, mask=None, u_mask=None, v_mask=None):
+                       resolution_fn, bound_coef, dt, mask=None, u_mask=None, v_mask=None,
+                       nu2_sponge_h=None):
     """OM4p5 lateral friction with MOM6's definitions (see om4p25_lateral_friction_tendency_cgrid)."""
     S_h = smagorinsky_viscosity_cgrid(u, v, grid, 1.0, mask=mask, u_mask=u_mask, v_mask=v_mask)  # area_h |D|
     D_T, D_S = strain_rate_cgrid(u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
@@ -3653,6 +3665,12 @@ def _om4_mom6_tendency(u, v, grid, *, C2, Cu2, C4, Cu4, Kh_sin_lat, Kh_sin_power
         nu2_q = jnp.minimum(nu2_q, bound_coef * dmin_q / (8.0 * dt))
         nu4_h = jnp.minimum(nu4_h, bound_coef * dmin_h ** 2 / (64.0 * dt))
         nu4_q = jnp.minimum(nu4_q, bound_coef * dmin_q ** 2 / (64.0 * dt))
+    if nu2_sponge_h is not None:      # CROCO SPONGE_VIS2: added after the caps, no resolution function
+        sp = jnp.asarray(nu2_sponge_h, dtype=nu2_h.dtype)
+        spp = jnp.pad(jnp.pad(sp, ((1, 1), (0, 0)), mode="edge"), ((0, 0), (1, 1)), mode="wrap")
+        sp_q = 0.25 * (spp[:-1, :-1] + spp[:-1, 1:] + spp[1:, :-1] + spp[1:, 1:])   # (n_lat+1, n_lon+1)
+        nu2_h = nu2_h + (sp[..., jnp.newaxis] if nd == 3 else sp)
+        nu2_q = nu2_q + (sp_q[..., jnp.newaxis] if nd == 3 else sp_q)
     if mask is not None:
         nu2_h = nu2_h * (mask[..., jnp.newaxis] if nd == 3 else mask)
         nu4_h = nu4_h * (mask[..., jnp.newaxis] if nd == 3 else mask)

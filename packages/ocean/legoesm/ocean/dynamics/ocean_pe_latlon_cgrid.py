@@ -3496,6 +3496,7 @@ def _bc_horizontal_viscosity(
     vertex_mask=None,
     T=None,
     S=None,
+    sponge_visc2=None,
 ):
     """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
     Smagorinsky + Leith, with cos(lat) / equatorial / polar-cap scaling and the
@@ -3503,6 +3504,9 @@ def _bc_horizontal_viscosity(
     together because the meridional block reuses the slope-foot helper/fields
     defined in stage 10. Pure verbatim extraction (Q8). Returns the momentum
     accumulators plus the per-term viscosity diagnostics."""
+    if sponge_visc2 is not None and config.lateral_friction_scheme != "om4p25":
+        raise ValueError("SpongeForcing.visc2 (sponge viscosity) is applied by the om4p25 lateral "
+                         f"friction only, got lateral_friction_scheme={config.lateral_friction_scheme!r}")
     diag_Ah_lap_u = jnp.zeros_like(du_dt)
     diag_Ah_lap_v = jnp.zeros_like(dv_dt)
     # Cell-centre A_h coefficient field [m²/s] used to build the FAITHFUL
@@ -4356,7 +4360,7 @@ def _bc_horizontal_viscosity(
             mask=mask, u_mask=u_mask, v_mask=v_mask,
             Kh_sin_lat=getattr(_om, "Kh_sin_lat", 0.0), Kh_sin_power=getattr(_om, "Kh_sin_power", 4.0),
             bound_coriolis_vel=getattr(_om, "bound_coriolis_vel", 0.0), resolution_fn=_res_fn,
-            bound_coef=getattr(_om, "bound_coef", 0.0), dt=dt)
+            bound_coef=getattr(_om, "bound_coef", 0.0), dt=dt, nu2_sponge_h=sponge_visc2)
         om_u, om_v = _apply_slope_foot(om_u, om_v)
         du_dt = du_dt + om_u
         dv_dt = dv_dt + om_v
@@ -6437,6 +6441,7 @@ def _latlon_tendencies_outside_core(
                 nemo_smagorinsky_coefficient_override),
             vertex_mask=vertex_mask,
             T=T, S=S,
+            sponge_visc2=getattr(sponge, "visc2", None),
         )
     _nemo_after_ldf_u = du_dt
     _nemo_after_ldf_v = dv_dt
