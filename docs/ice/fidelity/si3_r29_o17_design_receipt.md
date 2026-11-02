@@ -769,7 +769,9 @@ at least 250 GiB available and no process above 100 GiB):
   product of the pre-advection mass diagnostic changes the compiled digest to
   `c702ec2b…`; stopping the gradient on the scan carry fails all seven FD
   cases (zero gradient for the five state inputs); scaling the carry tangent
-  by 1 + 1e-5 per subcycle gives relative errors of 3.0e-5 in all seven.
+  by 1 + 1e-5 per subcycle gives relative errors of 3.0e-5 for the five
+  state inputs and 1.1e-5 and 1.7e-5 for the two velocities, which enter
+  outside the carry (all seven fail).
 - **Citations.**  The traced subcycles moved every later line of the state
   module; 24 citations into it are re-lined live through the DECISION 194
   mechanism (two re-pin a closing-parenthesis occurrence number) and the
