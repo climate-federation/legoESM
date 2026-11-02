@@ -412,7 +412,7 @@ stub_driver_fixture() {
   tar -czf "$bundles/sas.tar.gz" -C "$bundles/sas" .
   local orca_sha sas_sha; orca_sha=$(sha256sum "$bundles/orca.tar.gz"); orca_sha=${orca_sha%% *}
   sas_sha=$(sha256sum "$bundles/sas.tar.gz"); sas_sha=${sas_sha%% *}
-  local envs=(env O8O16_PATH_PREFIX="$scratch/stub_bin" O8O16_DRIVER_FIXTURE_ACTIVE=1 O8O16_CFG_DIGEST_PARENT=1 \
+  local envs=(env -u O8O16_STOP_BEFORE_BUILD O8O16_PATH_PREFIX="$scratch/stub_bin" O8O16_DRIVER_FIXTURE_ACTIVE=1 O8O16_CFG_DIGEST_PARENT=1 \
     NEMO_EXE_OVERRIDE="$STUB_NEMO" NEMO_ROOT="$root" \
     NEMO_SOURCE_ROOT="$NEMO_SOURCE_ROOT" BASE_BLD="$BASE_BLD" \
     REF_CFG=STUB_O8O16_REF REC_CFG=STUB_O8O16_REC REFUSED_DIR="$refused" MIN_FREE_RAM_GB=1 \
@@ -453,6 +453,11 @@ stub_driver_fixture() {
 run_preflight() {
   local scratch rung plant
   local -a cfg_roots
+  if [[ "$O17_EXTENDED" == 1 && ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} == 0 ]]; then
+    # Step 10's stub driver needs both real-scorer reports; fail before the long steps.
+    [[ -f "${O17_STUB_SCORE_JSON:-}" && -f "${O17_STUB_FAIL_SCORE_JSON:-}" ]] \
+      || refuse 'stub run needs the real scorer report O17_STUB_SCORE_JSON'
+  fi
   scratch=$(mktemp -d); ACTIVE_SCRATCH=$scratch
   cfg_roots=("$NEMO_ROOT/cfgs" "$NEMO_SOURCE_ROOT/cfgs" "$(dirname "$(dirname "$BASE_BLD")")")
   if [[ ${O8O16_CFG_DIGEST_PARENT:-0} == 0 ]]; then
@@ -565,6 +570,11 @@ RUN_STARTED_EPOCH=$(date +%s)
 [[ ! -e "$REF_ROOT" && ! -e "$REC_ROOT" && ! -e "$EVIDENCE" ]] || refuse 'target config/evidence already exists; use --move-aside-builds after a refusal'
 required_preflight
 ram_gate "$MIN_FREE_RAM_GB"; disk_gate "$EVIDENCE" "$MIN_FREE_DISK_KB"
+if [[ ${O8O16_STOP_BEFORE_BUILD:-0} == 1 ]]; then
+  # Preflight of the exact --run path: everything above ran; nothing below may.
+  printf 'DRY_RUN_STOPPED_BEFORE_BUILD_AND_NEMO: %s\n' "$EVIDENCE"
+  exit 0
+fi
 mkdir -p "$EVIDENCE/input" "$EVIDENCE/manifest/production_deck" "$EVIDENCE/manifest/binaries" "$EVIDENCE/manifest/per_rung"
 ACTIVE_RUN=$EVIDENCE
 for pair in "$ORCA2_BUNDLE:$ORCA2_BUNDLE_SHA256" "$SAS_BUNDLE:$SAS_BUNDLE_SHA256"; do
@@ -579,6 +589,7 @@ cp -L "$SHARED/namelist_ice_ref" "$EVIDENCE/manifest/production_deck/namelist_ic
 
 build_target() {
   local cfg=$1 instrument=$2 root=$NEMO_ROOT/cfgs/$1 unit name flags_text link_flags
+  [[ ${O8O16_STOP_BEFORE_BUILD:-0} == 0 ]] || refuse 'dry run reached build_target'
   [[ "$cfg" == "$REF_CFG" ]] && CREATED_REF=1 || CREATED_REC=1
   mkdir -p "$root"
   cp -a "$BASE_BLD" "$root/BLD"

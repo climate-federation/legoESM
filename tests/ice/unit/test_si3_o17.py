@@ -326,8 +326,28 @@ def test_o17_acquisition_has_no_hard_coded_pass_and_scores_real_records() -> Non
     assert '"status": "PASS"' not in master  # no literal PASS report anywhere
     assert "--self-test" not in o17
     assert "nemo_si3_o17_synthetic_record.py" in o17
-    assert o17.count('"$master" --run "$evidence"') == 1
+    assert o17.count('"$master" --run "$1"') == 1  # one operator entry (run_master)
     assert 'touch "$EVIDENCE/RUN_COMPLETE"' in master
+
+
+def test_o17_run_and_admit_supply_real_stub_scores_and_preflight_runs_the_run_branch() -> None:
+    """At 2b1921abc4 the operator --run gave the master's stub driver no score report."""
+    o17 = (REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_acquisition/run.sh").read_text()
+    master = (REPO / "scripts/validate/ocean_fidelity/testcases/"
+              "nemo_si3_o8_o16_master_acquisition/run.sh").read_text()
+    cases = o17[o17.index('case "$mode" in'):]
+    run_branch = cases[cases.index("  --run)"):cases.index("  --admit-existing)")]
+    admit_branch = cases[cases.index("  --admit-existing)"):cases.index("  --move-aside-builds)")]
+    assert "with_synthetic_scores" in run_branch and "with_synthetic_scores" in admit_branch
+    assert 'export O17_STUB_SCORE_JSON="$dir/synthetic/identical.json"' in o17
+    assert 'export O17_STUB_FAIL_SCORE_JSON="$dir/synthetic/one_ulp_t_si.json"' in o17
+    pre = o17[o17.index("preflight() {"):o17.index("with_synthetic_scores() {")]
+    assert 'env "${dry[@]}" "$0" --run' in pre  # the operator branch itself, not a copy
+    assert "O8O16_STOP_BEFORE_BUILD=1" in pre and "-u O17_STUB_SCORE_JSON" in pre
+    assert master.count("stub run needs the real scorer report O17_STUB_SCORE_JSON") == 2
+    stop = master.index("DRY_RUN_STOPPED_BEFORE_BUILD_AND_NEMO")
+    gates = master.index('required_preflight\nram_gate "$MIN_FREE_RAM_GB"')
+    assert gates < stop < master.index('mkdir -p "$EVIDENCE/input"') < master.index("stage_run \"$REC_CFG\"")
 
 
 def test_o17_kt_enters_only_through_prather_sweep_parity() -> None:
