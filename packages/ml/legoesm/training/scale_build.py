@@ -1590,11 +1590,12 @@ def curriculum_n_segs(yml, leads, n_epochs) -> tuple:
 
 def multi_lead_loss(run_seg, ic, targets, forcing, *, n_segs, seg_steps,
                     sigma_full, grid, sigma, loss_config, diagnose_fn,
-                    adjoint_steps=0, terms=False, lead_segs=None):
+                    lead_segs, adjoint_steps=0, terms=False):
     """Mean over the first ``n_segs`` supervised leads of the per-lead loss.
 
-    ``lead_segs[k]`` = segments of ``seg_steps`` up to lead k (default
-    ``1, 2, ...``); the rollout runs to the last scored lead's segment.
+    ``lead_segs[k]`` = segments of ``seg_steps`` up to lead k (required, so
+    a sparse lead list cannot be scored against the wrong segments); the
+    rollout runs to the last scored lead's segment.
 
     One chained forecast (``run_seg.raw_multi``) is scored after every
     segment against ``targets[k] = (carry, near-surface fields)``: the carry
@@ -1609,8 +1610,7 @@ def multi_lead_loss(run_seg, ic, targets, forcing, *, n_segs, seg_steps,
     n = int(n_segs)
     if not 1 <= n <= len(targets):
         raise ValueError(f"n_segs={n} outside 1..{len(targets)} loaded leads")
-    segs = tuple(lead_segs) if lead_segs is not None else tuple(
-        range(1, len(targets) + 1))
+    segs = tuple(lead_segs)
     if len(segs) != len(targets) or list(segs) != sorted(set(segs)) or segs[0] < 1:
         raise ValueError(f"lead_segs {segs} must be increasing, one per target")
     rolled = run_seg.raw_multi(ic, seg_steps, segs[n - 1], forcing,

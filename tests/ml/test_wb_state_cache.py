@@ -236,3 +236,21 @@ def test_every_lead_uses_the_initial_time_forcing(tmp_path, monkeypatch):
     assert float(forcing["day_of_year"]) == 2.0          # _rec(i) codes i here
     np.testing.assert_array_equal(forcing["sfc_shf"], 2.0)   # IC fluxes, not a lead's
     assert len(target) == 2
+
+
+def test_task_shares_cover_every_needed_time_once_whatever_is_done():
+    mod = _builder()
+    idx = np.arange(100, 120)
+    for done_set in (set(), {101, 105, 106, 119}):
+        done = {int(i): int(i) in done_set for i in idx}
+        shares = [mod.task_share(idx, done, t, 3) for t in range(3)]
+        got = sorted(int(idx[k]) for sh in shares for k in sh)
+        assert got == sorted(set(idx.tolist()) - done_set)
+    # Tasks that start one after another, each seeing the previous ones'
+    # writes, still cover every time (a split of only the unwritten times
+    # would shift and skip some).
+    written = set()
+    for t in range(3):
+        done = {int(i): int(i) in written for i in idx}
+        written |= {int(idx[k]) for k in mod.task_share(idx, done, t, 3)}
+    assert written == set(idx.tolist())

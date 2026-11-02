@@ -56,6 +56,13 @@ def needed_indices(cfg, yml, times):
     return np.asarray(sorted(out), dtype=np.int64)
 
 
+def task_share(idx, done, task, n_tasks):
+    """Positions in ``idx`` task ``task`` writes: every ``n_tasks``-th of the
+    FULL needed list (so a share never depends on what other tasks had
+    written when this one started), minus those ``done`` already marks."""
+    return [k for k in range(task, len(idx), n_tasks) if not done[int(idx[k])]]
+
+
 def main(argv=None):
     a = build_parser().parse_args(argv)
     import jax
@@ -108,11 +115,10 @@ def main(argv=None):
                     np.asarray(g["done"]).tolist()))
     if not set(idx.tolist()) <= set(have):
         raise SystemExit(f"{path} lacks needed times; re-run --init to extend it")
-    todo = [int(i) for i in idx if not have[int(i)]]
-    for k in range(a.task, len(todo), a.n_tasks):
-        arrays, _ = wsc.record_arrays(*record(todo[k]))
-        wsc.write_time(path, todo[k], arrays)
-        print(f"wrote {k + 1}/{len(todo)} {times[todo[k]]}", flush=True)
+    for k in task_share(idx, have, a.task, a.n_tasks):
+        arrays, _ = wsc.record_arrays(*record(idx[k]))
+        wsc.write_time(path, idx[k], arrays)
+        print(f"wrote {k + 1}/{len(idx)} {times[idx[k]]}", flush=True)
     return 0
 
 

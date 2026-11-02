@@ -441,7 +441,7 @@ def test_multi_lead_loss_is_mean_over_scored_leads():
 
     cfg = LossConfig()
     kw = dict(seg_steps=1, sigma_full=sf, grid=grid, sigma=sigma,
-              loss_config=cfg, diagnose_fn=None)
+              loss_config=cfg, diagnose_fn=None, lead_segs=(1, 2, 3))
     for n in (1, 2, 3):
         got = multi_lead_loss(_Seg(), base, tgts, None, n_segs=n, **kw)
         want = sum(float(combined_loss(p, base, sf, grid=grid, config=cfg))
@@ -522,7 +522,7 @@ def test_multi_lead_loss_real_rollout_with_surface_targets():
     cfg = LossConfig(w_t2m=1.0, t2m_resid_scale=2.0, w_u10=0.1, u10_resid_scale=3.0)
     kw = dict(n_segs=2, seg_steps=2, sigma_full=jnp.asarray(sigma.sigma_full),
               grid=grid, sigma=sigma, loss_config=cfg, diagnose_fn=diagnose,
-              terms=True)
+              terms=True, lead_segs=(1, 2))
     l0, t0 = multi_lead_loss(seg, ic, tuple(zip(outs, sfc)), f, **kw)
     assert {"mse_t2m", "mse_u10"} <= set(t0)
     assert float(l0) < 1e-16
