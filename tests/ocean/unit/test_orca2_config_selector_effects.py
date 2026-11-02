@@ -1084,7 +1084,7 @@ def test_stage_wzv_clock_pair_changes_the_executed_wzv_clock_all_sites(
 
     assert call_both(clock_pair=True) == [
         (5400.0, 2, False, 0, False),
-        (5400.0, 2, False, 0, False),
+        (10800.0, 0, False, 0, False),
     ]
     assert call_both(r3=True) == [
         (10800.0, 0, True, 0, False),
@@ -1096,7 +1096,7 @@ def test_stage_wzv_clock_pair_changes_the_executed_wzv_clock_all_sites(
     ]
     assert call_both(mom_half=True, mom_kmm=True) == [
         (10800.0, 0, False, 0, False),
-        (10800.0, 0, False, 1, True),
+        (5400.0, 0, False, 1, True),
     ]
 
 
