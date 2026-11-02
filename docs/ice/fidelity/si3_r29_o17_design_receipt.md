@@ -613,3 +613,82 @@ unit file `12 passed`, each the same count as at the parent.  Master scorer,
 reverse compiles and the O4 file were not run in this resume.
 
 independent review: pending (author: Claude)
+
+## DECISION 198 round 1 — traced O6 redistribution
+
+Review b of b17f14b73c: Gemini Argon LAND, Gemini flash LAND.  DECISION 200
+accepts the compiled zero/NaN sign changes; the one-ULP `oa_i` difference from
+the O17 thermodynamic tail stays out of scope.  This round extends the
+DECISION 194 method to the O6 redistribution only; O6 `ice_cor`, O4 Prather,
+O15 and O16 are untouched.
+
+What changed (read off the code): the `rdgrft_shift` donor-category loop
+(`DO jl1 = 1, jpl`, icedyn_rdgrft.f90 lines 722–939) became one body that an
+eager call runs as the Python loop and a traced call runs as a static-trip
+`fori_loop` with the category state as carry; the receiver loop
+(`DO jl2`, lines 846–937) stays unrolled inside the body, and the ridging-pass
+loop was already a `fori_loop`.  No statement, statement order, barrier or
+MIN/MAX operand order changed: the module's barrier sweep and MIN/MAX audit
+tests read the same source text.  An object-code audit of the compiled
+forward redistribution (10 ice and 5 snow layers) finds no FMA instruction,
+before or after.
+
+Measurements (CPU fp64, libm arm; every command that could pass 20 GB ran
+under a watchdog that kills only its own child above 120 GiB, after checking
+at least 250 GiB available and no process above 100 GiB):
+
+- **Forward bits.**  The O6 unit fixture at 3/2 and at 10/5 ice/snow layers:
+  eager and `jax.jit` both bit-identical to b17f14b73c (22 result leaves each,
+  19 ridging cells, 5 passes).  The full O17 step: eager and `jax.jit` both
+  bit-identical to b17f14b73c on all 1,209 trace leaves, signed zeros and NaN
+  bits included, so no compiled field moved.
+- **Equations** (the committed counter): 228,050 at b17f14b73c → 198,323;
+  the redistribution owner 43,529 → 13,802; the O9–O12 owner (35,918), open
+  water (9,809) and Prather (48,325) unchanged.  The counter had not been
+  re-pinned after the resume-1 barriers (it reported 228,050 against a pinned
+  227,840); both snapshots are now recorded.
+- **Compile.**  Isolated O6 reverse pass (`value_and_grad` of a weighted sum of
+  all redistribution outputs, 10/5 layers): 12.5 s to lower, 107.6 s to
+  compile, 5.0 GiB peak, all 21 input gradients finite and non-zero.  The
+  parent's was not re-run here; on the probe's recorded inputs it had not
+  finished after about 2.4 h at 148 GB (DECISION 194 measurement).  Forward
+  jit of the full step: 154 s, 7.3 GiB → 114 s, 5.7 GiB.  The O6 unit file:
+  `28 passed, 1 deselected in 219.82s`, 3.4 GiB peak (1,769 s at the parent).
+- **Full-step `value_and_grad`** (the AD probe's program; allowed because the
+  isolated O6 reverse compile stayed under 60 GB; run once): stopped by its
+  10,800 s limit while still compiling, peak 79.8 GiB, so the per-leaf table
+  stays unmeasured.  The remaining cost is outside O6 redistribution (O4
+  Prather 878 s, O6 `ice_cor` 396 s, O15 96 s, O16 46 s isolated).
+- **FD** (relative step 1e-4, objective = outputs weighted by
+  1/(1+max|output|), each case by its own relative error; rounding noise at
+  most 9.1e-8 of the gradient):
+
+| leaf (O6 fixture) | AD | FD | rel. error |
+|---|---:|---:|---:|
+| `a_i` (6,4) cat 5 | 0.3667349272 | 0.3667349267 | 1.4e-9 |
+| `v_i` (6,4) cat 5 | 0.07407449431 | 0.07407449425 | 7.5e-10 |
+| `v_s` (6,4) cat 5 | 0.3946576485 | 0.3946576486 | 1.3e-10 |
+| `e_i` (5,3) layer 1, cat 3 | 2.201112618e-9 | 2.201112617e-9 | 2.1e-10 |
+| `v_ip` (6,4) cat 5 | 0.9765167278 | 0.9765167447 | 1.7e-8 |
+| `oa_i` (5,3) cat 3 | 3.610880287e-7 | 3.610880287e-7 | 1.3e-10 |
+
+- **Plants** (new test, each restored afterwards): reversing the traced donor
+  order changes the compiled digest to `6c77559b…` (eager unchanged); removing
+  the barrier between the receiver product and its sum changes the compiled
+  digest to `943b21f4…` (removing the one on the ridged-volume sum did not
+  change any bit, so it is not used as the plant); stopping the gradient on
+  the donor-loop carry gives a zero gradient in all six FD cases; scaling the
+  carry tangent by 1 + 1e-5 per donor step gives relative errors of
+  2.5e-4 in all six (compounded over 5 donors × 5 passes).
+- **Citations.**  The SI3 receipts' four citations into the redistribution
+  module are pinned to historical content (DECISION 177 blobs and commits) and
+  still resolve; the full map audit and every SI3 receipt pass, so nothing
+  needed re-anchoring.  The gate is unchanged.
+
+Final checks from a clean checkout of b7c4412990, serial, CPU fp64: the
+DECISION 194 file `3 passed`; the DECISION 198 file `2 passed`; the O12 file
+`81 passed`; the citation gate `45 passed`; the O8–O16 master-scorer tests
+`30 passed`; master scorer over 100 steps `PASS_ALL_O8_O13_0_ULP`,
+`PASS_O14_0_ULP`, `PASS_ALL_O15_O16_0_ULP`.  The O4 Prather file was not run.
+
+independent review: pending (author: Claude)
