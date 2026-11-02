@@ -46,11 +46,17 @@ ARMS = {                      # modules switched OFF in each arm (one change per
 }
 
 
+def arm_off(arm, gwd_on):
+    """Modules switched off in *arm*; gravity-wave drag follows ``gwd_on``."""
+    off = tuple(m for m in ARMS[arm] if m != "gravity_wave_drag")
+    return off if gwd_on else off + ("gravity_wave_drag",)
+
+
 def arm_config(cfg, off):
     return cfg._replace(**{m: getattr(cfg, m)._replace(scheme="none") for m in off})
 
 
-def capture(run, day, scratch):
+def capture(run, day, scratch, run_amip_dir):
     import legoesm.atmosphere.physics.combined as combined
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationModel
     builds, cap = [], {}
@@ -65,8 +71,10 @@ def capture(run, day, scratch):
         raise H._Captured()
     combined.make_physics = spy_make
     MPASPrimitiveEquationModel.step = spy_step
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "run"))
+    sys.path.insert(0, str(run_amip_dir))
     import run_amip
+    if Path(run_amip.__file__).resolve().parent != Path(run_amip_dir).resolve():
+        raise SystemExit(f"imported {run_amip.__file__}, expected one in {run_amip_dir}")
     try:
         run_amip.main(H.launch_argv(run, day, scratch))
     except H._Captured:
@@ -100,11 +108,15 @@ def main(argv=None):
     ap.add_argument("--mesh-npz", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--inspect", action="store_true", help="print the capture and stop")
+    ap.add_argument("--gwd", choices=("off", "on"), required=True,
+                    help="gravity-wave drag in every arm (production settings when on)")
+    ap.add_argument("--run-amip-dir", required=True,
+                    help="scripts/run of the checkout whose code wrote the checkpoint")
     a = ap.parse_args(argv)
     t0 = time.time()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    cap, (cfg, pa, pkw), (_, ha, hkw), make = capture(a.run, a.day, out / "_launch")
+    cap, (cfg, pa, pkw), (_, ha, hkw), make = capture(a.run, a.day, out / "_launch", a.run_amip_dir)
     import jax
     import jax.numpy as jnp
     from legoesm.core.conservation import apply_physics_water_mass, apply_water_positivity
@@ -129,7 +141,7 @@ def main(argv=None):
     res = {}
 
     for arm in a.arms:
-        acfg = arm_config(cfg, ARMS[arm])
+        acfg = arm_config(cfg, arm_off(arm, a.gwd == "on"))
         f_full = make(acfg, *pa, **pkw)
         f_held = make(acfg, *ha, **hkw)
         fixers = arm == "+fixers"
@@ -190,8 +202,9 @@ def main(argv=None):
             for b, sel in sels.items()}
     sha = subprocess.run(["git", "-C", str(Path(__file__).resolve().parents[3]), "rev-parse",
                           "HEAD"], capture_output=True, text=True).stdout.strip()
-    (out / "physics_only_arms.json").write_text(json.dumps(
-        {"meta": {"git": sha, "run": a.run, "day": a.day, "hours": a.hours, "dt": DT,
+    import legoesm
+    (out / f"physics_only_arms_gwd{a.gwd}.json").write_text(json.dumps(
+        {"meta": {"probe_git": sha, "model_package": legoesm.__file__, "gwd": a.gwd, "run": a.run, "day": a.day, "hours": a.hours, "dt": DT,
                   "physics_update_steps": nphys, "rad_every_calls": rad_every},
          "init": init, "arms": res}, indent=1))
     print("init", json.dumps(init))

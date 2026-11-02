@@ -82,3 +82,12 @@ def test_arm_config_switches_only_the_named_modules():
     out = A.arm_config(Cfg(), ("radiation",))
     assert out.radiation.scheme == "none" and out.convection.scheme == "x" \
         and out.turbulence.scheme == "x"
+
+
+def test_arm_off_gwd_switch_is_the_only_difference():
+    import sys
+    sys.path.insert(0, str(_D))
+    A = _load("physics_only_arms")
+    for arm in A.ARMS:
+        on, off = set(A.arm_off(arm, True)), set(A.arm_off(arm, False))
+        assert off - on == {"gravity_wave_drag"} and not on - off
