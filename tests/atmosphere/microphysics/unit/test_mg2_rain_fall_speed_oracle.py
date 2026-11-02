@@ -7,17 +7,17 @@ scripts/validate/oracle/morrison_mg2_specified_nc_sed).  The process-by-process
 probe that located the difference is
 scripts/validate/oracle/morrison_mg2_rain_procs.
 
-Known fault (strict xfail until fixed): legoESM sizes the MG2 rain fall speed
-of the post-process state with
-  (a) a number set to 0 where the GRID-mean post-process rain is below qsmall
-      (morrison.py, N_r_sed), while MG2 sizes it from the in-precip
+Fixed port fault (this test fails with it reverted): legoESM sized the MG2
+rain fall speed of the post-process state with
+  (a) a number set to 0 where the GRID-mean post-process rain is below qsmall,
+      while MG2 sizes it from the in-precip
       dumnr = max((nr + nrtend dt)/precip_frac, 0) (micro_mg2_0.F90:2068,
       :2160-2172) and zeroes only the number it transports (:2209, :2215);
   (b) rhof = (rhosu/max(rho, 0.1))^0.54, while MG2's rhof is unfloored
       (micro_mg2_0.F90:895).
-Both change the trace-rain fall speeds aloft, hence MG2's one-per-column rain
-sub-step count (:2386), hence the rain that reaches the surface (1 to 12.5
-percent here).  Remove the xfail with the fix.  Bound 1e-10 relative, x64.
+Both changed the trace-rain fall speeds aloft, hence MG2's one-per-column rain
+sub-step count (:2386), hence the rain reaching the surface (1 to 12.5 percent
+on these columns).  Bound 1e-10 relative, x64.
 """
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -62,8 +61,6 @@ def _cases(fx):
     return out
 
 
-@pytest.mark.xfail(strict=True, reason="MG2 rain fall-speed port fault (a) and (b) in the "
-                   "module docstring; results/legoesm/mg2_rain/mg2_rain_vs_cam.md")
 def test_mg2_rain_matches_cam_on_dumped_c1_columns():
     fx = dict(np.load(FIXTURE))
     dt = float(fx["dt"])

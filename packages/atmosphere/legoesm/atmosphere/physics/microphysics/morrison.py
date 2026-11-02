@@ -2113,25 +2113,31 @@ def morrison_microphysics(
         dN_r_src = (dN_r_au + dN_r_selfcoll - dN_r_evap - freeze_N_r
                     + melt_N_to_rain)
         q_r_sed = q_r + dq_r_src * dt
-        N_r_sed = jnp.where(q_r_sed < MG2_QSMALL, 0.0,
-                            jnp.maximum(N_r + dN_r_src * dt, 0.0))
+        # MG2 sizes the fall speeds from the in-precip post-process number
+        # dumnr = max((nr + nrtend dt)/precip_frac, 0) (micro_mg2_0.F90:2068,
+        # :2160) and zeroes the number only in the grid-mean copy it
+        # transports, where dumr < qsmall (:2209, :2215).
+        _N_r_post = jnp.maximum(N_r + dN_r_src * dt, 0.0)
+        N_r_sed = jnp.where(q_r_sed < MG2_QSMALL, 0.0, _N_r_post)
         if config.fall_speed_scheme == "m2005_psd":
             # MG2 size_dist_param_basic on the in-precip (dumr, dumnr) and
             # umr/unr = min(arn Gamma(4+br)/6 | Gamma(1+br) lamr^-br,
-            # 9.1 rhof) where lamr >= qsmall (:2185-2200).  N/q is unchanged
+            # 9.1 rhof) where lamr >= qsmall (:2160-2178).  N/q is unchanged
             # by the precip_frac division, so the slope uses the grid ratio.
+            # MG2's rhof = (rhosu/rho)^0.54 has no density floor (:895).
+            _rhof_r = safe_pow(config.rho_su / rho, _FALL_RHO_EXP)
             _in_p = q_r_sed / precip_frac > MG2_QSMALL
             _den = jnp.where(_in_p, rho * q_r_sed, 1.0)
             _lamr_s = jnp.clip(
-                safe_pow(jnp.pi * constants.rho_water * N_r_sed / _den,
+                safe_pow(jnp.pi * constants.rho_water * _N_r_post / _den,
                          1.0 / 3.0),
                 config.lamr_min, config.lamr_max)
             V_t_r = jnp.where(_in_p, jnp.minimum(
                 config.fall_a_r * cons4 * safe_pow(_lamr_s, -config.fall_b_r)
-                * dum, _VT_CAP_RAIN * dum), 0.0)
+                * _rhof_r, _VT_CAP_RAIN * _rhof_r), 0.0)
             V_n_r = jnp.where(_in_p, jnp.minimum(
                 config.fall_a_r * cons6 * safe_pow(_lamr_s, -config.fall_b_r)
-                * dum, _VT_CAP_RAIN * dum), 0.0)
+                * _rhof_r, _VT_CAP_RAIN * _rhof_r), 0.0)
         else:
             V_t_r = config.a_v_r * safe_pow(
                 jnp.clip(q_r_sed, 0.0) * rho_ratio, config.b_v_r)
