@@ -525,6 +525,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="MPAS vertical biharmonic hyperdiffusion of T "
                              "[1/s] — #930 2Δσ vertical-checkerboard cure "
                              "(0 disables)")
+    parser.add_argument("--mpas-nu-vert4-tracer", type=float,
+                        default=_DYCORE_DEFAULTS.mpas_nu_vert4_tracer,
+                        dest="mpas_nu_vert4_tracer",
+                        help="MPAS vertical del4 filter rate for tracers "
+                             "[1/s] (default: follow --mpas-nu-vert4-t; 0 "
+                             "leaves tracers unfiltered while T keeps its "
+                             "filter)")
     parser.add_argument("--mpas-vert4-flux-form-tracers", nargs="*",
                         default=list(_DYCORE_DEFAULTS.mpas_vert4_flux_form_tracers),
                         help="tracer names whose MPAS vertical del4 filter uses "
@@ -3058,6 +3065,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         div_damp_scale=args.div_damp_scale,
         moisture_flux_form=args.moisture_flux_form,
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
+        mpas_nu_vert4_tracer=args.mpas_nu_vert4_tracer,
         mpas_vert4_flux_form_tracers=(
             (args.mpas_vert4_flux_form_tracers,)
             if isinstance(args.mpas_vert4_flux_form_tracers, str)   # YAML scalar

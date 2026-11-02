@@ -447,6 +447,10 @@ class DycoreConfig(NamedTuple):
     tracer_vertical_scheme: Literal["sb", "van_leer"] | None = None
     tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
     tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
+    # Rate [1/s] of the MPAS vertical del4 filter on tracers.  None = follow
+    # ``mpas_nu_vert4_T`` (bit-identical); 0.0 leaves tracers unfiltered while
+    # T keeps ``mpas_nu_vert4_T``.  Threaded by ``component_factory``.
+    mpas_nu_vert4_tracer: float | None = None
 
 
 class EvaluationConfig(NamedTuple):

@@ -247,6 +247,9 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # ASKED(user), 2026-11-15: smooth hybrid tracer reconstruction.
     tracer_van_leer_width: float = 1e-10  # Mixing-ratio increments [kg/kg]
     tracer_van_leer_flux_width: float = 1e-6  # Mass flux [Pa/s]
+    # Rate [1/s] of the vertical del4 filter on TRACERS.  None = follow
+    # ``nu_vert4_T`` (bit-identical); 0.0 leaves tracers unfiltered.
+    nu_vert4_tracer: float | None = None
 
 
 # ============================================================================
@@ -599,8 +602,11 @@ def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
         # column integral (not merely the index-space sum) is zero to machine
         # precision → conserves column moisture on the stretched hybrid and
         # tropopause-refined σ grids too, not just on a uniform grid.
-        # Zero when nu_vert4_T == 0 (bit-identical).
-        if config.nu_vert4_T > 0.0 and q.shape[-2] > 2:
+        # Rate: ``nu_vert4_tracer``, or ``nu_vert4_T`` when it is None; zero
+        # rate is bit-identical.
+        _nu4_q = (config.nu_vert4_T if config.nu_vert4_tracer is None
+                  else config.nu_vert4_tracer)
+        if _nu4_q > 0.0 and q.shape[-2] > 2:
             # Per-tracer form: names in ``vert4_flux_form_tracers`` get the
             # mass-weighted flux form (no projection); the rest keep the
             # projected form.  Static Python selection on the tracer names.
@@ -615,18 +621,18 @@ def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
             if not _flux_set and not _log_set:
                 dq = dq + jax.vmap(
                     lambda qk: vertical_del4_T_tendency(
-                        qk, config.nu_vert4_T, _filter_weight),
+                        qk, _nu4_q, _filter_weight),
                     in_axes=-1, out_axes=-1)(q)
             else:
                 dq = dq + jnp.stack([
                     (vertical_del4_tracer_tendency_flux(
-                        q[..., _i], config.nu_vert4_T, _filter_weight)
+                        q[..., _i], _nu4_q, _filter_weight)
                      if _n in _flux_set else
                      vertical_del4_tracer_tendency_log(
-                         q[..., _i], config.nu_vert4_T, _filter_weight)
+                         q[..., _i], _nu4_q, _filter_weight)
                      if _n in _log_set else
                      vertical_del4_T_tendency(
-                         q[..., _i], config.nu_vert4_T, _filter_weight))
+                         q[..., _i], _nu4_q, _filter_weight))
                     for _i, _n in enumerate(_tnames)], axis=-1)
         _phys_tt = (physics_tendency.tracer_tendencies
                     if physics_tendency is not None else None)

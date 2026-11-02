@@ -3198,6 +3198,31 @@ def test_mpas_nu_vert4_t_flag_flows_to_dycore_config():
     assert cfg_set.dycore.mpas_nu_vert4_T == pytest.approx(5e-6)
 
 
+def test_mpas_nu_vert4_tracer_flag_flows_to_dycore_config():
+    """--mpas-nu-vert4-tracer reaches DycoreConfig.mpas_nu_vert4_tracer (the
+    factory threads it into MPASPrimitiveEquationConfig.nu_vert4_tracer).
+    Absent = None (tracers follow the T rate); 0 leaves the T rate alone."""
+    from legoesm.driver.config import DycoreConfig
+    assert DycoreConfig().mpas_nu_vert4_tracer is None
+    parser = build_arg_parser()
+    assert parser.parse_args([]).mpas_nu_vert4_tracer is None
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.mpas_nu_vert4_tracer is None
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-vert4-t", "2e-6",
+        "--mpas-nu-vert4-tracer", "0",
+    ]), parser))
+    assert cfg_off.dycore.mpas_nu_vert4_tracer == 0.0
+    assert cfg_off.dycore.mpas_nu_vert4_T == pytest.approx(2e-6)
+    cfg_off.validate_strict()
+    cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-vert4-tracer", "5e-6",
+    ]), parser))
+    assert cfg_set.dycore.mpas_nu_vert4_tracer == pytest.approx(5e-6)
+    assert cfg_set.dycore.mpas_nu_vert4_T == cfg_default.dycore.mpas_nu_vert4_T
+
+
 def test_multicontroller_coordinator_flags_parse():
     """Route-B flags round-trip through the parser (they are RUN args consumed
     in main() for the jax.distributed bootstrap, not ExperimentConfig fields)."""
