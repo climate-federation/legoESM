@@ -191,7 +191,7 @@ def main(argv=None):
     from legoesm.training.losses import combined_loss
     from legoesm.training.scale_build import (
         build_mode_components, load_era5_samples, rollout_hours,
-        validate_wb_campaign_yaml,
+        supervised_leads, validate_wb_campaign_yaml,
     )
 
     cfg = build_scale_config_from_args(
@@ -199,6 +199,11 @@ def main(argv=None):
          "--config", a.config])
     yml = yaml.safe_load(open(a.config))
     validate_wb_campaign_yaml(yml)
+    if supervised_leads(yml, a.training_core):
+        raise SystemExit(
+            "this deck trains several leads (train_leads_hours, or a spectral "
+            "multi_step_hours list); this probe checks the single-lead "
+            "objective only and would not be checking the training loss.")
 
     _, grid, sigma, params, make_run_seg, loss_config, dt = \
         build_mode_components(cfg, yml, column_mesh=mesh)

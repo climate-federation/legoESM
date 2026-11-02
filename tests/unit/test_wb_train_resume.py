@@ -799,3 +799,13 @@ def test_the_checkpoint_cadence_flag():
         ["--checkpoint-every-steps", "0"]).checkpoint_every_steps == 0
     with pytest.raises(SystemExit):
         mod.build_scale_config_from_args(["--checkpoint-every-steps", "-1"])
+
+
+def test_the_fingerprint_records_the_scored_leads():
+    """A legacy multi_step_hours deck that now trains all its leads must not
+    resume optimizer state from a run that trained its first lead only."""
+    from scripts.run.train_weatherbench_scale import _run_fingerprint
+
+    one = _run_fingerprint(_cfg_ns(), {"loss": {"multi_step_hours": [6]}}, 500, 12, 240, 1)
+    two = _run_fingerprint(_cfg_ns(), {"loss": {"multi_step_hours": [6, 12]}}, 500, 12, 240, 1)
+    assert "train_leads_hours" not in one and two["train_leads_hours"] == [6, 12]

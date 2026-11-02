@@ -390,6 +390,12 @@ def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
         fp["adjoint_steps"] = int(cfg.adjoint_steps)
     if getattr(cfg, "probe_scenes", None) is not None:
         fp["probe_scenes"] = int(cfg.probe_scenes)
+    # The scored leads are an objective change the deck hash alone can miss
+    # (an unchanged legacy multi_step_hours deck now trains all its leads).
+    from legoesm.training.scale_build import supervised_leads
+    _leads = supervised_leads(yml, cfg.training_core)
+    if _leads:
+        fp["train_leads_hours"] = list(_leads)
     return fp
 
 
