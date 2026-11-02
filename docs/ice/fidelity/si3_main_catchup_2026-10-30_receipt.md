@@ -621,12 +621,124 @@ global `3e-6` absolute floor gated 4,614 of 4,968 entries.
    four `(')', count)` anchors in `nemo_testcase_receipt_citation_gate.py` are
    restored to their original full extents.
 
+Verbatim fixture report output (`report_fixture_numbers.py`):
+
+```text
+=== METHOD COUNTS ===
+{"main_ad": 3744, "lane_fd_central": 389, "lane_fd_forward": 736, "lane_fd_backward": 26, "excluded_nondifferentiable_boundary": 73}
+
+=== SWEEP VERDICTS ===
+sweep 0ae642c422 eager: fails=151 first=(2, 3, 7)
+sweep 0ae642c422 jit: fails=151 first=(2, 3, 7)
+sweep tip eager: fails=0 first=None
+sweep tip jit: fails=0 first=None
+
+=== CITED ENTRIES FROM FIXTURE ===
+[18,3,11] (T_surface / dqns_ice at (2e-10, 0.5, 0.0)): method=2 (lane_fd_forward) target=-0.00024972905521281064 bound=1.1368683772161603e-09 step=0.0001 ref_step=0.0001 main_ad=-0.0002497283729832977 tip_eager=-0.0002497283729832977 tip_jit=-0.0002497283729832977 err_eager=6.822295129543278e-10 err_jit=6.822295129543278e-10 rel_eager=2.7318788051032145e-06 rel_jit=2.7318788051032145e-06 fd_central=-0.0002497282025615277 fd_forward=-0.00024972905521281064 fd_backward=-0.0002497273499102448 rel(main_ad,fd_central)=6.824285439491914e-07
+[18,3,9] (T_surface / qns_ice at (2e-10, 0.5, 0.0)): method=0 (main_ad) target=0.050971963040420495 bound=1.1368683772161603e-09 step=0.0001 ref_step=0.0001 main_ad=0.050971963040420495 tip_eager=0.050971963040420495 tip_jit=0.050971963040420495 err_eager=0.0 err_jit=0.0 rel_eager=0.0 rel_jit=0.0 fd_central=0.05097196293490924 fd_forward=0.05097196321912634 fd_backward=0.05097196265069215 rel(main_ad,fd_central)=2.0699860515303513e-09
+[22,3,11] (T_surface / dqns_ice at (0.5, 0.5, 0.0)): method=2 (lane_fd_forward) target=-0.00024972905521281064 bound=1.1368683772161603e-09 step=0.0001 ref_step=0.0001 main_ad=-0.0002497283729832977 tip_eager=-0.0002497283729832977 tip_jit=-0.0002497283729832977 err_eager=6.822295129543278e-10 err_jit=6.822295129543278e-10 rel_eager=2.7318788051032145e-06 rel_jit=2.7318788051032145e-06 fd_central=-0.0002497282025615277 fd_forward=-0.00024972905521281064 fd_backward=-0.0002497273499102448 rel(main_ad,fd_central)=6.824285439491914e-07
+[22,3,9] (T_surface / qns_ice at (0.5, 0.5, 0.0)): method=0 (main_ad) target=0.050971963040420495 bound=1.1368683772161603e-09 step=0.0001 ref_step=0.0001 main_ad=0.050971963040420495 tip_eager=0.050971963040420495 tip_jit=0.050971963040420495 err_eager=0.0 err_jit=0.0 rel_eager=0.0 rel_jit=0.0 fd_central=0.05097196293490924 fd_forward=0.05097196321912634 fd_backward=0.05097196265069215 rel(main_ad,fd_central)=2.0699860515303513e-09
+[22,3,7] (T_surface / S_layers at (0.5, 0.5, 0.0)): method=0 (main_ad) target=1014193911.7999892 bound=11.368683772161603 step=5e-15 ref_step=5e-15 main_ad=1014193911.7999892 tip_eager=1014193911.8006747 tip_jit=1014193911.8006747 err_eager=0.0006854534149169922 err_jit=0.0006854534149169922 rel_eager=6.758603132412692e-13 rel_jit=6.758603132412692e-13 fd_central=1014194316.4398981 fd_forward=1013490293.6442814 fd_backward=1014898339.2355149 rel(main_ad,fd_central)=3.989767072745935e-07
+[2,3,7] (T_surface / S_layers at (0.0, 0.5, 0.0)): method=0 (main_ad) target=1014193911.7999892 bound=11.368683772161603 step=5e-15 ref_step=5e-15 main_ad=1014193911.7999892 tip_eager=1014193911.8006747 tip_jit=1014193911.8006747 err_eager=0.0006854534149169922 err_jit=0.0006854534149169922 rel_eager=6.758603132412692e-13 rel_jit=6.758603132412692e-13 fd_central=1014194316.4398981 fd_forward=1013490293.6442814 fd_backward=1014898339.2355149 rel(main_ad,fd_central)=3.989767072745935e-07
+[19,1,2] (h_ice / h_snow at (2e-10, 0.5, -40.0)): method=3 (lane_fd_backward) target=6.869234348005904e-06 bound=1.3877787807814457e-11 step=1e-07 ref_step=1e-06 main_ad=3.3891795643410926e-06 tip_eager=6.869232846683468e-06 tip_jit=6.869232846683468e-06 err_eager=1.5013224360536578e-12 err_jit=1.5013224360536578e-12 rel_eager=2.1855746361157155e-07 rel_jit=2.1855746361157155e-07 fd_central=3.4318728414639565e-06 fd_forward=-5.551115123125783e-09 fd_backward=6.869296798051039e-06 rel(main_ad,fd_central)=0.012440226982492735
+[18,1,0] (h_ice / concentration at (2e-10, 0.5, 0.0)): method=1 (lane_fd_central) target=0.0 bound=2.7755575615628914e-06 step=2e-11 ref_step=2e-11 main_ad=3.09825907152117e-07 tip_eager=4.76837158203125e-07 tip_jit=5.873816633084061e-07 err_eager=4.76837158203125e-07 err_jit=5.873816633084061e-07 rel_eager=1.0 rel_jit=1.0 fd_central=0.0 fd_forward=0.0 fd_backward=0.0 rel(main_ad,fd_central)=1.0
+[16,1,1] (h_ice / h_ice at (2e-10, 0.0, 0.0)): method=2 (lane_fd_forward) target=1.3234889800848443e-16 bound=1.3234889800848443e-16 step=1e-07 ref_step=1e-07 main_ad=0.0 tip_eager=0.0 tip_jit=0.0 err_eager=1.3234889800848443e-16 err_jit=1.3234889800848443e-16 rel_eager=1.0 rel_jit=1.0 fd_central=6.617444900424221e-17 fd_forward=1.3234889800848443e-16 fd_backward=0.0 rel(main_ad,fd_central)=1.0
+[20,1,1] (h_ice / h_ice at (0.5, 0.0, 0.0)): method=2 (lane_fd_forward) target=1.3234889800848443e-16 bound=1.3234889800848443e-16 step=1e-07 ref_step=1e-07 main_ad=0.0 tip_eager=0.0 tip_jit=0.0 err_eager=1.3234889800848443e-16 err_jit=1.3234889800848443e-16 rel_eager=1.0 rel_jit=1.0 fd_central=6.617444900424221e-17 fd_forward=1.3234889800848443e-16 fd_backward=0.0 rel(main_ad,fd_central)=1.0
+[7,1,7] (h_ice / S_layers at (1e-12, 0.5, -40.0)): method=1 (lane_fd_central) target=-0.646011022453763 bound=0.0013877787807814457 step=5e-15 ref_step=5e-15 main_ad=-0.6454089331772571 tip_eager=-0.6454089331773042 tip_jit=-0.6454089331773042 err_eager=0.0006020892764587726 err_jit=0.0006020892764587726 rel_eager=0.0009320108411956177 rel_jit=0.0009320108411956177 fd_central=-0.646011022453763 fd_forward=-0.6480926906249351 fd_backward=-0.6439293542825908 rel(main_ad,fd_central)=0.0009320108412684855
+[11,1,7] (h_ice / S_layers at (5e-11, 0.5, -40.0)): method=1 (lane_fd_central) target=-32.270019989510956 bound=0.0013877787807814457 step=5e-15 ref_step=5e-15 main_ad=-32.270295740906434 tip_eager=-32.270295740909674 tip_jit=-32.270295740909674 err_eager=0.00027575139871771626 err_jit=0.00027575139871771626 rel_eager=8.545053349732427e-06 rel_jit=8.545053349732427e-06 fd_central=-32.270019989510956 fd_forward=-32.260305538045486 fd_backward=-32.279734440976426 rel(main_ad,fd_central)=8.545053249329032e-06
+[15,1,7] (h_ice / S_layers at (1e-10, 0.5, -40.0)): method=1 (lane_fd_central) target=-64.5407338684123 bound=0.0013877787807814457 step=5e-15 ref_step=5e-15 main_ad=-64.54028348889759 tip_eager=-64.54028348890222 tip_jit=-64.54028348890222 err_eager=0.0004503795100845309 err_jit=0.0004503795100845309 rel_eager=6.978221087519379e-06 rel_jit=6.978221087519379e-06 fd_central=-64.5407338684123 fd_forward=-64.52061107609097 fd_backward=-64.56085666073363 rel(main_ad,fd_central)=6.978221159299453e-06
+
+=== S_LAYERS (INPUT 7) SUMMARY ===
+S_layers method counts: {'main_ad': 176, 'lane_fd_central': 40}
+S_layers 176 main_ad entries worst rel(lane_fd, main_ad)=3.989767072745935e-07 at [2,3,7]
+S_layers all 216 entries worst rel(tip_eager, target)=0.0009320108411956177 at [7,1,7] (err=0.0006020892764587726 <= bound=0.0013877787807814457)
+S_layers all 216 entries worst rel(tip_jit, target)=0.0009320108411956177 at [7,1,7] (err=0.0006020892764587726 <= bound=0.0013877787807814457)
+
+=== 36 LEFT-FD SNOW ENTRIES [c, 1|3|4, 2] AT h_ice = 0.5 ===
+total=36 right_disagrees=31 methods={0: 17, 3: 19}
+
+=== EXCLUDED NONDIFFERENTIABLE LIST (73 ENTRIES) ===
+[0, 3, 1]: fd_left=0.0, fd_right=-18797557.383536514
+[1, 3, 1]: fd_left=0.0, fd_right=-18797557.383536514
+[2, 2, 2]: fd_left=-0.9999999999999999, fd_right=1.0
+[2, 4, 16]: fd_left=0.0, fd_right=-9178756227895.201
+[2, 5, 2]: fd_left=-3300366686971284.5, fd_right=3300365686856625.0
+[3, 2, 2]: fd_left=-0.9999999999999999, fd_right=1.0
+[3, 4, 16]: fd_left=0.0, fd_right=-9178756227895.201
+[3, 5, 2]: fd_left=-3300366686971284.5, fd_right=3300365686856625.0
+[4, 0, 1]: fd_left=0.0, fd_right=1e-05
+[4, 3, 1]: fd_left=0.0, fd_right=-18797557.383536514
+[4, 8, 1]: fd_left=0.0, fd_right=0.036000000000000004
+[5, 0, 1]: fd_left=0.0, fd_right=9.99999999392329e-06
+[5, 1, 1]: fd_left=0.0, fd_right=-0.04772125875018851
+[5, 3, 1]: fd_left=0.0, fd_right=-18797557.383536514
+[5, 8, 1]: fd_left=0.0, fd_right=0.03599999999492898
+[6, 2, 2]: fd_left=-0.9999999999999999, fd_right=1.0
+[6, 2, 16]: fd_left=0.0, fd_right=7.200300961523515
+[6, 5, 2]: fd_left=-3300366686971284.5, fd_right=3300365686856625.0
+[7, 2, 2]: fd_left=-0.9999999999999999, fd_right=1.0
+[7, 2, 16]: fd_left=0.0, fd_right=7.200300961523515
+[7, 5, 2]: fd_left=-3300366686971284.5, fd_right=3300365686856625.0
+[8, 0, 1]: fd_left=0.0, fd_right=0.0005
+[8, 3, 1]: fd_left=0.0, fd_right=-18797557.383536514
+[8, 8, 1]: fd_left=0.0, fd_right=1.8
+[9, 0, 1]: fd_left=0.0, fd_right=0.0005000000000010964
+[9, 1, 1]: fd_left=0.0, fd_right=-2.3860517803231396
+[9, 3, 1]: fd_left=0.0, fd_right=-18797557.383536514
+[9, 8, 1]: fd_left=0.0, fd_right=1.8000000000240046
+[10, 2, 2]: fd_left=-0.9999999999999999, fd_right=1.0
+[10, 2, 16]: fd_left=0.0, fd_right=7.200010284949795
+[10, 5, 2]: fd_left=-3300366686971284.5, fd_right=3300365686856625.0
+[11, 2, 2]: fd_left=-0.9999999999999999, fd_right=1.0
+[11, 2, 16]: fd_left=0.0, fd_right=7.200010284949795
+[11, 5, 2]: fd_left=-3300366686971284.5, fd_right=3300365686856625.0
+[12, 0, 1]: fd_left=0.0, fd_right=0.001
+[12, 3, 1]: fd_left=0.0, fd_right=-18797557.383536514
+[12, 8, 1]: fd_left=0.0, fd_right=3.6
+[13, 0, 1]: fd_left=0.0, fd_right=0.0010000000000021927
+[13, 1, 1]: fd_left=0.0, fd_right=-4.772080787820987
+[13, 3, 1]: fd_left=0.0, fd_right=-18797557.383536514
+[13, 8, 1]: fd_left=0.0, fd_right=3.6000000000480092
+[14, 2, 2]: fd_left=-0.9999999999999999, fd_right=1.0
+[14, 2, 16]: fd_left=0.0, fd_right=7.199998173425891
+[14, 5, 2]: fd_left=-3300366686971284.5, fd_right=3300365686856625.0
+[15, 2, 2]: fd_left=-0.9999999999999999, fd_right=1.0
+[15, 2, 16]: fd_left=0.0, fd_right=7.199998173425891
+[15, 5, 2]: fd_left=-3300366686971284.5, fd_right=3300365686856625.0
+[16, 0, 1]: fd_left=0.0, fd_right=0.002
+[16, 3, 1]: fd_left=0.0, fd_right=-18797557.383536514
+[16, 8, 1]: fd_left=0.0, fd_right=7.2
+[17, 0, 1]: fd_left=0.0, fd_right=0.0020000000000043854
+[17, 1, 1]: fd_left=0.0, fd_right=-9.544070485451028
+[17, 3, 1]: fd_left=0.0, fd_right=-18797557.383536514
+[17, 8, 1]: fd_left=0.0, fd_right=7.2000000000266295
+[18, 2, 2]: fd_left=-0.9999999999999999, fd_right=1.0
+[18, 2, 16]: fd_left=0.0, fd_right=7.199998173425891
+[18, 5, 2]: fd_left=-3300366686971284.5, fd_right=3300365686856625.0
+[19, 2, 2]: fd_left=-0.9999999999999999, fd_right=1.0
+[19, 2, 16]: fd_left=0.0, fd_right=7.199998173425891
+[19, 5, 2]: fd_left=-3300366686971284.5, fd_right=3300365686856625.0
+[20, 0, 1]: fd_left=0.0, fd_right=5000000.0
+[20, 3, 1]: fd_left=0.0, fd_right=-18797557.383536514
+[20, 8, 1]: fd_left=0.0, fd_right=18000000000.0
+[21, 0, 1]: fd_left=0.0, fd_right=5000000.0
+[21, 1, 1]: fd_left=0.0, fd_right=-499989.5227098417
+[21, 3, 1]: fd_left=0.0, fd_right=-18797557.383536514
+[21, 8, 1]: fd_left=0.0, fd_right=18000000000.0
+[22, 2, 2]: fd_left=-0.9999999999999999, fd_right=1.0
+[22, 2, 16]: fd_left=0.0, fd_right=8.009928065778764
+[22, 5, 2]: fd_left=-3300366686971284.5, fd_right=3300365686856625.0
+[23, 2, 2]: fd_left=-0.9999999999999999, fd_right=1.0
+[23, 2, 16]: fd_left=0.0, fd_right=8.009928065778764
+[23, 5, 2]: fd_left=-3300366686971284.5, fd_right=3300365686856625.0
+```
+
 ## Final clean-checkout verification
 
 | Selection | Final line |
 |---|---|
 | Every requested `test_si3_o*.py` / `test_nemo_si3_*.py` file | each file started in a fresh serial process (excluding `test_si3_o6_rdgrft_cor.py` and `test_nemo_si3_o4_orca2_prather.py`, run by the operator with O6 already `28 passed` on `006f20b57c`): 36 files completed green; scalar math emitted its unchanged `1 failed, 4 passed in 1.11s`; O8–O16 acquisition emitted `27 passed` plus the `timeout=1200` subprocess limit on `test_preflight_compiles_and_runs_real_patched_source_without_nemo` (`1 failed, 27 passed in 1210.96s (0:20:10)`, previously `28 passed in 1114.96s (0:18:34)`) |
-| `test_bitz_lipscomb.py` | `19 passed in 253.76s (0:04:13)` |
+| `test_bitz_lipscomb.py` | `19 passed in 300.30s (0:05:00)` |
 | Operator forward probe | byte-identical to `fwd_old.txt` in both eager and JIT (`eager_cmp_status=0 jit_cmp_status=0`) |
 | `test_sea_ice_precip_routing.py` | `7 passed in 2.48s` |
 | `test_si3_surface.py` | `1 failed, 23 passed, 1 xfailed in 38.94s`; only the reproduced lane-parent `sum_first_category` plant |
@@ -635,8 +747,8 @@ global `3e-6` absolute floor gated 4,614 of 4,968 entries.
 | O6 slow merge-parent/current control | `1 passed in 774.76s` |
 | CEN2 direct-caller wrappers | ORCA2 `10 passed`; GYRE `4 passed` |
 | Landing battery | 7/7 files in fresh serial processes; `172 passed` (component final lines: `44 passed in 9.32s`, `6 passed in 5.47s`, `71 passed in 43.45s`, `25 passed in 322.97s (0:05:22)`, `16 passed in 6.43s`, `2 passed in 537.90s (0:08:57)`, and `8 passed in 64.79s (0:01:04)`) |
-| Receipt citation gate | `44 passed in 9.32s` |
-| Provenance SHA gate | `1517 passed in 23.70s` |
+| Receipt citation gate | `44 passed in 10.83s` |
+| Provenance SHA gate | `1517 passed in 23.28s` |
 
 ## Failure inventory and attribution
 
