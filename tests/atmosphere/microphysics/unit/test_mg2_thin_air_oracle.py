@@ -557,3 +557,56 @@ def test_rain_freeze_gradient_at_default():
         assert all(np.isfinite(x) for x in g) and abs(float(g[0])) > 0.0, g
         check_grads(f, (jnp.asarray(T0), jnp.asarray(q)), order=2, modes=("fwd", "rev"),
                     eps=1.0e-6 * min(q, 1e-2), atol=1e-6, rtol=1e-4)
+
+
+def _rain_prefreeze(fx, tag, width_K, cap):
+    """legoESM's start-of-step rain freezing on the rfz or rfp points: frozen
+    rain and number over the call and the heating."""
+    dt = float(fx["isc_dt"])
+    m, n = W.mg2_instant_rain_freeze(jnp.asarray(fx[f"{tag}_in_t"]),
+                                     jnp.asarray(fx[f"{tag}_in_dumr"]),
+                                     jnp.asarray(fx[f"{tag}_in_dumnr"]), width_K, cap)
+    m, n = np.asarray(m), np.asarray(n)
+    return dict(minstrf=m, ninstrf=n, tlat0=constants.L_f * m / dt)
+
+
+def test_rain_prefreeze_against_mg2():
+    """MG2's start-of-step rain freezing at -40 C (micro_mg2_0.F90:1182-1212,
+    verbatim in mg2_rain_frz_pts.F90; it runs after the start-of-step snow
+    melt :1147-1169 and tests the bare t) at the hard limits: the 48 rfz
+    points and the 8 rfp points 0.01 to 1 K below rainfrze with 3e-3 kg/kg of
+    rain, where the freezing is heat-limited.  Frozen rain, number and
+    heating match; all of it goes to snow (:1207-1210)."""
+    fx = _fx()
+    errs = {}
+    for tag in ("rfz", "rfp"):
+        lg = _rain_prefreeze(fx, tag, _DT_FORM_S, math.inf)
+        for k in ("minstrf", "ninstrf", "tlat0"):
+            errs[f"{tag}_{k}"] = float(np.max(_rel(lg[k], fx[f"{tag}_out_{k}"])))
+    lim = fx["rfp_out_minstrf"] < 0.99 * fx["rfp_in_dumr"]
+    assert (lim & (fx["rfp_out_minstrf"] > 0)).sum() == 3           # heat-limited
+    assert (fx["rfp_out_minstrf"] == 0).sum() == 2                  # above rainfrze
+    print("max relative error", errs)
+    assert max(errs.values()) <= TOL, errs
+
+
+# Default-switch gap per rfp point (relative error of the start-of-step frozen
+# rain against MG2) at the 0.2 K switch-on and the rounded heat cap.  Measured
+# 2026-11-02 on this fixture: 1 K below rainfrze 0, and 0.0053 where the
+# rounded cap meets the full freezing; 0.1 K below half the freezing is
+# missing (the switch-on), 0.01 K below 0.9988; above rainfrze 0.
+_RFP_DEFAULT_GAP = np.array([0.0, 0.005318910006701753, 0.5000000000000533, 0.5000000000000533,
+                             0.9988418750000031, 0.9988418750000031, 0.0, 0.0])
+
+
+def test_rain_prefreeze_default_gap_per_point():
+    """At the production widths the start-of-step freezing departs from MG2
+    only inside the switch-on and where the rounded cap acts (RULE 5)."""
+    fx = _fx()
+    from tests.atmosphere.microphysics.unit.test_mg2_warm_rain_oracle import _production_morrison
+    cfg = resolve_morrison_flavor(_production_morrison())
+    width = W.RAMP_WIDTH_PER_SHARPNESS / cfg.homogeneous_freeze_sharpness
+    lg = _rain_prefreeze(fx, "rfp", width, W.MG2_CAP_SHARPNESS)
+    gap = _rel(lg["minstrf"], fx["rfp_out_minstrf"])
+    print("default gap", repr(gap.tolist()))
+    np.testing.assert_allclose(gap, _RFP_DEFAULT_GAP, rtol=1e-6, atol=1e-12)

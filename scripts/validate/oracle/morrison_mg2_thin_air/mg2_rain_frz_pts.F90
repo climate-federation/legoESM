@@ -10,8 +10,11 @@
 ! Input (first line: npts deltat, then one line per point):
 !   t tlat dumr dumnr   (K, W/kg, kg/kg, #/kg)
 ! Output (one line per point): qrfrz nrfrz qsfrz nsfrz qifrz nifrz lamr tlat
+!   minstrf ninstrf tlat0
 !   (the rain loss and the snow and ice gains [kg/kg/s, #/kg/s], the rain
-!   slope [1/m], tlat after the freezing [W/kg])
+!   slope [1/m], tlat after the freezing [W/kg]; then MG2's start-of-step rain
+!   freezing (:1184-1212, verbatim) on t, qr = dumr, nr = dumnr: the frozen
+!   rain and number [kg/kg, #/kg], all to snow, and its tlat from 0 [W/kg])
 ! usage: mg2_rain_frz_pts pts_in.txt pts_out.txt dcs
 program mg2_rain_frz_pts
   use micro_mg_utils, only: r8, mg_rain_props, size_dist_param_basic
@@ -27,7 +30,7 @@ program mg2_rain_frz_pts
   character(len=16) :: pfm = 'in_cloud'
   real(r8) :: Dcs, deltat, cpp, xlf, rainfrze, dum, dum1
   real(r8), allocatable, dimension(:,:) :: t, tlat, dumr, dumnr, lamr, qrtend, nrtend, &
-       qstend, nstend, qitend, nitend
+       qstend, nstend, qitend, nitend, qr, nr, qs, ns, minstrf, ninstrf, tlat0
   call get_command_argument(1, fin)
   call get_command_argument(2, fout)
   call get_command_argument(3, adcs); read(adcs, *) Dcs
@@ -46,11 +49,47 @@ program mg2_rain_frz_pts
   open(10, file=trim(fin), status='old'); read(10, *) npts, deltat
   allocate(t(npts,1), tlat(npts,1), dumr(npts,1), dumnr(npts,1), lamr(npts,1), &
        qrtend(npts,1), nrtend(npts,1), qstend(npts,1), nstend(npts,1), qitend(npts,1), &
-       nitend(npts,1))
+       nitend(npts,1), qr(npts,1), nr(npts,1), qs(npts,1), ns(npts,1), minstrf(npts,1), &
+       ninstrf(npts,1), tlat0(npts,1))
   do i = 1, npts
      read(10, *) t(i,1), tlat(i,1), dumr(i,1), dumnr(i,1)
   end do
   close(10)
+  qr = dumr; nr = dumnr; qs = 0._r8; ns = 0._r8
+  minstrf = 0._r8; ninstrf = 0._r8; tlat0 = 0._r8
+  k = 1
+  do i = 1, npts
+        ! verbatim micro_mg2_0.F90:1184-1211 (tlat as tlat0, frzrdttot left out)
+        if (t(i,k) < rainfrze) then
+
+           if (qr(i,k) > 0._r8) then
+
+              ! make sure freezing rain doesn't increase temperature above threshold
+              dum = xlf/cpp*qr(i,k)
+              if (t(i,k)+dum > rainfrze) then
+                 dum = -(t(i,k)-rainfrze)*cpp/xlf
+                 dum = dum/qr(i,k)
+                 dum = max(0._r8,dum)
+                 dum = min(1._r8,dum)
+              else
+                 dum = 1._r8
+              end if
+
+              minstrf(i,k) = dum*qr(i,k)
+              ninstrf(i,k) = dum*nr(i,k)
+
+              ! heating tendency
+              dum1 = xlf*minstrf(i,k)/deltat
+              tlat0(i,k)=tlat0(i,k)+dum1
+
+              qr(i,k) = max(qr(i,k) - minstrf(i,k), 0._r8)
+              nr(i,k) = max(nr(i,k) - ninstrf(i,k), 0._r8)
+              qs(i,k) = max(qs(i,k) + minstrf(i,k), 0._r8)
+              ns(i,k) = max(ns(i,k) + ninstrf(i,k), 0._r8)
+
+           end if
+        end if
+  end do
   qrtend = 0._r8; nrtend = 0._r8; qstend = 0._r8; nstend = 0._r8
   qitend = 0._r8; nitend = 0._r8; lamr = 0._r8
   k = 1
@@ -97,8 +136,9 @@ program mg2_rain_frz_pts
   end do
   open(11, file=trim(fout), status='replace')
   do i = 1, npts
-     write(11, '(8(1x,es25.16e3))') -qrtend(i,1), -nrtend(i,1), qstend(i,1), nstend(i,1), &
-          qitend(i,1), nitend(i,1), lamr(i,1), tlat(i,1)
+     write(11, '(11(1x,es25.16e3))') -qrtend(i,1), -nrtend(i,1), qstend(i,1), nstend(i,1), &
+          qitend(i,1), nitend(i,1), lamr(i,1), tlat(i,1), minstrf(i,1), ninstrf(i,1), &
+          tlat0(i,1)
   end do
   close(11)
   print *, 'MG2_RAIN_FRZ_OK npts=', npts

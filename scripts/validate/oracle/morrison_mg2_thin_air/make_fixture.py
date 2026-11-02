@@ -18,7 +18,8 @@ grid spans rho from about 0.03 to 0.4 kg/m3 so it crosses 0.1 kg/m3, and runs
     falling into clear air cools the air before MG2's post-sedimentation
     snow melt tests it (:2536-2566);
   * rfz_*: mg2_rain_frz_pts.F90: the post-sedimentation rain freezing at
-    -40 C (:2571-2610) on points around rainfrze.
+    -40 C (:2571-2610) on points around rainfrze, and the start-of-step one
+    (:1182-1212) on the same rain and the bare temperature.
 The points are physical states only as far as the kernels need (warm rain at
 low pressure isolates the density factor from freezing).
 
@@ -176,7 +177,8 @@ def build_melt_columns(R_d, cp, T_freeze):
 # drops 1/lamr of 100 um (to cloud ice) and 1 mm (bounded to 500 um by MG2's
 # rain slope limits), each point at two values of Dcs.
 RFZ_IN = ("t", "tlat", "dumr", "dumnr")
-RFZ_OUT = ("qrfrz", "nrfrz", "qsfrz", "nsfrz", "qifrz", "nifrz", "lamr", "tlat")
+RFZ_OUT = ("qrfrz", "nrfrz", "qsfrz", "nsfrz", "qifrz", "nifrz", "lamr", "tlat",
+           "minstrf", "ninstrf", "tlat0")   # the last three: start-of-step freezing
 RFZ_RAINFRZE_OFFSET = 40.0      # MG2 rainfrze = tmelt - 40 K (:331)
 RFZ_HEAT_K = 0.3                 # heating before the freezing over the step [K]
 RFZ_OFF = (-5.0, -0.5, -0.05, 0.5)       # t + tlat/cpp dt - rainfrze [K]
@@ -186,6 +188,21 @@ RFZ_DROP = (100.0e-6, 1.0e-3)            # mean drop 1/lamr [m]
 # large drop exactly on 1/Dcs (cloud ice in MG2), and 200 um, where 1 mm
 # drops go to snow
 RFZ_DCS = (DCS, 200.0e-6)
+
+
+# Start-of-step rain freezing points (rfp_*, the same driver's minstrf columns,
+# micro_mg2_0.F90:1182-1212, on the bare t): 0.01, 0.1 and 1 K below rainfrze
+# and 0.1 K above, rain 1e-4 and 3e-3 kg/kg (heat-limited at the larger
+# amount up to 1 K below).
+RFP_OFF = (-1.0, -0.1, -0.01, 0.1)      # t - rainfrze [K]
+RFP_QR = (1.0e-4, 3.0e-3)               # rain [kg/kg]
+RFP_LAM = 3000.0                        # rain slope for its number [1/m]
+
+
+def build_rain_prefreeze_points(T_freeze):
+    return np.array([(T_freeze - RFZ_RAINFRZE_OFFSET + off, 0.0, qr,
+                      RFP_LAM ** 3 * qr / (math.pi * RHOW))
+                     for off in RFP_OFF for qr in RFP_QR])
 
 
 def build_rain_freeze_points(cp, T_freeze):
@@ -259,6 +276,15 @@ def main(argv=None):
         fx[f"rfz_in_{k}"] = rfz[:, i]
     for i, k in enumerate(RFZ_OUT):
         fx[f"rfz_out_{k}"] = ro[:, i]
+    rfp = build_rain_prefreeze_points(C.T_freeze)
+    pin, pout = a.build / "rfp_in.txt", a.build / "rfp_out.txt"
+    np.savetxt(pin, rfp, fmt="%.17e", header=f"{len(rfp)} {ISC_DT!r}", comments="")
+    subprocess.run([str(a.build / "mg2_rain_frz_pts"), str(pin), str(pout), repr(DCS)], check=True)
+    po = np.loadtxt(pout)
+    for i, k in enumerate(RFZ_IN):
+        fx[f"rfp_in_{k}"] = rfp[:, i]
+    for k in ("minstrf", "ninstrf", "tlat0"):
+        fx[f"rfp_out_{k}"] = po[:, RFZ_OUT.index(k)]
     files =["src/physics/cam/micro_mg2_0.F90", "src/physics/cam/micro_mg_utils.F90",
              "src/physics/cam/wv_sat_methods.F90"]
     meta = dict(oracle="ESCOMP/CAM", tag="cam_cesm2_1_rel_60",

@@ -132,6 +132,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     mg2_instant_rain_freeze,
     mg2_rain_size_dist,
     MG2_SNOWMELT_OFFSET_K,
+    MG2_RAINFRZE_OFFSET_K,
     mg2_precip_sublimation_limiter,
     MG2_QSIC_MAX,
     snow_deposition_m2005,
@@ -539,6 +540,22 @@ def morrison_microphysics(
         N_s = jnp.where(_fired, jnp.maximum(N_s - ninstsm, 0.0), N_s)
         q_r = jnp.where(_fired, jnp.maximum(q_r + minstsm, 0.0), q_r)
         N_r = jnp.where(_fired, jnp.maximum(N_r + ninstsm * rho, 0.0), N_r)   # per volume
+        # micro_mg2_0.F90:1182-1212, after the snow melt above: rain below
+        # rainfrze = T_freeze - 40 K freezes INSTANTANEOUSLY, heat-limited so it
+        # cannot warm the air above rainfrze, all of it to snow, on the input
+        # temperature (the heating goes into the tendency, below).  Same
+        # switch-on width and fixed threshold as the post-sedimentation freezing.
+        minstrf, ninstrf = mg2_instant_rain_freeze(
+            T, q_r, N_r / rho,
+            RAMP_WIDTH_PER_SHARPNESS / config.homogeneous_freeze_sharpness)
+        _frz_fired = (T < constants.T_freeze - MG2_RAINFRZE_OFFSET_K) & (q_r > 0.0)
+        _q_r_prefrz = q_r
+        q_r = jnp.where(_frz_fired, jnp.maximum(q_r - minstrf, 0.0), q_r)
+        N_r = jnp.where(_frz_fired, jnp.maximum(N_r - ninstrf * rho, 0.0), N_r)   # per volume
+        q_s = jnp.where(_frz_fired, jnp.maximum(q_s + minstrf, 0.0), q_s)
+        N_s = jnp.where(_frz_fired, jnp.maximum(N_s + ninstrf, 0.0), N_s)
+        # the rain loss, which all goes to snow (MG2 has no ice branch here)
+        _prefrz = jnp.where(_frz_fired, _q_r_prefrz - q_r, 0.0)
     sharpness = config.saturation_sharpness
     # Saturation curves: the CAM6 MG2 mode uses MG2's own qsat_water/qsat_ice,
     # CAM's Goff-Gratch (micro_mg2_0.F90:113-115, :909-916); other modes keep
@@ -2335,6 +2352,8 @@ def morrison_microphysics(
     if mg2_snow:
         # MG2 instantaneous snow melt at the start of the call (tlat, :1159)
         dT_dt = dT_dt - L_f * minstsm / dt / c_pd
+        # and its rain freezing below -40 C (tlat, :1202-1204)
+        dT_dt = dT_dt + L_f * _prefrz / dt / c_pd
 
     # === COMBINE TENDENCIES ===
     dq_v_dt = -condensation + evaporation - dq_i_dep - dq_i_nuc - prds - prdg
