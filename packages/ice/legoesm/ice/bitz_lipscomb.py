@@ -506,10 +506,12 @@ def _radiation(
     snow_fraction = h_s / (
         h_s + _SNOW_FRACTION_DEPTH
     )  # nn_snwfra=2, icevar.f90:1613
-    # :219 `zradtr_s(0) * EXP( - zraext_s * MAX( 0, zh_s * REAL(jk) - zhs_ssl ) )`
-    tr_s = qtr_top[..., None] * transcendentals.exp(
+    # :219 `zradtr_s(0) * EXP( - zraext_s * MAX( 0, zh_s * REAL(jk) - zhs_ssl ) )`;
+    # materialised because the icethd_zdf_bl99.F90:211 absorption difference otherwise
+    # contracts it into an FMA under jit (DECISION 194 resume 1 audit).
+    tr_s = sr(qtr_top[..., None] * transcendentals.exp(
         -rn_kappa_s * _maxsd(sr(dzs * js) - _SNOW_SSL_DEPTH, 0.0)
-    )
+    ))
     tr_s0 = jnp.concatenate([qtr_top[..., None], tr_s], axis=-1)
     ab_s = tr_s0[..., :-1] - tr_s0[..., 1:]
     through_snow = tr_s[..., -1]
@@ -1005,7 +1007,9 @@ def _cumulative_remap(h_old, content_old, nlay, sr):
     for h, e in zip(h_old, content_old):
         h_cum0.append(h_cum0[-1] + h)
         e_cum0.append(e_cum0[-1] + e)
-    zhnew = h_cum0[-1] * (1.0 / nlay)  # SUM(ph_old) * r1_nlay, same +0-seeded sequence
+    # SUM(ph_old) * r1_nlay (icevar.F90:1007), same +0-seeded sequence.  Materialised:
+    # XLA otherwise fuses this product into the :1012 interface additions as an FMA.
+    zhnew = sr(h_cum0[-1] * (1.0 / nlay))
     h_cum1 = [zero]
     for _ in range(nlay):
         h_cum1.append(h_cum1[-1] + zhnew)

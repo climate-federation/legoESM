@@ -394,3 +394,21 @@ The fast-forward landing rebase replayed the five approved Round 6 commits onto 
 3. The same gate, `CITATION_MAP` hunk: retained the complete expanded D5/Round 6 map and the complete O1 map, replaced only the superseded pre-O1 `sea_ice.py:...497-514` keys with `...499-516`, and introduced no duplicate key.
 4. The same gate, `_NAME` hunk: retained the O1 path forms (`ocean.output.excerpt`, `cfgs/ref_cfgs.txt`, acquisition `run.sh`, and both `si3_r4_o1_*` receipts) together with both `si3_r6_d5_*` receipt names.
 5. The final Round 6 documentation-fix commit's `CITATION_MAP` cleanup hunk: applied every approved Round 6 removal, replacement, and added exact citation to the already-combined map while preserving every O1-only key and value. Semantic comparison against both rebase sides found no missing entry, no altered retained value, and no newly duplicated key.
+
+## DECISION 194 note (citations into replaced code)
+
+DECISION 194 (2026-11-01) replaced statements this receipt cites in the SI3
+thermodynamics modules: the category loops, the `ice_thd_dh` layer passes and
+the vremap and salinity-4 permeability loops became traced loops with the same
+statements in the same order, and source-rounding barriers were added on the
+BL99 bottom conductive flux, the vremap new-layer thickness and the SSL snow
+transmission.  The text above describes the code when this round ran; through
+the citation gate the following citations now resolve to the replacement
+statements at HEAD:
+
+- bitz_lipscomb.py:980-1024 now resolves to lines 984-1047 of the same file
+- bitz_lipscomb.py:1134-1222,1244-1265 now resolves to lines 1186-1290,1312-1334 of the same file
+- bitz_lipscomb.py:41,980-1024,1134-1222,1244-1265,2072-2213 now resolves to lines 41,984-1047,1186-1290,1312-1334,2163-2304 of the same file
+- bitz_lipscomb.py:1143 now resolves to lines 1195 of the same file
+- bitz_lipscomb.py:1084-1090 now resolves to lines 1109-1142 of the same file
+- bitz_lipscomb.py:1104,1142,1143 now resolves to lines 1156,1194,1195 of the same file

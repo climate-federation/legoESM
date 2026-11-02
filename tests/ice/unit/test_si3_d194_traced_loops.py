@@ -97,15 +97,20 @@ def test_traced_o12_loops_keep_parent_forward_bits():
     run = lambda a: pnd_mod.si3_ice_thd_o12_stages(**a, **static)  # noqa: E731
     jaxpr = jax.make_jaxpr(run)(arrays)
     assert "scan" in {eqn.primitive.name for eqn in jaxpr.jaxpr.eqns}
-    assert _digest(jax.jit(run)(arrays)) == PARENT_DIGEST
+    with jax.disable_jit():  # concrete inputs: the eager Python-loop path, op by op
+        eager = _digest(run(arrays))
+    compiled = _digest(jax.jit(run)(arrays))  # traced inputs: the scan/fori_loop path
+    assert (eager, compiled) == (PARENT_DIGEST, PARENT_DIGEST)
 
 
 # (category or None, leaf, index, relative step): thickness, concentration,
 # enthalpy, snow, pond and forcing elements away from the max/min/where
 # thresholds (central differences at relative steps 1e-4 and 1e-5 agree).
-# The step is large enough that the objective's rounding (|f| ~ 1.9e4) stays
-# far below the difference; measured |AD - FD| / max(|AD|, |FD|):
-# 2.6e-9, 2.4e-8, 2.6e-10, 7.1e-9, 9.9e-9, 9.1e-9.
+# Each case is judged by its own relative error |AD - FD| / max(|AD|, |FD|)
+# (no absolute floor).  The difference quotient's rounding noise,
+# eps |f| / (2 h) with |f| ~ 1.9e4, is 2.1e-9, 5.1e-9, 1.9e-10, 2.3e-9, 1.2e-7
+# and 4.6e-9 of |AD| for the six cases, so a gradient wrong by 1e-6 or more is
+# visible in each.  Measured: 2.6e-9, 2.4e-8, 2.6e-10, 7.1e-9, 9.9e-9, 9.1e-9.
 FD_CASES = (
     (2, "h_i", (3, 2), 1.0e-4),
     (0, "a_i", (3, 2), 1.0e-4),
@@ -144,11 +149,33 @@ def test_traced_o12_loops_reverse_mode_compiles_and_matches_central_differences(
             a["category_entries"] = tuple(entries)
         return a
 
+    failures = []
     for jl, leaf, index, rel in FD_CASES:
         x0 = float((arrays[leaf] if jl is None else arrays["category_entries"][jl][leaf])[index])
         g = float((grad[leaf] if jl is None else grad["category_entries"][jl][leaf])[index])
         h = rel * abs(x0)
         fd = (float(forward(perturbed(jl, leaf, index, x0 + h)))
               - float(forward(perturbed(jl, leaf, index, x0 - h)))) / (2.0 * h)
-        assert g != 0.0, (jl, leaf, index)
-        assert abs(g - fd) <= 1.0e-6 * max(abs(g), abs(fd)), (jl, leaf, index, g, fd)
+        relative = abs(g - fd) / max(abs(g), abs(fd))
+        if g == 0.0 or not relative <= 1.0e-6:
+            failures.append((jl, leaf, index, g, fd, relative))
+    assert failures == []
+
+
+def test_ssl_snow_transmission_is_not_contracted_under_jit():
+    """The snow SSL absorption difference must match the eager program bit for bit.
+
+    Without the barrier on the transmitted radiation, XLA CPU fuses that
+    product into the absorption difference as an FMA (7754 of 20000 elements
+    differed on this input when measured).
+    """
+    rng = np.random.default_rng(7)
+    n = 4000
+    args = (jnp.asarray(rng.uniform(0.2, 3.0, n)), jnp.asarray(rng.uniform(0.05, 0.6, n)),
+            jnp.asarray(rng.uniform(1.0, 100.0, n)), jnp.full(n, 260.0))
+    run = lambda *a: bl._radiation(*a, rn_kappa_i=1.0, rn_kappa_s=10.0, _nlay=(10, 5))  # noqa: E731
+    compiled = jax.jit(run)(*args)
+    with jax.disable_jit():
+        eager = run(*args)
+    for got, want in zip(compiled, eager, strict=True):
+        np.testing.assert_array_equal(np.asarray(got).view(np.uint64), np.asarray(want).view(np.uint64))

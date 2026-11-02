@@ -354,3 +354,19 @@ the direct test suite through
 `tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1170`.  The
 earlier `:1-1151` citations above remain as the historical slices they recorded;
 this append-only amendment supplies the current full live extent.
+
+## DECISION 194 note (citations into replaced code)
+
+DECISION 194 (2026-11-01) replaced statements this receipt cites in the SI3
+thermodynamics modules: the category loops, the `ice_thd_dh` layer passes and
+the vremap and salinity-4 permeability loops became traced loops with the same
+statements in the same order, and source-rounding barriers were added on the
+BL99 bottom conductive flux, the vremap new-layer thickness and the SSL snow
+transmission.  The text above describes the code when this round ran; through
+the citation gate the following citations now resolve to the replacement
+statements at HEAD:
+
+- bitz_lipscomb.py:545-804 now resolves to lines 547-808 of the same file
+- bitz_lipscomb.py:1028-1277 now resolves to lines 1051-1346 of the same file
+- si3_thd_pnd.py:784-988 now resolves to lines 809-1045 of the same file
+- si3_thd_pnd.py:235-572 now resolves to lines 269-595 of the same file

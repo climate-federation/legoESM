@@ -545,4 +545,63 @@ run only).  The O8–O16 master scorer over all 100 steps: before and after,
    now match the eager program).  Accept as is (**pick**), or require the
    parent's compiled signed zeros.
 
-independent review: pending (author: Claude; reviewers to be assigned)
+independent review a: Gemini Argon HOLD, Gemini flash HOLD (both confirmed
+the loop orders, 0 ULP against the parent eager and jit on three fixtures,
+the plants and the master scorer; the five items below were raised).
+
+### Resume 1 (review a)
+
+1. **Eager path pinned.**  The forward test now runs the composition under
+   `jax.disable_jit()` (concrete inputs, so the Python-loop path) and under
+   `jax.jit` (the scan/`fori_loop` path) and requires both digests to equal the
+   parent digest.  Reversing only the eager category loop changes the eager
+   digest (`77c261c4…6770`) while the compiled one still matches.
+2. **FMA audit.**  The reviewers' `acc + e_old[old - 1] * weight` is the
+   vremap interpolation (icevar.F90 lines 1020–1022), whose two products are
+   already materialised.  Counting x86 FMA instructions in the dumped XLA CPU
+   kernels and mapping each back to its multiply: a jitted vremap (20,000
+   random columns) had one FMA, the new-layer thickness `zhnew`
+   (icevar.F90 line 1007) fused into the first interface addition (line 1012),
+   value-identical there (adding +0) and 0 bit differences against eager on
+   200,000 outputs; the parent's O12 program had 12 such vremap FMAs.  The
+   same audit of the O12 composition found a value-changing one inherited from
+   the parent: the SSL snow transmission (icethd_zdf_bl99.F90 line 209) fused
+   into the absorption difference (line 211) — 7,754 of 20,000 `ab_s`
+   elements differed from eager on a random input, although the composition
+   fixtures and the master records happened not to expose it.  Both products
+   are now materialised.  Afterwards the vremap and SSL kernels have no FMA and
+   match eager bit for bit; the O12 composition keeps only FMAs on the exact
+   halving `0.5 * (t_i(jk) + t_i(jk+1))`, which cannot change a value; in the
+   full O17 forward program the only O9–O12 FMAs left are those exact halvings;
+   the others are outside O9–O12 (O17 composition and tail, O4, O5).  A new unit check pins the SSL statement
+   (removing its barrier gives 7,754 mismatches); no input was found on which
+   the `zhnew` barrier changes bits, so it rests on the audit, not on a test.
+   The full O17 forward (`jit`) stays bit-identical to 2428dd0472 on all 679
+   published leaves, and eager to the parent on all 1,209 trace leaves.
+3. **Citations.**  The 101 parent-blob pins are gone.  87 citations into the
+   two edited files (81 pure moves from DECISION 194 plus 6 from the new SSL
+   barrier) are re-lined on the live HEAD files with the existing re-line
+   helper and keep their anchor text; 21 cite statements DECISION 194 replaced
+   and now cite the replacement statements, anchored on HEAD's text.  The seven
+   receipts that cite replaced code carry a DECISION 194 note.  The gate's
+   checking code is unchanged.  No citation of si3_thd_pnd.py lines 862-970 exists in
+   this receipt at 2428dd0472 (searched), so none was changed.
+4. **Finite differences.**  Each of the six cases is judged by its own
+   relative error (no absolute floor); its rounding-noise bound is at most
+   1.2e-7 of its gradient.  Stopping the gradient on the scanned inputs fails
+   all six (relative error 1.0 each); scaling the scanned inputs' tangent by
+   1 + 1e-5 also fails all six (1.0e-5, 9.9e-6, 1.0e-5 for the 3.3e-7
+   enthalpy gradient, 1.0e-5, 1.0e-5, 1.0e-5).
+5. **Scored O17 fields, jit against eager, at the final source** (report
+   only): 21 elements — `state.oa_i` and the after-thermodynamics `oa_i`,
+   9 elements each, differ in value by up to 1.5e-16 relative (one ULP), and
+   one NaN sign each in `wfx_snw_sub`, `wfx_spr` and `wfx_sub`.  The parent
+   has the same 18 `oa_i` differences (from an FMA in the O17 thermodynamic
+   tail, outside O9–O12) plus 12 sign-only differences in other fluxes and
+   `emp`; it matched eager on the `wfx_spr` NaN sign, which is new here.
+   Final jit against parent jit in scored fields: 11 elements, all zero or NaN
+   signs.  User decision 2 (accept the sign changes) is still pending.
+
+RESUME1_FINAL_CHECKS
+
+independent review: pending (author: Claude)

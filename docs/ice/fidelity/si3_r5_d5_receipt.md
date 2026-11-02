@@ -284,3 +284,21 @@ Round 5 (`si3_r5`) closes the four D5 debt items recorded in the Round 3 receipt
   * `ASKED`: **DECISION 156** (classify and close D5 per platform before starting the ORCA2 rungs), **DECISION 158** (certify the SI3 ladder on CPU `fp64` production JIT with XLA FMA prevented in code via `nemo_source_round`, subnormal cases as a stated platform floor, and each rung spot-checked on an idle GPU), and **DECISION 159** (run one round per debt group with preregistered before/after counts and remaining owner rankings).
   * `UNASKED`: **NONE**. `_nemo_ice_remap: bool = True`, `_nemo_dh_ice_density_reciprocal: bool = True`, and `_nemo_salprof_factoring: bool = True` in `packages/ice/legoesm/ice/bitz_lipscomb.py` follow the existing private `_nemo_*` flag pattern and Rule 3 (the NEMO-literal value is the default on the SI3 path; non-SI3 callers are bit-for-bit unchanged). No configuration classes (`SeaIceConfig`, `SI3ThermoConfig`) were modified.
 * **Independent review:** `independent review: operator`
+
+## DECISION 194 note (citations into replaced code)
+
+DECISION 194 (2026-11-01) replaced statements this receipt cites in the SI3
+thermodynamics modules: the category loops, the `ice_thd_dh` layer passes and
+the vremap and salinity-4 permeability loops became traced loops with the same
+statements in the same order, and source-rounding barriers were added on the
+BL99 bottom conductive flux, the vremap new-layer thickness and the SSL snow
+transmission.  The text above describes the code when this round ran; through
+the citation gate the following citations now resolve to the replacement
+statements at HEAD:
+
+- bitz_lipscomb.py:980-1024 now resolves to lines 984-1047 of the same file
+- bitz_lipscomb.py:980-1025 now resolves to lines 984-1048 of the same file
+- bitz_lipscomb.py:1052,1138-1145,1195-1203,1218-1222 now resolves to lines 1075,1190-1197,1258-1266,1283-1290 of the same file
+- bitz_lipscomb.py:1138-1145 now resolves to lines 1190-1197 of the same file
+- bitz_lipscomb.py:1218-1222 now resolves to lines 1283-1290 of the same file
+- bitz_lipscomb.py:1087 now resolves to lines 1113 of the same file

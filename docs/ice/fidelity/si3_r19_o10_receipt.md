@@ -243,3 +243,17 @@ citation gate, and all-SI3-receipt checks passed `61 passed in 26.80s`. The
 explicit O10 gate passed with 56 citations, no unmapped citations, no failures,
 and no full-map audit failures. Shifting the new TEMP1 scan citation by two
 lines produced `SYMBOL-NOT-AT-LINE`, gate status `FAIL`, and exit status 1.
+
+## DECISION 194 note (citations into replaced code)
+
+DECISION 194 (2026-11-01) replaced statements this receipt cites in the SI3
+thermodynamics modules: the category loops, the `ice_thd_dh` layer passes and
+the vremap and salinity-4 permeability loops became traced loops with the same
+statements in the same order, and source-rounding barriers were added on the
+BL99 bottom conductive flux, the vremap new-layer thickness and the SSL snow
+transmission.  The text above describes the code when this round ran; through
+the citation gate the following citations now resolve to the replacement
+statements at HEAD:
+
+- bitz_lipscomb.py:1410-1436 now resolves to lines 1479-1527 of the same file
+- bitz_lipscomb.py:1417-1436 now resolves to lines 1487-1527 of the same file
