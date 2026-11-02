@@ -56,13 +56,21 @@ D198_R1_743146B590 = {
     "si3_dyn_orca2": 48_325,
     "remaining_named_and_inlined": 104_271,
 }
-# DECISION 198 round 2: O4 Prather subcycles as one checkpointed scan.
-EXPECTED = {
+# DECISION 198 round 2 (56b768300a): O4 Prather subcycles as one checkpointed scan.
+D198_R2_56B768300A = {
     "recursive_total": 178_146,
     "_thermo_category_loop": 35_918,
     "si3_ice_thd_do": 9_809,
     "si3_dyn_orca2": 28_148,
     "remaining_named_and_inlined": 104_271,
+}
+# DECISION 198 round 3: O6 ice_cor rebinning, salinity and zapsmall loops as fori_loops.
+EXPECTED = {
+    "recursive_total": 162_751,
+    "_thermo_category_loop": 35_918,
+    "si3_ice_thd_do": 9_809,
+    "si3_dyn_orca2": 28_148,
+    "remaining_named_and_inlined": 88_876,
 }
 OWNERS = ("_thermo_category_loop", "si3_ice_thd_do", "si3_dyn_orca2")
 
@@ -151,6 +159,7 @@ def count(master: Path) -> dict[str, Any]:
         "d194_48526f950c_snapshot": D194_48526F950C,
         "d194_resume1_b17f14b73c_snapshot": D194_RESUME1_B17F14B73C,
         "d198_r1_743146b590_snapshot": D198_R1_743146B590,
+        "d198_r2_56b768300a_snapshot": D198_R2_56B768300A,
         "delta_from_pre_d194": {
             name: measured[name] - PRE_D194_9998276020[name] for name in EXPECTED
         },
