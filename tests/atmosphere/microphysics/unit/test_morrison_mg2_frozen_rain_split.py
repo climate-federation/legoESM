@@ -99,9 +99,13 @@ def test_scheme_routes_the_share(monkeypatch):
     monkeypatch.setattr(M, "mg2_frozen_rain_ice_fraction", spy)
     hyd = dict(q_i=jnp.asarray(fx["col_q_i"]), N_i=jnp.asarray(fx["col_ni_kg"]),
                q_s=jnp.asarray(fx["col_q_s"]), N_s=jnp.asarray(fx["col_ns_kg"]))
-    outs = [A._run(fx, cfg=_cfg(do_graupel=False)._replace(mg2_frozen_rain_ice_ramp_frac=fr),
-                   hyd_kw=hyd) for fr in (0.0, FRAC)]
-    df = seen[1] - seen[0]
+    outs, first = [], []
+    for fr in (0.0, FRAC):
+        first.append(len(seen))     # the run's first call is the Bigg routing; the
+        outs.append(A._run(         # post-sedimentation rain freezing calls it again
+            fx, cfg=_cfg(do_graupel=False)._replace(mg2_frozen_rain_ice_ramp_frac=fr),
+            hyd_kw=hyd))
+    df = seen[first[1]] - seen[first[0]]
     di = np.asarray(outs[1].dq_i_dt) - np.asarray(outs[0].dq_i_dt)
     on = (fx["ora_ilim2_mnuccr"] + fx["ora_ilim2_mnuccri"]) > 0
     moved = (np.abs(df) > 1e-6) & on

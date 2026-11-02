@@ -1483,16 +1483,25 @@ def mg2_inprecip_rain(q_r, N_r, rho, precip_frac, lamr_min, lamr_max):
     small = q_ric < MG2_QSMALL
     q_ric = jnp.where(small, 0.0, q_ric)
     N_ric = jnp.where(small, 0.0, jnp.maximum(N_r / precip_frac, 0.0))
-    active = q_ric > MG2_QSMALL
+    N_ric, lamr = mg2_rain_size_dist(q_ric, N_ric, rho, lamr_min, lamr_max)
+    return q_ric, N_ric, lamr, N_ric * lamr
+
+
+def mg2_rain_size_dist(q_r, N_r, rho, lamr_min, lamr_max):
+    """``size_dist_param_basic(mg_rain_props, q_r, N_r, lamr)``
+    (micro_mg_utils.F90:481-516) for rain mass ``q_r`` [kg/kg] and per-VOLUME
+    number ``N_r``: where ``q_r > qsmall``, ``lamr = (pi rho_w N_r/(rho
+    q_r))^(1/3)`` and, outside ``[lamr_min, lamr_max]``, the bound with the
+    number re-adjusted to match; ``lamr = 0`` and the number unchanged
+    elsewhere.  Returns ``(N_r, lamr)``."""
+    active = q_r > MG2_QSMALL
     cr = jnp.pi * constants.rho_water
-    den = jnp.where(active, rho * q_ric, 1.0)
-    lam_raw = safe_pow(_div_tangent_safe(cr * N_ric, den), 1.0 / 3.0)
+    den = jnp.where(active, rho * q_r, 1.0)
+    lam_raw = safe_pow(_div_tangent_safe(cr * N_r, den), 1.0 / 3.0)
     lam = jnp.clip(lam_raw, lamr_min, lamr_max)
     N_adj = jnp.where((lam_raw < lamr_min) | (lam_raw > lamr_max),
-                      lam ** 3 * den / cr, N_ric)
-    N_ric = jnp.where(active, N_adj, N_ric)
-    lamr = jnp.where(active, lam, 0.0)
-    return q_ric, N_ric, lamr, N_ric * lamr
+                      lam ** 3 * den / cr, N_r)
+    return jnp.where(active, N_adj, N_r), jnp.where(active, lam, 0.0)
 
 
 def self_collection_rain_mg2(q_ric, N_ric, rho, precip_frac):
@@ -1574,6 +1583,7 @@ def _mg2_vent_eps(n0_vol, lam, a_fall, b_fall, f1, f2, rho, dv, mu, sc):
 # f1s=0.86, f2s=0.28, eii=0.5. ---
 MG2_QSIC_MAX = 0.01            # in-precip snow cap [kg/kg] (micro_mg2_0.F90:1363, :2766)
 MG2_SNOWMELT_OFFSET_K = 2.0    # snowmelt = tmelt + 2 K: all snow melts above it (:329)
+MG2_RAINFRZE_OFFSET_K = 40.0   # rainfrze = tmelt - 40 K: all rain freezes below it (:331)
 _MG2_SNOW_VT_CAP = 1.2         # ums, uns <= 1.2*rhof [m/s] (:1407-1408, :2189-2190)
 _MG2_STOKES_DIV = 9.0          # accrete_cloud_water_snow Stokes number dc0^2 uns rhow lams/(9 mu) (:1133)
 _MG2_ECI_KNEE = 0.4            # eci = St^2/(St+0.4)^2, Thompson et al. 2004 (:1134)
@@ -1886,6 +1896,20 @@ def mg2_instant_snow_melt(T, q_s, N_s, width_K, cap_sharpness=MG2_CAP_SHARPNESS)
     excess = T - (constants.T_freeze + MG2_SNOWMELT_OFFSET_K)
     frac = mg2_phase_change_fraction(excess, q_s, width_K, cap_sharpness)
     return frac * jnp.maximum(q_s, 0.0), frac * N_s
+
+
+def mg2_instant_rain_freeze(T, q_r, N_r, width_K, cap_sharpness=MG2_CAP_SHARPNESS):
+    """MG2 instantaneous rain freezing below ``rainfrze = T_freeze - 40 K``
+    (micro_mg2_0.F90:1182-1212 before the processes, :2571-2610 after
+    sedimentation): MG2 freezes the fraction ``min(1, (rainfrze - T) c_p/(L_f
+    q_r))`` of the rain where ``T < rainfrze`` and ``q_r > 0`` (heat-limited so
+    the freezing cannot warm the air above rainfrze).  The switch-on and the
+    rounded min are those of :func:`mg2_instant_snow_melt`
+    (:func:`mg2_phase_change_fraction`).  Returns the frozen ``(mass, number)
+    = (f q_r, f N_r)`` in the units of ``q_r``, ``N_r``."""
+    deficit = (constants.T_freeze - MG2_RAINFRZE_OFFSET_K) - T
+    frac = mg2_phase_change_fraction(deficit, q_r, width_K, cap_sharpness)
+    return frac * jnp.maximum(q_r, 0.0), frac * N_r
 
 # --- Seifert & Beheng (2001) warm-rain UNIVERSAL FUNCTIONS ---
 # Faithful transcription of the gSAM M2005 IRAIN=1 path

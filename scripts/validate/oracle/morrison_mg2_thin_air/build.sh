@@ -18,4 +18,6 @@ gfortran $FF -o mg2_ice_fall_procs "$HERE/mg2_ice_fall_procs.F90" \
     wv_sat_methods.o micro_mg_utils.o micro_mg2_0.o
 gfortran $FF -o mg2_ice_sed_cols "$HERE/mg2_ice_sed_cols.F90" \
     wv_sat_methods.o micro_mg_utils.o micro_mg2_0.o
+gfortran $FF -o mg2_rain_frz_pts "$HERE/mg2_rain_frz_pts.F90" \
+    wv_sat_methods.o micro_mg_utils.o micro_mg2_0.o
 echo BUILD_OK

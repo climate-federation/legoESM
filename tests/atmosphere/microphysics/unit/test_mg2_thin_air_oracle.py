@@ -461,3 +461,99 @@ def test_post_sedimentation_snow_melt_temperature_has_the_sedimentation_heating(
         with monkeypatch.context() as mp:
             T1, m1, _, _ = _melt_column(mp, zero=(key,))
         np.testing.assert_allclose(T0 - T1, dT * dt, rtol=1.0e-9, atol=1.0e-12, err_msg=key)
+
+
+def _rain_freeze(fx, width_K, cap, ramp_frac):
+    """legoESM's post-sedimentation rain freezing on the rfz points: the
+    frozen rain and number rates, their cloud-ice and snow shares, the rain
+    slope and the heating after it."""
+    dt = float(fx["isc_dt"])
+    cfg = _cfg()
+    T_test = fx["rfz_in_t"] + fx["rfz_in_tlat"] / constants.c_pd * dt
+    m, n = W.mg2_instant_rain_freeze(jnp.asarray(T_test), jnp.asarray(fx["rfz_in_dumr"]),
+                                     jnp.asarray(fx["rfz_in_dumnr"]), width_K, cap)
+    one = jnp.ones_like(m)
+    n_adj, lamr = W.mg2_rain_size_dist(jnp.asarray(fx["rfz_in_dumr"]),
+                                       jnp.asarray(fx["rfz_in_dumnr"]), one,
+                                       cfg.lamr_min, cfg.lamr_max)
+    nd = W.mg2_instant_rain_freeze(jnp.asarray(T_test), jnp.asarray(fx["rfz_in_dumr"]),
+                                   n_adj, width_K, cap)[1]
+    f = np.asarray(W.mg2_frozen_rain_ice_fraction(lamr, jnp.asarray(fx["rfz_in_dcs"]),
+                                                  ramp_frac))
+    m, n, nd = np.asarray(m) / dt, np.asarray(n) / dt, np.asarray(nd) / dt
+    return dict(qrfrz=m, nrfrz=n, qifrz=f * m, nifrz=f * nd, qsfrz=m - f * m,
+                nsfrz=nd - f * nd, lamr=np.asarray(lamr),
+                tlat=fx["rfz_in_tlat"] + constants.L_f * m)
+
+
+def test_rain_freeze_after_sedimentation_against_mg2():
+    """MG2's post-sedimentation rain freezing (rfz_*: mg2_rain_frz_pts.F90,
+    micro_mg2_0.F90:2571-2610 verbatim) at the hard limits: 48 points from
+    5 K below rainfrze = tmelt - 40 K (:331) to 0.5 K above, the rain the
+    grid pool after sedimentation (:2511-2512, :2527), heat-limited freezing
+    near rainfrze, mean drops of 100 um and 1 mm (slope-bounded to 500 um) at
+    Dcs 500 and 200 um.  Frozen rain and number, rain slope, the snow and ice
+    shares and the heating match.  KNOWN DIFFERENCE, inherited from the
+    frozen-rain size switch (mg2_frozen_rain_ice_fraction, used by the Bigg
+    freezing too): a drop exactly at 1/lamr = Dcs, which is where MG2's rain
+    slope bound puts every large drop at CAM6's Dcs of 500 um, goes to cloud
+    ice in MG2 (lamr < 1/Dcs is false there) and to snow in the hard switch
+    (1/lamr < Dcs is false too); the 9 such frozen points are asserted as
+    that swap."""
+    fx = _fx()
+    lg = _rain_freeze(fx, _DT_FORM_S, math.inf, 0.0)
+    assert (fx["rfz_out_qifrz"] > 0).sum() >= 9 and (fx["rfz_out_qsfrz"] > 0).sum() >= 9
+    assert (fx["rfz_out_qrfrz"] == 0).sum() >= 12        # above rainfrze: no freezing
+    eq = (np.abs(fx["rfz_out_lamr"] * fx["rfz_in_dcs"] - 1.0) < 1e-12) & (fx["rfz_out_qrfrz"] > 0)
+    assert eq.sum() == 9, eq.sum()
+    errs = {k: float(np.max(_rel(lg[k], fx[f"rfz_out_{k}"]))) for k in
+            ("qrfrz", "nrfrz", "tlat")}
+    on = fx["rfz_out_qrfrz"] > 0
+    errs["lamr"] = float(np.max(_rel(lg["lamr"][on], fx["rfz_out_lamr"][on])))
+    for k in ("qifrz", "nifrz", "qsfrz", "nsfrz"):
+        errs[k] = float(np.max(_rel(lg[k][~eq], fx[f"rfz_out_{k}"][~eq])))
+    print("max relative error", errs)
+    assert max(errs.values()) <= TOL, errs
+    assert float(np.max(_rel(lg["qsfrz"][eq], fx["rfz_out_qifrz"][eq]))) <= TOL
+    assert (lg["qifrz"][eq] == 0).all()
+    # each pair of shares sums to the rain loss bit for bit (the scheme takes
+    # the loss as the sum of its shares)
+    np.testing.assert_array_equal(lg["qifrz"] + lg["qsfrz"], lg["qrfrz"])
+
+
+# Default-switch gap per rfz point (relative error of the frozen rain against
+# MG2): the 0.2 K switch-on of the homogeneous-freezing width and the rounded
+# heat cap (cap_sharpness 100).  Measured 2026-11-02 on this fixture: 0 on
+# every point but the six 0.05 K below rainfrze at each Dcs, where the
+# switch-on is at 0.05/0.2 of its width (0.8965 of the freezing missing).
+_RFZ_DEFAULT_GAP = np.array(([0.0] * 12 + [0.8964843749999399] * 6 + [0.0] * 6) * 2)
+
+
+def test_rain_freeze_default_gap_per_point():
+    """At the production widths the frozen rain departs from MG2 only where
+    the switch-on and the rounded heat cap act; the gap per point is the
+    recorded one (RULE 5)."""
+    fx = _fx()
+    from tests.atmosphere.microphysics.unit.test_mg2_warm_rain_oracle import _production_morrison
+    cfg = resolve_morrison_flavor(_production_morrison())
+    width = W.RAMP_WIDTH_PER_SHARPNESS / cfg.homogeneous_freeze_sharpness
+    lg = _rain_freeze(fx, width, W.MG2_CAP_SHARPNESS, cfg.mg2_frozen_rain_ice_ramp_frac)
+    gap = _rel(lg["qrfrz"], fx["rfz_out_qrfrz"])
+    print("default gap", repr(gap.tolist()))
+    np.testing.assert_allclose(gap, _RFZ_DEFAULT_GAP, rtol=1e-6, atol=1e-12)
+
+
+def test_rain_freeze_gradient_at_default():
+    """Finite, nonzero derivative of the frozen rain through the -40 C switch
+    and the heat cap at the production width."""
+    from jax.test_util import check_grads
+    width = W.RAMP_WIDTH_PER_SHARPNESS / 20.0
+
+    def f(T, q):
+        return W.mg2_instant_rain_freeze(T, q, 1.0e6 * q, width)[0]
+    T0 = constants.T_freeze - W.MG2_RAINFRZE_OFFSET_K - 0.1
+    for q in (1.0e-5, 1.0e-3):                 # switch-on, then the heat cap
+        g = jax.grad(f, argnums=(0, 1))(jnp.asarray(T0), jnp.asarray(q))
+        assert all(np.isfinite(x) for x in g) and abs(float(g[0])) > 0.0, g
+        check_grads(f, (jnp.asarray(T0), jnp.asarray(q)), order=2, modes=("fwd", "rev"),
+                    eps=1.0e-6 * min(q, 1e-2), atol=1e-6, rtol=1e-4)

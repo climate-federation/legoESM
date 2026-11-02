@@ -129,6 +129,8 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     mg2_deposition_limiter,
     mg2_snow_sublimation,
     mg2_instant_snow_melt,
+    mg2_instant_rain_freeze,
+    mg2_rain_size_dist,
     MG2_SNOWMELT_OFFSET_K,
     mg2_precip_sublimation_limiter,
     MG2_QSIC_MAX,
@@ -2470,6 +2472,12 @@ def morrison_microphysics(
         dq_v_dt = dq_v_dt + sed_qv
         dT_dt = dT_dt + sed_T
     if mg2_snow:
+        # MG2's post-sedimentation rain pool (micro_mg2_0.F90:2511-2512, :2527),
+        # taken before the snow melt below adds to it: the rain the freezing at
+        # -40 C acts on.  Number per kg here.
+        _dumr = jnp.maximum(q_r + dq_r_dt * dt, 0.0)
+        _dumnr = jnp.where(_dumr < MG2_QSMALL, 0.0,
+                           jnp.maximum(N_r + dN_r_dt * dt, 0.0) / rho)
         dN_s_mg2 = dN_s_src + sed_N_s
         if config.do_snow_melting:
             # MG2 melting of snow AFTER sedimentation (micro_mg2_0.F90:2536-
@@ -2487,6 +2495,36 @@ def morrison_microphysics(
             dq_r_dt = dq_r_dt + _m2 / dt
             dN_r_dt = dN_r_dt + _n2 * rho / dt          # N_r per-volume
             dT_dt = dT_dt - L_f * _m2 / dt / c_pd
+        # MG2 freezing of rain below rainfrze = -40 C after sedimentation
+        # (micro_mg2_0.F90:2571-2610) on t + tlat/cpp dt, the sedimentation
+        # heating and the snow-melt cooling included, heat-limited so the air
+        # is not warmed above rainfrze.  The frozen drops go to snow, or to
+        # cloud ice where the mean drop 1/lamr of the grid-mean rain is below
+        # Dcs (:2591-2602, the size switch of mg2_frozen_rain_ice_fraction).
+        # Graupel takes none of it, with do_graupel too: the CAM6 reference has
+        # no graupel.  The ice share is added after the instant ice melt below,
+        # which sees MG2's dumi, the ice before this freezing.  The rain loss
+        # is the sum of the two shares, so they add up to it exactly.  The
+        # rain loses the frozen share of its number; snow or ice gains that
+        # share of the number size_dist_param_basic re-adjusted to the slope
+        # bounds (it updates dumnr in place between the two, :2589-2602).
+        _fr_w = RAMP_WIDTH_PER_SHARPNESS / config.homogeneous_freeze_sharpness
+        _fr_m, _fr_n = mg2_instant_rain_freeze(T + dT_dt * dt, _dumr, _dumnr, _fr_w)
+        _dumnr_adj, _lamr_g = mg2_rain_size_dist(_dumr, _dumnr * rho, rho,
+                                                 config.lamr_min, config.lamr_max)
+        _fr_n_dest = mg2_instant_rain_freeze(T + dT_dt * dt, _dumr, _dumnr_adj / rho,
+                                             _fr_w)[1]
+        _to_ice = mg2_frozen_rain_ice_fraction(
+            _lamr_g, config.ice_snow_d_auto, config.mg2_frozen_rain_ice_ramp_frac)
+        _postfrz_ice = _to_ice * _fr_m
+        _postfrz_snow = _fr_m - _postfrz_ice
+        _postfrz_N_ice = _to_ice * _fr_n_dest
+        _postfrz = _postfrz_ice + _postfrz_snow
+        dq_r_dt = dq_r_dt - _postfrz / dt
+        dN_r_dt = dN_r_dt - _fr_n * rho / dt          # N_r per-volume
+        dq_s_dt = dq_s_dt + _postfrz_snow / dt
+        dN_s_mg2 = dN_s_mg2 + (_fr_n_dest - _postfrz_N_ice) / dt
+        dT_dt = dT_dt + L_f * _postfrz / dt / c_pd
     if mg2_snow:
         # MG2 instant ice melt -> droplets and homogeneous freezing on the
         # post-sedimentation state (micro_mg2_0.F90:2503-2685; decisions 4b, 1a,
@@ -2518,6 +2556,9 @@ def morrison_microphysics(
         dT_dt = dT_dt + constants.L_f * (_frz - _melt) / (constants.c_pd * dt)  # latent-ok: Morrison/MG2 oracle constant
         _qc_ice_melt = _melt / dt
         _qc_homog = _dqc - _qc_ice_melt
+        # the cloud-ice share of the rain frozen after sedimentation (above)
+        dq_i_dt = dq_i_dt + _postfrz_ice / dt
+        dN_i_dt = dN_i_dt + _postfrz_N_ice / dt
     if _prog_nc:
         # MG2 final droplet mean-size re-adjust (micro_mg2_0.F90:2743-2753,
         # :2812-2830; Q2'a).
