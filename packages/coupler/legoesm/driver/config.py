@@ -2282,6 +2282,13 @@ class ExperimentConfig(NamedTuple):
     # Directory of the sha256-pinned CAM6 PPE member-000 aerosol climatology +
     # MAM4 property files read by that activation; None = unset.
     cam6_aerosol_dir: str | None = None
+    # MorrisonConfig.cirrus_nucleation: "fixed" (Koop threshold, fixed number)
+    # or "cam6_liu_penner" (CAM6 nucleate_ice with pre-existing ice; MPAS lane;
+    # needs cirrus_aerosol_file).
+    morrison_cirrus_nucleation: str = "fixed"
+    # npz of a CAM prescribed MAM3 aerosol climatology mapped onto the run's
+    # cells (cam6_cirrus_aerosol.map_to_cells); None = unset.
+    cirrus_aerosol_file: str | None = None
     # Sea-ice shortwave albedo (#2106).
     #   "auto" (default)      -> resolved per run by resolve_sea_ice_albedo_scheme:
     #     "maykut_untersteiner" when the lane carries the prognostic ice skin,
@@ -5058,6 +5065,18 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "morrison_prognostic_droplet_number=True needs cam6_aerosol_dir "
                 "(the CAM6 prescribed-aerosol climatology its activation reads).")
+        if self.morrison_cirrus_nucleation not in ("fixed", "cam6_liu_penner"):
+            errors.append(f"morrison_cirrus_nucleation={self.morrison_cirrus_nucleation!r}; "
+                          "choose 'fixed' or 'cam6_liu_penner'.")
+        if self.morrison_cirrus_nucleation == "cam6_liu_penner" and not (
+                self.cirrus_aerosol_file and self.homogeneous_ice_nucleation
+                and self.morrison_warm_rain_incloud):
+            errors.append(
+                "morrison_cirrus_nucleation='cam6_liu_penner' needs cirrus_aerosol_file, "
+                "homogeneous_ice_nucleation=True and morrison_warm_rain_incloud=True.")
+        if self.cirrus_aerosol_file and self.morrison_cirrus_nucleation != "cam6_liu_penner":
+            errors.append("cirrus_aerosol_file is read only under "
+                          "morrison_cirrus_nucleation='cam6_liu_penner'.")
         if (self.morrison_sed_cfl_substeps_strict is True
                 and self.morrison_sed_cfl_substeps is False):
             errors.append(

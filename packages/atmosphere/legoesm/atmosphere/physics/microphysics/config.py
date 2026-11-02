@@ -1197,6 +1197,14 @@ class MorrisonConfig(NamedTuple):
     # C1 smoothstep from 0 at T_freeze to 1 at T_freeze - width.  0 = MG2's
     # hard switch.  KNOWN DIFFERENCE in morrison.mg2_qsfm.
     qsfm_freeze_ramp_K: float = 0.1
+    # Cirrus ice nucleation target of the homogeneous-nucleation block
+    # (APPENDED AT THE TUPLE END, positional ABI).  "fixed" (default,
+    # byte-identical): the Koop threshold with the fixed hom_ice_nuc_N.
+    # "cam6_liu_penner": CAM6's activated ice number naai (nucleate_ice.F90,
+    # Liu-Penner 2005 with pre-existing ice, cam6_nucleate_ice.py) passed in by
+    # the caller, applied as MG2 does (micro_mg2_0.F90:1117-1129).  Needs
+    # homogeneous_ice_nucleation=True and warm_rain_incloud=True.
+    cirrus_nucleation: str = "fixed"
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
@@ -1205,6 +1213,9 @@ class MorrisonConfig(NamedTuple):
 # lane needs 269 (CAM L32 at 1800 s).  ONE definition, imported by the other
 # validators (GLM 2026-09-22: three independent 1024s can drift apart).
 SED_CFL_SUBSTEPS_MAX_LIMIT = 1024
+
+# MorrisonConfig.cirrus_nucleation values (validated by the applier and the scheme).
+CIRRUS_NUCLEATION_SCHEMES = ("fixed", "cam6_liu_penner")
 
 
 class ThompsonConfig(NamedTuple):
@@ -1373,6 +1384,7 @@ def apply_microphysics_experiment_flags(
     morrison_warm_rain_incloud: bool | None = None,
     morrison_prognostic_droplet_number: bool | None = None,
     morrison_specified_nc_droplet_sedimentation: bool | None = None,
+    morrison_cirrus_nucleation: str | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1575,6 +1587,15 @@ def apply_microphysics_experiment_flags(
                 f"morrison scheme (got {scheme!r}).")
         scheme_config = scheme_config._replace(
             specified_nc_droplet_sedimentation=morrison_specified_nc_droplet_sedimentation)
+    if morrison_cirrus_nucleation is not None:
+        if morrison_cirrus_nucleation not in CIRRUS_NUCLEATION_SCHEMES:
+            raise ValueError("morrison_cirrus_nucleation must be one of "
+                             f"{CIRRUS_NUCLEATION_SCHEMES}, got {morrison_cirrus_nucleation!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_cirrus_nucleation is only read by the morrison scheme "
+                f"(got {scheme!r}).")
+        scheme_config = scheme_config._replace(cirrus_nucleation=morrison_cirrus_nucleation)
     if morrison_warm_rain_scheme is not None:
         if scheme != "morrison":
             raise ValueError(

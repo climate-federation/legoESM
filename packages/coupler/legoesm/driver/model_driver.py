@@ -13953,6 +13953,23 @@ class ModelDriver:
                 f"  CAM6 droplet activation: prescribed aerosol from "
                 f"{cfg.cam6_aerosol_dir}, top_lev={_cam6_act.top_lev}, "
                 f"mixing substeps <= {_cam6_act.n_max}")
+        _cirrus_setup = None
+        if cfg.morrison_cirrus_nucleation == "cam6_liu_penner":
+            from legoesm.atmosphere.physics.microphysics.cam6_aerosol_climatology import (
+                trop_cloud_top_lev)
+            from legoesm.atmosphere.physics.microphysics.cam6_cirrus_aerosol import load_setup
+            from legoesm.atmosphere.physics.turbulence.integration import resolved_clubb_config
+            _pref_mid = np.asarray(self.sigma.pressure_at_full(jnp.asarray(constants.p_ref)))
+            _cirrus_setup = load_setup(cfg.cirrus_aerosol_file, trop_cloud_top_lev(
+                _pref_mid, resolved_clubb_config(phys_cfg.turbulence).trop_cloud_top_press))
+            _ps_chk, _ = self._owned_p_s_and_lat()
+            _nc_file = int(np.load(cfg.cirrus_aerosol_file)["PS"].shape[-1])
+            if _nc_file != int(np.prod(np.shape(_ps_chk))):
+                raise ValueError(f"cirrus_aerosol_file has {_nc_file} cells, the run "
+                                 f"{int(np.prod(np.shape(_ps_chk)))}")
+            logger.info(
+                f"  CAM6 cirrus nucleation (Liu-Penner, pre-existing ice): prescribed "
+                f"aerosol from {cfg.cirrus_aerosol_file}, top_lev={_cirrus_setup.top_lev}")
 
         _mynn_col = getattr(cfg, "turbulence", "none") == "mynn25"
 
@@ -13966,6 +13983,7 @@ class ModelDriver:
             return make_physics(_cfg, model_type="mpas", dt=DT_PHYS,
                                 mynn_initflag=mynn_initflag,
                                 cam6_activation=_cam6_act,
+                                cirrus_aerosol=_cirrus_setup,
                                 budget_ledger_level_weight=_ledger_weight,
                                 column_mesh=_column_mesh, need_rad=need_rad,
                                 f_land=(_f_land_cells
@@ -15426,6 +15444,7 @@ class ModelDriver:
                                     False))
         _last_force_day = None
         _cam6_held = None
+        _cirrus_held = None
         # External CMIP6 forcing (ozone file / aerosol / transient GHG) on
         # the MPAS path: threaded through the same per-step TRACED
         # ``forcing`` dict as T_sfc, refreshed at daily cadence.  The
@@ -16183,7 +16202,8 @@ class ModelDriver:
             if (_sst_forcing or _ext_forcing or _solar_ext
                     or self._segment_callback is not None
                     or _cam6_act is not None
-                    or _cariolle_monthly is not None):
+                    or _cariolle_monthly is not None
+                    or _cirrus_setup is not None):
                 # Anchored on the ABSOLUTE step from the run's day-0 origin:
                 # ``START_DAY + step*DT`` rounds differently from the unbroken
                 # run's ``0 + (start_step+step)*DT`` (1 ulp at step 219 of a
@@ -16421,6 +16441,16 @@ class ModelDriver:
                     _cam6_held, _forcing["cam6_aerosol"] = cam6_aerosol_forcing(
                         cfg.cam6_aerosol_dir, _force_day % NOLEAP_ONE_YR,
                         *_cam6_hw, held=_cam6_held)
+                if _cirrus_setup is not None:
+                    # CAM prescribed_aero for the cirrus nucleation aerosol (MAM3
+                    # file mapped to the cells): same record handling and clock.
+                    from legoesm.atmosphere.physics.microphysics.cam6_aerosol_climatology import (  # noqa: E501
+                        NOLEAP_ONE_YR)
+                    from legoesm.atmosphere.physics.microphysics.cam6_cirrus_aerosol import (  # noqa: E501
+                        cirrus_aerosol_forcing)
+                    _cirrus_held, _forcing["cirrus_aerosol"] = cirrus_aerosol_forcing(
+                        cfg.cirrus_aerosol_file, _cirrus_setup, _force_day % NOLEAP_ONE_YR,
+                        held=_cirrus_held)
                 # Surface heat fluxes for the convective diurnal-cycle CAPE
                 # subtraction, which is what delays land storms from noon to
                 # late afternoon.  They are the PREVIOUS step's: turbulence

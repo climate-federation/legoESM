@@ -79,6 +79,10 @@ from legoesm.core.smooth import smooth_min
 from legoesm.thermo import saturation_specific_humidity_ice as _saturation_specific_humidity_ice
 from legoesm.thermo import saturation_specific_humidity_ice_goff_gratch as _qsat_ice_goff_gratch
 from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezing_rh_factor
+from legoesm.thermo import (
+    saturation_vapor_pressure_goff_gratch,
+    saturation_vapor_pressure_ice_goff_gratch,
+)
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     saturation_adjustment_gsam,
@@ -153,6 +157,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
 )
 from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.microphysics.config import (
+    CIRRUS_NUCLEATION_SCHEMES,
     SED_CFL_SUBSTEPS_MAX_LIMIT,
     MorrisonConfig,
     resolve_unset_ice_snow_d_auto,
@@ -214,6 +219,11 @@ _NUC_RH_ICE_THRESHOLD = 1.08     # ice-nucleation RH_ice gate
 _NUC_RH_LIQ_THRESHOLD = 0.999    # liquid-nucleation RH_liq gate
 _MG2_OMSM = 1.0 - 1.0e-5           # MG2 limiter round-off margin omsm, micro_mg_utils.F90:117
 _MG2_ACCRETION_VARCOEF_EXP = 1.15  # MG2 accrete_cloud_water_rain var_coef(relvar, 1.15), micro_mg_utils.F90:1317
+# MG2 ice nucleation from naai (micro_mg2_0.F90:334, :1117-1118; microp_aero.F90:73)
+_MG2_ICENUCT_OFFSET_K = 5.0        # icenuct = tmelt - 5
+_MG2_ICENUC_RHI = 1.05             # relhum*esl/esi > 1.05
+_MG2_MINCLD = 1.0e-4               # mincld
+_CAM6_HETFRZ_T_MIN_K = 235.15      # hetfrz_classnuc_cam.F90:779 lower bound [K]
 
 # MorrisonConfig fields with no counterpart in gSAM's satadj_liquid: under the
 # sam flavour they must stay at their defaults (setting one raises).
@@ -420,6 +430,7 @@ def morrison_microphysics(
     relvar: jax.Array | None = None,
     npccn: jax.Array | None = None,
     qsatfac_ramp: jax.Array | None = None,
+    naai: jax.Array | None = None,
 ) -> MicrophysicsOutput:
     """Compute Morrison double-moment microphysics tendencies.
 
@@ -449,6 +460,11 @@ def morrison_microphysics(
         every MG2 kernel reads, exactly as micro_mg2_0.F90:922-927 scales
         qvl/qvi (rain evaporation, snow sublimation, Bergeron, ice
         deposition/sublimation and its limiter).  None = qsfm = 1.
+    naai
+        CAM6 activated ice number ``(ncol, nlev)`` [1/kg] (nucleate_ice_cam_calc,
+        :func:`legoesm.atmosphere.physics.microphysics.cam6_nucleate_ice.cam6_naai`);
+        required by, and accepted only under, ``config.cirrus_nucleation ==
+        "cam6_liu_penner"``.
 
     Returns
     -------
@@ -503,6 +519,25 @@ def morrison_microphysics(
         # user decision 2026-10-20: inputs the switch-off path never reads are refused
         raise ValueError("npccn= is read only under "
                          "MorrisonConfig.prognostic_droplet_number=True.")
+    _cirrus = getattr(config, "cirrus_nucleation", "fixed")
+    if _cirrus not in CIRRUS_NUCLEATION_SCHEMES:
+        raise ValueError(f"MorrisonConfig.cirrus_nucleation={_cirrus!r}; choose one of "
+                         f"{CIRRUS_NUCLEATION_SCHEMES}.")
+    _cirrus_lp = _cirrus == "cam6_liu_penner"
+    if _cirrus_lp:
+        _bad = [msg for ok, msg in (
+            (config.homogeneous_ice_nucleation, "homogeneous_ice_nucleation=True"),
+            (config.warm_rain_incloud, "warm_rain_incloud=True (MG2's ice cloud fraction)"),
+            (cloud_fraction is not None, "the cloud fraction passed as cloud_fraction="),
+            (naai is not None and jnp.shape(naai) == T.shape,
+             f"the activated ice number passed as naai= with shape {T.shape}"),
+        ) if not ok]
+        if _bad:
+            raise ValueError('MorrisonConfig.cirrus_nucleation="cam6_liu_penner" needs '
+                             + ", ".join(_bad) + ".")
+    elif naai is not None:
+        raise ValueError('naai= is read only under MorrisonConfig.cirrus_nucleation='
+                         '"cam6_liu_penner".')
     # sam flavour: gSAM's micro_proc puts the state on the liquid saturation
     # curve (satadj_liquid, condensing OR evaporating cloud) BEFORE the M2005
     # process rates (microphysics.f90:743), so every rate below sees the
@@ -943,6 +978,11 @@ def morrison_microphysics(
     dN_i_nuc = (
         jnp.clip(N_i_target - N_frozen, 0.0) / jnp.clip(dt, 1.0) * nuc_gate
     )
+    if _cirrus_lp:
+        # Cooper stands in for CAM6's mixed-phase hetfrz_classnuc, which acts only
+        # for 235.15 K < T < 269.15 K (hetfrz_classnuc_cam.F90:779); below, CAM6's
+        # cirrus ice comes from naai alone (block 1b).
+        dN_i_nuc = jnp.where(T > _CAM6_HETFRZ_T_MIN_K, dN_i_nuc, 0.0)
     # Mass source: each new crystal starts at MI0 = 4/3·π·ρ_ci·r³ (SAM
     # MNUCCD = NNUCCD·MI0), so freshly-nucleated ice carries mass rather
     # than relying solely on subsequent deposition.
@@ -978,6 +1018,22 @@ def morrison_microphysics(
                 config.hom_freeze_T_sharpness * (config.hom_freeze_T_max - T))
         )
         n_hom_target = config.hom_ice_nuc_N / jnp.clip(rho, _RHO_FLOOR)  # per-mass
+        if _cirrus_lp:
+            # CAM6 MG2 (micro_mg2_0.F90:1117-1129): where naai > 0, T < tmelt - 5
+            # and relhum*esl/esi > 1.05, the grid-mean target is naai*icldm with
+            # icldm = max(ast, mincld) (:869).  Hard switches as in MG2; naai
+            # itself is a hard-threshold scheme (cam6_nucleate_ice, not
+            # differentiable).  KNOWN DIFFERENCES: Cooper's crystals of this step
+            # are counted as already present (legoESM keeps Cooper as the stand-in
+            # for CAM6's hetfrz_classnuc), and MG2's nimax cap is not applied.
+            _esl = saturation_vapor_pressure_goff_gratch(T)
+            _esi = saturation_vapor_pressure_ice_goff_gratch(T)
+            hom_gate = jnp.where(
+                (naai > 0.0) & (T < T_freeze - _MG2_ICENUCT_OFFSET_K)
+                # relhum = q/qvl on the qsfm-scaled qvl (:933, :1109-1112)
+                & (q_v / jnp.clip(q_sat_mg2, 1.0e-12) * _esl / _esi
+                   > _MG2_ICENUC_RHI), 1.0, 0.0)
+            n_hom_target = naai * jnp.maximum(cloud_fraction, _MG2_MINCLD)
         # Top up to n_hom_target counting the COOPER crystals nucleated in this
         # SAME step (dN_i_nuc*dt), not just the pre-existing N_i.  Cooper's
         # ``gate_ice`` opens at RH_ice >= 1.08, which is ALWAYS satisfied when the

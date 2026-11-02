@@ -4828,10 +4828,14 @@ def thread_morrison_scalars(config, scheme, micro_config):
                 else _prog_nc)
     _sed_spec = (None if _sed_spec is _ExpCfg._field_defaults[
         "morrison_specified_nc_droplet_sedimentation"] else _sed_spec)
+    _cirrus = getattr(config, "morrison_cirrus_nucleation",
+                      _ExpCfg._field_defaults["morrison_cirrus_nucleation"])
+    _cirrus = (None if _cirrus == _ExpCfg._field_defaults["morrison_cirrus_nucleation"]
+               else _cirrus)
     if (not _touched and _flavor is None and _sed_sub is None
             and _sed_strict is None and _sed_max is None and _graupel is None
             and _wrs is None and _incloud is None and _prog_nc is None
-            and _sed_spec is None):
+            and _sed_spec is None and _cirrus is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4844,7 +4848,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
         morrison_do_graupel=_graupel, morrison_warm_rain_scheme=_wrs,
         morrison_warm_rain_incloud=_incloud,
         morrison_prognostic_droplet_number=_prog_nc,
-        morrison_specified_nc_droplet_sedimentation=_sed_spec)
+        morrison_specified_nc_droplet_sedimentation=_sed_spec,
+        morrison_cirrus_nucleation=_cirrus)
 
 
 def _resolve_microphysics(config):
