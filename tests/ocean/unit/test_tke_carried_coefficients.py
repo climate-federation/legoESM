@@ -25,8 +25,7 @@ from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 def _step_entry_helper_fixture(tke_cfg):
     from legoesm.ocean.eos import NemoSEOSConfig
     from legoesm.ocean.vertical import (
-        create_full_step_coordinate, create_partial_cell_coordinate,
-        create_z_star_from_thicknesses,
+        create_partial_cell_coordinate, create_z_star_from_thicknesses,
     )
 
     ny, nx, nz = 2, 2, 3
@@ -425,7 +424,8 @@ def test_literal_mxl_ldown_updates_jpkm1_only_with_true_terminal_e3t():
 def test_terminal_e3t_flag_reaches_the_closure_lengths_and_refuses_unused_paths(
         monkeypatch):
     """The selected e3t(jpk) row must reach every length call; unselected
-    stages refuse the flag instead of silently ignoring it."""
+    stages refuse the flag instead of silently ignoring it.
+    """
     cfg = TKEConfig(prognostic=True, n2_mode="nemo_bn2",
                     tke_n2_evaluation_stage="step_entry",
                     tke_mxl_choice=3, nemo_mxl_terminal_e3t=True,
