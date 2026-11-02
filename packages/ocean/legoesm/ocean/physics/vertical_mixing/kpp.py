@@ -434,8 +434,15 @@ def kpp_vertical_mixing(
     eos_fn=None,
     u_stokes: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
+    h_k: jnp.ndarray | None = None,
 ) -> VerticalMixingOutput:
     """Apply LMD94-style KPP vertical mixing.
+
+    ``h_k`` (optional, (..., nlev)): the live layer thicknesses with partial
+    bottom cells.  When given, the non-local flux divergence divides by these
+    and the flux is kept only at interfaces between two wet cells, so the
+    column content change h_k * dT/dt sums to zero.  Without it the divisor is
+    dz_ref * jacobian, which is thicker than a partial bottom cell.
 
     Parameters
     ----------
@@ -691,7 +698,13 @@ def kpp_vertical_mixing(
     # but the 0/0 division produces NaN gradients in the backward
     # pass.  Safe denominator (``where dz>0, dz, 1``) gives clean
     # gradients while the where-mask still zeroes the forward output.
-    dz_safe = jnp.where(dz_actual > 0.0, dz_actual, 1.0)
+    dz_nl = dz_actual
+    if h_k is not None:
+        dz_nl = h_k
+        wet_iface = (h_k[..., :-1] > 0.0) & (h_k[..., 1:] > 0.0)
+        G_half = jnp.where(wet_iface, G_half, 0.0)
+        F_T = cfg.gamma_T * Q_T[..., jnp.newaxis] * G_half
+    dz_safe = jnp.where(dz_nl > 0.0, dz_nl, 1.0)
     dT_nonlocal_top = -F_T[..., :1] / dz_safe[..., :1]
     dT_nonlocal_int = (F_T[..., :-1] - F_T[..., 1:]) / dz_safe[..., 1:-1]
     dT_nonlocal_bot = F_T[..., -1:] / dz_safe[..., -1:]
@@ -699,7 +712,7 @@ def kpp_vertical_mixing(
         [dT_nonlocal_top, dT_nonlocal_int, dT_nonlocal_bot], axis=-1
     )  # (..., nlev)  [K/s]
     dT_nonlocal = jnp.where(
-        is_unstable_col[..., jnp.newaxis] & (dz_actual > 0.0),
+        is_unstable_col[..., jnp.newaxis] & (dz_nl > 0.0),
         dT_nonlocal, 0.0,
     )
 
@@ -712,7 +725,7 @@ def kpp_vertical_mixing(
         [dS_nonlocal_top, dS_nonlocal_int, dS_nonlocal_bot], axis=-1
     )  # (..., nlev)  [psu/s]
     dS_nonlocal = jnp.where(
-        is_unstable_col[..., jnp.newaxis] & (dz_actual > 0.0),
+        is_unstable_col[..., jnp.newaxis] & (dz_nl > 0.0),
         dS_nonlocal, 0.0,
     )
 
