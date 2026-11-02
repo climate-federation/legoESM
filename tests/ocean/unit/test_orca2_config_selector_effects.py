@@ -1112,8 +1112,8 @@ def test_rk3_stage3_salt_geothermal_and_krhs_order_change_model_step_qsr_sites()
             scheme="nemo_qsr_2bd",
         )
         cfg_2bd = base_cfg._replace(
-            physics=base_cfg.physics._replace(shortwave_penetration=sw_2bd),
-        )
+            rk3_stage3_heat_nemo_written=False, rk3_stage3_tracer_krhs_nemo_order=False,
+            rk3_stage3_tracer_nemo_stored_thickness=False, physics=base_cfg.physics._replace(shortwave_penetration=sw_2bd))
         with pytest.raises(
             _SelectorTouched, match="nemo_qsr_stage3_kmm_source_association",
         ):
@@ -1259,5 +1259,33 @@ def test_l4b_and_l6_geothermal_and_damping_validator_coupling_and_valid_pair_ste
                 surface_forcing=forcing,
                 K33_iso=jnp.ones((4, 6, 2), dtype=jnp.float64),
             )
+    finally:
+        set_policy(prev_policy)
+
+
+def test_stage_transport_stored_r3uv_pair_reaches_both_stage2_and_stage3_transport(
+        monkeypatch):
+    """Exercise both stage-2 (:9724) and stage-3 (:9795) stored-r3uv transport handoffs."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    prev_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid, z_coord, state, forcing, base_cfg = _stage3_tracer_step_fixture()
+        real_transport = omlc._nemo_ws_stage_transport
+        seen_pairs = []
+
+        def spy_transport(*args, **kwargs):
+            seen_pairs.append((int(args[2]), kwargs.get("nemo_stage_pair") is not None))
+            return real_transport(*args, **kwargs)
+
+        monkeypatch.setattr(omlc, "_nemo_ws_stage_transport", spy_transport)
+        cfg = base_cfg._replace(
+            rk3_stage_transport_stored_r3uv=True,
+            rk3_stage_r3uv_nemo_literal=True,
+        )
+        m = LatLonCGridOceanModel(grid, z_coord, cfg)
+        jax.make_jaxpr(lambda s: m.step(s, 300.0, surface_forcing=forcing))(state)
+        assert seen_pairs == [(0, False), (1, True), (2, True)]
     finally:
         set_policy(prev_policy)
