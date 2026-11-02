@@ -2616,7 +2616,10 @@ def _si3_one_pra_subcycle_step(
         jnp.concatenate(m_list, axis=2) for m_list in m_3d_lists
     )
 
-    if x_first:
+    # Alternating sweep order (`:267-367`).  DECISION 198: a traced ``x_first``
+    # (the subcycle scan) selects the order with ``lax.cond``; a Python bool
+    # (eager calls) runs the same branch directly.
+    def _sweep_x_then_y(_):
         zarea_mid, c_mid, m_mid = si3_adv_x(
             ihls,
             zdt,
@@ -2645,7 +2648,9 @@ def _si3_one_pra_subcycle_step(
             _plant_omit_donor_readjust=_plant_omit_donor_readjust,
             _plant_corrupt_receiver_flux=_plant_corrupt_receiver_flux,
         )
-    else:
+        return c_packed_out, m_packed_out
+
+    def _sweep_y_then_x(_):
         zarea_mid, c_mid, m_mid = si3_adv_y(
             ihls,
             zdt,
@@ -2674,6 +2679,12 @@ def _si3_one_pra_subcycle_step(
             _plant_omit_donor_readjust=_plant_omit_donor_readjust,
             _plant_corrupt_receiver_flux=_plant_corrupt_receiver_flux,
         )
+        return c_packed_out, m_packed_out
+
+    if isinstance(x_first, bool):
+        c_packed_out, m_packed_out = (_sweep_x_then_y if x_first else _sweep_y_then_x)(None)
+    else:
+        c_packed_out, m_packed_out = jax.lax.cond(x_first, _sweep_x_then_y, _sweep_y_then_x, None)
 
     swept_map: dict[str, tuple[Field, SI3PratherMoments]] = {}
     offset = 0
@@ -3082,11 +3093,16 @@ def _si3_pra_subcycle_cond_dispatch(
 ):
     moment_signs = _moment_nfd_signs(_plant_wrong_nfd_sign, dtype=h_i.dtype)
 
-    def _call_step(op, jt_val: int, ihls_val: int | Field):
-        x_first = int(kt_parity) == ((jt_val - 1) % 2)
-        if _plant_invert_sweep_order:
-            x_first = not x_first
-        return _si3_one_pra_subcycle_step(
+    def _call_step(op, jt_val: int, ihls_val: int | Field, x_first: bool | Field | None = None):
+        if x_first is None:
+            x_first = int(kt_parity) == ((jt_val - 1) % 2)
+            if _plant_invert_sweep_order:
+                x_first = not x_first
+        # A traced sweep parity cannot be a jit static argument: the scan body
+        # calls the unjitted step, which the enclosing trace inlines.
+        step = (_si3_one_pra_subcycle_step if isinstance(x_first, bool)
+                else _si3_one_pra_subcycle_step.__wrapped__)
+        return step(
             op,
             jnp.asarray(ihls_val, dtype=jnp.int32),
             x_first=x_first,
@@ -3121,6 +3137,25 @@ def _si3_pra_subcycle_cond_dispatch(
         jnp.int32(0),
         jnp.int32(max(0, nn_hls - 1)),
     )
+    if any(isinstance(leaf, jax.core.Tracer)
+           for leaf in jax.tree_util.tree_leaves((init_ops, icycle_arr))):
+        # DECISION 198: traced callers run `DO jt = 1, icycle` (`:156-498`) as one
+        # three-step lax.scan with the same per-jt ihls, sweep parity and
+        # `icycle >= jt` selection as the unrolled calls below; the body is
+        # checkpointed so reverse mode keeps only the carry.  Eager calls keep
+        # the unrolled calls.
+        ihls_tab = jnp.stack([ihls_1, jnp.int32(max(0, nn_hls - 2)), jnp.int32(max(0, nn_hls - 3))])
+
+        def _subcycle(carry, jt):
+            x_first = jnp.int32(kt_parity) == (jt - 1) % 2
+            if _plant_invert_sweep_order:
+                x_first = ~x_first
+            new = _call_step((carry,) + init_ops[1:], 0, ihls_tab[jt - 1], x_first=x_first)[0]
+            keep = icycle_arr >= jt
+            return jax.tree_util.tree_map(lambda n, o: jnp.where(keep, n, o), new, carry), None
+
+        out, _ = jax.lax.scan(jax.checkpoint(_subcycle), init_carry, jnp.arange(1, 4, dtype=jnp.int32))
+        return out
     ops_1 = _call_step(init_ops, 1, ihls_1)
     ops_2_cand = _call_step(ops_1, 2, jnp.int32(max(0, nn_hls - 2)))
     cond_2 = icycle_arr >= jnp.int32(2)
