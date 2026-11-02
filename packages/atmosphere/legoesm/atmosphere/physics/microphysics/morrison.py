@@ -1971,6 +1971,10 @@ def morrison_microphysics(
         # falls slightly SLOWER in thin upper-trop air than the 0.54 form (the
         # 0.54 over-sped the anvil ice ~20-30%; iter-209 fix, pairs with #6).
         dum_i = safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXP_ICE)
+        if config.warm_rain_incloud:
+            # CAM6 MG2 mode: ain = ai*(rhosu/rho)^0.35 has no density floor
+            # (micro_mg2_0.F90:900); the SAM path keeps its floor.
+            dum_i = safe_pow(config.rho_su / rho, _FALL_RHO_EXP_ICE)
         cons4 = math.gamma(4.0 + config.fall_b_r) / 6.0
         cons28 = math.gamma(4.0 + config.fall_b_i) / 6.0
         qr_pos = jnp.clip(q_r, 0.0)

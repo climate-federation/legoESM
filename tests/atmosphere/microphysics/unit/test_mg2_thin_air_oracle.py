@@ -156,7 +156,6 @@ def _ice_subset_density_only(fx):
     return (r_um >= 20.0) & (fx["ice_out_vtrmi"] < cap) & (fx["ice_out_vni"] < cap)
 
 
-@pytest.mark.xfail(strict=True, reason="MG2-mode ice fall speed floors rho at 0.1 in ain")
 def test_ice_fall_speed_density_factor_thin_air(monkeypatch):
     """MG2-mode cloud-ice fall speeds (ain = ai (rhosu/rho)^0.35, :900)
     against micro_mg2_0.F90:2119-2147 for the same ice state, on the points
