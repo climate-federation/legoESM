@@ -602,6 +602,14 @@ the plants and the master scorer; the five items below were raised).
    Final jit against parent jit in scored fields: 11 elements, all zero or NaN
    signs.  User decision 2 (accept the sign changes) is still pending.
 
-RESUME1_FINAL_CHECKS
+Final checks from a clean checkout of 594d6720f1, serial, CPU fp64, largest
+resident set 7.9 GB (sampled every 20 s): the DECISION 194 unit file
+`3 passed`; the O12 file `81 passed`; the citation gate `45 passed`; the O8–O16
+master-scorer tests `30 passed`; and the O9 `15 passed`, O10 `44 passed`, O14
+`10 passed`, lane-3 `si3thd` gates `22`, `8`, `13`, `17 passed` and shared BL99
+unit file `12 passed`, each the same count as at the parent.  Master scorer,
+100 steps: `PASS_ALL_O8_O13_0_ULP`, `PASS_O14_0_ULP`,
+`PASS_ALL_O15_O16_0_ULP`.  The full-step `value_and_grad`, the AD probe, the O6
+reverse compiles and the O4 file were not run in this resume.
 
 independent review: pending (author: Claude)
