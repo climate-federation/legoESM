@@ -412,6 +412,10 @@ command ran.
   4,416 and 4,565 s; both passes scored PASS. Before the cache clear the
   same two passes took 4,396 and 4,475 s, so clearing costs no measured
   time.
+- Receipt citation gates at `0cada202c8` (clean clone): per-receipt from
+  "Resume 5 review-HOLD closure", 62 citations, and default cumulative, 274
+  citations; both PASS with 0 unmapped citations, 0 failures and 0 map
+  entries failing the full audit; 12 of 12 built-in controls fired.
 - Memory-rule disclosure: the O17 unit file peaks at about 25 GB because of
   the 7 x 7 full-step compile behind its compiled-versus-eager census. It ran
   alongside the preflight and the RSS probe, about 60 GB combined with over
