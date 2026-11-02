@@ -14,9 +14,11 @@ dycore step; the physics-cadence write step already returns the n-step
 increment), alternating the full- and held-radiation builds on the run's
 ``rad_update_steps / physics_update_steps`` cadence. The ``+fixers`` arm adds
 the step's positivity stage (``apply_water_positivity``, run's settings).
+The forcing's solar clock (``seconds_of_day``, ``day_of_year``) advances with
+the calls; every other forcing field is held at the start.
 Not covered offline: horizontal and vertical transport, the dry-mass fixer
 (global), the vertical T filter, the land model's evolution beyond what the
-physics carry holds, and the forcing's time advance (held at the start).
+physics carry holds (land and lagged surface-flux forcing fields are held).
 
 Reported per arm and box (ocean, area-weighted): 950-850 hPa cloud fraction
 (CLUBB carry), grid-mean q_c, the inversion pressure, and the box-mean q_c
@@ -139,6 +141,16 @@ def main(argv=None):
             for b, x in BOXES.items()}
     c = model.config
     res = {}
+    s0, d0 = float(forcing["seconds_of_day"]), float(forcing["day_of_year"])
+
+    def forcing_at(n):
+        """The run's forcing with the clock advanced n physics calls (the driver
+        advances the solar time; everything else is held at the start)."""
+        t = s0 + n * DT * nphys
+        f = dict(forcing)
+        f["seconds_of_day"] = jnp.asarray(t % 86400.0, dtype=jnp.asarray(forcing["seconds_of_day"]).dtype)
+        f["day_of_year"] = jnp.asarray(d0 + t // 86400.0, dtype=jnp.asarray(forcing["day_of_year"]).dtype)
+        return f
 
     for arm in a.arms:
         acfg = arm_config(cfg, arm_off(arm, a.gwd == "on"))
@@ -146,8 +158,8 @@ def main(argv=None):
         f_held = make(acfg, *ha, **hkw)
         fixers = arm == "+fixers"
 
-        def apply(fn, st, ps):
-            r = fn(st, mesh, sig, phys_state=ps, forcing=forcing)
+        def apply(fn, st, ps, fc):
+            r = fn(st, mesh, sig, phys_state=ps, forcing=fc)
             t, ps_new = (r[0], r[1]) if type(r) is tuple else (r, ps)
             p_s = st.p_s.data + DT * t.dp_s_dt.data
             tr = st.tracers
@@ -164,14 +176,14 @@ def main(argv=None):
                     energy_consistent=c.energy_consistent_moisture_clip, area=mesh.areaCell)
                 st = st._replace(tracers=tr, T=st.T.replace(data=T))
             return st, ps_new
-        j_full, j_held = jax.jit(lambda s, p: apply(f_full, s, p)), \
-            jax.jit(lambda s, p: apply(f_held, s, p))
+        j_full, j_held = jax.jit(lambda s, p, f: apply(f_full, s, p, f)), \
+            jax.jit(lambda s, p, f: apply(f_held, s, p, f))
         st, ps = state0, cap["phys_state"]
         rows, hist = {b: [] for b in BOXES}, []
         t1 = time.time()
         for n in range(ncall):
             qc_prev = np.asarray(st.tracers["q_c"].data, float)
-            st, ps = (j_full if n % rad_every == 0 else j_held)(st, ps)
+            st, ps = (j_full if n % rad_every == 0 else j_held)(st, ps, forcing_at(n))
             T = np.asarray(st.T.data, float)
             qc = np.asarray(st.tracers["q_c"].data, float)
             if not (np.all(np.isfinite(T)) and np.all(np.isfinite(qc))):
