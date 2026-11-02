@@ -30,11 +30,14 @@ _FLUX = ("mean_surface_sensible_heat_flux", "mean_surface_latent_heat_flux",
 
 def _time_coded_fluxes(state):
     """Flux store on the state store's grid and times; every value = 100*(k+1)
-    at time index k, so a plane names the snapshot it came from."""
+    at time index k (net radiation 10*(k+1), so the upwelling differences are
+    time coded too), so a plane names the snapshot it came from."""
     t = state.time.values
     shape = (len(t), state.sizes["lat"], state.sizes["lon"])
     code = (100.0 * (np.arange(len(t)) + 1.0))[:, None, None]
-    data = {v: (("time", "lat", "lon"), np.broadcast_to(code, shape).astype(np.float32))
+    data = {v: (("time", "lat", "lon"),
+                np.broadcast_to(code / 10.0 if "_net_" in v else code,
+                                shape).astype(np.float32))
             for v in _FLUX}
     data["land_sea_mask"] = (("lat", "lon"), np.zeros(shape[1:], np.float32))
     return xr.Dataset(
@@ -50,8 +53,8 @@ def test_flux_planes_are_the_initial_time_snapshot(k):
     c = 100.0 * (k + 1)
     # Each plane is a sign flip / difference of the coded means at ONE time.
     for name, want in (("sfc_shf", -c), ("sfc_lhf", -c), ("sfc_tau_x", -c),
-                       ("sfc_tau_y", -c), ("sfc_sw_down", c), ("sfc_sw_up", 0.0),
-                       ("sfc_lw_up", 0.0)):
+                       ("sfc_tau_y", -c), ("sfc_sw_down", c), ("sfc_sw_up", 0.9 * c),
+                       ("sfc_lw_up", 0.9 * c)):
         np.testing.assert_array_equal(getattr(sl, name), want, err_msg=name)
 
 
