@@ -149,6 +149,52 @@ schema/source findings. `PLAUSIBLE`: none promoted to an O17 physics verdict.
 
 independent review: operator (Claude)
 
+## Resume 6: the operator --run refusal
+
+Review d was LAND; RUN from both reviewers. User DECISION 201 keeps O17
+scoring eager. The operator's --run at `2b1921abc4` then refused before
+NEMO started. Master preflight steps 1-10 ran, and then step 10's stub
+driver stopped with "REFUSE: stub run needs the real scorer report
+O17_STUB_SCORE_JSON". Only the wrapper's --preflight-only path exported the
+two real-scorer reports. The --run and --admit-existing branches called the
+master, whose own full preflight runs that stub driver, without them. The
+--run control flow had never been run end to end (checklist item 15).
+
+The check that refused is unchanged. The changes:
+
+- --run and --admit-existing first build the 2-step writer-shaped ORCA2 record
+  from the model and score it with the real scorer: identical passes; the
+  1-ULP `t_si` and signed-zero plants fail. They export those two reports,
+  then call the master. --run goes through one shared entry, the same one
+  the operator uses.
+- The master refuses a missing report with the same message at the start of
+  its preflight, instead of after steps 1-9.
+- `O8O16_STOP_BEFORE_BUILD=1` stops the master's --run after its full preflight
+  and its RAM and disk gates, and before any evidence directory, build or
+  NEMO. The stub driver's own children never inherit it.
+- --preflight-only now runs the wrapper's own --run branch: same environment,
+  same branch, same master --run entry, a clean committed tree, and the stop
+  above. Its evidence path is under the preflight's scratch. It also runs a
+  plant that repeats `2b1921abc4`: the shared entry without the reports. The
+  plant must be refused with the stub-score message. Measured, it is refused
+  in seconds with that message.
+- A static test pins the supply on both branches, the plant, the dry stop's
+  position after the gates and before any build, and the doubled refusal.
+  Run at `2b1921abc4`, it fails at its first assertion: the --run branch had
+  no score supply.
+
+Verification from a clean clone of `d28bccc16b`, TMPDIR under the round's
+work directory: `run.sh --preflight-only` exit 0 in 3525 s. Its last lines
+were `PASS_100_STEP_STUB_DRIVER_RETENTION`,
+`PASS_EXISTING_CFG_DIGESTS_UNCHANGED`, `PREFLIGHT_OK: no real NEMO integration
+was run; worst-case master 140965556460 bytes (131.28 GiB)`,
+`DRY_RUN_STOPPED_BEFORE_BUILD_AND_NEMO: <scratch>/si3_rounds/round0/oracle_o17_dry`
+and `PASS_O17_UNIFIED_MASTER_PREFLIGHT_AND_NUMERICAL_PLANTS`. No
+`ORCA2_SAS_ICE_O17_REF` or `_REC` build exists, and nothing was written under
+the real `si3_rounds/`. Other results at that commit: the master acquisition
+file had 28 passed; the O17 static tests, 9 passed. The O17 unit file was not
+re-run, because nothing it imports changed. No NEMO command ran.
+
 ## Resume 5 review-HOLD closure
 
 This section is authoritative for the review of `6e02036e3f`. No NEMO
