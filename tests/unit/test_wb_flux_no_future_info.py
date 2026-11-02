@@ -47,8 +47,25 @@ def test_flux_planes_are_the_initial_time_snapshot(k):
     state = _synthetic_era5_multitime()
     sl = e2s.load_era5_slice(_flux_config(load_surface_fluxes=True), k,
                              ds=state, flux_ds=_time_coded_fluxes(state))
-    np.testing.assert_array_equal(sl.sfc_shf, -100.0 * (k + 1))
-    np.testing.assert_array_equal(sl.sfc_sw_down, 100.0 * (k + 1))
+    c = 100.0 * (k + 1)
+    # Each plane is a sign flip / difference of the coded means at ONE time.
+    for name, want in (("sfc_shf", -c), ("sfc_lhf", -c), ("sfc_tau_x", -c),
+                       ("sfc_tau_y", -c), ("sfc_sw_down", c), ("sfc_sw_up", 0.0),
+                       ("sfc_lw_up", 0.0)):
+        np.testing.assert_array_equal(getattr(sl, name), want, err_msg=name)
+
+
+def test_uncached_sample_reads_its_forcing_slice_at_the_initial_time():
+    """The uncached loader's forcing slice is the third ``_sample_inputs``
+    slice, read at i_ic for every lead layout."""
+    from legoesm.training import scale_build as sb
+
+    state = _synthetic_era5_multitime()
+    flux = _time_coded_fluxes(state)
+    _, tg, f = sb._sample_inputs(_flux_config(), _flux_config(load_surface_fluxes=True),
+                                 0, 1, state, None, flux, int, lead_stride=1)
+    np.testing.assert_array_equal(f.sfc_shf, -100.0)      # time 0, not 1
+    assert len(tg) == 1
 
 
 def test_a_missing_initial_time_flux_is_an_error_not_a_neighbour():

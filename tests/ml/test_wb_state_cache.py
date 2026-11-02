@@ -20,6 +20,7 @@ def _rec(i):
     carry = Carry(rng.normal(size=(3, 4, 2)), rng.normal(size=(3, 4)))
     sfc = {"t2m": rng.normal(size=(3, 4)), "u10": rng.normal(size=(3, 4))}
     forcing = {"T_sfc": np.where(rng.random(12) > 0.5, np.nan, 280.0),
+               "sfc_shf": np.full(12, float(i)),
                "day_of_year": np.asarray(float(i)),
                "seconds_of_day": np.asarray(21600.0)}
     return carry, sfc, forcing
@@ -206,4 +207,5 @@ def test_every_lead_uses_the_initial_time_forcing(tmp_path, monkeypatch):
                                  None, "none", None)
     _, target, forcing = s[0]
     assert float(forcing["day_of_year"]) == 2.0          # _rec(i) codes i here
+    np.testing.assert_array_equal(forcing["sfc_shf"], 2.0)   # IC fluxes, not a lead's
     assert len(target) == 2
