@@ -84,6 +84,15 @@ class OpenBoundaryData(NamedTuple):
     north_t3: jnp.ndarray | None = None
     tau_in: jnp.ndarray | None = None
     tau_out: jnp.ndarray | None = None
+    # Baroclinic velocity radiation (normal and tangential): None keeps the
+    # CROCO oblique form above; a value selects MOM6's 1-D Orlanski radiation
+    # (MOM_open_boundary.F90, radiation_open_bdry_conds: ORLANSKI and
+    # ORLANSKI_TAN with NUDGED and NUDGED_TAN, as the NWA12 and NEP10
+    # regional configurations; OBC_RAD_VEL_WT = 1, so no running mean of the
+    # phase speed and no extra state) with this cap on the phase speed in grid
+    # points per step (OBC_RADIATION_MAX, 1 in MOM6).  T and S keep the CROCO
+    # form.
+    velocity_rx_max: jnp.ndarray | None = None
 
 
 def _characteristic(ub_old, u1_old, zb_old, z1_old, z1_new, hb, h1, dn, dt_s, g,
@@ -233,6 +242,23 @@ def _orlanski(fb_old, f1_old, f1_new, f2_new, data, r_in, r_out):
     return (1.0 - tau) * fb + tau * data
 
 
+def _orlanski_1d(fb_new, f1_old, f1_new, f2_new, data, r_in, r_out, rx_max):
+    """MOM6 1-D Orlanski radiation with nudging (radiation_open_bdry_conds,
+    OBC_RAD_VEL_WT = 1), on arrays (..., along): the boundary value after the
+    model step, the first interior old and new, the second interior new.  The
+    phase speed rx = min((f1_old - f1_new) / (f1_new - f2_new), rx_max) when
+    outward, 0 otherwise; boundary = (fb_new + rx f1_new) / (1 + rx), then
+    nudged with weight dt / (tau + dt) (MOM6 gamma_2), tau_in on inflow."""
+    dhdt = f1_old - f1_new
+    dhdx = f1_new - f2_new
+    out = dhdt * dhdx > 0.0
+    rx = jnp.where(out, jnp.minimum(dhdt / jnp.where(out, dhdx, 1.0), rx_max), 0.0)
+    fb = (fb_new + rx * f1_new) / (1.0 + rx)
+    r = jnp.where(out, r_out, r_in)
+    g = r / (1.0 + r)
+    return (1.0 - g) * fb + g * data
+
+
 def _side(a, side, b0, k):
     """Row k inward of the boundary row b0 of a 3-D field, as (nlev, along).
     b0: index along the normal of the boundary row -- the ring cell (0 or -1)
@@ -314,8 +340,12 @@ def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, d
             wet = (hf > 0).astype(hf.dtype)
             w = hf / jnp.maximum(jnp.sum(hf, axis=0, keepdims=True), _EPS)
             mean_cur = jnp.sum(w * _side(new, side, b0, 0), axis=0, keepdims=True)    # barotropic part kept
-            rad = _orlanski(_side(old, side, b0, 0), _side(old, side, b0, 1), _side(new, side, b0, 1),
-                            _side(new, side, b0, 2), data, r_in, r_out)
+            if ob.velocity_rx_max is None:
+                rad = _orlanski(_side(old, side, b0, 0), _side(old, side, b0, 1), _side(new, side, b0, 1),
+                                _side(new, side, b0, 2), data, r_in, r_out)
+            else:
+                rad = _orlanski_1d(_side(new, side, b0, 0), _side(old, side, b0, 1), _side(new, side, b0, 1),
+                                   _side(new, side, b0, 2), data, r_in, r_out, ob.velocity_rx_max)
             row = (rad - jnp.sum(w * rad, axis=0, keepdims=True) + mean_cur) * wet
             if use_u:
                 u = _set_side(u, side, b0, row)
