@@ -1627,7 +1627,6 @@ def _main(argv=None):
         return loss_fn, loss_terms_fn
 
     _stage_fns = [_stage_loss_fns(n) for n in _curriculum]
-    _cur_stage = [0]
 
     def _stage_of(epoch):
         return int(epoch) * len(_curriculum) // max(int(cfg.n_epochs), 1)
@@ -1695,13 +1694,11 @@ def _main(argv=None):
     # eager rollout of this deck does not fit on the mesh).
     # Same forward as the training loss, returning each weighted term too, so
     # the per-term curves add up to the validation loss.
-    # Validation scores the CURRENT stage's objective (same protocol as the
-    # training loss it is reported next to); one jitted program per stage.
-    _val_jit = [fns[1] if column_mesh is None else eqx.filter_jit(fns[1])
-                for fns in _stage_fns]
-
-    def _val_loss(cur_arr, sample):
-        return _val_jit[_cur_stage[0]](cur_arr, sample)
+    # Validation always scores the LAST curriculum stage's objective (every
+    # lead, to 24 h; owner 2026-11-01), so the held-out curve is one quantity
+    # across stages and checkpoints are selected on the full horizon.
+    _val_loss = (_stage_fns[-1][1] if column_mesh is None
+                 else eqx.filter_jit(_stage_fns[-1][1]))
     _val_place = _device_sample if column_mesh is None else place_sample
 
     def _validation_loss(cur_arr):
@@ -1831,7 +1828,6 @@ def _main(argv=None):
         _e0 = _k * cfg.n_epochs // _n_st
         _e1 = (_k + 1) * cfg.n_epochs // _n_st
         _first = start_epoch >= _e0
-        _cur_stage[0] = _k
         if _leads:
             log.info("curriculum stage %d/%d: epochs %d-%d score leads %s h",
                      _k + 1, _n_st, _e0, _e1 - 1, list(_leads[:_curriculum[_k]]))
