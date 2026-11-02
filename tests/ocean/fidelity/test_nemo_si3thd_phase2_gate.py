@@ -12,7 +12,7 @@ import pytest
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ice.bitz_lipscomb import (
     SI3SurfaceForcing,
-    _si3_zdf_bl99_step,
+    # _si3_zdf_bl99_step moved to phase2 gate (DECISION 186)
     ice_enthalpy_from_temperature,
     ice_temperature_from_enthalpy,
     option2_salinity_profile,
@@ -28,7 +28,7 @@ from legoesm.ice.constants_config import (
 from legoesm.ice.scm import IceColumnModel
 from legoesm.ice.snow import snow_ice_flooding
 from legoesm.timestepping.tridiagonal import thomas_solve
-
+import sys; sys.path.insert(0, "scripts/validate/ocean_fidelity/testcases"); from nemo_si3thd_phase2_gate import _si3_zdf_bl99_step  # noqa: E402,E501,E702
 set_policy(PrecisionPolicy.fp64())
 
 
@@ -209,9 +209,9 @@ def test_gate_owns_qns_time_level_and_reports_current_first_divergence(gate_modu
     assert result["status"] == "DEBT"
     assert result["backend"] == "cpu"
     assert result["dtypes"] == ["float64"]
-    assert result["sweep_steps_examined"] == 5
+    assert result["sweep_steps_examined"] == 19
     assert result["preregistered_hypothesis"] == "SUPERSEDED_BY_OWNER_FIX"
-    assert result["first_divergence"]["name"] == "kt5.POST_DH.e_s"
+    assert result["first_divergence"]["name"] == "kt19.POST_DH.e_s"
     assert result["first_divergence"]["normalized_max_abs"] > 1.0e-15
     assert result["owner_arm"]["variable"] == "qns_ice_entry"
     assert result["owner_arm"]["verdict"] == "CONFIRMED"

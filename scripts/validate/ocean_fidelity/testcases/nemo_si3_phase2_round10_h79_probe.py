@@ -22,8 +22,6 @@ from legoesm.ice.dynamics import _SI3_ICE_PRESENCE
 from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import build_ice_rheo_card
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 
-from legoesm import constants
-
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 PROBE_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/round10_subcycle_probe"
@@ -126,8 +124,8 @@ def run_probe(root: Path = ROOT, probe_root: Path = PROBE_ROOT) -> tuple[dict[st
     with netCDF4.Dataset(mesh_path) as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in MESH_FIELDS}
     with netCDF4.Dataset(init_path) as dataset:
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
-    card = build_ice_rheo_card(frame, mesh, ocean_temperature_k)
+        sst_m = np.asarray(dataset["sst"][0])
+    card = build_ice_rheo_card(frame, mesh, sst_m)
     dump_header, dump = _read_dump(dump_path)
     require(
         (dump_header["jpi"], dump_header["jpj"])

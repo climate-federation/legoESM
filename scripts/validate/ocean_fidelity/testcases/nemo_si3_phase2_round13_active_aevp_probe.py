@@ -28,8 +28,6 @@ from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
 )
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 
-from legoesm import constants
-
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 PROBE_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/round13/run_with_init"
@@ -374,8 +372,8 @@ def run_probe(
     with netCDF4.Dataset(mesh_path) as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in MESH_FIELDS}
     with netCDF4.Dataset(init_path) as dataset:
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
-    card = build_ice_rheo_card(frame, mesh, ocean_temperature_k)
+        sst_m = np.asarray(dataset["sst"][0])
+    card = build_ice_rheo_card(frame, mesh, sst_m)
     require(card.dynamics_config.n_subcycles == N_SUBCYCLES, "aEVP subcycle count drift")
     require(str(card.initial_state.contents.dtype) == "float64", "card contents are not fp64")
 

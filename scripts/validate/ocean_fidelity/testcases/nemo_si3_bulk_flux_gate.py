@@ -377,11 +377,11 @@ def _score(predicted, oracle, stage: str, variable: str) -> dict[str, object]:
 
 
 def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str, object]:
-    from legoesm import constants
-    from legoesm.core.bulk_flux import nemo_si3_constant_fluxes
+    from unittest import mock
+
     from legoesm.core.precision import PrecisionPolicy, set_policy
-    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
-    from legoesm.ice.sea_ice import _nemo_si3_blk_ice_2, _nemo_si3_ice_flx_other
+    from legoesm.ice import si3_surface
+    from legoesm.ice.si3_surface import SI3SurfaceConfig
 
     runtime = runtime_versions()
     if plant == "runtime":
@@ -407,53 +407,67 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     s1 = jax.tree.map(jax.numpy.asarray, s1_np)
     s2 = jax.tree.map(jax.numpy.asarray, s2_np)
 
-    raw = nemo_si3_constant_fluxes(
-        s0["u_air"], s0["v_air"], s0["theta_air"], s0["q_air"],
-        s0["T_surface"], s0["p_surface"], s0["rho_air"],
-        constants.bulk_transfer_ice_orca1,
-        constants.bulk_transfer_ice_orca1,
-        constants.bulk_transfer_ice_orca1,
+    # Deck scalars from the C1D run's own resolved namelists (never hard-coded).
+    cfg = SI3SurfaceConfig.from_resolved_namelists(
+        root / "output.namelist.dyn", root / "output.namelist.ice")
+    for name, model_value in (
+        ("dt", cfg.rDt_ice), ("drag_io", cfg.rn_Cd_io), ("rho_ocean", si3_surface._RHO0),
+        ("c_ocean", si3_surface._RCP), ("T0", si3_surface._RT0), ("ice_epsilon", si3_surface._EPSI10),
+    ):
+        require(np.all(s2_np[name] == model_value), f"record {name} differs from the model's value")
+    b1 = si3_surface.si3_blk_ice_1(
+        wndi=s0["u_air"], wndj=s0["v_air"], theta_air_zt=s0["theta_air"], q_air_zt=s0["q_air"],
+        slp=s0["p_surface"], tm_su=s0["T_surface"], rhoa=s0["rho_air"], config=cfg,
     )
     predictions = {
-        (0, "wndm_ice"): raw[2],
-        (0, "utau_ice"): raw[0],
-        (0, "vtau_ice"): raw[1],
+        (0, "wndm_ice"): b1.wndm_ice,
+        (0, "utau_ice"): b1.utau_ice,
+        (0, "vtau_ice"): b1.vtau_ice,
     }
     oracle = {
         (0, "wndm_ice"): s0["wind"],
         (0, "utau_ice"): s0["utau_ice"],
         (0, "vtau_ice"): s0["vtau_ice"],
     }
-    flux2 = _nemo_si3_blk_ice_2(
-        T_surface=s1["T_surface"], h_ice=s1["h_ice"], h_snow=s1["h_snow"],
-        cloud_fraction=s1["cloud_fraction"], theta_air=s1["theta_air"],
-        q_air=s1["q_air"], p_surface=s1["p_surface"], lw_down=s1["lw_down"],
-        precip=s1["precip"], snow=s1["snow"], qsr=s1["qsr"],
-        rho_air=s1["rho_air"], wind=s1["wind"], Ch=s1["Ch"], Ce=s1["Ce"],
-        ice_fraction_before=s1["ice_fraction_before"],
-        category_fraction_before=s1["category_fraction_before"],
-        sst_celsius=s1["sst_celsius"], qns_ocean=s1["qns_ocean"],
-        qsr_ocean=s1["qsr_ocean"], emp_ocean_raw=s1["emp_ocean_raw"],
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
-    )
+
+    def cat(a):  # one ice category (jpl = 1)
+        return a[:, None]
+
+    def surface_stage1():
+        alb = si3_surface.si3_ice_alb(
+            t_su=cat(s1["T_surface"]), h_i=cat(s1["h_ice"]), h_s=cat(s1["h_snow"]),
+            a_ip_eff=cat(s1["pond_fraction"]), h_ip=cat(s1["pond_depth"]), h_il=cat(s1["pond_lid"]),
+            cloud_fra=s1["cloud_fraction"], smask0=s0["mask"], config=cfg,
+        )
+        out = si3_surface.si3_blk_ice_2(
+            t_su=cat(s1["T_surface"]), h_s=cat(s1["h_snow"]), h_i=cat(s1["h_ice"]), alb_ice=alb,
+            theta_air_zt=s1["theta_air"], q_air_zt=s1["q_air"], slp=s1["p_surface"],
+            qlw=s1["lw_down"], precip=s1["precip"], snow=s1["snow"], qsr=s1["qsr"],
+            rhoa=s1["rho_air"], wndm_ice=s1["wind"], Ch_ice=s1["Ch"], Ce_ice=s1["Ce"],
+            theta_zu_i=s1["theta_air"], q_zu_i=s1["q_air"], smask0=s0["mask"],
+            sst_m=s1["sst_celsius"], emp=s1["emp_ocean_raw"],
+            at_i_b=s1["ice_fraction_before"], a_i_b=cat(s1["category_fraction_before"]),
+            qns_oce=s1["qns_ocean"], qsr_oce=s1["qsr_ocean"], cloud_fra=s1["cloud_fraction"],
+            config=cfg,
+        )
+        values = {"albedo": alb, **out._asdict()}
+        return {name: values[name].reshape(-1) for name in STAGE1_NAMES[25:45]}
+
+    flux2 = surface_stage1()
     for name in STAGE1_NAMES[25:45]:
         predictions[(1, name)] = flux2[name]
         oracle[(1, name)] = s1[name]
-    other = _nemo_si3_ice_flx_other(
-        ice_fraction=s2["ice_fraction"], ice_fraction_before=s2["ice_fraction_before"],
-        ice_volume=s2["ice_volume"], u_ice=s2["u_ice"],
-        u_ice_west=s2["u_ice_west"], v_ice=s2["v_ice"],
-        v_ice_south=s2["v_ice_south"], u_ocean=s2["u_ocean"],
-        u_ocean_west=s2["u_ocean_west"], v_ocean=s2["v_ocean"],
-        v_ocean_south=s2["v_ocean_south"], drag_io=s2["drag_io"],
-        frq=s2["frq"], qsr_ocean=s2["qsr_ocean"], qns_ocean=s2["qns_ocean"],
-        qemp_ocean=s2["qemp_ocean"], ocean_layer_thickness=s2["ocean_layer_thickness"],
-        sst_celsius=s2["sst_celsius"], T_bottom=s2["T_bottom"], dt=s2["dt"],
-        rho_ocean=s2["rho_ocean"], c_ocean=s2["c_ocean"], T0=s2["T0"],
-        ice_epsilon=s2["ice_epsilon"], max_ice_fraction=s2["max_ice_fraction"],
+    other = si3_surface.si3_ice_flx_other(
+        u_ice=s2["u_ice"], u_ice_w=s2["u_ice_west"], v_ice=s2["v_ice"], v_ice_s=s2["v_ice_south"],
+        ssu_m=s2["u_ocean"], ssu_m_w=s2["u_ocean_west"], ssv_m=s2["v_ocean"],
+        ssv_m_s=s2["v_ocean_south"], utau=s2["utau"], vtau=s2["vtau"], smask0=s2["mask"],
+        at_i=s2["ice_fraction"], at_i_b=s2["ice_fraction_before"], vt_i=s2["ice_volume"],
+        qsr_oce=s2["qsr_ocean"], qns_oce=s2["qns_ocean"], qemp_oce=s2["qemp_ocean"],
+        frq_m=s2["frq"], e3t_m=s2["ocean_layer_thickness"], sst_m=s2["sst_celsius"],
+        t_bo=s2["T_bottom"], rn_amax_2d=s2["max_ice_fraction"], config=cfg,
     )
     for name in ("qsb_ice_bot", "fhld", "qlead"):
-        predictions[(2, name)] = other[name]
+        predictions[(2, name)] = getattr(other, name)
         oracle[(2, name)] = s2[name]
 
     # Fields not subsequently mutated by ice thermodynamics must retain their
@@ -471,19 +485,10 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         "wndm_ice": s0["wind"],
     }
 
-    ablated_flux2 = _nemo_si3_blk_ice_2(
-        T_surface=s1["T_surface"], h_ice=s1["h_ice"], h_snow=s1["h_snow"],
-        cloud_fraction=s1["cloud_fraction"], theta_air=s1["theta_air"],
-        q_air=s1["q_air"], p_surface=s1["p_surface"], lw_down=s1["lw_down"],
-        precip=s1["precip"], snow=s1["snow"], qsr=s1["qsr"],
-        rho_air=s1["rho_air"], wind=s1["wind"], Ch=s1["Ch"], Ce=s1["Ce"],
-        ice_fraction_before=s1["ice_fraction_before"],
-        category_fraction_before=s1["category_fraction_before"],
-        sst_celsius=s1["sst_celsius"], qns_ocean=s1["qns_ocean"],
-        qsr_ocean=s1["qsr_ocean"], emp_ocean_raw=s1["emp_ocean_raw"],
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
-        _preserve_subnormal_snow=False,
-    )
+    # Private ablation: the snow-zero tests as floating comparisons instead of bit patterns.
+    with mock.patch.object(si3_surface, "_ieee_is_zero", lambda v: v == 0.0), \
+            mock.patch.object(si3_surface, "_ieee_le_zero", lambda v: v <= 0.0):
+        ablated_flux2 = surface_stage1()
     ablation_rows = [
         _score(ablated_flux2[name], s1[name], STAGE_NAMES[1], name)
         for name in STAGE1_NAMES[25:45]

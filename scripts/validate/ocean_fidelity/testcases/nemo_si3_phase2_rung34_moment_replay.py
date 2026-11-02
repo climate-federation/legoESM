@@ -12,9 +12,9 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
+import legoesm.ice.transport as ice_transport
 import netCDF4
 import numpy as np
-import legoesm.ice.transport as ice_transport
 from legoesm.core.precision import PrecisionPolicy, get_policy
 from legoesm.ice.dynamics import si3_cgrid_aevp_solver
 from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as recipe
@@ -23,8 +23,6 @@ from legoesm.ice.transport import (
     advect_si3_prather_2d,
     si3_prather_pack_intensives,
 )
-
-from legoesm import constants
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 RESTART_ROOT = ROOT.parent / "round8" / "oracle_active_restarts"
@@ -295,8 +293,8 @@ def run_replay(
     with netCDF4.Dataset(root / "mesh_mask.nc") as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in gate.MESH_FIELDS}
     with netCDF4.Dataset(root / "output.init_ice.nc") as dataset:
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
-    card = recipe.build_ice_rheo_card(entry, mesh, ocean_temperature_k)
+        sst_m = np.asarray(dataset["sst"][0])
+    card = recipe.build_ice_rheo_card(entry, mesh, sst_m)
     require(
         get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
         "fp64/scalar-libm policy required",

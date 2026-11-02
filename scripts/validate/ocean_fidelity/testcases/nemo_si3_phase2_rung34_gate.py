@@ -18,8 +18,6 @@ from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
     step_ice_rheo_card,
 )
 
-from legoesm import constants
-
 POINTWISE_BAR = 1.0e-15
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 HERE = Path(__file__).resolve().parent
@@ -181,9 +179,9 @@ def run_gate(root: Path, *, plant_field: bool = False) -> dict[str, object]:
     with netCDF4.Dataset(mesh_path) as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in MESH_FIELDS}
     with netCDF4.Dataset(init_path) as dataset:
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
+        sst_m = np.asarray(dataset["sst"][0])
 
-    card = build_ice_rheo_card(frame1, mesh, ocean_temperature_k)
+    card = build_ice_rheo_card(frame1, mesh, sst_m)
     candidate = step_ice_rheo_card(card, completed_steps=0)
     fields = _candidate_fields(card, candidate)
     if plant_field:
