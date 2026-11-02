@@ -1110,14 +1110,28 @@ class OMp25Config(NamedTuple):
     """OM4p25 lateral-friction closure coefficients (GFDL OM4.0, Adcroft et al.
     2019; Silvestri et al. 2024 "SM2"). Laplacian + biharmonic, each the max of
     a Smagorinsky term and a static grid-scale term, with the Laplacian tapered
-    by the deformation-radius factor F = 1/(1+0.25·(L_d/Δ)⁴). Defaults are the
-    published OM4p25 values."""
+    by the deformation-radius factor F = 1/(1+0.25·(L_d/Δ)⁴). The Laplacian defaults
+    (C2, Cu2) are OM4p5's: the OM4_025 parameter file has no Laplacian viscosity
+    (KH = KH_VEL_SCALE = 0, SMAGORINSKY_KH False); the biharmonic values are both."""
     C2: float = 0.15      # Laplacian Smagorinsky coefficient
     Cu2: float = 0.01     # Laplacian static-viscosity coefficient
     C4: float = 0.06      # biharmonic Smagorinsky coefficient
     Cu4: float = 0.01     # biharmonic static-viscosity coefficient
     deformation_radius_m: float = 6.75e3  # L_d for the F taper [m]; ~uniform for
     #   the idealised baroclinic jet. Spatially-varying L_d (from N²) is a refinement.
+    # The OM4p5 form (MOM6-examples OM4_05 parameter file, MOM_hor_visc.F90): each
+    # default keeps the closure above unchanged.  OM4p5 values in brackets.
+    Kh_sin_lat: float = 0.0          # [m2/s] Laplacian background Kh_sin_lat |sin(lat)|^p (2000)
+    Kh_sin_power: float = 4.0        # p (4)
+    bound_coriolis_vel: float = 0.0  # [m/s] BOUND_CORIOLIS_VEL of the biharmonic Smagorinsky (6); 0 off
+    # "taper": F = 1/(1 + 0.25 (L_d/Δ)⁴) with the scalar L_d above (legacy).
+    # "mom6_step_wkb": MOM6's resolution function with VISC_RES_FN_POWER >= 100, a
+    #   step at L_d² = c1² / (f² + c1 beta*) = dx² + dy², c1 the first baroclinic wave
+    #   speed by WKB from the model density each step, MOM6's Δ² = 2dx²dy²/(dx²+dy²).
+    resolution_function: str = "taper"
+    res_coef: float = 1.0            # VISC_RES_SCALE_COEF (1)
+    gill_equatorial_ld: bool = True  # GILL_EQUATORIAL_LD (True): beta* = 2 |grad f|
+    bound_coef: float = 0.0          # HORVISC_BOUND_COEF for the BOUND_KH, BOUND_AH caps (0.8); 0 off
 
 
 class DynBottomDragConfig(NamedTuple):
