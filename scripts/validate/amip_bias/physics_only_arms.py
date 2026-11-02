@@ -122,6 +122,7 @@ def main(argv=None):
     import jax
     import jax.numpy as jnp
     from legoesm.core.conservation import apply_physics_water_mass, apply_water_positivity
+    from legoesm.atmosphere.physics.combined import physics_cache_seed
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASHydrostaticState
     model, state0, DT = cap["model"], cap["state"], float(cap["dt"])
     mesh, sig, forcing = model.mesh, model.sigma_coord, cap["forcing"]
@@ -178,7 +179,11 @@ def main(argv=None):
             return st, ps_new
         j_full, j_held = jax.jit(lambda s, p, f: apply(f_full, s, p, f)), \
             jax.jit(lambda s, p, f: apply(f_held, s, p, f))
-        st, ps = state0, cap["phys_state"]
+        # the cadence cache is shaped by the physics that fills it; reseed it from
+        # this arm's full variant (combined.physics_cache_seed, as the driver does)
+        ps0 = cap["phys_state"]
+        st, ps = state0, ps0._replace(held_physics=physics_cache_seed(
+            f_full, state0, mesh, sig, ps0, forcing_at(0)))
         rows, hist = {b: [] for b in BOXES}, []
         t1 = time.time()
         for n in range(ncall):
