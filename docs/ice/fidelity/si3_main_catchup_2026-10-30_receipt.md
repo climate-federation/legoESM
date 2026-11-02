@@ -489,7 +489,7 @@ entries at `S = 0` used `main_ad` while the `1e-8` forward step disagreed with
 `main_ad` by 2x to 2,070x across the `1.146e-11` nonlinearity scale; and (4) a
 global `3e-6` absolute floor gated 4,614 of 4,968 entries.
 
-## Resume 8 oracle, tolerance, tiny-snow, and citation-span corrections
+## Resume 8 and Resume 9 oracle, tolerance, tiny-snow, and citation-span corrections
 
 1. **Full-exit tiny-snow production test (`tests/unit/test_bitz_lipscomb.py`):**
    `test_si3_column_step_remap_reverse_mode_finite_at_tiny_snow` now
@@ -501,50 +501,112 @@ global `3e-6` absolute floor gated 4,614 of 4,968 entries.
    `_cumulative_remap` no-material guard (`bitz_lipscomb.py:987-999`) now fails
    immediately with `AssertionError: concentration: [[nan]]` (with `NaN` in all
    nine exit leaf Jacobians).
-2. **Zero lane-AD targets (`scripts/validate/ocean_fidelity/testcases/si3_reverse_sweep_oracle.py`):**
+2. **Zero lane-AD targets and one-sided exclusion rule (`scripts/validate/ocean_fidelity/testcases/si3_reverse_sweep_oracle.py`):**
    `_sample` computes `jacrev` only when `sha == MAIN_SHA` (`has_jacobian=False`
    on `LANE_SHA`), and `build_oracle` raises `ValueError` if `"jacobian"` is
    present in the lane sample.  Every scored entry targets either `main_ad`
-   (`3,744` entries where main and lane forwards agree in the sampled
+   (`3744` entries where main and lane forwards agree in the sampled
    neighbourhood and `main_ad` agrees with `lane_fd` within `1e-6` relative) or
-   a finite difference of the lane forward (`389` `lane_fd_central`, `734`
-   `lane_fd_forward`, `26` `lane_fd_backward`).  Specifically, smooth entries
-   `[18,3,11]` (`target = 0.050971963040420495`, `lane_fd_central`), `[22,3,11]`
-   (`target = 0.050971963040420495`, `lane_fd_central`), and `[22,3,7]`
-   (`target = 1014193910.4272546`, `main_ad`, agreeing with `lane_fd`
-   `1014194314.9225268` to relative error `3.988e-7`) use no lane AD, and
-   `[19,1,2]` (`target = 6.869234348006378e-6`, vs tip eager AD
-   `6.869232846652797e-6` and JIT AD `6.869232846683276e-6`, relative error
-   `2.186e-7`) uses `lane_fd_backward` at step `1e-6` after a 4-step backward
-   FD refinement (`1e-8`: `6.869504964868e-6`; `1e-7`: `6.869296798051e-6`;
-   `1e-6`: `6.869234348006e-6`; `1e-5`: `6.869232960227e-6`) confirmed the AD
-   was right and the `1e-7` difference was float64 subtraction noise on
-   `exit.h_ice ~ 0.05`.  Only the `75` genuine non-differentiable
-   statement-boundary entries where measured left and right one-sided lane FDs
-   (`fd_left` and `fd_right`) disagree are excluded (`method = 4`,
+   a finite difference of the lane forward (`389` `lane_fd_central`, `736`
+   `lane_fd_forward`, `26` `lane_fd_backward`; `method_counts = {"main_ad": 3744, "lane_fd_central": 389, "lane_fd_forward": 736, "lane_fd_backward": 26, "excluded_nondifferentiable_boundary": 73}`).
+   Specifically (regenerated verbatim from the committed fixture):
+   - `[18,3,11]` (`T_surface / dqns_ice` at `(2e-10, 0.5, 0.0)`): `method = 2`
+     (`lane_fd_forward` at `step = 0.0001`), `target = -0.00024972905521281064`,
+     `fd_rounding_bound = 1.1368683772161603e-09`, `main_ad = -0.0002497283729832977`,
+     `tip_eager = -0.0002497283729832977`, `tip_jit = -0.0002497283729832977`,
+     `err_eager = 6.822295129543278e-10 <= fd_rounding_bound = 1.1368683772161603e-09`
+     (`rel_eager = 2.7318788051032145e-06`), while `[18,3,9]` (`T_surface / qns_ice`
+     at `(2e-10, 0.5, 0.0)`) has `method = 0` (`main_ad`),
+     `target = 0.050971963040420495`, `tip_eager = tip_jit = 0.050971963040420495`,
+     and `fd_central = 0.05097196293490924` (`rel(main_ad, fd_central) = 2.0699860515303513e-09`);
+   - `[22,3,11]` (`T_surface / dqns_ice` at `(0.5, 0.5, 0.0)`): `method = 2`
+     (`lane_fd_forward` at `step = 0.0001`), `target = -0.00024972905521281064`,
+     `fd_rounding_bound = 1.1368683772161603e-09`, `main_ad = -0.0002497283729832977`,
+     `tip_eager = -0.0002497283729832977`, `tip_jit = -0.0002497283729832977`,
+     `err_eager = 6.822295129543278e-10 <= fd_rounding_bound = 1.1368683772161603e-09`
+     (`rel_eager = 2.7318788051032145e-06`), while `[22,3,9]` (`T_surface / qns_ice`
+     at `(0.5, 0.5, 0.0)`) has `method = 0` (`main_ad`),
+     `target = 0.050971963040420495`, `tip_eager = tip_jit = 0.050971963040420495`,
+     and `fd_central = 0.05097196293490924` (`rel(main_ad, fd_central) = 2.0699860515303513e-09`);
+   - `[22,3,7]` (`T_surface / S_layers` at `(0.5, 0.5, 0.0)`): `method = 0`
+     (`main_ad`), `target = 1014193911.7999892`, `tip_eager = 1014193911.8006747`,
+     `tip_jit = 1014193911.8006747` (`rel_eager = rel_jit = 6.758603132412692e-13`),
+     agreeing with `fd_central = 1014194316.4398981` at `step = 5e-15` to
+     `rel(main_ad, fd_central) = 3.989767072745935e-07`; and
+   - `[19,1,2]` (`h_ice / h_snow` at `(2e-10, 0.5, -40.0)`): `method = 3`
+     (`lane_fd_backward` at `ref_step = 1e-06`), `target = 6.869234348005904e-06`,
+     `fd_rounding_bound = 1.3877787807814457e-11`, `tip_eager = 6.869232846683468e-06`,
+     `tip_jit = 6.869232846683468e-06`, `err_eager = err_jit = 1.5013224360536578e-12`,
+     `rel_eager = rel_jit = 2.1855746361157155e-07` (after a 4-step backward FD
+     refinement `1e-8`: `6.869504964868e-6`; `1e-7`: `6.869296798051039e-06`;
+     `1e-6`: `6.869234348005904e-06`; `1e-5`: `6.869232960227e-6` confirmed the
+     AD was right and the `1e-7` step difference was float64 subtraction noise on
+     `exit.h_ice ~ 0.05`).
+   For the `36` ice-thermodynamic entries `[c, 1|3|4, 2]` (`outputs h_ice,
+   T_surface, e_ice` with respect to `h_snow` at `h_snow = 0.0` on the `12`
+   `h_ice = 0.5` cases), the base point `h_snow = 0.0` executes the
+   `h_snow <= 0.0` no-snow branch while `h_snow > 0.0` crosses the strict
+   `h_snow > 0.0` guard into the snow-present branch (so the right FD disagrees
+   on `31` of the `36` entries); as stated in `SELECTION_RULE` and
+   `fixture["selection"]`, those `36` entries are scored against the left
+   (backward) difference at the `1e-06` refinement step along the executed
+   `h_snow <= 0.0` branch (`17` match `main_ad` with `method = 0` and `19` use
+   `lane_fd_backward` with `method = 3`).
+   Statement-boundary candidates (`[c, :, 1]` at `h_ice = 0.0`, and
+   `[c, :, 16]`, `[c, 2, 2]`, `[c, 5, 2]` at `h_ice = 0.5`) are excluded only
+   where measured left and right one-sided lane finite differences disagree by
+   more than both `1e-6` relative error and `1x` the entry's own
+   `fd_rounding_bound` (`|fd_right - fd_left| > max(1e-6 * max(|fd_left|,
+   |fd_right|, tiny), fd_rounding_bound)`).  Entries `[16,1,1]` (`h_ice / h_ice`
+   at `(2e-10, 0.0, 0.0)`) and `[20,1,1]` (`h_ice / h_ice` at `(0.5, 0.0, 0.0)`)
+   have `fd_left = 0.0`, `fd_right = 1.3234889800848443e-16`, and
+   `fd_rounding_bound = 1.3234889800848443e-16` (`step = 1e-07`), so
+   `|fd_right - fd_left| <= fd_rounding_bound`; they are not excluded and are
+   scored normally against `target = 1.3234889800848443e-16` (`method = 2`,
+   `lane_fd_forward`), passing with `tip_eager = tip_jit = 0.0` and
+   `err_eager = err_jit = 1.3234889800848443e-16 <= fd_rounding_bound = 1.3234889800848443e-16`.
+   Only the `73` genuine non-differentiable entries are excluded (`method = 4`,
    `excluded_nondifferentiable_boundary`, `target = NaN`), each recorded by
    `[case, output, input]` index with both one-sided values in
    `oracle["excluded_nondifferentiable"]`.
-3. **19 `S_layers` entries at `S = 0` (`input_index = 7`):**
+3. **`S_layers` entries at `S = 0` (`input_index = 7`):**
    Setting `_INPUT_STEPS[7] = 5.0e-15` with a central stencil resolves the
-   smooth `S_layers ~ 1.146e-11` nonlinearity scale at `S = 0`: across all 216
-   `S_layers` entries (including all 19 previously discrepant entries),
-   `lane_fd` now agrees with `main_ad` and `tip_ad` to a worst relative
-   difference of `3.990e-7 < 1e-6`.
+   smooth `S_layers ~ 1.146e-11` nonlinearity scale at `S = 0`.  Across the
+   `176` `S_layers` entries that use `method = 0` (`main_ad`) (including `16` of
+   the `19` previously discrepant entries), `lane_fd` agrees with `main_ad` to a
+   worst relative difference of `3.989767072745935e-07` (at `[2,3,7]`, where
+   `target = main_ad = 1014193911.7999892` and `fd_central = 1014194316.4398981`).
+   The remaining `40` `S_layers` entries use `method = 1` (`lane_fd_central`):
+   `37` zero-target open-water entries (`err_eager = err_jit = 0.0`) plus `3`
+   active-melt `h_ice / S_layers` entries at `exit.h_ice ~ 0.05` (`[7,1,7]` with
+   `target = -0.646011022453763`, `tip_eager = tip_jit = -0.6454089331773042`,
+   `err_eager = err_jit = 0.0006020892764587726 <= fd_rounding_bound = 0.0013877787807814457`,
+   `rel_eager = rel_jit = 0.0009320108411956177`; `[11,1,7]` with
+   `target = -32.270019989510956`, `tip_eager = tip_jit = -32.270295740909674`,
+   `err_eager = err_jit = 0.00027575139871771626 <= fd_rounding_bound = 0.0013877787807814457`,
+   `rel_eager = rel_jit = 8.545053349732427e-06`; and `[15,1,7]` with
+   `target = -64.5407338684123`, `tip_eager = tip_jit = -64.54028348890222`,
+   `err_eager = err_jit = 0.0004503795100845309 <= fd_rounding_bound = 0.0013877787807814457`,
+   `rel_eager = rel_jit = 6.978221087519379e-06`), so across all `216`
+   `S_layers` entries the worst relative difference is `0.0009320108411956177` at
+   `[7,1,7]`, covered by its own `fd_rounding_bound = 0.0013877787807814457`.
 4. **Per-entry FD rounding bound (`fd_rounding_bound`):**
    The global `3e-6` floor is removed.  Each entry stores its own float64
-   subtraction rounding bound (`FD_ROUNDING_BOUND_FORMULA`):
-   `(|spacing(f(x+d))| + |spacing(f(x-d))|) / (2*d)` for central differences,
-   `(|spacing(f(x+d))| + |spacing(f(x))|) / d` for forward differences,
-   `(|spacing(f(x))| + |spacing(f(x-d))|) / d` for backward differences, and the
+   subtraction rounding bound (`FD_ROUNDING_BOUND_FORMULA`), using
+   `s(x+-d) = max(|f(x+-d)|, d)` on diagonal state entries (`output_index ==
+   input_index`) where the perturbed state leaf enters the column step at scale
+   `>= d` and `s(x+-d) = |f(x+-d)|` otherwise, with `s(x) = |f(x)|`:
+   `(|spacing(s(x+d))| + |spacing(s(x-d))|) / (2*d)` for central differences,
+   `(|spacing(s(x+d))| + |spacing(s(x))|) / d` for forward differences,
+   `(|spacing(s(x))| + |spacing(s(x-d))|) / d` for backward differences, and the
    `0.5`-weighted sum of the two forward-step bounds for two-step averaged
    evaporation differences.  Every scored entry must satisfy `rel <= 1e-6` or
    `|err| <= 1.0 * fd_rounding_bound`.  Entry `[18,1,0]` (`h_ice / concentration`
-   at `(2e-10, 0.5, 0.0)`, `target = 0.0`, eager `4.76837158203125e-7`, JIT
-   `5.873817268728301e-7`) has `exit.h_ice = 0.5`
+   at `(2e-10, 0.5, 0.0)`, `target = 0.0`, `tip_eager = 4.76837158203125e-07`,
+   `tip_jit = 5.873816633084061e-07`) has `exit.h_ice = 0.5`
    (`spacing(0.5) = 5.551115123125783e-17`) and central step `d = 2e-11`, so its
    own FD rounding bound is
-   `(5.551115123125783e-17 + 5.551115123125783e-17) / (4e-11) = 2.7755575615628914e-6`,
+   `(5.551115123125783e-17 + 5.551115123125783e-17) / (4e-11) = 2.7755575615628914e-06`,
    which covers both eager and JIT errors directly without any global floor or
    per-entry patch.
 5. **Rebuilt sweep and restored citation spans:**

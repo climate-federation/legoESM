@@ -85,18 +85,34 @@ METHOD_LEGEND = {
 SELECTION_RULE = (
     "main compiled reverse AD iff main/lane forwards agree in the recorded "
     "neighbourhood and main AD agrees with the lane finite difference within "
-    "1e-6 relative error; otherwise the lane finite difference, with genuine "
-    "non-differentiable boundary entries excluded only where measured left "
-    "and right one-sided lane finite differences disagree"
+    "1e-6 relative error; otherwise the lane finite difference. For the 36 "
+    "ice-thermodynamic entries [c, 1|3|4, 2] (outputs h_ice, T_surface, e_ice "
+    "with respect to h_snow at h_snow = 0.0 on the 12 h_ice = 0.5 cases), the "
+    "base point h_snow = 0.0 executes the h_snow <= 0.0 no-snow branch while "
+    "h_snow > 0.0 crosses the strict h_snow > 0.0 guard into the snow-present "
+    "branch (so the right difference disagrees on 31 of the 36 entries), so "
+    "these 36 entries are scored against the left (backward) difference at the "
+    "1e-6 refinement step along the executed h_snow <= 0.0 branch. Statement-"
+    "boundary candidates ([c, :, 1] at h_ice = 0.0, and [c, :, 16], [c, 2, 2], "
+    "[c, 5, 2] at h_ice = 0.5) are excluded as non-differentiable only where "
+    "measured left and right one-sided lane finite differences disagree by more "
+    "than both 1e-6 relative error and 1x the entry's own fd_rounding_bound "
+    "(|fd_right - fd_left| > max(1e-6 * max(|fd_left|, |fd_right|, tiny), "
+    "fd_rounding_bound))"
 )
 FD_ROUNDING_BOUND_FORMULA = (
     "per-entry float64 subtraction rounding bound of the lane finite-difference "
-    "stencil: (|spacing(f(x+d))| + |spacing(f(x-d))|) / (2*d) for central "
-    "differences, (|spacing(f(x+d))| + |spacing(f(x))|) / d for forward "
-    "differences, (|spacing(f(x))| + |spacing(f(x-d))|) / d for backward "
+    "stencil, using s(x+-d) = max(|f(x+-d)|, d) on diagonal state entries "
+    "(output_index == input_index) where the perturbed state leaf enters the "
+    "column step at scale >= d and s(x+-d) = |f(x+-d)| otherwise, with "
+    "s(x) = |f(x)|: (|spacing(s(x+d))| + |spacing(s(x-d))|) / (2*d) for central "
+    "differences, (|spacing(s(x+d))| + |spacing(s(x))|) / d for forward "
+    "differences, (|spacing(s(x))| + |spacing(s(x-d))|) / d for backward "
     "differences, and the 0.5-weighted sum of the two forward-step bounds for "
-    "two-step averaged evaporation differences; each unexcluded entry passes "
-    "iff relative_error <= 1e-6 or |error| <= 1x fd_rounding_bound"
+    "two-step averaged evaporation differences; boundary candidates are excluded "
+    "only when |fd_right - fd_left| > max(1e-6 * max(|fd_left|, |fd_right|, tiny), "
+    "fd_rounding_bound), and each unexcluded entry passes iff "
+    "relative_error <= 1e-6 or |error| <= 1x fd_rounding_bound"
 )
 
 
@@ -323,10 +339,15 @@ def build_oracle(main: dict[str, object], lane: dict[str, object]) -> dict[str, 
             delta = steps[case_index, input_index]
             minus = lane_neighbourhood[case_index, input_index, 0]
             plus = lane_neighbourhood[case_index, input_index, 1]
+            minus_scale = np.abs(minus).copy()
+            plus_scale = np.abs(plus).copy()
+            if input_index < len(OUTPUT_NAMES):
+                minus_scale[input_index] = max(minus_scale[input_index], delta)
+                plus_scale[input_index] = max(plus_scale[input_index], delta)
             if method == 1:
                 lane_fd[case_index, :, input_index] = (plus - minus) / (2.0 * delta)
                 rounding[case_index, :, input_index] = (
-                    np.abs(np.spacing(plus)) + np.abs(np.spacing(minus))
+                    np.abs(np.spacing(plus_scale)) + np.abs(np.spacing(minus_scale))
                 ) / (2.0 * delta)
                 local_equal = neighbour_equal[case_index, input_index].all(axis=0)
                 # At a non-smooth zero input, one side can share main's local
@@ -340,7 +361,7 @@ def build_oracle(main: dict[str, object], lane: dict[str, object]) -> dict[str, 
                     plus[only_plus] - lane_base[case_index, only_plus]
                 ) / delta
                 rounding[case_index, only_plus, input_index] = (
-                    np.abs(np.spacing(plus[only_plus]))
+                    np.abs(np.spacing(plus_scale[only_plus]))
                     + np.abs(np.spacing(lane_base[case_index, only_plus]))
                 ) / delta
                 fd_methods[case_index, only_plus, input_index] = 2
@@ -349,7 +370,7 @@ def build_oracle(main: dict[str, object], lane: dict[str, object]) -> dict[str, 
                 ) / delta
                 rounding[case_index, only_minus, input_index] = (
                     np.abs(np.spacing(lane_base[case_index, only_minus]))
-                    + np.abs(np.spacing(minus[only_minus]))
+                    + np.abs(np.spacing(minus_scale[only_minus]))
                 ) / delta
                 fd_methods[case_index, only_minus, input_index] = 3
                 local_equal = local_equal | only_plus | only_minus
@@ -358,7 +379,7 @@ def build_oracle(main: dict[str, object], lane: dict[str, object]) -> dict[str, 
                     plus - lane_base[case_index]
                 ) / delta
                 rounding[case_index, :, input_index] = (
-                    np.abs(np.spacing(plus))
+                    np.abs(np.spacing(plus_scale))
                     + np.abs(np.spacing(lane_base[case_index]))
                 ) / delta
                 local_equal = neighbour_equal[case_index, input_index, 1]
@@ -368,7 +389,7 @@ def build_oracle(main: dict[str, object], lane: dict[str, object]) -> dict[str, 
                 ) / delta
                 rounding[case_index, :, input_index] = (
                     np.abs(np.spacing(lane_base[case_index]))
-                    + np.abs(np.spacing(minus))
+                    + np.abs(np.spacing(minus_scale))
                 ) / delta
                 local_equal = neighbour_equal[case_index, input_index, 0]
             else:
@@ -427,10 +448,10 @@ def build_oracle(main: dict[str, object], lane: dict[str, object]) -> dict[str, 
 
     # Measure one-sided left and right lane finite differences on the primary
     # neighbourhood.  Exclude an entry at a statement boundary only when the
-    # measured left and right one-sided lane finite differences disagree.
+    # measured left and right one-sided lane finite differences disagree by
+    # more than both 1e-6 relative error and the entry's own fd_rounding_bound.
     fd_left = np.empty_like(main_jacobian)
     fd_right = np.empty_like(main_jacobian)
-    one_sided_rounding = np.empty_like(main_jacobian)
     for case_index in range(len(CASES)):
         for input_index in range(len(INPUT_NAMES)):
             delta = steps[case_index, input_index]
@@ -439,11 +460,6 @@ def build_oracle(main: dict[str, object], lane: dict[str, object]) -> dict[str, 
             base_val = lane_base[case_index]
             fd_left[case_index, :, input_index] = (base_val - minus) / delta
             fd_right[case_index, :, input_index] = (plus - base_val) / delta
-            one_sided_rounding[case_index, :, input_index] = (
-                np.abs(np.spacing(plus))
-                + 2.0 * np.abs(np.spacing(base_val))
-                + np.abs(np.spacing(minus))
-            ) / delta
 
     boundary_candidate = np.zeros_like(main_jacobian, dtype=bool)
     for case_index, (_concentration, h_ice, _qlead) in enumerate(CASES):
@@ -460,7 +476,7 @@ def build_oracle(main: dict[str, object], lane: dict[str, object]) -> dict[str, 
     )
     one_sided_disagrees = np.abs(fd_right - fd_left) > np.maximum(
         1.0e-6 * one_sided_scale,
-        one_sided_rounding,
+        rounding,
     )
     excluded = boundary_candidate & one_sided_disagrees
 
