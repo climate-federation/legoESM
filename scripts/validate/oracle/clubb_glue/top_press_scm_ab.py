@@ -28,16 +28,10 @@ _P_CUT = 15000.0     # the pre-2026-10-20 production top (A/B arm 1); diagnostic
 _S_PER_DAY = 86400.0
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("checkpoint")
-    ap.add_argument("deck")
-    ap.add_argument("--steps", type=int, required=True)
-    ap.add_argument("--stride", type=int, required=True)
-    ap.add_argument("--mesh-level", type=int, required=True)
-    ap.add_argument("--out", required=True)
-    a = ap.parse_args(argv)
-
+def load_run_columns(checkpoint, deck, mesh_level, stride=None, pick=None):
+    """Rebuild the checkpoint's run (refusing any CLUBB-visible drift) and load
+    its columns. Returns a namespace of everything the A/B drivers use."""
+    import types
     import jax
     jax.config.update("jax_enable_x64", True)
     from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -57,12 +51,12 @@ def main(argv=None):
     # The checkpoint's own run: its recorded command line, with the deck given
     # here (normally the same file at this checkout).
     import shlex
-    man = json.loads((Path(a.checkpoint).parent / "run_manifest.json").read_text())
+    man = json.loads((Path(checkpoint).parent / "run_manifest.json").read_text())
     argv = shlex.split(man["run"]["command_line"])[1:]
-    argv[argv.index("--config") + 1] = a.deck
+    argv[argv.index("--config") + 1] = deck
     argv = [x for x in argv if x != "--distributed"]
     parser = run_amip.build_arg_parser()
-    keys = load_yaml_config(a.deck, parser)
+    keys = load_yaml_config(deck, parser)
     parser.set_defaults(**keys)
     parser.set_defaults(_config_keys=frozenset(keys))
     cfg = run_amip.build_config_from_args(run_amip._postprocess_args(
@@ -95,17 +89,19 @@ def main(argv=None):
     phys_dt = cfg.dycore.dt * cfg.physics_update_steps
     dt = phys_dt / cfg.cld_macmic_num_steps
 
-    d = np.load(a.checkpoint, allow_pickle=True)
+    d = np.load(checkpoint, allow_pickle=True)
     vg = np.asarray(d["meta_vgrid"], dtype=np.float64)
     T_all = np.asarray(d["T"], dtype=np.float64)
     ncell = T_all.shape[0]
-    mesh = create_voronoi_mesh(a.mesh_level)
+    mesh = create_voronoi_mesh(mesh_level)
     if mesh.latCell.shape[0] != ncell:
-        raise SystemExit(f"mesh level {a.mesh_level} has {mesh.latCell.shape[0]} "
+        raise SystemExit(f"mesh level {mesh_level} has {mesh.latCell.shape[0]} "
                          f"cells, checkpoint {ncell}")
     u_all, v_all = (np.asarray(x) for x in
                     reconstruct_cell_velocity(jnp.asarray(d["u"]), mesh))
-    pick = np.arange(0, ncell, a.stride)
+    if pick is None:
+        pick = np.arange(0, ncell, stride)
+    pick = np.asarray(pick)
     g = lambda k: jnp.asarray(np.asarray(d[k], dtype=np.float64)[pick])  # noqa: E731
     T0, qv0, qc0, ps = g("T"), g("trc_q_v"), g("trc_q_c"), g("p_s")
     u0, v0 = jnp.asarray(u_all[pick]), jnp.asarray(v_all[pick])
@@ -120,6 +116,25 @@ def main(argv=None):
     for k, x in dict(T=T0, qv=qv0, qc=qc0, u=u0, v=v0, mom=mom0).items():
         if not np.all(np.isfinite(np.asarray(x))):
             raise SystemExit(f"non-finite checkpoint field {k}")
+    return types.SimpleNamespace(**{k: v for k, v in locals().items()
+                                    if not k.startswith('_')})
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("checkpoint")
+    ap.add_argument("deck")
+    ap.add_argument("--steps", type=int, required=True)
+    ap.add_argument("--stride", type=int, required=True)
+    ap.add_argument("--mesh-level", type=int, required=True)
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args(argv)
+
+    L = load_run_columns(a.checkpoint, a.deck, a.mesh_level, stride=a.stride)
+    jax, jnp, C = L.jax, L.jnp, L.C  # noqa: N806
+    (ccfg, dt, lat, p_half, p_full, T0, qv0, qc0, u0, v0, mom0, compute_heights_from_sigma,
+     compute_rho) = (L.ccfg, L.dt, L.lat, L.p_half, L.p_full, L.T0, L.qv0, L.qc0, L.u0,
+                     L.v0, L.mom0, L.compute_heights_from_sigma, L.compute_rho)
     ncol = T0.shape[0]
     zero = jnp.zeros((ncol,))
     upper = np.asarray(p_full) < _P_CUT
