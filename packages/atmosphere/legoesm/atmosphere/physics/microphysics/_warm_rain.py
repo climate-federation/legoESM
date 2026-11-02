@@ -1491,8 +1491,9 @@ def rain_evaporation_mg2(q_v, q_sat, T, p, rho, q_ric, lamr, n0r, lcldm,
     qclr = (q_v - dum * q_sat) / one_m_dum
     lam = jnp.where(active, lamr, 1.0)
     dv, mu, sc = _air_transport_props(T, p, rho)
-    arn = config.fall_a_r * safe_pow(
-        config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
+    # MG2 arn = ar*rhof with rhof = (rhosu/rho)^0.54, no density floor
+    # (micro_mg2_0.F90:895-897)
+    arn = config.fall_a_r * safe_pow(config.rho_su / rho, _FALL_RHO_EXPONENT)
     dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)  # latent-ok: MG2 oracle constant (calc_ab, xxlv)
     ab = 1.0 + dqsdt * constants.L_v / constants.c_pd  # latent-ok: MG2 oracle constant (calc_ab, xxlv)
     eps = _mg2_vent_eps(n0r, lam, arn, config.fall_b_r, config.rain_vent_f1,

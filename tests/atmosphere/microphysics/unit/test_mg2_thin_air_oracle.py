@@ -67,7 +67,6 @@ def test_fixture_spans_the_floor():
         assert np.count_nonzero(o[k][np.asarray(i["rho"]) < 0.1]) > 10, k
 
 
-@pytest.mark.xfail(strict=True, reason="rain_evaporation_mg2 floors rho at 0.1 in arn")
 def test_rain_evaporation_thin_air():
     """rain_evaporation_mg2 against evaporate_sublimate_precip (arn)."""
     fx = _fx()
