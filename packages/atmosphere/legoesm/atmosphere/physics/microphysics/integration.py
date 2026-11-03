@@ -235,18 +235,32 @@ def _incloud_liquid_cloud_fraction(phys_state, q_v_col, T_col, p_full_col,
         q_v_col, T_col, p_full_col, q_i_col, lat_col, cloud_config,
         p_half_col[:, :-1],
         trop_cloud_top_press=clubb_config.trop_cloud_top_press,
-        trop_cloud_taper_lnp_width=clubb_config.trop_cloud_taper_lnp_width)
-    return jnp.maximum(jnp.clip(_cf.reshape(T_col.shape), 0.0, 1.0), _aist)
+        trop_cloud_taper_lnp_width=clubb_config.trop_cloud_taper_lnp_width,
+        return_qsatfac=bool(getattr(cloud_config, "cam6_do_subgrid_growth",
+                                    False)))
+    # cldfrc2m_do_subgrid_growth: aist's call also returns qsatfac's ramp
+    # term (clubb_intr.F90:2556-2558); MG2 completes it into qsfm (:880).
+    _ramp = None
+    if isinstance(_aist, tuple):
+        _aist, _ramp = _aist
+    return (jnp.maximum(jnp.clip(_cf.reshape(T_col.shape), 0.0, 1.0), _aist),
+            _ramp)
 
 
 def _check_incloud_cloud_config(scheme_config, cloud_config,
-                                clubb_config) -> bool:
+                                clubb_config, scheme_name) -> bool:
     _incloud = bool(getattr(scheme_config, "warm_rain_incloud", False))
     if _incloud and getattr(cloud_config, "scheme", None) != "cam6_clubb":
         raise ValueError(
             "warm_rain_incloud=True uses CAM6's ast = max(alst, aist); the "
             "ice-stratus fraction needs the cam6_clubb cloud config, got "
             f"{getattr(cloud_config, 'scheme', None)!r}.")
+    if getattr(cloud_config, "cam6_do_subgrid_growth", False) and not (
+            scheme_name == "morrison" and _incloud):
+        raise ValueError(
+            "CloudConfig.cam6_do_subgrid_growth feeds MG2's qsfm and is read "
+            "only by morrison with warm_rain_incloud=True (silently inert "
+            "otherwise).")
     if _incloud and clubb_config is None:
         raise ValueError(
             "warm_rain_incloud=True needs the run's CLUBBConfig "
@@ -528,7 +542,7 @@ def _make_hydrostatic_microphysics(
     )
 
     _incloud = _check_incloud_cloud_config(scheme_config, cloud_config,
-                                           clubb_config)
+                                           clubb_config, scheme_name)
     if _incloud and model_type != "mpas":
         # Checked at build time, not the first step: aist's tropopause
         # switch needs MPAS cell latitudes (mesh.latCell).
@@ -739,10 +753,14 @@ def _make_hydrostatic_microphysics(
                     raise ValueError(
                         "warm_rain_incloud=True: the aist tropopause switch "
                         "needs cell latitudes (MPAS mesh latCell).")
-                _kw["cloud_fraction"] = _incloud_liquid_cloud_fraction(
+                _kw["cloud_fraction"], _ramp = _incloud_liquid_cloud_fraction(
                     phys_state, q_v_col, T_col, p_full_col, p_half_col,
                     hydrometeors.q_i, jnp.asarray(grid.latCell).reshape(ncol),
                     cloud_config, clubb_config)
+
+                if _ramp is not None:
+
+                    _kw["qsatfac_ramp"] = _ramp
             if relvar_from_clubb:
                 # CAM6 MG2 reads pbuf RELVAR, set by clubb_tend_cam in the same
                 # macmic iteration (clubb_intr.F90:2416-2425).
@@ -1554,7 +1572,7 @@ def _make_spectral_pe_microphysics(
     is_ml = scheme_name == "ml_emulator"
     _ml_model_cache = [None]
     _incloud = _check_incloud_cloud_config(scheme_config, cloud_config,
-                                           clubb_config)
+                                           clubb_config, scheme_name)
 
     # Tracer key → MicrophysicsOutput attribute name.  Mirrors the
     # ``HydrometeorState`` field layout in ``microphysics/output.py``
@@ -1686,9 +1704,13 @@ def _make_spectral_pe_microphysics(
                 _lat_col = jnp.broadcast_to(
                     jnp.asarray(grid.lat)[:, None], (n_lat, n_lon)
                 ).reshape(ncol)
-                _kw["cloud_fraction"] = _incloud_liquid_cloud_fraction(
+                _kw["cloud_fraction"], _ramp = _incloud_liquid_cloud_fraction(
                     phys_state, q_v_col, T_col, p_full_col, p_half_col,
                     hydrometeors.q_i, _lat_col, cloud_config, clubb_config)
+
+                if _ramp is not None:
+
+                    _kw["qsatfac_ramp"] = _ramp
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,

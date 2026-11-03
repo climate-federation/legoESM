@@ -659,6 +659,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         cam6_rhmaxi=getattr(cfg, "cloud_cam6_rhmaxi", None),
         cam6_rhminis=getattr(cfg, "cloud_cam6_rhminis", None),
         cam6_rhmaxis=getattr(cfg, "cloud_cam6_rhmaxis", None),
+        cam6_do_subgrid_growth=getattr(cfg, "cloud_cam6_do_subgrid_growth", None),
         cam6_conv_water_in_rad=getattr(cfg, "cloud_cam6_conv_water_in_rad", None),
         cam6_conv_water_frac_limit=getattr(
             cfg, "cloud_cam6_conv_water_frac_limit", None),

@@ -1445,6 +1445,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=None,
                         help="CAM6 conv_water_frac_limit (bounds 1e-4..0.1); "
                              "None = 0.01 (CAM6 namelist)")
+    parser.add_argument("--cloud-cam6-do-subgrid-growth",
+                        dest="cloud_cam6_do_subgrid_growth",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="CAM6 cldfrc2m_do_subgrid_growth: MG2 scales its "
+                             "saturation below freezing by qsatfac from the "
+                             "aist ramp (cam6 namelist .true.). Default off "
+                             "(qsfm = 1).")
     parser.add_argument("--cloud-cam6-snow-in-rad", dest="cloud_cam6_snow_in_rad",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="CAM6 snow in the radiation (cloud scheme "
@@ -3304,6 +3311,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cam6_rhmaxi=args.cloud_cam6_rhmaxi,
         cloud_cam6_rhminis=args.cloud_cam6_rhminis,
         cloud_cam6_rhmaxis=args.cloud_cam6_rhmaxis,
+        cloud_cam6_do_subgrid_growth=args.cloud_cam6_do_subgrid_growth,
         cloud_cam6_conv_water_in_rad=args.cloud_cam6_conv_water_in_rad,
         cloud_cam6_conv_water_frac_limit=args.cloud_cam6_conv_water_frac_limit,
         cloud_cam6_snow_in_rad=args.cloud_cam6_snow_in_rad,

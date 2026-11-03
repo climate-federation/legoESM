@@ -1054,6 +1054,11 @@ class ExperimentConfig(NamedTuple):
     cloud_cam6_rhmaxi: float | None = None
     cloud_cam6_rhminis: float | None = None
     cloud_cam6_rhmaxis: float | None = None
+    # CAM6 cldfrc2m_do_subgrid_growth (CloudConfig.cam6_do_subgrid_growth):
+    # MG2's sub-grid saturation factor qsatfac (cldfrc2m.F90:1116-1117,
+    # micro_mg2_0.F90:880, 922-927); .true. in the cam6 namelist defaults.
+    # False = qsfm = 1 (upstream legoESM choice bc696df77e).
+    cloud_cam6_do_subgrid_growth: bool = False
     # CAM6 convective water in the radiation (CloudConfig.cam6_conv_water_in_rad;
     # conv_water.F90 conv_water_4rad, cam6 namelist conv_water_in_rad = 1 and
     # conv_water_frac_limit = 0.01).  0 (default) = off, the stratiform water
@@ -4926,6 +4931,12 @@ class ExperimentConfig(NamedTuple):
                 f"{', '.join(_cam6_rh_set)} set but cloud_scheme="
                 f"{self.cloud_scheme!r}: the CAM6 aist ramp is read only by "
                 "cloud_scheme='cam6_clubb' (otherwise silently inert).")
+        if self.cloud_cam6_do_subgrid_growth and (
+                self.cloud_scheme != "cam6_clubb" or self.microphysics != "morrison"):
+            errors.append(
+                "cloud_cam6_do_subgrid_growth=True needs cloud_scheme='cam6_clubb' "
+                "and microphysics='morrison' (MG2 mode); got "
+                f"{self.cloud_scheme!r}, {self.microphysics!r}.")
         if self.cloud_cam6_snow_in_rad and (
                 self.cloud_scheme != "cam6_clubb"
                 or self.cloud_vertical_overlap_optics != "mcica"
