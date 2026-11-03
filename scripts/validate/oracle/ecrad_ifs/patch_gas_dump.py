@@ -24,6 +24,8 @@ STAGES = {
                      "r:ZFORFRAC i:INDFOR r:ZSELFFAC r:ZSELFFRAC i:INDSELF r:ZFAC00 r:ZFAC01 r:ZFAC10 r:ZFAC11 "
                      "i:JP i:JT i:JT1"),
     "SRTM_GAS_OPTICAL_DEPTH": ("sw_od_", "r:ZOD_SW r:ZSSA_SW r:ZINCSOL"),
+    "PLANCK_FUNCTION_ATMOS": ("lw_planck_", "r:planck_hl"),
+    "PLANCK_FUNCTION_SURF": ("lw_planck_", "r:lw_emission"),
 }
 
 
@@ -49,6 +51,19 @@ def main(path):
         out.append(body[i])
         if i == use_i[0]:
             out.append("    use ecrad49_dump, only : dump_r, dump_i")
+        if re.match(r"\s*CALL RRTM_PREPARE_GASES", body[i], re.I):
+            # inputs exactly as the gas optics receive them (before the call)
+            out.pop()
+            out += ["    CALL DUMP_R('in_pressure_hl', thermodynamics%pressure_hl)",
+                    "    CALL DUMP_R('in_temperature_hl', thermodynamics%temperature_hl)",
+                    "    CALL DUMP_R('in_pressure_fl', pressure_fl)",
+                    "    CALL DUMP_R('in_temperature_fl', temperature_fl)",
+                    "    CALL DUMP_R('in_gas_mmr', gas%mixing_ratio)",
+                    "    CALL DUMP_R('in_cos_sza', single_level%cos_sza)",
+                    "    CALL DUMP_R('in_skin_temperature', single_level%skin_temperature)",
+                    "    CALL DUMP_R('in_solar_irradiance', single_level%solar_irradiance)",
+                    "    IF (PRESENT(lw_albedo)) CALL DUMP_R('in_lw_albedo', lw_albedo)",
+                    body[i]]
         m = re.match(r"\s*CALL\s+(\w+)", body[i], re.I)
         if m and m.group(1).upper() in STAGES:
             name = m.group(1).upper()
