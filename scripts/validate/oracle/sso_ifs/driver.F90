@@ -1,0 +1,134 @@
+! Oracle driver: OpenIFS 49r1 (8f6f722) subgrid-orography drag, Lott & Miller
+! (1997) as GWDRAG_LAYER calls it: SUGWD -> GWDRAG (-> GWSETUP, GWPROFIL),
+! all four compiled unchanged.  One column per GWDRAG call (KLON = 1).
+! Also the turbulent orographic form drag coefficient (Beljaars et al. 2004)
+! as VDFMAIN computes it: SUVDF (empty NAMVDF) -> VDFTOFDC, unchanged.
+!
+! Per column, SUGWD runs on that column's own vertical coordinate read as pure
+! sigma (PVAH = 0, PVBH = p_half / p_surf) with STPRE = sigma_full * 101325 Pa;
+! it sets NKTOPG, NGWDTOP, NGWDLIM (printed per column).  NAMGWD is empty, so
+! GKDRAG/GKWAKE/GTENLIM are the 49r1 code values.  LPHYLIN = .FALSE.
+!
+! Constants: SETUP_CONSTANTS (49r1), then CONST_MODE = 1 overwrites the YOMCST
+! module RG/RD/RCPD that GWSETUP/GWDRAG read with the namelist values (legoESM),
+! CONST_MODE = 2 keeps the 49r1 values.  The values used are printed.
+!
+! GWSETUP is also called once more per column, unchanged, only to report its
+! integer levels and PSOBETA-relevant fields (diagnostics, not scored).
+!
+! Input text (all reals '%.17e'):
+!   line 1: NCOL KLEV
+!   per column: 'COL' name / PHSTD PGAMMA PTHETA PSIG PSIGFLT / PAPHM1(0:KLEV) / PAPM1 /
+!               PGEOM1 / PTM1 / PUM1 / PVM1   (one record per line, top -> bottom)
+! Output text: per column 'COL' name, then SOTEU, SOTEV, SOBETA, GAMMA_OUT, TOFDC and
+! 'INT' NKTOPG NGWDTOP NGWDLIM KKCRITH KCRIT KKENVH KKNU KKNU2
+PROGRAM DRIVER
+USE PARKIND1, ONLY : JPIM, JPRB
+USE YOMLUN, ONLY : NULNAM
+USE YOMCST, ONLY : SETUP_CONSTANTS, TCST_INIT, YRCST, RG, RD, RCPD
+USE YOEGWD, ONLY : TEGWD
+USE YOEPHLI, ONLY : TEPHLI
+USE YOEPHY, ONLY : TEPHY
+USE YOMSTA, ONLY : TSTA
+USE YOEVDF, ONLY : TVDF
+IMPLICIT NONE
+INTEGER(KIND=JPIM) :: CONST_MODE = 2
+REAL(KIND=JPRB) :: CRG = -1.0_JPRB, CRD = -1.0_JPRB, CRCPD = -1.0_JPRB
+CHARACTER(LEN=512) :: INFILE = '', OUTFILE = '', CNML
+NAMELIST /RUN/ CONST_MODE, CRG, CRD, CRCPD, INFILE, OUTFILE
+TYPE(TEGWD) :: YDEGWD
+TYPE(TEPHLI) :: YDEPHLI
+TYPE(TEPHY) :: YDEPHY
+TYPE(TSTA) :: YDSTA
+TYPE(TVDF) :: YDVDF
+INTEGER(KIND=JPIM) :: NCOL, KLEV, IC, JK
+CHARACTER(LEN=128) :: CNAME, CTAG
+REAL(KIND=JPRB) :: ZSTD(1), ZGAM(1), ZTHE(1), ZSIG(1), ZGAM2(1), ZSIGF(1)
+REAL(KIND=JPRB), ALLOCATABLE :: PAPH(:,:), PAP(:,:), PGEO(:,:), PT(:,:), PU(:,:), PV(:,:)
+REAL(KIND=JPRB), ALLOCATABLE :: TEU(:,:), TEV(:,:), BETA(:,:), VAH(:), VBH(:), TOFDC(:,:)
+! GWSETUP diagnostic call
+LOGICAL :: LLGWD(1)
+INTEGER(KIND=JPIM) :: IKCRITH(1), ICRIT(1), IKENVH(1), IKNU(1), IKNU2(1)
+REAL(KIND=JPRB), ALLOCATABLE :: ZRHO(:,:), ZRI(:,:), ZSTAB(:,:), ZTAU(:,:), ZVPH(:,:), ZPSI(:,:), ZZDEP(:,:)
+REAL(KIND=JPRB) :: ZULOW(1), ZVLOW(1), ZNU(1), ZD1(1), ZD2(1), ZDMOD(1)
+#include "gwdrag.intfb.h"
+#include "vdftofdc.intfb.h"
+#include "suvdf.intfb.h"
+
+CALL GET_COMMAND_ARGUMENT(1, CNML)
+OPEN(NULNAM, FILE=TRIM(CNML), STATUS='OLD', ACTION='READ')
+READ(NULNAM, NML=RUN)
+
+CALL SETUP_CONSTANTS(6, 0)
+IF (CONST_MODE == 1) THEN
+  IF (CRG <= 0 .OR. CRD <= 0 .OR. CRCPD <= 0) STOP 'CONST_MODE=1 needs CRG CRD CRCPD'
+  ! YOMCST's own sync (TCST_INIT) copies YRCST into the PROTECTED module variables
+  YRCST%RG = CRG; YRCST%RD = CRD; YRCST%RCPD = CRCPD
+  CALL TCST_INIT(YRCST)
+ELSEIF (CONST_MODE /= 2) THEN
+  STOP 'CONST_MODE must be 1 or 2'
+ENDIF
+WRITE(6, '(A,I2,3ES25.17)') 'CONST MODE RG RD RCPD ', CONST_MODE, RG, RD, RCPD
+CALL SUVDF(YDVDF)
+WRITE(6, '(A,ES25.17)') 'SUVDF RTOFDALPHA ', YDVDF%RTOFDALPHA
+
+YDEPHLI%LPHYLIN = .FALSE.
+YDEPHLI%RLPDRAG = 0.0_JPRB      ! read only when LPHYLIN
+
+OPEN(11, FILE=TRIM(INFILE), STATUS='OLD', ACTION='READ')
+OPEN(12, FILE=TRIM(OUTFILE), STATUS='REPLACE', ACTION='WRITE')
+READ(11, *) NCOL, KLEV
+WRITE(12, '(2I6)') NCOL, KLEV
+ALLOCATE(PAPH(1,0:KLEV), PAP(1,KLEV), PGEO(1,KLEV), PT(1,KLEV), PU(1,KLEV), PV(1,KLEV))
+ALLOCATE(TEU(1,KLEV), TEV(1,KLEV), BETA(1,KLEV), VAH(KLEV+1), VBH(KLEV+1), TOFDC(1,KLEV))
+ALLOCATE(ZRHO(1,KLEV+1), ZRI(1,KLEV+1), ZSTAB(1,KLEV+1), ZTAU(1,KLEV+1), ZVPH(1,KLEV+1), &
+  & ZPSI(1,KLEV+1), ZZDEP(1,KLEV))
+ALLOCATE(YDSTA%STPRE(KLEV))
+DO IC = 1, NCOL
+  READ(11, *) CTAG, CNAME
+  IF (CTAG /= 'COL') STOP 'bad column header'
+  READ(11, *) ZSTD(1), ZGAM(1), ZTHE(1), ZSIG(1), ZSIGF(1)
+  READ(11, *) PAPH(1,0:KLEV)
+  READ(11, *) PAP(1,:)
+  READ(11, *) PGEO(1,:)
+  READ(11, *) PT(1,:)
+  READ(11, *) PU(1,:)
+  READ(11, *) PV(1,:)
+  ! this column's coordinate as pure sigma for SUGWD (49r1 code, unchanged)
+  VAH(:) = 0.0_JPRB
+  DO JK = 1, KLEV + 1
+    VBH(JK) = PAPH(1,JK-1) / PAPH(1,KLEV)
+  ENDDO
+  DO JK = 1, KLEV
+    YDSTA%STPRE(JK) = 0.5_JPRB * (VBH(JK) + VBH(JK+1)) * 101325.0_JPRB
+  ENDDO
+  CALL SUGWD(YDSTA, YDEGWD, YDEPHY, 6, KLEV, VAH, VBH)
+  WRITE(6, '(A,A,3I5,4ES25.17)') 'SUGWD ', TRIM(CNAME), YDEGWD%NKTOPG, YDEGWD%NGWDTOP, &
+    & YDEGWD%NGWDLIM, YDEGWD%GKDRAG, YDEGWD%GKWAKE, YDEGWD%GTENLIM, YDEGWD%GRFPLM
+
+  ZGAM2 = ZGAM
+  CALL GWDRAG(YDEPHLI, YDEGWD, 1, 1, 1, KLEV, PAPH, PAP, PGEO, PT, PU, PV, &
+    & ZSTD, ZGAM2, ZTHE, ZSIG, TEU, TEV, BETA)
+
+  TOFDC = -999.0_JPRB
+  CALL VDFTOFDC(YDVDF, 1, 1, 1, KLEV, PU, PV, PGEO, ZSIGF, TOFDC)
+
+  ! diagnostic: GWSETUP's integer levels on the same inputs (unchanged routine)
+  LLGWD(1) = ZSTD(1) > 50._JPRB
+  ZGAM2 = ZGAM
+  CALL GWSETUP(YDEGWD, 1, 1, 1, KLEV, LLGWD, IKCRITH, ICRIT, IKENVH, IKNU, IKNU2, &
+    & PAPH, PAP, PU, PV, PT, PGEO, ZSTD, ZRHO, ZRI, ZSTAB, ZTAU, ZVPH, ZPSI, ZZDEP, &
+    & ZULOW, ZVLOW, ZTHE, ZGAM2, ZNU, ZD1, ZD2, ZDMOD)
+
+  WRITE(12, '(A,1X,A)') 'COL', TRIM(CNAME)
+  WRITE(12, '(*(ES25.17))') TEU(1,:)
+  WRITE(12, '(*(ES25.17))') TEV(1,:)
+  WRITE(12, '(*(ES25.17))') BETA(1,:)
+  WRITE(12, '(*(ES25.17))') ZGAM2(1)
+  WRITE(12, '(*(ES25.17))') TOFDC(1,:)
+  WRITE(12, '(A,8I6)') 'INT', YDEGWD%NKTOPG, YDEGWD%NGWDTOP, YDEGWD%NGWDLIM, IKCRITH(1), &
+    & ICRIT(1), IKENVH(1), IKNU(1), IKNU2(1)
+ENDDO
+CLOSE(11); CLOSE(12)
+WRITE(6, '(A)') 'DRIVER_DONE'
+END PROGRAM DRIVER
