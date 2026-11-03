@@ -444,10 +444,27 @@ def _nemo_mld_from_potential_density(T, S, mask, z_coord, eos_fn, rho_c,
     return hml, m_base
 
 
+def _nemo_bn2_eos_form(eos):
+    """NEMO ``bn2`` alpha/beta branch for the run's EOS name.
+
+    ``nemo_seos`` / ``nemo_eos80`` / ``nemo_teos10`` -> ``seos`` / ``eos80``
+    / ``teos10`` (the same suffix mapping the model's step-entry N2 bundle
+    uses).  Any other EOS (``wright``, ``linear``, ...) has no NEMO
+    polynomial, so ``None`` is returned and the caller must not use bn2.
+    ``eos=None`` (caller did not thread the run's EOS) keeps the legacy
+    ``seos`` branch.
+    """
+    if eos is None:
+        return "seos"
+    if eos in ("nemo_seos", "nemo_eos80", "nemo_teos10"):
+        return eos.removeprefix("nemo_")
+    return None
+
+
 def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
                                active_3d=None, jacobian=None,
                                n2_override=None, e3w_override=None,
-                               eos_nemo_seos=None):
+                               eos_nemo_seos=None, eos=None):
     """Mixed-layer depth [m] via NEMO's EXACT zdfmxl N^2-integral criterion.
 
     NEMO (``zdfmxl.F90:91-105``, 5.0.2) integrates the POSITIVE buoyancy
@@ -501,10 +518,17 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
     # on the DINO y5 state (#1226): compute_buoyancy_frequency_nemo_bn2 gives
     # corr 1.000000 / ratio 0.999970, the adiabatic form 0.999999 / 0.995994.
     # Under a 1.0 fidelity bar that 0.4% amplitude deviation moves the MLD
-    # level in ~3% of columns, so use the NEMO form whenever the card runs the
-    # S-EOS; fall back to the adiabatic N^2 for any other EOS (nemo_bn2 is
-    # S-EOS-specific, being written in terms of the alpha/beta polynomial).
-    _use_nemo_bn2 = getattr(z_coord, "t_depth_ref", None) is not None
+    # level in ~3% of columns, so use the NEMO form whenever the card runs a
+    # NEMO EOS (S-EOS, EOS-80 or TEOS-10 polynomial, selected by ``eos``); fall
+    # back to the adiabatic N^2 with the run's eos_fn for any other EOS.  On
+    # ORCA1 (TEOS-10) the S-EOS alpha/beta put the ML base on the wrong level
+    # in 14% of wet columns (tier-3 MLD unit, row P6).
+    # ``eos`` is the run's EOS name; NEMO's bn2 alpha/beta come from that EOS
+    # (eosbn2.F90 rab_3d), so the bn2 branch runs with the matching form and
+    # a non-NEMO EOS takes the adiabatic branch with the run's own eos_fn.
+    _bn2_form = _nemo_bn2_eos_form(eos)
+    _use_nemo_bn2 = (getattr(z_coord, "t_depth_ref", None) is not None
+                     and _bn2_form is not None)
     if _use_nemo_bn2:
         from legoesm.ocean.eos import (
             compute_buoyancy_frequency_nemo_bn2, nemo_e3w_from_live_gdept,
@@ -550,7 +574,7 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
             n2_int = compute_buoyancy_frequency_nemo_bn2(
                 T_filled, S_filled, _gdept, _gdepw_int,
                 (eos_nemo_seos if eos_nemo_seos is not None
-                 else NemoSEOSConfig()), g=g,
+                 else NemoSEOSConfig()), g=g, eos_form=_bn2_form,
                 e3w_int=e3w)
     else:
         if n2_override is None:
@@ -684,7 +708,8 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
 
 def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
               g=constants.g, rho_0=_RHO_0, active_3d=None, jacobian=None,
-              n2_override=None, e3w_override=None, eos_nemo_seos=None):
+              n2_override=None, e3w_override=None, eos_nemo_seos=None,
+              eos=None):
     """Dispatch the NEMO zdfmxl mixed-layer depth by criterion (raise on typo).
 
     ``"rho_c"`` (default, byte-identical) = potential-density difference;
@@ -699,7 +724,7 @@ def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
         return _nemo_mld_from_n2_integral(
             T, S, mask, z_coord, eos_fn, rho_c, g, rho_0, active_3d=active_3d,
             jacobian=jacobian, n2_override=n2_override,
-            e3w_override=e3w_override, eos_nemo_seos=eos_nemo_seos)
+            e3w_override=e3w_override, eos_nemo_seos=eos_nemo_seos, eos=eos)
     raise ValueError(
         f"unknown GMRediConfig.mld_criterion {criterion!r}; "
         "expected 'rho_c' or 'n2_integral'.")
@@ -707,7 +732,8 @@ def _nemo_mld(criterion, T, S, mask, z_coord, eos_fn, rho_c, *,
 
 def _apply_nemo_mld_slope_ramp(S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c,
                                mld_criterion="rho_c", *, active_3d=None,
-                               g=constants.g, rho_0=_RHO_0, jacobian=None):
+                               g=constants.g, rho_0=_RHO_0, jacobian=None,
+                               eos=None):
     """Linearly ramp interface slopes to 0 through the mixed layer (NEMO ldfslp).
 
     NEMO (``ldfslp.F90:284-297``, w-point branch): inside the mixed layer
@@ -743,7 +769,7 @@ def _apply_nemo_mld_slope_ramp(S_x, S_y, T, S, mask, z_coord, eos_fn, rho_c,
     nlev_m1 = S_x.shape[-1]
     hml, m_base = _nemo_mld(
         mld_criterion, T, S, mask, z_coord, eos_fn, rho_c, g=g, rho_0=rho_0,
-        active_3d=active_3d, jacobian=jacobian)
+        active_3d=active_3d, jacobian=jacobian, eos=eos)
     z_iface = jnp.cumsum(z_coord.dz_ref)[:-1]         # (nlev-1,) interface depths
     z_iface_3d = z_iface[None, None, :]               # (1, 1, nlev-1), broadcastable
     if jacobian is not None and isinstance(z_coord, OceanPartialCellCoordinate):
@@ -818,7 +844,7 @@ def _shapiro_smooth_slopes(S_x, S_y, mask):
 
 def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
                               slope_n2="adiabatic", jacobian=None,
-                              eos_nemo_seos=None):
+                              eos_nemo_seos=None, eos=None):
     """Shared W-point geometry + N² for the native ldfslp stencil.
 
     Factors the ``e3w``/``wmask3``/``pn2`` block common to
@@ -887,6 +913,14 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
         from legoesm.ocean.eos import (
             compute_buoyancy_frequency_nemo_bn2, NemoSEOSConfig,
         )
+        # alpha/beta come from the run's EOS (eosbn2.F90 rab_3d); a non-NEMO
+        # EOS has no bn2 polynomial, so an explicit nemo_bn2 request fails.
+        _bn2_form = _nemo_bn2_eos_form(eos)
+        if _bn2_form is None:
+            raise ValueError(
+                "GMRediConfig.slope_n2='nemo_bn2' needs a NEMO EOS "
+                "('nemo_seos', 'nemo_eos80' or 'nemo_teos10'); got "
+                f"eos={eos!r}. Use slope_n2='adiabatic' for this EOS.")
         # zrw (eosbn2.F90:1459) weights the two T-point alpha/beta by the TRUE
         # w-interface depth gdepw, which is the gdept midpoint only on a uniform
         # ladder -- see the same fix in _nemo_mld_from_n2_integral.
@@ -911,7 +945,7 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
         n2_int = compute_buoyancy_frequency_nemo_bn2(
             T, S, _gdept_n2, _gdepw_n2,
             (eos_nemo_seos if eos_nemo_seos is not None
-             else NemoSEOSConfig()), g=g,
+             else NemoSEOSConfig()), g=g, eos_form=_bn2_form,
             e3w_int=e3w[..., 1:])                           # (...,nlev-1)
         # HISTORICAL (superseded 2026-07-28, kept for provenance):
         # this branch used to divide n2_int by the jacobian --
@@ -1070,6 +1104,7 @@ def compute_nemo_native_slopes(
     pn2_override: jnp.ndarray | None = None,
     e3w_override: jnp.ndarray | None = None, return_diagnostics: bool = False,
     nmln_override: jnp.ndarray | None = None, eos_nemo_seos=None,
+    eos: str | None = None,
 ):
     """NEMO ldfslp native four-position isopycnal slopes (uslp, vslp, wslpi,
     wslpj) — a direct transcription of ``ldfslp.F90`` (ldf_slp, NEMO 5.0.2)
@@ -1251,7 +1286,7 @@ def compute_nemo_native_slopes(
     e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
         rho, T, S, z_coord, eos_fn, rho_0, g, act,
         slope_n2=getattr(cfg, 'slope_n2', 'adiabatic'), jacobian=jacobian,
-        eos_nemo_seos=eos_nemo_seos)
+        eos_nemo_seos=eos_nemo_seos, eos=eos)
     _e3w_surface = e3w[..., :1]
     if pn2_override is not None:
         pn2 = jnp.asarray(pn2_override, dtype=dtype)
@@ -1313,7 +1348,7 @@ def compute_nemo_native_slopes(
         cfg.mld_criterion, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
         g=g, rho_0=rho_0, active_3d=active_3d, jacobian=jacobian,
         n2_override=pn2_override, e3w_override=e3w_override,
-        eos_nemo_seos=eos_nemo_seos)
+        eos_nemo_seos=eos_nemo_seos, eos=eos)
     first = jnp.clip(m_base + 1, 1, nlev - 1) if nmln_override is None else jnp.asarray(nmln_override, dtype=jnp.int32)
     # zhmlpt = gdept(nmln-1,Kmm) = depth of the last T-point inside the ML
     # (ldfslp.F90:143) -- live gdept, so the static per-level gather is
@@ -1726,6 +1761,7 @@ def compute_treguier_kappa_gm_nemo_native(
     source_ordered_final: bool = False,
     pn2_override: jnp.ndarray | None = None,
     e3w_override: jnp.ndarray | None = None,
+    eos: str | None = None,
 ) -> jnp.ndarray:
     r"""Treguier et al. (1997) adaptive κ_GM (NEMO ``ldftra.F90::ldf_eiv``,
     ``nn_aei_ijk_t=21``, the non-triad ``ln_traldf_triad=.FALSE.`` ELSE
@@ -1799,7 +1835,7 @@ def compute_treguier_kappa_gm_nemo_native(
            else active_3d.astype(dtype))
     e3w, wmask3, pn2 = _nemo_wpoint_e3w_wmask_n2(
         rho, T, S, z_coord, eos_fn, rho_0, g, act,
-        slope_n2=slope_n2, jacobian=jacobian)
+        slope_n2=slope_n2, jacobian=jacobian, eos=eos)
     _e3w_surface = e3w[..., :1]
     nlev = rho.shape[-1]
     if pn2_override is not None:
@@ -1977,6 +2013,7 @@ def compute_isopycnal_slopes_latlon_cgrid(
     eos_fn=None,
     rho_0: float = _RHO_0,
     g: float = constants.g,
+    eos: str | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Compute tapered isopycnal slopes at vertical interfaces.
 
@@ -2104,7 +2141,7 @@ def compute_isopycnal_slopes_latlon_cgrid(
             S_x_t, S_y_t, T, S, mask, z_coord, eos_fn, cfg.mld_rho_c,
             cfg.mld_criterion, g=g, rho_0=rho_0,
             active_3d=getattr(z_coord, "is_active", None),
-            jacobian=jacobian,
+            jacobian=jacobian, eos=eos,
         )
 
     # NEMO ldfslp horizontal Shapiro smoother (default OFF => byte-identical).
@@ -4524,7 +4561,7 @@ def nemo21_redi_from_gm(kappa_t, f_t, f_f, u_mask, v_mask, aht0, omega, *, grid=
 def native_treguier_kappa_for_state(
     rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn,
     jacobian, eta, H_bathy, prd_jacobian, prd_TS, pn2, e3w,
-    f_coriolis, rho_0, g, omega,
+    f_coriolis, rho_0, g, omega, eos=None,
 ):
     """Shared native GM diagnosis for tracer fluxes and the Redi K33 split."""
     _act_kgm = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
@@ -4535,7 +4572,7 @@ def native_treguier_kappa_for_state(
         prd_TS_override=prd_TS,
         pn2_override=pn2,
         e3w_override=e3w,
-        rho_0=rho_0, g=g, active_3d=_act_kgm,
+        rho_0=rho_0, g=g, active_3d=_act_kgm, eos=eos,
     )
     kappa_GM = compute_treguier_kappa_gm_nemo_native(
         rho, T, S, _wslpi_kgm, _wslpj_kgm, mask, z_coord, grid,
@@ -4557,6 +4594,7 @@ def native_treguier_kappa_for_state(
             and cfg.gm_bolus_advection == "through_fct"),
         pn2_override=pn2,
         e3w_override=e3w,
+        eos=eos,
     )
     return kappa_GM
 
@@ -4717,7 +4755,7 @@ def gm_redi_tracer_tendency_latlon(
     # locally-referenced gradient; ignored for the default in-situ mode.
     S_x, S_y, _taper = compute_isopycnal_slopes_latlon_cgrid(
         rho, mask, z_coord, jacobian, grid, cfg,
-        T=T, S=S, eos_fn=eos_fn, rho_0=rho_0, g=g,
+        T=T, S=S, eos_fn=eos_fn, rho_0=rho_0, g=g, eos=eos,
     )
 
     # GM coefficient. Precedence: prognostic-EKE override (computed by the step
@@ -4766,7 +4804,7 @@ def gm_redi_tracer_tendency_latlon(
                 rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg, eos_fn,
                 jacobian, _kappa_native_eta, H_bathy, _native_prd_J,
                 native_prd_TS, native_slope_pn2, native_slope_e3w,
-                f_coriolis, rho_0, g, omega,
+                f_coriolis, rho_0, g, omega, eos=eos,
             )
         else:
             kappa_GM = compute_treguier_kappa_gm(
@@ -5098,7 +5136,7 @@ def gm_redi_tracer_tendency_latlon(
                 e3w_override=native_slope_e3w,
                 return_diagnostics=return_redi_slope_diagnostics,
                 nmln_override=native_slope_nmln_override,
-                eos_nemo_seos=eos_nemo_seos)
+                eos_nemo_seos=eos_nemo_seos, eos=eos)
             _slope_diagnostics = _nat[4] if return_redi_slope_diagnostics else None; _nat = _nat[:4]; _bolus_nat = None
             if native_bolus_slope_eta is not None:
                 _bolus_nat = compute_nemo_native_slopes(
@@ -5109,7 +5147,7 @@ def gm_redi_tracer_tendency_latlon(
                     prd_TS_override=native_prd_TS,
                     pn2_override=native_slope_pn2,
                     e3w_override=native_slope_e3w,
-                    eos_nemo_seos=eos_nemo_seos)
+                    eos_nemo_seos=eos_nemo_seos, eos=eos)
             _w_stage = getattr(
                 cfg, "redi_w_slope_stage_evaluation", "redi_tuple")
             if _w_stage == "redi_tuple":
@@ -5393,13 +5431,13 @@ def compute_isoneutral_K33_latlon(
             pn2_override=native_slope_pn2,
             e3w_override=native_slope_e3w,
             rho_0=rho_0, g=g, active_3d=_act,
-            eos_nemo_seos=eos_nemo_seos)
+            eos_nemo_seos=eos_nemo_seos, eos=eos)
         if cfg.redi_coefficient == "nemo21":
             _kgm = native_treguier_kappa_for_state(
                 _rho, T, S, _m, _um, _vm, z_coord, grid, cfg, _eosfn,
                 _J, eta, H_bathy, _native_prd_J,
                 native_prd_TS, native_slope_pn2, native_slope_e3w,
-                jnp.broadcast_to(grid.f, _m.shape), rho_0, g, omega)
+                jnp.broadcast_to(grid.f, _m.shape), rho_0, g, omega, eos=eos)
             kappa_redi_override, kappa_redi_v_override = nemo21_redi_from_gm(
                 _kgm, jnp.broadcast_to(grid.f, _m.shape), cfg.redi_f_f,
                 _um[:, 1:], _vm[1:, :], cfg.redi_aht0, omega, grid=grid)
@@ -6197,7 +6235,7 @@ def _eke_stage1_fields(
     )
     S_x, S_y, _taper = compute_isopycnal_slopes_latlon_cgrid(
         rho, mask, z_coord, jacobian, grid, cfg,
-        T=T, S=S, eos_fn=eos_fn, rho_0=rho_0, g=g,
+        T=T, S=S, eos_fn=eos_fn, rho_0=rho_0, g=g, eos=eos,
     )
     f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
     # beta = df/dy = 2*Omega*cos(phi)/R (analytic; grid.cos_lat is cos(phi)).
