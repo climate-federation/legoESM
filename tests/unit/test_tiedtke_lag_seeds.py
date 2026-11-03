@@ -35,3 +35,17 @@ def test_restored_pair_is_used():
     assert s["turb_dq_v_prev"] is prev[0] and s["evap_sfc_prev"] is prev[1]
     s0 = tiedtke_lag_seeds("tiedtke", q, ps, prev=(None, None))
     assert not np.any(np.asarray(s0["evap_sfc_prev"]))
+
+
+def test_physics_factory_refuses_tiedtke_without_turbulence():
+    """Vote V21a: the lags come from the turbulence scheme; with none they
+    would stay at their zero seed, so make_physics refuses (direct
+    PhysicsConfig / SCM callers bypass ExperimentConfig.validate_strict)."""
+    import pytest
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    cfg = PhysicsConfig(convection=ConvectionConfig(scheme="tiedtke"),
+                        turbulence=TurbulenceConfig(scheme="none"))
+    with pytest.raises(ValueError, match="turbulence='none'"):
+        make_physics(cfg)
