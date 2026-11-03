@@ -3,7 +3,7 @@
 # usage: run49.sh <exe> <namelist> <data dir> <input.nc> <output.nc> [key=value ...]
 #   key=value pairs override &radiation entries (harness stages, e.g. use_aerosols=false)
 set -euo pipefail
-EXE=$1; NAM=$2; DATA=$3; IN=$4; OUT=$5; shift 5
+EXE=$(readlink -f "$1"); NAM=$2; DATA=$(readlink -f "$3"); IN=$(readlink -f "$4"); OUT=$(readlink -m "$5"); shift 5
 W=$(mktemp -d "${TMPDIR:-/tmp}/ecrad49run.XXXX")
 sed "s#\"DATA_DIR\"#\"$DATA\"#" "$NAM" > "$W/config.nam"
 for kv in "$@"; do
@@ -15,8 +15,11 @@ for kv in "$@"; do
   grep -qE "^$k *= *$v," "$W/config.nam" || { echo "override $kv not applied"; exit 1; }
 done
 cp "$W/config.nam" "${OUT%.nc}.nam"
-( cd "$W" && OMP_NUM_THREADS=1 "$EXE" config.nam "$(readlink -f "$IN")" "$W/out.nc" > "$W/run.log" 2>&1 ) || { tail -20 "$W/run.log"; exit 1; }
+( cd "$W" && OMP_NUM_THREADS=1 "$EXE" config.nam "$IN" "$W/out.nc" > "$W/run.log" 2>&1 ) || { tail -20 "$W/run.log"; exit 1; }
 mv "$W/out.nc" "$OUT"
 for f in "$W"/radiative_properties*.nc; do [ -e "$f" ] && mv "$f" "${OUT%.nc}_$(basename "$f")"; done
 cp "$W/run.log" "${OUT%.nc}.log"; rm -rf "$W"
+# chain of custody: every file the oracle opened, with its sha256
+sed -nE 's/^Reading (RRTMG (long|short)wave data|NetCDF) file (.*)$/\3/p' "${OUT%.nc}.log" | sort -u | xargs sha256sum > "${OUT%.nc}.opened"
+grep -q RADRRTM "${OUT%.nc}.opened" || { echo "opened-file log missing RADRRTM"; exit 1; }
 echo "RUN_OK $OUT"

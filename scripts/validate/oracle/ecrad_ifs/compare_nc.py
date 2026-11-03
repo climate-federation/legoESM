@@ -2,7 +2,7 @@
 
 usage: python -I compare_nc.py A.nc B.nc
 Prints, per shared variable, the max |a-b| and the max element relative
-difference |a-b|/max(|a|,|b|) (pairs that are both zero count as 0). NaN in
+difference |a-b|/max(|a|,|b|) (pairs that are both zero count as 0). NaN or Inf in
 either file is FATAL. Variables present in only one file are listed.
 """
 import sys
@@ -23,8 +23,8 @@ def compare(path_a, path_b):
         y = np.asarray(b[v][:], dtype=np.float64)
         if x.shape != y.shape:
             raise SystemExit(f"shape mismatch {v}: {x.shape} vs {y.shape}")
-        if np.isnan(x).any() or np.isnan(y).any():
-            raise SystemExit(f"NaN in {v}")
+        if not (np.isfinite(x).all() and np.isfinite(y).all()):
+            raise SystemExit(f"non-finite value in {v}")
         d = np.abs(x - y)
         den = np.maximum(np.abs(x), np.abs(y))
         rel = np.divide(d, den, out=np.zeros_like(d), where=den > 0)

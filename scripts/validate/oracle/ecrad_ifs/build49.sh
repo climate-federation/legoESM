@@ -117,7 +117,7 @@ echo "planted interface mismatch rejected ($r): $(grep -m1 -iE "mismatch|error" 
 echo "interface blocks checked: $(wc -l < intfb_checked.txt)"
 gfortran $FF -o ecrad49.x obj/*.o -L$NC/lib -lnetcdff -lnetcdf -Wl,-rpath,$NC/lib
 python3 -I "$HERE"/check_constants.py src "$M49/yomcst.F90" | tail -1
-grep -q "RPLRG *= *1.0" src/yomdyncore.F90 || { echo "RPLRG stand-in is not 1"; exit 1; }
+grep -qE "^REAL\(KIND=JPRB\), PARAMETER :: RPLRG = 1\.0_JPRB$" src/yomdyncore.F90 || { echo "RPLRG stand-in is not exactly 1.0"; exit 1; }
 gfortran --version | head -1
 echo "sources: $(wc -l < MANIFEST.txt)"
 echo BUILD_OK
