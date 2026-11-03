@@ -88,23 +88,29 @@ def test_zu_floors_are_c1_and_exact_outside_band(which):
     either band, so this synthetic case is what covers the blend."""
     floor = bf._Q_ZU_FLOOR_KG_KG if which == 1 else bf._T_ZU_FLOOR_K
     w = bf._ZU_FLOOR_REL_WIDTH * floor
-    xs = jnp.asarray([floor - 10 * w, floor - 0.5 * w, floor + w / 3,
-                      floor + 0.5 * w, floor + w, floor + 1e3 * w])
+    t = np.asarray([-10.0, -0.5, 1e-6, 1.0 / 3.0, 0.5, 1.0 - 1e-6, 1.0, 1e3])
+    xs = jnp.asarray(floor + t * w)
 
     def f(x):
         args = (x, 1e-3) if which == 0 else (280.0, x)
         return bf.nemo_zu_air_state(*args)[which]
 
     y = np.asarray(jax.vmap(f)(xs))
-    hard = np.maximum(np.asarray(xs), floor)
-    assert y[0] == floor and y[1] == floor
-    assert y[4] == float(xs[4]) and y[5] == float(xs[5])
-    gap = hard - y
-    assert np.all(gap >= 0.0) and gap.max() <= 4.0 * w / 27.0 * (1 + 1e-12)
     g = np.asarray(jax.vmap(jax.grad(f))(xs))
     assert np.all(np.isfinite(g))
-    assert g[0] == 0.0 and g[5] == 1.0 and g[2] > 0.0 and g[3] > 0.0
-    for k in (2, 3):
+    # Hard side and exact side.
+    assert y[0] == floor and y[1] == floor and g[0] == 0.0 and g[1] == 0.0
+    assert y[6] == float(xs[6]) and y[7] == float(xs[7]) and g[7] == 1.0
+    # Blend t^2 (2 - t) w, slope 4t - 3t^2: the maximum shortfall 4w/27 at
+    # t = 1/3, value 0.375 w and slope 1.25 at t = 1/2.
+    blend = np.where((t > 0) & (t < 1), t * t * (2.0 - t), 0.0)
+    for k in (2, 3, 4, 5):
+        assert abs((y[k] - floor) - blend[k] * w) <= 1e-9 * w, (k, y[k])
+    assert abs((float(xs[3]) - y[3]) - 4.0 * w / 27.0) <= 1e-9 * w
+    assert abs(g[4] - 1.25) < 1e-9
+    # Slope continuity at both joins (0 below, 1 above).
+    assert abs(g[2]) < 1e-5 and abs(g[5] - 1.0) < 1e-5
+    for k in (3, 4):
         x0, h = float(xs[k]), 1e-4 * w
         fd = (float(f(jnp.asarray(x0 + h))) - float(f(jnp.asarray(x0 - h)))) / (2 * h)
         assert abs(g[k] / fd - 1.0) < 1e-4
