@@ -69,6 +69,11 @@ echo "harness_patch random_numbers_mix.F90 $(git hash-object src/random_numbers_
 python3 -I "$HERE"/patch_gas_dump.py src/radiation_ifs_rrtm.F90
 echo "harness_patch radiation_ifs_rrtm.F90 $(git hash-object src/radiation_ifs_rrtm.F90)" >> MANIFEST.txt
 
+# harness instrumentation: McICA cloud-generator stage dumps (writes only, env-gated)
+python3 -I "$HERE"/patch_mcica_dump.py src/radiation_mcica_lw.F90 src/radiation_mcica_sw.F90
+echo "harness_patch radiation_mcica_lw.F90 $(git hash-object src/radiation_mcica_lw.F90)" >> MANIFEST.txt
+echo "harness_patch radiation_mcica_sw.F90 $(git hash-object src/radiation_mcica_sw.F90)" >> MANIFEST.txt
+
 # --- interface blocks ------------------------------------------------------
 # ecRad's generator (make_intfbl.1.pl) needs a perl module that is not
 # shipped, so take the 1.7.2 generated blocks and PROVE each one matches the
