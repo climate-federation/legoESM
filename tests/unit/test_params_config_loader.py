@@ -168,7 +168,6 @@ def test_atm_scalar_map_is_pipeline_threaded():
         "MorrisonConfig": {"microphysics": "morrison"},
         "P3Config": {"microphysics": "p3"},
         "SeifertBehengConfig": {"microphysics": "seifert_beheng"},
-        "ThompsonConfig": {"microphysics": "thompson"},
         # GWD: gwd_config_for overlays the mcfarlane_*/hines_* scalars onto the
         # scheme leaf, and get_gwd_fn hands the pipeline that LEAF as gwd_config.
         "HinesConfig": {"gravity_wave_drag": "hines"},
@@ -276,8 +275,6 @@ def test_atm_scalar_map_has_no_under_claim():
         ("P3Config", "", {"microphysics": "p3"},
          lambda pipe, field: getattr(pipe.micro_config, field, None)),
         ("SeifertBehengConfig", "", {"microphysics": "seifert_beheng"},
-         lambda pipe, field: getattr(pipe.micro_config, field, None)),
-        ("ThompsonConfig", "", {"microphysics": "thompson"},
          lambda pipe, field: getattr(pipe.micro_config, field, None)),
         # GWD families: _resolve_gwd -> gwd_config_for overlays the flat
         # scalars onto the scheme leaf, which get_gwd_fn returns as gwd_config.

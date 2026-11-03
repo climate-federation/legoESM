@@ -329,8 +329,6 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.micro.P3Config.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.SeifertBehengConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.SeifertBehengConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
-    "atm.micro.ThompsonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
-    "atm.micro.ThompsonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.SundqvistConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.SundqvistConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.MicrophysicsMLEmulatorConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",

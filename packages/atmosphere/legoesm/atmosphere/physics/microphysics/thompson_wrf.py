@@ -406,8 +406,15 @@ def _ksed_nstep(vt, dz, dt, nz):
     return ksed, jnp.max(ns, axis=-1)
 
 
+def thompson_air_density(T, p, qv):
+    """mp_thompson's air density ``rho = 0.622 p / (R_d T (qv + 0.622))``
+    [kg/m^3] with its ``qv = MAX(1.E-10, qv)`` floor: the density the scheme
+    multiplies its per-kg numbers by (``ni*rho``, ``nr*rho``)."""
+    return W.EPS_WRF * p / (W.R_DRY * T * (jnp.maximum(_QV_MIN, qv) + W.EPS_WRF))
+
+
 def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt: float,
-                      *, n_sed_max: int) -> ThompsonWRFStep:
+                      *, n_sed_max: int, nt_c=None) -> ThompsonWRFStep:
     """One WRF v4.8.0 ``mp_gt_driver`` column step (``mp_physics=8``).
 
     Arrays are ``(ncol, nz)``, level 0 = bottom, oracle units (module docstring).
@@ -415,6 +422,11 @@ def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt: float,
     ``dt > 120 s`` warm-riming branch).  ``n_sed_max`` is the static length of
     the sedimentation sub-step loop; the result equals the oracle's only while
     every column's required count (``nstep_required``) is ``<= n_sed_max``.
+    ``nt_c`` [1/m^3, ``(ncol, nz)``] replaces WRF's prescribed droplet number
+    ``Nt_c`` everywhere it is the droplet concentration (initial ``nc``, the
+    condensation reset and the nucleation target), floored at the scheme's
+    own minimum droplet number; ``None`` is WRF's constant
+    (the oracle).  A carried ``nt_c`` is a DEPARTURE from mp_physics=8.
     """
     dt = float(dt)
     dtype = T.dtype
@@ -446,7 +458,8 @@ def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt: float,
 
     # ---------------- mp_gt_driver per-column preamble -------
     rho_d = W.EPS_WRF * p / (W.R_DRY * T * (qv + W.EPS_WRF))
-    nc1d = W.NT_C / rho_d
+    ntc = W.NT_C if nt_c is None else jnp.maximum(_NC_MIN, nt_c)
+    nc1d = ntc / rho_d
     qg_pos = qg > R1
     qg_s = jnp.where(qg_pos, qg, 1.0)
     ygra1 = jnp.log10(jnp.maximum(_GRA_Y_MIN, qg_s * rho_d))
@@ -466,7 +479,7 @@ def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt: float,
 
     L_qc = qc > R1
     rc = jnp.where(L_qc, qc * rho, R1)
-    nc = jnp.where(L_qc, W.NT_C, _NC_MIN)     # Nt_c when not aerosol-aware
+    nc = jnp.where(L_qc, ntc, _NC_MIN)     # Nt_c when not aerosol-aware
     qc1d = jnp.where(L_qc, qc, 0.0)
     nc1d = jnp.where(L_qc, nc1d, 0.0)
 
@@ -1018,7 +1031,7 @@ def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt: float,
     qc_n = qc1d + qcten * dt
     L_qc = qc_n > R1
     rc = jnp.where(L_qc, qc_n * rho, R1)
-    nc = jnp.where(L_qc, W.NT_C, _NC_MIN)
+    nc = jnp.where(L_qc, ntc, _NC_MIN)
     qi_n = qi1d + qiten * dt
     L_qi = qi_n > R1
     ri = jnp.where(L_qi, qi_n * rho, R1)
@@ -1074,7 +1087,7 @@ def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt: float,
     pos = xrc > R1
     prw_vcd = jnp.where(pos, clap * odt, -rc * orho * odt)
     nucl = pos & (clap > EPS)
-    pnc_wcd = jnp.where(pos, jnp.where(nucl, 0.5 * (W.NT_C - nc + jnp.abs(W.NT_C - nc)) * odts
+    pnc_wcd = jnp.where(pos, jnp.where(nucl, 0.5 * (ntc - nc + jnp.abs(ntc - nc)) * odts
                                        * orho, 0.0),
                         -nc * orho * odt)
     prw_vcd = jnp.where(cnd, prw_vcd, 0.0)
@@ -1086,7 +1099,7 @@ def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt: float,
     rc_c = jnp.maximum(R1, (qc1d + dt * qcten) * rho)
     rc = jnp.where(cnd, rc_c, rc)
     L_qc = jnp.where(cnd & (rc_c == R1), False, L_qc)
-    nc = jnp.where(cnd, W.NT_C, nc)
+    nc = jnp.where(cnd, ntc, nc)
     qv_c = jnp.maximum(_QV_MIN, qv + dt * qvten)
     temp_c = T + dt * tten
     rho_c = W.EPS_WRF * pres / (W.R_DRY * temp_c * (qv_c + W.EPS_WRF))

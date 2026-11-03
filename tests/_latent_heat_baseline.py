@@ -24,7 +24,6 @@ LATENT_BUDGET: dict[str, int] = {
     'packages/atmosphere/legoesm/atmosphere/physics/convection/mass_flux.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/convection/sbm.py': 3,
     'packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py': 1,
-    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py': 16,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/arg_activation.py': 4,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/column.py': 2,

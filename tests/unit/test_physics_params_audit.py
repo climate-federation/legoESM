@@ -300,18 +300,6 @@ def _ice_column():
 
 
 class TestMicrophysicsAudit:
-    def test_thompson_k_ac(self):
-        from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
-        from legoesm.atmosphere.physics.microphysics.config import ThompsonConfig
-        T, q_v, hydro, p_full, p_half, rho, dz = _ice_column()
-
-        def loss(x):
-            cfg = ThompsonConfig()._replace(k_ac=x)
-            out = thompson_microphysics(T, q_v, hydro, p_full, p_half, rho, dz,
-                60.0, config=cfg)
-            return jnp.sum(out.dq_r_dt ** 2)
-        assert_grad_ok(loss, 5.25, "thompson.k_ac")
-
     def test_sundqvist_RH_crit(self):
         from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
         from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig

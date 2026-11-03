@@ -1157,6 +1157,31 @@ class PhysicsPipeline:
             return_water=return_water,
         )
 
+    def _resolved_omega(self, u, v, p_s, ncol, nlev, winds_on_t_grid, who):
+        """Resolved omega [Pa/s, (ncol, nlev)] by full sigma continuity, for
+        the WRF ports (Tiedtke's omega, Thompson's w); refuses what it cannot
+        diagnose (staggered winds, hybrid coordinate, grid without a
+        divergence operator)."""
+        from legoesm.atmosphere.physics.convection.integration import (
+            diagnose_omega_columns_hydrostatic,
+        )
+        from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+        if not winds_on_t_grid:
+            raise ValueError(f"{who} needs cell-centre winds (omega)")
+        if isinstance(self._sigma_coord, HybridSigmaPressureCoordinate):
+            raise ValueError(
+                f"{who} needs omega, which is diagnosed by PURE-sigma "
+                "continuity; a hybrid coordinate would get a wrong omega")
+        omega = (None if self._grid is None else
+                 diagnose_omega_columns_hydrostatic(
+                     u, v, p_s, self._grid, self._sigma_coord, ncol, nlev,
+                     full_continuity=True))
+        if omega is None:
+            raise ValueError(
+                f"{who} needs the resolved pressure velocity, diagnosed on "
+                "the cubed-sphere and lat-lon grids only")
+        return omega
+
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
                             sw_up_toa, lw_up_toa, sw_down_toa,
@@ -1275,7 +1300,6 @@ class PhysicsPipeline:
         # factories so the two call paths cannot drift).
         from legoesm.atmosphere.physics.convection.integration import (
             convection_scheme_traits,
-            diagnose_omega_columns_hydrostatic,
             diagnose_w_grid_columns_hydrostatic,
         )
         from legoesm.atmosphere.physics._shared import (
@@ -1283,7 +1307,6 @@ class PhysicsPipeline:
             compute_moisture_convergence,
             moisture_convergence_supported,
         )
-        from legoesm.grids.vertical import HybridSigmaPressureCoordinate
 
         _ctr = convection_scheme_traits(self._conv_scheme)
 
@@ -1593,24 +1616,9 @@ class PhysicsPipeline:
                         "supplies "
                         f"{[n for n, v in (('dq_v_dt_dyn', dq_v_dt_dyn), ('turb_dq_v_prev', turb_dq_v_prev), ('evap_sfc_prev', evap_sfc_prev)) if v is None]} "
                         "as None")
-                if not _winds_on_t_grid:
-                    raise ValueError(
-                        "convection='tiedtke' needs cell-centre winds "
-                        "(cumulus friction, omega)")
-                if isinstance(self._sigma_coord, HybridSigmaPressureCoordinate):
-                    raise ValueError(
-                        "convection='tiedtke' needs omega, which is diagnosed "
-                        "by PURE-sigma continuity; a hybrid coordinate would "
-                        "get a wrong omega")
-                _omega = (None if self._grid is None else
-                          diagnose_omega_columns_hydrostatic(
-                              u, v, p_s, self._grid, self._sigma_coord,
-                              ad.ncol, nlev, full_continuity=True))
-                if _omega is None:
-                    raise ValueError(
-                        "convection='tiedtke' needs the resolved pressure "
-                        "velocity, diagnosed on the cubed-sphere and lat-lon "
-                        "grids only")
+                _omega = self._resolved_omega(
+                    u, v, p_s, ad.ncol, nlev, _winds_on_t_grid,
+                    "convection='tiedtke'")
                 _z_full, _ = compute_heights_from_sigma(
                     T_col, p_half_col, q_v_col)
                 conv_out, conv_prog_out = self.convection_fn(
@@ -1832,6 +1840,19 @@ class PhysicsPipeline:
                 )
             else:
                 _sq_kw = self._sundqvist_kwargs(ad, q_i, cell_area)
+                from legoesm.atmosphere.physics._shared import (
+                    diagnose_grid_w_from_omega,
+                )
+                from legoesm.atmosphere.physics.microphysics.config import (
+                    ThompsonConfig,
+                )
+                if isinstance(self.micro_config, ThompsonConfig):
+                    # WRF Thompson reads the resolved w (votes H2/J6)
+                    _sq_kw["w"] = diagnose_grid_w_from_omega(
+                        self._resolved_omega(
+                            u, v, p_s, ad.ncol, nlev, _winds_on_t_grid,
+                            "microphysics='thompson'"),
+                        T_col, p_full_col, q_v_col)
                 micro_out = self.micro_fn(
                     T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
                     p_full=p_full_col, p_half=p_half_col,
