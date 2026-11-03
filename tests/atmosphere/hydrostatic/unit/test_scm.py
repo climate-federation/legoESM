@@ -415,9 +415,15 @@ def test_swap_convection_schemes(conv_scheme):
     conv = ConvectionConfig(scheme=conv_scheme)
     if conv_scheme == "zhang_mcfarlane":  # the SCM column has no land fraction
         conv = conv._replace(zhang_mcfarlane=conv.zhang_mcfarlane._replace(land_fraction="none"))
+    extra = {}
+    if conv_scheme == "tiedtke":
+        # WRF port reads the lagged turbulence q_v tendency / surface flux and
+        # detrains cloud ice: needs a turbulence scheme and a q_i carrier
+        extra = dict(turbulence=TurbulenceConfig(scheme="louis"),
+                     microphysics=MicrophysicsConfig(scheme="thompson"))
     cfg = _baseline_cfg(
         radiation=RadiationConfig(scheme="gray", diurnal_cycle=False),
-        convection=conv,
+        convection=conv, **extra,
     )
     _run_and_assert_stable(cfg)
 

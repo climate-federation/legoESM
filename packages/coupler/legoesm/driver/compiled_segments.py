@@ -1816,8 +1816,8 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         phys_cloud_fraction=phys_out.cloud_fraction,
         budget_ledger_step=_led_step,
         ice_T_skin_new=ice_T_skin_new,
-        phys_turb_dq_v=phys_out.turb_dq_v_dt,
-        phys_evap_sfc=phys_out.evap_sfc,
+        phys_turb_dq_v=getattr(phys_out, "turb_dq_v_dt", None),
+        phys_evap_sfc=getattr(phys_out, "evap_sfc", None),
     )
 
 

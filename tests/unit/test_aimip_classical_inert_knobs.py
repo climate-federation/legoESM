@@ -124,21 +124,21 @@ def test_checkpoint_loads_into_array_and_frozen_templates(tmp_path):
         names = aimip_classical_trainable_names(**DEFAULT_ARM)
         full = AIMIPClassicalParams.from_defaults()
         part = AIMIPClassicalParams.from_defaults(trainable=names)
-        part = eqx.tree_at(lambda m: m.raw_values["sbm_tau_c"], part, 0.25)
+        part = eqx.tree_at(lambda m: m.raw_values["surface_z0"], part, 0.25)
         p = tmp_path / "m.eqx"
         save_checkpoint(part, p)
         into_full = load_checkpoint(full, p)
-        v = into_full.raw_values["sbm_tau_c"]
-        assert v.dtype == full.raw_values["sbm_tau_c"].dtype == jnp.float32
+        v = into_full.raw_values["surface_z0"]
+        assert v.dtype == full.raw_values["surface_z0"].dtype == jnp.float32
         assert float(v) == 0.25
         into_part = load_checkpoint(
             AIMIPClassicalParams.from_defaults(trainable=names), p)
-        assert into_part.raw_values["sbm_tau_c"] == 0.25
-        assert isinstance(into_part.raw_values["sbm_tau_c"], float)
+        assert into_part.raw_values["surface_z0"] == 0.25
+        assert isinstance(into_part.raw_values["surface_z0"], float)
         # every knob frozen (no array to take the dtype from)
         save_checkpoint(AIMIPClassicalParams.from_defaults(trainable=()), p)
         assert load_checkpoint(full, p).raw_values[
-            "sbm_tau_c"].dtype == jnp.float32
+            "surface_z0"].dtype == jnp.float32
     finally:
         set_policy(old)
 

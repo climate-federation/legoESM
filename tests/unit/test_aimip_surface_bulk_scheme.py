@@ -112,6 +112,7 @@ def test_spatial_surface_path_carries_most():
         make_aimip_classical_spectral_physics(
             p, grid, dt=1800.0,
             radiation="gray",
+            convection_scheme="sbm",  # tiedtke (WRF port) refused on spectral
             turbulence_scheme="louis",
             surface_bulk_scheme="most",
             land_mask=land_mask,
