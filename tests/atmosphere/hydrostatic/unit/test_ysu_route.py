@@ -337,3 +337,16 @@ def test_mpas_lane_land_fraction_and_beta_refusal():
     fb = ti.make_turbulence_physics(turb, "mpas", dt=DT, f_land=f_land, land_beta=0.5)
     with pytest.raises(ValueError, match="surface-humidity"):
         fb(state, mesh, sigma, phys_state=ps)
+
+
+def test_combined_hydrostatic_physics_stores_the_carry():
+    from legoesm.atmosphere.physics.combined import make_physics
+    state, grid, sigma = _hydro_lane()
+    turb = TurbulenceConfig(scheme="ysu", ysu=YSUConfig(surface_type="water"))
+    cfg = PhysicsConfig(turbulence=turb)
+    ps = init_physics_state(6 * 4 * 4, sigma.n_levels, cfg)
+    _, ps1 = make_physics(cfg, "hydrostatic", dt=DT)(state, grid, sigma, phys_state=ps)
+    _, ps2 = make_physics(cfg, "hydrostatic", dt=DT)(state, grid, sigma, phys_state=ps1)
+    assert ps1.sfclay.shape == ps.sfclay.shape
+    assert not np.array_equal(np.asarray(ps1.sfclay), np.asarray(ps.sfclay))
+    assert not np.array_equal(np.asarray(ps2.sfclay), np.asarray(ps1.sfclay))
