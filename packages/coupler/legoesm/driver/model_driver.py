@@ -7956,6 +7956,10 @@ class ModelDriver:
                         # them None).
                         if _name in PHYSSTATE_INPUT_FIELDS:
                             continue
+                        # None = not carried by this configuration (e.g.
+                        # sfclay outside turbulence=ysu): nothing to persist.
+                        if _val is None:
+                            continue
                         if _name == "prng_key":
                             ps_d_carry[_name] = _val
                         elif _val.ndim == 3:
@@ -8105,7 +8109,7 @@ class ModelDriver:
                     # already dropped them).  Skip by NAME so a concrete-array
                     # carry is excluded too, not only None (``np.asarray(None)``
                     # is an unloadable object array under allow_pickle=False).
-                    if _name in PHYSSTATE_INPUT_FIELDS:
+                    if _name in PHYSSTATE_INPUT_FIELDS or _val is None:
                         continue
                     _save[f"physstate_{_name}"] = np.asarray(_val)
                 _save["physstate_meta_conv_scheme"] = np.asarray(
@@ -14803,8 +14807,8 @@ class ModelDriver:
                         "fresh seed."
                     )
             # Codex adversarial (#413): the MPAS save writes EVERY
-            # PhysicsState field together (all are concrete arrays —
-            # init_physics_state never leaves one None) AND the
+            # PhysicsState field together (every concrete array; a field the
+            # configuration does not carry is None and never saved) AND the
             # ``physstate_meta_conv_scheme`` tag, all inside one
             # ``if carry is not None`` block.  So the PRESENCE of ANY
             # ``physstate_*`` key — including the meta tag alone — means
@@ -14878,7 +14882,11 @@ class ModelDriver:
                 # likewise exempt: per-step driver INPUTS, never persisted
                 # (the save skips their None), re-seeded fresh.  Every
                 # EVOLVING field stays mandatory.
-                _exempt_ps = {"col_index"} | PHYSSTATE_INPUT_FIELDS
+                # Fields whose FRESH seed is None are not carried by this
+                # configuration (sfclay outside ysu), so never saved.
+                _exempt_ps = ({"col_index"} | PHYSSTATE_INPUT_FIELDS
+                              | {f for f in _phys_state._fields
+                                 if getattr(_phys_state, f) is None})
                 _missing = [f for f in _phys_state._fields
                             if f not in _present_fields
                             and f not in _exempt_ps]
@@ -14924,6 +14932,13 @@ class ModelDriver:
                 if _name in PHYSSTATE_INPUT_FIELDS:
                     continue
                 _seed_field = getattr(_phys_state, _name)
+                if _seed_field is None:
+                    raise ValueError(
+                        f"Restart physics-state field {_name!r} is carried by "
+                        "the checkpoint but not by the configured run (e.g. a "
+                        "turbulence=ysu checkpoint restored into another "
+                        "scheme); refusing to drop it.  Fix the config or "
+                        f"strip physstate_{_name} to accept the loss.")
                 _val = jnp.asarray(_v)
                 if tuple(_val.shape) != tuple(_seed_field.shape):
                     raise ValueError(
