@@ -239,11 +239,11 @@ def test_sfno_extra_input_channels_matrix():
     assert sfno_extra_input_channels(spatial_embedding=False,
                                      era5_surface_fluxes=False) == 0
     assert sfno_extra_input_channels(spatial_embedding=True,
-                                     era5_surface_fluxes=False) == 1
+                                     era5_surface_fluxes=False) == 3  # land, sin/cos lat
     assert sfno_extra_input_channels(spatial_embedding=False,
                                      era5_surface_fluxes=True) == 6
     assert sfno_extra_input_channels(spatial_embedding=True,
-                                     era5_surface_fluxes=True) == 7
+                                     era5_surface_fluxes=True) == 9
 
 
 def test_sfno_arch_config_in_channels():
@@ -252,7 +252,7 @@ def test_sfno_arch_config_in_channels():
         overrides={"sfno_embed_dim": 8, "sfno_n_blocks": 1,
                    "spatial_embedding": True, "era5_surface_fluxes": True},
     )
-    assert cfg.in_channels == cfg.out_channels + 3 + 7
+    assert cfg.in_channels == cfg.out_channels + 3 + 9
 
 
 def test_build_variant_embedding_requires_grid():

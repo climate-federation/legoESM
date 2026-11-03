@@ -258,7 +258,7 @@ def main(argv=None, ds=None):
     model_sc = run_wb_forecast_eval(
         None, grid, sigma, None, dt, cases, cfg.leads_hours, clim,
         resolution_deg=cfg.resolution_deg, rollout_fn=rollout_fn,
-        field_sink=_field_sink)
+        field_sink=_field_sink, head=getattr(trained, "head", None))
     # Persistence = the t0 state held constant (identity rollout); the
     # orchestrator diagnoses t0 and scores it against each lead's verification.
     persist_sc = run_wb_forecast_eval(

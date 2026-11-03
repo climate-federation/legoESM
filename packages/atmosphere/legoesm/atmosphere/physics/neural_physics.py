@@ -92,9 +92,10 @@ _NORM_SOLAR_W_M2 = 1400.0
 # their ``LearnedPositionalFeatures``, then trained).
 N_COLUMN_STATIC_FEATURES = 4
 N_COLUMN_POS_EMBED = 8
-# ACE2-style static land-fraction input plane for the SFNO arm (orography is
-# already one of its state channels).
-N_SFNO_LAND_FRAC_CHANNELS = 1
+# Static input planes of the SFNO arm (owner 2026-11-02, the same set as the
+# column network): land fraction, sin(lat), cos(lat); orography is already one
+# of its state channels.
+N_SFNO_STATIC_CHANNELS = 3
 # Prescribed ERA5 surface fluxes as extra inputs: stress x/y, sensible, latent,
 # upwelling SW, upwelling LW — the order of ``SFC_FLUX_FORCING_KEYS``.
 N_SFC_FLUX_INPUT_CHANNELS = 6
@@ -254,6 +255,10 @@ class NeuralPhysics(eqx.Module):
         lat, land-sea fraction, orography [km]) plus a learned per-grid-point
         embedding of ``N_COLUMN_POS_EMBED`` channels (zero-initialised,
         trained) — the NeuralGCM recipe.  Off by default.
+    learned_embedding : bool
+        With ``spatial_embedding``, whether the learned per-grid-point
+        embedding is included (False = the static features only, the
+        ablation of the learned map).
     era5_surface_fluxes : bool
         Append the ``N_SFC_FLUX_INPUT_CHANNELS`` normalised ERA5 surface-flux
         / stress planes as extra per-column inputs.  Off by default.
@@ -294,10 +299,12 @@ class NeuralPhysics(eqx.Module):
         spatial_embedding: bool = False,
         era5_surface_fluxes: bool = False,
         n_columns: int | None = None,
+        learned_embedding: bool = True,
     ):
         self.nlev = nlev
         self.n_static = N_COLUMN_STATIC_FEATURES if spatial_embedding else 0
-        self.n_embed = N_COLUMN_POS_EMBED if spatial_embedding else 0
+        self.n_embed = (N_COLUMN_POS_EMBED
+                        if spatial_embedding and learned_embedding else 0)
         self.n_flux = N_SFC_FLUX_INPUT_CHANNELS if era5_surface_fluxes else 0
         if spatial_embedding and n_columns is None:
             raise ValueError(
@@ -338,7 +345,7 @@ class NeuralPhysics(eqx.Module):
         self.pos_embed = (
             jnp.zeros((int(n_columns), self.n_embed),
                       dtype=self.layers[0].weight.dtype)
-            if spatial_embedding else None)
+            if self.n_embed else None)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Forward pass for a single column.
@@ -737,6 +744,7 @@ def build_column_physics(
     spatial_embedding: bool = False,
     era5_surface_fluxes: bool = False,
     n_columns: int | None = None,
+    learned_embedding: bool = True,
 ) -> NeuralPhysics:
     """Create a column MLP physics model for the spectral PE dycore.
 
@@ -754,11 +762,12 @@ def build_column_physics(
         Output scaling for stable init (untrained -> near-zero tendencies).
     key : jax.Array
         PRNG key for weight initialization.
-    spatial_embedding, era5_surface_fluxes, n_columns
+    spatial_embedding, era5_surface_fluxes, n_columns, learned_embedding
         See :class:`NeuralPhysics`; ``n_columns`` is required iff
         ``spatial_embedding``.
     """
     return NeuralPhysics(
+        learned_embedding=learned_embedding,
         nlev=nlev,
         hidden_dim=hidden_dim,
         n_layers=n_layers,

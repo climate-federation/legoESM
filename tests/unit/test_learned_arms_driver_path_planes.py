@@ -111,7 +111,7 @@ def sfno_setup():
     gauss = create_gaussian_grid(10)
     n_ch = 4 * NLEV + 2
     extra = sfno_extra_input_channels(spatial_embedding=True, era5_surface_fluxes=True)
-    assert extra == 7
+    assert extra == 9
     sfno = SFNO(SFNOConfig(in_channels=n_ch + extra, out_channels=n_ch,
                            embed_dim=8, n_blocks=1, residual_prediction=False),
                 gauss, key=jax.random.PRNGKey(0))

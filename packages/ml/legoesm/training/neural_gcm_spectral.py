@@ -664,11 +664,11 @@ N_SFNO_FORCING_CHANNELS = 3
 # site below, cast to ``in_scale``'s dtype so the concatenate result dtype is
 # identical to the former module-top ``jnp.array`` (in both x32 and x64).
 _SFNO_FORCING_INPUT_SCALE = (300.0, 1.0, 1400.0)
-# Optional extra input plane (see ``make_sfno_spectral_physics``): the
-# ACE2-style land fraction.  The six ERA5 surface-flux planes take their
-# scales from ``neural_physics.SFC_FLUX_INPUT_NORMS`` (one source for both
-# learned arms).  Plain tuple for the same reason as above.
-_SFNO_LAND_FRAC_INPUT_SCALE = (1.0,)
+# Optional extra input planes (see ``make_sfno_spectral_physics``): the static
+# land fraction, sin(lat), cos(lat), all O(1).  The six ERA5 surface-flux
+# planes take their scales from ``neural_physics.SFC_FLUX_INPUT_NORMS`` (one
+# source for both learned arms).  Plain tuple for the same reason as above.
+_SFNO_STATIC_INPUT_SCALE = (1.0, 1.0, 1.0)
 
 
 def _channel_input_scale(nlev: int) -> jnp.ndarray:
@@ -739,8 +739,8 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid, *,
     Optional extra input planes, appended AFTER the three forcing planes and
     counted by ``model_registry.sfno_extra_input_channels`` (the network must
     have been built with the same flags): ``spatial_embedding`` adds the
-    ACE2-style static land-fraction plane (``forcing["land_frac"]``; orography
-    is already a state channel), ``era5_surface_fluxes`` adds the six ERA5
+    static planes land fraction (``forcing["land_frac"]``), sin and cos
+    latitude (orography is already a state channel), ``era5_surface_fluxes`` adds the six ERA5
     surface-flux planes (``SFC_FLUX_FORCING_KEYS`` order).  Either flag
     rejects ``forcing=None``.
 
@@ -786,7 +786,7 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid, *,
             f"in={sfno.config.in_channels}, out={sfno.config.out_channels}."
         )
     extra_scale = tuple(
-        (_SFNO_LAND_FRAC_INPUT_SCALE if spatial_embedding else ())
+        (_SFNO_STATIC_INPUT_SCALE if spatial_embedding else ())
         + (tuple(SFC_FLUX_INPUT_NORMS) if era5_surface_fluxes else ()))
     in_scale = _channel_input_scale(nlev)
     out_scale = _channel_tendency_scale(nlev)
@@ -840,6 +840,8 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid, *,
             planes.append(jnp.clip(
                 jnp.asarray(forcing["land_frac"]).reshape(n_lat, n_lon),
                 0.0, 1.0)[..., None])
+            planes.append(jnp.sin(lat2d).astype(packed.dtype)[..., None])
+            planes.append(jnp.cos(lat2d).astype(packed.dtype)[..., None])
         if era5_surface_fluxes:
             for _k in SFC_FLUX_FORCING_KEYS:
                 if _k not in forcing:

@@ -58,6 +58,10 @@ class SFNOConfig(NamedTuple):
         for **MC-Dropout** ensembling — the U-Cast recipe (arXiv:2604.09041,
         10 %, flat across 5–15 %).  0.0 (default) is an exact no-op: the
         network stays deterministic and needs no key.
+    learned_position_embedding : bool
+        ACE2-style learned per-location embedding: one ``embed_dim`` vector
+        per grid point, added to the encoder output, zero-initialised (so it
+        starts as a no-op).  Off by default.
     """
     in_channels: int = 4
     out_channels: int = 4
@@ -67,6 +71,7 @@ class SFNOConfig(NamedTuple):
     residual_prediction: bool = True
     gradient_checkpoint: bool = False
     dropout: float = 0.0
+    learned_position_embedding: bool = False
 
 
 class SFNO(eqx.Module):
@@ -84,6 +89,7 @@ class SFNO(eqx.Module):
     encoder: eqx.nn.Linear
     blocks: list[SFNOBlock]
     decoder: eqx.nn.Linear
+    pos_embed: jax.Array | None
     config: SFNOConfig = eqx.field(static=True)
 
     def __init__(
@@ -118,6 +124,10 @@ class SFNO(eqx.Module):
         self.decoder = eqx.nn.Linear(
             config.embed_dim, config.out_channels, key=k_dec
         )
+        self.pos_embed = (
+            jnp.zeros((int(grid.n_lat), int(grid.n_lon), config.embed_dim),
+                      self.encoder.weight.dtype)
+            if config.learned_position_embedding else None)
 
     def __call__(
         self,
@@ -151,6 +161,8 @@ class SFNO(eqx.Module):
 
         # Encoder: (n_lat, n_lon, in_channels) → (n_lat, n_lon, embed_dim)
         x = jax.vmap(jax.vmap(self.encoder))(x)
+        if self.pos_embed is not None:
+            x = x + self.pos_embed
 
         # Processor: N SFNO blocks.  When ``gradient_checkpoint`` is
         # set, wrap each block call in ``jax.checkpoint`` so the

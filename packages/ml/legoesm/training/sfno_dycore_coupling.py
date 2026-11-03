@@ -55,7 +55,8 @@ class SFNOPhysics(eqx.Module):
     SFNO without dragging the Gaussian grid's int leaves into the gradient.
 
     ``spatial_embedding`` / ``era5_surface_fluxes`` append prescribed input
-    channels to ``packed`` — the land-fraction plane, then the six ERA5
+    channels to ``packed`` — the land-fraction, sin(lat) and cos(lat)
+    planes, then the six ERA5
     surface-flux planes in ``SFC_FLUX_FORCING_KEYS`` order each divided by
     its ``SFC_FLUX_INPUT_NORMS`` entry — supplied via the ``land_frac`` /
     ``sfc_fluxes`` call arguments.  A flag on with its plane missing raises
@@ -118,7 +119,11 @@ class SFNOPhysics(eqx.Module):
                     raise ValueError(
                         "SFNOPhysics(spatial_embedding=True) requires the "
                         "land_frac plane, got None")
-                extras.append(land_frac)
+                # The static planes N_SFNO_STATIC_CHANNELS counts: land
+                # fraction, sin(lat), cos(lat) (same set as the spectral arm).
+                lat2 = jnp.broadcast_to(self.grid.lat[:, None], land_frac.shape)
+                extras += [land_frac, jnp.sin(lat2).astype(land_frac.dtype),
+                           jnp.cos(lat2).astype(land_frac.dtype)]
             if self.era5_surface_fluxes:
                 if sfc_fluxes is None:
                     raise ValueError(

@@ -88,7 +88,8 @@ class HeadlineDiagnosis(NamedTuple):
     valid: dict
 
 
-def diagnose_headline_fields(state, grid, sigma_coord) -> HeadlineDiagnosis:
+def diagnose_headline_fields(state, grid, sigma_coord, *, head=None,
+                             land_frac=None, seconds_utc=None) -> HeadlineDiagnosis:
     """Map a rolled-out ``SpectralHydrostaticState`` to WB2 headline fields.
 
     Returns a :class:`HeadlineDiagnosis` (``.fields`` keyed by
@@ -112,6 +113,12 @@ def diagnose_headline_fields(state, grid, sigma_coord) -> HeadlineDiagnosis:
         from the geopotential and an open-terrain roughness — a documented
         global-neutral proxy that does not resolve land/ocean roughness or
         stability, so surface-wind scores carry that caveat.
+
+    ``head`` (a ``training.near_surface_head.NearSurfaceHead``) replaces the
+    proxies by the learned estimate: t2m = proxy + correction, u10/v10 =
+    log-law wind + correction, speed from the corrected components.  It needs
+    the land fraction (ncol,) and the valid time's UTC seconds of day; mslp
+    and the pressure-level fields are unchanged.
     """
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import spectral_pe_to_grid
 
@@ -167,12 +174,32 @@ def diagnose_headline_fields(state, grid, sigma_coord) -> HeadlineDiagnosis:
     fields["u10"] = u[..., -1] * scale
     fields["v10"] = v[..., -1] * scale
     fields["wind_speed_10m"] = speed10
+    if head is not None:
+        from legoesm.training.near_surface_head import head_features
+
+        if land_frac is None or seconds_utc is None:
+            raise ValueError("the near-surface head needs land_frac and "
+                             "seconds_utc (the lead's valid time)")
+        d = head(head_features(T, u, v, q, p_s, phis, land_frac,
+                               jnp.asarray(grid.lat), jnp.asarray(grid.lon),
+                               seconds_utc)).reshape(p_s.shape + (3,))
+        fields["t2m"] = fields["t2m"] + d[..., 0].astype(T.dtype)
+        fields["u10"] = fields["u10"] + d[..., 1].astype(T.dtype)
+        fields["v10"] = fields["v10"] + d[..., 2].astype(T.dtype)
+        # Speed from the corrected components, with the proxy's own
+        # calm-wind regularisation carried over, so a zero correction gives
+        # back the proxy speed (calm cells included).
+        reg = jnp.maximum(speed10 ** 2 - (u[..., -1] * scale) ** 2
+                          - (v[..., -1] * scale) ** 2, 0.0)
+        fields["wind_speed_10m"] = jnp.sqrt(
+            fields["u10"] ** 2 + fields["v10"] ** 2 + reg)
     valid["u10"] = valid["v10"] = valid["wind_speed_10m"] = all_valid
 
     return HeadlineDiagnosis(fields=fields, valid=valid)
 
 
-def diagnose_and_regrid(state, grid, sigma_coord, *, resolution_deg=None):
+def diagnose_and_regrid(state, grid, sigma_coord, *, resolution_deg=None,
+                        **head_kw):
     """Diagnose WB2 headline fields from a spectral state and regrid to the WB2 grid.
 
     Bridges :func:`diagnose_headline_fields` (Task 5) and
@@ -192,7 +219,7 @@ def diagnose_and_regrid(state, grid, sigma_coord, *, resolution_deg=None):
     from .wb_regrid import WB2_RESOLUTION_DEG, regrid_to_wb2
 
     res = WB2_RESOLUTION_DEG if resolution_deg is None else resolution_deg
-    diag = diagnose_headline_fields(state, grid, sigma_coord)
+    diag = diagnose_headline_fields(state, grid, sigma_coord, **head_kw)
     src_lat = np.rad2deg(np.asarray(grid.lat))       # Gaussian lat, radians S->N
     src_lon = np.rad2deg(np.asarray(grid.lon))       # radians [0, 2pi)
 

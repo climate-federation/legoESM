@@ -54,14 +54,19 @@ VARIANT_DEFAULTS: dict[str, dict[str, Any]] = {
     # (sfno_physics).  ``era5_surface_fluxes``: the six ERA5 surface-flux planes
     # as extra inputs.  Both OFF here so AIMIP is unchanged; the WB campaign
     # decks set them explicitly.
+    # ``learned_position_embedding`` (with spatial_embedding): the learned
+    # per-location map on (True, the NeuralGCM recipe) or off (the ablation).
     "column_nn": {"nn_hidden_dim": 256, "n_layers": 4, "residual_scale": None,
-                  "spatial_embedding": False, "era5_surface_fluxes": False},
+                  "spatial_embedding": False, "era5_surface_fluxes": False,
+                  "learned_position_embedding": True},
     "sfno_physics": {
         "sfno_embed_dim": 128,
         "sfno_n_blocks": 4,
         "sfno_mlp_expansion": 4,
         "spatial_embedding": False,
         "era5_surface_fluxes": False,
+        # ACE2-style learned per-location embedding after the encoder.
+        "learned_position_embedding": False,
     },
     "sfno_full": {
         "sfno_embed_dim": 128,
@@ -85,18 +90,19 @@ def sfno_extra_input_channels(*, spatial_embedding: bool,
                               era5_surface_fluxes: bool) -> int:
     """Extra SFNO input planes beyond the three baseline forcing planes.
 
-    ``spatial_embedding`` appends the ACE2-style static land-fraction plane;
+    ``spatial_embedding`` appends the static planes (land fraction, sin and
+    cos latitude);
     ``era5_surface_fluxes`` appends the six ERA5 surface-flux / stress planes.
     The counts live next to the column network that shares them
     (``atmosphere.physics.neural_physics``) so one constant feeds both arms.
     """
     from legoesm.atmosphere.physics.neural_physics import (
         N_SFC_FLUX_INPUT_CHANNELS,
-        N_SFNO_LAND_FRAC_CHANNELS,
+        N_SFNO_STATIC_CHANNELS,
     )
     n = 0
     if spatial_embedding:
-        n += N_SFNO_LAND_FRAC_CHANNELS
+        n += N_SFNO_STATIC_CHANNELS
     if era5_surface_fluxes:
         n += N_SFC_FLUX_INPUT_CHANNELS
     return n
@@ -150,7 +156,8 @@ def sfno_arch_config(variant: str, *, nlev: int,
                        + sfno_extra_input_channels(
                            spatial_embedding=bool(kw["spatial_embedding"]),
                            era5_surface_fluxes=bool(kw["era5_surface_fluxes"])))
-        extra = {}
+        extra = {"learned_position_embedding":
+                 bool(kw["learned_position_embedding"])}
     else:  # sfno_full: the emulator sees (1 + history) copies of the state.
         in_channels = spec.n_channels * (1 + int(kw["sfno_history_steps"]))
         extra = {"dropout": float(kw["sfno_dropout"])}
@@ -240,6 +247,7 @@ def build_variant(variant: str, *, nlev: int, grid=None, seed: int = 0,
             key=jax.random.PRNGKey(seed),
             spatial_embedding=_spatial,
             era5_surface_fluxes=bool(kw["era5_surface_fluxes"]),
+            learned_embedding=bool(kw["learned_position_embedding"]),
             **extra_cn,
         )
 

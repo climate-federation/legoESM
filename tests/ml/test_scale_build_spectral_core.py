@@ -521,7 +521,8 @@ def test_multi_lead_loss_real_rollout_with_surface_targets():
             for k in ("t2m", "u10", "v10", "mslp")} for o in outs]
     cfg = LossConfig(w_t2m=1.0, t2m_resid_scale=2.0, w_u10=0.1, u10_resid_scale=3.0)
     kw = dict(n_segs=2, seg_steps=2, sigma_full=jnp.asarray(sigma.sigma_full),
-              grid=grid, sigma=sigma, loss_config=cfg, diagnose_fn=diagnose,
+              grid=grid, sigma=sigma, loss_config=cfg,
+              diagnose_fn=lambda s, g, sg, _k: diagnose(s, g, sg),
               terms=True, lead_segs=(1, 2))
     l0, t0 = multi_lead_loss(seg, ic, tuple(zip(outs, sfc)), f, **kw)
     assert {"mse_t2m", "mse_u10"} <= set(t0)

@@ -52,7 +52,7 @@ class ForecastCase(NamedTuple):
 def run_wb_forecast_eval(physics_fn, grid, sigma_coord, pe_config, dt,
                          cases, leads_hours, clim_fields_wb2, *,
                          resolution_deg=None, rollout_fn=None,
-                         field_sink=None):
+                         field_sink=None, head=None):
     """Run the WB2 forecast protocol and return a lead-time scorecard.
 
     Parameters
@@ -76,6 +76,10 @@ def run_wb_forecast_eval(physics_fn, grid, sigma_coord, pe_config, dt,
         on the WB2 grid. This is how a map of the forecast against ERA5 is
         drawn from the SAME forecasts the scorecard scores, rather than from a
         second rollout that could differ in protocol.
+    head : training.near_surface_head.NearSurfaceHead, optional
+        The trained near-surface head: replaces the 2 m / 10 m proxies, read
+        at each lead's valid time with the case's land fraction (needs
+        ``case.forcing``).
     rollout_fn : callable, optional
         Rollout with signature ``(state, physics_fn, grid, sigma_coord,
         pe_config, dt, n_steps) -> state``, plus an optional
@@ -128,9 +132,18 @@ def run_wb_forecast_eval(physics_fn, grid, sigma_coord, pe_config, dt,
             # silently unpacks one state into its FIELDS and calls them
             # members. An ensemble must be a list.
             members = rolled if isinstance(rolled, list) else [rolled]
+            head_kw = {}
+            if head is not None:
+                if case.forcing is None:
+                    raise ValueError("the near-surface head needs the case's "
+                                     "forcing (land fraction, valid time)")
+                head_kw = dict(head=head, land_frac=case.forcing["land_frac"],
+                               seconds_utc=case.forcing["seconds_of_day"]
+                               + lead * _SECONDS_PER_HOUR)
             diagnosed = [
                 diagnose_and_regrid(
-                    mem, grid, sigma_coord, resolution_deg=resolution_deg)
+                    mem, grid, sigma_coord, resolution_deg=resolution_deg,
+                    **head_kw)
                 for mem in members
             ]
             member_fields = [d[0] for d in diagnosed]

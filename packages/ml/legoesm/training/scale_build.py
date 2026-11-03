@@ -577,7 +577,8 @@ _WB_CONSUMED_TOP_KEYS = frozenset({
     "classical", "convection", "dt", "era5_cadence_hours",
     "cache_dir", "era5_cloud_condensate", "era5_cloud_zarr", "era5_flux_zarr",
     "era5_flux_climatology", "era5_soil_moisture", "era5_surface_fluxes",
-    "era5_zarr", "eval_years",
+    "era5_zarr", "eval_years", "learned_position_embedding",
+    "near_surface_head",
     "grad_accum", "grad_clip_norm", "gravity_wave_drag", "loss", "lr",
     "microphysics", "n_epochs", "n_lat", "n_lon", "n_training_days",
     "neural_gcm", "nlev", "optimizer", "rad_update_steps", "radiation",
@@ -642,6 +643,18 @@ def _pinned_trainable_names(param_fixed: dict) -> set:
             for field in fields} & known
 
 
+def wb_learned_position_embedding(yml: dict) -> bool:
+    """The deck's top-level ``learned_position_embedding``: whether every
+    learned part (the arm's network with ``spatial_embedding``, the
+    near-surface head) carries a learned per-location embedding.  Required
+    wherever one could exist, so no run picks it up from a default."""
+    v = yml.get("learned_position_embedding")
+    if not isinstance(v, bool):
+        raise ValueError("learned_position_embedding must be stated in the "
+                         f"deck as true or false (the ablation), got {v!r}")
+    return v
+
+
 def wb_needs_land_frac(mode: str, yml: dict) -> bool:
     """Whether the WB sample loader must carry an ERA5 land fraction.
 
@@ -650,7 +663,8 @@ def wb_needs_land_frac(mode: str, yml: dict) -> bool:
     ship with the mask) or when the selected learned arm's block enables
     ``spatial_embedding`` (the land fraction is one of its static inputs).
     """
-    if mode == "physics" or bool(yml.get("era5_surface_fluxes", False)):
+    if (mode == "physics" or bool(yml.get("era5_surface_fluxes", False))
+            or yml.get("near_surface_head") is not None):
         return True
     if mode in ("neural_gcm", "sfno"):
         ov = yml.get(mode, {}) or {}
@@ -1122,6 +1136,8 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
         # surface-flux input planes (top-level campaign flag).
         _cn["spatial_embedding"] = bool(ov.get("spatial_embedding", False))
         _cn["era5_surface_fluxes"] = bool(yml.get("era5_surface_fluxes", False))
+        if _cn["spatial_embedding"]:
+            _cn["learned_position_embedding"] = wb_learned_position_embedding(yml)
         params = build_variant("column_nn", nlev=nlev, grid=grid, overrides=_cn)
 
         # #1464: the learned arm's only momentum physics is its own wind head,
@@ -1164,6 +1180,8 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
         _sf_fluxes = bool(yml.get("era5_surface_fluxes", False))
         _sf["spatial_embedding"] = _sf_spatial
         _sf["era5_surface_fluxes"] = _sf_fluxes
+        if _sf_spatial:
+            _sf["learned_position_embedding"] = wb_learned_position_embedding(yml)
         params = build_variant("sfno_physics", nlev=nlev, grid=grid,
                                overrides=_sf)
 
@@ -1277,7 +1295,23 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
                 **gated, **kw,
             )
 
+    from legoesm.training.near_surface_head import (
+        WithHead,
+        build_near_surface_head,
+    )
+    _head = build_near_surface_head(yml, grid)
+    if _head is not None:
+        params = WithHead(params, _head)
+    if ("learned_position_embedding" in yml and _head is None and not (
+            cfg.mode in ("neural_gcm", "sfno")
+            and (yml.get(cfg.mode) or {}).get("spatial_embedding", False))):
+        raise ValueError("learned_position_embedding is set but nothing in "
+                         "this run reads it (no near_surface_head, no "
+                         "spatial_embedding): an inert deck key.")
+
     def make_run_seg(trainable):
+        if isinstance(trainable, WithHead):
+            trainable = trainable.core
         return _SpectralRunSeg(make_physics_fn(trainable))
 
     return None, grid, sigma, params, make_run_seg, loss_config, dt
@@ -1367,6 +1401,11 @@ def build_mode_components(cfg, yml, column_mesh=None):
             f"mode='physics'; got core={core!r} mode={getattr(cfg, 'mode', None)!r}")
     if core == "spectral":
         return _build_mode_components_spectral(cfg, yml, column_mesh)
+    _spectral_only = [k for k in ("near_surface_head", "learned_position_embedding")
+                      if k in yml]
+    if _spectral_only:
+        raise ValueError(f"{_spectral_only} are built only on the spectral "
+                         f"training core; this run uses {core!r}.")
     if core != "latlon":
         raise ValueError(
             f"unknown training_core {core!r}; choose 'latlon' (explicit "
@@ -1601,9 +1640,11 @@ def multi_lead_loss(run_seg, ic, targets, forcing, *, n_segs, seg_steps,
     One chained forecast (``run_seg.raw_multi``) is scored after every
     segment against ``targets[k] = (carry, near-surface fields)``: the carry
     loss plus, when the fields are given, the near-surface loss on the fields
-    ``diagnose_fn`` (the WB2 eval's diagnosis, injected because ``evaluations``
-    depends on this package, not the reverse) derives from the predicted
-    state the way the eval does.  Returns the loss, or ``(loss, terms)`` with
+    ``diagnose_fn(state, grid, sigma, lead_seg)`` (the WB2 eval's diagnosis,
+    injected because ``evaluations`` depends on this package, not the
+    reverse; ``lead_seg`` = segments to the lead, which dates the valid time
+    for the near-surface head) derives from the predicted state the way the
+    eval does.  Returns the loss, or ``(loss, terms)`` with
     each term averaged over the leads the same way."""
     from legoesm.training.losses import combined_loss_terms, surface_field_terms
     from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
@@ -1618,11 +1659,12 @@ def multi_lead_loss(run_seg, ic, targets, forcing, *, n_segs, seg_steps,
                                adjoint_steps=adjoint_steps)
     preds = [rolled[k - 1] for k in segs[:n]]
     total, acc = 0.0, {}
-    for pred, (tgt, sfc) in zip(preds, targets[:n]):
+    for k_seg, pred, (tgt, sfc) in zip(segs, preds, targets[:n]):
         loss, t = combined_loss_terms(pred, tgt, sigma_full, grid=grid,
                                       config=loss_config)
         if sfc:
-            diag = diagnose_fn(carry_to_spectral_state(pred, grid), grid, sigma)
+            diag = diagnose_fn(carry_to_spectral_state(pred, grid), grid, sigma,
+                               k_seg)
             ls, ts = surface_field_terms(diag.fields, sfc, diag.valid,
                                          grid.weights, loss_config)
             loss = loss + ls
@@ -1632,6 +1674,23 @@ def multi_lead_loss(run_seg, ic, targets, forcing, *, n_segs, seg_steps,
             acc[k_] = acc.get(k_, 0.0) + v_ / n
     total = total / n
     return (total, acc) if terms else total
+
+
+def lead_diagnose_fn(diagnose, trainable, forcing, seg_seconds):
+    """``multi_lead_loss``'s ``diagnose_fn``: the eval diagnosis, with the
+    trainable's near-surface head (a ``WithHead``) read at each lead's own
+    valid time (``forcing``'s seconds of day + segments x ``seg_seconds``)
+    and the sample's land fraction; the plain diagnosis without a head."""
+    head = getattr(trainable, "head", None)
+
+    def fn(state, grid, sigma, k_seg):
+        if head is None:
+            return diagnose(state, grid, sigma)
+        return diagnose(state, grid, sigma, head=head,
+                        land_frac=forcing["land_frac"],
+                        seconds_utc=forcing["seconds_of_day"]
+                        + k_seg * seg_seconds)
+    return fn
 
 
 def era5_time_to_forcing_calendar(time_ns, year):

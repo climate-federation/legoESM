@@ -431,6 +431,7 @@ def _physical_params(params) -> dict:
     import numpy as np
 
     out = {}
+    params = getattr(params, "core", params)    # WithHead: the arm's own
     for _attr in ("classical", "schemes"):
         _part = getattr(params, _attr, None)
         _as_dict = getattr(_part, "as_dict", None)
@@ -1265,11 +1266,14 @@ def _main(argv=None):
             trainable = _in_trace_rep(trainable)
         ic, target, forcing = sample
         if _leads:
+            from legoesm.training.scale_build import lead_diagnose_fn
+            _diag = lead_diagnose_fn(_diagnose, trainable, forcing,
+                                     roll_steps * dt)
             return multi_lead_loss(
                 make_run_seg(trainable), ic, target, forcing,
                 n_segs=n_segs or _curriculum[0], seg_steps=roll_steps, sigma_full=sigma_full,
                 grid=grid, sigma=sigma, loss_config=loss_config,
-                diagnose_fn=_diagnose, adjoint_steps=cfg.adjoint_steps or 0,
+                diagnose_fn=_diag, adjoint_steps=cfg.adjoint_steps or 0,
                 terms=terms, lead_segs=tuple(h // _leads[0] for h in _leads))
         # Only the spectral segment takes the kwarg (checked above).
         _kw = {"adjoint_steps": cfg.adjoint_steps} if cfg.adjoint_steps else {}
@@ -1493,8 +1497,12 @@ def _main(argv=None):
         # leaf reachable at any stage's horizon has a gradient here.
         # Kept alive past the freeze: the same program re-measures on the
         # TRAINED parameters at the end of the run (no second compile).
+        # A near-surface head is probed with its zero last layer perturbed
+        # (near_surface_head.probe_view): at the zero init every other head
+        # leaf has an exactly-zero gradient that the first update removes.
+        from legoesm.training.near_surface_head import probe_view
         _probe_vg = eqx.filter_jit(jax.value_and_grad(
-            lambda a, s: _loss(eqx.combine(a, _probe_static), s,
+            lambda a, s: _loss(probe_view(eqx.combine(a, _probe_static)), s,
                                n_segs=_curriculum[-1])))
         # --probe-scenes N probes N evenly spread scenes instead, which brings
         # the sampling risk below back in exchange for time (owner, 2026-10-12).
