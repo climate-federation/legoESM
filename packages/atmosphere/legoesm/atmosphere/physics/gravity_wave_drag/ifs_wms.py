@@ -19,8 +19,8 @@ RULE 5 (vote V7, oracle_audit/ifs_port/wms_ozone/VOTES.md), all widths in
   N^2 floor        linear smooth_max, width ``n2_floor_rel_width * GSSEC``;
   critical speed   running smooth_max, width ``speed_width_m_s``;
   critical level   sigmoid_switch of (c - c_min), width ``speed_width_m_s``;
-  saturation       act*smooth_min(F, Fs) + (1-act)*F, width rel*(|F|+|Fs|);
-  deposition cap   smooth_min/max, width ``deposit_rel_width`` * (sum of |operands|);
+  saturation       act*smooth_min(F, Fs) + (1-act)*F, width rel*max(F, Fs);
+  deposition cap   smooth_min/max, width ``deposit_rel_width * ZDFL``;
   mean deposited   (sum c dF + eps ZCRT_below)/(sum dF + eps), eps = 1e-12 * launch flux.
 The grid-size factor stays hard (static geometry).
 """
@@ -117,6 +117,7 @@ _GSSEC = 1.0e-12           # [s^-2] sugwd.F90:161
 _LAUNCH_P = 45000.0        # [Pa] sugwwms.F90:113 ZLAUNCHP(1)
 _RHOUR = 3600.0            # [s] YOMCST RHOUR (exact conversion)
 _CRT_EPS_REL = 1.0e-12     # vote V7: ZCRT fallback eps / launch flux
+_MIN_NORM_WIDTH = 1.0e-8   # floor of a smoothing width / (|a|+|b|) (finite sharpness)
 
 
 class IFSWMSConfig(NamedTuple):
@@ -184,17 +185,18 @@ def _sharp(w):
     return math.inf if (isinstance(w, (int, float)) and w == 0) else 1.0 / w
 
 
-def _rel_smooth(op, hard, a, b, rel):
-    """``op`` (smooth_min/max) of relative width ``rel`` in units of
-    ``|a| + |b|``, on the normalised values so no exponent overflows; where
-    both operands vanish the hard ``hard`` (where-before-divide, AD-safe).
-    ``rel = 0`` is the hard form."""
-    if rel == 0.0:
-        return hard(a, b)
+def _rel_smooth(op, hard, a, b, width):
+    """``op`` (smooth_min/max) of absolute width ``width`` (vote V7 scales),
+    evaluated on operands normalised by ``|a| + |b|`` so no exponent
+    overflows; where both operands vanish the hard ``hard`` (where-before-
+    divide, AD-safe)."""
     raw = jnp.abs(a) + jnp.abs(b)
     ok = raw > _safe_floor(a)           # scale**2 stays normal in the reverse pass
     scale = jnp.where(ok, raw, 1.0)
-    return jnp.where(ok, op(a / scale, b / scale, 1.0 / rel) * scale, hard(a, b))
+    # width in normalised units, floored at _MIN_NORM_WIDTH so the sharpness and
+    # its reverse-pass derivative stay finite where ZDFL -> 0 against a finite cap
+    wn = jnp.maximum(width / scale, _MIN_NORM_WIDTH)
+    return jnp.where(ok, op(a / scale, b / scale, 1.0 / wn) * scale, hard(a, b))
 
 
 def _safe_floor(x):
@@ -202,12 +204,12 @@ def _safe_floor(x):
     return math.sqrt(float(jnp.finfo(jnp.result_type(x)).tiny))
 
 
-def _rel_smin(a, b, rel):
-    return _rel_smooth(smooth_min, jnp.minimum, a, b, rel)
+def _rel_smin(a, b, width):
+    return _rel_smooth(smooth_min, jnp.minimum, a, b, width)
 
 
-def _rel_smax(a, b, rel):
-    return _rel_smooth(smooth_max, jnp.maximum, a, b, rel)
+def _rel_smax(a, b, width):
+    return _rel_smooth(smooth_max, jnp.maximum, a, b, width)
 
 
 def _seqsum(x, axis):
@@ -306,7 +308,12 @@ def wms_drag(T, u, v, p_full, p_half, geo_full, lat, pgaw, *, launch_level: int,
             dep = act * (flux - fluxs)
             flux = jnp.where(dep > 0.0, fluxs, flux)
         else:
-            flux = act * _rel_smin(flux, fluxs, cfg.saturation_rel_width) + (1.0 - act) * flux
+            if cfg.saturation_rel_width == 0:
+                fsat = jnp.minimum(flux, fluxs)
+            else:   # V7: width 0.01 * max(F, Fs)
+                fsat = _rel_smin(flux, fluxs, cfg.saturation_rel_width
+                                 * jnp.maximum(jnp.abs(flux), jnp.abs(fluxs)))
+            flux = act * fsat + (1.0 - act) * flux
         pu = _seqsum(act * flux * dci[None, :, None], axis=1)
         return (cimin, act, flux, crt), (dfl, crt, pu)
 
@@ -331,7 +338,11 @@ def wms_drag(T, u, v, p_full, p_half, geo_full, lat, pgaw, *, launch_level: int,
         if hard:
             dft = jnp.maximum(jnp.minimum(d, cap), 0.0)
         else:
-            dft = _rel_smax(_rel_smin(d, cap, s_dep_rel), jnp.zeros_like(d), s_dep_rel)
+            if s_dep_rel == 0:
+                dft = jnp.maximum(jnp.minimum(d, cap), 0.0)
+            else:   # V7: width 0.01 * ZDFL on both clamps (ZDFL >= 0)
+                w = s_dep_rel * d
+                dft = _rel_smax(_rel_smin(d, cap, w), jnp.zeros_like(d), w)
         cngl = d - dft
         return cngl, cngl
 
