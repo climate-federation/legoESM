@@ -66,3 +66,22 @@ def test_sheared_flow_over_varying_ps_moves_air_vertically():
     full, const = _omega(True, *a), _omega(False, *a)
     assert np.max(np.abs(const)) <= 1e-12
     assert np.max(np.abs(full)) > 1e-3     # Pa/s; order sigma v.grad p_s
+
+
+def test_mpas_cell_centred_winds_refused():
+    """Vote V29a: the Voronoi divergence gathers EDGE-normal winds by edge
+    index; cell-centred winds (an MPAS column lane) must refuse instead of
+    returning clamped-gather garbage."""
+    import pytest
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    mesh = create_voronoi_mesh(3, lloyd_iterations=3)
+    sigma = create_sigma_coordinate(NLEV, sigma_top=0.05)
+    n = int(mesh.nCells)
+    u_cell = jnp.ones((n, NLEV))
+    p_s = jnp.full((n,), 1.0e5)
+    with pytest.raises(ValueError, match="edge-normal"):
+        omega_fn(u_cell, u_cell, p_s, mesh, sigma, n, NLEV, voronoi=True,
+                 full_continuity=True)
+    u_edge = jnp.ones((int(mesh.nEdges), NLEV))
+    assert omega_fn(u_edge, None, p_s, mesh, sigma, n, NLEV, voronoi=True,
+                    full_continuity=True).shape == (n, NLEV)
