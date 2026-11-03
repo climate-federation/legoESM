@@ -138,3 +138,16 @@ def test_scm_set_time_reaches_the_cold_start_build():
     scm.physics_fn_init.set_time = lambda d, s: seen.append((d, s))
     scm.set_time(10.0, 3600.0)
     assert seen == [(10.0, 3600.0)]
+
+
+def test_lane_without_vapour_tracer_refuses():
+    """codex R3 round 3: dqv must have a q_v tracer to land on."""
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        mynn_lane_kwargs)
+    scm = _scm()
+    tr = {k: v for k, v in scm.state.tracers.items() if k != "q_v"}
+    st = scm.state._replace(tracers=tr)
+    T = scm.state.T.data.reshape(1, NLEV)
+    with pytest.raises(ValueError, match="q_v"):
+        mynn_lane_kwargs(st, scm.grid, scm.sigma_coord, scm.phys_state,
+                         T, T, T, 1, False)

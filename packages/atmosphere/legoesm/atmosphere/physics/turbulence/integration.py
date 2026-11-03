@@ -306,6 +306,11 @@ def mynn_lane_kwargs(state, grid, sigma_coord, phys_state, T_col, p_full_col,
         x = tr[name]
         return getattr(x, "data", x).reshape(ncol, nlev)
 
+    if "q_v" not in tr:
+        raise ValueError(
+            "turbulence='mynn25' (WRF MYNN-EDMF) returns a vapour tendency "
+            "paired with its cloud-water one; this state carries no q_v "
+            "tracer to route it to")
     q_c = _col("q_c")
     if q_c is None:
         raise ValueError(
