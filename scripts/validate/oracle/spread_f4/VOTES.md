@@ -45,3 +45,18 @@ err_code; C1 compares the perturbed run's own base trajectory with the committed
 into the main trajectory) and the seed-0 rerun after seeds 0-19 must be bitwise (catches history pollution between
 copies); spread_step runs only inside the recorded-step loop (bigup2 warm-up is outside it); seed outputs are stored as
 fresh float64 copies.
+
+## Round 3 (F4 part 3, 2026-11-03)
+| id | question | me | codex | GLM | result |
+|---|---|---|---|---|---|
+| V20 | gray cases: (a) E0/E1/E2 matched subset (pstd_mks = column p_s), 8 tier-2 columns, dry, oracle insolation fed to ours; departure + RCE loop out / (b) include them | a | a | a | a |
+| V21 | metric: (a) per-column max\|o-r\|/max\|r\| (Louis convention), tol 1e-10 / (b) pointwise rel | a | a | a | a |
+| V22 | constants stefan/grav/cp_air (gray), KAPPA/CP_AIR/GRAV (HS): (a) written into the oracle input (perturbed, V1) / (b) hardcoded in stubs | a | a | a | a |
+| V23 | HS: (a) public hs_forcing unmodified, kf = our k_max in 1/s, udt/vdt only, ours sponge_k = 0, 13 tier-2 GWD columns / (b) visibility edit on rayleigh_damping | a | a | a | a |
+| V24 | Tripleclouds: (a) C-structural (closed-form grey factor, no region solver; tier-2 ecRad 1.7.2: fsd 0->1 TOA SW -8.2 vs -18.2 W/m2), no harness / (b) ecRad spread harness anyway | a | a | a | a |
+| V25 | CLUBB helper tests: (a) no edit, runpy + mapped open() on synthetic anchors + byte-identical rebuild of committed gen_spread_impl.py; analyze: bitwise_diff, load / (b) refactor first | a | a | a | a |
+| V26 | land: (a) new commit on feat/f4-oracle-spread (PR #2344) / (b) stacked branch | a | b | a | a (codex cited a rule against commits on an open PR; none found -- the brief allows PR updates, not merges) |
+Reviews: codex (job 11028851) NO FINDINGS on the two harnesses + CLUBB helper tests. GLM: gray NONE; HS 3 points, none
+taken -- (1)/(2) zero-wind/below-sigma_b columns: 12 of 13 columns have nonzero wind and the generator asserts the damping
+branch is reached; the test is shown to fail with the sponge on and with linear_frac off by 1e-6; (3) v IS compared;
+sigma > 1 and p_s < 1 Pa branches are unreachable for physical columns (stated scope limit).

@@ -76,3 +76,21 @@ for _tag, _flag, _test, _sel in (
         local_ref=True)   # VOTE V9 (b)
 
 FAMILIES["mg2_prog_nc_sed"]["metrics"] = ["_rel", "_rel_flux"]
+
+# F4 part 3: gray radiation and HS94 Rayleigh friction vs Isca v1.0 (VOTES V20-V23)
+FAMILIES["gray_isca"] = dict(
+    build=f"bash -x {G}/gray_isca/build.sh {OR}/Isca_v1.0 {B}/gray_isca",
+    generator=f"{G}/gray_isca/make_fixture.py",
+    argv=[f"{B}/gray_isca/drv_gray", f"{OR}/Isca_v1.0",
+          f"{OA}/morrison_mg_warm_rain_sedimentation/out/columns.npz", "{OUT}"],
+    exes={"drv_gray"}, fixture=f"{FX}/gray_isca.npz",
+    test=f"{WT}/tests/atmosphere/test_gray_isca_oracle.py", fix_attr="FIXTURE",
+    metrics=["_rel"], select="matches_isca")
+FAMILIES["rayleigh_hs_isca"] = dict(
+    build=f"bash -x {G}/hs_isca/build.sh {OR}/Isca_v1.0 {B}/hs_isca",
+    generator=f"{G}/hs_isca/make_fixture.py",
+    argv=[f"{B}/hs_isca/drv_hs", f"{OR}/Isca_v1.0",
+          f"{OA}/simple_gwd_hines_lindzen_rayleigh_spectral/inputs/cols.npz", "{OUT}"],
+    exes={"drv_hs"}, fixture=f"{FX}/rayleigh_hs_isca.npz",
+    test=f"{WT}/tests/atmosphere/test_rayleigh_hs_isca_oracle.py", fix_attr="FIXTURE",
+    metrics=["_rel"], select="matches_isca")

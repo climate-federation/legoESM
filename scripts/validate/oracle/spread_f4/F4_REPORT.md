@@ -40,8 +40,26 @@ equivalent was found by name.  Verdict: C-structural (sequencing departures), cl
 | Sundqvist condensation step | C-structural | ccpp-physics zhaocarr_gscond.f |
 | mc3d Monte-Carlo transport | C-structural | I3RC community Monte Carlo model |
 | Rayleigh upper sponge | C-structural | none (addition to HS94) |
-| gray radiation | harness to build | Isca two_stream_gray_rad.F90 @ v1.0 5868cfd, FMS stubs |
-| Rayleigh HS94 friction | harness to build | FMS/Isca hs_forcing.F90 |
-| mc3d Tripleclouds overlap | harness to build | ecRad (cloned) |
+| gray radiation | **A 27/27** (V20-V22) | Isca two_stream_gray_rad.F90 @ v1.0 5868cfd, FMS stubs |
+| Rayleigh HS94 friction | **A 2/2** (V23) | Isca v1.0 hs_forcing.F90 (unmodified) |
+| mc3d Tripleclouds overlap | C-structural (V24) | ecRad 1.7.2 radiation_tripleclouds_sw/lw.F90 |
 | CAM6 sequencing | C-structural (static audit above) | CAM cam_cesm2_1_rel_60 physpkg.F90 tphysbc/tphysac |
 | Beres | BLOCKED (V16) | E3SM gw_convect.F90 needs the real mfcc table (newmfspectra*.nc): not on disk |
+
+## Part 3 (V20-V26)
+| unit | comparisons | class | worst port rel / spread | job |
+|---|---|---|---|---|
+| gray radiation vs Isca v1.0 B_FRIERSON (E0/E1/E2, pstd_mks = p_s, 8 columns) | 27 | A 27 | E1 total heating 4.63e-14 / 6.00e-14 | 11028848 |
+| HS94 Rayleigh friction vs Isca v1.0 hs_forcing (sponge off, 13 columns) | 2 | A 2 | du_dt 7.18e-16 / 3.63e-15 | 11028849 |
+
+C1-C5 PASS both.  HS: the uncompared tdt (Newtonian + dissipative heating) changes zero pattern under 1 ulp, so the
+V7 family rule fires; no class changes (every port rel <= 1e-12).  Generator self-checks (known values) pass in every
+run: gray P2 insolation to 1e-14, zero TOA LW down, constant SW up, zero SW heating at atm_abs = 0; HS zero tendency at
+sigma <= sigma_b and -kf (sigma - sigma_b)/(1 - sigma_b) u to 1e-14 kf|u|.  Non-vacuity: gray test fails with
+linear_frac off by 1e-6 (E0/E1), HS test fails with the sponge on (job 11029100).
+Tripleclouds: C-structural (V24), no harness -- ours is the closed-form grey factor 1 - fsd^2 tau/(gamma0 + tau) with
+no region-resolved solver; tier-2 audit (radiation_overlap_inhomogeneity_ozone_mc3d) measured fsd 0->1 TOA SW -8.2 vs
+ecRad Tripleclouds -18.2 W/m2.  The IFS ecRad 49r1 port (feat/ifs-ecrad-oracle) ports McICA only; nothing there to share.
+CLUBB helpers: tests/oracle_baselines/test_spread_f4_clubb_impl.py (synthetic-anchor splice, missing-anchor refusal,
+byte-identical rebuild of the committed gen_spread_impl.py, bitwise_diff/load); fails with the spread_step splice
+removed and with value- instead of bitwise equality (job 11028845).
