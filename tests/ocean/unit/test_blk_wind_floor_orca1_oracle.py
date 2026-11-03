@@ -40,6 +40,7 @@ def fx():
 
 def _rel(a, b):
     a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+    assert np.all(np.isfinite(a)) and np.all(np.isfinite(b)), "non-finite operand"
     den = np.maximum(np.abs(a), np.abs(b))
     return np.where(den > 0, np.abs(a - b) / np.where(den > 0, den, 1.0), 0.0)
 
@@ -86,3 +87,8 @@ def test_parity_cd_gradient_below_half_metre_per_second():
     fd = (float(f(jnp.asarray(U + h))) - float(f(jnp.asarray(U - h)))) / (2 * h)
     assert np.isfinite(g) and g < 0.0
     assert abs(g / fd - 1.0) < 1e-6
+
+
+def test_rel_rejects_non_finite():
+    with pytest.raises(AssertionError):
+        _rel([np.nan], [1.0])
