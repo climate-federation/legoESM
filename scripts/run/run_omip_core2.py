@@ -3188,7 +3188,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                              q_net=sf.q_net * ramp,
                              sw_down=sf.sw_down * ramp)
         if chl_clim is not None:
-            sf = sf._replace(chl=month_sample(chl_clim, step, dt, args.forcing_time_interp))
+            sf = sf._replace(chl=chl_at_step(chl_clim, step, dt, args.forcing_time_interp))
         # --- prognostic ice step (B4; mirrors the host loop's block) ------
         ice_resp = None
         if ice_config is not None:
@@ -4207,11 +4207,13 @@ def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None,
                 f"got {lat2d_deg.shape} on grid_type={grid_type!r}")
         src0, wgt, nw = load_scrip_weights(_CHL_SCRIP_WEIGHTS)
         src_shape = chl.shape[1:]
+        # Raw remapped months, as NEMO's fld_read holds them: the 0.03 floor
+        # is applied AFTER time interpolation (chl_at_step), as in tra_qsr.
         out = np.stack([
-            np.maximum(_scrip_to_full_tripole(
+            _scrip_to_full_tripole(
                 apply_scrip_weights(np.nan_to_num(chl[m], nan=0.0),
                                     src0, wgt, nw, src_shape),
-                *lat2d_deg.shape), 0.03)
+                *lat2d_deg.shape)
             for m in range(12)])
         print(f"[setup] RGB chlorophyll: ESACCI monthly via the ORACLE'S OWN "
               f"bilinear weights ({nw} triples) onto {grid_type}, range "
@@ -4231,9 +4233,11 @@ def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None,
         om, _ = _regrid_curv_to_points(
             src_filled, src_lat, src_lon, src_valid, lat2d_deg, lon2d_deg,
             k=4, max_deg=2.0)
-        # Floor at the NEMO clamp minimum so flood-filled land/coast cells never
-        # produce a zero/negative Chl that would underflow the class-index log10.
-        out_months.append(np.maximum(om, 0.03))
+        # No floor here: NEMO clamps MAX(0.03, chl) after time interpolation
+        # (traqsr.F90:322), so the floor lives in chl_at_step.  Flooring each
+        # month first changes the interpolated value wherever one bracketing
+        # month is below 0.03 and the other above.
+        out_months.append(om)
     out = np.stack(out_months, axis=0)
     print(f"[setup] RGB chlorophyll: ESACCI monthly regridded onto {grid_type}, "
           f"range {float(out.min()):.3f}-{float(out.max()):.3f} mg/m3, "
@@ -4415,6 +4419,25 @@ def month_sample(field, step: int, dt: float, mode: str):
             "expected 'hold' or 'linear'")
     i0, i1, w = _month_interp_weights(step, dt)
     return (1.0 - w) * field[i0] + w * field[i1]
+
+
+# NEMO tra_qsr floors the time-interpolated chlorophyll: zchl = MAX(0.03,
+# MIN(fnow, 10)) (traqsr.F90:322; ORCA1's profile branch clamps the same way
+# at :331).  The upper bound is applied by the RGB
+# kernel's class-index clamp.
+_CHL_FLOOR_MG_M3 = 0.03
+
+
+def chl_at_step(chl_clim, step: int, dt: float, mode: str):
+    """Surface chlorophyll for this step: interpolate the RAW monthly
+    climatology (``month_sample``), then floor at 0.03 mg/m3, in NEMO's order.
+
+    Host-side forcing preparation (numpy, outside the JAX graph), so the hard
+    floor is NEMO's own form.  ``None`` passes through.
+    """
+    if chl_clim is None:
+        return None
+    return np.maximum(month_sample(chl_clim, step, dt, mode), _CHL_FLOOR_MG_M3)
 
 
 def _siconc_at_step(siconc, step: int, dt: float, monthly: bool):
@@ -10420,7 +10443,7 @@ def main() -> int:
         # switches the PE step to NEMO's RGB penetration.  NOT ramped — Chl is a
         # fixed optical climatology, independent of the dynamical spin-up ramp.
         if chl_clim is not None:
-            sf = sf._replace(chl=month_sample(chl_clim, step, dt, args.forcing_time_interp))
+            sf = sf._replace(chl=chl_at_step(chl_clim, step, dt, args.forcing_time_interp))
         # PRESCRIBED-ice runs (--ice-albedo/--ice-thermo/--sss-restore ice
         # gate, NO --prognostic-sea-ice): thread the SAME climatological
         # concentration to the vertical-mixing closure so the TKE under-ice

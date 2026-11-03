@@ -176,11 +176,15 @@ def test_interpolation_reweights_months_by_their_neighbours_lengths():
 def test_all_six_monthly_call_sites_use_the_sampler():
     """Three fields x two lanes. Counted over the AST so a commented-out call
     cannot satisfy it -- the substring form of this check was shown to accept
-    inert wiring on gap 11."""
-    calls = [n for n in ast.walk(ast.parse(RUNNER.read_text()))
-             if isinstance(n, ast.Call)
-             and getattr(n.func, "id", None) == "month_sample"]
-    assert len(calls) == 6, f"expected 6 wired call sites, found {len(calls)}"
+    inert wiring on gap 11.  The two chlorophyll sites go through
+    ``chl_at_step`` (sampler, then NEMO's 0.03 floor), which holds the
+    sixth ``month_sample`` call."""
+    tree = ast.parse(RUNNER.read_text())
+    def _n(name):
+        return sum(1 for n in ast.walk(tree) if isinstance(n, ast.Call)
+                   and getattr(n.func, "id", None) == name)
+    assert _n("month_sample") == 5, f"found {_n('month_sample')} month_sample calls"
+    assert _n("chl_at_step") == 2, f"found {_n('chl_at_step')} chl_at_step calls"
 
 
 def test_flag_round_trips_and_defaults_to_hold():
