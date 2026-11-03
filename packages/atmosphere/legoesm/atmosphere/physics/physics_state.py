@@ -292,6 +292,11 @@ class PhysicsState(NamedTuple):
     # other run carries them).  Appended LAST.
     turb_tendency_qv: jnp.ndarray = None
     evap_sfc: jnp.ndarray = None
+    # OPTIONAL per-call prescribed large-scale vertical velocity [m/s,
+    # positive up], same layout as T: the SCM's ``SCMForcing.subsidence_w``
+    # (zeros without it), from which WRF Tiedtke's omega is formed on a grid
+    # with no divergence operator.  Per-call INPUT, reset like dyn_tendency_*.
+    dyn_w_ls: jnp.ndarray = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -306,11 +311,11 @@ class PhysicsState(NamedTuple):
 # must carry them across its intermediate carry updates so every sub-module of
 # the same call sees them; only the call's final update may clear them.
 PHYSSTATE_PER_CALL_INPUTS = (
-    "dyn_tendency_T", "dyn_tendency_qv",
+    "dyn_tendency_T", "dyn_tendency_qv", "dyn_w_ls",
     "surface_wth_override", "surface_wqv_override",
 )
 PHYSSTATE_INPUT_FIELDS = frozenset({
-    "dyn_tendency_T", "dyn_tendency_qv",
+    "dyn_tendency_T", "dyn_tendency_qv", "dyn_w_ls",
     # per-job physics-cadence cache: carried across steps, never persisted
     "held_physics",
     "surface_wth_override", "surface_wqv_override",
@@ -600,6 +605,7 @@ def update_physics_state(phys_state, updates):
                           else updates.get("turb_tendency_qv",
                                            phys_state.turb_tendency_qv)),
         evap_sfc=_tiedtke_evap_update(phys_state.evap_sfc, updates),
+        dyn_w_ls=updates.get("dyn_w_ls", None),
     )
 
 

@@ -2642,6 +2642,12 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_snow_emissivity must be in [{_eps_lo}, {_eps_hi}] (the "
                 f"snow_column parameter spec), got {self.land_snow_emissivity!r}")
+        if self.convection == "tiedtke" and self.turbulence == "none":
+            errors.append(
+                "convection='tiedtke' (WRF port) reads the previous step's "
+                "boundary-layer q_v tendency and surface water flux (WRF "
+                "qvpblten / qfx) from the turbulence scheme; with "
+                "turbulence='none' they would stay zero")
         if self.convection == "tiedtke" and (
                 self.convective_precip_split != "constant"
                 or (self.convective_precip_efficiency or 0.0) > 0.0):

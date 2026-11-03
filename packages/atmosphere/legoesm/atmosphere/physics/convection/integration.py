@@ -104,6 +104,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
 )
 from legoesm.atmosphere.physics._shared import (
     compute_heights_from_sigma,
+    compute_rho,
     compute_moisture_convergence,
     diagnose_grid_w_from_omega,
     moisture_convergence_supported,
@@ -832,15 +833,23 @@ def _make_hydrostatic_convection(
                     raise ValueError(
                         "convection='tiedtke' needs both wind components "
                         "(cumulus friction, omega); state.v is None")
-                if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+                _w_ls = getattr(phys_state, "dyn_w_ls", None)
+                if (_w_ls is None and isinstance(
+                        sigma_coord, HybridSigmaPressureCoordinate)):
                     raise ValueError(
                         "convection='tiedtke' needs omega, which this bridge "
                         "diagnoses by PURE-sigma continuity; a hybrid "
                         "coordinate would get a wrong omega")
-                _omega = diagnose_omega_columns_hydrostatic(
-                    state.u.data, None if state.v is None else state.v.data,
-                    state.p_s.data, grid, sigma_coord, ncol, nlev,
-                    voronoi=True)
+                if _w_ls is not None:
+                    # SCM: the prescribed large-scale w [m/s, up] ->
+                    # omega = -rho g w (moist rho, as diagnose_grid_w_from_omega)
+                    _omega = (-compute_rho(T_col, p_full_col, q_v_col)
+                              * constants.g * _w_ls.reshape(ncol, nlev))
+                else:
+                    _omega = diagnose_omega_columns_hydrostatic(
+                        state.u.data, None if state.v is None else state.v.data,
+                        state.p_s.data, grid, sigma_coord, ncol, nlev,
+                        voronoi=True)
                 if _omega is None:
                     raise ValueError(
                         "convection='tiedtke' needs the resolved pressure "

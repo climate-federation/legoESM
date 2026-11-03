@@ -74,6 +74,7 @@ from legoesm.atmosphere.forcing.scm.scm_forcing import (
     default_forcing,
     inject_prescribed_T_sfc_into_phys_state,
     inject_prescribed_surface_fluxes_into_phys_state,
+    subsidence_w_profile,
     validate_forcing,
     validate_forcing_against_state,
 )
@@ -416,8 +417,13 @@ def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = Non
             if _ftr is not None and "q_v" in _ftr:
                 _dq_dyn = _ftr["q_v"].data
         if phys_state is not None:
+            # and its prescribed large-scale w (WRF Tiedtke's omega source:
+            # the SCM column has no divergence operator)
+            _w = subsidence_w_profile(forcing, t, state.T.data.shape[-1],
+                                      state.T.data.dtype)
             phys_state = phys_state._replace(
-                dyn_tendency_T=_dT_dyn, dyn_tendency_qv=_dq_dyn)
+                dyn_tendency_T=_dT_dyn, dyn_tendency_qv=_dq_dyn,
+                dyn_w_ls=jnp.broadcast_to(_w, state.T.data.shape))
 
         try:
             tend, phys_out = physics_fn(

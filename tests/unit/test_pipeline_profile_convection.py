@@ -285,6 +285,7 @@ def test_tiedtke_pipeline_matches_bridge(setup):
             grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
             dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
             convection=scheme, radiation="none", microphysics="none",
+            turbulence="louis",   # tiedtke reads its lagged qvpblten / qfx
         )
         config.validate_strict()
         pipe = build_physics_pipeline(grid, sigma, config)

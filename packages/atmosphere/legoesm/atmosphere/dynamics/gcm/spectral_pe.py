@@ -2580,8 +2580,9 @@ class SpectralPrimitiveEquationModel:
         ``(n_lat, n_lon, nlev)`` (the layout the physics adapter sees)."""
         tend = spectral_pe_tendencies(
             state, self.grid, self.sigma_coord, self.config, None)
+        _q = tend.tracers["q_v"]   # Field or raw array, as the state carries
         return (sh_synthesis_3d(self.grid, tend.T_hat.data),
-                tend.tracers["q_v"].data)
+                getattr(_q, "data", _q))
 
     @partial(jax.jit, static_argnums=(0, 3))
     def _leapfrog_si_phys_jit(self, state_n, state_nm1, dt, phys_tend):
