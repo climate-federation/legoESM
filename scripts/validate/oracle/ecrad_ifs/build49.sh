@@ -67,22 +67,26 @@ echo "harness_patch random_numbers_mix.F90 $(git hash-object src/random_numbers_
 # --- interface blocks ------------------------------------------------------
 # ecRad's generator (make_intfbl.1.pl) needs a perl module that is not
 # shipped, so take the 1.7.2 generated blocks and PROVE each one matches the
-# 49r1 definition: compile definition + interface in one file, where gfortran
-# rejects any global-procedure interface mismatch.
+# 49r1 definition: the definition is compiled as a module procedure, and a
+# procedure pointer declared from the interface block is pointed at it;
+# gfortran rejects pointer assignment unless the characteristics agree.
 : > intfb_checked.txt
 for h in $(grep -ho '^#include *"[^"]*"' src/*.F90 | sed 's/.*"\(.*\)"/\1/' | sort -u); do
   if [ -f "src/$h" ]; then continue
   elif [ -f "$E172/include/$h" ]; then
     cp "$E172/include/$h" inc/; echo "ecrad172_intfb $h $(git hash-object "inc/$h")" >> MANIFEST.txt
     r=${h%.intfb.h}
-    if [ -f "src/$r.F90" ]; then
-      { cat "src/$r.F90"; printf 'SUBROUTINE ZZ_INTFB_CHECK\n#include "%s"\nEND SUBROUTINE ZZ_INTFB_CHECK\n' "$h"; } > "inc/chk_$r.F90"
-      echo "$r" >> intfb_checked.txt
-    fi
+    [ -f "src/$r.F90" ] && echo "$r" >> intfb_checked.txt
   else echo "no interface block for $h"; exit 1; fi
 done
+mkchk() {  # mkchk <routine> <interface file> <out>
+  { echo "MODULE ZZCHK_$1"; echo "CONTAINS"; cat "src/$1.F90"; echo "END MODULE ZZCHK_$1"
+    echo "SUBROUTINE ZZCHK_CALLER_$1"; echo "USE ZZCHK_$1, ONLY : ZZDEF => $1"
+    echo "#include \"$2\""; echo "PROCEDURE($1), POINTER :: ZZP"; echo "ZZP => ZZDEF"
+    echo "END SUBROUTINE ZZCHK_CALLER_$1"; } > "$3"
+}
 # --- compile: repeated passes until every unit compiles (module order) ----
-FF="-O1 -ffp-contract=off -fno-fast-math -cpp -DLITTLE_ENDIAN -fno-range-check -fallow-invalid-boz -ffree-line-length-none -g -fbacktrace -fopenmp -DNC_NETCDF4"
+FF="${OPT:--O1} -ffp-contract=off -fno-fast-math -cpp -DLITTLE_ENDIAN -fno-range-check -fallow-invalid-boz -ffree-line-length-none -g -fbacktrace -fopenmp -DNC_NETCDF4"
 INC="-Isrc -Iinc -Imod -Jmod -I$NC/include"
 todo=$(cd src && ls *.F90)
 for pass in $(seq 1 40); do
@@ -94,12 +98,26 @@ for pass in $(seq 1 40); do
   [ $(echo $left | wc -w) -lt $(echo $todo | wc -w) ] || { echo "stuck at pass $pass:"; for f in $left; do echo "== $f"; grep -m3 -iE "error" -A1 "obj/${f%.F90}.log"; done; exit 1; }
   todo=$left
 done
-# interface-vs-definition check (modules exist now)
+# interface-vs-definition check (modules exist now), separate module dir
+mkdir -p chkmod
+CHK="$FF -Isrc -Iinc -Imod -Jchkmod -I$NC/include -c -o /dev/null"
 for r in $(cat intfb_checked.txt); do
-  gfortran $FF $INC -fsyntax-only "inc/chk_$r.F90" > "inc/chk_$r.log" 2>&1 || { echo "INTERFACE MISMATCH $r"; grep -m5 -i error "inc/chk_$r.log"; exit 1; }
+  mkchk "$r" "$r.intfb.h" "inc/chk_$r.F90"
+  gfortran $CHK "inc/chk_$r.F90" > "inc/chk_$r.log" 2>&1 || { echo "INTERFACE MISMATCH $r"; grep -m5 -i error -B2 "inc/chk_$r.log"; exit 1; }
 done
+# non-vacuity: a planted mismatch in one interface block must be rejected
+r=$(for x in $(cat intfb_checked.txt); do grep -q "REAL(KIND=JPRB)" inc/$x.intfb.h && { echo $x; break; }; done)
+sed '0,/REAL(KIND=JPRB)/s//INTEGER(KIND=JPIM)/' "inc/$r.intfb.h" > inc/planted.intfb.h
+cmp -s inc/planted.intfb.h "inc/$r.intfb.h" && { echo "planted control did not change $r"; exit 1; }
+mkchk "$r" planted.intfb.h inc/chk_planted.F90
+if gfortran $CHK inc/chk_planted.F90 > inc/chk_planted.log 2>&1; then
+  echo "INTERFACE CHECK IS VACUOUS: planted REAL->INTEGER mismatch in $r accepted"; exit 1
+fi
+echo "planted interface mismatch rejected ($r): $(grep -m1 -iE "mismatch|error" inc/chk_planted.log)"
 echo "interface blocks checked: $(wc -l < intfb_checked.txt)"
 gfortran $FF -o ecrad49.x obj/*.o -L$NC/lib -lnetcdff -lnetcdf -Wl,-rpath,$NC/lib
+python3 -I "$HERE"/check_constants.py src "$M49/yomcst.F90" | tail -1
+grep -q "RPLRG *= *1.0" src/yomdyncore.F90 || { echo "RPLRG stand-in is not 1"; exit 1; }
 gfortran --version | head -1
 echo "sources: $(wc -l < MANIFEST.txt)"
 echo BUILD_OK

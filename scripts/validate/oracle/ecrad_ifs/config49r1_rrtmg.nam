@@ -9,7 +9,7 @@
 ! seeds) belong to the IFS-interface harness, not here.
 &radiation_driver
 do_parallel              = false,  ! harness: one thread, deterministic
-nblocksize               = 8,
+nblocksize               = 8,      ! harness; see block-size control (srtm_taumol scalar I_LAYSOLFR)
 iverbose                 = 2,
 do_write_double_precision = true,  ! harness: fp64 output
 do_save_net_fluxes       = false,
@@ -28,10 +28,11 @@ liquid_model_name        = "SOCRATES",  ! SU:251 (NLIQOPT=4, SE:672)
 ice_model_name           = "Fu-IFS",    ! SU:262 (NICEOPT=3, SE:674)
 do_fu_lw_ice_optics_bug  = false,  ! SU:265 (LFU_LW_ICE_OPTICS_BUG=F, SE:754)
 do_sw_delta_scaling_with_gases = false, ! SU:292
-use_aerosols             = true,   ! SU:298
+use_aerosols             = false,  ! SU:298 sets TRUE; aerosol stage BLOCKED: optics file aerosol_ifs_49R1_20230725.nc and the CAMS type map (SU:440-470) await the user data ask
 sw_solver_name           = "McICA", ! SU:551 (NSWSOLVER=0, SE:643)
 lw_solver_name           = "McICA", ! SU:535 (NLWSOLVER=0, SE:642)
 do_3d_effects            = false,  ! SU:530
+min_cloud_effective_size = 500.0,  ! SU:573 (SPARTACUS only)
 do_lw_cloud_scattering   = true,   ! SU:586 (NLWSCATTERING=1, SE:630)
 do_lw_aerosol_scattering = false,  ! SU:583
 overlap_scheme_name      = "Exp-Ran", ! SU:605 (NCLOUDOVERLAP=3, SE:647)
@@ -43,7 +44,7 @@ do_lw_derivatives        = true,   ! SU:162 (LAPPROXLWUPDATE=T, SE:524)
 do_canopy_fluxes_sw      = true,   ! SU:168 (LAPPROXSWUPDATE=T, SE:530)
 do_canopy_fluxes_lw      = false,  ! RC default; SU:175 only if NLWOUT>1 (NEMISSSCHEME=0 -> NLWOUT=1, SE:1299)
 do_surface_sw_spectral_flux = true, ! SU:179
-do_save_spectral_flux    = true,   ! harness: spectral fluxes in the output
+do_save_spectral_flux    = false,  ! McICA forces this false (radiation_config.F90 consolidate)
 do_save_gpoint_flux      = false,
 iverbose                 = 1,      ! SU:150
 iverbosesetup            = 2,

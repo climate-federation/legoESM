@@ -8,6 +8,8 @@ W=$(mktemp -d "${TMPDIR:-/tmp}/ecrad49run.XXXX")
 sed "s#\"DATA_DIR\"#\"$DATA\"#" "$NAM" > "$W/config.nam"
 for kv in "$@"; do
   k=${kv%%=*}; v=${kv#*=}
+  # array entries are set by slices elsewhere in the file; only scalar keys may be overridden
+  grep -qE "^$k *\(" "$W/config.nam" && { echo "override $k: array key, not supported"; exit 1; }
   if grep -qE "^$k *=" "$W/config.nam"; then sed -i -E "s#^($k *= *)[^,]*,#\1$v,#" "$W/config.nam"
   else sed -i -E "0,/^&radiation\$/s##\&radiation\n$k = $v,#" "$W/config.nam"; fi
   grep -qE "^$k *= *$v," "$W/config.nam" || { echo "override $kv not applied"; exit 1; }
