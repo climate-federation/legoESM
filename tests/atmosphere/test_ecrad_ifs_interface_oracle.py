@@ -408,24 +408,72 @@ def test_gradient_across_transition(name, kind, f, span):
         assert np.max(np.abs(np.asarray(soft[::20]) - np.asarray(hard))) > 0.0, name
 
 
+FD_STEPS = (1e-5, 1e-6)    # two relative steps; the check must pass at both (vote V52)
+
+
 def test_check_grads_chain(fx):
-    """check_grads (order 1, rev) on a smooth interior point of the whole chain."""
+    """check_grads (order 1, rev) on a smooth interior point of the whole chain.
+
+    Inputs are nondimensional relative perturbations (vote V52): full-level T
+    at the radiation call and the skin T of the RADHEATN step are multiplied by
+    (1 + u), (1 + v), so one step size h is the same relative change for both;
+    the FD check is shown at two step sizes that agree with each other and AD.  (Perturbing the radiation-call
+    skin T instead is a null control: the diagnosed emissivity reproduces the
+    surface net LW, so the LW update and its derivative cancel exactly.)"""
     args = scheme_args(fx)
 
-    def f(t_scale, ts_shift):
-        a = dict(args, temperature_fl=args["temperature_fl"] * t_scale,
-                 skin_temperature=args["skin_temperature"] + ts_shift)
+    def f(u, v):
+        a = dict(args, temperature_fl=args["temperature_fl"] * (1.0 + u))
+        ts_step = args["skin_temperature"] * (1.0 + v)
         kw, ex = ii.prepare_inputs(**a, sharpness=100.0)
         rs = ii.scheme_outputs(ecrad_flux(fx), kw["cos_sza"], kw["skin_temperature"],
                                kw["lw_emissivity"], sharpness=100.0)
         carry = ii.radintg_post(rs, kw["solar_irradiance"], kw["cos_sza"], kw["sw_albedo"],
                                 kw["sw_albedo_direct"], fx["in:cos_solar_zenith_angle"], 100.0)
-        rh = ii.radheatn(carry, fx["in:pressure_hl"], fx["in:q"], a["skin_temperature"],
+        rh = ii.radheatn(carry, fx["in:pressure_hl"], fx["in:q"], ts_step,
                          d(fx, "rh_in_mu0_s1"), kw["solar_irradiance"], sharpness=100.0)
         return (jnp.sum(ex["re_liquid_um"]) + jnp.sum(ex["re_ice_um"]) + jnp.sum(kw["overlap_param"])
                 + jnp.sum(rh["te"]) * 1e5 + jnp.sum(rh["frth"]) * 1e-2)
 
-    check_grads(f, (1.0, 0.3), order=1, modes=("rev",), eps=1e-6)
+    x0 = (0.0, 0.0)                    # vote W3
+    for h in FD_STEPS:
+        check_grads(f, x0, order=1, modes=("rev",), eps=h)
+    # explicit convergence: central differences at both steps agree with AD per input
+    g_ad = jax.grad(f, argnums=(0, 1))(*x0)
+    for k in range(2):
+        fd = []
+        for h in FD_STEPS:
+            xp, xm = list(x0), list(x0)
+            xp[k] += h
+            xm[k] -= h
+            fd.append((float(f(*xp)) - float(f(*xm))) / (2.0 * h))
+        print(f"input {k}: AD {float(g_ad[k]):.12e}  FD {fd}")
+        assert np.isfinite(float(g_ad[k])) and float(g_ad[k]) != 0.0, (k, g_ad[k])
+        np.testing.assert_allclose(fd[0], fd[1], rtol=1e-6)
+        for v in fd:
+            np.testing.assert_allclose(v, float(g_ad[k]), rtol=1e-6)
+
+
+def test_radiation_call_skin_temperature_gradient_is_zero(fx):
+    """Vote W4: perturbing the skin T of the radiation call itself (seen by the
+    emissivity diagnosis AND by RADHEATN in the same step) leaves the LW update
+    unchanged: the diagnosed broadband emissivity reproduces the surface net LW,
+    so emis*(sigma*Ts^4 - LWdn) cancels PEMTD(sfc) and the zero is structural."""
+    args = scheme_args(fx)
+
+    def g(w):
+        ts = args["skin_temperature"] * (1.0 + w)
+        kw, _ = ii.prepare_inputs(**dict(args, skin_temperature=ts), sharpness=100.0)
+        rs = ii.scheme_outputs(ecrad_flux(fx), kw["cos_sza"], ts, kw["lw_emissivity"], sharpness=100.0)
+        carry = ii.radintg_post(rs, kw["solar_irradiance"], kw["cos_sza"], kw["sw_albedo"],
+                                kw["sw_albedo_direct"], fx["in:cos_solar_zenith_angle"], 100.0)
+        rh = ii.radheatn(carry, fx["in:pressure_hl"], fx["in:q"], ts, d(fx, "rh_in_mu0_s1"),
+                         kw["solar_irradiance"], sharpness=100.0)
+        return jnp.sum(rh["te"]) * 1e5 + jnp.sum(rh["frth"]) * 1e-2
+
+    grad = float(jax.grad(g)(0.0))
+    print("radiation-call skin T gradient:", grad)
+    assert abs(grad) <= 1e-9, grad
 
 
 def test_decorrelation_length_pole_gradient():
