@@ -3,7 +3,7 @@
 Faithful port of OpenIFS (github.com/ecmwf-ifs/openifs @ 8f6f722f73,
 OpenIFS 48r1.1) ``ifs-source/arpifs/phys_ec/{cumastrn,cudlfsn,cuddrafn,
 cuflxn,cudtdqn,cubidiag,cududv}.F90``; the updraught routines are in
-:mod:`._ifs_cuascent`, the thermodynamics in :mod:`._ifs_cuthermo`.
+:mod:`._ifs_cuascent`, the thermodynamics in :mod:`legoesm.atmosphere.physics._ifs_thermo`.
 
 Configuration ported (sucumf.F90 defaults, the deterministic ECMWF physics):
 LMFPEN = LMFSCV = LMFMID = LMFDD = LMFDUDV = LMFDSNOW = LMFWETB = LMFGLAC =
@@ -30,7 +30,7 @@ import numpy as np
 from legoesm.core.smooth import smooth_max
 
 from .mass_flux import ifs_ztaures
-from ._ifs_cuthermo import cuadjtq, foealfcu, foeewmcu, foelhmcu
+from .._ifs_thermo import cuadjtq, foealfcu, foeewmcu, foelhmcu
 from ._ifs_cuascent import (
     cuascn, cubasen, cuinin, kget, kset, sdiv, spow, ssqrt,
     RMFCMIN, RDEPTHS, RMFLIA, RMFCFL, ENTRORG, DETRPEN, ENTSHALP, RPRCON, ZDNOPRC,
