@@ -430,7 +430,8 @@ def test_swap_convection_schemes(conv_scheme):
 
 @pytest.mark.parametrize(
     "turb_scheme",
-    ["smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+    # mynn25 (WRF port) needs q_c / cell area: tests/unit/test_mynn_lanes.py
+    ["smagorinsky", "louis", "tke", "clubb_lite",
      "holtslag_boville", "ysu", "edmf"],
 )
 def test_swap_turbulence_schemes(turb_scheme):
