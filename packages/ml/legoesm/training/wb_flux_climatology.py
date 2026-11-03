@@ -116,7 +116,7 @@ def frames_at(frames, elapsed_s):
 class FluxClimatology:
     """Read side; ``frames(t0, n_hours)`` for one sample."""
 
-    def __init__(self, path):
+    def __init__(self, path, flux_zarr):
         import zarr
 
         self.path = Path(path)
@@ -127,6 +127,12 @@ class FluxClimatology:
         g = zarr.open_group(str(self.path), mode="r")
         if not bool(g.attrs.get("complete", False)):
             raise RuntimeError(f"flux climatology {self.path} is not finalised.")
+        # The store's name does not encode the ERA5 flux source; its build
+        # records it, and a deck naming another source must not reuse it.
+        if g.attrs.get("flux_zarr") != flux_zarr:
+            raise RuntimeError(
+                f"flux climatology {self.path} was built from "
+                f"{g.attrs.get('flux_zarr')!r}, this deck reads {flux_zarr!r}")
         self._clim = g["clim"]
 
     def frames(self, t0, n_hours):

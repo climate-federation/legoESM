@@ -162,3 +162,15 @@ def test_climatology_is_physics_only_and_needs_a_cache_dir():
         sb.wb_flux_climatology(SimpleNamespace(mode="physics"),
                                {"era5_flux_climatology": True,
                                 "era5_surface_fluxes": True}, None)
+
+
+def test_store_built_from_another_flux_source_is_refused(tmp_path):
+    import zarr
+
+    p = tmp_path / "clim.zarr"
+    g = zarr.open_group(str(p), mode="w")
+    g.create_array("clim", data=np.zeros((wfc.N_DAYS, 1, 1, 1), np.float32))
+    g.attrs.update({"complete": True, "flux_zarr": "gs://a"})
+    wfc.FluxClimatology(p, "gs://a")
+    with pytest.raises(RuntimeError, match="built from 'gs://a'"):
+        wfc.FluxClimatology(p, "gs://b")

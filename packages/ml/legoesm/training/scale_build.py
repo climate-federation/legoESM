@@ -1910,7 +1910,8 @@ def wb_flux_climatology(cfg, yml, grid):
         raise ValueError("era5_flux_climatology needs state_cache_dir (the "
                          "climatology is stored next to the state cache).")
     from legoesm.training import wb_flux_climatology as wfc
-    return wfc.FluxClimatology(wfc.store_path(root, grid))
+    return wfc.FluxClimatology(wfc.store_path(root, grid),
+                               wb_state_cache_configs(cfg, yml)[1].flux_zarr)
 
 
 def with_flux_climatology(forcing, clim, t0, n_hours):
