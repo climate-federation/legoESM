@@ -62,6 +62,8 @@ def main(src, out):
             call = f"CALL W{kind.upper()}('{mod}.{n}', {ref})"
             calls.append(f"IF (ALLOCATED({ref})) {call}" if alloc else call)
     lines += ["IMPLICIT NONE", "CHARACTER(LEN=512) :: CLDIR", "INTEGER :: IU",
+              # SRTM_INIT has an OPTIONAL argument: explicit interfaces, as ecRad has
+              '#include "srtm_init.intfb.h"', '#include "rrtm_init_140gp.intfb.h"',
               "CALL GET_COMMAND_ARGUMENT(1, CLDIR)",
               "CALL SURRTAB", "CALL SURRTPK", "CALL SURRTRF",
               "CALL RRTM_INIT_140GP(TRIM(CLDIR))", "CALL SRTM_INIT(TRIM(CLDIR))",
