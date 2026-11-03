@@ -5588,6 +5588,14 @@ class LatLonCGridOceanModel:
                     "everywhere (build it with nemo_runoff_depth_map, "
                     "which floors at 1 m) — zero/negative cells would "
                     "silently drop the runoff dilution (codex r11 LOW).")
+        _rdsl = getattr(config, "runoff_depth_spread_levels", None)
+        if _rdsl is not None:
+            import numpy as _np
+            _rdsl_np = _np.asarray(_rdsl)
+            if (not _np.issubdtype(_rdsl_np.dtype, _np.integer)) or (_rdsl_np < 1).any():
+                raise ValueError(
+                    "runoff_depth_spread_levels must be an integer map >= 1 "
+                    "(build it with nemo_runoff_level_count).")
         _valid_pgf_quad = {"cell_integral", "nemo_trapezoid"}
         _pgf_quad = getattr(config, "pgf_quadrature", "cell_integral")
         if _pgf_quad not in _valid_pgf_quad:
