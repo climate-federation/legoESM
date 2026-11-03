@@ -19,6 +19,11 @@ def compare(path_a, path_b):
     worst = 0.0
     rows = []
     for v in sorted(set(a.variables) & set(b.variables)):
+        for f, p in ((a, path_a), (b, path_b)):
+            if f[v].dtype.kind == "f" and f[v].dtype != np.float64:
+                raise SystemExit(f"{v} in {p} is {f[v].dtype}, not float64")
+            if any(k in f[v].ncattrs() for k in ("scale_factor", "add_offset")):
+                raise SystemExit(f"{v} in {p} is packed")
         x = np.asarray(a[v][:], dtype=np.float64)
         y = np.asarray(b[v][:], dtype=np.float64)
         if x.shape != y.shape:

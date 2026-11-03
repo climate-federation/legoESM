@@ -15,11 +15,12 @@ for kv in "$@"; do
   grep -qE "^$k *= *$v," "$W/config.nam" || { echo "override $kv not applied"; exit 1; }
 done
 cp "$W/config.nam" "${OUT%.nc}.nam"
+{ sha256sum "$EXE"; echo "OMP_NUM_THREADS=1"; echo "overrides: $*"; } > "${OUT%.nc}.run"
 ( cd "$W" && OMP_NUM_THREADS=1 "$EXE" config.nam "$IN" "$W/out.nc" > "$W/run.log" 2>&1 ) || { tail -20 "$W/run.log"; exit 1; }
 mv "$W/out.nc" "$OUT"
 for f in "$W"/radiative_properties*.nc; do [ -e "$f" ] && mv "$f" "${OUT%.nc}_$(basename "$f")"; done
 cp "$W/run.log" "${OUT%.nc}.log"; rm -rf "$W"
 # chain of custody: every file the oracle opened, with its sha256
-sed -nE 's/^Reading (RRTMG (long|short)wave data|NetCDF) file (.*)$/\3/p' "${OUT%.nc}.log" | sort -u | xargs sha256sum > "${OUT%.nc}.opened"
+sed -nE 's/^Reading (RRTMG (long|short)wave data|NetCDF) file (.*)$/\3/p' "${OUT%.nc}.log" | sort -u | tr "\n" "\0" | xargs -0 sha256sum -- > "${OUT%.nc}.opened"
 grep -q RADRRTM "${OUT%.nc}.opened" || { echo "opened-file log missing RADRRTM"; exit 1; }
 echo "RUN_OK $OUT"
