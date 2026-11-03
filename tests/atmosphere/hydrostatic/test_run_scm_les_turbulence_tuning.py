@@ -91,9 +91,9 @@ def test_arms_differ_only_in_turbulence():
 
 def test_arm_check_catches_a_non_turbulence_difference():
     configs = {s: drv.build_physics_config(s, prescribed_fluxes=False)
-               for s in ("louis", "ysu")}
-    bad = configs["ysu"]
-    configs["ysu"] = bad._replace(
+               for s in ("louis", "holtslag_boville")}
+    bad = configs["holtslag_boville"]
+    configs["holtslag_boville"] = bad._replace(
         radiation=bad.radiation._replace(scheme="gray")
     )
     with pytest.raises(RuntimeError, match="would not be controlled"):
@@ -171,7 +171,7 @@ def test_clubb_targets_the_nested_params_tuple():
     assert cfg.turbulence.clubb is not None
 
 
-@pytest.mark.parametrize("scheme", ["louis", "ysu", "clubb"])
+@pytest.mark.parametrize("scheme", ["louis", "holtslag_boville", "clubb"])
 def test_apply_trainable_params_actually_moves_a_parameter(scheme):
     """Non-vacuous: a no-op _apply_trainable_params must FAIL this.
 
@@ -461,7 +461,7 @@ def test_the_dead_check_covers_every_scheme_not_just_clubb():
     # Schemes whose every field is consumed must come back EMPTY -- the
     # assertion that fails loudly if the resolver ever returns everything,
     # which would silently freeze the whole model.
-    for scheme in ("ysu", "louis", "edmf", "holtslag_boville",
+    for scheme in ("louis", "edmf", "holtslag_boville",
                    "smagorinsky", "clubb_lite", "tke"):
         got = drv._dead_params_for(scheme)
         assert got == frozenset(), f"{scheme}: unexpected dead fields {got}"

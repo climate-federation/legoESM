@@ -1233,16 +1233,20 @@ def _make_mpas_turbulence(
             tke_in = _read_turb_carry(
                 phys_state, carry_field, nCells, nlev, scheme_config, _state_dtype)
             if carry_field == "sfclay" and (
-                    _qsfc_traced is not None or _beta_traced is not None
-                    or (f_land is not None and land_beta != 1.0)
-                    or getattr(_surf, "ocean_q_sfc_saline", False)):
-                # vote X10/X11: the WRF surface layer takes moisture
-                # availability 1 and computes its own saline water humidity.
+                    getattr(_surf, "ocean_q_sfc_saline", False)
+                    or (_qsfc_traced is None and (
+                        _beta_traced is not None
+                        or (f_land is not None and land_beta != 1.0)))):
+                # votes X10/X11: the WRF surface layer takes the lane's land
+                # humidity (incl. the land model's solved q_sfc_land) with
+                # moisture availability 1, and computes its own saline water
+                # humidity; a beta or ocean_q_sfc_saline would be a second,
+                # unported surface-humidity model.
                 raise ValueError(
                     "turbulence=ysu runs the WRF surface layer with moisture "
                     "availability 1 and its own water-surface humidity; a land "
-                    "beta / traced land humidity / ocean_q_sfc_saline would be "
-                    "a second, unported surface-humidity model and is refused.")
+                    "beta / ocean_q_sfc_saline would be a second, unported "
+                    "surface-humidity model and is refused.")
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,

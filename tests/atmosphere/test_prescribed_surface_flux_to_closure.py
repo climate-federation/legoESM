@@ -124,12 +124,15 @@ def test_only_one_channel_can_be_prescribed():
 def test_ysu_convective_pathway_switches_on_with_the_flux():
     """The consequence, on the scheme codex named.
 
-    YSU builds its convective velocity scale from shflx. With the historical
-    Ch=0 the dry convective case runs it with no convection at all; handing it
-    the deck flux must change its tendencies.
+    YSU builds its convective velocity scale from the surface sensible flux.
+    With the prescribed flux (WRF's scm_force_flux path) at zero the dry
+    convective case runs with no convection at all; handing it the deck flux
+    must change its PBL.
     """
     from legoesm.atmosphere.physics.turbulence.config import YSUConfig
-    from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
+    from legoesm.atmosphere.physics.turbulence.ysu import (
+        init_sfclay_carry, ysu_turbulence,
+    )
 
     nlev = 24
     ncol = 1
@@ -148,19 +151,17 @@ def test_ysu_convective_pathway_switches_on_with_the_flux():
 
     deck_shf = CBL_W_THETA_K_M_S * CBL_RHO * constants.c_pd
     off = YSUConfig(surface=SurfaceLayerConfig(
-        Cd_neutral=7.5e-3, Ch_neutral=0.0))
-    on = YSUConfig(surface=SurfaceLayerConfig(
-        Cd_neutral=7.5e-3, Ch_neutral=0.0,
-        prescribed_shflx_w_m2=deck_shf, prescribed_lhflx_w_m2=0.0))
+        prescribed_shflx_w_m2=0.0, prescribed_lhflx_w_m2=0.0),
+        surface_type="land", dx_m=1.0e5)
+    on = off._replace(surface=off.surface._replace(prescribed_shflx_w_m2=deck_shf))
+    c0 = init_sfclay_carry(ncol, off)
 
-    out_off = ysu_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half,
-                             T_sfc, q_sfc, rho, 10.0, off)
-    out_on = ysu_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half,
-                            T_sfc, q_sfc, rho, 10.0, on)
+    out_off, _ = ysu_turbulence(u, v, T, q_v, c0, p_full, p_half, z_full, z_half,
+                                T_sfc, q_sfc, rho, 10.0, off)
+    out_on, _ = ysu_turbulence(u, v, T, q_v, c0, p_full, p_half, z_full, z_half,
+                               T_sfc, q_sfc, rho, 10.0, on)
 
-    assert float(out_off.shflx[0]) == pytest.approx(0.0), (
-        "Ch=0 with no prescription gives the closure a zero surface flux -- "
-        "this is the defect being repaired")
+    assert float(out_off.shflx[0]) == pytest.approx(0.0)
     assert float(out_on.shflx[0]) == pytest.approx(deck_shf)
 
     # h_pbl is the sharp discriminator: YSU's convective branch grows the PBL
@@ -281,7 +282,9 @@ def test_the_closure_tracks_a_flux_that_changes_between_steps():
     from legoesm.atmosphere.physics.turbulence.config import (
         TurbulenceConfig, YSUConfig,
     )
-    from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
+    from legoesm.atmosphere.physics.turbulence.ysu import (
+        init_sfclay_carry, ysu_turbulence,
+    )
 
     nlev, ncol = 24, 1
     z_half = jnp.linspace(1600.0, 0.0, nlev + 1)[None, :]
@@ -299,15 +302,16 @@ def test_the_closure_tracks_a_flux_that_changes_between_steps():
     from legoesm.atmosphere.physics.turbulence.integration import (
         _resolve_prescribed_surface_fluxes,
     )
-    base = YSUConfig(surface=SurfaceLayerConfig(
-        Cd_neutral=7.5e-3, Ch_neutral=0.0))
+    base = YSUConfig(surface=SurfaceLayerConfig(), surface_type="land", dx_m=1.0e5)
     assert TurbulenceConfig(scheme="ysu", ysu=base).ysu is base  # dispatch sanity
 
     def _run(w_theta):
+        # heat AND water prescribed: YSU's WRF surface layer keeps both
+        # (scm_force_flux); a heat-only prescription is refused there.
         cfg = _resolve_prescribed_surface_fluxes(
-            base, _phys_state_stub(wth=w_theta), rho)
-        return ysu_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half,
-                              T_sfc, q_sfc, rho, 10.0, cfg)
+            base, _phys_state_stub(wth=w_theta, wqv=0.0), rho)
+        return ysu_turbulence(u, v, T, q_v, init_sfclay_carry(ncol, base), p_full,
+                              p_half, z_full, z_half, T_sfc, q_sfc, rho, 10.0, cfg)[0]
 
     morning, midday = _run(0.02), _run(0.12)
     assert float(morning.shflx[0]) == pytest.approx(
