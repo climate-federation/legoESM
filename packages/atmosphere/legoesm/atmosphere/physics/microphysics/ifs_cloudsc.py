@@ -862,21 +862,24 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         wrn = sm.gt(zraincld, _ZEPSEC, _wt(_ZEPSEC))
         wsn = sm.gt(zsnowcld, _ZEPSEC, _wt(_ZEPSEC))
         wic = sm.gt(zicecld, _ZEPSEC, _wt(_ZEPSEC))
-        zlamr = wrn * (RCL_LAM1R / (zrho * _safe(zraincld))) ** RCL_LAM2R
-        zn0r = wrn * (RCL_X1R * _safe(zlamr) ** RCL_X2R)
-        zlams = wsn * (RCL_LAM1S / (zrho * _safe(zsnowcld))) ** RCL_LAM2S
-        zn0s = wsn * RCL_X1S
-        zlami = wic * (RCL_LAM1S / (zrho * _safe(zicecld))) ** RCL_LAM2S
-        zn0i = wic * RCL_X1S
+        # PSD slopes/intercepts unweighted (inactive operands substituted, V22b); the
+        # activation weights multiply only the final transfer below -- weighting a
+        # slope before its inversion made a near-zero weight a singular rate.
+        zlamr = (RCL_LAM1R / (zrho * _safe(zraincld))) ** RCL_LAM2R
+        zn0r = RCL_X1R * zlamr ** RCL_X2R
+        zlams = (RCL_LAM1S / (zrho * _safe(zsnowcld))) ** RCL_LAM2S
+        zn0s = RCL_X1S
+        zlami = (RCL_LAM1S / (zrho * _safe(zicecld))) ** RCL_LAM2S
+        zn0i = RCL_X1S
         wcl = sm.le(T, th.RTT, _W_T) * sm.lt(prainfrac, _ZEPSEC, _wt(_ZEPSEC)) * wrn
-        lr = _safe(zlamr)
+        lr = zlamr
         for m, wsp, lam, n0, eff, src in ((NCLDQS, wsn, zlams, zn0s, _EFF_PSACR, NCLDQS),
                                           (NCLDQI, wic, zlami, zn0i, _EFF_PIACR, NCLDQI)):
             fr, fo = zfallspeed[NCLDQR], zfallspeed[m]
             b = (fr + fo) / _FALLDIFF_DIV
             zfalldiff = sm.max(sm.abs(fr - fo, _wfloor(b, _TINY)), b,
                                _wfloor(b, _TINY))
-            ls = _safe(lam)
+            ls = lam
             zfac = th.RPI * th.RPI * cfg.rdenswat * eff * zrho * zn0r * n0 / (ls * lr ** 3)
             zrat = lr / ls
             proc = wcl * wsp * (zcovptot * dt * zfac * zfalldiff

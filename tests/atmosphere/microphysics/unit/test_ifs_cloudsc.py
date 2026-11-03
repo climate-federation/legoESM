@@ -102,20 +102,26 @@ def test_above_ncldtop_water_defect_matches_independent_reference(fix, planted):
     if planted:
         x = _plant_above_ncldtop(cfg, x)
     out = M.cloudsc(cfg, th, x, dt, hard=True)
-    _, _, above_w, _, _, _ = budgets(cfg, th, x, out, dt)
+    _, _, above_w, above_h, _, _ = budgets(cfg, th, x, out, dt)
     k0 = cfg.ncldtop - 1
     c = np.asarray(x.clv[:, :k0, :4]) + dt * np.asarray(x.tend_cld[:, :k0, :4])
     a = np.asarray(x.a[:, :k0]) + dt * np.asarray(x.tend_a[:, :k0])
     moved = np.zeros(c.shape[:2])
+    cool = np.zeros(c.shape[:2])          # latent cooling, phase by species (:1131-1170)
+    lat = (th.RALVDCP, th.RALSDCP, th.RALVDCP, th.RALSDCP)   # L, I, R, S
     small = (c[..., 0] + c[..., 1] < cfg.rlmin) | (a < cfg.ramin)
     for m in (0, 1):
         moved += np.where(small, c[..., m], 0.0)
+        cool += lat[m] * np.where(small, c[..., m], 0.0)
         c[..., m] = np.where(small, 0.0, c[..., m])
     for m in range(4):
         moved += np.where(c[..., m] < cfg.rlmin, c[..., m], 0.0)
+        cool += lat[m] * np.where(c[..., m] < cfg.rlmin, c[..., m], 0.0)
     dp = np.asarray(x.paph[:, 1:k0 + 1] - x.paph[:, :k0])
     ref = np.sum(moved / dt * dp / th.RG, axis=1)
+    ref_h = -np.sum(cool / dt * dp / th.RG, axis=1)
     assert np.allclose(above_w, ref, rtol=1e-12, atol=1e-30)
+    assert np.allclose(above_h, ref_h, rtol=1e-12, atol=1e-30)
     if planted:
         assert np.all(ref > 0)
         # the rest of the column still closes (water and enthalpy)
@@ -215,6 +221,8 @@ def test_smooth_close_to_hard(fix, arm):
     cfg, th, x, dt = T.setup(fix, arm)
     gap = smooth_hard_gap(cfg, th, x, dt)
     assert set(gap) == {k.split(":", 1)[1] for k in pins if k.startswith(arm + ":")}
+    nonfinite = [f for f, g in gap.items() if not np.all(np.isfinite(g))]
+    assert not nonfinite, nonfinite
     bad = {f: (float(g.max()), float(np.max(pins[f"{arm}:{f}"])))
            for f, g in gap.items() if np.any(g > 2.0 * np.asarray(pins[f"{arm}:{f}"]))}
     assert not bad, bad
