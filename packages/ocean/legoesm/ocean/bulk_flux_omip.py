@@ -79,6 +79,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.core import transcendentals as tx
+from legoesm.core.smooth import positive_part_c1
 from legoesm.core.source_rounding import (
     nemo_fortran_max,
     nemo_fortran_min,
@@ -108,6 +109,11 @@ _NB_ITER_NCAR: int = 5         # NEMO sbc_phy nb_iter0
 _CX_MIN: float = 0.1e-3        # NEMO sbc_phy Cx_min (coefficient floor)
 _UN10_FLOOR_M_S: float = 0.25  # NEMO turb_ncar neutral-wind floor
 _ZETA_ABS_MAX: float = 10.0    # NEMO |z/L| cap
+_Q_ZU_FLOOR_KG_KG: float = 1.0e-6  # NEMO turb_ncar q_zu = MAX(q_zt, 1e-6)
+_T_ZU_FLOOR_K: float = 180.0      # NEMO turb_ncar t_zu = MAX(t_zt, 180)
+# Legacy-path smoothing of the two floors (repo rule: differentiable limits,
+# transition width 1 % of the floor value). 0.0 = NEMO's hard MAX.
+_ZU_FLOOR_REL_WIDTH: float = 0.01
 _ONE_ON_L_ABS_MAX: float = 200.0  # NEMO One_on_L |1/L| cap [1/m]
 _RHO_AIR_FLOOR: float = 0.8    # NEMO rho_air floor [kg/m^3]
 _RHO_FLUX_FLOOR: float = 1.0   # NEMO BULK_FORMULA zUrho = Ub*MAX(rho, 1.0)
@@ -185,7 +191,8 @@ def pressure_at_height(
         for _ in range(_N_ITER_PRES):
             e_s = saturation_vapor_pressure_goff(T)
             q_sat = _REPS0 * e_s / (p - (1.0 - _REPS0) * e_s)
-            ratio = jnp.clip(q / q_sat, 0.0, 2.0)
+            # NEMO pres_temp (sbc_phy.F90:275) uses q/q_sat unclipped.
+            ratio = q / q_sat
             xm = ((1.0 - ratio) * constants.M_dry_air
                   + ratio * constants.M_water)
             p = slp * jnp.exp(
@@ -457,8 +464,8 @@ def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
     Ce = _ce_n10_nemo(sqrt_CdN)
     sqrt_Cd = R(sqrt_CdN)
 
-    theta_zu = R(_fmax(theta, 180.0))
-    q_zu = R(_fmax(q, 1.0e-6))
+    theta_zu = R(_fmax(theta, _T_ZU_FLOOR_K))
+    q_zu = R(_fmax(q, _Q_ZU_FLOOR_KG_KG))
 
     for _ in range(int(nb_iter)):
         d_theta = R(theta_zu - sst)
@@ -511,9 +518,35 @@ def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
     return Cd, Ch, Ce, Ub, theta_zu, q_zu
 
 
+def _zu_floor(x, floor):
+    """NEMO ``MAX(x, floor)`` made C1: exact ``x`` for ``x >= floor + w`` and
+    ``floor`` for ``x <= floor``, with ``w = _ZU_FLOOR_REL_WIDTH * floor`` and
+    the :func:`positive_part_c1` blend in between.  ``_ZU_FLOOR_REL_WIDTH =
+    0`` gives the hard NEMO form (oracle tests only)."""
+    x = jnp.asarray(x, dtype=jnp.float64)
+    width = _ZU_FLOOR_REL_WIDTH * floor
+    if width == 0.0:
+        return jnp.maximum(x, floor)
+    return jnp.where(x >= floor + width, x,
+                     floor + positive_part_c1(x - floor, 1.0 / width))
+
+
+def nemo_zu_air_state(theta_air_K, q_air):
+    """NEMO ``turb_ncar`` air state at ``zu`` for ``zt == zu``:
+    ``t_zu = MAX(t_zt, 180)``, ``q_zu = MAX(q_zt, 1e-6)``
+    (sbcblk_algo_ncar.F90 after the first guess).  CORE-II humidity has
+    negative values (1,201 ORCA1 wet cells on the tier-3 step), so the floor
+    binds; q_zu then feeds 1/L, dq, evaporation and cp_air."""
+    return (_zu_floor(theta_air_K, _T_ZU_FLOOR_K),
+            _zu_floor(q_air, _Q_ZU_FLOOR_KG_KG))
+
+
 def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
                                wind_speed, *, nb_iter: int = _NB_ITER_NCAR):
-    """Legacy/public coefficient interface, bit-identical to the parent."""
+    """Legacy/public coefficient interface.
+
+    The first-guess stability uses the RAW ``theta``/``q`` (NEMO ``t_zt``/
+    ``q_zt``); the iteration uses the floored :func:`nemo_zu_air_state`."""
     from legoesm.core.bulk_flux import large_yeager_neutral_cd, psi_m, psi_h
 
     k = constants.kappa_von_karman
@@ -530,14 +563,15 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
     Ch = _ch_n10(sqrt_CdN, stable)
     Ce = _ce_n10(sqrt_CdN)
     sqrt_Cd = sqrt_CdN
-    d_theta = theta - sst
-    d_q = q - ssq
+    theta_zu, q_zu = nemo_zu_air_state(theta, q)
+    d_theta = theta_zu - sst
+    d_q = q_zu - ssq
     for _ in range(int(nb_iter)):
         u_star = sqrt_Cd * Ub
         theta_star = Ch / sqrt_Cd * d_theta
         q_star = Ce / sqrt_Cd * d_q
         inv_L = _one_on_obukhov(
-            theta, q, u_star, theta_star, q_star
+            theta_zu, q_zu, u_star, theta_star, q_star
         )
         zeta = jnp.clip(_ZU_M * inv_L, -_ZETA_ABS_MAX, _ZETA_ABS_MAX)
         psim = psi_m(zeta)
@@ -1626,8 +1660,10 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
     tau_x = -Urho * Cd * u_rel
     tau_y = -Urho * Cd * v_rel
     L_vap = latent_heat_vaporization_sst(theta_sst)
-    z_evap = Urho * Ce * (q_a - ssq)
-    shflx = Urho * Ch * (theta_air - theta_sst) * moist_air_cp(q_a)
+    # NEMO BULK_FORMULA takes theta_zu/q_zu (the turb_ncar floors).
+    theta_zu, q_zu = nemo_zu_air_state(theta_air, q_a)
+    z_evap = Urho * Ce * (q_zu - ssq)
+    shflx = Urho * Ch * (theta_zu - theta_sst) * moist_air_cp(q_zu)
     lhflx = L_vap * z_evap
     evap = -z_evap
     return tau_x, tau_y, shflx, lhflx, evap
@@ -1662,6 +1698,7 @@ __all__ = [
     "nemo_orca2_k0_surface_card",
     "NemoTStressLbcPlan",
     "ncar_transfer_coefficients",
+    "nemo_zu_air_state",
     "potential_air_temperature_10m",
     "pressure_at_height",
     "rho_air_moist",
