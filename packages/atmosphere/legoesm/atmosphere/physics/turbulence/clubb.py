@@ -8,49 +8,49 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 7378)
+Table of contents (sections, in order; flag reference table at line 7318)
 -----------------------------------------------------------------------------
-  1. [line  354] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2. [line  475] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
+  1. [line  355] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
+  2. [line  476] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3. [line  784] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3. [line  785] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4. [line  1115] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4. [line  1116] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5. [line  1171] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5. [line  1172] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6. [line  1345] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6. [line  1346] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7. [line  1793] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8. [line  1921] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7. [line  1794] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8. [line  1848] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9. [line  2102] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9. [line  2029] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. [line  2290] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. [line  2371] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line  2217] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line  2298] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. [line  2693] ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line  2620] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``) + the two-level-set reconciliation
       (``calc_trapezoid_zt`` / ``calc_trapezoid_zm`` / ``clip_rcm`` /
       ``compute_cloud_cover``). Every routine in this section is
       grid-agnostic: CAM evaluates the closure once per level set, so all
       regridding is the caller's.
-  13. [line  3054] Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line  2981] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. [line  4017] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line  3944] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. [line  4082] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line  4009] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. [line  4755] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line  4682] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. [line  5036] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line  4976] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. [line  5419] Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line  5359] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``calc_sfc_varnce`` / ``advance_clubb_core`` +
       the ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line  6197] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  6137] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -153,6 +153,7 @@ from legoesm.thermo import (
     saturation_vapor_pressure_flatau,
     saturation_vapor_pressure_ice_flatau,
 )
+from legoesm.timestepping.banded import lapack_band_solve
 from legoesm.timestepping.tridiagonal import thomas_solve
 
 from legoesm import constants
@@ -1792,12 +1793,15 @@ def compute_mixing_length(
 # ===========================================================================
 # 7. Implicit band solvers
 # ===========================================================================
-# ``tridiag_solve`` adapts CLUBB's band storage to the shared legoESM Thomas
-# solver (legoesm.timestepping.tridiagonal.thomas_solve); ``penta_solve`` is a
-# verbatim, bit-exact port of CLUBB's pentadiagonal LU (penta_lu_solve).
+# CAM runs CLUBB with ``penta_solve_method = tridiag_solve_method = lapack``
+# (flag table below): ``lapack_tridiag_solve`` -> ``dgtsv`` and
+# ``lapack_band_solve`` -> ``dgbsv``.  Both solves here transcribe those
+# reference LAPACK routines, so the pivot choice and operation order are the
+# oracle's (legoesm.timestepping: ``thomas_solve(..., "lapack_dgtsv")`` and
+# ``banded.lapack_band_solve``).
 
 def tridiag_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
-    """Solve the CLUBB-band tridiagonal system ``lhs @ x = rhs`` per column.
+    """Solve the CLUBB-band tridiagonal system ``lhs @ x = rhs`` per column (``dgtsv``).
 
     Parameters
     ----------
@@ -1812,21 +1816,15 @@ def tridiag_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
     jax.Array
         Solution, shape ``(ngrdcol, ndim)``.
     """
-    sup = lhs[0]   # super (couples to k+1) -> Thomas c
-    mid = lhs[1]   # main diagonal          -> Thomas b
-    sub = lhs[2]   # sub (couples to k-1)   -> Thomas a
-    return thomas_solve(sub, mid, sup, rhs)
+    return thomas_solve(lhs[2], lhs[1], lhs[0], rhs, "lapack_dgtsv")
 
 
 def penta_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
-    """Solve a pentadiagonal system ``lhs @ x = rhs`` via LU (CLUBB band storage).
+    """Solve a pentadiagonal system ``lhs @ x = rhs`` (CLUBB band storage, ``dgbsv``).
 
-    Faithful port of ``penta_lu_solver.F90`` /
-    ``CLUBB-JAX/.../penta_lu_solver.py`` (``penta_lu_solve``). legoESM has no
-    pentadiagonal solver; this is the one used by the coupled moment advances
-    (``advance_wp2_wp3``, ``advance_xm_wpxp``), whose interleaved 2-field systems
-    are pentadiagonal of size ``2*nzm-1``. Pure ``lax.scan`` LU (no module-scope
-    JIT — the caller JITs the physics step); reverse-mode differentiable.
+    Used by the coupled moment advances (``advance_wp2_wp3``,
+    ``advance_xm_wpxp``), whose interleaved 2-field systems are pentadiagonal
+    of size ``2*nzm-1``.
 
     Parameters
     ----------
@@ -1834,7 +1832,7 @@ def penta_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
         Band-stored LHS, shape ``(5, ngrdcol, ndim)`` with rows
         ``[super2, super1, diag, sub1, sub2]`` (Fortran ``lhs(-2:2)``):
         ``super2``/``super1`` couple level ``k`` to ``k+2``/``k+1``;
-        ``sub1``/``sub2`` couple to ``k-1``/``k-2``. Requires ``ndim >= 3``.
+        ``sub1``/``sub2`` couple to ``k-1``/``k-2``.
     rhs : jax.Array
         Right-hand side, shape ``(ngrdcol, ndim)``.
 
@@ -1843,78 +1841,7 @@ def penta_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
     jax.Array
         Solution, shape ``(ngrdcol, ndim)``.
     """
-    super2_t = lhs[0].T   # (ndim, ngrdcol)
-    super1_t = lhs[1].T
-    diag_t = lhs[2].T
-    sub1_t = lhs[3].T
-    sub2_t = lhs[4].T
-    rhs_t = rhs.T
-    ndim = lhs.shape[2]
-
-    # ---- LU decomposition ----
-    ldi_0 = 1.0 / diag_t[0]
-    u1_0 = ldi_0 * super1_t[0]
-    u2_0 = ldi_0 * super2_t[0]
-    l1_0 = jnp.zeros_like(ldi_0)
-    l2_0 = jnp.zeros_like(ldi_0)
-
-    l1_1 = sub1_t[1]
-    l2_1 = jnp.zeros_like(ldi_0)
-    ldi_1 = 1.0 / (diag_t[1] - l1_1 * u1_0)
-    u1_1 = ldi_1 * (super1_t[1] - l1_1 * u2_0)
-    u2_1 = ldi_1 * super2_t[1]
-
-    def lu_scan_step(carry, x):
-        u1_km1, u1_km2, u2_km1, u2_km2 = carry
-        s2, s1, d, sb1, sb2 = x
-        l2 = sb2
-        l1 = sb1 - l2 * u1_km2
-        ldi = 1.0 / (d - l2 * u2_km2 - l1 * u1_km1)
-        u1 = ldi * (s1 - l1 * u2_km1)
-        u2 = ldi * s2
-        return (u1, u1_km1, u2, u2_km1), (ldi, l1, l2, u1, u2)
-
-    _, (ldi_rest, l1_rest, l2_rest, u1_rest, u2_rest) = lax.scan(
-        lu_scan_step, (u1_1, u1_0, u2_1, u2_0),
-        (super2_t[2:], super1_t[2:], diag_t[2:], sub1_t[2:], sub2_t[2:]))
-
-    ldi_t = jnp.concatenate([ldi_0[None], ldi_1[None], ldi_rest], axis=0)
-    l1_t = jnp.concatenate([l1_0[None], l1_1[None], l1_rest], axis=0)
-    l2_t = jnp.concatenate([l2_0[None], l2_1[None], l2_rest], axis=0)
-    u1_t = jnp.concatenate([u1_0[None], u1_1[None], u1_rest], axis=0)
-    u2_t = jnp.concatenate([u2_0[None], u2_1[None], u2_rest], axis=0)
-
-    # ---- Forward substitution: L y = rhs ----
-    soln_0 = ldi_t[0] * rhs_t[0]
-    soln_1 = ldi_t[1] * (rhs_t[1] - l1_t[1] * soln_0)
-
-    def fwd_scan_step(carry, x):
-        soln_km2, soln_km1 = carry
-        rhs_k, ldi_k, l1_k, l2_k = x
-        soln_k = ldi_k * (rhs_k - l2_k * soln_km2 - l1_k * soln_km1)
-        return (soln_km1, soln_k), soln_k
-
-    _, soln_rest = lax.scan(
-        fwd_scan_step, (soln_0, soln_1),
-        (rhs_t[2:], ldi_t[2:], l1_t[2:], l2_t[2:]))
-    soln_t = jnp.concatenate([soln_0[None], soln_1[None], soln_rest], axis=0)
-
-    # ---- Backward substitution: U x = y ----
-    soln_nm2 = soln_t[ndim - 2] - u1_t[ndim - 2] * soln_t[ndim - 1]
-
-    def bwd_scan_step(carry, x):
-        soln_kp1, soln_kp2 = carry
-        soln_k_fwd, u1_k, u2_k = x
-        soln_k = soln_k_fwd - u1_k * soln_kp1 - u2_k * soln_kp2
-        return (soln_k, soln_kp1), soln_k
-
-    _, soln_bwd_rev = lax.scan(
-        bwd_scan_step, (soln_nm2, soln_t[ndim - 1]),
-        (soln_t[:ndim - 2][::-1], u1_t[:ndim - 2][::-1], u2_t[:ndim - 2][::-1]))
-
-    soln_final_t = jnp.concatenate(
-        [soln_bwd_rev[::-1], soln_nm2[None], soln_t[ndim - 1:ndim]], axis=0)
-    return soln_final_t.T
+    return lapack_band_solve(lhs, rhs, kl=2, ku=2)
 
 
 # ===========================================================================
