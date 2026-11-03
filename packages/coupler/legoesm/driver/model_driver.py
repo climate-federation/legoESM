@@ -9153,6 +9153,18 @@ class ModelDriver:
                     f"which this run carries (CAM6 MG2 two-moment snow, "
                     f"morrison_warm_rain_incloud); restart from a "
                     f"checkpoint written with N_s or start cold.")
+            # Same rule for IFS CLOUDSC's advected cloud fraction (vote VC26):
+            # a checkpoint without it cannot continue this run.
+            if (self._column_model() is None
+                    and "cloud_fraction_ifs" in self.tracer_registry.names
+                    and ("tracer_names" not in d
+                         or "cloud_fraction_ifs"
+                         not in [str(n) for n in d["tracer_names"]])):
+                raise ValueError(
+                    f"MPAS checkpoint {path.name} has no cloud_fraction_ifs, "
+                    f"which this run carries (microphysics='ifs_cloudsc'); "
+                    f"restart from a checkpoint written with it or start "
+                    f"cold.")
             # Restore moisture tracers (moist MPAS runs); absent ⇒ dry restart.
             # (column lane: the tracers are the bundle's own q slots, already
             # in the view built above)

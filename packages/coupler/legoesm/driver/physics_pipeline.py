@@ -4403,7 +4403,15 @@ def moisture_registry_for(scheme_name: str, scheme_config=None):
     column model's slot list, so both carry the same names in the same
     order (the duo's q_<i> is a slot index)."""
     from legoesm.core.tracers import (
-        make_full_moisture_registry, make_moisture_registry)
+        TracerInfo, TracerRegistry, make_full_moisture_registry,
+        make_moisture_registry)
+    if scheme_name == "ifs_cloudsc":
+        # IFS CLOUDSC carries a prognostic, advected cloud fraction (vote
+        # VC18a): the full nine in FV3 water order, then the fraction as a
+        # passenger.  Only for this scheme; every other registry unchanged.
+        return TracerRegistry(tracers=make_full_moisture_registry().tracers + (
+            TracerInfo("cloud_fraction_ifs", "1", True, True,
+                       "IFS prognostic cloud fraction"),))
     warm = make_moisture_registry()
     need = required_microphysics_tracer_slots(scheme_name, scheme_config)
     if need > warm.n_tracers:
