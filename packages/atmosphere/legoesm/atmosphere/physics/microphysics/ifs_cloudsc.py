@@ -332,6 +332,12 @@ def _safe(x):
     return jnp.where(x > _TINY, x, 1.0)
 
 
+def _wfloor(b, floor):
+    """Window width for a traced bound b: ~0.01|b|, never below ``floor``; smooth in b
+    (VC14b: hypot, not max, so the width has no derivative jump at 0.01|b| = floor)."""
+    return jnp.hypot(_W_REL * b, floor)
+
+
 def _wt(thr):
     return _W_REL * abs(thr)
 
@@ -428,7 +434,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
     wq = _W_REL * cfg.rlmin            # zero-threshold width for water mixing ratios
 
     def wb(b):                       # limit against a traced bound: 0.01*|bound|, floor wq (V26a)
-        return jnp.maximum(_W_REL * jnp.abs(b), wq)
+        return _wfloor(b, wq)
 
     # ---------------- section 1: initial values (cloudsc.F90:963-1115) -------
     ztp1 = x.t + dt * x.tend_t
@@ -595,7 +601,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         plu_dn = v["plu_dn"]
         wdet = nl * (x.ldcum.astype(T.dtype) * sm.gt(plude_s, _ZEPSEC, _wt(_ZEPSEC))
                      * sm.gt(plu_dn, _ZEPSEC, _wt(_ZEPSEC)))
-        zsolac = zsolac + wdet * (plude_s / jnp.maximum(plu_dn, _ZEPSEC))
+        zsolac = zsolac + wdet * (plude_s / _safe(plu_dn))
         for m, sl in ((NCLDQL, 0), (NCLDQI, 1)):
             src = v["pludeli"][:, sl] * zdtgdp
             zconvsrce[m] = wdet * src
@@ -625,7 +631,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         zdtdp = zrdcp * 0.5 * (v["ztp1_up"] + T) / v["paph"]
         wcap = (pap - v["pap_up"]) / dt
         zwtot = sm.min(th.RG * (v["pmfu"] * zadvw + v["pmfd"] * zadvwd), wcap,
-                       jnp.maximum(_W_REL * jnp.abs(wcap), _TINY))
+                       _wfloor(wcap, _TINY))
         zdtforc = zdtdp * dt * zwtot
         zdqs = zanewm1 * zdtforc * zdqsmixdt
         for m in (NCLDQL, NCLDQI):
@@ -687,7 +693,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         wpr = sm.gt(zqpretot, _ZEPSEC, _wt(_ZEPSEC))
         za_up = v["za_up"]
         cov = 1.0 - ((1.0 - zcovptot) * (1.0 - sm.max(za_k, za_up, _W_F))
-                     / (1.0 - sm.min(za_up, _COVP_AMAX, _wt(_COVP_AMAX))))
+                     / (1.0 - sm.min(za_up, _COVP_AMAX, _W_REL * (1.0 - _COVP_AMAX))))  # VC12a: gap-scale window
         cov = sm.max(cov, cfg.rcovpmin, _wt(cfg.rcovpmin))
         covs = _safe(cov)
         zcovptot = sm.sel(wpr, cov, 0.0)
@@ -868,8 +874,8 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
                                           (NCLDQI, wic, zlami, zn0i, _EFF_PIACR, NCLDQI)):
             fr, fo = zfallspeed[NCLDQR], zfallspeed[m]
             b = (fr + fo) / _FALLDIFF_DIV
-            zfalldiff = sm.max(sm.abs(fr - fo, jnp.maximum(_W_REL * jnp.abs(b), _TINY)), b,
-                               jnp.maximum(_W_REL * jnp.abs(b), _TINY))
+            zfalldiff = sm.max(sm.abs(fr - fo, _wfloor(b, _TINY)), b,
+                               _wfloor(b, _TINY))
             ls = _safe(lam)
             zfac = th.RPI * th.RPI * cfg.rdenswat * eff * zrho * zn0r * n0 / (ls * lr ** 3)
             zrat = lr / ls
@@ -979,11 +985,11 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
             zqxn[jn] = zqxn[jn] / lhs[jn][jn]
         for jn in range(NCLV - 1):
             ws = sm.lt(zqxn[jn], _ZEPSEC, _wt(_ZEPSEC))
-            # V38b, conservation fix (departs from :3633-3639): the solve conserved
-            # sum(ZQXN) + sum(ZFALLSINK*ZQXN), and the flux below is taken from the
-            # tidied ZQXN, so the would-be fall flux of the tidied amount goes to
-            # vapour too; 49r1 drops it (water created when ZQXN < 0).
-            zqxn[NCLDQV] = zqxn[NCLDQV] + ws * zqxn[jn] * (1.0 + zfallsink[jn])
+            # VC1b/VC13a, conservation fix (departs from :3633-3639): the solve conserved
+            # sum(ZQXN) + sum((ZFALLSINK + ZCONVSINK)*ZQXN), and the fall flux and the
+            # subsidence outflow are taken from the tidied ZQXN, so the would-be
+            # outflow of the tidied amount goes to vapour too; 49r1 drops it.
+            zqxn[NCLDQV] = zqxn[NCLDQV] + ws * zqxn[jn] * (1.0 + zfallsink[jn] + zconvsink[jn])
             zqxn[jn] = sm.sel(ws, 0.0 * zqxn[jn], zqxn[jn]) if hard else (1.0 - ws) * zqxn[jn]
         snap("s522", zqxn=jnp.stack(zqxn, -1))
 
@@ -1080,7 +1086,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
 def _supersatcheck(sm, cfg, th, wq, pt, pq, pa, pp, psurf):
     """cloud_supersatcheck.F90 (49r1), KFTLIQICE = 1."""
     def wb(b):
-        return jnp.maximum(_W_REL * jnp.abs(b), wq)
+        return _wfloor(b, wq)
 
     zt = sm.max(pt, _SUPSAT_TMIN, _W_T)
     za = sm.max(sm.min(pa, 1.0, _W_F), 0.0, _W_F)

@@ -83,11 +83,24 @@ def test_water_and_enthalpy_conserved(fix, arm, hard):
     assert np.max(np.abs(res_h - above_h) / sh) < 1e-12
 
 
-def test_above_ncldtop_water_defect_matches_independent_reference(fix):
+def _plant_above_ncldtop(cfg, x):
+    """Small (< RLMIN) liquid and ice on every level above NCLDTOP, so the tidy acts there."""
+    k0 = cfg.ncldtop - 1
+    clv = np.array(x.clv)
+    clv[:, :k0, 0] = 0.5 * cfg.rlmin
+    clv[:, :k0, 1] = 0.25 * cfg.rlmin
+    return x._replace(clv=jnp.asarray(clv))
+
+
+@pytest.mark.parametrize("planted", [False, True])
+def test_above_ncldtop_water_defect_matches_independent_reference(fix, planted):
     """49r1 defect (kept, vote V23a): above NCLDTOP the section-2 tidy adds the evaporated
     condensate to q but writes no condensate tendency.  Independent numpy reference of the
-    tidy (cloudsc.F90:1127-1175) on the levels above NCLDTOP; zero on these columns."""
+    tidy (cloudsc.F90:1127-1175) on the levels above NCLDTOP: zero on the oracle columns,
+    nonzero once condensate is planted there."""
     cfg, th, x, dt = T.setup(fix, "base")
+    if planted:
+        x = _plant_above_ncldtop(cfg, x)
     out = M.cloudsc(cfg, th, x, dt, hard=True)
     _, _, above_w, _, _, _ = budgets(cfg, th, x, out, dt)
     k0 = cfg.ncldtop - 1
@@ -103,7 +116,27 @@ def test_above_ncldtop_water_defect_matches_independent_reference(fix):
     dp = np.asarray(x.paph[:, 1:k0 + 1] - x.paph[:, :k0])
     ref = np.sum(moved / dt * dp / th.RG, axis=1)
     assert np.allclose(above_w, ref, rtol=1e-12, atol=1e-30)
-    assert np.all(ref == 0)       # size on the oracle columns: none (reported in the PR)
+    if planted:
+        assert np.all(ref > 0)
+        # the rest of the column still closes (water and enthalpy)
+        res_w, res_h, above_w, above_h, sw, sh = budgets(cfg, th, x, out, dt)
+        assert np.max(np.abs(res_w - above_w) / sw) < 1e-12
+        assert np.max(np.abs(res_h - above_h) / sh) < 1e-12
+    else:
+        assert np.all(ref == 0)   # size on the oracle columns: none (reported in the PR)
+
+
+def test_smooth_fp32_finite(fix):
+    """Production precision: the smooth scheme in float32 stays finite, values and gradient."""
+    cfg, th, x, dt = T.setup(fix, "base")
+    x32 = jax.tree_util.tree_map(
+        lambda a: a.astype(jnp.float32) if jnp.issubdtype(jnp.asarray(a).dtype, jnp.floating) else a, x)
+    out = M.cloudsc(cfg, th, x32, dt, hard=False)
+    for f in out._fields:
+        a = np.asarray(getattr(out, f))
+        assert a.dtype == np.float32 and np.all(np.isfinite(a)), f
+    g = jax.grad(lambda t: jnp.sum(M.cloudsc(cfg, th, x32._replace(t=t), dt, hard=False).tend_t))(x32.t)
+    assert np.all(np.isfinite(np.asarray(g)))
 
 
 # --- smooth forms ---------------------------------------------------------------
@@ -155,9 +188,33 @@ def test_smooth_scheme_gradient_finite_and_matches_fd(fix):
         assert abs(fd - ad) <= 2e-2 * max(abs(ad), abs(fd)) + 1e-12, (i, fd, ad)
 
 
-def test_smooth_close_to_hard(fix):
-    cfg, th, x, dt = T.setup(fix, "base")
-    hs = M.cloudsc(cfg, th, x, dt, hard=True)
-    ss = M.cloudsc(cfg, th, x, dt, hard=False)
-    # loose: the smooth forms differ from the oracle only inside 0.01-wide windows
-    assert np.max(np.abs(np.asarray(ss.fplsn[:, -1] - hs.fplsn[:, -1]))) <= 0.1 * np.max(np.abs(np.asarray(hs.fplsn[:, -1]))) + 1e-12
+_GAP_PINS = Path(__file__).parent / "ifs_cloudsc_smooth_gap.json"
+
+
+def smooth_hard_gap(cfg, th, x, dt):
+    """output -> per-column max|smooth - hard| / max|hard| over the field (absolute where the hard field is all zero)."""
+    h = M.cloudsc(cfg, th, x, dt, hard=True)
+    s = M.cloudsc(cfg, th, x, dt, hard=False)
+    out = {}
+    for f in h._fields:
+        a, b = np.asarray(getattr(s, f)), np.asarray(getattr(h, f))
+        d = np.abs(a - b).reshape(a.shape[0], -1).max(1)
+        scale = np.max(np.abs(b))
+        out[f] = d / scale if scale > 0 else d
+    return out
+
+
+@pytest.mark.parametrize("arm", _ARMS)
+def test_smooth_close_to_hard(fix, arm):
+    """Smooth-vs-oracle-form gap per output and column, pinned at 2x the measured value
+    (vote VC15a; pins from the oracle fixture columns, 2026-11-03).  The smooth forms
+    differ from the hard ones only inside the 0.01 windows; a regression that widens any
+    field's gap in any column fails here."""
+    import json
+    pins = json.loads(_GAP_PINS.read_text())
+    cfg, th, x, dt = T.setup(fix, arm)
+    gap = smooth_hard_gap(cfg, th, x, dt)
+    assert set(gap) == {k.split(":", 1)[1] for k in pins if k.startswith(arm + ":")}
+    bad = {f: (float(g.max()), float(np.max(pins[f"{arm}:{f}"])))
+           for f, g in gap.items() if np.any(g > 2.0 * np.asarray(pins[f"{arm}:{f}"]))}
+    assert not bad, bad

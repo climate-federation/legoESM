@@ -11,7 +11,8 @@ SHA=$(git -C "$OIFS" rev-parse HEAD)
 S=$OIFS/ifs-source/arpifs
 # the compiled sources must be the pinned commit's, unmodified
 git -C "$OIFS" diff --quiet HEAD -- ifs-source/arpifs/phys_ec/cloudsc.F90 ifs-source/arpifs/phys_ec/cloud_supersatcheck.F90 \
-  ifs-source/arpifs/phys_ec/sucldp.F90 ifs-source/arpifs/module || { echo "OpenIFS sources modified vs $SHA"; exit 1; }
+  ifs-source/arpifs/phys_ec/sucldp.F90 ifs-source/arpifs/module ifs-source/arpifs/function ifs-source/arpifs/include \
+  || { echo "OpenIFS sources modified vs $SHA"; exit 1; }
 mkdir -p "$B/inc"; cd "$B"; rm -f ./*.o ./*.mod oracle49.x   # no stale objects across modes
 # empty interface blocks for every *.intfb.h the compiled sources include
 # (implicit interfaces; none of these routines has OPTIONAL arguments)
