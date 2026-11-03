@@ -10905,6 +10905,11 @@ class ModelDriver:
                 conv_mass_flux_up=_ps_carry.conv_mass_flux_up,
                 conv_icwmr=_ps_carry.conv_icwmr,
             )
+        elif "cloud_fraction_ifs" in (getattr(state, "tracers", None) or {}):
+            # IFS CLOUDSC: clt/clivi read the advected fraction radiation
+            # reads (votes VC24, VC40)
+            _cam6_carry = dict(
+                cloud_fraction=state.tracers["cloud_fraction_ifs"].data)
         return dict(
             T=state.T.data,
             p_s=state.p_s.data,
@@ -14688,14 +14693,10 @@ class ModelDriver:
         # Does the convection scheme want the diurnal-cycle CAPE subtraction?
         # Resolved once: a static Python bool, so the per-step seeding below is
         # a trace-time branch and cannot retrace.
-        # The faithful IFS convection (bechtold_use_ifs_ascent) reads the
-        # surface fluxes in its trigger (PAHFS/PQHFL) and refuses to run
-        # without them, so it needs the same lagged feed (vote VC22).
         _capdcycl_on = bool(getattr(
             getattr(self.config, "convection_config", None), "use_ifs_capdcycl",
             False)) or bool(getattr(self.config, "bechtold_use_ifs_capdcycl",
-                                    False)) or bool(getattr(
-                self.config, "bechtold_use_ifs_ascent", False))
+                                    False))
         _last_force_day = None
         _cam6_held = None
         # External CMIP6 forcing (ozone file / aerosol / transient GHG) on

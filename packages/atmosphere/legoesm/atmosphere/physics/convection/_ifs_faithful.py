@@ -94,6 +94,8 @@ def _hydrostatic_geopotential(T, q_v, p_half):
 
 
 def _check_config(config):
+    # use_ifs_capdcycl must stay default (True) here, so the IFS ascent always
+    # gets the driver's lagged surface-flux feed (vote VC39).
     default = type(config)()
     set_ = []
     for f in config._fields:

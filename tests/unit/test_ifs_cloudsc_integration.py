@@ -227,6 +227,10 @@ def test_fv3_duo_column_takes_the_ifs_registry_as_nwat6_plus_passengers():
     col = FV3DuoColumnModel(dyn, tracer_names=names)
     assert col.nwat == 6
     assert col.tracer_names[6:] == ("N_c", "N_r", "N_i", "cloud_fraction_ifs")
+    # the column view labels the dimensionless fraction "1", not kg/kg (VC41)
+    state, _ = col.column_view(dyn.dcmip16_initial_state(n_tracers=len(names)))
+    assert state.tracers["cloud_fraction_ifs"].units == "1"
+    assert state.tracers["q_v"].units == "kg/kg"
 
 
 def test_cloudsc_bridge_refuses_a_state_missing_a_water_species():

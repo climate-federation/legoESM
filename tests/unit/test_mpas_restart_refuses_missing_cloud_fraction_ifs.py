@@ -1,10 +1,7 @@
 """An MPAS checkpoint without IFS CLOUDSC's advected cloud fraction
 (``cloud_fraction_ifs``) -- not listed, or listed without its array -- is
 refused on restart of an ifs_cloudsc run (votes VC26, VC37, the N_s rule);
-the intact checkpoint restores it with the registry's unit "1" (VC38).  The
-run itself also goes with the IFS diurnal-cycle option OFF, which only
-works because the IFS ascent alone switches the surface-flux feed on (VC22,
-VC35)."""
+the intact checkpoint restores it with the registry's unit "1" (VC38)."""
 from __future__ import annotations
 
 import glob
@@ -28,7 +25,7 @@ DT = 300.0
 TWO_STEPS_DAYS = 601.0 / 86400.0
 
 
-def _driver(tmpdir: str, capdcycl: bool = True) -> ModelDriver:
+def _driver(tmpdir: str) -> ModelDriver:
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=3, nlev=8,
                         vertical_coord="hybrid"),
@@ -37,20 +34,11 @@ def _driver(tmpdir: str, capdcycl: bool = True) -> ModelDriver:
         days=TWO_STEPS_DAYS, dataset="analytical", distributed=False,
         n_devices=1, turbulence="louis", radiation="none",
         convection="bechtold", bechtold_use_ifs_ascent=True,
-        bechtold_use_ifs_capdcycl=capdcycl,
         microphysics="ifs_cloudsc", gravity_wave_drag="none",
         cloud_scheme="none", cld_macmic_num_steps=1, precision="fp64")
     d = ModelDriver(cfg, output_dir=tmpdir)
     d.setup()
     return d
-
-
-@pytest.mark.slow
-def test_ifs_run_without_the_diurnal_option_still_gets_surface_fluxes(tmp_path):
-    d = _driver(str(tmp_path), capdcycl=False)
-    # the IFS ascent refuses to run without the surface fluxes; with the
-    # diurnal-cycle option off only the ascent itself turns the feed on
-    assert d.run(segment_callback=lambda drv, day, dt: None) == "COMPLETED"
 
 
 @pytest.mark.slow

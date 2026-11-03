@@ -384,7 +384,9 @@ class FV3DuoColumnModel:
                 f"FV3DuoColumnModel: {len(self.tracer_names)} tracer names "
                 f"{self.tracer_names} for a bundle carrying {len(q)}")
         tracers = {nm: fld(cols(q[i]), nm,
-                           "1/kg" if nm.startswith("N_") else "kg/kg")
+                           "1/kg" if nm.startswith("N_")
+                           else "1" if nm == "cloud_fraction_ifs"
+                           else "kg/kg")
                    for i, nm in enumerate(self.tracer_names)}
         state = FV3DuoColumnState(
             u=fld(cols(ua6), "u", "m/s"), v=fld(cols(va6), "v", "m/s"),
