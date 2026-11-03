@@ -683,6 +683,13 @@ def parse_args(argv: list[str] | None = None):
                    help="Minimum ocean depth [m]; shallower cells become land (default 10).")
     p.add_argument("--smoothing-passes", type=int, default=2,
                    help="Laplacian smoothing passes for bathymetry (default 2).")
+    p.add_argument("--enforce-straits", action=argparse.BooleanOptionalAction, default=True,
+                   dest="enforce_straits",
+                   help=("Carve the CRITICAL_STRAITS list to a minimum depth/width (lat-lon "
+                         "bathymetry lane; default on). At 0.25 deg the Indonesian Throughflow "
+                         "entry (3S 120E, 200 km, >=1500 m) cuts a deep channel through South "
+                         "Sulawesi and drives equatorial jets/blowup; use --no-enforce-straits "
+                         "where the straits are resolved."))
     p.add_argument("--eq-smoothing-passes", type=int, default=None, dest="eq_smoothing_passes",
                    help=("Extra wet-only Laplacian bathymetry passes within the equatorial band "
                          "(lat-lon bathymetry lane; default 30). At 0.25 deg these passes deepen "
@@ -6318,7 +6325,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             H_max=args.H_max,
             H_min=args.H_min,
             smoothing_passes=args.smoothing_passes,
-            enforce_straits=True,
+            enforce_straits=getattr(args, 'enforce_straits', True),
             fill_isolated_basins=True,
             depth_is_negative=True,
             r_factor_max=args.r_factor_max,
