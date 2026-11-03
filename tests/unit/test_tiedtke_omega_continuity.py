@@ -52,9 +52,10 @@ def test_pure_advection_of_surface_pressure_has_no_vertical_motion():
     a = _setup(shear=0.0, ps_wave=2000.0)
     full = _omega(True, *a)
     grid, sigma, u, v, p_s = a
-    # scale of the cancelling terms: sigma |v.grad p_s|
-    vgrad = 10.0 * 2000.0 * 2.0 / grid.radius
-    assert np.max(np.abs(full)) <= 1e-10 * vgrad
+    # round-off scale: the mass-flux differences the discrete divergence
+    # cancels, p_s |u| / (radius dlon) (vote V22)
+    flux_scale = 1.0e5 * 10.0 / (grid.radius * (2.0 * np.pi / 32))
+    assert np.max(np.abs(full)) <= 1e-9 * flux_scale
 
 
 def test_sheared_flow_over_varying_ps_moves_air_vertically():
