@@ -679,6 +679,10 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
         # function's N^2-integral live-e3w gate for the full derivation;
         # same gate, same jacobian, no new quantity.
         hml = hml * jnp.asarray(jacobian, dtype)
+    # zdfmxl.F90:104 ``hmlp(ji,jj) = gdepw(ji,jj,nmln(ji,jj),Kmm) * ssmask(ji,jj)``:
+    # land columns carry a ZERO mixed-layer depth (the unmasked gather left
+    # gdepw_0(nlb10), 1.02 m on ORCA1).  ``mask`` is the 2-D surface T-mask.
+    hml = hml * jnp.asarray(mask, dtype)
     return hml, m_base
 
 
