@@ -16,7 +16,7 @@ for kv in "$@"; do
 done
 cp "$W/config.nam" "${OUT%.nc}.nam"
 { sha256sum "$EXE"; echo "OMP_NUM_THREADS=1"; echo "overrides: $*"
-  ldd "$EXE" | awk '$3 ~ /^\// {print $3}' | xargs -r sha256sum --; } > "${OUT%.nc}.run"
+  ldd "$EXE" | awk '$3 ~ /^\// {print $3} $1 ~ /^\// {print $1}' | xargs -r sha256sum --; } > "${OUT%.nc}.run"
 ( cd "$W" && OMP_NUM_THREADS=1 "$EXE" config.nam "$IN" "$W/out.nc" > "$W/run.log" 2>&1 ) || { tail -20 "$W/run.log"; exit 1; }
 mv "$W/out.nc" "$OUT"
 for f in "$W"/radiative_properties*.nc; do [ -e "$f" ] && mv "$f" "${OUT%.nc}_$(basename "$f")"; done
