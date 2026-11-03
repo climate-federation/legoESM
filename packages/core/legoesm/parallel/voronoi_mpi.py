@@ -32,6 +32,7 @@ This module does NOT touch the global ``_active_topology`` or
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Callable, NamedTuple
 
@@ -1130,6 +1131,23 @@ def make_voronoi_mpi_step(
             })
         return new
 
+    def _refuse_missing_dt(dt):
+        """Raise on a missing, zero, negative or non-finite step ``dt``.
+
+        The dynamics tendency divides by ``dt`` in the flux-FCT limiter, so a
+        zero ``dt`` turned every limited tracer non-finite without an error
+        (docs/85 13.34 of the ENSO project). A traced ``dt`` (outer jit, scan
+        or grad) cannot be checked here and is passed through.
+        """
+        if dt is None:
+            raise ValueError("Voronoi MPI step called without dt")
+        if isinstance(dt, jax.core.Tracer):
+            return
+        dt_val = float(dt)
+        if not (dt_val > 0.0 and math.isfinite(dt_val)):
+            raise ValueError(
+                f"Voronoi MPI step needs a positive finite dt, got {dt_val!r}")
+
     @jax.jit
     def _step(state: MPASHydrostaticState, dt: float, forcing=None,
               phys_state=None):
@@ -1368,6 +1386,7 @@ def make_voronoi_mpi_step(
         # check is Python-level (static physics_fn, ``phys_state is None``),
         # so it adds no retrace and runs even under an outer trace.
         def _step_carry(state, dt, forcing=None, phys_state=None):
+            _refuse_missing_dt(dt)
             refuse_unthreaded_stateful_physics(
                 physics_fn, phys_state,
                 where="make_voronoi_mpi_step(return_phys_state=True)")
@@ -1408,6 +1427,7 @@ def make_voronoi_mpi_step(
     # carry is dropped.  ``_step`` is already jit; this thin wrapper only
     # selects the first element.
     def _step_state_only(state, dt, forcing=None, phys_state=None):
+        _refuse_missing_dt(dt)
         return _step(state, dt, forcing, phys_state)[0]
 
     return _step_state_only
