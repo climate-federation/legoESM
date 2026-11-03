@@ -237,6 +237,25 @@ def test_gradients_finite(cols, dtype):
     assert float(jnp.max(jnp.abs(g[1]))) > 0.0
 
 
+def test_gradients_finite_at_calm_wind(cols):
+    """Exactly calm lowest level (u = v = 0): the forward pass is the oracle's
+    and the gradients must stay finite (sqrt has an infinite slope at 0)."""
+    c = dict(cols)
+    c["u"] = c["u"].at[:, -1].set(0.0)
+    c["v"] = c["v"].at[:, -1].set(0.0)
+    ncol = c["T"].shape[0]
+    carry = init_sfclay_carry(ncol, CFG, jnp.float64)
+
+    def loss(T, T_sfc, u, v):
+        o, new = _call(dict(c, T=T, T_sfc=T_sfc, u=u, v=v), carry=carry)
+        return (jnp.sum(o.dT_dt) * 1e4 + jnp.sum(o.du_dt) * 1e4 + jnp.sum(o.shflx)
+                + jnp.sum(o.h_pbl) + jnp.sum(new))
+
+    g = jax.grad(loss, argnums=(0, 1, 2, 3))(c["T"], c["T_sfc"], c["u"], c["v"])
+    for name, gi in zip(("T", "T_sfc", "u", "v"), g):
+        assert bool(jnp.all(jnp.isfinite(gi))), name
+
+
 def test_scheme_registers_its_carry():
     assert turbulence_carry_field("ysu", YSUConfig()) == "sfclay"
     assert turbulence_scheme_traits("ysu").carries_energy
@@ -376,3 +395,23 @@ def test_era5_segment_carry_seeds_refuse_ysu():
     with pytest.raises(NotImplementedError, match="SegmentCarry"):
         prognostic_carry_seeds("kessler", "ysu", (2, 3, 4))
     assert prognostic_carry_seeds("kessler", "louis", (2, 3, 4)) == {}
+
+
+def test_scm_refuses_ysu_flux_injection_and_multistage_integrators():
+    """sfclayrev computes its own surface flux (ignores Ch_neutral): an SCM
+    column-tendency flux injection would double count it; and RK/AB2 would
+    advance the sfclay carry from a stale stage carry (vote K5)."""
+    import types
+    from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+    cfg = PhysicsConfig(turbulence=TurbulenceConfig(scheme="ysu"))
+    inject = types.SimpleNamespace(prescribe="fluxes", flux_to_closure=False)
+    with pytest.raises(ValueError, match="flux_to_closure=True"):
+        SingleColumnModel._validate_prescribed_fluxes_no_double_count(cfg, inject)
+    ok = PhysicsConfig(turbulence=TurbulenceConfig(
+        scheme="ysu", ysu=YSUConfig(surface=SurfaceLayerConfig(Ch_neutral=0.0))))
+    SingleColumnModel._validate_prescribed_fluxes_no_double_count(
+        ok, types.SimpleNamespace(prescribe="fluxes", flux_to_closure=True))
+    for integ in ("rk2", "rk4", "ab2"):
+        with pytest.raises(ValueError, match="turbulence='ysu'"):
+            SingleColumnModel._validate_integrator_compatibility(cfg, integ)
+    SingleColumnModel._validate_integrator_compatibility(cfg, "forward_euler")

@@ -49,6 +49,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.profile_metrics import safe_sqrt
 from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.physics._shared import (
     exner_function,
@@ -324,7 +325,8 @@ def bl_ysu_run(u, v, T, q_v, p_full, p_half, exner, dz, ust, hfx, qfx,
     dele = p2di[:, :-1] - p2di[:, 1:]
     dza = jnp.concatenate([za[:, :1], za[:, 1:] - za[:, :-1]], axis=1)
     zl1 = za[:, 0]
-    wspd1 = jnp.sqrt(ux[:, 0] * ux[:, 0] + vx[:, 0] * vx[:, 0]) + _WSPD1_EPS
+    # safe_sqrt: forward = sqrt, gradient finite at exactly calm wind (vote K4).
+    wspd1 = safe_sqrt(ux[:, 0] * ux[:, 0] + vx[:, 0] * vx[:, 0]) + _WSPD1_EPS
     sflux = hfx / rhox / cp + qfx / rhox * ep1 * thx[:, 0]
     sfcflg = ~(sfc.br > 0.0)
     thermal1 = thvx[:, 0]

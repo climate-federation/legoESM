@@ -253,11 +253,11 @@ def test_the_override_arrives_as_the_matching_w_m2_flux(w_theta):
 
 
 def test_the_kinematic_round_trip_is_exact():
-    """YSU divides straight back out; it must recover what was prescribed.
+    """The helper's conversion inverts exactly at the lowest-level density.
 
-    ``ysu.py``: ``wtheta_sfc = shflx / (rho[:, -1] * c_pd)``. Converting with
-    any OTHER density here would leave a silent offset in the one number every
-    flux-driven nonlocal scheme is built on.
+    Only the helper is tested: the WRF YSU kernel converts back with its own
+    surface-pressure density (rhox), so the kinematic flux it applies is the
+    prescribed one x rho[:, -1] / rhox (~0.997; recorded finding, vote K7).
     """
     from legoesm.atmosphere.physics.turbulence.config import YSUConfig
     from legoesm.atmosphere.physics.turbulence.integration import (
