@@ -189,6 +189,13 @@ def test_land_water_and_grid_spacing_inputs(cols):
     s, _ = _chain(cols, bare, carry, xland, jnp.full(ncol, 2.5e4))
     np.testing.assert_array_equal(np.asarray(out.ustar), np.asarray(s.ust))
     assert set(np.asarray(xland).tolist()) == {1.0, 2.0}
+    # land roughness is the lane's z0 every step, not the carried value (X9)
+    carry2 = carry.at[:, 2].set(0.5)
+    out2, _ = _call(cols, cfg=bare, carry=carry2, land_fraction=lf,
+                    cell_area=jnp.full(ncol, 2.5e4 ** 2))
+    s2, _ = _chain(cols, bare, carry2, xland, jnp.full(ncol, 2.5e4))
+    np.testing.assert_array_equal(np.asarray(out2.ustar), np.asarray(s2.ust))
+    assert not np.array_equal(np.asarray(out2.ustar), np.asarray(out.ustar))
     with pytest.raises(ValueError, match="surface_type"):
         _call(cols, cfg=bare._replace(dx_m=1e4))
     with pytest.raises(ValueError, match="dx_m"):
@@ -350,3 +357,13 @@ def test_combined_hydrostatic_physics_stores_the_carry():
     assert ps1.sfclay.shape == ps.sfclay.shape
     assert not np.array_equal(np.asarray(ps1.sfclay), np.asarray(ps.sfclay))
     assert not np.array_equal(np.asarray(ps2.sfclay), np.asarray(ps1.sfclay))
+
+
+def test_spectral_amip_rollout_refuses_ysu():
+    """That rollout hands one fixed physics state to every step (R4 vote J4)."""
+    from legoesm.training.neural_gcm_spectral import spectral_amip_rollout
+    cfg = PhysicsConfig(turbulence=TurbulenceConfig(scheme="ysu"))
+    ps = init_physics_state(4, 3, cfg)
+    with pytest.raises(ValueError, match="sfclay"):
+        spectral_amip_rollout(None, None, None, None, None, None, 600.0, 1,
+                              sst_col=jnp.zeros(4), sizing_phys_state=ps)

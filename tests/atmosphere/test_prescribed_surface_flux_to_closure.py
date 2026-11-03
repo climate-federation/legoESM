@@ -140,13 +140,15 @@ def test_ysu_convective_pathway_switches_on_with_the_flux():
     z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
     p_half = jnp.linspace(8.0e4, 1.0e5, nlev + 1)[None, :]
     p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-    # Well-mixed dry column, zero wind: the CBL case's defining configuration.
-    T = jnp.full((ncol, nlev), 300.0)
+    # Well-mixed dry column (theta = 300 K), zero wind: the CBL case's defining
+    # configuration; the skin 1 K warmer than the lowest air so the WRF surface
+    # layer, which takes its stability from the skin, is unstable (R4 vote K2).
+    T = 300.0 * (p_full / constants.p_ref) ** constants.kappa
     u = jnp.zeros((ncol, nlev))
     v = jnp.zeros((ncol, nlev))
     q_v = jnp.full((ncol, nlev), 1.0e-3)
     rho = jnp.full((ncol, nlev), CBL_RHO)
-    T_sfc = jnp.full((ncol,), 300.0)
+    T_sfc = T[:, -1] + 1.0
     q_sfc = jnp.full((ncol,), 1.0e-3)
 
     deck_shf = CBL_W_THETA_K_M_S * CBL_RHO * constants.c_pd
@@ -291,12 +293,12 @@ def test_the_closure_tracks_a_flux_that_changes_between_steps():
     z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
     p_half = jnp.linspace(8.0e4, 1.0e5, nlev + 1)[None, :]
     p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-    T = jnp.full((ncol, nlev), 300.0)
+    T = 300.0 * (p_full / constants.p_ref) ** constants.kappa   # theta = 300 K (vote K2)
     u = jnp.zeros((ncol, nlev))
     v = jnp.zeros((ncol, nlev))
     q_v = jnp.full((ncol, nlev), 1.0e-3)
     rho = jnp.full((ncol, nlev), CBL_RHO)
-    T_sfc = jnp.full((ncol,), 300.0)
+    T_sfc = T[:, -1] + 1.0
     q_sfc = jnp.full((ncol,), 1.0e-3)
 
     from legoesm.atmosphere.physics.turbulence.integration import (

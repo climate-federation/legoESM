@@ -333,8 +333,17 @@ class TestTurbulenceGrad:
         from legoesm.atmosphere.physics.turbulence.integration import make_turbulence_physics
         from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 
-        config = TurbulenceConfig(scheme=scheme)
+        from legoesm.atmosphere.physics.combined import PhysicsConfig
+        from legoesm.atmosphere.physics.physics_state import init_physics_state
+        from legoesm.atmosphere.physics.turbulence.config import YSUConfig
+        # ysu carries the WRF surface-layer state and needs the land/water flag
+        # on a grid without a land fraction
+        config = (TurbulenceConfig(scheme=scheme, ysu=YSUConfig(surface_type="land"))
+                  if scheme == "ysu" else TurbulenceConfig(scheme=scheme))
         turb_fn = make_turbulence_physics(config, model_type="hydrostatic", dt=300.0)
+        ps = (init_physics_state(self.state.T.data.size // self.sigma.n_levels,
+                                 self.sigma.n_levels, PhysicsConfig(turbulence=config))
+              if scheme == "ysu" else None)
         # Use a super-adiabatic (convectively unstable) temperature profile
         # so every turbulence scheme is genuinely active.  The default
         # near-isothermal state is stable in θ almost everywhere, where the
@@ -349,7 +358,7 @@ class TestTurbulenceGrad:
 
         def loss(T_data):
             s = state._replace(T=state.T.replace(data=T_data))
-            tend, _ = turb_fn(s, self.grid, self.sigma)
+            tend, _ = turb_fn(s, self.grid, self.sigma, phys_state=ps)
             return jnp.sum(tend.dT_dt.data ** 2)
 
         grad = jax.grad(loss)(state.T.data)

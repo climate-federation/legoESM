@@ -2114,6 +2114,13 @@ def spectral_amip_rollout(
     ``make_aimip_classical_spectral_physics(..., split_rad=True)``; both forward
     the optional ``phys_state`` / ``forcing`` kwargs used here.
     """
+    if sizing_phys_state.sfclay is not None:
+        # R4 vote J4: this rollout hands the SAME physics state to every step,
+        # so the WRF surface-layer carry of turbulence=ysu would restart each step.
+        raise ValueError(
+            "spectral_amip_rollout does not thread the physics state between steps; "
+            "turbulence='ysu' carries the WRF surface-layer state (PhysicsState.sfclay) "
+            "and is refused here.")
     integrator_name = pe_config.time_integrator
     # #817: explicit dispatch_integrator, or the semi-implicit SSP-RK3-SI step
     # (precomputed ONCE, outside the scan) when pe_config.semi_implicit.

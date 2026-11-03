@@ -32,15 +32,16 @@ drv = _load_driver()
 # --- scheme coverage --------------------------------------------------------
 
 def test_scheme_list_matches_the_dispatch():
-    """Every selectable closure except 'none' must be a candidate."""
+    """Every selectable closure except 'none' and 'ysu' (WRF YSU: no tunable
+    coefficients, R4 vote X17) must be a candidate."""
     import inspect
 
     from legoesm.atmosphere.physics.turbulence import integration
     src = inspect.getsource(integration.get_turbulence_fn)
     for scheme in drv.TURBULENCE_SCHEMES:
         assert f'"{scheme}"' in src, f"{scheme} not in get_turbulence_fn"
-    assert "none" not in drv.TURBULENCE_SCHEMES
-    assert len(drv.TURBULENCE_SCHEMES) == 9
+    assert "none" not in drv.TURBULENCE_SCHEMES and "ysu" not in drv.TURBULENCE_SCHEMES
+    assert len(drv.TURBULENCE_SCHEMES) == 8
 
 
 @pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)

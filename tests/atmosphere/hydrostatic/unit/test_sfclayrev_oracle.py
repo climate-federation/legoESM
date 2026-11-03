@@ -25,6 +25,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics.turbulence import sfclayrev_wrf
 from legoesm.atmosphere.physics.turbulence.sfclayrev_wrf import (
     SfclayState,
     sfclayrev_run,
@@ -141,3 +142,15 @@ def test_finite_gradients(fx):
         assert np.all(np.isfinite(np.asarray(gi)))
     assert float(np.max(np.abs(np.asarray(g[1])))) > 0.0      # flux responds to T_sfc
 
+
+
+def test_zolri2_clamps_its_inout_argument():
+    """zolri2's zol2 is intent(inout): a guess whose sign differs from ri is set
+    to 0 IN PLACE (sf_sfclayrev.F90 l.997), which zolri then returns.  The
+    fixture's secant never crosses sign, so this is pinned directly."""
+    z, z0 = jnp.array([25.0, 25.0]), jnp.array([0.1, 0.1])
+    ri = jnp.array([0.5, -0.5])
+    f_bad, x = sfclayrev_wrf._zolri2(jnp.array([-1.0, 1.0]), ri, z, z0)
+    f_zero, _ = sfclayrev_wrf._zolri2(jnp.zeros(2), ri, z, z0)
+    np.testing.assert_array_equal(np.asarray(x), 0.0)
+    np.testing.assert_array_equal(np.asarray(f_bad), np.asarray(f_zero))
