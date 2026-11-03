@@ -226,3 +226,41 @@ def test_smooth_close_to_hard(fix, arm):
     bad = {f: (float(g.max()), float(np.max(pins[f"{arm}:{f}"])))
            for f, g in gap.items() if np.any(g > 2.0 * np.asarray(pins[f"{arm}:{f}"]))}
     assert not bad, bad
+
+
+def test_tiny_inactive_rain_fp32_jit(fix):
+    """fp32 + jit, three levels: in-cloud rain far below the 1e-14 gate (2e-25, weight
+    identically 0) must keep every output and the gradient finite (review r4/r5
+    reproducer: the power laws and reciprocals of 4.4/4.9 overflowed on such operands)."""
+    cfg, th, _, _ = T.setup(fix, "base", slice(0, 1))
+    cfg = cfg._replace(ncldtop=2)
+    z = jnp.zeros((1, 3), jnp.float32)
+    col = jnp.zeros(1, jnp.float32)
+    rain = cfg.rlmin - 0.5 * M._wt(cfg.rlmin) + 1e-14
+    c = jnp.zeros((1, 3, 5), jnp.float32).at[0, 2, 2].set(rain)
+    x = M.CloudscInputs(
+        t=z + 270., q=z + 1e-7, a=z + .5, clv=c,
+        tend_t=z, tend_q=z, tend_a=z, tend_cld=jnp.zeros_like(c),
+        pvfl=z, pvfi=z,
+        pap=jnp.array([[20000., 50000., 80000.]], jnp.float32),
+        paph=jnp.array([[10000., 35000., 65000., 95000.]], jnp.float32),
+        plsm=col, ldcum=jnp.zeros(1, dtype=bool),
+        ktype=jnp.zeros(1, dtype=int), peis=col,
+        plu=z, plude=z, pludeli=jnp.zeros((1, 3, 4), jnp.float32),
+        psnde=jnp.zeros((1, 3, 2), jnp.float32), pmfu=z, pmfd=z,
+    )
+
+    def run(e):
+        return M.cloudsc(cfg, th, x._replace(psnde=x.psnde.at[0, 1, 1].set(e)),
+                         3600., hard=False, stages=True)
+
+    e0 = jnp.array(1.842477163000922e-14, jnp.float32)
+    out, st = jax.jit(run)(e0)
+    r = st["s42"]["zraincld"][-1, 0]
+    assert 0.0 < float(r) < 1e-24                       # the case is not vacuous
+    assert float(M._Sm(False).gt(r, M._ZEPSEC, M._wt(M._ZEPSEC))) == 0.
+    assert np.isfinite(st["s49"]["zsolqa"]).all()
+    for value in out:
+        assert value.dtype == jnp.float32 and np.isfinite(value).all()
+    g = jax.jit(jax.grad(lambda e: jnp.sum(run(e)[0].tend_t)))(e0)
+    assert np.isfinite(float(g))
