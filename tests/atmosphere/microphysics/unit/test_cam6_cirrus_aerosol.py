@@ -56,3 +56,26 @@ def test_map_time_interp_and_median(tmp_path):
     _, f2 = A.cirrus_aerosol_forcing(tmp_path / "a.npz", setup, 360.0)
     v = np.asarray(A.cirrus_aerosol_at_model_levels(f2, setup, pmid)["so4_a3"])
     assert np.all((v > np.exp(0.0)) & (v < np.exp(11.0)))
+
+
+def test_rank_local_cells_equal_global_rows(tmp_path):
+    """Voronoi MPI: a rank's cut (``cells`` = its global indices, owned then halo, any order) equals the
+    global field's columns for those cells, in every record and in PS; ``cells=None`` keeps all cells."""
+    ncol, nlev = 11, 3
+    rng = np.random.default_rng(0)
+    z = {f"{v}_logm": rng.normal(size=(12, nlev, ncol)) for v in A.CIRRUS_FIELDS}
+    z["PS"] = 1.0e5 + rng.normal(size=(12, ncol))
+    z.update(hyam=np.array([0.1, 0.05, 0.0]), hybm=np.array([0.0, 0.4, 0.9]), P0=np.array(1.0e5),
+             date=np.array([20000116, 20000214, 20000316, 20000415, 20000516, 20000615, 20000716,
+                            20000816, 20000915, 20001016, 20001115, 20001216]))
+    np.savez(tmp_path / "g.npz", **z)
+    setup = A.load_setup(tmp_path / "g.npz", top_lev=0)
+    _, full = A.cirrus_aerosol_forcing(tmp_path / "g.npz", setup, 90.0)
+    assert full["PS"].shape == (2, ncol)
+    cells = np.array([7, 2, 9, 0, 4])
+    _, loc = A.cirrus_aerosol_forcing(tmp_path / "g.npz", setup, 90.0, cells=cells)
+    np.testing.assert_array_equal(np.asarray(loc["PS"]), np.asarray(full["PS"])[:, cells])
+    for v in A.CIRRUS_FIELDS:
+        assert loc["rec"][v].shape == (2, nlev, cells.size)
+        np.testing.assert_array_equal(np.asarray(loc["rec"][v]), np.asarray(full["rec"][v])[..., cells])
+    assert float(loc["fact1"]) == float(full["fact1"])

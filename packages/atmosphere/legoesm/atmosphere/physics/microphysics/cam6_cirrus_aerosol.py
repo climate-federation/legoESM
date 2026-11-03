@@ -81,14 +81,19 @@ def load_setup(npz_path, top_lev):
     return CirrusAerosolSetup(z["hyam"], z["hybm"], float(z["P0"]), times, int(top_lev))
 
 
-def cirrus_aerosol_forcing(npz_path, setup, t, held=None):
+def cirrus_aerosol_forcing(npz_path, setup, t, held=None, cells=None):
     """Host side, as cam6_aerosol_forcing: the two records bracketing model time ``t`` [noleap days since
-    Jan 1], reloaded when the bracket moves, and this step's fact1."""
+    Jan 1], reloaded when the bracket moves, and this step's fact1.
+
+    ``cells``: global indices of this process's cells (the Voronoi MPI partition's ``local_cells``, owned
+    then halo); the file holds the global mesh, so each record is cut to those cells along its last axis.
+    None (serial) keeps every cell, so serial runs are unchanged."""
     months = bracket(setup.record_times, t)
     if held is None or held[0] != months:
         z = np.load(npz_path)
-        rec = {k: jnp.asarray(z[f"{k}_logm"][list(months)]) for k in CIRRUS_FIELDS}
-        held = (months, {"rec": rec, "PS": jnp.asarray(z["PS"][list(months)])})
+        cut = (lambda a: a) if cells is None else (lambda a: a[..., np.asarray(cells)])
+        rec = {k: jnp.asarray(cut(z[f"{k}_logm"][list(months)])) for k in CIRRUS_FIELDS}
+        held = (months, {"rec": rec, "PS": jnp.asarray(cut(z["PS"][list(months)]))})
     n, np1 = months
     fact1 = time_fact1(setup.record_times[n], setup.record_times[np1], t, NOLEAP_ONE_YR)
     return held, {**held[1], "fact1": jnp.asarray(fact1)}

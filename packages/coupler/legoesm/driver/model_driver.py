@@ -13964,6 +13964,16 @@ class ModelDriver:
                 _pref_mid, resolved_clubb_config(phys_cfg.turbulence).trop_cloud_top_press))
             _ps_chk, _ = self._owned_p_s_and_lat()
             _nc_file = int(np.load(cfg.cirrus_aerosol_file)["PS"].shape[-1])
+            # Voronoi cell-partition MPI: the file holds the GLOBAL mesh; each rank
+            # reads its own cells (owned then halo) by global index.
+            _vl_cir = getattr(self, "_voronoi_layout", None)
+            _cirrus_cells = (None if _vl_cir is None
+                             else np.asarray(_vl_cir.partition.local_cells))
+            if _cirrus_cells is not None:
+                if _nc_file != int(_vl_cir.partition.nCells_global):
+                    raise ValueError(f"cirrus_aerosol_file has {_nc_file} cells, the "
+                                     f"global mesh {int(_vl_cir.partition.nCells_global)}")
+                _nc_file = int(_cirrus_cells.size)
             if _nc_file != int(np.prod(np.shape(_ps_chk))):
                 raise ValueError(f"cirrus_aerosol_file has {_nc_file} cells, the run "
                                  f"{int(np.prod(np.shape(_ps_chk)))}")
@@ -16450,7 +16460,7 @@ class ModelDriver:
                         cirrus_aerosol_forcing)
                     _cirrus_held, _forcing["cirrus_aerosol"] = cirrus_aerosol_forcing(
                         cfg.cirrus_aerosol_file, _cirrus_setup, _force_day % NOLEAP_ONE_YR,
-                        held=_cirrus_held)
+                        held=_cirrus_held, cells=_cirrus_cells)
                 # Surface heat fluxes for the convective diurnal-cycle CAPE
                 # subtraction, which is what delays land storms from noon to
                 # late afternoon.  They are the PREVIOUS step's: turbulence
