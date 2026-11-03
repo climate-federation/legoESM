@@ -389,7 +389,7 @@ def test_spectral_rollout_rad_gating_one_step():
     )
     non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
         params, grid, dt=1800.0, radiation="gray", split_rad=True,
-        convection_scheme="sbm",
+        convection_scheme="mass_flux",
     )
 
     out_combined = spectral_rollout(
