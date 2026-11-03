@@ -40,6 +40,7 @@ blob_ok_aux yomlun_ifsaux.F90 && add "$OIFS"/ifs-source/ifsaux/module/yomlun_ifs
 # module-name shims: 49r1 RRTMG uses YOMLUN/YOMMP0/YOMCST, ecRad 1.7.2 stand-ins are *_ECRAD/*_IFSAUX
 add "$HERE"/shims49.F90 harness
 add "$HERE"/stubs49.F90 harness
+add "$HERE"/ecrad49_dump.F90 harness
 add $X/ifs-source/contrib/fiat/src/fiat/util/ec_parkind.F90 oifs49_fiat
 for f in "$R49"/*; do add "$f" oifs49_radiation; done
 for f in "$E172"/ifsrrtm/*.F90; do
@@ -63,6 +64,10 @@ echo "harness_patch ecrad_driver.F90 $(git hash-object src/ecrad_driver.F90)" >>
 # harness instrumentation: dump the McICA random-number stream (A16)
 python3 -I "$HERE"/patch_rng_dump.py src/random_numbers_mix.F90
 echo "harness_patch random_numbers_mix.F90 $(git hash-object src/random_numbers_mix.F90)" >> MANIFEST.txt
+
+# harness instrumentation: gas-optics stage dumps (writes only, env-gated)
+python3 -I "$HERE"/patch_gas_dump.py src/radiation_ifs_rrtm.F90
+echo "harness_patch radiation_ifs_rrtm.F90 $(git hash-object src/radiation_ifs_rrtm.F90)" >> MANIFEST.txt
 
 # --- interface blocks ------------------------------------------------------
 # ecRad's generator (make_intfbl.1.pl) needs a perl module that is not
@@ -117,6 +122,10 @@ if gfortran $CHK inc/chk_planted.F90 > inc/chk_planted.log 2>&1; then
 fi
 echo "planted interface mismatch rejected ($r): $(grep -m1 -iE "mismatch|error" inc/chk_planted.log)"
 echo "interface blocks checked: $(wc -l < intfb_checked.txt)"
+# table exporter: same objects, its own main program
+python3 -I "$HERE"/gen_tables49.py src tables49.F90
+gfortran $FF $INC -c tables49.F90 -o tables49.o
+gfortran $FF -o tables49.x tables49.o $(ls obj/*.o | grep -v ecrad_driver.o) -L$NC/lib -lnetcdff -lnetcdf -Wl,-rpath,$NC/lib
 gfortran $FF -o ecrad49.x obj/*.o -L$NC/lib -lnetcdff -lnetcdf -Wl,-rpath,$NC/lib
 python3 -I "$HERE"/check_constants.py src "$M49/yomcst.F90" | tail -1
 grep -qE "^REAL\(KIND=JPRB\), PARAMETER :: RPLRG = 1\.0_JPRB$" src/yomdyncore.F90 || { echo "RPLRG stand-in is not exactly 1.0"; exit 1; }
