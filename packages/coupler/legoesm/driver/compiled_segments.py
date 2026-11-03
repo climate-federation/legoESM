@@ -563,6 +563,11 @@ def tiedtke_lag_seeds(convection, q_v, p_s, prev=None):
     pytree unchanged)."""
     if convection != "tiedtke":
         return {}
+    if prev is not None and (prev[0] is None) != (prev[1] is None):
+        raise ValueError(
+            "tiedtke lag carries: restored pair has only one of "
+            "(turb_dq_v_prev, evap_sfc_prev); a checkpoint carries both or "
+            "neither")
     if prev is not None and prev[0] is not None:
         return {"turb_dq_v_prev": prev[0], "evap_sfc_prev": prev[1]}
     p_s = getattr(p_s, "data", p_s)

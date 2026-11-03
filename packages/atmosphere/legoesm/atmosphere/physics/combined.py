@@ -311,6 +311,13 @@ def make_physics(
             "boundary-layer q_v tendency and surface water flux (WRF "
             "qvpblten / qfx) from the turbulence scheme; with "
             "turbulence='none' they would stay at their zero seed")
+    if (config.convection.scheme == "tiedtke" and physics_cadence != "off"
+            and physics_cadence_steps > 1):
+        raise ValueError(
+            "convection='tiedtke' (WRF port) reads this step's dynamics q_v "
+            "tendency (qvften); physics_cadence_steps="
+            f"{physics_cadence_steps} would drop the intervening dynamics "
+            "steps. Run tiedtke with physics_cadence_steps=1")
     if isinstance(surface_bulk_coeffs, str):
         if surface_bulk_coeffs != "default":
             raise ValueError(

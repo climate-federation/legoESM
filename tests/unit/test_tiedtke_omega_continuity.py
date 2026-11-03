@@ -20,14 +20,14 @@ from legoesm.grids.vertical import create_sigma_coordinate
 NLEV = 6
 
 
-def _setup(shear, ps_wave):
+def _setup(shear, ps_wave, merid=0.0):
     grid = create_latlon_grid(n_lat=16, n_lon=32)
     sigma = create_sigma_coordinate(NLEV, sigma_top=0.05)
     lat = jnp.asarray(grid.grid_lat)[..., None]
     lon = jnp.asarray(grid.grid_lon)
     prof = 1.0 + shear * jnp.linspace(1.0, -1.0, NLEV)       # top -> surface
     u = 10.0 * jnp.cos(lat) * prof                            # solid body
-    v = jnp.zeros_like(u)
+    v = merid * jnp.sin(2.0 * lat) * prof                      # divergent
     p_s = 1.0e5 + ps_wave * jnp.sin(2.0 * lon) * jnp.cos(jnp.asarray(grid.grid_lat))
     return grid, sigma, u, v, p_s
 
@@ -40,10 +40,11 @@ def _omega(full, *a):
 
 
 def test_uniform_surface_pressure_reduces_to_constant_ps_form():
-    a = _setup(shear=0.8, ps_wave=0.0)
+    a = _setup(shear=0.8, ps_wave=0.0, merid=5.0)
     full, const = _omega(True, *a), _omega(False, *a)
-    scale = np.max(np.abs(const)) + 1e-30
-    assert np.max(np.abs(full - const)) <= 1e-12 * max(scale, 1.0)
+    scale = np.max(np.abs(const))
+    assert scale > 1e-3                    # divergent flow: omega non-zero
+    assert np.max(np.abs(full - const)) <= 1e-9 * scale
 
 
 def test_pure_advection_of_surface_pressure_has_no_vertical_motion():

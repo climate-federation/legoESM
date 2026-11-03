@@ -49,3 +49,26 @@ def test_physics_factory_refuses_tiedtke_without_turbulence():
                         turbulence=TurbulenceConfig(scheme="none"))
     with pytest.raises(ValueError, match="turbulence='none'"):
         make_physics(cfg)
+
+
+def test_asymmetric_restored_pair_raises():
+    """Vote V23a: a checkpoint carries both lags or neither."""
+    import pytest
+    q, ps = jnp.ones((2, 3, 4)), jnp.ones((2, 3))
+    for prev in ((jnp.ones(q.shape), None), (None, jnp.ones(ps.shape))):
+        with pytest.raises(ValueError, match="only one of"):
+            tiedtke_lag_seeds("tiedtke", q, ps, prev=prev)
+
+
+def test_physics_factory_refuses_tiedtke_with_physics_cadence():
+    """Vote V25a: qvften is this step's dynamics tendency; a physics cadence
+    of more than one step would drop the intervening dynamics steps."""
+    import pytest
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    cfg = PhysicsConfig(convection=ConvectionConfig(scheme="tiedtke"),
+                        turbulence=TurbulenceConfig(scheme="louis"))
+    with pytest.raises(ValueError, match="physics_cadence_steps=2"):
+        make_physics(cfg, model_type="mpas", physics_cadence="write",
+                     physics_cadence_steps=2)
