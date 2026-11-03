@@ -4220,7 +4220,7 @@ def test_hard_saturation_adjustment_requires_a_guarded_scheme():
     )
     parser = build_arg_parser()
     assert set(HARD_SAT_GUARD_EXEMPT) == {"sdm", "fast_sbm", "none", "kessler",
-                                          "seifert_beheng"}
+                                          "seifert_beheng", "ifs_cloudsc"}
     for micro in sorted(HARD_SAT_GUARD_EXEMPT):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", "--microphysics", micro,
