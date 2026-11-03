@@ -16,6 +16,7 @@ Strategy
 
 from __future__ import annotations
 
+import inspect
 import numpy as np
 import pytest
 
@@ -28,9 +29,11 @@ import jax.numpy as jnp  # noqa: E402
 from legoesm import constants  # noqa: E402
 from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
     air_sea_fluxes,
+    blk_oce_2,
     exner_potential_temperature,
     latent_heat_vaporization_sst as latent_heat_vaporization,
     moist_air_cp,
+    nemo_blk_oce_ncar,
     ncar_transfer_coefficients,
     potential_air_temperature_10m,
     pressure_at_height,
@@ -38,6 +41,111 @@ from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
     seawater_q_sat,
 )
 from legoesm.thermo import saturation_vapor_pressure_goff  # noqa: E402
+
+
+def test_standalone_k0_config_requires_every_explicit_selector():
+    """All six record-free K0 fields participate in fail-closed validation."""
+    from legoesm.ocean.bulk_flux_omip import (
+        NemoStandaloneK0Config,
+        validate_nemo_standalone_k0,
+    )
+
+    cfg = NemoStandaloneK0Config(
+        nn_ice=1, ln_drgice_imp=False, ln_mxl0=True, nn_mxlice=0,
+        ln_icebergs=False, initial_state="nemo_k0_istate")
+    validate_nemo_standalone_k0(cfg)
+    plants = {
+        "nn_ice": 0,
+        "ln_drgice_imp": True,
+        "ln_mxl0": False,
+        "nn_mxlice": 2,
+        "ln_icebergs": True,
+        "initial_state": "si3_iceistate",
+    }
+    for field, value in plants.items():
+        with pytest.raises(ValueError, match="Decision-175 K0 selectors"):
+            validate_nemo_standalone_k0(cfg._replace(**{field: value}))
+
+    from types import SimpleNamespace
+    import legoesm.ocean.bulk_flux_omip as bfo
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as ntr
+
+    seen_init = []
+
+    def _fake_orca2_card(deck_root, *, initial_state="file_ts"):
+        seen_init.append(initial_state)
+        return SimpleNamespace(
+            recipe=SimpleNamespace(
+                model_config=SimpleNamespace(
+                    implicit_ice_ocean_top_drag=False,
+                    physics=SimpleNamespace(
+                        vertical_mixing=SimpleNamespace(
+                            tke=SimpleNamespace(
+                                tke_mxl_choice=3,
+                                nemo_mxl0_surface_tmask=True,
+                                nemo_mxl0_rmxl_min_overwrite=True,
+                                nemo_mxlice=0,
+                            )
+                        )
+                    ),
+                ),
+                initial_state=None,
+            ),
+            icebergs_enabled=False,
+        )
+
+    real_builder = ntr.build_orca2_zps_card
+    ntr.build_orca2_zps_card = _fake_orca2_card
+    try:
+        k0_card = bfo.build_nemo_orca2_k0_ocean_card("/unused")
+    finally:
+        ntr.build_orca2_zps_card = real_builder
+    assert seen_init == ["nemo_k0_istate"]
+
+    for bad_k0 in (
+        cfg._replace(ln_drgice_imp=True),
+        cfg._replace(ln_mxl0=False),
+        cfg._replace(nn_mxlice=2),
+        cfg._replace(ln_icebergs=True),
+    ):
+        with pytest.raises(ValueError, match="Decision-175 K0 selectors"):
+            bfo._validate_k0_ocean_card(k0_card._replace(k0=bad_k0))
+
+    bad_drg = _fake_orca2_card("/unused")
+    bad_drg.recipe.model_config.implicit_ice_ocean_top_drag = True
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_drg))
+
+    bad_mxl_tmask = _fake_orca2_card("/unused")
+    bad_mxl_tmask.recipe.model_config.physics.vertical_mixing.tke.nemo_mxl0_surface_tmask = False
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_mxl_tmask))
+
+    bad_mxl_rmxl = _fake_orca2_card("/unused")
+    bad_mxl_rmxl.recipe.model_config.physics.vertical_mixing.tke.nemo_mxl0_rmxl_min_overwrite = False
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_mxl_rmxl))
+
+    bad_mxlice = _fake_orca2_card("/unused")
+    bad_mxlice.recipe.model_config.physics.vertical_mixing.tke.nemo_mxlice = 2
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_mxlice))
+
+    bad_icb = _fake_orca2_card("/unused")
+    bad_icb.icebergs_enabled = True
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_icb))
+
+    seen_nn_ice = []
+    real_blk = bfo.nemo_blk_oce_ncar
+    bfo.nemo_blk_oce_ncar = lambda *a, **kw: seen_nn_ice.append(kw.get("nn_ice"))
+    try:
+        bfo.nemo_orca2_k0_surface_card(
+            *(0.0,) * 10, 0.066, 1.0, 1.0, 5,
+            k0_config=cfg, ice_if=None, s0=None, s2=None)
+    finally:
+        bfo.nemo_blk_oce_ncar = real_blk
+    assert seen_nn_ice == [1]
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +164,68 @@ _MDRY = 28.9647e-3                    # NEMO rmm_dryair
 _MWAT = 18.0153e-3                    # NEMO rmm_water
 _GAMMA_DRY = _RGAS / (_MDRY * 1005.0)  # NEMO rgamma_dry
 _RT0 = 273.15                         # const-ok: NEMO rt0 in the test mirror
+
+
+@pytest.mark.parametrize("backend", ["host", "scan"])
+def test_legacy_blk_oce_2_preserves_parent_reduction_order(backend):
+    """Host and scan backends keep the pre-refactor q_net word order.
+
+    The deliberately flattened plant is algebraically identical but differs
+    by ulps, so this is a live bitwise compatibility check rather than an
+    allclose physics test.
+    """
+    rng = np.random.default_rng(335)
+    shape = (37, 43)
+    theta = rng.uniform(245.0, 310.0, shape)
+    tsk_c = rng.uniform(-2.0, 32.0, shape)
+    lw = rng.uniform(180.0, 480.0, shape)
+    precip = rng.uniform(0.0, 2.0e-4, shape)
+    snow = precip * rng.uniform(0.0, 1.0, shape)
+    evap = rng.uniform(-2.0e-4, 2.0e-4, shape)
+    sensible = rng.uniform(-400.0, 400.0, shape)
+    latent = rng.uniform(-800.0, 800.0, shape)
+
+    xp = np if backend == "host" else jnp
+    theta = xp.asarray(theta)
+    tsk_c = xp.asarray(tsk_c)
+    lw = xp.asarray(lw)
+    precip = xp.asarray(precip)
+    snow = xp.asarray(snow)
+    evap = xp.asarray(evap)
+    sensible = xp.asarray(sensible)
+    latent = xp.asarray(latent)
+    theta_c = theta - constants.T_freeze
+    tsk_K = tsk_c + constants.T_freeze
+    qlwn = constants.emissivity_seawater_lw * (
+        lw - constants.sigma_sb * tsk_K ** 4
+    )
+    liquid = xp.maximum(precip - snow, 0.0)
+    q_precip_evap = (
+        -snow * constants.L_fus_nemo
+        - evap * constants.c_p_seawater * tsk_c
+        + liquid * constants.c_p_seawater * theta_c
+        + snow * constants.c_p_ice_nemo * xp.minimum(theta_c, 0.0)
+    )
+    parent_qns = sensible + latent + qlwn + q_precip_evap
+
+    got = blk_oce_2(
+        theta, tsk_c, lw, precip, snow, evap, sensible, latent,
+        array_namespace=xp,
+    )
+    np.testing.assert_array_equal(np.asarray(got.qns), parent_qns)
+
+    flattened_plant = (
+        qlwn + sensible + latent
+        - snow * constants.L_fus_nemo
+        - evap * constants.c_p_seawater * tsk_c
+        + liquid * constants.c_p_seawater * theta_c
+        + snow * constants.c_p_ice_nemo * xp.minimum(theta_c, 0.0)
+    )
+    flattened_plant = np.asarray(flattened_plant)
+    parent_qns = np.asarray(parent_qns)
+    assert np.count_nonzero(
+        flattened_plant.view(np.uint64) != parent_qns.view(np.uint64)
+    ) > 0
 
 
 def _np_e_sat_goff(T):
@@ -376,6 +546,143 @@ def test_l_vap_deviation_from_nemo_is_bounded():
     assert ours[0] == pytest.approx(nemo[0], rel=1e-14)
     assert np.all(np.abs(ours / nemo - 1.0) < 3e-5)
     assert np.all(ours[1:] < nemo[1:])   # Kirchhoff is the slightly steeper slope, so smaller L when warm
+
+
+_NO_ICE = {"nn_ice": 0, "ice_if": None}
+
+
+def _literal_scalar_inputs():
+    return (
+        jnp.asarray(6.25), jnp.asarray(-2.5), jnp.asarray(286.4),
+        jnp.asarray(0.0065), jnp.asarray(100800.0), jnp.asarray(14.2),
+        jnp.asarray(0.1), jnp.asarray(-0.2), jnp.asarray(125.0),
+        jnp.asarray(310.0), jnp.asarray(2.3e-5), jnp.asarray(3.0e-6),
+        jnp.asarray(1.0), 0.066, 1.0, 1.0, 5,
+    )
+
+
+def test_literal_blk_oce_inexact_binary64_pins_and_eager_jit():
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    prior = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+        eager = nemo_blk_oce_ncar(
+            *_literal_scalar_inputs(), **_NO_ICE, s0=None, s2=None)
+        inputs = _literal_scalar_inputs()
+        compiled = jax.jit(
+            lambda *values: nemo_blk_oce_ncar(
+                *values, 5, **_NO_ICE, s0=None, s2=None)
+        )(*inputs[:-1])
+        assert all(np.array_equal(np.asarray(a).view(np.uint64),
+                                  np.asarray(b).view(np.uint64))
+                   for a, b in zip(eager, compiled) if a is not None)
+        pins = {
+            "theta_air": 4643735832083737147,
+            "ssq": 4576833549615626132,
+            "qns": 13863530862587990243,
+            "utau": 4588492273966355432,
+            "taum": 4589134070458585377,
+        }
+        for name, word in pins.items():
+            assert int(np.asarray(getattr(eager, name)).view(np.uint64)) == word
+    finally:
+        set_policy(prior)
+
+
+def test_literal_blk_oce_path_plants_and_physical_inputs_have_no_defaults():
+    signature = inspect.signature(nemo_blk_oce_ncar)
+    optional_composition = {
+        "prior_surface", "chl", "geothermal_heat_flux_mwm2"}
+    assert all(parameter.default is inspect.Parameter.empty
+               for name, parameter in signature.parameters.items()
+               if name not in optional_composition)
+    base_args = list(_literal_scalar_inputs())
+    base = nemo_blk_oce_ncar(*base_args, **_NO_ICE, s0=None, s2=None)
+    longwave_args = list(base_args)
+    longwave_args[9] = longwave_args[9] + 1.0
+    longwave = nemo_blk_oce_ncar(
+        *longwave_args, **_NO_ICE, s0=None, s2=None)
+    assert float(longwave.qlwn - base.qlwn) == pytest.approx(
+        constants.emissivity_seawater_lw, rel=0.0, abs=1e-14)
+    assert np.asarray(longwave.qns).view(np.uint64) != np.asarray(base.qns).view(np.uint64)
+    snow_args = list(base_args)
+    snow_args[11] = snow_args[11] + 1.0e-6
+    snow = nemo_blk_oce_ncar(*snow_args, **_NO_ICE, s0=None, s2=None)
+    assert np.asarray(snow.qns).view(np.uint64) != np.asarray(base.qns).view(np.uint64)
+    assert np.asarray(snow.emp).view(np.uint64) == np.asarray(base.emp).view(np.uint64)
+
+
+def test_literal_blk_oce_finite_difference_gradient():
+    args = _literal_scalar_inputs()
+    objective = lambda sst: nemo_blk_oce_ncar(
+        *args[:5], sst, *args[6:], **_NO_ICE, s0=None, s2=None
+    ).qns
+    value = args[5]
+    tangent = float(jax.grad(objective)(value))
+    step = 1.0e-4
+    finite_difference = float(
+        (objective(value + step) - objective(value - step)) / (2.0 * step)
+    )
+    assert np.isfinite(tangent)
+    assert tangent == pytest.approx(finite_difference, rel=2e-5, abs=2e-5)
+
+
+def test_literal_blk_oce_zero_wind_and_masked_fill_gradients_are_finite():
+    """Inactive fills and exactly calm wind are safe for reverse-mode AD."""
+    args = list(_literal_scalar_inputs())
+    args[0] = jnp.asarray(0.0)
+    args[1] = jnp.asarray(0.0)
+
+    def wind_objective(u_wind):
+        values = list(args)
+        values[0] = u_wind
+        result = nemo_blk_oce_ncar(
+            *values, **_NO_ICE, s0=None, s2=None)
+        return result.qns + result.utau + result.vtau + result.taum
+
+    assert np.isfinite(float(jax.grad(wind_objective)(jnp.asarray(0.0))))
+
+    def masked_temperature_objective(temperature):
+        values = list(args)
+        values[2] = temperature
+        values[12] = jnp.asarray(0.0)
+        result = nemo_blk_oce_ncar(
+            *values, **_NO_ICE, s0=None, s2=None)
+        return result.theta_air + result.qns
+
+    def masked_qns_objective(temperature):
+        values = list(args)
+        values[2] = temperature
+        values[12] = jnp.asarray(0.0)
+        result = nemo_blk_oce_ncar(
+            *values, **_NO_ICE, s0=None, s2=None)
+        return result.qns
+
+    value = masked_temperature_objective(jnp.asarray(250.0))
+    tangent = jax.grad(masked_temperature_objective)(jnp.asarray(250.0))
+    qns_tangent = jax.grad(masked_qns_objective)(jnp.asarray(250.0))
+    assert np.isfinite(float(value))
+    assert np.isfinite(float(tangent)) and float(tangent) != 0.0
+    assert float(qns_tangent) == 0.0
+
+
+def test_record_object_minmax_second_operand_wins_signed_zero_ties():
+    from legoesm.ocean.bulk_flux_omip import _fmax, _fmin
+
+    positive = jnp.asarray(0.0)
+    negative = jnp.asarray(-0.0)
+    for operation in (_fmax, _fmin):
+        assert np.signbit(float(operation(positive, negative)))
+        assert not np.signbit(float(operation(negative, positive)))
+
+
+def test_record_object_sign_treats_negative_zero_as_positive():
+    from legoesm.core.source_rounding import nemo_fortran_sign
+
+    magnitude = jnp.asarray(2.0)
+    assert float(nemo_fortran_sign(magnitude, jnp.asarray(-0.0))) == 2.0
+    assert float(nemo_fortran_sign(magnitude, jnp.asarray(-1.0))) == -2.0
 
 
 def test_pressure_at_height_supersaturated_matches_unclipped_nemo():
