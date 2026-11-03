@@ -8443,7 +8443,8 @@ class ModelDriver:
                                   or _ct.is_stochastic)
                 if (isinstance(self._carry_aux, dict)
                         and (any(k in self._carry_aux
-                                 for k in ("tke", "qke", "gwd_spectrum"))
+                                 for k in ("tke", "qke", "gwd_spectrum",
+                                           "tiedtke_turb_dq_v_prev"))
                              or (_conv_is_carry
                                  and "conv_prog" in self._carry_aux))):
                     raise ValueError(
@@ -8604,7 +8605,8 @@ class ModelDriver:
             backend == "zarr"
             and isinstance(self._carry_aux, dict)
             and (any(k in self._carry_aux
-                     for k in ("tke", "qke", "gwd_spectrum"))
+                     for k in ("tke", "qke", "gwd_spectrum",
+                               "tiedtke_turb_dq_v_prev"))
                  or (_conv_is_carry and "conv_prog" in self._carry_aux))
         ):
             raise ValueError(
@@ -9639,7 +9641,8 @@ class ModelDriver:
                               or _ct.is_stochastic)
             if isinstance(self._carry_aux, dict) and (
                 any(k in self._carry_aux
-                    for k in ("tke", "qke", "gwd_spectrum"))
+                    for k in ("tke", "qke", "gwd_spectrum",
+                              "tiedtke_turb_dq_v_prev"))
                 or (_conv_is_carry and "conv_prog" in self._carry_aux)
             ):
                 raise ValueError(
@@ -20010,12 +20013,13 @@ class ModelDriver:
                      for k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}
                     if isinstance(self.tracers, dict) else {}
                 ),
-                # WRF Tiedtke's lagged turbulence pair, persisted across
-                # segments like conv_precip_prev (single-member only).
+                # WRF Tiedtke's lagged turbulence pair (qvpblten, qfx): carried
+                # across segments AND restarts via carry_aux, as WRF restarts
+                # RQVBLTEN / QFX (vote V13b); zeros on a cold start.
                 **tiedtke_lag_seeds(
                     self.config.convection, self.q_v, self.state.p_s,
-                    prev=(getattr(self, "_tiedtke_lag_prev", None)
-                          if self._ensemble_size == 1 else None)),
+                    prev=(self._carry_aux.get("tiedtke_turb_dq_v_prev"),
+                          self._carry_aux.get("tiedtke_evap_sfc_prev"))),
             )
 
             # Shard carry across devices for SPMD execution
@@ -20076,8 +20080,6 @@ class ModelDriver:
             if self._ensemble_size == 1:
                 self._conv_precip_prev = carry.conv_precip_prev
                 self._precip_frozen_prev = carry.precip_frozen_prev
-                self._tiedtke_lag_prev = (carry.turb_dq_v_prev,
-                                          carry.evap_sfc_prev)
                 # Persist the evolved multilayer land state across segments (the
                 # prognostic soil column — no-op when slab/None).
                 if self._land_ml_state is not None:
@@ -20248,6 +20250,9 @@ class ModelDriver:
             if carry.cloud_fraction is not None:
                 phys_cloud_fraction = carry.cloud_fraction
                 self._carry_aux["cloud_fraction"] = phys_cloud_fraction
+            if carry.turb_dq_v_prev is not None:
+                self._carry_aux["tiedtke_turb_dq_v_prev"] = carry.turb_dq_v_prev
+                self._carry_aux["tiedtke_evap_sfc_prev"] = carry.evap_sfc_prev
 
             current_step = seg_end_step
 
