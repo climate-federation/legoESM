@@ -1185,8 +1185,10 @@ def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name)
     # Refuse configs whose explicit advection is unstable (the T63 dt=1800
     # blowup class): the CI deck gate cannot see ad-hoc YAMLs or CLI dt
     # overrides, so the bound is enforced where the integrator is built.
-    from legoesm.atmosphere.dynamics.gcm.spectral_pe import check_advective_cfl
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        check_advective_cfl, refuse_semi_implicit_hybrid)
     check_advective_cfl(int(grid.n_max), dt, pe_config)
+    refuse_semi_implicit_hybrid(pe_config, sigma_coord)
 
     if not pe_config.semi_implicit:
         def _integrate_explicit(state, tendency_fn):

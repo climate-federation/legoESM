@@ -38,9 +38,10 @@ from .primitive_eq_latlon_cgrid import (
 
 
 def build_latlon_column_mesh(grid) -> ColumnMesh:
-    """The column mesh of a global lat-lon grid: cell centres, areas and
-    quad corners ``(sw, se, ne, nw)`` flattened row-major (latitude rows
-    S->N, longitude fastest)."""
+    """The column mesh of a global lat-lon or Gaussian grid: cell centres,
+    areas (``grid_area``: the Gaussian grid's quadrature areas) and quad
+    corners ``(sw, se, ne, nw)`` flattened row-major (latitude rows S->N,
+    longitude fastest)."""
     lat2d = np.asarray(grid.lat2d, dtype=np.float64)
     lon2d = np.asarray(grid.lon2d, dtype=np.float64)
     lat_v = np.asarray(grid.lat_v, dtype=np.float64)
@@ -49,7 +50,7 @@ def build_latlon_column_mesh(grid) -> ColumnMesh:
             f"build_latlon_column_mesh: lat_v has shape {lat_v.shape}, "
             f"expected ({grid.n_lat + 1},) (a global grid, not an MPI band)")
     lon = np.asarray(grid.lon, dtype=np.float64)
-    half = 0.5 * float(grid.dlon)
+    half = np.pi / grid.n_lon  # half of dlon = 2 pi / n_lon
     s, n = lat_v[:-1, None], lat_v[1:, None]
     w, e = (lon - half)[None, :], (lon + half)[None, :]
     shp = (grid.n_lat, grid.n_lon)
@@ -63,7 +64,7 @@ def build_latlon_column_mesh(grid) -> ColumnMesh:
     jlon = jnp.asarray(lon2d.reshape(-1))
     return ColumnMesh(
         latCell=jlat, lonCell=jlon,
-        areaCell=jnp.asarray(np.asarray(grid.area).reshape(-1)),
+        areaCell=jnp.asarray(np.asarray(grid.grid_area).reshape(-1)),
         nCells=int(jlat.shape[0]), grid_lat=jlat, grid_lon=jlon,
         grid_shape_2d=(int(jlat.shape[0]),), lat=jlat, lon=jlon,
         cornerLat=jnp.asarray(corner_lat), cornerLon=jnp.asarray(corner_lon),

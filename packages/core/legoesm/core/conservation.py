@@ -717,6 +717,7 @@ def batch_global_area_sums(
     owned_mask: jax.Array | None = None,
     *,
     differentiable_broadcast: bool = False,
+    area: jax.Array | None = None,
 ) -> list[jax.Array]:
     """Compute multiple area-weighted global sums in a single MPI call.
 
@@ -728,9 +729,13 @@ def batch_global_area_sums(
 
     ``differentiable_broadcast``: no longer changes anything (see
     :func:`global_area_sum`; #1814).
+
+    ``area``: the cell areas, for a grid whose areas are not ``grid.area``
+    (the Gaussian grid's quadrature areas ``grid.grid_area``); ``None``
+    reads ``grid.area``.
     """
     acc = conservation_accumulator()
-    area_acc = grid.area.astype(acc)
+    area_acc = (grid.area if area is None else area).astype(acc)
     weight = area_acc
     if owned_mask is not None:
         mask = owned_mask.astype(acc)
@@ -1844,7 +1849,7 @@ def energy_fixer_dT(e_before, e_after, mass) -> jax.Array:
 
 
 def gridded_energy_fixer_dT(pre, post, grid, sigma_coord,
-                            owned_mask=None) -> jax.Array:
+                            owned_mask=None, area=None) -> jax.Array:
     """:func:`energy_fixer_dT` for the structured lanes (lat-lon C-grid, cube
     C-D grid), serial and distributed.
 
@@ -1854,8 +1859,8 @@ def gridded_energy_fixer_dT(pre, post, grid, sigma_coord,
     F15b-V1).  The three global integrals go through ONE
     :func:`batch_global_area_sums` call -- the reduction the lanes' own mass
     fixers use (serial, MPI allreduce-SUM, lat-band / tile SPMD psum, cube
-    face GSPMD), all AD-safe.  ``owned_mask`` as for that call (the
-    owned-face MPI segment lane).
+    face GSPMD), all AD-safe.  ``owned_mask`` and ``area`` as for that call
+    (the owned-face MPI segment lane; the spectral lane's quadrature areas).
     """
     acc = conservation_accumulator()
 
@@ -1868,7 +1873,7 @@ def gridded_energy_fixer_dT(pre, post, grid, sigma_coord,
     e0, _ = _col(*pre)
     e1, m1 = _col(*post)
     s0, s1, sm = batch_global_area_sums([e0, e1, m1], grid,
-                                        owned_mask=owned_mask)
+                                        owned_mask=owned_mask, area=area)
     return energy_fixer_dT(s0, s1, sm)
 
 
