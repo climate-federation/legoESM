@@ -218,7 +218,7 @@ def test_aimip_classical_params_with_spatial_surface_builds():
 
     fn = make_aimip_classical_spectral_physics(
         params, grid, dt=1800.0,
-        radiation="gray",
+        radiation="gray", convection_scheme="sbm",
         turbulence_scheme="louis",
         land_mask=land_mask,
     )
@@ -293,6 +293,7 @@ def test_make_aimip_classical_spectral_physics_split_returns_tuple():
     params = AIMIPClassicalParams.from_defaults()
     built = make_aimip_classical_spectral_physics(
         params, grid, dt=1800.0, radiation="gray", split_rad=True,
+        convection_scheme="sbm",
     )
     assert isinstance(built, tuple)
     assert len(built) == 2
@@ -308,7 +309,7 @@ def test_make_aimip_classical_spectral_physics_combined_default():
     grid = _grid_t11()
     params = AIMIPClassicalParams.from_defaults()
     fn = make_aimip_classical_spectral_physics(
-        params, grid, dt=1800.0, radiation="gray",
+        params, grid, dt=1800.0, radiation="gray", convection_scheme="sbm",
     )
     assert callable(fn)
     assert not isinstance(fn, tuple)
@@ -384,9 +385,11 @@ def test_spectral_rollout_rad_gating_one_step():
 
     combined_fn = make_aimip_classical_spectral_physics(
         params, grid, dt=1800.0, radiation="gray", split_rad=False,
+        convection_scheme="sbm",
     )
     non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
         params, grid, dt=1800.0, radiation="gray", split_rad=True,
+        convection_scheme="sbm",
     )
 
     out_combined = spectral_rollout(
