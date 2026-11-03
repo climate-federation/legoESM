@@ -6117,7 +6117,13 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         p_sfc, thv_ds_zt, thv_ds_zm, gr, config)
 
     diagnostics = dict(
-        cloud_frac=pdf_post["cloud_frac"], rcm=pdf_post["rcm"],
+        # CAM's cloud_frac_out: the PRE-advance closure's, after the cloud-cover
+        # overwrite and min(1) (CLUBB_CESM r8099 advance_clubb_core_module.F90
+        # :1404-1418, before the advances at :1957), copied to the host at
+        # clubb_intr.F90:1993.  rcm/rcm_grid/wpthvp stay post-advance (no host
+        # consumer).  The closure itself is clubb_release 54403a04's, the core
+        # oracle -- a departure from CAM-bundled 2014 CLUBB.
+        cloud_frac=pdf["cloud_frac"], rcm=pdf_post["rcm"],
         rcm_grid=pdf_post["rcm_grid"],
         # CAM's qclvar: rcp2_zt of the PRE-advance closure (CLUBB_CESM r8099
         # advance_clubb_core_module.F90:1150 -> :1798, before the advances).
