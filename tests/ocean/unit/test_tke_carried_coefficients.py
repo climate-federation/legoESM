@@ -390,6 +390,193 @@ def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
 
 
 @pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+def test_literal_mxl_ldown_updates_jpkm1_only_with_true_terminal_e3t():
+    e = jnp.asarray([[2.0, 3.0, 1.0e8]])
+    n2 = jnp.full_like(e, 1.0e-12)
+    dz_cell = jnp.asarray([[1.0, 2.0, 3.0, 4.0]])
+    cfg = TKEConfig(tke_mxl_choice=3, mxl_min=0.01,
+                    tke_mxl_raw_evaluation="nemo_literal")
+    floor = tke_mod._mixing_length_floor(cfg)
+
+    @jax.jit
+    def lengths(e, n2, dz_cell, anchor):
+        return tke_mod.compute_mixing_lengths(
+            e, n2, jnp.ones_like(e), cfg, dz_cell=dz_cell,
+            l_surface_anchor=anchor)
+
+    lk, _ = lengths(e, n2, dz_cell, jnp.asarray([floor]))
+    # Legacy shape has no e3t(jpk), so it retains the bounded jpk-pad proxy.
+    assert float(lk[0, -1]) == floor
+    widened = jnp.concatenate([dz_cell, jnp.asarray([[4.0]])], axis=-1)
+    lk_wide, _ = lengths(e, n2, widened, jnp.asarray([floor]))
+    # zdftke.f90:690-692: jk=jpkm1 is updated from untouched
+    # zmxlm(jpk)=rmxl_min plus the true e3t(jpk) terminal thickness.
+    assert float(lk_wide[0, -1]) == floor + 4.0
+    # Non-vacuity: deleting the terminal row restores the old result.
+    assert float(lk_wide[0, -1]) != float(lk[0, -1])
+    legacy, _ = tke_mod.compute_mixing_lengths(
+        e, n2, jnp.ones_like(e),
+        cfg._replace(tke_mxl_raw_evaluation="factored"),
+        dz_cell=dz_cell, l_surface_anchor=jnp.asarray([floor]))
+    assert float(legacy[0, -1]) != floor
+
+
+def test_terminal_e3t_flag_reaches_the_closure_lengths_and_refuses_unused_paths(
+        monkeypatch):
+    """The selected e3t(jpk) row must reach every length call; unselected
+    stages refuse the flag instead of silently ignoring it.
+    """
+    cfg = TKEConfig(prognostic=True, n2_mode="nemo_bn2",
+                    tke_n2_evaluation_stage="step_entry",
+                    tke_mxl_choice=3, nemo_mxl_terminal_e3t=True,
+                    kappaM_min=0.0, kappaH_min=0.0,
+                    enable_kappaH_profile=False)
+    bundle = tke_mod.TKEEntryN2Bundle(
+        rn2=jnp.asarray([[2.0, 4.0]]), rn2b=jnp.asarray([[3.0, 5.0]]),
+        gdepw_Kmm=jnp.asarray([[1.5, 4.0]]),
+        e3w_Kmm=jnp.asarray([[1.5, 2.5]]),
+        e3t_Kmm=jnp.asarray([[1.0, 2.0, 3.0]]),
+        e3t_jpk=jnp.asarray([77.0]))
+    seen = []
+
+    def fake_mxl(e, n2, *args, **kwargs):
+        seen.append(np.asarray(kwargs["dz_cell"]))
+        return jnp.ones_like(e), jnp.ones_like(e)
+
+    monkeypatch.setattr(tke_mod, "compute_mixing_lengths", fake_mxl)
+    monkeypatch.setattr(tke_mod, "_mxl0_surface_anchor",
+                        lambda *a, **k: jnp.ones((1,)))
+    col = dict(_column_kwargs(cfg), dz_ref=jnp.asarray([1.0, 2.0, 3.0]),
+               jacobian=jnp.ones((1,)))
+    tke_mod.tke_vertical_mixing(**col, precomputed_n2_bundle=bundle)
+    assert len(seen) == 2
+    for dz_cell in seen:
+        np.testing.assert_array_equal(dz_cell, [[1.0, 2.0, 3.0, 77.0]])
+
+    with pytest.raises(ValueError, match="requires the raw NEMO"):
+        tke_mod.tke_vertical_mixing(
+            **col, precomputed_n2_bundle=bundle._replace(e3t_jpk=None))
+    with pytest.raises(ValueError, match="requires tke_mxl_choice 3 or 4"):
+        tke_mod.tke_vertical_mixing(**dict(col, cfg=cfg._replace(
+            tke_mxl_choice=2)), precomputed_n2_bundle=bundle)
+    with pytest.raises(ValueError, match="requires etau_mode='below_ml'"):
+        tke_mod.tke_vertical_mixing(**dict(col, cfg=cfg._replace(
+            nemo_etau_wmask=True)), precomputed_n2_bundle=bundle)
+    implicit = cfg._replace(tke_n2_evaluation_stage="implicit_solve_state")
+    with pytest.raises(ValueError, match="requires tke_n2_evaluation_stage"):
+        tke_mod.tke_vertical_mixing(**dict(col, cfg=implicit))
+    post = TKEConfig(prognostic=True, veros_dz_slots=True, n2_mode="adiabatic",
+                     positivity="veros_surface_correction",
+                     buoyancy_timing="post_mixing_veros",
+                     nemo_mxl_terminal_e3t=True)
+    with pytest.raises(ValueError, match="nemo_mxl_terminal_e3t=True is not"):
+        tke_mod._validate_post_mixing_cfg(post)
+    tke_mod._validate_post_mixing_cfg(post._replace(nemo_mxl_terminal_e3t=False))
+    with pytest.raises(ValueError, match="nemo_etau_wmask=True is not"):
+        tke_mod._validate_post_mixing_cfg(post._replace(
+            nemo_mxl_terminal_e3t=False, nemo_etau_wmask=True))
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+@pytest.mark.parametrize("coordinate_kind", ["zstar", "partial"])
+def test_coordinate_nemo_e3t_jpk_changes_literal_terminal_length(
+        coordinate_kind):
+    """Exercise nemo_e3t_jpk from both coordinate classes through tke_vertical_mixing."""
+    from legoesm.ocean.vertical import (
+        create_full_step_coordinate, create_partial_cell_coordinate,
+        create_z_star_from_thicknesses,
+    )
+
+    cfg = TKEConfig(
+        prognostic=True,
+        n2_mode="nemo_bn2",
+        tke_n2_evaluation_stage="step_entry",
+        tke_mxl_choice=3,
+        nemo_mxl_terminal_e3t=True,
+        tke_mxl_raw_evaluation="nemo_literal",
+        kappaM_min=0.0,
+        kappaH_min=0.0,
+        kappaM_max=1.0e8,
+        enable_kappaH_profile=False,
+    )
+    model, state = _step_entry_helper_fixture(cfg)
+    partial = model.z_coord
+    base = create_z_star_from_thicknesses(
+        np.asarray(partial.dz_ref),
+        nemo_gdept_0_m=np.asarray(partial.nemo_gdept_0),
+        nemo_gdepw_0_m=np.asarray(partial.nemo_gdepw_0),
+        nemo_e3t_0_m=np.asarray(partial.nemo_e3t_0),
+        nemo_e3w_0_m=np.asarray(partial.nemo_e3w_0))
+
+    def selected(terminal):
+        coordinate = base._replace(
+            nemo_e3t_jpk=jnp.full(state.eta.data.shape, terminal))
+        if coordinate_kind == "partial":
+            coordinate = create_partial_cell_coordinate(
+                coordinate, state.H_bathy.data)
+        else:
+            coordinate = create_full_step_coordinate(
+                coordinate, partial.bottom_level)
+        bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
+            model, state, z_coord=coordinate)
+        z3 = jnp.zeros_like(state.T.data)
+        e_old = jnp.full((*state.eta.data.shape, 2), 1.0e8)
+        res = tke_mod.tke_vertical_mixing(
+            u_cell=z3,
+            v_cell=z3,
+            T_cell=state.T.data,
+            S_cell=state.S.data,
+            rho_cell=jnp.full_like(z3, 1026.0),
+            dz_half=bundle.e3w_Kmm,
+            tke_old=e_old,
+            tau_x_surface=jnp.zeros(state.eta.data.shape),
+            tau_y_surface=jnp.zeros(state.eta.data.shape),
+            dt=2.0,
+            cfg=cfg,
+            n_iterations=1,
+            precomputed_n2_bundle=bundle,
+            dz_ref=coordinate.dz_ref,
+            jacobian=jnp.ones(state.eta.data.shape),
+        )
+        return bundle, np.asarray(res.K_M)
+
+    on_bundle, on = selected(7.0)
+    off_bundle, off = selected(3.0)
+    np.testing.assert_array_equal(on_bundle.e3t_jpk, np.full((2, 2), 7.0))
+    np.testing.assert_array_equal(off_bundle.e3t_jpk, np.full((2, 2), 3.0))
+    on_bits = on.view(np.uint64)
+    off_bits = off.view(np.uint64)
+    assert int(np.count_nonzero(on_bits != off_bits)) == 8
+    assert on_bits[0, 0, -1] == np.uint64(4635417765172050131)
+    assert off_bits[0, 0, -1] == np.uint64(4634036713372483349)
+    assert np.count_nonzero(on[..., -1] > off[..., -1]) == 4
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+def test_etau_wmask_leaves_dry_rows_and_wet_bits_as_nemo():
+    """zdftke.f90:500-501: the nn_etau increment carries wmask*tmask(1)."""
+    cfg = TKEConfig(etau_mode="below_ml", etau_htau_mode="constant10m",
+                    etau_frac=0.05, nemo_etau_wmask=True)
+    e = jnp.asarray([[1e-6, 2e-6, 3e-6], [4e-6, 5e-6, 6e-6]])
+    depth = jnp.asarray([[1.0, 5.0, 20.0], [1.0, 5.0, 20.0]])
+    taum = jnp.asarray([0.1, 0.2])
+    wmask = jnp.asarray([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]])
+    tmask1 = jnp.asarray([1.0, 0.0])
+    inject = jax.jit(lambda e, t, d, w, m: tke_mod.nemo_etau_injection(
+        e, t, d, cfg, wmask=w, surface_tmask=m))
+    out = np.asarray(inject(e, taum, depth, wmask, tmask1))
+    legacy = np.asarray(tke_mod.nemo_etau_injection(
+        e, taum, depth, cfg._replace(nemo_etau_wmask=False)))
+    keep = np.asarray(wmask * tmask1[:, None]) == 1.0
+    np.testing.assert_array_equal(out[keep].view(np.uint64),
+                                  legacy[keep].view(np.uint64))
+    np.testing.assert_array_equal(out[~keep], np.asarray(e)[~keep])
+    assert np.all(legacy[~keep] > np.asarray(e)[~keep])   # red control
+    with pytest.raises(ValueError, match="nemo_etau_wmask=True requires"):
+        tke_mod.nemo_etau_injection(e, taum, depth, cfg)
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
 def test_literal_etau_exp_matches_oracle_bits_and_one_ulp_control_fires():
     # First selected row-18 ownership-control operand, plus ordinary-range
     # values spanning the DINO ladder.  Expected bits are from the committed
@@ -1662,3 +1849,25 @@ def test_nemo_literal_matrix_pins_every_row_including_jpkm1(monkeypatch):
     assert no_deep_diss != diag[3]                     # jpkm1-only mutation
     swapped = 1.0 - lw[0] - up[0] + 0.7 * dissl[0]     # 1.5 <-> 0.5 weights
     assert swapped != diag[0]
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_bn2_source_rounded_flag_reaches_the_step_entry_bundle(flag, monkeypatch):
+    """Review gap: the bundle's ``source_rounded`` wiring could be cut (fixed
+    False) with every unit test green.  Spy on the production builder."""
+    from legoesm.ocean import eos as eos_mod
+
+    seen = []
+    real = eos_mod.compute_buoyancy_frequency_nemo_bn2
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("source_rounded", False))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(eos_mod, "compute_buoyancy_frequency_nemo_bn2", spy)
+    tke_cfg = dino_mod._dino_vertical_mixing_config(
+        dino_config_for_recipe("nemo_dino_kamm_mlf")).tke._replace(
+            n2_eos_form="eos80", nemo_bn2_source_rounded=flag)
+    model, state = _step_entry_helper_fixture(tke_cfg)
+    LatLonCGridOceanModel._tke_step_entry_n2_bundle(model, state)
+    assert seen and all(s is flag for s in seen)

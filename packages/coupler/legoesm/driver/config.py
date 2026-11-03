@@ -2447,35 +2447,42 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.corner_fill must be one of {CORNER_FILL_MODES}, "
                           f"got {d.corner_fill!r}")
         if d.column_lane:
-            if d.discretization not in ("fv3_duo", "latlon_cgrid"):
+            _native_grid = {"latlon_cgrid": "latlon", "spectral": "gaussian"}
+            if d.discretization not in ("fv3_duo", *_native_grid):
                 errors.append(
                     "dycore.column_lane: no column adapter for "
                     f"dycore.discretization={d.discretization!r} "
-                    "(fv3_duo, latlon_cgrid)")
-            if d.discretization == "latlon_cgrid":
-                if (g.grid_type != "latlon" or d.model_type != "hydrostatic"):
+                    "(fv3_duo, latlon_cgrid, spectral)")
+            if d.discretization in _native_grid:
+                _ng = _native_grid[d.discretization]
+                if (g.grid_type != _ng or d.model_type != "hydrostatic"):
                     errors.append(
-                        "dycore.column_lane with latlon_cgrid needs "
-                        "grid_type='latlon' and model_type='hydrostatic' "
+                        f"dycore.column_lane with {d.discretization} needs "
+                        f"grid_type={_ng!r} and model_type='hydrostatic' "
                         f"(got {g.grid_type!r}, {d.model_type!r})")
                 if self.distributed or self.ensemble_size != 1:
                     errors.append(
-                        "dycore.column_lane on latlon_cgrid is single device: "
-                        "no MPI band (distributed) and no ensemble axis")
+                        f"dycore.column_lane on {d.discretization} is single "
+                        "device: no MPI (distributed) and no ensemble axis")
                 # the column loop's MPAS q_v smoother is a Voronoi
-                # operator; this lane's is latlon_qv_smooth_del4_m4s
+                # operator; the lat-lon lane's is latlon_qv_smooth_del4_m4s
                 if self.output.budget_ledger:
                     errors.append(
-                        "output.budget_ledger on the lat-lon column lane: its "
-                        "dycore publishes no per-step ledger, so no ledger "
-                        "would be written")
+                        f"output.budget_ledger on the {d.discretization} "
+                        "column lane: its dycore publishes no per-step ledger, "
+                        "so no ledger would be written")
                 for _k in ("mpas_qv_smooth_del2_m2s", "mpas_qv_smooth_del4_m4s"):
                     if float(getattr(self, _k, 0.0) or 0.0) != 0.0:
                         errors.append(
-                            f"{_k}={getattr(self, _k)!r} on the lat-lon column "
-                            "lane: the column loop's q_v smoother needs the "
-                            "Voronoi mesh; set it to 0 (this lane's is "
-                            "latlon_qv_smooth_del4_m4s)")
+                            f"{_k}={getattr(self, _k)!r} on the "
+                            f"{d.discretization} column lane: the column "
+                            "loop's q_v smoother needs the Voronoi mesh; set "
+                            "it to 0")
+            if (d.discretization == "spectral"
+                    and str(d.time_integrator).lower() in ("leapfrog", "leapfrog_si")):
+                errors.append(
+                    "dycore.column_lane on spectral runs the explicit ssp_rk54 "
+                    f"only (D5); got time_integrator={d.time_integrator!r}")
             # every column lane: the columns are a VIEW of the native
             # state and only the dycore's step may move the winds
             if self.sponge_enabled:
@@ -3034,7 +3041,8 @@ class ExperimentConfig(NamedTuple):
         # opt-in would silently no-op there.  Reject it loudly on that backend
         # (dispatch-hardening, mirrors the condensate-scheme guard above).
         if (self.use_clubb_cloud_fraction
-                and self.dycore.discretization == "spectral"):
+                and self.dycore.discretization == "spectral"
+                and not self.dycore.column_lane):
             errors.append(
                 "use_clubb_cloud_fraction=True is not wired into the "
                 f"{self.dycore.discretization!r} radiation path (that backend "
