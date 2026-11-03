@@ -3536,6 +3536,14 @@ class ExperimentConfig(NamedTuple):
                     f"physics_update_steps={_pus} (>= it) so radiation is "
                     "recomputed on physics steps; a held-physics step cannot "
                     "solve radiation")
+            if self.convection == "tiedtke":
+                errors.append(
+                    f"physics_update_steps={_pus} with convection='tiedtke': "
+                    "Tiedtke's moisture-convergence trigger reads the "
+                    "dynamics water-vapour tendency of the step physics "
+                    "runs on, and held-physics steps would drop the "
+                    "intervening dynamics tendencies; use "
+                    "physics_update_steps=1")
         # R-ex (D-REX-1) checkpoint/radiation alignment is NOT checked here:
         # it depends on the EFFECTIVE timestep, which the driver may clamp
         # (CFL) after this validation -- see

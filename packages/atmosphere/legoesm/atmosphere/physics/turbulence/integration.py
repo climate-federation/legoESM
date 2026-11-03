@@ -499,7 +499,10 @@ def _carry_update_with_cloud_fraction(carry_field, carry_val, turb_out):
     field) is not None, which holds for every scheme (turbulence_carry_field
     never returns None).
     """
-    updates = {"pblh": turb_out.h_pbl}
+    # pblh for ZM; the dq_v tendency + surface water flux for WRF Tiedtke
+    # (kept only where PhysicsState materialises those slots).
+    updates = {"pblh": turb_out.h_pbl, "turb_tendency_qv": turb_out.dq_v_dt,
+               "evap_sfc": turb_out.evap_sfc}
     if turb_out.cloud_fraction is not None:
         updates["cloud_fraction"] = turb_out.cloud_fraction
         if turb_out.relvar is not None:

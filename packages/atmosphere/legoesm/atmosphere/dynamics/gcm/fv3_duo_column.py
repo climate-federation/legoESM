@@ -522,11 +522,12 @@ class FV3DuoColumnModel:
             return self.from_bundle(fn(bundle, pre))
         fn = self._post_fns.get(physics_fn)
         if fn is None:
-            fn = jax.jit(lambda b, dt_, fo, ps, b_pre: self._physics_and_apply(
-                b, dt_, physics_fn, fo, ps, b_pre))
+            fn = jax.jit(lambda b, dt_, fo, ps, b_pre, b0: self._physics_and_apply(
+                b, dt_, physics_fn, fo, ps, b_pre, bundle_dyn0=b0))
             self._post_fns[physics_fn] = fn
-        state_new, phys_out, sfc_diag = fn(bundle, float(dt), forcing,
-                                           phys_state, pre)
+        state_new, phys_out, sfc_diag = fn(
+            bundle, float(dt), forcing, phys_state, pre,
+            bundle_pre if phys_state is not None else None)
         if timers is not None:
             jax.block_until_ready(state_new.T.data)
             timers["physics"] += time.perf_counter() - t1
@@ -632,8 +633,8 @@ class FV3DuoColumnModel:
         return st, dT
 
     def _physics_and_apply(self, bundle, dt, physics_fn, forcing, phys_state,
-                           bundle_pre=None):
-        from legoesm.core.state import MPAS_SFC_DIAG_EXTRA_KEYS
+                           bundle_pre=None, bundle_dyn0=None):
+        from legoesm.core.state import MPAS_SFC_DIAG_EXTRA_KEYS, with_dyn_tendencies
         cols, view, faces = self._view3(bundle)
         st_in = faces["state"]
         if bundle_pre is not None:
@@ -642,6 +643,9 @@ class FV3DuoColumnModel:
             st_in, dT_fix = self._fix_energy(faces, cols, bundle_pre)
             cols = cols._replace(T=cols.T.replace(
                 data=cols.T.data + dT_fix.astype(cols.T.data.dtype)))
+        if bundle_dyn0 is not None:
+            phys_state = with_dyn_tendencies(
+                phys_state, self._view3(bundle_dyn0)[0], cols, dt)
         pr = physics_fn(cols, self.mesh, self.sigma_coord,
                         phys_state=phys_state, forcing=forcing)
         tend, phys_out = (pr[0], pr[1]) if type(pr) is tuple else (pr, phys_state)

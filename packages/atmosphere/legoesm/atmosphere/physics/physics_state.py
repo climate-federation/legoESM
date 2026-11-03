@@ -284,6 +284,14 @@ class PhysicsState(NamedTuple):
     # CAM6 pbuf CLDO: the previous macmic sub-step's ast, set after the
     # microphysics (micro_mg_cam.F90:1829); 0 at cold start (:1047).
     cloud_fraction_old: jnp.ndarray = None
+    # WRF Tiedtke inputs from the PREVIOUS step's turbulence (on every lane
+    # turbulence runs after convection): the boundary-layer moisture tendency
+    # (ncol, nlev) [kg/kg/s] (WRF ``qvpblten``) and the surface water flux
+    # (ncol,) [kg/m^2/s, positive up] (WRF ``qfx``).  Zeros at cold start;
+    # materialised only when convection is ``tiedtke`` (None otherwise, so no
+    # other run carries them).  Appended LAST.
+    turb_tendency_qv: jnp.ndarray = None
+    evap_sfc: jnp.ndarray = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -407,6 +415,10 @@ def init_physics_state(
             conv_cfg.edmf.a_u_init
         )
 
+    _tiedtke = conv_cfg.scheme == "tiedtke"
+    turb_tendency_qv = jnp.zeros((ncol, nlev), dtype=dtype) if _tiedtke else None
+    evap_sfc = jnp.zeros((ncol,), dtype=dtype) if _tiedtke else None
+
     # --- Convection stochastic AR1 noise state (Bechtold/IFS) ---
     conv_stoch_state = jnp.zeros((ncol,), dtype=dtype)
 
@@ -486,6 +498,8 @@ def init_physics_state(
         clubb_wp2_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         clubb_kh_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         cloud_fraction_old=jnp.zeros((ncol, nlev), dtype=dtype),
+        turb_tendency_qv=turb_tendency_qv,
+        evap_sfc=evap_sfc,
     )
 
 
@@ -581,4 +595,20 @@ def update_physics_state(phys_state, updates):
         clubb_kh_iface=updates.get("clubb_kh_iface", phys_state.clubb_kh_iface),
         cloud_fraction_old=updates.get(
             "cloud_fraction_old", phys_state.cloud_fraction_old),
+        # Tiedtke-only slots: written only when materialised (see the field).
+        turb_tendency_qv=(None if phys_state.turb_tendency_qv is None
+                          else updates.get("turb_tendency_qv",
+                                           phys_state.turb_tendency_qv)),
+        evap_sfc=_tiedtke_evap_update(phys_state.evap_sfc, updates),
     )
+
+
+def _tiedtke_evap_update(current, updates):
+    if current is None:
+        return None
+    if "evap_sfc" in updates and updates["evap_sfc"] is None:
+        raise ValueError(
+            "convection='tiedtke' reads the previous step's surface water "
+            "flux (WRF qfx) from the turbulence scheme, but this turbulence "
+            "scheme returned evap_sfc=None")
+    return updates.get("evap_sfc", current)

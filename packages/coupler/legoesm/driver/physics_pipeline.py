@@ -1171,8 +1171,15 @@ class PhysicsPipeline:
                             tke=None, qke=None, gwd_spectrum=None,
                             w_land=None, snow=None, land_ml=None,
                             land_ml_params=None, cloud_fraction=None,
-                            T_ice_skin=None, cell_area=None):
+                            T_ice_skin=None, cell_area=None,
+                            dq_v_dt_dyn=None, turb_dq_v_prev=None,
+                            evap_sfc_prev=None):
         """Convection + microphysics + BL exchange with held radiation.
+
+        ``dq_v_dt_dyn`` (this step's dynamics q_v tendency, grid shape) and
+        ``turb_dq_v_prev`` / ``evap_sfc_prev`` (the previous step's turbulence
+        q_v tendency and surface water flux) are WRF Tiedtke's ``qvften``,
+        ``qvpblten`` and ``qfx``; read only by ``convection='tiedtke'``.
 
         ``T_ice_skin`` (optional, per column, grid shape) replaces the scalar
         ``T_ice`` in every surface-temperature blend: the prognostic ice skin.
@@ -1268,12 +1275,15 @@ class PhysicsPipeline:
         # factories so the two call paths cannot drift).
         from legoesm.atmosphere.physics.convection.integration import (
             convection_scheme_traits,
+            diagnose_omega_columns_hydrostatic,
             diagnose_w_grid_columns_hydrostatic,
         )
         from legoesm.atmosphere.physics._shared import (
+            compute_heights_from_sigma,
             compute_moisture_convergence,
             moisture_convergence_supported,
         )
+        from legoesm.grids.vertical import HybridSigmaPressureCoordinate
 
         _ctr = convection_scheme_traits(self._conv_scheme)
 
@@ -1570,37 +1580,73 @@ class PhysicsPipeline:
                     dt=dt, config=_conv_cfg,
                     u=u_conv_col, v=v_conv_col,
                 )
+            elif self._conv_scheme == "tiedtke":
+                # WRF Tiedtke port (same inputs as the hydrostatic bridge):
+                # qvften = this step's dynamics q_v tendency from the caller;
+                # qvpblten / qfx = the previous step's turbulence (it runs
+                # after convection here) riding the segment carry.
+                if (dq_v_dt_dyn is None or turb_dq_v_prev is None
+                        or evap_sfc_prev is None):
+                    raise ValueError(
+                        "convection='tiedtke' needs dq_v_dt_dyn, "
+                        "turb_dq_v_prev and evap_sfc_prev; this caller "
+                        "supplies "
+                        f"{[n for n, v in (('dq_v_dt_dyn', dq_v_dt_dyn), ('turb_dq_v_prev', turb_dq_v_prev), ('evap_sfc_prev', evap_sfc_prev)) if v is None]} "
+                        "as None")
+                if not _winds_on_t_grid:
+                    raise ValueError(
+                        "convection='tiedtke' needs cell-centre winds "
+                        "(cumulus friction, omega)")
+                if isinstance(self._sigma_coord, HybridSigmaPressureCoordinate):
+                    raise ValueError(
+                        "convection='tiedtke' needs omega, which is diagnosed "
+                        "by PURE-sigma continuity; a hybrid coordinate would "
+                        "get a wrong omega")
+                _omega = (None if self._grid is None else
+                          diagnose_omega_columns_hydrostatic(
+                              u, v, p_s, self._grid, self._sigma_coord,
+                              ad.ncol, nlev))
+                if _omega is None:
+                    raise ValueError(
+                        "convection='tiedtke' needs the resolved pressure "
+                        "velocity, diagnosed on the cubed-sphere and lat-lon "
+                        "grids only")
+                _z_full, _ = compute_heights_from_sigma(
+                    T_col, p_half_col, q_v_col)
+                conv_out, conv_prog_out = self.convection_fn(
+                    T_col, q_v_col, p_full_col, p_half_col,
+                    u_conv_col, v_conv_col, dt,
+                    geopotential=constants.g * _z_full,
+                    omega=_omega.astype(T_col.dtype),
+                    dq_v_dt_dyn=ad.flatten_3d(dq_v_dt_dyn),
+                    dq_v_dt_pbl=ad.flatten_3d(turb_dq_v_prev),
+                    surface_moisture_flux=ad.flatten_2d(evap_sfc_prev),
+                    land_frac=(ad.flatten_2d(self.f_land)
+                               if self.f_land is not None else None),
+                    sigma=jnp.broadcast_to(
+                        self._sigma_coord.sigma_full,
+                        (ad.ncol, nlev)).astype(T_col.dtype),
+                )
             elif _ctr.is_cmt_capable:
-                if _ctr.is_mc_consumer:
-                    # Tiedtke: CMT winds + moisture convergence.
-                    conv_out, conv_prog_out = self.convection_fn(
-                        T=T_col, q_v=q_v_col,
-                        p_full=p_full_col, p_half=p_half_col,
-                        u=u_conv_col, v=v_conv_col,
-                        conv_prog_profile=conv_prog,
-                        dt=dt, config=_conv_cfg,
-                        moisture_convergence=mc_col,
-                    )
-                else:
-                    # Zhang-McFarlane (CAM6): CMT winds, no MC kwarg; the
-                    # land fraction selects the c0 autoconversion
-                    # coefficient; the previous step's cloud-fraction carry
-                    # (CLUBB's PDF cloud fraction, None otherwise -> CAM's
-                    # (1 - cldfrc) = 1) feeds the rain evaporation; the
-                    # 40 hPa cap is fixed from the REFERENCE interfaces.
-                    conv_out, conv_prog_out = self.convection_fn(
-                        T=T_col, q_v=q_v_col,
-                        p_full=p_full_col, p_half=p_half_col,
-                        u=u_conv_col, v=v_conv_col,
-                        conv_prog_profile=conv_prog,
-                        dt=dt, config=_conv_cfg,
-                        land_frac=(
-                            ad.flatten_2d(self.f_land)
-                            if self.f_land is not None else None),
-                        cld_frac=(None if cloud_fraction is None
-                                  else cloud_fraction.reshape(T_col.shape)),
-                        pref_edge=self.sigma_half * constants.p_ref,
-                    )
+                # Zhang-McFarlane (CAM6): CMT winds, no MC kwarg; the
+                # land fraction selects the c0 autoconversion
+                # coefficient; the previous step's cloud-fraction carry
+                # (CLUBB's PDF cloud fraction, None otherwise -> CAM's
+                # (1 - cldfrc) = 1) feeds the rain evaporation; the
+                # 40 hPa cap is fixed from the REFERENCE interfaces.
+                conv_out, conv_prog_out = self.convection_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    u=u_conv_col, v=v_conv_col,
+                    conv_prog_profile=conv_prog,
+                    dt=dt, config=_conv_cfg,
+                    land_frac=(
+                        ad.flatten_2d(self.f_land)
+                        if self.f_land is not None else None),
+                    cld_frac=(None if cloud_fraction is None
+                              else cloud_fraction.reshape(T_col.shape)),
+                    pref_edge=self.sigma_half * constants.p_ref,
+                )
             elif _ctr.is_w_grid_consumer:
                 # Kain-Fritsch: resolved-w trigger.
                 conv_out, conv_prog_out = self.convection_fn(
@@ -1844,7 +1890,8 @@ class PhysicsPipeline:
             # detrained precipitation handed to the rain/snow species stays
             # in the column (IFS PSNDE)
             for _detr in (getattr(conv_out, "dq_r_detr_dt", None),
-                          getattr(conv_out, "dq_s_detr_dt", None)):
+                          getattr(conv_out, "dq_s_detr_dt", None),
+                          getattr(conv_out, "dq_i_conv_dt", None)):
                 if _detr is not None:
                     _bl_conv_q = _bl_conv_q + ad.unflatten_3d(_detr)
             _bl_conv = ledger_entry(_bl_conv_q, dT_dt_conv, p_s, _bl_dsigma,
@@ -1867,6 +1914,13 @@ class PhysicsPipeline:
         # column water removed equals the added precip (mass-conserving).
         if _ctr.detrains_to_cloud:
             dq_c_dt = dq_c_dt + dq_c_dt_conv
+            _dqi_conv = getattr(conv_out, "dq_i_conv_dt", None)
+            if _dqi_conv is not None:
+                if q_i is None:
+                    raise ValueError(
+                        "convection detrains cloud ice (WRF Tiedtke) but this "
+                        "run carries no q_i species")
+                dq_i_dt = dq_i_dt + ad.unflatten_3d(_dqi_conv)
             # #832: mass-flux schemes (bechtold/tiedtke) SPLIT the detrained
             # condensate by ``precip_efficiency``: ``dq_c_conv_dt`` = anvil cloud
             # (added to q_c above -> microphysics next step) and ``dq_r_conv_dt``
@@ -2582,6 +2636,10 @@ class PhysicsPipeline:
                 turb_out.cloud_fraction if turb_out is not None else None),
             budget_ledger=_bl_out,
             sed_substeps_required=_sed_req,
+            turb_dq_v_dt=(
+                ad.unflatten_3d(turb_out.dq_v_dt)
+                if self._conv_scheme == "tiedtke" and turb_out is not None
+                else None),
         )
 
     def _toa_insolation(self, lat, lon, day_of_year, seconds_of_day, s_0):
@@ -3358,7 +3416,8 @@ class PhysicsPipeline:
                          conv_precip=None, land_ml=None, w_land=None,
                          snow=None, land_ml_params=None, cloud_fraction=None,
                          conv_precip_frozen=None, ice_T_skin=None,
-                         cell_area=None):
+                         cell_area=None, dq_v_dt_dyn=None,
+                         turb_dq_v_prev=None, evap_sfc_prev=None):
 
             if pipeline.ice_skin_prognostic and ice_T_skin is None:
                 raise ValueError(
@@ -3469,6 +3528,8 @@ class PhysicsPipeline:
                     sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     cell_area=cell_area,
+                    dq_v_dt_dyn=dq_v_dt_dyn, turb_dq_v_prev=turb_dq_v_prev,
+                    evap_sfc_prev=evap_sfc_prev,
                     w_land=w_land, snow=snow, land_ml=land_ml,
                     land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
                     T_ice_skin=ice_T_skin,
@@ -3540,6 +3601,8 @@ class PhysicsPipeline:
                     sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     cell_area=cell_area,
+                    dq_v_dt_dyn=dq_v_dt_dyn, turb_dq_v_prev=turb_dq_v_prev,
+                    evap_sfc_prev=evap_sfc_prev,
                     w_land=w_land, snow=snow, land_ml=land_ml,
                     land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
                     T_ice_skin=ice_T_skin,

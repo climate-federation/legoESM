@@ -86,3 +86,7 @@ class PhysicsOutput(NamedTuple):
     # takes its snowfall from it.  None when a precipitating scheme does not
     # publish it (a consumer then refuses).  Appended LAST (positional ABI).
     precip_frozen: jax.Array | None = None
+    # The turbulence q_v tendency of this step [kg/kg/s], grid shape: WRF
+    # Tiedtke's ``qvpblten`` for the NEXT step (the caller carries it).  None
+    # unless convection is ``tiedtke``.  Appended LAST (positional ABI).
+    turb_dq_v_dt: jax.Array | None = None
