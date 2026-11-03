@@ -129,6 +129,10 @@ class GridConfig(NamedTuple):
     # before (unchanged).
     mpas_mesh_file: str = ""
     mpas_mesh_sha256: str = ""
+    # The saved mesh is variable resolution (not 10 x 4**r + 2 cells): the
+    # loader checks the file's own cell count and its variable_mesh mark
+    # instead of the subdivision level (load_voronoi_mesh_for_run).
+    mpas_mesh_variable: bool = False
 
 
 # Canonical name for the SCVT Voronoi mesh + TRiSK discretization.
@@ -2463,6 +2467,10 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "mpas_mesh_sha256 is set but mpas_mesh_file is empty; the "
                 "pin would be ignored")
+        if getattr(g, "mpas_mesh_variable", False) and not _mesh_file:
+            errors.append(
+                "mpas_mesh_variable is set but mpas_mesh_file is empty; a "
+                "variable mesh is only loaded from a saved file")
         if self.land_fraction_source not in ("topography", "era5", "zero"):
             errors.append(
                 f"land_fraction_source must be topography, era5 or zero, got "

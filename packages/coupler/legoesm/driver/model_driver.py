@@ -3520,7 +3520,8 @@ class ModelDriver:
         mesh = load_voronoi_mesh_for_run(
             gc.mpas_mesh_file, resolution=gc.resolution,
             expected_sha256=getattr(gc, "mpas_mesh_sha256", ""),
-            lloyd_iterations=lloyd_iterations, radius=constants.R_earth)
+            lloyd_iterations=lloyd_iterations, radius=constants.R_earth,
+            variable=bool(getattr(gc, "mpas_mesh_variable", False)))
         logger.info(
             "  MPAS mesh loaded from %s (sha256 %s, %d cells); not "
             "regenerated", gc.mpas_mesh_file, gc.mpas_mesh_sha256,

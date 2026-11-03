@@ -352,6 +352,7 @@ def load_voronoi_mesh_for_run(
     expected_sha256: str,
     lloyd_iterations: int | None = None,
     radius: float | None = None,
+    variable: bool = False,
 ) -> VoronoiMesh:
     """Load a pinned global mesh for a model run, or refuse.
 
@@ -360,6 +361,15 @@ def load_voronoi_mesh_for_run(
     count is not ``10 * 4**resolution + 2``, when ``lloyd_iterations`` or
     ``radius`` are given and differ from the file's, and on any hash problem
     (see :func:`load_voronoi_mesh`).
+
+    ``variable=True`` loads a variable-resolution (non-icosahedral) mesh: the
+    file must be marked ``variable_mesh: true`` in its metadata (saved with
+    ``extra_metadata={"variable_mesh": True, ...}``), its cell count is checked
+    against the count recorded in that metadata instead of the icosahedral
+    ``10 * 4**r + 2``, and ``resolution`` and ``lloyd_iterations`` are not
+    compared (a variable mesh has no subdivision level).  A file marked
+    variable is refused when ``variable`` is False, so a variable mesh is
+    never taken for a uniform one.
     """
     path = os.fspath(path)
     if not expected_sha256 or not str(expected_sha256).strip():
@@ -370,6 +380,22 @@ def load_voronoi_mesh_for_run(
     if not os.path.isfile(path):
         raise MeshFileError(f"mesh file {path} does not exist")
     meta = read_voronoi_mesh_metadata(path)
+    file_variable = bool(meta.get("variable_mesh", False))
+    if file_variable != bool(variable):
+        raise MeshFileError(
+            f"mesh file {path} is {'a variable' if file_variable else 'an icosahedral'}"
+            f" mesh but the run asks for {'a variable' if variable else 'an icosahedral'}"
+            " one (mpas_mesh_variable)")
+    if variable:
+        mesh = load_voronoi_mesh(path, expected_sha256=expected_sha256)
+        if mesh.nCells != int(meta.get("nCells", -1)):
+            raise MeshFileError(
+                f"mesh file {path} has {mesh.nCells} cells, its metadata "
+                f"records {meta.get('nCells')}")
+        if radius is not None and float(mesh.radius) != float(radius):
+            raise MeshFileError(
+                f"mesh file {path} has radius {mesh.radius}, the run uses {radius}")
+        return mesh
     file_res = meta.get("resolution")
     if file_res is None or int(file_res) != int(resolution):
         raise MeshFileError(

@@ -329,6 +329,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="SHA-256 the --mpas-mesh-file must have (printed "
                              "by save_mpas_mesh.py); the run refuses any other "
                              "mesh.")
+    parser.add_argument("--mpas-mesh-variable", action=argparse.BooleanOptionalAction,
+                        default=False, dest="mpas_mesh_variable",
+                        help="The --mpas-mesh-file is a variable-resolution mesh "
+                             "(marked variable_mesh in its metadata): its cell count "
+                             "is checked against the file's own record instead of "
+                             "10*4^r+2, and --resolution is not compared.")
     # The canonical names in `supported_matrix.py` are:
     #   - centered       (cubed_sphere, latlon)
     #   - finite_volume  (cubed_sphere, latlon)
@@ -3054,6 +3060,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_duogrid=getattr(args, "use_duogrid", False),
         mpas_mesh_file=getattr(args, "mpas_mesh_file", "") or "",
         mpas_mesh_sha256=getattr(args, "mpas_mesh_sha256", "") or "",
+        mpas_mesh_variable=bool(getattr(args, "mpas_mesh_variable", False)),
     )
 
     dycore_config = DycoreConfig(
