@@ -891,6 +891,11 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 "microphysics='ifs_cloudsc' runs CLOUDSC once per physics "
                 "step (the IFS order, no macro/micro sub-cycle): needs "
                 f"cld_macmic_num_steps=1, got {_n_macmic}.")
+    # Water positivity right after ZM's update (ZhangMcFarlaneConfig.
+    # positivity_after_zm), where CAM6 runs qneg3.
+    _zm_positivity = (model_type == "mpas" and _n_macmic >= 2
+                      and config.convection.scheme == "zhang_mcfarlane"
+                      and bool(config.convection.zhang_mcfarlane.positivity_after_zm))
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(
             config.convection, model_type, dt,
@@ -1408,9 +1413,39 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 if dlf is not None:
                     dlf = dlf.reshape(state.T.data.shape)
                 r_pre = r_pre[:6] + (_upd,) + r_pre[7:]
-            parts.append((r_pre, 1.0))
             state_m = _advance_state(state_m, r_pre[0], r_pre[1], r_pre[2],
                                      r_pre[3], r_pre[5], dt)
+            if _zm_positivity:
+                # CAM6 runs qneg3 here (physics_update after convect_deep_tend,
+                # physpkg.F90:1925); legoESM uses its column-conserving borrow.
+                # The correction joins ZM's tendency, so the window total and
+                # the ledger see it.
+                from legoesm.core.conservation import after_convection_positivity
+                _q0 = state.tracers["q_v"].data
+                _dqv = r_pre[5].get("q_v")
+                _tr_in = {k: f.data for k, f in state_m.tracers.items()}
+                _dp = sigma_coord.layer_thickness_dp(state_m.p_s.data)
+                _tr_out, _T_out, _zdiag = after_convection_positivity(
+                    _tr_in, state_m.T.data, _dp)
+                _tr_t = dict(r_pre[5])
+                for _k, _v in _tr_out.items():
+                    if _k in _tr_t:
+                        _tr_t[_k] = _tr_t[_k] + (_v - _tr_in[_k]) / dt
+                    elif _k in _tr_in:
+                        _tr_t[_k] = (_v - _tr_in[_k]) / dt
+                r_pre = (r_pre[:2] + (r_pre[2] + (_T_out - state_m.T.data) / dt,)
+                         + r_pre[3:5] + (_tr_t,) + r_pre[6:])
+                if _dqv is not None:
+                    # largest net ZM vapour outflow over the content in one dt
+                    _zdiag["max_outflow_over_content"] = jnp.max(
+                        jnp.where(_q0 > 0.0, -dt * _dqv / jnp.where(_q0 > 0.0, _q0, 1.0),
+                                  0.0), axis=-1)
+                r_pre = r_pre[:6] + ({**r_pre[6], "zm_borrow_diag": _zdiag},) + r_pre[7:]
+                state_m = state_m._replace(
+                    T=state_m.T.replace(data=_T_out),
+                    tracers={k: f.replace(data=_tr_out[k])
+                             for k, f in state_m.tracers.items()})
+            parts.append((r_pre, 1.0))
             # CAM order: clubb_tend_cam reads THIS step's convect_deep_tend
             # output (cmfmc, dlf), so the convective carries are visible to
             # the sub-cycle (the N=1 split hands them over one step late).

@@ -318,6 +318,11 @@ class PhysicsState(NamedTuple):
     # znt, hfx, qfx, pblh), seeded at WRF's cold start; None for every other
     # scheme.  Appended LAST with a default.
     sfclay: jnp.ndarray = None
+    # Diagnostic of the water positivity after ZM (combined macmic loop):
+    # dict of per-column counts and deficits, published every call when
+    # ZhangMcFarlaneConfig.positivity_after_zm is on; None otherwise.
+    # Appended LAST.
+    zm_borrow_diag: object = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -339,6 +344,8 @@ PHYSSTATE_INPUT_FIELDS = frozenset({
     "dyn_tendency_T", "dyn_tendency_qv", "dyn_w_ls",
     # per-job physics-cadence cache: carried across steps, never persisted
     "held_physics",
+    # per-call diagnostic of the positivity after ZM, never persisted
+    "zm_borrow_diag",
     "surface_wth_override", "surface_wqv_override",
     "surface_shflx_override_w_m2", "surface_lhflx_override_w_m2",
     "surface_evap_override_kg_m2_s",
@@ -659,6 +666,7 @@ def update_physics_state(phys_state, updates):
         zc_q_v_prev=updates.get("zc_q_v_prev", phys_state.zc_q_v_prev),
         zc_p_s_prev=updates.get("zc_p_s_prev", phys_state.zc_p_s_prev),
         sfclay=updates.get("sfclay", phys_state.sfclay),
+        zm_borrow_diag=updates.get("zm_borrow_diag", phys_state.zm_borrow_diag),
     )
 
 

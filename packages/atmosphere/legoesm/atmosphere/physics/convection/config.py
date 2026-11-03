@@ -799,6 +799,13 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # closure mass flux is scaled by a C1 ramp from 0 at capelmt to 1 at
     # capelmt + width (_zm_cam6 module docstring).  0 = CAM's hard switch.
     trigger_width_J_kg: float = 10.0
+    # Water positivity right after ZM's update in the macmic loop (MPAS lane,
+    # cld_macmic_num_steps >= 2), where CAM6 runs qneg3 inside physics_update
+    # after convect_deep_tend (physpkg.F90:1925).  CAM6 floors Q at 1e-12 and
+    # creates water; legoESM pays and borrows column by column instead
+    # (core.conservation.after_convection_positivity), a documented
+    # departure.  False (default) = no positivity stage after ZM.
+    positivity_after_zm: bool = False
 
 
 class KainFritschConfig(NamedTuple):
