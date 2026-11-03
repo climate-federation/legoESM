@@ -173,3 +173,17 @@ def test_lane_kwargs_only_for_thompson():
     assert w.shape == (2, 3)
     wf = half_level_w_to_full(jnp.arange(8.0).reshape(2, 4), 2, 3)
     np.testing.assert_array_equal(np.asarray(wf), [[0.5, 1.5, 2.5], [4.5, 5.5, 6.5]])
+
+
+def test_fp32_state_runs_in_fp64_and_returns_state_dtype(case):
+    """Vote J11a: an fp32 state (x64 enabled) runs the fp64-certified port as
+    an fp64 island (no dtype crash in the sedimentation loop) and returns
+    finite fp32 tendencies."""
+    T, qv, hyd, p, dz, w = _host(case)
+    f32 = lambda x: None if x is None else x.astype(jnp.float32)  # noqa: E731
+    out32 = thompson_microphysics(f32(T), f32(qv), HydrometeorState(*map(f32, hyd)),
+                                  f32(p), None, None, f32(dz), 300.0, w=f32(w))
+    for f in ("dT_dt", "dq_v_dt", "dN_r_dt", "precipitation"):
+        x = getattr(out32, f)
+        assert x.dtype == jnp.float32, f
+        assert np.all(np.isfinite(np.asarray(x))), f
