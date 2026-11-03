@@ -34,12 +34,11 @@ UNREACHABLE_SCHEMES = {
         "SAM's CRM convention (cloud fraction = 1 wherever condensate > 0); "
         "raises without explicit q_cloud/q_ice from microphysics. Not a C48 "
         "GCM scheme -- it belongs to the plane/CRM lane, not AMIP.",
-    # run_coupled shares run_amip's parser (composable physics P5a), so it
-    # carries exactly run_amip's two protective exclusions above.
-    ("run_coupled", "microphysics", "ml_emulator"):
-        "Shared parser with run_amip (P5a): same untrained-network exclusion.",
-    ("run_coupled", "clouds", "resolved"):
-        "Shared parser with run_amip (P5a): same CRM-only-convention exclusion.",
+    ("run_coupled", "radiation", "none"):
+        "With radiation off a coupled run gets no solar heating of the "
+        "surface or the ocean, so the coupled climate has no energy source; "
+        "main's run_coupled refused it and the shared parser (P5a) keeps "
+        "that refusal.",
     ("run_coupled", "surface_bulk_scheme", "none"):
         "No surface bulk fluxes means no air-sea exchange, so nothing drives "
         "the ocean; run_coupled refuses it (test_surface_bulk_none).",

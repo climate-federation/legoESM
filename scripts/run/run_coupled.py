@@ -547,6 +547,13 @@ _COUPLED_DISCRETIZATION = {
     "voronoi": "mpas",
 }
 
+# Values the coupled CLI accepted before it shared run_amip's parser
+# (run_amip excludes them; main's coupled CLI did not).
+_COUPLED_EXTRA_CHOICES = {"clouds": ("resolved",), "microphysics": ("ml_emulator",)}
+# ...and values it refused (reasons in tests/unit/_scheme_reachability_baseline.py).
+_COUPLED_REFUSED_CHOICES = {"surface_bulk_scheme": ("none",), "radiation": ("none",)}
+
+
 def _coupled_atm_config(args):
     """The atmosphere ``ExperimentConfig`` through run_amip's builder, then the
     rows the coupled lane sets itself (discretization, polar filter on lat-lon
@@ -628,9 +635,10 @@ def build_parser():
            store_true=True)
     _alias(parser, "unfused_radiation", "--no-unfused-radiation", store_false=True)
     acts = {a.dest: a for a in parser._actions}
-    # "none" (no surface fluxes) cannot drive an ocean.
-    acts["surface_bulk_scheme"].choices = [
-        s for s in acts["surface_bulk_scheme"].choices if s != "none"]
+    for dest, extra in _COUPLED_EXTRA_CHOICES.items():
+        acts[dest].choices = [*acts[dest].choices, *extra]
+    for dest, drop in _COUPLED_REFUSED_CHOICES.items():
+        acts[dest].choices = [c for c in acts[dest].choices if c not in drop]
 
     # Preset
     parser.add_argument(

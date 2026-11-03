@@ -28,14 +28,17 @@ def test_every_amip_dest_is_a_coupled_dest():
     missing = sorted(set(amip) - set(coupled))
     assert not missing, missing
     for dest, a in amip.items():
-        if dest not in ("grid_type", "surface_bulk_scheme"):
-            assert coupled[dest].choices == a.choices, dest
+        from scripts.run.run_coupled import (
+            _COUPLED_EXTRA_CHOICES, _COUPLED_REFUSED_CHOICES)
+        if dest != "grid_type":   # the coupled lane couples four grids only
+            want = None if a.choices is None else [
+                c for c in [*a.choices, *_COUPLED_EXTRA_CHOICES.get(dest, ())]
+                if c not in _COUPLED_REFUSED_CHOICES.get(dest, ())]
+            got = coupled[dest].choices
+            assert (None if got is None else list(got)) == want, dest
         assert coupled[dest].type == a.type, dest
     assert sorted(coupled["grid_type"].choices) == [
         "cubed_sphere", "gaussian", "latlon", "voronoi"]
-    # the coupled lane couples four grids only; no surface fluxes cannot drive an ocean
-    assert coupled["surface_bulk_scheme"].choices == [
-        s for s in amip["surface_bulk_scheme"].choices if s != "none"]
 
 
 @pytest.mark.parametrize("deck", [
