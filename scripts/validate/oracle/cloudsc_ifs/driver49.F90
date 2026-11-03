@@ -8,7 +8,9 @@
 ! values (vote V7a) and every difference is printed.
 ! Inputs the file lacks get the votes' values (V2-V5, user picks 2-3):
 !   NCLDTOP via a monotone STPRE crossing RCLDTOPP between levels 14 and 15;
-!   PLUDE = PLUDELI = 0; PEIS = 0; KCTOP = KPBLTYPE = 0; PDYNR = PDYNS = 0;
+!   PLUDE = PLUDELI = 0 (LDETR=.FALSE.; LDETR=.TRUE. = vote V18a detrainment arm:
+!   file PLUDE kept, PLUDELI(:,:,1:2) = FOEALFA(PT) / 1-FOEALFA(PT) split of it,
+!   slots 3-4 zero; the PLUDE/PLUDELI used are written out); PEIS = 0; KCTOP = KPBLTYPE = 0; PDYNR = PDYNS = 0;
 !   PSNDE: 49r1 slot 1 (rain) = 0, slot 2 (snow) = file PSNDE (all zero);
 !   PGEOM hydrostatic from the file's T, q, p with zero surface geopotential;
 !   PGAW = NaN (unused at defaults; any read would poison the outputs);
@@ -35,7 +37,9 @@ CHARACTER(LEN=512) :: CIN, COUT, CNML
 INTEGER(KIND=JPIM) :: KLON, KLEV, KFLDX, JK, JL
 REAL(KIND=JPRB) :: ZNAN
 REAL(KIND=JPRB) :: PTSPHY, RCLOUD_FRAC_STD, PGAW_VALUE, PGEOM_SCALE
-NAMELIST /HARNESS/ RCLOUD_FRAC_STD, PGAW_VALUE, PGEOM_SCALE
+LOGICAL :: LDETR = .FALSE.
+REAL(KIND=JPRB), ALLOCATABLE :: ZALF(:,:)
+NAMELIST /HARNESS/ RCLOUD_FRAC_STD, PGAW_VALUE, PGEOM_SCALE, LDETR
 TYPE(TECLDP), TARGET :: YDECLDP
 TYPE(TEPHLI) :: YDEPHLI
 TYPE(TERAD) :: YDERAD
@@ -113,7 +117,15 @@ LDSLPHY = SCALAR('LDSLPHY') > 0
 ALLOCATE(PDYNR(KLON,KLEV), PDYNS(KLON,KLEV), PGEOM(KLON,KLEV), ZPHI(KLON,KLEV+1))
 PDYNR = 0; PDYNS = 0
 ALLOCATE(PLUDELI(KLON,KLEV,4), PSNDE(KLON,KLEV,2), PGAW(KLON), PEIS(KLON), KCTOP(KLON), KPBLTYPE(KLON))
-PLUDE = 0; PLUDELI = 0                            ! vote V3c
+PLUDELI = 0
+IF (LDETR) THEN                                   ! vote V18a
+  ZALF = MIN(1.0_JPRB, ((MAX(YRTHF%RTICE, MIN(YRTHF%RTWAT, PT)) - YRTHF%RTICE)*YRTHF%RTWAT_RTICE_R)**2)
+  PLUDELI(:,:,1) = ZALF*PLUDE
+  PLUDELI(:,:,2) = (1.0_JPRB - ZALF)*PLUDE
+ELSE
+  PLUDE = 0                                       ! vote V3c
+ENDIF
+CALL W2('PLUDE_IN', PLUDE); CALL W3('PLUDELI_IN', PLUDELI)
 CALL R2('PSNDE', PCOVPTOT); PSNDE(:,:,1) = 0; PSNDE(:,:,2) = PCOVPTOT   ! dwarf PSNDE = snow; 49r1 slot 1 rain, 2 snow
 PEIS = 0; KCTOP = 0; KPBLTYPE = 0                 ! vote V4b / user pick 2
 PGAW = IEEE_VALUE(PGAW_VALUE, IEEE_QUIET_NAN)     ! votes V5a/V10c: NaN proves CLOUDSC never reads it
