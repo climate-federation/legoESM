@@ -49,6 +49,38 @@ def closure_liquid(turb_cfg, q_c):
     return q_c
 
 
+def host_after_clubb(entry, q_c, dt, u, v, T, q_v, moments, p_full, p_half,
+                     z_full, z_half, T_sfc, q_sfc, rho, clubb_cfg, **kw):
+    """Host liquid and cloud fraction after one physics step of the CLUBB lane
+    entry ``entry`` (clubb_turbulence_prognostic): q_c + dt*dq_c_dt and its
+    output cloud_fraction, both (ncol, nlev) top-down."""
+    out, _ = entry(u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
+                   T_sfc, q_sfc, rho, dt, clubb_cfg, q_c=q_c, **kw)
+    return np.asarray(q_c + dt * out.dq_c_dt), np.asarray(out.cloud_fraction)
+
+
+def host_liquid_inventory(q_c_before, q_c_host, cloud_fraction, dp, A):
+    """Section 1 numbers from what the host receives after the CLUBB call.
+
+    All (ncol, nlev) top-down; ``A`` area weights (ncol,) summing to 1.
+    Returns the liquid (clipped >= 0), the cloud fraction, the cloudy mask
+    (cf > 0), the inventory L_rcm and host-before L_qc on those layers [kg/m2],
+    and H = sum(max(liquid - q_c_before, 0) dp) / sum(liquid dp) there.
+    """
+    from legoesm import constants
+    ql = np.maximum(np.asarray(q_c_host), 0.0)
+    cf = np.asarray(cloud_fraction)
+    mask = cf > 0.0
+    dp = np.asarray(dp)
+    qb = np.asarray(q_c_before)
+    L_rcm = float(np.sum(A * np.sum(np.where(mask, ql, 0.0) * dp, axis=1) / constants.g))
+    L_qc = float(np.sum(A * np.sum(np.where(mask, qb, 0.0) * dp, axis=1) / constants.g))
+    num = np.sum(A[:, None] * np.where(mask, np.maximum(ql - qb, 0.0), 0.0) * dp)
+    den = np.sum(A[:, None] * np.where(mask, ql, 0.0) * dp)
+    return dict(liquid=ql, cloud_fraction=cf, mask=mask, L_rcm=L_rcm, L_qc=L_qc,
+                H=float(num / den) if den > 0 else float("nan"))
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True)
@@ -176,50 +208,34 @@ def main():
         _dts = dt_phys / _ns
         _u = u_cell.reshape(nCells, nlev); _v = v_cell.reshape(nCells, nlev)
         _T = T; _q = q_v; _m = moments; _rho = rho
-        # Call the closure the way the deck runs it: with the partition on,
-        # the host liquid seeds rt and each sub-step replaces it.
+        # What the HOST receives: the lane entry the model runs (its own
+        # sub-cycle count from the run's step, clubbtop, cloud-top taper),
+        # surface from T_sfc/q_sfc as before.
         _ql = closure_liquid(turb, q_c)
-        from legoesm.atmosphere.physics._shared import virtual_temperature
-        print(f"[{a.label}] closure call: {_ns} sub-step(s) of {_dts:.1f} s "
-              f"(the run's physics step is {dt_phys:.1f} s)")
-        for _i in range(_ns):
-            out = clubb_step(_u, _v, _T, _q, _m, p_full, p_half, z_full, z_half,
-                             T_sfc, q_sfc, _rho, _dts, clubb_cfg, **_top_kw,
-                             **({} if _ql is None else {"q_c": _ql}))
-            _du, _dv, _dT, _dq, _m, diags = out
-            if _ql is not None:
-                _ql = _ql + _dts * diags["dq_c_dt"]
-            if _i < _ns - 1:
-                _u = _u + _dts * _du; _v = _v + _dts * _dv
-                _T = _T + _dts * _dT; _q = _q + _dts * _dq
-                _tv = jnp.maximum(virtual_temperature(_T, _q), clubb_cfg.T0 * 0.5)
-                _rho = p_full / (constants.R_d * _tv)
-        # GRID MEAN, not the in-layer value: compute_cloud_cover divides rcm by
-        # a vertical cloud fraction <= 1 at cloud edges, so diags["rcm"] is the
-        # in-cloud water and integrating it as a grid mean inflates the
-        # inventory and the missing-share (codex).
-        rcm_a = np.asarray(diags["rcm_grid"])     # ascending (bottom-up)
-        cf_a = np.asarray(diags["cloud_frac"])
-        rcm = rcm_a[:, ::-1][:, :nlev] if rcm_a.shape[1] >= nlev else rcm_a[:, ::-1]
-        cfl = cf_a[:, ::-1][:, :nlev] if cf_a.shape[1] >= nlev else cf_a[:, ::-1]
-        rcm = np.maximum(rcm, 0.0)
-        mask = cfl > 0.0
-        dpn = np.asarray(dp)
-        qcn = np.asarray(q_c) if q_c is not None else np.zeros_like(rcm)
-        L_rcm = float(np.sum(A * np.sum(np.where(mask, rcm, 0.0) * dpn, axis=1) / constants.g))
-        L_qc_m = float(np.sum(A * np.sum(np.where(mask, qcn, 0.0) * dpn, axis=1) / constants.g))
-        num = np.sum(A[:, None] * np.where(mask, np.maximum(rcm - qcn, 0.0), 0.0) * dpn)
-        den = np.sum(A[:, None] * np.where(mask, rcm, 0.0) * dpn)
-        H = float(num / den) if den > 0 else float("nan")
-        _incl = np.where(mask, rcm, np.nan)
-        print(f"[{a.label}] rcm raw shape={rcm_a.shape} nlev={nlev}; "
-              f"grid-mean rcm where cf>0: mean={np.nanmean(_incl):.3e} max={np.nanmax(_incl):.3e} kg/kg; "
-              f"cf where cf>0: mean={cfl[mask].mean():.3f}")
-        print(f"[{a.label}] CLUBB PDF liquid  L_rcm = {L_rcm:.6e} kg/m2  "
-              f"(cloudy layers only, cf>0 in {int(mask.sum())} cells)")
-        print(f"[{a.label}] host q_c on those layers = {L_qc_m:.6e} kg/m2")
-        print(f"[{a.label}] H = missing share of PDF liquid = {H:.4f}")
-        rcm_done = True
+        if _ql is None:
+            print(f"[{a.label}] liquid partition off: the host receives no CLUBB "
+                  f"liquid -> section 1 skipped")
+        else:
+            from legoesm.atmosphere.physics.turbulence.clubb import (
+                clubb_turbulence_prognostic)
+            q_c_host, cf_host = host_after_clubb(
+                clubb_turbulence_prognostic, _ql, dt_phys,
+                u_cell.reshape(nCells, nlev), v_cell.reshape(nCells, nlev), T, q_v,
+                jnp.asarray(moments_packed), p_full, p_half, z_full, z_half,
+                T_sfc, q_sfc, rho, clubb_cfg,
+                lat=jnp.asarray(mesh.latCell).reshape(nCells))
+            inv = host_liquid_inventory(np.asarray(q_c), q_c_host, cf_host,
+                                        np.asarray(dp), A)
+            rcm, cfl, mask = inv["liquid"], inv["cloud_fraction"], inv["mask"]
+            _incl = np.where(mask, rcm, np.nan)
+            print(f"[{a.label}] host liquid where cf>0: mean={np.nanmean(_incl):.3e} "
+                  f"max={np.nanmax(_incl):.3e} kg/kg; cf where cf>0: "
+                  f"mean={cfl[mask].mean():.3f}")
+            print(f"[{a.label}] host CLUBB liquid  L_rcm = {inv['L_rcm']:.6e} kg/m2  "
+                  f"(cloudy layers only, cf>0 in {int(mask.sum())} cells)")
+            print(f"[{a.label}] host q_c before on those layers = {inv['L_qc']:.6e} kg/m2")
+            print(f"[{a.label}] H = missing share of host liquid = {inv['H']:.4f}")
+            rcm_done = True
 
         # ---- 1b. the LEVER itself ------------------------------------------
         # The band quoted before this came from an UNSEEDED call: rt held only
@@ -228,6 +244,7 @@ def main():
         # it in rt, so the closure REPARTITIONS instead of condensing, which is
         # the quantity the lever actually delivers.
         if a.partition and q_c is not None:
+            from legoesm.atmosphere.physics._shared import virtual_temperature
             _u = u_cell.reshape(nCells, nlev); _v = v_cell.reshape(nCells, nlev)
             _T = T; _q = q_v; _m = moments; _rho = rho; _ql = q_c
             for _i in range(_ns):
@@ -256,7 +273,7 @@ def main():
                   f"[the sub-900-hPa band is contaminated by the probe's "
                   f"saturated surface humidity]")
             q_c_partitioned_out = q_c_partitioned
-    if not rcm_done:
+    if moments_packed is None:
         print(f"[{a.label}] no carried CLUBB moments on this state -> PDF liquid N/A")
 
     # ---- 2. what the optics receives, floor on and off ----------------------
@@ -392,8 +409,9 @@ def main():
     qin2 = np.asarray(q_i) if q_i is not None else np.zeros_like(pm)
     cfn2 = np.asarray(cp.cloud_fraction)
     lwpn = np.asarray(cp.lwp)
-    _rcm_b = rcm if rcm_done else np.zeros_like(pm)
-    print(f"[{a.label}] pressure band | liquid path | ice path | mean cf where>0 | optics lwp | CLUBB rcm path")
+    # NaN, not 0: a skipped measurement must not read as an empty CLUBB path.
+    _rcm_b = rcm if rcm_done else np.full_like(pm, np.nan)
+    print(f"[{a.label}] pressure band | liquid path | ice path | mean cf where>0 | optics lwp | CLUBB host liquid path")
     for lo, hi in zip(_edges[:-1], _edges[1:]):
         m = (pm >= lo) & (pm < hi)
         if not m.any():

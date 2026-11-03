@@ -41,7 +41,7 @@ from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.constants import R_d
 
 from ._ifs_cumastrn import IfsTunables, cumastrn
-from ._ifs_cuthermo import lego_thermo, satur_qsat
+from .._ifs_thermo import lego_thermo, satur_qsat
 
 __physics_contract__ = {
     "summary": (
