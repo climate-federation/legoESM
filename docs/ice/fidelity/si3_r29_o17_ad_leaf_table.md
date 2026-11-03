@@ -245,3 +245,10 @@ With the O4 Prather subcycles also traced (commit 8e6046678f), the AD probe
 was run once more under a 120 GiB watchdog: it was stopped by its 10,800 s
 limit while still compiling, at 50.3 GiB peak (79.8 GiB in round 1).  No
 gradient was produced, so every count above remains `UNMEASURED_TIMEOUT`.
+
+## DECISION 198 round 3 re-measurement
+
+With the O6 `ice_cor` loops also traced (commit 41b761e5ad), the AD probe was
+run once more under a 120 GiB watchdog: it was stopped by its 10,800 s limit
+while still compiling, at 29.2 GiB peak (50.3 GiB in round 2).  No gradient
+was produced, so every count above remains `UNMEASURED_TIMEOUT`.

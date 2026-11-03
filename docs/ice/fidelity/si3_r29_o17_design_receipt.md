@@ -793,3 +793,101 @@ master-scorer tests `30 passed`; master scorer over 100 steps
 `PASS_ALL_O8_O13_0_ULP`, `PASS_O14_0_ULP`, `PASS_ALL_O15_O16_0_ULP`.
 
 independent review: pending (author: Claude)
+
+## DECISION 198 round 3 — traced O6 ice_cor loops
+
+Round 2 (56b768300a) is under review; this round works on top of it and
+touches O6 `ice_cor` only (O15, O16 and the round-2 `Hbig_pra` tie untouched).
+
+Today's order (isolated reverse compile on the probe's recorded inputs, each
+rung in its own process at 56b768300a, lower + compile, peak):
+
+| rung | lower s | compile s | peak GiB |
+|---|---:|---:|---:|
+| O6 `ice_cor` | 7.1 | 449.8 | 20.3 |
+| O4 Prather (traced in round 2) | 19.3 | 227.3 | 16.1 |
+| O12 composition | 29.1 | 117.2 | 9.0 |
+| O6 redistribution (traced in round 1) | 14.7 | 116.3 | 7.1 |
+| O15 | 7.7 | 100.5 | 8.2 |
+| O16 | 4.0 | 48.1 | 4.6 |
+| aEVP | 6.6 | 17.1 | 3.7 |
+| O14 open water | 4.3 | 11.1 | 3.8 |
+| O13 remap | 3.8 | 9.3 | 3.7 |
+| `ice_update_tau` | 0.3 | 0.5 | 3.2 |
+
+`ice_cor` was still the largest.
+
+What changed (read off the code): under a JAX transform the `ice_itd_reb`
+passes (iceitd.f90 `DO jl = 1, jpl-1` at line 628 and `DO jl = jpl-1, 1, -1`
+at line 664, each calling `itd_shiftice`), the salinity bounds
+(icecor.f90 lines 114–122, `DO jl` / `DO jk`) and the `ice_var_zapsmall` flux
+sums (icevar.f90 lines 633–645 salt, 664–690 heat, 695–722 water) run the same
+bodies as static-trip `fori_loop`s through one helper; eager calls keep the
+Python loops.  No statement, barrier or MIN/MAX operand order changed: the O6
+file's barrier sweep and MIN/MAX audit read the edited source and pass.  An
+object-code audit of the compiled forward `ice_cor` (3/2 and 10/5 layers)
+finds no FMA instruction, before or after.
+
+Measurements (CPU fp64, libm arm; every command that could pass 20 GB ran
+under a watchdog that kills only its own child above 120 GiB, after checking
+at least 250 GiB available and no process above 100 GiB):
+
+- **Forward bits.**  The O6 `ice_cor` fixture at 3/2 and 10/5 ice/snow layers
+  and the probe's recorded `ice_cor` inputs: eager and `jax.jit` bit-identical
+  to 56b768300a (24 result leaves each; the 3/2 fixture rebins cells in all
+  eight passes).  The full O17 step: eager and jit bit-identical to 56b768300a on
+  all 1,209 trace leaves, signed zeros and NaN bits included.
+- **Equations** (the committed counter): 178,146 at 56b768300a → 162,751;
+  inside `ice_cor` 20,327 → 4,932; the named owners unchanged.  The round-2
+  snapshot is kept.
+- **Compile.**  Isolated `ice_cor` reverse pass, same instrument: 7.1 s to
+  lower and 449.8 s to compile, 20.3 GiB → 3.3 s and 7.1 s, 3.4 GiB.
+- **Full-step `value_and_grad`** (the AD probe's program; allowed because the
+  isolated `ice_cor` reverse compile stayed under 30 GB; run once): stopped by
+  its 10,800 s limit while still compiling, peak 29.2 GiB (50.3 GiB in round 2,
+  79.8 GiB in round 1), so the per-leaf table stays unmeasured.
+- **FD** on the O6 fixture (3/2 layers; relative step 1e-4; objective =
+  outputs weighted by 1/(1+max|output|); the quotient is taken element by
+  element so the objective's large unchanged part does not swamp it; each
+  case by its own relative error):
+
+| input | AD | FD | rel. error |
+|---|---:|---:|---:|
+| `v_i` (5,2) cat 2 | 0.7245951532 | 0.7245951537 | 7.9e-10 |
+| `a_i` (5,2) cat 2 | 0.6663113636 | 0.6663113637 | 6.5e-11 |
+| `v_i` (5,5) cat 1 | 11.95596085 | 11.95596085 | 3.2e-12 |
+| `a_i` (5,5) cat 1 | −0.01023501231 | −0.01023501241 | 1.0e-8 |
+| `szv_i` (5,2) layer 2, cat 2 | 0.02216291618 | 0.02216291618 | 9.7e-13 |
+| `v_s` (5,5) cat 1 | 0.3796893385 | 0.3796893385 | 4.6e-13 |
+
+  A scan of all 1,057 non-zero interior entries of seven inputs: reverse-mode
+  values and quotients identical to the parent's (largest relative difference
+  0.0).  1,017 agree to 1e-6.  The other 40 are excluded, with the same
+  reverse-mode values in the parent.  39 have inputs of 1e-11 or less, all in
+  categories whose input ice volume is below 1e-10; there the step falls
+  below the outputs' rounding: 37 quotients
+  move by more than 1e-3 between steps 1e-4 and 1e-6, one (`v_i` (3,3)
+  category 1) gives a zero quotient at both steps, and one (`szv_i` (2,4)
+  layer 2, category 1) splits one-sided at step 1e-6.  The 40th, `a_i` (6,4)
+  category 4, is curvature (1.7e-6 at step 1e-4, 6.3e-9 at 1e-6).  No entry
+  shows a stable one-sided split, the mark of a branch boundary.
+- **Plants** (new test, each restored afterwards): reversing every traced
+  loop changes the compiled digest to `59ebad1b…`; removing one barrier in
+  the salinity-bound flux update (icecor.f90 lines 114–122) changes it to
+  `ce6d1e8a…`; stopping the gradient on the loop carry gives a zero gradient
+  in all six FD cases; scaling the carry tangent by 1 + 1e-5 per iteration
+  gives relative errors from 4.2e-5 to 3.7e-4 in all six.
+- **Citations.**  The full-map audit finds every citation at its anchor
+  without re-lining, so the gate script is unchanged; it passes.
+- **O6 file** (alone, under the watchdog): `28 passed, 1 deselected in
+  210.22s`, 3.4 GiB peak.
+
+Final checks from a clean checkout of a3e6e1f5e3 (the round's later commit
+changes only this receipt and the leaf table), serial, CPU fp64: the DECISION
+194 file `3 passed`; the DECISION 198 round-1 and round-2 files `2 passed`
+each; the new ice_cor file `2 passed`; the O12 file `81 passed`; the O6 file
+`28 passed, 1 deselected`; the citation gate `45 passed` and its default run
+`PASS`; the O8–O16 master-scorer tests `30 passed`; master scorer over 100
+steps `PASS_ALL_O8_O13_0_ULP`, `PASS_O14_0_ULP`, `PASS_ALL_O15_O16_0_ULP`.
+
+independent review: pending (author: Claude)
