@@ -1566,8 +1566,6 @@ def spectral_rollout(
             raise ValueError(
                 f"spectral_rollout: the forecast runs to {_end_s / 3600.0} h but "
                 f"sfc_flux_frames cover {_flux_frames.shape[0] - 1} h.")
-        _flux_override = tuple(_flux_frames[0, k]
-                               for k in range(len(_FLUX_OVERRIDE_KEYS)))
 
     def _frames_at_step(step_idx):
         from legoesm.training.wb_flux_climatology import frames_at
@@ -1576,6 +1574,10 @@ def spectral_rollout(
     def _flux_at(step_idx):
         f = _frames_at_step(step_idx)
         return tuple(f[k] for k in range(len(_FLUX_OVERRIDE_KEYS)))
+
+    if _flux_frames is not None:
+        # The initial anchors: this segment's first step (step_offset).
+        _flux_override = _flux_at(jnp.asarray(step_offset))
     if forcing_base is not None:
         _missing = [k for k in ("T_sfc", "sic", "day_of_year", "seconds_of_day") if k not in forcing_base]
         if _missing:

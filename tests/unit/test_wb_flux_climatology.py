@@ -55,6 +55,8 @@ def test_window_frames_cross_feb29_and_new_year():
     assert f[:, 0, 0].tolist() == [58022, 58023, 58000, 58001, 58002]  # 29 Feb = 28 Feb
     g = wfc.window_frames(_clim(), "2019-12-31T23", 2)
     assert g[:, 0, 0].tolist() == [364023, 0, 1]
+    with pytest.raises(ValueError, match="whole hour"):
+        wfc.window_frames(_clim(), "2019-12-31T23:30", 2)
 
 
 def test_frames_at_is_linear_in_hour():
@@ -73,8 +75,9 @@ def _builder():
 
 
 def test_day_means_use_2015_to_2019_only_with_the_loader_signs():
-    """A store spanning 2014-2020 whose sensible flux encodes the year: the
-    day-0 hour-6 mean is minus the 2015-2019 mean year; stresses flip sign."""
+    """A store spanning 2014-2020 whose sensible flux is (year - 2000)^2: the
+    day-0 hour-6 mean is minus its 2015-2019 mean (291; 2014-2020 would give
+    293); the other planes carry the loader's signs."""
     from legoesm.grids.gaussian import create_gaussian_grid
 
     grid = create_gaussian_grid(n_max=10)
@@ -85,7 +88,7 @@ def test_day_means_use_2015_to_2019_only_with_the_loader_signs():
     year = np.array([int(str(t)[:4]) for t in times], float)
     lat, lon = np.linspace(90, -90, 19), np.arange(0, 360, 10.0)
     shape = (len(times), len(lat), len(lon))
-    val = {"mean_surface_sensible_heat_flux": year,
+    val = {"mean_surface_sensible_heat_flux": (year - 2000.0) ** 2,
            "mean_surface_latent_heat_flux": np.full(len(times), 1.0),
            "mean_eastward_turbulent_surface_stress": np.full(len(times), 2.0),
            "mean_northward_turbulent_surface_stress": np.full(len(times), 3.0),
@@ -99,7 +102,7 @@ def test_day_means_use_2015_to_2019_only_with_the_loader_signs():
     m = _builder()
     out = m.day_means(fds, 0, grid, 1.0)
     assert out.shape == (24, 7, int(grid.n_lat) * int(grid.n_lon))
-    np.testing.assert_allclose(out[6, 0], -2017.0, rtol=1e-6)    # 2014/2020 excluded
+    np.testing.assert_allclose(out[6, 0], -291.0, rtol=1e-6)    # 2014/2020 excluded
     want = np.array([-1.0, -2.0, -3.0, 30.0, 300.0, 400.0])[:, None]
     np.testing.assert_allclose(out[6, 1:7], np.broadcast_to(want, out[6, 1:7].shape),
                                rtol=1e-6)

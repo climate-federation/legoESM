@@ -46,10 +46,11 @@ def setup():
     }
     pe = SpectralPEConfig(time_integrator="ssp_rk3")
 
-    def run(forcing, n_steps=N_STEPS):
+    def run(forcing, n_steps=N_STEPS, init=None, **kw):
         return spectral_rollout(
-            state, non_rad, grid, sigma, pe, DT, n_steps, None, None,
-            forcing_base=forcing, rad_physics_fn=rad, rad_update_interval=1)
+            state if init is None else init, non_rad, grid, sigma, pe, DT,
+            n_steps, None, None, forcing_base=forcing, rad_physics_fn=rad,
+            rad_update_interval=1, **kw)
 
     def lowest_T_mean(out):
         return float(sh_synthesis_3d(grid, out.T_hat.data)[..., -1].mean())
@@ -167,3 +168,18 @@ def test_climatology_frames_guards(setup):
         run({**base, "sfc_flux_frames": jnp.zeros((1, 7, ncol))})
     with pytest.raises(ValueError, match="cover 1 h"):
         run({**base, "sfc_flux_frames": _frames(ncol, [0.0, 0.0])}, n_steps=7)
+
+
+def test_climatology_frames_follow_the_step_offset(setup):
+    """Two chained 1 h segments (the second at step_offset 6) under a ramped
+    climatology equal one 2 h rollout: the continued segment reads the
+    frames at its own valid times, not from frame 0."""
+    grid, ncol, base, run, _ = setup
+    f = {**base, "sfc_flux_frames": _frames(ncol, [0.0, 150.0, 300.0])}
+    whole = run(f, n_steps=12)
+    mid, ps, rad_t = run(f, n_steps=6, return_phys_state=True,
+                         return_rad_tendency=True)
+    two = run(f, n_steps=6, init=mid, phys_state_in=ps, rad_tendency_in=rad_t,
+              step_offset=6)
+    np.testing.assert_array_equal(np.asarray(two.T_hat.data),
+                                  np.asarray(whole.T_hat.data))

@@ -45,8 +45,8 @@ def noleap_day(t) -> int:
     t = np.datetime64(t, "D")
     y = int(str(np.datetime64(t, "Y")))
     d = int((t - np.datetime64(f"{y}-01-01", "D")) / np.timedelta64(1, "D"))
-    if _leap(y) and d > _FEB28:
-        d = _FEB28 if d == _FEB28 + 1 else d - 1
+    if _leap(y) and d > _FEB28:     # 29 Feb (d = 59) -> 58, later days shift
+        d -= 1
     return d
 
 
@@ -88,6 +88,8 @@ def store_path(root, grid) -> Path:
 def window_frames(clim, t0, n_hours):
     """``(n_hours + 1, 7, n_columns)`` hourly climatology from ``t0`` (a whole
     UTC hour): frame k is slot (noleap day, hour) of ``t0 + k`` hours."""
+    if np.datetime64(t0, "ns") != np.datetime64(np.datetime64(t0, "h"), "ns"):
+        raise ValueError(f"climatology frames start on a whole hour, got {t0}")
     t0 = np.datetime64(t0, "h")
     days, rows = {}, []
     for k in range(int(n_hours) + 1):
