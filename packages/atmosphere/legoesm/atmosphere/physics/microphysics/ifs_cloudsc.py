@@ -332,6 +332,14 @@ def _safe(x):
     return jnp.where(x > _TINY, x, 1.0)
 
 
+def _safe_gate(x, thr):
+    """Inactive-operand substitute for a quantity gated by ``x > thr`` on the
+    _wt(thr) window: x where its smooth weight can be nonzero (x > thr - w/2, the
+    window's lower edge), else 1.0 (weight identically 0 there, so the substitute
+    never reaches an output; keeps fp32 power laws finite, review r4)."""
+    return jnp.where(x > thr - 0.5 * _wt(thr), x, 1.0)
+
+
 def _wfloor(b, floor):
     """Window width for a traced bound b: ~0.01|b|, never below ``floor``; smooth in b
     (VC14b: hypot, not max, so the width has no derivative jump at 0.01|b| = floor)."""
@@ -865,11 +873,11 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         # PSD slopes/intercepts unweighted (inactive operands substituted, V22b); the
         # activation weights multiply only the final transfer below -- weighting a
         # slope before its inversion made a near-zero weight a singular rate.
-        zlamr = (RCL_LAM1R / (zrho * _safe(zraincld))) ** RCL_LAM2R
+        zlamr = (RCL_LAM1R / (zrho * _safe_gate(zraincld, _ZEPSEC))) ** RCL_LAM2R
         zn0r = RCL_X1R * zlamr ** RCL_X2R
-        zlams = (RCL_LAM1S / (zrho * _safe(zsnowcld))) ** RCL_LAM2S
+        zlams = (RCL_LAM1S / (zrho * _safe_gate(zsnowcld, _ZEPSEC))) ** RCL_LAM2S
         zn0s = RCL_X1S
-        zlami = (RCL_LAM1S / (zrho * _safe(zicecld))) ** RCL_LAM2S
+        zlami = (RCL_LAM1S / (zrho * _safe_gate(zicecld, _ZEPSEC))) ** RCL_LAM2S
         zn0i = RCL_X1S
         wcl = sm.le(T, th.RTT, _W_T) * sm.lt(prainfrac, _ZEPSEC, _wt(_ZEPSEC)) * wrn
         lr = zlamr
