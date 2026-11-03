@@ -531,7 +531,7 @@ def compute_two_leaf_canopy_fluxes(
     # A column with no converged solution yet alternates its seed across passes
     # between the caller's seed and the COLD state, so a warm seed that led the
     # solve astray gets a cold retry inside the same call.  The passes run over
-    # every column anyway (vmap), so this costs nothing.  A failed pass still
+    # every column anyway (in groups), so this costs nothing.  A failed pass still
     # relaxes the soil boundary with its cold-state fallback flux (the one the
     # land step accepts if the column ends unsolved); freezing it held desert
     # columns at their start-of-step soil.  Acceptance stays tied to the LAST pass.
