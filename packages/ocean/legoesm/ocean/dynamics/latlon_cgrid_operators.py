@@ -4293,6 +4293,45 @@ def compute_face_masks_3d(
     return u_mask, v_mask
 
 
+def per_level_viscosity_masks(
+    is_active_3d: jnp.ndarray,
+    grid,
+    mask: jnp.ndarray | None,
+    u_mask: jnp.ndarray | None,
+    v_mask: jnp.ndarray | None,
+    vertex_mask: jnp.ndarray | None,
+    dtype,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Per-level cell / u-face / v-face / vertex masks for the vector Laplacian.
+
+    NEMO builds its momentum masks level by level from the 3-D tmask
+    (dommsk.F90:148-153): ``umask = tmask*tmask(i+1)``, ``vmask =
+    tmask*tmask(j+1)`` and the free-slip ``fmask`` = product of the four
+    surrounding T cells, all at level k.  Each level here is built the same
+    way from ``is_active_3d`` (``compute_face_masks_3d`` for the faces,
+    ``compute_vertex_mask`` per level for the vertices), then multiplied by
+    the caller's 2-D masks broadcast over levels, so a face or vertex the
+    caller closes (fold wall, seam, partition cut) stays closed at every
+    level.  Returns ``(mask3, u_mask3, v_mask3, vertex_mask3)`` with a
+    trailing level axis, in ``dtype``.
+    """
+    cell = jnp.asarray(is_active_3d).astype(dtype)
+    if mask is not None:
+        cell = cell * jnp.asarray(mask, dtype)[..., jnp.newaxis]
+    um3, vm3 = compute_face_masks_3d(cell, grid)
+    um3 = um3.astype(dtype)
+    vm3 = vm3.astype(dtype)
+    if u_mask is not None:
+        um3 = um3 * jnp.asarray(u_mask, dtype)[..., jnp.newaxis]
+    if v_mask is not None:
+        vm3 = vm3 * jnp.asarray(v_mask, dtype)[..., jnp.newaxis]
+    vx3 = jax.vmap(lambda m2: compute_vertex_mask(m2, grid=grid),
+                   in_axes=-1, out_axes=-1)(cell).astype(dtype)
+    if vertex_mask is not None:
+        vx3 = vx3 * jnp.asarray(vertex_mask, dtype)[..., jnp.newaxis]
+    return cell, um3, vm3, vx3
+
+
 def _nemo_hpg_sco_literal_cgrid_impl(
     rhd: jnp.ndarray,
     e3w: jnp.ndarray,

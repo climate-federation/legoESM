@@ -1588,13 +1588,14 @@ def vector_laplacian_cgrid(
     """
     # Native 2D and 3D — all underlying operators (``divergence_cgrid``,
     # ``gradient_*_cgrid``, ``curl_vertex_cgrid``, ``_gradient_curl_to_*``)
-    # natively support 3D inputs.  Masks remain 2D and broadcast over
-    # the trailing level axis when present.
+    # natively support 3D inputs.  2D masks broadcast over the trailing
+    # level axis; 3D (per-level) masks are applied level by level.
     is_3d = u.ndim == 3
 
     def _bcast(m, like):
-        # Broadcast 2D ``m`` over trailing axes of ``like``.
-        return m[..., jnp.newaxis] if is_3d else m
+        # Broadcast a 2D ``m`` over the trailing level axis of ``like``; a
+        # per-level (3D) mask already carries that axis and is used as is.
+        return m[..., jnp.newaxis] if is_3d and m.ndim == like.ndim - 1 else m
 
     # Apply face masks before computing div and curl
     u_eff = u if u_mask is None else u * _bcast(u_mask, u)

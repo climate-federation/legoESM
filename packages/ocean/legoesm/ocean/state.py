@@ -3479,6 +3479,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the lane-certified pre-catch-up EOS-default route.  NEMO testcase cards
     # state this explicitly.  Appended to preserve positional callers.
     vmix_eos_use_config_rho0: bool = True
+    # Land masks of the "vector_laplacian" lateral viscosity/biharmonic at
+    # each level.  "surface" (default, bit-identical) applies the 2-D surface
+    # u/v/vertex masks at every level, so a face or vertex closed at depth by
+    # a topographic step stays open.  "per_level" builds each level's masks
+    # from the partial-cell is_active, as NEMO's dynldf_lev reads its 3-D
+    # umask/vmask/fmask (dommsk.F90:148-153).  Appended to preserve
+    # positional callers.
+    lateral_viscosity_mask_levels: str = "surface"
 
 
     @classmethod
