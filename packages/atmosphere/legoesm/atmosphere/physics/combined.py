@@ -318,6 +318,13 @@ def make_physics(
             "tendency (qvften); physics_cadence_steps="
             f"{physics_cadence_steps} would drop the intervening dynamics "
             "steps. Run tiedtke with physics_cadence_steps=1")
+    if config.convection.scheme == "tiedtke" and cld_macmic_num_steps > 1:
+        raise ValueError(
+            "convection='tiedtke' (WRF port) reads the previous step's "
+            "turbulence q_v tendency and surface water flux; "
+            f"cld_macmic_num_steps={cld_macmic_num_steps} sub-cycles "
+            "turbulence and each sub-step overwrites them. Run tiedtke with "
+            "cld_macmic_num_steps=1")
     if isinstance(surface_bulk_coeffs, str):
         if surface_bulk_coeffs != "default":
             raise ValueError(

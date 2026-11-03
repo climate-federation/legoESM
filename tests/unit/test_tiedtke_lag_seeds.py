@@ -72,3 +72,16 @@ def test_physics_factory_refuses_tiedtke_with_physics_cadence():
     with pytest.raises(ValueError, match="physics_cadence_steps=2"):
         make_physics(cfg, model_type="mpas", physics_cadence="write",
                      physics_cadence_steps=2)
+
+
+def test_physics_factory_refuses_tiedtke_with_macmic_subcycle():
+    """Vote V28a: sub-cycled turbulence would leave only the last sub-step's
+    rate in the lag carries."""
+    import pytest
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    cfg = PhysicsConfig(convection=ConvectionConfig(scheme="tiedtke"),
+                        turbulence=TurbulenceConfig(scheme="louis"))
+    with pytest.raises(ValueError, match="cld_macmic_num_steps=2"):
+        make_physics(cfg, model_type="mpas", cld_macmic_num_steps=2)
