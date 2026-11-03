@@ -308,6 +308,9 @@ g_nemo = 9.80665                # [m/s^2]  NEMO phycst grav
 # must repeat the oracle's operations (radiation/ozone_mls.py: it cancels
 # analytically there).
 g_gsam = 9.79764                # [m/s^2]  gSAM consts.f90 ggr
+# ecRad (OpenIFS 49r1 bundled) gravity, radiation_constants.F90:26
+# ``AccelDueToGravity``; used only by the ecrad_ifs port.
+g_ecrad = 9.80665               # [m/s^2]
 R_v_nemo = 461.495              # [J/(kg*K)] NEMO sbc_phy R_vap (ours: 461.51)
 L_fus_nemo = 0.3333601e6        # [J/kg]   NEMO phycst rLfus (ours L_f: 3.337e5)
 L_fus_isf_nemo = 0.334e6        # [J/kg]   NEMO isf_oce rLfusisf (ISF melt latent
