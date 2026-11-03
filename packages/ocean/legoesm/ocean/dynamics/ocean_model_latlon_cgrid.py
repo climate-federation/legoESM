@@ -11718,7 +11718,8 @@ class LatLonCGridOceanModel:
             _F_entry, _entry_heat = real_freshwater_entry(
                 freshwater, _F_fw_rate_now, h_k_new, mask, _cfg_b.rho_0,
                 state_new.T.data,
-                runoff_spread_m=resolve_runoff_spread_arg(_cfg_b))
+                runoff_spread_m=resolve_runoff_spread_arg(_cfg_b),
+                runoff_t_floor_sharpness=_cfg_b.runoff_temperature_floor_sharpness)
             _dS_dil, _dT_dil = real_freshwater_dilution_tendencies(
                 _F_fw_rate_now, state_new.S.data, state_new.T.data,
                 h_k_new, mask, F_entry=_F_entry, entry_heat=_entry_heat)

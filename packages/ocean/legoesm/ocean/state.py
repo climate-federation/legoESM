@@ -3479,6 +3479,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the lane-certified pre-catch-up EOS-default route.  NEMO testcase cards
     # state this explicitly.  Appended to preserve positional callers.
     vmix_eos_use_config_rho0: bool = True
+    # Width of the smooth runoff-water temperature floor max(SST, 0 degC)
+    # (NEMO sbcrnf.F90:148, ln_rnf_tem=.false.) in the real-freshwater
+    # closure: LogSumExp sharpness [1/K], 100 = 0.01 K (user rule
+    # 2026-10-27, RULE 5); math.inf = NEMO's hard MAX.  Appended to preserve
+    # positional callers.
+    runoff_temperature_floor_sharpness: float = 100.0
 
 
     @classmethod
