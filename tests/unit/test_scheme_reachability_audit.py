@@ -336,6 +336,13 @@ def test_every_offered_scheme_passes_validate_strict(parsers, driver):
                 kwargs.update(turbulence="clubb", use_clubb_cloud_fraction=True,
                               microphysics="sundqvist", radiation="rrtmgp",
                               dycore=DycoreConfig(discretization="mpas"))
+            # IFS CLOUDSC reads CUMASTRN's raw fields and runs on the MPAS
+            # column lane only (documented cross-field contract).
+            if axis == "microphysics" and scheme == "ifs_cloudsc":
+                from legoesm.driver.config import DycoreConfig
+                kwargs.update(convection="bechtold", bechtold_use_ifs_ascent=True,
+                              cld_macmic_num_steps=1,
+                              dycore=DycoreConfig(discretization="mpas"))
             # ZM CMT is dropped on the compiled pipeline (refused there, P1).
             if axis == "convection" and scheme == "zhang_mcfarlane":
                 from legoesm.driver.config import DycoreConfig

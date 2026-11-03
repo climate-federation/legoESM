@@ -13018,6 +13018,19 @@ class ModelDriver:
                     cfg, cfg.microphysics,
                     getattr(_micro_cfg, cfg.microphysics)),
             })
+        if cfg.microphysics == "ifs_cloudsc":
+            # NCLDTOP by the sucldp.F90:631-634 rule on THIS lane's level
+            # table at the standard surface pressure (vote VC11a), static.
+            from legoesm.atmosphere.physics.microphysics.ifs_cloudsc import (
+                ncldtop_from_reference_pressure,
+            )
+            _ncldtop = ncldtop_from_reference_pressure(np.asarray(
+                self.sigma.pressure_at_full(
+                    jnp.asarray([constants.p_atm_std]))))
+            _micro_cfg = _micro_cfg._replace(
+                ifs_cloudsc=_micro_cfg.ifs_cloudsc._replace(ncldtop=_ncldtop))
+            logger.info("  ifs_cloudsc: NCLDTOP = %d (sucldp rule, "
+                        "RCLDTOPP = 100 Pa)", _ncldtop)
         # The cap the lane ACTUALLY runs -- read from the THREADED scheme
         # config (_micro_cfg above), not from the flat field, which a deck's
         # own microphysics sub-config can override.
@@ -14673,10 +14686,14 @@ class ModelDriver:
         # Does the convection scheme want the diurnal-cycle CAPE subtraction?
         # Resolved once: a static Python bool, so the per-step seeding below is
         # a trace-time branch and cannot retrace.
+        # The faithful IFS convection (bechtold_use_ifs_ascent) reads the
+        # surface fluxes in its trigger (PAHFS/PQHFL) and refuses to run
+        # without them, so it needs the same lagged feed (vote VC22).
         _capdcycl_on = bool(getattr(
             getattr(self.config, "convection_config", None), "use_ifs_capdcycl",
             False)) or bool(getattr(self.config, "bechtold_use_ifs_capdcycl",
-                                    False))
+                                    False)) or bool(getattr(
+                self.config, "bechtold_use_ifs_ascent", False))
         _last_force_day = None
         _cam6_held = None
         # External CMIP6 forcing (ozone file / aerosol / transient GHG) on

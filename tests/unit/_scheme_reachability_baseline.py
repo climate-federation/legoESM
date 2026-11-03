@@ -30,10 +30,10 @@ UNREACHABLE_SCHEMES = {
         "while _require_full_physics_for_amip would count it ACTIVE -- i.e. "
         "silently disabled microphysics that PASSES the full-physics guard. "
         "Excluding it is protective. Wiring it needs a checkpoint flag first.",
-    ("run_amip", "clouds", "resolved"):
-        "SAM's CRM convention (cloud fraction = 1 wherever condensate > 0); "
-        "raises without explicit q_cloud/q_ice from microphysics. Not a C48 "
-        "GCM scheme -- it belongs to the plane/CRM lane, not AMIP.",
+    # ("run_amip", "clouds", "resolved") REMOVED (vote VC31): run_amip now
+    # offers --clouds resolved, restricted to --microphysics ifs_cloudsc
+    # (CLOUDSC's advected cloud fraction + grid-mean condensate); every other
+    # microphysics is refused in run_amip's own argument check.
     # NOTE: run_coupled DOES offer --clouds resolved and --microphysics
     # ml_emulator. An earlier draft of this baseline assumed it mirrored
     # run_amip's exclusions; the self-test below caught the guess. Whether

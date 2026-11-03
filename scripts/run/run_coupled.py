@@ -822,6 +822,8 @@ def build_parser():
     parser.add_argument("--gravity-wave-drag", default="hines",
                         type=parse_gwd_spec,
                         help="Gravity-wave-drag scheme (default: hines)")
+    # 'resolved' with any microphysics is intentional here (vote VC31b); only
+    # run_amip restricts it to ifs_cloudsc.
     parser.add_argument("--clouds", default="sundqvist",
                         choices=["none", "sundqvist", "xu_randall", "resolved"],
                         help="Cloud-fraction scheme (default: sundqvist)")

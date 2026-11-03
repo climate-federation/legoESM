@@ -1129,3 +1129,80 @@ def _supersatcheck(sm, cfg, th, wq, pt, pq, pa, pp, psurf):
     zda = wc * zda_c
     t_adj = (zfoealfa * th.RALVDCP + (1.0 - zfoealfa) * th.RALSDCP) * zcond
     return t_adj, -zcond, zda, zcond * zfoealfa, zcond * (1.0 - zfoealfa)
+
+
+# ---------------------------------------------------------------------------
+# legoESM integration: NCLDTOP rule and the standard-contract adapter
+# ---------------------------------------------------------------------------
+_RCLDTOPP = 100.0                  # sucldp.F90 RCLDTOPP [Pa] (49r1)
+
+
+def ncldtop_from_reference_pressure(p_full_ref):
+    """sucldp.F90:631-634: NCLDTOP = 2, then for JLEV = NFLEVG..2 (1-based)
+    NCLDTOP = JLEV wherever STPRE(JLEV) > RCLDTOPP.  ``p_full_ref`` is the
+    full-level pressure [Pa] of the standard atmosphere (top first), i.e. the
+    lane's level table evaluated at p_s = 101325 Pa.  Static (numpy)."""
+    p = np.asarray(p_full_ref, dtype=np.float64).reshape(-1)
+    ncldtop = 2
+    for jlev in range(p.size, 1, -1):
+        if p[jlev - 1] > _RCLDTOPP:
+            ncldtop = jlev
+    return ncldtop
+
+
+class CloudscConvection(NamedTuple):
+    """CUMASTRN's raw outputs CLOUDSC reads (callpar order), [ncol, nlev]
+    unless noted: PLU, PLUDE and PLUDELI (``[ncol, nlev, 4]`` liquid, ice,
+    vapour, T), PSNDE (``[ncol, nlev, 2]`` rain, snow), PMFU, PMFD, and the
+    per-column LDCUM (bool) and KTYPE (int)."""
+    plu: jax.Array
+    plude: jax.Array
+    pludeli: jax.Array
+    psnde: jax.Array
+    pmfu: jax.Array
+    pmfd: jax.Array
+    ldcum: jax.Array
+    ktype: jax.Array
+
+
+def ifs_cloudsc_microphysics(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt,
+                             config, *, cloud_fraction, land_frac, conv):
+    """Standard microphysics contract around :func:`cloudsc` (one call, the
+    smooth path).  Inputs per the integration votes (vote_1103 VC2-VC21):
+    PTENDENCY_CML = 0 (operator split), PVFL = PVFI = 0 and PEIS = 0 (no VDF
+    yet), PLSM = ``land_frac``, the convective fields from ``conv``
+    (:class:`CloudscConvection`).  Species map L, I, R, S -> q_c, q_i, q_r,
+    q_s; q_g and every number get zero tendency.  Surface precipitation =
+    FPLSL + FPLSN at the surface half level, its frozen part FPLSN there.
+    ``rho`` and ``dz`` are unused (CLOUDSC works in pressure).  Returns a
+    ``MicrophysicsOutput`` whose ``cloud_fraction_new`` is A + dt*tend_a."""
+    from .output import MicrophysicsOutput
+    from .._ifs_thermo import lego_thermo
+    del rho, dz
+    if not isinstance(conv, CloudscConvection):
+        raise TypeError("ifs_cloudsc: conv must be a CloudscConvection (the "
+                        "CUMASTRN hand-off); got %r" % (type(conv).__name__,))
+    zero = jnp.zeros_like(T)
+    h = hydrometeors
+    clv = jnp.stack([h.q_c, h.q_i, h.q_r, h.q_s, q_v], axis=-1)
+    ncol = T.shape[0]
+    x = CloudscInputs(
+        t=T, q=q_v, a=cloud_fraction, clv=clv,
+        tend_t=zero, tend_q=zero, tend_a=zero, tend_cld=jnp.zeros_like(clv),
+        pvfl=zero, pvfi=zero, pap=p_full, paph=p_half,
+        plsm=jnp.asarray(land_frac, T.dtype).reshape(ncol),
+        ldcum=jnp.asarray(conv.ldcum).reshape(ncol).astype(bool),
+        ktype=jnp.asarray(conv.ktype).reshape(ncol),
+        peis=jnp.zeros((ncol,), T.dtype),
+        plu=conv.plu, plude=conv.plude, pludeli=conv.pludeli, psnde=conv.psnde,
+        pmfu=conv.pmfu, pmfd=conv.pmfd)
+    o = cloudsc(config, lego_thermo(), x, dt, hard=False)
+    tc = o.tend_cld
+    return MicrophysicsOutput(
+        dT_dt=o.tend_t, dq_v_dt=o.tend_q,
+        dq_c_dt=tc[..., NCLDQL], dq_r_dt=tc[..., NCLDQR],
+        dq_i_dt=tc[..., NCLDQI], dq_s_dt=tc[..., NCLDQS], dq_g_dt=zero,
+        dN_c_dt=zero, dN_r_dt=zero, dN_i_dt=zero,
+        precipitation=o.fplsl[:, -1] + o.fplsn[:, -1],
+        precip_frozen=o.fplsn[:, -1],
+        cloud_fraction_new=cloud_fraction + dt * o.tend_a)

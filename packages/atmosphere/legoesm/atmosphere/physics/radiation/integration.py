@@ -1265,8 +1265,14 @@ def make_radiation_physics(
     use_clubb_cloud_fraction: bool = False,
     clubb_config=None,
     micro_leaf_config=None,
+    cloud_fraction_tracer: str | None = None,
 ) -> Callable:
     """Create a physics function for radiation matching a model's signature.
+
+    ``cloud_fraction_tracer`` (MPAS lane only): the name of an ADVECTED
+    prognostic cloud-fraction tracer (IFS CLOUDSC's ``cloud_fraction_ifs``)
+    routed to the cloud optics through the same ``cloud_fraction_override``
+    the CLUBB carry uses; ``None`` (default) leaves radiation unchanged.
 
     Parameters
     ----------
@@ -1383,6 +1389,10 @@ def make_radiation_physics(
             radiation_config.ozone.ml_weights_path
         )
 
+    if cloud_fraction_tracer is not None and model_type != "mpas":
+        raise ValueError(
+            "cloud_fraction_tracer (the advected IFS cloud fraction) is wired "
+            f"on the MPAS lane only; got model_type={model_type!r}.")
     if model_type == "hydrostatic":
         return _make_hydrostatic_radiation(radiation_config, rrtmgp_solver,
                                             ml_ozone_coefs=ml_ozone_coefs,
@@ -1418,7 +1428,8 @@ def make_radiation_physics(
                                      nc_from_aerosol=nc_from_aerosol,
                                      use_clubb_cloud_fraction=use_clubb_cloud_fraction,
                                      clubb_config=clubb_config,
-                                     micro_leaf_config=micro_leaf_config)
+                                     micro_leaf_config=micro_leaf_config,
+                                     cloud_fraction_tracer=cloud_fraction_tracer)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -1431,6 +1442,20 @@ def make_radiation_physics(
 # Hydrostatic PE (cubed-sphere, lat-lon, and MPAS Voronoi)
 # ===========================================================================
 
+def full_column_cloud_fraction_override(radiation_config: RadiationConfig):
+    """The radiation config with ``cloud_fraction_override`` applied over the
+    WHOLE column: an advected prognostic fraction (IFS CLOUDSC) replaces the
+    diagnosed one at every level, without the CLUBB boundary-layer level gate
+    (vote VC24).  Unchanged when clouds are off."""
+    if radiation_config.cloud_scheme == "none":
+        return radiation_config
+    cc = (radiation_config.cloud_config
+          if radiation_config.cloud_config is not None
+          else CloudConfig(scheme=radiation_config.cloud_scheme))
+    return radiation_config._replace(
+        cloud_config=cc._replace(clubb_cf_override_p_min_pa=0.0))
+
+
 def _make_hydrostatic_radiation(
     radiation_config: RadiationConfig,
     rrtmgp_solver=None,
@@ -1441,6 +1466,7 @@ def _make_hydrostatic_radiation(
     use_clubb_cloud_fraction: bool = False,
     clubb_config=None,
     micro_leaf_config=None,
+    cloud_fraction_tracer: str | None = None,
 ) -> Callable:
     """Create radiation physics_fn for any hydrostatic model.
 
@@ -1507,6 +1533,13 @@ def _make_hydrostatic_radiation(
             "cloud scheme 'cam6_clubb' takes its liquid cloud fraction from "
             "the CLUBB carry, which is routed only with "
             "RadiationConfig.use_clubb_cloud_fraction=True; got False.")
+    if cloud_fraction_tracer is not None and use_clubb_cloud_fraction:
+        raise ValueError(
+            "two cloud-fraction sources for the optics: the advected tracer "
+            f"{cloud_fraction_tracer!r} and the CLUBB carry "
+            "(use_clubb_cloud_fraction=True); select one.")
+    if cloud_fraction_tracer is not None:
+        radiation_config = full_column_cloud_fraction_override(radiation_config)
     # Clear-sky TOA diagnostic (#843 lean-lane port): a STATIC clouds-off
     # config variant for the second radiation pass.  ``cloud_scheme="none"``
     # skips the cloud diagnosis entirely (no cloud kwargs -> the solver's
@@ -1752,6 +1785,16 @@ def _make_hydrostatic_radiation(
             _cf_ovr = getattr(phys_state, "cloud_fraction", None)
             if _cf_ovr is not None:
                 _cf_ovr = _cf_ovr.reshape(T_col.shape)
+        if cloud_fraction_tracer is not None:
+            # the advected prognostic fraction (IFS CLOUDSC), as the state
+            # carries it at the start of this physics call
+            if (state.tracers is None
+                    or cloud_fraction_tracer not in state.tracers):
+                raise ValueError(
+                    f"radiation reads the advected {cloud_fraction_tracer!r} "
+                    "tracer, which the state does not carry.")
+            _cf_ovr = state.tracers[cloud_fraction_tracer].data.reshape(
+                T_col.shape)
 
         # Convective-precip READ (standalone-path Slingo-1987-inspired surrogate cumulus fraction):
         # the convection module published its column-integrated in-updraft

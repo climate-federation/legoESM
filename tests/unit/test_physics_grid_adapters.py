@@ -245,7 +245,7 @@ class TestKernelRegistries:
     def test_microphysics_registry_has_all(self):
         expected = {
             "kessler", "sundqvist", "seifert_beheng", "morrison",
-            "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
+            "thompson", "p3", "sdm", "fast_sbm", "ml_emulator", "ifs_cloudsc",
         }
         assert expected == set(MICROPHYSICS_REGISTRY.keys())
 

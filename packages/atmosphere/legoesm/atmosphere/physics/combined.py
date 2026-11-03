@@ -792,6 +792,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 clubb_config=_clubb_cfg,
                 micro_leaf_config=getattr(config.microphysics,
                                           config.microphysics.scheme, None),
+                cloud_fraction_tracer=(
+                    "cloud_fraction_ifs"
+                    if config.microphysics.scheme == "ifs_cloudsc" else None),
             ),
             False,
             None,
@@ -806,11 +809,35 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     _defer_dlf = (model_type == "mpas" and _n_macmic >= 2
                   and config.convection.scheme == "zhang_mcfarlane"
                   and config.turbulence.scheme == "clubb")
+    # IFS CLOUDSC (votes VC2-VC30): CUMASTRN's raw detrainment and mass
+    # fluxes are THIS step's hand-off to CLOUDSC, so the convection runs
+    # first and CLOUDSC once, at the full step, on the post-convection state
+    # (the IFS order, VC23/VC30); turbulence, radiation and GWD stay on the
+    # pre-physics state.  Only the MPAS column lane carries the advected
+    # cloud fraction.
+    _cloudsc = config.microphysics.scheme == "ifs_cloudsc"
+    if _cloudsc:
+        if model_type != "mpas":
+            raise ValueError(
+                "microphysics='ifs_cloudsc' is wired on the MPAS column lane "
+                f"only; got model_type={model_type!r}.")
+        if not (config.convection.scheme == "bechtold"
+                and config.convection.bechtold.use_ifs_ascent):
+            raise ValueError(
+                "microphysics='ifs_cloudsc' needs convection='bechtold' with "
+                "use_ifs_ascent=True (CLOUDSC reads CUMASTRN's raw fields).")
+        if _n_macmic != 1:
+            raise ValueError(
+                "microphysics='ifs_cloudsc' runs CLOUDSC once per physics "
+                "step (the IFS order, no macro/micro sub-cycle): needs "
+                f"cld_macmic_num_steps=1, got {_n_macmic}.")
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(
             config.convection, model_type, dt,
-            defer_detrainment=_defer_dlf), True, "conv_prog_profile"))
+            defer_detrainment=_defer_dlf, defer_to_cloudsc=_cloudsc),
+            True, "conv_prog_profile"))
     _turb_entry = None
+    _micro_entry = None
     if config.turbulence.scheme != "none":
         # MYNN-2.5 writes its prognostic ``qke = 2·TKE`` into a
         # dedicated PhysicsState field so a restart-time scheme switch
@@ -861,6 +888,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         _micro_carry = getattr(_micro_fn, "_writes_phys_state", False)
         tagged_fns.append((_micro_fn, _micro_carry,
                            "cloud_fraction_old" if _micro_carry else None))
+        _micro_entry = tagged_fns[-1]
     if config.gravity_wave_drag.scheme != "none":
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, model_type, dt), True, "gwd_spectrum"))
     # Macmic group of each module, PARALLEL to ``tagged_fns`` (same append
@@ -873,7 +901,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     if config.convection.scheme != "none":
         _macmic_group.append("pre")
     if config.turbulence.scheme != "none":
-        _macmic_group.append("sub")
+        # IFS lane: turbulence stays on the pre-physics state (VC30)
+        _macmic_group.append("once" if _cloudsc else "sub")
     if _sfc_bulk:
         _macmic_group.append("once")
     if config.microphysics.scheme != "none":
@@ -1248,8 +1277,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
 
     def _accumulate_step(fns, groups, state, grid, sigma_coord, phys_state,
                          forcing, ledger_rows=None):
-        """``_accumulate`` (N=1, byte-identical) or the CAM macmic loop."""
-        if _n_macmic == 1:
+        """``_accumulate`` (N=1, byte-identical) or the CAM macmic loop (also
+        the IFS CLOUDSC order at N=1: convection, then CLOUDSC once)."""
+        if _n_macmic == 1 and not _cloudsc:
             return _accumulate(fns, state, grid, sigma_coord, phys_state,
                                forcing, ledger_rows=ledger_rows)
         rows = ledger_rows if ledger_rows is not None else [None] * len(fns)
@@ -1272,8 +1302,14 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         if groups[0] == "once" and sel["once"]:
             acc = _add_scaled(acc, _run(sel["once"], state, phys_state), 1.0)
         dlf = None
+        cloudsc_conv = None
         if sel["pre"]:
             r_pre = _run(sel["pre"], state, phys_state)
+            if _cloudsc:
+                # CUMASTRN -> CLOUDSC hand-off, not carried state.
+                _upd = dict(r_pre[6])
+                cloudsc_conv = _upd.pop("ifs_cloudsc_conv")
+                r_pre = r_pre[:6] + (_upd,) + r_pre[7:]
             if _defer_dlf:
                 # ZM's dlf is a hand-off to the CLUBB host, not carried state.
                 _upd = dict(r_pre[6])
@@ -1297,6 +1333,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     # clubb_tend_cam books dlf on its post-CLUBB state1.
                     r_sub = _run([_fr], state_m, ps_m,
                                  {**(forcing or {}), "conv_dlf": dlf})
+                elif cloudsc_conv is not None and _fr[0] is _micro_entry:
+                    # CLOUDSC reads the detrainment RATES every sub-step
+                    # (as the CLUBB host books dlf above).
+                    r_sub = _run([_fr], state_m, ps_m,
+                                 {**(forcing or {}),
+                                  "ifs_cloudsc_conv": cloudsc_conv})
                 else:
                     r_sub = _run([_fr], state_m, ps_m)
                 state_m = _advance_state(state_m, r_sub[0], r_sub[1], r_sub[2],

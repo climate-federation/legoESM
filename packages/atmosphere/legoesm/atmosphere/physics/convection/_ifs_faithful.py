@@ -42,6 +42,7 @@ from legoesm.constants import R_d
 
 from ._ifs_cumastrn import IfsTunables, cumastrn
 from .._ifs_thermo import lego_thermo, satur_qsat
+from ..microphysics.ifs_cloudsc import CloudscConvection
 
 __physics_contract__ = {
     "summary": (
@@ -163,5 +164,12 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, dt, config, shf_w_m2,
         precip_frozen_sfc=o.pmflxs[:, -1],
         dq_r_detr_dt=g_dp * o.psnde[:, 0],
         dq_s_detr_dt=g_dp * o.psnde[:, 1],
+        # raw, as CUMASTRN hands them to CLOUDSC (callpar), for a host that
+        # runs CLOUDSC (vote A7'); (ncol, k, nlev) -> (ncol, nlev, k)
+        ifs_cloudsc_conv=CloudscConvection(
+            plu=o.plu, plude=o.plude,
+            pludeli=jnp.moveaxis(o.pludeli, 1, -1),
+            psnde=jnp.moveaxis(o.psnde, 1, -1),
+            pmfu=o.pmfu, pmfd=o.pmfd, ldcum=o.ldcum, ktype=o.ktype),
     )
     return out, o.pmfu

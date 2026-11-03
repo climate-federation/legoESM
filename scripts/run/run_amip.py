@@ -1645,11 +1645,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Clouds & microphysics (full-physics defaults — see the policy note above)
     parser.add_argument("--clouds", type=str, default="xu_randall",
                         choices=["none", "sundqvist", "xu_randall",
-                                 "cam6_clubb"])
+                                 "cam6_clubb", "resolved"],
+                        help="'resolved' requires --microphysics ifs_cloudsc")
     parser.add_argument("--microphysics", type=str, default="sundqvist",
                         choices=["none", "kessler", "sundqvist",
                                  "seifert_beheng", "morrison", "thompson",
-                                 "p3", "sdm", "fast_sbm"])
+                                 "p3", "sdm", "fast_sbm", "ifs_cloudsc"])
     # Sundqvist large-scale-condensation tunables (override the SundqvistConfig
     # defaults / AIMIP-trained leaves).  These are the precipitation-efficiency
     # knobs: qc_crit is the autoconversion cloud-water threshold (rain forms only
@@ -3476,6 +3477,11 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser,
                          "standalone path yet (the specified-Nc field is "
                          "not filled there); use cubed_sphere / latlon / "
                          "mpas, or drop --aerosol-ccn.")
+    if args.clouds == "resolved" and args.microphysics != "ifs_cloudsc":
+        parser.error("--clouds resolved requires --microphysics ifs_cloudsc "
+                     "(radiation then reads CLOUDSC's advected cloud fraction "
+                     "and grid-mean condensate; with any other microphysics "
+                     "AMIP has no prognostic cloud fraction to resolve)")
     if args.subgrid_autoconversion and args.microphysics != "morrison":
         parser.error("--subgrid-autoconversion requires --microphysics "
                      "morrison (the in-cloud closure lives in the Morrison "
