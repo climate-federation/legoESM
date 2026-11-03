@@ -181,6 +181,9 @@ def test_kernel_feeds_the_port_one_bulk_exchange(fx, scheme):
         jnp.asarray(S["xland"]), p_half[:, -1], S["ts"], ust, shf, qfx, wspd,
         60.0, S["dx"], initflag=False)
     np.testing.assert_array_equal(out.dT_dt, m["dT"])
+    # du/dv carry the surface drag ust**2/wspd: wspd must be the bulk one
+    np.testing.assert_array_equal(out.du_dt, m["du"])
+    np.testing.assert_array_equal(out.dv_dt, m["dv"])
     np.testing.assert_array_equal(out.dq_c_dt, m["dqc"])
     np.testing.assert_array_equal(out.dq_i_dt, m["dqi"])
     np.testing.assert_array_equal(carry_new, c_ref)
