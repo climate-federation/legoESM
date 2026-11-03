@@ -42,6 +42,20 @@ _LCL_BOLTON_DENOM = 2840.0
 
 
 
+def liquid_water_theta(theta: jax.Array, q_c: jax.Array, exner: jax.Array) -> jax.Array:
+    """Liquid-water potential temperature θ_l = θ − (L_v/(c_pd·Π))·q_c (Betts 1973).
+
+    THE canonical θ_l reduction for the whole LES-suite pipeline — used both when RECORDING
+    LES truth (the moist LES prognoses actual θ; θ_l is derived from θ + its liquid q_c) and
+    when reducing the SCM state, so the moist score compares θ_l(LES) to θ_l(SCM) rather than
+    mixing θ and θ_l. Exner Π (=(p/p_ref)^κ) is passed in — the LES supplies its anelastic
+    reference Π, the SCM computes Π from its pressure — so this one formula is not re-derived.
+    The reduction is NEGATIVE where cloud (q_c>0) exists (condensation released latent heat
+    that raised θ above the cloud-conserved θ_l); units (L_v[J/kg]/c_pd[J/kg/K])·q_c/Π = K.
+    """
+    return theta - (constants.L_v / constants.c_pd) * q_c / exner
+
+
 def temperature_from_theta(
     theta: jax.Array,
     p: jax.Array,

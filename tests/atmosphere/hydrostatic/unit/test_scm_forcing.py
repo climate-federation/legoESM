@@ -1286,3 +1286,193 @@ def test_subsidence_tracers_subside_cloud_water_like_vapour():
     dry_tend = compute_forcing_tendencies(dry.state, dry.sigma_coord,
                                           SCMForcing(subsidence_w=w), t_seconds=0.0)
     assert not (dry_tend.tracer_tendencies or {})
+
+
+# ----------------------------------------------------------------------
+# CloudBench channels: θ_l/q_t subsidence and nudging, wind relaxation,
+# prescribed radiation (PI 2026-11-01/02). Each: an independent NumPy
+# reference for the tendency, and a one-step column budget
+# Δ(column total) = dt · ∫ source dp/g, to round-off (x64).
+# ----------------------------------------------------------------------
+
+
+def _cloudy_scm(forcing=None, dt=60.0):
+    q_v = jnp.linspace(1e-4, 1.4e-2, NLEV)
+    q_c = jnp.zeros(NLEV).at[10:13].set(jnp.array([2e-4, 5e-4, 3e-4]))
+    return SingleColumnModel.create(
+        physics_config=_no_physics_cfg(), nlev=NLEV, dt=dt,
+        T_profile=jnp.linspace(220.0, 295.0, NLEV), q_v_profile=q_v,
+        q_c_profile=q_c, u=jnp.linspace(12.0, -6.0, NLEV),
+        v=jnp.linspace(-3.0, 2.0, NLEV), forcing=forcing)
+
+
+def _column_np(scm):
+    s = scm.state
+    p_s = s.p_s.data
+    p_full = np.asarray(scm.sigma_coord.pressure_at_full(p_s)).reshape(NLEV)
+    p_half = np.asarray(scm.sigma_coord.pressure_at_half(p_s)).reshape(NLEV + 1)
+    T = np.asarray(s.T.data).reshape(NLEV)
+    q_v = np.asarray(s.tracers["q_v"].data).reshape(NLEV)
+    q_c = np.asarray(s.tracers["q_c"].data).reshape(NLEV)
+    pi = (p_full / constants.p_ref) ** constants.kappa
+    theta_l = T / pi - constants.L_v / (constants.c_pd * pi) * q_c
+    mass = np.diff(p_half) / constants.g          # kg/m^2 per layer, top first
+    return dict(T=T, q_v=q_v, q_c=q_c, q_t=q_v + q_c, pi=pi, theta_l=theta_l,
+                mass=mass, u=np.asarray(s.u.data).reshape(NLEV),
+                v=np.asarray(s.v.data).reshape(NLEV), p_s=float(np.asarray(p_s).ravel()[0]))
+
+
+def _tend_np(tend):
+    out = {"T": np.asarray(tend.dT_dt.data).reshape(NLEV),
+           "u": np.asarray(tend.du_dt.data).reshape(NLEV),
+           "v": np.asarray(tend.dv_dt.data).reshape(NLEV)}
+    for k, f in (tend.tracer_tendencies or {}).items():
+        out[k] = np.asarray(f.data).reshape(NLEV)
+    return out
+
+
+def _upwind_np(phi, z, w):
+    """Independent first-order upwind d(phi)/dz, top-first layout, with the
+    inflow endpoints (top w<0, surface w>0) set to zero tendency."""
+    n = phi.size
+    g = np.zeros(n)
+    for k in range(n):
+        if w[k] > 0:
+            g[k] = 0.0 if k == n - 1 else (phi[k] - phi[k + 1]) / (z[k] - z[k + 1])
+        else:
+            g[k] = 0.0 if k == 0 else (phi[k - 1] - phi[k]) / (z[k - 1] - z[k])
+    return g
+
+
+def _step_budget(scm, src, name):
+    """One forward-Euler step: Δ Σ m·X equals dt Σ m·src, and p_s is untouched."""
+    before = _column_np(scm)
+    scm.step()
+    after = _column_np(scm)
+    assert after["p_s"] == before["p_s"]
+    m = before["mass"]
+    lhs = np.sum(m * (after[name] - before[name]))
+    rhs = scm.dt * np.sum(m * src)
+    assert abs(rhs) > 0.0
+    # round-off of the per-level differences: a few ulps of each stored value
+    roundoff = 4.0 * np.sum(m * np.spacing(np.abs(after[name])))
+    np.testing.assert_allclose(lhs, rhs, rtol=0.0, atol=roundoff)
+    assert roundoff < 1e-6 * abs(rhs)
+    return before, after
+
+
+def test_theta_l_nudging_matches_the_relaxation_and_closes_its_budgets():
+    rate = jnp.linspace(1e-5, 0.0, NLEV)          # strongest at the top
+    thl_t = jnp.full(NLEV, 300.0)
+    qt_t = jnp.full(NLEV, 5e-3)
+    forcing = SCMForcing(nudge_rate=lambda t: rate, theta_l_target=lambda t: thl_t,
+                         qt_target=lambda t: qt_t)
+    scm = _cloudy_scm(forcing)
+    c = _column_np(scm)
+    tend = _tend_np(compute_forcing_tendencies(scm.state, scm.sigma_coord, forcing, 0.0))
+    r = np.asarray(rate)
+    exp_T = c["pi"] * r * (300.0 - c["theta_l"])
+    exp_qv = r * (5e-3 - c["q_t"])
+    np.testing.assert_allclose(tend["T"], exp_T, rtol=1e-12, atol=1e-18)
+    np.testing.assert_allclose(tend["q_v"], exp_qv, rtol=1e-12, atol=1e-22)
+    assert "q_c" not in tend                       # θ_l→θ and q_t→q_v only
+    np.testing.assert_array_equal(tend["u"], 0.0)
+    # total water: Δ Σ m (q_v+q_c) = dt Σ m r (q_t*−q_t); q_c unchanged
+    before, after = _step_budget(scm, exp_qv, "q_t")
+    np.testing.assert_array_equal(after["q_c"], before["q_c"])
+    # enthalpy: Δ Σ m c_pd T = dt Σ m c_pd Π r (θ_l*−θ_l)
+    scm2 = _cloudy_scm(forcing)
+    _step_budget(scm2, exp_T, "T")
+
+
+def test_wind_relaxation_matches_the_rate_and_closes_the_momentum_budget():
+    rate = 1.0 / 21600.0
+    u_t, v_t = jnp.full(NLEV, -5.0), jnp.full(NLEV, 1.0)
+    forcing = SCMForcing(wind_relax_rate=rate, u_target=lambda t: u_t,
+                         v_target=lambda t: v_t)
+    scm = _cloudy_scm(forcing)
+    c = _column_np(scm)
+    tend = _tend_np(compute_forcing_tendencies(scm.state, scm.sigma_coord, forcing, 0.0))
+    np.testing.assert_allclose(tend["u"], rate * (-5.0 - c["u"]), rtol=1e-13, atol=0.0)
+    np.testing.assert_allclose(tend["v"], rate * (1.0 - c["v"]), rtol=1e-13, atol=0.0)
+    np.testing.assert_array_equal(tend["T"], 0.0)
+    _step_budget(scm, rate * (-5.0 - c["u"]), "u")
+    _step_budget(_cloudy_scm(forcing), rate * (1.0 - c["v"]), "v")
+
+
+def test_prescribed_radiation_is_added_to_dT_dt_and_closes_the_energy_budget():
+    rad = jnp.linspace(-3e-5, 1e-5, NLEV)
+    forcing = SCMForcing(rad_T_tendency=lambda t: rad)
+    scm = _cloudy_scm(forcing)
+    tend = _tend_np(compute_forcing_tendencies(scm.state, scm.sigma_coord, forcing, 0.0))
+    np.testing.assert_array_equal(tend["T"], np.asarray(rad))
+    assert "q_v" not in tend or not np.any(tend["q_v"])
+    _step_budget(scm, np.asarray(rad), "T")
+
+
+def test_theta_l_qt_subsidence_advects_theta_l_and_total_water():
+    w = jnp.concatenate([jnp.full(NLEV // 2, -0.01), jnp.full(NLEV - NLEV // 2, 0.004)])
+    forcing = SCMForcing(subsidence_w=lambda t: w, subsidence_on="theta_l_qt")
+    scm = _cloudy_scm(forcing)
+    c = _column_np(scm)
+    from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
+    p_half = scm.sigma_coord.pressure_at_half(scm.state.p_s.data).reshape(1, NLEV + 1)
+    z, _ = compute_heights_from_sigma(scm.state.T.data.reshape(1, NLEV), p_half,
+                                      q_v=scm.state.tracers["q_v"].data.reshape(1, NLEV))
+    z = np.asarray(z).reshape(NLEV)
+    wn = np.asarray(w)
+    exp_T = c["pi"] * (-wn * _upwind_np(c["theta_l"], z, wn))
+    exp_qv = -wn * _upwind_np(c["q_t"], z, wn)
+    tend = _tend_np(compute_forcing_tendencies(scm.state, scm.sigma_coord, forcing, 0.0))
+    np.testing.assert_allclose(tend["T"], exp_T, rtol=1e-11, atol=1e-18)
+    np.testing.assert_allclose(tend["q_v"], exp_qv, rtol=1e-11, atol=1e-22)
+    assert "q_c" not in tend
+    # the cloud layer makes θ_l / q_t subsidence differ from θ / q_v subsidence
+    plain = _tend_np(compute_forcing_tendencies(
+        scm.state, scm.sigma_coord, SCMForcing(subsidence_w=lambda t: w), 0.0))
+    assert np.max(np.abs(plain["T"] - tend["T"])) > 1e-6
+    assert np.max(np.abs(plain["q_v"] - tend["q_v"])) > 1e-9
+    _step_budget(scm, exp_qv, "q_t")
+
+
+def test_theta_l_qt_subsidence_equals_theta_qv_on_a_clear_column():
+    w = jnp.full(NLEV, -0.01)
+    scm = _make_scm(q_v_profile=jnp.linspace(1e-4, 1.4e-2, NLEV))
+    clear = SingleColumnModel.create(
+        physics_config=_no_physics_cfg(), nlev=NLEV, dt=60.0,
+        T_profile=jnp.linspace(220.0, 295.0, NLEV),
+        q_v_profile=jnp.linspace(1e-4, 1.4e-2, NLEV), q_c_profile=jnp.zeros(NLEV),
+        u=0.0, v=0.0)
+    a = _tend_np(compute_forcing_tendencies(
+        clear.state, clear.sigma_coord,
+        SCMForcing(subsidence_w=lambda t: w, subsidence_on="theta_l_qt"), 0.0))
+    b = _tend_np(compute_forcing_tendencies(
+        scm.state, scm.sigma_coord, SCMForcing(subsidence_w=lambda t: w), 0.0))
+    np.testing.assert_allclose(a["T"], b["T"], rtol=1e-12, atol=1e-18)
+    np.testing.assert_allclose(a["q_v"], b["q_v"], rtol=1e-12, atol=1e-22)
+
+
+@pytest.mark.parametrize("kwargs, match", [
+    (dict(subsidence_on="theta_l"), "subsidence_on"),
+    (dict(subsidence_on="theta_l_qt", subsidence_tracers=("q_v",)), "subsidence_tracers"),
+    (dict(nudge_rate=lambda t: jnp.zeros(NLEV)), "together"),
+    (dict(nudge_rate=lambda t: jnp.zeros(NLEV), theta_l_target=lambda t: jnp.zeros(NLEV)),
+     "together"),
+    (dict(wind_relax_rate=1e-4, u_target=lambda t: jnp.zeros(NLEV)), "u_target and v_target"),
+    (dict(u_target=lambda t: jnp.zeros(NLEV), v_target=lambda t: jnp.zeros(NLEV)),
+     "wind_relax_rate is 0"),
+    (dict(wind_relax_rate=-1e-4, u_target=lambda t: jnp.zeros(NLEV),
+          v_target=lambda t: jnp.zeros(NLEV)), ">= 0"),
+])
+def test_validate_forcing_rejects_inconsistent_relaxation_settings(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        validate_forcing(SCMForcing(**kwargs))
+
+
+def test_theta_l_channels_need_cloud_water_in_the_column():
+    no_qc = _make_scm(q_v_profile=jnp.linspace(1e-4, 1.4e-2, NLEV))
+    z = lambda t: jnp.zeros(NLEV)                               # noqa: E731
+    for forcing in (SCMForcing(nudge_rate=z, theta_l_target=z, qt_target=z),
+                    SCMForcing(subsidence_w=z, subsidence_on="theta_l_qt")):
+        with pytest.raises(ValueError, match="'q_c'"):
+            compute_forcing_tendencies(no_qc.state, no_qc.sigma_coord, forcing, 0.0)

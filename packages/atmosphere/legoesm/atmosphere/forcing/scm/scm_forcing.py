@@ -37,6 +37,7 @@ from legoesm.atmosphere.forcing.idealized.large_scale_forcing import (
     mask_inflow_endpoint_tendency as _mask_inflow_endpoint_tendency,
     upwind_dphi_dz_top2bottom as _upwind_dphi_dz_top2bottom,
 )
+from legoesm.atmosphere.physics.thermodynamics import liquid_water_theta
 from legoesm.atmosphere.physics._shared import (
     compute_heights_from_sigma,
     compute_layer_dz,
@@ -49,6 +50,7 @@ ScalarFn = Callable[[float], jax.Array]
 
 
 _PRESCRIBE = ("none", "T_s", "fluxes")
+_SUBSIDENCE_ON = ("theta_qv", "theta_l_qt")
 
 
 class SCMForcing(NamedTuple):
@@ -109,6 +111,22 @@ class SCMForcing(NamedTuple):
         the whole run, so the config route can only carry one instant of a
         diurnal cycle (Wangara Day 33 measured 113.4 W/m^2 held for 8 h
         against a cycle peaking at 13:00).
+    subsidence_on
+        Which thermodynamic pair ``subsidence_w`` advects. ``"theta_qv"``
+        (default): potential temperature and the tracers above. ``"theta_l_qt"``:
+        liquid-water potential temperature θ_l and total water q_t = q_v + q_c
+        (rain excluded), as swirl-lm's GCM forcing does; the θ_l tendency is
+        applied to θ and the q_t tendency to q_v, q_c untouched (PI 2026-11-01).
+        Needs a ``q_c`` tracer; ``subsidence_tracers`` must stay unset.
+    nudge_rate, theta_l_target, qt_target
+        Relaxation of θ_l and q_t toward target profiles: ``nudge_rate`` [1/s],
+        targets [K] and [kg/kg]. Tendencies ``r (θ_l* − θ_l)`` on θ and
+        ``r (q_t* − q_t)`` on q_v. All three are set together or not at all.
+    wind_relax_rate, u_target, v_target
+        Relaxation of u and v toward target profiles at the uniform rate
+        ``wind_relax_rate`` [1/s]; ``0.0`` disables it. Targets [m/s].
+    rad_T_tendency
+        Prescribed radiative temperature tendency [K/s], added to dT/dt.
     """
     f_c: float = 0.0
     u_geo: Optional[ProfileFn] = None
@@ -122,6 +140,14 @@ class SCMForcing(NamedTuple):
     w_qv_s: Optional[ScalarFn] = None
     flux_to_closure: bool = False
     subsidence_tracers: Optional[tuple] = None
+    subsidence_on: str = "theta_qv"
+    nudge_rate: Optional[ProfileFn] = None
+    theta_l_target: Optional[ProfileFn] = None
+    qt_target: Optional[ProfileFn] = None
+    wind_relax_rate: float = 0.0
+    u_target: Optional[ProfileFn] = None
+    v_target: Optional[ProfileFn] = None
+    rad_T_tendency: Optional[ProfileFn] = None
 
 
 def default_forcing() -> SCMForcing:
@@ -160,6 +186,32 @@ def validate_forcing(forcing: SCMForcing) -> None:
             f"SCMForcing.prescribe={forcing.prescribe!r} invalid; "
             f"choose from {_PRESCRIBE}."
         )
+    if forcing.subsidence_on not in _SUBSIDENCE_ON:
+        raise ValueError(
+            f"SCMForcing.subsidence_on={forcing.subsidence_on!r} invalid; "
+            f"choose from {_SUBSIDENCE_ON}."
+        )
+    if forcing.subsidence_on == "theta_l_qt" and forcing.subsidence_tracers is not None:
+        raise ValueError(
+            "SCMForcing.subsidence_on='theta_l_qt' subsides total water as a whole; "
+            "subsidence_tracers names individual species and must stay unset.")
+    nudge = (forcing.nudge_rate, forcing.theta_l_target, forcing.qt_target)
+    if any(x is None for x in nudge) and not all(x is None for x in nudge):
+        raise ValueError(
+            "SCMForcing.nudge_rate, theta_l_target and qt_target are set together "
+            "or not at all; a partial set would leave one nudging term silently off.")
+    winds = (forcing.u_target, forcing.v_target)
+    if forcing.wind_relax_rate != 0.0:
+        if not forcing.wind_relax_rate > 0.0:
+            raise ValueError(
+                f"SCMForcing.wind_relax_rate must be >= 0, got {forcing.wind_relax_rate}")
+        if any(x is None for x in winds):
+            raise ValueError(
+                "SCMForcing.wind_relax_rate != 0 requires both u_target and v_target.")
+    elif any(x is not None for x in winds):
+        raise ValueError(
+            "SCMForcing.u_target/v_target are set but wind_relax_rate is 0; the "
+            "relaxation would be silently off.")
     if forcing.prescribe == "T_s" and forcing.T_s is None:
         raise ValueError("prescribe='T_s' requires SCMForcing.T_s callable.")
     if forcing.prescribe == "fluxes":
@@ -230,6 +282,17 @@ def validate_forcing_against_state(
                 f"SCMForcing.subsidence_tracers names {missing} but the SCM state "
                 f"carries only {sorted(carried)}; their subsidence would be "
                 "silently dropped.")
+    needs_qc = forcing.nudge_rate is not None or (
+        forcing.subsidence_w is not None and forcing.subsidence_on == "theta_l_qt")
+    if needs_qc and not (has_qv and "q_c" in state.tracers):
+        raise ValueError(
+            "SCMForcing θ_l/q_t nudging or subsidence_on='theta_l_qt' needs 'q_v' "
+            "and 'q_c' tracers in the SCM state (θ_l and q_t are built from them); "
+            f"the state carries {sorted(state.tracers or {})}.")
+    if forcing.wind_relax_rate != 0.0 and state.v is None:
+        raise ValueError(
+            "SCMForcing.wind_relax_rate != 0 requires the SCM column to carry "
+            "both horizontal wind components; state.v is None.")
     if forcing.f_c != 0.0 and state.v is None:
         raise ValueError(
             "SCMForcing.f_c != 0 (Coriolis / geostrophic relaxation) "
@@ -324,12 +387,20 @@ def compute_forcing_tendencies(
     else:
         z_full = None
 
+    theta_l_mode = forcing.subsidence_on == "theta_l_qt"
+    needs_thl = forcing.nudge_rate is not None or (
+        forcing.subsidence_w is not None and theta_l_mode)
     needs_exner = (
         forcing.subsidence_w is not None or forcing.theta_adv is not None
+        or needs_thl
     )
     exner = (
         (p_full / constants.p_ref) ** constants.kappa if needs_exner else None
     )
+    if needs_thl:
+        q_c = state.tracers["q_c"].data
+        theta_l = liquid_water_theta(T / jnp.clip(exner, 1e-6, None), q_c, exner)
+        q_t = q_v + q_c
 
     # --- Coriolis + geostrophic relaxation -----------------------------
     if forcing.f_c != 0.0 and v is not None:
@@ -348,14 +419,19 @@ def compute_forcing_tendencies(
         w_ls = _eval_profile(
             forcing.subsidence_w, t_seconds, nlev, sd,
         ).reshape(1, 1, 1, nlev)
-        theta = T / jnp.clip(exner, 1e-6, None)
+        theta = theta_l if theta_l_mode else T / jnp.clip(exner, 1e-6, None)
         dtheta_dz = _upwind_dphi_dz_top2bottom(theta, z_full, w_ls)
         dtheta_dt_subs = _mask_inflow_endpoint_tendency(
             -w_ls * dtheta_dz, w_ls,
         )
         dT_dt = dT_dt + exner * dtheta_dt_subs
-        names = (forcing.subsidence_tracers
-                 if forcing.subsidence_tracers is not None else ("q_v",))
+        if theta_l_mode:
+            dqt_dz = _upwind_dphi_dz_top2bottom(q_t, z_full, w_ls)
+            dqv_dt = dqv_dt + _mask_inflow_endpoint_tendency(-w_ls * dqt_dz, w_ls)
+            names = ()
+        else:
+            names = (forcing.subsidence_tracers
+                     if forcing.subsidence_tracers is not None else ("q_v",))
         if dqv_dt is not None and "q_v" in names:
             dqv_dz = _upwind_dphi_dz_top2bottom(q_v, z_full, w_ls)
             dqv_subs = _mask_inflow_endpoint_tendency(
@@ -422,6 +498,26 @@ def compute_forcing_tendencies(
             forcing.qv_adv, t_seconds, nlev, q_v.dtype,
         ).reshape(1, 1, 1, nlev)
         dqv_dt = dqv_dt + qv_tend
+
+    # --- Relaxation of θ_l / q_t (onto θ and q_v) and of the winds -------
+    if forcing.nudge_rate is not None:
+        rate = _eval_profile(forcing.nudge_rate, t_seconds, nlev, sd).reshape(1, 1, 1, nlev)
+        thl_target = _eval_profile(
+            forcing.theta_l_target, t_seconds, nlev, sd).reshape(1, 1, 1, nlev)
+        qt_target = _eval_profile(
+            forcing.qt_target, t_seconds, nlev, q_v.dtype).reshape(1, 1, 1, nlev)
+        dT_dt = dT_dt + exner * rate * (thl_target - theta_l)
+        dqv_dt = dqv_dt + rate * (qt_target - q_t)
+    if forcing.wind_relax_rate != 0.0:
+        u_t = _eval_profile(forcing.u_target, t_seconds, nlev, sd).reshape(1, 1, 1, nlev)
+        v_t = _eval_profile(forcing.v_target, t_seconds, nlev, sd).reshape(1, 1, 1, nlev)
+        du_dt = du_dt + forcing.wind_relax_rate * (u_t - u)
+        dv_dt = dv_dt + forcing.wind_relax_rate * (v_t - v)
+
+    # --- Prescribed radiative temperature tendency ----------------------
+    if forcing.rad_T_tendency is not None:
+        dT_dt = dT_dt + _eval_profile(
+            forcing.rad_T_tendency, t_seconds, nlev, sd).reshape(1, 1, 1, nlev)
 
     tracer_tend = dict(other_tend) or None
     if dqv_dt is not None and q_v_fld is not None:

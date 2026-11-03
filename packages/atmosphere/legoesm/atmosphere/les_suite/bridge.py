@@ -742,6 +742,40 @@ def forcing_profile_fn(artifact: LESReferenceArtifact, *, dt_s: float | None = N
     return lambda t_seconds: prof
 
 
+def rad_tendency_fn(artifact: LESReferenceArtifact, *, dt_s: float):
+    """The LES radiative temperature tendency [K/s] as an SCM channel
+    ``t -> (nz,)`` on the artifact heights (PI 2026-11-01/02).
+
+    Inside the LES record each output frame holds over the times NEAREST to it
+    (window edges at the midpoints between frames; the first and last frames
+    reach only the record's ends). Before the first LES frame the channel is the
+    time mean of that same series over the record, i.e. the trapezoid mean of the
+    frames. After the last frame the last frame continues. Returned as the mean
+    over each step ``[t, t+dt_s]`` (:func:`_cum_rate_fn`), so a forward-Euler SCM
+    applies exactly the integral of this series.
+
+    The artifact's frame 0 is the sounding, with no LES radiation (NaN); every
+    other frame must be finite."""
+    if artifact.rad_T_tendency is None:
+        raise BridgeError(f"{artifact.case_name}: artifact carries no rad_T_tendency")
+    times = jnp.asarray(artifact.times_s, dtype=jnp.result_type(float))
+    rad = jnp.asarray(artifact.rad_T_tendency, dtype=times.dtype)
+    if times.shape[0] < 3 or not bool(jnp.all(jnp.isnan(rad[0]))) or not bool(
+            jnp.all(jnp.isfinite(rad[1:]))):
+        raise BridgeError(
+            f"{artifact.case_name}: rad_T_tendency must be NaN at frame 0 and finite "
+            "on at least two LES frames after it")
+    t_les, r_les = times[1:], rad[1:]
+    mids = 0.5 * (t_les[1:] + t_les[:-1])
+    edges = jnp.concatenate([jnp.zeros(1, times.dtype), t_les[:1], mids, t_les[-1:]])
+    rates = jnp.concatenate([jnp.zeros_like(r_les[:1]), r_les], axis=0)
+    widths = jnp.diff(edges)[1:].reshape(-1, 1)
+    rates = rates.at[0].set(jnp.sum(r_les * widths, axis=0) / (t_les[-1] - t_les[0]))
+    cum = jnp.concatenate([jnp.zeros_like(r_les[:1]),
+                           jnp.cumsum(rates * jnp.diff(edges).reshape(-1, 1), axis=0)])
+    return _cum_rate_fn(edges, cum, dt_s)
+
+
 def subsidence_tracers(artifact: LESReferenceArtifact) -> tuple | None:
     """The SCM tracers the LES subsidence advected (``les_setup``'s record, in the
     SCM's tracer names). A moist artifact with subsidence must carry the record;

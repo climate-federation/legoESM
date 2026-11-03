@@ -544,3 +544,38 @@ def test_theta_adv_cum_is_one_channel_and_integrates_exactly():
         LESReferenceArtifact(**base, theta_adv_cum=cum, theta_adv=np.zeros(nz))
     with pytest.raises(BridgeError):
         LESReferenceArtifact(**base, theta_adv_cum=cum[:, :-1])
+
+
+def _rad_artifact(frames):
+    rad = jnp.concatenate([jnp.full((1, NZ), jnp.nan),
+                           jnp.broadcast_to(jnp.asarray(frames)[:, None], (NT - 1, NZ))])
+    return _moist_artifact(rad_T_tendency=rad)
+
+
+def test_rad_tendency_fn_holds_the_nearest_frame_and_its_time_mean_before():
+    from legoesm.atmosphere.les_suite.bridge import rad_tendency_fn
+    # LES frames at 1200, 2400, 3600 s; nearest-frame windows [1200,1800],
+    # [1800,3000], [3000,3600]; time mean over the record = trapezoid mean
+    art = _rad_artifact([1.0e-5, 2.0e-5, 4.0e-5])
+    mean = (600 * 1.0e-5 + 1200 * 2.0e-5 + 600 * 4.0e-5) / 2400.0
+    fn = rad_tendency_fn(art, dt_s=300.0)
+    for t, want in ((0.0, mean), (900.0, mean), (1200.0, 1.0e-5), (1500.0, 1.0e-5),
+                    (1650.0, 1.5e-5), (1800.0, 2.0e-5), (2700.0, 2.0e-5),
+                    (3000.0, 4.0e-5), (3600.0, 4.0e-5)):
+        got = fn(t)
+        assert got.shape == (NZ,)
+        assert jnp.allclose(got, want, rtol=1e-12, atol=0.0), (t, got[0], want)
+    total = sum(float(fn(t)[0]) * 300.0 for t in range(0, 3600, 300))
+    assert total == pytest.approx(3600.0 * mean, rel=1e-12)
+
+
+def test_rad_tendency_fn_refuses_a_missing_or_partial_record():
+    from legoesm.atmosphere.les_suite.bridge import rad_tendency_fn
+    with pytest.raises(BridgeError, match="no rad_T_tendency"):
+        rad_tendency_fn(_moist_artifact(), dt_s=300.0)
+    filled = _moist_artifact(rad_T_tendency=jnp.full((NT, NZ), 1e-5))
+    with pytest.raises(BridgeError, match="NaN at frame 0"):
+        rad_tendency_fn(filled, dt_s=300.0)
+    gap = _rad_artifact([1.0e-5, jnp.nan, 4.0e-5])
+    with pytest.raises(BridgeError, match="NaN at frame 0"):
+        rad_tendency_fn(gap, dt_s=300.0)
