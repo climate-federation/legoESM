@@ -129,6 +129,7 @@ EXCLUDED: frozenset[str] = frozenset(
         # ecRad 49r1 port: package docstring and the vendored RRTMG table loader (plumbing).
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/ecrad_ifs/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/ecrad_ifs/tables.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/ecrad_ifs/_libm.py",  # exp helper (V45)
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/config/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/config/radiative_transfer.py",
