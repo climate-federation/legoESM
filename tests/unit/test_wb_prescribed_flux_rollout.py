@@ -46,9 +46,9 @@ def setup():
     }
     pe = SpectralPEConfig(time_integrator="ssp_rk3")
 
-    def run(forcing):
+    def run(forcing, n_steps=N_STEPS):
         return spectral_rollout(
-            state, non_rad, grid, sigma, pe, DT, N_STEPS, None, None,
+            state, non_rad, grid, sigma, pe, DT, n_steps, None, None,
             forcing_base=forcing, rad_physics_fn=rad, rad_update_interval=1)
 
     def lowest_T_mean(out):
@@ -110,3 +110,60 @@ def test_partial_flux_set_is_refused(setup):
                "sfc_lhf": jnp.zeros((ncol,))}
     with pytest.raises(KeyError, match="sfc_tau_x"):
         run(partial)
+
+
+_RAD = {"sfc_sw_up": 30.0, "sfc_sw_down": 300.0, "sfc_lw_up": 400.0}
+
+
+def _frames(ncol, shf_by_hour, lw_up=400.0):
+    """(n_hours + 1, 7, ncol) climatology frames (FLUX_KEYS order): sensible
+    flux per hour, fixed radiation planes."""
+    f = np.zeros((len(shf_by_hour), 7, ncol))
+    f[:, 0] = np.asarray(shf_by_hour)[:, None]
+    f[:, 4], f[:, 5], f[:, 6] = _RAD["sfc_sw_up"], _RAD["sfc_sw_down"], lw_up
+    return jnp.asarray(f)
+
+
+def _rad(ncol):
+    return {k: jnp.full((ncol,), v) for k, v in _RAD.items()}
+
+
+def test_constant_climatology_frames_equal_the_held_planes(setup):
+    grid, ncol, base, run, _ = setup
+    held = run({**base, **_fluxes(ncol, shf=150.0), **_rad(ncol)})
+    clim = run({**base, "sfc_flux_frames": _frames(ncol, [150.0, 150.0])})
+    np.testing.assert_array_equal(np.asarray(held.T_hat.data),
+                                  np.asarray(clim.T_hat.data))
+
+
+def test_climatology_frames_are_re_read_every_step(setup):
+    """Hour-1 frame 0 -> 1200 W/m2: the second step (600 s) reads 200 W/m2,
+    so the run is warmer than one holding the step-0 value of 0."""
+    grid, ncol, base, run, lowest_T = setup
+    ramp = lowest_T(run({**base, "sfc_flux_frames": _frames(ncol, [0.0, 1200.0])}))
+    flat = lowest_T(run({**base, "sfc_flux_frames": _frames(ncol, [0.0, 0.0])}))
+    held = lowest_T(run({**base, **_fluxes(ncol, shf=0.0), **_rad(ncol)}))
+    assert flat == held
+    assert ramp > flat
+
+
+def test_climatology_radiation_planes_reach_the_radiation(setup):
+    grid, ncol, base, run, _ = setup
+    a = run({**base, "sfc_flux_frames": _frames(ncol, [0.0, 0.0], lw_up=500.0)})
+    b = run({**base, "sfc_flux_frames": _frames(ncol, [0.0, 0.0], lw_up=300.0)})
+    assert float(jnp.max(jnp.abs(a.T_hat.data - b.T_hat.data))) > 0.0
+
+
+def test_climatology_frames_guards(setup):
+    grid, ncol, base, run, _ = setup
+    with pytest.raises(ValueError, match="exactly one lower boundary"):
+        run({**base, **_fluxes(ncol), "sfc_flux_frames": _frames(ncol, [0.0, 0.0])})
+    with pytest.raises(ValueError, match="exactly one lower boundary"):
+        run({**base, "sfc_lw_up": jnp.full((ncol,), 1.0),
+             "sfc_flux_frames": _frames(ncol, [0.0, 0.0])})
+    with pytest.raises(ValueError, match="expected"):
+        run({**base, "sfc_flux_frames": jnp.zeros((2, 3, ncol))})
+    with pytest.raises(ValueError, match="expected"):
+        run({**base, "sfc_flux_frames": jnp.zeros((1, 7, ncol))})
+    with pytest.raises(ValueError, match="cover 1 h"):
+        run({**base, "sfc_flux_frames": _frames(ncol, [0.0, 0.0])}, n_steps=7)

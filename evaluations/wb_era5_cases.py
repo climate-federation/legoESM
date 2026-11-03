@@ -136,7 +136,7 @@ def build_forecast_cases(
     era5_cfg, grid, sigma, *, leads_hours, eval_year, n_inits,
     init_stride_hours, resolution_deg, ds=None, smoothing_passes=4,
     aerosol=None,
-    microphysics="none", cloud_ds=None,
+    microphysics="none", cloud_ds=None, flux_climatology=None,
 ):
     """Build the WB2 forecast-eval cases for one eval year.
 
@@ -169,6 +169,9 @@ def build_forecast_cases(
     cloud_ds : xarray.Dataset, optional
         Pre-opened condensate store; ``None`` opens ``era5_cfg.cloud_zarr``
         when ``era5_cfg.load_cloud_condensate``.
+    flux_climatology : FluxClimatology, optional
+        ``scale_build.wb_flux_climatology(...)``: the CAM6 arm's prescribed
+        fluxes, read over the longest lead (as in training).
 
     Returns
     -------
@@ -184,7 +187,10 @@ def build_forecast_cases(
         open_era5_zarr,
     )
     from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
-    from legoesm.training.scale_build import build_spectral_forcing
+    from legoesm.training.scale_build import (
+        build_spectral_forcing,
+        with_flux_climatology,
+    )
 
     cadence = int(era5_cfg.dt_hours)
     leads = [int(x) for x in leads_hours]
@@ -244,6 +250,9 @@ def build_forecast_cases(
         forcing = build_spectral_forcing(ic_slice, grid, times[i_ic], eval_year,
                                          aerosol=aerosol, sigma=sigma,
                                          ic_carry=init_carry)
+        if flux_climatology is not None:
+            forcing = with_flux_climatology(forcing, flux_climatology,
+                                            times[i_ic], max(leads))
 
         verif_by_lead = {}
         for lead in leads:

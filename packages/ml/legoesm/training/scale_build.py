@@ -576,7 +576,8 @@ def build_latlon_config(cfg, yml):
 _WB_CONSUMED_TOP_KEYS = frozenset({
     "classical", "convection", "dt", "era5_cadence_hours",
     "cache_dir", "era5_cloud_condensate", "era5_cloud_zarr", "era5_flux_zarr",
-    "era5_soil_moisture", "era5_surface_fluxes", "era5_zarr", "eval_years",
+    "era5_flux_climatology", "era5_soil_moisture", "era5_surface_fluxes",
+    "era5_zarr", "eval_years",
     "grad_accum", "grad_clip_norm", "gravity_wave_drag", "loss", "lr",
     "microphysics", "n_epochs", "n_lat", "n_lon", "n_training_days",
     "neural_gcm", "nlev", "optimizer", "rad_update_steps", "radiation",
@@ -1889,6 +1890,39 @@ def _lead_target(sl, carry, grid):
                                 ("v10", sl.v10), ("mslp", sl.msl))}
 
 
+_ERA5_FLUX_PLANE_KEYS = ("sfc_shf", "sfc_lhf", "sfc_tau_x", "sfc_tau_y",
+                         "sfc_sw_up", "sfc_sw_down", "sfc_lw_up")
+
+
+def wb_flux_climatology(cfg, yml, grid):
+    """The CAM6 arm's ERA5 flux climatology (``era5_flux_climatology: true``,
+    owner 2026-11-03), stored next to the state cache; None when unselected."""
+    if not yml.get("era5_flux_climatology", False):
+        return None
+    if getattr(cfg, "mode", None) != "physics":
+        raise ValueError("era5_flux_climatology is the CAM6 (physics) arm's "
+                         "lower boundary; the learned arms do not read fluxes.")
+    if not yml.get("era5_surface_fluxes", False):
+        raise ValueError("era5_flux_climatology selects WHICH prescribed ERA5 "
+                         "fluxes; it needs era5_surface_fluxes: true.")
+    root = wb_state_cache_root(yml)
+    if root is None:
+        raise ValueError("era5_flux_climatology needs state_cache_dir (the "
+                         "climatology is stored next to the state cache).")
+    from legoesm.training import wb_flux_climatology as wfc
+    return wfc.FluxClimatology(wfc.store_path(root, grid))
+
+
+def with_flux_climatology(forcing, clim, t0, n_hours):
+    """``forcing`` with the sample's own ERA5 flux planes removed and the
+    climatology's hourly frames from ``t0`` over ``n_hours`` added."""
+    import jax.numpy as jnp
+
+    out = {k: v for k, v in forcing.items() if k not in _ERA5_FLUX_PLANE_KEYS}
+    out["sfc_flux_frames"] = jnp.asarray(clim.frames(t0, n_hours))
+    return out
+
+
 def wb_state_cache_root(yml):
     """The deck's ``state_cache_dir`` (model-grid states), resolved like
     ``cache_dir``, or None."""
@@ -2032,6 +2066,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     # Carrying turbulence energy across steps on this path is separate work.
     _micro = wb_ic_microphysics(cfg.mode, yml)
     _aerosol = wb_aerosol_spec(yml) if cfg.mode == "physics" else None
+    _clim = wb_flux_climatology(cfg, yml, grid)
 
     def build(year, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
         s_ic, s_tg, sst_src = _sample_inputs(
@@ -2055,6 +2090,9 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
         forcing = build_spectral_forcing(sst_src, grid, times[i_ic], year,
                                          aerosol=_aerosol, sigma=sigma,
                                          ic_carry=ic)
+        if _clim is not None:
+            forcing = with_flux_climatology(forcing, _clim, times[i_ic],
+                                            stride * era5_cfg.dt_hours)
         return (ic, target, forcing)
 
     mine = list(_sharded_indices(
@@ -2062,7 +2100,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     if wb_state_cache_root(yml) is not None:
         return _state_cached_samples(
             cfg, yml, grid, sigma, mine, leads, lead_offsets, times, ds,
-            cloud_ds, flux_ds, _micro, _aerosol)
+            cloud_ds, flux_ds, _micro, _aerosol, clim=_clim)
     src = (ds, cloud_ds, flux_ds, int)
     local = _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times,
                              snaps_per_day, stride, rank, nproc,
@@ -2085,7 +2123,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
 
 
 def _state_cached_samples(cfg, yml, grid, sigma, mine, leads, lead_offsets,
-                          times, ds, cloud_ds, flux_ds, micro, aerosol):
+                          times, ds, cloud_ds, flux_ds, micro, aerosol, clim=None):
     """The spectral samples, read lazily from the model-grid state cache.
 
     Gate: every ERA5 time of the FIRST sample is rebuilt from the raw store
@@ -2124,6 +2162,9 @@ def _state_cached_samples(cfg, yml, grid, sigma, mine, leads, lead_offsets,
         if aerosol is not None:
             forcing = {**forcing, **wb_aerosol_forcing(aerosol, grid, sigma, ic,
                                                        times[i_ic])}
+        if clim is not None:
+            hours = int((times[i_tg] - times[i_ic]) / np.timedelta64(1, "h"))
+            forcing = with_flux_climatology(forcing, clim, times[i_ic], hours)
         if leads:
             target = tuple(cache.read(i)[:2] for i in times_of(i_ic, i_tg)[1:])
         else:

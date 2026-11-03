@@ -1533,6 +1533,49 @@ def spectral_rollout(
             # for the classical arm while the learned arms saw the NaN.
             _flux_override.append(_raw_f)
         _flux_override = tuple(_flux_override)
+    # Hourly climatology frames (the CAM6 arm's era5_flux_climatology),
+    # ``wb_flux_climatology.FLUX_KEYS`` order: the four turbulent anchors are
+    # re-set on the physics state at every step, the three radiation planes
+    # ride the step's forcing dict, both from the step's time.
+    _flux_frames = (None if forcing_base is None
+                    else forcing_base.get("sfc_flux_frames"))
+    if _flux_frames is not None:
+        if _have_flux:
+            raise ValueError(
+                "spectral_rollout: forcing_base carries both held flux planes "
+                "and climatology frames; exactly one lower boundary is allowed.")
+        _flux_frames = jnp.asarray(_flux_frames)
+        _ncol_grid = int(grid.n_lat) * int(grid.n_lon)
+        from legoesm.training.wb_flux_climatology import FLUX_KEYS as _FK
+        if (_flux_frames.ndim != 3 or _flux_frames.shape[0] < 2
+                or _flux_frames.shape[1:] != (len(_FK), _ncol_grid)):
+            raise ValueError(
+                "spectral_rollout: sfc_flux_frames has shape "
+                f"{_flux_frames.shape}, expected (n_hours + 1, "
+                f"{len(_FK)}, {_ncol_grid}).")
+        if any(forcing_base.get(k) is not None for k in _FK):
+            raise ValueError(
+                "spectral_rollout: forcing_base carries both held flux planes "
+                "and climatology frames; exactly one lower boundary is allowed.")
+        try:
+            _end_s = (int(step_offset) + int(n_steps)) * float(dt) + float(
+                sim_time_offset_seconds)
+        except TypeError:
+            _end_s = None   # traced offset: frames_at clamps
+        if _end_s is not None and _end_s > (_flux_frames.shape[0] - 1) * 3600.0 + 1e-6:
+            raise ValueError(
+                f"spectral_rollout: the forecast runs to {_end_s / 3600.0} h but "
+                f"sfc_flux_frames cover {_flux_frames.shape[0] - 1} h.")
+        _flux_override = tuple(_flux_frames[0, k]
+                               for k in range(len(_FLUX_OVERRIDE_KEYS)))
+
+    def _frames_at_step(step_idx):
+        from legoesm.training.wb_flux_climatology import frames_at
+        return frames_at(_flux_frames, step_idx.astype(jnp.float64) * dt + _t_off)
+
+    def _flux_at(step_idx):
+        f = _frames_at_step(step_idx)
+        return tuple(f[k] for k in range(len(_FLUX_OVERRIDE_KEYS)))
     if forcing_base is not None:
         _missing = [k for k in ("T_sfc", "sic", "day_of_year", "seconds_of_day") if k not in forcing_base]
         if _missing:
@@ -1570,13 +1613,24 @@ def spectral_rollout(
         # GLM suggestion).  The sentinel belongs only in the physics
         # state's override slot, which is where its contract is defined.
         # This is exactly what spectral_amip_rollout has always done.
+        _rad_planes = {}
+        if _flux_frames is not None:
+            from legoesm.training.wb_flux_climatology import (
+                FLUX_KEYS as _FK, N_TURBULENT as _NT)
+            _f = _frames_at_step(step_idx)
+            _rad_planes = {k: _f[i] for i, k in enumerate(_FK) if i >= _NT}
         return {
             **forcing_base,
+            **_rad_planes,
             "T_sfc": forcing_base["T_sfc"],
             "sic": forcing_base["sic"],
             "day_of_year": jnp.mod(doy - 1.0, 365.0) + 1.0,
             "seconds_of_day": jnp.mod(t, 86400.0),
         }
+
+    if _flux_frames is not None and not use_rad_gating:
+        raise ValueError("spectral_rollout: sfc_flux_frames are applied on the "
+                         "radiation-gated stateful path only (the CAM6 arm).")
 
     if not use_rad_gating:
         # Legacy single-physics path -- physics_fn computes the full
@@ -1831,6 +1885,9 @@ def spectral_rollout(
     _ps_entry = getattr(physics_fn, "with_phys_state", None)
     _ps_init = getattr(physics_fn, "init_phys_state", None)
     _thread_phys = _ps_entry is not None and _ps_init is not None
+    if _flux_frames is not None and not _thread_phys:
+        raise ValueError("spectral_rollout: sfc_flux_frames need a physics "
+                         "state to anchor them on (the CAM6 arm).")
 
     def _post_step(new_state):
         """Shared post-integration chain (filters / positivity / anchor)."""
@@ -1898,6 +1955,8 @@ def spectral_rollout(
 
     def step_fn_gated_stateful(carry, step_idx):
         state, cached_rad_tendency, phys_state = carry
+        if _flux_frames is not None:
+            phys_state = _set_flux_slots(phys_state, _flux_at(step_idx))
         # Radiation reads the carry ENTERING the step (lagged, as the
         # hydrostatic chain does): the previous step's published cloud
         # fraction and deep-convection carries.
@@ -1969,11 +2028,19 @@ def spectral_rollout(
                         "surface fluxes but the threaded physics state has "
                         f"no {_slot} slot, so the anchor would be silently "
                         f"dropped (state type {type(ps).__name__}).")
-            # Cast to the T_sfc anchor slot's dtype (all anchors share it);
-            # fall back to the planes' own dtype when no T_sfc anchor exists.
-            _dt = _cur.dtype if _cur is not None else _flux_override[0].dtype
-            for _slot, _val in zip(_slots, _flux_override):
-                ps = ps._replace(**{_slot: _val.astype(_dt)})
+            ps = _set_flux_slots(ps, _flux_override)
+        return ps
+
+    def _set_flux_slots(ps, vals):
+        # Cast to the T_sfc anchor slot's dtype (all anchors share it);
+        # fall back to the planes' own dtype when no T_sfc anchor exists.
+        _cur = getattr(ps, "surface_T_sfc_override", None)
+        _dt = _cur.dtype if _cur is not None else vals[0].dtype
+        for _slot, _val in zip(("surface_shflx_override_w_m2",
+                                "surface_lhflx_override_w_m2",
+                                "surface_tau_x_override_pa",
+                                "surface_tau_y_override_pa"), vals):
+            ps = ps._replace(**{_slot: _val.astype(_dt)})
         return ps
 
     if _thread_phys:

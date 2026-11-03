@@ -983,13 +983,10 @@ def load_era5_slice(
             _swn = _flux_2d("mean_surface_net_short_wave_radiation_flux", "load_surface_fluxes")
             _lwd = _flux_2d("mean_surface_downward_long_wave_radiation_flux", "load_surface_fluxes")
             _lwn = _flux_2d("mean_surface_net_long_wave_radiation_flux", "load_surface_fluxes")
-            sfc_shf = -_mssfhf / acc
-            sfc_lhf = -_mslhf / acc
-            sfc_tau_x = -_ewss / acc
-            sfc_tau_y = -_nsss / acc
-            sfc_sw_up = (_swd - _swn) / acc
-            sfc_sw_down = _swd / acc
-            sfc_lw_up = (_lwd - _lwn) / acc
+            sfc_shf, sfc_lhf, sfc_tau_x, sfc_tau_y = era5_turbulent_flux_planes(
+                _mssfhf, _mslhf, _ewss, _nsss, acc)
+            sfc_sw_up, sfc_sw_down, sfc_lw_up = era5_radiation_flux_planes(
+                _swd, _swn, _lwd, _lwn, acc)
             # A non-finite plane would become a zero flux (classical anchor)
             # or a NaN input (learned arm) downstream, where nothing can
             # raise; ERA5 has none, so a NaN here is a store defect.
@@ -2229,6 +2226,36 @@ def regrid_3d_to_gaussian(field_3d, era5_lat, era5_lon, grid):
         )
         out[:, :, k] = interp((lat_g, lon_g))
     return out
+
+
+# ERA5 variables of era5_turbulent_flux_planes, in its argument order.
+ERA5_TURBULENT_FLUX_VARS = (
+    "mean_surface_sensible_heat_flux", "mean_surface_latent_heat_flux",
+    "mean_eastward_turbulent_surface_stress",
+    "mean_northward_turbulent_surface_stress")
+
+
+def era5_turbulent_flux_planes(mssfhf, mslhf, ewss, nsss, acc):
+    """``(shf, lhf, tau_x, tau_y)`` in legoESM's signs from the ERA5 means.
+
+    ERA5 heat fluxes are positive DOWN, legoESM's positive UP; ERA5 stress is
+    the stress ON the surface, legoESM's the stress ON the atmosphere; so all
+    four flip sign.  ``acc`` converts accumulations to rates (1 for means)."""
+    return -mssfhf / acc, -mslhf / acc, -ewss / acc, -nsss / acc
+
+
+# ERA5 variables of era5_radiation_flux_planes, in its argument order.
+ERA5_RADIATION_FLUX_VARS = (
+    "mean_surface_downward_short_wave_radiation_flux",
+    "mean_surface_net_short_wave_radiation_flux",
+    "mean_surface_downward_long_wave_radiation_flux",
+    "mean_surface_net_long_wave_radiation_flux")
+
+
+def era5_radiation_flux_planes(swd, swn, lwd, lwn, acc):
+    """``(sw_up, sw_down, lw_up)``, positive as named, from the ERA5 means:
+    ERA5 net = down - up (positive down), so up = down - net."""
+    return (swd - swn) / acc, swd / acc, (lwd - lwn) / acc
 
 
 def regrid_2d_to_gaussian(field_2d, era5_lat, era5_lon, grid):
