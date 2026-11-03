@@ -726,7 +726,8 @@ def _make_hydrostatic_microphysics(
         # (accepts_ps, see make_hydrostatic combined) with the forcing.
         physics_fn._wants_forcing = True
         physics_fn._writes_phys_state = True
-    elif _incloud or relvar_from_clubb:
+    elif _incloud or relvar_from_clubb or scheme_name == "thompson":
+        # thompson: the SCM's prescribed large-scale w (PhysicsState.dyn_w_ls)
         physics_fn._wants_phys_state_ro = True
     return physics_fn
 

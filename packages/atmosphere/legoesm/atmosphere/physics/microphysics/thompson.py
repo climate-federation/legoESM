@@ -110,6 +110,13 @@ def thompson_microphysics(
         raise ValueError(
             "microphysics='thompson' needs the carried N_c, N_r and N_i")
     dt = float(dt)
+    # Run the oracle-certified fp64 port as an fp64 island (vote J11a): its
+    # NumPy float64 constants would otherwise promote an fp32 state mid-step.
+    # Tendencies are cast back to the state dtype.
+    out_dtype = T.dtype
+    up = lambda x: jnp.asarray(x, jnp.float64)                 # noqa: E731
+    T, q_v, p_full, dz, w = up(T), up(q_v), up(p_full), up(dz), up(w)
+    h = HydrometeorState(*(None if x is None else up(x) for x in h))
     qs = (q_v, h.q_c, h.q_i, h.q_r, h.q_s, h.q_g)
     dry = 1.0 - sum(qs)                       # 1 - q_tot (H3)
     r = [_flip(q / dry) for q in qs]
@@ -130,7 +137,8 @@ def thompson_microphysics(
     N_i_new = _flip(o.ni) * dry
     N_r_new = _flip(o.nr * rho_p)
     frozen = (o.pptsnow + o.pptgraul + o.pptice) / dt
-    return MicrophysicsOutput(
+    cast = lambda x: x.astype(out_dtype)                       # noqa: E731
+    return jax.tree_util.tree_map(cast, MicrophysicsOutput(
         dT_dt=(_flip(o.T) - T) / dt,
         dq_v_dt=dq_v, dq_c_dt=dq_c, dq_r_dt=dq_r, dq_i_dt=dq_i,
         dq_s_dt=dq_s, dq_g_dt=dq_g,
@@ -139,4 +147,4 @@ def thompson_microphysics(
         dN_i_dt=(N_i_new - h.N_i) / dt,
         precipitation=o.pptrain / dt + frozen,
         precip_frozen=frozen,
-    )
+    ))
