@@ -482,7 +482,7 @@ def diagnostic_scheme_flux(
     Interior flux is a pure state functional (dt-independent — see ``_DIAG_DT_S``). Dry
     prescribed-flux regimes only (CBL / sheared CBL / SBL): the counter-gradient ceiling is
     a dry-CBL notion, so a moist artifact is rejected. Restricted to the four K-closures
-    that expose ``wtheta_flux`` (smagorinsky/louis local, holtslag_boville/ysu nonlocal); a
+    that expose ``wtheta_flux`` (smagorinsky/louis local, holtslag_boville nonlocal); a
     TKE-carrying or non-exposing scheme raises.
     """
     if artifact.w_theta_s is None:
@@ -538,7 +538,7 @@ def diagnostic_scheme_flux(
     if out.wtheta_flux is None:
         raise ValueError(
             f"{name}: does not expose TurbulenceOutput.wtheta_flux; the Q1 diagnostic "
-            "flux is wired only for smagorinsky/louis/holtslag_boville/ysu")
+            "flux is wired only for smagorinsky/louis/holtslag_boville")
     # Regrid on the SAME hydrostatic heights z_full the scheme computed the flux on
     # (NOT the isothermal z_scm proxy used for the θ IC interp — codex #3).
     flux_inc, z_inc = _to_increasing(out.wtheta_flux[0], z_full[0])  # → increasing height

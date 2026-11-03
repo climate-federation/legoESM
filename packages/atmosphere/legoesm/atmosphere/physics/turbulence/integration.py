@@ -105,6 +105,9 @@ _ENERGY_FIELD_BY_SCHEME = {
     "clubb": "tke",
     "edmf": "tke",
     "mynn25": "qke",
+    # WRF surface-layer state carried by YSU (sfclayrev ust/mol/znt/hfx/qfx +
+    # YSU pblh), shape (ncol, 6), not an energy profile (R4 vote J3).
+    "ysu": "sfclay",
 }
 
 
@@ -228,6 +231,8 @@ def turbulence_carry_field(scheme_name: str, scheme_config) -> str:
     """
     if scheme_name == "mynn25":
         return "qke"
+    if scheme_name == "ysu":
+        return "sfclay"
     if scheme_name == "clubb" and getattr(scheme_config, "prognostic", False):
         return "clubb_moments"
     return "tke"
@@ -240,6 +245,19 @@ def _read_turb_carry(phys_state, carry_field, ncol, nlev, scheme_config, dtype):
     TKE/qke, or the packed CLUBB moments ``(ncol, 15, nlev+1)`` for prognostic
     CLUBB. Re-seeds when ``phys_state`` is absent or the stored slot has the wrong
     shape (e.g. a minimal placeholder from a non-clubb init / scheme switch)."""
+    if carry_field == "sfclay":
+        # No floor reseed for the WRF surface-layer state (vote X5/J3): a
+        # missing or wrong-shape carry is a caller that dropped it.
+        from legoesm.atmosphere.physics.turbulence.ysu import SFCLAY_FIELDS
+        stored = getattr(phys_state, "sfclay", None) if phys_state else None
+        want = (ncol, len(SFCLAY_FIELDS))
+        if stored is None or tuple(stored.shape) != want:
+            raise ValueError(
+                f"turbulence=ysu needs PhysicsState.sfclay of shape {want} (the "
+                "WRF surface-layer carry); got "
+                f"{None if stored is None else tuple(stored.shape)}. Seed it with "
+                "init_physics_state for turbulence=ysu and thread the physics state.")
+        return stored
     if carry_field == "clubb_moments":
         from legoesm.atmosphere.physics.turbulence.clubb import (
             init_clubb_moments,
@@ -288,6 +306,18 @@ from legoesm.atmosphere.physics._shared import (
     compute_rho as _compute_rho,
     exner_function as _exner_function,
 )
+
+
+def _ysu_lane_kwargs(carry_field, ncol, *, land_fraction=None, cell_area=None):
+    """``{"land_fraction": ..., "cell_area": ...}`` (ncol,) for turbulence=ysu
+    (the WRF surface layer's xland and grid spacing, from what the lane owns;
+    votes X7/X13/J5), else ``{}``.  ``None`` entries are dropped so the kernel
+    requires the explicit YSUConfig fields instead (and raises when unset)."""
+    if carry_field != "sfclay":
+        return {}
+    kw = {"land_fraction": land_fraction, "cell_area": cell_area}
+    return {k: jnp.reshape(jnp.asarray(v), (ncol,)) for k, v in kw.items()
+            if v is not None}
 
 
 def _resolve_T_sfc(T_col, phys_state):
@@ -748,6 +778,8 @@ def _make_hydrostatic_turbulence(
                 T_sfc, q_sfc, rho, dt, step_config,
                 **_prognostic_clubb_lat_kwargs(
                     carry_field, lambda: jnp.reshape(grid.lat, (ncol,))),
+                **_ysu_lane_kwargs(carry_field, ncol, land_fraction=grid.land_frac,
+                                   cell_area=grid.grid_area),
             )
             tke_out = tke_new
         else:
@@ -1200,12 +1232,25 @@ def _make_mpas_turbulence(
         if needs_tke:
             tke_in = _read_turb_carry(
                 phys_state, carry_field, nCells, nlev, scheme_config, _state_dtype)
+            if carry_field == "sfclay" and (
+                    _qsfc_traced is not None or _beta_traced is not None
+                    or (f_land is not None and land_beta != 1.0)
+                    or getattr(_surf, "ocean_q_sfc_saline", False)):
+                # vote X10/X11: the WRF surface layer takes moisture
+                # availability 1 and computes its own saline water humidity.
+                raise ValueError(
+                    "turbulence=ysu runs the WRF surface layer with moisture "
+                    "availability 1 and its own water-surface humidity; a land "
+                    "beta / traced land humidity / ocean_q_sfc_saline would be "
+                    "a second, unported surface-humidity model and is refused.")
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, step_config,
                 **_sfc_kw,
                 **_prognostic_clubb_lat_kwargs(carry_field, _mesh_lat),
+                **_ysu_lane_kwargs(carry_field, nCells, land_fraction=f_land,
+                                   cell_area=mesh.grid_area),
             )
             tke_out = tke_new
         else:
@@ -1585,6 +1630,14 @@ def _make_nonhydrostatic_turbulence(
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
+    if carry_field == "sfclay":
+        # R4 vote J4: this driver drops the returned PhysicsState, so the WRF
+        # surface-layer carry would re-initialise every step.
+        raise NotImplementedError(
+            "YSU turbulence (WRF surface layer + YSU) carries the surface-layer "
+            "state in PhysicsState.sfclay, which the nonhydrostatic CD-grid "
+            "driver discards after every physics call. Use "
+            "model_type='hydrostatic', 'mpas' or 'spectral_pe'.")
     if carry_field in ("qke", "clubb_moments"):
         # Phase C codex iter-3 high: the nonhydrostatic CD-grid dynamics
         # driver drops the returned ``PhysicsState`` after every
@@ -1908,6 +1961,9 @@ def _make_spectral_pe_turbulence(
                 # Gaussian latitudes [rad] (n_lat,), lat-major like the columns.
                 **_prognostic_clubb_lat_kwargs(
                     carry_field, lambda: jnp.repeat(grid.lat, n_lon)),
+                # lat-major (n_lat*n_lon,) like the columns (vote J5)
+                **_ysu_lane_kwargs(carry_field, ncol, land_fraction=grid.land_frac,
+                                   cell_area=grid.grid_area),
             )
             tke_out = tke_new
         else:

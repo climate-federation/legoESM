@@ -284,6 +284,11 @@ class PhysicsState(NamedTuple):
     # CAM6 pbuf CLDO: the previous macmic sub-step's ast, set after the
     # microphysics (micro_mg_cam.F90:1829); 0 at cold start (:1047).
     cloud_fraction_old: jnp.ndarray = None
+    # turbulence=ysu: the WRF revised MM5 surface layer's carried state,
+    # shape (ncol, 6) in ``turbulence.ysu.SFCLAY_FIELDS`` order (ust, mol,
+    # znt, hfx, qfx, pblh), seeded at WRF's cold start; None for every other
+    # scheme.  Appended LAST with a default.
+    sfclay: jnp.ndarray = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -486,7 +491,17 @@ def init_physics_state(
         clubb_wp2_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         clubb_kh_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         cloud_fraction_old=jnp.zeros((ncol, nlev), dtype=dtype),
+        sfclay=_init_sfclay(ncol, physics_config, dtype),
     )
+
+
+def _init_sfclay(ncol, physics_config, dtype):
+    """WRF cold-start surface-layer carry for turbulence=ysu, else None."""
+    turb = physics_config.turbulence
+    if turb.scheme != "ysu":
+        return None
+    from legoesm.atmosphere.physics.turbulence.ysu import init_sfclay_carry
+    return init_sfclay_carry(ncol, turb.ysu, jnp.float64 if dtype is None else dtype)
 
 
 def update_physics_state(phys_state, updates):
@@ -581,4 +596,5 @@ def update_physics_state(phys_state, updates):
         clubb_kh_iface=updates.get("clubb_kh_iface", phys_state.clubb_kh_iface),
         cloud_fraction_old=updates.get(
             "cloud_fraction_old", phys_state.cloud_fraction_old),
+        sfclay=updates.get("sfclay", phys_state.sfclay),
     )

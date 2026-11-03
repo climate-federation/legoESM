@@ -950,14 +950,14 @@ def make_turbulence_only_spectral_physics(dt,
     # prognostic TKE from the floor on EVERY call — a silently different
     # closure, not the one named (codex). Refuse rather than run it wrong;
     # threading the carry is the fix if one of these is ever wanted here.
-    _STATEFUL = ("tke", "mynn25", "clubb", "clubb_lite", "edmf")
+    _STATEFUL = ("tke", "mynn25", "clubb", "clubb_lite", "edmf", "ysu")
     if turb.scheme in _STATEFUL:
         raise ValueError(
             f"make_turbulence_only_spectral_physics: {turb.scheme!r} is a "
             f"PROGNOSTIC scheme and this builder threads no PhysicsState, so "
             f"its carry would be re-seeded from the floor every step. Use a "
             f"stateless scheme (e.g. 'smagorinsky', 'louis', "
-            f"'holtslag_boville', 'ysu') or thread the carry first.")
+            f"'holtslag_boville') or thread the carry first.")
     cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
         convection=ConvectionConfig(scheme="none"),
