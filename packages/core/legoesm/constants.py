@@ -404,6 +404,7 @@ alpha_ice_broadband_warm = 0.45     # [-] melting sea-ice broadband (phase-2 ble
 M_dry = M_air * 1e-3            # [kg/mol] = 0.02896546 (CODATA dry air)
 M_o3 = 0.0479982                # [kg/mol] ozone (NIST CODATA / IUPAC)
 M_h2o = M_H2O * 1e-3            # [kg/mol] = 0.01801528 (water)
+M_ch4 = 0.01604246              # [kg/mol] methane (NIST, 16.04246 g/mol)
 
 # Avogadro's number (CODATA 2019 SI redefinition — exact value).
 N_A = 6.02214076e23             # [1/mol] particles per mole
