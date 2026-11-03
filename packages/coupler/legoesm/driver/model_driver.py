@@ -3902,12 +3902,29 @@ class ModelDriver:
             else:
                 from legoesm.grids.topography import load_subgrid_orography
                 _nat_g = getattr(self, "_latlon_native_grid", None)
+                if str(sso_path).endswith(".npz"):
+                    # per-cell sgh over each cell's footprint, built for the
+                    # run's saved mesh (build_subgrid_orography_cells.py);
+                    # refused on any other mesh
+                    from legoesm.grids.topography import (
+                        load_subgrid_orography_cells)
+                    _gcfg = self.config.grid
+                    if not getattr(_gcfg, "mpas_mesh_file", ""):
+                        raise ValueError(
+                            "a per-cell subgrid orography file (.npz) needs a "
+                            "saved, pinned MPAS mesh (mpas_mesh_file)")
+                    sso = jnp.asarray(load_subgrid_orography_cells(
+                        sso_path, int(np.asarray(self.grid.grid_lat).size),
+                        getattr(_gcfg, "mpas_mesh_sha256", ""))).astype(_sd)
+                    logger.info("  subgrid orography per cell footprint from %s",
+                                sso_path)
                 # lat-lon column lane: the native grid (its own spacing for
                 # the file's scale check), flattened to the mesh's columns
-                sso = (load_subgrid_orography(self.grid, sso_path)
-                       if _nat_g is None else jnp.reshape(
-                           load_subgrid_orography(_nat_g, sso_path), (-1,))
-                       ).astype(_sd)
+                else:
+                    sso = (load_subgrid_orography(self.grid, sso_path)
+                           if _nat_g is None else jnp.reshape(
+                               load_subgrid_orography(_nat_g, sso_path), (-1,))
+                           ).astype(_sd)
                 try:
                     self.grid = self.grid._replace(subgrid_topo_stddev=sso)
                 # NamedTuple._replace raises TypeError ("Got unexpected field
