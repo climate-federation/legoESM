@@ -7956,6 +7956,10 @@ class ModelDriver:
                         # them None).
                         if _name in PHYSSTATE_INPUT_FIELDS:
                             continue
+                        # scheme-conditional memory absent for this run
+                        # (e.g. the WRF Tiedtke lags): nothing to persist
+                        if _val is None:
+                            continue
                         if _name == "prng_key":
                             ps_d_carry[_name] = _val
                         elif _val.ndim == 3:
@@ -8105,7 +8109,7 @@ class ModelDriver:
                     # already dropped them).  Skip by NAME so a concrete-array
                     # carry is excluded too, not only None (``np.asarray(None)``
                     # is an unloadable object array under allow_pickle=False).
-                    if _name in PHYSSTATE_INPUT_FIELDS:
+                    if _name in PHYSSTATE_INPUT_FIELDS or _val is None:
                         continue
                     _save[f"physstate_{_name}"] = np.asarray(_val)
                 _save["physstate_meta_conv_scheme"] = np.asarray(
@@ -14882,9 +14886,13 @@ class ModelDriver:
                 # (the save skips their None), re-seeded fresh.  Every
                 # EVOLVING field stays mandatory.
                 _exempt_ps = {"col_index"} | PHYSSTATE_INPUT_FIELDS
+                # A field whose fresh seed is None (scheme-conditional
+                # memory this configuration does not carry, e.g. the WRF
+                # Tiedtke lags) has nothing to restore; the save skips it.
                 _missing = [f for f in _phys_state._fields
                             if f not in _present_fields
-                            and f not in _exempt_ps]
+                            and f not in _exempt_ps
+                            and getattr(_phys_state, f) is not None]
                 _new_missing = [f for f in _missing
                                 if f in _NEW_OPTIONAL_PS_FIELDS]
                 _missing = [f for f in _missing
