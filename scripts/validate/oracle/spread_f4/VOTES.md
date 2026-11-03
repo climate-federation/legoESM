@@ -25,3 +25,23 @@ Codex r2 (2 findings: integer-valued float/bool discrete detection; C5 flags not
 (MG2 C5) fixed by tracing the generator's own build.sh call; codex r4: NO FINDINGS. GLM r3 on the last two changes: 6 points,
 none changes a class -- every case it names errs toward UNMEASURED/C5-FAIL (conservative), the traced build REPLACES the
 generator's call (not run twice) and each mode's log is a fresh directory.
+
+## Round 2 (coordinator follow-up, 2026-11-03)
+| id | question | me | codex | GLM | result |
+|---|---|---|---|---|---|
+| V9 | MG2 prog-N_c: (a) regenerate committed fixtures, (b) local spread-only reference, committed untouched | b | b | b | b |
+| V10 | TKE: C-structural, closest (a) WRF MYJ / (b) WRF MYNN | a | a | a | a: MYJ module_bl_myjpbl |
+| V11 | clubb_lite: (a) C-structural vs CLUBB release / (b) harness anyway | a | a | a | a |
+| V12 | Smagorinsky 1-D shear proxy: (a) C-structural vs WRF km_opt=3 / (b) Lilly transcription | a | a | a | a |
+| V13 | gray: (a) Isca two_stream_gray_rad.F90 @ Isca v1.0 5868cfd, FMS stubs, our constants / (b) HEAD | a | a | a | a |
+| V14 | Hines: C-structural, closest (a) ICON mo_gw_hines / (b) CCCma/CMAM | a | b | a | a: ICON |
+| V15 | Rayleigh: (a) HS94 part vs FMS hs_forcing, sponge C-structural / (b) all C-structural | a | a | a | a |
+| V16 | Beres: (a) E3SM gw_convect with the REAL mfcc table, stop if absent / (b) stand-in table | a | a | a | a |
+| V17 | mc3d: (a) Tripleclouds vs ecRad + MC C-structural (I3RC) / (b) both C-structural | a | b | a | a |
+| V18 | Sundqvist condensation: (a) C-structural vs ccpp zhaocarr_gscond / (b) harness | a | a | a | a |
+| V19 | CAM6 sequencing: (a) static call-order audit vs physpkg.F90 / (b) SCAM run | a | a | a | a |
+CLUBB implemented-arm harness review: codex NO FINDINGS; GLM 7 points, all already covered -- perturbed calls raise on
+err_code; C1 compares the perturbed run's own base trajectory with the committed fixture (catches Fortran state leaking
+into the main trajectory) and the seed-0 rerun after seeds 0-19 must be bitwise (catches history pollution between
+copies); spread_step runs only inside the recorded-step loop (bigup2 warm-up is outside it); seed outputs are stored as
+fresh float64 copies.

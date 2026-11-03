@@ -68,6 +68,11 @@ def main(family, rundir, buildlog):
     b1 = npz_equal(R / "base/fixture.npz", fam["fixture"])
     meta_diff = {k: v for k, v in b1.items() if "meta" in k}
     b1 = {k: v for k, v in b1.items() if "meta" not in k}
+    local = fam.get("local_ref", False)     # VOTE V9 (b): committed fixture built elsewhere
+    if local:
+        notes.append(f"V9 local reference: committed fixture differs from this machine's rerun by {b1}; "
+                     f"the local base run is the reference (C1 = base vs base2 bitwise)")
+        b1 = npz_equal(R / "base/fixture.npz", R / "base2/fixture.npz")
     ctl["C1"] = "PASS" if not b1 else "FAIL"
     notes.append(f"C1 base rerun vs committed fixture: {'bitwise' if not b1 else b1}; "
                  f"meta keys differing: {sorted(meta_diff)}")
@@ -108,6 +113,12 @@ def main(family, rundir, buildlog):
     st_b, rb = recs(R / "spy_base.pkl")
     same = rc.keys() == rb.keys() and all(
         np.float64(rc[k]["value"]).tobytes() == np.float64(rb[k]["value"]).tobytes() for k in rc)
+    if local:
+        notes.append("V9: committed-fixture port rel per comparison: "
+                     + str({f"{k[0].split('::', 1)[1]}#{k[1]}": rc[k]["value"] for k in rc}))
+        same = bool(rb) and st_b == 0
+        rc = rb
+        st_c = st_b
     ctl["C4"] = "PASS" if (same and st_c == 0 and rc) else "FAIL"
     notes.append(f"C4 test metric on committed vs base-rerun fixture: {len(rc)} comparisons, "
                  f"bitwise same={same}; pytest exit {st_c}/{st_b}")

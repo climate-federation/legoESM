@@ -72,6 +72,7 @@ for _tag, _flag, _test, _sel in (
         exes={"mg2_driver", "mg2_tap", "mg2_procs", "mg2_rime", "mg2_ice"},
         fixture=f"{WT}/tests/atmosphere/microphysics/oracle_fixtures/"
                 f"{'mg2_prognostic_nc' + _tag[len('mg2_prog_nc'):]}.npz",
-        test=f"{_MG2T}/{_test}", fix_attr="FIXTURE", metrics=["_rel"], select=_sel)
+        test=f"{_MG2T}/{_test}", fix_attr="FIXTURE", metrics=["_rel"], select=_sel,
+        local_ref=True)   # VOTE V9 (b)
 
 FAMILIES["mg2_prog_nc_sed"]["metrics"] = ["_rel", "_rel_flux"]
