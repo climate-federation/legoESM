@@ -1743,6 +1743,10 @@ class ExperimentConfig(NamedTuple):
     # PR #2249): "smooth" (default surrogate) or "wrf_kfeta" (faithful WRF
     # v4.8.0 KF-Eta port, OPT-IN, NOT RULE 5 compliant, #2280).
     kain_fritsch_variant: str = "smooth"
+    # Water positivity right after ZM's update in the macmic loop
+    # (ZhangMcFarlaneConfig.positivity_after_zm; where CAM6 runs qneg3, here
+    # the column-conserving borrow; MPAS lane, cld_macmic_num_steps >= 2).
+    positivity_after_zm: bool = False
     # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
@@ -3048,6 +3052,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"zm_transport_cloud_tracers must be a bool, got "
                 f"{self.zm_transport_cloud_tracers!r}"
+            )
+        if not isinstance(self.positivity_after_zm, bool):
+            errors.append(
+                f"positivity_after_zm must be a bool, got "
+                f"{self.positivity_after_zm!r}"
             )
         if self.bechtold_rain_vapor_sink not in ("formation", "vapour_mass"):
             errors.append(
@@ -5795,6 +5804,7 @@ class ExperimentConfig(NamedTuple):
             zm_land_fraction=getattr(amip_cfg, 'zm_land_fraction', "required"),
             zm_transport_cloud_tracers=getattr(amip_cfg, 'zm_transport_cloud_tracers', True),
             kain_fritsch_variant=getattr(amip_cfg, 'kain_fritsch_variant', "smooth"),
+            positivity_after_zm=getattr(amip_cfg, 'positivity_after_zm', False),
             convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
                 amip_cfg, 'bechtold_use_ifs_downdraft', True),
@@ -5980,6 +5990,7 @@ class ExperimentConfig(NamedTuple):
             zm_land_fraction=self.zm_land_fraction,
             zm_transport_cloud_tracers=self.zm_transport_cloud_tracers,
             kain_fritsch_variant=self.kain_fritsch_variant,
+            positivity_after_zm=self.positivity_after_zm,
             convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,

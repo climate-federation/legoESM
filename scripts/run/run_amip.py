@@ -1625,6 +1625,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "of the carried cloud water, ice, rain, snow and "
                              "number tracers. "
                              f"Default {_EXPERIMENT_DEFAULTS.zm_transport_cloud_tracers}.")
+    parser.add_argument("--positivity-after-zm",
+                        dest="positivity_after_zm",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.positivity_after_zm,
+                        help="Water positivity right after Zhang-McFarlane's "
+                             "update in the macmic loop (where CAM6 runs qneg3): "
+                             "the column-conserving borrow, MPAS lane with "
+                             "cld_macmic_num_steps >= 2. "
+                             f"Default {_EXPERIMENT_DEFAULTS.positivity_after_zm}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -3540,6 +3549,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         zm_land_fraction=args.zm_land_fraction,
         kain_fritsch_variant=args.kain_fritsch_variant,
         zm_transport_cloud_tracers=args.zm_transport_cloud_tracers,
+        positivity_after_zm=args.positivity_after_zm,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,

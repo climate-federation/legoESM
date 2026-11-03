@@ -5798,6 +5798,27 @@ def test_zm_transport_cloud_tracers_flows_to_config_and_kernel():
         cfg_on._replace(zm_transport_cloud_tracers="false").validate_strict()
 
 
+def test_positivity_after_zm_flows_to_config_and_kernel():
+    """--[no-]positivity-after-zm threads CLI -> ExperimentConfig ->
+    ZhangMcFarlaneConfig.positivity_after_zm and survives the AMIP export."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--convection", "zhang_mcfarlane"]
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--positivity-after-zm"]), parser))
+    assert cfg_on.positivity_after_zm is True
+    assert cfg_off.positivity_after_zm is False
+    assert _resolve_convection(cfg_on)[1].positivity_after_zm is True
+    assert _resolve_convection(cfg_off)[1].positivity_after_zm is False
+    for c in (cfg_on, cfg_off):
+        assert ExperimentConfig.from_amip_config(
+            c.to_amip_config()).positivity_after_zm == c.positivity_after_zm
+    with pytest.raises(ValueError, match="positivity_after_zm"):
+        cfg_on._replace(positivity_after_zm="false").validate_strict()
+
+
 def test_production_deck_pins_zm_tracer_transport_on():
     from legoesm.driver.run_config_yaml import load_yaml_config
     for deck in ("amip_production.yaml", "amip_production_fv3duo_c24.yaml"):
