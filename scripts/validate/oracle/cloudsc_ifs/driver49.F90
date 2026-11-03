@@ -11,7 +11,7 @@
 !   PLUDE = PLUDELI = 0; PEIS = 0; KCTOP = KPBLTYPE = 0; PDYNR = PDYNS = 0;
 !   PSNDE: 49r1 slot 1 (rain) = 0, slot 2 (snow) = file PSNDE (all zero);
 !   PGEOM hydrostatic from the file's T, q, p with zero surface geopotential;
-!   PGAW from the namelist (unused at defaults; control run changes it);
+!   PGAW = NaN (unused at defaults; any read would poison the outputs);
 !   LDDIAG = .FALSE., PGP2DSPP = 0, SPP off.
 ! usage: driver49.x <input text dir> <output text dir> <harness namelist>
 PROGRAM DRIVER49
@@ -116,7 +116,7 @@ ALLOCATE(PLUDELI(KLON,KLEV,4), PSNDE(KLON,KLEV,2), PGAW(KLON), PEIS(KLON), KCTOP
 PLUDE = 0; PLUDELI = 0                            ! vote V3c
 CALL R2('PSNDE', PCOVPTOT); PSNDE(:,:,1) = 0; PSNDE(:,:,2) = PCOVPTOT   ! dwarf PSNDE = snow; 49r1 slot 1 rain, 2 snow
 PEIS = 0; KCTOP = 0; KPBLTYPE = 0                 ! vote V4b / user pick 2
-PGAW = PGAW_VALUE                                 ! vote V5a
+PGAW = IEEE_VALUE(PGAW_VALUE, IEEE_QUIET_NAN)     ! votes V5a/V10c: NaN proves CLOUDSC never reads it
 ! hydrostatic geopotential, zero surface geopotential (pick 2; unused by 49r1 CLOUDSC)
 ZPHI(:,KLEV+1) = 0
 DO JK = KLEV, 1, -1
