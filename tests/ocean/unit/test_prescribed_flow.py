@@ -322,6 +322,8 @@ def test_positional_construction_unshifted_by_tail_field():
         "rk3_stage3_l9_eiv_nemo_order",
         "nemo_qsr_stage3_kmm_source_association",
         "vmix_eos_use_config_rho0",
+        # appended by the ocean oracle-fix campaign (tier-3 RNF)
+        "runoff_temperature_floor_sharpness",
     )
     # Head layout unchanged — the slots any positional caller binds first.
     assert f[:9] == (
