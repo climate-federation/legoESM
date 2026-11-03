@@ -9159,7 +9159,8 @@ class ModelDriver:
                     and "cloud_fraction_ifs" in self.tracer_registry.names
                     and ("tracer_names" not in d
                          or "cloud_fraction_ifs"
-                         not in [str(n) for n in d["tracer_names"]])):
+                         not in [str(n) for n in d["tracer_names"]]
+                         or "trc_cloud_fraction_ifs" not in d.files)):
                 raise ValueError(
                     f"MPAS checkpoint {path.name} has no cloud_fraction_ifs, "
                     f"which this run carries (microphysics='ifs_cloudsc'); "
@@ -9178,6 +9179,7 @@ class ModelDriver:
                               if _mpi else jnp.asarray(d[f"trc_{_k}"])),
                         name=_k, dims=("nCells", "nlev"),
                         units=("1/kg" if _k in ("N_c", "N_r", "N_i", "N_s")
+                               else "1" if _k == "cloud_fraction_ifs"
                                else "kg/kg"))
                     for _k in _names
                 })
