@@ -3918,8 +3918,15 @@ def _validate_pcg_variant_grid(grid, barotropic_pcg_variant=None,
 
 def _runoff_component_vars(exclude_isf: bool):
     """Dai-Trenberth NetCDF freshwater components summed by
-    :func:`load_runoff_monthly`: rivers (``sorunoff``) + icebergs (``Icb_flux``)
-    + ice-shelf melt (``sornfisf``).
+    :func:`load_runoff_monthly`: coastal runoff incl. iceberg melt
+    (``sorunoff``) + ice-shelf melt (``sornfisf``).
+
+    ``Icb_flux`` is NOT a separate component: ``sorunoff`` already contains it
+    (file long_name "coastal runoff ... with Iceberg melting freshwater flux";
+    sorunoff == Icb_flux bitwise at every one of the 155,456 cell-months with
+    Icb_flux > 0), and NEMO ORCA1 reads only ``sorunoff`` (sn_rnf; ln_rnf_icb
+    keeps its namelist_ref default .false., so sbcrnf.F90:120-131 never adds
+    sn_i_rnf).  Summing it double-counted the icebergs (+0.0428 Sv, +3.6%).
 
     ``exclude_isf=True`` DROPS ``sornfisf``: when ``--isf`` is on, the SAME
     file's ice-shelf melt is separately deposited at depth over the
@@ -3928,15 +3935,26 @@ def _runoff_component_vars(exclude_isf: bool):
     freshwater (codex).  The runner passes ``exclude_isf=args.isf``.
     """
     if exclude_isf:
-        return ("sorunoff", "Icb_flux")
-    return ("sorunoff", "sornfisf", "Icb_flux")
+        return ("sorunoff",)
+    return ("sorunoff", "sornfisf")
+
+
+def _sum_runoff_components(fields, exclude_isf: bool):
+    """Total runoff [kg/m^2/s] = sum of :func:`_runoff_component_vars` present in
+    ``fields`` (name -> array), NaN -> 0, float64."""
+    names = _runoff_component_vars(exclude_isf)
+    total = np.zeros_like(np.asarray(fields["sorunoff"]), dtype=np.float64)
+    for v in names:
+        if v in fields:
+            total = total + np.nan_to_num(np.asarray(fields[v], dtype=np.float64))
+    return total
 
 
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
                         land_mask=None, spread_passes=2, exclude_isf=False):
     """Load NEMO's Dai-Trenberth runoff (the SAME file NEMO ORCA1 uses) and regrid
     each climatological month onto the model grid. Total freshwater = rivers
-    (sorunoff) + ice-shelf melt (sornfisf) + icebergs (Icb_flux) [kg/m²/s, +INTO
+    incl. iceberg melt (sorunoff) + ice-shelf melt (sornfisf) [kg/m²/s, +INTO
     ocean]; ``exclude_isf=True`` drops sornfisf because --isf applies it at depth
     (see :func:`_runoff_component_vars`). Returns (12, *lat2d_deg.shape). Ungates
     the SSS comparison (runoff=0 made SSS only informational). Curvilinear ->
@@ -3949,10 +3967,8 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     src_lat = _squeeze2d(ds["nav_lat"].values)
     src_lon = _squeeze2d(ds["nav_lon"].values)
     components = _runoff_component_vars(exclude_isf)
-    total = np.zeros_like(np.asarray(ds["sorunoff"].values), dtype=np.float64)
-    for v in components:
-        if v in ds:
-            total = total + np.nan_to_num(np.asarray(ds[v].values, dtype=np.float64))
+    total = _sum_runoff_components(
+        {v: ds[v].values for v in components if v in ds}, exclude_isf)
     # SOURCE = the DISCHARGE cells only (annual runoff > 0): a coastal river-mouth
     # field is sparse, so IDW from ALL cells (incl. zeros) would dilute the discharge
     # to ~0. Routing only from nonzero cells spreads each river to the nearest model
