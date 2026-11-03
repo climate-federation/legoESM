@@ -449,16 +449,12 @@ def test_the_derived_set_catches_what_the_old_list_missed():
 
 
 def test_the_dead_check_covers_every_scheme_not_just_clubb():
-    """It is not CLUBB-specific, and MYNN-2.5 has dead fields too.
-
-    ``C4`` is documented dead (NN09 sets it to zero and the port does not read
-    it) and ``tke_min`` is declared but unused. Both are already excluded from
-    ``__param_spec__``, so neither reaches the tuner -- but the check must SEE
-    them, or it is only ever going to notice CLUBB.
+    """It is not CLUBB-specific.  (Its MYNN-2.5 surrogate example -- dead
+    ``C4``/``tke_min`` -- went with the surrogate in R3; mynn25 is now the WRF
+    port and no longer a tuner scheme.)
     """
     from legoesm.atmosphere.physics.turbulence import config as turb_config
 
-    assert drv._dead_params_for("mynn25") == {"C4", "tke_min"}
     # Schemes whose every field is consumed must come back EMPTY -- the
     # assertion that fails loudly if the resolver ever returns everything,
     # which would silently freeze the whole model.
