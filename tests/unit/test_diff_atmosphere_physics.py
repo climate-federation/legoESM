@@ -243,7 +243,9 @@ class TestConvectionGrad:
             "zhang_mcfarlane",
             "kain_fritsch",
             "emanuel",
-            "tiedtke",
+            # tiedtke: the WRF port's gradients are certified in
+            # tests/atmosphere/test_tiedtke_wrf_oracle.py (its bridge needs
+            # the dynamics / lagged turbulence carries this harness lacks)
             "bechtold",
         ],
     )

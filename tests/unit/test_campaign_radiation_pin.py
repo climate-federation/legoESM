@@ -196,7 +196,9 @@ def test_wb_and_aimip_classical_are_the_same_model():
 
     params = build_variant("classical", nlev=8)
     assert isinstance(params, AIMIPClassicalParams)
-    assert len(params.raw_values) == 49   # 50 until mcfarlane_tau_max left (CAM6 gw_oro)
+    # 50 until mcfarlane_tau_max left (CAM6 gw_oro); 49 until the 17
+    # tiedtke_* knobs left with the surrogate (WRF Tiedtke port, R1).
+    assert len(params.raw_values) == 32
 
 
 def test_the_wb_campaign_config_names_every_family():
@@ -251,7 +253,7 @@ def test_swapping_a_scheme_swaps_what_is_trained():
     base = _yaml.safe_load(
         (_REPO / "config" / "wb" / "campaign" / "spectral_smoke.yaml").read_text())
     counts = {}
-    for scheme in ("tiedtke", "bechtold"):
+    for scheme in ("sbm", "bechtold"):
         yml = dict(base)
         yml["classical"] = dict(base.get("classical", {}), convection=scheme)
         cfg = SimpleNamespace(mode="physics", training_core="spectral",
@@ -265,7 +267,7 @@ def test_swapping_a_scheme_swaps_what_is_trained():
             for pth, x in jax.tree.leaves_with_path(params)
             if hasattr(x, "size")}
 
-    assert counts["tiedtke"]
-    assert counts["bechtold"] != counts["tiedtke"], (
+    assert counts["sbm"]
+    assert counts["bechtold"] != counts["sbm"], (
         f"swapping convection did not change what is trainable: {counts}")
-    assert any("tiedtke" in n for n in counts["tiedtke"] - counts["bechtold"])
+    assert any("sbm" in n for n in counts["sbm"] - counts["bechtold"])

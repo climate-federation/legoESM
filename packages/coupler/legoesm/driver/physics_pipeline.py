@@ -4129,7 +4129,9 @@ def convection_config_for(config, grid_dx_m=None):
         return cc
     leaf = _fill_bechtold_dx(scheme, leaf, grid_dx_m)
     cc = cc._replace(**{scheme: leaf})
-    if getattr(leaf, "enable_cmt", False) and _is_mpas_grid(config):
+    # WRF Tiedtke always runs cumulus friction (no enable_cmt knob).
+    if ((getattr(leaf, "enable_cmt", False) or scheme == "tiedtke")
+            and _is_mpas_grid(config)):
         # The MPAS bridge reconstructs winds only on this explicit switch;
         # any scheme whose CMT resolved ON for an MPAS run asks for it
         # (Bechtold via _resolve_enable_cmt; Zhang-McFarlane / Tiedtke via

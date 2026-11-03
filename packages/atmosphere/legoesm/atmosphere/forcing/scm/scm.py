@@ -397,23 +397,27 @@ def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = Non
             )
 
         ftend = None
+        # The large-scale forcing is the SCM's dynamics: hand its T / q_v
+        # tendencies to physics' dynamics-tendency consumers (zero where the
+        # SCM has no forcing of that variable).  A prescribed surface flux
+        # injected at the lowest cell is surface physics, not dynamics, so it
+        # is left out of that hand-off.
+        _dT_dyn = _dq_dyn = jnp.zeros_like(state.T.data)
         if forcing is not None:
             ftend = compute_forcing_tendencies(state, sigma_coord, forcing, t)
-            # The large-scale forcing is the SCM's dynamics: hand its T / q_v
-            # tendencies to physics' dynamics-tendency consumers.  A prescribed
-            # surface flux injected at the lowest cell is surface physics, not
-            # dynamics, so it is left out of that hand-off.
             _dyn = ftend
             if forcing.prescribe == "fluxes" and not forcing.flux_to_closure:
                 _dyn = compute_forcing_tendencies(
                     state, sigma_coord,
                     forcing._replace(w_th_s=None, w_qv_s=None), t)
+            if _dyn.dT_dt is not None:
+                _dT_dyn = _dyn.dT_dt.data
             _ftr = _dyn.tracer_tendencies
-            if (phys_state is not None and _ftr is not None
-                    and "q_v" in _ftr):
-                phys_state = phys_state._replace(
-                    dyn_tendency_T=_dyn.dT_dt.data,
-                    dyn_tendency_qv=_ftr["q_v"].data)
+            if _ftr is not None and "q_v" in _ftr:
+                _dq_dyn = _ftr["q_v"].data
+        if phys_state is not None:
+            phys_state = phys_state._replace(
+                dyn_tendency_T=_dT_dyn, dyn_tendency_qv=_dq_dyn)
 
         try:
             tend, phys_out = physics_fn(

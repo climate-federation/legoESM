@@ -542,9 +542,14 @@ def test_tiedtke_latlon_bridge_runs_with_carries(
         latlon_grid, latlon_state, sigma_coord):
     fn = make_convection_physics(ConvectionConfig(scheme="tiedtke"),
                                  model_type="hydrostatic", dt=300.0)
-    tend, _ = fn(latlon_state, latlon_grid, sigma_coord,
-                 phys_state=_tiedtke_ps(latlon_state.T.data))
-    assert tend.dT_dt.data.shape == latlon_state.T.data.shape
+    from legoesm.core.field import Field
+    T = latlon_state.T
+    st = latlon_state._replace(tracers={
+        **(latlon_state.tracers or {}),
+        "q_i": Field(jnp.zeros_like(T.data), name="q_i", dims=T.dims)})
+    tend, _ = fn(st, latlon_grid, sigma_coord,
+                 phys_state=_tiedtke_ps(T.data))
+    assert tend.dT_dt.data.shape == T.data.shape
     assert tend.dv_dt.data.shape == latlon_state.v.data.shape
     assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data)))
     assert bool(jnp.all(jnp.isfinite(tend.du_dt.data)))

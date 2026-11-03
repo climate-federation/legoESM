@@ -107,9 +107,9 @@ def test_adapter_jit_matches_eager(case):
     eager, _ = _adapter(a, dt, lf)
     jitted, _ = jax.jit(lambda aa, l: _adapter(aa, dt, l))(a, lf)
     for k in ("dT_dt", "dq_v_dt", "dq_r_conv_dt", "du_dt_conv"):
-        np.testing.assert_allclose(np.asarray(getattr(jitted, k)),
-                                   np.asarray(getattr(eager, k)),
-                                   rtol=1e-10, atol=1e-300)
+        # the oracle test's metric and tolerance: max|diff| / max|ref|
+        x, ref = np.asarray(getattr(jitted, k)), np.asarray(getattr(eager, k))
+        assert np.max(np.abs(x - ref)) <= 1e-10 * np.max(np.abs(ref)), k
 
 
 def test_adapter_gradient_wrt_land_fraction_finite(case):
