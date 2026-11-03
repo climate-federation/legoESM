@@ -86,13 +86,15 @@ mkchk() {  # mkchk <routine> <interface file> <out>
     echo "END SUBROUTINE ZZCHK_CALLER_$1"; } > "$3"
 }
 # --- compile: repeated passes until every unit compiles (module order) ----
-FF="${OPT:--O1} -ffp-contract=off -fno-fast-math -cpp -DLITTLE_ENDIAN -fno-range-check -fallow-invalid-boz -ffree-line-length-none -g -fbacktrace -fopenmp -DNC_NETCDF4"
+FF="${OPT:--O1} -ffp-contract=off -fno-fast-math -cpp -DLITTLE_ENDIAN -fno-range-check -ffree-line-length-none -g -fbacktrace -fopenmp -DNC_NETCDF4"
 INC="-Isrc -Iinc -Imod -Jmod -I$NC/include"
 todo=$(cd src && ls *.F90)
 for pass in $(seq 1 40); do
   left=""
   for f in $todo; do
-    if gfortran $FF $INC -c "src/$f" -o "obj/${f%.F90}.o" > "obj/${f%.F90}.log" 2>&1; then :; else left="$left $f"; fi
+    # V33: legacy BOZ PARAMETER in 49r1 random_numbers_mix.F90 only (source kept unchanged)
+    X1=""; [ "$f" = random_numbers_mix.F90 ] && X1=-fallow-invalid-boz
+    if gfortran $FF $X1 $INC -c "src/$f" -o "obj/${f%.F90}.o" > "obj/${f%.F90}.log" 2>&1; then :; else left="$left $f"; fi
   done
   [ -z "$left" ] && break
   [ $(echo $left | wc -w) -lt $(echo $todo | wc -w) ] || { echo "stuck at pass $pass:"; for f in $left; do echo "== $f"; grep -m3 -iE "error" -A1 "obj/${f%.F90}.log"; done; exit 1; }
