@@ -80,13 +80,13 @@ def test_bulk_matches_nemo_on_negative_and_supersaturated_humidity(
             assert err[m].max() <= tol, (name, label, float(err[m].max()), tol)
 
 
-@pytest.mark.parametrize("floor, which", [
-    (bf._Q_ZU_FLOOR_KG_KG, 1), (bf._T_ZU_FLOOR_K, 0)])
-def test_zu_floors_are_c1_and_exact_outside_band(floor, which):
+@pytest.mark.parametrize("which", [1, 0], ids=["q", "theta"])
+def test_zu_floors_are_c1_and_exact_outside_band(which):
     """Both floors (q 1e-6, theta 180 K): exact outside [f, f + w], C1 blend
     inside whose shortfall below MAX is at most 4w/27, finite gradients that
     match finite differences inside the band.  No ORCA1 cell falls inside
     either band, so this synthetic case is what covers the blend."""
+    floor = bf._Q_ZU_FLOOR_KG_KG if which == 1 else bf._T_ZU_FLOOR_K
     w = bf._ZU_FLOOR_REL_WIDTH * floor
     xs = jnp.asarray([floor - 10 * w, floor - 0.5 * w, floor + w / 3,
                       floor + 0.5 * w, floor + w, floor + 1e3 * w])
