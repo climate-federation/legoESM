@@ -555,14 +555,19 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
     )
 
 
-def tiedtke_lag_seeds(convection, shape_3d, dtype=None):
+def tiedtke_lag_seeds(convection, q_v, p_s, prev=None):
     """``pack_carry`` kwargs seeding WRF Tiedtke's previous-step turbulence
-    carries with zeros (cold start), ``{}`` for any other convection scheme
-    (carry pytree unchanged)."""
+    carries: ``prev`` (a ``(turb_dq_v_prev, evap_sfc_prev)`` pair persisted
+    from the previous segment) when given, else zeros shaped like ``q_v`` /
+    ``p_s`` (cold start); ``{}`` for any other convection scheme (carry
+    pytree unchanged)."""
     if convection != "tiedtke":
         return {}
-    return {"turb_dq_v_prev": jnp.zeros(shape_3d, dtype),
-            "evap_sfc_prev": jnp.zeros(shape_3d[:-1], dtype)}
+    if prev is not None and prev[0] is not None:
+        return {"turb_dq_v_prev": prev[0], "evap_sfc_prev": prev[1]}
+    p_s = getattr(p_s, "data", p_s)
+    return {"turb_dq_v_prev": jnp.zeros_like(q_v),
+            "evap_sfc_prev": jnp.zeros_like(p_s)}
 
 
 def unpack_carry(carry, state_template):

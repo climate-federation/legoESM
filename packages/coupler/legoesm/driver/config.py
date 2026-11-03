@@ -1133,15 +1133,6 @@ class ExperimentConfig(NamedTuple):
     autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
     autoconv_pe_max: float = 0.9        # [1] ceiling on the emergent precip fraction
 
-    # Tiedtke plume buoyancy-death memory: when True the entraining plume,
-    # once it exhausts its cumulative buoyancy budget, stays dead instead of
-    # reviving above an inversion (the default False lets a plume killed by
-    # negative buoyancy resume nonzero M_u aloft — physically questionable,
-    # and the cause of convective detrainment heating reaching the ~100 hPa
-    # tropical cold point).  Tiedtke-only: validate_strict refuses it with any
-    # other convection scheme.
-    convective_buoyancy_death_memory: bool = False
-
     # Convection / Turbulence / GWD
     convection: str = "sbm"            # sbm, dca, kuo, mass_flux, edmf, zhang_mcfarlane, none
     turbulence: str = "none"           # smagorinsky, louis, tke, none
@@ -2651,11 +2642,16 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_snow_emissivity must be in [{_eps_lo}, {_eps_hi}] (the "
                 f"snow_column parameter spec), got {self.land_snow_emissivity!r}")
-        if self.convective_buoyancy_death_memory and self.convection != "tiedtke":
+        if self.convection == "tiedtke" and (
+                self.convective_precip_split != "constant"
+                or (self.convective_precip_efficiency or 0.0) > 0.0):
             errors.append(
-                "convective_buoyancy_death_memory=True requires "
-                f"convection='tiedtke' (got {self.convection!r}): only the "
-                "Tiedtke scheme reads it — the knob would be silently inert.")
+                "convection='tiedtke' (WRF port) closes its own "
+                "precipitation: convective_precip_split="
+                f"{self.convective_precip_split!r} / "
+                f"convective_precip_efficiency="
+                f"{self.convective_precip_efficiency!r} would be silently "
+                "inert; leave them at 'constant' / None")
         if self.land_soil_freeze_thaw and not self.use_multilayer_land:
             errors.append(
                 "land_soil_freeze_thaw requires use_multilayer_land: only the "
@@ -3827,9 +3823,8 @@ class ExperimentConfig(NamedTuple):
                     or (self.convection == "emanuel"
                         and self.emanuel_enable_cmt)):
                 errors.append(_cmt)
-            elif (self.convection == "tiedtke"
-                    or (self.convection == "bechtold"
-                        and self.bechtold_enable_cmt is None)):
+            elif (self.convection == "bechtold"
+                    and self.bechtold_enable_cmt is None):
                 _drops.append(_cmt)
             if self.land_params_refresh and self.use_multilayer_land:
                 _drops.append(
@@ -5268,7 +5263,6 @@ class ExperimentConfig(NamedTuple):
             zm_land_fraction=getattr(amip_cfg, 'zm_land_fraction', "required"),
             zm_transport_cloud_tracers=getattr(amip_cfg, 'zm_transport_cloud_tracers', True),
             kain_fritsch_variant=getattr(amip_cfg, 'kain_fritsch_variant', "smooth"),
-            convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
             convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
                 amip_cfg, 'bechtold_use_ifs_downdraft', True),
@@ -5451,7 +5445,6 @@ class ExperimentConfig(NamedTuple):
             zm_land_fraction=self.zm_land_fraction,
             zm_transport_cloud_tracers=self.zm_transport_cloud_tracers,
             kain_fritsch_variant=self.kain_fritsch_variant,
-            convective_buoyancy_death_memory=self.convective_buoyancy_death_memory,
             convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,

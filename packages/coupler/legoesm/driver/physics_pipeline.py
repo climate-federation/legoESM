@@ -2118,6 +2118,11 @@ class PhysicsPipeline:
         # Momentum tendencies from turbulence and GWD
         du_dt = jnp.zeros(shape_3d, dtype=_sd)
         dv_dt = jnp.zeros(shape_3d, dtype=_sd)
+        if self._conv_scheme == "tiedtke":
+            # WRF Tiedtke cumulus friction (cududv, RUCUTEN/RVCUTEN) acts on
+            # the resolved winds, as in WRF.
+            du_dt = du_dt + ad.unflatten_3d(conv_out.du_dt_conv)
+            dv_dt = dv_dt + ad.unflatten_3d(conv_out.dv_dt_conv)
 
         # Prescribed surface MOMENTUM flux, bulk path: the coupler/ERA5 stress
         # ON THE ATMOSPHERE [Pa] accelerates the lowest layer — the sign
@@ -4335,13 +4340,6 @@ def _resolve_convection(config):
                 transport_cloud_tracers=config.zm_transport_cloud_tracers,
                 **_zm_set)
 
-        # Tiedtke plume buoyancy-death memory (ExperimentConfig /
-        # --convective-buoyancy-death-memory, Tiedtke-only per the CLI guard).
-        if scheme == "tiedtke":
-            conv_config = conv_config._replace(
-                buoyancy_death_memory=bool(getattr(
-                    config, "convective_buoyancy_death_memory", False)))
-
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
         # ``precip_split_scheme`` + the autoconv params).  "autoconversion"
         # replaces the constant ``precip_efficiency`` with the PHYSICAL
@@ -4363,11 +4361,11 @@ def _resolve_convection(config):
             if not hasattr(conv_config, "precip_split_scheme"):
                 # A requested non-constant split on a scheme that cannot honour
                 # it must fail loudly, not silently run constant physics (codex
-                # MED). Only bechtold/tiedtke expose the plume q_c_u it needs.
+                # MED). Only bechtold exposes the plume q_c_u it needs.
                 raise ValueError(
                     f"convective_precip_split={_split!r} requires a convection "
-                    "scheme with the physical autoconversion split (bechtold or "
-                    f"tiedtke); scheme {scheme!r} does not support it")
+                    "scheme with the physical autoconversion split (bechtold); "
+                    f"scheme {scheme!r} does not support it")
             conv_config = conv_config._replace(precip_split_scheme=_split)
 
     _check_pipeline_convection_supported(scheme, conv_config)

@@ -18498,6 +18498,12 @@ class ModelDriver:
         _io_rank = jax.process_index() == 0
 
         # --- Refusals: the carry has no lat-band partition spec for these ---
+        if cfg.convection == "tiedtke":
+            raise NotImplementedError(
+                "convection='tiedtke' is not wired on the lat-band SPMD lane: "
+                "its omega is a horizontal divergence the band-local physics "
+                "grid cannot form across band edges; use the single-rank "
+                "compiled lane")
         if self._ensemble_size > 1:
             raise NotImplementedError(
                 "operator-split lat-band SPMD does not support ensembles (the "
@@ -19405,7 +19411,7 @@ class ModelDriver:
         production segment.  Single-rank / single-device only (the carry has no
         SPMD/MPI partition spec)."""
         from legoesm.driver.compiled_segments import (
-            pack_carry, build_segment_fn, pack_forcing,
+            pack_carry, tiedtke_lag_seeds, build_segment_fn, pack_forcing,
         )
         if (self._device_config is not None
                 and getattr(self._device_config, "is_distributed", False)):
@@ -19525,6 +19531,7 @@ class ModelDriver:
                  for k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}
                 if isinstance(self.tracers, dict) else {}
             ),
+            **tiedtke_lag_seeds(cfg.convection, self.q_v, self.state.p_s),
         )
 
         if self.get_sst_sic is not None:
@@ -19567,7 +19574,7 @@ class ModelDriver:
         """
         from legoesm.forcing.external import get_solar_forcing_at_time
         from legoesm.driver.compiled_segments import (
-            pack_carry, unpack_carry,
+            pack_carry, tiedtke_lag_seeds, unpack_carry,
             compute_segment_length, build_segment_fn, pack_forcing,
             shard_forcing, segment_accum_to_rate,
         )
@@ -20003,6 +20010,12 @@ class ModelDriver:
                      for k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}
                     if isinstance(self.tracers, dict) else {}
                 ),
+                # WRF Tiedtke's lagged turbulence pair, persisted across
+                # segments like conv_precip_prev (single-member only).
+                **tiedtke_lag_seeds(
+                    self.config.convection, self.q_v, self.state.p_s,
+                    prev=(getattr(self, "_tiedtke_lag_prev", None)
+                          if self._ensemble_size == 1 else None)),
             )
 
             # Shard carry across devices for SPMD execution
@@ -20063,6 +20076,8 @@ class ModelDriver:
             if self._ensemble_size == 1:
                 self._conv_precip_prev = carry.conv_precip_prev
                 self._precip_frozen_prev = carry.precip_frozen_prev
+                self._tiedtke_lag_prev = (carry.turb_dq_v_prev,
+                                          carry.evap_sfc_prev)
                 # Persist the evolved multilayer land state across segments (the
                 # prognostic soil column — no-op when slab/None).
                 if self._land_ml_state is not None:
@@ -20554,6 +20569,11 @@ class ModelDriver:
         # prognostic slab-land T_land from self._carry_aux; on a fresh
         # start self._carry_aux is empty so this is a no-op (#325
         # restart-safety for the non-compiled reference path).
+        if self.config.convection == "tiedtke":
+            raise NotImplementedError(
+                "convection='tiedtke' is wired on the compiled-segment and "
+                "column lanes only; this per-step reference loop does not "
+                "carry its dynamics q_v tendency / lagged turbulence inputs")
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
         cfg = ctx["cfg"]
         # Issue #405/#413: this loop now seeds and threads the
