@@ -87,8 +87,15 @@ def test_turbulence_scheme_traits_match_seeding():
         seeded = {
             "tke": bool(np.any(np.asarray(ps.tke) > 0)),
             "qke": bool(np.any(np.asarray(ps.qke) > 0)),
+            "sfclay": ps.sfclay is not None,
         }
-        if traits.carries_energy:
+        if traits.energy_field == "sfclay":
+            # WRF cold start [ust, mol, znt, hfx, qfx, pblh] = [1e-4, 0, z0, 0, 0, 0]
+            z0 = cfg.turbulence.ysu.surface.z0
+            want = np.tile([1.0e-4, 0.0, z0, 0.0, 0.0, 0.0], (4, 1))
+            np.testing.assert_array_equal(np.asarray(ps.sfclay), want)
+            assert not seeded["tke"] and not seeded["qke"], scheme
+        elif traits.carries_energy:
             assert seeded[traits.energy_field], (
                 f"{scheme}: traits say energy in {traits.energy_field!r} "
                 "but init_physics_state seeded it zero"
@@ -101,6 +108,8 @@ def test_turbulence_scheme_traits_match_seeding():
             assert not seeded["tke"] and not seeded["qke"], (
                 f"{scheme}: diagnostic scheme must not seed an energy carry"
             )
+        if traits.energy_field != "sfclay":
+            assert not seeded["sfclay"], f"{scheme}: must not seed the sfclay carry"
 
 
 def test_mpas_step_threads_seeded_carry():

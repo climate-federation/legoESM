@@ -367,3 +367,12 @@ def test_spectral_amip_rollout_refuses_ysu():
     with pytest.raises(ValueError, match="sfclay"):
         spectral_amip_rollout(None, None, None, None, None, None, 600.0, 1,
                               sst_col=jnp.zeros(4), sizing_phys_state=ps)
+
+
+def test_era5_segment_carry_seeds_refuse_ysu():
+    """SegmentCarry does not thread PhysicsState.sfclay: the ERA5 carry
+    initialisers refuse ysu instead of dropping its surface-layer state."""
+    from legoesm.training.era5_to_state import prognostic_carry_seeds
+    with pytest.raises(NotImplementedError, match="SegmentCarry"):
+        prognostic_carry_seeds("kessler", "ysu", (2, 3, 4))
+    assert prognostic_carry_seeds("kessler", "louis", (2, 3, 4)) == {}

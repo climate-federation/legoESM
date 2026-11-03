@@ -428,9 +428,10 @@ def test_swap_convection_schemes(conv_scheme):
      "holtslag_boville", "ysu", "edmf"],
 )
 def test_swap_turbulence_schemes(turb_scheme):
-    cfg = _baseline_cfg(
-        turbulence=TurbulenceConfig(scheme=turb_scheme),
-    )
+    turb = TurbulenceConfig(scheme=turb_scheme)
+    if turb_scheme == "ysu":  # the SCM column has no land fraction / cell area
+        turb = turb._replace(ysu=turb.ysu._replace(surface_type="land", dx_m=1.0e5))
+    cfg = _baseline_cfg(turbulence=turb)
     _run_and_assert_stable(cfg)
 
 

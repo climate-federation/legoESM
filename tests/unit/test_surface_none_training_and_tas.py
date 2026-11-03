@@ -284,8 +284,9 @@ def test_climateeval_hook_names_tas_not_produced_under_none(monkeypatch):
         assert (got == ["tas", "tasmin", "tasmax"]) is want, sbs
 
 
+# ysu: the driver pipeline refuses it (test_ysu_route::test_driver_pipeline_refuses_ysu).
 @pytest.mark.parametrize("turb", ["louis", "tke", "smagorinsky", "mynn25",
-                                  "holtslag_boville", "ysu", "edmf",
+                                  "holtslag_boville", "edmf",
                                   "clubb_lite", "clubb"])
 def test_every_scheme_takes_a_zero_lower_boundary_condition(turb):
     """The mechanism "none" relies on, scheme by scheme: with zero prescribed

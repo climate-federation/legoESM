@@ -481,7 +481,7 @@ def diagnostic_scheme_flux(
 
     Interior flux is a pure state functional (dt-independent — see ``_DIAG_DT_S``). Dry
     prescribed-flux regimes only (CBL / sheared CBL / SBL): the counter-gradient ceiling is
-    a dry-CBL notion, so a moist artifact is rejected. Restricted to the four K-closures
+    a dry-CBL notion, so a moist artifact is rejected. Restricted to the three K-closures
     that expose ``wtheta_flux`` (smagorinsky/louis local, holtslag_boville nonlocal); a
     TKE-carrying or non-exposing scheme raises.
     """
@@ -519,7 +519,7 @@ def diagnostic_scheme_flux(
     if turbulence_scheme_traits(name).carries_energy:
         raise ValueError(
             f"{name}: TKE-carrying schemes are not wired for the Q1 diagnostic flux "
-            "(only the four K-closures expose wtheta_flux)")
+            "(only the three K-closures expose wtheta_flux)")
 
     # Impose the LES surface kinematic heat flux (the controlled variable) on this closure.
     base_inputs = (u2, v2, T2, qv2, pf2, ph2, z_full, z_half, rho)
