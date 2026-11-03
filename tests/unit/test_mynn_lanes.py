@@ -129,3 +129,12 @@ def test_mpas_cell_wind_lane_refuses_diagnosed_w():
         mynn_lane_kwargs(scm.state, scm.grid, scm.sigma_coord,
                          scm.phys_state._replace(dyn_w_ls=None), T, p, q, 1,
                          False, voronoi=True)
+
+
+def test_scm_set_time_reaches_the_cold_start_build():
+    """codex R3: step 1 runs the cold-start physics, so it must get the clock."""
+    seen = []
+    scm = _scm()
+    scm.physics_fn_init.set_time = lambda d, s: seen.append((d, s))
+    scm.set_time(10.0, 3600.0)
+    assert seen == [(10.0, 3600.0)]

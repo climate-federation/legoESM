@@ -699,6 +699,7 @@ class SingleColumnModel:
             raise ValueError(
                 "physics_fn_init is the mynn25 cold-start physics; this "
                 "physics_fn does not run mynn25")
+        self.physics_fn_init = physics_fn_init
         self._tend_fn_init = (None if physics_fn_init is None else
                               _tendency_fn(physics_fn_init, grid, sigma_coord,
                                            forcing=forcing))
@@ -1114,9 +1115,11 @@ class SingleColumnModel:
 
     def set_time(self, day_of_year: float, seconds_of_day: float) -> None:
         """Propagate calendar time to sub-physics (radiation diurnal cycle)."""
-        set_time = getattr(self.physics_fn, "set_time", None)
-        if callable(set_time):
-            set_time(day_of_year, seconds_of_day)
+        # both builds: the mynn25 cold-start physics runs step 1 (codex R3)
+        for fn in (self.physics_fn, self.physics_fn_init):
+            set_time = getattr(fn, "set_time", None)
+            if callable(set_time):
+                set_time(day_of_year, seconds_of_day)
 
     def step(self) -> HydrostaticState:
         """Advance the column by one step using the selected integrator.
