@@ -45,15 +45,19 @@ PROFILE_SCHEMES = (
 
 @pytest.fixture(scope="module")
 def setup():
+    return _make_setup(NLEV)
+
+
+def _make_setup(nlev):
     grid = create_cubed_sphere(4)
-    sigma = make_hybrid_levels(NLEV)
+    sigma = make_hybrid_levels(nlev)
     s2 = grid.grid_lat.shape
-    s3 = (*s2, NLEV)
+    s3 = (*s2, nlev)
     rng = np.random.default_rng(0)
     # Moist, conditionally unstable tropical-ish column (index -1 = surface)
-    Tprof = 300.0 - 60.0 * np.linspace(0, 1, NLEV)[::-1]
+    Tprof = 300.0 - 60.0 * np.linspace(0, 1, nlev)[::-1]
     T = jnp.asarray(np.broadcast_to(Tprof, s3).copy() + rng.normal(0, 0.3, s3))
-    qprof = 18e-3 * np.exp(-3 * np.linspace(0, 1, NLEV)[::-1])
+    qprof = 18e-3 * np.exp(-3 * np.linspace(0, 1, nlev)[::-1])
     q_v = jnp.asarray(np.broadcast_to(qprof, s3) * (1 + 0.05 * rng.normal(0, 1, s3)))
     u = jnp.asarray(8.0 * np.sin(2 * np.asarray(grid.grid_lon))[..., None]
                     * np.ones(s3))
@@ -263,14 +267,17 @@ class TestMicrophysicsWiring:
         assert float(jnp.max(jnp.abs(out.dT_dt))) > 0.0
 
 
-def test_tiedtke_pipeline_matches_bridge(setup):
+def test_tiedtke_pipeline_matches_bridge():
     """WRF Tiedtke through the driver pipeline and through the hydrostatic
     bridge, on the same columns and inputs (pure-sigma coordinate: the port's
     omega is diagnosed by sigma continuity): heating, drying and the cumulus
     friction the pipeline now applies to the resolved winds agree to
     round-off, and the scheme fires (heating and CMT non-zero)."""
     from legoesm.grids.vertical import create_sigma_coordinate
-    grid, _, f, state = setup
+    # 30 levels: the 8-level module column never triggers the WRF scheme
+    # (its lowest layer is ~1 km deep; probed, ldcum=0 for every forcing)
+    NLEV = 30
+    grid, _, f, state = _make_setup(NLEV)
     sigma = create_sigma_coordinate(NLEV, sigma_top=0.02)
     s3 = f["T"].shape
     ncol = int(np.prod(f["p_s"].shape))
