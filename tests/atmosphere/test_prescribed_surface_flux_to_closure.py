@@ -293,7 +293,10 @@ def test_the_closure_tracks_a_flux_that_changes_between_steps():
     z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
     p_half = jnp.linspace(8.0e4, 1.0e5, nlev + 1)[None, :]
     p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-    T = 300.0 * (p_full / constants.p_ref) ** constants.kappa   # theta = 300 K (vote K2)
+    # theta = 300 K below 800 m, +8 K/km above: a capping inversion, so the
+    # PBL depth can respond to the flux magnitude (R4 votes K2/K2')
+    theta = jnp.where(z_full < 800.0, 300.0, 300.0 + 8.0e-3 * (z_full - 800.0))
+    T = theta * (p_full / constants.p_ref) ** constants.kappa
     u = jnp.zeros((ncol, nlev))
     v = jnp.zeros((ncol, nlev))
     q_v = jnp.full((ncol, nlev), 1.0e-3)
