@@ -122,8 +122,18 @@ def memoized(runner):
     cache: dict[str, object] = {}
 
     def run(entry, forcing):
+        # si3_o17_step overwrites aevp.(u_ice_u, v_ice_v) with ice.(u_ice, v_ice)
+        # (si3_o17.py:619) and stress.(u_ice, v_ice) with final.state.(u_ice, v_ice)
+        # (si3_o17.py:1124-1128) before reading either slot.
+        norm_entry = entry._replace(
+            aevp=entry.aevp._replace(u_ice_u=entry.ice.u_ice, v_ice_v=entry.ice.v_ice)
+        )
+        zero = np.zeros_like(np.asarray(forcing.sss_m))
+        norm_forcing = forcing._replace(
+            stress=forcing.stress._replace(u_ice=zero, v_ice=zero)
+        )
         digest = hashlib.sha256(str(forcing.kt).encode())
-        for leaf in jax.tree_util.tree_leaves((entry, tuple(forcing[1:]))):
+        for leaf in jax.tree_util.tree_leaves((norm_entry, tuple(norm_forcing[1:]))):
             array = np.ascontiguousarray(np.asarray(leaf))
             digest.update(str((array.shape, array.dtype.str)).encode())
             digest.update(array.tobytes())
@@ -144,6 +154,84 @@ def _plant(path: Path, name: str, mutate) -> dict:
     return {"file": path.name, "field": name, "index": [int(i) for i in index]}
 
 
+def _verify_parallel_ranges(identical_dir: Path, serial_report: dict, steps: int, kwargs: dict) -> dict:
+    """Prove split-then-merge equals the serial report and missing/duplicated steps refuse."""
+    range_reports = [
+        scorer.score(identical_dir, list(scorer.VALID_LABELS), step_range=(kt, kt), **kwargs)
+        for kt in range(1, steps + 1)
+    ]
+    merged = scorer.merge_reports(range_reports, expect_steps=steps)
+    equal_ignoring_timing = scorer.strip_timing(merged) == scorer.strip_timing(serial_report)
+
+    missing_refused = False
+    try:
+        scorer.merge_reports(range_reports[:-1], expect_steps=steps)
+    except ValueError:
+        missing_refused = True
+
+    duplicate_refused = False
+    try:
+        scorer.merge_reports([*range_reports, range_reports[-1]], expect_steps=steps)
+    except ValueError:
+        duplicate_refused = True
+
+    return {
+        "split_merge_equals_serial": equal_ignoring_timing,
+        "missing_step_refused": missing_refused,
+        "duplicated_step_refused": duplicate_refused,
+        "merged_status": merged["status"],
+    }
+
+
+def _verify_free_run(out: Path, identical_dir: Path, steps: int, h: int, kwargs: dict) -> dict:
+    """Prove free run passes on the synthetic record and detects the carried-field plant."""
+    free_identical = scorer.free_run(identical_dir, **kwargs)
+
+    def perturb_prev_v_i(kt: int, rank: int, out_state):
+        del rank
+        if kt != 1:
+            return out_state
+        v_i = np.asarray(out_state.ice.v_i).copy()
+        v_i[h, h, 0] = np.nextafter(v_i[h, h, 0], np.inf)
+        return out_state._replace(ice=out_state.ice._replace(v_i=jax.numpy.asarray(v_i)))
+
+    original_carry = scorer.carry_step_state
+
+    def planted_carry(prev_out, records, card):
+        rec_entry = scorer.entry_state(records, card)
+        return prev_out._replace(ice=prev_out.ice._replace(v_i=rec_entry.ice.v_i))
+
+    scorer.carry_step_state = planted_carry
+    try:
+        planted = scorer.free_run(identical_dir, post_step_hook=perturb_prev_v_i, **kwargs)
+    finally:
+        scorer.carry_step_state = original_carry
+
+    (out / "free_run.json").write_text(json.dumps(free_identical, indent=1, sort_keys=True) + "\n")
+    (out / "free_run_carried_plant.json").write_text(
+        json.dumps(planted, indent=1, sort_keys=True) + "\n"
+    )
+
+    step2 = planted["per_step"]["2:0"]
+    plant_detected = (
+        planted["status"] == "FAIL"
+        and step2["carry_chain_intact"] is False
+        and "carried_entry.ice.v_i" in step2["failed_fields"]
+        and planted["first_difference"] is not None
+        and planted["first_difference"]["step"] == 2
+        and planted["first_difference"]["field"] == "carried_entry.ice.v_i"
+        and planted["first_difference"]["different"] == 1
+    )
+    return {
+        "identical_status": free_identical["status"],
+        "identical_different": free_identical["different"],
+        "identical_first_difference": free_identical["first_difference"],
+        "carried_plant_status": planted["status"],
+        "carried_plant_detected": plant_detected,
+        "carried_plant_first_difference": planted["first_difference"],
+    }
+
+
 def preflight(out: Path, steps: int, shape: tuple[int, int], execution: str,
               plants: bool = True) -> dict:
     """Identical record PASS; one-ULP t_si and signed-zero plants FAIL.
@@ -155,8 +243,8 @@ def preflight(out: Path, steps: int, shape: tuple[int, int], execution: str,
     out.mkdir(parents=True, exist_ok=False)
     entry, forcing, card = _case(DEFAULT_MASTER, shape)
     runner = scorer.make_runner(card, execution)
-    generate(out / "identical", steps, entry, forcing, card, runner)
     shared = memoized(runner) if plants else runner
+    generate(out / "identical", steps, entry, forcing, card, shared)
     kwargs = dict(execution=execution, expect_steps=steps, card=card, runner=shared)
     reports = {"identical": scorer.score(out / "identical", list(scorer.VALID_LABELS), **kwargs)}
     h = int(card.state.nn_hls)
@@ -182,14 +270,33 @@ def preflight(out: Path, steps: int, shape: tuple[int, int], execution: str,
         given = reports[name]["labels"]["GIVEN-NEMO-ENTRY"]
         return reports[name]["status"] == "FAIL" and field in given["steps"][f"{steps}:0"]["failed_fields"]
 
+    parallel_summary = (
+        _verify_parallel_ranges(out / "identical", reports["identical"], steps, kwargs)
+        if plants else None
+    )
+    free_summary = (
+        _verify_free_run(out, out / "identical", steps, h, kwargs) if plants else None
+    )
     ok = reports["identical"]["status"] == "PASS" and (not plants or (
-        fired("one_ulp_t_si", "step_exit.t_si") and fired("signed_zero", "step_exit.wfx_bog")))
+        fired("one_ulp_t_si", "step_exit.t_si")
+        and fired("signed_zero", "step_exit.wfx_bog")
+        and parallel_summary["split_merge_equals_serial"]
+        and parallel_summary["missing_step_refused"]
+        and parallel_summary["duplicated_step_refused"]
+        and free_summary["identical_status"] == "PASS"
+        and free_summary["identical_different"] == 0
+        and free_summary["carried_plant_detected"]
+    ))
     summary = {
         "status": "PASS_O17_SYNTHETIC_RECORD_SCORER" if ok else "FAIL_O17_SYNTHETIC_RECORD_SCORER",
         "steps": steps, "grid": list(shape), "owned": [shape[0] - 2 * h, shape[1] - 2 * h],
         "execution": execution, "wall_seconds": time.monotonic() - started,
         "peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
     }
+    if parallel_summary is not None:
+        summary["parallel_ranges"] = parallel_summary
+    if free_summary is not None:
+        summary["free_run"] = free_summary
     for name in ("identical", "one_ulp_t_si", "signed_zero") if plants else ("identical",):
         rep = reports[name]
         summary[name] = {"status": rep["status"],

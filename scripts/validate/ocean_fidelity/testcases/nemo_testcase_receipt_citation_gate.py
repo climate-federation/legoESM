@@ -14199,6 +14199,43 @@ def check(citation: str, value, shift: int = 0, shift_last_only: bool = False,
     return {"citation": citation, "status": "OK"}
 
 
+FILES.update({
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_synthetic_record.py":
+        REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_synthetic_record.py",
+    "src/ICE/icedyn_rdgrft.F90": NEMO / "src/ICE/icedyn_rdgrft.F90",
+    "src/ICE/icesbc.F90": NEMO / "src/ICE/icesbc.F90",
+})
+CITATION_MAP.update({
+    'packages/ice/legoesm/ice/si3_o17.py:1124-1129': ['stress_inputs = forcing.stress._replace(', 'stress = si3_ice_update_tau(stress_inputs, config=card.state, ln_drgice_imp=card.ln_drgice_imp)', 6],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:456-775': ['def parse_step_range(spec: str) -> tuple[int, int]:', '"scorer_peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}', 320],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:472-508': ['def exit_state(records: dict[int, dict[str, Any]], card) -> SI3O17StepState:', ('return SI3O17StepState(state, aevp)', 2), 37],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:511-522': ['def external_forcing(records: dict[int, dict[str, Any]], card) -> SI3O17LiveForcing:', 'return live_forcing(filtered, card)', 12],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:525-532': ['def carry_step_state(', 'return prev_out', 8],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:590-692': ['def merge_reports(', ('}', 85), 103],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:726-730': ['if steps[0] > 1:', 'del prev_records', 5],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:778-890': ['def free_run(', ('}', 108), 113],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:899-956': ['def main() -> int:', 'return 0 if result.get("status") == "PASS" else 2', 58],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_synthetic_record.py:160-183': ['scorer.score(identical_dir, list(scorer.VALID_LABELS), step_range=(kt, kt), **kwargs)', ('}', 12), 24],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_synthetic_record.py:160-232': ['scorer.score(identical_dir, list(scorer.VALID_LABELS), step_range=(kt, kt), **kwargs)', ('}', 13), 73],
+    'src/ICE/icedyn_adv_pra.F90:119-127': ['zcfl =            MAXVAL( ABS( pu_ice(:,:) ) * rDt_ice * r1_e1u(:,:) )', ('ENDIF', 2), 9],
+    'src/ICE/icedyn_adv_pra.F90:119-136': ['zcfl =            MAXVAL( ABS( pu_ice(:,:) ) * rDt_ice * r1_e1u(:,:) )', 'zvdx(:,:) = pv_ice(:,:) * e1v(:,:)', 18],
+    'src/ICE/icedyn_adv_pra.F90:219-247': [('DO_2D( ihls+1, ihls+1, ihls+1, ihls+1 )', 1), ('ENDIF', 8), 29],
+    'src/ICE/icedyn_rdgrft.F90:247-263': ['IF( ln_rhg_EAP )   closing_net(ii) = zconv(ii)', 'IF( SUM( apartf(ii,1:jpl) ) > 0._wp .AND. closing_gross(ii) > 0._wp ) THEN', 17],
+    'src/ICE/icedyn_rhg_evp.F90:530-560': ['IF( MOD(jter,2) == 0 ) THEN ! even iterations', ('ELSE', 15), 31],
+    'src/ICE/iceitd.F90:543-559': ['h_i_2d (1:npti,:)  =  v_i_2d(1:npti,:) / a_i_2d(1:npti,:)', 'CALL tab_2d_3d( npti, nptidx(1:npti), t_su_2d (1:npti,:)  , t_su  )', 17],
+    'src/ICE/iceitd.F90:550-562': ['CALL tab_2d_3d( npti, nptidx(1:npti), h_i_2d  (1:npti,:)  , h_i   )', 'CALL tab_3d_4d( npti, nptidx(1:npti), szv_i_2d(1:npti,:,:), szv_i )', 13],
+    'src/ICE/icesbc.F90:108': "CALL lbc_lnk( 'icesbc', utau_ice, 'T', -1.0_wp, vtau_ice, 'T', -1.0_wp )",
+    'src/ICE/icesbc.F90:150-165': ['CALL ice_alb( ln_pnd_alb, t_su(:,:,:), h_i(:,:,:), h_s(:,:,:), a_ip_eff(:,:,:), &   ! <<== in', '&            precip, sf(jp_snow)%fnow(:,:,1) )                       ! <<== in', 16],
+    'src/ICE/icesbc.F90:195': 'CALL ice_flx_other',
+    'src/ICE/icesbc.F90:358-406': ['zqld =  smask0(ji,jj) * rDt_ice *  &', ('ENDIF', 11), 49],
+    'src/ICE/icesbc.F90:85-87': ['CALL blk_ice_1( sf(jp_wndi)%fnow(:,:,1), sf(jp_wndj)%fnow(:,:,1), theta_air_zt(:,:), q_air_zt(:,:), & ! <<== in', '&            putaui=utau_ice, pvtaui=vtau_ice )                                                    ! ==>> out', 3],
+    'src/ICE/icestp.F90:130-138': ['DO_2D( nn_hls, nn_hls, nn_hls, nn_hls )                      ! mean surface ocean current', 't_bo(:,:) = ( t_bo(:,:) + rt0 ) * smask0(:,:) + rt0 * ( 1._wp - smask0(:,:) )', 9],
+    'src/ICE/icestp.F90:159': 'CALL ice_sbc_tau( kt, ksbc, utau_ice, vtau_ice )',
+    'tests/ice/unit/test_si3_o17.py:535-722': [('@pytest.fixture(scope="module")', 5), 'assert "--free-run" in op_text', 188],
+    'tests/ice/unit/test_si3_o17.py:545-608': ['def test_o17_scorer_parallel_step_ranges_and_merge(', 'assert scorer.strip_timing(merged_fail) == scorer.strip_timing(serial_fail)', 64],
+})
+
+
 def audit_map() -> list[dict]:
     """EVERY entry in the map must resolve cleanly, cited this round or not.
 

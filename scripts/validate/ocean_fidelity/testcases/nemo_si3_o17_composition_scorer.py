@@ -447,12 +447,258 @@ def card_for(run: Path):
     return build_orca2_sas_ice_o17_card(surface=surface_cfg, thermo_namelist=nml)
 
 
+CARRIED_KIND22_FIELDS = frozenset(
+    (*STATE_FIELDS, "stress1_i", "stress2_i", "stress12_i", "cflice_delayed")
+)
+TIMING_KEYS = ("scorer_wall_seconds", "scorer_rss_kib_after_each_step", "scorer_peak_rss_kib")
+
+
+def parse_step_range(spec: str) -> tuple[int, int]:
+    """Parse a 1-based inclusive step range ``START..END`` (e.g. ``1..20``)."""
+    match = re.fullmatch(r"\s*(\d+)\.\.(\d+)\s*", spec)
+    if not match:
+        raise ValueError(f"step range must have form START..END (e.g. 1..20), got {spec!r}")
+    start, stop = int(match[1]), int(match[2])
+    if start < 1 or stop < start:
+        raise ValueError(f"invalid step range {start}..{stop}: require 1 <= START <= END")
+    return start, stop
+
+
+def strip_timing(report: dict[str, Any]) -> dict[str, Any]:
+    """Return ``report`` without runtime wall-clock/RSS telemetry fields."""
+    return {k: v for k, v in report.items() if k not in TIMING_KEYS}
+
+
+def exit_state(records: dict[int, dict[str, Any]], card) -> SI3O17StepState:
+    """Kinds 22, 23, 27, 28, and 30 -> the step-exit ``SI3O17StepState`` of a recorded step."""
+    f22, f23 = records[22]["fields"], records[23]["fields"]
+    f27, f28 = records[27]["fields"], records[28]["fields"]
+    full, h = _grid(records[28], card)
+
+    def F(src, name):  # noqa: N802
+        return _as_full(src[name], full, h)
+
+    state_cfg = card.state
+    eqv = si3_var_glo2eqv(
+        v_i=F(f27, "v_i"), v_s=F(f27, "v_s"), sv_i=F(f27, "sv_i"), a_i=F(f27, "a_i"),
+        oa_i=F(f27, "oa_i"), a_ip=F(f27, "a_ip"), v_ip=F(f27, "v_ip"), v_il=F(f27, "v_il"),
+        e_s=F(f27, "e_s"), e_i=F(f27, "e_i"), szv_i=F(f27, "szv_i"), kn=2,
+        hi_max_top=float(np.asarray(f22["hi_max"])[-1]), sss_m=F(f22, "sss_m"),
+        config=state_cfg,
+    )
+    agg = si3_var_agg(
+        v_i=F(f27, "v_i"), v_s=eqv.v_s, sv_i=F(f27, "sv_i"), a_i=eqv.a_i,
+        oa_i=F(f27, "oa_i"), a_ip=F(f27, "a_ip"), v_ip=F(f27, "v_ip"), v_il=F(f27, "v_il"),
+        t_su=F(f27, "t_su"), t_si=F(f27, "t_si"), e_s=F(f27, "e_s"), e_i=F(f27, "e_i"),
+        szv_i=F(f27, "szv_i"), a_ip_eff=eqv.a_ip_eff, t_i=eqv.t_i, t_s=eqv.t_s,
+        kn=2, config=state_cfg,
+    )
+    state = SI3State.zeros(*full, state_cfg)._replace(
+        **{name: F(f28, name) for name in STATE_FIELDS},
+        prather=_moments(records[30]["fields"], full, h), equivalent=eqv, aggregated=agg,
+        bounds=SI3CategoryBounds(jnp.asarray(f22["hi_max"]), jnp.asarray(f22["hi_mean"])),
+        cflice_delayed=(
+            jnp.asarray(f28["cflice_delayed"]) if "cflice_delayed" in f28 else None
+        ),
+    )
+    aevp = SI3CGridAEVPState(
+        F(f23, "u_ice"), F(f23, "v_ice"),
+        F(f23, "stress1_i"), F(f23, "stress2_i"), F(f23, "stress12_i"),
+    )
+    return SI3O17StepState(state, aevp)
+
+
+def external_forcing(records: dict[int, dict[str, Any]], card) -> SI3O17LiveForcing:
+    """Build ``SI3O17LiveForcing`` reading ONLY external (non-carried) fields from ``records``."""
+    external_k22 = {
+        "meta": records[22]["meta"],
+        "fields": {k: v for k, v in records[22]["fields"].items() if k not in CARRIED_KIND22_FIELDS},
+    }
+    full, h = _grid(records[22], card)
+    zero = jnp.zeros(full, jnp.float64)
+    external_k22["fields"]["u_ice"] = zero
+    external_k22["fields"]["v_ice"] = zero
+    filtered = {22: external_k22, 23: records[23], 32: records[32], 33: records[33]}
+    return live_forcing(filtered, card)
+
+
+def carry_step_state(
+    prev_out: SI3O17StepState,
+    records: dict[int, dict[str, Any]],
+    card,
+) -> SI3O17StepState:
+    """Return the carried ice state for the next free-run step from ``prev_out``."""
+    del records, card
+    return prev_out
+
+
+def _carried_mismatches(
+    actual: SI3O17StepState,
+    expected: SI3O17StepState,
+    full: tuple[int, int],
+    h: int,
+) -> dict[str, dict[str, Any]]:
+    """Bit-for-bit comparison of every carried state leaf entering a free-run step."""
+    mismatches: dict[str, dict[str, Any]] = {}
+    pairs: list[tuple[str, Any, Any]] = [
+        (f"ice.{name}", getattr(actual.ice, name), getattr(expected.ice, name))
+        for name in (*STATE_FIELDS, "cnd_ice", "t1_ice")
+    ]
+    for family, prefix in PRATHER_PREFIX.items():
+        act_m = getattr(actual.ice.prather, family)
+        exp_m = getattr(expected.ice.prather, family)
+        for member, stem in zip(act_m._fields, ("sx", "sy", "sxx", "syy", "sxy"), strict=True):
+            pairs.append((f"prather.{stem}{prefix}", getattr(act_m, member), getattr(exp_m, member)))
+    for member in actual.ice.bounds._fields:
+        pairs.append((f"ice.bounds.{member}", getattr(actual.ice.bounds, member), getattr(expected.ice.bounds, member)))
+    for member in actual.ice.equivalent._fields:
+        pairs.append((f"ice.equivalent.{member}", getattr(actual.ice.equivalent, member), getattr(expected.ice.equivalent, member)))
+    for member in actual.ice.aggregated._fields:
+        pairs.append((f"ice.aggregated.{member}", getattr(actual.ice.aggregated, member), getattr(expected.ice.aggregated, member)))
+    if actual.ice.cflice_delayed is not None or expected.ice.cflice_delayed is not None:
+        pairs.append(("ice.cflice_delayed", actual.ice.cflice_delayed, expected.ice.cflice_delayed))
+    for member, rec_name in (("stress1_t", "stress1_i"), ("stress2_t", "stress2_i"), ("stress12_f", "stress12_i")):
+        pairs.append((f"aevp.{rec_name}", getattr(actual.aevp, member), getattr(expected.aevp, member)))
+    for name, a_val, e_val in pairs:
+        if a_val is None or e_val is None:
+            row = {"different": 1, "nonfinite": 0, "max_relative": float("inf"), "pass": False}
+            mismatches[f"carried_entry.{name}"] = row
+            continue
+        row = compare(a_val, e_val, full, h)
+        row["pass"] = _passes(row, "GIVEN-NEMO-ENTRY")
+        if not row["pass"]:
+            mismatches[f"carried_entry.{name}"] = row
+    return mismatches
+
+
+def _summarize_label(steps_dict: dict[str, dict[str, Any]], label: str) -> dict[str, Any]:
+    rows = list(steps_dict.values())
+    return {
+        "steps": steps_dict,
+        "status": "PASS" if all(row["pass"] for row in rows) else "FAIL",
+        "different": sum(row["different"] for row in rows),
+        "nonfinite": sum(row["nonfinite"] for row in rows),
+        "max_relative": max(
+            (r["max_relative"] for row in rows for r in row["fields"].values()),
+            default=0.0,
+        ),
+        "ulp_bar": 0,
+        "trajectory_relative_bar": TRAJECTORY_BAR,
+    }
+
+
+def merge_reports(
+    reports: list[dict[str, Any]],
+    *,
+    expect_steps: int = 100,
+) -> dict[str, Any]:
+    """Combine parallel step-range reports into the exact serial scorer report."""
+    if not reports:
+        raise ValueError("no range reports provided for merge")
+    labels = list(VALID_LABELS)
+    expected_steps = list(range(1, expect_steps + 1))
+    first = reports[0]
+    execution = first.get("execution")
+    if execution not in ("eager", "jit"):
+        raise ValueError(f"invalid execution mode {execution!r} in range report")
+    ranks = list(first.get("ranks", []))
+    if not ranks or ranks != sorted(set(ranks)):
+        raise ValueError(f"invalid ranks {ranks!r} in range report")
+
+    step_owner: dict[int, dict[str, Any]] = {}
+    rss_by_step: dict[int, int] = {}
+    duplicates: list[int] = []
+
+    for rep in reports:
+        if rep.get("status") not in ("PASS", "FAIL"):
+            raise ValueError(f"cannot merge non-scored report with status={rep.get('status')!r}")
+        if rep.get("production_entry") != "legoesm.ice.si3_o17.si3_o17_step":
+            raise ValueError(f"mismatched production_entry {rep.get('production_entry')!r}")
+        if rep.get("execution") != execution:
+            raise ValueError(f"mismatched execution mode {rep.get('execution')!r} != {execution!r}")
+        if list(rep.get("ranks", [])) != ranks:
+            raise ValueError(f"mismatched ranks {rep.get('ranks')!r} != {ranks!r}")
+        rep_labels = rep.get("labels", {})
+        if list(rep_labels.keys()) != labels:
+            raise ValueError(f"range report labels must be {labels}, got {list(rep_labels.keys())}")
+        rep_steps = rep.get("steps", [])
+        if not isinstance(rep_steps, list) or not rep_steps:
+            raise ValueError("range report has empty or invalid steps list")
+        rep_rss = rep.get("scorer_rss_kib_after_each_step", [])
+        if len(rep_rss) != len(rep_steps):
+            raise ValueError("range report rss list length disagrees with its steps list")
+        expected_keys = {f"{kt}:{rank}" for kt in rep_steps for rank in ranks}
+        for label in labels:
+            step_map = rep_labels[label].get("steps", {})
+            if set(step_map.keys()) != expected_keys:
+                raise ValueError(
+                    f"range report step keys {sorted(step_map.keys())[:4]} disagree with steps {rep_steps}"
+                )
+        for kt, rss_val in zip(rep_steps, rep_rss, strict=True):
+            if not isinstance(kt, int):
+                raise ValueError(f"non-integer step {kt!r} in range report")
+            if kt in step_owner:
+                duplicates.append(kt)
+            else:
+                step_owner[kt] = rep
+                rss_by_step[kt] = int(rss_val)
+
+    if duplicates:
+        raise ValueError(f"duplicate O17 step(s) in merge: {sorted(set(duplicates))}")
+
+    present_steps = sorted(step_owner.keys())
+    if present_steps != expected_steps:
+        missing = sorted(set(expected_steps) - set(present_steps))
+        extra = sorted(set(present_steps) - set(expected_steps))
+        raise ValueError(
+            f"O17 merge requires steps 1..{expect_steps}; missing={missing}, extra={extra}"
+        )
+
+    per_label: dict[str, Any] = {}
+    for label in labels:
+        steps_dict: dict[str, dict[str, Any]] = {}
+        for kt in expected_steps:
+            rep = step_owner[kt]
+            for rank in ranks:
+                key = f"{kt}:{rank}"
+                raw_row = rep["labels"][label]["steps"][key]
+                fields: dict[str, Any] = {}
+                for fname, frow in raw_row["fields"].items():
+                    checked = dict(frow)
+                    checked["pass"] = _passes(checked, label)
+                    fields[fname] = checked
+                row = {
+                    "pass": all(r["pass"] for r in fields.values()),
+                    "different": sum(r["different"] for r in fields.values()),
+                    "nonfinite": sum(r["nonfinite"] for r in fields.values()),
+                    "failed_fields": [k for k, r in fields.items() if not r["pass"]],
+                    "fields": fields,
+                    "reused_bitwise_identical_entry": bool(raw_row["reused_bitwise_identical_entry"]),
+                }
+                steps_dict[key] = row
+        per_label[label] = _summarize_label(steps_dict, label)
+
+    status = "PASS" if all(per_label[label]["status"] == "PASS" for label in labels) else "FAIL"
+    return {
+        "status": status,
+        "labels": per_label,
+        "steps": expected_steps,
+        "ranks": ranks,
+        "execution": execution,
+        "production_entry": "legoesm.ice.si3_o17.si3_o17_step",
+        "scorer_wall_seconds": sum(float(rep["scorer_wall_seconds"]) for rep in reports),
+        "scorer_rss_kib_after_each_step": [rss_by_step[kt] for kt in expected_steps],
+        "scorer_peak_rss_kib": max(int(rep["scorer_peak_rss_kib"]) for rep in reports),
+    }
+
+
 def score(
     evidence: Path,
     labels: list[str],
     *,
     execution: str = "eager",
     expect_steps: int = 100,
+    step_range: tuple[int, int] | None = None,
     card=None,
     runner=None,
 ) -> dict[str, Any]:
@@ -462,14 +708,26 @@ def score(
     run = evidence / "record_100step"
     index = record_paths(run / "o17_master_records")
     ranks = sorted({rank for _, rank in index})
-    steps = sorted({kt for kt, _ in index})
-    if steps != list(range(1, expect_steps + 1)):
-        raise ValueError(f"O17 requires steps 1..{expect_steps}, got {steps[:3]}..{steps[-3:]}")
+    all_steps = sorted({kt for kt, _ in index})
+    if all_steps != list(range(1, expect_steps + 1)):
+        raise ValueError(f"O17 requires steps 1..{expect_steps}, got {all_steps[:3]}..{all_steps[-3:]}")
+    if step_range is None:
+        steps = all_steps
+    else:
+        start, stop = step_range
+        if start < 1 or stop < start or stop > expect_steps:
+            raise ValueError(f"O17 step range {start}..{stop} outside 1..{expect_steps}")
+        steps = list(range(start, stop + 1))
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     card = card if card is not None else card_for(run)
     runner = runner if runner is not None else make_runner(card, execution)
     per_label: dict[str, Any] = {label: {"steps": {}} for label in labels}
     independent: dict[int, SI3O17StepState] = {}
+    if steps[0] > 1:
+        for rank in ranks:
+            prev_records = load_step(index[(steps[0] - 1, rank)], steps[0] - 1, rank)
+            independent[rank] = exit_state(prev_records, card)
+            del prev_records
     rss_after_step: list[int] = []
     for kt in steps:
         for rank in ranks:
@@ -478,7 +736,7 @@ def score(
             forcing = live_forcing(records, card)
             given = runner(given_entry, forcing)
             entries = {"GIVEN-NEMO-ENTRY": given_entry,
-                       "INDEPENDENT": given_entry if kt == steps[0] else independent[rank]}
+                       "INDEPENDENT": given_entry if kt == 1 else independent[rank]}
             for label in labels:
                 entry = entries[label]
                 reused = label == "INDEPENDENT" and _same_bits(entry, given_entry)
@@ -517,6 +775,121 @@ def score(
             "scorer_peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
 
 
+def free_run(
+    evidence: Path,
+    *,
+    execution: str = "eager",
+    expect_steps: int = 100,
+    n_steps: int | None = None,
+    card=None,
+    runner=None,
+    post_step_hook: Callable[[int, int, SI3O17StepState], SI3O17StepState] | None = None,
+) -> dict[str, Any]:
+    """Run ``si3_o17_step`` freely for ``n_steps`` from step 1's recorded entry state.
+
+    Step 1 starts from NEMO's recorded state before step 1 (``entry_state``).
+    Every subsequent step takes its carried ice state from our previous step's
+    output (``carry_step_state``); only external inputs (atmospheric forcing,
+    prescribed SAS ocean fields, grid/masks, time ``kt``) come from the record
+    via ``external_forcing``.  Every recorded output field is compared after
+    every step with NEMO bit for bit (signed zeros and NaN bits included),
+    without stopping at the first difference.
+    """
+    started = time.monotonic()
+    run = evidence / "record_100step"
+    index = record_paths(run / "o17_master_records")
+    ranks = sorted({rank for _, rank in index})
+    all_steps = sorted({kt for kt, _ in index})
+    if all_steps != list(range(1, expect_steps + 1)):
+        raise ValueError(f"O17 requires steps 1..{expect_steps}, got {all_steps[:3]}..{all_steps[-3:]}")
+    target_steps = expect_steps if n_steps is None else n_steps
+    if target_steps < 1 or target_steps > expect_steps:
+        raise ValueError(f"O17 free_run requires 1 <= n_steps <= {expect_steps}, got {target_steps}")
+    steps = list(range(1, target_steps + 1))
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    card = card if card is not None else card_for(run)
+    runner = runner if runner is not None else make_runner(card, execution)
+    carried: dict[int, SI3O17StepState] = {}
+    per_step: dict[str, Any] = {}
+    first_difference: dict[str, Any] | None = None
+    rss_after_step: list[int] = []
+
+    for kt in steps:
+        for rank in ranks:
+            records = load_step(index[(kt, rank)], kt, rank)
+            full, h = _grid(records[22], card)
+            if kt == 1:
+                entry = entry_state(records, card)
+                carry_mismatches: dict[str, dict[str, Any]] = {}
+            else:
+                prev_out = carried[rank]
+                entry = carry_step_state(prev_out, records, card)
+                carry_mismatches = _carried_mismatches(entry, prev_out, full, h)
+            forcing = external_forcing(records, card)
+            out, trace = runner(entry, forcing)
+            scored = score_step(out, trace, records, card, "GIVEN-NEMO-ENTRY")
+            fields: dict[str, Any] = {}
+            if carry_mismatches:
+                fields.update(carry_mismatches)
+            fields.update(scored["fields"])
+            failed_fields = [key for key, frow in fields.items() if not frow["pass"]]
+            differing_per_field = {key: int(frow["different"]) for key, frow in fields.items()}
+            step_pass = len(failed_fields) == 0 and not carry_mismatches
+            step_key = f"{kt}:{rank}"
+            if first_difference is None and not step_pass:
+                first_field = failed_fields[0]
+                frow = fields[first_field]
+                first_difference = {
+                    "step": kt,
+                    "rank": rank,
+                    "step_key": step_key,
+                    "field": first_field,
+                    "different": int(frow["different"]),
+                    "nonfinite": int(frow["nonfinite"]),
+                    "max_relative": float(frow["max_relative"]),
+                }
+            per_step[step_key] = {
+                "pass": step_pass,
+                "carry_chain_intact": len(carry_mismatches) == 0,
+                "different": sum(frow["different"] for frow in fields.values()),
+                "nonfinite": sum(frow["nonfinite"] for frow in fields.values()),
+                "failed_fields": failed_fields,
+                "differing_values_per_field": differing_per_field,
+                "fields": fields,
+            }
+            carried[rank] = post_step_hook(kt, rank, out) if post_step_hook is not None else out
+            del out, trace, entry, records, forcing
+        if execution == "eager":
+            jax.clear_caches()
+        gc.collect()
+        _release_free_heap()
+        rss_after_step.append(_rss_kib())
+
+    rows = list(per_step.values())
+    status = "PASS" if all(row["pass"] for row in rows) else "FAIL"
+    return {
+        "status": status,
+        "mode": "FREE_RUN",
+        "steps": steps,
+        "ranks": ranks,
+        "execution": execution,
+        "production_entry": "legoesm.ice.si3_o17.si3_o17_step",
+        "ulp_bar": 0,
+        "different": sum(row["different"] for row in rows),
+        "nonfinite": sum(row["nonfinite"] for row in rows),
+        "max_relative": max(
+            (r["max_relative"] for row in rows for r in row["fields"].values()),
+            default=0.0,
+        ),
+        "first_difference": first_difference,
+        "per_step": per_step,
+        "scorer_wall_seconds": time.monotonic() - started,
+        "scorer_rss_kib_after_each_step": rss_after_step,
+        "scorer_peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+    }
+
+
 def schema() -> dict[str, Any]:
     return {"status": "PASS", "magic": MAGIC.decode(), "version": VERSION, "kinds": KINDS,
             "state_fields": STATE_FIELDS, "flux_fields": FLUX_FIELDS, "labels": VALID_LABELS,
@@ -528,6 +901,17 @@ def main() -> int:
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--labels", nargs=2, default=list(VALID_LABELS))
     parser.add_argument("--execution", choices=("jit", "eager"), default="eager")
+    parser.add_argument("--expect-steps", type=int, default=100)
+    parser.add_argument("--steps", type=parse_step_range, default=None,
+                        help="1-based inclusive step range START..END (e.g. 1..20)")
+    parser.add_argument("--merge", nargs="+", type=Path, default=None,
+                        help="Merge step-range report JSON files into a full report")
+    parser.add_argument("--free-run", action="store_true",
+                        help="Run carried-state free run from step 1 entry")
+    parser.add_argument("--n-steps", type=int, default=None,
+                        help="Number of steps N for --free-run (defaults to --expect-steps)")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="Optional path to write JSON report")
     parser.add_argument("--schema", action="store_true")
     parser.add_argument("--read-record", type=Path)
     args = parser.parse_args()
@@ -537,14 +921,38 @@ def main() -> int:
         elif args.read_record:
             record = read_record(args.read_record)
             result = {"status": "PASS", "meta": record["meta"], "fields": sorted(record["fields"])}
+        elif args.merge:
+            loaded = [json.loads(path.read_text()) for path in args.merge]
+            result = merge_reports(loaded, expect_steps=args.expect_steps)
+        elif args.evidence and args.free_run:
+            result = free_run(
+                args.evidence.resolve(),
+                execution=args.execution,
+                expect_steps=args.expect_steps,
+                n_steps=args.n_steps,
+            )
         elif args.evidence:
-            result = score(args.evidence.resolve(), args.labels, execution=args.execution)
+            result = score(
+                args.evidence.resolve(),
+                args.labels,
+                execution=args.execution,
+                expect_steps=args.expect_steps,
+                step_range=args.steps,
+            )
         else:
-            raise ValueError("one of --schema, --read-record, or --evidence is required")
-    except (OSError, ValueError, KeyError, struct.error) as exc:
-        print(json.dumps({"status": "REFUSE", "reason": str(exc)}, indent=2))
+            raise ValueError("one of --schema, --read-record, --merge, or --evidence is required")
+        text = json.dumps(result, indent=2, sort_keys=True)
+        if args.out is not None:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(text + "\n")
+    except (OSError, ValueError, KeyError, struct.error, json.JSONDecodeError) as exc:
+        err_text = json.dumps({"status": "REFUSE", "reason": str(exc)}, indent=2)
+        if args.out is not None:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(err_text + "\n")
+        print(err_text)
         return 2
-    print(json.dumps(result, indent=2, sort_keys=True))
+    print(text)
     return 0 if result.get("status") == "PASS" else 2
 
 

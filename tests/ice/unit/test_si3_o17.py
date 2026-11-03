@@ -530,3 +530,193 @@ def test_o17_scorer_on_writer_shaped_records_and_plants(mixed, tmp_path, monkeyp
     with monkeypatch.context() as patched:
         patched.setattr(scorer, "scored_fields", wrong_boundary)
         assert scorer.score(tmp_path / "rec", labels, **kwargs)["status"] == "FAIL"
+
+
+@pytest.fixture(scope="module")
+def synthetic_2step_fixture(mixed, tmp_path_factory):
+    """Module-shared 2-step writer-extent synthetic record and memoized runner."""
+    entry, forcing, card = mixed
+    runner = synthetic.memoized(scorer.make_runner(card, "eager"))
+    rec_dir = tmp_path_factory.mktemp("o17_synth_2step") / "rec"
+    synthetic.generate(rec_dir, 2, entry, forcing, card, runner)
+    return rec_dir, card, runner
+
+
+def test_o17_scorer_parallel_step_ranges_and_merge(
+    synthetic_2step_fixture, tmp_path, monkeypatch
+) -> None:
+    """(A) Step-range scoring + merge equals serial report; missing/duplicated steps refuse."""
+    rec_dir, card, runner = synthetic_2step_fixture
+    labels = list(scorer.VALID_LABELS)
+    kwargs = dict(execution="eager", expect_steps=2, card=card, runner=runner)
+
+    assert scorer.parse_step_range("1..20") == (1, 20)
+    assert scorer.parse_step_range("2..2") == (2, 2)
+    for bad in ("0..2", "3..2", "1:2", "abc", ""):
+        with pytest.raises(ValueError):
+            scorer.parse_step_range(bad)
+
+    serial = scorer.score(rec_dir, labels, **kwargs)
+    assert serial["status"] == "PASS"
+
+    r1 = scorer.score(rec_dir, labels, step_range=(1, 1), **kwargs)
+    r2 = scorer.score(rec_dir, labels, step_range=(2, 2), **kwargs)
+    assert r1["steps"] == [1] and r2["steps"] == [2]
+    merged = scorer.merge_reports([r1, r2], expect_steps=2)
+    assert scorer.strip_timing(merged) == scorer.strip_timing(serial)
+
+    # Deterministic timing/RSS -> byte-identical JSON serial report across invocations.
+    with monkeypatch.context() as det:
+        det.setattr(scorer.time, "monotonic", lambda: 100.0)
+        det.setattr(scorer, "_rss_kib", lambda: 123456)
+        det_a = scorer.score(rec_dir, labels, **kwargs)
+        det_b = scorer.score(rec_dir, labels, **kwargs)
+        assert scorer.json.dumps(det_a, indent=2, sort_keys=True) == scorer.json.dumps(
+            det_b, indent=2, sort_keys=True
+        )
+
+    # Missing step and duplicated step are refused.
+    with pytest.raises(ValueError, match=r"missing=\[2\]"):
+        scorer.merge_reports([r1], expect_steps=2)
+    with pytest.raises(ValueError, match=r"missing=\[1\]"):
+        scorer.merge_reports([r2], expect_steps=2)
+    with pytest.raises(ValueError, match="duplicate O17 step"):
+        scorer.merge_reports([r1, r2, r2], expect_steps=2)
+    with pytest.raises(ValueError, match="duplicate O17 step"):
+        scorer.merge_reports([serial, r1], expect_steps=2)
+    with pytest.raises(ValueError, match="outside 1..2"):
+        scorer.score(rec_dir, labels, step_range=(1, 3), **kwargs)
+
+    # A failing range report propagates the exact serial FAIL report through merge.
+    import shutil
+    planted_dir = tmp_path / "rec_fail"
+    shutil.copytree(rec_dir, planted_dir)
+    exit2 = (
+        planted_dir
+        / "record_100step/o17_master_records/o17_kind28_step_exit_step0002_rank0000.bin"
+    )
+    rec28 = scorer.read_record(exit2)
+    rec28["fields"]["t_si"].flat[0] = np.nextafter(rec28["fields"]["t_si"].flat[0], np.inf)
+    synthetic.write_record(
+        exit2, 28, 2, 0, (7, 7, 5, 10, 5), list(rec28["fields"].items())
+    )
+    serial_fail = scorer.score(planted_dir, labels, **kwargs)
+    rf1 = scorer.score(planted_dir, labels, step_range=(1, 1), **kwargs)
+    rf2 = scorer.score(planted_dir, labels, step_range=(2, 2), **kwargs)
+    merged_fail = scorer.merge_reports([rf1, rf2], expect_steps=2)
+    assert merged_fail["status"] == "FAIL"
+    assert scorer.strip_timing(merged_fail) == scorer.strip_timing(serial_fail)
+
+
+def test_o17_scorer_free_run_and_carried_state_plants(
+    synthetic_2step_fixture, tmp_path, monkeypatch
+) -> None:
+    """(B) Free run passes on model-built synthetic record and detects carried-field plant."""
+    import shutil
+
+    rec_dir, card, runner = synthetic_2step_fixture
+    h = int(card.state.nn_hls)
+    kwargs = dict(execution="eager", expect_steps=2, card=card, runner=runner)
+
+    report = scorer.free_run(rec_dir, **kwargs)
+    assert report["status"] == "PASS"
+    assert report["mode"] == "FREE_RUN"
+    assert report["different"] == 0 and report["nonfinite"] == 0
+    assert report["first_difference"] is None
+    for key in ("1:0", "2:0"):
+        step_rep = report["per_step"][key]
+        assert step_rep["pass"] is True
+        assert step_rep["carry_chain_intact"] is True
+        assert step_rep["different"] == 0
+        assert all(v == 0 for v in step_rep["differing_values_per_field"].values())
+
+    # Corrupting every carried field in step 2's entry records (kinds 22 and 29)
+    # cannot affect free_run because step 2's carried state comes from step 1's output.
+    corrupted_entry_dir = tmp_path / "corrupted_step2_entry"
+    shutil.copytree(rec_dir, corrupted_entry_dir)
+    records = scorer.record_paths(corrupted_entry_dir / "record_100step/o17_master_records")
+    for kind, target_fields in (
+        (22, scorer.CARRIED_KIND22_FIELDS),
+        (29, None),
+    ):
+        rec = scorer.read_record(records[(2, 0)][kind])
+        for fname, val in rec["fields"].items():
+            if target_fields is None or fname in target_fields:
+                val[...] = -999.0
+        synthetic.write_record(
+            records[(2, 0)][kind], kind, 2, 0, (7, 7, 5, 10, 5), list(rec["fields"].items())
+        )
+    corrupted_rep = scorer.free_run(corrupted_entry_dir, **kwargs)
+    assert corrupted_rep["status"] == "PASS"
+    assert corrupted_rep["different"] == 0
+
+    # Key plant: apply a 1-ULP change to our step 1 output while taking v_i from
+    # step 2's record instead of from our previous step -> detected at step 2.
+    def perturb_prev_v_i(kt: int, rank: int, out):
+        del rank
+        if kt != 1:
+            return out
+        v_i = np.asarray(out.ice.v_i).copy()
+        v_i[h, h, 0] = np.nextafter(v_i[h, h, 0], np.inf)
+        return out._replace(ice=out.ice._replace(v_i=jnp.asarray(v_i)))
+
+    def take_v_i_from_record(prev_out, step_records, step_card):
+        rec_entry = scorer.entry_state(step_records, step_card)
+        return prev_out._replace(ice=prev_out.ice._replace(v_i=rec_entry.ice.v_i))
+
+    carried_ulp = scorer.free_run(rec_dir, post_step_hook=perturb_prev_v_i, **kwargs)
+    assert carried_ulp["status"] == "FAIL"
+    assert carried_ulp["per_step"]["1:0"]["pass"] is True
+    assert carried_ulp["per_step"]["2:0"]["carry_chain_intact"] is True
+    assert carried_ulp["per_step"]["2:0"]["different"] == 569
+    assert carried_ulp["first_difference"]["step"] == 2
+    assert carried_ulp["first_difference"]["field"] == "after_advection.v_i"
+
+    with monkeypatch.context() as patched:
+        patched.setattr(scorer, "carry_step_state", take_v_i_from_record)
+        planted = scorer.free_run(rec_dir, post_step_hook=perturb_prev_v_i, **kwargs)
+    assert planted["status"] == "FAIL"
+    assert planted["per_step"]["1:0"]["pass"] is True
+    assert planted["per_step"]["2:0"]["pass"] is False
+    assert planted["per_step"]["2:0"]["carry_chain_intact"] is False
+    assert "carried_entry.ice.v_i" in planted["per_step"]["2:0"]["failed_fields"]
+    assert planted["per_step"]["2:0"]["differing_values_per_field"]["carried_entry.ice.v_i"] == 1
+    assert planted["first_difference"] is not None
+    assert planted["first_difference"]["step"] == 2
+    assert planted["first_difference"]["field"] == "carried_entry.ice.v_i"
+    assert planted["first_difference"]["different"] == 1
+
+    # Free run does not stop at the first difference and detects both signed-zero
+    # and NaN bit differences across steps 1 and 2.
+    both_bad_dir = tmp_path / "both_steps_bad"
+    shutil.copytree(rec_dir, both_bad_dir)
+    bad_records = scorer.record_paths(both_bad_dir / "record_100step/o17_master_records")
+    rec1_28 = scorer.read_record(bad_records[(1, 0)][28])
+    z_idx = tuple(np.argwhere((rec1_28["fields"]["wfx_bog"] == 0.0) & ~np.signbit(rec1_28["fields"]["wfx_bog"]))[0])
+    rec1_28["fields"]["wfx_bog"][z_idx] = -0.0
+    synthetic.write_record(
+        bad_records[(1, 0)][28], 28, 1, 0, (7, 7, 5, 10, 5), list(rec1_28["fields"].items())
+    )
+    rec2_28 = scorer.read_record(bad_records[(2, 0)][28])
+    rec2_28["fields"]["qns"].flat[0] = np.nan
+    synthetic.write_record(
+        bad_records[(2, 0)][28], 28, 2, 0, (7, 7, 5, 10, 5), list(rec2_28["fields"].items())
+    )
+    multi_fail = scorer.free_run(both_bad_dir, **kwargs)
+    assert multi_fail["status"] == "FAIL"
+    assert list(multi_fail["per_step"].keys()) == ["1:0", "2:0"]
+    assert multi_fail["first_difference"]["step"] == 1
+    assert multi_fail["first_difference"]["field"] == "step_exit.wfx_bog"
+    assert multi_fail["per_step"]["1:0"]["differing_values_per_field"]["step_exit.wfx_bog"] == 1
+    assert multi_fail["per_step"]["2:0"]["differing_values_per_field"]["step_exit.qns"] == 1
+    assert multi_fail["per_step"]["2:0"]["fields"]["step_exit.qns"]["nonfinite"] == 1
+
+    # Operator script structure and safety gates.
+    op_script = REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_operator_run.sh"
+    assert op_script.is_file()
+    op_text = op_script.read_text()
+    assert "MIN_AVAIL_GB=250" in op_text
+    assert "MAX_PROC_RSS_KIB=104857600" in op_text
+    assert "--steps \"${start}..${stop}\"" in op_text
+    assert "--merge \"${range_jsons[@]}\"" in op_text
+    assert "--free-run" in op_text
