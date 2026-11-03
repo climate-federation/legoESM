@@ -151,3 +151,13 @@ def test_lane_without_vapour_tracer_refuses():
     with pytest.raises(ValueError, match="q_v"):
         mynn_lane_kwargs(st, scm.grid, scm.sigma_coord, scm.phys_state,
                          T, T, T, 1, False)
+
+
+def test_scm_direct_construction_refuses_multistage_integrator():
+    """codex R3 round 4: RK stages would repeat the cold start."""
+    scm = _scm()
+    with pytest.raises(ValueError, match="forward_euler"):
+        SingleColumnModel(
+            physics_fn=scm.physics_fn, physics_fn_init=scm.physics_fn_init,
+            state=scm.state, phys_state=scm.phys_state, grid=scm.grid,
+            sigma_coord=scm.sigma_coord, dt=60.0, time_integrator="rk2")

@@ -695,6 +695,13 @@ class SingleColumnModel:
                 "turbulence='mynn25': pass physics_fn built with "
                 "mynn_initflag=False and physics_fn_init built with "
                 "mynn_initflag=True (SingleColumnModel.create does both)")
+        if physics_fn_init is not None and time_integrator != "forward_euler":
+            # create() rejects these for stateful turbulence; a direct
+            # construction must too: a multi-stage step would re-run the
+            # cold start on every stage (codex R3 round 4).
+            raise ValueError(
+                "turbulence='mynn25' runs with time_integrator="
+                f"'forward_euler' only; got {time_integrator!r}")
         if _flag is None and physics_fn_init is not None:
             raise ValueError(
                 "physics_fn_init is the mynn25 cold-start physics; this "
