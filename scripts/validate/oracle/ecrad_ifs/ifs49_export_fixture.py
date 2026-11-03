@@ -8,11 +8,14 @@ writes ONE compressed npz (vote IF7-ifs_interface):
   in:<name>     every driver input array, Fortran shape
   nml:<NAME>    the &HARNESS scalars the port needs (NINDAT_H, NSTEP_H,
                 TSTEP_H, NSTEPS, DMU0, DTS)
+  rng:*         optional (5th argument): the McICA uniform stream of a re-run
+                of the same case with ECRAD49_RNG_DUMP set (vote C1), parsed by
+                build_fixture.read_rng into the layout of the core fixtures
 
 No value is derived here.  NaN anywhere is fatal; the chk_* control dumps
 (deliberately NaN: members the 49r1 path never sets) are not exported.
 
-usage: python -I ifs49_export_fixture.py <run dir>/base_a <run dir>/inputs <base_a.nam> <out.npz>
+usage: python -I ifs49_export_fixture.py <run dir>/base_a <run dir>/inputs <base_a.nam> <out.npz> [rng.txt]
 """
 import glob
 import os
@@ -46,7 +49,7 @@ def _read_nml(path):
     return out
 
 
-def main(dump_dir, input_dir, nml, out):
+def main(dump_dir, input_dir, nml, out, rng=None):
     z = {}
     for p in sorted(glob.glob(os.path.join(dump_dir, "*.txt"))):
         if os.path.basename(p).startswith("chk_"):
@@ -68,9 +71,16 @@ def main(dump_dir, input_dir, nml, out):
         if not np.isfinite(v):
             sys.exit(f"non-finite namelist value {k}")
         z["nml:" + k] = np.float64(v)
+    if rng is not None:
+        from build_fixture import read_rng
+        vals, seeds, block, sizes = read_rng(rng)
+        if not np.all(np.isfinite(vals)):
+            sys.exit("non-finite value in the rng stream")
+        z.update({"rng:values": vals, "rng:seeds": seeds, "rng:block_of_call": block,
+                  "rng:call_sizes": sizes})
     np.savez_compressed(out, **z)
     print(f"EXPORT_OK {len(z)} arrays -> {out}")
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:5])
+    main(*sys.argv[1:6])

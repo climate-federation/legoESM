@@ -50,6 +50,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.atmosphere.physics._ifs_thermo import ifs_thermo, satur_qsat
+from legoesm.atmosphere.physics.radiation.ecrad_ifs import ecrad
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import mcica_solvers as ms
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import rrtmg_prepare as prep
 from legoesm.atmosphere.physics.radiation.ecrad_ifs.two_stream import (
@@ -315,12 +316,17 @@ def mcica_seed(nindat, nstep, tstep, gelam, gemu):
     return itim + iday + _nint(gelam * _SEED_LON_FACTOR + jnp.arcsin(gemu) * _SEED_LAT_FACTOR)
 
 
-def curvature_mu0(mu0, sharpness=100.0):
-    """radintg.F90:547-556: Earth-curvature-corrected cos(solar zenith)."""
+def _curvature(mu0, threshold, strict, sharpness):
+    """RRAE/(SQRT(mu0**2+CRAE)-mu0) above the threshold, RRAE/SQRT(CRAE) below."""
     crae = _RRAE * (_RRAE + 2.0)
-    w = step(mu0, _MU0_CURV_THRESHOLD, _MU0_CURV_THRESHOLD, sharpness, strict=True)
+    w = step(mu0, threshold, threshold, sharpness, strict=strict)
     mu0_s = jnp.where(w > 0.0, mu0, 1.0)
     return blend(w, _RRAE / (jnp.sqrt(mu0_s * mu0_s + crae) - mu0_s), _RRAE / math.sqrt(crae))
+
+
+def curvature_mu0(mu0, sharpness=100.0):
+    """radintg.F90:547-556 (IF mu0 > 1e-10): Earth-curvature-corrected cos(solar zenith)."""
+    return _curvature(mu0, _MU0_CURV_THRESHOLD, True, sharpness)
 
 
 # ---------------------------------------------------------------------------
@@ -531,15 +537,33 @@ def radintg_post(rs, solar_irradiance, amu0, albedo_dif, albedo_dir, mu0_rad, sh
         lwderivative=c01(rs["lwderivative"]), mu0_rad=mu0_rad)
 
 
+def radiation_scheme(*, mu0, uniforms_lw, uniforms_sw, sharpness=100.0, **scheme_kwargs):
+    """One full radiation call on the model grid: radintg.F90:547-556 (curvature
+    mu0) -> RADIATION_SCHEME (:func:`prepare_inputs`, :func:`.ecrad.radiation`,
+    :func:`scheme_outputs`) -> radintg.F90:1870-2058 (:func:`radintg_post`).
+
+    ``mu0`` is the RAW cos(solar zenith) (vote C3); ``uniforms_lw/sw`` the McICA
+    uniforms, required (vote C2): in production
+    ``ecrad.draw_uniforms(mcica_seed(...), nlev)``.  ``scheme_kwargs`` are the
+    other :func:`prepare_inputs` keywords.  Returns
+    ``(scheme_outputs dict, RadiationCarry)`` (vote C4)."""
+    amu0 = curvature_mu0(mu0, sharpness)
+    kw, _ = prepare_inputs(mu0=amu0, sharpness=sharpness, **scheme_kwargs)
+    flux = ecrad.radiation(**kw, uniforms_lw=uniforms_lw, uniforms_sw=uniforms_sw,
+                           sharpness=sharpness)
+    rs = scheme_outputs(flux, amu0, kw["skin_temperature"], kw["lw_emissivity"], sharpness)
+    carry = radintg_post(rs, kw["solar_irradiance"], amu0, kw["sw_albedo"],
+                         kw["sw_albedo_direct"], mu0, sharpness)
+    return rs, carry
+
+
 # ---------------------------------------------------------------------------
 # RADHEATN
 # ---------------------------------------------------------------------------
 
 def _mu0_curv_radheatn(mu0, sharpness):
-    crae = _RRAE * (_RRAE + 2.0)
-    w = step(mu0, _RADHEATN_EPS1, _RADHEATN_EPS1, sharpness, strict=False)
-    m = jnp.where(w > 0.0, mu0, 1.0)
-    return blend(w, _RRAE / (jnp.sqrt(m * m + crae) - m), _RRAE / math.sqrt(crae))
+    """radheatn.F90:401-410 (IF mu0 >= ZEPSILON1), same formula as radintg."""
+    return _curvature(mu0, _RADHEATN_EPS1, False, sharpness)
 
 
 def _manners(zi0, mu0, w_mu0, ratio, fdiri, trsod, trso_sfc, sharpness):

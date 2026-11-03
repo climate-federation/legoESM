@@ -15,6 +15,7 @@ stage:
 fp64 (JAX_ENABLE_X64=1); hard form (sharpness = inf) at rel <= 1e-12.
 """
 
+import json
 import math
 import os
 
@@ -480,3 +481,185 @@ def test_decorrelation_length_pole_gradient():
     """Vote IF12: finite gradient wrt sine of latitude at both poles and the equator."""
     g = jax.vmap(jax.grad(lambda m: ii.cloud_overlap_decorr_len(m)[0]))(jnp.array([-1.0, 0.0, 1.0]))
     np.testing.assert_allclose(np.asarray(g), [2 * 2.149, 0.0, -2 * 2.149], rtol=1e-14)
+
+
+# ---------------------------------------------------------------------------
+# composed call: curvature mu0 -> RADIATION_SCHEME (prep, ecRad, outputs) -> RADINTG
+# ---------------------------------------------------------------------------
+
+def composed_args(fx):
+    a = scheme_args(fx)
+    del a["mu0"]
+    return a
+
+
+def replayed_uniforms(fx, iseed=None):
+    """The oracle's McICA stream (re-run of base_a with ECRAD49_RNG_DUMP, vote C1)
+    placed with the end-to-end test's replay, using the port's own ecRad inputs.
+    ``iseed``: the seed the oracle ran with when it was held (spread runs, vote
+    C11); default the port's own seed from lat/lon."""
+    from tests.atmosphere.test_ecrad_ifs_end_to_end_oracle import replay
+    kw, ex = ii.prepare_inputs(**scheme_args(fx), sharpness=HARD)
+    seed = ex["iseed"] if iseed is None else iseed
+    z = {"in:iseed": np.asarray(seed), **{k: fx[k] for k in fx if k.startswith("rng:")}}
+    inp = {k: np.asarray(v) for k, v in kw.items() if k in (
+        "cloud_fraction", "q_liquid", "q_ice", "overlap_param", "fractional_std")}
+    ulw, _, n_lw = replay(z, inp, "lw")
+    usw, _, n_sw = replay(z, inp, "sw")
+    assert n_lw + n_sw == fx["rng:values"].size, "stream not fully consumed"
+    return ulw, usw
+
+
+_STATIC_ARGS = ("nindat", "nstep", "tstep")   # static ints / step length (seed)
+
+
+def run_composed(fx, uniforms, sharpness, jit=False):
+    """All model arrays (incl. raw mu0 and the solar irradiance) are traced
+    arguments under jit; only the seed's date/step/timestep are static."""
+    a = composed_args(fx)
+    static = {k: a.pop(k) for k in _STATIC_ARGS}
+
+    def f(mu0, arrays, ulw, usw):
+        rs, carry = ii.radiation_scheme(mu0=mu0, uniforms_lw=ulw, uniforms_sw=usw,
+                                        sharpness=sharpness, **arrays, **static)
+        return rs, carry._asdict()
+
+    rs, carry = (jax.jit(f) if jit else f)(fx["in:cos_solar_zenith_angle"], a, *uniforms)
+    return ({k: np.asarray(v) for k, v in rs.items()}, {k: np.asarray(v) for k, v in carry.items()})
+
+
+@pytest.fixture(scope="module")
+def uniforms(fx):
+    return replayed_uniforms(fx)
+
+
+@pytest.fixture(scope="module")
+def composed_hard(fx, uniforms):
+    return run_composed(fx, uniforms, HARD)
+
+
+def test_composed_matches_oracle(fx, composed_hard):
+    """rs_* and ri_* of the whole call from the raw driver inputs at 1e-12 (vote C5:
+    no field exceeded it, so no spread exemption is applied)."""
+    rs, carry = composed_hard
+    errs = {"rs_" + k: rel_err(rs[k], d(fx, "rs_" + k)) for k in RS_KEYS}
+    errs.update({"ri_" + k: rel_err(carry[f], d(fx, "ri_" + k)) for f, k in RI_KEYS.items()})
+    errs["mu0_rad"] = rel_err(carry["mu0_rad"], fx["in:cos_solar_zenith_angle"])
+    print("composed max rel:", errs)
+    assert max(errs.values()) <= TOL, {k: v for k, v in errs.items() if v > TOL}
+
+
+# Vote C8: the heating rates of the composed chain carry the ecRad-core round-off
+# (<=1.2e-14 in the carry) amplified by top-layer flux cancellation; they get the
+# IFS-interface oracle's own 20-seed 1-ulp spread (committed artifact, controls
+# C1-C5 PASS, never retyped).  Every other rh_* field stays at 1e-12.
+SPREAD_ARTIFACT_IFS = os.path.join(os.path.dirname(__file__), "oracle_fixtures",
+                                   "spread_ecrad_ifs49_interface.json")
+_C8_FIELDS = ("te", "hrlw", "hrlc", "hrsw", "hrsc")
+
+
+def rh_tol(k, s):
+    if k not in _C8_FIELDS:
+        return TOL
+    with open(SPREAD_ARTIFACT_IFS) as f:
+        art = json.load(f)
+    assert all(art["controls"][c] == "PASS" for c in ("C1", "C2", "C3", "C4", "C5"))
+    return max(TOL, float(art["spread"][f"rh_{k}_s{s}"]))
+
+
+@pytest.mark.parametrize("s", range(4))
+def test_composed_carry_through_radheatn(fx, composed_hard, s):
+    """Radiation call -> carry -> RADHEATN step s, against rh_*_s."""
+    carry = ii.RadiationCarry(**composed_hard[1])
+    out = run_radheatn(fx, carry, s, HARD)
+    errs = {k: rel_err(out[k], d(fx, f"rh_{k}_s{s}")) for k in RH_KEYS}
+    for k, v in errs.items():
+        print(f"RH_COMPOSED rh_{k}_s{s} max_rel={v:.3e}")
+    bad = {k: (v, rh_tol(k, s)) for k, v in errs.items() if v > rh_tol(k, s)}
+    assert not bad, bad
+
+
+_COMPOSED_JIT_SCRIPT = """
+import sys, numpy as np, jax
+jax.config.update("jax_enable_x64", True)
+from tests.atmosphere import test_ecrad_ifs_interface_oracle as t
+with np.load(t.FIXTURE) as z:
+    fx = {k: z[k] for k in z.files}
+rs, carry = t.run_composed(fx, t.replayed_uniforms(fx), float(sys.argv[2]), jit=True)
+np.savez(sys.argv[1], **{"rs:" + k: v for k, v in rs.items()}, **{"ri:" + k: v for k, v in carry.items()})
+"""
+
+
+# Vote C5: canopy-diffuse-derived fields get the V53 jit bound only where measured
+# above 1e-12.  Measured 2026-11-03: rs swdiffuseband 1.878e-12 (inf), 1.896e-12 (100);
+# every other rs/ri field <= 1e-12.
+_COMPOSED_JIT_TOL = {"rs:swdiffuseband": 5.0e-12}
+
+
+@pytest.mark.parametrize("sharpness", [HARD, 100.0])
+def test_composed_eager_vs_jit(fx, uniforms, composed_hard, tmp_path, sharpness):
+    """jit in a separate process with --xla_cpu_max_isa=AVX (no FMA; the same
+    method as the end-to-end test) == eager to 1e-12 (V51), C5 exemption above."""
+    import subprocess
+    import sys
+    rs, carry = composed_hard if sharpness == HARD else run_composed(fx, uniforms, sharpness)
+    path = tmp_path / "jit.npz"
+    env = dict(os.environ, XLA_FLAGS="--xla_cpu_max_isa=AVX", JAX_PLATFORMS="cpu", JAX_ENABLE_X64="1")
+    subprocess.run([sys.executable, "-c", _COMPOSED_JIT_SCRIPT, str(path), repr(sharpness)],
+                   env=env, check=True)
+    jit = np.load(path)
+    diff = {"rs:" + k: rel_err(v, jit["rs:" + k]) for k, v in rs.items()}
+    diff.update({"ri:" + k: rel_err(v, jit["ri:" + k]) for k, v in carry.items()})
+    print(f"COMPOSED_EAGER_VS_JIT sharpness={sharpness} max_rel={max(diff.values()):.3e} "
+          f"worst={max(diff, key=diff.get)}")
+    bad = {k: v for k, v in diff.items() if v > _COMPOSED_JIT_TOL.get(k, TOL)}
+    assert not bad, bad
+
+
+def _composed_functional(fx, uniforms, sharpness, k):
+    """Scalar of the composed call vs one relative perturbation: k=0 full-level T
+    (reaches ecRad only through the effective radii), k=1 skin T."""
+    args = composed_args(fx)
+    ulw, usw = uniforms
+    name = ("temperature_fl", "skin_temperature")[k]
+
+    def f(x):
+        a = dict(args, **{name: args[name] * (1.0 + x)})
+        rs, carry = ii.radiation_scheme(mu0=fx["in:cos_solar_zenith_angle"], uniforms_lw=ulw,
+                                        uniforms_sw=usw, sharpness=sharpness, **a)
+        return (jnp.sum(rs["flux_lw"]) * 1e-2 + jnp.sum(rs["flux_sw"]) * 1e-2
+                + jnp.sum(carry.trso) + jnp.sum(carry.emit))
+
+    return jax.jit(f)
+
+
+def _strict_grad_check(f, label):
+    """W1-W3: from x0 = 0, check_grads at h = 1e-5 and 1e-6; both central FDs
+    agree with each other and with AD at rtol 1e-6; AD finite and nonzero."""
+    x0 = 0.0
+    for h in FD_STEPS:
+        check_grads(f, (x0,), order=1, modes=("rev",), eps=h)
+    g = float(jax.grad(f)(x0))
+    fd = [(float(f(x0 + h)) - float(f(x0 - h))) / (2.0 * h) for h in FD_STEPS]
+    print(f"{label}: AD {g:.12e}  FD {fd}")
+    assert np.isfinite(g) and g != 0.0, (label, g)
+    np.testing.assert_allclose(fd[0], fd[1], rtol=1e-6)
+    for v in fd:
+        np.testing.assert_allclose(v, g, rtol=1e-6)
+
+
+def test_composed_grad_full_level_t_hard(fx, uniforms):
+    """Vote C7: the gate for the full-level-T input is the hard form."""
+    _strict_grad_check(_composed_functional(fx, uniforms, HARD, 0), "composed T_fl inf")
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "votes C7/C9: the FD side fails, not AD: fp64 round-off in the SW two-stream kernel "
+    "on nearly conservative layers makes the central FD in full-level T (via the "
+    "effective radii) noisy; AD is correct; FD error 3.3e-7 at h=3e-5, 3.47e-5 at h=1e-4"))
+def test_composed_grad_full_level_t_smooth(fx, uniforms):
+    _strict_grad_check(_composed_functional(fx, uniforms, 100.0, 0), "composed T_fl 100")
+
+
+def test_composed_grad_skin_t_smooth(fx, uniforms):
+    _strict_grad_check(_composed_functional(fx, uniforms, 100.0, 1), "composed T_skin 100")
