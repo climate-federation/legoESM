@@ -716,7 +716,9 @@ def make_turbulence_physics(
                 "the MPAS bridge's knob). Pass surface=...\n"
                 "._replace(ocean_q_sfc_saline=False) on this lane, or extend "
                 "the lane to carry a land fraction.")
-    _check_mynn_initflag(turbulence_config.scheme, mynn_initflag)
+    if model_type in ("hydrostatic", "mpas"):
+        # the lanes that route mynn25; the others keep their own refusal
+        _check_mynn_initflag(turbulence_config.scheme, mynn_initflag)
     if model_type == "hydrostatic":
         return _make_hydrostatic_turbulence(turbulence_config, dt,
                                             mynn_initflag)

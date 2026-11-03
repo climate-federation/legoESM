@@ -284,7 +284,8 @@ def test_climateeval_hook_names_tas_not_produced_under_none(monkeypatch):
         assert (got == ["tas", "tasmin", "tasmax"]) is want, sbs
 
 
-@pytest.mark.parametrize("turb", ["louis", "tke", "smagorinsky", "mynn25",
+# mynn25 (WRF port) dropped in R3: the compiled pipeline refuses it (P6)
+@pytest.mark.parametrize("turb", ["louis", "tke", "smagorinsky",
                                   "holtslag_boville", "ysu", "edmf",
                                   "clubb_lite", "clubb"])
 def test_every_scheme_takes_a_zero_lower_boundary_condition(turb):
