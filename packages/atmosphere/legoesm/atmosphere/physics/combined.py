@@ -304,6 +304,13 @@ def make_physics(
     # = no surface exchange (surface_bulk_scheme="none").  The nonhydrostatic
     # lane has no bulk module.
     _bulk_models = ("hydrostatic", "mpas", "spectral_pe")
+    if (config.convection.scheme == "tiedtke"
+            and config.turbulence.scheme == "none"):
+        raise ValueError(
+            "convection='tiedtke' (WRF port) reads the previous step's "
+            "boundary-layer q_v tendency and surface water flux (WRF "
+            "qvpblten / qfx) from the turbulence scheme; with "
+            "turbulence='none' they would stay at their zero seed")
     if isinstance(surface_bulk_coeffs, str):
         if surface_bulk_coeffs != "default":
             raise ValueError(

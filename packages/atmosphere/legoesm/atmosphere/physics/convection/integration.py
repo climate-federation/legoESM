@@ -111,7 +111,7 @@ from legoesm.atmosphere.physics._shared import (
     zero_like_tracers,
 )
 from legoesm.core.operators_3d import divergence_3d as _div3_cs
-from legoesm.core.operators_voronoi import divergence_cell_3d
+from legoesm.core.operators_voronoi import cell_to_edge_avg, divergence_cell_3d
 from legoesm.core.operators_latlon_3d import divergence_3d as _div3_latlon
 from legoesm.grids.gaussian import sh_analysis_3d, vordiv_from_uv_3d
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
@@ -307,7 +307,8 @@ def diagnose_w_grid_columns_hydrostatic(
     """
     ncol, nlev = T_col.shape
     omega_col = diagnose_omega_columns_hydrostatic(
-        u_grid, v_grid, p_s, grid, sigma_coord, ncol, nlev)
+        u_grid, v_grid, p_s, grid, sigma_coord, ncol, nlev,
+        full_continuity=False)
     if omega_col is not None:
         return diagnose_grid_w_from_omega(
             omega_col, T_col, p_full_col, q_v_col,
@@ -318,24 +319,49 @@ def diagnose_w_grid_columns_hydrostatic(
 
 
 def diagnose_omega_columns_hydrostatic(u_grid, v_grid, p_s, grid, sigma_coord,
-                                       ncol, nlev, *, voronoi=False):
-    """Resolved pressure velocity omega [Pa/s], ``(ncol, nlev)``, by the
-    sigma continuity of :func:`diagnose_w_grid_columns_hydrostatic`; ``None``
-    on grids without a divergence operator here (or without ``v``).
-    ``voronoi=True`` adds the MPAS cell divergence of the edge-normal ``u``.
-    Exact for a pure sigma coordinate only (callers needing omega on a hybrid
-    coordinate must refuse it)."""
-    div_grid = None
-    if voronoi and hasattr(grid, "edgesOnCell"):
-        div_grid = divergence_cell_3d(u_grid, grid)
-    elif isinstance(grid, CubedSphereGrid):
-        if v_grid is not None:
-            div_grid = _div3_cs(u_grid, v_grid, grid)
-    elif hasattr(grid, "dlat") and hasattr(grid, "dlon"):
-        if v_grid is not None:
-            div_grid = _div3_latlon(u_grid, v_grid, grid)
-    if div_grid is None:
+                                       ncol, nlev, *, voronoi=False,
+                                       full_continuity):
+    """Resolved pressure velocity omega [Pa/s], ``(ncol, nlev)``, by sigma
+    continuity; ``None`` on grids without a divergence operator here (or
+    without ``v``).  ``voronoi=True`` adds the MPAS cell divergence of the
+    edge-normal ``u``.  Exact for a pure sigma coordinate only (callers
+    needing omega on a hybrid coordinate must refuse it).
+
+    ``full_continuity=True`` is the sigma-coordinate omega::
+
+        D_k     = div(p_s v_k) / p_s
+        dp_s/dt = -p_s sum_k D_k dsigma_k / (1 - sigma_top)
+        omega_k = sigma_k (dp_s/dt + v_k.grad p_s) + p_s sigmadot_k
+
+    with ``v_k.grad p_s = div(p_s v_k) - p_s div(v_k)`` (MPAS: edge p_s is
+    the mean of the edge's two cells).  ``False`` is the constant-p_s form
+    (``D_k = div v_k``, no ``v.grad p_s``) Kain-Fritsch's w still uses
+    (reported, not changed here).
+    """
+    ps3 = p_s[..., None]
+
+    def _div(fu, fv):
+        if voronoi and hasattr(grid, "edgesOnCell"):
+            return divergence_cell_3d(fu, grid)
+        if isinstance(grid, CubedSphereGrid):
+            return None if fv is None else _div3_cs(fu, fv, grid)
+        if hasattr(grid, "dlat") and hasattr(grid, "dlon"):
+            return None if fv is None else _div3_latlon(fu, fv, grid)
         return None
+
+    div_v = _div(u_grid, v_grid)
+    if div_v is None:
+        return None
+    vgrad_ps = None
+    div_grid = div_v
+    if full_continuity:
+        if voronoi and hasattr(grid, "edgesOnCell"):
+            ps_u = cell_to_edge_avg(p_s, grid)[:, None] * u_grid
+            div_psv = _div(ps_u, None)
+        else:
+            div_psv = _div(ps3 * u_grid, ps3 * v_grid)
+        vgrad_ps = div_psv - ps3 * div_v
+        div_grid = div_psv / ps3
     sigma_top = sigma_coord.sigma_half[0]
     # Iter-55: share the cumsum between σ̇ and ``D_total`` (mirrors
     # iter-52/53 in the dycores).  Saves one cross-shard reduction
@@ -347,6 +373,8 @@ def diagnose_omega_columns_hydrostatic(u_grid, v_grid, p_s, grid, sigma_coord,
     omega_grid = compute_pressure_velocity(
         sigma_dot_grid, p_s, dp_s_dt_grid, sigma_coord,
     )
+    if vgrad_ps is not None:
+        omega_grid = omega_grid + sigma_coord.sigma_full * vgrad_ps
     return omega_grid.reshape(ncol, nlev)
 
 
@@ -849,7 +877,7 @@ def _make_hydrostatic_convection(
                     _omega = diagnose_omega_columns_hydrostatic(
                         state.u.data, None if state.v is None else state.v.data,
                         state.p_s.data, grid, sigma_coord, ncol, nlev,
-                        voronoi=True)
+                        voronoi=True, full_continuity=True)
                 if _omega is None:
                     raise ValueError(
                         "convection='tiedtke' needs the resolved pressure "

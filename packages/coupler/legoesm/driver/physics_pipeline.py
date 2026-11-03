@@ -1605,7 +1605,7 @@ class PhysicsPipeline:
                 _omega = (None if self._grid is None else
                           diagnose_omega_columns_hydrostatic(
                               u, v, p_s, self._grid, self._sigma_coord,
-                              ad.ncol, nlev))
+                              ad.ncol, nlev, full_continuity=True))
                 if _omega is None:
                     raise ValueError(
                         "convection='tiedtke' needs the resolved pressure "
