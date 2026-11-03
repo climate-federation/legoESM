@@ -47,7 +47,7 @@ def _rel(a, b):
     return np.where(den > 0, np.abs(a - b) / np.where(den > 0, den, 1.0), 0.0)
 
 
-def _port(fx):
+def _port(fx, **kw):
     T_sfc = jnp.asarray(fx["sst_m"] + fx["rt0"])
     q = jnp.asarray(fx["humi"])
     slp = jnp.asarray(fx["slp"])
@@ -56,22 +56,21 @@ def _port(fx):
         jnp.asarray(fx["tair"]), q, slp)
     Cd, Ch, Ce, _ = bf.ncar_transfer_coefficients(
         theta_air, q, bf.exner_potential_temperature(T_sfc, slp), ssq,
-        jnp.asarray(fx["wndm"]))
+        jnp.asarray(fx["wndm"]), **kw)
     _, _, sh, _, ev = bf.air_sea_fluxes(
         jnp.asarray(fx["wndi"]), jnp.asarray(fx["wndj"]),
         jnp.asarray(fx["tair"]), q, T_sfc, rho_air=jnp.asarray(fx["rhoa"]),
-        slp_Pa=slp)
+        slp_Pa=slp, **kw)
     return dict(Cd=Cd, Ch=Ch, Ce=Ce, psen=sh, pevp=ev,
                 theta_air_zt=theta_air, zpre_zt=p10)
 
 
 @pytest.mark.parametrize("width", [0.0, None])
 def test_bulk_matches_nemo_on_negative_and_supersaturated_humidity(
-        fx, monkeypatch, width):
+        fx, width):
     assert int(fx["d2"].sum()) == 200 and int((fx["d3"] & ~fx["d2"]).sum()) == 200
-    if width is not None:          # hard NEMO MAX (vote B3)
-        monkeypatch.setattr(bf, "_ZU_FLOOR_REL_WIDTH", width)
-    got = _port(fx)
+    # width 0.0 = NEMO's hard MAX (vote B3); None = production default.
+    got = _port(fx, **({} if width is None else {"zu_floor_rel_width": width}))
     groups = (("d2", fx["d2"]), ("d3_only", fx["d3"] & ~fx["d2"]),
               ("ordinary", ~fx["d2"] & ~fx["d3"]))
     for name, val in got.items():
@@ -81,23 +80,34 @@ def test_bulk_matches_nemo_on_negative_and_supersaturated_humidity(
             assert err[m].max() <= tol, (name, label, float(err[m].max()), tol)
 
 
-def test_zu_floor_is_c1_and_exact_outside_band():
-    f = bf._Q_ZU_FLOOR_KG_KG
-    w = bf._ZU_FLOOR_REL_WIDTH * f
-    qs = jnp.asarray([-1e-5, f - 0.5 * w, f + 0.5 * w, f + w, 3e-3])
-    _, q_zu = bf.nemo_zu_air_state(jnp.full_like(qs, 280.0), qs)
-    q_zu = np.asarray(q_zu)
-    assert q_zu[0] == f and q_zu[1] == f
-    assert f < q_zu[2] < f + 0.5 * w
-    assert q_zu[3] == float(qs[3]) and q_zu[4] == float(qs[4])
-    g = jax.vmap(jax.grad(lambda q: bf.nemo_zu_air_state(280.0, q)[1]))(qs)
-    g = np.asarray(g)
+@pytest.mark.parametrize("floor, which", [
+    (bf._Q_ZU_FLOOR_KG_KG, 1), (bf._T_ZU_FLOOR_K, 0)])
+def test_zu_floors_are_c1_and_exact_outside_band(floor, which):
+    """Both floors (q 1e-6, theta 180 K): exact outside [f, f + w], C1 blend
+    inside whose shortfall below MAX is at most 4w/27, finite gradients that
+    match finite differences inside the band.  No ORCA1 cell falls inside
+    either band, so this synthetic case is what covers the blend."""
+    w = bf._ZU_FLOOR_REL_WIDTH * floor
+    xs = jnp.asarray([floor - 10 * w, floor - 0.5 * w, floor + w / 3,
+                      floor + 0.5 * w, floor + w, floor + 1e3 * w])
+
+    def f(x):
+        args = (x, 1e-3) if which == 0 else (280.0, x)
+        return bf.nemo_zu_air_state(*args)[which]
+
+    y = np.asarray(jax.vmap(f)(xs))
+    hard = np.maximum(np.asarray(xs), floor)
+    assert y[0] == floor and y[1] == floor
+    assert y[4] == float(xs[4]) and y[5] == float(xs[5])
+    gap = hard - y
+    assert np.all(gap >= 0.0) and gap.max() <= 4.0 * w / 27.0 * (1 + 1e-12)
+    g = np.asarray(jax.vmap(jax.grad(f))(xs))
     assert np.all(np.isfinite(g))
-    assert g[0] == 0.0 and g[4] == 1.0 and g[2] > 0.0   # C1 blend slope peaks at 4/3
-    q0, h = f + 0.5 * w, 1e-3 * w
-    fd = (float(bf.nemo_zu_air_state(280.0, q0 + h)[1])
-          - float(bf.nemo_zu_air_state(280.0, q0 - h)[1])) / (2 * h)
-    assert abs(g[2] / fd - 1.0) < 1e-4
+    assert g[0] == 0.0 and g[5] == 1.0 and g[2] > 0.0 and g[3] > 0.0
+    for k in (2, 3):
+        x0, h = float(xs[k]), 1e-4 * w
+        fd = (float(f(jnp.asarray(x0 + h))) - float(f(jnp.asarray(x0 - h)))) / (2 * h)
+        assert abs(g[k] / fd - 1.0) < 1e-4
 
 
 def test_flux_gradient_finite_through_negative_humidity(fx):

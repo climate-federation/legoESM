@@ -112,7 +112,8 @@ _ZETA_ABS_MAX: float = 10.0    # NEMO |z/L| cap
 _Q_ZU_FLOOR_KG_KG: float = 1.0e-6  # NEMO turb_ncar q_zu = MAX(q_zt, 1e-6)
 _T_ZU_FLOOR_K: float = 180.0      # NEMO turb_ncar t_zu = MAX(t_zt, 180)
 # Legacy-path smoothing of the two floors (repo rule: differentiable limits,
-# transition width 1 % of the floor value). 0.0 = NEMO's hard MAX.
+# transition width 1 % of the floor value; default of the zu_floor_rel_width
+# keyword). 0.0 = NEMO's hard MAX.
 _ZU_FLOOR_REL_WIDTH: float = 0.01
 _ONE_ON_L_ABS_MAX: float = 200.0  # NEMO One_on_L |1/L| cap [1/m]
 _RHO_AIR_FLOOR: float = 0.8    # NEMO rho_air floor [kg/m^3]
@@ -518,31 +519,35 @@ def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
     return Cd, Ch, Ce, Ub, theta_zu, q_zu
 
 
-def _zu_floor(x, floor):
+def _zu_floor(x, floor, rel_width):
     """NEMO ``MAX(x, floor)`` made C1: exact ``x`` for ``x >= floor + w`` and
-    ``floor`` for ``x <= floor``, with ``w = _ZU_FLOOR_REL_WIDTH * floor`` and
-    the :func:`positive_part_c1` blend in between.  ``_ZU_FLOOR_REL_WIDTH =
-    0`` gives the hard NEMO form (oracle tests only)."""
+    ``floor`` for ``x <= floor``, with ``w = rel_width * floor`` and the
+    :func:`positive_part_c1` blend in between (shortfall below MAX at most
+    4w/27).  ``rel_width = 0`` gives the hard NEMO form (oracle tests only)."""
     x = jnp.asarray(x, dtype=jnp.float64)
-    width = _ZU_FLOOR_REL_WIDTH * floor
+    width = float(rel_width) * floor
     if width == 0.0:
         return jnp.maximum(x, floor)
     return jnp.where(x >= floor + width, x,
                      floor + positive_part_c1(x - floor, 1.0 / width))
 
 
-def nemo_zu_air_state(theta_air_K, q_air):
+def nemo_zu_air_state(theta_air_K, q_air, *,
+                      zu_floor_rel_width: float = _ZU_FLOOR_REL_WIDTH):
     """NEMO ``turb_ncar`` air state at ``zu`` for ``zt == zu``:
     ``t_zu = MAX(t_zt, 180)``, ``q_zu = MAX(q_zt, 1e-6)``
     (sbcblk_algo_ncar.F90 after the first guess).  CORE-II humidity has
     negative values (1,201 ORCA1 wet cells on the tier-3 step), so the floor
-    binds; q_zu then feeds 1/L, dq, evaporation and cp_air."""
-    return (_zu_floor(theta_air_K, _T_ZU_FLOOR_K),
-            _zu_floor(q_air, _Q_ZU_FLOOR_KG_KG))
+    binds; q_zu then feeds 1/L, dq, evaporation and cp_air.
+    ``zu_floor_rel_width`` (static float) is the C1 transition width as a
+    fraction of each floor; 0 = NEMO's hard MAX."""
+    return (_zu_floor(theta_air_K, _T_ZU_FLOOR_K, zu_floor_rel_width),
+            _zu_floor(q_air, _Q_ZU_FLOOR_KG_KG, zu_floor_rel_width))
 
 
 def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
-                               wind_speed, *, nb_iter: int = _NB_ITER_NCAR):
+                               wind_speed, *, nb_iter: int = _NB_ITER_NCAR,
+                               zu_floor_rel_width: float = _ZU_FLOOR_REL_WIDTH):
     """Legacy/public coefficient interface.
 
     The first-guess stability uses the RAW ``theta``/``q`` (NEMO ``t_zt``/
@@ -563,7 +568,8 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
     Ch = _ch_n10(sqrt_CdN, stable)
     Ce = _ce_n10(sqrt_CdN)
     sqrt_Cd = sqrt_CdN
-    theta_zu, q_zu = nemo_zu_air_state(theta, q)
+    theta_zu, q_zu = nemo_zu_air_state(
+        theta, q, zu_floor_rel_width=zu_floor_rel_width)
     d_theta = theta_zu - sst
     d_q = q_zu - ssq
     for _ in range(int(nb_iter)):
@@ -1553,7 +1559,8 @@ def nemo_sbc_ice_if(ice_cover, sss_m, sst_m, ts_surface, ff_f,
 def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
                    rho_air=None, *, slp_Pa=None, algo: str = "ncar",
                    nb_iter: int = _NB_ITER_NCAR, L_latent=None,
-                   u_oce=None, v_oce=None, vfac: float = 0.0):
+                   u_oce=None, v_oce=None, vfac: float = 0.0,
+                   zu_floor_rel_width: float = _ZU_FLOOR_REL_WIDTH):
     """Open-ocean bulk fluxes ``(tau_x, tau_y, shflx, lhflx, evap)``.
 
     Sign conventions: ``shflx``/``lhflx`` > 0 add heat to the ocean;
@@ -1594,6 +1601,10 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
         float, resolved at trace time).  ``0.0`` (default) is BYTE-IDENTICAL to
         the absolute-wind behaviour: the current is never touched (no float op),
         so an existing caller is unchanged.  ``1.0`` = full feedback.
+    zu_floor_rel_width : float
+        NCAR only: C1 transition width of the NEMO ``t_zu``/``q_zu`` floors
+        as a fraction of each floor (numerics, not tunable); ``0.0`` = NEMO's
+        hard MAX (oracle tests).
     """
     if algo not in _VALID_OMIP_BULK_ALGOS:
         raise ValueError(
@@ -1653,6 +1664,7 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
     theta_sst = exner_potential_temperature(sst, slp_for_sst)
     Cd, Ch, Ce, Ub = ncar_transfer_coefficients(
         theta_air, q_a, theta_sst, ssq, wind_speed, nb_iter=nb_iter,
+        zu_floor_rel_width=zu_floor_rel_width,
     )
     rho = rho_air_moist(T_air, q_a, p10) if rho_air is None else jnp.asarray(
         rho_air, dtype=jnp.float64)
@@ -1661,7 +1673,8 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
     tau_y = -Urho * Cd * v_rel
     L_vap = latent_heat_vaporization_sst(theta_sst)
     # NEMO BULK_FORMULA takes theta_zu/q_zu (the turb_ncar floors).
-    theta_zu, q_zu = nemo_zu_air_state(theta_air, q_a)
+    theta_zu, q_zu = nemo_zu_air_state(
+        theta_air, q_a, zu_floor_rel_width=zu_floor_rel_width)
     z_evap = Urho * Ce * (q_zu - ssq)
     shflx = Urho * Ch * (theta_zu - theta_sst) * moist_air_cp(q_zu)
     lhflx = L_vap * z_evap
