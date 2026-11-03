@@ -289,6 +289,22 @@ def cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backe
           f"(radius moved {rows['Nc x2']['reff'] * 1e6:.2f} -> {rows['Nc x0.5']['reff'] * 1e6:.2f} um)")
     return 0
 
+def use_checkpoint_terrain():
+    """#2303, THIS PROBE ONLY: the relaunch adopts the restored state's terrain
+    as its terrain product instead of refusing the restart (the rebuilt product
+    differs from the stored phis by up to 7.1e-2 m2/s2 on land; cause open).
+    The difference is printed; the production restart gate is not changed."""
+    import legoesm.driver.model_driver as md
+
+    def adopt(self):
+        st = np.asarray(self.state.phis.data)
+        d = float(np.max(np.abs(st.astype(np.float64) - np.asarray(self._phis_data, np.float64))))
+        print(f"use-checkpoint-terrain: rebuilt vs stored phis max|d| {d:.3e} m2/s2; "
+              "adopting the stored field", flush=True)
+        self._phis_data = self.state.phis.data.astype(self._phis_data.dtype)
+    md.ModelDriver._check_restart_terrain = adopt
+
+
 def era5_snapshot_on_cells(swap_dir, day, cell_lat, cell_lon, origin):
     """#2303: ERA5 00-UTC T, q and surface pressure of snapshot ``day``
     (``era5_prep.sbatch`` output: cdo ``setgridtype,regular`` of the N320
@@ -569,6 +585,9 @@ def main(argv=None):
                     help="#2303: with --rlutcs-replay, REPLACE T / q_v per column by the ERA5 "
                          "00-UTC snapshot of --day in DIR (era5_snapshot_on_cells) instead of "
                          "the global-mean bias profile")
+    ap.add_argument("--use-checkpoint-terrain", action="store_true",
+                    help="#2303 probe only: adopt the checkpoint's stored terrain instead of "
+                         "refusing a restart whose rebuilt terrain differs")
     ap.add_argument("--swap-json", default=None, help="write the --era5-swap global means here")
     ap.add_argument("--swap-origin", default=None,
                     help="UTC datetime of model day 0 (e.g. 1979-01-01T00:00); the ERA5 files "
@@ -676,6 +695,8 @@ def main(argv=None):
         raise H._Captured()
     combined.make_physics = spy_make_physics
     MPASPrimitiveEquationModel.step = spy_step
+    if args.use_checkpoint_terrain:
+        use_checkpoint_terrain()
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "run"))
     import run_amip
     try:

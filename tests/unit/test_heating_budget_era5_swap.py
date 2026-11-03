@@ -74,3 +74,17 @@ def test_snapshot_refuses_wrong_date(tmp_path):
                coords=c).to_netcdf(tmp_path / "sf134_day5.nc")
     with pytest.raises(SystemExit, match="snapshot time"):
         hb.era5_snapshot_on_cells(tmp_path, 5, np.zeros(1), np.zeros(1), "1979-01-01")
+
+
+def test_use_checkpoint_terrain_adopts_stored_phis(monkeypatch, capsys):
+    jnp = pytest.importorskip("jax.numpy")
+    import types
+    import legoesm.driver.model_driver as md
+    monkeypatch.setattr(md.ModelDriver, "_check_restart_terrain", lambda self: None)
+    hb.use_checkpoint_terrain()
+    drv = types.SimpleNamespace(state=types.SimpleNamespace(
+        phis=types.SimpleNamespace(data=jnp.asarray([1.0, 2.5]))),
+        _phis_data=jnp.asarray([1.0, 2.0]))
+    md.ModelDriver._check_restart_terrain(drv)
+    np.testing.assert_array_equal(np.asarray(drv._phis_data), [1.0, 2.5])
+    assert "max|d| 5.000e-01" in capsys.readouterr().out
