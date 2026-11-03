@@ -1086,14 +1086,15 @@ def mg2_droplet_psd(q_c_ic, N_c_ic, rho, *, number_cap_log_width=0.0,
     return active, pgam, lam, lam ** 3 * q_safe / shape
 
 
-def mg2_size_dist_liq(q_c_ic, N_c_ic, rho):
+def mg2_size_dist_liq(q_c_ic, N_c_ic, rho, **widths):
     """MG2 ``size_dist_param_liq`` (micro_mg_utils.F90:376-422):
     ``(N_c_ic_adjusted, pgam, lamc)`` with the number per-VOLUME, see
     :func:`mg2_size_bounded_nc`.  ``lamc`` is the slope clipped to
     ``(pgam+1)/[50 um, 2 um]``; where ``qcic <= qsmall`` MG2 sets ``pgam=-100``
-    and ``lamc=0`` and so does this.
+    and ``lamc=0`` and so does this.  ``widths``: the RULE 5 widths of
+    :func:`mg2_droplet_psd` (none = MG2's hard clip).
     """
-    active, pgam, lam, nc_kg = mg2_droplet_psd(q_c_ic, N_c_ic, rho)
+    active, pgam, lam, nc_kg = mg2_droplet_psd(q_c_ic, N_c_ic, rho, **widths)
     return (jnp.where(active, nc_kg * rho, N_c_ic),
             jnp.where(active, pgam, _MG2_PGAM_UNSET),
             jnp.where(active, lam, 0.0))
@@ -1108,17 +1109,34 @@ def mg2_size_bounded_nc(q_c_ic, N_c_ic, rho, **widths):
     return jnp.where(active, nc_kg * rho, N_c_ic)
 
 
-def mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho, *, presence_top):
+def mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho, *, presence_top, **widths):
     """MG2 droplet ``(fc, fnc)`` [Pa/s per unit mixing ratio] (micro_mg2_0.F90:
     2056-2120): ``g rho`` x the mass- / number-weighted Stokes fall speed of the
     in-cloud size distribution of the grid state ``(q_c, N_c_kg)``; 0 where the
-    in-cloud water is below qsmall, switched on by :func:`mg2_presence`."""
+    in-cloud water is below qsmall, switched on by :func:`mg2_presence`.
+
+    ``widths``: the RULE 5 widths of the size reset (:func:`mg2_droplet_psd`;
+    none = MG2's hard clip), ``MorrisonConfig.mg2_drop_sed_reset_log_width``
+    in the model.  KNOWN DIFFERENCE (#2216): at a width > 0 the slope lamc of
+    cells within a few widths (in ln lambda) of a bound moves inward too, so
+    their fall speeds differ from MG2's; the 2 um bound holds for every width
+    (50 um is passed by at most w*ln(1 + 25**(-1/w)) in ln D, see
+    :func:`mg2_droplet_number_readjust`).  Measured at the default 0.01 on the
+    prognostic-number oracle fixtures (x64, every other switch hard): the
+    whole-call droplet tendency moves by up to 1.7e-5 and the cloud-water
+    sedimentation by up to 3.0e-4 of the column's largest MG2 value; per-column
+    tables GAP / GAP_QC in tests/atmosphere/microphysics/unit/
+    test_morrison_mg2_sed_reset_smooth.py.  Production (specified droplet
+    number) never calls this: gap 0.  Prognostic arm, offline, one step on
+    jan1979_main1027 days 10/20/30 (#2216): mass-weighted q_c and N_c
+    sedimentation, cloud-water and droplet-number change move by <= 1.7e-5
+    relative (global, SO 40-65S; 950-700 hPa and column)."""
     g = constants.g
     has_c = q_c / lcldm >= MG2_QSMALL
     on = mg2_presence(q_c / lcldm, presence_top)
     q_ic = jnp.where(has_c, q_c / lcldm, 0.0)
     n_ic = jnp.where(has_c, jnp.maximum(N_c_kg / lcldm, 0.0), 0.0)
-    _, pgam, lamc = mg2_size_dist_liq(q_ic, n_ic * rho, rho)
+    _, pgam, lamc = mg2_size_dist_liq(q_ic, n_ic * rho, rho, **widths)
     # MG2 gates the fall speed at qcic >= qsmall but the size distribution at
     # qcic > qsmall, so qcic == qsmall exactly divides by lamc = 0 there (inf
     # in the Fortran too); such a cell falls at 0 here.
@@ -1135,7 +1153,7 @@ def mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho, *, presence_top):
 
 
 def mg2_cloud_sedimentation(q_c, N_c_kg, lcldm, T, rho, p_half, dt, n_substeps_max, *,
-                            presence_top):
+                            presence_top, **widths):
     """CAM6 MG2 cloud-droplet sedimentation (micro_mg2_0.F90:2056-2120,
     :2204-2216, :2319-2377) on the POST-process grid state.
 
@@ -1152,11 +1170,13 @@ def mg2_cloud_sedimentation(q_c, N_c_kg, lcldm, T, rho, p_half, dt, n_substeps_m
     ``(1-d) F(k-1)`` falling into clear air evaporates (vapour source, latent
     cooling ``L_v/c_pd``).  Returns ``(dq_c, dN_c_kg, dq_v, dT, sfc_flux,
     nstep_required)`` [kg/kg/s, 1/(kg s), kg/kg/s, K/s, kg/(m^2 s), int].
+    ``widths``: the size reset's RULE 5 widths, see
+    :func:`mg2_droplet_fall_coefficients` (none = MG2's hard clip).
     """
     g = constants.g
     pdel = p_half[:, 1:] - p_half[:, :-1]
     fc, fnc = mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho,
-                                            presence_top=presence_top)
+                                            presence_top=presence_top, **widths)
     c0 = q_c
     n0 = mg2_presence(q_c, presence_top) * jnp.maximum(N_c_kg, 0.0)
     courant = jnp.max(jnp.maximum(fc, fnc) / pdel, axis=1) * dt
@@ -1886,7 +1906,7 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt, fact=1.0):
 
 
 def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0, nc_floor=True,
-                               size_reset=True):
+                               size_reset=True, **widths):
     """CAM6 MG2 KK2000 autoconversion (``kk2000_liq_autoconversion``,
     micro_mg_utils.F90:689-736, CAM6 default ``microp_uniform=.false.``)::
 
@@ -1915,7 +1935,9 @@ def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0, nc_floor=Tru
     as is wherever the law is evaluated (``q_c >= icsmall``, where the reset
     makes it positive) and replaced by 1 only in the masked branch.
     ``size_reset=False``: ``N_c_eff`` already carries MG2's one reset (the
-    caller shares it with every liquid sink, micro_mg2_0.F90:1296).  ``fact`` =
+    caller shares it with every liquid sink, micro_mg2_0.F90:1296).  ``widths``:
+    the RULE 5 widths of that reset (:func:`mg2_droplet_psd`; none = MG2's
+    hard clip).  ``fact`` =
     ``MorrisonConfig.autocon_fact``.  Returns ``(dq_c_au, dN_r_au, x_c)`` like
     :func:`autoconversion_kk2000`.
     """
@@ -1924,7 +1946,7 @@ def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0, nc_floor=Tru
     # MG2 resets ncic to the [2, 50] um mean-size window before the law
     # (size_dist_param_liq, called at micro_mg2_0.F90:1296 before :1306).
     if size_reset:
-        N_c_eff = mg2_size_bounded_nc(q_c_ic, N_c_eff, rho)
+        N_c_eff = mg2_size_bounded_nc(q_c_ic, N_c_eff, rho, **widths)
     if nc_floor:
         N_c_eff = jnp.clip(N_c_eff, 1.0)
     else:

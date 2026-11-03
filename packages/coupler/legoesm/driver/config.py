@@ -2174,6 +2174,15 @@ class ExperimentConfig(NamedTuple):
     # droplet mean-size readjust (prognostic droplet number only); 0 = MG2's
     # hard clip.  Range [0, 1], checked in validate_strict.
     morrison_mg2_drop_readjust_log_width: float = 0.01
+    # MorrisonConfig.mg2_drop_early_reset_log_width: RULE 5 width of MG2's
+    # early droplet size reset (before autoconversion; both droplet-number
+    # paths: read by the kk2000_cam6 autoconversion and the MG2 snow riming);
+    # 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
+    morrison_mg2_drop_early_reset_log_width: float = 0.01
+    # MorrisonConfig.mg2_drop_sed_reset_log_width: RULE 5 width of MG2's
+    # droplet size reset in the sedimentation fall speeds (prognostic droplet
+    # number only); 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
+    morrison_mg2_drop_sed_reset_log_width: float = 0.01
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -4491,20 +4500,39 @@ class ExperimentConfig(NamedTuple):
                 "column lane: no other lane carries the snow number N_s; got "
                 f"grid_type={g.grid_type!r}, discretization={d.discretization!r}, "
                 f"column_lane={d.column_lane}")
-        _rw = self.morrison_mg2_drop_readjust_log_width
-        if (isinstance(_rw, bool) or not isinstance(_rw, (int, float))
-                or not math.isfinite(_rw) or not 0.0 <= _rw <= 1.0):
-            errors.append(
-                f"morrison_mg2_drop_readjust_log_width must be a finite float in "
-                f"[0, 1] (0 = MG2's hard clip), got {_rw!r}")
-        elif (_rw != ExperimentConfig._field_defaults[
-                "morrison_mg2_drop_readjust_log_width"]
-                and not (self.microphysics == "morrison"
-                         and self.morrison_prognostic_droplet_number is True)):
-            errors.append(
-                f"morrison_mg2_drop_readjust_log_width={_rw} is read only with "
-                "microphysics='morrison' and morrison_prognostic_droplet_number="
-                "True (it would be silently inert)")
+        # Where each width is read: the readjust and the sedimentation reset on
+        # the prognostic droplet number only; the early reset by the
+        # kk2000_cam6 autoconversion (both droplet-number paths) and the MG2
+        # snow riming (warm_rain_incloud, which needs the MPAS / FV3-duo
+        # column lane that carries N_s).
+        _morr = self.microphysics == "morrison"
+        _reads = {   # (is it read, where), evaluated only for a non-default value
+            "morrison_mg2_drop_readjust_log_width": (
+                lambda: _morr and self.morrison_prognostic_droplet_number is True,
+                "microphysics='morrison' and morrison_prognostic_droplet_number=True"),
+            "morrison_mg2_drop_early_reset_log_width": (
+                lambda: _morr and (self.morrison_warm_rain_incloud is True
+                           or _resolve_wrs(MorrisonConfig(
+                               morrison_flavor=self.morrison_flavor,
+                               warm_rain_scheme=self.morrison_warm_rain_scheme))
+                           == "kk2000_cam6"),
+                "microphysics='morrison' and the kk2000_cam6 warm-rain scheme or "
+                "morrison_warm_rain_incloud=True"),
+            "morrison_mg2_drop_sed_reset_log_width": (
+                lambda: _morr and self.morrison_prognostic_droplet_number is True,
+                "microphysics='morrison' and morrison_prognostic_droplet_number=True"),
+        }
+        for _rn, (_read, _where) in _reads.items():
+            _rw = getattr(self, _rn)
+            if (isinstance(_rw, bool) or not isinstance(_rw, (int, float))
+                    or not math.isfinite(_rw) or not 0.0 <= _rw <= 1.0):
+                errors.append(
+                    f"{_rn} must be a finite float in "
+                    f"[0, 1] (0 = MG2's hard clip), got {_rw!r}")
+            elif _rw != ExperimentConfig._field_defaults[_rn] and not _read():
+                errors.append(
+                    f"{_rn}={_rw} is read only with {_where} "
+                    "(it would be silently inert)")
         if self.morrison_prognostic_droplet_number is True and not self.cam6_aerosol_dir:
             # user decision 2026-10-24, 3
             errors.append(

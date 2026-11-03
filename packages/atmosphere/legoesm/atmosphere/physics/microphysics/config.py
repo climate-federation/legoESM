@@ -199,6 +199,8 @@ __param_spec__ = {
             "mg2_presence_ramp_top": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_frozen_rain_ice_ramp_frac": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_drop_readjust_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_drop_early_reset_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_drop_sed_reset_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -1202,6 +1204,21 @@ class MorrisonConfig(NamedTuple):
     # (#2216, codex + GLM 2026-11-01; KNOWN DIFFERENCE in
     # _warm_rain.mg2_droplet_number_readjust).
     mg2_drop_readjust_log_width: float = 0.01
+    # RULE 5 smoothing of MG2's EARLY droplet size reset (size_dist_param_liq
+    # before autoconversion, micro_mg2_0.F90:1296; its number and PSD feed
+    # every droplet sink and snow riming), at every call site on BOTH droplet-
+    # number paths (prognostic, and the specified number production runs:
+    # autoconversion + snow riming): same LogSumExp form and default as the
+    # readjust; 0 = MG2's hard clip (#2216, user 2026-11-01; KNOWN DIFFERENCE
+    # at the morrison.py calls).
+    mg2_drop_early_reset_log_width: float = 0.01
+    # RULE 5 smoothing of MG2's droplet size reset inside the SEDIMENTATION
+    # fall-speed coefficients (size_dist_param_liq, micro_mg2_0.F90:2056-2120;
+    # prognostic droplet number only, the only path that sediments droplets):
+    # same LogSumExp form and default as the early reset; 0 = MG2's hard clip
+    # (#2216, user 2026-11-01; KNOWN DIFFERENCE in
+    # _warm_rain.mg2_droplet_fall_coefficients).
+    mg2_drop_sed_reset_log_width: float = 0.01
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,

@@ -47,7 +47,8 @@ HARD_LIMIT = dict(
     cam_qsat_cap_sharpness=math.inf,
     mg2_ice_slope_log_width=0.0, mg2_qi_limit_width=0.0,
     mg2_presence_ramp_top=1.0e-18, mg2_frozen_rain_ice_ramp_frac=0.0,
-    mg2_drop_readjust_log_width=0.0)
+    mg2_drop_readjust_log_width=0.0, mg2_drop_early_reset_log_width=0.0,
+    mg2_drop_sed_reset_log_width=0.0)
 
 
 def _fx():
