@@ -1,18 +1,57 @@
 #!/usr/bin/env python3
-"""CPU-fp64 value-and-grad probe for one active mixed-ice O17 deck step."""
+"""CPU-fp64 value-and-grad probe and prefix/slice/pass compile diagnostics for O17."""
 
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
+from datetime import datetime
 import json
-import resource
-import time
+import os
 from pathlib import Path
+import re
+import resource
+import subprocess
+import sys
+import time
+from typing import Any, Iterable, Sequence
+
+
+def _preconfigure_xla_logging(argv: list[str]) -> Path | None:
+    """Enable C++ XLA pass/compiler VLOG before jaxlib initializes if --xla-pass-log is set."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--xla-pass-log", type=Path)
+    parser.add_argument("--vmodule", type=str, default=None)
+    known, _ = parser.parse_known_args(argv)
+    if known.xla_pass_log is None:
+        return None
+    resolved = str(known.xla_pass_log.resolve())
+    if resolved == "/tmp" or resolved.startswith("/tmp/"):
+        raise ValueError(f"XLA pass log must not be under /tmp: {known.xla_pass_log}")
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+    vmod = known.vmodule or "hlo_pass_pipeline=1,cpu_compiler=2,buffer_assignment=1,ir_compiler=2"
+    os.environ["TF_CPP_VMODULE"] = vmod
+    # Keep Python's sys.stderr attached to the real stderr fd while silencing C++ fd 2
+    # to /dev/null outside _compile_with_optional_xla_log.
+    real_stderr_fd = os.dup(2)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull_fd, 2)
+    os.close(devnull_fd)
+    sys.stderr = os.fdopen(real_stderr_fd, "w", buffering=1)
+    return known.xla_pass_log
+
+
+if __name__ == "__main__":
+    _PRECONFIGURED_LOG = _preconfigure_xla_logging(sys.argv[1:])
+else:
+    _PRECONFIGURED_LOG = None
 
 import jax
 import jax.numpy as jnp
+from jax.extend import core as jax_core
 import numpy as np
 from legoesm.core.precision import PrecisionPolicy, set_policy
+from legoesm.ice import si3_o17 as o17_module
 from legoesm.ice.dynamics import SI3CGridAEVPForcing, SI3CGridAEVPState, SI3CGridMetrics
 from legoesm.ice.si3_finalize import SI3StressInputs
 from legoesm.ice.si3_o17 import (
@@ -37,9 +76,398 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer imp
     parse_resolved_ice_namelist,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_MASTER = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/oracle_o8_o16_master"
 )
+
+# Canonical execution-order partition of si3_o17_step into N=14 rungs covering
+# all 10 major operators and the 4 inter-rung glue/halo/surface/tail stages.
+# Every function listed in ``funcs`` is called exactly once at the top level of
+# ``si3_o17_step``.
+RUNG_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "k": 1,
+        "name": "o7_blk1_strength",
+        "funcs": (
+            "si3_eos_fzp",
+            "si3_blk_ice_1",
+            "si3_ice_sbc_tau_lbc",
+            "si3_orca2_ice_strength",
+        ),
+        "description": "Entry freezing point, O7 bulk_ice_1 + wind-stress LBC, O5 H79 ice strength",
+    },
+    {
+        "k": 2,
+        "name": "o5_aevp",
+        "funcs": ("si3_orca2_aevp_solver", "si3_cgrid_deformation"),
+        "description": "O5 100-subcycle aEVP rheology solver and C-grid deformation",
+    },
+    {
+        "k": 3,
+        "name": "o4_prather",
+        "funcs": ("si3_dyn_orca2",),
+        "description": "O4 Prather advection (checkpointed 3-subcycle scan)",
+    },
+    {
+        "k": 4,
+        "name": "o6_rdgrft",
+        "funcs": ("si3_ice_dyn_rdgrft",),
+        "description": "O6 ridging and rafting redistribution",
+    },
+    {
+        "k": 5,
+        "name": "o6_ice_cor_dyn",
+        "funcs": ("si3_ice_cor_dyn",),
+        "description": "O6 post-dynamics correction ice_cor(kt, 1)",
+    },
+    {
+        "k": 6,
+        "name": "postdyn_halos_agg",
+        "funcs": ("si3_apply_state_halos_orca2", "si3_var_glo2eqv", "si3_var_agg"),
+        "description": "Post-dynamics full state LBC (69 fields), glo2eqv(2), and var_agg(1)",
+    },
+    {
+        "k": 7,
+        "name": "o7_surface_o8",
+        "funcs": ("si3_ice_alb", "si3_blk_ice_2", "si3_ice_flx_other", "si3_ice_thd_frazil"),
+        "description": "O7 ice albedo, blk_ice_2, flx_other, and O8 frazil",
+    },
+    {
+        "k": 8,
+        "name": "o12_thermo",
+        "funcs": ("_thermo_entries", "si3_ice_thd_o12_stages"),
+        "description": "Thermo category unpack/scatter and O9-O12 category scan + LEV ponds",
+    },
+    {
+        "k": 9,
+        "name": "o13_remap",
+        "funcs": ("si3_ice_itd_rem",),
+        "description": "Category state packing and O13 ITD thickness remapping",
+    },
+    {
+        "k": 10,
+        "name": "o14_open_water",
+        "funcs": ("si3_ice_thd_do",),
+        "description": "Remap scatter and O14 open-water ice growth",
+    },
+    {
+        "k": 11,
+        "name": "o15_cor",
+        "funcs": ("si3_o15_step",),
+        "description": "Open-water scatter and O15 post-thermo correction ice_cor(kt, 2)",
+    },
+    {
+        "k": 12,
+        "name": "thermo_tail",
+        "funcs": ("_thermodynamic_tail",),
+        "description": "Post-ice_cor(kt, 2) ageing, 14 LBC calls, category sum, velocity zeroing",
+    },
+    {
+        "k": 13,
+        "name": "o16_update_flx",
+        "funcs": ("si3_o16_step",),
+        "description": "O16 glo2eqv(2), var_agg(2), and ice_update_flx ocean exchange",
+    },
+    {
+        "k": 14,
+        "name": "o16_update_tau",
+        "funcs": ("si3_ice_update_tau",),
+        "description": "Final ocean-ice stress update ice_update_tau and full-step publication",
+    },
+)
+
+ALL_SINGLE_CALL_FUNCS: tuple[str, ...] = tuple(
+    fn for spec in RUNG_SPECS for fn in spec["funcs"]
+)
+D198_TEN_RUNG_FUNCS: tuple[str, ...] = (
+    "si3_orca2_aevp_solver",
+    "si3_dyn_orca2",
+    "si3_ice_dyn_rdgrft",
+    "si3_ice_cor_dyn",
+    "si3_ice_thd_o12_stages",
+    "si3_ice_itd_rem",
+    "si3_ice_thd_do",
+    "si3_o15_step",
+    "si3_o16_step",
+    "si3_ice_update_tau",
+)
+
+_HLO_INSTR_RE = re.compile(r"^\s+(?:ROOT\s+)?%?[\w\.\-]+\s+=\s+")
+
+
+def _provenance() -> dict[str, Any]:
+    """Stamp git SHA, working-tree cleanliness, CLI flags, and relevant env vars."""
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except Exception:
+        sha = "UNKNOWN"
+    try:
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+    except Exception:
+        dirty = ["UNKNOWN"]
+    env_keys = (
+        "CUDA_VISIBLE_DEVICES",
+        "JAX_PLATFORMS",
+        "JAX_ENABLE_X64",
+        "XLA_FLAGS",
+        "TF_CPP_MIN_LOG_LEVEL",
+        "TF_CPP_VMODULE",
+        "TMPDIR",
+        "PYTHONPATH",
+    )
+    return {
+        "git_sha": sha,
+        "git_dirty_count": len(dirty),
+        "git_dirty_files": dirty[:20],
+        "argv": list(sys.argv),
+        "env": {k: os.environ.get(k) for k in env_keys},
+        "jax_version": getattr(jax, "__version__", "unknown"),
+        "default_backend": jax.default_backend(),
+        "jax_enable_x64": bool(jax.config.jax_enable_x64),
+    }
+
+
+def _count_hlo_text(hlo_text: str) -> dict[str, int]:
+    """Count total HLO instructions, ENTRY instructions, and computations in HLO text."""
+    total_instr = 0
+    entry_instr = 0
+    computations = 0
+    in_entry = False
+    brace_depth = 0
+    for line in hlo_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("//", "/*", "HloModule")):
+            continue
+        if brace_depth == 0 and stripped.endswith("{"):
+            computations += 1
+            in_entry = stripped.startswith("ENTRY ")
+            brace_depth = 1
+            continue
+        if brace_depth > 0:
+            brace_depth += line.count("{") - line.count("}")
+            if _HLO_INSTR_RE.match(line):
+                total_instr += 1
+                if in_entry:
+                    entry_instr += 1
+            if brace_depth <= 0:
+                in_entry = False
+                brace_depth = 0
+    return {
+        "instructions_total": total_instr,
+        "instructions_entry": entry_instr,
+        "computations": computations,
+    }
+
+
+def _nested_jaxprs(value: Any) -> Iterable[jax_core.Jaxpr]:
+    if isinstance(value, jax_core.ClosedJaxpr):
+        yield value.jaxpr
+    elif isinstance(value, jax_core.Jaxpr):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _nested_jaxprs(child)
+    elif isinstance(value, (tuple, list)):
+        for child in value:
+            yield from _nested_jaxprs(child)
+
+
+def _count_jaxpr_equations(closed_jaxpr: jax_core.ClosedJaxpr) -> dict[str, int]:
+    top_eqns = len(closed_jaxpr.jaxpr.eqns)
+    rec_eqns = 0
+
+    def walk(j: jax_core.Jaxpr) -> None:
+        nonlocal rec_eqns
+        for eqn in j.eqns:
+            rec_eqns += 1
+            for child in _nested_jaxprs(eqn.params):
+                walk(child)
+
+    walk(closed_jaxpr.jaxpr)
+    return {"top_eqns": top_eqns, "recursive_eqns": rec_eqns}
+
+
+def _parse_duration_us(text: str) -> float:
+    """Extract microsecond value from '(12345 us)' or fallback to unit conversion."""
+    m = re.search(r"\((\d+)\s*us\)", text)
+    if m:
+        return float(m.group(1))
+    m2 = re.search(r"time:\s*([0-9.]+)\s*(us|ms|s)\b", text)
+    if m2:
+        val = float(m2.group(1))
+        unit = m2.group(2)
+        if unit == "us":
+            return val
+        if unit == "ms":
+            return val * 1e3
+        if unit == "s":
+            return val * 1e6
+    return 0.0
+
+
+def _parse_vlog_timestamp(line: str) -> float | None:
+    """Parse 'I1103 07:34:49.600038 ...' into seconds since midnight (handling day wrap)."""
+    m = re.match(r"^[IWEF](\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2}\.\d+)", line)
+    if not m:
+        return None
+    _month, day, hh, mm, ss = m.groups()
+    return int(day) * 86400.0 + int(hh) * 3600.0 + int(mm) * 60.0 + float(ss)
+
+
+def parse_xla_pass_log(log_path: Path) -> dict[str, Any]:
+    """Parse C++ VLOG from hlo_pass_pipeline, buffer_assignment, cpu_compiler, ir_compiler."""
+    if not log_path.exists():
+        return {"error": f"log file {log_path} does not exist"}
+    lines = log_path.read_text(errors="replace").splitlines()
+    # Locate the last main module compilation (or last 'Running HLO pass pipeline on module')
+    target_module = None
+    for line in lines:
+        m = re.search(r"Running HLO pass pipeline on module ([\w\.\-]+):", line)
+        if m:
+            target_module = m.group(1)
+    # Find the index where target_module's first HLO pass pipeline starts
+    start_idx = 0
+    if target_module:
+        for i, line in enumerate(lines):
+            if f"Running HLO pass pipeline on module {target_module}:" in line:
+                start_idx = i
+                break
+    relevant = lines[start_idx:]
+
+    pass_totals_us: dict[str, float] = defaultdict(float)
+    pass_max_us: dict[str, float] = defaultdict(float)
+    pass_calls: Counter[str] = Counter()
+    subpipeline_totals_us: dict[str, float] = defaultdict(float)
+    # Compound pipeline wrappers whose time is the sum of inner passes
+    compound_pipelines = {
+        "after layout assignment",
+        "simplification after layout assignment",
+        "simplification",
+        "post_scatter_expansion_simplification",
+        "pipeline",
+        "HLO passes through layout assignment",
+        "HLO passes after layout assignment",
+        "hlo normalization",
+        "dot-library-passes",
+        "sharding-removal",
+        "async-collective",
+        "SubbytePacker pipeline",
+    }
+    for line in relevant:
+        m_pipe = re.search(r"Running HLO pass pipeline on module [\w\.\-]+:\s*(.+)$", line)
+        if m_pipe:
+            compound_pipelines.add(m_pipe.group(1).strip())
+
+    first_hlo_ts = None
+    last_hlo_ts = None
+    last_hlo_pass_started = None
+    compile_backend_start_ts = None
+    buf_assign_start_ts = None
+    buf_assign_end_ts = None
+    buffers_to_assign = None
+    total_allocation_str = None
+    llvm_compile_start_ts = None
+    llvm_compile_end_ts = None
+    backend_jit_time_s = None
+    llvm_modules: list[dict[str, Any]] = []
+
+    for line in relevant:
+        ts = _parse_vlog_timestamp(line)
+        if "hlo_pass_pipeline.cc" in line:
+            if first_hlo_ts is None and ts is not None:
+                first_hlo_ts = ts
+            if ts is not None:
+                last_hlo_ts = ts
+            m_start = re.search(r"hlo_pass_pipeline\.cc:\d+\]\s+HLO pass\s+(.+)$", line)
+            if m_start:
+                pname_start = m_start.group(1).strip()
+                if pname_start not in compound_pipelines:
+                    last_hlo_pass_started = pname_start
+            m_done = re.search(r"HLO pass:\s+(.+?)\s+time:\s+(.+)$", line)
+            if m_done:
+                pname = m_done.group(1).strip()
+                dur_us = _parse_duration_us(m_done.group(2))
+                if pname in compound_pipelines:
+                    subpipeline_totals_us[pname] += dur_us
+                else:
+                    pass_totals_us[pname] += dur_us
+                    pass_max_us[pname] = max(pass_max_us[pname], dur_us)
+                    pass_calls[pname] += 1
+        elif "cpu_compiler.cc" in line:
+            if "Compiling: " in line and ts is not None:
+                compile_backend_start_ts = ts
+            elif "Compile LLVM module with" in line and ts is not None:
+                llvm_compile_start_ts = ts
+            elif "Compilation finished" in line and ts is not None:
+                llvm_compile_end_ts = ts
+            elif "for CPU using JIT time:" in line:
+                backend_jit_time_s = round(_parse_duration_us(line) / 1e6, 4)
+        elif "buffer_assignment.cc" in line:
+            if "Assigning buffers to module" in line and ts is not None:
+                buf_assign_start_ts = ts
+            elif "Number of buffers to assign:" in line:
+                m_buf = re.search(r"Number of buffers to assign:\s*(\d+)", line)
+                if m_buf:
+                    buffers_to_assign = int(m_buf.group(1))
+            elif "total allocation:" in line:
+                m_tot = re.search(r"total allocation:\s*(\S+)", line)
+                if m_tot:
+                    total_allocation_str = m_tot.group(1)
+            elif "Buffer assignment done." in line and ts is not None:
+                buf_assign_end_ts = ts
+        elif "ir_compiler.cc" in line and "Compiled LLVM module:" in line:
+            m_ir = re.search(r"Compiled LLVM module:\s*(\S+)\s+time:\s*(.+)$", line)
+            if m_ir:
+                llvm_modules.append(
+                    {
+                        "module": m_ir.group(1),
+                        "seconds": round(_parse_duration_us(m_ir.group(2)) / 1e6, 4),
+                    }
+                )
+
+    top_passes = sorted(pass_totals_us.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    llvm_modules_sorted = sorted(llvm_modules, key=lambda d: d["seconds"], reverse=True)
+
+    def _diff(a: float | None, b: float | None) -> float | None:
+        return round(b - a, 4) if (a is not None and b is not None and b >= a) else None
+
+    return {
+        "module": target_module,
+        "hlo_passes_wall_s": _diff(first_hlo_ts, compile_backend_start_ts or last_hlo_ts),
+        "hlo_passes_sum_s": round(sum(pass_totals_us.values()) / 1e6, 4),
+        "last_hlo_pass_started": last_hlo_pass_started,
+        "buffer_assignment_s": _diff(buf_assign_start_ts, buf_assign_end_ts),
+        "buffers_to_assign": buffers_to_assign,
+        "total_allocation": total_allocation_str,
+        "llvm_ir_emit_s": _diff(buf_assign_end_ts, llvm_compile_start_ts),
+        "llvm_codegen_wall_s": _diff(llvm_compile_start_ts, llvm_compile_end_ts),
+        "llvm_modules_compiled": len(llvm_modules),
+        "llvm_modules_sum_s": round(sum(m["seconds"] for m in llvm_modules), 4),
+        "backend_jit_total_s": backend_jit_time_s,
+        "top_hlo_passes": [
+            {
+                "pass": name,
+                "total_s": round(tot_us / 1e6, 4),
+                "max_s": round(pass_max_us[name] / 1e6, 4),
+                "calls": int(pass_calls[name]),
+            }
+            for name, tot_us in top_passes
+        ],
+        "top_llvm_modules": llvm_modules_sorted[:5],
+    }
 
 
 def _case(master: Path):
@@ -299,7 +727,488 @@ def _case(master: Path):
     return SI3O17StepState(state, aevp), forcing, card
 
 
-def probe(master: Path, *, execution_mode: str = "compiled") -> dict:
+class _SliceStop(Exception):
+    """Internal control-flow signal raised during JAX tracing at a rung boundary."""
+
+    def __init__(self, payload: Any):
+        self.payload = payload
+
+
+def _is_float_leaf(leaf: Any) -> bool:
+    return (
+        hasattr(leaf, "dtype")
+        and hasattr(leaf, "shape")
+        and jnp.issubdtype(leaf.dtype, jnp.floating)
+    )
+
+
+def _sum_unique_floating_leaves(tree: Any) -> jax.Array:
+    seen: set[int] = set()
+    terms: list[jax.Array] = []
+    for leaf in jax.tree_util.tree_leaves(tree):
+        if _is_float_leaf(leaf) and id(leaf) not in seen:
+            seen.add(id(leaf))
+            terms.append(jnp.sum(leaf))
+    if not terms:
+        return jnp.asarray(0.0, dtype=jnp.float64)
+    return sum(terms)
+
+
+def _record_eager_interceptions(
+    entry: SI3O17StepState,
+    forcing: SI3O17LiveForcing,
+    card: Any,
+    func_names: Iterable[str],
+) -> tuple[dict[str, tuple[Any, Any, Any]], float]:
+    """Run one concrete eager step and record (args, kwargs, output) for named functions."""
+    names = tuple(func_names)
+    recorded: dict[str, tuple[Any, Any, Any]] = {}
+    originals = {name: getattr(o17_module, name) for name in names}
+
+    def make_recorder(name: str, fn: Any):
+        def wrapped(*args, **kwargs):
+            out = fn(*args, **kwargs)
+            recorded.setdefault(name, (args, kwargs, out))
+            return out
+
+        return wrapped
+
+    t0 = time.monotonic()
+    try:
+        for name in names:
+            setattr(o17_module, name, make_recorder(name, originals[name]))
+        o17_module.si3_o17_step(entry, SI3O17LiveForcing(int(forcing.kt), *forcing[1:]), card)
+    finally:
+        for name, fn in originals.items():
+            setattr(o17_module, name, fn)
+    return recorded, time.monotonic() - t0
+
+
+def _compile_with_optional_xla_log(
+    lowered: Any,
+    xla_pass_log: Path | None,
+) -> tuple[Any, float, dict[str, Any] | None]:
+    """Compile a lowered JAX computation, optionally redirecting C++ stderr to xla_pass_log."""
+    if xla_pass_log is not None:
+        resolved = str(xla_pass_log.resolve())
+        if resolved == "/tmp" or resolved.startswith("/tmp/"):
+            raise ValueError(f"XLA pass log must not be under /tmp: {xla_pass_log}")
+        xla_pass_log.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(xla_pass_log), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        sys.stderr.flush()
+        saved_stderr = os.dup(2)
+        os.dup2(fd, 2)
+        os.close(fd)
+        t0 = time.monotonic()
+        try:
+            compiled = lowered.compile()
+        finally:
+            sys.stderr.flush()
+            os.dup2(saved_stderr, 2)
+            os.close(saved_stderr)
+        compile_s = time.monotonic() - t0
+        return compiled, compile_s, parse_xla_pass_log(xla_pass_log)
+    t0 = time.monotonic()
+    compiled = lowered.compile()
+    compile_s = time.monotonic() - t0
+    return compiled, compile_s, None
+
+
+def _log_progress(msg: str) -> None:
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    sys.stderr.write(f"[{ts}] {msg}\n")
+    sys.stderr.flush()
+
+
+def measure_reverse_compile_unit(
+    label: str,
+    objective_fn: Any,
+    diff_inputs: Any,
+    *,
+    xla_pass_log: Path | None = None,
+    execute: bool = True,
+    on_compiled: Any = None,
+) -> dict[str, Any]:
+    """Measure JAXPR counts, lower(), HLO counts, compile(), peak RSS, and optional execution."""
+    _log_progress(f"{label}: start make_jaxpr(fwd)")
+    t_jaxpr0 = time.monotonic()
+    fwd_closed = jax.make_jaxpr(objective_fn)(diff_inputs)
+    fwd_jaxpr_s = time.monotonic() - t_jaxpr0
+    fwd_counts = _count_jaxpr_equations(fwd_closed)
+
+    vg_fn = jax.value_and_grad(objective_fn)
+    _log_progress(
+        f"{label}: done make_jaxpr(fwd) in {fwd_jaxpr_s:.2f}s "
+        f"(top={fwd_counts['top_eqns']}, rec={fwd_counts['recursive_eqns']}); start make_jaxpr(vg)"
+    )
+    t_vg_jaxpr0 = time.monotonic()
+    vg_closed = jax.make_jaxpr(vg_fn)(diff_inputs)
+    vg_jaxpr_s = time.monotonic() - t_vg_jaxpr0
+    vg_counts = _count_jaxpr_equations(vg_closed)
+
+    transformed = jax.jit(vg_fn)
+    _log_progress(
+        f"{label}: done make_jaxpr(vg) in {vg_jaxpr_s:.2f}s "
+        f"(top={vg_counts['top_eqns']}, rec={vg_counts['recursive_eqns']}); start lower()"
+    )
+    t_low0 = time.monotonic()
+    lowered = transformed.lower(diff_inputs)
+    lower_s = time.monotonic() - t_low0
+
+    hlo_pre_text = lowered.as_text(dialect="hlo")
+    hlo_pre = _count_hlo_text(hlo_pre_text)
+    _log_progress(
+        f"{label}: done lower() in {lower_s:.2f}s "
+        f"(hlo_pre={hlo_pre['instructions_total']}); start compile()"
+    )
+
+    compiled, compile_s, xla_breakdown = _compile_with_optional_xla_log(lowered, xla_pass_log)
+    _log_progress(f"{label}: done compile() in {compile_s:.2f}s; start compiled.as_text()")
+    hlo_post_text = compiled.as_text()
+    hlo_post = _count_hlo_text(hlo_post_text)
+    _log_progress(
+        f"{label}: done compiled.as_text() (hlo_post={hlo_post['instructions_total']})"
+    )
+
+    rss_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    row: dict[str, Any] = {
+        "label": label,
+        "fwd_make_jaxpr_seconds": round(fwd_jaxpr_s, 3),
+        "vg_make_jaxpr_seconds": round(vg_jaxpr_s, 3),
+        "lower_seconds": round(lower_s, 3),
+        "lower_total_seconds": round(vg_jaxpr_s + lower_s, 3),
+        "compile_seconds": round(compile_s, 3),
+        "execution_seconds": None,
+        "objective": None,
+        "peak_rss_kib": rss_kib,
+        "peak_rss_gib": round(rss_kib / (1024.0 * 1024.0), 3),
+        "fwd_jaxpr_top_eqns": fwd_counts["top_eqns"],
+        "fwd_jaxpr_rec_eqns": fwd_counts["recursive_eqns"],
+        "vg_jaxpr_top_eqns": vg_counts["top_eqns"],
+        "vg_jaxpr_rec_eqns": vg_counts["recursive_eqns"],
+        "hlo_pre_opt_instructions": hlo_pre["instructions_total"],
+        "hlo_pre_opt_entry_instructions": hlo_pre["instructions_entry"],
+        "hlo_pre_opt_computations": hlo_pre["computations"],
+        "hlo_post_opt_instructions": hlo_post["instructions_total"],
+        "hlo_post_opt_entry_instructions": hlo_post["instructions_entry"],
+        "hlo_post_opt_computations": hlo_post["computations"],
+    }
+    if xla_breakdown is not None:
+        row["xla_pass_log"] = str(xla_pass_log)
+        row["xla_breakdown"] = xla_breakdown
+    if on_compiled is not None:
+        on_compiled(row)
+
+    if execute:
+        _log_progress(f"{label}: start execute()")
+        t_exec0 = time.monotonic()
+        val, _grad = compiled(diff_inputs)
+        jax.block_until_ready(val)
+        exec_s = round(time.monotonic() - t_exec0, 4)
+        obj_val = float(np.asarray(val))
+        rss_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        row["execution_seconds"] = exec_s
+        row["objective"] = obj_val
+        row["peak_rss_kib"] = rss_kib
+        row["peak_rss_gib"] = round(rss_kib / (1024.0 * 1024.0), 3)
+        _log_progress(f"{label}: done execute() in {exec_s:.4f}s")
+    return row
+
+
+def diagnose_slices(
+    master: Path = DEFAULT_MASTER,
+    *,
+    prefixes: Sequence[int] = (),
+    slices: Sequence[tuple[int, int]] = (),
+    isolated_funcs: Sequence[str] = (),
+    glue_only: bool = False,
+    checkpoint_rungs: Sequence[int] = (),
+    xla_pass_log: Path | None = None,
+    execute: bool = True,
+    output_path: Path | None = None,
+) -> dict[str, Any]:
+    """Run reverse-compile diagnostics on prefixes 1..k, slices k1..k2, isolated funcs, or glue-only."""
+    entry, forcing, card = _case(master)
+    kt = int(forcing.kt)
+    base_inputs = (entry, forcing[1:])
+
+    all_slice_specs: list[tuple[str, int, int]] = []
+    for k in prefixes:
+        if not (1 <= k <= len(RUNG_SPECS)):
+            raise ValueError(f"prefix k={k} out of range 1..{len(RUNG_SPECS)}")
+        all_slice_specs.append((f"prefix_1_{k}_{RUNG_SPECS[k - 1]['name']}", 1, k))
+    for k1, k2 in slices:
+        if not (1 <= k1 <= k2 <= len(RUNG_SPECS)):
+            raise ValueError(f"slice {k1}..{k2} out of range 1..{len(RUNG_SPECS)}")
+        n1 = RUNG_SPECS[k1 - 1]["name"]
+        n2 = RUNG_SPECS[k2 - 1]["name"]
+        label = f"rung_{k1}_{n1}" if k1 == k2 else f"slice_{k1}_{k2}_{n1}_to_{n2}"
+        all_slice_specs.append((label, k1, k2))
+
+    need_eager_record = (
+        any(k1 > 1 for _, k1, _ in all_slice_specs)
+        or bool(isolated_funcs)
+        or bool(glue_only)
+    )
+    recorded_eager: dict[str, tuple[Any, Any, Any]] = {}
+    eager_record_s = None
+    if need_eager_record:
+        recorded_eager, eager_record_s = _record_eager_interceptions(
+            entry, forcing, card, ALL_SINGLE_CALL_FUNCS
+        )
+
+    results: list[dict[str, Any]] = []
+    checkpoint_set = set(checkpoint_rungs)
+
+    def _log_for(item_label: str, total_items: int) -> Path | None:
+        if xla_pass_log is None:
+            return None
+        if total_items == 1:
+            return xla_pass_log
+        stem = xla_pass_log.stem
+        suffix = xla_pass_log.suffix or ".log"
+        return xla_pass_log.with_name(f"{stem}_{item_label}{suffix}")
+
+    total_runs = len(all_slice_specs) + len(isolated_funcs) + (1 if glue_only else 0)
+    prov = _provenance()
+
+    def _build_report() -> dict[str, Any]:
+        return {
+            "status": "PASS",
+            "mode": "diagnostic",
+            "provenance": prov,
+            "eager_recording_seconds": round(eager_record_s, 3)
+            if eager_record_s is not None
+            else None,
+            "rung_registry": [
+                {"k": s["k"], "name": s["name"], "funcs": list(s["funcs"])} for s in RUNG_SPECS
+            ],
+            "results": results,
+        }
+
+    def _flush_output() -> None:
+        if output_path is not None:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(_build_report(), indent=2, sort_keys=True) + "\n")
+
+    for label, k1, k2 in all_slice_specs:
+        mocked_funcs: list[str] = [
+            fn for r in range(1, k1) for fn in RUNG_SPECS[r - 1]["funcs"]
+        ]
+        active_rungs = [RUNG_SPECS[r - 1] for r in range(k1, k2 + 1)]
+        stop_before_func = (
+            RUNG_SPECS[k2]["funcs"][0] if k2 < len(RUNG_SPECS) else None
+        )
+
+        # Build template for mocked outputs of rungs 1..k1-1
+        mock_templates: list[tuple[str, list[Any], list[bool], Any]] = []
+        mock_float_Arrays: list[Any] = []
+        for fn_name in mocked_funcs:
+            _a, _kw, out_val = recorded_eager[fn_name]
+            leaves, treedef = jax.tree_util.tree_flatten(out_val)
+            mask = [_is_float_leaf(l) for l in leaves]
+            fl = [l for l, m in zip(leaves, mask) if m]
+            mock_templates.append((fn_name, leaves, mask, treedef))
+            mock_float_Arrays.append(fl)
+
+        diff_inputs = (base_inputs, mock_float_Arrays) if mocked_funcs else base_inputs
+
+        def make_slice_objective(
+            k1_val=k1,
+            k2_val=k2,
+            mock_templates_val=mock_templates,
+            stop_fn=stop_before_func,
+            active_specs=active_rungs,
+        ):
+            def objective(x):
+                if mock_templates_val:
+                    (step_entry, dynamic), mocked_fl_lists = x
+                else:
+                    step_entry, dynamic = x
+                    mocked_fl_lists = ()
+
+                originals = {name: getattr(o17_module, name) for name in ALL_SINGLE_CALL_FUNCS}
+                captured_outputs: list[Any] = []
+                try:
+                    # 1. Mock all functions in rungs 1..k1-1 to return their tracer outputs in 0 eqns
+                    for (fn_name, leaves, mask, treedef), fl_list in zip(
+                        mock_templates_val, mocked_fl_lists
+                    ):
+                        it = iter(fl_list)
+                        reconstructed = jax.tree_util.tree_unflatten(
+                            treedef, [next(it) if m else l for l, m in zip(leaves, mask)]
+                        )
+                        setattr(
+                            o17_module,
+                            fn_name,
+                            lambda *a, _ret=reconstructed, **kw: _ret,
+                        )
+
+                    # 2. Wrap active rungs k1..k2 to capture outputs (and optionally jax.checkpoint)
+                    for spec in active_specs:
+                        r_idx = spec["k"]
+                        for fn_name in spec["funcs"]:
+                            orig_fn = originals[fn_name]
+                            if r_idx in checkpoint_set:
+                                orig_fn = jax.checkpoint(orig_fn)
+
+                            def make_active_wrapper(f):
+                                def wrapped(*a, **kw):
+                                    res = f(*a, **kw)
+                                    captured_outputs.append(res)
+                                    return res
+
+                                return wrapped
+
+                            setattr(o17_module, fn_name, make_active_wrapper(orig_fn))
+
+                    # 3. If k2 < N, stop right at the entry of rung k2 + 1
+                    if stop_fn is not None:
+
+                        def stop_wrapper(*a, **kw):
+                            raise _SliceStop((captured_outputs, a, kw))
+
+                        setattr(o17_module, stop_fn, stop_wrapper)
+
+                    try:
+                        out, trace = si3_o17_step(
+                            step_entry, SI3O17LiveForcing(kt, *dynamic), card
+                        )
+                    except _SliceStop as stop_exc:
+                        return _sum_unique_floating_leaves(stop_exc.payload)
+
+                    exchange = trace.finalize.final
+                    primal = (out, exchange.fluxes, exchange.outputs, trace.finalize.stress)
+                    return _sum_unique_floating_leaves(primal)
+                finally:
+                    for name, fn in originals.items():
+                        setattr(o17_module, name, fn)
+
+            return objective
+
+        def _on_slice_compiled(
+            r: dict[str, Any], k1_v=k1, k2_v=k2, active_v=active_rungs
+        ) -> None:
+            r["k_start"] = k1_v
+            r["k_end"] = k2_v
+            r["rungs"] = [s["name"] for s in active_v]
+            r["checkpoint_rungs"] = sorted(checkpoint_set)
+            results.append(r)
+            _flush_output()
+
+        measure_reverse_compile_unit(
+            label,
+            make_slice_objective(),
+            diff_inputs,
+            xla_pass_log=_log_for(label, total_runs),
+            execute=execute,
+            on_compiled=_on_slice_compiled,
+        )
+        _flush_output()
+
+    for fn_name in isolated_funcs:
+        if fn_name not in recorded_eager:
+            raise ValueError(f"unknown or unrecorded function {fn_name!r}")
+        args, kwargs, _out = recorded_eager[fn_name]
+        leaves, treedef = jax.tree_util.tree_flatten((args, kwargs))
+        mask = [_is_float_leaf(l) for l in leaves]
+        diff = [l for l, m in zip(leaves, mask) if m]
+        orig_fn = getattr(o17_module, fn_name)
+
+        def isolated_obj(diff_leaves, leaves=leaves, mask=mask, treedef=treedef, fn=orig_fn):
+            it = iter(diff_leaves)
+            a, kw = jax.tree_util.tree_unflatten(
+                treedef, [next(it) if m else l for l, m in zip(leaves, mask)]
+            )
+            out = fn(*a, **kw)
+            return _sum_unique_floating_leaves(out)
+
+        label = f"isolated_{fn_name}"
+
+        def _on_iso_compiled(r: dict[str, Any], fn_v=fn_name) -> None:
+            r["isolated_function"] = fn_v
+            results.append(r)
+            _flush_output()
+
+        measure_reverse_compile_unit(
+            label,
+            isolated_obj,
+            diff,
+            xla_pass_log=_log_for(label, total_runs),
+            execute=execute,
+            on_compiled=_on_iso_compiled,
+        )
+        _flush_output()
+
+    if glue_only:
+        # Mock the 10 D198 rungs so ONLY the uncounted glue/halos/surface/packing/outer step runs
+        mock_templates = []
+        mock_float_arrays = []
+        for fn_name in D198_TEN_RUNG_FUNCS:
+            _a, _kw, out_val = recorded_eager[fn_name]
+            leaves, treedef = jax.tree_util.tree_flatten(out_val)
+            mask = [_is_float_leaf(l) for l in leaves]
+            fl = [l for l, m in zip(leaves, mask) if m]
+            mock_templates.append((fn_name, leaves, mask, treedef))
+            mock_float_arrays.append(fl)
+
+        glue_inputs = (base_inputs, mock_float_arrays)
+
+        def glue_objective(x):
+            (step_entry, dynamic), mocked_fl_lists = x
+            originals = {name: getattr(o17_module, name) for name in D198_TEN_RUNG_FUNCS}
+            mock_inputs_received: list[Any] = []
+            try:
+                for (fn_name, leaves, mask, treedef), fl_list in zip(
+                    mock_templates, mocked_fl_lists
+                ):
+                    it = iter(fl_list)
+                    reconstructed = jax.tree_util.tree_unflatten(
+                        treedef, [next(it) if m else l for l, m in zip(leaves, mask)]
+                    )
+
+                    def make_mock(ret_val):
+                        def _mock(*a, **kw):
+                            mock_inputs_received.append((a, kw))
+                            return ret_val
+
+                        return _mock
+
+                    setattr(o17_module, fn_name, make_mock(reconstructed))
+                out, trace = si3_o17_step(step_entry, SI3O17LiveForcing(kt, *dynamic), card)
+                exchange = trace.finalize.final
+                primal = (out, exchange.fluxes, exchange.outputs, trace.finalize.stress)
+                return _sum_unique_floating_leaves((primal, mock_inputs_received))
+            finally:
+                for name, fn in originals.items():
+                    setattr(o17_module, name, fn)
+
+        label = "glue_and_uncounted_rungs_only"
+
+        def _on_glue_compiled(r: dict[str, Any]) -> None:
+            r["mocked_d198_rungs"] = list(D198_TEN_RUNG_FUNCS)
+            results.append(r)
+            _flush_output()
+
+        measure_reverse_compile_unit(
+            label,
+            glue_objective,
+            glue_inputs,
+            xla_pass_log=_log_for(label, total_runs),
+            execute=execute,
+            on_compiled=_on_glue_compiled,
+        )
+        _flush_output()
+
+    return _build_report()
+
+
+def probe(
+    master: Path,
+    *,
+    execution_mode: str = "compiled",
+    xla_pass_log: Path | None = None,
+) -> dict:
     if execution_mode not in {"compiled", "eager"}:
         raise ValueError(f"unknown AD execution mode {execution_mode!r}")
     entry, forcing, card = _case(master)
@@ -335,14 +1244,25 @@ def probe(master: Path, *, execution_mode: str = "compiled") -> dict:
     jax.eval_shape(objective, inputs)
     if execution_mode == "compiled":
         transformed = jax.jit(jax.value_and_grad(objective, has_aux=True))
-        compile_started = time.monotonic()
-        compiled = transformed.lower(inputs).compile()
-        compile_seconds = time.monotonic() - compile_started
+        lower_started = time.monotonic()
+        lowered = transformed.lower(inputs)
+        lower_seconds = time.monotonic() - lower_started
+        hlo_pre = _count_hlo_text(lowered.as_text(dialect="hlo"))
+        compiled, compile_only_seconds, xla_breakdown = _compile_with_optional_xla_log(
+            lowered, xla_pass_log
+        )
+        compile_seconds = lower_seconds + compile_only_seconds
+        hlo_post = _count_hlo_text(compiled.as_text())
         execute_started = time.monotonic()
         (value, primal1), grad = compiled(inputs)
         execution_seconds = time.monotonic() - execute_started
     else:
+        lower_seconds = None
+        compile_only_seconds = None
         compile_seconds = None
+        hlo_pre = None
+        hlo_post = None
+        xla_breakdown = None
         execute_started = time.monotonic()
         with jax.disable_jit():
             (value, primal1), grad = jax.value_and_grad(objective, has_aux=True)(inputs)
@@ -452,15 +1372,20 @@ def probe(master: Path, *, execution_mode: str = "compiled") -> dict:
         for row in finite_rows
         if row["nonzero"] == 0
     ]
-    return {
+    report = {
         "status": "PASS"
         if unchanged and all(r["nan"] == r["inf"] == 0 for r in finite_rows)
         else "FAIL",
+        "provenance": _provenance(),
         "objective": float(value),
         "forward_bits_unchanged": unchanged,
+        "lower_seconds": lower_seconds,
+        "compile_only_seconds": compile_only_seconds,
         "compile_seconds": compile_seconds,
         "execution_seconds": execution_seconds,
         "execution_mode": execution_mode,
+        "hlo_pre_opt_instructions": hlo_pre["instructions_total"] if hlo_pre else None,
+        "hlo_post_opt_instructions": hlo_post["instructions_total"] if hlo_post else None,
         "peak_rss_kib": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),
         "memory_rule_reason": (
             "exact full O17 reverse-mode compile; run alone on a small conforming mixed-regime tile"
@@ -479,17 +1404,125 @@ def probe(master: Path, *, execution_mode: str = "compiled") -> dict:
         "zero_gradient_leaves": zero_gradient_leaves,
         "leaves": rows,
     }
+    if xla_breakdown is not None:
+        report["xla_pass_log"] = str(xla_pass_log)
+        report["xla_breakdown"] = xla_breakdown
+    return report
 
 
-def main() -> int:
+def _parse_int_list(spec: str) -> list[int]:
+    items: list[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            items.extend(range(int(a), int(b) + 1))
+        else:
+            items.append(int(part))
+    return items
+
+
+def _parse_slice_list(spec: str) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.append((int(a), int(b)))
+        elif ":" in part:
+            a, b = part.split(":", 1)
+            out.append((int(a), int(b)))
+        else:
+            k = int(part)
+            out.append((k, k))
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--master", type=Path, default=DEFAULT_MASTER)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--execution-mode", choices=("compiled", "eager"), default="compiled")
-    args = parser.parse_args()
-    report = probe(args.master, execution_mode=args.execution_mode)
+    parser.add_argument(
+        "--prefixes",
+        type=str,
+        default=None,
+        help="Comma/range list of prefix lengths k in 1..14 (e.g. '1-5' or '1,2,3').",
+    )
+    parser.add_argument(
+        "--slices",
+        type=str,
+        default=None,
+        help="Comma list of rung slices/pairs k1-k2 in 1..14 (e.g. '3-4,8-9,8-14').",
+    )
+    parser.add_argument(
+        "--isolated-funcs",
+        type=str,
+        default=None,
+        help="Comma list of single-call function names in si3_o17_step to compile in isolation.",
+    )
+    parser.add_argument(
+        "--glue-only",
+        action="store_true",
+        help="Mock the 10 D198 rungs to measure reverse compile of glue/halos/packing/outer step only.",
+    )
+    parser.add_argument(
+        "--checkpoint-rungs",
+        type=str,
+        default=None,
+        help="Optional comma/range list of rung indices to wrap in jax.checkpoint during slice runs.",
+    )
+    parser.add_argument(
+        "--xla-pass-log",
+        type=Path,
+        default=None,
+        help="Optional scratch file path to capture C++ XLA pass timings (never under /tmp).",
+    )
+    parser.add_argument("--vmodule", dest="vmodule", type=str, default=None)
+    parser.add_argument("--compile-only", action="store_true")
+    args = parser.parse_args(argv)
+
+    is_diag = any(
+        (
+            args.prefixes is not None,
+            args.slices is not None,
+            args.isolated_funcs is not None,
+            args.glue_only,
+        )
+    )
+    if is_diag:
+        prefixes = _parse_int_list(args.prefixes) if args.prefixes else []
+        slices = _parse_slice_list(args.slices) if args.slices else []
+        isolated = (
+            [s.strip() for s in args.isolated_funcs.split(",") if s.strip()]
+            if args.isolated_funcs
+            else []
+        )
+        ckpt = _parse_int_list(args.checkpoint_rungs) if args.checkpoint_rungs else []
+        report = diagnose_slices(
+            args.master,
+            prefixes=prefixes,
+            slices=slices,
+            isolated_funcs=isolated,
+            glue_only=args.glue_only,
+            checkpoint_rungs=ckpt,
+            xla_pass_log=args.xla_pass_log,
+            execute=not args.compile_only,
+            output_path=args.output,
+        )
+    else:
+        report = probe(
+            args.master,
+            execution_mode=args.execution_mode,
+            xla_pass_log=args.xla_pass_log,
+        )
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(text)
     print(text, end="")
     return 0 if report["status"] == "PASS" else 2

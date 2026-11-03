@@ -891,3 +891,289 @@ each; the new ice_cor file `2 passed`; the O12 file `81 passed`; the O6 file
 steps `PASS_ALL_O8_O13_0_ULP`, `PASS_O14_0_ULP`, `PASS_ALL_O15_O16_0_ULP`.
 
 independent review: pending (author: Claude)
+
+## DECISION 198 round 4 — full-step reverse-compile and runtime diagnosis
+
+DECISION 209 (2026-11-03) scopes DECISION 198 round 4 as a pure diagnosis at
+`22af29b743a8` (rounds D194 and D198 r1–r3 landed) with **no model code changes**
+(`git diff --stat 22af29b743a8..HEAD -- packages` is empty; forward bits are
+unchanged by construction).
+
+### 1. Question and candidate hypotheses
+
+After DECISION 194 and DECISION 198 rounds 1–3, every isolated rung's reverse
+compile (`lower + compile`) finishes in minutes (`o4_prather` 238.4 s compile,
+`o12_thermo` 111.2 s, `o6_rdgrft` 110.2 s, `o15_cor` 75.9 s, `o16_update_flx`
+43.6 s, `o5_aevp` 20.1 s, `o14_open_water` 13.0 s, `o13_remap` 10.4 s,
+`o6_ice_cor_dyn` 7.0 s, rest ≤ 5.3 s; sum across all 14 rungs = 643.5 s
+`.compile()` and 88.7 s `make_jaxpr + lower`), yet running the full-step AD
+probe (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_ad_probe.py`)
+still did not finish within `10,800 s` (peak `29.2 GiB` in Round 3).
+
+Four candidate explanations were pre-registered for discrimination:
+
+- **(a) JAX tracing/lowering vs XLA compile (and runtime execution inside the
+  probe)** — separated by timing `jax.make_jaxpr(fwd)`,
+  `jax.make_jaxpr(jax.value_and_grad(fwd))`, `.lower()`, `.compile()`, and
+  `compiled(inputs)` independently on the full 14-rung step (`--prefixes 14
+  --compile-only`) and on growing prefixes (`k = 1..14`).
+- **(b) One or a few XLA passes scaling super-linearly with module size** —
+  separated by capturing `TF_CPP_VMODULE=hlo_pass_pipeline=1,cpu_compiler=2,buffer_assignment=1,ir_compiler=2`
+  into scratch logs (`--xla-pass-log`) and comparing per-pass wall times, buffer
+  counts, and pre/post-optimization HLO instruction counts between isolated
+  rungs (`k-k`), growing prefixes (`1..k`), and the full step (`1..14`).
+- **(c) Composition / specific rung jumps** — separated by measuring both
+  `.compile()` and `compiled(inputs)` across the 14 isolated rungs (`1-1..14-14`),
+  growing prefixes (`k = 1..8, 12, 14`), and suffixes (`8-14`, `11-14`), then
+  isolating any rung whose addition causes a jump in compile or execution time
+  down to the individual function and field.
+- **(d) Reverse pass of uncounted glue (state packing, 69-field post-dynamics
+  halo exchange, `glo2eqv`, `agg(kn=1)`, surface/frazil/tail glue, outer step)**
+  — separated by `--glue-only` (which mocks the 10 major D198 rungs with identity
+  projections on their recorded outputs while differentiating through all
+  inter-rung glue and the 4 previously uncounted stages `k = 1, 6, 7, 12` in the
+  real `si3_o17_step`) and by measuring `k = 1, 6, 7, 12` in isolation.
+
+### 2. Instrument and direct unit test
+
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_ad_probe.py` was
+extended (without duplicating scripts) to provide:
+
+1. Canonical 14-rung execution-order registry `RUNG_SPECS` (`k = 1..14`)
+   covering every top-level stage of `si3_o17_step`:
+   `1: o7_blk1_strength`, `2: o5_aevp`, `3: o4_prather`, `4: o6_rdgrft`,
+   `5: o6_ice_cor_dyn`, `6: postdyn_halos_agg`, `7: o7_surface_o8`,
+   `8: o12_thermo`, `9: o13_remap`, `10: o14_open_water`, `11: o15_cor`,
+   `12: thermo_tail`, `13: o16_update_flx`, `14: o16_update_tau`.
+2. Separate stage timers (`fwd_make_jaxpr_seconds`, `vg_make_jaxpr_seconds`,
+   `lower_seconds`, `lower_total_seconds`, `compile_seconds`,
+   `execution_seconds`), peak RSS (`ru_maxrss` in KiB/GiB), and pre/post-opt HLO
+   instruction and computation counts (`_count_hlo_text`).
+3. CLI flags `--prefixes`, `--slices`, `--isolated-funcs`, `--glue-only`,
+   `--checkpoint-rungs`, `--compile-only`, `--xla-pass-log`, and `--vmodule`,
+   with provenance (`git_sha`, dirty status, `argv`, env vars) stamped in every
+   JSON artifact and `/tmp` paths rejected.
+4. Direct unit test `tests/ice/unit/test_si3_d198_r4_compile_diagnosis.py`
+   (`2 passed in 42.01s`), which runs `diagnose_slices` on prefixes `k = 1, 2`
+   and verifies planted violations on `/tmp` log paths, invalid slice bounds,
+   planted HLO instructions, and planted XLA `fusion` pass durations.
+
+### 3. Measurements (CPU fp64, `22af29b743a8`)
+
+All runs used `CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1` on
+`/home/dbalwada/legoESM/.venv/bin/python` with `TMPDIR` and all logs/outputs
+under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r4_scratch`
+(after verifying `free -g` ≥ 930 GiB available and no process > 16 GiB RSS).
+
+#### Table 1 — All 14 isolated rungs (`k-k`) and `--glue-only` (`MEASURED`)
+
+*(Sources: `diag_p1_3_glue.json`, `diag_iso2_7.json`, `diag_iso8_14.json`,
+`diag_exec_8_14.json`, `diag_exec_9_10_12_13_14.json`)*
+
+| k | Rung label | Fwd eqns (top / rec) | VG eqns (top / rec) | `make_jaxpr(vg)` s | `lower()` s | `compile()` s | `execute()` s | Pre-opt HLO | Post-opt HLO | HLO passes s | Buffer assign s (buffers) | Backend JIT s |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | `o7_blk1_strength` | 670 / 1,345 | 1,753 / 3,646 | 0.28 | 0.17 | 0.87 | 0.0041 | 2,276 | 8,267 | 0.29 | 0.01 (8,049) | 0.47 |
+| 2 | `o5_aevp` | 1,616 / 10,194 | 5,145 / 29,805 | 3.91 | 2.50 | 20.10 | 0.0927 | 34,883 | 130,813 | 11.54 | 1.54 (115,119) | 6.73 |
+| 3 | `o4_prather` | 2,344 / 28,487 | 6,527 / 107,555 | 18.35 | 4.07 | 238.39 | 0.1145 | 66,532 | 905,032 | 151.78 | 4.77 (882,128) | 80.56 |
+| 4 | `o6_rdgrft` | 1,329 / 13,934 | 3,289 / 41,298 | 14.59 | 7.30 | 110.19 | 0.0604 | 89,416 | 406,889 | 53.76 | 14.08 (341,390) | 50.55 |
+| 5 | `o6_ice_cor_dyn` | 564 / 5,216 | 2,546 / 12,091 | 1.39 | 1.76 | 7.03 | 0.0094 | 20,189 | 57,657 | 3.71 | 0.42 (47,623) | 2.44 |
+| 6 | `postdyn_halos_agg` | 5,044 / 7,405 | 11,760 / 17,737 | 2.50 | 0.99 | 5.28 | 0.0053 | 12,809 | 33,531 | 2.61 | 0.09 (30,739) | 1.78 |
+| 7 | `o7_surface_o8` | 2,588 / 5,518 | 6,499 / 14,980 | 1.27 | 0.54 | 5.01 | 0.0143 | 8,808 | 49,201 | 2.35 | 0.11 (48,388) | 2.14 |
+| 8 | `o12_thermo` | 3,900 / 38,088 | 11,241 / 148,711 | 25.11 | 7.03 | 111.16 | 1.0457 | 105,679 | 555,014 | 70.24 | 3.21 (521,098) | 35.54 |
+| 9 | `o13_remap` | 5,383 / 11,687 | 14,401 / 32,121 | 2.72 | 1.18 | 10.42 | 0.0130 | 17,360 | 101,938 | 5.62 | 0.31 (97,527) | 3.58 |
+| 10 | `o14_open_water` | 5,356 / 10,634 | 14,517 / 29,038 | 3.65 | 1.50 | 13.03 | 0.0116 | 23,215 | 109,512 | 6.86 | 0.45 (100,361) | 4.67 |
+| 11 | `o15_cor` | 10,589 / 22,265 | 27,890 / 62,327 | 5.72 | 2.25 | 75.91 | >150 (40.8 in `1..12`) | 35,637 | 552,597 | 38.70 | 1.81 (538,549) | 33.76 |
+| 12 | `thermo_tail` | 1,594 / 1,798 | 4,025 / 4,536 | 0.72 | 0.38 | 1.32 | 0.0119 | 3,353 | 7,300 | 0.37 | 0.07 (6,759) | 0.60 |
+| 13 | `o16_update_flx` | 5,232 / 12,637 | 14,649 / 35,276 | 2.70 | 1.25 | 43.62 | **>10,800 (hang)** | 18,190 | 212,055 | 11.66 | 0.56 (208,217) | 30.56 |
+| 14 | `o16_update_tau` | 1,175 / 1,751 | 3,467 / 5,061 | 1.08 | 0.26 | 1.02 | 0.0044 | 2,492 | 8,130 | 0.25 | 0.08 (8,125) | 0.49 |
+| **Sum** | **14 isolated rungs** | **47,384 / 170,959** | **127,709 / 544,183** | **84.01** | **31.18** | **643.52** | — | **440,839** | **3,137,936** | **359.74** | **27.51 (2,954,072)** | **253.87** |
+| — | `--glue-only` (10 D198 rungs mocked) | 11,146 / 17,772 | 25,356 / 43,745 | 4.96 | 1.95 | 19.03 | 0.0233 | 30,550 | 120,208 | 10.39 | 0.62 (115,447) | 6.41 |
+
+#### Table 2 — Growing prefixes `1..k` and multi-rung suffixes (`MEASURED`)
+
+*(Sources: `diag_p1_3_glue.json`, `diag_p4_5.json`, `diag_p6_7.json`,
+`diag_p8.json`, `diag_p12.json`, `diag_p14.json`, `xla_s8_14.log`,
+`xla_s8_8_11_14_slice_11_14_o15_cor_to_o16_update_tau.log`. Remaining
+intermediate prefixes `k = 9, 10, 11, 13` are scripted in
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r4_scratch/operator_run.sh`.)*
+
+| Slice / Prefix | Fwd eqns (top / rec) | VG eqns (top / rec) | `make_jaxpr(vg)` s | `lower()` s | `compile()` s | `execute()` s | Peak RSS GiB | Pre-opt HLO | Post-opt HLO | `fusion` s | `copy-insertion` s | `buffer_assignment` s (buffers) | `llvm_ir` + `codegen` wall s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `1..1` (`o7_blk1_strength`) | 670 / 1,345 | 1,753 / 3,646 | 0.28 | 0.17 | 0.87 | 0.0041 | 3.16 | 2,276 | 8,267 | 0.09 | 0.04 | 0.01 (8,049) | 0.21 + 0.22 |
+| `1..2` (`+ o5_aevp`) | 2,178 / 11,431 | 6,569 / 33,122 | 4.34 | 2.14 | 19.11 | 0.0919 | 3.98 | 36,780 | 141,185 | 2.09 | 3.22 | 1.28 (125,282) | 1.98 + 1.34 |
+| `1..3` (`+ o4_prather`) | 4,201 / 39,597 | 12,538 / 140,119 | 23.01 | 6.05 | 257.69 | 0.1810 | 17.18 | 102,351 | 1,044,467 | 104.23 | 20.66 | 8.45 (1,005,657) | 31.09 + 33.05 |
+| `1..4` (`+ o6_rdgrft`) | 5,420 / 53,421 | 15,385 / 180,975 | 36.79 | 13.48 | 392.35 | 0.2894 | 18.50 | 191,314 | 1,450,657 | 124.08 | 38.46 | 33.04 (1,346,333) | 39.78 + 50.30 |
+| `1..5` (`+ o6_ice_cor_dyn`) | 5,739 / 58,392 | 17,359 / 192,494 | 40.51 | 15.75 | 435.12 | 0.2683 | 20.50 | 210,728 | 1,507,314 | 130.48 | 42.34 | 41.04 (1,392,968) | 42.31 + 53.90 |
+| `1..6` (`+ postdyn_halos_agg`) | 10,645 / 65,659 | 28,727 / 209,839 | 40.80 | 17.07 | 432.77 | 0.2698 | 19.29 | 222,670 | 1,539,143 | 126.50 | 42.11 | 41.73 (1,422,028) | 43.92 + 56.30 |
+| `1..7` (`+ o7_surface_o8`) | 12,851 / 70,699 | 34,347 / 223,834 | 43.36 | 17.83 | 455.24 | 0.2966 | 21.75 | 230,477 | 1,591,552 | 130.91 | 43.57 | 43.49 (1,473,466) | 43.14 + 57.55 |
+| `1..8` (`+ o12_thermo`) | 16,288 / 108,228 | 44,452 / 371,303 | 71.48 | 23.18 | 639.69 | 1.3189 | 24.34 | 334,853 | 2,135,526 | 163.95 | 67.85 | 65.99 (1,983,458) | 55.01 + 67.13 |
+| `1..12` (`+ o13,o14,o15,tail`) | 36,984 / 152,002 | 98,015 / 491,497 | 81.95 | 29.86 | 791.90 | 42.0981 | 31.08 | 408,734 | 2,901,500 | 193.92 | 81.63 | 81.93 (2,721,187) | 72.38 + 96.75 |
+| **`1..14` (full O17 step)** | **39,930 / 162,737** | **103,347 / 503,371** | **79.79** | **27.67** | **803.95** | **>10,800 (hang)** | **32.12** | **402,843** | **3,052,370** | **200.29** | **78.48** | **76.72 (2,869,611)** | **74.10 + 109.75** |
+| `8..14` (`o12` to `update_tau`) | 29,638 / 94,552 | 76,650 / 302,163 | 47.00 | 13.79 | 274.20 | — | — | 194,207 | 1,622,550 | 73.17 | 31.02 | 22.84 (1,563,689) | 50.85 + 31.83 |
+| `11..14` (`o15` to `update_tau`) | 16,134 / 35,895 | 43,727 / 98,948 | 10.69 | 3.43 | 122.40 | — | — | 52,053 | 786,876 | 30.89 | 12.23 | 4.86 (771,846) | 27.66 + 26.86 |
+
+#### Table 3 — Full-step (`k = 14`, `prefix_1_14_o16_update_tau`) compile time breakdown (`MEASURED`)
+
+*(Source: `diag_p14.json` and `xla_p14.log`)*
+
+| Phase / XLA Pass | Calls | Wall s | Max single call s | Share of `.compile()` (`803.952 s`) | Share of total (`911.405 s`) |
+|---|---:|---:|---:|---:|---:|
+| **`jax.make_jaxpr(fwd)`** | 1 | 6.455 | 6.455 | — | — |
+| **`jax.make_jaxpr(value_and_grad(fwd))`** | 1 | 79.785 | 79.785 | — | 8.75% |
+| **JAX `.lower()` (MLIR / StableHLO emission)** | 1 | 27.668 | 27.668 | — | 3.04% |
+| **Subtotal: `lower_total_seconds` (`make_jaxpr(vg) + lower`)** | — | **107.453** | — | — | **11.79%** |
+| **XLA HLO pass pipeline (`hlo_passes_wall_s`)** | — | **465.004** | — | **57.84%** | **51.02%** |
+| — `fusion` (CPU `InstructionFusion`) | 1 | 200.293 | 200.293 | 24.91% | 21.98% |
+| — `copy-insertion` | 1 | 78.476 | 78.476 | 9.76% | 8.61% |
+| — `simplify-while-loops` | 50 | 27.615 | 1.636 | 3.43% | 3.03% |
+| — `algsimp` | 53 | 19.578 | 1.612 | 2.44% | 2.15% |
+| — `tree_reduction_rewriter` | 100 | 14.426 | 0.166 | 1.79% | 1.58% |
+| — `layout-assignment` | 1 | 12.112 | 12.112 | 1.51% | 1.33% |
+| — `while-loop-invariant-code-motion` | 50 | 10.429 | 1.245 | 1.30% | 1.14% |
+| — `tuple-simplifier` | 52 | 9.322 | 2.445 | 1.16% | 1.02% |
+| — `constant_folding` | 50 | 7.419 | 1.175 | 0.92% | 0.81% |
+| — `cpu-parallel-task-assigner` | 1 | 7.395 | 7.395 | 0.92% | 0.81% |
+| — all other HLO passes | — | 77.939 | — | 9.69% | 8.55% |
+| **XLA CPU backend JIT (`backend_jit_total_s`)** | 1 | **306.660** | 306.660 | **38.14%** | **33.65%** |
+| — `buffer_assignment` (`2,869,611` buffers, `51.65 MiB` alloc) | 1 | 76.724 | 76.724 | 9.54% | 8.42% |
+| — `llvm_ir_emit` (HLO → LLVM IR across `10,009` kernels) | 1 | 74.099 | 74.099 | 9.22% | 8.13% |
+| — `llvm_codegen` (`10,009` modules; `965.43 s` thread-sum) | 10,009 | 109.752 | 43.567 | 13.65% | 12.04% |
+| — backend scheduling / thunk emission / linking | — | 46.085 | — | 5.73% | 5.06% |
+| **HLO module setup / pre-pass & post-JIT wrapper overhead** | — | **32.288** | — | **4.02%** | **3.54%** |
+| **Subtotal: `.compile()` (`compile_seconds`)** | 1 | **803.952** | 803.952 | **100.00%** | **88.21%** |
+| **Total compile (`lower_total_seconds + compile_seconds`)** | — | **911.405** | — | — | **100.00%** |
+
+#### Table 4 — Isolation of the `> 10,800 s` probe timeout to `si3_var_agg(..., kn=2).tm_i` inside `si3_o16_step` (`MEASURED`)
+
+*(Sources: sub-function and per-field isolation runs on the recorded `si3_o16_step`
+inputs at `22af29b743a8`)*
+
+| Unit under `jax.value_and_grad` | `lower()` s | `compile()` s | `execute()` s | Post-opt HLO | Notes |
+|---|---:|---:|---:|---:|---|
+| `si3_o16_step` (`k = 13`, baseline `22af29b743a8`) | 1.25 | 43.62 | **>10,800 (hang)** | 212,055 | Calls `si3_var_glo2eqv(kn=2)`, `si3_var_agg(kn=2)`, `si3_ice_update_flx` |
+| — `si3_var_glo2eqv(..., kn=2)` alone | 0.26 | 2.69 | **0.0046** | — | Executes in 4.6 ms |
+| — `si3_ice_update_flx(...)` alone | 0.35 | 6.92 | **0.0033** | — | Executes in 3.3 ms |
+| — `si3_var_agg(..., kn=1)` (`k = 6`, post-dynamics) | 0.99 | 5.28 | **0.0053** | 33,531 | `kn <= 1` returns before `tm_i` / `tm_s` loops (`si3_orca2_state.py` line 1141) |
+| — `si3_var_agg(..., kn=2)` alone (all 21 fields) | 0.67 | 28.12 | **>10,800 (hang)** | 131,806 | Enters `kn > 1` block (`si3_orca2_state.py` lines 1143–1210) |
+| — `si3_var_agg(kn=2)` fields `hm_i, hm_s` | 0.08 | 0.86 | **0.0007** | — | Elementwise `jnp.where` |
+| — `si3_var_agg(kn=2)` field `tm_si` | 0.14 | 1.66 | **0.0014** | — | 5-step `jpl` loop |
+| — `si3_var_agg(kn=2)` fields `om_i, sm_i` | 0.18 | 2.09 | **0.0014** | — | 5-step `jpl` loop |
+| — `si3_var_agg(kn=2)` field `tm_s` | 0.30 | 3.51 | **0.0023** | — | 25-step `jpl * nlay_s` loop (`5 * 5 = 25`) |
+| — `si3_var_agg(kn=2)` fields `hm_ip, hm_il` | 0.21 | 2.36 | **0.0015** | — | 5-step `jpl` loop |
+| — **`si3_var_agg(kn=2)` field `tm_i` alone** | **0.28** | **20.23** | **>10,800 (hang)** | — | **50-step unrolled `jpl * nlay_i` loop (`5 * 10 = 50`, `si3_orca2_state.py` lines 1171–1178)** |
+| **In-memory test: `si3_var_agg(..., kn=2)` with `lax.scan` on `tm_i, tm_s`** | **0.35** | **2.60** | **0.0021** | — | **0.000e+00 max abs/ULP forward diff on all 21 fields** |
+| **In-memory test: `si3_o16_step` with `lax.scan` on `tm_i, tm_s`** | **0.88** | **6.64** | **0.0098** | **60,095** | **Compile `43.62 s -> 6.64 s` (6.6x); execute `>10,800 s -> 0.0098 s`** |
+
+### 4. Candidate verdicts (labeled `MEASURED` or `PLAUSIBLE`)
+
+1. **Candidate (a) — JAX tracing/lowering vs XLA compile vs runtime execution (`MEASURED`)**:
+   - **MEASURED**: On the full 14-rung O17 step (`prefix_1_14_o16_update_tau`),
+     `jax.make_jaxpr(fwd)` takes `6.455 s`, `jax.make_jaxpr(value_and_grad(fwd))`
+     takes `79.785 s`, and `.lower()` takes `27.668 s` (`lower_total_seconds =
+     107.453 s`, 3.04 GiB RSS, `402,843` pre-opt HLO instructions). XLA
+     `.compile()` takes **`803.952 s` (`13.40 min`)** at **`32.120 GiB` peak
+     RSS**, producing `3,052,370` post-opt HLO instructions. Thus **full-step
+     compilation (`lower + compile`) completes in `911.405 s` (`15.19 min`)**.
+   - **MEASURED**: In Round 3's log (`work/si3_d194_scratch/probe_d198r3.log`),
+     XLA's `SlowOperationAlarm` (`[Compiling module jit_objective for CPU]`,
+     which wraps `CpuCompiler`'s backend JIT phase) printed completion
+     (`5m12.90s`) 15 minutes after job start — matching today's `5m06.66s`
+     backend JIT and `15.19 min` total compile. Immediately after `.compile()`
+     returned, `nemo_si3_o17_ad_probe.py` executed `compiled(inputs)` before
+     printing any output, whereas Round 3's isolated-rung script (`ad_rungs.py`)
+     only called `.lower(diff).compile()` and never called `compiled(diff)`.
+     Therefore **`911.4 s` (`8.4%`) of the `10,800 s` timeout was compile time
+     and `> 9,880 s` (`> 91.6%`) was a runtime execution hang in
+     `compiled(inputs)`**.
+
+2. **Candidate (b) — XLA passes scaling with module size (`MEASURED`)**:
+   - **MEASURED**: Full-step `.compile()` (`803.952 s`) is **1.25x** the sum of
+     the 14 isolated rungs' `.compile()` (`643.521 s`), and post-opt HLO
+     (`3,052,370` instructions) is **7.58x** pre-opt HLO (`402,843`
+     instructions).
+   - **MEASURED**: Five XLA phases account for **`71.1%` (`571.64 s` /
+     `803.95 s`)** of full-step `.compile()`:
+     1. HLO `fusion` (`200.293 s`, 1 call, `24.9%`);
+     2. Backend `llvm_codegen` (`109.752 s` wall / `965.433 s` thread-sum across
+        `10,009` kernel modules, `13.7%`);
+     3. HLO `copy-insertion` (`78.476 s`, 1 call, `9.8%`);
+     4. Backend `buffer_assignment` (`76.724 s` over `2,869,611` buffers,
+        `9.5%`, which scales **2.79x** relative to the sum of isolated rungs'
+        `27.51 s` because whole-step live ranges coexist in one module);
+     5. Backend `llvm_ir_emit` (`74.099 s`, `9.2%`).
+
+3. **Candidate (c) — Composition / specific rung jumps (`MEASURED` + `PLAUSIBLE`)**:
+   - **MEASURED (compile jumps)**: Four rungs account for **`83.2%` (`535.64 s`
+     / `643.52 s`)** of isolated `.compile()` and drive the prefix `.compile()`
+     jumps: `k = 3` (`o4_prather`, `+238.58 s` in prefix `1..3`), `k = 4`
+     (`o6_rdgrft`, `+134.67 s` in prefix `1..4`), `k = 8` (`o12_thermo`,
+     `+184.45 s` in prefix `1..8`), and `k = 11` (`o15_cor`, `75.91 s` isolated)
+     + `k = 13` (`o16_update_flx`, `43.62 s` isolated; `+152.20 s` across
+     `1..8 -> 1..12`). In particular, `si3_o15_step` (`si3_ice_cor` in
+     `packages/ice/legoesm/ice/si3_finalize.py` lines 553–730) still unrolls the
+     `itd_shiftice`, salinity-bound, and `zapsmall` loops (`27,890` top-level VG
+     eqns, `75.91 s` `.compile()`), whereas `si3_ice_cor_dyn` (traced in Round 3,
+     `k = 5`) has `2,546` top-level VG eqns and compiles in `7.03 s`.
+   - **MEASURED (runtime execution jumps)**: Prefixes `1..1` through `1..8`
+     execute `compiled(inputs)` in `0.0041 s – 1.3189 s`. Prefix `1..12`
+     executes in `42.0981 s` (`+40.78 s` from `k = 11` `si3_o15_step`'s unrolled
+     `ice_cor` loops). Adding `k = 13` (`si3_o16_step`) causes `compiled(inputs)`
+     to hang for **`> 10,800 s`**, isolated specifically to the 50-step unrolled
+     `tm_i_acc` loop in `si3_var_agg(..., kn=2)`
+     (`packages/ice/legoesm/ice/si3_orca2_state.py` lines 1171–1178).
+   - **MEASURED (HLO inspection) + PLAUSIBLE (XLA CPU emitter mechanism)**:
+     In `si3_var_agg(..., kn=2)`, `tm_i` unrolls `50` iterations (`jpl=5 *
+     nlay_i=10`) of
+     `tm_i_acc = jnp.where(vt_i > _EPSI20, sr(tm_i_acc + sr(sr(t_i[:, :, jk, jl] * v_i[:, :, jl]) * r1_nlay_i)), rt0)`,
+     where `sr` (`nemo_source_round`,
+     `packages/core/legoesm/core/source_rounding.py` lines 14–27) is
+     `jnp.where(jnp.isfinite(value), value, jnp.copysign(jnp.abs(value), value))`.
+     MEASURED in the post-opt HLO dump of `si3_var_agg(..., kn=2)`: XLA fuses all
+     50 backward steps and their `slice`/`pad`/`dynamic-update-slice` scatters
+     into two 2,859-line `kLoop` fusions (`%fused_computation.1` and
+     `%fused_computation.2`, `backend_config={"outer_dimension_partitions":["3"]}`,
+     matching the 3 `tf_XLAEigen` worker threads observed spinning at 100% CPU).
+     PLAUSIBLE from XLA CPU's `FusedIrEmitter`: because the per-step cotangent
+     feeds multiple branch/select operands (`isfinite`, `copysign`, `abs`,
+     `vt_i > _EPSI20`) and non-elementwise `slice`/`pad` index expressions inside
+     a single `kLoop` fusion, `FusedIrEmitter` re-emits upstream value
+     evaluations at each use instead of caching per-step temporaries, turning a
+     50-step diamond recurrence into `O(2^50)` runtime work.
+   - **MEASURED (in-memory verification without touching `packages/`)**:
+     Replacing the unrolled `tm_i_acc` and `tm_s_acc` loops in
+     `si3_var_agg(..., kn=2)` with `jax.lax.scan` preserves `0.000e+00` ULP
+     forward agreement across all 21 fields of `SI3AggregatedVars`, cuts
+     `si3_var_agg(..., kn=2)` reverse compile from `28.12 s` to `2.60 s` and
+     execution from `> 10,800 s` to `0.0021 s`, and cuts `si3_o16_step` reverse
+     compile from `43.62 s` to `6.64 s` and execution from `> 10,800 s` to
+     `0.0098 s`.
+
+4. **Candidate (d) — Uncounted glue, state packing, 69-field halo exchange,
+   outer step (`MEASURED` — REFUTED)**:
+   - **MEASURED**: `--glue-only` (all 10 major D198 rungs mocked; all inter-rung
+     glue, 69-field `si3_apply_state_halos_orca2`, `si3_var_glo2eqv`,
+     `si3_var_agg(kn=1)`, `o7_blk1_strength`, `o7_surface_o8`, `_thermo_entries`,
+     `_thermodynamic_tail`, `SI3UpdateFluxForcing`, and `SI3O17Trace` packing
+     live) lowers in `1.952 s`, compiles in `19.034 s` (`120,208` post-opt HLO),
+     and executes in `0.0233 s`. The four previously uncounted rungs in isolation
+     (`k = 1, 6, 7, 12`) sum to `2.08 s` `lower()`, `12.48 s` `.compile()`, and
+     `0.036 s` `execute()`.
+
+### 5. Next changes pointed to by this diagnosis (no model changes made this round)
+
+1. **Primary change (eliminates the `> 10,800 s` runtime hang in `compiled(inputs)`
+   and cuts `si3_o16_step` reverse compile from `43.62 s` to `6.64 s`)**:
+   In `si3_var_agg` (`packages/ice/legoesm/ice/si3_orca2_state.py` lines 1171–1187),
+   when `kn > 1` and tracing under a JAX transform, replace the unrolled 50-step
+   `tm_i_acc` (`jpl * nlay_i`) and 25-step `tm_s_acc` (`jpl * nlay_s`) Python
+   loops with static-trip `jax.lax.fori_loop` / `jax.lax.scan` carries in exact
+   `(jl, jk)` order (already verified in memory to be `0.000e+00` ULP
+   bit-identical on all 21 `SI3AggregatedVars` fields).
+2. **Secondary change (cuts `si3_o15_step` isolated reverse compile from
+   `75.91 s` to `~7 s` and removes its `~40.8 s` execution cost in `1..12`)**:
+   Route `si3_o15_step` (`si3_ice_cor` in
+   `packages/ice/legoesm/ice/si3_finalize.py` lines 553–730) through the traced
+   `fori_loop` helpers (`itd_shiftice`, salinity bounds, `ice_var_zapsmall`)
+   already landed for `si3_ice_cor_dyn` in Round 3.
+
+independent review: operator
