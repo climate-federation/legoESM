@@ -311,6 +311,32 @@ g_gsam = 9.79764                # [m/s^2]  gSAM consts.f90 ggr
 # ecRad (OpenIFS 49r1 bundled) gravity, radiation_constants.F90:26
 # ``AccelDueToGravity``; used only by the ecrad_ifs port.
 g_ecrad = 9.80665               # [m/s^2]
+# ecRad dry-air gas constant, radiation_constants.F90:30 ``GasConstantDryAir``
+# (cloud overlap parameter from decorrelation length); ecrad_ifs port only.
+R_d_ecrad = 287.058             # [J/(kg*K)]
+# OpenIFS 49r1 YOMCST (arpifs/module/yomcst.F90 SETUP_CONSTANTS, LAPE=F
+# branch), formed by yomcst's own expressions so the derived values carry the
+# same rounding: used only by the ecrad_ifs IFS-interface port (vote IF8).
+k_B_ifs = 1.380658e-23          # [J/K]      RKBOL, yomcst.F90:511
+N_A_ifs = 6.0221367e23          # [1/mol]    RNAVO, :512
+c_light_ifs = 299792458.0       # [m/s]      RCLUM, :509
+h_planck_ifs = 6.6260755e-34    # [J s]      RHPLA, :510
+M_dry_air_ifs = 28.9644         # [g/mol]    RMD, :581
+M_water_ifs = 18.0153           # [g/mol]    RMV, :582
+g_ifs = 9.80665                 # [m/s^2]    RG, :553
+R_d_ifs = 1000.0 * (N_A_ifs * k_B_ifs) / M_dry_air_ifs   # RD = 1000*R/RMD, R = RNAVO*RKBOL (:580,:584)
+R_v_ifs = 1000.0 * (N_A_ifs * k_B_ifs) / M_water_ifs     # RV = 1000*R/RMV
+c_pd_ifs = 3.5 * R_d_ifs                                  # RCPD = 3.5*RD (:586)
+T_triple_ifs = 273.16           # [K]        RTT, :623
+L_v_ifs = 2.5008e6              # [J/kg]     RLVTT, :625
+L_s_ifs = 2.8345e6              # [J/kg]     RLSTT, :626
+# RSIGMA = 2*RPI**5*(RKBOL/RHPLA)**3*RKBOL/(15*RCLUM**2) (:564); integer powers
+# as the repeated products gfortran expands them to.
+_pi_ifs = float(jnp.pi)         # RPI = 2*ASIN(1) (:508), the same double
+_pi2_ifs = _pi_ifs * _pi_ifs
+_kh_ifs = k_B_ifs / h_planck_ifs
+sigma_sb_ifs = (2.0 * (_pi2_ifs * _pi2_ifs * _pi_ifs) * (_kh_ifs * _kh_ifs * _kh_ifs)
+                * k_B_ifs / (15.0 * (c_light_ifs * c_light_ifs)))  # [W/(m^2*K^4)]
 R_v_nemo = 461.495              # [J/(kg*K)] NEMO sbc_phy R_vap (ours: 461.51)
 L_fus_nemo = 0.3333601e6        # [J/kg]   NEMO phycst rLfus (ours L_f: 3.337e5)
 L_fus_isf_nemo = 0.334e6        # [J/kg]   NEMO isf_oce rLfusisf (ISF melt latent
