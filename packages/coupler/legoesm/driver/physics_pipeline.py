@@ -5157,6 +5157,16 @@ def _resolve_turbulence(config):
     scheme = getattr(config, 'turbulence', 'none')
     if scheme == "none":
         return None, None
+    if scheme == "mynn25":
+        # R3 (route mynn25 to WRF MYNN-EDMF) is UNFINISHED on this lane: the
+        # compiled segment does not yet peel the cold-start step or persist
+        # the mynn_initialized flag (votes M3/N2/N4).  Refuse, never run it
+        # without its cold start.
+        raise NotImplementedError(
+            "turbulence='mynn25' (WRF MYNN-EDMF) is not yet wired on the "
+            "compiled physics pipeline (cold-start peel + checkpointed "
+            "initialized flag pending); use the SCM or the hydrostatic/MPAS "
+            "bridge")
 
     from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
 
