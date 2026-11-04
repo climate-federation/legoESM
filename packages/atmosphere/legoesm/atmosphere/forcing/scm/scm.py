@@ -410,7 +410,8 @@ def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = Non
             if forcing.prescribe == "fluxes" and not forcing.flux_to_closure:
                 _dyn = compute_forcing_tendencies(
                     state, sigma_coord,
-                    forcing._replace(w_th_s=None, w_qv_s=None), t)
+                    forcing._replace(prescribe="none", w_th_s=None,
+                                     w_qv_s=None), t)
             if _dyn.dT_dt is not None:
                 _dT_dyn = _dyn.dT_dt.data
             _ftr = _dyn.tracer_tendencies
