@@ -423,7 +423,7 @@ def test_grad_finite_dead_thin_branch_and_fp32_guards():
     g = jax.grad(lambda w: sum(ts.calc_ref_trans_lw(1090512.5406112145, w, 0.9999999, 50.0, 55.0, 100.0)))(1.0)
     assert np.isfinite(float(g))
     z = jnp.float32(0.0)
-    assert np.isfinite(float(ms._guarded_div(z, z, 100.0)))
+    assert np.isfinite(float(ms.guarded_div(z, z, 100.0)))
 
 
 def test_grad_finite_dead_cloudy_layer():

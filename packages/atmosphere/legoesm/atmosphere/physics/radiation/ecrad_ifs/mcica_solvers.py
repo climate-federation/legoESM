@@ -66,7 +66,7 @@ _DEN_FLOOR = {np.dtype(np.float64): float.fromhex("0x1p-500"),
               np.dtype(np.float32): float.fromhex("0x1p-60")}
 
 
-def _den_floor(x):
+def den_floor(x):
     return _DEN_FLOOR[np.dtype(jnp.result_type(x))]
 
 N_G_LW = 140
@@ -177,7 +177,7 @@ def sw_albedo_weights(wavelength_bound, i_intervals):
 # Sequential sums (Fortran order, vote M6a)
 # --------------------------------------------------------------------------
 
-def _seqsum(x, axis):
+def seqsum(x, axis):
     """Left-to-right sum along ``axis`` (gfortran SUM at -O1, no reassociation)."""
     x = jnp.moveaxis(x, axis, 0)
     total, _ = jax.lax.scan(lambda c, v: (c + v, None), x[0], x[1:])
@@ -332,12 +332,12 @@ def lw_derivatives_ica(T, flux_up_surf, live=True):
     0/0 into the gradient (dead-branch guard, as the oracle skips the call).
     Known limit: a live surface up-flux sum below ~1e-154 W/m2 (unphysical)
     overflows the normalisation's VJP."""
-    total = _seqsum(flux_up_surf, 0)
+    total = seqsum(flux_up_surf, 0)
     g0 = flux_up_surf / jnp.where(live, total, 1.0)
 
     def body(g, t):
         g_new = g * t
-        return g_new, _seqsum(g_new, 0)
+        return g_new, seqsum(g_new, 0)
 
     _, d = jax.lax.scan(body, g0, T, reverse=True)
     return jnp.concatenate([d, jnp.ones((1,), d.dtype)])
@@ -360,7 +360,7 @@ def _cloud_threshold_weights(cloud_fraction, total_cloud_cover, thr, sharpness):
     return w_layer, w_col
 
 
-def _guarded_div(num, den, sharpness, live=True):
+def guarded_div(num, den, sharpness, live=True):
     """Oracle ``if (den > 0) x = num/den else x = 0`` with num = 0 wherever
     den = 0: divide by the inactive-exact floor max(den, 2^-500) (vote N1').
     Where ``live`` is False (zero-weight cloudy layer) the result is 0 and the
@@ -372,7 +372,7 @@ def _guarded_div(num, den, sharpness, live=True):
         pos = den_eff > 0.0
         q = jnp.where(pos, num / jnp.where(pos, den_eff, 1.0), 0.0)
     else:
-        f = _den_floor(den_eff)
+        f = den_floor(den_eff)
         q = num / lower_clamp(den_eff, f, f, sharpness)
     return jnp.where(live, q, 0.0)
 
@@ -383,8 +383,8 @@ def _solver_lw_column(od, od_cloud, ssa_cloud, g_cloud, planck_hl, emission, alb
     # Clear sky: no scattering (do_lw_aerosol_scattering = false).
     t_clr, su_clr, sd_clr = calc_no_scattering_transmittance_lw(od, pt, pb, sharpness)
     fup_clr, fdn_clr = fluxes_no_scattering_lw(t_clr, su_clr, sd_clr, emission, albedo)
-    up_clear = _seqsum(fup_clr, 1)
-    dn_clear = _seqsum(fdn_clr, 1)
+    up_clear = seqsum(fup_clr, 1)
+    dn_clear = seqsum(fdn_clr, 1)
 
     # Cloudy layers (do_lw_cloud_scattering = true, no aerosol scattering).
     w_layer, w_col = _cloud_threshold_weights(cloud_fraction, total_cloud_cover, thr, sharpness)
@@ -396,8 +396,8 @@ def _solver_lw_column(od, od_cloud, ssa_cloud, g_cloud, planck_hl, emission, alb
     od_cloud_new = od_scaling * od_cloud[:, band]
     od_total = od + od_cloud_new
     scat_od = ssa_cloud[:, band] * od_cloud_new
-    ssa_total = _guarded_div(scat_od, od_total, sharpness, live)
-    g_total = _guarded_div(g_cloud[:, band] * ssa_cloud[:, band] * od_cloud_new, scat_od, sharpness, live)
+    ssa_total = guarded_div(scat_od, od_total, sharpness, live)
+    g_total = guarded_div(g_cloud[:, band] * ssa_cloud[:, band] * od_cloud_new, scat_od, sharpness, live)
     r_cld, t_cld, su_cld, sd_cld = calc_ref_trans_lw(od_total, ssa_total, g_total, pt, pb, sharpness)
     wl = w_layer[:, None]
     R = blend(wl, r_cld, 0.0)
@@ -407,8 +407,8 @@ def _solver_lw_column(od, od_cloud, ssa_cloud, g_cloud, planck_hl, emission, alb
     fup, fdn = fast_adding_lw(R, T, su, sd, emission, albedo, w_layer)
 
     tcc = total_cloud_cover
-    up_cld = tcc * (_seqsum(fup, 1)) + (1.0 - tcc) * up_clear
-    dn_cld = tcc * (_seqsum(fdn, 1)) + (1.0 - tcc) * dn_clear
+    up_cld = tcc * (seqsum(fup, 1)) + (1.0 - tcc) * up_clear
+    dn_cld = tcc * (seqsum(fdn, 1)) + (1.0 - tcc) * dn_clear
 
     deriv_cld = lw_derivatives_ica(T, fup[-1], w_col > 0.0)
     # Oracle: if (tcc < 1 - thr) modify; smoothed in the clear fraction (vote M2a).
@@ -440,14 +440,14 @@ def _solver_sw_column(od, ssa, g, od_cloud, ssa_cloud, g_cloud, albedo_direct, a
         mu0 = jnp.where(cos_sza > 0.0, cos_sza, 1.0)
     else:
         w_day = smoothstep_cubic(1.0 + cos_sza * sharpness)
-        f = _den_floor(cos_sza)
+        f = den_floor(cos_sza)
         mu0 = lower_clamp(cos_sza, f, f, sharpness)
 
     def column_fluxes(rd, td, rdir, tdd_iff, tdd):
         fup, fdiff, fdir = adding_sw(incoming, albedo_diffuse, albedo_direct, mu0, rd, td, rdir, tdd_iff, tdd)
-        up = _seqsum(fup, 1)
-        dn_direct = _seqsum(fdir, 1)
-        dn = _seqsum(fdiff, 1) + dn_direct
+        up = seqsum(fup, 1)
+        dn_direct = seqsum(fdir, 1)
+        dn = seqsum(fdiff, 1) + dn_direct
         return up, dn, dn_direct, fdiff[-1], fdir[-1]
 
     clear_props = calc_ref_trans_sw(mu0, od, ssa, g, sharpness)
@@ -459,8 +459,8 @@ def _solver_sw_column(od, ssa, g, od_cloud, ssa_cloud, g_cloud, albedo_direct, a
     od_cloud_new = od_scaling * od_cloud[:, band]
     od_total = od + od_cloud_new
     scat_od = ssa * od + ssa_cloud[:, band] * od_cloud_new
-    ssa_total = _guarded_div(scat_od, od_total, sharpness, live)
-    g_total = _guarded_div(
+    ssa_total = guarded_div(scat_od, od_total, sharpness, live)
+    g_total = guarded_div(
         (g * ssa) * od + (g_cloud[:, band] * ssa_cloud[:, band]) * od_cloud_new,
         scat_od, sharpness, live,
     )
