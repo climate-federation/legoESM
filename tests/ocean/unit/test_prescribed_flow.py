@@ -322,6 +322,8 @@ def test_positional_construction_unshifted_by_tail_field():
         "rk3_stage3_l9_eiv_nemo_order",
         "nemo_qsr_stage3_kmm_source_association",
         "vmix_eos_use_config_rho0",
+        # appended by the ocean oracle-fix campaign (tier-3 RNF)
+        "runoff_depth_spread_levels",
         "lateral_viscosity_mask_levels",
         "lateral_shlat",
     )

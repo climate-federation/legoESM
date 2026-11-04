@@ -4766,6 +4766,27 @@ class ExperimentConfig(NamedTuple):
                     f"does not exist (the Beres table would silently fall "
                     f"back to nothing at build time)"
                 )
+        # Beres on the stand-in table: refused early here (the kernel also
+        # raises, E3SMBeresConfig.use_stand_in_table defaults False).  The
+        # effective GWD config is the override when one is set.
+        _ov = self.gravity_wave_drag_override
+        if _ov is not None and isinstance(_ov, GravityWaveDragConfig):
+            _b_scheme, _b_src = str(_ov.scheme), str(_ov.e3sm_cam.source)
+            _b_path = _ov.e3sm_cam.beres.mfcc_table_path
+            _b_standin = bool(_ov.e3sm_cam.beres.use_stand_in_table)
+        else:
+            _b_scheme, _b_src = str(self.gravity_wave_drag), str(self.e3sm_cam_source)
+            _b_path, _b_standin = self.e3sm_cam_mfcc_table_path, False
+        if ("e3sm_cam" in _b_scheme.split("+") and "convective" in _b_src.split("+")
+                and not _b_path and not _b_standin):
+            errors.append(
+                "e3sm_cam source includes 'convective' (Beres) but no table "
+                "path is set: the kernel would have only the analytic stand-in "
+                "spectrum, which launches almost nothing. Set "
+                "e3sm_cam_mfcc_table_path (or the override's "
+                "beres.mfcc_table_path) to the CESM/E3SM inputdata table "
+                "atm/waccm/gw/newmfspectra40_dc25.nc (sha256 8f1528d85b36...)"
+            )
         if isinstance(self.e3sm_cam_pgwv, bool) or \
                 not isinstance(self.e3sm_cam_pgwv, int) or \
                 self.e3sm_cam_pgwv < 0:

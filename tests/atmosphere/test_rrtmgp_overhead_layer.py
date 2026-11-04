@@ -140,8 +140,8 @@ def test_cli_and_cam6_decks():
     assert coupled_parser().parse_args(
         ["--rrtmgp-overhead-layer"]).rrtmgp_overhead_layer is True
     from scripts.run import run_coupled
-    assert ("rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,"
-            in inspect.getsource(run_coupled.main))
+    assert run_coupled._coupled_atm_config(coupled_parser().parse_args(
+        ["--rrtmgp-overhead-layer"])).rrtmgp_overhead_layer is True
     from legoesm.driver.run_config_yaml import read_yaml_with_includes
     for deck in ("amip_production.yaml", "amip_production_fv3duo_c24.yaml"):
         d = read_yaml_with_includes(_REPO / "config" / "amip" / deck)
