@@ -28,7 +28,7 @@ FLUX = ("hfx_sub", "wfx_snw_sub", "wfx_ice_sub", "sfx_sub", "hfx_snw", "wfx_snw_
 
 def _run(v):
     st, zr, fz = dh_args(FX)
-    return st, bl._dh_step_fluxes(st, zr, fz, dt(FX), K, nemo_version=v)
+    return st, bl._dh_step_fluxes(st, zr, fz, dt(FX), K, nemo_version=v, growth_gate_width=0.0)
 
 
 def test_501_order_matches_nemo_state_and_fluxes():
@@ -121,3 +121,17 @@ def test_501_gradient_finite_and_matches_fd():
     assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g[k])) > 0
     np.testing.assert_allclose(float(g[k]), float((f(fz.evaporation + d) - f(fz.evaporation - d)) / (2 * h)),
                                rtol=1e-5, atol=1e-12)
+
+
+def test_growth_gate_smooth_default_exact_outside_band_and_differentiable():
+    st, zr, fz = dh_args(FX)
+    k = 0
+    w = bl._GROWTH_GATE_WIDTH_WM2
+    def bog(q, **kw):
+        f = fz._replace(qsb_ice_bottom=fz.qsb_ice_bottom.at[k].set(q), fhld=fz.fhld * 0)
+        return bl._dh_step_fluxes(st, zr._replace(qcn_ice_bottom=zr.qcn_ice_bottom * 0), f, dt(FX), K,
+                                  nemo_version="5.0.1", **kw)[1].wfx_bog[k]
+    for q in (-5.0, -2 * w, 0.5 * w, 3.0):
+        assert float(bog(q)) == float(bog(q, growth_gate_width=0.0))     # exact outside the band
+    g = jax.grad(bog)(-0.5 * w)
+    assert bool(jnp.isfinite(g)) and float(jnp.abs(g)) > 0

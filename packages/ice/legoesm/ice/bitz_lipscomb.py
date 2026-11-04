@@ -151,6 +151,10 @@ _MAX_ITERATIONS = 200
 # iteration cap iconv_max = 50 (`icethd_zdf_bl99.F90:76`).
 _NEMO_VERSIONS = ("5.0.1", "5.0.2")
 _MAX_ITERATIONS_501 = 50
+# --- RULE 5 smoothing (user standing rule, 2026-11-04) ---
+# Width [W m-2] of the one-sided C1 basal-growth gate on zf_tt < 0 (0.01 of
+# a 1 W m-2 flux unit); exactly NEMO for zf >= 0 and zf <= -width; 0.0 = hard.
+_GROWTH_GATE_WIDTH_WM2 = 0.01
 
 
 def _check_nemo_version(nemo_version: str) -> None:
@@ -820,6 +824,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                     _nemo_snow_sublimation_order: bool = True,
                     _nemo_snow_remap: bool = True,
                     nemo_version: str = "5.0.2",
+                    growth_gate_width: float = _GROWTH_GATE_WIDTH_WM2,
                     ) -> tuple[SI3ColumnArrays, SI3ExchangeFluxes]:
     """Resolved no-lateral-melt thickness sequence (`icethd_dh.F90:91-533`).
 
@@ -1068,9 +1073,13 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     dE = e_i_specific - e_water
     # Basal growth only where zf_tt < 0 (`icethd_dh.F90:331`): with 5.0.1's
     # unclamped latent term dE can turn positive, so the sign gate is needed
-    # (5.0.2's MAX(0,.) keeps dE < 0 and makes it redundant).
-    dh_growth = jnp.where(
-        zf < 0.0, dt * jnp.maximum(0.0, zf / (dE * constants.rho_ice)), 0.0)
+    # (5.0.2's MAX(0,.) keeps dE < 0 and makes it redundant).  C1 one-sided
+    # over zf in (-growth_gate_width, 0] (user smooth rule); 0.0 = hard.
+    if growth_gate_width == 0:
+        grow = (zf < 0.0).astype(zf.dtype)
+    else:
+        grow = smoothstep_cubic(-zf / growth_gate_width)
+    dh_growth = grow * dt * jnp.maximum(0.0, zf / (dE * constants.rho_ice))
     growth_mass = -constants.rho_ice * dh_growth * ar      # zfmdt * a * r1_Dt
     fx = _add_fluxes(
         fx,
