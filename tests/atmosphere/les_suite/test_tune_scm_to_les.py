@@ -111,7 +111,8 @@ def test_scm_les_loss_jax_is_differentiable():
 
     def loss(cs):
         turb = TurbulenceConfig(scheme="smagorinsky",
-                                smagorinsky=SmagorinskyConfig(surface=surf, C_s=cs))
+                                smagorinsky=SmagorinskyConfig(surface=surf, C_s=cs,
+                                                                    stability_form="lilly"))
         # dt=100 (few steps) keeps the jax.grad UNROLL of the Python step-loop small so
         # the backward compile is a fast smoke test, not a full-resolution run.
         return scm_les_loss_jax(art, turb, nlev=NZ, dt=100.0)

@@ -179,7 +179,7 @@ def test_smagorinsky_config_defaults():
     LILLY-EXPERIMENT-CONSISTENT (it reproduces Lilly 1962's experimental K_h/K_m = 1,
     not a modern invention). Pinned here as config defaults (not oracle constants).
     """
-    c = SmagorinskyConfig()
+    c = SmagorinskyConfig(stability_form="lilly")
     assert c.C_s == 0.2          # modern C_s (vs Smagorinsky's k_s ≈ 0.28)
     assert c.Pr_t == 1.0         # = Lilly's experimental K_h/K_m = 1 (not a modern choice)
     assert c.l_mix_max == 100.0  # Blackadar asymptotic mixing length [m] (modern)
@@ -198,7 +198,7 @@ def test_smagorinsky_Km_full_expression_assembly_canary():
     combination independently (a partial oracle, not a fully independent end-to-end
     reimpl). The K_h = K_m/Pr_t closure is pinned separately with a non-unit Pr_t below.
     """
-    cfg = SmagorinskyConfig()
+    cfg = SmagorinskyConfig(stability_form="lilly")
     o, inputs = _run(cfg)
     Km = np.asarray(o.Km)[0]
     for full_idx, iface in ((0, 0), (-1, Km.shape[0] - 2)):
@@ -215,7 +215,7 @@ def test_smagorinsky_prandtl_closure_nonunit_Pr():
     wrongly hard-coded to Km. Using Pr_t=0.7 makes Kh≠Km, so this genuinely pins the
     /Pr_t division elementwise.
     """
-    cfg = SmagorinskyConfig(Pr_t=0.7)
+    cfg = SmagorinskyConfig(stability_form="lilly", Pr_t=0.7)
     o, _ = _run(cfg)
     Km = np.asarray(o.Km)[0]
     Kh = np.asarray(o.Kh)[0]
@@ -243,9 +243,9 @@ def test_smagorinsky_stable_cutoff_threshold_at_Pr_t():
     Ri0 = float(_production_Ri(u, v, T, q_v, p_full, z_full)[0, 0])
     assert Ri0 > 0.0                                          # a genuinely stable interface
 
-    km_on = np.asarray(_run(SmagorinskyConfig(Pr_t=Ri0 * (1.0 + 1e-6)), **col_kw)[0].Km)[0, 0]
-    km_eq = np.asarray(_run(SmagorinskyConfig(Pr_t=Ri0), **col_kw)[0].Km)[0, 0]
-    km_off = np.asarray(_run(SmagorinskyConfig(Pr_t=Ri0 * (1.0 - 1e-6)), **col_kw)[0].Km)[0, 0]
+    km_on = np.asarray(_run(SmagorinskyConfig(stability_form="lilly", Pr_t=Ri0 * (1.0 + 1e-6)), **col_kw)[0].Km)[0, 0]
+    km_eq = np.asarray(_run(SmagorinskyConfig(stability_form="lilly", Pr_t=Ri0), **col_kw)[0].Km)[0, 0]
+    km_off = np.asarray(_run(SmagorinskyConfig(stability_form="lilly", Pr_t=Ri0 * (1.0 - 1e-6)), **col_kw)[0].Km)[0, 0]
 
     assert km_on > 0.0                     # just below cutoff (Ri0 < Pr_t) ⇒ mixing ON
     assert km_eq == 0.0                     # Ri0 == Pr_t ⇒ OFF (inclusive equality)
@@ -266,7 +266,7 @@ def test_smagorinsky_finite_grad_at_exact_cutoff():
     col_kw = dict(theta_top=305.0, theta_sfc=300.0, u_top=12.0, u_sfc=1.0)
     u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _column(**col_kw)
     Ri0 = float(_production_Ri(u, v, T, q_v, p_full, z_full)[0, 0])
-    cfg = SmagorinskyConfig(Pr_t=Ri0)
+    cfg = SmagorinskyConfig(stability_form="lilly", Pr_t=Ri0)
     T_sfc = jnp.full((u.shape[0],), float(np.asarray(T)[0, -1]))
     q_sfc = saturation_mixing_ratio(T_sfc, p_half[:, -1])
 
@@ -286,7 +286,7 @@ def test_smagorinsky_finite_grad_at_exact_cutoff():
 
 def test_smagorinsky_unstable_enhancement():
     """Unstable stratification (Ri<0) ⇒ Lilly-type factor √(1−Ri/Pr_t) > 1 (enhanced K_m)."""
-    cfg = SmagorinskyConfig()
+    cfg = SmagorinskyConfig(stability_form="lilly")
     # warm below, cold aloft ⇒ θ decreases upward ⇒ Ri<0
     o, inputs = _run(cfg, theta_top=298.0, theta_sfc=302.0, u_top=20.0, u_sfc=1.0)
     Km = np.asarray(o.Km)[0]
@@ -299,8 +299,8 @@ def test_smagorinsky_unstable_enhancement():
 
 def test_faithful_smagorinsky_Cs_squared_scaling():
     """K_m ∝ C_s² (the (C_s·l)² Smagorinsky structure): doubling C_s quadruples K_m."""
-    o1, _ = _run(SmagorinskyConfig(C_s=0.2))
-    o2, _ = _run(SmagorinskyConfig(C_s=0.4))
+    o1, _ = _run(SmagorinskyConfig(stability_form="lilly", C_s=0.2))
+    o2, _ = _run(SmagorinskyConfig(stability_form="lilly", C_s=0.4))
     km1 = np.asarray(o1.Km)[0, 0]
     km2 = np.asarray(o2.Km)[0, 0]
     assert km1 > 0.0
@@ -322,7 +322,7 @@ def test_smagorinsky_deformation_approx_linear_in_vertical_shear():
     (both degree-1 homogeneous in velocity) — the single-column departure is documented
     by inspection (no horizontal strain).
     """
-    cfg = SmagorinskyConfig()
+    cfg = SmagorinskyConfig(stability_form="lilly")
     # neutral: θ constant ⇒ N²=0 ⇒ Ri=0 ⇒ f_buoy=1. Strong shear so the AD-safety
     # S²+1e-10 floor (itself a departure) is negligible and the linearity is clean.
     o1, _ = _run(cfg, theta_top=300.0, theta_sfc=300.0, u_top=200.0, u_sfc=20.0)

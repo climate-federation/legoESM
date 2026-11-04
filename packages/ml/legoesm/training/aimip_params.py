@@ -1179,7 +1179,8 @@ _INACTIVE_FIELDS_BY_CLOUD_SCHEME = {
 
 def aimip_inactive_fields(*, cloud_scheme: str, microphysics: str, gwd: str,
                           subgrid_orography: bool,
-                          param_fixed: dict | None = None) -> frozenset:
+                          param_fixed: dict | None = None,
+                          turbulence: str = "none") -> frozenset:
     """Qualified ``scheme_key.field`` names with no gradient path under this
     scheme selection, frozen OUT of the trainable set by name (no-inert-parameters
     rule, the ``_inactive_keys`` pattern) rather than left to a measured
@@ -1198,6 +1199,7 @@ def aimip_inactive_fields(*, cloud_scheme: str, microphysics: str, gwd: str,
         MicrophysicsConfig,
         MorrisonConfig,
     )
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     from legoesm.core.param_overrides import apply_param_overrides
 
     pins = (param_fixed or {}).get("atm.micro.MorrisonConfig", {})
@@ -1205,7 +1207,8 @@ def aimip_inactive_fields(*, cloud_scheme: str, microphysics: str, gwd: str,
         microphysics=MicrophysicsConfig(
             scheme=microphysics,
             morrison=apply_param_overrides(MorrisonConfig(), dict(pins))),
-        gravity_wave_drag=GravityWaveDragConfig(scheme=gwd))
+        gravity_wave_drag=GravityWaveDragConfig(scheme=gwd),
+        turbulence=TurbulenceConfig(scheme=turbulence))
     return (_INACTIVE_FIELDS_BY_CLOUD_SCHEME.get(cloud_scheme, frozenset())
             | resolved_inactive_fields(
                 probe, subgrid_orography=subgrid_orography))
@@ -1260,6 +1263,14 @@ def resolved_inactive_fields(physics_config, *,
     if (getattr(conv, "scheme", None) == "emanuel"
             and not conv.emanuel.enable_cmt):
         out.add("atm.conv.EmanuelConfig.cu_coefficient")
+    turb = getattr(physics_config, "turbulence", None)
+    if getattr(turb, "scheme", None) == "smagorinsky":
+        # The WRF km_opt=3 arm reads only wrf_c_s / wrf_prandtl; the Lilly and
+        # Deardorff arms read only C_s / Pr_t / l_mix_max (smagorinsky.py).
+        unread = (("C_s", "Pr_t", "l_mix_max")
+                  if turb.smagorinsky.stability_form == "wrf_km3"
+                  else ("wrf_c_s", "wrf_prandtl"))
+        out |= {f"atm.turb.SmagorinskyConfig.{f}" for f in unread}
     gwd = getattr(physics_config, "gravity_wave_drag", None)
     if subgrid_orography and "mcfarlane" in str(
             getattr(gwd, "scheme", "")).split("+"):
