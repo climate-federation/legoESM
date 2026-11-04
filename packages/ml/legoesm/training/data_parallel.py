@@ -78,6 +78,8 @@ def mpi_abort_on_uncaught(fn=None, *, comm=None, code=1):
     (``@mpi_abort_on_uncaught``) or parameterised (``@mpi_abort_on_uncaught(comm=c)``).
     """
     import functools
+    import sys
+    import traceback
 
     def _deco(f):
         @functools.wraps(f)
@@ -94,9 +96,15 @@ def mpi_abort_on_uncaught(fn=None, *, comm=None, code=1):
                 # (``sys.exit("")`` is a FAILING exit despite being falsy).
                 if not (exc.code is None
                         or (isinstance(exc.code, int) and exc.code == 0)):
+                    # MPI_Abort kills the process before the interpreter
+                    # prints anything, so say why first.
+                    print(f"[rank abort] SystemExit: {exc.code!r}",
+                          file=sys.stderr, flush=True)
                     _abort_multirank_job(comm, code=code)
                 raise
             except BaseException:
+                traceback.print_exc()
+                sys.stderr.flush()
                 _abort_multirank_job(comm, code=code)
                 raise
 
@@ -392,6 +400,28 @@ def mpi_data_parallel_train_step(value_and_grad_fn, params, opt_state, optimizer
     return params, opt_state, loss
 
 
+def _prefetched(samples, todo):
+    """Yield ``(i_step, samples[k])`` for ``todo = [(i_step, k), ...]`` in
+    order, reading the NEXT sample in one background thread while the caller
+    works on the current one (host reads only; a lazy state-cache list costs
+    ~1 s per record).  A read error re-raises here, in the caller's thread,
+    at the step that needed the sample; the thread is joined on exit."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not todo:
+        return
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        nxt = pool.submit(samples.__getitem__, todo[0][1])
+        for j, (i_step, _k) in enumerate(todo):
+            cur = nxt.result()
+            if j + 1 < len(todo):
+                nxt = pool.submit(samples.__getitem__, todo[j + 1][1])
+            yield i_step, cur
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 def epoch_permutation(seed: int, epoch: int, n: int):
     """The sample order of ``epoch``: a permutation of ``range(n)`` that depends
     only on ``(seed, epoch, n)``."""
@@ -463,10 +493,9 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
         n_skipped = start_skipped if first else 0
         order = (range(len(local_samples)) if epoch_order is None
                  else epoch_order(epoch))
-        for i_step, k_sample in enumerate(order):
-            if first and i_step < start_step:
-                continue
-            sample = local_samples[k_sample]
+        todo = [(i, k) for i, k in enumerate(order)
+                if not (first and i < start_step)]
+        for i_step, sample in _prefetched(local_samples, todo):
             import time as _time
             _t0 = _time.perf_counter()
             # #1286 fix A: samples are kept HOST-resident (numpy leaves) so the

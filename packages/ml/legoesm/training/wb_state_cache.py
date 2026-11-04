@@ -157,15 +157,34 @@ class StateCache:
         return carry, sfc, forcing
 
 
+# A GPU rebuild is not bit-reproducible: measured 2026-11-04, one of 589824
+# cloud-water values moved by 3.4e-21 (field max 5.4e-4) in 5 of 6 rebuilds.
+# A stale cache moves fields by far more than GATE_EPS_MULT float32 machine
+# epsilons of the field's own largest finite |value|.  (Voted 3-0: Claude,
+# GLM, codex.)
+GATE_EPS_MULT = 4
+
+
 def assert_cache_matches(fresh, cached) -> None:
     """Hard error unless the cached record equals the freshly built one
-    rounded to float32, leaf by leaf (NaN == NaN)."""
+    rounded to float32, leaf by leaf: NaN/inf exactly (same places, same
+    values), every finite value to within ``GATE_EPS_MULT`` * float32 eps *
+    that array's largest finite |value|."""
     a, _ = record_arrays(*fresh)
     b, _ = record_arrays(*cached)
     if sorted(a) != sorted(b):
         raise RuntimeError("state cache gate: record fields differ.")
+    eps = float(np.finfo(np.float32).eps)
     for name in sorted(a):
-        if not np.array_equal(a[name], b[name], equal_nan=True):
+        x, y = a[name], b[name]
+        fin = np.isfinite(y)
+        scale = float(np.max(np.abs(y[fin]), initial=0.0))
+        if not (x.shape == y.shape
+                and np.array_equal(np.isfinite(x), fin)
+                and np.array_equal(x[~fin], y[~fin], equal_nan=True)
+                and np.all(np.abs(x[fin].astype(np.float64)
+                                  - y[fin].astype(np.float64))
+                           <= GATE_EPS_MULT * eps * scale)):
             raise RuntimeError(
                 f"state cache gate: {name} differs between the cache and a "
                 "fresh build from ERA5; the cache is stale. Rebuild it.")

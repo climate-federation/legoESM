@@ -68,15 +68,40 @@ def test_extending_a_store_keeps_written_times(tmp_path):
     with pytest.raises(RuntimeError, match="different structure"):
         wsc.create_store(p, [10], arrays, structure, {"other": 1})
 
-def test_gate_catches_one_float32_ulp_and_structure(tmp_path):
+def _gate(tmp_path, edit):
     p = _store(tmp_path, [10])
-    arr = wsc.record_arrays(*_rec(10))[0]
-    arr["c000"] = arr["c000"].copy()
-    arr["c000"].flat[0] = np.nextafter(arr["c000"].flat[0], np.float32(np.inf))
+    arr = {k: v.copy() for k, v in wsc.record_arrays(*_rec(10))[0].items()}
+    edit(arr)
     wsc.write_time(p, 10, arr)
-    c = wsc.StateCache(p, _rec(10))
+    wsc.assert_cache_matches(_rec(10), wsc.StateCache(p, _rec(10)).read(10))
+
+
+def test_gate_tolerates_gpu_rebuild_noise_only(tmp_path):
+    eps = float(np.finfo(np.float32).eps)
+
+    def shift(k):          # move element 0 by k float32 eps x the array's max |value|
+        def edit(arr):
+            a = arr["c000"]
+            a.flat[0] += np.float32(k * eps * np.max(np.abs(a)))
+        return edit
+    _gate(tmp_path / "a", shift(2))       # rebuild-sized noise: passes
     with pytest.raises(RuntimeError, match="stale"):
-        wsc.assert_cache_matches(_rec(10), c.read(10))
+        _gate(tmp_path / "b", shift(32))  # a real change fails
+
+    def nan_flip(arr):
+        arr["f000"].flat[np.flatnonzero(~np.isnan(arr["f000"]))[0]] = np.nan
+    with pytest.raises(RuntimeError, match="stale"):
+        _gate(tmp_path / "c", nan_flip)
+
+    def inf_at_0(arr):     # cached inf where the fresh build is finite
+        arr["c000"].flat[0] = np.inf
+    with pytest.raises(RuntimeError, match="stale"):
+        _gate(tmp_path / "d", inf_at_0)
+
+
+def test_gate_catches_structure(tmp_path):
+    p = _store(tmp_path, [10])
+    wsc.write_time(p, 10, wsc.record_arrays(*_rec(10))[0])
     other = (_rec(10)[0], {"t2m": _rec(10)[1]["t2m"]}, _rec(10)[2])
     with pytest.raises(RuntimeError, match="different sample structure"):
         wsc.StateCache(p, other)

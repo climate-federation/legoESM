@@ -550,3 +550,36 @@ def test_legacy_multi_step_hours_train_every_lead_on_spectral_only():
     with pytest.raises(ValueError, match="weighted"):
         supervised_leads({"loss": {"multi_step_hours": [6, 12],
                                    "multi_step_weights": [1.0, 0.5]}})
+
+
+@pytest.mark.parametrize("mode", ["neural_gcm", "physics"])
+def test_segment_remat_keeps_forecast_and_gradient(mode):
+    """spectral.segment_remat (recompute each segment in the backward pass)
+    changes memory only: the chained forecast and its parameter gradient
+    equal the plain path to float64 round-off."""
+    import equinox as eqx
+    from legoesm.training.scale_build import build_mode_components
+
+    ncol_of = lambda g: int(g.n_lat) * int(g.n_lon)  # noqa: E731
+    outs = {}
+    for remat in (False, True):
+        yml = _yml(segment_remat=remat)
+        _, grid, sigma, params, mk, _, dt = build_mode_components(_cfg(mode), yml)
+        params = _perturbed(params)
+        ic = _synthetic_carry(grid, int(yml["nlev"]))
+        n = ncol_of(grid)
+        f = {"T_sfc": jnp.full((n,), 300.0), "sic": jnp.zeros((n,)),
+             "land_frac": jnp.asarray((np.arange(n) % 4 == 0).astype(float)),
+             "day_of_year": jnp.asarray(80.0), "seconds_of_day": jnp.asarray(75600.0)}
+        arr, static = eqx.partition(params, eqx.is_inexact_array)
+
+        def loss(a):
+            o = mk(eqx.combine(a, static)).raw_multi(ic, 1, 2, f)
+            return sum(jnp.sum(c.T ** 2) for c in o)
+
+        val, g = jax.value_and_grad(loss)(arr)
+        outs[remat] = (float(val), jax.tree.leaves(g))
+    assert outs[True][0] == pytest.approx(outs[False][0], rel=1e-12)
+    for a, b in zip(outs[True][1], outs[False][1]):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-30)
+    assert max(float(jnp.max(jnp.abs(x))) for x in outs[False][1]) > 0.0

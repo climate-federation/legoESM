@@ -600,7 +600,7 @@ _WB_SPECTRAL_KEYS = frozenset({
     "semi_implicit", "si_T_ref", "si_alpha", "si_substeps", "sponge_sigma",
     "sponge_tau", "spectral_filter_order", "spectral_filter_strength",
     "fix_mass", "anchor_mass_to_initial", "vertical_advection_scheme",
-    "frictional_heating",
+    "frictional_heating", "segment_remat",
 })
 # Exactly the keys the classical / neural_gcm / sfno builders read from their
 # nested blocks (#1663 review: these were unvalidated, so a nested typo like
@@ -625,6 +625,7 @@ _WB_NEURAL_KEYS = frozenset({
     "surface_drag", "surface_drag_scheme", "surface_drag_confounded",
     "nn_hidden", "nn_layers", "gauss_n_max", "sfno_embed_dim", "sfno_n_blocks",
     "sfno_mlp_expansion", "spatial_embedding", "land_inputs",
+    "sfno_gradient_checkpoint",
 })
 
 
@@ -863,6 +864,12 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
     grid = create_gaussian_grid(n_max)
     sigma = create_sigma_coordinate(nlev)
     pe_config = _spectral_pe_config(yml)
+    # Nested recomputation over the multi-lead forecast (owner 2026-11-04:
+    # recompute, never truncate): each segment keeps only its entering state
+    # and is re-run in the backward pass.  Same gradient, less memory.
+    _seg_remat = spec.get("segment_remat", False)
+    if not isinstance(_seg_remat, bool):
+        raise ValueError(f"spectral.segment_remat must be true or false, got {_seg_remat!r}")
     # No pole-cell clamp on the Gaussian grid.  The SI step is NOT stable at
     # arbitrary dt: only the linear gravity-wave subsystem is implicit, and
     # the explicit RK3 advection has a spectral CFL bound
@@ -1174,6 +1181,12 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
         _sf = {k: int(ov[k]) for k in
                ("sfno_embed_dim", "sfno_n_blocks", "sfno_mlp_expansion")
                if k in ov}
+        if "sfno_gradient_checkpoint" in ov:
+            _gc = ov["sfno_gradient_checkpoint"]
+            if not isinstance(_gc, bool):
+                raise ValueError("sfno.sfno_gradient_checkpoint must be true or "
+                                 f"false, got {_gc!r}")
+            _sf["sfno_gradient_checkpoint"] = _gc
         # ACE2-style land-fraction plane (mode block) + the six ERA5
         # surface-flux input planes (top-level campaign flag).
         _sf_spatial = bool(ov.get("spatial_embedding", False))
@@ -1232,7 +1245,26 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
                 raise ValueError(
                     "raw_multi: a stateful physics without split radiation "
                     "cannot be chained (its physics state would restart).")
+            import jax
+            import jax.numpy as jnp
+
             state = carry_to_spectral_state(ic_carry, grid)
+            if _seg_remat and self._rad_fn is None:
+                # One compiled segment body reused by every segment (a scan
+                # over segments, each recomputed in the backward pass), so
+                # the backward of segment k reuses segment k+1's buffers
+                # instead of XLA keeping a separate working set per segment.
+                def body(st, k):
+                    st = self._roll(st, seg_steps, forcing,
+                                    adjoint_steps=adjoint_steps,
+                                    sim_time_offset_seconds=(
+                                        k * (int(seg_steps) * dt)))
+                    return st, spectral_state_to_carry(st, grid, sigma)
+                _, stacked = jax.lax.scan(
+                    jax.checkpoint(body, prevent_cse=True), state,
+                    jnp.arange(int(n_segs), dtype=jnp.float64))
+                return tuple(jax.tree.map(lambda x, i=i: x[i], stacked)
+                             for i in range(int(n_segs)))
             ps = rad = None
             out = []
             for k in range(int(n_segs)):
@@ -1240,13 +1272,24 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
                 if self._rad_fn is not None:
                     kw.update(return_phys_state=True, return_rad_tendency=True)
                     if k:
-                        kw.update(phys_state_in=ps, rad_tendency_in=rad,
-                                  step_offset=k * int(seg_steps))
-                    state, ps, rad = self._roll(state, seg_steps, forcing, **kw)
+                        kw.update(step_offset=k * int(seg_steps))
+
+                    def seg(st, f, ps_, rad_, kw=kw, k=k):
+                        if k:
+                            kw = {**kw, "phys_state_in": ps_, "rad_tendency_in": rad_}
+                        return self._roll(st, seg_steps, f, **kw)
+                    if _seg_remat:
+                        seg = jax.checkpoint(seg, prevent_cse=True)
+                    state, ps, rad = seg(state, forcing, ps, rad)
                 else:
                     if k:
                         kw["sim_time_offset_seconds"] = k * int(seg_steps) * dt
-                    state = self._roll(state, seg_steps, forcing, **kw)
+
+                    def seg(st, f, kw=kw):
+                        return self._roll(st, seg_steps, f, **kw)
+                    if _seg_remat:
+                        seg = jax.checkpoint(seg, prevent_cse=True)
+                    state = seg(state, forcing)
                 out.append(spectral_state_to_carry(state, grid, sigma))
             return tuple(out)
 
@@ -2232,6 +2275,12 @@ def _state_cached_samples(cfg, yml, grid, sigma, mine, leads, lead_offsets,
         return (ic, target, forcing)
 
     samples = _CachedSamples(mine, make)
+    # The records are immutable once written (the first sample is gate-checked
+    # against a fresh ERA5 build above), so the store path (which carries its
+    # build tag) and the ordered index tuples identify the content exactly;
+    # the trainer fingerprints this instead of reading every record.
+    samples.content_key = (str(cache.path), tuple(tuple(int(x) for x in m)
+                                                  for m in mine))
     validate_carry_holds_scheme(samples[0][0], micro,
                                 context=f"WB {cfg.mode} arm initial condition")
     return samples

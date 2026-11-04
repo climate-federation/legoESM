@@ -942,6 +942,20 @@ def _sample_fingerprint(samples):
     import jax
     import numpy as np
 
+    if isinstance(samples, _Chained):
+        (h1, m1), (h2, m2) = (_sample_fingerprint(samples._a),
+                              _sample_fingerprint(samples._b))
+        return zlib.crc32(str(h2).encode(), h1), np.concatenate([m1, m2])
+    key = getattr(samples, "content_key", None)
+    if key is not None:
+        # A state-cache-backed list: identified by its store and indices
+        # (scale_build._state_cached_samples) plus the content sketch of its
+        # first and last samples only, which catches a change in any input
+        # mixed into every sample at read time (aerosol, flux climatology)
+        # without reading every record.  (Voted 3-0: Claude, GLM, codex.)
+        h, m = _sample_fingerprint([samples[0], samples[len(samples) - 1]])
+        return zlib.crc32(repr(key).encode(), h), m
+
     h = zlib.crc32(str(len(samples)).encode())
     moments = []
     for i, s in enumerate(samples):

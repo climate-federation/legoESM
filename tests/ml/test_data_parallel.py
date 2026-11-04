@@ -624,3 +624,37 @@ def test_epoch_shuffle_is_reproducible_across_processes_and_resume():
     assert full[n:] == list(epoch_permutation(0, 1, n))
     resumed = run(start_epoch=1, start_step=3, start_losses=(0.0, 0.0, 0.0))
     assert resumed == full[n + 3:]
+
+
+def test_prefetch_keeps_order_reads_ahead_and_reraises():
+    """The loop's one-ahead prefetch yields every scheduled sample in order,
+    has read the next one by the time the current one is used, and surfaces
+    a read error at the step that needed it."""
+    from legoesm.training.data_parallel import _prefetched
+
+    reads = []
+
+    class Lazy:
+        def __getitem__(self, k):
+            reads.append(k)
+            if k == 9:
+                raise OSError("bad record")
+            return k * 10
+
+    todo = [(0, 3), (1, 1), (2, 2)]
+    got = []
+    for i, s in _prefetched(Lazy(), todo):
+        got.append((i, s))
+        if i == 0:
+            import time
+            for _ in range(200):            # the next read is in flight/done
+                if len(reads) >= 2:
+                    break
+                time.sleep(0.01)
+            assert reads[:2] == [3, 1]
+    assert got == [(0, 30), (1, 10), (2, 20)]
+    seen = []
+    with pytest.raises(OSError, match="bad record"):
+        for i, s in _prefetched(Lazy(), [(0, 1), (1, 9), (2, 2)]):
+            seen.append(i)
+    assert seen == [0]

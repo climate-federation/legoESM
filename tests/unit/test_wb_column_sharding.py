@@ -165,6 +165,42 @@ def test_sample_fingerprint_sees_structure_order_and_content():
     assert mod._assert_samples_agree([a], "samples", 1e-9) == 0.0
 
 
+def test_cached_sample_list_is_fingerprinted_from_its_key_and_end_samples():
+    """A state-cache-backed list (content_key) is identified by its store,
+    its index tuples and the content of its FIRST and LAST samples only: no
+    other record is read, and another store, order or end content changes it."""
+    import numpy as np
+
+    class Cached:
+        def __init__(self, key, n=5, scale=1.0):
+            self.content_key, self.n, self.scale, self.read = key, n, scale, []
+
+        def __len__(self):
+            return self.n
+
+        def __getitem__(self, i):
+            self.read.append(i)
+            return {"T": np.full(3, (i + 1) * self.scale)}
+
+        def __iter__(self):
+            raise AssertionError("the whole list was read")
+
+    k = ("s", ((2015, 0, 1), (2015, 1, 2)))
+    c = Cached(k)
+    a = mod._sample_fingerprint(c)
+    assert sorted(c.read) == [0, 4]
+    assert a[0] != mod._sample_fingerprint(Cached(("t", k[1])))[0]
+    assert a[0] != mod._sample_fingerprint(Cached(("s", k[1][::-1])))[0]
+    # e.g. a different aerosol file: same store and indices, other content
+    b = mod._sample_fingerprint(Cached(k, scale=2.0))
+    assert a[0] == b[0] and not np.array_equal(a[1], b[1])
+    # chained with the parameter leaves: those are still fingerprinted by value
+    p = [np.ones(3)]
+    c1 = mod._sample_fingerprint(mod._Chained(Cached(k), [p]))
+    c2 = mod._sample_fingerprint(mod._Chained(Cached(k), [[np.ones(3) * 2]]))
+    assert c1[0] == c2[0] and not np.array_equal(c1[1], c2[1])
+
+
 def test_physical_params_runs():
     """_physical_params used numpy without importing it (NameError at the
     first checkpoint of every run)."""

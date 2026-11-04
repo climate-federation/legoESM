@@ -67,6 +67,9 @@ VARIANT_DEFAULTS: dict[str, dict[str, Any]] = {
         "era5_surface_fluxes": False,
         # ACE2-style learned per-location embedding after the encoder.
         "learned_position_embedding": False,
+        # Recompute each SFNO block in the backward pass (SFNOConfig
+        # gradient_checkpoint): same gradient, less memory.
+        "sfno_gradient_checkpoint": False,
     },
     "sfno_full": {
         "sfno_embed_dim": 128,
@@ -157,7 +160,8 @@ def sfno_arch_config(variant: str, *, nlev: int,
                            spatial_embedding=bool(kw["spatial_embedding"]),
                            era5_surface_fluxes=bool(kw["era5_surface_fluxes"])))
         extra = {"learned_position_embedding":
-                 bool(kw["learned_position_embedding"])}
+                 bool(kw["learned_position_embedding"]),
+                 "gradient_checkpoint": bool(kw["sfno_gradient_checkpoint"])}
     else:  # sfno_full: the emulator sees (1 + history) copies of the state.
         in_channels = spec.n_channels * (1 + int(kw["sfno_history_steps"]))
         extra = {"dropout": float(kw["sfno_dropout"])}
