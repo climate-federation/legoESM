@@ -34,9 +34,13 @@ ADDITIONS / DEPARTURES from HS94:
     ``positive_part_c1`` at ``sponge_sharpness`` (width 1/sharpness = 0.01);
     ``sponge_sharpness = inf`` is Isca's hard form (oracle test).
   * ``conserves = ["energy"]``: Rayleigh friction is a direct drag with no wave;
-    the drag and sponge convert resolved KE to heat, both tracked, so
-    ``eps_gwd = c_pd sum(rho dT_dt dz)`` is the full energy budget. Momentum
-    is NOT conserved (a sink).
+    the drag and sponge convert resolved KE to heat, both tracked. The heating
+    returns the KE the step removes (time-centred in the sponge), so
+    ``c_pd sum(rho dT_dt dz) = eps_gwd - dt/2 sum(rho (du_sp^2 + dv_sp^2) dz)``
+    with ``eps_gwd`` the instantaneous KE loss of the GWDOutput contract.
+    Momentum is NOT conserved (a sink).
+  * the level cap is a hard integer switch (Isca's), piecewise constant in
+    ``p_sb`` and ``p_s``: its gradient is zero, only the cutoff is smoothed.
 NUMERICS: the ``k_bl`` UPPER clip at 1 is a redundant guard (``(σ−σ_b)/(1−σ_b)
 ≤ 1`` for any physical ``σ ≤ 1``); the ``p_sfc`` floor at 1 Pa.
 Oracle: ``tests/atmosphere/test_rayleigh_sponge_isca_oracle.py``.
@@ -184,8 +188,10 @@ def rayleigh_gwd(
         - ((u + 0.5 * dt * du_sp) * du_sp + (v + 0.5 * dt * dv_sp) * dv_sp)
     ) / constants.c_pd
 
-    # Column dissipation = column-integrated heating (positive-definite)
+    # Column dissipation, GWDOutput contract (instantaneous KE loss). The column heating
+    # c_pd*sum(rho dT dz) is smaller by dt/2*sum(rho (du_sp^2 + dv_sp^2) dz): the
+    # time-centred sponge heating returns the KE the explicit step removes.
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
-    eps_gwd = constants.c_pd * jnp.sum(rho * dT_dt * dz, axis=1)
+    eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
 
     return GWDOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, eps_gwd=eps_gwd)

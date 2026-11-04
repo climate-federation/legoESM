@@ -168,19 +168,23 @@ def test_rayleigh_sponge_level_cap_binds():
 
 
 def test_rayleigh_sponge_smooth_cutoff_gradient():
-    """RULE 5: the default C1 cutoff has a finite, correct d(du_dt)/d(p_sb) (FD check)."""
+    """RULE 5: d(du_dt)/d(p_sb) with a level INSIDE the 0.01 cutoff band: AD == FD, != hard AD."""
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _columns(p_top=1.0)
+    p_in = float(p_full[0, 6])                             # ~44 Pa
+    p_sb0 = 1.005 * p_in                                   # (p_sb - p)/p_sb ~ 0.005 < 0.01
 
-    def f(p_sb):
-        cfg = RayleighConfig(k_max=0.0, sponge_pbottom_Pa=p_sb)
+    def f(p_sb, s):
+        cfg = RayleighConfig(k_max=0.0, sponge_pbottom_Pa=p_sb, sponge_sharpness=s)
         return jnp.sum(rayleigh_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
-                                    300.0, cfg).du_dt)
+                                    300.0, cfg).du_dt[:, 6])
 
-    g = float(jax.grad(f)(50.0))
-    h = 1e-4
-    fd = (float(f(50.0 + h)) - float(f(50.0 - h))) / (2 * h)
+    g = float(jax.grad(f)(p_sb0, 100.0))
+    h = 1e-6 * p_sb0
+    fd = (float(f(p_sb0 + h, 100.0)) - float(f(p_sb0 - h, 100.0))) / (2 * h)
+    g_hard = float(jax.grad(f)(p_sb0, float("inf")))
     assert np.isfinite(g) and g != 0.0
-    assert abs(g - fd) <= 1e-6 * abs(fd)
+    assert abs(g - fd) <= 1e-5 * abs(fd)
+    assert abs(g - g_hard) > 1e-3 * abs(g_hard)            # the smoothing is what is tested
 
 
 def test_rayleigh_rest_state_zero():
@@ -204,19 +208,28 @@ def test_rayleigh_sign_is_a_sink():
 
 
 def test_rayleigh_energy_closure_ke_to_heat():
-    """c_pd·Σρ·dT_dt·dz == eps_gwd ≥ 0 — the exact KE→heat energy closure.
+    """eps_gwd = -Σρ(u du + v dv)dz (contract); c_pd·Σρ·dT·dz = eps_gwd − dt/2·Σρ(du_sp²+dv_sp²)dz.
 
-    dT_dt is computed FROM the tendency so the identity holds BY CONSTRUCTION; here Rayleigh is a
-    DIRECT drag (no wave at all), so that by-construction closure IS the full resolved energy
-    budget, which is why conserves=["energy"] is correct for Rayleigh.
+    The extra term is the time-centred sponge heating (Isca do_conserve_energy): the heat equals
+    the KE the explicit step removes, computed here independently from (u + dt·du)².
     """
-    out, inp = _run(RayleighConfig())
-    rho, z_half = np.asarray(inp[7]), np.asarray(inp[6])
+    cfg, dt = RayleighConfig(), 300.0
+    out, inp = _run(cfg, p_top=1.0)
+    u, v, rho, z_half = (np.asarray(inp[i]) for i in (0, 1, 7, 6))
     dz = np.abs(z_half[:, :-1] - z_half[:, 1:])
-    col_heat = constants.c_pd * np.sum(rho * np.asarray(out.dT_dt) * dz, axis=1)
+    du, dv = np.asarray(out.du_dt), np.asarray(out.dv_dt)
     eps = np.asarray(out.eps_gwd)
     assert np.any(eps > 1e-12)
-    assert np.allclose(col_heat, eps, rtol=1e-9, atol=1e-12)
+    assert np.allclose(eps, -np.sum(rho * (u * du + v * dv) * dz, axis=1), rtol=1e-12, atol=0.0)
+    sp = _run(cfg._replace(k_max=0.0), p_top=1.0)[0]
+    du_sp, dv_sp = np.asarray(sp.du_dt), np.asarray(sp.dv_dt)
+    assert np.any(du_sp != 0.0)
+    du_bl, dv_bl = du - du_sp, dv - dv_sp
+    ke_step = -(((u + dt * du_sp) ** 2 - u ** 2) + ((v + dt * dv_sp) ** 2 - v ** 2)) / (2 * dt)
+    want_heat = -np.sum(rho * (u * du_bl + v * dv_bl) * dz, axis=1) + np.sum(rho * ke_step * dz, axis=1)
+    col_heat = constants.c_pd * np.sum(rho * np.asarray(out.dT_dt) * dz, axis=1)
+    assert np.allclose(col_heat, want_heat, rtol=1e-10, atol=0.0)
+    assert np.all(col_heat < eps)                          # the dt/2 term is present
 
 
 def test_rayleigh_frictional_heating_form():

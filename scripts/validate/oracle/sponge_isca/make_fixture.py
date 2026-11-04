@@ -19,7 +19,8 @@ Two column sets (vote W5):
        simple_gwd_hines_lindzen_rayleigh_spectral/inputs/cols.npz), sponge_pbottom
        1000 Pa (fixture value: their top full level is 364 Pa, so the 50 Pa default
        never acts there).
-  L60: 6 synthetic log-pressure columns, top interface 1 Pa, at the 50 Pa default.
+  L60: 7 synthetic log-pressure columns, top interface 1 Pa, at the 50 Pa default;
+       the p_s = 30 kPa column has levels with p < p_sb below the level cap.
 dt 1800 s, sponge_k = RayleighConfig default.
 
 Self-checks (known values, every run): zero tendency where p >= p_sb or level >
@@ -53,7 +54,7 @@ def f17(a):
 
 
 def synthetic_l60():
-    nlev, ps = 60, np.array([1.0e5, 1.013e5, 9.5e4, 8.0e4, 7.0e4, 5.5e4])
+    nlev, ps = 60, np.array([1.0e5, 1.013e5, 9.5e4, 8.0e4, 7.0e4, 5.5e4, 3.0e4])
     k = np.arange(nlev + 1)
     out = {key: [] for key in KEYS}
     for c, p_s in enumerate(ps):
@@ -101,6 +102,9 @@ def run_set(d, p_sb, cfg):
     cap = np.argmin(np.abs(pref - 2.0 * p_sb), axis=1)[:, None]
     act = (np.arange(nlev)[None, :] <= cap) & (d["p_full"] < p_sb)
     assert act.any() and (~act).any()
+    capped = (d["p_full"] < p_sb) & ~act
+    if p_sb == cfg.sponge_pbottom_Pa:
+        assert capped.any()      # the cap binds against Isca (L60 p_s = 30 kPa column)
     fac = rf * ((p_sb - d["p_full"]) / p_sb) ** 2
     for k, w in (("udt", d["u"]), ("vdt", d["v"])):
         assert np.all(out[k][~act] == 0.0), k

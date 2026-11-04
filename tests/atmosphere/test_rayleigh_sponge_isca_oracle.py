@@ -9,8 +9,9 @@ scripts/validate/oracle/sponge_isca/{build.sh,make_fixture.py}.
 
 Ours = ``rayleigh_gwd`` with the HS94 low-level drag off (``k_max = 0``: not part of
 damping_driver), the fixture's ``sponge_pbottom_Pa`` and Isca's hard cutoff
-(``sponge_sharpness = inf``).  Two column sets: 13 CAM L32 columns at 1000 Pa and 6
-synthetic L60 columns (top 1 Pa) at the 50 Pa default.
+(``sponge_sharpness = inf``).  Two column sets: 13 CAM L32 columns at 1000 Pa and 7
+synthetic L60 columns (top 1 Pa) at the 50 Pa default, one with p_s = 30 kPa so the
+level cap excludes levels with p < p_sb.
 
 Metric: per column, max|ours - ref| / max|ref| (0 when both are identically zero),
 worst column returned.
