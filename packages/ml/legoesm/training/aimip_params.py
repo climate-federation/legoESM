@@ -34,7 +34,6 @@ from legoesm import constants
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.atmosphere.physics.convection.config import (
     ConvectionConfig,
-    TiedtkeConfig,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     GravityWaveDragConfig,
@@ -60,30 +59,8 @@ from legoesm.training.aimip_spatial import AIMIPSpatialSurfaceParams
 # scheme's published defaults.  All transforms are 'sigmoid' so the
 # unconstrained optimizer-space leaves are unbounded reals.
 
-_TIEDTKE_TRAINABLE: list[ParamConstraint] = [
-    ParamConstraint("tiedtke_tau_M_u_relax", 600.0, 14400.0, "sigmoid"),
-    ParamConstraint("tiedtke_tau_MC_proxy", 1800.0, 28800.0, "sigmoid"),
-    # tiedtke_cape_threshold REMOVED (#1417): the trigger sigmoid saturates
-    # to exactly 1.0 in a convecting column and CAPE clamps to exactly 0 in a
-    # stable one, so its gradient is EXACTLY zero in both regimes. It was
-    # being optimised with no signal; its spec is tier 0 for the same reason.
-    ParamConstraint("tiedtke_downdraft_alpha", 0.05, 0.6, "sigmoid"),
-    ParamConstraint("tiedtke_downdraft_RH_min", 0.1, 0.6, "sigmoid"),
-    # Extended: entrainment / detrainment + closure knobs (audit pass).
-    ParamConstraint("tiedtke_epsilon_deep", 2.0e-5, 5.0e-4, "sigmoid"),
-    ParamConstraint("tiedtke_delta_deep", 2.0e-5, 5.0e-4, "sigmoid"),
-    ParamConstraint("tiedtke_epsilon_shallow", 1.0e-4, 1.0e-3, "sigmoid"),
-    ParamConstraint("tiedtke_delta_shallow", 1.0e-4, 1.0e-3, "sigmoid"),
-    ParamConstraint("tiedtke_epsilon_midlevel", 2.0e-5, 5.0e-4, "sigmoid"),
-    ParamConstraint("tiedtke_delta_midlevel", 2.0e-5, 5.0e-4, "sigmoid"),
-    ParamConstraint("tiedtke_cmt_c_u", 0.3, 1.0, "sigmoid"),
-    ParamConstraint("tiedtke_cmt_c_d", 0.3, 1.0, "sigmoid"),
-    ParamConstraint("tiedtke_parcel_dT", 0.1, 1.5, "sigmoid"),
-    ParamConstraint("tiedtke_parcel_dq", 1.0e-4, 5.0e-3, "sigmoid"),
-    ParamConstraint("tiedtke_cloud_depth_deep", 1500.0, 5000.0, "sigmoid"),
-    ParamConstraint("tiedtke_cloud_depth_shallow_max", 500.0, 3000.0, "sigmoid"),
-    ParamConstraint("tiedtke_mc_proxy_RH_crit", 0.4, 0.9, "sigmoid"),
-]
+# Tiedtke has no trainables: the convection is the faithful WRF port, whose
+# constants are fixed (oracle-fidelity routing R1, 2026-11).
 
 _LOUIS_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("louis_l_mix_max", 20.0, 400.0, "sigmoid"),
@@ -188,8 +165,8 @@ _SUNDQVIST_TRAINABLE: list[ParamConstraint] = [
 _SBM_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("sbm_tau_c", 1800.0, 21600.0, "sigmoid"),
     ParamConstraint("sbm_RH_ref", 0.5, 0.9, "sigmoid"),
-    # sbm_CAPE_threshold REMOVED (#1417): same AD-unreachable trigger as
-    # tiedtke_cape_threshold — see the note there.
+    # sbm_CAPE_threshold REMOVED (#1417): the trigger sigmoid saturates to
+    # exactly 1.0 / CAPE clamps to 0, so its gradient is exactly zero.
 ]
 
 # RRTMGP knobs (active when ``aimip_radiation=rrtmgp``).
@@ -220,8 +197,7 @@ _AIMIP_COMMON_TRAINABLE: list[ParamConstraint] = []   # see _GRAY_RAD_TRAINABLE
 
 
 AIMIP_CLASSICAL_CONSTRAINTS: list[ParamConstraint] = (
-    _TIEDTKE_TRAINABLE
-    + _LOUIS_TRAINABLE
+    _LOUIS_TRAINABLE
     + _SURFACE_TRAINABLE
     + _MCFARLANE_TRAINABLE
     + _XU_RANDALL_TRAINABLE
@@ -307,7 +283,7 @@ def aimip_classical_trainable_names(*, convection, turbulence, gwd,
         raise ValueError(
             f"unknown surface bulk scheme {surface_bulk_scheme!r}; expected "
             f"one of {sorted(_SURFACE_KNOBS_BY_BULK)}")
-    fams = {"tiedtke": _TIEDTKE_TRAINABLE, "sbm": _SBM_TRAINABLE}.get(
+    fams = {"sbm": _SBM_TRAINABLE}.get(
         convection, [])
     fams = list(fams)
     if turbulence == "louis":
@@ -594,32 +570,6 @@ class AIMIPClassicalParams(eqx.Module):
     # constructed config field.
     # ------------------------------------------------------------------
 
-    def to_tiedtke_config(self) -> TiedtkeConfig:
-        d = self.as_dict()
-        base = TiedtkeConfig()
-        return base._replace(
-            tau_M_u_relax=d["tiedtke_tau_M_u_relax"],
-            tau_MC_proxy=d["tiedtke_tau_MC_proxy"],
-            # cape_threshold is NOT overridden: #1417 dropped it from
-            # _TIEDTKE_TRAINABLE (AD-unreachable trigger), so it is absent
-            # from as_dict() and TiedtkeConfig's published default stands.
-            downdraft_alpha=d["tiedtke_downdraft_alpha"],
-            downdraft_RH_min=d["tiedtke_downdraft_RH_min"],
-            epsilon_deep=d["tiedtke_epsilon_deep"],
-            delta_deep=d["tiedtke_delta_deep"],
-            epsilon_shallow=d["tiedtke_epsilon_shallow"],
-            delta_shallow=d["tiedtke_delta_shallow"],
-            epsilon_midlevel=d["tiedtke_epsilon_midlevel"],
-            delta_midlevel=d["tiedtke_delta_midlevel"],
-            cmt_c_u=d["tiedtke_cmt_c_u"],
-            cmt_c_d=d["tiedtke_cmt_c_d"],
-            parcel_dT=d["tiedtke_parcel_dT"],
-            parcel_dq=d["tiedtke_parcel_dq"],
-            cloud_depth_deep=d["tiedtke_cloud_depth_deep"],
-            cloud_depth_shallow_max=d["tiedtke_cloud_depth_shallow_max"],
-            mc_proxy_RH_crit=d["tiedtke_mc_proxy_RH_crit"],
-        )
-
     def to_surface_config(
         self, bulk_scheme: str = "constant",
     ) -> SurfaceLayerConfig:
@@ -759,7 +709,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         RRTMGPConfig,
     )
 
-    t = TiedtkeConfig()
     lo = LouisConfig()
     su = SurfaceLayerConfig()
     mc = McFarlaneConfig()
@@ -768,25 +717,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
     sbm = SBMConfig()
     rr = RRTMGPConfig()
     return {
-        # Tiedtke (base + extended)
-        "tiedtke_tau_M_u_relax": float(t.tau_M_u_relax),
-        "tiedtke_tau_MC_proxy": float(t.tau_MC_proxy),
-        "tiedtke_cape_threshold": float(t.cape_threshold),
-        "tiedtke_downdraft_alpha": float(t.downdraft_alpha),
-        "tiedtke_downdraft_RH_min": float(t.downdraft_RH_min),
-        "tiedtke_epsilon_deep": float(t.epsilon_deep),
-        "tiedtke_delta_deep": float(t.delta_deep),
-        "tiedtke_epsilon_shallow": float(t.epsilon_shallow),
-        "tiedtke_delta_shallow": float(t.delta_shallow),
-        "tiedtke_epsilon_midlevel": float(t.epsilon_midlevel),
-        "tiedtke_delta_midlevel": float(t.delta_midlevel),
-        "tiedtke_cmt_c_u": float(t.cmt_c_u),
-        "tiedtke_cmt_c_d": float(t.cmt_c_d),
-        "tiedtke_parcel_dT": float(t.parcel_dT),
-        "tiedtke_parcel_dq": float(t.parcel_dq),
-        "tiedtke_cloud_depth_deep": float(t.cloud_depth_deep),
-        "tiedtke_cloud_depth_shallow_max": float(t.cloud_depth_shallow_max),
-        "tiedtke_mc_proxy_RH_crit": float(t.mc_proxy_RH_crit),
         # Louis
         "louis_l_mix_max": float(lo.l_mix_max),
         "louis_Ri_crit": float(lo.Ri_crit),
@@ -1708,11 +1638,7 @@ def make_aimip_classical_spectral_physics(
         )
 
     # ---- Convection ----
-    if convection_scheme == "tiedtke":
-        conv_cfg = ConvectionConfig(
-            scheme="tiedtke", tiedtke=params.to_tiedtke_config(),
-        )
-    elif convection_scheme == "sbm":
+    if convection_scheme == "sbm":
         conv_cfg = ConvectionConfig(
             scheme="sbm", sbm=params.to_sbm_config(),
         )

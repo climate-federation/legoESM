@@ -139,7 +139,9 @@ def test_wb_classical_tree_holds_only_the_selected_schemes_knobs(monkeypatch):
         microphysics="morrison", cloud="xu_randall", radiation="gray",
         surface_bulk_scheme="constant")
     assert _array_knobs(cl) == want
-    assert "sbm_tau_c" not in want and "tiedtke_epsilon_deep" in want
+    # tiedtke (WRF port) has no trainables: no convection knob is wanted
+    assert "sbm_tau_c" not in want and not any(k.startswith("tiedtke_")
+                                                for k in want)
     assert type(cl.raw_values["sbm_tau_c"]) is float   # same leaf, no grad
     arr, _ = eqx.partition(cl, eqx.is_inexact_array)
     assert arr.raw_values["sbm_tau_c"] is None

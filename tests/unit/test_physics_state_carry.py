@@ -88,7 +88,12 @@ def test_turbulence_scheme_traits_match_seeding():
             "tke": bool(np.any(np.asarray(ps.tke) > 0)),
             "qke": bool(np.any(np.asarray(ps.qke) > 0)),
         }
-        if traits.carries_energy:
+        if scheme == "mynn25":
+            # WRF MYNN-EDMF: packed (qke, qsq, el), zero seed that the
+            # cold-start step overwrites (R3 votes N1/N3)
+            assert np.asarray(ps.qke).shape == (4, 3, 3)
+            assert not seeded["qke"] and not seeded["tke"]
+        elif traits.carries_energy:
             assert seeded[traits.energy_field], (
                 f"{scheme}: traits say energy in {traits.energy_field!r} "
                 "but init_physics_state seeded it zero"
