@@ -16,13 +16,13 @@ import numpy as np
 from legoesm.ice import bitz_lipscomb as bl
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as K
 
-from si3_t4col_fixture import col, dh_args, dt, load, within, within_flux
+from si3_t4col_fixture import col, dh_args, dt, load, rel, within, within_flux
 
 jax.config.update("jax_enable_x64", True)
 FX = load("c4_fullmelt")
 
 
-def _run(**kw):
+def _run(**kw):  # noqa: D103
     st, zr, fz = dh_args(FX)
     return st, bl._dh_step_fluxes(st, zr, fz, dt(FX), K, **kw)
 
@@ -91,3 +91,15 @@ def test_smooth_snow_removal_band_is_differentiable():
     np.testing.assert_allclose(float(g), float(fd), rtol=1e-3)
     # hard form keeps all of that snow while any ice remains
     assert float(run(x0, full_melt_width=0.0).h_snow[k]) > float(f(x0))
+
+
+def test_snow_to_ocean_flux_is_strict_where_both_melt_out():
+    _, (out, fx) = _run(full_melt_width=0.0)
+    melt = (col(FX, "dh:nemo:h_i") == 0) & (np.asarray(out.h_ice) == 0)
+    sent = (col(FX, "dh:nemo:wfx_res") - col(FX, "dh:in:wfx_res")) > 0
+    assert (melt & sent).sum() >= 1
+    for f in ("wfx_res", "hfx_res"):
+        acc = col(FX, f"dh:in:{f}") + np.asarray(getattr(fx, f))
+        # 1e-3, not 1e-12: the snow left to send differs by <= 2.7e-4 relative through the
+        # 5.0.1 melt-then-sublimate order (C6); a missing transfer gives 1.0.
+        assert np.all(rel(acc, col(FX, f"dh:nemo:{f}"))[melt & sent] <= 1e-3), f
