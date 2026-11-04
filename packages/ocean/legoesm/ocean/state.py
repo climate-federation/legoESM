@@ -3479,6 +3479,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the lane-certified pre-catch-up EOS-default route.  NEMO testcase cards
     # state this explicitly.  Appended to preserve positional callers.
     vmix_eos_use_config_rho0: bool = True
+    # NEMO ln_rnf_depth_ini WHOLE-LEVEL runoff spread (int map nk_rnf or
+    # None): runoff enters the top nk wet levels (sbcrnf.F90:426-441) instead
+    # of the fractional runoff_depth_spread_map depth.  Build with
+    # forcing.runoff_depth.nemo_runoff_level_count; mutually exclusive with
+    # runoff_depth_spread_map / runoff_depth_spread_m (validated).  Appended
+    # to preserve positional callers.
+    runoff_depth_spread_levels: object = None
+    # Land masks of the "vector_laplacian" lateral viscosity/biharmonic at
+    # each level.  "surface" (default, bit-identical) applies the 2-D surface
+    # u/v/vertex masks at every level, so a face or vertex closed at depth by
+    # a topographic step stays open.  "per_level" builds each level's masks
+    # from the partial-cell is_active, as NEMO's dynldf_lev reads its 3-D
+    # umask/vmask/fmask (dommsk.F90:148-153).  Appended to preserve
+    # positional callers.
+    lateral_viscosity_mask_levels: str = "surface"
     # Width of the smooth runoff-water temperature floor max(SST, 0 degC)
     # (NEMO sbcrnf.F90:148, ln_rnf_tem=.false.) in the real-freshwater
     # closure: LogSumExp sharpness [1/K], 100 = 0.01 K (user rule

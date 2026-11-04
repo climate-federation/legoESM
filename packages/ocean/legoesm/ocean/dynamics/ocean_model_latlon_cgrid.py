@@ -4794,6 +4794,19 @@ class LatLonCGridOceanModel:
                 f"got {config.lateral_viscosity_operator!r}",
             )
         # #1455: e3-weighting selector for the "nemo_div_curl" operator only.
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            VALID_LATERAL_VISCOSITY_MASK_LEVELS)
+        _mlev = getattr(config, "lateral_viscosity_mask_levels", "surface")
+        if _mlev not in VALID_LATERAL_VISCOSITY_MASK_LEVELS:
+            raise ValueError(
+                "lateral_viscosity_mask_levels must be one of "
+                f"{sorted(VALID_LATERAL_VISCOSITY_MASK_LEVELS)}, got {_mlev!r}")
+        if (_mlev == "per_level"
+                and config.lateral_viscosity_operator != "vector_laplacian"):
+            raise ValueError(
+                "lateral_viscosity_mask_levels='per_level' requires "
+                "lateral_viscosity_operator='vector_laplacian', got "
+                f"{config.lateral_viscosity_operator!r}")
         _e3w = getattr(config, "lateral_viscosity_e3_weighting", "off")
         if _e3w not in VALID_LATERAL_VISCOSITY_E3_WEIGHTING:
             raise ValueError(
@@ -5588,6 +5601,14 @@ class LatLonCGridOceanModel:
                     "everywhere (build it with nemo_runoff_depth_map, "
                     "which floors at 1 m) — zero/negative cells would "
                     "silently drop the runoff dilution (codex r11 LOW).")
+        _rdsl = getattr(config, "runoff_depth_spread_levels", None)
+        if _rdsl is not None:
+            import numpy as _np
+            _rdsl_np = _np.asarray(_rdsl)
+            if (not _np.issubdtype(_rdsl_np.dtype, _np.integer)) or (_rdsl_np < 1).any():
+                raise ValueError(
+                    "runoff_depth_spread_levels must be an integer map >= 1 "
+                    "(build it with nemo_runoff_level_count).")
         _valid_pgf_quad = {"cell_integral", "nemo_trapezoid"}
         _pgf_quad = getattr(config, "pgf_quadrature", "cell_integral")
         if _pgf_quad not in _valid_pgf_quad:

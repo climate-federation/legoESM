@@ -149,22 +149,22 @@ def _stub_run(monkeypatch, seed_arr, converge_on_passes=None, soil_offset=0.0):
         calls["n"] += 1
         return out
 
-    monkeypatch.setattr(tl.jax, "vmap", _SolveVmapProxy(tl.jax.vmap, counted))
+    monkeypatch.setattr(tl.jax.lax, "map", _SolveMapProxy(tl.jax.lax.map, counted))
     seen_G = []
     out = _canopy_call(seed_arr=seed_arr, soil_record=seen_G, soil_offset=soil_offset)
     return out, seen_G, calls["n"], seen_Ts
 
 
-class _SolveVmapProxy:
-    """jax.vmap, except the batched _solve_one_col is replaced by the stand-in
-    (called on the whole batch)."""
+class _SolveMapProxy:
+    """jax.lax.map, except the grouped map over _solve_one_col is replaced by
+    the stand-in (called on the whole batch)."""
     def __init__(self, real, counted):
         self.real, self.counted = real, counted
 
-    def __call__(self, f, *a, **k):
-        if getattr(f, "__name__", "") == "_solve_one_col":
-            return self.counted
-        return self.real(f, *a, **k)
+    def __call__(self, f, xs, *a, **k):
+        if "_solve_one_col" in getattr(getattr(f, "__code__", None), "co_freevars", ()):
+            return self.counted(*xs)
+        return self.real(f, xs, *a, **k)
 
 
 def test_a_warm_seed_that_fails_gets_a_cold_retry(monkeypatch):
@@ -277,7 +277,7 @@ def test_a_rejected_nan_iterate_leaves_finite_gradients(monkeypatch):
         used.append(1)
         return batched(*a)
 
-    monkeypatch.setattr(tl.jax, "vmap", _SolveVmapProxy(tl.jax.vmap, stub))
+    monkeypatch.setattr(tl.jax.lax, "map", _SolveMapProxy(tl.jax.lax.map, stub))
 
     def loss(scale):
         out = _canopy_call(soil_record=None, lw_scale=scale)

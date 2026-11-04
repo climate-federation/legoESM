@@ -319,6 +319,21 @@ campaign's regime; pinning forcing downloads to fixed versions and checksums;
 turning missing variable name into hard error. Every one defensible. None asked.
 That the error.
 
+**2026-11-03 REFINEMENT — DETAIL DECISIONS GO TO A VOTE, NOT THE USER.** User,
+repeated three times in one day: *"For detailed questions do not ask me but
+check with him [GLM] and codex and use the majority of votes. Just ask me big
+picture / important questions such as on design or main directions."*
+- **Detail side decision** (names, tolerances, guards, edge cases, file
+  locations, minor scope trims, which diagnostic next): author's pick + GLM vote
+  + codex vote, majority of three wins. Never silent: record each voter's pick
+  in the commit, and mark the item VOTED on the end-of-task list (VOTED counts
+  as discharged, like ASKED).
+- **Still ASK the user:** model design, main direction, production defaults and
+  config changes (RULE 3), which experiments/compute to launch, data source,
+  what is trained or scored, anything changing comparability of results.
+- Unsure which class → big picture → ask.
+- Subagent briefs must state this rule.
+
 ## Operating Mode
 - **TERSE BY DEFAULT.** Drop articles/filler/pleasantries/hedging; fragments fine. Report `[thing] [state] [next]`, not prose. No restating what was just done, no feature tours, no explaining a simplification at more length than the code. Numbers/tables over narration. Full prose ONLY when asked for it (report/walkthrough), or for security warnings, irreversible-action confirmations, and multi-step sequences where fragments risk misread. Code/commits/PRs/docstrings: written normally.
 - **DO WHAT WAS ASKED — DO NOT EXTRAPOLATE.** Deliver requested thing, then STOP and report. No inventing adjacent work because it seem useful: no unrequested helper/launcher/benchmark scripts, no extra files staged "for later", no speculative refactors, no scope widened from "fix X" to "also improve Y". Adjacent work look warranted → NAME it in one line, let user choose. Do not pre-build. Uncertain whether in scope? It not; ask. Over-delivery not helpfulness: cost review time, bury actual change, create artifacts nobody vetted.

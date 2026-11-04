@@ -1431,6 +1431,8 @@ def test_store_mass_flux_is_the_last_config_field():
             "nemo_qsr_stage3_kmm_source_association",
             "vmix_eos_use_config_rho0",
             # appended by the ocean oracle-fix campaign (tier-3 RNF)
+            "runoff_depth_spread_levels",
+            "lateral_viscosity_mask_levels",
             "runoff_temperature_floor_sharpness",
             )
     assert fields[-len(tail):] == tail, (

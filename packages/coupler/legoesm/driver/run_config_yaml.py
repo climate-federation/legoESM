@@ -54,7 +54,7 @@ def migrate_renamed_keys(d: dict) -> dict:
     return out
 
 
-def read_yaml_with_includes(path, _seen=None) -> dict:
+def read_yaml_with_includes(path, _seen=None, renamed_keys=None) -> dict:
     """Read a run YAML config, recursively merging an optional ``include:`` base
     FIRST so the tuned physics can live in one shared file and be reused across
     run configs.
@@ -84,6 +84,17 @@ def read_yaml_with_includes(path, _seen=None) -> dict:
         doc = migrate_renamed_keys(doc)
     except ValueError as exc:
         raise SystemExit(f"--config {path}: {exc}.")
+    # Driver-local renames (top level only; the global RENAMED_CONFIG_KEYS
+    # apply at any depth, which a key such as ``grid`` must not).  Applied per
+    # file BEFORE the merge, so a child's old spelling overrides its base's new one.
+    for old, new in (renamed_keys or {}).items():
+        if old in doc:
+            if new in doc and doc[new] != doc[old]:
+                raise SystemExit(
+                    f"--config {path}: sets both {old!r} (old name) and "
+                    f"{new!r} to different values ({doc[old]!r} vs "
+                    f"{doc[new]!r}).")
+            doc[new] = doc.pop(old)
     base_ref = doc.pop("include", None)
     merged: dict = {}
     if base_ref is not None:
@@ -91,12 +102,14 @@ def read_yaml_with_includes(path, _seen=None) -> dict:
             raise SystemExit(
                 f"--config {path}: 'include' must be a single path string, "
                 f"got {type(base_ref).__name__}.")
-        merged.update(read_yaml_with_includes(p.parent / base_ref, _seen))
+        merged.update(read_yaml_with_includes(p.parent / base_ref, _seen,
+                                             renamed_keys))
     merged.update(doc)  # the including file overrides its base
     return merged
 
 
-def load_yaml_config(path, parser, *, example_keys: str | None = None) -> dict:
+def load_yaml_config(path, parser, *, example_keys: str | None = None,
+                     renamed_keys: dict[str, str] | None = None) -> dict:
     """Load a run YAML config file into a dict of argument defaults.
 
     Used by ``--config`` to make a canonical run (e.g. the tuned
@@ -115,7 +128,7 @@ def load_yaml_config(path, parser, *, example_keys: str | None = None) -> dict:
     ``example_keys`` is an optional human hint (driver-specific example dests)
     appended to the unknown-key error to help operators fix typos.
     """
-    doc = read_yaml_with_includes(path)
+    doc = read_yaml_with_includes(path, renamed_keys=renamed_keys)
     actions = {a.dest: a for a in parser._actions}
     unknown = sorted(set(doc) - set(actions))
     if unknown:

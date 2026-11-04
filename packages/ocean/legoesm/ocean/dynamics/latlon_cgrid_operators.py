@@ -4293,6 +4293,56 @@ def compute_face_masks_3d(
     return u_mask, v_mask
 
 
+def per_level_viscosity_masks(
+    is_active_3d: jnp.ndarray,
+    grid,
+    mask: jnp.ndarray | None,
+    u_mask: jnp.ndarray | None,
+    v_mask: jnp.ndarray | None,
+    vertex_mask: jnp.ndarray | None,
+    dtype,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Per-level cell / u-face / v-face / vertex masks for the vector Laplacian.
+
+    NEMO builds its momentum masks level by level from the 3-D tmask
+    (dommsk.F90:148-153): ``umask = tmask*tmask(i+1)``, ``vmask =
+    tmask*tmask(j+1)`` and the free-slip ``fmask`` = product of the four
+    surrounding T cells, all at level k.  Each level here is built the same
+    way from ``is_active_3d`` (neighbour cells through the backend pads, so
+    MPI partition cuts see the neighbour rank's cells; ``compute_vertex_mask``
+    on the 3-D mask for the vertices), then multiplied by
+    the caller's 2-D masks broadcast over levels, so a face or vertex the
+    caller closes (fold wall, seam, partition cut) stays closed at every
+    level.  Returns ``(mask3, u_mask3, v_mask3, vertex_mask3)`` with a
+    trailing level axis, in ``dtype``.
+    """
+    from legoesm.grids.halo_latlon import (
+        get_meridionally_flat, get_meridionally_periodic, pad_with_pole_bc_lat)
+    cell = jnp.asarray(is_active_3d).astype(dtype)
+    if mask is not None:
+        cell = cell * jnp.asarray(mask, dtype)[..., jnp.newaxis]
+
+    # Neighbour cells through the backend-dispatched pads (as in
+    # compute_vertex_mask), all levels in one pad: a face on an MPI partition
+    # cut sees the neighbour rank's true edge cell instead of a zero.
+    lon = pad_lon_cgrid(cell, halo=1)                         # (n_lat, n_lon+2, nlev)
+    lat = pad_with_pole_bc_lat(cell, halo=1, south_value=0.0, north_value=0.0)
+    um3, vm3 = lon[:, :-1] * lon[:, 1:], lat[:-1] * lat[1:]
+    if get_meridionally_periodic() or get_meridionally_flat():
+        # y-re-entrant boundary v-faces wrap; compute_face_masks_3d owns that.
+        vm3 = compute_face_masks_3d(cell, grid)[1]
+    um3 = um3.astype(dtype)
+    vm3 = vm3.astype(dtype)
+    if u_mask is not None:
+        um3 = um3 * jnp.asarray(u_mask, dtype)[..., jnp.newaxis]
+    if v_mask is not None:
+        vm3 = vm3 * jnp.asarray(v_mask, dtype)[..., jnp.newaxis]
+    vx3 = compute_vertex_mask(cell, grid=grid).astype(dtype)
+    if vertex_mask is not None:
+        vx3 = vx3 * jnp.asarray(vertex_mask, dtype)[..., jnp.newaxis]
+    return cell, um3, vm3, vx3
+
+
 def _nemo_hpg_sco_literal_cgrid_impl(
     rhd: jnp.ndarray,
     e3w: jnp.ndarray,

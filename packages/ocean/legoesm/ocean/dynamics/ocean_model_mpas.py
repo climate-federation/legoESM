@@ -324,6 +324,14 @@ class MPASOceanModel(IntegrationMixin):
                     "(build it with nemo_runoff_depth_map, which floors at 1 m) "
                     "— zero/negative cells would silently drop the runoff "
                     "dilution.")
+        _rdsl = getattr(self.config, "runoff_depth_spread_levels", None)
+        if _rdsl is not None:
+            import numpy as _np
+            _rdsl_np = _np.asarray(_rdsl)
+            if (not _np.issubdtype(_rdsl_np.dtype, _np.integer)) or (_rdsl_np < 1).any():
+                raise ValueError(
+                    "runoff_depth_spread_levels must be an integer map >= 1 "
+                    "(build it with nemo_runoff_level_count).")
         # Reserved distributed-PCG knobs (single-rank stock CG today; see
         # barotropic_implicit_mpas.py Step-4 TODO).  Validate so the
         # schema stays consistent with the lat-lon path.

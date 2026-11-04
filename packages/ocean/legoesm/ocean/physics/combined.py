@@ -61,8 +61,13 @@ class OceanPhysicsConfig(NamedTuple):
     constants: ConstantsConfig = ConstantsConfig()
 
 
-def _make_mle(cfg: MLEConfig) -> Callable:
+def _make_mle(cfg: MLEConfig, eos_fn: Callable | None = None) -> Callable:
     """Create the Fox-Kemper MLE bolus-tracer physics function.
+
+    ``eos_fn`` is the run's EOS (``make_ocean_physics``'s ``eos_fn``); the MLE
+    potential density is that EOS at zero pressure, as NEMO's ``rhop`` comes
+    from the run's ``eos_insitu_pot`` (tramle.F90 reads ``rhop``).  ``None`` =
+    Wright 1997, the ``make_eos_fn()`` default.
 
     Lat-lon / tripole C-grid ONLY.  The returned ``physics_fn`` computes the
     in-situ density, N^2 and the C-grid face masks the MLE adapter needs, then
@@ -95,7 +100,7 @@ def _make_mle(cfg: MLEConfig) -> Callable:
 
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         # NEMO rhop for the MLE MLD/buoyancy: SURFACE-REFERENCED POTENTIAL
-        # density — the default EOS evaluated at ZERO pressure (tramle.F90
+        # density — the run EOS (eos_fn) evaluated at ZERO pressure (tramle.F90
         # uses rhop for both the Delta-rho criterion and zbm; in-situ rho
         # collapses the diagnosed ML by compressibility alone).
         from legoesm import constants
@@ -104,7 +109,8 @@ def _make_mle(cfg: MLEConfig) -> Callable:
             make_eos_fn,
             rho_0 as _rho_0,
         )
-        rho_pot = make_eos_fn()(
+        _eos = eos_fn if eos_fn is not None else make_eos_fn()
+        rho_pot = _eos(
             state.T.data, state.S.data, jnp.zeros_like(state.T.data)
         )
         # Convection-gate N^2: NEMO's gate sums rn2 — the PROPER
@@ -169,7 +175,8 @@ def make_ocean_physics(
         ``LatLonCGridOceanConfig.from_flat(implicit_vertical_mixing=True)``.
     eos_fn : callable or None
         The run's EOS for the vertical-mixing closures that take one
-        (Richardson, ePBL; #2177). ``None`` = Wright 1997.
+        (Richardson, ePBL; #2177) and for the MLE potential density
+        (``eos_fn(T, S, 0)``). ``None`` = Wright 1997.
     epbl_shortwave : ShortwavePenetrationConfig or None
         Forwarded to ePBL (#2178); see ``make_vertical_mixing_physics``.
         Only the ocean single-column model passes it.
@@ -305,7 +312,7 @@ def make_ocean_physics(
     # standalone centred tendency.  Every pre-existing config keeps the
     # default ``through_fct=False`` and therefore the exact former program.
     if config.mle is not None and not config.mle.through_fct:
-        fns.append(_make_mle(config.mle))
+        fns.append(_make_mle(config.mle, eos_fn=eos_fn))
 
     sw_config = config.shortwave_penetration
 

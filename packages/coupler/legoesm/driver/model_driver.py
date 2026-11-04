@@ -325,6 +325,31 @@ def gather_land_step(run, ncol, padded, proc, allgather):
             + (jnp.max(g_cnt[:, -1]).astype(jnp.asarray(out[-1]).dtype),))
 
 
+def radiation_column_mesh(step_mesh, n_devices):
+    """The mesh radiation splits its columns over.  A dycore that runs on its
+    own step mesh (the FV3 duo face / window layouts) gets that SAME mesh:
+    JAX lowers a compiled step against one mesh only, and the physics runs
+    inside the duo step's jit.  Every other lane gets a new 1-D ``'col'``
+    mesh over ``n_devices`` devices, as before."""
+    if step_mesh is not None:
+        return step_mesh
+    from legoesm.parallel.column_shard import create_column_mesh
+    return create_column_mesh(n_devices)
+
+
+def land_device_mesh(step_mesh, local_devices):
+    """The mesh the land device split runs on: the step mesh itself when this
+    process owns all of its devices (one mesh per compiled step, as for
+    radiation), else a 1-D ``'land'`` mesh over this process's devices.
+    KNOWN GAP: several processes each driving more than one device still
+    get that per-process ``'land'`` mesh, which differs from the step mesh
+    inside the duo physics jit."""
+    if step_mesh is not None and len(local_devices) == step_mesh.size:
+        return step_mesh
+    from jax.sharding import Mesh
+    return Mesh(np.array(local_devices), ("land",))
+
+
 def shard_land_columns(cols, n_dev):
     """This process's land columns ``cols`` laid out for ``n_dev`` local
     devices: the same near-equal contiguous shares as the process split
@@ -346,7 +371,8 @@ def shard_land_columns(cols, n_dev):
 
 def solve_land_on_devices(step, args, is_col, mesh, keep):
     """``step(*args)`` (the land step on packed slots, leading axis = slot)
-    run one equal shard per device of the 1-D ``mesh`` under a shard_map,
+    run one equal shard per device of ``mesh`` (split over all its axes, so
+    the duo's 3-D window mesh works too) under a shard_map,
     then cut to the real slots ``keep``.  ``is_col`` is ``args``' tree of
     booleans marking the per-column array leaves (split over the devices);
     every other leaf is shared.  Every OUTPUT leaf must be per column (its
@@ -360,7 +386,8 @@ def solve_land_on_devices(step, args, is_col, mesh, keep):
     from legoesm.parallel.shard_map_compat import shard_map
 
     n_dev = int(np.prod(mesh.devices.shape))
-    axis = mesh.axis_names[0]
+    names = mesh.axis_names
+    axis = names[0] if len(names) == 1 else tuple(names)
     leaves, tdef = jax.tree_util.tree_flatten(args)
     cols = jax.tree_util.tree_leaves(is_col)
     if len(cols) != len(leaves):
@@ -466,6 +493,41 @@ def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> boo
     before SLURM kills the job (so a dependency chain can resume).
     """
     return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
+
+
+def trace_windows(spec: str | None, rank: str, n_windows: str | None = None,
+                  ranks: str | None = None) -> list[tuple[int, int, str]]:
+    """Profiler windows (start_step, stop_step, out_dir) for this rank.
+
+    ``spec`` is LEGOESM_TRACE_STEPS="first:count:dir" (dir may contain ':').
+    ``n_windows`` (LEGOESM_TRACE_WINDOWS) splits the trace into back-to-back
+    windows of ``count`` steps written to dir/rank<r>/wNN; unset keeps one
+    window in dir/rank<r>.  ``ranks`` (LEGOESM_TRACE_RANKS, comma list)
+    limits tracing to those ranks; unset traces every rank.
+    """
+    if not spec:
+        return []
+    try:
+        t0, tn, tdir = spec.split(":", 2)
+        t0, tn = int(t0), int(tn)
+        nw = 1 if n_windows is None else int(n_windows)
+        sel = None if ranks is None else {int(r) for r in ranks.split(",")}
+    except ValueError:
+        raise ValueError(
+            f"LEGOESM_TRACE_STEPS={spec!r} / LEGOESM_TRACE_WINDOWS="
+            f"{n_windows!r} / LEGOESM_TRACE_RANKS={ranks!r}: expected "
+            "'first:count:dir', an integer and a comma list of integers") from None
+    if t0 < 0 or tn < 1 or nw < 1:
+        raise ValueError(
+            f"LEGOESM_TRACE_STEPS={spec!r}, LEGOESM_TRACE_WINDOWS={n_windows!r}:"
+            " need first >= 0, count >= 1, windows >= 1")
+    if sel is not None and int(rank) not in sel:
+        return []
+    base = os.path.join(tdir, "rank" + rank)
+    if n_windows is None:
+        return [(t0, t0 + tn, base)]
+    return [(t0 + k * tn, t0 + (k + 1) * tn, os.path.join(base, f"w{k:02d}"))
+            for k in range(nw)]
 
 
 def _standalone_cloud_config(cfg, cloud_scheme: str,
@@ -1541,7 +1603,38 @@ def _sfc_flux_lag_slots() -> tuple[int, int]:
 # the land outputs the surface blend holds between land calls.  Without them
 # every restart dropped the pending samples (precipitation and radiation the
 # land never received) and re-ran the one-step bootstrap.
-_LAND_WIN_PREFIXES = ("land_win_", "land_held_")
+_LAND_WIN_PREFIXES = ("land_win_", "land_held_", "cpl_win_")
+# Per-run scalars among those keys (every other key is a per-cell field).
+_WIN_SCALAR_KEYS = ("land_win_n", "cpl_win_n", "cpl_win_k")
+# Coupling window (P5b): per-step sums of the fluxes the coupler consumes as
+# window MEANS, in the order (net SW, net LW, precip, frozen precip).
+_CPL_WIN_FIELDS = ("sw_net_sfc", "lw_net_sfc", "precip", "precip_frozen")
+
+
+def coupling_window_from_checkpoint(payload, cpl_k, n_cells):
+    """``(sums, n)`` of a persisted coupling window (``cpl_win_*`` keys).
+
+    Refuses a window written under a different cadence (``cpl_win_k`` !=
+    ``cpl_k``) and per-cell arrays not shaped ``(n_cells,)``.  ``sums`` holds
+    ``None`` for a field the window never received (dry run)."""
+    n = int(payload.get("cpl_win_n", 0))
+    k = int(payload.get("cpl_win_k", cpl_k))
+    if k != cpl_k or not 0 <= n < cpl_k:
+        raise ValueError(
+            f"checkpoint coupling window: {n} pending step(s) of a "
+            f"{k}-step window, but this run couples every {cpl_k} step(s); "
+            "the coupling interval changed across the restart.")
+    sums = []
+    for f in _CPL_WIN_FIELDS:
+        v = payload.get(f"cpl_win_sum_{f}")
+        if v is not None and np.shape(v) != (n_cells,):
+            raise ValueError(
+                f"checkpoint cpl_win_sum_{f} shape {np.shape(v)} != "
+                f"(nCells={n_cells},) -- mesh mismatch.")
+        sums.append(None if v is None else jnp.asarray(v))
+    return sums, n
+
+
 _LAND_HELD_NAMES = ("T_skin", "albedo", "qsfc_last", "qsfc", "shflx", "lhflx",
                     "evap", "beta")
 # ``beta`` (R-ex): once the solved-humidity channel is live the loop stops
@@ -1584,7 +1677,7 @@ def land_window_from_checkpoint(payload, land_k, n_cells):
     """
     from legoesm.core.coupling_fields import AtmToSurface
     for k, v in payload.items():
-        if k != "land_win_n" and np.shape(v) != (n_cells,):
+        if k not in _WIN_SCALAR_KEYS and np.shape(v) != (n_cells,):
             raise ValueError(
                 f"checkpoint {k} shape {np.shape(v)} != (nCells={n_cells},) "
                 "-- mesh mismatch.")
@@ -2190,8 +2283,9 @@ class ModelDriver:
         as the land stress).  Rank-local under MPI; the caller gathers.
         """
         win = getattr(self, "_land_window", None)
-        if win is not None:
-            return win
+        cpl = getattr(self, "_cpl_window", None)
+        if win is not None or cpl is not None:
+            return {**(win or {}), **(cpl or {})}
         ck = self._carry_aux if isinstance(self._carry_aux, dict) else {}
         staged = {k: v for k, v in ck.items()
                   if k.startswith(_LAND_WIN_PREFIXES)}
@@ -8047,7 +8141,7 @@ class ModelDriver:
                 _lw_save = self._land_window_for_checkpoint()
                 if _lw_save is not None:
                     _lw_save = {
-                        _k: (_v if _k == "land_win_n" else
+                        _k: (_v if _k in _WIN_SCALAR_KEYS else
                              gather_voronoi_field(jnp.asarray(_v).reshape(-1),
                                                   part, "cell"))
                         for _k, _v in sorted(_lw_save.items())}
@@ -9383,11 +9477,12 @@ class ModelDriver:
                            if k.startswith(_LAND_WIN_PREFIXES)]:
                 del self._carry_aux[_stale]
             self._land_window = None
+            self._cpl_window = None
             for _k in d.files:
                 if not _k.startswith(_LAND_WIN_PREFIXES):
                     continue
                 _a = np.asarray(d[_k])
-                if _mpi and _k != "land_win_n":
+                if _mpi and _k not in _WIN_SCALAR_KEYS:
                     if _a.shape != (part.nCells_global,):
                         raise ValueError(
                             f"MPAS checkpoint {path.name} {_k} shape "
@@ -13264,12 +13359,13 @@ class ModelDriver:
         _column_mesh = None
         _single_process = (self._device_config is None
                            or not self._device_config.is_distributed)
-        _n_dev = len(jax.devices())
+        _rad_step_mesh = getattr(self.model, "step_spmd_mesh", None)
+        _n_dev = (int(_rad_step_mesh.size) if _rad_step_mesh is not None
+                  else len(jax.devices()))
         _ncell = int(self.state.T.data.shape[0])
         if (_rad_scheme == "rrtmgp" and _single_process
                 and _n_dev > 1 and _ncell % _n_dev == 0):
-            from legoesm.parallel.column_shard import create_column_mesh
-            _column_mesh = create_column_mesh(_n_dev)
+            _column_mesh = radiation_column_mesh(_rad_step_mesh, _n_dev)
             logger.info(
                 f"  RRTMGP column-sharding: {_ncell} cells / {_n_dev} devices "
                 f"= {_ncell // _n_dev} cols/device"
@@ -14245,10 +14341,9 @@ class ModelDriver:
                     and (_land_split is not None
                          or not self._is_spmd_multiprocess())
                     and _land_pack_idx_np.size >= len(_land_devs)):
-                from jax.sharding import Mesh
                 _land_pack_idx_np, _land_keep = shard_land_columns(
                     _land_pack_idx_np, len(_land_devs))
-                _land_mesh = Mesh(np.array(_land_devs), ("land",))
+                _land_mesh = land_device_mesh(_step_mesh, _land_devs)
             # the device fallback is per process (shares differ by one
             # column), the process fallback is the same on every process
             if _land_mesh is None and (
@@ -15261,6 +15356,36 @@ class ModelDriver:
         _lw_ck = ({k: self._carry_aux.pop(k) for k in list(self._carry_aux)
                    if k.startswith(_LAND_WIN_PREFIXES)}
                   if isinstance(self._carry_aux, dict) else {})
+        # Coupling window (P5b): a coupler that sets ``_coupling_dt_s`` is
+        # called every coupling_dt with window-MEAN surface fluxes, at the end
+        # of the step that closes the window; any other segment_callback keeps
+        # the daily call.
+        _cpl_ck = {k: _lw_ck.pop(k) for k in list(_lw_ck)
+                   if k.startswith("cpl_win_")}
+        self._cpl_window = None
+        _cpl_dt = getattr(self, "_coupling_dt_s", None)
+        _CPL_K = None
+        _cpl_sums, _cpl_n = [None] * len(_CPL_WIN_FIELDS), 0
+        # Not persisted: a resumed link's first step re-samples SST/SIC from
+        # the restored ocean anyway (_last_force_day starts None).
+        _cpl_sst_due = False
+        if self._segment_callback is not None and _cpl_dt is not None:
+            _k = float(_cpl_dt) / DT
+            if (not np.isfinite(_k) or _k < 1 or _k != round(_k)
+                    or float(_cpl_dt) % 1800.0 != 0.0):
+                raise ValueError(
+                    f"coupling_dt={_cpl_dt!r} s must be a positive multiple "
+                    f"of 1800 s and of the atmosphere step DT={DT} s.")
+            _CPL_K = int(round(_k))
+            if _cpl_ck:
+                _cpl_sums, _cpl_n = coupling_window_from_checkpoint(
+                    _cpl_ck, _CPL_K,
+                    int(jnp.asarray(self.state.p_s.data).reshape(-1).shape[0]))
+            elif start_step > 0:
+                logger.warning(
+                    "  Coupling window: the checkpoint carries no coupling "
+                    "window (written before it was persisted); the pending "
+                    "steps of the previous link are lost.")
         if _land_ml_on and _lw_ck:
             (_land_a2s_sum, _land_a2s_n, _land_cz_wsum, _land_w_sum,
              (_lw_T, _lw_alb, _lw_qlast, _lw_qs, _lw_sh, _lw_lh,
@@ -15371,30 +15496,20 @@ class ModelDriver:
                 state = state._replace(tracers=_new_trc_sm)
             return state
 
-        # Profiling window, off unless LEGOESM_TRACE_STEPS="first:count:dir"
-        # (loop-step indices; each rank writes dir/rank<N>).  Blocks on the
-        # state at both ends so the trace holds exactly those steps; a window
-        # running past the end is stopped after the loop.
-        _trace_spec = os.environ.get("LEGOESM_TRACE_STEPS")
-        _trace_win = None
+        # Profiling windows, off unless LEGOESM_TRACE_STEPS="first:count:dir"
+        # (loop-step indices; see ``trace_windows`` for LEGOESM_TRACE_WINDOWS /
+        # LEGOESM_TRACE_RANKS).  Blocks on the state at each window edge so a
+        # trace holds exactly its steps; a window running past the end is
+        # stopped after the loop.
+        _trace_wins = trace_windows(
+            os.environ.get("LEGOESM_TRACE_STEPS"),
+            os.environ.get("SLURM_PROCID")
+            or os.environ.get("OMPI_COMM_WORLD_RANK")
+            or os.environ.get("PMI_RANK", "0"),
+            os.environ.get("LEGOESM_TRACE_WINDOWS"),
+            os.environ.get("LEGOESM_TRACE_RANKS"))
+        _trace_edges = {s for w in _trace_wins for s in w[:2]}
         _trace_on = False
-        if _trace_spec:
-            try:
-                _t0, _tn, _tdir = _trace_spec.split(":", 2)
-                _t0, _tn = int(_t0), int(_tn)
-            except ValueError:
-                raise ValueError(
-                    f"LEGOESM_TRACE_STEPS={_trace_spec!r}: expected "
-                    "'first:count:dir' with integer first and count") from None
-            if _t0 < 0 or _tn < 1:
-                raise ValueError(
-                    f"LEGOESM_TRACE_STEPS={_trace_spec!r}: need first >= 0, "
-                    "count >= 1")
-            _trace_rank = (os.environ.get("SLURM_PROCID")
-                           or os.environ.get("OMPI_COMM_WORLD_RANK")
-                           or os.environ.get("PMI_RANK", "0"))
-            _trace_win = (_t0, _t0 + _tn,
-                          os.path.join(_tdir, "rank" + _trace_rank))
         if _land_stress_on and _land_taumag_cells is None:
             raise RuntimeError(
                 "land_stress_from_land resolved ON but the land stress "
@@ -15414,14 +15529,15 @@ class ModelDriver:
         # (bitwise gate of refactors); off by default
         _DIGEST_EVERY = int(os.environ.get("LEGOESM_DIGEST_EVERY_STEPS", "0"))
         for step in range(n_steps_total):
-            if _trace_win is not None and step in _trace_win[:2]:
+            if step in _trace_edges:
                 jax.block_until_ready(self.state)
-                if step == _trace_win[0]:
-                    jax.profiler.start_trace(_trace_win[2])
-                    _trace_on = True
-                else:
+                if _trace_on:
                     jax.profiler.stop_trace()
                     _trace_on = False
+                for _w0, _w1, _wdir in _trace_wins:
+                    if step == _w0:
+                        jax.profiler.start_trace(_wdir)
+                        _trace_on = True
             if _PHASE_TIMERS:
                 _now = time.perf_counter()
                 if _phase_n:
@@ -15460,7 +15576,8 @@ class ModelDriver:
                 # truncation; day_to_calendar already handles negative
                 # days via modulo).
                 _fd_int = daily_forcing_bucket(_force_day)
-                if _fd_int != _last_force_day:
+                _new_day = _fd_int != _last_force_day
+                if _new_day or _cpl_sst_due:
                     # Coupled ocean/land: step the coupler's (grid-agnostic) slab
                     # ocean + land for the elapsed day BEFORE re-sampling SST, so
                     # the daily SST resample below reads the just-updated ocean
@@ -15468,6 +15585,7 @@ class ModelDriver:
                     # Daily coupling cadence, matching the SST-refresh cadence.
                     # step 0 has nothing to step yet (_last_force_day is None).
                     if (self._segment_callback is not None
+                            and _CPL_K is None and _new_day
                             and _last_force_day is not None):
                         # Export the surface net radiative fluxes the MPAS
                         # physics computed (sw/lw net [W/m^2, +into surface])
@@ -15527,7 +15645,10 @@ class ModelDriver:
                     # starting at integer days (all production configs) are
                     # bit-identical to before.
                     _force_day_canonical = float(_fd_int)
-                    _forcing_daily = {}
+                    # A post-exchange SST refresh (P5b) re-samples only the
+                    # surface fields below into the held daily dict.
+                    if _new_day:
+                        _forcing_daily = {}
                     if _sst_forcing:
                         # Prognostic ice skin: cache THIS forcing day's SST+SIC
                         # for the PER-STEP re-anchor + advance in the step loop.
@@ -15595,7 +15716,7 @@ class ModelDriver:
                                 _forcing_daily["open_ocean_frac"] = (
                                     (1.0 - _sic_day) if _alb_f_land is None
                                     else (1.0 - _alb_f_land) * (1.0 - _sic_day))
-                    if _ext_forcing:
+                    if _ext_forcing and _new_day:
                         _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
                         _o3, _aer, _ghg = self._precompute_external_forcing(
                             _force_day_canonical, _ext_p_s,
@@ -15620,7 +15741,7 @@ class ModelDriver:
                             _forcing_daily["ghg_vmr"] = {
                                 k: jnp.asarray(v) for k, v in _ghg.items()
                             }
-                    if _solar_ext:
+                    if _solar_ext and _new_day:
                         # Same canonical-day sampling as SST/ozone
                         # (FIX_RESTART_TIME: bit-exact restart continuation).
                         from legoesm.forcing.external import (
@@ -15636,6 +15757,7 @@ class ModelDriver:
                             _forcing_daily["solar_spectral_fraction"] = (
                                 jnp.asarray(_sol["solar_fraction_by_gpt"]))
                     _last_force_day = _fd_int
+                    _cpl_sst_due = False
                 # Per-STEP traced calendar time: the radiation factory
                 # closure (``set_time``) is baked at trace time inside the
                 # JIT'd MPAS step, so without these two traced scalars the
@@ -16516,6 +16638,57 @@ class ModelDriver:
                     self._feed_mpas_cmip_accumulators(
                         START_DAY + elapsed_day, flux_only=True)
 
+            # Coupling window (P5b): sum this step's net surface SW/LW [W/m2,
+            # +into surface] and precip [kg/m2/s, +down] as RATES; the step
+            # that closes the window hands the coupler their window means,
+            # then the next step re-samples SST/SIC from the coupler's ocean.
+            # After this step's ice/land updates, before the checkpoint, so a
+            # checkpoint on a window boundary holds the post-exchange ocean
+            # and an empty window.
+            if _CPL_K is not None:
+                _sd = getattr(self.model, "_sfc_diag", None)
+                _cpl_now = [None] * len(_CPL_WIN_FIELDS)
+                if _sd is not None:
+                    for _i in range(3):
+                        if len(_sd) > _i and _sd[_i] is not None:
+                            _cpl_now[_i] = jnp.asarray(
+                                _sd[_i].data).reshape(-1)
+                    if (_cpl_now[2] is not None and getattr(
+                            self, "_requires_surface_flux_export", False)):
+                        _cpl_now[3] = land_snowfall_from_sfc_diag(
+                            _sd, _cpl_now[2]).reshape(-1)
+                _cpl_sums = [
+                    s if v is None else (v if s is None else s + v)
+                    for s, v in zip(_cpl_sums, _cpl_now)]
+                _cpl_n += 1
+                if _cpl_n == _CPL_K:
+                    if not isinstance(self._carry_aux, dict):
+                        self._carry_aux = {}
+                    _shp = jnp.shape(self.state.p_s.data)
+                    for _key, _s in zip(
+                            ("seg_sw_net_sfc", "seg_lw_net_sfc", "seg_precip",
+                             "seg_precip_frozen"), _cpl_sums):
+                        if _s is not None:
+                            self._carry_aux[_key] = jnp.reshape(
+                                _s / _cpl_n, _shp)
+                    for _key, _v in zip(("held_sw_net_sfc", "held_lw_net_sfc"),
+                                        _cpl_now[:2]):
+                        if _v is not None:
+                            self._carry_aux[_key] = jnp.reshape(_v, _shp)
+                    _cpl_day = (_DAY_ORIGIN
+                                + (start_step + step + 1) * DT / 86400.0)
+                    self._current_day = _cpl_day
+                    self._segment_callback(self, _cpl_day, _cpl_n * DT)
+                    _cpl_sums = [None] * len(_CPL_WIN_FIELDS)
+                    _cpl_n = 0
+                    _cpl_sst_due = True
+                self._cpl_window = {
+                    "cpl_win_n": np.asarray(_cpl_n, dtype=np.int64),
+                    "cpl_win_k": np.asarray(_CPL_K, dtype=np.int64),
+                    **{f"cpl_win_sum_{f}": s
+                       for f, s in zip(_CPL_WIN_FIELDS, _cpl_sums)
+                       if s is not None}}
+
             if _DIGEST_EVERY > 0 and (step + 1) % _DIGEST_EVERY == 0:
                 _lv = locals()
                 _facc = self._mpas_sfc_accum
@@ -16529,7 +16702,9 @@ class ModelDriver:
                         "_land_beta_cells", "_land_taumag_cells",
                         "_land_taumag_valid", "_land_taumag_fresh",
                         "_land_a2s_sum", "_land_a2s_n", "_land_cz_wsum",
-                        "_land_w_sum")],
+                        "_land_w_sum",
+                        *(("_cpl_sums", "_cpl_n") if _CPL_K is not None
+                          else ()))],
                     ice=getattr(self, "_ice_T_skin", None),
                     sfc=getattr(self.model, "_sfc_diag", None),
                     forcing=_lv.get("_forcing"), carry=self._carry_aux,
@@ -16632,7 +16807,9 @@ class ModelDriver:
                 logger.warning(_msg)
                 print(f"WARNING: {_msg}", file=sys.stderr)
             else:
-                self.save_checkpoint(start_step + n_steps_total, _final_day)
+                (getattr(self, "_checkpoint_callback", None)
+                 or self.save_checkpoint)(start_step + n_steps_total,
+                                          _final_day)
 
         elapsed = time.time() - t_start
         logger.info(f"MPAS run {run_status} in {elapsed:.1f}s")

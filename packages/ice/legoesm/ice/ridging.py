@@ -95,9 +95,13 @@ _SI3_JPL1_MU_RIDGING = 3.0
 _SI3_JPL1_HRAFT_M = 0.75
 _SI3_JPL1_CRAFT = 5.0
 _SI3_JPL1_POROSITY = 0.0
-# The deck supplies 0.5, but this rung resolves ln_icethd=F.  SI3 therefore
-# overwrites all four factors to one at icedyn_rdgrft.F90:1244-1247 before the
-# first call.  These constants name the executed selector state.
+# Retention factors = fraction of snow/pond volume KEPT on the ridged/rafted
+# ice (namelist rn_fsnwrdg/rn_fsnwrft/rn_fpndrdg/rn_fpndrft, NEMO 5.0.1
+# icedyn_rdgrft.F90:88-94, used at :735-747,858-866).  The defaults are the
+# ln_icethd=F state: SI3 overwrites all four to one at :1231-1234 when
+# thermodynamics is off, which is the rung-3.4 testcase this arm was built
+# on.  A caller running thermodynamics passes its namelist values (ORCA1:
+# 0.5); the validator accepts any fraction in [0, 1].
 _SI3_JPL1_SNOW_RIDGE_RETENTION = 1.0
 _SI3_JPL1_SNOW_RAFT_RETENTION = 1.0
 _SI3_JPL1_POND_RIDGE_RETENTION = 1.0
@@ -562,12 +566,25 @@ def apply_ridging(
 def _validate_si3_jpl1_ridging_config(config: SI3JPL1RidgingConfig) -> None:
     """Reject every unmeasured redistribution selector combination."""
 
+    retention_fields = (
+        "snow_ridge_retention",
+        "snow_raft_retention",
+        "pond_ridge_retention",
+        "pond_raft_retention",
+    )
     expected = SI3JPL1RidgingConfig()
-    if config != expected:
+    pinned = config._replace(**{name: getattr(expected, name) for name in retention_fields})
+    if pinned != expected:
         raise ValueError(
             "SI3 jpl=1 ridging selector composition "
             f"{config!r} != {expected!r}; no Frankenstein fallback"
         )
+    for name in retention_fields:
+        value = getattr(config, name)
+        if not (math.isfinite(value) and _SI3_JPL1_ZERO <= value <= _SI3_JPL1_ONE):
+            raise ValueError(
+                f"SI3 jpl=1 ridging {name}={value!r} must be a retained fraction in [0, 1]"
+            )
 
 
 def apply_si3_jpl1_ridging(
@@ -592,9 +609,18 @@ def apply_si3_jpl1_ridging(
     conservation fallback (``:857-870``).  The layer axes are trailing and
     are carried with their parent ice/snow inventory.  ORCA1's zero ridge
     porosity makes ice volume, ice enthalpy, and option-4 layer salt invariant
-    under this redistribution.  Because this rung has ``ln_icethd=F``, SI3's
-    initialization also forces the snow/pond retention factors to one
-    (``icedyn_rdgrft.F90:1244-1247``), so those inventories remain carried.
+    under this redistribution.
+
+    Snow/pond retention: the config fields are the namelist fractions KEPT
+    (``rn_fsnwrdg``/``rn_fsnwrft``/``rn_fpndrdg``/``rn_fpndrft``, any value in
+    [0, 1]).  Their default 1.0 is NEMO's ``ln_icethd=F`` override
+    (``icedyn_rdgrft.F90:1231-1234``); a caller running thermodynamics must
+    pass its namelist values (ORCA1: 0.5).  The material not kept is returned
+    in :class:`SI3JPL1RidgingLosses` as inventories; NEMO's ocean fluxes are
+    ``wfx_snw_dyn = rho_snow * losses.snow_volume / dt`` [kg m-2 s-1],
+    ``hfx_dyn = -sum_layers(losses.snow_enthalpy) / dt`` [W m-2] (:735-739)
+    and ``wfx_pnd = rho_water * (losses.pond_volume + losses.pond_lid_volume)
+    / dt`` (:743-747; the lid term only with ``ln_pnd_lids``).
     """
 
     _validate_si3_jpl1_ridging_config(config)
@@ -648,11 +674,16 @@ def apply_si3_jpl1_ridging(
     )
     opening = closing + divergence
     work = area > _SI3_JPL1_EPSI10
+    listed = work
 
-    # NEMO initializes iter=1 and loops while iter<20 (:289-292): at most 19
-    # ordered shifts.  A fixed loop plus the per-cell ``work`` mask is the JAX
-    # equivalent of its shrinking packed-cell list and remains JIT/grad safe.
-    for _ in range(_SI3_JPL1_MAX_ITERATIONS):
+    # NEMO initializes iter=1 and loops while iter<20 (:285-320): at most 19
+    # ordered shifts.  The ridging list is fixed once, before the loop
+    # (:247-262: at_i > epsi10, ice participation > 0 and gross closing > 0 on
+    # the entry state), and every listed cell stays in the loop: converged cells
+    # carry zero rates (:304-307), which makes their later passes exact no-ops.
+    # A fixed loop plus the per-cell ``listed`` mask is therefore the JAX
+    # equivalent of NEMO's packed list and remains JIT/grad safe.
+    for iteration in range(_SI3_JPL1_MAX_ITERATIONS):
         total_area = open_water + area
         safe_total_area = jnp.where(total_area > _SI3_JPL1_EPSI10, total_area, _SI3_JPL1_ONE)
         inverse_total = jnp.where(
@@ -711,7 +742,7 @@ def apply_si3_jpl1_ridging(
             participation_ice,
             _SI3_JPL1_ONE,
         )
-        excessive = work & (requested_area > area) & (participation_ice != _SI3_JPL1_ZERO)
+        excessive = listed & (requested_area > area) & (participation_ice != _SI3_JPL1_ZERO)
         excessive_removal_clamp = excessive_removal_clamp | excessive
         gross = jnp.where(
             excessive,
@@ -720,7 +751,7 @@ def apply_si3_jpl1_ridging(
         )
         corrected_open = open_water + (opening - participation_open * gross) * dt
         open_water_correction = open_water_correction | (
-            work & ((corrected_open < _SI3_JPL1_ZERO) | (corrected_open > total_area))
+            listed & ((corrected_open < _SI3_JPL1_ZERO) | (corrected_open > total_area))
         )
         opening = jnp.where(
             corrected_open < _SI3_JPL1_ZERO,
@@ -732,7 +763,13 @@ def apply_si3_jpl1_ridging(
             participation_open * gross + (total_area - open_water) / dt,
             opening,
         )
-        shift = work & (participation_ice > _SI3_JPL1_ZERO) & (gross > _SI3_JPL1_ZERO)
+        if iteration == 0:
+            listed = work & (participation_ice > _SI3_JPL1_ZERO) & (gross > _SI3_JPL1_ZERO)
+        # rdgrft_shift: the ice ledger runs only where this pass ridges
+        # (:661-664 ll_shift), but open water is updated for EVERY listed cell
+        # (:651-654), so a deficit cell (ato_i + a_i < 1 on entry) keeps gaining
+        # open water through the opening rate after its ridging has stopped.
+        shift = listed & (participation_ice > _SI3_JPL1_ZERO) & (gross > _SI3_JPL1_ZERO)
 
         new_open_water = jnp.maximum(
             _SI3_JPL1_ZERO,
@@ -857,7 +894,7 @@ def apply_si3_jpl1_ridging(
         iteration_count = iteration_count + shift.astype(jnp.int32)
 
         area = jnp.where(shift, new_area, area)
-        open_water = jnp.where(shift, new_open_water, open_water)
+        open_water = jnp.where(listed, new_open_water, open_water)
         ice_volume = jnp.where(shift, new_ice_volume, ice_volume)
         snow_volume = jnp.where(shift, new_snow_volume, snow_volume)
         age = jnp.where(shift, new_age, age)
@@ -870,15 +907,26 @@ def apply_si3_jpl1_ridging(
 
         residual = _SI3_JPL1_ONE - (open_water + area)
         converged = jnp.abs(residual) < _SI3_JPL1_EPSI10
+        # :300-312: converged -> zero rates and ato_i = MAX(0, 1 - a_i);
+        # otherwise ridge/open again on the residual.  Applied to every listed
+        # cell; a converged cell stays converged with zero rates.
         open_water = jnp.where(
-            shift & converged,
+            listed & converged,
             jnp.maximum(_SI3_JPL1_ZERO, _SI3_JPL1_ONE - area),
             open_water,
         )
-        work = shift & ~converged
-        divergence = jnp.where(work, residual / dt, divergence)
-        closing = jnp.where(work, jnp.maximum(_SI3_JPL1_ZERO, -divergence), closing)
-        opening = jnp.where(work, jnp.maximum(_SI3_JPL1_ZERO, divergence), opening)
+        iterate = listed & ~converged
+        divergence = jnp.where(iterate, residual / dt, divergence)
+        closing = jnp.where(
+            iterate,
+            jnp.maximum(_SI3_JPL1_ZERO, -divergence),
+            jnp.where(listed, _SI3_JPL1_ZERO, closing),
+        )
+        opening = jnp.where(
+            iterate,
+            jnp.maximum(_SI3_JPL1_ZERO, divergence),
+            jnp.where(listed, _SI3_JPL1_ZERO, opening),
+        )
 
     # icedyn_rdgrft.F90:900-903 calls ice_var_roundoff.  Open water is absent
     # from that call, and icevar.F90:871 clips lid volume only in the narrow
