@@ -98,7 +98,7 @@ from legoesm.training.trainable_params import (  # noqa: E402
 # Every selectable closure in turbulence/integration.py::get_turbulence_fn,
 # minus "none" (which is the absence of a closure, not a candidate).
 TURBULENCE_SCHEMES: tuple[str, ...] = (
-    "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
+    "smagorinsky", "louis", "tke", "clubb_lite", "clubb",
     "holtslag_boville", "ysu", "edmf",
 )
 
@@ -359,7 +359,7 @@ def _dead_params_for(scheme: str) -> frozenset[str]:
         return unimplemented_params(mod, mod.CLUBBParams)
     cls_name = {
         "smagorinsky": "SmagorinskyConfig", "louis": "LouisConfig",
-        "tke": "TKEConfig", "mynn25": "MYNN25Config",
+        "tke": "TKEConfig",
         "clubb_lite": "CLUBBLiteConfig", "ysu": "YSUConfig",
         "holtslag_boville": "HoltslagBovilleConfig",
         "edmf": "TurbulentEDMFConfig",
