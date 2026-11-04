@@ -442,7 +442,10 @@ def apply_predicted_sundqvist_rain_survival_fraction(
     )
     zeros = jnp.zeros_like(T)
     return MicrophysicsOutput(
-        dT_dt=constants.L_v * (rates.condensation - evaporation) / constants.c_pd,
+        # condensation heats as in the physical scheme: L_v, plus L_f on its
+        # ice-water-id share (gscond)
+        dT_dt=(constants.L_v * (rates.condensation - evaporation)
+               + constants.L_f * rates.ice_condensation) / constants.c_pd,  # latent-ok: Zhao-Carr oracle constant (hfus)
         dq_v_dt=-rates.condensation + evaporation,
         dq_c_dt=rates.condensation - rates.autoconversion,
         dq_r_dt=dq_r_dt,

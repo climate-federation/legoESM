@@ -431,6 +431,9 @@ def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
         # The E3SM/CAM Beres convective source reads the lagged
         # ``conv_heating`` carry; unthreaded it would launch nothing.
         or gwd_reads_conv_heating(config.gravity_wave_drag)
+        # Sundqvist's gscond condenses the tendencies since its previous call
+        # (zc_* carry); unthreaded it refuses.
+        or config.microphysics.scheme == "sundqvist"
     )
 
 

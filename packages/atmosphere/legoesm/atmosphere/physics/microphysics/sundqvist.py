@@ -191,6 +191,8 @@ class SundqvistProcessRates(NamedTuple):
     autoconversion: jax.Array
     evaporation: jax.Array
     precipitation: jax.Array
+    # part of ``condensation`` heated with L_v + L_f (gscond's ice-water id)
+    ice_condensation: jax.Array
 
 
 class ZhaoCarrPrecpdResult(NamedTuple):
@@ -728,6 +730,7 @@ def diagnose_sundqvist_process_rates(
         prev_state)
     return SundqvistProcessRates(
         condensation=gs.net_condensation,
+        ice_condensation=gs.ice_condensation,
         autoconversion=zc.autoconversion,
         evaporation=zc.evaporation,
         precipitation=zc.rain_sfc + zc.snow_sfc,
