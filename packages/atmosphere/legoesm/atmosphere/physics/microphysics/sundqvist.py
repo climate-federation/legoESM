@@ -600,7 +600,8 @@ def zhao_carr_gscond(
         d = jnp.where(den_ok, (us - rqik) / jnp.where(den_ok, us - u, 1.0),
                       step(us - rqik, 1.0))
         d = smax(d, 0.0, 1.0)
-        ccrik = 1.0 - _sqrt(smin(d, 1.0, 1.0))
+        # smin never exceeds its FIRST argument: the cap 1 goes first so ccr >= 0.
+        ccrik = 1.0 - _sqrt(smin(1.0, d, 1.0))
 
         # Cloud evaporation, three iterations toward u*q_s [400-444].
         tx1, tx3 = tik, qik

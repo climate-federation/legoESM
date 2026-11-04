@@ -186,3 +186,20 @@ def test_smooth_fp32_matches_fp64_at_low_saturation_pressure():
     e64, e32 = run(jnp.float64), run(jnp.float32)
     assert float(np.max(np.abs(e64))) > 0.0
     np.testing.assert_allclose(e32, e64, rtol=1e-4)
+
+
+def test_smooth_cloud_cover_stays_in_unit_interval():
+    """codex 2026-11-04 reproducer: near saturation the smooth min(d, 1) went
+    above 1, cloud cover went negative and the condensation gain divided by 0."""
+    from legoesm.atmosphere.physics.microphysics.sundqvist import zhao_carr_gscond
+
+    a = lambda x: jnp.full((1, 1), x, jnp.float64)  # noqa: E731
+    T, q, ps = a(280.0), a(0.0061888470585646296), jnp.full((1,), 1.0e5, jnp.float64)
+
+    def f(cwm):
+        r = zhao_carr_gscond(T, q, cwm, a(8.0e4), ps, T, q, ps, 600.0, 0.8, 0.01)
+        return jnp.sum(r.T) + jnp.sum(r.cwm)
+
+    cwm = a(2.294926337804084e-6)
+    val, grad = jax.value_and_grad(f)(cwm)
+    assert np.isfinite(float(val)) and np.all(np.isfinite(np.asarray(grad)))
