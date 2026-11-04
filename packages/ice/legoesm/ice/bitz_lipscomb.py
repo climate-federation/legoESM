@@ -173,6 +173,11 @@ _MAXIMUM_ICE_CONCENTRATION = 0.99999
 # Width [K] of the one-sided C1 blend of hfx_err_dif's two NEMO formulas
 # below T0 (T_su < rt0 vs T_su = rt0); 0.0 = NEMO's hard branch.
 _ERR_DIF_BLEND_WIDTH_K = 0.01
+# --- RULE 5 smoothing (vote D6b, 2026-11-04) ---
+# Thickness [m] below which snow on fully melting ice is sent to the ocean,
+# C1 (1 - smoothstep_cubic(h_i / width)): all snow at h_i = 0 as NEMO
+# (`icethd_dh.F90:427-440`), none at h_i >= width; 0.0 = NEMO's h_i == 0.
+_FULL_MELT_SNOW_WIDTH_M = 1.0e-3
 
 
 # Compatibility constants for the public functions exposed by the parked
@@ -793,6 +798,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                     _snow_ice_salinity: bool = True,
                     _nemo_snow_sublimation_order: bool = True,
                     _nemo_snow_remap: bool = True,
+                    full_melt_width: float = _FULL_MELT_SNOW_WIDTH_M,
                     ) -> tuple[SI3ColumnArrays, SI3ExchangeFluxes]:
     """Resolved no-lateral-melt thickness sequence (`icethd_dh.F90:91-533`).
 
@@ -947,6 +953,11 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     hseg_s = jnp.stack(melted_snow, axis=-1)
 
     old_dz = h_i0 / 3.0
+    # NEMO keeps h_i_1d as a running total, h_i = MAX(0, h_i + dh) after every
+    # layer increment (`icethd_dh.F90:259,289,357,400`); its roundoff residual
+    # (~1e-17 m) decides the h_i == 0 full-melt branch below, so the column
+    # thickness is not re-summed from the layers.
+    h_run = h_i0
     old_h = jnp.broadcast_to(old_dz[..., None], state.e_ice.shape)
     melt_temperature = constants.T0 - constants.liquidus_slope * state.S_layers
     for k in range(3):
@@ -973,6 +984,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             ),
         )
         old_h = old_h.at[..., k].add(-surface_remove)
+        h_run = jnp.maximum(0.0, h_run - surface_remove)
         melt_mass = constants.rho_ice * surface_remove * ar
         fx = _add_fluxes(
             fx,
@@ -997,6 +1009,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             remaining_mass / constants.rho_ice, old_h[..., k]
         )
         old_h = old_h.at[..., k].add(-sublimation)
+        h_run = jnp.maximum(0.0, h_run - sublimation)
         fx = _add_fluxes(
             fx,
             hfx_sub=-zdf.e_ice[..., k] * sublimation * ar,
@@ -1035,6 +1048,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     # internal-melt arms remain zero until their actual flux becomes positive.
     basal_energy = dt * jnp.maximum(zf, 0.0)
     if _nemo_basal_layer_loop:
+        h_run = h_run + dh_growth
         for k in (2, 1, 0):
             internal_melt = (zf > 0.0) & (
                 zdf.T_ice[..., k] >= melt_temperature[..., k]
@@ -1063,6 +1077,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                 0.0,
             )
             old_h = old_h.at[..., k].add(-basal_remove)
+            h_run = jnp.maximum(0.0, h_run - basal_remove)
             melt_mass = constants.rho_ice * basal_remove * ar
             fx = _add_fluxes(
                 fx,
@@ -1083,7 +1098,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                     0.0,
                 ),
             )
-        h_i_pre_flood = jnp.sum(old_h, axis=-1) + dh_growth
+        h_i_pre_flood = h_run
     else:
         bottom_specific = -zdf.e_ice[..., -1] / constants.rho_ice
         bottom_water = constants.c_ocean * (
@@ -1113,6 +1128,21 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         old_h = old_h.at[..., -1].set(
             jnp.maximum(old_h[..., -1] - legacy_remove, 0.0)
         )
+
+    # Remove snow if the ice has melted entirely (`icethd_dh.F90:427-440`):
+    # its mass and enthalpy go to the ocean (hfx_res/wfx_res).
+    if full_melt_width == 0:
+        snow_off = (h_i_pre_flood == 0.0).astype(h_i_pre_flood.dtype)
+    else:
+        snow_off = 1.0 - smoothstep_cubic(h_i_pre_flood / full_melt_width)
+    removed = snow_off[..., None] * hseg_s
+    fx = _add_fluxes(
+        fx,
+        hfx_res=-jnp.sum(eseg_s * removed, axis=-1) * ar,
+        wfx_res=constants.rho_snow * jnp.sum(removed, axis=-1) * ar,
+    )
+    hseg_s = hseg_s - removed
+    h_s_work = h_s_work * (1.0 - snow_off)
 
     # Remap old layer energy plus bottom new ice.  The first zero-thickness
     # segment is the top snow-ice slot in NEMO's `zh_i_old(0:nlay_i+1)`.
@@ -1161,7 +1191,8 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     eseg_i = eseg_i.at[..., 0].set(jnp.where(
         flood > 0.0, flood_content / jnp.maximum(flood, 1.0e-20), 0.0
     ))
-    e_i = _piecewise_remap(hseg_i, eseg_i, h_i)
+    # ice_var_vremap's new layer thickness is SUM(zh_i_old)/nlay (icevar.F90:1005).
+    e_i = _piecewise_remap(hseg_i, eseg_i, jnp.sum(hseg_i, axis=-1))
     e_s = (
         _nemo_snow_enthalpy_remap(hseg_s, eseg_s)
         if _nemo_snow_remap
@@ -1181,7 +1212,12 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     S_bulk = state.S_bulk + (
         snow_ice_salt_change + (S_new - state.S_bulk) * dh_growth
     ) / jnp.maximum(h_i, _EPS10)
-    return SI3ColumnArrays(a, h_i, h_s_final, zdf.T_surface, e_i, e_s,
+    # Ensure a_i = 0, h_s = 0, t_su = rt0 where h_i = 0 (`icethd_dh.F90:528-532`).
+    # Hard on the exact-zero set: zero ice volume, so conservative (vote D6b).
+    gone = h_i == 0.0
+    return SI3ColumnArrays(jnp.where(gone, 0.0, a), h_i,
+                           jnp.where(gone, 0.0, h_s_final),
+                           jnp.where(gone, constants.T0, zdf.T_surface), e_i, e_s,
                            S_bulk, state.S_layers, state.age_volume), fx
 
 
@@ -1270,6 +1306,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _nemo_eos_order: bool = True,
                            _nemo_snow_sublimation_order: bool = True,
                            _nemo_snow_remap: bool = True,
+                           full_melt_width: float = _FULL_MELT_SNOW_WIDTH_M,
                            ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
@@ -1292,6 +1329,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _snow_ice_salinity=_snow_ice_salinity,
         _nemo_snow_sublimation_order=_nemo_snow_sublimation_order,
         _nemo_snow_remap=_nemo_snow_remap,
+        full_melt_width=full_melt_width,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
