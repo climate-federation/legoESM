@@ -142,6 +142,10 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, dt, config, shf_w_m2,
         raise ValueError("use_ifs_ascent needs shf_w_m2, lhf_w_m2 and land_frac "
                          "(cubasen's surface parcel and cumastrn's land switches)")
     th = lego_thermo()
+    # Hybrid-coordinate hosts build pressure in float64 under x64 whatever the
+    # column precision; CUMASTRN's scan carries are typed by the column.
+    p_full = jnp.asarray(p_full, T.dtype)
+    p_half = jnp.asarray(p_half, T.dtype)
     zero = jnp.zeros_like(T)
     z = lambda a: zero if a is None else a
     geo_full, geo_half = _hydrostatic_geopotential(T, q_v, p_half)
