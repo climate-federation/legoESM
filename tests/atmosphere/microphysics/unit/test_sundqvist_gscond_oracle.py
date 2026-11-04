@@ -168,3 +168,21 @@ def test_stored_humidity_is_floored_at_epsq():
     ps = jnp.full((1,), 1.0e5)
     r = zhao_carr_gscond(T, q, jnp.zeros((1, 2)), p, ps, T, q + 2e-12, ps, 600.0, 0.8, 0.0)
     np.testing.assert_array_equal(np.asarray(r.q_v_store), 2.0e-12)
+
+
+def test_smooth_fp32_matches_fp64_at_low_saturation_pressure():
+    """codex 2026-11-04 reproducer: at 180 K and 200 hPa the smooth
+    min(p, e_s) must not cancel in fp32 (it lost 24% of the evaporation)."""
+    from legoesm.atmosphere.physics.microphysics.sundqvist import zhao_carr_gscond
+
+    def run(dtype):
+        a = lambda x: jnp.full((1, 2), x, dtype)  # noqa: E731
+        T, q = a(180.0), a(1.6728596e-7)
+        ps = jnp.full((1,), 1.0e5, dtype)
+        r = jax.jit(zhao_carr_gscond, static_argnums=(8, 9, 10))(
+            T, q, a(1e-4), a(2.0e4), ps, T, q, ps, 600.0, 0.8, 0.01)
+        return np.asarray(r.net_condensation, np.float64)
+
+    e64, e32 = run(jnp.float64), run(jnp.float32)
+    assert float(np.max(np.abs(e64))) > 0.0
+    np.testing.assert_allclose(e32, e64, rtol=1e-4)

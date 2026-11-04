@@ -526,15 +526,23 @@ def zhao_carr_gscond(
             return (x > 0.0).astype(x.dtype)
         return sigmoid_switch(x, sharp(scale))
 
-    def smax(a, b, scale):              # max(a, b) = b + (a - b)+, C1, never above
+    # C1 max/min: b + (a - b)+ and a - (a - b)+ with the C1 positive part,
+    # written as the hard max/min minus/plus the small within-width correction
+    # (a - b)+_hard - (a - b)+_C1, so neither cancels in fp32 (p - (p - e_s)
+    # lost 24% of e_s at 180 K; codex 2026-11-04).
+    def _corr(a, b, scale):
+        d = a - b
+        return jnp.maximum(d, 0.0) - positive_part_c1(d, sharp(scale))
+
+    def smax(a, b, scale):              # C1, never above max(a, b)
         if hard:
             return jnp.maximum(a, b)
-        return b + positive_part_c1(a - b, sharp(scale))
+        return jnp.maximum(a, b) - _corr(a, b, scale)
 
-    def smin(a, b, scale):              # min(a, b) = a - (a - b)+, C1
+    def smin(a, b, scale):              # C1, never below min(a, b)
         if hard:
             return jnp.minimum(a, b)
-        return a - positive_part_c1(a - b, sharp(scale))
+        return jnp.minimum(a, b) + _corr(a, b, scale)
 
     elwv = constants.L_v                       # latent-ok: Zhao-Carr oracle constant (hvap [149])
     eliv = constants.L_v + constants.L_f       # latent-ok: Zhao-Carr oracle constant (hvap+hfus [150])
