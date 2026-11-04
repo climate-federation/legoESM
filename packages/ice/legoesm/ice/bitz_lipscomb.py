@@ -81,7 +81,7 @@ class SI3StepTrace(NamedTuple):
 _EPS10 = 1.0e-10
 _EPS20 = 1.0e-20
 _REMAP_SCALE = 2.0 ** 66   # exact power-of-two rescale, see _piecewise_remap
-_REMAP_SMALL_M = 1.0e-15    # below this layer thickness the rescaled quotient is used
+_REMAP_SMALL_M = 1.0e-15    # new layers thinner than this are remapped in 2**66-scaled units
 _H_MIN = 1.0e-3
 _T_CONVERGENCE = 1.0e-4
 _T_SURFACE_EPS = 1.0e-5
@@ -650,8 +650,10 @@ def _piecewise_remap(thickness, enthalpy, new_total, n_layers: int = 3):
     # 1e-15 m is remapped in units scaled by the power of two 2**66 (exact, so
     # fp64 values are bitwise unchanged): the scale enters at the input, so no
     # fp32 forward or reverse value leaves the normal range and the compiler
-    # cannot cancel it out of the quotient (review).  A zero column has zero
-    # content: NEMO's 0.
+    # cannot cancel it out of the quotient (review).  The new layers are equal
+    # by construction (new_total / n_layers), so the per-column trigger covers
+    # every denominator; only `thickness` carries old-grid lengths and it is
+    # scaled with the same factor.  A zero column has zero content: NEMO's 0.
     scale = jnp.where(new_total / n_layers < _REMAP_SMALL_M, _REMAP_SCALE, 1.0)
     thickness = thickness * scale[..., None]
     old_lo = jnp.cumsum(thickness, axis=-1) - thickness
