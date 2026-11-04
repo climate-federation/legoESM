@@ -1,5 +1,16 @@
 """Prognostic TKE, Mellor-Yamada-2.5-INSPIRED k-l turbulence closure.
 
+.. warning::
+
+   **NOT-YET-FAITHFUL to the selected oracle.**  The oracle for ``tke`` is
+   WRF v4.8.0 MYJ (``phys/module_bl_myjpbl.F``).  Its faithful JAX port is
+   :func:`legoesm.atmosphere.physics.turbulence.myj_wrf.myjpbl_column`
+   (oracle-tested in ``tests/atmosphere/hydrostatic/unit/test_myj_oracle.py``).
+   :func:`tke_turbulence` below is the older closure and is what every lane
+   still runs: no lane yet supplies the MYJ column state (the MYJSFC surface
+   exchange coefficients and surface values, carried TKE in MYJ's units,
+   cloud water/ice), and routing a lane to the port is a separate change.
+
 Carries a prognostic turbulent kinetic energy (TKE) equation and
 derives eddy diffusivities from TKE and a mixing length:
 
