@@ -654,8 +654,8 @@ _CERTIFIED_CARD_DIGESTS = {
     # The appended config fields move the printed NamedTuple digest; the
     # surrounding field-by-field guards pin their resolved values below.
     "GYRE-zco": "6bb18cf2c428e5ab",
-    "LOCK_EXCHANGE-zco": "39fa49bf73585f6e",
-    "OVERFLOW-zps": "9d7f1c12597be671",
+    "LOCK_EXCHANGE-zco": "9f64d2b817f72f5e",
+    "OVERFLOW-zps": "f3ca241ed2a098b7",
 }
 
 
@@ -682,6 +682,7 @@ def test_the_only_config_change_to_a_certified_card_is_the_added_eos_field(case)
     # Appended lateral_viscosity_mask_levels: every certified card keeps the
     # surface masks it always ran.
     assert cfg.lateral_viscosity_mask_levels == "surface"
+    assert cfg.lateral_shlat == 2.0 and cfg.lateral_side_bc != "nemo_shlat"
 
 
 def _card_digest(card):

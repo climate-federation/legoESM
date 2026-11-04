@@ -323,6 +323,7 @@ def test_positional_construction_unshifted_by_tail_field():
         "nemo_qsr_stage3_kmm_source_association",
         "vmix_eos_use_config_rho0",
         "lateral_viscosity_mask_levels",
+        "lateral_shlat",
     )
     # Head layout unchanged — the slots any positional caller binds first.
     assert f[:9] == (

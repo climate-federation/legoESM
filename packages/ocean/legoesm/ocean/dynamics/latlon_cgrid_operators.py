@@ -4343,6 +4343,34 @@ def per_level_viscosity_masks(
     return cell, um3, vm3, vx3
 
 
+def nemo_shlat_vertex_mask(
+    vertex_mask: jnp.ndarray,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+    shlat: float,
+) -> jnp.ndarray:
+    """NEMO's f-mask with the lateral momentum boundary condition rn_shlat.
+
+    dommsk.F90:209-215: where the free-slip f-mask is 0,
+    ``fmask = rn_shlat * MIN(1, MAX(umask(i,j), umask(i,j+1), vmask(i,j),
+    vmask(i+1,j)))`` -- a coastal vorticity point next to any wet face takes
+    rn_shlat (0 free slip, 2 no slip).  NEMO f(i,j) is vertex [j+1, i+1] here,
+    so its four faces are u[r-1, c], u[r, c], v[r, c-1], v[r, c].  The
+    neighbours come through the backend-dispatched pads (MPI cuts see the
+    neighbour rank).  Masks are static geometry, so the hard MAX/MIN carry no
+    gradient.  2-D or per-level (trailing level axis) masks.
+    """
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    vx = jnp.asarray(vertex_mask)
+    u_pad = pad_with_pole_bc_lat(jnp.asarray(u_mask, vx.dtype), halo=1,
+                                 south_value=0.0, north_value=0.0)
+    v_pad = pad_lon_cgrid(jnp.asarray(v_mask, vx.dtype), halo=1)
+    adj = jnp.maximum(jnp.maximum(u_pad[:-1], u_pad[1:]),
+                      jnp.maximum(v_pad[:, :-1], v_pad[:, 1:]))
+    coast = jnp.asarray(shlat, vx.dtype) * jnp.minimum(adj, 1.0)
+    return jnp.where(vx == 0.0, coast, vx)
+
+
 def _nemo_hpg_sco_literal_cgrid_impl(
     rhd: jnp.ndarray,
     e3w: jnp.ndarray,
