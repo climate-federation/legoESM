@@ -61,6 +61,10 @@ from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     ml_microphysics,
     MicrophysicsEmulator,
 )
+from legoesm.atmosphere.physics.microphysics.ifs_cloudsc import (
+    CloudscConvection,
+    ifs_cloudsc_microphysics,
+)
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
     reconstruct_half_level_pressure_hydrostatic,
@@ -95,6 +99,8 @@ def _get_microphysics_fn(config: MicrophysicsConfig):
         return "fast_sbm", fast_sbm_microphysics, config.fast_sbm
     elif config.scheme == "ml_emulator":
         return "ml_emulator", ml_microphysics, config.ml_emulator
+    elif config.scheme == "ifs_cloudsc":
+        return "ifs_cloudsc", ifs_cloudsc_microphysics, config.ifs_cloudsc
     elif config.scheme == "none":
         return "none", None, None
     else:
@@ -332,6 +338,43 @@ def sundqvist_lane_kwargs(scheme_name, grid, ncol, carries_q_i):
                 carries_q_i=carries_q_i)
 
 
+#: The advected tracer holding IFS CLOUDSC's prognostic cloud fraction
+#: (registry: physics_pipeline.moisture_registry_for).
+CLOUDSC_CF_TRACER = "cloud_fraction_ifs"
+
+
+def _cloudsc_lane_kwargs(state, grid, ncol, forcing, get_tracer):
+    """CLOUDSC's lane inputs (votes VC2-VC21): the advected cloud fraction,
+    the lane's land fraction (the one CUMASTRN reads) and this step's
+    CUMASTRN hand-off ``forcing["ifs_cloudsc_conv"]``.  Each one missing
+    raises: CLOUDSC has no meaningful default for any of them."""
+    from legoesm.atmosphere.physics.convection.integration import (
+        land_fraction_for_columns)
+    _need = ("q_v", "q_c", "q_i", "q_r", "q_s", CLOUDSC_CF_TRACER)
+    _missing = [n for n in _need
+                if state.tracers is None or n not in state.tracers]
+    if _missing:
+        # a missing species would read as zero and its CLOUDSC tendency be
+        # dropped, losing the detrainment the convection no longer books
+        raise ValueError(
+            f"ifs_cloudsc needs the tracers {_need} in the state "
+            f"(moisture_registry_for('ifs_cloudsc')); missing {_missing}.")
+    conv = None if forcing is None else forcing.get("ifs_cloudsc_conv")
+    if not isinstance(conv, CloudscConvection):
+        raise ValueError(
+            "ifs_cloudsc needs this step's CUMASTRN hand-off "
+            "(forcing['ifs_cloudsc_conv'], from convection='bechtold' with "
+            "use_ifs_ascent=True in the macmic loop); got "
+            f"{type(conv).__name__}.")
+    land = land_fraction_for_columns(grid, ncol)
+    if land is None:
+        raise ValueError(
+            "ifs_cloudsc needs the lane's land fraction (grid.land_frac, "
+            "CLOUDSC's PLSM); the grid carries none.")
+    return dict(cloud_fraction=get_tracer(CLOUDSC_CF_TRACER),
+                land_frac=land, conv=conv)
+
+
 def _make_hydrostatic_microphysics(
     microphysics_config: MicrophysicsConfig,
     dt: float,
@@ -371,6 +414,7 @@ def _make_hydrostatic_microphysics(
             "warm_rain_incloud=True is wired on the MPAS lane only (aist "
             f"needs mesh.latCell); got model_type={model_type!r}.")
 
+    _cloudsc = scheme_name == "ifs_cloudsc"
     _prog_nc = bool(getattr(scheme_config, "prognostic_droplet_number", False))
     if _prog_nc and not _incloud:
         # the scheme refuses this too (morrison.py start-up guard); fail at build
@@ -579,6 +623,9 @@ def _make_hydrostatic_microphysics(
             _kw.update(sundqvist_lane_kwargs(
                 scheme_name, grid, ncol,
                 state.tracers is not None and "q_i" in state.tracers))
+            if _cloudsc:
+                _kw.update(_cloudsc_lane_kwargs(
+                    state, grid, ncol, forcing, _get_tracer))
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,
@@ -628,6 +675,13 @@ def _make_hydrostatic_microphysics(
                     data=_ntend.reshape(shape_3d),
                     name=f"d{_nname}_dt_micro", dims=dims_3d, units=_nunits,
                 )
+        if _cloudsc:
+            # CLOUDSC's updated cloud fraction back onto the advected tracer
+            tracer_tends[CLOUDSC_CF_TRACER] = Field(
+                data=((micro_out.cloud_fraction_new - _kw["cloud_fraction"])
+                      / dt).reshape(shape_3d),
+                name=f"d{CLOUDSC_CF_TRACER}_dt_micro", dims=dims_3d,
+                units="1/s")
 
         tend = HydrostaticTendencies(
             du_dt=Field(
@@ -675,6 +729,9 @@ def _make_hydrostatic_microphysics(
     # without --aerosol-ccn is byte-identical (the accumulator calls the fn
     # with the legacy 3-arg signature).
     if _nc_from_aerosol:
+        physics_fn._wants_forcing = True
+    if _cloudsc:
+        # reads the CUMASTRN hand-off forcing["ifs_cloudsc_conv"]
         physics_fn._wants_forcing = True
     if _prog_nc:
         # Writes the CLDO carry: the accumulator calls it as a carry module
@@ -901,6 +958,7 @@ _PLANE_MIN_TRACER_SLOTS = {
     "sdm": 2,               # q_v, q_c by default; opt-in coalescence needs 8
     "fast_sbm": 9,          # q_v,q_c,q_r + N_c,N_r live; ice slots zero
     "ml_emulator": 9,       # generic full layout
+    "ifs_cloudsc": 10,      # full nine + cloud_fraction_ifs (q_g, N_* zero)
     "none": 0,              # no-op
 }
 

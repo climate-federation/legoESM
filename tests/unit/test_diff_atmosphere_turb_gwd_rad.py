@@ -1183,7 +1183,8 @@ def _turb_column(ncol=8, nlev=12, seed=1):
 
 
 # scheme -> (carries a prognostic TKE/qke carry?)
-TURB_CARRY = ["tke", "mynn25", "clubb_lite", "edmf"]
+# mynn25 (WRF port, own grad tests in test_mynn25_oracle) dropped in R3
+TURB_CARRY = ["tke", "clubb_lite", "edmf"]
 TURB_DIAGNOSTIC = ["ysu", "holtslag_boville"]
 TURB_ALL = TURB_CARRY + TURB_DIAGNOSTIC
 
@@ -1302,7 +1303,7 @@ class TestTurbulenceLeafGrad:
     # (a Richardson number / buoyancy-flux stability function evaluated this
     # step) vs schemes that diagnose K purely from the carried TKE and a
     # geometric length scale.  Measured, not assumed — see the two tests below.
-    TURB_K_STABILITY = ["mynn25", "ysu", "holtslag_boville"]
+    TURB_K_STABILITY = ["ysu", "holtslag_boville"]
     TURB_K_FROM_CARRY = ["tke", "clubb_lite", "edmf"]
 
     @pytest.mark.parametrize("scheme", TURB_K_STABILITY)

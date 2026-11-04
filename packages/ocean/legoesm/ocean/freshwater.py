@@ -23,6 +23,7 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.core.smooth import smooth_max
 from legoesm.core.source_rounding import nemo_source_round as _sr
 
 
@@ -423,6 +424,10 @@ def normalize_freshwater_net(
 
 _DEN_FLOOR = 1.0e-10   # empty-domain denominator floor [shared by both means]
 _THIN_CELL_M = 1.0e-3  # top-cell thickness below which the closure is inert [m]
+# Runoff water temperature floor max(SST, 0 degC) (NEMO sbcrnf.F90:148, ln_rnf_tem
+# =.false.): smooth LogSumExp max, sharpness 100 /K = 0.01 K transition width
+# (user rule 2026-10-27); math.inf gives NEMO's hard MAX exactly.
+_RUNOFF_T_FLOOR_SHARPNESS = 100.0  # [1/K]
 
 
 def _global_weighted_sums(num_field, den_field, w, owned_mask=None):
@@ -737,7 +742,8 @@ def runoff_entry_profile(fw, h_k, mask, rho_0: float, runoff_spread_m):
 
 
 def real_freshwater_entry(fw, F_rate, h_k, mask, rho_0: float, T,
-                          runoff_spread_m=None):
+                          runoff_spread_m=None,
+                          runoff_t_floor_sharpness=_RUNOFF_T_FLOOR_SHARPNESS):
     """Per-level water entry ``(F_entry, entry_heat)`` for
     :func:`real_freshwater_dilution_tendencies` on either core.
 
@@ -746,9 +752,19 @@ def real_freshwater_entry(fw, F_rate, h_k, mask, rho_0: float, T,
     at the surface.  Heat: rain/evaporation/restoring water carries ZERO
     tracer temperature (their heat content is in the surface heat flux,
     NEMO ``blk_oce_2`` / ``sbcssr``); runoff, ice melt water and the
-    normalisation residual enter at the local temperature (NEMO ``rnf_tsc``
-    at SST; no ice-melt heat-content term exists in our ice coupling either
-    -- PLAUSIBLE, review item).
+    normalisation residual enter at the local temperature, runoff at
+    ``max(SST, 0)`` (NEMO ``rnf_tsc = MAX(sst_m, 0)*rnf*r1_rho0``,
+    sbcrnf.F90:148: river water is fresh, so never below 0 degC) as a smooth
+    max of width 1/``runoff_t_floor_sharpness`` [K] (``math.inf`` = NEMO's
+    hard MAX); no ice-melt heat-content term exists in our ice coupling
+    either -- PLAUSIBLE, review item.
+
+    KNOWN DIFFERENCE (RULE 5): NEMO uses the hard ``MAX(sst_m, 0)``; the
+    default here is the smooth LogSumExp max at sharpness 100 /K (the config
+    field ``runoff_temperature_floor_sharpness``), which overshoots by
+    ``ln(1 + exp(-100|T|))/100`` K: 6.9 mK at T = 0, < 1e-6 K for
+    |T| > 0.14 K.  ``math.inf`` recovers NEMO exactly.  The smoothing breaks
+    no invariant (runoff water is never colder than 0 degC either way).
     """
     F = jnp.asarray(F_rate) * mask
     R = jnp.asarray(fw.runoff) / rho_0 * mask
@@ -763,8 +779,10 @@ def real_freshwater_entry(fw, F_rate, h_k, mask, rho_0: float, T,
     pe = (jnp.asarray(fw.precip) - jnp.asarray(fw.evap)) / rho_0 * mask
     rest = getattr(fw, "restoring", None)
     pe = pe if rest is None else pe + jnp.asarray(rest) / rho_0 * mask
-    # runoff enters at SST over the whole h_rnf (NEMO rnf_tsc = rnf*sst)
-    entry_heat = (R_entry * T[..., :1]).at[..., 0].add((top_rest - pe) * T[..., 0])
+    # runoff enters at max(SST, 0) over the whole h_rnf (NEMO rnf_tsc =
+    # MAX(sst_m, 0)*rnf*r1_rho0, sbcrnf.F90:148)
+    T_runoff = smooth_max(T[..., :1], 0.0, runoff_t_floor_sharpness)
+    entry_heat = (R_entry * T_runoff).at[..., 0].add((top_rest - pe) * T[..., 0])
     return F_entry, entry_heat
 
 
