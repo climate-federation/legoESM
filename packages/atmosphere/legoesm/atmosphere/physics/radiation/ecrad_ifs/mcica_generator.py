@@ -108,7 +108,7 @@ def _lt(a, b, sharpness):
     return 1.0 - sigmoid_switch(a - b, sharpness)
 
 
-def _step_pos(x, width, sharpness):
+def step_pos(x, width, sharpness):
     """``x > 0`` at inf; else C1 step, exactly 0 for x <= 0 and 1 for x >= width."""
     if _hard(sharpness):
         return (x > 0.0).astype(x.dtype)
@@ -209,7 +209,7 @@ def _generate_column(frac, overlap_param, fractional_std, rand_top, rand_cloud,
     # Range of cloudy layers ibegin..iend (layers with frac > 0) as masks
     # built from a per-layer presence m (vote G6'): exactly frac > 0 at inf,
     # exactly 0/1 for cropped input (frac = 0 or >= frac_threshold).
-    m = _step_pos(frac, frac_threshold / sharpness, sharpness)
+    m = step_pos(frac, frac_threshold / sharpness, sharpness)
     at_or_above = 1.0 - jnp.cumprod(1.0 - m)                 # l >= ibegin
     none_below_incl = jnp.cumprod((1.0 - m)[::-1])[::-1]
     at_or_below = 1.0 - none_below_incl                      # l <= iend
@@ -218,7 +218,7 @@ def _generate_column(frac, overlap_param, fractional_std, rand_top, rand_cloud,
     # Overlap parameter of inhomogeneities (cloud_generator lines 187-194):
     # op**(1/decorrelation_scaling) for interfaces ibegin..iend-1 where op > 0.
     use_pow = (at_or_above * jnp.concatenate([at_or_below[1:], pad])
-               * _step_pos(op, 1.0 / sharpness, sharpness))
+               * step_pos(op, 1.0 / sharpness, sharpness))
     op_pow = jnp.power(jnp.where(op > 0.0, op, 1.0), 1.0 / decorrelation_scaling)
     op_inhom = use_pow * op_pow + (1.0 - use_pow) * op
 
