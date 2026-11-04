@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
 
@@ -133,3 +134,21 @@ def test_hines_smooth_default_close_and_differentiable(fix):
         e = jnp.zeros_like(u0).at[0, k].set(1e-4)
         fd = (loss(u0 + e) - loss(u0 - e)) / 2e-4
         assert abs(float(fd) / float(grad[0, k]) - 1.0) < 1e-4, k
+
+
+def test_hines_fp32_columns_take_fp64_host_pressures():
+    """fp32 column fields with fp64 pressures/latitude stay fp32 end to end."""
+    nlev = 20
+    p_half = np.linspace(100.0, 1.0e5, nlev + 1)[None, :]
+    p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    z_half = 7000.0 * np.log(1.0e5 / p_half)
+    z_full = 0.5 * (z_half[:, 1:] + z_half[:, :-1])
+    f32 = lambda a: jnp.asarray(a, jnp.float32)
+    T = f32(np.full((1, nlev), 250.0))
+    u = f32(np.linspace(30.0, 2.0, nlev)[None, :])
+    out = hines_gwd(u, 0.3 * u, T, jnp.asarray(p_full), jnp.asarray(p_half),
+                    jnp.asarray(z_full), jnp.asarray(z_half),
+                    jnp.asarray(p_full / (constants.R_d * 250.0)),
+                    jnp.asarray([0.5]), 1800.0, HinesConfig())
+    assert out.du_dt.dtype == jnp.float32 and out.eps_gwd.dtype == jnp.float32
+    assert np.all(np.isfinite(np.asarray(out.du_dt)))
