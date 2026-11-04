@@ -3502,6 +3502,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # >2 strong slip; dommsk.F90:209-215).  2.0 = ORCA1's namelist_cfg.  Read
     # only by "nemo_shlat".  Appended to preserve positional callers.
     lateral_shlat: float = 2.0
+    # Width of the smooth runoff-water temperature floor max(SST, 0 degC)
+    # (NEMO sbcrnf.F90:148, ln_rnf_tem=.false.) in the real-freshwater
+    # closure: LogSumExp sharpness [1/K], 100 = 0.01 K (user rule
+    # 2026-10-27, RULE 5); math.inf = NEMO's hard MAX.  Appended to preserve
+    # positional callers.
+    runoff_temperature_floor_sharpness: float = 100.0
 
 
     @classmethod
