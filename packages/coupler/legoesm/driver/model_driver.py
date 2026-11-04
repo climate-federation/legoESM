@@ -20691,6 +20691,11 @@ class ModelDriver:
                 "convection='tiedtke' is wired on the compiled-segment and "
                 "column lanes only; this per-step reference loop does not "
                 "carry its dynamics q_v tendency / lagged turbulence inputs")
+        if getattr(self.config, "turbulence", "none") == "mynn25":
+            raise NotImplementedError(
+                "turbulence='mynn25' (WRF MYNN-EDMF) is wired on the compiled-"
+                "segment and column lanes only; this per-step reference loop "
+                "does not peel its cold-start step (vote P6/R1a)")
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
         cfg = ctx["cfg"]
         # Issue #405/#413: this loop now seeds and threads the

@@ -1321,12 +1321,15 @@ def _make_mpas_turbulence(
                 phys_state, carry_field, nCells, nlev, scheme_config, _state_dtype)
             _mynn_kw = {}
             if scheme_name == "mynn25":
-                # xland from the factory's f_land closure (vote N14).
-                _mynn_kw = dict(mynn_lane_kwargs(
+                # xland from the factory's f_land closure (vote N14), else
+                # the mesh's own land fraction (mynn_lane_kwargs; codex R3
+                # round 6: the driver passes f_land only for land_beta != 1)
+                _mynn_kw = mynn_lane_kwargs(
                     state, mesh, sigma_coord, phys_state, T_col, p_full_col,
-                    q_v_col, nCells, mynn_initflag, voronoi=True),
-                    land_frac=(None if f_land is None
-                               else jnp.reshape(jnp.asarray(f_land), (nCells,))))
+                    q_v_col, nCells, mynn_initflag, voronoi=True)
+                if f_land is not None:
+                    _mynn_kw["land_frac"] = jnp.reshape(
+                        jnp.asarray(f_land), (nCells,))
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,

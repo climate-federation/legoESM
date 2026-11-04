@@ -64,3 +64,11 @@ def test_pipeline_step_build_needs_the_flag():
     from legoesm.driver.physics_pipeline import PhysicsPipeline
     with pytest.raises(ValueError, match="mynn_initflag"):
         PhysicsPipeline.build_step_unified(pipe, static_need_rad=True)
+
+
+def test_per_step_reference_loop_refuses_mynn25(tmp_path):
+    """codex R3 round 6: that loop does not peel the cold start."""
+    drv = ModelDriver(_cfg(), output_dir=tmp_path)
+    drv.setup()
+    with pytest.raises(NotImplementedError, match="mynn25"):
+        drv._run_per_step()
