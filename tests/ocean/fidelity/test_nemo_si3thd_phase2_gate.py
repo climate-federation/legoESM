@@ -57,6 +57,7 @@ def _forcing() -> SI3SurfaceForcing:
         evaporation=a(0.0), snow_precipitation=a(5.0e-6),
         qprec_ice=a(0.0), qcn_ice_bottom=a(0.0),
         qsb_ice_bottom=a(0.0), fhld=a(0.0), qlead=a(0.0),
+        sst=a(271.27 - NEMO_SI3_CONSTANTS_CONFIG.T0),   # t_bottom in degC
     )
 
 
