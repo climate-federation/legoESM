@@ -135,3 +135,18 @@ def test_growth_gate_smooth_default_exact_outside_band_and_differentiable():
         assert float(bog(q)) == float(bog(q, growth_gate_width=0.0))     # exact outside the band
     g = jax.grad(bog)(-0.5 * w)
     assert bool(jnp.isfinite(g)) and float(jnp.abs(g)) > 0
+
+
+def test_growth_gate_attenuates_inside_band_and_is_differentiable():
+    st, zr, fz = dh_args(FX)
+    w = bl._GROWTH_GATE_WIDTH_WM2
+    zr0 = zr._replace(qcn_ice_bottom=zr.qcn_ice_bottom * 0, qtr_ice_bottom=zr.qtr_ice_bottom * 0)
+    def bog(q, **kw):
+        f = fz._replace(qsb_ice_bottom=fz.qsb_ice_bottom * 0 + q, fhld=fz.fhld * 0)
+        return bl._dh_step_fluxes(st, zr0, f, dt(FX), K, nemo_version="5.0.1", **kw)[1].wfx_bog
+    hard, soft = bog(-0.5 * w, growth_gate_width=0.0), bog(-0.5 * w)
+    grows = np.asarray(hard) != 0
+    assert grows.any()
+    np.testing.assert_allclose(np.asarray(soft)[grows], 0.5 * np.asarray(hard)[grows], rtol=1e-12)   # smoothstep(0.5)
+    g = jax.grad(lambda q: jnp.sum(bog(q)))(jnp.asarray(-0.5 * w))
+    assert bool(jnp.isfinite(g))

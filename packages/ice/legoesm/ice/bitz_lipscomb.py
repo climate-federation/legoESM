@@ -1079,7 +1079,11 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         grow = (zf < 0.0).astype(zf.dtype)
     else:
         grow = smoothstep_cubic(-zf / growth_gate_width)
-    dh_growth = grow * dt * jnp.maximum(0.0, zf / (dE * constants.rho_ice))
+    # dE = 0 can only occur with 5.0.1's unclamped latent term; the growth
+    # there is gated off, so a -1 placeholder keeps the discarded division
+    # (and its reverse pass) finite.
+    dE_safe = jnp.where(dE == 0.0, -1.0, dE)
+    dh_growth = grow * dt * jnp.maximum(0.0, zf / (dE_safe * constants.rho_ice))
     growth_mass = -constants.rho_ice * dh_growth * ar      # zfmdt * a * r1_Dt
     fx = _add_fluxes(
         fx,
@@ -1328,6 +1332,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _nemo_snow_sublimation_order: bool = True,
                            _nemo_snow_remap: bool = True,
                            nemo_version: str = "5.0.2",
+                           growth_gate_width: float = _GROWTH_GATE_WIDTH_WM2,
                            ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
@@ -1352,6 +1357,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _nemo_snow_sublimation_order=_nemo_snow_sublimation_order,
         _nemo_snow_remap=_nemo_snow_remap,
         nemo_version=nemo_version,
+        growth_gate_width=growth_gate_width,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
