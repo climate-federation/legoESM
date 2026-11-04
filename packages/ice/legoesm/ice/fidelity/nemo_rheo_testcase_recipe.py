@@ -9,6 +9,7 @@ condition can silently replace the shipped case.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import NamedTuple, cast
 
@@ -30,6 +31,12 @@ from legoesm.ice.ridging import (
     SI3JPL1RidgingConfig,
     SI3JPL1RidgingState,
     apply_si3_jpl1_ridging,
+)
+from legoesm.ice.si3_ice_cor import (
+    SI3IceCorConfig,
+    SI3IceCorFluxes,
+    SI3IceCorState,
+    apply_si3_jpl1_ice_cor,
 )
 from legoesm.ice.transport import (
     SI3PratherMoments,
@@ -533,51 +540,75 @@ def _ice_cor(
     contents: jnp.ndarray,
     t_surface: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """The resolved ``ice_cor(kn=1)`` arm at icecor.F90:64-116."""
+    """The resolved ``ice_cor(kn=1)`` arm at icecor.F90:64-116.
+
+    Delegates to the shared :func:`legoesm.ice.si3_ice_cor.apply_si3_jpl1_ice_cor`
+    (hard NEMO limits).  The card's constant ``sss`` enters the salinity cap;
+    the residual-flux ledgers are not carried by this card, and zapped cells
+    take the card's empty-surface temperature.
+    """
 
     index = ICE_RHEO_TRACERS.index
 
     def field(name: str) -> jnp.ndarray:
         return contents[..., index(name)]
 
-    ice_area = field("a_i")
-    ice_volume = field("v_i")
-    pond_area = field("a_ip")
-    has_area = ice_area >= _ICE_RHEO_EPSI20
-    safe_area = jnp.where(has_area, ice_area, _ICE_RHEO_ONE)
-    thickness = jnp.where(has_area, ice_volume / safe_area, _ICE_RHEO_ZERO)
-    thin = thickness < _ICE_RHEO_MINIMUM_THICKNESS_M
-    thin_factor = thickness / _ICE_RHEO_MINIMUM_THICKNESS_M
-    pond_area = jnp.where(thin, pond_area * thin_factor, pond_area)
-    ice_area = jnp.where(thin, ice_area * thin_factor, ice_area)
-    overfilled = ice_area > _ICE_RHEO_MAXIMUM_CONCENTRATION
-    safe_overfilled_area = jnp.where(overfilled, ice_area, _ICE_RHEO_ONE)
-    ice_area = jnp.where(
-        overfilled,
-        ice_area * _ICE_RHEO_MAXIMUM_CONCENTRATION / safe_overfilled_area,
-        ice_area,
-    )
-    contents = contents.at[..., index("a_ip")].set(pond_area)
-    contents = contents.at[..., index("a_i")].set(ice_area)
+    def layers(prefix: str, count: int) -> jnp.ndarray:
+        return jnp.stack([field(f"{prefix}{level:02d}") for level in range(1, count + 1)], axis=-1)
 
-    salinity_minimum = _ICE_RHEO_MINIMUM_SALINITY_G_KG * ice_volume / _ICE_RHEO_NLAY_I
-    salinity_maximum = (
-        _ICE_RHEO_NEW_ICE_SALINITY_FRACTION
-        * _ICE_RHEO_OCEAN_SALINITY_G_KG
-        * ice_volume
-        / _ICE_RHEO_NLAY_I
+    zeros = jnp.zeros_like(field("a_i"))
+    state = SI3IceCorState(
+        ice_area=field("a_i"),
+        ice_volume=field("v_i"),
+        snow_volume=field("v_s"),
+        salt_content=layers("szv_i_l", _ICE_RHEO_NLAY_I),
+        age_content=field("oa_i"),
+        pond_area=field("a_ip"),
+        pond_volume=field("v_ip"),
+        pond_lid_volume=field("v_il"),
+        snow_enthalpy=layers("e_s_l", _ICE_RHEO_NLAY_S),
+        ice_enthalpy=layers("e_i_l", _ICE_RHEO_NLAY_I),
+        surface_temperature=t_surface,
     )
-    for level in range(1, _ICE_RHEO_NLAY_I + 1):
-        name = f"szv_i_l{level:02d}"
-        value = jnp.minimum(jnp.maximum(field(name), salinity_minimum), salinity_maximum)
+    config = SI3IceCorConfig(
+        rn_himin_m=_ICE_RHEO_MINIMUM_THICKNESS_M,
+        rn_simin_g_kg=_ICE_RHEO_MINIMUM_SALINITY_G_KG,
+        rn_sinew=_ICE_RHEO_NEW_ICE_SALINITY_FRACTION,
+        nn_icesal=_ICE_RHEO_NN_ICESAL,
+        ponds=card.ponds,
+        rho_ice_kg_m3=constants.rho_ice,
+        rho_snow_kg_m3=constants.rho_snow,
+        rho_water_kg_m3=constants.rho_water,
+        rt0_k=constants.T_freeze,
+        dt_s=card.dt_s,
+        limit_sharpness_scale=math.inf,
+    )
+    out = apply_si3_jpl1_ice_cor(
+        state,
+        SI3IceCorFluxes(sfx_res=zeros, wfx_res=zeros, hfx_res=zeros),
+        _ICE_RHEO_MAXIMUM_CONCENTRATION,
+        jnp.full_like(zeros, _ICE_RHEO_OCEAN_SALINITY_G_KG),
+        zeros,
+        config,
+    )
+    new = out.state
+    fields = {
+        "a_i": new.ice_area,
+        "v_i": new.ice_volume,
+        "v_s": new.snow_volume,
+        "oa_i": new.age_content,
+        "a_ip": new.pond_area,
+        "v_ip": new.pond_volume,
+        "v_il": new.pond_lid_volume,
+    }
+    for prefix, values in (("szv_i_l", new.salt_content), ("e_s_l", new.snow_enthalpy), ("e_i_l", new.ice_enthalpy)):
+        fields.update({f"{prefix}{level:02d}": values[..., level - 1] for level in range(1, values.shape[-1] + 1)})
+    for name, value in fields.items():
         contents = contents.at[..., index(name)].set(value)
-
-    has_ice = ice_area > _ICE_RHEO_EPSI10
-    safe_ice_area = jnp.where(has_ice, ice_area, _ICE_RHEO_ONE)
-    thickness = jnp.where(has_ice, ice_volume / safe_ice_area, _ICE_RHEO_ZERO)
-    small = jnp.minimum(jnp.minimum(ice_area, ice_volume), thickness) < (_ICE_RHEO_EPSI10)
-    contents = jnp.where(small[..., None], _ICE_RHEO_ZERO, contents)
-    t_surface = jnp.where(small, card.empty_surface_temperature, t_surface)
+    # Every other card tracer is zeroed on a zapped cell, as before.
+    zapped = out.zap_fraction == _ICE_RHEO_ONE  # hard limits: exactly 0 or 1
+    contents = jnp.where(zapped[..., None], _ICE_RHEO_ZERO, contents)
+    t_surface = jnp.where(zapped, card.empty_surface_temperature, t_surface)
     return _replace_periodic_halo(contents), _replace_periodic_halo(t_surface)
 
 
