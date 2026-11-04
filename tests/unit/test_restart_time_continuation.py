@@ -144,7 +144,7 @@ def test_mpas_restart_refuses_a_carry_the_run_does_not_carry(tmp_path):
     assert "physstate_sfclay" not in payload
     ncol = payload["physstate_tke"].shape[0]
     payload["physstate_sfclay"] = np.zeros((ncol, 6))
-    bad = str(tmp_path / "with_sfclay.npz")
+    bad = ckpt  # rewritten in place: the writing run's manifest stays beside it
     np.savez(bad, **payload)
     dB2 = _build_mpas_driver(str(tmp_path / "chain2"), TWO_STEPS_DAYS)
     step, day = dB2.load_checkpoint(bad)
