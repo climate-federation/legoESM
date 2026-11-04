@@ -193,9 +193,8 @@ def test_default_ramp_matches_hard_except_tiny_positive_area():
     hard = _correct(entry, transported, False, 0.0)
     ramp = _correct(entry, transported, False, default)
     assert hard[_C, _C, i] == a_small
-    sharpness = 1.0 / _RAMP_W  # positive_part_c1's own operation order
-    t = a_small * sharpness
-    assert ramp[_C, _C, i] == t * t * (2.0 - t) / sharpness
+    # a = 0.3 w -> f = 0.3**2 * (2 - 0.3) w = 0.153 w (independent value)
+    assert abs(ramp[_C, _C, i] - 0.153 * _RAMP_W) <= 1.0e-12 * _RAMP_W
     assert 0.0 < hard[_C, _C, i] - ramp[_C, _C, i] <= 4.0 * _RAMP_W / 27.0
     other = np.ones(hard.shape, bool)
     other[_C, _C, i] = False
