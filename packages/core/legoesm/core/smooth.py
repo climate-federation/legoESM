@@ -158,12 +158,16 @@ def positive_part_c1(x: jax.Array, sharpness: float) -> jax.Array:
     ``4/(27 s)``, at ``x = 1/(3s)``).  Unlike :func:`smooth_relu` (softplus,
     positive everywhere, offset everywhere) it creates nothing from a
     non-positive input and is exact for ``x >= 1/s``; exactly ``max(x, 0)``
-    at ``sharpness = inf``.
+    at ``sharpness = inf``, static or traced (a traced ``inf`` selects the hard
+    form; the smooth branch then runs at sharpness 1 so it holds no ``inf * 0``).
     """
     if _hard(sharpness):
         return jnp.maximum(x, 0.0)
-    t = jnp.clip(x * sharpness, 0.0, 1.0)
-    return jnp.where(t >= 1.0, x, t * t * (2.0 - t) / sharpness)
+    hard = jnp.isinf(sharpness)
+    s = jnp.where(hard, 1.0, sharpness)
+    t = jnp.clip(x * s, 0.0, 1.0)
+    smooth = jnp.where(t >= 1.0, x, t * t * (2.0 - t) / s)
+    return jnp.where(hard, jnp.maximum(x, 0.0), smooth)
 
 
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
