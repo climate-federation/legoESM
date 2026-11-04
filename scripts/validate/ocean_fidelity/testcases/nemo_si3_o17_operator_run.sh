@@ -80,6 +80,13 @@ if [[ -z "$OUT_DIR" ]]; then
   usage >&2
   exit 2
 fi
+readonly ABS_OUT="$(realpath -m "$OUT_DIR")"
+readonly ABS_EVIDENCE="$(realpath -m "$EVIDENCE")"
+readonly ABS_DEFAULT_EVIDENCE="$(realpath -m "$DEFAULT_EVIDENCE")"
+if [[ "$ABS_OUT" == "$ABS_EVIDENCE" || "$ABS_OUT" == "$ABS_EVIDENCE/"* || "$ABS_OUT" == "$ABS_DEFAULT_EVIDENCE" || "$ABS_OUT" == "$ABS_DEFAULT_EVIDENCE/"* ]]; then
+  echo "REFUSE: --out resolves inside evidence tree ($ABS_OUT inside read-only $ABS_EVIDENCE)" >&2
+  exit 2
+fi
 if [[ ! -d "$EVIDENCE/record_100step/o17_master_records" ]]; then
   echo "REFUSE: missing O17 record directory under $EVIDENCE" >&2
   exit 2
@@ -89,13 +96,7 @@ if [[ "$K_PARALLEL" -lt 1 || "$N_STEPS" -lt 1 || "$K_PARALLEL" -gt "$N_STEPS" ]]
   exit 2
 fi
 
-mkdir -p "$OUT_DIR"
-readonly ABS_OUT="$(cd "$OUT_DIR" && pwd)"
-readonly ABS_EVIDENCE="$(cd "$EVIDENCE" && pwd)"
-if [[ "$ABS_OUT" == "$ABS_EVIDENCE" || "$ABS_OUT" == "$ABS_EVIDENCE/"* ]]; then
-  echo "REFUSE: output directory $ABS_OUT must not be inside read-only evidence $ABS_EVIDENCE" >&2
-  exit 2
-fi
+mkdir -p "$ABS_OUT"
 
 check_memory_gate() {
   local avail_gb
@@ -134,6 +135,7 @@ for ((i = 0; i < K_PARALLEL; i++)); do
   range_jsons+=("$rjson")
   "$PY" "$SCORER" \
     --evidence "$ABS_EVIDENCE" \
+    --labels GIVEN-NEMO-ENTRY \
     --execution eager \
     --expect-steps "$N_STEPS" \
     --steps "${start}..${stop}" \

@@ -155,13 +155,31 @@ def _plant(path: Path, name: str, mutate) -> dict:
 
 
 def _verify_parallel_ranges(identical_dir: Path, serial_report: dict, steps: int, kwargs: dict) -> dict:
-    """Prove split-then-merge equals the serial report and missing/duplicated steps refuse."""
+    """Prove per-step split-then-merge equals serial per-step and split free-run/missing/dup refuse."""
+    per_step_labels = list(scorer.PER_STEP_LABELS)
     range_reports = [
-        scorer.score(identical_dir, list(scorer.VALID_LABELS), step_range=(kt, kt), **kwargs)
+        scorer.score(identical_dir, per_step_labels, step_range=(kt, kt), **kwargs)
         for kt in range(1, steps + 1)
     ]
     merged = scorer.merge_reports(range_reports, expect_steps=steps)
-    equal_ignoring_timing = scorer.strip_timing(merged) == scorer.strip_timing(serial_report)
+    serial_per_step = scorer.score(identical_dir, per_step_labels, **kwargs)
+    equal_ignoring_timing = (
+        scorer.strip_timing(merged) == scorer.strip_timing(serial_per_step)
+        and scorer.strip_timing(merged)["labels"]["GIVEN-NEMO-ENTRY"]
+        == scorer.strip_timing(serial_report)["labels"]["GIVEN-NEMO-ENTRY"]
+    )
+
+    split_free_run_refused = True
+    for call in (
+        lambda: scorer.free_run(identical_dir, step_range=(2, steps), **kwargs),
+        lambda: scorer.score(identical_dir, list(scorer.VALID_LABELS), step_range=(2, steps), **kwargs),
+    ):
+        try:
+            call()
+        except ValueError:
+            pass
+        else:
+            split_free_run_refused = False
 
     missing_refused = False
     try:
@@ -177,6 +195,7 @@ def _verify_parallel_ranges(identical_dir: Path, serial_report: dict, steps: int
 
     return {
         "split_merge_equals_serial": equal_ignoring_timing,
+        "split_free_run_refused": split_free_run_refused,
         "missing_step_refused": missing_refused,
         "duplicated_step_refused": duplicate_refused,
         "merged_status": merged["status"],
@@ -281,6 +300,7 @@ def preflight(out: Path, steps: int, shape: tuple[int, int], execution: str,
         fired("one_ulp_t_si", "step_exit.t_si")
         and fired("signed_zero", "step_exit.wfx_bog")
         and parallel_summary["split_merge_equals_serial"]
+        and parallel_summary["split_free_run_refused"]
         and parallel_summary["missing_step_refused"]
         and parallel_summary["duplicated_step_refused"]
         and free_summary["identical_status"] == "PASS"

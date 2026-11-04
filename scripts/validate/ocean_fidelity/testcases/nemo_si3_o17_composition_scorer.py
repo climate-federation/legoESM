@@ -447,6 +447,9 @@ def card_for(run: Path):
     return build_orca2_sas_ice_o17_card(surface=surface_cfg, thermo_namelist=nml)
 
 
+PER_STEP_LABELS = ("GIVEN-NEMO-ENTRY",)
+CARRIED_ICE_STATE_FIELDS = tuple(n for n in STATE_FIELDS if n != "t_si")
+CARRIED_AGGREGATED_FIELDS = ("tm_su", "vt_i", "vt_s", "vt_ip", "vt_il", "ato_i")
 CARRIED_KIND22_FIELDS = frozenset(
     (*STATE_FIELDS, "stress1_i", "stress2_i", "stress12_i", "cflice_delayed")
 )
@@ -467,45 +470,6 @@ def parse_step_range(spec: str) -> tuple[int, int]:
 def strip_timing(report: dict[str, Any]) -> dict[str, Any]:
     """Return ``report`` without runtime wall-clock/RSS telemetry fields."""
     return {k: v for k, v in report.items() if k not in TIMING_KEYS}
-
-
-def exit_state(records: dict[int, dict[str, Any]], card) -> SI3O17StepState:
-    """Kinds 22, 23, 27, 28, and 30 -> the step-exit ``SI3O17StepState`` of a recorded step."""
-    f22, f23 = records[22]["fields"], records[23]["fields"]
-    f27, f28 = records[27]["fields"], records[28]["fields"]
-    full, h = _grid(records[28], card)
-
-    def F(src, name):  # noqa: N802
-        return _as_full(src[name], full, h)
-
-    state_cfg = card.state
-    eqv = si3_var_glo2eqv(
-        v_i=F(f27, "v_i"), v_s=F(f27, "v_s"), sv_i=F(f27, "sv_i"), a_i=F(f27, "a_i"),
-        oa_i=F(f27, "oa_i"), a_ip=F(f27, "a_ip"), v_ip=F(f27, "v_ip"), v_il=F(f27, "v_il"),
-        e_s=F(f27, "e_s"), e_i=F(f27, "e_i"), szv_i=F(f27, "szv_i"), kn=2,
-        hi_max_top=float(np.asarray(f22["hi_max"])[-1]), sss_m=F(f22, "sss_m"),
-        config=state_cfg,
-    )
-    agg = si3_var_agg(
-        v_i=F(f27, "v_i"), v_s=eqv.v_s, sv_i=F(f27, "sv_i"), a_i=eqv.a_i,
-        oa_i=F(f27, "oa_i"), a_ip=F(f27, "a_ip"), v_ip=F(f27, "v_ip"), v_il=F(f27, "v_il"),
-        t_su=F(f27, "t_su"), t_si=F(f27, "t_si"), e_s=F(f27, "e_s"), e_i=F(f27, "e_i"),
-        szv_i=F(f27, "szv_i"), a_ip_eff=eqv.a_ip_eff, t_i=eqv.t_i, t_s=eqv.t_s,
-        kn=2, config=state_cfg,
-    )
-    state = SI3State.zeros(*full, state_cfg)._replace(
-        **{name: F(f28, name) for name in STATE_FIELDS},
-        prather=_moments(records[30]["fields"], full, h), equivalent=eqv, aggregated=agg,
-        bounds=SI3CategoryBounds(jnp.asarray(f22["hi_max"]), jnp.asarray(f22["hi_mean"])),
-        cflice_delayed=(
-            jnp.asarray(f28["cflice_delayed"]) if "cflice_delayed" in f28 else None
-        ),
-    )
-    aevp = SI3CGridAEVPState(
-        F(f23, "u_ice"), F(f23, "v_ice"),
-        F(f23, "stress1_i"), F(f23, "stress2_i"), F(f23, "stress12_i"),
-    )
-    return SI3O17StepState(state, aevp)
 
 
 def external_forcing(records: dict[int, dict[str, Any]], card) -> SI3O17LiveForcing:
@@ -542,7 +506,7 @@ def _carried_mismatches(
     mismatches: dict[str, dict[str, Any]] = {}
     pairs: list[tuple[str, Any, Any]] = [
         (f"ice.{name}", getattr(actual.ice, name), getattr(expected.ice, name))
-        for name in (*STATE_FIELDS, "cnd_ice", "t1_ice")
+        for name in CARRIED_ICE_STATE_FIELDS
     ]
     for family, prefix in PRATHER_PREFIX.items():
         act_m = getattr(actual.ice.prather, family)
@@ -551,9 +515,7 @@ def _carried_mismatches(
             pairs.append((f"prather.{stem}{prefix}", getattr(act_m, member), getattr(exp_m, member)))
     for member in actual.ice.bounds._fields:
         pairs.append((f"ice.bounds.{member}", getattr(actual.ice.bounds, member), getattr(expected.ice.bounds, member)))
-    for member in actual.ice.equivalent._fields:
-        pairs.append((f"ice.equivalent.{member}", getattr(actual.ice.equivalent, member), getattr(expected.ice.equivalent, member)))
-    for member in actual.ice.aggregated._fields:
+    for member in CARRIED_AGGREGATED_FIELDS:
         pairs.append((f"ice.aggregated.{member}", getattr(actual.ice.aggregated, member), getattr(expected.ice.aggregated, member)))
     if actual.ice.cflice_delayed is not None or expected.ice.cflice_delayed is not None:
         pairs.append(("ice.cflice_delayed", actual.ice.cflice_delayed, expected.ice.cflice_delayed))
@@ -592,12 +554,22 @@ def merge_reports(
     *,
     expect_steps: int = 100,
 ) -> dict[str, Any]:
-    """Combine parallel step-range reports into the exact serial scorer report."""
+    """Combine parallel per-step range reports into the exact serial per-step report."""
     if not reports:
         raise ValueError("no range reports provided for merge")
-    labels = list(VALID_LABELS)
     expected_steps = list(range(1, expect_steps + 1))
     first = reports[0]
+    if first.get("mode") == "FREE_RUN" or "per_step" in first:
+        raise ValueError(
+            "cannot merge free-run reports: free-run mode is inherently serial and requires one contiguous range starting at step 1; step-range merge is for per-step (GIVEN-NEMO-ENTRY) scoring only"
+        )
+    labels = list(first.get("labels", {}).keys())
+    if labels not in (list(PER_STEP_LABELS), list(VALID_LABELS)):
+        raise ValueError(f"range report labels must be {list(PER_STEP_LABELS)}, got {labels}")
+    if len(reports) > 1 and "INDEPENDENT" in labels:
+        raise ValueError(
+            "cannot merge multi-range reports containing INDEPENDENT: free-run mode is inherently serial and requires one contiguous range starting at step 1; step-range merge is for per-step (GIVEN-NEMO-ENTRY) scoring only"
+        )
     execution = first.get("execution")
     if execution not in ("eager", "jit"):
         raise ValueError(f"invalid execution mode {execution!r} in range report")
@@ -610,6 +582,10 @@ def merge_reports(
     duplicates: list[int] = []
 
     for rep in reports:
+        if rep.get("mode") == "FREE_RUN" or "per_step" in rep:
+            raise ValueError(
+                "cannot merge free-run reports: free-run mode is inherently serial and requires one contiguous range starting at step 1; step-range merge is for per-step (GIVEN-NEMO-ENTRY) scoring only"
+            )
         if rep.get("status") not in ("PASS", "FAIL"):
             raise ValueError(f"cannot merge non-scored report with status={rep.get('status')!r}")
         if rep.get("production_entry") != "legoesm.ice.si3_o17.si3_o17_step":
@@ -619,6 +595,10 @@ def merge_reports(
         if list(rep.get("ranks", [])) != ranks:
             raise ValueError(f"mismatched ranks {rep.get('ranks')!r} != {ranks!r}")
         rep_labels = rep.get("labels", {})
+        if len(reports) > 1 and "INDEPENDENT" in rep_labels:
+            raise ValueError(
+                "cannot merge multi-range reports containing INDEPENDENT: free-run mode is inherently serial and requires one contiguous range starting at step 1; step-range merge is for per-step (GIVEN-NEMO-ENTRY) scoring only"
+            )
         if list(rep_labels.keys()) != labels:
             raise ValueError(f"range report labels must be {labels}, got {list(rep_labels.keys())}")
         rep_steps = rep.get("steps", [])
@@ -703,8 +683,8 @@ def score(
     runner=None,
 ) -> dict[str, Any]:
     started = time.monotonic()
-    if list(labels) != list(VALID_LABELS):
-        raise ValueError(f"labels must be exactly {VALID_LABELS}")
+    if list(labels) not in (list(VALID_LABELS), list(PER_STEP_LABELS)):
+        raise ValueError(f"labels must be {VALID_LABELS} or {PER_STEP_LABELS}")
     run = evidence / "record_100step"
     index = record_paths(run / "o17_master_records")
     ranks = sorted({rank for _, rank in index})
@@ -717,17 +697,16 @@ def score(
         start, stop = step_range
         if start < 1 or stop < start or stop > expect_steps:
             raise ValueError(f"O17 step range {start}..{stop} outside 1..{expect_steps}")
+        if "INDEPENDENT" in labels and start != 1:
+            raise ValueError(
+                f"O17 INDEPENDENT (free-run trajectory) scoring is inherently serial and requires one contiguous step range starting at step 1 (got {start}..{stop}); step ranges starting after step 1 are supported for per-step (GIVEN-NEMO-ENTRY) scoring only"
+            )
         steps = list(range(start, stop + 1))
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     card = card if card is not None else card_for(run)
     runner = runner if runner is not None else make_runner(card, execution)
     per_label: dict[str, Any] = {label: {"steps": {}} for label in labels}
     independent: dict[int, SI3O17StepState] = {}
-    if steps[0] > 1:
-        for rank in ranks:
-            prev_records = load_step(index[(steps[0] - 1, rank)], steps[0] - 1, rank)
-            independent[rank] = exit_state(prev_records, card)
-            del prev_records
     rss_after_step: list[int] = []
     for kt in steps:
         for rank in ranks:
@@ -735,8 +714,9 @@ def score(
             given_entry = entry_state(records, card)
             forcing = live_forcing(records, card)
             given = runner(given_entry, forcing)
-            entries = {"GIVEN-NEMO-ENTRY": given_entry,
-                       "INDEPENDENT": given_entry if kt == 1 else independent[rank]}
+            entries = {"GIVEN-NEMO-ENTRY": given_entry}
+            if "INDEPENDENT" in labels:
+                entries["INDEPENDENT"] = given_entry if kt == 1 else independent[rank]
             for label in labels:
                 entry = entries[label]
                 reused = label == "INDEPENDENT" and _same_bits(entry, given_entry)
@@ -781,6 +761,7 @@ def free_run(
     execution: str = "eager",
     expect_steps: int = 100,
     n_steps: int | None = None,
+    step_range: tuple[int, int] | None = None,
     card=None,
     runner=None,
     post_step_hook: Callable[[int, int, SI3O17StepState], SI3O17StepState] | None = None,
@@ -805,6 +786,12 @@ def free_run(
     target_steps = expect_steps if n_steps is None else n_steps
     if target_steps < 1 or target_steps > expect_steps:
         raise ValueError(f"O17 free_run requires 1 <= n_steps <= {expect_steps}, got {target_steps}")
+    if step_range is not None:
+        start, stop = step_range
+        if start != 1 or stop != target_steps:
+            raise ValueError(
+                f"O17 free-run mode is inherently serial and requires one contiguous range 1..{target_steps} starting at step 1 (got {start}..{stop}); step ranges are for per-step (GIVEN-NEMO-ENTRY) scoring only"
+            )
     steps = list(range(1, target_steps + 1))
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
@@ -899,7 +886,7 @@ def schema() -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--evidence", type=Path)
-    parser.add_argument("--labels", nargs=2, default=list(VALID_LABELS))
+    parser.add_argument("--labels", nargs="+", default=None)
     parser.add_argument("--execution", choices=("jit", "eager"), default="eager")
     parser.add_argument("--expect-steps", type=int, default=100)
     parser.add_argument("--steps", type=parse_step_range, default=None,
@@ -930,11 +917,17 @@ def main() -> int:
                 execution=args.execution,
                 expect_steps=args.expect_steps,
                 n_steps=args.n_steps,
+                step_range=args.steps,
             )
         elif args.evidence:
+            labels = (
+                args.labels
+                if args.labels is not None
+                else (list(PER_STEP_LABELS) if args.steps is not None else list(VALID_LABELS))
+            )
             result = score(
                 args.evidence.resolve(),
-                args.labels,
+                labels,
                 execution=args.execution,
                 expect_steps=args.expect_steps,
                 step_range=args.steps,

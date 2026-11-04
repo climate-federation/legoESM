@@ -542,12 +542,39 @@ def synthetic_2step_fixture(mixed, tmp_path_factory):
     return rec_dir, card, runner
 
 
+def _load_parent_scorer_94a4069d61(tmp_path: Path):
+    """Load the parent scorer at 94a4069d61 via git show into an isolated module."""
+    import importlib.util
+    import subprocess
+
+    src = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO),
+            "show",
+            "94a4069d61:scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    mod_path = tmp_path / "parent_scorer_94a4069d61.py"
+    mod_path.write_text(src)
+    spec = importlib.util.spec_from_file_location("parent_scorer_94a4069d61", mod_path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def test_o17_scorer_parallel_step_ranges_and_merge(
     synthetic_2step_fixture, tmp_path, monkeypatch
 ) -> None:
-    """(A) Step-range scoring + merge equals serial report; missing/duplicated steps refuse."""
+    """(A) Parent 94a4069d61 serial byte-identity; per-step range merge; split free-run refused."""
     rec_dir, card, runner = synthetic_2step_fixture
     labels = list(scorer.VALID_LABELS)
+    per_step_labels = list(scorer.PER_STEP_LABELS)
     kwargs = dict(execution="eager", expect_steps=2, card=card, runner=runner)
 
     assert scorer.parse_step_range("1..20") == (1, 20)
@@ -556,24 +583,118 @@ def test_o17_scorer_parallel_step_ranges_and_merge(
         with pytest.raises(ValueError):
             scorer.parse_step_range(bad)
 
+    # Finding 2: Compare parent scorer from 94a4069d61 against new scorer's default serial path
+    # byte-for-byte on the same synthetic record (timing fields excepted, named:
+    # scorer_wall_seconds, scorer_rss_kib_after_each_step, scorer_peak_rss_kib).
+    parent_scorer = _load_parent_scorer_94a4069d61(tmp_path)
+    parent_serial = parent_scorer.score(rec_dir, labels, **kwargs)
     serial = scorer.score(rec_dir, labels, **kwargs)
     assert serial["status"] == "PASS"
+    assert set(parent_serial.keys()) - set(scorer.strip_timing(parent_serial).keys()) == set(
+        scorer.TIMING_KEYS
+    )
+    parent_bytes = scorer.json.dumps(
+        scorer.strip_timing(parent_serial), indent=2, sort_keys=True
+    ).encode("utf-8")
+    new_bytes = scorer.json.dumps(
+        scorer.strip_timing(serial), indent=2, sort_keys=True
+    ).encode("utf-8")
+    assert parent_bytes == new_bytes
 
-    r1 = scorer.score(rec_dir, labels, step_range=(1, 1), **kwargs)
-    r2 = scorer.score(rec_dir, labels, step_range=(2, 2), **kwargs)
-    assert r1["steps"] == [1] and r2["steps"] == [2]
-    merged = scorer.merge_reports([r1, r2], expect_steps=2)
-    assert scorer.strip_timing(merged) == scorer.strip_timing(serial)
-
-    # Deterministic timing/RSS -> byte-identical JSON serial report across invocations.
     with monkeypatch.context() as det:
+        det.setattr(parent_scorer.time, "monotonic", lambda: 100.0)
+        det.setattr(parent_scorer, "_rss_kib", lambda: 123456)
         det.setattr(scorer.time, "monotonic", lambda: 100.0)
         det.setattr(scorer, "_rss_kib", lambda: 123456)
-        det_a = scorer.score(rec_dir, labels, **kwargs)
-        det_b = scorer.score(rec_dir, labels, **kwargs)
-        assert scorer.json.dumps(det_a, indent=2, sort_keys=True) == scorer.json.dumps(
-            det_b, indent=2, sort_keys=True
+        det_parent = parent_scorer.score(rec_dir, labels, **kwargs)
+        det_new = scorer.score(rec_dir, labels, **kwargs)
+        assert scorer.json.dumps(det_parent, indent=2, sort_keys=True).encode(
+            "utf-8"
+        ) == scorer.json.dumps(det_new, indent=2, sort_keys=True).encode("utf-8")
+
+    # Per-step range scoring (GIVEN-NEMO-ENTRY only) + merge equals serial per-step report.
+    serial_per_step = scorer.score(rec_dir, per_step_labels, **kwargs)
+    r1 = scorer.score(rec_dir, per_step_labels, step_range=(1, 1), **kwargs)
+    r2 = scorer.score(rec_dir, per_step_labels, step_range=(2, 2), **kwargs)
+    assert r1["steps"] == [1] and r2["steps"] == [2]
+    merged = scorer.merge_reports([r1, r2], expect_steps=2)
+    assert scorer.strip_timing(merged) == scorer.strip_timing(serial_per_step)
+    assert (
+        scorer.strip_timing(merged)["labels"]["GIVEN-NEMO-ENTRY"]
+        == scorer.strip_timing(serial)["labels"]["GIVEN-NEMO-ENTRY"]
+    )
+
+    # Finding 1: Split free-run ranges are refused (both free_run and score with INDEPENDENT).
+    with pytest.raises(ValueError, match="free-run mode is inherently serial"):
+        scorer.free_run(rec_dir, step_range=(2, 2), **kwargs)
+    with pytest.raises(ValueError, match="requires one contiguous range 1..2"):
+        scorer.free_run(rec_dir, step_range=(1, 1), **kwargs)
+    with pytest.raises(ValueError, match="INDEPENDENT .* inherently serial"):
+        scorer.score(rec_dir, labels, step_range=(2, 2), **kwargs)
+    r1_both = scorer.score(rec_dir, labels, step_range=(1, 1), **kwargs)
+    with pytest.raises(ValueError, match="cannot merge multi-range reports containing INDEPENDENT"):
+        scorer.merge_reports([r1_both, r2], expect_steps=2)
+
+    # Finding 1: Early-divergence plant gives the exact same result in serial free-run as parent 94a4069d61
+    # (serial step-2 max_relative == 1.0, whereas a split range restarting from NEMO would give 0.5 and is refused).
+    plant_idx = {(1, 0): {22: Path("x")}, (2, 0): {22: Path("x")}}
+
+    def plant_load(_paths, kt, rank):
+        del rank
+        return {22: {}, "kt": kt, "entry": float(kt - 1), "expected": float(kt)}
+
+    def plant_entry(records, _card):
+        return np.array([records["entry"]])
+
+    def plant_forcing(records, _card):
+        return records["kt"]
+
+    def plant_runner(state, _kt):
+        return (state + 2.0, None)
+
+    def plant_score_step(out, _trace, records, _card, label):
+        rel = float(abs(out[0] - records["expected"]) / records["expected"])
+        row = {
+            "different": int(out[0] != records["expected"]),
+            "nonfinite": 0,
+            "max_relative": rel,
+        }
+        row["pass"] = scorer._passes(row, label)
+        return {
+            "pass": row["pass"],
+            "different": row["different"],
+            "nonfinite": 0,
+            "failed_fields": ([] if row["pass"] else ["x"]),
+            "fields": {"x": row},
+        }
+
+    with monkeypatch.context() as div_patch:
+        for mod in (parent_scorer, scorer):
+            div_patch.setattr(mod, "record_paths", lambda _p: plant_idx)
+            div_patch.setattr(mod, "load_step", plant_load)
+            div_patch.setattr(mod, "entry_state", plant_entry)
+            div_patch.setattr(mod, "live_forcing", plant_forcing)
+            div_patch.setattr(mod, "score_step", plant_score_step)
+            div_patch.setattr(mod, "_rss_kib", lambda: 1)
+            div_patch.setattr(mod, "_release_free_heap", lambda: None)
+        div_patch.setattr(scorer, "external_forcing", plant_forcing)
+        div_patch.setattr(scorer, "_grid", lambda _r, _c: ((1, 1), 0))
+        div_patch.setattr(scorer, "_carried_mismatches", lambda _a, _e, _f, _h: {})
+        div_kw = dict(execution="jit", expect_steps=2, card=object(), runner=plant_runner)
+        parent_div = parent_scorer.score(Path("."), labels, **div_kw)
+        serial_div = scorer.score(Path("."), labels, **div_kw)
+        free_div = scorer.free_run(Path("."), **div_kw)
+        assert scorer.strip_timing(parent_div) == scorer.strip_timing(serial_div)
+        assert (
+            serial_div["labels"]["INDEPENDENT"]["steps"]["2:0"]["fields"]["x"]["max_relative"]
+            == parent_div["labels"]["INDEPENDENT"]["steps"]["2:0"]["fields"]["x"]["max_relative"]
+            == free_div["per_step"]["2:0"]["fields"]["x"]["max_relative"]
+            == 1.0
         )
+        with pytest.raises(ValueError, match="INDEPENDENT .* inherently serial"):
+            scorer.score(Path("."), labels, step_range=(2, 2), **div_kw)
+        with pytest.raises(ValueError, match="free-run mode is inherently serial"):
+            scorer.free_run(Path("."), step_range=(2, 2), **div_kw)
 
     # Missing step and duplicated step are refused.
     with pytest.raises(ValueError, match=r"missing=\[2\]"):
@@ -583,9 +704,9 @@ def test_o17_scorer_parallel_step_ranges_and_merge(
     with pytest.raises(ValueError, match="duplicate O17 step"):
         scorer.merge_reports([r1, r2, r2], expect_steps=2)
     with pytest.raises(ValueError, match="duplicate O17 step"):
-        scorer.merge_reports([serial, r1], expect_steps=2)
+        scorer.merge_reports([serial_per_step, r1], expect_steps=2)
     with pytest.raises(ValueError, match="outside 1..2"):
-        scorer.score(rec_dir, labels, step_range=(1, 3), **kwargs)
+        scorer.score(rec_dir, per_step_labels, step_range=(1, 3), **kwargs)
 
     # A failing range report propagates the exact serial FAIL report through merge.
     import shutil
@@ -600,9 +721,9 @@ def test_o17_scorer_parallel_step_ranges_and_merge(
     synthetic.write_record(
         exit2, 28, 2, 0, (7, 7, 5, 10, 5), list(rec28["fields"].items())
     )
-    serial_fail = scorer.score(planted_dir, labels, **kwargs)
-    rf1 = scorer.score(planted_dir, labels, step_range=(1, 1), **kwargs)
-    rf2 = scorer.score(planted_dir, labels, step_range=(2, 2), **kwargs)
+    serial_fail = scorer.score(planted_dir, per_step_labels, **kwargs)
+    rf1 = scorer.score(planted_dir, per_step_labels, step_range=(1, 1), **kwargs)
+    rf2 = scorer.score(planted_dir, per_step_labels, step_range=(2, 2), **kwargs)
     merged_fail = scorer.merge_reports([rf1, rf2], expect_steps=2)
     assert merged_fail["status"] == "FAIL"
     assert scorer.strip_timing(merged_fail) == scorer.strip_timing(serial_fail)
@@ -649,6 +770,96 @@ def test_o17_scorer_free_run_and_carried_state_plants(
     corrupted_rep = scorer.free_run(corrupted_entry_dir, **kwargs)
     assert corrupted_rep["status"] == "PASS"
     assert corrupted_rep["different"] == 0
+
+    # Finding 3: Fields reset at step entry (t_si on owned interior, cnd_ice), coupled-only unused
+    # diagnostics (t1_ice), fields recomputed in-step before use (equivalent.*, the 15 non-carried
+    # aggregated.* fields), and AEVP velocities overwritten at step entry (aevp.u_ice_u, aevp.v_ice_v)
+    # are not carried by NEMO and have zero effect on free_run when perturbed on step 1's output.
+    assert "t_si" not in scorer.CARRIED_ICE_STATE_FIELDS
+    assert "cnd_ice" not in scorer.CARRIED_ICE_STATE_FIELDS
+    assert "t1_ice" not in scorer.CARRIED_ICE_STATE_FIELDS
+    assert scorer.CARRIED_AGGREGATED_FIELDS == (
+        "tm_su",
+        "vt_i",
+        "vt_s",
+        "vt_ip",
+        "vt_il",
+        "ato_i",
+    )
+
+    def perturb_non_carried_output_fields(kt: int, rank: int, out):
+        del rank
+        if kt != 1:
+            return out
+        owned_sl = (slice(h, -h), slice(h, -h))
+        bad_t_si = out.ice.t_si.at[owned_sl[0], owned_sl[1], :].set(-999.0)
+        bad_eqv = out.ice.equivalent._replace(
+            **{
+                fname: jnp.full_like(getattr(out.ice.equivalent, fname), -999.0)
+                for fname in out.ice.equivalent._fields
+            }
+        )
+        bad_agg = out.ice.aggregated._replace(
+            **{
+                fname: jnp.full_like(getattr(out.ice.aggregated, fname), -999.0)
+                for fname in out.ice.aggregated._fields
+                if fname not in scorer.CARRIED_AGGREGATED_FIELDS
+            }
+        )
+        bad_ice = out.ice._replace(
+            t_si=bad_t_si,
+            cnd_ice=jnp.full_like(out.ice.cnd_ice, -999.0),
+            t1_ice=jnp.full_like(out.ice.t1_ice, -999.0),
+            equivalent=bad_eqv,
+            aggregated=bad_agg,
+        )
+        bad_aevp = out.aevp._replace(
+            u_ice_u=jnp.full_like(out.aevp.u_ice_u, -999.0),
+            v_ice_v=jnp.full_like(out.aevp.v_ice_v, -999.0),
+        )
+        return out._replace(ice=bad_ice, aevp=bad_aevp)
+
+    step2_clean_entry = scorer.entry_state(
+        scorer.load_step(
+            scorer.record_paths(rec_dir / "record_100step/o17_master_records")[(2, 0)], 2, 0
+        ),
+        card,
+    )
+    probe_checked = {"ran": False}
+
+    def runner_verifying_non_carried_reset(entry_st, forcing_st):
+        if int(forcing_st.kt) == 2:
+            # Prove the real si3_o17_step resets t_si[owned], overwrites aevp.(u_ice_u, v_ice_v),
+            # recomputes equivalent.* and the 15 non-carried aggregated.* fields before ice_thd,
+            # and ignores cnd_ice and t1_ice.
+            p_bad = si3_o17_step(
+                entry_st,
+                forcing_st,
+                card,
+                _test_return_surface_probe=True,
+                _plant_drop_redistribution=True,
+            )
+            p_clean = si3_o17_step(
+                step2_clean_entry,
+                forcing_st,
+                card,
+                _test_return_surface_probe=True,
+                _plant_drop_redistribution=True,
+            )
+            assert _bit_mismatches(p_bad, p_clean) == []
+            probe_checked["ran"] = True
+            return runner(step2_clean_entry, forcing_st)
+        return runner(entry_st, forcing_st)
+
+    non_carried_rep = scorer.free_run(
+        rec_dir,
+        post_step_hook=perturb_non_carried_output_fields,
+        **{**kwargs, "runner": runner_verifying_non_carried_reset},
+    )
+    assert probe_checked["ran"] is True
+    assert non_carried_rep["status"] == "PASS"
+    assert non_carried_rep["different"] == 0
+    assert non_carried_rep["per_step"]["2:0"]["carry_chain_intact"] is True
 
     # Key plant: apply a 1-ULP change to our step 1 output while taking v_i from
     # step 2's record instead of from our previous step -> detected at step 2.
@@ -711,12 +922,31 @@ def test_o17_scorer_free_run_and_carried_state_plants(
     assert multi_fail["per_step"]["2:0"]["differing_values_per_field"]["step_exit.qns"] == 1
     assert multi_fail["per_step"]["2:0"]["fields"]["step_exit.qns"]["nonfinite"] == 1
 
-    # Operator script structure and safety gates.
+    # Operator script structure and safety gates (Finding 5: refuse paths under real evidence
+    # tree BEFORE mkdir -p creates anything).
+    import subprocess
+
     op_script = REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_operator_run.sh"
     assert op_script.is_file()
     op_text = op_script.read_text()
     assert "MIN_AVAIL_GB=250" in op_text
     assert "MAX_PROC_RSS_KIB=104857600" in op_text
+    assert "--labels GIVEN-NEMO-ENTRY" in op_text
     assert "--steps \"${start}..${stop}\"" in op_text
     assert "--merge \"${range_jsons[@]}\"" in op_text
     assert "--free-run" in op_text
+
+    refused_target = (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step")
+        / "refused_probe_do_not_create"
+    )
+    assert not refused_target.exists()
+    res = subprocess.run(
+        ["bash", str(op_script), "--out", str(refused_target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 2
+    assert "REFUSE: --out resolves inside evidence tree" in res.stderr
+    assert not refused_target.exists()
