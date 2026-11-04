@@ -1239,7 +1239,8 @@ class MPASOceanModel(IntegrationMixin):
             )
             _F_entry, _entry_heat = real_freshwater_entry(
                 freshwater, F_slow_eta, h_k_new, mask, config.rho_0,
-                T_corrected, runoff_spread_m=resolve_runoff_spread_arg(config))
+                T_corrected, runoff_spread_m=resolve_runoff_spread_arg(config),
+                runoff_t_floor_sharpness=config.runoff_temperature_floor_sharpness)
             _dS_dil, _dT_dil = real_freshwater_dilution_tendencies(
                 F_slow_eta, S_corrected, T_corrected, h_k_new, mask,
                 F_entry=_F_entry, entry_heat=_entry_heat)
