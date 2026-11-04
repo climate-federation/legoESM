@@ -122,3 +122,21 @@ def test_nemo_shlat_requires_per_level_and_nonnegative_shlat():
         _call(cfg, t)
     with pytest.raises(ValueError, match="lateral_shlat"):
         _call(cfg._replace(lateral_viscosity_mask_levels="per_level", lateral_shlat=-1.0), t)
+
+
+def test_fold_row_is_refilled_from_its_partners_after_shlat():
+    """NEMO calls lbc_lnk(fmask, 'F') after setting rn_shlat: on a tripolar
+    fold the last vertex row is the fold image of the row below, rn_shlat
+    values included (codex r1)."""
+    t, _ = _win(1); n = t.shape[0]
+    perm = jnp.asarray((n - 1 - np.arange(n)) % n)
+    fold = types.SimpleNamespace(is_active=True, fold_j=n - 1, cap_j=n - 1,
+                                 perm_T=perm, perm_v=perm, perm_f=None)
+    grid = types.SimpleNamespace(fold=fold)
+    _, um3, vm3, vx3 = per_level_viscosity_masks(
+        jnp.asarray(t), _geo(n), None, None, None, None, jnp.float64)
+    f = np.asarray(nemo_shlat_vertex_mask(vx3, um3, vm3, 2.0, grid=grid))
+    row = f[-2][:n][np.asarray(perm)]
+    np.testing.assert_array_equal(f[-1][:n], row)
+    assert np.array_equal(f[-1][n], f[-1][0])          # wrap column
+    assert (f[-2] == 2).any()                          # the fold copies shlat values

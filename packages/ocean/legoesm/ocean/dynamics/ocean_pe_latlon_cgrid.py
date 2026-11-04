@@ -3674,7 +3674,7 @@ def _bc_horizontal_viscosity(
         if _vl_vertex_mask is None:
             _vl_vertex_mask = compute_vertex_mask(_vl_mask, grid=grid)
         _vl_vertex_mask = nemo_shlat_vertex_mask(
-            _vl_vertex_mask, _vl_u_mask, _vl_v_mask, _shlat)
+            _vl_vertex_mask, _vl_u_mask, _vl_v_mask, _shlat, grid=grid)
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
 
     def _biharmonic_op(uu, vv):
