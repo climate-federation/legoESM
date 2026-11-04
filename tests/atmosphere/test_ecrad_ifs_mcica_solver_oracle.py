@@ -390,7 +390,7 @@ def test_grad_solver_cloud_switches(fixture8):
 
 def test_exp_libm_matches_oracle_libm():
     """exp_libm: bitwise glibc (the oracle's libm; math.exp is the same
-    /lib64/libm-2.28.so) for |x| <= 0.01083, correctly rounded elsewhere."""
+    /lib64/libm-2.28.so) for |x| <= 0.01083."""
     rng = np.random.default_rng(0)
     mag = np.concatenate([np.logspace(-20, np.log10(0.01083), 150000),
                           rng.uniform(2.0**-28, 2.0**-18, 20000), rng.uniform(2.0**-18, 0.01083, 30000)])
@@ -400,20 +400,23 @@ def test_exp_libm_matches_oracle_libm():
     glibc = np.array([math.exp(v) for v in small])
     assert np.array_equal(got, glibc), int(np.sum(got != glibc))
 
-    mpmath = pytest.importorskip("mpmath")
-    big = np.concatenate([rng.uniform(-708.0, -0.0109, 20000), rng.uniform(0.0109, 709.0, 2000)])
-    got = np.asarray(f(jnp.asarray(big)))
-    with mpmath.workprec(200):
-        cr = np.array([float(mpmath.exp(mpmath.mpf(v))) for v in big])
-    assert np.array_equal(got, cr), int(np.sum(got != cr))
-    glibc = np.array([math.exp(v) for v in big])
-    print(f"EXP glibc != correctly-rounded for |x| > 0.01083: {np.mean(glibc != cr):.2e} of samples")
-
     edge = np.asarray(f(jnp.asarray([-746.5, -np.inf, 710.0, np.inf, np.nan])))
     assert edge[0] == 0.0 and edge[1] == 0.0 and np.isinf(edge[2]) and np.isinf(edge[3]) and np.isnan(edge[4])
     eager = np.asarray(ts.exp_libm(jnp.asarray(small)))  # no jit: no XLA FMA contraction
     assert np.array_equal(eager, np.array([math.exp(v) for v in small]))
     _finite_nonzero([jax.grad(ts.exp_libm)(v) for v in (-3.0, -1e-5, 0.0, -700.0)])
+
+
+def test_exp_libm_correctly_rounded_outside_the_glibc_band():
+    mpmath = pytest.importorskip("mpmath")
+    rng = np.random.default_rng(0)
+    big = np.concatenate([rng.uniform(-708.0, -0.0109, 20000), rng.uniform(0.0109, 709.0, 2000)])
+    got = np.asarray(jax.jit(ts.exp_libm)(jnp.asarray(big)))
+    with mpmath.workprec(200):
+        cr = np.array([float(mpmath.exp(mpmath.mpf(v))) for v in big])
+    assert np.array_equal(got, cr), int(np.sum(got != cr))
+    glibc = np.array([math.exp(v) for v in big])
+    print(f"EXP glibc != correctly-rounded for |x| > 0.01083: {np.mean(glibc != cr):.2e} of samples")
 
 
 def test_grad_finite_dead_thin_branch_and_fp32_guards():
