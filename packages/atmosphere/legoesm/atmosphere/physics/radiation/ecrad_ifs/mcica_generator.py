@@ -20,9 +20,13 @@ as explicit arrays with a static layout (vote G1), per column:
 Slots the oracle never draws are never read (the oracle test proves it).
 :func:`draw_uniforms` fills the layout from the JAX PRNG for production.
 
-Smoothing: ``sharpness = math.inf`` is the oracle's hard form.  Finite
-sharpness smooths the McICA cloud/no-cloud tests (see the per-function notes
-and the votes recorded in the port report).
+Smoothing: ``sharpness = math.inf`` is the oracle's hard form.  The McICA
+sampling itself (the cloud-top search, the cloudy/clear transitions, the
+inhomogeneity repeat, and the layer-presence mask defining the cloudy range,
+user rule 2026-11-04 and vote M5) is EXACT at every sharpness: the
+sub-column draw is piecewise constant in its inputs.  Finite sharpness only
+smooths the deterministic parts (overlap presence, pair cover, full-cloud
+gate, total-cover threshold, pdf weight clamps).
 """
 
 import functools
@@ -69,7 +73,9 @@ __physics_contract__ = {
 }
 
 # --- radiation_cloud_cover.F90:59 MaxCloudFrac = 1 - epsilon(1.0_jprb)*10 ---
-_MAX_CLOUD_FRAC = 1.0 - float(np.finfo(np.float64).eps) * 10.0
+# epsilon of the working precision (vote F1): the oracle's jprb kind.
+def _max_cloud_frac(dtype):
+    return 1.0 - float(np.finfo(np.dtype(dtype)).eps) * 10.0
 
 # --- seed offset of the LW generator (radiation_mcica_lw.F90:189) ---
 LW_SEED_OFFSET = 997
@@ -103,9 +109,9 @@ def _hard(sharpness):
     return sharpness == math.inf
 
 
-def _lt(a, b, sharpness):
-    """Indicator of the oracle's strict ``a < b``; exact at ``sharpness = inf``."""
-    return 1.0 - sigmoid_switch(a - b, sharpness)
+def _lt(a, b):
+    """Indicator of the oracle's strict ``a < b`` (McICA sampling: always exact)."""
+    return (a < b).astype(jnp.result_type(a, b))
 
 
 def _step_pos(x, width, sharpness):
@@ -179,14 +185,15 @@ def cum_cloud_cover_exp_ran(frac, overlap_param, sharpness=100.0):
     pair = (overlap_param * _max_c1(f1, f2, sharpness)
             + (1.0 - overlap_param) * (f1 + f2 - f1 * f2))
 
+    mcf = _max_cloud_frac(frac.dtype)
+
     def step(cum_product, xs):
         f, p = xs
-        full = f >= _MAX_CLOUD_FRAC
+        full = f >= mcf
         if _hard(sharpness):
             gate = full.astype(f.dtype)
         else:
-            gate = smoothstep_cubic((f - _MAX_CLOUD_FRAC)
-                                    / ((1.0 - _MAX_CLOUD_FRAC) / sharpness) + 1.0)
+            gate = smoothstep_cubic((f - mcf) / ((1.0 - mcf) / sharpness) + 1.0)
         cum_product = (1.0 - gate) * (cum_product * (1.0 - p)
                                       / jnp.where(full, 1.0, 1.0 - f))
         return cum_product, 1.0 - cum_product
@@ -207,9 +214,9 @@ def _generate_column(frac, overlap_param, fractional_std, rand_top, rand_cloud,
     op = jnp.concatenate([overlap_param, pad])
 
     # Range of cloudy layers ibegin..iend (layers with frac > 0) as masks
-    # built from a per-layer presence m (vote G6'): exactly frac > 0 at inf,
-    # exactly 0/1 for cropped input (frac = 0 or >= frac_threshold).
-    m = _step_pos(frac, frac_threshold / sharpness, sharpness)
+    # built from the per-layer presence m: part of the sampling, exact at every
+    # sharpness (vote M5).
+    m = (frac > 0.0).astype(frac.dtype)
     at_or_above = 1.0 - jnp.cumprod(1.0 - m)                 # l >= ibegin
     none_below_incl = jnp.cumprod((1.0 - m)[::-1])[::-1]
     at_or_below = 1.0 - none_below_incl                      # l <= iend
@@ -230,11 +237,11 @@ def _generate_column(frac, overlap_param, fractional_std, rand_top, rand_cloud,
 
     # Cloud-top search (cloud_generator lines 222-227): stop at the first l >=
     # ibegin with trigger <= cum(l), or at iend.
+    # Exact at every sharpness (McICA sampling, M1).
     trigger = rand_top * tcc                                  # (ng,)
-    stop = sigmoid_switch(cum[None, :] - trigger[:, None], sharpness) * at_or_above
+    stop = (trigger[:, None] <= cum[None, :]).astype(frac.dtype) * at_or_above
     stop = stop + (1.0 - stop) * none_below
-    # Smooth mode only: no soft cloud in a frac = 0 layer (vote G5').
-    keep = at_or_below if _hard(sharpness) else at_or_below * m
+    keep = at_or_below
 
     def step(carry, xs):
         found_prev, c_prev, u_prev = carry
@@ -242,13 +249,14 @@ def _generate_column(frac, overlap_param, fractional_std, rand_top, rand_cloud,
         first = (1.0 - found_prev) * stop_l
         # generate_column_exp_ran lines 318-334: transition probabilities
         # given cloud (c_prev) or clear sky above.
-        to_cloud = _lt(r_cloud * f_u, f_l + f_u - p_u, sharpness)
-        to_cloud_from_clear = _lt(r_cloud * (c_u - f_u), p_u - o_u - f_u, sharpness)
+        # exact at every sharpness (McICA sampling, M2/M3)
+        to_cloud = _lt(r_cloud * f_u, f_l + f_u - p_u)
+        to_cloud_from_clear = _lt(r_cloud * (c_u - f_u), p_u - o_u - f_u)
         markov = c_prev * to_cloud + (1.0 - c_prev) * to_cloud_from_clear
         c = (first + found_prev * markov) * keep_l
         # lines 350-363: within a contiguous cloud, repeat the random number
         # of the layer above with probability op_inhom.
-        w = c_prev * _lt(r2, opi_u, sharpness)
+        w = c_prev * _lt(r2, opi_u)                          # exact (M4)
         u = w * u_prev + (1.0 - w) * r1
         od = c * sample_from_pdf(fsd_l, u, sampler, sharpness)
         return (found_prev + first, c, u), od

@@ -21,22 +21,24 @@ g-point factors, taumol13 ``3.55E-4``), so they are stored as
 ``float(np.float32(...))``.
 
 Smoothing (one static ``sharpness``; ``math.inf`` reproduces the oracle's hard
-form exactly; the default 100 is in absolute units of each argument):
+form exactly; each width is S/sharpness with S the quantity's own scale, user
+rule 2026-11-04):
 
 1. tropopause split ``ln p > 4.56`` (lower vs upper k-table formulas, every band
    and the setcoef branch quantities): per-layer blend weight
-   ``w = 1 - sigmoid_switch(4.56 - ln p)`` (V1-lw); each branch is evaluated at
+   ``w = 1 - sigmoid_switch(5 (4.56 - ln p))`` (S = 0.2 = one jp interval in
+   ln p; V1-lw); each branch is evaluated at
    its own table-valid ``jp`` (lower ``min(jp,12)``, upper ``max(jp,13)``) with
    fp/jt/jt1/fac/ratios recomputed for that jp (V2-lw).
-2. setcoef ``Z_FP = MAX(-1, MIN(1, Z_FP))`` -> ``smooth_clamp``.
-3. specparm ``MIN(ONEMINUS, .)`` (all eta parameters) -> ``smooth_min``.
+2. setcoef ``Z_FP = MAX(-1, MIN(1, Z_FP))`` -> ``smooth_clamp`` (S = 0.2 in ln p).
+3. specparm ``MIN(ONEMINUS, .)`` (all eta parameters) -> inactive-exact upper
+   clamp (S = one eta bin, 1/8 lower, 1/4 upper).
 4. taumol 3-point (``specparm < 0.125`` / ``> 0.875``) vs 2-point formulas ->
-   sigmoid blend of the three formulas.
-5. ratio adjustments (``ZRATN2O > 1.5``, ``ZRATCO2 > 3``) -> sigmoid blend.
-6. taumol1 ``IF (ZPP < 250)`` correction -> sigmoid blend.
-7. Planck lower cap ``T < 160 K`` -> ``smooth_max(T, 160)``.
-8. ``max(min_gas_od_lw, od)`` -> ``smooth_max`` with sharpness / min_gas_od_lw
-   (V3-lw, relative width).
+   sigmoid blend of the three formulas (S = 1/8).
+5. ratio adjustments (``ZRATN2O > 1.5``, ``ZRATCO2 > 3``) -> sigmoid blend (S = thr).
+6. taumol1 ``IF (ZPP < 250)`` correction -> sigmoid blend (S = 250 hPa).
+7. Planck lower cap ``T < 160 K`` -> inactive-exact lower clamp (S = 160 K; vote P1).
+8. ``max(min_gas_od_lw, od)`` -> inactive-exact lower clamp (S = min_gas_od_lw).
 
 Not smoothed: integer table indices (jp, jt, jt1, js, indfor, indself,
 indminor, Planck ind and their clamps) feeding continuous interpolations; the
@@ -56,13 +58,12 @@ import numpy as np
 from legoesm.core.smooth import (
     sigmoid_switch,
     smooth_clamp,
-    smooth_max,
-    smooth_min,
     smooth_relu,
 )
 
 from . import tables
 from .rrtmg_prepare import const_operand
+from .two_stream import lower_clamp, upper_clamp
 
 __physics_contract__ = {
     "summary": (
@@ -295,7 +296,8 @@ def _branch(plog, tavel, jp, indfor, forfrac, upper, sharpness) -> Branch:
     tr0 = jnp.take(tref, jp - 1, mode="clip")
     tr1 = jnp.take(tref, jp, mode="clip")                    # TREF(JP1)
     lo_b, hi_b = _plog_bounds(upper)
-    fp = _JP_SLOPE * (preflog - smooth_clamp(plog, lo_b, hi_b, sharpness))
+    # S = 1/5 in ln p (one jp interval)
+    fp = _JP_SLOPE * (preflog - smooth_clamp(plog, lo_b, hi_b, _JP_SLOPE * sharpness))
     jt = jnp.clip(_trunc_int(3.0 + (tavel - tr0) / const_operand(_JT_DT)), 1, 4)
     ft = ((tavel - tr0) / const_operand(_JT_DT)) - (jt - 3).astype(tavel.dtype)
     jt1 = jnp.clip(_trunc_int(3.0 + (tavel - tr1) / const_operand(_JT_DT)), 1, 4)
@@ -326,7 +328,8 @@ def rrtm_setcoef_140gp(coldry, wbroad, wkl, pavel, tavel, wx,
     plog = jnp.log(pavel)
     jp = jnp.clip(_trunc_int(_JP_OFFSET - _JP_SLOPE * (plog + _JP_PLOG_SHIFT)), 1, _JP_MAX)
     lower = plog > _PLOG_TROP                                  # integer diagnostics only
-    w = 1.0 - sigmoid_switch(_PLOG_TROP - plog, sharpness)     # 1 where Z_PLOG > 4.56
+    # 1 where Z_PLOG > 4.56; S = 1/5 in ln p
+    w = 1.0 - sigmoid_switch((_PLOG_TROP - plog) * _JP_SLOPE, sharpness)
     water = wkl[:, _W_H2O] / coldry
     scalefac = pavel * _STPFAC / tavel
     forfac0 = scalefac / (1.0 + water)
@@ -450,10 +453,13 @@ def _simple(colx, b: Branch, tab, upper, nsp):
 
 
 def _eta_param(sp_raw, mult, sharpness):
-    """MIN(ONEMINUS, specparm); specmult; JS = 1+INT(); FS = MOD(specmult, 1)."""
-    sp = smooth_min(sp_raw, _ONEMINUS, sharpness)
+    """MIN(ONEMINUS, specparm); specmult; JS = 1+INT(); FS = MOD(specmult, 1).
+    The cap is an inactive-exact upper clamp, S = one eta bin 1/mult.  JS <= mult
+    (vote F2): fp32 can round the smoothed cap at specparm = 1 to 1.0; FS then
+    reaches 1.  Unchanged whenever specmult < mult, so at sharpness=inf."""
+    sp = upper_clamp(sp_raw, _ONEMINUS, 1.0 / mult, sharpness)
     sm = mult * sp
-    tr = jnp.trunc(sm)
+    tr = jnp.minimum(jnp.trunc(sm), mult - 1.0)
     return sp, 1 + tr.astype(jnp.int32), sm - tr
 
 
@@ -497,8 +503,8 @@ def _major3(speccomb, sp, sm, fa, fb, tab, base, nsp, sharpness):
     fs_ = _x(sm - (jsm - 1).astype(sm.dtype))
     t_mid = ((1.0 - fs_) * fa_ * at(ind, 0) + fs_ * fa_ * at(ind, 1)
              + (1.0 - fs_) * fb_ * at(ind, nsp) + fs_ * fb_ * at(ind, nsp + 1))
-    w_low = 1.0 - sigmoid_switch(sp - _SPEC_LO, sharpness)     # sp < 0.125
-    w_high = 1.0 - sigmoid_switch(_SPEC_HI - sp, sharpness)    # sp > 0.875
+    w_low = 1.0 - sigmoid_switch((sp - _SPEC_LO) * _ETA_A, sharpness)    # sp < 0.125; S = 1/8
+    w_high = 1.0 - sigmoid_switch((_SPEC_HI - sp) * _ETA_A, sharpness)   # sp > 0.875
     w_mid = 1.0 - w_low - w_high
     sc = _x(speccomb)
     return (_x(w_low) * (sc * t_low) + _x(w_high) * (sc * t_high)
@@ -583,9 +589,9 @@ def _adjcol(col, coldry, chi_rat, chi_col, spec, sharpness):
     # NaN. The softplus form stays > 0 for rat >= 0 in fp64 at sharpness 100;
     # where it still reaches 0 (fp32, or the hard max at sharpness=inf),
     # _safe_pow (V12-lw) gives the power a zero tangent instead of NaN.
-    base = (thr - off) + smooth_relu(rat - thr, sharpness)
+    base = (thr - off) + smooth_relu(rat - thr, sharpness / thr)        # S = thr
     adj = (off + _safe_pow(base, expo)) * chi_col * coldry * _COL_SCALE
-    ws = 1.0 - sigmoid_switch(thr - rat, sharpness)            # rat > thr
+    ws = 1.0 - sigmoid_switch((thr - rat) / thr, sharpness)    # rat > thr; S = thr
     return ws * adj + (1.0 - ws) * col
 
 
@@ -630,7 +636,7 @@ def _band(b, c: LwCoef, upper, sharpness):
     sh = sharpness
     if b == 1:
         if not upper:
-            wlt = 1.0 - sigmoid_switch(c.pavel - _B1_P_CORR, sh)          # ZPP < 250
+            wlt = 1.0 - sigmoid_switch((c.pavel - _B1_P_CORR) / _B1_P_CORR, sh)  # ZPP < 250 hPa
             corr_lo = 1.0 - _B1_A * (_B1_P_CORR - c.pavel) / const_operand(_B1_D_LO)
             corr = wlt * corr_lo + (1.0 - wlt) * 1.0
             tn2 = _x(c.colbrd * c.scaleminorn2) * _minor1(c, tb["KA_MN2"])
@@ -838,8 +844,10 @@ def rrtm_gas_optical_depth(c: LwCoef, sharpness: float = 100.0):
 # =====================================================================
 def _planck_bands(temperature, sharpness):
     """planck_store(..., jband) for temperatures of any shape -> (..., 16)."""
-    tc = smooth_max(temperature, _PLANCK_T_MIN, sharpness)       # cap below 160 K
-    ind = jnp.minimum(_trunc_int(tc - _PLANCK_T_OFF), _PLANCK_IND_MAX)
+    tc = lower_clamp(temperature, _PLANCK_T_MIN, _PLANCK_T_MIN, sharpness)  # 160 K cap, S = 160 K
+    # ind >= 1 (vote P2): inside the clamp band (tc < 160 K) the first table
+    # interval extrapolates (frac < 0); identical for tc >= 160 K, hence at inf.
+    ind = jnp.clip(_trunc_int(tc - _PLANCK_T_OFF), 1, _PLANCK_IND_MAX)
     frac = tc - (ind.astype(tc.dtype) + _PLANCK_T_OFF)
     tot = _t("yoerrtwn.TOTPLNK")                                  # (181, 16)
     factor = _ZFLUXFAC * _t("yoerrtwn.DELWAVE")
@@ -881,8 +889,8 @@ class LwGasOptics(NamedTuple):
 def lw_outputs(tau, min_gas_od_lw: float, sharpness: float = 100.0):
     """od_lw(:,jlev,jcol) = max(min_gas_od_lw, ZOD_LW(:,nlev+1-jlev,jcol)).
     min_gas_od_lw must be a Python float (the smooth width is relative to it,
-    V3-lw)."""
-    return smooth_max(tau[:, ::-1, :], min_gas_od_lw, sharpness / min_gas_od_lw)
+    V3-lw); inactive-exact lower clamp, S = min_gas_od_lw."""
+    return lower_clamp(tau[:, ::-1, :], min_gas_od_lw, min_gas_od_lw, sharpness)
 
 
 def gas_optics_lw(prep, temperature_hl, skin_temperature, lw_albedo,

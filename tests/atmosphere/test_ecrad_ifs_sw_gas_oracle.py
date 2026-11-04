@@ -283,14 +283,15 @@ def test_solar_source_out_of_bounds_cases():
 
 
 def test_gradient_across_day_night(z):
-    """cos_sza inside the smoothstep band (0, 1/sharpness): d incoming / d mu finite, nonzero."""
+    """cos_sza inside the night-side band (-1/sharpness, 0) (vote T5): d incoming /
+    d mu finite, nonzero."""
     p, t, cd, w, mu, s = map(jnp.asarray, _day_cols(z))
 
     def f(m):
         _, _, inc = sw.gas_optics_sw(p, t, cd, w, mu.at[0].set(m), s, 0.0, sharpness=100.0)
         return jnp.sum(inc[0])
 
-    g = jax.grad(f)(0.005)
+    g = jax.grad(f)(-0.005)
     assert bool(jnp.isfinite(g)) and float(g) > 0.0
 
 
@@ -386,7 +387,17 @@ def test_switch_derivatives_isolated(z):
     f = lambda x, sh: sw.solar_source(cand, jnp.asarray(jp).at[0, 2].set(x), w_lo, "trop", 6, sh)[0, 0]  # noqa: E731
     g, gh = _grad_hard_and_smooth(f, 6.0)
     assert np.isfinite(g) and g != 0.0 and gh == 0.0
-    # day/night weight inside (0, 1/sharpness)
+    # day/night weight inside the night-side band (-1/sharpness, 0)
     f = lambda m, sh: sw._day_weight(jnp.asarray([m]), sh)[0]  # noqa: E731
-    g, gh = _grad_hard_and_smooth(f, 0.005)
+    g, gh = _grad_hard_and_smooth(f, -0.005)
     assert np.isfinite(g) and g != 0.0 and gh == 0.0
+
+
+def test_eta_index_stays_in_table_fp32():
+    """Vote F2: a / speccomb = 1 with the smoothed cap rounds to 1.0 in fp32; JS
+    must stay <= mult (8 lower, 4 upper)."""
+    for mult in (sw._SPEC_LO, sw._SPEC_UP):
+        for dt in (jnp.float32, jnp.float64):
+            for s in (100.0, math.inf):
+                _, js, fs = sw._spec(jnp.ones((1,), dt), jnp.zeros((1,), dt), 1.0, mult, s)
+                assert int(js[0]) <= int(mult) and 0.0 <= float(fs[0]) <= 1.0, (mult, dt, s)

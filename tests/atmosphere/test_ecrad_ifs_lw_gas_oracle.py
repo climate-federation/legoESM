@@ -215,24 +215,18 @@ def test_eager_vs_jit(z, sharpness):
 #     bands 12/15 above the tropopause, so it carries no information);
 #   od_rel: max |a-b|/max(|a|,|b|) over elements with oracle od > 1e-10;
 #   emis_rel: max relative difference of lw_emission.
-# Sources (measured): the tropopause blend (od_abs and od_rel, at the layer
-# nearest ln p = 4.56; its tail still gives 46 % on a band-13 g-point 0.13 in
-# ln p above it); the specparm cap near ONEMINUS carries all of the lw_emission
-# gap (0 with that cap hard). Band 7 lower od differs by up to 19 % in the mid
-# troposphere (source not isolated).
+# Sources: measured before the per-quantity widths (2026-11-03, flat 0.01): the
+# tropopause blend and the specparm cap (all of the lw_emission gap).  After
+# (2026-11-04) lw_emission matches to round-off; the remaining od gaps are not
+# re-attributed per switch (planck_abs fell to ~3e-6 with the inactive-exact
+# 160 K cap).
 # Re-measure and update, with the reason, whenever a smooth form or the default
 # sharpness changes.
-GAPS_DEFAULT = {   # re-measured 2026-11-03 (job 11021161) after V4/V5/V9/V10/V11-lw
-    "od_abs": [2.9752129047178073, 2.878973060028386, 2.9057193713563265, 3.045143499010919,
-               3.062832230693232, 3.003224331108356, 2.8918367511618044, 2.7341814108439166],
-    "planck_abs": [0.03279346977665476, 0.03648409415473575, 0.03862084165333046,
-                   0.026137649688367848, 0.023153170090435715, 0.027579309507234306,
-                   0.03992268941463184, 0.04455002313970802],
-    "od_rel": [0.9997447459789051, 0.9997611340613465, 0.9998622404291261, 0.9999789100094723,
-               0.9999829812353078, 0.9999683164699835, 0.9998963737805034, 0.9998351091690104],
-    "emis_rel": [0.0021580012614706456, 0.00023060623037458948, 0.006178327611027848,
-                 0.0073662530111327385, 0.007387146371731142, 0.007171973440249537,
-                 0.007162772367775337, 0.004515671777382144],
+GAPS_DEFAULT = {   # re-measured 2026-11-04 (job 11033830): per-quantity widths (vote T6)
+    'od_abs': [0.037013504640583506, 0.11999528082759525, 0.07048416840304128, 1.518673011818919, 3.874938824880701, 0.34344521890318447, 0.23650117586674924, 0.146728878453672],
+    'planck_abs': [2.9064466562367386e-06, 2.989932343488988e-06, 3.3009257833782613e-06, 2.2636888434846014e-06, 1.9745093498002575e-06, 2.321112275271986e-06, 3.4082591175987886e-06, 3.3450636269805045e-06],
+    'od_rel': [0.25773486874916984, 0.2554515340395468, 0.38290988125373554, 0.8042145039302835, 0.8336755778536892, 0.7265513787557111, 0.45174587106245767, 0.31290515914941175],
+    'emis_rel': [0.0, 0.0, 0.0, 1.3557740225038281e-16, 1.2454592429700586e-16, 1.728016037681555e-16, 0.0, 3.1101654244296595e-16],
 }
 
 
@@ -288,8 +282,11 @@ def _layer_tau(z, j, x0):
 
 
 def _transitions(z):
-    """name -> (f(x, sharpness), x0 = transition point, h = transition width
-    in x units (1/sharpness in the switched argument), kinked_at_inf)."""
+    """name -> (f(x, sharpness), x0, h = transition width in x units (S/sharpness,
+    S the switch's own scale), control): control True = the hard form is kinked
+    inside the stencil; a float t = value control, the smooth value differs from
+    the hard one at x0 + h*t.  One-sided inactive-exact clamps are probed at the
+    centre of their band (vote T2), where they differ from the hard form."""
     pref = np.asarray(lw.tables.table("yoerrtrf.PREFLOG"))
     pl = np.log(np.asarray(oracle_prep(z).pavel[0]))
     jt = int(np.argmin(np.abs(pl - 4.56)))
@@ -307,7 +304,7 @@ def _transitions(z):
         chi, coldry = 3.0e-7, 1.0e24
         x0 = spec[0] * chi * coldry / lw._ADJ_SCALE                  # rat = threshold
         return ((lambda x, s: lw._adjcol(x, coldry, chi, chi, spec, s)),
-                x0, x0 / spec[0] * w0, True)
+                x0, x0 * w0, True)                                    # S = thr
 
     c0 = oracle_coef(z)
 
@@ -327,21 +324,22 @@ def _transitions(z):
     pk = np.exp((36.0 - 5) / 5.0 - 0.04)                              # u = 5: jp boundary
     pt, pb = np.exp(4.56), np.exp(pref[0] + 0.2)
     out = {
-        "tropopause blend": _layer_tau(z, jt, pt) + (pt * w0, True),
-        "fp clamp (ln p bound)": _layer_tau(z, 0, pb) + (pb * w0, True),
+        "tropopause blend": _layer_tau(z, jt, pt) + (pt * 0.2 * w0, True),      # S = 0.2 ln p
+        "fp clamp (ln p bound)": _layer_tau(z, 0, pb) + (pb * 0.2 * w0, True),
         "chi(jp+1) staircase": ((lambda x, s: lw._chi_step(3, x[None], False, s)[0]),
                                 pk, pk * w0 / 5.0, True),
         "zero-column floor": (zero_co2, 0.0, fl * w0, True),
-        "band1 250 hPa": (band1, lw._B1_P_CORR, w0, True),
+        "band1 250 hPa": (band1, lw._B1_P_CORR, lw._B1_P_CORR * w0, True),       # S = 250 hPa
         "planck 160 K": ((lambda x, s: lw.planck_function_surf(x[None], pf, s).sum()),
-                         160.0, w0, True),
+                         160.0 * (1.0 - 0.5 * w0), 160.0 * w0, 0.0),            # band centre
         "od floor": ((lambda x, s: lw.lw_outputs(x[None, None, None], MIN_GAS_OD_LW, s).sum()),
-                     MIN_GAS_OD_LW, MIN_GAS_OD_LW * w0, True),
-        "specparm cap ONEMINUS": (major3, lw._ONEMINUS, w0, True),
+                     MIN_GAS_OD_LW * (1.0 - 0.5 * w0), MIN_GAS_OD_LW * w0, 0.0),
+        # band centre (the function's form; physical specparm <= 1 reaches only its first 1e-6)
+        "specparm cap ONEMINUS": (major3, lw._ONEMINUS + 0.5 * w0 / 8.0, w0 / 8.0, 0.0),
         # the 3-point and 2-point formulas join C1 at 0.125/0.875 (measured: the
         # hard form passes check_grads there), so the control is a value check
-        "3-point blend 0.125": (major3, 0.125, w0, False),
-        "3-point blend 0.875": (major3, 0.875, w0, False),
+        "3-point blend 0.125": (major3, 0.125, w0 / 8.0, 1.0),                 # S = 1/8
+        "3-point blend 0.875": (major3, 0.875, w0 / 8.0, 1.0),
     }
     for spec in (lw._ADJ_N2O, lw._ADJ_B6, lw._ADJ_B7_LO, lw._ADJ_B8, lw._ADJ_B13):
         out[f"ratio adjustment {spec}"] = adj(spec)
@@ -359,7 +357,7 @@ _T0 = 0.5 * _EPS     # evaluation point: the hard kink lies inside the FD stenci
 
 @pytest.mark.parametrize("name", _NAMES)
 def test_grad_smoothed_transition(z, name):
-    f, x0, h, kinked = _transitions(z)[name]
+    f, x0, h, control = _transitions(z)[name]
     x0 = jnp.asarray(x0, jnp.float64)
     scale = abs(float(jax.grad(lambda x: f(x, 100.0))(x0))) * h
     g = np.asarray(jax.grad(lambda x: f(x, 100.0))(x0))
@@ -370,12 +368,13 @@ def test_grad_smoothed_transition(z, name):
         return f(x0 + h * t, s) / scale
     t0 = jnp.asarray(_T0)
     check_grads(lambda t: fn(t, 100.0), (t0,), order=1, modes=("fwd", "rev"), eps=_EPS)
-    if kinked:               # control: the hard form has a jump/kink inside the stencil
+    if control is True:      # control: the hard form has a jump/kink inside the stencil
         with pytest.raises(AssertionError):
             check_grads(lambda t: fn(t, INF), (t0,), order=1, modes=("fwd", "rev"), eps=_EPS)
-    else:                    # control: the blend is active one width past the threshold
-        t1 = jnp.asarray(1.0)
-        assert abs(float(fn(t1, 100.0) - fn(t1, INF))) > 1e-6
+    else:                    # control: the smoothing is active at x0 + h*control (votes T3, T3b)
+        t1 = jnp.asarray(control)
+        hard = float(fn(t1, INF))
+        assert abs(float(fn(t1, 100.0)) - hard) > 1e-12 * abs(hard)
 
 
 def test_safe_pow_grads_and_underflow():
@@ -411,3 +410,13 @@ def test_check_grads_end_to_end(z):
         return (jnp.sum(o.od_lw * wt) + 1e-2 * jnp.sum(o.planck_hl * wt)
                 + 1e-2 * jnp.sum(o.lw_emission))
     check_grads(f, (jnp.asarray(0.0123), jnp.asarray(1.0)), order=1, modes=("fwd", "rev"), eps=1e-6)
+
+
+def test_eta_index_stays_in_table_fp32():
+    """Vote F2: specparm = 1 (other column floored) with the smoothed cap rounds
+    to 1.0 in fp32; JS must stay <= specmult's block (8 lower, 4 upper)."""
+    for mult in (lw._ETA_A, lw._ETA_B):
+        for dt in (jnp.float32, jnp.float64):
+            for s in (100.0, INF):
+                sp, js, fs = lw._eta_param(jnp.ones((1,), dt), mult, s)
+                assert int(js[0]) <= int(mult) and 0.0 <= float(fs[0]) <= 1.0, (mult, dt, s)

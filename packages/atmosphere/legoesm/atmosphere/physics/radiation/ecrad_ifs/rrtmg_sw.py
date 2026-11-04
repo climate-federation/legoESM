@@ -25,15 +25,15 @@ Departures from 49r1, all decided by vote:
   agree on the oracle inputs (tested) and differ for a block mixing columns
   whose LAYREFFR crossing sits at different layers (tested, documented there).
 * Smoothing (one static ``sharpness``; ``math.inf`` = the oracle's hard form):
-  the specparm clamp ``IF (specparm >= ONEMINUS)`` -> ``smooth_min``; the
+  widths S/sharpness per quantity (user rule 2026-11-04): the specparm clamp
+  ``IF (specparm >= ONEMINUS)`` -> inactive-exact upper clamp (S = 1/mult); the
   tropopause split (lower vs upper k-table formula) -> per-layer blend with
   ``sigmoid_switch(jpc - 13)``, ``jpc = 36 - 5 (ln p + 0.04)``.
   the solar-source layer selection (I_LAYSOLFR crossing tests on the
   continuous pressure index, see :func:`solar_source`); the ``cos_sza > 0``
-  day/night branch -> ``smoothstep_cubic(cos_sza*sharpness)``. Still hard:
-  ``max(min_gas_od_sw, od)`` (PENDING user decision: every smooth form at the
-  approved 0.01 width biases the 63% of layers with od < 0.01) and the exact
-  ``IF (col == 0) col = 1e-32*coldry`` replacement.
+  day/night branch -> ``smoothstep_cubic(1 + cos_sza*sharpness)`` (night-side
+  band, the solver's form); ``max(min_gas_od_sw, od)`` -> inactive-exact lower
+  clamp (S = 1e-15); ``IF (col == 0) col = 1e-32*coldry`` -> the LW floor0 form.
 * Out-of-bounds cases of the oracle (votes): ``K_JP(lay-1)`` at lay=1 counts
   as no crossing; a column with no layer above LAYTROP takes the default layer.
   The tropopause split uses the per-layer ``jp >= 13`` test of SRTM_SETCOEF;
@@ -48,9 +48,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.core.smooth import sigmoid_switch, smooth_clamp, smooth_min, smoothstep_cubic
+from legoesm.core.smooth import sigmoid_switch, smooth_clamp, smoothstep_cubic
 
 from . import tables
+from .two_stream import lower_clamp, upper_clamp
 
 __physics_contract__ = {
     "summary": (
@@ -83,6 +84,9 @@ __physics_contract__ = {
 
 # --- radiation_ifs_rrtm.F90:353 ---------------------------------------------
 _ONEMINUS = 1.0 - 1.0e-6  # ZONEMINUS = 1.0_jprb - 1.0e-6_jprb
+# Smoothing scale of the od floor max(min_gas_od_sw, od) (vote S6: the LW floor
+# value min_gas_od_lw = 1e-15 as the od scale; min_gas_od_sw itself is 0).
+_OD_FLOOR_SCALE = 1.0e-15
 
 # --- srtm_setcoef.F90 (lines 91-201) ----------------------------------------
 _STPFAC = 296.0 / 1013.0  # Z_STPFAC = 296._JPRB/1013._JPRB
@@ -179,7 +183,7 @@ class SwCoef(NamedTuple):
 
 def srtm_setcoef(pavel, tavel, coldry, wkl, sharpness: float = 100.0) -> SwCoef:
     """SRTM_SETCOEF for all columns (the oracle skips cos_sza<=0 columns, whose
-    outputs it leaves stale; those columns are zeroed in gas_optics_sw)."""
+    outputs it leaves stale; gas_optics_sw weights them by the day weight)."""
     preflog = _t("yoesrtwn.PREFLOG")
     tref = _t("yoesrtwn.TREF")
     plog = jnp.log(pavel)
@@ -210,8 +214,11 @@ def srtm_setcoef(pavel, tavel, coldry, wkl, sharpness: float = 100.0) -> SwCoef:
     colh2o = _COL_SCALE * wkl[:, _WKL_H2O, :]
 
     def _col(i):
+        # IF (col == 0) col = 1e-32*coldry (vote X1: the LW floor0 form, width
+        # relative to the floor; exact at sharpness=inf since col >= 0).
         c = _COL_SCALE * wkl[:, i, :]
-        return jnp.where(c == 0.0, _COL_FLOOR * coldry, c)
+        fl = _COL_FLOOR * coldry
+        return c + fl * sigmoid_switch(-c / fl, sharpness)
 
     compfp = 1.0 - fp
     return SwCoef(
@@ -257,9 +264,13 @@ def _pair(tab, ind0, ind1, dt, fs, speccomb, c, ng):
 def _spec(a, b, strrat, mult, sharpness):
     """Z_SPECCOMB, JS, Z_FS with IF (Z_SPECPARM >= ONEMINUS) smoothed."""
     speccomb = a + strrat * b
-    specparm = smooth_min(a / speccomb, _ONEMINUS, sharpness)
+    specparm = upper_clamp(a / speccomb, _ONEMINUS, 1.0 / mult, sharpness)  # S = one eta bin
     specmult = mult * specparm
-    return speccomb, 1 + _trunc_int(specmult), jnp.fmod(specmult, 1.0)
+    # JS <= mult (vote F2): fp32 can round the smoothed cap at specparm = 1 to
+    # 1.0; Z_FS then reaches 1.  sm - trunc(sm) == MOD(sm, 1) exactly for sm >= 0,
+    # so unchanged whenever specmult < mult, hence at sharpness=inf.
+    tr = jnp.minimum(jnp.trunc(specmult), mult - 1.0)
+    return speccomb, 1 + tr.astype(jnp.int32), specmult - tr
 
 
 def _ind_lo(c, nsp, js):
@@ -510,27 +521,30 @@ def gas_optics_sw(pavel, tavel, coldry, wkl, cos_sza, solar_irradiance,
 
 
 def _day_weight(cos_sza, sharpness):
-    """IF (cos_sza > 0): smoothstep_cubic(cos_sza*sharpness) (re-vote), exactly 0
-    for cos_sza <= 0 and 1 for cos_sza >= 1/sharpness; hard at sharpness=inf."""
+    """IF (cos_sza > 0): band wholly on the night side (vote S5, the SW solver's
+    form): smoothstep_cubic(1 + cos_sza*sharpness), exactly 1 for cos_sza >= 0
+    and 0 for cos_sza <= -1/sharpness; hard at sharpness=inf."""
     if sharpness == math.inf:
         return (cos_sza > 0.0).astype(jnp.result_type(cos_sza, float))
-    return smoothstep_cubic(cos_sza * sharpness)
+    return smoothstep_cubic(1.0 + cos_sza * sharpness)
 
 
 def sw_outputs(zod, zssa, zinc, cos_sza, solar_irradiance, min_gas_od_sw,
                sharpness: float = 100.0):
     """radiation_ifs_rrtm.F90 lines 589-650 from day-branch ZOD/ZSSA/ZINCSOL.
 
-    Night columns are zero (the oracle's initialisation at line 563) and their
-    incoming_sw_scale is 1; the day/night choice is the weight w of
-    :func:`_day_weight`. The od floor is still the hard max (decision pending
-    with the user: both smooth forms at width 0.01 bias thin layers).
+    Columns with w = 0 (cos_sza <= -1/sharpness, or <= 0 at sharpness=inf) are
+    zero (the oracle's initialisation at line 563) with incoming_sw_scale 1;
+    inside the night-side band (-1/sharpness, 0] od and ssa are w times the day
+    values and incoming_sw = w*zinc*(w*solar_irradiance/total + 1 - w)
+    (:func:`_day_weight`). The od floor is an inactive-exact lower clamp of
+    scale 1e-15 (vote S6): exactly od wherever od >= min_gas_od_sw.
     """
     w = _day_weight(cos_sza, sharpness)[:, None]
     zod = w[..., None] * zod
     zssa = w[..., None] * zssa
     zinc_m = w * zinc
-    total = jnp.where((cos_sza > 0.0)[:, None], jnp.sum(zinc, -1, keepdims=True), 1.0)  # guards 0/0 only
+    total = jnp.where(w > 0.0, jnp.sum(zinc, -1, keepdims=True), 1.0)  # 0/0 guard only (X2)
     scale = w * (solar_irradiance / total) + (1.0 - w)
-    od_sw = jnp.maximum(min_gas_od_sw, zod[:, ::-1, :])
+    od_sw = lower_clamp(zod[:, ::-1, :], min_gas_od_sw, _OD_FLOOR_SCALE, sharpness)
     return od_sw, zssa[:, ::-1, :], scale * zinc_m
