@@ -141,7 +141,7 @@ _A4 = 35.86
 # --- derived (module_bl_myjpbl.F header, same expressions) ---
 _CP = _C.c_pd
 _CAPA = _C.R_d / _CP
-_RLIVWV = _C.L_s / _C.L_v
+_RLIVWV = _C.L_s / _C.L_v  # latent-ok: WRF MYJ oracle constant
 _ELOCP = 2.72e6 / _CP
 _P608 = _C.R_v / _C.R_d - 1.0
 _PQ0SEA = _PQ0 * _SEAFC
@@ -596,7 +596,7 @@ def myjpbl_column(dt, ht, dz, pmid, pint, th, t, exner, qv, qcw, qci, u, v, tke,
     seamask = xland - 1.
     thz0 = (1. - seamask) * thsk + seamask * thz0
     akhs_dens = akhs * rhok[L - 1]
-    qfc1 = _C.L_v * chklowq * akhs_dens
+    qfc1 = _C.L_v * chklowq * akhs_dens  # latent-ok: WRF MYJ oracle constant
     # SNOW > 0 .OR. SICE > 0.5 -> sublimation heat (soft OR; exactly 0 at snow <= 0)
     w_ice = 1.0 - (1.0 - _gt0_incl0(snow, cfg.width_snow_kg_m2)) * (1.0 - _gt0(sice - 0.5, cfg.width_sice))
     qfc1 = _blend(w_ice, qfc1 * _RLIVWV, qfc1)
