@@ -339,6 +339,62 @@ def test_one_sided_ramps_known_answer_in_each_band():
                 modes=("fwd", "rev"), eps=1e-9, atol=1e-6, rtol=1e-3)
 
 
+def test_partial_zap_band_known_answer_closure_and_gradient():
+    """Zap share z(min(a, v, h)): 1 below epsi10 - w, 0 at/above epsi10, C1 cubic between; the
+    share z of every content lands in the ledgers exactly; AD matches FD inside the band."""
+    eps10 = 1.0e-10
+    a = jnp.asarray(eps10 * np.array([0.5, 0.992, 0.995, 0.998, 2.0]))
+    v = a * 1.0  # h = 1 m, so min(a, v, h) = a
+    st = _synthetic_state(a, v, v * 5.0, np.full((5, 1), -1e7) * np.asarray(v)[:, None],
+                          np.full((5, 1), -1e5) * np.asarray(v)[:, None], pond_area=jnp.zeros(5))
+    z5 = jnp.zeros(5)
+    cfg = _synthetic_config(nn_icesal=2, ponds=False, limit_sharpness_scale=_SMOOTH_SCALE)
+    out = apply_si3_jpl1_ice_cor(st, SI3IceCorFluxes(z5, z5, z5), 0.99999, jnp.full(5, _SSS), jnp.full(5, _SST), cfg)
+    zf = np.asarray(out.zap_fraction)
+    assert zf[0] == 1.0 and zf[-1] == 0.0 and np.all(np.diff(zf) < 0)
+    np.testing.assert_allclose(zf[2], 0.5, rtol=1e-6)  # mid-band of the cubic step
+    s_, f_ = out.state, out.fluxes
+    np.testing.assert_allclose(np.asarray(s_.ice_volume)[2], np.asarray(v)[2] * 0.5, rtol=1e-6)
+    water_lost = (np.asarray(st.ice_volume) - np.asarray(s_.ice_volume)) * _RHOI + (
+        np.asarray(st.snow_volume) - np.asarray(s_.snow_volume)) * _RHOS + (
+        np.asarray(st.pond_volume + st.pond_lid_volume) - np.asarray(s_.pond_volume + s_.pond_lid_volume)) * _RHOW
+    np.testing.assert_allclose(np.asarray(f_.wfx_res) * _DT, water_lost, rtol=1e-12, atol=1e-30)
+    np.testing.assert_allclose(np.asarray(f_.sfx_res) * _DT,
+                               (np.asarray(st.salt_content) - np.asarray(s_.salt_content)) * _RHOI,
+                               rtol=1e-12, atol=1e-30)
+    heat_change = (np.asarray(s_.ice_enthalpy) - np.asarray(st.ice_enthalpy)).sum(-1) + (
+        np.asarray(s_.snow_enthalpy) - np.asarray(st.snow_enthalpy)).sum(-1)
+    np.testing.assert_allclose(np.asarray(f_.hfx_res) * _DT, heat_change, rtol=1e-12, atol=1e-30)
+
+    def remaining(x):
+        o = apply_si3_jpl1_ice_cor(st._replace(ice_area=x, ice_volume=x), SI3IceCorFluxes(z5, z5, z5),
+                                   0.99999, jnp.full(5, _SSS), jnp.full(5, _SST), cfg)
+        return o.state.ice_volume
+
+    ad = np.diag(np.asarray(jax.jacfwd(remaining)(a)))
+    step = 1e-15
+    fd = (np.asarray(remaining(a + step)) - np.asarray(remaining(a - step))) / (2 * step)
+    assert np.isfinite(ad).all()
+    np.testing.assert_allclose(ad, fd, rtol=1e-2, atol=1e-3)
+
+
+def test_ad_slope_is_continuous_at_each_threshold():
+    """At the exact tie (a = amax, h = himin) the default's AD slope equals the one-sided limits
+    (C1): the hard WHERE branch and the band correction agree on the tie."""
+    himin, amax = 0.05, 0.99999
+    z1 = jnp.zeros(1)
+    cfg = _synthetic_config(nn_icesal=2, ponds=False, limit_sharpness_scale=_SMOOTH_SCALE)
+
+    def area(a, v):
+        st = _synthetic_state(jnp.reshape(a, (1,)), jnp.reshape(v, (1,)), jnp.reshape(v, (1,)) * 5.0,
+                              np.full((1, 1), -1e7), np.full((1, 1), -1e5), pond_area=z1)
+        return apply_si3_jpl1_ice_cor(st, SI3IceCorFluxes(z1, z1, z1), amax, jnp.full(1, _SSS),
+                                      jnp.full(1, _SST), cfg).state.ice_area[0]
+
+    np.testing.assert_allclose(float(jax.grad(area, argnums=0)(amax, 1.0)), 1.0, rtol=1e-12)
+    np.testing.assert_allclose(float(jax.grad(area, argnums=1)(0.5, 0.5 * himin)), 0.0, atol=1e-12)
+
+
 def test_dispatch_and_layout_guards(fx):
     with pytest.raises(ValueError, match="nn_icesal"):
         apply_si3_jpl1_ice_cor(_state(fx), _fluxes(fx), 0.99, fx["sss_m"], fx["sst_m"],

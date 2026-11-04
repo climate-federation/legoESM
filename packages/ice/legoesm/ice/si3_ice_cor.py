@@ -313,21 +313,26 @@ def apply_si3_jpl1_ice_cor(
 
 
 def _band_correction(x, sharpness):
-    """``max(x, 0) - positive_part_c1(x)``: exactly 0 outside ``(0, 1/sharpness)``.
+    """``x^+ - positive_part_c1(x)``: exactly 0 outside ``(0, 1/sharpness)``.
 
     Added to NEMO's hard ``MIN``/``MAX`` it turns the limit into the one-sided C1 ramp
     (``min(y, b) = y - (y - b)^+``) without touching any cell outside the band.
     """
-    return jnp.maximum(x, _SI3_ICE_COR_ZERO) - positive_part_c1(x, sharpness)
+    # ``where(x > 0, x, 0)`` (not ``maximum``): its derivative at the tie x = 0 is 0, the
+    # same branch NEMO's strict ``>`` / ``<`` WHERE takes there, so AD stays C1 (slope 1).
+    return jnp.where(x > _SI3_ICE_COR_ZERO, x, _SI3_ICE_COR_ZERO) - positive_part_c1(x, sharpness)
 
 
 def _clamp(value, lower, upper, volume, config, sss_m, hard):
     """``MIN(MAX(lower, value), upper)`` (NEMO); smooth default adds the one-sided ramp
     corrections on the specific salinity ``S = value/volume`` (widths 0.01 x each bound).
     """
-    clamped = jnp.minimum(jnp.maximum(lower, value), upper)
     if hard:
-        return clamped
+        return jnp.minimum(jnp.maximum(lower, value), upper)
+    # Same values as MIN(MAX(...)); strict-inequality branches so the tie derivative matches
+    # the band correction's (see _band_correction).
+    raised = jnp.where(value < lower, lower, value)
+    clamped = jnp.where(raised > upper, upper, raised)
     has_volume = volume > _SI3_ICE_COR_ZERO
     safe = jnp.where(has_volume, volume, _SI3_ICE_COR_ONE)
     specific = value / safe
