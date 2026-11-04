@@ -272,29 +272,31 @@ def test_traced_o15_step_keeps_parent_forward_bits(monkeypatch):
 # while AD != 0.0 identically in HEAD and parent 3dd560f7f05f:
 # - 13 entries absorbed into the 1.0e30 category-1 sum/denominator in forward float64;
 # - 6 entries where -1.0e-300 / 1.0e30 intentionally underflows to -0.0 in forward float64.
-VAR_AGG_CELL22_EXCLUDED = frozenset(
-    {
-        ("vt_i", "v_i", (2, 2, 0)),  # x0=1.0, AD=parent_AD=1.0, FD=parent_FD=0.0 (1.0 + 1e30 -> 1e30)
-        ("at_i", "a_i", (2, 2, 0)),  # x0=1.0, AD=parent_AD=1.0, FD=parent_FD=0.0 (1.0 + 1e30 -> 1e30)
-        ("at_ip", "a_ip", (2, 2, 0)),  # x0=1.0, AD=parent_AD=1.0, FD=parent_FD=0.0 (1.0 + 1e30 -> 1e30)
-        ("ato_i", "a_i", (2, 2, 0)),  # x0=1.0, AD=parent_AD=-1.0, FD=parent_FD=0.0 (1.0 - (1.0 + 1e30))
-        ("at_ip_eff", "a_i", (2, 2, 0)),  # x0=1.0, AD=parent_AD=1.755678e-1, FD=parent_FD=0.0 (absorbed in 1.5e29)
-        ("at_ip_eff", "a_ip_eff", (2, 2, 0)),  # x0=1.756e-1, AD=parent_AD=1.0, FD=parent_FD=0.0 (absorbed in 1.5e29)
-        ("tm_su", "t_su", (2, 2, 0)),  # x0=-1e-300, AD=parent_AD=1.0e-30, FD=parent_FD=0.0 (-1e-300/1e30 -> -0.0)
-        ("hm_i", "v_i", (2, 2, 0)),  # x0=1.0, AD=parent_AD=1.0e-30, FD=parent_FD=0.0 (1.0 + 1e30 -> 1e30)
-        ("hm_i", "a_i", (2, 2, 0)),  # x0=1.0, AD=parent_AD=-1.0e-30, FD=parent_FD=0.0 (1.0 + 1e30 -> 1e30)
-        ("hm_s", "a_i", (2, 2, 0)),  # x0=1.0, AD=parent_AD=-8.941731e-62, FD=parent_FD=0.0 (1.0 + 1e30 -> 1e30)
-        ("tm_si", "t_si", (2, 2, 0)),  # x0=-1e-300, AD=parent_AD=1.0e-30, FD=parent_FD=0.0 (-1e-300/1e30 -> -0.0)
-        ("om_i", "oa_i", (2, 2, 0)),  # x0=-1e-300, AD=parent_AD=1.0e-30, FD=parent_FD=0.0 (-1e-300/1e30 -> -0.0)
-        ("sm_i", "szv_i", (2, 2, 0, 0)),  # x0=-1e-300, AD=parent_AD=1.0e-30, FD=parent_FD=0.0 (-1e-300/1e30 -> -0.0)
-        ("tm_i", "v_i", (2, 2, 0)),  # x0=1.0, AD=parent_AD=-2.731964e-30, FD=parent_FD=0.0 (absorbed in 2.6e32/1e30)
-        ("tm_i", "t_i", (2, 2, 0, 0)),  # x0=265.9, AD=parent_AD=3.333333e-31, FD=parent_FD=0.0 (absorbed in 1e30)
-        ("tm_i", "t_i", (2, 2, 1, 0)),  # x0=260.7, AD=parent_AD=3.333333e-31, FD=parent_FD=0.0 (absorbed in 1e30)
-        ("tm_i", "t_i", (2, 2, 2, 0)),  # x0=262.2, AD=parent_AD=3.333333e-31, FD=parent_FD=0.0 (absorbed in 1e30)
-        ("hm_ip", "v_ip", (2, 2, 0)),  # x0=-1e-300, AD=parent_AD=1.0e-30, FD=parent_FD=0.0 (-1e-300/1e30 -> -0.0)
-        ("hm_il", "v_il", (2, 2, 0)),  # x0=-1e-300, AD=parent_AD=1.0e-30, FD=parent_FD=0.0 (-1e-300/1e30 -> -0.0)
-    }
-)
+# Each entry maps (out_field, in_name, index) -> (parent_ad, parent_fd) measured at 3dd560f7f05f.
+VAR_AGG_CELL22_EXCLUDED_PARENT_TABLE: dict[
+    tuple[str, str, tuple[int, ...]], tuple[float, float]
+] = {
+    ("at_i", "a_i", (2, 2, 0)): (1.0, 0.0),
+    ("at_ip", "a_ip", (2, 2, 0)): (1.0, 0.0),
+    ("at_ip_eff", "a_i", (2, 2, 0)): (0.17556776050637313, 0.0),
+    ("at_ip_eff", "a_ip_eff", (2, 2, 0)): (1.0, 0.0),
+    ("ato_i", "a_i", (2, 2, 0)): (-1.0, 0.0),
+    ("hm_i", "a_i", (2, 2, 0)): (-9.999999999999999e-31, 0.0),
+    ("hm_i", "v_i", (2, 2, 0)): (9.999999999999999e-31, 0.0),
+    ("hm_il", "v_il", (2, 2, 0)): (9.999999999999999e-31, 0.0),
+    ("hm_ip", "v_ip", (2, 2, 0)): (9.999999999999999e-31, 0.0),
+    ("hm_s", "a_i", (2, 2, 0)): (-8.941731195714678e-62, 0.0),
+    ("om_i", "oa_i", (2, 2, 0)): (9.999999999999999e-31, 0.0),
+    ("sm_i", "szv_i", (2, 2, 0, 0)): (9.999999999999999e-31, 0.0),
+    ("tm_i", "t_i", (2, 2, 0, 0)): (3.333333333333333e-31, 0.0),
+    ("tm_i", "t_i", (2, 2, 1, 0)): (3.333333333333333e-31, 0.0),
+    ("tm_i", "t_i", (2, 2, 2, 0)): (3.333333333333333e-31, 0.0),
+    ("tm_i", "v_i", (2, 2, 0)): (-2.7319640688144486e-30, 0.0),
+    ("tm_si", "t_si", (2, 2, 0)): (9.999999999999999e-31, 0.0),
+    ("tm_su", "t_su", (2, 2, 0)): (9.999999999999999e-31, 0.0),
+    ("vt_i", "v_i", (2, 2, 0)): (1.0, 0.0),
+}
+VAR_AGG_CELL22_EXCLUDED = frozenset(VAR_AGG_CELL22_EXCLUDED_PARENT_TABLE)
 
 # Measured on _var_agg_fixture(3, 2) at cell (3, 2):
 # rel_err: 4.99e-12, 1.33e-11, 1.25e-8, 4.64e-11, 5.04e-10, 2.87e-12, 7.24e-14, 7.25e-12.
@@ -371,9 +373,20 @@ def test_traced_var_agg_kn2_reverse_mode_matches_central_differences():
                     if g == 0.0 and fd == 0.0:
                         continue
                     key = (of, k, idx)
-                    if key in VAR_AGG_CELL22_EXCLUDED:
-                        assert g != 0.0 and fd == 0.0
-                        seen_cell22_excluded.add(key)
+                    if key in VAR_AGG_CELL22_EXCLUDED_PARENT_TABLE:
+                        parent_ad, parent_fd = VAR_AGG_CELL22_EXCLUDED_PARENT_TABLE[key]
+                        if (
+                            g == 0.0
+                            or fd != 0.0
+                            or int(np.float64(g).view(np.uint64))
+                            != int(np.float64(parent_ad).view(np.uint64))
+                            or int(np.float64(fd).view(np.uint64))
+                            != int(np.float64(parent_fd).view(np.uint64))
+                            or f"{fd:.16e}" != f"{parent_fd:.16e}"
+                        ):
+                            per_entry_failures.append((of, k, idx, g, fd, parent_ad, parent_fd))
+                        else:
+                            seen_cell22_excluded.add(key)
                         continue
                     relative = abs(g - fd) / max(abs(g), abs(fd))
                     if g == 0.0 or not relative <= 1.0e-6:
@@ -504,49 +517,49 @@ O15_EXACT_ZERO_ENTRIES = frozenset(
     }
 )
 
-O15_ZAPSMALL_EXCLUDED_ENTRIES = frozenset(
-    {
-        ("a_i", (2, 4, 0)),  # x0=1.000e-12, AD=parent_AD=-1.596913, FD=parent_FD=-1.192845
-        ("a_i", (3, 2, 0)),  # x0=1.000e-12, AD=parent_AD=-1.360182, FD=parent_FD=-1.184121
-        ("a_i", (3, 3, 0)),  # x0=1.400e-12, AD=parent_AD=-1.611140, FD=parent_FD=-1.344075
-        ("v_i", (2, 2, 0)),  # x0=7.498e-13, AD=parent_AD=0.0848655, FD=parent_FD=0.0852745
-        ("v_i", (2, 2, 1)),  # x0=1.000e-11, AD=parent_AD=0.0848655, FD=parent_FD=0.0851810
-        ("v_i", (2, 3, 0)),  # x0=5.915e-14, AD=parent_AD=0.0848655, FD=parent_FD=0.0847288
-        ("v_i", (2, 4, 0)),  # x0=1.225e-12, AD=parent_AD=0.260545, FD=parent_FD=-0.0143443
-        ("v_i", (3, 2, 0)),  # x0=9.733e-13, AD=parent_AD=0.234920, FD=parent_FD=0.340024
-        ("v_i", (3, 3, 0)),  # x0=6.531e-13, AD=parent_AD=0.235027, FD=parent_FD=1.947051
-        ("v_i", (3, 4, 0)),  # x0=1.638e-13, AD=parent_AD=0.0848655, FD=parent_FD=0.0847785
-        ("v_s", (2, 2, 0)),  # x0=1.947e-13, AD=parent_AD=0.0305405, FD=parent_FD=0.0306069
-        ("v_s", (2, 3, 0)),  # x0=7.155e-15, AD=parent_AD=0.0305405, FD=parent_FD=0.0283996
-        ("v_s", (2, 4, 0)),  # x0=1.022e-13, AD=parent_AD=0.0305405, FD=parent_FD=0.0304946
-        ("v_s", (3, 2, 0)),  # x0=2.560e-13, AD=parent_AD=0.0305405, FD=parent_FD=0.0305521
-        ("v_s", (3, 3, 0)),  # x0=6.411e-14, AD=parent_AD=0.0305405, FD=parent_FD=0.0306365
-        ("v_s", (3, 4, 0)),  # x0=1.821e-14, AD=parent_AD=0.0305405, FD=parent_FD=0.0297581
-        ("v_ip", (2, 2, 0)),  # x0=6.865e-15, AD=parent_AD=0.0925469, FD=parent_FD=0.157852
-        ("v_ip", (2, 3, 0)),  # x0=3.162e-14, AD=parent_AD=0.0925469, FD=parent_FD=0.0921059
-        ("v_ip", (2, 4, 0)),  # x0=6.187e-15, AD=parent_AD=0.0925469, FD=parent_FD=0.0985246
-        ("v_ip", (3, 2, 0)),  # x0=5.728e-16, AD=parent_AD=0.0925469, FD=parent_FD=0.118235
-        ("v_ip", (3, 3, 0)),  # x0=8.808e-14, AD=parent_AD=0.0925469, FD=parent_FD=0.0926606
-        ("v_ip", (3, 4, 0)),  # x0=1.380e-14, AD=parent_AD=0.0925469, FD=parent_FD=0.0932204
-        ("szv_i", (2, 2, 0, 0)),  # x0=9.204e-13, AD=parent_AD=0.0161453, FD=parent_FD=0.0179203
-        ("szv_i", (2, 2, 1, 0)),  # x0=1.751e-12, AD=parent_AD=0.0161453, FD=parent_FD=0.0169547
-        ("szv_i", (2, 2, 2, 0)),  # x0=3.237e-13, AD=parent_AD=0.0161453, FD=parent_FD=0.0101917
-        ("szv_i", (2, 3, 0, 0)),  # x0=5.700e-14, AD=parent_AD=0.0161453, FD=parent_FD=0.0162749
-        ("szv_i", (2, 3, 1, 0)),  # x0=1.169e-13, AD=parent_AD=0.0161453, FD=parent_FD=0.0160957
-        ("szv_i", (2, 3, 2, 0)),  # x0=6.650e-14, AD=parent_AD=0.0161453, FD=parent_FD=0.0162757
-        ("szv_i", (2, 4, 0, 0)),  # x0=3.157e-12, AD=parent_AD=0.0161453, FD=parent_FD=0.0161452
-        ("szv_i", (2, 4, 1, 0)),  # x0=1.048e-12, AD=parent_AD=0.0161453, FD=parent_FD=0.0161445
-        ("szv_i", (3, 2, 0, 0)),  # x0=5.271e-13, AD=parent_AD=0.0161453, FD=parent_FD=0.0161332
-        ("szv_i", (3, 2, 1, 0)),  # x0=1.672e-12, AD=parent_AD=0.0161453, FD=parent_FD=0.0161490
-        ("szv_i", (3, 2, 2, 0)),  # x0=2.112e-12, AD=parent_AD=0.0161453, FD=parent_FD=0.0161454
-        ("szv_i", (3, 3, 0, 0)),  # x0=2.748e-13, AD=parent_AD=0.0161453, FD=parent_FD=0.0161313
-        ("szv_i", (3, 3, 1, 0)),  # x0=3.516e-13, AD=parent_AD=0.0161453, FD=parent_FD=0.0161269
-        ("szv_i", (3, 3, 2, 0)),  # x0=1.051e-12, AD=parent_AD=0.0161453, FD=parent_FD=0.0161572
-        ("szv_i", (3, 4, 0, 0)),  # x0=4.212e-13, AD=parent_AD=0.0161453, FD=parent_FD=0.0161525
-        ("szv_i", (3, 4, 1, 0)),  # x0=1.189e-13, AD=parent_AD=0.0161453, FD=parent_FD=0.0160334
-        ("szv_i", (3, 4, 2, 0)),  # x0=2.812e-13, AD=parent_AD=0.0161453, FD=parent_FD=0.0161299
-    }
-)
+# Each entry maps (in_name, index) -> (parent_ad, parent_fd) measured at 3dd560f7f05f.
+O15_ZAPSMALL_EXCLUDED_PARENT_TABLE: dict[tuple[str, tuple[int, ...]], tuple[float, float]] = {
+    ("a_i", (2, 4, 0)): (-1.5969134833187906, -1.192844539180534),
+    ("a_i", (3, 2, 0)): (-1.3601818920843725, -1.1841214586599635),
+    ("a_i", (3, 3, 0)): (-1.6111403518142584, -1.3440754603351188),
+    ("szv_i", (2, 2, 0, 0)): (0.016145254201342288, 0.017920272466355937),
+    ("szv_i", (2, 2, 1, 0)): (0.016145254201342288, 0.016954683879567663),
+    ("szv_i", (2, 2, 2, 0)): (0.016145254201342288, 0.010191693610668028),
+    ("szv_i", (2, 3, 0, 0)): (0.016145254201342288, 0.016274880161048874),
+    ("szv_i", (2, 3, 1, 0)): (0.016145254201342288, 0.016095708171847693),
+    ("szv_i", (2, 3, 2, 0)): (0.016145254201342288, 0.016275692587254195),
+    ("szv_i", (2, 4, 0, 0)): (0.016145254201342288, 0.016145195673378777),
+    ("szv_i", (2, 4, 1, 0)): (0.016145254201342288, 0.01614454261330627),
+    ("szv_i", (3, 2, 0, 0)): (0.016145254201342288, 0.016133226905047007),
+    ("szv_i", (3, 2, 1, 0)): (0.016145254201342288, 0.016148989054869552),
+    ("szv_i", (3, 2, 2, 0)): (0.016145254201342288, 0.01614539311256259),
+    ("szv_i", (3, 3, 0, 0)): (0.016145254201342288, 0.016131276830154022),
+    ("szv_i", (3, 3, 1, 0)): (0.016145254201342288, 0.016126913238721348),
+    ("szv_i", (3, 3, 2, 0)): (0.016145254201342288, 0.016157197119392463),
+    ("szv_i", (3, 4, 0, 0)): (0.016145254201342288, 0.01615249378099242),
+    ("szv_i", (3, 4, 1, 0)): (0.016145254201342288, 0.016033358314652225),
+    ("szv_i", (3, 4, 2, 0)): (0.016145254201342288, 0.01612994239714949),
+    ("v_i", (2, 2, 0)): (0.08486547647313808, 0.0852744988203282),
+    ("v_i", (2, 2, 1)): (0.08486547647313808, 0.08518096620176843),
+    ("v_i", (2, 3, 0)): (0.08486547647313808, 0.08472880160713198),
+    ("v_i", (2, 4, 0)): (0.2605453760682258, -0.014344312192269018),
+    ("v_i", (3, 2, 0)): (0.23492007647377722, 0.3400243526585641),
+    ("v_i", (3, 3, 0)): (0.23502659082625255, 1.947050972011337),
+    ("v_i", (3, 4, 0)): (0.08486547647313808, 0.08477850525486563),
+    ("v_ip", (2, 2, 0)): (0.09254686638292048, 0.15785160010130883),
+    ("v_ip", (2, 3, 0)): (0.09254686638292048, 0.09210587107962248),
+    ("v_ip", (2, 4, 0)): (0.09254686638292048, 0.09852455075235325),
+    ("v_ip", (3, 2, 0)): (0.09254686638292048, 0.11823514743949007),
+    ("v_ip", (3, 3, 0)): (0.09254686638292048, 0.09266057704962363),
+    ("v_ip", (3, 4, 0)): (0.09254686638292048, 0.09322038802157243),
+    ("v_s", (2, 2, 0)): (0.030540465906363758, 0.030606945835850448),
+    ("v_s", (2, 3, 0)): (0.030540465906363758, 0.028399622872605775),
+    ("v_s", (2, 4, 0)): (0.030540465906363758, 0.030494577831639683),
+    ("v_s", (3, 2, 0)): (0.030540465906363758, 0.030552059364509693),
+    ("v_s", (3, 3, 0)): (0.030540465906363758, 0.03063651804435005),
+    ("v_s", (3, 4, 0)): (0.030540465906363758, 0.029758068182755625),
+}
+O15_ZAPSMALL_EXCLUDED_ENTRIES = frozenset(O15_ZAPSMALL_EXCLUDED_PARENT_TABLE)
 
 
 def test_traced_o15_step_reverse_mode_matches_central_differences(monkeypatch):
@@ -690,10 +703,20 @@ def test_traced_o15_step_reverse_mode_matches_central_differences(monkeypatch):
                         assert float(v_i_np[i, j, sub_idx[-1]]) <= 1.0e-11
                         seen_exact_zero.add(key)
                         continue
-                    if key in O15_ZAPSMALL_EXCLUDED_ENTRIES:
+                    if key in O15_ZAPSMALL_EXCLUDED_PARENT_TABLE:
+                        parent_ad, parent_fd = O15_ZAPSMALL_EXCLUDED_PARENT_TABLE[key]
                         assert float(v_i_np[i, j, sub_idx[-1]]) <= 1.0e-11
                         assert abs(x0) <= 1.0e-11
-                        seen_excluded.add(key)
+                        if (
+                            int(np.float64(g).view(np.uint64))
+                            != int(np.float64(parent_ad).view(np.uint64))
+                            or int(np.float64(fd).view(np.uint64))
+                            != int(np.float64(parent_fd).view(np.uint64))
+                            or f"{fd:.16e}" != f"{parent_fd:.16e}"
+                        ):
+                            failures.append((name, index, g, fd, parent_ad, parent_fd))
+                        else:
+                            seen_excluded.add(key)
                         continue
                     relative = abs(g - fd) / max(abs(g), abs(fd))
                     if g == 0.0 or not relative <= 1.0e-6:

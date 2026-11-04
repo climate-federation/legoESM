@@ -1277,9 +1277,9 @@ independent review: operator
    - **Committed unit-test forward digests and negative-zero checks (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py`)**:
      Measured now by running:
      `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python -m pytest tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py -v`
-     (`4 passed in 50.52s`):
+     (`4 passed in 47.06s`):
      - `test_traced_var_agg_kn2_keeps_parent_forward_bits_and_negative_zeros`
-       (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 253–291):
+       (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 213–245):
        verifies across `(nlay_i, nlay_s) = (3, 2)` (`148` negative-zero input
        entries across all `16` input arrays) and `(10, 5)` (`318` negative-zero
        input entries across all `16` input arrays) that all `18` surviving `-0.0`
@@ -1289,7 +1289,7 @@ independent review: operator
        (scan), and unrolled `jax.jit`, with exact digest
        `PARENT_VAR_AGG_DIGEST = "587141e538eafe408a2cee07111a5ad3c6c0b96ac28ff571b60a4ff9527ee2ad"`.
      - `test_traced_o15_step_keeps_parent_forward_bits`
-       (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 294–318):
+       (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 248–263):
        verifies across `(nlay_i, nlay_s) = (3, 2)` and `(10, 5)` that eager,
        `jax.jit` (traced `fori_loop`), and unrolled `jax.jit` match
        `PARENT_O15_DIGEST = "193e003a7fe31bbf87ab7495e4406f19a032f80925470bf1a5705ced94c6894b"`
@@ -1329,11 +1329,13 @@ independent review: operator
      `E AssertionError: assert ('193e003a7fe31bbf87ab7495e4406f19a032f80925470bf1a5705ced94c6894b', 'b51c9336794dc4e0a413f86d38dacebb86c946b4c0c27f0f0ff02312639a0afb') == ('193e003a7fe31bbf87ab7495e4406f19a032f80925470bf1a5705ced94c6894b', '193e003a7fe31bbf87ab7495e4406f19a032f80925470bf1a5705ced94c6894b')`.
      Restored and verified `git status --porcelain` clean on `packages/`.
 
-3. **Proof 3 — Per-entry-relative central FD checks on `si3_var_agg(kn=2)` and `si3_o15_step` outputs (`relative <= 1.0e-6`, `g != 0.0`, no absolute floor)**:
+3. **Proof 3 — Per-entry-relative central FD checks on `si3_var_agg(kn=2)` and `si3_o15_step` outputs (`relative <= 1.0e-6`, `g != 0.0`, no absolute floor) and parent-exclusion equivalence at `3dd560f7f05f`**:
    Measured now by running:
    `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python -m pytest tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py -v`
-   (`4 passed in 50.52s`):
-   - **`test_traced_var_agg_kn2_reverse_mode_matches_central_differences` (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 321–397)**:
+   (`4 passed in 47.06s`), and by measuring both `HEAD` (`96bb44f0ae`) and parent `3dd560f7f05f` (via `git show 3dd560f7f0:packages/ice/legoesm/ice/{itd.py,si3_orca2_state.py,si3_finalize.py}` copies in `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch/{parent_itd.py,parent_state.py,parent_finalize.py}`, verified by `sha256sum`) with:
+   `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python -c 'import importlib.util, json, sys; import jax, jax.numpy as jnp, numpy as np; from legoesm.core.precision import PrecisionPolicy, set_policy; import legoesm.ice as ice_pkg; import tests.ice.unit.test_si3_d198_r5_var_agg_o15_traced as tmod; ...'`
+   (`SUMMARY: {'var_agg_ad_bit_diff': 0, 'var_agg_fd_bit_diff': 0, 'o15_ad_bit_diff': 0, 'o15_fd_bit_diff': 0, 'o15_zero_diff': 0}`, saved to `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch/parent_exclusions_measured.json`):
+   - **`test_traced_var_agg_kn2_reverse_mode_matches_central_differences` (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 315–451)**:
      Evaluates reverse-mode AD cotangents `g` and central finite differences
      `fd = (f(x + h e_k) - f(x - h e_k)) / (2 h)` with `h = 1.0e-4 * abs(x0)`
      and `relative = abs(g - fd) / max(abs(g), abs(fd)) <= 1.0e-6` (`g != 0.0`,
@@ -1353,50 +1355,113 @@ independent review: operator
        `szv_i`, not `sv_i`.
      - **Interior cell `(2, 2)` (the intentional `-1.0e-300 / 1.0e30 -> -0.0` underflow cell)**:
        All `65` non-excluded active `(out_field, in_name, index)` entries pass
-       `relative <= 1.0e-6` (max rel err `4.236e-9`). The `19` entries in
-       `VAR_AGG_CELL22_EXCLUDED` (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py`
-       lines 80–103) are explicitly named and verified to have identical
-       `AD_head == AD_parent` and `FD_head == FD_parent == 0.0` at parent
-       `3dd560f7f05f`: `13` entries where `a_i[2,2,0] = v_i[2,2,0] = a_ip[2,2,0] = 1.0`
-       is added to category-1 `1.0e30` (`1.0e30 + (1.0 +- 1.0e-4) == 1.0e30` in
-       IEEE-754 float64, so `FD == 0.0` while `AD` is `+-1.0e-60` or `+-2.7315e-38`
-       in both HEAD and `3dd560f7f05f`), and `6` entries (`t_su[2,2,0]`,
-       `t_si[2,2,0]`, `oa_i[2,2,0]`, `v_ip[2,2,0]`, `v_il[2,2,0]`,
-       `szv_i[2,2,0,0]`, all set to `-1.0e-300`) where division by `1.0e30`
-       underflows to `-0.0` in float64 (`FD == 0.0` while `AD == 1.0e-30` or
-       `9.17e-30` in both HEAD and `3dd560f7f05f`).
-   - **`test_traced_o15_step_reverse_mode_matches_central_differences` (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 400–454)**:
+       `relative <= 1.0e-6` (max rel err `4.236e-9`). The `19` excluded entries are
+       committed in `VAR_AGG_CELL22_EXCLUDED_PARENT_TABLE` (and `VAR_AGG_CELL22_EXCLUDED`,
+       `tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 276–299) and
+       checked by the test at lines 376–390 for bitwise `uint64` AD equality and
+       exact FD equality (`16e` and `uint64`) against parent `3dd560f7f05f`: `13`
+       entries where `a_i[2,2,0] = v_i[2,2,0] = a_ip[2,2,0] = 1.0` (or
+       `a_ip_eff[2,2,0] = 0.17556776050637313` or `t_i[2,2,0..2,0]`) is absorbed into
+       the category-1 `1.0e30` sum/denominator in forward float64 (`FD == 0.0`), and
+       `6` entries (`t_su[2,2,0]`, `t_si[2,2,0]`, `oa_i[2,2,0]`, `v_ip[2,2,0]`,
+       `v_il[2,2,0]`, `szv_i[2,2,0,0]`, all `-1.0e-300`) where division by `1.0e30`
+       underflows to `-0.0` in forward float64 (`FD == 0.0`):
+
+       | # | `(out_field, in_name, index)` | `x0` | `AD_head` (`96bb44f0ae`) | `AD_parent` (`3dd560f7f05f`) | `AD_uint64` | `FD_head` | `FD_parent` | `FD_uint64` |
+       | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+       | `1` | `('at_i', 'a_i', (2, 2, 0))` | `1.0` | `1.0` | `1.0` | `4607182418800017408` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `2` | `('at_ip', 'a_ip', (2, 2, 0))` | `1.0` | `1.0` | `1.0` | `4607182418800017408` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `3` | `('at_ip_eff', 'a_i', (2, 2, 0))` | `1.0` | `0.17556776050637313` | `0.17556776050637313` | `4595493515496893620` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `4` | `('at_ip_eff', 'a_ip_eff', (2, 2, 0))` | `0.17556776050637313` | `1.0` | `1.0` | `4607182418800017408` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `5` | `('ato_i', 'a_i', (2, 2, 0))` | `1.0` | `-1.0` | `-1.0` | `13830554455654793216` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `6` | `('hm_i', 'a_i', (2, 2, 0))` | `1.0` | `-9.999999999999999e-31` | `-9.999999999999999e-31` | `13381399884061196959` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `7` | `('hm_i', 'v_i', (2, 2, 0))` | `1.0` | `9.999999999999999e-31` | `9.999999999999999e-31` | `4158027847206421151` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `8` | `('hm_il', 'v_il', (2, 2, 0))` | `-1e-300` | `9.999999999999999e-31` | `9.999999999999999e-31` | `4158027847206421151` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `9` | `('hm_ip', 'v_ip', (2, 2, 0))` | `-1e-300` | `9.999999999999999e-31` | `9.999999999999999e-31` | `4158027847206421151` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `10` | `('hm_s', 'a_i', (2, 2, 0))` | `1.0` | `-8.941731195714678e-62` | `-8.941731195714678e-62` | `12916997040353963472` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `11` | `('om_i', 'oa_i', (2, 2, 0))` | `-1e-300` | `9.999999999999999e-31` | `9.999999999999999e-31` | `4158027847206421151` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `12` | `('sm_i', 'szv_i', (2, 2, 0, 0))` | `-1e-300` | `9.999999999999999e-31` | `9.999999999999999e-31` | `4158027847206421151` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `13` | `('tm_i', 't_i', (2, 2, 0, 0))` | `265.85944180689484` | `3.333333333333333e-31` | `3.333333333333333e-31` | `4150923644875288105` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `14` | `('tm_i', 't_i', (2, 2, 1, 0))` | `260.71001171568673` | `3.333333333333333e-31` | `3.333333333333333e-31` | `4150923644875288105` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `15` | `('tm_i', 't_i', (2, 2, 2, 0))` | `262.18678397813267` | `3.333333333333333e-31` | `3.333333333333333e-31` | `4150923644875288105` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `16` | `('tm_i', 'v_i', (2, 2, 0))` | `1.0` | `-2.7319640688144486e-30` | `-2.7319640688144486e-30` | `13387992871745285632` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `17` | `('tm_si', 't_si', (2, 2, 0))` | `-1e-300` | `9.999999999999999e-31` | `9.999999999999999e-31` | `4158027847206421151` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `18` | `('tm_su', 't_su', (2, 2, 0))` | `-1e-300` | `9.999999999999999e-31` | `9.999999999999999e-31` | `4158027847206421151` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+       | `19` | `('vt_i', 'v_i', (2, 2, 0))` | `1.0` | `1.0` | `1.0` | `4607182418800017408` | `0.0000000000000000e+00` | `0.0000000000000000e+00` | `0` |
+
+   - **`test_traced_o15_step_reverse_mode_matches_central_differences` (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 565–764)**:
      Scans all `1,057` non-zero interior entries across the `7` active input
      fields `("a_i", "v_i", "v_s", "oa_i", "v_ip", "e_i", "szv_i")` on
      `_o15_fixture(monkeypatch, 3, 2)` and also checks `25` individual
      `(in_name, in_idx, out_name, out_idx)` output-entry pairs
      (`O15_OUTPUT_ENTRY_FD_CASES`, `tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py`
-     lines 163–191) where each single output scalar `out_field[out_idx]` is
+     lines 466–492) where each single output scalar `out_field[out_idx]` is
      differentiated and compared against its own central difference with no
      cross-field or cross-category reduction:
      - All `1,007` non-excluded active input entries (and all `25` individual
        output-entry pairs) pass `relative <= 1.0e-6` (`max_rel = 1.145e-7`,
        and `AD_head` vs `AD_parent` at `3dd560f7f05f` matches to `max_rel = 2.619e-15`).
      - `11` entries in `O15_EXACT_ZERO_ENTRIES` (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py`
-       lines 108–120: `a_i[(2,2,0),(2,2,1),(3,2,4)]`, `v_s[(2,2,0),(2,2,1)]`,
-       `oa_i[(2,2,0),(2,2,1),(3,2,4)]`, `v_ip[(2,2,0),(2,2,1),(3,2,4)]`) have
-       exact structural zero (`AD == FD == 0.0` in both HEAD and `3dd560f7f05f`)
-       because those categories are zapsmalled (`v_i <= 1.0e-11 < 1.0e-10`) and
-       `a_i`, `oa_i`, `v_ip` do not enter the residual mass/heat/salt fluxes
-       when `v_s == 0`.
-     - `39` entries in `O15_ZAPSMALL_EXCLUDED_ENTRIES`
-       (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 121–162:
-       `v_i[(2,2,0),(2,2,1),(3,2,4)]`, `v_s[(3,2,4)]`, and `e_i`/`szv_i` layers
-       `0..2` in `(2,2,*,0)`, `(2,2,*,1)`, `(3,2,*,4)`) are in categories
-       zapsmalled by `si3_var_zapsmall` (`v_i <= 1.0e-11 < 1.0e-10`) where the
-       input magnitude is `abs(x0) <= 1.0e-11`, so the relative step
-       `h = 1.0e-4 * abs(x0) <= 1.0e-15` changes `wfx_res`/`hfx_res`/`sfx_res`
-       near the `O(1) - O(1e3)` float64 rounding floor; every one of the `39`
-       entries has `AD_head == AD_parent` and `FD_head == FD_parent` at
-       `3dd560f7f05f` (recorded in `O15_ZAPSMALL_EXCLUDED_PARENT_TABLE`).
-   - **Planted AD failures (`stop_gradient` and `1 + 1e-5` tangent scaling)**:
+       lines 504–518: `a_i[(2,2,0),(2,2,1),(2,3,0),(3,4,0)]` and
+       `oa_i[(2,2,0),(2,2,1),(2,3,0),(2,4,0),(3,2,0),(3,3,0),(3,4,0)]`) have
+       exact structural zero (`AD == FD == 0.0`, `uint64 == 0` in both HEAD and
+       `3dd560f7f05f`) because those categories are zapsmalled (`v_i <= 1.0e-11 < 1.0e-10`)
+       and `ice_var_zapsmall` zeroes `a_i` and `oa_i` without routing them into
+       water/heat/salt conservation fluxes where `a_ip == 0`.
+     - `39` entries in `O15_ZAPSMALL_EXCLUDED_PARENT_TABLE` (and `O15_ZAPSMALL_EXCLUDED_ENTRIES`,
+       `tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 521–562) are in
+       categories zapsmalled by `si3_var_zapsmall` (`v_i <= 1.0e-11 < 1.0e-10`) where
+       the input magnitude is `abs(x0) <= 1.0e-11`, so the relative step
+       `h = 1.0e-4 * abs(x0) <= 1.0e-15` changes `wfx_res`/`hfx_res`/`sfx_res` near
+       the float64 rounding floor; every one of the `39` entries is checked by the test
+       at lines 706–720 for bitwise `uint64` AD equality and exact FD equality (`16e`
+       and `uint64`) against parent `3dd560f7f05f`:
+
+       | # | `(in_name, index)` | `x0` | `AD_head` (`96bb44f0ae`) | `AD_parent` (`3dd560f7f05f`) | `AD_uint64` | `FD_head` (`96bb44f0ae`) | `FD_parent` (`3dd560f7f05f`) | `FD_uint64` |
+       | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+       | `1` | `('a_i', (2, 4, 0))` | `1e-12` | `-1.5969134833187906` | `-1.5969134833187906` | `13833242714995840146` | `-1.1928445391805340e+00` | `-1.1928445391805340e+00` | `13831422950249587104` |
+       | `2` | `('a_i', (3, 2, 0))` | `1e-12` | `-1.3601818920843725` | `-1.3601818920843725` | `13832176570689769996` | `-1.1841214586599635e+00` | `-1.1841214586599635e+00` | `13831383664987405140` |
+       | `3` | `('a_i', (3, 3, 0))` | `1.3999999999999999e-12` | `-1.6111403518142584` | `-1.6111403518142584` | `13833306787115494984` | `-1.3440754603351188e+00` | `-1.3440754603351188e+00` | `13832104033769745789` |
+       | `4` | `('szv_i', (2, 2, 0, 0))` | `9.203541154613764e-13` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.7920272466355937e-02` | `1.7920272466355937e-02` | `4580822388282142871` |
+       | `5` | `('szv_i', (2, 2, 1, 0))` | `1.7509847978974406e-12` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6954683879567663e-02` | `1.6954683879567663e-02` | `4580544076320565087` |
+       | `6` | `('szv_i', (2, 2, 2, 0))` | `3.2365565812017814e-13` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.0191693610668028e-02` | `1.0191693610668028e-02` | `4577028733147105126` |
+       | `7` | `('szv_i', (2, 3, 0, 0))` | `5.700386391579139e-14` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6274880161048874e-02` | `1.6274880161048874e-02` | `4580348136239067084` |
+       | `8` | `('szv_i', (2, 3, 1, 0))` | `1.168778903581845e-13` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6095708171847693e-02` | `1.6095708171847693e-02` | `4580296493429223777` |
+       | `9` | `('szv_i', (2, 3, 2, 0))` | `6.650118822705144e-14` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6275692587254195e-02` | `1.6275692587254195e-02` | `4580348370404977839` |
+       | `10` | `('szv_i', (2, 4, 0, 0))` | `3.157103682105899e-12` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6145195673378777e-02` | `1.6145195673378777e-02` | `4580310757230404890` |
+       | `11` | `('szv_i', (2, 4, 1, 0))` | `1.048120611074301e-12` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6144542613306272e-02` | `1.6144542613306272e-02` | `4580310568998654542` |
+       | `12` | `('szv_i', (3, 2, 0, 0))` | `5.271233943396759e-13` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6133226905047007e-02` | `1.6133226905047007e-02` | `4580307307467806551` |
+       | `13` | `('szv_i', (3, 2, 1, 0))` | `1.6723821968604005e-12` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6148989054869552e-02` | `1.6148989054869552e-02` | `4580311850598178863` |
+       | `14` | `('szv_i', (3, 2, 2, 0))` | `2.1124912319114183e-12` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6145393112562589e-02` | `1.6145393112562589e-02` | `4580310814138375107` |
+       | `15` | `('szv_i', (3, 3, 0, 0))` | `2.747763155990917e-13` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6131276830154022e-02` | `1.6131276830154022e-02` | `4580306745396986622` |
+       | `16` | `('szv_i', (3, 3, 1, 0))` | `3.5155317499204345e-13` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6126913238721348e-02` | `1.6126913238721348e-02` | `4580305487677386610` |
+       | `17` | `('szv_i', (3, 3, 2, 0))` | `1.0510877736488021e-12` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6157197119392463e-02` | `1.6157197119392463e-02` | `4580314216411703779` |
+       | `18` | `('szv_i', (3, 4, 0, 0))` | `4.211957085090081e-13` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6152493780992420e-02` | `1.6152493780992420e-02` | `4580312860766707566` |
+       | `19` | `('szv_i', (3, 4, 1, 0))` | `1.1893969339273605e-13` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6033358314652225e-02` | `1.6033358314652225e-02` | `4580278522306431322` |
+       | `20` | `('szv_i', (3, 4, 2, 0))` | `2.8118972342495787e-13` | `0.016145254201342288` | `0.016145254201342288` | `4580310774099941828` | `1.6129942397149492e-02` | `1.6129942397149492e-02` | `4580306360772859777` |
+       | `21` | `('v_i', (2, 2, 0))` | `7.497709038862792e-13` | `0.08486547647313808` | `0.08486547647313808` | `4590779622714701636` | `8.5274498820328198e-02` | `8.5274498820328198e-02` | `4590809095880947902` |
+       | `22` | `('v_i', (2, 2, 1))` | `1e-11` | `0.08486547647313808` | `0.08486547647313808` | `4590779622714701636` | `8.5180966201768432e-02` | `8.5180966201768432e-02` | `4590802356145490418` |
+       | `23` | `('v_i', (2, 3, 0))` | `5.915295163755829e-14` | `0.08486547647313808` | `0.08486547647313808` | `4590779622714701636` | `8.4728801607131976e-02` | `8.4728801607131976e-02` | `4590769774252691780` |
+       | `24` | `('v_i', (2, 4, 0))` | `1.2249264837930447e-12` | `0.2605453760682258` | `0.2605453760682258` | `4598365188152201790` | `-1.4344312192269018e-02` | `-1.4344312192269018e-02` | `13802794591633459816` |
+       | `25` | `('v_i', (3, 2, 0))` | `9.732754483907965e-13` | `0.23492007647377722` | `0.23492007647377722` | `4597631908041488636` | `3.4002435265856412e-01` | `3.4002435265856412e-01` | `4599796954109625934` |
+       | `26` | `('v_i', (3, 3, 0))` | `6.530684666460284e-13` | `0.23502659082625255` | `0.23502659082625255` | `4597635745625473576` | `1.9470509720113369e+00` | `1.9470509720113369e+00` | `4611447557204668531` |
+       | `27` | `('v_i', (3, 4, 0))` | `1.637735903829609e-13` | `0.08486547647313808` | `0.08486547647313808` | `4590779622714701636` | `8.4778505254865633e-02` | `8.4778505254865633e-02` | `4590773355777962376` |
+       | `28` | `('v_ip', (2, 2, 0))` | `6.865098269936168e-15` | `0.09254686638292048` | `0.09254686638292048` | `4591333125190467772` | `1.5785160010130883e-01` | `1.5785160010130883e-01` | `4594855223549704152` |
+       | `29` | `('v_ip', (2, 3, 0))` | `3.161963887628452e-14` | `0.09254686638292048` | `0.09254686638292048` | `4591333125190467772` | `9.2105871079622481e-02` | `9.2105871079622481e-02` | `4591301348129930092` |
+       | `30` | `('v_ip', (2, 4, 0))` | `6.186910170094338e-15` | `0.09254686638292048` | `0.09254686638292048` | `4591333125190467772` | `9.8524550752353252e-02` | `9.8524550752353252e-02` | `4591763862744047226` |
+       | `31` | `('v_ip', (3, 2, 0))` | `5.728345009025055e-16` | `0.09254686638292048` | `0.09254686638292048` | `4591333125190467772` | `1.1823514743949007e-01` | `1.1823514743949007e-01` | `4593184160918374258` |
+       | `32` | `('v_ip', (3, 3, 0))` | `8.80780742621719e-14` | `0.09254686638292048` | `0.09254686638292048` | `4591333125190467772` | `9.2660577049623633e-02` | `9.2660577049623633e-02` | `4591341318907526850` |
+       | `33` | `('v_ip', (3, 4, 0))` | `1.380442936455338e-14` | `0.09254686638292048` | `0.09254686638292048` | `4591333125190467772` | `9.3220388021572426e-02` | `9.3220388021572426e-02` | `4591381657539281514` |
+       | `34` | `('v_s', (2, 2, 0))` | `1.94732500889082e-13` | `0.030540465906363758` | `0.030540465906363758` | `4584459911384463690` | `3.0606945835850448e-02` | `3.0606945835850448e-02` | `4584479072919546178` |
+       | `35` | `('v_s', (2, 3, 0))` | `7.154584972108825e-15` | `0.030540465906363758` | `0.030540465906363758` | `4584459911384463690` | `2.8399622872605775e-02` | `2.8399622872605775e-02` | `4583842855391561855` |
+       | `36` | `('v_s', (2, 4, 0))` | `1.0216707750938762e-13` | `0.030540465906363758` | `0.030540465906363758` | `4584459911384463690` | `3.0494577831639683e-02` | `3.0494577831639683e-02` | `4584446685047425092` |
+       | `37` | `('v_s', (3, 2, 0))` | `2.5604556586049365e-13` | `0.030540465906363758` | `0.030540465906363758` | `4584459911384463690` | `3.0552059364509693e-02` | `3.0552059364509693e-02` | `4584463252971265992` |
+       | `38` | `('v_s', (3, 3, 0))` | `6.411126668060193e-14` | `0.030540465906363758` | `0.030540465906363758` | `4584459911384463690` | `3.0636518044350049e-02` | `3.0636518044350049e-02` | `4584487596528325655` |
+       | `39` | `('v_s', (3, 4, 0))` | `1.8207948515121027e-14` | `0.030540465906363758` | `0.030540465906363758` | `4584459911384463690` | `2.9758068182755625e-02` | `2.9758068182755625e-02` | `4584234400594287875` |
+
+   - **Planted AD failures (`stop_gradient`, `1 + 1e-5` tangent scaling, and parent-exclusion table edits)**:
      Measured now by running `pytest tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py`
-     under each plant and restoring `packages/`:
+     under each plant and restoring `packages/` (or scratch copies):
      - **Plant 3a (`jax.lax.stop_gradient` on `_scan_layer_temp` carry)**:
        In `packages/ice/legoesm/ice/si3_orca2_state.py` line 1193, replacing
        `return jnp.where(has_vol, acc_next, rt0), None` with
@@ -1418,6 +1483,17 @@ independent review: operator
        `E AssertionError: assert [('tm_i', 'v_...346489), ...] == []`
        `E Left contains 54 more items, first extra item: ('tm_i', 'v_i', (3, 2, 0), 1.3997521885923163, 1.3893957293976973, 0.007398780388346489)`.
        Restored and verified `git status --porcelain` clean on `packages/`.
+     - **Plant 3c (editing one excluded entry's parent value in `VAR_AGG_CELL22_EXCLUDED_PARENT_TABLE` in scratch)**:
+       Copying `tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` to
+       `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch/test_plant_var_agg_parent.py`
+       and editing `("at_ip_eff", "a_i", (2, 2, 0)): (0.17556776050637313, 0.0)`
+       by 1 ULP to `(0.17556776050637316, 0.0)` under:
+       `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python -m pytest /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch/test_plant_var_agg_parent.py -k test_traced_var_agg_kn2_reverse_mode_matches_central_differences -v`
+       fails `test_traced_var_agg_kn2_reverse_mode_matches_central_differences` (`exit=1`):
+       `FAILED ../../../work/si3_d198r5b_scratch/test_plant_var_agg_parent.py::test_traced_var_agg_kn2_reverse_mode_matches_central_differences`
+       `E AssertionError: assert [('at_ip_eff'...0637316, ...)] == []`
+       `E Left contains one more item: ('at_ip_eff', 'a_i', (2, 2, 0), 0.17556776050637313, 0.0, 0.17556776050637316, ...)`.
+       Removed scratch file and verified `git status --porcelain` clean.
      - **Plant 4a (`jax.lax.stop_gradient` on `_si3_loop` carry used by `si3_o15_step`)**:
        In `packages/ice/legoesm/ice/itd.py` line 1165, wrapping the `fori_loop`
        body output with `jax.tree_util.tree_map(jax.lax.stop_gradient, body(idx, val))`
@@ -1438,6 +1514,17 @@ independent review: operator
        `E AssertionError: assert [('a_i', (2, ...156e-05), ...] == []`
        `E Left contains 1038 more items, first extra item: ('a_i', (2, 2, 2), 0.6173553964270941, 0.6173060059866636, 8.000325374387586e-05)`.
        Restored and verified `git status --porcelain` clean on `packages/`.
+     - **Plant 4c (editing one excluded entry's parent value in `O15_ZAPSMALL_EXCLUDED_PARENT_TABLE` in scratch)**:
+       Copying `tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` to
+       `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch/test_plant_o15_parent.py`
+       and editing `("a_i", (2, 4, 0)): (-1.5969134833187906, -1.192844539180534)`
+       to `(-1.5969134833187906, -1.192844539180535)` under:
+       `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python -m pytest /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch/test_plant_o15_parent.py -k test_traced_o15_step_reverse_mode_matches_central_differences -v`
+       fails `test_traced_o15_step_reverse_mode_matches_central_differences` (`exit=1`):
+       `FAILED ../../../work/si3_d198r5b_scratch/test_plant_o15_parent.py::test_traced_o15_step_reverse_mode_matches_central_differences`
+       `E AssertionError: assert [('a_i', (2, ...844539180535)] == []`
+       `E Left contains one more item: ('a_i', (2, 4, 0), -1.5969134833187906, -1.192844539180534, -1.5969134833187906, -1.192844539180535)`.
+       Removed scratch file and verified `git status --porcelain` clean.
 
 4. **Proof 4 — Equation counter updated with historical snapshots kept**:
    Measured now by running:
