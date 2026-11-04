@@ -249,6 +249,73 @@ def fold_perm_u(fold):
     return fold.perm_T if p is None else p
 
 
+def fold_pivot_half_row(a, fold, stagger, *, scalar_sign=1.0):
+    """NEMO's T-pivot ``lbc_nfd`` on the stored pivot row (last row of ``a``):
+    the right half becomes the image of the left half of the SAME row.
+
+    ``stagger='T'`` (lbcnfd.f90:624-628): native cells N/2+1..N-1 <- N/2-1..1,
+    with ``scalar_sign`` (normally +1 for T, -1 for W).  ``stagger='U'``
+    (lbcnfd.f90:669-673; compact U, column 0 the
+    periodic closure): native U N/2..N-1 <- N/2-1..0 with the U vector sign,
+    and column 0 then repeats native U N-1.
+    """
+    n_lon = fold.perm_T.shape[0]
+    half = n_lon // 2
+    if stagger == "T":
+        image = a[-1][fold.perm_T[half + 1:]]
+        # Static sign; +1 keeps the pre-sign program (no multiply equation).
+        return a.at[-1, half + 1:].set(
+            image if scalar_sign == 1.0 else scalar_sign * image)
+    if stagger != "U":
+        raise ValueError(f"unknown pivot half-row stagger: {stagger!r}")
+    perm = fold_perm_u(fold)[half:]
+    out = a.at[-1, half + 1:].set(fold.vector_sign_u * a[-1, 1:][perm])
+    return out.at[-1, 0].set(fold.vector_sign_u * a[-1, 1])
+
+
+def north_neighbor_T(
+    interior, grid, pivot_ghost: bool = True, *, rolled=None,
+):
+    """T-point value immediately north, including a stored ORCA T-pivot.
+
+    The last row is the north ghost of the pivot row.  On a de-haloed
+    T-pivot mesh NEMO sources it from the row below the pivot and applies the
+    shared T permutation (``lbcnfd.f90:584-590``).  With ``pivot_ghost=False``
+    the final neighbour is the mirrored top row itself, the legacy BBL
+    geometry convention; a regular grid simply repeats its last row.  The
+    default fold-ghost arm deliberately
+    refuses non-local/no-fold grids: callers select it only for an executed
+    north-fold branch and retain their historical wall/roll path otherwise.
+    """
+    fold = getattr(grid, "fold", None)
+    if rolled is not None:
+        if not pivot_ghost:
+            raise ValueError("a supplied rolled neighbour requires pivot_ghost=True")
+        source = fold_ghost_source_T(interior, fold)[0]
+        folded = source[fold.perm_T]
+        if fold_is_local(grid):
+            return rolled.at[-1].set(folded)
+        nmask = north_fold_mask(grid)
+        if nmask is not None:
+            selector = nmask
+            while selector.ndim < folded.ndim:
+                selector = selector[..., None]
+            return rolled.at[-1].set(
+                jnp.where(selector, folded, rolled[-1]))
+        return rolled
+    if not pivot_ghost:
+        north = jnp.concatenate([interior[1:], interior[-1:]], axis=0)
+        if fold is not None and bool(getattr(fold, "is_active", False)):
+            north = north.at[-1].set(interior[-1, fold.perm_T])
+        return north
+    if not (fold_is_local(grid)
+            and bool(getattr(fold, "pivot_row_stored", False))):
+        raise ValueError(
+            "north_neighbor_T requires a locally stored active T-pivot fold")
+    ghost = fold_ghost_source_T(interior, fold)[:, fold.perm_T]
+    return jnp.concatenate([interior[1:], ghost], axis=0)
+
+
 def fold_perm_f(fold):
     """F/vertex-stagger fold permutation (falls back to perm_v)."""
     p = getattr(fold, "perm_f", None)
@@ -1521,13 +1588,14 @@ def vector_laplacian_cgrid(
     """
     # Native 2D and 3D — all underlying operators (``divergence_cgrid``,
     # ``gradient_*_cgrid``, ``curl_vertex_cgrid``, ``_gradient_curl_to_*``)
-    # natively support 3D inputs.  Masks remain 2D and broadcast over
-    # the trailing level axis when present.
+    # natively support 3D inputs.  2D masks broadcast over the trailing
+    # level axis; 3D (per-level) masks are applied level by level.
     is_3d = u.ndim == 3
 
     def _bcast(m, like):
-        # Broadcast 2D ``m`` over trailing axes of ``like``.
-        return m[..., jnp.newaxis] if is_3d else m
+        # Broadcast a 2D ``m`` over the trailing level axis of ``like``; a
+        # per-level (3D) mask already carries that axis and is used as is.
+        return m[..., jnp.newaxis] if is_3d and m.ndim == like.ndim - 1 else m
 
     # Apply face masks before computing div and curl
     u_eff = u if u_mask is None else u * _bcast(u_mask, u)
@@ -1607,12 +1675,13 @@ def compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
         pad_with_pole_bc_lat,
         zero_polar_lat_ends,
     )
-    if land_mask.ndim != 2:
-        # Preserve the previous implicit 2D contract (it unpacked
-        # ``m.shape`` into two names).
+    if land_mask.ndim not in (2, 3):
+        # 2D (n_lat, n_lon), or 3D (n_lat, n_lon, nlev) per-level masks: every
+        # step below acts on axes 0/1 only, so all levels share ONE pad / halo
+        # exchange (no vmap over a halo exchange).
         raise ValueError(
-            f"compute_vertex_mask: land_mask must be 2D (n_lat, n_lon), "
-            f"got ndim={land_mask.ndim}"
+            f"compute_vertex_mask: land_mask must be 2D (n_lat, n_lon) or 3D "
+            f"(n_lat, n_lon, nlev), got ndim={land_mask.ndim}"
         )
     # Vertex (i, j) is surrounded by cells (i-1, j-1), (i-1, j),
     # (i, j-1), (i, j); with the lat pad, rows i-1 / i of the global
@@ -1645,6 +1714,7 @@ def compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
         vtx_open = jnp.ones((full.shape[0],), dtype=full.dtype)  # (n_lat+1,)
         vtx_open = vtx_open.at[1:].multiply(open_face)   # cell row j -> vtx j+1
         vtx_open = vtx_open.at[:-1].multiply(open_face)  # cell row j -> vtx j
+        vtx_open = vtx_open.reshape(vtx_open.shape + (1,) * (full.ndim - 2))
         full = full.at[:, 0].multiply(vtx_open)
         full = full.at[:, -1].multiply(vtx_open)
     nmask = north_fold_mask(grid)

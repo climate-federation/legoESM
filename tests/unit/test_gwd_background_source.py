@@ -204,7 +204,8 @@ def test_calm_column_gradient_is_finite():
     assert np.all(np.isfinite(np.asarray(g)))
     for src, kwargs in (("orographic", {"h_topo_col": jnp.full((3,), 100.0)}),
                         ("convective", {"netdt_col": jnp.zeros_like(u)})):
-        cfg = BG._replace(source=src)
+        cfg = BG._replace(source=src,
+                          beres=BG.beres._replace(use_stand_in_table=True))   # explicit stand-in
 
         def loss_src(uu, cfg=cfg, kwargs=kwargs):
             out = e3sm_cam_gwd(uu, calm, T, pf, ph, zf, zh, rho, lat, DT, cfg,

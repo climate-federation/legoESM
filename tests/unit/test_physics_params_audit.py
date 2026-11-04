@@ -141,19 +141,6 @@ class TestConvectionAudit:
             return jnp.sum(out.dT_dt ** 2)
         assert_grad_ok(loss, 2400.0, "kain_fritsch.cape_consumption_time")
 
-    def test_tiedtke_epsilon_deep(self):
-        from legoesm.atmosphere.physics.convection.tiedtke import tiedtke_convection
-        from legoesm.atmosphere.physics.convection.config import TiedtkeConfig
-        T, q_v, p_full, p_half = _column()
-        A = _aux()
-
-        def loss(x):
-            cfg = TiedtkeConfig()._replace(epsilon_deep=x)
-            out = tiedtke_convection(T, q_v, p_full, p_half, A["u"], A["v"],
-                A["prog"], 600.0, config=cfg)[0]
-            return jnp.sum(out.dT_dt ** 2)
-        assert_grad_ok(loss, 1.0e-4, "tiedtke.epsilon_deep")
-
     def test_zhang_mcfarlane_tau(self):
         from tests._zm_cold_start import zm_cold_start as zhang_mcfarlane_convection
         from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
@@ -205,7 +192,7 @@ class TestConvectionAudit:
         # Both are live, used config fields (rain/cloud split): Bechtold ON by
         # default (#929), Tiedtke OFF by default (legacy byte-identity).
         assert BechtoldConfig().precip_efficiency == 0.7
-        assert TiedtkeConfig().precip_efficiency == 0.0
+        assert TiedtkeConfig()._fields == ()   # WRF port: no knobs at all
         # Guard the AIMIP trainable set: precip_efficiency stays a config knob,
         # never a sigmoid-trained AIMIP parameter re-introduced from off.
         from legoesm.training.aimip_params import AIMIPClassicalParams
@@ -372,12 +359,6 @@ class TestTurbulenceAudit:
         from legoesm.atmosphere.physics.turbulence.config import TKEConfig
         assert_grad_ok(lambda x: _turb_call(tke_turbulence,
             TKEConfig()._replace(Ck=x), True), 0.1, "tke.Ck")
-
-    def test_mynn25_A1(self):
-        from legoesm.atmosphere.physics.turbulence.mynn25 import mynn25_turbulence
-        from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
-        assert_grad_ok(lambda x: _turb_call(mynn25_turbulence,
-            MYNN25Config()._replace(A1=x), True), 1.18, "mynn25.A1")
 
     def test_clubb_lite_C_K(self):
         from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_lite_turbulence

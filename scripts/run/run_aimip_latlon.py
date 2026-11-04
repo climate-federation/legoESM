@@ -258,7 +258,7 @@ def _parse_windows(spec: str):
 
 def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
                       era5_zarr=None, microphysics="none", turbulence="none",
-                      multi_step_hours=(), grid_kind="latlon",
+                      convection="none", multi_step_hours=(), grid_kind="latlon",
                       ice_skin_prognostic=False):
     """Build (initial_carries, target_carries, forcings) on the model grid.
 
@@ -281,7 +281,8 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
     era5_terrain_product,
 )
 
-    def _to_carry(era5, grid_or_mesh, sigma_, microphysics_, turbulence_):
+    def _to_carry(era5, grid_or_mesh, sigma_, microphysics_, turbulence_,
+                  convection_="none"):
         """ERA5 slice -> SegmentCarry on whichever horizontal grid is in use.
 
         The two converters do NOT take the same arguments.
@@ -314,6 +315,7 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
             era5, grid_or_mesh, sigma_,
             target_phis=era5_terrain_product(era5, grid_or_mesh),
             microphysics=microphysics_, turbulence=turbulence_,
+            convection=convection_,
             ice_skin_prognostic=ice_skin_prognostic,
         )
 
@@ -369,7 +371,8 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
         for s in range(n_ics + max_stride):
             tidx = start + s
             era5 = load_era5_slice(era5_cfg, tidx, ds=ds, flux_ds=flux_ds)
-            block[s] = (_to_carry(era5, grid, sigma, microphysics, turbulence),
+            block[s] = (_to_carry(era5, grid, sigma, microphysics, turbulence,
+                                  convection),
                         era5, tidx)
         for d in range(n_ics):
             ic_carry, ic_era5, ic_tidx = block[d]
@@ -879,6 +882,7 @@ def main(argv=None):
         rollout_hours=_ROLLOUT_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
+        convection=args.convection,
         ice_skin_prognostic=config.ice_skin_prognostic,
         multi_step_hours=tuple(args.multi_step_hours),
     )
@@ -889,6 +893,7 @@ def main(argv=None):
         rollout_hours=_EVAL_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
+        convection=args.convection,
         ice_skin_prognostic=config.ice_skin_prognostic,
     )
 

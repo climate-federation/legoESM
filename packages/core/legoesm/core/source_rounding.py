@@ -27,4 +27,36 @@ def nemo_source_round(value: jax.Array) -> jax.Array:
     )
 
 
-__all__ = ("nemo_source_round",)
+def nemo_source_barrier(value: jax.Array) -> jax.Array:
+    """Prevent XLA from rewriting one source operand before an FP operation."""
+    return jax.lax.optimization_barrier(jnp.asarray(value))
+
+
+def nemo_fortran_sign(magnitude: jax.Array, sign_source: jax.Array) -> jax.Array:
+    """NEMO record-build ``SIGN`` semantics, including ``-0``.
+
+    The record build defines ``SIGN(a, b)`` in ``lib_fortran`` using
+    ``b >= 0``.  Therefore both ``+0`` and ``-0`` select ``ABS(a)``; this is
+    deliberately different from :func:`jax.numpy.copysign` for ``b == -0``.
+    """
+    magnitude = jnp.abs(magnitude)
+    return jnp.where(sign_source >= 0.0, magnitude, -magnitude)
+
+
+def nemo_fortran_max(first: jax.Array, second: jax.Array) -> jax.Array:
+    """Record-object ``MAXSD`` ordering: the second operand wins a tie."""
+    return jnp.where(first > second, first, second)
+
+
+def nemo_fortran_min(first: jax.Array, second: jax.Array) -> jax.Array:
+    """Record-object ``MINSD`` ordering: the second operand wins a tie."""
+    return jnp.where(first < second, first, second)
+
+
+__all__ = (
+    "nemo_fortran_max",
+    "nemo_fortran_min",
+    "nemo_fortran_sign",
+    "nemo_source_barrier",
+    "nemo_source_round",
+)

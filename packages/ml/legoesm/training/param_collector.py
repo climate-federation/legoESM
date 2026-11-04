@@ -85,6 +85,8 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.atmosphere.physics.microphysics.config",
     "legoesm.atmosphere.physics.microphysics.sdm.config",
     "legoesm.atmosphere.physics.microphysics.fast_sbm.config",
+    "legoesm.atmosphere.physics.microphysics.ifs_cloudsc",
+    "legoesm.atmosphere.physics.radiation.ecrad_ifs.config",
     "legoesm.atmosphere.physics.microphysics.aerosol_activation",
     "legoesm.atmosphere.physics.microphysics.arg_activation",
     "legoesm.atmosphere.physics.microphysics.prognostic_aerosol",
@@ -107,7 +109,7 @@ class ParamMeta(NamedTuple):
     field: str                   # NamedTuple field name
     module: str                  # dotted module path
     config_class: str
-    default: float
+    default: float | None        # None only for an explicit_only parameter
     bounds: tuple                # (lo, hi) scalar, or (lo_tuple, hi_tuple)
     tunable_tier: int
     transform: str
@@ -116,6 +118,7 @@ class ParamMeta(NamedTuple):
     reference: str
     shape_key: str | None        # dimension key for array params (else None)
     legacy_name: str | None
+    explicit_only: bool = False  # never tier-selected; needs include + init value
 
 
 def _load_spec(module_path: str):
@@ -183,6 +186,11 @@ def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
                         f"{module_path}.{cls_name}.{field} is in __param_spec__ but is "
                         f"not a defaulted NamedTuple field"
                     )
+                explicit_only = bool(p.get("explicit_only", False))
+                if defaults[field] is None and not explicit_only:
+                    raise ValueError(
+                        f"{module_path}.{cls_name}.{field} has no library default; "
+                        f"spec it explicit_only so a run must give its start value")
                 out.append(
                     ParamMeta(
                         scheme_key=scheme_key,
@@ -190,7 +198,8 @@ def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
                         field=field,
                         module=module_path,
                         config_class=cls_name,
-                        default=float(defaults[field]),
+                        default=(None if defaults[field] is None
+                                 else float(defaults[field])),
                         bounds=tuple(p["bounds"]),
                         tunable_tier=int(p["tunable_tier"]),
                         transform=p["transform"],
@@ -199,6 +208,7 @@ def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
                         reference=p["reference"],
                         shape_key=p.get("shape"),
                         legacy_name=p.get("legacy_name"),
+                        explicit_only=explicit_only,
                     )
                 )
     return out
@@ -416,6 +426,22 @@ def build_trainable_params(
             "and excluded; "
             "an excluded parameter has no gradient and cannot be trained.")
 
+    # An explicit_only parameter is trained only when named WITH its start
+    # value; check every such request before any skip can drop it silently.
+    for name in include:
+        meta = by_name[name]
+        if not meta.explicit_only:
+            continue
+        if init_values is None or name not in init_values:
+            raise ValueError(
+                f"{name!r} is explicit_only: pass its start value in "
+                f"init_values alongside include")
+        if name in exclude_set or (active_scheme_keys is not None
+                                   and meta.scheme_key not in active_scheme_keys):
+            raise ValueError(
+                f"{name!r} is explicitly requested but not reachable: it is "
+                f"excluded or its scheme {meta.scheme_key!r} is not active")
+
     raw: dict[str, jax.Array] = {}
     constraints: list[ParamConstraint] = []
     for meta in registry:
@@ -423,7 +449,10 @@ def build_trainable_params(
             continue
         if meta.qualified_name in exclude_set:
             continue
-        selected = (1 <= meta.tunable_tier <= level) or (meta.qualified_name in include_set)
+        if meta.explicit_only and meta.qualified_name not in include_set:
+            continue  # a tier threshold never reaches it
+        selected = ((1 <= meta.tunable_tier <= level and not meta.explicit_only)
+                    or (meta.qualified_name in include_set))
         if meta.tunable_tier == 0:
             # tier 0 is fixed for GRADIENT training and cannot be reached via
             # `include`; only the explicit derivative-free opt-in admits it.
@@ -489,3 +518,20 @@ def build_trainable_params(
                 f"parameter: the name is not in the registry, its scheme is "
                 f"not active, or its tier is outside this selection.")
     return TrainablePhysicsParams(raw_values=raw, constraints=constraints)
+
+
+def build_orca2_rung10_trainable_params(**kwargs) -> TrainablePhysicsParams:
+    """:func:`build_trainable_params` for the ORCA2 rung-10 card: the card's
+    frozen parameters (DECISION 149) are always excluded, and naming one in
+    ``include``/``include_tier0``/``init_values`` is refused."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import ORCA2_RUNG10_FROZEN_PARAMS
+
+    frozen = set(ORCA2_RUNG10_FROZEN_PARAMS)
+    asked = (set(kwargs.get("include", ())) | set(kwargs.get("include_tier0", ()))
+             | set(kwargs.get("init_values") or ()))
+    if asked & frozen:
+        raise ValueError(
+            f"{sorted(asked & frozen)} frozen on ORCA2 rung 10: "
+            f"{[ORCA2_RUNG10_FROZEN_PARAMS[n] for n in sorted(asked & frozen)]}")
+    kwargs["exclude"] = tuple(kwargs.get("exclude", ())) + tuple(sorted(frozen))
+    return build_trainable_params(**kwargs)
