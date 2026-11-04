@@ -24,6 +24,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import numpy as np
 
 _SUNDQ = dict(rh_crit=0.85, q_c_diagnostic=5.0e-6)
+_CAM6_CLUBB_TOP_PA = 15000.0    # spectral_t63_cam6.yaml clubb_top_press_hpa: 150
 # setup -> (cloud scheme, n_subcolumns, CloudConfig overrides)
 SETUPS = {
     "sundqvist_n8": ("sundqvist", 8, _SUNDQ),
@@ -78,7 +79,9 @@ def solve(cols, setup):
     a = {k: jnp.asarray(v) for k, v in cols.items() if k != "cloud_fraction"}
     extra = {}
     if scheme == "cam6_clubb":    # the CLUBB cover the lane would hand over
+        from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
         extra["cloud_fraction_override"] = jnp.asarray(cols["cloud_fraction"])
+        extra["clubb_config"] = CLUBBConfig(trop_cloud_top_press=_CAM6_CLUBB_TOP_PA)
     out = rad_int._call_radiation_backend(
         cfg, rrtmgp_solver=RRTMGP.from_legoesm_config(cfg.rrtmgp), **a, **extra)
     sw_up, sw_dn = np.asarray(out.sw_flux_up), np.asarray(out.sw_flux_down)
