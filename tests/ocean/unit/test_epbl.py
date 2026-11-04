@@ -949,7 +949,7 @@ def test_k_profile_fallback_forwards_the_eos_to_epbl(monkeypatch):
     vm = VerticalMixingConfig(scheme="epbl", epbl=EPBLConfig(dt_s=1200.0))
     with pytest.raises(StopIteration):
         k_profiles._vmix_K_profiles(scm.state, scm.z_coord, None, vm,
-                                    eos_fn=eos, lat_deg=40.0)
+                                    eos_fn=eos, lat_deg=40.0, dt_tke=1200.0)
     assert seen == [eos]
 
 
@@ -1388,7 +1388,8 @@ def _windy_forcing(state):
     from types import SimpleNamespace
     shape = state.T.data.shape[:-1]
     return SimpleNamespace(tau_x=jnp.full(shape, 0.1), tau_y=jnp.zeros(shape),
-                           q_net=jnp.full(shape, -100.0), freshwater=None)
+                           q_net=jnp.full(shape, -100.0),
+                           freshwater=jnp.zeros(shape))
 
 
 def test_k_profiles_epbl_uses_dt_tke_not_dt_s():
@@ -1450,7 +1451,7 @@ def test_latlon_model_passes_step_dt_to_epbl(monkeypatch, convection):
         dt_s=1800.0, convection=convection)
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     seen = _record_epbl_dt(monkeypatch)
-    new = model.step(state, 900.0)
+    new = model.step(state, 900.0, surface_forcing=_windy_forcing(state))
     jax.block_until_ready(new)
     assert seen and all(d == 900.0 for d in seen)
     assert np.all(np.isfinite(np.asarray(new.T.data)))
@@ -1467,10 +1468,12 @@ def test_latlon_leapfrog_passes_euler_start_then_two_dt_to_epbl(monkeypatch):
         coriolis_scheme="explicit_ab2", vorticity_scheme="een_total")
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     seen = _record_epbl_dt(monkeypatch)
-    s1 = jax.block_until_ready(model.step(state, 900.0))
+    forcing = _windy_forcing(state)
+    s1 = jax.block_until_ready(
+        model.step(state, 900.0, surface_forcing=forcing))
     first = list(seen)
     seen.clear()
-    jax.block_until_ready(model.step(s1, 900.0))
+    jax.block_until_ready(model.step(s1, 900.0, surface_forcing=forcing))
     assert first and all(d == 900.0 for d in first)
     assert seen and all(d == 1800.0 for d in seen)
 
