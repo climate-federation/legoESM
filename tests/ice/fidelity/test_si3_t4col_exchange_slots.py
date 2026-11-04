@@ -88,7 +88,7 @@ def test_zdf_hfx_dif_and_err_match_nemo():
     zr = bl._si3_zdf_bl99_step(*args[:6], args[6], dt(FX), K)
     st = bl.SI3ColumnArrays(jnp.asarray(col(FX, "zdf:in:a_i")), args[3], args[4], args[5],
                             args[0], args[1], jnp.zeros_like(args[3]), args[2], jnp.zeros_like(args[3]))
-    fx = bl._zdf_exchange_fluxes(st, zr, args[6], dt(FX), K)
+    fx = bl._zdf_exchange_fluxes(st, zr, args[6], dt(FX), K, err_blend_width=0.0)
     for f in ("hfx_dif", "hfx_err_dif"):
         acc = col(FX, f"zdf:in:{f}") + np.asarray(getattr(fx, f))
         # hfx_err_dif is a residual (~1e-10 W m-2): score it absolutely against NEMO's own size.
@@ -141,7 +141,8 @@ def test_sal_bounds_and_do_slots_close_the_salt_and_mass_budget():
     z = jnp.zeros(4)
     pre = bl.SI3ColumnArrays(a, h, z, z + 250.0, jnp.zeros((4, 3)), jnp.zeros((4, 3)), S,
                              jnp.stack([S] * 3, -1), z)
-    fz = forcing(4, t_bottom=z + 271.2, sss=z + 34.0, qlead=jnp.asarray([0.0, 0.0, -2e6, -1e6]))
+    extra = {"sst": z + 271.2 - K.T0} if "sst" in bl.SI3SurfaceForcing._fields else {}   # stacked C5 slot
+    fz = forcing(4, t_bottom=z + 271.2, sss=z + 34.0, qlead=jnp.asarray([0.0, 0.0, -2e6, -1e6]), **extra)
     S1, _, fx = bl._sal_step(pre, fz, 14400.0, K)
     assert float(jnp.abs(fx.sfx_res[:2]).min()) > 0
     ds = K.rho_ice * a * h * (S1 - S) / 14400.0
@@ -151,3 +152,20 @@ def test_sal_bounds_and_do_slots_close_the_salt_and_mass_budget():
     dv = K.rho_ice * (d.concentration * d.h_ice - tr.post_temp2.concentration * tr.post_temp2.h_ice) / 14400.0
     assert float(jnp.abs(tr.fluxes.wfx_opw[2:]).min()) > 0
     np.testing.assert_allclose(np.asarray(dv), -np.asarray(tr.fluxes.wfx_opw), rtol=1e-12, atol=1e-18)
+
+
+def test_hfx_err_dif_blend_is_smooth_and_hard_mode_is_nemo():
+    from si3_t4col_fixture import forcing
+    T = K.T0 - jnp.asarray([0.02, 0.008, 0.005, 0.002, 0.0])
+    n = T.shape[0]
+    z = jnp.zeros(n)
+    zr = bl.SI3ZDFResult(T, jnp.zeros((n, 3)), jnp.zeros((n, 3)), jnp.zeros((n, 3)), jnp.zeros((n, 3)),
+                         z + 10.0, z, z + 3.0, z, jnp.zeros(n, jnp.int32))
+    st = bl.SI3ColumnArrays(z + 1.0, z + 1.0, z, T, jnp.zeros((n, 3)), jnp.zeros((n, 3)), z, jnp.zeros((n, 3)), z)
+    fz = forcing(n, qns_ice=z + 10.0, qsr_ice=z + 5.0)
+    hard = bl._zdf_exchange_fluxes(st, zr, fz, 14400.0, K, err_blend_width=0.0).hfx_err_dif
+    soft = bl._zdf_exchange_fluxes(st, zr, fz, 14400.0, K).hfx_err_dif
+    np.testing.assert_array_equal(np.asarray(hard), [15.0, 15.0, 15.0, 15.0, 3.0])
+    assert float(soft[0]) == 15.0 and float(soft[-1]) == 3.0 and 3.0 < float(soft[2]) < 15.0
+    g = jax.grad(lambda t: jnp.sum(bl._zdf_exchange_fluxes(st, zr._replace(T_surface=t), fz, 14400.0, K).hfx_err_dif))(T)
+    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g[2])) > 0

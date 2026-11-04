@@ -13,6 +13,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from legoesm.core.smooth import smoothstep_cubic
 from legoesm.ice.constants_config import IceConstantsConfig
 from legoesm.ice.snow import snow_ice_flooding
 from legoesm.timestepping.tridiagonal import thomas_solve
@@ -168,6 +169,10 @@ _OPTION2_UPPER_TRANSITION = 4.5
 _OPTION2_LAYER_SHAPE = (1.0 / 3.0, 1.0, 5.0 / 3.0)
 _NEW_ICE_THICKNESS = 0.05
 _MAXIMUM_ICE_CONCENTRATION = 0.99999
+# --- RULE 5 smoothing (user standing rule, 2026-11-04) ---
+# Width [K] of the one-sided C1 blend of hfx_err_dif's two NEMO formulas
+# below T0 (T_su < rt0 vs T_su = rt0); 0.0 = NEMO's hard branch.
+_ERR_DIF_BLEND_WIDTH_K = 0.01
 
 
 # Compatibility constants for the public functions exposed by the parked
@@ -1182,12 +1187,14 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
 
 def _zdf_exchange_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                          forcing: SI3SurfaceForcing, dt: float,
-                         constants: IceConstantsConfig) -> SI3ExchangeFluxes:
+                         constants: IceConstantsConfig, *,
+                         err_blend_width: float = _ERR_DIF_BLEND_WIDTH_K,
+                         ) -> SI3ExchangeFluxes:
     """hfx_dif / hfx_err_dif of one BL99 call (`icethd_zdf_bl99.F90:768-830`).
 
-    Resolved arm k_cnd = np_cnd_OFF.  The T_su < rt0 split is NEMO's own
-    diagnostic branch and uses the same melting predicate as the dh qml
-    switch; neither value feeds back into the prognostic state.
+    Resolved arm k_cnd = np_cnd_OFF.  NEMO's T_su < rt0 / T_su = rt0 split of
+    the diagnostic is a C1 blend over ``err_blend_width`` [K] below T0
+    (0.0 = hard); it never feeds back into the prognostic state.
     """
 
     a = state.concentration
@@ -1198,10 +1205,14 @@ def _zdf_exchange_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
 
     zdq = content(zdf.e_ice, zdf.e_snow) - content(state.e_ice, state.e_snow)
     qns_initial = forcing.qns_ice
-    err = jnp.where(
-        zdf.T_surface < constants.T0,
-        zdf.qns_ice + forcing.qsr_ice,
-        zdf.qcn_ice_top + forcing.qtr_ice_top,
+    if err_blend_width == 0:
+        melting = (zdf.T_surface >= constants.T0).astype(zdf.T_surface.dtype)
+    else:
+        melting = smoothstep_cubic(
+            (zdf.T_surface - constants.T0 + err_blend_width) / err_blend_width)
+    err = (
+        (1.0 - melting) * (zdf.qns_ice + forcing.qsr_ice)
+        + melting * (zdf.qcn_ice_top + forcing.qtr_ice_top)
     ) - zdf.qtr_ice_bottom - zdf.qcn_ice_bottom + zdq / dt
     return _zero_fluxes(a)._replace(
         hfx_dif=-zdq / dt * a,
