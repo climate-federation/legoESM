@@ -112,3 +112,8 @@ class TurbulenceOutput(NamedTuple):
     relvar: jax.Array | None = None
     Kh_iface: jax.Array | None = None
     wp2_iface: jax.Array | None = None
+    # CLOUD ICE tendency [kg/kg/s], (ncol, nlev): WRF MYNN-EDMF's ``dqi``
+    # (turbulence=mynn25 on a lane with an ice tracer).  None otherwise; a lane
+    # that cannot route a non-None value must refuse (it would destroy ice).
+    # Appended LAST (positional ABI).
+    dq_i_dt: jax.Array | None = None

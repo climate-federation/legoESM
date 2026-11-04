@@ -1,0 +1,15 @@
+! Write-only stage dump used by the instrumented CLOUDSC copy (instrument_cloudsc.py):
+! appends JK (int32) then N fp64 values to $CLOUDSC_DUMP_DIR/<TAG>.bin.
+SUBROUTINE SDUMP(TAG, JK, A, N)
+  IMPLICIT NONE
+  CHARACTER(LEN=*), INTENT(IN) :: TAG
+  INTEGER, INTENT(IN) :: JK, N
+  REAL(KIND=8), INTENT(IN) :: A(N)
+  CHARACTER(LEN=512) :: D
+  INTEGER :: U
+  CALL GET_ENVIRONMENT_VARIABLE('CLOUDSC_DUMP_DIR', D)
+  OPEN(NEWUNIT=U, FILE=TRIM(D)//'/'//TAG//'.bin', ACCESS='STREAM', FORM='UNFORMATTED', &
+     & POSITION='APPEND', STATUS='UNKNOWN', ACTION='WRITE')
+  WRITE(U) JK, A
+  CLOSE(U)
+END SUBROUTINE SDUMP

@@ -1588,13 +1588,14 @@ def vector_laplacian_cgrid(
     """
     # Native 2D and 3D — all underlying operators (``divergence_cgrid``,
     # ``gradient_*_cgrid``, ``curl_vertex_cgrid``, ``_gradient_curl_to_*``)
-    # natively support 3D inputs.  Masks remain 2D and broadcast over
-    # the trailing level axis when present.
+    # natively support 3D inputs.  2D masks broadcast over the trailing
+    # level axis; 3D (per-level) masks are applied level by level.
     is_3d = u.ndim == 3
 
     def _bcast(m, like):
-        # Broadcast 2D ``m`` over trailing axes of ``like``.
-        return m[..., jnp.newaxis] if is_3d else m
+        # Broadcast a 2D ``m`` over the trailing level axis of ``like``; a
+        # per-level (3D) mask already carries that axis and is used as is.
+        return m[..., jnp.newaxis] if is_3d and m.ndim == like.ndim - 1 else m
 
     # Apply face masks before computing div and curl
     u_eff = u if u_mask is None else u * _bcast(u_mask, u)
@@ -1674,12 +1675,13 @@ def compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
         pad_with_pole_bc_lat,
         zero_polar_lat_ends,
     )
-    if land_mask.ndim != 2:
-        # Preserve the previous implicit 2D contract (it unpacked
-        # ``m.shape`` into two names).
+    if land_mask.ndim not in (2, 3):
+        # 2D (n_lat, n_lon), or 3D (n_lat, n_lon, nlev) per-level masks: every
+        # step below acts on axes 0/1 only, so all levels share ONE pad / halo
+        # exchange (no vmap over a halo exchange).
         raise ValueError(
-            f"compute_vertex_mask: land_mask must be 2D (n_lat, n_lon), "
-            f"got ndim={land_mask.ndim}"
+            f"compute_vertex_mask: land_mask must be 2D (n_lat, n_lon) or 3D "
+            f"(n_lat, n_lon, nlev), got ndim={land_mask.ndim}"
         )
     # Vertex (i, j) is surrounded by cells (i-1, j-1), (i-1, j),
     # (i, j-1), (i, j); with the lat pad, rows i-1 / i of the global
@@ -1712,6 +1714,7 @@ def compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
         vtx_open = jnp.ones((full.shape[0],), dtype=full.dtype)  # (n_lat+1,)
         vtx_open = vtx_open.at[1:].multiply(open_face)   # cell row j -> vtx j+1
         vtx_open = vtx_open.at[:-1].multiply(open_face)  # cell row j -> vtx j
+        vtx_open = vtx_open.reshape(vtx_open.shape + (1,) * (full.ndim - 2))
         full = full.at[:, 0].multiply(vtx_open)
         full = full.at[:, -1].multiply(vtx_open)
     nmask = north_fold_mask(grid)
