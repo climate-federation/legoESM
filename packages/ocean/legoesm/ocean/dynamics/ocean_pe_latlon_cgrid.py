@@ -5000,7 +5000,7 @@ def _bc_external_surface_forcing(
                 # cells), so the column integrates to q_net.
                 _inv_rho_csw_h0 = 1.0 / (
                     jnp.asarray(rho_0, dtype=T.dtype)
-                    * jnp.asarray(_c_sw, dtype=T.dtype)
+                    * jnp.asarray(_heat_capacity, dtype=T.dtype)
                     * jnp.maximum(jnp.asarray(h_k[..., 0], dtype=T.dtype), 1e-10))
                 dT_target = dT_target.at[..., 0].add(
                     q_nonsolar * _inv_rho_csw_h0 * mask
@@ -5009,7 +5009,7 @@ def _bc_external_surface_forcing(
                 sw_tend = apply_shortwave_penetration(
                     _sw_cfg, sw_absorbed,
                     chl=jnp.asarray(_sf_chl, dtype=T.dtype),
-                    dz_live=h_k, wet_cell=wet_cell, rho_0=float(rho_0),
+                    dz_live=h_k, wet_cell=wet_cell, rho_0=float(rho_0), c_sw=_heat_capacity,
                 )
                 dT_target = dT_target + sw_tend * mask_3d
             elif shortwave_scheme == "jerlov_2band" and _sf_sw is not None:
@@ -5032,7 +5032,7 @@ def _bc_external_surface_forcing(
                 # seabed remainder goes to the deepest wet cell.
                 sw_tend = shortwave_penetration_tendency(
                     sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref, J, _sw_cfg,
-                    rho_0=float(rho_0), dz_live=h_k,
+                    rho_0=float(rho_0), c_sw=_heat_capacity, dz_live=h_k,
                 )
                 dT_target = dT_target + sw_tend * mask_3d
             elif _sf_sw is not None and _sf_chl is not None:
@@ -5070,7 +5070,7 @@ def _bc_external_surface_forcing(
                         gdepw_ref=-jnp.asarray(
                             z_coord.z_half_ref, dtype=T.dtype),
                         e3t_ref=jnp.asarray(z_coord.dz_ref, dtype=T.dtype),
-                        rho_0=float(rho_0),
+                        rho_0=float(rho_0), c_sw=_heat_capacity,
                     )
                     dT_target = dT_target + sw_tend * mask_3d
                 # On the NEMO RGB selector the shared physics pipeline owns
@@ -5102,7 +5102,7 @@ def _bc_external_surface_forcing(
                         z_coord.dz_ref,
                         z_coord.z_half_ref,
                         J,
-                        rho_0=float(rho_0),
+                        rho_0=float(rho_0), c_sw=_heat_capacity,
                         dz_live=h_k,
                     )
                     dT_target = dT_target + sw_tend * mask_3d
