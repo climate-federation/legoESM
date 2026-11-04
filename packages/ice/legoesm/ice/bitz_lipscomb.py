@@ -654,10 +654,11 @@ def _piecewise_remap(thickness, enthalpy, new_total, n_layers: int = 3):
         - jnp.maximum(new_lo[..., :, None], old_lo[..., None, :]),
     )
     content = jnp.sum(overlap * enthalpy[..., None, :], axis=-1)
-    # Double where: a zero-thickness column (no ice / no snow) is 0/0 in the
-    # discarded branch, which turns the reverse pass into NaN (review F3).
-    _has = dz_new[..., None] > _EPS10
-    return jnp.where(_has, content / jnp.where(_has, dz_new[..., None], 1.0), 0.0)
+    # NEMO divides by MAX(zhnew, epsi20) (`icevar.F90:1031`), so a column of
+    # 1e-17 m keeps its layer enthalpy; a zero column has zero content and
+    # gives 0 with a finite reverse pass (review F3).  Hard numerics floor
+    # (vote D8a: denominator floor <= 1e-6, repo exemption).
+    return content / jnp.maximum(dz_new[..., None], _EPS20)
 
 
 def _nemo_snow_enthalpy_remap(thickness, enthalpy):
