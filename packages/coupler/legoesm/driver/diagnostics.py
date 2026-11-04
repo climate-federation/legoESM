@@ -1015,7 +1015,9 @@ class DiagnosticCollector:
             p_full,
             jnp.reshape(q_v, (ncol, nlev)),
             dp,
-            self._cloud_config_for(cloud_fraction),
+            # Cover only: the in-cloud optic never moves the fraction.
+            self._cloud_config_for(cloud_fraction)._replace(
+                cloud_optics_inhomogeneity="constant", cloud_inhomogeneity_factor=1.0),
             q_cloud=jnp.reshape(q_c, (ncol, nlev)),
             q_ice=q_ice_col,
             **self._cam6_cloud_kwargs(

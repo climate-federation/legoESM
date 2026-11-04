@@ -7,8 +7,8 @@ giving reflectance ``R(cf*tau_ic)``.  The independent-column answer is
 single-column form is ALWAYS the brighter one.  ``two_column`` scales the
 radiative path by the exact inversion of that identity.
 
-Pins the algebra (limits, sign, bound, the cf->0 limit), the three-region
-composition with ``two_region``, the MIXED-PHASE single-factor rule, the
+Pins the algebra (limits, sign, bound, the cf->0 limit), the refusal to
+combine with ``two_region``, the MIXED-PHASE single-factor rule, the
 byte-identical default, the dispatch guard, differentiability, a solver-level
 RRTMGP regression, and -- the class that already bit this repo in PR #1385 --
 that the MPAS lane actually FORWARDS the field instead of dropping it.
@@ -20,11 +20,9 @@ import pytest
 
 from legoesm import constants
 from legoesm.atmosphere.physics.clouds.cloud_fraction import (
-    _INHOM_CF_FLOOR,
     _INHOM_R_EFF_FLOOR_M,
     _TAU_GEOMETRIC_COEFF,
     _partial_coverage_factor,
-    _two_region_inhomogeneity_factor,
     compute_cloud_properties,
 )
 from legoesm.atmosphere.physics.clouds.config import build_cloud_config
@@ -143,24 +141,6 @@ def test_longwave_moves_toward_ica_not_away():
             assert abs(e_new - e_ica) <= abs(e_old - e_ica) + 1e-12
 
 
-def test_three_region_composition_is_sequential_not_a_product():
-    """fsd then cover, with tau RECOMPUTED between -- not two factors of tau.
-
-    The three-region subcolumn (clear 1-cf; cloudy cf split into equal-area
-    tau(1±fsd)) has ICA reflectance cf*R(tau*chi_fsd), so the coverage
-    inversion must be evaluated at C = tau*chi_fsd.  This FAILS against the
-    product form (codex review 2026-07-31).
-    """
-    fsd, cf, tau = 0.75, 0.4, 100.0
-    chi_fsd = (1.0 - fsd ** 2) + fsd ** 2 * GAMMA0 / (GAMMA0 + tau)
-    C = tau * chi_fsd
-    target = cf * _R(C)
-    assert _R(_chi_ic(C, cf) * cf * C) == pytest.approx(target, rel=1e-12)
-    tau_prod = _chi_ic(tau, cf) * cf * C          # the rejected form
-    assert abs(_R(tau_prod) - target) > 0.05
-    assert _R(tau_prod) < target, "product form over-thins (too dim)"
-
-
 # ------------------------------------------------- wiring through the scheme
 
 def _inputs(nlev=12, q_c=3.0e-4, q_i=1.0e-5):
@@ -197,7 +177,7 @@ def test_default_none_reproduces_the_pre_change_formula():
     are asserted.
     """
     inp = _inputs()
-    for inhom in ("constant", "two_region"):
+    for inhom in ("constant",):
         cfg = build_cloud_config("sundqvist", cloud_optics_inhomogeneity=inhom)
         got = compute_cloud_properties(config=cfg, **inp)
         # legacy grid-mean paths: the scheme's own condensate partition, taken
@@ -208,18 +188,7 @@ def test_default_none_reproduces_the_pre_change_formula():
                 cloud_inhomogeneity_factor=1.0),
             **inp)
         lwp0, iwp0 = np.asarray(base.lwp), np.asarray(base.iwp)
-        cf_safe = np.clip(np.asarray(base.cloud_fraction), _INHOM_CF_FLOOR, 1.0)
-        r_l = np.maximum(np.asarray(base.r_eff_liq), _INHOM_R_EFF_FLOOR_M)
-        r_i = np.maximum(np.asarray(base.r_eff_ice), _INHOM_R_EFF_FLOOR_M)
-        tau_l = _TAU_GEOMETRIC_COEFF * (lwp0 / cf_safe) / (constants.rho_water * r_l)
-        tau_i = _TAU_GEOMETRIC_COEFF * (iwp0 / cf_safe) / (cfg.rho_cloud_ice * r_i)
-        if inhom == "constant":
-            fl = fi = cfg.cloud_inhomogeneity_factor
-        else:
-            fl = np.asarray(_two_region_inhomogeneity_factor(
-                jnp.asarray(tau_l), cfg.cloud_fsd, cfg.cloud_optics_asymmetry_g))
-            fi = np.asarray(_two_region_inhomogeneity_factor(
-                jnp.asarray(tau_i), cfg.cloud_fsd, cfg.cloud_optics_asymmetry_g))
+        fl = fi = cfg.cloud_inhomogeneity_factor
         np.testing.assert_allclose(np.asarray(got.lwp), lwp0 * fl, rtol=1e-13)
         np.testing.assert_allclose(np.asarray(got.iwp), iwp0 * fi, rtol=1e-13)
 
@@ -260,38 +229,19 @@ def test_mixed_phase_uses_one_layer_factor_not_two():
     assert np.all(fl < liq_only * (1.0 - 1e-9)), "ice must contribute to tau"
 
 
-def test_pipeline_applies_the_sequential_composition():
-    """End-to-end: fsd per phase, then ONE combined-tau coverage factor."""
-    inp = _inputs()
+def test_two_region_refuses_partial_coverage():
+    """two_region is per-subcolumn McICA scaling; two_column has no subcolumns."""
     cfg = build_cloud_config(
         "sundqvist", cloud_optics_inhomogeneity="two_region",
         cloud_partial_coverage_optics="two_column")
-    base = _column("none", "constant")
-    both = compute_cloud_properties(config=cfg, **inp)
-    lwp0, iwp0 = np.asarray(base.lwp), np.asarray(base.iwp)
-    cf = np.asarray(base.cloud_fraction)
-    cf_safe = np.clip(cf, _INHOM_CF_FLOOR, 1.0)
-    r_l = np.maximum(np.asarray(base.r_eff_liq), _INHOM_R_EFF_FLOOR_M)
-    r_i = np.maximum(np.asarray(base.r_eff_ice), _INHOM_R_EFF_FLOOR_M)
-    tau_l = _TAU_GEOMETRIC_COEFF * (lwp0 / cf_safe) / (constants.rho_water * r_l)
-    tau_i = _TAU_GEOMETRIC_COEFF * (iwp0 / cf_safe) / (cfg.rho_cloud_ice * r_i)
-    fl = np.asarray(_two_region_inhomogeneity_factor(
-        jnp.asarray(tau_l), cfg.cloud_fsd, cfg.cloud_optics_asymmetry_g))
-    fi = np.asarray(_two_region_inhomogeneity_factor(
-        jnp.asarray(tau_i), cfg.cloud_fsd, cfg.cloud_optics_asymmetry_g))
-    tau_grid = cf_safe * (tau_l * fl + tau_i * fi)
-    chi = np.array([_chi(t, c) for t, c in zip(tau_grid.ravel(), cf.ravel())]
-                   ).reshape(tau_grid.shape)
-    np.testing.assert_allclose(np.asarray(both.lwp), lwp0 * fl * chi, rtol=1e-6)
-    np.testing.assert_allclose(np.asarray(both.iwp), iwp0 * fi * chi, rtol=1e-6)
+    with pytest.raises(ValueError, match="two_region"):
+        compute_cloud_properties(config=cfg, subcolumn_inhomogeneity=True, **_inputs())
 
 
 def test_end_to_end_gradient_is_finite():
     """AD through the whole scheme, not just the standalone factor."""
     inp = _inputs(nlev=8)
-    cfg = build_cloud_config(
-        "sundqvist", cloud_optics_inhomogeneity="two_region",
-        cloud_partial_coverage_optics="two_column")
+    cfg = build_cloud_config("sundqvist", cloud_partial_coverage_optics="two_column")
 
     def total(q_c):
         kw = dict(inp, q_cloud=q_c)

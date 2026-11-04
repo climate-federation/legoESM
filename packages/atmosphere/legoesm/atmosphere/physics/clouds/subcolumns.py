@@ -119,17 +119,21 @@ _CF_FLOOR = 1.0e-3             # matches clouds.cloud_fraction._INHOM_CF_FLOOR
 # Per-layer McICA shift: irrational slope and step decorrelate layer offsets.
 _SHIFT_LAYER_SLOPE = 2.0 ** 0.5
 _SHIFT_LAYER_STEP = (5.0 ** 0.5 - 1.0) / 2.0
+# ecRad inhomogeneity uniforms (rand_inhom1, rand_inhom2): own permutation
+# tables and a column-shift offset each, so neither repeats the mask's draw.
+_INHOM_PERM_SEEDS = (_PERM_SEED + 1, _PERM_SEED + 2)
+_INHOM_SHIFT_OFFSETS = (_SHIFT_LAYER_SLOPE % 1.0, (2.0 * _SHIFT_LAYER_SLOPE) % 1.0)
 
 
 @functools.lru_cache(maxsize=32)
-def _stratified_table_cached(n_sub: int, nlev: int) -> np.ndarray:
+def _stratified_table_cached(n_sub: int, nlev: int, seed: int = _PERM_SEED) -> np.ndarray:
     """``(n_sub, nlev)`` stratified uniforms, independently permuted per layer.
 
     Cached on the STATIC ``(n_sub, nlev)`` pair, so it is built once per shape
     and enters the traced graph as a constant -- no PRNG state in the hot loop.
     """
     base = (np.arange(n_sub, dtype=np.float64) + 0.5) / n_sub
-    rng = np.random.default_rng(_PERM_SEED)
+    rng = np.random.default_rng(seed)
     tab = np.stack([base[rng.permutation(n_sub)] for _ in range(nlev)], axis=1)
     # The cache hands the SAME object back on every hit, so make it read-only:
     # a caller mutating it would silently corrupt every later radiation call.
@@ -137,7 +141,7 @@ def _stratified_table_cached(n_sub: int, nlev: int) -> np.ndarray:
     return tab
 
 
-def _stratified_table(n_sub: int, nlev: int) -> np.ndarray:
+def _stratified_table(n_sub: int, nlev: int, seed: int = _PERM_SEED) -> np.ndarray:
     """Fresh copy of the cached table.
 
     The cache would otherwise hand the SAME object to every caller, and a
@@ -145,7 +149,19 @@ def _stratified_table(n_sub: int, nlev: int) -> np.ndarray:
     change every later radiation call. The table is n_sub x nlev floats, so
     copying costs nothing next to the solve it feeds.
     """
-    return np.array(_stratified_table_cached(int(n_sub), int(nlev)), copy=True)
+    return np.array(_stratified_table_cached(int(n_sub), int(nlev), int(seed)), copy=True)
+
+
+def _shifted_uniforms(n_sub, nlev, shift, dtype, seed=_PERM_SEED):
+    """``(n_sub, ncol or 1, nlev)`` stratified uniforms, per-layer column shift."""
+    u = jnp.asarray(_stratified_table(int(n_sub), int(nlev), seed), dtype=dtype)
+    u = u[:, None, :]                                   # (n_sub, 1, nlev)
+    if shift is not None:
+        k = jnp.arange(nlev, dtype=dtype)
+        off = (jnp.asarray(shift, dtype=dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
+               + k * _SHIFT_LAYER_STEP)                  # (ncol, nlev)
+        u = jnp.mod(u + off[None, :, :], 1.0)
+    return u
 
 
 def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT,
@@ -177,15 +193,42 @@ def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT,
         Plain arithmetic, so CPU and GPU give the same masks.
     """
     cf = jnp.clip(jnp.asarray(cloud_fraction), 0.0, 1.0)
-    ncol, nlev = cf.shape
-    u = jnp.asarray(_stratified_table(int(n_sub), int(nlev)), dtype=cf.dtype)
-    u = u[:, None, :]                                   # (n_sub, 1, nlev)
-    if shift is not None:
-        k = jnp.arange(nlev, dtype=cf.dtype)
-        off = (jnp.asarray(shift, dtype=cf.dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
-               + k * _SHIFT_LAYER_STEP)                  # (ncol, nlev)
-        u = jnp.mod(u + off[None, :, :], 1.0)
-    return max_random_mask(u, cf, width=width)
+    return max_random_mask(_shifted_uniforms(n_sub, cf.shape[1], shift, cf.dtype), cf,
+                           width=width)
+
+
+def ecrad_inhomogeneity_scaling(mask, fractional_std, lat, p_half, T_half, shift=None):
+    """ecRad McICA in-cloud optical-depth scaling per subcolumn cell.
+
+    ecRad 49r1 radiation_cloud_generator lines 187-194 and 350-363 applied to
+    the given ``mask`` ``(n_sub, ncol, nlev)`` (index 0 = model top): within a
+    contiguous cloud a cell repeats the gamma-PDF draw of the cell above with
+    probability ``op**(1/ratio)``, where ``op`` is ecRad's set_overlap_param
+    with the IFS decorrelation length 0.75 + 2.149 cos^2(lat) km and ratio 0.5
+    (cloud_overlap_decorr_len, NDECOLAT=2), R/g from legoesm constants.
+    Returns ``mask * x`` with ``x`` drawn from the gamma table (mean 1) at
+    ``fractional_std``; ``lat`` [rad] ``(ncol,)``, ``p_half``/``T_half``
+    ``(ncol, nlev+1)`` top first.  The draw is a sampling device: ``op`` only
+    enters an exact switch, so it carries no gradient.
+    """
+    from legoesm import constants
+    from legoesm.atmosphere.physics.radiation.ecrad_ifs.ifs_interface import (
+        cloud_overlap_decorr_len, overlap_param)
+    from legoesm.atmosphere.physics.radiation.ecrad_ifs.mcica_generator import (
+        inhomogeneity_od_scaling)
+    mask = jnp.asarray(mask)
+    n_sub, _, nlev = mask.shape
+    dtype = mask.dtype if jnp.issubdtype(mask.dtype, jnp.floating) else jnp.asarray(p_half).dtype
+    decorr_km, ratio = cloud_overlap_decorr_len(jnp.sin(jnp.asarray(lat)))
+    op = overlap_param(jnp.asarray(p_half), jnp.asarray(T_half), decorr_km * 1000.0,
+                       r_over_g=constants.R_d / constants.g)          # (ncol, nlev-1)
+    op_inhom_above = jnp.concatenate([jnp.ones_like(op[:, :1]), op ** (1.0 / ratio)], axis=1)
+    r1, r2 = (_shifted_uniforms(n_sub, nlev, None if shift is None else jnp.mod(shift + o, 1.0),
+                                dtype, seed)
+              for seed, o in zip(_INHOM_PERM_SEEDS, _INHOM_SHIFT_OFFSETS))
+    repeat = (r2 < op_inhom_above[None]).astype(dtype)
+    return inhomogeneity_od_scaling(mask.astype(dtype), repeat, jnp.asarray(fractional_std, dtype),
+                                    r1)
 
 
 def max_random_mask(u, cloud_fraction, *, width):
