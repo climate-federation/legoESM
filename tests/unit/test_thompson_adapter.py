@@ -280,3 +280,18 @@ def test_bridges_refuse_thompson_without_the_full_registry():
         require_thompson_tracers("thompson", 3)
     with pytest.raises(ValueError, match="lacks"):
         require_thompson_tracers("thompson", None)
+
+
+@pytest.mark.parametrize("dt", [60.0, 300.0])
+def test_traced_dt_matches_concrete_dt(case, dt):
+    """Vote X1a: the coupled pipeline jits dt as an ordinary argument; the
+    port's dt > 120 s warm-riming switch then runs as a traced select and
+    gives the concrete-dt answer on both sides of the threshold.  Compared
+    jit-to-jit: the adapter's jit and eager results differ by round-off that
+    can flip a WRF hard switch (measured 1.5e-5 on the snow set at 60 s, the
+    same with a concrete dt), which is not what this test is about."""
+    T, qv, hyd, p, ph, w = _host(case)
+    run = lambda d: thompson_microphysics(T, qv, hyd, p, ph, None, None, d, w=w)  # noqa: E731
+    concrete, traced = jax.jit(lambda: run(dt))(), jax.jit(run)(dt)
+    for f in ("dT_dt", "dq_c_dt", "dq_r_dt", "dq_s_dt", "dq_g_dt", "precipitation"):
+        assert _rel(getattr(traced, f), getattr(concrete, f)) <= _TOL, f

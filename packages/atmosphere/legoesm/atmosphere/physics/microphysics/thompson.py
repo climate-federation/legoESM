@@ -92,7 +92,7 @@ def thompson_microphysics(
     p_half: jax.Array,
     rho: jax.Array,
     dz: jax.Array,
-    dt: float,
+    dt,
     config: ThompsonConfig = ThompsonConfig(),
     *,
     w: jax.Array | None = None,
@@ -125,13 +125,13 @@ def thompson_microphysics(
     if h.N_r is None or h.N_i is None:
         raise ValueError(
             "microphysics='thompson' needs the carried N_r and N_i")
-    dt = float(dt)
     # Run the oracle-certified fp64 port as an fp64 island (vote J11a): its
     # NumPy float64 constants would otherwise promote an fp32 state mid-step.
     # Tendencies are cast back to the state dtype.
     out_dtype = T.dtype
     up = lambda x: jnp.asarray(x, jnp.float64)                 # noqa: E731
     T, q_v, p_full, p_half, w = up(T), up(q_v), up(p_full), up(p_half), up(w)
+    dt = up(dt)                     # may be traced (coupled pipeline jit, X1a)
     h = HydrometeorState(*(None if x is None else up(x) for x in h))
     qs = (q_v, h.q_c, h.q_i, h.q_r, h.q_s, h.q_g)
     dry = 1.0 - sum(qs)                       # 1 - q_tot (H3)
