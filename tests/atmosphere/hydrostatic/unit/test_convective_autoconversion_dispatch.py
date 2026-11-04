@@ -17,7 +17,6 @@ import pytest
 
 from legoesm.atmosphere.physics.convection import config as C
 from legoesm.atmosphere.physics.convection.bechtold import bechtold_convection
-from legoesm.atmosphere.physics.convection.tiedtke import tiedtke_convection
 from legoesm.thermo import saturation_specific_humidity
 
 _NCOL, _NLEV = 2, 16
@@ -50,16 +49,8 @@ def _bechtold(**cfg_kw):
     return out
 
 
-def _tiedtke(**cfg_kw):
-    T, q, pf, ph, u, v = _column()
-    ncol, nlev = T.shape
-    out, _ = tiedtke_convection(
-        T, q, pf, ph, u, v, jnp.zeros((ncol, nlev)), 1800.0,
-        C.TiedtkeConfig(**cfg_kw), moisture_convergence=jnp.zeros_like(T))
-    return out
-
-
-@pytest.mark.parametrize("runner", [_bechtold, _tiedtke])
+# tiedtke left: the WRF port closes its own precipitation (no split).
+@pytest.mark.parametrize("runner", [_bechtold])
 def test_autoconversion_emits_finite_conserving_rain(runner):
     base = runner(precip_split_scheme="constant", precip_efficiency=0.0)
     auto = runner(precip_split_scheme="autoconversion",
@@ -77,13 +68,15 @@ def test_autoconversion_emits_finite_conserving_rain(runner):
     assert float(jnp.sum(auto.dq_r_conv_dt)) > 0.0
 
 
-@pytest.mark.parametrize("runner", [_bechtold, _tiedtke])
+# tiedtke left: the WRF port closes its own precipitation (no split).
+@pytest.mark.parametrize("runner", [_bechtold])
 def test_unknown_split_scheme_raises(runner):
     with pytest.raises(ValueError, match="precip_split_scheme"):
         runner(precip_split_scheme="garbage")
 
 
-@pytest.mark.parametrize("runner", [_bechtold, _tiedtke])
+# tiedtke left: the WRF port closes its own precipitation (no split).
+@pytest.mark.parametrize("runner", [_bechtold])
 def test_constant_default_is_legacy_noop(runner):
     # default precip_split_scheme='constant' + precip_efficiency=0 -> no rain
     out = runner()

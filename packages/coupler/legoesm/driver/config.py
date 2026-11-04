@@ -530,6 +530,7 @@ class OutputConfig(NamedTuple):
 VALID_MICROPHYSICS = (
     "none", "kessler", "sundqvist", "seifert_beheng",
     "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
+    "ifs_cloudsc",
 )
 
 VALID_TURBULENCE = (
@@ -537,7 +538,7 @@ VALID_TURBULENCE = (
     "holtslag_boville", "ysu", "edmf", "none",
 )
 
-VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg")
+VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg", "ecrad_ifs")
 
 VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved", "cam6_clubb")
 
@@ -1132,15 +1133,6 @@ class ExperimentConfig(NamedTuple):
     convective_rain_to_surface: bool = True
     autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
     autoconv_pe_max: float = 0.9        # [1] ceiling on the emergent precip fraction
-
-    # Tiedtke plume buoyancy-death memory: when True the entraining plume,
-    # once it exhausts its cumulative buoyancy budget, stays dead instead of
-    # reviving above an inversion (the default False lets a plume killed by
-    # negative buoyancy resume nonzero M_u aloft — physically questionable,
-    # and the cause of convective detrainment heating reaching the ~100 hPa
-    # tropical cold point).  Tiedtke-only: validate_strict refuses it with any
-    # other convection scheme.
-    convective_buoyancy_death_memory: bool = False
 
     # Convection / Turbulence / GWD
     convection: str = "sbm"            # sbm, dca, kuo, mass_flux, edmf, zhang_mcfarlane, none
@@ -2244,12 +2236,42 @@ class ExperimentConfig(NamedTuple):
         # only schemes that carry and process both may run it.  p3's snow
         # slot holds rime, fast_sbm's ice slots stay zero, seifert_beheng is
         # liquid only, the ML emulator's layout is generic.
+        # ifs_cloudsc takes the detrained precipitation itself, through the
+        # CUMASTRN hand-off (vote VC2/A7').
         if (self.convection == "bechtold" and self.bechtold_use_ifs_ascent
-                and self.microphysics not in ("morrison", "thompson")):
+                and self.microphysics not in ("morrison", "thompson",
+                                              "ifs_cloudsc")):
             errors.append(
                 f"bechtold_use_ifs_ascent needs a microphysics that carries "
-                f"rain and snow (morrison, thompson) for the "
+                f"rain and snow (morrison, thompson, ifs_cloudsc) for the "
                 f"detrained precipitation, not {self.microphysics!r}")
+        # IFS CLOUDSC reads CUMASTRN's raw detrainment and mass fluxes (vote
+        # VC19a: refuse any other convection), and only the MPAS column lane
+        # carries its advected cloud fraction (vote VC16b: the compiled
+        # cube/lat-lon and spectral lanes refuse it; follow-up).
+        if self.microphysics == "ifs_cloudsc":
+            if not (self.convection == "bechtold"
+                    and self.bechtold_use_ifs_ascent):
+                errors.append(
+                    "microphysics='ifs_cloudsc' needs the faithful IFS "
+                    "convection (convection='bechtold' with "
+                    "bechtold_use_ifs_ascent=True), whose raw PLUDE/PLUDELI/"
+                    "PSNDE/PMFU/PMFD/PLU/LDCUM/KTYPE it reads; got "
+                    f"convection={self.convection!r}, bechtold_use_ifs_ascent="
+                    f"{self.bechtold_use_ifs_ascent!r}")
+            if self.cld_macmic_num_steps != 1:
+                errors.append(
+                    "microphysics='ifs_cloudsc' runs CLOUDSC once per physics "
+                    "step after the convection (the IFS order, vote VC23): "
+                    "needs cld_macmic_num_steps=1, got "
+                    f"{self.cld_macmic_num_steps!r}")
+            if not self.column_loop_lane:
+                errors.append(
+                    "microphysics='ifs_cloudsc' runs only on the MPAS column "
+                    "lane (MPAS dycore or the FV3-duo column lane), which "
+                    "advects its cloud_fraction_ifs tracer; the compiled "
+                    "cube/lat-lon and spectral lanes do not carry it "
+                    "(follow-up)")
         if self.land_fraction_source not in ("topography", "era5", "zero"):
             errors.append(
                 f"land_fraction_source must be topography, era5 or zero, got "
@@ -2658,11 +2680,22 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_snow_emissivity must be in [{_eps_lo}, {_eps_hi}] (the "
                 f"snow_column parameter spec), got {self.land_snow_emissivity!r}")
-        if self.convective_buoyancy_death_memory and self.convection != "tiedtke":
+        if self.convection == "tiedtke" and self.turbulence == "none":
             errors.append(
-                "convective_buoyancy_death_memory=True requires "
-                f"convection='tiedtke' (got {self.convection!r}): only the "
-                "Tiedtke scheme reads it — the knob would be silently inert.")
+                "convection='tiedtke' (WRF port) reads the previous step's "
+                "boundary-layer q_v tendency and surface water flux (WRF "
+                "qvpblten / qfx) from the turbulence scheme; with "
+                "turbulence='none' they would stay zero")
+        if self.convection == "tiedtke" and (
+                self.convective_precip_split != "constant"
+                or (self.convective_precip_efficiency or 0.0) > 0.0):
+            errors.append(
+                "convection='tiedtke' (WRF port) closes its own "
+                "precipitation: convective_precip_split="
+                f"{self.convective_precip_split!r} / "
+                f"convective_precip_efficiency="
+                f"{self.convective_precip_efficiency!r} would be silently "
+                "inert; leave them at 'constant' / None")
         if self.land_soil_freeze_thaw and not self.use_multilayer_land:
             errors.append(
                 "land_soil_freeze_thaw requires use_multilayer_land: only the "
@@ -2854,6 +2887,21 @@ class ExperimentConfig(NamedTuple):
                 f"radiation must be one of {_valid_radiation}, "
                 f"got {self.radiation!r}"
             )
+        # ecRad 49r1 (votes L2a, L20a): the MPAS column lane only, and its
+        # aerosols are OFF, so an aerosol forcing would be silently ignored.
+        if self.radiation == "ecrad_ifs":
+            if not self.column_loop_lane:
+                errors.append(
+                    "radiation='ecrad_ifs' runs only on the MPAS column lane "
+                    "(its between-call carry lives in that lane's physics "
+                    "state); the compiled cube/lat-lon and spectral lanes "
+                    "refuse it")
+            if self.aerosol_forcing != "off":
+                errors.append(
+                    "radiation='ecrad_ifs' runs with aerosols OFF (the CAMS "
+                    "climatology files are pending); aerosol_forcing="
+                    f"{self.aerosol_forcing!r} would be silently ignored, "
+                    "set it to 'off'")
         _valid_cloud_schemes = VALID_CLOUD_SCHEMES
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(
@@ -3544,6 +3592,14 @@ class ExperimentConfig(NamedTuple):
                     f"physics_update_steps={_pus} (>= it) so radiation is "
                     "recomputed on physics steps; a held-physics step cannot "
                     "solve radiation")
+            if self.convection == "tiedtke":
+                errors.append(
+                    f"physics_update_steps={_pus} with convection='tiedtke': "
+                    "Tiedtke's moisture-convergence trigger reads the "
+                    "dynamics water-vapour tendency of the step physics "
+                    "runs on, and held-physics steps would drop the "
+                    "intervening dynamics tendencies; use "
+                    "physics_update_steps=1")
         # R-ex (D-REX-1) checkpoint/radiation alignment is NOT checked here:
         # it depends on the EFFECTIVE timestep, which the driver may clamp
         # (CFL) after this validation -- see
@@ -3827,9 +3883,8 @@ class ExperimentConfig(NamedTuple):
                     or (self.convection == "emanuel"
                         and self.emanuel_enable_cmt)):
                 errors.append(_cmt)
-            elif (self.convection == "tiedtke"
-                    or (self.convection == "bechtold"
-                        and self.bechtold_enable_cmt is None)):
+            elif (self.convection == "bechtold"
+                    and self.bechtold_enable_cmt is None):
                 _drops.append(_cmt)
             if self.land_params_refresh and self.use_multilayer_land:
                 _drops.append(
@@ -5289,7 +5344,6 @@ class ExperimentConfig(NamedTuple):
             zm_land_fraction=getattr(amip_cfg, 'zm_land_fraction', "required"),
             zm_transport_cloud_tracers=getattr(amip_cfg, 'zm_transport_cloud_tracers', True),
             kain_fritsch_variant=getattr(amip_cfg, 'kain_fritsch_variant', "smooth"),
-            convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
             convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
                 amip_cfg, 'bechtold_use_ifs_downdraft', True),
@@ -5472,7 +5526,6 @@ class ExperimentConfig(NamedTuple):
             zm_land_fraction=self.zm_land_fraction,
             zm_transport_cloud_tracers=self.zm_transport_cloud_tracers,
             kain_fritsch_variant=self.kain_fritsch_variant,
-            convective_buoyancy_death_memory=self.convective_buoyancy_death_memory,
             convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,

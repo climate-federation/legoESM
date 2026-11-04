@@ -66,7 +66,9 @@ from tests import _ratchet_audit as ra
 # gSAM's exact satadj_liquid every call and refuses the opt-in guard).
 BASELINE_EXEMPT = frozenset({"sdm", "fast_sbm", "none", "seifert_beheng",
                              # faithful ESCOMP kessler_run port (no guard)
-                             "kessler"})
+                             "kessler",
+                             # faithful OpenIFS 49r1 CLOUDSC (own supersatcheck)
+                             "ifs_cloudsc"})
 
 _FACTORY_FN = "_get_microphysics_fn"
 _MIN_SCHEMES = 8  # discovery sanity floor (10 today)

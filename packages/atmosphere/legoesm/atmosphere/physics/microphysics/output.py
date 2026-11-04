@@ -134,6 +134,11 @@ class MicrophysicsOutput(NamedTuple):
     # droplet number (static branch, default graph untouched).  The terms sum
     # to ``dN_c_dt`` up to round-off.
     nc_budget: dict | None = None
+    # Optional: the scheme's UPDATED prognostic cloud fraction [1], (ncol,
+    # nlev), for a scheme that carries one (IFS CLOUDSC).  The host writes
+    # it back to its advected cloud-fraction tracer.  None = the scheme has
+    # no prognostic cloud fraction.
+    cloud_fraction_new: jax.Array | None = None
 
 
 def make_zero_hydrometeors(

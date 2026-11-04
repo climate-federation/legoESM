@@ -28,6 +28,7 @@ from legoesm.core.state import (
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
     HeightCoordinate,
+    HybridSigmaPressureCoordinate,
     SigmaCoordinate,
     TerrainMetric,
     compute_sigma_dot_and_total,
@@ -102,12 +103,15 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     spectral_pe_to_grid,
 )
 from legoesm.atmosphere.physics._shared import (
+    compute_heights_from_sigma,
+    compute_rho,
     compute_moisture_convergence,
     diagnose_grid_w_from_omega,
     moisture_convergence_supported,
     zero_like_tracers,
 )
 from legoesm.core.operators_3d import divergence_3d as _div3_cs
+from legoesm.core.operators_voronoi import cell_to_edge_avg, divergence_cell_3d
 from legoesm.core.operators_latlon_3d import divergence_3d as _div3_latlon
 from legoesm.grids.gaussian import sh_analysis_3d, vordiv_from_uv_3d
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
@@ -250,9 +254,11 @@ def convection_scheme_traits(scheme_name: str) -> ConvectionSchemeTraits:
                                        "emanuel"),
         is_w_grid_consumer=scheme_name in ("kain_fritsch",),
         is_stochastic=scheme_name in ("bechtold",),
-        is_mc_consumer=scheme_name in ("tiedtke", "bechtold"),
+        is_mc_consumer=scheme_name in ("bechtold",),
         is_simple_mc_consumer=scheme_name in ("kuo",),
-        rain_is_net_flux=scheme_name in ("zhang_mcfarlane",),
+        # Tiedtke (WRF port) emits its SURFACE precipitation in the lowest
+        # layer: column-integrated to the surface, never a per-layer source.
+        rain_is_net_flux=scheme_name in ("zhang_mcfarlane", "tiedtke"),
         # Plume / mass-flux schemes genuinely detrain condensate into q_c; the
         # adjustment schemes (sbm Betts-Miller / dca / kuo) produce convective
         # PRECIPITATION (their drying falls out), so their condensate is routed
@@ -300,32 +306,83 @@ def diagnose_w_grid_columns_hydrostatic(
     pipeline.
     """
     ncol, nlev = T_col.shape
-    div_grid = None
-    if isinstance(grid, CubedSphereGrid):
-        if v_grid is not None:
-            div_grid = _div3_cs(u_grid, v_grid, grid)
-    elif hasattr(grid, "dlat") and hasattr(grid, "dlon"):
-        if v_grid is not None:
-            div_grid = _div3_latlon(u_grid, v_grid, grid)
-
-    if div_grid is not None:
-        sigma_top = sigma_coord.sigma_half[0]
-        # Iter-55: share the cumsum between σ̇ and ``D_total`` (mirrors
-        # iter-52/53 in the dycores).  Saves one cross-shard reduction
-        # per physics call on this w-grid diagnostic path.
-        sigma_dot_grid, _D_total_full = compute_sigma_dot_and_total(
-            div_grid, sigma_coord,
-        )
-        dp_s_dt_grid = -p_s * _D_total_full[..., 0] / (1.0 - sigma_top)
-        omega_grid = compute_pressure_velocity(
-            sigma_dot_grid, p_s, dp_s_dt_grid, sigma_coord,
-        )
+    omega_col = diagnose_omega_columns_hydrostatic(
+        u_grid, v_grid, p_s, grid, sigma_coord, ncol, nlev,
+        full_continuity=False)
+    if omega_col is not None:
         return diagnose_grid_w_from_omega(
-            omega_grid.reshape(ncol, nlev), T_col, p_full_col, q_v_col,
+            omega_col, T_col, p_full_col, q_v_col,
         ).astype(dtype)
     if need_concrete:
         return jnp.zeros((ncol, nlev), dtype=dtype)
     return None
+
+
+def diagnose_omega_columns_hydrostatic(u_grid, v_grid, p_s, grid, sigma_coord,
+                                       ncol, nlev, *, voronoi=False,
+                                       full_continuity):
+    """Resolved pressure velocity omega [Pa/s], ``(ncol, nlev)``, by sigma
+    continuity; ``None`` on grids without a divergence operator here (or
+    without ``v``).  ``voronoi=True`` adds the MPAS cell divergence of the
+    edge-normal ``u``.  Exact for a pure sigma coordinate only (callers
+    needing omega on a hybrid coordinate must refuse it).
+
+    ``full_continuity=True`` is the sigma-coordinate omega::
+
+        D_k     = div(p_s v_k) / p_s
+        dp_s/dt = -p_s sum_k D_k dsigma_k / (1 - sigma_top)
+        omega_k = sigma_k (dp_s/dt + v_k.grad p_s) + p_s sigmadot_k
+
+    with ``v_k.grad p_s = div(p_s v_k) - p_s div(v_k)`` (MPAS: edge p_s is
+    the mean of the edge's two cells).  ``False`` is the constant-p_s form
+    (``D_k = div v_k``, no ``v.grad p_s``) Kain-Fritsch's w still uses
+    (reported, not changed here).
+    """
+    ps3 = p_s[..., None]
+
+    def _div(fu, fv):
+        if voronoi and hasattr(grid, "edgesOnCell"):
+            # the Voronoi divergence gathers EDGE-normal winds by edge index;
+            # cell-centred winds would be silently clamped garbage (vote V29a)
+            if fu.shape[0] != int(grid.nEdges):
+                raise ValueError(
+                    "omega on an MPAS mesh needs the edge-normal wind "
+                    f"(nEdges={int(grid.nEdges)}, nlev); got {tuple(fu.shape)} "
+                    "(cell-centred winds?)")
+            return divergence_cell_3d(fu, grid)
+        if isinstance(grid, CubedSphereGrid):
+            return None if fv is None else _div3_cs(fu, fv, grid)
+        if hasattr(grid, "dlat") and hasattr(grid, "dlon"):
+            return None if fv is None else _div3_latlon(fu, fv, grid)
+        return None
+
+    div_v = _div(u_grid, v_grid)
+    if div_v is None:
+        return None
+    vgrad_ps = None
+    div_grid = div_v
+    if full_continuity:
+        if voronoi and hasattr(grid, "edgesOnCell"):
+            ps_u = cell_to_edge_avg(p_s, grid)[:, None] * u_grid
+            div_psv = _div(ps_u, None)
+        else:
+            div_psv = _div(ps3 * u_grid, ps3 * v_grid)
+        vgrad_ps = div_psv - ps3 * div_v
+        div_grid = div_psv / ps3
+    sigma_top = sigma_coord.sigma_half[0]
+    # Iter-55: share the cumsum between σ̇ and ``D_total`` (mirrors
+    # iter-52/53 in the dycores).  Saves one cross-shard reduction
+    # per physics call on this w-grid diagnostic path.
+    sigma_dot_grid, _D_total_full = compute_sigma_dot_and_total(
+        div_grid, sigma_coord,
+    )
+    dp_s_dt_grid = -p_s * _D_total_full[..., 0] / (1.0 - sigma_top)
+    omega_grid = compute_pressure_velocity(
+        sigma_dot_grid, p_s, dp_s_dt_grid, sigma_coord,
+    )
+    if vgrad_ps is not None:
+        omega_grid = omega_grid + sigma_coord.sigma_full * vgrad_ps
+    return omega_grid.reshape(ncol, nlev)
 
 
 def make_convection_physics(
@@ -334,6 +391,7 @@ def make_convection_physics(
     dt: float = 300.0,  # coeff-ok: default physics timestep [s]
     *,
     defer_detrainment: bool = False,
+    defer_to_cloudsc: bool = False,
 ) -> Callable:
     """Create a physics function for convection matching a model's signature.
 
@@ -354,6 +412,14 @@ def make_convection_physics(
         macmic sub-step as CAM6 does (clubb_intr.F90:2345-2386).  The state
         must carry ``q_c``, ``q_i``, ``N_c`` and ``N_i`` (the species that
         booking writes); a state lacking any of them raises ``ValueError``.
+    defer_to_cloudsc : bool
+        Hydrostatic/MPAS bridge only (IFS CLOUDSC, vote A7'): the scheme's
+        raw ``ConvectionOutput.ifs_cloudsc_conv`` is published as
+        ``"ifs_cloudsc_conv"`` in the returned carry dict for the combined
+        physics to hand to CLOUDSC, and the detrained condensate
+        (``dq_c_conv_dt``) and detrained rain/snow (``dq_r_detr_dt``,
+        ``dq_s_detr_dt``) are NOT booked into q_c/q_r/q_s (CLOUDSC takes
+        them).  A scheme that publishes no ``ifs_cloudsc_conv`` raises.
 
     Returns
     -------
@@ -370,7 +436,12 @@ def make_convection_physics(
     # crashes the moment convection is enabled on an MPAS run.
     if model_type in ("hydrostatic", "mpas"):
         return _make_hydrostatic_convection(
-            convection_config, dt, defer_detrainment=defer_detrainment)
+            convection_config, dt, defer_detrainment=defer_detrainment,
+            defer_to_cloudsc=defer_to_cloudsc)
+    if defer_to_cloudsc:
+        raise ValueError(
+            "defer_to_cloudsc is implemented by the hydrostatic/MPAS bridge "
+            f"only; got model_type={model_type!r}.")
     if defer_detrainment:
         raise ValueError(
             "defer_detrainment is implemented by the hydrostatic/MPAS bridge "
@@ -415,6 +486,7 @@ def _make_hydrostatic_convection(
     convection_config: ConvectionConfig,
     dt: float,
     defer_detrainment: bool = False,
+    defer_to_cloudsc: bool = False,
 ) -> Callable:
     """Create convection physics_fn for PrimitiveEquationModel.
 
@@ -785,6 +857,68 @@ def _make_hydrostatic_convection(
                 }
                 if master_key_new is not None:
                     conv_prog_out["prng_key"] = master_key_new
+            elif scheme_name == "tiedtke":
+                # WRF Tiedtke port: the oracle's own inputs (cu_tiedtke ->
+                # tiecnv).  Heights above ground (WRF zi(kts) = 0); omega by
+                # sigma continuity; qvften = this step's dynamics tendency;
+                # qvpblten / qfx = the previous step's turbulence (it runs
+                # after convection on this lane).
+                _missing = [n for n, v in (
+                    ("dyn_tendency_qv", getattr(phys_state, "dyn_tendency_qv", None)),
+                    ("turb_tendency_qv", getattr(phys_state, "turb_tendency_qv", None)),
+                    ("evap_sfc", getattr(phys_state, "evap_sfc", None)),
+                ) if v is None]
+                if _missing:
+                    raise ValueError(
+                        "convection='tiedtke' needs PhysicsState "
+                        f"{_missing}: the driver writes the dynamics q_v "
+                        "tendency before physics and the turbulence scheme "
+                        "the other two; a lane without them cannot run it")
+                _mpas = hasattr(grid, "cellsOnEdge")
+                if _mpas and not bool(getattr(convection_config, "mpas_cmt", False)):
+                    raise ValueError(
+                        "convection='tiedtke' on MPAS needs cell-centred winds "
+                        "(cumulus friction); set convection.mpas_cmt=True")
+                if not _mpas and state.v is None:
+                    raise ValueError(
+                        "convection='tiedtke' needs both wind components "
+                        "(cumulus friction, omega); state.v is None")
+                _w_ls = getattr(phys_state, "dyn_w_ls", None)
+                if (_w_ls is None and isinstance(
+                        sigma_coord, HybridSigmaPressureCoordinate)):
+                    raise ValueError(
+                        "convection='tiedtke' needs omega, which this bridge "
+                        "diagnoses by PURE-sigma continuity; a hybrid "
+                        "coordinate would get a wrong omega")
+                if _w_ls is not None:
+                    # SCM: the prescribed large-scale w [m/s, up] ->
+                    # omega = -rho g w (moist rho, as diagnose_grid_w_from_omega)
+                    _omega = (-compute_rho(T_col, p_full_col, q_v_col)
+                              * constants.g * _w_ls.reshape(ncol, nlev))
+                else:
+                    _omega = diagnose_omega_columns_hydrostatic(
+                        state.u.data, None if state.v is None else state.v.data,
+                        state.p_s.data, grid, sigma_coord, ncol, nlev,
+                        voronoi=True, full_continuity=True)
+                if _omega is None:
+                    raise ValueError(
+                        "convection='tiedtke' needs the resolved pressure "
+                        "velocity, which this bridge diagnoses only on the "
+                        "cubed-sphere, lat-lon and MPAS grids")
+                _z_full, _ = compute_heights_from_sigma(
+                    T_col, p_half_col, q_v_col)
+                conv_out, prog_new_profile = conv_fn(
+                    T_col, q_v_col, p_full_col, p_half_col, u_col, v_col, dt,
+                    geopotential=constants.g * _z_full,
+                    omega=_omega.astype(_state_dtype),
+                    dq_v_dt_dyn=phys_state.dyn_tendency_qv.reshape(ncol, nlev),
+                    dq_v_dt_pbl=phys_state.turb_tendency_qv.reshape(ncol, nlev),
+                    surface_moisture_flux=phys_state.evap_sfc.reshape(ncol),
+                    land_frac=land_fraction_for_columns(grid, ncol, scheme_config),
+                    sigma=jnp.broadcast_to(
+                        sigma_coord.sigma_full, (ncol, nlev)).astype(_state_dtype),
+                )
+                conv_prog_out = prog_new_profile
             elif scheme_name == "emanuel":
                 # Emanuel: CONVECT FU/FV (read only with enable_cmt), no
                 # ZM/Tiedtke-specific kwargs.
@@ -909,6 +1043,18 @@ def _make_hydrostatic_convection(
         if conv_fn is not None:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
             dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
+            # IFS CLOUDSC takes the raw detrainment (PLUDE/PLUDELI/PSNDE)
+            # itself; nothing of it is booked into the host species here.
+            _cloudsc_pub = None
+            if defer_to_cloudsc:
+                _cloudsc_pub = getattr(conv_out, "ifs_cloudsc_conv", None)
+                if _cloudsc_pub is None:
+                    raise ValueError(
+                        "defer_to_cloudsc (microphysics='ifs_cloudsc') needs "
+                        "the faithful IFS convection's raw CUMASTRN fields "
+                        "(convection='bechtold' with use_ifs_ascent=True); "
+                        f"scheme {scheme_name!r} publishes none")
+                dq_c_conv_dt = jnp.zeros_like(dq_c_conv_dt)
             # #929 in-updraft rain split: mass-flux schemes (bechtold/tiedtke)
             # emit an in-updraft RAIN source ``dq_r_conv_dt`` (the fraction of
             # detrained condensate diverted to precipitation by
@@ -976,13 +1122,15 @@ def _make_hydrostatic_convection(
             # species, never to the surface or to cloud water (user
             # 2026-10-28, S1''/R12); no species to take it -> refuse.
             for _nm, _detr in (("q_r", getattr(conv_out, "dq_r_detr_dt", None)),
-                               ("q_s", getattr(conv_out, "dq_s_detr_dt", None))):
-                if _detr is None:
+                               ("q_s", getattr(conv_out, "dq_s_detr_dt", None)),
+                               ("q_i", getattr(conv_out, "dq_i_conv_dt", None))):
+                if _detr is None or defer_to_cloudsc:
                     continue
                 if state.tracers is None or _nm not in state.tracers:
                     raise ValueError(
-                        f"convection detrains precipitation into {_nm} (IFS "
-                        f"PSNDE) but the state carries no {_nm} tracer")
+                        f"convection detrains condensate into {_nm} (IFS "
+                        f"PSNDE / WRF Tiedtke ice) but the state carries no "
+                        f"{_nm} tracer")
                 _d = _detr.reshape(shape_3d)
                 if _nm in tracer_tends:
                     tracer_tends[_nm] = tracer_tends[_nm].replace(
@@ -1068,6 +1216,8 @@ def _make_hydrostatic_convection(
                     f"icwmr={conv_out.icwmr is not None}.")
             if _defer:
                 conv_prog_out = {**conv_prog_out, "conv_dlf": _dlf_pub}
+            if _cloudsc_pub is not None:
+                conv_prog_out = {**conv_prog_out, "ifs_cloudsc_conv": _cloudsc_pub}
             if conv_out.mass_flux_up is not None:
                 _mf_pub = {
                     "conv_mass_flux_up":
@@ -1181,6 +1331,12 @@ def _make_nonhydrostatic_convection(
     convention for scalar-carrying schemes.
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
+    if scheme_name == "tiedtke":
+        raise ValueError(
+            "convection='tiedtke' (WRF port) is wired on the hydrostatic "
+            "bridge, the coupler physics pipeline and the SCM only; "
+            "the non-hydrostatic lane does not supply its inputs (omega, dynamics and "
+            "boundary-layer moisture tendencies, surface water flux)")
     # Static plumbing traits — single source of truth shared across the
     # bridge factories and the unified driver pipeline.
     _tr = convection_scheme_traits(scheme_name)
@@ -1618,6 +1774,12 @@ def _make_spectral_pe_convection(
     convention.
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
+    if scheme_name == "tiedtke":
+        raise ValueError(
+            "convection='tiedtke' (WRF port) is wired on the hydrostatic "
+            "bridge, the coupler physics pipeline and the SCM only; "
+            "the spectral lane does not supply its inputs (omega, dynamics and "
+            "boundary-layer moisture tendencies, surface water flux)")
     # Static plumbing traits — single source of truth shared across the
     # bridge factories and the unified driver pipeline.
     _tr = convection_scheme_traits(scheme_name)

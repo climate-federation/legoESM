@@ -1,0 +1,29 @@
+{
+ "record": "/burg/glab/users/pg2328/oracle_audit/tier3/vis/ctl_on/t3_vis_record_<rank>.bin + t3_ahm_record_<rank>.bin",
+ "recorder_cfg": "ORCA1_T3VIS (NEMO 5.0.1, tier3/vis)",
+ "windows": [
+  {
+   "rank": "0028",
+   "i0_local0": 14,
+   "j0_local0": 6,
+   "n": 20,
+   "jpk": 75,
+   "step_entries": 54786,
+   "mig0": 85,
+   "mjg0": 293
+  },
+  {
+   "rank": "0031",
+   "i0_local0": 2,
+   "j0_local0": 18,
+   "n": 20,
+   "jpk": 75,
+   "step_entries": 50692,
+   "mig0": 289,
+   "mjg0": 305
+  }
+ ],
+ "nemo_sha": "NEMO 5.0.1 tree /burg/glab/users/pg2328/nemo_orca1/nemo_5.0.1",
+ "legoesm_base": "082ad4dcfb1350581d1fe7f85dce37117c06cd5e",
+ "layout": "NEMO (i, j, k) uint8; port cell = swapaxes(t,0,1); NEMO u(i,j) = port u-face [j, i+1]; v(i,j) = port v-face [j+1, i]; f(i,j) = port vertex [j+1, i+1]"
+}
