@@ -143,6 +143,28 @@ _H_MIN = 1.0e-3
 _T_CONVERGENCE = 1.0e-4
 _T_SURFACE_EPS = 1.0e-5
 _MAX_ITERATIONS = 200
+# NEMO releases this column port reproduces.  5.0.2 is the C1D_OMIP_L3
+# identity; 5.0.1 is the ORCA1 production oracle.  5.0.1 differs only in
+# (a) snow melt before snow sublimation/deposition (`icethd_dh.F90:179-201`),
+# (b) no MAX(0,.) on the latent term of basal-growth and new-ice enthalpy
+# (`icethd_dh.F90:339-340`, `icethd_do.F90:194-197`), and (c) the BL99
+# iteration cap iconv_max = 50 (`icethd_zdf_bl99.F90:76`).
+_NEMO_VERSIONS = ("5.0.1", "5.0.2")
+_MAX_ITERATIONS_501 = 50
+
+
+def _check_nemo_version(nemo_version: str) -> None:
+    if nemo_version not in _NEMO_VERSIONS:
+        raise ValueError(
+            f"Unknown SI3 column-port variant nemo_version={nemo_version!r}; "
+            f"expected one of {_NEMO_VERSIONS}"
+        )
+
+
+def _latent_part(T_m, T_c, nemo_version):
+    """1 - Tm/min(T,-epsi10), with 5.0.2's MAX(0,.) (absent in 5.0.1)."""
+    liquid = 1.0 - T_m / jnp.minimum(T_c, -_EPS10)
+    return liquid if nemo_version == "5.0.1" else jnp.maximum(0.0, liquid)
 
 # Fixed values in the sole supported ORCA1/SI3 identity.  Keeping them in this
 # module-level provenance block prevents them from masquerading as tunables or
@@ -460,6 +482,7 @@ def _si3_zdf_bl99_step(
     _nemo_branch_ranges: bool = True,
     _nemo_snow_temperature_bounds: bool = True,
     _nemo_eos_order: bool = True,
+    nemo_version: str = "5.0.2",
 ) -> SI3ZDFResult:
     """Iterative 3+3-layer BL99/P07 solve for the resolved ORCA1 arm.
 
@@ -469,6 +492,9 @@ def _si3_zdf_bl99_step(
     bound exists only to expose a single Picard iterate to the oracle gate.
     """
 
+    _check_nemo_version(nemo_version)
+    if nemo_version == "5.0.1":
+        _maximum_iterations = min(_maximum_iterations, _MAX_ITERATIONS_501)
     e_ice = jnp.asarray(e_ice)
     dtype = e_ice.dtype
     h_ice = jnp.asarray(h_ice, dtype=dtype)
@@ -793,6 +819,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                     _snow_ice_salinity: bool = True,
                     _nemo_snow_sublimation_order: bool = True,
                     _nemo_snow_remap: bool = True,
+                    nemo_version: str = "5.0.2",
                     ) -> tuple[SI3ColumnArrays, SI3ExchangeFluxes]:
     """Resolved no-lateral-melt thickness sequence (`icethd_dh.F90:91-533`).
 
@@ -801,6 +828,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     ``* a_i * r1_Dt_ice``).
     """
 
+    _check_nemo_version(nemo_version)
     a = state.concentration
     h_i0, h_s0 = state.h_ice, state.h_snow
     ar = a / dt                          # a_i_1d * r1_Dt_ice
@@ -850,7 +878,8 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         hfx_spr=precip_enthalpy * h_precip * ar,
         wfx_spr=-constants.rho_snow * h_precip * ar,
     )
-    if _nemo_snow_sublimation_order:
+    def _snow_sublimation(hseg_s, h_s_work, eseg_s, fx):
+        # `icethd_dh.F90:181-201` (5.0.1) / :155-175 (5.0.2).
         evaporation = jnp.where(
             _snow_deposition | (forcing.evaporation >= 0.0),
             forcing.evaporation,
@@ -878,6 +907,51 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             kept.append(jnp.maximum(0.0, hseg_s[..., k] + delta))
             snow_delta = jnp.minimum(snow_delta - delta, 0.0)
         hseg_s = jnp.stack(kept, axis=-1)
+        return hseg_s, h_s_work, eseg_s, fx, remaining_mass
+
+    def _snow_melt(hseg_s, h_s_work, eseg_s, fx):
+        # Surface melt consumes the four snow segments before ice
+        # (`icethd_dh.F90:204-280`).  Unlike the shared bulk snow helper, this path
+        # must retain each NEMO enthalpy segment for the subsequent conservative
+        # remap, so it is expressed on the existing segment carrier.
+        qml = jnp.where(
+            zdf.T_surface >= constants.T0,
+            zdf.qns_ice + forcing.qsr_ice - forcing.qtr_ice_top - zdf.qcn_ice_top,
+            0.0,
+        )
+        surface_energy = jnp.where(_surface_melt, jnp.maximum(qml * dt, 0.0), 0.0)
+        melted_snow = []
+        for k in range(4):
+            active = (hseg_s[..., k] > 0.0) & (surface_energy > 0.0)
+            delta = jnp.where(
+                active,
+                jnp.maximum(
+                    -surface_energy / jnp.maximum(eseg_s[..., k], 1.0e-20),
+                    -hseg_s[..., k],
+                ),
+                0.0,
+            )
+            melted_snow.append(hseg_s[..., k] + delta)
+            fx = _add_fluxes(
+                fx,
+                hfx_snw=-eseg_s[..., k] * delta * ar,
+                wfx_snw_sum=-constants.rho_snow * delta * ar,
+            )
+            h_s_work = jnp.maximum(0.0, h_s_work + delta)
+            surface_energy = jnp.maximum(
+                surface_energy + delta * eseg_s[..., k], 0.0
+            )
+        hseg_s = jnp.stack(melted_snow, axis=-1)
+        return hseg_s, h_s_work, fx, surface_energy
+
+    if _nemo_snow_sublimation_order and nemo_version == "5.0.1":
+        # 5.0.1 melts snow BEFORE sublimation/deposition (`icethd_dh.F90:179-201`).
+        hseg_s, h_s_work, fx, surface_energy = _snow_melt(hseg_s, h_s_work, eseg_s, fx)
+        hseg_s, h_s_work, eseg_s, fx, remaining_mass = _snow_sublimation(
+            hseg_s, h_s_work, eseg_s, fx)
+    elif _nemo_snow_sublimation_order:
+        hseg_s, h_s_work, eseg_s, fx, remaining_mass = _snow_sublimation(
+            hseg_s, h_s_work, eseg_s, fx)
     else:
         deposition = jnp.where(
             _snow_deposition,
@@ -913,38 +987,8 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         hseg_s = jnp.stack(kept, axis=-1)
         h_s_work = jnp.sum(hseg_s, axis=-1)
 
-    # Surface melt consumes the four snow segments before ice
-    # (`icethd_dh.F90:204-280`).  Unlike the shared bulk snow helper, this path
-    # must retain each NEMO enthalpy segment for the subsequent conservative
-    # remap, so it is expressed on the existing segment carrier.
-    qml = jnp.where(
-        zdf.T_surface >= constants.T0,
-        zdf.qns_ice + forcing.qsr_ice - forcing.qtr_ice_top - zdf.qcn_ice_top,
-        0.0,
-    )
-    surface_energy = jnp.where(_surface_melt, jnp.maximum(qml * dt, 0.0), 0.0)
-    melted_snow = []
-    for k in range(4):
-        active = (hseg_s[..., k] > 0.0) & (surface_energy > 0.0)
-        delta = jnp.where(
-            active,
-            jnp.maximum(
-                -surface_energy / jnp.maximum(eseg_s[..., k], 1.0e-20),
-                -hseg_s[..., k],
-            ),
-            0.0,
-        )
-        melted_snow.append(hseg_s[..., k] + delta)
-        fx = _add_fluxes(
-            fx,
-            hfx_snw=-eseg_s[..., k] * delta * ar,
-            wfx_snw_sum=-constants.rho_snow * delta * ar,
-        )
-        h_s_work = jnp.maximum(0.0, h_s_work + delta)
-        surface_energy = jnp.maximum(
-            surface_energy + delta * eseg_s[..., k], 0.0
-        )
-    hseg_s = jnp.stack(melted_snow, axis=-1)
+    if not (_nemo_snow_sublimation_order and nemo_version == "5.0.1"):
+        hseg_s, h_s_work, fx, surface_energy = _snow_melt(hseg_s, h_s_work, eseg_s, fx)
 
     old_dz = h_i0 / 3.0
     old_h = jnp.broadcast_to(old_dz[..., None], state.e_ice.shape)
@@ -1017,7 +1061,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     Tnew_c = forcing.t_bottom - constants.T0
     e_i_specific = (
         constants.c_ice * (Tnew_c - Tm)
-        - constants.latent_fusion * jnp.maximum(0.0, 1.0 - Tm / jnp.minimum(Tnew_c, -_EPS10))
+        - constants.latent_fusion * _latent_part(Tm, Tnew_c, nemo_version)
         + constants.c_ocean * Tm
     )
     e_water = constants.c_ocean * (forcing.t_bottom - constants.T0)
@@ -1270,6 +1314,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _nemo_eos_order: bool = True,
                            _nemo_snow_sublimation_order: bool = True,
                            _nemo_snow_remap: bool = True,
+                           nemo_version: str = "5.0.2",
                            ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
@@ -1279,6 +1324,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _nemo_branch_ranges=_zdf_branch_ranges,
         _nemo_snow_temperature_bounds=_nemo_snow_temperature_bounds,
         _nemo_eos_order=_nemo_eos_order,
+        nemo_version=nemo_version,
     )
     post_zdf = state._replace(T_surface=zdf.T_surface, e_ice=zdf.e_ice,
                               e_snow=zdf.e_snow)
@@ -1292,6 +1338,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _snow_ice_salinity=_snow_ice_salinity,
         _nemo_snow_sublimation_order=_nemo_snow_sublimation_order,
         _nemo_snow_remap=_nemo_snow_remap,
+        nemo_version=nemo_version,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
@@ -1306,7 +1353,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     Tbo_c = forcing.t_bottom - constants.T0
     e_new = constants.rho_ice * (
         constants.c_ice * (Tm - Tbo_c)
-        + constants.latent_fusion * jnp.maximum(0.0, 1.0 - Tm / jnp.minimum(Tbo_c, -_EPS10))
+        + constants.latent_fusion * _latent_part(Tm, Tbo_c, nemo_version)
         - constants.c_ocean * Tm
     )
     zEi = -e_new / constants.rho_ice

@@ -138,6 +138,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # Richards post-solve psi update: retention curve -> shift (PDI/Lu) or
         # exact reset; an unknown curve must raise, never pick one silently.
         ("packages/land/legoesm/land/richards.py", "solve_richards"),
+        # SI3 column port release selector ("5.0.1" | "5.0.2"): an unknown
+        # release must raise, never run the other release's order silently.
+        ("packages/ice/legoesm/ice/bitz_lipscomb.py", "_check_nemo_version"),
         # Distributed PCG preconditioner selection ("jacobi" | "poly"):
         # an unknown name must raise, never fall back to Jacobi.
         ("packages/ocean/legoesm/ocean/dynamics/barotropic_implicit_mpas.py", "barotropic_implicit_mpas"),
