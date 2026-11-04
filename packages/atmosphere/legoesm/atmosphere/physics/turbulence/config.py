@@ -140,6 +140,9 @@ __param_spec__ = {
             "C_s": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "Smagorinsky (1963) constant (atmospheric ~0.1-0.25)", "shape": None},
             "Pr_t": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
             "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
+            "wrf_c_s": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "WRF v4.8.0 namelist c_s (Registry default 0.25), km_opt=3 smag_km", "shape": None},
+            "wrf_prandtl": {"units": "1", "bounds": (0.2, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "WRF v4.8.0 module_model_constants prandtl = 1/3 (xkhv = xkmv/prandtl)", "shape": None},
+            "mix_upper_bound": {"units": "1", "bounds": (0.05, 0.5), "tunable_tier": 0, "transform": "none", "category": "numerics", "reference": "WRF v4.8.0 namelist mix_upper_bound (Registry default 0.1): explicit-diffusion stability cap K <= mub dz^2/dt", "shape": None},
         },
     },
     "SurfaceLayerConfig": {
@@ -419,19 +422,35 @@ class SmagorinskyConfig(NamedTuple):
     Pr_t : float
         Turbulent Prandtl number; Kh = Km / Pr_t (default 1.0).
     stability_form : str
-        How stable stratification suppresses mixing.  ``"lilly"`` (default,
-        unchanged behaviour) multiplies by ``√(max(0, 1 − Ri/Pr_t))``.
+        Which closure runs.  ``"wrf_km3"`` (default) is the port of WRF v4.8.0
+        ``km_opt = 3`` (``dyn_em/module_diffusion_em.F`` ``smag_km`` with
+        ``mix_isotropic = 0``, ``calculate_N2``, column limit of
+        ``cal_deform_and_div``); it reads only ``wrf_c_s``, ``wrf_prandtl``
+        and ``mix_upper_bound``.  ``"lilly"`` multiplies by
+        ``√(max(0, 1 − Ri/Pr_t))`` with the Blackadar length.
         ``"deardorff"`` instead SHRINKS the mixing length under stable
         stratification (Deardorff 1980, as used by SAM/PALM/ARPS/ERF and by
         this repo's own CRM and TKE-LES lanes), which avoids the hard cutoff
         whose slope diverges and makes ``"lilly"`` untunable on stable cases.
+    wrf_c_s : float
+        WRF Smagorinsky constant ``c_s`` (``"wrf_km3"`` only; default 0.25,
+        the WRF Registry default).
+    wrf_prandtl : float
+        WRF ``prandtl``: ``K_h = K_m / wrf_prandtl`` and the buoyancy term is
+        ``N² / wrf_prandtl`` (``"wrf_km3"`` only; default 1/3, WRF's constant).
+    mix_upper_bound : float
+        WRF non-dimensional cap ``K <= mix_upper_bound · dz² / dt``
+        (``"wrf_km3"`` only; default 0.1, the WRF Registry default).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
     C_s: float = 0.2
     l_mix_max: float = 100.0
     Pr_t: float = 1.0
-    stability_form: str = "lilly"
+    stability_form: str = "wrf_km3"
+    wrf_c_s: float = 0.25
+    wrf_prandtl: float = 1.0 / 3.0
+    mix_upper_bound: float = 0.1
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

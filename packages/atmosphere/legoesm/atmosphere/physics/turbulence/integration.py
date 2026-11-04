@@ -157,6 +157,21 @@ def resolved_clubb_config(config: TurbulenceConfig):
     return materialize_sub_config(config).clubb if config.scheme == "clubb" else None
 
 
+def _smagorinsky_condensate_kwargs(scheme_name, tracers, shape) -> dict:
+    """``{"q_c": .., "q_i": ..}`` columns for the WRF km_opt=3 Smagorinsky
+    buoyancy (its ``qv + qc + qi`` term and ``qc`` moist test), for whichever of
+    the two the state carries; other schemes get ``{}``.  A missing species
+    stays zero inside the scheme (a declared departure)."""
+    if scheme_name != "smagorinsky" or tracers is None:
+        return {}
+    out = {}
+    for name in ("q_c", "q_i"):
+        if name in tracers:
+            raw = tracers[name]
+            out[name] = (raw.data if hasattr(raw, "data") else raw).reshape(shape)
+    return out
+
+
 def get_turbulence_fn(config: TurbulenceConfig):
     """Select the turbulence backend based on config.scheme."""
     if config.scheme == "smagorinsky":
@@ -758,6 +773,8 @@ def _make_hydrostatic_turbulence(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, step_config,
+                **_smagorinsky_condensate_kwargs(
+                    scheme_name, state.tracers, (ncol, nlev)),
             )
 
         du_dt = turb_out.du_dt.reshape(shape_3d)
@@ -1214,6 +1231,8 @@ def _make_mpas_turbulence(
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, step_config,
                 **_sfc_kw,
+                **_smagorinsky_condensate_kwargs(
+                    scheme_name, state.tracers, (nCells, nlev)),
             )
         if _liquid_partition and turb_out.dq_c_dt is None:
             raise ValueError(
@@ -1917,6 +1936,8 @@ def _make_spectral_pe_turbulence(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, step_config, **_liq_kw,
+                **_smagorinsky_condensate_kwargs(
+                    scheme_name, state.tracers, (ncol, nlev)),
             )
 
         # Reshape tendencies to grid space

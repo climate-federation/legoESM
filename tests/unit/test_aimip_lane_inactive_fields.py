@@ -49,6 +49,11 @@ def test_helper_follows_scheme_pins_and_orography():
     assert ap.aimip_inactive_fields(
         cloud_scheme="xu_randall", microphysics="sundqvist", gwd="none",
         subgrid_orography=True) == frozenset()
+    # smagorinsky's default WRF km_opt=3 arm reads none of the Lilly knobs
+    assert ap.aimip_inactive_fields(
+        cloud_scheme="xu_randall", microphysics="sundqvist", gwd="none",
+        subgrid_orography=True, turbulence="smagorinsky") == frozenset(
+        "atm.turb.SmagorinskyConfig." + f for f in ("C_s", "Pr_t", "l_mix_max"))
 
 
 def _run_aimip_bundle(monkeypatch):
