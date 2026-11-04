@@ -4,6 +4,9 @@ usage: spread_run.py oracle <workdir>
        spread_run.py port   <workdir> <test_log>
        spread_run.py ifs_oracle <workdir>
        spread_run.py ifs_port   <workdir> <test_log>
+       spread_run.py ifs_aer_oracle <case> <workdir>   (aerosol arm, case in AER_CASES)
+       spread_run.py ifs_aer_port   <case> <workdir> <test_log>
+       spread_run.py ifs_aer_merge  <out.json> <workdir...>
 
 oracle: writes perturbed copies of the meridian input file (shared perturb.py,
         unchanged), runs the committed run49.sh with bld49/ecrad49.x and
@@ -229,7 +232,49 @@ IFS_EXE = f"{IFS_BLD}/ifs/ifs49_driver.x"
 IFS_NAM = f"{IFS_RUN}/base_a.nam"
 IFS_FIXTURE = f"{W}/tests/atmosphere/oracle_fixtures/ecrad_ifs49_interface.npz"
 IFS_UNTOUCHED = ()                  # vote C11: lat/lon perturbed, the seed held instead
+IFS_COPY_ONLY = ()                  # input files copied, never perturbed or float32-checked
+IFS_TEST = "tests.atmosphere.test_ecrad_ifs_interface_oracle"
+IFS_FAMILY = "ecrad_ifs49_interface"
+IFS_UNIT = ("OpenIFS 49r1 RADIATION_SCHEME + RADINTG glue + RADHEATN x4 via ifs49_driver.x "
+            "(base_a.nam); fields = every rh_*_s0..3 dump, test_ecrad_ifs_interface_oracle composed chain")
+IFS_CASE = "base_a: meridian fixture columns 0,4,..,28, one radiation call at step 4, RADHEATN steps 0-3"
 IFS_STEPS = 4
+
+
+AER_CASES = {  # case -> (ifs49_run_aer.sh run name, committed fixture)
+    "iv8": ("aer_a", "ecrad_ifs49_aer.npz"),
+    "d0201": ("d0201", "ecrad_ifs49_aer_0201.npz"),
+    "x100": ("x100", "ecrad_ifs49_aer_x100.npz"),
+}
+AER_CASE = None
+AER_UNSET_ABOVE_LAYTROP = ("dump:lw_coef_indself", "dump:lw_coef_zrat_h2och4", "dump:lw_coef_zrat_h2och4_1")
+
+
+def _use_aerosol_case(case):
+    """ifs_aer_oracle / ifs_aer_port: the same C8/C11 method on the aerosol arm
+    (ifs49_harness_aer.nam, NAERMACC=1) IV8 case, run by ifs49_run_aer.sh. Same perturbed
+    input set as the interface spread; the L137 A/B table (a vertical-coordinate table,
+    like the CAMS file and the optics tables) is copied unperturbed."""
+    global IFS_RUN, IFS_BLD, IFS_EXE, IFS_NAM, IFS_FIXTURE, IFS_COPY_ONLY, IFS_TEST, IFS_FAMILY
+    global IFS_UNIT, IFS_CASE, W, H, AER_CASE
+    run, fixture = AER_CASES[case]
+    AER_CASE = case
+    H = os.path.dirname(os.path.abspath(__file__))          # this worktree's harness and fixtures
+    W = os.path.abspath(os.path.join(H, "..", "..", "..", ".."))
+    AER = f"{A}/agents/aerosol"
+    IFS_RUN = f"{AER}/run_aer"
+    IFS_BLD = os.environ.get("IFS49_BLD", f"{AER}/bld")
+    IFS_EXE = f"{IFS_BLD}/ifs/ifs49_driver.x"
+    IFS_NAM = f"{IFS_RUN}/{run}.nam"
+    IFS_FIXTURE = f"{W}/tests/atmosphere/oracle_fixtures/{fixture}"
+    IFS_COPY_ONLY = ("l137_vah", "l137_vbh")
+    IFS_TEST = "tests.atmosphere.test_ecrad_ifs_aerosol_oracle"
+    IFS_FAMILY = f"ecrad_ifs49_aer_{case}"
+    IFS_UNIT = ("OpenIFS 49r1 aerosol arm (NAERMACC=1: CAMS 2D climatology, RADACT backgrounds) + "
+                "RADIATION_SCHEME + RADINTG glue + RADHEATN x4 via ifs49_driver.x (aer_a.nam); fields = "
+                f"every rh_*_s0..3 dump, test_ecrad_ifs_aerosol_oracle composed chain ({run}.nam)")
+    IFS_CASE = (f"{case}: meridian fixture columns 0,4,..,28 ({run}.nam: iv8 = 20200115 step 4 (IV8), "
+                "d0201 = 20200201 (B3), x100 = IV8 with aerosol inputs x100 (B6)), RADHEATN steps 0-3")
 
 
 def _ifs_read(path):
@@ -252,7 +297,7 @@ def _ifs_write(path, header, a):
 
 def _ifs_inputs():
     names = sorted(os.path.basename(p)[:-4] for p in os.listdir(f"{IFS_RUN}/inputs")
-                   if p.endswith(".txt") and p != "columns.txt")
+                   if p.endswith(".txt") and p != "columns.txt" and p[:-4] not in IFS_COPY_ONLY)
     return {n: _ifs_read(f"{IFS_RUN}/inputs/{n}.txt") for n in names}
 
 
@@ -279,7 +324,8 @@ def ifs_oracle(wd):
             _ifs_write(f"{d}/inputs/{n}.txt", h, vals.get(n, v))
             back = _ifs_read(f"{d}/inputs/{n}.txt")[1]
             assert _bitwise(back, vals.get(n, v)), n          # file holds exactly the intended bits
-        shutil.copyfile(f"{IFS_RUN}/inputs/columns.txt", f"{d}/inputs/columns.txt")
+        for n in ("columns",) + IFS_COPY_ONLY:
+            shutil.copyfile(f"{IFS_RUN}/inputs/{n}.txt", f"{d}/inputs/{n}.txt")
         env = dict(os.environ, DATA=f"{IFS_RUN}/data", OMP_NUM_THREADS="1",
                    ECRAD49_STAGE_DUMP=f"{d}/dump", ECRAD49_RNG_DUMP=f"{d}/rng.txt")
         env.pop("IFS49_ISEED_HOLD", None)
@@ -311,19 +357,37 @@ def ifs_port(wd, test_log):
     import math
     import jax
     jax.config.update("jax_enable_x64", True)
-    from tests.atmosphere import test_ecrad_ifs_interface_oracle as t
-    for f in ("spread_ecrad_ifs49_interface.json", "result.json"):
+    import importlib
+    from tests.atmosphere import test_ecrad_ifs_interface_oracle as base_t
+    t = importlib.import_module(IFS_TEST)   # its run_composed; radheatn/keys/metric from the interface test
+    for f in (f"spread_{IFS_FAMILY}.json", "result.json"):
         if os.path.exists(f"{wd}/{f}"):
             os.remove(f"{wd}/{f}")
     load = lambda tag: dict(np.load(f"{wd}/{tag}/z.npz"))  # noqa: E731
-    keys = [f"rh_{k}_s{s}" for s in range(IFS_STEPS) for k in t.RH_KEYS]
+    keys = [f"rh_{k}_s{s}" for s in range(IFS_STEPS) for k in base_t.RH_KEYS]
     fx = dict(np.load(IFS_FIXTURE))
     b1, b2 = load("base1"), load("base2")
     ctrl, notes = {}, []
     # C1: unperturbed rerun == committed interface fixture, every array, bitwise
-    bad = sorted(k for k in fx if k not in b1 or not _bitwise(b1[k], fx[k])) + sorted(set(b1) - set(fx))
+    masked = {}
+    if AER_CASE is not None:
+        # vote F1a: RRTM_SETCOEF leaves these arrays unset above the tropopause layer, so the
+        # dump there is uninitialised memory; mask levels >= the fixture's own ILAYTROP
+        # (0-based level index >= ILAYTROP), every other element and array bitwise
+        lt = np.asarray(fx["dump:lw_coef_ilaytrop"], np.int64)
+        lev = np.arange(np.shape(fx[AER_UNSET_ABOVE_LAYTROP[0]])[1])[None, :]
+        keep = lev < lt[:, None]
+        for k in AER_UNSET_ABOVE_LAYTROP:
+            masked[k] = int((~keep).sum())
+    def _c1_equal(k):
+        if k in masked:
+            return np.shape(b1[k]) == np.shape(fx[k]) and _bitwise(np.asarray(b1[k])[keep], np.asarray(fx[k])[keep])
+        return _bitwise(b1[k], fx[k])
+    bad = sorted(k for k in fx if k not in b1 or not _c1_equal(k)) + sorted(set(b1) - set(fx))
     ctrl["C1"] = "PASS" if not bad else "FAIL"
-    notes.append(f"C1 {len(fx)} arrays of ecrad_ifs49_interface.npz vs base1 rerun (rebuilt binary, "
+    if masked:
+        notes.append(f"C1 vote F1a mask (uninitialised RRTM_SETCOEF levels >= ILAYTROP): elements masked {masked}")
+    notes.append(f"C1 {len(fx)} arrays of {os.path.basename(IFS_FIXTURE)} vs base1 rerun (rebuilt binary, "
                  f"seed hold UNSET): mismatches {bad or 'none'}; base2 runs with the hold set, so C2 "
                  "also shows holding the unperturbed seed is inert")
     # C2: two unperturbed reruns and a same-seed rerun bitwise identical
@@ -371,12 +435,17 @@ def ifs_port(wd, test_log):
                  "flips where the perturbation moves a cloud boundary (PLAUSIBLE attribution).")
     # port on base1 (the committed test's composed chain, hard limit)
     def port_rh(z):
-        rs, carry = t.run_composed(z, t.replayed_uniforms(z, iseed=_held_seed()), math.inf)
-        c = t.ii.RadiationCarry(**carry)
+        u = base_t.replayed_uniforms(z, iseed=_held_seed())
+        if AER_CASE is None:
+            rs, carry = t.run_composed(z, u, math.inf)
+        else:
+            rs, carry = t.run_composed(dict(z, case=AER_CASE), math.inf, uniforms=u)
+        c = base_t.ii.RadiationCarry(**carry)
         out = {}
         for st in range(IFS_STEPS):
-            o = t.run_radheatn(z, c, st, math.inf)
-            out.update({f"rh_{k}_s{st}": float(t.rel_err(o[k], z[f"dump:rh_{k}_s{st}"])) for k in t.RH_KEYS})
+            o = base_t.run_radheatn(z, c, st, math.inf)
+            out.update({f"rh_{k}_s{st}": float(base_t.rel_err(o[k], z[f"dump:rh_{k}_s{st}"]))
+                        for k in base_t.RH_KEYS})
         return out
     port_base = port_rh(b1)
     # C4: harness rel == what the committed test printed (RH_COMPOSED lines)
@@ -384,6 +453,10 @@ def ifs_port(wd, test_log):
     for ln in open(test_log):
         if "RH_COMPOSED " in ln:
             k, v = ln.split("RH_COMPOSED ", 1)[1].split()[0], ln.split("max_rel=")[1].strip()
+            if AER_CASE is not None:
+                if not k.startswith(f"{AER_CASE}:"):
+                    continue
+                k = k.split(":", 1)[1]
             printed[k] = v
     mine = {k: f"{port_base[k]:.3e}" for k in keys}
     ctrl["C4"] = "PASS" if printed == mine else "FAIL"
@@ -393,10 +466,10 @@ def ifs_port(wd, test_log):
         raise SystemExit(f"CONTROL FAIL {ctrl}: no spread published")
     base = {k: b1["dump:" + k] for k in keys}
     per_runs = {sd: {k: runs[sd]["dump:" + k] for k in keys} for sd in P.SEEDS}
-    spread, per_seed = P.spread(base, per_runs, lambda a, b: t.rel_err(a, b))
+    spread, per_seed = P.spread(base, per_runs, lambda a, b: base_t.rel_err(a, b))
     # liveness (GLM): the perturbation must move every heating-rate field the
     # spread is used for (C8 fields); a dead perturbation would certify nothing
-    dead = sorted(k for k in keys if k.split("_")[1] in t._C8_FIELDS and not (spread[k] or 0.0) > 0.0)
+    dead = sorted(k for k in keys if k.split("_")[1] in base_t._C8_FIELDS and not (spread[k] or 0.0) > 0.0)
     if dead:
         ctrl["C3"] = "FAIL"
         notes.append(f"C3 FAIL: perturbation did not move {dead}")
@@ -412,19 +485,15 @@ def ifs_port(wd, test_log):
     for bad in ("-ffast-math", "-Ofast", "-ffp-contract=fast"):      # planted metadata
         assert not _ifs_flags_ok([f"{ok} {bad}"]), bad
     ctrl["C5"] = "PASS" if _ifs_flags_ok(info) else "FAIL"
-    compiler = " | ".join(info[:3]) + f" (ifs_interface build BUILD_INFO.txt; flags check {ctrl['C5']})"
+    compiler = " | ".join(info[:3]) + f" ({IFS_BLD}/ifs/BUILD_INFO.txt; flags check {ctrl['C5']})"
     if ctrl["C5"] != "PASS":
         raise SystemExit(f"C5 FAIL: build flags {info[:3]}")
     json.dump(P._enc(dict(controls=ctrl, notes=notes, spread=spread, per_seed=per_seed,
                           port_hard=port_base, port_on_seed=port_seed)),
               open(f"{wd}/result.json", "w"), indent=1, allow_nan=False)
-    cls = P.artifact(f"{wd}/spread_ecrad_ifs49_interface.json", family="ecrad_ifs49_interface",
-                     unit="OpenIFS 49r1 RADIATION_SCHEME + RADINTG glue + RADHEATN x4 via "
-                          "ifs49_driver.x (base_a.nam); fields = every rh_*_s0..3 dump, "
-                          "test_ecrad_ifs_interface_oracle composed chain",
+    cls = P.artifact(f"{wd}/spread_{IFS_FAMILY}.json", family=IFS_FAMILY, unit=IFS_UNIT,
                      fields_spread=spread, per_seed=per_seed, port_rel=port_base, compiler=compiler,
-                     controls=ctrl, cases=["base_a: meridian fixture columns 0,4,..,28, one radiation "
-                                           "call at step 4, RADHEATN steps 0-3"],
+                     controls=ctrl, cases=[IFS_CASE],
                      inputs_perturbed=sorted(floats), inputs_untouched=[
                          "harness namelist", "exact zeros",
                          "McICA seed held at the unperturbed lat/lon value (C11)"],
@@ -436,7 +505,54 @@ def ifs_port(wd, test_log):
               f"worst_on_seeds {max(port_seed[sd][k] for sd in P.SEEDS):.2e}")
 
 
+def ifs_aer_merge(out, workdirs):
+    """One artifact for the three aerosol cases, as the aerosol test reads it: every per-case
+    artifact (re-validated here by perturb.artifact) merged with spread/per_seed/port/class
+    keys prefixed "<case>:" and controls/compiler/cases/notes keyed by case."""
+    merged = {"spread": {}, "per_seed": {}, "port_vs_oracle_rel": {}, "field_class": {},
+              "controls": {}, "compiler": {}, "cases": {}, "notes": {}, "unit": {}}
+    from tests.atmosphere.test_ecrad_ifs_interface_oracle import RH_KEYS
+    want = {f"rh_{k}_s{s}" for s in range(IFS_STEPS) for k in RH_KEYS}   # same keys ifs_port scores
+    seen = set()
+    for wd in workdirs:
+        hits = [f for f in os.listdir(wd) if f.startswith("spread_ecrad_ifs49_aer_") and f.endswith(".json")]
+        if len(hits) != 1:
+            raise SystemExit(f"{wd}: expected one per-case artifact, got {hits}")
+        a = json.load(open(f"{wd}/{hits[0]}"))
+        case = a["family"][len("ecrad_ifs49_aer_"):]
+        if case not in AER_CASES or case in seen:
+            raise SystemExit(f"bad or repeated case {case}")
+        seen.add(case)
+        if any(a["controls"].get(c) != "PASS" for c in P.REQUIRED_CONTROLS):
+            raise SystemExit(f"{case}: controls {a['controls']}")
+        if set(a["spread"]) != want:
+            raise SystemExit(f"{case}: fields {sorted(set(a['spread']) ^ want)} differ from the {len(want)} scored keys")
+        # re-validate with the shared writer (seeds, field sets, per-seed max) and recompute classes
+        cls = P.artifact(os.devnull, family=a["family"], unit=a["unit"], fields_spread=a["spread"],
+                       per_seed=a["per_seed"], port_rel=a["port_vs_oracle_rel"], compiler=a["compiler"],
+                       controls=a["controls"], seeds=a["seeds"], cases=a["cases"],
+                       inputs_perturbed=a["inputs_perturbed"], inputs_untouched=a["inputs_untouched"],
+                       notes=a["notes"])
+        if cls != a["field_class"]:
+            raise SystemExit(f"{case}: stored field_class != recomputed {cls}")
+        for k in ("spread", "per_seed", "port_vs_oracle_rel", "field_class"):
+            merged[k].update({f"{case}:{f}": v for f, v in a[k].items()})
+        for k in ("controls", "compiler", "cases", "notes", "unit"):
+            merged[k][case] = a[k]
+        for k in ("label", "seeds", "zero_structure", "inputs_perturbed", "inputs_untouched"):
+            if merged.setdefault(k, a[k]) != a[k]:
+                raise SystemExit(f"{case}: {k} differs between cases")
+    if seen != set(AER_CASES):
+        raise SystemExit(f"cases {sorted(seen)} != {sorted(AER_CASES)}")
+    merged["family"] = "ecrad_ifs49_aer"
+    json.dump(merged, open(out, "w"), indent=1, sort_keys=True, allow_nan=False)
+    print("MERGED", out, {c: merged["controls"][c] for c in sorted(seen)})
+
+
 if __name__ == "__main__":
     {"oracle": lambda: oracle(sys.argv[2]), "port": lambda: port(sys.argv[2], sys.argv[3]),
      "ifs_oracle": lambda: ifs_oracle(sys.argv[2]),
-     "ifs_port": lambda: ifs_port(sys.argv[2], sys.argv[3])}[sys.argv[1]]()
+     "ifs_port": lambda: ifs_port(sys.argv[2], sys.argv[3]),
+     "ifs_aer_oracle": lambda: (_use_aerosol_case(sys.argv[2]), ifs_oracle(sys.argv[3])),
+     "ifs_aer_port": lambda: (_use_aerosol_case(sys.argv[2]), ifs_port(sys.argv[3], sys.argv[4])),
+     "ifs_aer_merge": lambda: ifs_aer_merge(sys.argv[2], sys.argv[3:])}[sys.argv[1]]()
