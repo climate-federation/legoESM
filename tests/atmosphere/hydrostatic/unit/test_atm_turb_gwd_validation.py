@@ -63,7 +63,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
 DT = 600.0
 
 TURB_SCHEMES = {
-    "smagorinsky": (smagorinsky_turbulence, lambda: SmagorinskyConfig(surface=SurfaceLayerConfig())),
+    "smagorinsky": (smagorinsky_turbulence, lambda: SmagorinskyConfig(surface=SurfaceLayerConfig(), stability_form="lilly")),
     "louis": (louis_turbulence, lambda: LouisConfig(surface=SurfaceLayerConfig())),
     "holtslag_boville": (holtslag_boville_turbulence, lambda: HoltslagBovilleConfig(surface=SurfaceLayerConfig())),
     "ysu": (ysu_turbulence, lambda: YSUConfig(surface=SurfaceLayerConfig())),

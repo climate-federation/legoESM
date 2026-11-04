@@ -48,7 +48,7 @@ QI_CLOUD = 2.0e-5    # kg/kg ice on those with T < T_freeze
 def write_constants(wrf, out):
     cfg = SmagorinskyConfig()
     vals = {"g": C.g, "r_d": C.R_d, "cp": C.c_pd, "r_v": C.R_v, "p1000mb": C.p_ref,
-            "XLV": C.L_v, "SVPT0": C.T_freeze, "prandtl": cfg.wrf_prandtl}
+            "XLV": C.L_v, "SVPT0": C.T_freeze, "prandtl": cfg.wrf_prandtl}  # latent-ok: WRF km_opt=3 oracle constant
     s = (Path(wrf) / "share/module_model_constants.F").read_text()
     for k, v in vals.items():
         pat = re.compile(rf"(PARAMETER\s*::\s*{k}\s*=)\s*[^!\n]+", re.IGNORECASE)

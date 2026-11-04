@@ -222,7 +222,7 @@ def wrf_km3_coefficients(u, v, T, q_v, q_c, q_i, p_full, p_half, z_half, dt,
     ``(1e-6/c_s^2)^2`` (below it the floor binds anyway).
     """
     g, R_d, R_v, cp, xlv = (constants.g, constants.R_d, constants.R_v,
-                            constants.c_pd, constants.L_v)
+                            constants.c_pd, constants.L_v)  # latent-ok: WRF km_opt=3 oracle constant
     flip = lambda a: a[:, ::-1]  # noqa: E731  top-down <-> WRF bottom-up
     qt_spec = q_v + q_c + q_i
     dry = 1.0 - qt_spec
