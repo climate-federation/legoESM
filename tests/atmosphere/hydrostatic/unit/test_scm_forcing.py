@@ -1476,3 +1476,58 @@ def test_theta_l_channels_need_cloud_water_in_the_column():
                     SCMForcing(subsidence_w=z, subsidence_on="theta_l_qt")):
         with pytest.raises(ValueError, match="'q_c'"):
             compute_forcing_tendencies(no_qc.state, no_qc.sigma_coord, forcing, 0.0)
+
+
+# --- surface law hook (SCMForcing.surface_flux_fn) ---------------------------------
+
+def _const_record(state, sigma_coord, t):
+    from legoesm.atmosphere.forcing.scm.scm_forcing import SurfaceFluxRecord
+    one = jnp.ones((), jnp.float64)
+    return SurfaceFluxRecord(w_theta_l=0.02 * one, w_q_t=3.0e-5 * one, uw=-0.04 * one,
+                             vw=0.01 * one, rho_s=1.15 * one, exner_s=1.003 * one)
+
+
+@pytest.mark.parametrize("bad,match", [
+    (dict(prescribe="none", flux_to_closure=False), "surface_flux_fn needs"),
+    (dict(prescribe="fluxes", flux_to_closure=False), "surface_flux_fn needs"),
+    (dict(prescribe="fluxes", flux_to_closure=True, w_th_s=lambda t: 0.0), "exclusive"),
+])
+def test_surface_flux_fn_validation(bad, match):
+    with pytest.raises(ValueError, match=match):
+        validate_forcing(SCMForcing(surface_flux_fn=_const_record, **bad))
+    validate_forcing(SCMForcing(surface_flux_fn=_const_record, prescribe="fluxes",
+                                flux_to_closure=True))
+
+
+def test_surface_flux_fn_reaches_the_closure_as_its_overrides():
+    forcing = SCMForcing(surface_flux_fn=_const_record, prescribe="fluxes",
+                         flux_to_closure=True)
+    from legoesm.atmosphere.physics.turbulence.config import (
+        SmagorinskyConfig, SurfaceLayerConfig)
+    q_v = jnp.linspace(1e-4, 1.4e-2, NLEV)
+    turb = TurbulenceConfig(scheme="smagorinsky", smagorinsky=SmagorinskyConfig(
+        surface=SurfaceLayerConfig(Ch_neutral=0.0)))
+    scm = SingleColumnModel.create(
+        physics_config=_no_physics_cfg()._replace(turbulence=turb), nlev=NLEV, dt=60.0,
+        T_profile=jnp.linspace(220.0, 295.0, NLEV), q_v_profile=q_v,
+        u=jnp.linspace(12.0, -6.0, NLEV), v=jnp.linspace(-3.0, 2.0, NLEV),
+        forcing=forcing)
+    seen = {}
+
+    def physics_fn(st, grid, sc, phys_state=None):
+        seen["ps"] = phys_state
+        return scm.physics_fn(st, grid, sc, phys_state=phys_state)
+
+    scm.pure_step_with_physics(scm.state, scm.phys_state, 0.0, physics_fn)
+    ps = seen["ps"]
+    assert float(ps.surface_wth_override.reshape(())) == pytest.approx(0.02 * 1.003, rel=1e-15)
+    assert float(ps.surface_wqv_override.reshape(())) == pytest.approx(3.0e-5, rel=1e-15)
+    assert float(ps.surface_tau_x_override_pa.reshape(())) == pytest.approx(-0.04 * 1.15, rel=1e-15)
+    assert float(ps.surface_tau_y_override_pa.reshape(())) == pytest.approx(0.01 * 1.15, rel=1e-15)
+    # the carried stress overrides exist from the start, so a scan keeps its carry
+    assert scm.phys_state.surface_tau_x_override_pa is not None
+    def body(c, _):
+        s, p = scm.pure_step(c[0], c[1], 0.0)
+        return (s, c[1] if p is None else p), None
+
+    jax.lax.scan(body, (scm.state, scm.phys_state), None, length=2)

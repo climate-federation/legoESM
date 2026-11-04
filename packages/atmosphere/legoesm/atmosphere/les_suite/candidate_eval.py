@@ -181,12 +181,15 @@ class RolloutRecord(NamedTuple):
     """``inputs``/``fluxes``: the column the closure saw at each step and the fluxes
     applied in that step (leading axis = step, surface-first); ``final_inputs``: the
     column after the last step; ``other_accel``: per step, the (du, dv) of everything
-    but a momentum candidate with dissipation heating (else ``None``)."""
+    but a momentum candidate with dissipation heating (else ``None``); ``budget``:
+    per step, the column budget terms of :func:`step_budget` when the column runs a
+    surface law (else ``None``)."""
 
     inputs: ColumnInputs
     fluxes: Fluxes
     final_inputs: ColumnInputs
     other_accel: tuple | None = None
+    budget: dict | None = None
 
     def at(self, step: int) -> ColumnInputs:
         """The column state after ``step`` steps (``step == nsteps`` → final)."""
@@ -199,10 +202,107 @@ class RolloutRecord(NamedTuple):
         return jax.tree_util.tree_map(lambda a: a[step], self.fluxes)
 
 
+def _with_surface(kind: str, flux_a, flux_b, inputs: ColumnInputs):
+    """Owned fluxes with their surface value set to the column's surface law."""
+    def s0(f, v):
+        return jnp.asarray(f).at[0].set(v)
+    if kind == "scalar":
+        return s0(flux_a, inputs.w_theta_s), s0(flux_b, inputs.w_qt_s)
+    if kind == "momentum":
+        return s0(flux_a, inputs.uw_s), s0(flux_b, inputs.vw_s)
+    return ((s0(flux_a[0], inputs.w_theta_s), s0(flux_a[1], inputs.w_qt_s)),
+            (s0(flux_b[0], inputs.uw_s), s0(flux_b[1], inputs.vw_s)))
+
+
+#: Quantities of :func:`step_budget`: column water (q_v + q_c + q_r), moist energy
+#: ``c_pd T + L_v q_v + ½|u|²`` and the two momentum components.
+BUDGET_QUANTITIES = ("water", "energy", "u", "v")
+
+
+def _tend_arrays(t, like):
+    """Surface-first tendency columns of ``t`` (zeros for an absent tracer)."""
+    tr = t.tracer_tendencies or {}
+    out = {"T": _col(t.dT_dt.data), "u": _col(t.du_dt.data), "v": _col(t.dv_dt.data)}
+    for k in ("q_v", "q_c", "q_r"):
+        out[k] = _col(tr[k].data) if k in tr else jnp.zeros_like(like)
+    return out
+
+
+#: The processes :func:`step_budget` splits a step into.
+BUDGET_PROCESSES = ("turbulence", "microphysics", "forcing")
+
+
+def step_budget(out, tend_full, tend_turb, ftend, inputs: ColumnInputs, record) -> dict:
+    """One forward-Euler step's column budget, per unit area per second.
+
+    The step's tendency is split by process: ``turbulence`` (what the harness
+    applied for the closure: ``out − (tend_full − tend_turb)``), ``microphysics``
+    (the rest of the physics, ``tend_full − tend_turb``) and ``forcing`` (the SCM
+    forcing ``ftend``). For each process and quantity (water q_v + q_c + q_r, moist
+    energy c_pd T + L_v q_v + ½|u|², u, v): ``<process>_<q>`` the mass-weighted
+    column integral of its tendency (kinetic energy at the step's midpoint winds,
+    so the total is the exact change over the step) and ``gross_<process>_<q>`` the
+    integral of its absolute terms (the round-off scale). ``rate_<q>`` is the total.
+    Declared supply: ``sfc_<q>`` the surface law at the surface interface (enthalpy
+    ``ρ_s c_pd Π_s w'θ_l'``, latent ``L_v ρ_s w'q_t'``, stress ``ρ_s u'w'`` and its
+    work), ``precip`` the rain reaching the ground. ``record_rho_rel`` /
+    ``record_exner_rel``: how far the record's ``rho_s``/``exner_s`` are from the
+    column's surface interface values, which the closures and this budget use.
+    No turbulent flux leaves through the column top (the turbulence share is held
+    to the surface law alone); the forcing's own column change is its declared
+    supply."""
+    m, rh, ex = inputs.mass, inputs.rho_half[0], inputs.exner_half[0]
+    full, turb_t = _tend_arrays(tend_full, m), _tend_arrays(tend_turb, m)
+    applied, forc = _tend_arrays(out, m), _tend_arrays(ftend, m)
+    parts = {
+        "turbulence": {k: applied[k] - full[k] + turb_t[k] for k in full},
+        "microphysics": {k: full[k] - turb_t[k] for k in full},
+        "forcing": forc,
+    }
+    # a process share that is a difference of tendencies carries the round-off of
+    # its operands, so its scale is the operands' magnitude, not the difference's
+    mag = {
+        "turbulence": {k: jnp.abs(applied[k]) + jnp.abs(full[k]) + jnp.abs(turb_t[k])
+                       for k in full},
+        "microphysics": {k: jnp.abs(full[k]) + jnp.abs(turb_t[k]) for k in full},
+        "forcing": {k: jnp.abs(v) for k, v in forc.items()},
+    }
+    du = sum(p["u"] for p in parts.values())
+    dv = sum(p["v"] for p in parts.values())
+    u_mid, v_mid = step_midpoint_winds(du, dv, inputs)
+    lv, cp = constants.L_v, constants.c_pd  # latent-ok: column moist-energy budget at the constant L_v
+    res = {}
+    for name, p in parts.items():
+        g = mag[name]
+        res[name + "_water"] = jnp.sum(m * (p["q_v"] + p["q_c"] + p["q_r"]))
+        res["gross_" + name + "_water"] = jnp.sum(m * (g["q_v"] + g["q_c"] + g["q_r"]))
+        res[name + "_energy"] = jnp.sum(
+            m * (cp * p["T"] + lv * p["q_v"] + u_mid * p["u"] + v_mid * p["v"]))
+        res["gross_" + name + "_energy"] = jnp.sum(
+            m * (cp * g["T"] + lv * g["q_v"] + jnp.abs(u_mid) * g["u"]
+                 + jnp.abs(v_mid) * g["v"]))
+        for c in ("u", "v"):
+            res[name + "_" + c] = jnp.sum(m * p[c])
+            res["gross_" + name + "_" + c] = jnp.sum(m * g[c])
+    for q in BUDGET_QUANTITIES:
+        res["rate_" + q] = sum(res[n + "_" + q] for n in BUDGET_PROCESSES)
+    precip = tend_full.precip
+    res["precip"] = (jnp.reshape(jnp.asarray(precip.data), ()) if precip is not None
+                     else jnp.zeros((), m.dtype))
+    res["sfc_water"] = rh * inputs.w_qt_s
+    res["sfc_energy"] = (rh * (cp * ex * inputs.w_theta_s + lv * inputs.w_qt_s)
+                         + rh * (u_mid[0] * inputs.uw_s + v_mid[0] * inputs.vw_s))
+    res["sfc_u"] = rh * inputs.uw_s
+    res["sfc_v"] = rh * inputs.vw_s
+    res["record_rho_rel"] = jnp.abs(record.rho_s / rh - 1.0)
+    res["record_exner_rel"] = jnp.abs(record.exner_s / ex - 1.0)
+    return res
+
+
 def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = None,
             params: dict | None = None, heat_form: str | None = None,
             ke_heating: bool | None = None, f_c: float = 0.0, u_geo=None, v_geo=None,
-            sfc_drag_most: bool | None = None):
+            sfc_drag_most: bool | None = None, energy_form_baseline: bool = False):
     """Free-run ``scm`` for ``nsteps`` with ``candidate`` owning its part (or the pure
     baseline when ``candidate is None``). Returns ``(RolloutRecord, aux_final)``.
 
@@ -211,9 +311,26 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
     only (one physics call per step, so the candidate sees the same stage state).
     ``sfc_drag_most`` (the LES case's wall-drag law) reaches the candidate as
     ``ColumnInputs.sfc_drag_most`` (NaN when not given).
+
+    A column with a surface law (``SCMForcing.surface_flux_fn``, the CloudBench
+    columns) gives every closure the law's heat, moisture and momentum fluxes: they
+    are the ``ColumnInputs`` surface values for every kind, and the surface value of
+    every flux the harness applies (a candidate's, or a converted baseline's) is set
+    to them; a native baseline applies them through its own surface override. Such
+    a run also records :func:`step_budget` per step, with each closure's own surface
+    flux before the harness set it (``own_sfc_*``).
+
+    ``energy_form_baseline`` (baseline only): the baseline's turbulence is applied
+    through the candidate conversion as a ``"both"`` closure in enthalpy form with
+    dissipation heating, its interface fluxes being those its tendencies imply, so
+    it conserves the column moist energy (PI 2026-11-03). Its prognostic turbulence
+    state, if any, still evolves from its own fluxes.
     """
     if scm.time_integrator != "forward_euler":
         raise ValueError("rollout supports forward_euler only (one stage per step)")
+    if energy_form_baseline and candidate is not None:
+        raise ValueError("energy_form_baseline converts the baseline; a candidate "
+                         "brings its own heat_form")
     if candidate is not None:
         if params is None:
             raise ValueError("a candidate rollout needs params")
@@ -235,8 +352,12 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
     sigma = scm.sigma_coord
     dt = scm.dt
     kind = None if candidate is None else candidate.kind
+    conv_kind = "both" if energy_form_baseline else kind
+    conv_heat = "enthalpy" if energy_form_baseline else heat_form
+    conv_ke = True if energy_form_baseline else ke_heating
 
     forcing = scm.forcing_arg
+    record_fn = None if forcing is None else forcing.surface_flux_fn
 
     def _geo(t):
         """The geostrophic wind the SCM forcing applies at time ``t`` (surface-first;
@@ -258,6 +379,10 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
                                  v_geo=vg, dt=dt, uw_s=zero, vw_s=zero, z0_m=z0_m,
                                  z0h_m=z0h_m, sfc_drag_most=sfc_drag_most)
         imp = implied_fluxes(tend_turb, base)
+        if record_fn is not None:  # the surface law gives every closure its fluxes
+            rec = record_fn(state, sigma, t)
+            return base._replace(w_theta_s=rec.w_theta_l, w_qt_s=rec.w_q_t,
+                                 uw_s=rec.uw, vw_s=rec.vw), imp
         if kind == "both":  # the candidate computes its own surface stress
             nan = jnp.full((), jnp.nan, zero.dtype)
             return base._replace(uw_s=nan, vw_s=nan), imp
@@ -306,30 +431,49 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
             inputs, imp = _inputs(st, phys_state, tend_turb, t)
             stash["inputs"] = inputs
             stash["other"] = None
-            if candidate is None:
+            stash["budget"] = None
+
+            def _done(out, own):
+                if record_fn is not None:
+                    ftend = compute_forcing_tendencies(st, sc, forcing, t)
+                    stash["budget"] = step_budget(out, tend_full, tend_turb, ftend, inputs,
+                                                  record_fn(st, sc, t))
+                    # the surface value of each flux the closure itself produced,
+                    # before the harness set it to the surface law (diagnostic)
+                    for k, f in own.items():
+                        stash["budget"]["own_sfc_" + k] = jnp.asarray(f)[0]
+                return out, phys_out
+
+            if conv_kind is None:
                 stash["fluxes"], stash["aux"] = imp, aux
-                return tend_full, phys_out
-            fa, fb, aux_new = candidate.fluxes(params, inputs, aux)
+                return _done(tend_full, imp._asdict())
+            if candidate is None:
+                fa, fb, aux_new = (imp.wtheta, imp.wqt), (imp.uw, imp.vw), aux
+            else:
+                fa, fb, aux_new = candidate.fluxes(params, inputs, aux)
+            own = {**imp._asdict(), **owned_fluxes(conv_kind, fa, fb)}
+            if record_fn is not None:
+                fa, fb = _with_surface(conv_kind, fa, fb, inputs)
             other = (_other_accel(tend_full, tend_turb, st, sc, t)
-                     if owns_momentum(kind) and ke_heating else None)
-            ct = candidate_tendencies(kind, fa, fb, inputs, heat_form=heat_form,
-                                      ke_heating=ke_heating, other_accel=other)
+                     if owns_momentum(conv_kind) and conv_ke else None)
+            ct = candidate_tendencies(conv_kind, fa, fb, inputs, heat_form=conv_heat,
+                                      ke_heating=conv_ke, other_accel=other)
             stash["other"] = other
-            stash["fluxes"] = imp._replace(**owned_fluxes(kind, fa, fb))
+            stash["fluxes"] = imp._replace(**owned_fluxes(conv_kind, fa, fb))
             stash["aux"] = aux_new
-            return _owned_tendencies(tend_full, tend_turb, ct, inputs, kind), phys_out
+            return _done(_owned_tendencies(tend_full, tend_turb, ct, inputs, conv_kind), own)
 
         new_state, new_phys = scm.pure_step_with_physics(state, phys, t, physics_fn)
         new_phys = new_phys if new_phys is not None else phys
         return ((new_state, new_phys, t + dt, stash["aux"]),
-                (stash["inputs"], stash["fluxes"], stash["other"]))
+                (stash["inputs"], stash["fluxes"], stash["other"], stash["budget"]))
 
-    (fstate, fphys, t_f, aux_f), (inputs_rec, flux_rec, other_rec) = lax.scan(
+    (fstate, fphys, t_f, aux_f), (inputs_rec, flux_rec, other_rec, budget_rec) = lax.scan(
         body, (scm.state, scm.phys_state, scm.t_seconds, aux0), None, length=nsteps)
     tend_f, _ = physics_turb(fstate, scm.grid, sigma, phys_state=fphys)
     final_inputs, _ = _inputs(fstate, fphys, tend_f, t_f)
     return RolloutRecord(inputs=inputs_rec, fluxes=flux_rec, final_inputs=final_inputs,
-                         other_accel=other_rec), aux_f
+                         other_accel=other_rec, budget=budget_rec), aux_f
 
 
 # --- E2 scoring --------------------------------------------------------------------

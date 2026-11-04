@@ -233,7 +233,7 @@ def moist_scm_microphysics(artifact: LESReferenceArtifact,
     return microphysics_from_record(setup["microphysics"])
 
 
-def _seed_rain(artifact: LESReferenceArtifact, micro: MicrophysicsConfig,
+def seed_rain(artifact: LESReferenceArtifact, micro: MicrophysicsConfig,
                z_les, z_scm):
     """The rain mass to seed the SCM with at the artifact's t=0, or ``None``.
 
@@ -434,14 +434,14 @@ def build_cbl_scm_from_artifact(
         # A clear column gives q_c=0, θ=θ_l, q_v=q_t either way ⇒ BOMEX unchanged.
         qt0 = interp_profile(jnp.asarray(artifact.qt)[0], z_les, z_scm)
         exner = exner_function(p_full)
-        q_r_scm = _seed_rain(artifact, moist_scm_microphysics(artifact, microphysics),
+        q_r_scm = seed_rain(artifact, moist_scm_microphysics(artifact, microphysics),
                              z_les, z_scm)
         if artifact.qc is not None:
             q_c_adj = jnp.clip(
                 interp_profile(jnp.asarray(artifact.qc)[0], z_les, z_scm), 0.0, None)
             theta_adj = theta_scm + constants.L_v / (constants.c_pd * exner) * q_c_adj
             # q_t = q_v + q_c + q_r: the rain the LES carried at this frame is
-            # seeded as rain (Kessler only, see _seed_rain), never folded into vapour.
+            # seeded as rain (Kessler only, see seed_rain), never folded into vapour.
             q_v_scm = qt0 - q_c_adj - (0.0 if q_r_scm is None else q_r_scm)
         else:
             if q_r_scm is not None:

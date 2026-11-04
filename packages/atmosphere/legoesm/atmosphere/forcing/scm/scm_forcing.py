@@ -127,6 +127,15 @@ class SCMForcing(NamedTuple):
         ``wind_relax_rate`` [1/s]; ``0.0`` disables it. Targets [m/s].
     rad_T_tendency
         Prescribed radiative temperature tendency [K/s], added to dT/dt.
+    surface_flux_fn
+        A surface law evaluated on the column each stage instead of a time
+        series: ``surface_flux_fn(state, sigma_coord, t) -> SurfaceFluxRecord``
+        (kinematic theta_l, total-water and momentum fluxes, positive up, plus
+        the surface density and Exner function they refer to). Needs
+        ``prescribe="fluxes"`` and ``flux_to_closure=True`` with ``w_th_s`` and
+        ``w_qv_s`` unset; the record reaches the closure through the same
+        per-step overrides (heat as ``rho_s c_pd exner_s w_theta_l``, stress as
+        ``rho_s uw`` [Pa]).
     """
     f_c: float = 0.0
     u_geo: Optional[ProfileFn] = None
@@ -148,6 +157,20 @@ class SCMForcing(NamedTuple):
     u_target: Optional[ProfileFn] = None
     v_target: Optional[ProfileFn] = None
     rad_T_tendency: Optional[ProfileFn] = None
+    surface_flux_fn: Optional[Callable] = None
+
+
+class SurfaceFluxRecord(NamedTuple):
+    """One stage's surface fluxes from a surface law (see ``SCMForcing``):
+    kinematic, positive up; ``rho_s`` [kg/m3] and ``exner_s`` the surface
+    density and Exner function the energetic forms use."""
+
+    w_theta_l: jax.Array
+    w_q_t: jax.Array
+    uw: jax.Array
+    vw: jax.Array
+    rho_s: jax.Array
+    exner_s: jax.Array
 
 
 def default_forcing() -> SCMForcing:
@@ -214,10 +237,22 @@ def validate_forcing(forcing: SCMForcing) -> None:
             "relaxation would be silently off.")
     if forcing.prescribe == "T_s" and forcing.T_s is None:
         raise ValueError("prescribe='T_s' requires SCMForcing.T_s callable.")
-    if forcing.prescribe == "fluxes":
-        if forcing.w_th_s is None and forcing.w_qv_s is None:
+    if forcing.surface_flux_fn is not None:
+        if not (forcing.prescribe == "fluxes" and forcing.flux_to_closure):
             raise ValueError(
-                "prescribe='fluxes' requires at least one of w_th_s, w_qv_s."
+                "SCMForcing.surface_flux_fn needs prescribe='fluxes' and "
+                "flux_to_closure=True; it reaches the closure only as the "
+                "per-step surface override.")
+        if forcing.w_th_s is not None or forcing.w_qv_s is not None:
+            raise ValueError(
+                "SCMForcing.surface_flux_fn and w_th_s/w_qv_s are exclusive; "
+                "two surface fluxes for one boundary would be ambiguous.")
+    if forcing.prescribe == "fluxes":
+        if (forcing.w_th_s is None and forcing.w_qv_s is None
+                and forcing.surface_flux_fn is None):
+            raise ValueError(
+                "prescribe='fluxes' requires at least one of w_th_s, w_qv_s "
+                "or surface_flux_fn."
             )
     elif forcing.flux_to_closure:
         # Silently inert otherwise: nothing outside the prescribe='fluxes'
@@ -596,7 +631,7 @@ def inject_prescribed_T_sfc_into_phys_state(phys_state, T_s_value):
 
 
 def inject_prescribed_surface_fluxes_into_phys_state(
-    phys_state, *, wth=None, wqv=None,
+    phys_state, *, wth=None, wqv=None, tau_x=None, tau_y=None,
 ):
     """Write this step's prescribed surface KINEMATIC fluxes into PhysicsState.
 
@@ -612,6 +647,8 @@ def inject_prescribed_surface_fluxes_into_phys_state(
     units and sign as ``SCMForcing.w_th_s`` / ``w_qv_s``, unconverted.  Either
     may be ``None``, which leaves that channel absent (a dry case has no
     moisture flux, and writing a zero would be a different statement).
+    ``tau_x``/``tau_y`` [Pa, stress on the atmosphere] go to the stress
+    overrides the closure applies in place of its own drag.
 
     NO host-side validation here, deliberately, and this is the one real
     difference from the ``T_s`` injector: the value comes from a callable of a
@@ -634,6 +671,12 @@ def inject_prescribed_surface_fluxes_into_phys_state(
     if wqv is not None:
         updates["surface_wqv_override"] = jnp.broadcast_to(
             jnp.asarray(wqv, dtype=dtype), shape)
+    if tau_x is not None:
+        updates["surface_tau_x_override_pa"] = jnp.broadcast_to(
+            jnp.asarray(tau_x, dtype=dtype), shape)
+    if tau_y is not None:
+        updates["surface_tau_y_override_pa"] = jnp.broadcast_to(
+            jnp.asarray(tau_y, dtype=dtype), shape)
     if not updates:
         return phys_state
     return phys_state._replace(**updates)

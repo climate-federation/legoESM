@@ -378,11 +378,22 @@ def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = Non
                     "carry the per-step surface flux, but phys_state is None; "
                     "the flux would be applied nowhere."
                 )
-            phys_state = inject_prescribed_surface_fluxes_into_phys_state(
-                phys_state,
-                wth=None if forcing.w_th_s is None else forcing.w_th_s(t),
-                wqv=None if forcing.w_qv_s is None else forcing.w_qv_s(t),
-            )
+            if forcing.surface_flux_fn is not None:
+                # A surface law on this stage's column: the closure's heat
+                # flux is the record's enthalpy flux rho_s c_pd exner_s w,
+                # i.e. the kinematic override w*exner_s (the closure converts
+                # with rho_s c_pd), and its stress is rho_s * u'w'.
+                rec = forcing.surface_flux_fn(state, sigma_coord, t)
+                phys_state = inject_prescribed_surface_fluxes_into_phys_state(
+                    phys_state, wth=rec.w_theta_l * rec.exner_s, wqv=rec.w_q_t,
+                    tau_x=rec.rho_s * rec.uw, tau_y=rec.rho_s * rec.vw,
+                )
+            else:
+                phys_state = inject_prescribed_surface_fluxes_into_phys_state(
+                    phys_state,
+                    wth=None if forcing.w_th_s is None else forcing.w_th_s(t),
+                    wqv=None if forcing.w_qv_s is None else forcing.w_qv_s(t),
+                )
 
         try:
             tend, phys_out = physics_fn(
@@ -1031,6 +1042,13 @@ class SingleColumnModel:
             ncol=1, nlev=nlev, physics_config=physics_config,
             dtype=dtype, prng_seed=prng_seed,
         )
+        if forcing is not None and forcing.surface_flux_fn is not None:
+            # The stress overrides are carried step to step, so they must exist
+            # from the start for a scan's carry to keep its structure; every
+            # stage overwrites them before any closure reads them.
+            zero = jnp.zeros_like(phys_state.surface_T_sfc_override)
+            phys_state = phys_state._replace(
+                surface_tau_x_override_pa=zero, surface_tau_y_override_pa=zero)
         return cls(
             physics_fn=physics_fn, state=state, phys_state=phys_state,
             grid=grid, sigma_coord=sigma_coord, dt=dt,

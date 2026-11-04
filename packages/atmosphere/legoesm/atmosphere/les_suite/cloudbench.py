@@ -233,6 +233,21 @@ def frame_profiles(s, dx, dy, dz, z_phys):
     return prof, check
 
 
+#: The LES domain top [m] and swirl-lm's gravity, for the column built from a case.
+DOMAIN_TOP_M = _CB_DOMAIN_M
+SWIRL_G_M_S2 = _CB_G
+
+
+def surface_theta_l(theta_li_s: float, q_t_s: float, p_s: float) -> float:
+    """Our θ_l at the surface from the run's surface θ_li (no condensate there):
+    T_s = θ_li (p_s/p00)^(R_m/c_pm) with swirl-lm's moist constants (water.py
+    ``potential_temperatures``), then T_s/Π with our Exner function."""
+    r_m = (1.0 - q_t_s) * _CB_R_D + q_t_s * _CB_R_V
+    cp_m = (1.0 - q_t_s) * _CB_CP_D + q_t_s * _CB_CP_V
+    t_s = theta_li_s * (p_s / _CB_P00) ** (r_m / cp_m)
+    return float(t_s / np.asarray(exner_function(p_s)))
+
+
 def run_surface_settings(pbtxt: str) -> dict:
     """The surface roughness ``z_0`` [m] and ``surface_gustiness`` [m/s] the run's
     swirl-lm config (``_swirl_lm.pbtxt`` in the store attributes) set; each must
