@@ -7078,6 +7078,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "local depth) instead of the flat "
                         "--runoff-depth-spread-m. Requires --runoff; mutually "
                         "exclusive with --runoff-depth-spread-m.")
+    p.add_argument("--runoff-depth-nemo-levels", action="store_true",
+                   help="With --runoff-depth-nemo-ini: spread runoff over NEMO's "
+                        "WHOLE levels nk_rnf (sbcrnf.F90:426-441: first level "
+                        ">= 2 whose T-depth reaches h, capped at the seafloor; "
+                        "h_rnf = live thickness of those levels) instead of "
+                        "the fractional depth h. Needs the run's reference "
+                        "T-depth ladder (z_coord.t_depth_ref). Default off "
+                        "(fractional, previous behaviour).")
     p.add_argument("--runoff-dep-max", type=float, default=None,
                    help="Override NEMO rn_dep_max [m] (default 150) used by "
                         "--runoff-depth-nemo-ini: the depth the biggest rivers "
@@ -8944,6 +8952,9 @@ def main() -> int:
             "--runoff-dep-max/--runoff-rnf-max require --runoff-depth-nemo-ini "
             "(they override the NEMO ln_rnf_depth_ini map; without it they would "
             "silently do nothing).")
+    if args.runoff_depth_nemo_levels and not args.runoff_depth_nemo_ini:
+        raise SystemExit(
+            "--runoff-depth-nemo-levels requires --runoff-depth-nemo-ini.")
     if args.runoff_depth_nemo_ini:
         # NEMO ln_rnf_depth_ini: per-cell spread depth from the runoff
         # climatology maximum — small Arctic/Siberian rivers stay near-surface
@@ -8979,6 +8990,21 @@ def main() -> int:
             _rd_kw["rnf_max"] = float(args.runoff_rnf_max)
         _h_rnf = nemo_runoff_depth_map(
             np.asarray(runoff_monthly), np.asarray(H_bathy), **_rd_kw)
+        _spread_kw = {"runoff_depth_spread_map": jnp.asarray(_h_rnf)}
+        if args.runoff_depth_nemo_levels:
+            # NEMO whole levels nk_rnf (sbcrnf.F90:426-441) on the run's own
+            # reference T-depth ladder; no midpoint fallback (vote V4).
+            from legoesm.ocean.forcing.runoff_depth import (
+                nemo_runoff_level_count)
+            _gdept = getattr(z_coord, "t_depth_ref", None)
+            if _gdept is None:
+                raise SystemExit(
+                    "--runoff-depth-nemo-levels needs the reference T-depth "
+                    "ladder (z_coord.t_depth_ref); this vertical coordinate "
+                    "carries none.")
+            _spread_kw = {"runoff_depth_spread_levels": jnp.asarray(
+                nemo_runoff_level_count(np.asarray(runoff_monthly),
+                                        np.asarray(_gdept), **_rd_kw))}
         if app_grid_type == "mpas":
             # Voronoi MPAS: rebuild the model with the per-cell map threaded
             # into MPASOceanConfig.  The freshwater application in
@@ -8990,8 +9016,7 @@ def main() -> int:
             from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
             model = MPASOceanModel(
                 grid, z_coord,
-                model.config._replace(
-                    runoff_depth_spread_map=jnp.asarray(_h_rnf)),
+                model.config._replace(**_spread_kw),
                 iwm_forcing=getattr(model, "_iwm_forcing", None))
         else:
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -8999,8 +9024,7 @@ def main() -> int:
             )
             model = LatLonCGridOceanModel(
                 grid, z_coord,
-                model.config._replace(
-                    runoff_depth_spread_map=jnp.asarray(_h_rnf)),
+                model.config._replace(**_spread_kw),
                 iwm_forcing=getattr(model, "_iwm_forcing", None))
         _wetm = np.asarray(state.land_mask.data) > 0.5
         print(f"[setup] NEMO runoff depth map (ln_rnf_depth_ini): "
@@ -9008,6 +9032,10 @@ def main() -> int:
               f"{_h_rnf[_wetm].max():.1f}] m; "
               f"{(np.asarray(runoff_monthly).max(0)[_wetm] > 0).sum()} "
               f"runoff cells")
+        if "runoff_depth_spread_levels" in _spread_kw:
+            _nk = np.asarray(_spread_kw["runoff_depth_spread_levels"])
+            print(f"[setup] NEMO whole-level runoff spread: nk_rnf wet range "
+                  f"[{_nk[_wetm].min()},{_nk[_wetm].max()}]")
     _fw_cfg_kw = {}
     if args.freshwater_salinity != "s_ref":
         _fw_cfg_kw["freshwater_salinity"] = args.freshwater_salinity

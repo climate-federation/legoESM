@@ -97,7 +97,8 @@ def test_frozen_knobs_keep_value_and_leaf_but_get_no_gradient(tmp_path):
     assert set(full.raw_values) == set(part.raw_values)
     for k, v in part.raw_values.items():
         assert isinstance(v, float) == (k not in names)
-        assert float(v) == float(full.raw_values[k])
+        if k in names:   # frozen knobs run at their exact value (no pull-in)
+            assert float(v) == float(full.raw_values[k])
     # the gradient reaches only the trainable knobs
     g = eqx.filter_grad(lambda m: sum(m.as_dict().values()))(part)
     assert g.raw_values["sbm_tau_c"] is None
@@ -112,7 +113,7 @@ def test_checkpoint_loads_into_array_and_frozen_templates(tmp_path):
     dtype, and into a frozen template as a float; fp32 knobs under x64 is the
     case where a raw float would land on disk as float64 (codex review)."""
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.ml.training import save_checkpoint
+    from legoesm.ml.training import load_checkpoint, save_checkpoint
     old = get_policy()
     set_policy(PrecisionPolicy.fp32())
     try:
@@ -122,17 +123,17 @@ def test_checkpoint_loads_into_array_and_frozen_templates(tmp_path):
         part = eqx.tree_at(lambda m: m.raw_values["sbm_tau_c"], part, 0.25)
         p = tmp_path / "m.eqx"
         save_checkpoint(part, p)
-        into_full = eqx.tree_deserialise_leaves(p, full)
+        into_full = load_checkpoint(full, p)
         v = into_full.raw_values["sbm_tau_c"]
         assert v.dtype == full.raw_values["sbm_tau_c"].dtype == jnp.float32
         assert float(v) == 0.25
-        into_part = eqx.tree_deserialise_leaves(
-            p, AIMIPClassicalParams.from_defaults(trainable=names))
+        into_part = load_checkpoint(
+            AIMIPClassicalParams.from_defaults(trainable=names), p)
         assert into_part.raw_values["sbm_tau_c"] == 0.25
         assert isinstance(into_part.raw_values["sbm_tau_c"], float)
         # every knob frozen (no array to take the dtype from)
         save_checkpoint(AIMIPClassicalParams.from_defaults(trainable=()), p)
-        assert eqx.tree_deserialise_leaves(p, full).raw_values[
+        assert load_checkpoint(full, p).raw_values[
             "sbm_tau_c"].dtype == jnp.float32
     finally:
         set_policy(old)

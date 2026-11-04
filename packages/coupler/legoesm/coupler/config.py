@@ -7,11 +7,16 @@ from typing import NamedTuple
 import jax
 
 from legoesm.surface_albedo import OceanAlbedoConfig
+from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+                                      NCAR_NEUTRAL_WIDTH)
 
 __param_spec__ = {
     "CouplerConfig": {
         "scheme_key": "coupler.surface",
         "excluded": {
+            "large_yeager_neutral_width": "numerics: RULE 5 smoothing width of the Large-Yeager neutral Stanton switch (zeta_u)",
+            "large_yeager_dthv_width": "numerics: RULE 5 smoothing width of the Large-Yeager first-guess stability switch [K]",
+            "large_yeager_cd_cutoff_width": "numerics: RULE 5 smoothing band of the Large-Yeager 33 m/s drag cutoff [m/s]",
             "U_min": "numerics: minimum wind-speed floor for bulk fluxes [m/s]",
             "co2_ppmv_default": "forcing: default atmospheric CO2 [ppmv]",
             "coupling_dt": "numerics: coupling timestep [s]",
@@ -132,3 +137,10 @@ class CouplerConfig(NamedTuple):
     bulk_n_iter: int = 5              # MOST iterations (coare3/large_yeager)
     # Zenith-dependent ocean albedo (Task 10)
     ocean_albedo_config: OceanAlbedoConfig = OceanAlbedoConfig()
+    # Large-Yeager (bulk_scheme="large_yeager", AeroBulk TURB_NCAR) RULE 5
+    # smooth-switch widths (#2241): in-loop neutral Stanton switch half-width
+    # in zeta_u, first-guess switch half-width in dthv [K], 33 m/s drag-cutoff
+    # band [m/s]; 0.0 = AeroBulk's hard switch.  Read only by that scheme.
+    large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
+    large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
+    large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH

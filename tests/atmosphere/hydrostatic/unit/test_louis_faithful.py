@@ -1,11 +1,12 @@
-"""Oracle-faithfulness tests for the Louis (1979)/LTG82 stability functions.
+"""Closed-form checks of the Louis stability functions.
 
-Oracle: the PUBLISHED closed forms of Louis (1979), Boundary-Layer Meteorol. 17,
-187-202 (Eqs. 19-20), with the momentum/heat coefficient split of Louis, Tiedtke
-& Geleyn (1982). These pin ``physics._shared.louis_stability_functions`` against
-INDEPENDENTLY WRITTEN expressions of the paper equations — distinct from
-``test_turbulence_shared_helpers.py``, whose ``_louis_reference`` is a copy of the
-OLD louis.py code block (a dedup-regression lock, not an oracle check).
+These pin ``physics._shared.louis_stability_functions`` against independently
+written closed forms.  The stable branch is the OpenIFS vdfexcu.F90:393-395
+form (heat function MULTIPLIES by sqrt(1+d*Ri)); the unstable checks here call
+the helper WITHOUT full-level heights, i.e. the legacy l^2/dz^2 geometry that
+only YSU still uses.  The oracle match against the RUNNING OpenIFS / ICON codes
+(including the ICON cube-root unstable geometry Louis now uses) is
+``test_louis_oracle.py``.
 
 FAITHFUL forms (stable/unstable branch + LTG82 b-split) are pinned where the
 sigmoid blend collapses to a single branch; DEPARTURES (c=16.6 Holtslag&De Bruin
@@ -56,8 +57,9 @@ def _call(Ri, l_mix, dz, b, c, d, sharp=SHARP, b_heat=None):
 # ===========================================================================
 # FAITHFUL: the published closed forms
 # ===========================================================================
-def test_faithful_stable_branch_is_louis1979_eq20():
-    """f = 1/(1 + 2b*Ri/sqrt(1+d*Ri)) at stable Ri (blend -> stable branch)."""
+def test_stable_branch_is_openifs_vdfexcu_form():
+    """f_m = 1/(1 + 2b*Ri/sqrt(1+d*Ri)), f_h = 1/(1 + 2b_h*Ri*sqrt(1+d*Ri)) at
+    stable Ri (blend -> stable branch); OpenIFS vdfexcu.F90:393-395."""
     Ri = np.array([0.3, 0.7, 1.5, 4.0])  # sigmoid(100*Ri) == 1 to ~1e-13
     l_mix = np.full_like(Ri, 30.0)
     dz = np.full_like(Ri, 50.0)
@@ -65,17 +67,15 @@ def test_faithful_stable_branch_is_louis1979_eq20():
                    b_heat=LTG82_B_HEAT_RATIO * LOUIS1979_B)
     expected_m = 1.0 / (1.0 + 2.0 * LOUIS1979_B * Ri / np.sqrt(1.0 + LOUIS1979_D * Ri))
     b_h = LTG82_B_HEAT_RATIO * LOUIS1979_B
-    expected_h = 1.0 / (1.0 + 2.0 * b_h * Ri / np.sqrt(1.0 + LOUIS1979_D * Ri))
+    expected_h = 1.0 / (1.0 + 2.0 * b_h * Ri * np.sqrt(1.0 + LOUIS1979_D * Ri))
     assert np.allclose(fm, expected_m, rtol=1e-9, atol=1e-12)
     assert np.allclose(fh, expected_h, rtol=1e-9, atol=1e-12)
 
 
-def test_faithful_unstable_branch_is_louis1979_eq19_interior():
-    """f = 1 - 2b*Ri/(1 + 3bc*l^2*sqrt|Ri|/dz^2) at unstable Ri (blend->unstable).
-
-    The interior geometry factor C = 3bc*l^2/dz^2 replaces the surface-layer
-    C = 3bc*a^2*sqrt(z/z0); the FORM (Louis 1979 Eq. 19) is what we pin.
-    """
+def test_legacy_unstable_branch_without_heights():
+    """f = 1 - 2b*Ri/(1 + 3bc*l^2*sqrt|Ri|/dz^2) at unstable Ri (blend->unstable)
+    when no full-level heights are passed (the legacy geometry YSU uses; NOT the
+    ECHAM/ICON form, which needs the heights)."""
     Ri = np.array([-0.3, -0.8, -2.0, -6.0])  # sigmoid(100*Ri) == 0 to ~1e-13
     l_mix = np.array([10.0, 25.0, 40.0, 60.0])
     dz = np.array([50.0, 50.0, 80.0, 100.0])
@@ -103,7 +103,8 @@ def test_faithful_ltg82_split_prandtl_direction_and_km_invariance():
     """LTG82: Pr_t = K_m/K_h < 1 unstable, > 1 stable; K_m independent of b_heat.
 
     b_heat > b enhances heat mixing more than momentum when unstable (f_h > f_m)
-    and suppresses it more when stable (f_h < f_m); b_heat = b -> f_h == f_m.
+    and suppresses it more when stable (f_h < f_m); b_heat = b -> f_h == f_m on
+    the UNSTABLE branch only (stable heat multiplies by sqrt(1+d*Ri)).
     Because only the numerator carries b_heat, f_m must NOT move with b_heat.
     """
     l_mix, dz = np.full(1, 30.0), np.full(1, 50.0)
@@ -115,7 +116,7 @@ def test_faithful_ltg82_split_prandtl_direction_and_km_invariance():
     fm_s, fh_s = _call([0.5], l_mix, dz, b, c, d, b_heat=b_h)
     assert fh_s[0] < fm_s[0]  # heat more suppressed (stable)
 
-    # b_heat = b recovers the Louis-1979 single function.
+    # b_heat = b: unstable heat function equals momentum (stable ones differ).
     fm_eq, fh_eq = _call([-0.5], l_mix, dz, b, c, d, b_heat=b)
     assert np.allclose(fh_eq, fm_eq, rtol=1e-12, atol=1e-14)
 

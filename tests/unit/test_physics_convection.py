@@ -929,7 +929,8 @@ def test_kuo_convergence_closure_removes_local_source():
 
     config = KuoConfig()
     out = kuo_convection(T, q_v, p_full, p_half, dt=900.0, config=config,
-                         moisture_convergence=ptenq)
+                         moisture_convergence=ptenq,
+                         w_grid=jnp.full_like(ptenq, 0.01))
 
     dp = p_half[:, 1:] - p_half[:, :-1]
     g = constants.g

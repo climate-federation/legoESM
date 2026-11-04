@@ -142,6 +142,7 @@ __param_spec__ = {
             "Fr_sharpness": "p-norm exponent of the smooth min(taudmp, tausat) (NOT a Froude-number transition); a differentiability/smoothing width, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "crit_level_floor": "signed source-projected wind U_proj (NOT a wind magnitude) at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
+            "oro_wind_ramp_width": "numerics: smooth-switch width of the U > oro_min_wind launch gate (RULE 5), value decided by codex+GLM (#2241)",
         },
         "params": {
             # --- orographic launch amplitude ---
@@ -159,7 +160,7 @@ __param_spec__ = {
             "crit_level_floor": "signed source-projected wind U_proj (NOT a wind magnitude) at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "min_wind_sharpness": "sigmoid sharpness of the smooth min-wind activation; a differentiability/smoothing width, not a closure",
-            "softmin_sharpness": "sigmoid sharpness of the saturation-cap blend; a differentiability/smoothing width, not a closure",
+            "softmin_sharpness": "p of the p-norm smooth min of the saturation cap min(taudmp, tausat); a differentiability/smoothing width, not a closure",
         },
         "params": {
             # --- orographic launch amplitude / efficiency ---
@@ -270,6 +271,14 @@ class LindzenConfig(NamedTuple):
     umcfac : float
         Maximum fraction of ``|c - ubm|`` (c = 0) the wind may change per step
         (default 0.5, E3SM ``umcfac``).
+    oro_wind_ramp_width : float
+        Width [m/s] of the smooth ``U > oro_min_wind`` (2 m/s) launch gate
+        (default 0.5, RULE 5, #2241): the launch stress is multiplied by
+        ``smoothstep_quintic((U - 2)/w)``, exactly 0 at and below 2 m/s and
+        exact from 2.5 m/s.  ``0.0`` is E3SM's hard gate (the stress jumps
+        from tau(2 m/s) to 0).  The mountain-height gate (``hdsp > 10 m``) and
+        the 1 Pa pressure floors stay hard: they are static (orography; the
+        model-top interface), not model state.
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
@@ -279,6 +288,7 @@ class LindzenConfig(NamedTuple):
     crit_level_floor: float = 0.5
     tndmax_per_day: float = 500.0
     umcfac: float = 0.5
+    oro_wind_ramp_width: float = 0.5
 
 
 class McFarlaneConfig(NamedTuple):
@@ -313,10 +323,10 @@ class McFarlaneConfig(NamedTuple):
         Sigmoid sharpness for the smooth ``U > min_wind`` activation
         (default 20.0).  Higher values approach a hard step.
     softmin_sharpness : float
-        Sigmoid sharpness of the saturation-cap blend (default 50.0): the
-        smooth form of CAM's ``tau = min(taudmp, tausat)``, blending toward
-        ``tausat`` with ``sigmoid(softmin_sharpness*(taudmp/tausat - 1))``;
-        exact ``min`` as the sharpness -> inf.
+        Exponent p of the p-norm smooth min (default 50.0): the smooth form
+        of CAM's ``tau = min(taudmp, tausat)``,
+        ``(taudmp^-p + tausat^-p)^(-1/p)`` (the Lindzen form, #2241); never
+        above either stress, exact ``min`` as p -> inf.
     fcrit2 : float
         Critical Froude number squared (default 1.0, CAM ``fcrit2``).  Used in
         the McFarlane (1987) / E3SM ``gw_oro_src`` displacement-height cap
@@ -369,8 +379,9 @@ class McFarlaneConfig(NamedTuple):
         two are combined as a smooth XNOR multiplying ``tausat``; the hard
         limit (sharpness -> inf, floor -> 0) is CAM's test exactly.
     crit_level_floor : float
-        Offset [m/s] of the two smoothed sign tests (default 0.5); CAM's
-        phase speed ``c = 0`` is the hard limit ``crit_level_floor -> 0``.
+        Offset [m/s] of the two smoothed sign tests (default 0.0 = CAM's
+        orographic phase speed ``c = 0``, gw_common.F90:485 in
+        cam_cesm2_1_rel_60).
     tndmax_per_day : float
         Absolute ceiling on ``|du/dt|`` [m/s/day] (default 400.0, CAM6
         ``tndmax = 400/86400`` in cam_cesm2_1_rel_60 gw_common.F90, applied
@@ -399,7 +410,7 @@ class McFarlaneConfig(NamedTuple):
     use_e3sm_hdsp: bool | str = "auto"
     use_depth_averaged_source: bool = True
     crit_level_sharpness: float = 10.0
-    crit_level_floor: float = 0.5
+    crit_level_floor: float = 0.0
     tndmax_per_day: float = 400.0
     umcfac: float = 0.5
     effgw_oro: float = 0.125

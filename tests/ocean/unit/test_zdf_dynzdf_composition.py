@@ -620,3 +620,32 @@ def test_barotropic_drag_rate_partial_now_velocity_raises():
             barotropic_substeps_latlon_cgrid(
                 state, 600.0, 2, grid, z, config,
                 add_barotropic_coriolis=False, **kw)
+
+
+def test_nemo_bottom_drag_rate_faces_traces_the_drag_coefficients():
+    """rn_Cd0, rn_Cdmax, rn_z0, rn_ke0, rn_Uc0 must be traceable (trainable)
+    inputs, not Python floats (round 316); the rate is linear in Cd0."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        nemo_bottom_drag_rate_faces,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    grid, z, state, config = _partial_cell_channel(n_lat=4, n_lon=5)
+    h_k = compute_layer_thickness(state.eta.data, state.H_bathy.data, z,
+                                  min_water_column_m=config.min_water_column_m)
+    u = jnp.linspace(0.011, 0.019, state.u.data.size).reshape(state.u.data.shape)
+    v = jnp.linspace(-0.017, -0.009, state.v.data.size).reshape(state.v.data.shape)
+    names = ("bottom_drag_cd0", "bottom_drag_cdmax", "bottom_drag_z0",
+             "bottom_drag_ke0", "bottom_drag_uc0")
+    bd = config.bottom_drag
+
+    def total(p):
+        cfg = config._replace(bottom_drag=bd._replace(**p))
+        r_u, r_v = nemo_bottom_drag_rate_faces(u, v, h_k, z, cfg, grid)[:2]
+        return jnp.sum(r_u) + jnp.sum(r_v)
+
+    p0 = {k: jnp.float64(getattr(bd, k)) for k in names}
+    g = jax.jit(jax.grad(total))(p0)
+    np.testing.assert_allclose(float(g["bottom_drag_cd0"]),
+                               float(total(p0)) / CD0, rtol=1e-12)
+    assert float(g["bottom_drag_ke0"]) > 0.0

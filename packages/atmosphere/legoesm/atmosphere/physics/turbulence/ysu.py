@@ -9,12 +9,13 @@ Two code paths share :func:`ysu_turbulence`:
   physics_mmm 550b5b494758ad2756394e93cb08b5709b8feb83) on its clear-sky path
   (``ysu_topdown_pblmix=.false.``, no cloud water/ice, no BEP urban canopy,
   ``ctopo`` absent, no ocean current), oracle-tested against the running
-  Fortran (``tests/atmosphere/hydrostatic/unit/test_ysu_oracle.py``).  The
-  existing sharpness fields smooth the oracle's three hard switches and reduce
-  to it at their hard limit; every other switch is ported as ``jnp.where``.
-  **NOT RULE 5 COMPLIANT** (user decision 2026-10-28): the PBL-top level and
-  the switches derived from it are hard at the default.  Opt-in kernel only;
-  these switches must be smoothed before any lane uses this path (#2231).
+  Fortran (``tests/atmosphere/hydrostatic/unit/test_ysu_oracle.py``).  Four
+  sharpness fields smooth the bulk-Ri first crossing, the PBL-top level and
+  the switches derived from it, the in/above-PBL selection, the Ri sign and the
+  entrainment-layer cutoff, and reduce to the oracle at their hard limit.
+  **NOT RULE 5 COMPLIANT** (#2231): the switches listed in :func:`bl_ysu_run`
+  as still hard are hard at the default.  Opt-in kernel only; they must be
+  smoothed before any lane uses this path.
 * **Legacy surrogate (NOT-YET-FAITHFUL)** — taken when ``surface_layer`` is
   ``None``, which is what every lane does today: no lane builds the WRF
   surface-layer state (bulk Richardson number, integrated stability functions,
@@ -255,7 +256,6 @@ _ROSS_A = 0.16          # brcr over water: min(0.16*(1e-7*Ro)^-0.18, 0.3) (l.787
 _ROSS_SCALE = 1.0e-7
 _ROSS_EXP = -0.18
 _BRCR_WATER_MAX = 0.3
-_ENTFAC_UNSET = 1.0e30  # entfac outside the entrainment layer (l.933)
 _ENTFAC_MAX = 4.6       # entrainment layer: entfac < 4.6 (l.1059)
 _SS_EPS = 1.0e-9        # added to the squared shear (l.989)
 _RLAMDZ_FRAC = 0.1      # rlamdz = min(max(0.1*dz, rlam), 300, dz) (l.1004)
@@ -320,14 +320,31 @@ class YSUOutput(NamedTuple):
     pblflg: jax.Array
 
 
-def _take(a, idx):
-    """a[:, idx] per column."""
-    return jnp.take_along_axis(a, idx[:, None], axis=1)[:, 0]
+def _soft_gt0(x, sharpness, at_zero):
+    """Smooth ``x > 0``: ``sigmoid(sharpness*x)``; at ``x == 0`` exactly the
+    oracle's hard value ``at_zero`` (the sigmoid alone gives 1/2 there at any
+    sharpness)."""
+    return jnp.where(x == 0.0, at_zero, jax.nn.sigmoid(sharpness * x))
+
+
+def _pbl_weights(zr, above, p_gt1, inv_gt1, region_sharpness):
+    """In-PBL weight ``wp`` and its conditional on ``kpbl > 1`` (``in_pbl``)
+    per interface, from ``zr = za/hpbl - 1``, ``above = P(kpbl <= k)``,
+    ``p_gt1 = P(kpbl > 1)`` and ``inv_gt1 = 1/p_gt1`` (0 where p_gt1 is 0).
+
+    Given kpbl > 1: k < kpbl at the exact tie ``zr == 0`` (P(kpbl > k) already
+    implies kpbl > 1, hence the division and no second factor p_gt1), else the
+    height sigmoid."""
+    eq = zr == 0.0
+    in_pbl = jnp.where(eq, (1.0 - above) * inv_gt1,
+                       1.0 - jax.nn.sigmoid(region_sharpness * zr))
+    wp = jnp.where(eq, 1.0 - above, p_gt1 * in_pbl)
+    return wp, in_pbl
 
 
 def bl_ysu_run(u, v, T, q_v, p_full, p_half, exner, dz, ust, hfx, qfx,
                sfc: YSUSurfaceLayer, dt, *, pbl_sharpness, region_sharpness,
-               ri_sharpness) -> YSUOutput:
+               ri_sharpness, entrainment_cutoff_sharpness) -> YSUOutput:
     """WRF v4.8.0 ``bl_ysu_run`` (clear-sky path), batched over columns.
 
     Ported path: ``ysu_topdown_pblmix=.false.``, ``f_qc=f_qi=.false.`` (so the
@@ -358,30 +375,57 @@ def bl_ysu_run(u, v, T, q_v, p_full, p_half, exner, dz, ust, hfx, qfx,
       free-atmosphere diffusivity, as ``sigmoid(s*ri)``; each branch is
       evaluated at ``min(ri,0)`` / ``max(ri,0)``, its value at ``ri = 0``,
       where both branches equal ``dk``.
-
-    Every other oracle switch is ported as a hard ``jnp.where``; operands of
-    unselected branches are replaced by benign values only so their gradients
-    stay finite (selected values are untouched).
+    * The PBL-top level ``kpbl`` (#2231) is a distribution over levels 1..n:
+      each pass's first-crossing weights (``pbl_sharpness``, the same weights
+      that give hpbl), with the no-crossing mass on level n and the
+      ``kpbl = 1`` rule (``h < zq(2)``) as ``sigmoid(region_sharpness*(h/zq(2)
+      - 1))``.  The PBL flag is a weight in [0, 1]; ``a & b`` -> ``a*b``,
+      ``where(f, A, B)`` -> ``f*A + (1-f)*B`` on hpbl and on the distribution
+      (pass selections, the stable-surface ``hpbl < zq(2)`` test likewise).
+      The entrainment-level picks apply the oracle's max/min/products per
+      candidate level, then average over the distribution; "interface above
+      kpbl" is the cumulative distribution; ``delta`` is the PBL weight times
+      its PBL value, and ``entfac`` uses that PBL value everywhere.  The PBL
+      flag implies ``kpbl > 1``, so what it multiplies (the level averages,
+      the entrainment layer, the in-PBL nonlocal fluxes) is conditioned on
+      ``kpbl > 1``.
+    * ``entrainment_cutoff_sharpness``: the entrainment layer ``entfac < 4.6``
+      as ``sigmoid(s*(4.6 - entfac))``.
+    The hard ``kpbl`` and ``pblflg`` outputs are diagnostics computed as the
+    oracle does (on the smooth hpbl), with the hard stable test they need;
+    none of these feeds hpbl, delta, the diffusivities or the tendencies.
+    The ``zfac`` denominator (``hpbl - zl1`` if ``kpbl > 1``, else 1): both
+    branches' raw in-PBL diffusivities and ``zfacent`` are mixed by
+    P(kpbl > 1), and the caps applied once after the mix.
 
     NOT RULE 5 COMPLIANT (opt-in kernel; smooth before any lane uses it,
-    #2231): see the unsmoothed switches below.
+    #2231).  Still hard ``jnp.where`` / ``max`` / ``min`` / ``clip`` on traced
+    state: the surface stability flag (``br > 0``), the unstable flag
+    (``sflux > 0``), the zero-10 m-wind guard of the water Rossby number, the
+    momentum entrainment thresholds (``|du| > tmin``, a jump), the floors and
+    caps (``max(dthvx, tmin)``, ``min(dqx, 0)``, ``clip(zfac, zfmin, 1)``,
+    the diffusivity bounds, ...), and the Ri-sign branch arguments
+    ``min(ri, 0)`` / ``max(ri, 0)``: each branch is flat on the far side, so
+    the blended free-atmosphere K is continuous but its slope in ``ri`` jumps
+    at ``ri = 0`` exactly (heat: -4 dk vs -5 dk; read off the formulas, not
+    measured).  Operands of unselected branches are
+    replaced by benign values only so their gradients stay finite.
 
-    KNOWN DIFFERENCE (RULE 5, measured 2026-10-28 on the 23-column oracle
+    KNOWN DIFFERENCE (RULE 5, measured 2026-10-29 on the 23-column oracle
     fixture plus its 8-level upper-endpoint column, fp64): the oracle uses the
     hard switches; at the ``YSUConfig`` defaults (``pbl_smooth_sharpness`` 20,
-    ``blend_pbl_sharpness`` 10, ``blend_ri_sharpness`` 100) the port differs
-    from it per column by up to 48 % in PBL height (median 5 %), up to 95 % in
-    the diffusivities (medians 6-9 %), and up to 89 % / 35 % / 44 % in the
-    u / v / temperature tendencies (medians 6 % / 12 % / 4 %); one column's moisture
-    tendency changes sign (200 %), and one column's ``kpbl`` differs.  Setting
-    all three fields to 1e300 recovers the oracle to 1e-10.  The column water
+    ``blend_pbl_sharpness`` 10, ``blend_ri_sharpness`` 100,
+    ``entrainment_cutoff_sharpness`` 2) the port differs from it per column by
+    up to 48 % in PBL height (median 4 %), up to 95 % in the diffusivities
+    (medians 7-11 %), up to 19 % in the entrainment thickness delta (one
+    column has a small non-zero delta where the oracle's is 0), and up to
+    89 % / 31 % / 44 % in the u / v / temperature tendencies (medians 4 % /
+    7 % / 5 %); one column's moisture tendency changes sign (200 %).  Setting
+    all four fields to 1e300 recovers the oracle to 1e-10.  The column water
     and heat budgets still close (residual < 1e-13 of the surface flux).  At an
     exact bulk-Ri tie (``brup == brcr``, e.g. a constant-theta_v layer) the
     default is DISCONTINUOUS: the tie gets weight 0 while any perturbation off
-    it gets ~1/2.  The hard switches listed above as ``jnp.where`` (the
-    PBL-top level ``kpbl`` and the flags and level picks derived from it) are
-    not smoothed: the derivative ignores which level is the PBL top, and the
-    output jumps where one of them flips.  Per-case gaps are stored in
+    it gets ~1/2.  Per-case gaps are stored in
     ``tests/atmosphere/hydrostatic/unit/test_ysu_oracle.py::DEFAULT_GAP``.
     """
     flip = lambda a: a[:, ::-1]  # noqa: E731  top-first -> oracle bottom-up
@@ -414,7 +458,10 @@ def bl_ysu_run(u, v, T, q_v, p_full, p_half, exner, dz, ust, hfx, qfx,
 
     def scan(thermal, brcr):
         """One bulk-Ri pass (l.624-648): first level k >= 2 with brup > brcr,
-        hpbl interpolated with the oracle's brint; kpbl = n if none."""
+        hpbl interpolated with the oracle's brint; kpbl = n if none.
+
+        Returns hpbl, the hard kpbl (diagnostic), the smooth kpbl distribution
+        P (ncol, n) over levels 1..n, and the smooth flag P(kpbl > 1)."""
         brcr = jnp.broadcast_to(brcr, (ncol,))[:, None]
         brup = (thvx[:, 1:] - thermal[:, None]) * gza / spdk2
         crossed = brup > brcr
@@ -433,13 +480,22 @@ def bl_ysu_run(u, v, T, q_v, p_full, p_half, exner, dz, ust, hfx, qfx,
         not_yet = jnp.cumprod(jnp.concatenate(
             [jnp.ones((ncol, 1), tx.dtype), 1.0 - w_c[:, :-1]], axis=1), axis=1)
         # no crossing: the oracle interpolates in the top pair (kpbl = n)
-        h = (jnp.sum(not_yet * w_c * h_pair, axis=1)
-             + jnp.prod(1.0 - w_c, axis=1) * h_pair[:, -1])
-        return h, jnp.where(h < zq[:, 1], 1, kpbl)
+        p_cross = not_yet * w_c                      # kpbl = 2..n
+        p_none = jnp.prod(1.0 - w_c, axis=1)
+        h = jnp.sum(p_cross * h_pair, axis=1) + p_none * h_pair[:, -1]
+        # kpbl = 1 when h < zq(2) (l.648): smooth flag for h >= zq(2)
+        f_gt1 = _soft_gt0(h / zq[:, 1] - 1.0, region_sharpness, 1.0)
+        dist = jnp.concatenate([(1.0 - f_gt1)[:, None], f_gt1[:, None]
+                                * p_cross.at[:, -1].add(p_none)], axis=1)
+        return h, jnp.where(h < zq[:, 1], 1, kpbl), dist, f_gt1
 
     # --- first guess (l.617-648) ---
-    h_guess, kpbl = scan(thermal1, _BRCR_UB)
+    # Hard kpbl / pblflg are kept as diagnostics (outputs); the computation
+    # uses their smooth counterparts: dist (kpbl distribution) and pf
+    # (pblflg weight), composed as a&b -> a*b, where(f, A, B) -> f*A+(1-f)*B.
+    h_guess, kpbl, dist, f1 = scan(thermal1, _BRCR_UB)
     pblflg = kpbl > 1
+    pf = f1
 
     # --- surface-layer scales from the first guess (l.650-678) ---
     zol1 = jnp.maximum(sfc.br * sfc.psim * sfc.psim / sfc.psih, _RIMIN)
@@ -468,76 +524,110 @@ def bl_ysu_run(u, v, T, q_v, p_full, p_half, exner, dz, ust, hfx, qfx,
     hgamu = jnp.where(unst, brint_u * ux[:, 0], 0.0)
     hgamv = jnp.where(unst, brint_u * vx[:, 0], 0.0)
     pblflg = pblflg & unst
+    pf = pf * jnp.where(unst, 1.0, 0.0)
 
     # --- second pass with the thermal (l.704-768, topdown off) ---
-    h2, k2 = scan(thermal2, _BRCR_UB)
-    hpbl = jnp.where(pblflg, h2, h_guess)
+    h2, k2, dist2, f2 = scan(thermal2, _BRCR_UB)
+    hpbl_h = jnp.where(pblflg, h2, h_guess)
+    hpbl = pf * h2 + (1.0 - pf) * h_guess
+    dist = pf[:, None] * dist2 + (1.0 - pf)[:, None] * dist
     kpbl = jnp.where(pblflg, k2, kpbl)
     pblflg = pblflg & (k2 > 1)
+    pf = pf * f2
 
     # --- stable boundary layer (l.770-822) ---
-    stab = (~sfcflg) & (hpbl < zq[:, 1])
+    stab = (~sfcflg) & (hpbl_h < zq[:, 1])
+    st = jnp.where(sfcflg, 0.0, 1.0) * (
+        1.0 - _soft_gt0(hpbl / zq[:, 1] - 1.0, region_sharpness, 1.0))
     water = (sfc.xland - _XLAND_WATER) >= 0.0
     s10 = sfc.u10 * sfc.u10 + sfc.v10 * sfc.v10
-    ok = stab & water & (s10 > 0.0)
+    # the Rossby brcr is pass 3's whenever over water; st weighs pass 3 in
+    ok = water & (s10 > 0.0)
     ross = jnp.sqrt(jnp.where(ok, s10, 1.0)) / (_CORI * sfc.znt)
     # zero 10 m wind: (1e-7*ross)**(-0.18) is +inf and min() returns 0.3
     brcr_sbro = jnp.minimum(jnp.where(
         ok, _ROSS_A * (_ROSS_SCALE * jnp.where(ok, ross, 1.0)) ** _ROSS_EXP, jnp.inf),
         _BRCR_WATER_MAX)
-    h3, k3 = scan(thermal1, jnp.where(water, brcr_sbro, _BRCR_SB))
-    hpbl = jnp.where(stab, h3, hpbl)
+    h3, k3, dist3, f3 = scan(thermal1, jnp.where(water, brcr_sbro, _BRCR_SB))
+    hpbl = st * h3 + (1.0 - st) * hpbl
+    dist = st[:, None] * dist3 + (1.0 - st)[:, None] * dist
     kpbl = jnp.where(stab, k3, kpbl)
     pblflg = pblflg & ~(stab & (k3 <= 1))
+    pf = pf * (1.0 - st * (1.0 - f3))
 
     # --- entrainment parameters, clear-sky branch (l.827-926) ---
-    kb = jnp.clip(kpbl - 2, 0, n - 2)          # 0-based level k = kpbl-1
+    # The oracle picks the jumps at k = kpbl-1 (0-based kb = kpbl-2) and then
+    # applies its max/min/products: done here per candidate level L = 1..n
+    # (kb = clip(L-2, 0, n-2)), then averaged over the kpbl distribution.
+    # pblflg implies kpbl > 1, and pf already carries that probability, so
+    # everything that multiplies pf (these averages, the entrainment-layer and
+    # in-PBL nonlocal weights) is conditioned on kpbl > 1.
+    p_gt1 = 1.0 - dist[:, :1]
+    inv_gt1 = jnp.where(p_gt1 > 0.0, 1.0 / jnp.where(p_gt1 > 0.0, p_gt1, 1.0), 0.0)
+    lev = jnp.arange(1, n + 1)
+    kbl = jnp.clip(lev - 2, 0, n - 2)
+    jump = lambda a: a[:, kbl + 1] - a[:, kbl]  # noqa: E731
+    expect = lambda a: jnp.sum(dist[:, 1:] * a[:, 1:], axis=1) * inv_gt1[:, 0]  # noqa: E731
     wm3 = wstar3 + _WM3_UST_COEFF * ust3
     wm2 = wm3 ** _H2
     bfxpbl = -_ENT_BFX_COEFF * thvx[:, 0] / g * wm3 / hpbl
-    dthvx = jnp.maximum(_take(thvx, kb + 1) - _take(thvx, kb), _TMIN)
-    we = jnp.maximum(bfxpbl / dthvx, -jnp.sqrt(wm2))
-    dthx = jnp.maximum(_take(thx, kb + 1) - _take(thx, kb), _TMIN)
-    dqx = jnp.minimum(_take(qx, kb + 1) - _take(qx, kb), 0.0)
-    hfxpbl = we * dthx
-    qfxpbl = we * dqx
+    dthvx = jnp.maximum(jump(thvx), _TMIN)
+    we = jnp.maximum(bfxpbl[:, None] / dthvx, -jnp.sqrt(wm2)[:, None])
+    dthx = jnp.maximum(jump(thx), _TMIN)
+    dqx = jnp.minimum(jump(qx), 0.0)
+    hfxpbl = expect(we * dthx)
+    qfxpbl = expect(we * dqx)
 
     def mom_ent_flux(d):
-        return jnp.where(d > _TMIN, jnp.maximum(_PRPBL * we * d, -ust * ust),
-                         jnp.where(d < -_TMIN, jnp.minimum(_PRPBL * we * d, ust * ust),
+        return jnp.where(d > _TMIN, jnp.maximum(_PRPBL * we * d, -ust[:, None] * ust[:, None]),
+                         jnp.where(d < -_TMIN, jnp.minimum(_PRPBL * we * d,
+                                                           ust[:, None] * ust[:, None]),
                                    0.0))
-    ufxpbl = mom_ent_flux(_take(ux, kb + 1) - _take(ux, kb))
-    vfxpbl = mom_ent_flux(_take(vx, kb + 1) - _take(vx, kb))
+    ufxpbl = expect(mom_ent_flux(jump(ux)))
+    vfxpbl = expect(mom_ent_flux(jump(vx)))
+    we_dza = expect(we * dza[:, jnp.clip(lev - 1, 0, n - 1)])
     delb = govrth * _D3 * hpbl
-    delta = jnp.where(pblflg, jnp.minimum(_D1 * hpbl + _D2 * wm2 / delb, _DELTA_MAX), 0.0)
+    delta_full = jnp.minimum(_D1 * hpbl + _D2 * wm2 / delb, _DELTA_MAX)
+    delta = pf * delta_full
 
     # interface k (1..n-1, Fortran) between levels k and k+1 sits at zq(k+1)
     zqi = zq[:, 1:n]
-    kk = jnp.arange(1, n)[None, :]
-    above = kk >= kpbl[:, None]
-    entfac = jnp.where(pblflg[:, None] & above, ((zqi - hpbl[:, None]) / jnp.where(
-        pblflg, delta, 1.0)[:, None]) ** 2.0, _ENTFAC_UNSET)
+    above = jnp.cumsum(dist, axis=1)[:, :n - 1]    # P(kpbl <= k)
+    entfac = ((zqi - hpbl[:, None]) / delta_full[:, None]) ** 2.0
 
     # --- diffusivities below the PBL top, k < kpbl (l.937-980) ---
     sf = sfcflg[:, None]
-    zfac = jnp.clip(1.0 - (zqi - zl1[:, None]) / jnp.where(
-        kpbl > 1, hpbl - zl1, 1.0)[:, None], _ZFMIN, 1.0)
-    zfacent = (1.0 - zfac) ** 3.0
-    wscalek = (ust3[:, None] + _PHIFAC * karman * wstar3[:, None] * (1.0 - zfac)) ** _H1
-    # wscalek2 = (phifac*karman*wstar3_2*zfac)**h1 is 0: wstar3_2 is set only on
-    # the cloud-top branch, which needs condensate (not ported).
+    # The oracle's zfac denominator switches on kpbl > 1 (hpbl - zl1, else 1):
+    # both branches are evaluated and their raw (uncapped) diffusivities and
+    # zfacent mixed by P(kpbl > 1), then capped once (user pick 2026-10-29).
+    # hpbl - zl1 <= 0 (unreachable at the hard limit: kpbl > 1 gives
+    # hpbl >= zq(2) > zl1) uses 1.0, i.e. branch B there.
     prfac = jnp.where(sfcflg, _BFAC * karman * _SFCFRAC, 0.0)[:, None]
     prfac2 = jnp.where(sfcflg, _HGAMU_COEFF * wstar3 / ust3 / (
         1.0 + _PRFAC2_COEFF * karman * wstar3 / ust3), 0.0)[:, None]
     prnumfac = jnp.where(sf, -_PRNUMFAC_COEFF * jnp.maximum(
         zqi - _SFCFRAC * hpbl[:, None], 0.0) ** 2.0 / hpbl[:, None] ** 2.0, 0.0)
     phim8z = jnp.where(sf, 1.0, 1.0 + _APHI5 * zol1[:, None] * zqi / zl1[:, None])
-    wscalek = jnp.where(sf, wscalek, jnp.maximum(ust[:, None] / phim8z, _WSCALEK_MIN))
     prnum0 = jnp.clip((phih / phim)[:, None] + prfac, _PRMIN, _PRMAX)
-    km_p = wscalek * karman * zqi * zfac ** _PFAC
-    kq_p = km_p / (1.0 + (prnum0 - 1.0) * jnp.exp(prnumfac)) * zfac ** (_PFAC_Q - _PFAC)
-    prnum0 = prnum0 / (1.0 + prfac2 * karman * _SFCFRAC)
-    kh_p = km_p / (1.0 + (prnum0 - 1.0) * jnp.exp(prnumfac))
+    prnum0h = prnum0 / (1.0 + prfac2 * karman * _SFCFRAC)
+
+    def pbl_k(den):
+        """Raw in-PBL km, kh, kq and zfacent for zfac denominator ``den``."""
+        zfac = jnp.clip(1.0 - (zqi - zl1[:, None]) / den[:, None], _ZFMIN, 1.0)
+        wscalek = (ust3[:, None] + _PHIFAC * karman * wstar3[:, None]
+                   * (1.0 - zfac)) ** _H1
+        # wscalek2 = (phifac*karman*wstar3_2*zfac)**h1 is 0: wstar3_2 is set
+        # only on the cloud-top branch, which needs condensate (not ported).
+        wscalek = jnp.where(sf, wscalek, jnp.maximum(ust[:, None] / phim8z, _WSCALEK_MIN))
+        km = wscalek * karman * zqi * zfac ** _PFAC
+        kq = km / (1.0 + (prnum0 - 1.0) * jnp.exp(prnumfac)) * zfac ** (_PFAC_Q - _PFAC)
+        kh = km / (1.0 + (prnum0h - 1.0) * jnp.exp(prnumfac))
+        return km, kh, kq, (1.0 - zfac) ** 3.0
+
+    d_a = hpbl - zl1
+    k_a = pbl_k(jnp.where(d_a > 0.0, d_a, 1.0))
+    k_b = pbl_k(jnp.ones_like(hpbl))
+    km_p, kh_p, kq_p, zfacent = (p_gt1 * a + (1.0 - p_gt1) * b for a, b in zip(k_a, k_b))
     km_p = jnp.minimum(km_p + _XKZMINM, _XKZMAX)
     kh_p = jnp.minimum(kh_p + _XKZMINH, _XKZMAX)
     kq_p = jnp.minimum(kq_p + _XKZMINH, _XKZMAX)
@@ -566,9 +656,14 @@ def bl_ysu_run(u, v, T, q_v, p_full, p_half, exner, dz, ust, hfx, qfx,
     kh_f = jnp.minimum((1.0 - w_st) * kh_u + w_st * kh_s + _XKZMINH, _XKZMAX)
 
     # --- entrainment layer above the PBL top (l.1059-1063, l.1339-1342) ---
-    ent = pblflg[:, None] & above & (entfac < _ENTFAC_MAX)
-    arg = -we[:, None] * _take(dza, jnp.clip(kpbl - 1, 0, n - 1))[:, None] * jnp.exp(-entfac)
-    kh_e = jnp.clip(jnp.sqrt(jnp.where(ent, arg * kh_f, 1.0)), _XKZMINH, _XKZMAX)
+    # pf times P(2 <= kpbl <= k | kpbl > 1) (a product, not one joint expectation)
+    ent = pf[:, None] * (above - dist[:, :1]) * inv_gt1 * _soft_gt0(
+        _ENTFAC_MAX - entfac, entrainment_cutoff_sharpness, 0.0)
+    # >= 0 (we <= 0); ke2 == 0 gives sqrt(0) -> xkzminh as in the oracle (do
+    # not substitute the old benign 1.0 there: it would break the hard limit)
+    ke2 = -we_dza[:, None] * jnp.exp(-entfac) * kh_f
+    kh_e = jnp.clip(jnp.where(ke2 > 0.0, jnp.sqrt(jnp.where(ke2 > 0.0, ke2, 1.0)), 0.0),
+                    _XKZMINH, _XKZMAX)
     km_e = jnp.clip(jnp.sqrt(_PRPBL * kh_e * km_f), _XKZMINM, _XKZMAX)
 
     # --- PBL / above-PBL selection ---
@@ -576,14 +671,12 @@ def bl_ysu_run(u, v, T, q_v, p_full, p_half, exner, dz, ust, hfx, qfx,
     # level kpbl when brint rounds to 1): the sigmoid would give 1/2 at any
     # sharpness, so equality takes the oracle's k < kpbl
     zr = za[:, :-1] / hpbl[:, None] - 1.0
-    wp = jnp.where(kpbl > 1, 1.0, 0.0)[:, None] * jnp.where(
-        zr == 0.0, jnp.where(kk < kpbl[:, None], 1.0, 0.0),
-        1.0 - jax.nn.sigmoid(region_sharpness * zr))
-    kh_a = jnp.where(ent, kh_e, kh_f)
+    wp, in_pbl = _pbl_weights(zr, above, p_gt1, inv_gt1, region_sharpness)
+    kh_a = ent * kh_e + (1.0 - ent) * kh_f
     Kh = wp * kh_p + (1.0 - wp) * kh_a
     Kq = wp * kq_p + (1.0 - wp) * kh_a
-    Km = wp * km_p + (1.0 - wp) * jnp.where(ent, km_e, km_f)
-    fw = jnp.where(pblflg, 1.0, 0.0)[:, None] * wp     # in-PBL nonlocal fluxes
+    Km = wp * km_p + (1.0 - wp) * (ent * km_e + (1.0 - ent) * km_f)
+    fw = pf[:, None] * in_pbl     # in-PBL nonlocal fluxes (conditioned as ent)
 
     # --- implicit solves over 2*dt (l.1031-1405) ---
     dsig = p2d[:, :-1] - p2d[:, 1:]
@@ -647,6 +740,23 @@ def _refuse_surrogate_fields(config: YSUConfig) -> None:
             "given, so they must stay at their defaults (concrete Python numbers).")
 
 
+# WRF-path config fields with no counterpart in the legacy surrogate: refused
+# there when non-default, as above.
+_WRF_ONLY_FIELDS = ("entrainment_cutoff_sharpness",)
+
+
+def _refuse_wrf_only_fields(config: YSUConfig) -> None:
+    defaults = YSUConfig._field_defaults
+    bad = [f for f in _WRF_ONLY_FIELDS
+           if not (isinstance(getattr(config, f), (int, float))
+                   and getattr(config, f) == defaults[f])]
+    if bad:
+        raise ValueError(
+            f"YSUConfig fields {bad} belong to the WRF YSU path and are inert on "
+            "the legacy surrogate (surface_layer=None), so they must stay at their "
+            "defaults (concrete Python numbers).")
+
+
 def _ysu_wrf_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc,
                         q_sfc, rho, dt, config, surface_layer):
     """WRF YSU path of :func:`ysu_turbulence`.
@@ -670,7 +780,8 @@ def _ysu_wrf_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc,
         z_half[:, :-1] - z_half[:, 1:], ustar, shflx, evap, surface_layer, dt,
         pbl_sharpness=config.pbl_smooth_sharpness,
         region_sharpness=config.blend_pbl_sharpness,
-        ri_sharpness=config.blend_ri_sharpness)
+        ri_sharpness=config.blend_ri_sharpness,
+        entrainment_cutoff_sharpness=config.entrainment_cutoff_sharpness)
     return TurbulenceOutput(
         du_dt=o.du_dt, dv_dt=o.dv_dt, dT_dt=o.dT_dt, dq_v_dt=o.dq_v_dt,
         Km=o.exch_m, Kh=o.exch_h, shflx=shflx, lhflx=lhflx, evap_sfc=evap,
@@ -735,6 +846,7 @@ def ysu_turbulence(
     if surface_layer is not None:
         return _ysu_wrf_turbulence(u, v, T, q_v, p_full, p_half, z_full, z_half,
                                    T_sfc, q_sfc, rho, dt, config, surface_layer)
+    _refuse_wrf_only_fields(config)
     ncol, nlev = T.shape
 
     # ----- Half-level gradients (same as Louis/HB) -----

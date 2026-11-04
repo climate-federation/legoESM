@@ -23,6 +23,8 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.core.source_rounding import nemo_source_round as _sr
+
 
 class FreshwaterForcing(NamedTuple):
     """Freshwater fluxes applied to the ocean surface.
@@ -53,6 +55,39 @@ class FreshwaterForcing(NamedTuple):
     runoff: jnp.ndarray
     ice_fw: jnp.ndarray
     restoring: jnp.ndarray = None  # type: ignore[assignment]
+
+
+class NemoRunoffSurface(NamedTuple):
+    """Deck surface-only ``sbc_rnf`` mass and tracer-content channels."""
+
+    mass_flux: jnp.ndarray
+    temperature_content: jnp.ndarray
+    salinity_content: jnp.ndarray
+
+
+def nemo_orca2_surface_runoff(
+    runoff_now, sst_mean, surface_mask, *, runoff_factor, reference_density
+):
+    """Literal ORCA2 runoff update for disabled T/S/depth input files.
+
+    The result feeds the existing :class:`FreshwaterForcing` mass path and
+    ``OceanSurfaceForcing.runoff_tracer_content``.  With both deck depth
+    options false, the existing core's ``runoff_spread_m=None`` arm deposits
+    mass and tracer content in the live top cell; no second distribution
+    formula is introduced here.
+    """
+    runoff = _sr(jnp.asarray(runoff_now, dtype=jnp.float64))
+    sst = _sr(jnp.asarray(sst_mean, dtype=jnp.float64))
+    smask = _sr(jnp.asarray(surface_mask, dtype=jnp.float64))
+    mass = _sr(_sr(_sr(runoff_factor) * runoff) * smask)
+    runoff_temperature = _sr(jnp.maximum(sst, _sr(0.0)))
+    temperature_mass = _sr(runoff_temperature * mass)
+    inverse_density = _sr(_sr(1.0) / _sr(reference_density))
+    temperature_content = _sr(temperature_mass * inverse_density)
+    zero_salinity = _sr(jnp.zeros_like(mass))
+    salinity_mass = _sr(zero_salinity * mass)
+    salinity_content = _sr(salinity_mass * inverse_density)
+    return NemoRunoffSurface(mass, temperature_content, salinity_content)
 
 
 def zero_freshwater(nCells: int) -> FreshwaterForcing:
@@ -593,6 +628,19 @@ def joint_volume_salt_virtual_salt_flux(
     return jnp.where(is_wet, -G / (rho_0 * dz_safe), 0.0)
 
 
+class RunoffSpreadLevels(NamedTuple):
+    """NEMO ``ln_rnf_depth_ini`` WHOLE-LEVEL runoff spread (sbcrnf.F90:426-441).
+
+    ``nk`` (..., int) = ``nk_rnf``: runoff enters the top ``nk`` WET levels,
+    each in proportion to its live thickness, ``h_rnf = sum e3t(1..nk,Kmm)``
+    (sbc_rnf_div).  Levels below the seafloor carry no weight, which is
+    NEMO's ``nk_rnf <= mbkt`` cap.  Build ``nk`` once with
+    :func:`legoesm.ocean.forcing.runoff_depth.nemo_runoff_level_count`.
+    """
+
+    nk: jnp.ndarray
+
+
 def resolve_runoff_spread_arg(config):
     """Resolve the NEMO runoff-depth spread argument from a model config.
 
@@ -616,6 +664,9 @@ def resolve_runoff_spread_arg(config):
     both).  Returns the value to pass as ``runoff_spread_m`` to
     :func:`runoff_spread_virtual_salt_tendency_3d`:
 
+    * a :class:`RunoffSpreadLevels` when ``runoff_depth_spread_levels`` (the
+      NEMO ``nk_rnf`` whole-level map; exclusive with both fields above) is
+      set;
     * the map as a JAX array when ``runoff_depth_spread_map`` is set;
     * the scalar float when only ``runoff_depth_spread_m > 0``;
     * ``None`` when neither is active (caller uses the legacy top-cell
@@ -624,6 +675,14 @@ def resolve_runoff_spread_arg(config):
     _m = getattr(config, "runoff_depth_spread_m", 0.0)
     spread_m = float(_m) if _m is not None else 0.0
     spread_map = getattr(config, "runoff_depth_spread_map", None)
+    spread_levels = getattr(config, "runoff_depth_spread_levels", None)
+    if spread_levels is not None:
+        # NEMO whole-level spread (:class:`RunoffSpreadLevels`).
+        if spread_map is not None or spread_m > 0.0:
+            raise ValueError(
+                "runoff_depth_spread_levels is mutually exclusive with "
+                "runoff_depth_spread_map and runoff_depth_spread_m.")
+        return RunoffSpreadLevels(jnp.asarray(spread_levels))
     if spread_map is not None and spread_m > 0.0:
         raise ValueError(
             "runoff_depth_spread_map and runoff_depth_spread_m are "
@@ -641,13 +700,19 @@ def runoff_spread_layer_fractions(h_k, mask, spread):
     lying above the spread depth (a level straddling it counts its above-
     depth part), zero on dry levels and land, and the resulting
     ``h_rnf = min(spread, wet depth)``.  ``spread`` is a scalar or an
-    already-broadcast ``(..., 1)`` per-cell depth.  Shared by the virtual
-    (salt) and real (volume) closures so both spread a river over the same
-    levels."""
+    already-broadcast ``(..., 1)`` per-cell depth, or a
+    :class:`RunoffSpreadLevels` (NEMO whole levels: weight 1 on the top
+    ``nk`` wet levels).  Shared by the virtual (salt) and real (volume)
+    closures so both spread a river over the same levels."""
+    wet_lvl = (h_k > 1.0e-3) & (mask[..., None] > 0.5)
+    if isinstance(spread, RunoffSpreadLevels):
+        lev = jnp.arange(h_k.shape[-1])
+        in_nk = lev < jnp.asarray(spread.nk)[..., None]
+        w_frac = jnp.where(in_nk & wet_lvl, 1.0, 0.0).astype(h_k.dtype)
+        return w_frac, jnp.sum(w_frac * h_k, axis=-1)
     cum_above = jnp.cumsum(h_k, axis=-1) - h_k          # depth of level top
     h_safe = jnp.maximum(h_k, 1.0e-3)
     w_frac = jnp.clip((spread - cum_above) / h_safe, 0.0, 1.0)
-    wet_lvl = (h_k > 1.0e-3) & (mask[..., None] > 0.5)
     w_frac = jnp.where(wet_lvl, w_frac, 0.0)
     h_rnf = jnp.sum(w_frac * h_k, axis=-1)
     return w_frac, h_rnf
@@ -659,9 +724,12 @@ def runoff_entry_profile(fw, h_k, mask, rho_0: float, runoff_spread_m):
     divergence of every level down to ``h_rnf``, i.e. the river water enters
     each level in proportion to its thickness inside ``h_rnf``.  Returns
     ``(..., nlev)`` summing to ``runoff/rho_0`` per column (0 on land)."""
-    _spread = jnp.asarray(runoff_spread_m)
-    if _spread.ndim > 0:
-        _spread = _spread[..., None]
+    if isinstance(runoff_spread_m, RunoffSpreadLevels):
+        _spread = runoff_spread_m
+    else:
+        _spread = jnp.asarray(runoff_spread_m)
+        if _spread.ndim > 0:
+            _spread = _spread[..., None]
     w_frac, h_rnf = runoff_spread_layer_fractions(h_k, mask, _spread)
     R = jnp.asarray(fw.runoff) / rho_0 * mask
     frac = w_frac * h_k / jnp.maximum(h_rnf, 1.0e-3)[..., None]
@@ -770,8 +838,10 @@ def runoff_spread_virtual_salt_tendency_3d(
         Salinity tendency; the caller multiplies by its land mask and
         integrates (``S += dt*dS`` or ``dS_dt += dS``).
     """
-    _spread = jnp.asarray(runoff_spread_m)
-    if _spread.ndim == 0:
+    if isinstance(runoff_spread_m, RunoffSpreadLevels):
+        _spread = runoff_spread_m
+    elif jnp.asarray(runoff_spread_m).ndim == 0:
+        _spread = jnp.asarray(runoff_spread_m)
         if float(runoff_spread_m) <= 0.0:
             raise ValueError(
                 "runoff_spread_virtual_salt_tendency_3d requires "
@@ -781,7 +851,7 @@ def runoff_spread_virtual_salt_tendency_3d(
         # per-cell NEMO ln_rnf_depth_ini map: broadcast over levels; the
         # builder guarantees >= 1 m on wet cells (values <= top-cell
         # thickness degrade gracefully to the single-cell form).
-        _spread = _spread[..., None]
+        _spread = jnp.asarray(runoff_spread_m)[..., None]
     R = fw.runoff
     h_top = h_k[..., 0]
     # --- top-cell channels (everything but runoff) -------------------------

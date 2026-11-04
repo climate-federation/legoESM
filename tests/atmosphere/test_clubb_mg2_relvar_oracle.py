@@ -351,6 +351,14 @@ def test_microphysics_reads_clubbs_relvar_from_the_same_substep(monkeypatch, inc
     # CLUBB makes liquid (else relvar is relvarmax everywhere)
     sig = jnp.asarray(sigma.sigma_full)[None, :]
     state = state._replace(T=state.T.replace(data=state.T.data - 20.0 * sig ** 8))
+    if incloud:
+        # CAM6 MG2 mode carries the snow number (refused without it); this
+        # column starts with no snow.
+        z = jnp.zeros_like(state.T.data)
+        state = state._replace(tracers={
+            **state.tracers,
+            "q_s": state.T.replace(data=z, name="q_s", units="kg/kg"),
+            "N_s": state.T.replace(data=z, name="N_s", units="1/kg")})
     cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none",
                                   cloud_config=CloudConfig(scheme="cam6_clubb")),

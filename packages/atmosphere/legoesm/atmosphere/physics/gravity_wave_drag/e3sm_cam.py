@@ -161,7 +161,6 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     E3SMBeresConfig,
     E3SMCAMConfig,
@@ -170,6 +169,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
     depth_averaged_oro_source,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+from legoesm.core.smooth import pnorm_smooth_min, smoothstep_quintic
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). Applies
 # to the top-level driver ``e3sm_cam_gwd``; the ``gw_*`` functions above/below
@@ -374,8 +374,18 @@ def gw_oro_src(
     fcrit2: float,
     oro_min_h: float,
     oro_min_wind: float,
+    oro_wind_ramp_width: float = 0.0,
 ):
     """McFarlane (1987) orographic source (single c=0 wave).
+
+    ``oro_wind_ramp_width = w`` [m/s] (static Python float): ``0.0`` is E3SM's
+    hard ``U > oro_min_wind`` launch gate (the stress jumps from tau(U) to 0);
+    ``w > 0`` (RULE 5, the Lindzen scheme's default, #2241) multiplies the
+    launch stress by ``smoothstep_quintic((U - oro_min_wind)/w)``: exactly 0 at
+    and below the gate, exact from ``oro_min_wind + w``, never above the hard
+    stress.  The launch level keeps the hard test (the weight is 0 there).
+    The mountain-height gate ``hdsp > oro_min_h`` stays hard: ``hdsp`` is
+    static orography, not model state.
 
     Faithful to ``gw_oro_src`` (gw_oro.F90).  Returns the launched stress
     profile (ncol, nlev+1), source/tend levels, projection unit vectors,
@@ -416,6 +426,11 @@ def gw_oro_src(
         oroko2 * jnp.minimum(hdsp ** 2, sghmax) * rsrc * nsrc * ubi_sfc
     )
     active = (ubi_sfc > oro_min_wind) & (hdsp > oro_min_h)
+    if oro_wind_ramp_width != 0.0:
+        if not (math.isfinite(oro_wind_ramp_width) and oro_wind_ramp_width > 0.0):
+            raise ValueError(
+                f"oro_wind_ramp_width must be finite and >= 0, got {oro_wind_ramp_width!r}")
+        tauoro = tauoro * smoothstep_quintic((ubi_sfc - oro_min_wind) / oro_wind_ramp_width)
     tauoro = jnp.where(active, tauoro, 0.0)             # (ncol,)
     # Where orographic term is zero, E3SM sets src_level = pver (no waves).
     src_level = jnp.where(active, src_level, nlev).astype(jnp.int32)
@@ -1170,14 +1185,10 @@ def gw_drag_prof(
             tau_computed = jnp.minimum(taudmp, tausat)
         else:
             # Smooth min(taudmp, tausat): p-norm (taudmp^-p + tausat^-p)^(-1/p),
-            # p = softmin_sharpness, written overflow-free as lo*(1+(lo/hi)^p)^(-1/p).
-            # C-infinity for positive stresses, in [0, min(taudmp, tausat)]; exact
-            # min at p -> inf.  (The mcfarlane.py sigmoid blend is not C1 at
-            # taudmp = tausat; user decision 2026-10-28.)
-            lo = jnp.minimum(taudmp, tausat)
-            ratio = safe_divide(lo, jnp.maximum(taudmp, tausat), eps=cfg.taumin)
-            tau_computed = lo * (1.0 + ratio ** softmin_sharpness) ** (
-                -1.0 / softmin_sharpness)
+            # p = softmin_sharpness (shared with mcfarlane.py; user decision
+            # 2026-10-28).  C-infinity for positive stresses, in
+            # [0, min(taudmp, tausat)]; exact min at p -> inf.
+            tau_computed = pnorm_smooth_min(taudmp, tausat, softmin_sharpness, cfg.taumin)
             tau_computed = jnp.where(tausat > 0.0, tau_computed, 0.0)
         # In the source region keep the launched value at interface k.
         tau_k = jnp.where(active, tau_computed, tau_launched_iface[:, :, k])
@@ -1450,13 +1461,8 @@ def gw_diff_tridiag_coeffs(
     # interfaces (E3SM ktop+2..kbot+1 in 1-based -> our interior interfaces).
     # tmpi[i] uses midpoints i-1 (above) and i (below): pmid[i]-pmid[i-1].
     dpmid = pmid[:, 1:] - pmid[:, :-1]                     # (ncol, nlev-1) iface 1..nlev-1
-    # E3SM divides by pmid(k)-pmid(k-1) directly.  We floor the magnitude at
-    # 1 Pa (codex ediff-1 #3): a SAFETY floor only — on any physical
-    # monotone-pressure grid the midpoint spacing is >> 1 Pa, so this is a
-    # no-op and the coefficients are bit-faithful to E3SM; it only guards a
-    # pathological/degenerate column from a divide-by-zero (same pattern as the
-    # dpm/piln floors used elsewhere in this module).
-    dpmid = jnp.where(jnp.abs(dpmid) < 1.0, 1.0, dpmid)
+    # Unfloored, as CAM/E3SM: Coords1D rdst = 1/(mid(k+1)-mid(k))
+    # (CAM cam_cesm2_1_rel_60 src/utils/coords_1d.F90:81-83).
     tmpi_int = dt * (gravit * rhoi_kludge[:, 1:nlev]) ** 2 / dpmid  # iface 1..nlev-1
     tmpi = jnp.zeros((ncol, nlev + 1), dtype=pmid.dtype)
     tmpi = tmpi.at[:, 1:nlev].set(tmpi_int)

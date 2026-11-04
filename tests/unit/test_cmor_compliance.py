@@ -265,6 +265,43 @@ def test_plev_variables_keep_bare_time_mean(amip_files):
             assert ds.variables[var].getncattr("cell_methods") == "time: mean", var
 
 
+def test_plev_coordinate_matches_cmip6_axis_entry(amip_files):
+    """plev long_name must equal the table's; iris refuses model-minus-obs otherwise."""
+    axis = tables.coordinate_axis("plev19")
+    with _open(amip_files[("Amon", "ta")]) as ds:
+        plev = ds.variables["plev"]
+        for key in ("standard_name", "long_name", "units", "positive"):
+            assert plev.getncattr(key) == axis[key], key
+
+
+def test_time_long_name_matches_cmip6(amip_files):
+    """CMIP6_coordinate.json time axis long_name is lower-case 'time'.
+
+    The vendored table subset has no time entry, so the value is pinned here.
+    """
+    for key in (("Amon", "ta"), ("day", "pr")):
+        with _open(amip_files[key]) as ds:
+            assert ds.variables["time"].getncattr("long_name") == "time", key
+
+
+def test_write_monthly_time_long_name_matches_cmip6(tmp_path):
+    """write_monthly builds its own time axis; same CMIP6 long_name."""
+    lat = np.linspace(-87.5, 87.5, 8)
+    lon = np.linspace(2.5, 357.5, 16)
+    writer = CFWriter(
+        output_dir=str(tmp_path), experiment_id="amip", model_id="legoESM-1-0",
+    )
+    paths = writer.write_monthly(
+        {"months": [(1, 1), (1, 2)],
+         "zonal_tas": np.full((2, 8), 288.0, dtype=np.float32), "lat": lat},
+        lat, lon,
+    )
+    writer.close()
+    tas = next(p for p in paths if "tas_" in p.name)
+    with _open(tas) as ds:
+        assert ds.variables["time"].getncattr("long_name") == "time"
+
+
 def test_output_dtype_is_float(amip_files):
     """Defect 9: CMIP6 declares ``type: real`` -> float32 on disk."""
     wrong = []
@@ -451,3 +488,39 @@ def test_known_deviations_are_exactly_these():
         (t, v) for t, vs in tables.NON_CMIP6_VARIABLES.items() for v in vs
     }
     assert non_cmip6 == {("Lmon", "nee"), ("Omon", "rhopoto"), ("Omon", "sic")}
+
+
+# --- nominal_resolution: CMIP6 global-attributes document, Appendix 2 ---
+
+def _regular(d, lon0=None):
+    lat = np.linspace(-90 + d / 2, 90 - d / 2, int(round(180 / d)))
+    lon = np.arange(int(round(360 / d))) * d + (d / 2 if lon0 is None else lon0)
+    return lat, lon
+
+
+def test_mean_resolution_reproduces_the_documents_half_degree_example():
+    """Appendix 2: "For a 0.5x0.5 degree grid, the mean resolution ... is
+    71.5 km (given 6371 km as the Earth's radius)"."""
+    from legoesm.io.cmor_output import _mean_resolution_km
+    assert abs(_mean_resolution_km(*_regular(0.5)) - 71.5) < 0.05
+
+
+def test_nominal_resolution_cmip6_rule():
+    from legoesm.io.cmor_output import _compute_nominal_resolution as nr
+    # The CMOR target at 1 deg IS the CMIP6 standard grid (360 x 180, a
+    # longitude at 0.5 E): Appendix 2 item 4 labels it "1x1 degree".
+    assert nr(*_regular(1.0)) == "1x1 degree"
+    # The same spacing off the standard longitudes: the binned mean
+    # diagonal (143 km) -> "100 km".
+    assert nr(*_regular(1.0, lon0=0.0)) == "100 km"
+    assert nr(*_regular(5.0)) == "500 km"         # 714 km
+    assert nr(*_regular(0.5)) == "50 km"          # 71.5 km < 72
+
+
+def test_nominal_resolution_labels_are_cv_values():
+    from legoesm.io.cmor_output import (
+        _NOMINAL_RES_BUCKETS_KM, _NOMINAL_RES_STANDARD_1X1, _NOMINAL_RES_TOP)
+    from legoesm.io.cmor_table_loader import load_cv
+    cv = set(load_cv()["nominal_resolution"])
+    labels = {lab for _, lab in _NOMINAL_RES_BUCKETS_KM}
+    assert labels | {_NOMINAL_RES_TOP, _NOMINAL_RES_STANDARD_1X1} == cv

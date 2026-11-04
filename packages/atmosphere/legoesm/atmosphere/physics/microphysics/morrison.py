@@ -401,6 +401,13 @@ def morrison_microphysics(
     config = resolve_morrison_flavor(config)
     ncol, nlev = T.shape
     _prog_nc = bool(getattr(config, "prognostic_droplet_number", False))
+    # RULE 5 widths of MG2's early droplet size reset (micro_mg2_0.F90:1296),
+    # every call site, both droplet-number paths; 0 = MG2's hard clip.
+    _early_reset_w = dict(number_cap_log_width=config.mg2_drop_early_reset_log_width,
+                          slope_log_width=config.mg2_drop_early_reset_log_width)
+    # Droplet-number budget publication (``MicrophysicsOutput.nc_budget``):
+    # the same static switch as ``qc_budget``, MG2 prognostic number only.
+    _nc_pub = _prog_nc and bool(getattr(config, "publish_qc_budget", False))
     if _prog_nc:
         # Start-up guards (static config; user decisions 2026-10-19 2a, Q-I/10a,
         # Q-B 3a, 18a; 2026-10-20 Q4): CAM6 MG2 droplet number lives only on the MG2 warm-rain
@@ -638,11 +645,35 @@ def morrison_microphysics(
             # droplet-number sink below.
             # The shape (pgam, lamc) comes from the PRE-reset number, as MG2
             # keeps it (:1296); riming reads it below.
-            N_c_ic, _pgam_c, _lamc_c = mg2_size_dist_liq(q_c_ic, N_c_ic, rho)
+            # RULE 5: both size limits rounded by mg2_drop_early_reset_log_width
+            # (0 = MG2's hard clip).  KNOWN DIFFERENCE (#2216): the port moves
+            # the number (and lamc) of cells within a few widths of a bound
+            # (in ln lambda) inward too; the 2 um / qcic/1e-20 limits hold for
+            # every width, 50 um is passed by at most
+            # w*ln(1 + 25**(-1/w)) in ln D (see mg2_droplet_number_readjust).
+            # Measured at the default 0.01 on the prognostic-number oracle
+            # fixtures (x64, every other switch hard): the whole-call droplet
+            # tendency moves by up to 1.9e-5 of the column's largest MG2
+            # droplet tendency; per-column table GAP in tests/atmosphere/
+            # microphysics/unit/test_morrison_mg2_drop_early_reset_smooth.py.
+            N_c_ic, _pgam_c, _lamc_c = mg2_size_dist_liq(
+                q_c_ic, N_c_ic, rho, **_early_reset_w)
+        # Specified droplet number (production): the same MG2 reset, inside
+        # the autoconversion, with the same RULE 5 width (#2216, user
+        # 2026-11-01).  KNOWN DIFFERENCE: as above.  Measured at the default
+        # 0.01 (x64): on the specified-number oracle fixtures, every other
+        # switch hard, the whole-call quantities move by <= 7.5e-15 of the
+        # column's largest MG2 value and the MG2 kernel points' autoconversion
+        # rate by up to 1.0e-8 relative (50 um side); per-case tables GAP and
+        # POINT_GAP in tests/atmosphere/microphysics/unit/
+        # test_morrison_mg2_specnc_reset_smooth.py.  On production-deck
+        # states (one step, jan1979_main1027_ncaero days 10/20/30, mass-
+        # weighted global and 40-65S means) autoconversion and snow riming
+        # move by <= 2e-6 relative and the rain-number tendency by <= 2e-4.
         dq_c_au, dN_r_au, x_c = autoconversion_kk2000_cam6(
             q_c_ic, N_c_ic, rho, _relvar,
             fact=config.autocon_fact, nc_floor=not _prog_nc,
-            size_reset=not _prog_nc)
+            size_reset=not _prog_nc, **_early_reset_w)
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff
         dq_c_ac = accretion_kk2000(
@@ -672,10 +703,15 @@ def morrison_microphysics(
         # ``-dq_c_au·rho/x_c`` sink below is used instead.
         dq_c_au, dN_r_au, x_c = autoconversion_sb2001(
             q_c_ic, q_r_ic, N_c_ic, rho,
+            ramp_top=config.sb2001_autoconv_ramp_top,
         )
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff
-        dq_c_ac = accretion_sb2001(q_c_ic, q_r_ic, rho) * cf_eff
+        dq_c_ac = accretion_sb2001(
+            q_c_ic, q_r_ic, rho,
+            qr_ramp_top=config.sb2001_accretion_qr_ramp_top,
+            qc_ramp_top=config.sb2001_accretion_qc_ramp_top,
+        ) * cf_eff
     else:
         raise ValueError(
             f"Unknown warm_rain_scheme: {config.warm_rain_scheme!r}; choose "
@@ -1105,7 +1141,10 @@ def morrison_microphysics(
             if _prog_nc:     # N_c_ic is already MG2's reset number (above)
                 _nc_liq, _pgam, _lamc = N_c_ic, _pgam_c, _lamc_c
             else:
-                _nc_liq, _pgam, _lamc = mg2_size_dist_liq(q_c_ic, N_c_ic, rho)
+                # specified number: MG2's reset again, same RULE 5 width
+                # (KNOWN DIFFERENCE at the autoconversion call above)
+                _nc_liq, _pgam, _lamc = mg2_size_dist_liq(q_c_ic, N_c_ic, rho,
+                                                          **_early_reset_w)
             riming_s = mg2_accrete_cloud_water_snow(
                 T, rho, mu_air, uns_ic, q_c_ic, _nc_liq, q_sic, _pgam, _lamc,
                 lams_ic, n0s_ic, config,
@@ -1492,10 +1531,20 @@ def morrison_microphysics(
         # MG2 conservation of nc with omsm (micro_mg2_0.F90:1628-1642), against
         # the post-activation grid-mean number.
         _nclim = nc_sink * dt > N_c_act
-        nc_sink = nc_sink * jnp.where(
+        _nc_lim = jnp.where(
             _nclim,
             N_c_act / dt / jnp.where(_nclim, nc_sink, 1.0) * _MG2_OMSM,
             1.0)
+        nc_sink = nc_sink * _nc_lim
+        if _nc_pub:
+            # APPLIED (post-limiter) sinks, split by process; they sum to
+            # ``nc_sink`` up to round-off.
+            _nc_terms = {
+                "autoconversion": -dq_c_au * _nc_per_qc * _nc_lim,
+                "accretion": -dq_c_ac * _nc_per_qc * _nc_lim,
+                "riming_snow": -riming_s * _nc_per_qc * _nc_lim,
+                "riming_graupel": -riming_g * _nc_per_qc * _nc_lim,
+            }
     qc_avail = jnp.clip(q_c, 0.0)
     if config.warm_rain_incloud:
         # CAM6 MG2 q_c limiter form (micro_mg2_0.F90:1566-1590): only where
@@ -2277,6 +2326,8 @@ def morrison_microphysics(
         # MG2 nctend (micro_mg2_0.F90:1947) + activation re-applied everywhere
         # (:2019-2022).
         dN_c_dt = -nc_sink + npccn
+        if _nc_pub:
+            _nc_terms["activation"] = npccn
     elif getattr(config, "predict_Nc", False):
         dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15) - dN_c_riming
     else:
@@ -2333,7 +2384,11 @@ def morrison_microphysics(
         (sed_c, sed_nc_kg, sed_qv, sed_T, precip_c,
          _req_c) = mg2_cloud_sedimentation(
             q_c + dq_c_dt * dt, (N_c + dN_c_dt * dt) / rho, cf_eff, T, rho,
-            p_half, dt, _nsub, presence_top=config.mg2_presence_ramp_top)
+            p_half, dt, _nsub, presence_top=config.mg2_presence_ramp_top,
+            # RULE 5: the fall-speed size reset rounded by its width (0 = MG2's
+            # hard clip; KNOWN DIFFERENCE in mg2_droplet_fall_coefficients)
+            number_cap_log_width=config.mg2_drop_sed_reset_log_width,
+            slope_log_width=config.mg2_drop_sed_reset_log_width)
         if config.sed_cfl_substeps:
             sed_substeps_required = jnp.maximum(sed_substeps_required, _req_c)
             if config.sed_cfl_substeps_strict:
@@ -2346,6 +2401,8 @@ def morrison_microphysics(
                 _sed_poison = jnp.where(_overflow_c, jnp.nan, _sed_poison)
         dq_c_dt = dq_c_dt + sed_c
         dN_c_dt = dN_c_dt + sed_nc_kg * rho
+        if _nc_pub:
+            _nc_terms["sedimentation"] = sed_nc_kg * rho
         dq_v_dt = dq_v_dt + sed_qv
         dT_dt = dT_dt + sed_T
     if mg2_snow:
@@ -2367,8 +2424,11 @@ def morrison_microphysics(
         _dqc = jnp.where(_chg, (_q_c_end - _q_c_raw) / dt, 0.0)
         dq_c_dt = dq_c_dt + _dqc
         if _prog_nc or config.predict_Nc:
-            dN_c_dt = dN_c_dt + jnp.where(
+            _dnc_mf = jnp.where(
                 _chg, (_N_c_end * rho - (N_c + dN_c_dt * dt)) / dt, 0.0)
+            dN_c_dt = dN_c_dt + _dnc_mf
+            if _nc_pub:
+                _nc_terms["ice_melt_homog_freeze"] = _dnc_mf
         dq_i_dt = dq_i_dt + jnp.where(
             _chg, (_q_i_end - (q_i + dq_i_dt * dt)) / dt, 0.0)
         dN_i_dt = dN_i_dt + jnp.where(
@@ -2379,13 +2439,20 @@ def morrison_microphysics(
     if _prog_nc:
         # MG2 final droplet mean-size re-adjust (micro_mg2_0.F90:2743-2753,
         # :2812-2830; Q2'a).
+        _dnc_pre = dN_c_dt
         dN_c_dt = mg2_droplet_number_readjust(
             q_c + dq_c_dt * dt, N_c + dN_c_dt * dt, N_c, cf_eff, rho, dt, dN_c_dt,
-            presence_top=config.mg2_presence_ramp_top)
+            presence_top=config.mg2_presence_ramp_top,
+            log_width=config.mg2_drop_readjust_log_width)
+        if _nc_pub:
+            _nc_terms["size_readjust"] = dN_c_dt - _dnc_pre
+            _dnc_pre = dN_c_dt
         # MG2's last droplet-number write (micro_mg2_0.F90:2913): no cloud
         # water left after the step => no droplets.
         _on = mg2_presence(q_c + dq_c_dt * dt, config.mg2_presence_ramp_top)
         dN_c_dt = _on * dN_c_dt + (1.0 - _on) * (-N_c / dt)
+        if _nc_pub:
+            _nc_terms["no_cloud_clear"] = dN_c_dt - _dnc_pre
 
     # === Non-negativity floor on the cloud/rain/ice NUMBER tendencies ===
     # Each individual number sink above is bounded (evap/riming ∝ N/dt,
@@ -2702,6 +2769,11 @@ def morrison_microphysics(
         if mg2_snow:
             out.qc_budget["ice_melt"] = _qc_ice_melt
             out.qc_budget["homogeneous_freezing"] = _qc_homog
+    if _nc_pub:
+        # Droplet-number terms [1/(m^3 s)], APPLIED: each later stage is booked
+        # as the increment it made to ``dN_c_dt``, so they sum to ``dN_c_dt``
+        # up to round-off (the probe asserts the residual).
+        out = out._replace(nc_budget=_nc_terms)
     if _sed_poison is not None:
         # Strict mode: every FLOAT field carries the overflow guard.  Static
         # Python branch -- the non-strict graph is untouched.

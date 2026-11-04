@@ -47,6 +47,14 @@ from legoesm import constants
 from legoesm.core.smooth import smooth_clamp, smooth_min
 
 
+# Tetens/Bolton coefficients of ``saturation_vapor_pressure`` (named so that a
+# scheme needing the same curve in another algebraic form -- the IFS
+# convection's R2ES/R3LES/R4LES -- reads them from here instead of copying).
+TETENS_E0_PA = 611.2   # satcurve-ok: definition site of the legoESM Tetens curve
+TETENS_A = 17.67       # satcurve-ok: definition site
+TETENS_B_K = 243.5     # satcurve-ok: definition site
+
+
 def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
     """Compute saturation vapor pressure using Tetens formula.
 
@@ -84,7 +92,7 @@ def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
     # there instead of inf).  satcurve-ok: identical Tetens curve for
     # T ≥ 150 K; this is an AD floor, not a new saturation formula.
     T_c = jnp.clip(T, 150.0, None) - constants.T_freeze
-    return 611.2 * jnp.exp(17.67 * T_c / (T_c + 243.5))
+    return TETENS_E0_PA * jnp.exp(TETENS_A * T_c / (T_c + TETENS_B_K))
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +183,9 @@ def dd_saturation_vapor_pressure_aerk(T: jax.Array) -> jax.Array:
     return ddw * (ew - ei) + 2.0 * dw * (dew - dei) + w * ddew + (1.0 - w) * ddei
 
 
-def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
+def saturation_vapor_pressure_goff(
+    T: jax.Array, *, nemo_source_exact: bool = False
+) -> jax.Array:
     """Saturation vapour pressure over liquid water, WMO Goff (1957) [Pa].
 
     Port of NEMO/aerobulk ``sbc_phy.F90::e_sat_sclr`` (NEMO 5.0.1, lines
@@ -204,6 +214,29 @@ def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
     jax.Array
         Saturation vapor pressure [Pa].
     """
+    if nemo_source_exact:
+        from legoesm.core.source_rounding import (
+            nemo_source_barrier as B,
+            nemo_source_round as R,
+        )
+        from legoesm.core import transcendentals as tx
+
+        T_K = R(jnp.maximum(T, 180.0))
+        rt = R(constants.T_freeze / T_K)
+        term1 = R(10.79574 * R(1.0 - rt))
+        temperature_ratio = R(T_K / B(constants.T_freeze))
+        log_temperature_ratio = tx.log10(temperature_ratio)
+        term2 = R(5.028 * B(log_temperature_ratio))
+        ratio_minus_one = R(temperature_ratio - 1.0)
+        inner3 = R(-8.2969 * ratio_minus_one)
+        scale3 = R(1.50475 * tx.pow(10.0, -4.0))
+        term3 = R(scale3 * R(1.0 - tx.pow(10.0, inner3)))
+        inner4 = R(4.76955 * R(1.0 - rt))
+        scale4 = R(0.42873 * tx.pow(10.0, -3.0))
+        term4 = R(scale4 * R(tx.pow(10.0, inner4) - 1.0))
+        exponent = R(R(R(R(term1 - term2) + term3) + term4) + 0.78614)
+        return R(100.0 * tx.pow(10.0, exponent))
+
     T_K = jnp.maximum(T, 180.0)
     rt = constants.T_freeze / T_K
     log10_T = jnp.log10(T_K / constants.T_freeze)

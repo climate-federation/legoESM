@@ -53,11 +53,12 @@ jax.config.update("jax_enable_x64", True)
 
 def _call(A, dx, dy, dz, c, nu_floor=0.0):
     """Call amd_nu_t with a 3x3 gradient tensor A[c,d] = a_{c+1,d+1}, at the
-    hard limit (floor_width=0, the AMR-Wind form these tests reimplement)."""
+    hard limit (both floor widths 0, the AMR-Wind form these tests reimplement)."""
     a = jnp.asarray(A, dtype=float)
     return float(amd_nu_t(
         a[0, 0], a[0, 1], a[0, 2], a[1, 0], a[1, 1], a[1, 2],
-        a[2, 0], a[2, 1], a[2, 2], dx, dy, dz, c, nu_floor, floor_width=0.0))
+        a[2, 0], a[2, 1], a[2, 2], dx, dy, dz, c, nu_floor, floor_width=0.0,
+        denom_floor_width=0.0))
 
 
 _F = 10.0 * float(np.finfo(np.float64).eps)   # AMR-Wind epsilon()*1.0e1
@@ -237,7 +238,8 @@ def test_kink_floored_side_gradient_zero():
 
     def nu_of_s(s):
         return amd_nu_t(s, 0.0, v, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                        dx, dy, dz, c, floor_width=0.0)   # the oracle's hard kink
+                        dx, dy, dz, c, floor_width=0.0,
+                        denom_floor_width=0.0)   # the oracle's hard kink
 
     assert float(nu_of_s(jnp.asarray(0.0))) == _F           # floored
     ad = float(jax.grad(nu_of_s)(jnp.asarray(0.0)))

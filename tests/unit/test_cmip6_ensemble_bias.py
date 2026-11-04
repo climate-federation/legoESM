@@ -153,3 +153,63 @@ def test_corrections_apply_to_exact_entries_only():
     # the other variables of a corrected model are untouched
     assert ce.correction("CIESM", "evspsbl", "r1i1p1f1", "v20200417") == (1.0, None)
     assert ce.correction("CAMS-CSM1-0", "pr", "r1i1p1f1", "v20190708") == (1.0, None)
+
+
+def _cmor(root, run, var, label, span="197901-197901", val=1.0):
+    xr = pytest.importorskip("xarray")
+    d = root / run / "cmor" / "Amon"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"{var}_Amon_legoESM-1-0_amip_r1i1p1f1_{label}_{span}.nc"
+    t = xr.DataArray([15.5], dims="time",
+                     attrs={"units": "days since 1979-01-01",
+                            "calendar": "noleap"})
+    xr.Dataset({var: ("time", [val])}, coords={"time": t}).to_netcdf(f)
+    return f
+
+
+def test_loader_grid_labels_gn_or_gr_only(tmp_path, monkeypatch):
+    ce = _load()
+    monkeypatch.setattr(ce.rb, "ROOT", str(tmp_path))
+    run = "exp_1/off"                              # nested run name, no symlink
+    _cmor(tmp_path, run, "rsut", "gr")
+    _cmor(tmp_path, run, "rsut", "grx", val=7.0)   # not gn/gr: ignored, sorts last
+    _cmor(tmp_path, run, "rsut", "gn1", val=9.0)   # not gn: no mixed-grid error
+    assert float(ce.rb._load_model(run, "rsut")["rsut"][0]) == 1.0
+    assert ce.run_window(run) == [(1979, 1)]
+    _cmor(tmp_path, run, "rsut", "gn")             # same var on both grids
+    with pytest.raises(SystemExit, match="both gn and gr"):
+        ce.rb._load_model(run, "rsut")
+    with pytest.raises(SystemExit, match="both gn and gr"):
+        ce.run_window(run)
+
+
+def test_run_window_counts_gr_files(tmp_path, monkeypatch):
+    ce = _load()
+    monkeypatch.setattr(ce.rb, "ROOT", str(tmp_path))
+    _cmor(tmp_path, "r", "rsut", "gr", "197901-197901")
+    _cmor(tmp_path, "r", "rsut", "gr", "197902-197902")
+    with pytest.raises(SystemExit, match="has 2 CMOR rsut files"):
+        ce.run_window("r")
+
+
+def test_slash_in_run_name_gives_flat_output_names(tmp_path, monkeypatch):
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("cartopy")                 # figure_a draws the maps
+    ce = _load()
+    lat = np.arange(-87.5, 90.0, 5.0)
+    lon = np.arange(2.5, 360.0, 5.0)
+    ref = np.add.outer(np.arange(lat.size), 0.1 * np.arange(lon.size))
+    models = np.stack([ref + 1.0, ref + 3.0, ref + 5.0])
+    st = ce.ensemble_stats(ref + 8.0, ref, models)
+    names = ["A", "B", "C"]
+    rows = [("clt", "obs", lat, lon, names, st, ref + 8.0, ref)]
+    meta = {("clt", n): ("r1i1p1f1", "gn v1", "") for n in names}
+    window = [(1979, 1)]
+    monkeypatch.setattr(ce, "collect", lambda run, v: (window, rows, [], meta))
+    saved = []
+    monkeypatch.setattr(ce, "_save", lambda fig, out: saved.append(out))
+    assert ce.main(["--run", "exp_1/off", "--out", str(tmp_path)]) == 0
+    assert (tmp_path / "cmip6_rms_exp_1__off.csv").is_file()
+    assert tmp_path / "cmip6_rms_rank_exp_1__off.png" in saved
+    assert tmp_path / "cmip6_bias_maps_exp_1__off.png" in saved
+    assert all(p.parent == tmp_path for p in saved)
