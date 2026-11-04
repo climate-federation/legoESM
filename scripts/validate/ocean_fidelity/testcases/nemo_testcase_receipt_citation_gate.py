@@ -13897,8 +13897,8 @@ _D194_REPLACED = (
      ['def _pnd_lev_single_category(', 'v_il=jnp.stack([o.v_il for o in outs], axis=-1),', 327]),
     ('packages/ice/legoesm/ice/si3_thd_pnd.py:286,530-563', '320,562-589', 29,
      ['zdv_pnd_old = sr(sr(h_ip + h_il) * a_ip)', 'per_category = ("a_i", "h_i", "t_su", "a_ip", "h_ip", "h_il", "dh_i_sum", "dh_s_sum", "sz_i", "t_i")', (')', 246), 29]),
-    ('packages/ice/legoesm/ice/si3_thd_pnd.py:784-988', '809-1045', 237,
-     ['def si3_ice_thd_o12_stages(', 'return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out, fluxes=live_out)', 237]),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:784-988', '809-1296', 488,
+     ['def si3_ice_thd_o12_stages(', 'return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out, fluxes=live_out)', 488]),
     ('packages/ice/legoesm/ice/bitz_lipscomb.py:475-528', '475-530', 56,
      ['def _radiation(', 'return ab_s, ab_i, tr_i[..., -1]', 56]),
 )

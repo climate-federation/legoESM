@@ -72,13 +72,21 @@ D198_R3_22AF29B743 = {
     "si3_dyn_orca2": 28_148,
     "remaining_named_and_inlined": 88_876,
 }
-# DECISION 198 round 5: si3_var_agg(kn=2) layer-temp scans + O15 ice_cor routed through Round 3 helpers.
-EXPECTED = {
+# DECISION 198 round 5 (96bb44f0ae): si3_var_agg(kn=2) layer-temp scans + O15 ice_cor routed through Round 3 helpers.
+D198_R5_96BB44F0AE = {
     "recursive_total": 141_340,
     "_thermo_category_loop": 35_918,
     "si3_ice_thd_do": 9_809,
     "si3_dyn_orca2": 28_148,
     "remaining_named_and_inlined": 67_465,
+}
+# O17 inactive-category NaN fix: category gather/scatter on active = owned & (a_i > epsi10).
+EXPECTED = {
+    "recursive_total": 141_935,
+    "_thermo_category_loop": 36_355,
+    "si3_ice_thd_do": 9_809,
+    "si3_dyn_orca2": 28_148,
+    "remaining_named_and_inlined": 67_623,
 }
 OWNERS = ("_thermo_category_loop", "si3_ice_thd_do", "si3_dyn_orca2")
 
@@ -169,6 +177,7 @@ def count(master: Path) -> dict[str, Any]:
         "d198_r1_743146b590_snapshot": D198_R1_743146B590,
         "d198_r2_56b768300a_snapshot": D198_R2_56B768300A,
         "d198_r3_22af29b743_snapshot": D198_R3_22AF29B743,
+        "d198_r5_96bb44f0ae_snapshot": D198_R5_96BB44F0AE,
         "delta_from_pre_d194": {
             name: measured[name] - PRE_D194_9998276020[name] for name in EXPECTED
         },

@@ -2492,8 +2492,8 @@ def _si3_column_thd_da(entry, post_temp2, forcing, si3, dt, constants, *,
     return post_da
 
 
-def _guard_inactive_columns(value, active_columns, dtype):
-    """Stop inactive-column cotangents without changing forward values."""
+def _guard_inactive_columns(value, active_columns, dtype, inactive_fill=None):
+    """Stop inactive-column cotangents and optionally replace inactive inputs."""
     array = jnp.asarray(value, dtype=dtype)
     if array.ndim < active_columns.ndim:
         array = jnp.broadcast_to(array, active_columns.shape)
@@ -2501,4 +2501,8 @@ def _guard_inactive_columns(value, active_columns, dtype):
         active_columns,
         active_columns.shape + (1,) * (array.ndim - active_columns.ndim),
     )
-    return jnp.where(active, array, jax.lax.stop_gradient(array))
+    if inactive_fill is None:
+        inactive = jax.lax.stop_gradient(array)
+    else:
+        inactive = jnp.asarray(inactive_fill, dtype=dtype)
+    return jnp.where(active, array, inactive)

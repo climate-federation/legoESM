@@ -1469,3 +1469,180 @@ independent review: operator
 
 independent review: operator
 
+## O17 inactive-category NaN fix
+
+### 1. Bug diagnosis and NEMO gather/scatter semantics (`MEASURED`)
+
+At `96bb44f0aeee`, `si3_o17_step` (`packages/ice/legoesm/ice/si3_o17.py` composing O12
+thermodynamics via `packages/ice/legoesm/ice/si3_thd_pnd.py` lines 874–990 and
+`packages/ice/legoesm/ice/bitz_lipscomb.py`) executed category thermodynamics on
+categories that NEMO 5.0.2 excludes:
+
+- **NEMO gather/scatter (`src/ICE/icethd.F90` lines 117–165 and 336–526, `src/ICE/icetab.F90` lines 191–216, `src/ICE/icestp.F90` lines 438–501)**:
+  Inside `DO jl = 1, jpl` (`src/ICE/icethd.F90` line 127), NEMO loops over owned
+  interior points `DO_2D( 0, 0, 0, 0 )` (`src/ICE/icethd.F90` line 130) and gathers
+  only `a_i(ji,jj,jl) > epsi10` (`1.0e-10`) into `nptidx(1:npti)`
+  (`src/ICE/icethd.F90` lines 131–135). The category sequence
+  `ice_thd_1d2d(jl, 1) -> ice_thd_zdf -> ice_thd_dh -> ice_thd_temp -> ice_thd_sal -> ice_thd_temp -> ice_thd_da -> ice_thd_1d2d(jl, 2)`
+  executes only under `IF( npti > 0 )` (`src/ICE/icethd.F90` lines 138–165), and
+  `ice_thd_1d2d(jl, 2)` scatters only `1:npti` via `tab_1d_2d`
+  (`src/ICE/icethd.F90` lines 456–526, `src/ICE/icetab.F90` lines 191–216).
+  Categories with `a_i(ji,jj,jl) <= epsi10` (or outside `DO_2D(0,0,0,0)`):
+  - leave pre-thermo state (`a_i`, `h_i`, `h_s`, `t_su`, `s_i`, `o_i`, `v_i`, `v_s`,
+    `sv_i`, `oa_i`, `t_i`, `t_s`, `e_i`, `e_s`, `sz_i`, `szv_i`) untouched
+    (`src/ICE/icethd.F90` lines 456–471 and 523–526);
+  - add `0._wp` to cumulative 2D fluxes (`wfx_snw_sni`, `wfx_snw_sum`, `wfx_sub`,
+    `wfx_snw_sub`, `wfx_ice_sub`, `wfx_err_sub`, `wfx_bog`, `wfx_bom`, `wfx_sum`,
+    `wfx_sni`, `wfx_spr`, `sfx_sni`, `sfx_bri`, `sfx_sub`, `sfx_bog`, `sfx_bom`,
+    `sfx_sum`, `hfx_thd`, `hfx_spr`, `hfx_snw`, `hfx_sub`, `hfx_bog`, `hfx_bom`,
+    `hfx_sum`, `hfx_sni`, `hfx_dif`, `hfx_err_dif`, `wfx_lam`, `hfx_lam`, `sfx_lam`
+    at `src/ICE/icethd.F90` lines 161 and 473–507, initialized to `0._wp` in
+    `diag_set0` at `src/ICE/icestp.F90` lines 438–465);
+  - keep `qcn_ice_bot(:,:,jl) = 0._wp`, `qcn_ice_top(:,:,jl) = 0._wp`,
+    `cnd_ice(:,:,jl) = 0._wp`, `qtr_ice_bot(:,:,jl) = 0._wp`,
+    `qml_ice(:,:,jl) = 0._wp`, `dh_i_sum_2d(:,:,jl) = 0._wp`, and
+    `dh_s_sum_2d(:,:,jl) = 0._wp` (`src/ICE/icethd.F90` lines 510–521, initialized
+    in `diag_set0` at `src/ICE/icestp.F90` lines 489–495);
+  - keep `t_si(:,:,jl) = rt0` (`273.15`, initialized in `diag_set0` on `A2D(0)` at
+    `src/ICE/icestp.F90` line 488 and updated only for `1:npti` at
+    `src/ICE/icethd.F90` line 518).
+- **Unguarded failure modes at `96bb44f0aeee`**:
+  1. Forward `0/0 -> NaN` in snow thickness update at
+     `packages/ice/legoesm/ice/bitz_lipscomb.py` line 1156 when `sprecip > 0`,
+     `zsnw = 0`, and `at_i = 0`, where `jnp.where(at_i > 0.0, sprecip * dt * (a_i / at_i) / rho_s, 0.0)`
+     evaluates `0.0 / 0.0` in the unselected branch before `nemo_source_round` (`sr`)
+     propagates `copysign(abs(NaN), NaN) = NaN` through `wfx_spr`, `hfx_spr`,
+     `wfx_snw_sub`, `wfx_sub`, `wfx_err_sub`, `hfx_sub`, `emp`, `fwfice`, and `qns`.
+     On REAL ORCA2 step 1 (`kt = 1`, `rank = 0`), this produced `1,813` NaNs at
+     open-water snowfall points in those 9 fields where NEMO's `kind = 28` record is
+     finite, plus `36,305` mismatches in inactive-category `t_si`.
+  2. Reverse-mode AD `0/0 -> NaN` on the probe tile (`objective = NaN` and `31` of
+     `37` input gradients containing `304` `NaN` entries) from open-water snowfall at
+     owned cell `(0, 0)` (`full (2, 2)`) and hidden `0/0` divisions inside unguarded
+     inactive columns at `packages/ice/legoesm/ice/bitz_lipscomb.py` lines 633–636
+     (`k_si = 0.0 / 0.0` when `h_i = h_s = 0`) and lines 745–748 (snow-free Thomas
+     surface row `0.0 / 0.0` when `dqns_ice = k_i_half = 0`).
+
+### 2. Model changes (exact NEMO gather/scatter; no knob, no default change)
+
+1. **`packages/ice/legoesm/ice/bitz_lipscomb.py` lines 2495–2508**:
+   Extended `_guard_inactive_columns(value, active_columns, dtype, inactive_fill=None)`
+   to accept an optional constant `inactive_fill` (defaulting to `value` when `None`)
+   placed under `jax.lax.stop_gradient` on `~active_columns`, reusing the existing
+   `_guard_inactive_columns` mechanism rather than introducing a new one.
+2. **`packages/ice/legoesm/ice/si3_o17.py` lines 382–456, 824, 899–905, 1008–1030**:
+   - Added `_owned_mask(shape, h)` (`src/ICE/icethd.F90` line 130 `DO_2D(0,0,0,0)`)
+     and set `active = owned_mask & (state.a_i[..., jl] > epsi10)`
+     (`src/ICE/icethd.F90` lines 130–135) in `_thermo_entries`, passing pre-thermo
+     2D state (`e_i_2d`, `e_s_2d`, `v_i`, `v_s`, `sv_i`, `oa_i`, `szv_i`, `t_si`).
+   - Masked `thermo_state.t_si` with `entry["active"]` so inactive categories retain
+     `state.t_si[..., jl]` (`rt0 = 273.15` on `owned`, `src/ICE/icethd.F90` line 518,
+     `src/ICE/icestp.F90` line 488).
+   - Masked `qtr_bot`, `qcn_top`, `qcn_bot`, and `qml_ice` with `thermo_active_owned`
+     to `0.0` (`src/ICE/icestp.F90` lines 489–493, `src/ICE/icethd.F90` lines 510–521)
+     so inactive-category values cannot leak into
+     `packages/ice/legoesm/ice/si3_finalize.py` lines 937–988.
+3. **`packages/ice/legoesm/ice/si3_thd_pnd.py` lines 883–1245**:
+   - In `_thermo_category_loop`, resolved `active = raw_entry["active"]` (or
+     `raw_entry["a_i"] > constants.epsi10` when `"active"` is omitted), guarded all
+     category inputs and carried fluxes on `~active` via
+     `_guard_inactive_columns(..., inactive_fill=...)` before calling
+     `si3_ice_thd_o10_category_stages` and `si3_ice_thd_da` so inactive lanes cannot
+     produce non-finite values or cotangents, and selected/scattered category outputs
+     (`SI3O12CategoryOutput`, `o10.o9.zdf`, `o10.o9.dh`, `o10.sal`, `da_out`) and
+     carried fluxes only on `active` (`_where_active`).
+
+### 3. Proofs
+
+1. **Proof 1 — Every ACTIVE-category forward bit unchanged vs `96bb44f0aeee` (`0` ULP, signed zeros and NaN bits included, eager AND `jax.jit`) on O12 fixtures, O8–O16 master scorer, and probe tile**:
+   - **O12 fixtures and probe tile (`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_nanfix_scratch/proof1_active_bits.json`)**:
+     Measured by running `verify_proof1_active_bits.py` across `--case o12_5cat`,
+     `--case d194`, and `--case probe_tile`:
+     - `o12_5cat_fixture` (`eager_vs_parent_96bb44f0aeee`, `jit_vs_parent_96bb44f0aeee`, `eager_vs_jit`):
+       `{"compared": 32250, "differing": 0, "equal": 32250, "max_ulp": 0}`
+     - `d194_fixture` (`eager_vs_parent_96bb44f0aeee`, `jit_vs_parent_96bb44f0aeee`, `eager_vs_jit`):
+       `{"compared": 38700, "differing": 0, "equal": 38700, "max_ulp": 0}`
+     - `probe_tile` (`eager_vs_parent_96bb44f0aeee`, `jit_vs_parent_96bb44f0aeee`, `eager_vs_jit`):
+       `{"compared": 1075, "differing": 0, "equal": 1075, "max_ulp": 0}`
+     - Final line: `"status": "PASS_0_ULP_ACTIVE_CATEGORIES"`
+   - **O8–O16 master scorer (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py`) per rung group (each under 20 min; full `1..100` in `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_nanfix_scratch/operator_run.sh`)**:
+     - `--rung O8-O13 --steps 1,2,100`: `"status": "PASS_ALL_O8_O13_0_ULP"`
+     - `--rung O8-O13 --steps 1..20`: `"status": "PASS_ALL_O8_O13_0_ULP"`
+     - `--rung O13 --steps 1..100`: `"status": "PASS_O13_0_ULP"`
+     - `--rung O14 --steps 1..100`: `"status": "PASS_O14_0_ULP"`
+     - `--rung O15-O16 --steps 1..100`: `"status": "PASS_ALL_O15_O16_0_ULP"`
+
+2. **Proof 2 — On REAL ORCA2 step 1 (`kt = 1`, `rank = 0`), eager `si3_o17_step` has `0` NaN in owned outputs and fluxes, and the 9 fields at the `1,813` open-water snowfall points equal NEMO's record bit for bit (`0` ULP)**:
+   Measured by running `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_nanfix_scratch/verify_proof2_orca2_step1.py`
+   (`elapsed_seconds: 535.72`, output `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_nanfix_scratch/proof2_orca2_step1.json`):
+   - `total_owned_nans`: `0` across all `18` owned state fields, `43` owned flux fields,
+     `14` owned output fields, and `5` owned stress fields.
+   - `open_water_snowfall_points`: `1813` (`at_i_b <= 1.0e-10` and `sprecip > 0.0`).
+   - Per-field comparison at the `1,813` open-water snowfall points against NEMO's
+     `kind = 28` record:
+
+     | Field | Compared | Equal | Differing | Max ULP |
+     |---|---:|---:|---:|---:|
+     | `hfx_spr` | 1,813 | 1,813 | 0 | 0 |
+     | `hfx_sub` | 1,813 | 1,813 | 0 | 0 |
+     | `wfx_err_sub` | 1,813 | 1,813 | 0 | 0 |
+     | `wfx_snw_sub` | 1,813 | 1,813 | 0 | 0 |
+     | `wfx_spr` | 1,813 | 1,813 | 0 | 0 |
+     | `wfx_sub` | 1,813 | 1,813 | 0 | 0 |
+     | `emp` | 1,813 | 1,813 | 0 | 0 |
+     | `fwfice` | 1,813 | 1,813 | 0 | 0 |
+     | `qns` | 1,813 | 1,813 | 0 | 0 |
+
+   - Inactive-category `t_si` (`a_i <= 1.0e-10`) across the full ORCA2 domain:
+     - `t_si_inactive_categories_kind27`: `{"compared": 114415, "differing": 0, "equal": 114415, "max_ulp": 0}`
+     - `t_si_inactive_categories_kind28`: `{"compared": 114415, "differing": 0, "equal": 114415, "max_ulp": 0}`
+   - Final line: `"status": "PASS"`
+
+3. **Proof 3 — Unit test failing under the `96bb44f0aeee` unguarded plant and passing now on a small tile with an open-water snowfall column**:
+   `tests/ice/unit/test_si3_o17.py::test_o17_inactive_category_open_water_snowfall_nan_fix_and_plant`
+   (`tests/ice/unit/test_si3_o17.py` lines 174–271) runs `si3_o17_step` on the `6x5`
+   (`2x1` owned) tile where owned cell `(0, 0)` (`full (2, 2)`) is open water with
+   snowfall (`at_i = 0.0`, `sprecip = 4.0e-8 > 0.0`) and owned cell `(1, 0)`
+   (`full (3, 2)`) is active 5-category sea ice:
+   - Passes now with `0` NaNs in all owned state, flux, output, and stress fields,
+     `0.0` at `(0, 0)` for `hfx_spr`, `hfx_sub`, `wfx_err_sub`, `wfx_snw_sub`,
+     `wfx_spr`, `wfx_sub`, and `fwfice`, finite `emp` (`2.0e-8`) and `qns`, and
+     `t_si[2, 2, :] == 273.15`.
+   - Under the planted `96bb44f0aeee` unguarded path (`active = True` for all
+     categories in `_thermo_entries`), produces `NaN` at `(0, 0)` in all 9 fields
+     (`hfx_spr`, `hfx_sub`, `wfx_err_sub`, `wfx_snw_sub`, `wfx_spr`, `wfx_sub`,
+     `emp`, `fwfice`, `qns`) and corrupts `t_si[2, 2, :]` (`266.89337065`), while
+     preserving `0` ULP (`uint64` bit-identical) agreement on all active-category
+     outputs at `(1, 0)` (`full (3, 2)`).
+
+4. **Proof 4 — AD probe on the small tile (prefix through O12, `--prefixes 8`, under 20 min) gives a finite objective and `0` NaN gradients**:
+   Measured by running:
+   `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_nanfix_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 /home/dbalwada/legoESM/.venv/bin/python scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_ad_probe.py --prefixes 8 --output /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_nanfix_scratch/proof4_ad_probe_prefix8.json`
+   - `prefix_1_8_o12_thermo`:
+     - `"objective": -7.963900479420319e+18`, `"objective_is_finite": true`
+     - `"gradient_nan_entries": 0`, `"gradient_inf_entries": 0`, `"gradient_finite_entries": 38425`, `"gradient_nonzero_entries": 8957`
+     - `"trace_plus_lower_plus_compile_seconds": 651.201`, `"execution_seconds": 1.3162`, `"peak_rss_gib": 24.707`
+   - Final line: `"status": "PASS"`
+
+5. **Proof 5 — Per-entry-relative central FD on the newly guarded outputs (`relative <= 1.0e-6`, `ad != 0.0`, no absolute floor), failing under `stop_gradient` and `1 + 1e-5` tangent plants**:
+   `tests/ice/unit/test_si3_o17.py::test_o17_newly_guarded_outputs_reverse_mode_matches_central_differences_and_plants`
+   (`tests/ice/unit/test_si3_o17.py` lines 274–662) verifies `0` NaNs across all
+   forward outputs and all `15` reverse-mode input cotangent arrays on the mixed
+   open-water snowfall / active sea-ice tile, checks per-entry-relative central
+   finite differences (`relative = abs(ad - fd) / max(abs(ad), abs(fd)) <= 1.0e-6`,
+   `ad != 0.0`) across all `21` output-entry pairs covering `t_si` (active and
+   inactive passthrough), `qtr_bot`, `qcn_top`, `qcn_bot`, `qml_ice`, `t_su`, `a_i`,
+   `v_i`, `v_s`, `e_i`, `e_s`, `szv_i`, `sfx_bri`, `hfx_thd`, `hfx_dif`, `hfx_sub`,
+   `wfx_snw_sub`, `wfx_ice_sub`, `hfx_spr`, and `wfx_spr` (`max_rel = 6.723e-8`),
+   and proves that both the `jax.lax.stop_gradient` plant and the `1 + 1e-5`
+   tangent-scaling plant fail the check.
+
+6. **Equation counter (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_jaxpr_count.py`)**:
+   Preserves `D198_R5_96BB44F0AE` (`recursive_total: 141,340`) and updates `EXPECTED`
+   to the measured counts with inactive-category guarding (`recursive_total: 141,935`,
+   `_thermo_category_loop: 36,355`, `si3_ice_thd_do: 9,809`, `si3_dyn_orca2: 28,148`,
+   `remaining_named_and_inlined: 67,623`; `"status": "PASS"`).
+
+independent review: operator
+
+

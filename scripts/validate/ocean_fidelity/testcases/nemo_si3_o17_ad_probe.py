@@ -911,9 +911,23 @@ def measure_reverse_compile_unit(
         jax.block_until_ready(val)
         exec_s = round(time.monotonic() - t_exec0, 4)
         obj_val = float(np.asarray(val))
+        grad_arrays = [
+            np.asarray(g)
+            for g in jax.tree_util.tree_leaves(_grad)
+            if _is_float_leaf(g)
+        ]
+        grad_nan = sum(int(np.isnan(a).sum()) for a in grad_arrays)
+        grad_inf = sum(int(np.isinf(a).sum()) for a in grad_arrays)
+        grad_finite = sum(int(np.isfinite(a).sum()) for a in grad_arrays)
+        grad_nonzero = sum(int(np.count_nonzero(a)) for a in grad_arrays)
         rss_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
         row["execution_seconds"] = exec_s
         row["objective"] = obj_val
+        row["objective_is_finite"] = bool(np.isfinite(obj_val))
+        row["gradient_nan_entries"] = grad_nan
+        row["gradient_inf_entries"] = grad_inf
+        row["gradient_finite_entries"] = grad_finite
+        row["gradient_nonzero_entries"] = grad_nonzero
         row["peak_rss_kib"] = rss_kib
         row["peak_rss_gib"] = round(rss_kib / (1024.0 * 1024.0), 3)
         _log_progress(f"{label}: done execute() in {exec_s:.4f}s")
@@ -978,8 +992,17 @@ def diagnose_slices(
     prov = _provenance()
 
     def _build_report() -> dict[str, Any]:
+        exec_ok = all(
+            (r.get("execution_seconds") is None)
+            or (
+                r.get("objective_is_finite") is True
+                and r.get("gradient_nan_entries", 0) == 0
+                and r.get("gradient_inf_entries", 0) == 0
+            )
+            for r in results
+        )
         return {
-            "status": "PASS",
+            "status": "PASS" if exec_ok else "FAIL",
             "mode": "diagnostic",
             "provenance": prov,
             "eager_recording_seconds": round(eager_record_s, 3)
@@ -1309,10 +1332,34 @@ def probe(
     else:
         with jax.disable_jit():
             primal0 = primal_outputs(inputs)
-    unchanged = all(
-        np.array_equal(np.asarray(a).view(np.uint64), np.asarray(b).view(np.uint64))
-        for a, b in zip(jax.tree_util.tree_leaves(primal0), jax.tree_util.tree_leaves(primal1))
-        if hasattr(a, "dtype") and a.dtype == jnp.float64
+    raw_uint64_differing = 0
+    signed_zero_differing = 0
+    both_nan_differing = 0
+    finite_value_differing = 0
+    primal0_nan_entries = 0
+    primal1_nan_entries = 0
+    for a, b in zip(jax.tree_util.tree_leaves(primal0), jax.tree_util.tree_leaves(primal1)):
+        if hasattr(a, "dtype") and a.dtype == jnp.float64:
+            aa = np.ascontiguousarray(np.asarray(a, dtype=np.float64))
+            bb = np.ascontiguousarray(np.asarray(b, dtype=np.float64))
+            primal0_nan_entries += int(np.isnan(aa).sum())
+            primal1_nan_entries += int(np.isnan(bb).sum())
+            ab = aa.view(np.uint64)
+            bw = bb.view(np.uint64)
+            diff_mask = ab != bw
+            if np.any(diff_mask):
+                raw_uint64_differing += int(np.sum(diff_mask))
+                ad = aa[diff_mask]
+                bd = bb[diff_mask]
+                zero_pair = (ad == 0.0) & (bd == 0.0)
+                nan_pair = np.isnan(ad) & np.isnan(bd)
+                signed_zero_differing += int(np.sum(zero_pair))
+                both_nan_differing += int(np.sum(nan_pair))
+                finite_value_differing += int(np.sum(~(zero_pair | nan_pair)))
+    unchanged = (
+        finite_value_differing == 0
+        and primal0_nan_entries == 0
+        and primal1_nan_entries == 0
     )
     rows = []
     input_paths, _ = jax.tree_util.tree_flatten_with_path(inputs)
@@ -1402,11 +1449,21 @@ def probe(
     rss_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     report = {
         "status": "PASS"
-        if unchanged and all(r["nan"] == r["inf"] == 0 for r in finite_rows)
+        if np.isfinite(float(value))
+        and unchanged
+        and all(r["nan"] == r["inf"] == 0 for r in finite_rows)
         else "FAIL",
         "provenance": _provenance(),
         "objective": float(value),
         "forward_bits_unchanged": unchanged,
+        "forward_primal_comparison": {
+            "raw_uint64_differing": raw_uint64_differing,
+            "decision_200_signed_zero_differing": signed_zero_differing,
+            "both_nan_differing": both_nan_differing,
+            "finite_value_differing": finite_value_differing,
+            "primal0_nan_entries": primal0_nan_entries,
+            "primal1_nan_entries": primal1_nan_entries,
+        },
         "tracing_seconds": tracing_seconds,
         "lower_seconds": lower_seconds,
         "lowering_seconds": lower_seconds,

@@ -379,6 +379,13 @@ def _correction_state(state: SI3State, fluxes: SI3Fluxes) -> SI3IceCorState:
     )
 
 
+def _owned_mask(shape: tuple[int, int], h: int) -> jnp.ndarray:
+    if not h:
+        return jnp.ones(shape, dtype=jnp.bool_)
+    mask = jnp.zeros(shape, dtype=jnp.bool_)
+    return mask.at[h:-h, h:-h].set(True)
+
+
 def _thermo_entries(
     state: SI3State,
     forcing: SI3O17LiveForcing,
@@ -386,12 +393,19 @@ def _thermo_entries(
     fluxes: SI3Fluxes,
     t_bo: jnp.ndarray,
     nn_hls: int,
+    epsi10: float = 1.0e-10,
 ) -> tuple[dict, ...]:
     eq = state.equivalent
     h = int(nn_hls)
+    owned_mask = _owned_mask(state.a_i.shape[:2], h)  # icethd.F90:130 DO_2D(0,0,0,0)
     entries = []
     for jl in range(state.a_i.shape[-1]):
+        active = owned_mask & (
+            jnp.asarray(state.a_i[..., jl], dtype=jnp.float64)
+            > jnp.asarray(epsi10, dtype=jnp.float64)
+        )  # icethd.F90:130-135 (nptidx/npti gather over a_i > epsi10)
         e = dict(
+            active=active,
             h_i=eq.h_i[..., jl],
             h_s=eq.h_s[..., jl],
             t_su=state.t_su[..., jl],
@@ -399,6 +413,14 @@ def _thermo_entries(
             t_s=eq.t_s[..., :, jl],
             e_i=state.e_i[..., :, jl],
             e_s=state.e_s[..., :, jl],
+            e_i_2d=state.e_i[..., :, jl],
+            e_s_2d=state.e_s[..., :, jl],
+            v_i=state.v_i[..., jl],
+            v_s=state.v_s[..., jl],
+            sv_i=state.sv_i[..., jl],
+            oa_i=state.oa_i[..., jl],
+            szv_i=state.szv_i[..., :, jl],
+            t_si=state.t_si[..., jl],
             sz_i=eq.sz_i[..., :, jl],
             s_i=eq.s_i[..., jl],
             a_i=state.a_i[..., jl],
@@ -792,10 +814,17 @@ def si3_o17_step(
 
     frazil = si3_ice_thd_frazil(other.qlead, rn_hinew=card.rn_hinew, ln_frazil=card.ln_frazil)
     dh_fluxes = SI3DHFluxes(**{name: getattr(fluxes, name) for name in SI3DHFluxes._fields})
+    thermo_entries = _thermo_entries(  # icethd.F90:117-140
+        state,
+        forcing,
+        surface,
+        fluxes,
+        t_bo,
+        card.state.nn_hls,
+        card.constants.epsi10,  # icethd.F90:130-140
+    )
     stages = si3_ice_thd_o12_stages(
-        category_entries=_thermo_entries(  # icethd.F90:117-140
-            state, forcing, surface, fluxes, t_bo, card.state.nn_hls  # icethd.F90:140
-        ),
+        category_entries=thermo_entries,
         category_fluxes=dh_fluxes,
         sfx_bri=fluxes.sfx_bri,
         sfx_lam=fluxes.sfx_lam,
@@ -867,8 +896,12 @@ def si3_o17_step(
             a_i=_pack_categories(stages, "a_i"),
             v_s=_pack_categories(stages, "v_s"),
         ),
-        t_si=jnp.stack(  # icethd.F90:163; ice_thd_1d2d :518
-            [c.o10.o9.zdf.t_si for c in stages.categories], axis=-1  # icethd.F90:518
+        t_si=jnp.stack(  # icethd.F90:130-135,163; ice_thd_1d2d :518; icestp.F90:488
+            [
+                jnp.where(entry["active"], c.o10.o9.zdf.t_si, state.t_si[..., jl])
+                for jl, (entry, c) in enumerate(zip(thermo_entries, stages.categories))
+            ],
+            axis=-1,  # icethd.F90:518
         ),
         aggregated=state.aggregated._replace(
             at_i=stages.pnd.at_i,
@@ -972,10 +1005,29 @@ def si3_o17_step(
     correction = correction._replace(state=corrected_state)  # icethd.F90:183-201
     owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
     owned_fluxes = SI3Fluxes(*(x[owned] for x in correction.fluxes))
-    qtr_bot = jnp.stack([c.o10.o9.zdf.qtr_ice_bot for c in stages.categories], axis=-1)[owned]
-    qcn_top = jnp.stack([c.o10.o9.zdf.qcn_ice_top for c in stages.categories], axis=-1)[owned]
-    qcn_bot = jnp.stack([c.o10.o9.zdf.qcn_ice_bot for c in stages.categories], axis=-1)[owned]
-    qml_ice = jnp.stack([c.o10.o9.dh.qml_ice for c in stages.categories], axis=-1)[owned]
+    thermo_active_owned = jnp.stack(  # icethd.F90:130-135 (nptidx/npti gather over a_i > epsi10)
+        [entry["active"][owned] for entry in thermo_entries], axis=-1
+    )
+    qtr_bot = jnp.where(  # icestp.F90:489; icethd.F90:519
+        thermo_active_owned,
+        jnp.stack([c.o10.o9.zdf.qtr_ice_bot for c in stages.categories], axis=-1)[owned],
+        0.0,
+    )
+    qcn_top = jnp.where(  # icestp.F90:492; icethd.F90:511
+        thermo_active_owned,
+        jnp.stack([c.o10.o9.zdf.qcn_ice_top for c in stages.categories], axis=-1)[owned],
+        0.0,
+    )
+    qcn_bot = jnp.where(  # icestp.F90:491; icethd.F90:510
+        thermo_active_owned,
+        jnp.stack([c.o10.o9.zdf.qcn_ice_bot for c in stages.categories], axis=-1)[owned],
+        0.0,
+    )
+    qml_ice = jnp.where(  # icestp.F90:493; icethd.F90:521
+        thermo_active_owned,
+        jnp.stack([c.o10.o9.dh.qml_ice for c in stages.categories], axis=-1)[owned],
+        0.0,
+    )
     zero2 = jnp.zeros_like(sf.smask0)
     zero3 = jnp.zeros_like(a_i_b)  # icestp.F90:184; store_fields :399-418
     update = SI3UpdateFluxForcing(
