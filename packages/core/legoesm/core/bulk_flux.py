@@ -335,6 +335,15 @@ def large_yeager_neutral_cd(
     no upper clip, so the calm-wind ``2.7/U`` enhancement (up to ``5.54e-3``
     at the 0.5 m/s floor) is kept.  The two conventions differ only for
     ``U < ~0.97 m/s`` (where the 3.0e-3 clip binds) and ``U > 33 m/s``.
+
+    ``nemo_parity=True`` applies NO wind floor: NEMO's ``cd_n10_ncar``
+    (sbcblk_algo_ncar.F90:242-255) has none, and its caller ``turb_ncar``
+    floors the argument itself -- ``MAX(0.5, U_zu)`` for the first guess
+    (:115) and ``MAX(0.25, UN10)`` inside the iteration (:192).  Re-flooring
+    at 0.5 here overrode the 0.25 neutral-wind floor on calm cells (tier-3
+    ORCA1 audit BLK D1: Cd 86% off on 67 cells).  Callers passing
+    ``nemo_parity=True`` MUST therefore supply a positive, already-floored
+    wind (both ``ncar_transfer_coefficients`` call sites do).
     """
     if nemo_source_exact:
         if not nemo_parity:
@@ -358,7 +367,9 @@ def large_yeager_neutral_cd(
         C_DN = R(1.0e-3 * R(below + above))
         return R(jnp.maximum(C_DN, 0.1e-3))
 
-    U = jnp.maximum(jnp.asarray(wind), 0.5)
+    U = jnp.asarray(wind)
+    if not nemo_parity:
+        U = jnp.maximum(U, 0.5)
     C_DN = (
         2.7 / U + 0.142 + U / 13.09 - 3.14807e-10 * U ** 6
     ) * 1e-3

@@ -267,7 +267,9 @@ def _np_rho_air(T_abs, q, p):
 
 
 def _np_cd_n10(w):
-    w = np.maximum(w, 0.5)
+    # NEMO cd_n10_ncar (sbcblk_algo_ncar.F90:242-255) has no wind floor: the
+    # caller floors (0.5 first guess, 0.25 iterated UN10).  A 0.5 floor here
+    # mirrored legoESM's tier-3 BLK D1 defect instead of NEMO.
     cd = (2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w ** 6) * 1e-3
     cd = np.where(w >= 33.0, 2.34e-3, cd)
     return np.maximum(cd, 0.1e-3)
