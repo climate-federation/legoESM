@@ -71,5 +71,69 @@
    "iterations_max": 3
   }
  },
- "fixture_subset_branch_max_rel_ato": 5.3563976311358974e-14
+ "fixture_subset_branch_max_rel_ato": 5.3563976311358974e-14,
+ "smooth_outputs": "smooth_* keys: branch port at default open_water_limit_sharpness=100 on the fixture cells (stored gap vs NEMO), budget.py",
+ "smooth_budget_full_field": {
+  "open_water": {
+   "n_changed": 4231,
+   "max_abs": 0.002527656048930127,
+   "net_area_weighted": -5974958282.483627,
+   "abs_area_weighted": 7146170144.2316675,
+   "rel_to_global_hard_inventory": 1.457916840537415e-05
+  },
+  "ice_area": {
+   "n_changed": 819,
+   "max_abs": 0.0011858454796016549,
+   "net_area_weighted": 190822292.4850963,
+   "abs_area_weighted": 190839243.8351768,
+   "rel_to_global_hard_inventory": 1.2365247474940574e-05
+  },
+  "ice_volume": {
+   "n_changed": 306,
+   "max_abs": 4.440892098500626e-16,
+   "net_area_weighted": 1.719149734201211e-05,
+   "abs_area_weighted": 0.00015147808690109987,
+   "rel_to_global_hard_inventory": 6.402293379990992e-18
+  },
+  "snow_volume": {
+   "n_changed": 270,
+   "max_abs": 1.1102230246251565e-16,
+   "net_area_weighted": 8.037748198038754e-08,
+   "abs_area_weighted": 1.474075662201675e-05,
+   "rel_to_global_hard_inventory": 6.826173591702108e-18
+  },
+  "ice_enthalpy": {
+   "n_changed": 241,
+   "max_abs": 2.384185791015625e-07,
+   "net_area_weighted": -680.906035378287,
+   "abs_area_weighted": 38815.02997985953,
+   "rel_to_global_hard_inventory": 5.471771078188839e-18
+  },
+  "snow_enthalpy": {
+   "n_changed": 234,
+   "max_abs": 1.1175870895385742e-08,
+   "net_area_weighted": 189.61545029054844,
+   "abs_area_weighted": 1880.3081958999167,
+   "rel_to_global_hard_inventory": 6.897398283401972e-18
+  },
+  "ice_salt": {
+   "n_changed": 260,
+   "max_abs": 3.552713678800501e-15,
+   "net_area_weighted": 9.346004500489634e-05,
+   "abs_area_weighted": 0.0010733526712365573,
+   "rel_to_global_hard_inventory": 6.424756694765878e-18
+  },
+  "closure_1_minus_ato_minus_a": {
+   "n_changed": 4210,
+   "max_abs": 0.0014814806994822849,
+   "net_area_weighted_m2": 5784135989.99853
+  },
+  "ocean_area_m2_interior": 507514522746686.1
+ },
+ "producer_sha256": {
+  "extract.py": "6a6bae6e504b6e15edce276b4afb581324f056cc3c578a818579188fcd8af9a2",
+  "budget.py": "47977cdbbe340f9fbcc570615aab0c1952426f4321e35c0820b929df7a2e3a79",
+  "ridging_base.py": "22e1e6e98bd8fce6c493b463bb48082f431a6cddf001fd0122897479a7a0635d"
+ },
+ "producer_note": "extract.py (NEMO cells, base vs fix) and budget.py (smooth_* keys + full-field budget) live in the oracle-audit tree with the tier-4 harness they import (t4lib.py, NEMO binary records); not repo code."
 }
