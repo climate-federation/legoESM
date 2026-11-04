@@ -1066,7 +1066,11 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     )
     e_water = constants.c_ocean * (forcing.t_bottom - constants.T0)
     dE = e_i_specific - e_water
-    dh_growth = dt * jnp.maximum(0.0, zf / (dE * constants.rho_ice))
+    # Basal growth only where zf_tt < 0 (`icethd_dh.F90:331`): with 5.0.1's
+    # unclamped latent term dE can turn positive, so the sign gate is needed
+    # (5.0.2's MAX(0,.) keeps dE < 0 and makes it redundant).
+    dh_growth = jnp.where(
+        zf < 0.0, dt * jnp.maximum(0.0, zf / (dE * constants.rho_ice)), 0.0)
     growth_mass = -constants.rho_ice * dh_growth * ar      # zfmdt * a * r1_Dt
     fx = _add_fluxes(
         fx,

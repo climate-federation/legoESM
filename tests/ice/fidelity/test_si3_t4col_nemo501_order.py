@@ -43,6 +43,19 @@ def test_501_order_matches_nemo_state_and_fluxes():
     assert not any(bad.values()), bad
 
 
+def test_501_order_is_strict_on_the_melt_columns_where_the_spread_is_vacuous():
+    """Review: NEMO's own spread is 1.0 in some degenerate columns; require <= 1e-12 instead."""
+    _, (o1, fx1) = _run("5.0.1")
+    # columns whose NEMO thickness is a roundoff residual (<1e-10 m) need the C4 running total
+    m = FX["is_fail_on_main"] & (col(FX, "dh:nemo:h_i") > 1e-10)
+    assert m.sum() >= 4
+    for f, a in (("h_i", "h_ice"), ("h_s", "h_snow")):
+        assert np.all(rel(getattr(o1, a), col(FX, f"dh:nemo:{f}"))[m] <= 1e-12), f
+    for f in ("wfx_snw_sub", "wfx_snw_sum"):
+        acc = col(FX, f"dh:in:{f}") + np.asarray(getattr(fx1, f))
+        assert np.all(rel(acc, col(FX, f"dh:nemo:{f}"))[m] <= 1e-12), f
+
+
 def test_default_502_order_differs_on_the_melt_columns():
     _, (o2, _) = _run("5.0.2")
     m = FX["is_fail_on_main"]
@@ -73,13 +86,38 @@ def test_unknown_version_raises_and_latent_max_differs_only_when_binding():
     assert float(l1[0]) == float(l2[0]) and float(l1[1]) < 0.0 == float(l2[1])
 
 
+def test_501_latent_and_iteration_cap_bind_at_both_call_sites():
+    st, zr, fz = dh_args(FX)
+    warm = fz._replace(t_bottom=fz.t_bottom * 0 + K.T0 - 0.05, sss=fz.sss * 0 + 34.0,
+                       qlead=fz.qlead * 0 - 1e6)            # t_bo above Tmelt(0.75*SSS): latent < 0
+    s1 = bl.si3_column_step_arrays(st, warm._replace(dqns_ice=warm.qns_ice - 1.0), dt(FX), K, nemo_version="5.0.1")
+    s2 = bl.si3_column_step_arrays(st, warm._replace(dqns_ice=warm.qns_ice - 1.0), dt(FX), K, nemo_version="5.0.2")
+    # ice_thd_do new-ice volume and dh basal growth both see the unclamped latent term
+    assert not np.allclose(np.asarray(s1.fluxes.wfx_opw), np.asarray(s2.fluxes.wfx_opw), rtol=1e-12, atol=0)
+    grow = np.asarray(s2.fluxes.wfx_bog) != 0
+    assert grow.any() and not np.allclose(np.asarray(s1.fluxes.wfx_bog)[grow], np.asarray(s2.fluxes.wfx_bog)[grow], rtol=1e-12, atol=0)
+
+
+
+def test_501_iteration_cap_is_50(monkeypatch):
+    """A column that never meets the 1e-4 K test reports the cap: 50 (5.0.1) vs 200 (5.0.2)."""
+    from si3_t4col_fixture import zdf_args
+    monkeypatch.setattr(bl, "_T_CONVERGENCE", -1.0)
+    a = zdf_args(FX)
+    it1 = bl._si3_zdf_bl99_step(*a[:6], a[6], dt(FX), K, nemo_version="5.0.1").iterations
+    it2 = bl._si3_zdf_bl99_step(*a[:6], a[6], dt(FX), K).iterations
+    assert int(jnp.min(it1)) == int(jnp.max(it1)) == 50 and int(jnp.max(it2)) == 200
+
+
 def test_501_gradient_finite_and_matches_fd():
     st, zr, fz = dh_args(FX)
-    k = int(np.flatnonzero(FX["is_fail_on_main"])[0])
-    f = lambda e: bl._dh_step(st, zr, fz._replace(evaporation=e), dt(FX), K, nemo_version="5.0.1").h_snow[k]  # noqa: E731
+    sub = (col(FX, "dh:nemo:wfx_snw_sub") - col(FX, "dh:in:wfx_snw_sub")) != 0
+    k = int(np.flatnonzero(FX["is_fail_on_main"] & sub)[0])
+    f = lambda e: bl._dh_step_fluxes(st, zr, fz._replace(evaporation=e), dt(FX), K,  # noqa: E731
+                                     nemo_version="5.0.1")[1].wfx_snw_sub[k]
     g = jax.grad(f)(fz.evaporation)
     h = 1e-3 * abs(float(fz.evaporation[k]))
     d = jnp.zeros_like(fz.evaporation).at[k].set(h)
-    assert bool(jnp.all(jnp.isfinite(g)))
+    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g[k])) > 0
     np.testing.assert_allclose(float(g[k]), float((f(fz.evaporation + d) - f(fz.evaporation - d)) / (2 * h)),
                                rtol=1e-5, atol=1e-12)
