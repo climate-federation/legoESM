@@ -651,6 +651,7 @@ def _step_ice_rheo_card_impl(
         nlay_s=card.nlay_s,
         cell_area_m2=_ICE_RHEO_CELL_AREA_M2,
         halo_width=card.halo_width,
+        ponds_active=card.ponds,
         entry_intensive_contents=state.contents,
         contents_are_intensive=True,
     )

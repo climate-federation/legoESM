@@ -42,6 +42,7 @@ from legoesm.core.bulk_flux import (
     validate_bulk_scheme,
 )
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.smooth import sigmoid_switch
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.latlon import LatLonCGridGeometry, LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh
@@ -86,6 +87,9 @@ from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
 
 # Historical helper default: convergence only unless the caller supplies Cs.
 _NO_SHEAR_RIDGING = 0.0
+# Relative width of the smooth NEMO 5.0.1 lead-freezing cut switches (user
+# rule 2026-10-27: ported switches smooth at 0.01; 0.0 = NEMO's hard form).
+_LEAD_CUT_RELATIVE_WIDTH = 0.01
 
 
 def grid_supports_ice_dynamics(grid) -> bool:
@@ -656,6 +660,9 @@ def _nemo_si3_blk_ice_2(
     qns_ocean,
     qsr_ocean,
     emp_ocean_raw,
+    precip_factor,
+    evap_factor,
+    snow_blow_exponent,
     land_mask,
     ice_constants,
     _preserve_subnormal_snow: bool = True,
@@ -665,6 +672,10 @@ def _nemo_si3_blk_ice_2(
     Formula and ordering follow NEMO 5.0.2 ``icealb.F90:124-185`` and
     ``sbcblk.F90:1218-1346``.  It is private because partial combinations with
     another public bulk selector are outside the certified identity.
+    ``precip_factor``, ``evap_factor`` and ``snow_blow_exponent`` are the
+    namelist ``rn_pfac``, ``rn_efac`` and ``rn_snwblow`` (``namsbc_blk`` /
+    ``nampar``): they scale total and solid precipitation, scale sublimation
+    and its T derivative, and set ``ice_var_snwblow``'s exponent.
     ``land_mask`` is NEMO's ``smask0``; it multiplies the same terms as
     ``sbcblk.F90`` (net longwave, total/solid precipitation and the rain,
     snow and SST heat contents), so land cells carry NEMO's land values.
@@ -702,14 +713,14 @@ def _nemo_si3_blk_ice_2(
     qns_ice = q_lw - sensible - latent
     dqns_ice = -(dq_lw + sensible_scale + dq_latent)
 
-    total_precip = precip * land_mask
-    snow_precip = snow * land_mask
+    total_precip = precip * precip_factor * land_mask
+    snow_precip = snow * precip_factor * land_mask
     ocean_evap = emp_ocean_raw + total_precip
-    evaporation_ice = latent / ice_constants.latent_sublimation
-    devaporation_ice = dq_latent / ice_constants.latent_sublimation
+    evaporation_ice = evap_factor * latent / ice_constants.latent_sublimation
+    devaporation_ice = evap_factor * dq_latent / ice_constants.latent_sublimation
     snow_on_ice_fraction = 1.0 - (
         1.0 - ice_fraction_before
-    ) ** constants.snow_blow_exponent_orca1
+    ) ** snow_blow_exponent
     emp_ocean = (
         (1.0 - ice_fraction_before) * ocean_evap
         - (total_precip - snow_precip)
@@ -768,6 +779,14 @@ def _nemo_si3_blk_ice_2(
     return {
         "albedo": albedo,
         "qsr_ice": qsr_ice,
+        # NEMO's per-category loop terms (sbcblk.F90 z_qlw, z_dqlw, z_qsb,
+        # z_dqsb): net longwave (positive down), its T derivative, sensible
+        # heat (positive up, so qns_ice = qlw_ice - qsb_ice - qla_ice) and
+        # its T derivative.  Per unit ice area, not the iom cell average.
+        "qlw_ice": q_lw,
+        "dqlw_ice": dq_lw,
+        "qsb_ice": sensible,
+        "dqsb_ice": sensible_scale,
         "qla_ice": latent,
         "dqla_ice": dq_latent,
         "qns_ice": qns_ice,
@@ -816,16 +835,35 @@ def _nemo_si3_ice_flx_other(
     T0,
     ice_epsilon,
     max_ice_fraction,
+    lead_cut_version,
     land_mask,
+    lead_cut_width=_LEAD_CUT_RELATIVE_WIDTH,
 ):
     """Active C1D ``ice_flx_other`` branch, ``icesbc.F90:322-437``.
 
     The accepted run has ``ln_icedyn/ln_leadhfx/ln_icedO/ln_icedH=.true.``
     and form drag false.  No public flags expose the inactive alternatives.
+
+    ``lead_cut_version`` selects the open-water freezing cuts:
+
+    * ``"5.0.2"`` (C1D_OMIP_L3 oracle): landfast cut needs
+      ``at_i >= rn_amax - 0.001`` AND ``vt_i >= 3 m``; full-cover cut also
+      needs ``vt_i >= 3 m``.  Hard switches, unchanged.
+    * ``"5.0.1"`` (ORCA1 oracle, icesbc.F90:391,412,416): landfast cut
+      ``zvel <= 5 mm/s .AND. at_i >= rn_amax - 0.01``; full-cover cut
+      ``at_i >= 1 - epsi10``; no thickness term.  The two cuts are smooth
+      switches of relative width ``lead_cut_width`` (``0.0`` = NEMO's hard
+      form, used by the oracle tests).  The smooth landfast switch acts on
+      the squared speed so its gradient stays finite for ice at rest.
+
     ``land_mask`` is NEMO's ``smask0``: it multiplies the friction velocity
     squared, the ice switch and the lead/freezing energies (``zfric``,
     ``zswitch``, ``zqld``, ``zqfr``), so land qlead is 0 as in NEMO.
     """
+    if lead_cut_version not in ("5.0.1", "5.0.2"):
+        raise ValueError(
+            f"Unknown lead_cut_version {lead_cut_version!r}; expected '5.0.1' or '5.0.2'."
+        )
     du = u_ice - u_ocean
     du_west = u_ice_west - u_ocean_west
     dv = v_ice - v_ocean
@@ -871,6 +909,9 @@ def _nemo_si3_ice_flx_other(
     freeze_energy = jnp.where(stop_supercool, 0.0, freeze_energy)
     freeze_positive = jnp.where(stop_supercool, 0.0, freeze_positive)
     qsb = jnp.where(stop_supercool, 0.0, qsb)
+    # NEMO 5.0.1 also enters this branch when at_i < epsi10; that changes no
+    # output (there zswitch = 0 so fhld = 0, and min(0, zqld - zqfr) = 0 when
+    # zqld - zqfr >= 0), so the extra hard condition is not carried.
     cooling = lead_energy - freeze_energy < 0.0
     fhld = jnp.where(
         cooling,
@@ -882,6 +923,32 @@ def _nemo_si3_ice_flx_other(
         ),
     )
     qlead = jnp.where(cooling, jnp.minimum(0.0, lead_energy - freeze_energy), 0.0)
+    if lead_cut_version == "5.0.1":
+        speed_stop = constants.ice_landfast_speed_stop_nemo
+        packed_floor = max_ice_fraction - constants.ice_landfast_margin_nemo501
+        full_floor = 1.0 - ice_epsilon
+        if lead_cut_width == 0.0:
+            slow = sigmoid_switch(speed_stop - ice_speed, jnp.inf)
+            packed = sigmoid_switch(ice_fraction - packed_floor, jnp.inf)
+            full = sigmoid_switch(ice_fraction - full_floor, jnp.inf)
+        else:
+            speed_sq = 0.25 * (
+                (u_ice_west + u_ice) * (u_ice_west + u_ice)
+                + (v_ice_south + v_ice) * (v_ice_south + v_ice)
+            )
+            slow = sigmoid_switch(
+                speed_stop * speed_stop - speed_sq,
+                1.0 / (lead_cut_width * speed_stop * speed_stop),
+            )
+            packed = sigmoid_switch(ice_fraction - packed_floor, 1.0 / lead_cut_width)
+            full = sigmoid_switch(ice_fraction - full_floor, 1.0 / lead_cut_width)
+        keep = (1.0 - slow * packed) * (1.0 - full)
+        if lead_cut_width == 0.0:
+            # hard oracle mode: NEMO assigns +0.0 (qlead * 0 would give -0.0)
+            qlead = jnp.where(keep == 0.0, 0.0, qlead)
+        else:
+            qlead = qlead * keep
+        return {"qsb_ice_bot": qsb, "fhld": fhld, "qlead": qlead}
     landfast_stop = (
         (ice_speed <= constants.ice_landfast_speed_stop_nemo)
         & (ice_fraction >= max_ice_fraction - constants.ice_full_cover_margin_nemo)

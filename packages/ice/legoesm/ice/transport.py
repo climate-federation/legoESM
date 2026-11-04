@@ -1622,6 +1622,32 @@ def _si3_periodic_halo_xy(value: jnp.ndarray, halo_width: int) -> jnp.ndarray:
     return nemo_source_round(jnp.pad(interior, padding, mode="wrap"))
 
 
+def _validate_si3_prather_spacings(dx, dy, shape, subcycles) -> None:
+    """Refuse spacing layouts the CFL selector cannot honour.
+
+    The kernels use ``dy`` as the U-face length (``zudy = u * e2u``) and ``dx``
+    as the V-face length (``zvdx = v * e1v``, ``icedyn_adv_pra.F90:135-136``).
+    A scalar pair is a uniform Cartesian card, where the same numbers are also
+    the CFL lengths.  Array spacings carry ``e1v``/``e2u``, but NEMO's CFL
+    divides by ``e1u``/``e2v`` (:119-120) and is a delayed global maximum
+    (``mpp_max cdelay='cflice'``, :122), so with arrays the caller must pass
+    NEMO's resolved ``subcycles``; the in-kernel estimate is refused.
+    """
+
+    for name, value in (("dx", dx), ("dy", dy)):
+        if jnp.ndim(value) == 0:
+            continue
+        if jnp.shape(value) != tuple(shape):
+            raise ValueError(
+                f"si3_prather array {name} shape {jnp.shape(value)} != velocity shape {tuple(shape)}"
+            )
+        if subcycles is None:
+            raise ValueError(
+                f"si3_prather array {name} (e1v/e2u face lengths) cannot select the CFL "
+                "cycle count; pass NEMO's resolved subcycles"
+            )
+
+
 def advect_si3_prather_1d(
     contents: jnp.ndarray,
     moments: SI3PratherMoments,
@@ -1631,8 +1657,8 @@ def advect_si3_prather_1d(
     wet: jnp.ndarray,
     dt: float,
     *,
-    dx: float,
-    dy: float,
+    dx: float | jnp.ndarray,
+    dy: float | jnp.ndarray,
     halo_width: int = 2,
     ice_volume_index: int | None = None,
     concentration_index: int | None = None,
@@ -1660,6 +1686,7 @@ def advect_si3_prather_1d(
         raise ValueError("si3_prather requires volume and concentration indices for Hbig")
     if ice_volume_index is None or concentration_index is None:
         raise ValueError("si3_prather Hbig requires both volume and concentration indices")
+    _validate_si3_prather_spacings(dx, dy, u_ice.shape, subcycles)
     if subcycles is None:
         cfl = float(jnp.max(jnp.abs(u_ice)) * dt / dx)
         subcycles = (
@@ -1769,8 +1796,8 @@ def advect_si3_prather_2d(
     wet: jnp.ndarray,
     dt: float,
     *,
-    dx: float,
-    dy: float,
+    dx: float | jnp.ndarray,
+    dy: float | jnp.ndarray,
     ice_step_index: int,
     nn_fsbc: int = 1,
     halo_width: int = 2,
@@ -1797,6 +1824,7 @@ def advect_si3_prather_2d(
         raise ValueError("si3_prather requires volume and concentration indices for Hbig")
     if ice_step_index < 1 or nn_fsbc < 1:
         raise ValueError("si3_prather requires positive ice_step_index and nn_fsbc")
+    _validate_si3_prather_spacings(dx, dy, u_ice.shape, subcycles)
     if subcycles is None:
         cfl = max(
             float(jnp.max(jnp.abs(u_ice)) * dt / dx),
