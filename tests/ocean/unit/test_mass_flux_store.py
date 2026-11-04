@@ -1432,6 +1432,7 @@ def test_store_mass_flux_is_the_last_config_field():
             "vmix_eos_use_config_rho0",
             # appended by the ocean oracle-fix campaign (tier-3 RNF)
             "runoff_depth_spread_levels",
+            "lateral_viscosity_mask_levels",
             )
     assert fields[-len(tail):] == tail, (
         f"config tail is {fields[-len(tail):]}, expected {tail}; a new field "

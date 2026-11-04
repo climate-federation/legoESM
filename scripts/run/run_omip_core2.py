@@ -1576,6 +1576,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None, A_h_eq_sigma_deg=None,
                   ke_gradient_scheme=None, partial_cell=False,
                   lateral_side_bc=None, barotropic_coriolis=None,
+                  lateral_viscosity_mask_levels=None,
                   adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
                   barotropic_pcg_variant=None,
@@ -1681,6 +1682,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("A_h_eq_sigma_deg", A_h_eq_sigma_deg),
                               ("ke_gradient_scheme", ke_gradient_scheme),
                               ("lateral_side_bc", lateral_side_bc),
+                              ("lateral_viscosity_mask_levels", lateral_viscosity_mask_levels),
                               ("barotropic_coriolis", barotropic_coriolis),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
                               ("momentum_time_integrator", momentum_time_integrator),
@@ -6580,6 +6582,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "from review: our no_slip is not yet demonstrated "
                         "numerically equivalent to NEMO's shlat=2 partial-slip "
                         "formulation. Default (None) preserves the config.")
+    p.add_argument("--lateral-viscosity-mask-levels", type=str, default=None,
+                   choices=["surface", "per_level"],
+                   help="Land masks of the vector-Laplacian lateral viscosity "
+                        "at each level. 'surface' applies the 2-D surface "
+                        "masks at every level (config default); 'per_level' "
+                        "uses each level's own wet faces/vertices, as NEMO's "
+                        "3-D umask/vmask/fmask. Default (None) preserves the "
+                        "config.")
     p.add_argument("--barotropic-coriolis", type=str, default=None,
                    choices=["avg", "een", "een_metric"],
                    help="Coriolis discretization inside the barotropic "
@@ -8280,6 +8290,7 @@ def main() -> int:
             A_h_profile_file=args.A_h_profile_file,
             ke_gradient_scheme=args.ke_gradient_scheme,
             lateral_side_bc=args.lateral_side_bc,
+            lateral_viscosity_mask_levels=args.lateral_viscosity_mask_levels,
             barotropic_coriolis=args.barotropic_coriolis,
             tke_kappah_min=args.tke_kappah_min,
             partial_cell=args.partial_cell,
