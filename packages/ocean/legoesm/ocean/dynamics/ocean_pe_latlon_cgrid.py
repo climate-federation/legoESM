@@ -4309,9 +4309,11 @@ def _bc_horizontal_viscosity(
             # =0, so it is exact there; with slope-foot on it is a localized
             # bottom-cell approximation of the boosted dissipation.
             _A_h_center = _A_h_center[:, jnp.newaxis, jnp.newaxis] * _slope_E_center
+        # Same masks as the vector-Laplacian tendency it credits (per level
+        # under lateral_viscosity_mask_levels="per_level").
         kdiss_h_cell = vector_laplacian_dissipation_cgrid(
             u, v, grid, _A_h_center,
-            mask=mask, u_mask=u_mask, v_mask=v_mask)
+            mask=_vl_mask, u_mask=_vl_u_mask, v_mask=_vl_v_mask)
     return (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
             diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
             diag_Cl_leith_v, kdiss_h_cell)
