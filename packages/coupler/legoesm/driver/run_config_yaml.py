@@ -125,6 +125,9 @@ def load_yaml_config(path, parser, *, example_keys: str | None = None,
     would otherwise reach the run as a str.  Returns the mapping so the caller
     can feed it to ``parser.set_defaults`` (an explicit CLI flag still wins).
 
+    A key with ``choices`` must hold one of them, except ``null`` on a key whose
+    flag default is None, which means "unset" (the flag default).
+
     ``example_keys`` is an optional human hint (driver-specific example dests)
     appended to the unknown-key error to help operators fix typos.
     """
@@ -154,15 +157,20 @@ def load_yaml_config(path, parser, *, example_keys: str | None = None,
         # via --config would otherwise reach the factory unvalidated.  Enforce
         # it here so a typo'd scheme fails loudly at load (dispatch-hardening),
         # exactly as an explicit CLI flag would.
+        # ``null`` on a choices key whose flag default is None means "the flag
+        # default" (unset), e.g. a deck un-setting a row its include sets.
         choices = getattr(actions[key], "choices", None)
-        if choices is not None and value not in choices:
+        unset_ok = value is None and actions[key].default is None
+        if choices is not None and value not in choices and not unset_ok:
             try:
                 allowed = sorted(choices)
             except TypeError:
                 allowed = list(choices)
             raise SystemExit(
                 f"--config {path}: key '{key}' value {value!r} is not one of "
-                f"the allowed choices {allowed}.")
+                f"the allowed choices {allowed}"
+                + (" (null is accepted only for a key whose flag default is "
+                   "None)." if value is None else "."))
         out[key] = value
     return out
 

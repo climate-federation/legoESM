@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 from legoesm import constants
+from legoesm.atmosphere.physics.radiation.ecrad_ifs.config import EcradIFSConfig
 from legoesm.atmosphere.physics.radiation.mc3d.config import MC3DRadiationConfig
 from legoesm.atmosphere.physics.radiation.simple_lw import (
     SimpleLWConfig,
@@ -384,7 +385,8 @@ class RadiationConfig(NamedTuple):
     Fields
     ------
     scheme : str
-        Active radiation scheme: "gray", "rrtmgp", "mc3d" or "simple_lw".
+        Active radiation scheme: "gray", "rrtmgp", "mc3d", "simple_lw" or
+        "ecrad_ifs" (OpenIFS 49r1 ecRad, MPAS column lane only).
     gray : GrayRadiationConfig
         Configuration for gray radiation.
     rrtmgp : RRTMGPConfig
@@ -468,3 +470,6 @@ class RadiationConfig(NamedTuple):
     # wiring rather than silently ignoring it.  Static Python bool (never
     # traced); ``False`` (default) adds no ops — byte-identical.
     clear_sky_diag: bool = False
+    # OpenIFS 49r1 ecRad lane settings (``scheme="ecrad_ifs"``, MPAS column
+    # lane only; see radiation/ecrad_ifs/config.py).  Read by no other scheme.
+    ecrad_ifs: EcradIFSConfig = EcradIFSConfig()

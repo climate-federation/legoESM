@@ -8055,7 +8055,9 @@ class ModelDriver:
                         # (allow_pickle=False).  Skip by NAME so BOTH None and
                         # a concrete-array carry are excluded (load re-seeds
                         # them None).
-                        if _name in PHYSSTATE_INPUT_FIELDS:
+                        if _name in PHYSSTATE_INPUT_FIELDS or _val is None:
+                            # None = a field inactive on this run
+                            # (ecrad_carry off ecrad_ifs): no array to save
                             continue
                         # scheme-conditional memory absent for this run
                         # (e.g. the WRF Tiedtke lags): nothing to persist
@@ -9353,6 +9355,19 @@ class ModelDriver:
                     f"which this run carries (CAM6 MG2 two-moment snow, "
                     f"morrison_warm_rain_incloud); restart from a "
                     f"checkpoint written with N_s or start cold.")
+            # Same rule for IFS CLOUDSC's advected cloud fraction (vote VC26):
+            # a checkpoint without it cannot continue this run.
+            if (self._column_model() is None
+                    and "cloud_fraction_ifs" in self.tracer_registry.names
+                    and ("tracer_names" not in d
+                         or "cloud_fraction_ifs"
+                         not in [str(n) for n in d["tracer_names"]]
+                         or "trc_cloud_fraction_ifs" not in d.files)):
+                raise ValueError(
+                    f"MPAS checkpoint {path.name} has no cloud_fraction_ifs, "
+                    f"which this run carries (microphysics='ifs_cloudsc'); "
+                    f"restart from a checkpoint written with it or start "
+                    f"cold.")
             # Restore moisture tracers (moist MPAS runs); absent ⇒ dry restart.
             # (column lane: the tracers are the bundle's own q slots, already
             # in the view built above)
@@ -9366,6 +9381,7 @@ class ModelDriver:
                               if _mpi else jnp.asarray(d[f"trc_{_k}"])),
                         name=_k, dims=("nCells", "nlev"),
                         units=("1/kg" if _k in ("N_c", "N_r", "N_i", "N_s")
+                               else "1" if _k == "cloud_fraction_ifs"
                                else "kg/kg"))
                     for _k in _names
                 })
@@ -11096,6 +11112,11 @@ class ModelDriver:
                 conv_mass_flux_up=_ps_carry.conv_mass_flux_up,
                 conv_icwmr=_ps_carry.conv_icwmr,
             )
+        elif "cloud_fraction_ifs" in (getattr(state, "tracers", None) or {}):
+            # IFS CLOUDSC: clt/clivi read the advected fraction radiation
+            # reads (votes VC24, VC40)
+            _cam6_carry = dict(
+                cloud_fraction=state.tracers["cloud_fraction_ifs"].data)
         return dict(
             T=state.T.data,
             p_s=state.p_s.data,
@@ -13227,6 +13248,19 @@ class ModelDriver:
                     cfg, cfg.microphysics,
                     getattr(_micro_cfg, cfg.microphysics)),
             })
+        if cfg.microphysics == "ifs_cloudsc":
+            # NCLDTOP by the sucldp.F90:631-634 rule on THIS lane's level
+            # table at the standard surface pressure (vote VC11a), static.
+            from legoesm.atmosphere.physics.microphysics.ifs_cloudsc import (
+                ncldtop_from_reference_pressure,
+            )
+            _ncldtop = ncldtop_from_reference_pressure(np.asarray(
+                self.sigma.pressure_at_full(
+                    jnp.asarray([constants.p_atm_std]))))
+            _micro_cfg = _micro_cfg._replace(
+                ifs_cloudsc=_micro_cfg.ifs_cloudsc._replace(ncldtop=_ncldtop))
+            logger.info("  ifs_cloudsc: NCLDTOP = %d (sucldp rule, "
+                        "RCLDTOPP = 100 Pa)", _ncldtop)
         # The cap the lane ACTUALLY runs -- read from the THREADED scheme
         # config (_micro_cfg above), not from the flat field, which a deck's
         # own microphysics sub-config can override.
@@ -15126,7 +15160,10 @@ class ModelDriver:
                 _exempt_ps = {"col_index"} | PHYSSTATE_INPUT_FIELDS
                 # A field whose fresh seed is None (scheme-conditional
                 # memory this configuration does not carry, e.g. the WRF
-                # Tiedtke lags) has nothing to restore; the save skips it.
+                # Tiedtke lags, or ecrad_carry off ecrad_ifs) has nothing to
+                # restore; the save skips it.  An ecrad_ifs run seeds an
+                # array, so a checkpoint without its carry is INCOMPLETE
+                # below (vote L23a).
                 _missing = [f for f in _phys_state._fields
                             if f not in _present_fields
                             and f not in _exempt_ps
@@ -15173,6 +15210,14 @@ class ModelDriver:
                 if _name in PHYSSTATE_INPUT_FIELDS:
                     continue
                 _seed_field = getattr(_phys_state, _name)
+                if _seed_field is None:
+                    # a field inactive on THIS run (e.g. ecrad_carry without
+                    # radiation='ecrad_ifs'): dropped, loudly (vote U2b)
+                    logger.warning(
+                        "  MPAS restart: DROPPED physics-state field %r from "
+                        "the checkpoint; it is inactive on this run (e.g. "
+                        "ecrad_carry without radiation='ecrad_ifs').", _name)
+                    continue
                 _val = jnp.asarray(_v)
                 if tuple(_val.shape) != tuple(_seed_field.shape):
                     raise ValueError(
@@ -15807,6 +15852,17 @@ class ModelDriver:
                 _forcing = dict(_forcing_daily)
                 _forcing["day_of_year"] = jnp.asarray(_doy)
                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
+                if cfg.radiation == "ecrad_ifs":
+                    # McICA seed time (radiation_scheme.F90:390-405, vote
+                    # S3a): NINDAT = the run start date (model day 0 on the
+                    # insolation calendar), NSTEP*TSTEP = elapsed model time
+                    from legoesm.forcing.time_utils import day_to_date
+                    _forcing["model_seconds"] = jnp.asarray(
+                        float(_force_day) * 86400.0)  # coeff-ok: s per day
+                    _forcing["model_start_day_of_month"] = jnp.asarray(
+                        day_to_date(self._insolation_day(0.0),
+                                    ref_year=int(cfg.start_year))[2],
+                        dtype=jnp.int32)
                 if _cam6_act is not None:
                     # CAM prescribed_aero_adv: the two monthly records held on
                     # device, reloaded when the bracket moves, linearly
@@ -15951,6 +16007,9 @@ class ModelDriver:
                     # The eager loop's clock (R-ex absolute-step origin).
                     calendar=lambda k: self._calendar_for_radiation(
                         _DAY_ORIGIN + (start_step + k) * DT / 86400.0),
+                    # ecrad_ifs McICA seed clock (vote S3a), same origin
+                    model_seconds=lambda k: (
+                        _DAY_ORIGIN + (start_step + k) * DT / 86400.0) * 86400.0,
                     land_step=_land_step_fn if _land_ml_on else None,
                     land_state=self._land_ml_state if _land_ml_on else None,
                     marshal_land=_marshal_land_forcing if _land_ml_on else None,

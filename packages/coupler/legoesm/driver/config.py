@@ -530,6 +530,7 @@ class OutputConfig(NamedTuple):
 VALID_MICROPHYSICS = (
     "none", "kessler", "sundqvist", "seifert_beheng",
     "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
+    "ifs_cloudsc",
 )
 
 VALID_TURBULENCE = (
@@ -537,7 +538,7 @@ VALID_TURBULENCE = (
     "holtslag_boville", "ysu", "edmf", "none",
 )
 
-VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg")
+VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg", "ecrad_ifs")
 
 VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved", "cam6_clubb")
 
@@ -2235,12 +2236,42 @@ class ExperimentConfig(NamedTuple):
         # only schemes that carry and process both may run it.  p3's snow
         # slot holds rime, fast_sbm's ice slots stay zero, seifert_beheng is
         # liquid only, the ML emulator's layout is generic.
+        # ifs_cloudsc takes the detrained precipitation itself, through the
+        # CUMASTRN hand-off (vote VC2/A7').
         if (self.convection == "bechtold" and self.bechtold_use_ifs_ascent
-                and self.microphysics not in ("morrison", "thompson")):
+                and self.microphysics not in ("morrison", "thompson",
+                                              "ifs_cloudsc")):
             errors.append(
                 f"bechtold_use_ifs_ascent needs a microphysics that carries "
-                f"rain and snow (morrison, thompson) for the "
+                f"rain and snow (morrison, thompson, ifs_cloudsc) for the "
                 f"detrained precipitation, not {self.microphysics!r}")
+        # IFS CLOUDSC reads CUMASTRN's raw detrainment and mass fluxes (vote
+        # VC19a: refuse any other convection), and only the MPAS column lane
+        # carries its advected cloud fraction (vote VC16b: the compiled
+        # cube/lat-lon and spectral lanes refuse it; follow-up).
+        if self.microphysics == "ifs_cloudsc":
+            if not (self.convection == "bechtold"
+                    and self.bechtold_use_ifs_ascent):
+                errors.append(
+                    "microphysics='ifs_cloudsc' needs the faithful IFS "
+                    "convection (convection='bechtold' with "
+                    "bechtold_use_ifs_ascent=True), whose raw PLUDE/PLUDELI/"
+                    "PSNDE/PMFU/PMFD/PLU/LDCUM/KTYPE it reads; got "
+                    f"convection={self.convection!r}, bechtold_use_ifs_ascent="
+                    f"{self.bechtold_use_ifs_ascent!r}")
+            if self.cld_macmic_num_steps != 1:
+                errors.append(
+                    "microphysics='ifs_cloudsc' runs CLOUDSC once per physics "
+                    "step after the convection (the IFS order, vote VC23): "
+                    "needs cld_macmic_num_steps=1, got "
+                    f"{self.cld_macmic_num_steps!r}")
+            if not self.column_loop_lane:
+                errors.append(
+                    "microphysics='ifs_cloudsc' runs only on the MPAS column "
+                    "lane (MPAS dycore or the FV3-duo column lane), which "
+                    "advects its cloud_fraction_ifs tracer; the compiled "
+                    "cube/lat-lon and spectral lanes do not carry it "
+                    "(follow-up)")
         if self.land_fraction_source not in ("topography", "era5", "zero"):
             errors.append(
                 f"land_fraction_source must be topography, era5 or zero, got "
@@ -2856,6 +2887,21 @@ class ExperimentConfig(NamedTuple):
                 f"radiation must be one of {_valid_radiation}, "
                 f"got {self.radiation!r}"
             )
+        # ecRad 49r1 (votes L2a, L20a): the MPAS column lane only, and its
+        # aerosols are OFF, so an aerosol forcing would be silently ignored.
+        if self.radiation == "ecrad_ifs":
+            if not self.column_loop_lane:
+                errors.append(
+                    "radiation='ecrad_ifs' runs only on the MPAS column lane "
+                    "(its between-call carry lives in that lane's physics "
+                    "state); the compiled cube/lat-lon and spectral lanes "
+                    "refuse it")
+            if self.aerosol_forcing != "off":
+                errors.append(
+                    "radiation='ecrad_ifs' runs with aerosols OFF (the CAMS "
+                    "climatology files are pending); aerosol_forcing="
+                    f"{self.aerosol_forcing!r} would be silently ignored, "
+                    "set it to 'off'")
         _valid_cloud_schemes = VALID_CLOUD_SCHEMES
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(

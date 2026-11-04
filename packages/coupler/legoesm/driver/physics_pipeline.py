@@ -4076,8 +4076,24 @@ def _build_rrtmgp_radiation_fn(config):
     return radiation_fn, {"scheme": rrtmg_config, "orbit": orbit}
 
 
+def _build_ecrad_ifs_radiation_fn(config):
+    """``radiation='ecrad_ifs'`` runs on the MPAS column lane's combined
+    physics only (vote L2a); the compiled pipeline is built at setup on every
+    lane, so it gets a radiation_fn that REFUSES when called rather than a
+    silent substitute."""
+    del config
+
+    def radiation_fn(*args, **kwargs):
+        raise ValueError(
+            "radiation='ecrad_ifs' is not wired into the compiled physics "
+            "pipeline; it runs on the MPAS column lane only (vote L2a).")
+
+    return radiation_fn, None
+
+
 # Map radiation scheme names to builder functions.
 _RADIATION_BUILDERS: dict[str, callable] = {
+    "ecrad_ifs": _build_ecrad_ifs_radiation_fn,  # MPAS lane only; refuses here
     "none": _build_none_radiation_fn,  # explicit zero-radiation (was silently rrtmgp)
     "gray": _build_gray_radiation_fn,
     "rrtmgp": _build_rrtmgp_radiation_fn,
@@ -4558,7 +4574,15 @@ def moisture_registry_for(scheme_name: str, scheme_config=None):
     column model's slot list, so both carry the same names in the same
     order (the duo's q_<i> is a slot index)."""
     from legoesm.core.tracers import (
-        make_full_moisture_registry, make_moisture_registry)
+        TracerInfo, TracerRegistry, make_full_moisture_registry,
+        make_moisture_registry)
+    if scheme_name == "ifs_cloudsc":
+        # IFS CLOUDSC carries a prognostic, advected cloud fraction (vote
+        # VC18a): the full nine in FV3 water order, then the fraction as a
+        # passenger.  Only for this scheme; every other registry unchanged.
+        return TracerRegistry(tracers=make_full_moisture_registry().tracers + (
+            TracerInfo("cloud_fraction_ifs", "1", True, True,
+                       "IFS prognostic cloud fraction"),))
     warm = make_moisture_registry()
     need = required_microphysics_tracer_slots(scheme_name, scheme_config)
     if need > warm.n_tracers:
