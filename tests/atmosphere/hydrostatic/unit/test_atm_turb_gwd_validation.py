@@ -421,7 +421,7 @@ def test_gwd_no_nan_in_reversed_flow():
 # ===========================================================================
 
 def test_idealized_smagorinsky_lilly_cutoff():
-    cfg = SmagorinskyConfig(surface=SurfaceLayerConfig())
+    cfg = SmagorinskyConfig(surface=SurfaceLayerConfig(), stability_form="lilly")
     d_stab = _base_column(1, 30, 360.0, 300.0, 4.0, 18.0)  # strongly stable
     d_stab["T_sfc"] = d_stab["T"][:, -1]
     d_stab["q_sfc"] = d_stab["q_v"][:, -1]
