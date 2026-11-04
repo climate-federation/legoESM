@@ -164,6 +164,13 @@ _DRAINAGE_TARGET = 5.0
 _DRAINAGE_TIMESCALE = 1730000.0
 _FLUSHING_TARGET = 2.0
 _FLUSHING_TIMESCALE = 864000.0
+# rn_sal_himin: drainage/flushing and bounds only above this thickness
+# (`icethd_sal.F90:216`, namelist_ice_cfg:126).
+_SAL_MIN_THICKNESS = 0.1
+# --- RULE 5 smoothing (vote D7a, 2026-11-04) ---
+# One-sided C1 gate width [m] above rn_sal_himin: exactly NEMO's gate for
+# h_i <= 0.1 m and h_i >= 0.101 m; 0.0 = NEMO's hard h_i > rn_sal_himin.
+_SAL_GATE_WIDTH_M = 1.0e-3
 _OPTION2_LOWER_TRANSITION = 3.5
 _OPTION2_UPPER_TRANSITION = 4.5
 _OPTION2_LAYER_SHAPE = (1.0 / 3.0, 1.0, 5.0 / 3.0)
@@ -1221,13 +1228,19 @@ def _zdf_exchange_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
 
 
 def _sal_step(post_dh: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
-              constants: IceConstantsConfig):
+              constants: IceConstantsConfig, *,
+              gate_width: float = _SAL_GATE_WIDTH_M):
     """nn_icesal=2 drainage/flushing + bounds (`icethd_sal.F90:202-240`).
 
-    Returns (S_bulk, S_layers, fluxes) with sfx_bri (drainage/flushing) and
-    sfx_res (bounds) contributions.
+    Both act only where h_i > rn_sal_himin (C1 one-sided gate over
+    ``gate_width`` [m]; 0.0 = hard).  Returns (S_bulk, S_layers, fluxes) with
+    sfx_bri (drainage/flushing) and sfx_res (bounds) contributions.
     """
 
+    if gate_width == 0:
+        gate = (post_dh.h_ice > _SAL_MIN_THICKNESS).astype(post_dh.h_ice.dtype)
+    else:
+        gate = smoothstep_cubic((post_dh.h_ice - _SAL_MIN_THICKNESS) / gate_width)
     drain = jnp.where(
         post_dh.T_surface >= constants.T0,
         -jnp.maximum(post_dh.S_bulk - _FLUSHING_TARGET, 0.0)
@@ -1241,12 +1254,13 @@ def _sal_step(post_dh: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
             0.0,
         ),
     )
+    drain = gate * drain
     drained = post_dh.S_bulk + drain
-    S_bulk = jnp.clip(
+    S_bulk = drained + gate * (jnp.clip(
         drained,
         _MINIMUM_ICE_SALINITY,
         _NEW_ICE_SALINITY_FRACTION * forcing.sss,
-    )
+    ) - drained)
     S_layers = option2_salinity_profile(S_bulk, forcing.sss)
     mass_rate = constants.rho_ice * post_dh.concentration * post_dh.h_ice / dt
     fluxes = _zero_fluxes(post_dh.h_ice)._replace(
@@ -1270,6 +1284,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _nemo_eos_order: bool = True,
                            _nemo_snow_sublimation_order: bool = True,
                            _nemo_snow_remap: bool = True,
+                           sal_gate_width: float = _SAL_GATE_WIDTH_M,
                            ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
@@ -1295,7 +1310,8 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
-    S_bulk, S_layers, sal_fluxes = _sal_step(post_dh, forcing, dt, constants)
+    S_bulk, S_layers, sal_fluxes = _sal_step(post_dh, forcing, dt, constants,
+                                              gate_width=sal_gate_width)
     post_sal = post_temp1._replace(S_bulk=S_bulk, S_layers=S_layers)
     post_temp2 = post_sal
 
