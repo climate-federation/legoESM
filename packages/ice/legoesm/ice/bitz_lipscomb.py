@@ -80,6 +80,7 @@ class SI3StepTrace(NamedTuple):
 
 _EPS10 = 1.0e-10
 _EPS20 = 1.0e-20
+_REMAP_SCALE = 2.0 ** 66   # exact power-of-two rescale, see _piecewise_remap
 _H_MIN = 1.0e-3
 _T_CONVERGENCE = 1.0e-4
 _T_SURFACE_EPS = 1.0e-5
@@ -655,12 +656,15 @@ def _piecewise_remap(thickness, enthalpy, new_total, n_layers: int = 3):
     )
     content = jnp.sum(overlap * enthalpy[..., None, :], axis=-1)
     # NEMO divides by MAX(zhnew, epsi20) (`icevar.F90:1031`), so a column of
-    # 1e-17 m keeps its layer enthalpy.  Hard numerics floor (vote D8a).  A
-    # zero column has zero content: the outer where gives NEMO's 0 and keeps
-    # the reverse pass finite in fp32, where epsi20**2 flushes to zero (review).
+    # 1e-17 m keeps its layer enthalpy.  Pure numerics floor (vote D8a): it
+    # binds only below 1e-20 m.  Numerator and denominator are both scaled by
+    # the power of two 2**66 (exact in binary floating point, so fp64 values
+    # are bitwise unchanged) so the reverse pass never squares a value below
+    # fp32's normal range (1e-20**2 flushes to zero; review).  A zero column
+    # has zero content: the outer where gives NEMO's 0.
     _has = dz_new[..., None] > 0.0
-    den = jnp.where(_has, jnp.maximum(dz_new[..., None], _EPS20), 1.0)
-    return jnp.where(_has, content / den, 0.0)
+    den = jnp.where(_has, jnp.maximum(dz_new[..., None], _EPS20), 1.0) * _REMAP_SCALE
+    return jnp.where(_has, (content * _REMAP_SCALE) / den, 0.0)
 
 
 def _nemo_snow_enthalpy_remap(thickness, enthalpy):

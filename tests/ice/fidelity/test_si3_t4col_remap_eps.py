@@ -78,7 +78,7 @@ def test_remap_zero_column_is_zero_and_gradient_finite_at_thin_column():
 
 
 def test_remap_reverse_pass_finite_in_fp32_at_zero_and_thin_columns():
-    for h_layer in (0.0, 1e-18, 1e-6):
+    for h_layer in (0.0, 1e-21, 1e-20, 3e-20, 1e-18, 1e-6):   # incl. at/below the epsi20 floor
         h = jnp.asarray([0.0, h_layer, h_layer, h_layer, 0.0], jnp.float32)
         e = jnp.full(5, 3e8, jnp.float32)
         gt = jax.grad(lambda t: jnp.sum(bl._piecewise_remap(h * t, e, jnp.sum(h * t))))(jnp.asarray(1.0, jnp.float32))
