@@ -39,7 +39,7 @@ def test_per_level_scale_divides_each_level_by_its_own_scale():
     base = dict(residual_normalize=True, w_bias_T=3.0, w_crps_T=0.7,
                 level_weighting="uniform",
                 u_resid_scale_lev=(1.0,) * NLEV, v_resid_scale_lev=(1.0,) * NLEV,
-                q_resid_scale_lev=(1.0,) * NLEV)
+                q_resid_scale_lev=(1.0,) * NLEV, q_resid_scale_lev_floor=0.0)
     dT = jnp.zeros((N_LAT, N_LON, NLEV)).at[..., -1].set(1.0)
     half = dT * 0.5
     a = LossConfig(**base, T_resid_scale_lev=(1.0, 1.0, 1.0, 2.0))
@@ -66,7 +66,8 @@ def test_uniform_per_level_scale_matches_scalar_scale():
                         q_resid_scale=5e-4, ps_resid_scale=200.0)
     lev = LossConfig(**common, ps_resid_scale=200.0,
                      T_resid_scale_lev=(1.5,) * NLEV, u_resid_scale_lev=(3.0,) * NLEV,
-                     v_resid_scale_lev=(3.0,) * NLEV, q_resid_scale_lev=(5e-4,) * NLEV)
+                     v_resid_scale_lev=(3.0,) * NLEV, q_resid_scale_lev=(5e-4,) * NLEV,
+                     q_resid_scale_lev_floor=0.0)
     la, ta = carry_mse_terms(pred, _C(), _sf(), LAT_W, scalar)
     lb, tb = carry_mse_terms(pred, _C(), _sf(), LAT_W, lev)
     assert set(ta) == set(tb)
@@ -79,9 +80,61 @@ def test_per_level_scales_all_or_nothing_and_sized():
             residual_normalize=True, T_resid_scale_lev=(1.0,) * NLEV))
     bad = LossConfig(residual_normalize=True, T_resid_scale_lev=(1.0,) * 3,
                      u_resid_scale_lev=(1.0,) * NLEV, v_resid_scale_lev=(1.0,) * NLEV,
-                     q_resid_scale_lev=(1.0,) * NLEV)
+                     q_resid_scale_lev=(1.0,) * NLEV, q_resid_scale_lev_floor=0.0)
     with pytest.raises(ValueError, match="levels"):
         carry_mse_terms(_C(), _C(), _sf(), LAT_W, bad)
+
+
+def _q_cfg(q_lev, floor):
+    return LossConfig(residual_normalize=True, w_crps_q=0.4, level_weighting="uniform",
+                      T_resid_scale_lev=(1.0,) * NLEV, u_resid_scale_lev=(1.0,) * NLEV,
+                      v_resid_scale_lev=(1.0,) * NLEV, q_resid_scale_lev=q_lev,
+                      q_resid_scale_lev_floor=floor)
+
+
+def test_q_scale_floor_changes_only_levels_below_it():
+    """The floor replaces a level's humidity scale only where it is below the
+    floor: an error on a below-floor level is scored against the floor, and
+    every other level scores exactly (bit for bit) as without a floor."""
+    q_lev = (4e-8, 7.7e-7, 1e-6, 5e-4)                 # top two below 1e-6
+    for k, s_k in enumerate(q_lev):
+        dq = jnp.zeros((N_LAT, N_LON, NLEV)).at[..., k].set(2e-7)
+        _, off = carry_mse_terms(_C(q_v=dq), _C(), _sf(), LAT_W, _q_cfg(q_lev, 0.0))
+        _, on = carry_mse_terms(_C(q_v=dq), _C(), _sf(), LAT_W, _q_cfg(q_lev, 1e-6))
+        if s_k < 1e-6:
+            # the analytic floored value: the error divided by 1e-6, not by s_k
+            ref = _q_cfg(tuple(1e-6 if j == k else 1.0 for j in range(NLEV)), 0.0)
+            _, want = carry_mse_terms(_C(q_v=dq), _C(), _sf(), LAT_W, ref)
+            np.testing.assert_allclose(float(on["mse_q"]), float(want["mse_q"]), rtol=1e-12)
+            assert float(on["mse_q"]) < float(off["mse_q"])
+        else:
+            for name in ("mse_q", "crps_q"):
+                assert float(on[name]) == float(off[name]), (k, name)
+
+
+def test_q_scale_floor_never_touches_t_u_v():
+    """Only humidity is floored: T/u/v scales below the floor stay as given."""
+    tiny = (5e-7, 1.0, 1.0, 1.0)
+    d = jnp.zeros((N_LAT, N_LON, NLEV)).at[..., 0].set(2e-7)
+    cfg = LossConfig(residual_normalize=True, level_weighting="uniform",
+                     w_bias_T=1.0, w_bias_u=1.0, w_bias_v=1.0,
+                     T_resid_scale_lev=tiny, u_resid_scale_lev=tiny,
+                     v_resid_scale_lev=tiny, q_resid_scale_lev=(1e-4,) * NLEV,
+                     q_resid_scale_lev_floor=0.0)
+    _, off = carry_mse_terms(_C(T=d, u=d, v=d), _C(), _sf(), LAT_W, cfg)
+    _, on = carry_mse_terms(_C(T=d, u=d, v=d), _C(), _sf(), LAT_W,
+                            cfg._replace(q_resid_scale_lev_floor=1e-6))
+    for name in ("mse_T", "mse_u", "mse_v", "bias_T", "bias_u", "bias_v"):
+        assert float(on[name]) == float(off[name]) > 0.0, name
+
+
+def test_q_scale_floor_must_be_set_and_valid():
+    q_lev = (1e-4,) * NLEV
+    with pytest.raises(ValueError, match="q_resid_scale_lev_floor set"):
+        carry_mse_terms(_C(), _C(), _sf(), LAT_W, _q_cfg(q_lev, None))
+    for bad in (-1e-6, float("nan"), float("inf"), True):
+        with pytest.raises(ValueError, match="finite number"):
+            carry_mse_terms(_C(), _C(), _sf(), LAT_W, _q_cfg(q_lev, bad))
 
 
 def _fields(c):
@@ -120,3 +173,16 @@ def test_per_level_scales_without_residual_normalize_refused():
     cfg = LossConfig(**{f"{v}_resid_scale_lev": (1.0,) * NLEV for v in "Tuvq"})
     with pytest.raises(ValueError, match="residual_normalize"):
         carry_mse_terms(_C(), _C(), _sf(), LAT_W, cfg)
+
+
+def test_deck_without_q_floor_is_refused_at_load():
+    """A per-level deck missing the humidity floor fails when the loss config
+    is built from the deck, before any data load or training step."""
+    from legoesm.training.scale_build import make_loss_config
+
+    lev = {f"{v}_resid_scale_lev": [1.0] * NLEV for v in "Tuvq"}
+    yml = {"loss": {"residual_normalize": True, **lev}}
+    with pytest.raises(ValueError, match="q_resid_scale_lev_floor set"):
+        make_loss_config(None, yml)
+    yml["loss"]["q_resid_scale_lev_floor"] = 1e-6
+    assert make_loss_config(None, yml).q_resid_scale_lev_floor == 1e-6

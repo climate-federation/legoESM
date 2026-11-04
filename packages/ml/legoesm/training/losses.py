@@ -7,6 +7,7 @@ SegmentCarry comparison.
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax
@@ -179,6 +180,12 @@ class LossConfig(NamedTuple):
     u_resid_scale_lev: tuple[float, ...] = ()
     v_resid_scale_lev: tuple[float, ...] = ()
     q_resid_scale_lev: tuple[float, ...] = ()
+    # Floor (kg/kg) on q_resid_scale_lev, applied in the loss; the deck keeps
+    # the measured scales.  Required (None raises) whenever per-level scales
+    # are used; 0.0 = explicitly no floor.  The measured stratospheric values
+    # (4e-8 kg/kg at the top) turn a tiny humidity nudge into an error ~1000x
+    # too large and blew the v9 runs up at step 3 (user 2026-11-04: 1e-6).
+    q_resid_scale_lev_floor: float | None = None
     # Near-surface WB2 headline fields (diagnosed from the predicted state the
     # way the WB2 eval does), scored on the model grid.  A weight > 0 needs its
     # own 6 h residual scale > 0; all 0.0 = off.
@@ -553,8 +560,24 @@ def _per_level_scales(config) -> bool:
     return True
 
 
-def _inv_scale(per_level, nlev: int, name: str):
-    s = jnp.asarray(per_level, dtype=jnp.float64)
+def check_q_resid_scale_lev_floor(config) -> None:
+    """Raise unless a config using per-level scales names a valid humidity
+    floor; a no-op otherwise.  Called at config build and again in the loss."""
+    if not _per_level_scales(config):
+        return
+    f = config.q_resid_scale_lev_floor
+    if f is None:
+        raise ValueError(
+            "per-level residual scales need q_resid_scale_lev_floor set "
+            "explicitly (kg/kg; 0.0 = no floor).")
+    if not (isinstance(f, (int, float)) and not isinstance(f, bool)
+            and math.isfinite(f) and f >= 0.0):
+        raise ValueError(
+            f"q_resid_scale_lev_floor must be a finite number >= 0, got {f!r}.")
+
+
+def _inv_scale(per_level, nlev: int, name: str, floor: float = 0.0):
+    s = jnp.maximum(jnp.asarray(per_level, dtype=jnp.float64), floor)
     if s.shape != (nlev,):
         raise ValueError(f"{name} has {s.shape[0]} entries, the model has {nlev} levels.")
     return 1.0 / jnp.sqrt(jnp.maximum(s ** 2, _SCALE_FLOOR_SQ))
@@ -568,6 +591,7 @@ def _carry_terms_per_level(pred_carry, target_carry, lev_w, lat_weights,
     weighting and the area mean, so MSE ~ (d/s)^2, bias ~ mean(d/s)^2 and
     CRPS ~ |d|/s with the same weights as the scalar-scale path."""
     nlev = lev_w.shape[0]
+    check_q_resid_scale_lev_floor(config)
 
     def _add(name, x):
         nonlocal loss
@@ -586,7 +610,8 @@ def _carry_terms_per_level(pred_carry, target_carry, lev_w, lat_weights,
          _inv_scale(config.v_resid_scale_lev, nlev, "v_resid_scale_lev"),
          config.w_v, config.w_bias_v, config.w_crps_v, True),
         ("q", pred_carry.q_v - target_carry.q_v,
-         _inv_scale(config.q_resid_scale_lev, nlev, "q_resid_scale_lev"),
+         _inv_scale(config.q_resid_scale_lev, nlev, "q_resid_scale_lev",
+                    floor=float(config.q_resid_scale_lev_floor)),
          config.w_q, 0.0, config.w_crps_q, True),
         ("ps", pred_carry.p_s - target_carry.p_s, ps_inv,
          config.w_ps, config.w_bias_ps, config.w_crps_ps, False),

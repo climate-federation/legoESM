@@ -744,12 +744,13 @@ def validate_wb_campaign_yaml(yml: dict) -> None:
 
 
 def make_loss_config(cfg, yml):
-    from legoesm.training.losses import LossConfig
+    from legoesm.training.losses import LossConfig, check_q_resid_scale_lev_floor
     lb = dict(yml.get("loss", {}))
     valid = set(LossConfig()._fields)
     kwargs = {k: (tuple(v) if isinstance(v, list) else v)
               for k, v in lb.items() if k in valid}
     lc = LossConfig(**kwargs)
+    check_q_resid_scale_lev_floor(lc)     # a bad deck fails here, not at step 1
     # The WB objective (combined_loss on one deterministic rollout) has no
     # persistence-normalised or ensemble branch; refuse rather than ignore.
     unsupported = [name for name, on in (
