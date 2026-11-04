@@ -93,7 +93,8 @@ def _flx(fx, mask=None, **arrays):
         frq=i["frq_m"], qsr_ocean=i["qsr_oce"], qns_ocean=i["qns_oce"], qemp_ocean=i["qemp_oce"],
         ocean_layer_thickness=i["e3t_m"], sst_celsius=i["sst_m"], T_bottom=i["t_bo"], dt=s["rDt_ice"],
         rho_ocean=s["rho0"], c_ocean=s["rcp"], T0=s["rt0"], ice_epsilon=1.0e-10,
-        max_ice_fraction=i["rn_amax_2d"], land_mask=i["smask0"] if mask is None else mask)
+        max_ice_fraction=i["rn_amax_2d"], lead_cut_version="5.0.1", lead_cut_width=0.0,
+        land_mask=i["smask0"] if mask is None else mask)
 
 
 def test_fixture_has_land_and_wet_cells(fx):
