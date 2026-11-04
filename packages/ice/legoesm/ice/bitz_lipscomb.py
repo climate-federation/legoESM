@@ -952,7 +952,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         )
     hseg_s = jnp.stack(melted_snow, axis=-1)
 
-    old_dz = h_i0 / 3.0
+    old_dz = h_i0 * (1.0 / 3.0)       # zh_i_old = h_i_1d * r1_nlay_i (`icethd_dh.F90:135`): roundoff decides full melt
     # NEMO keeps h_i_1d as a running total, h_i = MAX(0, h_i + dh) after every
     # layer increment (`icethd_dh.F90:259,289,357,400`); its roundoff residual
     # (~1e-17 m) decides the h_i == 0 full-melt branch below, so the column

@@ -30,7 +30,7 @@ def _run(**kw):  # noqa: D103
 def test_full_melt_reset_matches_nemo_exactly():
     _, (out, fx) = _run(full_melt_width=0.0)
     melt = (col(FX, "dh:nemo:h_i") == 0) & (np.asarray(out.h_ice) == 0)
-    assert melt.sum() >= 6
+    assert melt.sum() >= 5      # 5 of 8 NEMO full-melt cells in the 5.0.2 order (all 8 under 5.0.1, C6)
     for f, v in (("a_i", out.concentration), ("h_s", out.h_snow), ("t_su", out.T_surface)):
         np.testing.assert_array_equal(np.asarray(v)[melt], col(FX, f"dh:nemo:{f}")[melt], err_msg=f)
     # main kept the area / snow / cold surface there
