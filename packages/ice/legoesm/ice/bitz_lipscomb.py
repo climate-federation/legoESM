@@ -1237,6 +1237,8 @@ def _sal_step(post_dh: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     sfx_bri (drainage/flushing) and sfx_res (bounds) contributions.
     """
 
+    if not gate_width >= 0:
+        raise ValueError(f"sal gate_width must be >= 0 m, got {gate_width!r}")
     if gate_width == 0:
         gate = (post_dh.h_ice > _SAL_MIN_THICKNESS).astype(post_dh.h_ice.dtype)
     else:

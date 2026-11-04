@@ -68,3 +68,18 @@ def test_default_gate_is_exact_outside_band_and_differentiable_inside():
         fd = (f(hk + 1e-7) - f(hk - 1e-7)) / 2e-7
         assert bool(jnp.isfinite(g)) and float(jnp.abs(g)) > 0
         np.testing.assert_allclose(float(g), float(fd), rtol=1e-4)
+
+
+def test_default_gate_band_value_pinned_and_bad_width_rejected():
+    from legoesm.core.smooth import smoothstep_cubic
+    pre, fz = _pre()
+    k = int(np.flatnonzero(~FX["is_fail_on_main"])[0])
+    full = bl._sal_step(pre, fz, dt(FX), K, gate_width=0.0)[0][k] - pre.S_bulk[k]
+    for frac in (0.25, 0.5, 0.75):
+        p, z = _pre(pre.h_ice.at[k].set(0.1 + frac * bl._SAL_GATE_WIDTH_M))
+        got = bl._sal_step(p, z, dt(FX), K)[0][k] - p.S_bulk[k]
+        np.testing.assert_allclose(float(got), float(smoothstep_cubic(frac)) * float(full), rtol=1e-12)
+    import pytest
+    for bad in (-1e-3, float("nan")):
+        with pytest.raises(ValueError, match="gate_width"):
+            bl._sal_step(pre, fz, dt(FX), K, gate_width=bad)
