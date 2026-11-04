@@ -83,3 +83,18 @@ def test_default_gate_band_value_pinned_and_bad_width_rejected():
     for bad in (-1e-3, float("nan")):
         with pytest.raises(ValueError, match="gate_width"):
             bl._sal_step(pre, fz, dt(FX), K, gate_width=bad)
+
+
+def test_band_values_against_hand_numbers_incl_active_bound():
+    """Independent numbers (review): dt = 14400 s, drainage target 5 psu over 1.73e6 s, rn_simin 0.1.
+    h = 0.1005 m sits at the band centre, where the C1 gate is exactly 0.5."""
+    h = jnp.asarray([0.1005, 0.1005, 0.2, 0.05])
+    S = jnp.asarray([8.0, 0.05, 8.0, 8.0])                  # drains; below rn_simin; thick; thin
+    n = 4
+    pre = bl.SI3ColumnArrays(jnp.ones(n), h, jnp.zeros(n), jnp.full(n, 250.0), jnp.zeros((n, 3)),
+                             jnp.zeros((n, 3)), S, jnp.stack([S] * 3, -1), jnp.zeros(n))
+    fz = forcing(n, t_bottom=jnp.full(n, 271.2), sss=jnp.full(n, 34.0))
+    got = np.asarray(bl._sal_step(pre, fz, 14400.0, K)[0])
+    full_drain = 3.0 * 14400.0 / 1730000.0                   # 0.024971098265895952
+    np.testing.assert_allclose(got, [8.0 - 0.5 * full_drain, 0.05 + 0.5 * 0.05, 8.0 - full_drain, 8.0],
+                               rtol=1e-14)
