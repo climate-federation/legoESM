@@ -168,7 +168,7 @@ def test_through_fct_removes_the_standalone_combined_physics_route(
     from legoesm.ocean.physics import combined
 
     marker = object()
-    monkeypatch.setattr(combined, "_make_mle", lambda _cfg: marker)
+    monkeypatch.setattr(combined, "_make_mle", lambda _cfg, eos_fn=None: marker)
 
     def captured_functions(cfg):
         fn = combined.make_ocean_physics(
