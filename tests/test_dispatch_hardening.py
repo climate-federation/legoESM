@@ -195,9 +195,6 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "_get_microphysics_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "make_microphysics_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py", "morrison_microphysics"),
-        # thompson snow_scheme guard (hardened 2026-06-22; previously a bare
-        # ``else`` silently used the bulk power-law fall speed on a typo).
-        ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/thompson.py", "thompson_microphysics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py", "_get_radiation_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py", "make_radiation_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/optics.py", "optics_factory"),

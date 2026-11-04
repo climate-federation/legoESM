@@ -110,10 +110,8 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/output.py",
         # Shared microphysics primitive libraries (NOT single-tendency schemes):
         # _warm_rain = saturation-adjustment / autoconversion / accretion / rain-
-        # evap helpers reused by Kessler/SB/Morrison/Thompson/P3; _thompson_snow =
-        # Thompson-2008 snow process functions used by thompson.py. Like _shared.py.
+        # evap helpers reused by Kessler/SB/Morrison/P3. Like _shared.py.
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py",
         # WRF v4.8.0 Thompson init half (module PARAMETERs, gamma constants and
         # lookup tables); the scheme (thompson_wrf.py) carries the contract.
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/thompson_wrf_tables.py",

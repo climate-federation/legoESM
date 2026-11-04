@@ -31,8 +31,11 @@ from legoesm.core.state import (
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
     HeightCoordinate,
+    HybridSigmaPressureCoordinate,
     SigmaCoordinate,
     TerrainMetric,
+    compute_pressure_velocity,
+    compute_sigma_dot_and_total,
 )
 from legoesm import constants
 
@@ -45,6 +48,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
 )
 from legoesm.atmosphere.dynamics.shared.tracer_positivity import clip_positive
 from legoesm.atmosphere.physics._shared import zero_like_tracers
+from legoesm.atmosphere.physics._shared import diagnose_grid_w_from_omega
 from legoesm.grids.gaussian import sh_analysis_3d
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
@@ -338,6 +342,88 @@ def sundqvist_lane_kwargs(scheme_name, grid, ncol, carries_q_i):
                 carries_q_i=carries_q_i)
 
 
+def require_thompson_tracers(scheme_name, carried, scheme_config=None):
+    """Refuse the WRF Thompson port when the state does not carry every
+    tracer it writes (vote W1a): the bridges zero-fill an absent tracer and
+    drop its tendency, which would silently re-initialise the port's
+    particle distributions each step.  ``carried`` = the state's tracer names
+    (name-keyed bridges) or its slot count (slot-indexed bridges)."""
+    if scheme_name != "thompson":
+        return
+    from legoesm.core.tracers import make_full_moisture_registry
+    need = make_full_moisture_registry().names[
+        :min_tracer_slots(scheme_name, scheme_config)]
+    if isinstance(carried, int):
+        missing = list(need[carried:])
+    else:
+        missing = [n for n in need if n not in (carried or ())]
+    if missing:
+        raise ValueError(
+            f"microphysics='thompson' writes {list(need)}, but the state "
+            f"lacks {missing}: their tendencies would be dropped and the "
+            "port re-initialised from zeros every step. Carry the full "
+            "moisture registry.")
+
+
+def thompson_lane_kwargs(scheme_name, w_fn):
+    """``{"w": w_fn()}`` for the WRF Thompson port, which reads the lane's
+    resolved vertical velocity [m/s, (ncol, nlev), up] (votes H2/J6: no zero
+    fallback); ``{}`` for every other scheme (``w_fn`` not called)."""
+    return {"w": w_fn()} if scheme_name == "thompson" else {}
+
+
+def half_level_w_to_full(w_half, ncol, nlev):
+    """Prognostic half-level ``w`` ``(..., nlev+1)`` -> full levels
+    ``(ncol, nlev)``, the two-interface mean (as the KF/Kuo bridges)."""
+    w = w_half.reshape(ncol, nlev + 1)
+    return 0.5 * (w[:, :-1] + w[:, 1:])
+
+
+def _hydrostatic_w_for_thompson(state, grid, sigma_coord, phys_state, T_col,
+                                p_full_col, q_v_col, ncol, nlev):
+    """Resolved w on the hydrostatic bridge: the SCM's prescribed large-scale
+    w when the driver carries it, else the full sigma-continuity omega
+    (vote J1a, as WRF Tiedtke's) -> w = -omega/(rho g)."""
+    from legoesm.atmosphere.physics.convection.integration import (
+        diagnose_omega_columns_hydrostatic,
+    )
+    w_ls = getattr(phys_state, "dyn_w_ls", None)
+    if w_ls is not None:
+        return w_ls.reshape(ncol, nlev)
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        raise ValueError(
+            "microphysics='thompson' needs w, which this bridge diagnoses by "
+            "PURE-sigma continuity; a hybrid coordinate would get a wrong w")
+    omega = diagnose_omega_columns_hydrostatic(
+        state.u.data, None if state.v is None else state.v.data,
+        state.p_s.data, grid, sigma_coord, ncol, nlev,
+        voronoi=True, full_continuity=True)
+    if omega is None:
+        raise ValueError(
+            "microphysics='thompson' needs the resolved vertical velocity, "
+            "which this bridge diagnoses only on the cubed-sphere, lat-lon "
+            "and MPAS grids")
+    return diagnose_grid_w_from_omega(omega, T_col, p_full_col, q_v_col)
+
+
+def _spectral_w(fields, p_s, sigma_coord, T_col, p_full_col, q_v_col, ncol,
+                nlev):
+    """Resolved w on the spectral lane from its grid divergence, the omega the
+    spectral convection bridge builds for Kain-Fritsch (vote J6a); pure sigma
+    only (vote U11a: the formula has no hybrid form)."""
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        raise ValueError(
+            "microphysics='thompson' needs w, which the spectral bridge "
+            "diagnoses by PURE-sigma continuity; a hybrid coordinate would "
+            "get a wrong w")
+    div = fields["div"].astype(T_col.dtype)
+    sigma_dot, d_tot = compute_sigma_dot_and_total(div, sigma_coord)
+    dps_dt = -p_s * d_tot[..., 0] / (1.0 - sigma_coord.sigma_half[0])
+    omega = compute_pressure_velocity(sigma_dot, p_s, dps_dt, sigma_coord)
+    return diagnose_grid_w_from_omega(omega.reshape(ncol, nlev), T_col,
+                                      p_full_col, q_v_col)
+
+
 #: The advected tracer holding IFS CLOUDSC's prognostic cloud fraction
 #: (registry: physics_pipeline.moisture_registry_for).
 CLOUDSC_CF_TRACER = "cloud_fraction_ifs"
@@ -493,6 +579,7 @@ def _make_hydrostatic_microphysics(
         p_half_col = p_half.reshape(ncol, nlev + 1)
         # Helper: extract a tracer from the tracer dict, returning a
         # column-reshaped (ncol, nlev) array clipped to non-negative.
+        require_thompson_tracers(scheme_name, state.tracers, scheme_config)
         def _get_tracer(name):
             if state.tracers is not None and name in state.tracers:
                 raw = state.tracers[name]
@@ -623,6 +710,10 @@ def _make_hydrostatic_microphysics(
             _kw.update(sundqvist_lane_kwargs(
                 scheme_name, grid, ncol,
                 state.tracers is not None and "q_i" in state.tracers))
+            _kw.update(thompson_lane_kwargs(
+                scheme_name, lambda: _hydrostatic_w_for_thompson(
+                    state, grid, sigma_coord, phys_state, T_col, p_full_col,
+                    q_v_col, ncol, nlev)))
             if _cloudsc:
                 _kw.update(_cloudsc_lane_kwargs(
                     state, grid, ncol, forcing, _get_tracer))
@@ -738,7 +829,8 @@ def _make_hydrostatic_microphysics(
         # (accepts_ps, see make_hydrostatic combined) with the forcing.
         physics_fn._wants_forcing = True
         physics_fn._writes_phys_state = True
-    elif _incloud or relvar_from_clubb:
+    elif _incloud or relvar_from_clubb or scheme_name == "thompson":
+        # thompson: the SCM's prescribed large-scale w (PhysicsState.dyn_w_ls)
         physics_fn._wants_phys_state_ro = True
     return physics_fn
 
@@ -819,6 +911,7 @@ def _make_nonhydrostatic_microphysics(
         shape_w = state.w.data.shape
         shape_2d = state.phis.data.shape
         n_tracers = tracers.shape[-1] if tracers.ndim >= 5 else 0
+        require_thompson_tracers(scheme_name, n_tracers, scheme_config)
 
         dims_3d = ("face", "x", "y", "level")
         dims_w = ("face", "x", "y", "level_half")
@@ -897,6 +990,8 @@ def _make_nonhydrostatic_microphysics(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
                 **sundqvist_lane_kwargs(scheme_name, grid, ncol, n_tracers > 3),
+                **thompson_lane_kwargs(scheme_name, lambda: half_level_w_to_full(
+                    state.w.data, ncol, nlev)),
             )
 
         # Convert dT/dt -> dtheta'/dt using local Exner (T = theta * exner).
@@ -1117,6 +1212,8 @@ def _make_plane_microphysics(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
                 **sundqvist_lane_kwargs(scheme_name, grid, ncol, n_tracers > 3),
+                **thompson_lane_kwargs(scheme_name, lambda: half_level_w_to_full(
+                    state.w.data, ncol, nlev)),
             )
 
         dT_dt = micro_out.dT_dt.reshape(shape_3d)
@@ -1322,6 +1419,8 @@ def _make_mpas_nh_microphysics(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
                 **sundqvist_lane_kwargs(scheme_name, mesh, ncol, n_tracers > 3),
+                **thompson_lane_kwargs(scheme_name, lambda: half_level_w_to_full(
+                    state.w.data, ncol, nlev)),
             )
 
         dT_dt = micro_out.dT_dt
@@ -1480,6 +1579,7 @@ def _make_spectral_pe_microphysics(
         # column-physics ``(ncol, nlev)`` layout.  Backend microphysics
         # schemes assume non-negative mixing ratios, so clip on the way
         # in (matches the hydrostatic bridge's ``_get_tracer``).
+        require_thompson_tracers(scheme_name, state.tracers, scheme_config)
         def _get_tracer(name):
             if state.tracers is not None and name in state.tracers:
                 raw = state.tracers[name]
@@ -1535,6 +1635,9 @@ def _make_spectral_pe_microphysics(
                 **sundqvist_lane_kwargs(
                     scheme_name, grid, ncol,
                     state.tracers is not None and "q_i" in state.tracers),
+                **thompson_lane_kwargs(scheme_name, lambda: _spectral_w(
+                    fields, p_s, sigma_coord, T_col, p_full_col, q_v_col,
+                    ncol, nlev)),
             )
 
         dT_dt = micro_out.dT_dt.reshape(n_lat, n_lon, nlev)

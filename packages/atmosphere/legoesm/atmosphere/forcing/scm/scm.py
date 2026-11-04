@@ -300,6 +300,7 @@ def _microphysics_substepped_forward_euler(
     get_grid: Callable[[], SCMGrid],
     get_sigma_coord: Callable[[], SigmaCoordinate],
     microphysics_substeps: int,
+    forcing: SCMForcing | None = None,
 ) -> Callable:
     """Build an SCM-only forward-Euler wrapper with microphysics substeps.
 
@@ -317,9 +318,16 @@ def _microphysics_substepped_forward_euler(
         grid = get_grid()
         sigma_coord = get_sigma_coord()
 
+        # read-only phys_state for a fn that advertises it (combined-physics
+        # protocol), carrying the prescribed large-scale w the outer tendency
+        # sees: WRF Thompson reads it (vote U13a)
+        kw = {}
+        if getattr(microphysics_fn, "_wants_phys_state_ro", False):
+            kw["phys_state"] = _with_prescribed_w(phys_state, forcing, t, state)
+
         def substep(carry, _i):
             sub_state, base_tend = carry
-            micro_tend = microphysics_fn(sub_state, grid, sigma_coord)
+            micro_tend = microphysics_fn(sub_state, grid, sigma_coord, **kw)
             tend = add_tendencies(base_tend, micro_tend)
             sub_state = _apply_tendencies(sub_state, tend, sub_dt)
             return (sub_state, base_tend), None
@@ -332,6 +340,17 @@ def _microphysics_substepped_forward_euler(
         return new_state, phys_out
 
     return step
+
+
+def _with_prescribed_w(phys_state, forcing, t, state):
+    """``phys_state`` carrying the SCM's prescribed large-scale w (WRF
+    Tiedtke's omega / Thompson's w source: the column has no divergence
+    operator); ``None`` stays ``None``."""
+    if phys_state is None:
+        return None
+    _w = subsidence_w_profile(forcing, t, state.T.data.shape[-1],
+                              state.T.data.dtype)
+    return phys_state._replace(dyn_w_ls=jnp.broadcast_to(_w, state.T.data.shape))
 
 
 def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = None):
@@ -418,13 +437,10 @@ def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = Non
             if _ftr is not None and "q_v" in _ftr:
                 _dq_dyn = _ftr["q_v"].data
         if phys_state is not None:
-            # and its prescribed large-scale w (WRF Tiedtke's omega source:
-            # the SCM column has no divergence operator)
-            _w = subsidence_w_profile(forcing, t, state.T.data.shape[-1],
-                                      state.T.data.dtype)
-            phys_state = phys_state._replace(
-                dyn_tendency_T=_dT_dyn, dyn_tendency_qv=_dq_dyn,
-                dyn_w_ls=jnp.broadcast_to(_w, state.T.data.shape))
+            phys_state = _with_prescribed_w(
+                phys_state._replace(dyn_tendency_T=_dT_dyn,
+                                    dyn_tendency_qv=_dq_dyn),
+                forcing, t, state)
 
         try:
             tend, phys_out = physics_fn(
@@ -670,6 +686,7 @@ class SingleColumnModel:
                 get_grid=lambda: self.grid,
                 get_sigma_coord=lambda: self.sigma_coord,
                 microphysics_substeps=microphysics_substeps,
+                forcing=self.forcing,
             )
         else:
             self._step_fn = step_fn_obj

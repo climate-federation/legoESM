@@ -406,7 +406,14 @@ def _ksed_nstep(vt, dz, dt, nz):
     return ksed, jnp.max(ns, axis=-1)
 
 
-def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt: float,
+def thompson_air_density(T, p, qv):
+    """mp_thompson's air density ``rho = 0.622 p / (R_d T (qv + 0.622))``
+    [kg/m^3] with its ``qv = MAX(1.E-10, qv)`` floor: the density the scheme
+    multiplies its per-kg numbers by (``ni*rho``, ``nr*rho``)."""
+    return W.EPS_WRF * p / (W.R_DRY * T * (jnp.maximum(_QV_MIN, qv) + W.EPS_WRF))
+
+
+def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt,
                       *, n_sed_max: int) -> ThompsonWRFStep:
     """One WRF v4.8.0 ``mp_gt_driver`` column step (``mp_physics=8``).
 
@@ -416,8 +423,9 @@ def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt: float,
     the sedimentation sub-step loop; the result equals the oracle's only while
     every column's required count (``nstep_required``) is ``<= n_sed_max``.
     """
-    dt = float(dt)
     dtype = T.dtype
+    # dt may be traced (the coupled pipeline jits it): no Python float (X1a)
+    dt = jnp.asarray(dt, dtype)
     tab = {k: jnp.asarray(v) for k, v in _tables(jnp.dtype(dtype).name).items()}
     c = W.init_constants()
     ncol, nz = T.shape
@@ -887,10 +895,11 @@ def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt: float,
     prg_gde = jnp.where(gml & ~(prr_gml > 0.0) & (ssati < 0.0), gde_hot, prg_gde)
     prr_gml = jnp.where(gml, prr_gml, 0.0)
 
-    if dt > _DT_RIME_WARM:
-        prr_rcw = jnp.where(hot, prr_rcw + prs_scw + prg_gcw, prr_rcw)
-        prs_scw = jnp.where(hot, 0.0, prs_scw)
-        prg_gcw = jnp.where(hot, 0.0, prg_gcw)
+    # WRF: IF (dt > 120) hot-cell riming goes to rain; a traced-dt select (X1a)
+    hot_w = hot & (dt > _DT_RIME_WARM)
+    prr_rcw = jnp.where(hot_w, prr_rcw + prs_scw + prg_gcw, prr_rcw)
+    prs_scw = jnp.where(hot_w, 0.0, prs_scw)
+    prg_gcw = jnp.where(hot_w, 0.0, prg_gcw)
 
     # ---------------- conservation limits --------------------
     sump = pri_inu + pri_ide + prs_ide + prs_sde + prg_gde
