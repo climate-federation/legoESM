@@ -49,8 +49,9 @@ def test_snow_to_ocean_fluxes_and_controls_match_nemo():
 
 def test_mass_and_heat_budget_close_with_snow_removal():
     st, (out, fx) = _run()
-    a, d = np.asarray(st.concentration), dt(FX)
-    mass = a * (K.rho_ice * (out.h_ice - st.h_ice) + K.rho_snow * (out.h_snow - st.h_snow)) / d
+    a, a1, d = np.asarray(st.concentration), np.asarray(out.concentration), dt(FX)
+    mass = (a1 * (K.rho_ice * out.h_ice + K.rho_snow * out.h_snow)
+            - a * (K.rho_ice * st.h_ice + K.rho_snow * st.h_snow)) / d
     w = sum(np.asarray(getattr(fx, f)) for f in bl.SI3ExchangeFluxes._fields
             if f.startswith("wfx") and f not in ("wfx_err_sub", "wfx_opw"))
     np.testing.assert_allclose(mass, -w, rtol=0, atol=1e-12 * max(1.0, np.abs(mass).max()))
@@ -58,7 +59,10 @@ def test_mass_and_heat_budget_close_with_snow_removal():
     g = lambda k: np.asarray(getattr(fx, k))  # noqa: E731
     rhs = (g("hfx_thd") + g("hfx_res") + g("hfx_sub") + g("hfx_spr")
            - g("hfx_sum") - g("hfx_bom") - g("hfx_bog") - g("hfx_snw"))
-    dq = a * (q(out) - q(st)) / d
+    dq = (a1 * q(out) - a * q(st)) / d
+    S = lambda s_, aa: aa * K.rho_ice * s_.h_ice * s_.S_bulk  # noqa: E731
+    ssum = sum(np.asarray(getattr(fx, f)) for f in bl.SI3ExchangeFluxes._fields if f.startswith("sfx"))
+    np.testing.assert_allclose((S(out, a1) - S(st, a)) / d, -ssum, rtol=0, atol=1e-11)
     np.testing.assert_allclose(dq, rhs, rtol=0, atol=1e-11 * max(1.0, np.abs(dq).max()))
 
 
@@ -103,3 +107,32 @@ def test_snow_to_ocean_flux_is_strict_where_both_melt_out():
         # 1e-3, not 1e-12: the snow left to send differs by <= 2.7e-4 relative through the
         # 5.0.1 melt-then-sublimate order (C6); a missing transfer gives 1.0.
         assert np.all(rel(acc, col(FX, f"dh:nemo:{f}"))[melt & sent] <= 1e-3), f
+
+
+def test_smooth_area_closing_is_conservative_and_differentiable():
+    """Default (smooth) form on a column thinned into the band: area closes partially, the
+    removed ice/snow goes to the ocean slots (budget closes), and d a_i / d h is finite."""
+    st, zr, fz = dh_args(FX)
+    ctl = (~FX["is_fail_on_main"]) & (col(FX, "dh:nemo:dh_i_bom") < 0)
+    k = int(np.flatnonzero(ctl)[0])
+    w = bl._FULL_MELT_SNOW_WIDTH_M
+
+    def run(h):
+        return bl._dh_step_fluxes(st._replace(h_ice=st.h_ice.at[k].set(h)), zr, fz, dt(FX), K)
+
+    lo, hi = 0.0, float(st.h_ice[k])
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if float(run(mid)[0].h_ice[k]) < 0.5 * w else (lo, mid)
+    out, fx = run(hi)
+    a0 = float(st.concentration[k])
+    assert 0.0 < float(out.concentration[k]) < a0
+    m1 = float(out.concentration[k]) * (K.rho_ice * float(out.h_ice[k]) + K.rho_snow * float(out.h_snow[k]))
+    m0 = a0 * (K.rho_ice * hi + K.rho_snow * float(st.h_snow[k]))
+    w_sum = sum(float(getattr(fx, f)[k]) for f in bl.SI3ExchangeFluxes._fields
+                if f.startswith("wfx") and f not in ("wfx_err_sub", "wfx_opw"))
+    np.testing.assert_allclose((m1 - m0) / dt(FX), -w_sum, rtol=1e-10)
+    g = jax.grad(lambda h: run(h)[0].concentration[k])(jnp.asarray(hi))
+    fd = (run(hi + 1e-8)[0].concentration[k] - run(hi - 1e-8)[0].concentration[k]) / 2e-8
+    assert bool(jnp.isfinite(g)) and float(jnp.abs(g)) > 0
+    np.testing.assert_allclose(float(g), float(fd), rtol=1e-3)

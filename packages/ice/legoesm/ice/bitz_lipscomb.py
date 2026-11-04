@@ -1213,11 +1213,24 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         snow_ice_salt_change + (S_new - state.S_bulk) * dh_growth
     ) / jnp.maximum(h_i, _EPS10)
     # Ensure a_i = 0, h_s = 0, t_su = rt0 where h_i = 0 (`icethd_dh.F90:528-532`).
-    # Hard on the exact-zero set: zero ice volume, so conservative (vote D6b).
-    gone = h_i == 0.0
-    return SI3ColumnArrays(jnp.where(gone, 0.0, a), h_i,
-                           jnp.where(gone, 0.0, h_s_final),
-                           jnp.where(gone, constants.T0, zdf.T_surface), e_i, e_s,
+    # C1 one-sided over h_i < full_melt_width (user smooth rule): the fraction
+    # `gone` of the area is closed and its residual ice and snow are sent to the
+    # ocean (hfx/wfx/sfx_res), so mass, salt and heat stay closed; exactly
+    # NEMO at width 0 (zero volume moved) and for h_i >= width.
+    if full_melt_width == 0:
+        gone = (h_i == 0.0).astype(h_i.dtype)
+    else:
+        gone = 1.0 - smoothstep_cubic(h_i / full_melt_width)
+    closed = gone * ar
+    fx = _add_fluxes(
+        fx,
+        hfx_res=-closed * (jnp.sum(e_i, axis=-1) * h_i + jnp.sum(e_s, axis=-1) * h_s_final) * (1.0 / 3.0),
+        wfx_res=closed * (constants.rho_ice * h_i + constants.rho_snow * h_s_final),
+        sfx_res=closed * constants.rho_ice * h_i * S_bulk,
+    )
+    return SI3ColumnArrays(a * (1.0 - gone), h_i,
+                           h_s_final,          # -> 0 as gone -> 1 (snow sent off above)
+                           zdf.T_surface + gone * (constants.T0 - zdf.T_surface), e_i, e_s,
                            S_bulk, state.S_layers, state.age_volume), fx
 
 
