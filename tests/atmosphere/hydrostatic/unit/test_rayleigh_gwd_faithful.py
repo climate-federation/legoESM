@@ -8,9 +8,10 @@ FAITHFUL to HS94 (the MOMENTUM tendency): the BL drag ``k_bl = k_max·max(0,(σ�
 (u,v), defaults ``k_max = 1/day = k_f`` and ``σ_b = 0.7``, pinned to rtol 1e-12 vs an independent
 NumPy reimpl. (The frictional HEATING is a departure — HS94 has no KE-compensating heating term.)
 ADDITIONS / DEPARTURES (canaries):
-  * the upper sin² SPONGE is NOT HS94 — a numerical sponge-layer damping active only where
-    ``σ < sponge_top``; it HEATS the removed KE (energy-conserving), unlike a physical radiation
-    sponge that removes GW energy from the domain;
+  * the upper SPONGE is NOT HS94 — it is the Isca v1.0 damping_driver ``rayleigh`` (Polvani &
+    Kushner 2002) sponge ``sponge_k ((p_sb - p)/p_sb)^2`` for ``p < p_sb`` on levels up to the one
+    whose reference pressure is nearest ``2 p_sb``, with Isca's time-centred heating (oracle:
+    tests/atmosphere/test_rayleigh_sponge_isca_oracle.py);
   * ``conserves = ["energy"]`` is correct: Rayleigh is a DIRECT drag (no wave at all) — a resolved
     KE→heat conversion, both tracked. Contrast the c≠0 launched-SPECTRUM schemes hines/
     prognostic_spectral = ["none"] (propagating waves carry off vertical energy flux the limiter
@@ -46,11 +47,7 @@ def _enable_x64():
 
 
 def _columns(ncol=3, nlev=20, u0=18.0, v0=7.0, p_top=300.0):
-    """Deterministic column with sigma spanning the sponge (σ<0.02) to the BL (σ→1).
-
-    Log-spaced pressure gives fine top resolution so the sponge region (σ < sponge_top = 0.02) is
-    actually resolved.
-    """
+    """Deterministic column from ``p_top`` to the BL (σ→1), log-spaced in pressure."""
     p_half = jnp.broadcast_to(
         jnp.exp(jnp.linspace(jnp.log(p_top), jnp.log(1.0e5), nlev + 1))[None, :], (ncol, nlev + 1)
     )
@@ -79,9 +76,12 @@ def _k_bl_np(sigma, k_max, sigma_b):
     return k_max * np.clip((sigma - sigma_b) / (1.0 - sigma_b), 0.0, 1.0)
 
 
-def _k_sponge_np(sigma, sponge_k, sponge_top):
-    arg = np.clip((sponge_top - sigma) / sponge_top, 0.0, 1.0)
-    return sponge_k * np.sin(0.5 * np.pi * arg) ** 2
+def _k_sponge_np(p_full, sigma, sponge_k, p_sb):
+    """Isca damping_driver rayleigh, hard form, with its nlev_rayfric level cap."""
+    pref = sigma * constants.p_atm_std
+    cap = np.argmin(np.abs(pref - 2.0 * p_sb), axis=1)[:, None]
+    in_cap = np.arange(p_full.shape[1])[None, :] <= cap
+    return np.where(in_cap & (p_full < p_sb), sponge_k * ((p_sb - p_full) / p_sb) ** 2, 0.0)
 
 
 def _sigma_np(inp):
@@ -100,8 +100,9 @@ def test_rayleigh_config_defaults_are_hs94():
     assert c.sigma_b == SIGMA_B                 # == held_suarez.SIGMA_B (HS94 sigma_b = 0.7)
     assert c.k_max == 1.0 / 86400.0
     assert c.sigma_b == 0.7
-    assert c.sponge_top == 0.02
+    assert c.sponge_pbottom_Pa == 50.0          # Isca sponge_pbottom / PK02 0.5 hPa
     assert c.sponge_k == 1.0 / (0.5 * 86400.0)  # 2/day
+    assert c.sponge_sharpness == 100.0          # C1 cutoff width 0.01
 
 
 def test_rayleigh_full_drag_form_exact():
@@ -110,56 +111,76 @@ def test_rayleigh_full_drag_form_exact():
     Pins the FULL closed form including the non-HS94 sponge (a regression pin, NOT a HS94-faithful
     claim — the HS94-faithful part is the BL-only test test_rayleigh_bl_matches_hs94_exactly).
     """
-    cfg = RayleighConfig()
-    out, inp = _run(cfg)
+    cfg = RayleighConfig(sponge_sharpness=float("inf"))
+    out, inp = _run(cfg, p_top=1.0)
     u, v = np.asarray(inp[0]), np.asarray(inp[1])
     sigma = _sigma_np(inp)
     k_drag = _k_bl_np(sigma, cfg.k_max, cfg.sigma_b) + _k_sponge_np(
-        sigma, cfg.sponge_k, cfg.sponge_top
+        np.asarray(inp[3]), sigma, cfg.sponge_k, cfg.sponge_pbottom_Pa
     )
+    assert np.any(k_drag[:, :3] > 0.0)                     # non-vacuity: sponge in the column
     assert np.allclose(np.asarray(out.du_dt), -k_drag * u, rtol=1e-12, atol=0.0)
     assert np.allclose(np.asarray(out.dv_dt), -k_drag * v, rtol=1e-12, atol=0.0)
     assert np.any(np.abs(np.asarray(out.du_dt)) > 1e-12)   # non-vacuity
 
 
 def test_rayleigh_bl_matches_hs94_exactly():
-    """FAITHFUL: in a BL-only column (all σ > sponge_top) du_dt == −k_max·max(0,(σ−σ_b)/(1−σ_b))·u.
+    """FAITHFUL: in a BL-only column (all p >= p_sb) du_dt == −k_max·max(0,(σ−σ_b)/(1−σ_b))·u.
 
-    The sponge is OFF (σ > sponge_top ⇒ sponge_arg = 0), so the tendency is exactly HS94's
+    The sponge is OFF (p >= sponge_pbottom_Pa everywhere), so the tendency is exactly HS94's
     low-level Rayleigh friction.
     """
     cfg = RayleighConfig()
-    out, inp = _run(cfg, p_top=3000.0)                     # σ_top ≈ 0.03 > sponge_top=0.02
+    out, inp = _run(cfg, p_top=3000.0)
     u = np.asarray(inp[0])
     sigma = _sigma_np(inp)
-    assert np.all(sigma > cfg.sponge_top)                  # sponge genuinely off everywhere
+    assert np.all(np.asarray(inp[3]) > cfg.sponge_pbottom_Pa)  # sponge genuinely off
     k_bl = _k_bl_np(sigma, cfg.k_max, cfg.sigma_b)
     assert np.allclose(np.asarray(out.du_dt), -k_bl * u, rtol=1e-12, atol=0.0)
     # the HS94 ramp: zero above the BL (σ ≤ σ_b), rising to k_max at the surface
     assert np.any(k_bl == 0.0) and np.any(k_bl > 0.0)      # non-vacuity: ramp actually varies
 
 
-def test_rayleigh_sponge_sin2_profile():
-    """DEPARTURE canary: the upper sponge is a sin² taper active ONLY where σ < sponge_top.
-
-    In the sponge top (σ < sponge_top and σ < σ_b so k_bl = 0) the drag is exactly k_sponge, and
-    it is identically zero below the sponge (σ ≥ sponge_top) — a non-HS94 numerical addition.
-    """
-    cfg = RayleighConfig()
-    out, inp = _run(cfg, p_top=100.0)                      # reaches σ ≈ 0.001 (deep into sponge)
-    u = np.asarray(inp[0])
-    sigma = _sigma_np(inp)
-    k_sponge = _k_sponge_np(sigma, cfg.sponge_k, cfg.sponge_top)
-    in_sponge = sigma < cfg.sponge_top
-    assert in_sponge.any()                                 # non-vacuity: reaches the sponge
-    # below the sponge the sponge coefficient is exactly zero
-    assert np.allclose(k_sponge[sigma >= cfg.sponge_top], 0.0, atol=0.0)
-    # in the sponge-only top (also below σ_b ⇒ k_bl=0), du_dt == −k_sponge·u exactly
-    sponge_only = in_sponge & (sigma < cfg.sigma_b)
-    assert sponge_only.any()
+def test_rayleigh_sponge_isca_profile():
+    """The sponge is Isca's ``sponge_k ((p_sb - p)/p_sb)^2``, zero where p >= p_sb (hard form)."""
+    cfg = RayleighConfig(sponge_sharpness=float("inf"))
+    out, inp = _run(cfg, p_top=1.0)
+    u, p_full = np.asarray(inp[0]), np.asarray(inp[3])
+    k_sponge = _k_sponge_np(p_full, _sigma_np(inp), cfg.sponge_k, cfg.sponge_pbottom_Pa)
+    in_sponge = k_sponge > 0.0
+    assert in_sponge.any()                                 # non-vacuity: sponge acts
+    assert np.all(k_sponge[p_full >= cfg.sponge_pbottom_Pa] == 0.0)
     du = np.asarray(out.du_dt)
-    assert np.allclose(du[sponge_only], (-k_sponge * u)[sponge_only], rtol=1e-12, atol=0.0)
-    assert np.any(k_sponge[in_sponge] > 0.0)               # non-vacuity: sponge actually acts
+    assert np.allclose(du[in_sponge], (-k_sponge * u)[in_sponge], rtol=1e-12, atol=0.0)
+
+
+def test_rayleigh_sponge_level_cap_binds():
+    """Isca's nlev_rayfric cap: a low-p_s column (pref = σ·PSTD) loses sponge levels below the cap."""
+    cfg = RayleighConfig(k_max=0.0, sponge_sharpness=float("inf"), sponge_pbottom_Pa=50.0)
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _columns(p_top=1.0)
+    p_half, p_full = p_half * 0.3, p_full * 0.3            # p_s = 30 kPa: pref = p/0.3
+    out = rayleigh_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg)
+    pf = np.asarray(p_full)
+    capped = (pf < cfg.sponge_pbottom_Pa) & (np.asarray(out.du_dt) == 0.0)
+    assert capped.any()                                    # non-vacuity: the cap removes levels
+    k_sponge = _k_sponge_np(pf, _sigma_np((u, v, T, p_full, p_half)), cfg.sponge_k, 50.0)
+    assert np.allclose(np.asarray(out.du_dt), -k_sponge * np.asarray(u), rtol=1e-12, atol=0.0)
+
+
+def test_rayleigh_sponge_smooth_cutoff_gradient():
+    """RULE 5: the default C1 cutoff has a finite, correct d(du_dt)/d(p_sb) (FD check)."""
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _columns(p_top=1.0)
+
+    def f(p_sb):
+        cfg = RayleighConfig(k_max=0.0, sponge_pbottom_Pa=p_sb)
+        return jnp.sum(rayleigh_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                                    300.0, cfg).du_dt)
+
+    g = float(jax.grad(f)(50.0))
+    h = 1e-4
+    fd = (float(f(50.0 + h)) - float(f(50.0 - h))) / (2 * h)
+    assert np.isfinite(g) and g != 0.0
+    assert abs(g - fd) <= 1e-6 * abs(fd)
 
 
 def test_rayleigh_rest_state_zero():
@@ -199,11 +220,17 @@ def test_rayleigh_energy_closure_ke_to_heat():
 
 
 def test_rayleigh_frictional_heating_form():
-    """DESIGN (regression pin): dT_dt == −(u·du_dt + v·dv_dt)/c_pd."""
-    out, inp = _run(RayleighConfig())
+    """BL: −(u·du_bl + v·dv_bl)/c_pd; sponge: Isca −((u + dt/2 du_sp)·du_sp + ...)/c_pd."""
+    cfg = RayleighConfig()
+    out, inp = _run(cfg, p_top=1.0)
     u, v = np.asarray(inp[0]), np.asarray(inp[1])
-    assert np.any(np.abs(np.asarray(out.dT_dt)) > 1e-12)
-    dT_exp = -(u * np.asarray(out.du_dt) + v * np.asarray(out.dv_dt)) / constants.c_pd
+    sp = _run(cfg._replace(k_max=0.0), p_top=1.0)[0]
+    du_sp, dv_sp = np.asarray(sp.du_dt), np.asarray(sp.dv_dt)
+    du_bl, dv_bl = np.asarray(out.du_dt) - du_sp, np.asarray(out.dv_dt) - dv_sp
+    assert np.any(du_sp != 0.0) and np.any(du_bl != 0.0)
+    dt = 300.0
+    dT_exp = (-(u * du_bl + v * dv_bl)
+              - ((u + 0.5 * dt * du_sp) * du_sp + (v + 0.5 * dt * dv_sp) * dv_sp)) / constants.c_pd
     assert np.allclose(np.asarray(out.dT_dt), dT_exp, rtol=1e-12, atol=0.0)
 
 
