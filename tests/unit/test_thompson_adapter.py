@@ -261,3 +261,22 @@ def test_host_water_budget_equals_the_ports_own(case):
             + ref.pptrain + ref.pptsnow + ref.pptgraul + ref.pptice)
     scale = float(jnp.max(jnp.sum(q0 * dpg, axis=-1)))
     assert float(jnp.max(jnp.abs(host - port))) <= 1e-10 * scale   # V4b
+
+
+def test_bridges_refuse_thompson_without_the_full_registry():
+    """Vote W1a: a bridge would zero-fill the missing tracers and drop their
+    tendencies, silently re-initialising the port each step."""
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        require_thompson_tracers,
+    )
+    from legoesm.core.tracers import make_full_moisture_registry
+    full = make_full_moisture_registry().names
+    require_thompson_tracers("thompson", {n: None for n in full})
+    require_thompson_tracers("thompson", len(full))
+    require_thompson_tracers("morrison", {})                  # other schemes untouched
+    with pytest.raises(ValueError, match="N_i"):
+        require_thompson_tracers("thompson", {n: None for n in full if n != "N_i"})
+    with pytest.raises(ValueError, match="q_i"):
+        require_thompson_tracers("thompson", 3)
+    with pytest.raises(ValueError, match="lacks"):
+        require_thompson_tracers("thompson", None)

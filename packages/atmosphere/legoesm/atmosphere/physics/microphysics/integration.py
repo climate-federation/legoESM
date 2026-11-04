@@ -293,6 +293,29 @@ def sundqvist_lane_kwargs(scheme_name, grid, ncol, carries_q_i):
                 carries_q_i=carries_q_i)
 
 
+def require_thompson_tracers(scheme_name, carried, scheme_config=None):
+    """Refuse the WRF Thompson port when the state does not carry every
+    tracer it writes (vote W1a): the bridges zero-fill an absent tracer and
+    drop its tendency, which would silently re-initialise the port's
+    particle distributions each step.  ``carried`` = the state's tracer names
+    (name-keyed bridges) or its slot count (slot-indexed bridges)."""
+    if scheme_name != "thompson":
+        return
+    from legoesm.core.tracers import make_full_moisture_registry
+    need = make_full_moisture_registry().names[
+        :min_tracer_slots(scheme_name, scheme_config)]
+    if isinstance(carried, int):
+        missing = list(need[carried:])
+    else:
+        missing = [n for n in need if n not in (carried or ())]
+    if missing:
+        raise ValueError(
+            f"microphysics='thompson' writes {list(need)}, but the state "
+            f"lacks {missing}: their tendencies would be dropped and the "
+            "port re-initialised from zeros every step. Carry the full "
+            "moisture registry.")
+
+
 def thompson_lane_kwargs(scheme_name, w_fn):
     """``{"w": w_fn()}`` for the WRF Thompson port, which reads the lane's
     resolved vertical velocity [m/s, (ncol, nlev), up] (votes H2/J6: no zero
@@ -478,6 +501,7 @@ def _make_hydrostatic_microphysics(
         p_half_col = p_half.reshape(ncol, nlev + 1)
         # Helper: extract a tracer from the tracer dict, returning a
         # column-reshaped (ncol, nlev) array clipped to non-negative.
+        require_thompson_tracers(scheme_name, state.tracers, scheme_config)
         def _get_tracer(name):
             if state.tracers is not None and name in state.tracers:
                 raw = state.tracers[name]
@@ -814,6 +838,7 @@ def _make_nonhydrostatic_microphysics(
         shape_w = state.w.data.shape
         shape_2d = state.phis.data.shape
         n_tracers = tracers.shape[-1] if tracers.ndim >= 5 else 0
+        require_thompson_tracers(scheme_name, n_tracers, scheme_config)
 
         dims_3d = ("face", "x", "y", "level")
         dims_w = ("face", "x", "y", "level_half")
@@ -1476,6 +1501,7 @@ def _make_spectral_pe_microphysics(
         # column-physics ``(ncol, nlev)`` layout.  Backend microphysics
         # schemes assume non-negative mixing ratios, so clip on the way
         # in (matches the hydrostatic bridge's ``_get_tracer``).
+        require_thompson_tracers(scheme_name, state.tracers, scheme_config)
         def _get_tracer(name):
             if state.tracers is not None and name in state.tracers:
                 raw = state.tracers[name]
