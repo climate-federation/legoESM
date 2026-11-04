@@ -901,9 +901,18 @@ def _eoshift_rows(a: jax.Array, shift: jax.Array) -> jax.Array:
     return jnp.where(valid, jnp.take_along_axis(a, src_safe, axis=1), 0.0)
 
 
+# CESM/E3SM inputdata atm/waccm/gw/newmfspectra40_dc25.nc (svn rev 15), the only
+# Beres table this port is certified against (oracle fixture gw_beres_table).
+MFCC_TABLE_SHA256 = "8f1528d85b3642b5024ba186f45720ecaf7998adcf9fbcb9cd21399c67d3cc16"
+
+
 @functools.lru_cache(maxsize=4)
-def load_mfcc_table(path: str, pgwv: int):
+def load_mfcc_table(path: str, pgwv: int, allow_unpinned: bool = False):
     """Load the offline Beres lookup table the way ``gw_init_beres`` does.
+
+    The file's sha256 must equal ``MFCC_TABLE_SHA256`` (a structurally valid
+    but different table would otherwise run silently); ``allow_unpinned=True``
+    is the explicit opt-out for synthetic test tables.
 
     The netcdf (``newmfspectra40_dc25.nc``) stores ``mfcc(PS, MW, HD)`` in the
     file's (C-order) dimension list, which Fortran reads column-major into
@@ -915,9 +924,19 @@ def load_mfcc_table(path: str, pgwv: int):
     ``[ngwv_file-pgwv, ngwv_file+pgwv]`` inclusive.  Cached per (path, pgwv);
     returns a float64 NumPy array (a trace-time constant for the closures).
     """
+    import hashlib
+
     import numpy as np
     import xarray as xr
 
+    if not allow_unpinned:
+        with open(path, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        if digest != MFCC_TABLE_SHA256:
+            raise ValueError(
+                f"mfcc table {path!r}: sha256 {digest} is not the pinned CESM "
+                f"newmfspectra40_dc25.nc ({MFCC_TABLE_SHA256}); pass "
+                f"allow_unpinned=True only for a deliberate non-production table")
     with xr.open_dataset(path) as ds:
         var = ds["mfcc"]
         dims = tuple(var.dims)

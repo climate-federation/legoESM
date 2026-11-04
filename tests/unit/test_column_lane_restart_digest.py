@@ -513,3 +513,39 @@ def test_duo_mid_day_end_under_daily_forcing_leaves_cmor_to_the_resumed_run(
             for v in a.variables:
                 np.testing.assert_array_equal(
                     b[v].values, a[v].values, err_msg=f"{rel}: {v}")
+
+
+@pytest.mark.slow
+def test_spectral_column_lane_restart_matches_the_continuous_digest(
+        tmp_path, monkeypatch):
+    """Spectral column lane (P4), RRTMGP every 4 steps, land on: the day-1
+    checkpoint (step 48 at 1800 s, a radiation boundary as D-REX-1 requires)
+    resumes bitwise over the remaining 48 steps on the full restart set, the
+    spectral coefficients and the mass anchor included."""
+    from legoesm.driver.model_driver import ModelDriver
+    from tests.atmosphere.hydrostatic.unit.test_spectral_column import (
+        _spectral_land_stress_cfg)
+    monkeypatch.setenv("LEGOESM_DIGEST_EVERY_STEPS", "1")
+
+    def build(name, days):
+        d = tmp_path / name
+        d.mkdir()
+        cfg = _spectral_land_stress_cfg(d, monkeypatch, stress=None, days=days,
+                                        dt=1800.0, rad_update_steps=4)
+        cfg = cfg._replace(output=cfg.output._replace(checkpoint_days=1))
+        drv = ModelDriver(cfg, output_dir=d)
+        _drive(drv.setup)
+        return drv, d
+
+    for name, days in (("c", 2), ("a", 1)):
+        _require(_drive(build(name, days)[0].run) == "COMPLETED", name)
+    ckpt = tmp_path / "a" / "checkpoint_day_0001.npz"
+    _require(ckpt.exists(), ckpt)
+    dB, d = build("b", 1)
+    step, day = _drive(dB.load_checkpoint, ckpt)
+    _require(step == 48 and step % 4 == 0, step)
+    _require(_drive(dB.run, start_step=step, start_day=day) == "COMPLETED",
+             "b")
+    steps, bad = _restarted_vs_continuous(tmp_path / "c", step, d)
+    _require(steps == list(range(49, 97)), steps)
+    assert not bad, _mismatch(tmp_path / "c", d, bad[0])

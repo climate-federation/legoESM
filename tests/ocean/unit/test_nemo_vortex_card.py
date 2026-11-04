@@ -651,9 +651,11 @@ _CERTIFIED_CARD_DIGESTS_GRADGATE = {        # gradient-gate tip d678430f3
 # GYRE resolves vertical_mixing.scheme = "tke"); the non-config part of the
 # digest is identical.
 _CERTIFIED_CARD_DIGESTS = {
-    "GYRE-zco": "9fa9fec09b9cb850",
-    "LOCK_EXCHANGE-zco": "10516c2a4d166c73",
-    "OVERFLOW-zps": "9be98498ac9f50de",
+    # The appended config fields move the printed NamedTuple digest; the
+    # surrounding field-by-field guards pin their resolved values below.
+    "GYRE-zco": "6bb18cf2c428e5ab",
+    "LOCK_EXCHANGE-zco": "2a60d1dd582bad9f",
+    "OVERFLOW-zps": "d9398d054145794b",
 }
 
 
@@ -674,6 +676,9 @@ def test_the_only_config_change_to_a_certified_card_is_the_added_eos_field(case)
     # certified card must keep the metric formula it already ran.
     assert cfg.lateral_viscosity_coefficient_source == "nemo_ldf_c2d"
     assert cfg.eos == "nemo_teos10"
+    assert cfg.nemo_qsr_stage3_kmm_source_association is (
+        True if case == "GYRE-zco" else None)
+    assert cfg.vmix_eos_use_config_rho0 is True
 
 
 def _card_digest(card):
