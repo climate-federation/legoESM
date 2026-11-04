@@ -104,9 +104,9 @@ class PhysicsState(NamedTuple):
         this override, anchoring ``T[..., -1]`` to the prescribed value
         collapses the sensible-flux gradient — Phase B codex iter-1
         finding).
-    qke : jax.Array, shape (ncol, nlev)
-        Prognostic ``qke = 2·TKE`` [m²/s²] for the MYNN-2.5 turbulence
-        scheme (Nakanishi-Niino 2009).  Carried in a slot **distinct**
+    qke : jax.Array, shape (ncol, nlev); (ncol, 3, nlev) under mynn25
+        WRF MYNN-EDMF's turbulence state, packed ``(qke = 2·TKE [m²/s²],
+        qsq [kg²/kg²], el [m])`` along axis 1, top-down.  Carried in a slot **distinct**
         from :attr:`tke` so a restart that switches schemes between
         MY-2.5 (``tke``) and MYNN-2.5 (``qke``) cannot silently feed
         the wrong moment as energy — the active scheme reads its own
@@ -389,8 +389,11 @@ def init_physics_state(
     else:
         tke = jnp.zeros((ncol, nlev), dtype=dtype)
     if _turb_traits.energy_field == "qke":
-        qke_min = getattr(turb_cfg.mynn25, "tke_min", 1e-10)
-        qke = jnp.full((ncol, nlev), qke_min, dtype=dtype)
+        # WRF MYNN-EDMF (qke, qsq, el), packed (ncol, 3, nlev); zeros, which
+        # the cold-start (initflag) step overwrites (votes N1, N3).
+        from legoesm.atmosphere.physics.turbulence.mynn_wrf_adapter import (
+            cold_start_carry)
+        qke = cold_start_carry(ncol, nlev, dtype)
     else:
         qke = jnp.zeros((ncol, nlev), dtype=dtype)
 
