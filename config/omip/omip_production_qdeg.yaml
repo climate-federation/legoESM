@@ -15,7 +15,7 @@ precision: fp64
 output: results/omip_production_qdeg_L60
 
 # --- bathymetry: ETOPO 0.25 deg, no equatorial smoothing (removed on main)
-bathymetry: /work/bb1596/b384036/diffESM/data/bathy/bathy_025deg_etopo.nc
+bathymetry: /work/bb1596/b384036/diffESM/data/bathy/bathy_025deg_etopo_sulawesi.nc   # neck of Sulawesi closed
 smoothing_passes: 2
 eq_smoothing_passes: 0         # keep real sills (Sulu Sea, Indonesian straits)
 enforce_straits: false         # straits resolved at 0.25 deg; the ITF box would carve through Sulawesi
