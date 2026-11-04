@@ -1102,7 +1102,6 @@ def _strict_msgs(cfg, caplog):
     (dict(convection="emanuel", emanuel_enable_cmt=True),
      "emanuel_enable_cmt=false", True),
     (dict(turbulence="clubb", clubb_prognostic=True), "CLUBB-moment slot", True),
-    (dict(convection="tiedtke"), "momentum transport", False),
     (dict(convection="bechtold"), "bechtold_enable_cmt=false", False),
     (dict(use_multilayer_land=True), "land_params_refresh=True is inert",
      False),
@@ -1132,27 +1131,32 @@ def test_pipeline_cmt_off_not_flagged(caplog):
     err, warn = _strict_msgs(
         _cdgrid_cfg(convection="bechtold", bechtold_enable_cmt=False), caplog)
     assert "momentum transport" not in err + warn
+    # WRF Tiedtke: the pipeline applies its cumulus friction (vote V15)
+    err, warn = _strict_msgs(_cdgrid_cfg(convection="tiedtke"), caplog)
+    assert "momentum transport" not in err + warn
     for kw in (dict(), dict(emanuel_enable_cmt=False)):
         err, warn = _strict_msgs(_cdgrid_cfg(convection="emanuel", **kw), caplog)
         assert "momentum transport" not in err + warn
 
 
 @pytest.mark.parametrize("scheme, refused", [
-    ("kuo", True), ("kain_fritsch", True), ("tiedtke", False), ("bechtold", False),
+    ("kuo", True), ("kain_fritsch", True), ("tiedtke", None), ("bechtold", False),
 ])
 def test_column_lane_convection_without_its_grid_operator(scheme, refused, caplog):
     """F23/F24 (review 2026-10-10, majority vote): the column-loop meshes have
     no moisture-convergence / resolved-w operator.  Kuo (source) and
     Kain-Fritsch (trigger) are refused there; Tiedtke / Bechtold close on their
-    saturation proxy and are named.  The lat-lon / cube pipeline has the
-    operators, so neither message fires there (control)."""
+    saturation proxy and are named.  WRF Tiedtke (None) reads neither: its
+    omega comes from the column lane's own continuity, so neither message
+    fires for it.  The lat-lon / cube pipeline has the operators, so neither
+    message fires there (control)."""
     from legoesm.driver.config import DycoreConfig
     duo = _cdgrid_cfg(convection=scheme)._replace(dycore=DycoreConfig(
         dt=600.0, discretization="fv3_duo", column_lane=True))
     for cfg in (_mpas_cfg(convection=scheme), duo):
         err, warn = _strict_msgs(cfg, caplog)
-        assert ("reads a grid operator" in err) == refused, err
-        assert ("saturation proxy" in warn) == (not refused), warn
+        assert ("reads a grid operator" in err) == bool(refused), err
+        assert ("saturation proxy" in warn) == (refused is False), warn
     err, warn = _strict_msgs(_cdgrid_cfg(convection=scheme), caplog)
     assert "reads a grid operator" not in err and "saturation proxy" not in warn
 

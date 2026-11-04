@@ -146,7 +146,7 @@ _EXPECTED_INACTIVE = ("kuo", "dca")
 @pytest.mark.parametrize(
     "scheme", [s for s in (
         "sbm", "mass_flux", "edmf", "zhang_mcfarlane",
-        "kain_fritsch", "tiedtke", "bechtold", "emanuel") ])
+        "kain_fritsch", "bechtold", "emanuel") ])
 def test_active_schemes_are_reported_active(mod, col, scheme):
     """codex round 1 findings 14/19: an all-zero tendency is finite and times
     fine, so an untriggered scheme silently joins the 'pack' that ZM is
@@ -227,6 +227,6 @@ def test_scheme_list_matches_the_campaign(mod):
     'ZM vs the pack' ratio is against a different pack."""
     assert set(mod.SCHEMES) == {
         "sbm", "dca", "kuo", "mass_flux", "edmf", "zhang_mcfarlane",
-        "kain_fritsch", "emanuel", "tiedtke", "bechtold",
+        "kain_fritsch", "emanuel", "bechtold",
     }
-    assert len(mod.SCHEMES) == 10
+    assert len(mod.SCHEMES) == 9

@@ -1576,6 +1576,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None, A_h_eq_sigma_deg=None,
                   ke_gradient_scheme=None, partial_cell=False,
                   lateral_side_bc=None, barotropic_coriolis=None,
+                  lateral_viscosity_mask_levels=None, lateral_shlat=None,
                   adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
                   barotropic_pcg_variant=None,
@@ -1681,6 +1682,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("A_h_eq_sigma_deg", A_h_eq_sigma_deg),
                               ("ke_gradient_scheme", ke_gradient_scheme),
                               ("lateral_side_bc", lateral_side_bc),
+                              ("lateral_viscosity_mask_levels", lateral_viscosity_mask_levels),
+                              ("lateral_shlat", lateral_shlat),
                               ("barotropic_coriolis", barotropic_coriolis),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
                               ("momentum_time_integrator", momentum_time_integrator),
@@ -6572,14 +6575,29 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(None) preserves the config, and leaving it unset is "
                         "the NEMO-faithful choice.")
     p.add_argument("--lateral-side-bc", type=str, default=None,
-                   choices=["free_slip", "no_slip"],
+                   choices=["free_slip", "no_slip", "nemo_shlat"],
                    help="Lateral momentum boundary condition at coastal walls. "
+                        "'nemo_shlat' = NEMO's rn_shlat f-mask (value "
+                        "--lateral-shlat; needs --lateral-viscosity-mask-levels "
+                        "per_level). "
                         "NEMO ORCA1 runs rn_shlat=2, i.e. NO-SLIP; our config "
                         "default is free_slip, so this gap was previously "
                         "unreachable from the command line. Caveat carried "
                         "from review: our no_slip is not yet demonstrated "
                         "numerically equivalent to NEMO's shlat=2 partial-slip "
                         "formulation. Default (None) preserves the config.")
+    p.add_argument("--lateral-viscosity-mask-levels", type=str, default=None,
+                   choices=["surface", "per_level"],
+                   help="Land masks of the vector-Laplacian lateral viscosity "
+                        "at each level. 'surface' applies the 2-D surface "
+                        "masks at every level (config default); 'per_level' "
+                        "uses each level's own wet faces/vertices, as NEMO's "
+                        "3-D umask/vmask/fmask. Default (None) preserves the "
+                        "config.")
+    p.add_argument("--lateral-shlat", type=float, default=None,
+                   help="NEMO rn_shlat for --lateral-side-bc nemo_shlat (0 free "
+                        "slip, 2 no slip; ORCA1 = 2). Default (None) preserves "
+                        "the config.")
     p.add_argument("--barotropic-coriolis", type=str, default=None,
                    choices=["avg", "een", "een_metric"],
                    help="Coriolis discretization inside the barotropic "
@@ -8280,6 +8298,8 @@ def main() -> int:
             A_h_profile_file=args.A_h_profile_file,
             ke_gradient_scheme=args.ke_gradient_scheme,
             lateral_side_bc=args.lateral_side_bc,
+            lateral_viscosity_mask_levels=args.lateral_viscosity_mask_levels,
+            lateral_shlat=args.lateral_shlat,
             barotropic_coriolis=args.barotropic_coriolis,
             tke_kappah_min=args.tke_kappah_min,
             partial_cell=args.partial_cell,
