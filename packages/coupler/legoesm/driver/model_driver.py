@@ -15080,11 +15080,13 @@ class ModelDriver:
                     continue
                 _seed_field = getattr(_phys_state, _name)
                 if _seed_field is None:
-                    raise ValueError(
-                        f"Restart physics-state field {_name!r} is in the "
-                        "checkpoint but inactive on this run (e.g. "
-                        "ecrad_carry without radiation='ecrad_ifs'): the "
-                        "checkpoint does not match this configuration.")
+                    # a field inactive on THIS run (e.g. ecrad_carry without
+                    # radiation='ecrad_ifs'): dropped, loudly (vote U2b)
+                    logger.warning(
+                        "  MPAS restart: DROPPED physics-state field %r from "
+                        "the checkpoint; it is inactive on this run (e.g. "
+                        "ecrad_carry without radiation='ecrad_ifs').", _name)
+                    continue
                 _val = jnp.asarray(_v)
                 if tuple(_val.shape) != tuple(_seed_field.shape):
                     raise ValueError(
