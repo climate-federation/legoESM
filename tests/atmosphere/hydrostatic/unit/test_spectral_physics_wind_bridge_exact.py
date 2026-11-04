@@ -71,7 +71,12 @@ def test_wind_tendency_goes_through_the_exact_inverse(setup, monkeypatch, kind):
     grid, sigma, state = setup
     module, make = _build(kind)
     calls = _spy(monkeypatch, module)
-    out = make()(state, grid, sigma)
+    kw = {}
+    if kind == "convection":    # ZM needs the carried pblh
+        from tests._zm_cold_start import cold_phys_state
+        kw["phys_state"] = cold_phys_state(
+            jnp.zeros((grid.n_lat * grid.n_lon, _N_LEV)))
+    out = make()(state, grid, sigma, **kw)
     tend = out[0] if isinstance(out, tuple) else out
     assert calls == [(grid.n_lat, grid.n_lon, _N_LEV)], (kind, calls)
     assert np.all(np.isfinite(np.asarray(tend.vor_hat.data)))

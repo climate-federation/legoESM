@@ -403,7 +403,8 @@ def test_aerosol_climatology_averages_the_years_on_the_noleap_clock(
 
     calls = []
 
-    def _aod(c, day, lat_grid=None, band="gray"):
+    def _aod(c, day, lat_grid=None, band="gray", lon_grid=None):
+        assert lon_grid is None     # WB reads the zonal mean it trained on
         calls.append((c.start_year, float(day), band))
         return np.full(np.shape(lat_grid), 1e-3 * (c.start_year - 2000)
                        + (0.5 if band == "vis" else 0.0))

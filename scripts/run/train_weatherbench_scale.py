@@ -149,8 +149,12 @@ def _read_partial(out_dir, epoch, n_samples, expect_fp, content):
     try:
         with open(mp) as fh:
             obj = _json.load(fh)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"resume: {mp} is unreadable ({exc}); it may hold "
+                           "this epoch's progress, so it is not skipped. "
+                           "Remove it to restart the epoch.") from exc
     if not (isinstance(obj, dict) and obj.get("epoch") == epoch):
         return None
     if not (_manifest_is_valid(obj, expect_keys=expect_fp)
