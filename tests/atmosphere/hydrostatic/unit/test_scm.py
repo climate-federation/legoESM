@@ -459,6 +459,18 @@ def test_swap_microphysics_schemes(micro_scheme):
     _run_and_assert_stable(cfg)
 
 
+def test_thompson_runs_with_microphysics_substeps():
+    """Vote U13a: the substepped path hands WRF Thompson the prescribed w
+    (it refused for lack of w before)."""
+    cfg = _baseline_cfg(microphysics=MicrophysicsConfig(scheme="thompson"))
+    scm = SingleColumnModel.create(
+        physics_config=cfg, nlev=_RCE_NLEV, dt=_RCE_DT,
+        T_profile=_tropical_T_profile(), q_v_profile=_tropical_qv_profile(),
+        latitude_deg=0.0, microphysics_substeps=2)
+    final, _ = scm.run(nsteps=2)
+    assert jnp.all(jnp.isfinite(final.T.data))
+
+
 @pytest.mark.parametrize(
     "gwd_scheme",
     ["rayleigh", "lindzen", "mcfarlane", "hines"],

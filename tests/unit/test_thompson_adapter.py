@@ -28,6 +28,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.atmosphere.physics.microphysics import thompson_wrf_tables as W
 from legoesm.atmosphere.physics.microphysics.config import ThompsonConfig
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
@@ -71,13 +72,16 @@ def _host(a, n_c=0.0):
         q_c=q[1], q_r=q[3], q_i=q[2], q_s=q[4], q_g=q[5],
         N_c=jnp.full(a["T"].shape, n_c), N_r=fl(a["nr"] * rho_p),
         N_i=fl(a["ni"] / wet))
-    return fl(a["T"]), q[0], hyd, fl(a["p"]), fl(a["dz"]), fl(a["w"])
+    # host layer mass whose derived port thickness is the fixture's dz (V3b)
+    dp = fl(constants.g * rho_p * wet * a["dz"])
+    ph = jnp.concatenate([jnp.zeros_like(dp[:, :1]), jnp.cumsum(dp, axis=-1)], axis=-1)
+    return fl(a["T"]), q[0], hyd, fl(a["p"]), ph, fl(a["w"])
 
 
 def _adapter(a, dt, n_c=0.0, **kw):
-    T, qv, hyd, p, dz, w = _host(a, n_c)
+    T, qv, hyd, p, ph, w = _host(a, n_c)
     kw.setdefault("w", w)
-    return thompson_microphysics(T, qv, hyd, p, None, None, dz, dt, **kw), (T, qv, hyd)
+    return thompson_microphysics(T, qv, hyd, p, ph, None, None, dt, **kw), (T, qv, hyd)
 
 
 def _port(a, dt):
@@ -89,7 +93,8 @@ def test_adapter_reproduces_port_state_and_precip(case):
     out, (T, qv, hyd) = _adapter(case, dt)
     ref = _port(case, dt)
     fl = lambda x: np.asarray(x)[:, ::-1]                      # noqa: E731
-    wet = 1.0 + sum(getattr(ref, k) for k in ("qv", "qc", "qi", "qr", "qs", "qg"))
+    # back on the INPUT dry factor (vote V1b)
+    wet = 1.0 + sum(case[k] for k in ("qv", "qc", "qi", "qr", "qs", "qg"))
     assert _rel(T + dt * out.dT_dt, fl(ref.T)) <= _TOL
     for host_q, rate, k in ((qv, out.dq_v_dt, "qv"), (hyd.q_c, out.dq_c_dt, "qc"),
                             (hyd.q_r, out.dq_r_dt, "qr"), (hyd.q_i, out.dq_i_dt, "qi"),
@@ -100,10 +105,10 @@ def test_adapter_reproduces_port_state_and_precip(case):
     assert _rel(out.precip_frozen * dt, tot - ref.pptrain) <= _TOL
     np.testing.assert_array_equal(np.asarray(out.dN_c_dt), 0.0)
     # numbers back in host units: per m^3 (N_r) and per kg moist air (N_i)
+    # with the input factors (vote V2b)
     rho_p = thompson_air_density(case["T"], case["p"], case["qv"])
     assert _rel(hyd.N_r + dt * out.dN_r_dt, fl(ref.nr * rho_p)) <= _TOL
-    dry_in = 1.0 / (1.0 + sum(case[k] for k in ("qv", "qc", "qi", "qr", "qs", "qg")))
-    assert _rel(hyd.N_i + dt * out.dN_i_dt, fl(ref.ni * dry_in)) <= _TOL
+    assert _rel(hyd.N_i + dt * out.dN_i_dt, fl(ref.ni / wet)) <= _TOL
 
 
 def test_fixture_precipitates():
@@ -143,8 +148,9 @@ def test_no_op_column_returns_zero_tendencies():
     z = jnp.zeros_like(T)
     hyd = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z,
                            N_c=jnp.full_like(T, 1e8), N_r=z, N_i=z)
-    out = thompson_microphysics(T, 1e-4 * jnp.ones_like(T), hyd, p, None, None,
-                                jnp.full_like(T, 500.0), 300.0, w=z)
+    ph = jnp.linspace(2.5e4, 1.0e5, nz + 1)[None, :]
+    out = thompson_microphysics(T, 1e-4 * jnp.ones_like(T), hyd, p, ph, None,
+                                None, 300.0, w=z)
     for f in ("dT_dt", "dq_c_dt", "dN_r_dt", "dN_i_dt", "precipitation"):
         np.testing.assert_array_equal(np.asarray(getattr(out, f)), 0.0, err_msg=f)
     # q -> r -> q is exact up to round-off of the dry-basis factor
@@ -152,14 +158,16 @@ def test_no_op_column_returns_zero_tendencies():
 
 
 def test_refusals(case):
-    T, qv, hyd, p, dz, w = _host(case)
+    T, qv, hyd, p, ph, w = _host(case)
     with pytest.raises(ValueError, match="vertical velocity"):
-        thompson_microphysics(T, qv, hyd, p, None, None, dz, 300.0)
+        thompson_microphysics(T, qv, hyd, p, ph, None, None, 300.0)
+    with pytest.raises(ValueError, match="p_half"):
+        thompson_microphysics(T, qv, hyd, p, None, None, None, 300.0, w=w)
     with pytest.raises(ValueError, match="N_r"):
-        thompson_microphysics(T, qv, hyd._replace(N_r=None), p, None, None, dz,
+        thompson_microphysics(T, qv, hyd._replace(N_r=None), p, ph, None, None,
                               300.0, w=w)
     with pytest.raises(ValueError, match="sed_substeps_max"):
-        thompson_microphysics(T, qv, hyd, p, None, None, dz, 300.0,
+        thompson_microphysics(T, qv, hyd, p, ph, None, None, 300.0,
                               ThompsonConfig(sed_substeps_max=2000), w=w)
 
 
@@ -182,10 +190,10 @@ def test_fp32_state_runs_in_fp64_and_returns_state_dtype(case):
     """Vote J11a: an fp32 state (x64 enabled) runs the fp64-certified port as
     an fp64 island (no dtype crash in the sedimentation loop) and returns
     finite fp32 tendencies."""
-    T, qv, hyd, p, dz, w = _host(case)
+    T, qv, hyd, p, ph, w = _host(case)
     f32 = lambda x: None if x is None else x.astype(jnp.float32)  # noqa: E731
     out32 = thompson_microphysics(f32(T), f32(qv), HydrometeorState(*map(f32, hyd)),
-                                  f32(p), None, None, f32(dz), 300.0, w=f32(w))
+                                  f32(p), f32(ph), None, None, 300.0, w=f32(w))
     for f in ("dT_dt", "dq_v_dt", "dN_r_dt", "precipitation"):
         x = getattr(out32, f)
         assert x.dtype == jnp.float32, f
@@ -208,3 +216,48 @@ def test_surface_ice_counts_as_frozen_precip(case, monkeypatch):
     np.testing.assert_allclose(np.asarray(out.precipitation) * dt,
                                np.asarray(ref.pptrain + ref.pptsnow + ref.pptgraul) + 0.3,
                                rtol=1e-12)
+
+
+def test_refuses_without_x64(case):
+    """Vote U9a: with x64 off the fp64 island would silently be fp32."""
+    T, qv, hyd, p, ph, w = _host(case)
+    jax.config.update("jax_enable_x64", False)
+    try:
+        with pytest.raises(ValueError, match="jax_enable_x64"):
+            thompson_microphysics(T, qv, hyd, p, ph, None, None, 300.0, w=w)
+    finally:
+        jax.config.update("jax_enable_x64", True)
+
+
+def test_spectral_w_refuses_hybrid_coordinate():
+    """Vote U11a: the spectral bridge's pure-sigma omega has no hybrid form."""
+    from legoesm.atmosphere.physics.microphysics import integration as MI
+    from legoesm.grids.vertical import create_hybrid_coordinate
+    nlev = 4
+    hyb = create_hybrid_coordinate(nlev, jnp.linspace(0.1, 0.0, nlev + 1),
+                                   jnp.linspace(0.0, 1.0, nlev + 1))
+    z = jnp.zeros((1, nlev))
+    with pytest.raises(ValueError, match="hybrid"):
+        MI._spectral_w({"div": z}, jnp.ones(1), hyb, z + 280.0, z + 5e4, z, 1, nlev)
+
+
+def test_host_water_budget_equals_the_ports_own(case):
+    """Votes V1b-V4b: at FIXED host layer mass dp/g the adapter adds no water
+    error of its own; the host budget residual equals the port's residual on
+    its own masses rho_p*dz (WRF's, not zero) to round-off."""
+    dt = 300.0
+    out, (T, qv, hyd) = _adapter(case, dt)
+    _, _, _, _, ph, _ = _host(case)
+    dpg = (ph[:, 1:] - ph[:, :-1]) / constants.g
+    sp = ("qv", "qc", "qi", "qr", "qs", "qg")
+    q0 = qv + hyd.q_c + hyd.q_i + hyd.q_r + hyd.q_s + hyd.q_g
+    dq = (out.dq_v_dt + out.dq_c_dt + out.dq_i_dt + out.dq_r_dt + out.dq_s_dt
+          + out.dq_g_dt)
+    host = jnp.sum(dt * dq * dpg, axis=-1) + dt * out.precipitation
+    ref = _port(case, dt)
+    m = thompson_air_density(case["T"], case["p"], case["qv"]) * case["dz"]
+    port = (jnp.sum((sum(getattr(ref, k) for k in sp) - sum(case[k] for k in sp)) * m,
+                    axis=-1)
+            + ref.pptrain + ref.pptsnow + ref.pptgraul + ref.pptice)
+    scale = float(jnp.max(jnp.sum(q0 * dpg, axis=-1)))
+    assert float(jnp.max(jnp.abs(host - port))) <= 1e-10 * scale   # V4b

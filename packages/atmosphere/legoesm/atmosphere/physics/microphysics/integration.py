@@ -337,7 +337,13 @@ def _hydrostatic_w_for_thompson(state, grid, sigma_coord, phys_state, T_col,
 def _spectral_w(fields, p_s, sigma_coord, T_col, p_full_col, q_v_col, ncol,
                 nlev):
     """Resolved w on the spectral lane from its grid divergence, the omega the
-    spectral convection bridge builds for Kain-Fritsch (vote J6a)."""
+    spectral convection bridge builds for Kain-Fritsch (vote J6a); pure sigma
+    only (vote U11a: the formula has no hybrid form)."""
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        raise ValueError(
+            "microphysics='thompson' needs w, which the spectral bridge "
+            "diagnoses by PURE-sigma continuity; a hybrid coordinate would "
+            "get a wrong w")
     div = fields["div"].astype(T_col.dtype)
     sigma_dot, d_tot = compute_sigma_dot_and_total(div, sigma_coord)
     dps_dt = -p_s * d_tot[..., 0] / (1.0 - sigma_coord.sigma_half[0])

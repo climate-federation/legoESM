@@ -8,17 +8,24 @@ test_thompson_wrf_oracle.py``.  This module only maps legoESM's column state
 onto the oracle's representation and back (votes H1-H9, J1-J10):
 
 * species: specific humidities [kg/kg moist air] <-> mixing ratios per kg DRY
-  air, ``r_x = q_x / (1 - q_tot)`` and back ``q_x = r_x / (1 + r_tot)`` with
-  the total water of the six species (H3);
+  air, ``r_x = q_x / (1 - q_tot)`` and back ``q_x = r_x * (1 - q_tot)`` with
+  the INPUT total water of the six species: the host holds its layer mass
+  fixed through physics, so this is the conversion that keeps the host's
+  water budget equal to the port's own (vote V1b, measured; supersedes H3);
 * numbers: per-volume ``N_r`` [1/m^3] and per-kg ``N_i`` -> per kg dry air with the scheme's OWN air density
   (:func:`.thompson_wrf.thompson_air_density`, input state), so the scheme's
   ``n * rho`` recovers the host number exactly (J4); back with the same
-  density, so a step that changes nothing returns a zero number tendency;
+  input factors, the basis of the returned species (vote V2b);
 * droplet number: WRF's prescribed ``Nt_c`` = 100e6 /m^3 as in mp_physics=8
   (user decision 2026-11-04); the carried ``N_c`` is not read and
   ``dN_c_dt`` is zero (no prognostic droplet number, J5);
+* layer mass: the port's layer thickness is derived from the HOST layer mass
+  ``dp/g`` (``p_half``; on the non-hydrostatic lanes their ``rho*dz`` by
+  construction), ``dz = dp / (g * rho_dry * (1 + r_tot))``, so the port's
+  masses ``rho_dry * dz`` are the host's dry masses exactly (vote V3b,
+  supersedes J9; the lane's ``dz`` is not read);
 * orientation: top-down host columns <-> the oracle's bottom-up ones, the
-  lane's own layer thickness ``dz`` (J9) and resolved vertical velocity ``w``
+  resolved vertical velocity ``w``
   [m/s] (H2/J6; the oracle reads it only for its low-level cloud-water
   sedimentation switch);
 * tendencies: ``(new - old) / dt`` of the converted updated state, T from the
@@ -33,6 +40,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.config import (
     SED_CFL_SUBSTEPS_MAX_LIMIT,
     ThompsonConfig,
@@ -54,7 +62,7 @@ __physics_contract__ = {
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "q_c..q_g": "kg/kg",
-        "N_r": "1/m^3", "N_i": "1/kg", "p_full": "Pa", "dz": "m",
+        "N_r": "1/m^3", "N_i": "1/kg", "p_full": "Pa", "p_half": "Pa",
         "w": "m/s", "dt": "s",
     },
     "outputs": {
@@ -91,10 +99,11 @@ def thompson_microphysics(
 ) -> MicrophysicsOutput:
     """One WRF Thompson step on ``(ncol, nlev)`` top-down host columns.
 
-    ``p_half``, the host density ``rho`` and ``N_c`` are not read: the scheme uses its
-    own density (module docstring).  ``w`` is required (no zero fallback).
+    ``rho``, ``dz`` and ``N_c`` are not read: the scheme uses its own density
+    and the layer thickness of the host layer mass ``p_half`` (module
+    docstring).  ``w`` and ``p_half`` are required (no fallback).
     """
-    del p_half, rho
+    del rho, dz
     n_sed = int(config.sed_substeps_max)
     if not 1 <= n_sed <= SED_CFL_SUBSTEPS_MAX_LIMIT:
         raise ValueError(
@@ -104,6 +113,14 @@ def thompson_microphysics(
         raise ValueError(
             "microphysics='thompson' (WRF port) needs the resolved vertical "
             "velocity w; this lane did not supply it")
+    if p_half is None:
+        raise ValueError(
+            "microphysics='thompson' (WRF port) needs p_half, the host layer "
+            "mass it derives the port's layer thickness from")
+    if not jax.config.read("jax_enable_x64"):
+        raise ValueError(
+            "microphysics='thompson' runs the fp64-certified WRF port as an "
+            "fp64 island, which needs jax_enable_x64 (vote U9a)")
     h = hydrometeors
     if h.N_r is None or h.N_i is None:
         raise ValueError(
@@ -114,25 +131,26 @@ def thompson_microphysics(
     # Tendencies are cast back to the state dtype.
     out_dtype = T.dtype
     up = lambda x: jnp.asarray(x, jnp.float64)                 # noqa: E731
-    T, q_v, p_full, dz, w = up(T), up(q_v), up(p_full), up(dz), up(w)
+    T, q_v, p_full, p_half, w = up(T), up(q_v), up(p_full), up(p_half), up(w)
     h = HydrometeorState(*(None if x is None else up(x) for x in h))
     qs = (q_v, h.q_c, h.q_i, h.q_r, h.q_s, h.q_g)
     dry = 1.0 - sum(qs)                       # 1 - q_tot (H3)
     r = [_flip(q / dry) for q in qs]
     Tb, pb = _flip(T), _flip(p_full)
     rho_p = thompson_air_density(Tb, pb, r[0])
+    # host layer mass dp/g = rho_dry * dz * (1 + r_tot) = rho_dry * dz / dry
+    dzb = _flip(p_half[:, 1:] - p_half[:, :-1]) * _flip(dry) / (constants.g * rho_p)
     o = thompson_wrf_step(
-        Tb, pb, _flip(dz), _flip(w), *r,
+        Tb, pb, dzb, _flip(w), *r,
         _flip(h.N_i / dry),
         _flip(h.N_r) / rho_p, dt,
         n_sed_max=n_sed)
     r_new = (o.qv, o.qc, o.qi, o.qr, o.qs, o.qg)
-    wet = 1.0 + sum(r_new)                    # 1 + r_tot
-    q_new = [_flip(x / wet) for x in r_new]
+    q_new = [_flip(x) * dry for x in r_new]   # input dry factor (V1b)
     rate = [(qn - qo) / dt for qn, qo in zip(q_new, qs)]
     dq_v, dq_c, dq_i, dq_r, dq_s, dq_g = rate
     # numbers back: per kg dry -> per kg moist (N_i) / per m^3 (N_r) with the
-    # same factors as on the way in
+    # input factors, the basis of the returned species (vote V2b)
     N_i_new = _flip(o.ni) * dry
     N_r_new = _flip(o.nr * rho_p)
     frozen = (o.pptsnow + o.pptgraul + o.pptice) / dt
