@@ -391,8 +391,6 @@ def test_grad_solver_cloud_switches(fixture8):
 def test_exp_libm_matches_oracle_libm():
     """exp_libm: bitwise glibc (the oracle's libm; math.exp is the same
     /lib64/libm-2.28.so) for |x| <= 0.01083, correctly rounded elsewhere."""
-    import mpmath
-
     rng = np.random.default_rng(0)
     mag = np.concatenate([np.logspace(-20, np.log10(0.01083), 150000),
                           rng.uniform(2.0**-28, 2.0**-18, 20000), rng.uniform(2.0**-18, 0.01083, 30000)])
@@ -402,6 +400,7 @@ def test_exp_libm_matches_oracle_libm():
     glibc = np.array([math.exp(v) for v in small])
     assert np.array_equal(got, glibc), int(np.sum(got != glibc))
 
+    mpmath = pytest.importorskip("mpmath")
     big = np.concatenate([rng.uniform(-708.0, -0.0109, 20000), rng.uniform(0.0109, 709.0, 2000)])
     got = np.asarray(f(jnp.asarray(big)))
     with mpmath.workprec(200):

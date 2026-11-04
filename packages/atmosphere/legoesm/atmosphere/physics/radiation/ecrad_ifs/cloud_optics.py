@@ -165,13 +165,13 @@ def crop_cloud_fraction(cloud_fraction, q_liq, q_ice, sharpness=100.0):
     return w * cloud_fraction, w
 
 
-def _delta_eddington_scat_od(od, scat_od, g):
+def _delta_eddington_scat_od(od, scat_od, asym):
     """radiation_delta_eddington.h: delta_eddington_scat_od."""
-    f = g * g
+    f = asym * asym
     od = od - scat_od * f
     scat_od = scat_od * (1.0 - f)
-    g = g / (1.0 + g)
-    return od, scat_od, g
+    asym = asym / (1.0 + asym)
+    return od, scat_od, asym
 
 
 def _liq_socrates(coeff, lwp, re_in, sharpness):
