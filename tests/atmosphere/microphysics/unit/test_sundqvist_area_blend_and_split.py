@@ -43,6 +43,11 @@ def _cold_columns(ncol=2, nlev=10, q_i=0.0):
     return T, q_v, hyd, p_full, p_half, rho, dz
 
 
+def _fresh(ncol=2, nlev=10):
+    from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_carry_init
+    return sundqvist_carry_init(ncol, nlev, jnp.float64)
+
+
 def test_area_weight_is_the_gfs_clip_and_differentiable_inside():
     """wk1 is GFS's hard clip (grid geometry, not traced state): exactly 1 at
     and finer than the finest grid, 0 at and coarser than the coarsest."""
@@ -99,15 +104,16 @@ def test_liquid_fraction_default_gap_per_case():
 
 def test_sundqvist_refuses_a_missing_cell_area():
     with pytest.raises(ValueError, match="cell area"):
-        sundqvist_microphysics(*_cold_columns(), 300.0)
+        sundqvist_microphysics(*_cold_columns(), 300.0, prev_state=_fresh())
 
 
 def test_area_moves_ice_autoconversion_on_cold_columns():
     args = _cold_columns()
-    fine = sundqvist_microphysics(*args, 300.0, cell_area=_FINE)
-    coarse = sundqvist_microphysics(*args, 300.0, cell_area=_COARSE)
+    fine = sundqvist_microphysics(*args, 300.0, cell_area=_FINE, prev_state=_fresh())
+    coarse = sundqvist_microphysics(*args, 300.0, cell_area=_COARSE, prev_state=_fresh())
     same = sundqvist_microphysics(*args, 300.0, SundqvistConfig(
-        psautco_fine=5.0e-4, psautco_coarse=5.0e-4), cell_area=_FINE)
+        psautco_fine=5.0e-4, psautco_coarse=5.0e-4), cell_area=_FINE,
+        prev_state=_fresh())
     assert float(jnp.max(jnp.abs(fine.dq_c_dt - coarse.dq_c_dt))) > 0.0
     np.testing.assert_allclose(np.asarray(coarse.dq_c_dt), np.asarray(same.dq_c_dt),
                                rtol=1e-2, atol=1e-12)
@@ -124,8 +130,10 @@ def test_split_closes_moist_enthalpy_and_fails_without_the_heating():
     dt = 300.0
     dp = p_half[:, 1:] - p_half[:, :-1]
     args = (T, q_v, hyd, p_full, p_half, rho, dz, dt)
-    split = sundqvist_microphysics(*args, cell_area=1.0e10, carries_q_i=True)
-    whole = sundqvist_microphysics(*args, cell_area=1.0e10, carries_q_i=False)
+    split = sundqvist_microphysics(*args, cell_area=1.0e10, carries_q_i=True,
+                                   prev_state=_fresh())
+    whole = sundqvist_microphysics(*args, cell_area=1.0e10, carries_q_i=False,
+                                   prev_state=_fresh())
     q_i_split = hyd.q_i + split.dq_i_dt * dt
     assert float(jnp.max(q_i_split)) > 1e-5          # the split made ice
     # same precpd (q_i = 0 in): the split alone must not change H
@@ -150,7 +158,8 @@ def test_split_condensate_conserves_mass_and_enthalpy_with_an_input_ice_share():
 
 def test_lanes_without_q_i_keep_all_condensate_in_q_c():
     args = _cold_columns(q_i=5e-4)
-    out = sundqvist_microphysics(*args, 300.0, cell_area=1.0e10, carries_q_i=False)
+    out = sundqvist_microphysics(*args, 300.0, cell_area=1.0e10, carries_q_i=False,
+                                 prev_state=_fresh())
     assert float(jnp.max(jnp.abs(out.dq_i_dt))) == 0.0
 
 
@@ -162,6 +171,7 @@ def test_lane_kwargs_carry_the_grid_area_per_column():
     kw = sundqvist_lane_kwargs("sundqvist", G(), 6, True)
     np.testing.assert_array_equal(np.asarray(kw["cell_area"]), np.arange(1.0, 7.0))
     assert kw["carries_q_i"] is True
+    assert kw["prev_state"] is None        # no PhysicsState: the scheme refuses
     assert sundqvist_lane_kwargs("kessler", G(), 6, True) == {}
     assert sundqvist_lane_kwargs("sundqvist", object(), 6, False)["cell_area"] is None
 
@@ -179,12 +189,15 @@ def test_split_reads_the_end_of_step_temperature(monkeypatch):
 
     monkeypatch.setattr(sq, "split_condensate", spy)
     T, q_v, hyd, p_full, p_half, rho, dz = _cold_columns()
-    q_v = q_v * (1.3 / 0.95)       # supersaturated: condensation heats the step
     dt = 300.0
+    # moistening since the previous step: gscond condenses and heats the step
+    prev = {"zc_T_prev": T, "zc_q_v_prev": q_v - 2e-6, "zc_p_s_prev": p_half[:, -1]}
     args = (T, q_v, hyd, p_full, p_half, rho, dz, dt)
-    cond = sq.diagnose_sundqvist_process_rates(*args, cell_area=1.0e10).condensation
+    cond = sq.diagnose_sundqvist_process_rates(
+        *args, cell_area=1.0e10, prev_state=prev).condensation
     assert float(jnp.max(cond)) > 0.0   # end-of-step T differs from precpd's T
-    out = sq.sundqvist_microphysics(*args, cell_area=1.0e10, carries_q_i=True)
+    out = sq.sundqvist_microphysics(*args, cell_area=1.0e10, carries_q_i=True,
+                                    prev_state=prev)
     end_T = T + out.dT_dt * dt - seen["dT_fus"]
     np.testing.assert_allclose(np.asarray(seen["T"]), np.asarray(end_T),
                                rtol=1e-13, atol=0.0)

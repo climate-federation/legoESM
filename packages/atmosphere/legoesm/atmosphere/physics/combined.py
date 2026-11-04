@@ -935,7 +935,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 and resolve_warm_rain_scheme(
                     config.microphysics.morrison) == "kk2000_cam6"),
             cam6_activation=cam6_activation)
-        # CAM6 droplet activation writes the CLDO carry (cloud_fraction_old).
+        # CAM6 droplet activation writes the CLDO carry (cloud_fraction_old),
+        # Sundqvist its gscond previous-step carry (zc_*), both as a dict.
         _micro_carry = getattr(_micro_fn, "_writes_phys_state", False)
         tagged_fns.append((_micro_fn, _micro_carry,
                            "cloud_fraction_old" if _micro_carry else None))
@@ -1717,10 +1718,14 @@ def _make_spectral_pe_combined(
             *surface_bulk_coeffs), False, None))
     if config.microphysics.scheme != "none":
         # The run's built cloud config: the aist rh ramps are run parameters.
-        tagged_fns.append((make_microphysics_physics(
+        _micro_fn = make_microphysics_physics(
             config.microphysics, "spectral_pe", _dt_sub,
             cloud_config=config.radiation.cloud_config,
-            clubb_config=resolved_clubb_config(config.turbulence)), False, None))
+            clubb_config=resolved_clubb_config(config.turbulence))
+        # Sundqvist writes its gscond previous-step carry (a zc_* dict).
+        _micro_carry = getattr(_micro_fn, "_writes_phys_state", False)
+        tagged_fns.append((_micro_fn, _micro_carry,
+                           "zc_T_prev" if _micro_carry else None))
     if config.gravity_wave_drag.scheme != "none":
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, "spectral_pe", dt), True, "gwd_spectrum"))
 

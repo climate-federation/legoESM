@@ -376,8 +376,11 @@ def apply_predicted_sundqvist_rain_survival_fraction(
     config,
     carries_q_i: bool,
     cell_area=None,
+    prev_state=None,
 ) -> MicrophysicsOutput:
     """Rebuild Sundqvist microphysics from a learned column rain-survival fraction.
+    ``prev_state`` is the scheme's gscond carry (required by the physical
+    rates, see ``sundqvist_microphysics``).
     The rebuild has no ice slot: q_i is not read.  A lane that carries q_i is
     refused (``carries_q_i=True`` raises): the physical path splits liquid/ice
     there and this rebuild cannot (codex + GLM 2026-10-29)."""
@@ -388,6 +391,7 @@ def apply_predicted_sundqvist_rain_survival_fraction(
             "path does); run the physical scheme on this lane")
     rates = diagnose_sundqvist_process_rates(
         cell_area=cell_area,
+        prev_state=prev_state,
         T=T,
         q_v=q_v,
         hydrometeors=hydrometeors,

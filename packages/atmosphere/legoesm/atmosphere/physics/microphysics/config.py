@@ -61,7 +61,7 @@ HARD_SAT_GUARD_DEFAULTS = {
 # Schemes carrying the guard (kept sorted; used in the fail-loud messages below
 # and asserted against the factory by the ratchet).
 HARD_SAT_GUARD_SCHEMES = (
-    "ml_emulator", "morrison", "p3", "sundqvist",
+    "ml_emulator", "morrison", "p3",
 )
 # SHRINK-ONLY exemptions.  Each reason was verified in the scheme's own source,
 # not inferred from its name (CLAUDE.md: every allow-list reason string is a
@@ -120,6 +120,17 @@ HARD_SAT_GUARD_EXEMPT = {
         "(k >= NCLDTOP), condensing any excess over the IFS mixed/Koop "
         "saturation limit into cloud and fraction.  The legoESM guard has no "
         "49r1 counterpart; IFSCloudscConfig carries no guard fields."
+    ),
+    "sundqvist": (
+        "Sundqvist's condensation is the port of ccpp-physics v7.0.1 "
+        "zhaocarr_gscond_run (2026-11-04), which replaced the smooth "
+        "condensation surrogate the guard overlaid: sundqvist.py calls "
+        "zhao_carr_gscond, whose condensation is the Sundqvist et al. (1989) "
+        "closure of the other processes' tendencies, capped by the oracle's own "
+        "over-condensation limit condi. The oracle has no hard-adjustment "
+        "guard; SundqvistConfig keeps the three guard fields only so an old "
+        "deck fails loudly: sundqvist.py::_check_no_surrogate_guard raises on "
+        "any non-default value."
     ),
     "seifert_beheng": (
         "The scheme is gSAM 1.8.8 M2005 (liquid only, SB2001 warm rain): "
@@ -366,6 +377,9 @@ __param_spec__ = {
         "excluded": {
             "sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "liquid_fraction_clamp_sharpness": "numerics: smoothing width of the liquid-fraction clamp (RULE 5), not a closure",
+            "gscond_smooth_frac": "numerics: relative smoothing width of the gscond switches (RULE 5), not a closure",
+            "hard_sat_adjust_threshold": "inert: guard of the pre-port condensation surrogate; a non-default value raises",
+            "hard_sat_max_heating_K": "inert: guard of the pre-port condensation surrogate; a non-default value raises",
             # Zhao-Carr namelist coefficients added by the oracle port; whether
             # (and within which bounds) they are trainable is a pending user decision.
             "psautco_fine": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
@@ -387,8 +401,6 @@ __param_spec__ = {
             "bergeron_enh_coeff": {"units": "1", "bounds": (0.0, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
             "bergeron_T_peak_K": {"units": "K", "bounds": (248.0, 268.0), "tunable_tier": 3, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
             "bergeron_T_width_K": {"units": "K", "bounds": (2.0, 15.0), "tunable_tier": 3, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
-            "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
-            "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
         },
     },
 }
@@ -422,8 +434,8 @@ class SundqvistConfig(NamedTuple):
     ``coalescence_enh_coeff`` = 300 and ``bergeron_enh_coeff`` = 0.5.
     """
     rh_crit: float = 0.8              # Critical relative humidity (oracle u00k)
-    # Smooth RH_crit gate of the condensation surrogate and of the precipitation
-    # evaporation; the oracle is its hard-switch limit (sharpness -> inf).
+    # Smooth RH_crit gate of the precipitation evaporation; the oracle is its
+    # hard-switch limit (sharpness -> inf).  rh_crit is also gscond's u.
     sigmoid_sharpness: float = 20.0
     # Liquid release rate c_0 [1/s] (oracle prautco; GFS v16/v17 namelist pair
     # 1.5e-4, 1.5e-4, so its grid-area blend is the identity; user 2026-10-27).
@@ -444,41 +456,9 @@ class SundqvistConfig(NamedTuple):
     # Setting either to a non-default value raises.
     bergeron_T_peak_K: float = constants.T_freeze - 15.0   # [K]
     bergeron_T_width_K: float = 7.0        # [K]
-    # --- Hard (iterated) saturation-adjustment guard (opt-in) ---
-    # The SAME guard the five bulk warm-rain schemes carry, with the SAME
-    # defaults, applied to Sundqvist's OWN smooth condensation rate through the
-    # shared ``_warm_rain.hard_saturation_blend`` (no second implementation).
-    # Default OFF => the smooth condensation surrogate alone: a STATIC Python
-    # ``if`` in ``sundqvist._sundqvist_step``, so the OFF path never even
-    # traces the hard branch.
-    #
-    # What it changes when ON (Sundqvist is NOT the same failure mode as the
-    # five bulk schemes -- documented honestly): Sundqvist's smooth branch
-    # ``sigmoid(k*(RH - rh_crit)) * max(q_v - q_sat, 0)/dt`` gates on RH, an
-    # O(1) argument, so the sigmoid SATURATES to ~1 at high RH and the full
-    # supersaturation is removed toward ``q_sat(T_old)`` in ONE step.  It does
-    # not under-drain; it OVERSHOOTS -- it ignores the latent heating that
-    # raises q_sat (landing sub-saturated) and at RH 1.4 releases ~20 K of
-    # latent heat in a single step.  The guard makes the landing point the
-    # enthalpy-consistent equilibrium ``q_eq = q_sat(T + L_v/c_pd*(q_v-q_eq))``
-    # and rate-limits the per-step heating to ``hard_sat_max_heating_K``, so a
-    # large pool drains ONTO the curve over several steps instead of detonating.
-    #
-    # THRESHOLD SEMANTICS DIFFER ON THIS SCHEME -- read before tuning.  In
-    # ``hard_saturation_blend`` the RH threshold controls only the smooth
-    # activation ramp; the on-curve CAP ``min(blended, cond_hard)`` is applied
-    # UNCONDITIONALLY.  For the five bulk schemes the smooth rate is divided by
-    # the psychrometric factor, so it rarely exceeds ``cond_hard`` and the cap
-    # seldom binds -- there the guard really does "fire above the threshold".
-    # Sundqvist's smooth rate has NO psychrometric division, so it exceeds
-    # ``cond_hard`` wherever the RH_crit sigmoid saturates: at T=300 K,
-    # p=90 kPa, RH=1.02 the activation is only 0.083 yet the cap still cuts the
-    # rate ~5x.  So on Sundqvist the guard changes the answer at essentially
-    # every super-saturated cell and ``hard_sat_adjust_threshold`` is a WEAK
-    # knob (it modulates the smooth/on-curve blend below the cap, not an
-    # on/off trigger).  Its __param_spec__ tier-2 entry is kept for
-    # cross-scheme uniformity of the sweep interface; do not expect the
-    # (1.0, 2.0) sweep to behave like it does on Kessler.
+    # --- Hard saturation-adjustment guard of the PRE-PORT condensation
+    # surrogate.  The surrogate is gone (condensation is the Zhao-Carr gscond
+    # port), so any non-default value raises (sundqvist._check_no_surrogate_guard).
     hard_saturation_adjustment: bool = False
     hard_sat_adjust_threshold: float = 1.1      # blend knob here, NOT an on/off trigger [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
@@ -498,6 +478,10 @@ class SundqvistConfig(NamedTuple):
     # liquid/ice split, lanes carrying q_i); the hard clip is math.inf
     # (RULE 5; codex + GLM 2026-10-29; 100 = the 2026-10-21 smooth-clamp value).
     liquid_fraction_clamp_sharpness: float = 100.0
+    # Width of every smoothed switch in the Zhao-Carr gscond port, as a fraction
+    # of each switched quantity's own scale (sundqvist.zhao_carr_gscond);
+    # 0 = the oracle's hard switches.
+    gscond_smooth_frac: float = 0.01
 
 
 class SeifertBehengConfig(NamedTuple):

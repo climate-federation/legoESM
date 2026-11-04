@@ -22,6 +22,26 @@ from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 
 
+def _micro_call(micro_fn, s, grid, sigma):
+    """Call a hydrostatic microphysics adapter; a carry-writing scheme
+    (Sundqvist's gscond) gets a fresh zero carry and its tendencies are
+    returned."""
+    if not getattr(micro_fn, "_writes_phys_state", False):
+        return micro_fn(s, grid, sigma)
+    from types import SimpleNamespace
+    shape = s.T.data.shape
+    ncol = 1
+    for n in shape[:-1]:
+        ncol *= int(n)
+    # previous-step state 1 % drier: a moistening other-process forcing, so
+    # gscond condenses and its tendencies depend on q_v
+    q = jax.lax.stop_gradient(s.tracers["q_v"].data).reshape(ncol, shape[-1])
+    ps = SimpleNamespace(zc_T_prev=s.T.data.reshape(ncol, shape[-1]),
+                         zc_q_v_prev=0.99 * q,
+                         zc_p_s_prev=s.p_s.data.reshape(ncol))
+    return micro_fn(s, grid, sigma, phys_state=ps)[0]
+
+
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -402,7 +422,7 @@ class TestMicrophysicsGrad:
         def loss(qv_data):
             tracers_new = {**state.tracers, "q_v": state.tracers["q_v"].replace(data=qv_data)}
             s = state._replace(tracers=tracers_new)
-            tend = micro_fn(s, self.grid, self.sigma)
+            tend = _micro_call(micro_fn, s, self.grid, self.sigma)
             return jnp.sum(tend.dT_dt.data ** 2)
 
         grad = jax.grad(loss)(state.tracers["q_v"].data)
@@ -436,7 +456,7 @@ class TestMicrophysicsGrad:
                 "q_r": state.tracers["q_r"].replace(data=qr_data),
             }
             s = state._replace(tracers=tracers_new)
-            tend = micro_fn(s, self.grid, self.sigma)
+            tend = _micro_call(micro_fn, s, self.grid, self.sigma)
             # Sum across ALL output channels so fall-speed bugs in
             # dq_r/dq_i/dq_s/dq_g are not silently masked by a
             # dT_dt-only loss.
@@ -511,7 +531,7 @@ class TestMicrophysicsGrad:
                 "q_i": state_with_ice.tracers["q_i"].replace(data=qi_data),
             }
             s = state_with_ice._replace(tracers=tracers_new)
-            tend = micro_fn(s, self.grid, self.sigma)
+            tend = _micro_call(micro_fn, s, self.grid, self.sigma)
             total = jnp.sum(tend.dT_dt.data ** 2)
             if tend.tracer_tendencies is not None:
                 for fld in tend.tracer_tendencies.values():

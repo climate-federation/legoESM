@@ -1,13 +1,22 @@
-"""Sundqvist large-scale microphysics: SBK89 precipitation via the Zhao-Carr port.
+"""Sundqvist large-scale microphysics: the Zhao-Carr gscond + precpd ports.
 
-Two stages run in sequence:
+Two stages run in sequence, the oracle's order:
 
-1. **Condensation (NOT-YET-FAITHFUL surrogate).** A sigmoid-gated removal of
-   supersaturation, ``sigmoid(k·(RH-RH_crit))·max(q_v-q_sat,0)/dt``, optionally
-   overlaid by the shared hard saturation-adjustment guard
-   (``SundqvistConfig.hard_saturation_adjustment``, default False).  This is NOT
-   SBK89's condensation closure and has NOT been compared with oracle code (the
-   Zhao-Carr condensation routine, ``zhaocarr_gscond``, has not been ported).
+1. **Condensation (FAITHFUL port).** :func:`zhao_carr_gscond` is a JAX port of
+   ``zhaocarr_gscond_run`` from NCAR/ccpp-physics v7.0.1 (commit
+   da75531bf90a799e4c0dcb988cc591d82bd024de,
+   ``physics/MP/Zhao_Carr/zhaocarr_gscond.f``), two-time-level branch: the
+   Sundqvist et al. (1989) closure, condensation driven by the other
+   processes' tendencies ``A_t, A_q, A_p`` since the previous call (formed
+   from the carried post-condensation state ``tp, qp, psp``, PhysicsState
+   ``zc_*``), cloud evaporation toward ``u q_s`` where cloud cover is below
+   1e-3, and the ice-water id that sets the latent heat.  It reproduces the
+   oracle (run with legoESM's Tetens curve as ``fpvs``) to <= 1e-12 per field
+   in fp64 at ``gscond_smooth_frac = 0``
+   (``tests/atmosphere/microphysics/unit/test_sundqvist_gscond_oracle.py``);
+   its switches are smoothed at ``gscond_smooth_frac`` (default 0.01) of each
+   quantity's own scale.  A lane must thread the carry (hydrostatic and
+   spectral lanes do); without it the scheme raises.
 
 2. **Precipitation (FAITHFUL port).** :func:`zhao_carr_precpd` is a literal JAX
    port of ``zhaocarr_precpd_run`` from NCAR/ccpp-physics v7.0.1 (commit
@@ -80,6 +89,7 @@ References
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax
@@ -87,12 +97,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.core.smooth import smooth_clamp
+from legoesm.core.smooth import positive_part_c1, sigmoid_switch, smooth_clamp
 from legoesm.thermo import saturation_specific_humidity, saturation_vapor_pressure
-from legoesm.atmosphere.physics.microphysics._warm_rain import (
-    hard_saturation_blend,
-    safe_pow,
-)
+from legoesm.atmosphere.physics.microphysics._warm_rain import safe_pow
 from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -213,6 +220,24 @@ def _check_no_gaussian_f2_override(config: SundqvistConfig) -> None:
                 "pre-port Gaussian Bergeron factor and has no counterpart in the "
                 "Zhao-Carr/SBK89 port (F2 = 1 + c2*sqrt(min(max(0, 268-T), 20)))."
             )
+
+
+def _check_no_surrogate_guard(config: SundqvistConfig) -> None:
+    """The hard saturation-adjustment guard overlaid the pre-port condensation
+    surrogate, which the gscond port replaced: refuse it being switched on or
+    tuned (concrete values only)."""
+    defaults = SundqvistConfig._field_defaults
+    for name in ("hard_saturation_adjustment", "hard_sat_adjust_threshold",
+                 "hard_sat_max_heating_K"):
+        value = getattr(config, name)
+        if isinstance(value, jax.core.Tracer):
+            continue
+        if np.asarray(value) != np.asarray(defaults[name]):
+            raise ValueError(
+                f"SundqvistConfig.{name}={value!r}: this field configured the "
+                "hard saturation-adjustment guard of the pre-port condensation "
+                "surrogate; condensation is now the Zhao-Carr gscond port, "
+                "which has no such guard.")
 
 
 def _sqrt(x):
@@ -429,49 +454,248 @@ def zhao_carr_precpd(
     )
 
 
-def _sundqvist_step(T, q_v, hydrometeors, p_full, p_half, dt, config,
-                    cell_area, carries_q_i):
-    """Condensation surrogate followed by the Zhao-Carr precipitation port.
+# --- Zhao-Carr gscond fixed coefficients (NCAR/ccpp-physics v7.0.1,
+# zhaocarr_gscond.f; line numbers in brackets) ---
+_ZC_CCLIMIT = 1.0e-3            # [-] cloud cover below which cloud evaporates [159]
+_ZC_EVAP_HALF = 0.5             # [-] first-iteration increment halving [411]
 
-    Returns ``(condensation, zc, layer_mass)``; ``zc`` is the precpd state
-    update computed on the PRE-condensation T and q_v (the oracle's gscond ->
-    precpd order waits for the gscond port: with this surrogate's overshoot the
-    post-condensation state is sub-rh_crit and precpd re-evaporates its own
-    production); its ``cwm`` is q_c + q_i where the lane carries q_i, and
-    ``layer_mass`` is the oracle's ``del/g``."""
+
+class ZhaoCarrGscondResult(NamedTuple):
+    """State after ``zhaocarr_gscond_run``.  ``net_condensation`` [kg/kg/s] is
+    the oracle's ``cond - e0`` (> 0: vapour -> condensate, heating with the
+    ice-water-weighted latent heat).  ``T_store`` / ``q_v_store`` are the
+    oracle's ``tp`` / ``qp`` for the next step (two-time-level branch [508-523])."""
+    T: jax.Array
+    q_v: jax.Array
+    cwm: jax.Array
+    net_condensation: jax.Array
+    T_store: jax.Array
+    q_v_store: jax.Array
+
+
+def zhao_carr_gscond(
+    T: jax.Array,
+    q_v: jax.Array,
+    cwm: jax.Array,
+    p_full: jax.Array,
+    p_s: jax.Array,
+    T_prev: jax.Array,
+    q_v_prev: jax.Array,
+    p_s_prev: jax.Array,
+    dt: float,
+    rh_crit: float,
+    smooth_frac: float,
+) -> ZhaoCarrGscondResult:
+    """JAX port of ccpp-physics v7.0.1 ``zhaocarr_gscond_run`` (Zhao & Carr
+    1997 grid-scale condensation/evaporation with the Sundqvist et al. 1989
+    closure), two-time-level branch (``dt == dtf``).
+
+    ``T_prev``, ``q_v_prev``, ``p_s_prev`` are the oracle's ``tp``, ``qp``,
+    ``psp``: the post-gscond state of the previous step, from which the
+    tendencies of every other process, ``A_t``, ``A_q``, ``A_p`` [282-284],
+    are formed.  Level 0 = model top; the scan runs top -> surface, the
+    oracle's ``k = km, 1, -1`` [189].  ``fpvs`` is legoESM's Tetens curve (as
+    in :func:`zhao_carr_precpd`).
+
+    Every oracle switch (the ice-water id [238-257], cloud cover [384-391],
+    the evaporation / condensation branches [401, 449], the min/max caps) is
+    smoothed with the repo helpers at a width of ``smooth_frac`` times that
+    quantity's own scale: 1 K for temperature, 1 for RH, ``cclimit`` for cloud
+    cover, ``epsq`` / ``climit`` for the floors, ``p`` for ``min(p, e_s)``,
+    ``qc`` for the ice-supersaturation test, ``qc/dt`` for the evaporation
+    rate, ``cwm/dt`` for its cap and the size of the other-process forcing for
+    the two condensation caps.
+    ``smooth_frac = 0`` is the oracle's hard form exactly (strict ``>`` where
+    the oracle is strict).
+    """
+    hard = smooth_frac == 0
+
+    def sharp(scale):
+        # The width is numerics, not physics: no gradient through it (a width
+        # that scales with cwm would otherwise put d(1/cwm)/dcwm ~ 1/cwm^2 into
+        # the fp32 adjoint and overflow it).
+        return math.inf if hard else 1.0 / (smooth_frac * jax.lax.stop_gradient(scale))
+
+    def step(x, scale):                 # Heaviside(x > 0)
+        if hard:
+            return (x > 0.0).astype(x.dtype)
+        return sigmoid_switch(x, sharp(scale))
+
+    def smax(a, b, scale):              # max(a, b) = b + (a - b)+, C1, never above
+        if hard:
+            return jnp.maximum(a, b)
+        return b + positive_part_c1(a - b, sharp(scale))
+
+    def smin(a, b, scale):              # min(a, b) = a - (a - b)+, C1
+        if hard:
+            return jnp.minimum(a, b)
+        return a - positive_part_c1(a - b, sharp(scale))
+
+    elwv = constants.L_v                       # latent-ok: Zhao-Carr oracle constant (hvap [149])
+    eliv = constants.L_v + constants.L_f       # latent-ok: Zhao-Carr oracle constant (hvap+hfus [150])
+    cp = constants.c_pd
+    rcp = 1.0 / cp
+    cpr = cp * constants.R_d                   # [152]
+    eps = constants.R_d / constants.R_v
+    epsm1 = eps - 1.0
+    el2orc = constants.L_v * constants.L_v / (constants.R_v * cp)   # latent-ok: [154]
+    albycp = constants.L_v / cp                # latent-ok: [155]
+    rdt = 1.0 / dt
+    u = rh_crit
+    us = 1.0
+
+    dtype = jnp.result_type(T, q_v, cwm)
+    T, q_v, cwm, p_full, T_prev, q_v_prev = (
+        a.astype(dtype) for a in (T, q_v, cwm, p_full, T_prev, q_v_prev))
+    ps = jnp.asarray(p_s, dtype)[:, None]
+    psp = jnp.asarray(p_s_prev, dtype)[:, None]
+
+    def esat(t, pres):                         # min(pres, fpvs(t))
+        return smin(pres, saturation_vapor_pressure(t), pres)
+
+    def level(fiw_above, x):
+        tik, qq, ww, pres, tp, qp, ps_k, psp_k = x
+        tmt0 = tik - constants.T_zero_zhao_carr
+        qik = smax(qq, _ZC_EPSQ, _ZC_EPSQ)
+        cwmik = smax(ww, _ZC_CLIMIT, _ZC_CLIMIT)
+        qw = esat(tik, pres)
+        qw = eps * qw / (pres + epsm1 * qw)
+        qc = smax(qw, _ZC_EPSQ, _ZC_EPSQ)      # qi = qint = qw [214-217]
+
+        # Ice-water id [238-257]: ice below -15 C if ice-supersaturated or
+        # cloudy; ice in -15..0 C only under an ice layer and cloudy.
+        has_c = step(ww - _ZC_CLIMIT, _ZC_CLIMIT)          # cwmik > climit
+        fi = qik - u * qc
+        cold = step(_ZC_T_ICE_C - tmt0, 1.0)
+        below0 = step(-tmt0, 1.0)
+        iw_cold = 1.0 - (1.0 - step(fi, qc)) * (1.0 - has_c)
+        fiw = cold * iw_cold + (1.0 - cold) * below0 * fiw_above * has_c
+
+        # Other-process tendencies [281-284].
+        pp0 = (pres / ps_k) * psp_k
+        at = (tik - tp) * rdt
+        aq = (qik - qp) * rdt
+        ap = (pres - pp0) * rdt
+        elv = (1.0 - fiw) * elwv + fiw * eliv
+        rqik = step(qc - _ZC_QC_MIN, _ZC_QC_MIN) * qik / qc   # qc >= epsq > 0
+
+        # Cloud cover [384-391].
+        # 1 - sqrt(clamp((us - rq)/(us - u), 0, 1)): 0 below u, 1 at saturation.
+        d = smax((us - rqik) / (us - u), 0.0, 1.0)
+        ccrik = 1.0 - _sqrt(smin(d, 1.0, 1.0))
+
+        # Cloud evaporation, three iterations toward u*q_s [400-444].
+        tx1, tx3 = tik, qik
+        tx2 = jnp.zeros_like(tik)
+        for half in (_ZC_EVAP_HALF, 1.0, 1.0):
+            es = esat(tx1, pres)
+            qs = u * eps * es / (pres + epsm1 * es)
+            tsq = tx1 * tx1
+            delq = half * (qs - tx3) * tsq / (tsq + el2orc * qs)
+            tx2 = tx2 + delq
+            tx1 = tx1 - delq * albycp
+            tx3 = tx3 + delq
+        rate = qc * rdt
+        e0 = smax(tx2 * rdt, 0.0, rate)
+        e0 = smin(cwmik * rdt, e0, cwmik * rdt)
+        e0 = smax(0.0, e0, rate)
+
+        # Condensation [447-477].
+        us00 = us - u
+        ccrik1 = 1.0 - ccrik
+        aa = eps * elv * pres * qik
+        ab = ccrik * ccrik1 * qc * us00
+        ac = ab + 0.5 * cwmik
+        ad = ab * ccrik1
+        ae = cpr * tik * tik
+        af = ae * pres
+        ag = aa * elv
+        ai = cp * aa
+        gain = (ac - ad) / (ac * (af + ag))
+        cond = gain * (af * aq - ai * at + ae * qik * ap)
+        # Width scale of the two caps: the forcing's own size (sum of the
+        # magnitudes of its three terms), so the caps smooth over 1% of it.
+        forcing = gain * (af * jnp.abs(aq) + ai * jnp.abs(at) + ae * qik * jnp.abs(ap))
+        forcing = jnp.maximum(forcing, _ZC_EPSQ * rdt)
+        condi = (qik - u * qc * 1.0) * rdt
+        cond = smin(cond, condi, forcing)
+        cond = smax(cond, 0.0, forcing)
+
+        cloudy = step(ccrik - _ZC_CCLIMIT, _ZC_CCLIMIT)
+        w_cond = cloudy * step(qc - _ZC_EPSQ, _ZC_EPSQ)
+        w_evap = (1.0 - cloudy) * has_c
+        cone0 = (w_cond * cond - w_evap * e0) * dt     # [478]
+        t_new = tik + elv * rcp * cone0                # [483]
+        q_new = qq - cone0                             # [484]
+        return fiw, (t_new, q_new, ww + cone0, cone0 * rdt)
+
+    ncol, nlev = T.shape
+    full = (ncol, nlev)
+    xs = tuple(jnp.moveaxis(jnp.broadcast_to(a, full).astype(dtype), 1, 0) for a in (
+        T, q_v, cwm, p_full, T_prev, q_v_prev, ps, psp))
+    _, ys = jax.lax.scan(level, jnp.zeros((ncol,), dtype), xs)
+    t_new, q_new, w_new, net = (jnp.moveaxis(a, 0, 1) for a in ys)
+    return ZhaoCarrGscondResult(
+        T=t_new, q_v=q_new, cwm=w_new, net_condensation=net,
+        T_store=t_new, q_v_store=smax(q_new, _ZC_EPSQ, _ZC_EPSQ))   # [513-514]
+
+
+
+def _sundqvist_step(T, q_v, hydrometeors, p_full, p_half, dt, config,
+                    cell_area, carries_q_i, prev_state):
+    """Zhao-Carr gscond (condensation) then precpd (precipitation), the
+    oracle's order.
+
+    ``prev_state`` is the carry written by the previous call
+    (:func:`sundqvist_carry`): ``{"zc_T_prev", "zc_q_v_prev", "zc_p_s_prev"}``,
+    the oracle's ``tp``, ``qp``, ``psp``.  Columns whose ``zc_p_s_prev`` is not
+    positive (the zero-filled carry of a fresh start, or a restart written
+    before the carry existed) start from ``tp = T``, ``qp = max(q, epsq)``,
+    ``psp = p_s``: no other-process tendency on that step (GFS's
+    commented-out first-step initialisation, zhaocarr_gscond.f:168-181).
+
+    Returns ``(gs, zc, layer_mass)``: the gscond result, the precpd result on
+    the post-gscond state (its ``cwm`` is q_c + q_i where the lane carries
+    q_i) and the oracle's ``del/g``."""
     _check_no_gaussian_f2_override(config)
+    _check_no_surrogate_guard(config)
     if cell_area is None:
         raise ValueError(
             "sundqvist needs the lane's grid-cell area (GFS blends the ice "
             "autoconversion coefficient by it); pass cell_area, or declare the "
             "GCM cell area a single-column case stands for in its case config")
-    sharpness = config.sigmoid_sharpness
-
-    # 1. Condensation (NOT-YET-FAITHFUL surrogate; unchanged by the port).
-    # Removes only the supersaturation ``q_v - q_sat``, with the smooth
-    # RH_crit onset gate.  Sign: POSITIVE = vapour -> cloud water.
-    q_sat = saturation_specific_humidity(T, p_full)
-    RH = q_v / jnp.clip(q_sat, 1e-10)
-    f = jax.nn.sigmoid(sharpness * (RH - config.rh_crit))
-    condensation = f * jnp.maximum(q_v - q_sat, 0.0) / dt  # [kg/kg/s]
-    # OPT-IN hard (iterated) saturation-adjustment guard (shared with the bulk
-    # warm-rain schemes).  STATIC Python ``if`` on a compile-time bool.
-    if config.hard_saturation_adjustment:
-        condensation = hard_saturation_blend(
-            condensation, T, q_v, p_full, dt, q_sat,
-            config.hard_sat_adjust_threshold,
-            config.hard_sat_max_heating_K,
-        )
-
-    # 2. Precipitation: the condensate after condensation, on the pre-step
-    # T and q_v, with the oracle's layer mass del/g = dp/g (R9/C12: the column
-    # water budget closes in the model's pressure coordinate).
+    if prev_state is None:
+        raise ValueError(
+            "sundqvist (Zhao-Carr gscond) needs the previous step's carry "
+            "(zc_T_prev, zc_q_v_prev, zc_p_s_prev: the other-process "
+            "tendencies drive its condensation); this lane passed none.  Pass "
+            "the PhysicsState carry, or sundqvist_carry_init for a fresh start.")
+    p_s = p_half[:, -1]
+    fresh = prev_state["zc_p_s_prev"] <= 0.0
+    T_prev = jnp.where(fresh[:, None], T, prev_state["zc_T_prev"])
+    q_prev = jnp.where(fresh[:, None], jnp.maximum(q_v, _ZC_EPSQ),
+                       prev_state["zc_q_v_prev"])
+    ps_prev = jnp.where(fresh, p_s, prev_state["zc_p_s_prev"])
     q_c_in = hydrometeors.q_c + hydrometeors.q_i if carries_q_i else hydrometeors.q_c
-    cwm = q_c_in + condensation * dt
+    gs = zhao_carr_gscond(T, q_v, q_c_in, p_full, p_s, T_prev, q_prev, ps_prev,
+                          dt, config.rh_crit, config.gscond_smooth_frac)
     layer_mass = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
     wk1 = gfs_area_weight(jnp.broadcast_to(jnp.asarray(cell_area, T.dtype), T.shape[:1]))
-    zc = zhao_carr_precpd(T, q_v, cwm, p_full, layer_mass, dt, config, wk1)
-    return condensation, zc, layer_mass
+    zc = zhao_carr_precpd(gs.T, gs.q_v, gs.cwm, p_full, layer_mass, dt, config, wk1)
+    return gs, zc, layer_mass
+
+
+def sundqvist_carry_init(ncol, nlev, dtype):
+    """Zero-filled carry: every column starts fresh (see ``_sundqvist_step``)."""
+    return {"zc_T_prev": jnp.zeros((ncol, nlev), dtype),
+            "zc_q_v_prev": jnp.zeros((ncol, nlev), dtype),
+            "zc_p_s_prev": jnp.zeros((ncol,), dtype)}
+
+
+def sundqvist_carry(gs, p_half):
+    """The carry the next call reads: the post-gscond state [zhaocarr_gscond.f:513-522]."""
+    return {"zc_T_prev": gs.T_store, "zc_q_v_prev": gs.q_v_store,
+            "zc_p_s_prev": p_half[:, -1]}
 
 
 def diagnose_sundqvist_process_rates(
@@ -486,14 +710,16 @@ def diagnose_sundqvist_process_rates(
     config: SundqvistConfig = SundqvistConfig(),
     cell_area: jax.Array | None = None,
     carries_q_i: bool = False,
+    prev_state: dict | None = None,
 ) -> SundqvistProcessRates:
     """Diagnose the Sundqvist condensation, precipitation-production and
     precipitation-evaporation rates (see :class:`SundqvistProcessRates`)."""
     del rho, dz  # Signature parity with ``sundqvist_microphysics``.
-    condensation, zc, _ = _sundqvist_step(
-        T, q_v, hydrometeors, p_full, p_half, dt, config, cell_area, carries_q_i)
+    gs, zc, _ = _sundqvist_step(
+        T, q_v, hydrometeors, p_full, p_half, dt, config, cell_area, carries_q_i,
+        prev_state)
     return SundqvistProcessRates(
-        condensation=condensation,
+        condensation=gs.net_condensation,
         autoconversion=zc.autoconversion,
         evaporation=zc.evaporation,
         precipitation=zc.rain_sfc + zc.snow_sfc,
@@ -502,9 +728,9 @@ def diagnose_sundqvist_process_rates(
 
 __physics_contract__ = {
     "summary": (
-        "Sundqvist large-scale microphysics: a NOT-YET-FAITHFUL RH-gated "
-        "condensation surrogate followed by a literal port of the Zhao-Carr "
-        "precipitation scheme (ccpp-physics v7.0.1 zhaocarr_precpd_run): SBK89 "
+        "Sundqvist large-scale microphysics: ports of the Zhao-Carr "
+        "condensation (ccpp-physics v7.0.1 zhaocarr_gscond_run, carried "
+        "previous-step state) and precipitation (zhaocarr_precpd_run): SBK89 "
         "liquid release with cloud cover b, coalescence F1 and Bergeron F2; ice "
         "autoconversion and accretion by snow; rain evaporation, snow "
         "sublimation and melting; diagnostic (instant) precipitation."
@@ -515,6 +741,7 @@ __physics_contract__ = {
         "hydrometeors.q_i": "kg/kg (read only when carries_q_i)",
         "p_full": "Pa",
         "p_half": "Pa (interfaces, top-down; layer mass dp/g, R9)",
+        "prev_state": "zc_T_prev K, zc_q_v_prev kg/kg, zc_p_s_prev Pa (gscond carry)",
         "cell_area": "m^2 (GCM cell area for the GFS psautco blend; required)",
         "rho": "kg/m^3 (unused since R9; signature parity)",
         "dz": "m (unused since R9; signature parity)", "dt": "s",
@@ -527,7 +754,8 @@ __physics_contract__ = {
     "sign_convention": (
         "z up; level 0 = model top, surface at [:, -1]. Precipitation is "
         "positive downward and leaves the column: int (dq_v + dq_c + dq_r "
-        "+ dq_i) dp/g = -precipitation. Condensation heats with L_v; rain "
+        "+ dq_i) dp/g = -precipitation. Condensation heats with L_v "
+        "(L_v+L_f where gscond's ice-water id is ice); rain "
         "evaporation cools with L_v, snow sublimation with L_v+L_f, melting "
         "with L_f (Zhao-Carr); conversion of condensate to precipitation "
         "carries no latent heat; the liquid/ice re-split (carries_q_i) heats "
@@ -538,11 +766,12 @@ __physics_contract__ = {
     "reference": (
         "Sundqvist, Berge & Kristjansson (1989), Mon. Wea. Rev. 117, 1641-1657; "
         "Zhao & Carr (1997), Mon. Wea. Rev. 125, 1931-1953; oracle "
-        "NCAR/ccpp-physics v7.0.1 zhaocarr_precpd.f"
+        "NCAR/ccpp-physics v7.0.1 zhaocarr_gscond.f + zhaocarr_precpd.f"
     ),
     "idealized_test": (
-        "tests/atmosphere/microphysics/unit/test_sundqvist_zhao_carr_oracle.py "
-        "-- the precipitation port against the running Zhao-Carr oracle; "
+        "tests/atmosphere/microphysics/unit/test_sundqvist_gscond_oracle.py and "
+        "test_sundqvist_zhao_carr_oracle.py -- both ports and their chain "
+        "against the running Zhao-Carr oracle; "
         "tests/unit/test_physics_microphysics.py -- supersaturation removed, "
         "column water budget closes, q_r drained."
     ),
@@ -561,34 +790,38 @@ def sundqvist_microphysics(
     config: SundqvistConfig = SundqvistConfig(),
     cell_area: jax.Array | None = None,
     carries_q_i: bool = False,
+    prev_state: dict | None = None,
 ) -> MicrophysicsOutput:
-    """Compute Sundqvist tendencies (condensation surrogate + Zhao-Carr precipitation).
+    """Compute Sundqvist tendencies (Zhao-Carr gscond + precpd ports).
 
     Parameters
     ----------
     T, q_v, hydrometeors, p_full, p_half, rho, dz, dt, config
         Same interface as all microphysics backends.
     cell_area : (ncol,) or scalar grid-cell area [m^2]; required (raises if None).
-    carries_q_i : static bool, whether the lane carries q_i.  If so, precpd
-        runs on q_c + q_i and its condensate returns as q_c and q_i by
+    carries_q_i : static bool, whether the lane carries q_i.  If so, the
+        scheme runs on q_c + q_i and its condensate returns as q_c and q_i by
         :func:`liquid_fraction` of the post-step temperature; otherwise all
         condensate stays in q_c and q_i is not read.
+    prev_state : the previous call's carry (``MicrophysicsOutput.carry``, or
+        :func:`sundqvist_carry_init` on a fresh start); required.
 
     Returns
     -------
-    MicrophysicsOutput
+    MicrophysicsOutput, with ``carry`` the state the next call needs.
     """
     del rho, dz  # the layer mass is the oracle's dp/g (from p_half)
     ncol, nlev = T.shape
-    condensation, zc, layer_mass = _sundqvist_step(
-        T, q_v, hydrometeors, p_full, p_half, dt, config, cell_area, carries_q_i)
+    gs, zc, layer_mass = _sundqvist_step(
+        T, q_v, hydrometeors, p_full, p_half, dt, config, cell_area, carries_q_i,
+        prev_state)
 
-    # Tendencies = condensation + the Zhao-Carr state update over the step.
-    dT_dt = constants.L_v * condensation / constants.c_pd + (zc.T - T) / dt
-    dq_v_dt = -condensation + (zc.q_v - q_v) / dt
+    # Tendencies = the gscond + precpd state update over the step.
+    dT_dt = (zc.T - T) / dt
+    dq_v_dt = (zc.q_v - q_v) / dt
     z = jnp.zeros((ncol, nlev), dtype=T.dtype)
     if carries_q_i:
-        cwm_in = hydrometeors.q_c + hydrometeors.q_i + condensation * dt
+        cwm_in = hydrometeors.q_c + hydrometeors.q_i
         pos = cwm_in > 0.0
         share = jnp.where(pos, hydrometeors.q_i / jnp.where(pos, cwm_in, 1.0), 0.0)
         q_c_new, q_i_new, dT_fus = split_condensate(
@@ -623,4 +856,5 @@ def sundqvist_microphysics(
         dN_i_dt=z,
         precipitation=precipitation,
         precip_frozen=zc.snow_sfc,   # the oracle's sr * rn
+        carry=sundqvist_carry(gs, p_half),
     )
