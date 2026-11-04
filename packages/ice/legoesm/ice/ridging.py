@@ -95,9 +95,13 @@ _SI3_JPL1_MU_RIDGING = 3.0
 _SI3_JPL1_HRAFT_M = 0.75
 _SI3_JPL1_CRAFT = 5.0
 _SI3_JPL1_POROSITY = 0.0
-# The deck supplies 0.5, but this rung resolves ln_icethd=F.  SI3 therefore
-# overwrites all four factors to one at icedyn_rdgrft.F90:1244-1247 before the
-# first call.  These constants name the executed selector state.
+# Retention factors = fraction of snow/pond volume KEPT on the ridged/rafted
+# ice (namelist rn_fsnwrdg/rn_fsnwrft/rn_fpndrdg/rn_fpndrft, NEMO 5.0.1
+# icedyn_rdgrft.F90:88-94, used at :735-747,858-866).  The defaults are the
+# ln_icethd=F state: SI3 overwrites all four to one at :1231-1234 when
+# thermodynamics is off, which is the rung-3.4 testcase this arm was built
+# on.  A caller running thermodynamics passes its namelist values (ORCA1:
+# 0.5); the validator accepts any fraction in [0, 1].
 _SI3_JPL1_SNOW_RIDGE_RETENTION = 1.0
 _SI3_JPL1_SNOW_RAFT_RETENTION = 1.0
 _SI3_JPL1_POND_RIDGE_RETENTION = 1.0
@@ -562,12 +566,25 @@ def apply_ridging(
 def _validate_si3_jpl1_ridging_config(config: SI3JPL1RidgingConfig) -> None:
     """Reject every unmeasured redistribution selector combination."""
 
+    retention_fields = (
+        "snow_ridge_retention",
+        "snow_raft_retention",
+        "pond_ridge_retention",
+        "pond_raft_retention",
+    )
     expected = SI3JPL1RidgingConfig()
-    if config != expected:
+    pinned = config._replace(**{name: getattr(expected, name) for name in retention_fields})
+    if pinned != expected:
         raise ValueError(
             "SI3 jpl=1 ridging selector composition "
             f"{config!r} != {expected!r}; no Frankenstein fallback"
         )
+    for name in retention_fields:
+        value = getattr(config, name)
+        if not (math.isfinite(value) and _SI3_JPL1_ZERO <= value <= _SI3_JPL1_ONE):
+            raise ValueError(
+                f"SI3 jpl=1 ridging {name}={value!r} must be a retained fraction in [0, 1]"
+            )
 
 
 def apply_si3_jpl1_ridging(
@@ -592,9 +609,18 @@ def apply_si3_jpl1_ridging(
     conservation fallback (``:857-870``).  The layer axes are trailing and
     are carried with their parent ice/snow inventory.  ORCA1's zero ridge
     porosity makes ice volume, ice enthalpy, and option-4 layer salt invariant
-    under this redistribution.  Because this rung has ``ln_icethd=F``, SI3's
-    initialization also forces the snow/pond retention factors to one
-    (``icedyn_rdgrft.F90:1244-1247``), so those inventories remain carried.
+    under this redistribution.
+
+    Snow/pond retention: the config fields are the namelist fractions KEPT
+    (``rn_fsnwrdg``/``rn_fsnwrft``/``rn_fpndrdg``/``rn_fpndrft``, any value in
+    [0, 1]).  Their default 1.0 is NEMO's ``ln_icethd=F`` override
+    (``icedyn_rdgrft.F90:1231-1234``); a caller running thermodynamics must
+    pass its namelist values (ORCA1: 0.5).  The material not kept is returned
+    in :class:`SI3JPL1RidgingLosses` as inventories; NEMO's ocean fluxes are
+    ``wfx_snw_dyn = rho_snow * losses.snow_volume / dt`` [kg m-2 s-1],
+    ``hfx_dyn = -sum_layers(losses.snow_enthalpy) / dt`` [W m-2] (:735-739)
+    and ``wfx_pnd = rho_water * (losses.pond_volume + losses.pond_lid_volume)
+    / dt`` (:743-747; the lid term only with ``ln_pnd_lids``).
     """
 
     _validate_si3_jpl1_ridging_config(config)
