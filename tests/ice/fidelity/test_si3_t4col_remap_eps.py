@@ -84,3 +84,25 @@ def test_remap_reverse_pass_finite_in_fp32_at_zero_and_thin_columns():
         gt = jax.grad(lambda t: jnp.sum(bl._piecewise_remap(h * t, e, jnp.sum(h * t))))(jnp.asarray(1.0, jnp.float32))
         gh = jax.grad(lambda hh: jnp.sum(bl._piecewise_remap(hh, e, jnp.sum(hh))))(h)
         assert bool(jnp.isfinite(gt)) and bool(jnp.all(jnp.isfinite(gh))), h_layer
+
+
+def test_remap_fp32_gradient_matches_fp64_under_jit():
+    """Review: uniform thickness scaling leaves per-volume enthalpy unchanged -> gradient ~0 (fp32 vs fp64)."""
+    for h_layer in (1.0, 1e-3, 1e-12, 1e-16, 1e-18, 1e-21):
+        out = {}
+        for dt in (jnp.float32, jnp.float64):
+            h = jnp.asarray([0.0, h_layer, h_layer, h_layer, 0.0], dt)
+            e = jnp.asarray([0.0, 3e8, 2.9e8, 2.8e8, 0.0], dt)
+            f = jax.jit(jax.grad(lambda t: jnp.sum(bl._piecewise_remap(h * t, e, jnp.sum(h * t)))))
+            out[dt] = float(f(jnp.asarray(1.0, dt)))
+        assert np.isfinite(out[jnp.float32]), (h_layer, out)
+        if h_layer >= 1e-12:      # sub-1e-15 m fp32 gradients are finite but not accurate (PR body)
+            assert abs(out[jnp.float32] - out[jnp.float64]) <= 1e-6 * 8.7e8, (h_layer, out)
+
+
+def test_epsi20_floor_never_binds_above_its_value():
+    """The hard floor is a pure numerics guard: for every layer >= 1e-20 m the result is content/dz."""
+    for h_layer in (1e-20, 1e-17, 1e-15, 1e-3):
+        h = jnp.asarray([0.0, h_layer, h_layer, h_layer, 0.0])
+        e = jnp.asarray([0.0, 3e8, 2.9e8, 2.8e8, 0.0])
+        np.testing.assert_allclose(np.asarray(bl._piecewise_remap(h, e, jnp.sum(h))), [3e8, 2.9e8, 2.8e8], rtol=1e-14)
