@@ -166,3 +166,23 @@ def test_zero_enthalpy_difference_gives_zero_growth_and_finite_gradient(monkeypa
     np.testing.assert_array_equal(np.asarray(bog(fhld)), 0.0)
     g = jax.grad(lambda x: jnp.sum(bog(x)))(fhld)
     assert np.all(np.isfinite(np.asarray(g)))
+
+
+def test_growth_gate_band_pins_cubic_shape_and_closes_mass():
+    """GLM r3: inside the band the ramp is 3t^2-2t^3 and state and fluxes share one gated growth."""
+    st, zr, fz = dh_args(FX)
+    w = bl._GROWTH_GATE_WIDTH_WM2
+    zr0 = zr._replace(qcn_ice_bottom=zr.qcn_ice_bottom * 0, qtr_ice_bottom=zr.qtr_ice_bottom * 0)
+    def run(q, **kw):
+        f = fz._replace(qsb_ice_bottom=fz.qsb_ice_bottom * 0 + q, fhld=fz.fhld * 0)
+        return bl._dh_step_fluxes(st, zr0, f, dt(FX), K, nemo_version="5.0.1", **kw)
+    for t, s in ((0.25, 0.15625), (0.75, 0.84375)):
+        (out, fx), (_, fh) = run(-t * w), run(-t * w, growth_gate_width=0.0)
+        grows = np.asarray(fh.wfx_bog) != 0
+        assert grows.any()
+        np.testing.assert_allclose(np.asarray(fx.wfx_bog)[grows], s * np.asarray(fh.wfx_bog)[grows], rtol=1e-12)
+        a, d = np.asarray(st.concentration), dt(FX)
+        mass = a * (K.rho_ice * (out.h_ice - st.h_ice) + K.rho_snow * (out.h_snow - st.h_snow)) / d
+        wsum = sum(np.asarray(getattr(fx, f)) for f in bl.SI3ExchangeFluxes._fields
+                   if f.startswith("wfx") and f not in ("wfx_err_sub", "wfx_opw"))
+        np.testing.assert_allclose(mass, -wsum, rtol=0, atol=1e-12 * max(1.0, np.abs(mass).max()))
