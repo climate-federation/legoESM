@@ -1385,11 +1385,12 @@ def _latlon_epbl_setup(dt_s=1800.0, convection="none", **flat):
 
 
 def _windy_forcing(state):
-    from types import SimpleNamespace
+    from legoesm.ocean.state import OceanSurfaceForcing
     shape = state.T.data.shape[:-1]
-    return SimpleNamespace(tau_x=jnp.full(shape, 0.1), tau_y=jnp.zeros(shape),
-                           q_net=jnp.full(shape, -100.0),
-                           freshwater=jnp.zeros(shape))
+    return OceanSurfaceForcing(tau_x=jnp.full(shape, 0.1),
+                               tau_y=jnp.zeros(shape),
+                               q_net=jnp.full(shape, -100.0),
+                               freshwater=jnp.zeros(shape))
 
 
 def test_k_profiles_epbl_uses_dt_tke_not_dt_s():
