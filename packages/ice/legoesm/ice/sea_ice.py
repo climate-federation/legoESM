@@ -768,6 +768,14 @@ def _nemo_si3_blk_ice_2(
     return {
         "albedo": albedo,
         "qsr_ice": qsr_ice,
+        # NEMO's per-category loop terms (sbcblk.F90 z_qlw, z_dqlw, z_qsb,
+        # z_dqsb): net longwave (positive down), its T derivative, sensible
+        # heat (positive up, so qns_ice = qlw_ice - qsb_ice - qla_ice) and
+        # its T derivative.  Per unit ice area, not the iom cell average.
+        "qlw_ice": q_lw,
+        "dqlw_ice": dq_lw,
+        "qsb_ice": sensible,
+        "dqsb_ice": sensible_scale,
         "qla_ice": latent,
         "dqla_ice": dq_latent,
         "qns_ice": qns_ice,
