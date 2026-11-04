@@ -146,3 +146,13 @@ def test_unknown_or_unsupported_selection_raises():
     with pytest.raises(ValueError, match="per_level"):
         _call(cfg._replace(lateral_viscosity_mask_levels="per_level",
                            lateral_viscosity_operator="flux_divergence"), geo, t, u, v, zc)
+
+
+def test_3d_vertex_mask_equals_the_per_level_2d_mask():
+    """compute_vertex_mask on a (n_lat, n_lon, nlev) mask (one pad / halo
+    exchange for all levels) == the 2-D mask of each level."""
+    t = _sw(_windows()[1]["tmask"]); geo = _geo(t.shape[0])
+    v3 = np.asarray(compute_vertex_mask(jnp.asarray(t), grid=geo))
+    for k in range(t.shape[-1]):
+        np.testing.assert_array_equal(
+            v3[..., k], np.asarray(compute_vertex_mask(jnp.asarray(t[..., k]), grid=geo)))

@@ -1675,12 +1675,13 @@ def compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
         pad_with_pole_bc_lat,
         zero_polar_lat_ends,
     )
-    if land_mask.ndim != 2:
-        # Preserve the previous implicit 2D contract (it unpacked
-        # ``m.shape`` into two names).
+    if land_mask.ndim not in (2, 3):
+        # 2D (n_lat, n_lon), or 3D (n_lat, n_lon, nlev) per-level masks: every
+        # step below acts on axes 0/1 only, so all levels share ONE pad / halo
+        # exchange (no vmap over a halo exchange).
         raise ValueError(
-            f"compute_vertex_mask: land_mask must be 2D (n_lat, n_lon), "
-            f"got ndim={land_mask.ndim}"
+            f"compute_vertex_mask: land_mask must be 2D (n_lat, n_lon) or 3D "
+            f"(n_lat, n_lon, nlev), got ndim={land_mask.ndim}"
         )
     # Vertex (i, j) is surrounded by cells (i-1, j-1), (i-1, j),
     # (i, j-1), (i, j); with the lat pad, rows i-1 / i of the global
@@ -1713,6 +1714,7 @@ def compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
         vtx_open = jnp.ones((full.shape[0],), dtype=full.dtype)  # (n_lat+1,)
         vtx_open = vtx_open.at[1:].multiply(open_face)   # cell row j -> vtx j+1
         vtx_open = vtx_open.at[:-1].multiply(open_face)  # cell row j -> vtx j
+        vtx_open = vtx_open.reshape(vtx_open.shape + (1,) * (full.ndim - 2))
         full = full.at[:, 0].multiply(vtx_open)
         full = full.at[:, -1].multiply(vtx_open)
     nmask = north_fold_mask(grid)
