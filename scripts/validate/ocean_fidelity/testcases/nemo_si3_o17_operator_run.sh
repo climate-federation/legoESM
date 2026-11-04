@@ -10,7 +10,8 @@ readonly HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO="$(cd "$HERE/../../../.." && pwd)"
 readonly SCORER="$HERE/nemo_si3_o17_composition_scorer.py"
 readonly PY="/home/dbalwada/legoESM/.venv/bin/python"
-readonly DEFAULT_EVIDENCE="${NEMO_SI3_O17_DEFAULT_EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step}"
+readonly DEFAULT_EVIDENCE="/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step"
+readonly EXTRA_PROTECTED_EVIDENCE="${NEMO_SI3_O17_EXTRA_PROTECTED_EVIDENCE:-}"
 
 OUT_DIR=""
 K_PARALLEL=20
@@ -83,10 +84,16 @@ fi
 readonly ABS_OUT="$(realpath -m "$OUT_DIR")"
 readonly ABS_EVIDENCE="$(realpath -m "$EVIDENCE")"
 readonly ABS_DEFAULT_EVIDENCE="$(realpath -m "$DEFAULT_EVIDENCE")"
-if [[ "$ABS_OUT" == "$ABS_EVIDENCE" || "$ABS_OUT" == "$ABS_EVIDENCE/"* || "$ABS_OUT" == "$ABS_DEFAULT_EVIDENCE" || "$ABS_OUT" == "$ABS_DEFAULT_EVIDENCE/"* ]]; then
-  echo "REFUSE: --out resolves inside evidence tree ($ABS_OUT inside read-only $ABS_EVIDENCE)" >&2
-  exit 2
+protected_roots=("$ABS_DEFAULT_EVIDENCE" "$ABS_EVIDENCE")
+if [[ -n "$EXTRA_PROTECTED_EVIDENCE" ]]; then
+  protected_roots+=("$(realpath -m "$EXTRA_PROTECTED_EVIDENCE")")
 fi
+for protected_root in "${protected_roots[@]}"; do
+  if [[ "$ABS_OUT" == "$protected_root" || "$ABS_OUT" == "$protected_root/"* ]]; then
+    echo "REFUSE: --out resolves inside evidence tree ($ABS_OUT inside read-only $protected_root)" >&2
+    exit 2
+  fi
+done
 if [[ ! -d "$EVIDENCE/record_100step/o17_master_records" ]]; then
   echo "REFUSE: missing O17 record directory under $EVIDENCE" >&2
   exit 2

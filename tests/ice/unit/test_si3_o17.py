@@ -965,10 +965,16 @@ def test_o17_operator_script_refuses_scratch_evidence_tree_before_mkdir(
     assert op_script.is_file()
     op_text = op_script.read_text()
     assert (
-        'readonly DEFAULT_EVIDENCE="${NEMO_SI3_O17_DEFAULT_EVIDENCE:-'
-        '/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step}"'
+        'readonly DEFAULT_EVIDENCE='
+        '"/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step"'
         in op_text
     )
+    assert (
+        'readonly EXTRA_PROTECTED_EVIDENCE="${NEMO_SI3_O17_EXTRA_PROTECTED_EVIDENCE:-}"'
+        in op_text
+    )
+    assert 'protected_roots=("$ABS_DEFAULT_EVIDENCE" "$ABS_EVIDENCE")' in op_text
+    assert "NEMO_SI3_O17_DEFAULT_EVIDENCE" not in op_text
     assert "MIN_AVAIL_GB=250" in op_text
     assert "MAX_PROC_RSS_KIB=104857600" in op_text
     assert "--labels GIVEN-NEMO-ENTRY" in op_text
@@ -986,19 +992,36 @@ def test_o17_operator_script_refuses_scratch_evidence_tree_before_mkdir(
     scratch_evidence = (
         scratch_probe / "si3_rounds" / "round29" / "oracle_o17_full_step"
     )
+    scratch_alt_evidence = (
+        scratch_probe / "si3_rounds" / "round29" / "alt_oracle_o17_full_step"
+    )
     (scratch_evidence / "record_100step" / "o17_master_records").mkdir(
         parents=True, exist_ok=True
     )
+    (scratch_alt_evidence / "record_100step" / "o17_master_records").mkdir(
+        parents=True, exist_ok=True
+    )
     refused_target = scratch_evidence / "refused_probe_do_not_create"
+    refused_alt_target = scratch_alt_evidence / "refused_probe_do_not_create"
     assert not refused_target.exists()
+    assert not refused_alt_target.exists()
     env = {
         **os.environ,
-        "NEMO_SI3_O17_DEFAULT_EVIDENCE": str(scratch_evidence),
+        "NEMO_SI3_O17_EXTRA_PROTECTED_EVIDENCE": str(scratch_evidence),
         "TMPDIR": str(scratch_probe / "tmp"),
     }
-    for extra_args in ((), ("--evidence", str(scratch_evidence))):
+    for target, root, extra_args in (
+        (refused_target, scratch_evidence, ()),
+        (refused_target, scratch_evidence, ("--evidence", str(scratch_evidence))),
+        (refused_target, scratch_evidence, ("--evidence", str(scratch_alt_evidence))),
+        (
+            refused_alt_target,
+            scratch_alt_evidence,
+            ("--evidence", str(scratch_alt_evidence)),
+        ),
+    ):
         res = subprocess.run(
-            ["bash", str(op_script), "--out", str(refused_target), *extra_args],
+            ["bash", str(op_script), "--out", str(target), *extra_args],
             env=env,
             capture_output=True,
             text=True,
@@ -1006,5 +1029,5 @@ def test_o17_operator_script_refuses_scratch_evidence_tree_before_mkdir(
         )
         assert res.returncode == 2
         assert "REFUSE: --out resolves inside evidence tree" in res.stderr
-        assert str(scratch_evidence) in res.stderr
-        assert not refused_target.exists()
+        assert str(root) in res.stderr
+        assert not target.exists()
