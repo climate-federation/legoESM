@@ -2302,6 +2302,15 @@ class PhysicsPipeline:
                     )
                 _turb_kwargs[self._turb_energy_field] = _energy_in
                 if _mynn:
+                    # vote N5: moist density and moist hydrostatic heights
+                    # (this lane hands the other kernels dry ones; codex R3 r7)
+                    from legoesm.atmosphere.physics._shared import (
+                        compute_heights_from_sigma, compute_rho)
+                    _zf_m, _zh_m = compute_heights_from_sigma(
+                        T_col, p_half_col, q_v=q_v_col)
+                    _turb_kwargs.update(
+                        rho=compute_rho(T_col, p_full_col, q_v=q_v_col),
+                        z_full=_zf_m, z_half=_zh_m)
                     _turb_kwargs.update(self._mynn_kwargs(
                         ad, nlev, u, v, p_s, T_col, p_full_col, q_v_col, q_c,
                         q_i, cell_area, _winds_on_t_grid, mynn_initflag))
@@ -2343,8 +2352,15 @@ class PhysicsPipeline:
         if self.budget_ledger:
             from legoesm.diagnostics.process_ledger import ledger_entry
             if turb_out is not None:
+                # every water species this lane applied: mynn25 also moves
+                # condensate (routed above), no other kernel's is routed here
+                _dq_turb = turb_out.dq_v_dt
+                if _is_mynn_kernel(self.turbulence_fn):
+                    _dq_turb = _dq_turb + turb_out.dq_c_dt
+                    if turb_out.dq_i_dt is not None:
+                        _dq_turb = _dq_turb + turb_out.dq_i_dt
                 _bl_turb = ledger_entry(
-                    ad.unflatten_3d(turb_out.dq_v_dt),
+                    ad.unflatten_3d(_dq_turb),
                     ad.unflatten_3d(turb_out.dT_dt),
                     p_s, _bl_dsigma, area=self._ledger_area)
             else:
