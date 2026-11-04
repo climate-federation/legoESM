@@ -34,6 +34,31 @@ def _load_run_amip():
     return mod
 
 
+def global_masses(state, area, sigma_coord):
+    """Global mass [kg] of air, total water and each tracer, all in f64.
+
+    Tracer mass is ``sum_cells area * sum_k q_k dp_k / g`` with ``dp`` the
+    coordinate's own layer thickness at the state's ``p_s``; air mass is
+    ``sum area * p_s / g``.  Water = the mass species the dry-mass fixer
+    counts (no number concentrations).
+    """
+    from legoesm import constants
+    from legoesm.core.conservation import WATER_MASS_SPECIES
+    ps = np.asarray(state.p_s.data, dtype=np.float64)
+    area = np.asarray(area, dtype=np.float64)
+    dp = np.asarray(sigma_coord.layer_thickness_dp(ps), dtype=np.float64)
+    out = {"air": float(np.sum(area * ps) / constants.g)}
+    water = 0.0
+    for name, f in (state.tracers or {}).items():
+        q = np.asarray(getattr(f, "data", f), dtype=np.float64)
+        m = float(np.sum(area[:, None] * q * dp) / constants.g)
+        out[name] = m
+        if name in WATER_MASS_SPECIES:
+            water += m
+    out["water"] = water
+    return out
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True)
@@ -44,6 +69,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--hot-threshold", type=float, default=300.0)
     ap.add_argument("--thermo-terms", action="store_true",
                     help="decompose dT/dt at the restart state and exit (no integration)")
+    ap.add_argument("--tracer-mass", action="store_true",
+                    help="also print global mass of air, total water and every tracer "
+                         "(sum area*q*dp/g, f64) at each report")
+    ap.add_argument("--inject-qv", type=float, default=0.0,
+                    help="instrument self-test: multiply q_v by (1+X) after step "
+                         "--inject-step; the tracer-mass report must show a +X jump")
+    ap.add_argument("--inject-step", type=int, default=5)
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[],
                     help="run_amip path flags (see config/amip/amip_production.sh)")
     return ap
@@ -86,6 +118,9 @@ def main():
         print(f"step {n:5d}  t={n*dt/3600:7.3f} h  Tmax={T.max():8.2f}  "
               f"Tmax(k={a.hot_level})={T[:, a.hot_level].max():8.2f}  "
               f"hot_mean={h.mean():8.2f}  |u|max={np.abs(u).max():8.2f}", flush=True)
+        if a.tracer_mass:
+            m = global_masses(s, driver.model.mesh.areaCell, driver.model.sigma_coord)
+            print("  mass " + " ".join(f"{k}={v:.17e}" for k, v in m.items()), flush=True)
 
     report(0, state)
 
@@ -111,6 +146,13 @@ def main():
 
     for n in range(1, a.steps + 1):
         state = driver.model.step(state, dt)
+        if a.inject_qv and n == a.inject_step:
+            report(n, state)
+            qv = state.tracers["q_v"]
+            state = state._replace(tracers={**state.tracers, "q_v": qv.replace(
+                data=qv.data * (1.0 + a.inject_qv))})
+            print(f"  injected q_v *= 1+{a.inject_qv:g} after step {n}", flush=True)
+            report(n, state)
         if n % a.stride == 0 or n == a.steps:
             report(n, state)
             if not np.isfinite(np.asarray(state.T.data)).all():

@@ -47,3 +47,37 @@ def test_restart_and_passthrough_flags():
 def test_config_is_required():
     with pytest.raises(SystemExit):
         _load().build_arg_parser().parse_args([])
+
+
+def test_global_masses_known_answer():
+    """Mass weights: q = 1 in every layer gives the air mass of the layers;
+    a vapour scaled by (1+e) scales its own mass by exactly (1+e); numbers
+    are not counted as water."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from legoesm import constants
+
+    w = np.array([0.1, 0.3, 0.6])                   # layer fractions, sum 1
+    sc = SimpleNamespace(layer_thickness_dp=lambda ps: np.asarray(ps)[:, None] * w)
+    area = np.array([1.0e10, 2.0e10])
+    ps = np.array([1.0e5, 9.0e4])
+    one = np.ones((2, 3))
+    qv = np.array([[1e-3, 2e-3, 3e-3], [4e-3, 5e-3, 6e-3]])
+    st = SimpleNamespace(p_s=SimpleNamespace(data=ps),
+                         tracers={"q_v": qv, "q_c": 0.5 * qv, "N_c": 1e8 * one,
+                                  "ones": one})
+    m = _load().global_masses(st, area, sc)
+    air = float(np.sum(area * ps) / constants.g)
+    assert m["air"] == pytest.approx(air, rel=1e-15)
+    assert m["ones"] == pytest.approx(air, rel=1e-15)
+    expect_qv = float(np.sum(area[:, None] * qv * ps[:, None] * w) / constants.g)
+    assert m["q_v"] == pytest.approx(expect_qv, rel=1e-15)
+    assert m["water"] == pytest.approx(1.5 * expect_qv, rel=1e-15)
+    st.tracers["q_v"] = qv * (1 + 1e-6)
+    assert global_ratio(_load().global_masses(st, area, sc)["q_v"], expect_qv) == pytest.approx(1e-6, rel=1e-9)
+
+
+def global_ratio(a, b):
+    return a / b - 1.0
