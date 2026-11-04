@@ -1079,6 +1079,9 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         grow = (zf < 0.0).astype(zf.dtype)
     else:
         grow = smoothstep_cubic(-zf / growth_gate_width)
+    # Physical case: dE < 0 (new ice holds less enthalpy than water), so zf < 0
+    # grows ice; dE >= 0 arises only from 5.0.1's unclamped latent term and the
+    # MAX(0,.) then gives no growth, as NEMO.  Do not make the gate symmetric.
     # dE = 0 can only occur with 5.0.1's unclamped latent term, where NEMO's
     # quotient is undefined; growth is zero there (vote X9), and the double
     # where keeps the discarded division and its reverse pass finite.
