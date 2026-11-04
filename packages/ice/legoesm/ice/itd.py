@@ -1265,12 +1265,14 @@ def _si3_itd_shiftice(s: dict, cells, jl, donor_upper: bool, dai, dvi, amax, cfg
     return s
 
 
-def si3_ice_itd_reb(s: dict, *, interior, hi_max, hi_mean, amax, cfg: SI3IceCorConfig) -> dict:
+def si3_ice_itd_reb(s: dict, *, interior, hi_max, hi_mean, amax, cfg: SI3IceCorConfig,
+                    traced: bool | None = None) -> dict:
     """``ice_itd_reb``, ``iceitd.f90:623-690``: rebin too-thick then too-thin categories."""
     from legoesm.core.source_rounding import nemo_source_round as sr
 
     jpl = s["a_i"].shape[-1]
-    traced = _si3_traced(s, interior, hi_max, hi_mean, amax)
+    if traced is None:
+        traced = _si3_traced(s, interior, hi_max, hi_mean, amax)
 
     def thick_to_upper(jl, s):  # :628 DO jl = 1, jpl-1 (0-based jl)
         a, v = s["a_i"][..., jl], s["v_i"][..., jl]
@@ -1289,7 +1291,8 @@ def si3_ice_itd_reb(s: dict, *, interior, hi_max, hi_mean, amax, cfg: SI3IceCorC
     return _si3_loop(jpl - 1, thin_to_lower, s, traced)
 
 
-def si3_var_zapsmall(s: dict, *, interior, sss_m, sst_m, cfg: SI3IceCorConfig) -> dict:
+def si3_var_zapsmall(s: dict, *, interior, sss_m, sst_m, cfg: SI3IceCorConfig,
+                     traced: bool | None = None) -> dict:
     """``ice_var_zapsmall``, ``icevar.f90:625-735`` (``nn_icesal == 4`` arm)."""
     from legoesm.core.source_rounding import nemo_source_round as sr
     from legoesm.ice.si3_surface import fortran_max_tie_first as fmax
@@ -1305,7 +1308,8 @@ def si3_var_zapsmall(s: dict, *, interior, sss_m, sst_m, cfg: SI3IceCorConfig) -
     jpl = s["a_i"].shape[-1]
     sfx, hfx, wfx = s["sfx_res"], s["hfx_res"], s["wfx_res"]
     sz_new = fmin(cfg.rn_simin, sr(cfg.rn_sinew * sss_m))  # :642
-    traced = _si3_traced(s, interior, sss_m, sst_m)
+    if traced is None:
+        traced = _si3_traced(s, interior, sss_m, sst_m)
 
     def salt_category(jl, sfx):  # :633-645 DO jl
         def salt_layer(jk, sfx):  # DO jk
@@ -1345,6 +1349,37 @@ def si3_var_zapsmall(s: dict, *, interior, sss_m, sst_m, cfg: SI3IceCorConfig) -
     return s
 
 
+def si3_ice_cor_salinity_bounds(s: dict, *, interior, sss_m, cfg: SI3IceCorConfig,
+                                traced: bool | None = None) -> dict:
+    """``ice_cor`` salinity bounds (``icecor.f90:114-122``, ``nn_icesal == 4`` arm)."""
+    from legoesm.core.source_rounding import nemo_source_round as sr
+    from legoesm.ice.si3_surface import fortran_max_tie_first as fmax
+    from legoesm.ice.si3_surface import fortran_min_tie_first as fmin
+
+    s = dict(s)
+    r1 = 1.0 / cfg.rdt_ice
+    r1_nlay = 1.0 / s["szv_i"].shape[-2]
+    if traced is None:
+        traced = _si3_traced(s, interior, sss_m)
+
+    def salt_category(jl, carry):  # :114-122 DO jl
+        v = s["v_i"][..., jl]
+        lo = sr(sr(cfg.rn_simin * v) * r1_nlay)
+        hi = sr(sr(sr(cfg.rn_sinew * sss_m) * v) * r1_nlay)
+
+        def salt_layer(jk, carry):  # DO jk
+            sfx, szv_i = carry
+            zsal = szv_i[..., jk, jl]
+            new = fmin(fmax(zsal, lo), hi)  # :117-118, the kn /= 0 copy
+            new = jnp.where(interior, new, zsal)
+            sfx = jnp.where(interior, sr(sfx - sr(sr(sr(new - zsal) * cfg.rhoi) * r1)), sfx)
+            return sfx, szv_i.at[..., jk, jl].set(new)
+        return _si3_loop(s["szv_i"].shape[-2], salt_layer, carry, traced)
+
+    s["sfx_res"], s["szv_i"] = _si3_loop(s["a_i"].shape[-1], salt_category, (s["sfx_res"], s["szv_i"]), traced)
+    return s
+
+
 def si3_ice_cor_dyn(state: SI3IceCorState, *, rn_amax_2d, sss_m, sst_m, hi_max, hi_mean,
                     nn_hls: int, config: SI3IceCorConfig) -> SI3IceCorState:
     """``ice_cor(kt, kn=1)``, ``icecor.f90:81-130``, the post-dynamics correction.
@@ -1353,8 +1388,6 @@ def si3_ice_cor_dyn(state: SI3IceCorState, *, rn_amax_2d, sss_m, sst_m, hi_max, 
     NEMO's arrays at the call (``icedyn.f90:194``); every one is required.
     """
     from legoesm.core.source_rounding import nemo_source_round as sr
-    from legoesm.ice.si3_surface import fortran_max_tie_first as fmax
-    from legoesm.ice.si3_surface import fortran_min_tie_first as fmin
     from legoesm.ice.si3_surface import fortran_sum0
 
     if not isinstance(config, SI3IceCorConfig):
@@ -1391,24 +1424,7 @@ def si3_ice_cor_dyn(state: SI3IceCorState, *, rn_amax_2d, sss_m, sst_m, hi_max, 
     s["a_i"] = jnp.where(over[..., None], clamp, s["a_i"])
     if s["a_i"].shape[-1] > 1:  # :99
         s = si3_ice_itd_reb(s, interior=interior, hi_max=hi_max, hi_mean=hi_mean, amax=amax, cfg=config)
-    r1 = 1.0 / config.rdt_ice
-    r1_nlay = 1.0 / s["szv_i"].shape[-2]
     traced = _si3_traced(s, amax, sss_m, sst_m, hi_max, hi_mean)
-
-    def salt_category(jl, carry):  # :114-122 DO jl
-        v = s["v_i"][..., jl]
-        lo = sr(sr(config.rn_simin * v) * r1_nlay)
-        hi = sr(sr(sr(config.rn_sinew * sss_m) * v) * r1_nlay)
-
-        def salt_layer(jk, carry):  # DO jk
-            sfx, szv_i = carry
-            zsal = szv_i[..., jk, jl]
-            new = fmin(fmax(zsal, lo), hi)  # :117-118, the kn /= 0 copy
-            new = jnp.where(interior, new, zsal)
-            sfx = jnp.where(interior, sr(sfx - sr(sr(sr(new - zsal) * config.rhoi) * r1)), sfx)
-            return sfx, szv_i.at[..., jk, jl].set(new)
-        return _si3_loop(s["szv_i"].shape[-2], salt_layer, carry, traced)
-
-    s["sfx_res"], s["szv_i"] = _si3_loop(s["a_i"].shape[-1], salt_category, (s["sfx_res"], s["szv_i"]), traced)
+    s = si3_ice_cor_salinity_bounds(s, interior=interior, sss_m=sss_m, cfg=config, traced=traced)
     s = si3_var_zapsmall(s, interior=interior, sss_m=sss_m, sst_m=sst_m, cfg=config)  # :128
     return SI3IceCorState(**{k: s[k] for k in SI3IceCorState._fields})

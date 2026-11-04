@@ -875,9 +875,14 @@ def measure_reverse_compile_unit(
         "label": label,
         "fwd_make_jaxpr_seconds": round(fwd_jaxpr_s, 3),
         "vg_make_jaxpr_seconds": round(vg_jaxpr_s, 3),
+        "tracing_seconds": round(vg_jaxpr_s, 3),
         "lower_seconds": round(lower_s, 3),
+        "lowering_seconds": round(lower_s, 3),
         "lower_total_seconds": round(vg_jaxpr_s + lower_s, 3),
         "compile_seconds": round(compile_s, 3),
+        "compilation_seconds": round(compile_s, 3),
+        "lower_plus_compile_seconds": round(lower_s + compile_s, 3),
+        "trace_plus_lower_plus_compile_seconds": round(vg_jaxpr_s + lower_s + compile_s, 3),
         "execution_seconds": None,
         "objective": None,
         "peak_rss_kib": rss_kib,
@@ -1243,20 +1248,42 @@ def probe(
 
     jax.eval_shape(objective, inputs)
     if execution_mode == "compiled":
-        transformed = jax.jit(jax.value_and_grad(objective, has_aux=True))
+        vg_fn = jax.value_and_grad(objective, has_aux=True)
+        _log_progress("full_o17_probe: start make_jaxpr(vg)")
+        trace_started = time.monotonic()
+        vg_closed = jax.make_jaxpr(vg_fn)(inputs)
+        tracing_seconds = time.monotonic() - trace_started
+        vg_counts = _count_jaxpr_equations(vg_closed)
+        _log_progress(
+            f"full_o17_probe: done make_jaxpr(vg) in {tracing_seconds:.2f}s "
+            f"(top={vg_counts['top_eqns']}, rec={vg_counts['recursive_eqns']}); start lower()"
+        )
+        transformed = jax.jit(vg_fn)
         lower_started = time.monotonic()
         lowered = transformed.lower(inputs)
         lower_seconds = time.monotonic() - lower_started
         hlo_pre = _count_hlo_text(lowered.as_text(dialect="hlo"))
+        _log_progress(
+            f"full_o17_probe: done lower() in {lower_seconds:.2f}s "
+            f"(hlo_pre={hlo_pre['instructions_total']}); start compile()"
+        )
         compiled, compile_only_seconds, xla_breakdown = _compile_with_optional_xla_log(
             lowered, xla_pass_log
         )
         compile_seconds = lower_seconds + compile_only_seconds
         hlo_post = _count_hlo_text(compiled.as_text())
+        _log_progress(
+            f"full_o17_probe: done compile() in {compile_only_seconds:.2f}s "
+            f"(hlo_post={hlo_post['instructions_total']}); start execute()"
+        )
         execute_started = time.monotonic()
         (value, primal1), grad = compiled(inputs)
+        jax.block_until_ready(((value, primal1), grad))
         execution_seconds = time.monotonic() - execute_started
+        _log_progress(f"full_o17_probe: done execute() in {execution_seconds:.4f}s")
     else:
+        tracing_seconds = None
+        vg_counts = None
         lower_seconds = None
         compile_only_seconds = None
         compile_seconds = None
@@ -1372,6 +1399,7 @@ def probe(
         for row in finite_rows
         if row["nonzero"] == 0
     ]
+    rss_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     report = {
         "status": "PASS"
         if unchanged and all(r["nan"] == r["inf"] == 0 for r in finite_rows)
@@ -1379,14 +1407,26 @@ def probe(
         "provenance": _provenance(),
         "objective": float(value),
         "forward_bits_unchanged": unchanged,
+        "tracing_seconds": tracing_seconds,
         "lower_seconds": lower_seconds,
+        "lowering_seconds": lower_seconds,
         "compile_only_seconds": compile_only_seconds,
+        "compilation_seconds": compile_only_seconds,
         "compile_seconds": compile_seconds,
+        "lower_plus_compile_seconds": compile_seconds,
+        "trace_plus_lower_plus_compile_seconds": (
+            tracing_seconds + compile_seconds
+            if tracing_seconds is not None and compile_seconds is not None
+            else None
+        ),
         "execution_seconds": execution_seconds,
         "execution_mode": execution_mode,
+        "vg_jaxpr_top_eqns": vg_counts["top_eqns"] if vg_counts else None,
+        "vg_jaxpr_rec_eqns": vg_counts["recursive_eqns"] if vg_counts else None,
         "hlo_pre_opt_instructions": hlo_pre["instructions_total"] if hlo_pre else None,
         "hlo_post_opt_instructions": hlo_post["instructions_total"] if hlo_post else None,
-        "peak_rss_kib": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),
+        "peak_rss_kib": rss_kib,
+        "peak_rss_gib": round(rss_kib / (1024.0 * 1024.0), 3),
         "memory_rule_reason": (
             "exact full O17 reverse-mode compile; run alone on a small conforming mixed-regime tile"
         ),
@@ -1407,6 +1447,525 @@ def probe(
     if xla_breakdown is not None:
         report["xla_pass_log"] = str(xla_pass_log)
         report["xla_breakdown"] = xla_breakdown
+    return report
+
+
+def build_negative_zero_var_agg_fixture(
+    recorded_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a conforming si3_var_agg(kn=2) input dict containing IEEE-754 -0.0 in every input.
+
+    Exercises both:
+    - Halo cell (0, 0), where interior == +0.0 and negative category/layer entries
+      paired with -0.0 across categories 1..4 / layers 1..nlay propagate -0.0
+      through the 50-step tm_i_acc and 25-step tm_s_acc accumulations and
+      survive `* interior` across all 12 halo-masked output fields; and
+    - Interior cell (2, 2), where normal float64 -1e-300 in category 0 paired with
+      -0.0 in categories 1..4 and 1e30 in category 1 of a_i/v_i/a_ip underflows
+      to -0.0 in both eager and XLA CPU JIT across tm_su, tm_si, om_i, sm_i,
+      hm_ip, and hm_il.
+    """
+    neg_zero = np.float64(-0.0)
+    kw: dict[str, Any] = dict(recorded_kwargs)
+    array_names = (
+        "v_i",
+        "v_s",
+        "sv_i",
+        "a_i",
+        "oa_i",
+        "a_ip",
+        "v_ip",
+        "v_il",
+        "t_su",
+        "t_si",
+        "e_s",
+        "e_i",
+        "szv_i",
+        "a_ip_eff",
+        "t_i",
+        "t_s",
+    )
+    np_arrays = {k: np.array(kw[k], dtype=np.float64, copy=True) for k in array_names}
+
+    # Ensure every one of the 16 input arrays contains -0.0 in category/layer > 0 on halo cell (0, 0)
+    for k in array_names:
+        arr = np_arrays[k]
+        if arr.ndim == 3:
+            arr[0, 0, :] = neg_zero
+        else:
+            arr[0, 0, :, :] = neg_zero
+
+    # Halo cell (0, 0): active volume/concentration so tm_i_acc and tm_s_acc take the
+    # `vt_i > epsi20` / `vt_s > epsi20` branch across all 50 / 25 steps, with -0.0 in steps 1..49 / 1..24.
+    np_arrays["v_i"][0, 0, 0] = 1.0
+    np_arrays["v_s"][0, 0, 0] = 1.0
+    np_arrays["a_i"][0, 0, 0] = 0.5
+    np_arrays["a_ip"][0, 0, 0] = 0.5
+    np_arrays["t_i"][0, 0, 0, 0] = -10.0
+    np_arrays["t_s"][0, 0, 0, 0] = -5.0
+    np_arrays["e_s"][0, 0, 0, 0] = -1.0
+    np_arrays["e_i"][0, 0, 0, 0] = -1.0
+    np_arrays["a_ip_eff"][0, 0, 0] = -0.1
+    np_arrays["t_su"][0, 0, 0] = -1.0
+    np_arrays["t_si"][0, 0, 0] = -1.0
+    np_arrays["oa_i"][0, 0, 0] = -0.1
+    np_arrays["szv_i"][0, 0, 0, 0] = -0.1
+    np_arrays["v_ip"][0, 0, 0] = -0.1
+    np_arrays["v_il"][0, 0, 0] = -0.1
+
+    # Interior cell (2, 2): normal float64 -1e-300 divided by 1e30 underflows to -0.0 in eager and XLA CPU JIT.
+    np_arrays["a_i"][2, 2, :] = np.array([1.0, 1.0e30, neg_zero, neg_zero, neg_zero], dtype=np.float64)
+    np_arrays["v_i"][2, 2, :] = np.array([1.0, 1.0e30, neg_zero, neg_zero, neg_zero], dtype=np.float64)
+    np_arrays["a_ip"][2, 2, :] = np.array([1.0, 1.0e30, neg_zero, neg_zero, neg_zero], dtype=np.float64)
+    np_arrays["t_su"][2, 2, :] = np.array([-1.0e-300, neg_zero, neg_zero, neg_zero, neg_zero], dtype=np.float64)
+    np_arrays["t_si"][2, 2, :] = np.array([-1.0e-300, neg_zero, neg_zero, neg_zero, neg_zero], dtype=np.float64)
+    np_arrays["oa_i"][2, 2, :] = np.array([-1.0e-300, neg_zero, neg_zero, neg_zero, neg_zero], dtype=np.float64)
+    np_arrays["v_ip"][2, 2, :] = np.array([-1.0e-300, neg_zero, neg_zero, neg_zero, neg_zero], dtype=np.float64)
+    np_arrays["v_il"][2, 2, :] = np.array([-1.0e-300, neg_zero, neg_zero, neg_zero, neg_zero], dtype=np.float64)
+    np_arrays["szv_i"][2, 2, :, :] = neg_zero
+    np_arrays["szv_i"][2, 2, 0, 0] = -1.0e-300
+
+    for k, arr in np_arrays.items():
+        kw[k] = jnp.asarray(arr, dtype=jnp.float64)
+    return kw
+
+
+def _pytree_bit_stats(reference: Any, candidate: Any) -> dict[str, Any]:
+    ref_leaves = [
+        np.asarray(x, dtype=np.float64)
+        for x in jax.tree_util.tree_leaves(reference)
+        if _is_float_leaf(x)
+    ]
+    cand_leaves = [
+        np.asarray(x, dtype=np.float64)
+        for x in jax.tree_util.tree_leaves(candidate)
+        if _is_float_leaf(x)
+    ]
+    if len(ref_leaves) != len(cand_leaves):
+        raise AssertionError(f"float leaf count mismatch: {len(ref_leaves)} vs {len(cand_leaves)}")
+    bit_mismatches = 0
+    pos_zeros_ref = 0
+    neg_zeros_ref = 0
+    neg_zeros_cand = 0
+    nan_count = 0
+    for r, c in zip(ref_leaves, cand_leaves):
+        rb = r.view(np.uint64)
+        cb = c.view(np.uint64)
+        bit_mismatches += int(np.count_nonzero(rb != cb))
+        pos_zeros_ref += int(np.count_nonzero(rb == np.uint64(0)))
+        neg_zeros_ref += int(np.count_nonzero(rb == np.uint64(0x8000000000000000)))
+        neg_zeros_cand += int(np.count_nonzero(cb == np.uint64(0x8000000000000000)))
+        nan_count += int(np.count_nonzero(np.isnan(r)))
+    return {
+        "float_leaves": len(ref_leaves),
+        "bit_mismatches": bit_mismatches,
+        "positive_zeros_ref": pos_zeros_ref,
+        "negative_zeros_ref": neg_zeros_ref,
+        "negative_zeros_cand": neg_zeros_cand,
+        "nan_count": nan_count,
+    }
+
+
+def reproduce_d198_r5_var_agg_and_o16(
+    master: Path = DEFAULT_MASTER,
+    *,
+    execute_scan: bool = True,
+    include_o15: bool = True,
+    output_path: Path | None = None,
+) -> dict[str, Any]:
+    """Committed DECISION 198 round 5 reproducer for si3_var_agg(kn=2), si3_o16_step, and si3_o15_step.
+
+    1. Intercepts real recorded O15 and O16 inputs from a single eager si3_o17_step call.
+    2. Verifies 0-ULP forward bit parity (eager vs jit, unrolled vs scan/traced, signed zeros
+       and NaNs included) on both recorded inputs and the negative-zero fixture.
+    3. Measures reverse-mode AD compile (tracing, lowering, compilation separately) for
+       unrolled (compile-only) vs scan/traced (compile + execute).
+    """
+    from legoesm.ice import si3_finalize as finalize_mod
+    from legoesm.ice import si3_orca2_state as state_mod
+
+    entry, forcing, card = _case(master)
+    recorded, eager_s = _record_eager_interceptions(
+        entry, forcing, card, ("si3_o15_step", "si3_o16_step")
+    )
+    o15_args, o15_kw, o15_out_recorded = recorded["si3_o15_step"]
+    o16_args, o16_kw, o16_out_recorded = recorded["si3_o16_step"]
+    o16_state = o16_args[0]
+    o16_cfg = o16_kw["config"]
+    o16_sss_m = o16_kw["sss_m"]
+    eqv = state_mod.si3_var_glo2eqv(
+        v_i=o16_state.v_i,
+        v_s=o16_state.v_s,
+        sv_i=o16_state.sv_i,
+        a_i=o16_state.a_i,
+        oa_i=o16_state.oa_i,
+        a_ip=o16_state.a_ip,
+        v_ip=o16_state.v_ip,
+        v_il=o16_state.v_il,
+        e_s=o16_state.e_s,
+        e_i=o16_state.e_i,
+        szv_i=o16_state.szv_i,
+        kn=2,
+        hi_max_top=o16_state.bounds.hi_max[-1],
+        sss_m=o16_sss_m,
+        config=o16_cfg,
+    )
+    var_agg_kwargs: dict[str, Any] = {
+        "v_i": o16_state.v_i,
+        "v_s": eqv.v_s,
+        "sv_i": o16_state.sv_i,
+        "a_i": eqv.a_i,
+        "oa_i": o16_state.oa_i,
+        "a_ip": o16_state.a_ip,
+        "v_ip": o16_state.v_ip,
+        "v_il": o16_state.v_il,
+        "t_su": o16_state.t_su,
+        "t_si": o16_state.t_si,
+        "e_s": o16_state.e_s,
+        "e_i": o16_state.e_i,
+        "szv_i": o16_state.szv_i,
+        "a_ip_eff": eqv.a_ip_eff,
+        "t_i": eqv.t_i,
+        "t_s": eqv.t_s,
+        "kn": 2,
+        "config": o16_cfg,
+    }
+    var_agg_keys = tuple(k for k in var_agg_kwargs if k not in ("kn", "config"))
+    var_agg_diff = tuple(var_agg_kwargs[k] for k in var_agg_keys)
+
+    def _call_var_agg(diff_tuple: tuple[Any, ...]) -> Any:
+        call_kw = {k: v for k, v in zip(var_agg_keys, diff_tuple)}
+        call_kw["kn"] = 2
+        call_kw["config"] = o16_cfg
+        return state_mod.si3_var_agg(**call_kw)
+
+    def _var_agg_obj(diff_tuple: tuple[Any, ...]) -> jax.Array:
+        return _sum_unique_floating_leaves(_call_var_agg(diff_tuple))
+
+    # Forward bit parity on recorded inputs and negative-zero fixture
+    agg_eager = _call_var_agg(var_agg_diff)
+    agg_scan_jit = jax.jit(_call_var_agg)(var_agg_diff)
+    orig_state_traced = state_mod._si3_traced
+    try:
+        state_mod._si3_traced = lambda *_: False
+        agg_unrolled_jit = jax.jit(_call_var_agg)(var_agg_diff)
+    finally:
+        state_mod._si3_traced = orig_state_traced
+
+    neg_zero_kw = build_negative_zero_var_agg_fixture(var_agg_kwargs)
+    neg_zero_diff = tuple(neg_zero_kw[k] for k in var_agg_keys)
+    input_neg_zeros = {
+        k: int(np.count_nonzero(np.asarray(neg_zero_kw[k]).view(np.uint64) == np.uint64(0x8000000000000000)))
+        for k in var_agg_keys
+    }
+    agg_neg_eager = _call_var_agg(neg_zero_diff)
+    agg_neg_scan_jit = jax.jit(_call_var_agg)(neg_zero_diff)
+    try:
+        state_mod._si3_traced = lambda *_: False
+        agg_neg_unrolled_jit = jax.jit(_call_var_agg)(neg_zero_diff)
+    finally:
+        state_mod._si3_traced = orig_state_traced
+    output_neg_zero_fields = {
+        name: int(
+            np.count_nonzero(
+                np.asarray(getattr(agg_neg_scan_jit, name)).view(np.uint64)
+                == np.uint64(0x8000000000000000)
+            )
+        )
+        for name in agg_neg_scan_jit._fields
+        if int(
+            np.count_nonzero(
+                np.asarray(getattr(agg_neg_scan_jit, name)).view(np.uint64)
+                == np.uint64(0x8000000000000000)
+            )
+        )
+        > 0
+    }
+
+    parity = {
+        "var_agg_recorded_eager_vs_scan_jit": _pytree_bit_stats(agg_eager, agg_scan_jit),
+        "var_agg_recorded_unrolled_jit_vs_scan_jit": _pytree_bit_stats(
+            agg_unrolled_jit, agg_scan_jit
+        ),
+        "var_agg_neg_zero_eager_vs_scan_jit": _pytree_bit_stats(agg_neg_eager, agg_neg_scan_jit),
+        "var_agg_neg_zero_unrolled_jit_vs_scan_jit": _pytree_bit_stats(
+            agg_neg_unrolled_jit, agg_neg_scan_jit
+        ),
+        "var_agg_neg_zero_input_counts": input_neg_zeros,
+        "var_agg_neg_zero_surviving_output_fields": output_neg_zero_fields,
+    }
+
+    # Reverse-mode AD benchmarks: unrolled (compile-only) vs scan/traced (compile + execute)
+    benchmarks: dict[str, Any] = {}
+    try:
+        state_mod._si3_traced = lambda *_: False
+        benchmarks["si3_var_agg_kn2_unrolled"] = measure_reverse_compile_unit(
+            "si3_var_agg_kn2_unrolled",
+            _var_agg_obj,
+            var_agg_diff,
+            execute=False,
+        )
+    finally:
+        state_mod._si3_traced = orig_state_traced
+
+    benchmarks["si3_var_agg_kn2_scan"] = measure_reverse_compile_unit(
+        "si3_var_agg_kn2_scan",
+        _var_agg_obj,
+        var_agg_diff,
+        execute=execute_scan,
+    )
+
+    o16_leaves, o16_treedef = jax.tree_util.tree_flatten((o16_args, o16_kw))
+    o16_mask = [_is_float_leaf(x) for x in o16_leaves]
+    o16_diff = [x for x, m in zip(o16_leaves, o16_mask) if m]
+
+    def _call_o16(diff_list: list[Any]) -> Any:
+        it = iter(diff_list)
+        r_args, r_kw = jax.tree_util.tree_unflatten(
+            o16_treedef, [next(it) if m else v for v, m in zip(o16_leaves, o16_mask)]
+        )
+        return finalize_mod.si3_o16_step(*r_args, **r_kw)
+
+    def _o16_obj(diff_list: list[Any]) -> jax.Array:
+        return _sum_unique_floating_leaves(_call_o16(diff_list))
+
+    o16_scan_jit_out = jax.jit(_call_o16)(o16_diff)
+    parity["si3_o16_step_recorded_eager_vs_scan_jit"] = _pytree_bit_stats(
+        o16_out_recorded, o16_scan_jit_out
+    )
+
+    try:
+        state_mod._si3_traced = lambda *_: False
+        benchmarks["si3_o16_step_unrolled"] = measure_reverse_compile_unit(
+            "si3_o16_step_unrolled",
+            _o16_obj,
+            o16_diff,
+            execute=False,
+        )
+    finally:
+        state_mod._si3_traced = orig_state_traced
+
+    benchmarks["si3_o16_step_scan"] = measure_reverse_compile_unit(
+        "si3_o16_step_scan",
+        _o16_obj,
+        o16_diff,
+        execute=execute_scan,
+    )
+
+    if include_o15:
+        o15_leaves, o15_treedef = jax.tree_util.tree_flatten((o15_args, o15_kw))
+        o15_mask = [_is_float_leaf(x) for x in o15_leaves]
+        o15_diff = [x for x, m in zip(o15_leaves, o15_mask) if m]
+
+        def _call_o15(diff_list: list[Any]) -> Any:
+            it = iter(diff_list)
+            r_args, r_kw = jax.tree_util.tree_unflatten(
+                o15_treedef, [next(it) if m else v for v, m in zip(o15_leaves, o15_mask)]
+            )
+            return finalize_mod.si3_o15_step(*r_args, **r_kw)
+
+        def _o15_obj(diff_list: list[Any]) -> jax.Array:
+            return _sum_unique_floating_leaves(_call_o15(diff_list))
+
+        o15_traced_jit_out = jax.jit(_call_o15)(o15_diff)
+        parity["si3_o15_step_recorded_eager_vs_traced_jit"] = _pytree_bit_stats(
+            o15_out_recorded, o15_traced_jit_out
+        )
+        orig_finalize_traced = finalize_mod._si3_traced
+        try:
+            finalize_mod._si3_traced = lambda *_: False
+            benchmarks["si3_o15_step_unrolled"] = measure_reverse_compile_unit(
+                "si3_o15_step_unrolled",
+                _o15_obj,
+                o15_diff,
+                execute=False,
+            )
+        finally:
+            finalize_mod._si3_traced = orig_finalize_traced
+
+        benchmarks["si3_o15_step_traced"] = measure_reverse_compile_unit(
+            "si3_o15_step_traced",
+            _o15_obj,
+            o15_diff,
+            execute=execute_scan,
+        )
+
+        # Codex sub-candidate measurements on recorded O15/O16 inputs:
+        # 1. O15 _ice_itd_reb (si3_finalize.py:440-594)
+        o15_state, o15_fluxes = o15_args
+        o15_cfg = o15_kw["config"]
+        o15_sss_m = o15_kw["sss_m"]
+        o15_amax = o15_kw["rn_amax_2d"]
+
+        def _reb_obj(x: tuple[Any, Any]) -> jax.Array:
+            return _sum_unique_floating_leaves(finalize_mod._ice_itd_reb(x[0], x[1], o15_cfg))
+
+        try:
+            finalize_mod._si3_traced = lambda *_: False
+            benchmarks["o15_itd_reb_unrolled"] = measure_reverse_compile_unit(
+                "o15_itd_reb_unrolled",
+                _reb_obj,
+                (o15_state, o15_amax),
+                execute=execute_scan,
+            )
+        finally:
+            finalize_mod._si3_traced = orig_finalize_traced
+
+        benchmarks["o15_itd_reb_traced"] = measure_reverse_compile_unit(
+            "o15_itd_reb_traced",
+            _reb_obj,
+            (o15_state, o15_amax),
+            execute=execute_scan,
+        )
+
+        # 2. O15 50-step salinity bounds loop (si3_finalize.py:665-720 / itd.py:1352-1380)
+        import legoesm.constants as canonical_constants
+        from legoesm.ice.itd import SI3IceCorConfig, si3_ice_cor_salinity_bounds
+
+        cor_cfg = SI3IceCorConfig(
+            rn_himin=float(o15_kw["rn_himin"]),
+            rn_simin=float(o15_cfg.rn_simin),
+            rn_sinew=float(o15_cfg.rn_sinew),
+            nn_icesal=int(o15_cfg.nn_icesal),
+            ln_pnd=bool(o15_cfg.ln_pnd),
+            ln_pnd_lids=bool(o15_cfg.ln_pnd_lids),
+            rdt_ice=float(o15_cfg.rDt_ice),
+            rhoi=float(o15_cfg.ice_constants.rho_ice),
+            rhos=float(o15_cfg.ice_constants.rho_snow),
+            rhow=float(canonical_constants.rho_water),
+            rt0=float(o15_cfg.ice_constants.T0),
+        )
+        jpi_c, jpj_c, _ = o15_state.a_i.shape
+        h_c = int(o15_cfg.nn_hls)
+        sl_c = (slice(h_c, -h_c), slice(h_c, -h_c)) if h_c else (slice(None), slice(None))
+        interior_c = jnp.zeros((jpi_c, jpj_c), dtype=jnp.bool_).at[sl_c].set(True)
+
+        from legoesm.core.source_rounding import nemo_source_round as sr
+
+        def _sal_unrolled_obj(x: tuple[Any, Any, Any, Any]) -> jax.Array:
+            a_i_in, v_i_in, szv_i_in, sfx_in = x
+            dtype = a_i_in.dtype
+            r1_nlay_i = sr(jnp.asarray(1.0 / float(o15_cfg.nlay_i), dtype=dtype))
+            r1_dt = sr(jnp.asarray(1.0 / float(o15_cfg.rDt_ice), dtype=dtype))
+            rhoi = jnp.asarray(o15_cfg.ice_constants.rho_ice, dtype=dtype)
+            sss = jnp.asarray(o15_sss_m, dtype=dtype)
+            szv_i = szv_i_in
+            sfx_res = sfx_in
+            for jl in range(o15_cfg.jpl):
+                for jk in range(o15_cfg.nlay_i):
+                    old = szv_i[..., jk, jl]
+                    lower = sr(sr(o15_cfg.rn_simin * v_i_in[..., jl]) * r1_nlay_i)
+                    upper = sr(
+                        sr(sr(sr(o15_cfg.rn_sinew * sss) * v_i_in[..., jl]) * r1_nlay_i)
+                    )
+                    bounded_low = jnp.where(lower > old, lower, old)
+                    bounded = jnp.where(upper < bounded_low, upper, bounded_low)
+                    bounded = jnp.where(interior_c, bounded, old)
+                    szv_i = szv_i.at[..., jk, jl].set(bounded)
+                    delta = sr(bounded - old)
+                    correction = sr(sr(delta * rhoi) * r1_dt)
+                    sfx_res = jnp.where(interior_c, sr(sfx_res - correction), sfx_res)
+            return _sum_unique_floating_leaves((szv_i, sfx_res))
+
+        def _sal_traced_obj(x: tuple[Any, Any, Any, Any]) -> jax.Array:
+            out = si3_ice_cor_salinity_bounds(
+                {"a_i": x[0], "v_i": x[1], "szv_i": x[2], "sfx_res": x[3]},
+                interior=interior_c,
+                sss_m=o15_sss_m,
+                cfg=cor_cfg,
+                traced=True,
+            )
+            return _sum_unique_floating_leaves((out["szv_i"], out["sfx_res"]))
+
+        sal_inputs = (o15_state.a_i, o15_state.v_i, o15_state.szv_i, o15_fluxes.sfx_res)
+        benchmarks["o15_salinity_50step_unrolled"] = measure_reverse_compile_unit(
+            "o15_salinity_50step_unrolled",
+            _sal_unrolled_obj,
+            sal_inputs,
+            execute=execute_scan,
+        )
+        benchmarks["o15_salinity_50step_traced"] = measure_reverse_compile_unit(
+            "o15_salinity_50step_traced",
+            _sal_traced_obj,
+            sal_inputs,
+            execute=execute_scan,
+        )
+
+        # 3. O12 10-step pond permeability loop (si3_thd_pnd.py:247-260)
+        from legoesm.core.source_rounding import nemo_source_round as sr
+
+        def _o12_perm_10step_obj(x: tuple[Any, Any]) -> jax.Array:
+            t_i_cat, sz_i_cat = x
+            zt1 = sr(t_i_cat - float(o16_cfg.ice_constants.T0))
+            zs1 = sz_i_cat
+            zperm_layers = []
+            for jk in range(o16_cfg.nlay_i):
+                zt_k = zt1[:, :, jk]
+                zs_k = zs1[:, :, jk]
+                zfac = jnp.where(zt_k < -2.0, -5.0, -18.0)
+                zb_k = jnp.maximum(0.0, jnp.minimum(1.0, sr(sr(zs_k / jnp.minimum(-0.01, zt_k)) / zfac)))
+                zperm_layers.append(sr(3.0e-8 * jnp.power(zb_k, 3.0)))
+            zperm = zperm_layers[0]
+            for jk in range(1, o16_cfg.nlay_i):
+                zperm = jnp.minimum(zperm, zperm_layers[jk])
+            return jnp.sum(zperm)
+
+        benchmarks["o12_pnd_10step_perm_loop"] = measure_reverse_compile_unit(
+            "o12_pnd_10step_perm_loop",
+            _o12_perm_10step_obj,
+            (eqv.t_i[:, :, :, 0], eqv.sz_i[:, :, :, 0]),
+            execute=execute_scan,
+        )
+
+        # 4. 10-step aggregation sums (si3_orca2_state.py:768-777, 997-998)
+        benchmarks["fortran_sum_categories_10step"] = measure_reverse_compile_unit(
+            "fortran_sum_categories_10step",
+            lambda e_arr: jnp.sum(
+                state_mod.fortran_sum_categories(
+                    state_mod.fortran_sum_categories(e_arr, axis=-1), axis=-1
+                )
+            ),
+            o16_state.e_i,
+            execute=execute_scan,
+        )
+
+        def _glo2eqv_si_10step_obj(sz_i_in: Any) -> jax.Array:
+            r1_nlay_i = sr(jnp.asarray(1.0 / float(o16_cfg.nlay_i), dtype=sz_i_in.dtype))
+            s_i_acc = jnp.zeros_like(o16_state.v_i)
+            for jk in range(o16_cfg.nlay_i):
+                s_i_acc = sr(s_i_acc + sr(sz_i_in[:, :, jk, :] * r1_nlay_i))
+            return jnp.sum(s_i_acc)
+
+        benchmarks["glo2eqv_s_i_sum_10step"] = measure_reverse_compile_unit(
+            "glo2eqv_s_i_sum_10step",
+            _glo2eqv_si_10step_obj,
+            eqv.sz_i,
+            execute=execute_scan,
+        )
+
+    all_parity_ok = (
+        parity["var_agg_recorded_eager_vs_scan_jit"]["bit_mismatches"] == 0
+        and parity["var_agg_recorded_unrolled_jit_vs_scan_jit"]["bit_mismatches"] == 0
+        and parity["var_agg_neg_zero_eager_vs_scan_jit"]["bit_mismatches"] == 0
+        and parity["var_agg_neg_zero_unrolled_jit_vs_scan_jit"]["bit_mismatches"] == 0
+        and parity["var_agg_neg_zero_eager_vs_scan_jit"]["negative_zeros_cand"] > 0
+        and all(v > 0 for v in input_neg_zeros.values())
+        and parity["si3_o16_step_recorded_eager_vs_scan_jit"]["bit_mismatches"] == 0
+        and (
+            not include_o15
+            or parity["si3_o15_step_recorded_eager_vs_traced_jit"]["bit_mismatches"] == 0
+        )
+    )
+    report = {
+        "status": "PASS" if all_parity_ok else "FAIL",
+        "provenance": _provenance(),
+        "eager_interception_seconds": round(eager_s, 3),
+        "parity": parity,
+        "benchmarks": benchmarks,
+    }
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     return report
 
 
@@ -1484,6 +2043,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--vmodule", dest="vmodule", type=str, default=None)
     parser.add_argument("--compile-only", action="store_true")
+    parser.add_argument(
+        "--reproduce-d198r5",
+        action="store_true",
+        help="Run the committed DECISION 198 round 5 reproducer for si3_var_agg(kn=2), si3_o16_step, and si3_o15_step.",
+    )
     args = parser.parse_args(argv)
 
     is_diag = any(
@@ -1494,7 +2058,14 @@ def main(argv: list[str] | None = None) -> int:
             args.glue_only,
         )
     )
-    if is_diag:
+    if args.reproduce_d198r5:
+        report = reproduce_d198_r5_var_agg_and_o16(
+            args.master,
+            execute_scan=not args.compile_only,
+            include_o15=True,
+            output_path=args.output,
+        )
+    elif is_diag:
         prefixes = _parse_int_list(args.prefixes) if args.prefixes else []
         slices = _parse_slice_list(args.slices) if args.slices else []
         isolated = (

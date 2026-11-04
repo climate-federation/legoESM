@@ -1169,21 +1169,45 @@ def si3_var_agg(
     sm_i = sr(st_i * z1_vt_i) * interior
 
     r1_nlay_i = sr(jnp.asarray(1.0 / float(nlay_i), dtype=dtype))
-    tm_i_acc = jnp.zeros((jpi, jpj), dtype=dtype)
-    for jl in range(jpl):
-        v_i_cat = v_i[:, :, jl]
-        for jk in range(nlay_i):
-            contrib = sr(sr(sr(r1_nlay_i * t_i[:, :, jk, jl]) * v_i_cat) / vt_i_safe)
-            tm_i_acc = jnp.where(vt_i > _EPSI20, sr(tm_i_acc + contrib), rt0)
-
     r1_nlay_s = sr(jnp.asarray(1.0 / float(nlay_s), dtype=dtype))
     vt_s_safe = jnp.where(vt_s > _EPSI20, vt_s, 1.0)
+    tm_i_acc = jnp.zeros((jpi, jpj), dtype=dtype)
     tm_s_acc = jnp.zeros((jpi, jpj), dtype=dtype)
-    for jl in range(jpl):
-        v_s_cat = v_s[:, :, jl]
-        for jk in range(nlay_s):
-            contrib = sr(sr(sr(r1_nlay_s * t_s[:, :, jk, jl]) * v_s_cat) / vt_s_safe)
-            tm_s_acc = jnp.where(vt_s > _EPSI20, sr(tm_s_acc + contrib), rt0)
+    if _si3_traced(v_i, v_s, vt_i, vt_s, t_i, t_s):
+        # DECISION 198: traced callers run the `DO jl = 1, jpl` / `DO jk = 1, nlay_i`
+        # (`src/ICE/icevar.F90:181-191`) and `DO jl = 1, jpl` / `DO jk = 1, nlay_s`
+        # (`src/ICE/icevar.F90:192-200`) accumulations as static-trip `lax.scan`
+        # carries in exact `(jl, jk)` order; eager calls keep the Python loops.
+        def _scan_layer_temp(
+            acc0: Field, t_arr: Field, v_arr: Field, vt_arr: Field, vt_safe: Field, r1_nlay: Field, nlay: int
+        ) -> Field:
+            has_vol = vt_arr > _EPSI20
+            t_seq = jnp.moveaxis(t_arr, (3, 2), (0, 1)).reshape(jpl * nlay, jpi, jpj)
+            v_seq = jnp.broadcast_to(
+                jnp.moveaxis(v_arr, 2, 0)[:, None, :, :], (jpl, nlay, jpi, jpj)
+            ).reshape(jpl * nlay, jpi, jpj)
+
+            def _step(acc: Field, xs: tuple[Field, Field]) -> tuple[Field, None]:
+                t_lay, v_cat = xs
+                contrib = sr(sr(sr(r1_nlay * t_lay) * v_cat) / vt_safe)
+                return jnp.where(has_vol, sr(acc + contrib), rt0), None
+
+            out, _ = jax.lax.scan(_step, acc0, (t_seq, v_seq))
+            return out
+
+        tm_i_acc = _scan_layer_temp(tm_i_acc, t_i, v_i, vt_i, vt_i_safe, r1_nlay_i, nlay_i)
+        tm_s_acc = _scan_layer_temp(tm_s_acc, t_s, v_s, vt_s, vt_s_safe, r1_nlay_s, nlay_s)
+    else:
+        for jl in range(jpl):
+            v_i_cat = v_i[:, :, jl]
+            for jk in range(nlay_i):
+                contrib = sr(sr(sr(r1_nlay_i * t_i[:, :, jk, jl]) * v_i_cat) / vt_i_safe)
+                tm_i_acc = jnp.where(vt_i > _EPSI20, sr(tm_i_acc + contrib), rt0)
+        for jl in range(jpl):
+            v_s_cat = v_s[:, :, jl]
+            for jk in range(nlay_s):
+                contrib = sr(sr(sr(r1_nlay_s * t_s[:, :, jk, jl]) * v_s_cat) / vt_s_safe)
+                tm_s_acc = jnp.where(vt_s > _EPSI20, sr(tm_s_acc + contrib), rt0)
 
     no_ice = at_i <= _EPSI20
     tm_si = jnp.where(no_ice, rt0, tm_si_raw) * interior
@@ -4981,6 +5005,10 @@ def si3_ice_cons_hsm_check(
         and cd_routine not in ("icedyn_adv", "icedyn_rdgrft")
     )
     return {"diag": diag, "violations": violations}
+
+
+def _si3_traced(*xs: object) -> bool:
+    return any(isinstance(x, jax.core.Tracer) for x in xs)
 
 
 __all__.extend((
