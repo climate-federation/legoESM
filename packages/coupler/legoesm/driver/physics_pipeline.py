@@ -1846,19 +1846,44 @@ class PhysicsPipeline:
                 from legoesm.atmosphere.physics.microphysics.config import (
                     ThompsonConfig,
                 )
-                if isinstance(self.micro_config, ThompsonConfig):
+                _thompson = isinstance(self.micro_config, ThompsonConfig)
+                if _thompson:
+                    from legoesm.atmosphere.physics._shared import compute_rho
+                    from legoesm.atmosphere.physics.microphysics.integration import (
+                        number_per_mass_to_per_volume,
+                        number_per_volume_to_per_mass,
+                        require_thompson_tracers,
+                    )
+                    # the column bridges' full-registry refusal (vote W1a/Y2a)
+                    require_thompson_tracers("thompson", [
+                        k for k, x in (("q_v", q_v), ("q_c", q_c),
+                                       ("q_r", q_r), ("q_i", q_i),
+                                       ("q_s", q_s), ("q_g", q_g),
+                                       ("N_c", N_c), ("N_r", N_r),
+                                       ("N_i", N_i)) if x is not None])
                     # WRF Thompson reads the resolved w (votes H2/J6)
                     _sq_kw["w"] = diagnose_grid_w_from_omega(
                         self._resolved_omega(
                             u, v, p_s, ad.ncol, nlev, _winds_on_t_grid,
                             "microphysics='thompson'"),
                         T_col, p_full_col, q_v_col)
+                    # per-mass N_c/N_r carry <-> the scheme's per-volume
+                    # numbers, with the bridges' moist density (vote Y1b;
+                    # the other schemes still get the carry raw: finding)
+                    _rho_n = compute_rho(T_col, p_full_col, q_v_col)
+                    hydrometeors = hydrometeors._replace(
+                        N_c=number_per_mass_to_per_volume(hydrometeors.N_c, _rho_n),
+                        N_r=number_per_mass_to_per_volume(hydrometeors.N_r, _rho_n))
                 micro_out = self.micro_fn(
                     T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
                     p_full=p_full_col, p_half=p_half_col,
                     rho=rho_col, dz=dz_col, dt=dt,
                     config=self.micro_config, **_sq_kw,
                 )
+                if _thompson:
+                    micro_out = micro_out._replace(
+                        dN_c_dt=number_per_volume_to_per_mass(micro_out.dN_c_dt, _rho_n),
+                        dN_r_dt=number_per_volume_to_per_mass(micro_out.dN_r_dt, _rho_n))
             dT_dt_micro = ad.unflatten_3d(micro_out.dT_dt)
             dq_v_dt_micro = ad.unflatten_3d(micro_out.dq_v_dt)
             dq_c_dt = ad.unflatten_3d(micro_out.dq_c_dt)
