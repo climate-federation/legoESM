@@ -2186,12 +2186,14 @@ def compute_sam_oceflx_fluxes(
             "absolute lowest-level air temperature: CESM2.1's cold-air-"
             "outbreak wind enhancement (coldair_outbreak_mod) reads tbot - ts.")
 
-    # Safe sqrt (+eps) so the calm-wind (u=v=wd=0) reverse-mode gradient
-    # stays finite — bare sqrt(0) gives a 0·inf NaN even though the value
-    # is floored to umin (Codex iter-5). eps ≪ umin² so the primal is
-    # unchanged to round-off.
+    # Safe sqrt so the calm-wind (u=v=wd=0) reverse-mode gradient stays
+    # finite — bare sqrt(0) gives a 0·inf NaN even though the value is floored
+    # to umin (Codex iter-5).  Double where, not an additive eps: a 1e-12 m²/s²
+    # eps moved ustar by up to 1.5e-12 relative at ~1 m/s winds vs CESM.
+    wind2 = u_atm ** 2 + v_atm ** 2 + wd ** 2
+    windy = wind2 != 0.0   # NaN stays NaN (GLM review)
     vmag = jnp.maximum(
-        umin, jnp.sqrt(u_atm ** 2 + v_atm ** 2 + wd ** 2 + 1e-12)
+        umin, jnp.where(windy, jnp.sqrt(jnp.where(windy, wind2, 1.0)), 0.0)
     )
     if variant == "cesm":
         # shr_flux_atmOcn cold-air-outbreak block (use_coldair_outbreak_mod):
