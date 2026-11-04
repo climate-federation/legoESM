@@ -181,3 +181,49 @@ def test_spectral_source_without_reference_interfaces_raises(fx):
         e3sm_cam_gwd(j["u"], j["v"], j["T"], j["p_full"], j["p_half"], j["z_full"],
                      j["z_half"], j["rho"], jnp.deg2rad(j["lat"]), 112.5,
                      _config(meta["arms"]["background"]["ours"]))
+
+
+# ---- Beres on the REAL source-spectrum table (newmfspectra40_dc25.nc) ----
+# Fixture gw_spec_e3sm_beres_table.npz: scripts/validate/oracle/gw_beres_table/make_fixture.py -- the two
+# Beres arms above, the oracle reading the CESM/E3SM inputdata table with E3SM's own
+# gw_init_beres; the table it loaded is stored in the fixture.
+FIXTURE_TABLE = FIXTURE.with_name("gw_spec_e3sm_beres_table.npz")
+_TABLE_FILE = Path("/burg/glab/users/pg2328/oracles/inputdata/atm/waccm/gw/newmfspectra40_dc25.nc")
+
+
+@pytest.fixture(scope="module")
+def fx_table():
+    if not jax.config.jax_enable_x64:
+        pytest.skip("oracle match is certified in fp64 (JAX_ENABLE_X64=1)")
+    z = dict(np.load(FIXTURE_TABLE))
+    meta = json.loads(str(z.pop("meta")))
+    table = z.pop("mfcc")
+    assert hashlib.sha256(table.tobytes()).hexdigest() == meta["mfcc"]["table_sha256"]
+    return z, meta, table
+
+
+def _table_cases():
+    meta = json.loads(str(np.load(FIXTURE_TABLE)["meta"]))
+    return [(a, ds) for a, m in meta["arms"].items() for ds in m["datasets"]]
+
+
+@pytest.mark.parametrize("arm,ds", _table_cases())
+def test_beres_real_table_matches_e3sm_oracle(fx_table, arm, ds):
+    out, ref, flat = _arm(fx_table, arm, ds)
+    ds_ours = np.asarray(out.dT_dt) * constants.c_pd
+    errs = {"du_dt": _rel_err(out.du_dt, ref["u"]), "dv_dt": _rel_err(out.dv_dt, ref["v"]),
+            "dT_dt": _rel_err_field(ds_ours[flat], ref["s"][flat]),
+            "dT_dt_elevated_vs_nophis": _rel_err_field(ds_ours[~flat], ref["s0"][~flat])
+            if np.any(~flat) else 0.0}
+    print(arm, ds, "real Beres table, max rel err vs E3SM v3.0.1:", errs)
+    assert np.abs(ref["u"]).max() > 1e-6 and np.abs(ref["s"][flat]).max() > 1e-4
+    assert max(errs.values()) <= _TOL, errs
+
+
+@pytest.mark.skipif(not _TABLE_FILE.exists(), reason="inputdata table lives on Ginsburg")
+def test_load_mfcc_table_matches_e3sm_gw_init_beres(fx_table):
+    from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import load_mfcc_table
+    _, meta, table = fx_table
+    assert hashlib.sha256(_TABLE_FILE.read_bytes()).hexdigest() == meta["mfcc"]["sha256"]
+    ours = load_mfcc_table(str(_TABLE_FILE), meta["mfcc"]["pgwv"])
+    assert ours.shape == table.shape and ours.tobytes() == table.tobytes()

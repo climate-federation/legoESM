@@ -9,7 +9,7 @@
 set -euo pipefail
 FAM=$1
 H=/burg/glab/users/pg2328/oracle_audit/f4
-WT=/burg/glab/users/pg2328/wt_f4
+WT=${F4_WT:-/burg/glab/users/pg2328/wt_f4}; export F4_WT=$WT   # VOTE V32
 export PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export PYTHONPATH=$(ls -d $WT/packages/* | tr "\n" ":")$WT:$H
 export JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 XLA_FLAGS=--xla_cpu_multi_thread_eigen=false

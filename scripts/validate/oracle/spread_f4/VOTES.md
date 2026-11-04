@@ -60,3 +60,18 @@ Reviews: codex (job 11028851) NO FINDINGS on the two harnesses + CLUBB helper te
 taken -- (1)/(2) zero-wind/below-sigma_b columns: 12 of 13 columns have nonzero wind and the generator asserts the damping
 branch is reached; the test is shown to fail with the sponge on and with linear_frac off by 1e-6; (3) v IS compared;
 sigma > 1 and p_s < 1 Pa branches are unreachable for physical columns (stated scope limit).
+
+## Round 4 (Beres on the real table, 2026-11-04)
+| id | question | me | codex | GLM | result |
+|---|---|---|---|---|---|
+| V27 | source: (a) CESM svn inputdata (ETag rev 15) + sha256, E3SM inputdata copy fetched only to compare sha256 (identical) / (b) CESM only | a | a | a | a |
+| V28 | storage: (a) .nc outside git + SHA256SUMS; fixture stores the sliced table; loader bitwise test when .nc present / (b) skip when absent | a | a | a | a |
+| V29 | arms: (a) the two existing Beres arms, both column sets, NEW fixture, existing fixture untouched / (b) regenerate existing | a | a | a | a |
+| V30 | oracle table read: (a) E3SM's own gw_init_beres (verbatim) + netcdf-fortran; table not perturbed by the spread / (b) Python read, text | a | a | a | a |
+| V31 | branch: (a) stacked on feat/f4-oracle-spread / (b) off main | a | a | b | a |
+| V32 | harness path: (a) F4_WT env override, default unchanged / (b) copy harness | a | a | a | a |
+| V33 | spread selects the 4 real-table comparison tests only (a) / plus loader test (b) | a | a | a | a |
+| V34 | codex P2 (netcdf build made the existing build need netcdf): (a) existing build.sh restored, netcdf steps in gw_beres_table/build.sh / (b) conditional | a | a | a | a |
+| V35 | GLM "Beres may be inactive": (a) cite control (table x(1+1e-6) fails all 4 comparisons), no change / (b) store hdepth/launch spectrum | a | a | a | a |
+GLM review points 3 (coverage: uh/hdepth clamps, zero heating) and 4 (metric denominators are max|oracle tendency| per
+column / field, not |U|): 3 noted as scope (the arms are the existing harness's, V29), 4 is a misreading -- not taken.
