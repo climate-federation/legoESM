@@ -4805,6 +4805,27 @@ class LatLonCGridOceanModel:
                 f"got {config.lateral_viscosity_operator!r}",
             )
         # #1455: e3-weighting selector for the "nemo_div_curl" operator only.
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            VALID_LATERAL_VISCOSITY_MASK_LEVELS)
+        _mlev = getattr(config, "lateral_viscosity_mask_levels", "surface")
+        if _mlev not in VALID_LATERAL_VISCOSITY_MASK_LEVELS:
+            raise ValueError(
+                "lateral_viscosity_mask_levels must be one of "
+                f"{sorted(VALID_LATERAL_VISCOSITY_MASK_LEVELS)}, got {_mlev!r}")
+        if (_mlev == "per_level"
+                and config.lateral_viscosity_operator != "vector_laplacian"):
+            raise ValueError(
+                "lateral_viscosity_mask_levels='per_level' requires "
+                "lateral_viscosity_operator='vector_laplacian', got "
+                f"{config.lateral_viscosity_operator!r}")
+        if (getattr(config, "lateral_side_bc", "free_slip") == "nemo_shlat"
+                and _mlev != "per_level"):
+            raise ValueError(
+                "lateral_side_bc='nemo_shlat' requires "
+                "lateral_viscosity_mask_levels='per_level'")
+        if not float(getattr(config, "lateral_shlat", 2.0)) >= 0.0:
+            raise ValueError(
+                f"lateral_shlat must be >= 0, got {config.lateral_shlat!r}")
         _e3w = getattr(config, "lateral_viscosity_e3_weighting", "off")
         if _e3w not in VALID_LATERAL_VISCOSITY_E3_WEIGHTING:
             raise ValueError(
