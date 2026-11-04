@@ -281,3 +281,50 @@ def test_held_step_after_sunset(fx, scale):
     held = lambda ts: jnp.sum(lane.step(EcradIFSConfig(), src, full_call=False,  # noqa: E731
                                         packed_carry=packed, **dict(kw2, T_skin=ts))[0])
     assert np.all(np.isfinite(np.asarray(jax.grad(held)(kw2["T_skin"]))))
+
+
+_NO_FMA_JIT_SCRIPT = """
+import sys, numpy as np, jax, jax.numpy as jnp
+jax.config.update("jax_enable_x64", True)
+assert not jax.config.jax_disable_jit
+from tests.atmosphere import test_ecrad_ifs_lane as t
+from legoesm.atmosphere.physics.radiation.ecrad_ifs import lane
+from legoesm.atmosphere.physics.radiation.ecrad_ifs.config import EcradIFSConfig
+with np.load(t.FIXTURE) as z:
+    fx = {k: z[k] for k in z.files}
+src, kw = t._inputs(fx)
+f = lambda T, el: lane.step(EcradIFSConfig(), src, full_call=True, packed_carry=None,
+                            **dict(kw, T=T, elapsed_s=el))
+dT, fl, c = jax.jit(f)(kw["T"], jnp.asarray(3600.0))
+np.savez(sys.argv[1], dT=dT, carry=c, **{"fl:" + k: v for k, v in fl.items()})
+"""
+
+
+def test_eager_vs_jit_without_fma(fx, tmp_path):
+    """Vote J2c: jit in a separate process with --xla_cpu_max_isa=AVX (XLA
+    emits no FMA; the method of the port's interface/end-to-end tests) ==
+    eager to 1e-12 (V51) on the carry and every flux, heating in flux units
+    (J3a), so the default-flags gap above is FMA contraction, not a lane
+    path difference."""
+    import subprocess
+    import sys
+    path = tmp_path / "jit_no_fma.npz"
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = dict(os.environ, XLA_FLAGS="--xla_cpu_max_isa=AVX", JAX_PLATFORMS="cpu",
+               JAX_ENABLE_X64="1", JAX_DISABLE_JIT="0")
+    subprocess.run([sys.executable, "-c", _NO_FMA_JIT_SCRIPT, str(path)], env=env,
+                   check=True, cwd=root)
+    jit = np.load(path)
+    _, kw = _inputs(fx)
+    dT, fl, c = _full(fx)
+    diff = {"carry": _rel(c, jit["carry"])}
+    diff.update({k: _rel(v, jit["fl:" + k]) for k, v in fl.items()})
+    print(f"EAGER_VS_JIT no-FMA max_rel={max(diff.values()):.3e} worst={max(diff, key=diff.get)}")
+    assert max(diff.values()) <= JIT_RTOL, diff
+    # vote J3a: heating in flux units (cancellation at small divergence;
+    # measured 8.9e-10 rel), with the L24c form of the bound
+    dp = np.asarray(kw["p_half"][:, 1:] - kw["p_half"][:, :-1])
+    flux_err = np.max(np.abs((np.asarray(dT) - jit["dT"]) * dp) * constants.c_pd / constants.g, axis=1)
+    tol = np.maximum(ENERGY_REL * np.max(np.abs(np.asarray(fl["net_flux"])), axis=1), ENERGY_ABS)
+    print(f"EAGER_VS_JIT no-FMA heating in flux units max={np.max(flux_err):.3e} W/m^2")
+    assert np.all(flux_err <= tol), (flux_err, tol)
