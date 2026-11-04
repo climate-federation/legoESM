@@ -1433,6 +1433,7 @@ def test_store_mass_flux_is_the_last_config_field():
             # appended by the ocean oracle-fix campaign (tier-3 RNF)
             "runoff_depth_spread_levels",
             "lateral_viscosity_mask_levels",
+            "lateral_shlat",
             "runoff_temperature_floor_sharpness",
             )
     assert fields[-len(tail):] == tail, (

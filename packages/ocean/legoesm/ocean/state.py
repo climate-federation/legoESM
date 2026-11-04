@@ -2636,6 +2636,9 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   "free_slip" (default) — viscous flux zeroed at walls (∂u_tang/∂n = 0).
     #   "no_slip"  — MITgcm no_slip_sides: adds the wall side-drag
     #                -(2/Δy)·A_h·u (mom_u_sidedrag / mom_v_sidedrag, sideDragFactor=2).
+    #   "nemo_shlat" — NEMO rn_shlat: coastal vorticity points take the value
+    #                lateral_shlat in the vector Laplacian (requires
+    #                lateral_viscosity_mask_levels="per_level"; no side drag).
     lateral_side_bc: str = "free_slip"
     # Asynchronous ("distorted-physics") time stepping: dt_mom = dt / dt_mom_ratio.
     # The `dt` passed to step()/integrate_scan IS dt_tracer (the clock — Veros
@@ -3494,6 +3497,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # umask/vmask/fmask (dommsk.F90:148-153).  Appended to preserve
     # positional callers.
     lateral_viscosity_mask_levels: str = "surface"
+    # NEMO rn_shlat: the f-mask value at coastal vorticity points under
+    # lateral_side_bc="nemo_shlat" (0 free slip, 0-2 partial, 2 no slip,
+    # >2 strong slip; dommsk.F90:209-215).  2.0 = ORCA1's namelist_cfg.  Read
+    # only by "nemo_shlat".  Appended to preserve positional callers.
+    lateral_shlat: float = 2.0
     # Width of the smooth runoff-water temperature floor max(SST, 0 degC)
     # (NEMO sbcrnf.F90:148, ln_rnf_tem=.false.) in the real-freshwater
     # closure: LogSumExp sharpness [1/K], 100 = 0.01 K (user rule

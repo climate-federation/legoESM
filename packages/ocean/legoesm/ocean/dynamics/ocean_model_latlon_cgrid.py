@@ -4807,6 +4807,14 @@ class LatLonCGridOceanModel:
                 "lateral_viscosity_mask_levels='per_level' requires "
                 "lateral_viscosity_operator='vector_laplacian', got "
                 f"{config.lateral_viscosity_operator!r}")
+        if (getattr(config, "lateral_side_bc", "free_slip") == "nemo_shlat"
+                and _mlev != "per_level"):
+            raise ValueError(
+                "lateral_side_bc='nemo_shlat' requires "
+                "lateral_viscosity_mask_levels='per_level'")
+        if not float(getattr(config, "lateral_shlat", 2.0)) >= 0.0:
+            raise ValueError(
+                f"lateral_shlat must be >= 0, got {config.lateral_shlat!r}")
         _e3w = getattr(config, "lateral_viscosity_e3_weighting", "off")
         if _e3w not in VALID_LATERAL_VISCOSITY_E3_WEIGHTING:
             raise ValueError(
