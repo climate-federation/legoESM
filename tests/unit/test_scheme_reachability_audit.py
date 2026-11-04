@@ -343,6 +343,11 @@ def test_every_offered_scheme_passes_validate_strict(parsers, driver):
                 kwargs.update(convection="bechtold", bechtold_use_ifs_ascent=True,
                               cld_macmic_num_steps=1,
                               dycore=DycoreConfig(discretization="mpas"))
+            # ecRad 49r1 runs on the MPAS column lane only, with aerosols off
+            # (votes L2a/L20a, documented cross-field contract).
+            if axis == "radiation" and scheme == "ecrad_ifs":
+                from legoesm.driver.config import DycoreConfig
+                kwargs["dycore"] = DycoreConfig(discretization="mpas")
             # ZM CMT is dropped on the compiled pipeline (refused there, P1).
             if axis == "convection" and scheme == "zhang_mcfarlane":
                 from legoesm.driver.config import DycoreConfig

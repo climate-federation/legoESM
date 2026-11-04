@@ -7961,7 +7961,9 @@ class ModelDriver:
                         # (allow_pickle=False).  Skip by NAME so BOTH None and
                         # a concrete-array carry are excluded (load re-seeds
                         # them None).
-                        if _name in PHYSSTATE_INPUT_FIELDS:
+                        if _name in PHYSSTATE_INPUT_FIELDS or _val is None:
+                            # None = a field inactive on this run
+                            # (ecrad_carry off ecrad_ifs): no array to save
                             continue
                         if _name == "prng_key":
                             ps_d_carry[_name] = _val
@@ -8112,7 +8114,7 @@ class ModelDriver:
                     # already dropped them).  Skip by NAME so a concrete-array
                     # carry is excluded too, not only None (``np.asarray(None)``
                     # is an unloadable object array under allow_pickle=False).
-                    if _name in PHYSSTATE_INPUT_FIELDS:
+                    if _name in PHYSSTATE_INPUT_FIELDS or _val is None:
                         continue
                     _save[f"physstate_{_name}"] = np.asarray(_val)
                 _save["physstate_meta_conv_scheme"] = np.asarray(
@@ -15026,6 +15028,12 @@ class ModelDriver:
                 # (the save skips their None), re-seeded fresh.  Every
                 # EVOLVING field stays mandatory.
                 _exempt_ps = {"col_index"} | PHYSSTATE_INPUT_FIELDS
+                # fields inactive on THIS run (fresh seed None, e.g.
+                # ecrad_carry off ecrad_ifs) are never saved; an ecrad_ifs
+                # run seeds an array, so a checkpoint without its carry is
+                # INCOMPLETE below (vote L23a)
+                _exempt_ps |= {f for f in _phys_state._fields
+                               if getattr(_phys_state, f) is None}
                 _missing = [f for f in _phys_state._fields
                             if f not in _present_fields
                             and f not in _exempt_ps]
@@ -15071,6 +15079,12 @@ class ModelDriver:
                 if _name in PHYSSTATE_INPUT_FIELDS:
                     continue
                 _seed_field = getattr(_phys_state, _name)
+                if _seed_field is None:
+                    raise ValueError(
+                        f"Restart physics-state field {_name!r} is in the "
+                        "checkpoint but inactive on this run (e.g. "
+                        "ecrad_carry without radiation='ecrad_ifs'): the "
+                        "checkpoint does not match this configuration.")
                 _val = jnp.asarray(_v)
                 if tuple(_val.shape) != tuple(_seed_field.shape):
                     raise ValueError(
@@ -15678,6 +15692,17 @@ class ModelDriver:
                 _forcing = dict(_forcing_daily)
                 _forcing["day_of_year"] = jnp.asarray(_doy)
                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
+                if cfg.radiation == "ecrad_ifs":
+                    # McICA seed time (radiation_scheme.F90:390-405, vote
+                    # S3a): NINDAT = the run start date (model day 0 on the
+                    # insolation calendar), NSTEP*TSTEP = elapsed model time
+                    from legoesm.forcing.time_utils import day_to_date
+                    _forcing["model_seconds"] = jnp.asarray(
+                        float(_force_day) * 86400.0)  # coeff-ok: s per day
+                    _forcing["model_start_day_of_month"] = jnp.asarray(
+                        day_to_date(self._insolation_day(0.0),
+                                    ref_year=int(cfg.start_year))[2],
+                        dtype=jnp.int32)
                 if _cam6_act is not None:
                     # CAM prescribed_aero_adv: the two monthly records held on
                     # device, reloaded when the bracket moves, linearly
@@ -15818,6 +15843,9 @@ class ModelDriver:
                     # The eager loop's clock (R-ex absolute-step origin).
                     calendar=lambda k: self._calendar_for_radiation(
                         _DAY_ORIGIN + (start_step + k) * DT / 86400.0),
+                    # ecrad_ifs McICA seed clock (vote S3a), same origin
+                    model_seconds=lambda k: (
+                        _DAY_ORIGIN + (start_step + k) * DT / 86400.0) * 86400.0,
                     land_step=_land_step_fn if _land_ml_on else None,
                     land_state=self._land_ml_state if _land_ml_on else None,
                     marshal_land=_marshal_land_forcing if _land_ml_on else None,

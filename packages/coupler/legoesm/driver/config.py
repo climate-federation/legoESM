@@ -538,7 +538,7 @@ VALID_TURBULENCE = (
     "holtslag_boville", "ysu", "edmf", "none",
 )
 
-VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg")
+VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg", "ecrad_ifs")
 
 VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved", "cam6_clubb")
 
@@ -2885,6 +2885,21 @@ class ExperimentConfig(NamedTuple):
                 f"radiation must be one of {_valid_radiation}, "
                 f"got {self.radiation!r}"
             )
+        # ecRad 49r1 (votes L2a, L20a): the MPAS column lane only, and its
+        # aerosols are OFF, so an aerosol forcing would be silently ignored.
+        if self.radiation == "ecrad_ifs":
+            if not self.column_loop_lane:
+                errors.append(
+                    "radiation='ecrad_ifs' runs only on the MPAS column lane "
+                    "(its between-call carry lives in that lane's physics "
+                    "state); the compiled cube/lat-lon and spectral lanes "
+                    "refuse it")
+            if self.aerosol_forcing != "off":
+                errors.append(
+                    "radiation='ecrad_ifs' runs with aerosols OFF (the CAMS "
+                    "climatology files are pending); aerosol_forcing="
+                    f"{self.aerosol_forcing!r} would be silently ignored, "
+                    "set it to 'off'")
         _valid_cloud_schemes = VALID_CLOUD_SCHEMES
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(

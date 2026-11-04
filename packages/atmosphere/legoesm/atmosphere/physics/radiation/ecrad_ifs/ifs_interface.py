@@ -316,6 +316,15 @@ def mcica_seed(nindat, nstep, tstep, gelam, gemu):
     return itim + iday + _nint(gelam * _SEED_LON_FACTOR + jnp.arcsin(gemu) * _SEED_LAT_FACTOR)
 
 
+def mcica_seed_traced(iday, elapsed_s, gelam, gemu):
+    """:func:`mcica_seed` with a TRACED elapsed time (vote S3a): ``iday`` the
+    day of month of NINDAT (the run start date), ``elapsed_s`` =
+    NSTEP*TSTEP [s] since that date.  Same NINT (halves away from zero) as
+    the host form, so both agree wherever both apply."""
+    itim = _nint(jnp.asarray(elapsed_s) / _SECONDS_PER_MINUTE)
+    return itim + jnp.asarray(iday, jnp.int32) + _nint(gelam * _SEED_LON_FACTOR + jnp.arcsin(gemu) * _SEED_LAT_FACTOR)
+
+
 def _curvature(mu0, threshold, strict, sharpness):
     """RRAE/(SQRT(mu0**2+CRAE)-mu0) above the threshold, RRAE/SQRT(CRAE) below."""
     crae = _RRAE * (_RRAE + 2.0)

@@ -173,8 +173,13 @@ def make_physics(
     cld_macmic_num_steps: int = 1,
     surface_bulk_coeffs="default",
     cam6_activation=None,
+    ecrad_ifs_sources=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
+
+    ``ecrad_ifs_sources`` (radiation ``ecrad_ifs``, MPAS only): the TSI, gas
+    and ozone inputs pending the user (votes L12-L14); ``None`` makes the
+    ecrad_ifs radiation build refuse (vote S2a).
 
     The returned function calls each enabled physics module and sums
     their tendencies.
@@ -345,7 +350,8 @@ def make_physics(
             budget_ledger=budget_ledger,
             budget_ledger_level_weight=budget_ledger_level_weight,
             surface_bulk_coeffs=surface_bulk_coeffs,
-            cam6_activation=cam6_activation)
+            cam6_activation=cam6_activation,
+            ecrad_ifs_sources=ecrad_ifs_sources)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -671,7 +677,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                physics_cadence_steps: int = 1,
                                cld_macmic_num_steps: int = 1,
                                surface_bulk_coeffs=None,
-                               cam6_activation=None) -> Callable:
+                               cam6_activation=None,
+                               ecrad_ifs_sources=None) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
 
     ``surface_bulk_coeffs`` ``(C_H, C_E, latent)``: the constant-coefficient surface
@@ -782,6 +789,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     # ice-stratus fraction is cut at CLUBB's top (clubb_intr.F90:2535) in
     # radiation and MG2 alike.
     _clubb_cfg = resolved_clubb_config(config.turbulence)
+    _ecrad_rad = config.radiation.scheme == "ecrad_ifs"
     if config.radiation.scheme != "none":
         tagged_fns.append((
             make_radiation_physics(
@@ -795,9 +803,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 cloud_fraction_tracer=(
                     "cloud_fraction_ifs"
                     if config.microphysics.scheme == "ifs_cloudsc" else None),
+                ecrad_ifs_sources=ecrad_ifs_sources,
+                # ecRad: the held-radiation variant runs RADHEATN on the
+                # carry instead of re-adding a held heating (votes L4a/S4a)
+                ecrad_ifs_full_call=need_rad,
             ),
-            False,
-            None,
+            _ecrad_rad,
+            "ecrad_carry" if _ecrad_rad else None,
         ))
     # CAM6 books ZM's detrained condensate in the CLUBB host on the post-CLUBB
     # state of every macmic sub-step (clubb_intr.F90:2345-2376): liquid/ice
@@ -1358,7 +1370,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # alternates this variant with the full one by ``step %
         # rad_update_steps``; step 0 of every sub-cycle is a full step, so
         # the cache is always populated before a held step reads it.
-        if (not need_rad) and _has_rad:
+        if (not need_rad) and _has_rad and not _ecrad_rad:
             cached_rad = (phys_state.rad_heating
                           if phys_state is not None else None)
             if not _non_rad_fns:
