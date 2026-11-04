@@ -1079,11 +1079,13 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         grow = (zf < 0.0).astype(zf.dtype)
     else:
         grow = smoothstep_cubic(-zf / growth_gate_width)
-    # dE = 0 can only occur with 5.0.1's unclamped latent term; the growth
-    # there is gated off, so a -1 placeholder keeps the discarded division
-    # (and its reverse pass) finite.
-    dE_safe = jnp.where(dE == 0.0, -1.0, dE)
-    dh_growth = grow * dt * jnp.maximum(0.0, zf / (dE_safe * constants.rho_ice))
+    # dE = 0 can only occur with 5.0.1's unclamped latent term, where NEMO's
+    # quotient is undefined; growth is zero there (vote X9), and the double
+    # where keeps the discarded division and its reverse pass finite.
+    _dE_ok = dE != 0.0
+    dE_safe = jnp.where(_dE_ok, dE, -1.0)
+    dh_growth = jnp.where(
+        _dE_ok, grow * dt * jnp.maximum(0.0, zf / (dE_safe * constants.rho_ice)), 0.0)
     growth_mass = -constants.rho_ice * dh_growth * ar      # zfmdt * a * r1_Dt
     fx = _add_fluxes(
         fx,

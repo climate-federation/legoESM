@@ -150,3 +150,19 @@ def test_growth_gate_attenuates_inside_band_and_is_differentiable():
     np.testing.assert_allclose(np.asarray(soft)[grows], 0.5 * np.asarray(hard)[grows], rtol=1e-12)   # smoothstep(0.5)
     g = jax.grad(lambda q: jnp.sum(bog(q)))(jnp.asarray(-0.5 * w))
     assert bool(jnp.isfinite(g))
+
+
+def test_zero_enthalpy_difference_gives_zero_growth_and_finite_gradient(monkeypatch):
+    """Vote X9: dE == 0 (NEMO's quotient undefined) -> no basal growth, finite reverse pass."""
+    st, zr, fz = dh_args(FX)
+    # sss = 0 and t_bo = T0 make Tm = Tnew = 0, so a zero latent part gives dE == 0 exactly.
+    monkeypatch.setattr(bl, "_latent_part", lambda Tm, Tn, v: jnp.zeros_like(Tm))
+    fz = fz._replace(sss=jnp.zeros_like(fz.sss), t_bottom=jnp.full_like(fz.t_bottom, K.T0))
+
+    def bog(fhld):
+        return bl._dh_step_fluxes(st, zr, fz._replace(fhld=fhld), dt(FX), K,
+                                  nemo_version="5.0.1")[1].wfx_bog
+    fhld = jnp.full_like(fz.fhld, -1.0e4)                      # zf < 0: growth would be active
+    np.testing.assert_array_equal(np.asarray(bog(fhld)), 0.0)
+    g = jax.grad(lambda x: jnp.sum(bog(x)))(fhld)
+    assert np.all(np.isfinite(np.asarray(g)))
