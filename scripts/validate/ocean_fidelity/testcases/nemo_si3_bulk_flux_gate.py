@@ -434,6 +434,9 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         category_fraction_before=s1["category_fraction_before"],
         sst_celsius=s1["sst_celsius"], qns_ocean=s1["qns_ocean"],
         qsr_ocean=s1["qsr_ocean"], emp_ocean_raw=s1["emp_ocean_raw"],
+        precip_factor=constants.precip_factor_orca1,
+        evap_factor=constants.evap_factor_orca1,
+        snow_blow_exponent=constants.snow_blow_exponent_orca1,
         land_mask=s2["mask"], ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
     )
     for name in STAGE1_NAMES[25:45]:
@@ -482,6 +485,9 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         category_fraction_before=s1["category_fraction_before"],
         sst_celsius=s1["sst_celsius"], qns_ocean=s1["qns_ocean"],
         qsr_ocean=s1["qsr_ocean"], emp_ocean_raw=s1["emp_ocean_raw"],
+        precip_factor=constants.precip_factor_orca1,
+        evap_factor=constants.evap_factor_orca1,
+        snow_blow_exponent=constants.snow_blow_exponent_orca1,
         land_mask=s2["mask"], ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
         _preserve_subnormal_snow=False,
     )
