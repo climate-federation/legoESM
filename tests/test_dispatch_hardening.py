@@ -135,6 +135,10 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # SI3 aEVP lateral boundary: an unknown north_fold / lbc point type
+        # must raise, never fall back to the doubly periodic halo.
+        ("packages/ice/legoesm/ice/dynamics.py", "_si3_halo"),
+        ("packages/ice/legoesm/ice/dynamics.py", "_si3_orca_f_pivot_halo"),
         # Richards post-solve psi update: retention curve -> shift (PDI/Lu) or
         # exact reset; an unknown curve must raise, never pick one silently.
         ("packages/land/legoesm/land/richards.py", "solve_richards"),
@@ -172,7 +176,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # (moved with #2253's mode from the removed reduced chain's
         # _ifs_closure.shallow_closure into the CUMASTRN port's entry)
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/_ifs_cumastrn.py", "cumastrn"),
-        ("packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py", "tiedtke_convection"),
+        # (tiedtke.py::tiedtke_convection removed 2026-11-03: its guard was the
+        # surrogate's precip_split_scheme selector; the WRF Tiedtke port that
+        # replaced it has no scheme selector to dispatch on.)
         # Kain-Fritsch implementation selector ("smooth" | "wrf_kfeta", PR
         # #2249): a typo must raise, not silently run the surrogate.
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/kain_fritsch.py", "kain_fritsch_convection"),

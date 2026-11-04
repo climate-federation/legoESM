@@ -176,6 +176,8 @@ __param_spec__ = {
             "gsam_satadj_excess_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
+            "gsam_small_removal_rh_sharpness": "numerics: smooth-switch sharpness (RULE 5), value decided by codex+GLM+Claude vote 2026-11-03",
+            "gsam_small_removal_q_sharpness": "numerics: smooth-switch sharpness (RULE 5), value decided by codex+GLM+Claude vote 2026-11-03",
             "sb2001_autoconv_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-29 (#2232)",
             "sb2001_accretion_qr_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
             "sb2001_accretion_qc_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
@@ -1162,6 +1164,13 @@ class MorrisonConfig(NamedTuple):
     gsam_satadj_excess_sharpness: float = 1.0e4   # saturation step, on (q_t - q_s)/q_sat [-]
     gsam_satadj_qc_floor_sharpness: float = 1.0e4  # positivity, on T1 - T_l [1/K]
     gsam_satadj_p_min_width_pa: float = 100.0     # on/off, p >= 5000 Pa gate width [Pa]
+    # morrison_flavor="sam" gSAM M2005 sub-saturation small-condensate removal
+    # (module_mp_graupel.f90:1453-1488, :4664-4700; see
+    # _warm_rain.m2005_subsaturation_removal) smooth switches (RULE 5).  Hard
+    # limit = gSAM exactly: math.inf, math.inf.  Values by codex+GLM+Claude
+    # majority vote 2026-11-03 (0.01 width).
+    gsam_small_removal_rh_sharpness: float = 100.0  # RH < 0.9 gate, on 0.9 - q_v/q_sat [-]
+    gsam_small_removal_q_sharpness: float = 100.0   # q < 1e-8 gate, on 1 - q/1e-8 [-]
     # RULE 5 smoothing of gSAM's SB2001 autoconversion gate q_c >= 1e-6 kg/kg
     # (module_mp_graupel.f90:1806/2843): the C2 step reaches 1 at this value
     # [kg/kg]; <= 1e-6 = gSAM's hard step (codex+GLM 2026-10-29, #2232; KNOWN

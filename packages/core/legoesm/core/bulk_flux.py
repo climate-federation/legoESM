@@ -335,6 +335,15 @@ def large_yeager_neutral_cd(
     no upper clip, so the calm-wind ``2.7/U`` enhancement (up to ``5.54e-3``
     at the 0.5 m/s floor) is kept.  The two conventions differ only for
     ``U < ~0.97 m/s`` (where the 3.0e-3 clip binds) and ``U > 33 m/s``.
+
+    ``nemo_parity=True`` applies NO wind floor: NEMO's ``cd_n10_ncar``
+    (sbcblk_algo_ncar.F90:242-255) has none, and its caller ``turb_ncar``
+    floors the argument itself -- ``MAX(0.5, U_zu)`` for the first guess
+    (:115) and ``MAX(0.25, UN10)`` inside the iteration (:192).  Re-flooring
+    at 0.5 here overrode the 0.25 neutral-wind floor on calm cells (tier-3
+    ORCA1 audit BLK D1: Cd 86% off on 67 cells).  Callers passing
+    ``nemo_parity=True`` MUST therefore supply a positive, already-floored
+    wind (both ``ncar_transfer_coefficients`` call sites do).
     """
     if nemo_source_exact:
         if not nemo_parity:
@@ -358,7 +367,9 @@ def large_yeager_neutral_cd(
         C_DN = R(1.0e-3 * R(below + above))
         return R(jnp.maximum(C_DN, 0.1e-3))
 
-    U = jnp.maximum(jnp.asarray(wind), 0.5)
+    U = jnp.asarray(wind)
+    if not nemo_parity:
+        U = jnp.maximum(U, 0.5)
     C_DN = (
         2.7 / U + 0.142 + U / 13.09 - 3.14807e-10 * U ** 6
     ) * 1e-3
@@ -1348,6 +1359,7 @@ def compute_most_fluxes(
     stability_scheme="dyer1974",
     return_convergence=False,
     *,
+    return_wind_speed=False,
     unstable_gamma=_DYER_UNSTABLE_GAMMA,
     stable_beta=_DYER_STABLE_BETA,
     z0h_z0_ratio=_Z0H_Z0_RATIO_DEFAULT,
@@ -1886,6 +1898,11 @@ def compute_most_fluxes(
         shflx = rho * _cp * _c["Ch"] * _c["Ub"] * (T_sfc - _c["t_zu"])
         lhflx = rho * _L * _c["Ce"] * _c["Ub"] * (q_sfc - _c["q_zu"])
 
+    # ``return_wind_speed``: the speed THIS solver put in its flux formulas
+    # (U_eff incl. gustiness/floor, or AeroBulk's Ub), appended LAST, for a
+    # closure that must pair it with this u* (WRF MYNN's ust**2/wspd drag).
+    _wind_out = (U_eff_final,) if return_wind_speed else ()
+
     if return_2m:
         # Air temperature at the diagnostic height (default 2 m) from the
         # converged MOST similarity profile: T(z) = T_sfc − (θ*/κ)·[ln(z/z0t) −
@@ -1929,12 +1946,13 @@ def compute_most_fluxes(
         hi = jnp.maximum(T_atm, T_sfc)
         T_2m = jnp.clip(T_2m, lo, hi)
         if return_convergence:
-            return tau_x, tau_y, shflx, lhflx, u_star, T_2m, most_residual
-        return tau_x, tau_y, shflx, lhflx, u_star, T_2m
+            return (tau_x, tau_y, shflx, lhflx, u_star, T_2m, most_residual
+                    ) + _wind_out
+        return (tau_x, tau_y, shflx, lhflx, u_star, T_2m) + _wind_out
 
     if return_convergence:
-        return tau_x, tau_y, shflx, lhflx, u_star, most_residual
-    return tau_x, tau_y, shflx, lhflx, u_star
+        return (tau_x, tau_y, shflx, lhflx, u_star, most_residual) + _wind_out
+    return (tau_x, tau_y, shflx, lhflx, u_star) + _wind_out
 
 
 def sam_ocean_surface_q(
@@ -2078,6 +2096,7 @@ def compute_sam_oceflx_fluxes(
     return_2m: bool = False,
     z_diag: float = 2.0,
     t_bot: jnp.ndarray | None = None,
+    return_wind_speed: bool = False,
 ) -> tuple[jnp.ndarray, ...]:
     """SAM ocean surface fluxes — faithful port of ``oceflx.f90`` (CESM1).
 
@@ -2186,12 +2205,14 @@ def compute_sam_oceflx_fluxes(
             "absolute lowest-level air temperature: CESM2.1's cold-air-"
             "outbreak wind enhancement (coldair_outbreak_mod) reads tbot - ts.")
 
-    # Safe sqrt (+eps) so the calm-wind (u=v=wd=0) reverse-mode gradient
-    # stays finite — bare sqrt(0) gives a 0·inf NaN even though the value
-    # is floored to umin (Codex iter-5). eps ≪ umin² so the primal is
-    # unchanged to round-off.
+    # Safe sqrt so the calm-wind (u=v=wd=0) reverse-mode gradient stays
+    # finite — bare sqrt(0) gives a 0·inf NaN even though the value is floored
+    # to umin (Codex iter-5).  Double where, not an additive eps: a 1e-12 m²/s²
+    # eps moved ustar by up to 1.5e-12 relative at ~1 m/s winds vs CESM.
+    wind2 = u_atm ** 2 + v_atm ** 2 + wd ** 2
+    windy = wind2 != 0.0   # NaN stays NaN (GLM review)
     vmag = jnp.maximum(
-        umin, jnp.sqrt(u_atm ** 2 + v_atm ** 2 + wd ** 2 + 1e-12)
+        umin, jnp.where(windy, jnp.sqrt(jnp.where(windy, wind2, 1.0)), 0.0)
     )
     if variant == "cesm":
         # shr_flux_atmOcn cold-air-outbreak block (use_coldair_outbreak_mod):
@@ -2292,8 +2313,11 @@ def compute_sam_oceflx_fluxes(
           if variant == "cesm" else constants.c_pd)
     shflx = -rho * cp * u_star * t_star
     lhflx = -rho * constants.L_v * u_star * q_star
+    # ``return_wind_speed``: the floored speed these fluxes used (vmag),
+    # appended LAST, for a closure pairing it with this u* (WRF MYNN drag).
+    _wind_out = (vmag,) if return_wind_speed else ()
     if not return_2m:
-        return tau_x, tau_y, shflx, lhflx, u_star
+        return (tau_x, tau_y, shflx, lhflx, u_star) + _wind_out
     # CESM ``tref`` (shr_flux_atmOcn diagnostics block): re-evaluate the
     # stability function at ztref, integrate the theta profile from zbot down
     # to ztref, then the 0.01 K/m potential-to-temperature correction.
@@ -2304,7 +2328,7 @@ def compute_sam_oceflx_fluxes(
     psix2 = -5.0 * hol2 * stable + (1.0 - stable) * psixhu(xqq2)
     fac = (rh / karman) * (alz + al2 - psixh + psix2)
     tref = theta_atm - delt * fac - 0.01 * z_diag  # coeff-ok: CESM 0.01 K/m theta->T
-    return tau_x, tau_y, shflx, lhflx, u_star, tref
+    return (tau_x, tau_y, shflx, lhflx, u_star, tref) + _wind_out
 
 
 def nemo_si3_constant_fluxes(

@@ -313,9 +313,20 @@ def test_latlon_partial_cell_nonuniform_matches_nemo_reference():
     h_k = np.asarray(compute_layer_thickness(
         state.eta.data, state.H_bathy.data, z))
     bl = np.asarray(z.bottom_level)
-    u_c = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
-    v_c = 0.5 * (v[:-1, :, :] + v[1:, :, :])
     n_lat, n_lon = 6, 8
+    # NEMO's uu/vv are umask/vmask'ed at every level (stprk3_stg.F90:367,375),
+    # so a face below the shallower neighbour's seafloor contributes 0 to
+    # zut/zvt (zdfdrg.F90:174-175 log-layer, :186-187 standard).  The random
+    # u/v above also fill those sub-seafloor faces, so the reference masks
+    # them as NEMO's state would.
+    lev = np.arange(u.shape[-1])
+    wet = (bl[..., None] >= lev)                         # (n_lat, n_lon, nlev)
+    um = np.concatenate([wet & np.roll(wet, 1, axis=1),
+                         (wet & np.roll(wet, 1, axis=1))[:, :1]], axis=1)
+    vm = np.zeros(v.shape, bool)
+    vm[1:-1] = wet[1:] & wet[:-1]
+    u_c = 0.5 * ((u * um)[:, :-1, :] + (u * um)[:, 1:, :])
+    v_c = 0.5 * ((v * vm)[:-1, :, :] + (v * vm)[1:, :, :])
     r_t = np.zeros((n_lat, n_lon))
     for j in range(n_lat):
         for i in range(n_lon):

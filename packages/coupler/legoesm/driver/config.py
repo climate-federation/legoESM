@@ -1134,15 +1134,6 @@ class ExperimentConfig(NamedTuple):
     autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
     autoconv_pe_max: float = 0.9        # [1] ceiling on the emergent precip fraction
 
-    # Tiedtke plume buoyancy-death memory: when True the entraining plume,
-    # once it exhausts its cumulative buoyancy budget, stays dead instead of
-    # reviving above an inversion (the default False lets a plume killed by
-    # negative buoyancy resume nonzero M_u aloft — physically questionable,
-    # and the cause of convective detrainment heating reaching the ~100 hPa
-    # tropical cold point).  Tiedtke-only: validate_strict refuses it with any
-    # other convection scheme.
-    convective_buoyancy_death_memory: bool = False
-
     # Convection / Turbulence / GWD
     convection: str = "sbm"            # sbm, dca, kuo, mass_flux, edmf, zhang_mcfarlane, none
     turbulence: str = "none"           # smagorinsky, louis, tke, none
@@ -2689,11 +2680,22 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_snow_emissivity must be in [{_eps_lo}, {_eps_hi}] (the "
                 f"snow_column parameter spec), got {self.land_snow_emissivity!r}")
-        if self.convective_buoyancy_death_memory and self.convection != "tiedtke":
+        if self.convection == "tiedtke" and self.turbulence == "none":
             errors.append(
-                "convective_buoyancy_death_memory=True requires "
-                f"convection='tiedtke' (got {self.convection!r}): only the "
-                "Tiedtke scheme reads it — the knob would be silently inert.")
+                "convection='tiedtke' (WRF port) reads the previous step's "
+                "boundary-layer q_v tendency and surface water flux (WRF "
+                "qvpblten / qfx) from the turbulence scheme; with "
+                "turbulence='none' they would stay zero")
+        if self.convection == "tiedtke" and (
+                self.convective_precip_split != "constant"
+                or (self.convective_precip_efficiency or 0.0) > 0.0):
+            errors.append(
+                "convection='tiedtke' (WRF port) closes its own "
+                "precipitation: convective_precip_split="
+                f"{self.convective_precip_split!r} / "
+                f"convective_precip_efficiency="
+                f"{self.convective_precip_efficiency!r} would be silently "
+                "inert; leave them at 'constant' / None")
         if self.land_soil_freeze_thaw and not self.use_multilayer_land:
             errors.append(
                 "land_soil_freeze_thaw requires use_multilayer_land: only the "
@@ -3590,6 +3592,14 @@ class ExperimentConfig(NamedTuple):
                     f"physics_update_steps={_pus} (>= it) so radiation is "
                     "recomputed on physics steps; a held-physics step cannot "
                     "solve radiation")
+            if self.convection == "tiedtke":
+                errors.append(
+                    f"physics_update_steps={_pus} with convection='tiedtke': "
+                    "Tiedtke's moisture-convergence trigger reads the "
+                    "dynamics water-vapour tendency of the step physics "
+                    "runs on, and held-physics steps would drop the "
+                    "intervening dynamics tendencies; use "
+                    "physics_update_steps=1")
         # R-ex (D-REX-1) checkpoint/radiation alignment is NOT checked here:
         # it depends on the EFFECTIVE timestep, which the driver may clamp
         # (CFL) after this validation -- see
@@ -3873,9 +3883,8 @@ class ExperimentConfig(NamedTuple):
                     or (self.convection == "emanuel"
                         and self.emanuel_enable_cmt)):
                 errors.append(_cmt)
-            elif (self.convection == "tiedtke"
-                    or (self.convection == "bechtold"
-                        and self.bechtold_enable_cmt is None)):
+            elif (self.convection == "bechtold"
+                    and self.bechtold_enable_cmt is None):
                 _drops.append(_cmt)
             if self.land_params_refresh and self.use_multilayer_land:
                 _drops.append(
@@ -4812,6 +4821,27 @@ class ExperimentConfig(NamedTuple):
                     f"does not exist (the Beres table would silently fall "
                     f"back to nothing at build time)"
                 )
+        # Beres on the stand-in table: refused early here (the kernel also
+        # raises, E3SMBeresConfig.use_stand_in_table defaults False).  The
+        # effective GWD config is the override when one is set.
+        _ov = self.gravity_wave_drag_override
+        if _ov is not None and isinstance(_ov, GravityWaveDragConfig):
+            _b_scheme, _b_src = str(_ov.scheme), str(_ov.e3sm_cam.source)
+            _b_path = _ov.e3sm_cam.beres.mfcc_table_path
+            _b_standin = bool(_ov.e3sm_cam.beres.use_stand_in_table)
+        else:
+            _b_scheme, _b_src = str(self.gravity_wave_drag), str(self.e3sm_cam_source)
+            _b_path, _b_standin = self.e3sm_cam_mfcc_table_path, False
+        if ("e3sm_cam" in _b_scheme.split("+") and "convective" in _b_src.split("+")
+                and not _b_path and not _b_standin):
+            errors.append(
+                "e3sm_cam source includes 'convective' (Beres) but no table "
+                "path is set: the kernel would have only the analytic stand-in "
+                "spectrum, which launches almost nothing. Set "
+                "e3sm_cam_mfcc_table_path (or the override's "
+                "beres.mfcc_table_path) to the CESM/E3SM inputdata table "
+                "atm/waccm/gw/newmfspectra40_dc25.nc (sha256 8f1528d85b36...)"
+            )
         if isinstance(self.e3sm_cam_pgwv, bool) or \
                 not isinstance(self.e3sm_cam_pgwv, int) or \
                 self.e3sm_cam_pgwv < 0:
@@ -5314,7 +5344,6 @@ class ExperimentConfig(NamedTuple):
             zm_land_fraction=getattr(amip_cfg, 'zm_land_fraction', "required"),
             zm_transport_cloud_tracers=getattr(amip_cfg, 'zm_transport_cloud_tracers', True),
             kain_fritsch_variant=getattr(amip_cfg, 'kain_fritsch_variant', "smooth"),
-            convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
             convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
                 amip_cfg, 'bechtold_use_ifs_downdraft', True),
@@ -5497,7 +5526,6 @@ class ExperimentConfig(NamedTuple):
             zm_land_fraction=self.zm_land_fraction,
             zm_transport_cloud_tracers=self.zm_transport_cloud_tracers,
             kain_fritsch_variant=self.kain_fritsch_variant,
-            convective_buoyancy_death_memory=self.convective_buoyancy_death_memory,
             convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
