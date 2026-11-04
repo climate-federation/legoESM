@@ -366,7 +366,6 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # (FV pipeline / MPAS / spectral) now routes through.  Before it, these
     # scalars existed on ExperimentConfig but NO production path read them.
     "atm.gwd.HinesConfig.total_rms_wind": "hines_total_rms_wind",
-    "atm.gwd.HinesConfig.Fmax": "hines_Fmax",
     "atm.gwd.McFarlaneConfig.directional_spread": "mcfarlane_directional_spread",
     "atm.gwd.McFarlaneConfig.effgw_oro": "mcfarlane_effgw_oro",
     # NOTE: ``mcfarlane_k_wave`` is threaded too but has NO ``__param_spec__``

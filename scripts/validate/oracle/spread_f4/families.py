@@ -95,6 +95,15 @@ FAMILIES["rayleigh_hs_isca"] = dict(
     exes={"drv_hs"}, fixture=f"{FX}/rayleigh_hs_isca.npz",
     test=f"{WT}/tests/atmosphere/test_rayleigh_hs_isca_oracle.py", fix_attr="FIXTURE",
     metrics=["_rel"], select="matches_isca")
+FAMILIES["hines_lmdz"] = dict(
+    build=f"bash -x {G}/hines_lmdz/build.sh {OR}/LMDZ/modipsl/modeles/LMDZ/libf/phylmd {B}/hines_lmdz",
+    generator=f"{G}/hines_lmdz/make_fixture.py",
+    argv=[f"{B}/hines_lmdz/drv_hines", f"{OR}/LMDZ/modipsl/modeles/LMDZ/libf/phylmd",
+          f"{OA}/simple_gwd_hines_lindzen_rayleigh_spectral/inputs/cols.npz", "{OUT}"],
+    exes={"drv_hines"}, fixture=f"{FX}/hines_lmdz.npz",
+    test=f"{WT}/tests/atmosphere/hydrostatic/unit/test_hines_lmdz_oracle.py", fix_attr="FIXTURE",
+    metrics=["_rel"], select="matches_lmdz")
+
 
 # Beres (Beres 2004 / E3SM gw_beres_src) on the real gw_drag_file table (VOTES V27-V33)
 FAMILIES["gw_beres_table"] = dict(

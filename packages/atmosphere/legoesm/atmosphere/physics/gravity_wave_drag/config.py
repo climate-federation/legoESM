@@ -122,18 +122,17 @@ __param_spec__ = {
     "HinesConfig": {
         "scheme_key": "atm.gwd.HinesConfig",
         "excluded": {
-            "U_mag_floor": "wind-magnitude floor for the direction projection; a divide-by-zero safety floor, not a closure",
-            "doppler_sharpness": "sigmoid sharpness of the smooth saturation gate; a differentiability/smoothing width, not a closure",
             "launch_p": "selects a launch level INDEX by argmin, so the drag is piecewise-constant in it and not usefully differentiable (E3SM selects kbotbg statically at init)",
+            "f1": "Hines/McLandress closure constant, fixed by the reference (LMDZ hines_setup)",
+            "f2": "Hines/McLandress closure constant, fixed by the reference (LMDZ hines_setup)",
+            "f3": "Hines/McLandress closure constant, fixed by the reference (LMDZ hines_setup)",
+            "kstar_min": "Hines/McLandress horizontal-wavenumber constant, fixed by the reference (LMDZ hines_setup)",
+            "kstar_max": "Hines/McLandress horizontal-wavenumber constant, fixed by the reference (LMDZ hines_setup)",
+            "smooth_sharpness": "smoothing width of the differentiable switch forms; numerics, not a closure",
         },
         "params": {
             # --- launch source spectrum (Hines 1997) ---
-            "total_rms_wind": {"units": "m/s", "bounds": (0.5, 10.0), "tunable_tier": 1, "transform": "sigmoid", "category": "source_spectrum", "reference": "Hines (1997) launch rms wind", "shape": None},
-            # --- saturation / momentum-flux cap ---
-            "Fmax": {"units": "Pa", "bounds": (0.01, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "saturation", "reference": "Hines (1997) saturation momentum-flux cap", "shape": None},
-            # --- tendency limiters ---
-            "tndmax_per_day": {"units": "m/s/day", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common tendency ceiling", "shape": None},
-            "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common umcfac no-reversal limiter", "shape": None},
+            "total_rms_wind": {"units": "m/s", "bounds": (0.25, 4.0), "tunable_tier": 1, "transform": "sigmoid", "category": "source_spectrum", "reference": "Hines (1997) launch rms wind; LMDZ rmscon = 1.0", "shape": None},
         },
     },
     "LindzenConfig": {
@@ -424,44 +423,38 @@ class McFarlaneConfig(NamedTuple):
 
 
 class HinesConfig(NamedTuple):
-    """Configuration for Hines (1997) Doppler-spread parameterization.
+    """Configuration for the Hines (1997) Doppler-spread scheme (LMDZ r5891
+    ``hines_gwd.f90`` port; defaults = LMDZ ``hines_setup`` / driver values).
 
     Fields
     ------
-    m_star : float
-        Characteristic vertical wavenumber [1/m] (default 2*pi/2e3).
     total_rms_wind : float
-        Total RMS gravity wave wind [m/s] (default 2.0).
-    Fmax : float
-        Saturation momentum flux cap [Pa] (default 0.1).
-    doppler_sharpness : float
-        Sigmoid sharpness for Doppler saturation (default 50.0).
-    tndmax_per_day : float
-        Absolute ceiling on ``|du/dt|`` [m/s/day] (default 400.0, CAM
-        ``tndmax`` for spectral/non-orographic sources; gw_common.F90:158).
-        Caps the ``Fmax/(rho*dz)`` accelerations that blow up in thin,
-        low-density upper layers where a fixed momentum-flux cap is divided
-        by a tiny ``rho*dz``.
-    umcfac : float
-        Maximum fraction of the local wind magnitude the deposition may
-        remove per step (default 0.5, CAM ``umcfac``; gw_common.F90:642), so
-        the single-step drag cannot reverse the wind.
+        Total rms gravity-wave wind at the launch level [m/s] (LMDZ
+        ``rmscon = 1.0``).
+    f1, f2, f3 : float
+        Hines closure factors (LMDZ 1.5, 0.3, 1.0): Doppler-spread cutoff
+        (f1), turbulent cutoff (f2), molecular cutoff (f3).
+    kstar_min, kstar_max : float
+        Horizontal wavenumber ``k* = kstar_min / (cos(lat) + kstar_min /
+        kstar_max)`` [1/m] (LMDZ 1e-5, 1e-4).
+    smooth_sharpness : float
+        Sharpness of the smooth forms of the oracle's hard switches, on
+        dimensionless ratios (100 = 0.01 relative width); ``math.inf`` = the
+        oracle's exact hard forms.
+    launch_p : float
+        Launch pressure [Pa], default 700 hPa, legal range
+        ``HINES_LAUNCH_P_RANGE_PA``: the spectrum is launched at the level
+        nearest ``launch_p`` in each column (LMDZ launches at the fixed level
+        third from the bottom; a near-surface launch is not offered).  A
+        column whose nearest level is its lowest level gets no source.
     """
-    m_star: float = 2.0 * math.pi / 2e3
-    total_rms_wind: float = 2.0
-    Fmax: float = 0.1
-    doppler_sharpness: float = 50.0
-    U_mag_floor: float = 0.1  # Wind-magnitude floor for projection [m/s]
-    tndmax_per_day: float = 400.0
-    umcfac: float = 0.5
-    # Launch pressure [Pa], default 700 hPa, legal range
-    # ``HINES_LAUNCH_P_RANGE_PA``.  There is no surface launch: a
-    # non-orographic wave launched at the surface is born SUPERSATURATED
-    # wherever the launch amplitude exceeds ``sigma_sat = N/m_star``, and N is
-    # SMALLEST in the well-mixed boundary layer (2.5 deg AMIP state: 2.0 m/s
-    # exceeds the 1.25 m/s sigma_sat at 140 m over 78.5% of the area), so it
-    # broke at its own launch level and deposited 55% of its momentum below
-    # 1 km.  No drag is deposited at or below the launch level.
+    total_rms_wind: float = 1.0
+    f1: float = 1.5
+    f2: float = 0.3
+    f3: float = 1.0
+    kstar_min: float = 1.0e-5
+    kstar_max: float = 1.0e-4
+    smooth_sharpness: float = 100.0
     launch_p: float = 7.0e4
 
 

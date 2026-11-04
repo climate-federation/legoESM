@@ -543,7 +543,9 @@ def test_mcfarlane_grad_jit_vmap():
 
 
 # ===========================================================================
-# Hines Doppler-spread (single bulk-amplitude surrogate)
+# Hines Doppler-spread (LMDZ r5891 port).  The drag is the divergence of an
+# 8-azimuth spectrum's flux relative to the launch-level wind: it is NOT
+# antiparallel to the local wind, and its frictional heating can be either sign.
 # ===========================================================================
 
 def test_hines_finite_sign_heating():
@@ -551,8 +553,6 @@ def test_hines_finite_sign_heating():
     out = hines_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0,
                     HinesConfig())
     _assert_finite_and_bounded(out)
-    _assert_drag_opposes_flow(out, u)   # deposition is along +U (a sink)
-    _assert_heating_nonneg(out)
 
 
 def test_hines_flux_grows_upward():
@@ -569,13 +569,12 @@ def test_hines_flux_grows_upward():
 
 
 def test_hines_wind_reversal_finite_sink():
-    """Hines is amplitude-based (no explicit c): through a wind reversal it
-    must stay finite and remain a momentum sink (no acceleration)."""
+    """Through a wind reversal (critical levels for half the azimuths) the
+    drag stays finite."""
     u, v, T, pf, ph, zf, zh, rho = _idealized_column(u_profile="critical")
     out = hines_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0,
                     HinesConfig())
     assert jnp.all(jnp.isfinite(out.du_dt))
-    _assert_drag_opposes_flow(out, u)
 
 
 def test_hines_grad_jit_vmap():
