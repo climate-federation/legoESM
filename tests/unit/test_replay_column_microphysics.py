@@ -316,3 +316,20 @@ def test_build_morrison_config_resolves_dcs_as_the_driver(flavor, dcs, expect):
     cfg = build_morrison_config({**RESOLVED_1432, "morrison_flavor": flavor,
                                  "morrison_ice_snow_d_auto": dcs})
     assert resolve_morrison_flavor(cfg).ice_snow_d_auto == expect
+
+
+@pytest.mark.parametrize("recorded,expect", [
+    ("absent", "kk2000"), (None, "kk2000_cam6"),
+    ("seifert_beheng_sb2001", "seifert_beheng_sb2001")])
+def test_build_morrison_config_replays_the_recorded_warm_rain_law(recorded,
+                                                                  expect):
+    """Explicit law as recorded; recorded unset by flavour (mg here); a
+    manifest without the key (pre-field run) at kk2000."""
+    from legoesm.atmosphere.physics.microphysics.morrison import (
+        resolve_morrison_flavor)
+    res = {**RESOLVED_1432, "morrison_flavor": "mg"}
+    res.pop("morrison_warm_rain_scheme", None)
+    if recorded != "absent":
+        res["morrison_warm_rain_scheme"] = recorded
+    cfg = build_morrison_config(res)
+    assert resolve_morrison_flavor(cfg).warm_rain_scheme == expect

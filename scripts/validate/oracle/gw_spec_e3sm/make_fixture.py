@@ -232,7 +232,10 @@ def write_oracle_input(path, d, arm, mfcc):
              f(np.array([arm["taubgnd"], frontgfc, arm.get("hcf", 20.0), arm.get("hdsf", 1.0)])),
              "1 0.0", "0 -1 -1 -1", f(d["pref_edge"])]
     if "convective" in srcs:
-        lines += [f"{mfcc.shape[0]} {(mfcc.shape[1] - 1) // 2}", f(mfcc)]
+        if isinstance(mfcc, str):   # gw_drag_file path: the oracle reads it (MFCC_FILE build)
+            lines += [f"{MAXH} {MAXUH}"]
+        else:
+            lines += [f"{mfcc.shape[0]} {(mfcc.shape[1] - 1) // 2}", f(mfcc)]
     dse = constants.c_pd * d["T"] + constants.g * d["z_full"] + d["phis"][:, None]
     for i in range(ncol):
         lines += [f(np.array([np.deg2rad(d["lat"][i]), d["sgh"][i], d["lf"][i]])),
@@ -246,7 +249,8 @@ def run_oracle(drv, d, arm, mfcc):
     with tempfile.TemporaryDirectory() as td:
         inp, out = Path(td, "in.txt"), Path(td, "out.txt")
         write_oracle_input(inp, d, arm, mfcc)
-        r = subprocess.run([drv, str(inp), str(out)], capture_output=True, text=True)
+        extra = [mfcc] if isinstance(mfcc, str) else []
+        r = subprocess.run([drv, str(inp), str(out), *extra], capture_output=True, text=True)
         if "E3SM_SPEC_ORACLE_OK" not in r.stdout:
             raise RuntimeError(f"oracle failed: {r.stdout}\n{r.stderr}")
         rows = {}
@@ -254,10 +258,14 @@ def run_oracle(drv, d, arm, mfcc):
             t = line.split()
             if t[0] in ("ptend_u", "ptend_v", "ptend_s"):
                 rows.setdefault(t[0], {})[int(t[1])] = np.array([float(x) for x in t[2:]])
+            elif t[0] == "mfcc":
+                rows["mfcc"] = np.array([float(x) for x in t[1:]])
             elif t[0] == "kidx":
                 rows["kidx"] = np.array([int(x) for x in t[1:]])
-    o = {k: np.stack([v[i] for i in sorted(v)]) for k, v in rows.items() if k != "kidx"}
+    o = {k: np.stack([v[i] for i in sorted(v)]) for k, v in rows.items() if k not in ("kidx", "mfcc")}
     o["kidx"] = rows["kidx"]
+    if "mfcc" in rows:
+        o["mfcc"] = rows["mfcc"]
     return o
 
 

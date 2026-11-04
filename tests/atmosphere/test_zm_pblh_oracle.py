@@ -11,7 +11,7 @@ MPAS and FV3-duo column production decks -- now hands ZM the lagged
 Fixture ``oracle_fixtures/zm_pblh_cam.npz``: inputs and outputs of the real
 CAM cam_cesm2_1_rel_60 (SHA a03b84b7c4e34f965b115686f22a043b85739e56)
 zm_conv.F90, run by ``sbatch --wait scripts/validate/oracle/zm_pblh/build.sh``
-(legoESM constants, legoESM qsat_water curve for the plume, ientropy tightened to 1e-11 K; see
+(legoESM constants, CAM's Goff-Gratch qsat_water for the plume, ientropy tightened to 1e-11 K; see
 make_fixture.py).  Column ``nocturnal_elevated`` (pblh 150 m) does not convect
 in CAM; with the old 700 hPa launch bound it did.
 

@@ -82,13 +82,16 @@ kw = dict(T=jnp.asarray(S("T")), p_full=jnp.asarray(p_full), q_v=jnp.asarray(S("
           p_half=jnp.asarray(p_half))
 from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E402
 CLUBB = CLUBBConfig()  # CAM top_lev cut on aist (clubb_intr.F90:2535)
-props = compute_cloud_properties(**kw, n_cloud_in_cloud=True, clubb_config=CLUBB)
+from legoesm.atmosphere.physics.microphysics.config import MG2_DCS_M  # noqa: E402
+props = compute_cloud_properties(**kw, n_cloud_in_cloud=True, clubb_config=CLUBB,
+                                 mg2_ice_dcs_m=MG2_DCS_M, mg2_ice_slope_log_width=0.0)
 aist = cam6_ice_stratus_fraction(kw["q_v"], kw["T"], kw["p_full"], kw["q_ice"], kw["lat"],
                                  ccfg, kw["p_half"][:, :-1],
                                  trop_cloud_top_press=CLUBB.trop_cloud_top_press,
                                  trop_cloud_taper_lnp_width=CLUBB.trop_cloud_taper_lnp_width)
 ast = np.asarray(jnp.maximum(jnp.clip(kw["cloud_fraction_override"], 0.0, 1.0), aist))
 rho = np.asarray(compute_rho(jnp.maximum(kw["T"], 1.0), kw["p_full"], kw["q_v"]))
+rho_dry = np.asarray(compute_rho(jnp.maximum(kw["T"], 1.0), kw["p_full"]))  # CAM REL rho = p/(rair t)
 
 with tempfile.TemporaryDirectory() as d:
     fin, fout = os.path.join(d, "in.bin"), os.path.join(d, "out.bin")
@@ -96,7 +99,7 @@ with tempfile.TemporaryDirectory() as d:
         np.asarray([ncol * nlev], "<i4").tofile(f)
         np.asarray([CAM6_DCS, constants.rho_water], "<f8").tofile(f)
         nc_or = np.where(S("n_ccn") > 1.0, S("n_ccn"), ccfg.Nc_default)
-        for a in (S("q_c"), S("q_i"), S("n_i"), nc_or, ast, rho):
+        for a in (S("q_c"), S("q_i"), S("n_i"), nc_or, ast, rho, rho_dry):
             np.asarray(a, "<f8").ravel().tofile(f)
     run = subprocess.run([ORACLE, fin, fout], capture_output=True, text=True, check=True)
     assert "ORACLE_DONE" in run.stdout, run.stdout
@@ -123,7 +126,8 @@ cfg_d = ccfg._asdict()
 assert type(ccfg)(**json.loads(json.dumps(cfg_d))) == ccfg
 meta = dict(
     oracle=f"CAM {tagof(CAM)} {sha(CAM)} micro_mg2_0.F90 L877-879,2739-2768,2772-2808,"
-           "2811-2865 + micro_mg_cam.F90 L2296,2534-2554 (grid REL) + micro_mg_utils.F90 "
+           "2811-2865 (MG2 at dry rho; REL reads nc + nctend*dt, the post-MG2 number) + micro_mg_cam.F90 "
+           "L2296,2507-2508 (dry REL rho),2534-2554 (grid REL) + micro_mg_utils.F90 "
            "(unmodified), dcs=500e-6; dead droplet number -> ncnst = Nc_default",
     oracle_psd=f"WRF module_mp_morr_two_moment.F L3918-3949,4024-4029 (sha256 "
                f"{hashlib.sha256(open(WRF, 'rb').read()).hexdigest()}, identical to v4.6.1), "

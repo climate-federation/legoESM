@@ -142,6 +142,9 @@ clouds: sundqvist
 # newer curve; that is a different experiment.
 cloud_saturation_scheme: liquid
 microphysics: morrison
+morrison_warm_rain_scheme: kk2000   # explicit: the unset default resolves to
+                                    # kk2000_cam6 under morrison_flavor mg,
+                                    # which needs CLUBB relvar (not wired here)
 morrison_sed_cfl_substeps: true  # user decision 2026-09-22: MG2 CFL sub-stepped
                                  # sedimentation (micro_mg2_0.F90 loop). The
                                  # one-pass form moved a hydrometeor at most one
@@ -154,6 +157,14 @@ morrison_sed_cfl_substeps: true  # user decision 2026-09-22: MG2 CFL sub-stepped
                                  # 256 cap; turning the abort on is a user choice, not taken.
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
                             # construction; C24 screen = revalidation gate
+# Faithful IFS CUMASTRN path OFF (user decision 2026-10-30): its cloud base,
+# cloud top, cloud type and on/off flags are hard switches on model state, so
+# it is not differentiable (RULE 5 status: issue #2281).  Production runs the
+# smooth Bechtold chain; the IFS port stays an oracle / validation target.
+# The two legacy pins below are restored to the values this deck ran with
+# before #2249: the convection config now resolves field for field to the one
+# built at fec6aacafe^1 (pinned by test_run_amip_cli.py).
+bechtold_use_ifs_ascent: false
 # Convective momentum transport PINNED OFF (review 2026-10-10 F22, majority
 # vote Claude+GLM): the unset default is now ON on every lane, but it resolved
 # OFF on MPAS when this deck's results were produced; this deck exists so

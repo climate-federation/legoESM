@@ -57,6 +57,9 @@ from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
 )
 from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
 from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence
+from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+    cam6_detrain_condensate,
+)
 from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
@@ -517,6 +520,8 @@ def make_turbulence_physics(
     dt: float = 300.0,  # coeff-ok: default physics timestep [s]
     f_land=None,
     land_beta: float = 1.0,
+    *,
+    zm_config=None,
 ) -> Callable:
     """Create a physics function for turbulence matching a model's signature.
 
@@ -537,6 +542,10 @@ def make_turbulence_physics(
         Land evaporation efficiency in [0, 1] applied on the ``f_land``
         fraction of the surface humidity (MPAS-only, with ``f_land``).
         ``1.0`` (default) keeps the saturated wet surface, byte-identical.
+    zm_config : ZhangMcFarlaneConfig or None
+        MPAS-only: the ZM config whose detrainment smoothing widths the CLUBB
+        bridge uses to book a ``forcing["conv_dlf"]`` hand-off (CAM6
+        clubb_intr.F90:2345-2376).  ``None``: a handed ``conv_dlf`` raises.
 
     Returns
     -------
@@ -560,6 +569,11 @@ def make_turbulence_physics(
             "TurbulenceConfig.liquid_partition needs prognostic CLUBB "
             "(CLUBBConfig(prognostic=True)); the diagnostic closure does not "
             "advance the total water the exchange partitions.")
+    if model_type != "mpas" and zm_config is not None:
+        raise ValueError(
+            "zm_config feeds the MPAS CLUBB bridge's booking of ZM's detrained "
+            f"condensate; the {model_type!r} turbulence lane does not book it "
+            "(it would be silently inert here).")
     if model_type != "mpas" and (f_land is not None or land_beta != 1.0):
         raise ValueError(
             "f_land/land_beta are the MPAS land surface boundary knobs; the "
@@ -615,7 +629,8 @@ def make_turbulence_physics(
         # temperature from the per-step ``forcing["T_sfc"]`` (AMIP SST) when
         # supplied, so the surface sensible/latent fluxes are SST-driven.
         _mpas_turb_fn = _make_mpas_turbulence(
-            turbulence_config, dt, f_land=f_land, land_beta=land_beta)
+            turbulence_config, dt, f_land=f_land, land_beta=land_beta,
+            zm_config=zm_config)
         # Forcing-aware: the combined-physics dispatcher forwards
         # ``forcing["T_sfc"]`` to fns advertising this (mirrors radiation).
         _mpas_turb_fn._wants_forcing = True
@@ -805,6 +820,7 @@ def _make_mpas_turbulence(
     dt: float,
     f_land=None,
     land_beta: float = 1.0,
+    zm_config=None,
 ) -> Callable:
     """Create turbulence physics_fn for MPASPrimitiveEquationModel.
 
@@ -1204,6 +1220,29 @@ def _make_mpas_turbulence(
                 f"turbulence scheme {scheme_name!r} accepted the liquid "
                 "partition but returned no dq_c_dt, so the liquid removed from "
                 "vapour would vanish. This is a scheme bug, not a config one.")
+        # ZM's detrained condensate handed over by the combined macmic loop
+        # (CAM6 clubb_intr.F90:2345-2376): booked on state1 AFTER the CLUBB
+        # update (:2251), so everything below -- the PBL height included
+        # (:2594-2617 runs after the detrainment update at :2397) -- sees it.
+        _dlf = None if forcing is None else forcing.get("conv_dlf")
+        _det = None
+        if _dlf is not None:
+            if zm_config is None:
+                raise ValueError(
+                    "forcing['conv_dlf'] (ZM's detrained condensate) was handed "
+                    "to the MPAS turbulence bridge, but it was built without "
+                    "zm_config, whose smoothing widths the booking needs.")
+            _missing = [n for n in ("q_c", "q_i", "N_c", "N_i")
+                        if state.tracers is None or n not in state.tracers]
+            if _missing:
+                raise ValueError(
+                    "forcing['conv_dlf'] is booked into q_c, q_i, N_c and N_i; "
+                    f"the state lacks {_missing}, whose tendencies the MPAS "
+                    "step would drop.")
+            _det = cam6_detrain_condensate(
+                T_col + dt * turb_out.dT_dt,
+                jnp.asarray(_dlf).reshape(nCells, nlev), zm_config)
+            turb_out = turb_out._replace(dT_dt=turb_out.dT_dt + _det[0])
         if scheme_name == "clubb" and _surface_flux is not None:
             # CAM6 PBL height (oracle row 48): clubb_intr.F90:2594-2617 runs
             # hb_diff::pblintd on state1 AFTER the CLUBB update
@@ -1264,6 +1303,18 @@ def _make_mpas_turbulence(
                 )
             else:
                 tracer_tends["q_c"] = turb_out.dq_c_dt.reshape(_qc_raw.shape)
+        if _det is not None:
+            for _nm, _d, _u in zip(("q_c", "q_i", "N_c", "N_i"), _det[1:],
+                                   ("kg/kg/s", "kg/kg/s", "1/kg/s", "1/kg/s")):
+                _d = _d.reshape(state.T.data.shape)
+                _prev = tracer_tends.get(_nm)
+                if _prev is None:
+                    tracer_tends[_nm] = state.T.replace(
+                        data=_d, name=f"d{_nm}_dt_detrain", units=_u)
+                elif hasattr(_prev, "replace"):
+                    tracer_tends[_nm] = _prev.replace(data=_prev.data + _d)
+                else:
+                    tracer_tends[_nm] = _prev + _d
 
         zero_ps = jnp.zeros_like(p_s)
         # Surface turbulent fluxes for the CMOR hfss/hfls feed [W/m^2,

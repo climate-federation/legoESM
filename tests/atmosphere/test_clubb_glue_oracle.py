@@ -48,7 +48,8 @@ def fix():
     return dict(np.load(_FIX))
 
 
-def run_glue(fx, case, width, monkeypatch, T=None, q_c=None):
+def run_glue(fx, case, width, monkeypatch, T=None, q_c=None, rcm_post_scale=1.0,
+             rcm_post_offset=0.0):
     """Our glue with the oracle's prescribed 'core'; returns outputs + the
     host->CLUBB inputs the core received."""
     g = lambda k: jnp.asarray(fx[f"in/{k}"])  # noqa: E731
@@ -66,7 +67,9 @@ def run_glue(fx, case, width, monkeypatch, T=None, q_c=None):
                              rtm=state.rtm + flip(c("drt")), rtp2=flip(g("rtp2")))
         z = jnp.zeros_like(state.thlm)
         return new, dict(cloud_frac=flip(jnp.minimum(c("cf_out"), 1.0)),
-                         rcm=flip(c("rcm_out")), wpthvp=jnp.zeros_like(state.wp2),
+                         rcm=rcm_post_scale * flip(c("rcm_out")) + rcm_post_offset,
+                         rcm_out=flip(c("rcm_out")),
+                         wpthvp=jnp.zeros_like(state.wp2),
                          Kh_zt=z, Kh_zm=jnp.zeros_like(state.wp2),
                          rcp2_zt=z)  # relvar input; not compared here
 
@@ -116,6 +119,19 @@ def test_glue_matches_cam_clubb_intr(fix, case, monkeypatch):
     assert not bad, f"top {case} Pa: fields above {_TOL}: {bad}"
 
 
+@pytest.mark.parametrize("case", ["15000", "100"])
+def test_host_liquid_is_the_cores_rcm_out(fix, case, monkeypatch):
+    """CAM copies the core's rcm_out into rcm (clubb_intr.F90:1991) and that
+    one array is the host liquid (:2159-2160): a core whose post-advance
+    closure rcm differs from rcm_out must not move the host outputs.  The
+    offset makes the decoy nonzero where rcm_out is zero, so the clubbtop search
+    (rcm == 0 on quiet levels, :2043) also tells the two apart."""
+    err = errors(fix, case, run_glue(fix, case, _HARD, monkeypatch,
+                                     rcm_post_scale=0.5, rcm_post_offset=1.0e-5))
+    bad = {k: v for k, v in err.items() if not v <= _TOL}
+    assert not bad, f"top {case} Pa: fields above {_TOL}: {bad}"
+
+
 @pytest.mark.parametrize("path", ["bulk", "prescribed"])
 def test_heat_bc_and_energy_fixer_target_share_the_cam_convention(fix, path,
                                                                  monkeypatch):
@@ -129,7 +145,7 @@ def test_heat_bc_and_energy_fixer_target_share_the_cam_convention(fix, path,
 
     def fake_core(state, forcing, **kw):
         z = jnp.zeros_like(state.thlm)
-        return state, dict(cloud_frac=z, rcm=z, wpthvp=jnp.zeros_like(state.wp2),
+        return state, dict(cloud_frac=z, rcm=z, rcm_out=z, wpthvp=jnp.zeros_like(state.wp2),
                            Kh_zt=z, Kh_zm=jnp.zeros_like(state.wp2),
                            rcp2_zt=z)  # relvar input; not compared here
 

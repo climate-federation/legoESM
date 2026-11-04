@@ -271,10 +271,17 @@ def test_a_rejected_nan_iterate_leaves_finite_gradients(monkeypatch):
         z = jnp.zeros((), x0.dtype)
         return (jnp.full_like(x0, jnp.nan), jnp.array(1), jnp.asarray(False), z, z, z, z)
 
-    monkeypatch.setattr(tl.jax.lax, "map", _SolveMapProxy(tl.jax.lax.map, jax.vmap(fake)))
+    batched, used = jax.vmap(fake), []
+
+    def stub(*a):
+        used.append(1)
+        return batched(*a)
+
+    monkeypatch.setattr(tl.jax.lax, "map", _SolveMapProxy(tl.jax.lax.map, stub))
 
     def loss(scale):
         out = _canopy_call(soil_record=None, lw_scale=scale)
         return jnp.sum(out.Ts_solve) + jnp.sum(jnp.nan_to_num(out.T_surface))
     g = jax.grad(loss)(jnp.asarray(1.0, jnp.float32))
+    assert used, "the stand-in solver never ran: the test would pass on the real solver"
     assert bool(jnp.isfinite(g))

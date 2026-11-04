@@ -377,9 +377,10 @@ class TestMicrophysicsGrad:
     )
     def test_grad_wrt_qv(self, scheme):
         from legoesm.atmosphere.physics.microphysics.integration import make_microphysics_physics
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MicrophysicsConfig, MorrisonConfig)
 
-        config = MicrophysicsConfig(scheme=scheme)
+        config = MicrophysicsConfig(scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
         micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)
         state = self.state
 
@@ -406,9 +407,10 @@ class TestMicrophysicsGrad:
         loss must include tracer tendencies, not just ``dT_dt``.
         """
         from legoesm.atmosphere.physics.microphysics.integration import make_microphysics_physics
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MicrophysicsConfig, MorrisonConfig)
 
-        config = MicrophysicsConfig(scheme=scheme)
+        config = MicrophysicsConfig(scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
         micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)
         state = self.state
         qr_zero = jnp.zeros_like(state.tracers["q_r"].data)
@@ -464,9 +466,10 @@ class TestMicrophysicsGrad:
             actually wired through and the test isn't ineffective.
         """
         from legoesm.atmosphere.physics.microphysics.integration import make_microphysics_physics
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MicrophysicsConfig, MorrisonConfig)
 
-        config = MicrophysicsConfig(scheme=scheme)
+        config = MicrophysicsConfig(scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
         micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)
         state = self.state
         zero_field = jnp.zeros_like(state.tracers["q_v"].data)
@@ -541,7 +544,8 @@ class TestCombinedPhysicsGrad:
         from legoesm.atmosphere.physics.radiation.config import RadiationConfig
         from legoesm.atmosphere.physics.convection.config import ConvectionConfig
         from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MicrophysicsConfig, MorrisonConfig)
 
         n, nlev = 4, 5
         self.grid = create_cubed_sphere(n)

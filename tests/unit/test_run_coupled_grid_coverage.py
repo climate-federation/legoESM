@@ -36,7 +36,7 @@ def _driver_output(result) -> str:
 def test_grid_choice_accepted(grid):
     """All four grids parse (the --grid choices were widened for coupled runs)."""
     args = build_parser().parse_args(["--grid", grid])
-    assert args.grid == grid
+    assert args.grid_type == grid
 
 
 def test_gaussian_dynamic_ocean_requires_distinct_ocean_grid():
@@ -65,7 +65,7 @@ def test_gaussian_dynamic_ocean_with_distinct_grid_parses():
     parse and the distinct ocean-grid spec is accepted (no SystemExit at parse)."""
     args = build_parser().parse_args(
         ["--grid", "gaussian", "--ocean", "dynamic", "--ocean-grid", "latlon:48"])
-    assert args.grid == "gaussian" and args.ocean == "dynamic"
+    assert args.grid_type == "gaussian" and args.ocean == "dynamic"
     assert args.ocean_grid == "latlon:48"
 
 

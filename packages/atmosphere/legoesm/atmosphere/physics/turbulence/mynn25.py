@@ -1,5 +1,18 @@
 """Mellor-Yamada-Nakanishi-Niino level-2.5 (MYNN-2.5) turbulence closure.
 
+.. warning::
+
+   **NOT-YET-FAITHFUL to the selected oracle.**  The oracle for ``mynn25`` is
+   WRF v4.8.0 MYNN-EDMF at level 2.5 with the WRF namelist defaults (user
+   decision 2026-10-20).  Its faithful JAX port is
+   :func:`legoesm.atmosphere.physics.turbulence.mynnedmf_wrf.mynnedmf_column`
+   (oracle-tested in ``tests/atmosphere/hydrostatic/unit/test_mynn25_oracle.py``).
+   :func:`mynn25_turbulence` below is the older jax_scm closure and is what
+   every lane still runs: no lane yet supplies the WRF column state (cloud
+   water/ice, vertical velocity, carried ``qsq``/``el``, skin temperature,
+   friction velocity, surface fluxes, land/water flag, grid spacing), and how
+   lanes should supply it is an open decision.
+
 Faithful port of the closure used by jax_scm (Pierzyna 2026, arXiv:2605.24544)
 for jax_scm-oracle parity on the GABLS1 / Wangara / Ekman benchmarks.  Follows
 Nakanishi & Niino (2009) — *Development of an Improved Turbulence Closure

@@ -23,23 +23,30 @@ Every closed form here is a faithful port of the jax-alfa oracle
 numpy reimplementation in ``tests/unit/test_lasd_faithful.py``: the sharp spectral test
 filter (cutoff ``round(N/(2·FGR·TFR))``), the 3×3 periodic box average /9, the Laguerre
 max-real-root-in-(0,5) β-solver (default 1.0, cross-checked against ``numpy.roots`` — a
-different algorithm), and the full a1..e2 / aa..ff / M_ij / LM / MM / ``C_s²``-clip
+different algorithm), and the full a1..e2 / aa..ff / M_ij / LM / MM / ``C_s²``-mask
 assembly (with the Lilly-1992 error-functional coefficient ``_LASD_LILLY_COEFF=8`` and
-``_TFR=2``).  Documented departures from the oracle:
-- ``cs_max`` is a CONFIGURABLE clip extension: the oracle hardcodes 1.0, and the default
-  ``cs_max=1`` reproduces the oracle mask exactly, but ``cs_max != 1`` DOES change the
-  modeled closure (a different ceiling on ``C_s²``) — it is an extension, not a pure
+``_TFR=2``).  The tier-2 oracle audit (les_sgs_closures, 2026-10-19) also RAN jax-alfa
+v0.0.1 (93fe4658) ``LASDD`` on the oracle's own 32³ CBL/NBL/SBL LES fields: ``C_s²`` max
+abs difference 3.8e-15 / 1.1e-10 / 2.9e-10 and β ≤ 6.9e-8, the same size as the oracle's
+own difference from itself on the x↔y-swapped flow (round-off of a different FFT /
+summation axis order, amplified where ``LM``/``MM`` cancel); oracle ``ComputeBeta1`` on
+this module's quintic coefficients returns this module's β bitwise.  Only the oracle's
+``FGR=1`` (``TFR=2``) setting is supported.  Documented departures from the oracle:
+- ``cs_max`` is a CONFIGURABLE mask bound: the oracle hardcodes 1.0 (it sets ``C_s²`` to
+  ZERO where ``C_s² > 1``; it does not clip to 1), and the default ``cs_max=1``
+  reproduces the oracle mask exactly, but ``cs_max != 1`` DOES change the modeled
+  closure (``C_s² > cs_max²`` is zeroed) — it is an extension, not a pure
   reformatting.
 - ``C_s²`` uses a RAW divide after FLOORING the denominator
   (``LMx / where(|MMx|<1e-10, 1e-10, MMx)``), not the project ``safe_divide`` helper;
   it is forward-identical to the oracle (the ``|MMx|<1e-10`` cells are masked to 0 either
   way) and keeps the reverse-mode cotangent finite by never dividing by a tiny denominator.
 - the β-solver is a fixed-trip ``lax.scan`` that FREEZES the converged root via ``where``
-  (the oracle uses a ``while_loop`` that stops early).  It returns the SAME converged root
-  as the oracle to the Laguerre tolerance, but is NOT bit-identical to the ``while_loop``
-  (it keeps evaluating — and discarding — later Laguerre steps after convergence) and can
-  differ at a convergence boundary; the scan form is what makes it reverse-mode
-  differentiable.
+  (the oracle uses a ``while_loop`` that stops early).  Bit-identity with the
+  ``while_loop`` is not guaranteed by construction (the scan keeps evaluating — and
+  discarding — later Laguerre steps after convergence), but on the audit's CBL/NBL/SBL
+  coefficients it returned the oracle's β bitwise; the scan form is what makes it
+  reverse-mode differentiable.
 - the ``(ny, nx, nz)`` layout (oracle ``(nx, ny, nz)`` — a transpose) and the optional
   MPI y-slab distributed path (serial path is the pinned one).
 """
@@ -64,14 +71,15 @@ __physics_contract__ = {
         "S12": "1/s", "S13": "1/s", "S23": "1/s",
         "Smag": "1/s (resolved strain-rate magnitude |S|)",
         "delta": "m (grid filter width per level)",
-        "cs_max": "1 (upper clip on C_s)",
+        "cs_max": "1 (C_s^2 > cs_max^2 is masked to 0)",
     },
     "outputs": {
         "cs2": "1 (dimensionless Smagorinsky coefficient C_s^2 field)",
     },
     "sign_convention": (
         "C_s^2 >= 0: masked to 0 where the Germano denominator MM ~ 0, where "
-        "C_s^2 < 0, or where C_s^2 > cs_max^2 (backscatter/invalid clipped). "
+        "C_s^2 < 0, or where C_s^2 > cs_max^2 (backscatter/invalid zeroed, "
+        "not clipped). "
         "The caller forms the down-gradient eddy viscosity nu_t = "
         "C_s^2 * delta^2 * |S| >= 0. Returns a coefficient, not a tendency."
     ),
@@ -248,7 +256,7 @@ def lasd_cs2(uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag,
     uc, vc, wc : ``(ny, nx, nz)`` cell-centre velocities.
     S11..S23, Smag : ``(ny, nx, nz)`` resolved strain components + ``|S|``.
     delta : ``(nz,)`` grid filter width ``Δ`` per level.
-    cs_max : upper clip on ``C_s²`` (oracle mask uses 1.0).
+    cs_max : ``C_s² > cs_max²`` is masked to ZERO (oracle mask uses 1.0).
 
     Returns ``C_s²`` field ``(ny, nx, nz)`` (locally averaged, masked to a valid
     LES range). The caller forms ``ν_t = C_s² · Δ² · |S|``.

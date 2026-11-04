@@ -78,7 +78,8 @@ def _fake_zm(ncol, nlev, dq_v, dq_c, dq_r):
     z = jnp.zeros((ncol, nlev))
 
     def fake(*, T, q_v, p_full, p_half, u, v, conv_prog_profile, dt, config,
-             land_frac=None, cld_frac=None, pblh=None, pref_edge=None):
+             land_frac=None, cld_frac=None, pblh=None, pref_edge=None,
+             tracers=None):
         return ConvectionOutput(
             dT_dt=z, dq_v_dt=dq_v, dq_c_conv_dt=dq_c, cape=jnp.zeros((ncol,)),
             convective_mask=jnp.ones((ncol,)), dq_r_conv_dt=dq_r), z

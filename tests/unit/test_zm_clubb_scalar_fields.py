@@ -16,6 +16,7 @@ from legoesm.driver.config import (
     CLUBB_PROGNOSTIC_ONLY,
     CLUBB_SCALAR_FIELDS,
     ZM_SCALAR_FIELDS,
+    ZM_WIDTH_FIELDS,
     ExperimentConfig,
 )
 from legoesm.driver.physics_pipeline import (
@@ -178,3 +179,121 @@ def test_out_of_spec_bounds_refused(field, value):
                            **{field: value})
     with pytest.raises(ValueError, match=field):
         cfg.validate_strict()
+
+
+# --- ZM detrainment smoothing widths (ZM_WIDTH_FIELDS) ----------------------
+# Read only by the MPAS macro/micro sub-cycle with ZM + CLUBB; != defaults.
+_ZW = {"zm_detrain_phase_width_K": 0.2,
+       "zm_detrain_number_width_kgkg_s": 2.0e-12}
+_ZW_HOST = dict(convection="zhang_mcfarlane", turbulence="clubb",
+                cld_macmic_num_steps=3)
+
+
+def _mpas(cfg):
+    return cfg._replace(grid=cfg.grid._replace(grid_type="mpas"),
+                        dycore=cfg.dycore._replace(discretization="mpas"))
+
+
+def _zw_leaves(cfg):
+    zm = convection_config_for(cfg).zhang_mcfarlane
+    return {f: getattr(zm, leaf) for f, leaf in ZM_WIDTH_FIELDS.items()}
+
+
+def test_width_cli_values_reach_the_zm_config():
+    argv = ["--convection", "zhang_mcfarlane", "--turbulence", "clubb",
+            "--cld-macmic-num-steps", "3"]
+    for f, v in _ZW.items():
+        argv += ["--" + f.replace("_", "-"), str(v)]
+    cfg = _mpas(_parse(argv))
+    assert {f: getattr(cfg, f) for f in _ZW} == _ZW
+    cfg.validate_strict()
+    assert _zw_leaves(cfg) == _ZW
+
+
+def test_width_unset_keeps_scheme_defaults():
+    cfg = _mpas(_parse(["--convection", "zhang_mcfarlane"]))
+    assert all(getattr(cfg, f) is None for f in ZM_WIDTH_FIELDS)
+    assert _zw_leaves(cfg) == {f: getattr(ZhangMcFarlaneConfig(), leaf)
+                               for f, leaf in ZM_WIDTH_FIELDS.items()}
+
+
+def test_production_deck_names_the_widths_at_their_defaults():
+    import yaml
+    deck = yaml.safe_load(_DECK.read_text())
+    for f, leaf in ZM_WIDTH_FIELDS.items():
+        assert deck[f] == getattr(ZhangMcFarlaneConfig(), leaf), f
+    from scripts.run import run_amip
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    p = run_amip.build_arg_parser()
+    p.set_defaults(**load_yaml_config(_DECK, p))
+    cfg = run_amip.build_config_from_args(p.parse_args([]))
+    assert {f: getattr(cfg, f) for f in ZM_WIDTH_FIELDS} == {
+        f: deck[f] for f in ZM_WIDTH_FIELDS}
+    try:
+        cfg.validate_strict()
+    except ValueError as exc:
+        assert not any(k in str(exc) for k in ZM_WIDTH_FIELDS), exc
+
+
+@pytest.mark.parametrize("host", [
+    dict(_ZW_HOST, convection="bechtold"),
+    dict(_ZW_HOST, turbulence="louis"),
+    dict(_ZW_HOST, cld_macmic_num_steps=1),
+])
+def test_width_refused_where_nothing_reads_it(host):
+    cfg = _mpas(ExperimentConfig(**host, zm_detrain_phase_width_K=0.2))
+    with pytest.raises(ValueError, match="zm_detrain_phase_width_K"):
+        cfg.validate_strict()
+
+
+def test_width_refused_off_the_mpas_lane():
+    """The booking runs only in the MPAS macmic loop (combined.py _defer_dlf);
+    elsewhere cld_macmic_num_steps>=2 itself is refused."""
+    cfg = ExperimentConfig(**_ZW_HOST, zm_detrain_phase_width_K=0.2)
+    assert not cfg.column_loop_lane
+    with pytest.raises(ValueError, match="cld_macmic_num_steps=3 is wired"):
+        cfg.validate_strict()
+
+
+@pytest.mark.parametrize("field", sorted(ZM_WIDTH_FIELDS))
+@pytest.mark.parametrize("value", [-1.0e-3, float("nan"), float("inf"), 1.0e-320,
+                                   1.0e-39, 1.0e-20, 1.0e19, 1.0e300])
+def test_width_out_of_range_refused(field, value):
+    cfg = _mpas(ExperimentConfig(**_ZW_HOST, **{field: value}))
+    with pytest.raises(ValueError, match=field):
+        cfg.validate_strict()
+    from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+        validate_detrain_widths,
+    )
+    zm = ZhangMcFarlaneConfig()._replace(**{ZM_WIDTH_FIELDS[field]: value})
+    with pytest.raises(ValueError, match="finite and >= 0"):
+        validate_detrain_widths(zm.detrain_phase_width_K,
+                                zm.detrain_number_width_kgkg_s)
+
+
+@pytest.mark.parametrize("field", sorted(ZM_WIDTH_FIELDS))
+@pytest.mark.parametrize("value", [False, True])
+def test_width_bool_refused(field, value):
+    """A YAML ``false`` reaches the config as a bool (the deck loader coerces
+    strings only); it must not read as 0 = the hard switch."""
+    cfg = _mpas(ExperimentConfig(**_ZW_HOST, **{field: value}))
+    with pytest.raises(ValueError, match=field):
+        cfg.validate_strict()
+    # The resolver refuses it too (a caller that skips validate_strict).
+    with pytest.raises(ValueError, match="finite and >= 0"):
+        convection_config_for(cfg)
+
+
+def test_width_zero_hard_switch_accepted():
+    _mpas(ExperimentConfig(**_ZW_HOST, zm_detrain_phase_width_K=0.0,
+                           zm_detrain_number_width_kgkg_s=0.0)).validate_strict()
+    _mpas(ExperimentConfig(**_ZW_HOST, zm_detrain_phase_width_K=1.1e-19,
+                           zm_detrain_number_width_kgkg_s=1.1e-19)).validate_strict()
+    _mpas(ExperimentConfig(**_ZW_HOST, zm_detrain_phase_width_K=9.0e18,
+                           zm_detrain_number_width_kgkg_s=9.0e18)).validate_strict()
+
+
+def test_widths_have_no_params_route():
+    """Excluded from __param_spec__ (tier 0): --params must not reach them."""
+    from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
+    assert not set(ZM_WIDTH_FIELDS) & set(build_atm_scalar_param_map().values())

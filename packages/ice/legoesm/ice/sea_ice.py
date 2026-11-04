@@ -36,6 +36,7 @@ from legoesm.thermo import (
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes,
     compute_most_fluxes,
+    large_yeager_widths,
     surface_reference_state,
     nemo_si3_constant_fluxes,
     validate_bulk_scheme,
@@ -572,12 +573,16 @@ def _nemo_si3_ice_albedo(
     h_snow: jnp.ndarray,
     cloud_fraction: jnp.ndarray,
     *,
+    land_mask: jnp.ndarray,
     _preserve_subnormal_snow: bool = True,
 ) -> jnp.ndarray:
     """Active no-pond SI3 albedo, ``icealb.F90:124-185``.
 
     The ORCA1 identity fixes ``nn_snwfra=2`` and ``ln_pnd_alb=.false.``;
     alternate snow-cover and pond branches are intentionally absent.
+    ``land_mask`` is NEMO's surface T mask ``smask0`` (1 wet, 0 land); it
+    multiplies the overcast albedo and the clear-sky correction at the same
+    two sites as ``icealb.F90:179-182``, so land albedo is 0 as in NEMO.
     """
     if _preserve_subnormal_snow:
         # XLA CPU flushes the smallest positive fp64 snow thickness to zero in
@@ -619,12 +624,12 @@ def _nemo_si3_ice_albedo(
         constants.albedo_snow_melt_orca1 - bare
     ) * jnp.exp(-h_snow * (1.0 / constants.albedo_snow_decay_melt_nemo))
     snow = jnp.where(T_surface < constants.T_freeze, snow_dry, snow_melt)
-    overcast = snow_fraction * snow + (1.0 - snow_fraction) * bare
+    overcast = (snow_fraction * snow + (1.0 - snow_fraction) * bare) * land_mask
     clear = overcast - (
         constants.albedo_cloud_quad_nemo * overcast * overcast
         + constants.albedo_cloud_linear_nemo * overcast
         + constants.albedo_cloud_offset_nemo
-    )
+    ) * land_mask
     return (1.0 - cloud_fraction) * clear + cloud_fraction * overcast
 
 
@@ -651,6 +656,7 @@ def _nemo_si3_blk_ice_2(
     qns_ocean,
     qsr_ocean,
     emp_ocean_raw,
+    land_mask,
     ice_constants,
     _preserve_subnormal_snow: bool = True,
 ):
@@ -659,9 +665,13 @@ def _nemo_si3_blk_ice_2(
     Formula and ordering follow NEMO 5.0.2 ``icealb.F90:124-185`` and
     ``sbcblk.F90:1218-1346``.  It is private because partial combinations with
     another public bulk selector are outside the certified identity.
+    ``land_mask`` is NEMO's ``smask0``; it multiplies the same terms as
+    ``sbcblk.F90`` (net longwave, total/solid precipitation and the rain,
+    snow and SST heat contents), so land cells carry NEMO's land values.
     """
     albedo = _nemo_si3_ice_albedo(
         T_surface, h_ice, h_snow, cloud_fraction,
+        land_mask=land_mask,
         _preserve_subnormal_snow=_preserve_subnormal_snow,
     )
     q_sat, dq_sat = nemo_si3_saturation_over_ice(T_surface, p_surface)
@@ -678,7 +688,7 @@ def _nemo_si3_blk_ice_2(
     surface_t3 = T_surface * T_surface * T_surface
     q_lw = constants.emissivity_ice_nemo * (
         lw_down - constants.sigma_sb_nemo * T_surface * surface_t3
-    )
+    ) * land_mask
     dq_lw = (
         4.0 * constants.emissivity_ice_nemo
         * constants.sigma_sb_nemo * surface_t3
@@ -692,8 +702,8 @@ def _nemo_si3_blk_ice_2(
     qns_ice = q_lw - sensible - latent
     dqns_ice = -(dq_lw + sensible_scale + dq_latent)
 
-    total_precip = precip
-    snow_precip = snow
+    total_precip = precip * land_mask
+    snow_precip = snow * land_mask
     ocean_evap = emp_ocean_raw + total_precip
     evaporation_ice = latent / ice_constants.latent_sublimation
     devaporation_ice = dq_latent / ice_constants.latent_sublimation
@@ -710,12 +720,12 @@ def _nemo_si3_blk_ice_2(
         - snow_precip * snow_on_ice_fraction
     )
     emp_total = emp_ocean + emp_ice
-    rain_heat = (theta_air - ice_constants.T0) * ice_constants.c_ocean
+    rain_heat = (theta_air - ice_constants.T0) * ice_constants.c_ocean * land_mask
     snow_heat = (
         (jnp.minimum(theta_air, ice_constants.T0) - ice_constants.T0)
-        * ice_constants.c_ice
+        * ice_constants.c_ice * land_mask
     )
-    ocean_heat = sst_celsius * ice_constants.c_ocean
+    ocean_heat = sst_celsius * ice_constants.c_ocean * land_mask
     qemp_ocean = (
         -(1.0 - ice_fraction_before) * ocean_evap * ocean_heat
         + (total_precip - snow_precip) * rain_heat
@@ -806,25 +816,29 @@ def _nemo_si3_ice_flx_other(
     T0,
     ice_epsilon,
     max_ice_fraction,
+    land_mask,
 ):
     """Active C1D ``ice_flx_other`` branch, ``icesbc.F90:322-437``.
 
     The accepted run has ``ln_icedyn/ln_leadhfx/ln_icedO/ln_icedH=.true.``
     and form drag false.  No public flags expose the inactive alternatives.
+    ``land_mask`` is NEMO's ``smask0``: it multiplies the friction velocity
+    squared, the ice switch and the lead/freezing energies (``zfric``,
+    ``zswitch``, ``zqld``, ``zqfr``), so land qlead is 0 as in NEMO.
     """
     du = u_ice - u_ocean
     du_west = u_ice_west - u_ocean_west
     dv = v_ice - v_ocean
     dv_south = v_ice_south - v_ocean_south
-    friction = drag_io * 0.5 * (
+    friction = drag_io * (0.5 * (
         (du * du + du_west * du_west) + (dv * dv + dv_south * dv_south)
-    )
+    )) * land_mask
     ice_speed = 0.5 * jnp.sqrt(
         (u_ice_west + u_ice) * (u_ice_west + u_ice)
         + (v_ice_south + v_ice) * (v_ice_south + v_ice)
     )
-    switch = jnp.where(ice_fraction >= ice_epsilon, 1.0, 0.0)
-    lead_energy = dt * (
+    switch = jnp.where(ice_fraction >= ice_epsilon, land_mask, 0.0)
+    lead_energy = land_mask * dt * (
         (1.0 - ice_fraction_before) * qsr_ocean * frq
         + (1.0 - ice_fraction_before) * qns_ocean
         + qemp_ocean
@@ -832,10 +846,15 @@ def _nemo_si3_ice_flx_other(
     freeze_energy = (
         rho_ocean * c_ocean * ocean_layer_thickness
         * (T_bottom - (sst_celsius + T0))
-    )
+    ) * land_mask
     freeze_negative = jnp.minimum(freeze_energy, 0.0)
     freeze_positive = jnp.maximum(freeze_energy, 0.0)
-    friction_velocity = jnp.sqrt(friction)
+    # sqrt(0) = 0 on land (friction masked) and at zero relative velocity;
+    # the inner where keeps the gradient there 0 instead of 0*inf = NaN (V15).
+    friction_positive = friction > 0.0
+    friction_velocity = jnp.where(
+        friction_positive, jnp.sqrt(jnp.where(friction_positive, friction, 1.0)), 0.0
+    )
     qsb = (
         switch * rho_ocean * c_ocean
         * constants.ice_ocean_heat_transfer_nemo * friction_velocity
@@ -935,6 +954,7 @@ def _bulk_flux_dispatch(
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
             L_latent=latent_heat_sublimation(T_ice),
+            **large_yeager_widths(config),
             stability_scheme=config.stability_scheme,
         )
     else:

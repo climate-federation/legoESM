@@ -344,6 +344,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Wrap with srun for multi-node MPI execution
     if args.distributed:
+        # Forward the flag: run_amip federates the SPMD lane only when
+        # --distributed is on its own command line (user decision 2026-10-28).
+        cmd.append("--distributed")
         n_ranks = args.n_ranks or int(os.environ.get("SLURM_NTASKS", 2))
         srun_prefix = [
             "srun",

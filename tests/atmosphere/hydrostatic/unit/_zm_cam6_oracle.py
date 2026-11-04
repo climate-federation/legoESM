@@ -7,9 +7,9 @@ column, with ``zmconv_microp = .false.`` and ``zm_org = .false.``.  Arrays are
 allocated with a dummy index 0 so the Fortran indices can be used verbatim.
 
 Independent of the JAX port except for the two shared physical inputs it
-must agree on to be comparable at 1e-10: the saturation curve
-(``legoesm.thermo.saturation_mixing_ratio``, CLAUDE.md, converted to CAM's
-specific humidity in ``qsat_pa``) and the constants
+must agree on to be comparable at 1e-10: the saturation curve (CAM's
+Goff-Gratch over water, ``legoesm.thermo.saturation_vapor_pressure_goff_gratch``,
+with CAM's hard ``wv_sat_svp_to_qsat`` in ``qsat_pa``) and the constants
 (``legoesm.constants``).  The entropy inversion here is scipy ``brentq``
 (the oracle's Brent, run to 1e-13) so it is an independent root finder from
 the port's Newton iteration.
@@ -19,31 +19,24 @@ from __future__ import annotations
 
 import math
 
-import jax
 import numpy as np
 from scipy.optimize import brentq
 
 from legoesm import constants
 from legoesm.thermo import (
-    saturation_mixing_ratio,
-    saturation_vapor_pressure,
     saturation_vapor_pressure_goff_gratch,
     saturation_vapor_pressure_ice_goff_gratch,
 )
 
-_w_sat_jit = jax.jit(saturation_mixing_ratio)
-
 
 def qsat_pa(t, p_pa):
-    """CAM ``qsat_water``/``qsat`` -> saturation SPECIFIC humidity (kg/kg).
-
-    ``wv_sat_methods.F90`` ``wv_sat_svp_to_qsat``: ``qs = ε·es/(p − (1−ε)·es)``.
-    Written here from the shared mixing ratio ``w = ε·es/(p − es)`` as
-    ``w/(1 + w)`` (the same expression), so the shared smooth cap cancels and
-    the pins stay at 1e-10 while a port that feeds ``w`` itself is caught.
-    """
-    w = float(_w_sat_jit(np.float64(t), np.float64(p_pa)))
-    return w / (1.0 + w)
+    """CAM ``qsat_water`` (``wv_sat_qsat_water``, wv_sat_methods.F90:195-218)
+    -> saturation SPECIFIC humidity (kg/kg): Goff-Gratch over water, then
+    ``wv_sat_svp_to_qsat`` ``qs = ε·es/(p − (1−ε)·es)``, 1 where
+    ``p − es <= 0``."""
+    es = float(saturation_vapor_pressure_goff_gratch(np.float64(t)))
+    p = float(p_pa)
+    return 1.0 if p - es <= 0.0 else eps1 * es / (p - (1.0 - eps1) * es)
 
 
 def qsat_trans_pa(t, p_pa):
@@ -264,7 +257,7 @@ def cldprp(q, t, p, z, s, zf, shat, qhat, jb, lel, jt_in, mx, pver, msg, limcnv,
         qu[k] = q[k]
         su[k] = s[k]
         qst[k] = qsat_hpa(t[k], p[k])
-        if p[k] * 100.0 - float(saturation_vapor_pressure(t[k])) <= 0.0:
+        if p[k] * 100.0 - float(saturation_vapor_pressure_goff_gratch(np.float64(t[k]))) <= 0.0:
             qst[k] = 1.0
         gamma[k] = qst[k] * (1.0 + qst[k] / eps1) * eps1 * rl / (rgas * t[k] ** 2) * rl / cpres
         hmn[k] = cpres * t[k] + grav * z[k] + rl * q[k]

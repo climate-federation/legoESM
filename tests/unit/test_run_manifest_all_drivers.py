@@ -320,3 +320,62 @@ def test_fesom_b1_records_the_final_state_digest(tmp_path, monkeypatch):
     assert path == tmp_path / "run_manifest.json"
     # 1 day at dt=1800 s is 48 steps.
     np.testing.assert_array_equal(state.inner.T, np.full(3, 49.0))
+
+
+def test_core2_ice_digest_is_separate_from_the_ocean_digest(tmp_path):
+    """#2176: the prognostic sea ice gets its own result.ice_state_digest;
+    the ocean state_digest stays the ocean-only digest (old manifests still
+    compare), and a run without ice writes no ice field."""
+    import numpy as np
+    from scripts.run import run_omip_core2
+
+    ocean = {"T": np.ones(3)}
+    path = restart.write_run_manifest(tmp_path, {"runner": "x"},
+                                      config_kind="land")
+    run_omip_core2._record_final_state_digest(path, ocean)
+    res = restart.read_run_manifest(path)["result"]
+    assert "ice_state_digest" not in res
+    ocean_only = res["state_digest"]
+
+    for h in (1.0, 2.0):
+        ice = {"h_ice": np.full(3, h)}
+        run_omip_core2._record_final_state_digest(path, ocean, ice)
+        res = restart.read_run_manifest(path)["result"]
+        assert res["state_digest"] == ocean_only
+        assert res["ice_state_digest"] == restart.pytree_state_digest(ice)
+    assert res["ice_state_digest"] != restart.pytree_state_digest(
+        {"h_ice": np.full(3, 1.0)})
+
+
+@pytest.mark.parametrize("fn", ["run_fesom_forced_loop", "main"])
+def test_core2_ice_lanes_pass_the_ice_to_the_digest(fn):
+    """The two core2 lanes that carry a prognostic ice_state hand it to the
+    run-end digest (source of the functions that run)."""
+    import inspect
+    from scripts.run import run_omip_core2
+
+    src = inspect.getsource(getattr(run_omip_core2, fn))
+    assert "_record_final_state_digest(manifest_path, state, ice_state)" in src
+
+
+def test_core2_ice_digest_failure_keeps_the_ocean_digest(tmp_path, monkeypatch):
+    """An ice digest that raises is reported; the ocean digest is still
+    recorded and no ice field is written."""
+    import numpy as np
+    from scripts.run import run_omip_core2
+
+    real = restart.pytree_state_digest
+
+    def flaky(*trees):
+        if "h_ice" in trees[0]:
+            raise RuntimeError("not addressable")
+        return real(*trees)
+
+    monkeypatch.setattr(restart, "pytree_state_digest", flaky)
+    path = restart.write_run_manifest(tmp_path, {"runner": "x"},
+                                      config_kind="land")
+    run_omip_core2._record_final_state_digest(
+        path, {"T": np.ones(3)}, {"h_ice": np.ones(3)})
+    res = restart.read_run_manifest(path)["result"]
+    assert res["state_digest"] == real({"T": np.ones(3)})
+    assert "ice_state_digest" not in res

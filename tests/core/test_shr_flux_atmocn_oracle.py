@@ -74,6 +74,31 @@ def test_cesm_variant_matches_compiled_shr_flux_atmocn():
         assert rel.max() <= _RTOL, (k, float(rel.max()))
 
 
+def test_cesm_variant_ustar_matches_at_1e12():
+    """Campaign bar (rel 1e-12, fp64).  An additive 1e-12 m^2/s^2 in the wind
+    speed's square root (the calm-wind AD guard) moved ustar by 1.5e-12."""
+    d = _fixture()
+    a, b = np.asarray(_ours(d)["ustar"]), d["oracle_ustar"]
+    nz = b != 0.0
+    assert (np.abs(a[nz] - b[nz]) / np.abs(b[nz])).max() <= 1e-12
+
+
+def test_calm_wind_value_is_the_floor_and_gradient_finite():
+    z = jnp.zeros(1)
+    args = (z, z, jnp.full(1, 300.0), jnp.full(1, 0.015), jnp.full(1, 301.0),
+            jnp.full(1, 0.02), jnp.full(1, 1.2))
+    kw = dict(z_bot=jnp.full(1, 10.0), t_bot=jnp.full(1, 299.0), variant="cesm")
+    g = jax.grad(lambda u, v: compute_sam_oceflx_fluxes(u, v, *args[2:], **kw)[4].sum(),
+                 argnums=(0, 1))(*args[:2])
+    assert all(bool(jnp.all(jnp.isfinite(x))) for x in g)
+    u = 1e-3 * jnp.ones(1)
+    calm = compute_sam_oceflx_fluxes(*args, **kw)[4]
+    breeze = compute_sam_oceflx_fluxes(u, *args[1:], **kw)[4]
+    assert float(calm[0]) == float(breeze[0])  # both at the minwind floor
+    nan = compute_sam_oceflx_fluxes(jnp.full(1, jnp.nan), *args[1:], **kw)[4]
+    assert bool(jnp.isnan(nan[0]))  # a NaN wind is not floored away
+
+
 def test_cesm_variant_gradient_finite_on_fixture():
     d = _fixture()
     J = lambda k: jnp.asarray(d[k])  # noqa: E731
@@ -91,6 +116,39 @@ def test_cesm_variant_gradient_finite_on_fixture():
     # t_bot carries gradient exactly where the cold-air-outbreak block is active
     coa = np.asarray(d["in_tbot"] - d["in_ts"] < -10.0)
     assert np.all(np.asarray(g[4])[coa] != 0.0) and np.all(np.asarray(g[4])[~coa] == 0.0)
+
+
+def test_cesm_variant_gradient_finite_at_the_cold_air_outbreak_threshold():
+    """Exactly at ``tbot - ts == td0 = -10 K`` the oracle's block is off
+    (``tdiff .lt. td0`` false, shr_flux_mod.F90:329), so the forward value
+    is the no-outbreak one; the unused branch's sqrt(0) must not turn the
+    gradient into NaN (oracle audit row 57, safe-where)."""
+    d = _fixture()
+    J = lambda k: jnp.asarray(d[k])  # noqa: E731
+    # Dyadic SST so tbot - ts is exactly -10.0 in fp64.
+    ts = jnp.round(J("in_ts") * 4.0) / 4.0
+    tb = ts - 10.0
+    assert np.all(np.asarray(tb - ts) == -10.0)
+
+    def flux(u, th, q, ts_, tb_):
+        return compute_sam_oceflx_fluxes(
+            u, J("in_vbot"), th, q, ts_, J("oracle_ssq"), J("in_rbot"),
+            z_bot=J("in_zbot"), t_bot=tb_, variant="cesm", return_2m=True)
+
+    args = (J("in_ubot"), J("in_thbot"), J("in_qbot"), ts)
+    at_td0 = flux(*args, tb)
+    no_coa = flux(*args, ts)        # tdiff = 0: block off
+    for a, b in zip(at_td0, no_coa):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    def loss(u, th, q, ts_, tb_):
+        r = flux(u, th, q, ts_, tb_)
+        return jnp.sum(r[0] + r[2] + r[3] + r[4])
+
+    g = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*args, tb)
+    for x in g:
+        assert np.all(np.isfinite(np.asarray(x)))
+    assert np.all(np.asarray(g[4]) == 0.0)
 
 
 def test_generator_driver_constants_are_legoesm_constants():

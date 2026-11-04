@@ -40,6 +40,10 @@ from legoesm.atmosphere.physics.microphysics.config import SeifertBehengConfig
 
 
 jax.config.update("jax_enable_x64", True)
+_RAMP_TOP = SeifertBehengConfig._field_defaults["sb2001_autoconv_ramp_top"]
+_AC_TOPS = dict(
+    qr_ramp_top=SeifertBehengConfig._field_defaults["sb2001_accretion_qr_ramp_top"],
+    qc_ramp_top=SeifertBehengConfig._field_defaults["sb2001_accretion_qc_ramp_top"])
 
 
 # --- Independent numpy transcriptions of the gSAM IRAIN=1 oracle ---------------
@@ -64,7 +68,7 @@ def _gsam_pra_irain1(q_c, q_r, rho):
 
 def test_accretion_sb2001_matches_gsam_irain1():
     q_c, q_r, rho = 8.0e-4, 2.0e-4, 1.1
-    pra = accretion_sb2001(jnp.array(q_c), jnp.array(q_r), jnp.array(rho))
+    pra = accretion_sb2001(jnp.array(q_c), jnp.array(q_r), jnp.array(rho), **_AC_TOPS)
     assert float(pra) == pytest.approx(_gsam_pra_irain1(q_c, q_r, rho), rel=1e-9)
 
 
@@ -77,7 +81,7 @@ def test_accretion_sb2001_phi_ac_suppresses_at_low_rain_fraction():
     ratios = []
     for q_r in (1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7):
         faith = float(accretion_sb2001(
-            jnp.array(q_c), jnp.array(q_r), jnp.array(rho)))
+            jnp.array(q_c), jnp.array(q_r), jnp.array(rho), **_AC_TOPS))
         simple = float(accretion(
             jnp.array(q_c), jnp.array(q_r), jnp.array(rho), cfg.k_ac))
         ratios.append(faith / simple)
@@ -109,7 +113,7 @@ def test_simplified_autoconv_is_a_departure_qc_squared_not_qc_fourth():
         # Hold tau fixed at 0.2 (q_r = 0.25·q_c) ⇒ only the q_c^4 factor varies.
         dq, _, _ = autoconversion_sb2001(
             jnp.array(q_c), jnp.array(0.25 * q_c),
-            jnp.array(N_c_faithful), jnp.array(rho))
+            jnp.array(N_c_faithful), jnp.array(rho), ramp_top=_RAMP_TOP)
         return float(dq)
 
     def simplified(q_c):
@@ -190,15 +194,17 @@ def test_sb2001_warm_rain_ad_safe_at_zero():
     the tau=0/1 boundaries (safe_pow + floored denominators)."""
     N_c, rho = jnp.array(1.0e8), jnp.array(1.1)
     g_au_qc = jax.grad(
-        lambda q: autoconversion_sb2001(q, jnp.array(1.0e-4), N_c, rho)[0]
+        lambda q: autoconversion_sb2001(q, jnp.array(1.0e-4), N_c, rho,
+                                        ramp_top=_RAMP_TOP)[0]
     )(jnp.array(0.0))
     g_au_qr = jax.grad(
-        lambda q: autoconversion_sb2001(jnp.array(5.0e-4), q, N_c, rho)[0]
+        lambda q: autoconversion_sb2001(jnp.array(5.0e-4), q, N_c, rho,
+                                        ramp_top=_RAMP_TOP)[0]
     )(jnp.array(0.0))
     g_ac_qc = jax.grad(
-        lambda q: accretion_sb2001(q, jnp.array(1.0e-4), rho)
+        lambda q: accretion_sb2001(q, jnp.array(1.0e-4), rho, **_AC_TOPS)
     )(jnp.array(0.0))
     g_ac_qr = jax.grad(
-        lambda q: accretion_sb2001(jnp.array(5.0e-4), q, rho)
+        lambda q: accretion_sb2001(jnp.array(5.0e-4), q, rho, **_AC_TOPS)
     )(jnp.array(0.0))
     assert all(bool(jnp.isfinite(g)) for g in (g_au_qc, g_au_qr, g_ac_qc, g_ac_qr))

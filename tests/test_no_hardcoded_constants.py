@@ -132,7 +132,7 @@ LITERAL_BUDGET: dict[str, dict[str, int]] = {
     },
     "tests/ocean/unit/test_eos_veros_nonlin2.py": {"_THETA0 = 283.0 - 273.15": 1},
     "tests/ocean/unit/test_eos_veros_nonlin3.py": {"_VEROS_THETA0 = 283.0 - 273.15": 1},
-    "tests/unit/test_kuo_oracle_faithful.py": {"Tc = T - 273.15": 1},
+    "tests/_kuo_sounding.py": {"Tc = T - 273.15": 1},
     "tests/unit/test_m6_ice_nucleation.py": {
         "target = min(5.0 * math.exp(0.304 * (273.15 - T)), 5.0e5) / rho": 1,
         "assert 5.0 * math.exp(0.304 * (273.15 - T)) > 5.0e5": 1,

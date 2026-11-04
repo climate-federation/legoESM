@@ -33,6 +33,10 @@ __param_spec__ = {
             "eqd_shape_function_epsilon": "below-boundary-layer floor that keeps the iterative solver well posed",
             "vonkar": "von Karman constant; a measured universal constant, not tunable",
             "min_mix_len": "numerical floor on the mixing length (MOM6 default 0 = no floor)",
+            "smooth_bflux_sharpness_s3m2": "RULE 5 smoothing sharpness of the ePBL buoyancy-flux switches; a numerics regulariser, not physics",
+            "smooth_energy_sharpness_m2j": "RULE 5 smoothing sharpness of the ePBL energy switches; a numerics regulariser, not physics",
+            "smooth_colht_sharpness_per_m": "RULE 5 smoothing sharpness of the ePBL column-height switches; a numerics regulariser, not physics",
+            "smooth_ratio_sharpness": "RULE 5 smoothing sharpness of the ePBL nondimensional caps; a numerics regulariser, not physics",
         },
         "params": {
             "nstar": {"units": "1", "bounds": (0.02, 0.4), "tunable_tier": 1, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Reichl & Hallberg (2018) NSTAR: fraction of released PE available to drive entrainment", "shape": None},
@@ -346,7 +350,7 @@ class TKEConfig(NamedTuple):
     #   NEMO-literal cards select it (GYRE and everything built on it, the
     #   ORCA2-zps testcase card, and the NEMO DINO cards).
     nemo_mxl0_rmxl_min_overwrite: bool = False
-    mxl0_min_m: float = 0.04             # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
+    mxl0_min_m: float = constants.kappa_von_karman * constants.nemo_mxl0_z0_m  # NEMO rn_mxl0 [m] = kappa*z0
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
@@ -681,12 +685,18 @@ class TKEConfig(NamedTuple):
     # Arithmetic used by the nn_etau penetration profile. ``jax_expression``
     # is the historical single jnp.exp call. ``nemo_literal`` reproduces the
     # ordinary-range glibc-2.34 vector EXP linked into the DINO oracle; only
-    # the two complete DINO oracle cards select it.
+    # the two complete DINO oracle cards select it. ``nemo_scalar_libm`` is the
+    # historical selector name for the source-written expression: it calls the
+    # precision policy's exp (scalar libm on exact cards, native XLA on the
+    # explicitly selected fast-literal card; round-off-only difference).
     tke_etau_exponential_evaluation: str = "jax_expression"
     # Latitude-profile arithmetic for nn_htau=1. ``jax_expression`` is the
     # historical jnp.deg2rad+jnp.sin path. ``nemo_literal`` consumes native
     # mesh degrees and transcribes glibc-2.34's two-lane vector SIN arithmetic.
-    # Only complete DINO oracle cards select it.
+    # Only complete DINO oracle cards select it. ``nemo_scalar_libm`` takes the
+    # same native-degree phase through the precision policy's sin (scalar libm
+    # on exact cards, native XLA on the explicitly selected fast-literal card;
+    # round-off-only difference).
     tke_htau_evaluation: str = "jax_expression"
     # Raw nn_mxl buoyancy length. ``factored`` preserves the historical
     # sqrt(2)*sqrt(e)/sqrt(max(N2,1e-12)) expression. ``nemo_literal`` uses
@@ -871,12 +881,56 @@ class TKEConfig(NamedTuple):
 
 
 # --- LMD94 nonlocal-transport constants (Large, McWilliams & Doney 1994, eq. 20 + App. B) ---
-_LMD94_C_STAR = 10.0     # C*, nonlocal flux constant (eq. 20)
+
+    # NEMO nn_mxlice: the ln_mxl0 anchor under sea ice (zdftke.f90:605-633).
+    # 0 (DEFAULT, main's behaviour) = CASE 0, no scaling.  2 = CASE 2,
+    # ``((1-fr_i)*zraug*taum + fr_i*hm_i*2)*tmask`` with raw ``fr_i`` and SI3's
+    # mean thickness ``hm_i`` (OceanSurfaceForcing.ice_concentration and
+    # .ice_mean_thickness_hm_i, both required); needs the masked anchor.
+    nemo_mxlice: int = 0
+    # NEMO's nn_mxl bottom-up scan starts at jpkm1 and therefore reads
+    # e3t_3d(jpk), the masked dummy-bottom T-cell thickness. Generic grids do
+    # not carry that extra slot. A record-backed NEMO card may select this arm
+    # and supply ``z_coord.nemo_e3t_jpk``; missing data then raises.
+    nemo_mxl_terminal_e3t: bool = False
+    # nn_etau=1 penetration masks, zdftke.f90:500-501 (`* wmask(jk) *
+    # tmask(1)`). The historical injection also fills dry W rows, which the
+    # nn_mxl bottom-up sweep then carries into wet cells. Card-selected.
+    nemo_etau_wmask: bool = False
+    # NEMO's rab_3d_t/bn2_t (eosbn2.F90) with every source operation rounded
+    # before its consumer; the compiled default lets XLA contract them.
+    # Card-selected.
+    nemo_bn2_source_rounded: bool = False
+    # zdf_sh2's r3u/r3v at the whole-step entry level (RK3 zdf_phy(Nbb,Nbb),
+    # zdfsh2.F90 e3w_1d*(1+r3u(Kmm))), not the stage Kmm. Card-selected.
+    # None preserves main's resolved RK3-WS behavior: use step-entry SSH when
+    # that operand is supplied.  Certified cards state True or False.
+    nemo_sh2_step_entry_ssh: bool | None = None
+    # zdftke.f90:466,472 recurrences with each product rounded before its
+    # subtraction (NEMO's build has no FMA); the default lets XLA contract.
+    # Card-selected.
+    nemo_tke_solve_source_rounded: bool = False
+    # zdf_sh2 on the T-pivot row's north V face (zdfsh2.f90:98-113): wet raw
+    # vmask, north avm_k and r3v ssh from the fold images (lbcnfd.f90:584-720)
+    # instead of a wall. Card-selected.
+    nemo_sh2_fold_top_v: bool = False
+    # zdftke.f90:420 zdiag and :423-426 RHS with every operation rounded in
+    # written order (NEMO's build has no FMA). Card-selected.
+    nemo_tke_matrix_rhs_source_rounded: bool = False
+    # zdf_sh2's step-entry r3u/r3v rounded before zdfsh2.f90:104-108 adds 1
+    # (NEMO stores pr3u/pr3v, domqco.f90:266-269); the default lets XLA fuse
+    # the quotient into an FMA with the "1 +". Card-selected.
+    nemo_sh2_r3_source_rounded: bool = False
+    # zdf_sh2's step-entry r3u/r3v as NEMO forms them, (num * r1_hu_0) times
+    # the stored 1/e1e2u (domqco.f90:266-269); the default divides, which
+    # XLA folds with r1_hu_0 into one constant. Card-selected.
+    nemo_sh2_r3_stored_reciprocal: bool = False
+
 _LMD94_C_S = 98.96       # c_s, scalar convective constant (App. B)
 _LMD94_EPSILON = 0.1     # epsilon, surface-layer fraction (App. A/B)
 # C_s = C* kappa (c_s kappa epsilon)^(1/3) (LMD94 eq. 20; POP/CVMix ``Cg``). At kappa = 0.4
-# this is 6.3275155 -- the published 6.33 and CVMix's 6.32739901 are roundings of it.
-_LMD94_GAMMA_NONLOCAL = (_LMD94_C_STAR * constants.kappa_von_karman
+# this is 6.3275155; LMD94 prints 6.33 (rounded) and CVMix hard-codes 6.32739901.
+_LMD94_GAMMA_NONLOCAL = (constants.lmd94_c_star * constants.kappa_von_karman
                          * (_LMD94_C_S * constants.kappa_von_karman * _LMD94_EPSILON) ** (1.0 / 3.0))
 
 
@@ -1115,6 +1169,17 @@ class EPBLConfig(NamedTuple):
     eqd_lh_cap: float = 8.0               # ..._LH_CAP
     eqd_f_lower: float = 2.5384e-7        # ..._CORIOLIS_LOWER_CAP [1/s]
     eqd_shape_function_epsilon: float = 0.01  # ..._SHAPE_FUNCTION_EPSILON
+
+    # --- RULE 5 smooth switches (no MOM6 equivalent; issue #2180) ---
+    # Sharpness [1/units of the switched quantity] of the logsumexp/softplus/
+    # sigmoid forms (legoesm.core.smooth) that replace MOM6's max/min/clip/
+    # where on traced state.  math.inf = MOM6's exact switch.  One field per
+    # unit class; the default width is 1/sharpness.  The sites each field
+    # controls and the gap to MOM6 they cost are listed in epbl.py.
+    smooth_bflux_sharpness_s3m2: float = 1.0e10   # [s^3/m^2] buoyancy flux
+    smooth_energy_sharpness_m2j: float = 1.0e6    # [m^2/J] TKE / PE per area
+    smooth_colht_sharpness_per_m: float = 1.0e10  # [1/m] column-height change
+    smooth_ratio_sharpness: float = 1.0e3         # [1] nondimensional ratios
 
     # --- background floors added to the ePBL diffusivity ---
     K_bg: float = 1.0e-5               # KD   [m^2/s]

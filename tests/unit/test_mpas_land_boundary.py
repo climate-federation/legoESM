@@ -1032,6 +1032,46 @@ def test_ocean_surface_truthy_non_bool_is_still_validated():
     with pytest.raises(ValueError, match="radiation='none'"):
         _eligible_cfg(radiation="none",
                       ocean_flux_on_ocean_surface="true").validate_strict()
+@pytest.mark.parametrize("kw,why", [
+    (dict(), None),
+    (dict(land_surface_scheme="simple_seb", land_params_refresh=False), None),
+    (dict(use_multilayer_land=False, land_beta_soil=False),
+     "use_multilayer_land"),
+    (dict(land_beta_soil=False), "land_beta_soil"),
+    (dict(turbulence="ysu"), "turbulence"),
+    (dict(radiation="none"), "radiation='none'"),
+    (dict(land_stress_from_land=False), "land model's stress"),
+    (dict(land_surface_scheme="clm_ml"), "land model's stress"),
+])
+def test_ocean_surface_auto_resolution_per_predicate(kw, why):
+    """Oracle audit row 56: the default (None) is AUTO -- ON exactly where the
+    explicit True is accepted, OFF (and accepted) for each failing predicate;
+    explicit False always resolves off."""
+    from legoesm.driver.config import (
+        ExperimentConfig, ocean_flux_surface_eligibility,
+        resolve_ocean_flux_on_ocean_surface,
+    )
+    assert ExperimentConfig._field_defaults["ocean_flux_on_ocean_surface"] is None
+    cfg = _eligible_cfg(**kw)
+    assert cfg.ocean_flux_on_ocean_surface is None
+    ok, reason = ocean_flux_surface_eligibility(cfg)
+    assert ok is (why is None), reason
+    assert resolve_ocean_flux_on_ocean_surface(cfg) is ok
+    assert resolve_ocean_flux_on_ocean_surface(
+        cfg._replace(ocean_flux_on_ocean_surface=False)) is False
+    if why is None:
+        cfg._replace(ocean_flux_on_ocean_surface=True).validate_strict()
+    else:
+        assert why in reason
+        with pytest.raises(ValueError, match="ocean_flux_on_ocean_surface=True"):
+            cfg._replace(ocean_flux_on_ocean_surface=True).validate_strict()
+
+
+def test_ocean_surface_auto_off_off_the_mpas_lane():
+    from legoesm.driver.config import resolve_ocean_flux_on_ocean_surface
+    cfg = _cdgrid_cfg()
+    assert resolve_ocean_flux_on_ocean_surface(cfg) is False
+    cfg.validate_strict()
 
 
 def test_ocean_surface_flag_refused_off_the_mpas_lane():
@@ -1059,6 +1099,8 @@ def _strict_msgs(cfg, caplog):
     (dict(convection="zhang_mcfarlane"), "momentum transport", True),
     (dict(convection="bechtold", bechtold_enable_cmt=True),
      "bechtold_enable_cmt=false", True),
+    (dict(convection="emanuel", emanuel_enable_cmt=True),
+     "emanuel_enable_cmt=false", True),
     (dict(turbulence="clubb", clubb_prognostic=True), "CLUBB-moment slot", True),
     (dict(convection="tiedtke"), "momentum transport", False),
     (dict(convection="bechtold"), "bechtold_enable_cmt=false", False),
@@ -1090,6 +1132,9 @@ def test_pipeline_cmt_off_not_flagged(caplog):
     err, warn = _strict_msgs(
         _cdgrid_cfg(convection="bechtold", bechtold_enable_cmt=False), caplog)
     assert "momentum transport" not in err + warn
+    for kw in (dict(), dict(emanuel_enable_cmt=False)):
+        err, warn = _strict_msgs(_cdgrid_cfg(convection="emanuel", **kw), caplog)
+        assert "momentum transport" not in err + warn
 
 
 @pytest.mark.parametrize("scheme, refused", [

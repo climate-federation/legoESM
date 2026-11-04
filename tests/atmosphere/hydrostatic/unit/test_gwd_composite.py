@@ -29,7 +29,8 @@ def _make_state(n=4, nlev=10, wind_speed=20.0):
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
-    grid = create_cubed_sphere(n)
+    # all land: CAM6 gw_oro needs a land fraction; lf = 1 is its unscaled drag
+    grid = create_cubed_sphere(n)._replace(land_frac=jnp.ones(6 * n * n))
     sigma = create_sigma_coordinate(nlev)
     state = held_suarez_init(grid, sigma)
     state = state._replace(

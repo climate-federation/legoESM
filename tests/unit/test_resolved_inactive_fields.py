@@ -158,7 +158,7 @@ def _mcfarlane_drag(h_topo, h_topo_col):
         p_full=p_full, p_half=p_half, z_full=z_full, z_half=z_half,
         rho=p_full / (constants.R_d * T), lat=jnp.zeros((ncol,)), dt=600.0,
         config=McFarlaneConfig(h_topo=h_topo), h_topo_col=h_topo_col,
-        p_ref_half=p_half[0])
+        p_ref_half=p_half[0], land_frac_col=jnp.ones(ncol))  # all land
     return jnp.sum(out.du_dt ** 2)
 
 
@@ -172,3 +172,17 @@ def test_mcfarlane_h_topo_unread_with_sso_column():
     # forward too: the source DEPTH is a discrete level choice AD cannot see
     assert float(_mcfarlane_drag(h0, col)) == float(_mcfarlane_drag(8 * h0, col))
     assert float(jax.grad(_mcfarlane_drag)(h0, None)) != 0.0   # fallback reads it
+
+
+def test_emanuel_cu_frozen_unless_cmt():
+    """CONVECT's CU is read only by the momentum transport (#2266)."""
+    from legoesm.atmosphere.physics.convection.config import (
+        ConvectionConfig, EmanuelConfig)
+    cu = "atm.conv.EmanuelConfig.cu_coefficient"
+
+    def cfg(cmt):
+        return _cfg()._replace(convection=ConvectionConfig(
+            scheme="emanuel", emanuel=EmanuelConfig(enable_cmt=cmt)))
+
+    assert cu in resolved_inactive_fields(cfg(False), subgrid_orography=False)
+    assert cu not in resolved_inactive_fields(cfg(True), subgrid_orography=False)

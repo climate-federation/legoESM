@@ -41,6 +41,7 @@ from jax import lax
 
 from legoesm import constants
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
+    RCE_CELL_AREA_M2,
     WING_P_SFC,
     WING_Q_SFC_BY_SST,
     wing2018_T_v0,
@@ -1011,6 +1012,11 @@ def make_physics_config(
     # flag raises instead of silently ignoring it — never a private copy of
     # that dispatch.
     micro_cfg = cfg.microphysics._replace(scheme=microphysics)
+    if microphysics == "morrison" and micro_cfg.morrison.warm_rain_scheme is None:
+        # Pinned: an unset law resolves to kk2000_cam6 under mg, which needs
+        # CLUBB's per-cell relvar; the SCM-RCE columns run kk2000.
+        micro_cfg = micro_cfg._replace(morrison=micro_cfg.morrison._replace(
+            warm_rain_scheme="kk2000"))
     if (hard_saturation_adjustment
             or hard_sat_adjust_threshold is not None
             or hard_sat_max_heating_K is not None):
@@ -1536,6 +1542,8 @@ def run_scm_rce(
         v=0.0,
         p_s=WING_P_SFC,
         latitude_deg=0.0,
+        cell_area_m2=RCE_CELL_AREA_M2,
+        land_frac=0.0,  # RCE is an ocean case (user 2026-10-27, Q16)
         time_integrator="forward_euler",
         forcing=forcing,
         dtype=jnp.float64,

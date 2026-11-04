@@ -165,8 +165,9 @@ morrison_warm_rain_scheme: kk2000_cam6  # CAM6 MG2 law (user decision
                                    # 13x MG2): 13.5*var_coef(relvar,2.47)*
                                    # qc^2.47*Nc^-1.1 (micro_mg_utils.F90), with
                                    # per-cell relvar = rcm^2/min(1, rcp2) from
-                                   # CLUBB (clubb_intr.F90:2416-2425).  Code
-                                   # default stays kk2000.
+                                   # CLUBB (clubb_intr.F90:2416-2425).  Named
+                                   # explicitly; the code default (unset)
+                                   # resolves to the same law under mg.
 morrison_autocon_fact: 1.0         # kk2000 autoconversion multiplier (1 = unscaled)
 morrison_accre_enhan_fact: 1.0     # kk2000 accretion multiplier (MG2 accre_enhan)
 morrison_warm_rain_incloud: true   # CAM6 MG2 in-cloud warm rain (user decision
@@ -249,17 +250,38 @@ rrtmgp_gpoint_batch_size: 0          # CPU: one g-point at a time (code default 
                                      # cores: radiation step 13.8 s at 16, 7.9 s at 0
                                      # (~139 s per simulated day); fluxes differ only by
                                      # summation order (<= 6.1e-4 W/m2).
+rrtmgp_use_scan: true                # scan the RRTMGP column recurrence (code default:
+                                     # unrolled on CPU, scan on GPU, so GPU is unchanged).
+                                     # Measured 2026-10-29, this deck, MPAS res6 CPU: step
+                                     # -4% at 1 node, -7% at 8; round-off only (fp32 fluxes
+                                     # <= 1.1e-7 of max after one step), dry mass unchanged,
+                                     # 127-step divergence (0.66 K) matched by a 1e-14 T
+                                     # perturbation control (0.27 K).  User 2026-10-30.
 hard_sat_ice_curve: false          # the ice-curve blend of that same
                                    # post-step drain; inert once the drain
                                    # is off, set explicitly so no row rests
                                    # on a default.  User table row 3.
 homogeneous_ice_nucleation: true
-aerosol_ccn: false                 # off with the prognostic droplet number (user
-                                   # decision 2026-10-24): CAM6 MG2 cannot run both.
-morrison_prognostic_droplet_number: true  # CAM6 MG2 prognostic droplet number,
-                                   # activation = CAM6 microp_aero_run on the
-                                   # prescribed PPE-000 MAM4 climatology (user
-                                   # decision 2026-10-24).
+aerosol_ccn: true                  # droplet number diagnosed from the prescribed
+                                   # aerosol (user decision 2026-11-01, #2216,
+                                   # reverses 2026-10-24): Jan 1979 30-day arm,
+                                   # global rsut bias vs CERES-EBAF -7.99 W/m2
+                                   # (prognostic) -> +0.78 (this setting).
+morrison_prognostic_droplet_number: false  # CAM6 MG2 prognostic droplet number
+                                   # OFF until its droplet budget closes (#2216);
+                                   # the prognostic arm is
+                                   # amip_production_prognostic_nc.yaml.
+                                   # cam6_aerosol_dir below is read only by it.
+morrison_mg2_drop_early_reset_log_width: 0.01  # NAMED, equals the code default:
+                                   # RULE 5 width of MG2's early droplet size
+                                   # reset (autoconversion + snow riming on
+                                   # this deck's specified droplet number; 0 =
+                                   # MG2's hard clip; user 2026-11-01, #2216)
+morrison_mg2_drop_sed_reset_log_width: 0.01  # NAMED, equals the code default:
+                                   # RULE 5 width of MG2's droplet size reset in
+                                   # the sedimentation fall speeds (read only by
+                                   # the prognostic droplet number, so inert on
+                                   # this deck; 0 = MG2's hard clip; #2216)
 cam6_aerosol_dir: /work/bb1596/b309178/diffESM/legoesm_ap/data/cam6_optics
 energy_consistent_moisture_clip: true
 
@@ -276,6 +298,9 @@ convection: zhang_mcfarlane # CAM6: faithful zm_conv port (f09 mg2+clubb namelis
                             # off, lane default)
 convective_rain_to_surface: true
 convective_cloud: false     # refused by cam6_clubb (deepcu is CAM6's version)
+# Bechtold/IFS settings written explicitly (inert here: convection is ZM).
+bechtold_use_ifs_ascent: false         # faithful OpenIFS chain off
+bechtold_ifs_shallow_nosupply: zero    # no sub-cloud supply -> shallow flux ramps to ~0 (OpenIFS: first_guess)
 # ZM tunables written explicitly (values = the scheme defaults = the CAM6 f09
 # namelist above), so a campaign arm's change is one visible row.
 zm_c0_lnd: 0.0075           # rain conversion over land [1/m]
@@ -284,6 +309,10 @@ zm_ke: 5.0e-6               # rain evaporation efficiency
 zm_dmpdz: -1.0e-3           # dilute-plume entrainment [1/m]
 zm_tau: 3600.0              # CAPE consumption timescale [s]
 zm_capelmt: 70.0            # deep-convection CAPE threshold [J/kg]
+# ZM detrainment smoothing widths (RULE 5; values = the scheme defaults; 0 =
+# CAM's hard switch), read by the CLUBB macmic sub-step's detrainment booking.
+zm_detrain_phase_width_K: 0.1              # liquid/ice ramp corners [K]
+zm_detrain_number_width_kgkg_s: 1.0e-12    # max(0, dlf) in the number source [kg/kg/s]
 zm_transport_cloud_tracers: true  # ZM convtran of carried cloud/precip water + numbers (CAM6)
 
 # ---- turbulence ---------------------------------------------------------------
@@ -337,7 +366,9 @@ gravity_wave_drag: mcfarlane            # orographic member = CAM6 gw_oro port
                                         # interface N with n2min 5e-5, no launch
                                         # clip, tndmax 400 m/s/day, limiter
                                         # remainder carried down, gw eddy
-                                        # diffusion of dse + tracers.  These are
+                                        # diffusion of dse + tracers, critical-
+                                        # level offset 0 (CAM c = 0; follow-up
+                                        # 2026-10-20, was 0.5 m/s).  These are
                                         # the McFarlaneConfig code defaults (no
                                         # deck rows exist for them, except
                                         # effgw_oro below); the fv3duo deck

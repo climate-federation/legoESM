@@ -215,7 +215,7 @@ def _core_state_env(gr, ng, nzm, seed=7):
         invrs_rho_ds_zt=jnp.asarray(1.0 / (0.5 * (rho[:, 1:] + rho[:, :-1]))),
         wm_zt=zeros_zt, wm_zm=zeros_zm, sfc_elevation=jnp.zeros((ng,)),
         fcor=jnp.full((ng,), 1e-4), ug=zt(1.0, 5.0), vg=zt(1.0),
-        dt=300.0, gr=gr, config=CLUBBConfig())
+        dt=300.0, gr=gr, config=CLUBBConfig(), l_implemented=False)
     return state, forcing, env
 
 

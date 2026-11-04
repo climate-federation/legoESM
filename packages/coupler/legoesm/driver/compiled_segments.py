@@ -1164,6 +1164,9 @@ class _SplitStepStatics:
     # every call, for the static rad-every-call step_unified).  Defaults keep
     # the lat-band-SPMD lane (which does not pass them) byte-identical.
     pipeline: object = None
+    #: the band's / tile's own cell areas (grid shape) for Sundqvist's GFS area
+    #: blend on lanes that share one pipeline build; None = the build's areas
+    cell_area: object = None
     clear_sky_fresh: str = "hold"
     # Per-process budget ledger (diagnostics.process_ledger): static Python
     # bool — when True the split body fills the dynamics/clips rows and
@@ -1582,6 +1585,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         conv_precip_frozen=carry.precip_frozen_prev,
         w_land=carry.w_land, snow=carry.snow,
         **_dm_in, **_skin_kw(carry.ice_T_skin),
+        **({} if statics.cell_area is None else {"cell_area": statics.cell_area}),
     )
     phys_out, held_new = _ret[0], _ret[1]
     ice_T_skin_new = _ret[4] if len(_ret) > 4 else carry.ice_T_skin

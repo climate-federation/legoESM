@@ -41,6 +41,11 @@ dt: 450.0                   # decision A rule (MPAS / duo decks): 0.82 x the DRI
 physics_update_steps: 4     # CAM6: physics every 1800 s (4 x 450 s)
 rad_update_steps: 8         # CAM6 f09: radiation hourly (8 x 450 s); checkpoint_days 30 = 5760
                             # steps, a multiple of 8 (D-REX-1: checkpoints on radiation boundaries)
+rrtmgp_use_scan: null       # keep the code default (unrolled on CPU, scan on GPU): the
+                            # included deck's scan row was measured on the MPAS lane only
+                            # (CPU -4%/-7% at 1/8 nodes, round-off only); not measured on
+                            # this lane.  User 2026-10-30.
+
 # ---- MPAS-dycore rows of the included deck ---------------------------------------
 # Divergence damping (CAM-FV ldiv4) is ON with the MPAS deck's value: the same
 # scale means CAM's nondimensional rate 0.01*area^2/dt on every grid; this

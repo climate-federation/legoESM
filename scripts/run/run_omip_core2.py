@@ -3188,7 +3188,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                              q_net=sf.q_net * ramp,
                              sw_down=sf.sw_down * ramp)
         if chl_clim is not None:
-            sf = sf._replace(chl=month_sample(chl_clim, step, dt, args.forcing_time_interp))
+            sf = sf._replace(chl=chl_at_step(chl_clim, step, dt, args.forcing_time_interp))
         # --- prognostic ice step (B4; mirrors the host loop's block) ------
         ice_resp = None
         if ice_config is not None:
@@ -3331,7 +3331,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             ice_state, grid, state.land_mask.data)
         print(f"[fesom-forced] final ice: area={_af / 1.0e12:.3f}e6 km2 "
               f"mean_conc={_cf:.3f} max_h={_hf:.3f} m")
-    _record_final_state_digest(manifest_path, state)
+    _record_final_state_digest(manifest_path, state, ice_state)
     print(f"[fesom-forced] done: {n_steps} steps; snapshots in {out}")
 
 
@@ -3918,8 +3918,15 @@ def _validate_pcg_variant_grid(grid, barotropic_pcg_variant=None,
 
 def _runoff_component_vars(exclude_isf: bool):
     """Dai-Trenberth NetCDF freshwater components summed by
-    :func:`load_runoff_monthly`: rivers (``sorunoff``) + icebergs (``Icb_flux``)
-    + ice-shelf melt (``sornfisf``).
+    :func:`load_runoff_monthly`: coastal runoff incl. iceberg melt
+    (``sorunoff``) + ice-shelf melt (``sornfisf``).
+
+    ``Icb_flux`` is NOT a separate component: ``sorunoff`` already contains it
+    (file long_name "coastal runoff ... with Iceberg melting freshwater flux";
+    sorunoff == Icb_flux bitwise at every one of the 155,456 cell-months with
+    Icb_flux > 0), and NEMO ORCA1 reads only ``sorunoff`` (sn_rnf; ln_rnf_icb
+    keeps its namelist_ref default .false., so sbcrnf.F90:120-131 never adds
+    sn_i_rnf).  Summing it double-counted the icebergs (+0.0428 Sv, +3.6%).
 
     ``exclude_isf=True`` DROPS ``sornfisf``: when ``--isf`` is on, the SAME
     file's ice-shelf melt is separately deposited at depth over the
@@ -3928,15 +3935,26 @@ def _runoff_component_vars(exclude_isf: bool):
     freshwater (codex).  The runner passes ``exclude_isf=args.isf``.
     """
     if exclude_isf:
-        return ("sorunoff", "Icb_flux")
-    return ("sorunoff", "sornfisf", "Icb_flux")
+        return ("sorunoff",)
+    return ("sorunoff", "sornfisf")
+
+
+def _sum_runoff_components(fields, exclude_isf: bool):
+    """Total runoff [kg/m^2/s] = sum of :func:`_runoff_component_vars` present in
+    ``fields`` (name -> array), NaN -> 0, float64."""
+    names = _runoff_component_vars(exclude_isf)
+    total = np.zeros_like(np.asarray(fields["sorunoff"]), dtype=np.float64)
+    for v in names:
+        if v in fields:
+            total = total + np.nan_to_num(np.asarray(fields[v], dtype=np.float64))
+    return total
 
 
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
                         land_mask=None, spread_passes=2, exclude_isf=False):
     """Load NEMO's Dai-Trenberth runoff (the SAME file NEMO ORCA1 uses) and regrid
     each climatological month onto the model grid. Total freshwater = rivers
-    (sorunoff) + ice-shelf melt (sornfisf) + icebergs (Icb_flux) [kg/m²/s, +INTO
+    incl. iceberg melt (sorunoff) + ice-shelf melt (sornfisf) [kg/m²/s, +INTO
     ocean]; ``exclude_isf=True`` drops sornfisf because --isf applies it at depth
     (see :func:`_runoff_component_vars`). Returns (12, *lat2d_deg.shape). Ungates
     the SSS comparison (runoff=0 made SSS only informational). Curvilinear ->
@@ -3949,10 +3967,8 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     src_lat = _squeeze2d(ds["nav_lat"].values)
     src_lon = _squeeze2d(ds["nav_lon"].values)
     components = _runoff_component_vars(exclude_isf)
-    total = np.zeros_like(np.asarray(ds["sorunoff"].values), dtype=np.float64)
-    for v in components:
-        if v in ds:
-            total = total + np.nan_to_num(np.asarray(ds[v].values, dtype=np.float64))
+    total = _sum_runoff_components(
+        {v: ds[v].values for v in components if v in ds}, exclude_isf)
     # SOURCE = the DISCHARGE cells only (annual runoff > 0): a coastal river-mouth
     # field is sparse, so IDW from ALL cells (incl. zeros) would dilute the discharge
     # to ~0. Routing only from nonzero cells spreads each river to the nearest model
@@ -4207,11 +4223,13 @@ def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None,
                 f"got {lat2d_deg.shape} on grid_type={grid_type!r}")
         src0, wgt, nw = load_scrip_weights(_CHL_SCRIP_WEIGHTS)
         src_shape = chl.shape[1:]
+        # Raw remapped months, as NEMO's fld_read holds them: the 0.03 floor
+        # is applied AFTER time interpolation (chl_at_step), as in tra_qsr.
         out = np.stack([
-            np.maximum(_scrip_to_full_tripole(
+            _scrip_to_full_tripole(
                 apply_scrip_weights(np.nan_to_num(chl[m], nan=0.0),
                                     src0, wgt, nw, src_shape),
-                *lat2d_deg.shape), 0.03)
+                *lat2d_deg.shape)
             for m in range(12)])
         print(f"[setup] RGB chlorophyll: ESACCI monthly via the ORACLE'S OWN "
               f"bilinear weights ({nw} triples) onto {grid_type}, range "
@@ -4231,9 +4249,11 @@ def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None,
         om, _ = _regrid_curv_to_points(
             src_filled, src_lat, src_lon, src_valid, lat2d_deg, lon2d_deg,
             k=4, max_deg=2.0)
-        # Floor at the NEMO clamp minimum so flood-filled land/coast cells never
-        # produce a zero/negative Chl that would underflow the class-index log10.
-        out_months.append(np.maximum(om, 0.03))
+        # No floor here: NEMO clamps MAX(0.03, chl) after time interpolation
+        # (traqsr.F90:322), so the floor lives in chl_at_step.  Flooring each
+        # month first changes the interpolated value wherever one bracketing
+        # month is below 0.03 and the other above.
+        out_months.append(om)
     out = np.stack(out_months, axis=0)
     print(f"[setup] RGB chlorophyll: ESACCI monthly regridded onto {grid_type}, "
           f"range {float(out.min()):.3f}-{float(out.max()):.3f} mg/m3, "
@@ -4415,6 +4435,25 @@ def month_sample(field, step: int, dt: float, mode: str):
             "expected 'hold' or 'linear'")
     i0, i1, w = _month_interp_weights(step, dt)
     return (1.0 - w) * field[i0] + w * field[i1]
+
+
+# NEMO tra_qsr floors the time-interpolated chlorophyll: zchl = MAX(0.03,
+# MIN(fnow, 10)) (traqsr.F90:322; ORCA1's profile branch clamps the same way
+# at :331).  The upper bound is applied by the RGB
+# kernel's class-index clamp.
+_CHL_FLOOR_MG_M3 = 0.03
+
+
+def chl_at_step(chl_clim, step: int, dt: float, mode: str):
+    """Surface chlorophyll for this step: interpolate the RAW monthly
+    climatology (``month_sample``), then floor at 0.03 mg/m3, in NEMO's order.
+
+    Host-side forcing preparation (numpy, outside the JAX graph), so the hard
+    floor is NEMO's own form.  ``None`` passes through.
+    """
+    if chl_clim is None:
+        return None
+    return np.maximum(month_sample(chl_clim, step, dt, mode), _CHL_FLOOR_MG_M3)
 
 
 def _siconc_at_step(siconc, step: int, dt: float, monthly: bool):
@@ -6214,18 +6253,28 @@ class _PersistentStateResidency:
         return self._gather_fn(st)
 
 
-def _record_final_state_digest(manifest_path, state) -> None:
+def _record_final_state_digest(manifest_path, state, ice_state=None) -> None:
     """Record the final ocean state digest into the run manifest (#376 Phase 4).
 
     Best-effort: a digest/record failure must not fail an otherwise-complete run.
     Gives ``legoesm reproduce --check`` a reference to compare a rerun against.
+    A prognostic sea-ice state is digested separately into
+    ``result.ice_state_digest`` (#2176); the ocean ``state_digest`` is unchanged.
     """
     if manifest_path is None:
         return
     try:
         from legoesm.driver.restart import pytree_state_digest, record_state_digest
         digest = pytree_state_digest(state)
-        record_state_digest(manifest_path, digest)
+        ice_digest = None
+        if ice_state is not None:
+            # Its own best-effort: an ice failure must not cost the ocean digest.
+            try:
+                ice_digest = pytree_state_digest(ice_state)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[warn] ice_state_digest not recorded: "
+                      f"{type(exc).__name__}: {exc}")
+        record_state_digest(manifest_path, digest, ice_state_digest=ice_digest)
         print(f"[done] recorded state_digest {digest[:16]}... in {manifest_path}")
     except Exception as exc:  # noqa: BLE001 — provenance is best-effort
         print(f"[warn] state_digest not recorded: {type(exc).__name__}: {exc}")
@@ -7068,6 +7117,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "local depth) instead of the flat "
                         "--runoff-depth-spread-m. Requires --runoff; mutually "
                         "exclusive with --runoff-depth-spread-m.")
+    p.add_argument("--runoff-depth-nemo-levels", action="store_true",
+                   help="With --runoff-depth-nemo-ini: spread runoff over NEMO's "
+                        "WHOLE levels nk_rnf (sbcrnf.F90:426-441: first level "
+                        ">= 2 whose T-depth reaches h, capped at the seafloor; "
+                        "h_rnf = live thickness of those levels) instead of "
+                        "the fractional depth h. Needs the run's reference "
+                        "T-depth ladder (z_coord.t_depth_ref). Default off "
+                        "(fractional, previous behaviour).")
     p.add_argument("--runoff-dep-max", type=float, default=None,
                    help="Override NEMO rn_dep_max [m] (default 150) used by "
                         "--runoff-depth-nemo-ini: the depth the biggest rivers "
@@ -8934,6 +8991,9 @@ def main() -> int:
             "--runoff-dep-max/--runoff-rnf-max require --runoff-depth-nemo-ini "
             "(they override the NEMO ln_rnf_depth_ini map; without it they would "
             "silently do nothing).")
+    if args.runoff_depth_nemo_levels and not args.runoff_depth_nemo_ini:
+        raise SystemExit(
+            "--runoff-depth-nemo-levels requires --runoff-depth-nemo-ini.")
     if args.runoff_depth_nemo_ini:
         # NEMO ln_rnf_depth_ini: per-cell spread depth from the runoff
         # climatology maximum — small Arctic/Siberian rivers stay near-surface
@@ -8969,6 +9029,21 @@ def main() -> int:
             _rd_kw["rnf_max"] = float(args.runoff_rnf_max)
         _h_rnf = nemo_runoff_depth_map(
             np.asarray(runoff_monthly), np.asarray(H_bathy), **_rd_kw)
+        _spread_kw = {"runoff_depth_spread_map": jnp.asarray(_h_rnf)}
+        if args.runoff_depth_nemo_levels:
+            # NEMO whole levels nk_rnf (sbcrnf.F90:426-441) on the run's own
+            # reference T-depth ladder; no midpoint fallback (vote V4).
+            from legoesm.ocean.forcing.runoff_depth import (
+                nemo_runoff_level_count)
+            _gdept = getattr(z_coord, "t_depth_ref", None)
+            if _gdept is None:
+                raise SystemExit(
+                    "--runoff-depth-nemo-levels needs the reference T-depth "
+                    "ladder (z_coord.t_depth_ref); this vertical coordinate "
+                    "carries none.")
+            _spread_kw = {"runoff_depth_spread_levels": jnp.asarray(
+                nemo_runoff_level_count(np.asarray(runoff_monthly),
+                                        np.asarray(_gdept), **_rd_kw))}
         if app_grid_type == "mpas":
             # Voronoi MPAS: rebuild the model with the per-cell map threaded
             # into MPASOceanConfig.  The freshwater application in
@@ -8980,8 +9055,7 @@ def main() -> int:
             from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
             model = MPASOceanModel(
                 grid, z_coord,
-                model.config._replace(
-                    runoff_depth_spread_map=jnp.asarray(_h_rnf)),
+                model.config._replace(**_spread_kw),
                 iwm_forcing=getattr(model, "_iwm_forcing", None))
         else:
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -8989,8 +9063,7 @@ def main() -> int:
             )
             model = LatLonCGridOceanModel(
                 grid, z_coord,
-                model.config._replace(
-                    runoff_depth_spread_map=jnp.asarray(_h_rnf)),
+                model.config._replace(**_spread_kw),
                 iwm_forcing=getattr(model, "_iwm_forcing", None))
         _wetm = np.asarray(state.land_mask.data) > 0.5
         print(f"[setup] NEMO runoff depth map (ln_rnf_depth_ini): "
@@ -8998,6 +9071,10 @@ def main() -> int:
               f"{_h_rnf[_wetm].max():.1f}] m; "
               f"{(np.asarray(runoff_monthly).max(0)[_wetm] > 0).sum()} "
               f"runoff cells")
+        if "runoff_depth_spread_levels" in _spread_kw:
+            _nk = np.asarray(_spread_kw["runoff_depth_spread_levels"])
+            print(f"[setup] NEMO whole-level runoff spread: nk_rnf wet range "
+                  f"[{_nk[_wetm].min()},{_nk[_wetm].max()}]")
     _fw_cfg_kw = {}
     if args.freshwater_salinity != "s_ref":
         _fw_cfg_kw["freshwater_salinity"] = args.freshwater_salinity
@@ -10410,7 +10487,7 @@ def main() -> int:
         # switches the PE step to NEMO's RGB penetration.  NOT ramped — Chl is a
         # fixed optical climatology, independent of the dynamical spin-up ramp.
         if chl_clim is not None:
-            sf = sf._replace(chl=month_sample(chl_clim, step, dt, args.forcing_time_interp))
+            sf = sf._replace(chl=chl_at_step(chl_clim, step, dt, args.forcing_time_interp))
         # PRESCRIBED-ice runs (--ice-albedo/--ice-thermo/--sss-restore ice
         # gate, NO --prognostic-sea-ice): thread the SAME climatological
         # concentration to the vertical-mixing closure so the TKE under-ice
@@ -11153,7 +11230,7 @@ def main() -> int:
                             n_steps * dt / _SEC_PER_DAY)
     _gateway_cumulative_close(_gw_csv)
     _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)
-    _record_final_state_digest(manifest_path, state)
+    _record_final_state_digest(manifest_path, state, ice_state)
     _close_csv()
     rate = (n_steps - start_step) / (time.time() - t_wall)
     if _spmd_persistent:
