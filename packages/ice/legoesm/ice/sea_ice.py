@@ -657,6 +657,9 @@ def _nemo_si3_blk_ice_2(
     qsr_ocean,
     emp_ocean_raw,
     land_mask,
+    precip_factor,
+    evap_factor,
+    snow_blow_exponent,
     ice_constants,
     _preserve_subnormal_snow: bool = True,
 ):
@@ -668,6 +671,10 @@ def _nemo_si3_blk_ice_2(
     ``land_mask`` is NEMO's ``smask0``; it multiplies the same terms as
     ``sbcblk.F90`` (net longwave, total/solid precipitation and the rain,
     snow and SST heat contents), so land cells carry NEMO's land values.
+    ``precip_factor``, ``evap_factor`` and ``snow_blow_exponent`` are the
+    namelist ``rn_pfac``, ``rn_efac`` and ``rn_snwblow`` (``namsbc_blk`` /
+    ``nampar``): they scale total and solid precipitation, scale sublimation
+    and its T derivative, and set ``ice_var_snwblow``'s exponent.
     """
     albedo = _nemo_si3_ice_albedo(
         T_surface, h_ice, h_snow, cloud_fraction,
@@ -702,14 +709,14 @@ def _nemo_si3_blk_ice_2(
     qns_ice = q_lw - sensible - latent
     dqns_ice = -(dq_lw + sensible_scale + dq_latent)
 
-    total_precip = precip * land_mask
-    snow_precip = snow * land_mask
+    total_precip = precip * precip_factor * land_mask
+    snow_precip = snow * precip_factor * land_mask
     ocean_evap = emp_ocean_raw + total_precip
-    evaporation_ice = latent / ice_constants.latent_sublimation
-    devaporation_ice = dq_latent / ice_constants.latent_sublimation
+    evaporation_ice = evap_factor * latent / ice_constants.latent_sublimation
+    devaporation_ice = evap_factor * dq_latent / ice_constants.latent_sublimation
     snow_on_ice_fraction = 1.0 - (
         1.0 - ice_fraction_before
-    ) ** constants.snow_blow_exponent_orca1
+    ) ** snow_blow_exponent
     emp_ocean = (
         (1.0 - ice_fraction_before) * ocean_evap
         - (total_precip - snow_precip)
