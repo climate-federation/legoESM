@@ -125,6 +125,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     leith_biharmonic_tendency_cgrid,
     compute_vertex_mask,
     compute_face_masks_3d,
+    per_level_viscosity_masks,
+    nemo_shlat_vertex_mask,
     nemo_hpg_sco_literal_cgrid,
     density_jacobian_pgf_smc03_x,
     density_jacobian_pgf_smc03_y,
@@ -265,8 +267,16 @@ VALID_LATERAL_VISCOSITY_E3_WEIGHTING = frozenset({"off", "nemo_e3"})
 VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE = frozenset(
     {"nemo_ldf_c2d", "nemo_constant", "nemo_ahm_3d_file", "nemo_smag_blp"})
 # Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
-# at walls) or MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall side-drag).
-VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip"})
+# at walls), MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall
+# side-drag), or NEMO's rn_shlat ("nemo_shlat": coastal vorticity points take the
+# value config.lateral_shlat, dommsk.F90:209-215; 2 = no-slip).
+VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip", "nemo_shlat"})
+# Which land masks the "vector_laplacian" viscosity/biharmonic applies at each
+# level (config.lateral_viscosity_mask_levels): "surface" (default,
+# bit-identical) broadcasts the 2-D surface u/v/vertex masks to every level;
+# "per_level" builds them per level from the partial-cell is_active, as
+# NEMO uses its 3-D umask/vmask/fmask in dynldf_lev (dommsk.F90:148-153).
+VALID_LATERAL_VISCOSITY_MASK_LEVELS = frozenset({"surface", "per_level"})
 # Lateral-friction CLOSURE selector (config.lateral_friction_scheme): "none"
 # (the A_h/B_h/C_smag/C_leith knobs apply) or "om4p25" (Silvestri 2024 SM2 —
 # GFDL OM4p25 Laplacian+biharmonic max(Smag,static) closure).
@@ -3623,6 +3633,48 @@ def _bc_horizontal_viscosity(
             "lateral_viscosity_coefficient_source='nemo_smag_blp'")
     _use_flux_div = _visc_op == "flux_divergence"
     _use_nemo_div_curl = _visc_op == "nemo_div_curl"
+    # Land masks of the vector Laplacian / biharmonic sites below.  "surface"
+    # (default) keeps the 2-D surface masks at every level (bit-identical).
+    # "per_level" uses each level's own wet cells, faces and vertices, as
+    # NEMO's dynldf_lev reads 3-D tmask/umask/vmask/fmask: with 2-D masks a
+    # face or vertex closed at depth by a topographic step stays open.
+    _mask_levels = getattr(config, "lateral_viscosity_mask_levels", "surface")
+    if _mask_levels not in VALID_LATERAL_VISCOSITY_MASK_LEVELS:
+        raise ValueError(
+            "lateral_viscosity_mask_levels must be one of "
+            f"{sorted(VALID_LATERAL_VISCOSITY_MASK_LEVELS)}, got "
+            f"{_mask_levels!r}")
+    if _mask_levels == "per_level" and _visc_op != "vector_laplacian":
+        raise ValueError(
+            "lateral_viscosity_mask_levels='per_level' selects the masks of "
+            "the 'vector_laplacian' operator; got "
+            f"lateral_viscosity_operator={_visc_op!r}")
+    _vl_mask, _vl_u_mask, _vl_v_mask, _vl_vertex_mask = (
+        mask, u_mask, v_mask, vertex_mask)
+    if (_mask_levels == "per_level"
+            and getattr(z_coord, "is_active", None) is not None):
+        _vl_mask, _vl_u_mask, _vl_v_mask, _vl_vertex_mask = (
+            per_level_viscosity_masks(
+                z_coord.is_active, grid, mask, u_mask, v_mask, vertex_mask,
+                u.dtype))
+    # NEMO's lateral momentum BC (rn_shlat) lives in the VALUE of its f-mask:
+    # a coastal vorticity point with any wet adjacent face takes rn_shlat
+    # (dommsk.F90:209-215; 2 = no-slip), applied once to the vorticity.  It
+    # needs NEMO's per-level masks and replaces the MITgcm side drag.
+    if getattr(config, "lateral_side_bc", "free_slip") == "nemo_shlat":
+        if _mask_levels != "per_level":
+            raise ValueError(
+                "lateral_side_bc='nemo_shlat' requires "
+                "lateral_viscosity_mask_levels='per_level' (NEMO's f-mask "
+                f"is built per level); got {_mask_levels!r}")
+        _shlat = float(getattr(config, "lateral_shlat", 2.0))
+        if not _shlat >= 0.0:
+            raise ValueError(
+                f"lateral_shlat must be >= 0 (NEMO dom_msk stops), got {_shlat!r}")
+        if _vl_vertex_mask is None:
+            _vl_vertex_mask = compute_vertex_mask(_vl_mask, grid=grid)
+        _vl_vertex_mask = nemo_shlat_vertex_mask(
+            _vl_vertex_mask, _vl_u_mask, _vl_v_mask, _shlat, grid=grid)
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
 
     def _biharmonic_op(uu, vv):
@@ -3637,8 +3689,8 @@ def _bc_horizontal_viscosity(
         # cached vertex mask instead of recomputing it (a per-step
         # ``compute_vertex_mask`` + N-S pole-BC halo) every call.
         return vector_bilaplacian_cgrid(
-            uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
-            vertex_mask=vertex_mask)
+            uu, vv, grid, mask=_vl_mask, u_mask=_vl_u_mask,
+            v_mask=_vl_v_mask, vertex_mask=_vl_vertex_mask)
 
     if _use_nemo_div_curl and _ahm_source == "nemo_smag_blp":
         lv = config.lateral_viscosity
@@ -3912,8 +3964,8 @@ def _bc_horizontal_viscosity(
         # averaged viscous tendency damps the barotropic mode via F_slow.
         _vlap_u, _vlap_v = vector_laplacian_cgrid(
             u, v, grid,
-            mask=mask, u_mask=u_mask, v_mask=v_mask,
-            vertex_mask=vertex_mask)
+            mask=_vl_mask, u_mask=_vl_u_mask, v_mask=_vl_v_mask,
+            vertex_mask=_vl_vertex_mask)
         if config.lateral_viscosity.A_h_lat_scaling:
             _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if config.lateral_viscosity.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
@@ -3972,8 +4024,8 @@ def _bc_horizontal_viscosity(
         dv_dt = dv_dt + diag_Ah_lap_v
         bilap_u, bilap_v = vector_laplacian_cgrid(
             _vlap_u, _vlap_v, grid,
-            mask=mask, u_mask=u_mask, v_mask=v_mask,
-            vertex_mask=vertex_mask)
+            mask=_vl_mask, u_mask=_vl_u_mask, v_mask=_vl_v_mask,
+            vertex_mask=_vl_vertex_mask)
         if config.lateral_viscosity.B_h_lat_scaling:
             scale_u, scale_v = biharmonic_scaling_factor(grid)
             diag_Bh_bilap_u = -config.lateral_viscosity.B_h * scale_u[:, None, None] * bilap_u
@@ -3987,8 +4039,8 @@ def _bc_horizontal_viscosity(
     elif config.lateral_viscosity.A_h > 0:
         vlap_u, vlap_v = vector_laplacian_cgrid(
             u, v, grid,
-            mask=mask, u_mask=u_mask, v_mask=v_mask,
-            vertex_mask=vertex_mask)
+            mask=_vl_mask, u_mask=_vl_u_mask, v_mask=_vl_v_mask,
+            vertex_mask=_vl_vertex_mask)
         if config.lateral_viscosity.A_h_lat_scaling:
             _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if config.lateral_viscosity.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
@@ -4058,8 +4110,8 @@ def _bc_horizontal_viscosity(
             coef_u, coef_v = biharmonic_gamma0_coefficients(
                 grid, config.lateral_viscosity.B_h_gamma0)
             vlap_u, vlap_v = vector_laplacian_cgrid(
-                u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
-                vertex_mask=vertex_mask)
+                u, v, grid, mask=_vl_mask, u_mask=_vl_u_mask, v_mask=_vl_v_mask,
+                vertex_mask=_vl_vertex_mask)
             coef_u = coef_u.astype(vlap_u.dtype)
             coef_v = coef_v.astype(vlap_v.dtype)
             if vlap_u.ndim != 2:
@@ -4067,8 +4119,8 @@ def _bc_horizontal_viscosity(
                 coef_v = coef_v[:, :, None]
             bilap_u, bilap_v = vector_laplacian_cgrid(
                 coef_u * vlap_u, coef_v * vlap_v, grid,
-                mask=mask, u_mask=u_mask, v_mask=v_mask,
-                vertex_mask=vertex_mask)
+                mask=_vl_mask, u_mask=_vl_u_mask, v_mask=_vl_v_mask,
+                vertex_mask=_vl_vertex_mask)
             diag_Bh_bilap_u = -bilap_u
             diag_Bh_bilap_v = -bilap_v
         elif config.lateral_viscosity.B_h_lat_scaling:
@@ -4278,9 +4330,11 @@ def _bc_horizontal_viscosity(
             # =0, so it is exact there; with slope-foot on it is a localized
             # bottom-cell approximation of the boosted dissipation.
             _A_h_center = _A_h_center[:, jnp.newaxis, jnp.newaxis] * _slope_E_center
+        # Same masks as the vector-Laplacian tendency it credits (per level
+        # under lateral_viscosity_mask_levels="per_level").
         kdiss_h_cell = vector_laplacian_dissipation_cgrid(
             u, v, grid, _A_h_center,
-            mask=mask, u_mask=u_mask, v_mask=v_mask)
+            mask=_vl_mask, u_mask=_vl_u_mask, v_mask=_vl_v_mask)
     return (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
             diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
             diag_Cl_leith_v, kdiss_h_cell)
