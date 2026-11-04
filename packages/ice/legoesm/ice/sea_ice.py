@@ -852,8 +852,7 @@ def _nemo_si3_ice_flx_other(
     * ``"5.0.2"`` (C1D_OMIP_L3 oracle): landfast cut needs
       ``at_i >= rn_amax - 0.001`` AND ``vt_i >= 3 m``; full-cover cut also
       needs ``vt_i >= 3 m``.  Hard switches, unchanged.
-    * ``"5.0.1"`` (ORCA1 oracle, icesbc.F90:391,412,416): cooling branch is
-      ``zqld - zqfr < 0 .OR. at_i < epsi10``; landfast cut
+    * ``"5.0.1"`` (ORCA1 oracle, icesbc.F90:391,412,416): landfast cut
       ``zvel <= 5 mm/s .AND. at_i >= rn_amax - 0.01``; full-cover cut
       ``at_i >= 1 - epsi10``; no thickness term.  The two cuts are smooth
       switches of relative width ``lead_cut_width`` (``0.0`` = NEMO's hard
@@ -909,9 +908,10 @@ def _nemo_si3_ice_flx_other(
     freeze_energy = jnp.where(stop_supercool, 0.0, freeze_energy)
     freeze_positive = jnp.where(stop_supercool, 0.0, freeze_positive)
     qsb = jnp.where(stop_supercool, 0.0, qsb)
+    # NEMO 5.0.1 also enters this branch when at_i < epsi10; that changes no
+    # output (there zswitch = 0 so fhld = 0, and min(0, zqld - zqfr) = 0 when
+    # zqld - zqfr >= 0), so the extra hard condition is not carried.
     cooling = lead_energy - freeze_energy < 0.0
-    if lead_cut_version == "5.0.1":
-        cooling = cooling | (ice_fraction < ice_epsilon)
     fhld = jnp.where(
         cooling,
         0.0,
@@ -942,8 +942,11 @@ def _nemo_si3_ice_flx_other(
             packed = sigmoid_switch(ice_fraction - packed_floor, 1.0 / lead_cut_width)
             full = sigmoid_switch(ice_fraction - full_floor, 1.0 / lead_cut_width)
         keep = (1.0 - slow * packed) * (1.0 - full)
-        # explicit +0.0 where the cut is complete (NEMO assigns 0; qlead*0 would give -0.0)
-        qlead = jnp.where(keep == 0.0, 0.0, qlead * keep)
+        if lead_cut_width == 0.0:
+            # hard oracle mode: NEMO assigns +0.0 (qlead * 0 would give -0.0)
+            qlead = jnp.where(keep == 0.0, 0.0, qlead)
+        else:
+            qlead = qlead * keep
         return {"qsb_ice_bot": qsb, "fhld": fhld, "qlead": qlead}
     landfast_stop = (
         (ice_speed <= constants.ice_landfast_speed_stop_nemo)
