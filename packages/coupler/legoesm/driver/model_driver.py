@@ -8114,6 +8114,10 @@ class ModelDriver:
                     _save[f"physstate_{_name}"] = np.asarray(_val)
                 _save["physstate_meta_conv_scheme"] = np.asarray(
                     str(getattr(self.config, "convection", "none")))
+                if (getattr(self.config, "turbulence", "none") == "mynn25"
+                        and not getattr(self, "_mynn_col_pending", True)):
+                    # the cold-start step has run (vote R2a)
+                    _save["physstate_meta_mynn_initialized"] = np.asarray(True)
             # Persist moisture tracers too (moist MPAS runs), so a chained
             # restart does not silently drop water.  The ``trc_`` prefix avoids
             # colliding with u/T/p_s/phis; ``tracer_names`` lets load rebuild
@@ -13350,11 +13354,17 @@ class ModelDriver:
                 f"{cfg.cam6_aerosol_dir}, top_lev={_cam6_act.top_lev}, "
                 f"mixing substeps <= {_cam6_act.n_max}")
 
-        def _build_physics(_cfg, need_rad=True):
+        _mynn_col = getattr(cfg, "turbulence", "none") == "mynn25"
+
+        def _build_physics(_cfg, need_rad=True,
+                           mynn_initflag=(False if _mynn_col else None)):
             """The lane's make_physics call (one copy for the full and the
             held-radiation variants; exported to mpas_diff_step so a caller
-            can rebuild the SAME physics from a config with traced params)."""
+            can rebuild the SAME physics from a config with traced params).
+            ``mynn_initflag``: turbulence='mynn25' only; True builds the
+            peeled cold-start step (votes M3/R3a)."""
             return make_physics(_cfg, model_type="mpas", dt=DT_PHYS,
+                                mynn_initflag=mynn_initflag,
                                 cam6_activation=_cam6_act,
                                 budget_ledger_level_weight=_ledger_weight,
                                 column_mesh=_column_mesh, need_rad=need_rad,
@@ -13462,6 +13472,20 @@ class ModelDriver:
         self._clock_day_origin = _DAY_ORIGIN
         physics_fn_norad = (_build_physics(phys_cfg, need_rad=False)
                             if _subcycle_rad else None)
+        # turbulence='mynn25': the cold-start builds for the ONE peeled
+        # first physics step of an uninitialised run (votes M3/R1a/R3a).
+        physics_fn_init = physics_fn_norad_init = None
+        self._mynn_col_pending = False
+        if _mynn_col:
+            self._mynn_col_pending = self._mynn_peel_pending(
+                qke_key="physstate_qke",
+                flag_key="physstate_meta_mynn_initialized")
+            if self._mynn_col_pending:
+                physics_fn_init = _build_physics(phys_cfg, mynn_initflag=True)
+                physics_fn_norad_init = (
+                    _build_physics(phys_cfg, need_rad=False,
+                                   mynn_initflag=True)
+                    if _subcycle_rad else None)
         if _subcycle_rad:
             logger.info(
                 "  Radiation sub-cycle: RRTMGP solved every "
@@ -14614,6 +14638,10 @@ class ModelDriver:
             physics_fn = _wrap_hs(physics_fn)
             if physics_fn_norad is not None:
                 physics_fn_norad = _wrap_hs(physics_fn_norad)
+            if physics_fn_init is not None:
+                physics_fn_init = _wrap_hs(physics_fn_init)
+            if physics_fn_norad_init is not None:
+                physics_fn_norad_init = _wrap_hs(physics_fn_norad_init)
             # Physics cadence: HS forcing is analytic and cheap, so it is
             # recomputed on held steps (the cache holds physics only).
             if physics_fn_held is not None:
@@ -15659,6 +15687,10 @@ class ModelDriver:
                 # Differentiable-step export (review F9): hand the production
                 # closures built above to mpas_diff_step and stop BEFORE the
                 # first step; the driver state is untouched.
+                if self._mynn_col_pending:
+                    raise NotImplementedError(
+                        "export_mpas_step: turbulence='mynn25' cold-start "
+                        "peel is not part of the exported differentiable step")
                 if (_mpi_step is not None or _hard_sat_on
                         or _budget_ledger_on or cfg.held_suarez_forcing
                         or not hasattr(self.model, "step_pure")):
@@ -15688,6 +15720,10 @@ class ModelDriver:
                     land_k=_LAND_K if _land_ml_on else None)
                 return "EXPORTED"
             if _mpi_step is not None:
+                if self._mynn_col_pending:
+                    raise NotImplementedError(
+                        "turbulence='mynn25' cold-start peel is not wired on "
+                        "the MPAS cell-partition MPI step; run serial")
                 _mstep = ((_mpi_step if _use_rad else _mpi_step_norad)
                           if _is_phys_step else _mpi_step_held)
                 self.state, _phys_state = _mstep(
@@ -15695,6 +15731,11 @@ class ModelDriver:
             else:
                 _pfn = pick_physics_fn(_use_rad, _is_phys_step, physics_fn,
                                        physics_fn_norad, physics_fn_held)
+                if self._mynn_col_pending and _is_phys_step:
+                    # the peeled cold-start physics step (initflag=True)
+                    _pfn = pick_physics_fn(_use_rad, True, physics_fn_init,
+                                           physics_fn_norad_init, None)
+                    self._mynn_col_pending = False
                 _pt0 = time.perf_counter() if _PHASE_TIMERS else 0.0
                 self.state = self.model.step(
                     self.state, DT, physics_fn=_pfn, forcing=_forcing,
@@ -18920,6 +18961,23 @@ class ModelDriver:
                 jax.process_count(), _maxT, _maxU, time.time() - t0)
         return status
 
+    def _mynn_peel_pending(self, qke_key="qke", flag_key="mynn_initialized"):
+        """turbulence='mynn25': True when this run still owes its cold-start
+        (initflag) step, from the host flag carried in ``carry_aux`` and the
+        checkpoint (vote R2a).  A restored packed qke without the flag, or the
+        flag without the qke, is refused."""
+        aux = self._carry_aux if isinstance(self._carry_aux, dict) else {}
+        has_flag = flag_key in aux
+        has_qke = qke_key in aux
+        if has_flag != has_qke:
+            raise ValueError(
+                "turbulence='mynn25': the restored state has "
+                + ("the initialized flag but no (qke, qsq, el) carry"
+                   if has_flag else
+                   "a (qke, qsq, el) carry but no mynn_initialized flag")
+                + "; a checkpoint carries both or neither")
+        return not (has_flag and bool(np.asarray(aux[flag_key])))
+
     def _prepare_run_context(self, start_step, start_day, restore_carry=False):
         """Prepare shared state for a run loop.
 
@@ -18993,11 +19051,25 @@ class ModelDriver:
         # When ``rad_update_steps <= 1`` the no-rad variant is unused
         # but the rad-only variant still helps by collapsing the
         # legacy ``lax.cond(True, _, _)`` to a single branch.
-        step_unified = self.physics.build_step_unified(static_need_rad=True)
+        # turbulence='mynn25' (WRF MYNN-EDMF): every-step builds carry
+        # initflag=False; the cold-start pair (initflag=True) runs the ONE
+        # peeled first step of an uninitialised run (votes M3/N4/R1).
+        _mynn = getattr(cfg, "turbulence", "none") == "mynn25"
+        _mk = {"mynn_initflag": False} if _mynn else {}
+        step_unified = self.physics.build_step_unified(
+            static_need_rad=True, **_mk)
         step_unified_no_rad = (
-            self.physics.build_step_unified(static_need_rad=False)
+            self.physics.build_step_unified(static_need_rad=False, **_mk)
             if RAD_UPDATE_STEPS > 1 else None
         )
+        mynn_init_steps = None
+        if _mynn:
+            mynn_init_steps = (
+                self.physics.build_step_unified(
+                    static_need_rad=True, mynn_initflag=True),
+                (self.physics.build_step_unified(
+                    static_need_rad=False, mynn_initflag=True)
+                 if RAD_UPDATE_STEPS > 1 else None))
 
         # Held radiation arrays — restore from carry or zero-init
         _ens = self._ensemble_size
@@ -19305,6 +19377,7 @@ class ModelDriver:
             "current_s_0": current_s_0, "solar_weights": solar_weights,
             "step_unified": step_unified,
             "step_unified_no_rad": step_unified_no_rad,
+            "mynn_init_steps": mynn_init_steps,
             "held_dT_rad": held_dT_rad,
             "held_sw_net_sfc": held_sw_net_sfc,
             "held_lw_net_sfc": held_lw_net_sfc,
@@ -19612,6 +19685,7 @@ class ModelDriver:
         solar_weights = ctx["solar_weights"]
         step_unified = ctx["step_unified"]
         step_unified_no_rad = ctx.get("step_unified_no_rad")
+        mynn_init_steps = ctx.get("mynn_init_steps")
         held_dT_rad = ctx["held_dT_rad"]
         held_sw_net_sfc = ctx["held_sw_net_sfc"]
         held_lw_net_sfc = ctx["held_lw_net_sfc"]
@@ -19762,54 +19836,66 @@ class ModelDriver:
         ):
             _seg_device_config = self._device_config
 
-        run_segment = build_segment_fn(
-            model=self.model,
-            persistent_dgrid=self._persistent_dgrid_active(),   # #1028
-            persistent_cgrid=self._persistent_cgrid_active(),
-            tiled_step_fn=self._maybe_build_tiled_step(DT),
-            step_unified=step_unified,
-            step_unified_no_rad=step_unified_no_rad,
-            grid=self.grid,
-            sigma_full=sigma_full,
-            dsigma=dsigma,
-            dt=DT,
-            rad_update_steps=RAD_UPDATE_STEPS,
-            microphysics=cfg.microphysics,
-            fix_moisture=cfg.fix_moisture,
-            fix_mass=cfg.dycore.fix_mass,
-            fric_decay=self._fric_decay,
-            qv_smooth_coeff=self._qv_smooth_coeff,
-            lat=_seg_lat,
-            lon=_seg_lon,
-            start_day=START_DAY + self._insolation_day_offset,
-            gradient_checkpoint=(
-                cfg.gradient_checkpoint
-                if cfg.gradient_checkpoint
-                else segment_length > 50
-            ),
-            hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
-            tau_equator=cfg.tau_equator,
-            tau_pole=cfg.tau_pole,
-            sbm_tau_c=cfg.sbm_tau_c,
-            sbm_RH_ref=cfg.sbm_RH_ref,
-            C_H=cfg.C_H,
-            C_E=cfg.C_E,
-            albedo_ice=cfg.albedo_ice,
-            albedo_ocean=cfg.albedo_ocean,
-            ghg_vmr_override=ghg_vmr,
-            owned_face_ids=self._owned_face_ids,
-            hs_newtonian_relax=self._hs_newtonian_relax,
-            device_config=_seg_device_config,
-            energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
-            advect_moisture=self._moisture_advection_active(),
-            # Un-fused-radiation host path (ExperimentConfig.unfused_radiation,
-            # default OFF): the pipeline lets build_segment_fn expose
-            # run_norad_scan / run_rad so rrtmgp and the no-rad scan compile
-            # as two separate executables.  Passing it is harmless when the
-            # flag is off (the attributes are simply never invoked).
-            pipeline=self.physics,
-            budget_ledger=cfg.output.budget_ledger,
-        )
+        def _build_run_segment(_su, _su_norad):
+            # one build recipe for the every-step and the mynn25
+            # cold-start segment fns (they differ only in these two)
+            return build_segment_fn(
+                model=self.model,
+                persistent_dgrid=self._persistent_dgrid_active(),   # #1028
+                persistent_cgrid=self._persistent_cgrid_active(),
+                tiled_step_fn=self._maybe_build_tiled_step(DT),
+                step_unified=_su,
+                step_unified_no_rad=_su_norad,
+                grid=self.grid,
+                sigma_full=sigma_full,
+                dsigma=dsigma,
+                dt=DT,
+                rad_update_steps=RAD_UPDATE_STEPS,
+                microphysics=cfg.microphysics,
+                fix_moisture=cfg.fix_moisture,
+                fix_mass=cfg.dycore.fix_mass,
+                fric_decay=self._fric_decay,
+                qv_smooth_coeff=self._qv_smooth_coeff,
+                lat=_seg_lat,
+                lon=_seg_lon,
+                start_day=START_DAY + self._insolation_day_offset,
+                gradient_checkpoint=(
+                    cfg.gradient_checkpoint
+                    if cfg.gradient_checkpoint
+                    else segment_length > 50
+                ),
+                hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
+                tau_equator=cfg.tau_equator,
+                tau_pole=cfg.tau_pole,
+                sbm_tau_c=cfg.sbm_tau_c,
+                sbm_RH_ref=cfg.sbm_RH_ref,
+                C_H=cfg.C_H,
+                C_E=cfg.C_E,
+                albedo_ice=cfg.albedo_ice,
+                albedo_ocean=cfg.albedo_ocean,
+                ghg_vmr_override=ghg_vmr,
+                owned_face_ids=self._owned_face_ids,
+                hs_newtonian_relax=self._hs_newtonian_relax,
+                device_config=_seg_device_config,
+                energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+                advect_moisture=self._moisture_advection_active(),
+                # Un-fused-radiation host path (ExperimentConfig.unfused_radiation,
+                # default OFF): the pipeline lets build_segment_fn expose
+                # run_norad_scan / run_rad so rrtmgp and the no-rad scan compile
+                # as two separate executables.  Passing it is harmless when the
+                # flag is off (the attributes are simply never invoked).
+                pipeline=self.physics,
+                budget_ledger=cfg.output.budget_ledger,
+            )
+        run_segment = _build_run_segment(step_unified, step_unified_no_rad)
+        # turbulence='mynn25': the peeled cold-start step (vote R1a) runs
+        # once, through its own 1-step segment, unless a restored carry_aux
+        # says the run is already initialised (R2a).
+        _mynn_peel = None
+        if mynn_init_steps is not None:
+            _mynn_peel = self._mynn_peel_pending()
+            if _mynn_peel:
+                run_segment_init = _build_run_segment(*mynn_init_steps)
 
         logger.info(
             f"Starting compiled run: {n_steps_remaining} steps, "
@@ -20039,12 +20125,27 @@ class ModelDriver:
             if seg_idx == 0:
                 t_jit_start = time.time()
 
+            # turbulence='mynn25' cold start (votes M3/R1a): ONE peeled step
+            # through the initflag=True build, outside the segment scan; the
+            # rest of this segment runs the every-step build (the radiation
+            # phase gate below keys on the absolute step, so cadence holds).
+            _seg_run_steps = seg_steps
+            if _mynn_peel:
+                if self._ensemble_size > 1:
+                    raise NotImplementedError(
+                        "turbulence='mynn25' cold-start peel is single-member "
+                        "only on the compiled lane")
+                carry = run_segment_init(carry, 1, forcing)
+                _seg_run_steps = seg_steps - 1
+                _mynn_peel = False
             # Execute compiled segment (vmap over ensemble if needed)
-            if self._ensemble_size > 1:
+            if _seg_run_steps == 0:
+                pass
+            elif self._ensemble_size > 1:
                 carry = jax.vmap(run_segment, in_axes=(0, None, None))(carry, seg_steps, forcing)
             elif (cfg.unfused_radiation
                     and RAD_UPDATE_STEPS > 1
-                    and seg_steps % RAD_UPDATE_STEPS == 0
+                    and _seg_run_steps % RAD_UPDATE_STEPS == 0
                     # PHASE gate.  The host loop below hardcodes "advance
                     # exactly RAD_UPDATE_STEPS held steps, then refresh", which
                     # only lands on the configured boundary when the segment
@@ -20074,14 +20175,14 @@ class ModelDriver:
                 # refresh lands at the cycle boundary.  This is the intended
                 # one-step phase shift (numerically equivalent to ~1e-6; same
                 # kernels, different compile boundary).
-                n_outer = seg_steps // RAD_UPDATE_STEPS
+                n_outer = _seg_run_steps // RAD_UPDATE_STEPS
                 for _ic in range(n_outer):
                     # advance RAD_UPDATE_STEPS no-rad steps w/ current held_*
                     carry = run_segment.run_norad_scan(carry, forcing)
                     # recompute fresh held_*/T_land from post-cycle state
                     carry = run_segment.run_rad(carry, forcing)
             else:
-                carry = run_segment(carry, seg_steps, forcing)           # legacy fused path (byte-identical)
+                carry = run_segment(carry, _seg_run_steps, forcing)      # legacy fused path (byte-identical)
 
             # Carry the lagged convective-cloud precip into the next segment
             # (single-member only — see pack_carry above).
@@ -20252,6 +20353,9 @@ class ModelDriver:
             if carry.qke is not None:
                 phys_qke = carry.qke
                 self._carry_aux["qke"] = phys_qke
+                if mynn_init_steps is not None and not _mynn_peel:
+                    # the cold-start step has run (vote R2a), checkpointed with qke
+                    self._carry_aux["mynn_initialized"] = np.asarray(True)
             if carry.gwd_spectrum is not None:
                 phys_gwd_spectrum = carry.gwd_spectrum
                 self._carry_aux["gwd_spectrum"] = phys_gwd_spectrum

@@ -116,14 +116,16 @@ def mynn_wrf_columns(dz, u, v, w, T, p, exner, rho, q_v, q_c, q_i, carry,
     return mapped, new_carry
 
 
-def mynn_wrf_turbulence(u, v, T, q_v, carry, p_full, p_half, z_full, z_half,
+def mynn_wrf_turbulence(u, v, T, q_v, qke, p_full, p_half, z_full, z_half,
                         T_sfc, q_sfc, rho, dt, config, *, w, q_c, q_i,
                         cell_area, land_frac, initflag):
     """Lane kernel for ``turbulence: mynn25`` (signature of the other
     carry-holding kernels plus the port's extra inputs, all keyword-only and
     required: ``w`` [m/s, up], ``q_c``, ``q_i`` (None = no ice),
     ``cell_area`` [m^2, (ncol,)], ``land_frac`` ((ncol,) or None = water),
-    ``initflag`` (static bool)).  Returns ``(TurbulenceOutput, carry_new)``.
+    ``initflag`` (static bool)).  ``qke`` is the packed (qke, qsq, el)
+    carry under the slot's name (the pipeline passes it by that keyword).
+    Returns ``(TurbulenceOutput, carry_new)``.
     """
     for name, val in (("w", w), ("q_c", q_c), ("cell_area", cell_area)):
         if val is None:
@@ -142,7 +144,7 @@ def mynn_wrf_turbulence(u, v, T, q_v, carry, p_full, p_half, z_full, z_half,
                             ).astype(T.dtype))
     dx = jnp.sqrt(jnp.reshape(cell_area, T_sfc.shape))
     m, carry_new = mynn_wrf_columns(
-        dz, u, v, w, T, p_full, exner, rho, q_v, q_c, q_i, carry, xland,
+        dz, u, v, w, T, p_full, exner, rho, q_v, q_c, q_i, qke, xland,
         p_half[:, -1], T_sfc, ust, shflx, qfx, wspd, dt, dx,
         initflag=initflag)
     out = TurbulenceOutput(

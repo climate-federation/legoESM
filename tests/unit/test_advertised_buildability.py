@@ -116,10 +116,6 @@ class TestSchemeLiteralsResolveOrExplicitNIE:
         config = _cfg(turbulence=scheme)
         if scheme == "none":
             assert _resolve_turbulence(config) == (None, None)
-        elif scheme == "mynn25":
-            # R3: refused until the pipeline peels its cold start (vote P6)
-            with pytest.raises(NotImplementedError, match="mynn25"):
-                _resolve_turbulence(config)
         else:
             turb_fn, _ = _resolve_turbulence(config)
             assert callable(turb_fn)

@@ -93,11 +93,15 @@ def test_make_physics_refuses_mynn25_with_macmic_subcycling():
                      cld_macmic_num_steps=2)
 
 
-def test_compiled_pipeline_refuses_mynn25():
+def test_compiled_pipeline_resolves_the_port():
+    """R3 R1a: the pipeline now runs mynn25 (cold start peeled by the driver;
+    tests/unit/test_mynn_compiled_peel.py)."""
     from types import SimpleNamespace
     from legoesm.driver.physics_pipeline import _resolve_turbulence
-    with pytest.raises(NotImplementedError, match="mynn25"):
-        _resolve_turbulence(SimpleNamespace(turbulence="mynn25"))
+    from legoesm.atmosphere.physics.turbulence.mynn_wrf_adapter import (
+        mynn_wrf_turbulence)
+    fn, _ = _resolve_turbulence(SimpleNamespace(turbulence="mynn25"))
+    assert fn is mynn_wrf_turbulence
 
 
 def test_bridge_routes_cloud_water_and_drops_absent_ice():
