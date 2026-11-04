@@ -1,5 +1,6 @@
-"""config/amip/amip_ifs49r1.yaml: the production deck with OpenIFS 49r1 CLOUDSC
-and the faithful CUMASTRN convection (votes VC2a, VC22-VC32).
+"""config/amip/amip_ifs49r1.yaml: the production deck with OpenIFS 49r1 CLOUDSC,
+the faithful CUMASTRN convection (votes VC2a, VC22-VC32) and ecRad 49r1
+radiation (votes L1-L28).
 
 Pins that the deck resolves to the IFS lane and adds no validate_strict error
 to production's, and that its RESOLVED config differs from
@@ -31,6 +32,9 @@ _EXPECTED_DIFF = {
     "cloud_cam6_rhmaxis",
     "zm_c0_lnd", "zm_c0_ocn", "zm_ke", "zm_dmpdz", "zm_tau", "zm_capelmt",
     "zm_detrain_phase_width_K", "zm_detrain_number_width_kgkg_s",
+    # ecRad 49r1 radiation (votes L1, L18, L20): the scheme, its aerosols-off
+    # forcing row, and the RRTMGP-only overhead layer that errors under it
+    "radiation", "aerosol_forcing", "rrtmgp_overhead_layer",
 }
 
 
@@ -70,9 +74,11 @@ def test_deck_resolves_to_the_ifs_lane_and_validates():
     assert cfg.cld_macmic_num_steps == 1
     assert cfg.cloud_scheme == "resolved"
     assert cfg.dycore.discretization == "mpas"
+    assert cfg.radiation == "ecrad_ifs" and cfg.aerosol_forcing == "off"
     # the launcher supplies the land/IC files both decks need; with them
-    # absent, the IFS deck raises exactly the errors production raises
-    assert _strict_errors(cfg) == _strict_errors(_cfg(_PROD))
+    # absent, the IFS deck raises no error production does not raise
+    # (aerosols off: it may raise fewer)
+    assert _strict_errors(cfg) <= _strict_errors(_cfg(_PROD))
 
 
 def test_run_amip_accepts_resolved_clouds_with_cloudsc():

@@ -2784,15 +2784,17 @@ class ModelDriver:
         # dy) rather than a single resolution.
         from legoesm.grids.factory import create_grid
 
-        if gc.grid_type == "latlon" and self.config.dycore.column_lane:
-            # lat-lon COLUMN lane: the driver's grid is the column mesh of
-            # the native lat-lon grid (row-major cells), so every setup-time
-            # regrid lands on the columns the model steps; the native grid
-            # goes to the dycore factory
+        if (gc.grid_type in ("latlon", "gaussian")
+                and self.config.dycore.column_lane):
+            # lat-lon / spectral COLUMN lane: the driver's grid is the column
+            # mesh of the native lat-lon or Gaussian grid (row-major cells),
+            # so every setup-time regrid lands on the columns the model
+            # steps; the native grid (held in _latlon_native_grid on both
+            # lanes) goes to the dycore factory
             from legoesm.atmosphere.dynamics.gcm.latlon_cgrid_column import (
                 build_latlon_column_mesh,
             )
-            self._latlon_native_grid = create_grid("latlon", gc.resolution)
+            self._latlon_native_grid = create_grid(gc.grid_type, gc.resolution)
             self.grid = build_latlon_column_mesh(self._latlon_native_grid)
         elif gc.grid_type == "latlon":
             global_grid = create_grid("latlon", gc.resolution)
@@ -3000,9 +3002,14 @@ class ModelDriver:
                 # the spectral dynamics feel the TRUNCATED field; the product
                 # (dynamics, CMOR orog, restart check) is that field, once
                 # round-tripped so the carry's own truncation is idempotent
+                # (the spectral column lane: on the native Gaussian grid,
+                # flattened back to the mesh's row-major columns)
                 from legoesm.grids.gaussian import sh_analysis, sh_synthesis
-                self._phis_data = sh_synthesis(self.grid, sh_analysis(
-                    self.grid, jnp.asarray(self._phis_data, jnp.float64)))
+                _sg = getattr(self, "_latlon_native_grid", None) or self.grid
+                self._phis_data = sh_synthesis(_sg, sh_analysis(
+                    _sg, jnp.reshape(jnp.asarray(self._phis_data, jnp.float64),
+                                     (_sg.n_lat, _sg.n_lon)))
+                ).reshape(jnp.shape(self._phis_data))
             self._phis_data = self._phis_data.astype(_sd)
             self._f_land = self._f_land.astype(_sd)
             if self._voronoi_layout is not None:
@@ -7954,7 +7961,9 @@ class ModelDriver:
                         # (allow_pickle=False).  Skip by NAME so BOTH None and
                         # a concrete-array carry are excluded (load re-seeds
                         # them None).
-                        if _name in PHYSSTATE_INPUT_FIELDS:
+                        if _name in PHYSSTATE_INPUT_FIELDS or _val is None:
+                            # None = a field inactive on this run
+                            # (ecrad_carry off ecrad_ifs): no array to save
                             continue
                         if _name == "prng_key":
                             ps_d_carry[_name] = _val
@@ -8105,7 +8114,7 @@ class ModelDriver:
                     # already dropped them).  Skip by NAME so a concrete-array
                     # carry is excluded too, not only None (``np.asarray(None)``
                     # is an unloadable object array under allow_pickle=False).
-                    if _name in PHYSSTATE_INPUT_FIELDS:
+                    if _name in PHYSSTATE_INPUT_FIELDS or _val is None:
                         continue
                     _save[f"physstate_{_name}"] = np.asarray(_val)
                 _save["physstate_meta_conv_scheme"] = np.asarray(
@@ -8272,6 +8281,24 @@ class ModelDriver:
                 _save["latloncol_tracer_names"] = np.asarray(_names)
                 for _i, _nm in enumerate(_names):
                     _save[f"latloncol_q_{_i}"] = np.asarray(_nat.tracers[_nm])
+            # spectral COLUMN lane: the columns are a SYNTHESIS of the
+            # coefficients, so the coefficients (driver post-step T edits
+            # written back as an SH increment) and the anchored dry-mass
+            # target ride along; T above stays the column view the run held
+            _spc = self._spectral_column_model()
+            if _spc is not None:
+                _nat = _spc.to_bundle(s)
+                _save["spectralcol_schema"] = np.asarray("spectralcol_ckpt_v1")
+                for _k in self._SPECTRALCOL_COEFFS:
+                    _save[f"spectralcol_{_k}"] = np.asarray(getattr(_nat, _k).data)
+                _names = sorted(_nat.tracers or ())
+                _save["spectralcol_tracer_names"] = np.asarray(_names)
+                for _i, _nm in enumerate(_names):
+                    _save[f"spectralcol_q_{_i}"] = np.asarray(
+                        _nat.tracers[_nm].data)
+                if _spc.dyn._target_mass is not None:
+                    _save["spectralcol_target_mass"] = np.asarray(
+                        _spc.dyn._target_mass, dtype=np.float64)
             # multi-process SPMD (M7 column lane): every process holds the
             # same host payload; process 0 writes, the others rendezvous
             # on its success (a root-only exception must not leave them
@@ -9088,6 +9115,77 @@ class ModelDriver:
                         "--topography / --topo-smoothing or start fresh")
                 self.state = _llc.from_bundle(_nat)
                 self._fv3_duo_column_restored = True
+            elif self._spectral_column_model() is not None:
+                _spc = self._spectral_column_model()
+                if "spectralcol_schema" not in d.files:
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} carries no spectral "
+                        "coefficients (spectralcol_schema absent): the column "
+                        "view cannot rebuild them, so only a checkpoint "
+                        "written by the spectral column lane can restart it.")
+                if str(d["spectralcol_schema"]) != "spectralcol_ckpt_v1":
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name}: unknown spectral column "
+                        f"schema {str(d['spectralcol_schema'])!r}")
+                _need = ["spectralcol_tracer_names"] + [
+                    f"spectralcol_{_k}" for _k in self._SPECTRALCOL_COEFFS]
+                if "spectralcol_tracer_names" in d.files:
+                    _need += [f"spectralcol_q_{_i}" for _i in
+                              range(len(d["spectralcol_tracer_names"]))]
+                _anchored = (_spc.config.fix_mass
+                             and _spc.config.anchor_mass_to_initial)
+                if _anchored:
+                    _need.append("spectralcol_target_mass")
+                _miss = [_k for _k in _need if _k not in d.files]
+                if _miss:
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name}: spectral column state "
+                        f"incomplete, missing {_miss}")
+                _names = [str(n) for n in d["spectralcol_tracer_names"]]
+                _cur = self.state.native
+                if sorted(_cur.tracers or ()) != _names:
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} tracers {_names} != "
+                        f"the run's {sorted(_cur.tracers or ())}")
+                _arrs = {_k: jnp.asarray(d[f"spectralcol_{_k}"],
+                                         dtype=getattr(_cur, _k).data.dtype)
+                         for _k in self._SPECTRALCOL_COEFFS}
+                _trc = {_nm: jnp.asarray(d[f"spectralcol_q_{_i}"],
+                                         dtype=_cur.tracers[_nm].data.dtype)
+                        for _i, _nm in enumerate(_names)}
+                for _k, _a, _b in (
+                        [(_k, _arrs[_k], getattr(_cur, _k).data)
+                         for _k in self._SPECTRALCOL_COEFFS]
+                        + [(f"q {_nm}", _trc[_nm], _cur.tracers[_nm].data)
+                           for _nm in _names]):
+                    if _a.shape != _b.shape:
+                        raise ValueError(
+                            f"MPAS checkpoint {path.name}: spectral {_k} shape "
+                            f"{_a.shape} != the run's {_b.shape}")
+                if not np.array_equal(np.asarray(_arrs["phis_hat"]),
+                                      np.asarray(_cur.phis_hat.data)):
+                    raise RuntimeError(
+                        "spectral column restart: the checkpoint's terrain "
+                        "differs from this run's; restart on the same "
+                        "--topography / --topo-smoothing or start fresh")
+                _nat = _cur._replace(
+                    **{_k: getattr(_cur, _k).replace(data=_arrs[_k])
+                       for _k in self._SPECTRALCOL_COEFFS},
+                    tracers={_nm: _cur.tracers[_nm].replace(data=_trc[_nm])
+                             for _nm in _names} or _cur.tracers)
+                if _anchored:
+                    # the ORIGINAL anchor, never a re-snapshot of the loaded mass
+                    _spc.dyn.set_target_mass(
+                        float(np.asarray(d["spectralcol_target_mass"])))
+                # T and its write-back base are the column view the
+                # continuous run held (any pending edit is already in
+                # T_hat): the resumed step neither re-analyses nor
+                # re-applies it
+                _st = _spc.from_bundle(_nat)
+                _T = _st.T.replace(data=jnp.asarray(
+                    d["T"], dtype=_st.T.data.dtype))
+                self.state = _st._replace(T=_T, T_view=_T)
+                self._fv3_duo_column_restored = True
             elif _mpi:
                 from legoesm.parallel.voronoi_partition import scatter_to_local
                 part = self._voronoi_layout.partition
@@ -9812,7 +9910,10 @@ class ModelDriver:
                 and getattr(self._device_config, "mesh", None) is not None
                 and tuple(getattr(self._device_config, "tiling", (1, 1))) != (1, 1)
             )
-            if _disc == "spectral" or _latlon_spmd or _tiled_cube:
+            # (the spectral COLUMN lane runs the column loop, which carries it)
+            _spectral = (_disc == "spectral"
+                         and not self.config.dycore.column_lane)
+            if _spectral or _latlon_spmd or _tiled_cube:
                 raise NotImplementedError(
                     "use_clubb_cloud_fraction is wired through the single-device "
                     "per-step AND fused-compiled rollouts and the MPAS lane, but "
@@ -12065,6 +12166,18 @@ class ModelDriver:
         g = getattr(self, "_latlon_native_grid", None)
         return self.grid if g is None else g
 
+    _SPECTRALCOL_COEFFS = ("vor_hat", "div_hat", "T_hat", "lnps_hat",
+                           "phis_hat")
+
+    def _spectral_column_model(self):
+        """The SpectralColumnModel when the driver runs the spectral column
+        lane, else None."""
+        from legoesm.atmosphere.dynamics.gcm.spectral_column import (
+            SpectralColumnModel,
+        )
+        m = getattr(self, "model", None)
+        return m if isinstance(m, SpectralColumnModel) else None
+
     def _latlon_column_model(self):
         """The LatLonCGridColumnModel when the driver runs the lat-lon
         column lane, else None."""
@@ -12136,9 +12249,11 @@ class ModelDriver:
                 "fv3_duo column lane threads no ensemble axis")
 
     def _latlon_column_init_state(self, col) -> None:
-        """The lat-lon column lane's fresh IC: the lat-lon lane's own IC
-        (``_init_state`` on the NATIVE grid with the native-shaped terrain),
-        lifted to the C-grid once and seen through the column view."""
+        """The lat-lon / spectral column lane's fresh IC: the native lane's
+        own IC (``_init_state`` on the NATIVE grid with the native-shaped
+        terrain; the spectral one is already the coefficient state), lifted
+        to the C-grid once on the lat-lon lane, and seen through the column
+        view."""
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
             hydrostatic_to_cgrid,
         )
@@ -12159,7 +12274,9 @@ class ModelDriver:
             hs = hs._replace(tracers={
                 k: Field(data=v, name=k, units="kg/kg")
                 for k, v in self.tracers.items()})
-        self.state = col.from_bundle(hydrostatic_to_cgrid(hs, col.grid))
+        self.state = col.from_bundle(
+            hs if self._latlon_column_model() is None
+            else hydrostatic_to_cgrid(hs, col.grid))
         self.tracers = {nm: f.data for nm, f in (self.state.tracers or {}).items()}
         self._state_template = self.state
 
@@ -14911,6 +15028,12 @@ class ModelDriver:
                 # (the save skips their None), re-seeded fresh.  Every
                 # EVOLVING field stays mandatory.
                 _exempt_ps = {"col_index"} | PHYSSTATE_INPUT_FIELDS
+                # fields inactive on THIS run (fresh seed None, e.g.
+                # ecrad_carry off ecrad_ifs) are never saved; an ecrad_ifs
+                # run seeds an array, so a checkpoint without its carry is
+                # INCOMPLETE below (vote L23a)
+                _exempt_ps |= {f for f in _phys_state._fields
+                               if getattr(_phys_state, f) is None}
                 _missing = [f for f in _phys_state._fields
                             if f not in _present_fields
                             and f not in _exempt_ps]
@@ -14956,6 +15079,14 @@ class ModelDriver:
                 if _name in PHYSSTATE_INPUT_FIELDS:
                     continue
                 _seed_field = getattr(_phys_state, _name)
+                if _seed_field is None:
+                    # a field inactive on THIS run (e.g. ecrad_carry without
+                    # radiation='ecrad_ifs'): dropped, loudly (vote U2b)
+                    logger.warning(
+                        "  MPAS restart: DROPPED physics-state field %r from "
+                        "the checkpoint; it is inactive on this run (e.g. "
+                        "ecrad_carry without radiation='ecrad_ifs').", _name)
+                    continue
                 _val = jnp.asarray(_v)
                 if tuple(_val.shape) != tuple(_seed_field.shape):
                     raise ValueError(
@@ -15563,6 +15694,17 @@ class ModelDriver:
                 _forcing = dict(_forcing_daily)
                 _forcing["day_of_year"] = jnp.asarray(_doy)
                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
+                if cfg.radiation == "ecrad_ifs":
+                    # McICA seed time (radiation_scheme.F90:390-405, vote
+                    # S3a): NINDAT = the run start date (model day 0 on the
+                    # insolation calendar), NSTEP*TSTEP = elapsed model time
+                    from legoesm.forcing.time_utils import day_to_date
+                    _forcing["model_seconds"] = jnp.asarray(
+                        float(_force_day) * 86400.0)  # coeff-ok: s per day
+                    _forcing["model_start_day_of_month"] = jnp.asarray(
+                        day_to_date(self._insolation_day(0.0),
+                                    ref_year=int(cfg.start_year))[2],
+                        dtype=jnp.int32)
                 if _cam6_act is not None:
                     # CAM prescribed_aero_adv: the two monthly records held on
                     # device, reloaded when the bracket moves, linearly
@@ -15703,6 +15845,9 @@ class ModelDriver:
                     # The eager loop's clock (R-ex absolute-step origin).
                     calendar=lambda k: self._calendar_for_radiation(
                         _DAY_ORIGIN + (start_step + k) * DT / 86400.0),
+                    # ecrad_ifs McICA seed clock (vote S3a), same origin
+                    model_seconds=lambda k: (
+                        _DAY_ORIGIN + (start_step + k) * DT / 86400.0) * 86400.0,
                     land_step=_land_step_fn if _land_ml_on else None,
                     land_state=self._land_ml_state if _land_ml_on else None,
                     marshal_land=_marshal_land_forcing if _land_ml_on else None,

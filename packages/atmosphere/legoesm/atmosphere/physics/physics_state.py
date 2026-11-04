@@ -284,6 +284,12 @@ class PhysicsState(NamedTuple):
     # CAM6 pbuf CLDO: the previous macmic sub-step's ast, set after the
     # microphysics (micro_mg_cam.F90:1829); 0 at cold start (:1047).
     cloud_fraction_old: jnp.ndarray = None
+    # OpenIFS 49r1 ecRad between-call carry (radiation="ecrad_ifs" only,
+    # votes L3a/S1a): the RadiationCarry RADHEATN reads, packed to
+    # (ncol, 5*(nlev+1)+13) by ecrad_ifs.lane.pack_carry.  Written by every
+    # full radiation call, read by every step.  ``None`` on every other run
+    # (no leaves; the checkpoint skips it).  Appended LAST.
+    ecrad_carry: jnp.ndarray = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -486,7 +492,17 @@ def init_physics_state(
         clubb_wp2_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         clubb_kh_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         cloud_fraction_old=jnp.zeros((ncol, nlev), dtype=dtype),
+        ecrad_carry=_ecrad_carry_seed(physics_config, ncol, nlev, dtype),
     )
+
+
+def _ecrad_carry_seed(physics_config, ncol, nlev, dtype):
+    """Zero carry for radiation="ecrad_ifs" (the first step of every run is
+    a full radiation call, so the zeros are never read), else None."""
+    if getattr(physics_config.radiation, "scheme", None) != "ecrad_ifs":
+        return None
+    from legoesm.atmosphere.physics.radiation.ecrad_ifs.lane import carry_width
+    return jnp.zeros((ncol, carry_width(nlev)), dtype=dtype)
 
 
 def update_physics_state(phys_state, updates):
@@ -581,4 +597,5 @@ def update_physics_state(phys_state, updates):
         clubb_kh_iface=updates.get("clubb_kh_iface", phys_state.clubb_kh_iface),
         cloud_fraction_old=updates.get(
             "cloud_fraction_old", phys_state.cloud_fraction_old),
+        ecrad_carry=updates.get("ecrad_carry", phys_state.ecrad_carry),
     )

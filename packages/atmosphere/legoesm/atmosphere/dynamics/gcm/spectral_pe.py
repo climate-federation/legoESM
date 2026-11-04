@@ -50,8 +50,15 @@ from legoesm.grids.gaussian import (
     sh_analysis_dmu_3d,
     sh_analysis_oc2_dmu_3d,
     uv_from_vordiv_3d,
+    vordiv_from_uv_3d,
     spectral_hyperdiffusion_3d,
     sh_synthesis_H,
+    spectral_gradient_3d,
+)
+from legoesm.core.conservation import (
+    apply_physics_water_mass,
+    gridded_energy_fixer_dT,
+    shift_ps_keep_tracer_mass,
 )
 from legoesm.grids.vertical import (
     SigmaCoordinate,
@@ -60,6 +67,7 @@ from legoesm.grids.vertical import (
     dp_from_hybrid,
     compute_geopotential,
     compute_geopotential_hybrid,
+    sb81_full_level_ln_p,
     compute_mass_flux_from_cumsum,
     vertical_advection,
     vertical_advection_hybrid,
@@ -335,6 +343,12 @@ class SpectralPEConfig(NamedTuple):
     # numerics for tests that intentionally measure drift.
     fix_mass: bool = False
     anchor_mass_to_initial: bool = False
+    # CAM-style global total-energy fixer (DycoreConfig.energy_fixer, F15):
+    # the energy the dynamics window lost (RK + sponge / filter / truncation /
+    # hyperdiffusion) comes back as ONE uniform heating before the physics.
+    # Honoured by the column-split step only (composable physics P4); the
+    # legacy step refuses it at the factory (refuse_unwired_energy_fixer).
+    energy_fixer: bool = False
     # Vertical advection for u, v, T on BOTH vertical coordinates (sigma and
     # hybrid): "sb_centered" (DEFAULT — Simmons-Burridge energy-conserving
     # pairing; sigma via _vertical_advection_sigma_sb, hybrid via
@@ -809,17 +823,25 @@ def spectral_pe_tendencies(
     # flux-form continuity needs it before the surface-pressure tendency;
     # the PGF correction below reuses the same arrays.
 
-    # PGF correction: -∇·(R_d·T'·∇_eta(lnp)) computed as spectral div of grid product
-    # In sigma coords: ∇_eta(ln p) = ∇(ln p_s).
-    # In hybrid coords: ∇_eta(ln p) = (B*p_s/p) * ∇(ln p_s).
-    T_prime_pgf = T - T_ref
-    _pgf_dlnps_dx = dlnps_dx[..., None]
-    _pgf_dlnps_dy = dlnps_dy[..., None]
+    # PGF correction computed as spectral div of a grid product:
+    # sigma: -∇·(R_d·T'·∇ln p_s) (T_ref part is the spectral term below);
+    # hybrid: -∇·(R_d·T·∇ln p_k), SB81 ln p_k, no T_ref split.
     if _hybrid:
-        B_full = sigma_coord.B_full  # (nlev,)
-        _hf = B_full * p_s[..., None] / p_full  # (n_lat, n_lon, nlev)
-        _pgf_dlnps_dx = _pgf_dlnps_dx * _hf
-        _pgf_dlnps_dy = _pgf_dlnps_dy * _hf
+        # The whole R_d·T·∇ln p_k through this grid-product path, with ln p_k
+        # the SB81 full-level log-pressure that compute_geopotential_hybrid
+        # integrates, so -∇Φ - R_d T ∇ln p cancels at isothermal rest over
+        # terrain (lat-lon #1029).  No spectral T_ref split here: that term
+        # carried ∇ln p_s on every level, a residual R_d T_ref (1 - B p_s/p)
+        # ∇ln p_s at rest.
+        _dlnp_dx, _dlnp_dy = spectral_gradient_3d(
+            grid, sh_analysis_3d(grid, sb81_full_level_ln_p(sigma_coord, p_s)))
+        T_prime_pgf = T
+        _pgf_dlnps_dx = _dlnp_dx
+        _pgf_dlnps_dy = _dlnp_dy
+    else:
+        T_prime_pgf = T - T_ref
+        _pgf_dlnps_dx = dlnps_dx[..., None]
+        _pgf_dlnps_dy = dlnps_dy[..., None]
     pgf_Fx_cos = R_d * T_prime_pgf * _pgf_dlnps_dx * cos_lat_3d
     pgf_Fy_cos = R_d * T_prime_pgf * _pgf_dlnps_dy * cos_lat_3d
 
@@ -874,12 +896,10 @@ def spectral_pe_tendencies(
     # Build ``ddiv_hat`` with the KE contribution to ``KPhi_hat``
     # already in place; the geopotential ``Phi`` contribution is added
     # after the batched sh_analysis_3d below (Loop 145).
-    ddiv_hat = (
-        flux_vor_curl
-        - grid.lap[:, None] * KPhi_oc2
-        - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
-        - pgf_correction_hat
-    )
+    ddiv_hat = flux_vor_curl - grid.lap[:, None] * KPhi_oc2
+    if not _hybrid:
+        ddiv_hat = ddiv_hat - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
+    ddiv_hat = ddiv_hat - pgf_correction_hat
 
     flux_T_div = (
         im_over_a[:, None] * _oc2_triple[..., 1]
@@ -903,11 +923,10 @@ def spectral_pe_tendencies(
     adiabatic = kappa * T * omega / p_adiab
 
     # Material derivative correction: kappa * T * v . grad_eta(ln p)
-    # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
-    # Reuses the unscaled v·∇lnps hoisted to step 7 (flux-form continuity).
+    # Sigma reuses the v·∇lnps hoisted to step 7; hybrid uses the SB81 ∇ln p_k.
     v_dot_grad_lnps = v_grad_lnps
     if _hybrid:
-        v_dot_grad_lnps = v_dot_grad_lnps * (sigma_coord.B_full * p_s[..., None] / p_adiab)
+        v_dot_grad_lnps = u * _dlnp_dx + v * _dlnp_dy  # same SB81 ∇ln p as the PGF
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     # Combine the three grid-space contributions to dT/dt before the SH
@@ -1321,6 +1340,26 @@ def advective_cfl_courant(n_max: int, dt_step: float,
     return u_ref * float(n_max) * float(dt_step) / constants.R_earth
 
 
+def refuse_semi_implicit_hybrid(config: SpectralPEConfig, sigma_coord) -> None:
+    """Refuse the semi-implicit path on hybrid levels.
+
+    The SI temperature-coupling matrix (``compute_tau_matrix``) uses the sigma
+    omega, while the hybrid explicit tendency uses the hybrid omega; they
+    differ by ~8.7% on CAM6 L32, so the implicit and explicit gravity-wave
+    terms do not cancel.  Refuse until that matrix is made hybrid-consistent.
+    """
+    uses_si = config.semi_implicit or str(config.time_integrator).lower() in (
+        "leapfrog", "leapfrog_si")  # leapfrog always builds the SI matrices
+    if uses_si and isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        raise NotImplementedError(
+            "spectral semi-implicit stepping (semi_implicit=True or a leapfrog "
+            "integrator) on hybrid sigma-pressure levels is "
+            "refused: the semi-implicit temperature-coupling matrix assumes "
+            "sigma levels (~8.7% off the hybrid tendency on CAM6 L32).  Use "
+            "time_integrator='ssp_rk54' (semi_implicit=False) or sigma levels."
+        )
+
+
 def check_advective_cfl(n_max: int, dt: float, config: SpectralPEConfig) -> None:
     """Refuse a spectral configuration whose explicit advection is unstable.
 
@@ -1731,6 +1770,7 @@ class SpectralPrimitiveEquationModel:
             raise ValueError(
                 f"si_substeps must be >= 1, got {self.config.si_substeps!r}",
             )
+        refuse_semi_implicit_hybrid(self.config, self.sigma_coord)
 
     def _ensure_si_data(self, dt: float):
         """Lazily precompute semi-implicit matrices and refresh when dt changes."""
@@ -1963,10 +2003,19 @@ class SpectralPrimitiveEquationModel:
         inputs lets XLA capture them as runtime tensors without
         recompilation.
         """
+        result, sfc_rate = self._advance_dynamics(
+            state, dt, tendency_fn, si_data, sfc=sfc)
+        result = self._post_step(result, target_mass)
+        if sfc:
+            return result, sfc_rate
+        return result
+
+    def _advance_dynamics(self, state, dt, tendency_fn, si_data=None,
+                          sfc=False):
+        """The integrator alone (explicit RK or semi-implicit RK3 substeps):
+        the first half of :meth:`_do_step`."""
         if si_data is None:
             si_data = self._si_data
-        if sponge_factor is None:
-            sponge_factor = self._sponge_factor
 
         # ``sfc`` (#2277): ``tendency_fn`` is the pair closure of
         # ``_make_sfc_tendency_fn``; returns ``(state, surface precip rate)``.
@@ -2006,7 +2055,18 @@ class SpectralPrimitiveEquationModel:
             result = dispatch_integrator(
                 state, tendency_fn, dt, self.config.time_integrator,
             )
+        return result, sfc_rate
 
+    def _post_step(self, result, target_mass=None):
+        """Sponge, spectral filter, 2/3 state truncation, implicit
+        hyperdiffusion, tracer filter + positivity, anchored mass fixer: the
+        second half of :meth:`_do_step`, in that order."""
+        return self._post_step_tracers_and_mass(
+            self._post_step_dynamics(result), target_mass)
+
+    def _post_step_dynamics(self, result):
+        """Sponge, spectral filter, 2/3 state truncation, implicit
+        hyperdiffusion: the dissipative operators on the spectral state."""
         # Apply implicit sponge filter (unconditionally stable)
         if self._sponge_factor is not None:
             result = apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
@@ -2033,6 +2093,10 @@ class SpectralPrimitiveEquationModel:
         # Apply combined spectral-filter + implicit-hyperdiff to tracers
         # via one SH round-trip per tracer (no-op when neither knob is
         # active or ``state.tracers is None``).
+        return result
+
+    def _post_step_tracers_and_mass(self, result, target_mass=None):
+        """Tracer filter + positivity, then the anchored mass fixer."""
         result = self._apply_tracer_filter(result)
 
         # Iter-3: anchored-mass fixer.  ``target_mass`` is threaded in as
@@ -2046,9 +2110,6 @@ class SpectralPrimitiveEquationModel:
                 and self.config.anchor_mass_to_initial
                 and target_mass is not None):
             result = self._apply_mass_fixer(result, target_mass)
-
-        if sfc:
-            return result, sfc_rate
         return result
 
     def _apply_state_truncation(self, state):
@@ -2224,6 +2285,90 @@ class SpectralPrimitiveEquationModel:
         if _emits:
             return r[0], r[-1]
         return (r[0] if type(r) is tuple else r), None
+
+    def prepare_column_split(self, state, dt) -> None:
+        """Eager set-up of :meth:`column_split_impl` (the spectral column
+        lane, composable physics P4): the D5 refusal, the first-step mass
+        anchor and the dt-dependent filters, which the traced body reads off
+        ``self`` -- so a caller jitting the body keys its cache on ``dt``."""
+        integrator = self.config.time_integrator.lower()
+        if integrator in ("leapfrog", "leapfrog_si") or self.config.semi_implicit:
+            raise ValueError(
+                "Spectral PE column split: refused on time_integrator="
+                f"{self.config.time_integrator!r} / semi_implicit="
+                f"{self.config.semi_implicit}; the spectral column lane runs "
+                "the explicit self-starting ssp_rk54 only (D5)")
+        if self._use_cpu_for_spectral:
+            raise NotImplementedError(
+                "Spectral PE column split is not wired for the Metal "
+                "CPU-offload placement")
+        self._maybe_snapshot_target_mass(state)
+        self._ensure_si_data(dt)
+        self._ensure_sponge_factor(dt)
+        self._ensure_hyperdiff_filter(dt)
+        self._ensure_tracer_filter(dt)
+
+    def column_split_impl(self, state, dt, physics_fn, forcing_data,
+                          phys_state, target_mass=None):
+        """The column lane's operator-split step, un-jitted (the column
+        adapter owns the jit, after :meth:`prepare_column_split`): a
+        dynamics-only step, the sponge / filter / truncation /
+        hyperdiffusion chain, the energy fixer, ONE evaluation of
+        ``physics_fn(grid HydrostaticState, grid, sigma_coord, phys_state,
+        forcing) -> (HydrostaticTendencies, phys_state_out)`` (``None``:
+        dynamics only) on the post-dynamics grid view, the tendencies applied as grid increments
+        (:func:`apply_grid_physics_increments`), then the tracer filter /
+        positivity and the anchored dry-mass fixer -- the lat-lon C-grid
+        step's order.  Returns ``(state, phys_state_out, tend, diag)``."""
+        res, _ = self._advance_dynamics(state, dt, self._make_tendency_fn(None))
+        # the dissipative chain (sponge / filter / truncation / hyperdiffusion)
+        # is DYNAMICS: inside the energy fixer's window and before the
+        # physics, as the lat-lon C-grid step's diffusion is
+        res = self._post_step_dynamics(res)
+        if self.config.energy_fixer:
+            res = self._apply_energy_fixer(state, res)
+        if physics_fn is None:
+            # dynamics only: no physics call, no increments (the configured
+            # energy fixer above still runs)
+            tend, pout = None, phys_state
+            zero = jnp.zeros((), dtype=jnp.float64)
+            diag = {"dry_mass_trunc_rel_max": zero,
+                    "dry_mass_trunc_rel_mean": zero}
+        else:
+            hs = grid_view_state(res, self.grid, self.sigma_coord)
+            pr = physics_fn(hs, self.grid, self.sigma_coord, phys_state,
+                            forcing_data)
+            tend, pout = (pr[0], pr[1]) if type(pr) is tuple else (pr, phys_state)
+            res, diag = apply_grid_physics_increments(
+                res, tend, dt, self.grid, self.sigma_coord,
+                dealias_mask=self._dealias_state)
+        # the lat-lon lane's safety rails after its physics increment:
+        # tracer filter + positivity, then the anchored dry-mass fixer
+        res = self._post_step_tracers_and_mass(res, target_mass)
+        T_g = sh_synthesis_3d(self.grid, res.T_hat.data)
+        diag = dict(diag, min_T=jnp.min(T_g),
+                    T_floor_hits=jnp.sum(T_g < self.config.T_min))
+        return res, pout, tend, diag
+
+    def _apply_energy_fixer(self, pre, post):
+        """CAM ``check_energy_fix`` on the spectral state (F15): the global
+        total energy (:func:`~legoesm.core.conservation.dycore_column_energy`
+        on the synthesised grid view, KE from the geographic winds) the
+        dynamics window *pre* -> *post* lost comes back as ONE uniform
+        heating [K], added to the ``n = 0`` mode of ``T_hat`` (a constant in
+        physical space is ``dT * sqrt(4 pi)`` on that coefficient, the lnps
+        anchor's normalisation: ``P_0^0 = 1/sqrt(4 pi)``).  The integrals are
+        :func:`~legoesm.core.conservation.gridded_energy_fixer_dT` over the
+        quadrature areas; single process (D6)."""
+        def _fields(st):
+            f = spectral_pe_to_grid(st, self.grid, self.sigma_coord)
+            return f["T"], f["u"], f["v"], f["p_s"], f["phis"]
+        dT = gridded_energy_fixer_dT(_fields(pre), _fields(post), self.grid,
+                                     self.sigma_coord, area=self.grid.grid_area)
+        sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=dT.dtype))
+        T_hat = post.T_hat.data.at[0].add(
+            (dT * sqrt_4pi).astype(post.T_hat.data.dtype))
+        return post._replace(T_hat=post.T_hat.replace(data=T_hat))
 
     def _leapfrog_step(self, state, dt, physics_fn=None, forcing_data=None,
                        phys_state=None):
@@ -2920,3 +3065,131 @@ def spectral_pe_to_grid(
         'lnps': lnps, 'p_s': jnp.exp(lnps),
         'phis': phis,
     }
+
+
+# =============================================================================
+# Composable physics P4: the grid view and the grid increments of the column
+# lane's operator split (the lat-lon C-grid step's pattern on the Gaussian grid)
+# =============================================================================
+
+def grid_view_state(state: SpectralHydrostaticState, grid: GaussianGrid,
+                    sigma_coord):
+    """The grid-shaped :class:`~legoesm.core.state.HydrostaticState` a column
+    physics reads: ``u, v, T, p_s, phis`` synthesised ``(n_lat, n_lon[, nlev])``
+    (:func:`spectral_pe_to_grid`), the grid-space tracers attached as they
+    are (``p_s`` TOTAL, tracers mass fractions of total air: the column
+    mesh exchange convention)."""
+    from legoesm.core.state import HydrostaticState
+    f = spectral_pe_to_grid(state, grid, sigma_coord)
+
+    def fld(a, nm, un):
+        return Field(data=a, name=nm, units=un)
+    tracers = None
+    if state.tracers:
+        tracers = {nm: (t if hasattr(t, "data") else Field(data=t, name=nm))
+                   for nm, t in state.tracers.items()}
+    return HydrostaticState(
+        u=fld(f["u"], "u", "m/s"), v=fld(f["v"], "v", "m/s"),
+        T=fld(f["T"], "T", "K"), p_s=fld(f["p_s"], "p_s", "Pa"),
+        phis=fld(f["phis"], "phis", "m^2/s^2"), tracers=tracers)
+
+
+@jax.custom_jvp
+def _select_keep_tangent(mask, a, b):
+    """``where(mask, a, b)`` whose tangent is ``a``'s everywhere: the mask
+    only pins bitwise-exact values where ``a`` equals ``b`` mathematically
+    (an exactly-zero water tendency); the derivative stays ``a``'s."""
+    return jnp.where(mask, a, b)
+
+
+@_select_keep_tangent.defjvp
+def _select_keep_tangent_jvp(primals, tangents):
+    mask, a, b = primals
+    _, a_dot, _ = tangents
+    return _select_keep_tangent(mask, a, b), a_dot
+
+
+def apply_grid_physics_increments(state: SpectralHydrostaticState, tend, dt,
+                                  grid: GaussianGrid, sigma_coord, *,
+                                  dealias_mask=None):
+    """Apply a grid-space physics tendency (``HydrostaticTendencies`` on
+    ``(n_lat, n_lon[, nlev])``) to the spectral state as Euler increments
+    (design row P4 i):
+
+    * ``T_hat += M SH(dt dT/dt)``;
+    * ``vor_hat, div_hat += M vordiv_from_uv_3d(dt du/dt, dt dv/dt)`` (the
+      Bourke operators of :func:`~legoesm.grids.gaussian.vordiv_from_uv_3d`,
+      which the dycore's own IC path and the legacy spectral physics use);
+    * tracers and ``p_s`` through :func:`apply_physics_water_mass` in grid
+      space (every tracer's column mass and the column dry mass exact), then
+      ``lnps_hat += M SH(ln p_s_new - ln p_s_old)`` with ``M`` the dycore's
+      de-aliasing mask (*dealias_mask*; the state truncation that follows
+      is then the identity on the increment), and the tracers re-weighted
+      onto the layer masses of the APPLIED surface pressure ``p_s_eff =
+      exp(SH^-1 lnps_hat)`` (:func:`shift_ps_keep_tracer_mass`) so every
+      tracer's column mass is the one the physics left, in every column
+      the applied increment reaches (codex 2026-10-14 / 2026-10-27: without
+      the re-weight the truncation moved water and passenger tracers).  The truncation's
+      residual lands in the per-column DRY mass, which the global anchor
+      restores as it does the dynamics' own drift.
+
+    ``dp_s_dt`` / ``dphis_dt`` are not read: ``p_s`` follows the water
+    (``dp_s_dt = 0``, the column mesh contract) and ``phis`` is static.
+
+    Returns ``(state, diag)``; ``diag['dry_mass_trunc_rel_max' / '_mean']``
+    is that per-column dry-mass residual, ``|p_s_eff - p_s_new| / p_s_new``,
+    max and area-mean, budgeted by the lane's gate.
+    """
+    dt = jnp.asarray(dt, dtype=jnp.float64)
+    dT_hat = sh_analysis_3d(grid, dt * tend.dT_dt.data)
+    dvor, ddiv = vordiv_from_uv_3d(grid, dt * tend.du_dt.data, dt * tend.dv_dt.data)
+    if dealias_mask is not None:
+        # the increments stay in the de-aliased band the state lives in, so
+        # the next step's dynamics never acts on coefficients the native
+        # lane would have truncated (GLM 2026-10-14); the n = 0 mode, hence
+        # every global integral, is retained
+        m3 = dealias_mask[:, None]
+        dT_hat, dvor, ddiv = dT_hat * m3, dvor * m3, ddiv * m3
+    T_hat = state.T_hat.data + dT_hat
+    vor_hat = state.vor_hat.data + dvor
+    div_hat = state.div_hat.data + ddiv
+    lnps_hat = state.lnps_hat.data
+    tracers = state.tracers
+    zero = jnp.zeros((), dtype=jnp.float64)
+    diag = {"dry_mass_trunc_rel_max": zero, "dry_mass_trunc_rel_mean": zero}
+    if tracers and tend.tracer_tendencies:
+        p_s_old = jnp.exp(sh_synthesis(grid, lnps_hat))
+        tracers, p_s_new = apply_physics_water_mass(
+            tracers, tend.tracer_tendencies, p_s_old, sigma_coord, dt)
+        # columns whose water the physics moved: inside one jit, XLA may
+        # evaluate p_s_old in two fusions with different rounding, so a
+        # zero water tendency is masked out explicitly (bitwise identity)
+        # rather than relied on as log(p_s / p_s) == 0 (measured 4e-17);
+        # the derivative is the unmasked one (codex 2026-10-27 r2)
+        moved = p_s_new != p_s_old
+        lr = jnp.log(p_s_new / p_s_old)
+        inc = sh_analysis(grid, _select_keep_tangent(moved, lr, jnp.zeros_like(lr)))
+        if dealias_mask is not None:
+            inc = inc * dealias_mask
+        lnps_hat = lnps_hat + inc
+        p_s_eff = jnp.exp(sh_synthesis(grid, lnps_hat))
+        # the truncated increment moves p_s beyond the columns whose water
+        # moved: every column with a non-zero applied ln p_s change is
+        # re-weighted (an exactly-zero increment leaves the rest bitwise)
+        reweight = moved | (sh_synthesis(grid, inc) != 0.0)
+        rel = jnp.abs(p_s_eff - p_s_new) / p_s_new
+        w = grid.grid_area.astype(jnp.float64)
+        diag = {"dry_mass_trunc_rel_max": jnp.max(rel),
+                "dry_mass_trunc_rel_mean": jnp.sum(rel * w) / jnp.sum(w)}
+        _, shifted = shift_ps_keep_tracer_mass(
+            p_s_new, tracers, sigma_coord, p_s_eff - p_s_new)
+        tracers = {nm: tr.replace(data=_select_keep_tangent(
+                       reweight[..., None], shifted[nm].data, tr.data))
+                   for nm, tr in tracers.items()}
+    out = state._replace(
+        vor_hat=state.vor_hat.replace(data=vor_hat),
+        div_hat=state.div_hat.replace(data=div_hat),
+        T_hat=state.T_hat.replace(data=T_hat),
+        lnps_hat=state.lnps_hat.replace(data=lnps_hat),
+        tracers=tracers)
+    return out, diag

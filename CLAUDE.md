@@ -296,8 +296,21 @@ rule (target: empty), not a disclosure that discharges it. FAILURE 2026-10-16:
 radiation stage 1 shipped a band-list check tolerance and an fp32 tiny-path
 guard behaviour, both labelled "formatting only", neither asked.
 
+**2026-11-03 — WHO ANSWERS: DETAIL CHOICES GO TO A VOTE, NOT THE USER.** User:
+*"For such detailed question do not ask me but check with [GLM] and codex and
+use the majority of votes. Just ask me big picture / important questions such
+as on design or main directions."* Every side decision above is still never
+made silently, but a DETAIL choice (tolerance, guard, edge case, test value,
+cache key, refusal scope, error-vs-fallback) is put to GLM
+(`mcp__zai__ask_glm`) and codex, batched in one prompt each, plus the author's
+own vote; majority of the three decides. Record each choice with its three
+votes in the commit/PR body. The USER is asked only about design, main
+direction, scope, and anything they named as their call. Precedence: this
+replaces "ask the user" for detail choices everywhere in this section and in
+the STOP-AND-ASK list; for design/direction the user rule stands unchanged.
+
 MECHANICAL CHECK, end of every task: print list of choices made, each one line,
-marked ASKED or UNASKED. Empty UNASKED list = target. Anything on UNASKED list
+marked ASKED (user), VOTED (GLM/codex/author majority, votes shown) or UNASKED. Empty UNASKED list = target. Anything on UNASKED list
 offered for revert in same message. Worked example, five from 2026-08-21 that
 prompted this rule: routing each case's droplet number into single-column arm;
 allocating zero graupel field in every column running microphysics; which
