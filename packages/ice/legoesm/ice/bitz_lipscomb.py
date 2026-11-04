@@ -13,6 +13,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from legoesm.core.smooth import smooth_max_c1, smooth_min_c1
 from legoesm.ice.constants_config import IceConstantsConfig
 from legoesm.ice.snow import snow_ice_flooding
 from legoesm.timestepping.tridiagonal import thomas_solve
@@ -110,6 +111,12 @@ _OPTION2_UPPER_TRANSITION = 4.5
 _OPTION2_LAYER_SHAPE = (1.0 / 3.0, 1.0, 5.0 / 3.0)
 _NEW_ICE_THICKNESS = 0.05
 _MAXIMUM_ICE_CONCENTRATION = 0.99999
+# --- RULE 5 smoothing (votes D4a, D5a revised by V1a, 2026-11-04) ---
+# Total width [K] of the C1 band of NEMO's glo2eqv bounds
+# MAX(-100, MIN(T, Tmelt)) (icevar.F90:393-395): exact outside +-0.005 K of
+# each bound, never beyond it; 0.0 = NEMO's hard MIN/MAX (oracle tests).
+_T_CLAMP_WIDTH_K = 0.01
+_T_ICE_FLOOR_C = -100.0
 
 
 # Compatibility constants for the public functions exposed by the parked
@@ -204,13 +211,23 @@ def ice_enthalpy_from_temperature(T_K, S, constants: IceConstantsConfig, *,
     return constants.rho_ice * ((sensible + latent) - ocean)
 
 
+def _glo2eqv_bounds(T_c, T_m, width):
+    """NEMO MAX(-100, MIN(T_c, T_m)) [degC]; C1 smooth over ``width`` [K], hard at 0."""
+
+    return smooth_max_c1(_T_ICE_FLOOR_C, smooth_min_c1(T_c, T_m, width), width)
+
+
 def ice_temperature_from_enthalpy(e, S, constants: IceConstantsConfig | None = None,
-                                  *, _nemo_order: bool = True):
+                                  *, _nemo_order: bool = True,
+                                  width: float = _T_CLAMP_WIDTH_K):
     """Invert enthalpy [K] in the selected NEMO or legacy convention.
 
     Supplying ``constants`` selects NEMO's positive energy-of-melting
-    convention (`icethd.F90:221-247`).  Omitting it preserves the public API
-    of the promoted prototype, whose enthalpy is negative for cold ice.
+    convention (`icethd.F90:221-247`) with the glo2eqv bounds
+    ``-100 C <= T - T0 <= Tmelt`` (`icevar.F90:393-395`), C1-smooth over
+    ``width`` [K] (0.0 = NEMO's hard bounds).  Omitting
+    ``constants`` preserves the public API of the promoted prototype, whose
+    enthalpy is negative for cold ice.
     """
 
     if constants is None:
@@ -237,7 +254,8 @@ def ice_temperature_from_enthalpy(e, S, constants: IceConstantsConfig | None = N
             b * b - 4.0 * constants.c_ice * constants.latent_fusion * T_m,
             0.0,
         )
-        return constants.T0 - (b + jnp.sqrt(disc)) / (2.0 * constants.c_ice)
+        T_c = -(b + jnp.sqrt(disc)) / (2.0 * constants.c_ice)
+        return _glo2eqv_bounds(T_c, T_m, width) + constants.T0
     # Written order of `icethd.F90:233-243`.  NEMO multiplies by its
     # precomputed reciprocals and applies `* 0.5 * r1_rcpi`; the algebraically
     # equivalent combined division loses observable ULPs in the oracle gate.
@@ -252,7 +270,8 @@ def ice_temperature_from_enthalpy(e, S, constants: IceConstantsConfig | None = N
         b * b - 4.0 * constants.c_ice * constants.latent_fusion * T_m,
         0.0,
     )
-    return constants.T0 - (b + jnp.sqrt(disc)) * 0.5 * inverse_c_ice
+    T_c = -(b + jnp.sqrt(disc)) * 0.5 * inverse_c_ice
+    return _glo2eqv_bounds(T_c, T_m, width) + constants.T0
 
 
 def ice_thermal_conductivity(T_K, S):
@@ -397,6 +416,7 @@ def _si3_zdf_bl99_step(
     _nemo_branch_ranges: bool = True,
     _nemo_snow_temperature_bounds: bool = True,
     _nemo_eos_order: bool = True,
+    t_clamp_width: float = _T_CLAMP_WIDTH_K,
 ) -> SI3ZDFResult:
     """Iterative 3+3-layer BL99/P07 solve for the resolved ORCA1 arm.
 
@@ -413,7 +433,8 @@ def _si3_zdf_bl99_step(
     T_surface_input = jnp.asarray(T_surface, dtype=dtype)
     S_layers = jnp.asarray(S_layers, dtype=dtype)
     T_i_old = ice_temperature_from_enthalpy(
-        e_ice, S_layers, constants, _nemo_order=_nemo_eos_order
+        e_ice, S_layers, constants, _nemo_order=_nemo_eos_order,
+        width=t_clamp_width,
     )
     e_snow = jnp.asarray(e_snow, dtype=dtype)
     T_s_old = snow_temperature_from_enthalpy(
@@ -1041,6 +1062,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _nemo_eos_order: bool = True,
                            _nemo_snow_sublimation_order: bool = True,
                            _nemo_snow_remap: bool = True,
+                           t_clamp_width: float = _T_CLAMP_WIDTH_K,
                            ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
@@ -1050,6 +1072,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _nemo_branch_ranges=_zdf_branch_ranges,
         _nemo_snow_temperature_bounds=_nemo_snow_temperature_bounds,
         _nemo_eos_order=_nemo_eos_order,
+        t_clamp_width=t_clamp_width,
     )
     post_zdf = state._replace(T_surface=zdf.T_surface, e_ice=zdf.e_ice,
                               e_snow=zdf.e_snow)
