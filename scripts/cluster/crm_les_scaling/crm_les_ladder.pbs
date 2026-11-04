@@ -1,0 +1,122 @@
+#!/bin/bash -l
+#PBS -N crm_les_ladder
+#PBS -A UCLB0017
+#PBS -q main
+#PBS -l select=1:ncpus=128:mpiprocs=128:mem=230GB
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#
+# CRM (plane compressible step_halo) + spectral LES (y-slab FFT) MPI scaling
+# ladder on Derecho CPU nodes. One rank per core, ONE core per rank (pinned with
+# an explicit core list, spread evenly over the node), single-threaded XLA.
+# Each run appends one JSON line (timings + resolved config + provenance) to
+# $OUT/{crm,les}.jsonl; the bound probes (STREAM-type bandwidth, mpi4jax
+# sendrecv/allreduce latency + bandwidth) run first on the SAME nodes.
+#
+# Every run setting is an explicit variable recorded in the job log:
+#   RANKS       rank counts to run in this job (each <= nodes*128)
+#   MODELS      "crm les"          PRECISIONS "float32 float64"
+#   MODES       "strong weak"      BOUNDS     1 = run the bound probes first
+#   Column physics is timed (separately) on CRM WEAK runs only: its cost per
+#   rank depends only on the tile, and strong-mode 1-rank tiles are 512^2.
+#   CRM_EXTRA   extra run_rcemip_plane flags for the CRM on top of the driver's
+#               defaults plus --semi-implicit (REQUIRED: the driver's default
+#               substepped horizontal acoustics refuses to run without it, and
+#               every production deck passes it). NOTE: the driver defaults
+#               (separate centred momentum advection, vertical SGS) raise on
+#               >1 rank today.
+#
+# 1 node : qsub -v RANKS="1 2 4 8 16 32 64 128" crm_les_ladder.pbs
+# 2 nodes: qsub -l select=2:ncpus=128:mpiprocs=128:mem=230GB -v RANKS=256 crm_les_ladder.pbs
+# 4 nodes: qsub -l select=4:ncpus=128:mpiprocs=128:mem=230GB -v RANKS=512 crm_les_ladder.pbs
+set -uo pipefail
+
+: "${REPO:=${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/../../.." && pwd)}}"
+: "${RANKS:=1 2 4 8 16 32 64 128}"
+: "${MODELS:=crm les}"
+: "${PRECISIONS:=float32 float64}"
+: "${MODES:=strong weak}"
+: "${BOUNDS:=1}"
+: "${CRM_EXTRA:=}"
+: "${STRONG_NX:=512}" "${WEAK_NX:=64}" "${CRM_NLEV:=64}" "${LES_NZ:=128}"
+: "${WARMUP:=3}" "${TIME_STEPS:=5}" "${WINDOWS:=3}"
+: "${OUT:=/glade/derecho/scratch/${USER}/crm_les_scaling/${PBS_JOBID:-local}}"
+
+export LEGOESM_REPO="$REPO"
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-/glade/work/${USER}/conda-envs/legoesm-gpu}"
+export JAX_PLATFORMS=cpu
+# shellcheck source=../scaling_derecho/_env.sh
+source "$REPO/scripts/cluster/scaling_derecho/_env.sh"
+module load gcc cray-mpich >/dev/null 2>&1 || true
+export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false"
+mkdir -p "$OUT"
+exec > >(tee -a "$OUT/job.log") 2>&1
+cd "$REPO" || exit 2
+
+NODES=$(sort -u "${PBS_NODEFILE:-/dev/null}" 2>/dev/null | wc -l)
+[ "$NODES" -ge 1 ] || NODES=1
+CORES=128
+echo "[ladder] sha=$(git rev-parse HEAD) dirty=$(git status --porcelain --untracked-files=no | wc -l) nodes=$NODES"
+echo "[ladder] RANKS=[$RANKS] MODELS=[$MODELS] PRECISIONS=[$PRECISIONS] MODES=[$MODES]"
+echo "[ladder] STRONG_NX=$STRONG_NX WEAK_NX=$WEAK_NX CRM_NLEV=$CRM_NLEV LES_NZ=$LES_NZ"
+echo "[ladder] WARMUP=$WARMUP TIME_STEPS=$TIME_STEPS WINDOWS=$WINDOWS CRM_EXTRA=[$CRM_EXTRA]"
+echo "[ladder] XLA_FLAGS=$XLA_FLAGS OUT=$OUT"
+
+# run N PPN CMD... : N ranks, PPN per node, each pinned to one core spread
+# evenly over the node (stride CORES/PPN).
+run() {
+    local n=$1 ppn=$2; shift 2
+    local stride=$(( CORES / ppn )) list="" i
+    for (( i = 0; i < ppn; i++ )); do list="${list:+$list:}$(( i * stride ))"; done
+    echo "--- n=$n ppn=$ppn cores=[$list] :: $*"
+    mpiexec -n "$n" --ppn "$ppn" --cpu-bind "list:$list" "$PY" "$@" < /dev/null
+}
+
+rc_all=0
+if [ "$BOUNDS" = 1 ]; then
+    for PREC in $PRECISIONS; do
+        run 1 1 scripts/bench/roofline_probe.py --bw-dtype "$PREC" \
+            --skip-collectives --skip-allreduce --tag "bw1_$PREC" \
+            --output-dir "$OUT/bounds" || rc_all=1
+        run "$CORES" "$CORES" scripts/bench/roofline_probe.py --bw-dtype "$PREC" \
+            --tag "node_$PREC" --output-dir "$OUT/bounds" || rc_all=1
+        if [ "$NODES" -ge 2 ]; then
+            run 2 1 scripts/bench/roofline_probe.py --bw-dtype "$PREC" \
+                --skip-bandwidth --tag "xnode_$PREC" \
+                --output-dir "$OUT/bounds" || rc_all=1
+        fi
+    done
+fi
+
+for N in $RANKS; do
+    PPN=$(( N < CORES ? N : CORES ))
+    if [ $(( (N + PPN - 1) / PPN )) -gt "$NODES" ]; then
+        echo "--- SKIP n=$N: needs more than $NODES node(s)"; rc_all=1; continue
+    fi
+    for MODEL in $MODELS; do
+     for PREC in $PRECISIONS; do
+      for MODE in $MODES; do
+        if [ "$MODE" = strong ]; then NXY=$STRONG_NX; PHYS=""; else NXY=$WEAK_NX; PHYS=--time-physics; fi
+        COMMON=(--mode "$MODE" --precision "$PREC" --nx "$NXY" --ny "$NXY"
+                --warmup-steps "$WARMUP" --time-steps "$TIME_STEPS"
+                --windows "$WINDOWS")
+        case "$MODEL" in
+          crm)
+            # shellcheck disable=SC2086
+            run "$N" "$PPN" scripts/bench/bench_plane_crm_dd_scaling.py \
+                "${COMMON[@]}" --nlev "$CRM_NLEV" --semi-implicit $PHYS $CRM_EXTRA \
+                --output "$OUT/crm.jsonl" || { echo "FAILED crm $MODE $PREC n=$N"; rc_all=1; } ;;
+          les)
+            run "$N" "$PPN" scripts/bench/bench_spectral_les_dd_scaling.py \
+                "${COMMON[@]}" --nz "$LES_NZ" \
+                --output "$OUT/les.jsonl" || { echo "FAILED les $MODE $PREC n=$N"; rc_all=1; } ;;
+          *) echo "unknown MODEL=$MODEL"; exit 2 ;;
+        esac
+      done
+     done
+    done
+done
+echo "=== DONE rc=$rc_all out=$OUT ==="
+exit $rc_all

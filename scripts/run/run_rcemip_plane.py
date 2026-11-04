@@ -1495,6 +1495,112 @@ def cfl_guard(dt, dx, dz_min, n_acoustic_substeps=6, c_s=350.0, label="run"):
             stacklevel=3)
 
 
+def build_rcemip_height_coord(args, p_sfc_rcemip, dtype):
+    """Height coordinate the driver builds from ``args``: ``(hc, snd, q_sfc)``.
+
+    ``snd`` is the tabulated sounding (``None`` unless ``--sounding``)."""
+    try:
+        q_sfc_rce = wing2018_q_sfc(args.T_sfc)
+    except ValueError:
+        # Off-protocol SST (sensitivity sweeps, land RCE with a custom T): keep
+        # the RCE300 q0 rather than inventing an unpublished one, but SAY that
+        # the near-surface RH is then off-protocol.
+        q_sfc_rce = WING_Q_SFC_DEFAULT
+        print(f"  WARN: SST={args.T_sfc} K is not an RCEMIP case (295/300/305);"
+              f" using the 300 K q0={WING_Q_SFC_DEFAULT} kg/kg, so the initial"
+              f" near-surface RH is NOT the protocol's ~80 %.")
+    # --sounding: initialise from a TABULATED SAM sounding instead of the
+    # analytic Wing form.  gSAM's own RCEMIP1 deck ships one sounding per SST
+    # (CASES/RCEMIP1/snd_rcemip_{295,300,305}s6.11.2, `snd` == the 300 K one),
+    # and that file is NOT the Wing analytic profile: it has a ~7.47 K/km
+    # tropospheric lapse and a stratosphere that WARMS with height, where the
+    # analytic form uses 6.70 K/km and an isothermal cap.  No analytic-constant
+    # choice can represent the second difference, so the faithful RCEMIP1 IC has
+    # to read the table — exactly as BOMEX/RICO/DYCOMS/GATE already do.
+    #
+    # Reuses the SHARED reader + setup (no second parser, no second IC builder):
+    #   read_sam_snd -> extend_sounding_to_top -> build_sam_case_height_coord
+    #                                          -> build_sam_case_initial_state
+    # so the θ (potential temperature) and q [g/kg -> kg/kg] unit conventions
+    # are handled in exactly one place for every SAM-deck case.
+    snd = None
+
+    def theta_ref_fn(z):
+        return _rcemip_theta_profile(z, T_sfc=args.T_sfc, q_sfc=q_sfc_rce)
+
+    # --sam-grd is checked FIRST so it cannot be silently outranked by another
+    # coordinate flag; build_sam_grd_height_coord refuses the --sounding pair
+    # rather than picking a winner.
+    if args.sam_grd is not None:
+        hc = build_sam_grd_height_coord(args, p_sfc_rcemip, theta_ref_fn, dtype)
+    elif args.sounding is not None:
+        snd, hc = build_sounding_height_coord(args, p_sfc_rcemip, dtype)
+    elif args.stretched_vertical:
+        hc = create_stretched_height_coordinate(
+            args.nlev, H=args.H, dz_sfc=args.dz_sfc, p_sfc=p_sfc_rcemip,
+            theta_ref_fn=theta_ref_fn,
+        )
+    else:
+        hc = create_height_coordinate(
+            args.nlev, H=args.H, p_sfc=p_sfc_rcemip,
+            theta_ref_fn=theta_ref_fn,
+        )
+    return hc, snd, q_sfc_rce
+
+
+# RCEMIP1 surface pressure [Pa] (Wing et al. 2018: 1014.8 hPa).
+P_SFC_RCEMIP = 101480.0
+
+
+def microphysics_n_tracers(microphysics):
+    """Tracer slot count the driver allocates for ``--microphysics``."""
+    if microphysics == "morrison":
+        # slot [9] = prognostic snow number, [10] = prognostic graupel number
+        # ⇒ fully double-moment M2005 (snow + graupel).
+        return 11
+    elif microphysics in ("seifert_beheng", "p3", "thompson", "fast_sbm"):
+        # fast_sbm (FSBM-2): q_v,q_c,q_r + N_c,N_r live, ice slots zero ⇒ 9.
+        return 9
+    else:
+        return 3
+
+
+def build_dycore_config(args):
+    """The driver's ``CompressibleEulerConfig`` from resolved ``args``
+    (``args.hyperdiff`` must already be resolved, see ``main``)."""
+    return CompressibleEulerConfig(
+        sponge_coeff=args.sponge_coeff,
+        sponge_width=args.sponge_width,
+        sponge_w_only=True,               # SAM damping.f90: damp w only
+        sponge_profile_shape="sam_rational",  # SAM zzz/(1+zzz) taper
+
+        hyperdiff_coeff=args.hyperdiff,
+        hyperdiff_rho_coeff=args.hyperdiff,
+        hyperdiff_w_coeff=args.hyperdiff,
+        semi_implicit_acoustic=args.semi_implicit,
+        n_acoustic_substeps=args.n_acoustic_substeps,
+        acoustic_off_centering=args.off_centering,
+        implicit_buoyancy=args.implicit_buoyancy,
+        si_w_vertical_filter_nu=args.si_w_filter_nu,
+        substep_horizontal_acoustic=args.substep_horizontal_acoustic,
+        horizontal_advection_scheme=args.advection,
+        horizontal_momentum_advection_scheme=args.momentum_advection,
+        vertical_tracer_advection=args.vertical_tracer_advection,
+        acoustic_theta_advection=args.acoustic_theta_advection,
+        use_coriolis=(args.coriolis_mode != "none"),
+        fix_mass=True, anchor_mass_to_initial=True,
+        smagorinsky_cs=args.smag_cs, smagorinsky_prandtl=1.0,
+        smagorinsky_wall_damping=args.smag_wall_damping,  # False=SAM CRM; True=LES
+        smagorinsky_delta_max=args.smag_delta_max,  # SAM 1000 m horiz length cap
+        smagorinsky_stability_length=args.smag_stability_length,  # SAM dosmagor
+        # weakly-stable Deardorff smix limit (default off = pure Cs form)
+        vertical_theta_diffusion=args.vertical_theta_diffusion,
+        sgs_vertical_diffusion=args.sgs_vertical,
+        turbulence_closure=args.turbulence_closure,
+        molecular_viscosity=args.molecular_viscosity,
+    )
+
+
 def parse_args(argv=None):
     """Parse the driver CLI. ``argv=None`` reads ``sys.argv`` (production);
     passing a list is what the CLI round-trip tests use — same convention as
@@ -2020,7 +2126,7 @@ def main():
     # sensible-heat flux has the WRONG SIGN (cools the air toward a
     # ~236 K cold-biased equilibrium instead of warming toward SST).
     # With p_sfc set: exner_sfc=1.003, T_lowest=301 K, flux correct.
-    p_sfc_rcemip = 101480.0
+    p_sfc_rcemip = P_SFC_RCEMIP
     # Reference θ(z) MUST track the RCEMIP sounding, NOT the constant-θ=300
     # default. A constant potential temperature is ISENTROPIC, and an
     # isentropic atmosphere reaches exner=0 (p=T=0) at z=c_p·θ/g ≈ 30.7 km
@@ -2040,52 +2146,7 @@ def main():
     # --T-sfc: with the SST-derived T_v0 (Wing Eq. 3), pairing the 300 K
     # q0 with a 295 K SST rebuilds the supersaturated-IC bug at the other
     # two RCEMIP SSTs.
-    try:
-        q_sfc_rce = wing2018_q_sfc(args.T_sfc)
-    except ValueError:
-        # Off-protocol SST (sensitivity sweeps, land RCE with a custom T): keep
-        # the RCE300 q0 rather than inventing an unpublished one, but SAY that
-        # the near-surface RH is then off-protocol.
-        q_sfc_rce = WING_Q_SFC_DEFAULT
-        print(f"  WARN: SST={args.T_sfc} K is not an RCEMIP case (295/300/305);"
-              f" using the 300 K q0={WING_Q_SFC_DEFAULT} kg/kg, so the initial"
-              f" near-surface RH is NOT the protocol's ~80 %.")
-    # --sounding: initialise from a TABULATED SAM sounding instead of the
-    # analytic Wing form.  gSAM's own RCEMIP1 deck ships one sounding per SST
-    # (CASES/RCEMIP1/snd_rcemip_{295,300,305}s6.11.2, `snd` == the 300 K one),
-    # and that file is NOT the Wing analytic profile: it has a ~7.47 K/km
-    # tropospheric lapse and a stratosphere that WARMS with height, where the
-    # analytic form uses 6.70 K/km and an isothermal cap.  No analytic-constant
-    # choice can represent the second difference, so the faithful RCEMIP1 IC has
-    # to read the table — exactly as BOMEX/RICO/DYCOMS/GATE already do.
-    #
-    # Reuses the SHARED reader + setup (no second parser, no second IC builder):
-    #   read_sam_snd -> extend_sounding_to_top -> build_sam_case_height_coord
-    #                                          -> build_sam_case_initial_state
-    # so the θ (potential temperature) and q [g/kg -> kg/kg] unit conventions
-    # are handled in exactly one place for every SAM-deck case.
-    snd = None
-
-    def theta_ref_fn(z):
-        return _rcemip_theta_profile(z, T_sfc=args.T_sfc, q_sfc=q_sfc_rce)
-
-    # --sam-grd is checked FIRST so it cannot be silently outranked by another
-    # coordinate flag; build_sam_grd_height_coord refuses the --sounding pair
-    # rather than picking a winner.
-    if args.sam_grd is not None:
-        hc = build_sam_grd_height_coord(args, p_sfc_rcemip, theta_ref_fn, dtype)
-    elif args.sounding is not None:
-        snd, hc = build_sounding_height_coord(args, p_sfc_rcemip, dtype)
-    elif args.stretched_vertical:
-        hc = create_stretched_height_coordinate(
-            args.nlev, H=args.H, dz_sfc=args.dz_sfc, p_sfc=p_sfc_rcemip,
-            theta_ref_fn=theta_ref_fn,
-        )
-    else:
-        hc = create_height_coordinate(
-            args.nlev, H=args.H, p_sfc=p_sfc_rcemip,
-            theta_ref_fn=theta_ref_fn,
-        )
+    hc, snd, q_sfc_rce = build_rcemip_height_coord(args, p_sfc_rcemip, dtype)
     tm = make_flat_plane_terrain_metric(grid, hc)
     # This driver DEFINES cfl_guard (run_gate_plane.py calls it as rcp.cfl_guard)
     # but never called it on its own config. On the uniform dz=330 m grid that
@@ -2093,37 +2154,7 @@ def main():
     # difference between a run and a day-1.5 blow-up, so wire it in here too.
     cfl_guard(args.dt, args.dx, float(jnp.min(hc.dz)),
               n_acoustic_substeps=args.n_acoustic_substeps, label="RCEMIP1")
-    cfg = CompressibleEulerConfig(
-        sponge_coeff=args.sponge_coeff,
-        sponge_width=args.sponge_width,
-        sponge_w_only=True,               # SAM damping.f90: damp w only
-        sponge_profile_shape="sam_rational",  # SAM zzz/(1+zzz) taper
-
-        hyperdiff_coeff=args.hyperdiff,
-        hyperdiff_rho_coeff=args.hyperdiff,
-        hyperdiff_w_coeff=args.hyperdiff,
-        semi_implicit_acoustic=args.semi_implicit,
-        n_acoustic_substeps=args.n_acoustic_substeps,
-        acoustic_off_centering=args.off_centering,
-        implicit_buoyancy=args.implicit_buoyancy,
-        si_w_vertical_filter_nu=args.si_w_filter_nu,
-        substep_horizontal_acoustic=args.substep_horizontal_acoustic,
-        horizontal_advection_scheme=args.advection,
-        horizontal_momentum_advection_scheme=args.momentum_advection,
-        vertical_tracer_advection=args.vertical_tracer_advection,
-        acoustic_theta_advection=args.acoustic_theta_advection,
-        use_coriolis=(args.coriolis_mode != "none"),
-        fix_mass=True, anchor_mass_to_initial=True,
-        smagorinsky_cs=args.smag_cs, smagorinsky_prandtl=1.0,
-        smagorinsky_wall_damping=args.smag_wall_damping,  # False=SAM CRM; True=LES
-        smagorinsky_delta_max=args.smag_delta_max,  # SAM 1000 m horiz length cap
-        smagorinsky_stability_length=args.smag_stability_length,  # SAM dosmagor
-        # weakly-stable Deardorff smix limit (default off = pure Cs form)
-        vertical_theta_diffusion=args.vertical_theta_diffusion,
-        sgs_vertical_diffusion=args.sgs_vertical,
-        turbulence_closure=args.turbulence_closure,
-        molecular_viscosity=args.molecular_viscosity,
-    )
+    cfg = build_dycore_config(args)
     # DYCORE-ROBUST (iter-61, ROOT CAUSE): with substep_horizontal_acoustic OFF the
     # HORIZONTAL acoustic mode is integrated at the OUTER dt and a perturbed θ' IC
     # blows up to NaN at finite amplitude. The full Skamarock-Klemp split
@@ -2221,15 +2252,7 @@ def main():
     # The microphysics integration validates the slot count at JIT time
     # and raises ValueError if too few — but we allocate generously
     # here to surface schema errors at parse time, not deep in JIT.
-    if args.microphysics == "morrison":
-        # slot [9] = prognostic snow number, [10] = prognostic graupel number
-        # ⇒ fully double-moment M2005 (snow + graupel).
-        n_tracers = 11
-    elif args.microphysics in ("seifert_beheng", "p3", "thompson", "fast_sbm"):
-        # fast_sbm (FSBM-2): q_v,q_c,q_r + N_c,N_r live, ice slots zero ⇒ 9.
-        n_tracers = 9
-    else:
-        n_tracers = 3
+    n_tracers = microphysics_n_tracers(args.microphysics)
     if snd is not None:
         # Shared SAM-deck IC builder: u/v/q_v interpolated from the sounding,
         # θ' = θ_snd − θ_ref (≈0, θ_ref IS the sounding) + the same bottom-level
