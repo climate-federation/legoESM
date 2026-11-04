@@ -848,14 +848,15 @@ def aimip_active_scheme_keys(physics_config) -> set[str]:
             active = getattr(fam_cfg, part, None)
             if active is None:
                 continue
-            # Descend into a nested ``params`` holder when that is what carries
-            # the spec (CLUBBConfig.params -> CLUBBParams).
-            target = getattr(active, "params", None)
-            if target is None or not hasattr(target, "_fields"):
-                target = active
-            cls = type(target).__name__
+            # The scheme config AND a nested ``params`` holder can both carry
+            # a spec (CLUBBConfig.pdf_variance_scale; CLUBBConfig.params ->
+            # CLUBBParams), so collect both.
+            classes = {type(active).__name__}
+            nested = getattr(active, "params", None)
+            if nested is not None and hasattr(nested, "_fields"):
+                classes.add(type(nested).__name__)
             keys |= {m.scheme_key for m in registry
-                     if m.config_class == cls
+                     if m.config_class in classes
                      and m.scheme_key.startswith(prefixes)}
     return keys
 
@@ -1412,6 +1413,10 @@ def make_aimip_classical_spectral_physics(
     rrtmgp_gpoint_checkpoint: bool = True,
     rrtmgp_gpoint_batch_size: int = 16,
     rrtmgp_column_chunk_size: int = 0,
+    # CAM RRTMG lid layer above the model top / fp32 optics+RTE (the AMIP
+    # production MPAS path runs both on); off = byte-identical.
+    rrtmgp_overhead_layer: bool = False,
+    rrtmgp_compute_fp32: bool = False,
     column_mesh=None,
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
@@ -1593,6 +1598,8 @@ def make_aimip_classical_spectral_physics(
             gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
             gpoint_batch_size=rrtmgp_gpoint_batch_size,
             column_chunk_size=rrtmgp_column_chunk_size,
+            overhead_layer=bool(rrtmgp_overhead_layer),
+            compute_fp32=bool(rrtmgp_compute_fp32),
         )
         rad_cfg = RadiationConfig(
             scheme="rrtmgp",
@@ -1900,7 +1907,10 @@ def make_aimip_classical_spectral_physics(
         resolved_clubb_config,
     )
     non_rad_cfg = PhysicsConfig(
-        radiation=RadiationConfig(scheme="none"),
+        # Radiation is off here, but the run's (spliced) cloud config rides
+        # along: MG2 in-cloud warm rain reads its aist rh ramps.
+        radiation=RadiationConfig(scheme="none",
+                                  cloud_config=rad_cfg.cloud_config),
         convection=conv_cfg,
         turbulence=turb_cfg,
         microphysics=micro_cfg,
