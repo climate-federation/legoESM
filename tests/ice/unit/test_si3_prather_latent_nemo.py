@@ -61,7 +61,8 @@ def _background():
 _IN = (slice(_HALO, -_HALO), slice(_HALO, -_HALO))  # halos are a periodic refresh
 
 
-def _correct(entry, transported, ponds_active):
+def _correct(entry, transported, ponds_active, ramp_width=0.0):
+    """Hard NEMO form (width 0) unless a ramp width is given."""
     return np.asarray(
         apply_si3_prather_source_corrections(
             jnp.asarray(entry),
@@ -74,6 +75,7 @@ def _correct(entry, transported, ponds_active):
             ponds_active=ponds_active,
             entry_intensive_contents=jnp.asarray(entry),
             contents_are_intensive=True,
+            negative_area_ramp_width=ramp_width,
         )
     )
 
@@ -149,6 +151,7 @@ def test_zapneg_area_reset_has_finite_gradient():
             jnp.asarray(entry), x, tracer_names=_TR, nlay_i=3, nlay_s=3,
             cell_area_m2=1.0, halo_width=_HALO, ponds_active=False,
             entry_intensive_contents=jnp.asarray(entry), contents_are_intensive=True,
+            negative_area_ramp_width=0.0,
         )
         return out[_C, _C, i("a_i")]
 
@@ -158,6 +161,77 @@ def test_zapneg_area_reset_has_finite_gradient():
         fd = (float(centre_area(a + h)) - float(centre_area(a - h))) / (2 * h)
         assert np.isfinite(g) and g == slope
         assert abs(fd - slope) < 1.0e-6
+
+
+_RAMP_W = 1.0e-12  # module default (0.01 x epsi10), vote W2
+
+
+def _tiny_area_case(a_small):
+    entry, transported = _negative_area_case()
+    transported[_C, _C, _TR.index("a_i")] = a_small
+    return entry, transported
+
+
+def test_default_ramp_matches_hard_except_tiny_positive_area():
+    """Default C1 ramp: ice-free and negative cells exactly as hard NEMO; a cell
+    with 0 < a_i < width loses at most 4 width / 27 (class-B gap, measured)."""
+
+    import inspect
+
+    default = inspect.signature(apply_si3_prather_source_corrections).parameters[
+        "negative_area_ramp_width"
+    ].default
+    assert default == _RAMP_W
+    i = _TR.index("a_i")
+    entry, transported = _negative_area_case()
+    np.testing.assert_array_equal(
+        _correct(entry, transported, False, default)[_IN],
+        _correct(entry, transported, False, 0.0)[_IN],
+    )
+    a_small = 0.3 * _RAMP_W
+    entry, transported = _tiny_area_case(a_small)
+    hard = _correct(entry, transported, False, 0.0)
+    ramp = _correct(entry, transported, False, default)
+    assert hard[_C, _C, i] == a_small
+    sharpness = 1.0 / _RAMP_W  # positive_part_c1's own operation order
+    t = a_small * sharpness
+    assert ramp[_C, _C, i] == t * t * (2.0 - t) / sharpness
+    assert 0.0 < hard[_C, _C, i] - ramp[_C, _C, i] <= 4.0 * _RAMP_W / 27.0
+    other = np.ones(hard.shape, bool)
+    other[_C, _C, i] = False
+    np.testing.assert_array_equal(ramp[_IN][other[_IN]], hard[_IN][other[_IN]])
+
+
+def test_ramp_path_check_grads():
+    """check_grads (fwd+rev, order 2) through the ramp branch; the ramp is
+    width-generic, so a wide test width keeps finite differences resolvable."""
+
+    from jax.test_util import check_grads
+
+    width = 1.0e-2
+    entry, transported = _tiny_area_case(0.0)
+    i = _TR.index("a_i")
+
+    def centre_area(a):
+        x = jnp.asarray(transported).at[_C, _C, i].set(a)
+        out = apply_si3_prather_source_corrections(
+            jnp.asarray(entry), x, tracer_names=_TR, nlay_i=3, nlay_s=3,
+            cell_area_m2=1.0, halo_width=_HALO, ponds_active=False,
+            entry_intensive_contents=jnp.asarray(entry), contents_are_intensive=True,
+            negative_area_ramp_width=width,
+        )
+        return out[_C, _C, i]
+
+    for a in (0.3 * width, 0.7 * width, 2.0 * width):
+        check_grads(centre_area, (a,), order=2, modes=("fwd", "rev"), eps=1.0e-5)
+    for a in (-width, 0.0, width):  # joins: finite, C1
+        assert np.isfinite(float(jax.grad(centre_area)(a)))
+
+
+def test_negative_ramp_width_refused():
+    entry, transported = _negative_area_case()
+    with pytest.raises(ValueError, match="negative_area_ramp_width"):
+        _correct(entry, transported, False, -1.0)
 
 
 def _kernel_inputs():

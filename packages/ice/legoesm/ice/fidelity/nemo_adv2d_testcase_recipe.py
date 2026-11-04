@@ -10,6 +10,7 @@ from typing import NamedTuple, cast
 import jax.numpy as jnp
 import numpy as np
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+from legoesm.core.smooth import positive_part_c1
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.ice.transport import (
     SI3_PRATHER_MOMENT_NAMES,
@@ -75,6 +76,10 @@ _ICE_ADV2D_INITIAL_LID_DEPTH_M = 0.0  # SHARED/namelist_ice_ref:285-286
 _ICE_ADV2D_SMALL = 1.0e-10  # icevar.F90:611-706 (`epsi10`)
 _ICE_ADV2D_MAXIMUM_FLOOR = 1.0e-20  # icedyn_adv_pra.F90:1519-1534,1561-1571 (`epsi20`)
 _ICE_ADV2D_HBIG_CONCENTRATION = 0.15  # icedyn_adv_pra.F90:992,1000,1007
+# Width of the C1 one-sided ramp that replaces zapneg's final hard
+# WHERE(pa_i < 0) pa_i = 0 (icevar.F90:836): 0.01 x epsi10, the port's
+# concentration-presence threshold (vote W2, me/codex/GLM).  0.0 = hard NEMO.
+_SI3_NEGATIVE_AREA_RAMP_WIDTH = 1.0e-12
 
 
 class ICEAdv2DState(NamedTuple):
@@ -402,6 +407,7 @@ def apply_si3_prather_source_corrections(
     ponds_active: bool,
     entry_intensive_contents: jnp.ndarray | None = None,
     contents_are_intensive: bool = False,
+    negative_area_ramp_width: float = _SI3_NEGATIVE_AREA_RAMP_WIDTH,
 ) -> jnp.ndarray:
     """Apply SI3's active Hbig/Hsnow/zapneg Prather corrections.
 
@@ -413,7 +419,16 @@ def apply_si3_prather_source_corrections(
     ``ln_pnd=.false.``) skips the pond-thickness branch of Hbig_pra
     (``icedyn_adv_pra.F90:1033``); ``ln_pnd_TOPO`` is not ported.  Residual
     ocean flux ledgers are deliberately outside the uncoupled fidelity cards.
+
+    ``negative_area_ramp_width`` [concentration] replaces zapneg's final hard
+    ``WHERE(pa_i < 0) pa_i = 0`` (``icevar.F90:836``) with the C1 one-sided ramp
+    :func:`legoesm.core.smooth.positive_part_c1`: exactly 0 for ``a_i <= 0``
+    (ice-free cells unchanged), exactly ``a_i`` for ``a_i >= width``, and up to
+    ``4 width / 27`` less in between.  It changes only ``a_i`` (no volume, heat
+    or salt).  ``0.0`` selects the hard NEMO form (oracle tests).
     """
+    if negative_area_ramp_width < 0.0:
+        raise ValueError("negative_area_ramp_width must be >= 0 (0 = hard NEMO form)")
 
     # Hbig_pra receives the already-restored intensive pv_i/pv_s/pa_i/... at
     # icedyn_adv_pra.F90:405-408.  Keep the extensive mode for the rung-3.2
@@ -628,13 +643,18 @@ def apply_si3_prather_source_corrections(
             jnp.where(invalid, 0.0, contents[..., index(name)])
         )
     # icevar.F90:835-837 final WHEREs: oa_i and a_ip were zeroed above; a
-    # negative a_i with v_i > 0 survives the :760 reset and is zeroed here
-    # (NEMO-literal hard form, like the rest of zapneg; derivative 0 or 1).
-    contents = contents.at[..., index("a_i")].set(
-        jnp.where(
-            contents[..., index("a_i")] < 0.0, 0.0, contents[..., index("a_i")]
-        )
-    )
+    # negative a_i with v_i > 0 survives the :760 reset and is floored here.
+    # Width 0 = NEMO's hard WHERE; > 0 = C1 one-sided ramp (default).
+    # Cells at or above the width keep their stored value bitwise (no
+    # extensive/intensive round trip).
+    a_i_stored = contents[..., index("a_i")]
+    if negative_area_ramp_width == 0.0:
+        floored = jnp.where(a_i_stored < 0.0, 0.0, a_i_stored)
+    else:
+        a_i_now = a_i_stored / area
+        ramp = positive_part_c1(a_i_now, 1.0 / negative_area_ramp_width) * area
+        floored = jnp.where(a_i_now < negative_area_ramp_width, ramp, a_i_stored)
+    contents = contents.at[..., index("a_i")].set(floored)
     # NEMO corrects physical cells, then lbc_lnk refreshes the bi-periodic
     # halos (`icedyn_adv_pra.F90:405-479`).  Never feed independently corrected
     # halo values into the next split step.
