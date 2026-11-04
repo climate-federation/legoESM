@@ -1256,6 +1256,100 @@ def _sal_step(post_dh: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     return S_bulk, S_layers, fluxes
 
 
+def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
+             constants: IceConstantsConfig):
+    """ice_thd_do, jpl = 1, nn_icesal = 2, no frazil (`icethd_do.F90:171-307`).
+
+    New ice forms at t_bo with salinity rn_sinew*SSS; its enthalpy and
+    salinity are mixed by volume into the category, the excess over rn_amax is
+    accreted at the base and remapped, and the snow VOLUME is kept.  Returns
+    (post_do, exchange contributions).
+    """
+
+    # Open-water growth (`icethd_do.F90:171-307`), active only for qlead<0.
+    Tm = -constants.liquidus_slope * (
+        _NEW_ICE_SALINITY_FRACTION * forcing.sss
+    )
+    Tbo_c = forcing.t_bottom - constants.T0
+    e_new = constants.rho_ice * (
+        constants.c_ice * (Tm - Tbo_c)
+        + constants.latent_fusion * jnp.maximum(0.0, 1.0 - Tm / jnp.minimum(Tbo_c, -_EPS10))
+        - constants.c_ocean * Tm
+    )
+    zEi = -e_new / constants.rho_ice
+    zEw = constants.c_ocean * Tbo_c
+    vnew = jnp.where(
+        forcing.qlead < 0.0,
+        -(-forcing.qlead / (zEi - zEw)) / constants.rho_ice,
+        0.0,
+    )
+    # Lateral growth up to rn_amax; the excess volume is accreted at the base
+    # (`icethd_do.F90:233-247`).
+    a_old = post_temp2.concentration
+    room = jnp.maximum(0.0, _MAXIMUM_ICE_CONCENTRATION - a_old)
+    a_lateral = vnew / _NEW_ICE_THICKNESS
+    capped = a_lateral > room
+    excess_area = jnp.where(capped, a_lateral - room, 0.0)
+    residual = excess_area * _NEW_ICE_THICKNESS                    # zdv_res
+    anew = jnp.where(capped, jnp.maximum(0.0, a_lateral - excess_area), a_lateral)
+    v_lateral = jnp.where(capped, jnp.maximum(0.0, vnew - residual), vnew)
+    v_old = post_temp2.h_ice * a_old
+    a_total = a_old + anew
+    v_mixed = v_old + v_lateral
+    # New-ice enthalpy/salinity mixed by volume into the category; open water
+    # takes the new-ice values (`icethd_do.F90:250-259`).
+    s_new = _NEW_ICE_SALINITY_FRACTION * forcing.sss
+    had_ice = (a_old > 0.0)[..., None]
+    v_den = jnp.maximum(v_mixed, _EPS20)[..., None]
+    e_mixed = jnp.where(
+        had_ice,
+        (e_new[..., None] * v_lateral[..., None] + post_temp2.e_ice * v_old[..., None]) / v_den,
+        jnp.broadcast_to(e_new[..., None], post_temp2.e_ice.shape),
+    )
+    S_layers_new = jnp.where(
+        had_ice,
+        (s_new[..., None] * v_lateral[..., None] + post_temp2.S_layers * v_old[..., None]) / v_den,
+        jnp.broadcast_to(s_new[..., None], post_temp2.S_layers.shape),
+    )
+    # Basal accretion of the residual and enthalpy remap (`icethd_do.F90:262-294`);
+    # a category whose area is below epsi20 is emptied (numerics guard).
+    keep = (a_total >= _EPS20) | (vnew <= 0.0)
+    accreted = jnp.where(keep, residual, 0.0)
+    a_total = jnp.where(keep, a_total, 0.0)
+    v_total = v_mixed + accreted
+    layer = v_mixed * (1.0 / 3.0)
+    vseg = jnp.stack([jnp.zeros_like(layer), layer, layer, layer, accreted], axis=-1)
+    eseg = jnp.concatenate(
+        [jnp.zeros_like(e_new)[..., None], e_mixed, e_new[..., None]], axis=-1)
+    e_ice_new = _piecewise_remap(vseg, eseg, v_total)
+    v_salt = post_temp2.S_bulk * v_old + s_new * (v_total - v_old)   # sv_i update
+    _has_vol = v_total > 0.0
+    S_bulk_new = jnp.where(_has_vol, v_salt / jnp.where(_has_vol, v_total, 1.0), post_temp2.S_bulk)
+    _has_ice = a_total > _EPS10   # double where: open water is 0/0 (review F3)
+    h_total = jnp.where(_has_ice, v_total / jnp.where(_has_ice, a_total, 1.0), 0.0)
+    # Snow volume is untouched by ice_thd_do: thickness spreads over the new area.
+    h_snow_new = jnp.where(_has_ice, post_temp2.h_snow * a_old / jnp.where(_has_ice, a_total, 1.0), 0.0)
+    new_ice = vnew > 0.0
+    post_do = post_temp2._replace(
+        concentration=a_total,
+        h_ice=h_total,
+        h_snow=jnp.where(new_ice, h_snow_new, post_temp2.h_snow),
+        e_ice=jnp.where(new_ice[..., None], e_ice_new, post_temp2.e_ice),
+        S_bulk=jnp.where(new_ice, S_bulk_new, post_temp2.S_bulk),
+        S_layers=jnp.where(new_ice[..., None], S_layers_new, post_temp2.S_layers),
+    )
+    # ice_thd_do exchange in NEMO's operation order (`icethd_do.F90:204-221`).
+    zfmdt = jnp.where(forcing.qlead < 0.0, -forcing.qlead / (zEi - zEw), 0.0)
+    r1_dt = 1.0 / dt
+    do_fluxes = _zero_fluxes(vnew)._replace(
+        hfx_thd=zfmdt * zEw * r1_dt,
+        hfx_opw=-zfmdt * (zEi - zEw) * r1_dt,
+        wfx_opw=-vnew * constants.rho_ice * r1_dt,
+        sfx_opw=-vnew * constants.rho_ice * s_new * r1_dt,
+    )
+    return post_do, do_fluxes
+
+
 def si3_column_step_arrays(state: SI3ColumnArrays,
                            forcing: SI3SurfaceForcing,
                            dt: float,
@@ -1299,49 +1393,11 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     post_sal = post_temp1._replace(S_bulk=S_bulk, S_layers=S_layers)
     post_temp2 = post_sal
 
-    # Open-water growth (`icethd_do.F90:171-307`), active only for qlead<0.
-    Tm = -constants.liquidus_slope * (
-        _NEW_ICE_SALINITY_FRACTION * forcing.sss
-    )
-    Tbo_c = forcing.t_bottom - constants.T0
-    e_new = constants.rho_ice * (
-        constants.c_ice * (Tm - Tbo_c)
-        + constants.latent_fusion * jnp.maximum(0.0, 1.0 - Tm / jnp.minimum(Tbo_c, -_EPS10))
-        - constants.c_ocean * Tm
-    )
-    zEi = -e_new / constants.rho_ice
-    zEw = constants.c_ocean * Tbo_c
-    vnew = jnp.where(
-        forcing.qlead < 0.0,
-        -(-forcing.qlead / (zEi - zEw)) / constants.rho_ice,
-        0.0,
-    )
-    anew = jnp.minimum(
-        vnew / _NEW_ICE_THICKNESS,
-        jnp.maximum(
-            0.0,
-            _MAXIMUM_ICE_CONCENTRATION - post_temp2.concentration,
-        ),
-    )
-    residual = jnp.maximum(vnew - anew * _NEW_ICE_THICKNESS, 0.0)
-    v_old = post_temp2.h_ice * post_temp2.concentration
-    v_total = v_old + anew * _NEW_ICE_THICKNESS + residual
-    a_total = post_temp2.concentration + anew
-    _has_ice = a_total > _EPS10   # double where: open water is 0/0 (review F3)
-    h_total = jnp.where(_has_ice, v_total / jnp.where(_has_ice, a_total, 1.0), 0.0)
-    post_do = post_temp2._replace(concentration=a_total, h_ice=h_total)
-    # ice_thd_do exchange (`icethd_do.F90:214-221`): zfmdt = -rhoi * vnew.
-    new_mass = -constants.rho_ice * vnew / dt
-    do_fluxes = _zero_fluxes(vnew)._replace(
-        hfx_thd=new_mass * zEw,
-        hfx_opw=-new_mass * (zEi - zEw),
-        wfx_opw=new_mass,
-        sfx_opw=new_mass * _NEW_ICE_SALINITY_FRACTION * forcing.sss,
-    )
+    post_do, do_fluxes = _do_step(post_temp2, forcing, dt, constants)
     fluxes = SI3ExchangeFluxes(*(
         sum(parts) for parts in zip(zdf_fluxes, dh_fluxes, sal_fluxes, do_fluxes)
     ))
-    exit_state = post_do._replace(age_volume=post_do.age_volume + a_total * dt)
+    exit_state = post_do._replace(age_volume=post_do.age_volume + post_do.concentration * dt)
     return SI3StepTrace(state, post_zdf, post_dh, post_temp1, post_sal,
                         post_temp2, post_do, exit_state, fluxes)
 
