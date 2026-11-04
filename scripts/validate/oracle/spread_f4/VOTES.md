@@ -60,3 +60,32 @@ Reviews: codex (job 11028851) NO FINDINGS on the two harnesses + CLUBB helper te
 taken -- (1)/(2) zero-wind/below-sigma_b columns: 12 of 13 columns have nonzero wind and the generator asserts the damping
 branch is reached; the test is shown to fail with the sponge on and with linear_frac off by 1e-6; (3) v IS compared;
 sigma > 1 and p_s < 1 Pa branches are unreachable for physical columns (stated scope limit).
+
+Hines port to LMDZ r5891 hines_gwd.f90 (user-approved class-C-structural port, wave 2):
+
+| id | question | me | codex | GLM | result |
+|---|---|---|---|---|---|
+| V39 | Hines oracle: (a) LMDZ r5891 hines_gwd.f90 (no public ICON tag 2024.01-2026.10 has mo_gw_hines; LMDZ r6216 removed it) / (b) stop until an ECHAM/ICON copy is supplied | a | a | a | a |
+| V43 | (a) replace hines.py in place, scheme name kept, bulk heuristic deleted / (b) new scheme hines_lmdz | a | a | a | a |
+| V44 | launch: (a) production keeps per-column launch_p (70 kPa); kernel kwarg k_launch, set by the oracle test to LMDZ's nlev-3 / (b) config level index | a | a | a | a |
+| V45 | total_rms_wind default (a) 1.0 (LMDZ rmscon) / (b) keep 2.0 | a | a | a | a |
+| V46 | (a) HinesConfig = total_rms_wind, f1, f2, f3, kstar_min, kstar_max, smooth_sharpness, launch_p; Fmax/m_star/doppler_sharpness/tndmax/umcfac/U_mag_floor and the hines_Fmax field + CLI flag removed / (b) keep inert | a | a | a | a |
+| V47 | heating: (a) keep KE->heat closure, LMDZ's zero heating a documented departure / (b) dT = 0 | a | b | a | a |
+| V48 | (a) smooth the oracle's hard switches on ratios at sharpness 100, exact at inf; 105 km level mask stays hard / (b) hard | a | a | a | a |
+| V49 | columns: (a) 13 audit CAM L32 columns + one constructed column to 1e-3 Pa (exp-decay branch) / (b) 13 only | a | a | a | a |
+| V50 | spec: (a) total_rms_wind tier 1 (0.25, 4); f1-f3, kstar tier 0 excluded; sharpness numerics / (b) all tier 2 | a | a | a | a |
+| V51 | (a) port LMDZ's launch-flux removal at launch+1 (column momentum telescopes to zero); old tests -> "no drag below launch+1" / (b) drop it | a | a | a | a |
+| V52 | smooth-vs-hard bound (a) 0.05 (measured worst 1.85e-2) / (b) 0.02 | a | a | a | a |
+| V53 | grad check (a) levels 5/20/28, eps 1e-4, tol 1e-4 (measured 2.2e-6; level 10 sits on a sharpness-100 transition) / (b) level 10 at 1e-2 | a | a | a | a |
+| V54 | resting column (a) keep LMDZ's sign-blind umin floor drag, bound 1 m/s/day / (b) force zero | a | a | a | a |
+| V55 | (a) delete bulk-heuristic property tests (antiparallel sink, limiter, m_star, sublinear, Pa units); keep KE->heat identity (eps sign not fixed), heating form, dispatch / (b) adapt | a | a | a | a |
+| V56 | oracle control (a) rms 1.0->1.01 only / (b) also T x 1.001 | a | b | b | b |
+
+Reviews: codex round 1 -- 3 findings (smoothing test passed with smoothing removed; wrong launch+1 assertion,
+the isotropic launch spectrum has zero net flux there; two bulk-sign tests in test_gwd_physical_realism.py), all
+fixed; round 2 CLEAN. GLM mechanism review: launch at 700 hPa scales the launch flux by densb (~0.7 of LMDZ's
+near-surface launch), no normalisation assumes a surface launch; frictional heating is -u.F (exact energy closure,
+not clipped); "plateau columns jump to 500 hPa" refuted (a column whose nearest level is its lowest gets no
+source). GLM point taken as a FINDING, not fixed: the decks selecting hines (amip_sota, amip_realism_c12, AIMIP
+classical/t106) were tuned with the old bulk scheme at 2 m/s and need retuning.
+F4 spread hines_lmdz: C1-C5 PASS, A 28/28, worst port 2.9e-13 vs max spread 1.5e-12 (job 11036225).

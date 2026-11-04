@@ -174,9 +174,10 @@ def test_sign_shflx_warm_surface_positive(name):
     assert jnp.all(out_c.shflx < 0.0), f"{name}: cold surface gave shflx>=0"
 
 
+# Hines (LMDZ port) is excluded: its spectrum's drag is relative to the
+# launch-level wind, not antiparallel to the local wind (V55).
 @pytest.mark.parametrize("gwd,mk", [
     (mcfarlane_gwd, McFarlaneConfig),
-    (hines_gwd, HinesConfig),
 ])
 def test_sign_gwd_momentum_sink(gwd, mk):
     d = gwd_breaking_column()
@@ -346,7 +347,7 @@ def test_diff_turb_params_finite_match_fd(name):
 
 @pytest.mark.parametrize("gwd,mk,params", [
     (mcfarlane_gwd, McFarlaneConfig, ["G_0", "h_topo", "efficiency", "fcrit2"]),
-    (hines_gwd, HinesConfig, ["total_rms_wind", "Fmax", "m_star"]),
+    (hines_gwd, HinesConfig, ["total_rms_wind", "f1", "f2"]),
 ])
 def test_diff_gwd_params_finite_match_fd(gwd, mk, params):
     d = gwd_breaking_column(ncol=2, nlev=40)

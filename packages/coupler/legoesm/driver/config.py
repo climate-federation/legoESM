@@ -1979,8 +1979,7 @@ class ExperimentConfig(NamedTuple):
     # that resolver existed).  The low-level extratropical westerlies are the
     # observable lever: hines deposits momentum that decelerates them.
     # Appended at the tuple END to preserve the positional ABI.
-    hines_total_rms_wind: float = 2.0           # HinesConfig.total_rms_wind [m/s]
-    hines_Fmax: float = 0.1                     # HinesConfig.Fmax [Pa]
+    hines_total_rms_wind: float = 1.0           # HinesConfig.total_rms_wind [m/s] (LMDZ rmscon)
     # HinesConfig.launch_p [Pa], legal range HINES_LAUNCH_P_RANGE_PA.  No
     # surface launch: a non-orographic wave launched there is born
     # supersaturated in the weakly stratified BL and breaks at its own
@@ -4683,14 +4682,12 @@ class ExperimentConfig(NamedTuple):
         # spreading factor, a stress/flux cap, an rms launch wind), and none is
         # bounds-checked anywhere else on the CLI/--config route (the
         # ``__param_spec__`` bounds only gate the ``--params`` loader).  Silent
-        # failure modes without this guard: ``hines_Fmax < 0`` makes
-        # ``jnp.clip(drag, 0.0, Fmax)`` return the NEGATIVE cap at every level
-        # (constant spurious drag, no error), and ``hines_total_rms_wind <= 0``
-        # zeroes the amplitude growth so the scheme silently does nothing.
+        # failure modes without this guard: ``hines_total_rms_wind <= 0``
+        # launches no wave spectrum, so the scheme silently does nothing.
         # Positivity + finiteness only — the calibratable RANGE stays in
         # ``__param_spec__`` so it is not maintained twice.
         for _f in ("mcfarlane_k_wave", "mcfarlane_directional_spread",
-                   "hines_total_rms_wind", "hines_Fmax",
+                   "hines_total_rms_wind",
                    "e3sm_cam_taubgnd", "e3sm_cam_c0", "e3sm_cam_launch_p",
                    "e3sm_cam_effgw"):
             _v = getattr(self, _f)

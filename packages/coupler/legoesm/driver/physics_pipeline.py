@@ -5153,11 +5153,10 @@ def gwd_config_for(config):
         effgw_oro=float(getattr(config, "mcfarlane_effgw_oro",
                                 gc.mcfarlane.effgw_oro)),
     )
-    # Hines (non-orographic) launch amplitude + saturation flux cap.
+    # Hines (non-orographic) launch rms wind + launch pressure.
     hn = gc.hines._replace(
         total_rms_wind=float(getattr(config, "hines_total_rms_wind",
                                      gc.hines.total_rms_wind)),
-        Fmax=float(getattr(config, "hines_Fmax", gc.hines.Fmax)),
         launch_p=float(config.hines_launch_p),
     )
     fr = gc.e3sm_cam.frontal._replace(

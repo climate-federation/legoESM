@@ -1,117 +1,57 @@
-"""Single-bulk-amplitude WKB gravity wave drag (Hines-1997-inspired).
+"""Hines (1997) Doppler-spread non-orographic gravity-wave drag.
 
-.. warning::
+Port of LMDZ6 trunk r5891 ``libf/phylmd/hines_gwd.f90`` (McLandress 1995 code,
+modified by McFarlane & Manzini for MAECHAM; same lineage as ECHAM/ICON
+``mo_gw_hines``), oracle-matched by
+``tests/atmosphere/hydrostatic/unit/test_hines_lmdz_oracle.py``.  Routines
+ported: ``hines_gwd`` (driver: sigma-coordinate N, density, altitude),
+``hines_setup`` (naz = 8, slope = 1), ``hines_extro0``, ``hines_wind``,
+``hines_wavnum``, ``hines_sigma``, ``hines_intgrl`` (slope = 1 branch),
+``hines_flux``, ``hines_exp`` and ``vert_smooth``.  Not ported, because the
+LMDZ driver never reaches them: ``hines_heat`` (``iheatcal = 0``), the
+precipitation-enhanced rms wind (``lozpr = .FALSE.``) and the convective
+``sigsqmcw`` source (identically zero, so ``f2mod = 1`` and ``sigalpmc = 0``).
 
-   This is **NOT** the full Hines (1997) Doppler-spread *spectrum*.  It is
-   a single-bulk-amplitude WKB approximation: one rms wave amplitude is
-   propagated and saturated per column (see the disclosed-simplification
-   note below), rather than the full azimuthal + vertical-wavenumber
-   Doppler-spread spectrum.
+Departures from the oracle (each voted, spread_f4/VOTES.md V43-V51):
 
-Non-orographic GWD scheme: a single bulk wave amplitude grows with
-decreasing density and is capped by a smooth saturation amplitude. Uses
-bottom-up propagation with smooth sigmoid activation for AD-safety —
-differentiable ALMOST EVERYWHERE (the ``clip``/``minimum`` drag-floor and
-tendency limiters are subgradient KINKS, not everywhere-smooth).
+* launch level: LMDZ launches at the fixed model level ``klev-2`` (third from
+  the bottom).  Here the launch level is the level nearest ``launch_p`` in
+  each column (default 700 hPa, never the lowest level); the oracle test
+  passes ``k_launch`` to select LMDZ's level.
+* heating: LMDZ returns ``d_t_hin = 0``.  Here the mean-flow kinetic energy
+  removed is returned as frictional heating ``dT_dt = -(u du + v dv)/c_pd``
+  (``eps_gwd`` its column integral); the momentum tendencies are unchanged.
+* differentiability: the oracle's hard switches (N floor, ``m_trial``
+  clamp, turbulent-vs-molecular cutoff, ``umin`` wind floor, series-vs-log
+  integral) are smooth at ``config.smooth_sharpness`` (on dimensionless
+  ratios, 0.01 relative width at the default 100) and exactly the oracle's
+  hard forms at ``smooth_sharpness = inf``.  The 105 km exponential-decay
+  mask is a level selection by altitude and stays hard.
 
-.. note::
-
-   **Disclosed simplification / limitation (F-GWD-2, defer).** This is a
-   *single bulk-amplitude* approximation of the Hines spectrum: one rms
-   wave amplitude ``sigma`` is propagated and saturated per column rather
-   than the full azimuthal + vertical-wavenumber spectrum.  Consequently
-   the whole packet saturates at once and the per-level deposition
-   ``(sigma_grown^2 - sigma_new^2)·rho`` is large; the ``Fmax`` clip then
-   *binds* over a substantial fraction of a realistic column (≈22-40 % of
-   levels on 30-60 level grids at the default ``total_rms_wind``), so the
-   cap — not the Doppler-spread physics — shapes the drag profile there.
-   The drag remains a physically-signed momentum sink and is AD-safe
-   (differentiable a.e.; the ``clip``/``minimum`` limiters are subgradient
-   kinks, not everywhere-smooth); only its *vertical distribution* is
-   cap-dominated.  A
-   faithful upgrade (spectral/azimuthal Hines) plus a QBO / momentum-flux
-   benchmark is required before retuning ``Fmax`` / ``total_rms_wind`` —
-   retuning without a benchmark would be guessing.  Default GWD scheme is
-   ``none``; this scheme is opt-in.
-
-Faithfulness to Hines (1997)
-----------------------------
-This is a Hines-INSPIRED bulk heuristic, NOT a faithful Hines Doppler-spread parameterization.
-The Hines (1997) MECHANISM — an incident azimuthal + vertical-wavenumber SPECTRUM whose
-Doppler-shifted cutoff vertical wavenumber evolves with the background wind and the wave-induced
-rms wind (eq. 9 is that cutoff-wavenumber relation, NOT a velocity-amplitude cap) — is ABSENT.
-This scheme propagates ONE bulk rms amplitude and saturates it against a scalar (per-column, but
-locally ``N(z)``-dependent) scale ``σ_sat = N(z)/m_*`` — one amplitude, one scale per level.
-FAITHFUL to Hines — only the undamped-WKB amplitude scaling:
-  * the amplitude grows with ``1/√ρ`` between levels, ``σ_grown = σ·√(ρ[k+1]/ρ[k])`` — the WKB
-    scaling for a conserved ``ρσ²`` (NOTE: ``ρσ²`` is the code's ASSUMED invariant, NOT the true
-    momentum flux ``ρ⟨u'w'⟩``, which carries the wave-geometry ``k/m`` correlation omitted here).
-DEPARTURES from Hines — the mechanism is gone:
-  * **NO Doppler-spread SPECTRUM**: a SINGLE bulk rms amplitude, not the azimuthal +
-    vertical-wavenumber spectrum whose cutoff evolution IS the Hines mechanism (F-GWD-2);
-  * **NO background-wind coupling in propagation**: the wind is NOT used for Doppler shifting,
-    cutoff evolution, critical-level filtering, or refraction — it enters ONLY as (a) the
-    antiparallel sink DIRECTION and (b) the tendency limiter (``lat`` and ``p_half`` are unused;
-    a resting column can still saturate the packet internally, the projection just zeroes the
-    RETURNED vector tendency and heating);
-  * ``σ_sat = N/m_*`` is a **bulk saturation-amplitude HEURISTIC** (a velocity scale ≈ the
-    intrinsic phase speed ``N/m_*``), NOT Hines eq. 9's cutoff wavenumber;
-  * the deposition ``drag = ρ(σ²_grown − σ²_new)`` (where ``σ_new`` is the smoothly-saturated
-    amplitude ``σ_grown(1−f)+σ_sat·f``, equal to ``σ_sat`` only in the hard-saturation limit
-    ``f→1``) is a per-layer STRESS DECREMENT [Pa] (``accel = −decrement/(ρ·dz)``). Under the
-    code's ASSUMED fixed wave geometry/proportionality ``F ∝ ρσ²`` this reads as a stress-flux
-    divergence, but it is NOT Hines' spectral vector momentum flux — the azimuthal-spectrum vector
-    covariance ``ρ⟨u'w'⟩`` (with its ``k/m`` sign/geometry) that Hines deposits is absent here;
-  * the **antiparallel "pure deceleration along U" and the KE→heat closure** (all mean-flow KE
-    loss returned as local frictional heating) are bulk-closure DESIGN choices — Hines deposits
-    the vector momentum/energy of the dissipating spectrum, which need not be antiparallel to the
-    local ``U`` and distinguishes wave-energy dissipation from mean-flow KE dissipation and
-    heat-flux (Becker & McLandress 2009);
-  * the ``Fmax`` cap and the tendency limiter are **UNCLOSED sinks**: the scan removes the FULL
-    uncapped amplitude loss from the wave carry but deposits only the CAPPED stress on the mean
-    flow, so excess wave momentum/energy is lost rather than transferred — so even in the
-    interior the mean-flow drag no longer equals the wave stress-flux divergence (momentum is
-    not conserved; energy of the mean flow that IS removed is still heated back exactly).
-NUMERICS (AD-safety): the smooth sigmoid saturation (``doppler_sharpness``) — NOTE this smooth
-blend is a two-sided relaxation toward ``σ_sat``, so BELOW threshold (``σ_grown < σ_sat``, where
-``f_diss`` is small but nonzero) it nudges the carry amplitude slightly UP toward ``σ_sat`` (a weak
-spurious SOURCE); the drag clamp ``[0, Fmax]`` floors the resulting negative decrement to 0, so this
-sub-threshold gain is neither drag nor heat but an unbudgeted carry perturbation of the AD smoothing
-(a hard ``σ_grown > σ_sat`` gate would not have it); the ``accel`` magnitude limiter
-(E3SM-PROVENANCE constants ``tndmax``/``umcfac``, a LOOSE analog of E3SM's per-phase-speed
-``|c−u|/dt`` limiter — NOT
-E3SM-equivalent: no phase speed ``c``, one scalar magnitude, no post-limit stress reconstruction);
-density / ``U_mag`` floors; the scan-carry dtype pin.
-Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_hines_gwd_faithful.py``.
-
-References
-----------
-- Hines, C. O. (1997). Doppler-spread parameterization of gravity-wave
-  momentum deposition in the middle atmosphere. 1. Basic formulation.
-  J. Atmos. Solar-Terr. Phys., 59, 371-386.
+Arrays are top-down (index 0 = model top), the LMDZ internal order.
 """
 
 from __future__ import annotations
+
+import math
 
 import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
 from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+from legoesm.core.smooth import sigmoid_switch, smooth_max
 
-# Machine-checked scheme contract (see tests/test_physics_contracts.py).
 __physics_contract__ = {
     "summary": (
-        "Hines-INSPIRED non-orographic gravity-wave drag (single bulk-amplitude "
-        "heuristic, NOT the Doppler-spread spectrum): a launched rms wave amplitude "
-        "grows with 1/sqrt(rho) upward, saturates against a bulk scalar scale "
-        "N/m_*, and deposits the per-layer stress decrement as a drag on the "
-        "flow.  The wave is held at its launch amplitude at and below the "
-        "launch level ``launch_p`` (no source, no deposition) and starts "
-        "propagating there, so the stress-decrement statement applies only "
-        "ABOVE the launch level."
+        "Hines (1997) Doppler-spread non-orographic gravity-wave drag, LMDZ "
+        "r5891 hines_gwd.f90 port: an 8-azimuth spectrum launched with rms "
+        "wind total_rms_wind at the level nearest launch_p is Doppler-shifted "
+        "by the wind relative to the launch level; its cutoff vertical "
+        "wavenumber m_alpha shrinks upward with the wave-induced rms wind "
+        "(turbulent and molecular cutoffs), and the drag is the vertical "
+        "divergence of the resulting momentum flux."
     ),
     "inputs": {
         "u": "m/s", "v": "m/s", "T": "K",
@@ -122,35 +62,118 @@ __physics_contract__ = {
         "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "eps_gwd": "W/m^2",
     },
     "sign_convention": (
-        "z up. Drag opposes the wind: accel is a pure deceleration along the "
-        "local wind vector (du_dt*u + dv_dt*v <= 0); stress decrement "
-        "drag = rho*(sigma_grown^2 - sigma_new^2) is floored at 0 (a sink). "
-        "eps_gwd>=0 is the column KE loss returned as frictional heating "
-        "dT_dt = -(u*du_dt + v*dv_dt)/c_pd."
+        "z up, arrays top-down. flux_u[k] = rho_launch * sum_n ak_n k* m_n[k] "
+        "* e_n (eastward momentum flux carried upward); drag[k] = (F[k] - "
+        "F[k-1]) / (rho_k (alt_{k-1} - alt_k)) with F[-1] = 0, so the "
+        "launched flux is removed one level BELOW the launch level and "
+        "deposited aloft (column momentum sum exactly zero, as in LMDZ, "
+        "unless the 105 km decay acts). "
+        "dT_dt = -(u du_dt + v dv_dt)/c_pd, eps_gwd its column integral."
     ),
-    # KE->heat is an EXACT local closure: the resolved mean-flow KE removed
-    # (-U.a) is returned exactly as frictional heating (c_pd*sum(rho*dT_dt*dz)
-    # == eps_gwd). But total WAVE + mean-flow ENERGY is NOT conserved: the
-    # launched wave is an EXTERNAL/unbudgeted source, and the Fmax cap + the
-    # tendency limiter discard the implied carry loss (the scan removes the
-    # full uncapped amplitude loss from the wave but deposits only the capped
-    # stress on the mean flow). Momentum is not conserved either. Hence
-    # "none" -- the only exact invariant is the resolved-KE->heat closure,
-    # pinned by the idealized test, not a total-energy conservation law.
-    "conserves": ["none"],
-    # True = AD-compatible (a defined VJP everywhere, incl. the clip/minimum
-    # subgradient kinks); NOT everywhere-smooth (see NUMERICS in the docstring).
+    # total energy: the mean-flow KE change is returned exactly as heat.
+    # Momentum telescopes to zero only below the 105 km decay, so not claimed.
+    "conserves": ["energy"],
     "differentiable": True,
     "reference": (
-        "Hines (1997), J. Atmos. Solar-Terr. Phys. 59, 371-386 "
-        "(Doppler-spread parameterization, basic formulation)"
+        "Hines (1997) JASTP 59, 371-386 and 387-400; McLandress (1998); LMDZ6 "
+        "r5891 libf/phylmd/hines_gwd.f90 (oracle)"
     ),
     "idealized_test": (
-        "tests/atmosphere/hydrostatic/unit/test_gravity_wave_drag.py: rest "
-        "state -> zero tendency; du_dt*u + dv_dt*v <= 0 at every level; "
-        "c_pd*sum(rho*dT_dt*dz) == eps_gwd >= 0 (KE->heat closure)"
+        "tests/atmosphere/hydrostatic/unit/test_hines_lmdz_oracle.py: drag "
+        "== LMDZ hines_gwd on 14 columns (smooth_sharpness=inf); column "
+        "momentum sum rho*du*dz == 0; finite nonzero gradients at the default "
+        "sharpness; c_pd*sum(rho*dT_dt*dz) == eps_gwd (test_hines_gwd_faithful.py)"
     ),
 }
+
+# --- hines_setup (LMDZ r5891 hines_gwd.f90:1640-1767) ---
+_NAZ = 8                      # azimuths
+_SLOPE = 1.0                  # m-spectrum slope (only the slope = 1 branch is ported)
+_ALT_CUTOFF_M = 105.0e3       # icutoff = 1: drag decays above this altitude
+_SMCO = 2.0                   # vert_smooth centre weight
+_NSMAX = 5                    # vert_smooth passes
+# --- hines_gwd driver constants ---
+_VISC_MOL = 1.5e-5            # molecular viscosity [m2/s] (hines_gwd.f90:325); > visc_min
+_DTHETA_FLOOR = 5.0           # dTheta/dsigma <= -5/sigma (hines_gwd.f90:293)
+_N_SMOOTH = 5.0               # bvfreq smoothing ratio 5*log(sigma_l/sigma_l-1)
+# --- hines_wind / hines_intgrl / hines_exp / hines_flux literals, copied verbatim ---
+_COS45 = 0.7071068
+_UMIN = 0.001                 # [m/s]
+_THIRD = 0.33333333           # molecular-cutoff exponent, as written in hines_wavnum
+_Q_MIN = 1.0
+_QM_MIN = 0.01
+_EXP_HSCALE_M = 5.0e3
+
+
+def _hines_sigma(sigsqh):
+    """hines_sigma, naz = 8: (ncol, 8) -> (sigma_alpha (ncol, 8), sigma_t (ncol,))."""
+    s = [sigsqh[:, n] for n in range(_NAZ)]
+    sum_odd = (s[0] + s[2] + s[4] + s[6]) / 2.0
+    sum_even = (s[1] + s[3] + s[5] + s[7]) / 2.0
+    a1 = jnp.sqrt(s[0] + s[4] + sum_even)
+    a2 = jnp.sqrt(s[1] + s[5] + sum_odd)
+    a3 = jnp.sqrt(s[2] + s[6] + sum_even)
+    a4 = jnp.sqrt(s[3] + s[7] + sum_odd)
+    sigma_alpha = jnp.stack([a1, a2, a3, a4, a1, a2, a3, a4], axis=1)
+    tot = s[0]
+    for n in range(1, _NAZ):
+        tot = tot + s[n]
+    return sigma_alpha, jnp.sqrt(tot)
+
+
+def _hines_wind(uhs, vhs, sharp, hard):
+    """hines_wind, naz = 8: (ncol, nlev) winds -> v_alpha (ncol, nlev, 8)."""
+    def floor(w):
+        # |w| < umin -> umin (sign NOT kept, as in LMDZ)
+        if hard:
+            return jnp.where(jnp.abs(w) < _UMIN, _UMIN, w)
+        keep = sigmoid_switch(jnp.abs(w) / _UMIN - 1.0, sharp)
+        return keep * w + (1.0 - keep) * _UMIN
+    u = floor(uhs)
+    v = floor(vhs)
+    a2 = _COS45 * (v + u)
+    a4 = _COS45 * (v - u)
+    return jnp.stack([u, a2, v, a4, -u, -a2, -v, -a4], axis=-1)
+
+
+def _hines_intgrl(v_alpha, m_alpha, bvfb, sharp, hard):
+    """hines_intgrl, slope = 1: (ncol, 8) -> i_alpha (ncol, 8)."""
+    q = v_alpha / bvfb[:, None]
+    qm = q * m_alpha
+    q_ok = q != 0.0
+    q_safe = jnp.where(q_ok, q, 1.0)
+    series = jnp.where(
+        q_ok,
+        (qm ** 2 / 2.0 + qm ** 3 / 3.0 + qm ** 4 / 4.0 + qm ** 5 / 5.0) / q_safe ** 2,  # coeff-ok: Taylor series of -(log(1-x)+x), hines_intgrl
+        m_alpha ** 2 / 2.0)
+    if hard:
+        use_log = (jnp.abs(q) >= _Q_MIN) & (jnp.abs(qm) >= _QM_MIN)
+        w_log = use_log.astype(q.dtype)
+    else:
+        w_log = (sigmoid_switch(jnp.abs(q) / _Q_MIN - 1.0, sharp)
+                 * sigmoid_switch(jnp.abs(qm) / _QM_MIN - 1.0, sharp))
+        use_log = w_log > 0.0
+    # qm < 1 on every reachable state (m <= N/(f1 sigma + n/m + v)); the where
+    # keeps an unselected lane's log finite for the VJP.
+    one_m_qm = jnp.where(use_log, 1.0 - qm, 0.5)
+    logf = -(jnp.log(one_m_qm) + qm) / q_safe ** 2
+    if hard:
+        return jnp.where(use_log, logf, series)
+    return w_log * logf + (1.0 - w_log) * series
+
+
+def _vert_smooth(data, k_idx, k_launch):
+    """vert_smooth (coeff _SMCO, _NSMAX passes) on levels 0..k_launch, ends fixed.
+
+    data (ncol, nlev, ...); k_launch (ncol,)."""
+    sum_wts = _SMCO + 2.0
+    inner = (k_idx[None, :] >= 1) & (k_idx[None, :] <= k_launch[:, None] - 1)
+    inner = inner.reshape(inner.shape + (1,) * (data.ndim - 2))
+    for _ in range(_NSMAX):
+        up = jnp.concatenate([data[:, :1], data[:, :-1]], axis=1)      # work(l-1)
+        dn = jnp.concatenate([data[:, 1:], data[:, -1:]], axis=1)      # work(l+1)
+        data = jnp.where(inner, (dn + _SMCO * data + up) / sum_wts, data)
+    return data
 
 
 def hines_gwd(
@@ -165,198 +188,146 @@ def hines_gwd(
     lat: jax.Array,
     dt: float,
     config: HinesConfig,
+    k_launch: jax.Array | None = None,
 ) -> GWDOutput:
-    """Compute Hines-inspired bulk GWD tendencies.
+    """Hines Doppler-spread GWD tendencies (LMDZ r5891 ``hines_gwd``).
 
     Parameters
     ----------
     u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, config
-        Standard GWD backend signature. All column arrays (ncol, nlev).
+        Standard GWD backend signature, column arrays (ncol, nlev) top-down,
+        ``p_half`` (ncol, nlev+1), ``lat`` in radians.  ``z_full``/``rho``
+        enter only the frictional-heating diagnostics: like LMDZ the scheme
+        builds its own density and altitude from ``p`` and ``T``.
+    k_launch : optional (ncol,) int
+        Launch level index (0-based, top-down).  ``None`` (production) = the
+        level nearest ``config.launch_p``; the oracle test passes LMDZ's
+        ``nlev - 3``.  A column whose launch level is its lowest level gets no
+        source.
 
     Returns
     -------
     GWDOutput
     """
     ncol, nlev = u.shape
+    dtype = u.dtype
+    sharp = config.smooth_sharpness
+    hard = isinstance(sharp, (int, float)) and sharp == math.inf
+    rd, rg = constants.R_d, constants.g
+    rgocp = rd / constants.c_pd
+    k_idx = jnp.arange(nlev)
 
-    # Brunt-Väisälä frequency at full levels
-    N_full = brunt_vaisala_n_full(T, p_full, z_full)
+    # --- driver: sigma coordinate, N, density, altitude (hines_gwd.f90:270-345)
+    ps = p_half[:, -1:]
+    sg = p_full / ps
+    dsg = (p_half[:, 1:] - p_half[:, :-1]) / ps
+    shx = sg ** rgocp
+    thx = T / shx
+    dttdsf = (thx[:, 1:] - thx[:, :-1]) / (sg[:, 1:] - sg[:, :-1])
+    cap = _DTHETA_FLOOR / sg[:, 1:]
+    if hard:
+        dttdsf = jnp.minimum(dttdsf, -cap)
+    else:
+        dttdsf = -cap * smooth_max(-dttdsf / cap, 1.0, sharp)
+    bv = jnp.sqrt(-dttdsf * sg[:, 1:] * (sg[:, 1:] ** rgocp) / rd) * rg / T[:, 1:]
+    ratio = _N_SMOOTH * jnp.log(sg[:, 1:] / sg[:, :-1])
 
-    # Wind magnitude at each level
-    U_mag = jnp.sqrt(u ** 2 + v ** 2 + 1e-10)
+    def _bv_smooth(prev, x):
+        b, r = x
+        b = (prev + r * b) / (1.0 + r)
+        return b, b
 
-    # Layer thickness
+    _, bv_s = jax.lax.scan(_bv_smooth, bv[:, 0], (bv.T, ratio.T))
+    bvfreq = jnp.concatenate([bv[:, :1], bv_s.T], axis=1)          # level 0 = raw level 1
+
+    hscal = rd * T / rg
+    density = sg * ps / (rg * hscal)
+    dalt = hscal * dsg / sg
+    alt = jnp.concatenate(
+        [jnp.cumsum(dalt[:, -2::-1], axis=1)[:, ::-1], jnp.zeros((ncol, 1), dtype)],
+        axis=1)                                                     # alt[nlev-1] = 0
+
+    # --- launch level, rms wind, kstar (hines_setup)
+    if k_launch is None:
+        k_launch = jnp.argmin(jnp.abs(p_full - config.launch_p), axis=1)
+    k_launch = jnp.asarray(k_launch, jnp.int32)
+    active = k_launch < nlev - 1                                    # no source at the lowest level
+    k_launch = jnp.where(active, k_launch, nlev - 2)               # any valid index; masked below
+    take = lambda a: jnp.take_along_axis(a, k_launch[:, None], axis=1)[:, 0]
+    bvfb = take(bvfreq)
+    densb = take(density)
+    kstar = config.kstar_min / (jnp.cos(lat) + config.kstar_min / config.kstar_max)
+
+    upper = k_idx[None, :] <= k_launch[:, None]                     # levels 0..k_launch
+    uhs = jnp.where(upper, u - take(u)[:, None], 0.0)
+    vhs = jnp.where(upper, v - take(v)[:, None], 0.0)
+    v_alpha = _hines_wind(uhs, vhs, sharp, hard)                    # (ncol, nlev, 8)
+
+    # --- hines_wavnum: launch level
+    sigsqh_b = jnp.full((ncol, _NAZ), config.total_rms_wind ** 2 / _NAZ, dtype)
+    sig_a_b, sig_t_b = _hines_sigma(sigsqh_b)
+    m_b = bvfb[:, None] / (config.f1 * sig_a_b + config.f2 * sig_t_b[:, None])
+    ak = sigsqh_b / (m_b ** (_SLOPE + 1.0) / (_SLOPE + 1.0))
+
+    def _up(carry, x):
+        mmin, sig_a, sig_t = carry
+        k, n_l, rho_l, va = x                                       # level k, scanned bottom-up
+        # turbulent vs molecular cutoff (f2mod = 1: no convective source)
+        nm_turb = config.f2 * sig_t
+        m_mol = (n_l * kstar / _VISC_MOL) ** _THIRD / config.f3
+        nm_mol = n_l / m_mol
+        if hard:
+            n_over_m = jnp.where(n_l / nm_turb < m_mol, nm_turb, nm_mol)
+        else:
+            n_over_m = nm_mol * smooth_max(nm_turb / nm_mol, 1.0, sharp)
+        denom = config.f1 * sig_a + n_over_m[:, None] + va
+        if hard:
+            m_trial = bvfb[:, None] / denom
+            m = jnp.where((m_trial <= 0.0) | (m_trial > mmin), mmin, m_trial)
+        else:
+            c = bvfb[:, None] / mmin
+            m = bvfb[:, None] / (c * smooth_max(denom / c, 1.0, sharp))
+        i_a = _hines_intgrl(va, m, bvfb, sharp, hard)
+        sigfac = densb / rho_l * n_l / bvfb
+        sig_a_new, sig_t_new = _hines_sigma(sigfac[:, None] * ak * i_a)
+        up = (k < k_launch)                                         # above the launch level
+        at = (k == k_launch)
+        m_out = jnp.where(up[:, None], m, jnp.where(at[:, None], m_b, 0.0))
+        new = (jnp.where(up[:, None], m, mmin),
+               jnp.where(up[:, None], sig_a_new, sig_a),
+               jnp.where(up, sig_t_new, sig_t))
+        return new, m_out
+
+    xs = (k_idx[::-1], bvfreq.T[::-1], density.T[::-1],
+          jnp.moveaxis(v_alpha, 1, 0)[::-1])
+    _, m_rev = jax.lax.scan(_up, (m_b, sig_a_b, sig_t_b), xs)
+    m_alpha = jnp.moveaxis(m_rev[::-1], 0, 1)                       # (ncol, nlev, 8)
+    m_alpha = _vert_smooth(m_alpha, k_idx, k_launch)
+
+    # --- hines_flux, slope = 1, naz = 8 (k_alpha = kstar for every azimuth)
+    pr = ak[:, None, :] * kstar[:, None, None] * m_alpha
+    flux_u = pr[..., 0] - pr[..., 4] + _COS45 * (pr[..., 1] - pr[..., 3] - pr[..., 5] + pr[..., 7])
+    flux_v = pr[..., 2] - pr[..., 6] + _COS45 * (pr[..., 1] + pr[..., 3] - pr[..., 5] - pr[..., 7])
+    flux_u = flux_u * densb[:, None] / _SLOPE
+    flux_v = flux_v * densb[:, None] / _SLOPE
+
+    def _drag(f):
+        d_top = f[:, :1] / (density[:, :1] * (alt[:, :1] - alt[:, 1:2]))
+        d_in = -(f[:, :-1] - f[:, 1:]) / (density[:, 1:] * (alt[:, :-1] - alt[:, 1:]))
+        d = jnp.concatenate([d_top, d_in], axis=1)
+        # hines_exp: above alt_cutoff (levels 0..k_launch) decay from the
+        # lowest such level's value with a 5 km scale height
+        hi = (alt >= _ALT_CUTOFF_M) & upper
+        k_lo = jnp.max(jnp.where(hi, k_idx[None, :], -1), axis=1)
+        d_zmax = jnp.take_along_axis(d, jnp.maximum(k_lo, 0)[:, None], axis=1)
+        d = jnp.where(hi, d_zmax * jnp.exp((_ALT_CUTOFF_M - alt) / _EXP_HSCALE_M), d)
+        return jnp.where(active[:, None], d, 0.0)
+
+    du_dt = _drag(flux_u)
+    dv_dt = _drag(flux_v)
+
+    # frictional heating: the mean-flow KE removed (V47; LMDZ returns 0)
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
-    dz = jnp.clip(dz, 1.0, None)
-
-    # Saturation amplitude per level:
-    # As the bulk wave propagates upward its amplitude grows with decreasing
-    # density (the code's assumed WKB invariant rho*sigma^2 = const; this is
-    # NOT the true momentum flux rho*<u'w'>).  Saturation occurs when the
-    # wave-induced velocity perturbation reaches a BULK saturation-amplitude
-    # scale ``sigma_sat = N / m_*`` (a velocity ~ the intrinsic phase speed;
-    # a heuristic, NOT Hines 1997 eq. 9's cutoff wavenumber), constant per
-    # column at fixed N and m_*.  An earlier formulation divided this
-    # by ``rho_ratio = sqrt(rho_sfc/rho) ≥ 1`` ⇒ ``sigma_sat`` *decreased*
-    # with altitude, the opposite of physical expectation: amplitudes
-    # grow with altitude (1/sqrt(rho)) so the cap should remain at least
-    # constant.  The /rho_ratio factor caused premature saturation aloft
-    # and biased the drag deposition lower in the column (audit GWD-B2).
-    sigma_sat = N_full / jnp.clip(config.m_star, 1e-6, None)
-
-    # Per-level WKB growth factor for the bottom-up scan.  Going from
-    # level (k+1) to level k (one step upward), the amplitude grows by
-    # ``sqrt(rho[k+1] / rho[k])`` (energy conservation rho * sigma^2).
-    # The carry already contains the integrated WKB amplitude from the
-    # surface to level k+1, so we multiply by the *inter-level* ratio,
-    # not the cumulative ``sqrt(rho_sfc/rho_k)``.  Multiplying by the
-    # cumulative factor at every step compounds the growth and
-    # over-amplifies the wave by a product of cumulative ratios — a
-    # bug masked in operational use only because the sigma_sat cap
-    # truncates the runaway.
-    rho_ratio_step = jnp.ones_like(rho)
-    rho_ratio_step = rho_ratio_step.at[:, :-1].set(
-        jnp.sqrt(jnp.clip(
-            rho[:, 1:] / jnp.clip(rho[:, :-1], 0.01, None), 1.0, None,  # coeff-ok: density-ratio floor
-        ))
-    )
-
-    # --- Launch level ---------------------------------------------------
-    # A non-orographic wave launched at the SURFACE is born supersaturated
-    # wherever the launch amplitude exceeds ``sigma_sat = N/m_star``, and N
-    # is SMALLEST in the well-mixed boundary layer: on the 2.5 deg AMIP
-    # state 2.0 m/s exceeds the 1.25 m/s sigma_sat at 140 m over 78.5% of
-    # the area, so the wave breaks AT its own launch level (55% of its
-    # momentum below 1 km, only 35% above 12 km).
-    #
-    # Level selection is PER COLUMN, not from a column-mean profile: the
-    # documented units are [Pa], so a nominal 700 hPa source must sit at
-    # 700 hPa over a mountain as well as over the ocean.  (The sibling
-    # e3sm_cam.py:1544 picks ONE global level from the column mean, which
-    # makes its threshold a reference-grid convention rather than a
-    # pressure; codex review 2026-07-31.)  ``jnp.argmin`` keeps the index
-    # TRACED (never ``int(...)``) so the kernel stays jit-safe; the index
-    # itself is not differentiated, matching E3SM's static selection.
-    #
-    # A column whose launch level would be its LOWEST model level gets NO
-    # source rather than a surface launch: that covers high terrain (surface
-    # pressure below ``launch_p``, so every level is closest at the bottom)
-    # and plateau margins where the bottom layer straddles ``launch_p``.
-    #
-    # NB it is NOT enough to zero the drag below the launch level: the
-    # amplitude carry would still propagate up through the BL and SATURATE
-    # there, so the wave would arrive at the launch level already clipped
-    # and the drag ALOFT would be unchanged (verified: bit-identical above
-    # the launch level with output-masking alone).  The carry must be HELD
-    # AT the launch amplitude until the launch level is reached, so the
-    # wave genuinely starts there.
-    # (ncol,) index of the level closest to launch_p in EACH column.
-    _k_launch = jnp.argmin(
-        jnp.abs(p_full - config.launch_p), axis=1
-    ).astype(jnp.int32)
-    # No source where the launch level is the lowest model level.  The scan
-    # gate is ``below = k >= k_launch``, so the sentinel that marks EVERY
-    # level as below-launch is 0 (k >= 0 always holds) — NOT nlev, which
-    # would make the condition never true and mask nothing.
-    _k_launch = jnp.where(
-        _k_launch >= nlev - 1, jnp.int32(0), _k_launch)
-
-    # Bottom-up scan: propagate sigma_gw upward from surface.
-    # ``rho_ratio_step[:, k]`` carries amplitude from level k+1 to level k;
-    # at the surface (k = nlev-1) the step factor is 1 (initial condition).
-    def scan_fn(carry, k_rev):
-        sigma_gw = carry
-        k = nlev - 1 - k_rev
-
-        # Amplitude growth from density decrease (single-layer step)
-        sigma_grown = sigma_gw * rho_ratio_step[:, k]
-
-        # Smooth blend toward the saturation amplitude. ABOVE threshold
-        # (sigma_grown > sigma_sat) this dissipates (sigma_new < sigma_grown,
-        # a sink). BELOW threshold the sigmoid is small but NONZERO, so
-        # sigma_new = sigma_grown*(1-f)+sigma_sat*f is pulled slightly UP
-        # toward sigma_sat (sigma_new > sigma_grown): a weak spurious SOURCE
-        # in the carry. The drag floor clip(., 0, Fmax) zeroes the resulting
-        # negative decrement, so this sub-threshold amplitude gain is neither
-        # drag nor heat -- an unbudgeted carry perturbation of the smooth
-        # (AD) sigmoid, not a physical process (see NUMERICS in the docstring).
-        f_diss = jax.nn.sigmoid(
-            config.doppler_sharpness * (sigma_grown - sigma_sat[:, k])
-        )
-        sigma_new = sigma_grown * (1.0 - f_diss) + sigma_sat[:, k] * f_diss
-
-        # Stress decrement: ``ΔF = ρ · (σ²_grown - σ²_new)`` [Pa].  Under the
-        # code's ASSUMED fixed wave geometry/proportionality ``F ∝ ρσ²`` this
-        # reads as a stress-flux divergence between two levels of the WKB-grown
-        # wave; it is NOT the physical spectral flux ``F = ρ·<u'w'>`` — Hines'
-        # azimuthal spectrum supplies the vector covariance (the ``k/m`` sign/
-        # geometry) that this single-amplitude surrogate lacks.  Acceleration
-        # of the mean flow is then ``-ΔF / (ρ·dz)`` [m/s²].
-        #
-        # An earlier formulation used ``ρ · (σ_grown - σ_new)``, which
-        # has units ``kg/(m²·s)`` rather than Pa, so the downstream
-        # ``accel = drag / (ρ·dz)`` came out as ``1/s`` rather than
-        # ``m/s²`` (audit cycle 2 P1: "Hines drag dimensional
-        # inconsistency").  Operationally the two forms gave near-
-        # identical drag because Fmax saturates the upper levels in
-        # both, but they differ by a factor of ``σ_grown + σ_new``
-        # (typically 2-4×) in the sub-saturation troposphere.
-        #
-        # Clamp the lower bound to zero: the smooth ``f_diss`` sigmoid
-        # does not vanish exactly when ``sigma_grown < sigma_sat``, so
-        # without the floor a small "anti-drag" leak can appear in the
-        # transition region.  GWD on the mean flow is always a sink.
-        drag = (sigma_grown ** 2 - sigma_new ** 2) * rho[:, k]
-        drag = jnp.clip(drag, 0.0, config.Fmax)
-
-        # Launch gate: at and BELOW the launch level (arrays are top-down, so
-        # k >= k_launch) the wave does not exist yet — hold the carry at the
-        # launch amplitude and deposit no drag, so the wave genuinely STARTS
-        # at the launch level with an unclipped amplitude.
-        _below = k >= _k_launch
-        sigma_new = jnp.where(_below, config.total_rms_wind, sigma_new)
-        drag = jnp.where(_below, 0.0, drag)
-
-        # Pin the carry back to the launch-wind precision: under x64 the
-        # Python-float ``config.*`` constants promote ``sigma_new`` to f64, but
-        # the scan carry init (sigma_gw_init) is ``u.dtype`` (f32) — lax.scan
-        # requires carry in/out dtypes to match, so cast the carry output.
-        return sigma_new.astype(sigma_gw.dtype), drag
-
-    # Pin the carry dtype so the scan body stays at the input precision
-    # (defaulting allows x64 to silently promote the launch wind to f64).
-    sigma_gw_init = jnp.full((ncol,), config.total_rms_wind, dtype=u.dtype)
-    _, drag_stack = jax.lax.scan(scan_fn, sigma_gw_init, jnp.arange(nlev))
-    drag_all = drag_stack.T[:, ::-1]  # (ncol, nlev), top-first
-
-    # Convert to acceleration
-    accel = -drag_all / jnp.clip(rho * dz, 1e-10, None)
-
-    # Tendency limiters (E3SM gw_common.F90:642-643).  ``drag_all >= 0`` so
-    # ``accel`` is a pure deceleration along the wind; cap its MAGNITUDE
-    # without touching its sign.  The fixed ``Fmax`` momentum-flux cap divided
-    # by a tiny ``rho*dz`` in thin, low-density upper layers produces
-    # physically-implausible accelerations (hundreds of m/s/day); ``tndmax``
-    # is the absolute ceiling, and ``umcfac*U_mag/dt`` is a LOCAL no-reversal
-    # limiter (Hines is amplitude-based with no explicit phase speed ``c``, so
-    # this is the bulk analog of E3SM's ``umcfac*|c-u|/dt``, not the literal
-    # phase-speed limiter).  AD-safe (``jnp.minimum``/``jnp.abs`` subgradient
-    # ops; no NaN/dead grad).  NOTE: a *post-flux* limiter — where it binds the
-    # column drag no longer exactly equals the stress-flux divergence, but
-    # stays a momentum SINK (no source).
-    tndmax = config.tndmax_per_day / 86400.0
-    accel_cap = jnp.minimum(config.umcfac * U_mag / dt, tndmax)
-    accel = -jnp.minimum(jnp.abs(accel), accel_cap)
-
-    cos_a = u / jnp.clip(U_mag, config.U_mag_floor, None)
-    sin_a = v / jnp.clip(U_mag, config.U_mag_floor, None)
-    du_dt = accel * cos_a
-    dv_dt = accel * sin_a
-
-    # Frictional heating
     dT_dt = -(u * du_dt + v * dv_dt) / constants.c_pd
-
-    # Column dissipation (positive-definite: KE lost by the mean flow)
     eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
-
     return GWDOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, eps_gwd=eps_gwd)

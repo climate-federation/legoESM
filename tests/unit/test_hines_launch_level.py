@@ -1,15 +1,11 @@
-"""Hines non-orographic GWD must be able to launch ABOVE the boundary layer.
+"""Hines non-orographic GWD must launch ABOVE the boundary layer.
 
-Measured failure (2026-07-30, 2.5 deg AMIP state): the launch amplitude
-``total_rms_wind = 2.0 m/s`` exceeds ``sigma_sat = N/m_star`` (1.25 m/s at
-140 m) over 78.5% of the planet's area, because N is SMALLEST in the
-well-mixed boundary layer.  The wave is therefore born supersaturated and
-breaks at its OWN launch level: 55% of its momentum lands below 1 km and
-only 35% above 12 km -- the opposite of what a non-orographic scheme should
-do.  Removing Hines entirely recovered ~26% of the missing surface wind.
-
-``launch_p`` releases the wave at a chosen pressure instead, depositing no
-drag at or below it.  Default 700 hPa; there is no surface launch.
+Measured failure of the former bulk scheme (2026-07-30, 2.5 deg AMIP state): a
+surface launch broke the wave in the weakly stratified boundary layer (55% of its
+momentum below 1 km).  ``launch_p`` releases the spectrum at the level nearest a
+chosen pressure (default 700 hPa; no surface launch).  In the LMDZ Hines port the
+launched flux is taken from the level just below the launch level (the flux
+divergence telescopes), so no drag reaches the levels further down.
 """
 import numpy as np
 import jax
@@ -64,29 +60,24 @@ def test_default_launches_at_700hpa_not_the_surface():
     assert np.abs(du).max() > 0.0, "the default must still deposit drag aloft"
 
 
-def test_launch_level_zeroes_drag_at_and_below_it():
-    """No drag at or below the launch level; the column above still gets it."""
+def test_launch_level_zeroes_drag_below_it():
+    """No drag below launch+1 (the launch flux is taken from level launch+1);
+    the column above still gets drag."""
     out = _run(HinesConfig(launch_p=_LAUNCH_P))
     du = np.asarray(out.du_dt)
     _, _, _, p_full, *_ = _column()
     pmean = np.asarray(p_full).mean(axis=0)
     k_launch = int(np.argmin(np.abs(pmean - _LAUNCH_P)))
-    assert np.allclose(du[:, k_launch:], 0.0), (
-        f"drag must vanish at/below the launch level k={k_launch} "
-        f"(p={pmean[k_launch]:.0f} Pa)")
+    assert np.allclose(du[:, k_launch + 2:], 0.0), (
+        f"drag must vanish below launch+1 (launch k={k_launch}, "
+        f"p={pmean[k_launch]:.0f} Pa)")
     assert np.abs(du[:, :k_launch]).max() > 0.0, (
         "the column above the launch level must still receive drag")
 
 
 def test_wave_starts_UNCLIPPED_at_the_launch_level():
-    """The defect a drag-output mask alone does NOT fix.
-
-    Zeroing the drag below the launch level still lets the amplitude CARRY
-    propagate up through the boundary layer and SATURATE there, so the wave
-    arrives at the launch level already clipped by the BL stratification.
-    A real launch holds the carry at the launch amplitude until the launch
-    level, so the drag ABOVE it cannot depend on the stratification BELOW it.
-    """
+    """The drag ABOVE the launch level cannot depend on the stratification
+    BELOW it (a wave carried up through the boundary layer would break there)."""
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column()
     pmean = np.asarray(p_full).mean(axis=0)
     k = int(np.argmin(np.abs(pmean - _LAUNCH_P)))

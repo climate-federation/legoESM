@@ -2167,19 +2167,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hines-total-rms-wind", type=float, default=None,
                         dest="hines_total_rms_wind",
                         help="Hines (1997) non-orographic GWD launch RMS wind "
-                             "[m/s] (default 2.0). Larger = stronger "
+                             "[m/s] (default 1.0, LMDZ rmscon). Larger = stronger "
                              "non-orographic drag; the low-level extratropical "
                              "westerly bias is the observable lever.")
     parser.add_argument("--hines-launch-p", type=float, default=None,
                         dest="hines_launch_p",
                         help="Hines non-orographic GWD LAUNCH PRESSURE [Pa] "
                              "(default 70000 = 700 hPa; legal 30000-90000). "
-                             "No drag is deposited at or below the launch "
-                             "level.")
-    parser.add_argument("--hines-fmax", type=float, default=None,
-                        dest="hines_Fmax",
-                        help="Hines saturation momentum-flux cap [Pa] "
-                             "(default 0.1).")
+                             "The spectrum is launched at the nearest level; "
+                             "its launch flux is taken from the level just "
+                             "below it.")
     parser.add_argument("--e3sm-cam-source", type=str, default=None,
                         dest="e3sm_cam_source",
                         help="E3SM CAM gravity-wave source: orographic | "
@@ -3192,8 +3189,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.hines_launch_p
             if args.hines_launch_p is not None
             else _EXPERIMENT_DEFAULTS.hines_launch_p),
-        hines_Fmax=(args.hines_Fmax if args.hines_Fmax is not None
-                    else _EXPERIMENT_DEFAULTS.hines_Fmax),
         e3sm_cam_source=(args.e3sm_cam_source
                          if args.e3sm_cam_source is not None
                          else _EXPERIMENT_DEFAULTS.e3sm_cam_source),

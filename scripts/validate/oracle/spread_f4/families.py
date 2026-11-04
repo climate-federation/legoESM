@@ -1,7 +1,8 @@
 """F4 family registry: committed generator + its args, oracle exes to intercept,
 committed fixture, committed test + the test's own metric, tests that compare
 port vs oracle (jit/gap/grad tests excluded: not oracle comparisons)."""
-WT = "/burg/glab/users/pg2328/wt_f4"
+import os
+WT = os.environ.get("F4_WT", "/burg/glab/users/pg2328/wt_f4")   # VOTE V32: stacked-branch worktrees
 OR = "/burg/glab/users/pg2328/oracles"
 OA = "/burg/glab/users/pg2328/oracle_audit"
 B = "/burg/glab/users/pg2328/oracle_audit/f4/build"
@@ -94,3 +95,11 @@ FAMILIES["rayleigh_hs_isca"] = dict(
     exes={"drv_hs"}, fixture=f"{FX}/rayleigh_hs_isca.npz",
     test=f"{WT}/tests/atmosphere/test_rayleigh_hs_isca_oracle.py", fix_attr="FIXTURE",
     metrics=["_rel"], select="matches_isca")
+FAMILIES["hines_lmdz"] = dict(
+    build=f"bash -x {G}/hines_lmdz/build.sh {OR}/LMDZ/modipsl/modeles/LMDZ/libf/phylmd {B}/hines_lmdz",
+    generator=f"{G}/hines_lmdz/make_fixture.py",
+    argv=[f"{B}/hines_lmdz/drv_hines", f"{OR}/LMDZ/modipsl/modeles/LMDZ/libf/phylmd",
+          f"{OA}/simple_gwd_hines_lindzen_rayleigh_spectral/inputs/cols.npz", "{OUT}"],
+    exes={"drv_hines"}, fixture=f"{FX}/hines_lmdz.npz",
+    test=f"{WT}/tests/atmosphere/hydrostatic/unit/test_hines_lmdz_oracle.py", fix_attr="FIXTURE",
+    metrics=["_rel"], select="matches_lmdz")

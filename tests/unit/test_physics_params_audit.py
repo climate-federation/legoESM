@@ -468,7 +468,7 @@ class TestGWDRadiationCloudsAudit:
         from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
         from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
         assert_grad_ok(lambda x: _gwd_call(hines_gwd,
-            HinesConfig()._replace(total_rms_wind=x)), 2.0, "hines.total_rms_wind")
+            HinesConfig()._replace(total_rms_wind=x)), 1.0, "hines.total_rms_wind")
 
     def test_prognostic_spectral_launch_flux(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.prognostic_spectral import prognostic_spectral_gwd
