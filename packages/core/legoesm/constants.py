@@ -239,6 +239,7 @@ ice_ocean_heat_transfer_nemo = 0.0057
 ice_supercool_volume_stop_nemo = 20.0  # [m] icesbc.F90:376-381
 ice_landfast_speed_stop_nemo = 5.0e-3  # [m/s] icesbc.F90:421
 ice_full_cover_margin_nemo = 1.0e-3
+ice_landfast_margin_nemo501 = 1.0e-2  # [-] NEMO 5.0.1 icesbc.F90:412 rn_amax - 0.01
 ice_growth_thickness_stop_nemo = 3.0  # [m]
 
 # WRF v4.8.0 Thompson microphysics (phys/module_mp_thompson.F, commit

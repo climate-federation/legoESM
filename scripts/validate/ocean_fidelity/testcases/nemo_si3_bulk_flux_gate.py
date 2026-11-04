@@ -455,6 +455,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         rho_ocean=s2["rho_ocean"], c_ocean=s2["c_ocean"], T0=s2["T0"],
         ice_epsilon=s2["ice_epsilon"], max_ice_fraction=s2["max_ice_fraction"],
         land_mask=s2["mask"],
+        lead_cut_version="5.0.2",
     )
     for name in ("qsb_ice_bot", "fhld", "qlead"):
         predictions[(2, name)] = other[name]
