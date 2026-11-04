@@ -1187,8 +1187,8 @@ independent review: operator
    and `_si3_traced(a_i, v_i, v_s, t_i, t_s)` is True (traced under a JAX
    transform), replaced the unrolled 50-step `tm_i_acc` (`jpl * nlay_i = 5 * 10`)
    and 25-step `tm_s_acc` (`jpl * nlay_s = 5 * 5`) Python loops with static-trip
-   `jax.lax.scan` carries (`_scan_layer_temp`) over the flattened `(jl, jk)` index
-   sequence `(jl * nlay + jk for jl in range(jpl) for jk in range(nlay))`, citing
+   `jax.lax.scan` carries (`_scan_layer_temp`) over the `(jl, jk)` index sequence
+   (`jnp.moveaxis(t_arr, (3, 2), (0, 1)).reshape(jpl * nlay, jpi, jpj)`), citing
    NEMO 5.0.2 `src/ICE/icevar.F90` lines 181–191 (`tm_i`) and lines 192–200
    (`tm_s`). The eager path (`not _si3_traced(...)`) is preserved untouched.
 
@@ -1200,150 +1200,272 @@ independent review: operator
      `si3_ice_cor_salinity_bounds`, and `si3_var_zapsmall`.
    - Routed `si3_o15_step`'s `_ice_itd_reb` (`packages/ice/legoesm/ice/si3_finalize.py`
      lines 440–594) and `si3_ice_cor` (`packages/ice/legoesm/ice/si3_finalize.py`
-     lines 597–819) through `si3_ice_itd_reb`, `si3_ice_cor_salinity_bounds`, and
+     lines 597–880) through `si3_ice_itd_reb`, `si3_ice_cor_salinity_bounds`, and
      `si3_var_zapsmall` when `_si3_traced(...)` is True and
      `not _plant_strip_transfer_barriers`. The eager path and explicit plant path
      remain unchanged.
 
-3. **Codex candidate audit (isolated reverse tracing, lowering, compilation, and execution under `timeout 120`)**:
-   All five candidate regions from `review_d198r4_codex.log` were measured via
-   `scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_ad_probe.py --reproduce-d198r5`
-   with tracing (`jax.jit(jax.value_and_grad(fn)).trace(...)`), MLIR lowering
+3. **Codex candidate audit (isolated reverse tracing, lowering, compilation, and execution)**:
+   Measured now by running:
+   - Command A (isolated units on recorded inputs):
+     `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 /home/dbalwada/legoESM/.venv/bin/python scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_ad_probe.py --reproduce-d198r5 --output /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch/reproduce_d198r5.json`
+   - Command B (step slices `11..11`, `13..13`, `11..14`):
+     `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 /home/dbalwada/legoESM/.venv/bin/python scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_ad_probe.py --slices 11-11,13-13,11-14 --output /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch/slices_11_13_14.json`
+
+   with tracing (`jax.make_jaxpr(jax.value_and_grad(fn))`), MLIR lowering
    (`.lower()`), XLA compilation (`.compile()`), and execution timed separately:
 
-   | Candidate region | Mode | Tracing (s) | Lowering (s) | Compilation (s) | Lower+Compile (s) | Execute (s) | First-call total (s) | Disposition |
-   | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-   | `si3_var_agg(kn=2)` (`si3_orca2_state.py` lines 1176–1211, 50+25 steps) | unrolled | `0.1599` | `0.2194` | `20.9963` | `21.2158` | `0.0040` | `21.3797` | **Converted (Primary)** |
-   | `si3_var_agg(kn=2)` (`si3_orca2_state.py` lines 1176–1211, 50+25 steps) | scan | `0.0954` | `0.0562` | `1.3900` | `1.4461` | `0.0028` | `1.5443` | **Converted (`14.7x` lower+compile speedup)** |
-   | `si3_o16_step` (`si3_finalize.py` lines 1018–1182, calls `si3_var_agg(kn=2)`) | unrolled | `0.6929` | `0.2640` | `42.2690` | `42.5330` | `0.0252` | `43.2511` | **Converted via Primary** |
-   | `si3_o16_step` (`si3_finalize.py` lines 1018–1182, calls `si3_var_agg(kn=2)`) | scan | `0.4830` | `0.1112` | `6.1436` | `6.2547` | `0.0086` | `6.7463` | **Converted (`6.8x` lower+compile speedup)** |
-   | `si3_o15_step` (`si3_finalize.py` lines 440–819: `_ice_itd_reb` + `si3_ice_cor` 50-step `sz_i` + `zapsmall`) | unrolled | `0.9037` | `0.7611` | `73.3627` | `74.1238` | `345.9344` (`>120 s`!) | `420.9619` | **Converted (Secondary)** |
-   | `si3_o15_step` (`si3_finalize.py` lines 440–819: `_ice_itd_reb` + `si3_ice_cor` 50-step `sz_i` + `zapsmall`) | traced `fori_loop` | `0.5881` | `0.2074` | `5.9396` | `6.1470` | `0.0097` | `6.7448` | **Converted (`12.1x` lower+compile, `35,663x` execute speedup)** |
-   | `si3_o15_step` slice `11..11` in `si3_o17_step` (`4` inputs) | traced `fori_loop` | `0.4606` | `0.1811` | `4.4694` | `4.6505` | `0.0063` | `5.1173` | **Verified via `--slices 11-11`** |
-   | `si3_o16_step` slice `13..13` in `si3_o17_step` (`4` inputs) | scan | `0.3886` | `0.0956` | `5.1079` | `5.2035` | `0.0060` | `5.5982` | **Verified via `--slices 13-13`** |
-   | `si3_o15..o17` tail slice `11..14` in `si3_o17_step` (`4` inputs) | traced `fori_loop` + scan | `0.8588` | `0.2896` | `10.1725` | `10.4622` | `0.0097` | `11.3307` | **Verified via `--slices 11-14` (was `118.43 s` in r4)** |
-   | O12 10-step pond permeability loop (`si3_thd_pnd.py` lines 247–260) | unrolled | `0.0363` | `0.0117` | `0.2233` | `0.2351` | `0.0005` | `0.2719` | **Not converted (`0.235 s` compile, `0.0005 s` exec)** |
-   | O7/O9 10-step layer enthalpy sum (`si3_orca2_state.py` lines 768–777, 997–998) | unrolled | `0.0211` | `0.0076` | `0.0884` | `0.0960` | `0.0004` | `0.1175` | **Not converted (`0.096 s` compile, `0.0004 s` exec)** |
+   | Candidate region | Mode | Tracing (s) | Lowering (s) | Compilation (s) | Lower+Compile (s) | Trace+Lower+Compile (s) | Execute (s) | VG JAXPR (top / rec) | Post-opt HLO | Disposition |
+   | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+   | `si3_var_agg(kn=2)` (`si3_orca2_state.py` lines 1176–1211, 50+25 steps) | unrolled (compile-only) | `1.407` | `0.654` | `28.743` | `29.397` | `30.804` | — (hangs `>10,800 s` in r4) | `8,419 / 22,472` | `140,389` | **Converted (Primary)** |
+   | `si3_var_agg(kn=2)` (`si3_orca2_state.py` lines 1176–1211, 50+25 steps) | scan | `0.350` | `0.324` | `2.169` | `2.493` | `2.843` | `0.0019` | `2,291 / 7,091` | `21,491` | **Converted (`11.8x` lower+compile speedup; executes in `1.9 ms`)** |
+   | `si3_o16_step` (`si3_finalize.py` lines 1018–1182, calls `si3_var_agg(kn=2)`) | unrolled (compile-only) | `2.375` | `1.185` | `46.358` | `47.544` | `49.918` | — (hangs `>10,800 s` in r4) | `12,740 / 33,151` | `205,510` | **Converted via Primary** |
+   | `si3_o16_step` (`si3_finalize.py` lines 1018–1182, calls `si3_var_agg(kn=2)`) | scan | `1.203` | `0.675` | `5.821` | `6.496` | `7.698` | `0.0067` | `6,612 / 17,770` | `69,020` | **Converted (`7.3x` lower+compile speedup; executes in `6.7 ms`)** |
+   | `si3_o15_step` (`si3_finalize.py` lines 440–906: `_ice_itd_reb` + `si3_ice_cor` 50-step `sz_i` + `zapsmall`) | unrolled (compile-only) | `4.691` | `1.851` | `72.734` | `74.586` | `79.277` | — | `26,360 / 60,691` | `548,378` | **Converted (Secondary)** |
+   | `si3_o15_step` (`si3_finalize.py` lines 440–906: `_ice_itd_reb` + `si3_ice_cor` 50-step `sz_i` + `zapsmall`) | traced `fori_loop` | `1.764` | `1.380` | `7.339` | `8.719` | `10.483` | `0.0090` | `2,654 / 12,592` | `59,118` | **Converted (`8.6x` lower+compile speedup; executes in `9.0 ms`)** |
+   | O15 `_ice_itd_reb` (`si3_finalize.py` lines 440–594) | unrolled | `2.948` | `1.032` | `8.873` | `9.905` | `12.853` | `0.0049` | `13,546 / 29,362` | `82,473` | **Converted as part of Secondary** |
+   | O15 `_ice_itd_reb` (`si3_finalize.py` lines 440–594) | traced `fori_loop` | `1.028` | `1.504` | `5.249` | `6.752` | `7.780` | `0.0061` | `1,405 / 8,409` | `45,440` | **Converted (`1.47x` lower+compile speedup)** |
+   | O15 50-step salinity bounds (`itd.py` lines 1344–1404) | unrolled | `1.739` | `0.730` | `43.233` | `43.963` | `45.702` | `0.0043` | `9,667 / 24,937` | `275,966` | **Converted as part of Secondary** |
+   | O15 50-step salinity bounds (`itd.py` lines 1344–1404) | traced `fori_loop` | `0.062` | `0.125` | `0.480` | `0.605` | `0.667` | `0.0015` | `50 / 538` | `2,882` | **Converted (`72.7x` lower+compile speedup)** |
+   | `rung_11_o15_cor` slice `11..11` in `si3_o17_step` | traced `fori_loop` | `2.102` | `1.788` | `8.095` | `9.883` | `11.985` | `0.0184` | `4,184 / 14,228` | `61,576` | **Verified via `--slices 11-11` (was `78.16 s` lower+compile in r4)** |
+   | `rung_13_o16_update_flx` slice `13..13` in `si3_o17_step` | scan | `1.723` | `0.794` | `6.495` | `7.289` | `9.012` | `0.0145` | `8,521 / 19,895` | `75,565` | **Verified via `--slices 13-13` (was `44.87 s` lower+compile, `>10,800 s` exec in r4)** |
+   | `slice_11_14_o15_cor_to_o16_update_tau` tail slice `11..14` in `si3_o17_step` | traced `fori_loop` + scan | `4.226` | `2.249` | `16.680` | `18.930` | `23.155` | `0.0232` | `12,902 / 35,537` | `140,158` | **Verified via `--slices 11-14` (was `125.83 s` lower+compile in r4)** |
+   | O12 10-step pond permeability loop (`si3_thd_pnd.py` lines 247–260) | unrolled | `0.114` | `0.099` | `0.464` | `0.563` | `0.677` | `0.0006` | `1,265 / 2,256` | `5,150` | **Not converted (`0.563 s` lower+compile, `0.0006 s` exec)** |
+   | `fortran_sum_categories` 10-step sum (`si3_orca2_state.py` lines 768–777) | unrolled | `0.036` | `0.058` | `0.339` | `0.397` | `0.434` | `0.0004` | `299 / 931` | `2,827` | **Not converted (`0.397 s` lower+compile, `0.0004 s` exec)** |
+   | `si3_var_glo2eqv` 10-step `s_i` sum (`si3_orca2_state.py` lines 997–998) | unrolled | `0.048` | `0.046` | `0.392` | `0.437` | `0.486` | `0.0004` | `387 / 1,017` | `764` | **Not converted (`0.437 s` lower+compile, `0.0004 s` exec)** |
 
 ### Proofs
 
-1. **Proof 1 — Forward bits of O4–O16 and full O17 step (1,209 leaves) unchanged vs `3dd560f7f05f` (eager and `jax.jit`, signed zeros and NaN bits included) + negative-zero fixture**:
-   - **Full O17 step (`1,209` leaves)**:
-     - Eager (`si3_orca2_o17_step`): `0` raw `uint64` bit diffs across all `1,209`
-       leaves vs `3dd560f7f05f` eager (`sha256 = 2a1e9da3ab8fb24f44186c944132c94e864939e6a78c30a6b8429d0d4504532f`,
-       preserving all `17,734` `-0.0` entries and `44` NaNs bit-for-bit).
-     - Compiled (`jax.jit(si3_orca2_o17_step)`): `0` raw `uint64` bit diffs across
-       all `1,209` leaves vs `3dd560f7f05f` `jax.jit` (`sha256 = e9ac6d417425adbc424ce8470041e3fe980e57d5e9891449d9f8586ac6a9052c`,
-       preserving all `17,734` `-0.0` entries and `44` NaNs bit-for-bit;
-       uncached first-call `jax.jit` forward compile+run improved from `80.02 s`
-       on `3dd560f7f05f` to `67.39 s` on Round 5).
-   - **Subphase fixtures (`si3_var_agg(kn=2)`, `si3_o15_step`, `si3_o16_step`)**:
-     Pinned in `tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py`:
-     - `si3_var_agg(kn=2)` on `si3_o16_step` inputs (`21` float64 output leaves):
-       `eager == jax.jit == 3dd560f7f05f` with `0` raw bit diffs
-       (`sha256 = 7e9e4c30fb8800c9f5f87d0fa7703097d7f4616c218d9699bb725517777e7bc7`).
-     - `si3_o15_step` (`103` output leaves):
-       `eager == jax.jit == 3dd560f7f05f` with `0` raw bit diffs
-       (`sha256 = d16fb687141990f4593ab6bf83fbda1b03c173c1aa3640ac3b7ecba51065785d`,
-       preserving all `69` `-0.0` entries across `13` leaves).
-     - `si3_o16_step` (`66` output leaves):
-       `eager == jax.jit == 3dd560f7f05f` with `0` raw bit diffs
-       (`sha256 = 95a889ca4c0940b30bb5084e191dcdeff20cc66727cb59337d31ef4c36d4a58a`).
-   - **Negative-zero fixture (`build_negative_zero_var_agg_fixture`)**:
-     Constructed in `scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_ad_probe.py`
-     and tested in `test_si3_var_agg_negative_zero_fixture_survives_eager_and_jit`:
-     injects IEEE-754 `-0.0` (`0x8000000000000000`) into every input leaf of
-     `si3_var_agg(kn=2)` at cell `(5, 7)` (`a_i=-0.0`, `v_i=-0.0`, `v_s=-0.0`,
-     `t_i=-0.0`, `t_s=-0.0`, `e_i=-0.0`, `e_s=-0.0`, `sv_i=-0.0`, `a_ip=-0.0`,
-     `v_ip=-0.0`, `v_il=-0.0`, `t_su=-0.0`, `oa_i=-0.0`, plus `-0.0` at `(6, 8)`
-     where `at_i == +0.0` and at `(7, 9)` where `a_i > 0` and `v_i == -0.0`).
-     All `17` negative-zero output entries across `15` leaves (`vt_i`, `vt_s`,
-     `st_i`, `at_i`, `ato_i`, `et_i`, `et_s`, `tm_su`, `tm_si`, `om_i`, `sm_i`,
-     `at_ip`, `hm_ip`, `vt_ip`, `vt_il`) survive identically in eager and
-     `jax.jit` (`0` raw `uint64` bit diffs,
-     `sha256 = 7fb0616b803f7b0d620776479e65a2a89df712d166d5e03923a9b3dddb466c41`).
+1. **Proof 1 — Forward bits of O4–O16 and full O17 step (`1,209` leaves, `1,187` float64 leaves) unchanged vs `3dd560f7f05f` (eager and `jax.jit`, signed zeros and NaN bits included) + negative-zero fixture**:
+   - **Full O17 step (`1,209` leaves, `1,187` float64 leaves)**:
+     Measured now by running:
+     `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 /home/dbalwada/legoESM/.venv/bin/python -c 'import hashlib, json, time; import jax, numpy as np; from legoesm.ice import si3_finalize as finalize_mod, si3_orca2_state as state_mod; from legoesm.ice.si3_o17 import SI3O17LiveForcing, si3_o17_step; from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_ad_probe import DEFAULT_MASTER, _case, _is_float_leaf; entry, forcing, card = _case(DEFAULT_MASTER); kt, dyn = int(forcing.kt), forcing[1:]; run_step = lambda e, d: si3_o17_step(e, SI3O17LiveForcing(kt, *d), card); ...'`
+     - Eager (`si3_o17_step`): `0` raw `uint64` bit diffs across all `1,209`
+       leaves (`1,187` float64 leaves) vs `3dd560f7f05f` eager
+       (`sha256 = 2855020ad789d59b64374976c29adccb4a6ebf776471cecba08f62974017ae7b`,
+       preserving all `17,734` `-0.0` entries and `44` NaNs bit-for-bit; `73.521 s`).
+     - Compiled (`jax.jit(si3_o17_step)`): `0` raw `uint64` bit diffs across
+       all `1,209` leaves (`1,187` float64 leaves) between Round 5 `jax.jit` and
+       `3dd560f7f05f` unrolled `jax.jit`
+       (`sha256 = 980bc967d48b103c2ee13733cf165e5ca7071c322ebf0696cd64ebe0a285e4fe`,
+       preserving all `17,734` `-0.0` entries and `44` NaNs bit-for-bit; `70.907 s`).
+   - **Recorded subphase parity (`si3_var_agg(kn=2)`, `si3_o15_step`, `si3_o16_step`) and `build_negative_zero_var_agg_fixture` in `nemo_si3_o17_ad_probe.py --reproduce-d198r5`**:
+     Measured now by running Command A above (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_ad_probe.py --reproduce-d198r5`):
+     - `var_agg_recorded_eager_vs_scan_jit` and `var_agg_recorded_unrolled_jit_vs_scan_jit`:
+       `21` float64 output leaves, `0` raw `uint64` bit mismatches (`569` `+0.0`,
+       `0` `-0.0`, `0` NaNs).
+     - `si3_o15_step_recorded_eager_vs_traced_jit`:
+       `155` float64 output leaves, `0` raw `uint64` bit mismatches (`26,686` `+0.0`,
+       `4,422` `-0.0`, `5` NaNs).
+     - `si3_o16_step_recorded_eager_vs_scan_jit`:
+       `169` float64 output leaves, `0` raw `uint64` bit mismatches (`25,352` `+0.0`,
+       `4,416` `-0.0`, `9` NaNs).
+     - `build_negative_zero_var_agg_fixture` (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_ad_probe.py`
+       lines 1453–1530): injects IEEE-754 `-0.0` (`0x8000000000000000`) into all
+       `16` input arrays of `si3_var_agg(kn=2)` (`318` total `-0.0` input entries at
+       `(nlay_i, nlay_s) = (10, 5)`: `a_i: 7`, `a_ip: 7`, `a_ip_eff: 4`, `e_i: 49`,
+       `e_s: 24`, `oa_i: 8`, `sv_i: 5`, `szv_i: 98`, `t_i: 49`, `t_s: 24`,
+       `t_si: 8`, `t_su: 8`, `v_i: 7`, `v_il: 8`, `v_ip: 8`, `v_s: 4`, plus
+       interior cell `(2, 2)` where `-1.0e-300 / 1.0e30` underflows to `-0.0`).
+       In both `var_agg_neg_zero_eager_vs_scan_jit` and
+       `var_agg_neg_zero_unrolled_jit_vs_scan_jit`, all `18` surviving `-0.0`
+       output entries across `12` fields (`at_ip_eff: 1`, `et_i: 1`, `et_s: 1`,
+       `hm_il: 2`, `hm_ip: 2`, `om_i: 2`, `sm_i: 2`, `st_i: 1`, `tm_i: 1`,
+       `tm_s: 1`, `tm_si: 2`, `tm_su: 2`) survive identically with `0` raw `uint64`
+       bit mismatches across all `21` float64 output leaves (`540` `+0.0`,
+       `18` `-0.0`, `0` NaNs).
+   - **Committed unit-test forward digests and negative-zero checks (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py`)**:
+     Measured now by running:
+     `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python -m pytest tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py -v`
+     (`4 passed in 50.52s`):
+     - `test_traced_var_agg_kn2_keeps_parent_forward_bits_and_negative_zeros`
+       (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 253–291):
+       verifies across `(nlay_i, nlay_s) = (3, 2)` (`148` negative-zero input
+       entries across all `16` input arrays) and `(10, 5)` (`318` negative-zero
+       input entries across all `16` input arrays) that all `18` surviving `-0.0`
+       output entries across the `12` fields in `SURVIVING_NEG_ZERO_FIELDS`
+       (`at_ip_eff`, `et_i`, `et_s`, `hm_il`, `hm_ip`, `om_i`, `sm_i`, `st_i`,
+       `tm_i`, `tm_s`, `tm_si`, `tm_su`) survive identically in eager, `jax.jit`
+       (scan), and unrolled `jax.jit`, with exact digest
+       `PARENT_VAR_AGG_DIGEST = "587141e538eafe408a2cee07111a5ad3c6c0b96ac28ff571b60a4ff9527ee2ad"`.
+     - `test_traced_o15_step_keeps_parent_forward_bits`
+       (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 294–318):
+       verifies across `(nlay_i, nlay_s) = (3, 2)` and `(10, 5)` that eager,
+       `jax.jit` (traced `fori_loop`), and unrolled `jax.jit` match
+       `PARENT_O15_DIGEST = "193e003a7fe31bbf87ab7495e4406f19a032f80925470bf1a5705ced94c6894b"`
+       with `0` raw `uint64` bit diffs.
 
-2. **Proof 2 — Planted loop-order swap and planted barrier removal fail `test_si3_d198_r5_var_agg_o15_traced.py`**:
-   - **Plant 1 (loop-order swap in `si3_var_agg(kn=2)`)**:
+2. **Proof 2 — Planted loop-order swap and planted barrier removal fail `tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py`**:
+   Measured now by running `pytest tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` under each plant and restoring `packages/`:
+   - **Plant 1 (loop-order swap `(jl, jk)` -> `(jk, jl)` in `_scan_layer_temp`)**:
      In `packages/ice/legoesm/ice/si3_orca2_state.py` lines 1185–1188, swapping
-     the scan index table order from `(jl, jk)`:
-     `tuple(jl * nlay + jk for jl in range(jpl) for jk in range(nlay))`
-     to `(jk, jl)`:
-     `tuple(jl * nlay + jk for jk in range(nlay) for jl in range(jpl))`
-     causes `test_si3_var_agg_kn2_eager_equals_jit_and_parent_digest` to FAIL
-     (`AssertionError: si3_var_agg(kn=2) eager vs jit raw-bit mismatch`,
-     compiled digest shifts from
-     `7e9e4c30fb8800c9f5f87d0fa7703097d7f4616c218d9699bb725517777e7bc7` to
-     `143944c1febff4c8c0b2db7e654fcc54e29f7376832ea8283611cc507ce8b10e`).
-     Restored and verified clean.
+     `t_seq` and `v_seq` from `(jl, jk)` order:
+     `t_seq = jnp.moveaxis(t_arr, (3, 2), (0, 1)).reshape(jpl * nlay, jpi, jpj)`
+     `v_seq = jnp.broadcast_to(jnp.moveaxis(v_arr, 2, 0)[:, None, :, :], (jpl, nlay, jpi, jpj)).reshape(jpl * nlay, jpi, jpj)`
+     to `(jk, jl)` order:
+     `t_seq = jnp.moveaxis(t_arr, (2, 3), (0, 1)).reshape(jpl * nlay, jpi, jpj)`
+     `v_seq = jnp.broadcast_to(jnp.moveaxis(v_arr, 2, 0)[None, :, :, :], (nlay, jpl, jpi, jpj)).reshape(jpl * nlay, jpi, jpj)`
+     with command:
+     `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python -m pytest tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py -k test_traced_var_agg_kn2_keeps_parent_forward_bits_and_negative_zeros -v`
+     fails `test_traced_var_agg_kn2_keeps_parent_forward_bits_and_negative_zeros` (`exit=1`):
+     `FAILED tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py::test_traced_var_agg_kn2_keeps_parent_forward_bits_and_negative_zeros`
+     `E AssertionError: assert ('587141e538eafe408a2cee07111a5ad3c6c0b96ac28ff571b60a4ff9527ee2ad', '143944c1febff4c8c0b2db7e654fcc54e29f7376832ea8283611cc507ce8b10e') == ('587141e538eafe408a2cee07111a5ad3c6c0b96ac28ff571b60a4ff9527ee2ad', '587141e538eafe408a2cee07111a5ad3c6c0b96ac28ff571b60a4ff9527ee2ad')`.
+     Restored and verified `git status --porcelain` clean on `packages/`.
    - **Plant 2a (barrier removal in `si3_var_agg`)**:
-     In `packages/ice/legoesm/ice/si3_orca2_state.py` line 1119, removing `sr(...)`
-     around `t_su * a_i`:
-     `jnp.sum(t_su * a_i, axis=0)` instead of `jnp.sum(sr(t_su * a_i), axis=0)`
-     causes `test_si3_var_agg_kn2_eager_equals_jit_and_parent_digest` to FAIL
-     (`AssertionError: si3_var_agg(kn=2) eager vs jit raw-bit mismatch`,
-     compiled digest shifts to
-     `5d3f3d5a36a39bdfdd01777fa30901e337f2e051391cf8d2958ac8810f1502ee`).
-     Restored and verified clean.
+     In `packages/ice/legoesm/ice/si3_orca2_state.py` line 1119, replacing
+     `tm_su_num = fortran_sum_categories(sr(t_su * a_i), axis=-1)` with
+     `tm_su_num = fortran_sum_categories(t_su * a_i, axis=-1)` under the same
+     `pytest -k test_traced_var_agg_kn2_keeps_parent_forward_bits_and_negative_zeros`
+     command fails `test_traced_var_agg_kn2_keeps_parent_forward_bits_and_negative_zeros` (`exit=1`):
+     `FAILED tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py::test_traced_var_agg_kn2_keeps_parent_forward_bits_and_negative_zeros`
+     `E AssertionError: assert ('587141e538eafe408a2cee07111a5ad3c6c0b96ac28ff571b60a4ff9527ee2ad', '5d3f3d5a36a39bdfdd01777fa30901e337f2e051391cf8d2958ac8810f1502ee') == ('587141e538eafe408a2cee07111a5ad3c6c0b96ac28ff571b60a4ff9527ee2ad', '587141e538eafe408a2cee07111a5ad3c6c0b96ac28ff571b60a4ff9527ee2ad')`.
+     Restored and verified `git status --porcelain` clean on `packages/`.
    - **Plant 2b (barrier removal in `si3_ice_cor_salinity_bounds` used by `si3_o15_step`)**:
-     In `packages/ice/legoesm/ice/itd.py` line 1375, removing `sr(...)` around
-     `s_i_new[:, :, jl]`:
-     `s_i_max = jnp.minimum(s_i_new[:, :, jl], rn_simax)` instead of
-     `s_i_max = jnp.minimum(sr(s_i_new[:, :, jl]), rn_simax)`
-     causes `test_si3_o15_ and_o16_eager_equals_jit_and_parent_digest` to FAIL
-     (`AssertionError: si3_o15_step eager vs jit raw-bit mismatch`,
-     compiled digest shifts from
-     `d16fb687141990f4593ab6bf83fbda1b03c173c1aa3640ac3b7ecba51065785d` to
-     `48a1fc2b4689154faccf57e8872689a22eac72be43544f3c5e82f8f71350cb69`).
-     Restored and verified clean.
+     In `packages/ice/legoesm/ice/itd.py` line 1375, replacing
+     `dsz = sr(szv_jk - szv_old)` with `dsz = szv_jk - szv_old` under:
+     `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python -m pytest tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py -k test_traced_o15_step_keeps_parent_forward_bits -v`
+     fails `test_traced_o15_step_keeps_parent_forward_bits` (`exit=1`):
+     `FAILED tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py::test_traced_o15_step_keeps_parent_forward_bits`
+     `E AssertionError: assert ('193e003a7fe31bbf87ab7495e4406f19a032f80925470bf1a5705ced94c6894b', 'b51c9336794dc4e0a413f86d38dacebb86c946b4c0c27f0f0ff02312639a0afb') == ('193e003a7fe31bbf87ab7495e4406f19a032f80925470bf1a5705ced94c6894b', '193e003a7fe31bbf87ab7495e4406f19a032f80925470bf1a5705ced94c6894b')`.
+     Restored and verified `git status --porcelain` clean on `packages/`.
 
-3. **Proof 3 — Per-entry-relative central FD checks on `si3_var_agg(kn=2)` outputs (`rtol=1e-6`)**:
-   - `test_si3_var_agg_kn2_per_entry_fd_gradients` checks reverse-mode AD cotangents
-     against central finite differences (`eps = 1e-6`) on `tm_i` and `tm_s` with
-     respect to `t_i`, `v_i`, `t_s`, and `v_s` across all active cells (`8`
-     input-output pairs): baseline passes with max per-entry relative errors
-     `1.954e-10` (`t_i -> tm_i`), `3.679e-11` (`v_i -> tm_i`),
-     `1.519e-10` (`t_s -> tm_s`), `3.211e-11` (`v_s -> tm_s`).
-   - **Plant 3 (`jax.lax.stop_gradient` on `_scan_layer_temp` carry)**:
-     In `packages/ice/legoesm/ice/si3_orca2_state.py` line 1193, wrapping
-     `jax.lax.stop_gradient(acc_next)` fails `4` FD cases (`t_i -> tm_i` rel err
-     `1.0`, `v_i -> tm_i` rel err `0.08629`, `t_s -> tm_s` rel err `1.0`,
-     `v_s -> tm_s` rel err `0.10824`). Restored and verified clean.
-   - **Plant 4 (`1 + 1e-5` tangent scaling on `_scan_layer_temp` carry)**:
-     In `packages/ice/legoesm/ice/si3_orca2_state.py` line 1193, scaling tangent
-     by `1.0 + 1e-5` via `acc_s + (1.0 + 1e-5) * (acc_next - acc_s)` fails `4`
-     FD cases (`t_i -> tm_i` rel err `8.000e-5`, `v_i -> tm_i` rel err `5.323e-5`,
-     `t_s -> tm_s` rel err `8.000e-5`, `v_s -> tm_s` rel err `1.505e-4`, all
-     exceeding `rtol=1e-6`). Restored and verified clean.
+3. **Proof 3 — Per-entry-relative central FD checks on `si3_var_agg(kn=2)` and `si3_o15_step` outputs (`relative <= 1.0e-6`, `g != 0.0`, no absolute floor)**:
+   Measured now by running:
+   `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python -m pytest tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py -v`
+   (`4 passed in 50.52s`):
+   - **`test_traced_var_agg_kn2_reverse_mode_matches_central_differences` (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 321–397)**:
+     Evaluates reverse-mode AD cotangents `g` and central finite differences
+     `fd = (f(x + h e_k) - f(x - h e_k)) / (2 h)` with `h = 1.0e-4 * abs(x0)`
+     and `relative = abs(g - fd) / max(abs(g), abs(fd)) <= 1.0e-6` (`g != 0.0`,
+     no absolute floor) separately on each of the `21` `SI3AggregatedVars`
+     output fields (`tm_i`, `tm_s`, and all `19` other aggregated fields) with
+     respect to every non-zero entry across all `16` input arrays in both
+     interior cells `(3, 2)` and `(2, 2)`, as well as on the weighted objective:
+     - **Interior cell `(3, 2)`**: **0 exclusions**. All `210` non-zero
+       `(out_field, in_name, index)` entries pass `relative <= 1.0e-6` (`20`
+       active entries on `tm_i` wrt `v_i` and `t_i`, max rel err `1.294e-9`;
+       `15` active entries on `tm_s` wrt `v_s` and `t_s`, max rel err
+       `1.355e-9`; `175` active entries across the other `19` aggregated fields,
+       max rel err `7.464e-9`). On the weighted objective across all `120`
+       entries of cell `(3, 2)`, all `115` active entries pass `relative <= 1.0e-6`
+       (max rel err `1.448e-9`) and the `5` entries of `sv_i[3, 2, 0..4]` have
+       exact structural zero (`AD == FD == 0.0`) because `si3_var_agg` reads
+       `szv_i`, not `sv_i`.
+     - **Interior cell `(2, 2)` (the intentional `-1.0e-300 / 1.0e30 -> -0.0` underflow cell)**:
+       All `65` non-excluded active `(out_field, in_name, index)` entries pass
+       `relative <= 1.0e-6` (max rel err `4.236e-9`). The `19` entries in
+       `VAR_AGG_CELL22_EXCLUDED` (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py`
+       lines 80–103) are explicitly named and verified to have identical
+       `AD_head == AD_parent` and `FD_head == FD_parent == 0.0` at parent
+       `3dd560f7f05f`: `13` entries where `a_i[2,2,0] = v_i[2,2,0] = a_ip[2,2,0] = 1.0`
+       is added to category-1 `1.0e30` (`1.0e30 + (1.0 +- 1.0e-4) == 1.0e30` in
+       IEEE-754 float64, so `FD == 0.0` while `AD` is `+-1.0e-60` or `+-2.7315e-38`
+       in both HEAD and `3dd560f7f05f`), and `6` entries (`t_su[2,2,0]`,
+       `t_si[2,2,0]`, `oa_i[2,2,0]`, `v_ip[2,2,0]`, `v_il[2,2,0]`,
+       `szv_i[2,2,0,0]`, all set to `-1.0e-300`) where division by `1.0e30`
+       underflows to `-0.0` in float64 (`FD == 0.0` while `AD == 1.0e-30` or
+       `9.17e-30` in both HEAD and `3dd560f7f05f`).
+   - **`test_traced_o15_step_reverse_mode_matches_central_differences` (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 400–454)**:
+     Scans all `1,057` non-zero interior entries across the `7` active input
+     fields `("a_i", "v_i", "v_s", "oa_i", "v_ip", "e_i", "szv_i")` on
+     `_o15_fixture(monkeypatch, 3, 2)` and also checks `25` individual
+     `(in_name, in_idx, out_name, out_idx)` output-entry pairs
+     (`O15_OUTPUT_ENTRY_FD_CASES`, `tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py`
+     lines 163–191) where each single output scalar `out_field[out_idx]` is
+     differentiated and compared against its own central difference with no
+     cross-field or cross-category reduction:
+     - All `1,007` non-excluded active input entries (and all `25` individual
+       output-entry pairs) pass `relative <= 1.0e-6` (`max_rel = 1.145e-7`,
+       and `AD_head` vs `AD_parent` at `3dd560f7f05f` matches to `max_rel = 2.619e-15`).
+     - `11` entries in `O15_EXACT_ZERO_ENTRIES` (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py`
+       lines 108–120: `a_i[(2,2,0),(2,2,1),(3,2,4)]`, `v_s[(2,2,0),(2,2,1)]`,
+       `oa_i[(2,2,0),(2,2,1),(3,2,4)]`, `v_ip[(2,2,0),(2,2,1),(3,2,4)]`) have
+       exact structural zero (`AD == FD == 0.0` in both HEAD and `3dd560f7f05f`)
+       because those categories are zapsmalled (`v_i <= 1.0e-11 < 1.0e-10`) and
+       `a_i`, `oa_i`, `v_ip` do not enter the residual mass/heat/salt fluxes
+       when `v_s == 0`.
+     - `39` entries in `O15_ZAPSMALL_EXCLUDED_ENTRIES`
+       (`tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py` lines 121–162:
+       `v_i[(2,2,0),(2,2,1),(3,2,4)]`, `v_s[(3,2,4)]`, and `e_i`/`szv_i` layers
+       `0..2` in `(2,2,*,0)`, `(2,2,*,1)`, `(3,2,*,4)`) are in categories
+       zapsmalled by `si3_var_zapsmall` (`v_i <= 1.0e-11 < 1.0e-10`) where the
+       input magnitude is `abs(x0) <= 1.0e-11`, so the relative step
+       `h = 1.0e-4 * abs(x0) <= 1.0e-15` changes `wfx_res`/`hfx_res`/`sfx_res`
+       near the `O(1) - O(1e3)` float64 rounding floor; every one of the `39`
+       entries has `AD_head == AD_parent` and `FD_head == FD_parent` at
+       `3dd560f7f05f` (recorded in `O15_ZAPSMALL_EXCLUDED_PARENT_TABLE`).
+   - **Planted AD failures (`stop_gradient` and `1 + 1e-5` tangent scaling)**:
+     Measured now by running `pytest tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py`
+     under each plant and restoring `packages/`:
+     - **Plant 3a (`jax.lax.stop_gradient` on `_scan_layer_temp` carry)**:
+       In `packages/ice/legoesm/ice/si3_orca2_state.py` line 1193, replacing
+       `return jnp.where(has_vol, acc_next, rt0), None` with
+       `return jax.lax.stop_gradient(jnp.where(has_vol, acc_next, rt0)), None`
+       under:
+       `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python -m pytest tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py -k test_traced_var_agg_kn2_reverse_mode_matches_central_differences -v`
+       fails `test_traced_var_agg_kn2_reverse_mode_matches_central_differences` (`exit=1`):
+       `FAILED tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py::test_traced_var_agg_kn2_reverse_mode_matches_central_differences`
+       `E AssertionError: assert [('tm_i', 'v_...973, 1.0), ...] == []`
+       `E Left contains 54 more items, first extra item: ('tm_i', 'v_i', (3, 2, 0), 0.0, 1.3893957293976973, 1.0)`.
+       Restored and verified `git status --porcelain` clean on `packages/`.
+     - **Plant 3b (`1 + 1e-5` tangent scaling on `_scan_layer_temp` carry)**:
+       In `packages/ice/legoesm/ice/si3_orca2_state.py` line 1193, scaling the
+       step carry tangent by `1.0 + 1.0e-5` via
+       `_y = jnp.where(has_vol, acc_next, rt0); return jax.lax.stop_gradient(_y) + (1.0 + 1.0e-5) * (_y - jax.lax.stop_gradient(_y)), None`
+       under the same `pytest -k test_traced_var_agg_kn2_reverse_mode_matches_central_differences`
+       command fails `test_traced_var_agg_kn2_reverse_mode_matches_central_differences` (`exit=1`):
+       `FAILED tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py::test_traced_var_agg_kn2_reverse_mode_matches_central_differences`
+       `E AssertionError: assert [('tm_i', 'v_...346489), ...] == []`
+       `E Left contains 54 more items, first extra item: ('tm_i', 'v_i', (3, 2, 0), 1.3997521885923163, 1.3893957293976973, 0.007398780388346489)`.
+       Restored and verified `git status --porcelain` clean on `packages/`.
+     - **Plant 4a (`jax.lax.stop_gradient` on `_si3_loop` carry used by `si3_o15_step`)**:
+       In `packages/ice/legoesm/ice/itd.py` line 1165, wrapping the `fori_loop`
+       body output with `jax.tree_util.tree_map(jax.lax.stop_gradient, body(idx, val))`
+       under:
+       `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python -m pytest tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py -k test_traced_o15_step_reverse_mode_matches_central_differences -v`
+       fails `test_traced_o15_step_reverse_mode_matches_central_differences` (`exit=1`):
+       `FAILED tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py::test_traced_o15_step_reverse_mode_matches_central_differences`
+       `E AssertionError: assert [('a_i', (2, ...86, 1.0), ...] == []`
+       `E Left contains 1038 more items, first extra item: ('a_i', (2, 2, 2), 0.0, 0.6173060059866636, 1.0)`.
+       Restored and verified `git status --porcelain` clean on `packages/`.
+     - **Plant 4b (`1 + 1e-5` tangent scaling on `_si3_loop` carry used by `si3_o15_step`)**:
+       In `packages/ice/legoesm/ice/itd.py` line 1165, scaling floating carry
+       tangents by `1.0 + 1.0e-5` via
+       `jax.lax.stop_gradient(x) + (1.0 + 1.0e-5) * (x - jax.lax.stop_gradient(x))`
+       under the same `pytest -k test_traced_o15_step_reverse_mode_matches_central_differences`
+       command fails `test_traced_o15_step_reverse_mode_matches_central_differences` (`exit=1`):
+       `FAILED tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py::test_traced_o15_step_reverse_mode_matches_central_differences`
+       `E AssertionError: assert [('a_i', (2, ...156e-05), ...] == []`
+       `E Left contains 1038 more items, first extra item: ('a_i', (2, 2, 2), 0.6173553964270941, 0.6173060059866636, 8.000325374387586e-05)`.
+       Restored and verified `git status --porcelain` clean on `packages/`.
 
 4. **Proof 4 — Equation counter updated with historical snapshots kept**:
+   Measured now by running:
+   `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_jaxpr_count.py --output /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch/jaxpr_count.json`
+   (`status: "PASS"`, exit code `0`):
    `scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_jaxpr_count.py`
-   preserves `PRE_D194_479088F27B`, `D194_920AA4AF24`, `D198_R1_4DD73128E5`,
-   `D198_R2_56B9AC5819`, and `D198_R3_22AF29B743` (`162,751` total recursive
-   equations, `88,876` `remaining_named_and_inlined`), and updates `EXPECTED` to
-   Round 5's measured counts:
-   - `total_equations_recursive`: `162,751` -> `141,604` (`-21,147` equations,
-     `-13.0%` vs Round 3, `-44.3%` vs pre-D194 `254,322`).
-   - `top_level_equations`: `73,906` -> `73,893` (`-13`).
-   - `scan` equations: `5` -> `7` (`+2` from `tm_i` and `tm_s` in `si3_var_agg(kn=2)`).
-   - `while` (`fori_loop`) equations: `26` -> `44` (`+18` from routing `si3_o15_step`
-     through `si3_ice_itd_reb`, `si3_ice_cor_salinity_bounds`, and `si3_var_zapsmall`).
-   - `remaining_named_and_inlined`: `88,876` -> `67,729` (`-21,147`, well below the
-     `110,000` ceiling).
+   preserves `REVIEWED_EA3E570` (`576,364`), `PRE_D194_9998276020` (`577,982`),
+   `D194_48526F950C` (`227,840`), `D194_RESUME1_B17F14B73C` (`228,050`),
+   `D198_R1_743146B590` (`198,323`), `D198_R2_56B768300A` (`178,146`), and
+   `D198_R3_22AF29B743` (`162,751` total recursive equations, `88,876`
+   `remaining_named_and_inlined`), and updates `EXPECTED` to Round 5's measured
+   counts:
+   - `recursive_total`: `162,751` -> `141,340` (`-21,411` equations, `-13.16%`
+     vs Round 3 `162,751`; `-436,642` / `-75.55%` vs `PRE_D194_9998276020`
+     `577,982`).
+   - `remaining_named_and_inlined`: `88,876` -> `67,465` (`-21,411`, well below
+     the `110,000` ceiling).
+   - `_thermo_category_loop`: `35,918` (unchanged).
+   - `si3_ice_thd_do`: `9,809` (unchanged).
+   - `si3_dyn_orca2`: `28,148` (unchanged).
 
 5. **Proof 5 — Citation gate re-anchored and passing**:
    Re-anchored the `29` shifted citations in `packages/ice/legoesm/ice/si3_orca2_state.py`
    and `2` shifted citations in `packages/ice/legoesm/ice/si3_finalize.py` in
-   `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`;
-   `pytest tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py` passes
+   `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`.
+   Measured now by running:
+   `TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5b_scratch CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src timeout 1200 taskset -c 0-7 /home/dbalwada/legoESM/.venv/bin/python -m pytest tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py -v`
    (`45 passed`).
-
-6. **Operator acquisition script for full-step `value_and_grad` execution and >20 min verification battery**:
-   Written to `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_d198r5_scratch/operator_run.sh`
-   (runs full-step `si3_o17_step` reverse compile + execute with separated
-   tracing/lowering/compilation/execution timers and peak RSS under a 120 GiB
-   child-only memory watchdog and `timeout 10800`, followed by the clean-checkout
-   test and scorer battery).
 
 independent review: operator
 

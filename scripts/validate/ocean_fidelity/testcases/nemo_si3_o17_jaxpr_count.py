@@ -74,11 +74,11 @@ D198_R3_22AF29B743 = {
 }
 # DECISION 198 round 5: si3_var_agg(kn=2) layer-temp scans + O15 ice_cor routed through Round 3 helpers.
 EXPECTED = {
-    "recursive_total": 141_604,
+    "recursive_total": 141_340,
     "_thermo_category_loop": 35_918,
     "si3_ice_thd_do": 9_809,
     "si3_dyn_orca2": 28_148,
-    "remaining_named_and_inlined": 67_729,
+    "remaining_named_and_inlined": 67_465,
 }
 OWNERS = ("_thermo_category_loop", "si3_ice_thd_do", "si3_dyn_orca2")
 
