@@ -2167,6 +2167,31 @@ def _make_ecrad_ifs_step(radiation_config, full_call, column_mesh):
                 packed = shard_columns(packed, column_mesh)
         sources = _ecrad_ifs_sources(full_call, tsi, eccf, o3_vmr_col,
                                      ghg_vmr, T_col.dtype)
+        aerosol = None
+        if full_call:
+            # IFS 49r1 NAERMACC=1 aerosols (user 2026-11-04 item 3, votes
+            # C1-C12): the day's column mass / cumulative fraction from the
+            # driver, the traced RADACT + profile half here, with the
+            # half-level T the step hands ecRad (C9a) and its sharpness (C10a)
+            from legoesm.atmosphere.physics.radiation.ecrad_ifs import (
+                ifs_aerosol)
+            _aer = {k: None if forcing is None else forcing.get(k)
+                    for k in ("ecrad_aerosol_column_mass",
+                              "ecrad_aerosol_cum_fraction")}
+            for _k, _v in _aer.items():
+                if _v is None:
+                    raise ValueError(
+                        f"radiation 'ecrad_ifs' needs forcing[{_k!r}] (the IFS "
+                        "CAMS aerosol climatology, ecrad_ifs_aerosol_file).")
+            cm = jnp.asarray(_aer["ecrad_aerosol_column_mass"], T_col.dtype)
+            if column_mesh is not None:
+                cm = shard_columns(cm, column_mesh)
+            aerosol = ifs_aerosol.macc_inputs(
+                cm, jnp.asarray(_aer["ecrad_aerosol_cum_fraction"], T_col.dtype),
+                p_half_col,
+                _lane.half_level_temperature(T_col, p_full_col, p_half_col,
+                                             T_sfc_col),
+                cfg.sharpness)
         dT, fl, carry = _lane.step(
             cfg, sources, full_call=full_call, packed_carry=packed,
             T=T_col, p_full=p_full_col, p_half=p_half_col, T_skin=T_sfc_col,
@@ -2176,7 +2201,7 @@ def _make_ecrad_ifs_step(radiation_config, full_call, column_mesh):
             albedo_dir=alb_dir, emissivity=emis,
             iday=forcing["model_start_day_of_month"],
             elapsed_s=forcing["model_seconds"], g=constants.g,
-            c_pd=constants.c_pd)
+            c_pd=constants.c_pd, aerosol=aerosol)
         tend = _pack_hydrostatic_tendencies(
             dT.reshape(shape_3d), state, shape_3d, shape_2d,
             sw_net_sfc=fl["sw_net_sfc"], lw_net_sfc=fl["lw_net_sfc"],

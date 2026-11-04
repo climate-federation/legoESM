@@ -350,7 +350,8 @@ def test_every_offered_scheme_passes_validate_strict(parsers, driver):
                 from legoesm.driver.config import DycoreConfig
                 kwargs.update(dycore=DycoreConfig(discretization="mpas"),
                               ozone_forcing="external", ghg_forcing="external",
-                              solar_source="spectral_file")
+                              solar_source="spectral_file",
+                              ecrad_ifs_aerosol_file="cams.nc")
             # ZM CMT is dropped on the compiled pipeline (refused there, P1).
             if axis == "convection" and scheme == "zhang_mcfarlane":
                 from legoesm.driver.config import DycoreConfig

@@ -5357,6 +5357,36 @@ class ModelDriver:
                                       top_lev, n_max)
         return setup, (lon_w, lat_w)
 
+    def _ecrad_aerosol_forcing(self, day):
+        """ecrad_ifs aerosols (user 2026-11-04 item 3, votes C2-C8): the IFS
+        49r1 NAERMACC=1 climatology half that is static per call --
+        UPDECAEC month weight + 2D CAMS update + bilinear column mass -- on
+        this rank's columns for the forcing day ``day``.  NINDAT = the run
+        start date on the insolation calendar (the McICA seed's, S3a), minute
+        = elapsed minutes at ``day`` (C4a); eta = the lane's hybrid half
+        levels at p_atm_std / p_atm_std (C6a: the mass above the model top
+        is dropped).  Elapsed minutes go through updecaec.F90's own
+        365.25-day year (the IFS's leap-day wobble, kept for parity).  Returns
+        the two forcing arrays (C8a)."""
+        from legoesm.atmosphere.physics.radiation.ecrad_ifs import ifs_aerosol
+        from legoesm.forcing.time_utils import day_to_date
+        cfg = self.config
+        if getattr(self, "_ecrad_cams", None) is None:
+            self._ecrad_cams = ifs_aerosol.load_cams_2d(cfg.ecrad_ifs_aerosol_file)
+        y, m, d = day_to_date(self._insolation_day(0.0),
+                              ref_year=int(cfg.start_year))[:3]
+        nindat = int(y) * 10000 + int(m) * 100 + int(d)  # coeff-ok: YYYYMMDD packing
+        minute = int(round(float(day) * 1440.0))  # coeff-ok: minutes per day
+        eta = np.asarray(self.sigma.pressure_at_half(
+            jnp.asarray([constants.p_atm_std])))[0] / constants.p_atm_std
+        _, lat = self._owned_p_s_and_lat()
+        lat = np.asarray(lat).reshape(-1)
+        lon = np.asarray(self._owned_lon()).reshape(-1)
+        cm, cum = ifs_aerosol.climatology_at_columns(
+            self._ecrad_cams, nindat, minute, eta, np.sin(lat), lon)
+        return {"ecrad_aerosol_column_mass": jnp.asarray(cm),
+                "ecrad_aerosol_cum_fraction": jnp.asarray(cum)}
+
     def _precompute_external_forcing(self, day, p_s, lat, temp=None, lon=None):
         """Pre-compute ozone/aerosol/GHG fields outside JIT boundary.
 
@@ -15693,6 +15723,10 @@ class ModelDriver:
                                 is not None):
                             _forcing_daily["solar_spectral_fraction"] = (
                                 jnp.asarray(_sol["solar_fraction_by_gpt"]))
+                    if cfg.radiation == "ecrad_ifs":
+                        # same canonical-day bucket as ozone (vote C5a)
+                        _forcing_daily.update(self._ecrad_aerosol_forcing(
+                            _force_day_canonical))
                     _last_force_day = _fd_int
                 # Per-STEP traced calendar time: the radiation factory
                 # closure (``set_time``) is baked at trace time inside the

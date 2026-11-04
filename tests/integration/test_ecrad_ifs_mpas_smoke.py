@@ -37,10 +37,14 @@ _FEEDS = dict(
         _FORCING / "solar_cmip6_SOLARIS-HEPPA-3-2_mon.nc"),
     solar_tsi_var="TSI", solar_spectral_var="SSI_frac",
     solar_spectral_band_order="rrtmg_sw", start_year=1979,
-    orbital_insolation=True)          # the production deck row
+    orbital_insolation=True,          # the production deck row
+    ecrad_ifs_aerosol_file=os.environ.get(
+        "ECRAD_IFS_CAMS2D", "/burg/glab/users/pg2328/oracles/openifs_data_48r1/"
+        "ifsdata_ecrad/aerosol_cams_climatology_43R3a.nc"))
 _needs_feeds = pytest.mark.skipif(
     not all(pathlib.Path(_FEEDS[k]).exists()
-            for k in ("ozone_file", "ghg_file", "solar_file")),
+            for k in ("ozone_file", "ghg_file", "solar_file",
+                      "ecrad_ifs_aerosol_file")),
     reason="input4MIPs forcing files not staged")
 
 
@@ -81,11 +85,17 @@ def _run(tmp, n_steps, monkeypatch):
     from legoesm.atmosphere.physics.radiation.ecrad_ifs import lane
     d = _driver(tmp, n_steps, **_FEEDS)
     from legoesm.atmosphere.physics.radiation import integration as rint
-    calls, seen, raw = [], [], []
+    calls, seen, raw, seen_aer = [], [], [], []
     orig, orig_src = lane.step, rint._ecrad_ifs_sources
+
+    aer = []
 
     def spy(cfg, sources, **k):       # records each traced variant + inputs
         calls.append(k["full_call"])
+        aer.append((k["full_call"], k.get("aerosol")))
+        if k["full_call"]:            # aerosols on (C1-C12): column > 0, finite
+            jax.debug.callback(
+                lambda p: seen_aer.append(np.asarray(p)), k["aerosol"].paerosol)
         if k["full_call"]:
             jax.debug.callback(
                 lambda r, c, h, o: seen.append(tuple(map(np.asarray, (r, c, h, o)))),
@@ -101,6 +111,16 @@ def _run(tmp, n_steps, monkeypatch):
         return out
 
     monkeypatch.setattr(rint, "_ecrad_ifs_sources", spy_src)
+    # receipt at ecRad itself (codex hook review): the NAERMACC=1 mixing
+    # ratio reaches ecrad.radiation, not only the lane's inputs
+    from legoesm.atmosphere.physics.radiation.ecrad_ifs import ecrad
+    got_mr, orig_rad = [], ecrad.radiation
+
+    def spy_rad(*a, **k):
+        got_mr.append(k.get("aerosol_mixing_ratio") is not None)
+        return orig_rad(*a, **k)
+
+    monkeypatch.setattr(ecrad, "radiation", spy_rad)
     monkeypatch.setattr(lane, "step", spy)
     T0 = np.asarray(d.state.T.data).copy()
     assert d.run(compiled=True, segment_callback=lambda drv, day, dt: None) == "COMPLETED"
@@ -131,6 +151,13 @@ def _run(tmp, n_steps, monkeypatch):
         # a start near quadrature, where 15 min drifts ~6e-6
         assert e == pytest.approx(eccf, rel=1e-6, abs=0.0)
         assert r == pytest.approx(t * e, rel=1e-15)
+    # the NAERMACC=1 arm runs on full calls only (C12a), with real loads
+    assert all((a is not None) == full for full, a in aer)
+    assert got_mr and all(got_mr)
+    assert seen_aer
+    for p in seen_aer:
+        assert p.shape[-1] == 13 and np.isfinite(p).all()
+        assert p.min() >= 0.0 and p[..., :11].sum(axis=-1).max() > 0.0
     assert seen
     for rii0, co2, hcfc22, o3 in seen:
         assert float(co2) == pytest.approx(vmr["co2"] * 44.011 / 28.970, rel=1e-12,
