@@ -46,7 +46,7 @@ def test_literal_and_defaults_are_49r1():
 _MPAS = dict(grid=GridConfig(grid_type="mpas", resolution=3, nlev=8),
              dycore=DycoreConfig(model_type="hydrostatic", discretization="mpas"))
 _FEEDS = dict(ozone_forcing="external", ghg_forcing="external",
-              solar_source="spectral_file")
+              solar_source="spectral_file", ecrad_ifs_aerosol_file="cams.nc")
 
 
 def test_validate_strict_refuses_off_lane_and_aerosols():
@@ -55,12 +55,13 @@ def test_validate_strict_refuses_off_lane_and_aerosols():
     assert _strict(radiation="ecrad_ifs", **_FEEDS, **_MPAS) == ""
     msg = _strict(radiation="ecrad_ifs", aerosol_forcing="external",
                   **_FEEDS, **_MPAS)
-    assert "IFS 48r1 aerosol files" in msg
+    assert "ecrad_ifs_aerosol_file" in msg
 
 
 @pytest.mark.parametrize("field,value", [
     ("ozone_forcing", "inline"), ("ghg_forcing", "constant"),
-    ("solar_source", "constant"), ("experiment", "historical")])
+    ("solar_source", "constant"), ("experiment", "historical"),
+    ("ecrad_ifs_aerosol_file", "")])
 def test_validate_strict_refuses_non_input4mips_sources(field, value):
     """Vote M7a: any source other than the input4MIPs files would feed ecRad
     silently (inline ozone profile, config GHG scalars, static S_0)."""
@@ -157,9 +158,11 @@ def test_physics_state_carry_only_for_ecrad():
 def test_run_amip_flag_round_trip():
     from scripts.run import run_amip
     p = run_amip.build_arg_parser()
-    a = p.parse_args(["--radiation", "ecrad_ifs"])
+    a = p.parse_args(["--radiation", "ecrad_ifs",
+                      "--ecrad-ifs-aerosol-file", "cams.nc"])
     assert a.radiation == "ecrad_ifs"
-    assert run_amip.build_config_from_args(a).radiation == "ecrad_ifs"
+    cfg = run_amip.build_config_from_args(a)
+    assert cfg.radiation == "ecrad_ifs" and cfg.ecrad_ifs_aerosol_file == "cams.nc"
 
 
 def test_exported_segment_advances_the_seed_clock():

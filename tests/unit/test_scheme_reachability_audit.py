@@ -350,7 +350,8 @@ def test_every_offered_scheme_passes_validate_strict(parsers, driver):
                 from legoesm.driver.config import DycoreConfig
                 kwargs.update(dycore=DycoreConfig(discretization="mpas"),
                               ozone_forcing="external", ghg_forcing="external",
-                              solar_source="spectral_file")
+                              solar_source="spectral_file",
+                              ecrad_ifs_aerosol_file="cams.nc")
             # WRF Tiedtke reads the turbulence scheme's lagged q_v tendency
             # and surface water flux (cross-field contract, vote V21).
             if axis == "convection" and scheme == "tiedtke":

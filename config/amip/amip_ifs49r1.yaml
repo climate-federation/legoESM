@@ -54,9 +54,14 @@ zm_detrain_number_width_kgkg_s: null
 # TSI/GHG climatologies and Cariolle ozone (L12-L14), ecRad's own solar
 # spectrum (SSI_frac not read, M2), CCN 900/50 (LERADS=F arm, L25), lane orbit
 # (L17), broadband albedo/emissivity in every band (L10/L11), no ozone above
-# the model top (L18), aerosols pending (IFS 48r1 files, own path).
+# the model top (L18), 48r1 aerosol files (A2a, below).
 radiation: ecrad_ifs
-aerosol_forcing: "off"          # lane aerosols never reach ecRad (L20); its IFS 48r1 aerosol path is separate
+aerosol_forcing: "off"          # the lane's aerosol forcing never reaches ecRad (M6)
+# ecRad aerosols ON (user 2026-11-04 item 3, votes C1-C12): the IFS 49r1
+# NAERMACC=1 arm on the 48r1 CAMS 2D column-mass climatology (DECLARED
+# DEPARTURE A2a from aerosol_cams_climatology_43r3_v2_3D.nc; sha256 and source
+# in oracles/openifs_data_48r1/PROVENANCE.md), refreshed per forcing day.
+ecrad_ifs_aerosol_file: /burg/glab/users/pg2328/oracles/openifs_data_48r1/ifsdata_ecrad/aerosol_cams_climatology_43R3a.nc
 rrtmgp_overhead_layer: false    # RRTMGP-only row (validate_strict error); L18
 
 # --- production rows INERT under ifs_cloudsc + CUMASTRN (left as inherited) --

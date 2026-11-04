@@ -806,6 +806,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tau-pole", type=float,
                         default=_EXPERIMENT_DEFAULTS.tau_pole,
                         help="Gray-radiation polar optical depth")
+    parser.add_argument(
+        "--ecrad-ifs-aerosol-file", type=str, default="",
+        help=("radiation='ecrad_ifs': the IFS CAMS 2D aerosol climatology "
+              "(aerosol_cams_climatology_43R3a.nc); required for ecrad_ifs."))
     parser.add_argument("--ozone-source", type=str, default="standard",
                         choices=["standard", "analytical", "mls", "none"])
     parser.add_argument("--ozone-forcing", type=str, default="inline",
@@ -2779,6 +2783,7 @@ def _resolve_land_model(args, parser=None, argv=None):
 
 DRY_RUN_CONFIG_INPUTS = (
     "ic_path", "forcing_path", "sic_path", "ozone_file", "ghg_file",
+    "ecrad_ifs_aerosol_file",
     "solar_file", "aerosol_file", "aerosol_ccn_file", "volcanic_aerosol_file",
     "topography", "land_mask_path", "albedo_land_path",
     "subgrid_orography_path", "land_ic_path", "clm_surfdata_path",
@@ -2999,6 +3004,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         ozone_file=args.ozone_file,
         ghg_forcing=args.ghg_forcing,
         ghg_file=args.ghg_file,
+        ecrad_ifs_aerosol_file=args.ecrad_ifs_aerosol_file,
         solar_source=args.solar_source,
         solar_file=args.solar_file,
         solar_tsi_var=args.solar_tsi_var,

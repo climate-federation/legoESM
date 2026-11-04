@@ -824,6 +824,10 @@ class ExperimentConfig(NamedTuple):
     ozone_file: str = ""
     ghg_forcing: str = "constant"       # constant, external
     ghg_file: str = ""
+    # radiation='ecrad_ifs' aerosols: the IFS CAMS 2D column-mass
+    # climatology (48r1 aerosol_cams_climatology_43R3a.nc, declared departure
+    # A2a; user 2026-11-04 item 3).  Required for ecrad_ifs (vote C2a).
+    ecrad_ifs_aerosol_file: str = ""
 
     # Solar
     solar_source: str = "constant"      # constant, file, spectral_file
@@ -2900,11 +2904,16 @@ class ExperimentConfig(NamedTuple):
             if self.aerosol_forcing != "off":
                 errors.append(
                     "radiation='ecrad_ifs' does not read the lane's aerosol "
-                    "forcing: its aerosols are the IFS 48r1 aerosol files "
-                    "through the ecrad_ifs adapter's own aerosol path, not "
-                    "yet wired; aerosol_forcing="
+                    "forcing: its aerosols are the IFS CAMS climatology in "
+                    "ecrad_ifs_aerosol_file; aerosol_forcing="
                     f"{self.aerosol_forcing!r} would be silently ignored, "
                     "set it to 'off'")
+            if not self.ecrad_ifs_aerosol_file:
+                errors.append(
+                    "radiation='ecrad_ifs' needs ecrad_ifs_aerosol_file (the "
+                    "IFS CAMS 2D aerosol climatology, "
+                    "aerosol_cams_climatology_43R3a.nc); ecRad runs with "
+                    "aerosols on")
             for _f, _v in (("ozone_forcing", self.ozone_forcing),
                            ("ghg_forcing", self.ghg_forcing)):
                 if _v != "external":
