@@ -80,6 +80,7 @@ from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezi
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     saturation_adjustment_gsam,
+    m2005_subsaturation_removal,
     effective_Nc,
     autoconversion_sb2001,
     autoconversion_kk2000,
@@ -246,6 +247,25 @@ def _reject_sb_proxy_fields(config: MorrisonConfig) -> None:
             "warm_rain_scheme='seifert_beheng' runs SB2001 as gSAM M2005 runs "
             f"it, which has no counterpart for {bad}; leave them at their "
             "defaults.")
+
+
+def _gsam_small_removal(T, q_v, hyd, p_full, config):
+    """:func:`_warm_rain.m2005_subsaturation_removal` on a HydrometeorState
+    (liquid q_r, q_c; frozen q_i, q_s, q_g in gSAM's order); each removed
+    species' number scales by ``1 - w`` (N_c is specified in sam, untouched;
+    an N_g passed while graupel is single-moment has no tendency to carry the
+    scaling and is left as the caller passed it)."""
+    T, q_v, (q_r, q_c), (q_i, q_s, q_g), (w_r, _), (w_i, w_s, w_g) = (
+        m2005_subsaturation_removal(
+            T, q_v, _saturation_specific_humidity(T, p_full),
+            _saturation_specific_humidity_ice(T, p_full),
+            (hyd.q_r, hyd.q_c), (hyd.q_i, hyd.q_s, hyd.q_g),
+            rh_sharpness=config.gsam_small_removal_rh_sharpness,
+            q_sharpness=config.gsam_small_removal_q_sharpness))
+    scale = lambda n, w: None if n is None else n * (1.0 - w)  # noqa: E731
+    return T, q_v, hyd._replace(
+        q_r=q_r, q_c=q_c, q_i=q_i, q_s=q_s, q_g=q_g, N_r=scale(hyd.N_r, w_r),
+        N_i=scale(hyd.N_i, w_i), N_s=scale(hyd.N_s, w_s), N_g=scale(hyd.N_g, w_g))
 
 
 def resolve_morrison_flavor(config: MorrisonConfig) -> MorrisonConfig:
@@ -440,13 +460,18 @@ def morrison_microphysics(
     gsam_satadj = config.morrison_flavor == "sam"
     if gsam_satadj:
         _reject_fields_without_gsam_counterpart(config)
-        T_in, q_v_in, q_c_in = T, q_v, hydrometeors.q_c
+        T_in, q_v_in, q_c_in, hyd0 = T, q_v, hydrometeors.q_c, hydrometeors
         T, q_v, q_c_adj = saturation_adjustment_gsam(
             T, q_v, hydrometeors.q_c, p_full,
             excess_sharpness=config.gsam_satadj_excess_sharpness,
             qc_floor_sharpness=config.gsam_satadj_qc_floor_sharpness,
             p_min_width_pa=config.gsam_satadj_p_min_width_pa)
         hydrometeors = hydrometeors._replace(q_c=q_c_adj)
+        hyd_in = hydrometeors
+        # then gSAM M2005's sub-saturation small-condensate removal
+        # (module_mp_graupel.f90:1453-1488), on the adjusted state.
+        T, q_v, hydrometeors = _gsam_small_removal(
+            T, q_v, hydrometeors, p_full, config)
     q_c = hydrometeors.q_c
     q_r = hydrometeors.q_r
     q_i = hydrometeors.q_i
@@ -2716,6 +2741,39 @@ def morrison_microphysics(
         dT_dt = dT_dt + (T - T_in) / dt
         dq_v_dt = dq_v_dt + (q_v - q_v_in) / dt
         dq_c_dt = dq_c_dt + condensation
+        # The removal's increments (relative to the adjusted state; its T,
+        # q_v, q_c parts are already in the two lines above).
+        dq_r_dt = dq_r_dt + (hydrometeors.q_r - hyd_in.q_r) / dt
+        dq_i_dt = dq_i_dt + (hydrometeors.q_i - hyd_in.q_i) / dt
+        dq_s_dt = dq_s_dt + (hydrometeors.q_s - hyd_in.q_s) / dt
+        dq_g_dt = dq_g_dt + (hydrometeors.q_g - hyd_in.q_g) / dt
+        dN_r_dt = dN_r_dt + (hydrometeors.N_r - hyd_in.N_r) / dt
+        dN_i_dt = dN_i_dt + (hydrometeors.N_i - hyd_in.N_i) / dt
+        if dN_s_dt is not None:
+            dN_s_dt = dN_s_dt + (hydrometeors.N_s - hyd_in.N_s) / dt
+        if dN_g_dt is not None:
+            dN_g_dt = dN_g_dt + (hydrometeors.N_g - hyd_in.N_g) / dt
+        # Post-step removal (:4664-4700) on the end-of-step state.
+        tend = dict(q_c=dq_c_dt, q_r=dq_r_dt, q_i=dq_i_dt, q_s=dq_s_dt, q_g=dq_g_dt,
+                    N_r=dN_r_dt, N_i=dN_i_dt, N_s=dN_s_dt, N_g=dN_g_dt)
+        new = hyd0._replace(**{k: getattr(hyd0, k) + dt * v for k, v in tend.items()
+                               if v is not None})
+        T_new, q_v_new = T_in + dt * dT_dt, q_v_in + dt * dq_v_dt
+        T_rm, q_v_rm, rm = _gsam_small_removal(T_new, q_v_new, new, p_full, config)
+        dT_dt = dT_dt + (T_rm - T_new) / dt
+        dq_v_dt = dq_v_dt + (q_v_rm - q_v_new) / dt
+        small_removal_c = (rm.q_c - new.q_c) / dt
+        dq_c_dt = dq_c_dt + small_removal_c
+        dq_r_dt = dq_r_dt + (rm.q_r - new.q_r) / dt
+        dq_i_dt = dq_i_dt + (rm.q_i - new.q_i) / dt
+        dq_s_dt = dq_s_dt + (rm.q_s - new.q_s) / dt
+        dq_g_dt = dq_g_dt + (rm.q_g - new.q_g) / dt
+        dN_r_dt = dN_r_dt + (rm.N_r - new.N_r) / dt
+        dN_i_dt = dN_i_dt + (rm.N_i - new.N_i) / dt
+        if dN_s_dt is not None:
+            dN_s_dt = dN_s_dt + (rm.N_s - new.N_s) / dt
+        if dN_g_dt is not None:
+            dN_g_dt = dN_g_dt + (rm.N_g - new.N_g) / dt
 
     # (No placeholder outputs here — every MicrophysicsOutput field below is
     # a computed tendency, so no dtype pin is needed; a former bare
@@ -2764,6 +2822,10 @@ def morrison_microphysics(
             "homogeneous_freezing": -homo_freeze_c,
             "bergeron_snow": -bergs,
         })
+        if gsam_satadj:
+            # post-step M2005 small-condensate removal (the preamble one is
+            # inside "condensation", relative to the input q_c)
+            out.qc_budget["small_removal"] = small_removal_c
         if _prog_nc:
             out.qc_budget["sedimentation"] = sed_c
         if mg2_snow:

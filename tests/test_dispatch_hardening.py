@@ -135,6 +135,10 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # SI3 aEVP lateral boundary: an unknown north_fold / lbc point type
+        # must raise, never fall back to the doubly periodic halo.
+        ("packages/ice/legoesm/ice/dynamics.py", "_si3_halo"),
+        ("packages/ice/legoesm/ice/dynamics.py", "_si3_orca_f_pivot_halo"),
         # Richards post-solve psi update: retention curve -> shift (PDI/Lu) or
         # exact reset; an unknown curve must raise, never pick one silently.
         ("packages/land/legoesm/land/richards.py", "solve_richards"),
@@ -419,6 +423,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # defence — a typo would silently pick a different composition or run
         # the trigger on the post-explicit Kaa state.
         ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", "compute_vertical_K_profiles"),
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_nemo_ddm_literal"),
         # TKE surface-BC dispatch (surface_bc: veros_flux | nemo_dirichlet;
         # hardened 2026-07-16 with the NEMO nn_bc_surf=1 Dirichlet option — a
         # typo would silently run the Veros flux BC, a ~60x different surface

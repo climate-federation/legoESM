@@ -79,7 +79,7 @@ _VALID_SHAPE_KEYS = frozenset(
 _REQUIRED_PARAM_KEYS = frozenset(
     {"units", "bounds", "tunable_tier", "transform", "category", "reference", "shape"}
 )
-_OPTIONAL_PARAM_KEYS = frozenset({"legacy_name"})
+_OPTIONAL_PARAM_KEYS = frozenset({"legacy_name", "explicit_only"})
 _REQUIRED_CLASS_KEYS = frozenset({"scheme_key", "params"})
 _OPTIONAL_CLASS_KEYS = frozenset({"excluded"})
 
@@ -336,6 +336,8 @@ def validate_param_spec(
                 errors.append(f"{cls_name}.{pname}: missing keys {sorted(pmissing)}")
             if pextra:
                 errors.append(f"{cls_name}.{pname}: unexpected keys {sorted(pextra)}")
+            if "explicit_only" in p and p["explicit_only"] is not True:
+                errors.append(f"{cls_name}.{pname}: explicit_only must be True when present")
             tier = p.get("tunable_tier")
             if tier not in _VALID_TIERS:
                 errors.append(f"{cls_name}.{pname}: tunable_tier must be in {sorted(_VALID_TIERS)}")
@@ -788,3 +790,22 @@ def test_inclusion_predicate_excludes_constants_and_nonfloat() -> None:
         "    flag: bool = False\n"
     )
     assert spec_required_classes(src) == {"C": {"tau": 7200.0}}
+
+
+def test_optional_float_field_is_eligible_not_required() -> None:
+    """A ``float | None = None`` field (no library default) may be spec'd but is
+    never forced; ``int | None`` stays ineligible; ``explicit_only`` must be True."""
+    src = ("class C(NamedTuple):\n"
+           "    ud: float | None = None\n"
+           "    n: int | None = None\n"
+           "    floor: float = 0.0\n")
+    assert spec_required_classes(src) == {"C": {"floor": 0.0}}
+    assert all_float_field_names(src) == {"C": {"ud", "floor"}}
+    p = {"units": "m s-1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid",
+         "category": "c", "reference": "r", "shape": None, "explicit_only": True}
+    spec = {"C": {"scheme_key": "c", "excluded": {"floor": "numerics: floor"},
+                  "params": {"ud": p}}}
+    req, elig = spec_required_classes(src), all_float_field_names(src)
+    assert validate_param_spec(spec, req, elig) == []
+    spec["C"]["params"]["ud"] = {**p, "explicit_only": False}
+    assert any("explicit_only" in e for e in validate_param_spec(spec, req, elig))

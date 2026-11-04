@@ -391,6 +391,7 @@ def make_convection_physics(
     dt: float = 300.0,  # coeff-ok: default physics timestep [s]
     *,
     defer_detrainment: bool = False,
+    defer_to_cloudsc: bool = False,
 ) -> Callable:
     """Create a physics function for convection matching a model's signature.
 
@@ -411,6 +412,14 @@ def make_convection_physics(
         macmic sub-step as CAM6 does (clubb_intr.F90:2345-2386).  The state
         must carry ``q_c``, ``q_i``, ``N_c`` and ``N_i`` (the species that
         booking writes); a state lacking any of them raises ``ValueError``.
+    defer_to_cloudsc : bool
+        Hydrostatic/MPAS bridge only (IFS CLOUDSC, vote A7'): the scheme's
+        raw ``ConvectionOutput.ifs_cloudsc_conv`` is published as
+        ``"ifs_cloudsc_conv"`` in the returned carry dict for the combined
+        physics to hand to CLOUDSC, and the detrained condensate
+        (``dq_c_conv_dt``) and detrained rain/snow (``dq_r_detr_dt``,
+        ``dq_s_detr_dt``) are NOT booked into q_c/q_r/q_s (CLOUDSC takes
+        them).  A scheme that publishes no ``ifs_cloudsc_conv`` raises.
 
     Returns
     -------
@@ -427,7 +436,12 @@ def make_convection_physics(
     # crashes the moment convection is enabled on an MPAS run.
     if model_type in ("hydrostatic", "mpas"):
         return _make_hydrostatic_convection(
-            convection_config, dt, defer_detrainment=defer_detrainment)
+            convection_config, dt, defer_detrainment=defer_detrainment,
+            defer_to_cloudsc=defer_to_cloudsc)
+    if defer_to_cloudsc:
+        raise ValueError(
+            "defer_to_cloudsc is implemented by the hydrostatic/MPAS bridge "
+            f"only; got model_type={model_type!r}.")
     if defer_detrainment:
         raise ValueError(
             "defer_detrainment is implemented by the hydrostatic/MPAS bridge "
@@ -472,6 +486,7 @@ def _make_hydrostatic_convection(
     convection_config: ConvectionConfig,
     dt: float,
     defer_detrainment: bool = False,
+    defer_to_cloudsc: bool = False,
 ) -> Callable:
     """Create convection physics_fn for PrimitiveEquationModel.
 
@@ -1028,6 +1043,18 @@ def _make_hydrostatic_convection(
         if conv_fn is not None:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
             dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
+            # IFS CLOUDSC takes the raw detrainment (PLUDE/PLUDELI/PSNDE)
+            # itself; nothing of it is booked into the host species here.
+            _cloudsc_pub = None
+            if defer_to_cloudsc:
+                _cloudsc_pub = getattr(conv_out, "ifs_cloudsc_conv", None)
+                if _cloudsc_pub is None:
+                    raise ValueError(
+                        "defer_to_cloudsc (microphysics='ifs_cloudsc') needs "
+                        "the faithful IFS convection's raw CUMASTRN fields "
+                        "(convection='bechtold' with use_ifs_ascent=True); "
+                        f"scheme {scheme_name!r} publishes none")
+                dq_c_conv_dt = jnp.zeros_like(dq_c_conv_dt)
             # #929 in-updraft rain split: mass-flux schemes (bechtold/tiedtke)
             # emit an in-updraft RAIN source ``dq_r_conv_dt`` (the fraction of
             # detrained condensate diverted to precipitation by
@@ -1097,7 +1124,7 @@ def _make_hydrostatic_convection(
             for _nm, _detr in (("q_r", getattr(conv_out, "dq_r_detr_dt", None)),
                                ("q_s", getattr(conv_out, "dq_s_detr_dt", None)),
                                ("q_i", getattr(conv_out, "dq_i_conv_dt", None))):
-                if _detr is None:
+                if _detr is None or defer_to_cloudsc:
                     continue
                 if state.tracers is None or _nm not in state.tracers:
                     raise ValueError(
@@ -1189,6 +1216,8 @@ def _make_hydrostatic_convection(
                     f"icwmr={conv_out.icwmr is not None}.")
             if _defer:
                 conv_prog_out = {**conv_prog_out, "conv_dlf": _dlf_pub}
+            if _cloudsc_pub is not None:
+                conv_prog_out = {**conv_prog_out, "ifs_cloudsc_conv": _cloudsc_pub}
             if conv_out.mass_flux_up is not None:
                 _mf_pub = {
                     "conv_mass_flux_up":

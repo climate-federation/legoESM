@@ -22,7 +22,7 @@ include: cmip_tuned_physics.yaml
 
 # --- run orchestration (identical to the slab twin) ---
 preset: slab_richards
-grid: latlon
+grid_type: latlon
 energy_fixer: true                   # dycore energy fixer, now wired on this lane (review 2026-10-10 F15, vote F15b-V6)
 resolution: 24
 nlev: 20

@@ -186,7 +186,9 @@ def _print_forcing_activity(args) -> None:
     # rrtmg/rrtmgp) into the standalone radiation.
     _grid = getattr(args, "grid_type", None) or "cubed_sphere"
     _disc = getattr(args, "discretization", None) or ""
-    solar_file_unthreaded = (_grid == "gaussian" and _disc == "spectral")
+    # (the spectral COLUMN lane runs the column loop, which threads it)
+    solar_file_unthreaded = (_grid == "gaussian" and _disc == "spectral"
+                             and not getattr(args, "column_lane", False))
 
     def _flag(active: bool) -> str:
         return "ACTIVE" if active else "inert  (gray radiation)"
@@ -1645,11 +1647,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Clouds & microphysics (full-physics defaults — see the policy note above)
     parser.add_argument("--clouds", type=str, default="xu_randall",
                         choices=["none", "sundqvist", "xu_randall",
-                                 "cam6_clubb"])
+                                 "cam6_clubb", "resolved"],
+                        help="'resolved' requires --microphysics ifs_cloudsc")
     parser.add_argument("--microphysics", type=str, default="sundqvist",
                         choices=["none", "kessler", "sundqvist",
                                  "seifert_beheng", "morrison", "thompson",
-                                 "p3", "sdm", "fast_sbm"])
+                                 "p3", "sdm", "fast_sbm", "ifs_cloudsc"])
     # Sundqvist large-scale-condensation tunables (override the SundqvistConfig
     # defaults / AIMIP-trained leaves).  These are the precipitation-efficiency
     # knobs: qc_crit is the autoconversion cloud-water threshold (rain forms only
@@ -3341,6 +3344,10 @@ def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv,
     spectral step (the #405 follow-up), NOT this scheme swap. No-op off spectral."""
     if getattr(args, "discretization", None) != "spectral":
         return args
+    if getattr(args, "column_lane", False):
+        # the spectral COLUMN lane runs the column loop, which threads the
+        # prognostic physics carry: the deck's schemes run as written
+        return args
     # #405: the spectral run loop now THREADS the prognostic PhysicsState carry
     # on the LEAPFROG path (single physics eval per step), so a prognostic
     # scheme runs FAITHFULLY there — do not downgrade it.  The downgrade below
@@ -3461,12 +3468,18 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser,
         # MPAS now fills the specified-Nc field via the combined-physics
         # microphysics + radiation factories (driven by the morrison
         # ``nc_from_aerosol`` switch).  Only the SPECTRAL standalone path
-        # still lacks the fill.
-        if args.discretization == "spectral":
+        # still lacks the fill (the spectral COLUMN lane runs the column
+        # loop's physics, which fills it as on MPAS).
+        if args.discretization == "spectral" and not args.column_lane:
             parser.error("--aerosol-ccn is not wired on the spectral "
                          "standalone path yet (the specified-Nc field is "
                          "not filled there); use cubed_sphere / latlon / "
                          "mpas, or drop --aerosol-ccn.")
+    if args.clouds == "resolved" and args.microphysics != "ifs_cloudsc":
+        parser.error("--clouds resolved requires --microphysics ifs_cloudsc "
+                     "(radiation then reads CLOUDSC's advected cloud fraction "
+                     "and grid-mean condensate; with any other microphysics "
+                     "AMIP has no prognostic cloud fraction to resolve)")
     if args.subgrid_autoconversion and args.microphysics != "morrison":
         parser.error("--subgrid-autoconversion requires --microphysics "
                      "morrison (the in-cloud closure lives in the Morrison "
@@ -3484,14 +3497,18 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser,
     # assembly, so only the SPECTRAL standalone path still has nowhere to put
     # it.  Narrowed rather than deleted: a flag that is silently ignored is the
     # defect this guard exists to prevent.
-    if args.dynamic_albedo and args.discretization == "spectral":
+    # (both guards: the spectral COLUMN lane runs the column loop's physics,
+    # where the dynamic albedo and the multilayer land are stepped as on MPAS)
+    _spectral_standalone = (args.discretization == "spectral"
+                            and not args.column_lane)
+    if args.dynamic_albedo and _spectral_standalone:
         parser.error("--dynamic-albedo has no effect on the SPECTRAL "
                      "standalone radiation path, which uses the RRTMGPConfig "
                      "constant surface albedo and would silently ignore the "
                      "flag. It is supported on cubed_sphere/latlon (coupled "
                      "physics pipeline) and on MPAS (daily tile-blended "
                      "surface albedo).")
-    if args.use_multilayer_land and args.discretization == "spectral":
+    if args.use_multilayer_land and _spectral_standalone:
         parser.error("--use-multilayer-land runs inside the coupled physics "
                      "pipeline or the MPAS driver loop; the SPECTRAL "
                      "standalone physics carries a PASSIVE land tile and "

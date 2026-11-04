@@ -110,9 +110,11 @@ def test_a_shifted_box_is_detectable(monkeypatch):
 
 def test_the_card_builder_takes_the_alterations_by_default():
     import inspect
-    source = inspect.getsource(_recipe().build_orca2_initial_ts)
+    recipe = _recipe()
+    source = inspect.getsource(recipe.build_orca2_initial_ts)
+    implementation = inspect.getsource(recipe.build_orca2_ts_at_step)
     assert "apply_hand_alterations: bool = True" in source
-    assert "apply_orca2_hand_alterations(temperature, salinity)" in source
+    assert "apply_orca2_hand_alterations(temperature, salinity)" in implementation
     # masked AFTER the alterations, as the z/zps branch does
-    assert source.index("apply_orca2_hand_alterations") < source.index(
+    assert implementation.index("apply_orca2_hand_alterations") < implementation.index(
         "np.where(tmask, temperature, 0.0)")

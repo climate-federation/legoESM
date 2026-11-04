@@ -578,6 +578,7 @@ class SingleColumnModel:
         physics_config: PhysicsConfig | None = None,
         microphysics_substeps: int = DEFAULT_MICROPHYSICS_SUBSTEPS,
         microphysics_fn: Callable | None = None,
+        physics_fn_init: Callable | None = None,
         _built_by_create: bool = False,
     ):
         # Private marker set ONLY by :meth:`create`.  Direct callers
@@ -701,6 +702,33 @@ class SingleColumnModel:
         self._tend_fn = _tendency_fn(
             physics_fn, grid, sigma_coord, forcing=forcing,
         )
+        # WRF MYNN-EDMF cold start (votes M3/N4): the FIRST step runs the
+        # physics built with initflag=True, every later step ``physics_fn``
+        # (built with False).  ``_mynn_initialized`` is the host flag.
+        _flag = getattr(physics_fn, "_mynn_initflag", None)
+        if _flag is not None and (_flag is not False or physics_fn_init is None
+                                  or getattr(physics_fn_init, "_mynn_initflag",
+                                             None) is not True):
+            raise ValueError(
+                "turbulence='mynn25': pass physics_fn built with "
+                "mynn_initflag=False and physics_fn_init built with "
+                "mynn_initflag=True (SingleColumnModel.create does both)")
+        if physics_fn_init is not None and time_integrator != "forward_euler":
+            # create() rejects these for stateful turbulence; a direct
+            # construction must too: a multi-stage step would re-run the
+            # cold start on every stage (codex R3 round 4).
+            raise ValueError(
+                "turbulence='mynn25' runs with time_integrator="
+                f"'forward_euler' only; got {time_integrator!r}")
+        if _flag is None and physics_fn_init is not None:
+            raise ValueError(
+                "physics_fn_init is the mynn25 cold-start physics; this "
+                "physics_fn does not run mynn25")
+        self.physics_fn_init = physics_fn_init
+        self._tend_fn_init = (None if physics_fn_init is None else
+                              _tendency_fn(physics_fn_init, grid, sigma_coord,
+                                           forcing=forcing))
+        self._mynn_initialized = physics_fn_init is None
 
     @staticmethod
     def _validate_prescribed_fluxes_no_double_count(
@@ -1068,6 +1096,17 @@ class SingleColumnModel:
         _sfc_bulk = ("default" if (forcing is not None
                                    and forcing.prescribe == "T_s") else None)
         microphysics_fn = None
+        _mynn = physics_config.turbulence.scheme == "mynn25"
+
+        def _build(cfg):
+            # mynn25: the every-step build (initflag False) and the
+            # cold-start build (True); any other scheme: one build.
+            kw = dict(model_type="hydrostatic", dt=dt,
+                      surface_bulk_coeffs=_sfc_bulk)
+            if not _mynn:
+                return make_physics(cfg, **kw), None
+            return (make_physics(cfg, mynn_initflag=False, **kw),
+                    make_physics(cfg, mynn_initflag=True, **kw))
         if (
             microphysics_substeps > 1
             and physics_config.microphysics.scheme != "none"
@@ -1075,20 +1114,14 @@ class SingleColumnModel:
             nonmicro_config = physics_config._replace(
                 microphysics=physics_config.microphysics._replace(scheme="none"),
             )
-            physics_fn = make_physics(
-                nonmicro_config, model_type="hydrostatic", dt=dt,
-                surface_bulk_coeffs=_sfc_bulk,
-            )
+            physics_fn, physics_fn_init = _build(nonmicro_config)
             microphysics_fn = make_microphysics_physics(
                 physics_config.microphysics,
                 model_type="hydrostatic",
                 dt=dt / microphysics_substeps,
             )
         else:
-            physics_fn = make_physics(
-                physics_config, model_type="hydrostatic", dt=dt,
-                surface_bulk_coeffs=_sfc_bulk,
-            )
+            physics_fn, physics_fn_init = _build(physics_config)
         phys_state = init_physics_state(
             ncol=1, nlev=nlev, physics_config=physics_config,
             dtype=dtype, prng_seed=prng_seed,
@@ -1101,14 +1134,17 @@ class SingleColumnModel:
             physics_config=physics_config,
             microphysics_substeps=microphysics_substeps,
             microphysics_fn=microphysics_fn,
+            physics_fn_init=physics_fn_init,
             _built_by_create=True,
         )
 
     def set_time(self, day_of_year: float, seconds_of_day: float) -> None:
         """Propagate calendar time to sub-physics (radiation diurnal cycle)."""
-        set_time = getattr(self.physics_fn, "set_time", None)
-        if callable(set_time):
-            set_time(day_of_year, seconds_of_day)
+        # both builds: the mynn25 cold-start physics runs step 1 (codex R3)
+        for fn in (self.physics_fn, self.physics_fn_init):
+            set_time = getattr(fn, "set_time", None)
+            if callable(set_time):
+                set_time(day_of_year, seconds_of_day)
 
     def step(self) -> HydrostaticState:
         """Advance the column by one step using the selected integrator.
@@ -1129,7 +1165,7 @@ class SingleColumnModel:
             # and could pair the cached tendency with a different
             # ``phys_state`` than the one actually applied — Phase D
             # codex iter-1 high finding.
-            tend_n, new_phys = self._tend_fn(
+            tend_n, new_phys = self._current_tend_fn()(
                 self.state, self.phys_state, self.t_seconds,
             )
             if self._ab2_prev_tend is None:
@@ -1142,9 +1178,10 @@ class SingleColumnModel:
             self._ab2_prev_tend = tend_n
         else:
             new_state, new_phys = self._step_fn(
-                self.state, self.phys_state, self._tend_fn, self.dt,
+                self.state, self.phys_state, self._current_tend_fn(), self.dt,
                 self.t_seconds,
             )
+        self._mynn_initialized = True
         self.t_seconds += self.dt
         self.state = new_state
         if new_phys is not None:
@@ -1162,6 +1199,11 @@ class SingleColumnModel:
         # persistent override after ``step()`` must use an
         # active-physics config (Louis / gray rad / MYNN).
         return self.state
+
+    def _current_tend_fn(self):
+        """The cold-start (mynn25 initflag) tendency on the first step of an
+        uninitialised run, else the every-step one."""
+        return self._tend_fn if self._mynn_initialized else self._tend_fn_init
 
     def pure_step(self, state, phys_state, t_seconds):
         """One integration step returning ``(new_state, new_phys_or_None)`` — exactly what
@@ -1183,6 +1225,10 @@ class SingleColumnModel:
             raise ValueError(
                 "pure_step is undefined for the AB2 integrator (it threads prev_tend "
                 "statefully); use forward_euler/rk2/rk4 for a scan rollout.")
+        if not self._mynn_initialized:
+            raise ValueError(
+                "turbulence='mynn25': the cold-start (initflag) step has not "
+                "run; call step() once before a pure_step/scan rollout")
         return self._step_fn(state, phys_state, self._tend_fn, self.dt, t_seconds)
 
     def run(

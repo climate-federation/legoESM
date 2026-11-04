@@ -196,14 +196,15 @@ __param_spec__ = {
     "RayleighConfig": {
         "scheme_key": "atm.gwd.RayleighConfig",
         "excluded": {
+            "sponge_sharpness": "smoothing width of the sponge cutoff (numerics, RULE 5), not physics",
         },
         "params": {
             # --- boundary-layer Rayleigh drag ---
             "k_max": {"units": "1/s", "bounds": (1.0e-6, 1.0e-4), "tunable_tier": 1, "transform": "sigmoid", "category": "damping", "reference": "Held & Suarez (1994) boundary-layer drag rate", "shape": None},
             "sigma_b": {"units": "1", "bounds": (0.5, 0.95), "tunable_tier": 2, "transform": "sigmoid", "category": "damping", "reference": "Held & Suarez (1994) boundary-layer top sigma", "shape": None},
             # --- upper sponge ---
-            "sponge_k": {"units": "1/s", "bounds": (1.0e-6, 1.0e-4), "tunable_tier": 1, "transform": "sigmoid", "category": "damping", "reference": "Rayleigh sponge drag rate", "shape": None},
-            "sponge_top": {"units": "1", "bounds": (0.001, 0.1), "tunable_tier": 2, "transform": "sigmoid", "category": "damping", "reference": "Rayleigh sponge top sigma level", "shape": None},
+            "sponge_k": {"units": "1/s", "bounds": (1.0e-6, 1.0e-4), "tunable_tier": 1, "transform": "sigmoid", "category": "damping", "reference": "Polvani & Kushner (2002) sponge rate; Isca damping_driver rfactr", "shape": None},
+            "sponge_pbottom_Pa": {"units": "Pa", "bounds": (1.0, 1.0e4), "tunable_tier": 2, "transform": "sigmoid", "category": "damping", "reference": "Polvani & Kushner (2002) sponge bottom; Isca damping_driver sponge_pbottom", "shape": None, "legacy_name": "sponge_top"},
         },
     },
 }
@@ -218,15 +219,21 @@ class RayleighConfig(NamedTuple):
         Maximum drag coefficient [1/s] (default 1/(1*86400)).
     sigma_b : float
         Boundary layer top sigma level (default 0.7).
-    sponge_top : float
-        Upper sponge sigma level (default 0.02).
+    sponge_pbottom_Pa : float
+        Sponge bottom pressure [Pa], Isca ``sponge_pbottom`` (default 50).
+        Replaces the former sigma field ``sponge_top`` (units differ; not
+        convertible by a factor).
     sponge_k : float
-        Upper sponge drag coefficient [1/s] (default 1/(0.5*86400)).
+        Sponge rate at p -> 0 [1/s], Isca ``rfactr`` (default 1/(0.5*86400)).
+    sponge_sharpness : float
+        Sharpness of the C1 cutoff at p = sponge_pbottom_Pa (default 100 =
+        width 0.01 in (p_sb - p)/p_sb); ``inf`` = Isca's hard form.
     """
     k_max: float = 1.0 / 86400.0
     sigma_b: float = 0.7
-    sponge_top: float = 0.02
+    sponge_pbottom_Pa: float = 50.0
     sponge_k: float = 1.0 / (0.5 * 86400.0)
+    sponge_sharpness: float = 100.0
 
 
 class LindzenConfig(NamedTuple):
@@ -643,7 +650,9 @@ class E3SMBeresConfig(NamedTuple):
         Mean-wind table half-dimension (E3SM ``maxuh = 40``); ``uh`` is
         clamped to ``[-maxuh, maxuh]`` and rounded to index the table.
     use_stand_in_table : bool
-        When ``True`` (default) use the documented analytic stand-in
+        Default ``False``: with no real ``mfcc_table`` the kernel RAISES
+        (the stand-in launches almost nothing, so it must never run silently;
+        2026-11-04).  When ``True`` (explicit opt-in) use the documented analytic stand-in
         spectrum (a normalized Gaussian in phase speed, peak ``mfcc_peak``,
         width ``mfcc_c0``) so the scheme RUNS and is testable WITHOUT the
         offline E3SM table.  This is NOT bit-faithful to Beres (2004); it
@@ -715,7 +724,7 @@ class E3SMBeresConfig(NamedTuple):
     source_wind_p: float = 7.0e4
     maxh: int = 20
     maxuh: int = 40
-    use_stand_in_table: bool = True
+    use_stand_in_table: bool = False     # True = explicit opt-in to the stand-in (tests only)
     mfcc_peak: float = 1.0e-2
     mfcc_c0: float = 30.0
     mfcc_hdepth_growth: float = 0.05

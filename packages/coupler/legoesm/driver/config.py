@@ -530,6 +530,7 @@ class OutputConfig(NamedTuple):
 VALID_MICROPHYSICS = (
     "none", "kessler", "sundqvist", "seifert_beheng",
     "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
+    "ifs_cloudsc",
 )
 
 VALID_TURBULENCE = (
@@ -537,7 +538,7 @@ VALID_TURBULENCE = (
     "holtslag_boville", "ysu", "edmf", "none",
 )
 
-VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg")
+VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg", "ecrad_ifs")
 
 VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved", "cam6_clubb")
 
@@ -2235,12 +2236,42 @@ class ExperimentConfig(NamedTuple):
         # only schemes that carry and process both may run it.  p3's snow
         # slot holds rime, fast_sbm's ice slots stay zero, seifert_beheng is
         # liquid only, the ML emulator's layout is generic.
+        # ifs_cloudsc takes the detrained precipitation itself, through the
+        # CUMASTRN hand-off (vote VC2/A7').
         if (self.convection == "bechtold" and self.bechtold_use_ifs_ascent
-                and self.microphysics not in ("morrison", "thompson")):
+                and self.microphysics not in ("morrison", "thompson",
+                                              "ifs_cloudsc")):
             errors.append(
                 f"bechtold_use_ifs_ascent needs a microphysics that carries "
-                f"rain and snow (morrison, thompson) for the "
+                f"rain and snow (morrison, thompson, ifs_cloudsc) for the "
                 f"detrained precipitation, not {self.microphysics!r}")
+        # IFS CLOUDSC reads CUMASTRN's raw detrainment and mass fluxes (vote
+        # VC19a: refuse any other convection), and only the MPAS column lane
+        # carries its advected cloud fraction (vote VC16b: the compiled
+        # cube/lat-lon and spectral lanes refuse it; follow-up).
+        if self.microphysics == "ifs_cloudsc":
+            if not (self.convection == "bechtold"
+                    and self.bechtold_use_ifs_ascent):
+                errors.append(
+                    "microphysics='ifs_cloudsc' needs the faithful IFS "
+                    "convection (convection='bechtold' with "
+                    "bechtold_use_ifs_ascent=True), whose raw PLUDE/PLUDELI/"
+                    "PSNDE/PMFU/PMFD/PLU/LDCUM/KTYPE it reads; got "
+                    f"convection={self.convection!r}, bechtold_use_ifs_ascent="
+                    f"{self.bechtold_use_ifs_ascent!r}")
+            if self.cld_macmic_num_steps != 1:
+                errors.append(
+                    "microphysics='ifs_cloudsc' runs CLOUDSC once per physics "
+                    "step after the convection (the IFS order, vote VC23): "
+                    "needs cld_macmic_num_steps=1, got "
+                    f"{self.cld_macmic_num_steps!r}")
+            if not self.column_loop_lane:
+                errors.append(
+                    "microphysics='ifs_cloudsc' runs only on the MPAS column "
+                    "lane (MPAS dycore or the FV3-duo column lane), which "
+                    "advects its cloud_fraction_ifs tracer; the compiled "
+                    "cube/lat-lon and spectral lanes do not carry it "
+                    "(follow-up)")
         if self.land_fraction_source not in ("topography", "era5", "zero"):
             errors.append(
                 f"land_fraction_source must be topography, era5 or zero, got "
@@ -2407,35 +2438,42 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.corner_fill must be one of {CORNER_FILL_MODES}, "
                           f"got {d.corner_fill!r}")
         if d.column_lane:
-            if d.discretization not in ("fv3_duo", "latlon_cgrid"):
+            _native_grid = {"latlon_cgrid": "latlon", "spectral": "gaussian"}
+            if d.discretization not in ("fv3_duo", *_native_grid):
                 errors.append(
                     "dycore.column_lane: no column adapter for "
                     f"dycore.discretization={d.discretization!r} "
-                    "(fv3_duo, latlon_cgrid)")
-            if d.discretization == "latlon_cgrid":
-                if (g.grid_type != "latlon" or d.model_type != "hydrostatic"):
+                    "(fv3_duo, latlon_cgrid, spectral)")
+            if d.discretization in _native_grid:
+                _ng = _native_grid[d.discretization]
+                if (g.grid_type != _ng or d.model_type != "hydrostatic"):
                     errors.append(
-                        "dycore.column_lane with latlon_cgrid needs "
-                        "grid_type='latlon' and model_type='hydrostatic' "
+                        f"dycore.column_lane with {d.discretization} needs "
+                        f"grid_type={_ng!r} and model_type='hydrostatic' "
                         f"(got {g.grid_type!r}, {d.model_type!r})")
                 if self.distributed or self.ensemble_size != 1:
                     errors.append(
-                        "dycore.column_lane on latlon_cgrid is single device: "
-                        "no MPI band (distributed) and no ensemble axis")
+                        f"dycore.column_lane on {d.discretization} is single "
+                        "device: no MPI (distributed) and no ensemble axis")
                 # the column loop's MPAS q_v smoother is a Voronoi
-                # operator; this lane's is latlon_qv_smooth_del4_m4s
+                # operator; the lat-lon lane's is latlon_qv_smooth_del4_m4s
                 if self.output.budget_ledger:
                     errors.append(
-                        "output.budget_ledger on the lat-lon column lane: its "
-                        "dycore publishes no per-step ledger, so no ledger "
-                        "would be written")
+                        f"output.budget_ledger on the {d.discretization} "
+                        "column lane: its dycore publishes no per-step ledger, "
+                        "so no ledger would be written")
                 for _k in ("mpas_qv_smooth_del2_m2s", "mpas_qv_smooth_del4_m4s"):
                     if float(getattr(self, _k, 0.0) or 0.0) != 0.0:
                         errors.append(
-                            f"{_k}={getattr(self, _k)!r} on the lat-lon column "
-                            "lane: the column loop's q_v smoother needs the "
-                            "Voronoi mesh; set it to 0 (this lane's is "
-                            "latlon_qv_smooth_del4_m4s)")
+                            f"{_k}={getattr(self, _k)!r} on the "
+                            f"{d.discretization} column lane: the column "
+                            "loop's q_v smoother needs the Voronoi mesh; set "
+                            "it to 0")
+            if (d.discretization == "spectral"
+                    and str(d.time_integrator).lower() in ("leapfrog", "leapfrog_si")):
+                errors.append(
+                    "dycore.column_lane on spectral runs the explicit ssp_rk54 "
+                    f"only (D5); got time_integrator={d.time_integrator!r}")
             # every column lane: the columns are a VIEW of the native
             # state and only the dycore's step may move the winds
             if self.sponge_enabled:
@@ -2849,6 +2887,21 @@ class ExperimentConfig(NamedTuple):
                 f"radiation must be one of {_valid_radiation}, "
                 f"got {self.radiation!r}"
             )
+        # ecRad 49r1 (votes L2a, L20a): the MPAS column lane only, and its
+        # aerosols are OFF, so an aerosol forcing would be silently ignored.
+        if self.radiation == "ecrad_ifs":
+            if not self.column_loop_lane:
+                errors.append(
+                    "radiation='ecrad_ifs' runs only on the MPAS column lane "
+                    "(its between-call carry lives in that lane's physics "
+                    "state); the compiled cube/lat-lon and spectral lanes "
+                    "refuse it")
+            if self.aerosol_forcing != "off":
+                errors.append(
+                    "radiation='ecrad_ifs' runs with aerosols OFF (the CAMS "
+                    "climatology files are pending); aerosol_forcing="
+                    f"{self.aerosol_forcing!r} would be silently ignored, "
+                    "set it to 'off'")
         _valid_cloud_schemes = VALID_CLOUD_SCHEMES
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(
@@ -3005,7 +3058,8 @@ class ExperimentConfig(NamedTuple):
         # opt-in would silently no-op there.  Reject it loudly on that backend
         # (dispatch-hardening, mirrors the condensate-scheme guard above).
         if (self.use_clubb_cloud_fraction
-                and self.dycore.discretization == "spectral"):
+                and self.dycore.discretization == "spectral"
+                and not self.dycore.column_lane):
             errors.append(
                 "use_clubb_cloud_fraction=True is not wired into the "
                 f"{self.dycore.discretization!r} radiation path (that backend "
@@ -4767,6 +4821,27 @@ class ExperimentConfig(NamedTuple):
                     f"does not exist (the Beres table would silently fall "
                     f"back to nothing at build time)"
                 )
+        # Beres on the stand-in table: refused early here (the kernel also
+        # raises, E3SMBeresConfig.use_stand_in_table defaults False).  The
+        # effective GWD config is the override when one is set.
+        _ov = self.gravity_wave_drag_override
+        if _ov is not None and isinstance(_ov, GravityWaveDragConfig):
+            _b_scheme, _b_src = str(_ov.scheme), str(_ov.e3sm_cam.source)
+            _b_path = _ov.e3sm_cam.beres.mfcc_table_path
+            _b_standin = bool(_ov.e3sm_cam.beres.use_stand_in_table)
+        else:
+            _b_scheme, _b_src = str(self.gravity_wave_drag), str(self.e3sm_cam_source)
+            _b_path, _b_standin = self.e3sm_cam_mfcc_table_path, False
+        if ("e3sm_cam" in _b_scheme.split("+") and "convective" in _b_src.split("+")
+                and not _b_path and not _b_standin):
+            errors.append(
+                "e3sm_cam source includes 'convective' (Beres) but no table "
+                "path is set: the kernel would have only the analytic stand-in "
+                "spectrum, which launches almost nothing. Set "
+                "e3sm_cam_mfcc_table_path (or the override's "
+                "beres.mfcc_table_path) to the CESM/E3SM inputdata table "
+                "atm/waccm/gw/newmfspectra40_dc25.nc (sha256 8f1528d85b36...)"
+            )
         if isinstance(self.e3sm_cam_pgwv, bool) or \
                 not isinstance(self.e3sm_cam_pgwv, int) or \
                 self.e3sm_cam_pgwv < 0:
