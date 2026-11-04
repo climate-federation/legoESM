@@ -270,3 +270,30 @@ def test_zdf_operand_reader_is_complete_and_fails_closed(
 def test_gate_plants_exit_red(gate_module, kwargs, error) -> None:
     with pytest.raises((gate_module.GateError, ValueError), match=error):
         gate_module.run(**kwargs)
+
+
+
+def _zin_record(names: int, version: int, step: int = 3) -> bytes:
+    import struct
+    extra = {1: 0, 2: 3, 3: 4}[version]
+    vals = np.arange(1.0, names + extra + 1.0)
+    return (f"NEMO_L3ZIN_00{version}  ".encode()
+            + struct.pack("=6i", version, step, 1, 1, 64, names + extra) + vals.tobytes())
+
+
+def test_zin_v3_record_carries_sst_and_older_records_are_refused(gate_module, tmp_path) -> None:
+    """Vote Y1: SST comes from the v3 recorder; v1/v2 records cannot drive the column (no fallback)."""
+    n = len(gate_module.ZDF_INPUT_NAMES)
+
+    def read(version):
+        path = tmp_path / f"zin{version}.bin"
+        path.write_bytes(_zin_record(n, version))
+        with path.open("rb") as stream:     # reader uses np.fromfile: needs a real file
+            return gate_module._read_zdf_input_step(stream, 3)
+    v3 = read(3)
+    assert float(v3["sst"][0]) == n + 4.0 and float(v3["t_s"][0, 2]) == n + 3.0
+    assert float(gate_module._forcing(v3).sst[0]) == n + 4.0
+    for version in (1, 2):
+        old = read(version)
+        with pytest.raises(gate_module.GateError, match="no SST"):
+            gate_module.forcing_inputs(old)
