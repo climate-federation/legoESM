@@ -93,3 +93,20 @@ def test_smooth_min_max_c1_helper_contract():
     assert bool(jnp.all(smooth_max_c1(x, 0.0, w) == -smooth_min_c1(-x, 0.0, w)))
     g = jax.vmap(jax.grad(lambda v: smooth_min_c1(v, 0.0, w)))(x)
     assert bool(jnp.all(jnp.isfinite(g))) and bool(jnp.all((g >= 0) & (g <= 1)))
+
+
+def test_default_band_values_pinned_at_both_bounds():
+    """Review: the fixture never lands inside the 0.01 K bands; pin the default form there."""
+    w = bl._T_CLAMP_WIDTH_K
+    T_m = -0.27
+    for b, x in ((T_m, T_m + jnp.array([-0.004, -0.001, 0.0, 0.002, 0.0049])),
+                 (bl._T_ICE_FLOOR_C, bl._T_ICE_FLOOR_C + jnp.array([-0.004, 0.0, 0.003]))):
+        got = bl._glo2eqv_bounds(x, T_m, w)
+        if b == T_m:
+            y = x - b + w / 2
+            want = x - y * y / (2 * w)
+        else:
+            y = b - x + w / 2
+            want = x + y * y / (2 * w)
+        np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=0, atol=1e-13)
+        assert bool(jnp.all(jnp.abs(got - jnp.clip(x, bl._T_ICE_FLOOR_C, T_m)) <= w / 8 + 1e-15))
