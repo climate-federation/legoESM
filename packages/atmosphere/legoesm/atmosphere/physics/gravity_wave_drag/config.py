@@ -643,7 +643,9 @@ class E3SMBeresConfig(NamedTuple):
         Mean-wind table half-dimension (E3SM ``maxuh = 40``); ``uh`` is
         clamped to ``[-maxuh, maxuh]`` and rounded to index the table.
     use_stand_in_table : bool
-        When ``True`` (default) use the documented analytic stand-in
+        Default ``False``: with no real ``mfcc_table`` the kernel RAISES
+        (the stand-in launches almost nothing, so it must never run silently;
+        2026-11-04).  When ``True`` (explicit opt-in) use the documented analytic stand-in
         spectrum (a normalized Gaussian in phase speed, peak ``mfcc_peak``,
         width ``mfcc_c0``) so the scheme RUNS and is testable WITHOUT the
         offline E3SM table.  This is NOT bit-faithful to Beres (2004); it
@@ -715,7 +717,7 @@ class E3SMBeresConfig(NamedTuple):
     source_wind_p: float = 7.0e4
     maxh: int = 20
     maxuh: int = 40
-    use_stand_in_table: bool = True
+    use_stand_in_table: bool = False     # True = explicit opt-in to the stand-in (tests only)
     mfcc_peak: float = 1.0e-2
     mfcc_c0: float = 30.0
     mfcc_hdepth_growth: float = 0.05

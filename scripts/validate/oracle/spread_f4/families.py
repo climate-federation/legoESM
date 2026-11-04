@@ -1,7 +1,8 @@
 """F4 family registry: committed generator + its args, oracle exes to intercept,
 committed fixture, committed test + the test's own metric, tests that compare
 port vs oracle (jit/gap/grad tests excluded: not oracle comparisons)."""
-WT = "/burg/glab/users/pg2328/wt_f4"
+import os
+WT = os.environ.get("F4_WT", "/burg/glab/users/pg2328/wt_f4")   # VOTE V32: stacked-branch worktrees
 OR = "/burg/glab/users/pg2328/oracles"
 OA = "/burg/glab/users/pg2328/oracle_audit"
 B = "/burg/glab/users/pg2328/oracle_audit/f4/build"
@@ -94,3 +95,15 @@ FAMILIES["rayleigh_hs_isca"] = dict(
     exes={"drv_hs"}, fixture=f"{FX}/rayleigh_hs_isca.npz",
     test=f"{WT}/tests/atmosphere/test_rayleigh_hs_isca_oracle.py", fix_attr="FIXTURE",
     metrics=["_rel"], select="matches_isca")
+
+# Beres (Beres 2004 / E3SM gw_beres_src) on the real gw_drag_file table (VOTES V27-V33)
+FAMILIES["gw_beres_table"] = dict(
+    build=(f"set +u && source /etc/profile.d/modules.sh && module load netcdf-c/4.9.3 netcdf-fortran/4.6.2 && set -u"
+           f" && bash -x {G}/gw_beres_table/build.sh {OR}/E3SM_v3.0.1 {B}/gw_beres_table"
+           f" {OA}/nonorographic_gwd_e3sm_cam/fortran/src/interpolate_data.F90"),
+    generator=f"{G}/gw_beres_table/make_fixture.py",
+    argv=["--drv", f"{B}/gw_beres_table/gw_spec_oracle_nc", "--mfcc-file",
+          f"{OR}/inputdata/atm/waccm/gw/newmfspectra40_dc25.nc", "--out", "{OUT}"],
+    exes={"gw_spec_oracle_nc"}, fixture=f"{FX}/gw_spec_e3sm_beres_table.npz",
+    test=f"{WT}/tests/atmosphere/hydrostatic/unit/test_gw_spec_e3sm_oracle.py",
+    fix_attr="FIXTURE_TABLE", metrics=["_rel_err", "_rel_err_field"], select="beres_real_table")

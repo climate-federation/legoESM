@@ -32,6 +32,7 @@ sys.path.insert(0, "/burg/glab/users/pg2328/oracle_audit/spread")
 import perturb  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import families  # noqa: E402
 from families import FAMILIES  # noqa: E402
 
 
@@ -60,7 +61,7 @@ def main(family, rundir, buildlog):
     R = Path(rundir)
     spec = importlib.util.spec_from_file_location("t", fam["test"])
     T = importlib.util.module_from_spec(spec)
-    sys.path.insert(0, "/burg/glab/users/pg2328/wt_f4")
+    sys.path.insert(0, families.WT)
     spec.loader.exec_module(T)
     metric = getattr(T, fam["metrics"][0])
     notes, ctl = [], {}
