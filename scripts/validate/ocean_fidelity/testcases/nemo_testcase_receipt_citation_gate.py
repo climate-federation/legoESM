@@ -14250,11 +14250,16 @@ CITATION_MAP.update({
     'src/OCE/SBC/sbc_ice.F90:217-219': [('REAL(wp), PUBLIC, ALLOCATABLE, SAVE, DIMENSION(:,:)   ::   snwice_mass        !: mass of snow and ice at current  ice time step   [Kg/m2]', 2), ('REAL(wp), PUBLIC, ALLOCATABLE, SAVE, DIMENSION(:,:)   ::   snwice_fmass       !: time evolution of mass of snow+ice               [Kg/m2/s]', 2), 3],
     'src/OCE/SBC/sbccpl.F90:2302-2309': ['IF( ssnd(jps_ttilyr)%laction) THEN', ('ENDIF', 137), 8],
     'src/OCE/SBC/sbccpl.F90:2485-2498': ['SELECT CASE( sn_snd_cond%clcat )', ('END SELECT', 38), 14],
-    'tests/ice/unit/test_si3_o17.py:535-952': [('@pytest.fixture(scope="module")', 5), ('assert not refused_target.exists()', 2), 418],
+    'packages/ice/legoesm/ice/si3_o17.py:79-97': ['class SI3O17Card(NamedTuple):', 'core2_precipitation_closure: bool', 19],
+    'packages/ice/legoesm/ice/si3_o17.py:164-291': ['def build_orca2_sas_ice_o17_card(*, surface: SI3SurfaceConfig, thermo_namelist: dict) -> SI3O17Card:', (')', 24), 128],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:444-447': ['def card_for(run: Path):', 'return build_orca2_sas_ice_o17_card(surface=surface_cfg, thermo_namelist=nml)', 4],
+    'src/ICE/icestp.F90:260-325': ["CALL load_nml( numnam_ice_cfg, 'namelist_ice_cfg',    numout, lwm )", ('END SUBROUTINE ice_init', 1), 66],
+    'src/ICE/icestp.F90:328-385': [('SUBROUTINE par_init', 1), 'END SUBROUTINE par_init', 58],
+    'tests/ice/unit/test_si3_o17.py:535-1010': [('@pytest.fixture(scope="module")', 5), ('assert not refused_target.exists()', 2), 476],
     'tests/ice/unit/test_si3_o17.py:545-613': ['def _load_parent_scorer_94a4069d61(tmp_path: Path):', ') == scorer.json.dumps(det_new, indent=2, sort_keys=True).encode("utf-8")', 69],
     'tests/ice/unit/test_si3_o17.py:545-729': ['def _load_parent_scorer_94a4069d61(tmp_path: Path):', 'assert scorer.strip_timing(merged_fail) == scorer.strip_timing(serial_fail)', 185],
     'tests/ice/unit/test_si3_o17.py:627-697': ['# Finding 1: Split free-run ranges are refused (both free_run and score with INDEPENDENT).', 'scorer.free_run(Path("."), step_range=(2, 2), **div_kw)', 71],
-    'tests/ice/unit/test_si3_o17.py:925-952': ['# Operator script structure and safety gates (Finding 5: refuse paths under real evidence', ('assert not refused_target.exists()', 2), 28],
+    'tests/ice/unit/test_si3_o17.py:925-1010': ['# Operator script structure and safety gates (Finding 5: refuse paths under scratch', ('assert not refused_target.exists()', 2), 86],
 })
 
 

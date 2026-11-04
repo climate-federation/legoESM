@@ -10,7 +10,7 @@ readonly HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO="$(cd "$HERE/../../../.." && pwd)"
 readonly SCORER="$HERE/nemo_si3_o17_composition_scorer.py"
 readonly PY="/home/dbalwada/legoESM/.venv/bin/python"
-readonly DEFAULT_EVIDENCE="/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step"
+readonly DEFAULT_EVIDENCE="${NEMO_SI3_O17_DEFAULT_EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step}"
 
 OUT_DIR=""
 K_PARALLEL=20

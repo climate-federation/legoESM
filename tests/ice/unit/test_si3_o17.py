@@ -922,31 +922,89 @@ def test_o17_scorer_free_run_and_carried_state_plants(
     assert multi_fail["per_step"]["2:0"]["differing_values_per_field"]["step_exit.qns"] == 1
     assert multi_fail["per_step"]["2:0"]["fields"]["step_exit.qns"]["nonfinite"] == 1
 
-    # Operator script structure and safety gates (Finding 5: refuse paths under real evidence
-    # tree BEFORE mkdir -p creates anything).
+    # Operator script structure and safety gates (Finding 5: refuse paths under scratch
+    # evidence tree BEFORE mkdir -p creates anything; never target the real evidence tree).
+    test_o17_operator_script_refuses_scratch_evidence_tree_before_mkdir(tmp_path)
+
+
+def test_o17_operator_script_refuses_scratch_evidence_tree_before_mkdir(
+    tmp_path: Path,
+) -> None:
+    """Operator script refuses --out under a scratch evidence tree before mkdir -p creates anything."""
+    import os
+    import shutil
     import subprocess
 
-    op_script = REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_operator_run.sh"
+    from legoesm.ice.si3_o17 import SI3O17Card
+
+    assert SI3O17Card._fields == (
+        "state",
+        "aevp",
+        "strength",
+        "fold",
+        "redistribution",
+        "correction",
+        "surface",
+        "thermo_namelist",
+        "constants",
+        "rn_himin",
+        "rn_hinew",
+        "ln_frazil",
+        "ln_drgice_imp",
+        "ln_ice_embd",
+        "differentiable",
+        "core2_precipitation_closure",
+    )
+
+    op_script = Path(
+        os.environ.get(
+            "NEMO_SI3_O17_OPERATOR_SCRIPT",
+            REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_operator_run.sh",
+        )
+    )
     assert op_script.is_file()
     op_text = op_script.read_text()
+    assert (
+        'readonly DEFAULT_EVIDENCE="${NEMO_SI3_O17_DEFAULT_EVIDENCE:-'
+        '/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step}"'
+        in op_text
+    )
     assert "MIN_AVAIL_GB=250" in op_text
     assert "MAX_PROC_RSS_KIB=104857600" in op_text
     assert "--labels GIVEN-NEMO-ENTRY" in op_text
-    assert "--steps \"${start}..${stop}\"" in op_text
-    assert "--merge \"${range_jsons[@]}\"" in op_text
+    assert '--steps "${start}..${stop}"' in op_text
+    assert '--merge "${range_jsons[@]}"' in op_text
     assert "--free-run" in op_text
 
-    refused_target = (
-        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step")
-        / "refused_probe_do_not_create"
+    scratch_base = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_o17_free_scratch"
     )
-    assert not refused_target.exists()
-    res = subprocess.run(
-        ["bash", str(op_script), "--out", str(refused_target)],
-        capture_output=True,
-        text=True,
-        check=False,
+    if not scratch_base.parent.is_dir():
+        scratch_base = tmp_path / "si3_o17_free_scratch"
+    scratch_probe = scratch_base / "operator_refusal_guard"
+    shutil.rmtree(scratch_probe, ignore_errors=True)
+    scratch_evidence = (
+        scratch_probe / "si3_rounds" / "round29" / "oracle_o17_full_step"
     )
-    assert res.returncode == 2
-    assert "REFUSE: --out resolves inside evidence tree" in res.stderr
+    (scratch_evidence / "record_100step" / "o17_master_records").mkdir(
+        parents=True, exist_ok=True
+    )
+    refused_target = scratch_evidence / "refused_probe_do_not_create"
     assert not refused_target.exists()
+    env = {
+        **os.environ,
+        "NEMO_SI3_O17_DEFAULT_EVIDENCE": str(scratch_evidence),
+        "TMPDIR": str(scratch_probe / "tmp"),
+    }
+    for extra_args in ((), ("--evidence", str(scratch_evidence))):
+        res = subprocess.run(
+            ["bash", str(op_script), "--out", str(refused_target), *extra_args],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 2
+        assert "REFUSE: --out resolves inside evidence tree" in res.stderr
+        assert str(scratch_evidence) in res.stderr
+        assert not refused_target.exists()
