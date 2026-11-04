@@ -41,7 +41,7 @@ def nemo_vremap(ph_old, pts_old):
 
 def _cases():
     e = col(FX, "dh:in:e_i")                     # recorded per-volume layer enthalpies [J m-3]
-    for total in (2.08e-17, 6.9e-18, 1e-12, 1e-10, 0.37):
+    for total in (3e-21, 3e-20, 6e-20, 2.08e-17, 6.9e-18, 1e-12, 1e-10, 0.37):   # below/at/above epsi20*3
         for row in e:
             h = np.array([0.0, total / 3, total / 3, total / 3 * 0.5, total / 3 * 0.5])   # last = basal new ice
             yield h, np.array([0.0, row[0], row[1], row[2], row[2] * 1.01])
@@ -52,13 +52,16 @@ def test_remap_matches_nemo_vremap_on_thin_and_normal_columns():
         port = np.asarray(bl._piecewise_remap(jnp.asarray(h), jnp.asarray(e), jnp.asarray(h.sum())))
         ref = nemo_vremap(h, h * e)
         np.testing.assert_allclose(port, ref, rtol=1e-12, atol=0.0)
+        if h.sum() / 3 <= EPSI20:                   # floor binds: content / epsi20
+            np.testing.assert_allclose(port.sum(), np.sum(h * e) / EPSI20, rtol=1e-12)
         assert ref.max() > 0                       # the thin columns keep their enthalpy
 
 
 def test_remap_conserves_column_enthalpy_including_thin_columns():
     for h, e in _cases():
         port = np.asarray(bl._piecewise_remap(jnp.asarray(h), jnp.asarray(e), jnp.asarray(h.sum())))
-        np.testing.assert_allclose(np.sum(port) * h.sum() / 3, np.sum(h * e), rtol=1e-12)
+        if h.sum() / 3 > EPSI20:                    # content conserved wherever the floor does not bind
+            np.testing.assert_allclose(np.sum(port) * h.sum() / 3, np.sum(h * e), rtol=1e-12, atol=0.0)
 
 
 def test_remap_zero_column_is_zero_and_gradient_finite_at_thin_column():
@@ -72,3 +75,12 @@ def test_remap_zero_column_is_zero_and_gradient_finite_at_thin_column():
     assert bool(jnp.all(jnp.isfinite(ge))) and float(jnp.abs(ge).max()) > 0
     gz = jax.grad(lambda t: jnp.sum(bl._piecewise_remap(z * t, z + 3e8, jnp.sum(z * t))))(1.0)
     assert bool(jnp.isfinite(gz))
+
+
+def test_remap_reverse_pass_finite_in_fp32_at_zero_and_thin_columns():
+    for h_layer in (0.0, 1e-18, 1e-6):
+        h = jnp.asarray([0.0, h_layer, h_layer, h_layer, 0.0], jnp.float32)
+        e = jnp.full(5, 3e8, jnp.float32)
+        gt = jax.grad(lambda t: jnp.sum(bl._piecewise_remap(h * t, e, jnp.sum(h * t))))(jnp.asarray(1.0, jnp.float32))
+        gh = jax.grad(lambda hh: jnp.sum(bl._piecewise_remap(hh, e, jnp.sum(hh))))(h)
+        assert bool(jnp.isfinite(gt)) and bool(jnp.all(jnp.isfinite(gh))), h_layer
