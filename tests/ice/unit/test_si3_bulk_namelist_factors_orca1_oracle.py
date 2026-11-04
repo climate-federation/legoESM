@@ -58,7 +58,8 @@ def _blk(fx, pfac, efac, snwblow, at_i_b=None):
         Ch=i["Ch_ice"], Ce=i["Ce_ice"], ice_fraction_before=i["at_i_b"] if at_i_b is None else at_i_b,
         category_fraction_before=i["a_i_b"], sst_celsius=i["sst_m"], qns_ocean=i["qns_oce"],
         qsr_ocean=i["qsr_oce"], emp_ocean_raw=i["emp"], precip_factor=pfac, evap_factor=efac,
-        snow_blow_exponent=snwblow, ice_constants=NEMO_SI3_CONSTANTS_CONFIG)
+        snow_blow_exponent=snwblow, land_mask=i["smask0"], ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        switch_width=0.0)
 
 
 def _close(p, n, name):

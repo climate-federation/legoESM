@@ -55,7 +55,8 @@ def _blk(fx, T=None):
         precip=i["precip"], snow=i["snow"], qsr=i["qsr"], rho_air=i["rhoa"], wind=i["wndm_ice"],
         Ch=i["Ch_ice"], Ce=i["Ce_ice"], ice_fraction_before=i["at_i_b"], category_fraction_before=i["a_i_b"],
         sst_celsius=i["sst_m"], qns_ocean=i["qns_oce"], qsr_ocean=i["qsr_oce"], emp_ocean_raw=i["emp"],
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG)
+        land_mask=i["smask0"], precip_factor=1.0, evap_factor=1.0, snow_blow_exponent=0.66,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG, switch_width=0.0)
 
 
 def test_fixture_is_wet_and_has_ice(fx):

@@ -67,7 +67,8 @@ def _blk(fx, mask=None):
         precip=i["precip"], snow=i["snow"], qsr=i["qsr"], rho_air=i["rhoa"], wind=i["wndm_ice"],
         Ch=i["Ch_ice"], Ce=i["Ce_ice"], ice_fraction_before=i["at_i_b"], category_fraction_before=i["a_i_b"],
         sst_celsius=i["sst_m"], qns_ocean=i["qns_oce"], qsr_ocean=i["qsr_oce"], emp_ocean_raw=i["emp"],
-        land_mask=i["smask0"] if mask is None else mask, ice_constants=NEMO_SI3_CONSTANTS_CONFIG)
+        land_mask=i["smask0"] if mask is None else mask, precip_factor=1.0, evap_factor=1.0,
+        snow_blow_exponent=0.66, ice_constants=NEMO_SI3_CONSTANTS_CONFIG, switch_width=0.0)
 
 
 def _alb(fx, mask=None, **arrays):
@@ -75,7 +76,7 @@ def _alb(fx, mask=None, **arrays):
     i = {k: jnp.asarray(v) for k, v in _sec(fx, "alb_in").items()}
     i.update(arrays)
     return _nemo_si3_ice_albedo(i["t_su"], i["h_i"], i["h_s"], i["cloud_fra"],
-                                land_mask=i["smask0"] if mask is None else mask)
+                                land_mask=i["smask0"] if mask is None else mask, switch_width=0.0)
 
 
 def _flx(fx, mask=None, **arrays):
@@ -90,7 +91,8 @@ def _flx(fx, mask=None, **arrays):
         frq=i["frq_m"], qsr_ocean=i["qsr_oce"], qns_ocean=i["qns_oce"], qemp_ocean=i["qemp_oce"],
         ocean_layer_thickness=i["e3t_m"], sst_celsius=i["sst_m"], T_bottom=i["t_bo"], dt=s["rDt_ice"],
         rho_ocean=s["rho0"], c_ocean=s["rcp"], T0=s["rt0"], ice_epsilon=1.0e-10,
-        max_ice_fraction=i["rn_amax_2d"], land_mask=i["smask0"] if mask is None else mask)
+        max_ice_fraction=i["rn_amax_2d"], land_mask=i["smask0"] if mask is None else mask,
+        lead_cut_version="5.0.1", switch_width=0.0)
 
 
 def test_fixture_has_land_and_wet_cells(fx):
