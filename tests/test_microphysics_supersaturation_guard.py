@@ -68,7 +68,9 @@ BASELINE_EXEMPT = frozenset({"sdm", "fast_sbm", "none", "seifert_beheng",
                              # faithful ESCOMP kessler_run port (no guard)
                              "kessler",
                              # faithful OpenIFS 49r1 CLOUDSC (own supersatcheck)
-                             "ifs_cloudsc"})
+                             "ifs_cloudsc",
+                             # faithful WRF Thompson (own saturation adjustment)
+                             "thompson"})
 
 _FACTORY_FN = "_get_microphysics_fn"
 _MIN_SCHEMES = 8  # discovery sanity floor (10 today)
