@@ -128,3 +128,26 @@ def test_column_trace_carries_summed_fluxes_and_is_differentiable():
     fd = (loss(fz.qsb_ice_bottom + e) - loss(fz.qsb_ice_bottom - e)) / (2 * eps)
     assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g).max()) > 0
     np.testing.assert_allclose(float(g[0]), float(fd), rtol=1e-5, atol=1e-10)
+
+
+def test_sal_bounds_and_do_slots_close_the_salt_and_mass_budget():
+    """Review: the record has no active salinity bound and its do block is not isolated here, so
+    check the sal sfx_res and ice_thd_do slots against the port's own state change on columns
+    that activate them (bounds both ways; lead freezing on ice and on open water)."""
+    from si3_t4col_fixture import forcing
+    a = jnp.asarray([0.9, 0.9, 0.5, 0.0])
+    h = jnp.asarray([1.0, 1.0, 0.5, 0.0])
+    S = jnp.asarray([0.05, 30.0, 6.0, 0.0])                # below rn_simin, above 0.75*SSS, inside
+    z = jnp.zeros(4)
+    pre = bl.SI3ColumnArrays(a, h, z, z + 250.0, jnp.zeros((4, 3)), jnp.zeros((4, 3)), S,
+                             jnp.stack([S] * 3, -1), z)
+    fz = forcing(4, t_bottom=z + 271.2, sss=z + 34.0, qlead=jnp.asarray([0.0, 0.0, -2e6, -1e6]))
+    S1, _, fx = bl._sal_step(pre, fz, 14400.0, K)
+    assert float(jnp.abs(fx.sfx_res[:2]).min()) > 0
+    ds = K.rho_ice * a * h * (S1 - S) / 14400.0
+    np.testing.assert_allclose(np.asarray(ds), -np.asarray(fx.sfx_bri + fx.sfx_res), rtol=1e-12, atol=1e-18)
+    tr = bl.si3_column_step_arrays(pre, fz._replace(dqns_ice=z - 1.0), 14400.0, K)
+    d = tr.post_do
+    dv = K.rho_ice * (d.concentration * d.h_ice - tr.post_temp2.concentration * tr.post_temp2.h_ice) / 14400.0
+    assert float(jnp.abs(tr.fluxes.wfx_opw[2:]).min()) > 0
+    np.testing.assert_allclose(np.asarray(dv), -np.asarray(tr.fluxes.wfx_opw), rtol=1e-12, atol=1e-18)
