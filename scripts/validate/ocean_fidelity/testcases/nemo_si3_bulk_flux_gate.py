@@ -437,7 +437,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         precip_factor=constants.precip_factor_orca1,
         evap_factor=constants.evap_factor_orca1,
         snow_blow_exponent=constants.snow_blow_exponent_orca1,
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        land_mask=s2["mask"], ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
     )
     for name in STAGE1_NAMES[25:45]:
         predictions[(1, name)] = flux2[name]
@@ -454,6 +454,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         sst_celsius=s2["sst_celsius"], T_bottom=s2["T_bottom"], dt=s2["dt"],
         rho_ocean=s2["rho_ocean"], c_ocean=s2["c_ocean"], T0=s2["T0"],
         ice_epsilon=s2["ice_epsilon"], max_ice_fraction=s2["max_ice_fraction"],
+        land_mask=s2["mask"],
     )
     for name in ("qsb_ice_bot", "fhld", "qlead"):
         predictions[(2, name)] = other[name]
@@ -487,7 +488,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         precip_factor=constants.precip_factor_orca1,
         evap_factor=constants.evap_factor_orca1,
         snow_blow_exponent=constants.snow_blow_exponent_orca1,
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        land_mask=s2["mask"], ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
         _preserve_subnormal_snow=False,
     )
     ablation_rows = [

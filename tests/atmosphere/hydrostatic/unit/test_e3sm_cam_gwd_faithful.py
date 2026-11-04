@@ -36,6 +36,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+    E3SMBeresConfig,
     E3SMCAMConfig,
     E3SMFrontalConfig,
     E3SMOrographicConfig,
@@ -522,7 +523,8 @@ def test_spectral_heating_band_cuts_deep_beres_dttke():
     heat[:, mask] = 2e-3                                   # K/s, deep layer
     netdt = jnp.asarray(heat)
     base = dict(source="convective", pgwv=8, dc=2.5,
-                do_energy_conservation=False)
+                do_energy_conservation=False,
+                beres=E3SMBeresConfig(use_stand_in_table=True))   # explicit stand-in
     cfg_off = E3SMCAMConfig(**base, use_e3sm_spectral_heating=False)
     # prndl=0 zeroes egwdffm AT THE SOURCE -> egwdffi = min(cap, 0) = 0
     # everywhere -> dttdf == 0 exactly, isolating the band effect.  (NOT
