@@ -190,3 +190,21 @@ def test_fp32_state_runs_in_fp64_and_returns_state_dtype(case):
         x = getattr(out32, f)
         assert x.dtype == jnp.float32, f
         assert np.all(np.isfinite(np.asarray(x))), f
+
+
+def test_surface_ice_counts_as_frozen_precip(case, monkeypatch):
+    """The fixtures never deposit ice at the surface (pptice = 0), so the
+    pptice term of the precipitation mapping is pinned with a port output
+    whose surface ice is set to a known value."""
+    import legoesm.atmosphere.physics.microphysics.thompson as TA
+    real = TA.thompson_wrf_step
+    monkeypatch.setattr(TA, "thompson_wrf_step", lambda *a, **k: real(*a, **k)._replace(
+        pptice=jnp.full(case["T"].shape[:1], 0.3)))
+    dt = 300.0
+    out, _ = _adapter(case, dt)
+    ref = _port(case, dt)
+    np.testing.assert_allclose(np.asarray(out.precip_frozen) * dt,
+                               np.asarray(ref.pptsnow + ref.pptgraul) + 0.3, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(out.precipitation) * dt,
+                               np.asarray(ref.pptrain + ref.pptsnow + ref.pptgraul) + 0.3,
+                               rtol=1e-12)
