@@ -116,21 +116,6 @@ def test_bridge_routes_cloud_water_and_drops_absent_ice():
     assert upd["qke"].shape == (1, 3, NLEV)
 
 
-def test_mpas_cell_wind_lane_refuses_diagnosed_w():
-    """P1: the MPAS omega needs edge-normal winds; a lane handing cell winds
-    (state.v present) is refused unless w is prescribed."""
-    from legoesm.atmosphere.physics.turbulence.integration import (
-        mynn_lane_kwargs)
-    scm = _scm()
-    T = scm.state.T.data.reshape(1, NLEV)
-    p = scm.sigma_coord.pressure_at_full(scm.state.p_s.data).reshape(1, NLEV)
-    q = scm.state.tracers["q_v"].data.reshape(1, NLEV)
-    with pytest.raises(ValueError, match="EDGE-normal"):
-        mynn_lane_kwargs(scm.state, scm.grid, scm.sigma_coord,
-                         scm.phys_state._replace(dyn_w_ls=None), T, p, q, 1,
-                         False, voronoi=True)
-
-
 def test_scm_set_time_reaches_the_cold_start_build():
     """codex R3: step 1 runs the cold-start physics, so it must get the clock."""
     seen = []

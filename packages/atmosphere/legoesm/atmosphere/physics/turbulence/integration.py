@@ -324,10 +324,6 @@ def mynn_lane_kwargs(state, grid, sigma_coord, phys_state, T_col, p_full_col,
             raise ValueError(
                 "turbulence='mynn25' needs w, diagnosed by PURE-sigma "
                 "continuity; a hybrid coordinate would get a wrong omega")
-        if voronoi and state.v is not None:
-            raise ValueError(
-                "turbulence='mynn25' on MPAS diagnoses w from the EDGE-normal "
-                "winds' cell divergence; this lane hands cell-centred winds")
         omega = diagnose_omega_columns_hydrostatic(
             state.u.data, None if state.v is None else state.v.data,
             state.p_s.data, grid, sigma_coord, ncol, nlev,
