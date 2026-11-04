@@ -1,0 +1,17 @@
+{
+ "record": "/burg/glab/users/pg2328/oracle_audit/tier4/dyn/ctl_on/t4_adv_record_*.bin (32 ranks, magic NEMO_T4_ORCA1DYN, channel adv, kt=17281)",
+ "spread_seeds": "/burg/glab/users/pg2328/oracle_audit/tier4/dyn/seeds/out_*.npz (20 seeds, base /burg/glab/users/pg2328/oracle_audit/tier4/dyn/ctl_stop)",
+ "recorder": "tier4/dyn MY_SRC t4_dyn.F90 hooks in icedyn_adv_pra.F90, NEMO 5.0.1 SI3 cfg ORCA1_T4DYN, build job 11022552",
+ "nemo_scalars": {
+  "rhoi": 917.0,
+  "rhos": 330.0,
+  "rhow": 1000.0,
+  "rho0": 1026.0
+ },
+ "extractor": "oracle_audit/si3dyn_fix/D2/score_extract.py",
+ "branch_sha": "base 01546ffdac + this PR's working-tree diff (extraction run before commit)",
+ "layout": "extended global index (Ni0glo+4, Nj0glo+4), H=2; windows WxW=16 at w*_ext_origin; inner [5:11,5:11] scored",
+ "mapping": "harness votes A1a/A2a: intensive tracers TR, sv_i in szv_i_l01, ponds zero (ln_pnd=F); dx=e1v, dy=e2u",
+ "nemo_outputs": "*_out = NEMO value after ice_dyn_adv_pra (residual inputs are 0 at this call)",
+ "source": "NEMO 5.0.1 src/ICE/icedyn_adv_pra.F90:407-428 (Hbig_pra, Hsnow_pra, open water), icevar.F90 ice_var_zapneg"
+}

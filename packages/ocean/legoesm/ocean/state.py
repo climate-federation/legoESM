@@ -3479,6 +3479,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the lane-certified pre-catch-up EOS-default route.  NEMO testcase cards
     # state this explicitly.  Appended to preserve positional callers.
     vmix_eos_use_config_rho0: bool = True
+    # NEMO ln_rnf_depth_ini WHOLE-LEVEL runoff spread (int map nk_rnf or
+    # None): runoff enters the top nk wet levels (sbcrnf.F90:426-441) instead
+    # of the fractional runoff_depth_spread_map depth.  Build with
+    # forcing.runoff_depth.nemo_runoff_level_count; mutually exclusive with
+    # runoff_depth_spread_map / runoff_depth_spread_m (validated).  Appended
+    # to preserve positional callers.
+    runoff_depth_spread_levels: object = None
 
 
     @classmethod
