@@ -198,6 +198,35 @@ def test_split_reads_the_end_of_step_temperature(monkeypatch):
     assert float(jnp.max(cond)) > 0.0   # end-of-step T differs from precpd's T
     out = sq.sundqvist_microphysics(*args, cell_area=1.0e10, carries_q_i=True,
                                     prev_state=prev)
-    end_T = T + out.dT_dt * dt - seen["dT_fus"]
+    assert float(jnp.max(jnp.abs(out.dq_i_dt))) > 0.0      # the split ran
+    # q_i = 0 in: the no-q_i call has the same gscond + precpd and no re-split
+    whole = sq.sundqvist_microphysics(*args, cell_area=1.0e10, carries_q_i=False,
+                                      prev_state=prev)
+    end_T = T + whole.dT_dt * dt
     np.testing.assert_allclose(np.asarray(seen["T"]), np.asarray(end_T),
                                rtol=1e-13, atol=0.0)
+
+
+def test_q_i_lane_closes_moist_enthalpy_through_gscond_deposition():
+    """codex 2026-11-04 reproducer: a cold cell condensing as ice (gscond heats
+    with L_v + L_f) on a lane carrying q_i; no precipitation forms, so
+    c_pd T + L_v q_v - L_f q_i must not change (the re-split must not add the
+    fusion heat a second time)."""
+    T = jnp.full((1, 2), 250.0)
+    q_v = jnp.full((1, 2), 1e-3)
+    z = jnp.zeros((1, 2))
+    hyd = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
+    p_full = jnp.array([[7.5e4, 8.5e4]])
+    p_half = jnp.array([[7.0e4, 8.0e4, 9.0e4]])
+    rho = p_full / (constants.R_d * T)
+    dz = jnp.full((1, 2), 1000.0)
+    prev = {"zc_T_prev": T, "zc_q_v_prev": q_v - 1e-5, "zc_p_s_prev": p_half[:, -1]}
+    dt = 600.0
+    out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, dt,
+                                 cell_area=1.0e10, carries_q_i=True, prev_state=prev)
+    assert float(jnp.max(out.precipitation)) == 0.0
+    assert float(jnp.max(out.dq_i_dt)) > 0.0                 # ice was made
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    dH = _H(T + out.dT_dt * dt, q_v + out.dq_v_dt * dt, out.dq_i_dt * dt, dp) - _H(
+        T, q_v, z, dp)
+    assert float(jnp.max(jnp.abs(dH))) <= 1e-12 * float(jnp.max(jnp.abs(_H(T, q_v, z, dp))))

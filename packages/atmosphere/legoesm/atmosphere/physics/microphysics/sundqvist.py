@@ -464,11 +464,14 @@ class ZhaoCarrGscondResult(NamedTuple):
     """State after ``zhaocarr_gscond_run``.  ``net_condensation`` [kg/kg/s] is
     the oracle's ``cond - e0`` (> 0: vapour -> condensate, heating with the
     ice-water-weighted latent heat).  ``T_store`` / ``q_v_store`` are the
-    oracle's ``tp`` / ``qp`` for the next step (two-time-level branch [508-523])."""
+    oracle's ``tp`` / ``qp`` for the next step (two-time-level branch [508-523]).
+    ``ice_condensation`` [kg/kg/s] is the part of ``net_condensation`` heated
+    with ``L_v + L_f`` (the ice-water id share)."""
     T: jax.Array
     q_v: jax.Array
     cwm: jax.Array
     net_condensation: jax.Array
+    ice_condensation: jax.Array
     T_store: jax.Array
     q_v_store: jax.Array
 
@@ -581,7 +584,12 @@ def zhao_carr_gscond(
 
         # Cloud cover [384-391].
         # 1 - sqrt(clamp((us - rq)/(us - u), 0, 1)): 0 below u, 1 at saturation.
-        d = smax((us - rqik) / (us - u), 0.0, 1.0)
+        # rh_crit = 1 (inside its bounds): the oracle's branches give 0 below
+        # saturation, 1 at it, and never form 1/(us-u); neither does this.
+        den_ok = (us - u) > 0.0
+        d = jnp.where(den_ok, (us - rqik) / jnp.where(den_ok, us - u, 1.0),
+                      step(us - rqik, 1.0))
+        d = smax(d, 0.0, 1.0)
         ccrik = 1.0 - _sqrt(smin(d, 1.0, 1.0))
 
         # Cloud evaporation, three iterations toward u*q_s [400-444].
@@ -627,16 +635,16 @@ def zhao_carr_gscond(
         cone0 = (w_cond * cond - w_evap * e0) * dt     # [478]
         t_new = tik + elv * rcp * cone0                # [483]
         q_new = qq - cone0                             # [484]
-        return fiw, (t_new, q_new, ww + cone0, cone0 * rdt)
+        return fiw, (t_new, q_new, ww + cone0, cone0 * rdt, fiw * cone0 * rdt)
 
     ncol, nlev = T.shape
     full = (ncol, nlev)
     xs = tuple(jnp.moveaxis(jnp.broadcast_to(a, full).astype(dtype), 1, 0) for a in (
         T, q_v, cwm, p_full, T_prev, q_v_prev, ps, psp))
     _, ys = jax.lax.scan(level, jnp.zeros((ncol,), dtype), xs)
-    t_new, q_new, w_new, net = (jnp.moveaxis(a, 0, 1) for a in ys)
+    t_new, q_new, w_new, net, ice = (jnp.moveaxis(a, 0, 1) for a in ys)
     return ZhaoCarrGscondResult(
-        T=t_new, q_v=q_new, cwm=w_new, net_condensation=net,
+        T=t_new, q_v=q_new, cwm=w_new, net_condensation=net, ice_condensation=ice,
         T_store=t_new, q_v_store=smax(q_new, _ZC_EPSQ, _ZC_EPSQ))   # [513-514]
 
 
@@ -824,9 +832,15 @@ def sundqvist_microphysics(
         cwm_in = hydrometeors.q_c + hydrometeors.q_i
         pos = cwm_in > 0.0
         share = jnp.where(pos, hydrometeors.q_i / jnp.where(pos, cwm_in, 1.0), 0.0)
-        q_c_new, q_i_new, dT_fus = split_condensate(
+        q_c_new, q_i_new, _ = split_condensate(
             T + dT_dt * dt, zc.cwm, share, config.liquid_fraction_clamp_sharpness)
-        dT_dt = dT_dt + dT_fus / dt
+        # Fusion heat of the re-split, L_f per kg of ice it adds over the ice
+        # the scheme already heated for: the input ice share of the condensate
+        # gscond did not make, plus gscond's ice-id condensation (heated with
+        # L_v + L_f there), so c_pd T + L_v q_v - L_f q_i closes.
+        ice_ref = (share * (zc.cwm - gs.net_condensation * dt)
+                   + gs.ice_condensation * dt)
+        dT_dt = dT_dt + constants.L_f / constants.c_pd * (q_i_new - ice_ref) / dt  # latent-ok: Zhao-Carr oracle constant (hfus)
         dq_c_dt = (q_c_new - hydrometeors.q_c) / dt
         dq_i_dt = (q_i_new - hydrometeors.q_i) / dt
     else:

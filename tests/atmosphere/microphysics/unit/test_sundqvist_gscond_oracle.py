@@ -112,3 +112,59 @@ def test_smooth_default_close_and_differentiable():
     h = 1e-4
     fd = (f(T0 + h * v) - f(T0 - h * v)) / (2 * h)
     assert abs(float(jnp.vdot(g, v)) - float(fd)) <= 1e-5 * max(1.0, abs(float(fd)))
+
+
+@pytest.mark.parametrize("smooth_frac", [0.0, 0.01])
+def test_rh_crit_one_is_finite(smooth_frac):
+    """rh_crit = 1 (inside the declared bounds): the oracle never forms
+    1/(1-u); neither may the port's value or gradient."""
+    from legoesm.atmosphere.physics.microphysics.sundqvist import zhao_carr_gscond
+    from legoesm.thermo import saturation_specific_humidity
+    T = jnp.full((1, 3), 280.0)
+    p = jnp.full((1, 3), 8.0e4)
+    ps = jnp.full((1,), 1.0e5)
+
+    def f(q):
+        r = zhao_carr_gscond(T, q, jnp.full((1, 3), 1e-4), p, ps, T, 0.99 * q, ps,
+                             600.0, 1.0, smooth_frac)
+        return jnp.sum(r.cwm) + jnp.sum(r.T)
+
+    q = saturation_specific_humidity(T, p) * jnp.array([[0.9, 1.0, 1.02]])
+    assert bool(jnp.isfinite(f(q)))
+    assert bool(jnp.all(jnp.isfinite(jax.grad(f)(q))))
+
+
+def test_zero_carry_is_the_explicit_fresh_start_bitwise():
+    """A zero carry (fresh start / restart before the carry existed) runs the
+    step with tp = T, qp = max(q, epsq), psp = ps, bitwise."""
+    from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+    from legoesm.atmosphere.physics.microphysics.sundqvist import (
+        sundqvist_carry_init, sundqvist_microphysics)
+    fx = _fx()
+    a = lambda k: jnp.asarray(fx[f"col_{k}"])  # noqa: E731
+    T, q, qc, pf, ph = a("T"), a("q_v"), a("q_c"), a("p_full"), a("p_half")
+    z = jnp.zeros_like(T)
+    hyd = HydrometeorState(q_c=qc, q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
+    rho = pf / 287.0 / T
+
+    def run(prev):
+        return sundqvist_microphysics(T, q, hyd, pf, ph, rho, jnp.ones_like(T), 600.0,
+                                      cell_area=1.0e10, prev_state=prev)
+
+    zero = run(sundqvist_carry_init(*T.shape, T.dtype))
+    explicit = run({"zc_T_prev": T, "zc_q_v_prev": jnp.maximum(q, 2.0e-12),
+                    "zc_p_s_prev": ph[:, -1]})
+    for k in ("dT_dt", "dq_v_dt", "dq_c_dt", "precipitation"):
+        np.testing.assert_array_equal(np.asarray(getattr(zero, k)),
+                                      np.asarray(getattr(explicit, k)))
+
+
+def test_stored_humidity_is_floored_at_epsq():
+    """The oracle stores qp = max(q, epsq) for the next step [514]."""
+    from legoesm.atmosphere.physics.microphysics.sundqvist import zhao_carr_gscond
+    T = jnp.full((1, 2), 280.0)
+    q = jnp.zeros((1, 2))
+    p = jnp.full((1, 2), 8.0e4)
+    ps = jnp.full((1,), 1.0e5)
+    r = zhao_carr_gscond(T, q, jnp.zeros((1, 2)), p, ps, T, q + 2e-12, ps, 600.0, 0.8, 0.0)
+    np.testing.assert_array_equal(np.asarray(r.q_v_store), 2.0e-12)
