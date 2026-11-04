@@ -173,13 +173,8 @@ def make_physics(
     cld_macmic_num_steps: int = 1,
     surface_bulk_coeffs="default",
     cam6_activation=None,
-    ecrad_ifs_sources=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
-
-    ``ecrad_ifs_sources`` (radiation ``ecrad_ifs``, MPAS only): the TSI, gas
-    and ozone inputs pending the user (votes L12-L14); ``None`` makes the
-    ecrad_ifs radiation build refuse (vote S2a).
 
     The returned function calls each enabled physics module and sums
     their tendencies.
@@ -350,8 +345,7 @@ def make_physics(
             budget_ledger=budget_ledger,
             budget_ledger_level_weight=budget_ledger_level_weight,
             surface_bulk_coeffs=surface_bulk_coeffs,
-            cam6_activation=cam6_activation,
-            ecrad_ifs_sources=ecrad_ifs_sources)
+            cam6_activation=cam6_activation)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -677,8 +671,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                physics_cadence_steps: int = 1,
                                cld_macmic_num_steps: int = 1,
                                surface_bulk_coeffs=None,
-                               cam6_activation=None,
-                               ecrad_ifs_sources=None) -> Callable:
+                               cam6_activation=None) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
 
     ``surface_bulk_coeffs`` ``(C_H, C_E, latent)``: the constant-coefficient surface
@@ -803,7 +796,6 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 cloud_fraction_tracer=(
                     "cloud_fraction_ifs"
                     if config.microphysics.scheme == "ifs_cloudsc" else None),
-                ecrad_ifs_sources=ecrad_ifs_sources,
                 # ecRad: the held-radiation variant runs RADHEATN on the
                 # carry instead of re-adding a held heating (votes L4a/S4a)
                 ecrad_ifs_full_call=need_rad,

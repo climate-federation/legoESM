@@ -48,6 +48,12 @@ UNREACHABLE_SCHEMES = {
         "run_coupled drives the FV pipeline, where the cloud call threads "
         "neither lat nor the deep-convection carries, so the scheme cannot "
         "function there. Offer it once the pipeline threads them.",
+    ("run_coupled", "radiation", "ecrad_ifs"):
+        "OpenIFS ecRad runs on the MPAS column lane only (validate_strict "
+        "requires column_loop_lane); run_coupled can drive an MPAS atmosphere, "
+        "but its coupled loop is not verified to carry the ecRad between-call "
+        "state (PhysicsState.ecrad_carry) or the McICA seed clock. Offer it "
+        "once that is checked (vote 2026-11-04 Q2a).",
     ("run_coupled", "radiation", "none"):
         "run_coupled has NO --held-suarez-forcing lane (verified), so a "
         "coupled run with radiation off has no energy source at all -- it "

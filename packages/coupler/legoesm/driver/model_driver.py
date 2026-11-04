@@ -5160,8 +5160,18 @@ class ModelDriver:
         self._use_solar_spectral = (cfg.solar_source == "spectral_file")
 
         # Ozone external forcing
-        self._ozone_ext_active = (cfg.radiation in ("rrtmg", "rrtmgp")
-                                  and cfg.ozone_forcing == "external")
+        # ecrad_ifs reads the same input4MIPs ozone and GHG (user 2026-11-04,
+        # vote M6a); aerosols and the GHG overrides stay rrtmg/rrtmgp-only.
+        self._ozone_ext_active = (
+            cfg.radiation in ("rrtmg", "rrtmgp", "ecrad_ifs")
+            and cfg.ozone_forcing == "external")
+        if (self._ozone_ext_active and cfg.radiation == "ecrad_ifs"
+                and not cfg.ozone_file):
+            # the loader would substitute its built-in reference profile
+            # (use_reference_if_missing below) for the input4MIPs file
+            raise ValueError(
+                "radiation='ecrad_ifs' reads the input4MIPs ozone file; "
+                "ozone_file is empty (--ozone-file).")
         self._ozone_ext_config = OzoneConfig(
             enabled=self._ozone_ext_active,
             source="climatology", path=cfg.ozone_file,
@@ -5234,7 +5244,7 @@ class ModelDriver:
                   f"CO2={co2:.1f} ppmv")
 
         # GHG forcing config
-        self._ghg_active = (cfg.radiation in ("rrtmg", "rrtmgp")
+        self._ghg_active = (cfg.radiation in ("rrtmg", "rrtmgp", "ecrad_ifs")
                             and cfg.ghg_forcing == "external")
         if self._ghg_active:
             self._ghg_config = GHGConfig(
@@ -12847,7 +12857,7 @@ class ModelDriver:
         (then-misleading) fail-fast.  Requires a real aerosol source."""
         cfg = self.config
         return bool(_external_forcing_active(
-            cfg.radiation in ("rrtmg", "rrtmgp"),
+            cfg.radiation in ("rrtmg", "rrtmgp", "ecrad_ifs"),
             self._ozone_ext_active, self._aerosol_active,
             self._aerosol_lw_active, self._ghg_active, bool(self._experiment),
         ) or (cfg.nc_from_aerosol and self._aerosol_active))

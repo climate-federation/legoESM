@@ -99,6 +99,16 @@ M_C   = 12.011          # [g/mol] atomic mass of carbon (IUPAC 2021)
 M_CO2 = 44.01           # [g/mol] CO2
 M_H2O = 18.01528        # [g/mol] water
 
+# ecRad's own molar masses [g/mol] (ecRad radiation_gas_constants.F90:42-55,
+# AirMolarMass and GasMolarMass), used to turn input4MIPs mole fractions into
+# the mass mixing ratios the IFS hands ecRad, the exact inverse of ecRad's own
+# unit conversion (vote L15a).  Not the CODATA values above, on purpose.
+M_air_ecrad = 28.970
+M_gas_ecrad = {
+    "o3": 47.9982, "co2": 44.011, "ch4": 16.043, "n2o": 44.013,
+    "cfc11": 137.3686, "cfc12": 120.914, "hcfc22": 86.469, "ccl4": 153.823,
+}
+
 # ==============================================================================
 # Moisture Parameters
 # ==============================================================================

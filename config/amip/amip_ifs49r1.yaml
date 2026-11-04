@@ -46,14 +46,17 @@ zm_detrain_number_width_kgkg_s: null
 
 # --- radiation: OpenIFS 49r1 ecRad (RRTMG gas optics), votes L1-L28, S1-S6 --
 # Full call hourly (rad_update_steps 32 x 112.5 s, inherited = NRADFR=-1) into
-# the between-call carry; RADHEATN updates SW/LW every physics step.  The lane
-# REFUSES to build until the IFS TSI and GHG climatologies (A15) and the
-# Cariolle ozone (A11) are available or the user approves interim sources
-# (L12-L14).  Departures recorded: CCN 900/50 (LERADS=F arm, L25), lane orbit
+# the between-call carry; RADHEATN updates SW/LW every physics step.  TSI,
+# GHG and ozone are the input4MIPs feeds every lane reads (inherited
+# ozone_forcing / ghg_forcing external, solar_source spectral_file; user
+# 2026-11-04, votes M1-M10): RII0 = TSI x Earth-Sun factor, gases and ozone as
+# ecRad mass mixing ratios.  Departures recorded: input4MIPs instead of the IFS
+# TSI/GHG climatologies and Cariolle ozone (L12-L14), ecRad's own solar
+# spectrum (SSI_frac not read, M2), CCN 900/50 (LERADS=F arm, L25), lane orbit
 # (L17), broadband albedo/emissivity in every band (L10/L11), no ozone above
-# the model top (L18), aerosols off.
+# the model top (L18), aerosols pending (IFS 48r1 files, own path).
 radiation: ecrad_ifs
-aerosol_forcing: "off"          # ecRad aerosols are OFF (L20): refused otherwise
+aerosol_forcing: "off"          # lane aerosols never reach ecRad (L20); its IFS 48r1 aerosol path is separate
 rrtmgp_overhead_layer: false    # RRTMGP-only row (validate_strict error); L18
 
 # --- production rows INERT under ifs_cloudsc + CUMASTRN (left as inherited) --
@@ -71,6 +74,5 @@ rrtmgp_overhead_layer: false    # RRTMGP-only row (validate_strict error); L18
 #   cloud_partial_coverage_optics, cloud_optics_inhomogeneity,
 #   cloud_inhomogeneity_factor, cloud_vertical_overlap_optics,
 #   cloud_n_subcolumns, rrtmgp_gpoint_batch_size, rrtmgp_use_scan;
-#   ozone_forcing, ghg_forcing (loaded only for rrtmg/rrtmgp) and
-#   solar_source/solar_tsi_var/solar_spectral_* (the TSI is loaded, ecrad_ifs
-#   does not read it yet, L12)
+#   solar_spectral_var/solar_spectral_band_order (ecrad_ifs reads the TSI
+#   only, M2)

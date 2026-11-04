@@ -2885,8 +2885,10 @@ class ExperimentConfig(NamedTuple):
                 f"radiation must be one of {_valid_radiation}, "
                 f"got {self.radiation!r}"
             )
-        # ecRad 49r1 (votes L2a, L20a): the MPAS column lane only, and its
-        # aerosols are OFF, so an aerosol forcing would be silently ignored.
+        # ecRad 49r1 (votes L2a, L20a, M7a): the MPAS column lane only; the
+        # lane's aerosol forcing does not reach it; TSI, ozone and GHG come
+        # from the input4MIPs files (user 2026-11-04), so any other source
+        # would feed it silently.
         if self.radiation == "ecrad_ifs":
             if not self.column_loop_lane:
                 errors.append(
@@ -2896,10 +2898,30 @@ class ExperimentConfig(NamedTuple):
                     "refuse it")
             if self.aerosol_forcing != "off":
                 errors.append(
-                    "radiation='ecrad_ifs' runs with aerosols OFF (the CAMS "
-                    "climatology files are pending); aerosol_forcing="
+                    "radiation='ecrad_ifs' does not read the lane's aerosol "
+                    "forcing: its aerosols are the IFS 48r1 aerosol files "
+                    "through the ecrad_ifs adapter's own aerosol path, not "
+                    "yet wired; aerosol_forcing="
                     f"{self.aerosol_forcing!r} would be silently ignored, "
                     "set it to 'off'")
+            for _f, _v in (("ozone_forcing", self.ozone_forcing),
+                           ("ghg_forcing", self.ghg_forcing)):
+                if _v != "external":
+                    errors.append(
+                        f"radiation='ecrad_ifs' reads the input4MIPs {_f} "
+                        f"file; {_f}={_v!r} would feed it another source, "
+                        "set it to 'external'")
+            if self.solar_source not in ("file", "spectral_file"):
+                errors.append(
+                    "radiation='ecrad_ifs' reads the input4MIPs TSI; "
+                    f"solar_source={self.solar_source!r} would feed it the "
+                    "static configured constant, set 'file' or "
+                    "'spectral_file'")
+            if self.experiment:
+                errors.append(
+                    "radiation='ecrad_ifs' does not take the CMIP-experiment "
+                    f"GHG trajectory (experiment={self.experiment!r}); it "
+                    "reads the ghg_file")
         _valid_cloud_schemes = VALID_CLOUD_SCHEMES
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(
