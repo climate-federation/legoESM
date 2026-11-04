@@ -31,8 +31,11 @@ from legoesm.core.state import (
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
     HeightCoordinate,
+    HybridSigmaPressureCoordinate,
     SigmaCoordinate,
     TerrainMetric,
+    compute_pressure_velocity,
+    compute_sigma_dot_and_total,
 )
 from legoesm import constants
 
@@ -45,6 +48,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
 )
 from legoesm.atmosphere.dynamics.shared.tracer_positivity import clip_positive
 from legoesm.atmosphere.physics._shared import zero_like_tracers
+from legoesm.atmosphere.physics._shared import diagnose_grid_w_from_omega
 from legoesm.grids.gaussian import sh_analysis_3d
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
@@ -60,6 +64,10 @@ from legoesm.atmosphere.physics.microphysics.sdm import sdm_microphysics
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     ml_microphysics,
     MicrophysicsEmulator,
+)
+from legoesm.atmosphere.physics.microphysics.ifs_cloudsc import (
+    CloudscConvection,
+    ifs_cloudsc_microphysics,
 )
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
@@ -95,6 +103,8 @@ def _get_microphysics_fn(config: MicrophysicsConfig):
         return "fast_sbm", fast_sbm_microphysics, config.fast_sbm
     elif config.scheme == "ml_emulator":
         return "ml_emulator", ml_microphysics, config.ml_emulator
+    elif config.scheme == "ifs_cloudsc":
+        return "ifs_cloudsc", ifs_cloudsc_microphysics, config.ifs_cloudsc
     elif config.scheme == "none":
         return "none", None, None
     else:
@@ -184,6 +194,47 @@ from legoesm.atmosphere.physics._shared import (
 )
 
 
+def _incloud_liquid_cloud_fraction(phys_state, q_v_col, T_col, p_full_col,
+                                   p_half_col, q_i_col, lat_col, cloud_config,
+                                   clubb_config):
+    """CAM6 MG2 liquid cloud fraction ``ast = max(alst, aist)``, (ncol, nlev).
+
+    CAM6 micro_mg_cam.F90:1809-1810 liqcldf = ast, with clubb_intr.F90:2575
+    ast = max(alst, aist).  ``alst`` is CLUBB's PDF cloud fraction, written
+    into the carry by the turbulence sub-step that precedes this one in the
+    macmic loop (clubb_tend_cam, then MG2); ``aist`` is cldfrc2m aist_vector
+    on the post-CLUBB state (:2556), which is this sub-step's input state.
+    """
+    _cf = (None if phys_state is None
+           else getattr(phys_state, "cloud_fraction", None))
+    if _cf is None:
+        raise ValueError(
+            "warm_rain_incloud=True but no cloud_fraction carry "
+            "reached the microphysics (needs CLUBB turbulence).")
+    _aist = cam6_ice_stratus_fraction(
+        q_v_col, T_col, p_full_col, q_i_col, lat_col, cloud_config,
+        p_half_col[:, :-1],
+        trop_cloud_top_press=clubb_config.trop_cloud_top_press,
+        trop_cloud_taper_lnp_width=clubb_config.trop_cloud_taper_lnp_width)
+    return jnp.maximum(jnp.clip(_cf.reshape(T_col.shape), 0.0, 1.0), _aist)
+
+
+def _check_incloud_cloud_config(scheme_config, cloud_config,
+                                clubb_config) -> bool:
+    _incloud = bool(getattr(scheme_config, "warm_rain_incloud", False))
+    if _incloud and getattr(cloud_config, "scheme", None) != "cam6_clubb":
+        raise ValueError(
+            "warm_rain_incloud=True uses CAM6's ast = max(alst, aist); the "
+            "ice-stratus fraction needs the cam6_clubb cloud config, got "
+            f"{getattr(cloud_config, 'scheme', None)!r}.")
+    if _incloud and clubb_config is None:
+        raise ValueError(
+            "warm_rain_incloud=True needs the run's CLUBBConfig "
+            "(clubb_config): CAM zeroes aist above CLUBB's top_lev "
+            "(clubb_intr.F90:2535); got None.")
+    return _incloud
+
+
 def make_microphysics_physics(
     microphysics_config: MicrophysicsConfig,
     model_type: str = "hydrostatic",
@@ -248,7 +299,9 @@ def make_microphysics_physics(
     elif model_type == "mpas_nh":
         fn = _make_mpas_nh_microphysics(microphysics_config, dt)
     elif model_type == "spectral_pe":
-        fn = _make_spectral_pe_microphysics(microphysics_config, dt)
+        fn = _make_spectral_pe_microphysics(microphysics_config, dt,
+                                            cloud_config=cloud_config,
+                                            clubb_config=clubb_config)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -289,6 +342,125 @@ def sundqvist_lane_kwargs(scheme_name, grid, ncol, carries_q_i):
                 carries_q_i=carries_q_i)
 
 
+def require_thompson_tracers(scheme_name, carried, scheme_config=None):
+    """Refuse the WRF Thompson port when the state does not carry every
+    tracer it writes (vote W1a): the bridges zero-fill an absent tracer and
+    drop its tendency, which would silently re-initialise the port's
+    particle distributions each step.  ``carried`` = the state's tracer names
+    (name-keyed bridges) or its slot count (slot-indexed bridges)."""
+    if scheme_name != "thompson":
+        return
+    from legoesm.core.tracers import make_full_moisture_registry
+    need = make_full_moisture_registry().names[
+        :min_tracer_slots(scheme_name, scheme_config)]
+    if isinstance(carried, int):
+        missing = list(need[carried:])
+    else:
+        missing = [n for n in need if n not in (carried or ())]
+    if missing:
+        raise ValueError(
+            f"microphysics='thompson' writes {list(need)}, but the state "
+            f"lacks {missing}: their tendencies would be dropped and the "
+            "port re-initialised from zeros every step. Carry the full "
+            "moisture registry.")
+
+
+def thompson_lane_kwargs(scheme_name, w_fn):
+    """``{"w": w_fn()}`` for the WRF Thompson port, which reads the lane's
+    resolved vertical velocity [m/s, (ncol, nlev), up] (votes H2/J6: no zero
+    fallback); ``{}`` for every other scheme (``w_fn`` not called)."""
+    return {"w": w_fn()} if scheme_name == "thompson" else {}
+
+
+def half_level_w_to_full(w_half, ncol, nlev):
+    """Prognostic half-level ``w`` ``(..., nlev+1)`` -> full levels
+    ``(ncol, nlev)``, the two-interface mean (as the KF/Kuo bridges)."""
+    w = w_half.reshape(ncol, nlev + 1)
+    return 0.5 * (w[:, :-1] + w[:, 1:])
+
+
+def _hydrostatic_w_for_thompson(state, grid, sigma_coord, phys_state, T_col,
+                                p_full_col, q_v_col, ncol, nlev):
+    """Resolved w on the hydrostatic bridge: the SCM's prescribed large-scale
+    w when the driver carries it, else the full sigma-continuity omega
+    (vote J1a, as WRF Tiedtke's) -> w = -omega/(rho g)."""
+    from legoesm.atmosphere.physics.convection.integration import (
+        diagnose_omega_columns_hydrostatic,
+    )
+    w_ls = getattr(phys_state, "dyn_w_ls", None)
+    if w_ls is not None:
+        return w_ls.reshape(ncol, nlev)
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        raise ValueError(
+            "microphysics='thompson' needs w, which this bridge diagnoses by "
+            "PURE-sigma continuity; a hybrid coordinate would get a wrong w")
+    omega = diagnose_omega_columns_hydrostatic(
+        state.u.data, None if state.v is None else state.v.data,
+        state.p_s.data, grid, sigma_coord, ncol, nlev,
+        voronoi=True, full_continuity=True)
+    if omega is None:
+        raise ValueError(
+            "microphysics='thompson' needs the resolved vertical velocity, "
+            "which this bridge diagnoses only on the cubed-sphere, lat-lon "
+            "and MPAS grids")
+    return diagnose_grid_w_from_omega(omega, T_col, p_full_col, q_v_col)
+
+
+def _spectral_w(fields, p_s, sigma_coord, T_col, p_full_col, q_v_col, ncol,
+                nlev):
+    """Resolved w on the spectral lane from its grid divergence, the omega the
+    spectral convection bridge builds for Kain-Fritsch (vote J6a); pure sigma
+    only (vote U11a: the formula has no hybrid form)."""
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        raise ValueError(
+            "microphysics='thompson' needs w, which the spectral bridge "
+            "diagnoses by PURE-sigma continuity; a hybrid coordinate would "
+            "get a wrong w")
+    div = fields["div"].astype(T_col.dtype)
+    sigma_dot, d_tot = compute_sigma_dot_and_total(div, sigma_coord)
+    dps_dt = -p_s * d_tot[..., 0] / (1.0 - sigma_coord.sigma_half[0])
+    omega = compute_pressure_velocity(sigma_dot, p_s, dps_dt, sigma_coord)
+    return diagnose_grid_w_from_omega(omega.reshape(ncol, nlev), T_col,
+                                      p_full_col, q_v_col)
+
+
+#: The advected tracer holding IFS CLOUDSC's prognostic cloud fraction
+#: (registry: physics_pipeline.moisture_registry_for).
+CLOUDSC_CF_TRACER = "cloud_fraction_ifs"
+
+
+def _cloudsc_lane_kwargs(state, grid, ncol, forcing, get_tracer):
+    """CLOUDSC's lane inputs (votes VC2-VC21): the advected cloud fraction,
+    the lane's land fraction (the one CUMASTRN reads) and this step's
+    CUMASTRN hand-off ``forcing["ifs_cloudsc_conv"]``.  Each one missing
+    raises: CLOUDSC has no meaningful default for any of them."""
+    from legoesm.atmosphere.physics.convection.integration import (
+        land_fraction_for_columns)
+    _need = ("q_v", "q_c", "q_i", "q_r", "q_s", CLOUDSC_CF_TRACER)
+    _missing = [n for n in _need
+                if state.tracers is None or n not in state.tracers]
+    if _missing:
+        # a missing species would read as zero and its CLOUDSC tendency be
+        # dropped, losing the detrainment the convection no longer books
+        raise ValueError(
+            f"ifs_cloudsc needs the tracers {_need} in the state "
+            f"(moisture_registry_for('ifs_cloudsc')); missing {_missing}.")
+    conv = None if forcing is None else forcing.get("ifs_cloudsc_conv")
+    if not isinstance(conv, CloudscConvection):
+        raise ValueError(
+            "ifs_cloudsc needs this step's CUMASTRN hand-off "
+            "(forcing['ifs_cloudsc_conv'], from convection='bechtold' with "
+            "use_ifs_ascent=True in the macmic loop); got "
+            f"{type(conv).__name__}.")
+    land = land_fraction_for_columns(grid, ncol)
+    if land is None:
+        raise ValueError(
+            "ifs_cloudsc needs the lane's land fraction (grid.land_frac, "
+            "CLOUDSC's PLSM); the grid carries none.")
+    return dict(cloud_fraction=get_tracer(CLOUDSC_CF_TRACER),
+                land_frac=land, conv=conv)
+
+
 def _make_hydrostatic_microphysics(
     microphysics_config: MicrophysicsConfig,
     dt: float,
@@ -319,17 +491,8 @@ def _make_hydrostatic_microphysics(
         and not getattr(scheme_config, "predict_Nc", False)
     )
 
-    _incloud = bool(getattr(scheme_config, "warm_rain_incloud", False))
-    if _incloud and getattr(cloud_config, "scheme", None) != "cam6_clubb":
-        raise ValueError(
-            "warm_rain_incloud=True uses CAM6's ast = max(alst, aist); the "
-            "ice-stratus fraction needs the cam6_clubb cloud config, got "
-            f"{getattr(cloud_config, 'scheme', None)!r}.")
-    if _incloud and clubb_config is None:
-        raise ValueError(
-            "warm_rain_incloud=True needs the run's CLUBBConfig "
-            "(clubb_config): CAM zeroes aist above CLUBB's top_lev "
-            "(clubb_intr.F90:2535); got None.")
+    _incloud = _check_incloud_cloud_config(scheme_config, cloud_config,
+                                           clubb_config)
     if _incloud and model_type != "mpas":
         # Checked at build time, not the first step: aist's tropopause
         # switch needs MPAS cell latitudes (mesh.latCell).
@@ -337,6 +500,7 @@ def _make_hydrostatic_microphysics(
             "warm_rain_incloud=True is wired on the MPAS lane only (aist "
             f"needs mesh.latCell); got model_type={model_type!r}.")
 
+    _cloudsc = scheme_name == "ifs_cloudsc"
     _prog_nc = bool(getattr(scheme_config, "prognostic_droplet_number", False))
     if _prog_nc and not _incloud:
         # the scheme refuses this too (morrison.py start-up guard); fail at build
@@ -415,6 +579,7 @@ def _make_hydrostatic_microphysics(
         p_half_col = p_half.reshape(ncol, nlev + 1)
         # Helper: extract a tracer from the tracer dict, returning a
         # column-reshaped (ncol, nlev) array clipped to non-negative.
+        require_thompson_tracers(scheme_name, state.tracers, scheme_config)
         def _get_tracer(name):
             if state.tracers is not None and name in state.tracers:
                 raw = state.tracers[name]
@@ -517,32 +682,14 @@ def _make_hydrostatic_microphysics(
         else:
             _kw = {}
             if _incloud:
-                # CLUBB's PDF cloud fraction, written into the carry by the
-                # turbulence sub-step that precedes this one in the macmic
-                # loop (CAM6: clubb_tend_cam, then MG2 on ast).
-                _cf = (None if phys_state is None
-                       else getattr(phys_state, "cloud_fraction", None))
-                if _cf is None:
-                    raise ValueError(
-                        "warm_rain_incloud=True but no cloud_fraction carry "
-                        "reached the microphysics (needs CLUBB turbulence).")
                 if not hasattr(grid, "latCell"):
                     raise ValueError(
                         "warm_rain_incloud=True: the aist tropopause switch "
                         "needs cell latitudes (MPAS mesh latCell).")
-                # CAM6 micro_mg_cam.F90:1809-1810 liqcldf = ast, with
-                # clubb_intr.F90:2575 ast = max(alst, aist); aist is
-                # cldfrc2m aist_vector on the post-CLUBB state (:2556),
-                # which is this sub-step's input state.
-                _aist = cam6_ice_stratus_fraction(
-                    q_v_col, T_col, p_full_col, hydrometeors.q_i,
-                    jnp.asarray(grid.latCell).reshape(ncol), cloud_config,
-                    p_half_col[:, :-1],
-                    trop_cloud_top_press=clubb_config.trop_cloud_top_press,
-                    trop_cloud_taper_lnp_width=(
-                        clubb_config.trop_cloud_taper_lnp_width))
-                _kw["cloud_fraction"] = jnp.maximum(
-                    jnp.clip(_cf.reshape(ncol, nlev), 0.0, 1.0), _aist)
+                _kw["cloud_fraction"] = _incloud_liquid_cloud_fraction(
+                    phys_state, q_v_col, T_col, p_full_col, p_half_col,
+                    hydrometeors.q_i, jnp.asarray(grid.latCell).reshape(ncol),
+                    cloud_config, clubb_config)
             if relvar_from_clubb:
                 # CAM6 MG2 reads pbuf RELVAR, set by clubb_tend_cam in the same
                 # macmic iteration (clubb_intr.F90:2416-2425).
@@ -564,6 +711,13 @@ def _make_hydrostatic_microphysics(
             _kw.update(sundqvist_lane_kwargs(
                 scheme_name, grid, ncol,
                 state.tracers is not None and "q_i" in state.tracers))
+            _kw.update(thompson_lane_kwargs(
+                scheme_name, lambda: _hydrostatic_w_for_thompson(
+                    state, grid, sigma_coord, phys_state, T_col, p_full_col,
+                    q_v_col, ncol, nlev)))
+            if _cloudsc:
+                _kw.update(_cloudsc_lane_kwargs(
+                    state, grid, ncol, forcing, _get_tracer))
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,
@@ -613,6 +767,13 @@ def _make_hydrostatic_microphysics(
                     data=_ntend.reshape(shape_3d),
                     name=f"d{_nname}_dt_micro", dims=dims_3d, units=_nunits,
                 )
+        if _cloudsc:
+            # CLOUDSC's updated cloud fraction back onto the advected tracer
+            tracer_tends[CLOUDSC_CF_TRACER] = Field(
+                data=((micro_out.cloud_fraction_new - _kw["cloud_fraction"])
+                      / dt).reshape(shape_3d),
+                name=f"d{CLOUDSC_CF_TRACER}_dt_micro", dims=dims_3d,
+                units="1/s")
 
         tend = HydrostaticTendencies(
             du_dt=Field(
@@ -661,12 +822,16 @@ def _make_hydrostatic_microphysics(
     # with the legacy 3-arg signature).
     if _nc_from_aerosol:
         physics_fn._wants_forcing = True
+    if _cloudsc:
+        # reads the CUMASTRN hand-off forcing["ifs_cloudsc_conv"]
+        physics_fn._wants_forcing = True
     if _prog_nc:
         # Writes the CLDO carry: the accumulator calls it as a carry module
         # (accepts_ps, see make_hydrostatic combined) with the forcing.
         physics_fn._wants_forcing = True
         physics_fn._writes_phys_state = True
-    elif _incloud or relvar_from_clubb:
+    elif _incloud or relvar_from_clubb or scheme_name == "thompson":
+        # thompson: the SCM's prescribed large-scale w (PhysicsState.dyn_w_ls)
         physics_fn._wants_phys_state_ro = True
     return physics_fn
 
@@ -748,6 +913,7 @@ def _make_nonhydrostatic_microphysics(
         shape_w = state.w.data.shape
         shape_2d = state.phis.data.shape
         n_tracers = tracers.shape[-1] if tracers.ndim >= 5 else 0
+        require_thompson_tracers(scheme_name, n_tracers, scheme_config)
 
         dims_3d = ("face", "x", "y", "level")
         dims_w = ("face", "x", "y", "level_half")
@@ -826,6 +992,8 @@ def _make_nonhydrostatic_microphysics(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
                 **sundqvist_lane_kwargs(scheme_name, grid, ncol, n_tracers > 3),
+                **thompson_lane_kwargs(scheme_name, lambda: half_level_w_to_full(
+                    state.w.data, ncol, nlev)),
             )
 
         # Convert dT/dt -> dtheta'/dt using local Exner (T = theta * exner).
@@ -887,6 +1055,7 @@ _PLANE_MIN_TRACER_SLOTS = {
     "sdm": 2,               # q_v, q_c by default; opt-in coalescence needs 8
     "fast_sbm": 9,          # q_v,q_c,q_r + N_c,N_r live; ice slots zero
     "ml_emulator": 9,       # generic full layout
+    "ifs_cloudsc": 10,      # full nine + cloud_fraction_ifs (q_g, N_* zero)
     "none": 0,              # no-op
 }
 
@@ -1045,6 +1214,8 @@ def _make_plane_microphysics(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
                 **sundqvist_lane_kwargs(scheme_name, grid, ncol, n_tracers > 3),
+                **thompson_lane_kwargs(scheme_name, lambda: half_level_w_to_full(
+                    state.w.data, ncol, nlev)),
             )
 
         dT_dt = micro_out.dT_dt.reshape(shape_3d)
@@ -1250,6 +1421,8 @@ def _make_mpas_nh_microphysics(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
                 **sundqvist_lane_kwargs(scheme_name, mesh, ncol, n_tracers > 3),
+                **thompson_lane_kwargs(scheme_name, lambda: half_level_w_to_full(
+                    state.w.data, ncol, nlev)),
             )
 
         dT_dt = micro_out.dT_dt
@@ -1304,6 +1477,8 @@ def _make_mpas_nh_microphysics(
 def _make_spectral_pe_microphysics(
     microphysics_config: MicrophysicsConfig,
     dt: float,
+    cloud_config=None,
+    clubb_config=None,
 ) -> Callable:
     """Create microphysics physics_fn for SpectralPEModel.
 
@@ -1320,6 +1495,8 @@ def _make_spectral_pe_microphysics(
     scheme_name, micro_fn, scheme_config = _get_microphysics_fn(microphysics_config)
     is_ml = scheme_name == "ml_emulator"
     _ml_model_cache = [None]
+    _incloud = _check_incloud_cloud_config(scheme_config, cloud_config,
+                                           clubb_config)
 
     # Tracer key → MicrophysicsOutput attribute name.  Mirrors the
     # ``HydrometeorState`` field layout in ``microphysics/output.py``
@@ -1339,7 +1516,7 @@ def _make_spectral_pe_microphysics(
     }
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None,
-                   return_sfc_precip=False):
+                   phys_state=None, return_sfc_precip=False):
         # Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -1404,6 +1581,7 @@ def _make_spectral_pe_microphysics(
         # column-physics ``(ncol, nlev)`` layout.  Backend microphysics
         # schemes assume non-negative mixing ratios, so clip on the way
         # in (matches the hydrostatic bridge's ``_get_tracer``).
+        require_thompson_tracers(scheme_name, state.tracers, scheme_config)
         def _get_tracer(name):
             if state.tracers is not None and name in state.tracers:
                 raw = state.tracers[name]
@@ -1443,12 +1621,25 @@ def _make_spectral_pe_microphysics(
                 scheme_config, _ml_model_cache[0],
             )
         else:
+            _kw = {}
+            if _incloud:
+                # Gaussian latitudes [rad] (n_lat,), broadcast to the
+                # (n_lat, n_lon) column order of T_col.
+                _lat_col = jnp.broadcast_to(
+                    jnp.asarray(grid.lat)[:, None], (n_lat, n_lon)
+                ).reshape(ncol)
+                _kw["cloud_fraction"] = _incloud_liquid_cloud_fraction(
+                    phys_state, q_v_col, T_col, p_full_col, p_half_col,
+                    hydrometeors.q_i, _lat_col, cloud_config, clubb_config)
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
-                p_full_col, p_half_col, rho, dz, dt, scheme_config,
+                p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,
                 **sundqvist_lane_kwargs(
                     scheme_name, grid, ncol,
                     state.tracers is not None and "q_i" in state.tracers),
+                **thompson_lane_kwargs(scheme_name, lambda: _spectral_w(
+                    fields, p_s, sigma_coord, T_col, p_full_col, q_v_col,
+                    ncol, nlev)),
             )
 
         dT_dt = micro_out.dT_dt.reshape(n_lat, n_lon, nlev)
@@ -1514,6 +1705,8 @@ def _make_spectral_pe_microphysics(
         _ml_model_cache[0] = None
 
     physics_fn.reset_state = reset_state
+    if _incloud:
+        physics_fn._wants_phys_state_ro = True
     # #2277: accepts ``return_sfc_precip=True`` (second return: surface precip).
     physics_fn._emits_sfc_precip = True
     return physics_fn

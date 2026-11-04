@@ -1,0 +1,24 @@
+{
+ "record": "/burg/glab/users/pg2328/oracle_audit/tier4/dyn/ctl_on/t4_rhg_record_*.bin (32 ranks)",
+ "recorder": "MY_SRC t4_dyn.F90 channel rhg",
+ "config": "ORCA1_T4DYN eORCA1 360x331, NEMO 5.0.1 SI3, nn_hls=2, F-pivot fold, 32 ranks 5x7",
+ "nemo_build_job": 11022552,
+ "kt": 17281,
+ "nevp_recorded": 100,
+ "ln_aEVP": true,
+ "ln_landfast_L16": true,
+ "assembly": "tier4/dyn/t4lib.assemble (owner interior, recorded halos, votes R3a/V2/V3')",
+ "band": "extended j rows 323..334 of 335: 2 south-pad rows, 8 inner rows, 2 north halo rows; full width incl. E-W halos",
+ "outputs": "NEMO subcycle-1 (jter==1) u_ice, v_ice, stress1/2/12 after lbc_lnk",
+ "extractor": "oracle_audit/si3dyn_fix/D1/extract.py",
+ "legoesm_base_sha": "01546ffdacd2781c6e75d0ce6c27b1ada02f5a6d",
+ "tier4_report": "oracle_audit/tier4/dyn/REPORT.txt (U9)",
+ "spread_all_max": {
+  "sub1_u_ice": 1.5739801381525794e-11,
+  "sub1_v_ice": 2.269821162677213e-11,
+  "sub1_s1": 2.3050186423244083e-13,
+  "sub1_s2": 8.63178047717252e-12,
+  "sub1_s12": 2.3373182282760058e-12
+ },
+ "spread_note": "20-seed NEMO 1-ulp input-perturbation spread, max rel over the interior minus the fold row (tier4 spread.json)"
+}

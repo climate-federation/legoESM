@@ -135,6 +135,15 @@ def test_microphysics_smoke(scheme):
                          dims=("face", "x", "y", "level"), units="kg/kg"),
         }
     )
+    if scheme == "thompson":
+        # the WRF port needs the full registry (vote W1a/Y3a): zeros for the
+        # absent species, the values the bridge used to zero-fill
+        from legoesm.core.tracers import make_full_moisture_registry
+        state = state._replace(tracers={
+            **{n: Field(jnp.zeros_like(q_c_data), name=n,
+                        dims=("face", "x", "y", "level"), units="")
+               for n in make_full_moisture_registry().names},
+            **state.tracers})
     config = MicrophysicsConfig(
         scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
     micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)

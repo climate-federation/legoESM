@@ -1,0 +1,23 @@
+{
+ "records": "/burg/glab/users/pg2328/oracle_audit/tier3/rnf/ctl_on/t3_rnf0_record_RRRR.bin (sbc_rnf_init: zrnfcl_max, gdept_1d, mbkt, nk_rnf), t3_rnf2_record_RRRR.bin (first sbc_rnf_div: rnf, e3t(Kmm) = e3t_3d*(1+r3t*tmask), tmask, h_rnf)",
+ "recorder_cfg": "NEMO 5.0.1 cfgs/ORCA1_T3RNF (MY_SRC t3_rnf.F90), ORCA1 day-30 restart kt=17281, 32 ranks; ln_rnf_depth_ini=T rn_dep_max=150 rn_rnf_max=0.05",
+ "legoesm_base_sha": "ee8534602be3ffdff9b3f66dde1ee6397d3ab877",
+ "selection": "10 runoff columns with largest nk_rnf, 50 seeded (20261103) random runoff columns, 10 random no-runoff wet columns",
+ "counts": {
+  "runoff_cols": 27662,
+  "dry_cols": 37425
+ },
+ "min_mbkt_runoff_columns": 10,
+ "nk_hist": {
+  "2": 27479,
+  "3": 66,
+  "4": 37,
+  "5": 15,
+  "6": 13,
+  "7": 6,
+  "8": 11,
+  "9": 5,
+  "10": 19,
+  "11": 11
+ }
+}
