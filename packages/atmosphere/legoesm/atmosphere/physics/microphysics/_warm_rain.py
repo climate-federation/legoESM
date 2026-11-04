@@ -13,7 +13,8 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.output import sedimentation_tendency
-from legoesm.core.smooth import smooth_clamp, smooth_max, smooth_min, smooth_relu, smoothstep_quintic
+from legoesm.core.smooth import (sigmoid_switch, smooth_clamp, smooth_max, smooth_min, smooth_relu,
+                                 smoothstep_quintic)
 from legoesm.thermo import (
     mixing_ratio_to_specific_humidity,
     saturation_mixing_ratio,
@@ -3040,6 +3041,58 @@ _M2005_SMALL_REMOVAL_RH = 0.9     # small liquid evaporated where q_v/q_sat < 0.
 _M2005_SMALL_REMOVAL_Q = 1.0e-8   # ... when below 1e-8 kg/kg (:1454-1463, :4670-4679) [kg/kg]
 _M2005_FALL_FILL_MIN = 1.0e-10    # fall speed below this takes the level above's (:4282-4310) [m/s]
 _M2005_STOKES_DENOM = 18.0        # ACN = g*rho_w/(18*mu), Stokes droplet fall speed (:1546)
+
+
+def m2005_subsaturation_removal(T, q_v, q_sat, q_sat_i, liquid, frozen, *,
+                                rh_sharpness, q_sharpness):
+    """gSAM M2005 removal of small condensate in sub-saturated air.
+
+    module_mp_graupel.f90:1453-1488 (preamble) and :4664-4700 (post-step):
+    with ``RH = q_v/q_sat`` and ``RH_i = q_v/q_sat_i`` evaluated ONCE, each
+    liquid species (``q_c``, ``q_r``) below 1e-8 kg/kg where ``RH < 0.9`` and
+    each frozen species (``q_i``, ``q_s``, ``q_g``) below 1e-8 where
+    ``RH_i < 0.9`` is moved to vapour, cooling by ``L_v/c_pd`` (liquid) or
+    ``L_s/c_pd`` (frozen) per kg -- gSAM's XXLV = lcond, XXLS = lsub,
+    CPM = cp.  Water and the enthalpy ``c_pd T - L_v q_l - L_s q_f`` are
+    conserved exactly.
+
+    KNOWN DIFFERENCE (RULE 5): the removed fraction of each species is
+    ``(1 - H(RH - 0.9)) (1 - H(q/1e-8 - 1))`` with ``H = sigmoid_switch`` at
+    ``rh_sharpness`` / ``q_sharpness``; at ``math.inf`` both are gSAM's strict
+    ``<`` steps.  ``RH`` is +inf (no removal) where ``q_sat`` underflows to 0
+    (fp32 cold cells; gSAM's ``q_v/0``).  Measured default departure on the
+    gSAM satadj fixture columns (one whole call, other switches hard): the RH
+    gate up to 7.7e-6 K / 3.1e-9 kg/kg (a cell near RH 0.9), the q gate 0
+    (no species near 1e-8; at 1.005e-8 it removes 1 - sigmoid(0.5) = 38 % that
+    gSAM keeps); both pinned in the oracle test.  ``liquid``/``frozen`` are tuples of
+    mixing ratios (``None`` entries pass through).  Returns ``(T, q_v,
+    liquid', frozen', w_liquid, w_frozen)`` with ``w_*`` the removed fractions
+    (tuples, ``None`` for ``None``) for scaling the species' numbers.
+    """
+    def ratio(q_s):   # q_v/q_s, +inf (no removal, as gSAM) where q_s underflows to 0
+        pos = q_s > 0.0
+        return jnp.where(pos, q_v / jnp.where(pos, q_s, 1.0), jnp.inf)
+
+    # 1 - H(x - x0) is gSAM's strict "x < x0" at the hard limit
+    g_l = 1.0 - sigmoid_switch(ratio(q_sat) - _M2005_SMALL_REMOVAL_RH, rh_sharpness)
+    g_f = 1.0 - sigmoid_switch(ratio(q_sat_i) - _M2005_SMALL_REMOVAL_RH, rh_sharpness)
+    out = []
+    for species, gate, lat in ((liquid, g_l, constants.L_v), (frozen, g_f, constants.L_s)):
+        qs, ws = [], []
+        for q in species:
+            if q is None:
+                qs.append(None)
+                ws.append(None)
+                continue
+            w = gate * (1.0 - sigmoid_switch(q / _M2005_SMALL_REMOVAL_Q - 1.0, q_sharpness))
+            dq = w * q
+            q_v = q_v + dq
+            T = T - dq * lat / constants.c_pd
+            qs.append(q - dq)
+            ws.append(w)
+        out.append((tuple(qs), tuple(ws)))
+    (liq, w_l), (fro, w_f) = out
+    return T, q_v, liq, fro, w_l, w_f
 
 
 def m2005_rain_psd(q_r, N_r, rho, lamr_min, lamr_max):

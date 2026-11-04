@@ -4394,8 +4394,28 @@ def nemo_bottom_drag_rate_faces(
         raise ValueError(
             "nemo_bottom_drag_rate_faces requires the cell-centre layer "
             "thickness h_k (NEMO e3t).")
-    u_c = 0.5 * (u[:, :-1, :] + u[:, 1:, :])   # (n_lat, n_lon, nlev)
-    v_c = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+    # zdfdrg.F90:174,186 sums uu(ji)+uu(ji-1) at the bottom level with no
+    # mask of its own because NEMO's uu is umask'ed at every level
+    # (stprk3_stg.F90:367,375: uu(Kaa) = (...)*umask(ji,jj,jk)).  legoESM's
+    # prognostic u carries only the 2-D column mask, so a face below the
+    # shallower neighbour's seafloor can hold a non-zero velocity: apply the
+    # 3-D face masks (same helper as the TKE bottom BC) so the rate reads
+    # NEMO's operand.  No-op wherever u is already zero on dry faces.  The
+    # helper closes the north-fold v face; there the face keeps its state
+    # value (unmasked, as before this change) because a fold card's NEMO
+    # vmask can be wet.  Only the physical fold row: serial/MPI north rank
+    # (fold_is_local) or the SPMD north band (north_fold_mask); interior
+    # band cuts keep the helper's 3-D masks.
+    _um3, _vm3 = compute_face_masks_3d(z_coord.is_active, grid)
+    _nmask = north_fold_mask(grid)
+    if fold_is_local(grid):
+        _vm3 = _vm3.at[-1].set(1.0)
+    elif _nmask is not None:
+        _vm3 = _vm3.at[-1].set(jnp.where(_nmask, 1.0, _vm3[-1]))
+    u_m = u * _um3.astype(u.dtype)
+    v_m = v * _vm3.astype(v.dtype)
+    u_c = 0.5 * (u_m[:, :-1, :] + u_m[:, 1:, :])   # (n_lat, n_lon, nlev)
+    v_c = 0.5 * (v_m[:-1, :, :] + v_m[1:, :, :])
     _bl = jnp.maximum(z_coord.bottom_level, 0)   # -1 (land) -> 0
     _bl_idx = _bl[..., jnp.newaxis]
     u_bot = jnp.take_along_axis(u_c, _bl_idx, axis=-1)[..., 0]
@@ -4413,6 +4433,10 @@ def nemo_bottom_drag_rate_faces(
         uc0=config.bottom_drag.bottom_drag_uc0,
         von_karman=constants.kappa_von_karman,
     ))
+    # rCd0_bot = rn_Cd0*ssmask (zdfdrg.F90:465,497): the rate is 0 on land
+    # columns, not Cd0*sqrt(ke0).  It feeds the face averages below, so a
+    # land-adjacent face carries 0.5*rate(wet cell) as in dynzdf.
+    r_t = jnp.where(z_coord.bottom_level >= 0, r_t, jnp.zeros_like(r_t))
     # t-point -> face 2-point averages (NEMO dynzdf:
     # zCdu = 0.5*(rCdU(ji+1,jj)+rCdU(ji,jj))).  u-faces are lon-periodic
     # (face l couples cells l-1, l; face n_lon repeats face 0, mirroring
@@ -5000,7 +5024,7 @@ def _bc_external_surface_forcing(
                 # cells), so the column integrates to q_net.
                 _inv_rho_csw_h0 = 1.0 / (
                     jnp.asarray(rho_0, dtype=T.dtype)
-                    * jnp.asarray(_c_sw, dtype=T.dtype)
+                    * jnp.asarray(_heat_capacity, dtype=T.dtype)
                     * jnp.maximum(jnp.asarray(h_k[..., 0], dtype=T.dtype), 1e-10))
                 dT_target = dT_target.at[..., 0].add(
                     q_nonsolar * _inv_rho_csw_h0 * mask
@@ -5009,7 +5033,7 @@ def _bc_external_surface_forcing(
                 sw_tend = apply_shortwave_penetration(
                     _sw_cfg, sw_absorbed,
                     chl=jnp.asarray(_sf_chl, dtype=T.dtype),
-                    dz_live=h_k, wet_cell=wet_cell, rho_0=float(rho_0),
+                    dz_live=h_k, wet_cell=wet_cell, rho_0=float(rho_0), c_sw=_heat_capacity,
                 )
                 dT_target = dT_target + sw_tend * mask_3d
             elif shortwave_scheme == "jerlov_2band" and _sf_sw is not None:
@@ -5032,7 +5056,7 @@ def _bc_external_surface_forcing(
                 # seabed remainder goes to the deepest wet cell.
                 sw_tend = shortwave_penetration_tendency(
                     sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref, J, _sw_cfg,
-                    rho_0=float(rho_0), dz_live=h_k,
+                    rho_0=float(rho_0), c_sw=_heat_capacity, dz_live=h_k,
                 )
                 dT_target = dT_target + sw_tend * mask_3d
             elif _sf_sw is not None and _sf_chl is not None:
@@ -5070,7 +5094,7 @@ def _bc_external_surface_forcing(
                         gdepw_ref=-jnp.asarray(
                             z_coord.z_half_ref, dtype=T.dtype),
                         e3t_ref=jnp.asarray(z_coord.dz_ref, dtype=T.dtype),
-                        rho_0=float(rho_0),
+                        rho_0=float(rho_0), c_sw=_heat_capacity,
                     )
                     dT_target = dT_target + sw_tend * mask_3d
                 # On the NEMO RGB selector the shared physics pipeline owns
@@ -5102,7 +5126,7 @@ def _bc_external_surface_forcing(
                         z_coord.dz_ref,
                         z_coord.z_half_ref,
                         J,
-                        rho_0=float(rho_0),
+                        rho_0=float(rho_0), c_sw=_heat_capacity,
                         dz_live=h_k,
                     )
                     dT_target = dT_target + sw_tend * mask_3d

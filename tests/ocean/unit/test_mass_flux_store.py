@@ -1430,6 +1430,8 @@ def test_store_mass_flux_is_the_last_config_field():
             "rk3_stage3_l9_eiv_nemo_order",
             "nemo_qsr_stage3_kmm_source_association",
             "vmix_eos_use_config_rho0",
+            # appended by the ocean oracle-fix campaign (tier-3 RNF)
+            "runoff_depth_spread_levels",
             )
     assert fields[-len(tail):] == tail, (
         f"config tail is {fields[-len(tail):]}, expected {tail}; a new field "

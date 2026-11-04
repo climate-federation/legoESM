@@ -54,7 +54,8 @@ HARD_LIMIT = dict(
     homogeneous_freeze_sharpness=1.0e6, hom_freeze_T_sharpness=1.0e6,
     hom_ice_nuc_sharpness=1.0e9, melt_sharpness=1.0e6,
     gsam_satadj_excess_sharpness=math.inf, gsam_satadj_qc_floor_sharpness=math.inf,
-    gsam_satadj_p_min_width_pa=0.0)
+    gsam_satadj_p_min_width_pa=0.0, gsam_small_removal_rh_sharpness=math.inf,
+    gsam_small_removal_q_sharpness=math.inf)
 # saturation_adjustment_gsam at gSAM's hard switches, and at the defaults.
 GSAM_HARD = dict(excess_sharpness=math.inf, qc_floor_sharpness=math.inf, p_min_width_pa=0.0)
 GSAM_DEFAULT = dict(
@@ -134,6 +135,144 @@ def test_morrison_sam_whole_call_T_qv_match_gsam():
             "q_v": _rel(qv_new, fx["ora_col_q_v"]).max()}
     assert max(errs.values()) <= TOL, errs
 
+
+def test_morrison_sam_whole_call_matches_gsam_at_1e12():
+    """Campaign bar (rel 1e-12, fp64).  The edge_dry column has q_r = 1e-12 at
+    RH 0.89 after the adjustment, which gSAM moves to vapour (sub-saturation
+    small-condensate removal, module_mp_graupel.f90:1453-1488); without it
+    q_v is off by 5.6e-11 relative."""
+    fx = _fx()
+    T, q_v, hyd, pf, ph, rho, dz, dt = _columns(fx)
+    out = morrison_microphysics(T, q_v, hyd, pf, ph, rho, dz, dt,
+                                _sam()._replace(**HARD_LIMIT))
+    T_new = np.asarray(T + dt * out.dT_dt)[:, ::-1]
+    qv_new = np.asarray(q_v + dt * out.dq_v_dt)[:, ::-1]
+    assert _rel(T_new, fx["ora_col_T"]).max() <= 1e-12
+    assert _rel(qv_new, fx["ora_col_q_v"]).max() <= 1e-12
+
+
+def _removal_cell():
+    """Liquid cells at RH 0.85 (removed) / 0.95 (kept) and frozen cells at
+    RH_i 0.85 / 0.95, every species at 1e-9 (removed where gated) or 1e-6."""
+    from legoesm.thermo import saturation_specific_humidity, saturation_specific_humidity_ice
+    T = jnp.asarray([285.0, 285.0, 250.0, 250.0, 285.0])
+    p = jnp.full(5, 8.0e4)
+    qs, qsi = saturation_specific_humidity(T, p), saturation_specific_humidity_ice(T, p)
+    q_v = jnp.asarray([0.85, 0.95, 0.0, 0.0, 0.85]) * qs + jnp.asarray(
+        [0.0, 0.0, 0.85, 0.95, 0.0]) * qsi
+    q = jnp.asarray([1e-9, 1e-9, 1e-9, 1e-9, 1e-6])
+    return T, q_v, qs, qsi, q
+
+
+def test_subsaturation_removal_hard_form_is_gsams():
+    from legoesm.atmosphere.physics.microphysics._warm_rain import m2005_subsaturation_removal
+    T, q_v, qs, qsi, q = _removal_cell()
+    Tn, qvn, (qr, qc), (qi, qsn, qg), _, _ = m2005_subsaturation_removal(
+        T, q_v, qs, qsi, (q, q), (q, q, q), rh_sharpness=math.inf,
+        q_sharpness=math.inf)
+    liq = (q_v / qs < 0.9) & (q < 1e-8)
+    fro = (q_v / qsi < 0.9) & (q < 1e-8)
+    for x in (qr, qc):
+        np.testing.assert_array_equal(x, np.where(liq, 0.0, q))
+    for x in (qi, qsn, qg):
+        np.testing.assert_array_equal(x, np.where(fro, 0.0, q))
+    dl = np.where(liq, 2 * q, 0.0)
+    df = np.where(fro, 3 * q, 0.0)
+    # absolute tolerances: a few ulp of q_v (~1e-2) and T (~280 K)
+    np.testing.assert_allclose(qvn - q_v, dl + df, rtol=0.0, atol=1e-16)
+    np.testing.assert_allclose(
+        Tn - T, -(dl * constants.L_v + df * constants.L_s) / constants.c_pd,
+        rtol=0.0, atol=1e-12)
+    assert bool(liq[0]) and not bool(liq[1]) and bool(fro[2]) and not bool(fro[3])
+    assert not bool(liq[4])
+
+
+def test_subsaturation_removal_smooth_conserves_and_has_gradient():
+    from jax.test_util import check_grads
+    from legoesm.atmosphere.physics.microphysics._warm_rain import m2005_subsaturation_removal
+    T, q_v, qs, qsi, q = _removal_cell()
+    kw = dict(rh_sharpness=MorrisonConfig._field_defaults["gsam_small_removal_rh_sharpness"],
+              q_sharpness=MorrisonConfig._field_defaults["gsam_small_removal_q_sharpness"])
+
+    def f(q_v, q):
+        Tn, qvn, liq, fro, _, _ = m2005_subsaturation_removal(
+            T, q_v, qs, qsi, (q, q), (q, q, q), **kw)
+        return Tn, qvn, liq, fro
+
+    Tn, qvn, liq, fro = f(q_v, q)
+    water = qvn + sum(liq) + sum(fro)
+    np.testing.assert_allclose(water, q_v + 5 * q, rtol=1e-14, atol=0.0)
+    h = (constants.c_pd * Tn - constants.L_v * sum(liq) - constants.L_s * sum(fro))
+    h0 = constants.c_pd * T - constants.L_v * 2 * q - constants.L_s * 3 * q
+    np.testing.assert_allclose(h, h0, rtol=1e-14, atol=0.0)
+    # on both gates' transitions: RH = 0.9 and q = 1e-8
+    qv_k, q_k = 0.9 * qs[:1], jnp.asarray([1e-8])
+    g = lambda a, b: f(a, b)[2][0] * 1e9  # noqa: E731
+    check_grads(lambda a: g(a, q_k), (qv_k,), order=1, modes=("rev",), eps=1e-7 * float(qs[0]))
+    check_grads(lambda b: g(qv_k, b), (q_k,), order=1, modes=("rev",), eps=1e-13)
+    assert float(jnp.abs(jax.grad(lambda a: g(a, q_k).sum())(qv_k)).sum()) > 0.0
+    assert float(jnp.abs(jax.grad(lambda b: g(qv_k, b).sum())(q_k)).sum()) > 0.0
+
+
+# Default departure of the M2005 small-condensate removal from gSAM, the RH
+# switch smooth at its default and the rest hard: per fixture column
+# (max|dT| [K], max|dq_v| [kg/kg]) after one whole call.  No fixture species
+# sits near the 1e-8 kg/kg q gate, so that switch is pinned on the cell below.
+_SMALL_REMOVAL_RH_DEFAULT_GAP = (
+    (0.0, 0.0), (0.0, 0.0), (0.0, 0.0),
+    (1.1880274541908875e-11, 4.78089789979208e-15),
+    (7.741554043150245e-06, 3.109746057883278e-09))
+
+
+def test_small_removal_rh_default_gap_is_pinned_per_column():
+    fx = _fx()
+    T, q_v, hyd, pf, ph, rho, dz, dt = _columns(fx)
+    field = "gsam_small_removal_rh_sharpness"
+
+    def step(**kw):
+        cfg = _sam()._replace(**dict(HARD_LIMIT, **kw))
+        out = morrison_microphysics(T, q_v, hyd, pf, ph, rho, dz, dt, cfg)
+        return np.asarray(T + dt * out.dT_dt), np.asarray(q_v + dt * out.dq_v_dt)
+
+    (Th, qh), (Ts, qs) = step(), step(**{field: MorrisonConfig._field_defaults[field]})
+    for c, (gT, gq) in enumerate(_SMALL_REMOVAL_RH_DEFAULT_GAP):
+        assert float(np.abs(Ts[c] - Th[c]).max()) == pytest.approx(gT, rel=1e-6, abs=1e-13)
+        assert float(np.abs(qs[c] - qh[c]).max()) == pytest.approx(gq, rel=1e-6, abs=1e-18)
+
+
+def test_small_removal_q_default_gap_is_pinned():
+    """q = 1.005e-8 at RH 0.85: gSAM keeps it (q > 1e-8); the default
+    smooth gate removes 1 - sigmoid(100 * 0.005) of it."""
+    from legoesm.atmosphere.physics.microphysics._warm_rain import m2005_subsaturation_removal
+    T, q_v, qs, qsi, _ = _removal_cell()
+    q = jnp.full(5, 1.005e-8)
+    s_q = MorrisonConfig._field_defaults["gsam_small_removal_q_sharpness"]
+    hard, smooth = (m2005_subsaturation_removal(
+        T, q_v, qs, qsi, (q,), (), rh_sharpness=math.inf, q_sharpness=sq)[2][0]
+        for sq in (math.inf, s_q))
+    np.testing.assert_array_equal(hard, q)
+    kept = 0.6224593312018546  # sigmoid(0.5): the default sharpness 100 on a 0.5 % excess
+    expect = np.where(np.asarray(q_v / qs) < 0.9, kept, 1.0)
+    np.testing.assert_allclose(smooth, expect * 1.005e-8, rtol=1e-9, atol=0.0)
+
+
+def test_subsaturation_removal_fp32_underflowed_qsat_is_finite():
+    """170 K, 80 kPa in fp32: q_sat underflows to 0; no removal there (gSAM's
+    q_v/0 = inf) and a finite gradient (codex review)."""
+    from legoesm.atmosphere.physics.microphysics._warm_rain import m2005_subsaturation_removal
+    from legoesm.thermo import saturation_specific_humidity, saturation_specific_humidity_ice
+    T, p = jnp.full(2, 170.0, jnp.float32), jnp.full(2, 8.0e4, jnp.float32)
+    qs, qsi = saturation_specific_humidity(T, p), saturation_specific_humidity_ice(T, p)
+    q = jnp.full(2, 1e-9, jnp.float32)
+
+    def f(q_v):
+        Tn, qvn, liq, fro, _, _ = m2005_subsaturation_removal(
+            T, q_v, qs, qsi, (q, q), (q, q, q), rh_sharpness=100.0, q_sharpness=100.0)
+        return jnp.sum(Tn) + 1e6 * (jnp.sum(qvn) + sum(map(jnp.sum, liq + fro)))
+
+    q_v = jnp.asarray([0.0, 1e-12], jnp.float32)
+    assert bool(jnp.isfinite(f(q_v)))
+    assert bool(jnp.all(jnp.isfinite(jax.grad(f)(q_v))))
 
 @pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
 def test_adjustment_gradients_finite(dtype):
