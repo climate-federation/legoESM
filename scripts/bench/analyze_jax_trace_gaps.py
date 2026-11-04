@@ -101,7 +101,7 @@ def exact_period(seq: list[str]) -> int | None:
     return None
 
 
-def _union_ms(evs: list[dict]) -> float:
+def union_us(evs: list[dict]) -> float:
     """Total device-BUSY time as the union of event intervals — events
     on different streams overlap, so a plain duration sum overstates
     busy (the CPU smoke showed busy 33 s inside a 1.5 s span)."""
@@ -226,11 +226,11 @@ def time_by_family(evs: list[dict], steps: int, *,
     out = {"steps": steps, "devices_per_rank": devices_per_rank,
            "span_ms_per_step": span_us / 1e3 / steps, "families": {}}
     for fam, fevs in sorted(buckets.items()):
-        union_us = _union_ms(fevs)
+        busy_us = union_us(fevs)
         out["families"][fam] = {
             "instructions": len(fevs),
-            "ms_per_step": union_us / 1e3 / steps,
-            "share_of_span": (union_us / span_us) if span_us else None,
+            "ms_per_step": busy_us / 1e3 / steps,
+            "share_of_span": (busy_us / span_us) if span_us else None,
         }
     if expect is not None:
         problems = []
@@ -256,7 +256,7 @@ def per_rank_summary(evs: list[dict]) -> dict:
     evs = sorted(evs, key=lambda e: e["ts"])
     t0, t1 = evs[0]["ts"], max(e["ts"] + e["dur"] for e in evs)
     span = t1 - t0
-    busy = _union_ms(evs)
+    busy = union_us(evs)
     coll = [e for e in evs if is_collective(e["name"])]
     comp = [e for e in evs if not is_collective(e["name"])]
     return {

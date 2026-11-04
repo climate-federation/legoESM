@@ -1472,7 +1472,7 @@ def main(argv=None, *, build_only=False):
             elapsed = day - getattr(atm_config, "start_day", 0.0)
             driver.load_coupled_checkpoint(float(elapsed),
                                            checkpoint_dir=args.output,
-                                           required=True)
+                                           required=True, atm_step=step)
             start_step, start_day = step, day
             logger.info("  RESUME from %s: step=%d, day=%.1f (elapsed %.1f) -> "
                         "integrating to day %d", os.path.basename(ckpt),

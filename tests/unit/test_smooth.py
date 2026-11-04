@@ -138,3 +138,13 @@ def test_positive_part_c1_is_zero_below_and_c1():
     for j in (0.0, 1.0 / s):
         lo, hi = g(jnp.array([j - 1e-7, j + 1e-7]))
         assert abs(float(hi - lo)) < 1e-5
+
+
+def test_positive_part_c1_traced_inf_is_hard_and_finite():
+    """A TRACED sharpness = inf gives max(x, 0) with finite gradients (no inf * 0)."""
+    x = jnp.array([-1.0, 0.0, 0.3, 2.0])
+    f = jax.jit(lambda x, s: positive_part_c1(x, s))
+    assert jnp.array_equal(f(x, jnp.inf), jnp.maximum(x, 0.0))
+    g = jax.jit(jax.grad(lambda x, s: jnp.sum(positive_part_c1(x, s))))(x, jnp.inf)
+    assert jnp.all(jnp.isfinite(g))
+    assert jnp.array_equal(f(x, 4.0), positive_part_c1(x, 4.0))
