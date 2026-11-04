@@ -4,16 +4,16 @@ The port is certified against the running Fortran in
 tests/atmosphere/microphysics/unit/test_thompson_wrf_oracle.py.  These tests
 pin the MAPPING the adapter adds (votes H3-H5, J2-J10), on the same oracle
 fixture columns rebuilt in the host's representation (top-down, specific
-humidity, per-volume N_r / N_c, per-kg-moist N_i):
+humidity, per-volume N_r, per-kg-moist N_i):
 
-* with the carried droplet number equal to WRF's Nt_c the adapter reproduces
-  the port's updated state and precipitation (the oracle test's metric and
-  1e-10 tolerance);
-* the carried N_c is read (a different N_c changes the answer) and nt_c=None
-  is the oracle's constant bitwise;
+* the adapter reproduces the port's updated state and precipitation (the
+  oracle test's metric and 1e-10 tolerance);
+* the carried N_c is NOT read: the droplet number is WRF's fixed Nt_c
+  (user decision 2026-11-04), so carried zero and carried 4*Nt_c agree
+  bitwise;
 * a step that changes nothing returns zero tendencies (number included);
 * the temperature tendency is the port's tten (J10);
-* missing w / N_c and an out-of-range sub-step cap refuse.
+* missing w / N_r and an out-of-range sub-step cap refuse.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def case(request):
     return a
 
 
-def _host(a, nt_c=W.NT_C):
+def _host(a, n_c=0.0):
     """The oracle's bottom-up dry-basis inputs in the host representation."""
     fl = lambda x: x[:, ::-1]                                  # noqa: E731
     r = [a[k] for k in ("qv", "qc", "qi", "qr", "qs", "qg")]
@@ -69,20 +69,19 @@ def _host(a, nt_c=W.NT_C):
     rho_p = thompson_air_density(a["T"], a["p"], a["qv"])
     hyd = HydrometeorState(
         q_c=q[1], q_r=q[3], q_i=q[2], q_s=q[4], q_g=q[5],
-        N_c=jnp.full(a["T"].shape, nt_c), N_r=fl(a["nr"] * rho_p),
+        N_c=jnp.full(a["T"].shape, n_c), N_r=fl(a["nr"] * rho_p),
         N_i=fl(a["ni"] / wet))
     return fl(a["T"]), q[0], hyd, fl(a["p"]), fl(a["dz"]), fl(a["w"])
 
 
-def _adapter(a, dt, nt_c=W.NT_C, **kw):
-    T, qv, hyd, p, dz, w = _host(a, nt_c)
+def _adapter(a, dt, n_c=0.0, **kw):
+    T, qv, hyd, p, dz, w = _host(a, n_c)
     kw.setdefault("w", w)
     return thompson_microphysics(T, qv, hyd, p, None, None, dz, dt, **kw), (T, qv, hyd)
 
 
-def _port(a, dt, nt_c=None):
-    return thompson_wrf_step(*(a[k] for k in _FIN), float(dt), n_sed_max=_N_SED,
-                             nt_c=nt_c)
+def _port(a, dt):
+    return thompson_wrf_step(*(a[k] for k in _FIN), float(dt), n_sed_max=_N_SED)
 
 
 def test_adapter_reproduces_port_state_and_precip(case):
@@ -100,6 +99,11 @@ def test_adapter_reproduces_port_state_and_precip(case):
     assert _rel(out.precipitation * dt, tot) <= _TOL
     assert _rel(out.precip_frozen * dt, tot - ref.pptrain) <= _TOL
     np.testing.assert_array_equal(np.asarray(out.dN_c_dt), 0.0)
+    # numbers back in host units: per m^3 (N_r) and per kg moist air (N_i)
+    rho_p = thompson_air_density(case["T"], case["p"], case["qv"])
+    assert _rel(hyd.N_r + dt * out.dN_r_dt, fl(ref.nr * rho_p)) <= _TOL
+    dry_in = 1.0 / (1.0 + sum(case[k] for k in ("qv", "qc", "qi", "qr", "qs", "qg")))
+    assert _rel(hyd.N_i + dt * out.dN_i_dt, fl(ref.ni * dry_in)) <= _TOL
 
 
 def test_fixture_precipitates():
@@ -119,16 +123,15 @@ def test_temperature_tendency_is_tten(case):
     assert _rel(T + dt * out.dT_dt, T + dt * np.asarray(ref.tten)[:, ::-1]) <= _TOL
 
 
-def test_nt_c_none_is_the_oracle_constant_and_carried_nc_is_read(case):
+def test_carried_nc_is_not_read(case):
+    """WRF's fixed Nt_c, not the carried N_c (user decision 2026-11-04)."""
     dt = 300.0
-    a, b = _port(case, dt), _port(case, dt, nt_c=jnp.full(case["T"].shape, W.NT_C))
-    np.testing.assert_array_equal(np.asarray(a.qc), np.asarray(b.qc))
-    np.testing.assert_array_equal(np.asarray(a.qr), np.asarray(b.qr))
-    if not np.any(np.asarray(case["qc"]) > W.R1):
-        return                       # no cloud water: N_c cannot enter
     o1, _ = _adapter(case, dt)
-    o2, _ = _adapter(case, dt, nt_c=4.0 * W.NT_C)
-    assert not np.array_equal(np.asarray(o1.dq_c_dt), np.asarray(o2.dq_c_dt))
+    o2, _ = _adapter(case, dt, n_c=4.0 * W.NT_C)
+    for f in o1._fields:
+        a, b = getattr(o1, f), getattr(o2, f)
+        if a is not None:
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b), err_msg=f)
 
 
 def test_no_op_column_returns_zero_tendencies():
@@ -152,8 +155,8 @@ def test_refusals(case):
     T, qv, hyd, p, dz, w = _host(case)
     with pytest.raises(ValueError, match="vertical velocity"):
         thompson_microphysics(T, qv, hyd, p, None, None, dz, 300.0)
-    with pytest.raises(ValueError, match="N_c"):
-        thompson_microphysics(T, qv, hyd._replace(N_c=None), p, None, None, dz,
+    with pytest.raises(ValueError, match="N_r"):
+        thompson_microphysics(T, qv, hyd._replace(N_r=None), p, None, None, dz,
                               300.0, w=w)
     with pytest.raises(ValueError, match="sed_substeps_max"):
         thompson_microphysics(T, qv, hyd, p, None, None, dz, 300.0,

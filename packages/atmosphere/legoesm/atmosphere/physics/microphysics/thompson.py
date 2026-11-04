@@ -10,14 +10,13 @@ onto the oracle's representation and back (votes H1-H9, J1-J10):
 * species: specific humidities [kg/kg moist air] <-> mixing ratios per kg DRY
   air, ``r_x = q_x / (1 - q_tot)`` and back ``q_x = r_x / (1 + r_tot)`` with
   the total water of the six species (H3);
-* numbers: per-volume ``N_r`` and the carried ``N_c`` [1/m^3], per-kg ``N_i``
-  -> per kg dry air with the scheme's OWN air density
+* numbers: per-volume ``N_r`` [1/m^3] and per-kg ``N_i`` -> per kg dry air with the scheme's OWN air density
   (:func:`.thompson_wrf.thompson_air_density`, input state), so the scheme's
   ``n * rho`` recovers the host number exactly (J4); back with the same
   density, so a step that changes nothing returns a zero number tendency;
-* DEPARTURE from mp_physics=8: the carried droplet number ``N_c`` replaces
-  WRF's prescribed ``Nt_c`` (user decision 2026-11-03, J2); ``dN_c_dt`` is
-  zero (mp_physics=8 has no prognostic droplet number, J5);
+* droplet number: WRF's prescribed ``Nt_c`` = 100e6 /m^3 as in mp_physics=8
+  (user decision 2026-11-04); the carried ``N_c`` is not read and
+  ``dN_c_dt`` is zero (no prognostic droplet number, J5);
 * orientation: top-down host columns <-> the oracle's bottom-up ones, the
   lane's own layer thickness ``dz`` (J9) and resolved vertical velocity ``w``
   [m/s] (H2/J6; the oracle reads it only for its low-level cloud-water
@@ -51,10 +50,10 @@ __physics_contract__ = {
     "summary": (
         "Host adapter of the WRF v4.8.0 Thompson port (mp_physics=8): "
         "specific humidity <-> dry mixing ratio, per-volume <-> per-kg "
-        "numbers, top-down <-> bottom-up, carried droplet number."
+        "numbers, top-down <-> bottom-up, WRF's fixed droplet number."
     ),
     "inputs": {
-        "T": "K", "q_v": "kg/kg", "q_c..q_g": "kg/kg", "N_c": "1/m^3",
+        "T": "K", "q_v": "kg/kg", "q_c..q_g": "kg/kg",
         "N_r": "1/m^3", "N_i": "1/kg", "p_full": "Pa", "dz": "m",
         "w": "m/s", "dt": "s",
     },
@@ -92,7 +91,7 @@ def thompson_microphysics(
 ) -> MicrophysicsOutput:
     """One WRF Thompson step on ``(ncol, nlev)`` top-down host columns.
 
-    ``p_half`` and the host density ``rho`` are not read: the scheme uses its
+    ``p_half``, the host density ``rho`` and ``N_c`` are not read: the scheme uses its
     own density (module docstring).  ``w`` is required (no zero fallback).
     """
     del p_half, rho
@@ -106,9 +105,9 @@ def thompson_microphysics(
             "microphysics='thompson' (WRF port) needs the resolved vertical "
             "velocity w; this lane did not supply it")
     h = hydrometeors
-    if h.N_c is None or h.N_r is None or h.N_i is None:
+    if h.N_r is None or h.N_i is None:
         raise ValueError(
-            "microphysics='thompson' needs the carried N_c, N_r and N_i")
+            "microphysics='thompson' needs the carried N_r and N_i")
     dt = float(dt)
     # Run the oracle-certified fp64 port as an fp64 island (vote J11a): its
     # NumPy float64 constants would otherwise promote an fp32 state mid-step.
@@ -126,7 +125,7 @@ def thompson_microphysics(
         Tb, pb, _flip(dz), _flip(w), *r,
         _flip(h.N_i / dry),
         _flip(h.N_r) / rho_p, dt,
-        n_sed_max=n_sed, nt_c=_flip(h.N_c))
+        n_sed_max=n_sed)
     r_new = (o.qv, o.qc, o.qi, o.qr, o.qs, o.qg)
     wet = 1.0 + sum(r_new)                    # 1 + r_tot
     q_new = [_flip(x / wet) for x in r_new]
