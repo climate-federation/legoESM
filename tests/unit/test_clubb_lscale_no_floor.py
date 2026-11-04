@@ -20,7 +20,7 @@ from tests.unit.test_clubb_liquid_partition import _NCOL, _NLEV, _column  # noqa
 
 
 def test_clubb_step_passes_the_unfloored_mixing_length(monkeypatch):
-    cfg = CLUBBConfig(prognostic=True)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)
     got = {}
     real_ml, real_core = clubb_mod.compute_mixing_length, clubb_mod.advance_clubb_core
 

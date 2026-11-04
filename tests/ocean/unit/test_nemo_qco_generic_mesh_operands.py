@@ -173,6 +173,38 @@ def test_raw_and_card_operand_sources_agree_and_the_arm_is_constructible():
     assert not np.array_equal(ww_alias, ww_card)
 
 
+def test_raw_mesh_source_uses_its_associated_face_masks():
+    """The raw thickness and its NEMO-associated masks are one geometry unit."""
+    grid, z_coord, u_mask, v_mask, _ = _fixture()
+    ops = nemo_qco_resolved_mesh_operands(
+        z_coord, grid, u_mask, v_mask, jnp.float64, NLEV)
+    raw_coord = _attach_raw(z_coord, ops)
+
+    # Plant a different caller-side mask at a genuinely wet face.  Before
+    # Decision 114 the raw e3u/e3v path still consumed this reconstructed
+    # mask, splitting NEMO's domzgr/dommsk geometry unit at the fold.
+    altered_u = np.asarray(u_mask).copy()
+    native_wet = np.argwhere(np.asarray(ops.umask3) != 0.0)[0]
+    compact_index = (native_wet[0], native_wet[1] + 1, native_wet[2])
+    altered_u[compact_index] = 0.0
+    assert not np.array_equal(altered_u[:, 1:, :], np.asarray(ops.umask3))
+
+    resolved = nemo_qco_resolved_mesh_operands(
+        raw_coord, grid, jnp.asarray(altered_u), v_mask, jnp.float64, NLEV)
+    np.testing.assert_array_equal(np.asarray(resolved.umask3),
+                                  np.asarray(ops.umask3))
+    np.testing.assert_array_equal(np.asarray(resolved.vmask3),
+                                  np.asarray(ops.vmask3))
+
+    # Missing the associated masks is a partial raw mesh, never permission to
+    # fall back to the caller's reconstructed face masks.
+    missing = raw_coord._replace(
+        nemo_een_barotropic=raw_coord.nemo_een_barotropic._replace(vmask=None))
+    with pytest.raises(ValueError, match="associated umask/vmask"):
+        nemo_qco_resolved_mesh_operands(
+            missing, grid, u_mask, v_mask, jnp.float64, NLEV)
+
+
 def test_raw_branch_is_bit_identical_when_the_mesh_is_full_step():
     """On a full-step mesh ``e3u_0 == e3t_0``, so the two sources coincide."""
     grid = create_beta_plane_cgrid_geometry(

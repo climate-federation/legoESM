@@ -77,6 +77,14 @@ _ICE_ADV2D_MAXIMUM_FLOOR = 1.0e-20  # icedyn_adv_pra.F90:1519-1534,1561-1571 (`e
 _ICE_ADV2D_HBIG_CONCENTRATION = 0.15  # icedyn_adv_pra.F90:992,1000,1007
 
 
+class SI3PratherResidualFluxes(NamedTuple):
+    """Ocean residual ledgers of the Prather corrections (per unit cell area)."""
+
+    wfx_res: jnp.ndarray  # [kg m-2 s-1], + into ocean
+    hfx_res: jnp.ndarray  # [W m-2], -(removed ice/snow enthalpy)/dt
+    sfx_res: jnp.ndarray  # [g m-2 s-1], + into ocean
+
+
 class ICEAdv2DState(NamedTuple):
     contents: jnp.ndarray
     bulk_salt_diagnostic: jnp.ndarray
@@ -401,15 +409,32 @@ def apply_si3_prather_source_corrections(
     halo_width: int,
     entry_intensive_contents: jnp.ndarray | None = None,
     contents_are_intensive: bool = False,
-) -> jnp.ndarray:
+    dt_s: float | None = None,
+    return_residual_fluxes: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, SI3PratherResidualFluxes]:
     """Apply SI3's active Hbig/Hsnow/zapneg Prather corrections.
 
     This shared implementation is the single-category, option-4-salinity,
     level-pond composition in
     ``icedyn_adv_pra.F90:156-180,405-421,946-1142``.  Rung-specific wrappers
-    supply only their resolved layer roster, area, and halo.  Residual ocean
-    flux ledgers are deliberately outside the uncoupled fidelity cards.
+    supply only their resolved layer roster, area, and halo.
+
+    ``return_residual_fluxes=True`` also returns the ocean residual ledgers
+    the corrections feed (``wfx_res`` [kg m-2 s-1], ``hfx_res`` [W m-2],
+    ``sfx_res`` [g m-2 s-1 = salt content * rhoi / dt]) as an
+    :class:`SI3PratherResidualFluxes`, accumulated per branch in NEMO 5.0.1
+    order: ``Hbig_pra`` (icedyn_adv_pra.F90:1053-1054,1071,1083,1097,1109),
+    ``Hsnow_pra`` (:1167-1168), ``ice_var_zapneg`` (icevar.F90 zapneg salt,
+    heat and volume branches).  Sign: positive wfx/sfx = mass/salt INTO the
+    ocean; hfx = -(removed enthalpy content)/dt (NEMO "W.m-2 <0").  ``dt_s``
+    is NEMO's ``pdt = rDt_ice`` (the full ice step, also under subcycling).
+    The ledgers are zero outside the inner domain (NEMO adds DO_2D(0,0,0,0)
+    only).  Default output (corrected contents only) is unchanged.
     """
+
+    if return_residual_fluxes and dt_s is None:
+        raise ValueError("return_residual_fluxes requires dt_s (NEMO rDt_ice)")
+    z1_dt = 0.0 if dt_s is None else 1.0 / dt_s
 
     # Hbig_pra receives the already-restored intensive pv_i/pv_s/pa_i/... at
     # icedyn_adv_pra.F90:405-408.  Keep the extensive mode for the rung-3.2
@@ -455,6 +480,9 @@ def apply_si3_prather_source_corrections(
 
     contents = transported_contents
     v_i = intensive(contents, "v_i")
+    wfx_res = jnp.zeros(contents.shape[:2], dtype=contents.dtype)
+    hfx_res = jnp.zeros_like(wfx_res)
+    sfx_res = jnp.zeros_like(wfx_res)
     v_s = intensive(contents, "v_s")
     a_i = intensive(contents, "a_i")
     a_ip = intensive(contents, "a_ip")
@@ -485,6 +513,13 @@ def apply_si3_prather_source_corrections(
     snow_correct = (v_s > 0.0) & (h_s > h_s_max) & (a_i < _ICE_ADV2D_HBIG_CONCENTRATION)
     snow_fraction = jnp.where(snow_correct, ratio(h_s_max, h_s, snow_correct), 1.0)
     corrected_v_s = a_i * h_s_max
+    snow_enthalpy = sum(intensive(contents, name) for name in snow_layers)
+    wfx_res = wfx_res + jnp.where(
+        snow_correct, (v_s - corrected_v_s) * constants.rho_snow * z1_dt, 0.0
+    )
+    hfx_res = hfx_res - jnp.where(
+        snow_correct, snow_enthalpy * (1.0 - snow_fraction) * z1_dt, 0.0
+    )
     contents = contents.at[..., index("v_s")].set(
         jnp.where(
             snow_correct,
@@ -513,6 +548,11 @@ def apply_si3_prather_source_corrections(
         contents = contents.at[..., index(name)].set(
             jnp.where(correct, corrected * area, contents[..., index(name)])
         )
+        sfx_res = sfx_res + jnp.where(
+            correct,
+            value * (1.0 - ratio(cap, specific, correct)) * constants.rho_ice * z1_dt,
+            0.0,
+        )
     for name in ice_layers:
         entry_specific = ratio(
             intensive(entry_contents, name), entry_v_i, entry_v_i >= _ICE_ADV2D_SMALL
@@ -524,6 +564,9 @@ def apply_si3_prather_source_corrections(
         corrected = ratio(value * cap, specific, correct)
         contents = contents.at[..., index(name)].set(
             jnp.where(correct, corrected * area, contents[..., index(name)])
+        )
+        hfx_res = hfx_res - jnp.where(
+            correct, value * (1.0 - ratio(cap, specific, correct)) * z1_dt, 0.0
         )
     for name in snow_layers:
         entry_specific = ratio(
@@ -537,6 +580,9 @@ def apply_si3_prather_source_corrections(
         contents = contents.at[..., index(name)].set(
             jnp.where(correct, corrected * area, contents[..., index(name)])
         )
+        hfx_res = hfx_res - jnp.where(
+            correct, value * (1.0 - ratio(cap, specific, correct)) * z1_dt, 0.0
+        )
 
     # Hsnow_pra (:1115-1133): bound snow loading and pond area.
     snow_capacity = v_i * (constants.rho_ocean_nemo - constants.rho_ice) / constants.rho_snow
@@ -544,6 +590,11 @@ def apply_si3_prather_source_corrections(
     has_excess = excess > 0.0
     fraction = jnp.where(v_s > 0.0, ratio(v_s - excess, v_s, v_s > 0.0), 1.0)
     corrected_v_s = v_s - excess
+    snow_enthalpy = sum(intensive(contents, name) for name in snow_layers)
+    wfx_res = wfx_res + jnp.where(has_excess, excess * constants.rho_snow * z1_dt, 0.0)
+    hfx_res = hfx_res - jnp.where(
+        has_excess, snow_enthalpy * (1.0 - fraction) * z1_dt, 0.0
+    )
     contents = contents.at[..., index("v_s")].set(
         jnp.where(
             has_excess,
@@ -580,12 +631,17 @@ def apply_si3_prather_source_corrections(
     for name in salt_layers + ice_layers:
         value = intensive(contents, name)
         invalid = (value < 0.0) | invalid_ice
+        if name in salt_layers:
+            sfx_res = sfx_res + jnp.where(invalid, value * constants.rho_ice * z1_dt, 0.0)
+        else:
+            hfx_res = hfx_res - jnp.where(invalid, value * z1_dt, 0.0)
         contents = contents.at[..., index(name)].set(
             jnp.where(invalid, 0.0, contents[..., index(name)])
         )
     for name in snow_layers:
         value = intensive(contents, name)
         invalid = (value < 0.0) | (a_i <= 0.0) | (v_s <= 0.0)
+        hfx_res = hfx_res - jnp.where(invalid, value * z1_dt, 0.0)
         contents = contents.at[..., index(name)].set(
             jnp.where(invalid, 0.0, contents[..., index(name)])
         )
@@ -598,6 +654,14 @@ def apply_si3_prather_source_corrections(
     v_ip = intensive(contents, "v_ip")
     v_il = intensive(contents, "v_il")
     invalid_pond = (v_ip < 0.0) | (a_ip <= 0.0)
+    # icevar.F90 zapneg volume branch order: v_i, v_s, v_il, v_ip.
+    for value, invalid, density in (
+        (v_i, invalid_v_i, constants.rho_ice),
+        (v_s, invalid_v_s, constants.rho_snow),
+        (v_il, invalid_pond | (v_il < 0.0), constants.rho_water),
+        (v_ip, invalid_pond, constants.rho_water),
+    ):
+        wfx_res = wfx_res + jnp.where(invalid, value * density * z1_dt, 0.0)
     for name, invalid in (
         ("v_i", invalid_v_i),
         ("v_s", invalid_v_s),
@@ -612,7 +676,16 @@ def apply_si3_prather_source_corrections(
     # NEMO corrects physical cells, then lbc_lnk refreshes the bi-periodic
     # halos (`icedyn_adv_pra.F90:405-479`).  Never feed independently corrected
     # halo values into the next split step.
-    return _periodic_halo(contents, halo_width)
+    corrected = _periodic_halo(contents, halo_width)
+    if not return_residual_fluxes:
+        return corrected
+    inner = jnp.zeros(wfx_res.shape, dtype=bool)
+    inner = inner.at[halo_width:-halo_width, halo_width:-halo_width].set(True)
+    return corrected, SI3PratherResidualFluxes(
+        wfx_res=jnp.where(inner, wfx_res, 0.0),
+        hfx_res=jnp.where(inner, hfx_res, 0.0),
+        sfx_res=jnp.where(inner, sfx_res, 0.0),
+    )
 
 
 def apply_ice_adv2d_source_corrections(

@@ -1534,6 +1534,7 @@ def era5_to_cubedsphere_carry(
     target_phis,
     microphysics: str = "none",
     turbulence: str = "none",
+    ice_skin_prognostic: bool = False,
 ):
     """Convert ERA5 slice to SegmentCarry on a cubed-sphere grid.
 
@@ -1678,6 +1679,9 @@ def era5_to_cubedsphere_carry(
         held_lw_up_toa=olr_m,
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
+        # Prognostic ice skin seeded like a restart without one (#2106).
+        ice_T_skin=(jnp.full(shape_2d, constants.T_freeze_ocean)
+                    if ice_skin_prognostic else None),
         **_with_ice(prognostic_carry_seeds(microphysics, turbulence, shape_3d),
                     q_i_model),
     )
@@ -1720,6 +1724,7 @@ def era5_to_latlon_carry(
     target_phis,
     microphysics: str = "none",
     turbulence: str = "none",
+    ice_skin_prognostic: bool = False,
 ):
     """Convert ERA5 slice to a SegmentCarry on the lat-lon C-grid.
 
@@ -1825,6 +1830,9 @@ def era5_to_latlon_carry(
         held_lw_up_toa=olr_m,
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
+        # Prognostic ice skin seeded like a restart without one (#2106).
+        ice_T_skin=(jnp.full(shape_2d, constants.T_freeze_ocean)
+                    if ice_skin_prognostic else None),
         **_with_ice(prognostic_carry_seeds(microphysics, turbulence, shape_3d),
                     q_i_model),
     )

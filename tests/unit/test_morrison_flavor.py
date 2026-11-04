@@ -35,8 +35,8 @@ def test_mg_flavor_overrides_match_e3sm():
     assert mg.rho_snow == 250.0                          # rhosn
     assert mg.fall_b_i == 1.0                            # bi
     assert mg.ice_to_snow_scheme == "mg_ferrier"
-    # warm rain + ice deposition already MG-faithful in both flavors
-    assert mg.warm_rain_scheme == "kk2000"
+    # an unset warm-rain law resolves to the CAM6 MG2 law under mg
+    assert mg.warm_rain_scheme == "kk2000_cam6"
     assert mg.ice_deposition_scheme == "m2005"
 
 

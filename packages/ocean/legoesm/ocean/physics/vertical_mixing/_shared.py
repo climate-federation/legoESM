@@ -18,6 +18,7 @@ from legoesm.ocean.eos import (
     thermal_expansion_coeff,
     haline_contraction_coeff,
     eos_density_derivatives,
+    wright_eos,
 )
 
 # EOS salinity floor [PSU] for the generic-EOS surface α/β autodiff path.
@@ -26,6 +27,15 @@ from legoesm.ocean.eos import (
 # before differentiating.  Matches tke.compute_surface_buoyancy_P_diss_v.  Ocean
 # S ≫ floor, so this is a no-op on wet cells.
 _EOS_SALINITY_FLOOR = 1.0e-3
+
+
+def eos_salinity(S, eos_fn):
+    """Salinity to hand an EOS autodiff: floored at ``_EOS_SALINITY_FLOOR``
+    unless the EOS is Wright (``None`` or ``wright_eos``), which has no
+    sqrt(S) term and stays bit-identical."""
+    if eos_fn is None or eos_fn is wright_eos:
+        return S
+    return jnp.maximum(S, _EOS_SALINITY_FLOOR)
 
 # Shared float32-eps floor for the vertical-mixing kernels.
 _EPS = float(jnp.finfo(jnp.float32).eps)
@@ -317,6 +327,7 @@ def avm_weighted_shear_production(
     *,
     face_metrics: tuple[jnp.ndarray, jnp.ndarray,
                         jnp.ndarray, jnp.ndarray] | None = None,
+    kappa_north_v: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""NEMO ``zdf_sh2`` shear-PRODUCTION term ``p_sh2`` with the viscosity
     face-averaged INSIDE the face sum, exactly as ``zdfsh2.F90:80-94``
@@ -364,6 +375,8 @@ def avm_weighted_shear_production(
     ----------
     u_face_now, v_face_now, u_face_before, v_face_before, dz_half, u_mask,
     v_mask : as :func:`vertical_shear_face_native`.
+    kappa_north_v : optional ``(n_lon, nlev-1)`` viscosity north of the top
+        V face (a T-pivot fold image); None keeps the edge-repeat.
     kappaM_T : ``(n_lat, n_lon, nlev-1)`` — T-point (single per-interface)
         viscosity — face-summed here via array rolls, matching NEMO's
         ``avm(ji+1,jj,jk)+avm(ji,jj,jk)`` exactly; NOT new staggered state.
@@ -431,6 +444,9 @@ def avm_weighted_shear_production(
     kM_face_u = kM_left_u + kM_right_u          # (n_lat, n_lon+1, nlev-1)
     kM_left_v = jnp.concatenate([kappaM_T[:1, :, :], kappaM_T], axis=0)
     kM_right_v = jnp.concatenate([kappaM_T, kappaM_T[-1:, :, :]], axis=0)
+    if kappa_north_v is not None:
+        # north-fold top face: NEMO's avm_k(ji,jj+1) is the fold image row
+        kM_right_v = kM_right_v.at[-1].set(kappa_north_v)
     kM_face_v = kM_left_v + kM_right_v          # (n_lat+1, n_lon, nlev-1)
 
     if face_metrics is None:
@@ -715,6 +731,7 @@ def surface_buoyancy_flux(
     c_sw: float,
     real_salt_in_qs: bool,
     eos_fn=None,
+    rho_0_norm: bool = False,
 ):
     """Surface buoyancy flux ``B_f`` [m^2/s^3] (>0 destabilising) + the kinematic
     surface heat / salt fluxes for the KPP / CATKE boundary-layer closures.
@@ -758,6 +775,10 @@ def surface_buoyancy_flux(
         constant source (``constants_config`` for lat-lon, module constants for
         MPAS; both equal the canonical values by default).
     real_salt_in_qs : see above.
+    rho_0_norm : ``False`` (KPP / CATKE): ``alpha``/``beta`` divide the EOS
+        derivatives by the surface density ``rho(T, S, 0)``.  ``True`` (ePBL):
+        divide by ``rho_0`` instead, MOM6's ``calculateBuoyancyFlux1d`` form
+        (``GoRho = g / Rho0``).
 
     Returns
     -------
@@ -773,7 +794,20 @@ def surface_buoyancy_flux(
     # different surface α/β, so the KPP/CATKE surface buoyancy forcing must use
     # it (else the boundary layer mixes against Wright while the interior
     # ρ/N²/Ri use S-EOS — a half-applied closure).
-    if eos_fn is None:
+    if rho_0_norm:
+        fn = wright_eos if eos_fn is None else eos_fn
+        # Same salinity floor as the generic-EOS path below; none for Wright
+        # (given or defaulted), so a run passing wright_eos stays bit-identical.
+        S_eval = eos_salinity(S_sfc, fn)
+
+        def _alpha_sfc():
+            drho_dT, _ = eos_density_derivatives(fn, T_sfc, S_eval, p_sfc)
+            return -drho_dT / rho_0
+
+        def _beta_sfc():
+            _, drho_dS = eos_density_derivatives(fn, T_sfc, S_eval, p_sfc)
+            return drho_dS / rho_0
+    elif eos_fn is None:
         def _alpha_sfc():
             return thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
 
@@ -782,7 +816,9 @@ def surface_buoyancy_flux(
     else:
         # Floor salinity before the EOS-generic autodiff (sqrt(S) EOSes diverge
         # at S=0 land cells; later masking is a multiply ⇒ 0·NaN unsafe).
-        S_eval = jnp.maximum(S_sfc, _EOS_SALINITY_FLOOR)
+        # Wright passed explicitly is not floored, so it matches None bit for
+        # bit, also below the floor (#2243).
+        S_eval = eos_salinity(S_sfc, eos_fn)
 
         def _alpha_sfc():
             drho_dT, _ = eos_density_derivatives(eos_fn, T_sfc, S_eval, p_sfc)

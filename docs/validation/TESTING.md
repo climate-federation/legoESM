@@ -252,9 +252,65 @@ mpi-nightly,claude-code-review}.yml`).
 4. **New machine** → add `config/machines/<name>.yaml` with `hostnames` patterns.
 5. **New dataset** → add it to `config/data_catalog.yaml`.
 
+## Running CI's test jobs locally
+
+`pytest tests/` collects about 58,000 tests. That is far more than CI runs, and it
+can take most of a day on a laptop. To check a change against what CI checks, run
+the test steps of `.github/workflows/ci.yml` directly. Use the precision each job
+sets: the unit tier and the restart and integration smoke jobs do not set
+`JAX_ENABLE_X64` (but hundreds of unit modules, e.g. `test_zarr_checkpoint.py`,
+enable x64 at import, so a full unit run executes with x64 on); the Fortran-fidelity
+job (top-level tests, SFNO restart, FV3 native grid) and the visual-regression job
+set `JAX_ENABLE_X64=1`.
+
+```bash
+export JAX_PLATFORMS=cpu   # needed on Apple Silicon when the mps extra is installed
+
+# unit-tests (no JAX_ENABLE_X64; x64 still switches on at collection)
+.venv/bin/python -m pytest tests/unit/ --timeout=300 \
+    -k "not test_coupler_with_3d_ocean_fc_gram" --tb=short -q
+
+# top-level-fidelity-tests (x64)
+JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/test_*.py --timeout=300 \
+    --tb=short -q -n 4 --dist loadfile
+
+# SFNO restart tests (CI runs them in their own x64 step)
+JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/unit/test_sfno_refuses_latlon_start.py \
+    tests/unit/test_latlon_face_wind_restart.py --timeout=600 --tb=short -q
+
+# restart-smoke
+.venv/bin/python -m pytest tests/unit/test_cmor_experiments_restart.py \
+    tests/unit/test_zarr_checkpoint.py -v --tb=short
+
+# integration-smoke
+.venv/bin/python -m pytest tests/atmosphere/ --timeout=600 \
+    -k "test_williamson or test_held_suarez" --tb=short -q
+```
+
+`ci.yml` also runs the FV3 native-grid files under x64, plus `ruff` and `lint-imports`.
+Copy those commands from the workflow. The unit and integration steps in `ci.yml` add
+`-x`. They are shown here without it, so you see every failure instead of the first.
+
+Rough wall-clock times on a 10-core Apple M5 (CPU, 2026-10):
+
+| Job | Tests | Time |
+|---|---|---|
+| unit-tests (`-n 8 --dist loadfile`) | ~17,000 | 2 h 40 min |
+| top-level-fidelity-tests (`-n 4`) | ~17,600 | 8 min |
+| FV3 native grid + swcore | ~110 | 2 min |
+| restart-smoke | ~95 | 10 s |
+| integration-smoke | ~66 | 2 min |
+
+`--timeout=300` is per test. Under `-n 8`, CPU contention pushes some tests over it
+that pass when run alone (37 of 50 timeouts in the run above). Re-run timeouts one at
+a time before treating them as failures.
+
 ## Conventions
 
-- CPU only on Apple Silicon (`JAX_PLATFORMS=cpu`; the Metal backend is broken).
+- Apple Silicon: installing the `mps` extra makes the Apple GPU (`jax-mps`) JAX's
+  default device. It is fp32 only and single-device, so set `JAX_PLATFORMS=cpu` for
+  tests and anything x64. (`jax-metal`, which this note used to call broken, was
+  removed in #668.)
 - `JAX_ENABLE_X64=1` for scientific/conservation tests unless explicitly fp32/Metal.
 - The CI **unit tier runs fp32-by-default** (no job-wide `JAX_ENABLE_X64`); unit
   tests that need x64 self-enable it at module scope. The x64 CI jobs are

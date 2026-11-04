@@ -148,12 +148,13 @@ def test_silent_no_op_paths_refuse():
     refuse_cap_floor_on_fv(cfg("cubed_sphere", "finite_volume", on=False))
     refuse_cap_floor_on_fv(cfg("mpas", "finite_volume"))
 
-    # ModelDriver.run itself: the gate is its first statement, so a stub whose
-    # next call raises a sentinel shows whether the gate let the lane through.
+    # ModelDriver.run itself: the gate runs right after the export-consumed
+    # check, so a stub whose next call raises a sentinel shows whether the gate
+    # let the lane through.
     class _Entered(Exception):
         pass
     def run_with(config):
-        stub = SimpleNamespace(config=config)
+        stub = SimpleNamespace(config=config, _mpas_step_exported=False)
         stub._reject_shallow_water_unrunnable = lambda: (_ for _ in ()).throw(_Entered())
         return ModelDriver.run(stub)
     with pytest.raises(_Entered):                     # MPAS + floor on: proceeds

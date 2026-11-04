@@ -16,6 +16,7 @@ from legoesm.training.param_collector import (
     _resolve_shape,
     _seed_raw,
     build_registry,
+    build_orca2_rung10_trainable_params,
     build_trainable_params,
 )
 from legoesm.core.param_overrides import apply_param_overrides
@@ -306,3 +307,150 @@ def test_as_dict_respects_declared_finite_bounds() -> None:
                 f"{name} ({transform}) -> {arr.reshape(-1)[:3]} escaped declared "
                 f"bounds [{lo}, {hi}] at raw={sign:+}e4"
             )
+
+
+@pytest.mark.parametrize("cfg_kw,expect", [
+    (None, 500.0e-6),                                   # class default (mg)
+    ({"morrison_flavor": "mg"}, 500.0e-6),
+    ({"morrison_flavor": "sam"}, 250.0e-6),
+    ({"morrison_flavor": "sam", "ice_snow_d_auto": 300.0e-6}, 300.0e-6),
+])
+def test_unset_dcs_seed_follows_the_run_flavour(cfg_kw, expect) -> None:
+    """The trainable Morrison DCS starts where the run's scheme resolves it:
+    500 um under mg, 250 um under sam, an explicit value as given (the same
+    resolver as resolve_morrison_flavor)."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    key = "atm.micro.MorrisonConfig"
+    p = build_trainable_params(
+        tier="extended", active_scheme_keys={key},
+        scheme_configs=None if cfg_kw is None else {key: MorrisonConfig(**cfg_kw)})
+    np.testing.assert_allclose(
+        float(p.as_dict()[f"{key}.ice_snow_d_auto"]), expect, rtol=1e-5)
+
+
+def test_scheme_configs_refuses_wrong_type_and_unreached_scheme() -> None:
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MorrisonConfig, ThompsonConfig)
+    key = "atm.micro.MorrisonConfig"
+    with pytest.raises(TypeError, match="not the MorrisonConfig"):
+        build_trainable_params(tier="extended", active_scheme_keys={key},
+                               scheme_configs={key: ThompsonConfig()})
+    with pytest.raises(ValueError, match="reached no trainable"):
+        build_trainable_params(
+            tier="extended", active_scheme_keys={key},
+            scheme_configs={key: MorrisonConfig(),
+                            "atm.micro.ThompsonConfig": ThompsonConfig()})
+
+
+def test_wrong_config_type_refused_even_when_dcs_not_seeded() -> None:
+    from legoesm.atmosphere.physics.microphysics.config import ThompsonConfig
+    key = "atm.micro.MorrisonConfig"
+    with pytest.raises(TypeError, match="not the MorrisonConfig"):
+        build_trainable_params(tier="extended", active_scheme_keys={key},
+                               exclude=(f"{key}.ice_snow_d_auto",),
+                               scheme_configs={key: ThompsonConfig()})
+
+
+def test_wb_aimip_bundle_seeds_dcs_from_the_deck_pins() -> None:
+    """scale_build's run config: a deck pinning the sam flavour seeds 250 um."""
+    from legoesm.training.scale_build import _pinned_morrison_config
+    key = "atm.micro.MorrisonConfig"
+    for pins, expect in (({}, 500.0e-6), ({"morrison_flavor": "sam"}, 250.0e-6)):
+        p = build_trainable_params(
+            tier="extended", active_scheme_keys={key},
+            scheme_configs=_pinned_morrison_config({key}, {key: pins}))
+        np.testing.assert_allclose(
+            float(p.as_dict()[f"{key}.ice_snow_d_auto"]), expect, rtol=1e-5)
+    assert _pinned_morrison_config({"atm.micro.KesslerConfig"}, {}) is None
+
+
+def test_unresolvable_unset_dcs_is_a_clear_error() -> None:
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    key = "atm.micro.MorrisonConfig"
+    with pytest.raises(ValueError, match="resolver gives no value"):
+        build_trainable_params(
+            tier="extended", active_scheme_keys={key},
+            scheme_configs={key: MorrisonConfig(morrison_flavor="other")})
+
+
+_GM_REDI_KEY = "ocean.lat.gm_redi"
+_RN_UD = f"{_GM_REDI_KEY}.kappa_redi_diffusive_velocity"
+_KAPPA_REDI = f"{_GM_REDI_KEY}.kappa_Redi"
+_ORCA2_RN_UD = 0.018
+
+
+def test_explicit_only_registry_keeps_unset_rn_ud_out_of_every_tier() -> None:
+    reg = {m.qualified_name: m for m in build_registry()}
+    ud = reg[_RN_UD]
+    assert ud.explicit_only and ud.default is None
+    for tier in ("core", "extended", "aggressive"):
+        names = {c.name for c in build_trainable_params(
+            tier=tier, dtype=jnp.float64).constraints}
+        assert _RN_UD not in names
+    assert _KAPPA_REDI in names  # proves the GM/Redi tier path was live
+
+
+def test_explicit_only_request_with_start_value_returns_rn_ud() -> None:
+    params = build_trainable_params(
+        active_scheme_keys={_GM_REDI_KEY}, tier=0, include=(_RN_UD,),
+        init_values={_RN_UD: _ORCA2_RN_UD}, dtype=jnp.float64)
+    assert [c.name for c in params.constraints] == [_RN_UD]
+    np.testing.assert_allclose(
+        float(params.as_dict()[_RN_UD]), _ORCA2_RN_UD, rtol=1e-12)
+
+
+def test_explicit_only_request_without_start_value_is_refused() -> None:
+    with pytest.raises(ValueError, match="explicit_only"):
+        build_trainable_params(
+            active_scheme_keys={_GM_REDI_KEY}, tier="extended",
+            include=(_RN_UD,), dtype=jnp.float64)
+    with pytest.raises(ValueError, match="explicit_only"):
+        build_trainable_params(
+            active_scheme_keys={_GM_REDI_KEY}, tier="extended",
+            include=(_RN_UD,), init_values={_KAPPA_REDI: 1000.0},
+            dtype=jnp.float64)
+
+
+def test_explicit_only_request_that_is_inactive_or_excluded_is_refused() -> None:
+    with pytest.raises(ValueError, match="not reachable"):
+        build_trainable_params(
+            active_scheme_keys={"ocean.lat.visbeck"}, tier=0,
+            include=(_RN_UD,), init_values={_RN_UD: _ORCA2_RN_UD},
+            dtype=jnp.float64)
+    with pytest.raises(ValueError, match="both requested.*excluded"):
+        build_trainable_params(
+            active_scheme_keys={_GM_REDI_KEY}, tier=0, include=(_RN_UD,),
+            exclude=(_RN_UD,), init_values={_RN_UD: _ORCA2_RN_UD},
+            dtype=jnp.float64)
+
+
+def test_orca2_rung10_builder_refuses_every_explicit_frozen_request() -> None:
+    """The ORCA2 wrapper, not only the generic collector, owns the freeze."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        ORCA2_RUNG10_FROZEN_PARAMS,
+    )
+
+    frozen = next(iter(ORCA2_RUNG10_FROZEN_PARAMS))
+    for kwargs in (
+        {"include": (frozen,)},
+        {"include_tier0": (frozen,)},
+        {"init_values": {frozen: 1.0}},
+    ):
+        with pytest.raises(ValueError, match="frozen on ORCA2 rung 10"):
+            build_orca2_rung10_trainable_params(**kwargs)
+
+
+def test_orca2_rung10_builder_excludes_frozen_but_keeps_explicit_rn_ud() -> None:
+    """The wrapper delegates the live selection after adding its exclusions."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        ORCA2_RUNG10_FROZEN_PARAMS,
+    )
+
+    params = build_orca2_rung10_trainable_params(
+        active_scheme_keys={_GM_REDI_KEY}, tier=0, include=(_RN_UD,),
+        init_values={_RN_UD: _ORCA2_RN_UD}, dtype=jnp.float64)
+    names = {c.name for c in params.constraints}
+    assert names == {_RN_UD}
+    assert names.isdisjoint(ORCA2_RUNG10_FROZEN_PARAMS)
+    np.testing.assert_allclose(
+        float(params.as_dict()[_RN_UD]), _ORCA2_RN_UD, rtol=1e-12)

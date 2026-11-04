@@ -1,0 +1,48 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -20,6 +20,8 @@
+    !!----------------------------------------------------------------------
+    USE step_oce       ! time stepping used modules
+    USE eosbn2, ONLY : eos_l2_dump_next ! config-local WRITE-only lane-2 instrument
++   USE gyre_r14_budget, ONLY : r14_begin, r14_after_hpg, r14_after_vor, &
++      & r14_after_ldf, r14_finish
+    USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
+    USE bdydyn         ! ocean open boundary conditions (define bdy_dyn)
+    USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
+@@ -362,6 +364,7 @@
+          CASE ( 2 , 3 )    !==  Stage 2 & 3  ==!
+             !              !-------------------!   Vector Inv. Form : HPG + VOR (COR+RVO) +ADV (KEG +ZAD)
+             !
++            IF( kstg == 3 ) CALL r14_begin( kstp, vv(:,:,1,Kbb) )
+             !                             !*  hydrostatic pressure gradient (HPG))  *!   always called FIRST
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 ) THEN
+                l1_filename = 'oracle_rkstage2_terms_kt00000001.bin'
+@@ -393,10 +396,12 @@
+                WRITE(numout,*) 'L2_STAGE2_HPG_OPERAND_DUMP ', kstp, Kmm, TRIM(l1_filename)
+             ENDIF
+             CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )  ! Hydrostratic Pressure Gradient (HPG)
++            IF( kstg == 3 ) CALL r14_after_hpg( vv(:,:,1,Krhs) )
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 )   WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+             !
+             !                             !* Coriolis / vorticity       ==> 3D RHS
+             CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )
++            IF( kstg == 3 ) CALL r14_after_vor( vv(:,:,1,Krhs) )
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 )   WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+             !
+             !                             !* advection (VIF or FF)      ==> 3D RHS
+@@ -491,6 +496,7 @@
+             !                  !*  complete the momentum RHS *!   except ZDF (implicit)
+             !
+                                CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )     ! lateral mixing
++            CALL r14_after_ldf( vv(:,:,1,Krhs) )
+             !
+             IF( ln_zdfosm  )   CALL dyn_osm( kstp,      Kmm, uu, vv, Krhs )     ! OSMOSIS non-local velocity fluxes
+             !
+@@ -552,6 +558,7 @@
+             uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)
+             vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)
+          END_3D
++         IF( kstg == 3 ) CALL r14_finish( kstp, rDt, vv(:,:,1,Kaa) )
+          IF( lwp .AND. kstp == nit000 .AND. kstg == 2 ) THEN
+             WRITE(l1_unit) uu(:,:,:,Kaa), vv(:,:,:,Kaa)
+             CLOSE(l1_unit)

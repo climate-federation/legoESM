@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.grids.gaussian import (
@@ -260,13 +261,17 @@ class TestSpectralPECMT:
         zeros = jnp.zeros((grid.n_lat, grid.n_lon, sigma_coord.n_levels))
         q_v = Field(data=zeros, name="q_v", dims=("lat", "lon", "level"), units="kg/kg")
         q_c = Field(data=zeros, name="q_c", dims=("lat", "lon", "level"), units="kg/kg")
+        from tests._zm_cold_start import cold_phys_state
+        ps = cold_phys_state(zeros)  # ZM needs the carried pblh: CAM cold start
         tendencies, _ = physics_fn(
-            _state_with_tracers(rest_state, {"q_v": q_v, "q_c": q_c}), grid, sigma_coord)
+            _state_with_tracers(rest_state, {"q_v": q_v, "q_c": q_c}), grid, sigma_coord,
+            phys_state=ps)
         assert set(tendencies.tracers) == {"q_v", "q_c"}
         for k in ("q_v", "q_c"):
             assert bool(jnp.all(jnp.isfinite(tendencies.tracers[k].data)))
         with pytest.raises(ValueError, match="must carry both tracers"):
-            physics_fn(_state_with_tracers(rest_state, {"q_v": q_v}), grid, sigma_coord)
+            physics_fn(_state_with_tracers(rest_state, {"q_v": q_v}), grid, sigma_coord,
+                       phys_state=ps)
 
     def test_tiedtke_with_cape_and_winds_yields_nonzero_cmt(
         self, grid, sigma_coord, rest_state,
@@ -633,14 +638,10 @@ class TestSpectralPECMT:
 def profile_scheme_config(request):
     """Yield a (name, ConvectionConfig) pair for each new scheme."""
     name, scheme_field, scheme_cls = request.param
-    # #929: this dispatch / finite-output regression shares one condensate-less
-    # (``q_v``-only) spectral state across all five schemes.  Default Bechtold
-    # now emits an in-updraft rain split (``precip_efficiency=0.7``) that the
-    # spectral bridge REQUIRES a ``q_c``/``q_r`` tracer to receive — otherwise
-    # it raises loudly rather than silently leaking the un-booked rain water.
-    # Pin ``precip_efficiency=0.0`` here so Bechtold exercises its pre-#929
-    # no-split dispatch path on this condensate-less state; the rain-split
-    # routing and the raise are covered by
+    # #929: the spectral bridge raises whenever a scheme emits a rain-split
+    # field (even all-zero), so the shared state carries a zero ``q_c`` tracer
+    # to receive it.  ``precip_efficiency=0.0`` pins Bechtold's no-split
+    # amount; the rain-split routing and the raise are covered by
     # ``test_convection_rain_split_bridges.py``.
     if scheme_cls is BechtoldConfig:
         kwargs = {scheme_field: scheme_cls(precip_efficiency=0.0)}
@@ -681,9 +682,14 @@ class TestSpectralPEAllProfileSchemes:
             data=q_v_grid, name="q_v",
             dims=("lat", "lon", "level"), units="kg/kg",
         )
+        # q_c receives the convective rain split (#929 raises without one).
+        q_c_field = Field(
+            data=jnp.zeros_like(q_v_grid), name="q_c",
+            dims=("lat", "lon", "level"), units="kg/kg",
+        )
         return rest_state._replace(
             T_hat=rest_state.T_hat.replace(data=T_hat),
-            tracers={"q_v": q_v_field},
+            tracers={"q_v": q_v_field, "q_c": q_c_field},
         )
 
     def test_bridge_call_succeeds(
@@ -752,3 +758,47 @@ class TestSpectralPEAllProfileSchemes:
         tend, _ = physics_fn(state, grid, sigma_coord)
         # And the resulting T tendency must be finite (no NaN).
         assert bool(jnp.all(jnp.isfinite(tend.T_hat.data)))
+
+
+class TestSpectralRainToSurface:
+    """``rain_to_surface`` on the spectral bridge: a mass-flux scheme's survivor
+    rain leaves the column (the bridge's existing surface route) instead of
+    entering q_r, where the microphysics would evaporate it a second time.
+    The kernel's ``dq_r_conv_dt`` is overridden with a fixed positive profile
+    (spy) so the rain source is known exactly."""
+
+    def _run(self, grid, sigma_coord, rest_state, flag):
+        from legoesm.atmosphere.physics.convection import integration as ci
+        shape = (grid.n_lat, grid.n_lon, sigma_coord.n_levels)
+        dq_r = jnp.full((grid.n_lat * grid.n_lon, sigma_coord.n_levels), 2.0e-7)
+        real = ci.bechtold_convection
+
+        def spy(*a, **k):
+            out, m_u, stoch = real(*a, **k)
+            return out._replace(dq_r_conv_dt=dq_r), m_u, stoch
+
+        zeros = jnp.zeros(shape)
+        tracers = {n: Field(data=zeros, name=n, dims=("lat", "lon", "level"), units="kg/kg")
+                   for n in ("q_v", "q_c", "q_r")}
+        ci.bechtold_convection = spy
+        try:
+            fn = make_convection_physics(
+                ConvectionConfig(scheme="bechtold", rain_to_surface=flag),
+                model_type="spectral_pe", dt=300.0)
+            tend, _ = fn(_state_with_tracers(rest_state, tracers), grid, sigma_coord)
+        finally:
+            ci.bechtold_convection = real
+        return tend, np.asarray(dq_r).reshape(shape)
+
+    def test_flag_off_hands_the_rain_to_q_r(self, grid, sigma_coord, rest_state):
+        tend, dq_r = self._run(grid, sigma_coord, rest_state, False)
+        np.testing.assert_array_equal(np.asarray(tend.tracers["q_r"].data), dq_r)
+
+    def test_flag_on_sends_the_rain_out_of_the_column(self, grid, sigma_coord, rest_state):
+        off, _ = self._run(grid, sigma_coord, rest_state, False)
+        on, _ = self._run(grid, sigma_coord, rest_state, True)
+        if "q_r" in on.tracers:
+            assert float(jnp.max(jnp.abs(on.tracers["q_r"].data))) == 0.0
+        for k in ("q_v", "q_c"):
+            np.testing.assert_array_equal(np.asarray(on.tracers[k].data),
+                                          np.asarray(off.tracers[k].data))

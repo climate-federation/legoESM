@@ -70,6 +70,27 @@ class TurbulenceOutput(NamedTuple):
         NOT feed the tendencies (those come from the flux DIVERGENCE / implicit solve)
         and so cannot change any run. Consumed only by the LES-suite Q1 diagnostic
         score (``les_suite`` compares it to the LES flux at the LES mean state).
+    relvar : jax.Array or None
+        Optional CAM6 relative cloud-water variance ``rcm**2/qclvar`` [-] for
+        MG2 (``clubb_intr.F90:2416-2425``), shape (ncol, nlev).  Produced only
+        by prognostic CLUBB with the liquid partition; ``None`` otherwise.
+    Kh_iface : jax.Array or None
+        Heat eddy diffusivity [m^2/s] on ALL ``nlev+1`` interfaces, top-first,
+        shape (ncol, nlev+1): the interface values the scheme itself used in its
+        vertical-diffusion solve, with zero at the model-top and surface
+        interfaces (CAM6's ``kvh`` convention for non-CLUBB schemes).  Prognostic
+        CLUBB exports its ``Kh_zm`` of the final sub-step on every interface,
+        surface included (CAM6 clubb_intr ``khzm``); CAM's zeroing above
+        ``top_lev`` is left to the consumer.  ``None`` for schemes that compute
+        their diffusivity on full levels only (tke, edmf, clubb_lite) and for
+        diagnostic CLUBB.  Not read by any tendency; it is the input CAM6 droplet
+        activation needs.
+    wp2_iface : jax.Array or None
+        Vertical-velocity variance ``w'^2`` [m^2/s^2] on the ``nlev+1``
+        interfaces, top-first, shape (ncol, nlev+1): prognostic CLUBB's moments at
+        the end of the final sub-step (what CAM6 leaves in ``WP2_nadv`` for
+        ``microp_aero``).  ``None`` for every other scheme.  Not read by any
+        tendency.
     """
     du_dt: jax.Array
     dv_dt: jax.Array
@@ -88,3 +109,6 @@ class TurbulenceOutput(NamedTuple):
     # positive up]: the prescribed tile water or lhflx / L_v(T_sfc).  The water
     # ledgers and CMOR evspsbl read THIS, never lhflx / L_v.
     evap_sfc: jax.Array | None = None
+    relvar: jax.Array | None = None
+    Kh_iface: jax.Array | None = None
+    wp2_iface: jax.Array | None = None

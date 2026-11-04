@@ -1,10 +1,13 @@
 """Generate tests/atmosphere/oracle_fixtures/rrtmgp_lw_sfc_face.npz.
 
-Oracle: RTE+RRTMGP v1.8 (compute_Planck_source in mo_gas_optics_rrtmgp_kernels.F90),
-given tlev from the CAM6 host convention (rrtmg_state.F90: log-p interpolation between
-layer midpoints, lid = top-layer temperature).  The surface interface is set to T_sfc;
-CAM6 uses (lwup/stebol)**0.25, which equals T_sfc only for a unit-emissivity surface
-(for the emissivity-0.98 RFMIP columns T_b - T_sfc = -0.2..-0.6 K).
+Oracles, both RUN: (1) CAM cam_cesm2_1_rel_60 rrtmg_state.F90 (rrtmg_state_init +
+rrtmg_state_create, compiled unmodified against cime5.6.47 shr_kind/shr_const and
+cam_stubs.F90; build_cam_state.sh, cam_state_driver.F90) gives the CAM6 host level
+temperatures tlev on the model columns (log-p interior interpolation, lid and the
+extra layer's interfaces = top-layer temperature), with lwup = stebol*T_sfc**4 so the
+surface level is T_sfc (CAM6's (lwup/stebol)**0.25 for a unit-emissivity surface);
+(2) RTE+RRTMGP v1.8 compute_Planck_source (mo_gas_optics_rrtmgp_kernels.F90) gives the
+level sources lev_source at every level from that tlev.
 The fixture holds the arrays legoESM's production entry ``RRTMGP.solve_columns``
 actually hands to the LW solver (pressure/temperature/vmr incl. overhead layer and
 halos, captured by a pass-through wrapper of ``two_stream.solve_lw``) and the oracle's
@@ -16,7 +19,8 @@ truncated at ~225 Pa.
 
 usage (compute node, JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu):
     bash build.sh <rte-rrtmgp@v1.8> <conda env> <build dir>
-    python make_fixture.py <build dir>/oracle_driver <rte-rrtmgp@v1.8> <rrtmgp-data@v1.8.2> <out.npz>
+    python make_fixture.py <build dir>/oracle_driver <rte-rrtmgp@v1.8> <rrtmgp-data@v1.8.2> <out.npz> \
+        <CAM@cam_cesm2_1_rel_60> <cime@cime5.6.47> <cam build dir>
 """
 import json
 import os
@@ -36,7 +40,7 @@ from legoesm.atmosphere.physics.radiation.rrtmgp import rrtmgp as R  # noqa: E40
 from legoesm.atmosphere.physics.radiation.rrtmgp import constants as RC  # noqa: E402
 from legoesm.atmosphere.physics.radiation.rrtmgp.rte import two_stream as TS  # noqa: E402
 
-ORACLE, RTE, DATA, OUT = sys.argv[1:5]
+ORACLE, RTE, DATA, OUT, CAM, CIME, CAM_BUILD = sys.argv[1:8]
 RFMIP = os.path.join(DATA, "examples/rfmip-clear-sky/inputs/"
                      "multiple_input4MIPs_radiation_RFMIP_UColorado-RFMIP-1-2_none.nc")
 P_TOP_TARGET = 225.0  # Pa, CAM L32 model-top interface (tier-1 audit column set)
@@ -144,17 +148,26 @@ for gname in (str(x) for x in opt.gas_optics_lw.idx_gases):
         continue  # gas absent in legoESM (vmr 0)
     glist.append(gname)
     vlist.append(v)
-# CAM6 host tint (rrtmg_state.F90:113-119) with the surface level = T_sfc (not
-# (lwup/stebol)**0.25), TOA-first then flipped to surface-first
-pl, pv, tl = play[:, ::-1], plev[:, ::-1], tlay[:, ::-1]
-tint = np.empty_like(pv)
-tint[:, 0] = tl[:, 0]
-tint[:, -1] = tsfc
-for k in range(1, pl.shape[1]):
-    dy = (np.log(pv[:, k]) - np.log(pl[:, k])) / (np.log(pl[:, k - 1]) - np.log(pl[:, k]))
-    tint[:, k] = tl[:, k] - dy * (tl[:, k] - tl[:, k - 1])
-tlev = tint[:, ::-1]
+# CAM6 host tlev (rrtmg_state.F90), RUN on the model columns (TOA-first)
+t_mod, pf_mod, ph_mod = stack("T"), stack("p_full"), stack("p_half")
 ncol, nlay = play.shape
+here = os.path.dirname(os.path.abspath(__file__))
+print(subprocess.run(["bash", os.path.join(here, "build_cam_state.sh"), CAM, CIME, str(ncol),
+                      str(t_mod.shape[1]), CAM_BUILD], capture_output=True, text=True,
+                     check=True).stdout)
+with tempfile.TemporaryDirectory() as d:
+    with open(os.path.join(d, "cam_in.bin"), "wb") as f:
+        for a in (t_mod, pf_mod, ph_mod, tsfc):
+            np.asarray(a, dtype="<f8").ravel(order="F").tofile(f)
+    run = subprocess.run([os.path.join(CAM_BUILD, "cam_state_driver"), d],
+                         capture_output=True, text=True, check=True)
+    print(run.stdout)
+    assert "CAM_STATE_DONE" in run.stdout
+    raw = np.fromfile(os.path.join(d, "cam_out.bin"), dtype="<f8")
+num_levs = int(raw[0])
+assert num_levs + 1 == nlay + 1, (num_levs, nlay)  # extra layer present, as ours
+tlev_cam = raw[1:].reshape(ncol, num_levs + 1, order="F")  # TOA-first
+tlev = tlev_cam[:, ::-1]  # surface-first for the RRTMGP oracle
 mu0 = vec("mu0")
 toa = np.outer(np.ones(ncol), cfg_kw["S_0"] * np.asarray(opt.solar_fraction_by_gpt, np.float64))
 
@@ -181,17 +194,25 @@ sha = lambda p: subprocess.run(["git", "-C", p, "rev-parse", "HEAD"],  # noqa: E
                                capture_output=True, text=True).stdout.strip()
 meta = dict(
     oracle="rte-rrtmgp v1.8 " + sha(RTE),
-    oracle_note="lev_source(:,1,:) and sfc_source from mo_gas_optics_rrtmgp_kernels.F90 "
-                "compute_Planck_source, tlev = CAM6 rrtmg_state.F90 tint (surface = T_sfc)",
+    oracle_note="lev_source and sfc_source from mo_gas_optics_rrtmgp_kernels.F90 "
+                "compute_Planck_source; tlev from CAM6 rrtmg_state.F90 rrtmg_state_create "
+                "(run, lwup = stebol*T_sfc**4)",
+    cam="cam_cesm2_1_rel_60 " + sha(CAM),
+    cime="cime5.6.47 " + sha(CIME),
     rrtmgp_data="v1.8.2 " + sha(DATA),
     legoesm=sha(os.path.dirname(os.path.abspath(__file__))),
-    generator="scripts/validate/oracle/rrtmgp_lw_sfc_face/{build.sh,make_fixture.py}",
-    columns=names, cfg=cfg_kw)
+    generator="scripts/validate/oracle/rrtmgp_lw_sfc_face/{build.sh,build_cam_state.sh,"
+              "make_fixture.py}",
+    columns=names, cfg=cfg_kw, ghg=ghg)
 vnames = sorted(CAP["vmr"])
 np.savez_compressed(
     OUT, p=np.asarray(CAP["p"], np.float64), T=np.asarray(CAP["T"], np.float64),
     sfcT=np.asarray(CAP["sfcT"], np.float64), vmr_names=np.array(vnames),
     vmr=np.stack([np.asarray(CAP["vmr"][k], np.float64) for k in vnames]),
     tlev_sfc_oracle=tlev[:, 0], lev_src_sfc_oracle=lev_src[:, 0, :], sfc_src_oracle=sfc_src,
+    T_model=t_mod, p_full_model=pf_mod, p_half_model=ph_mod, tsfc_model=vec("tsfc"),
+    q_model=stack("q"), o3_model=stack("o3"), o3_top_model=vec("o3_top"), mu0_model=mu0,
+    emis_model=vec("emis"), alb_model=vec("alb"),
+    tlev_cam_oracle=tlev_cam, lev_src_oracle=lev_src,
     meta=json.dumps(meta))
 print("FIXTURE_DONE", OUT, os.path.getsize(OUT), "bytes")

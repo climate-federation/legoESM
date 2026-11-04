@@ -389,7 +389,9 @@ class TestDeckChecker:
 
     def test_missing_files_reported(self, tmp_path):
         from scripts.run.run_amip_smoke_deck import _check_forcing_files
-        files = _check_forcing_files(tmp_path, 1979, 1980)
+        files = _check_forcing_files(
+            tmp_path, 1979, 1980,
+            aerosol_file=tmp_path / "aerosol_amip_clim.nc")
         assert "_missing" in files
         # All six channels should be reported missing
         missing = files["_missing"].split(",")
@@ -401,7 +403,9 @@ class TestDeckChecker:
         from scripts.run.run_amip_smoke_deck import _check_forcing_files
         self._make_deck(tmp_path, with_interannual_o3=True,
                         with_clim_o3=False)
-        files = _check_forcing_files(tmp_path, 1979, 1980)
+        files = _check_forcing_files(
+            tmp_path, 1979, 1980,
+            aerosol_file=tmp_path / "aerosol_amip_clim.nc")
         assert "_missing" not in files, (
             f"Interannual-only deck should be complete, got missing: "
             f"{files.get('_missing')}"
@@ -413,7 +417,9 @@ class TestDeckChecker:
         from scripts.run.run_amip_smoke_deck import _check_forcing_files
         self._make_deck(tmp_path, with_interannual_o3=False,
                         with_clim_o3=True)
-        files = _check_forcing_files(tmp_path, 1979, 1980)
+        files = _check_forcing_files(
+            tmp_path, 1979, 1980,
+            aerosol_file=tmp_path / "aerosol_amip_clim.nc")
         assert "_missing" not in files
         assert files["ozone"].name == "ozone_amip_clim.nc"
 
@@ -423,12 +429,75 @@ class TestDeckChecker:
         from scripts.run.run_amip_smoke_deck import _check_forcing_files
         self._make_deck(tmp_path, with_interannual_o3=True,
                         with_clim_o3=True)
-        files = _check_forcing_files(tmp_path, 1979, 1980)
+        files = _check_forcing_files(
+            tmp_path, 1979, 1980,
+            aerosol_file=tmp_path / "aerosol_amip_clim.nc")
         assert "_missing" not in files
         assert files["ozone"].name == "ozone_amip_1979-1980.nc", (
             "When both interannual and climatology ozone files are "
             "present, the deck checker must prefer the interannual file."
         )
+
+
+class TestDeckAerosolFile:
+    """#2212 (user decision 2026-10-28): the deck's --aerosol-file defaults to
+    the production aerosol file; tests pass their own fake file."""
+
+    def test_default_is_the_production_launcher_aerosol(self):
+        """The deck constant equals the AEROSOL default in
+        config/amip/amip_production.sh (drift guard)."""
+        import re
+        from scripts.run.run_amip_smoke_deck import _PRODUCTION_AEROSOL_FILE
+        sh = (_REPO_ROOT / "config" / "amip" / "amip_production.sh").read_text()
+        root = re.search(r'^: "\$\{FORCING_1979_2014:=([^}]+)\}"', sh, re.M)
+        aer = re.search(r'^: "\$\{AEROSOL:=([^}]*\}[^}]*)\}"', sh, re.M)
+        assert root and aer
+        want = aer.group(1).replace("${FORCING_1979_2014}", root.group(1))
+        assert _PRODUCTION_AEROSOL_FILE == want
+
+    def test_cli_default_is_the_production_constant(self, tmp_path,
+                                                     monkeypatch, capsys):
+        """With no --aerosol-file the deck checks and forwards
+        _PRODUCTION_AEROSOL_FILE (pointed here at a fake file)."""
+        import scripts.run.run_amip_smoke_deck as deck
+        sy, ey = 1979, 1980
+        TestDeckChecker._make_deck(None, tmp_path, with_interannual_o3=False,
+                                   with_clim_o3=True)
+        fake = tmp_path / "production_aerosol.nc"   # not the deck-dir name
+        (tmp_path / "aerosol_amip_clim.nc").rename(fake)
+        monkeypatch.setattr(deck, "_PRODUCTION_AEROSOL_FILE", str(fake))
+        rc = deck.main(["--forcing-dir", str(tmp_path),
+                        "--start-year", str(sy), "--end-year", str(ey),
+                        "--grid-type", "cubed_sphere",
+                        "--discretization", "centered",
+                        "--radiation", "rrtmg", "--resolution", "8",
+                        "--ic", "default", "--days", "1", "--dry-run"])
+        out = capsys.readouterr().out
+        assert rc in (0, None), out
+        block = out.split("[deck] Command:", 1)[1]
+        toks = [t.strip() for t in block.split("\\\n")]
+        assert toks[toks.index("--aerosol-file") + 1] == str(fake)
+        # a missing default is reported by the deck's own missing-file check
+        fake.unlink()
+        assert deck.main(["--forcing-dir", str(tmp_path),
+                          "--start-year", str(sy), "--end-year", str(ey),
+                          "--ic", "default", "--days", "1",
+                          "--dry-run"]) == 2
+        assert "aerosol" in capsys.readouterr().out
+
+    def test_aerosol_path_must_be_a_file(self, tmp_path):
+        """An empty --aerosol-file (Path("") is the existing current
+        directory) or a directory is reported missing."""
+        from scripts.run.run_amip_smoke_deck import _check_forcing_files
+        TestDeckChecker._make_deck(None, tmp_path, with_interannual_o3=False,
+                                   with_clim_o3=True)
+        assert "_missing" not in _check_forcing_files(
+            tmp_path, 1979, 1980,
+            aerosol_file=tmp_path / "aerosol_amip_clim.nc")
+        for bad in ("", tmp_path):
+            files = _check_forcing_files(tmp_path, 1979, 1980,
+                                         aerosol_file=bad)
+            assert files.get("_missing") == "aerosol", bad
 
 
 class TestOzoneUnitDetection:
@@ -1226,6 +1295,7 @@ class TestNoAerosolNoVolcanicFlags:
         # be considered complete.
         files = _check_forcing_files(
             tmp_path, 1979, 1980,
+            aerosol_file=tmp_path / "aerosol_amip_clim.nc",
             require_aerosol=False, require_volcanic=False,
         )
         assert "_missing" not in files, (
@@ -1233,7 +1303,9 @@ class TestNoAerosolNoVolcanicFlags:
             f"disabled, got missing: {files.get('_missing')}"
         )
         # Default require=True still reports missing.
-        files_required = _check_forcing_files(tmp_path, 1979, 1980)
+        files_required = _check_forcing_files(
+            tmp_path, 1979, 1980,
+            aerosol_file=tmp_path / "aerosol_amip_clim.nc")
         assert "_missing" in files_required
         assert "aerosol" in files_required["_missing"]
         assert "volcanic" in files_required["_missing"]
@@ -1245,6 +1317,7 @@ class TestNoAerosolNoVolcanicFlags:
                                  include_volcanic=False)
         files = _check_forcing_files(
             tmp_path, 1979, 1980,
+            aerosol_file=tmp_path / "aerosol_amip_clim.nc",
             require_aerosol=True, require_volcanic=False,
         )
         assert "_missing" not in files
@@ -1400,6 +1473,7 @@ class TestSpectralMpasForcingActive:
             "--grid-type", grid_type, "--discretization", disc,
             "--radiation", "rrtmg", "--resolution", str(res),
             "--ic", "default",
+            "--aerosol-file", str(tmp_path / "aerosol_amip_clim.nc"),
             "--days", "1", "--dry-run",
         ]
         r = subprocess.run(cmd, capture_output=True, text=True)
@@ -1457,6 +1531,9 @@ class TestSpectralMpasForcingActive:
             "[deck] Forcing-channel activity", 1)[0]
         toks = [t.strip() for t in block.split("\\\n")]
         assert toks[toks.index("--aerosol-reference-aod") + 1] == "0.03"
+        # --aerosol-file is forwarded as given (#2212)
+        assert toks[toks.index("--aerosol-file") + 1] == str(
+            tmp_path / "aerosol_amip_clim.nc")
 
     def test_voronoi_mpas_rrtmg_forcing_active(self, tmp_path):
         out = self._run(tmp_path, "voronoi", "mpas", 4)

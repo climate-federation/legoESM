@@ -79,7 +79,7 @@ _VALID_SHAPE_KEYS = frozenset(
 _REQUIRED_PARAM_KEYS = frozenset(
     {"units", "bounds", "tunable_tier", "transform", "category", "reference", "shape"}
 )
-_OPTIONAL_PARAM_KEYS = frozenset({"legacy_name"})
+_OPTIONAL_PARAM_KEYS = frozenset({"legacy_name", "explicit_only"})
 _REQUIRED_CLASS_KEYS = frozenset({"scheme_key", "params"})
 _OPTIONAL_CLASS_KEYS = frozenset({"excluded"})
 
@@ -91,6 +91,11 @@ PARAM_SPEC_TODO: frozenset[str] = frozenset(
         # (CLUBB graduated 2026-07-11: clubb.py now ships a complete
         # __param_spec__ over CLUBBParams + CLUBBConfig — see clubb.py and
         # param_collector.SPEC_MODULES.)
+        # IfsTunables (PR #2249, CUMASTRN port) holds run-set values the host
+        # copies from BechtoldConfig fields that already carry a spec; a second
+        # spec would declare the same ranges twice.  Fix = source its spec from
+        # BechtoldConfig (codex + GLM 2026-10-30), then drop this entry.
+        "packages/atmosphere/legoesm/atmosphere/physics/convection/_ifs_cumastrn.py",
         # --- ocean ---------------------------------------------------------
         # --- land ----------------------------------------------------------
     }
@@ -105,6 +110,15 @@ def _is_namedtuple(cls: ast.ClassDef) -> bool:
         if isinstance(b, ast.Attribute) and b.attr == "NamedTuple":
             return True
     return False
+
+
+def _is_float_ann(a) -> bool:
+    """``float`` or an unset-able ``float | None`` (resolved by its scheme)."""
+    if isinstance(a, ast.Name):
+        return a.id == "float"
+    return (isinstance(a, ast.BinOp) and isinstance(a.op, ast.BitOr)
+            and isinstance(a.left, ast.Name) and a.left.id == "float"
+            and isinstance(a.right, ast.Constant) and a.right.value is None)
 
 
 def _float_default_fields(cls: ast.ClassDef) -> dict[str, float]:
@@ -131,12 +145,38 @@ def spec_required_classes(src: str) -> dict[str, dict[str, float]]:
     a spec MUST classify."""
     tree = ast.parse(src)
     out: dict[str, dict[str, float]] = {}
+    unset = _declared_unset_fields(tree)
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and _is_namedtuple(node):
             fields = _float_default_fields(node)
+            # a ``float | None = None`` field the module declares in
+            # ``__param_unset_defaults__`` (an unset tunable its scheme
+            # resolves) MUST be classified too; it has no default to bound
+            for n in node.body:
+                if (isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+                        and n.target.id in unset.get(node.name, ())
+                        and _is_float_ann(n.annotation)):
+                    fields[n.target.id] = None
             if fields:
                 out[node.name] = fields
     return out
+
+
+def _declared_unset_fields(tree) -> dict[str, set[str]]:
+    """``{Class: {field}}`` from a module-level ``__param_unset_defaults__``
+    dict literal (keys only; values may be names)."""
+    for node in tree.body:
+        if (isinstance(node, (ast.Assign, ast.AnnAssign))
+                and isinstance(node.value, ast.Dict)
+                and any(isinstance(t, ast.Name)
+                        and t.id == "__param_unset_defaults__"
+                        for t in (node.targets if isinstance(node, ast.Assign)
+                                  else [node.target]))):
+            return {k.value: {kk.value for kk in v.keys
+                              if isinstance(kk, ast.Constant)}
+                    for k, v in zip(node.value.keys, node.value.values)
+                    if isinstance(k, ast.Constant) and isinstance(v, ast.Dict)}
+    return {}
 
 
 def all_float_field_names(src: str) -> dict[str, set[str]]:
@@ -155,8 +195,7 @@ def all_float_field_names(src: str) -> dict[str, set[str]]:
                 for n in node.body
                 if isinstance(n, ast.AnnAssign)
                 and isinstance(n.target, ast.Name)
-                and isinstance(n.annotation, ast.Name)
-                and n.annotation.id == "float"
+                and _is_float_ann(n.annotation)
                 and n.value is not None
             }
             if names:
@@ -297,6 +336,8 @@ def validate_param_spec(
                 errors.append(f"{cls_name}.{pname}: missing keys {sorted(pmissing)}")
             if pextra:
                 errors.append(f"{cls_name}.{pname}: unexpected keys {sorted(pextra)}")
+            if "explicit_only" in p and p["explicit_only"] is not True:
+                errors.append(f"{cls_name}.{pname}: explicit_only must be True when present")
             tier = p.get("tunable_tier")
             if tier not in _VALID_TIERS:
                 errors.append(f"{cls_name}.{pname}: tunable_tier must be in {sorted(_VALID_TIERS)}")
@@ -663,6 +704,26 @@ def test_spec_cannot_classify_an_int_iteration_count() -> None:
     assert any("non-float" in e or "not in params/excluded" in e for e in errs)
 
 
+def test_unset_float_field_is_spec_required() -> None:
+    """A ``float | None = None`` field declared in ``__param_unset_defaults__``
+    (an unset tunable its scheme resolves, e.g. Morrison DCS by flavour) is
+    REQUIRED, so deleting its spec entry fails, like a plain float field."""
+    src = (
+        "class C(NamedTuple):\n"
+        "    dcs: float | None = None\n"
+        "    other: float | None = None\n"
+        "    floor: float = 0.0\n"
+        "__param_unset_defaults__ = {'C': {'dcs': X}}\n"
+    )
+    assert spec_required_classes(src) == {"C": {"dcs": None, "floor": 0.0}}
+    # an undeclared unset field is eligible, not required
+    assert all_float_field_names(src) == {"C": {"dcs", "other", "floor"}}
+    missing = {"C": {"scheme_key": "c", "excluded": {"floor": "numerics: floor"},
+                     "params": {}}}
+    assert validate_param_spec(missing, spec_required_classes(src),
+                               all_float_field_names(src))
+
+
 def test_constants_default_field_is_spec_eligible_not_required() -> None:
     """A ``: float`` field whose default is a ``constants.X`` reference is NOT
     forced into the spec (not in ``required``) but MAY be classified as a tunable
@@ -723,9 +784,28 @@ def test_inclusion_predicate_excludes_constants_and_nonfloat() -> None:
         "from legoesm import constants\n"
         "class C(NamedTuple):\n"
         "    tau: float = 7200.0\n"
-        "    kappa: float = constants.kappa_vk\n"
+        "    kappa: float = constants.kappa_von_karman\n"
         "    n: int = 2\n"
         "    name: str = 'x'\n"
         "    flag: bool = False\n"
     )
     assert spec_required_classes(src) == {"C": {"tau": 7200.0}}
+
+
+def test_optional_float_field_is_eligible_not_required() -> None:
+    """A ``float | None = None`` field (no library default) may be spec'd but is
+    never forced; ``int | None`` stays ineligible; ``explicit_only`` must be True."""
+    src = ("class C(NamedTuple):\n"
+           "    ud: float | None = None\n"
+           "    n: int | None = None\n"
+           "    floor: float = 0.0\n")
+    assert spec_required_classes(src) == {"C": {"floor": 0.0}}
+    assert all_float_field_names(src) == {"C": {"ud", "floor"}}
+    p = {"units": "m s-1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid",
+         "category": "c", "reference": "r", "shape": None, "explicit_only": True}
+    spec = {"C": {"scheme_key": "c", "excluded": {"floor": "numerics: floor"},
+                  "params": {"ud": p}}}
+    req, elig = spec_required_classes(src), all_float_field_names(src)
+    assert validate_param_spec(spec, req, elig) == []
+    spec["C"]["params"]["ud"] = {**p, "explicit_only": False}
+    assert any("explicit_only" in e for e in validate_param_spec(spec, req, elig))

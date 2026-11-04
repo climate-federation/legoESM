@@ -5,6 +5,40 @@ All notable changes to legoESM. Format roughly follows
 
 ## Unreleased
 
+### Added
+
+- **ePBL vertical mixing (`VerticalMixingConfig(scheme="epbl")`).** A JAX
+  port of MOM6's `MOM_energetic_PBL` (created by B. G. Reichl and R. Hallberg;
+  machine-learned diffusivity options by A. Sane), swappable with KPP and
+  CATKE, differentiable, MOM6 parameter names and defaults in `EPBLConfig`
+  (except von Karman: legoESM uses 0.4 where MOM6 uses 0.41).
+  New option `EPBLConfig.k_after_surface_flux` (default `False`, legoESM/KPP
+  order): when `True` the ocean single-column model applies the surface flux
+  first and then evaluates ePBL on the updated column, as MOM6 does, so the
+  legoESM single-column model can be compared one-to-one with the MOM6
+  single-column model; every other driver rejects it. A single-column test
+  case against MOM6 is documented (agreement to ~1e-3 degC with the MOM6
+  order). The OMIP driver accepts `--vertical-mixing-scheme epbl` plus
+  `--woa-t-var/--woa-s-var/--woa-month` and `--monthly-mld-sst`. See
+  `docs/ocean/specs/epbl_energetic_pbl.md`.
+
+- **Orchestrator provenance env vars.** `build_run_manifest()` now reads
+  `LEGOESM_RUNNER_TAG` into a new `reproducibility.orchestrator_tag` field and
+  `LEGOESM_RUNNER_PATCHES` (comma-separated list, appended to the caller's
+  patches, duplicates and blanks dropped), so a downstream orchestrator (e.g. legoESM-ocean-runners'
+  `run.sh`) can identify itself and its patch chain on every lane.
+  `runner_tag` is left as the entry script's tag: replay specs and the
+  one-run-per-directory check key on it. No schema bump: validation accepts
+  the added optional key.
+- **`run_omip_core2.py` short-run flags.** `--days` runs for a day
+  budget instead of the standard `--years` / `--smoke` budget (short tests
+  that are not the 10-day smoke), `--synthetic-forcing` explicitly opts in
+  to synthetic forcing (default stays real CORE-II data — a silent
+  fallback would corrupt the NEMO comparison invisibly), and
+  `--forcing-scale` scales surface forcing amplitude (sensitivity tests /
+  cold-start shock reduction). Contributed from the
+  legoESM-ocean-runners tripole-OMIP orchestration lane.
+
 ### Changed
 
 - **License: MIT.** legoESM is now released under the MIT License, replacing

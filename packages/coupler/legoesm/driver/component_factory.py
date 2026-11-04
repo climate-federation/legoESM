@@ -452,13 +452,44 @@ def _ledger_level_weight(config, sigma):
     return sigma_band_weight(sigma.sigma_half, float(band[0]), float(band[1]))
 
 
+def _auto_ice_skin(cfg):
+    from legoesm.driver.config import resolve_ice_skin_prognostic
+    return resolve_ice_skin_prognostic(
+        cfg._replace(ice_skin_prognostic=None))[0]
+
+
+def _auto_sea_ice_albedo(cfg):
+    from legoesm.driver.config import resolve_sea_ice_albedo_scheme
+    return resolve_sea_ice_albedo_scheme(
+        cfg._replace(sea_ice_albedo_scheme="auto"))
+
+
+def _auto_ocean_flux_surface(cfg):
+    from legoesm.driver.config import resolve_ocean_flux_on_ocean_surface
+    return resolve_ocean_flux_on_ocean_surface(
+        cfg._replace(ocean_flux_on_ocean_surface=None))
+
+
+# AUTO-default fields (user decision 2026-10-26): ModelDriver.setup
+# replaces the AUTO default by its resolved value before this wall runs,
+# so each is accepted at its default OR at exactly what AUTO resolves to
+# in this config (the closed lane: skin off, constant albedo).  Any other
+# value is still refused.  Path -> fn(config) -> resolved AUTO value.
+_FV3_DUO_AUTO_RESOLVED = {
+    "ice_skin_prognostic": _auto_ice_skin,
+    "sea_ice_albedo_scheme": _auto_sea_ice_albedo,
+    "ocean_flux_on_ocean_surface": _auto_ocean_flux_surface,
+}
+
+
 def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
     """Refuse EVERY non-default, non-allow-listed field, all at once.
 
     Diffs the incoming config field-by-field against a freshly
     constructed default instance and raises ONE error naming every
     offending path and value, so a mis-built launch script is fixed in
-    one round-trip instead of field-by-field.
+    one round-trip instead of field-by-field.  An AUTO-default field
+    (``_FV3_DUO_AUTO_RESOLVED``) also passes at its resolved value.
     """
     defaults = dict(_flatten_config_fields(type(config)()))
     offending = [
@@ -466,6 +497,8 @@ def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
         for path, val in _flatten_config_fields(config)
         if path not in _FV3_DUO_ALLOWED_NONDEFAULT
         and not (val == defaults[path])
+        and not (path in _FV3_DUO_AUTO_RESOLVED
+                 and val == _FV3_DUO_AUTO_RESOLVED[path](config))
     ]
     if offending:
         listing = ", ".join(f"{p}={v!r}" for p, v in offending)
@@ -571,11 +604,14 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     moist = any(getattr(config, k) != "none"
                 for k in ("microphysics", "convection", "turbulence"))
     from legoesm.driver.physics_pipeline import (
-        moisture_registry_for, validate_microphysics_tracer_slots)
-    registry = moisture_registry_for(config.microphysics)
+        moisture_registry_for, registry_scheme_config,
+        validate_microphysics_tracer_slots)
+    _scheme_cfg = registry_scheme_config(config)
+    registry = moisture_registry_for(config.microphysics, _scheme_cfg)
     validate_microphysics_tracer_slots(
         config.microphysics, registry.n_tracers,
-        context="fv3_duo column lane tracer slots")
+        context="fv3_duo column lane tracer slots",
+        scheme_config=_scheme_cfg)
     if bundle.ctx_np.get("ectx") is None:
         raise ValueError("fv3_duo column lane needs the duo ext bundle "
                          "(ctx['ectx'] with amat6) for the c2l column winds")
@@ -724,7 +760,8 @@ def energy_fixer_wired(config: ExperimentConfig, solver_name: str) -> bool:
     (``_step_fv3``; the sub-face-TILED dynamics lanes do not run it and are
     refused at their driver entry).  Every other solver does not run it."""
     return (solver_name in _ENERGY_FIXER_SOLVERS
-            or (solver_name == "fv3_duo_primitive_equations"
+            or (solver_name in ("fv3_duo_primitive_equations",
+                                "spectral_primitive_equations")
                 and bool(config.dycore.column_lane)))
 
 
@@ -745,7 +782,7 @@ def refuse_unwired_energy_fixer(config: ExperimentConfig,
         raise ValueError(
             f"DycoreConfig.energy_fixer=True, but the dycore total-energy "
             f"fixer is wired only on the MPAS, lat-lon C-grid and cube C-D grid "
-            f"hydrostatic and FV3-duo column lanes; {solver_name!r} would run WITHOUT it and leave the "
+            f"hydrostatic and FV3-duo / spectral column lanes; {solver_name!r} would run WITHOUT it and leave the "
             f"damping/numerical energy sink open.  Set energy_fixer=False "
             f"(run_amip/run_coupled --no-energy-fixer) to accept that sink "
             f"explicitly on this lane.")
@@ -825,11 +862,12 @@ def create_atmosphere_dycore(
     """
     dc = config.dycore
     gc = config.grid
-    if dc.column_lane and dc.discretization == "latlon_cgrid":
+    if dc.column_lane and dc.discretization in ("latlon_cgrid", "spectral"):
         if latlon_native_grid is None:
             raise ValueError(
-                "create_atmosphere_dycore: the lat-lon column lane needs "
-                "latlon_native_grid (the driver builds it in _create_grid)")
+                f"create_atmosphere_dycore: the {dc.discretization} column "
+                "lane needs latlon_native_grid (the driver builds it in "
+                "_create_grid)")
         grid = latlon_native_grid
         coeff_grid = None
 
@@ -1045,10 +1083,23 @@ def create_atmosphere_dycore(
             fix_mass=dc.fix_mass and dc.conservation_fixer,
             anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,  # #1354/#1515 borrow (grid-general knob)
+            # the column-split step runs the global energy fixer (F15); the
+            # legacy step does not and is refused above with it on
+            energy_fixer=bool(dc.energy_fixer and dc.column_lane),
         )
-        return SpectralPrimitiveEquationModel(
+        model = SpectralPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma, config=pe_config,
         )
+        if dc.column_lane:
+            if _spectral_leapfrog:
+                raise ValueError(
+                    f"time_integrator={dc.time_integrator!r} on the spectral "
+                    "column lane: it runs the explicit ssp_rk54 only (D5)")
+            from legoesm.atmosphere.dynamics.gcm.spectral_column import (
+                SpectralColumnModel,
+            )
+            model = SpectralColumnModel(model)
+        return model
 
     if solver_name == "spectral_compressible_euler":
         _reject_unselectable_time_integrator("spectral non-hydrostatic (compressible Euler)")
@@ -1531,6 +1582,10 @@ def create_atmosphere_dycore(
                              else dc.time_integrator),
             # CAM-style dycore total-energy fixer (F15; DycoreConfig).
             energy_fixer=dc.energy_fixer,
+            # CAM-FV ldiv4 on this grid: the SCALE only; the dycore builds its
+            # own per-row 0.01*area_row^2/dt (NOT diff.div_damp4, whose
+            # smallest-cell / dx_min^2 value is wrong on a lat-lon grid).
+            nu_div4_scale=dc.mpas_div_damp4_scale,
         )
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)

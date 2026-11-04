@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -33,6 +34,9 @@ from legoesm.driver.restart import (
     resolved_physics_record,
     write_run_manifest,
 )
+
+if TYPE_CHECKING:
+    from legoesm.driver.model_driver import ModelDriver
 
 DAYS_2_STEPS = 1201.0 / 86400.0   # dt=600 s -> 2 steps
 

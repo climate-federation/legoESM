@@ -166,7 +166,6 @@ def test_atm_scalar_map_is_pipeline_threaded():
         "TiedtkeConfig": {"convection": "tiedtke", "microphysics": "kessler"},
         # warm-rain hard-saturation-adjustment overrides: activate each scheme
         # so _resolve_microphysics threads the flat scalar into its sub-config.
-        "KesslerConfig": {"microphysics": "kessler"},
         "MorrisonConfig": {"microphysics": "morrison"},
         "P3Config": {"microphysics": "p3"},
         "SeifertBehengConfig": {"microphysics": "seifert_beheng"},
@@ -185,7 +184,6 @@ def test_atm_scalar_map_is_pipeline_threaded():
         "SBMConfig": "convection_config",
         "BechtoldConfig": "convection_config",
         "TiedtkeConfig": "convection_config",
-        "KesslerConfig": "micro_config",
         "MorrisonConfig": "micro_config",
         "P3Config": "micro_config",
         "SeifertBehengConfig": "micro_config",
@@ -227,6 +225,8 @@ def test_atm_scalar_map_is_pipeline_threaded():
             got = getattr(cc, m.field)
         elif m.config_class == "CLUBBParams":
             got = getattr(pipe.turbulence_config.params, m.field)
+        elif m.config_class == "PrescribedIceSurfaceConfig":
+            got = getattr(pipe, m.field)
         else:
             got = getattr(getattr(pipe, resolved_attr[m.config_class]), m.field)
         assert got == sentinel, (
@@ -279,8 +279,6 @@ def test_atm_scalar_map_has_no_under_claim():
         # hard_sat_max_heating_K), so the convention prefix is empty — the
         # ec_lower lookup below simply skips micro fields with no same-named
         # ExperimentConfig scalar.
-        ("KesslerConfig", "", {"microphysics": "kessler"},
-         lambda pipe, field: getattr(pipe.micro_config, field, None)),
         ("MorrisonConfig", "", {"microphysics": "morrison"},
          lambda pipe, field: getattr(pipe.micro_config, field, None)),
         ("P3Config", "", {"microphysics": "p3"},
@@ -300,6 +298,10 @@ def test_atm_scalar_map_has_no_under_claim():
         ("CLUBBParams", "clubb_", {"turbulence": "clubb",
                                    "clubb_prognostic": True},
          lambda pipe, field: getattr(pipe.turbulence_config.params, field)),
+        # Prescribed-ice surface: the flat scalar and the spec field share one
+        # name, read back from the pipeline attribute of that name.
+        ("PrescribedIceSurfaceConfig", "", {},
+         lambda pipe, field: getattr(pipe, field, None)),
     ]
     # Companion drift-guard: the family list scanned below must exactly match
     # the config classes present in the verified allowlist map.  The selector /

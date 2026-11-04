@@ -26,6 +26,7 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.config.radiative_transfer impor
     RRTMOptics as RRTMOpticsConfig,
 )
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import atmospheric_state
+from legoesm.atmosphere.physics.radiation.rrtmgp.optics import cloud_optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import constants as optics_constants
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics.lookup_volume_mixing_ratio import (
     LookupVolumeMixingRatio,
@@ -123,6 +124,37 @@ def _add_halos(f_3d):
     bottom_halo = 2 * f_3d[:, :, 0:1] - f_3d[:, :, 1:2]
     top_halo = 2 * f_3d[:, :, -1:] - f_3d[:, :, -2:-1]
     return jnp.concatenate([bottom_halo, f_3d, top_halo], axis=2)
+
+
+def cam_interface_temperature(T, p_full, p_half, sfc_temperature):
+    """Longwave level temperatures, CAM6 host recipe (TOA-first).
+
+    Port of CAM cam_cesm2_1_rel_60 ``rrtmg_state.F90`` (rrtmg_state_create,
+    lines 113-119): the top interface takes the top-layer temperature, the
+    surface interface takes the surface temperature, and each interior
+    interface k (between layers k-1 above and k below) is
+
+        tint(k) = t(k) - dy * (t(k) - t(k-1)),
+        dy = (ln pint(k) - ln pmid(k)) / (ln pmid(k-1) - ln pmid(k)).
+
+    CAM's surface value is (lwup/stebol)**0.25; here it is the
+    ``sfc_temperature`` the radiation is handed (equal for a surface whose
+    upward LW is stebol*T**4).
+
+    Args:
+      T: ``(ncol, nlev)`` layer temperature [K], index 0 = model top.
+      p_full: ``(ncol, nlev)`` layer-midpoint pressure [Pa].
+      p_half: ``(ncol, nlev+1)`` interface pressure [Pa].
+      sfc_temperature: ``(ncol,)`` surface temperature [K].
+
+    Returns:
+      ``(ncol, nlev+1)`` interface temperature [K], index 0 = model top.
+    """
+    lnpm = jnp.log(p_full)
+    dy = (jnp.log(p_half[:, 1:-1]) - lnpm[:, 1:]) / (lnpm[:, :-1] - lnpm[:, 1:])
+    t_int = T[:, 1:] - dy * (T[:, 1:] - T[:, :-1])
+    return jnp.concatenate(
+        [T[:, :1], t_int, jnp.reshape(sfc_temperature, (-1, 1))], axis=1)
 
 
 def _standard_o3_profile(p_full):
@@ -560,8 +592,10 @@ class RRTMGP:
       lw_optical_field_only: bool = False,
       *,
       mcica_cloud_fraction: jnp.ndarray | None = None,
+      mcica_mask_width: float | None = None,
       clear_sky: bool = False,
       o3_top_vmr: jnp.ndarray | None = None,
+      cloud_rho_ice: float | None = None,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -629,11 +663,21 @@ class RRTMGP:
           ``(ncol, nlev)`` layer cloud fraction, index 0 = model top.  Given,
           ``cloud_path_liq/ice`` are IN-CLOUD paths and each g-point solves
           its own maximum-random subcolumn (McICA).
+      mcica_mask_width : float | None
+          Static smoothing width of the subcolumn mask
+          (``CloudConfig.cloud_subcolumn_mask_width``; 0 = CAM's hard mask).
+          Required with ``mcica_cloud_fraction``.
       o3_top_vmr : jnp.ndarray | None
           Column-mean ozone VMR above the model top (ncol,), over
           ``0 < p < p_half[:, 0]``.  Used only by the transported overhead
           layer (``config.overhead_layer``); ``None`` => that layer takes the
           top model layer's ozone.
+      cloud_rho_ice : float | None
+          Bulk ice density [kg/m^3] of the PSD that produced
+          ``cloud_r_eff_ice`` (``CloudConfig.rho_cloud_ice``).  CAM6 uses one
+          ``rhoi`` for the ice PSD and the optics size ``deffi =
+          effi*rhoi/rhows*2`` (micro_mg2_0.F90:2795).  ``None`` => CAM's
+          ``rhoi`` = 500, the value the cloud optics convert from.
 
       Returns
       -------
@@ -651,14 +695,15 @@ class RRTMGP:
       # all inputs to match so that table lookups, lax.cond branches, and
       # lax.scan carries have consistent dtypes throughout the solver.
       _table_dtype = self.optics_lib.gas_optics_lw.kmajor.dtype
-      # McICA per-column table shift, seeded like CAM's mcica_subcol_gen:
-      # the fractional part of the lowest-layer pressure [Pa], taken before
-      # the cast to the table dtype.  State-derived, so it is independent of
-      # the domain decomposition and needs no PRNG.  Columns with IDENTICAL
-      # bottom pressure (idealized uniform states) share a shift, as they
-      # share a seed in CAM.
-      _mcica_shift = (None if mcica_cloud_fraction is None
-                      else jax.lax.stop_gradient(jnp.mod(p_full[:, -1], 1.0)))
+      # McICA per-column table shift, seeded like CAM's mcica_subcol_gen
+      # (clouds.subcolumns.cam_seed_shift), taken before the cast to the
+      # table dtype.
+      if mcica_cloud_fraction is None:
+          _mcica_shift = None
+      else:
+          from legoesm.atmosphere.physics.clouds.subcolumns import (
+              cam_seed_shift)
+          _mcica_shift = cam_seed_shift(p_full)
       T = T.astype(_table_dtype)
       p_full = p_full.astype(_table_dtype)
       p_half = p_half.astype(_table_dtype)
@@ -693,6 +738,13 @@ class RRTMGP:
           cloud_r_eff_liq = jnp.asarray(cloud_r_eff_liq).astype(_table_dtype)
       if cloud_r_eff_ice is not None:
           cloud_r_eff_ice = jnp.asarray(cloud_r_eff_ice).astype(_table_dtype)
+          if cloud_rho_ice is not None:
+              # The cloud optics read the table at 2 r 500/917 (CAM rhoi =
+              # 500); r*rho/500 makes that 2 r rho/917 for the configured
+              # bulk density (factor exactly 1.0 at rho = 500).
+              cloud_r_eff_ice = cloud_r_eff_ice * jnp.asarray(
+                  cloud_rho_ice / cloud_optics.RHO_ICE_BULK_CAM_MG2,
+                  dtype=_table_dtype)
       if cloud_fraction is not None:
           cloud_fraction = jnp.asarray(cloud_fraction).astype(_table_dtype)
       if mcica_cloud_fraction is not None:
@@ -726,7 +778,12 @@ class RRTMGP:
       # whose per-layer output must stay on the model grid.
       overhead = (bool(getattr(config, "overhead_layer", False))
                   and not (sw_optical_field_only or lw_optical_field_only))
+      # LW level temperatures from the model column (CAM6 rrtmg_state).
+      T_lev = cam_interface_temperature(T, p_full, p_half, sfc_temperature)
       if overhead:
+          # CAM's extra layer (rrtmg_state.F90 L122-136, kk = max(k-1, 1)):
+          # both of its interfaces take tint(1), the top-layer temperature.
+          T_lev = jnp.concatenate([T_lev[:, :1], T_lev], axis=1)
           p_top = p_half[:, :1]
           p_lid = jnp.minimum(p_top, 1.0)  # coeff-ok: 1 Pa lid (CAM-like ~0 Pa top)
 
@@ -875,6 +932,7 @@ class RRTMGP:
       )
 
       sfc_T_2d = sfc_temperature[:, None]
+      T_lev_3d = T_lev[:, None, ::-1]  # (ncol, 1, nlev+1), surface first
 
       # --- Cloud properties ---
       has_clouds = config.include_clouds and (
@@ -941,11 +999,15 @@ class RRTMGP:
                   "flux solve; the optical-field-only outputs would return "
                   "unsampled in-cloud optics")
           from legoesm.atmosphere.physics.clouds.subcolumns import (
-              generate_subcolumns)
+              apply_mask, generate_subcolumns)
+          if mcica_mask_width is None:
+              raise ValueError(
+                  "mcica_cloud_fraction needs mcica_mask_width "
+                  "(CloudConfig.cloud_subcolumn_mask_width; 0 = CAM's hard mask)")
 
           def _mcica_paths(n_gpt):
               mask = generate_subcolumns(mcica_cloud_fraction, n_gpt,
-                                         shift=_mcica_shift)
+                                         shift=_mcica_shift, width=mcica_mask_width)
               if overhead:
                   # the overhead layer is cloud-free; sample the MODEL layers
                   # only, so each g-point's model-layer subcolumn is the one
@@ -958,7 +1020,7 @@ class RRTMGP:
                   m = mask[igpt]
                   return tuple(
                       jnp.clip(_add_halos(
-                          jnp.where(m, x, 0.0)[:, None, ::-1]), 0.0, None)
+                          apply_mask(m, x)[:, None, ::-1]), 0.0, None)
                       for x in (_cpl, _cpi))
               return paths
 
@@ -1058,6 +1120,7 @@ class RRTMGP:
       if lw_optical_field_only:
           lw_props = two_stream.compute_lw_optical_field(
               p_3d, T_3d, molecules, optics_lib, sfc_T_2d, vmr_fields,
+              level_temperature=T_lev_3d,
               cloud_r_eff_liq=crl_3d, cloud_path_liq=cpl_lw_3d,
               cloud_r_eff_ice=cri_3d, cloud_path_ice=cpi_lw_3d,
               cloud_fraction=cf_3d,
@@ -1089,6 +1152,7 @@ class RRTMGP:
           atmos_state,
           vmr_fields,
           sfc_T_2d,
+          level_temperature=T_lev_3d,
           cloud_r_eff_liq=crl_3d,
           cloud_path_liq=cpl_lw_3d,
           cloud_r_eff_ice=cri_3d,

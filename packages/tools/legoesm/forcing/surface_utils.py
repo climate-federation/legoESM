@@ -466,6 +466,7 @@ def prognostic_ice_skin_temperature(
     T_freeze_K: float = constants.T_freeze_ocean,
     k_ice_W_m_K: float = constants.k_ice_default,
     T_melt_surface_K: float = constants.T_freeze,
+    melt_cap_width_K: float = 0.0,
 ) -> jnp.ndarray:
     """Advance a prescribed-ice AMIP skin temperature one integration step.
 
@@ -540,6 +541,13 @@ def prognostic_ice_skin_temperature(
         open-water snap).
     k_ice_W_m_K : ice thermal conductivity [W/m/K].
     T_melt_surface_K : fresh-ice surface melting point [K] (upper cap).
+    melt_cap_width_K : width [K] of the smooth melt cap.  ``0`` = the hard
+        ``clip`` cap; ``> 0`` = ``smooth_min(T_new, T_melt_surface_K,
+        sharpness=1/width)`` (LogSumExp, never above the melting point), so
+        the skin keeps a nonzero gradient at the cap.  KNOWN DIFFERENCE vs the
+        hard cap: a melting skin sits slightly below 0 C, by about
+        ``width * ln(1 / (1 - exp(-dT/width)))`` for a per-step warming dT
+        (measured per case in tests/unit/test_ice_skin_smooth_cap.py).
 
     Returns
     -------
@@ -550,8 +558,44 @@ def prognostic_ice_skin_temperature(
     r = dt_s / C_areal
     T_new = (T_skin + r * (F_net_down_W_m2 + g_cond * T_freeze_K)) \
         / (1.0 + r * g_cond)
-    T_new = jnp.clip(T_new, _ICE_SKIN_FLOOR_K, T_melt_surface_K)
+    if melt_cap_width_K == 0.0:
+        T_new = jnp.clip(T_new, _ICE_SKIN_FLOOR_K, T_melt_surface_K)
+    else:
+        from legoesm.core.smooth import smooth_min
+        T_new = smooth_min(jnp.maximum(T_new, _ICE_SKIN_FLOOR_K),
+                           T_melt_surface_K, 1.0 / melt_cap_width_K)
     return jnp.where(sic > 0.0, T_new, T_freeze_K)
+
+
+def advance_ice_skin(
+    T_skin: jnp.ndarray,
+    sw_net: jnp.ndarray,
+    lw_net: jnp.ndarray,
+    shflx: jnp.ndarray | None,
+    lhflx: jnp.ndarray | None,
+    sic: jnp.ndarray,
+    dt_s: float,
+    h_ice_m: float,
+    melt_cap_width_K: float = 0.0,
+) -> jnp.ndarray:
+    """One step of the prognostic ice skin from a lane's surface fluxes.
+
+    Grid-agnostic per-column physics shared by every lane: ``F_net_down =
+    sw_net + lw_net - shflx - lhflx`` (sw/lw net [W/m^2, +into surface];
+    turbulent fluxes [W/m^2, +upward]; an absent turbulent flux contributes
+    nothing), then :func:`prognostic_ice_skin_temperature`.  Inputs are
+    flattened to columns and the result has the shape of ``T_skin``.
+    """
+    shape = jnp.shape(T_skin)
+    f_net = (jnp.asarray(sw_net).reshape(-1) + jnp.asarray(lw_net).reshape(-1))
+    if shflx is not None:
+        f_net = f_net - jnp.asarray(shflx).reshape(-1)
+    if lhflx is not None:
+        f_net = f_net - jnp.asarray(lhflx).reshape(-1)
+    out = prognostic_ice_skin_temperature(
+        jnp.asarray(T_skin).reshape(-1), f_net, jnp.asarray(sic).reshape(-1),
+        dt_s=dt_s, h_ice_m=h_ice_m, melt_cap_width_K=melt_cap_width_K)
+    return out.reshape(shape)
 
 # NOTE: the model has OTHER tropopauses (clouds/cloud_fraction.py): the CAM6
 # aist cloud switch (rhminis/rhmaxis) uses the analytic 25000 - 15000
@@ -640,11 +684,13 @@ def stratospheric_layer_weight(p_half_col: jnp.ndarray,
 
 
 def aerosol_layer_fields(acfg, day, lat_col, p_half_col, w_strat, *,
-                         active, lw_active, dtype):
+                         active, lw_active, dtype, lon_col=None):
     """Per-layer aerosol forcing for one day: ``(aerosol_od, ccn_aod,
     aerosol_lw_od)``, as the AMIP driver feeds radiation and the aerosol-CCN
     droplet number.  ``ccn_aod`` is None when ``active`` is off; the two
-    optical-depth fields are zeros (ncol, nlev) when their switch is off."""
+    optical-depth fields are zeros (ncol, nlev) when their switch is off.
+    ``lon_col`` [rad] reads the SW and CCN aerosol at each column's longitude;
+    None reads their zonal mean."""
     from legoesm.forcing.external import (
         get_aerosol_at_time,
         get_aerosol_lw_at_time,
@@ -664,6 +710,7 @@ def aerosol_layer_fields(acfg, day, lat_col, p_half_col, w_strat, *,
         _trop_cfg = _acfg._replace(volcanic_enabled=False)
         aerosol_col = get_aerosol_at_time(
             _acfg if volc_sw is None else _trop_cfg, day, lat_grid=lat_col,
+            lon_grid=lon_col,
         )
         aerosol_od = distribute_column_aod_to_layers(
             jnp.asarray(aerosol_col), p_half_col,
@@ -674,10 +721,12 @@ def aerosol_layer_fields(acfg, day, lat_col, p_half_col, w_strat, *,
             ) * w_strat
             ).astype(aerosol_od.dtype)
         # AOD->CCN input: TROPOSPHERIC column in the visible (550 nm)
-        # band, volcanic excluded, from ``ccn_path`` (fine mode) if set.
+        # band, volcanic excluded, from ``ccn_path`` if set.  The Andreae 2009
+        # fit is local total AOT: a zonal mean gives polluted E China and the
+        # clean N Pacific one droplet number.
         ccn_aod = jnp.asarray(get_aerosol_at_time(
             _trop_cfg._replace(path=_acfg.ccn_path or _acfg.path),
-            day, lat_grid=lat_col, band="vis",
+            day, lat_grid=lat_col, band="vis", lon_grid=lon_col,
         )).reshape(ncol).astype(dtype)
 
     # Volcanic stratospheric LONGWAVE aerosol (gap #9): same (ncol,

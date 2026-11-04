@@ -187,12 +187,17 @@ def cmor_nc_paths(cmor_dir: Path) -> list[Path]:
     table), load those (back-compat). Otherwise treat it as the ``cmor``
     root and load the monthly MIP tables + fx (see ``_MONTHLY_CMOR_TABLES``);
     ``day``/sub-daily tables are excluded to avoid frequency collisions.
+    A run written with ``--cmip-drs-tree`` keeps the same tables under the
+    ESGF DRS tree ``CMIP6/<activity>/<inst>/<source>/<expt>/<variant>/
+    <table>/<var>/<grid>/<version>/``; those are found too.
     """
     direct = sorted(cmor_dir.glob("*.nc"))
     if direct:
         return direct
     return sorted(
-        p for table in _MONTHLY_CMOR_TABLES for p in (cmor_dir / table).glob("*.nc")
+        p for table in _MONTHLY_CMOR_TABLES
+        for pattern in (f"{table}/*.nc", f"CMIP6/*/*/*/*/*/{table}/*/*/v*/*.nc")
+        for p in cmor_dir.glob(pattern)
     )
 
 
@@ -252,6 +257,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report-name", default=DEFAULT_REPORT_NAME,
                          help="Filename of the combined HTML report written "
                               f"under --output-dir (default: {DEFAULT_REPORT_NAME}).")
+    parser.add_argument("--share", action="store_true", default=False,
+                         help="Publish the HTML report to DKRZ Swift as a public "
+                              "link (needs a valid ~/.swiftenv from `swift-token new`).")
+    parser.add_argument("--share-container", default=None,
+                         help="Swift container for --share (default: climateeval). "
+                              "WARNING: sharing makes the WHOLE container "
+                              "public-read, not just this report.")
+    parser.add_argument("--share-name", default=None,
+                         help="Report prefix on Swift for --share (default: the "
+                              "run folder, i.e. the parent of --cmor-dir, plus a UTC "
+                              "timestamp, e.g. amip_run4_20261023T1530Z).")
     return parser
 
 
@@ -358,6 +374,15 @@ def main(argv: list[str] | None = None) -> int:
     serve(db_paths, model_name=args.model_id, save_html=html_path)
     print(f"Report covers {len(db_paths)}/{len(suites)} suites; "
           f"HTML report written to {html_path}")
+    if args.share:
+        # Model id is the same for every run, so default the prefix to the run
+        # folder plus a UTC timestamp (minute precision: two shares within the
+        # same minute still collide).
+        from datetime import datetime, timezone
+        from climateeval._cli import _share_report
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%MZ")
+        _share_report(html_path, args,
+                      default_name=f"{Path(args.cmor_dir).resolve().parent.name}_{stamp}")
     return 0
 
 

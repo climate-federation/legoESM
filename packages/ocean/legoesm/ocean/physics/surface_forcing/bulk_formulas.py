@@ -6,7 +6,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
-from legoesm.core.bulk_flux import compute_most_fluxes
+from legoesm.core.bulk_flux import compute_most_fluxes, large_yeager_widths
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
 from legoesm.ocean.physics.surface_forcing._shared import surface_tendency_factors
 from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
@@ -123,6 +123,7 @@ def bulk_formula_surface_forcing(
             z0_init=cfg.z0,
             scheme=cfg.bulk_scheme,
             n_iter=cfg.bulk_n_iter,
+            **large_yeager_widths(cfg),
         )
         # ``compute_most_fluxes`` returns stress in the ATMOSPHERIC convention
         # (tau = -rho*u*^2 * u/|U|, i.e. it OPPOSES the wind — drag on the air).

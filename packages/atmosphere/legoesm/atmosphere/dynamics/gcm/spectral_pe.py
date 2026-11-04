@@ -50,8 +50,15 @@ from legoesm.grids.gaussian import (
     sh_analysis_dmu_3d,
     sh_analysis_oc2_dmu_3d,
     uv_from_vordiv_3d,
+    vordiv_from_uv_3d,
     spectral_hyperdiffusion_3d,
     sh_synthesis_H,
+    spectral_gradient_3d,
+)
+from legoesm.core.conservation import (
+    apply_physics_water_mass,
+    gridded_energy_fixer_dT,
+    shift_ps_keep_tracer_mass,
 )
 from legoesm.grids.vertical import (
     SigmaCoordinate,
@@ -60,6 +67,7 @@ from legoesm.grids.vertical import (
     dp_from_hybrid,
     compute_geopotential,
     compute_geopotential_hybrid,
+    sb81_full_level_ln_p,
     compute_mass_flux_from_cumsum,
     vertical_advection,
     vertical_advection_hybrid,
@@ -112,6 +120,12 @@ def soft_clip_lnps(lnps_raw: jax.Array) -> jax.Array:
 # Sentinel distinguishing "no forcing arg" (3-arg physics_fn) from a forcing
 # value of None (4-arg) in SpectralPrimitiveEquationModel._make_tendency_fn.
 _NO_FORCING = object()
+
+
+def _emits_sfc_precip(physics_fn) -> bool:
+    """True for a physics fn that accepts ``return_sfc_precip=True`` and then
+    also returns its surface precip (#2277; static: read at trace time)."""
+    return bool(getattr(physics_fn, "_emits_sfc_precip", False))
 
 
 # =============================================================================
@@ -329,6 +343,12 @@ class SpectralPEConfig(NamedTuple):
     # numerics for tests that intentionally measure drift.
     fix_mass: bool = False
     anchor_mass_to_initial: bool = False
+    # CAM-style global total-energy fixer (DycoreConfig.energy_fixer, F15):
+    # the energy the dynamics window lost (RK + sponge / filter / truncation /
+    # hyperdiffusion) comes back as ONE uniform heating before the physics.
+    # Honoured by the column-split step only (composable physics P4); the
+    # legacy step refuses it at the factory (refuse_unwired_energy_fixer).
+    energy_fixer: bool = False
     # Vertical advection for u, v, T on BOTH vertical coordinates (sigma and
     # hybrid): "sb_centered" (DEFAULT — Simmons-Burridge energy-conserving
     # pairing; sigma via _vertical_advection_sigma_sb, hybrid via
@@ -803,17 +823,25 @@ def spectral_pe_tendencies(
     # flux-form continuity needs it before the surface-pressure tendency;
     # the PGF correction below reuses the same arrays.
 
-    # PGF correction: -∇·(R_d·T'·∇_eta(lnp)) computed as spectral div of grid product
-    # In sigma coords: ∇_eta(ln p) = ∇(ln p_s).
-    # In hybrid coords: ∇_eta(ln p) = (B*p_s/p) * ∇(ln p_s).
-    T_prime_pgf = T - T_ref
-    _pgf_dlnps_dx = dlnps_dx[..., None]
-    _pgf_dlnps_dy = dlnps_dy[..., None]
+    # PGF correction computed as spectral div of a grid product:
+    # sigma: -∇·(R_d·T'·∇ln p_s) (T_ref part is the spectral term below);
+    # hybrid: -∇·(R_d·T·∇ln p_k), SB81 ln p_k, no T_ref split.
     if _hybrid:
-        B_full = sigma_coord.B_full  # (nlev,)
-        _hf = B_full * p_s[..., None] / p_full  # (n_lat, n_lon, nlev)
-        _pgf_dlnps_dx = _pgf_dlnps_dx * _hf
-        _pgf_dlnps_dy = _pgf_dlnps_dy * _hf
+        # The whole R_d·T·∇ln p_k through this grid-product path, with ln p_k
+        # the SB81 full-level log-pressure that compute_geopotential_hybrid
+        # integrates, so -∇Φ - R_d T ∇ln p cancels at isothermal rest over
+        # terrain (lat-lon #1029).  No spectral T_ref split here: that term
+        # carried ∇ln p_s on every level, a residual R_d T_ref (1 - B p_s/p)
+        # ∇ln p_s at rest.
+        _dlnp_dx, _dlnp_dy = spectral_gradient_3d(
+            grid, sh_analysis_3d(grid, sb81_full_level_ln_p(sigma_coord, p_s)))
+        T_prime_pgf = T
+        _pgf_dlnps_dx = _dlnp_dx
+        _pgf_dlnps_dy = _dlnp_dy
+    else:
+        T_prime_pgf = T - T_ref
+        _pgf_dlnps_dx = dlnps_dx[..., None]
+        _pgf_dlnps_dy = dlnps_dy[..., None]
     pgf_Fx_cos = R_d * T_prime_pgf * _pgf_dlnps_dx * cos_lat_3d
     pgf_Fy_cos = R_d * T_prime_pgf * _pgf_dlnps_dy * cos_lat_3d
 
@@ -868,12 +896,10 @@ def spectral_pe_tendencies(
     # Build ``ddiv_hat`` with the KE contribution to ``KPhi_hat``
     # already in place; the geopotential ``Phi`` contribution is added
     # after the batched sh_analysis_3d below (Loop 145).
-    ddiv_hat = (
-        flux_vor_curl
-        - grid.lap[:, None] * KPhi_oc2
-        - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
-        - pgf_correction_hat
-    )
+    ddiv_hat = flux_vor_curl - grid.lap[:, None] * KPhi_oc2
+    if not _hybrid:
+        ddiv_hat = ddiv_hat - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
+    ddiv_hat = ddiv_hat - pgf_correction_hat
 
     flux_T_div = (
         im_over_a[:, None] * _oc2_triple[..., 1]
@@ -897,11 +923,10 @@ def spectral_pe_tendencies(
     adiabatic = kappa * T * omega / p_adiab
 
     # Material derivative correction: kappa * T * v . grad_eta(ln p)
-    # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
-    # Reuses the unscaled v·∇lnps hoisted to step 7 (flux-form continuity).
+    # Sigma reuses the v·∇lnps hoisted to step 7; hybrid uses the SB81 ∇ln p_k.
     v_dot_grad_lnps = v_grad_lnps
     if _hybrid:
-        v_dot_grad_lnps = v_dot_grad_lnps * (sigma_coord.B_full * p_s[..., None] / p_adiab)
+        v_dot_grad_lnps = u * _dlnp_dx + v * _dlnp_dy  # same SB81 ∇ln p as the PGF
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     # Combine the three grid-space contributions to dT/dt before the SH
@@ -1315,6 +1340,26 @@ def advective_cfl_courant(n_max: int, dt_step: float,
     return u_ref * float(n_max) * float(dt_step) / constants.R_earth
 
 
+def refuse_semi_implicit_hybrid(config: SpectralPEConfig, sigma_coord) -> None:
+    """Refuse the semi-implicit path on hybrid levels.
+
+    The SI temperature-coupling matrix (``compute_tau_matrix``) uses the sigma
+    omega, while the hybrid explicit tendency uses the hybrid omega; they
+    differ by ~8.7% on CAM6 L32, so the implicit and explicit gravity-wave
+    terms do not cancel.  Refuse until that matrix is made hybrid-consistent.
+    """
+    uses_si = config.semi_implicit or str(config.time_integrator).lower() in (
+        "leapfrog", "leapfrog_si")  # leapfrog always builds the SI matrices
+    if uses_si and isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        raise NotImplementedError(
+            "spectral semi-implicit stepping (semi_implicit=True or a leapfrog "
+            "integrator) on hybrid sigma-pressure levels is "
+            "refused: the semi-implicit temperature-coupling matrix assumes "
+            "sigma levels (~8.7% off the hybrid tendency on CAM6 L32).  Use "
+            "time_integrator='ssp_rk54' (semi_implicit=False) or sigma levels."
+        )
+
+
 def check_advective_cfl(n_max: int, dt: float, config: SpectralPEConfig) -> None:
     """Refuse a spectral configuration whose explicit advection is unstable.
 
@@ -1655,6 +1700,16 @@ class SpectralPrimitiveEquationModel:
         # leapfrog body for stability (#405 stiff-physics fix); None until the
         # first stateful step.
         self._prev_phys_tend = None
+        # ... and its surface precip (#2277), so the published precip is the
+        # one of the tendency actually applied.
+        self._prev_sfc_precip = None
+        # Surface precip (precip, precip_frozen-or-None), each (n_lat, n_lon)
+        # [kg/m^2/s, +down], of the physics the LAST step applied: the
+        # stage-weighted rate on the explicit-RK path, the applied (lagged)
+        # tendency's on leapfrog.  None when the physics publishes none or
+        # the step path cannot integrate it (semi-implicit RK, CPU batch
+        # loop).  Eager-only side channel, like the MPAS model's _sfc_diag.
+        self._sfc_precip = None
         # Precompute implicit hyperdiffusion filter (unconditionally stable)
         self._hyperdiff_filter = None
         self._hyperdiff_filter_div = None  # iter-69: precomputed hf**2
@@ -1715,6 +1770,7 @@ class SpectralPrimitiveEquationModel:
             raise ValueError(
                 f"si_substeps must be >= 1, got {self.config.si_substeps!r}",
             )
+        refuse_semi_implicit_hybrid(self.config, self.sigma_coord)
 
     def _ensure_si_data(self, dt: float):
         """Lazily precompute semi-implicit matrices and refresh when dt changes."""
@@ -1932,7 +1988,8 @@ class SpectralPrimitiveEquationModel:
             self._si_dt_lf = dt_eff
 
     def _do_step(self, state, dt, tendency_fn,
-                 si_data=None, sponge_factor=None, target_mass=None):
+                 si_data=None, sponge_factor=None, target_mass=None,
+                 sfc=False):
         """Core step: explicit RK3/RK54 or semi-implicit RK3, then sponge.
 
         ``si_data`` and ``sponge_factor`` are passed as **dynamic args**
@@ -1946,10 +2003,32 @@ class SpectralPrimitiveEquationModel:
         inputs lets XLA capture them as runtime tensors without
         recompilation.
         """
+        result, sfc_rate = self._advance_dynamics(
+            state, dt, tendency_fn, si_data, sfc=sfc)
+        result = self._post_step(result, target_mass)
+        if sfc:
+            return result, sfc_rate
+        return result
+
+    def _advance_dynamics(self, state, dt, tendency_fn, si_data=None,
+                          sfc=False):
+        """The integrator alone (explicit RK or semi-implicit RK3 substeps):
+        the first half of :meth:`_do_step`."""
         if si_data is None:
             si_data = self._si_data
-        if sponge_factor is None:
-            sponge_factor = self._sponge_factor
+
+        # ``sfc`` (#2277): ``tendency_fn`` is the pair closure of
+        # ``_make_sfc_tendency_fn``; returns ``(state, surface precip rate)``.
+        # The explicit RK integrates the precip as a 2-D accumulator with the
+        # state's own stage weights, so ``accumulator / dt`` is the step-mean
+        # rate the column water actually lost.  The semi-implicit RK applies
+        # its correction to a spectral state only: no precip there (None).
+        sfc_rate = None
+        if sfc and self.config.semi_implicit:
+            _pair_fn = tendency_fn
+
+            def tendency_fn(s):
+                return _pair_fn((s, None))[0]
 
         if self.config.semi_implicit:
             n_substeps = int(self.config.si_substeps)
@@ -1965,11 +2044,29 @@ class SpectralPrimitiveEquationModel:
                         s, tendency_fn, dt_si, si_data, self.grid,
                     )
                 result = jax.lax.fori_loop(0, n_substeps, si_substep, state)
+        elif sfc:
+            _acc0 = jax.tree.map(
+                lambda x: jnp.zeros(x.shape, x.dtype),
+                jax.eval_shape(lambda s: tendency_fn((s, None))[1], state))
+            result, _acc = dispatch_integrator(
+                (state, _acc0), tendency_fn, dt, self.config.time_integrator)
+            sfc_rate = jax.tree.map(lambda a: a / dt, _acc)
         else:
             result = dispatch_integrator(
                 state, tendency_fn, dt, self.config.time_integrator,
             )
+        return result, sfc_rate
 
+    def _post_step(self, result, target_mass=None):
+        """Sponge, spectral filter, 2/3 state truncation, implicit
+        hyperdiffusion, tracer filter + positivity, anchored mass fixer: the
+        second half of :meth:`_do_step`, in that order."""
+        return self._post_step_tracers_and_mass(
+            self._post_step_dynamics(result), target_mass)
+
+    def _post_step_dynamics(self, result):
+        """Sponge, spectral filter, 2/3 state truncation, implicit
+        hyperdiffusion: the dissipative operators on the spectral state."""
         # Apply implicit sponge filter (unconditionally stable)
         if self._sponge_factor is not None:
             result = apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
@@ -1996,6 +2093,10 @@ class SpectralPrimitiveEquationModel:
         # Apply combined spectral-filter + implicit-hyperdiff to tracers
         # via one SH round-trip per tracer (no-op when neither knob is
         # active or ``state.tracers is None``).
+        return result
+
+    def _post_step_tracers_and_mass(self, result, target_mass=None):
+        """Tracer filter + positivity, then the anchored mass fixer."""
         result = self._apply_tracer_filter(result)
 
         # Iter-3: anchored-mass fixer.  ``target_mass`` is threaded in as
@@ -2009,7 +2110,6 @@ class SpectralPrimitiveEquationModel:
                 and self.config.anchor_mass_to_initial
                 and target_mass is not None):
             result = self._apply_mass_fixer(result, target_mass)
-
         return result
 
     def _apply_state_truncation(self, state):
@@ -2143,6 +2243,7 @@ class SpectralPrimitiveEquationModel:
         # driver's _run_spectral loop, mirroring the MPAS self._phys_state).
         # Passthrough default; the stateful leapfrog branch overwrites it.
         self._phys_state = phys_state
+        self._sfc_precip = None
 
         if _is_leapfrog:
             return self._leapfrog_step(
@@ -2153,10 +2254,121 @@ class SpectralPrimitiveEquationModel:
         self._ensure_hyperdiff_filter(dt)
         self._ensure_tracer_filter(dt)
         if forcing_data is not None:
-            return self._step_with_forcing_jit(
+            result = self._step_with_forcing_jit(
                 state, dt, physics_fn, forcing_data, self._target_mass,
             )
-        return self._step_jit(state, dt, physics_fn, self._target_mass)
+        else:
+            result = self._step_jit(state, dt, physics_fn, self._target_mass)
+        if _emits_sfc_precip(physics_fn):
+            result, sfc = result
+            self._publish_sfc_precip(sfc)
+        return result
+
+    def _publish_sfc_precip(self, sfc):
+        """Stash the step's surface precip on ``self._sfc_precip`` -- eager
+        calls only (a stashed tracer leaks into the next trace, gh-417)."""
+        if sfc is not None and not any(
+                isinstance(leaf, jax.core.Tracer)
+                for leaf in jax.tree_util.tree_leaves(sfc)):
+            self._sfc_precip = sfc
+
+    def _call_physics(self, physics_fn, s, forcing_data=_NO_FORCING):
+        """``(physics tendency, surface precip or None)`` of ``physics_fn`` at
+        ``s``; the precip comes from a physics fn that publishes it
+        (``_emits_sfc_precip``, #2277), else None."""
+        _emits = _emits_sfc_precip(physics_fn)
+        _kw = {"return_sfc_precip": True} if _emits else {}
+        if forcing_data is _NO_FORCING:
+            r = physics_fn(s, self.grid, self.sigma_coord, **_kw)
+        else:
+            r = physics_fn(s, self.grid, self.sigma_coord, forcing_data, **_kw)
+        if _emits:
+            return r[0], r[-1]
+        return (r[0] if type(r) is tuple else r), None
+
+    def prepare_column_split(self, state, dt) -> None:
+        """Eager set-up of :meth:`column_split_impl` (the spectral column
+        lane, composable physics P4): the D5 refusal, the first-step mass
+        anchor and the dt-dependent filters, which the traced body reads off
+        ``self`` -- so a caller jitting the body keys its cache on ``dt``."""
+        integrator = self.config.time_integrator.lower()
+        if integrator in ("leapfrog", "leapfrog_si") or self.config.semi_implicit:
+            raise ValueError(
+                "Spectral PE column split: refused on time_integrator="
+                f"{self.config.time_integrator!r} / semi_implicit="
+                f"{self.config.semi_implicit}; the spectral column lane runs "
+                "the explicit self-starting ssp_rk54 only (D5)")
+        if self._use_cpu_for_spectral:
+            raise NotImplementedError(
+                "Spectral PE column split is not wired for the Metal "
+                "CPU-offload placement")
+        self._maybe_snapshot_target_mass(state)
+        self._ensure_si_data(dt)
+        self._ensure_sponge_factor(dt)
+        self._ensure_hyperdiff_filter(dt)
+        self._ensure_tracer_filter(dt)
+
+    def column_split_impl(self, state, dt, physics_fn, forcing_data,
+                          phys_state, target_mass=None):
+        """The column lane's operator-split step, un-jitted (the column
+        adapter owns the jit, after :meth:`prepare_column_split`): a
+        dynamics-only step, the sponge / filter / truncation /
+        hyperdiffusion chain, the energy fixer, ONE evaluation of
+        ``physics_fn(grid HydrostaticState, grid, sigma_coord, phys_state,
+        forcing) -> (HydrostaticTendencies, phys_state_out)`` (``None``:
+        dynamics only) on the post-dynamics grid view, the tendencies applied as grid increments
+        (:func:`apply_grid_physics_increments`), then the tracer filter /
+        positivity and the anchored dry-mass fixer -- the lat-lon C-grid
+        step's order.  Returns ``(state, phys_state_out, tend, diag)``."""
+        res, _ = self._advance_dynamics(state, dt, self._make_tendency_fn(None))
+        # the dissipative chain (sponge / filter / truncation / hyperdiffusion)
+        # is DYNAMICS: inside the energy fixer's window and before the
+        # physics, as the lat-lon C-grid step's diffusion is
+        res = self._post_step_dynamics(res)
+        if self.config.energy_fixer:
+            res = self._apply_energy_fixer(state, res)
+        if physics_fn is None:
+            # dynamics only: no physics call, no increments (the configured
+            # energy fixer above still runs)
+            tend, pout = None, phys_state
+            zero = jnp.zeros((), dtype=jnp.float64)
+            diag = {"dry_mass_trunc_rel_max": zero,
+                    "dry_mass_trunc_rel_mean": zero}
+        else:
+            hs = grid_view_state(res, self.grid, self.sigma_coord)
+            pr = physics_fn(hs, self.grid, self.sigma_coord, phys_state,
+                            forcing_data)
+            tend, pout = (pr[0], pr[1]) if type(pr) is tuple else (pr, phys_state)
+            res, diag = apply_grid_physics_increments(
+                res, tend, dt, self.grid, self.sigma_coord,
+                dealias_mask=self._dealias_state)
+        # the lat-lon lane's safety rails after its physics increment:
+        # tracer filter + positivity, then the anchored dry-mass fixer
+        res = self._post_step_tracers_and_mass(res, target_mass)
+        T_g = sh_synthesis_3d(self.grid, res.T_hat.data)
+        diag = dict(diag, min_T=jnp.min(T_g),
+                    T_floor_hits=jnp.sum(T_g < self.config.T_min))
+        return res, pout, tend, diag
+
+    def _apply_energy_fixer(self, pre, post):
+        """CAM ``check_energy_fix`` on the spectral state (F15): the global
+        total energy (:func:`~legoesm.core.conservation.dycore_column_energy`
+        on the synthesised grid view, KE from the geographic winds) the
+        dynamics window *pre* -> *post* lost comes back as ONE uniform
+        heating [K], added to the ``n = 0`` mode of ``T_hat`` (a constant in
+        physical space is ``dT * sqrt(4 pi)`` on that coefficient, the lnps
+        anchor's normalisation: ``P_0^0 = 1/sqrt(4 pi)``).  The integrals are
+        :func:`~legoesm.core.conservation.gridded_energy_fixer_dT` over the
+        quadrature areas; single process (D6)."""
+        def _fields(st):
+            f = spectral_pe_to_grid(st, self.grid, self.sigma_coord)
+            return f["T"], f["u"], f["v"], f["p_s"], f["phis"]
+        dT = gridded_energy_fixer_dT(_fields(pre), _fields(post), self.grid,
+                                     self.sigma_coord, area=self.grid.grid_area)
+        sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=dT.dtype))
+        T_hat = post.T_hat.data.at[0].add(
+            (dT * sqrt_4pi).astype(post.T_hat.data.dtype))
+        return post._replace(T_hat=post.T_hat.replace(data=T_hat))
 
     def _leapfrog_step(self, state, dt, physics_fn=None, forcing_data=None,
                        phys_state=None):
@@ -2201,15 +2413,23 @@ class SpectralPrimitiveEquationModel:
             # centered n level excites leapfrog's computational mode (clubb_lite /
             # bechtold NaN'd otherwise).  The Euler STARTUP applies the current
             # (n) tendency — a forward step with no computational mode.
-            _phys_tend_now, _phys_state_out = physics_fn(
+            _emits = _emits_sfc_precip(physics_fn)
+            _r = physics_fn(
                 state, self.grid, self.sigma_coord,
-                phys_state=phys_state, forcing=forcing_data)
+                phys_state=phys_state, forcing=forcing_data,
+                **({"return_sfc_precip": True} if _emits else {}))
+            _phys_tend_now, _phys_state_out = _r[0], _r[1]
+            _sfc_now = _r[2] if _emits else None
             self._phys_state = _phys_state_out
             if self._state_prev is None or self._prev_phys_tend is None:
                 _phys_tend = _phys_tend_now          # Euler startup: forward (n)
+                _sfc = _sfc_now
             else:
                 _phys_tend = self._prev_phys_tend    # leapfrog body: lagged (n-1)
+                _sfc = self._prev_sfc_precip
             self._prev_phys_tend = _phys_tend_now    # store for next step's lag
+            self._prev_sfc_precip = _sfc_now
+            self._publish_sfc_precip(_sfc)
 
         if self._state_prev is None:
             # --- First step: forward Euler + SI ---
@@ -2224,6 +2444,9 @@ class SpectralPrimitiveEquationModel:
                 )
             else:
                 result = self._euler_si_jit(state, dt, physics_fn)
+            if not _stateful and _emits_sfc_precip(physics_fn):
+                result, _sfc = result
+                self._publish_sfc_precip(_sfc)
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
                 result = apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
@@ -2261,6 +2484,9 @@ class SpectralPrimitiveEquationModel:
                 state_np1 = self._leapfrog_si_jit(
                     state, self._state_prev, dt, physics_fn,
                 )
+            if not _stateful and _emits_sfc_precip(physics_fn):
+                state_np1, _sfc = state_np1
+                self._publish_sfc_precip(_sfc)
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
                 state_np1 = apply_sponge_filter(
@@ -2340,6 +2566,32 @@ class SpectralPrimitiveEquationModel:
             )
         return tendency_fn
 
+    def _make_sfc_tendency_fn(self, physics_fn, forcing_data=_NO_FORCING):
+        """Tendency closure on the pair ``(state, precip accumulator)`` for a
+        physics fn that publishes surface precip (#2277): returns
+        ``(state tendency, surface precip)``, so an explicit RK integrator
+        integrates the precip with the SAME stage weights as the state (the
+        accumulator is never read)."""
+        def tendency_fn(pair):
+            s = pair[0]
+            phys, sfc = self._call_physics(physics_fn, s, forcing_data)
+            return (spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys), sfc)
+        return tendency_fn
+
+    def _make_fixed_physics_tendency_fn(self, physics_fn, state,
+                                        forcing_data=_NO_FORCING):
+        """``(tendency closure, surface precip)`` with the physics evaluated
+        ONCE at ``state`` -- for a step that evaluates its tendency once at
+        ``state`` (Euler + SI), numerically the same as evaluating it inside
+        the closure, and the precip is the applied physics' (#2277)."""
+        phys, sfc = self._call_physics(physics_fn, state, forcing_data)
+
+        def tendency_fn(s):
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys)
+        return tendency_fn, sfc
+
     def _make_leapfrog_tendency_fn(self, physics_fn, state_lag,
                                    forcing_data=_NO_FORCING):
         """Leapfrog tendency with the PHYSICS evaluated ONCE at ``state_lag``
@@ -2361,20 +2613,16 @@ class SpectralPrimitiveEquationModel:
         step keeps physics at n (a forward step, which has no computational
         mode), so only the leapfrog body lags.
         """
-        phys = None
+        phys = sfc = None
         if physics_fn is not None:
-            if forcing_data is _NO_FORCING:
-                _r = physics_fn(state_lag, self.grid, self.sigma_coord)
-            else:
-                _r = physics_fn(
-                    state_lag, self.grid, self.sigma_coord, forcing_data)
-            phys = _r[0] if type(_r) is tuple else _r
+            phys, sfc = self._call_physics(physics_fn, state_lag, forcing_data)
 
         def tendency_fn(s):
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
-        return tendency_fn
+        # ``sfc``: the lagged physics' surface precip (#2277), or None.
+        return tendency_fn, sfc
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
     def _euler_si_jit(self, state, dt, physics_fn=None):
@@ -2386,8 +2634,15 @@ class SpectralPrimitiveEquationModel:
         matrices from the first dt.  A static ``dt`` keys the JIT cache on
         the value, so ``_ensure_si_data(dt)`` + retrace stay consistent.
         """
-        tendency_fn = self._make_tendency_fn(physics_fn)
         from legoesm.timestepping.semi_implicit import euler_si_step
+        if _emits_sfc_precip(physics_fn):
+            # The SI step evaluates the tendency once, at ``state``: the same
+            # physics evaluated here, so its precip is the applied one.
+            tendency_fn, sfc = self._make_fixed_physics_tendency_fn(
+                physics_fn, state)
+            return euler_si_step(
+                state, tendency_fn, dt, self._si_data, self.grid), sfc
+        tendency_fn = self._make_tendency_fn(physics_fn)
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
@@ -2398,6 +2653,11 @@ class SpectralPrimitiveEquationModel:
         are static (dt keys the cache — see ``_euler_si_jit``);
         ``forcing_data`` stays traced so per-step values never retrace.
         """
+        if _emits_sfc_precip(physics_fn):
+            tendency_fn, sfc = self._make_fixed_physics_tendency_fn(
+                physics_fn, state, forcing_data)
+            return euler_si_step(
+                state, tendency_fn, dt, self._si_data, self.grid), sfc
         tendency_fn = self._make_tendency_fn(physics_fn, forcing_data)
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
@@ -2411,10 +2671,12 @@ class SpectralPrimitiveEquationModel:
         Physics is LAGGED to ``state_nm1`` (n-1) for leapfrog stability — see
         :meth:`_make_leapfrog_tendency_fn`.
         """
-        tendency_fn = self._make_leapfrog_tendency_fn(physics_fn, state_nm1)
-        return leapfrog_si_step(
+        tendency_fn, sfc = self._make_leapfrog_tendency_fn(
+            physics_fn, state_nm1)
+        out = leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
+        return (out, sfc) if _emits_sfc_precip(physics_fn) else out
 
     @partial(jax.jit, static_argnums=(0, 3, 4))
     def _leapfrog_si_with_forcing_jit(
@@ -2428,11 +2690,12 @@ class SpectralPrimitiveEquationModel:
         Physics is LAGGED to ``state_nm1`` (n-1) for leapfrog stability — see
         :meth:`_make_leapfrog_tendency_fn`.
         """
-        tendency_fn = self._make_leapfrog_tendency_fn(
+        tendency_fn, sfc = self._make_leapfrog_tendency_fn(
             physics_fn, state_nm1, forcing_data)
-        return leapfrog_si_step(
+        out = leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
+        return (out, sfc) if _emits_sfc_precip(physics_fn) else out
 
     @partial(jax.jit, static_argnums=(0, 2))
     def _euler_si_phys_jit(self, state, dt, phys_tend):
@@ -2487,15 +2750,18 @@ class SpectralPrimitiveEquationModel:
         closure capture (structure is stable — ``step()`` snapshots
         before the first JIT call whenever anchoring is on).
         """
-        tendency_fn = self._make_tendency_fn(physics_fn)
+        _sfc = _emits_sfc_precip(physics_fn)
+        tendency_fn = (self._make_sfc_tendency_fn(physics_fn) if _sfc
+                       else self._make_tendency_fn(physics_fn))
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
             result_cpu = self._do_step(state_cpu, dt, tendency_fn,
-                                       target_mass=target_mass)
+                                       target_mass=target_mass, sfc=_sfc)
             return jax.device_put(result_cpu, self._default_device)
 
-        return self._do_step(state, dt, tendency_fn, target_mass=target_mass)
+        return self._do_step(state, dt, tendency_fn, target_mass=target_mass,
+                             sfc=_sfc)
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
     def _step_with_forcing_jit(
@@ -2524,15 +2790,19 @@ class SpectralPrimitiveEquationModel:
         closures stay fresh — see ``_step_jit``); ``forcing_data`` and
         ``target_mass`` traced.
         """
-        tendency_fn = self._make_tendency_fn(physics_fn, forcing_data)
+        _sfc = _emits_sfc_precip(physics_fn)
+        tendency_fn = (self._make_sfc_tendency_fn(physics_fn, forcing_data)
+                       if _sfc
+                       else self._make_tendency_fn(physics_fn, forcing_data))
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
             result_cpu = self._do_step(state_cpu, dt, tendency_fn,
-                                       target_mass=target_mass)
+                                       target_mass=target_mass, sfc=_sfc)
             return jax.device_put(result_cpu, self._default_device)
 
-        return self._do_step(state, dt, tendency_fn, target_mass=target_mass)
+        return self._do_step(state, dt, tendency_fn, target_mass=target_mass,
+                             sfc=_sfc)
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
     def _step_on_cpu(
@@ -2599,6 +2869,9 @@ class SpectralPrimitiveEquationModel:
 
     def _integrate_on_cpu(self, state, n_steps, dt, save_every, physics_fn=None):
         """Batch integration on CPU: transfer once, not per step."""
+        # This loop does not integrate the surface precip (#2277): publish
+        # none rather than a value left over from an earlier step().
+        self._sfc_precip = None
         # The batch loop drives the generic SSP/SI ``_step_on_cpu`` only;
         # it has no two-time-level leapfrog state machine (``_state_prev``,
         # RA filter, Euler startup).  Silently stepping a leapfrog config
@@ -2792,3 +3065,131 @@ def spectral_pe_to_grid(
         'lnps': lnps, 'p_s': jnp.exp(lnps),
         'phis': phis,
     }
+
+
+# =============================================================================
+# Composable physics P4: the grid view and the grid increments of the column
+# lane's operator split (the lat-lon C-grid step's pattern on the Gaussian grid)
+# =============================================================================
+
+def grid_view_state(state: SpectralHydrostaticState, grid: GaussianGrid,
+                    sigma_coord):
+    """The grid-shaped :class:`~legoesm.core.state.HydrostaticState` a column
+    physics reads: ``u, v, T, p_s, phis`` synthesised ``(n_lat, n_lon[, nlev])``
+    (:func:`spectral_pe_to_grid`), the grid-space tracers attached as they
+    are (``p_s`` TOTAL, tracers mass fractions of total air: the column
+    mesh exchange convention)."""
+    from legoesm.core.state import HydrostaticState
+    f = spectral_pe_to_grid(state, grid, sigma_coord)
+
+    def fld(a, nm, un):
+        return Field(data=a, name=nm, units=un)
+    tracers = None
+    if state.tracers:
+        tracers = {nm: (t if hasattr(t, "data") else Field(data=t, name=nm))
+                   for nm, t in state.tracers.items()}
+    return HydrostaticState(
+        u=fld(f["u"], "u", "m/s"), v=fld(f["v"], "v", "m/s"),
+        T=fld(f["T"], "T", "K"), p_s=fld(f["p_s"], "p_s", "Pa"),
+        phis=fld(f["phis"], "phis", "m^2/s^2"), tracers=tracers)
+
+
+@jax.custom_jvp
+def _select_keep_tangent(mask, a, b):
+    """``where(mask, a, b)`` whose tangent is ``a``'s everywhere: the mask
+    only pins bitwise-exact values where ``a`` equals ``b`` mathematically
+    (an exactly-zero water tendency); the derivative stays ``a``'s."""
+    return jnp.where(mask, a, b)
+
+
+@_select_keep_tangent.defjvp
+def _select_keep_tangent_jvp(primals, tangents):
+    mask, a, b = primals
+    _, a_dot, _ = tangents
+    return _select_keep_tangent(mask, a, b), a_dot
+
+
+def apply_grid_physics_increments(state: SpectralHydrostaticState, tend, dt,
+                                  grid: GaussianGrid, sigma_coord, *,
+                                  dealias_mask=None):
+    """Apply a grid-space physics tendency (``HydrostaticTendencies`` on
+    ``(n_lat, n_lon[, nlev])``) to the spectral state as Euler increments
+    (design row P4 i):
+
+    * ``T_hat += M SH(dt dT/dt)``;
+    * ``vor_hat, div_hat += M vordiv_from_uv_3d(dt du/dt, dt dv/dt)`` (the
+      Bourke operators of :func:`~legoesm.grids.gaussian.vordiv_from_uv_3d`,
+      which the dycore's own IC path and the legacy spectral physics use);
+    * tracers and ``p_s`` through :func:`apply_physics_water_mass` in grid
+      space (every tracer's column mass and the column dry mass exact), then
+      ``lnps_hat += M SH(ln p_s_new - ln p_s_old)`` with ``M`` the dycore's
+      de-aliasing mask (*dealias_mask*; the state truncation that follows
+      is then the identity on the increment), and the tracers re-weighted
+      onto the layer masses of the APPLIED surface pressure ``p_s_eff =
+      exp(SH^-1 lnps_hat)`` (:func:`shift_ps_keep_tracer_mass`) so every
+      tracer's column mass is the one the physics left, in every column
+      the applied increment reaches (codex 2026-10-14 / 2026-10-27: without
+      the re-weight the truncation moved water and passenger tracers).  The truncation's
+      residual lands in the per-column DRY mass, which the global anchor
+      restores as it does the dynamics' own drift.
+
+    ``dp_s_dt`` / ``dphis_dt`` are not read: ``p_s`` follows the water
+    (``dp_s_dt = 0``, the column mesh contract) and ``phis`` is static.
+
+    Returns ``(state, diag)``; ``diag['dry_mass_trunc_rel_max' / '_mean']``
+    is that per-column dry-mass residual, ``|p_s_eff - p_s_new| / p_s_new``,
+    max and area-mean, budgeted by the lane's gate.
+    """
+    dt = jnp.asarray(dt, dtype=jnp.float64)
+    dT_hat = sh_analysis_3d(grid, dt * tend.dT_dt.data)
+    dvor, ddiv = vordiv_from_uv_3d(grid, dt * tend.du_dt.data, dt * tend.dv_dt.data)
+    if dealias_mask is not None:
+        # the increments stay in the de-aliased band the state lives in, so
+        # the next step's dynamics never acts on coefficients the native
+        # lane would have truncated (GLM 2026-10-14); the n = 0 mode, hence
+        # every global integral, is retained
+        m3 = dealias_mask[:, None]
+        dT_hat, dvor, ddiv = dT_hat * m3, dvor * m3, ddiv * m3
+    T_hat = state.T_hat.data + dT_hat
+    vor_hat = state.vor_hat.data + dvor
+    div_hat = state.div_hat.data + ddiv
+    lnps_hat = state.lnps_hat.data
+    tracers = state.tracers
+    zero = jnp.zeros((), dtype=jnp.float64)
+    diag = {"dry_mass_trunc_rel_max": zero, "dry_mass_trunc_rel_mean": zero}
+    if tracers and tend.tracer_tendencies:
+        p_s_old = jnp.exp(sh_synthesis(grid, lnps_hat))
+        tracers, p_s_new = apply_physics_water_mass(
+            tracers, tend.tracer_tendencies, p_s_old, sigma_coord, dt)
+        # columns whose water the physics moved: inside one jit, XLA may
+        # evaluate p_s_old in two fusions with different rounding, so a
+        # zero water tendency is masked out explicitly (bitwise identity)
+        # rather than relied on as log(p_s / p_s) == 0 (measured 4e-17);
+        # the derivative is the unmasked one (codex 2026-10-27 r2)
+        moved = p_s_new != p_s_old
+        lr = jnp.log(p_s_new / p_s_old)
+        inc = sh_analysis(grid, _select_keep_tangent(moved, lr, jnp.zeros_like(lr)))
+        if dealias_mask is not None:
+            inc = inc * dealias_mask
+        lnps_hat = lnps_hat + inc
+        p_s_eff = jnp.exp(sh_synthesis(grid, lnps_hat))
+        # the truncated increment moves p_s beyond the columns whose water
+        # moved: every column with a non-zero applied ln p_s change is
+        # re-weighted (an exactly-zero increment leaves the rest bitwise)
+        reweight = moved | (sh_synthesis(grid, inc) != 0.0)
+        rel = jnp.abs(p_s_eff - p_s_new) / p_s_new
+        w = grid.grid_area.astype(jnp.float64)
+        diag = {"dry_mass_trunc_rel_max": jnp.max(rel),
+                "dry_mass_trunc_rel_mean": jnp.sum(rel * w) / jnp.sum(w)}
+        _, shifted = shift_ps_keep_tracer_mass(
+            p_s_new, tracers, sigma_coord, p_s_eff - p_s_new)
+        tracers = {nm: tr.replace(data=_select_keep_tangent(
+                       reweight[..., None], shifted[nm].data, tr.data))
+                   for nm, tr in tracers.items()}
+    out = state._replace(
+        vor_hat=state.vor_hat.replace(data=vor_hat),
+        div_hat=state.div_hat.replace(data=div_hat),
+        T_hat=state.T_hat.replace(data=T_hat),
+        lnps_hat=state.lnps_hat.replace(data=lnps_hat),
+        tracers=tracers)
+    return out, diag

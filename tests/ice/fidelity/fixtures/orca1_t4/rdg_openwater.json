@@ -1,0 +1,75 @@
+{
+ "source": "NEMO 5.0.1 SI3, cfg ORCA1_T4DYN (eORCA1 360x331, 32 ranks, nn_hls=2), build job 11022552, kt=17281=nit000, jpl=1",
+ "record": "/burg/glab/users/pg2328/oracle_audit/tier4/dyn/ctl_on/t4_rdg_record_*.bin (32 files, md5-of-md5s 12be3e720fe2de45d1309c0a69ab25b4); hook MY_SRC t4_dyn.F90 channel rdg (ice_dyn_rdgrft entry/exit)",
+ "spread": "20-seed 1-ulp per-cell spread, tier4/dyn/seeds/out_*.npz vs ctl_stop (shared perturb.py)",
+ "harness": "tier4/dyn/t4lib.py assemble/interior (ext idx -> interior global 0-based i,j)",
+ "extractor": "/burg/glab/users/pg2328/oracle_audit/si3dyn_fix/D5/extract.py",
+ "legoesm_branch_sha": "01546ffdacd2781c6e75d0ce6c27b1ada02f5a6d",
+ "nemo_retention": "rn_fsnwrdg=rn_fsnwrft=rn_fpndrdg=rn_fpndrft=0.5 (snow/pond only; not in fixture outputs)",
+ "cell_classes": {
+  "deficit_base_miss": 16,
+  "excess_entry": 4,
+  "deficit_base_match": 6,
+  "branch_worst": 1,
+  "low_conc_ridged": 4,
+  "ice_not_ridged": 4,
+  "no_ice": 2
+ },
+ "full_field_summary": {
+  "base": {
+   "ato_i_out": {
+    "max": 1.0,
+    "n_gt_1e12": 142,
+    "n_gt_cell_spread": 142,
+    "max_excess_over_spread": 0.07136667383390388
+   },
+   "a_i_out": {
+    "max": 2.2296890228358316e-16,
+    "n_gt_1e12": 0,
+    "n_gt_cell_spread": 1,
+    "max_excess_over_spread": 1.1148445114179156e-16
+   },
+   "v_i_out": {
+    "max": 2.107274668902802e-16,
+    "n_gt_1e12": 0
+   },
+   "oa_i_out": {
+    "max": 3.56054186712487e-16,
+    "n_gt_1e12": 0
+   },
+   "e_i_out": {
+    "max": 2.1573801579891355e-16,
+    "n_gt_1e12": 0
+   },
+   "iterations_max": 3
+  },
+  "branch": {
+   "ato_i_out": {
+    "max": 1.0,
+    "n_gt_1e12": 1,
+    "n_gt_cell_spread": 1,
+    "max_excess_over_spread": 2.6781988155679487e-14
+   },
+   "a_i_out": {
+    "max": 2.2296890228358316e-16,
+    "n_gt_1e12": 0,
+    "n_gt_cell_spread": 1,
+    "max_excess_over_spread": 1.1148445114179156e-16
+   },
+   "v_i_out": {
+    "max": 2.107274668902802e-16,
+    "n_gt_1e12": 0
+   },
+   "oa_i_out": {
+    "max": 3.56054186712487e-16,
+    "n_gt_1e12": 0
+   },
+   "e_i_out": {
+    "max": 2.1573801579891355e-16,
+    "n_gt_1e12": 0
+   },
+   "iterations_max": 3
+  }
+ },
+ "fixture_subset_branch_max_rel_ato": 5.3563976311358974e-14
+}

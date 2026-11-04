@@ -51,10 +51,14 @@ from legoesm.atmosphere.physics.turbulence.mynn25 import mynn25_turbulence
 from legoesm.atmosphere.physics.turbulence.clubb import clubb_turbulence
 from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_lite_turbulence
 from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
+    cam_pblintd_height,
     holtslag_boville_turbulence,
 )
 from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
 from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence
+from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+    cam6_detrain_condensate,
+)
 from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
@@ -142,6 +146,14 @@ def materialize_sub_config(config: TurbulenceConfig) -> TurbulenceConfig:
         from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
         return config._replace(clubb=CLUBBConfig())
     return config
+
+
+def resolved_clubb_config(config: TurbulenceConfig):
+    """The ``CLUBBConfig`` dispatch will run, or ``None`` unless
+    ``config.scheme == "clubb"``.  Consumers of CLUBB's top (the cam6_clubb
+    ice-stratus cut in radiation, MG2 and the CMOR cloud diagnostics) read it
+    from here, so they see the same config the closure runs with."""
+    return materialize_sub_config(config).clubb if config.scheme == "clubb" else None
 
 
 def get_turbulence_fn(config: TurbulenceConfig):
@@ -475,17 +487,27 @@ def _carry_update_with_cloud_fraction(carry_field, carry_val, turb_out):
     (``carry_field`` -> ``carry_val``: tke / qke / clubb_moments) is co-located
     under its own key so it still evolves across the step.
 
-    Schemes with no PDF cloud closure leave ``cloud_fraction=None`` -> we return
-    the plain ``carry_val``, byte-identical to the pre-existing (bare value, not
-    dict) contract.  combined.py only merges the dict when ``field_name`` (the
-    registered carry field) is not None, which holds for every cf-producing
-    scheme today (CLUBB carries ``tke``); a diagnostic scheme that ever set cf
-    with ``carry_field=None`` would need combined.py's ``field_name is not None``
-    guard relaxed for the dict branch first.
+    The diagnosed PBL height ``turb_out.h_pbl`` is always published as
+    ``pblh`` (CAM's pbuf ``pblh``, written by clubb_intr.F90:2616): deep
+    convection reads it one step lagged for its launch-level bound
+    (convect_deep.F90:266).  Schemes with no PDF cloud closure leave
+    ``cloud_fraction=None`` and publish only ``pblh`` plus their carry; a PDF
+    closure that also returns ``relvar`` (prognostic CLUBB) publishes it next
+    to ``cloud_fraction`` for MG2.
+    combined.py only merges the dict when ``field_name`` (the registered carry
+    field) is not None, which holds for every scheme (turbulence_carry_field
+    never returns None).
     """
-    if turb_out.cloud_fraction is None:
-        return carry_val
-    updates = {"cloud_fraction": turb_out.cloud_fraction}
+    updates = {"pblh": turb_out.h_pbl}
+    if turb_out.cloud_fraction is not None:
+        updates["cloud_fraction"] = turb_out.cloud_fraction
+        if turb_out.relvar is not None:
+            updates["relvar"] = turb_out.relvar
+    # CAM6 droplet-activation inputs (prognostic CLUBB only; None otherwise).
+    if turb_out.wp2_iface is not None:
+        updates["clubb_wp2_iface"] = turb_out.wp2_iface
+    if turb_out.Kh_iface is not None:
+        updates["clubb_kh_iface"] = turb_out.Kh_iface
     if carry_field is not None and carry_val is not None:
         updates[carry_field] = carry_val
     return updates
@@ -497,6 +519,8 @@ def make_turbulence_physics(
     dt: float = 300.0,  # coeff-ok: default physics timestep [s]
     f_land=None,
     land_beta: float = 1.0,
+    *,
+    zm_config=None,
 ) -> Callable:
     """Create a physics function for turbulence matching a model's signature.
 
@@ -517,6 +541,10 @@ def make_turbulence_physics(
         Land evaporation efficiency in [0, 1] applied on the ``f_land``
         fraction of the surface humidity (MPAS-only, with ``f_land``).
         ``1.0`` (default) keeps the saturated wet surface, byte-identical.
+    zm_config : ZhangMcFarlaneConfig or None
+        MPAS-only: the ZM config whose detrainment smoothing widths the CLUBB
+        bridge uses to book a ``forcing["conv_dlf"]`` hand-off (CAM6
+        clubb_intr.F90:2345-2376).  ``None``: a handed ``conv_dlf`` raises.
 
     Returns
     -------
@@ -540,6 +568,11 @@ def make_turbulence_physics(
             "TurbulenceConfig.liquid_partition needs prognostic CLUBB "
             "(CLUBBConfig(prognostic=True)); the diagnostic closure does not "
             "advance the total water the exchange partitions.")
+    if model_type != "mpas" and zm_config is not None:
+        raise ValueError(
+            "zm_config feeds the MPAS CLUBB bridge's booking of ZM's detrained "
+            f"condensate; the {model_type!r} turbulence lane does not book it "
+            "(it would be silently inert here).")
     if model_type != "mpas" and (f_land is not None or land_beta != 1.0):
         raise ValueError(
             "f_land/land_beta are the MPAS land surface boundary knobs; the "
@@ -595,7 +628,8 @@ def make_turbulence_physics(
         # temperature from the per-step ``forcing["T_sfc"]`` (AMIP SST) when
         # supplied, so the surface sensible/latent fluxes are SST-driven.
         _mpas_turb_fn = _make_mpas_turbulence(
-            turbulence_config, dt, f_land=f_land, land_beta=land_beta)
+            turbulence_config, dt, f_land=f_land, land_beta=land_beta,
+            zm_config=zm_config)
         # Forcing-aware: the combined-physics dispatcher forwards
         # ``forcing["T_sfc"]`` to fns advertising this (mirrors radiation).
         _mpas_turb_fn._wants_forcing = True
@@ -785,6 +819,7 @@ def _make_mpas_turbulence(
     dt: float,
     f_land=None,
     land_beta: float = 1.0,
+    zm_config=None,
 ) -> Callable:
     """Create turbulence physics_fn for MPASPrimitiveEquationModel.
 
@@ -990,11 +1025,17 @@ def _make_mpas_turbulence(
         if getattr(_surf, "ocean_q_sfc_saline", False):
             # Sea water at the SURFACE pressure (the coupled lane's convention)
             # for the ocean fraction: replace that fraction's fresh-water share
-            # of the blend; the land share is untouched.
+            # of the blend; the land share is untouched.  SPECIFIC humidity,
+            # like the air humidity it is differenced with (CESM ssq = 0.98 x
+            # saturation specific humidity): the saturation curve's MIXING
+            # RATIO is converted before the salinity factor.
             from legoesm.core.bulk_flux import ocean_surface_q_sat
-            _q_ocean = ocean_surface_q_sat(
-                T_sfc, p_s.reshape(nCells), thermo_convention=_surf.thermo_convention,
-                bulk_scheme=_surf.bulk_scheme, saline_factor=_Q_SAT_SALINE_FACTOR)
+            from legoesm.thermo import mixing_ratio_to_specific_humidity
+            _q_ocean = _Q_SAT_SALINE_FACTOR * mixing_ratio_to_specific_humidity(
+                ocean_surface_q_sat(
+                    T_sfc, p_s.reshape(nCells),
+                    thermo_convention=_surf.thermo_convention,
+                    bulk_scheme=_surf.bulk_scheme))
             _fo = (1.0 - jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
                    if f_land is not None else 1.0)
             q_sfc = q_sfc + _fo * (_q_ocean - _q_sfc_fresh)
@@ -1047,12 +1088,14 @@ def _make_mpas_turbulence(
             else:
                 _T_bulk = jnp.asarray(_T_oc, dtype=T_sfc.dtype).reshape(nCells)
                 if getattr(_surf, "ocean_q_sfc_saline", False):
+                    # Specific humidity, as the blended path's ocean share.
                     from legoesm.core.bulk_flux import ocean_surface_q_sat
-                    _q_bulk = ocean_surface_q_sat(
-                        _T_bulk, p_s.reshape(nCells),
-                        thermo_convention=_surf.thermo_convention,
-                        bulk_scheme=_surf.bulk_scheme,
-                        saline_factor=_Q_SAT_SALINE_FACTOR)
+                    from legoesm.thermo import mixing_ratio_to_specific_humidity
+                    _q_bulk = _Q_SAT_SALINE_FACTOR * mixing_ratio_to_specific_humidity(
+                        ocean_surface_q_sat(
+                            _T_bulk, p_s.reshape(nCells),
+                            thermo_convention=_surf.thermo_convention,
+                            bulk_scheme=_surf.bulk_scheme))
                 else:
                     _q_bulk = saturation_specific_humidity(_T_bulk, p_full_col[:, -1])
             # Through the shared helper rather than an inline copy: this
@@ -1176,6 +1219,49 @@ def _make_mpas_turbulence(
                 f"turbulence scheme {scheme_name!r} accepted the liquid "
                 "partition but returned no dq_c_dt, so the liquid removed from "
                 "vapour would vanish. This is a scheme bug, not a config one.")
+        # ZM's detrained condensate handed over by the combined macmic loop
+        # (CAM6 clubb_intr.F90:2345-2376): booked on state1 AFTER the CLUBB
+        # update (:2251), so everything below -- the PBL height included
+        # (:2594-2617 runs after the detrainment update at :2397) -- sees it.
+        _dlf = None if forcing is None else forcing.get("conv_dlf")
+        _det = None
+        if _dlf is not None:
+            if zm_config is None:
+                raise ValueError(
+                    "forcing['conv_dlf'] (ZM's detrained condensate) was handed "
+                    "to the MPAS turbulence bridge, but it was built without "
+                    "zm_config, whose smoothing widths the booking needs.")
+            _missing = [n for n in ("q_c", "q_i", "N_c", "N_i")
+                        if state.tracers is None or n not in state.tracers]
+            if _missing:
+                raise ValueError(
+                    "forcing['conv_dlf'] is booked into q_c, q_i, N_c and N_i; "
+                    f"the state lacks {_missing}, whose tendencies the MPAS "
+                    "step would drop.")
+            _det = cam6_detrain_condensate(
+                T_col + dt * turb_out.dT_dt,
+                jnp.asarray(_dlf).reshape(nCells, nlev), zm_config)
+            turb_out = turb_out._replace(dT_dt=turb_out.dT_dt + _det[0])
+        if scheme_name == "clubb" and _surface_flux is not None:
+            # CAM6 PBL height (oracle row 48): clubb_intr.F90:2594-2617 runs
+            # hb_diff::pblintd on state1 AFTER the CLUBB update
+            # (physics_update at :2251; geopotential_t re-derives zm/zi from
+            # the updated T, q), with the coupler's surface stress, sensible
+            # heat and water flux (cam_in%wsx/wsy/shf/cflx) and the hb_diff
+            # constants; ZM reads it next step (convect_deep.F90:266).
+            _T_p = T_col + dt * turb_out.dT_dt
+            _q_p = q_v_col + dt * turb_out.dq_v_dt
+            _zf_p, _zh_p = _compute_heights_from_sigma(
+                _T_p, p_half_col, q_v=_q_p)
+            turb_out = turb_out._replace(h_pbl=cam_pblintd_height(
+                _T_p, _q_p, u_col + dt * turb_out.du_dt,
+                v_col + dt * turb_out.dv_dt, p_full_col, _zf_p, _zh_p,
+                _surface_flux[0], _surface_flux[1], turb_out.shflx,
+                turb_out.evap_sfc,
+                sigma_coord.pressure_at_full(
+                    jnp.asarray(constants.p_ref, dtype=T_col.dtype)),
+                turbulence_config.holtslag_boville,
+                p_sfc=p_half_col[:, -1]))
 
         # Cell → edge tendency projection.  Average the cell tendencies
         # of the two cells flanking each edge, then project onto the
@@ -1216,6 +1302,18 @@ def _make_mpas_turbulence(
                 )
             else:
                 tracer_tends["q_c"] = turb_out.dq_c_dt.reshape(_qc_raw.shape)
+        if _det is not None:
+            for _nm, _d, _u in zip(("q_c", "q_i", "N_c", "N_i"), _det[1:],
+                                   ("kg/kg/s", "kg/kg/s", "1/kg/s", "1/kg/s")):
+                _d = _d.reshape(state.T.data.shape)
+                _prev = tracer_tends.get(_nm)
+                if _prev is None:
+                    tracer_tends[_nm] = state.T.replace(
+                        data=_d, name=f"d{_nm}_dt_detrain", units=_u)
+                elif hasattr(_prev, "replace"):
+                    tracer_tends[_nm] = _prev.replace(data=_prev.data + _d)
+                else:
+                    tracer_tends[_nm] = _prev + _d
 
         zero_ps = jnp.zeros_like(p_s)
         # Surface turbulent fluxes for the CMOR hfss/hfls feed [W/m^2,

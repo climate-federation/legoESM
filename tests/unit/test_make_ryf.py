@@ -23,6 +23,10 @@ xr = pytest.importorskip("xarray")
 zarr = pytest.importorskip("zarr")
 pd = pytest.importorskip("pandas")
 
+# make_ryf calls Dataset.chunk() before to_zarr, which needs dask.
+_needs_dask = pytest.mark.skipif(importlib.util.find_spec("dask") is None,
+                                 reason="make_ryf needs dask")
+
 # Load the script as a module by file path.
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "data" / "make_ryf.py"
 _spec = importlib.util.spec_from_file_location("make_ryf", _SCRIPT)
@@ -144,6 +148,7 @@ def synthetic_iaf(tmp_path):
     return iaf
 
 
+@_needs_dask
 def test_make_ryf_end_to_end(synthetic_iaf, tmp_path):
     out = tmp_path / "RYF9091.zarr"
     make_ryf_mod.make_ryf(
@@ -171,6 +176,7 @@ def test_make_ryf_end_to_end(synthetic_iaf, tmp_path):
         assert "1900-01-01" in str(t0)
 
 
+@_needs_dask
 def test_make_ryf_splice_boundary_uses_year1_for_may_dec(synthetic_iaf, tmp_path):
     """For RYF9091 (year2=1991 non-leap), May-Dec values must come
     from year1=1990 (base 10000) not from year2=1991 (base 20000)."""
@@ -189,6 +195,7 @@ def test_make_ryf_splice_boundary_uses_year1_for_may_dec(synthetic_iaf, tmp_path
     assert uas[959, 0, 0] == 20959.0
 
 
+@_needs_dask
 def test_make_ryf_3hr_mean_path_shifts_timestamp(synthetic_iaf, tmp_path):
     """3hr-mean variables (rsds, rlds, prra, prsn) get re-stamped from
     HH:30 to HH:00 — verify that path executes and produces the
@@ -203,6 +210,7 @@ def test_make_ryf_3hr_mean_path_shifts_timestamp(synthetic_iaf, tmp_path):
     assert rsds.shape == (365 * 8, 4, 8)
 
 
+@_needs_dask
 def test_make_ryf_daily_friver_broadcast_to_8_slots(synthetic_iaf, tmp_path):
     """Daily friver should be broadcast 8x per noleap day."""
     out = tmp_path / "RYF9091.zarr"
@@ -229,6 +237,7 @@ def test_make_ryf_rejects_missing_variable_file(tmp_path):
         make_ryf_mod.make_ryf(iaf, 1990, 1991, out, progress=False)
 
 
+@_needs_dask
 def test_make_ryf_handles_friver_on_different_grid(tmp_path):
     """Real JRA55-do v1.6.0 publishes friver on a 0.25° regular grid
     while the atmospheric vars are on TL319 (~0.55°). This test
@@ -288,6 +297,7 @@ def _write_iaf_var_alt_grid(iaf_dir, year, base):
     ds.to_netcdf(str(path))
 
 
+@_needs_dask
 def test_make_ryf_cli_entry_point(synthetic_iaf, tmp_path):
     """Smoke test the argv parser + main()."""
     out = tmp_path / "out.zarr"

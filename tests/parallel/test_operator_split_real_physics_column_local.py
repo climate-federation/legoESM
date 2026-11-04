@@ -170,3 +170,51 @@ def test_real_step_unified_is_column_local():
     dT = np.asarray(phys_g.dT_dt.data if hasattr(phys_g.dT_dt, "data")
                     else phys_g.dT_dt)
     assert float(np.max(np.abs(dT))) > 0.0, "physics inert — vacuous locality"
+
+
+def test_sundqvist_band_build_reads_the_band_cell_areas():
+    """Item 9 (user 2026-10-27): the lat-band lane builds ONE pipeline (band 0)
+    and serves every band with it.  Sundqvist's GFS area blend must then read
+    the band's own areas from ``cell_area``: band 1's columns through the
+    band-0 build + band 1's areas equal the global build's band-1 slice, and
+    without the override (band 0's baked areas) they do not."""
+    # A 1/30-radius sphere puts these 8x8 cells (~1e10 m2) inside GFS's area
+    # ramp; at Earth radius every cell is coarser than its coarsest grid and
+    # the blend saturates identically in both bands.
+    grid = create_latlon_grid(n_lat=N_LAT, n_lon=N_LON,
+                              radius=constants.R_earth / 30.0,
+                              omega=constants.Omega)
+    bands = build_band_grids_atm(grid, N_DEV)
+    sigma = create_sigma_coordinate(n_levels=NLEV)
+    cfg = _experiment()._replace(microphysics="sundqvist")
+    su_g = build_physics_pipeline(grid, sigma, cfg).build_step_unified(
+        static_need_rad=True, jit=True)
+    su_b0 = build_physics_pipeline(bands[0], sigma, cfg).build_step_unified(
+        static_need_rad=True, jit=True)
+    a0, a1 = np.asarray(bands[0].grid_area), np.asarray(bands[1].grid_area)
+    assert not np.allclose(a0, a1)
+
+    rng = np.random.default_rng(4243)
+    inp = _inputs(N_LAT, N_LON, NLEV, rng)
+    # cold, cloudy columns: Sundqvist's ice autoconversion (the area-blended
+    # psautco) is active
+    inp["T"] = inp["T"] - 40.0
+    inp["q_c"] = jnp.full_like(inp["q_c"], 5.0e-4)
+    sl = {k: (v[NL * N_LON:2 * NL * N_LON] if k == "tke" else v[NL:2 * NL])
+          for k, v in inp.items()}
+
+    def _dqc(su, g, i, **kw):
+        lat, lon = _grid_lat_lon(g)
+        out = su(jnp.bool_(True), i["T"], i["p_s"], i["q_v"], i["q_c"], i["q_r"],
+                 None, i["u"], i["v"], i["sst"], i["sic"], lat, lon,
+                 1.0, 0.0, 600.0, jnp.ones(14), constants.S_0, i["o3"], i["aod"],
+                 i["held3"], i["held2"], i["held2"], i["held2"], i["held2"],
+                 i["held2"], tke=i["tke"], **kw)[0]
+        d = out.dq_c_dt
+        return np.asarray(d.data if hasattr(d, "data") else d)
+
+    ref = _dqc(su_g, grid, inp)[NL:2 * NL]
+    got = _dqc(su_b0, bands[1], sl, cell_area=bands[1].grid_area)
+    assert float(np.max(np.abs(got - ref))) < 1e-10
+    wrong = _dqc(su_b0, bands[1], sl)
+    assert float(np.max(np.abs(wrong - ref))) > 1e-10

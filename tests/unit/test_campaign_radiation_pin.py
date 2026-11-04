@@ -196,7 +196,7 @@ def test_wb_and_aimip_classical_are_the_same_model():
 
     params = build_variant("classical", nlev=8)
     assert isinstance(params, AIMIPClassicalParams)
-    assert len(params.raw_values) == 50
+    assert len(params.raw_values) == 49   # 50 until mcfarlane_tau_max left (CAM6 gw_oro)
 
 
 def test_the_wb_campaign_config_names_every_family():

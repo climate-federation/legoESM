@@ -1961,6 +1961,66 @@ fast-falling species can cross more than one layer per call; the number of
 sub-steps is bounded by a static cap, and the count each column required is
 reported.
 
+\paragraph{Instant melting and freezing (prognostic droplet number).}
+With the CAM6 prognostic droplet number enabled, cloud ice above
+$0\,^\circ$C melts into cloud droplets (8\,$\mu$m mean-volume radius) and cloud
+water below the homogeneous-freezing temperature ($-40\,^\circ$C by default)
+freezes into 25\,$\mu$m crystals of density 500\,kg\,m$^{-3}$, after
+sedimentation and limited by the heat available, as in MG2.  One deliberate
+departure from CAM keeps the scheme differentiable: MG2 switches each process on
+abruptly at its threshold, whereas here the heat-limited amount is multiplied by
+a smooth step $s(t)=6t^5-15t^4+10t^3$, $t=\Delta T/W$, which is exactly zero at
+the threshold (nothing melts below $0\,^\circ$C) and reaches full strength after
+$W=4/k$, with $k$ the existing melting or freezing sharpness ($W=2$\,K for ice
+melting, $0.2$\,K for homogeneous freezing).  The heat limit itself,
+$\min(1,r)$ with $r$ the heat-allowed over the available mass, is rounded with
+the smooth minimum $-\ln(e^{-s}+e^{-sr})/s$, $s=100$: it never exceeds the hard
+cap and lies $\ln 2/s\approx0.7\%$ below it at $r=1$.  Snow melts the same way above
+$+2\,^\circ$C, both on the start-of-step state (every later process then sees
+the melted snow as rain) and again after sedimentation, with the same smooth
+step ($W=2$\,K) and rounded cap; Morrison's own snow-melting rate is then off,
+and graupel melting is limited by the heat left after the snow has melted,
+through the same smooth step and rounded cap.
+
+\paragraph{Snow riming and splinters (prognostic droplet number).}
+Under the same switch, snow collects cloud droplets with CAM6 MG2's
+continuous-collection rate: a Stokes-number collection efficiency
+$E=\mathrm{St}^2/(\mathrm{St}+0.4)^2$ with
+$\mathrm{St}=D_c^2 V_{n,s}\rho_w\lambda_s/(9\mu)$, evaluated on the in-cloud
+droplets and the in-precipitation snow and multiplied by the liquid cloud
+fraction; droplets are removed in proportion to their mass.  The snow size
+distribution is the model's own (density and slope bounds; its number is not
+re-adjusted at the slope bounds, unlike MG2).  MG2's hard 0\,\textdegree C
+switch becomes a smooth step, zero at 0\,\textdegree C and full riming by
+$-W$ ($W=2$\,K in production).  Hallett--Mossop splinters take
+$3.5\times10^{8}$ crystals per kg of rime between $-8$ and $-3$\,\textdegree C
+(peak at $-5$\,\textdegree C), each of mass $\frac{4}{3}\pi\rho_i(1\,\mu$m$)^3$;
+the triangle's three corners are rounded with a smooth minimum and maximum
+(sharpness 100).  Splinter mass is limited with the rest of riming, splinter
+number is not (as MG2), and MG2's cap of ice number at the activated ice-nuclei
+number is not applied, because the model has no such number.
+
+\paragraph{Ice and snow vapour growth, ice-to-snow conversion (prognostic droplet number).}
+Under the same switch, cloud ice grows and sublimates as in CAM6 MG2: the
+vapour exchange is $\epsilon_i(q-q_{vi})/A_b$ times the ice cloud fraction, with
+$\epsilon_i=2\pi n_{0i}\rho D_v/\lambda_i^2$ on MG2's ice size distribution
+(density 500\,kg\,m$^{-3}$, slope between $1/(2D_{cs})$ and $1/(1\,\mu$m$)$,
+rounded at sharpness 100) and $A_b=1+L_s^2q_{vi}/(c_pR_vT^2)$.  Deposition and
+the Bergeron transfer of cloud liquid to ice at liquid saturation act below
+0\,\textdegree C through the smooth step ($W=2$\,K), sublimation at all
+temperatures.  Snow takes cloud liquid by the same Bergeron mechanism on the
+in-precipitation snow (MG2's ventilation factor) and sublimates in the clear
+precipitating air; it never grows from vapour, as in MG2.  Cloud ice converts
+to snow with MG2's Ferrier rate on its own size distribution (hard 0\,\textdegree
+C gate, as in CAM), removing MG2's own number.  The rates are then limited in
+MG2's order: ice deposition plus nucleation by the vapour available above ice
+saturation, then cloud ice, ice number and snow against their supplies, and
+finally rain evaporation and snow and ice sublimation so the air does not pass
+water saturation; Morrison's own ice and snow donor clamps are off.  Sublimating
+ice keeps its number, and rain number is removed with the evaporation before
+the last limiter, as MG2.  The saturation factor that production CAM6 applies
+to the vapour saturation is set to one.
+
 \paragraph{Homogeneous ice nucleation.}
 Optionally, haze droplets freeze homogeneously when the ice supersaturation
 exceeds the threshold

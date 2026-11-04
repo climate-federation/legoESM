@@ -45,7 +45,7 @@ def test_helper_follows_scheme_pins_and_orography():
     assert ap.aimip_inactive_fields(**kw, subgrid_orography=True) == (
         cloud | _SB | {_HTOPO})
     assert ap.aimip_inactive_fields(**kw, subgrid_orography=False,
-                                    param_fixed=_PIN_SB) == cloud | _KK
+                                    param_fixed=_PIN_SB) == cloud | _KK | _SB
     assert ap.aimip_inactive_fields(
         cloud_scheme="xu_randall", microphysics="sundqvist", gwd="none",
         subgrid_orography=True) == frozenset()
@@ -119,7 +119,9 @@ def test_scale_build_freezes_by_resolved_warm_rain_law(monkeypatch):
     kk = names({})
     assert not (kk & _SB) and _KK <= kk
     sb = names(_PIN_SB)                    # the deck pins the SB law
-    assert not (sb & _KK) and _SB <= sb
+    # k_au/k_ac/x_star are read by no law since the 2026-10-20 oracle port
+    # ("seifert_beheng" runs SB2001 as gSAM does), so they leave here too.
+    assert not (sb & _KK) and not (sb & _SB)
 
 
 def _array_knobs(classical):
@@ -170,18 +172,26 @@ def test_wb_param_init_of_an_inactive_parameter_raises(monkeypatch):
 
 def test_wb_checkpoint_of_frozen_knobs_loads_into_an_all_array_template(
         monkeypatch, tmp_path):
-    # The WB trainer serialises checkpoint_view(params): float knobs go to
-    # disk as arrays of the live dtype, or an all-array template (registry
-    # default, eval skeleton) fails equinox's dtype check.
+    # The WB trainer serialises checkpoint_view(params) plus the knob record:
+    # frozen float knobs go to disk as float64, and the loaders (load_checkpoint_or_fail) read them
+    # into an all-array template (registry default, eval skeleton) at that
+    # template's dtype, and into a frozen template as the same Python float.
+    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail, write_knob_record
     from legoesm.ml.training import checkpoint_view
     from legoesm.training.model_registry import build_variant
     cl = _wb_params(monkeypatch).classical
     path = tmp_path / "p.eqx"
     eqx.tree_serialise_leaves(path, checkpoint_view(cl))
-    full = eqx.tree_deserialise_leaves(path, build_variant("classical", nlev=4))
-    back = eqx.tree_deserialise_leaves(path, cl)
-    assert float(full.raw_values["sbm_tau_c"]) == cl.raw_values["sbm_tau_c"]
+    write_knob_record(cl, path)
+    tmpl = build_variant("classical", nlev=4)
+    full = load_checkpoint_or_fail(path, tmpl)
+    back = load_checkpoint_or_fail(path, cl)
+    dt = tmpl.raw_values["sbm_tau_c"].dtype
+    assert full.raw_values["sbm_tau_c"].dtype == dt
+    assert float(full.raw_values["sbm_tau_c"]) == float(
+        np.asarray(cl.raw_values["sbm_tau_c"], dtype=dt))
     assert type(back.raw_values["sbm_tau_c"]) is float
+    assert back.raw_values["sbm_tau_c"] == cl.raw_values["sbm_tau_c"]
 
 
 # --- Decision 5 (2026-10-15): unread SPATIAL surface fields -----------------
@@ -300,7 +310,7 @@ def test_unread_spatial_fields_do_not_change_the_surface_fluxes(bulk):
     rho = jnp.full((4,), 1.2)
     other = cfg._replace(**{f: getattr(cfg, f) * jnp.asarray([3.0, 0.2, 7.0, 0.5])
                             for f in unread})
-    a = compute_surface_fluxes(u, v, T, q, T_sfc, q_sfc, rho, cfg)
-    b = compute_surface_fluxes(u, v, T, q, T_sfc, q_sfc, rho, other)
+    a = compute_surface_fluxes(u, v, T, q, T_sfc, q_sfc, rho, cfg, t_bot=T)
+    b = compute_surface_fluxes(u, v, T, q, T_sfc, q_sfc, rho, other, t_bot=T)
     for x, y in zip(a, b):
         np.testing.assert_array_equal(np.asarray(x), np.asarray(y))

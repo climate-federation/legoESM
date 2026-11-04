@@ -69,7 +69,7 @@ def _column(ncol=4, nlev=24, dtheta_dz=4e-3, seed=0):
     return dict(u=u, v=v, T=T, q_v=q_v, tke=jnp.full((ncol, nlev), 0.4),
                 p_full=p_full, p_half=p_half, z_full=z_full, z_half=z_half,
                 T_sfc=T[:, -1] + 1.0, q_sfc=q_v[:, -1], rho=rho, dt=300.0,
-                config=CLUBBConfig())
+                config=CLUBBConfig(trop_cloud_top_press=0.0))
 
 
 def _hydrostatic_heights(col):
@@ -117,7 +117,7 @@ def test_unstable_mixes_more_than_stable():
     assert float(jnp.mean(out_unstable.Km)) > float(jnp.mean(out_stable.Km))
 
 
-def test_diagnostic_clubb_conserves_column_with_no_sfc_flux():
+def test_diagnostic_clubb_conserves_column_with_no_sfc_flux(monkeypatch):
     """The DEFAULT diagnostic ``scheme="clubb"`` conserves column moisture AND heat
     under zero surface flux — the conservation contract of the path most users
     get (the prognostic triad covers the opt-in path).
@@ -130,6 +130,10 @@ def test_diagnostic_clubb_conserves_column_with_no_sfc_flux():
     round-off. Non-vacuous WITHOUT spin-up: unlike the prognostic rest state, the
     diagnostic eddy diffusion is driven directly by the initial gradient, so it
     moves a genuine ``max|dq·dt|``~1e-4 of moisture while still conserving."""
+    # theta TRANSPORT pin: the column energy fixer (closes the host c_pd*T
+    # budget, which theta diffusion does not; test_clubb_column_budget.py)
+    # is a separate closure, zeroed so it cannot mask a transport defect.
+    _zero_energy_fixer(monkeypatch)
     kw = _column(ncol=2, nlev=24, dtheta_dz=4e-3)
     kw["T_sfc"] = kw["T"][:, -1]        # zero surface sensible-heat flux
     kw["q_sfc"] = kw["q_v"][:, -1]      # zero surface moisture flux
@@ -163,7 +167,7 @@ def test_diagnostic_clubb_conserves_column_with_no_sfc_flux():
 
 def test_custom_config_is_used():
     """A custom CLUBBConfig threads through TurbulenceConfig.clubb."""
-    cfg = CLUBBConfig()
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0)
     name, fn, scheme_cfg = get_turbulence_fn(TurbulenceConfig(scheme="clubb", clubb=cfg))
     assert scheme_cfg is cfg
 
@@ -270,6 +274,15 @@ def test_clubb_step_jit_and_grad():
     assert g.shape == kw["T"].shape and jnp.all(jnp.isfinite(g))
 
 
+# Sundqvist microphysics with the Zhao-Carr oracle's hard-coded constants
+# (m_r 3e-4, c2 0.5; zhaocarr_precpd.f:244,248), the GFS v16/v17 namelist
+# psautco (8e-4) and the oracle's commented operational evpco (2e-5,
+# zhaocarr_precpd.f:215), held at 8e-4 on any grid so the cold condensate of
+# these columns reaches the ground (the coupling tests need a precip sink).
+_SUNDQVIST_ZC = dict(qc_crit=3.0e-4, bergeron_enh_coeff=0.5, psautco_fine=8.0e-4,
+                     psautco_coarse=8.0e-4, evap_coeff=2.0e-5)
+
+
 def _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3, seed=0):
     """A grid-consistent top-down column for the prognostic SCM driver."""
     kw = _column(ncol=ncol, nlev=nlev, dtheta_dz=dtheta_dz, seed=seed)
@@ -286,7 +299,7 @@ def test_integrate_clubb_column_multistep_stable():
     multi-step test of the higher-order moment closure (moments persist+evolve)."""
     kw = _scm_column(ncol=2, nlev=24)
     u_f, v_f, T_f, q_f, m_f, diags = integrate_clubb_column(
-        **kw, dt=150.0, nsteps=40, config=CLUBBConfig())
+        **kw, dt=150.0, nsteps=40, config=CLUBBConfig(trop_cloud_top_press=0.0))
     for name, arr in (("u", u_f), ("T", T_f), ("q_v", q_f)):
         a = np.asarray(arr)
         assert np.all(np.isfinite(a)), name
@@ -298,7 +311,7 @@ def test_integrate_clubb_column_multistep_stable():
     assert np.all(np.asarray(q_f) >= 0.0)
     assert np.all(np.asarray(T_f) > 100.0)
     # TKE stays bounded (no blow-up) and physical over the run.
-    assert float(np.max(np.asarray(m_f.wp2))) < CLUBBConfig().wp2_max
+    assert float(np.max(np.asarray(m_f.wp2))) < CLUBBConfig(trop_cloud_top_press=0.0).wp2_max
     # Per-step cloud diagnostics are physical throughout.
     cf = np.asarray(diags["cloud_frac"])
     assert cf.shape[0] == 40 and np.all((cf >= 0.0) & (cf <= 1.0))
@@ -317,7 +330,7 @@ def test_integrate_clubb_column_dry_stress_stays_physical():
     kw["q_v"] = jnp.full_like(kw["q_v"], 1e-5)   # near-dry
     kw["q_sfc"] = jnp.full_like(kw["q_sfc"], 1e-5)
     _, _, T_f, q_f, m_f, _ = integrate_clubb_column(
-        **kw, dt=200.0, nsteps=60, config=CLUBBConfig())
+        **kw, dt=200.0, nsteps=60, config=CLUBBConfig(trop_cloud_top_press=0.0))
     assert np.all(np.isfinite(np.asarray(T_f))) and np.all(np.asarray(T_f) > 100.0)
     assert np.all(np.asarray(q_f) >= 0.0)
     assert np.all(np.isfinite(np.asarray(m_f.wp2)))
@@ -346,7 +359,7 @@ def test_integrate_clubb_column_dry_regime_bounded_without_host_diffusion():
         kw["q_v"] = jnp.full_like(kw["q_v"], 1e-5)
         kw["q_sfc"] = jnp.full_like(kw["q_sfc"], 1e-5)
         _, _, _, _, m_f, _ = integrate_clubb_column(
-            **kw, dt=200.0, nsteps=60, config=CLUBBConfig(),
+            **kw, dt=200.0, nsteps=60, config=CLUBBConfig(trop_cloud_top_press=0.0),
             host_numerical_diffusion=nu)
         return float(np.max(np.asarray(m_f.wp2)))
     bare, damped = _run(0.0), _run(0.05)
@@ -406,8 +419,8 @@ def test_integrate_clubb_column_develops_tke_when_unstable():
     # Strong surface heating.
     kw["T_sfc"] = kw["T"][:, -1] + 6.0
     _, _, _, _, m_f, _ = integrate_clubb_column(
-        **kw, dt=150.0, nsteps=30, config=CLUBBConfig())
-    assert float(np.max(np.asarray(m_f.wp2))) > 10.0 * CLUBBConfig().tke_min
+        **kw, dt=150.0, nsteps=30, config=CLUBBConfig(trop_cloud_top_press=0.0))
+    assert float(np.max(np.asarray(m_f.wp2))) > 10.0 * CLUBBConfig(trop_cloud_top_press=0.0).tke_min
 
 
 def test_integrate_clubb_column_jit_and_grad():
@@ -415,7 +428,7 @@ def test_integrate_clubb_column_jit_and_grad():
 
     def loss(T):
         _, _, T_f, _, m_f, _ = integrate_clubb_column(
-            **dict(kw, T=T), dt=150.0, nsteps=8, config=CLUBBConfig())
+            **dict(kw, T=T), dt=150.0, nsteps=8, config=CLUBBConfig(trop_cloud_top_press=0.0))
         return jnp.sum(T_f ** 2) + jnp.sum(m_f.wp2 ** 2)
 
     assert jnp.isfinite(jax.jit(loss)(kw["T"]))
@@ -429,7 +442,7 @@ def test_integrate_clubb_column_returns_consistent_means():
     from legoesm.atmosphere.physics.turbulence.clubb import flip_vertical
     kw = _scm_column(ncol=2, nlev=20)
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
-        **kw, dt=150.0, nsteps=12, config=CLUBBConfig())
+        **kw, dt=150.0, nsteps=12, config=CLUBBConfig(trop_cloud_top_press=0.0))
     np.testing.assert_allclose(np.asarray(m_f.rtm), np.asarray(flip_vertical(q_f)))
     np.testing.assert_allclose(np.asarray(m_f.um), np.asarray(flip_vertical(u_f)))
     np.testing.assert_allclose(np.asarray(m_f.vm), np.asarray(flip_vertical(v_f)))
@@ -438,10 +451,10 @@ def test_integrate_clubb_column_returns_consistent_means():
 
 
 def test_init_clubb_moments_shapes_and_floors():
-    m = init_clubb_moments(3, 20, CLUBBConfig())
+    m = init_clubb_moments(3, 20, CLUBBConfig(trop_cloud_top_press=0.0))
     assert m.rtm.shape == (3, 20) and m.wp2.shape == (3, 21) and m.wp3.shape == (3, 20)
-    assert np.all(np.asarray(m.wp2) == CLUBBConfig().tke_min)
-    assert np.allclose(np.asarray(m.rtp2), CLUBBConfig().rt_tol ** 2)
+    assert np.all(np.asarray(m.wp2) == CLUBBConfig(trop_cloud_top_press=0.0).tke_min)
+    assert np.allclose(np.asarray(m.rtp2), CLUBBConfig(trop_cloud_top_press=0.0).rt_tol ** 2)
 
 
 def test_prognostic_dispatch_selects_prognostic_fn():
@@ -452,7 +465,7 @@ def test_prognostic_dispatch_selects_prognostic_fn():
         turbulence_carry_field,
     )
     name, fn, cfg = get_turbulence_fn(
-        TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True)))
+        TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)))
     assert name == "clubb" and fn is clubb_turbulence_prognostic
     assert turbulence_carry_field(name, cfg) == "clubb_moments"
     # default (diagnostic) clubb still routes to tke + clubb_turbulence.
@@ -489,7 +502,7 @@ def test_prognostic_clubb_surface_heat_flux_tracks_surface_temperature():
     kw.pop("tke")
     kw["z_full"] = 0.5 * (kw["z_half"][:, :-1] + kw["z_half"][:, 1:])
     ncol, nlev = kw["T"].shape
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0,
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0,
                       surface=SurfaceLayerConfig(Cd_neutral=1.5e-3, Ch_neutral=1.5e-3))
     carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
 
@@ -547,7 +560,7 @@ def test_prognostic_clubb_conserves_column_moisture_no_sfc_flux():
     from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)   # moist, stably stratified
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
     # Spin up the higher-order moments so a real turbulent moisture flux exists
     # (dt=150, nsteps=40 is the proven-stable driver setting; the flux-form host
     # diffusion damps the bare-column 2Δz noise without altering the column sum).
@@ -620,7 +633,7 @@ def test_prognostic_clubb_conserves_column_heat_no_sfc_flux(monkeypatch):
     from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         **kw, dt=150.0, nsteps=40, config=cfg)
     tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
@@ -682,7 +695,7 @@ def test_prognostic_clubb_conserves_column_momentum_to_surface_stress():
     # Shift v to a clearly positive wind so the v-budget relative residual is
     # well-conditioned (the default near-zero-mean v has columns with τ_y ≈ 0).
     kw["v"] = kw["v"] + 5.0
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         **kw, dt=150.0, nsteps=40, config=cfg)
     tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
@@ -742,7 +755,11 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
     CLUBB conserves total water (``Σ mass·dq_v|clubb ≈ 0`` at zero surface flux),
     and ``sundqvist``'s column water budget closes to the surface precip sink, so
 
-        Σ mass·(dq_v|clubb + dq_v|μ + dq_c|μ + dq_r|μ) + precip ≈ 0 .
+        Σ (rho dz)·dq_v|clubb + Σ (dp/g)·(dq_v|μ + dq_c|μ + dq_r|μ) + precip ≈ 0 ,
+
+    each scheme in its own layer mass (CLUBB rho*dz, ``sundqvist`` dp/g since
+    R9).  Where rho*dz != dp/g this is the sum of two separate closures, not
+    the summed inventory in one coordinate.
 
     Scope: the spun-up column is supersaturated (independent of CLUBB), so the
     branch exercised is condensation → autoconversion → surface precip — exactly
@@ -752,16 +769,18 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
     microphysics' own tests, not this coupling test.
 
     Asserted alongside: (a) real condensation (non-vacuous), and (b) the
-    condensation is enthalpy-consistent (``c_pd·dT + L_v·dq_v = 0``)."""
+    microphysics never creates enthalpy (``c_pd·dT + L_v·dq_v <= 0``: zero but
+    for Zhao-Carr's fusion cooling)."""
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
     from legoesm.atmosphere.physics.microphysics.output import make_zero_hydrometeors
-    from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
+    from legoesm.atmosphere.physics.microphysics.sundqvist import (
+        diagnose_sundqvist_process_rates, sundqvist_microphysics)
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
     from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     dt = 150.0
     # Spin up real turbulent fluxes; the resulting column is supersaturated.
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
@@ -777,9 +796,12 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
     assert np.all(np.asarray(out.lhflx) == 0.0)          # zero sfc moisture flux
     hyd = make_zero_hydrometeors(ncol, nlev, dtype=T_f.dtype)   # q_r == 0
     mp = sundqvist_microphysics(
-        T_f, q_f, hyd, kw["p_full"], kw["p_half"], rho, dz, dt, SundqvistConfig())
+        T_f, q_f, hyd, kw["p_full"], kw["p_half"], rho, dz, dt,
+        SundqvistConfig(**_SUNDQVIST_ZC), cell_area=1.0e10)
 
-    mass = np.asarray(rho) * np.asarray(dz)              # kg/m^2
+    mass = np.asarray(rho) * np.asarray(dz)              # kg/m^2, CLUBB's weight
+    # sundqvist closes its budget in the Zhao-Carr layer mass dp/g (R9/C12)
+    mass_mu = np.asarray(kw["p_half"][:, 1:] - kw["p_half"][:, :-1]) / constants.g
     dqc = np.asarray(mp.dq_c_dt)
     dqv_m = np.asarray(mp.dq_v_dt)
     dqr = np.asarray(mp.dq_r_dt)
@@ -788,12 +810,25 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
     assert float(np.max(np.abs(dqr))) == 0.0             # diagnostic-rain: no q_r tracer growth
     # (a) Non-vacuous: the spun-up column is supersaturated → real condensation.
     assert float(np.max(dqc)) > 1e-7
-    # (b) Condensation is enthalpy-consistent (latent heating balances vapor sink).
-    assert float(np.max(np.abs(constants.c_pd * dTm + constants.L_v * dqv_m))) < 1e-10
-    # (c) Headline: summed turbulence+microphysics tendencies close the column
-    # water budget to the surface precip sink (CLUBB conserves; sundqvist closes).
+    # (b) Enthalpy: condensation and rain evaporation conserve c_pd*T + L_v*q_v;
+    # the only residual is Zhao-Carr's fusion term (snow sublimation at L_v+L_f,
+    # melting at L_f), which can only cool.
+    # Two-sided: the fusion cooling cannot exceed L_f times the condensate the
+    # step converted to precipitation (only snow can sublimate or melt).
+    resid_h = constants.c_pd * dTm + constants.L_v * dqv_m
+    assert float(np.max(resid_h)) < 1e-10
+    rates = diagnose_sundqvist_process_rates(
+        T_f, q_f, hyd, kw["p_full"], kw["p_half"], rho, dz, dt,
+        SundqvistConfig(**_SUNDQVIST_ZC), cell_area=1.0e10)
+    fusion_cap = constants.L_f * np.sum(mass_mu * np.asarray(rates.autoconversion), axis=1)
+    assert np.all(-np.sum(mass_mu * resid_h, axis=1) <= fusion_cap * (1.0 + 1e-12))
+    # (c) Headline: on the same state, CLUBB conserves column water and
+    # Sundqvist closes its budget to the surface precip sink, EACH in its own
+    # layer mass (CLUBB rho*dz, Sundqvist dp/g since R9).  This is NOT a check
+    # of the summed inventory in one coordinate: where rho*dz != dp/g the two
+    # schemes' weights disagree and that sum is not tested here.
     clubb_col_dqv = np.sum(mass * np.asarray(out.dq_v_dt), axis=1)
-    micro_col = np.sum(mass * (dqv_m + dqc + dqr), axis=1)
+    micro_col = np.sum(mass_mu * (dqv_m + dqc + dqr), axis=1)
     col_water = np.sum(mass * np.asarray(q_f), axis=1)
     combined_resid = clubb_col_dqv + micro_col + precip  # kg/m^2/s, want ~0
     # precip is genuinely nonzero (autoconversion fires), so this is not a
@@ -829,7 +864,7 @@ def test_clubb_microphysics_chain_is_differentiable():
     from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     kw = _scm_column(ncol=2, nlev=16, dtheta_dz=4e-3)
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     dt = 150.0
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         **kw, dt=dt, nsteps=30, config=cfg)
@@ -847,7 +882,8 @@ def test_clubb_microphysics_chain_is_differentiable():
         t1 = T_f + dt * out.dT_dt
         q1 = q_in + dt * out.dq_v_dt
         mp = sundqvist_microphysics(
-            t1, q1, hyd, kw["p_full"], kw["p_half"], rho, dz, dt, SundqvistConfig())
+            t1, q1, hyd, kw["p_full"], kw["p_half"], rho, dz, dt,
+            SundqvistConfig(**_SUNDQVIST_ZC), cell_area=1.0e10)
         return out, mp
 
     # Forward: the condensation branch is ACTIVE for this column (max on its
@@ -927,7 +963,7 @@ def test_prognostic_clubb_develops_convective_skewness_unlike_clubb_lite():
     p_half = jnp.asarray(p_half)
     z_full = jnp.asarray(z_full)
     z_half = jnp.asarray(z_half)
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     zt = np.sort(zc[0])
     # Upper mixed layer / entrainment zone — surface levels EXCLUDED so the
     # skewness statistic measures non-local transport aloft, not a surface spike.
@@ -997,7 +1033,7 @@ def test_clubb_turbulence_prognostic_carry_roundtrip_multistep():
     kw.pop("tke")
     kw["z_full"] = 0.5 * (kw["z_half"][:, :-1] + kw["z_half"][:, 1:])
     ncol, nlev = kw["T"].shape
-    cfg = CLUBBConfig(prognostic=True)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)
     carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
     assert carry.shape == (ncol, 15, nlev + 1)
     u, v, T, q = kw["u"], kw["v"], kw["T"], kw["q_v"]
@@ -1016,7 +1052,7 @@ def test_clubb_turbulence_prognostic_carry_roundtrip_multistep():
     assert np.all(np.isfinite(np.asarray(T))) and np.all(np.asarray(T) > 100.0)
     # wp2 (slot 4) evolved away from the init floor (the moments are prognostic).
     wp2_final = np.asarray(carry)[:, 4, :]
-    assert float(np.max(wp2_final)) > CLUBBConfig().tke_min
+    assert float(np.max(wp2_final)) > CLUBBConfig(trop_cloud_top_press=0.0).tke_min
 
 
 def _zero_energy_fixer(monkeypatch):
@@ -1044,7 +1080,7 @@ def test_prognostic_clubb_subcycling(monkeypatch):
     kw.pop("tke")
     kw["z_full"] = 0.5 * (kw["z_half"][:, :-1] + kw["z_half"][:, 1:])
     ncol, nlev = kw["T"].shape
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
     args = (kw["u"], kw["v"], kw["T"], kw["q_v"], carry, kw["p_full"],
             kw["p_half"], kw["z_full"], kw["z_half"], kw["T_sfc"], kw["q_sfc"],
@@ -1086,7 +1122,7 @@ def test_prognostic_clubb_subcycling_raw_moisture_contract():
     kw["q_v"] = jnp.full_like(kw["q_v"], 1e-6)       # near-dry: any clip would bite
     kw["q_sfc"] = jnp.full_like(kw["q_sfc"], 1e-6)
     ncol, nlev = kw["T"].shape
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
     base = (kw["u"], kw["v"], kw["T"], kw["q_v"], carry, kw["p_full"],
             kw["p_half"], kw["z_full"], kw["z_half"], kw["T_sfc"], kw["q_sfc"], kw["rho"])
@@ -1121,7 +1157,7 @@ def test_prognostic_clubb_blocked_on_non_persisting_drivers():
     persist -> allowed.
     """
     from legoesm.atmosphere.physics.turbulence.integration import make_turbulence_physics
-    tc = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True))
+    tc = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True))
     with pytest.raises(NotImplementedError, match="prognostic CLUBB"):
         make_turbulence_physics(tc, "nonhydrostatic", 300.0)
     assert make_turbulence_physics(tc, "spectral_pe", 300.0) is not None
@@ -1132,7 +1168,7 @@ def test_prognostic_clubb_blocked_on_non_persisting_drivers():
     # hydrostatic builds fine.
     assert make_turbulence_physics(tc, "hydrostatic", 300.0) is not None
     # diagnostic clubb is allowed on all (stateless wp2 in tke).
-    tc_diag = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig())
+    tc_diag = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(trop_cloud_top_press=0.0))
     assert make_turbulence_physics(tc_diag, "nonhydrostatic", 300.0) is not None
 
 
@@ -1188,7 +1224,7 @@ def test_prognostic_clubb_runs_through_mpas_driver():
             p_s=Field(jnp.full((nC,), 1e5), name="p_s", dims=("nCells",), units="Pa"),
             phis=Field(jnp.zeros((nC,)), name="phis", dims=("nCells",), units="m^2/s^2"))
 
-    tc = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True))
+    tc = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True))
     # The build-policy docstring claims mpas is allowed — verify it actually builds.
     assert make_turbulence_physics(tc, "mpas", 300.0) is not None
     cfg = PhysicsConfig(
@@ -1268,7 +1304,7 @@ def test_default_diagnostic_clubb_runs_through_mpas_driver():
     cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
         convection=ConvectionConfig(scheme="none"),
-        turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig()),  # diagnostic
+        turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(trop_cloud_top_press=0.0)),  # diagnostic
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"))
     phys_state = init_physics_state(nC, nlev, cfg)
@@ -1303,11 +1339,11 @@ def test_read_turb_carry_fails_fast_on_wrong_clubb_shape():
     from legoesm.atmosphere.physics.turbulence.integration import _read_turb_carry
     bad = SimpleNamespace(clubb_moments=jnp.zeros((4, 1, 1)))   # minimal placeholder
     with pytest.raises(ValueError, match="prognostic CLUBB expects"):
-        _read_turb_carry(bad, "clubb_moments", 4, 24, CLUBBConfig(prognostic=True),
+        _read_turb_carry(bad, "clubb_moments", 4, 24, CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True),
                          jnp.float64)
     # phys_state=None seeds fresh at the correct shape (one-off call).
     seeded = _read_turb_carry(None, "clubb_moments", 4, 24,
-                              CLUBBConfig(prognostic=True), jnp.float64)
+                              CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True), jnp.float64)
     assert seeded.shape == (4, 15, 25)
 
 
@@ -1321,7 +1357,7 @@ def test_prognostic_clubb_cloud_fraction_responds_to_moisture():
     from legoesm.thermo import saturation_mixing_ratio
     base = _scm_column(ncol=2, nlev=24, dtheta_dz=3e-3)
     qsat = saturation_mixing_ratio(base["T"], base["p_full"])
-    cfg = CLUBBConfig()
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0)
 
     def total_cloud(rh):
         kw = dict(base)
@@ -1349,7 +1385,7 @@ def test_prognostic_clubb_convective_bl_physics():
     lower BL (buoyancy production of TKE). This is the canonical turbulence-
     scheme sanity check, on the genuinely-prognostic path."""
     base = _scm_column(ncol=2, nlev=30, dtheta_dz=3e-3)   # stably stratified
-    cfg = CLUBBConfig()
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0)
 
     def run(extra_heating):
         kw = dict(base)
@@ -1427,7 +1463,7 @@ def test_prognostic_clubb_runs_in_combined_physics_pipeline():
     cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
         convection=ConvectionConfig(scheme="none"),
-        turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True)),
+        turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)),
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"))
     ncol = 6 * n * n
@@ -1473,7 +1509,7 @@ def test_prognostic_clubb_differentiable_through_pipeline():
     cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
         convection=ConvectionConfig(scheme="none"),
-        turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True)),
+        turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)),
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"))
     phys_state = init_physics_state(6 * n * n, nlev, cfg)
@@ -1518,7 +1554,7 @@ def test_prognostic_clubb_pipeline_multistep_stable():
     cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
         convection=ConvectionConfig(scheme="none"),
-        turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True)),
+        turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)),
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"))
     ncol = 6 * n * n
@@ -1533,7 +1569,7 @@ def test_prognostic_clubb_pipeline_multistep_stable():
         assert np.all(np.isfinite(cm))
         wp2_max_hist.append(float(np.max(cm[:, 4, :])))   # wp2 slot
     # No blow-up: wp2 stays well-bounded across the run.
-    assert max(wp2_max_hist) < CLUBBConfig().wp2_max
+    assert max(wp2_max_hist) < CLUBBConfig(trop_cloud_top_press=0.0).wp2_max
     # Quasi-equilibrium: the last few steps don't keep growing super-linearly.
     assert wp2_max_hist[-1] < 5.0 * max(wp2_max_hist[:3] + [1e-3])
 
@@ -1547,7 +1583,7 @@ def test_clubb_turbulence_prognostic_jit_and_grad():
     kw.pop("tke")
     kw["z_full"] = 0.5 * (kw["z_half"][:, :-1] + kw["z_half"][:, 1:])
     ncol, nlev = kw["T"].shape
-    cfg = CLUBBConfig(prognostic=True)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)
     carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
 
     def loss(T):
@@ -1590,7 +1626,7 @@ def test_diagnostic_clubb_runs_in_float32_no_dtype_promotion():
                     * jnp.maximum(T * (1.0 + 0.61 * q_v), jnp.asarray(150.0, f32)))
     out, wp2 = clubb_turbulence(
         u, v, T, q_v, tke, p_full, p_half, z_full, z_half, T[:, -1], q_v[:, -1],
-        rho, jnp.asarray(150.0, f32), CLUBBConfig())
+        rho, jnp.asarray(150.0, f32), CLUBBConfig(trop_cloud_top_press=0.0))
     for arr in (out.du_dt, out.dv_dt, out.dT_dt, out.dq_v_dt, out.Km, out.Kh,
                 out.shflx, out.lhflx, out.ustar, out.h_pbl, wp2):
         assert arr.dtype == f32                          # NO silent float64 promotion
@@ -1626,7 +1662,7 @@ def test_prognostic_clubb_runs_in_float32_no_dtype_promotion():
     u = jnp.asarray(8.0 + 4.0 * rng.standard_normal((ncol, nlev)), dtype=f32)
     v = jnp.asarray(2.0 * rng.standard_normal((ncol, nlev)), dtype=f32)
     q_v = jnp.asarray(2e-3 + 4e-3 * rng.random((ncol, nlev)), dtype=f32)
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     carry = init_clubb_moments(ncol, nlev, cfg, dtype=f32)
     from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
     rho = p_full / (jnp.asarray(constants.R_d, f32)
@@ -1775,7 +1811,7 @@ def test_prognostic_clubb_accepts_prescribed_surface_fluxes():
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
     ncol, nlev = kw["T"].shape
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
     # Spin up real higher-order moments on a grid-consistent column (the proven-
     # stable dt=150,nsteps=40 driver setting) so the closure is non-degenerate.
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
@@ -1784,7 +1820,6 @@ def test_prognostic_clubb_accepts_prescribed_surface_fluxes():
     tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
     rho = kw["p_full"] / (constants.R_d * tv)
     rho_sfc = np.asarray(rho)[:, -1]
-    exner_sfc = (np.asarray(kw["p_full"])[:, -1] / constants.p_ref) ** constants.kappa
 
     wpthlp = jnp.full((ncol,), 0.06)    # upward kinematic heat flux [K m/s]
     wprtp = jnp.full((ncol,), 4.0e-5)   # upward kinematic moisture flux [kg/kg m/s]
@@ -1799,9 +1834,10 @@ def test_prognostic_clubb_accepts_prescribed_surface_fluxes():
     out, _ = run(T_f[:, -1] + 1.0, q_f[:, -1])
     assert np.all(np.isfinite(np.asarray(out.dT_dt)))   # non-degenerate state
 
-    # (1) Round-trip the kinematic BC to the reported W/m^2 surface fluxes + ustar.
+    # (1) Round-trip the kinematic BC to the reported W/m^2 surface fluxes + ustar
+    # (CAM host convention, clubb_intr.F90:1781: shf = cpair*rho*wpthlp_sfc).
     assert np.allclose(np.asarray(out.shflx),
-                       np.asarray(wpthlp) * rho_sfc * constants.c_pd * exner_sfc,
+                       np.asarray(wpthlp) * rho_sfc * constants.c_pd,
                        rtol=1e-6)
     assert np.allclose(np.asarray(out.lhflx),
                        np.asarray(wprtp) * rho_sfc * constants.L_v, rtol=1e-6)
@@ -1888,7 +1924,7 @@ def test_prognostic_clubb_prescribed_heat_flux_closes_column_budget(monkeypatch)
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
     ncol, nlev = kw["T"].shape
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         **kw, dt=150.0, nsteps=40, config=cfg)
     carry = pack_clubb_moments(m_f)
@@ -1940,7 +1976,7 @@ def test_prognostic_clubb_prescribed_moisture_flux_closes_column_budget():
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
     ncol, nlev = kw["T"].shape
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         **kw, dt=150.0, nsteps=40, config=cfg)
     carry = pack_clubb_moments(m_f)
@@ -2012,7 +2048,7 @@ def test_prognostic_clubb_prescribed_heat_flux_applied_through_subcycling(monkey
     u0 = jnp.full((ncol, nlev), 3.0)               # low, uniform → low shear
     v0 = jnp.zeros((ncol, nlev))
     q0 = jnp.full((ncol, nlev), 3e-3)
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         u0, v0, T0, q0, p_full, p_half, z_full, z_half, T0[:, -1], q0[:, -1],
         dt=150.0, nsteps=40, config=cfg)
@@ -2068,7 +2104,7 @@ def test_prognostic_clubb_prescribed_momentum_flux_is_applied_as_a_vector():
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
     ncol, nlev = kw["T"].shape
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         **kw, dt=150.0, nsteps=40, config=cfg)
     carry = pack_clubb_moments(m_f)
@@ -2195,7 +2231,7 @@ def test_clubb_prognostic_injected_flux_equals_kinematic_prescription():
     (``latent_enthalpy_correction``).  The expectation used to invert with the
     constant L_v and no correction -- the convention that decision replaced."""
     from legoesm.atmosphere.physics.turbulence.clubb import (
-        exner_function, init_clubb_moments, pack_clubb_moments,
+        init_clubb_moments, pack_clubb_moments,
     )
     from legoesm.atmosphere.physics.turbulence.surface_layer import (
         latent_enthalpy_correction, surface_moisture_flux,
@@ -2203,16 +2239,16 @@ def test_clubb_prognostic_injected_flux_equals_kinematic_prescription():
     kw = _hydrostatic_heights(_column(ncol=3, nlev=18))
     kw.pop("tke")
     ncol, nlev = kw["T"].shape
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
     sf = _injected_surface_flux(ncol, kw["T"].dtype)
     tau_x, tau_y, shflx, lhflx, _ = sf
     rho_sfc = kw["rho"][:, -1]
-    exner_sfc = exner_function(kw["p_full"][:, -1])
-    # The exact inverse map clubb_turbulence_prognostic applies internally.
+    # The exact inverse map clubb_turbulence_prognostic applies internally
+    # (CAM host convention, clubb_intr.F90:1781: no exner).
     evap = surface_moisture_flux(cfg.surface, lhflx, kw["T_sfc"])
     sfc_wpthlp = ((shflx + latent_enthalpy_correction(lhflx, evap))
-                  / (rho_sfc * constants.c_pd * exner_sfc))
+                  / (rho_sfc * constants.c_pd))
     sfc_wprtp = evap / rho_sfc
     sfc_upwp = tau_x / rho_sfc
     sfc_vpwp = tau_y / rho_sfc
@@ -2262,7 +2298,7 @@ def test_clubb_prognostic_injected_dynamic_flux_conserved():
     )
     from legoesm.diagnostics.process_ledger import column_total_energy
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     # Spin up a stable moment state (same recipe as the moisture-conservation test).
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         **kw, dt=150.0, nsteps=40, config=cfg)
@@ -2314,7 +2350,7 @@ def test_clubb_prognostic_wind_antiparallel_stress_conserved_componentwise():
         integrate_clubb_column, pack_clubb_moments,
     )
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         **kw, dt=150.0, nsteps=40, config=cfg)
     tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
@@ -2357,7 +2393,7 @@ def test_clubb_prognostic_rejects_surface_flux_and_explicit_sfc_together():
     kw = _column(ncol=2, nlev=16)
     kw.pop("tke")
     ncol, nlev = kw["T"].shape
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
     sf = _injected_surface_flux(ncol, kw["T"].dtype)
     with pytest.raises(ValueError, match="not both"):
@@ -2399,7 +2435,7 @@ def test_prognostic_surface_theta_l_variance_is_physical():
     )
 
     col = _hydrostatic_heights(_column(ncol=2, nlev=24))
-    cfg = CLUBBConfig(prognostic=True)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)
     moments = pack_clubb_moments(
         init_clubb_moments(2, 24, cfg, dtype=col["T"].dtype))
     _, m_new = clubb_turbulence_prognostic(
@@ -2446,7 +2482,7 @@ def test_prognostic_clubb_publishes_its_pdf_cloud_fraction():
     u = jnp.full((ncol, nlev), 4.0)
     v = jnp.zeros((ncol, nlev))
     rho = p_full / (constants.R_d * T)
-    cfg = CLUBBConfig(prognostic=True)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)
     mom = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg, dtype=jnp.float64))
     for _ in range(20):
         out, mom = clubb_turbulence_prognostic(
@@ -2506,7 +2542,7 @@ def test_pdf_variance_scale_is_live_and_monotonic():
         out, _ = clubb_turbulence(
             u, v, T, q_v, jnp.full((ncol, nlev), 0.1), p_full, p_half,
             z_full, z_half, jnp.full((ncol,), 301.0), jnp.full((ncol,), 0.021),
-            rho, 112.5, CLUBBConfig(pdf_variance_scale=scale))
+            rho, 112.5, CLUBBConfig(trop_cloud_top_press=0.0, pdf_variance_scale=scale))
         means.append(float(np.asarray(out.cloud_fraction)[:, band].mean()))
 
     assert all(np.isfinite(means)), means
@@ -2530,7 +2566,7 @@ def test_the_config_route_reaches_the_vector_path_too():
     )
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
-    cfg_base = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg_base = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         **kw, dt=150.0, nsteps=40, config=cfg_base)
     tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg_base.T0 * 0.5)
@@ -2575,7 +2611,7 @@ def test_a_mixed_stress_is_conserved_not_just_a_pure_cross_wind_one():
     )
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         **kw, dt=150.0, nsteps=40, config=cfg)
     tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
@@ -2629,7 +2665,7 @@ def test_prescribed_cross_wind_stress_is_applied_as_a_vector():
     )
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
-    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=300.0)
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         **kw, dt=150.0, nsteps=40, config=cfg)
     tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)

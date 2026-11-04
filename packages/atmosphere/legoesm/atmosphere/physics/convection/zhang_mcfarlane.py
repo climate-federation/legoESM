@@ -11,7 +11,8 @@
    the state BEFORE the evaporation step, so the evaporation below sees
    ``T + heat/cp*dt`` and ``q + dqdt*dt``;
 3. ``zm_conv_evap`` -- Sundqvist rain evaporation with snow/melt fusion
-   heating (``cldfrc_fice``), on the updated state;
+   heating (``cldfrc_fice``), on the updated state, against CAM's mixed-phase
+   ``qsat`` (``svp_trans`` blend to ice between 0 and -20 degC);
 4. ``momtran`` -- Richter-Rasch convective momentum transport with the
    Boville-Bretherton kinetic-energy dissipation heating.
 
@@ -20,19 +21,21 @@ CAM6 has NO cloud-base mass-flux carry: ``mb`` is diagnosed every step, so
 ``mb`` [kg/m^2/s] at ``[:, -1]`` for diagnostics only (zeros aloft), which
 keeps the orchestrator's uniform carry schema.
 
-Not wired (host contract): the oracle also runs ``convtran`` on cloud
-liquid/ice.  ``_zm_cam6.convtran`` is ported and pinned, but this scheme
-receives no ``q_c``/``q_i`` and ``ConvectionOutput`` has no signed cloud
-transport slot (``dq_c_conv_dt`` is a non-negative source), so that call is
-left out.  Departures inside the kernels are listed in ``_zm_cam6``.
+5. ``convtran`` -- convective transport of the CAM6 ``convtran1``
+   constituents the host carries (``CONVTRAN1_TRACERS``; ``tracers=``), on the
+   input state, returned as signed column-conserving tendencies in
+   ``ConvectionOutput.tracer_transport``.  ``tracers=None`` or ``config.transport_cloud_tracers=False`` transports nothing.
+
+Departures inside the kernels are listed in ``_zm_cam6``.
 
 The rain field ``dq_r_conv_dt`` is CAM's ``ntprprd``: the NET divergence of
 the falling-precipitation flux (``prdprec - evpprec``), negative where rain
 from above evaporates.  It column-integrates to the surface rain and is not
 a per-layer condensate source; hosts must sum it (the bridges do, or refuse).
 
-Host inputs the oracle has that the convection contract lacks: ``pblh``
-(PBL height; ``None`` -> ``pbl_top_pa`` launch bound), the total cloud
+Host inputs beyond the convection contract: ``pblh`` (PBL height; every
+bridge passes the turbulence scheme's lagged ``PhysicsState.pblh``, CAM's
+pbuf ``pblh``; ``None`` raises), the total cloud
 fraction for the evaporation (``cld_frac``; ``None`` -> 0, i.e. CAM's
 ``(1 - cldfrc)`` factor at its maximum), and ``land_frac``, which is required
 unless ``config.land_fraction == "none"`` (an explicit aquaplanet: ocean
@@ -41,12 +44,15 @@ coefficients everywhere).
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics.convection._zm_cam6 import (
     Q_MIN_VAPOR,
+    convtran,
     momtran,
     zm_conv_evap,
     zm_convr,
@@ -55,9 +61,34 @@ from legoesm.atmosphere.physics.convection._zm_dilute import LWMAX
 from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
 from legoesm.atmosphere.physics.convection.mass_flux import compute_column_geometry
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.core.smooth import smooth_clamp, smooth_relu
 
 
-__all__ = ("zhang_mcfarlane_convection",)
+__all__ = ("CONVTRAN1_TRACERS", "cam6_detrain_condensate",
+           "validate_detrain_widths", "zhang_mcfarlane_convection")
+
+# CAM6 constituents with ``is_convtran1`` (micro_mg_cam.F90:416-435, MG2) that
+# zm_conv_intr.F90:829-846 transports with ``convtran``, mapped to legoESM
+# tracer names: CLDLIQ, CLDICE, NUMLIQ, NUMICE, RAINQM, SNOWQM, NUMRAI.  CAM's
+# NUMSNO has no legoESM tracer.
+CONVTRAN1_TRACERS = ("q_c", "q_i", "N_c", "N_i", "q_r", "q_s", "N_r")
+
+
+# --- CAM6 detrainment of ZM condensate (clubb_intr.F90:2345-2376) ---
+# The CLUBB host books ZM's detrained condensate ``dlf`` on the post-CLUBB
+# state of every macmic sub-step.  Literals exactly as the oracle writes them
+# (cam_cesm2_1_rel_60, a03b84b7c4e34f965b115686f22a043b85739e56): the
+# all-liquid / all-ice temperatures and ramp width (:2347-2352), and the
+# deep-convection droplet / crystal radii and densities of the number source
+# (:2365-2372, CAM's ``3.14``, not pi).  The all-ice temperature 238.15 K is
+# ``_DETRAIN_T_LIQ_K - _DETRAIN_RAMP_K``: the clamp's upper end.
+_DETRAIN_T_LIQ_K = 268.15
+_DETRAIN_RAMP_K = 30.0
+_DETRAIN_PI = 3.14
+_DETRAIN_R_LIQ_M = 8.0e-6
+_DETRAIN_R_ICE_M = 25.0e-6
+_DETRAIN_RHO_LIQ = 997.0
+_DETRAIN_RHO_ICE = 500.0
 
 
 __physics_contract__ = {
@@ -71,6 +102,7 @@ __physics_contract__ = {
         "u": "m/s", "v": "m/s",
         "conv_prog_profile": "unused (CAM6 ZM carries no state)",
         "dt": "s", "land_frac": "1", "cld_frac": "1", "pblh": "m",
+        "tracers": "kg/kg or 1/kg (CAM6 convtran1 constituents, optional)",
     },
     "outputs": {
         "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
@@ -87,6 +119,8 @@ __physics_contract__ = {
                         "interfaces, top->bottom, bottom face 0)",
         "icwmr": "kg/kg (CAM ICWMRDP: in-cloud updraft condensate, 0 outside "
                  "convecting columns)",
+        "tracer_transport": "tracer units/s (convtran; signed, column-"
+                            "conserving; None without tracers)",
     },
     "sign_convention": (
         "z up; surface at [:, -1]. dT_dt > 0 warms (includes the fusion "
@@ -129,6 +163,7 @@ def zhang_mcfarlane_convection(
     cld_frac: jax.Array | None = None,
     pblh: jax.Array | None = None,
     pref_edge: jax.Array | None = None,
+    tracers: dict | None = None,
 ) -> tuple[ConvectionOutput, jax.Array]:
     """CAM6 Zhang-McFarlane deep convection tendencies for one step.
 
@@ -153,6 +188,9 @@ def zhang_mcfarlane_convection(
         Reference interface pressures ``(nlev+1,)`` [Pa]; CAM's
         40 hPa convection cap is fixed from these once.  ``None`` -> the cap
         follows each column's own interfaces (see ``_zm_cam6.zm_convr``).
+    tracers : dict, optional
+        ``{name: (ncol, nlev)}`` moist tracers to transport with ``convtran``
+        (the host passes the ``CONVTRAN1_TRACERS`` it carries).
     """
     ncol, nlev = T.shape
     dtype = T.dtype
@@ -193,7 +231,7 @@ def zhang_mcfarlane_convection(
         num_cin=int(config.num_cin), dmpdz=config.dmpdz,
         tiedke_add=config.tiedke_add, lwmax=LWMAX, c0_lnd=config.c0_lnd,
         c0_ocn=config.c0_ocn, alfa=config.alfa, limcnv_p_pa=config.limcnv_p_pa,
-        pbl_top_pa=config.pbl_top_pa, pref_edge=pref_edge)
+        pref_edge=pref_edge)
 
     # zm_conv_tend: physics_update before zm_conv_evap (zm_conv_intr.F90:686).
     T1 = T + conv.heat / cp * dt
@@ -212,6 +250,15 @@ def zhang_mcfarlane_convection(
         du_dt_conv, dv_dt_conv = mom.dudt, mom.dvdt
     else:
         du_dt_conv = dv_dt_conv = None
+
+    transport = None
+    if tracers is not None and config.transport_cloud_tracers:
+        # zm_conv_intr.F90:842: convtran on state1 (ZM's T/Q/U/V updates do
+        # not touch these constituents, so this is the input state).
+        transport = {
+            name: convtran(jnp.asarray(c, dtype).reshape(ncol, nlev), conv.mu, conv.md,
+                           conv.du, conv.eu, conv.ed, conv.dp, conv.jt, conv.maxg, conv.msg)
+            for name, c in tracers.items()}
 
     out = ConvectionOutput(
         dT_dt=dT_dt,
@@ -234,7 +281,84 @@ def zhang_mcfarlane_convection(
         mass_flux_up=jnp.concatenate(
             [conv.mc * 100.0 / constants.g, jnp.zeros((ncol, 1), dtype)], axis=1),
         icwmr=jnp.where(conv.ideep[:, None], conv.ql, 0.0),
+        tracer_transport=transport,
     )
     mb_kg = conv.mb * 100.0 / constants.g
     conv_prog_profile_new = jnp.zeros_like(conv_prog_profile).at[:, -1].set(mb_kg)
     return out, conv_prog_profile_new
+
+
+def validate_detrain_widths(w_T, w_n) -> None:
+    """The one legal range of the two detrainment smoothing widths: 0 (CAM's
+    hard switch) or finite in [sqrt(t), 1/sqrt(t)] with t = finfo(float32).tiny
+    (~[1.08e-19, 9.22e18]).  Shared by :func:`cam6_detrain_condensate` and
+    ``ExperimentConfig.validate_strict``.  Outside it the ramp sharpness
+    ``30 / w_T`` and the quotient ``dlf / w_n`` leave the normal float32 range
+    (measured: fp32 outputs non-finite at w_T = 1.2e-38 and w_n = 1e-100, fp64
+    NaN at w_n = 1e-320); the run's dtype is unknown here, so the float32 bound
+    covers both.  It is a numerics bound only, not a physical range.  Booleans
+    are refused (a YAML ``false`` would otherwise read as the hard switch)."""
+    lo = math.sqrt(float(jnp.finfo(jnp.float32).tiny))
+    hi = 1.0 / lo
+    if not all(not isinstance(w, bool)
+               and (w == 0 or (math.isfinite(w) and lo <= w <= hi))
+               for w in (w_T, w_n)):
+        raise ValueError(
+            "ZhangMcFarlaneConfig detrain_phase_width_K / "
+            "detrain_number_width_kgkg_s must be finite and >= 0, and either 0 "
+            f"(CAM's hard switch) or in [{lo:.3e}, {hi:.3e}]; got {w_T!r}, "
+            f"{w_n!r}.")
+
+
+def cam6_detrain_condensate(T: jax.Array, dlf: jax.Array,
+                            config: ZhangMcFarlaneConfig):
+    """CAM6 detrainment of ZM condensate, clubb_intr.F90:2345-2376.
+
+    ``T`` is the state the CLUBB host holds after its own update in the
+    macmic sub-step (``state1``, clubb_intr.F90:2251); ``dlf`` [kg/kg/s] is
+    ZM's detrained condensate (pbuf DLF).  The ``zmconv_microp = .false.``
+    branch (namelist default) with CAM6's shallow detrainment ``dlf2 = 0``
+    (clubb_intr.F90:2327), whose terms therefore vanish:
+
+    ``dum1 = 0`` above 268.15 K, ``1`` below 238.15 K, ``(268.15 - T)/30``
+    between; ``dq_c = dlf (1 - dum1)``, ``dq_i = dlf dum1``,
+    ``dN_c = 3 max(0, dlf) (1 - dum1) / (4 3.14 (8e-6)^3 997)``,
+    ``dN_i = 3 max(0, dlf) dum1 / (4 3.14 (25e-6)^3 500)``,
+    ``s = dlf dum1 latice`` (fusion heating, applied as ``s/cpair``).
+
+    KNOWN DIFFERENCE (RULE 5): both switches depend on traced state and are
+    smoothed by default.  The ice fraction is
+    ``smooth_clamp((268.15 - T)/30, 0, 1, sharpness=30/w_T)`` with
+    ``w_T = config.detrain_phase_width_K`` (0.1 K), and ``max(0, dlf)`` in the
+    number sources is ``w_n smooth_relu(dlf/w_n, 1)`` with
+    ``w_n = config.detrain_number_width_kgkg_s`` (1e-12 kg/kg/s).  A width
+    of 0 recovers CAM's hard switch exactly (oracle match 1e-10).  At the
+    default: ``dum1`` departs from CAM by up to ``ln 2 w_T/30`` (~2.3e-3) at
+    the 268.15 / 238.15 K corners; it never exceeds 1 but dips ~1e-133 below
+    0 well above 268.15 K (fp64), so ``dq_i`` can be that fraction of ``dlf``
+    negative there;
+    the number sources gain ``~ln 2 w_n`` of ``dlf`` where CAM's ``dlf`` is 0
+    (a spurious droplet source ~0.3 /kg/s).  ``dq_c + dq_i = dlf`` still
+    holds.  Measured on the 15 CAM oracle columns (max |ours - CAM| / max |CAM|
+    per field): heating and dq_c / dq_i <= 1.6e-8, dN_c 1.1e-4 and dN_i
+    1.3e-4 (the dlf = 0 levels).  Per-case gaps are stored in
+    tests/atmosphere/test_zm_detrain_oracle.py.
+
+    Returns ``(dT_dt [K/s], dq_c_dt, dq_i_dt [kg/kg/s], dN_c_dt, dN_i_dt
+    [1/kg/s])``; signed as sources (+ = gain), same shape as ``T``.
+    """
+    w_T = config.detrain_phase_width_K
+    w_n = config.detrain_number_width_kgkg_s
+    validate_detrain_widths(w_T, w_n)
+    dum1 = smooth_clamp((_DETRAIN_T_LIQ_K - T) / _DETRAIN_RAMP_K, 0.0, 1.0,
+                        math.inf if w_T == 0 else _DETRAIN_RAMP_K / w_T)
+    dlf_pos = (jnp.maximum(0.0, dlf) if w_n == 0
+               else w_n * smooth_relu(dlf / w_n, 1.0))
+    dq_c = dlf * (1.0 - dum1)
+    dq_i = dlf * dum1
+    dN_c = 3.0 * (dlf_pos * (1.0 - dum1)) / (
+        4.0 * _DETRAIN_PI * _DETRAIN_R_LIQ_M**3 * _DETRAIN_RHO_LIQ)
+    dN_i = 3.0 * (dlf_pos * dum1) / (
+        4.0 * _DETRAIN_PI * _DETRAIN_R_ICE_M**3 * _DETRAIN_RHO_ICE)
+    dT = dlf * dum1 * constants.L_f / constants.c_pd
+    return dT, dq_c, dq_i, dN_c, dN_i

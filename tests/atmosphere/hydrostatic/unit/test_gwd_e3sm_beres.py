@@ -42,6 +42,19 @@ from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import (
     _cshift_rows,
 )
 
+
+_e3sm_cam_gwd_kernel = e3sm_cam_gwd
+
+
+def e3sm_cam_gwd(*args, **kw):
+    """The kernel with ``p_ref_half`` (E3SM pref_edge) = the test column's own
+    interfaces: these columns are built at surface pressure p_ref = 1e5 Pa, so
+    their interfaces ARE the reference interfaces a lane would pass."""
+    if "p_ref_half" not in kw:
+        ph = kw["p_half"] if "p_half" in kw else args[4]
+        kw["p_ref_half"] = jnp.asarray(ph)[0]
+    return _e3sm_cam_gwd_kernel(*args, **kw)
+
 ORACLE_RAIR = 287.04
 ORACLE_G = 9.80616
 DC = 2.5
@@ -261,7 +274,13 @@ def test_beres_driver_dissipative():
     u_c = rep(u)
     v_c = jnp.zeros((ncol, pver))
     lat = jnp.zeros(ncol)
-    cfg = E3SMCAMConfig(source="convective", pgwv=NGWV, dc=DC, effgw=0.4)
+    args = (u_c, v_c, T_c, pmid_c, pint_c, zf_c, zh_c, rho_c, lat, 1800.0)
+    # RULE 3: the DEFAULT config has no table and must refuse, not run the stand-in.
+    with pytest.raises(ValueError, match="use_stand_in_table is False"):
+        e3sm_cam_gwd(*args, E3SMCAMConfig(source="convective", pgwv=NGWV, dc=DC,
+                                          effgw=0.4), netdt_col=rep(netdt))
+    cfg = E3SMCAMConfig(source="convective", pgwv=NGWV, dc=DC, effgw=0.4,
+                        beres=E3SMBeresConfig(use_stand_in_table=True))   # explicit stand-in
     out = e3sm_cam_gwd(
         u_c, v_c, T_c, pmid_c, pint_c, zf_c, zh_c, rho_c, lat, 1800.0, cfg,
         netdt_col=rep(netdt),

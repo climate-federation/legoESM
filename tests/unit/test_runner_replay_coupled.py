@@ -99,6 +99,27 @@ def test_coupled_manifest_is_written_after_setup_with_component_configs(
         ":LakeConfig")
 
 
+def test_coupled_record_carries_the_resolved_ocean_flux_auto(tmp_path,
+                                                           monkeypatch):
+    """#1320: the coupled record's atmosphere config records the boolean the
+    atmosphere's setup resolved for ocean_flux_on_ocean_surface AUTO, the
+    same value as the atmosphere's own manifest (never null)."""
+    def setup(self):
+        self._atm._resolve_ocean_flux_surface()
+        restart.write_run_manifest(self.output_dir, self._atm._input_config)
+    monkeypatch.setattr(CoupledESMDriver, "setup", setup)
+    _stop_at_run(monkeypatch)
+    out = tmp_path / "r"
+    with pytest.raises(_Ran):
+        _coupled(out)
+    atm = restart.read_run_manifest(out)["config"]["resolved_config"]
+    cpl = restart.read_run_manifest(out / "coupled")["config"][
+        "resolved_config"]["atmosphere"]
+    assert isinstance(atm["ocean_flux_on_ocean_surface"], bool)
+    assert (cpl["ocean_flux_on_ocean_surface"]
+            == atm["ocean_flux_on_ocean_surface"])
+
+
 def test_clean_coupled_rerun_passes_and_forwards_the_atmosphere_record(
         tmp_path, monkeypatch):
     ref = _reference(monkeypatch, tmp_path)
@@ -703,3 +724,34 @@ def test_standalone_run_does_not_adopt_a_pre_tag_coupled_record(tmp_path):
                                config_kind="coupled", runner_tag="run_coupled")
     with pytest.raises(RuntimeError, match="'run_coupled' runner"):
         _atm_driver(tmp_path, cfg, tag=None)._write_run_manifest()
+
+
+def test_coupled_record_carries_the_atmosphere_resolved_snapshot(
+        tmp_path, monkeypatch):
+    """The coupled record's atmosphere config is the atmosphere's resolved
+    snapshot, the same record its own manifest holds: the ice skin and
+    sea-ice albedo "auto" settings appear resolved, never as "auto"."""
+    def setup(self):
+        self._atm._resolve_ice_skin()
+        restart.write_run_manifest(self.output_dir, self._atm._input_config)
+    monkeypatch.setattr(CoupledESMDriver, "setup", setup)
+    seen = []
+    _stop_at_run(monkeypatch, seen)
+    out = tmp_path / "r"
+    with pytest.raises(_Ran):
+        _coupled(out)
+    # Non-vacuous: the runner hands the atmosphere both settings unresolved
+    # (None is the ice skin's "auto").
+    assert seen[0].atm_config.ice_skin_prognostic is None
+    assert seen[0].atm_config.sea_ice_albedo_scheme == "auto"
+    atm = restart.read_run_manifest(out)["config"]["resolved_config"]
+    cpl = restart.read_run_manifest(out / "coupled")["config"][
+        "resolved_config"]["atmosphere"]
+    assert isinstance(cpl["ice_skin_prognostic"], bool)
+    assert cpl["sea_ice_albedo_scheme"] != "auto"
+
+    def untyped(v):   # nested records carry a type tag only in the coupled one
+        if isinstance(v, dict):
+            return {k: untyped(x) for k, x in v.items() if k != "__type__"}
+        return v
+    assert untyped(cpl) == untyped(atm)

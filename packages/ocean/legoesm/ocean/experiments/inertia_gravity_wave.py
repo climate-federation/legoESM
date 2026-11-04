@@ -617,7 +617,6 @@ EXPERIMENT_CONFIG = {
     "default_duration": 2.0,   # days
     "quick_duration": 0.2,     # days
     "expected_metrics": {
-        "l2_error": "< 0.1",
         "amplitude_conservation": "0.8-1.2",
         "omega_analytical": "~1.4e-4 s^-1"
     },
@@ -631,4 +630,29 @@ EXPERIMENT_CONFIG = {
         "H_max": 1000.0,    # Shallow equivalent depth
         "nlev": 2           # Barotropic-equivalent
     }
+}
+
+
+# f-plane channel variant (#2114). Registry entry only: the IC, geometry and
+# gates are built by the matrix runner (run_inertia_gravity_wave_channel in
+# scripts/matrix/run_ocean_test_matrix.py), which owns the case; this entry
+# makes it selectable from a ``setup:`` template. config_class is reused so
+# registry consumers that instantiate it keep working; the runner does not
+# read it.
+CHANNEL_EXPERIMENT_CONFIG = {
+    "name": "inertia_gravity_wave_channel",
+    "description": ("Inertia-gravity (Poincaré) wave in an f-plane channel "
+                    "(x-periodic, walled in y), where it is an exact eigenmode"),
+    "reference": "Bishnu et al. (2024), DOI: 10.1029/2022MS003545",
+    "config_class": InertiaGravityWaveConfig,
+    "default_duration": 1.0,   # days (matrix TestCase; runner runs 1.25 periods)
+    "quick_duration": 1.0,     # days
+    "expected_metrics": {
+        "l2_error": "< 0.08",
+        "omega_relative_error": "< 0.03",
+        "mode_purity": "> 0.95",
+    },
+    "grid_support": {
+        "latlon_channel": True,
+    },
 }

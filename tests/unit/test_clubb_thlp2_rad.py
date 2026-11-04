@@ -97,7 +97,7 @@ def _moments(config):
 
 
 def _run(col, rad_dT_dt=None, dt=300.0, coef=None):
-    config = CLUBBConfig()
+    config = CLUBBConfig(trop_cloud_top_press=0.0)
     if coef is not None:
         config = config._replace(
             params=config.params._replace(thlp2_rad_coef=coef))
@@ -125,7 +125,7 @@ def test_prognostic_entry_publishes_the_water_beside_the_heat():
     col["q_sfc"] = col["q_sfc"] * 1.5
     out, _, _ = _run(col)
     assert out.evap_sfc is not None
-    want = surface_moisture_flux(CLUBBConfig().surface, out.lhflx, col["T_sfc"])
+    want = surface_moisture_flux(CLUBBConfig(trop_cloud_top_press=0.0).surface, out.lhflx, col["T_sfc"])
     np.testing.assert_allclose(np.asarray(out.evap_sfc), np.asarray(want),
                                rtol=1e-6)
     assert np.all(np.sign(np.asarray(out.evap_sfc)) == np.sign(np.asarray(out.lhflx)))
@@ -183,14 +183,14 @@ def test_sign_follows_thlprcp():
 def test_gradient_finite():
     col = _column()
     rad_np = np.asarray(_rad())
-    packed0 = pack_clubb_moments(_moments(CLUBBConfig()))
+    packed0 = pack_clubb_moments(_moments(CLUBBConfig(trop_cloud_top_press=0.0)))
 
     def _sum_thlp2(mult):
         rad = mult * jnp.asarray(rad_np)
         _, packed = clubb_turbulence_prognostic(
             col["u"], col["v"], col["T"], col["q_v"], packed0,
             col["p_full"], col["p_half"], col["z_full"], col["z_half"],
-            col["T_sfc"], col["q_sfc"], col["rho"], 300.0, CLUBBConfig(),
+            col["T_sfc"], col["q_sfc"], col["rho"], 300.0, CLUBBConfig(trop_cloud_top_press=0.0),
             rad_dT_dt=rad)
         return jnp.sum(unpack_clubb_moments(packed).thlp2)
 
@@ -234,13 +234,13 @@ def test_subcycle_forwards_the_source():
 def test_gradient_nonzero_and_matches_finite_difference():
     col = _column()
     rad_np = np.asarray(_rad())
-    packed0 = pack_clubb_moments(_moments(CLUBBConfig()))
+    packed0 = pack_clubb_moments(_moments(CLUBBConfig(trop_cloud_top_press=0.0)))
 
     def _sum_thlp2(mult):
         _, packed = clubb_turbulence_prognostic(
             col["u"], col["v"], col["T"], col["q_v"], packed0,
             col["p_full"], col["p_half"], col["z_full"], col["z_half"],
-            col["T_sfc"], col["q_sfc"], col["rho"], 300.0, CLUBBConfig(),
+            col["T_sfc"], col["q_sfc"], col["rho"], 300.0, CLUBBConfig(trop_cloud_top_press=0.0),
             rad_dT_dt=mult * jnp.asarray(rad_np))
         return jnp.sum(unpack_clubb_moments(packed).thlp2)
 

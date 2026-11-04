@@ -121,6 +121,15 @@ def scheme_config(request):
     return name, ConvectionConfig(scheme=name, **kwargs)
 
 
+def _zm_ps(scheme_name, state):
+    """ZM needs the carried PBL height: a fresh PhysicsState (pblh = 0, CAM's
+    cold start) for ZM, no carry for the other schemes (as before)."""
+    if scheme_name != "zhang_mcfarlane":
+        return None
+    from tests._zm_cold_start import cold_phys_state
+    return cold_phys_state(state.T.data)
+
+
 # ---------------------------------------------------------------------------
 # Lat-lon C-grid coverage
 # ---------------------------------------------------------------------------
@@ -135,7 +144,8 @@ class TestConvectionLatLon:
             cfg, model_type="hydrostatic", dt=300.0,
         )
         # Returns (tendencies, conv_prog_out).
-        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord)
+        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, latlon_state))
         # Basic structure.
         assert tend.dT_dt.data.shape == latlon_state.T.data.shape, (
             f"{scheme_name}: dT_dt shape mismatch"
@@ -156,7 +166,8 @@ class TestConvectionLatLon:
         physics_fn = make_convection_physics(
             cfg, model_type="hydrostatic", dt=300.0,
         )
-        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord)
+        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, latlon_state))
         assert tend.dT_dt.dims == latlon_state.T.dims, (
             f"{scheme_name}: dT_dt dims {tend.dT_dt.dims} should match "
             f"state.T.dims {latlon_state.T.dims}"
@@ -172,7 +183,8 @@ class TestConvectionLatLon:
         physics_fn = make_convection_physics(
             cfg, model_type="hydrostatic", dt=300.0,
         )
-        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord)
+        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, latlon_state))
         assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data))), (
             f"{scheme_name}: dT_dt has NaN/Inf"
         )
@@ -208,7 +220,8 @@ class TestConvectionMPAS:
         physics_fn = make_convection_physics(
             cfg, model_type="mpas", dt=300.0,
         )
-        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
         assert tend.dT_dt.data.shape == mpas_state.T.data.shape, (
             f"{scheme_name}: dT_dt shape mismatch"
         )
@@ -230,7 +243,8 @@ class TestConvectionMPAS:
         physics_fn = make_convection_physics(
             cfg, model_type="mpas", dt=300.0,
         )
-        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
         assert tend.dT_dt.dims == mpas_state.T.dims, (
             f"{scheme_name}: dT_dt dims {tend.dT_dt.dims} should match "
             f"state.T.dims {mpas_state.T.dims}"
@@ -246,12 +260,61 @@ class TestConvectionMPAS:
         physics_fn = make_convection_physics(
             cfg, model_type="mpas", dt=300.0,
         )
-        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
         assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data))), (
             f"{scheme_name}: dT_dt has NaN/Inf"
         )
         assert bool(jnp.all(jnp.isfinite(tend.du_dt.data)))
         assert bool(jnp.all(jnp.isfinite(tend.dp_s_dt.data)))
+
+    def test_kf_wrf_variant_mpas_needs_reconstructed_winds(
+        self, mpas_mesh, mpas_state, sigma_coord,
+    ):
+        """The opt-in WRF KF-Eta variant on MPAS: refused with mpas_cmt off
+        (it would run on zero winds), finite with the edge-normal
+        reconstruction on.  The smooth default runs either way (above)."""
+        wrf = KainFritschConfig(variant="wrf_kfeta")
+        off = make_convection_physics(
+            ConvectionConfig(scheme="kain_fritsch", kain_fritsch=wrf),
+            model_type="mpas", dt=300.0)
+        with pytest.raises(ValueError, match="mpas_cmt"):
+            off(mpas_state, mpas_mesh, sigma_coord)
+        # With the reconstruction on, the port receives exactly the
+        # reconstructed cell winds (spy on the port's entry; codex r1).
+        import numpy as np
+
+        from legoesm.atmosphere.physics.convection import kain_fritsch_wrf
+        from legoesm.grids.voronoi import reconstruct_cell_velocity
+        real = kain_fritsch_wrf.kain_fritsch_wrf_convection
+        seen = {}
+        # the fixture starts at rest; give the edges a non-trivial wind
+        ne, nl = mpas_state.u.data.shape
+        st = mpas_state._replace(u=mpas_state.u.replace(
+            data=5.0 * jnp.sin(jnp.arange(ne, dtype=mpas_state.u.data.dtype))[:, None]
+            * jnp.ones((1, nl), dtype=mpas_state.u.data.dtype)))
+
+        def spy(*a, **kw):
+            seen["u"], seen["v"] = kw["u"], kw["v"]
+            return real(*a, **kw)
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr(kain_fritsch_wrf, "kain_fritsch_wrf_convection", spy)
+        try:
+            on = make_convection_physics(
+                ConvectionConfig(scheme="kain_fritsch", kain_fritsch=wrf,
+                                 mpas_cmt=True),
+                model_type="mpas", dt=300.0)
+            tend, _ = on(st, mpas_mesh, sigma_coord)
+        finally:
+            mp.undo()
+        assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data)))
+        u_ref, v_ref = reconstruct_cell_velocity(st.u.data, mpas_mesh)
+        assert float(jnp.max(jnp.abs(u_ref))) > 0.0  # non-trivial winds
+        np.testing.assert_allclose(np.asarray(seen["u"]), np.asarray(u_ref),
+                                   rtol=1e-12, atol=0.0)
+        np.testing.assert_allclose(np.asarray(seen["v"]), np.asarray(v_ref),
+                                   rtol=1e-12, atol=0.0)
 
     def test_tiedtke_mpas_passes_none_not_zeros_for_missing_mc(
         self, mpas_mesh, mpas_state, sigma_coord,
@@ -448,7 +511,8 @@ class TestConvectionMPAS:
         physics_fn = make_convection_physics(
             cfg, model_type="mpas", dt=300.0,
         )
-        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
         # CMT was disabled because state.u is on edges (shape mismatch
         # vs ncol=nCells).  du_dt should be exactly zero.
         max_du = float(jnp.max(jnp.abs(tend.du_dt.data)))

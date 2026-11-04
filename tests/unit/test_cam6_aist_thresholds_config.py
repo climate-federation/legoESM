@@ -82,8 +82,9 @@ def test_cli_value_reaches_the_mpas_cloud_config_and_moves_aist():
     qs = saturation_mixing_ratio(T, p)
     args = (0.9 * qs, T, p, jnp.full((1, 1), 1e-5), jnp.zeros(1))
     ptop = jnp.full((1, 1), 4.9e4)          # tropospheric at lat 0
-    a0 = float(cam6_ice_stratus_fraction(*args, base, ptop)[0, 0])
-    a1 = float(cam6_ice_stratus_fraction(*args, cc, ptop)[0, 0])
+    no_top = dict(trop_cloud_top_press=0.0, trop_cloud_taper_lnp_width=0.15)
+    a0 = float(cam6_ice_stratus_fraction(*args, base, ptop, **no_top)[0, 0])
+    a1 = float(cam6_ice_stratus_fraction(*args, cc, ptop, **no_top)[0, 0])
     assert 0.0 < a1 < a0 < 0.999
 
 

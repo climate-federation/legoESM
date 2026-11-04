@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.conservation import WATER_MASS_SPECIES
 from legoesm.core.state import (
     HydrostaticState,
     HydrostaticTendencies,
@@ -35,7 +36,8 @@ from legoesm.grids.vertical import (
 )
 from legoesm import constants
 
-from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+from legoesm.atmosphere.physics.microphysics.config import (
+    MicrophysicsConfig, resolve_warm_rain_scheme)
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
@@ -162,6 +164,11 @@ def _min_tracer_slots_for_config(scheme_name: str, scheme_config=None) -> int:
         # reconstructed-box coalescence path writes rain mass and cloud/rain
         # number tendencies, so slot 7 must exist.
         return 8
+    if (scheme_name == "morrison"
+            and getattr(scheme_config, "warm_rain_incloud", False)):
+        # CAM6 MG2 mode: two-moment snow, so slot [9] = N_s (per-mass)
+        # carries MG2's prognostic snow number (micro_mg2_0.F90 nsn/nstend).
+        return 10
     return _PLANE_MIN_TRACER_SLOTS[scheme_name]
 
 
@@ -178,7 +185,8 @@ from legoesm.atmosphere.physics._shared import (
 
 
 def _incloud_liquid_cloud_fraction(phys_state, q_v_col, T_col, p_full_col,
-                                   p_half_col, q_i_col, lat_col, cloud_config):
+                                   p_half_col, q_i_col, lat_col, cloud_config,
+                                   clubb_config):
     """CAM6 MG2 liquid cloud fraction ``ast = max(alst, aist)``, (ncol, nlev).
 
     CAM6 micro_mg_cam.F90:1809-1810 liqcldf = ast, with clubb_intr.F90:2575
@@ -195,17 +203,25 @@ def _incloud_liquid_cloud_fraction(phys_state, q_v_col, T_col, p_full_col,
             "reached the microphysics (needs CLUBB turbulence).")
     _aist = cam6_ice_stratus_fraction(
         q_v_col, T_col, p_full_col, q_i_col, lat_col, cloud_config,
-        p_half_col[:, :-1])
+        p_half_col[:, :-1],
+        trop_cloud_top_press=clubb_config.trop_cloud_top_press,
+        trop_cloud_taper_lnp_width=clubb_config.trop_cloud_taper_lnp_width)
     return jnp.maximum(jnp.clip(_cf.reshape(T_col.shape), 0.0, 1.0), _aist)
 
 
-def _check_incloud_cloud_config(scheme_config, cloud_config) -> bool:
+def _check_incloud_cloud_config(scheme_config, cloud_config,
+                                clubb_config) -> bool:
     _incloud = bool(getattr(scheme_config, "warm_rain_incloud", False))
     if _incloud and getattr(cloud_config, "scheme", None) != "cam6_clubb":
         raise ValueError(
             "warm_rain_incloud=True uses CAM6's ast = max(alst, aist); the "
             "ice-stratus fraction needs the cam6_clubb cloud config, got "
             f"{getattr(cloud_config, 'scheme', None)!r}.")
+    if _incloud and clubb_config is None:
+        raise ValueError(
+            "warm_rain_incloud=True needs the run's CLUBBConfig "
+            "(clubb_config): CAM zeroes aist above CLUBB's top_lev "
+            "(clubb_intr.F90:2535); got None.")
     return _incloud
 
 
@@ -214,6 +230,9 @@ def make_microphysics_physics(
     model_type: str = "hydrostatic",
     dt: float = 300.0,  # coeff-ok: default physics timestep [s]
     cloud_config=None,
+    clubb_config=None,
+    relvar_from_clubb: bool = False,
+    cam6_activation=None,
 ) -> Callable:
     """Create a physics function for microphysics matching a model's signature.
 
@@ -228,6 +247,17 @@ def make_microphysics_physics(
     cloud_config : CloudConfig, optional
         The run's cloud config (scheme ``cam6_clubb``); read only by Morrison
         ``warm_rain_incloud`` for the CAM6 ice-stratus fraction ``aist``.
+    clubb_config : CLUBBConfig, optional
+        The run's CLUBB config; ``warm_rain_incloud`` requires it (raises if
+        None): aist is zeroed above CLUBB's top (clubb_intr.F90:2535).
+    relvar_from_clubb : bool
+        Read the per-cell ``PhysicsState.relvar`` CLUBB wrote in the same
+        macmic sub-step (CAM6 pbuf RELVAR) into Morrison ``kk2000_cam6``.
+        hydrostatic/mpas lanes only.
+    cam6_activation : Cam6AerosolActivation, optional
+        Start-up constants of CAM6 prescribed-aerosol droplet activation;
+        required by Morrison ``prognostic_droplet_number`` (mpas lane), which
+        then reads ``forcing["cam6_aerosol"]`` every step.
 
     Returns
     -------
@@ -239,36 +269,77 @@ def make_microphysics_physics(
     # ``(*shape_2d, nlev)`` to ``(ncol, nlev)`` and never references
     # grid lat/lon — works identically for cubed-sphere ``(face, n, n)``,
     # lat-lon ``(n_lat, n_lon)``, and MPAS Voronoi ``(nCells,)``.
+    if relvar_from_clubb and model_type not in ("hydrostatic", "mpas"):
+        raise ValueError(
+            f"relvar_from_clubb=True on model_type={model_type!r}: only the "
+            "hydrostatic/mpas lane forwards CLUBB's per-cell relvar to "
+            "microphysics; this lane would silently use the constant.")
+    require_relvar_for_kk2000_cam6(microphysics_config, relvar_from_clubb)
     if model_type in ("hydrostatic", "mpas"):
-        return _make_hydrostatic_microphysics(microphysics_config, dt,
-                                              cloud_config=cloud_config,
-                                              model_type=model_type)
+        fn = _make_hydrostatic_microphysics(microphysics_config, dt,
+                                            cloud_config=cloud_config,
+                                            model_type=model_type,
+                                            clubb_config=clubb_config,
+                                            relvar_from_clubb=relvar_from_clubb,
+                                            cam6_activation=cam6_activation)
     elif model_type == "nonhydrostatic":
-        return _make_nonhydrostatic_microphysics(microphysics_config, dt)
+        fn = _make_nonhydrostatic_microphysics(microphysics_config, dt)
     elif model_type == "plane":
-        return _make_plane_microphysics(microphysics_config, dt)
+        fn = _make_plane_microphysics(microphysics_config, dt)
     elif model_type == "mpas_nh":
-        return _make_mpas_nh_microphysics(microphysics_config, dt)
+        fn = _make_mpas_nh_microphysics(microphysics_config, dt)
     elif model_type == "spectral_pe":
-        return _make_spectral_pe_microphysics(microphysics_config, dt,
-                                              cloud_config=cloud_config)
+        fn = _make_spectral_pe_microphysics(microphysics_config, dt,
+                                            cloud_config=cloud_config,
+                                            clubb_config=clubb_config)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
             f"Choose from 'hydrostatic', 'nonhydrostatic', 'plane', "
             f"'mpas_nh', 'spectral_pe', 'mpas'."
         )
+    return fn
+
+
+def require_relvar_for_kk2000_cam6(microphysics_config, relvar_wired: bool):
+    """Refuse a lane that selects Morrison ``kk2000_cam6`` without wiring
+    CLUBB's per-cell relvar (it would run the CAM6 law at a constant)."""
+    m = getattr(microphysics_config, "morrison", None)
+    if (microphysics_config.scheme == "morrison" and m is not None
+            and resolve_warm_rain_scheme(m) == "kk2000_cam6"
+            and not relvar_wired):
+        raise ValueError(
+            "warm_rain_scheme='kk2000_cam6' needs CLUBB's per-cell relvar "
+            "(clubb_intr.F90:2416-2425), which only the MPAS/hydrostatic "
+            "lane wires, with prognostic CLUBB and its liquid partition "
+            "(cld_macmic_num_steps>=2); this lane passes none.  Select "
+            "warm_rain_scheme='kk2000' (or another law) here; an unset "
+            "warm_rain_scheme resolves to kk2000_cam6 under morrison_flavor="
+            "'mg'.")
 
 
 # ===========================================================================
 # Hydrostatic PE
 # ===========================================================================
 
+def sundqvist_lane_kwargs(scheme_name, grid, ncol, carries_q_i):
+    """Sundqvist's lane inputs: the grid-cell area [m^2] per column (None where
+    the grid has none; Sundqvist then raises) and whether the lane carries q_i."""
+    if scheme_name != "sundqvist":
+        return {}
+    area = getattr(grid, "grid_area", None)
+    return dict(cell_area=None if area is None else jnp.asarray(area).reshape(ncol),
+                carries_q_i=carries_q_i)
+
+
 def _make_hydrostatic_microphysics(
     microphysics_config: MicrophysicsConfig,
     dt: float,
     cloud_config=None,
     model_type: str = "hydrostatic",
+    clubb_config=None,
+    relvar_from_clubb: bool = False,
+    cam6_activation=None,
 ) -> Callable:
     """Create microphysics physics_fn for PrimitiveEquationModel.
 
@@ -291,13 +362,27 @@ def _make_hydrostatic_microphysics(
         and not getattr(scheme_config, "predict_Nc", False)
     )
 
-    _incloud = _check_incloud_cloud_config(scheme_config, cloud_config)
+    _incloud = _check_incloud_cloud_config(scheme_config, cloud_config,
+                                           clubb_config)
     if _incloud and model_type != "mpas":
         # Checked at build time, not the first step: aist's tropopause
         # switch needs MPAS cell latitudes (mesh.latCell).
         raise ValueError(
             "warm_rain_incloud=True is wired on the MPAS lane only (aist "
             f"needs mesh.latCell); got model_type={model_type!r}.")
+
+    _prog_nc = bool(getattr(scheme_config, "prognostic_droplet_number", False))
+    if _prog_nc and not _incloud:
+        # the scheme refuses this too (morrison.py start-up guard); fail at build
+        raise ValueError("prognostic_droplet_number=True needs warm_rain_incloud=True "
+                         "(activation reads CAM6's ast).")
+    if _prog_nc and cam6_activation is None:
+        raise ValueError(
+            "prognostic_droplet_number=True needs the CAM6 prescribed-aerosol "
+            "droplet activation (cam6_activation); none was built for this lane.")
+    if cam6_activation is not None and not _prog_nc:
+        raise ValueError("cam6_activation is read only under "
+                         "prognostic_droplet_number=True.")
 
     def physics_fn(
         state: HydrostaticState,
@@ -380,6 +465,13 @@ def _make_hydrostatic_microphysics(
         rho = _compute_rho(T_col, p_full_col, q_v_col)
         dz = _compute_heights_from_sigma(T_col, p_half_col, q_v_col)
 
+        if _incloud and (state.tracers is None or "N_s" not in state.tracers):
+            # CAM6 MG2 mode carries the snow number; without it the scheme
+            # would silently run single-moment snow (user decision
+            # 2026-10-20: refuse).
+            raise ValueError(
+                "warm_rain_incloud=True (CAM6 MG2 two-moment snow) needs the "
+                "snow number tracer N_s in the state; it is absent.")
         # Extract actual hydrometeor state from tracers (fall back to zero
         # for any species not present in the tracer registry).
         hydrometeors = HydrometeorState(
@@ -392,6 +484,11 @@ def _make_hydrostatic_microphysics(
             N_c=number_per_mass_to_per_volume(_get_tracer("N_c"), rho),
             N_r=number_per_mass_to_per_volume(_get_tracer("N_r"), rho),
             N_i=_get_tracer("N_i"),
+            # Prognostic snow number [1/kg] when the state carries it (the
+            # CAM6 MG2 mode's two-moment snow, required there, see above);
+            # absent outside that mode => None => single-moment snow.
+            N_s=(_get_tracer("N_s") if state.tracers is not None
+                 and "N_s" in state.tracers else None),
         )
 
         # Aerosol-CCN specified-Nc fill.  Override the (dead-zeros, never
@@ -461,7 +558,27 @@ def _make_hydrostatic_microphysics(
                 _kw["cloud_fraction"] = _incloud_liquid_cloud_fraction(
                     phys_state, q_v_col, T_col, p_full_col, p_half_col,
                     hydrometeors.q_i, jnp.asarray(grid.latCell).reshape(ncol),
-                    cloud_config)
+                    cloud_config, clubb_config)
+            if relvar_from_clubb:
+                # CAM6 MG2 reads pbuf RELVAR, set by clubb_tend_cam in the same
+                # macmic iteration (clubb_intr.F90:2416-2425).
+                _kw["relvar"] = phys_state.relvar.reshape(ncol, nlev)
+            if _prog_nc:
+                # CAM6 microp_aero_run immediately before micro_mg (user
+                # decision 2026-10-24, 2), on this sub-step's post-CLUBB state.
+                _ast = _kw["cloud_fraction"]
+                _npccn = cam6_activation_npccn(
+                    T_col, q_v_col, p_full_col, p_half_col, _get_tracer("N_c"),
+                    hydrometeors.q_c, hydrometeors.q_i, _ast, phys_state, forcing,
+                    cam6_activation, dt)
+                _kw["npccn"] = number_per_mass_to_per_volume(_npccn, rho)
+                # pbuf CLDO = ast from top_lev down (micro_mg_cam.F90:1829)
+                _below = jnp.arange(nlev) >= cam6_activation.top_lev
+                _cldo_new = jnp.where(
+                    _below, _ast, phys_state.cloud_fraction_old.reshape(ncol, nlev))
+            _kw.update(sundqvist_lane_kwargs(
+                scheme_name, grid, ncol,
+                state.tracers is not None and "q_i" in state.tracers))
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,
@@ -502,15 +619,17 @@ def _make_hydrostatic_microphysics(
             "N_r": (number_per_volume_to_per_mass(micro_out.dN_r_dt, rho),
                     "1/(kg s)"),
             "N_i": (micro_out.dN_i_dt, "1/(kg s)"),
+            "N_s": (micro_out.dN_s_dt, "1/(kg s)"),
         }
         for _nname, (_ntend, _nunits) in _num_tends.items():
-            if state.tracers is not None and _nname in state.tracers:
+            if (state.tracers is not None and _nname in state.tracers
+                    and _ntend is not None):
                 tracer_tends[_nname] = Field(
                     data=_ntend.reshape(shape_3d),
                     name=f"d{_nname}_dt_micro", dims=dims_3d, units=_nunits,
                 )
 
-        return HydrostaticTendencies(
+        tend = HydrostaticTendencies(
             du_dt=Field(
                 data=jnp.zeros(u_shape, dtype=_state_dtype),
                 name="du_dt_micro", dims=u_dims, units="m/s^2",
@@ -541,6 +660,10 @@ def _make_hydrostatic_microphysics(
                     data=micro_out.sed_substeps_required.reshape(shape_2d),
                     name="sed_substeps_required", dims=dims_2d, units="1")),
         )
+        if _prog_nc:
+            return tend, {"cloud_fraction_old": _cldo_new.reshape(
+                phys_state.cloud_fraction_old.shape)}
+        return tend
 
     def reset_state():
         _ml_model_cache[0] = None
@@ -553,9 +676,47 @@ def _make_hydrostatic_microphysics(
     # with the legacy 3-arg signature).
     if _nc_from_aerosol:
         physics_fn._wants_forcing = True
-    if _incloud:
+    if _prog_nc:
+        # Writes the CLDO carry: the accumulator calls it as a carry module
+        # (accepts_ps, see make_hydrostatic combined) with the forcing.
+        physics_fn._wants_forcing = True
+        physics_fn._writes_phys_state = True
+    elif _incloud or relvar_from_clubb:
         physics_fn._wants_phys_state_ro = True
     return physics_fn
+
+
+def cam6_activation_columns(T_col, q_v_col, p_full_col, p_half_col):
+    """``(pmid, pint, rpdel, zm)`` for CAM6 droplet activation, top-first: the
+    heights are the hydrostatic ones the lane's turbulence (CLUBB) uses."""
+    from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
+    zm, _ = compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
+    rpdel = 1.0 / (p_half_col[:, 1:] - p_half_col[:, :-1])
+    return p_full_col, p_half_col, rpdel, zm
+
+
+def cam6_activation_npccn(T_col, q_v_col, p_full_col, p_half_col, N_c_per_kg, q_c, q_i,
+                          ast, phys_state, forcing, setup, dtmicro):
+    """CAM6 ``microp_aero_run`` npccn [1/kg/s] from the prescribed aerosol in
+    ``forcing["cam6_aerosol"]`` and the carried CLUBB / CLDO fields."""
+    from legoesm.atmosphere.physics.microphysics.cam6_aerosol_climatology import (
+        aerosol_at_model_levels)
+    from legoesm.atmosphere.physics.microphysics.cam6_dropmixnuc import (
+        cam6_microp_aero_npccn)
+    aer = None if forcing is None else forcing.get("cam6_aerosol")
+    if aer is None:
+        raise ValueError(
+            "prognostic_droplet_number=True but no forcing['cam6_aerosol'] reached "
+            "the microphysics; the driver must thread the CAM6 aerosol climatology.")
+    ncol, nlev = T_col.shape
+    pmid, pint, rpdel, zm = cam6_activation_columns(T_col, q_v_col, p_full_col, p_half_col)
+    aer_num, aer_mass = aerosol_at_model_levels(aer, setup, pmid)
+    return cam6_microp_aero_npccn(
+        N_c_per_kg, T_col, pmid, pint, rpdel, zm, q_c, q_i,
+        phys_state.clubb_wp2_iface.reshape(ncol, nlev + 1),
+        phys_state.clubb_kh_iface.reshape(ncol, nlev + 1),
+        ast, phys_state.cloud_fraction_old.reshape(ncol, nlev), dtmicro,
+        aer_num, aer_mass, setup.props, setup.top_lev, setup.n_max)
 
 
 # ===========================================================================
@@ -678,6 +839,7 @@ def _make_nonhydrostatic_microphysics(
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
+                **sundqvist_lane_kwargs(scheme_name, grid, ncol, n_tracers > 3),
             )
 
         # Convert dT/dt -> dtheta'/dt using local Exner (T = theta * exner).
@@ -896,6 +1058,7 @@ def _make_plane_microphysics(
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
+                **sundqvist_lane_kwargs(scheme_name, grid, ncol, n_tracers > 3),
             )
 
         dT_dt = micro_out.dT_dt.reshape(shape_3d)
@@ -1100,6 +1263,7 @@ def _make_mpas_nh_microphysics(
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
+                **sundqvist_lane_kwargs(scheme_name, mesh, ncol, n_tracers > 3),
             )
 
         dT_dt = micro_out.dT_dt
@@ -1155,6 +1319,7 @@ def _make_spectral_pe_microphysics(
     microphysics_config: MicrophysicsConfig,
     dt: float,
     cloud_config=None,
+    clubb_config=None,
 ) -> Callable:
     """Create microphysics physics_fn for SpectralPEModel.
 
@@ -1171,7 +1336,8 @@ def _make_spectral_pe_microphysics(
     scheme_name, micro_fn, scheme_config = _get_microphysics_fn(microphysics_config)
     is_ml = scheme_name == "ml_emulator"
     _ml_model_cache = [None]
-    _incloud = _check_incloud_cloud_config(scheme_config, cloud_config)
+    _incloud = _check_incloud_cloud_config(scheme_config, cloud_config,
+                                           clubb_config)
 
     # Tracer key → MicrophysicsOutput attribute name.  Mirrors the
     # ``HydrometeorState`` field layout in ``microphysics/output.py``
@@ -1191,7 +1357,7 @@ def _make_spectral_pe_microphysics(
     }
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None,
-                   phys_state=None):
+                   phys_state=None, return_sfc_precip=False):
         # Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -1208,12 +1374,28 @@ def _make_spectral_pe_microphysics(
         # we do not silently flow x64 zeros into the column path.
         _state_dtype = T.dtype
 
+        if return_sfc_precip and micro_fn is not None:
+            # #2277: the surface precip is recorded only when every water
+            # species the scheme writes is carried -- a dropped tendency would
+            # report water leaving a column that never lost it.
+            _need = WATER_MASS_SPECIES[:min(
+                min_tracer_slots(scheme_name, scheme_config),
+                len(WATER_MASS_SPECIES))]
+            _missing = [n for n in _need
+                        if state.tracers is None or n not in state.tracers]
+            if _missing:
+                raise ValueError(
+                    f"microphysics '{scheme_name}' writes {list(_need)}, but "
+                    f"the spectral state lacks {_missing}: its tendency would "
+                    "be dropped while the surface precipitation is recorded. "
+                    "Carry those tracers.")
+
         if micro_fn is None:
             # Mirror the input tracer pytree shape with zeros so the
             # orchestrator's accumulator and the dycore RHS see a
             # consistent tendency structure even when microphysics is
             # disabled.
-            return SpectralHydrostaticState(
+            _z = SpectralHydrostaticState(
                 vor_hat=state.vor_hat.replace(data=zero_3d),
                 div_hat=state.div_hat.replace(data=zero_3d),
                 T_hat=state.T_hat.replace(data=jnp.zeros_like(state.T_hat.data)),
@@ -1221,6 +1403,10 @@ def _make_spectral_pe_microphysics(
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
                 tracers=zero_like_tracers(state.tracers),
             )
+            if not return_sfc_precip:
+                return _z
+            _p0 = jnp.zeros((n_lat, n_lon), dtype=p_s.dtype)
+            return _z, (_p0, _p0)
 
         # Pressure at full and half levels
         p_full = sigma_coord.pressure_at_full(p_s)
@@ -1284,10 +1470,13 @@ def _make_spectral_pe_microphysics(
                 ).reshape(ncol)
                 _kw["cloud_fraction"] = _incloud_liquid_cloud_fraction(
                     phys_state, q_v_col, T_col, p_full_col, p_half_col,
-                    hydrometeors.q_i, _lat_col, cloud_config)
+                    hydrometeors.q_i, _lat_col, cloud_config, clubb_config)
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,
+                **sundqvist_lane_kwargs(
+                    scheme_name, grid, ncol,
+                    state.tracers is not None and "q_i" in state.tracers),
             )
 
         dT_dt = micro_out.dT_dt.reshape(n_lat, n_lon, nlev)
@@ -1330,7 +1519,7 @@ def _make_spectral_pe_microphysics(
                     tt.setdefault(k, zv)
             tracers_tend = tt
 
-        return SpectralHydrostaticState(
+        tend = SpectralHydrostaticState(
             vor_hat=state.vor_hat.replace(data=zero_3d),
             div_hat=state.div_hat.replace(data=zero_3d),
             T_hat=state.T_hat.replace(data=dT_hat),
@@ -1338,6 +1527,16 @@ def _make_spectral_pe_microphysics(
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
             tracers=tracers_tend,
         )
+        if not return_sfc_precip:
+            return tend
+        # Surface precip [kg/m^2/s, +down] the scheme computes, and its frozen
+        # part (None when the scheme does not publish it), as on the
+        # hydrostatic bridge (#2277).
+        _pf = micro_out.precip_frozen
+        return tend, (
+            micro_out.precipitation.reshape(n_lat, n_lon).astype(p_s.dtype),
+            None if _pf is None
+            else _pf.reshape(n_lat, n_lon).astype(p_s.dtype))
 
     def reset_state():
         _ml_model_cache[0] = None
@@ -1345,4 +1544,6 @@ def _make_spectral_pe_microphysics(
     physics_fn.reset_state = reset_state
     if _incloud:
         physics_fn._wants_phys_state_ro = True
+    # #2277: accepts ``return_sfc_precip=True`` (second return: surface precip).
+    physics_fn._emits_sfc_precip = True
     return physics_fn

@@ -232,21 +232,21 @@ def _friction_velocity(zldis: jax.Array, z0m: jax.Array,
 
     # Very unstable (valid: obu < 0, zeta < -zetam).  Floor the log/cbrt args so
     # the discarded (obu > 0) branch stays finite; both floors are no-ops here.
-    ustar1 = constants.kappa_vk * um / (
+    ustar1 = constants.kappa_von_karman * um / (
         jnp.log(jnp.maximum(-zetam * obu / z0m, _MOST_ARG_FLOOR))
         - _stability_func_momentum(-zetam)
         + _stability_func_momentum(z0m / obu)
         + _MOST_MOM_CONV_COEF * (jnp.cbrt(jnp.maximum(-zeta, zetam)) - jnp.cbrt(zetam))
     )
     # Unstable
-    ustar2 = constants.kappa_vk * um / (
+    ustar2 = constants.kappa_von_karman * um / (
         jnp.log(zldis / z0m)
         - _stability_func_momentum(zeta)
         + _stability_func_momentum(z0m / obu)
     )
     # Stable (zeta >= 0): Beljaars & Holtslag (1991), all stable zeta.  psi_m
     # is finite for the negative arguments of the discarded (obu < 0) branch.
-    ustar3 = constants.kappa_vk * um / (
+    ustar3 = constants.kappa_von_karman * um / (
         jnp.log(zldis / z0m)
         - psi_m(zeta, _STABLE_SCHEME) + psi_m(z0m / obu, _STABLE_SCHEME))
 
@@ -262,14 +262,14 @@ def _temperature_humidity_relation(zldis: jax.Array, obu: jax.Array,
     zeta  = zldis / obu
 
     # Very unstable (valid: obu < 0, zeta < -zetat).  Floor log/cbrt args; no-ops here.
-    ch1 = constants.kappa_vk / (
+    ch1 = constants.kappa_von_karman / (
         jnp.log(jnp.maximum(-zetat * obu / z0h, _MOST_ARG_FLOOR))
         - _stability_func_heat(-zetat)
         + _stability_func_heat(z0h / obu)
         + _MOST_HEAT_CONV_COEF * (1.0 / jnp.cbrt(zetat)
                                   - 1.0 / jnp.cbrt(jnp.maximum(-zeta, zetat)))
     )
-    ch2 = constants.kappa_vk / (
+    ch2 = constants.kappa_von_karman / (
         jnp.log(zldis / z0h)
         - _stability_func_heat(zeta)
         + _stability_func_heat(z0h / obu)
@@ -277,7 +277,7 @@ def _temperature_humidity_relation(zldis: jax.Array, obu: jax.Array,
     # Stable (zeta >= 0): Beljaars & Holtslag (1991), all stable zeta.  The core
     # psi_h floors its stable argument at 1e-10, so the (1 + 2z/3)^1.5 term stays
     # finite for the negative arguments of the discarded (obu < 0) branch.
-    ch3 = constants.kappa_vk / (
+    ch3 = constants.kappa_von_karman / (
         jnp.log(zldis / z0h)
         - psi_h(zeta, _STABLE_SCHEME) + psi_h(z0h / obu, _STABLE_SCHEME))
 
@@ -341,7 +341,7 @@ def _stability_step(carry: jax.Array, _xs: None,
     qstar = ch * dq
     thvstar = tstar * (1.0 + _VIRT_T_COEF * q_atm) + _VIRT_T_COEF * Ta * qstar
 
-    zeta  = zldis * constants.kappa_vk * constants.g * thvstar / (ustar**2 * Tv_atm)
+    zeta  = zldis * constants.kappa_von_karman * constants.g * thvstar / (ustar**2 * Tv_atm)
 
     zeta_stable = _cap_stable_zeta(zeta, zeta_cap_width)
     um_stable   = jnp.maximum(ur, 0.1)                     # coeff-ok: 0.1 m/s wind floor
@@ -520,7 +520,7 @@ def compute_below_canopy_resistance(
     """
     nu       = _NU_AIR    # kinematic viscosity of air [m2/s]
     Csdense  = _CS_DENSE  # dense-canopy turbulent transfer coefficient
-    Csbare   = constants.kappa_vk / _CS_BARE_COEF * (z0mg * jnp.maximum(uav, 1e-3) / nu) ** (-_CS_BARE_EXP)  # coeff-ok: 1e-3 m/s wind floor
+    Csbare   = constants.kappa_von_karman / _CS_BARE_COEF * (z0mg * jnp.maximum(uav, 1e-3) / nu) ** (-_CS_BARE_EXP)  # coeff-ok: 1e-3 m/s wind floor
 
     w   = jnp.exp(-0.5 * CI * LAI)
     Cs  = Csbare * w + Csdense * (1.0 - w)

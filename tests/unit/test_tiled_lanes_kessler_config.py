@@ -29,7 +29,7 @@ def _expected(cfg):
     return KesslerConfig()._replace(**_HARD)
 
 
-@pytest.mark.parametrize("over", [{}, _HARD])
+@pytest.mark.parametrize("over", [{}])
 def test_tiled_cube_lane_passes_run_kessler_config(monkeypatch, over):
     seen = {}
 
@@ -44,7 +44,7 @@ def test_tiled_cube_lane_passes_run_kessler_config(monkeypatch, over):
     assert seen["config"] == _expected(cfg)
 
 
-@pytest.mark.parametrize("over", [{}, _HARD])
+@pytest.mark.parametrize("over", [{}])
 def test_fv3_duo_lane_passes_run_kessler_config(monkeypatch, over):
     import jax.numpy as jnp
     seen = {}
@@ -86,3 +86,11 @@ def _call_lane(lane, cfg):
 def test_unsupported_flag_on_kessler_lane_raises(lane, flag, match):
     with pytest.raises(ValueError, match=match):
         _call_lane(lane, _cfg(**{flag: True}))
+
+
+@pytest.mark.parametrize("lane", ["tiled", "fv3_duo"])
+def test_hard_saturation_flags_are_refused_on_kessler_lanes(lane):
+    """The faithful kessler_run port has no hard-saturation guard, so a run
+    config that asks for one is refused, not silently ignored."""
+    with pytest.raises(ValueError, match="hard_saturation_adjustment"):
+        _call_lane(lane, _cfg(**_HARD))

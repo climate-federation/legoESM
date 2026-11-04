@@ -125,6 +125,7 @@ def test_sea_ice_restart_round_trip_is_continuous(tmp_path):
     # Checkpoint after block A, reload ocean + ice, resume block B.
     ckpt = tmp_path / "ckpt"
     fname = run_omip._save_restart(s1, 1.0, 3, ckpt, ice_state=ice1)
+    run_omip._join_restart_writer()   # the write is asynchronous
     s1r, _, _ = run_omip._load_restart(str(fname), state)
     ice1r = run_omip._load_ice_restart(str(fname), ice0)
     assert ice1r is not None, "ice must be persisted in the restart"
@@ -149,6 +150,7 @@ def test_load_ice_restart_none_for_legacy_ocean_only_checkpoint(tmp_path):
     model, state, js = _setup(tmp_path, sea_ice=True)
     ckpt = tmp_path / "ckpt"
     fname = run_omip._save_restart(state, 0.0, 0, ckpt)   # NO ice_state
+    run_omip._join_restart_writer()   # the write is asynchronous
     assert run_omip._load_ice_restart(str(fname),
                                       js["ice_state_init"]) is None
 

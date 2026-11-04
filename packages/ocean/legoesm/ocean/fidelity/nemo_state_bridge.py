@@ -106,7 +106,7 @@ def _beta_plane_params(grid: NemoGrid):
     return n_lat, n_lon, dx_m, dy_m, f0, beta
 
 
-def _u_east_to_face(nemo_u: np.ndarray) -> np.ndarray:
+def nemo_closed_u_east_to_face(nemo_u: np.ndarray) -> np.ndarray:
     """NEMO east-face u ``(n_lat, n_lon, nz)`` -> legoESM ``u_face (n_lat, n_lon+1, nz)``.
 
     ``u_face[:, 0]`` = west wall (0); ``u_face[:, 1:]`` = NEMO u (whose last
@@ -116,10 +116,15 @@ def _u_east_to_face(nemo_u: np.ndarray) -> np.ndarray:
     return np.concatenate([wall, nemo_u], axis=1)
 
 
-def _v_north_to_face(nemo_v: np.ndarray) -> np.ndarray:
+def nemo_closed_v_north_to_face(nemo_v: np.ndarray) -> np.ndarray:
     """NEMO north-face v ``(n_lat, n_lon, nz)`` -> legoESM ``v_face (n_lat+1, n_lon, nz)``."""
     wall = np.zeros_like(nemo_v[:1, :, :])
     return np.concatenate([wall, nemo_v], axis=0)
+
+
+# Historical private spellings retained for the bridge's internal callers.
+_u_east_to_face = nemo_closed_u_east_to_face
+_v_north_to_face = nemo_closed_v_north_to_face
 
 
 def _u_east_to_face_periodic(nemo_u: np.ndarray) -> np.ndarray:

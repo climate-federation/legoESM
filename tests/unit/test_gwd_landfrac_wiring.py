@@ -112,9 +112,32 @@ def test_e3sm_cam_f_land_none_sends_no_kwarg():
     assert "land_frac_col" not in rec.kwargs
 
 
-@pytest.mark.parametrize("scheme", ["mcfarlane", "lindzen", "hines"])
+def test_mcfarlane_pipeline_threads_f_land_and_reference_pressures():
+    """CAM6 gw_oro (``mcfarlane``): the pipeline forwards f_land as the
+    (ncol,) ``land_frac_col`` and the coordinate's interfaces at p_ref as
+    ``p_ref_half`` (CAM pref_edge)."""
+    from legoesm import constants
+    grid, pipe = _pipe("mcfarlane")
+    assert pipe._gwd_mcfarlane is True
+    f_land = jnp.asarray(
+        np.linspace(0.0, 1.0, NLAT * NLON).reshape(grid.grid_lat.shape)
+    )
+    pipe.f_land = f_land
+    rec = _Recorder()
+    pipe.gwd_fn = rec
+    _run_step(grid, pipe)
+    assert rec.kwargs is not None, "GWD kernel was never called"
+    np.testing.assert_allclose(
+        np.asarray(rec.kwargs["land_frac_col"]), np.asarray(f_land).reshape(-1))
+    np.testing.assert_allclose(
+        np.asarray(rec.kwargs["p_ref_half"]),
+        np.asarray(pipe.sigma_coord.pressure_at_half(
+            jnp.asarray([constants.p_ref]))).reshape(-1))
+
+
+@pytest.mark.parametrize("scheme", ["lindzen", "hines"])
 def test_other_gwd_schemes_never_send_land_frac(scheme):
-    """mcfarlane/lindzen/hines kernels do NOT accept ``land_frac_col`` —
+    """lindzen/hines kernels do NOT accept ``land_frac_col`` —
     sending it would TypeError in production.  Even with f_land set, the
     pipeline must not forward it (builder flag False + recorder proof)."""
     grid, pipe = _pipe(scheme)
@@ -169,11 +192,13 @@ def test_e3sm_convective_source_receives_netdt():
     from types import SimpleNamespace
 
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        E3SMBeresConfig,
         E3SMCAMConfig,
         GravityWaveDragConfig,
     )
     over = GravityWaveDragConfig(
-        scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source="convective", pgwv=8))
+        scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source="convective", pgwv=8,
+                                                  beres=E3SMBeresConfig(use_stand_in_table=True)))   # stand-in: explicit opt-in
     grid, pipe = _pipe_over(over, convection="none")
     assert pipe._gwd_takes_netdt is True
 
@@ -228,6 +253,7 @@ def test_e3sm_frontal_source_threads_frontgf_on_latlon(monkeypatch):
     array (mirrors the netdt sentinel test)."""
     from legoesm.atmosphere.physics.gravity_wave_drag import frontogenesis
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        E3SMBeresConfig,
         E3SMCAMConfig,
         GravityWaveDragConfig,
     )
@@ -265,6 +291,7 @@ def test_e3sm_frontal_source_rejected_on_unsupported_grid(monkeypatch):
     zeros path would otherwise be a silent no-op."""
     from legoesm.atmosphere.physics.gravity_wave_drag import frontogenesis
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        E3SMBeresConfig,
         E3SMCAMConfig,
         GravityWaveDragConfig,
     )
@@ -280,12 +307,14 @@ def test_e3sm_nonfrontal_sources_never_send_frontgf():
     """Orographic / convective sources: the flag stays False and no
     frontgf kwarg is sent (no useless per-step producer calls)."""
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        E3SMBeresConfig,
         E3SMCAMConfig,
         GravityWaveDragConfig,
     )
     for src in ("orographic", "convective"):
         grid, pipe = _pipe_over(GravityWaveDragConfig(
-            scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source=src, pgwv=8)))
+            scheme="e3sm_cam", e3sm_cam=E3SMCAMConfig(source=src, pgwv=8,
+                                                      beres=E3SMBeresConfig(use_stand_in_table=True))))
         assert pipe._gwd_takes_frontgf is False
         rec = _Recorder()
         pipe.gwd_fn = rec

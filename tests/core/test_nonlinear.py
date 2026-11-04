@@ -232,3 +232,43 @@ def test_attach_implicit_gradient_bound_and_nan(x64):
 
     x = attach_implicit_gradient(jnp.array([1.0]), resid)
     assert jnp.isnan(x).all()
+
+
+def _split_residual(offset):
+    """|f| as the Jacobian sweep sees it (x - 1) and as a plain call sees it
+    (x - 1 + offset).  The deliberate gap stands in for the rounding gap between
+    two compilations of one residual; keep it, or the tests below go vacuous."""
+    @jax.custom_jvp
+    def f(x):
+        return x - 1.0 + offset
+
+    @f.defjvp
+    def f_jvp(primals, tangents):
+        (x,), (dx,) = primals, tangents
+        return x - 1.0, dx
+
+    return lambda x, _: f(x)
+
+
+def test_a_seed_within_tolerance_is_converged_not_sent_to_the_fallback():
+    """The verdict must be the loop's own: the sweep sees |f| = 0.9e-6 at the
+    seed, a plain call 1.1e-6, either side of atol = 1e-12 on |f|^2.  A seed the
+    loop accepts must come back converged, or its column falls back to the
+    cold-state fluxes."""
+    solve = _solver(_split_residual(2.0e-7), x_scale=[1.0], f_scale=[1.0], atol=1.0e-12)
+    x0 = jnp.array([1.0 + 0.9e-6])
+    x, n_iters, converged, n_sq, *_ = solve(x0, ())
+    assert int(n_iters) == 0
+    assert bool(converged)
+    assert float(n_sq) < 1.0e-12
+    assert float(x[0]) == float(x0[0])
+
+
+def test_a_root_the_loop_reaches_is_converged_not_sent_to_the_fallback():
+    """Same contract after iterating: the loop stops on its own residual; a
+    plain call at that root reads |f| ~ 2e-6, |f|^2 ~ 4e-12, above the gate."""
+    solve = _solver(_split_residual(2.0e-6), x_scale=[1.0], f_scale=[1.0], atol=1.0e-12)
+    x, n_iters, converged, n_sq, *_ = solve(jnp.array([1.001]), ())
+    assert int(n_iters) >= 1
+    assert bool(converged)
+    assert float(n_sq) <= 1.0e-12 + 1.0e-8 * 1.0e-6

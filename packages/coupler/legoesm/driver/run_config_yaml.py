@@ -54,7 +54,7 @@ def migrate_renamed_keys(d: dict) -> dict:
     return out
 
 
-def read_yaml_with_includes(path, _seen=None) -> dict:
+def read_yaml_with_includes(path, _seen=None, renamed_keys=None) -> dict:
     """Read a run YAML config, recursively merging an optional ``include:`` base
     FIRST so the tuned physics can live in one shared file and be reused across
     run configs.
@@ -84,6 +84,17 @@ def read_yaml_with_includes(path, _seen=None) -> dict:
         doc = migrate_renamed_keys(doc)
     except ValueError as exc:
         raise SystemExit(f"--config {path}: {exc}.")
+    # Driver-local renames (top level only; the global RENAMED_CONFIG_KEYS
+    # apply at any depth, which a key such as ``grid`` must not).  Applied per
+    # file BEFORE the merge, so a child's old spelling overrides its base's new one.
+    for old, new in (renamed_keys or {}).items():
+        if old in doc:
+            if new in doc and doc[new] != doc[old]:
+                raise SystemExit(
+                    f"--config {path}: sets both {old!r} (old name) and "
+                    f"{new!r} to different values ({doc[old]!r} vs "
+                    f"{doc[new]!r}).")
+            doc[new] = doc.pop(old)
     base_ref = doc.pop("include", None)
     merged: dict = {}
     if base_ref is not None:
@@ -91,12 +102,14 @@ def read_yaml_with_includes(path, _seen=None) -> dict:
             raise SystemExit(
                 f"--config {path}: 'include' must be a single path string, "
                 f"got {type(base_ref).__name__}.")
-        merged.update(read_yaml_with_includes(p.parent / base_ref, _seen))
+        merged.update(read_yaml_with_includes(p.parent / base_ref, _seen,
+                                             renamed_keys))
     merged.update(doc)  # the including file overrides its base
     return merged
 
 
-def load_yaml_config(path, parser, *, example_keys: str | None = None) -> dict:
+def load_yaml_config(path, parser, *, example_keys: str | None = None,
+                     renamed_keys: dict[str, str] | None = None) -> dict:
     """Load a run YAML config file into a dict of argument defaults.
 
     Used by ``--config`` to make a canonical run (e.g. the tuned
@@ -115,7 +128,7 @@ def load_yaml_config(path, parser, *, example_keys: str | None = None) -> dict:
     ``example_keys`` is an optional human hint (driver-specific example dests)
     appended to the unknown-key error to help operators fix typos.
     """
-    doc = read_yaml_with_includes(path)
+    doc = read_yaml_with_includes(path, renamed_keys=renamed_keys)
     actions = {a.dest: a for a in parser._actions}
     unknown = sorted(set(doc) - set(actions))
     if unknown:
@@ -215,6 +228,9 @@ def load_params_config(path) -> dict:
 # value) — extend this dict only when the pipeline threads a new scalar
 # (issue #691, codex audit).
 _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
+    # prescribed-ice melt albedo -> build_physics_pipeline / MPAS column lane
+    "atm.prescribed_ice.sea_ice_melt_ramp_width_K":
+        "sea_ice_melt_ramp_width_K",
     # clouds -> build_cloud_config (physics_pipeline)
     "atm.clouds.CloudConfig.rh_crit": "cloud_rh_crit",
     "atm.clouds.CloudConfig.q_c_diagnostic": "cloud_q_c_diagnostic",
@@ -316,13 +332,12 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # hard saturation-adjustment trigger + heating cap -> _resolve_microphysics
     # (physics_pipeline, via apply_microphysics_experiment_flags; the MPAS
     # post-step drain reads the same threaded sub-config in model_driver).
-    # One flat scalar serves ALL SEVEN guarded schemes -- the five bulk
-    # warm-rain ones plus the Sundqvist diagnostic scheme and the ML emulator,
+    # One flat scalar serves ALL SIX guarded schemes -- the four bulk
+    # microphysics ones (morrison, p3, seifert_beheng, thompson) plus the
+    # Sundqvist diagnostic scheme and the ML emulator,
     # which gained the same guard when it was made uniform (only the active
     # scheme's sub-config is built, so one scalar is unambiguous). Keep this
     # block in step with microphysics/config.HARD_SAT_GUARD_SCHEMES.
-    "atm.micro.KesslerConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
-    "atm.micro.KesslerConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.MorrisonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.MorrisonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.P3Config.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
@@ -346,13 +361,10 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # gravity wave drag -> gwd_config_for (physics_pipeline), which every lane
     # (FV pipeline / MPAS / spectral) now routes through.  Before it, these
     # scalars existed on ExperimentConfig but NO production path read them.
-    # ``tau_max`` is tier 3 (a numerics clip), so the tier-1/2 reachability
-    # audit does not require it — it is mapped anyway because the same resolver
-    # threads it and the map's contract is "what the pipeline actually threads".
     "atm.gwd.HinesConfig.total_rms_wind": "hines_total_rms_wind",
     "atm.gwd.HinesConfig.Fmax": "hines_Fmax",
     "atm.gwd.McFarlaneConfig.directional_spread": "mcfarlane_directional_spread",
-    "atm.gwd.McFarlaneConfig.tau_max": "mcfarlane_tau_max",
+    "atm.gwd.McFarlaneConfig.effgw_oro": "mcfarlane_effgw_oro",
     # NOTE: ``mcfarlane_k_wave`` is threaded too but has NO ``__param_spec__``
     # entry (its computed 2*pi/100e3 default is not a float literal, so the
     # AST-based spec gate never required one) — there is no qualified name to
