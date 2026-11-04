@@ -53,7 +53,7 @@ def test_flag_accepts_the_nemo_value_and_rejects_a_typo(flag, dest, good, bad):
 
 @pytest.mark.parametrize("dest", [
     "lateral_side_bc", "barotropic_coriolis", "pgf_scheme",
-    "lateral_viscosity_mask_levels"])
+    "lateral_viscosity_mask_levels", "lateral_shlat"])
 def test_default_is_none_so_no_existing_run_moved(dest):
     """None means "preserve the config", not "pick a value". Adding these
     flags must not change any run that does not pass them."""
@@ -61,7 +61,8 @@ def test_default_is_none_so_no_existing_run_moved(dest):
 
 
 @pytest.mark.parametrize("name", ["lateral_side_bc", "barotropic_coriolis",
-                                  "lateral_viscosity_mask_levels"])
+                                  "lateral_viscosity_mask_levels",
+                                  "lateral_shlat"])
 def test_build_tripole_takes_the_flag(name):
     for node in ast.walk(ast.parse(RUNNER.read_text())):
         if isinstance(node, ast.FunctionDef) and node.name == "build_tripole":
@@ -72,7 +73,8 @@ def test_build_tripole_takes_the_flag(name):
 
 
 @pytest.mark.parametrize("name", ["lateral_side_bc", "barotropic_coriolis",
-                                  "lateral_viscosity_mask_levels"])
+                                  "lateral_viscosity_mask_levels",
+                                  "lateral_shlat"])
 def test_the_flag_reaches_the_config_override(name):
     """A flag parsed but never put in the override dict is inert -- the exact
     defect that made these options unreachable in the first place."""
@@ -139,6 +141,8 @@ def test_the_paired_field_is_reachable_from_replace_flat():
     ("lateral_side_bc", "no_slip", lambda c: c.lateral_side_bc),
     ("lateral_viscosity_mask_levels", "per_level",
      lambda c: c.lateral_viscosity_mask_levels),
+    ("lateral_shlat", 0.5, lambda c: c.lateral_shlat),
+    ("lateral_side_bc", "nemo_shlat", lambda c: c.lateral_side_bc),
     ("barotropic_coriolis", "een", lambda c: c.barotropic.barotropic_coriolis),
 ])
 def test_the_flags_actually_land_in_the_config(name, value, read):
