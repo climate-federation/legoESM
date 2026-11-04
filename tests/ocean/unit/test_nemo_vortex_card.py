@@ -654,8 +654,8 @@ _CERTIFIED_CARD_DIGESTS = {
     # The appended config fields move the printed NamedTuple digest; the
     # surrounding field-by-field guards pin their resolved values below.
     "GYRE-zco": "6bb18cf2c428e5ab",
-    "LOCK_EXCHANGE-zco": "2a60d1dd582bad9f",
-    "OVERFLOW-zps": "d9398d054145794b",
+    "LOCK_EXCHANGE-zco": "39fa49bf73585f6e",
+    "OVERFLOW-zps": "9d7f1c12597be671",
 }
 
 
@@ -679,6 +679,9 @@ def test_the_only_config_change_to_a_certified_card_is_the_added_eos_field(case)
     assert cfg.nemo_qsr_stage3_kmm_source_association is (
         True if case == "GYRE-zco" else None)
     assert cfg.vmix_eos_use_config_rho0 is True
+    # Appended lateral_viscosity_mask_levels: every certified card keeps the
+    # surface masks it always ran.
+    assert cfg.lateral_viscosity_mask_levels == "surface"
 
 
 def _card_digest(card):
