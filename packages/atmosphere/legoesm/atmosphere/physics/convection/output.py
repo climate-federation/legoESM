@@ -113,6 +113,10 @@ class ConvectionOutput(NamedTuple):
     dq_s_detr_dt: jax.Array | None = None
     """Optional DETRAINED snow [kg/kg/s], (ncol, nlev), to the host's SNOW
     species (IFS PSNDE ice); as ``dq_r_detr_dt``."""
+    dq_i_conv_dt: jax.Array | None = None
+    """Optional detrained cloud-ICE source [kg/kg/s], (ncol, nlev) (WRF
+    Tiedtke's ice share of the detrained condensate).  Hosts add it to the
+    ``q_i`` species and refuse a state without one.  ``None`` = none."""
 
 
 def split_convective_rain(dq_c_conv_dt, precip_efficiency):

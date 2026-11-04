@@ -237,6 +237,12 @@ class LatLonCGridColumnModel:
                 bridge = None
                 if physics_fn is not None:
                     def bridge(hs, grid, sigma, ps_in=None):
+                        # The dycore wrote the dynamics tendencies on the
+                        # grid; physics reads them in the column layout.
+                        if getattr(ps_in, "dyn_tendency_T", None) is not None:
+                            ps_in = ps_in._replace(
+                                dyn_tendency_T=self.columns_of(ps_in.dyn_tendency_T),
+                                dyn_tendency_qv=self.columns_of(ps_in.dyn_tendency_qv))
                         pr = physics_fn(self._hs_to_columns(hs), self.mesh,
                                         self.sigma_coord, phys_state=ps_in,
                                         forcing=fo)

@@ -310,8 +310,6 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # they are --params-reachable (2026-07-23; previously baselined CLI-only).
     "atm.conv.BechtoldConfig.downdraft_alpha": "bechtold_downdraft_alpha",
     "atm.conv.BechtoldConfig.downdraft_entrain_rate": "bechtold_downdraft_entrain_rate",
-    "atm.conv.TiedtkeConfig.autoconv_pe_max": "autoconv_pe_max",
-    "atm.conv.TiedtkeConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
     # Zhang-McFarlane + CLUBB tunables -> _resolve_convection's ZM branch and
     # turbulence_config_for (ZM_SCALAR_FIELDS / CLUBB_SCALAR_FIELDS in
     # driver/config.py), the resolvers every lane (MPAS included) consumes.

@@ -39,6 +39,7 @@ from legoesm.core.precision import cast_pytree, finalize_to_storage
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
+    with_dyn_tendencies,
     MPAS_SFC_DIAG_EXTRA_KEYS,
     MPASHydrostaticState,
     MPASHydrostaticTendencies,
@@ -1336,6 +1337,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         _state_postdyn = state_new
         _led_phys_rows = None
         if physics_fn is not None:
+            phys_state = with_dyn_tendencies(phys_state, state, state_new, dt)
             _pr = physics_fn(state_new, self.mesh, self.sigma_coord,
                              phys_state=phys_state, forcing=forcing)
             if type(_pr) is tuple:
