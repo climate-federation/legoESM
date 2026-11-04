@@ -34,6 +34,7 @@ import sys
 
 import jax.numpy as jnp
 import numpy as np
+from legoesm.atmosphere.idealized.rcemip_initial_conditions import RCE_CELL_AREA_M2
 from legoesm.atmosphere.physics import (
     ConvectionConfig,
     GravityWaveDragConfig,
@@ -138,6 +139,10 @@ def build_scm(
         sigma_top=sigma_top,
         forcing=forcing,
         time_integrator="forward_euler",
+        # mynn25 (WRF port) reads q_c and the GCM cell area (vote T1a/T2a/T3b);
+        # dry case: q_c = 0, water surface (land_frac None)
+        **({"q_c_profile": jnp.zeros(nlev), "cell_area_m2": RCE_CELL_AREA_M2}
+           if turbulence == "mynn25" else {}),
     )
 
 

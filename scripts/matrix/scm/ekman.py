@@ -25,6 +25,7 @@ import sys
 
 import jax.numpy as jnp
 
+from legoesm.atmosphere.idealized.rcemip_initial_conditions import RCE_CELL_AREA_M2
 from legoesm import constants
 from legoesm.atmosphere.physics import (
     ConvectionConfig,
@@ -89,6 +90,8 @@ def build_scm(
         sigma_top=sigma_top,
         forcing=forcing,
         time_integrator="forward_euler",
+        # mynn25 (WRF port) reads q_c and the GCM cell area (votes T1a/T2a/T3b)
+        q_c_profile=jnp.zeros(nlev), cell_area_m2=RCE_CELL_AREA_M2,
     )
 
 
