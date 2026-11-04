@@ -674,11 +674,16 @@ def apply_si3_jpl1_ridging(
     )
     opening = closing + divergence
     work = area > _SI3_JPL1_EPSI10
+    listed = work
 
-    # NEMO initializes iter=1 and loops while iter<20 (:289-292): at most 19
-    # ordered shifts.  A fixed loop plus the per-cell ``work`` mask is the JAX
-    # equivalent of its shrinking packed-cell list and remains JIT/grad safe.
-    for _ in range(_SI3_JPL1_MAX_ITERATIONS):
+    # NEMO initializes iter=1 and loops while iter<20 (:285-320): at most 19
+    # ordered shifts.  The ridging list is fixed once, before the loop
+    # (:247-262: at_i > epsi10, ice participation > 0 and gross closing > 0 on
+    # the entry state), and every listed cell stays in the loop: converged cells
+    # carry zero rates (:304-307), which makes their later passes exact no-ops.
+    # A fixed loop plus the per-cell ``listed`` mask is therefore the JAX
+    # equivalent of NEMO's packed list and remains JIT/grad safe.
+    for iteration in range(_SI3_JPL1_MAX_ITERATIONS):
         total_area = open_water + area
         safe_total_area = jnp.where(total_area > _SI3_JPL1_EPSI10, total_area, _SI3_JPL1_ONE)
         inverse_total = jnp.where(
@@ -737,7 +742,7 @@ def apply_si3_jpl1_ridging(
             participation_ice,
             _SI3_JPL1_ONE,
         )
-        excessive = work & (requested_area > area) & (participation_ice != _SI3_JPL1_ZERO)
+        excessive = listed & (requested_area > area) & (participation_ice != _SI3_JPL1_ZERO)
         excessive_removal_clamp = excessive_removal_clamp | excessive
         gross = jnp.where(
             excessive,
@@ -746,7 +751,7 @@ def apply_si3_jpl1_ridging(
         )
         corrected_open = open_water + (opening - participation_open * gross) * dt
         open_water_correction = open_water_correction | (
-            work & ((corrected_open < _SI3_JPL1_ZERO) | (corrected_open > total_area))
+            listed & ((corrected_open < _SI3_JPL1_ZERO) | (corrected_open > total_area))
         )
         opening = jnp.where(
             corrected_open < _SI3_JPL1_ZERO,
@@ -758,7 +763,13 @@ def apply_si3_jpl1_ridging(
             participation_open * gross + (total_area - open_water) / dt,
             opening,
         )
-        shift = work & (participation_ice > _SI3_JPL1_ZERO) & (gross > _SI3_JPL1_ZERO)
+        if iteration == 0:
+            listed = work & (participation_ice > _SI3_JPL1_ZERO) & (gross > _SI3_JPL1_ZERO)
+        # rdgrft_shift: the ice ledger runs only where this pass ridges
+        # (:661-664 ll_shift), but open water is updated for EVERY listed cell
+        # (:651-654), so a deficit cell (ato_i + a_i < 1 on entry) keeps gaining
+        # open water through the opening rate after its ridging has stopped.
+        shift = listed & (participation_ice > _SI3_JPL1_ZERO) & (gross > _SI3_JPL1_ZERO)
 
         new_open_water = jnp.maximum(
             _SI3_JPL1_ZERO,
@@ -883,7 +894,7 @@ def apply_si3_jpl1_ridging(
         iteration_count = iteration_count + shift.astype(jnp.int32)
 
         area = jnp.where(shift, new_area, area)
-        open_water = jnp.where(shift, new_open_water, open_water)
+        open_water = jnp.where(listed, new_open_water, open_water)
         ice_volume = jnp.where(shift, new_ice_volume, ice_volume)
         snow_volume = jnp.where(shift, new_snow_volume, snow_volume)
         age = jnp.where(shift, new_age, age)
@@ -896,15 +907,26 @@ def apply_si3_jpl1_ridging(
 
         residual = _SI3_JPL1_ONE - (open_water + area)
         converged = jnp.abs(residual) < _SI3_JPL1_EPSI10
+        # :300-312: converged -> zero rates and ato_i = MAX(0, 1 - a_i);
+        # otherwise ridge/open again on the residual.  Applied to every listed
+        # cell; a converged cell stays converged with zero rates.
         open_water = jnp.where(
-            shift & converged,
+            listed & converged,
             jnp.maximum(_SI3_JPL1_ZERO, _SI3_JPL1_ONE - area),
             open_water,
         )
-        work = shift & ~converged
-        divergence = jnp.where(work, residual / dt, divergence)
-        closing = jnp.where(work, jnp.maximum(_SI3_JPL1_ZERO, -divergence), closing)
-        opening = jnp.where(work, jnp.maximum(_SI3_JPL1_ZERO, divergence), opening)
+        iterate = listed & ~converged
+        divergence = jnp.where(iterate, residual / dt, divergence)
+        closing = jnp.where(
+            iterate,
+            jnp.maximum(_SI3_JPL1_ZERO, -divergence),
+            jnp.where(listed, _SI3_JPL1_ZERO, closing),
+        )
+        opening = jnp.where(
+            iterate,
+            jnp.maximum(_SI3_JPL1_ZERO, divergence),
+            jnp.where(listed, _SI3_JPL1_ZERO, opening),
+        )
 
     # icedyn_rdgrft.F90:900-903 calls ice_var_roundoff.  Open water is absent
     # from that call, and icevar.F90:871 clips lid volume only in the narrow
