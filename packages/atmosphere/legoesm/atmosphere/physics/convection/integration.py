@@ -342,6 +342,13 @@ def diagnose_omega_columns_hydrostatic(u_grid, v_grid, p_s, grid, sigma_coord,
 
     def _div(fu, fv):
         if voronoi and hasattr(grid, "edgesOnCell"):
+            # the Voronoi divergence gathers EDGE-normal winds by edge index;
+            # cell-centred winds would be silently clamped garbage (vote V29a)
+            if fu.shape[0] != int(grid.nEdges):
+                raise ValueError(
+                    "omega on an MPAS mesh needs the edge-normal wind "
+                    f"(nEdges={int(grid.nEdges)}, nlev); got {tuple(fu.shape)} "
+                    "(cell-centred winds?)")
             return divergence_cell_3d(fu, grid)
         if isinstance(grid, CubedSphereGrid):
             return None if fv is None else _div3_cs(fu, fv, grid)
