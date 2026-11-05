@@ -1,0 +1,23 @@
+{
+ "record": "/burg/glab/users/pg2328/oracle_audit/tier4/column/ctl_on (t4col_{zdf,dh,sal}_record_*.bin, kt=17281)",
+ "cfg": "NEMO 5.0.1 SI3 ORCA1_T4COL",
+ "derived": "/burg/glab/users/pg2328/oracle_audit/tier4/column/port_col.npz",
+ "harness_port_col_sha256": "e1cd329a41e8652408ea2b2c4dd6bf93bd0fb91a78c94070a1eb7e59c169cfb7",
+ "port_sha": "3148c95a76",
+ "spread": "/burg/glab/users/pg2328/oracle_audit/tier4/column/seeds/out_00..19.npz (20-seed 1-ulp, tol=max(spread,1e-12))",
+ "extractor": "/burg/glab/users/pg2328/oracle_audit/seaice_fix/make_fixtures.py",
+ "cells": [
+  27,
+  41,
+  42,
+  43,
+  58,
+  59,
+  60,
+  69,
+  0,
+  1,
+  5,
+  6
+ ]
+}

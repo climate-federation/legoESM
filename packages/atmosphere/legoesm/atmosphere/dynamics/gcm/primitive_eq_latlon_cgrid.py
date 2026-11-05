@@ -42,7 +42,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
-from legoesm.core.state import HydrostaticState
+from legoesm.core.state import HydrostaticState, with_dyn_tendencies
 from legoesm.grids.operators_latlon_cgrid import (
     gradient_x_cgrid,
     gradient_y_cgrid,
@@ -1405,8 +1405,12 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # state, applied as an Euler increment (see the docstring). ---
         phys_state_out = phys_state
         if physics_fn is not None:
+            _hs_new = cgrid_to_hydrostatic(state_new, grid)
+            if phys_state is not None:
+                phys_state = with_dyn_tendencies(
+                    phys_state, cgrid_to_hydrostatic(state_c, grid), _hs_new, dt)
             _pr = self._call_physics_raw(
-                physics_fn, cgrid_to_hydrostatic(state_new, grid),
+                physics_fn, _hs_new,
                 phys_state, grid=grid, sigma_coord=sigma_coord)
             if type(_pr) is tuple:
                 phys_tend = _pr[0]

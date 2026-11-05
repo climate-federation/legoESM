@@ -548,8 +548,9 @@ _COUPLED_DISCRETIZATION = {
 }
 
 # Values the coupled CLI accepted before it shared run_amip's parser
-# (run_amip excludes them; main's coupled CLI did not).
-_COUPLED_EXTRA_CHOICES = {"clouds": ("resolved",), "microphysics": ("ml_emulator",)}
+# (run_amip excludes them; main's coupled CLI did not).  --clouds resolved is
+# in the shared choices; only run_amip restricts it to ifs_cloudsc (vote VC31b).
+_COUPLED_EXTRA_CHOICES = {"microphysics": ("ml_emulator",)}
 # ...and values it refused (reasons in tests/unit/_scheme_reachability_baseline.py).
 _COUPLED_REFUSED_CHOICES = {"surface_bulk_scheme": ("none",), "radiation": ("none",)}
 
@@ -1472,7 +1473,7 @@ def main(argv=None, *, build_only=False):
             elapsed = day - getattr(atm_config, "start_day", 0.0)
             driver.load_coupled_checkpoint(float(elapsed),
                                            checkpoint_dir=args.output,
-                                           required=True)
+                                           required=True, atm_step=step)
             start_step, start_day = step, day
             logger.info("  RESUME from %s: step=%d, day=%.1f (elapsed %.1f) -> "
                         "integrating to day %d", os.path.basename(ckpt),

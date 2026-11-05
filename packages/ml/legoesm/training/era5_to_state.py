@@ -1221,6 +1221,7 @@ def prognostic_carry_seeds(
     microphysics: str,
     turbulence: str,
     shape_3d,
+    convection: str = "none",
 ):
     """Extra ``pack_carry`` kwargs seeding the conditional prognostic carries.
 
@@ -1251,6 +1252,9 @@ def prognostic_carry_seeds(
         Microphysics scheme name (``ExperimentConfig.microphysics``).
     turbulence : str
         Turbulence scheme name (``ExperimentConfig.turbulence``).
+    convection : str
+        Convection scheme name; ``"tiedtke"`` seeds the previous-step
+        turbulence carries the WRF port reads (zeros, cold start).
     shape_3d : tuple
         Model 3-D field shape ``(..., nlev)`` — the shape of ``q_v``.
 
@@ -1290,6 +1294,12 @@ def prognostic_carry_seeds(
     if _traits.carries_energy:
         _ncol = int(np.prod(shape_3d[:-1]))
         seeds[_traits.energy_field] = jnp.zeros((_ncol, shape_3d[-1]))
+
+    # WRF Tiedtke: previous-step turbulence q_v tendency + surface water
+    # flux (grid-shaped like q_v / p_s).
+    from legoesm.driver.compiled_segments import tiedtke_lag_seeds
+    seeds.update(tiedtke_lag_seeds(
+        convection, jnp.zeros(shape_3d), jnp.zeros(shape_3d[:-1])))
 
     return seeds
 
@@ -1413,6 +1423,7 @@ def era5_to_spectral_carry(
     target_phis,
     microphysics: str = "none",
     turbulence: str = "none",
+    convection: str = "none",
 ):
     """Convert ERA5 slice to SegmentCarry on a spectral (Gaussian) grid.
 
@@ -1521,7 +1532,8 @@ def era5_to_spectral_carry(
         held_lw_up_toa=olr_m,
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
-        **_with_ice(prognostic_carry_seeds(microphysics, turbulence, shape_3d),
+        **_with_ice(prognostic_carry_seeds(microphysics, turbulence, shape_3d,
+                                           convection),
                     q_i_model),
     )
 
@@ -1534,6 +1546,7 @@ def era5_to_cubedsphere_carry(
     target_phis,
     microphysics: str = "none",
     turbulence: str = "none",
+    convection: str = "none",
     ice_skin_prognostic: bool = False,
 ):
     """Convert ERA5 slice to SegmentCarry on a cubed-sphere grid.
@@ -1682,7 +1695,8 @@ def era5_to_cubedsphere_carry(
         # Prognostic ice skin seeded like a restart without one (#2106).
         ice_T_skin=(jnp.full(shape_2d, constants.T_freeze_ocean)
                     if ice_skin_prognostic else None),
-        **_with_ice(prognostic_carry_seeds(microphysics, turbulence, shape_3d),
+        **_with_ice(prognostic_carry_seeds(microphysics, turbulence, shape_3d,
+                                           convection),
                     q_i_model),
     )
 
@@ -1724,6 +1738,7 @@ def era5_to_latlon_carry(
     target_phis,
     microphysics: str = "none",
     turbulence: str = "none",
+    convection: str = "none",
     ice_skin_prognostic: bool = False,
 ):
     """Convert ERA5 slice to a SegmentCarry on the lat-lon C-grid.
@@ -1833,7 +1848,8 @@ def era5_to_latlon_carry(
         # Prognostic ice skin seeded like a restart without one (#2106).
         ice_T_skin=(jnp.full(shape_2d, constants.T_freeze_ocean)
                     if ice_skin_prognostic else None),
-        **_with_ice(prognostic_carry_seeds(microphysics, turbulence, shape_3d),
+        **_with_ice(prognostic_carry_seeds(microphysics, turbulence, shape_3d,
+                                           convection),
                     q_i_model),
     )
 

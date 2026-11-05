@@ -74,6 +74,31 @@ def test_cesm_variant_matches_compiled_shr_flux_atmocn():
         assert rel.max() <= _RTOL, (k, float(rel.max()))
 
 
+def test_cesm_variant_ustar_matches_at_1e12():
+    """Campaign bar (rel 1e-12, fp64).  An additive 1e-12 m^2/s^2 in the wind
+    speed's square root (the calm-wind AD guard) moved ustar by 1.5e-12."""
+    d = _fixture()
+    a, b = np.asarray(_ours(d)["ustar"]), d["oracle_ustar"]
+    nz = b != 0.0
+    assert (np.abs(a[nz] - b[nz]) / np.abs(b[nz])).max() <= 1e-12
+
+
+def test_calm_wind_value_is_the_floor_and_gradient_finite():
+    z = jnp.zeros(1)
+    args = (z, z, jnp.full(1, 300.0), jnp.full(1, 0.015), jnp.full(1, 301.0),
+            jnp.full(1, 0.02), jnp.full(1, 1.2))
+    kw = dict(z_bot=jnp.full(1, 10.0), t_bot=jnp.full(1, 299.0), variant="cesm")
+    g = jax.grad(lambda u, v: compute_sam_oceflx_fluxes(u, v, *args[2:], **kw)[4].sum(),
+                 argnums=(0, 1))(*args[:2])
+    assert all(bool(jnp.all(jnp.isfinite(x))) for x in g)
+    u = 1e-3 * jnp.ones(1)
+    calm = compute_sam_oceflx_fluxes(*args, **kw)[4]
+    breeze = compute_sam_oceflx_fluxes(u, *args[1:], **kw)[4]
+    assert float(calm[0]) == float(breeze[0])  # both at the minwind floor
+    nan = compute_sam_oceflx_fluxes(jnp.full(1, jnp.nan), *args[1:], **kw)[4]
+    assert bool(jnp.isnan(nan[0]))  # a NaN wind is not floored away
+
+
 def test_cesm_variant_gradient_finite_on_fixture():
     d = _fixture()
     J = lambda k: jnp.asarray(d[k])  # noqa: E731

@@ -112,6 +112,7 @@ def test_spatial_surface_path_carries_most():
         make_aimip_classical_spectral_physics(
             p, grid, dt=1800.0,
             radiation="gray",
+            convection_scheme="sbm",  # tiedtke (WRF port) refused on spectral
             turbulence_scheme="louis",
             surface_bulk_scheme="most",
             land_mask=land_mask,
@@ -150,6 +151,9 @@ def _assemble_physics_config(p, grid, *, turbulence_scheme, surface_bulk_scheme,
         make_aimip_classical_spectral_physics(
             p, grid, dt=1800.0,
             radiation="gray",
+            # the default convection (tiedtke, WRF port) is refused on the
+            # spectral lane; sbm keeps these surface tests buildable
+            convection_scheme="sbm",
             turbulence_scheme=turbulence_scheme,
             surface_bulk_scheme=surface_bulk_scheme,
             land_mask=land_mask,

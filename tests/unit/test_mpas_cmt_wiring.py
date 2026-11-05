@@ -209,12 +209,13 @@ def test_cmt_cap_binds_and_float32_gradient_is_finite_at_zero_tendency():
 
 
 def test_other_cmt_schemes_keep_zero_edge_winds_on_mpas_with_switches_off():
-    """codex whole-branch review: Tiedtke / Zhang-McFarlane keep
-    enable_cmt=True in their configs, so the reconstruction must be gated by
-    the explicit ConvectionConfig.mpas_cmt, not by the scheme's own flag."""
+    """codex whole-branch review: Zhang-McFarlane keeps enable_cmt=True in
+    its config, so the reconstruction must be gated by the explicit
+    ConvectionConfig.mpas_cmt, not by the scheme's own flag.  (WRF Tiedtke
+    refuses mpas_cmt=False outright: test_convection_latlon_mpas.)"""
     mesh = create_voronoi_mesh(3, lloyd_iterations=3)
     state, sigma = _state(mesh)
-    for scheme in ("tiedtke", "zhang_mcfarlane"):
+    for scheme in ("zhang_mcfarlane",):
         fn = make_convection_physics(ConvectionConfig(scheme=scheme, zhang_mcfarlane=_ZM_AQUA), model_type="mpas", dt=600.0)
         tend, _ = fn(state, mesh, sigma, phys_state=(
             cold_phys_state(state.T.data) if scheme == "zhang_mcfarlane" else None))
