@@ -542,7 +542,7 @@ def test_all_guarded_configs_carry_the_fields():
         HARD_SAT_GUARD_SCHEMES, MicrophysicsConfig,
     )
     top = MicrophysicsConfig()
-    assert len(HARD_SAT_GUARD_SCHEMES) == 5   # kessler, seifert_beheng: exempt (faithful ports)
+    assert len(HARD_SAT_GUARD_SCHEMES) == 4   # kessler, seifert_beheng, thompson: exempt (faithful ports)
     for name in HARD_SAT_GUARD_SCHEMES:
         cfg = getattr(top, name)
         assert cfg.hard_saturation_adjustment is False, name

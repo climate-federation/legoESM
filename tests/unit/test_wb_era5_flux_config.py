@@ -123,11 +123,11 @@ def test_prescribed_surface_frozen_names_are_exactly_the_surface_leaves():
     for knob in _SURFACE_KNOBS:
         assert sum(knob in n for n in names) >= 1, knob
     # nothing else: every returned name carries a marker, and a non-surface
-    # knob (a convection timescale) is NOT in the list
+    # knob (a turbulence mixing length) is NOT in the list
     markers = inert_params.PRESCRIBED_SURFACE_LEAF_MARKERS
     assert all(any(m in n for m in markers) for n in names)
-    assert not any("tiedtke" in n for n in names)
-    assert any("tiedtke" in n for n in _leaf_names(params))
+    assert not any("louis_l_mix_max" in n for n in names)
+    assert any("louis_l_mix_max" in n for n in _leaf_names(params))
 
 
 def test_apply_forced_freeze_removes_the_surface_leaves_from_the_trainable_set():
