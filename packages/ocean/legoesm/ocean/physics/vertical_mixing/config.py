@@ -1060,7 +1060,10 @@ class CATKEConfig(NamedTuple):
     """
     # --- stable (shear) mixing length: surface/bottom + stratification ---
     c_surface_shear: float = 1.131       # Cˢ  surface-distance coefficient
-    c_bottom_shear: float = 0.28         # Cᵇ  bottom-distance coefficient
+    # Cᵇ bottom-distance coefficient. Oceananigans CATKEMixingLength (main, 8e4f98d, 5 November 2026): Cᵇ = 0.967,
+    # chosen so that the near-bottom similarity constant Cᵇ (Cˡᵒu^3 / CˡᵒD)^(1/4) is 0.4, because Cᵇ is not
+    # constrained by the surface-forced calibration LES (Wagner et al. 2025, section 3.1.3). Was 0.28 (core-0026).
+    c_bottom_shear: float = 0.967
     c_ri_lower: float = 0.254            # CRi⁰ stability-function lower Ri
     c_ri_width: float = 1.02             # CRiᵟ stability-function width
     c_sheared_plume: float = 0.505       # Cˢᵖ sheared-convective-plume coefficient
