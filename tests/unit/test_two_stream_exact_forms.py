@@ -132,3 +132,22 @@ def test_sw_gradients_finite(ssa):
 def test_sw_gradients_agree_with_finite_differences():
     f = lambda t, w: jnp.sum(_sw(0.4, [t], [w], [0.5])["t_diff"])  # noqa: E731
     check_grads(f, (0.7, 0.6), order=1, modes=("rev",), rtol=1e-4, atol=1e-6)
+
+
+def test_diffuse_branch_switch_is_continuous_float32():
+    """k^2 below the k floor: the switch at k*tau = 1 must not jump."""
+    f32 = jnp.float32
+    t = [float(_sw(0.5, [6527.5376 * x], [0.99999994], [0.9], f32)["t_diff"].ravel()[0])
+         for x in (1 - 1e-5, 1 + 1e-5)]
+    assert t[0] == pytest.approx(t[1], rel=1e-3)
+
+
+@pytest.mark.parametrize("dtype,tol", [(jnp.float64, 1e-7), (jnp.float32, 5e-3)])
+def test_conservative_layer_absorbs_nothing(dtype, tol):
+    """ssa = 1: the direct beam is reflected, scattered through, or unscattered."""
+    tau = np.array([0.1, 1.0, 10.0, 100.0, 1000.0])
+    mu = 0.5
+    o = _sw(mu, tau, np.ones(5), np.full(5, 0.5), dtype)
+    total = (np.asarray(o["r_dir"], np.float64).ravel() + np.asarray(o["t_dir"], np.float64).ravel()
+             + np.exp(-tau / mu))
+    assert np.abs(total - 1.0).max() < tol
