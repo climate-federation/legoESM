@@ -343,19 +343,19 @@ def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
         raise ValueError("invalid SI3 C1D identity: " + "; ".join(conflicts))
 
 
-def validate_si3_lane_thermo_config(config: "SeaIceConfig") -> None:
-    """Validate the SI3 lane identity consumed by its source-literal step."""
+def validate_si3_lane_thermo_config(config: "SeaIceConfig") -> "SeaIceConfig":
+    """Resolve and validate the SI3 lane identity used by its literal step."""
 
     if config.thermo_scheme != "si3_bl99":
         raise ValueError("the SI3 lane requires thermo_scheme='si3_bl99'")
     if config.si3.lateral_melt and config.si3.namthd_da is None:
-        raise ValueError(
-            "the SI3 lane requires si3.namthd_da when lateral_melt=True"
+        config = config._replace(
+            si3=config.si3._replace(
+                namthd_da=_SI3_NAMELIST_ICE_REF_DEFAULTS["namthd_da"]
+            )
         )
     if not config.si3.lateral_melt and config.si3.namthd_da is not None:
-        raise ValueError(
-            "the SI3 lane rejects si3.namthd_da when lateral_melt=False"
-        )
+        config = config._replace(si3=config.si3._replace(namthd_da=None))
     wanted = SI3ThermoConfig(
         lateral_melt=config.si3.lateral_melt,
         namthd_da=config.si3.namthd_da,
@@ -380,6 +380,7 @@ def validate_si3_lane_thermo_config(config: "SeaIceConfig") -> None:
         conflicts.append("dynamics and transport must both be 'none' in C1D")
     if conflicts:
         raise ValueError("invalid SI3 lane C1D identity: " + "; ".join(conflicts))
+    return config
 
 
 def validate_si3_bulk_config(config: "SeaIceConfig") -> None:
@@ -656,10 +657,16 @@ def build_si3_orca2_o2_config(
 
 
 class SI3LateralMeltConfig(NamedTuple):
-    """``&namthd_da`` values read by ``ice_thd_da`` (``namelist_ice_ref:179,183``); no defaults."""
+    """Resolved ``&namthd_da`` values read by ``ice_thd_da``."""
 
     rn_beta: float
     rn_dmin: float
+
+
+_SI3_NAMELIST_ICE_REF_DEFAULTS = {
+    # NEMO 5.0.2 cfgs/SHARED/namelist_ice_ref:179,183.
+    "namthd_da": SI3LateralMeltConfig(rn_beta=1.0, rn_dmin=8.0),
+}
 
 
 def _validate_si3_orca2_o4_config(config: "SeaIceConfig") -> None:

@@ -10,6 +10,7 @@ from legoesm.ice.config import (
     SI3ThermoConfig,
     SeaIceConfig,
     validate_si3_bulk_config,
+    validate_si3_lane_thermo_config,
     validate_si3_thermo_config,
 )
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
@@ -128,7 +129,7 @@ def build_c1d_omip_l3_si3_lane_card(
     config = card.config._replace(
         si3=SI3ThermoConfig(salinity_scheme=nn_icesal),
     )
-    validate_si3_thermo_config(config)
+    config = validate_si3_lane_thermo_config(config)
     return card._replace(config=config)
 
 

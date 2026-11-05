@@ -614,27 +614,48 @@ def test_d5_card_keeps_lateral_melt_off():
     assert not np.array_equal(_bits(on.concentration.data), _bits(off.concentration.data))
 
 
-def test_lane_validator_rejects_ignored_lateral_melt_namelist():
+def test_lane_validator_resolves_namelist_ice_ref_lateral_melt_defaults():
     from legoesm.ice.config import (
         SI3LateralMeltConfig,
         validate_si3_lane_thermo_config,
     )
 
-    card, _, _ = _production_case()
-    with pytest.raises(ValueError, match="lateral_melt=False"):
-        validate_si3_lane_thermo_config(
-            card.config._replace(
-                si3=card.config.si3._replace(
-                    namthd_da=SI3LateralMeltConfig(rn_beta=1.0, rn_dmin=8.0)
-                )
-            )
+    card, state, forcing = _production_case()
+    beta, dmin = _deck()
+    unresolved = card.config._replace(
+        si3=card.config.si3._replace(lateral_melt=True)
+    )
+    resolved = validate_si3_lane_thermo_config(unresolved)
+    assert resolved.si3.namthd_da == SI3LateralMeltConfig(
+        rn_beta=beta,
+        rn_dmin=dmin,
+    )
+    explicit = _lateral_melt_config(card, beta, dmin)
+    assert validate_si3_lane_thermo_config(explicit) == explicit
+    resolved_out = _dispatch(unresolved, state, forcing, card.dt_seconds)
+    explicit_out = _dispatch(explicit, state, forcing, card.dt_seconds)
+    for resolved_field, explicit_field in zip(resolved_out, explicit_out, strict=True):
+        assert np.array_equal(_bits(resolved_field.data), _bits(explicit_field.data))
+
+
+def test_lane_validator_ignores_namthd_da_when_lateral_melt_is_off():
+    from legoesm.ice.config import (
+        SI3LateralMeltConfig,
+        validate_si3_lane_thermo_config,
+    )
+
+    card, state, forcing = _production_case()
+    beta, dmin = _deck()
+    supplied = card.config._replace(
+        si3=card.config.si3._replace(
+            namthd_da=SI3LateralMeltConfig(rn_beta=beta, rn_dmin=dmin)
         )
-    with pytest.raises(ValueError, match="lateral_melt=True"):
-        validate_si3_lane_thermo_config(
-            card.config._replace(
-                si3=card.config.si3._replace(lateral_melt=True)
-            )
-        )
+    )
+    assert validate_si3_lane_thermo_config(supplied) == card.config
+    supplied_out = _dispatch(supplied, state, forcing, card.dt_seconds)
+    missing_out = _dispatch(card.config, state, forcing, card.dt_seconds)
+    for supplied_field, missing_field in zip(supplied_out, missing_out, strict=True):
+        assert np.array_equal(_bits(supplied_field.data), _bits(missing_field.data))
 
 
 @pytest.mark.parametrize(

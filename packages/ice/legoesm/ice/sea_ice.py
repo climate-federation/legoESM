@@ -608,7 +608,7 @@ def step_sea_ice_si3_lane(
         )
     if config.thermo_scheme != "si3_bl99":
         raise ValueError("step_sea_ice_si3_lane requires thermo_scheme='si3_bl99'")
-    validate_si3_lane_thermo_config(config)
+    config = validate_si3_lane_thermo_config(config)
     if not isinstance(state, SI3ColumnState):
         raise ValueError(
             "thermo_scheme='si3_bl99' requires SI3ColumnState with 3+3 layer enthalpies"
