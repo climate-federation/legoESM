@@ -131,6 +131,61 @@ __physics_contract__ = {
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
 
+def _unbroadcast(g, like):
+    """Sum a cotangent over the axes that broadcasting added, back to ``like``'s shape and dtype."""
+    shape = jnp.shape(like)
+    g = jnp.sum(g, axis=tuple(range(g.ndim - len(shape)))) if g.ndim > len(shape) else g
+    axes = tuple(i for i, (n, m) in enumerate(zip(g.shape, shape)) if m == 1 and n != 1)
+    if axes:
+        g = jnp.sum(g, axis=axes, keepdims=True)
+    return g.astype(jnp.result_type(like))
+
+
+def _make_surrogate_gate(width):
+    """``where(x > 0, a, b)`` with the exact forward value and a surrogate for the switch in the backward pass.
+
+    Forward: the same jnp.where as the model, so every forward result is bitwise unchanged.
+    Backward: the derivative of the logistic blend s a + (1 - s) b, s = sigmoid(x / width), as specified in
+    docs/88 6.12 (a2) before the check: g s for a, g (1 - s) for b, g (a - b) s (1 - s) / width for x.
+    (The variant with exact branch cotangents, g where x > 0 for a and g elsewhere for b, was also run after
+    the review and passed 6 of 9 components; not adopted.) Reverse mode only (custom_vjp). Used only when
+    ``KPPConfig.gradient_surrogates`` is True (widths are numerical, stated, never fitted)."""
+    if not width > 0.0:
+        raise ValueError(f"surrogate width must be positive, got {width!r}")
+
+    @jax.custom_vjp
+    def gate(x, a, b):
+        return jnp.where(x > 0.0, a, b)
+
+    def fwd(x, a, b):
+        return jnp.where(x > 0.0, a, b), (x, a, b)
+
+    def bwd(res, g):
+        x, a, b = res
+        s = jax.nn.sigmoid(x / width)
+        gx = g * (a - b) * s * (1.0 - s) / width
+        return (_unbroadcast(gx, x), _unbroadcast(g * s, a), _unbroadcast(g * (1.0 - s), b))
+
+    gate.defvjp(fwd, bwd)
+    return gate
+
+
+def _surrogate_for(cfg, which):
+    """The surrogate gate when cfg.gradient_surrogates is on and ``which`` ('bl_base': x = 1 - sigma at the
+    interface, width in sigma; 'convective': x = Ri_conv - N2, width in s^-2) is listed in
+    cfg.surrogate_switches; None otherwise, in which case the caller keeps its original exact expression."""
+    if not getattr(cfg, "gradient_surrogates", False):
+        return None
+    switches = [s.strip() for s in cfg.surrogate_switches.split(",") if s.strip()]
+    unknown = set(switches) - {"bl_base", "convective"}
+    if unknown:
+        raise ValueError(f"KPPConfig.surrogate_switches: unknown {sorted(unknown)}")
+    if which not in switches:
+        return None
+    width = {"bl_base": cfg.surrogate_width_sigma, "convective": cfg.surrogate_width_n2}[which]
+    return _make_surrogate_gate(float(width))
+
+
 def _kpp_ice_attenuation(ice_frac, eice):
     """Under-ice attenuation factor ``(1 - eff)`` for the KPP velocity scales.
 
@@ -638,7 +693,12 @@ def kpp_vertical_mixing(
     Ri_shear_curve = cfg.K_0_shear * (1.0 - Ri_ratio**2) ** 3
 
     # Interior static instability: enhanced mixing where N2 < 0
-    K_conv = jnp.where(N2 < cfg.Ri_conv, cfg.K_conv, 0.0)
+    _conv = _surrogate_for(cfg, "convective")
+    if _conv is None:
+        K_conv = jnp.where(N2 < cfg.Ri_conv, cfg.K_conv, 0.0)
+    else:
+        # (N2 < Ri_conv) as x = Ri_conv - N2 > 0 (the same decisions), surrogate backward pass
+        K_conv = _conv(cfg.Ri_conv - N2, jnp.full_like(N2, cfg.K_conv), jnp.zeros_like(N2))
 
     # Build separate interior floors for tracer (K_v) and momentum (A_v).
     # The shear-instability + convective enhancement is shared, but the
@@ -662,8 +722,14 @@ def kpp_vertical_mixing(
     # floor (K_bg for tracers, A_bg for momentum) so the merged field
     # honors the configured background levels in BOTH the BL and the
     # interior.
-    K_v = jnp.where(in_bl, K_bl_s_half + cfg.K_bg, K_interior)   # scalar  ← w_s
-    A_v = jnp.where(in_bl, K_bl_m_half + cfg.A_bg, A_interior)   # momentum ← w_m
+    _bl = _surrogate_for(cfg, "bl_base")
+    if _bl is None:
+        K_v = jnp.where(in_bl, K_bl_s_half + cfg.K_bg, K_interior)   # scalar  ← w_s
+        A_v = jnp.where(in_bl, K_bl_m_half + cfg.A_bg, A_interior)   # momentum ← w_m
+    else:
+        # in_bl = sigma_half < 1 as x = 1 - sigma_half > 0 (the same decisions), surrogate backward pass
+        K_v = _bl(1.0 - sigma_half, K_bl_s_half + cfg.K_bg, K_interior)
+        A_v = _bl(1.0 - sigma_half, K_bl_m_half + cfg.A_bg, A_interior)
     K_v = jnp.minimum(K_v, cfg.K_max)
     A_v = jnp.minimum(A_v, cfg.K_max)
 

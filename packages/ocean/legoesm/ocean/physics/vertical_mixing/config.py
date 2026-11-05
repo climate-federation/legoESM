@@ -175,6 +175,8 @@ __param_spec__ = {
             "cfl_cap_dt_s": "numerics: solver/CFL/smoothing parameter",
             "crossing_sharpness": "numerics: solver/CFL/smoothing parameter",
             "crossing_threshold": "numerics: solver/CFL/smoothing parameter",
+            "surrogate_width_sigma": "numerics: backward-pass surrogate width (gradients only, never fitted)",
+            "surrogate_width_n2": "numerics: backward-pass surrogate width (gradients only, never fitted)",
             "epsilon_lmd": "numerics: floor/cap",
             "gamma_S": "Large 1994 fixed nondim constant",
             "gamma_T": "Large 1994 fixed nondim constant",
@@ -1051,6 +1053,14 @@ class KPPConfig(NamedTuple):
     # flux, with zeta = d_eff kappa B_f / u*^3 written without a division by B_f, as
     # LMD94 and CVMix (cvmix_kpp_compute_turbulent_scales_1d_OBL) use it.
     actual_buoyancy_flux: bool = False
+    # Gradient surrogates (docs/88 6.12 (a2)): the boundary-layer base switch (K_bl inside, interior K below
+    # sigma = 1) and the convective switch (K_conv where N2 < Ri_conv) keep their exact forward values but
+    # take the derivative of a logistic blend in the backward pass, with these widths (numerical, stated
+    # before use, never fitted).  False (default): exact gradients of the step functions.
+    gradient_surrogates: bool = False
+    surrogate_switches: str = "bl_base,convective"   # which switches get a surrogate (comma list)
+    surrogate_width_sigma: float = 0.1     # in sigma = depth / h_bl
+    surrogate_width_n2: float = 1.0e-6     # in N2 [s^-2]
 
 
 class CATKEConfig(NamedTuple):
