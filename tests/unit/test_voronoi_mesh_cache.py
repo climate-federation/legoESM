@@ -207,3 +207,33 @@ def test_cache_serves_each_precision_its_fresh_build(cache_dir, monkeypatch, pre
         m = _mesh(pol, precision)
         assert m.xCell.dtype == fresh.xCell.dtype
         _mesh_fields_equal(m, fresh)
+
+
+def test_cache_rounds_geometry_once_for_half_precision(cache_dir, monkeypatch, precision):
+    """A float16-storage run gets its uncached build bit-for-bit, cold or warm.
+
+    With x64 off the file used to be float32, so float16 runs rounded twice
+    (float64 -> float32 -> float16) and differed from a fresh build by one
+    float16 ulp in some cells. The file is now always float64; a legacy
+    float32 file is a miss for a float16 run.
+    """
+    import jax.numpy as jnp
+    fp16 = precision.PrecisionPolicy(storage=jnp.float16)
+    monkeypatch.setenv("LEGOESM_MESH_CACHE_DISABLE", "1")
+    fresh16 = _mesh(fp16, precision)
+    monkeypatch.delenv("LEGOESM_MESH_CACHE_DISABLE")
+    assert fresh16.xCell.dtype == np.float16
+    path = _voronoi_cache_path(_LEVEL, 1.0, _LLOYD, 1e-4)
+
+    _mesh_fields_equal(_mesh(fp16, precision), fresh16)      # cold: build + save
+    assert np.load(path)["xCell"].dtype == np.float64
+    _mesh_fields_equal(_mesh(fp16, precision), fresh16)      # warm: load + cast
+
+    # Legacy float32 file: must be rebuilt, not double-rounded.
+    precision.set_policy(precision.PrecisionPolicy.fp32())
+    monkeypatch.setenv("LEGOESM_MESH_CACHE_DISABLE", "1")
+    fresh32 = _mesh(precision.PrecisionPolicy.fp32(), precision)
+    monkeypatch.delenv("LEGOESM_MESH_CACHE_DISABLE")
+    _save_voronoi_cache(path, fresh32)
+    _mesh_fields_equal(_mesh(fp16, precision), fresh16)
+    assert np.load(path)["xCell"].dtype == np.float64

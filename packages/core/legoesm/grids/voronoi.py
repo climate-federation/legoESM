@@ -430,7 +430,7 @@ def _mesh_float_dtype():
 
 def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
                                 triangles=None, periodic_L_rad=None,
-                                float_dtype=None):
+                                host_float64=False):
     """Build complete MPAS mesh from generator points on the unit sphere.
 
     Parameters
@@ -791,9 +791,13 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
     fVertex = 2.0 * omega * np.sin(latVertex)
 
     # --- Convert all arrays to JAX ---
-    _fdtype = _mesh_float_dtype() if float_dtype is None else float_dtype
+    _fdtype = _mesh_float_dtype()
 
     def to_jax_f(arr):
+        # host_float64: numpy float64 regardless of jax_enable_x64, so a
+        # cache file never holds geometry rounded below float64.
+        if host_float64:
+            return np.asarray(arr, dtype=np.float64)
         return jnp.array(arr, dtype=_fdtype)
 
     def to_jax_i(arr):
@@ -1184,11 +1188,12 @@ def _load_voronoi_cache(path: str):
                 if arr.ndim == 0:
                     fields[field_name] = arr.item()        # scalar (nCells, radius, ...)
                 elif arr.dtype.kind == "f":
-                    # A float32 file cannot serve a float64 run (its geometry is
-                    # already rounded) -> miss, rebuild, overwrite. A wider file
-                    # is cast down: identical to a fresh build, which computes
-                    # in float64 and casts once at the end.
-                    if arr.dtype.itemsize < target.itemsize:
+                    # A fresh build rounds float64 geometry once, to the run's
+                    # dtype. Only a float64 file (cast once here) or a file
+                    # already in the run's dtype reproduces that; anything
+                    # else (legacy float32 file for a float64 or float16 run)
+                    # -> miss, rebuild, overwrite with float64.
+                    if arr.dtype not in (np.dtype(np.float64), target):
                         return None
                     fields[field_name] = jnp.asarray(arr, dtype=target)
                 else:
@@ -1387,11 +1392,10 @@ def create_voronoi_mesh(
 
     # Step 4: Build complete mesh
     if use_cache and cache_path is not None:
-        # The file serves every precision policy under this x64 key, so it is
-        # written at the widest dtype the key allows, then cast for this run.
-        wide = jnp.float64 if jax.config.read("jax_enable_x64") else jnp.float32
+        # The file serves every precision policy, so it is written in
+        # float64, then cast once for this run.
         mesh = _build_mesh_from_generators(cell_points, radius, omega,
-                                           float_dtype=wide)
+                                           host_float64=True)
         _save_voronoi_cache(cache_path, mesh)
         target = _mesh_float_dtype()
         mesh = mesh._replace(**{
