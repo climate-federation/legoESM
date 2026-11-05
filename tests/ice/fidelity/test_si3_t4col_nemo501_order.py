@@ -28,7 +28,8 @@ FLUX = ("hfx_sub", "wfx_snw_sub", "wfx_ice_sub", "sfx_sub", "hfx_snw", "wfx_snw_
 
 def _run(v):
     st, zr, fz = dh_args(FX)
-    return st, bl._dh_step_fluxes(st, zr, fz, dt(FX), K, nemo_version=v, growth_gate_width=0.0)
+    return st, bl._dh_step_fluxes(st, zr, fz, dt(FX), K, nemo_version=v, growth_gate_width=0.0,
+                                   full_melt_width=0.0)
 
 
 def test_501_order_matches_nemo_state_and_fluxes():

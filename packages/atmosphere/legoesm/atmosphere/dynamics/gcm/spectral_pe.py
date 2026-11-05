@@ -2413,6 +2413,12 @@ class SpectralPrimitiveEquationModel:
             # centered n level excites leapfrog's computational mode (clubb_lite /
             # bechtold NaN'd otherwise).  The Euler STARTUP applies the current
             # (n) tendency — a forward step with no computational mode.
+            # Process-coupled lane: the dynamics-only tendency at step start
+            # (grid space) is what physics' dynamics-tendency consumers read.
+            if (state.tracers is not None and "q_v" in state.tracers):
+                _dT, _dq = self._dyn_tendency_grid_jit(state)
+                phys_state = phys_state._replace(
+                    dyn_tendency_T=_dT, dyn_tendency_qv=_dq)
             _emits = _emits_sfc_precip(physics_fn)
             _r = physics_fn(
                 state, self.grid, self.sigma_coord,
@@ -2712,6 +2718,16 @@ class SpectralPrimitiveEquationModel:
                 s, self.grid, self.sigma_coord, self.config, phys_tend,
             )
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _dyn_tendency_grid_jit(self, state):
+        """Dynamics-only ``(dT/dt, dq_v/dt)`` at ``state``, grid space
+        ``(n_lat, n_lon, nlev)`` (the layout the physics adapter sees)."""
+        tend = spectral_pe_tendencies(
+            state, self.grid, self.sigma_coord, self.config, None)
+        _q = tend.tracers["q_v"]   # Field or raw array, as the state carries
+        return (sh_synthesis_3d(self.grid, tend.T_hat.data),
+                getattr(_q, "data", _q))
 
     @partial(jax.jit, static_argnums=(0, 3))
     def _leapfrog_si_phys_jit(self, state_n, state_nm1, dt, phys_tend):

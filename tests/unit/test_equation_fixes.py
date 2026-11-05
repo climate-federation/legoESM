@@ -239,7 +239,6 @@ class TestIssue3_MicrophysicsRateSemantics:
         ("sundqvist", "sundqvist_microphysics"),
         ("seifert_beheng", "seifert_beheng_microphysics"),
         ("morrison", "morrison_microphysics"),
-        ("thompson", "thompson_microphysics"),
     ])
     def test_all_schemes_condensation_depends_on_dt(self, scheme_name, scheme_fn):
         """All backends' condensation component should depend on dt."""

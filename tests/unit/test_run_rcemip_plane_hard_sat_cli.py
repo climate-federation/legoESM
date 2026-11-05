@@ -34,7 +34,8 @@ def _load():
     return mod
 
 
-GUARDED = ("sundqvist", "morrison", "thompson", "p3", "ml_emulator")
+# thompson is HARD_SAT_GUARD_EXEMPT now (the WRF port, vote K3)
+GUARDED = ("sundqvist", "morrison", "p3", "ml_emulator")
 
 
 @pytest.mark.parametrize("scheme", GUARDED)
@@ -85,7 +86,8 @@ def test_float_override_without_the_gate_is_refused():
 
 
 # HARD_SAT_GUARD_EXEMPT schemes: refused when the config is built.
-@pytest.mark.parametrize("scheme", ["sdm", "fast_sbm", "kessler", "seifert_beheng"])
+@pytest.mark.parametrize("scheme", ["sdm", "fast_sbm", "kessler", "seifert_beheng",
+                                    "thompson"])
 def test_exempt_schemes_reject_the_flag_loudly(scheme):
     """Exempt schemes (HARD_SAT_GUARD_EXEMPT) refuse the guard flag via the
     SHARED helper when the config is built, never silently do nothing."""

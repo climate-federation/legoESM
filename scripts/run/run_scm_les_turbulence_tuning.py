@@ -98,7 +98,7 @@ from legoesm.training.trainable_params import (  # noqa: E402
 # Every selectable closure in turbulence/integration.py::get_turbulence_fn,
 # minus "none" (which is the absence of a closure, not a candidate).
 TURBULENCE_SCHEMES: tuple[str, ...] = (
-    "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
+    "smagorinsky", "louis", "tke", "clubb_lite", "clubb",
     "holtslag_boville", "ysu", "edmf",
 )
 
@@ -359,7 +359,7 @@ def _dead_params_for(scheme: str) -> frozenset[str]:
         return unimplemented_params(mod, mod.CLUBBParams)
     cls_name = {
         "smagorinsky": "SmagorinskyConfig", "louis": "LouisConfig",
-        "tke": "TKEConfig", "mynn25": "MYNN25Config",
+        "tke": "TKEConfig",
         "clubb_lite": "CLUBBLiteConfig", "ysu": "YSUConfig",
         "holtslag_boville": "HoltslagBovilleConfig",
         "edmf": "TurbulentEDMFConfig",
@@ -465,7 +465,7 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
             clubb=clubb_cfg._replace(prognostic=bool(clubb_prognostic))
         )
     sub = getattr(turb, scheme)
-    if scheme == "smagorinsky" and smag_stability_form != "lilly":
+    if scheme == "smagorinsky":
         # The Deardorff stable-length option (PR #1647): stratification shrinks
         # the mixing length instead of driving a stability factor to zero. The
         # Lilly default is untunable on stable cases (its sqrt cutoff has an
@@ -1392,7 +1392,7 @@ def parse_args(argv=None):
                    help="Gaussian scale (raw/pre-sigmoid space) on the initial "
                         "params when --seed is set. 0 disables jitter.")
     p.add_argument("--smag-stability-form", default="lilly",
-                   choices=["lilly", "deardorff"],
+                   choices=["lilly", "deardorff", "wrf_km3"],
                    help="smagorinsky stable-stratification treatment. 'lilly' "
                         "(default, unchanged) is untunable on stable cases; "
                         "'deardorff' (PR #1647) shrinks the mixing length and "

@@ -18,7 +18,6 @@ import re
 
 import pytest
 
-from legoesm.atmosphere.physics.convection.config import TiedtkeConfig
 from legoesm.training.aimip_params import AIMIPClassicalParams
 
 # Builders needing an argument that has no usable default from reflection.
@@ -40,8 +39,7 @@ def _builder_names() -> list[str]:
 def test_there_are_config_builders_to_check():
     """Guard against the reflection silently finding nothing."""
     names = _builder_names()
-    assert len(names) >= 8, names
-    assert "to_tiedtke_config" in names
+    assert len(names) >= 7, names
     assert "to_sbm_config" in names
 
 
@@ -54,20 +52,12 @@ def test_every_config_builder_runs_on_default_params(name):
     assert cfg is not None
 
 
-def test_tiedtke_and_sbm_keep_their_published_cape_threshold_defaults():
-    """#1417: the dropped knobs fall back to the scheme default, not to a guess.
-
-    Reading the value (rather than only building the config) is what makes this
-    fail if someone "fixes" the KeyError by injecting some other number.
-    """
-    params = _default_params()
-    assert (
-        float(params.to_tiedtke_config().cape_threshold)
-        == float(TiedtkeConfig().cape_threshold)
-    )
-    published = params.as_dict()
-    assert "tiedtke_cape_threshold" not in published
+def test_sbm_keeps_its_published_cape_threshold_default():
+    """#1417: the dropped knob is not published (it falls back to the scheme
+    default, not to a guess)."""
+    published = _default_params().as_dict()
     assert "sbm_CAPE_threshold" not in published
+    assert not any(k.startswith("tiedtke_") for k in published)
 
 
 def test_no_builder_reads_a_key_absent_from_as_dict():
