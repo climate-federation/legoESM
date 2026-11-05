@@ -25,24 +25,25 @@ matrix smoke tests do not require ~50 GB of JRA55-do data.
 
 from __future__ import annotations
 
-from .jra55_do import OceanForcing, load_jra55_do, synthetic_ocean_forcing
 from .core2 import core2_nyf_cache_dir, core2_nyf_path, load_core2_nyf
-from .woa import load_woa_sst, synthetic_woa_sst
-from .woa_sss import load_woa_sss, synthetic_woa_sss
 from .dai_trenberth import (
     RiverRunoffData,
     load_dai_trenberth,
-    synthetic_dai_trenberth,
     project_runoff_to_grid,
+    synthetic_dai_trenberth,
 )
+from .jra55_do import OceanForcing, load_jra55_do, synthetic_ocean_forcing
+from .nemo_surface import NemoSurfaceMeans, nemo_sbc_ssm_step, nemo_t_stress_to_uv
 from .sss_restoring import (
-    SSSRestoringConfig,
-    RegionMaskSpec,
     DEFAULT_OMIP2_REGIONS,
+    RegionMaskSpec,
+    SSSRestoringConfig,
     build_region_masks,
     compute_sss_restoring_flux,
     interp_woa_sss_to_grid,
 )
+from .woa import load_woa_sst, synthetic_woa_sst
+from .woa_sss import load_woa_sss, synthetic_woa_sss
 
 __all__ = [
     "OceanForcing",
@@ -65,4 +66,7 @@ __all__ = [
     "build_region_masks",
     "compute_sss_restoring_flux",
     "interp_woa_sss_to_grid",
+    "NemoSurfaceMeans",
+    "nemo_sbc_ssm_step",
+    "nemo_t_stress_to_uv",
 ]

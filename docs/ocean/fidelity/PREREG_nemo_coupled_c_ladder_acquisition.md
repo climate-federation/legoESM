@@ -1,0 +1,23 @@
+# Preregistration: coupled ocean+SI3 C-ladder acquisition
+
+This file must be committed before the operator starts either NEMO executable. It fixes the measurements and verdicts for the fresh `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY` REF/REC clones using the exact R339/R5 deck, SI3 on, TOP off, two CPU ranks, `nn_fsbc=2`, and 10,800 s ocean steps.
+
+## Fixed runs and retained outputs
+
+- C2 REF and REC: steps 1--2; retain four step-2 ocean/ice restart shards per arm, logs, resolved namelists, binaries, patched/preprocessed sources, manifests, and every REC record.
+- C3 REC: steps 1--100 (50 SI3 calls); retain 1,200 C records (kinds 1--6, 100 steps, two ranks), 200 update-flux records (kinds 15/16), 400 stress records (kinds 19/20), 200 private stress records (kind 34), logs, resolved namelists, and step-100 restarts.
+- C4 REF: steps 1--2,920; `nn_stock=8`; retain exactly 1,460 daily ocean+ice restart shards (365 days × two products × two ranks), logs, and resolved namelists. No observer stream is permitted.
+- Retain all raw material until the C0/C1 score and later C2--C4 composition admission are complete. A refusal moves evidence under `refused/`; it does not delete it.
+
+## Preregistered measurements and verdicts
+
+1. Source placement/passivity. CONFIRM only if every inserted executable statement is a writer call, placement is exactly before/after the registered live-R5 boundaries, and all four C2 REF/REC restart shards are byte-identical. REFUTE on any observer assignment/reordering, dead-arm placement, missing shard, or one-byte difference.
+2. C0 `sbc_ssm`. Score all seven exit fields on both parities, both ranks, steps 1--100 against `nemo_sbc_ssm_step`. CONFIRM only at zero unequal IEEE-754 words (0 ULP). REFUTE at one unequal word. The planted one-ULP change must REFUTE.
+3. C1 update flux/stress. Score all kind-16 outputs on the 50 SI3 calls against `si3_ice_update_flx`; score kind-20 and private kind-34 outputs on every ocean step against `si3_ice_update_tau`, with cadence true exactly when `MOD(kt-1,2)==0`; score final native-face stresses with `nemo_t_stress_to_uv`. CONFIRM only at 0 ULP for every owned value. REFUTE at one unequal word, wrong parity, or wrong time level.
+4. C2, C3, C4 composed-step fidelity. The only permitted current status is `NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP`; no match/fidelity verdict may be printed from these acquisitions.
+5. Schema/integrity. CONFIRM only for magic `CLAD0001`, version 1, fp64, exact kind/field counts, complete payloads, exact expected record counts, and manifest digests. REFUTE on truncation, trailing bytes, wrong magic/version/dtype/count, or digest mismatch.
+6. Resources. CONFIRM only if C2 ≤ 6 GiB and ≤ 900 s per integration, C3 ≤ 150 GiB and ≤ 21,600 s, C4 ≤ 30 GiB and ≤ 10,800 s, and the pre-run RAM/free-disk gates pass. REFUTE any excess. Disk and RAM planted shortages must REFUTE.
+7. Deck. CONFIRM only for `nn_it000=1`, C2 `(nn_itend,nn_stock)=(2,2)`, C3 `(100,100)`, C4 `(2920,8)`, `rn_Dt=10800`, `nn_fsbc=2`, `nn_ice=2`, two MPI ranks, unchanged ice namelist, and C4 frequency-mode daily ocean+ice restarts. REFUTE any other resolved value or restart count.
+8. Control flow/retention. CONFIRM only if the stub exercises the acknowledged `--run` branch through staging and reaches the exact `mpirun -np 2` start point, while the retention plant leaves refused evidence recoverable. REFUTE if only `--preflight-only` is exercised, real NEMO starts during preflight, or refused evidence is deleted.
+
+No statistic, tolerance, output count, budget, parity rule, or verdict above may be changed after the first run; any amendment requires a new committed preregistration before rerunning.

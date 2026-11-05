@@ -1,0 +1,14 @@
+--- stprk3.f90
++++ stprk3.f90
+@@ -38,1 +38,2 @@
+-   USE icb_oce, ONLY : berg_grid, nclasses
++   USE icb_oce, ONLY : berg_grid, nclasses
++   USE c_ladder_writer, ONLY : c_record_step
+@@ -88,1 +89,2 @@
+-      IF( ln_timing )   CALL timing_start('stp_RK3')
++      IF( ln_timing )   CALL timing_start('stp_RK3')
++      CALL c_record_step(5,kstp,Nbb,Nbb)
+@@ -241,1 +243,2 @@
+-         ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)
++         ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)
++         CALL c_record_step(6,kstp,Nbb,Nbb)

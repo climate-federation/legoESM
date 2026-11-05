@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Decision-independent C-ladder foundation. This script cannot build or run NEMO.
+# Coupled C-ladder profile; real execution requires the exact operator acknowledgement.
 set -Eeuo pipefail
 
 export CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
@@ -13,32 +13,20 @@ readonly master=$here/../nemo_si3_o8_o16_master_acquisition/run.sh
 export TMPDIR=${TMPDIR:-$scratch_root}
 export PYTHONPATH="$repo:$repo/packages/core:$repo/packages/ocean:$repo/packages/atmosphere:$repo/packages/coupler:$repo/packages/ice:$repo/packages/land:$repo/packages/ml:$repo/packages/tools:$repo/src"
 
-refuse() { printf 'REFUSE: %s\n' "$*" >&2; return 1; }
-expect_refusal() { if timeout 1500 "$@" >/dev/null 2>&1; then refuse "plant survived: $*"; fi; }
-
-[[ ${1:---preflight-only} == --preflight-only && $# -le 1 ]] \
-  || { refuse "usage: $0 [--preflight-only]"; exit 64; }
+[[ $# -le 2 ]] || { printf 'REFUSE: usage: %s [--preflight-only|--run|--move-aside-builds] [evidence]\n' "$0" >&2; exit 64; }
 [[ "$TMPDIR" == "$scratch_root" || "$TMPDIR" == "$scratch_root/"* ]] \
   || { refuse "TMPDIR must be under $scratch_root"; exit 64; }
 [[ -x "$py" ]] || { refuse "required Python is missing: $py"; exit 64; }
 
-scratch=$(mktemp -d "$TMPDIR/c_ladder_preflight.XXXXXX")
-trap 'rm -rf -- "$scratch"' EXIT
-
-timeout 1500 "$py" "$here/preflight.py" > "$scratch/source_contract.json"
-grep -q '"status": "PASS_COUPLED_C_SOURCE_CONTRACT"' "$scratch/source_contract.json" \
-  || refuse "coupled source contract did not pass"
-for plant in drop-sbc-ssm swap-flux-update pretend-mlf; do
-  expect_refusal "$py" "$here/preflight.py" --plant "$plant"
-done
-printf 'PASS_COUPLED_C_SOURCE_CONTRACT_AND_PLANTS\n'
-
-# Reuse the admitted master framework for real-ppsrc observer placement,
-# same-program passivity, stub-NEMO execution, retention, and its own plants.
-# PYTHON_BIN keeps the operator's required interpreter through the delegation.
-timeout 1500 env PYTHON_BIN="$py" O17_EXTENDED=0 "$master" --preflight-only \
-  > "$scratch/si3_master.log"
-grep -q '^PASS_100_STEP_STUB_DRIVER_RETENTION$' "$scratch/si3_master.log" \
-  || { tail -40 "$scratch/si3_master.log" >&2; refuse "delegated SI3 master preflight failed"; }
-printf 'PASS_REUSED_REAL_PPSRC_OBSERVER_AND_STUB_NEMO_PREFLIGHT\n'
-printf 'PREFLIGHT_OK: no build and no NEMO integration were run\n'
+runner=(env \
+  PYTHON_BIN="$py" O17_EXTENDED=1 O8O16_PROFILE_SCRIPT="$here/c_profile.sh" \
+  SOURCE_CFG=ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY SOURCE_EXP=EXP00 \
+  NEMO_ROOT="${NEMO_ROOT:-$scratch_root/c_ladder_builds}" \
+  NEMO_SOURCE_ROOT="${NEMO_SOURCE_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}" \
+  MIN_FREE_RAM_GB="${MIN_FREE_RAM_GB:-150}" MIN_FREE_DISK_KB="${MIN_FREE_DISK_KB:-157286400}" \
+  MAX_EVIDENCE_DISK_KB="${MAX_EVIDENCE_DISK_KB:-157286400}" RUN_TIMEOUT_SEC="${RUN_TIMEOUT_SEC:-21600}" \
+  BASE_BLD="${BASE_BLD:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD}" \
+  REF_CFG="${REF_CFG:-ORCA2_ORCA1ICE_C_LADDER_REF}" REC_CFG="${REC_CFG:-ORCA2_ORCA1ICE_C_LADDER_REC}" \
+  EVIDENCE_ROOT="${EVIDENCE_ROOT:-$scratch_root/c_ladder_acquisitions}" \
+  "$master" "${1:---preflight-only}" "${2:-}")
+if [[ ${1:---preflight-only} == --preflight-only ]]; then exec timeout 1500 "${runner[@]}"; else exec "${runner[@]}"; fi

@@ -1,0 +1,14 @@
+--- iceupdate.f90
++++ iceupdate.f90
+@@ -34,1 +34,2 @@
+-   USE timing         ! Timing
++   USE timing         ! Timing
++   USE o8_o16_master_writer, ONLY : o8o16_tau
+@@ -365,1 +366,2 @@
+-      IF( ln_timing )   CALL timing_start('iceupdate')
++      CALL o8o16_tau(19,pu_oce,pv_oce,tmod_io,utau_oce,vtau_oce)
++      IF( ln_timing )   CALL timing_start('iceupdate')
+@@ -421,1 +423,2 @@
+-      IF( ln_timing )   CALL timing_stop('iceupdate')
++      CALL o8o16_tau(20,pu_oce,pv_oce,tmod_io,utau_oce,vtau_oce)
++      IF( ln_timing )   CALL timing_stop('iceupdate')

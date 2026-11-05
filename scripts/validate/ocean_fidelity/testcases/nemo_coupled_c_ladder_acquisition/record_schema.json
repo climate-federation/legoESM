@@ -1,0 +1,15 @@
+{
+  "magic": "CLAD0001",
+  "version": 1,
+  "byte_order": "native_little_endian",
+  "header": ["magic:char8", "version:int32", "kind:int32", "kt:int32", "kbb:int32", "kmm:int32", "rank:int32", "jpi:int32", "jpj:int32", "jpk:int32", "jpts:int32", "real_bits:int32", "nfields:int32"],
+  "kinds": {
+    "1": {"label": "sbc_ssm_entry", "fields": ["restart_means_present:i4", "use_conservative_temperature:i4", "remove_inverse_barometer:i4", "temperature_now:F2", "salinity_now:F2", "u_before:F2", "v_before:F2", "ssh_now:F2", "ssh_inverse_barometer:F2", "e3t_reference:F2", "r3t_now:F2", "surface_mask:F2", "shortwave_fraction_top:F2", "ssu_prior:F2", "ssv_prior:F2", "sst_prior:F2", "sss_prior:F2", "ssh_prior:F2", "e3t_prior:F2", "frq_prior:F2"]},
+    "2": {"label": "sbc_ssm_exit", "fields": ["ssu:F2", "ssv:F2", "sst:F2", "sss:F2", "ssh:F2", "e3t:F2", "frq:F2"]},
+    "3": {"label": "si3_visible_before_ice_stp", "fields": ["ssu:F2", "ssv:F2", "sst:F2", "sss:F2", "ssh:F2", "e3t:F2", "frq:F2"]},
+    "4": {"label": "ocean_consumed_after_sbc", "fields": ["utau:F2", "vtau:F2", "taum:F2", "utauU:F2", "vtauV:F2", "qsr:F2", "qns:F2", "emp:F2", "sfx:F2", "fr_i:F2", "fwfice:F2", "tmask:F2", "umask:F2", "vmask:F2"]},
+    "5": {"label": "rk3_step_entry", "fields": ["ts:F4", "uu:F3", "vv:F3", "ssh:F2"]},
+    "6": {"label": "rk3_committed_exit", "fields": ["ts:F4", "uu:F3", "vv:F3", "ssh:F2"]}
+  },
+  "o8_o16_reused_kinds": {"15": "ice_update_flx_entry", "16": "ice_update_flx_exit", "19": "ice_update_tau_entry", "20": "ice_update_tau_exit", "34": "ice_update_tau_private_exit"}
+}

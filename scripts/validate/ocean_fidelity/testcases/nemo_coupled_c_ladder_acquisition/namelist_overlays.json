@@ -1,0 +1,7 @@
+{
+  "source_deck": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2",
+  "invariants": {"nn_it000": 1, "rn_Dt": 10800, "nn_fsbc": 2, "nn_ice": 2, "mpi_ranks": 2, "key_si3": true, "key_top": false},
+  "C2": {"nn_itend": 2, "nn_stock": 2, "observer": "REC_AND_REF_PASSIVITY"},
+  "C3": {"nn_itend": 100, "nn_stock": 100, "observer": "REC", "si3_calls": 50},
+  "C4": {"nn_itend": 2920, "nn_stock": 8, "observer": "REF_ONLY", "restart_period": "DAILY", "expected_restart_shards": 1460}
+}
