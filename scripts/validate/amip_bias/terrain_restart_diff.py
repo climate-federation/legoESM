@@ -37,6 +37,32 @@ def terrain_diff(a, b) -> dict:
     return {"max": float(d.max()), "argmax": int(d.argmax()), "n_diff": int((d > 0).sum())}
 
 
+def steps_hook(real_step, product_fn, n_steps, got):
+    """Wrap ``real_step``: record phis drift per step, raise _Done after n_steps.
+
+    ``product_fn()`` returns the terrain product (called once, on the first
+    step). Rows go to ``got["rows"]``; the last step's phis to ``got["state"]``.
+    """
+    rows = got.setdefault("rows", [])
+
+    def hook(self, state, *a, **kw):
+        if "product" not in got:
+            got["product"] = np.asarray(product_fn())
+        before = np.asarray(state.phis.data)       # host copy before the step
+        new = real_step(self, state, *a, **kw)
+        after = np.asarray(new.phis.data)
+        n = len(rows)
+        rows.append((n, terrain_diff(after, before)["max"],
+                     terrain_diff(after, got["product"])["max"], str(after.dtype)))
+        print(f"steps: step {n}: max|after-before| {rows[-1][1]:.3e}, "
+              f"max|after-product| {rows[-1][2]:.3e} m2/s2, dtype {rows[-1][3]}", flush=True)
+        if n + 1 >= n_steps:
+            got["state"] = after
+            raise _Done()
+        return new
+    return hook
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -44,8 +70,10 @@ def main(argv=None):
     ap.add_argument("--day", type=int, required=True)
     ap.add_argument("--mode", choices=("restart", "mpi", "cold", "steps"), required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--n-steps", type=int, default=200)
+    ap.add_argument("--n-steps", type=int, help="steps to record (required for --mode steps)")
     args = ap.parse_args(argv)
+    if args.mode == "steps" and (args.n_steps is None or args.n_steps < 1):
+        ap.error("--mode steps needs --n-steps >= 1")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     rank = int(os.environ.get("SLURM_PROCID", "0"))
@@ -72,28 +100,14 @@ def main(argv=None):
     elif args.mode == "steps":
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel)
-        real_step = MPASPrimitiveEquationModel.step
-        rows = got.setdefault("rows", [])
 
-        def hook(self, state, *a, **kw):
-            if "product" not in got:
-                drv = [o for o in gc.get_objects() if isinstance(o, md.ModelDriver)]
-                if len(drv) != 1:
-                    raise SystemExit(f"expected one ModelDriver, found {len(drv)}")
-                got["product"] = np.asarray(drv[0]._phis_data)
-            before = np.asarray(state.phis.data)
-            new = real_step(self, state, *a, **kw)
-            after = np.asarray(new.phis.data)
-            n = len(rows)
-            rows.append((n, terrain_diff(after, before)["max"],
-                         terrain_diff(after, got["product"])["max"], str(after.dtype)))
-            print(f"steps: step {n}: max|after-before| {rows[-1][1]:.3e}, "
-                  f"max|after-product| {rows[-1][2]:.3e} m2/s2, dtype {rows[-1][3]}", flush=True)
-            if n + 1 >= args.n_steps:
-                got["state"] = after
-                raise _Done()
-            return new
-        MPASPrimitiveEquationModel.step = hook
+        def product():
+            drv = [o for o in gc.get_objects() if isinstance(o, md.ModelDriver)]
+            if len(drv) != 1:
+                raise SystemExit(f"expected one ModelDriver, found {len(drv)}")
+            return drv[0]._phis_data
+        MPASPrimitiveEquationModel.step = steps_hook(
+            MPASPrimitiveEquationModel.step, product, args.n_steps, got)
     else:
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
             MPASPrimitiveEquationModel)
