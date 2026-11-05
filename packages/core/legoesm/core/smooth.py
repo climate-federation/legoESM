@@ -170,6 +170,28 @@ def positive_part_c1(x: jax.Array, sharpness: float) -> jax.Array:
     return jnp.where(hard, jnp.maximum(x, 0.0), smooth)
 
 
+def smooth_min_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
+    """C1 min(a, b), EXACT outside ``|a - b| >= width/2``; ``width = 0`` is ``jnp.minimum``.
+
+    Inside the band ``y = a - b + width/2`` in ``(0, width)`` it is
+    ``a - y**2 / (2 width)``: monotone in ``a`` (slope ``1 - y/width``), never
+    above ``min(a, b)`` and at most ``width/8`` below it (at ``a = b``).
+    Unlike ``x - positive_part_c1(x - b)`` it does not overshoot ``b``.
+    """
+    if width == 0:
+        return jnp.minimum(a, b)
+    y = a - b + 0.5 * width
+    inside = a - y * y / (2.0 * width)
+    return jnp.where(y <= 0.0, a, jnp.where(y >= width, b + 0.0 * a, inside))
+
+
+def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
+    """C1 max(a, b): ``-smooth_min_c1(-a, -b, width)``; ``width = 0`` is ``jnp.maximum``."""
+    if width == 0:
+        return jnp.maximum(a, b)
+    return -smooth_min_c1(-a, -b, width)
+
+
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
     """Smooth approximation to |x|.
 
