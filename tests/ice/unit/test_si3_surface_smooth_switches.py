@@ -288,3 +288,9 @@ def test_qsb_cap_and_freeze_parts_are_smooth():
     sst = g["t_bo"] - g["rt0"] - 0.005 * g["rDt_ice"] / k
     qn = jnp.asarray(qns_for_lead(10.0 * g["rDt_ice"]))      # warming lead: fhld = (lead - freeze_pos)/dt/at_i
     _switch("flx:freeze_parts", lambda x, wd: _flx(w, wd, sst_m=x, qns_oce=qn)["fhld"], sst, 1e-5 * g["rDt_ice"] / k)
+    # negative part, read only by the qsb cap: freeze inside (-0.01 dt, 0), thin layer so the cap binds
+    e3t = jnp.asarray(0.05)
+    k = g["rho0"] * g["rcp"] * float(e3t)
+    sst = g["t_bo"] - g["rt0"] + 0.005 * g["rDt_ice"] / k
+    _switch("flx:freeze_negative", lambda x, wd: _flx(w, wd, sst_m=x, e3t_m=e3t)["qsb_ice_bot"],
+            sst, 1e-5 * g["rDt_ice"] / k)

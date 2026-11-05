@@ -647,8 +647,9 @@ def nemo_si3_saturation_over_ice(
     tier-2 oracle audit ran (fp64: 8.2e-14 max relative on q_sat, 1.6e-13
     on dq/dT); 5.0.2 itself was not run.
 
-    This is the literal operation order of ``sbc_phy.F90:665-711,727-790``.
-    It intentionally does not use the smooth generic mixing-ratio conversion:
+    At ``floor_width_K = 0`` this is the literal operation order of
+    ``sbc_phy.F90:665-711,727-790``; a positive width smooths the 180 K floor
+    and scales ``dq/dT`` by the ramp slope.  It intentionally does not use the smooth generic mixing-ratio conversion:
     that would be a different formula at an oracle boundary.  Returns
     ``(q_sat, dq_sat_dT)`` and remains JIT/reverse-mode compatible.
     """

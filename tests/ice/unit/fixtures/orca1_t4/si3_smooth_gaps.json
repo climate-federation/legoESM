@@ -21,6 +21,7 @@
   "flx502:packed",
   "flx:fhld",
   "flx:fhld_max",
+  "flx:freeze_negative",
   "flx:freeze_parts",
   "flx:full_cover",
   "flx:ice_floor",

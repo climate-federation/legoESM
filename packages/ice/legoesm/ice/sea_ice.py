@@ -634,8 +634,9 @@ def _nemo_si3_ice_albedo(
     ``land_mask`` is NEMO's surface T mask ``smask0`` (1 wet, 0 land); it
     multiplies the overcast albedo and the clear-sky correction at the same
     two sites as ``icealb.F90:179-182``, so land albedo is 0 as in NEMO.
-    Switches (snow-free, melt flag, thickness pieces) are C1 ramps of width
-    ``switches.relative_width x scale``; ``relative_width=0.0`` is NEMO's hard form.
+    Switches (melt flag, thickness pieces) are C1 ramps of width
+    ``switches.relative_width x scale``; ``relative_width=0.0`` is NEMO's hard
+    form.  The snow-free test stays hard unless ``snow_ramp_width_m > 0``.
     """
     r = switches.relative_width
     t_freeze = constants.T_freeze
@@ -725,8 +726,8 @@ def _nemo_si3_blk_ice_2(
     ``land_mask`` is NEMO's ``smask0``; it multiplies the same terms as
     ``sbcblk.F90`` (net longwave, total/solid precipitation and the rain,
     snow and SST heat contents), so land cells carry NEMO's land values.
-    Switches (albedo, ``min(T_air, rt0)``, thin-ice transmission, snow-free
-    qtr, Goff 180 K floor) are C1 ramps of width ``switches.relative_width x scale``;
+    Switches (albedo, ``min(T_air, rt0)``, thin-ice transmission, Goff 180 K
+    floor) are C1 ramps of width ``switches.relative_width x scale``;
     ``relative_width=0.0`` is NEMO's hard form.
     """
     r = switches.relative_width
@@ -940,7 +941,7 @@ def _nemo_si3_ice_flx_other(
         switch = _si3_ge(
             ice_fraction, ice_epsilon, r * switches.ice_switch_scale
         ) * land_mask
-    ice_floor = max_c1(ice_fraction, ice_epsilon, _sharp(r * ice_epsilon))
+    ice_floor = max_c1(ice_fraction, ice_epsilon, _sharp(r * switches.ice_switch_scale))
     lead_energy = land_mask * dt * (
         (1.0 - ice_fraction_before) * qsr_ocean * frq
         + (1.0 - ice_fraction_before) * qns_ocean
