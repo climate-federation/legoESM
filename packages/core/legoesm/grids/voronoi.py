@@ -422,8 +422,15 @@ def _order_indices_ccw(center_xyz, neighbor_xyz):
 # Mesh connectivity and geometry building
 # ============================================================================
 
+def _mesh_float_dtype():
+    """Float dtype mesh geometry is stored in: the precision policy's storage role."""
+    from legoesm.core.precision import get_policy
+    return get_policy().storage
+
+
 def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
-                                triangles=None, periodic_L_rad=None):
+                                triangles=None, periodic_L_rad=None,
+                                float_dtype=None):
     """Build complete MPAS mesh from generator points on the unit sphere.
 
     Parameters
@@ -784,13 +791,7 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
     fVertex = 2.0 * omega * np.sin(latVertex)
 
     # --- Convert all arrays to JAX ---
-    # Use float64 when x64 is enabled for geometry precision, float32 otherwise.
-    import jax
-    try:
-        from legoesm.core.precision import get_policy
-        _fdtype = get_policy().storage
-    except Exception:
-        _fdtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    _fdtype = _mesh_float_dtype() if float_dtype is None else float_dtype
 
     def to_jax_f(arr):
         return jnp.array(arr, dtype=_fdtype)
@@ -1176,13 +1177,22 @@ def _load_voronoi_cache(path: str):
                     and _files <= set(VoronoiMesh._fields)):
                 # Stale schema (fields added/removed) -> ignore, rebuild.
                 return None
+            target = np.dtype(_mesh_float_dtype())
             fields = {}
             for field_name in _files:
                 arr = data[field_name]
                 if arr.ndim == 0:
                     fields[field_name] = arr.item()        # scalar (nCells, radius, ...)
+                elif arr.dtype.kind == "f":
+                    # A float32 file cannot serve a float64 run (its geometry is
+                    # already rounded) -> miss, rebuild, overwrite. A wider file
+                    # is cast down: identical to a fresh build, which computes
+                    # in float64 and casts once at the end.
+                    if arr.dtype.itemsize < target.itemsize:
+                        return None
+                    fields[field_name] = jnp.asarray(arr, dtype=target)
                 else:
-                    fields[field_name] = jnp.asarray(arr)  # respects current x64
+                    fields[field_name] = jnp.asarray(arr)
         return VoronoiMesh(**fields)
     except Exception as exc:  # corrupt / truncated cache file -> rebuild
         warnings.warn(
@@ -1376,9 +1386,20 @@ def create_voronoi_mesh(
         cell_points = verts
 
     # Step 4: Build complete mesh
-    mesh = _build_mesh_from_generators(cell_points, radius, omega)
     if use_cache and cache_path is not None:
+        # The file serves every precision policy under this x64 key, so it is
+        # written at the widest dtype the key allows, then cast for this run.
+        wide = jnp.float64 if jax.config.read("jax_enable_x64") else jnp.float32
+        mesh = _build_mesh_from_generators(cell_points, radius, omega,
+                                           float_dtype=wide)
         _save_voronoi_cache(cache_path, mesh)
+        target = _mesh_float_dtype()
+        mesh = mesh._replace(**{
+            k: jnp.asarray(v, dtype=target) for k in mesh._fields
+            if getattr(v := getattr(mesh, k), "dtype", None) is not None
+            and v.dtype.kind == "f"})
+    else:
+        mesh = _build_mesh_from_generators(cell_points, radius, omega)
     if _lock_path is not None:
         # Release AFTER the atomic cache save: waiters poll the cache, so
         # the lock's job is done once the mesh is loadable.
@@ -1954,12 +1975,7 @@ def load_mpas_mesh(path: str) -> VoronoiMesh:
 
     radius = float(ds.sphere_radius) if hasattr(ds, 'sphere_radius') else constants.R_earth
 
-    import jax
-    try:
-        from legoesm.core.precision import get_policy
-        _fdtype = get_policy().storage
-    except Exception:
-        _fdtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    _fdtype = _mesh_float_dtype()
 
     mesh_data = {
         'nCells': nCells, 'nEdges': nEdges, 'nVertices': nVertices,
