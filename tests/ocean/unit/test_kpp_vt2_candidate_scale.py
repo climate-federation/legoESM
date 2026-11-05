@@ -31,19 +31,25 @@ from legoesm.ocean.physics.vertical_mixing import kpp as kpp_mod  # noqa: E402
 from legoesm.ocean.physics.vertical_mixing.config import KPPConfig  # noqa: E402
 
 KAPPA, EPS_SL = 0.4, 0.1
-ZETA_S, A_S, C_S = -1.0, -28.86, 98.96
+ZETA_S = -1.0
+# CVMix computes the convective constants from zeta_s (cvmix_kpp.F90 lines 374 to 376):
+# a_s = sqrt(1 - 16 zeta_s) (1 + 8 zeta_s) = -7 sqrt(17), c_s = 24 sqrt(1 - 16 zeta_s) = 24 sqrt(17).
+# legoESM keeps LMD94's published rounding (-28.86, 98.96; test_kpp_lmd94_faithful pins them), a relative
+# difference of about 5e-5, so the convective regime is compared at 1e-4 and the others at 1e-12.
+A_S, C_S = -7.0 * np.sqrt(17.0), 24.0 * np.sqrt(17.0)
 
 
 def cvmix_ws(ustar, B_cvmix, d):
-    """CVMix 1d_OBL w_s with sigma_coord = 1 (MOM6 Vt_layer), OBL_depth = d, l_LMD_ws = .false."""
+    """CVMix 1d_OBL w_s with sigma_coord = 1 (MOM6 Vt_layer), OBL_depth = d, l_LMD_ws = .false.
+    Returns w_s and whether the convective branch was used."""
     zeta = EPS_SL * d * B_cvmix * KAPPA / ustar ** 3
     if zeta >= 0.0:
-        phi = 1.0 + 5.0 * zeta
-    elif zeta > ZETA_S:
-        phi = (1.0 - 16.0 * zeta) ** -0.5
+        phi, conv = 1.0 + 5.0 * zeta, False
+    elif zeta >= ZETA_S:                      # CVMix: the weakly unstable form down to zeta_s inclusive
+        phi, conv = (1.0 - 16.0 * zeta) ** -0.5, False
     else:
-        phi = (A_S - C_S * zeta) ** (-1.0 / 3.0)
-    return KAPPA * ustar / phi
+        phi, conv = (A_S - C_S * zeta) ** (-1.0 / 3.0), True
+    return KAPPA * ustar / phi, conv
 
 
 def _column(nlev=40):
@@ -80,16 +86,20 @@ def _capture_ws(cfg, ustar, Bf, h_bl_prev=None):
     return z, seen, float(h)
 
 
-# |B_f| = 0 or above legoESM's AD floor (float32 eps, 1.2e-7 m2/s3), below which legoESM substitutes the floor
-# (a documented legoESM departure that this test does not cover).
+# |B_f| = 0 or above legoESM's AD floor (float32 eps, 1.2e-7 m2/s3). Below it, legoESM substitutes the floor for
+# the flux in every KPP velocity scale; that is a departure of its own (docs/92, core-0022 note), not covered here.
 @pytest.mark.parametrize("ustar,Bf", [(0.01, 0.0), (0.01, -2e-7), (0.01, 2e-7), (0.003, 3e-7), (0.02, 5e-7),
                                       (0.005, -1e-6)])
 def test_candidate_ws_equals_cvmix(ustar, Bf):
     cfg = KPPConfig(vt2_velocity_scale="candidate")
     z, seen, _ = _capture_ws(cfg, ustar, Bf)
     # legoESM B_f > 0 is destabilising; CVMix surf_buoy_force > 0 is stabilising
-    ref = np.array([cvmix_ws(ustar, -Bf, d) for d in z])
-    np.testing.assert_allclose(seen["ws"], ref, rtol=1e-12, atol=1e-15)
+    out = [cvmix_ws(ustar, -Bf, d) for d in z]
+    ref = np.array([w for w, _ in out])
+    conv = np.array([c for _, c in out])
+    got = np.ravel(seen["ws"])
+    np.testing.assert_allclose(got[~conv], ref[~conv], rtol=1e-12, atol=1e-15)
+    np.testing.assert_allclose(got[conv], ref[conv], rtol=1e-4, atol=1e-15)
 
 
 def test_candidate_passes_each_depth_as_its_own_layer():
