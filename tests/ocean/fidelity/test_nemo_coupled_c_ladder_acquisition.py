@@ -27,9 +27,9 @@ COUPLED_RECORD = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/"
     "acquisition/orca1ice_surface_entry_every_step_a_np2"
 )
-REFUSED_C3 = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round30/refused/"
-    "oracle_coupled_c_ladder_20261105T183812Z_rc1_3724699/REC_C3"
+SAS_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/"
+    "oracle_o17_full_step/record_100step"
 )
 
 
@@ -155,13 +155,17 @@ def test_tau_cadence_is_scorer_only_and_preserves_production_api(tmp_path: Path)
 def test_coupled_namelist_reads_executed_drag_arm_and_rejects_ambiguity(
     tmp_path: Path,
 ) -> None:
-    resolved = scorer._coupled_resolved_namelist(COUPLED_RECORD)
-    assert resolved["ln_drgice_imp"] is True
-    assert tuple(resolved[name] for name in ("jpl", "nlay_i", "nlay_s")) == (1, 3, 3)
+    historical = scorer._coupled_resolved_namelist(COUPLED_RECORD)
+    assert tuple(historical[name] for name in ("jpl", "nlay_i", "nlay_s")) == (1, 3, 3)
 
     run = tmp_path / "REC_C3"
     run.mkdir()
-    (run / "output.namelist.ice").write_bytes((COUPLED_RECORD / "output.namelist.ice").read_bytes())
+    (run / "output.namelist.ice").write_bytes((SAS_RECORD / "output.namelist.ice").read_bytes())
+    (run / "ocean.output").write_text("implicit ice-ocean drag ln_drgice_imp = T\n")
+    resolved = scorer._coupled_resolved_namelist(run)
+    assert resolved["ln_drgice_imp"] is True
+    assert tuple(resolved[name] for name in ("jpl", "nlay_i", "nlay_s")) == (5, 10, 5)
+
     (run / "ocean.output").write_text(
         "implicit ice-ocean drag ln_drgice_imp = T\nimplicit ice-ocean drag ln_drgice_imp = F\n"
     )
@@ -169,15 +173,20 @@ def test_coupled_namelist_reads_executed_drag_arm_and_rejects_ambiguity(
         scorer._coupled_resolved_namelist(run)
 
 
-def test_c1_dimensions_come_from_run_and_refuse_sas_hardcode() -> None:
+def test_c1_dimensions_come_from_ice5_run(tmp_path: Path) -> None:
     dimensions_parameter = inspect.signature(scorer.read_record_verified).parameters[
         "expected_ice_dimensions"
     ]
     assert dimensions_parameter.default is inspect.Parameter.empty
 
-    resolved = scorer._coupled_resolved_namelist(REFUSED_C3)
+    run = tmp_path / "REC_C3"
+    run.mkdir()
+    (run / "output.namelist.ice").write_bytes((SAS_RECORD / "output.namelist.ice").read_bytes())
+    (run / "ocean.output").write_text("implicit ice-ocean drag ln_drgice_imp = T\n")
+    resolved = scorer._coupled_resolved_namelist(run)
     dimensions = tuple(int(resolved[name]) for name in ("jpl", "nlay_i", "nlay_s"))
-    record_path = REFUSED_C3 / "o8_o16_master_records" / scorer.record_name(15, 1, 0, 0)
+    assert dimensions == (5, 10, 5)
+    record_path = SAS_RECORD / "o8_o16_master_records" / scorer.record_name(15, 1, 0, 0)
     record = scorer.read_record_verified(
         record_path,
         expected_ice_dimensions=dimensions,
@@ -185,15 +194,15 @@ def test_c1_dimensions_come_from_run_and_refuse_sas_hardcode() -> None:
     assert tuple(record["meta"][name] for name in ("jpl", "nlay_i", "nlay_s")) == dimensions
     with pytest.raises(
         ValueError,
-        match=r"record ice dimensions \(1, 3, 3\) != expected \(5, 10, 5\)",
+        match=r"record ice dimensions \(5, 10, 5\) != expected \(1, 3, 3\)",
     ):
         scorer.read_record_verified(
             record_path,
-            expected_ice_dimensions=(5, 10, 5),
+            expected_ice_dimensions=(1, 3, 3),
         )
 
     private = scorer.read_o17_record(
-        REFUSED_C3
+        SAS_RECORD
         / "o17_master_records/o17_kind34_tau_private_step0001_rank0000.bin"
     )
     assert tuple(private["meta"][name] for name in ("jpl", "nlay_i", "nlay_s")) == dimensions
@@ -253,6 +262,12 @@ def test_schema_overlays_writer_prereg_and_truncation(tmp_path: Path) -> None:
     overlays = json.loads((ACQ / "namelist_overlays.json").read_text())
     assert schema["magic"] == "CLAD0001" and set(schema["kinds"]) == set("123456")
     assert overlays["C4"]["nn_stock"] == 8 and overlays["C4"]["expected_restart_shards"] == 1460
+    assert sum(
+        len(rows)
+        for groups in overlays["ice_overlay"].values()
+        for rows in groups.values()
+    ) == 39
+    assert sum(len(rows) for rows in overlays["ice_retained_pending"].values()) == 9
     writer = (ACQ / "c_ladder_writer.F90").read_text()
     assert "PUBLIC :: c_record_ssm, c_record_sbc, c_record_step" in writer
     assert "have_ssh_ib=ALLOCATED(ssh_ib)" in writer
@@ -397,10 +412,34 @@ def test_exact_overlays_and_shell_control_flow(tmp_path: Path) -> None:
         )
         assert deck._last_int(rendered, "nn_itend") == expected[0]
         assert deck._last_int(rendered, "nn_stock") == expected[1]
+    report = deck.stage(source, tmp_path / "ice5", "C3")
+    assert report["status"] == "PASS_EXACT_R339_R5_DECK_ICE5"
+    assert report["ice_dimensions"] == [5, 10, 5]
+    assert report["ice_overlay_rows"] == 39
+    assert report["ice_retained_pending_rows"] == 9
+    executed = tmp_path / "ice5" / "output.namelist.ice"
+    executed.write_bytes((COUPLED_RECORD / "output.namelist.ice").read_bytes())
+    deck._apply_ice_overlay(executed)
+    executed_report = deck.verify(
+        tmp_path / "ice5", "C3", require_resolved_output=True
+    )
+    assert executed_report["resolved_output_checked"] is True
+    with pytest.raises(ValueError, match="staged ICE5 resolution"):
+        deck.stage(source, tmp_path / "drop", "C3", plant="drop-ice-overlay")
+    changed_sas = tmp_path / "changed.output.namelist.ice"
+    changed_sas.write_bytes(
+        (SAS_RECORD / "output.namelist.ice")
+        .read_bytes()
+        .replace(b"RN_KAPPA_I=  1", b"RN_KAPPA_I=  2", 1)
+    )
+    with pytest.raises(ValueError, match="differs from SAS ICE5 outside"):
+        deck.stage(source, tmp_path / "changed", "C3", sas_reference=changed_sas)
     for shell in (ACQ / "run.sh", ACQ / "c_profile.sh"):
         subprocess.run(["bash", "-n", str(shell)], check=True, timeout=30)
     profile = (ACQ / "c_profile.sh").read_text()
     assert "C_LADDER_OPERATOR_ACK" in profile
+    assert "RUN_FRESH_R5_REF_REC_C2_2_C3_100_C4_2920_DAILY_NP2_ICE5" in profile
+    assert "readonly C_ACK=RUN_FRESH_R5_REF_REC_C2_2_C3_100_C4_2920_DAILY_NP2\n" not in profile
     assert "STUB_REACHED_EXACT_NEMO_START" in profile
     assert "c_legacy_observer_gate" in profile
     assert "for unit in $C_OBSERVER_UNITS" in profile
@@ -427,7 +466,7 @@ def test_real_run_refuses_noncanonical_evidence_path(tmp_path: Path) -> None:
     assert proc.returncode == 64
     assert "evidence must be under /data/abyssal" in proc.stderr
     launcher = (ACQ / "run.sh").read_text()
-    assert "phase3/si3_rounds/round30" in launcher
+    assert "phase3/si3_rounds/round31" in launcher
     assert "scratch_root/c_ladder_acquisitions" not in launcher
 
 

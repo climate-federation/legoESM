@@ -1,6 +1,65 @@
 {
   "source_deck": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2",
+  "sas_ice_reference": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step/record_100step/output.namelist.ice",
   "invariants": {"nn_it000": 1, "rn_Dt": 10800, "nn_fsbc": 2, "nn_ice": 2, "mpi_ranks": 2, "key_si3": true, "key_top": false},
+  "ice_overlay": {
+    "physics_numerics": {
+      "namdyn": {"ln_landfast_l16": false},
+      "namdyn_rdgrft": {
+        "ln_distf_exp": false,
+        "ln_distf_lin": true,
+        "ln_str_smooth": true,
+        "rn_fpndrdg": 1.0,
+        "rn_fpndrft": 1.0,
+        "rn_porordg": 0.3
+      },
+      "namitd": {"rn_himin": 0.1},
+      "nampar": {"jpl": 5, "nlay_i": 10, "nlay_s": 5, "rn_amax_n": 0.997, "rn_amax_s": 0.997},
+      "namthd": {"ln_iceda": true},
+      "namthd_da": {"rn_beta": 1.0, "rn_dmin": 8.0},
+      "namthd_do": {"rn_hinew": 0.1},
+      "namthd_pnd": {"ln_pnd": true, "ln_pnd_lev": true},
+      "namthd_sal": {
+        "nn_icesal": 4,
+        "rn_alpha_cw": 5e-7,
+        "rn_alpha_gn": 4.6e-4,
+        "rn_rc_gn": 8.1,
+        "rn_rc_rjw": 8.0,
+        "rn_time_gd": 172800.0
+      },
+      "namthd_zdf": {"rn_cnd_s": 0.31}
+    },
+    "analytic_initial_state": {
+      "namini": {
+        "rn_apd_ini_n": 0.2,
+        "rn_ati_ini_n": 0.9,
+        "rn_ati_ini_s": 0.9,
+        "rn_hpd_ini_n": 0.05,
+        "rn_hti_ini_n": 2.0,
+        "rn_hts_ini_s": 0.2,
+        "rn_smi_ini_n": 6.3,
+        "rn_smi_ini_s": 6.3,
+        "rn_tmi_ini_n": 270.0,
+        "rn_tmi_ini_s": 270.0,
+        "rn_tms_ini_n": 270.0,
+        "rn_tms_ini_s": 270.0,
+        "rn_tsu_ini_n": 270.0
+      }
+    }
+  },
+  "ice_retained_pending": {
+    "nampar": {"cn_icerst_in": "restart_ice_r4.2"},
+    "namini": {
+      "sn_ati%clvar": "at_i",
+      "sn_hti%clvar": "ht_i",
+      "sn_hts%clvar": "ht_s",
+      "sn_smi%clvar": "sm_i",
+      "sn_tmi%clname": "NOT USED",
+      "sn_tmi%clvar": "tm_i",
+      "sn_tms%clvar": "tm_s",
+      "sn_tsu%clvar": "tmsu"
+    }
+  },
   "C2": {"nn_itend": 2, "nn_stock": 2, "observer": "REC_AND_REF_PASSIVITY"},
   "C3": {"nn_itend": 100, "nn_stock": 100, "observer": "REC", "si3_calls": 50},
   "C4": {"nn_itend": 2920, "nn_stock": 8, "observer": "REF_ONLY", "restart_period": "DAILY", "expected_restart_shards": 1460}

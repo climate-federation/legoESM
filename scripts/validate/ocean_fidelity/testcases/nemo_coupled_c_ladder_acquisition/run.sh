@@ -8,8 +8,8 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly repo=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 readonly py=/home/dbalwada/legoESM/.venv/bin/python
-readonly scratch_root=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_c0_scratch
-readonly default_evidence_root=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round30
+readonly scratch_root=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_c6_scratch
+readonly default_evidence_root=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round31
 readonly master=$here/../nemo_si3_o8_o16_master_acquisition/run.sh
 export TMPDIR=${TMPDIR:-$scratch_root}
 export PYTHONPATH="$repo:$repo/packages/core:$repo/packages/ocean:$repo/packages/atmosphere:$repo/packages/coupler:$repo/packages/ice:$repo/packages/land:$repo/packages/ml:$repo/packages/tools:$repo/src"
@@ -51,4 +51,4 @@ runner=(env \
   REF_CFG="${REF_CFG:-ORCA2_ORCA1ICE_C_LADDER_REF}" REC_CFG="${REC_CFG:-ORCA2_ORCA1ICE_C_LADDER_REC}" \
   EVIDENCE_ROOT="$evidence_root" \
   "$master" "$mode" "$evidence")
-if [[ "$mode" == --preflight-only ]]; then exec timeout 1500 "${runner[@]}"; else exec "${runner[@]}"; fi
+if [[ "$mode" == --preflight-only ]]; then exec timeout 1200 "${runner[@]}"; else exec "${runner[@]}"; fi

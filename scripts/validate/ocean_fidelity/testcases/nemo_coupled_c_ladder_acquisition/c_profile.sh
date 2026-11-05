@@ -2,7 +2,7 @@
 # Sourced by the O8--O16 master: do not execute directly.
 
 readonly C_HERE=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-readonly C_ACK=RUN_FRESH_R5_REF_REC_C2_2_C3_100_C4_2920_DAILY_NP2
+readonly C_ACK=RUN_FRESH_R5_REF_REC_C2_2_C3_100_C4_2920_DAILY_NP2_ICE5
 readonly C_SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2
 readonly C_PPSRC=${C_REAL_PPSRC:-$BASE_BLD/ppsrc/nemo}
 readonly C_SOURCE_WORK=${C_REAL_WORK:-$BASE_BLD/../WORK}
@@ -116,6 +116,12 @@ c_run_preflight() {
   done
   c_patch_preflight "$scratch"
   for rung in C2 C3 C4; do "$PY" "$C_HERE/deck.py" --destination "$scratch/deck_$rung" --rung "$rung" >/dev/null; done
+  expect_refusal "$PY" "$C_HERE/deck.py" --destination "$scratch/deck_drop_ice" --rung C3 --plant drop-ice-overlay
+  local sas_plant
+  sas_plant=$scratch/output.namelist.ice.changed
+  cp "$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["sas_ice_reference"])' "$C_HERE/namelist_overlays.json")" "$sas_plant"
+  sed -i '0,/RN_KAPPA_I=  1/{s/RN_KAPPA_I=  1/RN_KAPPA_I=  2/}' "$sas_plant"
+  expect_refusal "$PY" "$C_HERE/deck.py" --destination "$scratch/deck_changed_sas" --rung C3 --sas-reference "$sas_plant"
   expect_refusal ram_gate 999999
   expect_refusal disk_gate "$scratch" 999999999999999
   "$PY" -m json.tool "$C_HERE/record_schema.json" >/dev/null
@@ -179,6 +185,7 @@ c_stage_and_run() {
   (cd "$dir" && timeout "$budget" mpirun -np 2 --oversubscribe ./nemo >run.user.stdout.log 2>&1)
   [[ -s "$dir/ocean.output" && -s "$dir/output.namelist.dyn" && -s "$dir/output.namelist.ice" ]] \
     || refuse "$rung $arm lacks required resolved outputs"
+  "$PY" "$C_HERE/deck.py" --destination "$dir" --rung "$rung" --verify-resolved-output >/dev/null
   ! grep -Eiq 'E[[:space:]]+R[[:space:]]+R[[:space:]]+O[[:space:]]+R|ABORT' "$dir/ocean.output" "$dir/run.user.stdout.log" \
     || refuse "fatal token in $rung $arm"
   touch "$dir/NEMO_RUN_COMPLETE"
@@ -244,6 +251,7 @@ manifest={
  'source_sha256':{str(p.relative_to(repo)):sha(p) for p in sources+[prereg]},
  'binary_sha256':{'observer_free_REF':sha(ref),'observer_REC':sha(rec)},
  'source_configuration':'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY',
+ 'ice_configuration':'DECISION_217_ORCA2_SAS_ICE5',
  'forcing_start':'EXACT_R339_R5_STAGED_OMIP_CORE_II_INITIAL_DECK','mpi_ranks':2,
  'runs':{'C2':{'steps':2,'arms':['REF','REC'],'budget_seconds':900,'budget_gib':6},'C3':{'steps':100,'si3_calls':50,'arms':['REC'],'budget_seconds':21600,'budget_gib':150},'C4':{'steps':2920,'arms':['REF'],'budget_seconds':10800,'budget_gib':30,'restart_stride_steps':8,'expected_restart_shards':1460}},
  'scoring':{'C0':'0_ULP','C1':'0_ULP','C2':'NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP','C3':'NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP','C4':'NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP'},
