@@ -51,6 +51,8 @@ RTICECU_OFFSET_K = 38.0  # sucumf.F90:272  RTICECU = RTT - 38 (LMFGLAC, convecti
 RTBER_OFFSET_K = 5.0     # suphec.F90:247-248  RTBER = RTBERCU = RTT - 5
 RKAP = constants.kappa_von_karman   # parphy.F90 RKAP = 0.4 (same value)
 QSAT_CAP = 0.5           # cuadjtq.F90 ZQMAX / satur.F90 MIN(0.5, ZQS)
+RKOOP1 = 2.583           # suphec.F90:253  Koop homogeneous-nucleation fit
+RKOOP2 = 0.48116e-2      # suphec.F90:254  [K-1]
 
 
 class IFSThermo(NamedTuple):
@@ -86,6 +88,8 @@ class IFSThermo(NamedTuple):
     RTICECU: float
     RTWAT_RTICE_R: float
     RTWAT_RTICECU_R: float
+    RKOOP1: float = RKOOP1
+    RKOOP2: float = RKOOP2
 
 
 def ifs_thermo(*, RG, RD, RV, RCPD, RLVTT, RLMLT, RTT, RA, R2ES, R3LES, R4LES,
@@ -136,30 +140,40 @@ def foealfcu(th, t):
                               - th.RTICECU) * th.RTWAT_RTICECU_R) ** 2)
 
 
-def _ew_mixed(th, a, t):
+def ew_mixed(th, a, t):
     return th.R2ES * (a * jnp.exp(th.R3LES * (t - th.RTT) / (t - th.R4LES))
                       + (1.0 - a) * jnp.exp(th.R3IES * (t - th.RTT) / (t - th.R4IES)))
 
 
+def foeeliq(th, t):
+    """fcttre.func.h FOEELIQ: liquid-only Tetens."""
+    return th.R2ES * jnp.exp(th.R3LES * (t - th.RTT) / (t - th.R4LES))
+
+
+def foeeice(th, t):
+    """fcttre.func.h FOEEICE: ice-only Tetens."""
+    return th.R2ES * jnp.exp(th.R3IES * (t - th.RTT) / (t - th.R4IES))
+
+
 def foeewm(th, t):
-    return _ew_mixed(th, foealfa(th, t), t)
+    return ew_mixed(th, foealfa(th, t), t)
 
 
 def foeewmcu(th, t):
-    return _ew_mixed(th, foealfcu(th, t), t)
+    return ew_mixed(th, foealfcu(th, t), t)
 
 
-def _dem(th, a, t):
+def dem_mixed(th, a, t):
     return (a * th.R5ALVCP * (1.0 / (t - th.R4LES) ** 2)
             + (1.0 - a) * th.R5ALSCP * (1.0 / (t - th.R4IES) ** 2))
 
 
 def foedem(th, t):
-    return _dem(th, foealfa(th, t), t)
+    return dem_mixed(th, foealfa(th, t), t)
 
 
 def foedemcu(th, t):
-    return _dem(th, foealfcu(th, t), t)
+    return dem_mixed(th, foealfcu(th, t), t)
 
 
 def foeldcpm(th, t):
