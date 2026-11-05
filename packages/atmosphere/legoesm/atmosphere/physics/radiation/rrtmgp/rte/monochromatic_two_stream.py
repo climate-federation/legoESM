@@ -378,14 +378,8 @@ def _direct_quantities(
   t_dir = (ssa / denom) * (
       -c * one_plus_kmu * pair_t + d * e_kt * etm1 / one_plus_kmu
   )
-  # `1 - exp(-tau/mu0)` is the energy-conservation cap the caller clamps
-  # against. Return it from here rather than have the caller evaluate the same
-  # exponential a second time. (The subtraction does cancel for a thin layer,
-  # and `-expm1(-tau/mu0)` would give it exactly -- but only at the cost of
-  # another transcendental, and for no observable gain: a cap that small is far
-  # inside `_SW_CLIP_SHARPNESS`, so the smooth clamp drives r_dir and t_dir to
-  # zero there whether or not the cap itself is resolved.)
-  return {'r_dir': r_dir, 't_dir': t_dir, 'one_minus_t0': 1.0 - t0}
+  # Energy cap for the caller's clamp; expm1 keeps it nonzero for thin layers.
+  return {'r_dir': r_dir, 't_dir': t_dir, 'one_minus_t0': -jnp.expm1(-tau / mu0)}
 
 
 def _diffuse_quantities(gamma1: Array, gamma2: Array, tau: Array) -> StatesMap:
@@ -427,12 +421,11 @@ def _diffuse_quantities(gamma1: Array, gamma2: Array, tau: Array) -> StatesMap:
   """
   eps = _eps_of(gamma1)
   k2 = _k_squared(gamma1, gamma2)
-  k = _k_fn(gamma1, gamma2)
   # The branch selector and the whole small branch are written in
   # x2 = (k*tau)^2 = k2*tau^2 — never through sqrt(k2), whose reverse-mode
   # derivative is infinite at the conservative-scattering point k2 = 0 (see
-  # the note above the hyperbolic helpers). ``k`` itself (eps-floored, safe
-  # adjoint) is used only by the large branch.
+  # the note above the hyperbolic helpers). ``k`` itself is used only by the
+  # large branch.
   x2 = k2 * jnp.square(tau)
   small = x2 < _KTAU_SWITCH**2
   gsum = jnp.maximum(gamma1 + gamma2, eps)
@@ -460,6 +453,9 @@ def _diffuse_quantities(gamma1: Array, gamma2: Array, tau: Array) -> StatesMap:
                + shc_m1) / c_small
 
   # --- large-k*tau branch (exp-scaled; safe at any tau).
+  # Unfloored k: x2 >= 1 here, so k2 > 0, and a floored k would jump at the switch
+  # wherever k2 is below the floor.
+  k = jnp.sqrt(jnp.where(small, 1.0, k2))
   ktau_big = jnp.where(small, _KTAU_SWITCH, k * tau)
   # One exp serves the whole branch. `expm1` and a second `exp` are not needed
   # here: this branch is only selected for `k*tau >= 1`, so `e1 <= exp(-1)` and

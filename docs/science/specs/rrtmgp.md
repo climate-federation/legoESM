@@ -196,6 +196,9 @@ KNOWN DIFFERENCES, kept:
   reconstruction differs by up to 12 W/m2 in surface LW down.  Host choice.
 - Constants g, M_d, M_w: 4e-5 W/m2.
 - Out-of-range T, p: RTE refuses them; ours clips to the table.
+- Float32 direct beam at ssa = 1 exactly: k is floored at sqrt(eps), leaving up to
+  3e-3 false absorptance in the worst layer of a tau up to 2000 sweep.  Lower floors
+  are worse (0.01 to 0.95, measured).  Float64: 8e-9.
 
 OPEN: cloud tables are v1.8.2 (pinned by `test_rrtmgp_cloud_optics_oracle.py`);
 against the latest tables they cost up to 2.4 W/m2 SW (0.47 rms) and 1.5 W/m2 LW.

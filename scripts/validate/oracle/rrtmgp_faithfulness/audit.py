@@ -318,6 +318,7 @@ def audit_case(name, args, p_top, overhead, data):
     up = tuple(convert_cloud_table(Path(args.data) / f"rrtmgp-clouds-{b}-bnd.nc",
                                    Path(args.out) / f"converted_{b}.nc") for b in ("lw", "sw"))
     ours[("cloud_upstream_tables", "f64")] = run_ours(c, ghg, cloud, overhead, False, s0, cloud_files=up)
+    ours[("cloud_upstream_tables", "f32")] = run_ours(c, ghg, cloud, overhead, True, s0, cloud_files=up)
     opt = cap["optics"]
     interior = lambda a: np.asarray(a, np.float64)[:, 0, 1:-1]  # noqa: E731
     play, tlay = interior(cap["p"]), interior(cap["T"])
@@ -397,9 +398,6 @@ def audit_case(name, args, p_top, overhead, data):
         lwf["planck_src_top"], lwf["planck_src_bottom"])["planck_src_top"]
     lev_ours = np.moveaxis(np.asarray(comb, np.float64)[:, :, 0, :-1], 0, -1)
     cmp(f"optics/{name}/lev_source", lev_ours, lev, 1e-30)
-    binds = lev ** 2 < MTS._EPSILON
-    print(f"source floor binds on {binds.mean():.3%} of (col, level, g-point)")
-    cmp(f"optics/{name}/lev_source_unfloored_cells", lev_ours[~binds], lev[~binds], 1e-30)
     cmp(f"optics/{name}/sfc_source", np.moveaxis(np.asarray(lwf["planck_src_sfc"], np.float64)[:, :, 0], 0, -1),
         sfc, 1e-30)
     cmp(f"optics/{name}/sw_tau", to_cl(swf["optical_depth"]), tau_s, 1e-30)
