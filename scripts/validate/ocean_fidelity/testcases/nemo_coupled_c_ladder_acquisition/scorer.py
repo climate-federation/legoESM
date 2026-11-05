@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import struct
 from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
+from legoesm.core.nemo_namelist import parse_namelist
 from legoesm.core.source_rounding import nemo_source_round as sr
 from legoesm.ice.si3_finalize import (
     SI3StressInputs,
@@ -30,10 +32,9 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer imp
     _late_config,
     _state_from_record,
     _update_forcing,
-    parse_resolved_ice_namelist,
+    read_record_verified,
 )
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o16_master_gate import (
-    read_master_record,
     record_name,
 )
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_composition_scorer import (
@@ -116,6 +117,64 @@ def read_c_record(path: Path) -> dict:
 def _equal(name: str, got, want) -> None:
     if not np.array_equal(np.asarray(got).view(np.uint64), np.asarray(want).view(np.uint64)):
         raise ValueError(f"STATUS PLANT-FIRED: {name} is not 0 ULP")
+
+
+def _coupled_resolved_namelist(run: Path) -> dict:
+    """Read SI3 parameters plus the coupled run's executed ice-drag arm."""
+    ice_path = run / "output.namelist.ice"
+    if not ice_path.is_file():
+        raise ValueError(f"STATUS PLANT-FIRED: missing resolved ice namelist: {ice_path}")
+    values = parse_namelist(ice_path, "ice")
+    required = (
+        "rn_simin",
+        "rn_sinew",
+        "nn_icesal",
+        "ln_pnd",
+        "ln_pnd_lev",
+        "ln_pnd_topo",
+        "ln_pnd_lids",
+        "ln_pnd_alb",
+        "nn_snwfra",
+    )
+    parsed = {}
+    for name in required:
+        matches = [tokens for (_, _, key), tokens in values.items() if key == name]
+        if len(matches) != 1 or len(matches[0]) != 1:
+            raise ValueError(
+                f"STATUS PLANT-FIRED: coupled resolved ice namelist lacks one scalar {name}"
+            )
+        parsed[name if name != "ln_pnd_lev" else "ln_pnd_LEV"] = matches[0][0]
+    parsed["ln_pnd_TOPO"] = parsed.pop("ln_pnd_topo")
+    ocean_output = run / "ocean.output"
+    if not ocean_output.is_file():
+        raise ValueError(f"STATUS PLANT-FIRED: missing coupled run log: {ocean_output}")
+    drag_values = re.findall(
+        r"implicit ice-ocean drag\s+ln_drgice_imp\s*=\s*([TF])\b",
+        ocean_output.read_text(errors="replace"),
+        flags=re.I,
+    )
+    resolved = {value.upper() == "T" for value in drag_values}
+    if len(resolved) != 1:
+        raise ValueError(
+            "STATUS PLANT-FIRED: coupled ocean.output does not resolve one "
+            "executed ln_drgice_imp value"
+        )
+    parsed["ln_drgice_imp"] = resolved.pop()
+    return parsed
+
+
+def _interior_master_fields(record: dict) -> dict[str, np.ndarray]:
+    """Crop full local-domain fields to the MPI shard's recorded interior."""
+    meta = record["meta"]
+    sl = (
+        slice(meta["ntsi"] - 1, meta["ntei"]),
+        slice(meta["ntsj"] - 1, meta["ntej"]),
+    )
+    full_shape = (meta["jpi"], meta["jpj"])
+    return {
+        name: value[sl] if value.ndim >= 2 and value.shape[:2] == full_shape else value
+        for name, value in record["fields"].items()
+    }
 
 
 def _nemo_cadenced_tau_step(
@@ -202,14 +261,13 @@ def score_c0(records: Path, *, plant: str | None = None) -> dict:
     return {"status": "PASS_C0_0_ULP", "records": len(entries)}
 
 
-def score_c1(evidence: Path, ppsrc: Path, *, plant: str | None = None) -> dict:
+def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
     run = evidence / "REC_C3"
     records = run / "o8_o16_master_records"
-    first = read_master_record(records / record_name(15, 1, 0, 0))
-    namelist = parse_resolved_ice_namelist(
-        run / "output.namelist.ice", run / "output.namelist.dyn", ppsrc
-    )
+    first = read_record_verified(records / record_name(15, 1, 0, 0))
+    namelist = _coupled_resolved_namelist(run)
     cfg = _late_config(namelist, first["scalars"], nn_hls=2)._replace(nn_fsbc=2)
+    flux_cfg = cfg._replace(nn_hls=0)
     surface_config = SI3SurfaceConfig.from_resolved_namelists(
         run / "output.namelist.dyn", run / "output.namelist.ice"
     )
@@ -218,38 +276,37 @@ def score_c1(evidence: Path, ppsrc: Path, *, plant: str | None = None) -> dict:
     )
     for kt in steps:
         for rank in (0, 1):
-            r15 = read_master_record(records / record_name(15, kt, 0, rank))
-            r16 = read_master_record(records / record_name(16, kt, 0, rank))
+            r15 = read_record_verified(records / record_name(15, kt, 0, rank))
+            r16 = read_record_verified(records / record_name(16, kt, 0, rank))
             state_fields = dict(r15["fields"])
             sample = state_fields["a_i"]
             template = SI3State.zeros(
-                sample.shape[0] + 2 * cfg.nn_hls,
-                sample.shape[1] + 2 * cfg.nn_hls,
-                config=cfg,
+                sample.shape[0],
+                sample.shape[1],
+                config=flux_cfg,
             )
             state_fields["hi_max"] = np.asarray(template.bounds.hi_max)
             state_fields["hi_mean"] = np.asarray(template.bounds.hi_mean)
-            state = _state_from_record(state_fields, cfg, full_orca2=True)
+            state = _state_from_record(state_fields, flux_cfg, full_orca2=False)
             flux = _fluxes_from_record(r15["fields"])
             _, out = si3_ice_update_flx(
                 state,
                 flux,
-                _update_forcing(r15["fields"]),
-                config=cfg,
+                _update_forcing(_interior_master_fields(r15)),
+                config=flux_cfg,
                 surface_config=surface_config,
             )
+            expected = _interior_master_fields(r16)
             for name in out._fields:
-                _equal(
-                    f"C1 flux step={kt} rank={rank} {name}", getattr(out, name), r16["fields"][name]
-                )
+                _equal(f"C1 flux step={kt} rank={rank} {name}", getattr(out, name), expected[name])
         # Flux records occur only on SI3 calls; stress records occur every ocean step.
     tau_steps = sorted(
         {int(path.name.split("_step")[1][:4]) for path in records.glob("o8o16_kind19_*.bin")}
     )
     for kt in tau_steps:
         for rank in (0, 1):
-            r19 = read_master_record(records / record_name(19, kt, 0, rank))
-            r20 = read_master_record(records / record_name(20, kt, 0, rank))
+            r19 = read_record_verified(records / record_name(19, kt, 0, rank))
+            r20 = read_record_verified(records / record_name(20, kt, 0, rank))
             stress = SI3StressInputs(
                 **{name: jnp.asarray(r19["fields"][name]) for name in SI3StressInputs._fields}
             )
@@ -347,7 +404,7 @@ def main() -> int:
             args.evidence / "REC_C3/c_ladder_records",
             plant=args.plant if args.plant == "numeric" else None,
         ),
-        "C1": score_c1(args.evidence, args.ppsrc, plant=args.plant),
+        "C1": score_c1(args.evidence, plant=args.plant),
         **status_report(),
     }
     print(json.dumps(report, indent=2, sort_keys=True))

@@ -28,7 +28,7 @@ c_render_pristine_observer_unit() {
 c_legacy_observer_gate() {
   local dir=$1 unit
   for unit in $C_OBSERVER_UNITS; do
-    if rg -n 'oracle_|l[1234]_dump|l3xchg_dump' "$dir/$unit.f90" >/dev/null; then
+    if grep -En 'oracle_|l[1234]_dump|l3xchg_dump' "$dir/$unit.f90" >/dev/null; then
       refuse "legacy R5 observer survived pristine-source regeneration: $unit"
       return 1
     fi
@@ -74,7 +74,7 @@ c_patch_preflight() {
   c_legacy_observer_gate "$scratch/ppsrc"
   c_placement_gate "$scratch/ppsrc"
   expect_refusal c_placement_gate "$scratch/ppsrc" source-placement
-  ! rg -n '(^|[^=!<>])=([^=]|$)' "$C_HERE"/*_c.patch | rg 'CALL c_record|CALL o8o16' >/dev/null || refuse 'observer patch contains assignment'
+  ! grep -En '(^|[^=!<>])=([^=]|$)' "$C_HERE"/*_c.patch | grep -E 'CALL c_record|CALL o8o16' >/dev/null || refuse 'observer patch contains assignment'
 }
 
 c_stub_run() {

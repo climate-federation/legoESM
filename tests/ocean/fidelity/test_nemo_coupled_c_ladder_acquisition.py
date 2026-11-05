@@ -22,6 +22,10 @@ ACQ = REPO / "scripts/validate/ocean_fidelity/testcases/nemo_coupled_c_ladder_ac
 REAL = Path(
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
 )
+COUPLED_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/"
+    "acquisition/orca1ice_surface_entry_every_step_a_np2"
+)
 
 
 def _module(name: str, path: Path):
@@ -138,6 +142,46 @@ def test_tau_cadence_is_scorer_only_and_preserves_production_api(tmp_path: Path)
     assert not np.array_equal(on.tmod_io, inputs.tmod_io)
     with pytest.raises(ValueError, match="parity"):
         scorer.self_test("wrong-parity", tmp_path)
+
+
+def test_coupled_namelist_reads_executed_drag_arm_and_rejects_ambiguity(
+    tmp_path: Path,
+) -> None:
+    resolved = scorer._coupled_resolved_namelist(COUPLED_RECORD)
+    assert resolved["ln_drgice_imp"] is True
+
+    run = tmp_path / "REC_C3"
+    run.mkdir()
+    (run / "output.namelist.ice").write_bytes((COUPLED_RECORD / "output.namelist.ice").read_bytes())
+    (run / "ocean.output").write_text(
+        "implicit ice-ocean drag ln_drgice_imp = T\nimplicit ice-ocean drag ln_drgice_imp = F\n"
+    )
+    with pytest.raises(ValueError, match="does not resolve one executed"):
+        scorer._coupled_resolved_namelist(run)
+
+
+def test_c1_uses_versioned_reader_and_scores_only_mpi_shard_interior() -> None:
+    source = inspect.getsource(scorer.score_c1)
+    assert "read_master_record" not in source
+    assert source.count("read_record_verified") == 5
+    assert "full_orca2=False" in source
+
+    full = np.arange(42, dtype=np.float64).reshape(6, 7)
+    interior = np.arange(6, dtype=np.float64).reshape(2, 3)
+    record = {
+        "meta": {
+            "jpi": 6,
+            "jpj": 7,
+            "ntsi": 3,
+            "ntei": 4,
+            "ntsj": 3,
+            "ntej": 5,
+        },
+        "fields": {"full": full, "interior": interior},
+    }
+    cropped = scorer._interior_master_fields(record)
+    np.testing.assert_array_equal(cropped["full"], full[2:4, 2:5])
+    np.testing.assert_array_equal(cropped["interior"], interior)
 
 
 def test_schema_overlays_writer_prereg_and_truncation(tmp_path: Path) -> None:
