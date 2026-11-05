@@ -1365,9 +1365,87 @@ def test_store_mass_flux_is_the_last_config_field():
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
     fields = LatLonCGridOceanConfig._fields
-    # The integration contract is stronger than "still near the tail": every
-    # field from main is an exact prefix and store_mass_flux retains slot 103.
-    # The follow-up fields are the only allowed suffix.
+    # The contract is APPEND-ONLY, so the pinned tail GROWS as fields are
+    # appended; each addition extends this tuple (a deliberate, visible
+    # edit).  store_salt_flux was appended after store_mass_flux (the
+    # exact-salt gateway instrument), preserving every earlier position.
+    # ``zdf_implicit_solver_evaluation`` was appended by ``d80df3ed7``; the
+    # earlier two slots retain their positions immediately before it.
+    # The NEMO ORCA2 lane then appended its 23 card-selected statement
+    # switches, every one defaulting to the previous behaviour.
+    tail = ("store_mass_flux", "store_salt_flux",
+            "zdf_implicit_solver_evaluation",
+            "een_fold_image_v_row",
+            "rk3_stage1_ssh_nemo_literal",
+            "rk3_stage1_rhs_nemo_literal",
+            "rk3_stage_velocity_written_order",
+            "een_vorticity_written_order",
+            "zdf_barotropic_removal_nemo_literal",
+            "zdf_momentum_nemo_face_thickness",
+            "rk3_fold_exchange_top_v_row",
+            "rk3_stage_r3f_nemo_literal",
+            "rk3_stage_r3t_nemo_literal",
+            "nemo_eos_gdept_rounded_product",
+            "rk3_stage_r3uv_nemo_literal",
+            "zdf_tracer_nemo_rounded_thickness",
+            "barotropic_rhs_ascending_level_sum",
+            "zdf_momentum_stage_r3u_nemo_literal",
+            "een_nemo_relative_vorticity",
+            "een_nemo_top_f_u_halo",
+            "barotropic_wind_nemo_stored_depth",
+            "surface_stress_nemo_fold_vector_sign",
+            "zdf_surface_stress_nemo_face_thickness",
+            "rk3_stage_tracer_written_order",
+            "rk3_stage3_heat_nemo_written",
+            "rk3_stage3_tracer_nemo_stored_thickness",
+            "bbl_nemo_stage3_krhs",
+            "bbl_nemo_pivot_ghost",
+            "rk3_stage2_tracer_nemo_stored_thickness",
+            "rk3_stage3_salt_nemo_written",
+            "implicit_ice_ocean_top_drag",
+            "nemo_bottom_drag_written_statements",
+            "nemo_hpg_sco_fold_geometry",
+            "rk3_vector_raw_vmask",
+            "nemo_wzv_stored_r3_ratios",
+            "nemo_zad_written_association",
+            "nemo_stage2_momentum_wzv_half_step",
+            "nemo_stage_momentum_wzv_stored_kmm_ratios",
+            "rk3_vector_rhs_nemo_order",
+            "nemo_ldf_stored_f_area",
+            "nemo_ldf_fold_rows",
+            "rk3_stage1_ldf_source_order",
+            "nemo_ldf_stage_r3f",
+            "rk3_stage_transport_raw_vmask",
+            "rk3_stage_transport_fold_exchanges",
+            "fct_fold_exchange",
+            "rk3_end_of_stage_pivot_fold",
+            "rk3_stage_wzv_nemo_clock_pair",
+            "rk3_stage3_tracer_krhs_nemo_order",
+            "rk3_stage_tracer_wzv_stored_kmm_ratios",
+            "rk3_stage_transport_stored_r3uv",
+            "rk3_stage3_geothermal_nemo_written",
+            "rk3_stage3_geothermal_after_ldf_nemo_order",
+            "rk3_stage3_damping_after_geothermal_nemo_order",
+            "rk3_stage3_l8_nemo_order",
+            "rk3_stage3_l9_eiv_nemo_order",
+            "nemo_qsr_stage3_kmm_source_association",
+            "vmix_eos_use_config_rho0",
+            # appended by the ocean oracle-fix campaign (tier-3 RNF)
+            "runoff_depth_spread_levels",
+            "lateral_viscosity_mask_levels",
+            "lateral_shlat",
+            "runoff_temperature_floor_sharpness",
+            )
+    assert fields[-len(tail):] == tail, (
+        f"config tail is {fields[-len(tail):]}, expected {tail}; a new field "
+        "must be APPENDED, never inserted -- positional callers break "
+        "otherwise")
+
+
+def test_store_mass_flux_retains_slot_103_and_main_prefix():
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+
+    fields = LatLonCGridOceanConfig._fields
     main_prefix = (
         "metric_convention", "vface_zonal_metric_evaluation",
         "coriolis_placement", "lateral_viscosity", "bottom_drag", "K_h",
@@ -1406,53 +1484,31 @@ def test_store_mass_flux_is_the_last_config_field():
         "zdf_drag_in_matrix", "zdf_baroclinic_only", "barotropic_drag_substep",
         "barotropic_forcing_centred", "store_mass_flux", "store_salt_flux",
         "zdf_implicit_solver_evaluation",
-            "een_fold_image_v_row",
-            "rk3_stage1_ssh_nemo_literal",
-            "rk3_stage1_rhs_nemo_literal",
-            "rk3_stage_velocity_written_order",
-            "een_vorticity_written_order",
-            "zdf_barotropic_removal_nemo_literal",
-            "zdf_momentum_nemo_face_thickness",
-            "rk3_fold_exchange_top_v_row",
-            "rk3_stage_r3f_nemo_literal",
-            "rk3_stage_r3t_nemo_literal",
-            "nemo_eos_gdept_rounded_product",
-            "rk3_stage_r3uv_nemo_literal",
-            "zdf_tracer_nemo_rounded_thickness",
-            "barotropic_rhs_ascending_level_sum",
-            "zdf_momentum_stage_r3u_nemo_literal",
-            "een_nemo_relative_vorticity",
-            "een_nemo_top_f_u_halo",
-            "barotropic_wind_nemo_stored_depth",
-            "surface_stress_nemo_fold_vector_sign",
-            "zdf_surface_stress_nemo_face_thickness",
-            "rk3_stage_tracer_written_order",
-            "rk3_stage3_heat_nemo_written",
+        "een_fold_image_v_row",
+        "rk3_stage1_ssh_nemo_literal",
+        "rk3_stage1_rhs_nemo_literal",
+        "rk3_stage_velocity_written_order",
+        "een_vorticity_written_order",
+        "zdf_barotropic_removal_nemo_literal",
+        "zdf_momentum_nemo_face_thickness",
+        "rk3_fold_exchange_top_v_row",
+        "rk3_stage_r3f_nemo_literal",
+        "rk3_stage_r3t_nemo_literal",
+        "nemo_eos_gdept_rounded_product",
+        "rk3_stage_r3uv_nemo_literal",
+        "zdf_tracer_nemo_rounded_thickness",
+        "barotropic_rhs_ascending_level_sum",
+        "zdf_momentum_stage_r3u_nemo_literal",
+        "een_nemo_relative_vorticity",
+        "een_nemo_top_f_u_halo",
+        "barotropic_wind_nemo_stored_depth",
+        "surface_stress_nemo_fold_vector_sign",
+        "zdf_surface_stress_nemo_face_thickness",
+        "rk3_stage_tracer_written_order",
+        "rk3_stage3_heat_nemo_written",
         "rk3_stage3_tracer_nemo_stored_thickness",
     )
-    appended = (
-        "bbl_nemo_stage3_krhs", "bbl_nemo_pivot_ghost",
-        "rk3_stage2_tracer_nemo_stored_thickness",
-        "rk3_stage3_salt_nemo_written", "implicit_ice_ocean_top_drag",
-        "nemo_bottom_drag_written_statements", "nemo_hpg_sco_fold_geometry",
-        "rk3_vector_raw_vmask", "nemo_wzv_stored_r3_ratios",
-        "nemo_zad_written_association", "nemo_stage2_momentum_wzv_half_step",
-        "nemo_stage_momentum_wzv_stored_kmm_ratios", "rk3_vector_rhs_nemo_order",
-        "nemo_ldf_stored_f_area", "nemo_ldf_fold_rows",
-        "rk3_stage1_ldf_source_order", "nemo_ldf_stage_r3f",
-        "rk3_stage_transport_raw_vmask", "rk3_stage_transport_fold_exchanges",
-        "fct_fold_exchange", "rk3_end_of_stage_pivot_fold",
-        "rk3_stage_wzv_nemo_clock_pair", "rk3_stage3_tracer_krhs_nemo_order",
-        "rk3_stage_tracer_wzv_stored_kmm_ratios",
-        "rk3_stage_transport_stored_r3uv",
-        "rk3_stage3_geothermal_nemo_written",
-        "rk3_stage3_geothermal_after_ldf_nemo_order",
-        "rk3_stage3_damping_after_geothermal_nemo_order",
-        "rk3_stage3_l8_nemo_order", "rk3_stage3_l9_eiv_nemo_order",
-        "nemo_qsr_stage3_kmm_source_association", "vmix_eos_use_config_rho0",
-    )
     assert fields[:len(main_prefix)] == main_prefix
-    assert fields[len(main_prefix):] == appended
     assert fields.index("store_mass_flux") == 103
 
 

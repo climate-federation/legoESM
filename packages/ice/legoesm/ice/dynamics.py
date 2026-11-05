@@ -48,6 +48,7 @@ from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo_latlon import pad_halo_latlon
 from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.operators_latlon_cgrid import fold_row
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.rheology import (
@@ -101,6 +102,7 @@ _SI3_FAST_MASK_REDUCTION = 0.99
 _SI3_REQUIRED_HALO = 2
 _SI3_REQUIRED_CATEGORY_COUNT = 1
 _SI3_REQUIRED_RN_ISHLAT = 2.0
+SI3_NORTH_FOLD_CHOICES = ("none", "orca_f_pivot")
 _SI3_LANDFAST_SPEED_FLOOR_M_S = 5.0e-5  # icedyn_rhg_evp.F90:541,592,647,699
 _SI3_ORCA1_LF_DEPFRA = 0.125  # ORCA1 namelist_ice_ref:59
 _SI3_ORCA1_LF_BFR_N_M3 = 15.0  # ORCA1 namelist_ice_ref:61
@@ -197,6 +199,11 @@ class SI3CGridAEVPConfig(NamedTuple):
     landfast_relaxation_s_inv: float
     landfast_tensile_fraction: float
     convergence_check: int
+    # Lateral boundary condition of the same-index halo.  "none" = the
+    # one-rank doubly periodic card (both axes wrapped).  "orca_f_pivot" =
+    # NEMO 5.0.1 ORCA F-pivot lbc_lnk (E-W cyclic, closed south halo, north
+    # fold on the halo rows only); see ``_si3_orca_f_pivot_halo``.
+    north_fold: str = "none"
 
 
 class SI3CGridAEVPState(NamedTuple):
@@ -845,6 +852,73 @@ def _si3_lane3_halo(label, value, nature, sign, ldfull):
 
     del label, nature, sign, ldfull
     return _si3_periodic_halo(value)
+def _si3_orca_f_pivot_halo(value: jnp.ndarray, point: str, sign: float) -> jnp.ndarray:
+    """NEMO 5.0.1 ``lbc_lnk`` on an ORCA F-pivot grid for one same-index field.
+
+    Halo = 2 (validated).  E-W cyclic; the south halo rows are closed (zero,
+    NEMO's south boundary is land); the two north halo rows are the F-pivot
+    fold images of the inner rows (``lbc_nfd_generic.h90``, ``c_NFtype='F'``,
+    halo rows only: icedyn_rhg_evp.F90's ``lbc_lnk`` has no ``ldfull``):
+    halo row ``jj`` above the top inner row takes inner row
+    ``Nj - jj`` (T/U points) or ``Nj - jj - 1`` (V/F points, whose top inner
+    row lies on the fold line), i-permuted and multiplied by ``sign``.
+
+    The i-permutation is the repo's ORCA halo-row-stored tripole ``perm_T``
+    (``tripole.py``: ``perm[i] = n_lon - 1 - i``) applied through the shared
+    ``fold_row``; NEMO stores U and F at the EAST face of T column ``i``, so
+    those points use ``perm_T`` shifted by one column, ``(N - 2 - i) mod N``.
+    Applying the fold to the inner columns and then the E-W wrap reproduces
+    NEMO's halo-column fold pairs (verified against NEMO's recorded halos).
+    """
+
+    halo = _SI3_REQUIRED_HALO
+    core = value[halo:-halo, halo:-halo, ...]
+    n_i, n_j = core.shape[0], core.shape[1]
+    perm_t = jnp.arange(n_i - 1, -1, -1, dtype=jnp.int32)
+    if point in ("T", "V"):
+        perm = perm_t
+    elif point in ("U", "F"):
+        # jnp `%` is floor-mod: perm_t - 1 = -1 at i = N-1 maps to N-1 (self pair).
+        perm = (perm_t - 1) % n_i
+    else:
+        raise ValueError(f"unknown SI3 lbc point type {point!r} for the aEVP solver halo")
+    lag = 0 if point in ("T", "U") else 1
+    north = jnp.stack(
+        [
+            fold_row(core[None, :, n_j - jj - lag, ...], perm, sign, n_i)[0]
+            for jj in range(1, halo + 1)
+        ],
+        axis=1,
+    )
+    south = jnp.zeros((n_i, halo) + core.shape[2:], core.dtype)
+    column = jnp.concatenate([south, core, north], axis=1)
+    tail = ((0, 0),) * (value.ndim - 2)
+    return nemo_source_round(jnp.pad(column, ((halo, halo), (0, 0)) + tail, mode="wrap"))
+
+
+def _si3_halo(
+    value: jnp.ndarray, config: "SI3CGridAEVPConfig", point: str, sign: float
+) -> jnp.ndarray:
+    """Halo refresh selected by ``config.north_fold`` (validated statically)."""
+
+    if config.north_fold == "orca_f_pivot":
+        return _si3_orca_f_pivot_halo(value, point, sign)
+    if config.north_fold == "none":
+        return _si3_periodic_halo(value)
+    raise ValueError(
+        f"unknown SI3 north_fold lbc scheme {config.north_fold!r}; "
+        f"expected {SI3_NORTH_FOLD_CHOICES}"
+    )
+
+
+def _si3_config_halo(config: "SI3CGridAEVPConfig"):
+    """Adapt the configured periodic/ORCA-F halo to the shared lbc_lnk call shape."""
+
+    def halo(label, value, nature, sign, ldfull):
+        del label, ldfull
+        return _si3_halo(value, config, nature, sign)
+
+    return halo
 
 
 def _si3_set(array: jnp.ndarray, row_slice: slice, value: jnp.ndarray) -> jnp.ndarray:
@@ -1032,6 +1106,11 @@ def _validate_si3_cgrid_aevp_static(
         )
     if config.n_subcycles < 1:
         raise ValueError("SI3 C-grid aEVP requires at least one subcycle")
+    if config.north_fold not in SI3_NORTH_FOLD_CHOICES:
+        raise ValueError(
+            f"unknown SI3 north_fold lbc scheme {config.north_fold!r}; "
+            f"expected {SI3_NORTH_FOLD_CHOICES}"
+        )
     if config.landfast:
         landfast_actual = (
             config.landfast_depth_fraction,
@@ -1263,10 +1342,11 @@ def si3_cgrid_aevp_solver(
         # sets u_ice_b = u_ice before ice_dyn, which its cards enter directly.
         u_ice_b=state.u_ice_u,
         v_ice_b=state.v_ice_v,
-        halo=_si3_lane3_halo,
+        halo=_si3_config_halo(config),
         differentiable=differentiable,
         stress_divergence_outer_weight=stress_divergence_outer_weight,
         swap_parity=False,
+        orca2_source_order=False,
     )
 
 
@@ -1283,6 +1363,7 @@ def _si3_cgrid_aevp_core(
     differentiable: bool,
     stress_divergence_outer_weight: float,
     swap_parity: bool,
+    orca2_source_order: bool,
     capture_trace: bool = False,
 ) -> SI3CGridAEVPState | SI3ORCA2AEVPTrace:
     """Shared aEVP body; ``halo(label, field, nature, sign, ldfull)`` is the lbc_lnk program.
@@ -1645,35 +1726,55 @@ def _si3_cgrid_aevp_core(
                     )
                 ),
             )
-            # icedyn_rhg_evp.f90:611-613,666-668; every operation rounded (no FMA).
-            coriolis_u = _si3_mul(
-                _si3_mul(_SI3_QUARTER, _si3_div(_SI3_ONE, metrics.e1u)),
-                _si3_add(
-                    _si3_mul(
-                        mass_coriolis_t,
-                        _si3_add(
-                            _si3_mul(metrics.e1v, current_v),
-                            _si3_mul(
-                                jnp.roll(metrics.e1v, 1, axis=1),
-                                jnp.roll(current_v, 1, axis=1),
+            if orca2_source_order:
+                # icedyn_rhg_evp.f90:611-613,666-668; every operation rounded (no FMA).
+                coriolis_u = _si3_mul(
+                    _si3_mul(_SI3_QUARTER, _si3_div(_SI3_ONE, metrics.e1u)),
+                    _si3_add(
+                        _si3_mul(
+                            mass_coriolis_t,
+                            _si3_add(
+                                _si3_mul(metrics.e1v, current_v),
+                                _si3_mul(
+                                    jnp.roll(metrics.e1v, 1, axis=1),
+                                    jnp.roll(current_v, 1, axis=1),
+                                ),
+                            ),
+                        ),
+                        _si3_mul(
+                            jnp.roll(mass_coriolis_t, -1, axis=0),
+                            _si3_add(
+                                _si3_mul(
+                                    jnp.roll(metrics.e1v, -1, axis=0),
+                                    jnp.roll(current_v, -1, axis=0),
+                                ),
+                                _si3_mul(
+                                    jnp.roll(jnp.roll(metrics.e1v, -1, axis=0), 1, axis=1),
+                                    jnp.roll(jnp.roll(current_v, -1, axis=0), 1, axis=1),
+                                ),
                             ),
                         ),
                     ),
-                    _si3_mul(
-                        jnp.roll(mass_coriolis_t, -1, axis=0),
-                        _si3_add(
-                            _si3_mul(
-                                jnp.roll(metrics.e1v, -1, axis=0),
-                                jnp.roll(current_v, -1, axis=0),
-                            ),
-                            _si3_mul(
-                                jnp.roll(jnp.roll(metrics.e1v, -1, axis=0), 1, axis=1),
-                                jnp.roll(jnp.roll(current_v, -1, axis=0), 1, axis=1),
-                            ),
-                        ),
-                    ),
-                ),
-            )
+                )
+            else:
+                # Preserve main's certified ORCA1 evaluation order exactly.
+                coriolis_u = nemo_source_round(
+                    _SI3_QUARTER
+                    * nemo_source_round(_SI3_ONE / metrics.e1u)
+                    * (
+                        mass_coriolis_t
+                        * (
+                            metrics.e1v * current_v
+                            + jnp.roll(metrics.e1v, 1, axis=1) * jnp.roll(current_v, 1, axis=1)
+                        )
+                        + jnp.roll(mass_coriolis_t, -1, axis=0)
+                        * (
+                            jnp.roll(metrics.e1v, -1, axis=0) * jnp.roll(current_v, -1, axis=0)
+                            + jnp.roll(jnp.roll(metrics.e1v, -1, axis=0), 1, axis=1)
+                            * jnp.roll(jnp.roll(current_v, -1, axis=0), 1, axis=1)
+                        )
+                    )
+                )
             ocean_stress = _si3_mul(drag_magnitude, _si3_sub(forcing.ocean_u_u, current_u))
             rhs = _si3_add(force_u, tau_air_u)
             rhs = _si3_add(rhs, coriolis_u)
@@ -1760,36 +1861,56 @@ def _si3_cgrid_aevp_core(
                     )
                 ),
             )
-            # icedyn_rhg_evp.f90:560-562,718-720; Fortran's leading minus negates
-            # the whole product (exact).  Every operation rounded (no FMA).
-            coriolis_v = -_si3_mul(
-                _si3_mul(_SI3_QUARTER, _si3_div(_SI3_ONE, metrics.e2v)),
-                _si3_add(
-                    _si3_mul(
-                        mass_coriolis_t,
-                        _si3_add(
-                            _si3_mul(metrics.e2u, current_u),
-                            _si3_mul(
-                                jnp.roll(metrics.e2u, 1, axis=0),
-                                jnp.roll(current_u, 1, axis=0),
+            if orca2_source_order:
+                # icedyn_rhg_evp.f90:560-562,718-720; Fortran's leading minus negates
+                # the whole product (exact).  Every operation rounded (no FMA).
+                coriolis_v = -_si3_mul(
+                    _si3_mul(_SI3_QUARTER, _si3_div(_SI3_ONE, metrics.e2v)),
+                    _si3_add(
+                        _si3_mul(
+                            mass_coriolis_t,
+                            _si3_add(
+                                _si3_mul(metrics.e2u, current_u),
+                                _si3_mul(
+                                    jnp.roll(metrics.e2u, 1, axis=0),
+                                    jnp.roll(current_u, 1, axis=0),
+                                ),
+                            ),
+                        ),
+                        _si3_mul(
+                            jnp.roll(mass_coriolis_t, -1, axis=1),
+                            _si3_add(
+                                _si3_mul(
+                                    jnp.roll(metrics.e2u, -1, axis=1),
+                                    jnp.roll(current_u, -1, axis=1),
+                                ),
+                                _si3_mul(
+                                    jnp.roll(jnp.roll(metrics.e2u, 1, axis=0), -1, axis=1),
+                                    jnp.roll(jnp.roll(current_u, 1, axis=0), -1, axis=1),
+                                ),
                             ),
                         ),
                     ),
-                    _si3_mul(
-                        jnp.roll(mass_coriolis_t, -1, axis=1),
-                        _si3_add(
-                            _si3_mul(
-                                jnp.roll(metrics.e2u, -1, axis=1),
-                                jnp.roll(current_u, -1, axis=1),
-                            ),
-                            _si3_mul(
-                                jnp.roll(jnp.roll(metrics.e2u, 1, axis=0), -1, axis=1),
-                                jnp.roll(jnp.roll(current_u, 1, axis=0), -1, axis=1),
-                            ),
-                        ),
-                    ),
-                ),
-            )
+                )
+            else:
+                # Preserve main's certified ORCA1 evaluation order exactly.
+                coriolis_v = nemo_source_round(
+                    -_SI3_QUARTER
+                    * nemo_source_round(_SI3_ONE / metrics.e2v)
+                    * (
+                        mass_coriolis_t
+                        * (
+                            metrics.e2u * current_u
+                            + jnp.roll(metrics.e2u, 1, axis=0) * jnp.roll(current_u, 1, axis=0)
+                        )
+                        + jnp.roll(mass_coriolis_t, -1, axis=1)
+                        * (
+                            jnp.roll(metrics.e2u, -1, axis=1) * jnp.roll(current_u, -1, axis=1)
+                            + jnp.roll(jnp.roll(metrics.e2u, 1, axis=0), -1, axis=1)
+                            * jnp.roll(jnp.roll(current_u, 1, axis=0), -1, axis=1)
+                        )
+                    )
+                )
             ocean_stress = _si3_mul(drag_magnitude, _si3_sub(forcing.ocean_v_v, current_v))
             rhs = _si3_add(force_v, tau_air_v)
             rhs = _si3_add(rhs, coriolis_v)
@@ -1959,6 +2080,7 @@ def si3_h79_strength_raw(
     )
 
 
+# ==============================================================================
 # ==============================================================================
 # SI3 ORCA2 (rung O5): five-category H79 strength + aEVP on the tripole
 # ==============================================================================
@@ -2269,8 +2391,14 @@ def _si3_orca2_aevp_run(
         differentiable=differentiable,
         stress_divergence_outer_weight=_SI3_HALF,
         swap_parity=plant_swap_parity,
+        orca2_source_order=True,
         capture_trace=capture_trace,
     )
+
+
+# ==============================================================================
+# mEVP solver
+
 
 
 # ==============================================================================

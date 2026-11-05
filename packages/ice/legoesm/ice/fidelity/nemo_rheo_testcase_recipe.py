@@ -10,6 +10,7 @@ condition can silently replace the shipped case.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import NamedTuple, cast
 
@@ -149,7 +150,7 @@ class ICERheoCard(NamedTuple):
     transport_scheme: str
     ridging_scheme: str
     metrics: SI3CGridMetrics
-    sst_m: jnp.ndarray
+    empty_surface_temperature: jnp.ndarray
     forcing_template: SI3CGridAEVPForcing
     dynamics_config: SI3CGridAEVPConfig
     ridging_config: SI3RdgrftConfig
@@ -168,6 +169,8 @@ class ICERheoCard(NamedTuple):
     landfast: bool
     # Appended (main's field order stays an exact prefix): DECISION 177's ice_cor constants.
     cor_config: SI3IceCorConfig
+    # SI3 names the same file-provided degC field as the NEMO ice_cor argument.
+    sst_m: jnp.ndarray
 
 
 def _periodic_halo(value: np.ndarray) -> jnp.ndarray:
@@ -392,6 +395,7 @@ def build_ice_rheo_card(
         transport_scheme=_ICE_RHEO_TRANSPORT,
         ridging_scheme=_ICE_RHEO_RIDGING,
         metrics=metrics,
+        empty_surface_temperature=_periodic_halo(ocean_temperature.T),
         sst_m=_periodic_halo(ocean_temperature.T),
         forcing_template=forcing,
         dynamics_config=config,
@@ -468,6 +472,7 @@ def validate_ice_rheo_card(card: ICERheoCard, state: ICERheoState | None = None)
         *state.dynamics,
         state.t_surface,
         state.open_water_area,
+        card.empty_surface_temperature,
         card.sst_m,
         *card.metrics,
         *card.forcing_template,
@@ -759,6 +764,7 @@ def _step_ice_rheo_card_impl(
         nlay_s=card.nlay_s,
         cell_area_m2=_ICE_RHEO_CELL_AREA_M2,
         halo_width=card.halo_width,
+        ponds_active=card.ponds,
         entry_intensive_contents=state.contents,
         contents_are_intensive=True,
     )

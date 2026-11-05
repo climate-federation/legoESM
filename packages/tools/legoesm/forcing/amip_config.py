@@ -105,7 +105,6 @@ class AMIPExperimentConfig(NamedTuple):
     bechtold_downdraft_detrain_scale_m: float = 700.0
     bechtold_downdraft_transport: bool = False
     bechtold_subsidence_solve: str = "implicit_flux"
-    convective_buoyancy_death_memory: bool = False
     convective_cloud: bool = False
     # Bechtold convective-downdraft strength (marine humid-BL evaporation lever).
     bechtold_downdraft_evap: float = 0.05

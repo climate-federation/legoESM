@@ -154,6 +154,13 @@ def test_literal_form_refuses_mevar_and_generic_form_but_runs_native_policy():
         _card(case, cfg=CFG._replace(mevar=True))
     with pytest.raises(ValueError, match="form='nemo_literal'"):
         _card(case, cfg=CFG._replace(form="generic"))
+    from types import SimpleNamespace
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _nemo_iwm_literal
+
+    assert _nemo_iwm_literal(SimpleNamespace(physics=SimpleNamespace(
+        vertical_mixing=SimpleNamespace(iwm=CFG)))) is True
+    assert _nemo_iwm_literal(SimpleNamespace(physics=SimpleNamespace(
+        vertical_mixing=SimpleNamespace(iwm=CFG._replace(form="generic"))))) is False
     set_policy(PrecisionPolicy.fp64(transcendentals="native"))
     with jax.disable_jit():
         eager = _card(case)

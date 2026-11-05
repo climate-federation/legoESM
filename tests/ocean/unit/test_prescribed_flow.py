@@ -322,8 +322,12 @@ def test_positional_construction_unshifted_by_tail_field():
         "rk3_stage3_l9_eiv_nemo_order",
         "nemo_qsr_stage3_kmm_source_association",
         "vmix_eos_use_config_rho0",
+        # appended by the ocean oracle-fix campaign (tier-3 RNF)
+        "runoff_depth_spread_levels",
+        "lateral_viscosity_mask_levels",
+        "lateral_shlat",
+        "runoff_temperature_floor_sharpness",
     )
-    assert prescribed_i == 97
     # Head layout unchanged — the slots any positional caller binds first.
     assert f[:9] == (
         "metric_convention", "vface_zonal_metric_evaluation",
@@ -338,6 +342,11 @@ def test_positional_construction_unshifted_by_tail_field():
     assert cfg.K_h == 55.0
     assert cfg.K_bih == 0.0                 # first defaulted slot after the 6
     assert cfg.prescribed_flow is None      # tail default untouched
+
+
+def test_prescribed_flow_config_index_preserved():
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    assert LatLonCGridOceanConfig._fields.index("prescribed_flow") == 97
 
 
 def _isolationbreaking_physics(mle=None, lateral_scheme="none"):

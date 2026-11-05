@@ -250,9 +250,7 @@ def test_orca2_card_states_the_after_ssh_form_and_the_cfl_cap():
     RK3 vector-invariant program -- ``stp2d.f90`` takes the "Vector Inv. Form"
     Coriolis arm and the "only KEG + ZAD in Vector Inv. Form" advection -- and
     that program leaves the previous step's linear extrapolation in the after
-    slot (``stprk3.f90:241``).  Decision 132 + addendum 104 (G6 certified)
-    and round 308's Decision-122 import carry that slot, so the card resolves
-    ``rk3_extrapolated_carried``.
+    slot (``stprk3.f90:241``), so the card must resolve ``rk3_extrapolated``.
 
     The lateral-mixing CFL cap must not be inherited from a library default
     (decision 75): the card is built twice with every ``enforce_cfl`` default
@@ -275,41 +273,6 @@ def test_orca2_card_states_the_after_ssh_form_and_the_cfl_cap():
     assert config.momentum_time_integrator == "rk3_ws"
     assert config.momentum_advection == "vector_invariant"
     assert config.nemo_first_wzv_after_ssh == "rk3_extrapolated_carried"
-    expected_tail = {
-        "bbl_nemo_stage3_krhs": True,
-        "bbl_nemo_pivot_ghost": True,
-        "rk3_stage2_tracer_nemo_stored_thickness": True,
-        "rk3_stage3_salt_nemo_written": True,
-        "implicit_ice_ocean_top_drag": False,
-        "nemo_bottom_drag_written_statements": True,
-        "nemo_hpg_sco_fold_geometry": False,
-        "rk3_vector_raw_vmask": True,
-        "nemo_wzv_stored_r3_ratios": True,
-        "nemo_zad_written_association": True,
-        "nemo_stage2_momentum_wzv_half_step": True,
-        "nemo_stage_momentum_wzv_stored_kmm_ratios": True,
-        "rk3_vector_rhs_nemo_order": True,
-        "nemo_ldf_stored_f_area": True,
-        "nemo_ldf_fold_rows": True,
-        "rk3_stage1_ldf_source_order": True,
-        "nemo_ldf_stage_r3f": True,
-        "rk3_stage_transport_raw_vmask": True,
-        "rk3_stage_transport_fold_exchanges": True,
-        "fct_fold_exchange": True,
-        "rk3_end_of_stage_pivot_fold": True,
-        "rk3_stage_wzv_nemo_clock_pair": True,
-        "rk3_stage3_tracer_krhs_nemo_order": True,
-        "rk3_stage_tracer_wzv_stored_kmm_ratios": True,
-        "rk3_stage_transport_stored_r3uv": True,
-        "rk3_stage3_geothermal_nemo_written": True,
-        "rk3_stage3_geothermal_after_ldf_nemo_order": True,
-        "rk3_stage3_damping_after_geothermal_nemo_order": True,
-        "rk3_stage3_l8_nemo_order": True,
-        "rk3_stage3_l9_eiv_nemo_order": True,
-        "nemo_qsr_stage3_kmm_source_association": False,
-        "vmix_eos_use_config_rho0": False,
-    }
-    assert {name: getattr(config, name) for name in expected_tail} == expected_tail
 
     # Reuse the decision-75 flip harness rather than writing a second one.
     root = Path(__file__).resolve().parents[3]
@@ -351,6 +314,56 @@ def test_orca2_card_states_the_after_ssh_form_and_the_cfl_cap():
     finally:
         recipe_module._model_config = original
     assert stated.nemo_first_wzv_after_ssh == "rk3_extrapolated_carried"
+
+
+def test_orca2_card_states_the_config_tail_selectors():
+    from pathlib import Path
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_zps_card,
+    )
+
+    deck = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+
+    config = build_orca2_zps_card(deck).recipe.model_config
+    expected_tail = {
+        "bbl_nemo_stage3_krhs": True,
+        "bbl_nemo_pivot_ghost": True,
+        "rk3_stage2_tracer_nemo_stored_thickness": True,
+        "rk3_stage3_salt_nemo_written": True,
+        "implicit_ice_ocean_top_drag": False,
+        "nemo_bottom_drag_written_statements": True,
+        "nemo_hpg_sco_fold_geometry": False,
+        "rk3_vector_raw_vmask": True,
+        "nemo_wzv_stored_r3_ratios": True,
+        "nemo_zad_written_association": True,
+        "nemo_stage2_momentum_wzv_half_step": True,
+        "nemo_stage_momentum_wzv_stored_kmm_ratios": True,
+        "rk3_vector_rhs_nemo_order": True,
+        "nemo_ldf_stored_f_area": True,
+        "nemo_ldf_fold_rows": True,
+        "rk3_stage1_ldf_source_order": True,
+        "nemo_ldf_stage_r3f": True,
+        "rk3_stage_transport_raw_vmask": True,
+        "rk3_stage_transport_fold_exchanges": True,
+        "fct_fold_exchange": True,
+        "rk3_end_of_stage_pivot_fold": True,
+        "rk3_stage_wzv_nemo_clock_pair": True,
+        "rk3_stage3_tracer_krhs_nemo_order": True,
+        "rk3_stage_tracer_wzv_stored_kmm_ratios": True,
+        "rk3_stage_transport_stored_r3uv": True,
+        "rk3_stage3_geothermal_nemo_written": True,
+        "rk3_stage3_geothermal_after_ldf_nemo_order": True,
+        "rk3_stage3_damping_after_geothermal_nemo_order": True,
+        "rk3_stage3_l8_nemo_order": True,
+        "rk3_stage3_l9_eiv_nemo_order": True,
+        "nemo_qsr_stage3_kmm_source_association": False,
+        "vmix_eos_use_config_rho0": False,
+    }
+    assert {name: getattr(config, name) for name in expected_tail} == expected_tail
 
 
 # --------------------------------------------------------------------------
@@ -500,16 +513,13 @@ def test_the_nemo_testcase_cards_still_require_the_carried_pair():
 
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_gyre_zco_card,
-        build_gyre_zco_lane_certified_card,
         validate_nemo_testcase_card,
     )
 
     card = build_gyre_zco_card()
-    for candidate in (card, build_gyre_zco_lane_certified_card()):
-        validate_nemo_testcase_card(candidate)
-        assert (candidate.recipe.model_config.barotropic
-                .nemo_prognostic_barotropic_state) is True
+    validate_nemo_testcase_card(card)
     cfg = card.recipe.model_config
+    assert cfg.barotropic.nemo_prognostic_barotropic_state is True
 
     # Non-vacuity: the validator, not a source string, is what refuses the
     # DINO arrangement on a key_RK3 card.

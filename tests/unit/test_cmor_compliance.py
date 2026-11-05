@@ -265,6 +265,43 @@ def test_plev_variables_keep_bare_time_mean(amip_files):
             assert ds.variables[var].getncattr("cell_methods") == "time: mean", var
 
 
+def test_plev_coordinate_matches_cmip6_axis_entry(amip_files):
+    """plev long_name must equal the table's; iris refuses model-minus-obs otherwise."""
+    axis = tables.coordinate_axis("plev19")
+    with _open(amip_files[("Amon", "ta")]) as ds:
+        plev = ds.variables["plev"]
+        for key in ("standard_name", "long_name", "units", "positive"):
+            assert plev.getncattr(key) == axis[key], key
+
+
+def test_time_long_name_matches_cmip6(amip_files):
+    """CMIP6_coordinate.json time axis long_name is lower-case 'time'.
+
+    The vendored table subset has no time entry, so the value is pinned here.
+    """
+    for key in (("Amon", "ta"), ("day", "pr")):
+        with _open(amip_files[key]) as ds:
+            assert ds.variables["time"].getncattr("long_name") == "time", key
+
+
+def test_write_monthly_time_long_name_matches_cmip6(tmp_path):
+    """write_monthly builds its own time axis; same CMIP6 long_name."""
+    lat = np.linspace(-87.5, 87.5, 8)
+    lon = np.linspace(2.5, 357.5, 16)
+    writer = CFWriter(
+        output_dir=str(tmp_path), experiment_id="amip", model_id="legoESM-1-0",
+    )
+    paths = writer.write_monthly(
+        {"months": [(1, 1), (1, 2)],
+         "zonal_tas": np.full((2, 8), 288.0, dtype=np.float32), "lat": lat},
+        lat, lon,
+    )
+    writer.close()
+    tas = next(p for p in paths if "tas_" in p.name)
+    with _open(tas) as ds:
+        assert ds.variables["time"].getncattr("long_name") == "time"
+
+
 def test_output_dtype_is_float(amip_files):
     """Defect 9: CMIP6 declares ``type: real`` -> float32 on disk."""
     wrong = []

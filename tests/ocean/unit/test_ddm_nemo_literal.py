@@ -108,6 +108,16 @@ def test_literal_ddm_refuses_other_forms_and_runs_native_exp():
     ))
     with pytest.raises(ValueError, match="nemo_literal"):
         nemo_zdf_ddm(*args, CFG._replace(form="hybrid"))
+    from types import SimpleNamespace
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _nemo_ddm_literal
+
+    assert _nemo_ddm_literal(SimpleNamespace(physics=SimpleNamespace(
+        vertical_mixing=SimpleNamespace(ddm=CFG)))) is True
+    assert _nemo_ddm_literal(SimpleNamespace(physics=SimpleNamespace(
+        vertical_mixing=SimpleNamespace(ddm=CFG._replace(form="hybrid"))))) is False
+    with pytest.raises(ValueError, match="Unknown DoubleDiffusionConfig.form"):
+        _nemo_ddm_literal(SimpleNamespace(physics=SimpleNamespace(
+            vertical_mixing=SimpleNamespace(ddm=CFG._replace(form="bad")))))
     set_policy(PrecisionPolicy.fp64(transcendentals="native"))
     with jax.disable_jit():
         eager = nemo_zdf_ddm(*args, CFG)

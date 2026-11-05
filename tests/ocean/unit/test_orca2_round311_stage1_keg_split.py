@@ -59,6 +59,9 @@ def test_stage1_order_keeps_g1b_keg_guard_on_vector_form():
                    rk3_vector_rhs_nemo_order=True)
     assert both == guard
     assert both != plain
+    g1b_only = _jaxpr("VORTEX_VEC-zco", rk3_vector_rhs_nemo_order=True)
+    hook_only = _jaxpr("VORTEX_VEC-zco", True, rk3_vector_rhs_nemo_order=False)
+    assert g1b_only != hook_only
 
 
 def test_stage1_order_on_flux_form_keeps_the_certified_plain_add():

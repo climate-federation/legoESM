@@ -1183,6 +1183,8 @@ def make_voronoi_mpi_step(
             state_phys_in = (
                 state_new if _phys_col_local
                 else _exchange_mpas_state(state_new))
+            from legoesm.core.state import with_dyn_tendencies
+            phys_state = with_dyn_tendencies(phys_state, state, state_new, dt)
             _pr = physics_fn(
                 state_phys_in, local_mesh, sigma_coord,
                 phys_state=phys_state, forcing=forcing,

@@ -266,6 +266,8 @@ def test_stage2_transport_uses_stored_h_s2_kmm_and_fails_on_revert() -> None:
     h_prod_off = spies["off"][1][3]
     assert _hex64(h_prod_on[1, 1, 3]) == "0x40234d4bd6440687"
     assert _hex64(h_prod_off[1, 1, 3]) == "0x40234d4bd6440686"
+    assert _hex64(h_prod_on[1, 1, 2]) == "0x40248d5e5fb43e1f"
+    assert _hex64(h_prod_off[1, 1, 2]) == "0x40248d5e5fb43e1e"
 
 
 def test_stage1_stage3_and_legacy_caller_stay_bit_identical() -> None:
@@ -307,6 +309,22 @@ def test_stage1_stage3_and_legacy_caller_stay_bit_identical() -> None:
                 eta_before=eta_b,
                 eta_after=eta_a,
             )
+    with jax.disable_jit(), pytest.raises(ValueError, match="stage_entry_override"):
+        omlc.LatLonCGridOceanModel(
+            grid,
+            zc,
+            model_on.config,
+            _nemo_ws_test_hooks=omlc._NEMOWSRK3TestHooks(
+                stage_entry_override=(
+                    2,
+                    state.u.data,
+                    state.v.data,
+                    state.T.data,
+                    state.S.data,
+                    eta_b,
+                )
+            ),
+        ).step(state, dt)
 
     # Stage 1 (:9341, stage_index=0) in production _step_impl is bit-identical across all 12 tuple slots
     spies = _run_production_step_spies()

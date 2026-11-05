@@ -264,7 +264,7 @@ def test_redi_a33_source_ordering_config_changes_operator_bits():
                 msc_stabilize=True, redi_a33_source_ordering=flag)
             dT, dS = gm_redi_tracer_tendency_latlon(
                 T_a33, S_a33, eta_a33, st_a33.H_bathy.data, grid_a33, zc_a33,
-                cfg, eos="linear", mask=st_a33.land_mask.data,
+                cfg, eos="nemo_eos80", mask=st_a33.land_mask.data,
                 u_mask=st_a33.u_mask.data, v_mask=st_a33.v_mask.data,
                 kappa_redi_override=aht_3d, dt=300.0,
             )
@@ -275,7 +275,7 @@ def test_redi_a33_source_ordering_config_changes_operator_bits():
                 msc_stabilize=False, redi_a33_source_ordering=flag)
             k33 = compute_isoneutral_K33_latlon(
                 T_a33, S_a33, eta_a33, st_a33.H_bathy.data, grid_a33, zc_a33,
-                cfg, eos="linear", mask=st_a33.land_mask.data,
+                cfg, eos="nemo_eos80", mask=st_a33.land_mask.data,
                 u_mask=st_a33.u_mask.data, v_mask=st_a33.v_mask.data,
                 kappa_redi_override=aht_3d, dt=300.0,
             )
@@ -283,16 +283,18 @@ def test_redi_a33_source_ordering_config_changes_operator_bits():
 
         dt_on, ds_on = selected_tendency(True)
         dt_off, ds_off = selected_tendency(False)
-        assert np.count_nonzero(dt_on != dt_off) == 4
+        # Re-pinned with the card's own EOS (nemo_eos80): the S-EOS-on-linear
+        # fixture this pinned before is now rejected for slope_n2='nemo_bn2'.
+        assert np.count_nonzero(dt_on != dt_off) == 2
         assert np.count_nonzero(ds_on != ds_off) == 1
-        assert dt_on[1, 1, 0] == np.uint64(4485655141148798191)
-        assert dt_off[1, 1, 0] == np.uint64(4485655141148798190)
+        assert dt_on[1, 2, 0] == np.uint64(13730951617157274263)
+        assert dt_off[1, 2, 0] == np.uint64(13730951617157274259)
 
         k33_on = selected_k33(True)
         k33_off = selected_k33(False)
-        assert np.count_nonzero(k33_on != k33_off) == 7
-        assert k33_on[1, 0, 0] == np.uint64(4515149403999348297)
-        assert k33_off[1, 0, 0] == np.uint64(4515149403999348298)
+        assert np.count_nonzero(k33_on != k33_off) == 6
+        assert k33_on[0, 4, 0] == np.uint64(4484438105626536215)
+        assert k33_off[0, 4, 0] == np.uint64(4484438105626536216)
     finally:
         set_policy(prev_policy)
 
@@ -314,12 +316,18 @@ def test_orca2_l2_config_selects_every_new_redi_operand_route():
 
 def test_orca2_l2_new_routes_reach_the_record_free_operator(monkeypatch):
     """Exercise the five formerly attribute-only fields at their consumers."""
+    from legoesm.grids.tripole import create_synthetic_tripole
+    from legoesm.ocean.eos import make_eos_fn
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         orca2_l2_isoneutral_gm_redi,
     )
 
-    setup = _stratified_with_meridional_tilt(n_lat=5, n_lon=7, nlev=4)
-    (grid, base_z, mask, u_mask, v_mask, eta, H_bathy, _, _, T, S, _) = setup
+    setup = _stratified_with_meridional_tilt(n_lat=5, n_lon=6, nlev=4)
+    (grid, base_z, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+     rho, T, S, _) = setup
+    tripole = create_synthetic_tripole(5, 6, dtype=jnp.float64)
+    grid = tripole._replace(
+        fold=tripole.fold._replace(pivot_row_stored=True))
     raw = np.broadcast_to(np.asarray(base_z.dz_ref), T.shape).copy()
     z_coord = create_partial_cell_coordinate(
         create_z_star_from_thicknesses(
@@ -327,11 +335,15 @@ def test_orca2_l2_new_routes_reach_the_record_free_operator(monkeypatch):
             nemo_e3w_0_m=raw),
         H_bathy)
     cfg = orca2_l2_isoneutral_gm_redi()._replace(
-        nemo_slope_north_fold=False,
         slope_prd_evaluation="density_roundtrip",
         redi_w_slope_stage_evaluation="redi_tuple",
+        gm_bolus_advection="through_fct",
     )
-    seen = {"source_round": [], "mesh": 0, "preserve": [], "operator": []}
+    seen = {
+        "source_round": [], "mesh": 0, "preserve": [], "face_grid": [],
+        "mask_north_fold": [], "operator": [], "treguier_final": [],
+        "k33_source_ordered": [], "k33_round_calls": [],
+    }
     from types import SimpleNamespace
 
     def depth_spy(ssh, bathy, zc, dtype, **kwargs):
@@ -355,32 +367,80 @@ def test_orca2_l2_new_routes_reach_the_record_free_operator(monkeypatch):
     def face_spy(*args, **kwargs):
         if "preserve_north_fold" in kwargs:
             seen["preserve"].append(kwargs["preserve_north_fold"])
+            seen["face_grid"].append(kwargs.get("grid") is grid)
         # The downstream operator is spied too; retaining the resolved native
         # reference arrays is enough to prove this routing boundary.
         return args[2], args[3]
+
+    orig_face_masks = gm_module.nemo_iso_face_masks
+
+    def face_masks_spy(*args, **kwargs):
+        seen["mask_north_fold"].append(kwargs.get("north_fold"))
+        return orig_face_masks(*args, **kwargs)
 
     def operator_spy(q, *_args, **kwargs):
         seen["operator"].append(kwargs)
         return jnp.zeros_like(q)
 
+    def treguier_spy(*_args, **kwargs):
+        seen["treguier_final"].append(kwargs.get("source_ordered_final"))
+        return jnp.zeros_like(T[:, :, 0])
+
+    orig_round = gm_module.nemo_source_round
+    round_counter = [0]
+
+    def round_spy(x):
+        round_counter[0] += 1
+        return orig_round(x)
+
+    def a33_spy(*args, **kwargs):
+        seen["k33_source_ordered"].append(kwargs.get("source_ordered"))
+        return jnp.zeros_like(args[0]), jnp.zeros_like(args[0])
+
     monkeypatch.setattr(gm_module, "_nemo_qco_live_slope_depths", depth_spy)
     monkeypatch.setattr(gm_module, "nemo_qco_resolved_mesh_operands", mesh_spy)
     monkeypatch.setattr(gm_module, "nemo_qco_live_face_thicknesses", face_spy)
+    monkeypatch.setattr(gm_module, "nemo_iso_face_masks", face_masks_spy)
     monkeypatch.setattr(
         gm_module, "nemo_iso_lap_tracer_tendency_latlon_cgrid", operator_spy)
+    monkeypatch.setattr(
+        gm_module, "compute_treguier_kappa_gm_nemo_native", treguier_spy)
+    monkeypatch.setattr(gm_module, "nemo_iso_a33", a33_spy)
+    monkeypatch.setattr(gm_module, "nemo_source_round", round_spy)
     gm_redi_tracer_tendency_latlon(
         T, S, eta, H_bathy, grid, z_coord, cfg,
-        eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+        eos="nemo_eos80", mask=mask, u_mask=u_mask, v_mask=v_mask,
         redi_flux_eta=eta + 0.125)
+    gm_module.native_treguier_kappa_for_state(
+        rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
+        make_eos_fn("linear", None), jacobian, eta, H_bathy,
+        None, None, None, None, jnp.ones_like(eta) * 1.0e-4,
+        constants.rho_ocean, constants.g, constants.Omega)
+    for flag in (True, False):
+        round_counter[0] = 0
+        compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord,
+            cfg._replace(redi_a33_source_ordering=flag),
+            eos="nemo_eos80", mask=mask, u_mask=u_mask, v_mask=v_mask,
+            dt=300.0)
+        seen["k33_round_calls"].append(round_counter[0])
 
-    assert seen["source_round"] == [True]
+    assert seen["source_round"] == [True, True, True, True]
     assert seen["mesh"] == 1
     assert seen["preserve"] == [True]
+    assert seen["face_grid"] == [True]
+    assert seen["mask_north_fold"] == [True, True, True]
+    assert seen["treguier_final"] == [True]
+    assert seen["k33_source_ordered"] == [True, False]
+    assert seen["k33_round_calls"][0] == seen["k33_round_calls"][1] + 1
     assert len(seen["operator"]) == 2
     for routed in seen["operator"]:
         assert routed["face_thickness_u"] is not None
         assert routed["face_thickness_v"] is not None
         assert routed["a33_source_ordering"] is True
+        assert routed["horizontal_flux_evaluation"] == "nemo_literal_divergence"
+        assert routed["area_reciprocal_evaluation"] == "nemo_stored"
+        assert routed["north_fold"] is True
 
 
 def test_redi_flux_geometry_stage_changes_live_flux_result():
@@ -465,7 +525,7 @@ def test_redi_flux_geometry_stage_changes_live_flux_result():
             chl=jnp.full((4, 6), 0.1, dtype=jnp.float64),
         )
 
-        def selected(stage):
+        def selected(stage, *, stored_thickness=True):
             cfg = LatLonCGridOceanConfig.from_flat(
                 barotropic_solver="explicit_substep",
                 momentum_time_integrator="rk3_ws",
@@ -479,7 +539,8 @@ def test_redi_flux_geometry_stage_changes_live_flux_result():
                 surface_stress_implicit=True,
                 implicit_vertical_mixing=False,
                 rk3_stage3_heat_nemo_written=True,
-                rk3_stage3_tracer_nemo_stored_thickness=True,
+                rk3_stage3_tracer_nemo_stored_thickness=stored_thickness,
+                eos="nemo_eos80",   # ORCA2's own EOS (slope_n2='nemo_bn2')
                 n_barotropic_substeps=2,
                 enable_runtime_checks=False,
                 gm_redi=gm_base._replace(redi_flux_geometry_stage=stage),
@@ -493,6 +554,16 @@ def test_redi_flux_geometry_stage_changes_live_flux_result():
             return LatLonCGridOceanModel(grid_gm, zc_gm, cfg).step(
                 st_gm, 300.0, surface_forcing=forcing_gm)
 
+        with pytest.raises(ValueError, match="rk3_kmm Redi geometry"):
+            selected("rk3_kmm", stored_thickness=False)
+        with pytest.raises(ValueError, match="redi_flux_geometry_stage"):
+            gm_redi_tracer_tendency_latlon(
+                st_gm.T.data, st_gm.S.data, st_gm.eta.data,
+                st_gm.H_bathy.data, grid_gm, zc_gm,
+                gm_base._replace(redi_flux_geometry_stage="invalid"),
+                eos="nemo_eos80", mask=st_gm.land_mask.data,
+                u_mask=st_gm.u_mask.data, v_mask=st_gm.v_mask.data)
+
         gm_on = selected("rk3_kmm")
         gm_off = selected("step_entry")
         t_on = np.asarray(gm_on.T.data).view(np.uint64)
@@ -501,8 +572,9 @@ def test_redi_flux_geometry_stage_changes_live_flux_result():
         s_off = np.asarray(gm_off.S.data).view(np.uint64)
         assert np.count_nonzero(t_on != t_off) == 18
         assert np.count_nonzero(s_on != s_off) == 18
-        assert t_on[1, 0, 0] == np.uint64(4626170872078521270)
-        assert t_off[1, 0, 0] == np.uint64(4626170872078513377)
+        # Re-pinned with eos='nemo_eos80' (see the a33 test above).
+        assert t_on[1, 0, 0] == np.uint64(4626170872078521070)
+        assert t_off[1, 0, 0] == np.uint64(4626170872078513176)
     finally:
         set_policy(prev_policy)
 

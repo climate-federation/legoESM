@@ -108,7 +108,7 @@ def test_none_built_surface_gives_zero_fluxes():
 
 def test_none_trains_no_surface_exchange_knob():
     from legoesm.training.aimip_params import aimip_classical_trainable_names
-    kw = dict(convection="tiedtke", turbulence="louis", gwd="mcfarlane",
+    kw = dict(convection="sbm", turbulence="louis", gwd="mcfarlane",
               microphysics="sundqvist", cloud="xu_randall", radiation="rrtmgp")
     const = aimip_classical_trainable_names(surface_bulk_scheme="constant", **kw)
     none = aimip_classical_trainable_names(surface_bulk_scheme="none", **kw)
@@ -120,7 +120,7 @@ def test_none_trains_no_surface_exchange_knob():
 def test_aimip_spatial_exchange_fields_frozen_under_none():
     from legoesm.training.aimip_params import (
         AIMIPClassicalParams, aimip_classical_trainable_names)
-    kw = dict(convection="tiedtke", turbulence="louis", gwd="mcfarlane",
+    kw = dict(convection="sbm", turbulence="louis", gwd="mcfarlane",
               microphysics="sundqvist", cloud="xu_randall", radiation="rrtmgp")
     for sbs, frozen in (("none", {"Cd_neutral", "Ch_neutral", "z0"}),
                         ("constant", {"z0"})):
@@ -284,7 +284,8 @@ def test_climateeval_hook_names_tas_not_produced_under_none(monkeypatch):
         assert (got == ["tas", "tasmin", "tasmax"]) is want, sbs
 
 
-@pytest.mark.parametrize("turb", ["louis", "tke", "smagorinsky", "mynn25",
+# mynn25 (WRF port) dropped in R3: the compiled pipeline refuses it (P6)
+@pytest.mark.parametrize("turb", ["louis", "tke", "smagorinsky",
                                   "holtslag_boville", "ysu", "edmf",
                                   "clubb_lite", "clubb"])
 def test_every_scheme_takes_a_zero_lower_boundary_condition(turb):

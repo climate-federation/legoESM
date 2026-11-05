@@ -13,7 +13,8 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.output import sedimentation_tendency
-from legoesm.core.smooth import smooth_clamp, smooth_max, smooth_min, smooth_relu, smoothstep_quintic
+from legoesm.core.smooth import (sigmoid_switch, smooth_clamp, smooth_max, smooth_min, smooth_relu,
+                                 smoothstep_quintic)
 from legoesm.thermo import (
     mixing_ratio_to_specific_humidity,
     saturation_mixing_ratio,
@@ -1086,14 +1087,15 @@ def mg2_droplet_psd(q_c_ic, N_c_ic, rho, *, number_cap_log_width=0.0,
     return active, pgam, lam, lam ** 3 * q_safe / shape
 
 
-def mg2_size_dist_liq(q_c_ic, N_c_ic, rho):
+def mg2_size_dist_liq(q_c_ic, N_c_ic, rho, **widths):
     """MG2 ``size_dist_param_liq`` (micro_mg_utils.F90:376-422):
     ``(N_c_ic_adjusted, pgam, lamc)`` with the number per-VOLUME, see
     :func:`mg2_size_bounded_nc`.  ``lamc`` is the slope clipped to
     ``(pgam+1)/[50 um, 2 um]``; where ``qcic <= qsmall`` MG2 sets ``pgam=-100``
-    and ``lamc=0`` and so does this.
+    and ``lamc=0`` and so does this.  ``widths``: the RULE 5 widths of
+    :func:`mg2_droplet_psd` (none = MG2's hard clip).
     """
-    active, pgam, lam, nc_kg = mg2_droplet_psd(q_c_ic, N_c_ic, rho)
+    active, pgam, lam, nc_kg = mg2_droplet_psd(q_c_ic, N_c_ic, rho, **widths)
     return (jnp.where(active, nc_kg * rho, N_c_ic),
             jnp.where(active, pgam, _MG2_PGAM_UNSET),
             jnp.where(active, lam, 0.0))
@@ -1108,17 +1110,34 @@ def mg2_size_bounded_nc(q_c_ic, N_c_ic, rho, **widths):
     return jnp.where(active, nc_kg * rho, N_c_ic)
 
 
-def mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho, *, presence_top):
+def mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho, *, presence_top, **widths):
     """MG2 droplet ``(fc, fnc)`` [Pa/s per unit mixing ratio] (micro_mg2_0.F90:
     2056-2120): ``g rho`` x the mass- / number-weighted Stokes fall speed of the
     in-cloud size distribution of the grid state ``(q_c, N_c_kg)``; 0 where the
-    in-cloud water is below qsmall, switched on by :func:`mg2_presence`."""
+    in-cloud water is below qsmall, switched on by :func:`mg2_presence`.
+
+    ``widths``: the RULE 5 widths of the size reset (:func:`mg2_droplet_psd`;
+    none = MG2's hard clip), ``MorrisonConfig.mg2_drop_sed_reset_log_width``
+    in the model.  KNOWN DIFFERENCE (#2216): at a width > 0 the slope lamc of
+    cells within a few widths (in ln lambda) of a bound moves inward too, so
+    their fall speeds differ from MG2's; the 2 um bound holds for every width
+    (50 um is passed by at most w*ln(1 + 25**(-1/w)) in ln D, see
+    :func:`mg2_droplet_number_readjust`).  Measured at the default 0.01 on the
+    prognostic-number oracle fixtures (x64, every other switch hard): the
+    whole-call droplet tendency moves by up to 1.7e-5 and the cloud-water
+    sedimentation by up to 3.0e-4 of the column's largest MG2 value; per-column
+    tables GAP / GAP_QC in tests/atmosphere/microphysics/unit/
+    test_morrison_mg2_sed_reset_smooth.py.  Production (specified droplet
+    number) never calls this: gap 0.  Prognostic arm, offline, one step on
+    jan1979_main1027 days 10/20/30 (#2216): mass-weighted q_c and N_c
+    sedimentation, cloud-water and droplet-number change move by <= 1.7e-5
+    relative (global, SO 40-65S; 950-700 hPa and column)."""
     g = constants.g
     has_c = q_c / lcldm >= MG2_QSMALL
     on = mg2_presence(q_c / lcldm, presence_top)
     q_ic = jnp.where(has_c, q_c / lcldm, 0.0)
     n_ic = jnp.where(has_c, jnp.maximum(N_c_kg / lcldm, 0.0), 0.0)
-    _, pgam, lamc = mg2_size_dist_liq(q_ic, n_ic * rho, rho)
+    _, pgam, lamc = mg2_size_dist_liq(q_ic, n_ic * rho, rho, **widths)
     # MG2 gates the fall speed at qcic >= qsmall but the size distribution at
     # qcic > qsmall, so qcic == qsmall exactly divides by lamc = 0 there (inf
     # in the Fortran too); such a cell falls at 0 here.
@@ -1135,7 +1154,7 @@ def mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho, *, presence_top):
 
 
 def mg2_cloud_sedimentation(q_c, N_c_kg, lcldm, T, rho, p_half, dt, n_substeps_max, *,
-                            presence_top):
+                            presence_top, **widths):
     """CAM6 MG2 cloud-droplet sedimentation (micro_mg2_0.F90:2056-2120,
     :2204-2216, :2319-2377) on the POST-process grid state.
 
@@ -1152,11 +1171,13 @@ def mg2_cloud_sedimentation(q_c, N_c_kg, lcldm, T, rho, p_half, dt, n_substeps_m
     ``(1-d) F(k-1)`` falling into clear air evaporates (vapour source, latent
     cooling ``L_v/c_pd``).  Returns ``(dq_c, dN_c_kg, dq_v, dT, sfc_flux,
     nstep_required)`` [kg/kg/s, 1/(kg s), kg/kg/s, K/s, kg/(m^2 s), int].
+    ``widths``: the size reset's RULE 5 widths, see
+    :func:`mg2_droplet_fall_coefficients` (none = MG2's hard clip).
     """
     g = constants.g
     pdel = p_half[:, 1:] - p_half[:, :-1]
     fc, fnc = mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho,
-                                            presence_top=presence_top)
+                                            presence_top=presence_top, **widths)
     c0 = q_c
     n0 = mg2_presence(q_c, presence_top) * jnp.maximum(N_c_kg, 0.0)
     courant = jnp.max(jnp.maximum(fc, fnc) / pdel, axis=1) * dt
@@ -1253,7 +1274,7 @@ def mg2_instant_ice_melt_homog_freeze(q_c, N_c_kg, q_i, N_i_kg, T, T_homog,
     return q_c2, N_c2, q_i2, N_i2, T2, melt, frz, fired_m | fired_h
 
 def mg2_droplet_number_readjust(q_c_post, N_c_post, N_c, cf, rho, dt, dN_c_dt, *,
-                                presence_top):
+                                presence_top, log_width=0.0):
     """CAM6 MG2 final droplet mean-size re-adjust (micro_mg2_0.F90:2743-2753,
     :2812-2835) on the grid-mean post-step state (per-volume number): in-cloud
     dumc = min(max(q_post,0)/cf, 5e-3), dumnc = max(N_post,0)/cf; where
@@ -1261,11 +1282,45 @@ def mg2_droplet_number_readjust(q_c_post, N_c_post, N_c, cf, rho, dt, dN_c_dt, *
     becomes (dumnc_adj*cf - N_c)/dt.  At dumc == qsmall exactly the size
     routine (qcic > qsmall) leaves the number, so a negative one survives, as
     in MG2.
+
+    ``log_width`` (``MorrisonConfig.mg2_drop_readjust_log_width``) is the
+    RULE 5 width of both size limits (:func:`mg2_droplet_psd`); 0 = MG2.
+
+    KNOWN DIFFERENCE (RULE 5, #2216).  MG2 clips: the in-cloud mean diameter
+    is set to exactly 2 um (or 50 um) where it leaves [2, 50] um, the number
+    to qcic/1e-20 kg where it exceeds that, and the number is left untouched
+    inside the bounds.  At ``log_width > 0`` the port rounds both limits by a
+    LogSumExp in ln space and applies the result in every cell with cloud
+    water above qsmall (the "number moved" test is dropped: with rounded
+    limits it is a jump of up to the rounding offset).  Measured at the default 0.01 on the
+    prognostic-number oracle fixtures (x64; readjust inputs of the real call):
+    the readjusted number departs from MG2's by up to 1.4e-2 relative (7.1e-3
+    in cells MG2 leaves untouched); with every other switch at its hard
+    limit the readjust alone moves the whole-call droplet tendency by up to
+    9.7e-3 of the column's largest MG2 droplet tendency (icelim column 0).
+    At the prognostic arm's resolved defaults the total gap to MG2 reaches
+    1.10 in the melt fixture, from the other approved smoothings (the
+    readjust's share there is <= 1e-14).  Both per-column tables (GAP,
+    ARM_GAP) are stored in tests/atmosphere/microphysics/unit/
+    test_morrison_mg2_drop_readjust_smooth.py.  Bounds: the number stays at
+    or below qcic/1e-20 kg and the mean diameter at or above 2 um for every
+    width (LogSumExp min <= min); the 50 um maximum can be passed by at most
+    ``log_width*ln(1 + 25**(-1/log_width))`` in ln D (the clamp's upper
+    rounding reaching its lower bound, ln 25 away): 1e-140 at the default
+    0.01 (measured on the fixtures: <= 2e-15, round-off), 4 % (52 um) at the
+    largest accepted width 1.  What changes at the default is that cells
+    within a few ``log_width`` of a bound (in ln lambda) are moved inward too.
+    ``log_width = 0`` recovers MG2 exactly.
     """
     q_ic = jnp.minimum(jnp.maximum(q_c_post, 0.0) / cf, KK2000_CAM6_QC_MAX)
     n_ic = jnp.maximum(N_c_post, 0.0) / cf
-    n_adj = mg2_size_bounded_nc(q_ic, n_ic, rho)
-    f = mg2_presence(q_ic, presence_top) * jnp.where(n_adj != n_ic, 1.0, 0.0)
+    n_adj = mg2_size_bounded_nc(q_ic, n_ic, rho, number_cap_log_width=log_width,
+                                slope_log_width=log_width)
+    f = mg2_presence(q_ic, presence_top)
+    if log_width == 0.0:
+        f = f * jnp.where(n_adj != n_ic, 1.0, 0.0)
+    else:   # the size routine's own qcic > qsmall test (0 width at the default presence ramp)
+        f = f * jnp.where(q_ic > MG2_QSMALL, 1.0, 0.0)
     return f * ((n_adj * cf - N_c) / dt) + (1.0 - f) * dN_c_dt
 
 
@@ -1852,7 +1907,7 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt, fact=1.0):
 
 
 def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0, nc_floor=True,
-                               size_reset=True):
+                               size_reset=True, **widths):
     """CAM6 MG2 KK2000 autoconversion (``kk2000_liq_autoconversion``,
     micro_mg_utils.F90:689-736, CAM6 default ``microp_uniform=.false.``)::
 
@@ -1881,7 +1936,9 @@ def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0, nc_floor=Tru
     as is wherever the law is evaluated (``q_c >= icsmall``, where the reset
     makes it positive) and replaced by 1 only in the masked branch.
     ``size_reset=False``: ``N_c_eff`` already carries MG2's one reset (the
-    caller shares it with every liquid sink, micro_mg2_0.F90:1296).  ``fact`` =
+    caller shares it with every liquid sink, micro_mg2_0.F90:1296).  ``widths``:
+    the RULE 5 widths of that reset (:func:`mg2_droplet_psd`; none = MG2's
+    hard clip).  ``fact`` =
     ``MorrisonConfig.autocon_fact``.  Returns ``(dq_c_au, dN_r_au, x_c)`` like
     :func:`autoconversion_kk2000`.
     """
@@ -1890,7 +1947,7 @@ def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0, nc_floor=Tru
     # MG2 resets ncic to the [2, 50] um mean-size window before the law
     # (size_dist_param_liq, called at micro_mg2_0.F90:1296 before :1306).
     if size_reset:
-        N_c_eff = mg2_size_bounded_nc(q_c_ic, N_c_eff, rho)
+        N_c_eff = mg2_size_bounded_nc(q_c_ic, N_c_eff, rho, **widths)
     if nc_floor:
         N_c_eff = jnp.clip(N_c_eff, 1.0)
     else:
@@ -2984,6 +3041,58 @@ _M2005_SMALL_REMOVAL_RH = 0.9     # small liquid evaporated where q_v/q_sat < 0.
 _M2005_SMALL_REMOVAL_Q = 1.0e-8   # ... when below 1e-8 kg/kg (:1454-1463, :4670-4679) [kg/kg]
 _M2005_FALL_FILL_MIN = 1.0e-10    # fall speed below this takes the level above's (:4282-4310) [m/s]
 _M2005_STOKES_DENOM = 18.0        # ACN = g*rho_w/(18*mu), Stokes droplet fall speed (:1546)
+
+
+def m2005_subsaturation_removal(T, q_v, q_sat, q_sat_i, liquid, frozen, *,
+                                rh_sharpness, q_sharpness):
+    """gSAM M2005 removal of small condensate in sub-saturated air.
+
+    module_mp_graupel.f90:1453-1488 (preamble) and :4664-4700 (post-step):
+    with ``RH = q_v/q_sat`` and ``RH_i = q_v/q_sat_i`` evaluated ONCE, each
+    liquid species (``q_c``, ``q_r``) below 1e-8 kg/kg where ``RH < 0.9`` and
+    each frozen species (``q_i``, ``q_s``, ``q_g``) below 1e-8 where
+    ``RH_i < 0.9`` is moved to vapour, cooling by ``L_v/c_pd`` (liquid) or
+    ``L_s/c_pd`` (frozen) per kg -- gSAM's XXLV = lcond, XXLS = lsub,
+    CPM = cp.  Water and the enthalpy ``c_pd T - L_v q_l - L_s q_f`` are
+    conserved exactly.
+
+    KNOWN DIFFERENCE (RULE 5): the removed fraction of each species is
+    ``(1 - H(RH - 0.9)) (1 - H(q/1e-8 - 1))`` with ``H = sigmoid_switch`` at
+    ``rh_sharpness`` / ``q_sharpness``; at ``math.inf`` both are gSAM's strict
+    ``<`` steps.  ``RH`` is +inf (no removal) where ``q_sat`` underflows to 0
+    (fp32 cold cells; gSAM's ``q_v/0``).  Measured default departure on the
+    gSAM satadj fixture columns (one whole call, other switches hard): the RH
+    gate up to 7.7e-6 K / 3.1e-9 kg/kg (a cell near RH 0.9), the q gate 0
+    (no species near 1e-8; at 1.005e-8 it removes 1 - sigmoid(0.5) = 38 % that
+    gSAM keeps); both pinned in the oracle test.  ``liquid``/``frozen`` are tuples of
+    mixing ratios (``None`` entries pass through).  Returns ``(T, q_v,
+    liquid', frozen', w_liquid, w_frozen)`` with ``w_*`` the removed fractions
+    (tuples, ``None`` for ``None``) for scaling the species' numbers.
+    """
+    def ratio(q_s):   # q_v/q_s, +inf (no removal, as gSAM) where q_s underflows to 0
+        pos = q_s > 0.0
+        return jnp.where(pos, q_v / jnp.where(pos, q_s, 1.0), jnp.inf)
+
+    # 1 - H(x - x0) is gSAM's strict "x < x0" at the hard limit
+    g_l = 1.0 - sigmoid_switch(ratio(q_sat) - _M2005_SMALL_REMOVAL_RH, rh_sharpness)
+    g_f = 1.0 - sigmoid_switch(ratio(q_sat_i) - _M2005_SMALL_REMOVAL_RH, rh_sharpness)
+    out = []
+    for species, gate, lat in ((liquid, g_l, constants.L_v), (frozen, g_f, constants.L_s)):
+        qs, ws = [], []
+        for q in species:
+            if q is None:
+                qs.append(None)
+                ws.append(None)
+                continue
+            w = gate * (1.0 - sigmoid_switch(q / _M2005_SMALL_REMOVAL_Q - 1.0, q_sharpness))
+            dq = w * q
+            q_v = q_v + dq
+            T = T - dq * lat / constants.c_pd
+            qs.append(q - dq)
+            ws.append(w)
+        out.append((tuple(qs), tuple(ws)))
+    (liq, w_l), (fro, w_f) = out
+    return T, q_v, liq, fro, w_l, w_f
 
 
 def m2005_rain_psd(q_r, N_r, rho, lamr_min, lamr_max):

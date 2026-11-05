@@ -613,7 +613,7 @@ def _train_aimip_classical(
             exclude=tuple(sorted(
                 _owned | aimip_inactive_fields(
                     cloud_scheme=cloud_scheme, microphysics=micro_scheme,
-                    gwd=gwd_scheme, subgrid_orography=getattr(
+                    gwd=gwd_scheme, turbulence=turb_scheme, subgrid_orography=getattr(
                         grid, "subgrid_topo_stddev", None) is not None))),
         )
         _n_scheme = sum(len(v) for v in _scheme_params.to_overrides().values())

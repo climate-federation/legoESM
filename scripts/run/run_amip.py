@@ -186,7 +186,9 @@ def _print_forcing_activity(args) -> None:
     # rrtmg/rrtmgp) into the standalone radiation.
     _grid = getattr(args, "grid_type", None) or "cubed_sphere"
     _disc = getattr(args, "discretization", None) or ""
-    solar_file_unthreaded = (_grid == "gaussian" and _disc == "spectral")
+    # (the spectral COLUMN lane runs the column loop, which threads it)
+    solar_file_unthreaded = (_grid == "gaussian" and _disc == "spectral"
+                             and not getattr(args, "column_lane", False))
 
     def _flag(active: bool) -> str:
         return "ACTIVE" if active else "inert  (gray radiation)"
@@ -1645,11 +1647,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Clouds & microphysics (full-physics defaults — see the policy note above)
     parser.add_argument("--clouds", type=str, default="xu_randall",
                         choices=["none", "sundqvist", "xu_randall",
-                                 "cam6_clubb"])
+                                 "cam6_clubb", "resolved"],
+                        help="'resolved' requires --microphysics ifs_cloudsc")
     parser.add_argument("--microphysics", type=str, default="sundqvist",
                         choices=["none", "kessler", "sundqvist",
                                  "seifert_beheng", "morrison", "thompson",
-                                 "p3", "sdm", "fast_sbm"])
+                                 "p3", "sdm", "fast_sbm", "ifs_cloudsc"])
     # Sundqvist large-scale-condensation tunables (override the SundqvistConfig
     # defaults / AIMIP-trained leaves).  These are the precipitation-efficiency
     # knobs: qc_crit is the autoconversion cloud-water threshold (rain forms only
@@ -1752,14 +1755,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Ceiling on the emergent convective precip fraction "
                              "for --convective-precip-split autoconversion. "
                              "Default 0.9.")
-    parser.add_argument("--convective-buoyancy-death-memory",
-                        action="store_true",
-                        help="Tiedtke plume buoyancy-death memory: once a "
-                             "plume exhausts its cumulative buoyancy budget it "
-                             "stays dead instead of reviving above an inversion "
-                             "(default off lets dead plumes resume nonzero M_u "
-                             "aloft, leaking convective heating to the ~100 hPa "
-                             "cold point). Requires --convection tiedtke.")
     parser.add_argument("--nc-from-aerosol", action="store_true",
                         dest="aerosol_ccn",
                         help="Alias for --aerosol-ccn")
@@ -2167,19 +2162,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hines-total-rms-wind", type=float, default=None,
                         dest="hines_total_rms_wind",
                         help="Hines (1997) non-orographic GWD launch RMS wind "
-                             "[m/s] (default 2.0). Larger = stronger "
+                             "[m/s] (default 1.0, LMDZ rmscon). Larger = stronger "
                              "non-orographic drag; the low-level extratropical "
                              "westerly bias is the observable lever.")
     parser.add_argument("--hines-launch-p", type=float, default=None,
                         dest="hines_launch_p",
                         help="Hines non-orographic GWD LAUNCH PRESSURE [Pa] "
                              "(default 70000 = 700 hPa; legal 30000-90000). "
-                             "No drag is deposited at or below the launch "
-                             "level.")
-    parser.add_argument("--hines-fmax", type=float, default=None,
-                        dest="hines_Fmax",
-                        help="Hines saturation momentum-flux cap [Pa] "
-                             "(default 0.1).")
+                             "The spectrum is launched at the nearest level; "
+                             "its launch flux is taken from the level just "
+                             "below it.")
     parser.add_argument("--e3sm-cam-source", type=str, default=None,
                         dest="e3sm_cam_source",
                         help="E3SM CAM gravity-wave source: orographic | "
@@ -2296,6 +2288,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Multiplier on kk2000 accretion of cloud by "
                              "rain (MG2 accre_enhan; 1.0 = unscaled). "
                              "kk2000 only.")
+    parser.add_argument("--morrison-mg2-drop-readjust-log-width", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_mg2_drop_readjust_log_width"],
+                        dest="morrison_mg2_drop_readjust_log_width",
+                        help="RULE 5 width (ln space) of CAM6 MG2's final "
+                             "droplet mean-size readjust, prognostic droplet "
+                             "number only; 0 = MG2's hard clip.")
+    parser.add_argument("--morrison-mg2-drop-early-reset-log-width", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_mg2_drop_early_reset_log_width"],
+                        dest="morrison_mg2_drop_early_reset_log_width",
+                        help="RULE 5 width (ln space) of CAM6 MG2's early "
+                             "droplet size reset (before autoconversion and "
+                             "snow riming), both droplet-number paths; 0 = "
+                             "MG2's hard clip.")
+    parser.add_argument("--morrison-mg2-drop-sed-reset-log-width", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_mg2_drop_sed_reset_log_width"],
+                        dest="morrison_mg2_drop_sed_reset_log_width",
+                        help="RULE 5 width (ln space) of CAM6 MG2's droplet "
+                             "size reset in the sedimentation fall speeds, "
+                             "prognostic droplet number only; 0 = MG2's hard "
+                             "clip.")
     parser.add_argument("--morrison-warm-rain-incloud",
                         action=argparse.BooleanOptionalAction,
                         default=ExperimentConfig._field_defaults[
@@ -3020,7 +3035,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         convective_rain_to_surface=args.convective_rain_to_surface,
         autoconv_q_c_crit=args.autoconv_q_c_crit,
         autoconv_pe_max=args.autoconv_pe_max,
-        convective_buoyancy_death_memory=args.convective_buoyancy_death_memory,
         convection=args.convection,
         turbulence=args.turbulence,
         gravity_wave_drag=args.gravity_wave_drag,
@@ -3148,6 +3162,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_autocon_fact=args.morrison_autocon_fact,
         morrison_ice_snow_d_auto=args.morrison_ice_snow_d_auto,
         morrison_accre_enhan_fact=args.morrison_accre_enhan_fact,
+        morrison_mg2_drop_readjust_log_width=args.morrison_mg2_drop_readjust_log_width,
+        morrison_mg2_drop_early_reset_log_width=args.morrison_mg2_drop_early_reset_log_width,
+        morrison_mg2_drop_sed_reset_log_width=args.morrison_mg2_drop_sed_reset_log_width,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
@@ -3166,8 +3183,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.hines_launch_p
             if args.hines_launch_p is not None
             else _EXPERIMENT_DEFAULTS.hines_launch_p),
-        hines_Fmax=(args.hines_Fmax if args.hines_Fmax is not None
-                    else _EXPERIMENT_DEFAULTS.hines_Fmax),
         e3sm_cam_source=(args.e3sm_cam_source
                          if args.e3sm_cam_source is not None
                          else _EXPERIMENT_DEFAULTS.e3sm_cam_source),
@@ -3324,6 +3339,10 @@ def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv,
     spectral step (the #405 follow-up), NOT this scheme swap. No-op off spectral."""
     if getattr(args, "discretization", None) != "spectral":
         return args
+    if getattr(args, "column_lane", False):
+        # the spectral COLUMN lane runs the column loop, which threads the
+        # prognostic physics carry: the deck's schemes run as written
+        return args
     # #405: the spectral run loop now THREADS the prognostic PhysicsState carry
     # on the LEAPFROG path (single physics eval per step), so a prognostic
     # scheme runs FAITHFULLY there — do not downgrade it.  The downgrade below
@@ -3347,7 +3366,7 @@ def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv,
         _convection_dependent_flags = [
             f for f in ("--convective-precip-efficiency",
                         "--convective-precip-split", "--autoconv-q-c-crit",
-                        "--autoconv-pe-max", "--convective-buoyancy-death-memory")
+                        "--autoconv-pe-max")
             if has(f)
         ]
         if _convection_dependent_flags:
@@ -3444,17 +3463,24 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser,
         # MPAS now fills the specified-Nc field via the combined-physics
         # microphysics + radiation factories (driven by the morrison
         # ``nc_from_aerosol`` switch).  Only the SPECTRAL standalone path
-        # still lacks the fill.
-        if args.discretization == "spectral":
+        # still lacks the fill (the spectral COLUMN lane runs the column
+        # loop's physics, which fills it as on MPAS).
+        if args.discretization == "spectral" and not args.column_lane:
             parser.error("--aerosol-ccn is not wired on the spectral "
                          "standalone path yet (the specified-Nc field is "
                          "not filled there); use cubed_sphere / latlon / "
                          "mpas, or drop --aerosol-ccn.")
+    if args.clouds == "resolved" and args.microphysics != "ifs_cloudsc":
+        parser.error("--clouds resolved requires --microphysics ifs_cloudsc "
+                     "(radiation then reads CLOUDSC's advected cloud fraction "
+                     "and grid-mean condensate; with any other microphysics "
+                     "AMIP has no prognostic cloud fraction to resolve)")
     if args.subgrid_autoconversion and args.microphysics != "morrison":
         parser.error("--subgrid-autoconversion requires --microphysics "
                      "morrison (the in-cloud closure lives in the Morrison "
                      "warm-rain path)")
-    _RAIN_SPLIT_SCHEMES = ("tiedtke", "bechtold", "zhang_mcfarlane",
+    # tiedtke: the WRF port closes its own precipitation (no rain split)
+    _RAIN_SPLIT_SCHEMES = ("bechtold", "zhang_mcfarlane",
                            "kain_fritsch", "mass_flux", "edmf")
     if (args.convective_precip_efficiency is not None
             and args.convective_precip_efficiency > 0.0
@@ -3462,22 +3488,22 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser,
         parser.error("--convective-precip-efficiency requires a mass-flux "
                      f"convection scheme with the shared in-updraft-rain "
                      f"split: {_RAIN_SPLIT_SCHEMES}")
-    if args.convective_buoyancy_death_memory and args.convection != "tiedtke":
-        parser.error("--convective-buoyancy-death-memory requires --convection "
-                     "tiedtke (plume buoyancy-death memory is a Tiedtke "
-                     "plume-integrator option)")
     # MPAS implements the zenith ocean curve in its own daily surface-albedo
     # assembly, so only the SPECTRAL standalone path still has nowhere to put
     # it.  Narrowed rather than deleted: a flag that is silently ignored is the
     # defect this guard exists to prevent.
-    if args.dynamic_albedo and args.discretization == "spectral":
+    # (both guards: the spectral COLUMN lane runs the column loop's physics,
+    # where the dynamic albedo and the multilayer land are stepped as on MPAS)
+    _spectral_standalone = (args.discretization == "spectral"
+                            and not args.column_lane)
+    if args.dynamic_albedo and _spectral_standalone:
         parser.error("--dynamic-albedo has no effect on the SPECTRAL "
                      "standalone radiation path, which uses the RRTMGPConfig "
                      "constant surface albedo and would silently ignore the "
                      "flag. It is supported on cubed_sphere/latlon (coupled "
                      "physics pipeline) and on MPAS (daily tile-blended "
                      "surface albedo).")
-    if args.use_multilayer_land and args.discretization == "spectral":
+    if args.use_multilayer_land and _spectral_standalone:
         parser.error("--use-multilayer-land runs inside the coupled physics "
                      "pipeline or the MPAS driver loop; the SPECTRAL "
                      "standalone physics carries a PASSIVE land tile and "
@@ -4181,13 +4207,13 @@ def main(argv: list[str] | None = None):
     _is_root = (driver._mpi_rank is None or driver._mpi_rank == 0)
 
     # AIMIP-classical trained params: override the built pipeline's settable
-    # scheme configs with the trained tiedtke / louis / mcfarlane values (the
+    # scheme configs with the trained louis / mcfarlane values (Tiedtke is
+    # the WRF port, no trainables) (the
     # same post-setup, pre-run() mutation the driver does for f_land / albedo;
     # captured at compile).  Cloud (xu_randall) was seeded via the flat fields
     # above (it is built inline in the pipeline).
     if getattr(args, "_aimip_params", None) is not None:
         _p = args._aimip_params
-        driver.physics.convection_config = _p.to_tiedtke_config()
         # to_louis_config() rebuilds SurfaceLayerConfig at the DEFAULTS
         # (bulk_scheme="constant", gustiness_w_zi=0), so a naive assignment
         # clobbers the run-resolved --surface-bulk-scheme (e.g. coare3) +

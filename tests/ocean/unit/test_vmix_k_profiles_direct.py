@@ -163,6 +163,38 @@ def test_tke_bundle_ddm_operands_change_literal_composition(
     assert float(on[2][0, 0, 0]) == pytest.approx(4.00001)
     assert float(off[0][0, 0, 0]) == pytest.approx(1.0e-5)
     assert not np.array_equal(np.asarray(on[0]), np.asarray(off[0]))
+    from types import SimpleNamespace
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+
+    z_n2 = create_partial_cell_coordinate(
+        base_z._replace(
+            nemo_gdept_0=jnp.broadcast_to(
+                jnp.abs(base_z.z_full_ref), state.T.data.shape),
+            nemo_gdepw_0=jnp.broadcast_to(
+                jnp.abs(base_z.z_half_ref[:-1]), state.T.data.shape),
+            nemo_e3t_0=jnp.broadcast_to(base_z.dz_ref, state.T.data.shape),
+            nemo_e3w_0=jnp.broadcast_to(base_z.dz_ref, state.T.data.shape),
+            nemo_e3w_mesh_reference=True),
+        state.H_bathy.data)
+    n2_bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
+        SimpleNamespace(
+            _nemo_ws_test_hooks=SimpleNamespace(
+                bn2_tracer_override=None, bn2_intermediate="",
+                bn2_alpha_beta_override=None),
+            _n2_nemo_before_tracers=lambda *a, **k: None),
+        state, z_coord=z_n2,
+        config=SimpleNamespace(
+            physics=cfg._replace(vertical_mixing=vmix._replace(
+                scheme="tke",
+                tke=TKEConfig(
+                    tke_n2_evaluation_stage="step_entry",
+                    n2_mode="nemo_bn2", n2_eos_form="eos80"))),
+            gm_redi=None, eos_nemo_seos=None,
+            constants=SimpleNamespace(g=9.80665)))
+    assert n2_bundle.ddm_operands is not None and len(n2_bundle.ddm_operands) == 2
 
 
 def test_tke_bundle_iwm_stretch_changes_literal_composition(
@@ -218,6 +250,38 @@ def test_tke_bundle_iwm_stretch_changes_literal_composition(
     assert float(on[2][0, 0, 0]) == pytest.approx(2.50001)
     assert float(off[0][0, 0, 0]) == pytest.approx(1.00001)
     assert not np.array_equal(np.asarray(on[0]), np.asarray(off[0]))
+    from types import SimpleNamespace
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+
+    z_n2 = create_partial_cell_coordinate(
+        base_z._replace(
+            nemo_gdept_0=jnp.broadcast_to(
+                jnp.abs(base_z.z_full_ref), state.T.data.shape),
+            nemo_gdepw_0=jnp.broadcast_to(
+                jnp.abs(base_z.z_half_ref[:-1]), state.T.data.shape),
+            nemo_e3t_0=jnp.broadcast_to(base_z.dz_ref, state.T.data.shape),
+            nemo_e3w_0=jnp.broadcast_to(base_z.dz_ref, state.T.data.shape),
+            nemo_e3w_mesh_reference=True),
+        state.H_bathy.data)
+    n2_bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
+        SimpleNamespace(
+            _nemo_ws_test_hooks=SimpleNamespace(
+                bn2_tracer_override=None, bn2_intermediate="",
+                bn2_alpha_beta_override=None),
+            _n2_nemo_before_tracers=lambda *a, **k: None),
+        state, z_coord=z_n2,
+        config=SimpleNamespace(
+            physics=cfg._replace(vertical_mixing=vmix._replace(
+                scheme="tke",
+                tke=TKEConfig(
+                    tke_n2_evaluation_stage="step_entry",
+                    n2_mode="nemo_bn2", n2_eos_form="eos80"))),
+            gm_redi=None, eos_nemo_seos=None,
+            constants=SimpleNamespace(g=9.80665)))
+    assert n2_bundle.iwm_stretch is not None
 
 
 class TestBackgroundCompositionMode:

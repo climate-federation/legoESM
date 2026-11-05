@@ -40,6 +40,12 @@ def _while_batch_sizes(ncol):
     return sizes
 
 
+def test_production_group_size_is_64():
+    """User decision 2026-11-03 (PREREG v17 sweep): fixed groups of 64."""
+    assert tlc._CANOPY_SOLVE_GROUP == 64
+    assert tlc._SORT_BY_PREV_ITERS is True
+
+
 def test_newton_iterations_run_per_group_not_per_rank(monkeypatch):
     # An odd group size no other array in the canopy call has, so finding it on
     # a while loop can only mean the grouped Newton loop.

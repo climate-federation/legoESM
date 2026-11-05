@@ -369,7 +369,6 @@ def test_literal_raw_mxl_matches_hand_computed_source_order_and_red_control():
             l_surface_anchor=jnp.asarray([floor]))
 
 
-@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
 def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
     e = jnp.asarray([[2.0, 3.0, 1.0e8]])
     n2 = jnp.full_like(e, 1.0e-12)
@@ -380,6 +379,8 @@ def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
     lk, _ = tke_mod.compute_mixing_lengths(
         e, n2, jnp.ones_like(e), cfg, dz_cell=dz_cell,
         l_surface_anchor=jnp.asarray([floor]))
+    # The final carried slot is NEMO's untouched jpk pad, not another raw
+    # buoyancy-length row.  The old recurrence produced 4.01 here.
     assert float(lk[0, -1]) == floor
     legacy, _ = tke_mod.compute_mixing_lengths(
         e, n2, jnp.ones_like(e),
@@ -423,7 +424,8 @@ def test_literal_mxl_ldown_updates_jpkm1_only_with_true_terminal_e3t():
 def test_terminal_e3t_flag_reaches_the_closure_lengths_and_refuses_unused_paths(
         monkeypatch):
     """The selected e3t(jpk) row must reach every length call; unselected
-    stages refuse the flag instead of silently ignoring it."""
+    stages refuse the flag instead of silently ignoring it.
+    """
     cfg = TKEConfig(prognostic=True, n2_mode="nemo_bn2",
                     tke_n2_evaluation_stage="step_entry",
                     tke_mxl_choice=3, nemo_mxl_terminal_e3t=True,
@@ -481,7 +483,8 @@ def test_coordinate_nemo_e3t_jpk_changes_literal_terminal_length(
         coordinate_kind):
     """Exercise nemo_e3t_jpk from both coordinate classes through tke_vertical_mixing."""
     from legoesm.ocean.vertical import (
-        create_partial_cell_coordinate, create_z_star_from_thicknesses,
+        create_full_step_coordinate, create_partial_cell_coordinate,
+        create_z_star_from_thicknesses,
     )
 
     cfg = TKEConfig(
@@ -511,6 +514,9 @@ def test_coordinate_nemo_e3t_jpk_changes_literal_terminal_length(
         if coordinate_kind == "partial":
             coordinate = create_partial_cell_coordinate(
                 coordinate, state.H_bathy.data)
+        else:
+            coordinate = create_full_step_coordinate(
+                coordinate, partial.bottom_level)
         bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
             model, state, z_coord=coordinate)
         z3 = jnp.zeros_like(state.T.data)
