@@ -100,9 +100,10 @@ def test_section_2_reports_both_flags_as_load_bearing(checker):
 
 def test_section_2_covers_every_ice_scheme(checker):
     """A cap that reaches morrison and nothing else must not pass: section 3
-    only reads config fields, so an ignored flag in thompson would be
+    only reads config fields, so an ignored flag in another scheme would be
     invisible without this."""
-    assert set(checker.ICE_SCHEMES) == {"morrison", "thompson"}
+    # thompson left: it is the faithful WRF port, no allowance (vote K4)
+    assert set(checker.ICE_SCHEMES) == {"morrison"}
     seen = []
     real = checker._on_off
 
@@ -117,7 +118,7 @@ def test_section_2_covers_every_ice_scheme(checker):
         checker._on_off = real
     for scheme in checker.ICE_SCHEMES:
         assert (scheme, checker.ICE_FIELD) in seen, (scheme, seen)
-    assert set(checker.LIQUID_SCHEMES) == {"morrison", "thompson", "p3"}
+    assert set(checker.LIQUID_SCHEMES) == {"morrison", "p3"}
     for scheme in checker.LIQUID_SCHEMES:
         if scheme in checker.LIQUID_GUARD_REJECTED:
             # sam-flavour Morrison: the guard is rejected (checked inside
@@ -135,7 +136,7 @@ def test_section_2_fails_when_a_scheme_ignores_the_flag(checker):
 
     def _inert(scheme, field, q_v, rest):
         on, off = real(scheme, field, q_v, rest)
-        return (off, off) if scheme == "thompson" else (on, off)
+        return (off, off) if scheme == "morrison" else (on, off)
 
 
     checker._on_off = _inert
@@ -143,7 +144,7 @@ def test_section_2_fails_when_a_scheme_ignores_the_flag(checker):
         failures = checker.section_2_load_bearing()
     finally:
         checker._on_off = real
-    assert any("thompson" in f for f in failures), failures
+    assert any("morrison" in f for f in failures), failures
 
 
 def test_section_2_fails_on_a_barely_nonzero_liquid_effect(checker):

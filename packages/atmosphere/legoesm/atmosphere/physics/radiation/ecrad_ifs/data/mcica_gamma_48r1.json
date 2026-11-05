@@ -1,0 +1,21 @@
+{
+ "data_set": "openifs-48r1-ifsdata-b8364fe2ab722bf2249b42106fd4ba1d",
+ "dtypes": {
+  "fsd": "float32",
+  "x": "float32"
+ },
+ "file": "mcica_gamma.nc",
+ "generator": "scripts/validate/oracle/ecrad_ifs/export_mcica_gamma_npz.py",
+ "npz_sha256": "989e97b26615da47421d22879168b3a9404df48f54d0794c72955ed607a24ae8",
+ "oracle": "openifs-8f6f722f732b92fed2c39af763d8fcd1ab15f573",
+ "sha256": "73aa3d30b17b329d85a6a8585d23c1eef53a468b70f82e9714c8d0dfeaa8ffb4",
+ "shapes": {
+  "fsd": [
+   81
+  ],
+  "x": [
+   81,
+   1000
+  ]
+ }
+}

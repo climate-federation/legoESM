@@ -46,6 +46,7 @@ def fx():
 
 
 def _blk(fx, T=None):
+    from legoesm import constants
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
     from legoesm.ice.sea_ice import _nemo_si3_blk_ice_2
     i = {k.split(":", 1)[1]: jnp.asarray(v) for k, v in fx.items() if k.startswith("blk2_in:")}
@@ -54,8 +55,9 @@ def _blk(fx, T=None):
         theta_air=i["theta_air_zt"], q_air=i["q_air_zt"], p_surface=i["slp"], lw_down=i["qlw"],
         precip=i["precip"], snow=i["snow"], qsr=i["qsr"], rho_air=i["rhoa"], wind=i["wndm_ice"],
         Ch=i["Ch_ice"], Ce=i["Ce_ice"], ice_fraction_before=i["at_i_b"], category_fraction_before=i["a_i_b"],
-        sst_celsius=i["sst_m"], qns_ocean=i["qns_oce"], qsr_ocean=i["qsr_oce"], emp_ocean_raw=i["emp"],
-        land_mask=i["smask0"], precip_factor=1.0, evap_factor=1.0, snow_blow_exponent=0.66,
+        sst_celsius=i["sst_m"], qns_ocean=i["qns_oce"], qsr_ocean=i["qsr_oce"], emp_ocean_raw=i["emp"], land_mask=i["smask0"],
+        precip_factor=constants.precip_factor_orca1, evap_factor=constants.evap_factor_orca1,
+        snow_blow_exponent=constants.snow_blow_exponent_orca1,
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG, switch_width=0.0)
 
 

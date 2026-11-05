@@ -724,10 +724,10 @@ def _nemo_si3_blk_ice_2(
     qns_ocean,
     qsr_ocean,
     emp_ocean_raw,
-    land_mask,
     precip_factor,
     evap_factor,
     snow_blow_exponent,
+    land_mask,
     ice_constants,
     switch_width: float = _SI3_SWITCH_RELATIVE_WIDTH,
     _preserve_subnormal_snow: bool = True,
@@ -737,13 +737,13 @@ def _nemo_si3_blk_ice_2(
     Formula and ordering follow NEMO 5.0.2 ``icealb.F90:124-185`` and
     ``sbcblk.F90:1218-1346``.  It is private because partial combinations with
     another public bulk selector are outside the certified identity.
-    ``land_mask`` is NEMO's ``smask0``; it multiplies the same terms as
-    ``sbcblk.F90`` (net longwave, total/solid precipitation and the rain,
-    snow and SST heat contents), so land cells carry NEMO's land values.
     ``precip_factor``, ``evap_factor`` and ``snow_blow_exponent`` are the
     namelist ``rn_pfac``, ``rn_efac`` and ``rn_snwblow`` (``namsbc_blk`` /
     ``nampar``): they scale total and solid precipitation, scale sublimation
     and its T derivative, and set ``ice_var_snwblow``'s exponent.
+    ``land_mask`` is NEMO's ``smask0``; it multiplies the same terms as
+    ``sbcblk.F90`` (net longwave, total/solid precipitation and the rain,
+    snow and SST heat contents), so land cells carry NEMO's land values.
     Switches (albedo, ``min(T_air, rt0)``, thin-ice transmission, snow-free
     qtr, Goff 180 K floor) are C1 ramps of width ``switch_width x scale``;
     ``switch_width=0.0`` is NEMO's hard form.
@@ -908,17 +908,14 @@ def _nemo_si3_ice_flx_other(
     T0,
     ice_epsilon,
     max_ice_fraction,
-    land_mask,
     lead_cut_version,
+    land_mask,
     switch_width=_SI3_SWITCH_RELATIVE_WIDTH,
 ):
     """Active C1D ``ice_flx_other`` branch, ``icesbc.F90:322-437``.
 
     The accepted run has ``ln_icedyn/ln_leadhfx/ln_icedO/ln_icedH=.true.``
     and form drag false.  No public flags expose the inactive alternatives.
-    ``land_mask`` is NEMO's ``smask0``: it multiplies the friction velocity
-    squared, the ice switch and the lead/freezing energies (``zfric``,
-    ``zswitch``, ``zqld``, ``zqfr``), so land qlead is 0 as in NEMO.
 
     ``lead_cut_version`` selects the open-water freezing cuts:
 
