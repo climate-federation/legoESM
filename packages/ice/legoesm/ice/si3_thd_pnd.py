@@ -831,7 +831,7 @@ def si3_ice_thd_o12_stages(
     cat_outputs: list[SI3O12CategoryOutput] = []
     cur_sfx_bri = _required("sfx_bri", sfx_bri)
     cur_sfx_lam = _required("sfx_lam", sfx_lam)
-    cur_hfx_thd = _required("hfx_thd", hfx_thd)
+    _required("hfx_thd", hfx_thd)
     cur_wfx_lam = _required("wfx_lam", wfx_lam)
 
     for jl in range(5):
@@ -870,7 +870,9 @@ def si3_ice_thd_o12_stages(
                 sst=entry["sst"],
                 t_bo=entry["t_bo"],
                 sfx_lam=cur_sfx_lam,
-                hfx_thd=cur_hfx_thd,
+                # NEMO icethd.F90:397,497 and icethd_da.F90:146-147 pass the
+                # DH-updated flux.
+                hfx_thd=dh.fluxes.hfx_thd,
                 wfx_lam=cur_wfx_lam,
                 rn_beta=nml.get("rn_beta"),
                 rn_dmin=nml.get("rn_dmin"),
@@ -882,7 +884,6 @@ def si3_ice_thd_o12_stages(
             h_i_cat = da_out.h_i
             h_s_cat = da_out.h_s
             cur_sfx_lam = da_out.sfx_lam
-            cur_hfx_thd = da_out.hfx_thd
             cur_wfx_lam = da_out.wfx_lam
         else:
             da_out = None
