@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import netCDF4
 import numpy as np
 from legoesm.ice.dynamics import si3_cgrid_deformation
-from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
+from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import (
     _step_ice_rheo_card_impl,
     build_ice_rheo_card,
     ice_rheo_frame_contents,

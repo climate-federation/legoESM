@@ -19,7 +19,7 @@ from pathlib import Path
 import netCDF4
 import numpy as np
 from legoesm.ice.dynamics import _SI3_ICE_PRESENCE
-from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import build_ice_rheo_card
+from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import build_ice_rheo_card
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")

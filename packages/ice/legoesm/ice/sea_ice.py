@@ -83,6 +83,7 @@ from legoesm.ice.state import (
 from legoesm.ice.bitz_lipscomb import (
     SI3ColumnArrays,
     SI3SurfaceForcing,
+    _si3_column_step_arrays_si3,
     si3_column_step_arrays,
 )
 from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
@@ -529,7 +530,7 @@ def _si3_step_with_trace(state: SI3ColumnState,
         state.S_layers.data,
         state.age_volume.data,
     )
-    trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants, si3=config.si3)
+    trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants)
     out = trace.exit
     new_state = SI3ColumnState(
         concentration=state.concentration.replace(data=out.concentration),
@@ -572,6 +573,117 @@ def _si3_step_with_trace(state: SI3ColumnState,
         surface_mass_flux=forcing.evaporation * out.concentration,
         lhflx_exchange=(forcing.evaporation * config.ice_constants.latent_sublimation
                         * out.concentration),
+        salt_flux=z,
+        T_rad=out.T_surface,
+        ice_concentration_thermo=arrays.concentration,
+    )
+    return new_state, response, trace
+
+
+def step_sea_ice_si3_lane(
+    state,
+    forcing: AtmToSurface,
+    ocean_sst: jnp.ndarray,
+    ocean_u: jnp.ndarray,
+    ocean_v: jnp.ndarray,
+    config: SeaIceConfig,
+    U_min: float,
+    dt: float,
+    grid=None,
+    *,
+    q_open_top=None,
+    ocean_dz_top_m=None,
+    ocean_freezing_temperature_K=None,
+    rn_amax_2d=None,
+):
+    """Run the SI3 lane's source-literal C1D entry without changing main's dispatcher."""
+
+    del ocean_sst, ocean_u, ocean_v, U_min, grid, q_open_top, ocean_dz_top_m, rn_amax_2d
+    if ocean_freezing_temperature_K is not None:
+        raise ValueError(
+            "ocean_freezing_temperature_K is not routed into the layered "
+            "SI3 thermodynamics; pass the liquidus through the SI3 forcing's "
+            "bottom boundary instead"
+        )
+    if config.thermo_scheme != "si3_bl99":
+        raise ValueError("step_sea_ice_si3_lane requires thermo_scheme='si3_bl99'")
+    validate_si3_thermo_config(config)
+    if not isinstance(state, SI3ColumnState):
+        raise ValueError(
+            "thermo_scheme='si3_bl99' requires SI3ColumnState with 3+3 layer enthalpies"
+        )
+    if not isinstance(forcing, SI3SurfaceForcing):
+        raise ValueError(
+            "thermo_scheme='si3_bl99' requires SI3SurfaceForcing at the ice_thd entry boundary"
+        )
+    new_state, response, _ = _si3_lane_step_with_trace(state, forcing, config, dt)
+    return new_state, response
+
+
+def _si3_lane_step_with_trace(
+    state: SI3ColumnState,
+    forcing: SI3SurfaceForcing,
+    config: SeaIceConfig,
+    dt: float,
+):
+    """SI3 lane counterpart to main's ``_si3_step_with_trace``."""
+
+    arrays = SI3ColumnArrays(
+        state.concentration.data,
+        state.h_ice.data,
+        state.h_snow.data,
+        state.T_surface.data,
+        state.e_ice.data,
+        state.e_snow.data,
+        state.S_bulk.data,
+        state.S_layers.data,
+        state.age_volume.data,
+    )
+    trace = _si3_column_step_arrays_si3(
+        arrays,
+        forcing,
+        dt,
+        config.ice_constants,
+        si3=config.si3,
+    )
+    out = trace.exit
+    new_state = SI3ColumnState(
+        concentration=state.concentration.replace(data=out.concentration),
+        h_ice=state.h_ice.replace(data=out.h_ice),
+        h_snow=state.h_snow.replace(data=out.h_snow),
+        T_surface=state.T_surface.replace(data=out.T_surface),
+        e_ice=state.e_ice.replace(data=out.e_ice),
+        e_snow=state.e_snow.replace(data=out.e_snow),
+        S_bulk=state.S_bulk.replace(data=out.S_bulk),
+        S_layers=state.S_layers.replace(data=out.S_layers),
+        age_volume=state.age_volume.replace(data=out.age_volume),
+    )
+    z = jnp.zeros_like(out.h_ice)
+    one = jnp.ones_like(out.h_ice)
+    response = TileResponse(
+        T_sfc=out.T_surface,
+        albedo=one * config.albedo_ice,
+        emissivity=one * config.emissivity_ice,
+        z0=one * config.z0_ice,
+        q_surface=z,
+        shflx=z,
+        lhflx=forcing.evaporation * config.ice_constants.latent_sublimation,
+        tau_x=z,
+        tau_y=z,
+        lw_up=z,
+        u_ocean_sfc=z,
+        v_ocean_sfc=z,
+        co2_flux=z,
+        freshwater_flux=z,
+        ocean_heat_extraction=z,
+        ocean_stress_x=z,
+        ocean_stress_y=z,
+        surface_mass_flux=forcing.evaporation * out.concentration,
+        lhflx_exchange=(
+            forcing.evaporation
+            * config.ice_constants.latent_sublimation
+            * out.concentration
+        ),
         salt_flux=z,
         T_rad=out.T_surface,
         ice_concentration_thermo=arrays.concentration,

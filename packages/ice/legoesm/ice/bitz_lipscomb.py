@@ -699,7 +699,7 @@ def _si3_zdf_bl99_step(
             d[..., 4],
         ))
 
-        solution = thomas_solve(a, b, c, d, "nemo_unnormalised")
+        solution = thomas_solve(a, b, c, d, "nemo_unnormalised_unrounded")
         solved_surface = jnp.where(
             branch_snow_present, solution[..., 0], solution[..., 3]
         )
@@ -1526,7 +1526,7 @@ def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     return post_do, do_fluxes
 
 
-def _si3_column_step_arrays_main(state: SI3ColumnArrays,
+def si3_column_step_arrays(state: SI3ColumnArrays,
                            forcing: SI3SurfaceForcing,
                            dt: float,
                            constants: IceConstantsConfig, *,
@@ -3828,13 +3828,6 @@ _inactive_reverse_from_entry.defvjp(
 )
 
 ieee_lt_zero = _ieee_lt_zero
-
-
-def si3_column_step_arrays(state, forcing, dt, constants, **kwargs):
-    """Dispatch explicit SI3 cards separately from main's current C1D path."""
-    if kwargs.get("si3") is not None:
-        return _si3_column_step_arrays_si3(state, forcing, dt, constants, **kwargs)
-    return _si3_column_step_arrays_main(state, forcing, dt, constants, **kwargs)
 
 
 __all__ = tuple(dict.fromkeys(__all__ + (

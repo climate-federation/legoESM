@@ -389,6 +389,19 @@ def apply_ice_adv2d_zapsmall(
 
 def _max9(value: jnp.ndarray) -> jnp.ndarray:
     """SI3's floored surrounding maximum (`icedyn_adv_pra.F90:1519-1571`)."""
+
+    neighbors = (
+        jnp.roll(jnp.roll(value, di, axis=0), dj, axis=1) for di in (-1, 0, 1) for dj in (-1, 0, 1)
+    )
+    return jnp.maximum(
+        _ICE_ADV2D_MAXIMUM_FLOOR,
+        jnp.max(jnp.stack(tuple(neighbors)), axis=0),
+    )
+
+
+
+def _si3_lane_max9(value: jnp.ndarray) -> jnp.ndarray:
+    """SI3's floored surrounding maximum (`icedyn_adv_pra.F90:1519-1571`)."""
     return si3_icemax2d_pra(0, value, nn_hls=0, mask_inactive=False)
 
 
@@ -468,6 +481,10 @@ def apply_si3_prather_source_corrections(
             return intensive(entry_contents, name)
         if entry_intensive_contents.shape != entry_contents.shape:
             raise ValueError("Prather entry intensive/extensive shapes differ")
+        # NEMO recovers the transported fields at icedyn_adv_pra.F90:355-381,
+        # but its pre-advection maxima were formed directly from the carried
+        # intensive fields at :156-180.  Cards whose outer state is intensive
+        # pass that exact carry here instead of re-deriving it through area.
         return entry_intensive_contents[..., index(name)]
 
     def ratio(numerator: jnp.ndarray, denominator: jnp.ndarray, valid: jnp.ndarray) -> jnp.ndarray:
@@ -487,183 +504,8 @@ def apply_si3_prather_source_corrections(
     )
     h_s_max = _max9(entry_h_s)
     h_ip_max = _max9(entry_h_ip)
-    pszi_max = jnp.stack(
-        [
-            _max9(
-                ratio(
-                    intensive(entry_contents, name),
-                    entry_v_i,
-                    entry_v_i >= _ICE_ADV2D_SMALL,
-                )
-            )
-            for name in salt_layers
-        ],
-        axis=2,
-    )
-    pei_max = jnp.stack(
-        [
-            _max9(
-                ratio(
-                    intensive(entry_contents, name),
-                    entry_v_i,
-                    entry_v_i >= _ICE_ADV2D_SMALL,
-                )
-            )
-            for name in ice_layers
-        ],
-        axis=2,
-    )
-    pes_max = jnp.stack(
-        [
-            _max9(
-                ratio(
-                    intensive(entry_contents, name),
-                    entry_v_s,
-                    entry_v_s >= _ICE_ADV2D_SMALL,
-                )
-            )
-            for name in snow_layers
-        ],
-        axis=2,
-    )
 
     contents = transported_contents
-    # The hard NEMO arm uses the shared production kernels carried by the SI3 ladder.
-    if negative_area_ramp_width == 0.0 and not return_residual_fluxes:
-        zero_2d = jnp.zeros(contents.shape[:2], dtype=contents.dtype)
-        v_i = contents[..., index("v_i")]
-        v_s = contents[..., index("v_s")]
-        a_i = contents[..., index("a_i")]
-        oa_i = contents[..., index("oa_i")]
-        a_ip = contents[..., index("a_ip")]
-        v_ip = contents[..., index("v_ip")]
-        v_il = contents[..., index("v_il")]
-        e_s = jnp.stack([contents[..., index(name)] for name in snow_layers], axis=2)
-        e_i = jnp.stack([contents[..., index(name)] for name in ice_layers], axis=2)
-        szv_i = jnp.stack([contents[..., index(name)] for name in salt_layers], axis=2)
-
-        (
-            v_i,
-            v_s,
-            a_i,
-            a_ip,
-            v_ip,
-            _,
-            e_s,
-            e_i,
-            szv_i,
-            _,
-            _,
-            _,
-        ) = si3_hbig_pra(
-            0,
-            1.0,
-            zero_2d,
-            h_s_max,
-            h_ip_max,
-            zero_2d,
-            pes_max,
-            pei_max,
-            pszi_max,
-            v_i,
-            v_s,
-            a_i,
-            a_ip,
-            v_ip,
-            zero_2d,
-            e_s,
-            e_i,
-            szv_i,
-            zero_2d,
-            zero_2d,
-            zero_2d,
-            nn_hls=0,
-            nn_icesal=4,
-            ln_pnd_LEV=ponds_active,
-            ln_pnd_TOPO=False,
-            hi_max_top=None,
-            rhoi=constants.rho_ice,
-            rhos=constants.rho_snow,
-            apply_hi_cap=False,
-            multiply_before_divide=True,
-            extensive_area=None if contents_are_intensive else cell_area_m2,
-        )
-        v_i, v_s, a_i, a_ip, e_s, _, _ = si3_hsnow_pra(
-            0,
-            1.0,
-            v_i,
-            v_s,
-            a_i,
-            a_ip,
-            e_s,
-            zero_2d,
-            zero_2d,
-            nn_hls=0,
-            rho0=constants.rho_ocean_nemo,
-            rhoi=constants.rho_ice,
-            rhos=constants.rho_snow,
-            use_reciprocal_rhos=False,
-            extensive_area=None if contents_are_intensive else cell_area_m2,
-        )
-        (
-            v_i,
-            v_s,
-            _,
-            oa_i,
-            a_i,
-            a_ip,
-            v_ip,
-            v_il,
-            e_s,
-            e_i,
-            szv_i,
-            _,
-            _,
-            _,
-        ) = si3_var_zapneg(
-            0,
-            1.0,
-            v_i,
-            v_s,
-            zero_2d,
-            oa_i,
-            a_i,
-            a_ip,
-            v_ip,
-            v_il,
-            e_s,
-            e_i,
-            szv_i,
-            zero_2d,
-            zero_2d,
-            zero_2d,
-            nn_hls=0,
-            nn_icesal=4,
-            rhoi=constants.rho_ice,
-            rhos=constants.rho_snow,
-            rhow=constants.rho_water,
-        )
-
-        updated_by_name: dict[str, jnp.ndarray] = {
-            "v_i": v_i,
-            "v_s": v_s,
-            "a_i": a_i,
-            "oa_i": oa_i,
-            "a_ip": a_ip,
-            "v_ip": v_ip,
-            "v_il": v_il,
-            **{name: e_s[:, :, jk] for jk, name in enumerate(snow_layers)},
-            **{name: e_i[:, :, jk] for jk, name in enumerate(ice_layers)},
-            **{name: szv_i[:, :, jk] for jk, name in enumerate(salt_layers)},
-        }
-        contents = jnp.stack(
-            [
-                updated_by_name.get(name, contents[..., idx])
-                for idx, name in enumerate(tracer_names)
-            ],
-            axis=-1,
-        )
-        return _periodic_halo(contents, halo_width)
     v_i = intensive(contents, "v_i")
     wfx_res = jnp.zeros(contents.shape[:2], dtype=contents.dtype)
     hfx_res = jnp.zeros_like(wfx_res)
@@ -900,6 +742,235 @@ def apply_si3_prather_source_corrections(
     )
 
 
+
+def apply_si3_prather_source_corrections_lane(
+    entry_contents: jnp.ndarray,
+    transported_contents: jnp.ndarray,
+    *,
+    tracer_names: tuple[str, ...],
+    nlay_i: int,
+    nlay_s: int,
+    cell_area_m2: float,
+    halo_width: int,
+    entry_intensive_contents: jnp.ndarray | None = None,
+    contents_are_intensive: bool = False,
+) -> jnp.ndarray:
+    """Apply SI3's active Hbig/Hsnow/zapneg Prather corrections.
+
+    Delegates to the shared `si3_icemax2d_pra`, `si3_hbig_pra`, `si3_hsnow_pra`,
+    and `si3_var_zapneg` kernels in `legoesm.ice.transport`
+    (`icedyn_adv_pra.F90:156-180,405-421,946-1142`).
+    """
+    area = 1.0 if contents_are_intensive else cell_area_m2
+    index = tracer_names.index
+    snow_layers = tuple(f"e_s_l{level:02d}" for level in range(1, nlay_s + 1))
+    ice_layers = tuple(f"e_i_l{level:02d}" for level in range(1, nlay_i + 1))
+    salt_layers = tuple(f"szv_i_l{level:02d}" for level in range(1, nlay_i + 1))
+
+    def intensive(contents: jnp.ndarray, name: str) -> jnp.ndarray:
+        return contents[..., index(name)] / area
+
+    def entry_intensive(name: str) -> jnp.ndarray:
+        if entry_intensive_contents is None:
+            return intensive(entry_contents, name)
+        if entry_intensive_contents.shape != entry_contents.shape:
+            raise ValueError("Prather entry intensive/extensive shapes differ")
+        return entry_intensive_contents[..., index(name)]
+
+    def ratio(numerator: jnp.ndarray, denominator: jnp.ndarray, valid: jnp.ndarray) -> jnp.ndarray:
+        safe_denominator = jnp.where(valid, denominator, 1.0)
+        return jnp.where(valid, numerator / safe_denominator, 0.0)
+
+    entry_v_i = entry_intensive("v_i")
+    entry_v_s = entry_intensive("v_s")
+    entry_a_i = entry_intensive("a_i")
+    entry_a_ip = entry_intensive("a_ip")
+    entry_v_ip = entry_intensive("v_ip")
+    entry_h_s = ratio(entry_v_s, entry_a_i, entry_a_i > _ICE_ADV2D_SMALL)
+    entry_h_ip = ratio(
+        entry_v_ip,
+        entry_a_ip,
+        entry_a_ip > _ICE_ADV2D_MAXIMUM_FLOOR,
+    )
+    h_s_max = _si3_lane_max9(entry_h_s)
+    h_ip_max = _si3_lane_max9(entry_h_ip)
+    pszi_max = jnp.stack(
+        [
+            _si3_lane_max9(
+                ratio(
+                    intensive(entry_contents, name),
+                    entry_v_i,
+                    entry_v_i >= _ICE_ADV2D_SMALL,
+                )
+            )
+            for name in salt_layers
+        ],
+        axis=2,
+    )
+    pei_max = jnp.stack(
+        [
+            _si3_lane_max9(
+                ratio(
+                    intensive(entry_contents, name),
+                    entry_v_i,
+                    entry_v_i >= _ICE_ADV2D_SMALL,
+                )
+            )
+            for name in ice_layers
+        ],
+        axis=2,
+    )
+    pes_max = jnp.stack(
+        [
+            _si3_lane_max9(
+                ratio(
+                    intensive(entry_contents, name),
+                    entry_v_s,
+                    entry_v_s >= _ICE_ADV2D_SMALL,
+                )
+            )
+            for name in snow_layers
+        ],
+        axis=2,
+    )
+
+    contents = transported_contents
+    zero_2d = jnp.zeros(contents.shape[:2], dtype=contents.dtype)
+    v_i = contents[..., index("v_i")]
+    v_s = contents[..., index("v_s")]
+    a_i = contents[..., index("a_i")]
+    oa_i = contents[..., index("oa_i")]
+    a_ip = contents[..., index("a_ip")]
+    v_ip = contents[..., index("v_ip")]
+    v_il = contents[..., index("v_il")]
+    e_s = jnp.stack([contents[..., index(name)] for name in snow_layers], axis=2)
+    e_i = jnp.stack([contents[..., index(name)] for name in ice_layers], axis=2)
+    szv_i = jnp.stack([contents[..., index(name)] for name in salt_layers], axis=2)
+
+    (
+        v_i,
+        v_s,
+        a_i,
+        a_ip,
+        v_ip,
+        _,
+        e_s,
+        e_i,
+        szv_i,
+        _,
+        _,
+        _,
+    ) = si3_hbig_pra(
+        0,
+        1.0,
+        zero_2d,
+        h_s_max,
+        h_ip_max,
+        zero_2d,
+        pes_max,
+        pei_max,
+        pszi_max,
+        v_i,
+        v_s,
+        a_i,
+        a_ip,
+        v_ip,
+        zero_2d,
+        e_s,
+        e_i,
+        szv_i,
+        zero_2d,
+        zero_2d,
+        zero_2d,
+        nn_hls=0,
+        nn_icesal=4,
+        ln_pnd_LEV=True,
+        ln_pnd_TOPO=False,
+        hi_max_top=None,
+        rhoi=constants.rho_ice,
+        rhos=constants.rho_snow,
+        apply_hi_cap=False,
+        multiply_before_divide=True,
+        extensive_area=None if contents_are_intensive else cell_area_m2,
+    )
+    v_i, v_s, a_i, a_ip, e_s, _, _ = si3_hsnow_pra(
+        0,
+        1.0,
+        v_i,
+        v_s,
+        a_i,
+        a_ip,
+        e_s,
+        zero_2d,
+        zero_2d,
+        nn_hls=0,
+        rho0=constants.rho_ocean_nemo,
+        rhoi=constants.rho_ice,
+        rhos=constants.rho_snow,
+        use_reciprocal_rhos=False,
+        extensive_area=None if contents_are_intensive else cell_area_m2,
+    )
+    (
+        v_i,
+        v_s,
+        _,
+        oa_i,
+        a_i,
+        a_ip,
+        v_ip,
+        v_il,
+        e_s,
+        e_i,
+        szv_i,
+        _,
+        _,
+        _,
+    ) = si3_var_zapneg(
+        0,
+        1.0,
+        v_i,
+        v_s,
+        zero_2d,
+        oa_i,
+        a_i,
+        a_ip,
+        v_ip,
+        v_il,
+        e_s,
+        e_i,
+        szv_i,
+        zero_2d,
+        zero_2d,
+        zero_2d,
+        nn_hls=0,
+        nn_icesal=4,
+        rhoi=constants.rho_ice,
+        rhos=constants.rho_snow,
+        rhow=constants.rho_water,
+    )
+
+    updated_by_name: dict[str, jnp.ndarray] = {
+        "v_i": v_i,
+        "v_s": v_s,
+        "a_i": a_i,
+        "oa_i": oa_i,
+        "a_ip": a_ip,
+        "v_ip": v_ip,
+        "v_il": v_il,
+        **{name: e_s[:, :, jk] for jk, name in enumerate(snow_layers)},
+        **{name: e_i[:, :, jk] for jk, name in enumerate(ice_layers)},
+        **{name: szv_i[:, :, jk] for jk, name in enumerate(salt_layers)},
+    }
+    contents = jnp.stack(
+        [
+            updated_by_name.get(name, contents[..., idx])
+            for idx, name in enumerate(tracer_names)
+        ],
+        axis=-1,
+    )
+    return _periodic_halo(contents, halo_width)
+
+
 def apply_ice_adv2d_source_corrections(
     card: ICEAdv2DCard,
     entry_contents: jnp.ndarray,
@@ -1088,6 +1159,7 @@ __all__ = (
     "build_ice_adv2d_card",
     "apply_ice_adv2d_source_corrections",
     "apply_si3_prather_source_corrections",
+    "apply_si3_prather_source_corrections_lane",
     "ice_adv2d_card_contract_sha256",
     "load_ice_adv2d_restart",
     "save_ice_adv2d_restart",

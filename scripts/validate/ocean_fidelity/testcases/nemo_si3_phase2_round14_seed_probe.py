@@ -22,8 +22,8 @@ import numpy as np
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ice import ridging as ridging_module
 from legoesm.ice.dynamics import SI3CGridAEVPState, si3_cgrid_aevp_solver
-from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as recipe
-from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
+from legoesm.ice.fidelity import nemo_rheo_testcase_recipe_lane as recipe
+from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import (
     ICE_RHEO_TRACERS,
     _forcing_for_state,
     build_ice_rheo_card,

@@ -11,7 +11,7 @@ import netCDF4
 import numpy as np
 import pytest
 from legoesm.core.precision import get_policy
-from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
+from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import (
     ICE_RHEO_TRACERS,
     build_ice_rheo_card,
     ice_rheo_air_stress,

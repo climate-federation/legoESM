@@ -1225,6 +1225,80 @@ def _si3_cgrid_fmask(
     forcing: SI3CGridAEVPForcing,
     config: SI3CGridAEVPConfig,
     dtype,
+) -> jnp.ndarray:
+    """Construct SI3's F-point ocean/boundary mask at source lines 204-224."""
+
+    tmask = forcing.tmask_t
+    ocean = (
+        tmask
+        * jnp.roll(tmask, -1, axis=0)
+        * jnp.roll(tmask, -1, axis=1)
+        * jnp.roll(jnp.roll(tmask, -1, axis=0), -1, axis=1)
+    )
+    boundary = config.rn_ishlat * jnp.minimum(
+        _SI3_ONE,
+        jnp.maximum(
+            jnp.maximum(forcing.umask_u, jnp.roll(forcing.umask_u, -1, axis=1)),
+            jnp.maximum(forcing.vmask_v, jnp.roll(forcing.vmask_v, -1, axis=0)),
+        ),
+    )
+    raw = jnp.where(ocean == _SI3_ZERO, boundary, ocean).astype(dtype)
+    return _si3_halo(_si3_set(jnp.zeros_like(raw), slice(2, -2), raw), config, "F", _SI3_ONE)
+
+
+def si3_cgrid_deformation(
+    state: SI3CGridAEVPState,
+    forcing: SI3CGridAEVPForcing,
+    metrics: SI3CGridMetrics,
+    config: SI3CGridAEVPConfig,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return final C-grid divergence and deformation for redistribution.
+
+    This is main's ORCA1 implementation of ``icedyn_rhg_evp.F90:788-836`` used
+    by the rung-3.4 ``rhg -> adv -> rdgrft`` composition.  The returned T-point
+    arrays populate only NEMO's physical ``DO_2D(0,0,0,0)`` region; diagnostics
+    outside that region are intentionally zero because SI3 does not exchange
+    their halos before ``icedyn_rdgrft.F90:234-237`` packs physical cells.
+    """
+
+    _validate_si3_cgrid_aevp_static(config)
+    shape = state.u_ice_u.shape
+    leaves = (*state, *forcing, *metrics)
+    if len(shape) != 2 or any(value.shape != shape for value in leaves):
+        raise ValueError("SI3 C-grid deformation requires same-shape 2-D leaves")
+    fimask = _si3_cgrid_fmask(forcing, config, state.u_ice_u.dtype)
+    shear_f = _si3_f_shear(
+        state.u_ice_u,
+        state.v_ice_v,
+        metrics,
+        fimask,
+        jnp.zeros_like(state.stress12_f),
+    )
+    divergence, tension, shear_square = _si3_t_deformation(
+        state.u_ice_u, state.v_ice_v, shear_f, metrics
+    )
+    ice_mask = (forcing.concentration_t >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
+    divergence = divergence * ice_mask
+    deformation = (
+        _si3_sqrt(
+            divergence * divergence
+            + (tension * tension + shear_square) / (config.eccentricity * config.eccentricity)
+        )
+        * ice_mask
+    )
+    interior = slice(2, -2)
+    zero = jnp.zeros_like(divergence)
+    return (
+        _si3_set(zero, interior, divergence),
+        _si3_set(zero, interior, deformation),
+    )
+
+
+
+def _si3_orca2_cgrid_fmask(
+    forcing: SI3CGridAEVPForcing,
+    config: SI3CGridAEVPConfig,
+    dtype,
     halo,
 ) -> jnp.ndarray:
     """Construct SI3's F-point ocean/boundary mask at source lines 204-224."""
@@ -1249,7 +1323,7 @@ def _si3_cgrid_fmask(
     return halo("fimask", _si3_set(jnp.zeros_like(raw), slice(2, -2), raw), "F", _SI3_ONE, True)
 
 
-def si3_cgrid_deformation(
+def si3_lane_cgrid_deformation(
     state: SI3CGridAEVPState,
     forcing: SI3CGridAEVPForcing,
     metrics: SI3CGridMetrics,
@@ -1257,7 +1331,7 @@ def si3_cgrid_deformation(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Return final C-grid divergence and deformation for redistribution.
 
-    This is the single implementation of ``icedyn_rhg_evp.F90:788-836`` used
+    This is the SI3 lane's ICE_RHEO implementation of ``icedyn_rhg_evp.F90:788-836`` used
     by the rung-3.4 ``rhg -> adv -> rdgrft`` composition.  The returned T-point
     arrays populate only NEMO's physical ``DO_2D(0,0,0,0)`` region; diagnostics
     outside that region are intentionally zero because SI3 does not exchange
@@ -1269,7 +1343,7 @@ def si3_cgrid_deformation(
     leaves = (*state, *forcing, *metrics)
     if len(shape) != 2 or any(value.shape != shape for value in leaves):
         raise ValueError("SI3 C-grid deformation requires same-shape 2-D leaves")
-    fimask = _si3_cgrid_fmask(forcing, config, state.u_ice_u.dtype, _si3_lane3_halo)
+    fimask = _si3_orca2_cgrid_fmask(forcing, config, state.u_ice_u.dtype, _si3_lane3_halo)
     shear_f = _si3_f_shear(
         state.u_ice_u,
         state.v_ice_v,
@@ -1324,33 +1398,613 @@ def si3_cgrid_aevp_solver(
     leaves = (*state, *forcing, *metrics)
     if len(shape) != 2 or any(value.shape != shape for value in leaves):
         raise ValueError("SI3 C-grid aEVP requires same-shape two-dimensional leaves")
+
+    at_i = forcing.concentration_t
+    zmsk = (at_i >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
+    tmask = forcing.tmask_t
+    # The pinned ORCA1/case deck resolves rn_ishlat=2.  Reproduce the
+    # nonzero-boundary repair from icedyn_rhg_evp.F90:215-224 even though the
+    # all-wet periodic rung makes it inert; static validation rejects every
+    # selector other than this one measured arm.
+    fimask = _si3_cgrid_fmask(forcing, config, state.u_ice_u.dtype)
+    eccentricity_square = _si3_mul(config.eccentricity, config.eccentricity)
+    inverse_eccentricity_square = _si3_div(_SI3_ONE, eccentricity_square)
+    mass_t = _si3_add(
+        _si3_add(
+            _si3_mul(config.rho_snow, forcing.snow_volume_t),
+            _si3_mul(config.rho_ice, forcing.ice_volume_t),
+        ),
+        _si3_mul(
+            config.rho_water,
+            _si3_add(forcing.pond_volume_t, forcing.lid_volume_t),
+        ),
+    )
+    mass_coriolis_t = _si3_mul(mass_t, forcing.coriolis_t)
+    dt_over_mass_t = _si3_div(config.dt_s, jnp.maximum(mass_t, _SI3_MASS_FLOOR_KG_M2))
+
     # H79 guard is deliberately outside the shared helper, matching
     # icedyn_rdgrft.F90:1048-1056 and leaving the A-grid helper unchanged.
-    strength_t = si3_h79_strength_raw(
+    strength_formula = ice_strength(
         forcing.ice_volume_t,
-        forcing.concentration_t,
+        at_i,
         config.strength_parameter_pa,
         config.strength_decay,
+        source_exact=True,
     )
-    return _si3_cgrid_aevp_core(
-        state,
+    strength_t = nemo_source_round(jnp.where(at_i > _SI3_ICE_PRESENCE, strength_formula, _SI3_ZERO))
+    tensile_fraction = (
+        config.landfast_tensile_fraction if config.landfast else _SI3_ZERO
+    )
+
+    area_t_east = jnp.roll(metrics.area_t, -1, axis=0)
+    area_t_north = jnp.roll(metrics.area_t, -1, axis=1)
+    mass_t_east = jnp.roll(mass_t, -1, axis=0)
+    mass_t_north = jnp.roll(mass_t, -1, axis=1)
+    at_i_east = jnp.roll(at_i, -1, axis=0)
+    at_i_north = jnp.roll(at_i, -1, axis=1)
+    za_u = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _SI3_HALF,
+                _si3_add(
+                    _si3_mul(at_i, metrics.area_t),
+                    _si3_mul(at_i_east, area_t_east),
+                ),
+            ),
+            _si3_div(_SI3_ONE, metrics.area_u),
+        ),
+        forcing.umask_u,
+    )
+    za_v = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _SI3_HALF,
+                _si3_add(
+                    _si3_mul(at_i, metrics.area_t),
+                    _si3_mul(at_i_north, area_t_north),
+                ),
+            ),
+            _si3_div(_SI3_ONE, metrics.area_v),
+        ),
+        forcing.vmask_v,
+    )
+    mass_u = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _SI3_HALF,
+                _si3_add(
+                    _si3_mul(mass_t, metrics.area_t),
+                    _si3_mul(mass_t_east, area_t_east),
+                ),
+            ),
+            _si3_div(_SI3_ONE, metrics.area_u),
+        ),
+        forcing.umask_u,
+    )
+    mass_v = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _SI3_HALF,
+                _si3_add(
+                    _si3_mul(mass_t, metrics.area_t),
+                    _si3_mul(mass_t_north, area_t_north),
+                ),
+            ),
+            _si3_div(_SI3_ONE, metrics.area_v),
+        ),
+        forcing.vmask_v,
+    )
+    ocean_v_u = _si3_mul(
+        _si3_mul(
+            _SI3_QUARTER,
+            _si3_add(
+                _si3_add(
+                    forcing.ocean_v_v,
+                    jnp.roll(forcing.ocean_v_v, 1, axis=1),
+                ),
+                _si3_add(
+                    jnp.roll(forcing.ocean_v_v, -1, axis=0),
+                    jnp.roll(jnp.roll(forcing.ocean_v_v, -1, axis=0), 1, axis=1),
+                ),
+            ),
+        ),
+        forcing.umask_u,
+    )
+    ocean_u_v = _si3_mul(
+        _si3_mul(
+            _SI3_QUARTER,
+            _si3_add(
+                _si3_add(
+                    forcing.ocean_u_u,
+                    jnp.roll(forcing.ocean_u_u, 1, axis=0),
+                ),
+                _si3_add(
+                    jnp.roll(forcing.ocean_u_u, -1, axis=1),
+                    jnp.roll(jnp.roll(forcing.ocean_u_u, 1, axis=0), -1, axis=1),
+                ),
+            ),
+        ),
+        forcing.vmask_v,
+    )
+    inverse_dt = _si3_div(_SI3_ONE, config.dt_s)
+    mass_over_dt_u = _si3_mul(mass_u, inverse_dt)
+    mass_over_dt_v = _si3_mul(mass_v, inverse_dt)
+    tau_air_u = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _si3_mul(za_u, _SI3_HALF),
+                _si3_add(
+                    forcing.air_stress_u_t,
+                    jnp.roll(forcing.air_stress_u_t, -1, axis=0),
+                ),
+            ),
+            _si3_sub(_SI3_TWO, forcing.umask_u),
+        ),
+        jnp.maximum(tmask, jnp.roll(tmask, -1, axis=0)),
+    )
+    tau_air_v = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _si3_mul(za_v, _SI3_HALF),
+                _si3_add(
+                    forcing.air_stress_v_t,
+                    jnp.roll(forcing.air_stress_v_t, -1, axis=1),
+                ),
+            ),
+            _si3_sub(_SI3_TWO, forcing.vmask_v),
+        ),
+        jnp.maximum(tmask, jnp.roll(tmask, -1, axis=1)),
+    )
+    drag_u = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _si3_mul(_si3_mul(config.rho_ocean, za_u), _SI3_HALF),
+                _si3_add(
+                    forcing.drag_io_t,
+                    jnp.roll(forcing.drag_io_t, -1, axis=0),
+                ),
+            ),
+            _si3_sub(_SI3_TWO, forcing.umask_u),
+        ),
+        jnp.maximum(tmask, jnp.roll(tmask, -1, axis=0)),
+    )
+    drag_v = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _si3_mul(_si3_mul(config.rho_ocean, za_v), _SI3_HALF),
+                _si3_add(
+                    forcing.drag_io_t,
+                    jnp.roll(forcing.drag_io_t, -1, axis=1),
+                ),
+            ),
+            _si3_sub(_SI3_TWO, forcing.vmask_v),
+        ),
+        jnp.maximum(tmask, jnp.roll(tmask, -1, axis=1)),
+    )
+    slope_u = _si3_mul(
+        _si3_mul(
+            _si3_mul(-mass_u, config.gravity),
+            _si3_sub(jnp.roll(forcing.ssh_t, -1, axis=0), forcing.ssh_t),
+        ),
+        _si3_div(_SI3_ONE, metrics.e1u),
+    )
+    slope_v = _si3_mul(
+        _si3_mul(
+            _si3_mul(-mass_v, config.gravity),
+            _si3_sub(jnp.roll(forcing.ssh_t, -1, axis=1), forcing.ssh_t),
+        ),
+        _si3_div(_SI3_ONE, metrics.e2v),
+    )
+    mass_mask_u = (mass_u > _SI3_ZERO).astype(state.u_ice_u.dtype)
+    mass_mask_v = (mass_v > _SI3_ZERO).astype(state.v_ice_v.dtype)
+    active_u = ~((mass_u <= _SI3_MASS_FLOOR_KG_M2) & (za_u <= _SI3_LOW_CONCENTRATION))
+    active_v = ~((mass_v <= _SI3_MASS_FLOOR_KG_M2) & (za_v <= _SI3_LOW_CONCENTRATION))
+    active_u = active_u.astype(state.u_ice_u.dtype)
+    active_v = active_v.astype(state.v_ice_v.dtype)
+    fast_u = jnp.maximum(forcing.fast_tmask, jnp.roll(forcing.fast_tmask, -1, axis=0))
+    fast_v = jnp.maximum(forcing.fast_tmask, jnp.roll(forcing.fast_tmask, -1, axis=1))
+    basal_u, basal_v, _basal_t = si3_cgrid_landfast_l16_basal_stress(
         forcing,
         metrics,
         config,
-        strength_t=strength_t,
-        # Lane 3 keeps its certified contract: store_fields (icestp.f90:463)
-        # sets u_ice_b = u_ice before ice_dyn, which its cards enter directly.
-        u_ice_b=state.u_ice_u,
-        v_ice_b=state.v_ice_v,
-        halo=_si3_config_halo(config),
-        differentiable=differentiable,
-        stress_divergence_outer_weight=stress_divergence_outer_weight,
-        swap_parity=False,
-        orca2_source_order=False,
+        za_u,
+        za_v,
+    )
+
+    halo_one = slice(1, -1)
+    interior = slice(2, -2)
+
+    def subcycle(iteration, carry):
+        u_ice, v_ice, stress1, stress2, stress12 = carry
+        shear = _si3_f_shear(u_ice, v_ice, metrics, fimask, jnp.zeros_like(stress12))
+        divergence, tension, shear_square = _si3_t_deformation(u_ice, v_ice, shear, metrics)
+        tension_square = _si3_mul(tension, tension)
+        delta_inner = _si3_add(tension_square, shear_square)
+        delta_inner = _si3_mul(delta_inner, inverse_eccentricity_square)
+        divergence_square = _si3_mul(divergence, divergence)
+        delta_inner = _si3_add(divergence_square, delta_inner)
+        delta_value = _si3_mul(nemo_source_round(_si3_sqrt(delta_inner)), zmsk)
+        p_over_delta_value = _si3_mul(
+            _si3_div(
+                strength_t,
+                _si3_add(delta_value, config.creep_limit_s_inv),
+            ),
+            zmsk,
+        )
+        delta_t = _si3_halo(
+            _si3_set(jnp.zeros_like(delta_value), interior, delta_value), config, "T", _SI3_ONE
+        )
+        p_over_delta_t = _si3_halo(
+            _si3_set(jnp.zeros_like(p_over_delta_value), interior, p_over_delta_value),
+            config,
+            "T",
+            _SI3_ONE,
+        )
+
+        # SI3 intentionally recomputes these operands for the wide stress loop.
+        divergence, tension, ignored_shear_square = _si3_t_deformation(u_ice, v_ice, shear, metrics)
+        del ignored_shear_square
+        alpha_inner = _si3_mul(_SI3_HALF, p_over_delta_t)
+        alpha_inner = _si3_mul(alpha_inner, _si3_div(_SI3_ONE, metrics.area_t))
+        alpha_inner = _si3_mul(alpha_inner, dt_over_mass_t)
+        alpha_t = nemo_source_round(
+            jnp.maximum(
+                _SI3_ALPHA_FLOOR,
+                _si3_mul(jnp.pi, nemo_source_round(_si3_sqrt(alpha_inner))),
+            )
+        )
+        inverse_alpha_t = _si3_div(_SI3_ONE, _si3_add(alpha_t, _SI3_ONE))
+        stress1_target = _si3_sub(
+            _si3_mul(divergence, _si3_add(_SI3_ONE, tensile_fraction)),
+            _si3_mul(delta_t, _si3_sub(_SI3_ONE, tensile_fraction)),
+        )
+        stress1_target = _si3_mul(p_over_delta_t, stress1_target)
+        stress1_value = _si3_add(_si3_mul(stress1, alpha_t), stress1_target)
+        stress1_value = _si3_mul(stress1_value, inverse_alpha_t)
+        stress1_value = _si3_mul(stress1_value, zmsk)
+        stress2_target = _si3_mul(
+            _si3_mul(tension, inverse_eccentricity_square),
+            _si3_add(_SI3_ONE, tensile_fraction),
+        )
+        stress2_target = _si3_mul(p_over_delta_t, stress2_target)
+        stress2_value = _si3_add(_si3_mul(stress2, alpha_t), stress2_target)
+        stress2_value = _si3_mul(stress2_value, inverse_alpha_t)
+        stress2_value = _si3_mul(stress2_value, zmsk)
+        stress1 = _si3_set(stress1, slice(1, None), stress1_value)
+        stress2 = _si3_set(stress2, slice(1, None), stress2_value)
+
+        beta_t = nemo_source_round(
+            jnp.maximum(
+                _SI3_ALPHA_FLOOR,
+                _si3_mul(jnp.pi, nemo_source_round(_si3_sqrt(alpha_inner))),
+            )
+        )
+        alpha_f = nemo_source_round(
+            jnp.maximum(
+                jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=0)),
+                jnp.maximum(
+                    jnp.roll(beta_t, -1, axis=1),
+                    jnp.roll(jnp.roll(beta_t, -1, axis=0), -1, axis=1),
+                ),
+            )
+        )
+        inverse_alpha_f = _si3_div(_SI3_ONE, _si3_add(alpha_f, _SI3_ONE))
+        p_over_delta_f = _si3_mul(
+            _SI3_QUARTER,
+            _si3_add(
+                _si3_add(p_over_delta_t, jnp.roll(p_over_delta_t, -1, axis=0)),
+                _si3_add(
+                    jnp.roll(p_over_delta_t, -1, axis=1),
+                    jnp.roll(jnp.roll(p_over_delta_t, -1, axis=0), -1, axis=1),
+                ),
+            ),
+        )
+        stress12_target = _si3_mul(
+            _si3_mul(shear, inverse_eccentricity_square),
+            _si3_add(_SI3_ONE, tensile_fraction),
+        )
+        stress12_target = _si3_mul(p_over_delta_f, stress12_target)
+        stress12_target = _si3_mul(stress12_target, _SI3_SHEAR_STRESS_WEIGHT)
+        stress12_value = _si3_add(_si3_mul(stress12, alpha_f), stress12_target)
+        stress12_value = _si3_mul(stress12_value, inverse_alpha_f)
+        stress12 = _si3_set(stress12, slice(0, -1), stress12_value)
+
+        force_u, force_v = _si3_stress_divergence(
+            stress1,
+            stress2,
+            stress12,
+            metrics,
+            outer_weight=stress_divergence_outer_weight,
+        )
+        cross_v_u = _si3_mul(
+            _si3_mul(
+                _SI3_QUARTER,
+                _si3_add(
+                    _si3_add(v_ice, jnp.roll(v_ice, 1, axis=1)),
+                    _si3_add(
+                        jnp.roll(v_ice, -1, axis=0),
+                        jnp.roll(jnp.roll(v_ice, -1, axis=0), 1, axis=1),
+                    ),
+                ),
+            ),
+            forcing.umask_u,
+        )
+        cross_u_v = _si3_mul(
+            _si3_mul(
+                _SI3_QUARTER,
+                _si3_add(
+                    _si3_add(u_ice, jnp.roll(u_ice, 1, axis=0)),
+                    _si3_add(
+                        jnp.roll(u_ice, -1, axis=1),
+                        jnp.roll(jnp.roll(u_ice, 1, axis=0), -1, axis=1),
+                    ),
+                ),
+            ),
+            forcing.vmask_v,
+        )
+
+        def update_u(current_u, current_v, write_slice):
+            delta_u = _si3_sub(current_u, forcing.ocean_u_u)
+            delta_v = _si3_sub(cross_v_u, ocean_v_u)
+            drag_magnitude = _si3_mul(
+                drag_u,
+                nemo_source_round(
+                    _si3_sqrt(
+                        _si3_add(
+                            _si3_mul(delta_u, delta_u),
+                            _si3_mul(delta_v, delta_v),
+                        )
+                    )
+                ),
+            )
+            coriolis_u = nemo_source_round(
+                _SI3_QUARTER
+                * nemo_source_round(_SI3_ONE / metrics.e1u)
+                * (
+                    mass_coriolis_t
+                    * (
+                        metrics.e1v * current_v
+                        + jnp.roll(metrics.e1v, 1, axis=1) * jnp.roll(current_v, 1, axis=1)
+                    )
+                    + jnp.roll(mass_coriolis_t, -1, axis=0)
+                    * (
+                        jnp.roll(metrics.e1v, -1, axis=0) * jnp.roll(current_v, -1, axis=0)
+                        + jnp.roll(jnp.roll(metrics.e1v, -1, axis=0), 1, axis=1)
+                        * jnp.roll(jnp.roll(current_v, -1, axis=0), 1, axis=1)
+                    )
+                )
+            )
+            ocean_stress = _si3_mul(drag_magnitude, _si3_sub(forcing.ocean_u_u, current_u))
+            rhs = _si3_add(force_u, tau_air_u)
+            rhs = _si3_add(rhs, coriolis_u)
+            rhs = _si3_add(rhs, slope_u)
+            rhs = _si3_add(rhs, ocean_stress)
+            beta_u = jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=0))
+            numerator = _si3_add(_si3_mul(beta_u, current_u), state.u_ice_u)
+            numerator = _si3_mul(mass_over_dt_u, numerator)
+            numerator = _si3_add(numerator, rhs)
+            numerator = _si3_add(numerator, _si3_mul(drag_magnitude, current_u))
+            denominator = _si3_add(
+                _si3_mul(mass_over_dt_u, _si3_add(beta_u, _SI3_ONE)),
+                drag_magnitude,
+            )
+            if config.landfast:
+                basal_speed = _si3_add(
+                    _SI3_LANDFAST_SPEED_FLOOR_M_S,
+                    nemo_source_round(
+                        _si3_sqrt(
+                            _si3_add(
+                                _si3_mul(cross_v_u, cross_v_u),
+                                _si3_mul(current_u, current_u),
+                            )
+                        )
+                    ),
+                )
+                basal_ratio = _si3_div(basal_u, basal_speed)
+                denominator = _si3_sub(denominator, basal_ratio)
+                dynamic_value = _si3_div(
+                    numerator,
+                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                )
+                static_decay = jnp.maximum(
+                    _SI3_ZERO,
+                    _si3_sub(
+                        beta_u,
+                        _si3_mul(config.dt_s, config.landfast_relaxation_s_inv),
+                    ),
+                )
+                static_numerator = _si3_add(
+                    state.u_ice_u,
+                    _si3_mul(current_u, static_decay),
+                )
+                static_value = _si3_div(
+                    static_numerator,
+                    _si3_add(beta_u, _SI3_ONE),
+                )
+                static_friction = (_si3_add(rhs, basal_u) < _SI3_ZERO) & (
+                    rhs >= _SI3_ZERO
+                )
+                value = nemo_source_round(
+                    jnp.where(static_friction, static_value, dynamic_value)
+                )
+            else:
+                value = _si3_div(
+                    numerator,
+                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                )
+            value = _si3_add(
+                _si3_mul(value, active_u),
+                _si3_mul(
+                    _si3_mul(forcing.ocean_u_u, _SI3_LOW_MASS_OCEAN_FACTOR),
+                    _si3_sub(_SI3_ONE, active_u),
+                ),
+            )
+            value = _si3_mul(value, mass_mask_u)
+            value = _si3_mul(
+                value,
+                _si3_sub(_SI3_ONE, _si3_mul(_SI3_FAST_MASK_REDUCTION, fast_u)),
+            )
+            return _si3_set(current_u, write_slice, value)
+
+        def update_v(current_u, current_v, write_slice):
+            delta_v = _si3_sub(current_v, forcing.ocean_v_v)
+            delta_u = _si3_sub(cross_u_v, ocean_u_v)
+            drag_magnitude = _si3_mul(
+                drag_v,
+                nemo_source_round(
+                    _si3_sqrt(
+                        _si3_add(
+                            _si3_mul(delta_v, delta_v),
+                            _si3_mul(delta_u, delta_u),
+                        )
+                    )
+                ),
+            )
+            coriolis_v = nemo_source_round(
+                -_SI3_QUARTER
+                * nemo_source_round(_SI3_ONE / metrics.e2v)
+                * (
+                    mass_coriolis_t
+                    * (
+                        metrics.e2u * current_u
+                        + jnp.roll(metrics.e2u, 1, axis=0) * jnp.roll(current_u, 1, axis=0)
+                    )
+                    + jnp.roll(mass_coriolis_t, -1, axis=1)
+                    * (
+                        jnp.roll(metrics.e2u, -1, axis=1) * jnp.roll(current_u, -1, axis=1)
+                        + jnp.roll(jnp.roll(metrics.e2u, 1, axis=0), -1, axis=1)
+                        * jnp.roll(jnp.roll(current_u, 1, axis=0), -1, axis=1)
+                    )
+                )
+            )
+            ocean_stress = _si3_mul(drag_magnitude, _si3_sub(forcing.ocean_v_v, current_v))
+            rhs = _si3_add(force_v, tau_air_v)
+            rhs = _si3_add(rhs, coriolis_v)
+            rhs = _si3_add(rhs, slope_v)
+            rhs = _si3_add(rhs, ocean_stress)
+            beta_v = jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=1))
+            numerator = _si3_add(_si3_mul(beta_v, current_v), state.v_ice_v)
+            numerator = _si3_mul(mass_over_dt_v, numerator)
+            numerator = _si3_add(numerator, rhs)
+            numerator = _si3_add(numerator, _si3_mul(drag_magnitude, current_v))
+            denominator = _si3_add(
+                _si3_mul(mass_over_dt_v, _si3_add(beta_v, _SI3_ONE)),
+                drag_magnitude,
+            )
+            if config.landfast:
+                basal_speed = _si3_add(
+                    _SI3_LANDFAST_SPEED_FLOOR_M_S,
+                    nemo_source_round(
+                        _si3_sqrt(
+                            _si3_add(
+                                _si3_mul(current_v, current_v),
+                                _si3_mul(cross_u_v, cross_u_v),
+                            )
+                        )
+                    ),
+                )
+                basal_ratio = _si3_div(basal_v, basal_speed)
+                denominator = _si3_sub(denominator, basal_ratio)
+                dynamic_value = _si3_div(
+                    numerator,
+                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                )
+                static_decay = jnp.maximum(
+                    _SI3_ZERO,
+                    _si3_sub(
+                        beta_v,
+                        _si3_mul(config.dt_s, config.landfast_relaxation_s_inv),
+                    ),
+                )
+                static_numerator = _si3_add(
+                    state.v_ice_v,
+                    _si3_mul(current_v, static_decay),
+                )
+                static_value = _si3_div(
+                    static_numerator,
+                    _si3_add(beta_v, _SI3_ONE),
+                )
+                static_friction = (_si3_add(rhs, basal_v) < _SI3_ZERO) & (
+                    rhs >= _SI3_ZERO
+                )
+                value = nemo_source_round(
+                    jnp.where(static_friction, static_value, dynamic_value)
+                )
+            else:
+                value = _si3_div(
+                    numerator,
+                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                )
+            value = _si3_add(
+                _si3_mul(value, active_v),
+                _si3_mul(
+                    _si3_mul(forcing.ocean_v_v, _SI3_LOW_MASS_OCEAN_FACTOR),
+                    _si3_sub(_SI3_ONE, active_v),
+                ),
+            )
+            value = _si3_mul(value, mass_mask_v)
+            value = _si3_mul(
+                value,
+                _si3_sub(_SI3_ONE, _si3_mul(_SI3_FAST_MASK_REDUCTION, fast_v)),
+            )
+            return _si3_set(current_v, write_slice, value)
+
+        # jter is one-based in NEMO.  Even: V halo-1 then U interior; odd:
+        # U halo-1 then V interior (icedyn_rhg_evp.F90:530-741).
+        def even_pair(pair):
+            pair_u, pair_v = pair
+            pair_v = update_v(pair_u, pair_v, halo_one)
+            pair_u = update_u(pair_u, pair_v, interior)
+            return pair_u, pair_v
+
+        def odd_pair(pair):
+            pair_u, pair_v = pair
+            pair_u = update_u(pair_u, pair_v, halo_one)
+            pair_v = update_v(pair_u, pair_v, interior)
+            return pair_u, pair_v
+
+        # lax.fori_loop supplies a zero-based iteration index.
+        u_ice, v_ice = jax.lax.cond(
+            (iteration + 1) % 2 == 0,
+            even_pair,
+            odd_pair,
+            (u_ice, v_ice),
+        )
+        u_ice = _si3_halo(u_ice, config, "U", -_SI3_ONE)
+        v_ice = _si3_halo(v_ice, config, "V", -_SI3_ONE)
+        return u_ice, v_ice, stress1, stress2, stress12
+
+    initial = tuple(state)
+    if differentiable:
+
+        def scan_body(carry, iteration):
+            updated = subcycle(iteration, carry)
+            return updated, None
+
+        final, _ = jax.lax.scan(
+            scan_body,
+            initial,
+            xs=jnp.arange(config.n_subcycles),
+        )
+    else:
+        final = jax.lax.fori_loop(0, config.n_subcycles, subcycle, initial)
+    u_final, v_final, stress1_final, stress2_final, stress12_final = final
+    return SI3CGridAEVPState(
+        u_ice_u=u_final,
+        v_ice_v=v_final,
+        stress1_t=_si3_halo(stress1_final, config, "T", _SI3_ONE),
+        stress2_t=_si3_halo(stress2_final, config, "T", _SI3_ONE),
+        stress12_f=_si3_halo(stress12_final, config, "F", _SI3_ONE),
     )
 
 
-def _si3_cgrid_aevp_core(
+# ==============================================================================
+# mEVP solver
+# ==============================================================================
+
+
+
+def _si3_orca2_cgrid_aevp_core(
     state: SI3CGridAEVPState,
     forcing: SI3CGridAEVPForcing,
     metrics: SI3CGridMetrics,
@@ -1363,10 +2017,9 @@ def _si3_cgrid_aevp_core(
     differentiable: bool,
     stress_divergence_outer_weight: float,
     swap_parity: bool,
-    orca2_source_order: bool,
     capture_trace: bool = False,
 ) -> SI3CGridAEVPState | SI3ORCA2AEVPTrace:
-    """Shared aEVP body; ``halo(label, field, nature, sign, ldfull)`` is the lbc_lnk program.
+    """ORCA2 lane aEVP body; ``halo(label, field, nature, sign, ldfull)`` is the lbc_lnk program.
 
     ``u_ice_b``/``v_ice_b`` are NEMO's previous-step velocities
     (``icedyn_rhg_evp.f90:574,625``), distinct inputs from the entry ``state``.
@@ -1379,7 +2032,7 @@ def _si3_cgrid_aevp_core(
     # nonzero-boundary repair from icedyn_rhg_evp.F90:215-224 even though the
     # all-wet periodic rung makes it inert; static validation rejects every
     # selector other than this one measured arm.
-    fimask = _si3_cgrid_fmask(forcing, config, state.u_ice_u.dtype, halo)
+    fimask = _si3_orca2_cgrid_fmask(forcing, config, state.u_ice_u.dtype, halo)
     eccentricity_square = _si3_mul(config.eccentricity, config.eccentricity)
     inverse_eccentricity_square = _si3_div(_SI3_ONE, eccentricity_square)
     mass_t = _si3_add(
@@ -1726,55 +2379,35 @@ def _si3_cgrid_aevp_core(
                     )
                 ),
             )
-            if orca2_source_order:
-                # icedyn_rhg_evp.f90:611-613,666-668; every operation rounded (no FMA).
-                coriolis_u = _si3_mul(
-                    _si3_mul(_SI3_QUARTER, _si3_div(_SI3_ONE, metrics.e1u)),
-                    _si3_add(
-                        _si3_mul(
-                            mass_coriolis_t,
-                            _si3_add(
-                                _si3_mul(metrics.e1v, current_v),
-                                _si3_mul(
-                                    jnp.roll(metrics.e1v, 1, axis=1),
-                                    jnp.roll(current_v, 1, axis=1),
-                                ),
-                            ),
-                        ),
-                        _si3_mul(
-                            jnp.roll(mass_coriolis_t, -1, axis=0),
-                            _si3_add(
-                                _si3_mul(
-                                    jnp.roll(metrics.e1v, -1, axis=0),
-                                    jnp.roll(current_v, -1, axis=0),
-                                ),
-                                _si3_mul(
-                                    jnp.roll(jnp.roll(metrics.e1v, -1, axis=0), 1, axis=1),
-                                    jnp.roll(jnp.roll(current_v, -1, axis=0), 1, axis=1),
-                                ),
+            # icedyn_rhg_evp.f90:611-613,666-668; every operation rounded (no FMA).
+            coriolis_u = _si3_mul(
+                _si3_mul(_SI3_QUARTER, _si3_div(_SI3_ONE, metrics.e1u)),
+                _si3_add(
+                    _si3_mul(
+                        mass_coriolis_t,
+                        _si3_add(
+                            _si3_mul(metrics.e1v, current_v),
+                            _si3_mul(
+                                jnp.roll(metrics.e1v, 1, axis=1),
+                                jnp.roll(current_v, 1, axis=1),
                             ),
                         ),
                     ),
-                )
-            else:
-                # Preserve main's certified ORCA1 evaluation order exactly.
-                coriolis_u = nemo_source_round(
-                    _SI3_QUARTER
-                    * nemo_source_round(_SI3_ONE / metrics.e1u)
-                    * (
-                        mass_coriolis_t
-                        * (
-                            metrics.e1v * current_v
-                            + jnp.roll(metrics.e1v, 1, axis=1) * jnp.roll(current_v, 1, axis=1)
-                        )
-                        + jnp.roll(mass_coriolis_t, -1, axis=0)
-                        * (
-                            jnp.roll(metrics.e1v, -1, axis=0) * jnp.roll(current_v, -1, axis=0)
-                            + jnp.roll(jnp.roll(metrics.e1v, -1, axis=0), 1, axis=1)
-                            * jnp.roll(jnp.roll(current_v, -1, axis=0), 1, axis=1)
-                        )
-                    )
-                )
+                    _si3_mul(
+                        jnp.roll(mass_coriolis_t, -1, axis=0),
+                        _si3_add(
+                            _si3_mul(
+                                jnp.roll(metrics.e1v, -1, axis=0),
+                                jnp.roll(current_v, -1, axis=0),
+                            ),
+                            _si3_mul(
+                                jnp.roll(jnp.roll(metrics.e1v, -1, axis=0), 1, axis=1),
+                                jnp.roll(jnp.roll(current_v, -1, axis=0), 1, axis=1),
+                            ),
+                        ),
+                    ),
+                ),
+            )
             ocean_stress = _si3_mul(drag_magnitude, _si3_sub(forcing.ocean_u_u, current_u))
             rhs = _si3_add(force_u, tau_air_u)
             rhs = _si3_add(rhs, coriolis_u)
@@ -1861,56 +2494,36 @@ def _si3_cgrid_aevp_core(
                     )
                 ),
             )
-            if orca2_source_order:
-                # icedyn_rhg_evp.f90:560-562,718-720; Fortran's leading minus negates
-                # the whole product (exact).  Every operation rounded (no FMA).
-                coriolis_v = -_si3_mul(
-                    _si3_mul(_SI3_QUARTER, _si3_div(_SI3_ONE, metrics.e2v)),
-                    _si3_add(
-                        _si3_mul(
-                            mass_coriolis_t,
-                            _si3_add(
-                                _si3_mul(metrics.e2u, current_u),
-                                _si3_mul(
-                                    jnp.roll(metrics.e2u, 1, axis=0),
-                                    jnp.roll(current_u, 1, axis=0),
-                                ),
-                            ),
-                        ),
-                        _si3_mul(
-                            jnp.roll(mass_coriolis_t, -1, axis=1),
-                            _si3_add(
-                                _si3_mul(
-                                    jnp.roll(metrics.e2u, -1, axis=1),
-                                    jnp.roll(current_u, -1, axis=1),
-                                ),
-                                _si3_mul(
-                                    jnp.roll(jnp.roll(metrics.e2u, 1, axis=0), -1, axis=1),
-                                    jnp.roll(jnp.roll(current_u, 1, axis=0), -1, axis=1),
-                                ),
+            # icedyn_rhg_evp.f90:560-562,718-720; Fortran's leading minus negates
+            # the whole product (exact).  Every operation rounded (no FMA).
+            coriolis_v = -_si3_mul(
+                _si3_mul(_SI3_QUARTER, _si3_div(_SI3_ONE, metrics.e2v)),
+                _si3_add(
+                    _si3_mul(
+                        mass_coriolis_t,
+                        _si3_add(
+                            _si3_mul(metrics.e2u, current_u),
+                            _si3_mul(
+                                jnp.roll(metrics.e2u, 1, axis=0),
+                                jnp.roll(current_u, 1, axis=0),
                             ),
                         ),
                     ),
-                )
-            else:
-                # Preserve main's certified ORCA1 evaluation order exactly.
-                coriolis_v = nemo_source_round(
-                    -_SI3_QUARTER
-                    * nemo_source_round(_SI3_ONE / metrics.e2v)
-                    * (
-                        mass_coriolis_t
-                        * (
-                            metrics.e2u * current_u
-                            + jnp.roll(metrics.e2u, 1, axis=0) * jnp.roll(current_u, 1, axis=0)
-                        )
-                        + jnp.roll(mass_coriolis_t, -1, axis=1)
-                        * (
-                            jnp.roll(metrics.e2u, -1, axis=1) * jnp.roll(current_u, -1, axis=1)
-                            + jnp.roll(jnp.roll(metrics.e2u, 1, axis=0), -1, axis=1)
-                            * jnp.roll(jnp.roll(current_u, 1, axis=0), -1, axis=1)
-                        )
-                    )
-                )
+                    _si3_mul(
+                        jnp.roll(mass_coriolis_t, -1, axis=1),
+                        _si3_add(
+                            _si3_mul(
+                                jnp.roll(metrics.e2u, -1, axis=1),
+                                jnp.roll(current_u, -1, axis=1),
+                            ),
+                            _si3_mul(
+                                jnp.roll(jnp.roll(metrics.e2u, 1, axis=0), -1, axis=1),
+                                jnp.roll(jnp.roll(current_u, 1, axis=0), -1, axis=1),
+                            ),
+                        ),
+                    ),
+                ),
+            )
             ocean_stress = _si3_mul(drag_magnitude, _si3_sub(forcing.ocean_v_v, current_v))
             rhs = _si3_add(force_v, tau_air_v)
             rhs = _si3_add(rhs, coriolis_v)
@@ -2379,7 +2992,7 @@ def _si3_orca2_aevp_run(
     leaves = (*state, *forcing, *metrics, strength_t, u_ice_b, v_ice_b)
     if len(shape) != 2 or any(value is None or value.shape != shape for value in leaves):
         raise ValueError("SI3 ORCA2 aEVP requires every NEMO array, same-shape 2-D")
-    return _si3_cgrid_aevp_core(
+    return _si3_orca2_cgrid_aevp_core(
         state,
         forcing,
         metrics,
@@ -2391,14 +3004,8 @@ def _si3_orca2_aevp_run(
         differentiable=differentiable,
         stress_divergence_outer_weight=_SI3_HALF,
         swap_parity=plant_swap_parity,
-        orca2_source_order=True,
         capture_trace=capture_trace,
     )
-
-
-# ==============================================================================
-# mEVP solver
-
 
 
 # ==============================================================================
