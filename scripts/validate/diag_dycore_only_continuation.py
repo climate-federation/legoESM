@@ -66,14 +66,16 @@ def water_tendency_terms(state, model):
     with ``ddp = dB*dp_s_dt``.  ``total`` uses the dycore's own tendencies
     (physics off).  ``horizontal`` is the advective horizontal tracer term
     with the matching layer-mass divergence ``-div(u*dp_edge)``; ``ps_del4``
-    is the mass the surface-pressure hyperdiffusion moves with no tracer
-    flux; ``rest`` = total - both (vertical transport, filters).
+    is the NET change in ``total`` from the surface-pressure hyperdiffusion
+    (total minus total with ``nu_del4_ps = 0``, so any compensation in the
+    tracer tendency is included); ``rest`` = total - both (vertical
+    transport, filters).
     """
     import jax.numpy as jnp
     from legoesm import constants
     from legoesm.core.conservation import WATER_MASS_SPECIES
     from legoesm.core.operators_voronoi import (
-        cell_to_edge_avg_3d, divergence_cell, divergence_cell_3d, gradient_edge)
+        cell_to_edge_avg_3d, divergence_cell_3d)
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         mpas_hydrostatic_tendencies)
     from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
@@ -91,17 +93,16 @@ def water_tendency_terms(state, model):
     def glob(rate):  # (nCells, nlev, nspecies) kg/kg*Pa/s -> kg/m2/day
         return float(jnp.sum(area[:, None, None] * rate) / constants.g * day_per_area)
 
-    t = mpas_hydrostatic_tendencies(state, mesh, sc, cfg)
-    dq = jnp.stack([t.tracer_tendencies[k].data for k in names], axis=-1)
-    total = glob(dp[..., None] * dq + q * (dB * t.dp_s_dt.data[:, None])[..., None])
+    def total_rate(c):
+        t = mpas_hydrostatic_tendencies(state, mesh, sc, c)
+        dq = jnp.stack([t.tracer_tendencies[k].data for k in names], axis=-1)
+        return glob(dp[..., None] * dq + q * (dB * t.dp_s_dt.data[:, None])[..., None])
+
+    total = total_rate(cfg)
     dqh = tracer_horizontal_advection(q, u, mesh)
     ddp_h = -divergence_cell_3d(u * cell_to_edge_avg_3d(dp, mesh), mesh)
     horizontal = glob(dp[..., None] * dqh + q * ddp_h[..., None])
-    ps_del4 = 0.0
-    if cfg.nu_del4_ps > 0:
-        d2 = divergence_cell(gradient_edge(ps, mesh), mesh)
-        d4 = divergence_cell(gradient_edge(d2, mesh), mesh)
-        ps_del4 = glob(q * (dB * (-cfg.nu_del4_ps * d4)[:, None])[..., None])
+    ps_del4 = total - total_rate(cfg._replace(nu_del4_ps=0.0)) if cfg.nu_del4_ps > 0 else 0.0
     return {"total": total, "horizontal": horizontal, "ps_del4": ps_del4,
             "rest": total - horizontal - ps_del4}
 

@@ -43,13 +43,19 @@ def _state(coord):
     return mesh, s._replace(tracers=tracers)
 
 
+def _dB(coord, ps):
+    """d(layer mass)/d(p_s), by forward-mode AD of the coordinate's own layer
+    thickness -- independent of how the dycore forms its dB."""
+    return jax.jvp(coord.layer_thickness_dp, (ps,), (jnp.ones_like(ps),))[1]
+
+
 def _tracer_mass_rates(state, mesh, coord, nu):
     """Global d/dt of sum(area*q*dp) per tracer, and its gross del4 scale."""
     cfg = MPASPrimitiveEquationConfig(fix_mass=False, nu_del4_ps=nu)
     t = mpas_hydrostatic_tendencies(state, mesh, coord, cfg)
     ps = state.p_s.data
     dp = coord.layer_thickness_dp(ps)
-    dB = coord.layer_thickness_dp(jnp.ones_like(ps)) - coord.layer_thickness_dp(jnp.zeros_like(ps))
+    dB = _dB(coord, ps)
     area = jnp.asarray(mesh.areaCell)[:, None]
     out = {}
     for k, f in state.tracers.items():
@@ -68,7 +74,7 @@ def test_ps_del4_leaves_tracer_mass_unchanged(coord_fn):
     r1, t1 = _tracer_mass_rates(state, mesh, coord, NU)
     _, t0 = _tracer_mass_rates(state, mesh, coord, 0.0)
     ps = state.p_s.data
-    dB = coord.layer_thickness_dp(jnp.ones_like(ps)) - coord.layer_thickness_dp(jnp.zeros_like(ps))
+    dB = _dB(coord, ps)
     dps_del4 = t1.dp_s_dt.data - t0.dp_s_dt.data
     area = jnp.asarray(mesh.areaCell)[:, None]
     for k, f in state.tracers.items():

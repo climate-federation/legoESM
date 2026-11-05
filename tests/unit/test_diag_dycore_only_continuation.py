@@ -81,3 +81,40 @@ def test_global_masses_known_answer():
 
 def global_ratio(a, b):
     return a / b - 1.0
+
+
+def test_water_terms_on_a_small_mesh():
+    """The per-term split on a real dycore state: horizontal transport and the
+    p_s filter each change global water by rounding only (the filter's air is
+    carried as dry), and the terms add up to the total."""
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        MPASPrimitiveEquationConfig)
+    from legoesm.atmosphere.idealized.held_suarez_topo import held_suarez_topo_init_mpas
+    from legoesm.core.field import Field
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.grids.vertical import standard_hybrid_levels
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    saved = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        mesh = create_voronoi_mesh(3)
+        coord = standard_hybrid_levels(10)
+        s = held_suarez_topo_init_mpas(mesh, coord)
+        rng = np.random.default_rng(0)
+        q = jnp.asarray(rng.uniform(1e-6, 1e-2, size=s.T.data.shape))
+        s = s._replace(tracers={"q_v": Field(data=q, name="q_v", dims=("nCells", "nlev"))},
+                       u=s.u.replace(data=jnp.asarray(rng.normal(0, 10, s.u.data.shape))))
+        model = SimpleNamespace(mesh=mesh, sigma_coord=coord, config=MPASPrimitiveEquationConfig(
+            fix_mass=False, nu_del4_ps=1.0e16))
+        w = _load().water_tendency_terms(s, model)
+    finally:
+        set_policy(saved)
+    assert w["total"] == pytest.approx(w["horizontal"] + w["ps_del4"] + w["rest"], abs=1e-15)
+    assert abs(w["horizontal"]) < 1e-10
+    assert abs(w["ps_del4"]) < 1e-10
