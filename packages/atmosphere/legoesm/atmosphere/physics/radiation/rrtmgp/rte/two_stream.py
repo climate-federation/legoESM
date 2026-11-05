@@ -888,16 +888,12 @@ def solve_sw(
 
   # --- Per-column day/night handling ---
   # ``zenith`` may be a scalar (single-column) or an array with a column
-  # dimension, e.g. shape ``(ncol, 1)``.  To avoid division-by-zero in
-  # ``exp(-tau / cos(zenith))`` for nighttime columns (cos(zenith) ~ 0),
-  # we clamp the zenith used in the slant path (exp(-tau/mu) and the
-  # two-stream R/T) to at most ~89.4 degrees (cos > 0.01).  The incident
-  # beam is projected with the TRUE cos(zenith), as RTE does
-  # (sw_solver_2stream: flux_dir(top) = inc_flux_dir * mu0); projecting it
-  # with the floored value gave a sun just above the horizon up to
-  # S_0*(0.01 - cos z) extra insolation.  After the solve, nighttime columns
-  # are zeroed out.
-  _ZENITH_MAX = jnp.arccos(jnp.asarray(0.01, dtype=temperature.dtype))  # coeff-ok: min cos(zenith) floor
+  # dimension, e.g. shape ``(ncol, 1)``.  The slant path (exp(-tau/mu) and the
+  # two-stream R/T) uses max(mu0, sqrt(eps)), as RTE sw_dif_and_source does; the
+  # incident beam is projected with the true cos(zenith) (sw_solver_2stream:
+  # flux_dir(top) = inc_flux_dir * mu0).  After the solve, nighttime columns are
+  # zeroed out.
+  _ZENITH_MAX = jnp.arccos(jnp.sqrt(jnp.finfo(temperature.dtype).eps))
   safe_zenith = jnp.minimum(zenith, _ZENITH_MAX)
 
   # Build a per-column boolean mask that is True for daytime columns.

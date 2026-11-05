@@ -155,3 +155,49 @@ shard-equivalence + iter-13/15 end-to-end pins.
 
 - Mlawer, E. J., Taubman, S. J., Brown, P. D., Iacono, M. J. & Clough, S. A., 1997: Radiative transfer for inhomogeneous atmospheres: RRTM, a validated correlated-k model for the longwave. *Journal of Geophysical Research*, 102, 16663–16682.
 - Pincus, R., Mlawer, E. J. & Delamere, J. S., 2019: Balancing accuracy, efficiency, and flexibility in radiation calculations for dynamical models. *Journal of Advances in Modeling Earth Systems*, 11, 3074–3089.
+
+---
+
+## Numerical audit against latest RTE+RRTMGP (2026-11-05)
+
+Oracle: unpatched rte-rrtmgp d4b3c51 (after v1.9.3), gfortran -O2, double precision,
+rrtmgp-data 8ba21ca, 100 RFMIP columns, identical inputs.  Harness and provenance:
+`scripts/validate/oracle/rrtmgp_faithfulness/`.  Max over columns and levels, W/m2.
+
+| Quantity | Before | After, float64 | After, float32 |
+|---|---|---|---|
+| Gas tables | identical numerically (85 of 85 variables) | | |
+| Gas tau, ssa, layer and surface Planck | 2e-13 relative | same | |
+| Level Planck source | 0.023; floor bound 4.7% of cells | 2e-13 relative | |
+| Solar weights | 1.6% per g-point | 0 | |
+| Clear SW, all sun angles | 0.63 | 1.4e-11 | 7.7e-4 |
+| Clear SW heating, K/day | 0.57 | 3e-11 | 5e-3 |
+| Clear LW | 0.098 | 1e-6 | 3.4e-4 |
+| Clear LW heating, K/day | 0.15 | 1e-7 | 3e-3 |
+
+Fixed: LW layer sources, diffuse and direct R/T (closed non-cancelling forms from
+jax-rrtmgp; no optical-depth cutoff, no k floor in the diffuse branch, no ssa floor,
+resonance handled analytically), level-source floor, top level source, slant-path
+floor (`sqrt(eps)`), default solar spectrum.
+
+Upstream defect: the default-kernel `lw_solver_2stream` passes `lev_source` to
+`lw_source_2str` without the g-point index (`mo_rte_solver_kernels.F90:422`), so every
+g-point uses g-point 1's level source (clear-sky surface LW down 247 instead of 428
+W/m2).  Present since the original import.  The oracle driver calls the solver one
+g-point at a time.
+
+KNOWN DIFFERENCES, kept:
+- LW sources for tau <= 1e-8: RTE zero, ours exact.  RTE's formula also loses up to
+  1.2e-2 W/m2 per layer to rounding near thin conservative layers; ours is within
+  3.4e-12 of 60-digit arithmetic (`tests/unit/test_two_stream_exact_forms.py`).
+- Adding reciprocal guard `1/(1 - R A)`: fires only if R A rounds to 1.
+- Cloud-optics thresholds (1e-6): residual 1.3e-4 W/m2 with upstream tables.
+- LW level temperature follows CAM6 (`cam_interface_temperature`); upstream's own
+  reconstruction differs by up to 12 W/m2 in surface LW down.  Host choice.
+- Constants g, M_d, M_w: 4e-5 W/m2.
+- Out-of-range T, p: RTE refuses them; ours clips to the table.
+
+OPEN: cloud tables are v1.8.2 (pinned by `test_rrtmgp_cloud_optics_oracle.py`);
+against the latest tables they cost up to 2.4 W/m2 SW (0.47 rms) and 1.5 W/m2 LW.
+LW solver is two-stream; upstream's default is no-scattering one-angle (OLR 0.46,
+surface down 4.5 W/m2, heating 1.07 K/day rms).
