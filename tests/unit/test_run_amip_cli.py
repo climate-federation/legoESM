@@ -6175,7 +6175,7 @@ def test_large_yeager_width_flags_thread_to_config():
 
 
 def test_land_dry_soil_albedo_boost_flag_flows_to_config():
-    """--land-dry-soil-albedo-boost round-trips; unset stays None (library 0.11)."""
+    """--land-dry-soil-albedo-boost round-trips; unset stays None (bake 0.155)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))

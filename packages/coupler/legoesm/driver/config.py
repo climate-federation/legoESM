@@ -1051,9 +1051,9 @@ class ExperimentConfig(NamedTuple):
     # with albedo_ice 0.80, polar clear-sky reflected SW bias -15.7 -> -2.7
     # W/m2. None restores the calibration's 3.674 d.
     land_snow_tau_days: float | None = 150.0
-    # Dry-soil albedo brightening at zero top-layer water (SoilAlbedoConfig.
-    # delta_intercept, CLM eq. 3.52 fit, library default 0.11). None keeps the
-    # library value. Measured 2026-11-05 (MPAS 2 deg, January): the SimpleSEB
+    # Dry-soil albedo brightening at zero top-layer water (LandAlbedoConfig.
+    # soil_dry_albedo_boost, CLM Oleson 2013; 0.1553 after the multilayer bake,
+    # 0.1458 under calibrated physics). None keeps the bake's value. Measured 2026-11-05 (MPAS 2 deg, January): the SimpleSEB
     # tile adds this on top of the surfdata soil-colour albedo, so deserts
     # reflected 17-28 W/m2 more clear-sky sunlight than the two-leaf canopy
     # (Sahara albedo 0.50 vs 0.35); the knob lets an arm set the increment.

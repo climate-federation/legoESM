@@ -4584,9 +4584,9 @@ class ModelDriver:
         if _boost is not None:
             cfg = cfg._replace(
                 land_albedo=cfg.land_albedo._replace(
-                    delta_intercept=float(_boost)))
+                    soil_dry_albedo_boost=float(_boost)))
             logger.info("  land dry-soil albedo brightening: %.3f at zero "
-                        "top-layer water (library default 0.11)", float(_boost))
+                        "top-layer water (bake default 0.155)", float(_boost))
         # Soil freeze/thaw, same placement: the bake rebuilds ``thermal`` with
         # the switch at its library default, so it must be set after it.
         _ft = bool(self.config.land_soil_freeze_thaw)

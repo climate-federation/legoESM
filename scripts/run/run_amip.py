@@ -1292,9 +1292,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="land_dry_soil_albedo_boost", type=float,
                         default=_EXPERIMENT_DEFAULTS.land_dry_soil_albedo_boost,
                         help="Dry-soil albedo brightening at zero top-layer "
-                             "water [-] (SoilAlbedoConfig.delta_intercept; "
-                             "library default 0.11, darkening 0.40 per unit "
-                             "volumetric water). Unset keeps the library value. "
+                             "water [-] (LandAlbedoConfig.soil_dry_albedo_boost; "
+                             "0.1553 after the multilayer bake, fading to 0 at "
+                             "soil_dry_albedo_ref). Unset keeps the bake's value. "
                              "The SimpleSEB land tile adds it to the surfdata "
                              "soil-colour albedo, which made January deserts "
                              "reflect 17-28 W/m2 more clear-sky sunlight than "
