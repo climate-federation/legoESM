@@ -1288,6 +1288,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "against an observed 0.70-0.82. Pairs with "
                              "--snow-age-activation-K, which alone does not "
                              "move it.")
+    parser.add_argument("--land-dry-soil-albedo-boost",
+                        dest="land_dry_soil_albedo_boost", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_dry_soil_albedo_boost,
+                        help="Dry-soil albedo brightening at zero top-layer "
+                             "water [-] (SoilAlbedoConfig.delta_intercept; "
+                             "library default 0.11, darkening 0.40 per unit "
+                             "volumetric water). Unset keeps the library value. "
+                             "The SimpleSEB land tile adds it to the surfdata "
+                             "soil-colour albedo, which made January deserts "
+                             "reflect 17-28 W/m2 more clear-sky sunlight than "
+                             "the two-leaf canopy (measured 2026-11-05).")
     parser.add_argument("--cloud-cap-floor", dest="cloud_cap_floor_on",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="ATTRIBUTION LEVER (Arctic self-isolation A/B, arm 1): "
@@ -3111,6 +3122,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cap_floor_q_c=args.cloud_cap_floor_q_c,
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
+        land_dry_soil_albedo_boost=args.land_dry_soil_albedo_boost,
         land_soil_freeze_thaw=args.land_soil_freeze_thaw,
         land_snow_scheme=args.land_snow_scheme,
         land_snow_emissivity=args.land_snow_emissivity,

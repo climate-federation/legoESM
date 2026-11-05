@@ -6172,3 +6172,24 @@ def test_large_yeager_width_flags_thread_to_config():
     assert cfg.surface_large_yeager_neutral_width == 0.0
     assert cfg.surface_large_yeager_dthv_width == 0.02
     assert cfg.surface_large_yeager_cd_cutoff_width == 0.25
+
+
+def test_land_dry_soil_albedo_boost_flag_flows_to_config():
+    """--land-dry-soil-albedo-boost round-trips; unset stays None (library 0.11)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_dry_soil_albedo_boost is None
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-dry-soil-albedo-boost", "0.0",
+    ]), parser))
+    assert cfg.land_dry_soil_albedo_boost == 0.0
+
+
+@pytest.mark.parametrize("bad", ["-0.1", "0.5"])
+def test_land_dry_soil_albedo_boost_out_of_range_is_refused(bad):
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-dry-soil-albedo-boost", bad]), parser))
+    with pytest.raises(ValueError, match="land_dry_soil_albedo_boost"):
+        cfg.validate_strict()

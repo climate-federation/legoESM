@@ -4579,6 +4579,14 @@ class ModelDriver:
                     tau_snow_decay=float(_tau_d) * 86400.0))
             logger.info("  land snow-albedo age e-folding: %.3g days "
                         "(overrides the calibration)", float(_tau_d))
+        # Dry-soil brightening intercept, same placement for the same reason.
+        _boost = getattr(self.config, "land_dry_soil_albedo_boost", None)
+        if _boost is not None:
+            cfg = cfg._replace(
+                land_albedo=cfg.land_albedo._replace(
+                    delta_intercept=float(_boost)))
+            logger.info("  land dry-soil albedo brightening: %.3f at zero "
+                        "top-layer water (library default 0.11)", float(_boost))
         # Soil freeze/thaw, same placement: the bake rebuilds ``thermal`` with
         # the switch at its library default, so it must be set after it.
         _ft = bool(self.config.land_soil_freeze_thaw)

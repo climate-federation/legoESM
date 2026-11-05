@@ -1051,6 +1051,13 @@ class ExperimentConfig(NamedTuple):
     # with albedo_ice 0.80, polar clear-sky reflected SW bias -15.7 -> -2.7
     # W/m2. None restores the calibration's 3.674 d.
     land_snow_tau_days: float | None = 150.0
+    # Dry-soil albedo brightening at zero top-layer water (SoilAlbedoConfig.
+    # delta_intercept, CLM eq. 3.52 fit, library default 0.11). None keeps the
+    # library value. Measured 2026-11-05 (MPAS 2 deg, January): the SimpleSEB
+    # tile adds this on top of the surfdata soil-colour albedo, so deserts
+    # reflected 17-28 W/m2 more clear-sky sunlight than the two-leaf canopy
+    # (Sahara albedo 0.50 vs 0.35); the knob lets an arm set the increment.
+    land_dry_soil_albedo_boost: float | None = None
     # Marine-Sc albedo lever: blend strength [0,1] toward diagnostic-CLUBB cf in
     # the BL when --use-clubb-cloud-fraction is on (1.0 = full replacement, which
     # drove a real-SST surface-heating runaway; ~0.3-0.5 is gentler + stable).
@@ -4766,6 +4773,8 @@ class ExperimentConfig(NamedTuple):
             # 0.5 d = melting spring snow; 400 d spans the cold-plateau
             # timescale the literature supports (Warren & Wiscombe 1980).
             ("land_snow_tau_days", 0.5, 400.0),
+            # 0 = no dry-soil brightening; 0.3 is above any soil-colour span.
+            ("land_dry_soil_albedo_boost", 0.0, 0.3),
             ("cloud_adiabatic_lwc_rate", 5.0e-7, 3.0e-6),
             # 0 = the scheme's own "no limit"; 1e3 Pa is above any tropopause,
             # 5e4 Pa would switch the boundary-layer scheme off in the free
