@@ -1037,12 +1037,25 @@ def _step_multilayer_land_impl(
             ground_sublimation_heat=_L_s_T,
         )
     elif isinstance(config.surface_scheme, SimpleSEBConfig):
-        # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].
+        # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].  The bare-soil
+        # evaporation resistance (Kelvin pore relative humidity x top-layer
+        # crust, #671) enters the SKIN solve here, as both canopy schemes apply
+        # it inside their own energy balance.  Solving the skin at the
+        # unthrottled root-zone demand and throttling only the water afterwards
+        # charged the skin a latent loss the soil never paid and relabelled the
+        # gap as sensible heat: January 1979 summer deserts gave 320 W/m2
+        # upward sensible heat with the surface 6 K colder than the air
+        # (measured 2026-11-05, MPAS lane, 1 and 2 degree).
+        _h_r_seb = jnp.exp(jnp.minimum(
+            psi_avail[:, 0] * constants.g
+            / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0))
+        _beta_surf_seb = (_h_r_seb * _S_top ** config.soil_evap_resistance_exp
+                          ).astype(beta_soil.dtype)
         surface_out = compute_simple_seb_fluxes(
             T_surface=T_surface,
             snow=snow,
             snow_age=snow_age,
-            beta_soil=beta_soil,
+            beta_soil=beta_soil * _beta_surf_seb,
             forcing=forcing,
             land_config=config,
             U_min=U_min,
@@ -1392,31 +1405,14 @@ def _step_multilayer_land_impl(
     # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):
     # throttle the (positive, evaporative) bare-soil demand by the TOP-layer
     # effective saturation S_top**exp — the surface dries into a high-resistance
-    # crust far faster than the root-zone mean.  GATED to SimpleSEB ONLY: BOTH
-    # canopy schemes (two-leaf Kelvin h_r, and CLM-ML's Philip (1957) rhg_soil
-    # soil-humidity closure) apply their OWN top-layer soil-evap throttle inside
-    # the canopy energy balance, so surface_out.lhflx already reflects it;
-    # applying S_top**exp again here would double-throttle AND wrongly throttle
-    # the canopy transpiration folded into the total lhflx.  Testing
-    # ``isinstance(SimpleSEBConfig)`` (not ``not isinstance(TwoLeafCanopyConfig)``)
-    # so the third scheme, CLMMLCanopyConfig, is correctly excluded too.  Dew
-    # (demand<0) left un-throttled.
-    if isinstance(config.surface_scheme, SimpleSEBConfig):
-        # Bare-soil evaporation efficiency = Kelvin pore RELATIVE HUMIDITY x diffusion-crust
-        # resistance, matching the two-leaf-canopy path (above) and CLM5 (Oleson 2013):
-        #   * h_r = exp(psi_top g /(R_v T_top)) — pore-space vapour-pressure lowering; ~1
-        #     except as the surface nears residual (psi -> -inf), where it shuts evap off.
-        #     Previously MISSING on the SimpleSEB path (only S_top**exp), unlike the canopy.
-        #   * _S_top (top-layer effective saturation, floored at 1e-6 in its shared
-        #     definition above so d(S_top**exp)/dS_top stays finite at the residual-water
-        #     boundary for a trainable exp < 1; AD-safe, negligible fwd).
-        _h_r = jnp.exp(jnp.minimum(
-            psi_avail[:, 0] * constants.g
-            / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0))
-        _beta_surf = (_h_r * _S_top ** config.soil_evap_resistance_exp).astype(
-            soil_evap_demand.dtype)
-        soil_evap_demand = jnp.where(
-            soil_evap_demand > 0.0, soil_evap_demand * _beta_surf, soil_evap_demand)
+    # crust far faster than the root-zone mean.  Every scheme applies it INSIDE
+    # its energy balance (two-leaf Kelvin h_r, CLM-ML's Philip (1957) rhg_soil
+    # closure, SimpleSEB via its beta at the dispatch above), so the demand
+    # derived from surface_out.lhflx already reflects it and a second throttle
+    # here would double-count.  Dew (demand<0) un-throttled.
+    # SimpleSEB applies the same factor INSIDE its skin solve (dispatch above), so
+    # surface_out.lhflx already carries it for all three schemes and no second
+    # throttle is applied here; only the supply cap below remains.
     # Water available to bare-soil evaporation uses the THROUGHFALL (infil_rain),
     # not raw precip, since interception removed the intercepted part upstream.
     max_soil_evap = jnp.maximum(

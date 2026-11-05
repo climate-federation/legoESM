@@ -236,3 +236,22 @@ def test_jit_and_grad_finite_on_a_dry_column():
 
     v, g = jax.jit(jax.value_and_grad(et_of))(5.0e-3)
     assert np.isfinite(float(v)) and np.isfinite(float(g))
+
+
+def test_simple_seb_dry_crust_charges_no_phantom_sensible_heat():
+    """SimpleSEB, hot dry day, skin 5 K colder than the air, top layer at its
+    dry floor: the crust factor must enter the skin solve, so the latent demand
+    the soil cannot supply is never relabelled as sensible heat.  Before the fix
+    the skin was solved at the unthrottled root-zone demand and the unmet part
+    was added to shflx: ~+100 W/m2 upward from a surface colder than the air
+    (the January-desert 320 W/m2 signature, 2026-11-05)."""
+    cfg = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0),
+                               richards=RichardsConfig(bottom_bc="zero_flux"),
+                               surface_scheme=SimpleSEBConfig())
+    tfl = _theta_floor(cfg.hydraulics)
+    st = init_multilayer_land_state(2, cfg, T_init=305.0, theta_init=tfl + 5.0e-3)
+    f, lat = _forcing(2), jnp.full(2, 0.3)
+    _, r, _ = step_multilayer_land(st, f, cfg, 1.0, 1800.0, lat=lat)
+    sh = float(r.shflx[0])
+    assert sh < 0.0, sh                       # surface colder than the air: downward
+    assert float(r.lhflx[0]) < 5.0, float(r.lhflx[0])   # crust shuts evaporation
