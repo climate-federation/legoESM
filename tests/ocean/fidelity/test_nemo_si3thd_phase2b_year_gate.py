@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.core.precision import PrecisionPolicy, set_policy
-from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_si3_lane_card
 
 set_policy(PrecisionPolicy.fp64())
 
@@ -28,7 +28,7 @@ def gate():
 
 
 def test_nemo_operation_order_replay_is_exact_and_normalised_order_differs(gate) -> None:
-    card = build_c1d_omip_l3_card(oracle_root=gate.REPLAY_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=gate.REPLAY_ROOT)
     result = gate._arithmetic_replay(
         gate.REPLAY_ROOT, card.config.ice_constants
     )
@@ -54,7 +54,7 @@ def test_round9_year_artifact_and_default_root_are_scalar_math_v2(gate) -> None:
 
 
 def test_arithmetic_plant_exits_red(gate) -> None:
-    card = build_c1d_omip_l3_card(oracle_root=gate.REPLAY_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=gate.REPLAY_ROOT)
     with pytest.raises(gate.phase2.GateError, match="exceeds 2 ULP"):
         gate._arithmetic_replay(
             gate.REPLAY_ROOT, card.config.ice_constants, plant=True
@@ -109,7 +109,7 @@ def test_phenomenology_floor_classification_is_literal(gate) -> None:
 
 
 def test_owner_arms_confirm_and_plants_exit_red(gate) -> None:
-    card = build_c1d_omip_l3_card(oracle_root=gate.REPLAY_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=gate.REPLAY_ROOT)
     result = gate._owner_arms(gate.REPLAY_ROOT, card)
     assert result["step74_negative_evaporation_deposition"]["verdict"] == "CONFIRMED"
     assert result["surface_melt"]["verdict"] == "CONFIRMED"
@@ -138,7 +138,7 @@ def test_round4_zdf_operand_stream_registers_tiny_snow_temperature(gate) -> None
             if step in (4239, 5285):
                 wanted[step] = exact
     assert set(wanted) == {4239, 5285}
-    freezing = build_c1d_omip_l3_card().config.ice_constants.T0
+    freezing = build_c1d_omip_l3_si3_lane_card().config.ice_constants.T0
     for exact in wanted.values():
         assert int(exact["_version"]) == 2
         np.testing.assert_array_equal(exact["t_s"], np.full((1, 3), freezing))
@@ -221,7 +221,7 @@ def test_round6_snow_remap_jit_and_gradients_are_finite(gate) -> None:
 
 
 def test_round6_combined_dh_owner_and_plant(gate) -> None:
-    card = build_c1d_omip_l3_card(oracle_root=gate.REPLAY_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=gate.REPLAY_ROOT)
     result = gate._dh_owner_evidence(gate.REPLAY_ROOT, card)
     assert result["verdict"] == "CONFIRMED two-operation interaction"
     assert result["replays"]["5734"]["sublimation_max_ulp"] == 0

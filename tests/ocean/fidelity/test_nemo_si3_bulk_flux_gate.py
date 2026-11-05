@@ -64,10 +64,10 @@ def test_bitwise_evidence_runtime_is_stamped_and_fails_closed() -> None:
 
 
 def test_selector_is_single_orca1_identity() -> None:
-    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_si3_lane_card
     from legoesm.ice.config import validate_si3_bulk_config
 
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_si3_lane_card()
     validate_si3_bulk_config(card.config)
     with pytest.raises(ValueError, match="Cd_ice=Ch_ice=Ce_ice"):
         validate_si3_bulk_config(card.config._replace(Cd_ice=card.config.Cd_ice * 2.0))
@@ -94,7 +94,7 @@ def test_positive_subnormal_snow_uses_nemo_nonzero_branch(monkeypatch) -> None:
 
 def test_selected_dispatch_is_jittable_and_differentiable() -> None:
     from legoesm.core.coupling_fields import AtmToSurface
-    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_si3_lane_card
     from legoesm.ice.sea_ice import _bulk_flux_dispatch
 
     one = jnp.ones((1,), dtype=jnp.float64)
@@ -106,7 +106,7 @@ def test_selected_dispatch_is_jittable_and_differentiable() -> None:
         rho_lowest=one * 1.3, cos_zenith=one, co2_ppmv=one,
         has_radiation=one, has_precipitation=one,
     )
-    config = build_c1d_omip_l3_card().config
+    config = build_c1d_omip_l3_si3_lane_card().config
 
     def run(T):
         return _bulk_flux_dispatch(T, forcing, config, 0.0)

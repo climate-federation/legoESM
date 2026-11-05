@@ -386,11 +386,11 @@ def _si3_zdf_bl99_step(
     h_snow = jnp.asarray(h_snow, dtype=dtype)
     S_layers = jnp.asarray(S_layers, dtype=dtype)
     e_snow = jnp.asarray(e_snow, dtype=dtype)
-    T_i_old = bl.ice_temperature_from_enthalpy(
+    T_i_old = bl._si3_502_ice_temperature_from_enthalpy(
         e_ice, S_layers, constants,
         _nemo_order=_nemo_eos_order, _nemo_source_round=_nemo_source_round,
     )
-    T_s_old = bl.snow_temperature_from_enthalpy(
+    T_s_old = bl._si3_502_snow_temperature_from_enthalpy(
         e_snow, constants,
         _nemo_order=_nemo_eos_order,
         _nemo_glo2eqv_snow_temp=_nemo_glo2eqv_snow_temp,
@@ -449,11 +449,11 @@ def _si3_zdf_bl99_step(
         _nemo_source_round=_nemo_source_round,
     )
     Tsu, Ti, Ts = core.t_su, core.t_i, core.t_s
-    e_i = bl.ice_enthalpy_from_temperature(
+    e_i = bl._si3_502_ice_enthalpy_from_temperature(
         Ti, S_layers, constants,
         _nemo_order=_nemo_eos_order, _nemo_source_round=_nemo_source_round,
     )
-    e_s = bl.snow_enthalpy_from_temperature(
+    e_s = bl._si3_502_snow_enthalpy_from_temperature(
         Ts, constants, _nemo_source_round=_nemo_source_round
     )
     if _nemo_zdf_layer_reciprocals:
@@ -463,11 +463,11 @@ def _si3_zdf_bl99_step(
         dz_i = jnp.maximum(h_ice, bl._H_MIN) / nlay_i
         dz_s = jnp.maximum(h_snow, bl._H_MIN) / nlay_s
         snow_present = h_snow > 0.0
-        k_top_i = bl.p07_conductivity(
+        k_top_i = bl._si3_502_p07_conductivity(
             Ti[..., 0], S_layers[..., 0], constants,
             _nemo_source_round=_nemo_source_round,
         ) / dz_i
-        k_base_i = bl.p07_conductivity(
+        k_base_i = bl._si3_502_p07_conductivity(
             T_bottom, S_layers[..., -1], constants,
             _nemo_source_round=_nemo_source_round,
         ) / dz_i
@@ -989,7 +989,7 @@ def _si3_column_step_arrays_ablation(
     _nemo_source_round: bool = True,
     si3=None,
 ):
-    """D5 harness step wrapper: delegates to production `si3_column_step_arrays` unless an ablation arm is requested."""
+    """D5 wrapper: delegate to the NEMO-literal lane step unless ablating it."""
     import jax.numpy as jnp
     from legoesm import constants as canonical_constants
     from legoesm.ice import bitz_lipscomb as bl
@@ -1016,7 +1016,9 @@ def _si3_column_step_arrays_ablation(
         _nemo_glo2eqv_snow_temp,
         _nemo_source_round,
     )):
-        return bl.si3_column_step_arrays(state, forcing, dt, constants, si3=si3)
+        return bl.si3_lane_column_step_arrays(
+            state, forcing, dt, constants, si3=si3
+        )
 
     zdf = _si3_zdf_bl99_step(
         state.e_ice, state.e_snow, state.S_layers, state.h_ice, state.h_snow,
@@ -1077,7 +1079,7 @@ def _si3_column_step_arrays_ablation(
             _nemo_salprof_factoring=_nemo_salprof_factoring,
         )
     )
-    return bl.si3_column_step_arrays(
+    return bl.si3_lane_column_step_arrays(
         state, forcing, dt, constants, si3=si3,
         _zdf_dh_override=(post_zdf, post_dh, S_bulk, S_layers),
     )
@@ -1086,7 +1088,7 @@ def _si3_column_step_arrays_ablation(
 def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.ice.bitz_lipscomb import si3_column_step_arrays
+    from legoesm.ice.bitz_lipscomb import si3_lane_column_step_arrays
     from legoesm.ice.c1d_omip_l3 import (
         FORCING_SHA256,
         ORACLE_V1_EXCHANGE_STREAM_SHA256,
@@ -1094,7 +1096,7 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
         ORACLE_V1_ZDF_INPUT_STREAM_SHA256,
         ORACLE_V1_ZDF_OPERAND_STREAM_SHA256,
         THERMO_STREAM_SHA256,
-        build_c1d_omip_l3_card,
+        build_c1d_omip_l3_si3_lane_card,
     )
     from legoesm.ice.config import SI3ThermoConfig, validate_si3_thermo_config
 
@@ -1104,7 +1106,7 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
     # This is the retained Phase-2 boundary gate and its original compact ZDF
     # operand schema.  Pin it explicitly to V1 while the canonical card points
     # new certification at scalar-math V2.
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V1_ROOT)
     if plant_selector:
         bad = card.config._replace(si3=SI3ThermoConfig(n_ice_layers=2))
         validate_si3_thermo_config(bad)  # must raise
@@ -1182,7 +1184,7 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
             lambda x: jnp.asarray(x, dtype=jnp.float64), step_entry
         )
         step_forcing = _forcing(step_input)
-        trace = si3_column_step_arrays(
+        trace = si3_lane_column_step_arrays(
             step_entry_jax,
             step_forcing,
             card.dt_seconds,

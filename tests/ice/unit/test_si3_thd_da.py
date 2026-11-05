@@ -500,10 +500,10 @@ def _production_case():
         option2_salinity_profile,
         snow_enthalpy_from_temperature,
     )
-    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_si3_lane_card
     from legoesm.ice.state import SI3ColumnState
 
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_si3_lane_card()
     n = len(PROD_CELLS)
     a, hs, sst = (np.array(col, dtype=np.float64) for col in zip(*PROD_CELLS, strict=True))
     hi = np.random.default_rng(18).uniform(0.3, 3.0, n)

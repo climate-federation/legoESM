@@ -214,9 +214,9 @@ def test_gradients_finite_and_match_central_difference_away_from_switches(
 
 
 def test_column_step_vanished_ice_has_finite_concentration_and_thickness_gradients():
-    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_si3_lane_card
 
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_si3_lane_card()
     z1 = jnp.zeros(1, dtype=jnp.float64)
     z3 = jnp.zeros((1, 3), dtype=jnp.float64)
     state = bl.SI3ColumnArrays(z1, z1, z1, z1, z3, z3, z1, z3, z1)

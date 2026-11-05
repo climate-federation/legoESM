@@ -132,7 +132,7 @@ def test_si3_column_step_reverse_mode_finite_on_open_water_and_bare_ice():
         SI3SurfaceForcing,
         ice_enthalpy_from_temperature,
         option2_salinity_profile,
-        si3_column_step_arrays,
+        si3_lane_column_step_arrays,
         snow_enthalpy_from_temperature,
     )
     from legoesm.ice.config import SI3ThermoConfig
@@ -163,13 +163,15 @@ def test_si3_column_step_reverse_mode_finite_on_open_water_and_bare_ice():
         qlead=z3)   # qlead >= 0: no lead freezing, so open water stays ice-free
 
     def loss(qns, h):
-        out = si3_column_step_arrays(state._replace(h_ice=h),
+        out = si3_lane_column_step_arrays(state._replace(h_ice=h),
                                      forcing._replace(qns_ice=qns),
                                      3600.0, c, si3=si3).exit
         return (jnp.sum(out.h_ice) + jnp.sum(out.concentration)
                 + 1e-9 * jnp.sum(out.e_ice) + 1e-9 * jnp.sum(out.e_snow))
 
-    out = si3_column_step_arrays(state, forcing, 3600.0, c, si3=si3).exit
+    out = si3_lane_column_step_arrays(
+        state, forcing, 3600.0, c, si3=si3
+    ).exit
     assert float(out.concentration[0]) == 0.0 and float(out.h_snow[1]) == 0.0
     g_q, g_h = jax.grad(loss, argnums=(0, 1))(forcing.qns_ice, state.h_ice)
     assert bool(jnp.all(jnp.isfinite(g_q))), g_q
@@ -177,7 +179,7 @@ def test_si3_column_step_reverse_mode_finite_on_open_water_and_bare_ice():
     assert float(jnp.abs(g_h[1:]).max()) > 0.0     # ice columns stay live
 
     def state_loss(value):
-        result = si3_column_step_arrays(
+        result = si3_lane_column_step_arrays(
             value, forcing, 3600.0, c, si3=si3
         ).exit
         return sum(jnp.sum(leaf) for leaf in jax.tree.leaves(result))
@@ -196,7 +198,7 @@ def test_si3_column_step_shared_forcing_gradients_finite_with_open_water_batch()
         SI3SurfaceForcing,
         ice_enthalpy_from_temperature,
         option2_salinity_profile,
-        si3_column_step_arrays,
+        si3_lane_column_step_arrays,
         snow_enthalpy_from_temperature,
     )
     from legoesm.ice.config import SI3ThermoConfig
@@ -238,7 +240,7 @@ def test_si3_column_step_shared_forcing_gradients_finite_with_open_water_batch()
             fhld=zero,
             qlead=zero,
         )
-        out = si3_column_step_arrays(
+        out = si3_lane_column_step_arrays(
             state, forcing, 3600.0, c, si3=SI3ThermoConfig()
         ).exit
         return jnp.sum(out.h_ice * out.concentration)
@@ -252,7 +254,7 @@ def _degenerate_four_column_step(*, compiled=False):
     from legoesm.ice.bitz_lipscomb import (
         SI3ColumnArrays,
         SI3SurfaceForcing,
-        si3_column_step_arrays,
+        si3_lane_column_step_arrays,
     )
     from legoesm.ice.config import SI3ThermoConfig
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
@@ -272,7 +274,7 @@ def _degenerate_four_column_step(*, compiled=False):
         evaporation=zero, snow_precipitation=zero, qprec_ice=zero,
         qcn_ice_bottom=zero, qsb_ice_bottom=zero, fhld=zero, qlead=qlead,
     )
-    step = lambda value: si3_column_step_arrays(  # noqa: E731
+    step = lambda value: si3_lane_column_step_arrays(  # noqa: E731
         value, forcing, 3600.0, c, si3=SI3ThermoConfig()
     ).exit
     if compiled:
@@ -349,7 +351,7 @@ def test_ice_forming_open_water_gradients_match_main_and_lane_difference():
     from legoesm.ice.bitz_lipscomb import (
         SI3ColumnArrays,
         SI3SurfaceForcing,
-        si3_column_step_arrays,
+        si3_lane_column_step_arrays,
     )
     from legoesm.ice.config import SI3ThermoConfig
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
@@ -371,7 +373,7 @@ def test_ice_forming_open_water_gradients_match_main_and_lane_difference():
             qcn_ice_bottom=zero, qsb_ice_bottom=zero, fhld=zero,
             qlead=jnp.asarray([qlead]),
         )
-        return si3_column_step_arrays(
+        return si3_lane_column_step_arrays(
             state, forcing, 3600.0, c, si3=SI3ThermoConfig()
         ).exit
 
@@ -426,7 +428,7 @@ def test_ice_forming_open_water_gradients_match_main_and_lane_difference():
     )
 
     age_identity = jax.grad(
-        lambda age: si3_column_step_arrays(
+        lambda age: si3_lane_column_step_arrays(
             SI3ColumnArrays(
                 zero, zero, zero, jnp.asarray([c.T0]), zero_layers,
                 zero_layers, zero, zero_layers, jnp.asarray([age]),
@@ -494,7 +496,7 @@ def test_si3_column_step_remap_reverse_mode_finite_at_tiny_snow():
     from legoesm.ice.bitz_lipscomb import (
         SI3ColumnArrays,
         SI3SurfaceForcing,
-        si3_column_step_arrays,
+        si3_lane_column_step_arrays,
     )
     from legoesm.ice.config import SI3ThermoConfig
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
@@ -514,7 +516,7 @@ def test_si3_column_step_remap_reverse_mode_finite_at_tiny_snow():
             jnp.asarray([c.T0]), zero_layers,
             jnp.asarray([[0.0, 0.0, -1.0e8]]), zero, zero_layers, zero,
         )
-        return si3_column_step_arrays(
+        return si3_lane_column_step_arrays(
             state, forcing, 3600.0, c, si3=SI3ThermoConfig(),
         ).exit
 
@@ -534,7 +536,7 @@ def test_si3_column_step_mixed_dtypes_match_lane_and_differentiate():
     from legoesm.ice.bitz_lipscomb import (
         SI3ColumnArrays,
         SI3SurfaceForcing,
-        si3_column_step_arrays,
+        si3_lane_column_step_arrays,
     )
     from legoesm.ice.config import SI3ThermoConfig
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
@@ -564,7 +566,7 @@ def test_si3_column_step_mixed_dtypes_match_lane_and_differentiate():
         )
 
     def step(value, surface_forcing):
-        return si3_column_step_arrays(
+        return si3_lane_column_step_arrays(
             value, surface_forcing, 3600.0, c, si3=SI3ThermoConfig(),
         )
 
