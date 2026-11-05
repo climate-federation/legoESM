@@ -4,7 +4,7 @@ Equation (Boutle et al. 2014, QJRMS 140, 583-594, as restated in Crnivec and
 Mayer 2021, GMD 14, 3663, eq. 8): FSD = (0.45 - 0.25 C) Phi for C < 1,
 0.11 Phi for C = 1, Phi = (x C)^(1/3) ((0.06 x C)^1.5 + 1)^(-0.17), x in km.
 """
-import sys
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -41,7 +41,9 @@ def test_fsd_reference_values_and_the_overcast_jump():
     # values recomputed independently (review, 5 November 2026)
     np.testing.assert_allclose(float(boutle2014_fsd(0.02, _area(100.0))), 0.556796, rtol=1e-5)
     np.testing.assert_allclose(float(boutle2014_fsd(0.02, _area(25.0))), 0.352886, rtol=1e-5)
-    np.testing.assert_allclose(float(boutle2014_relvar(1.0, _area(25.0), 1.0)), 13.7795, rtol=1e-4)
+    np.testing.assert_allclose(1.0 / float(boutle2014_fsd(1.0, _area(25.0))) ** 2, 13.7795, rtol=1e-4)
+    # above relvarmax the relvar is MG2's clip value already (the floor of the fix)
+    assert float(boutle2014_relvar(1.0, _area(25.0), 1.0)) == 10.0
     # the published jump at C = 1 is kept: just below 1 the (0.45 - 0.25 C) branch
     below, at = (float(boutle2014_fsd(c, _area(25.0))) for c in (1.0 - 1e-12, 1.0))
     assert below / at == pytest.approx(0.20 / 0.11, rel=1e-9)
@@ -90,8 +92,58 @@ def _physics(**morrison_kw):
 def test_build_guards():
     with pytest.raises(ValueError, match="Unknown relvar_scheme"):
         _physics(warm_rain_incloud=True, relvar_scheme="boutle")
-    with pytest.raises(ValueError, match="warm_rain_incloud=True"):
+    with pytest.raises(ValueError, match="relvar_scheme='boutle2014' needs the CLUBB"):
         _physics(warm_rain_incloud=False, relvar_scheme="boutle2014")
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="boutle_fsd_factor must be positive"):
+            _physics(warm_rain_incloud=True, relvar_scheme="boutle2014", boutle_fsd_factor=bad)
+    # every other lane refuses it instead of ignoring it
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.atmosphere.physics.microphysics.integration import require_relvar_scheme_lane
+    mc = MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(
+        warm_rain_scheme="kk2000", relvar_scheme="boutle2014"))
+    for lane in ("hydrostatic", "nonhydrostatic", "spectral_pe", "plane", "pipeline"):
+        with pytest.raises(ValueError, match="MPAS lane only"):
+            require_relvar_scheme_lane(mc, lane)
+    require_relvar_scheme_lane(mc, "mpas")
+    require_relvar_scheme_lane(MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig()), "plane")
+
+
+def test_cell_size_guard():
+    from legoesm.atmosphere.physics.microphysics._warm_rain import check_boutle2014_cell_size
+    check_boutle2014_cell_size(np.asarray([_area(0.5), _area(110.0), _area(500.0)]))
+    with pytest.raises(ValueError, match="is areaCell in m"):
+        check_boutle2014_cell_size(np.asarray([3.0e-10]))      # unit-sphere mesh cell
+
+
+def test_gradients_stay_finite_at_tiny_cloud_fraction():
+    """Reverse pass through MG2's clip: no 0 * inf for a vanishing positive C
+    (review finding, 5 November 2026: NaN at C = 1e-300 before the fix)."""
+    from legoesm.atmosphere.physics.microphysics._warm_rain import mg2_var_coef
+    a = jnp.full(4, _area(110.0))
+
+    def loss(cc, f):
+        return jnp.sum(mg2_var_coef(boutle2014_relvar(cc, a, f), 2.47, jnp.float64))
+    for c in (jnp.asarray([1e-300, 5e-320, 1e-185, 1e-20]), jnp.asarray([1e-30, 1e-23, 1e-12, 0.5])):
+        gc, gf = jax.grad(loss, argnums=(0, 1))(c, 1.0)
+        assert np.all(np.isfinite(np.asarray(gc))) and np.isfinite(float(gf))
+    c32 = jnp.asarray([1e-30, 1e-23, 0.3], jnp.float32)
+    g32 = jax.grad(lambda cc: jnp.sum(mg2_var_coef(boutle2014_relvar(cc, jnp.full(3, _area(110.0), jnp.float32),
+                                                                     jnp.float32(1.0)), 2.47, jnp.float32)))(c32)
+    assert np.all(np.isfinite(np.asarray(g32)))
+
+
+def test_cloud_fraction_outside_zero_one_is_clipped():
+    a = jnp.full(4, _area(110.0))
+    np.testing.assert_array_equal(boutle2014_fsd(jnp.asarray([-0.2, 0.0, 1.0, 1.3]), a),
+                                  boutle2014_fsd(jnp.asarray([0.0, 0.0, 1.0, 1.0]), a))
+
+
+def test_c_gradient_matches_finite_differences():
+    a = jnp.full(3, _area(60.0))
+    check_grads(lambda cc: boutle2014_relvar(cc, a, 1.0), (jnp.asarray([0.03, 0.3, 0.9]),),
+                order=1, modes=("rev",), rtol=1e-4)    # measured 2.6e-5 at the default step
 
 
 @pytest.mark.parametrize("scheme", ["cam6_clubb", "boutle2014"])
@@ -99,7 +151,7 @@ def test_mg2_receives_the_selected_relvar(monkeypatch, scheme):
     """Spy on both ends: under boutle2014 Morrison gets Boutle's relvar from the
     cloud fraction CLUBB wrote in the same sub-step and the cell area; under the
     default it gets CLUBB's own relvar, unchanged."""
-    sys.path.insert(0, "tests/unit")
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "unit"))
     from legoesm.atmosphere.physics.microphysics import integration as mi
     from legoesm.atmosphere.physics.physics_state import init_physics_state
     from legoesm.atmosphere.physics.turbulence import integration as ti

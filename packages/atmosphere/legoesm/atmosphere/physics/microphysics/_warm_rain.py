@@ -934,6 +934,10 @@ _BOUTLE14_PHI_D = 0.06
 _BOUTLE14_PHI_E = 1.5
 _BOUTLE14_PHI_F = -0.17
 _M_PER_KM = 1.0e3
+_BOUTLE14_XC_MIN_KM = 1.0e-6   # x C below this is cloud free (keeps dFSD/dC finite)
+# Plausibility check of the cell size x [km] read from areaCell (a unit-sphere
+# mesh gives about 1e-5 km); a units guard, not physics.
+BOUTLE14_X_KM_RANGE = (0.01, 1000.0)
 
 # --- CAM6 MG2 in-cloud warm-rain inputs (micro_mg2_0.F90, CESM2.1) ---
 # lcldm = max(liqcldf, mincld) (:878), micro_mg_utils.F90:123 mincld = 1e-4;
@@ -1062,29 +1066,55 @@ def mg2_var_coef(relvar, a, dtype):
 def boutle2014_fsd(cloud_fraction, cell_area_m2):
     """Fractional standard deviation of liquid cloud water, Boutle et al.
     (2014): ``(0.45 - 0.25 C) Phi`` for ``C < 1`` and ``0.11 Phi`` at
-    ``C = 1`` (the published jump, kept exact), ``Phi = (x C)^(1/3)
-    ((0.06 x C)^1.5 + 1)^(-0.17)``, ``x = sqrt(cell_area_m2)`` in km.
-    0 where ``C <= 0``.  The C-derivative is not used (the fitted parameter
-    multiplies FSD); the safe C keeps it finite at ``C = 0``.
+    ``C = 1``, ``Phi = (x C)^(1/3) ((0.06 x C)^1.5 + 1)^(-0.17)``,
+    ``x = sqrt(cell_area_m2)`` in km; 0 where ``x C <= _BOUTLE14_XC_MIN_KM``.
+
+    KNOWN DIFFERENCE / RULE 5 waiver (project owner via the orchestrator,
+    5 November 2026): the jump at ``C = 1`` is kept exact, as published, not
+    smoothed.  It switches on traced state, so a cloud fraction that lands one
+    ulp below 1 in an overcast cell (CLUBB's two-plume sum) takes the
+    ``C < 1`` coefficient, 0.20 instead of 0.11 (relvar 3.3 times smaller,
+    before MG2's clip).  The C-derivative is the derivative of the selected
+    branch; the jump itself carries none.  Below ``_BOUTLE14_XC_MIN_KM`` the
+    cell is treated as cloud free, which keeps the C-derivative (order
+    C^(-2/3)) finite; there FSD is below 0.0045, so the relvar is clipped to
+    relvarmax by MG2 anyway for any factor below 70 (forward unchanged).
     """
     c = jnp.clip(cloud_fraction, 0.0, 1.0)
     x_km = jnp.sqrt(cell_area_m2) / _M_PER_KM
-    cloudy = c > 0.0
-    xc = x_km * jnp.where(cloudy, c, 1.0)
+    xc_raw = x_km * c
+    cloudy = xc_raw > _BOUTLE14_XC_MIN_KM
+    xc = jnp.where(cloudy, xc_raw, 1.0)
     phi = xc ** (1.0 / 3.0) * ((_BOUTLE14_PHI_D * xc) ** _BOUTLE14_PHI_E + 1.0) ** _BOUTLE14_PHI_F
     coef = jnp.where(c >= 1.0, _BOUTLE14_FSD_OVERCAST, _BOUTLE14_FSD_A - _BOUTLE14_FSD_B * c)
     return jnp.where(cloudy, coef * phi, 0.0)
 
 
+def check_boutle2014_cell_size(cell_area_m2):
+    """Raise if ``sqrt(cell_area_m2)`` [km] leaves ``BOUTLE14_X_KM_RANGE``
+    (concrete NumPy areas only; a unit-sphere mesh gives about 1e-5 km)."""
+    x = cell_area_m2 ** 0.5 / _M_PER_KM
+    lo, hi = BOUTLE14_X_KM_RANGE
+    if not ((x >= lo).all() and (x <= hi).all()):
+        raise ValueError(
+            f"relvar_scheme='boutle2014': cell sizes {x.min():.3g} to {x.max():.3g} km "
+            f"lie outside {BOUTLE14_X_KM_RANGE} km; is areaCell in m^2?")
+
+
 def boutle2014_relvar(cloud_fraction, cell_area_m2, fsd_factor):
     """MG2 relvar ``1/(fsd_factor * FSD)^2`` from :func:`boutle2014_fsd`
-    (gamma distribution of the same variance); ``relvarmax`` where FSD is 0
-    (no cloud), as CAM6's relvar defaults there (clubb_intr.F90:2421).  Not
-    clipped here: :func:`mg2_var_coef` applies MG2's [0.001, relvarmax].
+    (gamma distribution of the same variance), with ``fsd_factor * FSD``
+    floored at ``relvarmax^(-1/2)``: the result is at most ``relvarmax``,
+    which MG2's clip (:func:`mg2_var_coef`, [0.001, relvarmax]) gives anyway,
+    so the forward value after the clip is unchanged, while the reverse pass
+    never multiplies the clip's zero cotangent by an overflowing derivative.
+    Cloud-free cells (FSD 0) get ``relvarmax``, CAM6's relvar default there
+    (clubb_intr.F90:2421).  ``fsd_factor`` must be positive (refused at build).
     """
     f = fsd_factor * boutle2014_fsd(cloud_fraction, cell_area_m2)
-    pos = f > 0.0
-    return jnp.where(pos, 1.0 / jnp.where(pos, f, 1.0) ** 2, _KK2000_CAM6_RELVAR_MAX)
+    floor = _KK2000_CAM6_RELVAR_MAX ** -0.5
+    above = f > floor
+    return jnp.where(above, 1.0 / jnp.maximum(f, floor) ** 2, _KK2000_CAM6_RELVAR_MAX)
 
 
 def rule5_sharpness(width):

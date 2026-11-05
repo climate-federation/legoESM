@@ -13,8 +13,11 @@ from __future__ import annotations
 
 from typing import Callable
 
+import math
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.precision import with_precision_override
@@ -45,7 +48,8 @@ from legoesm import constants
 
 from legoesm.atmosphere.physics.microphysics.config import (
     RELVAR_SCHEMES, MicrophysicsConfig, resolve_warm_rain_scheme)
-from legoesm.atmosphere.physics.microphysics._warm_rain import boutle2014_relvar
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    boutle2014_relvar, check_boutle2014_cell_size)
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
@@ -306,6 +310,7 @@ def make_microphysics_physics(
             "hydrostatic/mpas lane forwards CLUBB's per-cell relvar to "
             "microphysics; this lane would silently use the constant.")
     require_relvar_for_kk2000_cam6(microphysics_config, relvar_from_clubb)
+    require_relvar_scheme_lane(microphysics_config, model_type)
     if model_type in ("hydrostatic", "mpas"):
         fn = _make_hydrostatic_microphysics(microphysics_config, dt,
                                             cloud_config=cloud_config,
@@ -347,6 +352,26 @@ def require_relvar_for_kk2000_cam6(microphysics_config, relvar_wired: bool):
             "warm_rain_scheme='kk2000' (or another law) here; an unset "
             "warm_rain_scheme resolves to kk2000_cam6 under morrison_flavor="
             "'mg'.")
+
+
+def require_relvar_scheme_lane(microphysics_config, model_type: str):
+    """Refuse a Morrison ``relvar_scheme`` other than the default on any lane
+    but MPAS (the only lane that hands CLUBB's cloud fraction and relvar to
+    MG2), and a ``boutle_fsd_factor`` that is not a positive finite number;
+    otherwise the option would be ignored or replaced silently."""
+    m = getattr(microphysics_config, "morrison", None)
+    if microphysics_config.scheme != "morrison" or m is None:
+        return
+    scheme = getattr(m, "relvar_scheme", "cam6_clubb")
+    if scheme not in RELVAR_SCHEMES:
+        raise ValueError(f"Unknown relvar_scheme {scheme!r}; choose one of {RELVAR_SCHEMES}.")
+    if scheme != "cam6_clubb" and model_type != "mpas":
+        raise ValueError(
+            f"relvar_scheme={scheme!r} is wired on the MPAS lane only; got "
+            f"model_type={model_type!r}.")
+    f = m.boutle_fsd_factor
+    if scheme == "boutle2014" and isinstance(f, (int, float)) and not (math.isfinite(f) and f > 0.0):
+        raise ValueError(f"boutle_fsd_factor must be positive and finite, got {f!r}.")
 
 
 # ===========================================================================
@@ -762,9 +787,15 @@ def _make_hydrostatic_microphysics(
                 if _boutle:
                     # Boutle et al. (2014) FSD in CLUBB's PDF cloud fraction and
                     # the cell size, in place of CLUBB's rcm**2/qclvar.
+                    if not hasattr(grid, "areaCell"):
+                        raise ValueError("relvar_scheme='boutle2014' needs the mesh cell "
+                                         "areas (grid.areaCell).")
+                    _area = grid.areaCell
+                    if not isinstance(_area, jax.core.Tracer):
+                        check_boutle2014_cell_size(np.asarray(_area))
                     _kw["relvar"] = boutle2014_relvar(
                         jnp.clip(phys_state.cloud_fraction.reshape(ncol, nlev), 0.0, 1.0),
-                        jnp.asarray(grid.areaCell).reshape(ncol, 1),
+                        jnp.asarray(_area).reshape(ncol, 1),
                         scheme_config.boutle_fsd_factor)
             if _prog_nc:
                 # CAM6 microp_aero_run immediately before micro_mg (user

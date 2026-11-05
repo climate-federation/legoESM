@@ -4962,9 +4962,13 @@ def _resolve_microphysics(config):
         # runs make_physics instead, whose factory applies the same guard.
         from legoesm.atmosphere.physics.microphysics.integration import (
             require_relvar_for_kk2000_cam6,
+            require_relvar_scheme_lane,
         )
         require_relvar_for_kk2000_cam6(
             MicrophysicsConfig(scheme="morrison", morrison=micro_config), False)
+        # no CLUBB cloud fraction either: a non-default relvar_scheme is refused
+        require_relvar_scheme_lane(
+            MicrophysicsConfig(scheme="morrison", morrison=micro_config), "pipeline")
 
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (
