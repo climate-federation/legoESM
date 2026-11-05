@@ -923,6 +923,18 @@ KK2000_CAM6_QC_MAX = 5.0e-3     # in-cloud cap [kg/kg] (shared with morrison.py)
 _KK2000_CAM6_RELVAR_MIN = 1.0e-3   # relvar clip (clubb_intr.F90:2425)
 _KK2000_CAM6_RELVAR_MAX = 10.0     # relvarmax, non-CLUBB deep scheme (:2418)
 
+# --- Liquid cloud water FSD (Boutle et al. 2014, QJRMS 140, 583-594) ---
+# FSD = (a - b C) Phi(x, C) for C < 1, c Phi(x, C) for C = 1,
+# Phi(x, C) = (x C)^(1/3) ((d x C)^e + 1)^f, x the grid box size [km], C the
+# cloud fraction; as restated in Crnivec and Mayer (2021, GMD 14, 3663, eq. 8).
+_BOUTLE14_FSD_A = 0.45
+_BOUTLE14_FSD_B = 0.25
+_BOUTLE14_FSD_OVERCAST = 0.11
+_BOUTLE14_PHI_D = 0.06
+_BOUTLE14_PHI_E = 1.5
+_BOUTLE14_PHI_F = -0.17
+_M_PER_KM = 1.0e3
+
 # --- CAM6 MG2 in-cloud warm-rain inputs (micro_mg2_0.F90, CESM2.1) ---
 # lcldm = max(liqcldf, mincld) (:878), micro_mg_utils.F90:123 mincld = 1e-4;
 # qcic = min(qc/lcldm, 5e-3), ncic = max(nc/lcldm, 0), both 0 where qc < qsmall
@@ -1045,6 +1057,34 @@ def mg2_var_coef(relvar, a, dtype):
                  _KK2000_CAM6_RELVAR_MIN, _KK2000_CAM6_RELVAR_MAX)
     return jnp.exp(jax.scipy.special.gammaln(r + a)
                    - jax.scipy.special.gammaln(r)) / r ** a
+
+
+def boutle2014_fsd(cloud_fraction, cell_area_m2):
+    """Fractional standard deviation of liquid cloud water, Boutle et al.
+    (2014): ``(0.45 - 0.25 C) Phi`` for ``C < 1`` and ``0.11 Phi`` at
+    ``C = 1`` (the published jump, kept exact), ``Phi = (x C)^(1/3)
+    ((0.06 x C)^1.5 + 1)^(-0.17)``, ``x = sqrt(cell_area_m2)`` in km.
+    0 where ``C <= 0``.  The C-derivative is not used (the fitted parameter
+    multiplies FSD); the safe C keeps it finite at ``C = 0``.
+    """
+    c = jnp.clip(cloud_fraction, 0.0, 1.0)
+    x_km = jnp.sqrt(cell_area_m2) / _M_PER_KM
+    cloudy = c > 0.0
+    xc = x_km * jnp.where(cloudy, c, 1.0)
+    phi = xc ** (1.0 / 3.0) * ((_BOUTLE14_PHI_D * xc) ** _BOUTLE14_PHI_E + 1.0) ** _BOUTLE14_PHI_F
+    coef = jnp.where(c >= 1.0, _BOUTLE14_FSD_OVERCAST, _BOUTLE14_FSD_A - _BOUTLE14_FSD_B * c)
+    return jnp.where(cloudy, coef * phi, 0.0)
+
+
+def boutle2014_relvar(cloud_fraction, cell_area_m2, fsd_factor):
+    """MG2 relvar ``1/(fsd_factor * FSD)^2`` from :func:`boutle2014_fsd`
+    (gamma distribution of the same variance); ``relvarmax`` where FSD is 0
+    (no cloud), as CAM6's relvar defaults there (clubb_intr.F90:2421).  Not
+    clipped here: :func:`mg2_var_coef` applies MG2's [0.001, relvarmax].
+    """
+    f = fsd_factor * boutle2014_fsd(cloud_fraction, cell_area_m2)
+    pos = f > 0.0
+    return jnp.where(pos, 1.0 / jnp.where(pos, f, 1.0) ** 2, _KK2000_CAM6_RELVAR_MAX)
 
 
 def rule5_sharpness(width):

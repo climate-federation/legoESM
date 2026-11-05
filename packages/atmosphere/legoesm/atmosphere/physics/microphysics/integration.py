@@ -44,7 +44,8 @@ from legoesm.grids.vertical import (
 from legoesm import constants
 
 from legoesm.atmosphere.physics.microphysics.config import (
-    MicrophysicsConfig, resolve_warm_rain_scheme)
+    RELVAR_SCHEMES, MicrophysicsConfig, resolve_warm_rain_scheme)
+from legoesm.atmosphere.physics.microphysics._warm_rain import boutle2014_relvar
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
@@ -537,6 +538,17 @@ def _make_hydrostatic_microphysics(
             f"needs mesh.latCell); got model_type={model_type!r}.")
 
     _cloudsc = scheme_name == "ifs_cloudsc"
+    _relvar_scheme = getattr(scheme_config, "relvar_scheme", "cam6_clubb")
+    if _relvar_scheme not in RELVAR_SCHEMES:
+        raise ValueError(f"Unknown relvar_scheme {_relvar_scheme!r}; choose one of {RELVAR_SCHEMES}.")
+    _boutle = _relvar_scheme == "boutle2014"
+    if _boutle and not (relvar_from_clubb and _incloud):
+        # Boutle's FSD needs CLUBB's PDF cloud fraction (the warm_rain_incloud
+        # carry) and replaces the relvar CLUBB hands to the kk2000_cam6 law.
+        raise ValueError(
+            "relvar_scheme='boutle2014' needs the CLUBB liquid-partition lane with "
+            "warm_rain_scheme='kk2000_cam6' (relvar_from_clubb) and warm_rain_incloud=True.")
+
     _prog_nc = bool(getattr(scheme_config, "prognostic_droplet_number", False))
     if _prog_nc and not _incloud:
         # the scheme refuses this too (morrison.py start-up guard); fail at build
@@ -747,6 +759,13 @@ def _make_hydrostatic_microphysics(
                 # CAM6 MG2 reads pbuf RELVAR, set by clubb_tend_cam in the same
                 # macmic iteration (clubb_intr.F90:2416-2425).
                 _kw["relvar"] = phys_state.relvar.reshape(ncol, nlev)
+                if _boutle:
+                    # Boutle et al. (2014) FSD in CLUBB's PDF cloud fraction and
+                    # the cell size, in place of CLUBB's rcm**2/qclvar.
+                    _kw["relvar"] = boutle2014_relvar(
+                        jnp.clip(phys_state.cloud_fraction.reshape(ncol, nlev), 0.0, 1.0),
+                        jnp.asarray(grid.areaCell).reshape(ncol, 1),
+                        scheme_config.boutle_fsd_factor)
             if _prog_nc:
                 # CAM6 microp_aero_run immediately before micro_mg (user
                 # decision 2026-10-24, 2), on this sub-step's post-CLUBB state.
