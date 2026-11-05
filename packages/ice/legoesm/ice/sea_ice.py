@@ -66,6 +66,7 @@ from legoesm.ice.shortwave import compute_ice_sw
 from legoesm.ice.ponds import step_ponds
 from legoesm.core.surface_energy import surface_radiation_fluxes
 from legoesm.ice.config import (
+    SI3SwitchConfig,
     SeaIceConfig,
     validate_si3_bulk_config,
     validate_si3_thermo_config,
@@ -87,26 +88,6 @@ from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
 
 # Historical helper default: convergence only unless the caller supplies Cs.
 _NO_SHEAR_RIDGING = 0.0
-# SI3 surface ports: every switch/floor/cap is a C1 ramp of width
-# ``switch_width x scale`` (user rule 2026-10-27: smooth at 0.01; 0.0 = NEMO's
-# hard form, used by the oracle tests).  Scales (votes W3-W8): temperature
-# 1 K, heat flux 1 W/m2 (heat content: dt x 1 W/m2), snow-free test
-# _SI3_SNOW_RAMP_WIDTH_M (held hard), thickness / volume / fraction thresholds themselves.
-_SI3_SWITCH_RELATIVE_WIDTH = 0.01
-_SI3_T_SCALE_K = 1.0
-_SI3_FLUX_SCALE_W_M2 = 1.0
-# Fraction scales set by the tier-4 ORCA1 budget sweep (votes X1-X2): with
-# scale 1 the ramps moved qsb/fhld/qlead in hundreds of cells by O(100 W/m2);
-# with these the smooth default changes <= 1.5e-3 W/m2 (50 cells) and qlead
-# 70 J/m2 in total (3 cells).
-_SI3_ICE_SWITCH_SCALE = 1.0e-10    # ice switch ramp width scale (epsi10)
-_SI3_CUT_FRACTION_SCALE = 1.0e-3   # qlead landfast "packed" cut (5.0.2 margin)
-_SI3_FULL_COVER_SCALE = 1.0e-10    # qlead full-cover cut (epsi10)
-# Snow-free test (h_s == 0) ramp width [m]: 0.0 = NEMO's hard test in every
-# mode.  HELD at 0.0 pending a user decision (vote X4 escalated; trace snow
-# 1e-30..1e-15 m sits in 355 ORCA1 ice cells, see the PR's width table);
-# a positive value gives ``1 - C1 ramp(h_s / width)`` when switch_width > 0.
-_SI3_SNOW_RAMP_WIDTH_M = 0.0
 
 
 def _sharp(w):
@@ -138,10 +119,10 @@ def _si3_mix(weight, a, b, w):
 def _si3_snow_free(h_snow, w, preserve_subnormal):
     """1 where ``h_snow == 0`` (NEMO's IEEE test); ramp ``1 - C1(h_snow / w)`` if ``w > 0``.
 
-    ``w = switch_width > 0 ? _SI3_SNOW_RAMP_WIDTH_M : 0``; the module width is
-    held at 0.0 (hard) pending a user decision (vote X4): the ORCA1 record
-    holds trace snow down to 1.2e-30 m in 355 ice cells, so any ramp width
-    >= 1e-15 m changes their through-ice sunlight by up to 218 W/m2.
+    ``w = snow_ramp_width_m`` when the ports are smooth, else 0; held at 0.0
+    (hard) pending a user decision (vote X4): the ORCA1 record holds trace
+    snow down to 1.2e-30 m in 355 ice cells, so any ramp width >= 1e-15 m
+    changes their through-ice sunlight by up to 218 W/m2.
     """
     if w != 0.0:
         return 1.0 - smoothstep_cubic(h_snow / w)
@@ -643,7 +624,7 @@ def _nemo_si3_ice_albedo(
     cloud_fraction: jnp.ndarray,
     *,
     land_mask: jnp.ndarray,
-    switch_width: float = _SI3_SWITCH_RELATIVE_WIDTH,
+    switches: SI3SwitchConfig,
     _preserve_subnormal_snow: bool = True,
 ) -> jnp.ndarray:
     """Active no-pond SI3 albedo, ``icealb.F90:124-185``.
@@ -654,14 +635,14 @@ def _nemo_si3_ice_albedo(
     multiplies the overcast albedo and the clear-sky correction at the same
     two sites as ``icealb.F90:179-182``, so land albedo is 0 as in NEMO.
     Switches (snow-free, melt flag, thickness pieces) are C1 ramps of width
-    ``switch_width x scale``; ``switch_width=0.0`` is NEMO's hard form.
+    ``switches.relative_width x scale``; ``relative_width=0.0`` is NEMO's hard form.
     """
-    r = switch_width
+    r = switches.relative_width
     t_freeze = constants.T_freeze
     snow_free = _si3_snow_free(
-        h_snow, _SI3_SNOW_RAMP_WIDTH_M if r > 0.0 else 0.0, _preserve_subnormal_snow
+        h_snow, switches.snow_ramp_width_m if r > 0.0 else 0.0, _preserve_subnormal_snow
     )
-    melting = _si3_ge(T_surface, t_freeze, r * _SI3_T_SCALE_K)
+    melting = _si3_ge(T_surface, t_freeze, r * switches.temperature_scale_K)
     snow_fraction = h_snow / (h_snow + constants.snow_cover_depth_nemo)
     bare_thick = _si3_mix(
         snow_free * melting,
@@ -729,7 +710,7 @@ def _nemo_si3_blk_ice_2(
     snow_blow_exponent,
     land_mask,
     ice_constants,
-    switch_width: float = _SI3_SWITCH_RELATIVE_WIDTH,
+    switches: SI3SwitchConfig,
     _preserve_subnormal_snow: bool = True,
 ):
     """ORCA1-resolved ``ice_alb`` + ``blk_ice_2`` scalar identity.
@@ -745,18 +726,18 @@ def _nemo_si3_blk_ice_2(
     ``sbcblk.F90`` (net longwave, total/solid precipitation and the rain,
     snow and SST heat contents), so land cells carry NEMO's land values.
     Switches (albedo, ``min(T_air, rt0)``, thin-ice transmission, snow-free
-    qtr, Goff 180 K floor) are C1 ramps of width ``switch_width x scale``;
-    ``switch_width=0.0`` is NEMO's hard form.
+    qtr, Goff 180 K floor) are C1 ramps of width ``switches.relative_width x scale``;
+    ``relative_width=0.0`` is NEMO's hard form.
     """
-    r = switch_width
+    r = switches.relative_width
     albedo = _nemo_si3_ice_albedo(
         T_surface, h_ice, h_snow, cloud_fraction,
         land_mask=land_mask,
-        switch_width=r,
+        switches=switches,
         _preserve_subnormal_snow=_preserve_subnormal_snow,
     )
     q_sat, dq_sat = nemo_si3_saturation_over_ice(
-        T_surface, p_surface, floor_width_K=r * _SI3_T_SCALE_K
+        T_surface, p_surface, floor_width_K=r * switches.temperature_scale_K
     )
     theta_surface = T_surface * (
         constants.p_ref / p_surface
@@ -805,7 +786,7 @@ def _nemo_si3_blk_ice_2(
     emp_total = emp_ocean + emp_ice
     rain_heat = (theta_air - ice_constants.T0) * ice_constants.c_ocean * land_mask
     snow_heat = (
-        (min_c1(theta_air, ice_constants.T0, _sharp(r * _SI3_T_SCALE_K)) - ice_constants.T0)
+        (min_c1(theta_air, ice_constants.T0, _sharp(r * switches.temperature_scale_K)) - ice_constants.T0)
         * ice_constants.c_ice * land_mask
     )
     ocean_heat = sst_celsius * ice_constants.c_ocean * land_mask
@@ -846,7 +827,7 @@ def _nemo_si3_blk_ice_2(
         r,
     )
     snow_free = _si3_snow_free(
-        h_snow, _SI3_SNOW_RAMP_WIDTH_M if r > 0.0 else 0.0, _preserve_subnormal_snow
+        h_snow, switches.snow_ramp_width_m if r > 0.0 else 0.0, _preserve_subnormal_snow
     )
     qtr_ice_top = _si3_mix(snow_free, qsr_ice * transmission, 0.0, r)
     return {
@@ -910,7 +891,7 @@ def _nemo_si3_ice_flx_other(
     max_ice_fraction,
     lead_cut_version,
     land_mask,
-    switch_width=_SI3_SWITCH_RELATIVE_WIDTH,
+    switches: SI3SwitchConfig,
 ):
     """Active C1D ``ice_flx_other`` branch, ``icesbc.F90:322-437``.
 
@@ -921,14 +902,15 @@ def _nemo_si3_ice_flx_other(
 
     * ``"5.0.2"`` (C1D_OMIP_L3 oracle): landfast cut needs
       ``at_i >= rn_amax - 0.001`` AND ``vt_i >= 3 m``; full-cover cut also
-      needs ``vt_i >= 3 m``.  Hard switches, unchanged.
+      needs ``vt_i >= 3 m``.
     * ``"5.0.1"`` (ORCA1 oracle, icesbc.F90:391,412,416): landfast cut
       ``zvel <= 5 mm/s .AND. at_i >= rn_amax - 0.01``; full-cover cut
       ``at_i >= 1 - epsi10``; no thickness term.
 
-    Every switch, floor and cap is a C1 ramp of width ``switch_width x scale``
-    (``0.0`` = NEMO's hard form, used by the oracle tests): the ice switch
-    ramps on ``[epsi10 (1 - switch_width), epsi10]``; ``max(at_i, epsi10)``
+    Every switch, floor and cap is a C1 ramp of width
+    ``switches.relative_width x scale`` (``0.0`` = NEMO's hard form, used by
+    the oracle tests): the ice switch ramps on
+    ``[epsi10 (1 - relative_width), epsi10]``; ``max(at_i, epsi10)``
     and the qsb cap are exact outside their band; ``min/max(., 0)`` of heat
     contents and fluxes use ``positive_part_c1``; the landfast speed test acts
     on the squared speed so its gradient is finite for ice at rest.  Smooth
@@ -941,9 +923,9 @@ def _nemo_si3_ice_flx_other(
         raise ValueError(
             f"Unknown lead_cut_version {lead_cut_version!r}; expected '5.0.1' or '5.0.2'."
         )
-    r = switch_width
+    r = switches.relative_width
     hard = r == 0.0
-    flux_w = r * _SI3_FLUX_SCALE_W_M2              # [W/m2]
+    flux_w = r * switches.flux_scale_W_m2              # [W/m2]
     energy_w = flux_w * dt                         # [J/m2]
     du = u_ice - u_ocean
     du_west = u_ice_west - u_ocean_west
@@ -956,7 +938,7 @@ def _nemo_si3_ice_flx_other(
         switch = jnp.where(ice_fraction >= ice_epsilon, land_mask, 0.0)
     else:   # ramp on [epsi10 - w, epsi10]: exact NEMO outside it (X1 scale; GLM review)
         switch = _si3_ge(
-            ice_fraction, ice_epsilon, r * _SI3_ICE_SWITCH_SCALE
+            ice_fraction, ice_epsilon, r * switches.ice_switch_scale
         ) * land_mask
     ice_floor = max_c1(ice_fraction, ice_epsilon, _sharp(r * ice_epsilon))
     lead_energy = land_mask * dt * (
@@ -982,7 +964,7 @@ def _nemo_si3_ice_flx_other(
         * ((sst_celsius + T0) - T_bottom)
     )
     qsb = switch * min_c1(qsb, -freeze_negative / dt / ice_floor, _sharp(flux_w))
-    supercool = _si3_gt(T_bottom - (sst_celsius + T0), 0.0, r * _SI3_T_SCALE_K)
+    supercool = _si3_gt(T_bottom - (sst_celsius + T0), 0.0, r * switches.temperature_scale_K)
     stop_volume = constants.ice_supercool_volume_stop_nemo
     thick = _si3_ge(ice_volume, stop_volume, r * stop_volume)
     stop_supercool = supercool * thick
@@ -1014,11 +996,11 @@ def _nemo_si3_ice_flx_other(
         )
         stop_sq = constants.ice_landfast_speed_stop_nemo ** 2
         slow = _si3_ge(-speed_sq, -stop_sq, r * stop_sq)          # speed <= 5 mm/s
-    full = _si3_ge(ice_fraction, 1.0 - ice_epsilon, r * _SI3_FULL_COVER_SCALE)
+    full = _si3_ge(ice_fraction, 1.0 - ice_epsilon, r * switches.full_cover_scale)
     if lead_cut_version == "5.0.1":
         packed = _si3_ge(
             ice_fraction, max_ice_fraction - constants.ice_landfast_margin_nemo501,
-            r * _SI3_CUT_FRACTION_SCALE,
+            r * switches.cut_fraction_scale,
         )
         cut = 1.0 - (1.0 - slow * packed) * (1.0 - full)
     else:
@@ -1026,7 +1008,7 @@ def _nemo_si3_ice_flx_other(
         grown = _si3_ge(ice_volume, thick_v, r * thick_v)
         packed = _si3_ge(
             ice_fraction, max_ice_fraction - constants.ice_full_cover_margin_nemo,
-            r * _SI3_CUT_FRACTION_SCALE,
+            r * switches.cut_fraction_scale,
         )
         cut = 1.0 - (1.0 - slow * packed * grown) * (1.0 - full * grown)
     # hard mode assigns +0.0 as NEMO (qlead * 0 would give -0.0)
@@ -1074,6 +1056,8 @@ def _bulk_flux_dispatch(
             forcing.u_lowest, forcing.v_lowest, theta_air, forcing.q_lowest,
             T_ice, forcing.p_surface, rho,
             config.Cd_ice, config.Ch_ice, config.Ce_ice,
+            goff_floor_width_K=(config.si3_switches.relative_width
+                                * config.si3_switches.temperature_scale_K),
         )
         # NEMO returns air->ice stress; TileResponse carries the equal/opposite
         # ice->air reaction used by the existing legoESM coupling convention.

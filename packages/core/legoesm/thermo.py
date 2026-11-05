@@ -636,14 +636,10 @@ def saturation_specific_humidity_cam_table(T: jax.Array, p: jax.Array, *,
     return _specific_humidity_from_esat_cam(es, p, cap_sharpness=cap_sharpness)
 
 
-# Width of the smoothed Goff 180 K temperature floor (user smooth rule, 0.01 x 1 K).
-_GOFF_FLOOR_SMOOTH_WIDTH_K = 0.01
-
-
 def nemo_si3_saturation_over_ice(
     T: jax.Array,
     p: jax.Array,
-    floor_width_K: float = _GOFF_FLOOR_SMOOTH_WIDTH_K,
+    floor_width_K: float,
 ) -> tuple[jax.Array, jax.Array]:
     """NEMO 5.0.2 Goff-ice specific humidity and analytic ``dq/dT``.
 

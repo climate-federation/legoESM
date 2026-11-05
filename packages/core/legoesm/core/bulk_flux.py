@@ -2342,6 +2342,7 @@ def nemo_si3_constant_fluxes(
     Cd: float,
     Ch: float,
     Ce: float,
+    goff_floor_width_K: float,
 ) -> tuple[jnp.ndarray, ...]:
     """Executing constant-coefficient SI3 air--ice bulk core.
 
@@ -2360,7 +2361,9 @@ def nemo_si3_constant_fluxes(
     theta_ice = T_ice * (
         constants.p_ref / p_surface
     ) ** (constants.R_gas_molar / (constants.M_dry_air * constants.c_p_dry_air_nemo))
-    q_sat, dq_sat_dT = nemo_si3_saturation_over_ice(T_ice, p_surface)
+    q_sat, dq_sat_dT = nemo_si3_saturation_over_ice(
+        T_ice, p_surface, floor_width_K=goff_floor_width_K
+    )
     rho_wind = rho_air * wind
     stress_scale = rho_wind * Cd
     tau_x = stress_scale * u_air

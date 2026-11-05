@@ -381,6 +381,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
     from legoesm.core.bulk_flux import nemo_si3_constant_fluxes
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+    from legoesm.ice.config import SI3_HARD_SWITCHES
     from legoesm.ice.sea_ice import _nemo_si3_blk_ice_2, _nemo_si3_ice_flx_other
 
     runtime = runtime_versions()
@@ -413,6 +414,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         constants.bulk_transfer_ice_orca1,
         constants.bulk_transfer_ice_orca1,
         constants.bulk_transfer_ice_orca1,
+        goff_floor_width_K=0.0,
     )
     predictions = {
         (0, "wndm_ice"): raw[2],
@@ -438,7 +440,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         evap_factor=constants.evap_factor_orca1,
         snow_blow_exponent=constants.snow_blow_exponent_orca1,
         land_mask=s2["mask"], ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
-        switch_width=0.0,
+        switches=SI3_HARD_SWITCHES,
     )
     for name in STAGE1_NAMES[25:45]:
         predictions[(1, name)] = flux2[name]
@@ -457,7 +459,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         ice_epsilon=s2["ice_epsilon"], max_ice_fraction=s2["max_ice_fraction"],
         lead_cut_version="5.0.2",
         land_mask=s2["mask"],
-        lead_cut_version="5.0.2", switch_width=0.0,
+        lead_cut_version="5.0.2", switches=SI3_HARD_SWITCHES,
     )
     for name in ("qsb_ice_bot", "fhld", "qlead"):
         predictions[(2, name)] = other[name]
@@ -492,7 +494,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
         evap_factor=constants.evap_factor_orca1,
         snow_blow_exponent=constants.snow_blow_exponent_orca1,
         land_mask=s2["mask"], ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
-        switch_width=0.0,
+        switches=SI3_HARD_SWITCHES,
         _preserve_subnormal_snow=False,
     )
     ablation_rows = [
