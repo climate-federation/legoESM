@@ -31,6 +31,9 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o7_orca2_sas_gate import
     derive_sas_time_level,
     verify_o7_log,
 )
+from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_record_budget import (
+    size_report as o17_size_report,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_NEMO_ROOT = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
@@ -674,10 +677,16 @@ def verify_manifest(root: Path, producer: str | None = None) -> dict[str, Any]:
         raise _refuse("production ice namelist/overlay disposition mismatch")
     if manifest.get("estimated_master_bytes") != size_report()["master_bytes_worst_case"]:
         raise _refuse("manifest storage estimate differs from schema")
-    if manifest.get("max_evidence_disk_kib") != 150_000_000:
+    o17_extended = manifest.get("o17_extended") is True
+    o17_budget = o17_size_report(manifest["estimated_master_bytes"])
+    expected_disk = o17_budget["combined_disk_budget_kib_4pct"] if o17_extended else 150_000_000
+    expected_wall = o17_budget["wall_clock_budget_seconds"] if o17_extended else 14_400
+    if manifest.get("max_evidence_disk_kib") != expected_disk:
         raise _refuse("manifest disk-use gate differs from acquisition contract")
-    if manifest.get("wall_clock_budget_seconds") != 14_400:
+    if manifest.get("wall_clock_budget_seconds") != expected_wall:
         raise _refuse("manifest wall-clock gate differs from acquisition contract")
+    if o17_extended and manifest.get("o17_record_bytes_gate") != o17_budget["o17_record_bytes_exact_max"]:
+        raise _refuse("manifest O17 record gate differs from exact writer schema")
     for rel, want in manifest["source_sha256"].items():
         path = REPO_ROOT / rel
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != want:

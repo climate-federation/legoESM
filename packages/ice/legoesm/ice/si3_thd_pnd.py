@@ -885,8 +885,9 @@ def si3_ice_thd_o12_stages(
         prev_sfx_lam = cur_sfx_lam
         prev_hfx_thd = cur_hfx_thd
         prev_wfx_lam = cur_wfx_lam
-        if raw_entry.get("active") is not None:
-            active = jnp.asarray(raw_entry["active"], dtype=jnp.bool_)  # icethd.F90:130-135
+        active_selector = raw_entry.get("active", raw_entry.get("_active"))
+        if active_selector is not None:
+            active = jnp.asarray(active_selector, dtype=jnp.bool_)  # icethd.F90:130-135
         elif raw_entry.get("a_i") is not None:
             active = (  # icethd.F90:132
                 jnp.asarray(raw_entry["a_i"], dtype=jnp.float64)
@@ -1065,11 +1066,14 @@ def si3_ice_thd_o12_stages(
             # icethd.F90:456-526 (tab_1d_2d scatter over 1:npti) and
             # icestp.F90:438-501 (diag_set0): inactive categories leave state
             # and cumulative 2D fluxes untouched and keep zeroed diagnostics.
-            raw_a_i = jnp.asarray(raw_entry["a_i"], dtype=jnp.float64)
-            raw_h_i = jnp.asarray(raw_entry["h_i"], dtype=jnp.float64)
-            raw_h_s = jnp.asarray(raw_entry["h_s"], dtype=jnp.float64)
-            raw_s_i = jnp.asarray(raw_entry["s_i"], dtype=jnp.float64)
-            raw_sz_i = jnp.asarray(raw_entry["sz_i"], dtype=jnp.float64)
+            raw_a_i = jnp.asarray(raw_entry.get("_a_i_2d", raw_entry["a_i"]), dtype=jnp.float64)
+            raw_h_i = jnp.asarray(raw_entry.get("_h_i_2d", raw_entry["h_i"]), dtype=jnp.float64)
+            raw_h_s = jnp.asarray(raw_entry.get("_h_s_2d", raw_entry["h_s"]), dtype=jnp.float64)
+            raw_s_i = jnp.asarray(raw_entry.get("_s_i_2d", raw_entry["s_i"]), dtype=jnp.float64)
+            raw_sz_i = jnp.asarray(raw_entry.get("_sz_i_2d", raw_entry["sz_i"]), dtype=jnp.float64)
+            raw_t_su = raw_entry.get("_t_su_2d", raw_entry["t_su"])
+            raw_t_i = raw_entry.get("_t_i_2d", raw_entry["t_i"])
+            raw_t_s = raw_entry.get("_t_s_2d", raw_entry["t_s"])
             raw_o_i = jnp.asarray(_required("o_i", raw_entry.get("o_i")), dtype=jnp.float64)
             raw_e_i = jnp.asarray(raw_entry["e_i"], dtype=jnp.float64)
             raw_e_s = jnp.asarray(raw_entry["e_s"], dtype=jnp.float64)
@@ -1112,10 +1116,10 @@ def si3_ice_thd_o12_stages(
             h_i_cat = _where_active(h_i_cat, raw_h_i)  # icethd.F90:457
             h_s_cat = _where_active(h_s_cat, raw_h_s)  # icethd.F90:458
             s_i_cat = _where_active(s_i_cat, raw_s_i)  # icethd.F90:459
-            t_su_cat = _where_active(t_su_cat, raw_entry["t_su"])  # icethd.F90:460
-            t_s_cat = _where_active(t_s_cat, raw_entry["t_s"])  # icethd.F90:464
+            t_su_cat = _where_active(t_su_cat, raw_t_su)  # icethd.F90:460
+            t_s_cat = _where_active(t_s_cat, raw_t_s)  # icethd.F90:464
             e_s_2d = _where_active(e_s_2d, raw_e_s_2d)  # icethd.F90:465,492
-            t_i_cat = _where_active(t_i_cat, raw_entry["t_i"])  # icethd.F90:469
+            t_i_cat = _where_active(t_i_cat, raw_t_i)  # icethd.F90:469
             e_i_2d = _where_active(e_i_2d, raw_e_i_2d)  # icethd.F90:470,489
             sz_i_cat = _where_active(sz_i_cat, raw_sz_i)  # icethd.F90:471
             szv_i_cat = _where_active(szv_i_cat, raw_szv_i)  # icethd.F90:472,498
@@ -1142,9 +1146,9 @@ def si3_ice_thd_o12_stages(
                 raw_entry["t_si"] if raw_entry.get("t_si") is not None else constants.T0
             )  # icestp.F90:488; icethd.F90:518
             zdf_masked = o10.o9.zdf._replace(
-                t_su=_where_active(o10.o9.zdf.t_su, raw_entry["t_su"]),
-                t_s=_where_active(o10.o9.zdf.t_s, raw_entry["t_s"]),
-                t_i=_where_active(o10.o9.zdf.t_i, raw_entry["t_i"]),
+                t_su=_where_active(o10.o9.zdf.t_su, raw_t_su),
+                t_s=_where_active(o10.o9.zdf.t_s, raw_t_s),
+                t_i=_where_active(o10.o9.zdf.t_i, raw_t_i),
                 e_i=_where_active(o10.o9.zdf.e_i, raw_e_i),
                 e_s=_where_active(o10.o9.zdf.e_s, raw_e_s),
                 qcn_ice_bot=_where_active(o10.o9.zdf.qcn_ice_bot, 0.0),  # icestp.F90:491; icethd.F90:510
@@ -1181,7 +1185,7 @@ def si3_ice_thd_o12_stages(
             o9_masked = o10.o9._replace(
                 zdf=zdf_masked,
                 dh=dh_masked,
-                t_i=_where_active(o10.o9.t_i, raw_entry["t_i"]),
+                t_i=_where_active(o10.o9.t_i, raw_t_i),
             )
             o10 = o10._replace(
                 o9=o9_masked,

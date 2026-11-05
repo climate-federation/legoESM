@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax.numpy as jnp
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ice.bitz_lipscomb import (
     SI3DHFluxes,
     SI3DOOutputs,
@@ -397,22 +398,46 @@ def _thermo_entries(
 ) -> tuple[dict, ...]:
     eq = state.equivalent
     h = int(nn_hls)
-    owned_mask = _owned_mask(state.a_i.shape[:2], h)  # icethd.F90:130 DO_2D(0,0,0,0)
+    sr = nemo_source_round
     entries = []
+    owned_mask = _owned_mask(state.a_i.shape[:2], h)  # icethd.F90:130 DO_2D(0,0,0,0)
     for jl in range(state.a_i.shape[-1]):
+        a_i = state.a_i[..., jl]
         active = owned_mask & (
-            jnp.asarray(state.a_i[..., jl], dtype=jnp.float64)
+            jnp.asarray(a_i, dtype=jnp.float64)
             > jnp.asarray(epsi10, dtype=jnp.float64)
         )  # icethd.F90:130-135 (nptidx/npti gather over a_i > epsi10)
+        h_i = eq.h_i[..., jl]
+        h_s = eq.h_s[..., jl]
+        ice_area_volume = sr(h_i * a_i)  # icethd.F90:423-424
+        snow_area_volume = sr(h_s * a_i)  # icethd.F90:430-431
+        safe_ice = jnp.where(ice_area_volume > 1.0e-20, ice_area_volume, 1.0)  # icethd.F90:423-427
+        safe_snow = jnp.where(snow_area_volume > 1.0e-20, snow_area_volume, 1.0)  # icethd.F90:430-434
+        e_i = jnp.where(  # icethd.F90:418-428
+            active[..., None] & (ice_area_volume[..., None] > 1.0e-20),
+            sr(sr(state.e_i[..., :, jl] / safe_ice[..., None]) * state.e_i.shape[-2]),
+            0.0,
+        )
+        e_s = jnp.where(  # icethd.F90:429-435
+            active[..., None] & (snow_area_volume[..., None] > 1.0e-20),
+            sr(sr(state.e_s[..., :, jl] / safe_snow[..., None]) * state.e_s.shape[-2]),
+            0.0,
+        )
+
+        def gathered(value, fill):
+            array = jnp.asarray(value)
+            mask = active.reshape(active.shape + (1,) * (array.ndim - active.ndim))
+            return jnp.where(mask, array, jnp.broadcast_to(fill, array.shape))  # icethd.F90:121-140
+
         e = dict(
             active=active,
-            h_i=eq.h_i[..., jl],
-            h_s=eq.h_s[..., jl],
-            t_su=state.t_su[..., jl],
-            t_i=eq.t_i[..., :, jl],
-            t_s=eq.t_s[..., :, jl],
-            e_i=state.e_i[..., :, jl],
-            e_s=state.e_s[..., :, jl],
+            h_i=gathered(h_i, jnp.ones_like(h_i)),  # icethd.F90:140,418-424
+            h_s=gathered(h_s, jnp.ones_like(h_s)),  # icethd.F90:140,429-431
+            t_su=gathered(state.t_su[..., jl], state.t_si[..., jl]),  # icethd.F90:140
+            t_i=gathered(eq.t_i[..., :, jl], state.t_si[..., jl, None]),  # icethd.F90:140
+            t_s=gathered(eq.t_s[..., :, jl], state.t_si[..., jl, None]),  # icethd.F90:140
+            e_i=e_i,  # icethd.F90:418-428
+            e_s=e_s,  # icethd.F90:429-435
             e_i_2d=state.e_i[..., :, jl],
             e_s_2d=state.e_s[..., :, jl],
             v_i=state.v_i[..., jl],
@@ -421,11 +446,11 @@ def _thermo_entries(
             oa_i=state.oa_i[..., jl],
             szv_i=state.szv_i[..., :, jl],
             t_si=state.t_si[..., jl],
-            sz_i=eq.sz_i[..., :, jl],
-            s_i=eq.s_i[..., jl],
-            a_i=state.a_i[..., jl],
-            o_i=eq.o_i[..., jl],
-            at_i=state.aggregated.at_i,
+            sz_i=gathered(eq.sz_i[..., :, jl], jnp.ones_like(eq.sz_i[..., :, jl])),  # icethd.F90:140
+            s_i=gathered(eq.s_i[..., jl], jnp.ones_like(eq.s_i[..., jl])),  # icethd.F90:140
+            a_i=gathered(a_i, jnp.ones_like(a_i)),  # icethd.F90:121-140
+            o_i=gathered(eq.o_i[..., jl], jnp.zeros_like(eq.o_i[..., jl])),  # icethd.F90:140
+            at_i=gathered(state.aggregated.at_i, jnp.ones_like(state.aggregated.at_i)),  # icethd.F90:140
             sss=forcing.sss_m,
             sst=forcing.sst_m,
             t_bo=_scatter(jnp.zeros_like(forcing.sst_m), t_bo, h),  # icestp.F90:136-138
@@ -451,6 +476,22 @@ def _thermo_entries(
             ),
             hfx_err_dif=fluxes.hfx_err_dif,
             hfx_dif=fluxes.hfx_dif,
+            _active=active,  # icethd.F90:121-138; vectorised gather/scatter selector
+            _a_i_2d=a_i,  # icethd.F90:457
+            _v_i_2d=state.v_i[..., jl],  # icethd.F90:523
+            _v_s_2d=state.v_s[..., jl],  # icethd.F90:524
+            _sv_i_2d=state.sv_i[..., jl],  # icethd.F90:525
+            _oa_i_2d=state.oa_i[..., jl],  # icethd.F90:526
+            _t_su_2d=state.t_su[..., jl],  # icethd.F90:460
+            _e_i_2d=state.e_i[..., :, jl],  # icethd.F90:468
+            _e_s_2d=state.e_s[..., :, jl],  # icethd.F90:464
+            _szv_i_2d=state.szv_i[..., :, jl],  # icethd.F90:470
+            _h_i_2d=h_i,  # icethd.F90:458
+            _h_s_2d=h_s,  # icethd.F90:459
+            _t_i_2d=eq.t_i[..., :, jl],  # icethd.F90:467
+            _t_s_2d=eq.t_s[..., :, jl],  # icethd.F90:463
+            _sz_i_2d=eq.sz_i[..., :, jl],  # icethd.F90:469
+            _s_i_2d=eq.s_i[..., jl],  # icethd.F90:461
         )
         entries.append(e)
     return tuple(entries)
@@ -470,14 +511,21 @@ def _thermodynamic_tail(state: SI3State, card: SI3O17Card) -> SI3State:
     """Finish ``ice_thd`` after ``ice_cor(kt, 2)`` (``icethd.F90:185-201``)."""
 
     h = int(card.state.nn_hls)  # icethd.F90:185-201 (A2D(0) and lbc_lnk extents)
-    owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))  # :185-200
+    owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))  # icethd.F90:185-200
     oa_i = state.oa_i.at[owned].set(  # icethd.F90:185
-        state.oa_i[owned] + state.a_i[owned] * card.state.rDt_ice  # icethd.F90:185
+        nemo_source_round(  # icethd.F90:185; block compiled FMA contraction
+            state.oa_i[owned]
+            + nemo_source_round(state.a_i[owned] * card.state.rDt_ice)  # icethd.F90:185
+        )
     )
 
     def t_lbc(field: jnp.ndarray) -> jnp.ndarray:
         return si3_lbc_lnk_orca2(  # icethd.F90:188-190
-            field, "T", 1.0, nn_hls=h, ldfull=True  # icethd.F90:188-190
+            field,
+            "T",
+            1.0,
+            nn_hls=h,
+            ldfull=card.fold.nfd_full_when_absent,  # icethd.F90:188-190
         )
 
     linked = state._replace(  # icethd.F90:188-190
@@ -508,8 +556,12 @@ def _thermodynamic_tail(state: SI3State, card: SI3O17Card) -> SI3State:
     else:
         u_ice = jnp.where(no_ice & jnp.roll(no_ice, -1, axis=0), 0.0, linked.u_ice)  # icethd.F90:195-196
         v_ice = jnp.where(no_ice & jnp.roll(no_ice, -1, axis=1), 0.0, linked.v_ice)  # icethd.F90:197-198
-    u_ice = si3_lbc_lnk_orca2(u_ice, "U", -1.0, nn_hls=h, ldfull=True)  # icethd.F90:201
-    v_ice = si3_lbc_lnk_orca2(v_ice, "V", -1.0, nn_hls=h, ldfull=True)  # icethd.F90:201
+    u_ice = si3_lbc_lnk_orca2(
+        u_ice, "U", -1.0, nn_hls=h, ldfull=card.fold.nfd_full_when_absent
+    )  # icethd.F90:201
+    v_ice = si3_lbc_lnk_orca2(
+        v_ice, "V", -1.0, nn_hls=h, ldfull=card.fold.nfd_full_when_absent
+    )  # icethd.F90:201
     return linked._replace(  # icethd.F90:192-201
         u_ice=u_ice,  # icethd.F90:195-196,201
         v_ice=v_ice,  # icethd.F90:197-198,201
@@ -593,6 +645,8 @@ def si3_o17_step(
         fold=card.fold,
         differentiable=card.differentiable,
     )
+    # icedyn_rhg_evp.F90:838-843 stores the lbc-linked zs1/zs2/zs12 arithmetic
+    # result, signed zeros included; no canonicalisation follows.
     state = state._replace(u_ice=aevp.u_ice_u, v_ice=aevp.v_ice_v)
     divu, delta = si3_cgrid_deformation(  # icedyn_rhg_evp.F90:788-836
         aevp,
@@ -601,6 +655,9 @@ def si3_o17_step(
         card.aevp,
         fold=None if _plant_drop_deformation_fold else card.fold,  # icedyn_rhg_evp.F90:791-838
     )
+    # pdivu_i is the arithmetic product at icedyn_rhg_evp.F90:822-824 (a
+    # negative bracket times zmsk=0 stores -0); pdelta_i's +0 is the ELSE of
+    # :830-831, which the deformation kernel's SQRT(...)*mask never makes -0.
     zeros = jnp.zeros_like(state.u_ice)
     # icestp.diag_set0 assigns +0 to every SI3 flux accumulator at step
     # entry.  They are not live forcing and cannot be injected mid-step.
@@ -622,6 +679,7 @@ def si3_o17_step(
             diag_adv_mass=zeros,
             diag_adv_salt=zeros,
             diag_adv_heat=zeros,
+            dynamics_path="np_dynALL",  # namelist_ice_ref:51; icedyn.F90:130-135
         )
         state = adv_state._replace(u_ice=aevp.u_ice_u, v_ice=aevp.v_ice_v)
     else:
@@ -641,6 +699,7 @@ def si3_o17_step(
             diag_adv_mass=zeros,
             diag_adv_salt=zeros,
             diag_adv_heat=zeros,
+            dynamics_path="np_dynALL",  # namelist_ice_ref:51; icedyn.F90:130-135
         )
     advection_state = state  # icedyn.F90:133-134; named O17 localisation boundary
     rdg_entry = _rdgrft_state(state, step_fluxes)
@@ -810,6 +869,7 @@ def si3_o17_step(
             state.a_i, divu, delta,  # icedyn.F90:133-134
             other.qlead, other.fhld, t_bo,  # icesbc.F90:450-464; icestp.F90:136
             u_ice_b, v_ice_b, a_i_b, at_i_b,  # icestp.F90:151,184
+            surface, aevp,  # icestp.F90:159,168,201 (O7 products and aEVP exit)
         )
 
     frazil = si3_ice_thd_frazil(other.qlead, rn_hinew=card.rn_hinew, ln_frazil=card.ln_frazil)
@@ -899,9 +959,11 @@ def si3_o17_step(
         t_si=jnp.stack(  # icethd.F90:130-135,163; ice_thd_1d2d :518; icestp.F90:488
             [
                 jnp.where(entry["active"], c.o10.o9.zdf.t_si, state.t_si[..., jl])
-                for jl, (entry, c) in enumerate(zip(thermo_entries, stages.categories))
+                for jl, (entry, c) in enumerate(
+                    zip(thermo_entries, stages.categories, strict=True)
+                )
             ],
-            axis=-1,  # icethd.F90:518
+            axis=-1,  # icethd.F90:121-138,518; scatter gathered points only
         ),
         aggregated=state.aggregated._replace(
             at_i=stages.pnd.at_i,
@@ -1091,6 +1153,12 @@ def si3_o17_step(
         config=card.state,
         surface_config=card.surface,
     )
+    final_state = final.state._replace(  # iceupdate.F90:189-194
+        snwice_mass=final.outputs.snwice_mass,  # iceupdate.F90:191-192
+        snwice_mass_b=final.outputs.snwice_mass_b,  # iceupdate.F90:190
+        snwice_fmass=final.outputs.snwice_fmass,  # iceupdate.F90:193
+    )
+    final = final._replace(state=final_state)  # iceupdate.F90:189-194
     stress_inputs = forcing.stress._replace(
         u_ice=final.state.u_ice,
         v_ice=final.state.v_ice,

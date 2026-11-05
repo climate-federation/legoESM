@@ -3446,6 +3446,7 @@ def si3_dyn_orca2(
     diag_adv_mass: Field,
     diag_adv_salt: Field,
     diag_adv_heat: Field,
+    dynamics_path: str = "np_dynADV2D",
     _plant_invert_sweep_order: bool = False,
     _plant_perturb_hbig_cap: bool = False,
     _plant_omit_subcycle_lbc: bool = False,
@@ -3454,7 +3455,7 @@ def si3_dyn_orca2(
     _plant_wrong_nfd_sign: bool | str = False,
     _plant_ignore_mppdelay: bool = False,
 ) -> tuple[SI3State, SI3AdvectionDiagnostics]:
-    """Execute NEMO SI3 `ice_dyn` (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn.f90:126-265`).
+    """Execute NEMO SI3 Prather advection within the selected ``ice_dyn`` path.
 
     Follows NEMO's exact statement order:
     1. Pre-advection intensive thickness recovery (`icedyn.f90:156-170`)
@@ -3464,8 +3465,11 @@ def si3_dyn_orca2(
        `icedyn_adv_pra.f90:70-510`)
     4. Transport diagnostics `diag_trp_ei, diag_trp_es, diag_trp_sv, diag_trp_vi, diag_trp_vs`
        on `A2D(0)` (`icedyn_adv.f90:156-164`)
-    5. `ice_var_zapsmall` (`icedyn.f90:225`, `icevar.f90:615-737`)
-    6. End-of-`ice_dyn` `lbc_lnk(..., ldfull = .TRUE.)` (`icedyn.f90:254-260`).
+    5. For ``np_dynADV2D``, `ice_var_zapsmall` (`icedyn.f90:167`) before the
+       common end-of-`ice_dyn` halo exchange (`icedyn.f90:191-201`).
+
+    ``np_dynALL`` returns at `icedyn.f90:133`, before ridging, correction (whose
+    `ice_var_zapsmall` is `icecor.f90:111-115`), and the common halo exchange.
 
     ``rn_uice``/``rn_vice`` both given select the `np_dynADV2D` velocities; both
     explicitly ``None`` replay ``state.u_ice``/``state.v_ice`` as exact input.
@@ -3478,6 +3482,8 @@ def si3_dyn_orca2(
         raise ValueError("si3_dyn_orca2 requires an explicit SI3ORCA2StateConfig")
     if (rn_uice is None) != (rn_vice is None):
         raise ValueError("si3_dyn_orca2 requires rn_uice and rn_vice both given or both None")
+    if dynamics_path not in {"np_dynADV2D", "np_dynALL"}:
+        raise ValueError(f"unknown SI3 dynamics path {dynamics_path!r}")
     cfg = config
     sr = nemo_source_round
     consts = cfg.ice_constants
@@ -3633,74 +3639,87 @@ def si3_dyn_orca2(
         _SI3_PRA_ZERO,
     )
 
-    # 5. `ice_var_zapsmall` (`icedyn.f90:225`, `icevar.f90:615-737`)
-    (
-        v_i,
-        v_s,
-        sv_i,
-        oa_i,
-        a_i,
-        a_ip,
-        v_ip,
-        v_il,
-        t_su,
-        h_i_post,
-        h_s_post,
-        h_ip_post,
-        h_il_post,
-        e_s,
-        e_i,
-        szv_i,
-        sz_i_post,
-        t_i_post,
-        t_s_post,
-        at_i_post,
-        vt_i_post,
-        ato_i_dyn,
-        wfx_res,
-        hfx_res,
-        sfx_res,
-    ) = si3_var_zapsmall(
-        v_i=v_i,
-        v_s=v_s,
-        sv_i=sv_i,
-        oa_i=oa_i,
-        a_i=a_i,
-        a_ip=a_ip,
-        v_ip=v_ip,
-        v_il=v_il,
-        t_su=state.t_su,
-        h_i=h_i_pre,
-        h_s=h_s_pre,
-        h_ip=h_ip_pre,
-        h_il=h_il_pre,
-        e_s=e_s,
-        e_i=e_i,
-        szv_i=szv_i,
-        sz_i=state.equivalent.sz_i,
-        t_i=state.equivalent.t_i,
-        t_s=state.equivalent.t_s,
-        at_i=state.aggregated.at_i,
-        vt_i=state.aggregated.vt_i,
-        ato_i=ato_i_adv,
-        wfx_res=wfx_res,
-        hfx_res=hfx_res,
-        sfx_res=sfx_res,
-        rDt_ice=rDt_ice,
-        sss_m=sss_m,
-        sst_m=sst_m,
-        nn_hls=nn_hls,
-        nn_icesal=cfg.nn_icesal,
-        rn_simin=cfg.rn_simin,
-        rn_sinew=cfg.rn_sinew,
-        rt0=consts.T0,
-        rhoi=consts.rho_ice,
-        rhos=consts.rho_snow,
-        rhow=canonical_constants.rho_water,
-    )
+    # Only the ADV2D diagnostic path zaps here (icedyn.F90:159-167).
+    # np_dynALL continues to ridging and zaps inside ice_cor(kt,1), after it
+    # (icedyn.F90:130-135; icecor.F90:111-115).
+    if dynamics_path == "np_dynADV2D":
+        (
+            v_i,
+            v_s,
+            sv_i,
+            oa_i,
+            a_i,
+            a_ip,
+            v_ip,
+            v_il,
+            t_su,
+            h_i_post,
+            h_s_post,
+            h_ip_post,
+            h_il_post,
+            e_s,
+            e_i,
+            szv_i,
+            sz_i_post,
+            t_i_post,
+            t_s_post,
+            at_i_post,
+            vt_i_post,
+            ato_i_dyn,
+            wfx_res,
+            hfx_res,
+            sfx_res,
+        ) = si3_var_zapsmall(
+            v_i=v_i,
+            v_s=v_s,
+            sv_i=sv_i,
+            oa_i=oa_i,
+            a_i=a_i,
+            a_ip=a_ip,
+            v_ip=v_ip,
+            v_il=v_il,
+            t_su=state.t_su,
+            h_i=h_i_pre,
+            h_s=h_s_pre,
+            h_ip=h_ip_pre,
+            h_il=h_il_pre,
+            e_s=e_s,
+            e_i=e_i,
+            szv_i=szv_i,
+            sz_i=state.equivalent.sz_i,
+            t_i=state.equivalent.t_i,
+            t_s=state.equivalent.t_s,
+            at_i=state.aggregated.at_i,
+            vt_i=state.aggregated.vt_i,
+            ato_i=ato_i_adv,
+            wfx_res=wfx_res,
+            hfx_res=hfx_res,
+            sfx_res=sfx_res,
+            rDt_ice=rDt_ice,
+            sss_m=sss_m,
+            sst_m=sst_m,
+            nn_hls=nn_hls,
+            nn_icesal=cfg.nn_icesal,
+            rn_simin=cfg.rn_simin,
+            rn_sinew=cfg.rn_sinew,
+            rt0=consts.T0,
+            rhoi=consts.rho_ice,
+            rhos=consts.rho_snow,
+            rhow=canonical_constants.rho_water,
+        )
+    else:
+        h_i_post, h_s_post = h_i_pre, h_s_pre  # icedyn.F90:132-134
+        h_ip_post, h_il_post = h_ip_pre, h_il_pre  # icedyn.F90:132-134
+        t_su = state.t_su  # icedyn.F90:132-134
+        sz_i_post = state.equivalent.sz_i  # icedyn.F90:132-134
+        t_i_post, t_s_post = state.equivalent.t_i, state.equivalent.t_s  # icedyn.F90:132-134
+        at_i_post = fortran_sum_categories(a_i, axis=-1)  # icedyn_rdgrft.F90:209
+        vt_i_post = fortran_sum_categories(v_i, axis=-1)  # icedyn.F90:132-134
+        ato_i_dyn = ato_i_adv  # icedyn.F90:133-134
 
-    # 6. End-of-`ice_dyn` `lbc_lnk(..., ldfull = .TRUE.)` (`icedyn.f90:254-260`)
-    if not _plant_omit_subcycle_lbc:
+    # np_dynALL reaches this common exchange only after rdgrft + ice_cor(kt,1)
+    # (icedyn.F90:132-135,191-201); O17 applies it at that production boundary.
+    if dynamics_path == "np_dynADV2D" and not _plant_omit_subcycle_lbc:
         dyn_entries: list[tuple[Field, tuple[int, ...]]] = [
             (a_i, a_i.shape),
             (v_i, v_i.shape),

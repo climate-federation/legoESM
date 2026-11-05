@@ -117,6 +117,7 @@ CONTAINS
       INTEGER,INTENT(in)::kind
       INTEGER::u,jd
       REAL(real64)::cflice_delayed
+      LOGICAL::have_cflice_delayed
       CHARACTER(LEN=32)::label
       SELECT CASE(kind)
       CASE(22); label='step_entry'
@@ -129,11 +130,14 @@ CONTAINS
       CASE(31); label='after_flx_other'
       CASE DEFAULT; ERROR STOP 'O17 unknown state kind'
       END SELECT
-      cflice_delayed=0._real64
+      cflice_delayed=0._real64 ; have_cflice_delayed=.FALSE.
       DO jd=1,nbdelay
          IF(TRIM(c_delaylist(jd)) == 'cflice') THEN
             IF(ALLOCATED(todelay(jd)%zdpbuffout)) THEN
-               IF(SIZE(todelay(jd)%zdpbuffout)>0) cflice_delayed=todelay(jd)%zdpbuffout(1)
+               IF(SIZE(todelay(jd)%zdpbuffout)>0) THEN
+                  cflice_delayed=todelay(jd)%zdpbuffout(1) ! mpp_allreduce_generic.h90:147-152
+                  have_cflice_delayed=.TRUE.               ! mpp_allreduce_generic.h90:147-152
+               ENDIF
             ENDIF
          ENDIF
       ENDDO
@@ -147,7 +151,8 @@ CONTAINS
       CALL put(u,'stress1_i',stress1_i); CALL put(u,'stress2_i',stress2_i); CALL put(u,'stress12_i',stress12_i)
       CALL put(u,'t_si',t_si); CALL put(u,'a_i_b',a_i_b); CALL put(u,'at_i_b',at_i_b)
       CALL put(u,'u_ice_b',u_ice_b); CALL put(u,'v_ice_b',v_ice_b)
-      CALL put(u,'cflice_delayed',cflice_delayed); CALL put(u,'hi_max',hi_max)
+      IF(have_cflice_delayed) CALL put(u,'cflice_delayed',cflice_delayed) ! mpp_allreduce_generic.h90:147-152
+      CALL put(u,'hi_max',hi_max)
       CALL put(u,'hi_mean',hi_mean); CALL put(u,'rn_amax_2d',rn_amax_2d)
       ! Every ice_stp forcing/read operand available at the boundary.
       CALL put(u,'sss_m',sss_m); CALL put(u,'sst_m',sst_m); CALL put(u,'ssh_m',ssh_m)
