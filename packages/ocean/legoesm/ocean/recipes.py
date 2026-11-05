@@ -189,6 +189,9 @@ LATLON_RECIPES = {
         # the config default False (codex).
         "normalize_freshwater": True,
         "lateral_viscosity_mask_levels": "per_level",
+        # NEMO ORCA1 rn_shlat = 2 (dommsk.F90:209-215).
+        "lateral_side_bc": "nemo_shlat",
+        "lateral_shlat": 2.0,
     },
     # Oracle dycores — the canonical numerics of the runnable oracle models. SINGLE
     # SOURCE for the *_canonical_ocean_config factory defaults (the factories splat

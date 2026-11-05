@@ -469,6 +469,9 @@ def nemo_match_tripole_model_config(
     return LatLonCGridOceanConfig.from_flat(
         A_h=cfg.A_h,
         lateral_viscosity_mask_levels="per_level",
+        # NEMO ORCA1 rn_shlat = 2 (dommsk.F90:209-215).
+        lateral_side_bc="nemo_shlat",
+        lateral_shlat=2.0,
         A_v=cfg.A_v,
         K_v=cfg.K_v,
         B_h=cfg.B_h,

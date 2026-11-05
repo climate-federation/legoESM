@@ -152,6 +152,12 @@ class TestCatalogMatchesFactories:
         recipe = get_recipe("omip_nemo_match_tripole_v1", "latlon")
         assert recipe["lateral_viscosity_mask_levels"] == "per_level"
 
+    def test_omip_nemo_match_tripole_v1_selects_nemo_shlat(self):
+        """The production OMIP card runs NEMO ORCA1's rn_shlat = 2 side BC."""
+        recipe = get_recipe("omip_nemo_match_tripole_v1", "latlon")
+        assert recipe["lateral_side_bc"] == "nemo_shlat"
+        assert recipe["lateral_shlat"] == 2.0
+
 
 # The PROVEN OMIP MPAS ico6 dycore — a FROZEN snapshot of the scheme + coefficient
 # fields _create_setup("mpas") produced BEFORE the factory rewire (#500).  This is
@@ -185,11 +191,13 @@ _FROZEN_MPAS_DYCORE = {
 # serve 1 degree and 1/12 degree (measured, 1e5 puts ORCA12 26x over the
 # explicit Laplacian limit).  The anchor mesh still derives 1e5, gated against
 # the real eORCA1.2 file in test_lateral_viscosity_resolution_scaling.py.
-# The SST RMSE 1.15 was scored with surface masks; the per-level masks below
-# have not been re-scored.
+# The SST RMSE 1.15 was scored with surface masks and free-slip sides; the
+# current masks and side BC below have not been re-scored.
 _FROZEN_TRIPOLE_DYCORE = {
     "A_h": None,
     "lateral_viscosity_mask_levels": "per_level",
+    "lateral_side_bc": "nemo_shlat",
+    "lateral_shlat": 2.0,
     "A_v": 1.0e-4,
     "K_v": 1.0e-5,
     "B_h": 0.0,
