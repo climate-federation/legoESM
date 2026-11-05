@@ -900,6 +900,7 @@ def test_l4b_and_l6_geothermal_and_damping_validator_coupling_and_valid_pair_ste
         )
         l2_cfg = base_cfg._replace(
             implicit_vertical_mixing=False,
+            eos="nemo_eos80",   # ORCA2's own EOS (slope_n2='nemo_bn2')
             gm_redi=gm,
             physics=base_cfg.physics._replace(
                 vertical_mixing=VerticalMixingConfig(scheme="constant"),
@@ -968,8 +969,10 @@ def test_l4b_and_l6_geothermal_and_damping_validator_coupling_and_valid_pair_ste
         t_l4b_on = np.asarray(out_l4b_on.T.data).view(np.uint64)
         t_l4b_off = np.asarray(out_l4b_off.T.data).view(np.uint64)
         assert np.count_nonzero(t_l4b_on != t_l4b_off) == 6
-        assert t_l4b_on[1, 0, 2] == np.uint64(4625465393761942146)
-        assert t_l4b_off[1, 0, 2] == np.uint64(4625465393755890474)
+        # Re-pinned with the ORCA2 card's own EOS (nemo_eos80); the old values
+        # came from S-EOS slope N2 on a Wright-EOS fixture, now rejected.
+        assert t_l4b_on[1, 0, 2] == np.uint64(4625465393761867892)
+        assert t_l4b_off[1, 0, 2] == np.uint64(4625465393755816221)
 
         cfg_l6_on = cfg_l4b_on._replace(
             rk3_stage3_damping_after_geothermal_nemo_order=True,
@@ -982,10 +985,10 @@ def test_l4b_and_l6_geothermal_and_damping_validator_coupling_and_valid_pair_ste
         s_l4b_on = np.asarray(out_l4b_on.S.data).view(np.uint64)
         assert np.count_nonzero(t_l6_on != t_l4b_on) == 18
         assert np.count_nonzero(s_l6_on != s_l4b_on) == 18
-        assert t_l6_on[1, 0, 0] == np.uint64(4626479647477587073)
-        assert t_l4b_on[1, 0, 0] == np.uint64(4626466981215184375)
-        assert s_l6_on[1, 0, 0] == np.uint64(4630131660021248911)
-        assert s_l4b_on[1, 0, 0] == np.uint64(4630132926647489180)
+        assert t_l6_on[1, 0, 0] == np.uint64(4626479647477586594)
+        assert t_l4b_on[1, 0, 0] == np.uint64(4626466981215183895)
+        assert s_l6_on[1, 0, 0] == np.uint64(4630131660021248575)
+        assert s_l4b_on[1, 0, 0] == np.uint64(4630132926647488845)
     finally:
         set_policy(prev_policy)
 
@@ -1189,6 +1192,7 @@ def test_l4b_and_l6_geothermal_and_damping_validator_coupling_and_valid_pair_ste
         )
         l2_cfg = base_cfg._replace(
             implicit_vertical_mixing=False,
+            eos="nemo_eos80",   # ORCA2's own EOS (slope_n2='nemo_bn2')
             gm_redi=gm,
             physics=base_cfg.physics._replace(
                 vertical_mixing=VerticalMixingConfig(scheme="constant"),

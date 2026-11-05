@@ -145,28 +145,6 @@ def test_each_known_disagreement_is_still_real(name):
 # scheme's __param_spec__ and, where one exists, the driver's check.  Values
 # are NOT reconciled here; today's disagreements are listed, SHRINK-ONLY.
 _AIMIP_DISAGREE: dict[str, str] = {
-    "tiedtke_tau_M_u_relax":
-        "aimip (600.0, 14400.0) vs spec (600.0, 5400.0) vs driver None",
-    "tiedtke_tau_MC_proxy":
-        "aimip (1800.0, 28800.0) vs spec (1188.0, 10800.0) vs driver None",
-    "tiedtke_downdraft_alpha":
-        "aimip (0.05, 0.6) vs spec (0.0, 0.9) vs driver None",
-    "tiedtke_delta_deep":
-        "aimip (2e-05, 0.0005) vs spec (3.3e-05, 0.0003) vs driver None",
-    "tiedtke_delta_shallow":
-        "aimip (0.0001, 0.001) vs spec (9.9e-05, 0.0009) vs driver None",
-    "tiedtke_delta_midlevel":
-        "aimip (2e-05, 0.0005) vs spec (6.6e-05, 0.0006) vs driver None",
-    "tiedtke_cmt_c_u":
-        "aimip (0.3, 1.0) vs spec (0.0, 2.0) vs driver None",
-    "tiedtke_cmt_c_d":
-        "aimip (0.3, 1.0) vs spec (0.0, 2.0) vs driver None",
-    "tiedtke_parcel_dq":
-        "aimip (0.0001, 0.005) vs spec (0.0, 0.003) vs driver None",
-    "tiedtke_cloud_depth_shallow_max":
-        "aimip (500.0, 3000.0) vs spec (800.0, 2500.0) vs driver None",
-    "tiedtke_mc_proxy_RH_crit":
-        "aimip (0.4, 0.9) vs spec (0.3, 1.0) vs driver None",
     "louis_l_mix_max":
         "aimip (20.0, 400.0) vs spec (10.0, 300.0) vs driver None",
     "louis_Ri_crit":
@@ -216,11 +194,6 @@ _AIMIP_DISAGREE: dict[str, str] = {
 # check), so nothing is compared for them (user 2026-10-28, R10).  SHRINK-ONLY:
 # a new unchecked knob fails, and one that gains a range must leave the list.
 _AIMIP_UNCHECKED: frozenset[str] = frozenset({
-    "tiedtke_downdraft_RH_min",
-    "tiedtke_epsilon_deep",
-    "tiedtke_epsilon_shallow",
-    "tiedtke_epsilon_midlevel",
-    "tiedtke_parcel_dT",
     "mcfarlane_k_wave",
     "sundqvist_sigmoid_sharpness",
     "rrtmgp_sfc_emissivity",

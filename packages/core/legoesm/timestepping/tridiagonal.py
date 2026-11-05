@@ -83,6 +83,9 @@ def thomas_solve(
         (bottom-up elimination with reciprocal pivots, top-down back
         substitution), keeping the ``_TINY`` pivot clamp.  Caller: the E3SM
         gravity-wave eddy diffusion (``e3sm_cam.gw_diff_tend``).
+      * ``"lapack_dgtsv"`` transcribes reference LAPACK ``dgtsv``: Gaussian
+        elimination with partial pivoting between adjacent rows, no pivot
+        clamp.  Caller: CLUBB (``tridiag_solve_method = lapack``).
 
     Limitations (by design, not bugs):
       * The adjoint is the VJP of the IDEAL solve ``A⁻¹d``.  Where the forward
@@ -205,6 +208,51 @@ def _thomas_solve_impl(
             return x_k, x_k
 
         _, x = jax.lax.scan(lu_down, zero, (ze, zf))
+        x = jnp.moveaxis(x, 0, -1)
+        return jax.lax.convert_element_type(x, out_dtype)
+
+    if operation_order == "lapack_dgtsv":
+        # Reference LAPACK dgtsv (v3.x, NRHS=1): elimination with partial
+        # pivoting between rows i and i+1 (DL = a[1:], D = b, DU = c[:-1]),
+        # second super-diagonal fill in DL, then the back solve dividing by D.
+        # No pivot clamp: dgtsv returns INFO>0 on a zero pivot instead.
+        a_, b_, c_, d_ = (jnp.moveaxis(v, -1, 0)
+                          for v in jnp.broadcast_arrays(a, b, c, d))
+        if n == 1:
+            return jax.lax.convert_element_type(
+                jnp.moveaxis(d_[:1] / b_[:1], 0, -1), out_dtype)
+
+        def eliminate(carry, row):
+            di, dui, bi = carry
+            dli, d1, du1, b1 = row
+            keep = jnp.abs(di) >= jnp.abs(dli)
+            f_keep = dli / jnp.where(keep, di, 1.0)
+            f_swap = di / jnp.where(keep, 1.0, dli)
+            d_next = jnp.where(keep, d1 - f_keep * dui, dui - f_swap * d1)
+            du_next = jnp.where(keep, du1, -f_swap * du1)
+            b_next = jnp.where(keep, b1 - f_keep * bi, bi - f_swap * b1)
+            out = (jnp.where(keep, di, dli), jnp.where(keep, dui, d1),
+                   jnp.where(keep, 0.0, du1), jnp.where(keep, bi, b1))
+            return (d_next, du_next, b_next), out
+
+        du_up = jnp.concatenate([c_[1:n - 1], jnp.zeros_like(c_[:1])], axis=0)
+        (d_last, _, b_last), (dd, du, dl, bb) = jax.lax.scan(
+            eliminate, (b_[0], c_[0], d_[0]), (a_[1:], b_[1:], du_up, d_[1:]))
+        x_last = b_last / d_last
+        x_nm2 = (bb[-1] - du[-1] * x_last) / dd[-1]
+
+        def back(carry, row):
+            x1, x2 = carry
+            di, dui, dli, bi = row
+            xi = (bi - dui * x1 - dli * x2) / di
+            return (xi, x1), xi
+
+        if n == 2:
+            x = jnp.stack([x_nm2, x_last])
+        else:
+            _, xs = jax.lax.scan(back, (x_nm2, x_last),
+                                 (dd[:-1], du[:-1], dl[:-1], bb[:-1]), reverse=True)
+            x = jnp.concatenate([xs, x_nm2[None], x_last[None]], axis=0)
         x = jnp.moveaxis(x, 0, -1)
         return jax.lax.convert_element_type(x, out_dtype)
 

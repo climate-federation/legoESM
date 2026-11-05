@@ -170,7 +170,6 @@ SCM_MICROPHYSICS_SUBSTEP_SCHEMES = (
     "sundqvist",
     "seifert_beheng",
     "morrison",
-    "thompson",
     "p3",
 )
 DEFAULT_DAYS = 100.0
@@ -248,7 +247,8 @@ SCHEME_SWEEPS = {
         "holtslag_boville", "ysu", "edmf",
     ),
     "microphysics": (
-        "kessler", "sundqvist", "seifert_beheng", "morrison", "thompson",
+        # thompson (WRF port) needs the resolved w this campaign lacks
+        "kessler", "sundqvist", "seifert_beheng", "morrison",
         "p3",
     ),
     "gravity_wave_drag": (

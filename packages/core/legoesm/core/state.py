@@ -716,3 +716,26 @@ class MPASOceanTendencies(NamedTuple):
     dS_dt: Field
     deta_dt: Field
     F_slow_u: Field | None = None
+
+
+def with_dyn_tendencies(phys_state, state_before, state_after, dt):
+    """Write the dynamics tendencies a process-split step hands to physics.
+
+    ``dyn_tendency_T`` / ``dyn_tendency_qv`` = ``(state_after - state_before)
+    / dt`` in the state's own array layout (convection reshapes them like T).
+    ``state_before`` is the state just after the previous physics increment
+    and ``state_after`` the state physics now receives (post dycore energy
+    fixer), so ``dt`` spans the whole interval and only dynamics changes are
+    counted.  No-op when ``phys_state`` is None or the state carries no
+    ``q_v`` tracer (the consumers then raise).  Duck-typed on
+    ``phys_state._replace`` so core needs no physics import.
+    """
+    if phys_state is None:
+        return phys_state
+    tr_b, tr_a = state_before.tracers, state_after.tracers
+    if tr_b is None or tr_a is None or "q_v" not in tr_b or "q_v" not in tr_a:
+        return phys_state
+    inv_dt = 1.0 / dt
+    dT = (state_after.T.data - state_before.T.data) * inv_dt
+    dq = (tr_a["q_v"].data - tr_b["q_v"].data) * inv_dt
+    return phys_state._replace(dyn_tendency_T=dT, dyn_tendency_qv=dq)

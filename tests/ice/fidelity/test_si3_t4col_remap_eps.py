@@ -1,0 +1,108 @@
+"""C7: layer remap divides by MAX(zhnew, epsi20) like NEMO's ice_var_vremap (icevar.F90:1005-1031).
+
+Main returned 0 enthalpy for any new layer <= 1e-10 m.  In the tier-4 record (fixture
+c7_remap_eps) NEMO keeps e_i up to 8e10 J m-3 in columns of 3e-18..2e-17 m; the port reaches
+h_i = 0 exactly in those columns (roundoff-level thickness inside the C6 melt-order domain), so
+the literal row cannot isolate C7 there.  The oracle here is therefore a line-by-line numpy
+transliteration of ice_var_vremap, fed the fixture's recorded layer enthalpies on thin columns.
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from legoesm.ice import bitz_lipscomb as bl
+
+from si3_t4col_fixture import col, load
+
+jax.config.update("jax_enable_x64", True)
+FX = load("c7_remap_eps")
+EPSI20 = 1.0e-20
+
+
+def nemo_vremap(ph_old, pts_old):
+    """icevar.F90 ice_var_vremap, nlay_i = 3, ph_old/pts_old over 0:nlay_i+1 (content per segment)."""
+    nlay = 3
+    zh_cum0 = np.concatenate([[0.0], np.cumsum(ph_old)])
+    zts_cum0 = np.concatenate([[0.0], np.cumsum(pts_old)])
+    zhnew = np.sum(ph_old) * (1.0 / nlay)
+    zh_cum1 = np.array([zhnew * k for k in range(nlay + 1)])
+    zts_cum1 = np.zeros(nlay + 1)
+    for jk0 in range(1, nlay + 3):
+        for jk1 in range(1, nlay):
+            if zh_cum1[jk1] <= zh_cum0[jk0] and zh_cum1[jk1] > zh_cum0[jk0 - 1]:
+                zts_cum1[jk1] = (zts_cum0[jk0 - 1] * (zh_cum0[jk0] - zh_cum1[jk1])
+                                 + zts_cum0[jk0] * (zh_cum1[jk1] - zh_cum0[jk0 - 1])) / (zh_cum0[jk0] - zh_cum0[jk0 - 1])
+    zts_cum1[nlay] = zts_cum0[nlay + 2]
+    return np.array([max(0.0, zts_cum1[k] - zts_cum1[k - 1]) / max(zhnew, EPSI20) for k in range(1, nlay + 1)])
+
+
+def _cases():
+    e = col(FX, "dh:in:e_i")                     # recorded per-volume layer enthalpies [J m-3]
+    for total in (3e-21, 3e-20, 6e-20, 2.08e-17, 6.9e-18, 1e-12, 1e-10, 0.37):   # below/at/above epsi20*3
+        for row in e:
+            h = np.array([0.0, total / 3, total / 3, total / 3 * 0.5, total / 3 * 0.5])   # last = basal new ice
+            yield h, np.array([0.0, row[0], row[1], row[2], row[2] * 1.01])
+
+
+def test_remap_matches_nemo_vremap_on_thin_and_normal_columns():
+    for h, e in _cases():
+        port = np.asarray(bl._piecewise_remap(jnp.asarray(h), jnp.asarray(e), jnp.asarray(h.sum())))
+        ref = nemo_vremap(h, h * e)
+        np.testing.assert_allclose(port, ref, rtol=1e-12, atol=0.0)
+        if h.sum() / 3 <= EPSI20:                   # floor binds: content / epsi20
+            np.testing.assert_allclose(port.sum(), np.sum(h * e) / EPSI20, rtol=1e-12)
+        assert ref.max() > 0                       # the thin columns keep their enthalpy
+
+
+def test_remap_conserves_column_enthalpy_including_thin_columns():
+    for h, e in _cases():
+        port = np.asarray(bl._piecewise_remap(jnp.asarray(h), jnp.asarray(e), jnp.asarray(h.sum())))
+        if h.sum() / 3 > EPSI20:                    # content conserved wherever the floor does not bind
+            np.testing.assert_allclose(np.sum(port) * h.sum() / 3, np.sum(h * e), rtol=1e-12, atol=0.0)
+
+
+def test_remap_zero_column_is_zero_and_gradient_finite_at_thin_column():
+    z = jnp.zeros(5)
+    assert float(jnp.max(jnp.abs(bl._piecewise_remap(z, z + 3e8, jnp.asarray(0.0))))) == 0.0
+    h0, e0 = next(_cases())
+    f = lambda t: jnp.sum(bl._piecewise_remap(jnp.asarray(h0) * t, jnp.asarray(e0), jnp.sum(jnp.asarray(h0) * t)))  # noqa: E731
+    g = jax.grad(f)(1.0)
+    assert bool(jnp.isfinite(g))
+    ge = jax.grad(lambda e: jnp.sum(bl._piecewise_remap(jnp.asarray(h0), e, jnp.asarray(h0.sum()))))(jnp.asarray(e0))
+    assert bool(jnp.all(jnp.isfinite(ge))) and float(jnp.abs(ge).max()) > 0
+    gz = jax.grad(lambda t: jnp.sum(bl._piecewise_remap(z * t, z + 3e8, jnp.sum(z * t))))(1.0)
+    assert bool(jnp.isfinite(gz))
+
+
+def test_remap_reverse_pass_finite_in_fp32_at_zero_and_thin_columns():
+    for h_layer in (0.0, 1e-21, 1e-20, 3e-20, 1e-18, 1e-6):   # incl. at/below the epsi20 floor
+        h = jnp.asarray([0.0, h_layer, h_layer, h_layer, 0.0], jnp.float32)
+        e = jnp.full(5, 3e8, jnp.float32)
+        gt = jax.grad(lambda t: jnp.sum(bl._piecewise_remap(h * t, e, jnp.sum(h * t))))(jnp.asarray(1.0, jnp.float32))
+        gh = jax.grad(lambda hh: jnp.sum(bl._piecewise_remap(hh, e, jnp.sum(hh))))(h)
+        assert bool(jnp.isfinite(gt)) and bool(jnp.all(jnp.isfinite(gh))), h_layer
+
+
+def test_remap_fp32_gradient_matches_fp64_under_jit():
+    """Review: uniform thickness scaling leaves per-volume enthalpy unchanged -> gradient ~0 (fp32 vs fp64)."""
+    for h_layer in (1.0, 1e-3, 1e-12, 1e-16, 1e-18, 1e-21):
+        out = {}
+        for dt in (jnp.float32, jnp.float64):
+            h = jnp.asarray([0.0, h_layer, h_layer, h_layer, 0.0], dt)
+            e = jnp.asarray([0.0, 3e8, 2.9e8, 2.8e8, 0.0], dt)
+            f = jax.jit(jax.grad(lambda t: jnp.sum(bl._piecewise_remap(h * t, e, jnp.sum(h * t)))))
+            out[dt] = float(f(jnp.asarray(1.0, dt)))
+        assert np.isfinite(out[jnp.float32]), (h_layer, out)
+        if h_layer >= 1e-12:      # sub-1e-15 m fp32 gradients are finite but not accurate (PR body)
+            assert abs(out[jnp.float32] - out[jnp.float64]) <= 1e-6 * 8.7e8, (h_layer, out)
+
+
+def test_epsi20_floor_never_binds_above_its_value():
+    """The hard floor is a pure numerics guard: for every layer >= 1e-20 m the result is content/dz."""
+    for h_layer in (1e-20, 1e-17, 1e-15, 1e-3):
+        h = jnp.asarray([0.0, h_layer, h_layer, h_layer, 0.0])
+        e = jnp.asarray([0.0, 3e8, 2.9e8, 2.8e8, 0.0])
+        np.testing.assert_allclose(np.asarray(bl._piecewise_remap(h, e, jnp.sum(h))), [3e8, 2.9e8, 2.8e8], rtol=1e-14)

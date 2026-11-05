@@ -267,7 +267,9 @@ def _np_rho_air(T_abs, q, p):
 
 
 def _np_cd_n10(w):
-    w = np.maximum(w, 0.5)
+    # NEMO cd_n10_ncar (sbcblk_algo_ncar.F90:242-255) has no wind floor: the
+    # caller floors (0.5 first guess, 0.25 iterated UN10).  A 0.5 floor here
+    # mirrored legoESM's tier-3 BLK D1 defect instead of NEMO.
     cd = (2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w ** 6) * 1e-3
     cd = np.where(w >= 33.0, 2.34e-3, cd)
     return np.maximum(cd, 0.1e-3)
@@ -403,10 +405,8 @@ def test_full_flux_path_matches_independent_numpy_mirror():
     q = rng.uniform(2e-4, 0.020, n)
     slp = rng.uniform(96000.0, 104000.0, n)
     # Keep q within w = q/q_sat <= 1.5 (up to 150% RH): the random draw can
-    # otherwise pair cold air with tropical humidity (w ~ 9, unphysical),
-    # where the implementation's w<=2 garbage guard INTENTIONALLY departs
-    # from the unclipped Fortran mirror.  Supersaturation parity has its own
-    # dedicated test (q = 1.3 q_sat).
+    # otherwise pair cold air with tropical humidity (w ~ 9, unphysical).
+    # Supersaturation parity has its own dedicated test (q = 1.3 and 7 q_sat).
     q = np.minimum(q, 1.5 * _np_q_sat(T_air, slp))
     u = rng.uniform(-20.0, 20.0, n)
     v = rng.uniform(-20.0, 20.0, n)
@@ -686,10 +686,10 @@ def test_record_object_sign_treats_negative_zero_as_positive():
 
 
 def test_pressure_at_height_supersaturated_matches_unclipped_nemo():
-    """SUPERSATURATED air (q = 1.3 q_sat, RH 130%): the implementation must
-    still match the UNCLIPPED NEMO formula bit-for-bit — the garbage guard
-    clips only at w > 2, beyond any physical supersaturation (codex
-    round-2 MED: a clip at 1.0 would silently diverge from NEMO here)."""
+    """SUPERSATURATED air: the implementation matches NEMO's UNCLIPPED
+    pres_temp (sbc_phy.F90:275).  q = 1.3 q_sat (RH 130%) and q = 7 q_sat
+    (the largest q/q_sat on the tier-3 ORCA1 record, wet or land; the old
+    w <= 2 clip departed from NEMO there, BLK D3)."""
     T, slp = 275.0, 101000.0
     q_sat0 = float(_np_q_sat(np.float64(T), np.float64(slp)))
     q_super = 1.3 * q_sat0
@@ -698,10 +698,12 @@ def test_pressure_at_height_supersaturated_matches_unclipped_nemo():
     p_ref = float(_np_pres_temp(np.float64(q_super), np.float64(slp), 10.0,
                                 np.float64(T)))
     assert p_impl == pytest.approx(p_ref, rel=1e-13)
-    # and the guard still protects true garbage (land cell at the T floor)
-    p_junk = float(pressure_at_height(
-        jnp.asarray(0.01), jnp.asarray(slp), 10.0, jnp.asarray(150.0)))
-    assert np.isfinite(p_junk) and 0.0 < p_junk <= slp
+    q_record_max = 7.0 * q_sat0
+    p_impl = float(pressure_at_height(
+        jnp.asarray(q_record_max), jnp.asarray(slp), 10.0, jnp.asarray(T)))
+    p_ref = float(_np_pres_temp(np.float64(q_record_max), np.float64(slp),
+                                10.0, np.float64(T)))
+    assert p_impl == pytest.approx(p_ref, rel=1e-13)
 
 
 def test_pressure_at_height_and_exner_theta():
