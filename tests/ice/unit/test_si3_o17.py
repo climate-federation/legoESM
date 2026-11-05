@@ -38,7 +38,7 @@ REPO = Path(__file__).resolve().parents[3]
 # Eager binary64 digests of the 7x7 mixed-regime card (one aEVP subcycle) after
 # Resume 5.  Any code revert of a composed statement changes them.
 PROBE_SHA256 = "7e6ff54def6cdd1b6ba878431687a00c7627e50d37af7824ee8d32481ff6ebbe"
-FULL_SHA256 = "671efb4a3427c0c84f7a23d6b9f2ce25ce58d6981cf109724d0bed00eea29102"
+FULL_SHA256 = "46317520de43e28ead25d27239c5d0dc05fe7dde92087f6594f59c317a74c16d"
 
 
 def _leaf_rows(tree):
@@ -422,6 +422,48 @@ def test_o17_full_step_production_invariants(mixed, full_baseline) -> None:
             SI3O17LiveForcing(1, *forcing[1:]),
             card._replace(ln_ice_embd=True),
         )
+
+
+def test_o17_remap_uses_direct_before_volume_area_quotient(mixed, monkeypatch) -> None:
+    """The remap receives NEMO's direct v_i_b/a_i_b snapshot, not reciprocal multiplication."""
+    entry, forcing, card = mixed
+    real_glo2eqv = o17_mod.si3_var_glo2eqv
+    captured = {}
+
+    class RemapReachedError(Exception):
+        pass
+
+    def record_glo2eqv(**kwargs):
+        result = real_glo2eqv(**kwargs)
+        if kwargs["kn"] == 2:
+            h = card.state.nn_hls
+            owned = (slice(h, -h), slice(h, -h))
+            captured["v_i_b"] = kwargs["v_i"][owned]
+            captured["a_i_b"] = result.a_i[owned]
+            captured["reciprocal_h_i_b"] = result.h_i[owned]
+        return result
+
+    def record_remap(**kwargs):
+        captured["remap_h_i_b"] = kwargs["h_i_b"]
+        raise RemapReachedError
+
+    monkeypatch.setattr(o17_mod, "si3_var_glo2eqv", record_glo2eqv)
+    monkeypatch.setattr(o17_mod, "si3_ice_itd_rem", record_remap)
+    with pytest.raises(RemapReachedError):
+        _run(entry, forcing, card)
+
+    present = captured["a_i_b"] >= card.constants.epsi20
+    direct_h_i_b = jnp.where(
+        present,
+        captured["v_i_b"] / jnp.where(present, captured["a_i_b"], 1.0),
+        0.0,
+    )
+    direct_bits = np.asarray(direct_h_i_b).view(np.uint64)
+    reciprocal_bits = np.asarray(captured["reciprocal_h_i_b"]).view(np.uint64)
+    assert np.any(direct_bits != reciprocal_bits), "fixture must resolve at least one ULP"
+    np.testing.assert_array_equal(
+        np.asarray(captured["remap_h_i_b"]).view(np.uint64), direct_bits
+    )
 
 
 def test_o17_inactive_category_open_water_snowfall_nan_fix_and_plant(monkeypatch) -> None:

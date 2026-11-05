@@ -551,7 +551,7 @@ measured on the reviewed parent before its correction was accepted.
    `src/ICE/icethd.F90:438-526`. The production entry now applies that same
    predicate, source-rounded layer scaling, safe inactive dummies, and
    selected scatter (`packages/ice/legoesm/ice/si3_o17.py:395-473`,
-   `packages/ice/legoesm/ice/si3_thd_pnd.py:865-874,955-1003`). Repeating the
+   `packages/ice/legoesm/ice/si3_thd_pnd.py:865-874,955-1006`). Repeating the
    complete step produced zero non-finite trace, flux, or output leaves.
 
 3. **Production dynamics selector.** The shipped deck says
@@ -1694,6 +1694,116 @@ inputs at `22af29b743a8`)*
 
 independent review: operator
 
+## O17 thermodynamics composition fixes D1, D2
+
+Date: 2026-11-05. Base: `23d39a9bc7eaf260be49f60aed42142953da2047`
+(clean SI3 lane merge). No NEMO executable was run and the admitted record remained
+read-only.
+
+Two measured composition defects were corrected without adding a selector or changing
+a default:
+
+- **D1, DH -> DA flux carry.** `si3_ice_thd_o12_stages` now gives
+  `si3_ice_thd_da` the DH-updated `dh.fluxes.hfx_thd`, matching the executed NEMO
+  order in `icethd.F90` and `icethd_da.F90`. The direct `6 x 6` traced-tile test
+  observes the actual DA call, proves the DH value differs bitwise from the stale
+  entry flux, proves DA receives the DH value bit for bit, and proves substituting
+  the stale value changes the DA result. Fixed: `1 passed in 289.77s`. In isolated
+  scratch copy `d1_revert.sMABeq`, reverting only D1 makes that same test fail on
+  all `36 / 36` values (`1 failed in 301.35s`).
+- **D2, before-remap thickness.** The O17 composition computes the saved
+  before-remap thickness directly as `v_i_b / a_i_b`, before the remap, instead
+  of reusing the reciprocal-multiplied equivalent thickness. The small mixed
+  production tile proves the two formulations differ by at least one binary64
+  ULP and observes the actual remap input. Fixed: `1 passed in 305.84s`. In
+  isolated scratch copy `d2_revert.ShPELa`, reverting only D2 makes the same test
+  fail on `5 / 45` values, each by exactly one bit in the `uint64` view
+  (`1 failed in 294.03s`).
+
+All commands below used this prefix (and every command was additionally bounded by
+`timeout 1500`):
+
+```bash
+env TMPDIR=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_thdfix_scratch \
+  CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
+  PYTHONPATH=.:packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src \
+  /home/dbalwada/legoESM/.venv/bin/python
+```
+
+### MEASURED fidelity and regression results
+
+The merged production composition scorer, eager, scored the read-only real ORCA2
+record at GIVEN-NEMO-ENTRY with **zero differing values, zero non-finite values,
+and `max_relative = 0.0`** at each requested step:
+
+| Step | Verdict | Wall time (s) | Report |
+|---:|---|---:|---|
+| 1 | `PASS`, 0 differences | 1175.4967863 | `o17_step1_eager.json` |
+| 2 | `PASS`, 0 differences | 1257.8526021 | `o17_step2_eager.json` |
+| 3 | `PASS`, 0 differences | 1280.0754074 | `o17_step3_eager.json` |
+| 50 | `PASS`, 0 differences | 1220.4446083 | `o17_step50_eager.json` |
+
+The command was run once for each `N` in `1 2 3 50`:
+
+```bash
+scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py \
+  --evidence /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step \
+  --labels GIVEN-NEMO-ENTRY --execution eager --expect-steps 100 --steps N..N \
+  --out /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_thdfix_scratch/o17_stepN_eager.json
+```
+
+The admitted O8--O16 master record was rescored, unchanged, for steps `1..2`:
+
+```bash
+scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py --rung O8-O13 --steps 1..2 --output-json .../o8_o13_steps1_2.json
+scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py --rung O13 --steps 1..2 --output-json .../o13_steps1_2.json
+scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py --rung O14 --steps 1..2 --output-json .../o14_steps1_2.json
+scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py --rung O15-O16 --steps 1..2 --output-json .../o15_o16_steps1_2.json
+```
+
+The respective final statuses were `PASS_ALL_O8_O13_0_ULP`, `PASS_O13_0_ULP`,
+`PASS_O14_0_ULP`, and `PASS_ALL_O15_O16_0_ULP`.
+
+The real-grid step-1 JIT command was identical to the eager command except for
+`--execution jit --steps 1..1 --out .../o17_step1_jit.json`. Because eager is
+bitwise identical to the NEMO record, the JIT-to-record comparison is also the
+JIT-to-eager comparison. It is **not accepted by DECISION 200**: `FAIL`, `1513`
+finite numeric differences in `44` fields, `0` signed-zero-only differences,
+`0` non-finite/NaN differences, and `max_relative = 1.9021217570415877e-13`.
+The non-accepted fields were:
+
+```text
+after_rdgrft: a_i, szv_i, wfx_dyn, sfx_dyn, hfx_dyn
+after_dyn_cor: a_i, szv_i
+after_thermo: v_i, v_s, sv_i, a_i, t_su, oa_i, a_ip, v_ip, e_s, e_i,
+              szv_i, t_si
+step_exit: v_i, v_s, sv_i, a_i, t_su, oa_i, a_ip, v_ip, e_s, e_i, szv_i,
+           t_si, wfx_snw, wfx_pnd, wfx_dyn, sfx_bom, sfx_bri, sfx_dyn,
+           hfx_dif, hfx_err_dif, hfx_sub, hfx_dyn, qns, emp, sfx
+```
+
+Focused test commands and measured results:
+
+```text
+pytest tests/ice/unit/test_si3_d194_traced_loops.py -q
+pytest tests/ice/unit/test_si3_d198_icecor_traced.py -q        -> 2 passed in 21.57s
+pytest tests/ice/unit/test_si3_d198_prather_traced.py -q       -> 2 passed in 299.49s
+pytest tests/ice/unit/test_si3_d198_rdgrft_traced.py -q        -> 2 passed in 150.06s
+pytest tests/ice/unit/test_si3_d198_r5_var_agg_o15_traced.py -q -> 4 passed in 48.88s
+pytest tests/ice/unit/test_si3_o17.py -k test_o17_inactive_category_open_water_snowfall_nan_fix_and_plant -q
+  -> 1 passed, 22 deselected in 105.01s
+pytest tests/ice/unit/test_si3_o17.py -k test_o17_newly_guarded_outputs_reverse_mode_matches_central_differences_and_plants -q
+  -> 1 passed, 22 deselected in 152.65s
+```
+
+The final full-file D194 rerun passed (`4 passed in 828.69s`). The refreshed O17
+production-invariant digest is
+`46317520de43e28ead25d27239c5d0dc05fe7dde92087f6594f59c317a74c16d`, and its
+direct node rerun passed (`1 passed in 318.76s`). After live-source re-anchoring,
+`LEGOESM_GATE_ALLOW_DIRTY=1 pytest tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py -q`
+passed (`45 passed in 9.44s`); the scoped dirty stamp is required because the
+operator, rather than this agent, commits the completed worktree.
+
 ## DECISION 198 round 5 — traced `si3_var_agg(kn=2)` and `si3_o15_step` loops
 
 ### Summary of changes (`3dd560f7f05f` -> Round 5)
@@ -2259,10 +2369,10 @@ The composition scorer (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_
 
 - **Retraction of split free-run step ranges (Resume 2 Finding 1):** The Round-1 `exit_state` helper has been removed. In free-run mode (`free_run`, or `score` when `"INDEPENDENT"` is in `labels`), restarting a range `START > 1` from NEMO's recorded state would reset an early trajectory divergence back to NEMO rather than carrying our own trajectory. The free run is inherently serial: `free_run` (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:758-877`) refuses any `step_range` other than one contiguous range `1..target_steps` starting at step `1`, `score` (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:675-755`) refuses any `step_range` with `start != 1` when `"INDEPENDENT"` is in `labels`, and `merge_reports` (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:552-672`) refuses `FREE_RUN` reports and multi-range reports containing `INDEPENDENT`. Step ranges (`--steps START..END`) and `--merge` are restricted to per-step scoring (`PER_STEP_LABELS = ("GIVEN-NEMO-ENTRY",)`, `scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:450-456` and `scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:886-949`).
 - `merge_reports` (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:552-672`) verifies that every step in `1..expect_steps` is present once across all ranks, recomputes per-field, per-step, per-label, and top-level `PASS`/`FAIL` verdicts with the exact serial rules, and refuses any missing step (`O17 merge requires steps 1..N; missing=[...]`) or duplicated step (`duplicate O17 step(s) in merge: [...]`).
-- Verified on the model-built 2-step synthetic record (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_synthetic_record.py:157-202` and `tests/ice/unit/test_si3_o17.py:545-729`):
-  - **Parent `94a4069d61` serial byte identity (Resume 2 Finding 2):** Loading the parent scorer from `94a4069d61:scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py` (`_load_parent_scorer_94a4069d61`, `tests/ice/unit/test_si3_o17.py:545-613`) and running both `parent_scorer.score` and the new scorer's default serial `scorer.score` on the same 2-step synthetic record produces byte-for-byte identical JSON reports (`138,424` bytes, `sha256 = 0998de68d2b0869cbb72915767d9e7b73cbc251f62050fda7bfa1ed972fd59b3`) with the three named timing fields (`scorer_wall_seconds`, `scorer_rss_kib_after_each_step`, `scorer_peak_rss_kib`) excepted (`strip_timing`), and byte-for-byte identical full JSON reports when `time.monotonic` and `_rss_kib` are monkeypatched identically on both modules.
+- Verified on the model-built 2-step synthetic record (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_synthetic_record.py:157-202` and `tests/ice/unit/test_si3_o17.py:587-771`):
+  - **Parent `94a4069d61` serial byte identity (Resume 2 Finding 2):** Loading the parent scorer from `94a4069d61:scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py` (`_load_parent_scorer_94a4069d61`, `tests/ice/unit/test_si3_o17.py:587-655`) and running both `parent_scorer.score` and the new scorer's default serial `scorer.score` on the same 2-step synthetic record produces byte-for-byte identical JSON reports (`138,424` bytes, `sha256 = 0998de68d2b0869cbb72915767d9e7b73cbc251f62050fda7bfa1ed972fd59b3`) with the three named timing fields (`scorer_wall_seconds`, `scorer_rss_kib_after_each_step`, `scorer_peak_rss_kib`) excepted (`strip_timing`), and byte-for-byte identical full JSON reports when `time.monotonic` and `_rss_kib` are monkeypatched identically on both modules.
   - Scoring per-step ranges (`PER_STEP_LABELS = ("GIVEN-NEMO-ENTRY",)`) on `--steps 1..1` and `--steps 2..2` separately and merging via `merge_reports` equals the serial per-step report (`strip_timing(merged) == strip_timing(serial_per_step)`, `split_merge_equals_serial = true`) for both the passing identical record and a planted 1-ULP `FAIL` record.
-  - Split free-run ranges (`free_run(..., step_range=(2, 2))`, `free_run(..., step_range=(1, 1))` on a 2-step run, `score(..., VALID_LABELS, step_range=(2, 2))`, and `merge_reports` on multi-range `INDEPENDENT` reports) are refused with `ValueError` (`split_free_run_refused = true`). On the early-divergence plant (`state + 2.0` vs `expected = float(kt)`), `parent_scorer.score` (`94a4069d61`), serial `scorer.score` (`INDEPENDENT`), and serial `scorer.free_run` all produce the exact same step-2 `max_relative = 1.0` (`tests/ice/unit/test_si3_o17.py:627-697`).
+  - Split free-run ranges (`free_run(..., step_range=(2, 2))`, `free_run(..., step_range=(1, 1))` on a 2-step run, `score(..., VALID_LABELS, step_range=(2, 2))`, and `merge_reports` on multi-range `INDEPENDENT` reports) are refused with `ValueError` (`split_free_run_refused = true`). On the early-divergence plant (`state + 2.0` vs `expected = float(kt)`), `parent_scorer.score` (`94a4069d61`), serial `scorer.score` (`INDEPENDENT`), and serial `scorer.free_run` all produce the exact same step-2 `max_relative = 1.0` (`tests/ice/unit/test_si3_o17.py:669-739`).
   - Merging with step 1 or step 2 omitted raises `ValueError` (`missing_step_refused = true`), and merging with step 1 or step 2 duplicated raises `ValueError` (`duplicated_step_refused = true`).
 
 ### (B) Carried-state free run (`--free-run`) and `CARRIED` vs `EXTERNAL` input classification
@@ -2273,7 +2383,7 @@ Read-only inspection of steps 1 and 2 of the real NEMO record `/data/abyssal/dba
 
 #### Complete classification of every `si3_o17_step` input (`CARRIED`, `EXTERNAL`, `RESET AT STEP ENTRY`, `RECOMPUTED IN-STEP`)
 
-Every input leaf of `si3_o17_step(entry: SI3O17StepState, forcing: SI3O17LiveForcing, card: SI3O17Card)` (`packages/ice/legoesm/ice/si3_o17.py:559-568` and `packages/ice/legoesm/ice/si3_o17.py:1131-1145`) has been re-checked against NEMO 5.0.2 source (Resume 2 Finding 3; `DECISION_NEEDED: none`).
+Every input leaf of `si3_o17_step(entry: SI3O17StepState, forcing: SI3O17LiveForcing, card: SI3O17Card)` (`packages/ice/legoesm/ice/si3_o17.py:559-568` and `packages/ice/legoesm/ice/si3_o17.py:1138-1152`) has been re-checked against NEMO 5.0.2 source (Resume 2 Finding 3; `DECISION_NEEDED: none`).
 
 | Input path in `si3_o17_step` | Class | Record kind (`kt=1` / `kt>=2`) | NEMO 5.0.2 source and `si3_o17_step` behavior |
 |---|---|---|---|
@@ -2289,12 +2399,12 @@ Every input leaf of `si3_o17_step(entry: SI3O17StepState, forcing: SI3O17LiveFor
 | `entry.ice.t_si` `(jpi,jpj,jpl)` | `RESET AT STEP ENTRY (NOT CARRIED)` | Kind 22 at `kt=1`; `prev_out.ice.t_si` passed at `kt>=2` and immediately reset on `owned` to `rt0` | Allocated on `A2D(0)` (`src/ICE/ice.F90:451`) and reset to `rt0` across all `A2D(0)` points at the start of every step in `diag_set0` (`src/ICE/icestp.F90:164` and `src/ICE/icestp.F90:485-493`), then written on active ice points in `ice_thd_zdf_BL99` (`src/ICE/icethd_zdf_bl99.F90:860-869`) and scattered in `src/ICE/icethd.F90:163,518`. In `si3_o17_step`, `state.t_si.at[owned].set(card.constants.T0)` (`packages/ice/legoesm/ice/si3_o17.py:587-589`) resets `t_si[owned]` to `rt0` at step entry before any kernel reads `t_si` (halo cells remain `0.0`, are never read, and are sliced out by `compare`), so `free_run` is unaffected. |
 | `entry.ice.cnd_ice` `(jpi,jpj,jpl)` | `RESET AT STEP ENTRY / UNUSED IN SAS (NOT CARRIED)` | `0.0` at `kt=1`; `prev_out.ice.cnd_ice` (`0.0`) at `kt>=2` | Allocated on `A2D(0)` (`src/ICE/ice.F90:414`), reset to `0._wp` at the start of every step in `diag_set0` (`src/ICE/icestp.F90:164` and `src/ICE/icestp.F90:485-493`), written in `src/ICE/icethd_zdf_bl99.F90:842-850` and `src/ICE/icethd.F90:438-526`, and only read by `sbc_cpl_snd` (`src/OCE/SBC/sbccpl.F90:2485-2498`, `ln_cpl=T`). Never read or written in `si3_o17_step`, so `free_run` is unaffected. |
 | `entry.ice.t1_ice` `(jpi,jpj,jpl)` | `COUPLED-ONLY DIAGNOSTIC / UNUSED IN SAS (NOT CARRIED)` | `0.0` at `kt=1`; `prev_out.ice.t1_ice` (`0.0`) at `kt>=2` | Allocated on `A2D(0)` (`src/ICE/ice.F90:198-199` and `src/ICE/ice.F90:414`), written on active ice points in `src/ICE/icethd_zdf_bl99.F90:842-850` and `src/ICE/icethd.F90:438-526`, and only read by `sbc_cpl_snd` (`src/OCE/SBC/sbccpl.F90:2302-2309`, `ln_cpl=T`). Never read or written in `si3_o17_step`, so `free_run` is unaffected. |
-| `entry.ice.snwice_mass`, `entry.ice.snwice_mass_b`, `entry.ice.snwice_fmass` `(jpi,jpj)` | `CARRIED` | Kind 22 at `kt=1`; `prev_out.ice.(snwice_mass,snwice_mass_b,snwice_fmass)` at `kt>=2` (scored vs kinds 24, 27, 28) | `SAVE` module arrays in `src/OCE/SBC/sbc_ice.F90:125` and `src/OCE/SBC/sbc_ice.F90:217-219`, updated at step exit by `ice_update_flx` (`src/ICE/iceupdate.F90:189-194`, `packages/ice/legoesm/ice/si3_o17.py:1118-1123`); `snwice_mass` and `snwice_mass_b` are read in `ice_var_sshdyn` (`src/ICE/icedyn_rhg_evp.F90:268`) and `ice_update_flx`, while `snwice_fmass` persists in module memory across kinds `24` (`after_advection`) and `27` (`after_thermo`) until `ice_update_flx` updates it at kind `28`. |
+| `entry.ice.snwice_mass`, `entry.ice.snwice_mass_b`, `entry.ice.snwice_fmass` `(jpi,jpj)` | `CARRIED` | Kind 22 at `kt=1`; `prev_out.ice.(snwice_mass,snwice_mass_b,snwice_fmass)` at `kt>=2` (scored vs kinds 24, 27, 28) | `SAVE` module arrays in `src/OCE/SBC/sbc_ice.F90:125` and `src/OCE/SBC/sbc_ice.F90:217-219`, updated at step exit by `ice_update_flx` (`src/ICE/iceupdate.F90:189-194`, `packages/ice/legoesm/ice/si3_o17.py:1125-1130`); `snwice_mass` and `snwice_mass_b` are read in `ice_var_sshdyn` (`src/ICE/icedyn_rhg_evp.F90:268`) and `ice_update_flx`, while `snwice_fmass` persists in module memory across kinds `24` (`after_advection`) and `27` (`after_thermo`) until `ice_update_flx` updates it at kind `28`. |
 | `entry.ice.prather.*` (55 moment arrays across 11 families: `ice, snw, a, s, age, ap, vp, vl, c0, e, si`) | `CARRIED` | Kind 29 at `kt=1`; `prev_out.ice.prather` at `kt>=2` (scored vs kind 30) | Updated in SI3 by Prather advection (`src/ICE/icedyn_adv_pra.F90:219-247` and `src/ICE/icedyn_adv_pra.F90:438-482`). |
 | `entry.ice.bounds.(hi_max, hi_mean)` `(jpl+1,), (jpl,)` | `CARRIED` | Kind 22 at `kt=1`; `prev_out.ice.bounds` at `kt>=2` | Initialized in `ice_itd_init` (`src/ICE/iceitd.F90:715-769`) and carried unchanged on `SI3State.bounds`. |
 | `entry.ice.equivalent.*` (`h_i, h_s, o_i, h_ip, h_il, a_ip_frac, a_ip_eff, s_i, sz_i, t_i, t_s, a_i, v_s`) | `RECOMPUTED IN-STEP (NOT CARRIED)` | Reconstructed via `ice_var_glo2eqv(2)` at `kt=1`; `prev_out.ice.equivalent` passed at `kt>=2` and overwritten before use | Recomputed in-step after dynamics by `CALL ice_var_glo2eqv(2)` (`src/ICE/icestp.F90:182`, `src/ICE/icevar.F90:255-428`). In `si3_o17_step`, dynamics (`si3_dyn_orca2`, `si3_ice_cor_dyn`) recomputes pre-advection thicknesses from extensive volumes/areas and `si3_var_glo2eqv(kn=2)` overwrites `state.equivalent` at `packages/ice/legoesm/ice/si3_o17.py:744-760` before surface fluxes and thermodynamics, so `free_run` is unaffected. |
-| `entry.ice.aggregated.(tm_su, vt_i, vt_s, vt_ip, vt_il, ato_i)` | `CARRIED` | Reconstructed via `ice_var_agg(2)` at `kt=1`; `prev_out.ice.aggregated.(tm_su,vt_i,vt_s,vt_ip,vt_il,ato_i)` at `kt>=2` | Computed at the end of step `kt - 1` by `CALL ice_var_agg(2)` (`src/ICE/icestp.F90:211`, `src/ICE/icevar.F90:105-252`, `packages/ice/legoesm/ice/si3_o17.py:1110-1117`) and read at the start of step `kt` by `blk_ice_1` (`src/ICE/icestp.F90:159`, `src/ICE/icesbc.F90:85-87`), `ice_dyn_rhg_evp` (`src/ICE/icedyn_rhg_evp.F90:283-285`), and `ice_dyn_adv_pra` (`src/ICE/icedyn_adv_pra.F90:219-247`) before `CALL ice_var_agg(1)` runs at `src/ICE/icestp.F90:183`. |
-| `entry.ice.aggregated.(at_i, at_ip, et_s, et_i, at_ip_eff, st_i, hm_i, hm_s, tm_si, om_i, sm_i, tm_i, tm_s, hm_ip, hm_il)` | `RECOMPUTED IN-STEP (NOT CARRIED)` | Reconstructed via `ice_var_agg(2)` at `kt=1`; `prev_out.ice.aggregated` passed at `kt>=2` and overwritten before use | Recomputed in-step by `CALL ice_var_agg(1)` (`src/ICE/icestp.F90:183`, `packages/ice/legoesm/ice/si3_o17.py:761-781`) and `CALL ice_var_agg(2)` (`src/ICE/icestp.F90:211`, `packages/ice/legoesm/ice/si3_o17.py:1110-1117`); none of these 15 fields on `entry.ice.aggregated` is read by any scored output before `si3_var_agg(kn=1)` overwrites `state.aggregated` at `packages/ice/legoesm/ice/si3_o17.py:761-781`, so `free_run` is unaffected. |
+| `entry.ice.aggregated.(tm_su, vt_i, vt_s, vt_ip, vt_il, ato_i)` | `CARRIED` | Reconstructed via `ice_var_agg(2)` at `kt=1`; `prev_out.ice.aggregated.(tm_su,vt_i,vt_s,vt_ip,vt_il,ato_i)` at `kt>=2` | Computed at the end of step `kt - 1` by `CALL ice_var_agg(2)` (`src/ICE/icestp.F90:211`, `src/ICE/icevar.F90:105-252`, `packages/ice/legoesm/ice/si3_o17.py:1117-1124`) and read at the start of step `kt` by `blk_ice_1` (`src/ICE/icestp.F90:159`, `src/ICE/icesbc.F90:85-87`), `ice_dyn_rhg_evp` (`src/ICE/icedyn_rhg_evp.F90:283-285`), and `ice_dyn_adv_pra` (`src/ICE/icedyn_adv_pra.F90:219-247`) before `CALL ice_var_agg(1)` runs at `src/ICE/icestp.F90:183`. |
+| `entry.ice.aggregated.(at_i, at_ip, et_s, et_i, at_ip_eff, st_i, hm_i, hm_s, tm_si, om_i, sm_i, tm_i, tm_s, hm_ip, hm_il)` | `RECOMPUTED IN-STEP (NOT CARRIED)` | Reconstructed via `ice_var_agg(2)` at `kt=1`; `prev_out.ice.aggregated` passed at `kt>=2` and overwritten before use | Recomputed in-step by `CALL ice_var_agg(1)` (`src/ICE/icestp.F90:183`, `packages/ice/legoesm/ice/si3_o17.py:761-781`) and `CALL ice_var_agg(2)` (`src/ICE/icestp.F90:211`, `packages/ice/legoesm/ice/si3_o17.py:1117-1124`); none of these 15 fields on `entry.ice.aggregated` is read by any scored output before `si3_var_agg(kn=1)` overwrites `state.aggregated` at `packages/ice/legoesm/ice/si3_o17.py:761-781`, so `free_run` is unaffected. |
 | `entry.ice.cflice_delayed` `()` | `CARRIED` | `None` at `kt=1`; `prev_out.ice.cflice_delayed` at `kt>=2` (scored vs kind 22 `cflice_delayed`) | Updated in SI3 by `CALL mpp_max('icedyn_adv_pra', zcfl, cdelay='cflice')` (`src/ICE/icedyn_adv_pra.F90:119-127`). |
 | `entry.aevp.(stress1_t, stress2_t, stress12_f)` `(jpi,jpj)` | `CARRIED` | Kind 22 at `kt=1`; `prev_out.aevp.(stress1_t,stress2_t,stress12_f)` at `kt>=2` (scored vs kind 23) | Updated in SI3 by `ice_dyn_rhg_evp` (`src/ICE/icedyn_rhg_evp.F90:459-461` and `src/ICE/icedyn_rhg_evp.F90:838-843`). |
 | `entry.aevp.(u_ice_u, v_ice_v)` `(jpi,jpj)` | `OVERWRITTEN AT STEP ENTRY (NOT CARRIED SEPARATELY)` | Kind 22 `(u_ice,v_ice)` at `kt=1`; `prev_out.aevp.(u_ice_u,v_ice_v)` passed at `kt>=2` and overwritten at step entry | Overwritten at step entry with `entry.ice.(u_ice, v_ice)` (`packages/ice/legoesm/ice/si3_o17.py:610-619`), matching `src/ICE/icestp.F90:151`, `src/ICE/icestp.F90:167`, and `src/ICE/icedyn.F90:128-135`, so `free_run` is unaffected. |
@@ -2305,7 +2415,7 @@ Every input leaf of `si3_o17_step(entry: SI3O17StepState, forcing: SI3O17LiveFor
 | `forcing.aevp_forcing.(u_oce_u, v_oce_v, ssh_m, ff_t, ff_f, fast_tmask, fast_umask, fast_vmask, iceberg_tmask, iceberg_umask, iceberg_vmask, utau_ice, vtau_ice, ssh_t)` | `EXTERNAL` | Kind 22 (`ssu_m, ssv_m, ssh_m, ff_t, ff_f`) and kind 23 (masks) at every step | Ocean velocity/SSH from `src/SAS/sbcssm.F90:87-121`; Coriolis from `tools/DOMAINcfg/src/domhgr.F90:383-384`; rheology masks read in `src/ICE/icedyn_rhg_evp.F90:530-560`; `utau_ice, vtau_ice` overwritten inside `si3_o17_step` (`packages/ice/legoesm/ice/si3_o17.py:610-619`) by live `ice_sbc_tau` (`src/ICE/icestp.F90:159`, `src/ICE/icesbc.F90:85-87`, `src/ICE/icesbc.F90:108`); `ssh_t=None` computed in-kernel (`src/ICE/icedyn_rhg_evp.F90:268`). |
 | `forcing.aevp_metrics.*` (`e1t, e2t, e1u, e2u, e1v, e2v, e1f, e2f, r1_e1t, r1_e2t, r1_e1u, r1_e2v, r1_e1f, r1_e2f, e1e2t, r1_e1e2t, e2_e1u, e1_e2v, e1e1t, e2e2t, e1e1f, e2e2f, tmask, umask, vmask, fmask, bdy_umask, bdy_vmask`) | `EXTERNAL` | Kind 22 at every step | Domain metrics and land/sea masks from `domhgr.F90:222-227` and `src/OCE/DOM/dommsk.F90:203-205`; read in `src/ICE/icedyn_rhg_evp.F90:189-192`, `src/ICE/icedyn_rhg_evp.F90:459-461`, `src/ICE/icedyn_rhg_evp.F90:791-827`, and `src/ICE/icestp.F90:421-423`. |
 | `forcing.surface.(wndi, wndj, theta_air_zt, q_air_zt, slp, rhoa, smask0, qlw, precip, snow, qsr, cloud_fra, qsr_oce, qns_oce, emp_oce, utau_oce_in, vtau_oce_in, taum_oce_in)` | `EXTERNAL` | Kinds 32, 33, and 22 at every step | Set in `sbc_blk` before `ice_stp` (`src/OCE/SBC/sbcmod.F90:474-477` and `src/OCE/SBC/sbcmod.F90:570`); read by `ice_sbc_tau` (`src/ICE/icesbc.F90:85-87`), `ice_sbc_flx` (`src/ICE/icesbc.F90:150-165` and `src/ICE/icesbc.F90:195`), `ice_flx_other` (`src/ICE/icesbc.F90:358-406`), and `ice_update_flx` (`src/ICE/iceupdate.F90:187-194`). Optional precomputed flux overrides are `None` in O17 live forcing. |
-| `forcing.stress.(utau_oce, vtau_oce, taum_oce, u_oce, v_oce, umask, vmask, tmask, u_ice, v_ice)` | `EXTERNAL` | Kind 22 at every step (`u_ice, v_ice` zeroed in `external_forcing`) | Pre-ice ocean stress/velocity and masks read in `ice_update_tau` (`src/ICE/iceupdate.F90:438-484`); `u_ice, v_ice` on `forcing.stress` are overwritten inside `si3_o17_step` (`packages/ice/legoesm/ice/si3_o17.py:1124-1129`) with post-thermodynamic `final_state.(u_ice, v_ice)`. |
+| `forcing.stress.(utau_oce, vtau_oce, taum_oce, u_oce, v_oce, umask, vmask, tmask, u_ice, v_ice)` | `EXTERNAL` | Kind 22 at every step (`u_ice, v_ice` zeroed in `external_forcing`) | Pre-ice ocean stress/velocity and masks read in `ice_update_tau` (`src/ICE/iceupdate.F90:438-484`); `u_ice, v_ice` on `forcing.stress` are overwritten inside `si3_o17_step` (`packages/ice/legoesm/ice/si3_o17.py:1131-1136`) with post-thermodynamic `final_state.(u_ice, v_ice)`. |
 | `card.state: SI3ORCA2StateConfig` (32 fields: `jpl, nlay_i, nlay_s, nn_icesal, rn_icesal, rn_sal_gd, rn_sal_fl, rn_simax, rn_simin, rn_sinew, rn_himean, rn_himax, opt_hips, ln_pnd, ln_pnd_LEV, ln_pnd_TOPO, ln_pnd_lids, ln_pnd_alb, rn_apnd_min, rn_apnd_max, rn_pnd_hl_min, rn_pnd_hl_max, nn_snwfra, ln_icedyn, ln_icethd, ln_dynadv_pra, ln_mppdelay, nn_fsbc, rDt_ice, nn_hls, ln_cpl, ice_constants`) | `EXTERNAL` | `output.namelist.ice` and `output.namelist.dyn` (`card_for`, `scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:444-447`) | Time-invariant state/domain/category/pond/salinity config initialized in `par_init` (`src/ICE/icestp.F90:328-385`) and `ice_init` (`src/ICE/icestp.F90:260-325`); constructed in `build_orca2_sas_ice_o17_card` (`packages/ice/legoesm/ice/si3_o17.py:79-97` and `packages/ice/legoesm/ice/si3_o17.py:164-291`). |
 | `card.aevp: SI3CGridAEVPConfig` (22 fields: `scheme, staggering, dt_s, n_subcycles, eccentricity, creep_limit_s_inv, strength_parameter_pa, strength_decay, rho_snow, rho_ice, rho_water, rho_ocean, gravity, rn_ishlat, halo_width, category_count, landfast, landfast_depth_fraction, landfast_basal_friction_n_m3, landfast_relaxation_s_inv, landfast_tensile_fraction, convergence_check`) | `EXTERNAL` | `output.namelist.ice` and `output.namelist.dyn` | Time-invariant C-grid aEVP rheology and subcycling parameters (`nammpp`, `namdyn_neots`, `namdyn_rhg`, `packages/ice/legoesm/ice/si3_o17.py:79-97` and `packages/ice/legoesm/ice/si3_o17.py:164-291`). |
 | `card.strength: SI3ORCA2StrengthConfig` (4 fields: `ln_str_h79, rn_pstar, rn_crhg, ln_str_smooth`) | `EXTERNAL` | `output.namelist.ice` (`namdyn_rhg`) | Time-invariant Hibler (1979) ice strength parameters (`packages/ice/legoesm/ice/si3_o17.py:79-97` and `packages/ice/legoesm/ice/si3_o17.py:164-291`). |
@@ -2355,10 +2465,10 @@ for idx, name in enumerate(SI3O17Card._fields, 1):
   - `status = "PASS_O17_SYNTHETIC_RECORD_SCORER"` in `720.01 s`, peak RSS `4,056,148 KiB`.
   - `(A) parallel_ranges`: `split_merge_equals_serial = true`, `split_free_run_refused = true`, `missing_step_refused = true`, `duplicated_step_refused = true`, `merged_status = "PASS"`.
   - `(B) free_run`: `identical_status = "PASS"`, `identical_different = 0`, `identical_first_difference = null`. When a 1-ULP change is applied to our step 1 output `out.ice.v_i[2, 2, 0]` (`1.1794439265913363e-16` relative) while a plant takes `v_i` from step 2's record instead of from our previous step, `free_run` detects the broken carry chain at step 2 (`carried_plant_status = "FAIL"`, `carried_plant_detected = true`, `carried_plant_first_difference = {"step": 2, "rank": 0, "step_key": "2:0", "field": "carried_entry.ice.v_i", "different": 1, "nonfinite": 0, "max_relative": 1.1794439265913363e-16}`).
-- Direct unit tests `test_o17_scorer_parallel_step_ranges_and_merge`, `test_o17_scorer_free_run_and_carried_state_plants`, and `test_o17_operator_script_refuses_scratch_evidence_tree_before_mkdir` in `tests/ice/unit/test_si3_o17.py:535-1033` passed, proving byte-for-byte identity against the parent `94a4069d61` scorer on the default serial path, refusal of split free-run step ranges, identical step-2 relative error (`1.0`) on the early-divergence plant across `parent_scorer.score`, serial `scorer.score`, and `scorer.free_run`, zero bit difference when all step-entry-reset / in-step-recomputed / SAS-unused fields (`t_si[owned]`, `cnd_ice`, `t1_ice`, `equivalent.*`, the 15 non-carried `aggregated.*` fields, and `aevp.(u_ice_u, v_ice_v)`) are perturbed to `-999.0` on step 1's output, detection of the 1-ULP `v_i` carry plant, continuation past step-1 differences, and pre-creation refusal of `--out` inside a scratch evidence tree without ever targeting the real read-only evidence directory.
+- Direct unit tests `test_o17_scorer_parallel_step_ranges_and_merge`, `test_o17_scorer_free_run_and_carried_state_plants`, and `test_o17_operator_script_refuses_scratch_evidence_tree_before_mkdir` in `tests/ice/unit/test_si3_o17.py:577-1075` passed, proving byte-for-byte identity against the parent `94a4069d61` scorer on the default serial path, refusal of split free-run step ranges, identical step-2 relative error (`1.0`) on the early-divergence plant across `parent_scorer.score`, serial `scorer.score`, and `scorer.free_run`, zero bit difference when all step-entry-reset / in-step-recomputed / SAS-unused fields (`t_si[owned]`, `cnd_ice`, `t1_ice`, `equivalent.*`, the 15 non-carried `aggregated.*` fields, and `aevp.(u_ice_u, v_ice_v)`) are perturbed to `-999.0` on step 1's output, detection of the 1-ULP `v_i` carry plant, continuation past step-1 differences, and pre-creation refusal of `--out` inside a scratch evidence tree without ever targeting the real read-only evidence directory.
 - The committed operator script `scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_operator_run.sh:1-180` hardcodes `readonly DEFAULT_EVIDENCE="/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step"` and allows `NEMO_SI3_O17_EXTRA_PROTECTED_EVIDENCE` only to append an additional protected root (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_operator_run.sh:13-14`), resolves `ABS_OUT`, `ABS_EVIDENCE`, and `ABS_DEFAULT_EVIDENCE` via `realpath -m` (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_operator_run.sh:84-106`), and refuses any output path equal to or under the canonical real evidence tree, `--evidence`, or `NEMO_SI3_O17_EXTRA_PROTECTED_EVIDENCE` BEFORE `mkdir -p "$ABS_OUT"` creates anything:
   - **(a) Canonical real evidence tree always refused even when `NEMO_SI3_O17_EXTRA_PROTECTED_EVIDENCE` is set to a scratch root:** With `NEMO_SI3_O17_EXTRA_PROTECTED_EVIDENCE` set to `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_o17_free_scratch/operator_refusal_guard/si3_rounds/round29/oracle_o17_full_step`, invoking `nemo_si3_o17_operator_run.sh` with `--out /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step/refused_probe_do_not_create` (both without `--evidence` and with `--evidence <scratch_root>`) exits with code `2` and prints `REFUSE: --out resolves inside evidence tree (/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step/refused_probe_do_not_create inside read-only /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step)` before `mkdir -p`; `refused_probe_do_not_create` does not exist before (`REAL_NONEXISTENT_BEFORE=absent`) or after (`REAL_NONEXISTENT_AFTER=absent`).
-  - **(b) Scratch root refusal test:** `test_o17_operator_script_refuses_scratch_evidence_tree_before_mkdir` (`tests/ice/unit/test_si3_o17.py:925-1033`) builds `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_o17_free_scratch/operator_refusal_guard/si3_rounds/round29/oracle_o17_full_step/record_100step/o17_master_records` and an alternate scratch root `alt_oracle_o17_full_step`, sets `NEMO_SI3_O17_EXTRA_PROTECTED_EVIDENCE` to the first scratch root, and verifies that `--out` inside either scratch root is refused (`returncode == 2`, `"REFUSE: --out resolves inside evidence tree"`, `not target.exists()`).
+  - **(b) Scratch root refusal test:** `test_o17_operator_script_refuses_scratch_evidence_tree_before_mkdir` (`tests/ice/unit/test_si3_o17.py:967-1075`) builds `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_o17_free_scratch/operator_refusal_guard/si3_rounds/round29/oracle_o17_full_step/record_100step/o17_master_records` and an alternate scratch root `alt_oracle_o17_full_step`, sets `NEMO_SI3_O17_EXTRA_PROTECTED_EVIDENCE` to the first scratch root, and verifies that `--out` inside either scratch root is refused (`returncode == 2`, `"REFUSE: --out resolves inside evidence tree"`, `not target.exists()`).
   - **(c) Planted moved-refusal control in scratch (quoted and restored):** Planting a copy of `nemo_si3_o17_operator_run.sh` in `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_o17_free_scratch/planted_operator_run.sh` with the `for protected_root in "${protected_roots[@]}"` refusal loop moved immediately after `mkdir -p "$ABS_OUT"` and running `NEMO_SI3_O17_OPERATOR_SCRIPT=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_o17_free_scratch/planted_operator_run.sh pytest tests/ice/unit/test_si3_o17.py -k test_o17_operator_script_refuses_scratch_evidence_tree_before_mkdir -v` fails as required (`FAILED tests/ice/unit/test_si3_o17.py::test_o17_operator_script_refuses_scratch_evidence_tree_before_mkdir - AssertionError: assert not True` on `assert not target.exists()`, `1 failed, 19 deselected in 0.47s`), after which the scratch plant was removed and the unplanted test passed (`1 passed, 19 deselected in 0.47s`).
   - **Real read-only evidence tree untouched before and after:** Listing `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step` before and after running (a), (b), and (c) shows the exact same four entries (`input`, `manifest`, `record_100step`, `reference_100step`) and `2026-11-02` modification times:
     ```text

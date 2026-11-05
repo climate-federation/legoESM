@@ -11928,7 +11928,7 @@ _reanchor('packages/ice/legoesm/ice/si3_thd_pnd.py:575-763', 'packages/ice/legoe
 _reanchor('packages/ice/legoesm/ice/si3_thd_pnd.py:683', 'packages/ice/legoesm/ice/si3_thd_pnd.py:701', anchors='at_i = fortran_sum0(arr["a_i"]) if _at_i_override is None else _required("at_i", _at_i_override)')
 _reanchor('packages/ice/legoesm/ice/si3_thd_pnd.py:699-717', 'packages/ice/legoesm/ice/si3_thd_pnd.py:717-735', anchors=[('for jl in range(jpl):', 2), 'a_ip_frac_int = jnp.stack(a_ip_frac_clean, axis=-1)', 19])
 _reanchor('packages/ice/legoesm/ice/si3_thd_pnd.py:720-763', 'packages/ice/legoesm/ice/si3_thd_pnd.py:738-781', anchors=['has_ice = at_int >= epsi10', (')', 322), 44])
-_reanchor('packages/ice/legoesm/ice/si3_thd_pnd.py:766-990', 'packages/ice/legoesm/ice/si3_thd_pnd.py:784-1008', anchors=['def si3_ice_thd_o12_stages(', 'return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out)', 189])
+_reanchor('packages/ice/legoesm/ice/si3_thd_pnd.py:766-990', 'packages/ice/legoesm/ice/si3_thd_pnd.py:784-1011', anchors=['def si3_ice_thd_o12_stages(', 'return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out)', 189])
 _reanchor('packages/ice/legoesm/ice/ponds.py:34-212', 'packages/ice/legoesm/ice/ponds.py:34-311', anchors=['def step_ponds(', (')', 70), 278])
 
 
@@ -13142,8 +13142,8 @@ for _old, _new in (
 ):
     _round29_reanchor_or_defer(_old, _new)
 
-_round29_reanchor_or_defer('packages/ice/legoesm/ice/si3_thd_pnd.py:784-1008',
-                           'packages/ice/legoesm/ice/si3_thd_pnd.py:784-1024', extent=205)
+_round29_reanchor_or_defer('packages/ice/legoesm/ice/si3_thd_pnd.py:784-1011',
+                           'packages/ice/legoesm/ice/si3_thd_pnd.py:784-1027', extent=205)
 _round29_reanchor_or_defer('packages/ice/legoesm/ice/config.py:524-578',
                            'packages/ice/legoesm/ice/config.py:524-586', extent=63)
 _round29_reanchor_or_defer('packages/ice/legoesm/ice/config.py:532-590',
@@ -13684,7 +13684,7 @@ _resume3_reline(
     anchors=['def _si3_orca2_o2_step_with_trace(', ('    )', 39), 86],
 )
 _resume3_reline(
-    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-1024', '797-1056', 260,  # icethd.F90:160-223
+    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-1027', '797-1056', 260,  # icethd.F90:160-223
     anchors=['def si3_ice_thd_o12_stages(',
              'return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out, fluxes=live_out)',
              260],  # icethd.F90:160-223
@@ -13721,7 +13721,7 @@ CITATION_MAP.update({
         '_s_i_2d=eq.s_i[..., jl],  # icethd.F90:461',
         79,
     ],
-    'packages/ice/legoesm/ice/si3_thd_pnd.py:865-874,955-1003': [
+    'packages/ice/legoesm/ice/si3_thd_pnd.py:865-874,955-1006': [
         'for jl in range(5):',
         'previous_hfx_dif = cur_hfx_dif  # icethd_zdf_bl99.F90:831',
         'if active is not None:',
@@ -13893,7 +13893,7 @@ CITATION_MAP.update({
     'packages/ice/legoesm/ice/si3_orca2_state.py:4692-4699': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4711-4718'),
     'packages/ice/legoesm/ice/si3_orca2_state.py:4754-4768': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4773-4787'),
     'packages/ice/legoesm/ice/si3_orca2_state.py:4804-4811': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4823-4830'),
-    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-988': _resume4_historical('packages/ice/legoesm/ice/si3_thd_pnd.py:784-1024'),
+    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-988': _resume4_historical('packages/ice/legoesm/ice/si3_thd_pnd.py:784-1027'),
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:40-55': _resume4_historical('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:43-58'),
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:701-741': _resume4_historical('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:710-750'),
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:93-100,136-238': _resume4_historical('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:96-103,139-241'),
@@ -14493,10 +14493,10 @@ FILES.update({
     "src/OCE/SBC/sbccpl.F90": NEMO / "src/OCE/SBC/sbccpl.F90",
 })
 CITATION_MAP.update({
-    'packages/ice/legoesm/ice/si3_o17.py:1110-1117': ['final = si3_o16_step(', (')', 257), 8],
-    'packages/ice/legoesm/ice/si3_o17.py:1118-1123': ['final_state = final.state._replace(  # iceupdate.F90:189-194', 'final = final._replace(state=final_state)  # iceupdate.F90:189-194', 6],
-    'packages/ice/legoesm/ice/si3_o17.py:1124-1129': ['stress_inputs = forcing.stress._replace(', 'stress = si3_ice_update_tau(stress_inputs, config=card.state, ln_drgice_imp=card.ln_drgice_imp)', 6],
-    'packages/ice/legoesm/ice/si3_o17.py:1131-1145': ['return SI3O17StepState(final.state, aevp), SI3O17Trace(', (')', 265), 15],
+    'packages/ice/legoesm/ice/si3_o17.py:1117-1124': ['final = si3_o16_step(', (')', 257), 8],
+    'packages/ice/legoesm/ice/si3_o17.py:1125-1130': ['final_state = final.state._replace(  # iceupdate.F90:189-194', 'final = final._replace(state=final_state)  # iceupdate.F90:189-194', 6],
+    'packages/ice/legoesm/ice/si3_o17.py:1131-1136': ['stress_inputs = forcing.stress._replace(', 'stress = si3_ice_update_tau(stress_inputs, config=card.state, ln_drgice_imp=card.ln_drgice_imp)', 6],
+    'packages/ice/legoesm/ice/si3_o17.py:1138-1152': ['return SI3O17StepState(final.state, aevp), SI3O17Trace(', (')', 265), 15],
     'packages/ice/legoesm/ice/si3_o17.py:559-568': ['def si3_o17_step(', ') -> tuple[SI3O17StepState, SI3O17Trace]:', 10],
     'packages/ice/legoesm/ice/si3_o17.py:587-589': ['t_si_step = state.t_si  # icestp.F90:164; diag_set0 :485-488 touches A2D(0) only', 'state = state._replace(t_si=t_si_step)  # icestp.F90:164; diag_set0 :488', 3],
     'packages/ice/legoesm/ice/si3_o17.py:610-619': ['aevp_forcing = forcing.aevp_forcing._replace(', 'aevp_entry = entry.aevp._replace(u_ice_u=state.u_ice, v_ice_v=state.v_ice)', 10],
@@ -14541,11 +14541,11 @@ CITATION_MAP.update({
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:444-447': ['def card_for(run: Path):', 'return build_orca2_sas_ice_o17_card(surface=surface_cfg, thermo_namelist=nml)', 4],
     'src/ICE/icestp.F90:260-325': ["CALL load_nml( numnam_ice_cfg, 'namelist_ice_cfg',    numout, lwm )", ('END SUBROUTINE ice_init', 1), 66],
     'src/ICE/icestp.F90:328-385': [('SUBROUTINE par_init', 1), 'END SUBROUTINE par_init', 58],
-    'tests/ice/unit/test_si3_o17.py:535-1033': [('@pytest.fixture(scope="module")', 5), 'assert not target.exists()', 499],
-    'tests/ice/unit/test_si3_o17.py:545-613': ['def _load_parent_scorer_94a4069d61(tmp_path: Path):', ') == scorer.json.dumps(det_new, indent=2, sort_keys=True).encode("utf-8")', 69],
-    'tests/ice/unit/test_si3_o17.py:545-729': ['def _load_parent_scorer_94a4069d61(tmp_path: Path):', 'assert scorer.strip_timing(merged_fail) == scorer.strip_timing(serial_fail)', 185],
-    'tests/ice/unit/test_si3_o17.py:627-697': ['# Finding 1: Split free-run ranges are refused (both free_run and score with INDEPENDENT).', 'scorer.free_run(Path("."), step_range=(2, 2), **div_kw)', 71],
-    'tests/ice/unit/test_si3_o17.py:925-1033': ['# Operator script structure and safety gates (Finding 5: refuse paths under scratch', 'assert not target.exists()', 109],
+    'tests/ice/unit/test_si3_o17.py:577-1075': [('@pytest.fixture(scope="module")', 5), 'assert not target.exists()', 499],
+    'tests/ice/unit/test_si3_o17.py:587-655': ['def _load_parent_scorer_94a4069d61(tmp_path: Path):', ') == scorer.json.dumps(det_new, indent=2, sort_keys=True).encode("utf-8")', 69],
+    'tests/ice/unit/test_si3_o17.py:587-771': ['def _load_parent_scorer_94a4069d61(tmp_path: Path):', 'assert scorer.strip_timing(merged_fail) == scorer.strip_timing(serial_fail)', 185],
+    'tests/ice/unit/test_si3_o17.py:669-739': ['# Finding 1: Split free-run ranges are refused (both free_run and score with INDEPENDENT).', 'scorer.free_run(Path("."), step_range=(2, 2), **div_kw)', 71],
+    'tests/ice/unit/test_si3_o17.py:967-1075': ['# Operator script structure and safety gates (Finding 5: refuse paths under scratch', 'assert not target.exists()', 109],
 })
 
 
@@ -14624,12 +14624,12 @@ for _citation, _lines in (
     _merge_resolution_repin(_citation, _lines)
 
 _merge_resolution_repin(
-    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-1024', '809-1300')
+    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-1027', '809-1303')
 _merge_resolution_repin(
-    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-988', '809-1300')
+    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-988', '809-1303')
 _merge_resolution_repin(
-    'packages/ice/legoesm/ice/si3_thd_pnd.py:865-874,955-1003',
-    '876-988,1065-1246',
+    'packages/ice/legoesm/ice/si3_thd_pnd.py:865-874,955-1006',
+    '876-988,1068-1249',
     anchors=[
         '    def _category(carry, xs):  # one ``DO jl = 1, jpl`` pass (icethd.f90:176-221)',
         '            cur_hfx_dif = o10.o9.zdf.hfx_dif  # icethd_zdf_bl99.F90:831',
@@ -14644,20 +14644,20 @@ for _citation, _lines, _anchors in (
         '        )  # icethd.F90:130-135 (nptidx/npti gather over a_i > epsi10)',
     ]),
     ('packages/ice/legoesm/ice/si3_o17.py:484-488', '383-387', None),
-    ('packages/ice/legoesm/ice/si3_o17.py:1110-1117', '1148-1155', None),
-    ('packages/ice/legoesm/ice/si3_o17.py:1118-1123', '1156-1161', None),
-    ('packages/ice/legoesm/ice/si3_o17.py:1124-1129', '1162-1167', None),
-    ('packages/ice/legoesm/ice/si3_o17.py:1131-1145', '1169-1183', None),
+    ('packages/ice/legoesm/ice/si3_o17.py:1117-1124', '1155-1162', None),
+    ('packages/ice/legoesm/ice/si3_o17.py:1125-1130', '1163-1168', None),
+    ('packages/ice/legoesm/ice/si3_o17.py:1131-1136', '1169-1174', None),
+    ('packages/ice/legoesm/ice/si3_o17.py:1138-1152', '1176-1190', None),
     ('packages/ice/legoesm/ice/si3_o17.py:559-568', '572-581', None),
     ('packages/ice/legoesm/ice/si3_o17.py:587-589', '600-602', None),
     ('packages/ice/legoesm/ice/si3_o17.py:610-619', '623-632', None),
     ('packages/ice/legoesm/ice/si3_o17.py:744-760', '757-773', None),
     ('packages/ice/legoesm/ice/si3_o17.py:761-781', '774-794', None),
-    ('tests/ice/unit/test_si3_o17.py:535-1033', '1072-1570', None),
-    ('tests/ice/unit/test_si3_o17.py:545-613', '1082-1150', None),
-    ('tests/ice/unit/test_si3_o17.py:545-729', '1082-1266', None),
-    ('tests/ice/unit/test_si3_o17.py:627-697', '1164-1234', None),
-    ('tests/ice/unit/test_si3_o17.py:925-1033', '1462-1570', None),
+    ('tests/ice/unit/test_si3_o17.py:577-1075', '1114-1612', None),
+    ('tests/ice/unit/test_si3_o17.py:587-655', '1124-1192', None),
+    ('tests/ice/unit/test_si3_o17.py:587-771', '1124-1308', None),
+    ('tests/ice/unit/test_si3_o17.py:669-739', '1206-1276', None),
+    ('tests/ice/unit/test_si3_o17.py:967-1075', '1504-1612', None),
 ):
     _merge_resolution_repin(_citation, _lines, _anchors)
 
@@ -14700,8 +14700,8 @@ _merge_resolution_repin(
     anchors=['new_state = si3_o1_step(', (')', 1658)],
 )
 _merge_resolution_repin(
-    'packages/ice/legoesm/ice/si3_thd_pnd.py:865-874,955-1003',
-    '876-988,1065-1246',
+    'packages/ice/legoesm/ice/si3_thd_pnd.py:865-874,955-1006',
+    '876-988,1068-1249',
     anchors=[
         '    def _category(carry, xs):  # one ``DO jl = 1, jpl`` pass (icethd.f90:176-221)',
         '            cur_hfx_dif = o10.o9.zdf.hfx_dif  # icethd_zdf_bl99.F90:831',
@@ -14718,14 +14718,14 @@ _merge_resolution_repin(
     ],
 )
 _merge_resolution_repin(
-    'packages/ice/legoesm/ice/si3_o17.py:1110-1117',
-    '1148-1155',
-    anchors=['final = si3_o16_step(', (')', 265)],
+    'packages/ice/legoesm/ice/si3_o17.py:1117-1124',
+    '1155-1162',
+    anchors=['final = si3_o16_step(', (')', 267)],
 )
 _merge_resolution_repin(
-    'packages/ice/legoesm/ice/si3_o17.py:1131-1145',
-    '1169-1183',
-    anchors=['return SI3O17StepState(final.state, aevp), SI3O17Trace(', (')', 273)],
+    'packages/ice/legoesm/ice/si3_o17.py:1138-1152',
+    '1176-1190',
+    anchors=['return SI3O17StepState(final.state, aevp), SI3O17Trace(', (')', 275)],
 )
 _merge_resolution_repin(
     'packages/ice/legoesm/ice/si3_o17.py:744-760',

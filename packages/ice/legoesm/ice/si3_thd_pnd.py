@@ -997,9 +997,12 @@ def si3_ice_thd_o12_stages(
                 else cur_sfx_lam
             )
             hfx_thd_in = (
-                _guard_inactive_columns(prev_hfx_thd, active, jnp.float64, inactive_fill=0.0)
+                # NEMO icethd.F90:397,497 and icethd_da.F90:146-147 pass the DH-updated flux.
+                _guard_inactive_columns(
+                    dh.fluxes.hfx_thd, active, jnp.float64, inactive_fill=0.0
+                )
                 if active is not None
-                else cur_hfx_thd
+                else dh.fluxes.hfx_thd
             )
             wfx_lam_in = (
                 _guard_inactive_columns(prev_wfx_lam, active, jnp.float64, inactive_fill=0.0)

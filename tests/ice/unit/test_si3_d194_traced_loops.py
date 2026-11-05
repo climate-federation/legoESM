@@ -36,9 +36,9 @@ from tests.ice.unit.test_si3_o12_pnd import (
 )
 
 # sha256 over (path, dtype, shape, bytes) of every output leaf of ``_fixture``'s
-# O12 composition, measured at 9998276020 (Python loops) under jax.jit and under
+# O12 composition with the NEMO DH->DA flux carry, measured under jax.jit and
 # jax.disable_jit -- both runs gave this digest.
-PARENT_DIGEST = "e74fcfa0c610d6c33b80babc5639b4471ab70c4c70eba86b520e226cba8373bf"
+EXPECTED_DIGEST = "96e36c79fb959b1563fcf3bd712752bdb586cb1324cb433ff3020eb320c5b0f0"
 JPJ = JPI = 6
 
 
@@ -100,7 +100,36 @@ def test_traced_o12_loops_keep_parent_forward_bits():
     with jax.disable_jit():  # concrete inputs: the eager Python-loop path, op by op
         eager = _digest(run(arrays))
     compiled = _digest(jax.jit(run)(arrays))  # traced inputs: the scan/fori_loop path
-    assert (eager, compiled) == (PARENT_DIGEST, PARENT_DIGEST)
+    assert (eager, compiled) == (EXPECTED_DIGEST, EXPECTED_DIGEST)
+
+
+def test_o12_da_receives_dh_updated_hfx_thd(monkeypatch):
+    """DH's heat-flux update reaches DA instead of the stale category-entry value."""
+    arrays, static = _fixture()
+    real_da = pnd_mod.si3_ice_thd_da
+    da_calls = []
+
+    def record_da(**kwargs):
+        result = real_da(**kwargs)
+        da_calls.append((kwargs, result))
+        return result
+
+    monkeypatch.setattr(pnd_mod, "si3_ice_thd_da", record_da)
+    with jax.disable_jit():
+        out = pnd_mod.si3_ice_thd_o12_stages(**arrays, **static)
+
+    dh_hfx = out.categories[0].o10.o9.dh.fluxes.hfx_thd
+    stale_hfx = arrays["hfx_thd"]
+    assert np.any(np.asarray(dh_hfx).view(np.uint64) != np.asarray(stale_hfx).view(np.uint64))
+    np.testing.assert_array_equal(
+        np.asarray(da_calls[0][0]["hfx_thd"]).view(np.uint64),
+        np.asarray(dh_hfx).view(np.uint64),
+    )
+    stale_da = real_da(**{**da_calls[0][0], "hfx_thd": stale_hfx})
+    assert np.any(
+        np.asarray(da_calls[0][1].hfx_thd).view(np.uint64)
+        != np.asarray(stale_da.hfx_thd).view(np.uint64)
+    )
 
 
 # (category or None, leaf, index, relative step): thickness, concentration,

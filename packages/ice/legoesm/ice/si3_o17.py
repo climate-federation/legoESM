@@ -793,6 +793,13 @@ def si3_o17_step(
     )
     state = state._replace(a_i=eqv.a_i, v_s=eqv.v_s, equivalent=eqv, aggregated=agg)
     a_i_b = state.a_i[owned]  # icestp.F90:184; store_fields :399
+    # NEMO icestp.F90:184,388-410 computes v_i_b/a_i_b before iceitd.F90:124-125.
+    a_i_b_present = a_i_b >= card.constants.epsi20
+    h_i_b = jnp.where(
+        a_i_b_present,
+        state.v_i[owned] / jnp.where(a_i_b_present, a_i_b, 1.0),
+        0.0,
+    )
     at_i_b = fortran_sum_categories(a_i_b, axis=-1)  # icestp.F90:184; store_fields :418
 
     alb = si3_ice_alb(
@@ -970,7 +977,7 @@ def si3_o17_step(
         ),
     )
     remap = si3_ice_itd_rem(
-        h_i_b=state.equivalent.h_i[owned],
+        h_i_b=h_i_b,
         a_i_b=state.a_i[owned],
         h_i=_pack_categories(stages, "h_i")[owned],
         a_i=thermo_state.a_i[owned],
