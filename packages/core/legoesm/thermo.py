@@ -44,7 +44,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.core.smooth import smooth_clamp, smooth_min
+from legoesm.core.smooth import max_c1, smooth_clamp, smooth_min
 
 
 # Tetens/Bolton coefficients of ``saturation_vapor_pressure`` (named so that a
@@ -639,6 +639,7 @@ def saturation_specific_humidity_cam_table(T: jax.Array, p: jax.Array, *,
 def nemo_si3_saturation_over_ice(
     T: jax.Array,
     p: jax.Array,
+    floor_width_K: float,
 ) -> tuple[jax.Array, jax.Array]:
     """NEMO 5.0.2 Goff-ice specific humidity and analytic ``dq/dT``.
 
@@ -646,12 +647,24 @@ def nemo_si3_saturation_over_ice(
     tier-2 oracle audit ran (fp64: 8.2e-14 max relative on q_sat, 1.6e-13
     on dq/dT); 5.0.2 itself was not run.
 
-    This is the literal operation order of ``sbc_phy.F90:665-711,727-790``.
-    It intentionally does not use the smooth generic mixing-ratio conversion:
+    At ``floor_width_K = 0`` this is the literal operation order of
+    ``sbc_phy.F90:665-711,727-790``; a positive width smooths the 180 K floor
+    and scales ``dq/dT`` by the ramp slope.  It intentionally does not use the smooth generic mixing-ratio conversion:
     that would be a different formula at an oracle boundary.  Returns
     ``(q_sat, dq_sat_dT)`` and remains JIT/reverse-mode compatible.
     """
-    zta = jnp.maximum(jnp.asarray(T), constants.T_goff_floor_nemo)
+    # NEMO's MAX(T, 180 K) floor as a C1 ramp of width floor_width_K (exact
+    # outside 180..180+width K; 0.0 = NEMO's hard MAX).
+    T = jnp.asarray(T)
+    if floor_width_K == 0.0:
+        zta = max_c1(T, constants.T_goff_floor_nemo, jnp.inf)
+        dzta_dT = 1.0   # NEMO returns d/dT at the floored temperature
+    else:
+        # smooth mode: carry the ramp's slope into dq_sat/dT (1 above the band)
+        zta, dzta_dT = jax.jvp(
+            lambda t: max_c1(t, constants.T_goff_floor_nemo, 1.0 / floor_width_K),
+            (T,), (jnp.ones_like(T),),
+        )
     ztmp = constants.T_triple_nemo / zta
     zle = (
         constants.goff_ice_A_nemo * (ztmp - 1.0)
@@ -669,7 +682,7 @@ def nemo_si3_saturation_over_ice(
         - constants.goff_ice_C_nemo / constants.T_triple_nemo
     )
     de_sat_dT = jnp.log(10.0) * zde * e_sat
-    dq_sat_dT = eps * p * de_sat_dT / (denom * denom)
+    dq_sat_dT = eps * p * de_sat_dT / (denom * denom) * dzta_dT
     return q_sat, dq_sat_dT
 
 
