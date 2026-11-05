@@ -59,6 +59,53 @@ def global_masses(state, area, sigma_coord):
     return out
 
 
+def water_tendency_terms(state, model):
+    """Instantaneous global total-water tendency [kg/m2/day], split by term.
+
+    Tracer mass per layer is ``q*dp/g``, so its rate is ``(dp*dq + q*ddp)/g``
+    with ``ddp = dB*dp_s_dt``.  ``total`` uses the dycore's own tendencies
+    (physics off).  ``horizontal`` is the advective horizontal tracer term
+    with the matching layer-mass divergence ``-div(u*dp_edge)``; ``ps_del4``
+    is the mass the surface-pressure hyperdiffusion moves with no tracer
+    flux; ``rest`` = total - both (vertical transport, filters).
+    """
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.core.conservation import WATER_MASS_SPECIES
+    from legoesm.core.operators_voronoi import (
+        cell_to_edge_avg_3d, divergence_cell, divergence_cell_3d, gradient_edge)
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        mpas_hydrostatic_tendencies)
+    from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
+        tracer_horizontal_advection)
+    mesh, sc, cfg = model.mesh, model.sigma_coord, model.config
+    ps = state.p_s.data
+    dp = sc.layer_thickness_dp(ps)
+    dB = sc.layer_thickness_dp(jnp.ones_like(ps)) - sc.layer_thickness_dp(jnp.zeros_like(ps))
+    names = [k for k in WATER_MASS_SPECIES if k in (state.tracers or {})]
+    q = jnp.stack([state.tracers[k].data for k in names], axis=-1)
+    u = state.u.data
+    area = jnp.asarray(mesh.areaCell)
+    day_per_area = 86400.0 / float(jnp.sum(area))
+
+    def glob(rate):  # (nCells, nlev, nspecies) kg/kg*Pa/s -> kg/m2/day
+        return float(jnp.sum(area[:, None, None] * rate) / constants.g * day_per_area)
+
+    t = mpas_hydrostatic_tendencies(state, mesh, sc, cfg)
+    dq = jnp.stack([t.tracer_tendencies[k].data for k in names], axis=-1)
+    total = glob(dp[..., None] * dq + q * (dB * t.dp_s_dt.data[:, None])[..., None])
+    dqh = tracer_horizontal_advection(q, u, mesh)
+    ddp_h = -divergence_cell_3d(u * cell_to_edge_avg_3d(dp, mesh), mesh)
+    horizontal = glob(dp[..., None] * dqh + q * ddp_h[..., None])
+    ps_del4 = 0.0
+    if cfg.nu_del4_ps > 0:
+        d2 = divergence_cell(gradient_edge(ps, mesh), mesh)
+        d4 = divergence_cell(gradient_edge(d2, mesh), mesh)
+        ps_del4 = glob(q * (dB * (-cfg.nu_del4_ps * d4)[:, None])[..., None])
+    return {"total": total, "horizontal": horizontal, "ps_del4": ps_del4,
+            "rest": total - horizontal - ps_del4}
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True)
@@ -76,6 +123,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="instrument self-test: multiply q_v by (1+X) after step "
                          "--inject-step; the tracer-mass report must show a +X jump")
     ap.add_argument("--inject-step", type=int, default=5)
+    ap.add_argument("--water-terms", action="store_true",
+                    help="print the instantaneous global water tendency split by term "
+                         "at the first and last report")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[],
                     help="run_amip path flags (see config/amip/amip_production.sh)")
     return ap
@@ -121,6 +171,10 @@ def main():
         if a.tracer_mass:
             m = global_masses(s, driver.model.mesh.areaCell, driver.model.sigma_coord)
             print("  mass " + " ".join(f"{k}={v:.17e}" for k, v in m.items()), flush=True)
+        if a.water_terms and n in (0, a.steps):
+            w = water_tendency_terms(s, driver.model)
+            print("  water_terms kg/m2/day " + " ".join(f"{k}={v:+.6e}" for k, v in w.items()),
+                  flush=True)
 
     report(0, state)
 
