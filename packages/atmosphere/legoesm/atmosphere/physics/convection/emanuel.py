@@ -22,8 +22,13 @@ against the running oracle (fixture generator in
 
 What is NOT the oracle (stated, not hidden):
 
-* No convective momentum transport (CONVECT's FU/FV): this scheme's signature
-  takes no winds, so ``du_dt_conv = dv_dt_conv = None``.
+* Convective momentum transport (CONVECT's FU/FV, CU = ``cu_coefficient``)
+  runs only with ``enable_cmt`` (default False: ``du_dt_conv = dv_dt_conv =
+  None``).  KNOWN DIFFERENCES at the default smoothing: the UAV/CU pass is
+  weighted by the smooth cloud-layer window, so the column momentum integral
+  is exactly 0 at any sharpness (the oracle's is 0 over 1..INB); the shaft's
+  UP/VP are not blended through the smooth EP(INB) gate (QP is).  Per-column
+  FU/FV gaps are pinned with the FT/FQ ones.
 * The oracle's WD/TPRIME/QPRIME surface-flux scales are not returned.
 * Water routing: CONVECT returns a scalar PRECIP.  Here the whole column
   water deficit ``-sum(FQ dp/g)`` (the precipitating ``EP*CLW`` and the mixture
@@ -123,7 +128,7 @@ _HPA_PER_PA = 0.01
 # selector).  CONVECT has no counterpart; they are kept so existing configs
 # load, and any non-default value is refused rather than silently ignored.
 _RETIRED_FIELDS = (
-    "n_mixing_fractions", "cu_coefficient", "precip_efficiency_water",
+    "n_mixing_fractions", "precip_efficiency_water",
     "precip_efficiency_lcl", "parcel_perturb_T", "parcel_perturb_q",
     "smooth_trigger_sharpness", "epsilon_0", "delta_0",
     "mse_min_search_offset",
@@ -230,6 +235,8 @@ def emanuel_convection(
     conv_prog_profile: jax.Array,
     dt: float,
     config: EmanuelConfig = EmanuelConfig(),
+    u: jax.Array | None = None,
+    v: jax.Array | None = None,
 ) -> tuple[ConvectionOutput, jax.Array]:
     """Emanuel CONVECT v4.3c convection.
 
@@ -250,11 +257,15 @@ def emanuel_convection(
     dt : float
         Time step [s] (CONVECT DELT).
     config : EmanuelConfig
+    u, v : jax.Array, shape (ncol, nlev), optional
+        Zonal / meridional wind [m/s], surface-LAST.  Read only when
+        ``config.enable_cmt`` (then both are required); ignored otherwise.
 
     Returns
     -------
     out : ConvectionOutput
-        ``du_dt_conv = dv_dt_conv = None`` (no convective momentum transport).
+        ``du_dt_conv``/``dv_dt_conv`` [m/s^2]: CONVECT's FU/FV when
+        ``config.enable_cmt``, else ``None`` (no momentum transport).
     conv_prog_profile_new : jax.Array, shape (ncol, nlev)
 
     Known limitation
@@ -273,6 +284,13 @@ def emanuel_convection(
     # or pressure in a float32 run would make the downdraught's scan carry and
     # outputs differ in dtype (reviewer decision, #2213 split).
     q_v, p_full, p_half = (jnp.asarray(x, T.dtype) for x in (q_v, p_full, p_half))
+    winds = None
+    if config.enable_cmt:
+        if u is None or v is None:
+            raise ValueError(
+                "EmanuelConfig.enable_cmt=True needs both winds u and v "
+                "(convective momentum transport); got None.")
+        winds = jnp.stack([jnp.asarray(u, T.dtype), jnp.asarray(v, T.dtype)])
     ncol, nlev = T.shape
     dp = p_half[:, 1:] - p_half[:, :-1]
 
@@ -300,11 +318,13 @@ def emanuel_convection(
         lcl_pressure_sharpness=config.lcl_pressure_sharpness,
         strict_index_sharpness=config.strict_index_sharpness,
         epmax=config.precip_efficiency_max,
+        winds=winds,
         **{name: getattr(config, name) for name in _MIXING_SHARPNESS_FIELDS},
     )
     _rev = lambda x: x[:, ::-1]  # noqa: E731 - surface-last <-> surface-first
     ft = _rev(mixing.dT_dt)                       # surface-FIRST from here
     fq = _rev(mixing.dq_v_dt)
+    fuv = None if winds is None else mixing.duv_dt[..., ::-1]
 
     # -- Precipitating downdraught (oracle l.713-830 and its FT/FQ terms) -----
     # Static Python branch: no trace overhead when disabled.  Disabled is the
@@ -335,15 +355,22 @@ def emanuel_convection(
             dhdp_sharpness=config.downdraft_dhdp_sharpness,
             mp_sharpness=config.downdraft_mp_sharpness,
             taper_band_sharpness=config.downdraft_taper_band_sharpness,
+            winds=None if winds is None else winds[..., ::-1],
         )
         ft = ft + downdraft.dT_dt
         fq = fq + downdraft.dq_v_dt
+        if fuv is not None:
+            fuv = fuv + downdraft.duv_dt
 
     # -- Cloud-top adjustment (oracle l.940-950), on FT+FQ incl. downdraught --
     phf = _rev(p_half) * _HPA_PER_PA
     dph = phf[:, :-1] - phf[:, 1:]
     fq = _apply_frac(fq, mixing.inb, mixing.frac, dph, mixing.lv)
     ft = _apply_frac(ft, mixing.inb, mixing.frac, dph, mixing.cpn)
+    if fuv is not None:   # oracle l.951-958: no heat-capacity ratio for FU/FV
+        ones = jnp.ones_like(mixing.cpn)
+        fuv = jnp.stack([_apply_frac(f, mixing.inb, mixing.frac, dph, ones)[:, ::-1]
+                         for f in fuv])           # surface-LAST
     dT_dt = _rev(ft)
     dq_v_dt = _rev(fq)
 
@@ -392,6 +419,16 @@ def emanuel_convection(
     )
     dT_dt = dT_dt - ents_mask * (ents[:, None] / cpn)
 
+    # -- Momentum: UAV removal and the CU pressure-gradient factor (l.970-983)
+    # FU = (1 - CU)*(FU - UAV) on levels 1..INB, UAV the layer mean.  Written
+    # ents_mask*(...) with UAV ents_mask-weighted, so the column momentum
+    # integral is exactly 0 at any level_window_sharpness (levels above INB
+    # get 0, as in the oracle).
+    du_dt = dv_dt = None
+    if fuv is not None:
+        uav = jnp.sum(ents_mask * fuv * dp, axis=-1) / jnp.maximum(layer_mass, 1.0)
+        du_dt, dv_dt = ents_mask * (1.0 - config.cu_coefficient) * (fuv - uav[..., None])
+
     out = ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
@@ -400,8 +437,8 @@ def emanuel_convection(
         precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
         cape=cape,
         convective_mask=cape_weight,
-        du_dt_conv=None,
-        dv_dt_conv=None,
+        du_dt_conv=du_dt,
+        dv_dt_conv=dv_dt,
     )
     # Carry CONVECT's CBMF (>= 0: the oracle's MAX at the hard limit, a
     # softplus at the default cbmf_sharpness; no cap).

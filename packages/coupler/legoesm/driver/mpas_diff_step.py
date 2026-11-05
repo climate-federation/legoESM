@@ -66,7 +66,8 @@ def mpas_step(exp: dict, state, phys_state, forcing, step: int,
 def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
                  step0: int = 0, checkpoint: bool = False):
     """Advance ``n_steps`` from job-local ``step0``; pure in (state, phys_state,
-    forcing).  The forcing clock (``day_of_year`` / ``seconds_of_day``) is
+    forcing).  The forcing clock (``day_of_year`` / ``seconds_of_day``, and
+    ``model_seconds`` when the run carries it) is
     advanced per step exactly as the eager loop does; every other forcing key
     is held (see the module docstring).  The dry-mass target is
     ``model.mass_target`` as in eager ``step``: None on the MPAS lane (the
@@ -82,6 +83,8 @@ def mpas_segment(exp: dict, state, phys_state, n_steps: int, forcing=None,
             doy, sod = exp["calendar"](step)
             f = dict(f, day_of_year=jnp.asarray(doy),
                      seconds_of_day=jnp.asarray(sod))
+            if "model_seconds" in f:      # ecrad_ifs seed clock (vote S3a)
+                f["model_seconds"] = jnp.asarray(exp["model_seconds"](step))
 
         def _one(s, p, f_, _step=step):
             return mpas_step(exp, s, p, f_, _step, target_mass)[:2]

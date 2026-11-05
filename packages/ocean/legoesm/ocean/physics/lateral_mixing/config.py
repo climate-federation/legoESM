@@ -648,7 +648,6 @@ class GMRediConfig(NamedTuple):
     # function applies uniformly to ALL closures incl. constant-kappa, which
     # never computes ``int(N dz)``.
 
-
 class LateralMixingConfig(NamedTuple):
     """Top-level lateral mixing configuration."""
     scheme: str = "harmonic"  # "harmonic", "biharmonic", "gm_redi", "none"

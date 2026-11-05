@@ -1546,7 +1546,6 @@ class OceanPartialCellCoordinate(NamedTuple):
     # keeps the reconstructed source (user decision 2026-10-17).
     nemo_stage_faces_raw_mesh: bool = False
 
-
 def create_partial_cell_coordinate(
     z_coord: OceanZStarCoordinate,
     H_bathy: jnp.ndarray,

@@ -6,7 +6,10 @@ columns, a cold copy and a frozen copy (homogeneous freezing active), written by
 ``scripts/validate/oracle/morrison_mg2_warm_rain/make_switch_off_golden.py`` at the
 commit recorded in its meta.  Compared bitwise.  Regenerated 2026-10-21 on the
 rebase onto main (bit-identical to main) and 2026-10-22 for the smooth Bigg -4 C
-step (user decision 3a: cold column set only, max relative change 1.8e-3).
+step (user decision 3a: cold column set only, max relative change 1.8e-3), and
+2026-11-01 at 3db9432886 for the smooth specified-number early droplet size reset
+(#2216, user decision RULE 3; the two kk2000_cam6 configs only, every changed leaf
+<= 3.2e-14 of its array maximum).
 """
 from __future__ import annotations
 
@@ -61,6 +64,9 @@ def test_switch_off_is_bit_identical(config):
 def test_switch_defaults_off():
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     assert MorrisonConfig._field_defaults["prognostic_droplet_number"] is False
-    # appended (positional ABI), then the two RULE 5 widths of 2026-10-22
-    assert MorrisonConfig._fields[-3:] == (
-        "prognostic_droplet_number", "mg2_presence_ramp_top", "mg2_frozen_rain_ice_ramp_frac")
+    # appended (positional ABI), then the two RULE 5 widths of 2026-10-22 and
+    # the readjust, early-reset and sedimentation-reset widths of 2026-11-01 (#2216)
+    assert MorrisonConfig._fields[-6:] == (
+        "prognostic_droplet_number", "mg2_presence_ramp_top", "mg2_frozen_rain_ice_ramp_frac",
+        "mg2_drop_readjust_log_width", "mg2_drop_early_reset_log_width",
+        "mg2_drop_sed_reset_log_width")

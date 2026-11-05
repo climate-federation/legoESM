@@ -155,7 +155,7 @@ def test_si3_column_step_reverse_mode_finite_on_open_water_and_bare_ice():
         qtr_ice_top=z3, t_bottom=a(271.27, 271.27, 271.27),
         sss=a(34.7, 34.7, 34.7), evaporation=z3, snow_precipitation=z3,
         qprec_ice=z3, qcn_ice_bottom=z3, qsb_ice_bottom=z3, fhld=z3,
-        qlead=z3)   # qlead >= 0: no lead freezing, so open water stays ice-free
+        qlead=z3, sst=a(-1.88, -1.88, -1.88))   # qlead >= 0: no lead freezing, so open water stays ice-free
 
     def loss(qns, h):
         out = si3_column_step_arrays(state._replace(h_ice=h),

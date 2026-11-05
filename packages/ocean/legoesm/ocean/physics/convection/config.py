@@ -188,7 +188,6 @@ class EnhancedDiffusionConfig(NamedTuple):
     #                   (nn_evdm=1, avm replaced by rn_evd too).
     evd_composition: str = ""
 
-
 class PlumeConfig(NamedTuple):
     """Entraining mass-flux convective plume."""
     epsilon: float = 1e-3       # Entrainment rate [1/m]

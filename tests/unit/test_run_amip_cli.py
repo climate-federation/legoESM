@@ -247,12 +247,13 @@ def test_convective_precip_efficiency_cli_wiring_929():
     ]), parser))
     assert cfg_bech0.convective_precip_efficiency == 0.0
 
-    # Tiedtke still reaches the config.
-    cfg_tied = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--convection", "tiedtke",
-        "--convective-precip-efficiency", "0.5",
-    ]), parser))
-    assert cfg_tied.convective_precip_efficiency == 0.5
+    # Tiedtke (WRF port) closes its own precipitation: the knob is refused
+    # (it would be silently inert), vote V14.
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--convection", "tiedtke",
+            "--convective-precip-efficiency", "0.5",
+        ]), parser)
 
 
 def test_convective_precip_efficiency_rejected_for_non_massflux_929():
@@ -4150,8 +4151,10 @@ def test_spectral_fallback_rejects_dependent_option_silent_noop():
     it must error instead of accept-then-ignore (codex r2)."""
     p = build_arg_parser()
     argv = ["--truncation", "21", "--convective-precip-efficiency", "0.5"]
-    args = _postprocess_args(p.parse_args(argv), p)
+    # (the default convection, tiedtke, now refuses the knob already in
+    # _postprocess_args; either refusal is the required loud error)
     with pytest.raises(SystemExit):
+        args = _postprocess_args(p.parse_args(argv), p)
         _apply_spectral_scheme_fallback(args, argv, p)
 
 
@@ -4220,7 +4223,8 @@ def test_hard_saturation_adjustment_requires_a_guarded_scheme():
     )
     parser = build_arg_parser()
     assert set(HARD_SAT_GUARD_EXEMPT) == {"sdm", "fast_sbm", "none", "kessler",
-                                          "seifert_beheng"}
+                                          "seifert_beheng", "thompson",
+                                          "ifs_cloudsc"}
     for micro in sorted(HARD_SAT_GUARD_EXEMPT):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", "--microphysics", micro,
@@ -4239,8 +4243,8 @@ def test_hard_saturation_adjustment_accepted_by_every_guarded_scheme():
     )
     parser = build_arg_parser()
     exposed = [s for s in HARD_SAT_GUARD_SCHEMES
-               if s in {"sundqvist", "morrison", "thompson", "p3"}]
-    assert len(exposed) == 4, exposed
+               if s in {"sundqvist", "morrison", "p3"}]
+    assert len(exposed) == 3, exposed
     for micro in exposed:
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", "--microphysics", micro,
@@ -4871,6 +4875,32 @@ def test_bechtold_enable_cmt_round_trips_and_default_is_one_value_on_every_lane(
             grid=dflt.grid._replace(grid_type=gt))).bechtold.enable_cmt is True
 
 
+def test_emanuel_enable_cmt_round_trips():
+    """--emanuel-enable-cmt reaches the EmanuelConfig leaf on both resolvers
+    (#2266); unset keeps the scheme default; explicit True on a compiled
+    PhysicsPipeline lane (which drops du_dt_conv) is refused."""
+    from legoesm.atmosphere.physics.convection.config import EmanuelConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection, convection_config_for
+
+    parser = build_arg_parser()
+
+    def cfg_of(*extra):
+        return build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--convection", "emanuel", *extra]), parser))
+
+    on = cfg_of("--emanuel-enable-cmt")
+    assert on.emanuel_enable_cmt is True
+    assert _resolve_convection(on)[1].enable_cmt is True
+    assert convection_config_for(on).emanuel.enable_cmt is True
+    off = cfg_of("--no-emanuel-enable-cmt")
+    assert convection_config_for(off).emanuel.enable_cmt is False
+    dflt = cfg_of()
+    assert dflt.emanuel_enable_cmt is None
+    assert convection_config_for(dflt).emanuel.enable_cmt is EmanuelConfig().enable_cmt
+    mpas = on._replace(grid=on.grid._replace(grid_type="mpas"))
+    assert convection_config_for(mpas).mpas_cmt is True
+
+
 def test_persistent_dgrid_flag_flows_to_config_1028():
     """--persistent-dgrid reaches DycoreConfig, and OFF is the default.
 
@@ -5424,43 +5454,21 @@ def test_land_snow_options_refused_when_invalid(argv, match):
         cfg.validate_strict()
 
 
-def test_convective_buoyancy_death_memory_reaches_tiedtke_config():
-    """--convective-buoyancy-death-memory must reach the Tiedtke scheme config
-    the kernel is built from, not stop at ExperimentConfig."""
-    from legoesm.driver.physics_pipeline import _resolve_convection
-
-    parser = build_arg_parser()
-    base = ["--grid", "gaussian", "--resolution", "21",
-            "--convection", "tiedtke"]
-    cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(base), parser))
-    cfg_on = build_config_from_args(_postprocess_args(
-        parser.parse_args(base + ["--convective-buoyancy-death-memory"]),
-        parser))
-    assert cfg_on.convective_buoyancy_death_memory is True
-    assert _resolve_convection(cfg_off)[1].buoyancy_death_memory is False
-    assert _resolve_convection(cfg_on)[1].buoyancy_death_memory is True
-
-
-@pytest.mark.parametrize("scheme", ["bechtold", "kain_fritsch", "sbm"])
-def test_buoyancy_death_memory_refused_off_tiedtke_in_python_config(scheme):
-    """A config built in Python (no CLI) must refuse the flag with any scheme
-    that does not read it, exactly as the CLI does."""
+@pytest.mark.parametrize("over", [
+    {"convective_precip_split": "autoconversion"},
+    {"convective_precip_efficiency": 0.5},
+])
+def test_tiedtke_refuses_surrogate_precip_knobs(over):
+    """The WRF Tiedtke port closes its own precipitation; the surrogate's
+    rain-split knobs would be silently inert with it (vote V14)."""
     from legoesm.driver.config import ExperimentConfig
-    cfg = ExperimentConfig(convection=scheme,
-                           convective_buoyancy_death_memory=True)
-    with pytest.raises(ValueError, match="convective_buoyancy_death_memory"):
+    cfg = ExperimentConfig(convection="tiedtke", **over)
+    with pytest.raises(ValueError, match="closes its own"):
         cfg.validate_strict()
-    # control: the same scheme with the flag at its default is not refused for it
-    try:
-        cfg._replace(convective_buoyancy_death_memory=False).validate_strict()
+    try:   # control: the same knob on Bechtold is not refused for it
+        cfg._replace(convection="bechtold").validate_strict()
     except ValueError as e:
-        assert "convective_buoyancy_death_memory" not in str(e)
-    # and Tiedtke with the flag on is not refused for it
-    try:
-        cfg._replace(convection="tiedtke").validate_strict()
-    except ValueError as e:
-        assert "convective_buoyancy_death_memory" not in str(e)
+        assert "closes its own" not in str(e)
 
 
 def test_corner_fill_flag_round_trip_and_production_pin(capsys):
@@ -6041,3 +6049,38 @@ def test_climateeval_ids_follow_cmip_flags_unless_given():
     cmd = run.call_args.args[0]
     assert cmd[cmd.index("--model-id") + 1] == "SRC-1-0"
     assert cmd[cmd.index("--variant-id") + 1] == "r2i1p1f1"
+
+
+_LY_WIDTH_FIELDS = ("surface_large_yeager_neutral_width",
+                    "surface_large_yeager_dthv_width",
+                    "surface_large_yeager_cd_cutoff_width")
+
+
+def test_large_yeager_width_flags_default_bit_identical():
+    """Unset Large-Yeager width flags (#2241) leave ExperimentConfig at its own
+    defaults exactly (no new value chosen by the CLI)."""
+    from legoesm.driver.config import ExperimentConfig
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]),
+                             parser)
+    cfg = build_config_from_args(args)
+    for f in _LY_WIDTH_FIELDS:
+        assert getattr(cfg, f) == getattr(ExperimentConfig(), f)
+
+
+def test_large_yeager_width_flags_thread_to_config():
+    """Each --surface-large-yeager-*-width flag reaches its ExperimentConfig
+    field (0 = AeroBulk hard switch, the reference limit)."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--surface-bulk-scheme", "large_yeager",
+        "--turbulence", "holtslag_boville",
+        "--surface-large-yeager-neutral-width", "0",
+        "--surface-large-yeager-dthv-width", "0.02",
+        "--surface-large-yeager-cd-cutoff-width", "0.25",
+    ])
+    cfg = build_config_from_args(_postprocess_args(args, parser))
+    assert cfg.surface_large_yeager_neutral_width == 0.0
+    assert cfg.surface_large_yeager_dthv_width == 0.02
+    assert cfg.surface_large_yeager_cd_cutoff_width == 0.25

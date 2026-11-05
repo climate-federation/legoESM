@@ -740,7 +740,7 @@ uninstrumented `_nemo_literal_tke_solve` (`0 / 772,560` interior words unequal;
   (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12656-12685`)
   calls `compute_face_masks_3d(_zc.is_active, _grid)`, which sets the
   northernmost V-face mask row `north = jnp.zeros_like(south)`
-  (`packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py:5875-5876`),
+  (`packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py:5967-5968`),
   zeroing `vm3[-1]` on the north-fold row `jj = 150` (`j = 147`) instead of
   restoring NEMO's raw `vmask[-1]` as `_tke_step_entry_p_sh2` already does when
   `nemo_sh2_fold_top_v=True`
@@ -1438,7 +1438,7 @@ recipe at `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2418`).
   and matches `_tke_step_entry_p_sh2`
   (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13071-13088`).
 - **Production-call-site test and `eager == jit` (`M2`, `M4`)**:
-  `tests/ocean/unit/test_nemo_sh2_fold_top_v.py:118-310` exercises
+  `tests/ocean/unit/test_nemo_sh2_fold_top_v.py:118-311` exercises
   `model._tke_bottom_dirichlet` and
   `LatLonCGridOceanModel._apply_implicit_vertical_mixing` on a partial-cell
   north-fold staircase (`mbkt = 2 < nlev - 1 = 3`, so the in-solve seafloor

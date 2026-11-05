@@ -1428,11 +1428,87 @@ def test_store_mass_flux_is_the_last_config_field():
             "rk3_stage3_l9_eiv_nemo_order",
             "nemo_qsr_stage3_kmm_source_association",
             "vmix_eos_use_config_rho0",
+            # appended by the ocean oracle-fix campaign (tier-3 RNF)
+            "runoff_depth_spread_levels",
+            "lateral_viscosity_mask_levels",
+            "lateral_shlat",
+            "runoff_temperature_floor_sharpness",
             )
     assert fields[-len(tail):] == tail, (
         f"config tail is {fields[-len(tail):]}, expected {tail}; a new field "
         "must be APPENDED, never inserted -- positional callers break "
         "otherwise")
+
+
+def test_store_mass_flux_retains_slot_105_and_combined_prefix():
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+
+    fields = LatLonCGridOceanConfig._fields
+    combined_prefix = (
+        "metric_convention", "vface_zonal_metric_evaluation",
+        "coriolis_placement", "lateral_viscosity", "bottom_drag", "K_h",
+        "K_bih", "A_v", "K_v", "barotropic", "hyperdiff_coeff",
+        "use_conservation_fixer", "fix_volume", "fix_heat", "fix_salt",
+        "fix_eta_drift", "min_water_column_m", "runtime_checks",
+        "freshwater_closure", "S_ref", "normalize_freshwater",
+        "tracer_advection", "gm_redi", "physics", "eos", "eos_linear",
+        "eos_nemo_seos", "slope_foot_alpha", "slope_foot_threshold",
+        "slope_foot_n_levels", "momentum_advection", "ke_gradient_scheme",
+        "weno_d_term", "weno_smoothness", "weno_divergence_smoothness",
+        "vortcor_enstrophy_metric", "vortcor_reconstruct_zeta",
+        "vorticity_scheme", "een_q_boundary", "een_e3f_scheme",
+        "een_metric_weighting", "weno_vertadv_full_velocity",
+        "wall_grid_filter_rate_s", "tracer_wall_neumann_fill", "pgf_scheme",
+        "pgf_quadrature", "eos_depth", "tracer_time_integrator",
+        "bbl_adv_option", "bbl_gamma_s", "bbl_diffusive_option",
+        "bbl_aht_m2_s", "bbl_nemo_stage3_krhs", "bbl_nemo_pivot_ghost",
+        "ab2_epsilon", "outer_integrator", "asselin_gamma",
+        "tracer_combine", "implicit_vertical_mixing", "constants",
+        "momentum_flux_scheme", "vertical_momentum_scheme",
+        "zad_bottom_face_mask", "zad_qco_evaluation", "wzv_call2_evaluation",
+        "nemo_stage_momentum_wzv_split", "nemo_first_wzv_after_ssh",
+        "lateral_viscosity_operator", "lateral_viscosity_e3_weighting",
+        "lateral_viscosity_coefficient_source", "lateral_side_bc",
+        "dt_mom_ratio", "surface_forcing_implicit", "surface_stress_implicit",
+        "adaptive_implicit_vertadv", "momentum_time_integrator",
+        "freeze_floor", "freeze_floor_temp_c", "freezing", "polar_filter",
+        "momentum_friction_additive", "coriolis_scheme",
+        "coriolis_energy_conserving", "barotropic_coriolis_split", "ab2_scope",
+        "ew_cyclic_overlap", "meridionally_periodic", "runoff_depth_spread_m",
+        "runoff_depth_spread_map", "sponge_forcing_implicit",
+        "lateral_friction_scheme", "omp25", "qg_leith_coeff",
+        "qg_leith_stretching", "qg_leith_deformation_radius_m",
+        "implicit_vmix_dzw_slot", "meridionally_flat", "tidal_forcing",
+        "backscatter", "prescribed_flow", "freshwater_salinity",
+        "zdf_drag_in_matrix", "zdf_baroclinic_only", "barotropic_drag_substep",
+        "barotropic_forcing_centred", "store_mass_flux", "store_salt_flux",
+        "zdf_implicit_solver_evaluation",
+        "een_fold_image_v_row",
+        "rk3_stage1_ssh_nemo_literal",
+        "rk3_stage1_rhs_nemo_literal",
+        "rk3_stage_velocity_written_order",
+        "een_vorticity_written_order",
+        "zdf_barotropic_removal_nemo_literal",
+        "zdf_momentum_nemo_face_thickness",
+        "rk3_fold_exchange_top_v_row",
+        "rk3_stage_r3f_nemo_literal",
+        "rk3_stage_r3t_nemo_literal",
+        "nemo_eos_gdept_rounded_product",
+        "rk3_stage_r3uv_nemo_literal",
+        "zdf_tracer_nemo_rounded_thickness",
+        "barotropic_rhs_ascending_level_sum",
+        "zdf_momentum_stage_r3u_nemo_literal",
+        "een_nemo_relative_vorticity",
+        "een_nemo_top_f_u_halo",
+        "barotropic_wind_nemo_stored_depth",
+        "surface_stress_nemo_fold_vector_sign",
+        "zdf_surface_stress_nemo_face_thickness",
+        "rk3_stage_tracer_written_order",
+        "rk3_stage3_heat_nemo_written",
+        "rk3_stage3_tracer_nemo_stored_thickness",
+    )
+    assert fields[:len(combined_prefix)] == combined_prefix
+    assert fields.index("store_mass_flux") == 105
 
 
 def test_store_mass_flux_survives_flat_construction_and_replace():

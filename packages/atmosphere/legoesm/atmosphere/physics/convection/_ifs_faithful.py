@@ -41,7 +41,8 @@ from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.constants import R_d
 
 from ._ifs_cumastrn import IfsTunables, cumastrn
-from ._ifs_cuthermo import lego_thermo, satur_qsat
+from .._ifs_thermo import lego_thermo, satur_qsat
+from ..microphysics.ifs_cloudsc import CloudscConvection
 
 __physics_contract__ = {
     "summary": (
@@ -93,6 +94,8 @@ def _hydrostatic_geopotential(T, q_v, p_half):
 
 
 def _check_config(config):
+    # use_ifs_capdcycl must stay default (True) here, so the IFS ascent always
+    # gets the driver's lagged surface-flux feed (vote VC39).
     default = type(config)()
     set_ = []
     for f in config._fields:
@@ -139,6 +142,13 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, dt, config, shf_w_m2,
         raise ValueError("use_ifs_ascent needs shf_w_m2, lhf_w_m2 and land_frac "
                          "(cubasen's surface parcel and cumastrn's land switches)")
     th = lego_thermo()
+    # Hybrid-coordinate hosts build pressure, and density-derived surface
+    # fluxes, in float64 under x64 whatever the column precision; CUMASTRN's
+    # scan carries are typed by the column.
+    p_full = jnp.asarray(p_full, T.dtype)
+    p_half = jnp.asarray(p_half, T.dtype)
+    shf_w_m2 = jnp.asarray(shf_w_m2, T.dtype)
+    lhf_w_m2 = jnp.asarray(lhf_w_m2, T.dtype)
     zero = jnp.zeros_like(T)
     z = lambda a: zero if a is None else a
     geo_full, geo_half = _hydrostatic_geopotential(T, q_v, p_half)
@@ -163,5 +173,12 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, dt, config, shf_w_m2,
         precip_frozen_sfc=o.pmflxs[:, -1],
         dq_r_detr_dt=g_dp * o.psnde[:, 0],
         dq_s_detr_dt=g_dp * o.psnde[:, 1],
+        # raw, as CUMASTRN hands them to CLOUDSC (callpar), for a host that
+        # runs CLOUDSC (vote A7'); (ncol, k, nlev) -> (ncol, nlev, k)
+        ifs_cloudsc_conv=CloudscConvection(
+            plu=o.plu, plude=o.plude,
+            pludeli=jnp.moveaxis(o.pludeli, 1, -1),
+            psnde=jnp.moveaxis(o.psnde, 1, -1),
+            pmfu=o.pmfu, pmfd=o.pmfd, ldcum=o.ldcum, ktype=o.ktype),
     )
     return out, o.pmfu

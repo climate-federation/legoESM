@@ -243,7 +243,9 @@ class TestConvectionGrad:
             "zhang_mcfarlane",
             "kain_fritsch",
             "emanuel",
-            "tiedtke",
+            # tiedtke: the WRF port's gradients are certified in
+            # tests/atmosphere/test_tiedtke_wrf_oracle.py (its bridge needs
+            # the dynamics / lagged turbulence carries this harness lacks)
             "bechtold",
         ],
     )
@@ -360,6 +362,19 @@ class TestTurbulenceGrad:
 # 2e  Microphysics
 # ============================================================================
 
+def _full_registry_for(scheme, state):
+    """The WRF Thompson port needs the full moisture registry (votes W1a/Y3a):
+    zeros for the absent species, the values the bridge used to zero-fill."""
+    if scheme != "thompson":
+        return state
+    from legoesm.core.tracers import make_full_moisture_registry
+    qv0 = state.tracers["q_v"]
+    return state._replace(tracers={
+        **{n: qv0.replace(data=jnp.zeros_like(qv0.data), name=n)
+           for n in make_full_moisture_registry().names},
+        **state.tracers})
+
+
 class TestMicrophysicsGrad:
 
     @pytest.fixture(autouse=True)
@@ -382,7 +397,7 @@ class TestMicrophysicsGrad:
 
         config = MicrophysicsConfig(scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
         micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)
-        state = self.state
+        state = _full_registry_for(scheme, self.state)
 
         def loss(qv_data):
             tracers_new = {**state.tracers, "q_v": state.tracers["q_v"].replace(data=qv_data)}
@@ -412,7 +427,7 @@ class TestMicrophysicsGrad:
 
         config = MicrophysicsConfig(scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
         micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)
-        state = self.state
+        state = _full_registry_for(scheme, self.state)
         qr_zero = jnp.zeros_like(state.tracers["q_r"].data)
 
         def loss(qr_data):
@@ -471,7 +486,7 @@ class TestMicrophysicsGrad:
 
         config = MicrophysicsConfig(scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
         micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)
-        state = self.state
+        state = _full_registry_for(scheme, self.state)
         zero_field = jnp.zeros_like(state.tracers["q_v"].data)
 
         # Explicitly add ice-phase tracers to the state so the override

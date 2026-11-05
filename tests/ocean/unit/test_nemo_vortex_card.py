@@ -651,11 +651,13 @@ _CERTIFIED_CARD_DIGESTS_GRADGATE = {        # gradient-gate tip d678430f3
 # GYRE resolves vertical_mixing.scheme = "tke"); the non-config part of the
 # digest is identical.
 _CERTIFIED_CARD_DIGESTS = {
-    # The two appended routing fields move the printed NamedTuple digest; the
-    # surrounding field-by-field guards pin their resolved values below.
-    "GYRE-zco": "d060e5655f9310f6",
-    "LOCK_EXCHANGE-zco": "8bdbed2f7aa4da7d",
-    "OVERFLOW-zps": "72dc1f3dd2857fd9",
+    # Catch-up merge audit: state/grid/z/land/tail components are unchanged,
+    # and every common config leaf is value-identical to main.  The digest
+    # moves for the combined NamedTuple field order plus the appended fields
+    # whose values are pinned by the surrounding field-by-field guards.
+    "GYRE-zco": "6e62ad9e2f13da2b",
+    "LOCK_EXCHANGE-zco": "fe969dad638d27b6",
+    "OVERFLOW-zps": "7a4559a730c1079d",
 }
 
 
@@ -679,6 +681,10 @@ def test_the_only_config_change_to_a_certified_card_is_the_added_eos_field(case)
     assert cfg.nemo_qsr_stage3_kmm_source_association is (
         True if case == "GYRE-zco" else None)
     assert cfg.vmix_eos_use_config_rho0 is True
+    # Appended lateral_viscosity_mask_levels: every certified card keeps the
+    # surface masks it always ran.
+    assert cfg.lateral_viscosity_mask_levels == "surface"
+    assert cfg.lateral_shlat == 2.0 and cfg.lateral_side_bc != "nemo_shlat"
 
 
 def _card_digest(card):

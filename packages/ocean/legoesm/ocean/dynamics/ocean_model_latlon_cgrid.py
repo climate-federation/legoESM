@@ -1925,7 +1925,6 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # own ``tra_zdf`` boundary without enabling an absent module.
     tracer_zdf_trace: bool = False
 
-
 def rk3_stage_velocity_update(
     velocity_before,
     rhs,
@@ -2531,7 +2530,6 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     barotropic_correction_geometry: object
     stage_outputs: object
     stage_tracer_sources: object
-
 
 class _NEMOWSMomentumBudgetTrace(NamedTuple):
     """Private passive surface-V production increments for GYRE."""
@@ -3985,8 +3983,12 @@ class LatLonCGridOceanModel:
             # recompute K/A via the fallback — the same pattern as the
             # surface_forcing_implicit strip above.  Explicit-mixing configs
             # (implicit_vertical_mixing=False) keep the loud ValueError.
+            # ePBL is stripped the same way: its K must come from the
+            # fallback, which hands it the step dt (CATKE's dt_mom); the
+            # pipeline's copy would price mixing with EPBLConfig.dt_s.
             if (self.config.implicit_vertical_mixing
-                    and self._lat_dependent_constant_vmix()):
+                    and (self._lat_dependent_constant_vmix()
+                         or self._epbl_vmix())):
                 physics_for_combined = physics_for_combined._replace(
                     vertical_mixing=physics_for_combined.vertical_mixing
                     ._replace(scheme="none"))
@@ -4025,6 +4027,13 @@ class LatLonCGridOceanModel:
                 and _pc.vertical_mixing.scheme == "constant"
                 and bool(getattr(_pc.vertical_mixing.constant,
                                  "lat_dependent", False)))
+
+    def _epbl_vmix(self) -> bool:
+        """Static predicate: ``vertical_mixing.scheme="epbl"``.  ePBL's K is
+        computed only by the implicit-solve fallback (with the step dt), so
+        the explicit-composition strip and the fallback force share it."""
+        _pc = self.config.physics
+        return _pc is not None and _pc.vertical_mixing.scheme == "epbl"
 
     def _ensure_vertex_mask(self, state) -> None:
         """Fill (or refresh) the vertex-mask cache from CONCRETE state.
@@ -4790,6 +4799,27 @@ class LatLonCGridOceanModel:
                 f"got {config.lateral_viscosity_operator!r}",
             )
         # #1455: e3-weighting selector for the "nemo_div_curl" operator only.
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            VALID_LATERAL_VISCOSITY_MASK_LEVELS)
+        _mlev = getattr(config, "lateral_viscosity_mask_levels", "surface")
+        if _mlev not in VALID_LATERAL_VISCOSITY_MASK_LEVELS:
+            raise ValueError(
+                "lateral_viscosity_mask_levels must be one of "
+                f"{sorted(VALID_LATERAL_VISCOSITY_MASK_LEVELS)}, got {_mlev!r}")
+        if (_mlev == "per_level"
+                and config.lateral_viscosity_operator != "vector_laplacian"):
+            raise ValueError(
+                "lateral_viscosity_mask_levels='per_level' requires "
+                "lateral_viscosity_operator='vector_laplacian', got "
+                f"{config.lateral_viscosity_operator!r}")
+        if (getattr(config, "lateral_side_bc", "free_slip") == "nemo_shlat"
+                and _mlev != "per_level"):
+            raise ValueError(
+                "lateral_side_bc='nemo_shlat' requires "
+                "lateral_viscosity_mask_levels='per_level'")
+        if not float(getattr(config, "lateral_shlat", 2.0)) >= 0.0:
+            raise ValueError(
+                f"lateral_shlat must be >= 0, got {config.lateral_shlat!r}")
         _e3w = getattr(config, "lateral_viscosity_e3_weighting", "off")
         if _e3w not in VALID_LATERAL_VISCOSITY_E3_WEIGHTING:
             raise ValueError(
@@ -5470,6 +5500,14 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "dt_mom_ratio must be >= 1.0 (dt_mom <= dt_tracer), "
                 f"got {config.dt_mom_ratio!r}")
+        if (config.dt_mom_ratio != 1.0 and config.physics is not None
+                and config.physics.vertical_mixing.scheme == "epbl"):
+            raise ValueError(
+                "vertical_mixing.scheme='epbl' requires dt_mom_ratio == 1.0: "
+                "ePBL's energy budget is per timestep and runs on the momentum "
+                "step dt, so it must equal the tracer dt of the implicit "
+                f"tracer solve its diffusivity feeds. Got dt_mom_ratio="
+                f"{config.dt_mom_ratio!r}.")
         if config.dt_mom_ratio != 1.0 and config.barotropic.barotropic_solver != "rigid_lid":
             raise ValueError(
                 "dt_mom_ratio != 1.0 (asynchronous dt_mom≠dt_tracer stepping) "
@@ -5584,6 +5622,14 @@ class LatLonCGridOceanModel:
                     "everywhere (build it with nemo_runoff_depth_map, "
                     "which floors at 1 m) — zero/negative cells would "
                     "silently drop the runoff dilution (codex r11 LOW).")
+        _rdsl = getattr(config, "runoff_depth_spread_levels", None)
+        if _rdsl is not None:
+            import numpy as _np
+            _rdsl_np = _np.asarray(_rdsl)
+            if (not _np.issubdtype(_rdsl_np.dtype, _np.integer)) or (_rdsl_np < 1).any():
+                raise ValueError(
+                    "runoff_depth_spread_levels must be an integer map >= 1 "
+                    "(build it with nemo_runoff_level_count).")
         _valid_pgf_quad = {"cell_integral", "nemo_trapezoid"}
         _pgf_quad = getattr(config, "pgf_quadrature", "cell_integral")
         if _pgf_quad not in _valid_pgf_quad:
@@ -11714,7 +11760,8 @@ class LatLonCGridOceanModel:
             _F_entry, _entry_heat = real_freshwater_entry(
                 freshwater, _F_fw_rate_now, h_k_new, mask, _cfg_b.rho_0,
                 state_new.T.data,
-                runoff_spread_m=resolve_runoff_spread_arg(_cfg_b))
+                runoff_spread_m=resolve_runoff_spread_arg(_cfg_b),
+                runoff_t_floor_sharpness=_cfg_b.runoff_temperature_floor_sharpness)
             _dS_dil, _dT_dil = real_freshwater_dilution_tendencies(
                 _F_fw_rate_now, state_new.S.data, state_new.T.data,
                 h_k_new, mask, F_entry=_F_entry, entry_heat=_entry_heat)
@@ -13917,7 +13964,11 @@ class LatLonCGridOceanModel:
             _constant_nemo_evd = resolve_evd_composition(
                 _conv_here.enhanced_diffusion) == "nemo_replace"
 
-        if self._lat_dependent_constant_vmix() or _constant_nemo_evd:
+        if (self._lat_dependent_constant_vmix() or _constant_nemo_evd
+                or self._epbl_vmix()):
+            # (ePBL: its K comes only from the fallback, which passes it the
+            # step dt; anything surfaced here, e.g. EVD, is re-diagnosed
+            # there, as for tke/catke.)
             # The combined physics pipeline surfaces only the SUM of the
             # constant closure and EVD fields.  NEMO keeps those owners
             # separate: zdfphy.f90:347-351 copies the constant closure, then
@@ -14018,6 +14069,8 @@ class LatLonCGridOceanModel:
                     _phys_cfg.vertical_mixing.iwm,
                     eos_fn=_mk_eos(eos=_cfg_b.eos,
                                    eos_linear=_cfg_b.eos_linear,
+                                   eos_nemo_seos=getattr(
+                                       _cfg_b, "eos_nemo_seos", None),
                                    **({"rho0": _cfg_b.rho_0}
                                       if getattr(_cfg_b, "eos_depth", None) == "geometric" and getattr(_cfg_b, "vmix_eos_use_config_rho0", True)
                                       else {})),
@@ -14202,6 +14255,10 @@ class LatLonCGridOceanModel:
                     A_v_background=float(_cfg_b.A_v),
                     K_v_background=float(_cfg_b.K_v),
                     eos_fn=_vmix_eos_fn,
+                    # ePBL's per-timestep energy budget takes the same step
+                    # dt CATKE gets above (dt_mom: leapfrog 2*dt, dt on the
+                    # Euler start); no other scheme on this branch reads it.
+                    dt_tke=(dt_mom if _vmix_cfg.scheme == "epbl" else None),
                     lat_deg=_tke_lat_deg,
                     iwm_fields=_iwm,
                     n2_tracers=n2_tracers,
@@ -14448,6 +14505,8 @@ class LatLonCGridOceanModel:
                     state, _zc, _cfg_b.physics, _ddm_cfg,
                     eos_fn=_mk_eos_ddm(eos=_cfg_b.eos,
                                        eos_linear=_cfg_b.eos_linear,
+                                       eos_nemo_seos=getattr(
+                                           _cfg_b, "eos_nemo_seos", None),
                                        **({"rho0": _cfg_b.rho_0}
                                           if getattr(_cfg_b, "eos_depth", None) == "geometric" and getattr(_cfg_b, "vmix_eos_use_config_rho0", True)
                                           else {})),

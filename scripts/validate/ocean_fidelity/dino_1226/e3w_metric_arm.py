@@ -56,7 +56,7 @@ ARMS (one variable, Rule 7)
              NEMO's ``gdept(k)-gdept(k-1)``.  THE VARIABLE.
              NOTE this is deliberately the WIDE arm: ``dz_half_ref`` is also
              read by the N^2 / TKE / GM / momentum-friction paths
-             (ocean_pe_latlon_cgrid.py:1821,:3457, combined.py:130,
+             (ocean_pe_latlon_cgrid.py:1831,:3457, combined.py:130,
              ocean_model_latlon_cgrid.py:6533-6534), so a NULL result here
              exonerates the whole ``dz_half`` metric family at once, which is
              the stronger statement.  A non-null result must then be split.

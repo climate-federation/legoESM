@@ -54,8 +54,9 @@ from legoesm.thermo import saturation_mixing_ratio
 
 # Schemes with a self-contained warm/ice column tendency (ml_emulator needs a
 # trained net; "none" is a no-op — both excluded).
+# thompson (WRF port) needs the resolved w this offline column lacks.
 SCHEMES = ("kessler", "sundqvist", "seifert_beheng", "morrison",
-           "thompson", "p3", "sdm", "fast_sbm")
+           "p3", "sdm", "fast_sbm")
 
 # Literature liquid-water-path ranges [g/m²].
 #  * DYCOMS is OVERCAST (cloud fraction ≈ 1), so a single saturated column ≈

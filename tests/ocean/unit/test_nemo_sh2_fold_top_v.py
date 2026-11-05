@@ -229,6 +229,7 @@ def _bottom_bc_production_case(flag: bool, fold: bool = True):
         ),
         _tke_post_mixing_active=lambda: False,
         _lat_dependent_constant_vmix=lambda: False,
+        _epbl_vmix=lambda: False,
     )
     from types import MethodType
     for name in ("_tke_bottom_dirichlet", "_tke_bottom_level",
@@ -308,5 +309,3 @@ def test_production_bottom_dirichlet_restores_north_fold_vmask_and_matches_nemo(
     assert not np.array_equal(kv_off[-1, :, 1], kv_off[-1, PERM, 1])
     with pytest.raises(ValueError, match="nemo_sh2_fold_top_v"):
         _bottom_bc_production_case(True, fold=False)
-
-

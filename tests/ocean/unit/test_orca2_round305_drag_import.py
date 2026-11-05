@@ -105,7 +105,7 @@ def test_substeps_receive_nemos_bottom_tfield(vortex, monkeypatch):
     out = model.step(s0, dt=vortex.dt_s, surface_forcing=OceanSurfaceForcing(
         tau_x=zero, tau_y=zero, ice_ocean_top_drag_rCdu=_field(vortex, 1.5e-3, 5)))
     assert np.all(np.isfinite(np.asarray(out.eta.data)))
-    assert seen, "the substeps never passed rCdU_bot"
+    assert len(seen) == 2, "the substeps never passed rCdU_bot"
     wet = np.asarray(vortex.recipe.z_coord.bottom_level) >= 0
     want = np.where(wet, -(recipe._SMT2_RN_CD0 * recipe._SMT2_RN_UC0), -0.0)
     for got in seen:
@@ -231,11 +231,18 @@ def test_dynzdf_bottom_rhs_runs_nemos_statement(vortex, monkeypatch):
     model = LatLonCGridOceanModel(vortex.recipe.grid, vortex.recipe.z_coord, cfg)
     s0 = vortex.recipe.initial_state
     zero = jnp.zeros_like(s0.eta.data)
+    with pytest.raises(ValueError, match="ice_ocean_top_drag_rCdu"):
+        model.step(s0, dt=vortex.dt_s)
+    with pytest.raises(ValueError, match="ice_ocean_top_drag_rCdu"):
+        model._apply_implicit_vertical_mixing(s0, s0, None, vortex.dt_s)
+    top_rCdu = _field(vortex, 1.5e-3, 5)
     model.step(s0, dt=vortex.dt_s, surface_forcing=OceanSurfaceForcing(
-        tau_x=zero, tau_y=zero, ice_ocean_top_drag_rCdu=zero))
+        tau_x=zero, tau_y=zero, ice_ocean_top_drag_rCdu=top_rCdu))
     pair = 2 * -(recipe._SMT2_RN_CD0 * recipe._SMT2_RN_UC0)
     assert sum(np.any(p == pair) for p in seen) >= 2, \
         "dyn_zdf's bottom drag RHS did not run NEMO's statement"
+    assert sum(np.any(p != 0.0) and not np.any(p == pair) for p in seen) >= 2, \
+        "dyn_zdf's top drag RHS did not run NEMO's statement"
 
 
 @pytest.mark.parametrize("change", [

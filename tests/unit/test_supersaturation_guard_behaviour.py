@@ -68,7 +68,6 @@ from legoesm.atmosphere.physics.microphysics.config import (
     P3Config,
     SeifertBehengConfig,
     SundqvistConfig,
-    ThompsonConfig,
 )
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     MicrophysicsEmulator,
@@ -81,7 +80,6 @@ from legoesm.atmosphere.physics.microphysics.seifert_beheng import (
     seifert_beheng_microphysics,
 )
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
-from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.thermo import saturation_specific_humidity
 
 from legoesm import constants
@@ -101,7 +99,6 @@ _SCHEMES = {
                   SundqvistConfig),
     "seifert_beheng": (seifert_beheng_microphysics, SeifertBehengConfig),
     "morrison": (morrison_microphysics, MorrisonConfig),
-    "thompson": (thompson_microphysics, ThompsonConfig),
     "p3": (p3_microphysics, P3Config),
     "ml_emulator": (ml_microphysics, MicrophysicsMLEmulatorConfig),
 }

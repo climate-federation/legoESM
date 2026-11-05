@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.grids.latlon import create_latlon_grid
@@ -116,6 +117,171 @@ class TestConstantScheme:
             state, z, None, cfg, A_v_background=5e-4, K_v_background=2e-4)
         assert jnp.allclose(K1 - K0, 2e-4)
         assert jnp.allclose(A1 - A0, 5e-4)
+
+
+def test_tke_bundle_ddm_operands_change_literal_composition(
+        grid_z_state, monkeypatch):
+    """Run TKEEntryN2Bundle.ddm_operands through its k_profiles consumer."""
+    from legoesm.ocean.physics.vertical_mixing import double_diffusion
+    from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+        DoubleDiffusionConfig,
+    )
+    from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
+    from legoesm.ocean.vertical import create_partial_cell_coordinate
+
+    _, base_z, state = grid_z_state
+    z_coord = create_partial_cell_coordinate(base_z, state.H_bathy.data)
+    vmix = VerticalMixingConfig(
+        scheme="constant",
+        constant=ConstantVerticalMixingConfig(K_v=1.0e-5, A_v=2.0e-5),
+        ddm=DoubleDiffusionConfig(enabled=True, form="nemo_literal"))
+    cfg = OceanPhysicsConfig(vertical_mixing=vmix, **_base())
+    shape = state.T.data.shape[:-1] + (state.T.data.shape[-1] - 1,)
+    seen = []
+
+    def fake_ddm(avt, avm, zdt, zds, rn2, wet, _cfg):
+        seen.append((np.asarray(zdt), np.asarray(zds)))
+        delta = jnp.mean(zdt - zds)
+        return avt + delta, avt + 2.0 * delta, avm + 3.0 * delta
+
+    monkeypatch.setattr(double_diffusion, "nemo_zdf_ddm", fake_ddm)
+
+    def selected(zdt_value):
+        bundle = TKEEntryN2Bundle(
+            rn2=jnp.ones(shape), rn2b=jnp.ones(shape),
+            gdepw_Kmm=jnp.ones(shape), e3w_Kmm=jnp.ones(shape),
+            e3t_Kmm=jnp.ones(state.T.data.shape),
+            ddm_operands=(jnp.full(shape, zdt_value), jnp.ones(shape)))
+        return compute_vertical_K_profiles(
+            state, z_coord, None, cfg, tke_n2_bundle=bundle,
+            return_salt_K=True)
+
+    on = selected(3.0)
+    off = selected(1.0)
+    assert len(seen) == 2
+    assert float(on[0][0, 0, 0]) == pytest.approx(2.00001)
+    assert float(on[2][0, 0, 0]) == pytest.approx(4.00001)
+    assert float(off[0][0, 0, 0]) == pytest.approx(1.0e-5)
+    assert not np.array_equal(np.asarray(on[0]), np.asarray(off[0]))
+    from types import SimpleNamespace
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+
+    z_n2 = create_partial_cell_coordinate(
+        base_z._replace(
+            nemo_gdept_0=jnp.broadcast_to(
+                jnp.abs(base_z.z_full_ref), state.T.data.shape),
+            nemo_gdepw_0=jnp.broadcast_to(
+                jnp.abs(base_z.z_half_ref[:-1]), state.T.data.shape),
+            nemo_e3t_0=jnp.broadcast_to(base_z.dz_ref, state.T.data.shape),
+            nemo_e3w_0=jnp.broadcast_to(base_z.dz_ref, state.T.data.shape),
+            nemo_e3w_mesh_reference=True),
+        state.H_bathy.data)
+    n2_bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
+        SimpleNamespace(
+            _nemo_ws_test_hooks=SimpleNamespace(
+                bn2_tracer_override=None, bn2_intermediate="",
+                bn2_alpha_beta_override=None),
+            _n2_nemo_before_tracers=lambda *a, **k: None),
+        state, z_coord=z_n2,
+        config=SimpleNamespace(
+            physics=cfg._replace(vertical_mixing=vmix._replace(
+                scheme="tke",
+                tke=TKEConfig(
+                    tke_n2_evaluation_stage="step_entry",
+                    n2_mode="nemo_bn2", n2_eos_form="eos80"))),
+            gm_redi=None, eos_nemo_seos=None,
+            constants=SimpleNamespace(g=9.80665)))
+    assert n2_bundle.ddm_operands is not None and len(n2_bundle.ddm_operands) == 2
+
+
+def test_tke_bundle_iwm_stretch_changes_literal_composition(
+        grid_z_state, monkeypatch):
+    """Run TKEEntryN2Bundle.iwm_stretch through its k_profiles consumer."""
+    from legoesm.ocean.physics.vertical_mixing import internal_wave_mixing
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        IWMConfig, IWMForcing,
+    )
+    from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
+    from legoesm.ocean.vertical import create_partial_cell_coordinate
+
+    _, base_z, state = grid_z_state
+    raw_e3w = jnp.broadcast_to(
+        base_z.dz_ref, state.T.data.shape)
+    base_z = base_z._replace(
+        t_depth_ref=jnp.abs(base_z.z_full_ref), nemo_e3w_0=raw_e3w)
+    z_coord = create_partial_cell_coordinate(base_z, state.H_bathy.data)
+    vmix = VerticalMixingConfig(
+        scheme="constant",
+        constant=ConstantVerticalMixingConfig(K_v=1.0e-5, A_v=2.0e-5),
+        iwm=IWMConfig(enabled=True, form="nemo_literal", tsdiff=False))
+    cfg = OceanPhysicsConfig(vertical_mixing=vmix, **_base())
+    horizontal = state.eta.data.shape
+    shape = state.T.data.shape[:-1] + (state.T.data.shape[-1] - 1,)
+    forcing = IWMForcing(
+        ebot=jnp.ones(horizontal), ecri=jnp.ones(horizontal),
+        ensq=jnp.ones(horizontal), esho=jnp.ones(horizontal),
+        hbot=jnp.ones(horizontal), hcri_inv=jnp.ones(horizontal))
+    seen = []
+
+    def fake_iwm(avt, avs, avm, _forcing, rn2, stretch, *_args, **_kwargs):
+        seen.append(np.asarray(stretch))
+        delta = jnp.mean(stretch)
+        return avt + delta, avs + 2.0 * delta, avm + 3.0 * delta
+
+    monkeypatch.setattr(internal_wave_mixing, "nemo_zdf_iwm", fake_iwm)
+
+    def selected(stretch_value):
+        bundle = TKEEntryN2Bundle(
+            rn2=jnp.ones(shape), rn2b=jnp.ones(shape),
+            gdepw_Kmm=jnp.ones(shape), e3w_Kmm=jnp.ones(shape),
+            e3t_Kmm=jnp.ones(state.T.data.shape),
+            iwm_stretch=jnp.full(horizontal, stretch_value))
+        return compute_vertical_K_profiles(
+            state, z_coord, None, cfg, tke_n2_bundle=bundle,
+            iwm_fields=forcing, return_salt_K=True)
+
+    on = selected(1.25)
+    off = selected(1.0)
+    assert len(seen) == 2
+    assert float(on[0][0, 0, 0]) == pytest.approx(1.25001)
+    assert float(on[2][0, 0, 0]) == pytest.approx(2.50001)
+    assert float(off[0][0, 0, 0]) == pytest.approx(1.00001)
+    assert not np.array_equal(np.asarray(on[0]), np.asarray(off[0]))
+    from types import SimpleNamespace
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+
+    z_n2 = create_partial_cell_coordinate(
+        base_z._replace(
+            nemo_gdept_0=jnp.broadcast_to(
+                jnp.abs(base_z.z_full_ref), state.T.data.shape),
+            nemo_gdepw_0=jnp.broadcast_to(
+                jnp.abs(base_z.z_half_ref[:-1]), state.T.data.shape),
+            nemo_e3t_0=jnp.broadcast_to(base_z.dz_ref, state.T.data.shape),
+            nemo_e3w_0=jnp.broadcast_to(base_z.dz_ref, state.T.data.shape),
+            nemo_e3w_mesh_reference=True),
+        state.H_bathy.data)
+    n2_bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
+        SimpleNamespace(
+            _nemo_ws_test_hooks=SimpleNamespace(
+                bn2_tracer_override=None, bn2_intermediate="",
+                bn2_alpha_beta_override=None),
+            _n2_nemo_before_tracers=lambda *a, **k: None),
+        state, z_coord=z_n2,
+        config=SimpleNamespace(
+            physics=cfg._replace(vertical_mixing=vmix._replace(
+                scheme="tke",
+                tke=TKEConfig(
+                    tke_n2_evaluation_stage="step_entry",
+                    n2_mode="nemo_bn2", n2_eos_form="eos80"))),
+            gm_redi=None, eos_nemo_seos=None,
+            constants=SimpleNamespace(g=9.80665)))
+    assert n2_bundle.iwm_stretch is not None
 
 
 class TestBackgroundCompositionMode:

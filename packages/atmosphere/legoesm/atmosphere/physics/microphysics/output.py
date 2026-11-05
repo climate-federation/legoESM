@@ -128,6 +128,17 @@ class MicrophysicsOutput(NamedTuple):
     # (no ice phase: all their precipitation is liquid energetically); None =
     # the scheme does not publish it (an interactive land then refuses).
     precip_frozen: jax.Array | None = None
+    # Optional: the APPLIED cloud-droplet NUMBER budget terms [1/(m^3 s)],
+    # per-volume like ``dN_c_dt``, as a dict keyed by process.  Populated only
+    # under ``MorrisonConfig.publish_qc_budget`` with the MG2 prognostic
+    # droplet number (static branch, default graph untouched).  The terms sum
+    # to ``dN_c_dt`` up to round-off.
+    nc_budget: dict | None = None
+    # Optional: the scheme's UPDATED prognostic cloud fraction [1], (ncol,
+    # nlev), for a scheme that carries one (IFS CLOUDSC).  The host writes
+    # it back to its advected cloud-fraction tracer.  None = the scheme has
+    # no prognostic cloud fraction.
+    cloud_fraction_new: jax.Array | None = None
 
 
 def make_zero_hydrometeors(

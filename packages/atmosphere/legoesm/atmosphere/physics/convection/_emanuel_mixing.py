@@ -258,6 +258,9 @@ class EmanuelMixingOutput(NamedTuple):
     cbmf: jax.Array = None      # oracle CBMF out, (ncol,)
     inb: jax.Array = None       # INB, 0-based surface-first, (ncol,) int
     frac: jax.Array = None      # FRAC, (ncol,)
+    # (2, ncol, nlev) surface-LAST mixing FU, FV (DO 410-500), only when
+    # ``winds`` is passed; FRAC and the UAV/CU pass are added by the caller.
+    duv_dt: jax.Array = None
 
 
 def _oracle_qsat(T, p, floor_sharpness=math.inf):
@@ -429,6 +432,7 @@ def emanuel_mixing_tendencies(
     qsat_floor_sharpness: float,
     strict_index_sharpness: float = _STRICT_INDEX_SHARPNESS,
     epmax: float = _EPMAX_DEFAULT,
+    winds: jax.Array | None = None,
 ) -> EmanuelMixingOutput:
     """CONVECT v4.3c from the column setup through the mixing tendencies.
 
@@ -448,6 +452,8 @@ def emanuel_mixing_tendencies(
         module docstring (fields of :class:`EmanuelConfig`, documented there);
         large values are the oracle and ``math.inf`` is exactly the oracle
         for every field read through :func:`legoesm.core.smooth`.
+    winds : optional (2, ncol, nlev) surface-LAST (u, v) [m/s]; when given,
+        the oracle's mixing FU/FV are returned as ``duv_dt``.
     """
     ncol, nlev = T.shape
     dtype = T.dtype
@@ -765,6 +771,21 @@ def emanuel_mixing_tendencies(
     # the downdraught receives it there), so it leaves through the caller's
     # column rain residual.
 
+    # Momentum (FU/FV, oracle l.850-860, 900-922): the FQ terms with U for Q,
+    # UENT for QENT (l.618-619, U(NK) on local detrainment l.639-640/703-704),
+    # no AWAT and no evaporation term.
+    duv_dt = None
+    if winds is not None:
+        wf = winds[..., ::-1]                                  # (2, ncol, nlev)
+        w_nk = jnp.take_along_axis(wf, nk[None, :, None], axis=-1)[..., None]
+        went = SIJ_eff * wf[..., :, None] + (1.0 - SIJ_eff) * w_nk
+        went = wl * w_nk + (1.0 - wl) * went
+        w_up = jnp.concatenate([wf[..., 1:], wf[..., -1:]], axis=-1)
+        w_dn = jnp.concatenate([wf[..., :1], wf[..., :-1]], axis=-1)
+        fuv = g * dpinv * (AMP1 * (w_up - wf) - AD * (wf - w_dn)
+                           + jnp.sum(MENT * (went - wf[..., None, :]), axis=-2))
+        duv_dt = fuv[..., ::-1]
+
     ents_mask = jax.nn.sigmoid(level_window_sharpness * (inb_f - lvl + 0.5))
 
     return EmanuelMixingOutput(
@@ -784,4 +805,5 @@ def emanuel_mixing_tendencies(
         cbmf=cbmf,
         inb=inb,
         frac=frac,
+        duv_dt=duv_dt,
     )

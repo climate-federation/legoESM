@@ -15,43 +15,45 @@ FAITHFUL to HS94 — the boundary-layer MOMENTUM tendency:
     forcing term. The DEFAULT constants are the HS94 values: ``k_max = 1/day =
     k_f`` and ``σ_b = 0.7`` (== ``held_suarez.K_F`` / ``held_suarez.SIGMA_B``).
 ADDITIONS / DEPARTURES from HS94:
-  * **the frictional HEATING is NOT HS94**: this scheme returns the KE removed
-    by the FULL ``k_drag`` (BL drag + sponge) as heat ``dT_dt = −(u·du_dt +
-    v·dv_dt)/c_pd``. HS94 has NO KE-compensating heating term — its temperature
-    forcing is a SEPARATE Newtonian relaxation ``−k_T·(T − T_eq)`` while the
-    velocity drag does not heat. So the FAITHFUL claim is scoped to the MOMENTUM
-    tendency; the heating (which makes the scheme energy-conserving) is an
-    addition;
-  * the upper **sin² SPONGE is NOT HS94** (HS94 has no sponge layer): a purely
-    numerical sponge-layer Rayleigh damping ``k_sponge = sponge_k · sin²(½π ·
-    clip((sponge_top − σ)/sponge_top, 0, 1))`` that ramps from 0 at
-    ``σ = sponge_top`` to ``sponge_k`` at the model top (``σ → 0``), to absorb
-    upward-propagating gravity waves and prevent spurious reflection. Standard
-    dynamical-core device, not a HS94 physics term;
-  * the sponge **HEATS the removed KE** (``dT_dt`` is computed from the FULL
-    ``k_drag = k_bl + k_sponge``), so the scheme is energy-CONSERVING — UNLIKE a
-    physical radiation sponge, which removes gravity-wave energy from the domain
-    (radiated to space) rather than converting it to local heat. A design choice
-    that keeps the column energy budget closed; not how a physical sponge acts;
-  * ``conserves = ["energy"]`` is CORRECT here (unlike the c≠0 launched-SPECTRUM
-    schemes ``hines.py``/``prognostic_spectral.py`` = ["none"], whose propagating
-    waves carry off vertical energy flux the limiter discards): Rayleigh friction
-    is a DIRECT drag with NO wave at all — the drag + sponge convert RESOLVED
-    mean-flow KE directly to heat, both tracked, so the resolved-KE→heat closure
-    ``c_pd·Σρ·dT·dz == eps_gwd`` IS the full energy budget. (The c=0 orographic
-    schemes ``mcfarlane.py``/``lindzen.py`` ALSO conserve energy — a stationary
-    wave carries zero energy flux — so they are NOT the contrast; the contrast is
-    the c≠0 spectra.) Momentum is NOT conserved (a sink).
+  * **the BL frictional HEATING is NOT HS94**: the KE removed by the BL drag
+    returns as heat ``dT_dt = -(u du_bl + v dv_bl)/c_pd``. HS94 has no
+    KE-compensating heating (its temperature forcing is a separate Newtonian
+    relaxation), so the FAITHFUL claim for the BL part is the MOMENTUM tendency.
+  * the upper **SPONGE is NOT HS94**; it is a port of Isca v1.0
+    ``damping_driver.f90`` subroutine ``rayleigh`` (Polvani & Kushner 2002
+    sponge): ``k_sp = sponge_k ((p_sb - p)/p_sb)^2`` for ``p < p_sb =
+    sponge_pbottom_Pa``, applied only on levels ``1..nlev_rayfric`` where
+    ``nlev_rayfric`` is the level whose reference pressure (sigma *
+    ``constants.p_atm_std``, Isca's ``PSTD_MKS`` profile) is nearest ``2 p_sb``.
+    Heating = Isca's ``do_conserve_energy`` time-centred form ``-((u + dt/2
+    du_sp) du_sp + (v + dt/2 dv_sp) dv_sp)/c_pd``, always on here (energy
+    conservation). Defaults ``p_sb = 50 Pa`` (Isca / PK02) and ``sponge_k =
+    1/(0.5 day)``. With 50 Pa the sponge is INERT on any grid whose top level
+    sits below 50 Pa (e.g. CAM L32, top full level ~364 Pa).
+  * DEPARTURE (smoothing, RULE 5): ``max(0, (p_sb - p)/p_sb)`` uses the C1
+    ``positive_part_c1`` at ``sponge_sharpness`` (width 1/sharpness = 0.01);
+    ``sponge_sharpness = inf`` is Isca's hard form (oracle test).
+  * ``conserves = ["energy"]``: Rayleigh friction is a direct drag with no wave;
+    the drag and sponge convert resolved KE to heat, both tracked. The heating
+    returns the KE the step removes (time-centred in the sponge), so
+    ``c_pd sum(rho dT_dt dz) = eps_gwd - dt/2 sum(rho (du_sp^2 + dv_sp^2) dz)``
+    with ``eps_gwd`` the instantaneous KE loss of the GWDOutput contract.
+    Momentum is NOT conserved (a sink).
+  * the level cap is a hard integer switch (Isca's), piecewise constant in
+    ``p_sb`` and ``p_s``: its gradient is zero, only the cutoff is smoothed.
 NUMERICS: the ``k_bl`` UPPER clip at 1 is a redundant guard (``(σ−σ_b)/(1−σ_b)
-≤ 1`` for any physical ``σ ≤ 1``; bites only if ``σ > 1``, i.e. ``p_full >
-p_sfc``); the ``sponge_arg`` clip to [0, 1]; the ``p_sfc`` floor at 1 Pa.
-Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_rayleigh_gwd_faithful.py``.
+≤ 1`` for any physical ``σ ≤ 1``); the ``p_sfc`` floor at 1 Pa.
+Oracle: ``tests/atmosphere/test_rayleigh_sponge_isca_oracle.py``.
 
 References
 ----------
 - Held, I. M., & Suarez, M. J. (1994). A proposal for the intercomparison of
   the dynamical cores of atmospheric general circulation models. Bull. Amer.
   Meteor. Soc., 75, 1825-1830 (the σ_b/k_f low-level Rayleigh friction).
+- Polvani, L. M., & Kushner, P. J. (2002). Tropospheric response to
+  stratospheric perturbations in a relatively simple general circulation
+  model. Geophys. Res. Lett., 29, 1114 (the sponge); code: Isca v1.0
+  (5868cfd) src/atmos_param/damping_driver/damping_driver.f90 ``rayleigh``.
 """
 
 from __future__ import annotations
@@ -62,6 +64,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import RayleighConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+from legoesm.core.smooth import positive_part_c1
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py and
 # docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md). The architect pins
@@ -69,7 +72,8 @@ from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 __physics_contract__ = {
     "summary": (
         "Rayleigh-friction gravity-wave drag: a linear momentum sink in the "
-        "boundary layer plus a sin^2 sponge near the model top."
+        "boundary layer plus the Polvani-Kushner (Isca damping_driver) sponge "
+        "near the model top."
     ),
     "inputs": {
         "u": "m/s", "v": "m/s", "T": "K",
@@ -100,7 +104,8 @@ __physics_contract__ = {
     "differentiable": True,
     "reference": (
         "Held & Suarez (1994) low-level sigma-drag Rayleigh friction "
-        "(k_f, sigma_b); the upper sin^2 sponge is a numerical addition, not HS94."
+        "(k_f, sigma_b); upper sponge = Isca v1.0 damping_driver rayleigh "
+        "(Polvani & Kushner 2002)."
     ),
     "idealized_test": (
         "rest state (u=v=0) -> zero tendency; for u>0 the boundary-layer drag is "
@@ -160,23 +165,32 @@ def rayleigh_gwd(
         (sigma - config.sigma_b) / (1.0 - config.sigma_b), 0.0, 1.0
     )
 
-    # Upper sponge: sin^2 taper near model top
-    sponge_arg = jnp.clip(
-        (config.sponge_top - sigma) / config.sponge_top, 0.0, 1.0
-    )
-    k_sponge = config.sponge_k * jnp.sin(0.5 * jnp.pi * sponge_arg) ** 2
+    # Upper sponge: Isca v1.0 damping_driver ``rayleigh`` (Polvani & Kushner 2002).
+    # Levels 1..nlev_rayfric only, nlev_rayfric = level whose reference pressure
+    # (full levels at ps = PSTD_MKS) is nearest 2*sponge_pbottom (Fortran minloc,
+    # first index == jnp.argmin); there k = rfactr*((p_sb - p)/p_sb)**2 for p < p_sb.
+    p_sb = config.sponge_pbottom_Pa
+    pref = sigma * constants.p_atm_std
+    k_cap = jnp.argmin(jnp.abs(pref - 2.0 * p_sb), axis=1)[:, None]
+    in_cap = jnp.arange(nlev)[None, :] <= k_cap
+    frac = positive_part_c1((p_sb - p_full) / p_sb, config.sponge_sharpness)
+    k_sponge = jnp.where(in_cap, config.sponge_k * frac**2, 0.0)
 
-    # Combined drag coefficient
-    k_drag = k_bl + k_sponge
+    du_bl, dv_bl = -k_bl * u, -k_bl * v
+    du_sp, dv_sp = -k_sponge * u, -k_sponge * v
+    du_dt = du_bl + du_sp
+    dv_dt = dv_bl + dv_sp
 
-    # Tendencies
-    du_dt = -k_drag * u
-    dv_dt = -k_drag * v
+    # Frictional heating. BL: -(u du + v dv)/c_pd. Sponge: Isca's time-centred
+    # do_conserve_energy form -((u + dt/2 du) du + (v + dt/2 dv) dv)/c_pd, always on.
+    dT_dt = (
+        -(u * du_bl + v * dv_bl)
+        - ((u + 0.5 * dt * du_sp) * du_sp + (v + 0.5 * dt * dv_sp) * dv_sp)
+    ) / constants.c_pd
 
-    # Frictional heating: dT/dt = -(u*du/dt + v*dv/dt) / c_pd
-    dT_dt = -(u * du_dt + v * dv_dt) / constants.c_pd
-
-    # Column dissipation (positive-definite: KE lost by the mean flow)
+    # Column dissipation, GWDOutput contract (instantaneous KE loss). The column heating
+    # c_pd*sum(rho dT dz) is smaller by dt/2*sum(rho (du_sp^2 + dv_sp^2) dz): the
+    # time-centred sponge heating returns the KE the explicit step removes.
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
     eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
 

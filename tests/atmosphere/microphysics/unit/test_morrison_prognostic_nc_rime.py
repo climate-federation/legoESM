@@ -252,8 +252,8 @@ def _wired(fx, monkeypatch, cfg, q_s_val, kill_splinter):
 
     real_d = W.mg2_size_dist_liq
 
-    def spy_d(*a):
-        seen["dist"] = real_d(*a)
+    def spy_d(*a, **k):
+        seen["dist"] = real_d(*a, **k)
         return seen["dist"]
 
     monkeypatch.setattr(M, "mg2_size_dist_liq", spy_d)

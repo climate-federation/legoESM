@@ -67,7 +67,7 @@ already recorded completed stage and fold exchange.
 
 The earliest possible owner in that order is therefore the `tra_adv` call at
 line 637. Its legoESM counterpart is the production stage-3 `_flux_pair`
-call at `ocean_model_latlon_cgrid.py:2990-2991`. This assignment is
+call at `ocean_model_latlon_cgrid.py:2988-2989`. This assignment is
 **PLAUSIBLE, not CONFIRMED**: the existing kt-2 records jump from the preceding
 completed stage to the completed stage-3 frame, so they cannot distinguish
 advection from any later tracer statement. No single statement is eligible
@@ -574,7 +574,7 @@ The producing record build materializes the half-stage `r3t` in
 `ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3_stg.f90:210-229`.
 legoESM already materializes the corresponding `_h_s3_kmm` at
 `ocean_model_latlon_cgrid.py:8899-8913`, but the shared operator chooses its
-divisor at `gm_redi_latlon_cgrid.py:3269-3274` and the production call supplies
+divisor at `gm_redi_latlon_cgrid.py:3310-3315` and the production call supplies
 only rebuilt half-stage sea level, not the stored thickness, at
 `ocean_model_latlon_cgrid.py:10764-10777`.
 
@@ -703,7 +703,7 @@ reports division by zero, `jax.debug_nans` reports NaN in `div`, and a
 zero-cotangent primitive VJP produces NaN bars for numerator and divisor. The
 following `tend * act` mask then also forms a NaN mask cotangent. This is the
 rectangular legoESM evaluation at
-`gm_redi_latlon_cgrid.py:3293-3309`; NEMO instead executes only wet tracer
+`gm_redi_latlon_cgrid.py:3334-3350`; NEMO instead executes only wet tracer
 cells in its divisions at
 `ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90:301-305`
 and

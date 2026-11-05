@@ -43,6 +43,111 @@ from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
 from legoesm.thermo import saturation_vapor_pressure_goff  # noqa: E402
 
 
+def test_standalone_k0_config_requires_every_explicit_selector():
+    """All six record-free K0 fields participate in fail-closed validation."""
+    from legoesm.ocean.bulk_flux_omip import (
+        NemoStandaloneK0Config,
+        validate_nemo_standalone_k0,
+    )
+
+    cfg = NemoStandaloneK0Config(
+        nn_ice=1, ln_drgice_imp=False, ln_mxl0=True, nn_mxlice=0,
+        ln_icebergs=False, initial_state="nemo_k0_istate")
+    validate_nemo_standalone_k0(cfg)
+    plants = {
+        "nn_ice": 0,
+        "ln_drgice_imp": True,
+        "ln_mxl0": False,
+        "nn_mxlice": 2,
+        "ln_icebergs": True,
+        "initial_state": "si3_iceistate",
+    }
+    for field, value in plants.items():
+        with pytest.raises(ValueError, match="Decision-175 K0 selectors"):
+            validate_nemo_standalone_k0(cfg._replace(**{field: value}))
+
+    from types import SimpleNamespace
+    import legoesm.ocean.bulk_flux_omip as bfo
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as ntr
+
+    seen_init = []
+
+    def _fake_orca2_card(deck_root, *, initial_state="file_ts"):
+        seen_init.append(initial_state)
+        return SimpleNamespace(
+            recipe=SimpleNamespace(
+                model_config=SimpleNamespace(
+                    implicit_ice_ocean_top_drag=False,
+                    physics=SimpleNamespace(
+                        vertical_mixing=SimpleNamespace(
+                            tke=SimpleNamespace(
+                                tke_mxl_choice=3,
+                                nemo_mxl0_surface_tmask=True,
+                                nemo_mxl0_rmxl_min_overwrite=True,
+                                nemo_mxlice=0,
+                            )
+                        )
+                    ),
+                ),
+                initial_state=None,
+            ),
+            icebergs_enabled=False,
+        )
+
+    real_builder = ntr.build_orca2_zps_card
+    ntr.build_orca2_zps_card = _fake_orca2_card
+    try:
+        k0_card = bfo.build_nemo_orca2_k0_ocean_card("/unused")
+    finally:
+        ntr.build_orca2_zps_card = real_builder
+    assert seen_init == ["nemo_k0_istate"]
+
+    for bad_k0 in (
+        cfg._replace(ln_drgice_imp=True),
+        cfg._replace(ln_mxl0=False),
+        cfg._replace(nn_mxlice=2),
+        cfg._replace(ln_icebergs=True),
+    ):
+        with pytest.raises(ValueError, match="Decision-175 K0 selectors"):
+            bfo._validate_k0_ocean_card(k0_card._replace(k0=bad_k0))
+
+    bad_drg = _fake_orca2_card("/unused")
+    bad_drg.recipe.model_config.implicit_ice_ocean_top_drag = True
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_drg))
+
+    bad_mxl_tmask = _fake_orca2_card("/unused")
+    bad_mxl_tmask.recipe.model_config.physics.vertical_mixing.tke.nemo_mxl0_surface_tmask = False
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_mxl_tmask))
+
+    bad_mxl_rmxl = _fake_orca2_card("/unused")
+    bad_mxl_rmxl.recipe.model_config.physics.vertical_mixing.tke.nemo_mxl0_rmxl_min_overwrite = False
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_mxl_rmxl))
+
+    bad_mxlice = _fake_orca2_card("/unused")
+    bad_mxlice.recipe.model_config.physics.vertical_mixing.tke.nemo_mxlice = 2
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_mxlice))
+
+    bad_icb = _fake_orca2_card("/unused")
+    bad_icb.icebergs_enabled = True
+    with pytest.raises(ValueError, match="standalone K0 ocean selectors"):
+        bfo._validate_k0_ocean_card(k0_card._replace(ocean=bad_icb))
+
+    seen_nn_ice = []
+    real_blk = bfo.nemo_blk_oce_ncar
+    bfo.nemo_blk_oce_ncar = lambda *a, **kw: seen_nn_ice.append(kw.get("nn_ice"))
+    try:
+        bfo.nemo_orca2_k0_surface_card(
+            *(0.0,) * 10, 0.066, 1.0, 1.0, 5,
+            k0_config=cfg, ice_if=None, s0=None, s2=None)
+    finally:
+        bfo.nemo_blk_oce_ncar = real_blk
+    assert seen_nn_ice == [1]
+
+
 # ---------------------------------------------------------------------------
 # Independent NumPy mirror of NEMO sbcblk_algo_ncar + sbc_phy preprocessing
 # (zt = zu = 10 m), transcribed directly from the Fortran.  Deliberately
@@ -162,7 +267,9 @@ def _np_rho_air(T_abs, q, p):
 
 
 def _np_cd_n10(w):
-    w = np.maximum(w, 0.5)
+    # NEMO cd_n10_ncar (sbcblk_algo_ncar.F90:242-255) has no wind floor: the
+    # caller floors (0.5 first guess, 0.25 iterated UN10).  A 0.5 floor here
+    # mirrored legoESM's tier-3 BLK D1 defect instead of NEMO.
     cd = (2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w ** 6) * 1e-3
     cd = np.where(w >= 33.0, 2.34e-3, cd)
     return np.maximum(cd, 0.1e-3)
@@ -295,9 +402,8 @@ def test_full_flux_path_matches_independent_numpy_mirror():
     q = rng.uniform(2e-4, 0.020, n)
     slp = rng.uniform(96000.0, 104000.0, n)
     # Keep q within w = q/q_sat <= 1.5 (up to 150% RH): the random draw can
-    # otherwise pair cold air with tropical humidity (w ~ 9, unphysical),
-    # where the implementation's w<=2 garbage guard intentionally departs
-    # from the unclipped Fortran mirror.
+    # otherwise pair cold air with tropical humidity (w ~ 9, unphysical).
+    # Supersaturation parity has its own dedicated test (q = 1.3 and 7 q_sat).
     q = np.minimum(q, 1.5 * _np_q_sat(T_air, slp))
     u = rng.uniform(-20.0, 20.0, n)
     v = rng.uniform(-20.0, 20.0, n)
@@ -568,8 +674,11 @@ def test_record_object_sign_treats_negative_zero_as_positive():
     assert float(nemo_fortran_sign(magnitude, jnp.asarray(-1.0))) == -2.0
 
 
-def test_pressure_at_height_supersaturated_matches_parent_guarded_formula():
-    """Public callers retain the parent's physical supersaturation behavior."""
+def test_pressure_at_height_supersaturated_matches_unclipped_nemo():
+    """SUPERSATURATED air: the implementation matches NEMO's UNCLIPPED
+    pres_temp (sbc_phy.F90:275).  q = 1.3 q_sat (RH 130%) and q = 7 q_sat
+    (the largest q/q_sat on the tier-3 ORCA1 record, wet or land; the old
+    w <= 2 clip departed from NEMO there, BLK D3)."""
     T, slp = 275.0, 101000.0
     q_sat0 = float(_np_q_sat(np.float64(T), np.float64(slp)))
     q_super = 1.3 * q_sat0
@@ -578,10 +687,12 @@ def test_pressure_at_height_supersaturated_matches_parent_guarded_formula():
     p_ref = float(_np_pres_temp(np.float64(q_super), np.float64(slp), 10.0,
                                 np.float64(T)))
     assert p_impl == pytest.approx(p_ref, rel=1e-13)
-    # The public compatibility arm retains the parent's land-fill guard.
-    p_junk = float(pressure_at_height(
-        jnp.asarray(0.01), jnp.asarray(slp), 10.0, jnp.asarray(150.0)))
-    assert np.isfinite(p_junk) and 0.0 < p_junk <= slp
+    q_record_max = 7.0 * q_sat0
+    p_impl = float(pressure_at_height(
+        jnp.asarray(q_record_max), jnp.asarray(slp), 10.0, jnp.asarray(T)))
+    p_ref = float(_np_pres_temp(np.float64(q_record_max), np.float64(slp),
+                                10.0, np.float64(T)))
+    assert p_impl == pytest.approx(p_ref, rel=1e-13)
 
 
 def test_pressure_at_height_and_exner_theta():

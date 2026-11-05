@@ -96,4 +96,3 @@ def test_safe_stored_divisor_preserves_wet_bits_and_has_finite_transpose() -> No
     assert bool(jnp.all(jnp.isfinite(gradient)))
     np.testing.assert_array_equal(
         np.asarray(gradient), np.asarray([-0.75, 0.0, 0.0]))
-
