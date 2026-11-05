@@ -389,6 +389,11 @@ class SI3SwitchConfig(NamedTuple):
     Each ramp is ``relative_width x scale`` wide; ``relative_width = 0.0`` is
     NEMO's hard form.  The ports have no driver lane yet, so only the Goff
     floor (``bulk_scheme="nemo_si3_constant"``) reads this from a run today.
+
+    KNOWN DIFFERENCE (RULE 5): NEMO's switches are hard; the smooth default
+    differs from it by at most 0.034 W/m2 in qsr and 3.1e-4 in albedo over the
+    tier-4 ORCA1 record, per case in ``si3_smooth_gaps.npz``; mass terms do not
+    change.  ``relative_width = 0.0`` recovers NEMO.
     """
 
     relative_width: float = 0.01         # [-] user rule 2026-10-27
