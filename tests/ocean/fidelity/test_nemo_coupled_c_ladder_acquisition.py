@@ -6,6 +6,7 @@ import importlib.util
 import inspect
 import json
 import os
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -53,7 +54,10 @@ def test_real_candidates_and_live_coupled_call_order() -> None:
     assert report["call_order"]["ice_stp"][-1] == "ice_update_tau-every-ocean-step"
 
 
-@pytest.mark.parametrize("plant", ("drop-sbc-ssm", "swap-flux-update", "pretend-mlf"))
+@pytest.mark.parametrize(
+    "plant",
+    ("drop-sbc-ssm", "swap-flux-update", "pretend-mlf", "old-unconditional-layout"),
+)
 def test_source_contract_plants_fail(plant: str) -> None:
     with pytest.raises(preflight.ContractError):
         preflight.source_contract(preflight.NEMO_DEFAULT, plant)
@@ -191,6 +195,11 @@ def test_schema_overlays_writer_prereg_and_truncation(tmp_path: Path) -> None:
     assert overlays["C4"]["nn_stock"] == 8 and overlays["C4"]["expected_restart_shards"] == 1460
     writer = (ACQ / "c_ladder_writer.F90").read_text()
     assert "PUBLIC :: c_record_ssm, c_record_sbc, c_record_step" in writer
+    assert "have_ssh_ib=ALLOCATED(ssh_ib)" in writer
+    assert "19+MERGE(1,0,have_ssh_ib)" in writer
+    assert "IF(have_ssh_ib) WRITE(u) ssh_ib" in writer
+    for required in ("e3t_3d", "r3t", "fraqsr_1lev", "ssh_m", "e3t_m", "fwfice", "utauU", "vtauV"):
+        assert f"ALLOCATED({required})" in writer
     assert "INTENT(out)" not in "\n".join(
         line for line in writer.splitlines() if "c_record_" in line
     )
@@ -199,6 +208,87 @@ def test_schema_overlays_writer_prereg_and_truncation(tmp_path: Path) -> None:
     assert "CONFIRM" in prereg and "REFUTE" in prereg
     with pytest.raises(ValueError, match="truncated"):
         scorer.self_test("truncation", tmp_path)
+
+
+def test_kind1_layout_follows_inverse_barometer_flag_and_old_layout_is_refused(
+    tmp_path: Path,
+) -> None:
+    report = scorer.self_test(None, tmp_path)
+    assert report["kind1_ln_apr_dyn_off"] == "PASS_19_FIELDS_NO_SSH"
+    assert report["old_unconditional_kind1_plant"].startswith("REFUSED:")
+    record = scorer.read_c_record(tmp_path / "c_kind1_step0001_rank0000.bin")
+    assert record["nfields"] == 19
+    assert record["fields"]["remove_inverse_barometer"] == 0
+    assert "ssh_inverse_barometer" not in record["fields"]
+    flag_on = tmp_path / "kind1_inverse_barometer_on.bin"
+    scorer._write_stub_kind1_record(
+        flag_on, remove_inverse_barometer=1, old_unconditional_layout=False
+    )
+    flag_on_record = scorer.read_c_record(flag_on)
+    assert flag_on_record["nfields"] == 20
+    assert flag_on_record["fields"]["remove_inverse_barometer"] == 1
+    assert "ssh_inverse_barometer" in flag_on_record["fields"]
+    assert (tmp_path / "old_unconditional_kind1.bin").stat().st_size == (
+        tmp_path / "c_kind1_step0001_rank0000.bin"
+    ).stat().st_size
+    with pytest.raises(ValueError, match="remove_inverse_barometer=0 requires nfields=19") as exc:
+        scorer.read_c_record(tmp_path / "old_unconditional_kind1.bin")
+    assert "PLANT-FIRED" not in str(exc.value)
+
+    valid = (tmp_path / "c_kind1_step0001_rank0000.bin").read_bytes()
+    truncated = tmp_path / "truncated_payload.bin"
+    truncated.write_bytes(valid[:-1])
+    with pytest.raises(ValueError, match="truncated C record payload"):
+        scorer.read_c_record(truncated)
+    trailing = tmp_path / "trailing_payload.bin"
+    trailing.write_bytes(valid + b"\x00")
+    with pytest.raises(ValueError, match="trailing C record bytes"):
+        scorer.read_c_record(trailing)
+
+
+def test_reader_parses_fixed_kinds_with_full_reduced_and_vertical_shapes(tmp_path: Path) -> None:
+    jpi, jpj, jpk, jpts = 6, 7, 3, 2
+    layouts = {
+        2: [(name, (jpi, jpj)) for name in ("ssu", "ssv", "sst", "sss", "ssh", "e3t", "frq")],
+        3: [(name, (jpi, jpj)) for name in ("ssu", "ssv", "sst", "sss", "ssh", "e3t", "frq")],
+        4: [
+            ("utau", (jpi, jpj)),
+            ("vtau", (jpi, jpj)),
+            ("taum", (jpi - 4, jpj - 4)),
+            ("utauU", (jpi, jpj)),
+            ("vtauV", (jpi, jpj)),
+            ("qsr", (jpi - 4, jpj - 4)),
+            ("qns", (jpi - 4, jpj - 4)),
+            ("emp", (jpi, jpj)),
+            ("sfx", (jpi - 4, jpj - 4)),
+            ("fr_i", (jpi, jpj)),
+            ("fwfice", (jpi - 4, jpj - 4)),
+            ("tmask", (jpi, jpj)),
+            ("umask", (jpi, jpj)),
+            ("vmask", (jpi, jpj)),
+        ],
+        5: [
+            ("ts", (jpi, jpj, jpk, jpts)),
+            ("uu", (jpi, jpj, jpk)),
+            ("vv", (jpi, jpj, jpk)),
+            ("ssh", (jpi, jpj)),
+        ],
+        6: [
+            ("ts", (jpi, jpj, jpk, jpts)),
+            ("uu", (jpi, jpj, jpk)),
+            ("vv", (jpi, jpj, jpk)),
+            ("ssh", (jpi, jpj)),
+        ],
+    }
+    for kind, fields in layouts.items():
+        path = tmp_path / f"kind{kind}.bin"
+        header = scorer.MAGIC + struct.pack(
+            "<12i", 1, kind, 1, 1, 1, 0, jpi, jpj, jpk, jpts, 64, len(fields)
+        )
+        payload = b"".join(np.zeros(shape, dtype="<f8").tobytes(order="F") for _, shape in fields)
+        path.write_bytes(header + payload)
+        record = scorer.read_c_record(path)
+        assert {name: value.shape for name, value in record["fields"].items()} == dict(fields)
 
 
 def test_scorer_main_reads_c0_from_staged_rec_c3(monkeypatch, tmp_path: Path) -> None:

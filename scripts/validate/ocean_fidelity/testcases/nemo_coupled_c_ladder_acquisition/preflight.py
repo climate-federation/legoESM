@@ -23,6 +23,7 @@ CANDIDATES = {
     STANDALONE: "EXP00",
 }
 ICE_CADENCE = r"IF\s*\(\s*MOD\s*\(\s*kt\s*-\s*1\s*,\s*nn_fsbc\s*\)\s*==\s*0\s*\)\s*THEN"
+WRITER = Path(__file__).with_name("c_ladder_writer.F90")
 
 
 class ContractError(ValueError):
@@ -56,6 +57,23 @@ def _ordered(text: str, labels: tuple[tuple[str, str], ...]) -> list[str]:
     return found
 
 
+def _writer_layout_contract(plant: str | None) -> dict:
+    text = WRITER.read_text()
+    if plant == "old-unconditional-layout":
+        text = text.replace("19+MERGE(1,0,have_ssh_ib)", "20", 1)
+        text = text.replace("IF(have_ssh_ib) WRITE(u) ssh_ib", "WRITE(u) ssh_ib", 1)
+    required = {
+        "allocation": "have_ssh_ib=ALLOCATED(ssh_ib)",
+        "flag-allocation-consistency": "IF(aprdyn.NEQV.have_ssh_ib) ERROR STOP",
+        "dynamic-field-count": "19+MERGE(1,0,have_ssh_ib)",
+        "conditional-payload": "IF(have_ssh_ib) WRITE(u) ssh_ib",
+    }
+    missing = [label for label, needle in required.items() if needle not in text]
+    if missing:
+        raise ContractError(f"C writer kind-1 layout lacks {', '.join(missing)}")
+    return {"status": "PASS_C_WRITER_ALLOCATION_LAYOUT", "checks": list(required)}
+
+
 def _candidate_report(nemo: Path, name: str, exp: str) -> dict:
     root = nemo / "cfgs" / name
     cfg = (root / exp / "namelist_cfg").read_text()
@@ -71,6 +89,7 @@ def _candidate_report(nemo: Path, name: str, exp: str) -> dict:
 
 
 def source_contract(nemo: Path, plant: str | None = None) -> dict:
+    writer_layout = _writer_layout_contract(plant)
     reports = {
         name: _candidate_report(nemo, name, exp)
         for name, exp in CANDIDATES.items()
@@ -145,6 +164,7 @@ def source_contract(nemo: Path, plant: str | None = None) -> dict:
         "candidates": reports,
         "live_ppsrc": str(ppsrc),
         "call_order": order,
+        "writer_layout": writer_layout,
         "facts": {
             "sbc_ice_si3_exists": False,
             "ice_is_called_every_ocean_steps": coupled["nn_fsbc"],
@@ -160,7 +180,12 @@ def main() -> int:
     parser.add_argument("--nemo-root", type=Path, default=NEMO_DEFAULT)
     parser.add_argument(
         "--plant",
-        choices=("drop-sbc-ssm", "swap-flux-update", "pretend-mlf"),
+        choices=(
+            "drop-sbc-ssm",
+            "swap-flux-update",
+            "pretend-mlf",
+            "old-unconditional-layout",
+        ),
     )
     args = parser.parse_args()
     try:

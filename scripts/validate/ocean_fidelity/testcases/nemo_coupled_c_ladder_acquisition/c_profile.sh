@@ -91,6 +91,11 @@ c_stub_run() {
     REF_CFG=C_STUB_REF REC_CFG=C_STUB_REC EVIDENCE_ROOT="$stub_round" \
     "$C_HERE/run.sh" --run "$stub_ev" > "$scratch/stub_run.log"
   grep -q '^STUB_REACHED_EXACT_NEMO_START: C2 REF np=2$' "$scratch/stub_run.log" || refuse 'stub did not reach exact --run NEMO-start point'
+  local stub_records=$stub_ev/REC_C3/c_ladder_records
+  "$PY" "$C_HERE/scorer.py" --self-test baseline --scratch "$stub_records" > "$scratch/stub_kind1_layout.json"
+  grep -q 'PASS_19_FIELDS_NO_SSH' "$scratch/stub_kind1_layout.json" || refuse 'stub did not produce allocation-off kind-1 layout'
+  grep -q 'old_unconditional_kind1_plant.*REFUSED' "$scratch/stub_kind1_layout.json" || refuse 'old unconditional kind-1 plant was not refused'
+  [[ -s "$stub_records/c_kind1_step0001_rank0000.bin" ]] || refuse 'stub kind-1 record is absent'
   local retained_root=$scratch/retained/si3_rounds/round0
   mkdir -p "$retained_root"
   expect_refusal env C_LADDER_STUB=1 C_PROFILE_SKIP_STUB=1 C_PLANT=retention C_LADDER_OPERATOR_ACK="$C_ACK" \
@@ -106,13 +111,17 @@ c_run_preflight() {
   local scratch
   scratch=$(mktemp -d "$TMPDIR/c_ladder_profile.XXXXXX"); ACTIVE_SCRATCH=$scratch
   "$PY" "$C_HERE/preflight.py" > "$scratch/source.json"
-  for p in drop-sbc-ssm swap-flux-update pretend-mlf; do expect_refusal "$PY" "$C_HERE/preflight.py" --plant "$p"; done
+  for p in drop-sbc-ssm swap-flux-update pretend-mlf old-unconditional-layout; do
+    expect_refusal "$PY" "$C_HERE/preflight.py" --plant "$p"
+  done
   c_patch_preflight "$scratch"
   for rung in C2 C3 C4; do "$PY" "$C_HERE/deck.py" --destination "$scratch/deck_$rung" --rung "$rung" >/dev/null; done
   expect_refusal ram_gate 999999
   expect_refusal disk_gate "$scratch" 999999999999999
   "$PY" -m json.tool "$C_HERE/record_schema.json" >/dev/null
-  "$PY" "$C_HERE/scorer.py" --self-test baseline --scratch "$scratch" >/dev/null
+  "$PY" "$C_HERE/scorer.py" --self-test baseline --scratch "$scratch" > "$scratch/kind1_layout.json"
+  grep -q 'PASS_19_FIELDS_NO_SSH' "$scratch/kind1_layout.json" || refuse 'allocation-off kind-1 layout self-test failed'
+  grep -q 'old_unconditional_kind1_plant.*REFUSED' "$scratch/kind1_layout.json" || refuse 'old unconditional kind-1 plant was not refused'
   for p in numeric truncation wrong-parity; do expect_refusal "$PY" "$C_HERE/scorer.py" --self-test "$p" --scratch "$scratch"; done
   mkdir -p "$scratch/passivity_ref" "$scratch/passivity_rec"
   for f in ocean_0000 ocean_0001 ice_0000 ice_0001; do printf 'same\n' > "$scratch/passivity_ref/$f"; printf 'same\n' > "$scratch/passivity_rec/$f"; done

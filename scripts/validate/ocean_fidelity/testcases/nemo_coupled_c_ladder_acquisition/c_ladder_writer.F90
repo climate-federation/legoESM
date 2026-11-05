@@ -27,13 +27,25 @@ CONTAINS
       INTEGER,INTENT(in)::kind,kt,kbb,kmm
       LOGICAL,INTENT(in)::lmean,usect,aprdyn
       INTEGER::u
+      LOGICAL::have_ssh_ib
       IF(kind==1) THEN
-         CALL open_c(kind,kt,kbb,kmm,20,u)
+         IF(.NOT.(ALLOCATED(ts).AND.ALLOCATED(uu).AND.ALLOCATED(vv).AND.ALLOCATED(ssh).AND. &
+            & ALLOCATED(e3t_3d).AND.ALLOCATED(r3t).AND.ALLOCATED(tmask).AND. &
+            & ALLOCATED(fraqsr_1lev).AND.ALLOCATED(ssu_m).AND.ALLOCATED(ssv_m).AND. &
+            & ALLOCATED(sst_m).AND.ALLOCATED(sss_m).AND.ALLOCATED(ssh_m).AND. &
+            & ALLOCATED(e3t_m).AND.ALLOCATED(frq_m))) ERROR STOP 'C-ladder kind 1 required array unallocated'
+         have_ssh_ib=ALLOCATED(ssh_ib)
+         IF(aprdyn.NEQV.have_ssh_ib) ERROR STOP 'C-ladder kind 1 ln_apr_dyn/ssh_ib allocation mismatch'
+         CALL open_c(kind,kt,kbb,kmm,19+MERGE(1,0,have_ssh_ib),u)
          WRITE(u) MERGE(1_int32,0_int32,lmean),MERGE(1_int32,0_int32,usect),MERGE(1_int32,0_int32,aprdyn)
          WRITE(u) ts(:,:,1,jp_tem,kmm),ts(:,:,1,jp_sal,kmm),uu(:,:,1,kbb),vv(:,:,1,kbb),ssh(:,:,kmm)
-         WRITE(u) ssh_ib,e3t_3d(:,:,1),r3t(:,:,kmm),tmask(:,:,1),fraqsr_1lev
+         IF(have_ssh_ib) WRITE(u) ssh_ib
+         WRITE(u) e3t_3d(:,:,1),r3t(:,:,kmm),tmask(:,:,1),fraqsr_1lev
          WRITE(u) ssu_m,ssv_m,sst_m,sss_m,ssh_m,e3t_m,frq_m
       ELSEIF(kind==2) THEN
+         IF(.NOT.(ALLOCATED(ssu_m).AND.ALLOCATED(ssv_m).AND.ALLOCATED(sst_m).AND. &
+            & ALLOCATED(sss_m).AND.ALLOCATED(ssh_m).AND.ALLOCATED(e3t_m).AND. &
+            & ALLOCATED(frq_m))) ERROR STOP 'C-ladder kind 2 required array unallocated'
          CALL open_c(kind,kt,kbb,kmm,7,u)
          WRITE(u) ssu_m,ssv_m,sst_m,sss_m,ssh_m,e3t_m,frq_m
       ELSE
@@ -46,9 +58,17 @@ CONTAINS
       INTEGER,INTENT(in)::kind,kt,kbb,kmm
       INTEGER::u
       IF(kind==3) THEN
+         IF(.NOT.(ALLOCATED(ssu_m).AND.ALLOCATED(ssv_m).AND.ALLOCATED(sst_m).AND. &
+            & ALLOCATED(sss_m).AND.ALLOCATED(ssh_m).AND.ALLOCATED(e3t_m).AND. &
+            & ALLOCATED(frq_m))) ERROR STOP 'C-ladder kind 3 required array unallocated'
          CALL open_c(kind,kt,kbb,kmm,7,u)
          WRITE(u) ssu_m,ssv_m,sst_m,sss_m,ssh_m,e3t_m,frq_m
       ELSEIF(kind==4) THEN
+         IF(.NOT.(ALLOCATED(utau).AND.ALLOCATED(vtau).AND.ALLOCATED(taum).AND. &
+            & ALLOCATED(utauU).AND.ALLOCATED(vtauV).AND.ALLOCATED(qsr).AND. &
+            & ALLOCATED(qns).AND.ALLOCATED(emp).AND.ALLOCATED(sfx).AND. &
+            & ALLOCATED(fr_i).AND.ALLOCATED(fwfice).AND.ALLOCATED(tmask).AND. &
+            & ALLOCATED(umask).AND.ALLOCATED(vmask))) ERROR STOP 'C-ladder kind 4 required array unallocated'
          CALL open_c(kind,kt,kbb,kmm,14,u)
          WRITE(u) utau,vtau,taum,utauU,vtauV,qsr,qns,emp,sfx,fr_i,fwfice
          WRITE(u) tmask(:,:,1),umask(:,:,1),vmask(:,:,1)
@@ -62,6 +82,8 @@ CONTAINS
       INTEGER,INTENT(in)::kind,kt,kbb,kmm
       INTEGER::u
       IF(kind/=5 .AND. kind/=6) ERROR STOP 'C-ladder invalid step kind'
+      IF(.NOT.(ALLOCATED(ts).AND.ALLOCATED(uu).AND.ALLOCATED(vv).AND.ALLOCATED(ssh))) &
+         & ERROR STOP 'C-ladder step required array unallocated'
       CALL open_c(kind,kt,kbb,kmm,4,u)
       WRITE(u) ts(:,:,:,:,kbb),uu(:,:,:,kbb),vv(:,:,:,kbb),ssh(:,:,kbb)
       CLOSE(u)

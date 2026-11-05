@@ -43,17 +43,23 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_composition_scorer i
 
 MAGIC = b"CLAD0001"
 UNSCORABLE = "NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP"
-NAMES = {
-    1: (
-        "restart_means_present",
-        "use_conservative_temperature",
-        "remove_inverse_barometer",
-        "temperature_now",
-        "salinity_now",
-        "u_before",
-        "v_before",
-        "ssh_now",
-        "ssh_inverse_barometer",
+_HEADER_BYTES = 8 + 4 + 11 * 4
+_KIND1_FLAGS = (
+    ("restart_means_present", "i4"),
+    ("use_conservative_temperature", "i4"),
+    ("remove_inverse_barometer", "i4"),
+)
+_KIND1_BEFORE_IB = (
+    ("temperature_now", "F2"),
+    ("salinity_now", "F2"),
+    ("u_before", "F2"),
+    ("v_before", "F2"),
+    ("ssh_now", "F2"),
+)
+_KIND1_IB = (("ssh_inverse_barometer", "F2"),)
+_KIND1_AFTER_IB = tuple(
+    (name, "F2")
+    for name in (
         "e3t_reference",
         "r3t_now",
         "surface_mask",
@@ -65,53 +71,174 @@ NAMES = {
         "ssh_prior",
         "e3t_prior",
         "frq_prior",
-    ),
-    2: ("ssu", "ssv", "sst", "sss", "ssh", "e3t", "frq"),
-    3: ("ssu", "ssv", "sst", "sss", "ssh", "e3t", "frq"),
+    )
+)
+_FIXED_SPECS = {
+    2: tuple((name, "F2") for name in ("ssu", "ssv", "sst", "sss", "ssh", "e3t", "frq")),
+    3: tuple((name, "F2") for name in ("ssu", "ssv", "sst", "sss", "ssh", "e3t", "frq")),
     4: (
-        "utau",
-        "vtau",
-        "taum",
-        "utauU",
-        "vtauV",
-        "qsr",
-        "qns",
-        "emp",
-        "sfx",
-        "fr_i",
-        "fwfice",
-        "tmask",
-        "umask",
-        "vmask",
+        ("utau", "F2"),
+        ("vtau", "F2"),
+        ("taum", "A2D0"),
+        ("utauU", "F2"),
+        ("vtauV", "F2"),
+        ("qsr", "A2D0"),
+        ("qns", "A2D0"),
+        ("emp", "F2"),
+        ("sfx", "A2D0"),
+        ("fr_i", "F2"),
+        ("fwfice", "A2D0"),
+        ("tmask", "F2"),
+        ("umask", "F2"),
+        ("vmask", "F2"),
     ),
+    5: (("ts", "F4"), ("uu", "F3"), ("vv", "F3"), ("ssh", "F2")),
+    6: (("ts", "F4"), ("uu", "F3"), ("vv", "F3"), ("ssh", "F2")),
 }
+
+
+def _record_specs(kind: int, remove_inverse_barometer: int | None = None):
+    if kind == 1:
+        if remove_inverse_barometer not in (0, 1):
+            raise ValueError(
+                "invalid kind-1 remove_inverse_barometer flag: "
+                f"expected 0 or 1, got {remove_inverse_barometer}"
+            )
+        optional = _KIND1_IB if remove_inverse_barometer == 1 else ()
+        return _KIND1_FLAGS + _KIND1_BEFORE_IB + optional + _KIND1_AFTER_IB
+    try:
+        return _FIXED_SPECS[kind]
+    except KeyError as exc:
+        raise ValueError(f"unsupported C record kind: {kind}") from exc
+
+
+def _field_shape(code: str, *, jpi: int, jpj: int, jpk: int, jpts: int) -> tuple[int, ...]:
+    if code == "F2":
+        return jpi, jpj
+    if code == "A2D0":
+        if jpi <= 4 or jpj <= 4:
+            raise ValueError(f"invalid C record A2D(0) domain: jpi={jpi}, jpj={jpj}")
+        return jpi - 4, jpj - 4
+    if code == "F3":
+        return jpi, jpj, jpk
+    if code == "F4":
+        return jpi, jpj, jpk, jpts
+    raise ValueError(f"unsupported C record field shape: {code}")
 
 
 def read_c_record(path: Path) -> dict:
     raw = path.read_bytes()
-    header = 8 + 4 + 11 * 4
-    if len(raw) < header or raw[:8] != MAGIC:
-        raise ValueError("STATUS PLANT-FIRED: truncated/bad C record header")
+    if len(raw) < _HEADER_BYTES:
+        raise ValueError(
+            f"truncated C record header: expected {_HEADER_BYTES} bytes, found {len(raw)}"
+        )
+    if raw[:8] != MAGIC:
+        raise ValueError(f"bad C record magic: expected {MAGIC!r}, found {raw[:8]!r}")
     version, *meta = struct.unpack_from("<12i", raw, 8)
     kind, kt, kbb, kmm, rank, jpi, jpj, jpk, jpts, bits, nfields = meta
-    if version != 1 or bits != 64 or kind not in NAMES or nfields != len(NAMES[kind]):
-        raise ValueError("STATUS PLANT-FIRED: unsupported C record schema")
-    offset = header
+    if version != 1:
+        raise ValueError(f"unsupported C record version: expected 1, got {version}")
+    if bits != 64:
+        raise ValueError(f"unsupported C record real width: expected 64 bits, got {bits}")
+    if min(jpi, jpj, jpk, jpts) <= 0:
+        raise ValueError(
+            f"invalid C record dimensions: jpi={jpi}, jpj={jpj}, jpk={jpk}, jpts={jpts}"
+        )
+    offset = _HEADER_BYTES
     fields = {}
-    for index, name in enumerate(NAMES[kind]):
-        if kind == 1 and index < 3:
-            fields[name] = struct.unpack_from("<i", raw, offset)[0]
-            offset += 4
-        else:
-            count = jpi * jpj
-            stop = offset + count * 8
+    if kind == 1:
+        for name, _ in _KIND1_FLAGS:
+            stop = offset + 4
             if stop > len(raw):
-                raise ValueError("STATUS PLANT-FIRED: truncated C record payload")
-            fields[name] = np.frombuffer(raw[offset:stop], "<f8").reshape((jpi, jpj), order="F")
-            offset = stop
+                raise ValueError(f"truncated C record payload: kind=1 field={name}")
+            fields[name] = struct.unpack_from("<i", raw, offset)[0]
+            if fields[name] not in (0, 1):
+                raise ValueError(
+                    f"invalid kind-1 {name} flag: expected 0 or 1, got {fields[name]}"
+                )
+            offset += 4
+        specs = _record_specs(kind, fields["remove_inverse_barometer"])
+    else:
+        specs = _record_specs(kind)
+    if nfields != len(specs):
+        if kind == 1:
+            flag = fields["remove_inverse_barometer"]
+            raise ValueError(
+                "inconsistent kind-1 layout: "
+                f"remove_inverse_barometer={flag} requires nfields={len(specs)}, got {nfields}"
+            )
+        raise ValueError(
+            f"inconsistent kind-{kind} layout: expected nfields={len(specs)}, got {nfields}"
+        )
+    for name, code in specs[len(_KIND1_FLAGS) if kind == 1 else 0 :]:
+        shape = _field_shape(code, jpi=jpi, jpj=jpj, jpk=jpk, jpts=jpts)
+        count = int(np.prod(shape))
+        stop = offset + count * 8
+        if stop > len(raw):
+            raise ValueError(
+                f"truncated C record payload: kind={kind} field={name}; "
+                f"need {count * 8} bytes, have {max(0, len(raw) - offset)}"
+            )
+        fields[name] = np.frombuffer(raw, "<f8", count=count, offset=offset).reshape(
+            shape, order="F"
+        )
+        offset = stop
     if offset != len(raw):
-        raise ValueError("STATUS PLANT-FIRED: trailing C record bytes")
-    return {"kind": kind, "kt": kt, "rank": rank, "fields": fields}
+        raise ValueError(
+            f"trailing C record bytes: kind={kind}; parsed {offset}, file has {len(raw)}"
+        )
+    return {
+        "kind": kind,
+        "kt": kt,
+        "kbb": kbb,
+        "kmm": kmm,
+        "rank": rank,
+        "jpi": jpi,
+        "jpj": jpj,
+        "jpk": jpk,
+        "jpts": jpts,
+        "nfields": nfields,
+        "fields": fields,
+    }
+
+
+def _write_stub_kind1_record(
+    path: Path,
+    *,
+    remove_inverse_barometer: int,
+    old_unconditional_layout: bool,
+) -> None:
+    """Write a flag-governed kind-1 record or the allocation-off old-layout plant."""
+    jpi, jpj, jpk, jpts = 6, 7, 2, 2
+    if old_unconditional_layout and remove_inverse_barometer != 0:
+        raise ValueError("old unconditional kind-1 plant requires allocation-off flag")
+    specs = _record_specs(1, remove_inverse_barometer)
+    nfields = 20 if old_unconditional_layout else len(specs)
+    header = MAGIC + struct.pack(
+        "<12i",
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        jpi,
+        jpj,
+        jpk,
+        jpts,
+        64,
+        nfields,
+    )
+    payload = bytearray()
+    flag_values = (0, 0, remove_inverse_barometer)
+    for (_, code), value in zip(_KIND1_FLAGS, flag_values, strict=True):
+        assert code == "i4"
+        payload.extend(struct.pack("<i", value))
+    for index, (_, code) in enumerate(specs[len(_KIND1_FLAGS) :], start=1):
+        shape = _field_shape(code, jpi=jpi, jpj=jpj, jpk=jpk, jpts=jpts)
+        payload.extend(np.full(shape, float(index), dtype="<f8").tobytes(order="F"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(header + payload)
 
 
 def _equal(name: str, got, want) -> None:
@@ -246,7 +373,10 @@ def score_c0(records: Path, *, plant: str | None = None) -> dict:
             temperature_now=f["temperature_now"],
             salinity_now=f["salinity_now"],
             ssh_now=f["ssh_now"],
-            ssh_inverse_barometer=f["ssh_inverse_barometer"],
+            # The production helper does not use this argument when the recorded
+            # flag is false; reuse an existing same-shape field without inventing
+            # data that the allocation-off NEMO run did not emit.
+            ssh_inverse_barometer=f.get("ssh_inverse_barometer", f["ssh_now"]),
             e3t_reference=f["e3t_reference"],
             r3t_now=f["r3t_now"],
             surface_mask=f["surface_mask"],
@@ -365,6 +495,32 @@ def status_report() -> dict:
 
 
 def self_test(plant: str | None, scratch: Path) -> dict:
+    if plant is None:
+        valid = scratch / "c_kind1_step0001_rank0000.bin"
+        legacy = scratch / "old_unconditional_kind1.bin"
+        _write_stub_kind1_record(
+            valid, remove_inverse_barometer=0, old_unconditional_layout=False
+        )
+        record = read_c_record(valid)
+        if record["nfields"] != 19 or "ssh_inverse_barometer" in record["fields"]:
+            raise ValueError("allocation-off kind-1 stub did not use the 19-field layout")
+        _write_stub_kind1_record(
+            legacy, remove_inverse_barometer=0, old_unconditional_layout=True
+        )
+        try:
+            read_c_record(legacy)
+        except ValueError as exc:
+            refusal = str(exc)
+            if "remove_inverse_barometer=0 requires nfields=19, got 20" not in refusal:
+                raise
+        else:
+            raise ValueError("old unconditional kind-1 layout was accepted")
+        return {
+            "status": "PASS_C_SCORER_SELF_TEST",
+            "kind1_ln_apr_dyn_off": "PASS_19_FIELDS_NO_SSH",
+            "old_unconditional_kind1_plant": f"REFUSED: {refusal}",
+            **status_report(),
+        }
     if plant == "numeric":
         _equal("numeric plant", np.array([1.0]), np.array([np.nextafter(1.0, np.inf)]))
     if plant == "truncation":
