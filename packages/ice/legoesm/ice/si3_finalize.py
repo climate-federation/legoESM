@@ -1109,11 +1109,10 @@ def si3_ice_update_tau(
     *,
     config: SI3ORCA2StateConfig,
     ln_drgice_imp: bool,
-    update_cadence: bool = True,
 ) -> SI3StressOutputs:
     """Execute the production-deck ``ice_update_tau`` resolved drag arm."""
-    if config.nn_fsbc < 1:
-        raise ValueError("ice_update_tau requires nn_fsbc >= 1")
+    if config.nn_fsbc != 1:
+        raise ValueError("O16 master record requires resolved nn_fsbc=1")
     h = int(config.nn_hls)
     if h < 1:
         raise ValueError("ice_update_tau requires at least one halo cell")
@@ -1139,12 +1138,7 @@ def si3_ice_update_tau(
             sr(inputs.v_oce[1:-1, 1:-1] + inputs.v_oce[1:-1, :-2]))
     zmod = sr(_QUARTER * sr(sr(zu * zu) + sr(zv * zv)))
     tmod_inner = sr(sr(rho0 * inputs.drag_io[1:-1, 1:-1]) * jnp.sqrt(zmod))
-    tmod_io = jax.lax.cond(
-        jnp.asarray(update_cadence),
-        lambda value: value.at[1:-1, 1:-1].set(tmod_inner),
-        lambda value: value,
-        inputs.tmod_io,
-    )
+    tmod_io = inputs.tmod_io.at[1:-1, 1:-1].set(tmod_inner)
 
     sl = (slice(h, -h), slice(h, -h))
     left = (slice(h - 1, -h - 1), slice(h, -h))
@@ -1157,25 +1151,10 @@ def si3_ice_update_tau(
     at_i = inputs.at_i[sl]
     drag_i = inputs.drag_io[sl]
     taum_ice = sr(sr(sr(at_i * rho0) * drag_i) * zmod_i)
-    taum = jax.lax.cond(
-        jnp.asarray(update_cadence),
-        lambda value: sr(sr(sr(_ONE - at_i) * value) + taum_ice),
-        lambda value: value,
-        inputs.taum,
-    )
+    taum = sr(sr(sr(_ONE - at_i) * inputs.taum) + taum_ice)
 
-    utau_oce = jax.lax.cond(
-        jnp.asarray(update_cadence),
-        lambda _: inputs.utau[sl],
-        lambda _: inputs.utau_oce,
-        operand=None,
-    )
-    vtau_oce = jax.lax.cond(
-        jnp.asarray(update_cadence),
-        lambda _: inputs.vtau[sl],
-        lambda _: inputs.vtau_oce,
-        operand=None,
-    )
+    utau_oce = inputs.utau[sl]
+    vtau_oce = inputs.vtau[sl]
     # The admitted deck resolves ln_drgice_imp=F, hence zflagi=1.  Keeping the
     # resolved logical explicit also preserves the already supported implicit arm.
     zflagi = _ZERO if ln_drgice_imp else _ONE

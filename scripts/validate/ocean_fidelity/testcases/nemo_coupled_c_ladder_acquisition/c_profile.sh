@@ -5,6 +5,7 @@ readonly C_HERE=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly C_ACK=RUN_FRESH_R5_REF_REC_C2_2_C3_100_C4_2920_DAILY_NP2
 readonly C_SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2
 readonly C_PPSRC=${C_REAL_PPSRC:-$BASE_BLD/ppsrc/nemo}
+readonly C_SOURCE_WORK=${C_REAL_WORK:-$BASE_BLD/../WORK}
 readonly C_O8_DIR=$C_HERE/../nemo_si3_o8_o16_master_acquisition
 readonly C_OBSERVER_UNITS="dynhpg dynspg_ts dynvor eosbn2 icedyn_adv_pra icedyn_rhg_evp icestp icethd sbcblk stp2d stprk3 stprk3_stg traadv traqsr"
 
@@ -12,6 +13,25 @@ c_apply_patches() {
   local dir=$1
   for unit in stprk3 sbcssm sbcmod icestp iceupdate; do
     patch --batch --fuzz=0 "$dir/$unit.f90" "$C_HERE/${unit}_c.patch" >/dev/null
+  done
+}
+
+c_render_pristine_observer_unit() {
+  local dir=$1 unit=$2 source
+  if [[ "$unit" == stprk3 ]]; then source=$NEMO_SOURCE_ROOT/src/OCE/stprk3.F90
+  else source=$(find "$NEMO_SOURCE_ROOT/src" -iname "$unit.F90" -print -quit); fi
+  [[ -f "$source" ]] || refuse "missing pristine NEMO source for $unit"
+  cpp -Dkey_nosignedzero -Dkey_si3 -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
+    -I"$C_SOURCE_WORK" "$source" > "$dir/$unit.f90"
+}
+
+c_legacy_observer_gate() {
+  local dir=$1 unit
+  for unit in $C_OBSERVER_UNITS; do
+    if rg -n 'oracle_|l[1234]_dump|l3xchg_dump' "$dir/$unit.f90" >/dev/null; then
+      refuse "legacy R5 observer survived pristine-source regeneration: $unit"
+      return 1
+    fi
   done
 }
 
@@ -43,8 +63,15 @@ PY
 c_patch_preflight() {
   local scratch=$1 unit
   mkdir -p "$scratch/ppsrc"
-  for unit in stprk3 sbcssm sbcmod icestp iceupdate; do cp "$C_PPSRC/$unit.f90" "$scratch/ppsrc/$unit.f90"; done
+  for unit in $C_OBSERVER_UNITS; do c_render_pristine_observer_unit "$scratch/ppsrc" "$unit"; done
+  c_legacy_observer_gate "$scratch/ppsrc"
+  cp -f "$scratch/ppsrc/dynhpg.f90" "$scratch/dynhpg.clean.f90"
+  printf 'CALL oracle_plant\n' >> "$scratch/ppsrc/dynhpg.f90"
+  expect_refusal c_legacy_observer_gate "$scratch/ppsrc"
+  mv -f "$scratch/dynhpg.clean.f90" "$scratch/ppsrc/dynhpg.f90"
+  for unit in sbcssm sbcmod iceupdate; do cp "$C_PPSRC/$unit.f90" "$scratch/ppsrc/$unit.f90"; done
   c_apply_patches "$scratch/ppsrc"
+  c_legacy_observer_gate "$scratch/ppsrc"
   c_placement_gate "$scratch/ppsrc"
   expect_refusal c_placement_gate "$scratch/ppsrc" source-placement
   ! rg -n '(^|[^=!<>])=([^=]|$)' "$C_HERE"/*_c.patch | rg 'CALL c_record|CALL o8o16' >/dev/null || refuse 'observer patch contains assignment'
@@ -52,21 +79,24 @@ c_patch_preflight() {
 
 c_stub_run() {
   local scratch=$1
-  local stub_root=$scratch/stub_nemo stub_ev=$scratch/stub_evidence
+  local stub_root=$scratch/stub_nemo
+  local stub_round=$scratch/si3_rounds/round0
+  local stub_ev=$stub_round/stub_evidence
   mkdir -p "$stub_root/cfgs/BASE/BLD/ppsrc/nemo" "$stub_root/cfgs/SHARED"
+  mkdir -p "$stub_round"
   env C_LADDER_STUB=1 C_PROFILE_SKIP_STUB=1 C_LADDER_OPERATOR_ACK="$C_ACK" \
-    C_REAL_PPSRC="$C_PPSRC" \
+    C_REAL_PPSRC="$C_PPSRC" C_REAL_WORK="$C_SOURCE_WORK" \
     MIN_FREE_RAM_GB=1 MIN_FREE_DISK_KB=1024 MAX_EVIDENCE_DISK_KB=1048576 \
-    NEMO_ROOT="$stub_root" NEMO_SOURCE_ROOT="$stub_root" BASE_BLD="$stub_root/cfgs/BASE/BLD" \
-    REF_CFG=C_STUB_REF REC_CFG=C_STUB_REC EVIDENCE_ROOT="$scratch" \
+    NEMO_ROOT="$stub_root" NEMO_SOURCE_ROOT="$NEMO_SOURCE_ROOT" BASE_BLD="$stub_root/cfgs/BASE/BLD" \
+    REF_CFG=C_STUB_REF REC_CFG=C_STUB_REC EVIDENCE_ROOT="$stub_round" \
     "$C_HERE/run.sh" --run "$stub_ev" > "$scratch/stub_run.log"
   grep -q '^STUB_REACHED_EXACT_NEMO_START: C2 REF np=2$' "$scratch/stub_run.log" || refuse 'stub did not reach exact --run NEMO-start point'
-  local retained_root=$scratch/retained
+  local retained_root=$scratch/retained/si3_rounds/round0
   mkdir -p "$retained_root"
   expect_refusal env C_LADDER_STUB=1 C_PROFILE_SKIP_STUB=1 C_PLANT=retention C_LADDER_OPERATOR_ACK="$C_ACK" \
-    C_REAL_PPSRC="$C_PPSRC" \
+    C_REAL_PPSRC="$C_PPSRC" C_REAL_WORK="$C_SOURCE_WORK" \
     MIN_FREE_RAM_GB=1 MIN_FREE_DISK_KB=1024 MAX_EVIDENCE_DISK_KB=1048576 \
-    NEMO_ROOT="$stub_root" NEMO_SOURCE_ROOT="$stub_root" BASE_BLD="$stub_root/cfgs/BASE/BLD" \
+    NEMO_ROOT="$stub_root" NEMO_SOURCE_ROOT="$NEMO_SOURCE_ROOT" BASE_BLD="$stub_root/cfgs/BASE/BLD" \
     REF_CFG=C_RETAIN_REF REC_CFG=C_RETAIN_REC EVIDENCE_ROOT="$retained_root" \
     "$C_HERE/run.sh" --run "$retained_root/evidence"
   find "$retained_root/refused" -maxdepth 1 -type d -name 'evidence_*' | grep -q . || refuse 'retention plant did not retain refused evidence'
@@ -99,28 +129,21 @@ c_render_build() {
   local -a link_objects
   cp -a "$BASE_BLD" "$root"
   flags_text=$(production_flags); read -r -a flags <<< "$flags_text"
+  # R5FULLENTRY carries 14 legacy MY_SRC dumpers. Regenerate and compile those
+  # units from pristine NEMO for both arms before adding the registered REC set.
+  for unit in $C_OBSERVER_UNITS; do
+    c_render_pristine_observer_unit "$root/ppsrc/nemo" "$unit"
+    mpif90 -c "${flags[@]}" -I"$root/inc" -J"$root/inc" "$root/ppsrc/nemo/$unit.f90" -o "$root/obj/$unit.o"
+  done
+  c_legacy_observer_gate "$root/ppsrc/nemo"
   if [[ "$instrument" == 1 ]]; then
     c_apply_patches "$root/ppsrc/nemo"
+    c_legacy_observer_gate "$root/ppsrc/nemo"
     cp "$C_HERE/c_ladder_writer.F90" "$root/ppsrc/nemo/c_ladder_writer.f90"
     cp "$C_O8_DIR/o8_o16_master_writer.F90" "$root/ppsrc/nemo/o8_o16_master_writer.f90"
     mpif90 -c -cpp "${flags[@]}" -I"$root/inc" -J"$root/inc" "$root/ppsrc/nemo/o8_o16_master_writer.f90" -o "$root/obj/o8_o16_master_writer.o"
     mpif90 -c -cpp "${flags[@]}" -I"$root/inc" -J"$root/inc" "$root/ppsrc/nemo/c_ladder_writer.f90" -o "$root/obj/c_ladder_writer.o"
     for unit in stprk3 sbcssm sbcmod icestp iceupdate; do
-      mpif90 -c "${flags[@]}" -I"$root/inc" -J"$root/inc" "$root/ppsrc/nemo/$unit.f90" -o "$root/obj/$unit.o"
-    done
-  else
-    # R5FULLENTRY is a physics-identical oracle build with legacy dump streams.
-    # Recompile exactly those MY_SRC observer units from pristine NEMO source so
-    # REF (and especially year-long C4) is an observer-free standard executable.
-    for unit in $C_OBSERVER_UNITS; do
-      local source
-      if [[ "$unit" == stprk3 ]]; then source=$NEMO_SOURCE_ROOT/src/OCE/stprk3.F90
-      else source=$(find "$NEMO_SOURCE_ROOT/src" -iname "$unit.F90" -print -quit); fi
-      [[ -f "$source" ]] || refuse "missing pristine NEMO source for $unit"
-      cpp -Dkey_nosignedzero -Dkey_si3 -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
-        -I"$BASE_BLD/../WORK" "$source" > "$root/ppsrc/nemo/$unit.f90"
-      ! rg -q 'oracle_|l[1234]_dump|l3xchg_dump' "$root/ppsrc/nemo/$unit.f90" \
-        || refuse "REF sanitization left an observer in $unit"
       mpif90 -c "${flags[@]}" -I"$root/inc" -J"$root/inc" "$root/ppsrc/nemo/$unit.f90" -o "$root/obj/$unit.o"
     done
   fi

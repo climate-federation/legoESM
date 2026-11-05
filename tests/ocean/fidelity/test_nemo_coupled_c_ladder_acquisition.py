@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import os
 import subprocess
@@ -21,7 +22,6 @@ ACQ = REPO / "scripts/validate/ocean_fidelity/testcases/nemo_coupled_c_ladder_ac
 REAL = Path(
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
 )
-SCRATCH = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_c0_scratch")
 
 
 def _module(name: str, path: Path):
@@ -55,7 +55,7 @@ def test_source_contract_plants_fail(plant: str) -> None:
         preflight.source_contract(preflight.NEMO_DEFAULT, plant)
 
 
-def test_surface_mean_both_parities_and_numeric_plant() -> None:
+def test_surface_mean_both_parities_and_numeric_plant(tmp_path: Path) -> None:
     instant = np.arange(6, dtype=np.float64).reshape(2, 3) + 1.0
     zero = jnp.zeros_like(jnp.asarray(instant))
     prior = NemoSurfaceMeans(*(zero for _ in range(7)))
@@ -102,10 +102,10 @@ def test_surface_mean_both_parities_and_numeric_plant() -> None:
         np.asarray(second.ssu).view(np.uint64), (instant * 2).view(np.uint64)
     )
     with pytest.raises(ValueError, match="not 0 ULP"):
-        scorer.self_test("numeric", SCRATCH)
+        scorer.self_test("numeric", tmp_path)
 
 
-def test_tau_cadence_preserves_private_state_off_step() -> None:
+def test_tau_cadence_is_scorer_only_and_preserves_production_api(tmp_path: Path) -> None:
     full = jnp.ones((6, 6), dtype=jnp.float64)
     interior = jnp.ones((2, 2), dtype=jnp.float64)
     inputs = SI3StressInputs(
@@ -127,17 +127,20 @@ def test_tau_cadence_preserves_private_state_off_step() -> None:
         interior * 10,
     )
     cfg = SI3ORCA2StateConfig.for_orca2_sas_ice(nn_hls=2, nn_fsbc=2)
-    off = si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=False, update_cadence=False)
+    assert "update_cadence" not in inspect.signature(si3_ice_update_tau).parameters
+    with pytest.raises(ValueError, match="nn_fsbc=1"):
+        si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=False)
+    off = scorer._nemo_cadenced_tau_step(inputs, config=cfg, ln_drgice_imp=False, update_now=False)
     np.testing.assert_array_equal(off.tmod_io, inputs.tmod_io)
     np.testing.assert_array_equal(off.taum, inputs.taum)
     np.testing.assert_array_equal(off.utau_oce, inputs.utau_oce)
-    on = si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=False, update_cadence=True)
+    on = scorer._nemo_cadenced_tau_step(inputs, config=cfg, ln_drgice_imp=False, update_now=True)
     assert not np.array_equal(on.tmod_io, inputs.tmod_io)
     with pytest.raises(ValueError, match="parity"):
-        scorer.self_test("wrong-parity", SCRATCH)
+        scorer.self_test("wrong-parity", tmp_path)
 
 
-def test_schema_overlays_writer_prereg_and_truncation() -> None:
+def test_schema_overlays_writer_prereg_and_truncation(tmp_path: Path) -> None:
     schema = json.loads((ACQ / "record_schema.json").read_text())
     overlays = json.loads((ACQ / "namelist_overlays.json").read_text())
     assert schema["magic"] == "CLAD0001" and set(schema["kinds"]) == set("123456")
@@ -151,7 +154,25 @@ def test_schema_overlays_writer_prereg_and_truncation() -> None:
     assert "NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP" in prereg
     assert "CONFIRM" in prereg and "REFUTE" in prereg
     with pytest.raises(ValueError, match="truncated"):
-        scorer.self_test("truncation", SCRATCH)
+        scorer.self_test("truncation", tmp_path)
+
+
+def test_scorer_main_reads_c0_from_staged_rec_c3(monkeypatch, tmp_path: Path) -> None:
+    seen = {}
+
+    def fake_c0(path, **_kwargs):
+        seen["c0"] = path
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(scorer, "score_c0", fake_c0)
+    monkeypatch.setattr(scorer, "score_c1", lambda *_args, **_kwargs: {"status": "PASS"})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["scorer.py", "--evidence", str(tmp_path), "--ppsrc", str(tmp_path / "ppsrc")],
+    )
+    assert scorer.main() == 0
+    assert seen["c0"] == tmp_path / "REC_C3/c_ladder_records"
 
 
 @pytest.mark.parametrize("unit", ("stprk3", "sbcssm", "sbcmod", "icestp", "iceupdate"))
@@ -187,6 +208,8 @@ def test_exact_overlays_and_shell_control_flow(tmp_path: Path) -> None:
     profile = (ACQ / "c_profile.sh").read_text()
     assert "C_LADDER_OPERATOR_ACK" in profile
     assert "STUB_REACHED_EXACT_NEMO_START" in profile
+    assert "c_legacy_observer_gate" in profile
+    assert "for unit in $C_OBSERVER_UNITS" in profile
     assert "mpirun -np 2" in profile and "makenemo" not in profile
     objects = link_objects.active_objects(
         Path(
@@ -196,11 +219,29 @@ def test_exact_overlays_and_shell_control_flow(tmp_path: Path) -> None:
     assert "nemo.o" in objects and "stprk3.o" in objects and "trcopt.o" not in objects
 
 
-def test_bounded_master_preflight_exercises_exact_run_stub() -> None:
+def test_real_run_refuses_noncanonical_evidence_path(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env["TMPDIR"] = str(tmp_path)
+    proc = subprocess.run(
+        [str(ACQ / "run.sh"), "--run", str(tmp_path / "evidence")],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 64
+    assert "evidence must be under /data/abyssal" in proc.stderr
+    launcher = (ACQ / "run.sh").read_text()
+    assert "phase3/si3_rounds/round30" in launcher
+    assert "scratch_root/c_ladder_acquisitions" not in launcher
+
+
+def test_bounded_master_preflight_exercises_exact_run_stub(tmp_path: Path) -> None:
     env = os.environ.copy()
     env.update(
         {
-            "TMPDIR": str(SCRATCH),
+            "TMPDIR": str(tmp_path),
             "CUDA_VISIBLE_DEVICES": "",
             "JAX_PLATFORMS": "cpu",
             "JAX_ENABLE_X64": "1",

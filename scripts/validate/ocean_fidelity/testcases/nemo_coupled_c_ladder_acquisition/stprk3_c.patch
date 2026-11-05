@@ -1,9 +1,9 @@
 --- stprk3.f90
 +++ stprk3.f90
-@@ -38,1 +38,2 @@
--   USE icb_oce, ONLY : berg_grid, nclasses
-+   USE icb_oce, ONLY : berg_grid, nclasses
+@@ -40,1 +40,2 @@
+-   IMPLICIT NONE
 +   USE c_ladder_writer, ONLY : c_record_step
++   IMPLICIT NONE
 @@ -88,1 +89,2 @@
 -      IF( ln_timing )   CALL timing_start('stp_RK3')
 +      IF( ln_timing )   CALL timing_start('stp_RK3')
