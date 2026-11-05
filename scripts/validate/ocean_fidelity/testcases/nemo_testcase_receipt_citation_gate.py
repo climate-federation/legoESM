@@ -14240,6 +14240,68 @@ _resume3_reline(
              'ops_2_cand = _call_step(ops_1, 2, jnp.int32(max(0, nn_hls - 2)))', 95],
 )
 
+# The coupled C-ladder scorer made the shared master-record dimensions an
+# explicit, mandatory argument.  Re-anchor the existing O8--O16 receipts to
+# that additive reader/config plumbing; their claims and pinned symbols are
+# unchanged.
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1036-1066',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1054-1084')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1069-1121',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1087-1139')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1845-1849',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1863-1867')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2588',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2620',
+          extent=2620)
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:540-596',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:558-614')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:714-1032',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:732-1050')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1287-1304',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1305-1322')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1463-1696',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1481-1714')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1585-1610',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1603-1628')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1720-1730',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1738-1748')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1733-1805',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1751-1823')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1811-1842',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1829-1860')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1236-1973',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1254-1991')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1151',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1153',
+          extent=1153)
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:882-890',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:900-908')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1129-1232',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1147-1250')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:328-366',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:329-367')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:369-423',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:370-424')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:607-696',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:625-714')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2159-2232',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2186-2259')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2298-2475',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2325-2507',
+          extent=183)
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2440-2455',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2472-2487')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:257-300',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:258-301')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:427-536',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:428-540',
+          extent=113)
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1698-1717',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1716-1735')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1170',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1172',
+          extent=1172)
+
 
 _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"
          r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|namelist_ice_cfg|namelist_ice_ref|ocean\.output\.excerpt|ocean\.output)"

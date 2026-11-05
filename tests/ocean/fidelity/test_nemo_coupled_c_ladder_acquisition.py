@@ -27,6 +27,10 @@ COUPLED_RECORD = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/"
     "acquisition/orca1ice_surface_entry_every_step_a_np2"
 )
+REFUSED_C3 = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round30/refused/"
+    "oracle_coupled_c_ladder_20261105T183812Z_rc1_3724699/REC_C3"
+)
 
 
 def _module(name: str, path: Path):
@@ -153,6 +157,7 @@ def test_coupled_namelist_reads_executed_drag_arm_and_rejects_ambiguity(
 ) -> None:
     resolved = scorer._coupled_resolved_namelist(COUPLED_RECORD)
     assert resolved["ln_drgice_imp"] is True
+    assert tuple(resolved[name] for name in ("jpl", "nlay_i", "nlay_s")) == (1, 3, 3)
 
     run = tmp_path / "REC_C3"
     run.mkdir()
@@ -162,6 +167,61 @@ def test_coupled_namelist_reads_executed_drag_arm_and_rejects_ambiguity(
     )
     with pytest.raises(ValueError, match="does not resolve one executed"):
         scorer._coupled_resolved_namelist(run)
+
+
+def test_c1_dimensions_come_from_run_and_refuse_sas_hardcode() -> None:
+    dimensions_parameter = inspect.signature(scorer.read_record_verified).parameters[
+        "expected_ice_dimensions"
+    ]
+    assert dimensions_parameter.default is inspect.Parameter.empty
+
+    resolved = scorer._coupled_resolved_namelist(REFUSED_C3)
+    dimensions = tuple(int(resolved[name]) for name in ("jpl", "nlay_i", "nlay_s"))
+    record_path = REFUSED_C3 / "o8_o16_master_records" / scorer.record_name(15, 1, 0, 0)
+    record = scorer.read_record_verified(
+        record_path,
+        expected_ice_dimensions=dimensions,
+    )
+    assert tuple(record["meta"][name] for name in ("jpl", "nlay_i", "nlay_s")) == dimensions
+    with pytest.raises(
+        ValueError,
+        match=r"record ice dimensions \(1, 3, 3\) != expected \(5, 10, 5\)",
+    ):
+        scorer.read_record_verified(
+            record_path,
+            expected_ice_dimensions=(5, 10, 5),
+        )
+
+    private = scorer.read_o17_record(
+        REFUSED_C3
+        / "o17_master_records/o17_kind34_tau_private_step0001_rank0000.bin"
+    )
+    assert tuple(private["meta"][name] for name in ("jpl", "nlay_i", "nlay_s")) == dimensions
+    cfg = scorer._late_config(
+        resolved,
+        record["scalars"],
+        ice_dimensions=dimensions,
+        nn_hls=2,
+    )
+    assert (cfg.jpl, cfg.nlay_i, cfg.nlay_s) == dimensions
+
+
+def test_c_scorers_select_fp64_libm_before_scoring(monkeypatch, tmp_path: Path) -> None:
+    selected = []
+    monkeypatch.setattr(scorer, "set_policy", selected.append)
+    with pytest.raises(ValueError, match="no C0 entry records"):
+        scorer.score_c0(tmp_path)
+    assert selected[-1].compute == jnp.float64
+    assert selected[-1].transcendentals == "libm"
+
+    def stop_after_policy(_run):
+        raise RuntimeError("stop after precision policy")
+
+    monkeypatch.setattr(scorer, "_coupled_resolved_namelist", stop_after_policy)
+    with pytest.raises(RuntimeError, match="stop after precision policy"):
+        scorer.score_c1(tmp_path)
+    assert selected[-1].compute == jnp.float64
+    assert selected[-1].transcendentals == "libm"
 
 
 def test_c1_uses_versioned_reader_and_scores_only_mpi_shard_interior() -> None:

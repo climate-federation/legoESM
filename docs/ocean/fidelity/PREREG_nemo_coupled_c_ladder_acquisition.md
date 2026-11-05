@@ -29,3 +29,14 @@ The approved operator run completed C2 REF+REC with byte passivity, C3 REC with 
 The record header advertised 20 fields while its three flags were `0,0,0`. With `ln_apr_dyn` false, `sbc_apr_init` did not allocate `ssh_ib`; the unconditional stream write emitted no bytes, leaving a 1,828,932-byte file instead of the advertised 1,943,236 bytes. The missing 114,304 bytes are exactly one `94x152` fp64 array. Every following field was therefore decoded one position early.
 
 The repair does not change the deck, run lengths, output counts, cadence, scoring bar, or verdicts. The writer now emits `ssh_ib` iff it is allocated, records 19 or 20 fields accordingly, and refuses an allocation/flag disagreement. The reader accepts only the corresponding flag/count/payload layout and retains independent truncated and trailing-byte refusals. The allocation-off preflight stub writes the 19-field layout; a planted copy of the old unconditional 20-field layout must be refused before any real run.
+
+## 2026-11-05 refused-run scratch rescore (not admissible evidence)
+
+The retained `REC_C3` records from the refused round-30 run were copied under `phase3/work/si3_c5_scratch`; the read-only refused tree was not modified. On the scratch copy only, all 200 kind-1 headers were rewritten from the false `nfields=20` declaration to the payload's actual `nfields=19`. This is a diagnostic repair of refused records, not a fresh admitted acquisition, so none of the following results is admissible campaign evidence.
+
+- C0: `PASS_C0_0_ULP`, 200 kind-1/kind-2 record pairs (100 steps, two ranks).
+- C1: `PASS_C1_0_ULP`, all 50 update-flux steps and all 100 stress steps (both ranks scored at every retained step).
+- Control: forcing the SAS dimensions `(jpl,nlay_i,nlay_s)=(5,10,5)` refuses the coupled record header `(1,3,3)`.
+- Control: suppressing `PrecisionPolicy.fp64(transcendentals="libm")` refuses C1 at `alb_ice`, step 3, rank 0.
+
+C2--C4 remain `NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP`; this scratch rescore changes no registered verdict.

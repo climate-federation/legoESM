@@ -975,6 +975,7 @@ def test_score_o14_refuses_preregistered_selector_mismatches(
 ) -> None:
     from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer import (
         DEFAULT_PPSRC,
+        SAS_ICE_DIMENSIONS,
         _verify_record_scalars_against_namelist,
         parse_resolved_ice_namelist,
         read_record_verified,
@@ -988,7 +989,8 @@ def test_score_o14_refuses_preregistered_selector_mismatches(
         run_dir / "output.namelist.ice", run_dir / "output.namelist.dyn", ppsrc=DEFAULT_PPSRC
     )
     scalars = read_record_verified(
-        run_dir / "o8_o16_master_records" / record_name(12, 1, 0)
+        run_dir / "o8_o16_master_records" / record_name(12, 1, 0),
+        expected_ice_dimensions=SAS_ICE_DIMENSIONS,
     )["scalars"]
     namelist[selector] = bad_value
     with pytest.raises(ValueError, match=expected_pattern):

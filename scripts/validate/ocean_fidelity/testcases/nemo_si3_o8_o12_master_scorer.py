@@ -98,6 +98,7 @@ PINNED_PROJECTION_SHA256: dict[str, str] = {
 
 SCORE_RUNGS = ("O8", "O9", "O10", "O11", "O12", "O13")
 N_PAD_1D = 4099
+SAS_ICE_DIMENSIONS = (5, 10, 5)
 
 ZDF_UPDATED_FIELDS = (
     "t_su",
@@ -428,6 +429,7 @@ def read_record_verified(
     path: Path,
     expected_record_sha256: str | None = None,
     *,
+    expected_ice_dimensions: tuple[int, int, int],
     plant_kind15_wrong_permutation: bool = False,
     plant_kind19_wrong_permutation: bool = False,
 ) -> dict[str, Any]:
@@ -470,11 +472,13 @@ def read_record_verified(
     kind = meta["kind"]
     if kind not in KINDS or meta["nfields"] != len(KINDS[kind].fields):
         raise _refuse(f"unknown kind/field count {kind}/{meta['nfields']}")
+    record_ice_dimensions = tuple(meta[name] for name in ("jpl", "nlay_i", "nlay_s"))
+    if record_ice_dimensions != expected_ice_dimensions:
+        raise _refuse(
+            f"record ice dimensions {record_ice_dimensions} != expected {expected_ice_dimensions}"
+        )
     if (
-        meta["jpl"] != 5
-        or meta["nlay_i"] != 10
-        or meta["nlay_s"] != 5
-        or meta["endian"] != 1
+        meta["endian"] != 1
         or meta["jpi"] < 1
         or meta["jpj"] < 1
         or not (1 <= meta["ntsi"] <= meta["ntei"] <= meta["jpi"])
@@ -535,6 +539,20 @@ def read_record_verified(
         "record_sha256": record_sha,
         "reader_translation": reader_translation,
     }
+
+
+def _read_sas_record_verified(
+    path: Path,
+    expected_record_sha256: str | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Preserve the admitted ORCA2_SAS_ICE reader contract explicitly."""
+    return read_record_verified(
+        path,
+        expected_record_sha256,
+        expected_ice_dimensions=SAS_ICE_DIMENSIONS,
+        **kwargs,
+    )
 
 
 def _verify_record_scalars_against_namelist(
@@ -1041,8 +1059,8 @@ def _score_o13_step(
     """Score one admitted Kind 11 -> Kind 12 pair through the production kernel."""
     n11 = record_name(11, kt, 0)
     n12 = record_name(12, kt, 0)
-    r11 = read_record_verified(records_dir / n11, digest_map.get(n11))
-    r12 = read_record_verified(records_dir / n12, digest_map.get(n12))
+    r11 = _read_sas_record_verified(records_dir / n11, digest_map.get(n11))
+    r12 = _read_sas_record_verified(records_dir / n12, digest_map.get(n12))
     _verify_record_scalars_against_namelist(r11["scalars"], namelist, 11)
     _verify_record_scalars_against_namelist(r12["scalars"], namelist, 12)
     f11 = r11["fields"]
@@ -1085,7 +1103,7 @@ def score_o13(
         run_dir / "output.namelist.ice", run_dir / "output.namelist.dyn",
         ppsrc=ppsrc, plant=plant,
     )
-    first = read_record_verified(records_dir / record_name(11, steps[0], 0))
+    first = _read_sas_record_verified(records_dir / record_name(11, steps[0], 0))
     kernels = _build_compiled_kernels(
         float(first["scalars"]["rDt_ice"]),
         float(first["scalars"]["r1_Dt_ice"]),
@@ -1149,7 +1167,7 @@ def score_o14(
         ppsrc=ppsrc,
         plant=plant,
     )
-    first = read_record_verified(
+    first = _read_sas_record_verified(
         records_dir / record_name(12, steps[0], 0),
         o14_digests.get(record_name(12, steps[0], 0)),
     )
@@ -1183,8 +1201,8 @@ def score_o14(
     for kt in steps:
         n12 = record_name(12, kt, 0)
         n13 = record_name(13, kt, 0)
-        r12 = read_record_verified(records_dir / n12, o14_digests.get(n12))
-        r13 = read_record_verified(records_dir / n13, o14_digests.get(n13))
+        r12 = _read_sas_record_verified(records_dir / n12, o14_digests.get(n12))
+        r13 = _read_sas_record_verified(records_dir / n13, o14_digests.get(n13))
         _verify_record_scalars_against_namelist(r12["scalars"], namelist, 12)
         _verify_record_scalars_against_namelist(r13["scalars"], namelist, 13)
         f12 = r12["fields"]
@@ -1259,7 +1277,7 @@ def score_o8_to_o12(
         plant=plant,
     )
 
-    first_rec = read_record_verified(records_dir / record_name(3, steps[0], 1))
+    first_rec = _read_sas_record_verified(records_dir / record_name(3, steps[0], 1))
     rDt_ice = float(first_rec["scalars"]["rDt_ice"])
     r1_Dt_ice = float(first_rec["scalars"]["r1_Dt_ice"])
     r1_nlay_i = float(first_rec["scalars"]["r1_nlay_i"])
@@ -1289,8 +1307,8 @@ def score_o8_to_o12(
     for kt in steps:
         n1 = record_name(1, kt, 0)
         n2 = record_name(2, kt, 0)
-        r1 = read_record_verified(records_dir / n1, digests_by_rung["O8"].get(n1))
-        r2 = read_record_verified(records_dir / n2, digests_by_rung["O8"].get(n2))
+        r1 = _read_sas_record_verified(records_dir / n1, digests_by_rung["O8"].get(n1))
+        r2 = _read_sas_record_verified(records_dir / n2, digests_by_rung["O8"].get(n2))
         _verify_record_scalars_against_namelist(r1["scalars"], namelist, 1)
         _verify_record_scalars_against_namelist(r2["scalars"], namelist, 2)
         f1 = r1["fields"]
@@ -1421,7 +1439,7 @@ def score_o8_to_o12(
 
     for kt in steps:
         n21 = record_name(21, kt, 0)
-        r21 = read_record_verified(records_dir / n21, digests_by_rung["O9"].get(n21))
+        r21 = _read_sas_record_verified(records_dir / n21, digests_by_rung["O9"].get(n21))
         _verify_record_scalars_against_namelist(r21["scalars"], namelist, 21)
 
         for jl in range(1, 6):
@@ -1433,13 +1451,13 @@ def score_o8_to_o12(
             n8 = record_name(8, kt, jl)
             n9 = record_name(9, kt, jl)
 
-            r3 = read_record_verified(records_dir / n3, digests_by_rung["O9"].get(n3))
-            r4 = read_record_verified(records_dir / n4, digests_by_rung["O9"].get(n4))
-            r5 = read_record_verified(records_dir / n5, digests_by_rung["O9"].get(n5))
-            r6 = read_record_verified(records_dir / n6, digests_by_rung["O9"].get(n6))
-            r7 = read_record_verified(records_dir / n7, digests_by_rung["O10"].get(n7))
-            r8 = read_record_verified(records_dir / n8, digests_by_rung["O10"].get(n8))
-            r9 = read_record_verified(records_dir / n9, digests_by_rung["O11"].get(n9))
+            r3 = _read_sas_record_verified(records_dir / n3, digests_by_rung["O9"].get(n3))
+            r4 = _read_sas_record_verified(records_dir / n4, digests_by_rung["O9"].get(n4))
+            r5 = _read_sas_record_verified(records_dir / n5, digests_by_rung["O9"].get(n5))
+            r6 = _read_sas_record_verified(records_dir / n6, digests_by_rung["O9"].get(n6))
+            r7 = _read_sas_record_verified(records_dir / n7, digests_by_rung["O10"].get(n7))
+            r8 = _read_sas_record_verified(records_dir / n8, digests_by_rung["O10"].get(n8))
+            r9 = _read_sas_record_verified(records_dir / n9, digests_by_rung["O11"].get(n9))
 
             for k_id, rec in ((3, r3), (4, r4), (5, r5), (6, r6), (7, r7), (8, r8), (9, r9)):
                 _verify_record_scalars_against_namelist(rec["scalars"], namelist, k_id)
@@ -1612,7 +1630,7 @@ def score_o8_to_o12(
             # O9 Kind 17 picard_final check at PICARD_STEPS
             if kt in PICARD_STEPS:
                 n17 = record_name(17, kt, jl)
-                r17 = read_record_verified(
+                r17 = _read_sas_record_verified(
                     records_dir / n17, digests_by_rung["O9"].get(n17)
                 )
                 _verify_record_scalars_against_namelist(r17["scalars"], namelist, 17)
@@ -1811,8 +1829,8 @@ def score_o8_to_o12(
         # 5. Rung O12: Kind 10 -> Kind 11 (si3_ice_thd_pnd and step_ponds(scheme='si3_lev'))
         n10 = record_name(10, kt, 0)
         n11 = record_name(11, kt, 0)
-        r10 = read_record_verified(records_dir / n10, digests_by_rung["O12"].get(n10))
-        r11 = read_record_verified(records_dir / n11, digests_by_rung["O12"].get(n11))
+        r10 = _read_sas_record_verified(records_dir / n10, digests_by_rung["O12"].get(n10))
+        r11 = _read_sas_record_verified(records_dir / n11, digests_by_rung["O12"].get(n11))
         _verify_record_scalars_against_namelist(r10["scalars"], namelist, 10)
         _verify_record_scalars_against_namelist(r11["scalars"], namelist, 11)
         f10 = r10["fields"]
@@ -2130,8 +2148,17 @@ def _state_score_fields(state: SI3State, *, interior_halo: int = 0) -> dict[str,
     return out
 
 
-def _late_config(namelist: dict[str, Any], scalars: dict[str, float], *, nn_hls: int) -> SI3ORCA2StateConfig:
+def _late_config(
+    namelist: dict[str, Any],
+    scalars: dict[str, float],
+    *,
+    ice_dimensions: tuple[int, int, int],
+    nn_hls: int,
+) -> SI3ORCA2StateConfig:
     return SI3ORCA2StateConfig.for_orca2_sas_ice(
+        jpl=ice_dimensions[0],
+        nlay_i=ice_dimensions[1],
+        nlay_s=ice_dimensions[2],
         nn_hls=nn_hls,
         ln_icethd=True,
         rn_simin=float(namelist["rn_simin"]),
@@ -2193,7 +2220,7 @@ def verify_kind15_translation_evidence(
     cross_kind_fields = _DIRECT_STATE_FIELDS
     checked = 0
     for kt in steps:
-        record15 = read_record_verified(
+        record15 = _read_sas_record_verified(
             records_dir / record_name(15, kt),
             digests[record_name(15, kt)],
             plant_kind15_wrong_permutation=plant,
@@ -2204,7 +2231,7 @@ def verify_kind15_translation_evidence(
         ):
             raise _refuse(f"kind-15 versioned translation metadata failed at kt={kt}")
         f15 = record15["fields"]
-        f18 = read_record_verified(
+        f18 = _read_sas_record_verified(
             records_dir / record_name(18, kt), digests[record_name(18, kt)]
         )["fields"]
         for name in cross_kind_fields:
@@ -2257,7 +2284,7 @@ def verify_kind19_translation_evidence(
 
     independent_checks = 0
     for kt in steps:
-        record = read_record_verified(
+        record = _read_sas_record_verified(
             records_dir / record_name(19, kt),
             digests[record_name(19, kt)],
             plant_kind19_wrong_permutation=plant,
@@ -2322,10 +2349,15 @@ def score_o15_o16(
         run_dir / "output.namelist.dyn", run_dir / "output.namelist.ice"
     )
     first13_name = record_name(13, steps[0], 0)
-    first13 = read_record_verified(
+    first13 = _read_sas_record_verified(
         records_dir / first13_name, digests["O15"].get(first13_name)
     )
-    cfg16 = _late_config(namelist, first13["scalars"], nn_hls=2)
+    cfg16 = _late_config(
+        namelist,
+        first13["scalars"],
+        ice_dimensions=SAS_ICE_DIMENSIONS,
+        nn_hls=2,
+    )
     sea_config = build_si3_orca2_o2_config(cfg16)
 
     @jax.jit
@@ -2370,7 +2402,7 @@ def score_o15_o16(
         for kind in PROJECTIONS["O15"] + PROJECTIONS["O16"]:
             name = record_name(kind, kt, 0)
             rung = "O15" if kind in PROJECTIONS["O15"] else "O16"
-            records[kind] = read_record_verified(records_dir / name, digests[rung].get(name))
+            records[kind] = _read_sas_record_verified(records_dir / name, digests[rung].get(name))
             _verify_record_scalars_against_namelist(records[kind]["scalars"], namelist, kind)
 
         f13 = records[13]["fields"]

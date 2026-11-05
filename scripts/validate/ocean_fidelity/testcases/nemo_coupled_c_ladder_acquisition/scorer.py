@@ -12,6 +12,7 @@ from pathlib import Path
 import jax.numpy as jnp
 import numpy as np
 from legoesm.core.nemo_namelist import parse_namelist
+from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.core.source_rounding import nemo_source_round as sr
 from legoesm.ice.si3_finalize import (
     SI3StressInputs,
@@ -253,6 +254,9 @@ def _coupled_resolved_namelist(run: Path) -> dict:
         raise ValueError(f"STATUS PLANT-FIRED: missing resolved ice namelist: {ice_path}")
     values = parse_namelist(ice_path, "ice")
     required = (
+        "jpl",
+        "nlay_i",
+        "nlay_s",
         "rn_simin",
         "rn_sinew",
         "nn_icesal",
@@ -346,6 +350,7 @@ def _nemo_cadenced_tau_step(
 
 
 def score_c0(records: Path, *, plant: str | None = None) -> dict:
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     entries = sorted(records.glob("c_kind1_*.bin"))
     if not entries:
         raise ValueError("STATUS PLANT-FIRED: no C0 entry records")
@@ -392,11 +397,21 @@ def score_c0(records: Path, *, plant: str | None = None) -> dict:
 
 
 def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     run = evidence / "REC_C3"
     records = run / "o8_o16_master_records"
-    first = read_record_verified(records / record_name(15, 1, 0, 0))
     namelist = _coupled_resolved_namelist(run)
-    cfg = _late_config(namelist, first["scalars"], nn_hls=2)._replace(nn_fsbc=2)
+    ice_dimensions = tuple(int(namelist[name]) for name in ("jpl", "nlay_i", "nlay_s"))
+    first = read_record_verified(
+        records / record_name(15, 1, 0, 0),
+        expected_ice_dimensions=ice_dimensions,
+    )
+    cfg = _late_config(
+        namelist,
+        first["scalars"],
+        ice_dimensions=ice_dimensions,
+        nn_hls=2,
+    )._replace(nn_fsbc=2)
     flux_cfg = cfg._replace(nn_hls=0)
     surface_config = SI3SurfaceConfig.from_resolved_namelists(
         run / "output.namelist.dyn", run / "output.namelist.ice"
@@ -406,8 +421,14 @@ def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
     )
     for kt in steps:
         for rank in (0, 1):
-            r15 = read_record_verified(records / record_name(15, kt, 0, rank))
-            r16 = read_record_verified(records / record_name(16, kt, 0, rank))
+            r15 = read_record_verified(
+                records / record_name(15, kt, 0, rank),
+                expected_ice_dimensions=ice_dimensions,
+            )
+            r16 = read_record_verified(
+                records / record_name(16, kt, 0, rank),
+                expected_ice_dimensions=ice_dimensions,
+            )
             state_fields = dict(r15["fields"])
             sample = state_fields["a_i"]
             template = SI3State.zeros(
@@ -435,8 +456,27 @@ def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
     )
     for kt in tau_steps:
         for rank in (0, 1):
-            r19 = read_record_verified(records / record_name(19, kt, 0, rank))
-            r20 = read_record_verified(records / record_name(20, kt, 0, rank))
+            r19 = read_record_verified(
+                records / record_name(19, kt, 0, rank),
+                expected_ice_dimensions=ice_dimensions,
+            )
+            r20 = read_record_verified(
+                records / record_name(20, kt, 0, rank),
+                expected_ice_dimensions=ice_dimensions,
+            )
+            private_record = read_o17_record(
+                evidence
+                / "REC_C3/o17_master_records"
+                / f"o17_kind34_tau_private_step{kt:04d}_rank{rank:04d}.bin"
+            )
+            private_dimensions = tuple(
+                int(private_record["meta"][name]) for name in ("jpl", "nlay_i", "nlay_s")
+            )
+            if private_dimensions != ice_dimensions:
+                raise ValueError(
+                    "STATUS PLANT-FIRED: O17 record ice dimensions "
+                    f"{private_dimensions} disagree with resolved run {ice_dimensions}"
+                )
             stress = SI3StressInputs(
                 **{name: jnp.asarray(r19["fields"][name]) for name in SI3StressInputs._fields}
             )
@@ -453,11 +493,7 @@ def score_c1(evidence: Path, *, plant: str | None = None) -> dict:
                 _equal(
                     f"C1 tau step={kt} rank={rank} {name}", getattr(got, name), r20["fields"][name]
                 )
-            private = read_o17_record(
-                evidence
-                / "REC_C3/o17_master_records"
-                / f"o17_kind34_tau_private_step{kt:04d}_rank{rank:04d}.bin"
-            )["fields"]
+            private = private_record["fields"]
             for name in ("tmod_io", "utau_oce", "vtau_oce"):
                 _equal(
                     f"C1 tau private step={kt} rank={rank} {name}",

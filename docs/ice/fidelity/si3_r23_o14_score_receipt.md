@@ -120,11 +120,11 @@ denominator makes this plant fail with a NaN gradient. Result: `10 passed`.
 
 The existing scorer was extended rather than reimplemented. Its cached JIT
 kernel calls the production function with resolved selectors
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:882-890`).
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:900-908`).
 `score_o14` verifies admission, reads kind 12 and kind 13 through the existing
 verified reader, passes ENTRY arrays as JIT arguments, compares all 96 EXIT
 fields bitwise, and fails with the first `(kt, category, cell, field)`
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1129-1232`).
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1147-1250`).
 Admission now also compares the preregistered `ln_icedO=T` and `ln_leadhfx=T`
 selectors with the resolved record namelist and compares the kind-12/13
 `rn_hinew` scalar header with that namelist; all three mismatch plants fire.
