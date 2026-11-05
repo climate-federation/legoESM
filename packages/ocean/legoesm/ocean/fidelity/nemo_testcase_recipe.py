@@ -732,6 +732,7 @@ def _model_config(
             # velocity (dynspg_ts.F90:359,689; nn_bt_flt=3).
             barotropic_coriolis_split="live",
             lateral_viscosity_operator="nemo_div_curl",
+            lateral_viscosity_mask_levels="surface",
             lateral_viscosity_e3_weighting="nemo_e3",
             surface_stress_implicit=True,
             bbl_adv_option=bbl_adv_option,
@@ -809,6 +810,9 @@ def _model_config(
 
     return LatLonCGridOceanConfig.from_flat(
         constants=NEMO_CONSTANTS_CONFIG,
+        # Certified cards keep the masks their records were made with; moving
+        # them to NEMO's 3-D masks is a re-certification, not done here.
+        lateral_viscosity_mask_levels="surface",
         # Resolved ln_TEOS10=.true.; NEMO 5.0.2 eosbn2.F90:1920-2108
         # selects the Roquet TEOS-10 coefficient table and :260-288 evaluates it.
         eos="nemo_teos10",
@@ -3711,6 +3715,7 @@ def build_vortex_smt_zps_card(
                 C_leith=0.0,
             ),
             lateral_viscosity_operator="nemo_div_curl",
+            lateral_viscosity_mask_levels="surface",
             lateral_viscosity_e3_weighting="nemo_e3",
             lateral_viscosity_coefficient_source="nemo_ldf_c2d",
             lateral_side_bc="free_slip",
@@ -5338,6 +5343,7 @@ def build_swg_card(
         een_e3f_scheme="nemo_avg4", een_metric_weighting="nemo",
         een_q_boundary="nemo_live",
         lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_mask_levels="surface",
         lateral_viscosity_e3_weighting="nemo_e3",
         lateral_viscosity_coefficient_source="nemo_constant",
         lateral_viscosity=base.lateral_viscosity._replace(A_h=constant_ahm),
