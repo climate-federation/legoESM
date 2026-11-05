@@ -48,7 +48,12 @@ def cmp(name, ours, ref, floor=0.0):
     """Print max |diff|, max relative diff above ``floor``, and rms diff."""
     a, b = np.asarray(ours, np.float64), np.asarray(ref, np.float64)
     assert a.shape == b.shape, (name, a.shape, b.shape)
-    assert np.isfinite(a).all() and np.isfinite(b).all(), f"non-finite in {name}"
+    if not (np.isfinite(a).all() and np.isfinite(b).all()):
+        print(f"{name:58s} NONFINITE ours {int((~np.isfinite(a)).sum())} oracle "
+              f"{int((~np.isfinite(b)).sum())} of {a.size}", flush=True)
+        RESULTS[name] = dict(nonfinite_ours=int((~np.isfinite(a)).sum()),
+                             nonfinite_oracle=int((~np.isfinite(b)).sum()))
+        return
     d = np.abs(a - b)
     i = np.unravel_index(int(np.argmax(d)), d.shape)
     m = np.abs(b) > floor
@@ -245,7 +250,7 @@ def solve_with_oracle_optics(tau_lw, ssa_lw, g_lw, lev, sfc, tau_sw, ssa_sw, g_s
     return f(lw, "flux_up"), f(lw, "flux_down"), f(sw, "flux_up"), f(sw, "flux_down")
 
 
-def synthetic(oracle, tag, args, n=4096, nlay=12, seed=0):
+def synthetic(oracle, tag, args, n=4096, nlay=12, seed=0, tau_min=0.0):
     """Solver-only sweep, one g-point per column.
 
     Quarters: random legal optics; thin layers (tau 1e-9..1e-3); conservative
@@ -267,9 +272,10 @@ def synthetic(oracle, tag, args, n=4096, nlay=12, seed=0):
     ssa[2 * q:3 * q], g[2 * q:3 * q] = 1.0, r.uniform(0.0, 0.9, (q, nlay))
     alb_dir[2 * q:3 * q], alb_dif[2 * q:3 * q], emis[2 * q:3 * q] = 0.99, 0.99, 0.6
     s3 = slice(3 * q, n)
-    g[s3], ssa[s3], tau[s3] = 0.5, 0.6, 10.0 ** r.uniform(-3, 1, (n - 3 * q, nlay))
-    g1, g2 = (8.0 - 0.6 * 6.5) * 0.25, 3.0 * 0.6 * 0.5 * 0.25
+    g[s3], ssa[s3], tau[s3] = 0.5, 0.2, 10.0 ** r.uniform(-3, 1, (n - 3 * q, nlay))
+    g1, g2 = (8.0 - 0.2 * 6.5) * 0.25, 3.0 * 0.2 * 0.5 * 0.25  # k = 1.673, mu0 = 0.598
     mu0[s3] = (1.0 + r.uniform(-1e-6, 1e-6, n - 3 * q)) / np.sqrt((g1 - g2) * (g1 + g2))
+    tau = np.maximum(tau, tau_min)
     inc = np.full(n, 100.0)
     with tempfile.TemporaryDirectory(dir=args.out) as d:
         Path(d, "synth_dims.txt").write_text(f"{n} {nlay}\n")
@@ -440,6 +446,18 @@ def audit_case(name, args, p_top, overhead, data):
             cmp(f"e2e/{name}/{sky}/{nm}/sw_hr_Kday", np.asarray(o.sw_heating_rate) * SECONDS_PER_DAY,
                 hr_sw[:, ::-1][:, drop:])
 
+    if name == "prod" and args.fixture:
+        pick = np.concatenate([np.where(mu0 < 0.01)[0][:8], np.where(mu0 >= 0.01)[0][:12]])
+        np.savez_compressed(
+            args.fixture, **{k: c[k][pick] for k in ("T", "p_full", "p_half", "tsfc", "q", "o3", "o3_top",
+                                                     "mu0", "alb", "emis")},
+            s0=s0, ghg=json.dumps(ghg),
+            lw_up=toa_first(flw["2str"][0])[pick], lw_dn=toa_first(flw["2str"][1])[pick],
+            sw_up=toa_first(fsw["ours_toa"][0])[pick], sw_dn=toa_first(fsw["ours_toa"][1])[pick],
+            meta=json.dumps(dict(oracle="rte-rrtmgp d4b3c51992a613d0c234026246705fdf68ffd7a3, unpatched kernels, "
+                                        "one g-point per two-stream call", data="rrtmgp-data 8ba21ca, RFMIP expt 0",
+                                 generator="scripts/validate/oracle/rrtmgp_faithfulness/audit.py --fixture")))
+
     # ---- what our choice of solver and inputs costs, all oracle runs ----
     top = -1
     for key in ("noscat1", "noscat3", "2str_own_tlev", "2str_own_coldry"):
@@ -459,21 +477,19 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--tables", choices=("ours", "upstream"), default="ours")
-    ap.add_argument("--min-tau", type=float, default=None, help="override the LW source cutoff")
+    ap.add_argument("--fixture", help="write the 20-column regression fixture here")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     print("devices", jax.devices(), "x64", jax.config.jax_enable_x64)
     compare_tables(args.data)
     synthetic(args.oracle, "base", args)
-    if args.min_tau is not None:
-        MTS._MIN_TAU_FOR_LW_SRC = args.min_tau
-        synthetic(args.oracle, f"min_tau_{args.min_tau:g}", args)
+    synthetic(args.oracle, "tau_above_oracle_cutoff", args, tau_min=2e-8)
     audit_case("full", args, 0.0, False, args.data)
     audit_case("prod", args, 225.0, True, args.data)
     git = lambda p: subprocess.run(["git", "-c", "safe.directory=*", "-C", str(p), "rev-parse", "HEAD"],  # noqa: E731
                                    capture_output=True, text=True).stdout.strip()
     RESULTS["_provenance"] = dict(
-        legoesm=git(Path(__file__).parent), rte_rrtmgp=git(Path(args.oracle).parents[2] / "ref/rte-rrtmgp"),
+        legoesm=git(Path(__file__).parent), rte_rrtmgp=git(Path(args.oracle).parents[1] / "ref/rte-rrtmgp"),
         rrtmgp_data=git(args.data), tables=args.tables, jax=jax.__version__,
         devices=str(jax.devices()), oracle_note="unpatched kernels, per-g-point two-stream driver")
     Path(args.out, "audit.json").write_text(json.dumps(RESULTS, indent=1))

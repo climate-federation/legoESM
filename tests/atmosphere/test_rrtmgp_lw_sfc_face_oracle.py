@@ -21,10 +21,7 @@ a03b84b7c4e34f965b115686f22a043b85739e56, cime5.6.47
 d8e9b894d7eb96fe96f8f8a6943b421147f94606) via
 scripts/validate/oracle/rrtmgp_lw_sfc_face/{build.sh,build_cam_state.sh,make_fixture.py}.
 
-Interior levels are compared with the solver's existing sqrt floor applied
-to the oracle (max(lev_src, sqrt(floor)), exactly what the floor does to an
-unfloored source).  Not covered: the model-top (lid) level, whose halo Planck
-fraction is a separate audit finding.
+Every level including the model top (lid) is compared directly.
 """
 
 from __future__ import annotations
@@ -165,12 +162,10 @@ def test_interior_level_sources_match_rrtmgp_v18(case):
     def fn(ig):
         comb = monochromatic_two_stream.lw_combine_sources(
             _sources(opt, vmr, p, T, sfcT, tlev, ig))
-        return comb["planck_src_top"][:, 0, 1:-2]  # levels 2..nlay (surface first)
+        return comb["planck_src_top"][:, 0, 1:-1]  # levels 2..nlay+1 (surface first)
 
     ours = np.asarray(_by_gpoint(fn, opt))
-    floor = np.sqrt(monochromatic_two_stream._EPSILON)
-    ref = np.maximum(z["lev_src_oracle"][:, 1:-1, :], floor)
-    rel = _max_rel(ours, ref)
+    rel = _max_rel(ours, z["lev_src_oracle"][:, 1:, :])
     assert rel <= _TOL, f"max rel error {rel:.3e} > {_TOL}"
 
 
