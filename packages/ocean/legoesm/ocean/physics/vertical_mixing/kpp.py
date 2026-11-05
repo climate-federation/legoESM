@@ -201,13 +201,22 @@ def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps, ice_frac=None):
     # constant below sigma = epsilon (LMD94 App. A/B).
     d_eff = jnp.minimum(d, cfg.epsilon_lmd * h_bl_col)
     B_f_e = B_f[..., jnp.newaxis]
-    # copysign(eps, B_f) preserves the stability sign near zero (issue #168).
-    B_f_safe = jnp.where(
-        jnp.abs(B_f_e) > eps, B_f_e, jnp.copysign(eps, B_f_e),
-    )
     ustar_e = u_star[..., jnp.newaxis]
-    L_MO = ustar_e ** 3 / (kappa * B_f_safe)
-    zeta = d_eff / L_MO
+    if getattr(cfg, "actual_buoyancy_flux", False):
+        # zeta from the actual flux, written without dividing by it (CVMix 1d_OBL:
+        # zeta = sigma * OBL_depth * surf_buoy_force * vonkar / surf_fric_vel**3; u* is
+        # floored by its callers), so weak fluxes are used as they are and the gradient is
+        # finite down to B_f = 0 in float32 as well
+        zeta = d_eff * kappa * B_f_e / ustar_e ** 3
+    else:
+        # legacy: copysign(eps, B_f) preserves the stability sign near zero (issue #168), but
+        # replaces every |B_f| below eps (float32 machine epsilon, 1.19e-7 m^2/s^3) by eps; that
+        # covers most tropical surface fluxes (about 4e-8 to 1e-7 for 50 to 150 W/m^2)
+        B_f_safe = jnp.where(
+            jnp.abs(B_f_e) > eps, B_f_e, jnp.copysign(eps, B_f_e),
+        )
+        L_MO = ustar_e ** 3 / (kappa * B_f_safe)
+        zeta = d_eff / L_MO
     abs_zeta = jnp.abs(zeta)
     Bf_pos = jnp.maximum(B_f_e, 0.0)
     is_unstable = B_f_e > 0.0
