@@ -12006,6 +12006,9 @@ class LatLonCGridOceanModel:
                 # ``state_new`` is the working copy). None ⇒ BIT-IDENTICAL.
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
+                if _tb is not None:
+                    # tracer budget: the implicit solve stage, as on the non-prognostic path below
+                    _tb["T_pre_zdf"] = state_new.T.data
                 _tke_result = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
@@ -12053,6 +12056,8 @@ class LatLonCGridOceanModel:
                      _nemo_ws_budget_v_no_stress) = _tke_result
                 else:
                     state_new, tke_new, _nemo_ws_vertical_solve_trace = (_tke_result if _return_vertical_solve_trace else (*_tke_result, None))
+                if _tb is not None:
+                    _tb["T_post_zdf"] = state_new.T.data
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
