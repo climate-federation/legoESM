@@ -1081,7 +1081,9 @@ def boutle2014_fsd(cloud_fraction, cell_area_m2):
     relvarmax by MG2 anyway for any factor below 70 (forward unchanged).
     """
     c = jnp.clip(cloud_fraction, 0.0, 1.0)
-    x_km = jnp.sqrt(cell_area_m2) / _M_PER_KM
+    # the cell size in the state's working precision: a mesh may store its
+    # areas in float32 (orchestrator, 5 November 2026)
+    x_km = jnp.sqrt(jnp.asarray(cell_area_m2, dtype=c.dtype)) / _M_PER_KM
     xc_raw = x_km * c
     cloudy = xc_raw > _BOUTLE14_XC_MIN_KM
     xc = jnp.where(cloudy, xc_raw, 1.0)

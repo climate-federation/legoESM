@@ -59,6 +59,17 @@ def test_relvar_is_inverse_square_and_cloud_free_cells_get_relvarmax():
     assert float(r1[0]) == 10.0 and float(r2[0]) == 10.0
 
 
+@pytest.mark.skipif(not jax.config.jax_enable_x64, reason="needs a float64 state")
+def test_cell_size_in_the_working_precision_of_the_cloud_fraction():
+    # a mesh with float32 areas and a float64 state: the cell size is taken in
+    # float64 from the same float32 area value, not rounded by a float32 sqrt
+    c = jnp.asarray([0.03, 0.3, 0.9, 1.0], dtype=jnp.float64)
+    a32 = jnp.asarray([_area(x) for x in (27.3, 61.7, 110.9, 233.1)], dtype=jnp.float32)
+    got = boutle2014_fsd(c, a32)
+    assert got.dtype == jnp.float64
+    np.testing.assert_array_equal(got, boutle2014_fsd(c, a32.astype(jnp.float64)))
+
+
 def test_gradients_in_the_factor_are_finite_and_correct():
     c = jnp.asarray([0.0, 0.03, 0.3, 0.9, 1.0])
     a = jnp.full(5, _area(60.0))
@@ -185,8 +196,11 @@ def test_mg2_receives_the_selected_relvar(monkeypatch, scheme):
     assert len(read) == len(written_cf) == 2
     for cf, rv, r in zip(written_cf, written_rv, read):
         if scheme == "boutle2014":
-            want = boutle2014_relvar(jnp.clip(cf.reshape(r.shape), 0.0, 1.0),
-                                     jnp.asarray(mesh.areaCell).reshape(-1, 1), 1.7)
+            # jitted, as in the scanned sub-cycle (this mesh's areaCell is float32;
+            # before the cell size was cast to the state's precision, eager and
+            # compiled float32 arithmetic gave values 5e-8 apart)
+            want = jax.jit(boutle2014_relvar)(jnp.clip(cf.reshape(r.shape), 0.0, 1.0),
+                                              jnp.asarray(mesh.areaCell).reshape(-1, 1), 1.7)
             np.testing.assert_array_equal(np.asarray(want), r)
         else:
             np.testing.assert_array_equal(rv.reshape(r.shape), r)
