@@ -1,0 +1,16 @@
+# TIMING ARM ONLY (2026-11-05, user "measure first"): production deck with the
+# multilayer land OFF.  On the MPAS lane this means NO land model at all (the
+# validator says so); it bounds the land's cost, it is not a usable climate.
+include: amip_production.yaml
+use_multilayer_land: false
+land_surface_scheme: simple_seb
+land_calibrated_physics: false
+land_params_refresh: false
+land_soil_freeze_thaw: false
+land_update_seconds: 0
+land_beta_soil: false
+land_canopy_rh_cap_smoothing_width: null
+land_canopy_zeta_cap_smoothing_width: null
+land_canopy_most_n_iters: null
+ocean_flux_on_ocean_surface: null
+land_stress_from_land: null

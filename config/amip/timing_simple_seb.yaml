@@ -1,0 +1,11 @@
+# TIMING ARM ONLY (2026-11-05, user "measure first"): production deck with the
+# multilayer soil kept and the two-leaf canopy replaced by the simple surface
+# energy balance.  Rows that only the canopy reads are unset so validate_strict
+# accepts the deck.  Not a production configuration.
+include: amip_production.yaml
+land_surface_scheme: simple_seb
+land_calibrated_physics: false     # tables fitted under two_leaf (validator)
+land_params_refresh: false         # rebuilds canopy params only (validator)
+land_canopy_rh_cap_smoothing_width: null
+land_canopy_zeta_cap_smoothing_width: null
+land_canopy_most_n_iters: null
