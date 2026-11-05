@@ -3460,7 +3460,7 @@ def si3_ice_thd_do(
         hfx_opw=jnp.where(cooling, hfx_opw_new, hfx_opw),
     )
 
-def _si3_column_step_arrays_si3(state: SI3ColumnArrays,
+def si3_lane_column_step_arrays(state: SI3ColumnArrays,
                            forcing: SI3SurfaceForcing,
                            dt: float,
                            constants: IceConstantsConfig, *,
@@ -3519,7 +3519,7 @@ def _si3_column_step_arrays_si3(state: SI3ColumnArrays,
     else:
         T_s_old = jnp.asarray(t_s_entry, dtype=dtype)
     zero = jnp.zeros_like(h_ice)
-    if si3 is None or getattr(si3, "salinity_scheme", None) is None: raise ValueError("_si3_column_step_arrays_si3 requires an explicit SI3ThermoConfig (si3); no default")
+    if si3 is None or getattr(si3, "salinity_scheme", None) is None: raise ValueError("si3_lane_column_step_arrays requires an explicit SI3ThermoConfig (si3); no default")
     nn_icesal, fluxes_in = int(si3.salinity_scheme), SI3DHFluxes(*([zero] * len(SI3DHFluxes._fields))) if fluxes is None else fluxes
     nml = {
         "ln_icedH": True,

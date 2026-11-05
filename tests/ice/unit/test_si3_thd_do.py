@@ -237,7 +237,7 @@ def test_column_step_vanished_ice_has_finite_concentration_and_thickness_gradien
     )
 
     def loss(concentration, h_ice):
-        trace = bl._si3_column_step_arrays_si3(
+        trace = bl.si3_lane_column_step_arrays(
             state._replace(concentration=concentration, h_ice=h_ice),
             forcing,
             card.dt_seconds,

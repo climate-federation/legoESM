@@ -567,11 +567,11 @@ def _dispatch(config, state, forcing, dt, traced=False):
 
 def _production_expected(card, state, forcing, beta, dmin):
     """Oracle ice_thd_da on the column's post-ice_thd_temp state, then non-cooling ice_thd_do."""
-    from legoesm.ice.bitz_lipscomb import SI3ColumnArrays, _si3_column_step_arrays_si3
+    from legoesm.ice.bitz_lipscomb import SI3ColumnArrays, si3_lane_column_step_arrays
 
     arrays = SI3ColumnArrays(*(f.data for f in state))
     pre = jax.jit(
-        lambda s, f: _si3_column_step_arrays_si3(
+        lambda s, f: si3_lane_column_step_arrays(
             s, f, card.dt_seconds, ICE, si3=card.config.si3
         )
     )(*jax.device_put((arrays, forcing), jax.devices("cpu")[0])).post_temp2
@@ -612,6 +612,29 @@ def test_d5_card_keeps_lateral_melt_off():
     on = _dispatch(_lateral_melt_config(card, *_deck()), state, forcing, card.dt_seconds)
     off = _dispatch(card.config, state, forcing, card.dt_seconds)
     assert not np.array_equal(_bits(on.concentration.data), _bits(off.concentration.data))
+
+
+def test_lane_validator_rejects_ignored_lateral_melt_namelist():
+    from legoesm.ice.config import (
+        SI3LateralMeltConfig,
+        validate_si3_lane_thermo_config,
+    )
+
+    card, _, _ = _production_case()
+    with pytest.raises(ValueError, match="lateral_melt=False"):
+        validate_si3_lane_thermo_config(
+            card.config._replace(
+                si3=card.config.si3._replace(
+                    namthd_da=SI3LateralMeltConfig(rn_beta=1.0, rn_dmin=8.0)
+                )
+            )
+        )
+    with pytest.raises(ValueError, match="lateral_melt=True"):
+        validate_si3_lane_thermo_config(
+            card.config._replace(
+                si3=card.config.si3._replace(lateral_melt=True)
+            )
+        )
 
 
 @pytest.mark.parametrize(

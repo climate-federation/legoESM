@@ -70,6 +70,7 @@ from legoesm.core.surface_energy import surface_radiation_fluxes
 from legoesm.ice.config import (
     SeaIceConfig,
     validate_si3_bulk_config,
+    validate_si3_lane_thermo_config,
     validate_si3_thermo_config,
 )
 from legoesm.ice.rheology import strain_rates
@@ -83,7 +84,7 @@ from legoesm.ice.state import (
 from legoesm.ice.bitz_lipscomb import (
     SI3ColumnArrays,
     SI3SurfaceForcing,
-    _si3_column_step_arrays_si3,
+    si3_lane_column_step_arrays,
     si3_column_step_arrays,
 )
 from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
@@ -607,7 +608,7 @@ def step_sea_ice_si3_lane(
         )
     if config.thermo_scheme != "si3_bl99":
         raise ValueError("step_sea_ice_si3_lane requires thermo_scheme='si3_bl99'")
-    validate_si3_thermo_config(config)
+    validate_si3_lane_thermo_config(config)
     if not isinstance(state, SI3ColumnState):
         raise ValueError(
             "thermo_scheme='si3_bl99' requires SI3ColumnState with 3+3 layer enthalpies"
@@ -639,7 +640,7 @@ def _si3_lane_step_with_trace(
         state.S_layers.data,
         state.age_volume.data,
     )
-    trace = _si3_column_step_arrays_si3(
+    trace = si3_lane_column_step_arrays(
         arrays,
         forcing,
         dt,

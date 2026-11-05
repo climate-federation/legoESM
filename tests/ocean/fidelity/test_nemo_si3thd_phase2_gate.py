@@ -20,7 +20,11 @@ from legoesm.ice.bitz_lipscomb import (
     snow_temperature_from_enthalpy,
 )
 from legoesm.ice.c1d_omip_l3 import ORACLE_V1_ROOT, build_c1d_omip_l3_card
-from legoesm.ice.config import SI3ThermoConfig, validate_si3_thermo_config
+from legoesm.ice.config import (
+    SI3LateralMeltConfig,
+    SI3ThermoConfig,
+    validate_si3_thermo_config,
+)
 from legoesm.ice.constants_config import (
     NEMO_SI3_CONSTANTS_CONFIG,
     IceConstantsConfig,
@@ -127,6 +131,15 @@ def test_selector_rejects_frankenstein_identity() -> None:
     with pytest.raises(ValueError, match="mixing canonical"):
         validate_si3_thermo_config(
             card.config._replace(ice_constants=IceConstantsConfig())
+        )
+    with pytest.raises(ValueError, match="ORCA1-resolved"):
+        validate_si3_thermo_config(
+            card.config._replace(
+                si3=SI3ThermoConfig(
+                    lateral_melt=True,
+                    namthd_da=SI3LateralMeltConfig(rn_beta=1.0, rn_dmin=8.0),
+                )
+            )
         )
 
 

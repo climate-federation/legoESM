@@ -318,7 +318,7 @@ def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
 
     if config.thermo_scheme != "si3_bl99":
         return _validate_si3_orca2_o1_config(config) or _validate_si3_orca2_o4_config(config) or _validate_si3_lev_pond_config(config)
-    wanted = SI3ThermoConfig(lateral_melt=config.si3.lateral_melt, namthd_da=config.si3.namthd_da)
+    wanted = SI3ThermoConfig()
     if config.si3 != wanted:
         raise ValueError(
             "thermo_scheme='si3_bl99' supports only the ORCA1-resolved "
@@ -341,6 +341,45 @@ def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
         conflicts.append("dynamics and transport must both be 'none' in C1D")
     if conflicts:
         raise ValueError("invalid SI3 C1D identity: " + "; ".join(conflicts))
+
+
+def validate_si3_lane_thermo_config(config: "SeaIceConfig") -> None:
+    """Validate the SI3 lane identity consumed by its source-literal step."""
+
+    if config.thermo_scheme != "si3_bl99":
+        raise ValueError("the SI3 lane requires thermo_scheme='si3_bl99'")
+    if config.si3.lateral_melt and config.si3.namthd_da is None:
+        raise ValueError(
+            "the SI3 lane requires si3.namthd_da when lateral_melt=True"
+        )
+    if not config.si3.lateral_melt and config.si3.namthd_da is not None:
+        raise ValueError(
+            "the SI3 lane rejects si3.namthd_da when lateral_melt=False"
+        )
+    wanted = SI3ThermoConfig(
+        lateral_melt=config.si3.lateral_melt,
+        namthd_da=config.si3.namthd_da,
+    )
+    if config.si3 != wanted:
+        raise ValueError(
+            "the SI3 lane supports only the resolved source-literal "
+            f"identity {wanted!r}; got {config.si3!r}"
+        )
+    if config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG:
+        raise ValueError(
+            "the SI3 lane requires the NEMO 5.0.2 phycst/EOS constant set"
+        )
+    conflicts = []
+    if config.n_categories != 1:
+        conflicts.append("n_categories must be 1")
+    if config.ponds.enabled:
+        conflicts.append("ponds.enabled must be False")
+    if config.ridging.enabled:
+        conflicts.append("ridging is inert in the C1D thermodynamic column")
+    if config.dynamics != "none" or config.transport != "none":
+        conflicts.append("dynamics and transport must both be 'none' in C1D")
+    if conflicts:
+        raise ValueError("invalid SI3 lane C1D identity: " + "; ".join(conflicts))
 
 
 def validate_si3_bulk_config(config: "SeaIceConfig") -> None:
