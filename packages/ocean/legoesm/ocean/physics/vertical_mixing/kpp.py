@@ -388,8 +388,17 @@ def _boundary_layer_depth(
     # give V_t^2 = 0 there.  (Floored at 1e-30 for an AD-safe gradient.)
     N_full = jnp.sqrt(jnp.maximum(N2_full, 1e-30))  # [1/s]
     max_depth = z_depth[..., -1]
-    h_est = max_depth if h_bl_prev is None else h_bl_prev
-    h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
+    _vt2_scale = getattr(cfg, "vt2_velocity_scale", "column")
+    if _vt2_scale == "candidate":
+        # CVMix / MOM6: every candidate depth is its own boundary-layer depth, so
+        # _kpp_velocity_scales' cap min(d, epsilon*h) gives d_eff = epsilon*d.
+        h_safe = jnp.maximum(z_depth, eps)
+    elif _vt2_scale == "column":
+        h_est = max_depth if h_bl_prev is None else h_bl_prev
+        h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
+    else:
+        raise ValueError(
+            f"KPPConfig.vt2_velocity_scale must be 'column' or 'candidate', got {_vt2_scale!r}")
     _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg, eps,
                                      ice_frac=ice_frac)
     V_t2 = _kpp_unresolved_shear_variance(N_full, z_depth, w_s_vt, cfg, eps)

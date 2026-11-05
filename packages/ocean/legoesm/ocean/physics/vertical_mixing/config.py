@@ -1034,6 +1034,17 @@ class KPPConfig(NamedTuple):
     # CVMix/MOM6, MITgcm and POP.  "insitu_signed": the earlier difference of in-situ densities at each
     # cell's own pressure (biased by g^2/c_s^2, about +4e-5 s^-2), kept bit for bit.  User-approved default 2026-11-20 (published form).
     n2_mode: str = "adiabatic"
+    # Velocity scale w_s inside the unresolved shear V_t^2 of the bulk Richardson
+    # number.  "column" (default, unchanged behaviour): w_s at each depth d for a
+    # boundary layer of depth h_bl_prev, or of the full column when the caller
+    # passes no h_bl_prev (the lat-lon K-profile path), so the surface-layer cap
+    # d_eff = min(d, epsilon*h) does not act.  "candidate": the CVMix / MOM6 form,
+    # each candidate depth d is its own boundary-layer depth and w_s is taken at
+    # sigma = epsilon of it, d_eff = epsilon*d, in stable and unstable forcing
+    # (CVMix cvmix_kpp_compute_turbulent_scales_1d_OBL with l_LMD_ws = .false.,
+    # its default; MOM6 MOM_CVMix_KPP.F90 KPP_compute_BLD, Vt_layer = 1.0 and
+    # OBL_depth = cell-centre depth).
+    vt2_velocity_scale: str = "column"
 
 
 class CATKEConfig(NamedTuple):
