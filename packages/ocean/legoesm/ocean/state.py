@@ -3490,13 +3490,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     # to preserve positional callers.
     runoff_depth_spread_levels: object = None
     # Land masks of the "vector_laplacian" lateral viscosity/biharmonic at
-    # each level.  "surface" (default, bit-identical) applies the 2-D surface
-    # u/v/vertex masks at every level, so a face or vertex closed at depth by
-    # a topographic step stays open.  "per_level" builds each level's masks
-    # from the partial-cell is_active, as NEMO's dynldf_lev reads its 3-D
-    # umask/vmask/fmask (dommsk.F90:148-153).  Appended to preserve
+    # each level.  "per_level" (default) builds each level's masks from the
+    # partial-cell is_active, as NEMO's dynldf_lev reads its 3-D
+    # umask/vmask/fmask (dommsk.F90:148-153).  "surface" applies the 2-D
+    # surface u/v/vertex masks at every level, so a face or vertex closed at
+    # depth by a topographic step stays open; every other viscosity operator
+    # must select it, and certified cards pin it.  Appended to preserve
     # positional callers.
-    lateral_viscosity_mask_levels: str = "surface"
+    lateral_viscosity_mask_levels: str = "per_level"
     # NEMO rn_shlat: the f-mask value at coastal vorticity points under
     # lateral_side_bc="nemo_shlat" (0 free slip, 0-2 partial, 2 no slip,
     # >2 strong slip; dommsk.F90:209-215).  2.0 = ORCA1's namelist_cfg.  Read

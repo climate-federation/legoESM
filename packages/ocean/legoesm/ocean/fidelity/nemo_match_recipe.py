@@ -468,6 +468,7 @@ def nemo_match_tripole_model_config(
         physics = _default_match_physics()
     return LatLonCGridOceanConfig.from_flat(
         A_h=cfg.A_h,
+        lateral_viscosity_mask_levels="per_level",
         A_v=cfg.A_v,
         K_v=cfg.K_v,
         B_h=cfg.B_h,

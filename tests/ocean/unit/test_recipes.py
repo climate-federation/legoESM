@@ -137,6 +137,21 @@ class TestCatalogMatchesFactories:
         for k, v in get_recipe("omip_nemo_match_tripole_v1", "latlon").items():
             assert mc.flat_get(k) == v, k
 
+    def test_other_viscosity_operators_pin_surface_masks(self):
+        """per_level raises off the vector Laplacian, so those recipes must pin."""
+        from legoesm.ocean.recipes import LATLON_RECIPES
+        pinned = [n for n, r in LATLON_RECIPES.items()
+                  if r.get("lateral_viscosity_operator", "vector_laplacian")
+                  != "vector_laplacian"]
+        assert pinned
+        for name in pinned:
+            assert LATLON_RECIPES[name]["lateral_viscosity_mask_levels"] == "surface", name
+
+    def test_omip_nemo_match_tripole_v1_selects_per_level_masks(self):
+        """The production OMIP card names NEMO's 3-D viscosity masks."""
+        recipe = get_recipe("omip_nemo_match_tripole_v1", "latlon")
+        assert recipe["lateral_viscosity_mask_levels"] == "per_level"
+
 
 # The PROVEN OMIP MPAS ico6 dycore — a FROZEN snapshot of the scheme + coefficient
 # fields _create_setup("mpas") produced BEFORE the factory rewire (#500).  This is
@@ -170,8 +185,11 @@ _FROZEN_MPAS_DYCORE = {
 # serve 1 degree and 1/12 degree (measured, 1e5 puts ORCA12 26x over the
 # explicit Laplacian limit).  The anchor mesh still derives 1e5, gated against
 # the real eORCA1.2 file in test_lateral_viscosity_resolution_scaling.py.
+# The SST RMSE 1.15 was scored with surface masks; the per-level masks below
+# have not been re-scored.
 _FROZEN_TRIPOLE_DYCORE = {
     "A_h": None,
+    "lateral_viscosity_mask_levels": "per_level",
     "A_v": 1.0e-4,
     "K_v": 1.0e-5,
     "B_h": 0.0,
