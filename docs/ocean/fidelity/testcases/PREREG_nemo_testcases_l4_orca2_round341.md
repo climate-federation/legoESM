@@ -117,9 +117,9 @@ never runs NEMO.
     identical in `ORCA2_ORCA1ICE_OMIP_L4_R326HMI`).
   - `legoESM` line:
     `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2321-2323`
-    (invoked for Stage 2 at `:9570-9572` with `_h_live_one_third` instead of
-    `_h_s2_kmm`, and passed at `:2665,2706` into `_nemo_cen2_tracer_rhs` at
-    `:2129-2130,2143`).
+    (invoked for Stage 2 at `:9616-9618` with `_h_live_one_third` instead of
+    `_h_s2_kmm`, and passed at `:2663,2704` into `_nemo_cen2_tracer_rhs` at
+    `:2128-2129,2142`).
   - Verification on recorded inputs across `kt = 1..10`: using the stored
     Stage-2 `Kmm` thickness `_h_s2_kmm = nemo_source_round(_h_ref_ws * _qt_13[..., None])`
     (`ocean_model_latlon_cgrid.py:8936-8939`) in Stage-2 `_nemo_cen2_tracer_rhs`
