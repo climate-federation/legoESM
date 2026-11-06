@@ -5146,14 +5146,42 @@ def _bc_external_surface_forcing(
             # default-off path); the implicit branch starts from zeros.
             dT_target = dT_surf if route_heat_to_implicit else dT_dt
             if shortwave_scheme not in (
-                "auto", "jerlov_2band", "sweeney_2band",
+                "auto", "jerlov_2band", "sweeney_2band", "ohlmann_2003",
                 "nemo_qsr_2bd", "nemo_qsr_rgb",
             ):
                 raise ValueError(
                     f"unknown surface_forcing.shortwave_scheme {shortwave_scheme!r}; "
-                    "expected 'auto', 'jerlov_2band', 'sweeney_2band', "
+                    "expected 'auto', 'jerlov_2band', 'sweeney_2band', 'ohlmann_2003', "
                     "'nemo_qsr_2bd' or 'nemo_qsr_rgb'")
-            if shortwave_scheme == "sweeney_2band" and _sf_sw is not None:
+            if shortwave_scheme == "ohlmann_2003" and _sf_sw is not None:
+                # Ohlmann (2003) chlorophyll double exponential (Table 1a, transmission relative to the net
+                # shortwave just beneath the surface): the whole net shortwave goes through the profile, the
+                # non-solar flux heats the surface cell; column total stays q_net.
+                if _sf_chl is None:
+                    raise ValueError(
+                        "surface_forcing.shortwave_scheme='ohlmann_2003' requires "
+                        "OceanSurfaceForcing.chl; got None")
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    shortwave_penetration_ohlmann_tendency,
+                )
+                sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
+                q_nonsolar = q_net_T - sw_T
+                # the model's heat capacity (as the jerlov branch), so the column gains exactly q_net under any
+                # constants preset
+                _inv_rho_csw_h0 = 1.0 / (
+                    jnp.asarray(rho_0, dtype=T.dtype)
+                    * jnp.asarray(_heat_capacity, dtype=T.dtype)
+                    * jnp.maximum(jnp.asarray(h_k[..., 0], dtype=T.dtype), 1e-10))
+                dT_target = dT_target.at[..., 0].add(
+                    q_nonsolar * _inv_rho_csw_h0 * mask
+                )
+                wet_cell = jnp.asarray(h_k > 0.0, dtype=T.dtype)
+                sw_tend = shortwave_penetration_ohlmann_tendency(
+                    sw_T, jnp.asarray(_sf_chl, dtype=T.dtype), dz_live=h_k, wet_cell=wet_cell,
+                    rho_0=float(rho_0), c_sw=_heat_capacity,
+                )
+                dT_target = dT_target + sw_tend * mask_3d
+            elif shortwave_scheme == "sweeney_2band" and _sf_sw is not None:
                 # FESOM2 chlorophyll two-band: the visible fraction of the net
                 # shortwave penetrates on the live partial-cell thickness, the
                 # rest heats the surface cell; column total stays q_net.
