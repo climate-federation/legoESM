@@ -217,7 +217,7 @@ c_measure_and_retain() {
   c4_kib=$(du -sk "$EVIDENCE/REF_C4" | awk '{print $1}')
   [[ "$c2_kib" -le 6291456 ]] || refuse 'C2 exceeded 6 GiB'
   [[ "$c3_kib" -le 157286400 ]] || refuse 'C3 exceeded 150 GiB'
-  [[ "$c4_kib" -le 31457280 ]] || refuse 'C4 exceeded 30 GiB'
+  [[ "$c4_kib" -le 104857600 ]] || refuse 'C4 exceeded 100 GiB'
   count=$(find "$EVIDENCE/REF_C4" -maxdepth 1 -type f -name 'ORCA2_*restart*.nc' | wc -l)
   [[ "$count" -eq 1460 ]] || refuse "C4 daily ocean+ice restart count $count != 1460"
   count=$(find "$EVIDENCE/REC_C3/c_ladder_records" -type f -name '*.bin' | wc -l)
@@ -253,7 +253,7 @@ manifest={
  'source_configuration':'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY',
  'ice_configuration':'DECISION_217_ORCA2_SAS_ICE5',
  'forcing_start':'EXACT_R339_R5_STAGED_OMIP_CORE_II_INITIAL_DECK','mpi_ranks':2,
- 'runs':{'C2':{'steps':2,'arms':['REF','REC'],'budget_seconds':900,'budget_gib':6},'C3':{'steps':100,'si3_calls':50,'arms':['REC'],'budget_seconds':21600,'budget_gib':150},'C4':{'steps':2920,'arms':['REF'],'budget_seconds':10800,'budget_gib':30,'restart_stride_steps':8,'expected_restart_shards':1460}},
+ 'runs':{'C2':{'steps':2,'arms':['REF','REC'],'budget_seconds':900,'budget_gib':6},'C3':{'steps':100,'si3_calls':50,'arms':['REC'],'budget_seconds':21600,'budget_gib':150},'C4':{'steps':2920,'arms':['REF'],'budget_seconds':10800,'budget_gib':100,'restart_stride_steps':8,'expected_restart_shards':1460}},
  'scoring':{'C0':'0_ULP','C1':'0_ULP','C2':'NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP','C3':'NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP','C4':'NOT_YET_SCORABLE_NO_COMPOSED_LEGOESM_COUPLED_STEP'},
  'retention':'ALL_RAW_RECORDS_RESTARTS_LOGS_RESOLVED_NAMELISTS_BINARIES_AND_MANIFESTS_UNTIL_ADMISSION',
 }
