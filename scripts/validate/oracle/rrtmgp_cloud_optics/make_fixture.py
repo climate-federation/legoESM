@@ -18,7 +18,7 @@ paths (``subcolumns.in_cloud_paths``).  Sizes are pre-clipped to the LUT range f
 the oracle (RRTMGP raises out of range; legoESM clips) -- documented contract
 difference.
 
-usage (compute node, JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu, PYTHONPATH incl. packages):
+usage (from this directory, compute node, JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu, PYTHONPATH incl. packages):
     bash ../rrtmgp_faithfulness/build.sh <rte-rrtmgp> <build dir> .
     python make_fixture.py <build dir>/oracle_driver <rte-rrtmgp> <rrtmgp-data> <out.npz>
 """
