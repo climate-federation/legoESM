@@ -68,8 +68,8 @@ def cmp(name, ours, ref, floor=0.0):
 def compare_tables(data):
     pairs = [("rrtmgp-gas-lw-g128.nc", "rrtmgp-gas-lw-g128.nc"),
              ("rrtmgp-gas-sw-g112.nc", "rrtmgp-gas-sw-g112.nc"),
-             ("cloudysky_lw.nc", "rrtmgp-clouds-lw-bnd.nc"),
-             ("cloudysky_sw.nc", "rrtmgp-clouds-sw-bnd.nc")]
+             ("rrtmgp-clouds-lw-bnd.nc", "rrtmgp-clouds-lw-bnd.nc"),
+             ("rrtmgp-clouds-sw-bnd.nc", "rrtmgp-clouds-sw-bnd.nc")]
     for mine, theirs in pairs:
         a, b = netCDF4.Dataset(OURS_DATA / mine), netCDF4.Dataset(Path(data) / theirs)
         va, vb = set(a.variables), set(b.variables)
@@ -85,15 +85,6 @@ def compare_tables(data):
                     np.ma.filled(y.astype(float), 0.0), 1e-300)
             elif not np.array_equal(np.ma.filled(x), np.ma.filled(y)):
                 print(f"  {v}: non-numeric content differs")
-        for v in sorted(va - vb):  # old cloud file: lut_* / radice_* are upstream's * / diamice_*
-            new = v.removeprefix("lut_").replace("radice_", "diamice_")
-            if new != v and new in vb:
-                x, y = a[v][:], b[new][:]
-                if x.shape != y.shape:
-                    print(f"  {v} vs {new}: SHAPE {x.shape} vs {y.shape}")
-                else:
-                    cmp(f"table/{mine}/{v}->{new}", np.ma.filled(x.astype(float), 0.0),
-                        np.ma.filled(y.astype(float), 0.0), 1e-300)
         a.close(); b.close()
 
 
@@ -137,20 +128,8 @@ def add_clouds(c):
                 cloud_r_eff_ice=np.broadcast_to((20.0 + 10.0 * (i % 6)) * 1e-6, pf.shape).copy())
 
 
-def convert_cloud_table(src, dst):
-    """Upstream cloud table under the variable names our reader expects."""
-    rename = {v: "lut_" + v for v in ("extliq", "ssaliq", "asyliq", "extice", "ssaice", "asyice")}
-    rename.update(diamice_lwr="radice_lwr", diamice_upr="radice_upr")
-    with netCDF4.Dataset(src) as a, netCDF4.Dataset(dst, "w") as b:
-        for n, d in a.dimensions.items():
-            b.createDimension(n, len(d))
-        for n, v in a.variables.items():
-            b.createVariable(rename.get(n, n), v.dtype, v.dimensions)[:] = v[:]
-    return str(dst)
-
-
-def run_ours(c, ghg, cloud, overhead, fp32, s0, capture=None, cloud_files=("", "")):
-    cfg = RRTMGPConfig(lw_cloud_file=cloud_files[0], sw_cloud_file=cloud_files[1], S_0=s0, include_clouds=cloud is not None, overhead_layer=overhead,
+def run_ours(c, ghg, cloud, overhead, fp32, s0, capture=None):
+    cfg = RRTMGPConfig(S_0=s0, include_clouds=cloud is not None, overhead_layer=overhead,
                        compute_fp32=fp32, gpoint_batch_size=0, gpoint_checkpoint=False,
                        use_optimal_angle=False, use_scan=True, co2_ppmv=ghg["co2"] * 1e6,
                        ch4_ppbv=ghg["ch4"] * 1e9, n2o_ppbv=ghg["n2o"] * 1e9)
@@ -318,10 +297,6 @@ def audit_case(name, args, p_top, overhead, data):
             ("cloud", "f64"): run_ours(c, ghg, cloud, overhead, False, s0, cap_c),
             ("clear", "f32"): run_ours(c, ghg, None, overhead, True, s0),
             ("cloud", "f32"): run_ours(c, ghg, cloud, overhead, True, s0)}
-    up = tuple(convert_cloud_table(Path(args.data) / f"rrtmgp-clouds-{b}-bnd.nc",
-                                   Path(args.out) / f"converted_{b}.nc") for b in ("lw", "sw"))
-    ours[("cloud_upstream_tables", "f64")] = run_ours(c, ghg, cloud, overhead, False, s0, cloud_files=up)
-    ours[("cloud_upstream_tables", "f32")] = run_ours(c, ghg, cloud, overhead, True, s0, cloud_files=up)
     opt = cap["optics"]
     interior = lambda a: np.asarray(a, np.float64)[:, 0, 1:-1]  # noqa: E731
     play, tlay = interior(cap["p"]), interior(cap["T"])
@@ -349,8 +324,6 @@ def audit_case(name, args, p_top, overhead, data):
     solar = np.asarray(opt.solar_fraction_by_gpt, np.float64)
     toa = np.outer(np.ones(ncol), s0 * solar)
     mu0, emis, alb = c["mu0"], c["emis"], c["alb"]
-    # Cloud files always upstream's: the current reader rejects our older format;
-    # the tables stage compares the two contents.
     gas_dir = OURS_DATA if args.tables == "ours" else Path(args.data)
     lwg, swg = gas_dir / "rrtmgp-gas-lw-g128.nc", gas_dir / "rrtmgp-gas-sw-g112.nc"
     lwc, swc = Path(args.data) / "rrtmgp-clouds-lw-bnd.nc", Path(args.data) / "rrtmgp-clouds-sw-bnd.nc"
@@ -426,12 +399,9 @@ def audit_case(name, args, p_top, overhead, data):
     hr_ph = plev
     sun = mu0 >= 0.01
     print(f"columns with mu0 >= 0.01: {sun.sum()} of {ncol}")
-    for sky, ref_lw, ref_sw in (("clear", flw["2str"], fsw["ours_toa"]), ("cloud", flw_c, fsw_c),
-                                ("cloud_upstream_tables", flw_c, fsw_c)):
+    for sky, ref_lw, ref_sw in (("clear", flw["2str"], fsw["ours_toa"]), ("cloud", flw_c, fsw_c)):
         hr_lw, hr_sw = heating(*ref_lw, hr_ph), heating(ref_sw[0], ref_sw[1], hr_ph)
         for nm in ("f64", "f32"):
-            if (sky, nm) not in ours:
-                continue
             o = ours[(sky, nm)]
             cmp(f"e2e/{name}/{sky}/{nm}/sw_up/mu>=0.01", np.asarray(o.sw_flux_up)[sun], toa_first(ref_sw[0])[sun], 1e-6)
             cmp(f"e2e/{name}/{sky}/{nm}/sw_dn/mu>=0.01", np.asarray(o.sw_flux_down)[sun], toa_first(ref_sw[1])[sun], 1e-6)

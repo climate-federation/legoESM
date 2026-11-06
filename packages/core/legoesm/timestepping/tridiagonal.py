@@ -25,6 +25,8 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.source_rounding import nemo_source_round
+
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
 
@@ -139,20 +141,28 @@ def _thomas_solve_impl(
     c = jnp.asarray(c, work_dtype)
     d = jnp.asarray(d, work_dtype)
 
-    if operation_order == "nemo_unnormalised":
+    if operation_order in ("nemo_unnormalised", "nemo_unnormalised_unrounded"):
         diagonal = b
         rhs = d
+        # Materialize every intermediate of NEMO's statements so XLA cannot
+        # contract or reassociate them: `b - (a * c) / prev` forward
+        # (`icethd_zdf_bl99.f90:537-538`), `(r - c * x) / diag` backward (`:548-567`).
+        round_prod = (
+            nemo_source_round
+            if operation_order == "nemo_unnormalised"
+            else (lambda x: x)
+        )
 
         def unnormalised_forward(k, carry):
             diagonal_k, rhs_k = carry
             previous = diagonal_k[..., k - 1]
             diagonal_k = diagonal_k.at[..., k].set(
                 diagonal_k[..., k]
-                - (a[..., k] * c[..., k - 1]) / previous
+                - round_prod(round_prod(a[..., k] * c[..., k - 1]) / previous)
             )
             rhs_k = rhs_k.at[..., k].set(
                 rhs_k[..., k]
-                - (a[..., k] * rhs_k[..., k - 1]) / previous
+                - round_prod(round_prod(a[..., k] * rhs_k[..., k - 1]) / previous)
             )
             return diagonal_k, rhs_k
 
@@ -163,11 +173,10 @@ def _thomas_solve_impl(
         solution = solution.at[..., -1].set(
             rhs[..., -1] / diagonal[..., -1]
         )
-
         def unnormalised_backward(reverse_k, current):
             k = n - 2 - reverse_k
             return current.at[..., k].set(
-                (rhs[..., k] - c[..., k] * current[..., k + 1])
+                round_prod(rhs[..., k] - round_prod(c[..., k] * current[..., k + 1]))
                 / diagonal[..., k]
             )
 

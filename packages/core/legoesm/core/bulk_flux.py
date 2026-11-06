@@ -70,12 +70,14 @@ from __future__ import annotations
 import functools
 import math
 import numbers
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round as sr
 from legoesm.core.smooth import positive_part_c1, smoothstep_quintic
 
 # Physical constants
@@ -2329,6 +2331,84 @@ def compute_sam_oceflx_fluxes(
     fac = (rh / karman) * (alz + al2 - psixh + psix2)
     tref = theta_atm - delt * fac - 0.01 * z_diag  # coeff-ok: CESM 0.01 K/m theta->T
     return (tau_x, tau_y, shflx, lhflx, u_star, tref) + _wind_out
+
+
+@jax.custom_jvp
+def sqrt_zero_subgradient(value):
+    """Exact ``SQRT`` primal; finite zero subgradient at 0 (gradient-only guard)."""
+    return jnp.sqrt(value)
+
+
+@sqrt_zero_subgradient.defjvp
+def _sqrt_zero_subgradient_jvp(primals, tangents):
+    (value,), (value_dot,) = primals, tangents
+    root = jnp.sqrt(value)
+    safe = jnp.where(value > 0.0, root, 1.0)
+    return root, jnp.where(value > 0.0, 0.5 * value_dot / safe, 0.0)
+
+
+class NemoSI3BlkIce1(NamedTuple):
+    wndm_ice: jax.Array
+    zsipt: jax.Array
+    Cd_ice: jax.Array
+    Ch_ice: jax.Array
+    Ce_ice: jax.Array
+    theta_zu_i: jax.Array
+    q_zu_i: jax.Array
+    utau_ice: jax.Array   # putaui, interior (before icesbc's lbc_lnk)
+    vtau_ice: jax.Array
+
+
+def nemo_si3_blk_ice_1_cst(pwndi, pwndj, ptair, pqair, pslp, ptsui, rhoa, rn_Cd_ia, rn_Ch_ia, rn_Ce_ia):
+    """``blk_ice_1``, constant-coefficient arm with ``ln_blk`` (``sbcblk.f90:1081-1098,1136-1139``).
+
+    NEMO source order with source-order barriers.  ``zsipt`` (``:1086``) is
+    returned although this arm never reads it (only the AN05/LU12/LG15 arms,
+    ``:1102,1107,1112``, do).  Stress is NEMO's air-to-ice sign.
+    """
+    from legoesm.thermo import nemo_theta_exner
+
+    wndm = sqrt_zero_subgradient(sr(sr(pwndi * pwndi) + sr(pwndj * pwndj)))   # :1082
+    zsipt = nemo_theta_exner(ptsui, pslp)                                       # :1086
+    cd = jnp.full_like(wndm, rn_Cd_ia)                                          # :1093
+    ch = jnp.full_like(wndm, rn_Ch_ia)                                          # :1094
+    ce = jnp.full_like(wndm, rn_Ce_ia)                                          # :1095
+    zztmp = sr(sr(rhoa * cd) * wndm)                                            # :1137
+    return NemoSI3BlkIce1(
+        wndm_ice=wndm, zsipt=zsipt, Cd_ice=cd, Ch_ice=ch, Ce_ice=ce,
+        theta_zu_i=jnp.asarray(ptair), q_zu_i=jnp.asarray(pqair),              # :1097-1098
+        utau_ice=sr(zztmp * pwndi), vtau_ice=sr(zztmp * pwndj),                 # :1138-1139
+    )
+
+
+class NemoSI3IceTurbulent(NamedTuple):
+    zsq: jax.Array
+    zsipt: jax.Array
+    dq_sat: jax.Array
+    z_qsb: jax.Array
+    z_dqsb: jax.Array
+    qla_ice: jax.Array
+    dqla_ice: jax.Array
+
+
+def nemo_si3_ice_turbulent(ptsu, pslp, rhoa, wndm_ice, Ch_ice, Ce_ice, theta_zu_i, q_zu_i):
+    """``blk_ice_2`` saturation and turbulent statements (``sbcblk.f90:1224-1225,1246-1256``).
+
+    Elementwise; a category axis is carried by broadcasting the caller's arrays.
+    """
+    from legoesm.thermo import nemo_si3_dq_sat_dt_ice, nemo_si3_q_sat_ice, nemo_theta_exner
+
+    zsq = nemo_si3_q_sat_ice(ptsu, pslp)                                        # :1224
+    zsipt = nemo_theta_exner(ptsu, pslp)                                        # :1225
+    zzblk = sr(rhoa * wndm_ice)                                                 # :1246
+    zztmp1 = sr(sr(zzblk * constants.c_p_air_ice_nemo) * Ch_ice)                # :1249
+    z_qsb = sr(zztmp1 * sr(zsipt - theta_zu_i))                                 # :1250
+    z_dqsb = zztmp1                                                             # :1251
+    zztmp1 = sr(sr(zzblk * constants.L_sub_nemo) * Ce_ice)                      # :1254
+    qla = sr(zztmp1 * sr(zsq - q_zu_i))                                         # :1255
+    dq_sat = nemo_si3_dq_sat_dt_ice(ptsu, pslp)
+    dqla = sr(zztmp1 * dq_sat)                                                  # :1256
+    return NemoSI3IceTurbulent(zsq=zsq, zsipt=zsipt, dq_sat=dq_sat, z_qsb=z_qsb, z_dqsb=z_dqsb, qla_ice=qla, dqla_ice=dqla)
 
 
 def nemo_si3_constant_fluxes(

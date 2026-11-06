@@ -12,15 +12,22 @@ import pytest
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ice.bitz_lipscomb import (
     SI3SurfaceForcing,
-    _si3_zdf_bl99_step,
+    # _si3_zdf_bl99_step moved to phase2 gate (DECISION 186)
     ice_enthalpy_from_temperature,
     ice_temperature_from_enthalpy,
     option2_salinity_profile,
     snow_enthalpy_from_temperature,
     snow_temperature_from_enthalpy,
 )
-from legoesm.ice.c1d_omip_l3 import ORACLE_V1_ROOT, build_c1d_omip_l3_card
-from legoesm.ice.config import SI3ThermoConfig, validate_si3_thermo_config
+from legoesm.ice.c1d_omip_l3 import (
+    ORACLE_V1_ROOT,
+    build_c1d_omip_l3_si3_lane_card,
+)
+from legoesm.ice.config import (
+    SI3LateralMeltConfig,
+    SI3ThermoConfig,
+    validate_si3_thermo_config,
+)
 from legoesm.ice.constants_config import (
     NEMO_SI3_CONSTANTS_CONFIG,
     IceConstantsConfig,
@@ -28,7 +35,7 @@ from legoesm.ice.constants_config import (
 from legoesm.ice.scm import IceColumnModel
 from legoesm.ice.snow import snow_ice_flooding
 from legoesm.timestepping.tridiagonal import thomas_solve
-
+import sys; sys.path.insert(0, "scripts/validate/ocean_fidelity/testcases"); from nemo_si3thd_phase2_gate import _si3_zdf_bl99_step  # noqa: E402,E501,E702
 set_policy(PrecisionPolicy.fp64())
 
 
@@ -119,7 +126,7 @@ def test_shared_flooding_is_bit_exact_with_former_inline_path() -> None:
 
 
 def test_selector_rejects_frankenstein_identity() -> None:
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V1_ROOT)
     validate_si3_thermo_config(card.config)
     with pytest.raises(ValueError, match="ORCA1-resolved"):
         validate_si3_thermo_config(
@@ -128,6 +135,15 @@ def test_selector_rejects_frankenstein_identity() -> None:
     with pytest.raises(ValueError, match="mixing canonical"):
         validate_si3_thermo_config(
             card.config._replace(ice_constants=IceConstantsConfig())
+        )
+    with pytest.raises(ValueError, match="ORCA1-resolved"):
+        validate_si3_thermo_config(
+            card.config._replace(
+                si3=SI3ThermoConfig(
+                    lateral_melt=True,
+                    namthd_da=SI3LateralMeltConfig(rn_beta=1.0, rn_dmin=8.0),
+                )
+            )
         )
 
 
@@ -181,7 +197,7 @@ def test_shared_nemo_thomas_mode_is_bit_exact_with_written_order() -> None:
 
 
 def test_existing_column_driver_dispatches_selected_si3() -> None:
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V1_ROOT)
     model = IceColumnModel.create(
         forcing=_forcing(), config=card.config, ncol=1, dt=card.dt_seconds,
         h_ice_init=2.0, h_snow_init=0.2, concentration_init=0.9,
@@ -210,9 +226,9 @@ def test_gate_owns_qns_time_level_and_reports_current_first_divergence(gate_modu
     assert result["status"] == "DEBT"
     assert result["backend"] == "cpu"
     assert result["dtypes"] == ["float64"]
-    assert result["sweep_steps_examined"] == 5
+    assert result["sweep_steps_examined"] == 19
     assert result["preregistered_hypothesis"] == "SUPERSEDED_BY_OWNER_FIX"
-    assert result["first_divergence"]["name"] == "kt5.POST_DH.e_s"
+    assert result["first_divergence"]["name"] == "kt19.POST_DH.e_s"
     assert result["first_divergence"]["normalized_max_abs"] > 1.0e-15
     assert result["owner_arm"]["variable"] == "qns_ice_entry"
     assert result["owner_arm"]["verdict"] == "CONFIRMED"
@@ -229,7 +245,7 @@ def test_gate_owns_qns_time_level_and_reports_current_first_divergence(gate_modu
 def test_gate_binary_cursor_advances_to_second_step(gate_module) -> None:
     """The kt=1 stop does not hide a broken later-step stream cursor."""
 
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V1_ROOT)
     with (
         (card.oracle_root / "oracle_si3_thd_frames.bin").open("rb") as thd,
         (card.oracle_root / "oracle_si3_exchange_frames.bin").open("rb") as xchg,
@@ -244,7 +260,7 @@ def test_gate_binary_cursor_advances_to_second_step(gate_module) -> None:
 def test_zdf_operand_reader_is_complete_and_fails_closed(
     gate_module, tmp_path: Path
 ) -> None:
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V1_ROOT)
     path = card.oracle_root / "oracle_si3_zdf_operands.bin"
     frames = gate_module._read_zdf_operands(path)
     assert [(frame["frame"], frame["iteration"]) for frame in frames] == (

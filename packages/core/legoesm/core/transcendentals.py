@@ -200,10 +200,20 @@ def _libm_pow(left: jax.Array, right: jax.Array) -> jax.Array:
 
 @_libm_pow.defjvp
 def _libm_pow_jvp(primals, tangents):
+    # True slope at base 0 is infinite for exponents < 1; 0 is a deliberate stand-in.
     left, right = primals
     left_dot, right_dot = tangents
     result = _libm_pow(left, right)
-    tangent = result * (right_dot * _libm_log(left) + right * left_dot / left)
+    int_dtype = jnp.int64 if left.dtype == jnp.float64 else jnp.int32
+    positive = jax.lax.bitcast_convert_type(left, int_dtype) > 0
+    safe_left = jnp.where(positive, left, jnp.ones_like(left))
+    safe_result = jnp.where(positive, result, jnp.zeros_like(result))
+    left_dot = jnp.where(positive, left_dot, jnp.zeros_like(left_dot))
+    tangent = jnp.where(
+        positive,
+        safe_result * (right_dot * _libm_log(safe_left) + right * left_dot / safe_left),
+        jnp.zeros_like(result),
+    )
     return result, tangent
 
 

@@ -892,7 +892,8 @@ def _ridging_rain_step(rain, conc_scale=1.0):
         data=st.concentration.data * conc_scale))
     cfg = SeaIceConfig(dynamics="free_drift", transport="none", n_categories=5,
                        itd_remap="lipscomb2001", brine=BrineConfig(enabled=True),
-                       ridging=RidgingConfig(enabled=True, closing_scheme="convergence"))
+                       ridging=RidgingConfig(enabled=True, closing_scheme="convergence"),
+                       core2_precipitation_closure=True)
     atm = _min_forcing(shape)._replace(
         precip_total=jnp.full(shape, rain), precip_snow=jnp.zeros(shape),
         has_precipitation=jnp.asarray(1.0))

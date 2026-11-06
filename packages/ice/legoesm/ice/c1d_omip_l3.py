@@ -5,14 +5,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
+from legoesm.core.nemo_namelist import parse_namelist
 from legoesm.ice.config import (
+    SI3_HARD_SWITCHES,
+    SI3ThermoConfig,
     SeaIceConfig,
     validate_si3_bulk_config,
+    validate_si3_lane_thermo_config,
     validate_si3_thermo_config,
 )
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 
 from legoesm import constants
+
+C1D_OMIP_L3_NAMELIST_ICE_CFG = (
+    Path(__file__).resolve().parents[4]
+    / "scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_ice_cfg"
+)
 
 FORCING_SHA256 = "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
 THERMO_STREAM_SHA256 = "7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b"
@@ -99,6 +108,33 @@ def build_c1d_omip_l3_card(
     )
 
 
+def build_c1d_omip_l3_si3_lane_card(
+    *,
+    forcing_path: Path = Path(
+        "/data/abyssal/dbalwada/nemo-inputs/C1D_v5.0.0/C1D_v5.0.0/"
+        "ERA5_NorthGreenland_surface_84N_-36E_1h_y2018.nc"
+    ),
+    oracle_root: Path = ORACLE_V2_ROOT,
+    namelist_ice_path: Path = C1D_OMIP_L3_NAMELIST_ICE_CFG,
+) -> C1DOMIPL3Card:
+    """Return the NEMO-literal lane card resolved from ``namelist_ice_cfg``."""
+
+    nml = parse_namelist(namelist_ice_path, "ice")
+    if ("ice", "namthd_sal", "nn_icesal") not in nml:
+        raise ValueError(f"missing namthd_sal.nn_icesal in {namelist_ice_path}")
+    nn_icesal = int(nml[("ice", "namthd_sal", "nn_icesal")][0])
+    card = build_c1d_omip_l3_card(
+        forcing_path=forcing_path,
+        oracle_root=oracle_root,
+    )
+    config = card.config._replace(
+        si3=SI3ThermoConfig(salinity_scheme=nn_icesal),
+        si3_switches=SI3_HARD_SWITCHES,
+    )
+    config = validate_si3_lane_thermo_config(config)
+    return card._replace(config=config)
+
+
 __all__ = (
     "C1DOMIPL3Card",
     "FORCING_SHA256",
@@ -115,4 +151,5 @@ __all__ = (
     "ZDF_INPUT_STREAM_SHA256",
     "ZDF_OPERAND_STREAM_SHA256",
     "build_c1d_omip_l3_card",
+    "build_c1d_omip_l3_si3_lane_card",
 )

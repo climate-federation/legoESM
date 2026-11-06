@@ -212,16 +212,24 @@ Against the former per-g-point lookup, 4096 columns, 32 layers, float32, clouds,
 to 1.70 GB, compile 10 to 42 s.  CPU node, 2048 columns, one g-point at a time: 4254
 to 1227 ms.  Stage by stage the two agreed to 1e-12 relative (float64) before the old
 path was removed.
+Whole model, production deck, MPAS res 6 L32, 4 A100s, 2 days, one pair of runs: steady
+segments 358 and 368 s before, 356 and 362 s after, about 1%, because radiation runs
+hourly and is a small share of the step.  Start-up grew about 110 s, so a 2-day run took
+1117 s against 997 s.  The gain is in radiation-heavy uses, not production GPU throughput.
 
 The ecRad IFS lane takes these gas optics too (user 2026-11-06; RRTMG deleted):
 `ecrad_ifs/gas_optics.py`, tables g128/g112.  ecRad's solvers, cloud optics and McICA
 stay and keep their 49r1 Fortran tests; the lane no longer matches 49r1 end to end.
 Cloud optics stay on RRTMG bands: LW index to index, SW band b to (b - 1) mod 14.
-Clear-sky gap to the RRTMGP solve, not attributed between solver, gas preparation and
-level temperature: LW 3.6 up, 4.4 down near the surface, 0.6 at TOA; SW 0.71 up, 0.85
-down (W/m2, worst of 20 columns; `tests/atmosphere/test_ecrad_ifs_rrtmgp_gas.py`).
+Clear-sky gap to the RRTMGP solve, worst of 20 columns: LW 3.6 up, 4.4 down near the
+surface, 0.6 at TOA; SW 0.71 up, 0.85 down (W/m2).  On these columns it is predominantly
+inputs: co and no2, which the lane never carries, with halocarbons this test leaves zero
+(not separated); then CAM's level temperature against IFS's.  With those and gravity
+matched: 0.02 LW, 0.002 SW.  ecRad's solvers against RTE on the same gas optics: 5e-4 LW,
+4e-7 SW (`scripts/validate/oracle/rrtmgp_faithfulness/ifs_gap_attribution.py`).
 
-OPEN: cloud tables are v1.8.2 (pinned by `test_rrtmgp_cloud_optics_oracle.py`);
-against the latest tables they cost up to 2.4 W/m2 SW (0.47 rms) and 1.5 W/m2 LW.
-LW solver is two-stream; upstream's default is no-scattering one-angle (OLR 0.46,
+Cloud tables are upstream's `rrtmgp-clouds-{lw,sw}-bnd.nc`, byte-identical to
+rrtmgp-data v1.9.2 and pinned by `test_rrtmgp_cloud_optics_oracle.py`.
+
+OPEN: LW solver is two-stream; upstream's default is no-scattering one-angle (OLR 0.46,
 surface down 4.5 W/m2, heating 1.07 K/day rms).

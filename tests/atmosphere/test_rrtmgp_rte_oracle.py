@@ -6,8 +6,7 @@ unpatched rte-rrtmgp d4b3c51 (generator and provenance in its ``meta``).  The
 two-stream LW solver is called one g-point at a time because
 mo_rte_solver_kernels.F90:422 drops the g-point index of lev_source.
 
-Cloud optics are out of scope here: the shipped cloud tables are v1.8.2 and are
-pinned by test_rrtmgp_cloud_optics_oracle.py.
+Cloud optics are out of scope here: test_rrtmgp_cloud_optics_oracle.py pins them.
 
 KNOWN DIFFERENCE, LW only: RTE zeroes layer sources for tau <= 1e-8 and its
 cancelling form loses up to ~1e-2 W/m2 per layer near conservative thin layers;
