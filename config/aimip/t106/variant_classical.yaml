@@ -15,7 +15,7 @@ aimip_variant: "classical"
 # Scheme selection — run_aimip reads these via the ``aimip_*`` keys
 # (cfg.get("aimip_convection"), ...). Bare keys (convection:, turbulence:, ...)
 # are NOT consumed by run_aimip and were silently ignored.
-aimip_convection: "tiedtke"
+aimip_convection: "zhang_mcfarlane"
 aimip_turbulence: "louis"
 aimip_gwd: "mcfarlane"
 aimip_cloud: "xu_randall"

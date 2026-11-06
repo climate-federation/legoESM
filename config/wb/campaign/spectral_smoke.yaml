@@ -96,7 +96,7 @@ sfno:
 # WB-vs-AIMIP number differs by those two knobs plus the campaign itself
 # (forcing, ICs, grid). State that when comparing; do not call it "same run".
 classical:
-  convection: "tiedtke"
+  convection: "zhang_mcfarlane"
   turbulence: "louis"
   cloud: "xu_randall"
   microphysics: "sundqvist"

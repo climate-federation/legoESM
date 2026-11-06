@@ -107,7 +107,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--label", required=True)
     parser.add_argument("--gwd-scheme",          default="mcfarlane")
-    parser.add_argument("--convection-scheme",   default="tiedtke")
+    parser.add_argument("--convection-scheme",   default=None,
+                        help="default zhang_mcfarlane, logged (user 2026-11-06)")
     parser.add_argument("--turbulence-scheme",   default="louis")
     parser.add_argument("--surface-bulk-scheme", default="constant")
     parser.add_argument("--microphysics-scheme", default="none")
@@ -155,8 +156,9 @@ def main():
     grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top)
 
+    from legoesm.training.aimip_params import resolve_convection
     schemes = {
-        "convection_scheme":   args.convection_scheme,
+        "convection_scheme":   resolve_convection(vars(args), "convection_scheme"),
         "turbulence_scheme":   args.turbulence_scheme,
         "surface_bulk_scheme": args.surface_bulk_scheme,
         "gwd_scheme":          args.gwd_scheme,

@@ -266,7 +266,7 @@ sfno:
   sfno_gradient_checkpoint: true
   land_inputs: true
 classical:
-  convection: tiedtke
+  convection: zhang_mcfarlane
   turbulence: louis
   cloud: xu_randall
   microphysics: sundqvist

@@ -8,6 +8,10 @@
 #     --training-core cubed_sphere --mode neural_gcm --out <dir>
 grid: "cubed_sphere"
 cube_n: 24
+# Convection of the grid-point run (it sets the carry's convective state in
+# every mode).  Named, not defaulted (user 2026-11-06): the cube lane has no
+# default; "sbm" is what the old silent default ran.
+convection: "sbm"
 nlev: 8
 dt: 300.0
 radiation: "rrtmgp"

@@ -24,6 +24,7 @@ _spec.loader.exec_module(_mod)
 
 _SMOKE_YML = {
     "n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0,
+    "convection": "sbm",
     "radiation": "gray", "era5_zarr": "unused", "train_years": [2015],
     "loss": {"multi_step_hours": [6, 12]},
 }

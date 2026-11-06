@@ -81,7 +81,7 @@ def test_none_reaches_schemes_spectral_physics_refuses(turb, monkeypatch):
             AIMIPClassicalParams.from_defaults(),
             create_gaussian_grid(11, dealiasing="quadratic"), dt=1800.0,
             radiation="gray", turbulence_scheme=turb,
-            surface_bulk_scheme="none")
+            convection_scheme="zhang_mcfarlane", surface_bulk_scheme="none")
     surface = getattr(seen["cfg"].turbulence, turb).surface
     for name in _ZERO_PRESCRIBED:
         assert getattr(surface, name) == 0.0, name

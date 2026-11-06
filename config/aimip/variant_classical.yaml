@@ -1,6 +1,8 @@
 # AIMIP variant: classical physics.
 #
-# Tunes the scheme parameters of Tiedtke (convection), Louis
+# Tunes the scheme parameters of Zhang-McFarlane (convection; was Tiedtke
+# until 2026-11-06: main's WRF Tiedtke port is refused on the spectral lane,
+# user decision 2026-11-06), Louis
 # (turbulence), surface bulk fluxes, McFarlane (gravity wave drag),
 # and Xu-Randall (cloud fraction diagnostic) via end-to-end
 # differentiation through the dycore + physics rollout.
@@ -15,7 +17,7 @@ aimip_variant: "classical"
 # Scheme selection — run_aimip reads these via the ``aimip_*`` keys
 # (cfg.get("aimip_convection"), ...). Bare keys (convection:, turbulence:, ...)
 # are NOT consumed by run_aimip and were silently ignored.
-aimip_convection: "tiedtke"
+aimip_convection: "zhang_mcfarlane"
 aimip_turbulence: "louis"
 aimip_gwd: "mcfarlane"
 aimip_cloud: "xu_randall"

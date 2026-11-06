@@ -217,6 +217,10 @@ def test_the_wb_campaign_config_names_every_family():
         for name, param in inspect.signature(
             make_aimip_classical_spectral_physics).parameters.items()
     }
+    # Convection has no factory default: AIMIP configs resolve it with
+    # resolve_convection (default Zhang-McFarlane, recorded).
+    from legoesm.training.aimip_params import DEFAULT_CONVECTION
+    defaults["convection_scheme"] = DEFAULT_CONVECTION
     for path in ("spectral_t63.yaml", "spectral_t106.yaml", "spectral_smoke.yaml"):
         cfg = _yaml.safe_load(
             (_REPO / "config" / "wb" / "campaign" / path).read_text())

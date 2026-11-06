@@ -1721,6 +1721,15 @@ def _main(argv=None):
     optimizer = create_optimizer(_train_cfg)
     _fingerprint = _run_fingerprint(cfg, yml, warmup, roll_steps,
                                     len(local) * nproc, nproc)
+    # The convection scheme that RAN, as resolved (a deck that names none
+    # resolves to the recorded default; user decision 2026-11-06).  The
+    # lat-lon lane reads the top-level key in every mode; the spectral lane
+    # reads classical.convection in physics mode only.
+    _resolved_schemes = {"convection": (
+        yml.get("convection")
+        if cfg.training_core in ("latlon", "cubed_sphere", "mpas")
+        else (yml.get("classical") or {}).get("convection")
+        if cfg.mode == "physics" else None)}
     opt_state = optimizer.init(arr)
     _opt_err = None
     if _partial_opt is not None:
@@ -1936,7 +1945,8 @@ def _main(argv=None):
             _atomic_write(fpath, lambda t: pathlib.Path(t).write_text(
                 json.dumps({"schema": _MANIFEST_SCHEMA,
                             "frozen": frozen_names,
-                            "fingerprint": _fingerprint})))
+                            "fingerprint": _fingerprint,
+                            "resolved_schemes": _resolved_schemes})))
 
     _every = int(cfg.checkpoint_every_steps)
 

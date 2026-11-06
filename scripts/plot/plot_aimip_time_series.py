@@ -156,6 +156,7 @@ def _load_sfno(ckpt_path: Path, spec_cfg, grid, variant="sfno_physics"):
 def _physics_fn_for(variant: str, model, grid, spec_cfg, base_cfg):
     from legoesm.training.aimip_params import (
         make_aimip_classical_spectral_physics,
+        resolve_convection,
     )
     from legoesm.training.neural_gcm_spectral import (
         make_column_mlp_spectral_physics,
@@ -165,6 +166,7 @@ def _physics_fn_for(variant: str, model, grid, spec_cfg, base_cfg):
     if variant == "classical":
         return make_aimip_classical_spectral_physics(
             model, grid, spec_cfg.dt,
+            convection_scheme=resolve_convection(base_cfg, "aimip_convection"),
             radiation=str(base_cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=int(
                 base_cfg.get("aimip_rad_update_interval", 6),

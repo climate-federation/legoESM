@@ -84,6 +84,8 @@ def _yml(n_max=10, nlev=8, **spectral_over):
         "dt": 300.0,               # lat-lon core dt; spectral core ignores it
         "spectral": spec,
         "loss": {},
+        # Physics mode names its convection scheme: there is no default.
+        "classical": {"convection": "zhang_mcfarlane"},
     }
 
 
@@ -584,3 +586,62 @@ def test_segment_remat_keeps_forecast_and_gradient(mode):
     for a, b in zip(outs[True][1], outs[False][1]):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-30)
     assert max(float(jnp.max(jnp.abs(x))) for x in outs[False][1]) > 0.0
+
+
+
+def test_physics_mode_without_a_named_convection_resolves_to_zm_and_records_it(
+        caplog):
+    """A physics config that names no convection scheme runs Zhang-McFarlane
+    (user decision 2026-11-06), logged and written back into the run's own
+    YAML, which the run's fingerprint and manifest are built from."""
+    import logging
+
+    from legoesm.training.aimip_params import resolve_convection
+    from legoesm.training.scale_build import build_mode_components
+
+    yml = {k: v for k, v in _yml().items() if k != "classical"}
+    with caplog.at_level(logging.WARNING):
+        build_mode_components(_cfg("physics"), yml)
+    assert yml["classical"]["convection"] == "zhang_mcfarlane"
+    assert "resolving to the default 'zhang_mcfarlane'" in caplog.text
+    for cfg in ({}, {"convection": ""}, {"convection": None}):
+        assert resolve_convection(cfg, "convection") == "zhang_mcfarlane"
+        assert cfg["convection"] == "zhang_mcfarlane"
+    named = {"convection": "bechtold"}
+    assert resolve_convection(named, "convection") == "bechtold"
+    assert named == {"convection": "bechtold"}
+
+
+def test_latlon_run_without_a_named_convection_is_refused():
+    """The lat-lon lane has no convection default: Zhang-McFarlane is refused
+    there, and the scheme shapes the carry in every mode."""
+    from legoesm.training.scale_build import build_latlon_config
+
+    yml = {"n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0,
+           "radiation": "rrtmgp"}
+    with pytest.raises(ValueError, match="needs a named convection scheme"):
+        build_latlon_config(_cfg("neural_gcm"), yml)
+    assert build_latlon_config(_cfg("neural_gcm"),
+                               dict(yml, convection="sbm")).convection == "sbm"
+
+
+def test_mpas_run_without_a_named_convection_resolves_to_zm_and_records_it():
+    """MPAS runs Zhang-McFarlane, so the WB MPAS core defaults to it (user
+    decision 2026-11-06), written back into the deck."""
+    from types import SimpleNamespace
+
+    from legoesm.training.scale_build import build_latlon_config
+
+    cfg = SimpleNamespace(mode="neural_gcm", training_core="mpas", smoke=False,
+                          multi_step_hours=(6, 12))
+    yml = {"mpas_level": 2, "nlev": 8, "dt": 300.0, "radiation": "rrtmgp"}
+    assert build_latlon_config(cfg, yml).convection == "zhang_mcfarlane"
+    assert yml["convection"] == "zhang_mcfarlane"
+
+
+def test_explicit_tiedtke_is_still_refused_on_the_spectral_lane():
+    from legoesm.training.scale_build import build_mode_components
+
+    yml = dict(_yml(), classical={"convection": "tiedtke"})
+    with pytest.raises(ValueError, match="spectral lane does not supply"):
+        build_mode_components(_cfg("physics"), yml)

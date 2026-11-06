@@ -36,7 +36,8 @@ def setup():
     state = carry_to_spectral_state(carry, grid)
     non_rad, rad = make_aimip_classical_spectral_physics(
         AIMIPClassicalParams.from_defaults(), grid, dt=DT, radiation="gray",
-        split_rad=True, turbulence_scheme="louis")
+        split_rad=True, turbulence_scheme="louis",
+        convection_scheme="zhang_mcfarlane")
     ncol = len(grid.lat) * len(grid.lon)
     base = {
         "T_sfc": jnp.full((ncol,), 300.0),

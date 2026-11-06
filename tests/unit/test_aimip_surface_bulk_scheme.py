@@ -301,7 +301,7 @@ def test_make_physics_rejects_unknown_bulk_scheme():
     with pytest.raises(ValueError, match="Unknown bulk_scheme"):
         make_aimip_classical_spectral_physics(
             p, grid, dt=1800.0,
-            radiation="gray",
+            radiation="gray", convection_scheme="zhang_mcfarlane",
             surface_bulk_scheme="bogus",
         )
 

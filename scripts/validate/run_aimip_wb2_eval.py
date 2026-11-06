@@ -429,6 +429,7 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
         if cfg.get("aimip_trainable_schemes"):
             from legoesm.training.aimip_params import (
                 AIMIPTrainableBundle,
+                resolve_convection,
                 aimip_inactive_fields,
                 aimip_legacy_owned_fields,
                 aimip_scheme_keys_for,
@@ -442,7 +443,7 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
             _micro = str(cfg.get(
                 "aimip_microphysics", _default_schemes()["microphysics"]))
             _keys = aimip_scheme_keys_for(
-                convection=str(cfg.get("aimip_convection", "tiedtke")),
+                convection=resolve_convection(cfg, "aimip_convection"),
                 turbulence=str(cfg.get("aimip_turbulence", "louis")),
                 gwd=_gwd,
                 microphysics=_micro,
@@ -526,6 +527,7 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
 
     from legoesm.training.aimip_params import (
         make_aimip_classical_spectral_physics,
+        resolve_convection,
     )
     from legoesm.training.campaign_driver import parse_bool_flag
     from legoesm.training.neural_gcm_spectral import (
@@ -540,7 +542,7 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
         from legoesm.training.aimip_spatial import (
             era5_land_fraction, grid_with_land_fraction,
         )
-        conv = str(cfg.get("aimip_convection", "tiedtke"))
+        conv = resolve_convection(cfg, "aimip_convection")
         spatial = parse_bool_flag(cfg.get("aimip_spatial_surface", False))
         land = era5_land_fraction(grid, era5_cfg, ds=ds)
         grid = grid_with_land_fraction(grid, land)

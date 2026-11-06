@@ -247,6 +247,9 @@ def test_run_aimip_classical_trains_resolved_knobs_with_gate_on(monkeypatch):
     cfg = mod._merge(mod._load_yaml(root / "config" / "aimip" / "aimip_era5.yaml"), {
         "n_max": 8, "aimip_variant": "classical", "aimip_spatial_surface": False,
         "aimip_radiation": "gray", "aimip_rad_update_interval": 1})
+    # The base config names no convection scheme: the trainer resolves the
+    # default (Zhang-McFarlane) and records it in the run's own cfg.
+    cfg.pop("aimip_convection", None)
     spec_cfg = mod._build_spectral_config(cfg)
 
     def fake_data(spec_cfg_, grid, sigma, cache_dir, **kw):
@@ -260,12 +263,13 @@ def test_run_aimip_classical_trains_resolved_knobs_with_gate_on(monkeypatch):
     monkeypatch.setattr(ap, "make_aimip_classical_spectral_physics",
                         lambda *a, **k: (lambda *a2, **k2: None))
     mod._train_aimip_classical(spec_cfg, "unused", cfg=cfg)
+    assert cfg["aimip_convection"] == "zhang_mcfarlane"
     assert seen["kw"].get("assert_no_inert_params") is True
     arrays = {k for k, v in seen["params"].raw_values.items()
               if isinstance(v, jax.Array)}
     ds = ap.CLASSICAL_DEFAULT_SCHEMES
     expect = aimip_classical_trainable_names(
-        convection=cfg.get("aimip_convection", ds["convection"]),
+        convection=cfg["aimip_convection"],
         turbulence=cfg.get("aimip_turbulence", ds["turbulence"]),
         gwd=cfg.get("aimip_gwd", ds["gwd"]),
         microphysics=cfg.get("aimip_microphysics", ds["microphysics"]),

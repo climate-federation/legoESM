@@ -12,6 +12,11 @@ n_lat: 256
 n_lon: 512
 nlev: 32
 dt: 300.0                 # CFL-conservative for 0.7 deg; smoke-tune before scale
+# Convection scheme of the lat-lon run (every mode: it sets the carry's
+# convective state even when a network replaces the physics). Named, not
+# defaulted (user 2026-11-06); "sbm" is what the old silent default ran.
+# The classical: block below is read by the SPECTRAL physics lane only.
+convection: "sbm"
 
 # --- ERA5 ---
 era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
@@ -118,7 +123,7 @@ sfno:
 # WB-vs-AIMIP number differs by those two knobs plus the campaign itself
 # (forcing, ICs, grid). State that when comparing; do not call it "same run".
 classical:
-  convection: "tiedtke"
+  convection: "zhang_mcfarlane"
   turbulence: "louis"
   cloud: "xu_randall"
   microphysics: "sundqvist"

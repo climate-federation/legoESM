@@ -874,9 +874,10 @@ CLASSICAL_SCHEME_FAMILIES = (
 # The default scheme per family, in ONE place. Training and evaluation used to
 # carry their own copies of these strings and had already drifted: microphysics
 # defaulted to "none" on the eval side while training used a real scheme, so an
-# omitted key trained one model and scored another (codex).
+# omitted key trained one model and scored another (codex).  Convection is
+# resolved by resolve_convection (default Zhang-McFarlane, logged and written
+# back into the config; user decision 2026-11-06).
 CLASSICAL_DEFAULT_SCHEMES = {
-    "convection": "tiedtke",
     "turbulence": "louis",
     "cloud": "xu_randall",
     "microphysics": "sundqvist",
@@ -885,6 +886,29 @@ CLASSICAL_DEFAULT_SCHEMES = {
 }
 
 _UNFILLED = ("", "none", "off", "false")
+
+
+DEFAULT_CONVECTION = "zhang_mcfarlane"
+
+
+def resolve_convection(cfg, key: str) -> str:
+    """The convection scheme ``cfg[key]`` names; when it names none, the
+    default (Zhang-McFarlane, user decision 2026-11-06) -- never silently: it
+    is logged and WRITTEN BACK into ``cfg``.  A trainer passes the run's own
+    mapping so its resolved config / manifest records the scheme that ran
+    (WB epoch manifest, AIMIP results record); evaluation and plotting
+    scripts only log it."""
+    value = cfg.get(key)
+    if value is None or not str(value).strip():
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "no convection scheme named (%s): resolving to the default %r "
+            "(user decision 2026-11-06); written back into this config",
+            key, DEFAULT_CONVECTION)
+        cfg[key] = DEFAULT_CONVECTION
+        return DEFAULT_CONVECTION
+    return str(value)
 
 # --- Per-rollout TKE seed (training-lane seeding POLICY, not scheme
 # physics; GLM 2026-08-17 review, option c) -------------------------------
@@ -1468,7 +1492,9 @@ def make_aimip_classical_spectral_physics(
     # what you get by omission.
     radiation: str = "rrtmgp",
     rad_update_interval_steps: int = 6,
-    convection_scheme: str = "tiedtke",
+    # No default here: callers resolve it from their config with
+    # resolve_convection, which logs and records a defaulted scheme.
+    convection_scheme: str,
     turbulence_scheme: str = "louis",
     surface_bulk_scheme: str = "constant",
     gwd_scheme: str = "mcfarlane",

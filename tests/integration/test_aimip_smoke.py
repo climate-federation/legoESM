@@ -131,10 +131,13 @@ def test_make_aimip_classical_spectral_physics_callable():
     fn = make_aimip_classical_spectral_physics(params, grid, dt=1800.0,
                                                convection_scheme="sbm")
     assert callable(fn)
-    # The classical default convection (tiedtke) is now the WRF port, which
-    # the spectral lane refuses (no omega / dynamics / lagged PBL inputs).
-    with pytest.raises(ValueError, match="spectral lane does not supply"):
+    # No convection default (user decision 2026-11-06): omitting it is an
+    # error, and the WRF Tiedtke port is refused on the spectral lane.
+    with pytest.raises(TypeError, match="convection_scheme"):
         make_aimip_classical_spectral_physics(params, grid, dt=1800.0)
+    with pytest.raises(ValueError, match="spectral lane does not supply"):
+        make_aimip_classical_spectral_physics(params, grid, dt=1800.0,
+                                              convection_scheme="tiedtke")
 
 
 def test_aimip_classical_params_gradient_through_synthetic_loss():

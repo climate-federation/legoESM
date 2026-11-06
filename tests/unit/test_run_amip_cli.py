@@ -28,9 +28,15 @@ def test_spectral_scheme_fallback():
     base = ["--grid-type", "gaussian", "--discretization", "spectral",
             "--truncation", "21"]
 
-    # Default (prognostic tiedtke/mcfarlane) on spectral -> auto diagnostic.
-    a = _apply_spectral_scheme_fallback(p.parse_args(base), base)
-    assert a.convection == "sbm", "spectral did not fall back to diagnostic convection"
+    # No scheme named on spectral -> zhang_mcfarlane, and it STAYS
+    # zhang_mcfarlane: convection is never swapped (user decision 2026-11-06).
+    # The GWD fallback (mcfarlane -> rayleigh) is unchanged.
+    from scripts.run.run_amip import _resolve_default_convection
+    a = p.parse_args(base)
+    _resolve_default_convection(a)
+    assert a.convection == "zhang_mcfarlane"
+    a = _apply_spectral_scheme_fallback(a, base)
+    assert a.convection == "zhang_mcfarlane", "defaulted convection was swapped"
     assert "mcfarlane" not in str(a.gravity_wave_drag), \
         "spectral did not fall back off prognostic GWD"
     assert a.gravity_wave_drag == "rayleigh"
@@ -41,7 +47,8 @@ def test_spectral_scheme_fallback():
     assert a2.convection == "tiedtke", "explicit --convection was overridden"
 
     # Non-spectral grid: no-op (keeps the prognostic defaults).
-    cs = ["--grid-type", "cubed_sphere", "--discretization", "cdgrid"]
+    cs = ["--grid-type", "cubed_sphere", "--discretization", "cdgrid",
+          "--convection", "tiedtke"]
     a3 = _apply_spectral_scheme_fallback(p.parse_args(cs), cs)
     assert a3.convection == "tiedtke", "non-spectral grid wrongly swapped schemes"
 
@@ -1233,6 +1240,51 @@ def test_convection_cli_choices_match_config_single_source():
         assert scheme in conv.choices
 
 
+def test_convection_default_is_zhang_mcfarlane_on_spectral_and_mpas():
+    """User decision 2026-11-06: no --convection on MPAS / spectral runs
+    Zhang-McFarlane, announced, and the config (hence the manifest) records
+    it."""
+    import argparse
+
+    from scripts.run.run_amip import _resolve_default_convection
+
+    parser = build_arg_parser()
+    argv = ["--dataset", "analytical", "--grid-type", "gaussian",
+            "--discretization", "spectral", "--truncation", "21"]
+    args = parser.parse_args(argv)
+    assert args.convection is None
+    assert build_config_from_args(args).convection == "zhang_mcfarlane"
+    mpas = argparse.Namespace(convection=None, grid_type="voronoi",
+                              discretization="mpas")
+    _resolve_default_convection(mpas)
+    assert mpas.convection == "zhang_mcfarlane"
+
+
+@pytest.mark.parametrize("grid", [("cubed_sphere", "cdgrid"),
+                                  ("latlon", "latlon_cgrid")])
+def test_missing_convection_is_an_error_on_latlon_and_cube(grid, capsys):
+    """Zhang-McFarlane is refused on these lanes, so a missing scheme is an
+    error naming the grid and the valid schemes; a named one passes."""
+    gt, disc = grid
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--grid-type", gt,
+            "--discretization", disc]
+    with pytest.raises(SystemExit, match=f"required on grid_type='{gt}'"):
+        build_config_from_args(parser.parse_args(base))
+    with pytest.raises(SystemExit, match="tiedtke"):
+        build_config_from_args(parser.parse_args(base))
+    cfg = build_config_from_args(parser.parse_args(base + ["--convection", "sbm"]))
+    assert cfg.convection == "sbm"
+
+
+def test_aimip_checkpoint_never_overrides_an_explicit_convection(tmp_path):
+    ckpt = _serialise_aimip_defaults(tmp_path)
+    args = build_arg_parser().parse_args(
+        ["--dataset", "analytical", "--convection", "bechtold",
+         "--aimip-classical-checkpoint", ckpt])
+    assert _apply_aimip_classical_overrides(args).convection == "bechtold"
+
+
 def test_convection_tiedtke_parses_and_flows_to_config():
     parser = build_arg_parser()
     args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"])
@@ -1792,8 +1844,10 @@ def test_aimip_classical_overrides_force_sundqvist_microphysics(tmp_path):
                               "--aimip-classical-checkpoint", ckpt])
     assert args.microphysics == "none"
     out = _apply_aimip_classical_overrides(args)
-    # the full classical scheme set is forced on...
-    assert out.convection == "tiedtke"
+    # convection is NOT forced: a checkpoint never overrides the config's
+    # scheme (user decision 2026-11-06); none was named, so none is set...
+    assert out.convection is None
+    # ...the rest of the classical scheme set is forced on...
     assert out.turbulence == "louis"
     assert out.gravity_wave_drag == "mcfarlane"
     assert out.clouds == "xu_randall"

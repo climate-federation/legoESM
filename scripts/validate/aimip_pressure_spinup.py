@@ -248,6 +248,7 @@ def main(argv=None):
         elif args.variant == "classical":
             from legoesm.training.aimip_params import (
                 make_aimip_classical_spectral_physics,
+                resolve_convection,
             )
             rad_update_interval = int(cfg.get("aimip_rad_update_interval", 1))
             from legoesm.training.aimip_spatial import grid_with_land_fraction
@@ -258,7 +259,7 @@ def main(argv=None):
                 # may still name gray for a cheap diagnostic (Claude review).
                 radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
                 rad_update_interval_steps=rad_update_interval,
-                convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
+                convection_scheme=resolve_convection(cfg, "aimip_convection"),
                 turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
                 surface_bulk_scheme=str(
                     cfg.get("aimip_surface_bulk_scheme", "constant")),

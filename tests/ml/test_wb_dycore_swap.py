@@ -29,6 +29,7 @@ N_STEPS = 2
 _YML = {"n_lat": 32, "n_lon": 64, "cube_n": 12, "mpas_level": 2, "nlev": 8,
         "dt": 300.0,
         "radiation": "gray",
+        "convection": "sbm",
         "spectral": {"n_max": 10, "dt": 1800.0}, "loss": {},
         # as the v9 WB decks: drop network outputs the loss cannot reach
         "neural_gcm": {"prune_unused_weights": True}}

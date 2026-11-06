@@ -265,7 +265,7 @@ sfno:
   sfno_embed_dim: 128
   sfno_n_blocks: 8
 classical:
-  convection: tiedtke
+  convection: zhang_mcfarlane
   turbulence: louis
   cloud: xu_randall
   microphysics: sundqvist

@@ -109,7 +109,8 @@ def test_aimip_classical_factory_pins_kk2000_for_morrison(monkeypatch):
         make_aimip_classical_spectral_physics(
             AIMIPClassicalParams.from_defaults(),
             create_gaussian_grid(11, dealiasing="quadratic"), dt=1800.0,
-            radiation="gray", microphysics_scheme="morrison")
+            radiation="gray", microphysics_scheme="morrison",
+            convection_scheme="zhang_mcfarlane")
     assert seen["law"] == "kk2000"
 
 

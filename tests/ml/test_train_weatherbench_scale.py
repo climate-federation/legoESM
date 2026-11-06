@@ -255,7 +255,8 @@ def test_clubb_liquid_partition_refuses_a_non_clubb_closure():
     with pytest.raises(ValueError, match="liquid hand-off"):
         make_aimip_classical_spectral_physics(
             params, create_gaussian_grid(8), 1800.0, radiation="gray",
-            turbulence_scheme="louis", clubb_liquid_partition=True)
+            turbulence_scheme="louis", clubb_liquid_partition=True,
+            convection_scheme="zhang_mcfarlane")
 
 
 def test_latlon_grid_exposes_2d_lat_for_radiation():
@@ -288,7 +289,8 @@ def test_build_latlon_config_rad_update_steps_is_int():
         pytest.skip(f"scale_build import needs the full stack ({exc})")
 
     cfg = build_scale_config_from_args(["--mode", "physics", "--smoke"])
-    base = {"n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0, "radiation": "gray"}
+    base = {"n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0, "radiation": "gray",
+            "convection": "sbm"}
 
     ec = build_latlon_config(cfg, dict(base))
     assert isinstance(ec.rad_update_steps, int) and ec.rad_update_steps == 1
@@ -324,7 +326,8 @@ def test_build_latlon_config_resolves_the_ice_skin_auto():
     except ImportError as exc:  # pragma: no cover - env-gated
         pytest.skip(f"scale_build import needs the full stack ({exc})")
     cfg = build_scale_config_from_args(["--mode", "physics", "--smoke"])
-    base = {"n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0, "radiation": "gray"}
+    base = {"n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0, "radiation": "gray",
+            "convection": "sbm"}
     auto = build_latlon_config(cfg, dict(base))
     assert auto.ice_skin_prognostic is True
     assert auto.sea_ice_albedo_scheme == "maykut_untersteiner"

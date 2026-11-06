@@ -137,6 +137,7 @@ if "--multicontroller" not in sys.argv:
 
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
+    VALID_CONVECTION_SCHEMES,
     VALID_RADIATION,
     ZM_SCALAR_FIELDS,
     ZM_WIDTH_FIELDS,
@@ -902,7 +903,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "run dates outside its years (default: raise).")
 
     # Subgrid physics
-    parser.add_argument("--convection", type=str, default="tiedtke",
+    # No fixed default: _resolve_default_convection gives zhang_mcfarlane on
+    # MPAS / spectral and refuses a missing scheme elsewhere (user decision
+    # 2026-11-06); the run manifest records what ran.
+    parser.add_argument("--convection", type=str, default=None,
                         choices=[
                             "none", "sbm", "dca", "kuo", "mass_flux", "edmf",
                             "zhang_mcfarlane", "kain_fritsch", "emanuel",
@@ -2846,6 +2850,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         args.grid_type = "cubed_sphere"
     if args.discretization is None:
         args.discretization = _default_discretization_for_grid(args.grid_type)
+    _resolve_default_convection(args)
     grid_config = GridConfig(
         grid_type=args.grid_type,
         resolution=args.resolution,
@@ -3330,20 +3335,15 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     )
 
 
-_SPECTRAL_PROGNOSTIC_CONVECTION = frozenset({
-    "tiedtke", "bechtold", "zhang_mcfarlane", "kain_fritsch", "mass_flux",
-    "edmf", "emanuel"})
-
-
 def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv,
                                     parser: argparse.ArgumentParser | None = None
                                     ) -> argparse.Namespace:
     """Spectral/gaussian AMIP: the spectral run loop cannot thread a prognostic
     physics carry yet (issue #405), so prognostic convection / gravity-wave-drag
-    are refused deep in setup. When the user did NOT explicitly pick them, fall
-    back to the diagnostic schemes the spectral loop CAN run — convection ->
-    ``sbm``, GWD -> ``rayleigh`` — with a notice, so gaussian AMIP runs out of the
-    box. Explicit ``--convection`` / ``--gravity-wave-drag`` are honoured verbatim
+    are refused deep in setup. When the user did NOT explicitly pick the GWD,
+    fall back to ``rayleigh`` with a notice. Convection is never swapped (user
+    decision 2026-11-06): a run with no scheme named runs zhang_mcfarlane.
+    Explicit ``--convection`` / ``--gravity-wave-drag`` are honoured verbatim
     (and still correctly refused by the loop if prognostic — the user's call).
     The faithful prognostic-on-spectral path is threading PhysicsState through the
     spectral step (the #405 follow-up), NOT this scheme swap. No-op off spectral."""
@@ -3368,35 +3368,9 @@ def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv,
         return args
     toks = list(argv or [])
     has = lambda f: any(a == f or a.startswith(f + "=") for a in toks)
-    if not has("--convection") and args.convection in _SPECTRAL_PROGNOSTIC_CONVECTION:
-        # Reject a silent-no-op: the user did not pick --convection (so we
-        # downgrade to diagnostic sbm), but they DID pass an option that only
-        # the mass-flux convection honors — after the swap it would be
-        # silently ignored (codex r2).  Make them choose explicitly.
-        _convection_dependent_flags = [
-            f for f in ("--convective-precip-efficiency",
-                        "--convective-precip-split", "--autoconv-q-c-crit",
-                        "--autoconv-pe-max")
-            if has(f)
-        ]
-        if _convection_dependent_flags:
-            _msg = (
-                f"the spectral/gaussian loop cannot thread prognostic "
-                f"convection '{args.convection}' yet (issue #405) and would "
-                f"downgrade to diagnostic 'sbm', but you passed "
-                f"{_convection_dependent_flags}, which only a mass-flux "
-                f"convection honors — it would be silently ignored. Either "
-                f"drop those flags or pass an explicit --convection that "
-                f"supports them (and a --time-integrator leapfrog_si spectral "
-                f"path that threads the prognostic carry)."
-            )
-            if parser is not None:
-                parser.error(_msg)
-            raise SystemExit(f"run_amip: error: {_msg}")
-        print(f"[run_amip] spectral loop cannot thread prognostic convection "
-              f"'{args.convection}' yet (issue #405) -> diagnostic 'sbm'. "
-              f"Pass --convection to override.", flush=True)
-        args.convection = "sbm"
+    # Convection is NOT swapped (user decision 2026-11-06): a spectral run
+    # with no scheme named runs the zhang_mcfarlane default
+    # (_resolve_default_convection), never a substituted diagnostic scheme.
     if not has("--gravity-wave-drag") and "mcfarlane" in str(args.gravity_wave_drag):
         print(f"[run_amip] spectral loop cannot thread prognostic GWD "
               f"'{args.gravity_wave_drag}' yet (issue #405) -> diagnostic "
@@ -3701,7 +3675,35 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser,
     if args.rad_update_steps is None:
         args.rad_update_steps = 1
 
+    _resolve_default_convection(args)
     return args
+
+
+# Grids whose lanes run Zhang-McFarlane (MPAS column lane, spectral); the
+# PhysicsPipeline lanes (lat-lon, cubed sphere, ...) refuse it (they discard
+# its momentum transport), so they get no default at all.
+_ZM_DEFAULT_DISCRETIZATIONS = ("mpas", "spectral")
+
+
+def _resolve_default_convection(args: argparse.Namespace) -> None:
+    """``--convection`` not given: zhang_mcfarlane on MPAS / spectral,
+    announced and recorded (the config carries it into the run manifest); an
+    error naming the grid and the valid schemes elsewhere (user decision
+    2026-11-06).  Idempotent; needs the resolved discretization."""
+    if args.convection is not None:
+        return
+    if args.discretization in _ZM_DEFAULT_DISCRETIZATIONS:
+        args.convection = "zhang_mcfarlane"
+        print(f"[run_amip] --convection not given: zhang_mcfarlane (default "
+              f"on discretization={args.discretization!r}; recorded in the "
+              "run manifest)", flush=True)
+        return
+    valid = [s for s in VALID_CONVECTION_SCHEMES if s != "zhang_mcfarlane"]
+    raise SystemExit(
+        f"run_amip: error: --convection is required on grid_type="
+        f"{args.grid_type!r} (discretization={args.discretization!r}): there "
+        "is no default here, because zhang_mcfarlane (the default on MPAS and "
+        f"spectral) is refused on this lane. Name one of: {valid}")
 
 
 def _check_run_state_finite(driver) -> tuple[bool, str | None]:
@@ -3809,8 +3811,7 @@ def _apply_aimip_classical_overrides(
     """Force the AIMIP-classical scheme set + seed it with the trained params.
 
     When ``--aimip-classical-checkpoint`` is given, force the classical physics
-    scheme set the params were trained against — tiedtke convection, louis
-    turbulence, mcfarlane GWD, xu_randall cloud, and **sundqvist microphysics**
+    scheme set the params were trained against — louis turbulence, mcfarlane GWD, xu_randall cloud, and **sundqvist microphysics**
     — and stash the trained values on ``args._aimip_params`` for the post-setup
     pipeline injection.  The cloud (xu_randall) flat fields are seeded here
     because that config is built inline in the pipeline.
@@ -3832,7 +3833,8 @@ def _apply_aimip_classical_overrides(
     if getattr(args, "cloud_cap_floor_on", False):
         raise SystemExit("--cloud-cap-floor cannot be combined with --aimip-classical-checkpoint: "
                          "the trained cloud config is prebuilt and would not carry the floor")
-    args.convection = "tiedtke"
+    # Convection is NOT forced: a checkpoint never overrides the config's
+    # scheme (user decision 2026-11-06).
     args.turbulence = "louis"
     args.gravity_wave_drag = "mcfarlane"
     args.clouds = "xu_randall"

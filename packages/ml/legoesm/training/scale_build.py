@@ -562,6 +562,20 @@ def _gridpoint_argv(cfg, yml):
 def build_latlon_config(cfg, yml):
     """ExperimentConfig for a grid-point PE run (lat-lon C-grid or cubed-sphere
     CD-grid, per ``cfg.training_core``), via run_amip's parser."""
+    # Convection (user decisions 2026-11-06): MPAS runs Zhang-McFarlane, so a
+    # deck naming none resolves to it, logged and written back into the deck
+    # (the run's resolved config).  The lat-lon / cubed-sphere PhysicsPipeline
+    # lane refuses ZM (it discards ZM's momentum transport) and the scheme
+    # shapes the carry in every mode, so a deck there must name one.
+    if getattr(cfg, "training_core", "latlon") == "mpas":
+        from legoesm.training.aimip_params import resolve_convection
+        resolve_convection(yml, "convection")
+    elif not str(yml.get("convection") or "").strip():
+        raise ValueError(
+            "the grid-point (lat-lon / cubed-sphere) lane needs a named "
+            "convection scheme (top-level 'convection'); there is no default "
+            "here: zhang_mcfarlane, the default elsewhere, is refused on this "
+            "lane.")
     ra = _load_run_amip()
     # Pure-dycore WB modes (neural_gcm / sfno) replace the physics pipeline with
     # a neural net -- their rollout runs NO boundary-layer scheme, so the
@@ -588,7 +602,7 @@ def build_latlon_config(cfg, yml):
         # lat-lon path forwarded the raw key, so a production WB config could
         # still run gray while the spectral path was pinned (codex).
         "--radiation", _validated_wb_radiation(cfg, yml),
-        "--convection", str(yml.get("convection", "sbm")),
+        "--convection", str(yml["convection"]),
         "--turbulence", str(_turbulence),
         "--microphysics", str(yml.get("microphysics", "kessler")),
         "--gravity-wave-drag", str(yml.get("gravity_wave_drag", "hines")),
@@ -1006,14 +1020,20 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
         # experiment wearing the same name, and not a baseline for this one.
         from legoesm.training.aimip_params import (
             make_aimip_classical_spectral_physics,
+            resolve_convection,
         )
         _radiation = _validated_wb_radiation(cfg, yml)
-        _cl = dict(yml.get("classical", {}))
+        # Resolved on the deck's OWN mapping so a defaulted scheme is written
+        # back into the run's resolved config (and its fingerprint).
+        if yml.get("classical") is None:
+            yml["classical"] = {}
+        resolve_convection(yml["classical"], "convection")
+        _cl = dict(yml["classical"])
         # Every family named explicitly in the YAML: a classical model carries
         # one of each, and defaulting them silently is how a campaign ends up
         # comparing models that differ in more than the variable under test.
         _schemes = dict(
-            convection_scheme=str(_cl.get("convection", "tiedtke")),
+            convection_scheme=str(_cl["convection"]),
             turbulence_scheme=str(_cl.get("turbulence", "louis")),
             gwd_scheme=str(_cl.get("gwd", "mcfarlane")),
             microphysics_scheme=str(_cl.get("microphysics", "sundqvist")),

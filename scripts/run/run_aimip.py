@@ -509,7 +509,8 @@ def _train_aimip_classical(
     # Used by the combinatorial physics sweep
     # (scripts/run/run_aimip_classical_sweep_stage1.py).
     from legoesm.training.aimip_params import CLASSICAL_DEFAULT_SCHEMES as _DS
-    conv_scheme = str(cfg.get("aimip_convection", _DS["convection"]))
+    from legoesm.training.aimip_params import resolve_convection
+    conv_scheme = resolve_convection(cfg, "aimip_convection")
     gwd_scheme = str(cfg.get("aimip_gwd", _DS["gwd"]))
     from legoesm.training.aimip_spatial import grid_with_land_fraction
     grid = grid_with_land_fraction(grid, land_mask)
@@ -749,6 +750,7 @@ def _evaluate_variant(
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.training.aimip_params import (
         make_aimip_classical_spectral_physics,
+        resolve_convection,
     )
     from legoesm.training.neural_gcm_spectral import (
         load_training_data,
@@ -857,7 +859,7 @@ def _evaluate_variant(
             trained_model, grid, spec_cfg.dt,
             radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=eval_rad_interval,
-            convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
+            convection_scheme=resolve_convection(cfg, "aimip_convection"),
             turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
             surface_bulk_scheme=str(cfg.get("aimip_surface_bulk_scheme", "constant")),
             gwd_scheme=str(cfg.get("aimip_gwd", "mcfarlane")),
@@ -1296,6 +1298,9 @@ def main():
                 "eval_metrics_train_period": eval_metrics_train,
                 "checkpoint": str(ckpt_path),
                 "eval_weights": eval_weights,
+                # The convection scheme that ran, as resolved (a config naming
+                # none resolves to the logged default; user 2026-11-06).
+                "aimip_convection": cfg.get("aimip_convection"),
                 **(
                     {"checkpoint_ema": str(ema_ckpt_path)}
                     if ema_ckpt_path is not None else {}
