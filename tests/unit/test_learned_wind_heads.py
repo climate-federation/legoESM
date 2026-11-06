@@ -293,3 +293,17 @@ def test_wind_rows_are_inside_the_tanh_cap(latlon_adapter):
     out, _ = step(True, *_positional_nlev(latlon_adapter))
     np.testing.assert_allclose(np.asarray(out.du_dt), 5.0e-4, rtol=1e-12)
     np.testing.assert_allclose(np.asarray(out.dv_dt), 5.0e-4, rtol=1e-12)
+
+
+def test_gridded_moisture_heads_are_at_moisture_scale():
+    """The grid-point unpack scales the q_v, q_c and q_r heads by the
+    spectral adapter's _Q_HEAD_TENDENCY_FACTOR (user 2026-11-06); T stays at
+    the temperature scale."""
+    nlev = 3
+    y = jnp.arange(1.0, 6 * nlev + 7.0)
+    out = nph._unpack_column_output(y, nlev)
+    f = nph._Q_HEAD_TENDENCY_FACTOR
+    assert jnp.allclose(out.dT_dt, y[:nlev])
+    assert jnp.allclose(out.dq_v_dt, y[nlev:2 * nlev] * f)
+    assert jnp.allclose(out.dq_c_dt, y[2 * nlev:3 * nlev] * f)
+    assert jnp.allclose(out.dq_r_dt, y[3 * nlev:4 * nlev] * f)

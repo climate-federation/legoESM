@@ -135,11 +135,10 @@ _DEFAULT_TENDENCY_CAP = 5.0
 # Moisture tendencies live ~3 orders lower (dT 1e-4 K/s vs dq 1e-7 kg/kg/s), so
 # make_column_physics_fn multiplies the q_v head by this factor before it enters
 # the tracer tendency; without it an UNTRAINED head emits O(1e-3 kg/kg/s) and
-# q_v explodes within a 6 h rollout (probe 2026-07-03).  NOTE: the gridded
-# make_neural_step_unified path does NOT apply this — its _unpack_column_output
-# emits the full dq_v head as one of four PhysicsOutput tendency fields (the
-# grid pipeline's tanh cap bounds it).  The two paths diverge here by design;
-# unifying is a numerics change gated on a controlled column_nn re-run.
+# q_v explodes within a 6 h rollout (probe 2026-07-03).  The gridded
+# make_neural_step_unified path applies the same factor to its q_v, q_c and
+# q_r heads in _unpack_column_output (user decision 2026-11-06; before it the
+# grid-point moisture heads ran at the temperature scale).
 _Q_HEAD_TENDENCY_FACTOR = 1.0e-4
 # Wind-head rescale (both adapters): with residual_scale 0.01 one raw unit is
 # 1e-4 m/s^2 and the tanh cap 5e-4 m/s^2 (~43 m/s per day).
@@ -494,9 +493,12 @@ def _unpack_column_output(
         surface fluxes are scalars.
     """
     dT_dt = y[:nlev]
-    dq_v_dt = y[nlev:2 * nlev]
-    dq_c_dt = y[2 * nlev:3 * nlev]
-    dq_r_dt = y[3 * nlev:4 * nlev]
+    # Moisture heads at moisture magnitudes, the spectral adapter's factor
+    # (user 2026-11-06): at the temperature scale one optimizer step put
+    # 0.49 kg/kg of cloud water into a 6 h grid-point rollout.
+    dq_v_dt = y[nlev:2 * nlev] * _Q_HEAD_TENDENCY_FACTOR
+    dq_c_dt = y[2 * nlev:3 * nlev] * _Q_HEAD_TENDENCY_FACTOR
+    dq_r_dt = y[3 * nlev:4 * nlev] * _Q_HEAD_TENDENCY_FACTOR
     du_dt = y[4 * nlev:5 * nlev] * _WIND_HEAD_TENDENCY_FACTOR
     dv_dt = y[5 * nlev:6 * nlev] * _WIND_HEAD_TENDENCY_FACTOR
     sfc = y[6 * nlev:]
