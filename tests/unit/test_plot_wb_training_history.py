@@ -49,3 +49,23 @@ def test_lead_label_names_what_each_curve_scored():
     assert p.lead_label(rows, "train_leads_hours") == " (6 h / 6-12 h)"
     assert p.lead_label(rows, "val_leads_hours") == " (6-12-18-24 h)"
     assert p.lead_label([{"epoch": 0}], "val_leads_hours") == ""
+
+
+def test_the_ema_curve_is_drawn_when_logged(tmp_path, monkeypatch):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.axes
+
+    labels = []
+    real = matplotlib.axes.Axes.plot
+
+    def spy(self, *a, **k):
+        labels.append(k.get("label"))
+        return real(self, *a, **k)
+    monkeypatch.setattr(matplotlib.axes.Axes, "plot", spy)
+    rows = [{"epoch": e, "train_loss": 1.0, "val_loss": 1.0, "val_loss_ema": 0.9,
+             "params": {}} for e in range(2)]
+    h = _write(tmp_path, rows)
+    monkeypatch.setattr(sys, "argv", ["x", "--history", str(h)])
+    assert p.main() == 0
+    assert "held out, EMA weights" in labels

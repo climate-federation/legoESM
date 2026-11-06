@@ -860,6 +860,12 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid, *,
         )
         # SFNO forward: O(1) in, O(1) out
         output_norm = sfno(packed_norm.astype(jnp.float32), grid_)
+        if output_norm.shape[-1] == spec.n_channels - 1:
+            # Pruned SFNO (prune_unused_weights): no surface-geopotential
+            # output channel (the LAST one, a static field); restore it as 0,
+            # what the zero-initialised, gradient-free channel always was.
+            output_norm = jnp.concatenate(
+                [output_norm, jnp.zeros_like(output_norm[..., :1])], axis=-1)
         # Scale to physical tendency magnitudes
         output = output_norm * out_scale
         tend = unpack_pe_output(

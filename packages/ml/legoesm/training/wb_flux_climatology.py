@@ -17,6 +17,17 @@ Store: ``<state_cache_dir>/era5_flux_clim_<tag>.zarr``, array ``clim`` of
 shape (365, 24, 7, n_columns) float32, one chunk per day.  Slot ``(d, h)``
 holds the ERA5 means timestamped hour ``h`` (each the mean over the hour
 ENDING at ``h``) of noleap day ``d``.
+
+SEA-ICE climatology for the learned arms (user 2026-11-06; details VOTED 3-0,
+Claude / codex / GLM): the WB2 6-hourly ERA5 ``sea_ice_cover`` of the TRAINING
+years only (same ``YEARS``; no 2014 validation or 2020 test data), regridded
+as the AIMIP sea-ice forcing is (land NaN filled from the nearest ocean value,
+then clipped to [0, 1]; vote 2026-11-06), averaged per noleap day (the four
+6-hourly snapshots of each of the five years, 29 February excluded and read
+as 28 February), then a centred 31-day running mean that wraps at the year
+end.  A sample reads ONE plane, at its initial time's day.  Store:
+``<state_cache_dir>/era5_sic_clim_<tag>.zarr``, array ``clim`` of shape
+(365, n_columns) float32.
 """
 from __future__ import annotations
 
@@ -71,6 +82,53 @@ def smooth_days(raw, window=WINDOW_DAYS):
     c = np.cumsum(ext, axis=0)
     c = np.concatenate([np.zeros_like(c[:1]), c], axis=0)
     return (c[window:] - c[:-window]) / window
+
+
+SIC_WINDOW_DAYS = 31
+SIC_CADENCE_HOURS = 6
+SIC_VAR = "sea_ice_cover"
+# How a snapshot reaches the model grid; part of the store tag, so a store
+# regridded any other way is never read as this one.
+SIC_REGRID = "aimip_amip_forcing.regrid_era5_field_2d+clip01"
+
+
+def sic_day_times(day, years=YEARS, cadence_h=SIC_CADENCE_HOURS):
+    """The 6-hourly timestamps averaged into noleap ``day`` (29 Feb never)."""
+    return [t for hs in climatology_hours(day, years) for t in hs
+            if int(str(t)[11:13]) % cadence_h == 0]
+
+
+def sic_store_tag(grid, source) -> str:
+    return hashlib.sha256(json.dumps([
+        STORE_FORMAT, SIC_VAR, SIC_REGRID, str(source), list(YEARS), SIC_WINDOW_DAYS,
+        SIC_CADENCE_HOURS, int(grid.n_lat), int(grid.n_lon),
+        np.asarray(grid.lat).tolist(), np.asarray(grid.lon).tolist()]).encode()
+    ).hexdigest()[:16]
+
+
+def sic_store_path(root, grid, source) -> Path:
+    return Path(root) / f"era5_sic_clim_{sic_store_tag(grid, source)}.zarr"
+
+
+class SeaIceClimatology:
+    """Read side; ``plane(t0)`` = the (n_columns,) sea-ice fraction of the
+    noleap day of ``t0``."""
+
+    def __init__(self, path):
+        import zarr
+
+        self.path = Path(path)
+        if not self.path.exists():
+            raise FileNotFoundError(
+                f"sea-ice climatology {self.path} does not exist; build it with "
+                "scripts/data/build_wb_flux_climatology.py --field sic (SLURM).")
+        g = zarr.open_group(str(self.path), mode="r")
+        if not bool(g.attrs.get("complete", False)):
+            raise RuntimeError(f"sea-ice climatology {self.path} is not finalised.")
+        self._clim = g["clim"]
+
+    def plane(self, t0):
+        return np.asarray(self._clim[noleap_day(t0)])
 
 
 def store_tag(grid) -> str:

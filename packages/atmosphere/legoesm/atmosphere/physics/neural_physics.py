@@ -34,6 +34,7 @@ Integration modes
 from __future__ import annotations
 
 import jax
+import numpy as np
 import jax.numpy as jnp
 import equinox as eqx
 
@@ -226,6 +227,21 @@ def build_physics_output_kwargs(
 # Neural network module
 # ======================================================================
 
+#: Output groups of the column network, in layout order: six per-level
+#: tendencies, then precipitation and the five radiation fluxes.
+COLUMN_OUTPUT_GROUPS = ("T", "q_v", "q_c", "q_r", "u", "v", "precip",
+                        "sw_net_sfc", "lw_net_sfc", "sw_up_toa", "lw_up_toa",
+                        "sw_down_toa")
+
+
+def column_output_index(group: str, nlev: int):
+    """Indices of ``group`` in the full ``nlev * 6 + 6`` output vector."""
+    i = COLUMN_OUTPUT_GROUPS.index(group)
+    if i < 6:
+        return np.arange(i * nlev, (i + 1) * nlev)
+    return np.asarray([6 * nlev + (i - 6)])
+
+
 class NeuralPhysics(eqx.Module):
     """Column MLP for learned physics tendencies.
 
@@ -277,6 +293,10 @@ class NeuralPhysics(eqx.Module):
     n_static: int = eqx.field(static=True)
     n_embed: int = eqx.field(static=True)
     n_flux: int = eqx.field(static=True)
+    # The output groups the network CREATES (``COLUMN_OUTPUT_GROUPS`` names,
+    # layout order); every other group is emitted as exact zeros in the full
+    # ``nlev * 6 + 6`` layout (see __call__).  ``None`` = every group.
+    kept_outputs: tuple | None = eqx.field(static=True)
     # Learned per-grid-point embedding table, (n_columns, n_embed); None
     # unless ``spatial_embedding``.
     pos_embed: jax.Array | None
@@ -300,8 +320,19 @@ class NeuralPhysics(eqx.Module):
         era5_surface_fluxes: bool = False,
         n_columns: int | None = None,
         learned_embedding: bool = True,
+        kept_outputs: tuple | None = None,
     ):
         self.nlev = nlev
+        if kept_outputs is not None:
+            kept_outputs = tuple(kept_outputs)
+            bad = [g for g in kept_outputs if g not in COLUMN_OUTPUT_GROUPS]
+            if bad or not kept_outputs:
+                raise ValueError(f"kept_outputs {kept_outputs!r}: unknown groups "
+                                 f"{bad} (valid: {COLUMN_OUTPUT_GROUPS})")
+            # layout order, no duplicates
+            kept_outputs = tuple(g for g in COLUMN_OUTPUT_GROUPS
+                                 if g in kept_outputs)
+        self.kept_outputs = kept_outputs
         self.n_static = N_COLUMN_STATIC_FEATURES if spatial_embedding else 0
         self.n_embed = (N_COLUMN_POS_EMBED
                         if spatial_embedding and learned_embedding else 0)
@@ -315,8 +346,13 @@ class NeuralPhysics(eqx.Module):
         # Then the optional groups, in pack order: static spatial features,
         # ERA5 surface-flux planes, learned embedding.
         self.n_input = nlev * 4 + 4 + self.n_static + self.n_flux + self.n_embed
-        # T, q_v, q_c, q_r, u, v tendencies per level + precip + 5 fluxes
-        self.n_output = nlev * 6 + 6
+        # T, q_v, q_c, q_r, u, v tendencies per level + precip + 5 fluxes;
+        # with ``kept_outputs`` only those groups.  The final layer is
+        # zero-initialised, so the surviving rows start exactly as the full
+        # network's do and the dropped outputs were 0.
+        self.n_output = (nlev * 6 + 6 if kept_outputs is None else
+                         int(np.sum([column_output_index(g, nlev).size
+                                     for g in kept_outputs])))
         self.residual_scale = residual_scale
         self.flux_output_scale = flux_output_scale
         self.tendency_cap = tendency_cap
@@ -369,8 +405,21 @@ class NeuralPhysics(eqx.Module):
         # training crash). The 5 radiation fluxes (sw_net_sfc, lw_net_sfc,
         # sw_up_toa, lw_up_toa, sw_down_toa) are O(100 W/m^2) ->
         # flux_output_scale (they do not drive the state, so left unbounded).
-        n_rate = self.nlev * 6 + 1  # tendencies + precip
         cap = self.tendency_cap
+        if self.kept_outputs is not None:
+            # The full (nlev * 6 + 6) layout with exact zeros where the
+            # pruned groups were, each kept element under the same element-
+            # wise map as in the full network: every consumer reads the same
+            # vector.
+            idx = np.concatenate([column_output_index(g, self.nlev)
+                                  for g in self.kept_outputs])
+            n_rate = self.nlev * 6 + 1
+            is_rate = jnp.asarray(idx < n_rate)
+            val = jnp.where(is_rate,
+                            self.residual_scale * cap * jnp.tanh(raw / cap),
+                            raw * self.flux_output_scale)
+            return jnp.zeros((self.nlev * 6 + 6,), raw.dtype).at[idx].set(val)
+        n_rate = self.nlev * 6 + 1  # tendencies + precip
         rate = self.residual_scale * cap * jnp.tanh(raw[:n_rate] / cap)
         return jnp.concatenate([rate, raw[n_rate:] * self.flux_output_scale])
 
@@ -745,6 +794,7 @@ def build_column_physics(
     era5_surface_fluxes: bool = False,
     n_columns: int | None = None,
     learned_embedding: bool = True,
+    kept_outputs: tuple | None = None,
 ) -> NeuralPhysics:
     """Create a column MLP physics model for the spectral PE dycore.
 
@@ -768,6 +818,7 @@ def build_column_physics(
     """
     return NeuralPhysics(
         learned_embedding=learned_embedding,
+        kept_outputs=kept_outputs,
         nlev=nlev,
         hidden_dim=hidden_dim,
         n_layers=n_layers,

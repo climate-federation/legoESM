@@ -56,9 +56,17 @@ VARIANT_DEFAULTS: dict[str, dict[str, Any]] = {
     # decks set them explicitly.
     # ``learned_position_embedding`` (with spatial_embedding): the learned
     # per-location map on (True, the NeuralGCM recipe) or off (the ablation).
+    # Weights the training loss cannot reach are not created (user
+    # 2026-11-06).  column_nn ``kept_outputs``: the output groups to create
+    # (``losses.column_outputs_the_loss_reads`` of the run's loss config);
+    # None = all.  sfno_physics ``prune_unused_weights``: no imaginary part of
+    # the zonal-mean (m = 0) spectral weights and no surface-geopotential
+    # output channel (structural: no loss can reach either).  Off here so
+    # AIMIP's layout is unchanged until it opts in.
     "column_nn": {"nn_hidden_dim": 256, "n_layers": 4, "residual_scale": None,
                   "spatial_embedding": False, "era5_surface_fluxes": False,
-                  "learned_position_embedding": True},
+                  "learned_position_embedding": True,
+                  "kept_outputs": None},
     "sfno_physics": {
         "sfno_embed_dim": 128,
         "sfno_n_blocks": 4,
@@ -70,6 +78,7 @@ VARIANT_DEFAULTS: dict[str, dict[str, Any]] = {
         # Recompute each SFNO block in the backward pass (SFNOConfig
         # gradient_checkpoint): same gradient, less memory.
         "sfno_gradient_checkpoint": False,
+        "prune_unused_weights": False,
     },
     "sfno_full": {
         "sfno_embed_dim": 128,
@@ -159,16 +168,21 @@ def sfno_arch_config(variant: str, *, nlev: int,
                        + sfno_extra_input_channels(
                            spatial_embedding=bool(kw["spatial_embedding"]),
                            era5_surface_fluxes=bool(kw["era5_surface_fluxes"])))
+        _prune = bool(kw["prune_unused_weights"])
         extra = {"learned_position_embedding":
                  bool(kw["learned_position_embedding"]),
-                 "gradient_checkpoint": bool(kw["sfno_gradient_checkpoint"])}
+                 "gradient_checkpoint": bool(kw["sfno_gradient_checkpoint"]),
+                 "real_zonal_mean_modes": _prune}
     else:  # sfno_full: the emulator sees (1 + history) copies of the state.
         in_channels = spec.n_channels * (1 + int(kw["sfno_history_steps"]))
         extra = {"dropout": float(kw["sfno_dropout"])}
 
+    # Pruned: no surface-geopotential output (the LAST channel, a static
+    # field whose tendency nothing reads); the physics pads it back as 0.
+    _drop_phis = variant == "sfno_physics" and bool(kw["prune_unused_weights"])
     return SFNOConfig(
         in_channels=in_channels,
-        out_channels=spec.n_channels,
+        out_channels=spec.n_channels - (1 if _drop_phis else 0),
         embed_dim=int(kw["sfno_embed_dim"]),
         n_blocks=int(kw["sfno_n_blocks"]),
         mlp_expansion=int(kw["sfno_mlp_expansion"]),
@@ -252,6 +266,7 @@ def build_variant(variant: str, *, nlev: int, grid=None, seed: int = 0,
             spatial_embedding=_spatial,
             era5_surface_fluxes=bool(kw["era5_surface_fluxes"]),
             learned_embedding=bool(kw["learned_position_embedding"]),
+            kept_outputs=kw["kept_outputs"],
             **extra_cn,
         )
 

@@ -23,6 +23,13 @@ train_years:
 - 2018
 - 2019
 era5_surface_fluxes: false
+# EMA of the trained weights (vote 2026-11-06, user: EMA in v9): saved as
+# epoch_NNNN_ema.eqx beside every checkpoint, validated beside the raw
+# weights; selection and evaluation use the EMA.
+ema_decay: 0.995
+# User 2026-11-06: sea ice = ERA5 2015-2019 climatology (not actual daily
+# sea ice: leakage); without it the sea-ice input is zero everywhere.
+era5_sea_ice_climatology: true
 train_windows:
 - - 2015
   - 0
@@ -243,12 +250,16 @@ loss:
   w_bias_mslp: 0.33333333333333337
   w_crps_mslp: 0.05
 neural_gcm:
+  # User 2026-11-06: weights no WB loss can reach are not created.
+  prune_unused_weights: true
   spatial_embedding: false
   surface_drag: true
   surface_drag_scheme: louis
   nn_hidden: 256
   nn_layers: 4
 sfno:
+  # User 2026-11-06: weights no WB loss can reach are not created.
+  prune_unused_weights: true
   spatial_embedding: true
   sfno_embed_dim: 128
   sfno_n_blocks: 8

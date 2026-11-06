@@ -279,34 +279,63 @@ def test_the_entrypoint_aborts_the_whole_job_when_one_rank_dies():
     assert invoked, "main() must CALL mpi_abort_on_uncaught(_main)(...)"
 
 
-def test_the_freeze_is_reached_only_through_the_mode_gate():
-    """A neural model must never be frozen on a zero gradient (its decoder is
-    zero-initialized, so every upstream weight is dead at step 0).  The gate is
-    only worth anything if the call site actually sits behind it."""
+def test_every_mode_passes_the_gradient_access_gate_before_training():
+    """User rule 2026-11-05: parameter access is checked before ANY training,
+    in every mode, and the old silent zero-gradient freeze is gone (a dead
+    parameter now aborts).  The gate runs at the top of EVERY curriculum
+    stage's loop body (unconditionally, before that stage trains), and no
+    top-level ``return`` of ``_main`` precedes the stage loop except the
+    --gate-only exit, which runs the gate first."""
     import ast
 
     tree = _entry_ast()
     main = next(n for n in tree.body
                 if isinstance(n, ast.FunctionDef) and n.name == "_main")
-    calls = [n for n in ast.walk(main)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-             and n.func.id == "freeze_unreachable"]
-    assert calls, "_main() must call freeze_unreachable"
-    # Only the TRUE branch counts: a call in the `else` would run for exactly
-    # the neural modes the gate exists to protect.
-    in_true_branch = set()
-    for stmt in ast.walk(main):
-        if not isinstance(stmt, ast.If):
+
+    def calls(node, name):
+        return [n for n in ast.walk(node) if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name) and n.func.id == name]
+
+    def _returns_outside_defs(node):
+        # A ``return`` of _main itself, not one inside a nested function.
+        todo = list(ast.iter_child_nodes(node))
+        while todo:
+            n = todo.pop()
+            if isinstance(n, ast.Return):
+                return True
+            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                todo.extend(ast.iter_child_nodes(n))
+        return False
+    assert not calls(main, "freeze_unreachable"), "the measured freeze must be gone"
+    gate_def = [n for n in main.body if isinstance(n, ast.FunctionDef)
+                and n.name == "_gate_from"]
+    assert len(gate_def) == 1 and len(calls(gate_def[0], "gradient_access_gate")) == 1
+    assert len(calls(main, "gradient_access_gate")) == 1
+    loops = [n for n in main.body if isinstance(n, ast.For)
+             and calls(n, "mpi_data_parallel_training_loop")]
+    assert len(loops) == 1, "one top-level stage loop"
+    body = loops[0].body
+    i_gate = [i for i, st in enumerate(body) if isinstance(st, ast.Expr)
+              and calls(st, "_gate_from")]
+    i_train = [i for i, st in enumerate(body) if calls(st, "mpi_data_parallel_training_loop")]
+    assert i_gate and i_train and i_gate[0] < i_train[0], (
+        "each stage must call _gate_from unconditionally before it trains")
+    i_loop = main.body.index(loops[0])
+    # The ONLY permitted exit before the stage loop: ``if cfg.gate_only:``,
+    # whose body runs the gate (in a loop over stages) before returning.
+    for st in main.body[:i_loop]:
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue   # a nested function's return is not _main's
+        if not (isinstance(st, ast.Return) or _returns_outside_defs(st)):
             continue
-        if not any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-                   and c.func.id == "_uses_reachability_freeze"
-                   for c in ast.walk(stmt.test)):
-            continue
-        for body_stmt in stmt.body:
-            in_true_branch.update(id(n) for n in ast.walk(body_stmt))
-    assert all(id(c) in in_true_branch for c in calls), (
-        "every freeze_unreachable(...) call must sit in the TRUE branch of an "
-        "`if _uses_reachability_freeze(...)`")
+        is_gate_only = (isinstance(st, ast.If)
+                        and ast.unparse(st.test) == "cfg.gate_only")
+        assert is_gate_only, ("a return before the stage loop skips the gate: "
+                              + ast.unparse(st)[:120])
+        first = st.body[0]
+        assert isinstance(first, ast.For) and calls(first, "_gate_from"), (
+            "the --gate-only exit must start by gating every stage")
+        assert not st.orelse
 
 
 def test_the_epoch_checkpoint_carries_the_frozen_parameters():
@@ -400,9 +429,16 @@ def test_every_epoch_writes_all_three_checkpoint_files():
               and n.func.id == "_atomic_write"
               and not (isinstance(n.args[0], ast.Name)
                        and n.args[0].id == "_history_path")]
-    assert len(writes) == 3, (
+    ema = [w for w in writes if isinstance(w.args[0], ast.Call)
+           and getattr(w.args[0].func, "id", None) == "_ema_path"]
+    rest = [w for w in writes if w not in ema]
+    assert len(rest) == 3, (
         f"on_epoch must write parameters, optimizer state and the frozen list "
-        f"atomically; found {len(writes)} atomic write(s)")
+        f"atomically; found {len(rest)} atomic write(s)")
+    # The EMA weights (deck ema_decay) are written before the manifest, the
+    # completion marker, so a complete epoch of an EMA run always has them.
+    manifest = next(w for w in rest if getattr(w.args[0], "id", None) == "fpath")
+    assert len(ema) == 1 and ema[0].lineno < manifest.lineno
 
 
 def test_yaml_training_keys_resolved():

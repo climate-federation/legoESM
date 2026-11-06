@@ -560,6 +560,36 @@ def _per_level_scales(config) -> bool:
     return True
 
 
+#: The column-physics flux outputs the forecast loss reads, with the weights
+#: that read them (``_flux_loss_terms``: rsut = held_sw_up_toa, OLR =
+#: held_lw_up_toa, surface net SW / LW = held_sw_net_sfc / held_lw_net_sfc).
+_SCORED_FLUX_OUTPUTS = {
+    "sw_up_toa": ("w_flux_rsut", "w_bias_flux_rsut"),
+    "lw_up_toa": ("w_flux_olr", "w_bias_flux_olr"),
+    "sw_net_sfc": ("w_flux_sfc_sw", "w_bias_flux_sfc_sw"),
+    "lw_net_sfc": ("w_flux_sfc_lw", "w_bias_flux_sfc_lw"),
+}
+
+#: The state tendencies a learned column physics must always emit: what the
+#: dynamics advances and the state loss scores (T, q_v, u, v).
+STATE_TENDENCY_OUTPUTS = ("T", "q_v", "u", "v")
+
+
+def column_outputs_the_loss_reads(config: "LossConfig", *,
+                                  lane_writes_fluxes: bool) -> tuple:
+    """Column-network output groups this loss can reach: the state tendencies
+    plus, when the lane writes the network's radiation fluxes into the carry
+    the flux loss reads (``lane_writes_fluxes``), every flux a nonzero
+    flux-loss weight scores.  Nothing in the loss reads precipitation, the
+    cloud-water / rain tendencies or the TOA downward shortwave, so a network
+    built with only these groups has exactly the weights the loss can train
+    (user 2026-11-06)."""
+    fluxes = tuple(g for g, ws in _SCORED_FLUX_OUTPUTS.items()
+                   if lane_writes_fluxes
+                   and any(float(getattr(config, w)) != 0.0 for w in ws))
+    return STATE_TENDENCY_OUTPUTS + fluxes
+
+
 def check_q_resid_scale_lev_floor(config) -> None:
     """Raise unless a config using per-level scales names a valid humidity
     floor; a no-op otherwise.  Called at config build and again in the loss."""

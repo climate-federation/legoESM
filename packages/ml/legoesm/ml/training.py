@@ -187,6 +187,29 @@ class TrainingConfig(NamedTuple):
     adamw_weight_decay_scale: float = 1.0
 
 
+def make_lr_schedule(config: TrainingConfig):
+    """The learning-rate schedule :func:`create_optimizer` uses (lr at an
+    optimizer step count), so a caller can read the rate a step will use.
+
+    Clamp the schedule lengths so a tiny-steps smoke run cannot crash.
+    optax.warmup_cosine_decay_schedule builds its cosine leg with
+    ``decay_steps - warmup_steps`` and optax.cosine_decay_schedule raises
+    ``requires positive decay_steps`` when that is <= 0.  Guarantee
+    ``decay_steps - warmup_steps >= 1``: ``total_steps >= 1`` and
+    ``warmup_steps <= total_steps - 1``.  ``warmup_steps == 0`` is fine:
+    linear_schedule disables the warmup leg for ``transition_steps <= 0``.
+    """
+    total_steps = max(1, int(config.total_steps))
+    warmup_steps = min(int(config.warmup_steps), max(0, total_steps - 1))
+    return optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=config.lr,
+        warmup_steps=warmup_steps,
+        decay_steps=total_steps,
+        end_value=0.0,
+    )
+
+
 def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
     """Create optimizer with warmup, cosine decay, and gradient clipping.
 
@@ -228,26 +251,7 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
     ValueError
         If ``config.optimizer`` is not one of the supported names.
     """
-    # Clamp the schedule lengths so a tiny-steps smoke run cannot crash.
-    # optax.warmup_cosine_decay_schedule builds its cosine leg with
-    # ``decay_steps - warmup_steps`` and optax.cosine_decay_schedule raises
-    # ``requires positive decay_steps`` when that is <= 0.  With the carbon
-    # trainer's ``total_steps=max(args.steps, 1)`` and an unclamped
-    # ``warmup_steps`` (e.g. --steps 6 with the sbatch default WARMUP=10) the
-    # cosine leg would be ``6 - 10 = -4`` and abort the whole run.  Guarantee
-    # ``decay_steps - warmup_steps >= 1``: ``total_steps >= 1`` and
-    # ``warmup_steps <= total_steps - 1`` (a warmup no longer than the run,
-    # leaving >=1 cosine step).  ``warmup_steps == 0`` is fine: linear_schedule
-    # disables the warmup leg for ``transition_steps <= 0``.
-    total_steps = max(1, int(config.total_steps))
-    warmup_steps = min(int(config.warmup_steps), max(0, total_steps - 1))
-    schedule = optax.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=config.lr,
-        warmup_steps=warmup_steps,
-        decay_steps=total_steps,
-        end_value=0.0,
-    )
+    schedule = make_lr_schedule(config)
 
     if config.optimizer == "adamw":
         core = optax.adamw(

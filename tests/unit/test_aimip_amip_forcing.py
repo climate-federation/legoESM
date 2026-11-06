@@ -129,7 +129,7 @@ def test_regrid_monthly_forcing_cache_rejects_wrong_grid(tmp_path):
                                              cache_path=str(cache))
 
 
-def test_regrid_field_2d_flips_descending_lat():
+def test_regrid_era5_field_2d_flips_descending_lat():
     m = _mod()
     pytest.importorskip("scipy")
 
@@ -142,7 +142,7 @@ def test_regrid_field_2d_flips_descending_lat():
     era5_lat = np.array([90.0, 0.0, -90.0])   # descending
     era5_lon = np.array([0.0, 180.0])
     field = np.array([[3.0, 3.0], [2.0, 2.0], [1.0, 1.0]])  # value = f(lat), N=3 S=1
-    out = m._regrid_field_2d(field, era5_lat, era5_lon, _Grid())
+    out = m.regrid_era5_field_2d(field, era5_lat, era5_lon, _Grid())
     col = out[:, 0]
     assert col[0] < col[1] < col[2]  # increases toward north (ascending Gaussian lat)
     assert np.all(np.isfinite(out))

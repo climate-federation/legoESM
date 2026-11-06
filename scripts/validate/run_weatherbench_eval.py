@@ -237,7 +237,8 @@ def main(argv=None, ds=None):
     # The eval's surface forcing must match training: the prescribed-flux
     # planes and the land fraction are loaded iff the deck (and mode) ask.
     from legoesm.training.scale_build import (
-        wb_aerosol_spec, wb_era5_config, wb_flux_climatology, wb_ic_microphysics)
+        wb_aerosol_spec, wb_era5_config, wb_flux_climatology, wb_ic_microphysics,
+        wb_sea_ice_climatology)
     era5_cfg = wb_era5_config(cfg, yml)
     cases = build_forecast_cases(
         era5_cfg, grid, sigma,
@@ -246,7 +247,8 @@ def main(argv=None, ds=None):
         resolution_deg=cfg.resolution_deg, ds=ds,
         aerosol=(wb_aerosol_spec(yml) if cfg.mode == "physics" else None),
         microphysics=wb_ic_microphysics(cfg.mode, yml),
-        flux_climatology=wb_flux_climatology(cfg, yml, grid))
+        flux_climatology=wb_flux_climatology(cfg, yml, grid),
+        sea_ice_climatology=wb_sea_ice_climatology(cfg, yml, grid))
     log.info("WB2 eval: mode=%s year=%d inits=%d leads=%s res=%.3gdeg dt=%.1fs",
              cfg.mode, eval_year, len(cases), list(cfg.leads_hours),
              cfg.resolution_deg, dt)

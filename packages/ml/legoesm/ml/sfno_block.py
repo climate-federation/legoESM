@@ -17,6 +17,7 @@ embed dimension identically to the level axis.
 from __future__ import annotations
 
 import jax
+import numpy as np
 import jax.numpy as jnp
 import equinox as eqx
 
@@ -63,6 +64,7 @@ class SFNOBlock(eqx.Module):
         embed_dim: int,
         mlp_expansion: int = 4,
         dropout: float = 0.0,
+        real_zonal_mean_modes: bool = False,
         *,
         key: jax.Array,
     ):
@@ -75,6 +77,9 @@ class SFNOBlock(eqx.Module):
             in_channels=embed_dim,
             out_channels=embed_dim,
             key=k1,
+            real_rows=(tuple(int(i) for i in
+                             np.nonzero(np.asarray(grid.ms) == 0)[0])
+                       if real_zonal_mean_modes else ()),
         )
 
         self.ln = eqx.nn.LayerNorm(embed_dim)

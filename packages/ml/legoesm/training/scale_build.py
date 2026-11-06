@@ -574,9 +574,10 @@ def build_latlon_config(cfg, yml):
 # whole campaign (v2 trained at 3e-4 while its deck said 1.5e-3), and a typo
 # like ``learning_rate`` would silently reintroduce exactly that.
 _WB_CONSUMED_TOP_KEYS = frozenset({
-    "classical", "convection", "dt", "era5_cadence_hours",
+    "classical", "convection", "dt", "ema_decay", "era5_cadence_hours",
     "cache_dir", "era5_cloud_condensate", "era5_cloud_zarr", "era5_flux_zarr",
     "era5_flux_climatology", "era5_soil_moisture", "era5_surface_fluxes",
+    "era5_sea_ice_climatology",
     "era5_zarr", "eval_years", "learned_position_embedding",
     "near_surface_head",
     "grad_accum", "grad_clip_norm", "gravity_wave_drag", "loss", "lr",
@@ -625,8 +626,30 @@ _WB_NEURAL_KEYS = frozenset({
     "surface_drag", "surface_drag_scheme", "surface_drag_confounded",
     "nn_hidden", "nn_layers", "gauss_n_max", "sfno_embed_dim", "sfno_n_blocks",
     "sfno_mlp_expansion", "spatial_embedding", "land_inputs",
-    "sfno_gradient_checkpoint",
+    "sfno_gradient_checkpoint", "prune_unused_weights",
 })
+
+
+def wb_prune_unused_weights(ov: dict) -> bool:
+    """The learned-arm block's ``prune_unused_weights`` (user 2026-11-06):
+    weights the configured loss cannot reach are not created (the column
+    network's kept outputs are derived from the loss config).  Must be a
+    bool; absent = False (the layout of every run before it)."""
+    v = ov.get("prune_unused_weights", False)
+    if not isinstance(v, bool):
+        raise ValueError(f"prune_unused_weights must be true or false, got {v!r}")
+    return v
+
+
+def wb_ema_decay(yml: dict) -> float:
+    """The deck's ``ema_decay`` (v9 vote 2026-11-06): when > 0 the trainer
+    keeps an exponential moving average of the trained weights
+    (training/ema.py), saves it beside every checkpoint and validates it.
+    A number in [0, 1); absent = 0 = no EMA (every run before it)."""
+    v = yml.get("ema_decay", 0.0)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v < 1.0:
+        raise ValueError(f"ema_decay must be a number in [0, 1), got {v!r}")
+    return float(v)
 
 
 def _pinned_trainable_names(param_fixed: dict) -> set:
@@ -662,10 +685,12 @@ def wb_needs_land_frac(mode: str, yml: dict) -> bool:
     True for the classical ``physics`` arm (convection's land branch),
     when the top-level ``era5_surface_fluxes`` flag is on (the flux planes
     ship with the mask) or when the selected learned arm's block enables
-    ``spatial_embedding`` (the land fraction is one of its static inputs).
+    ``spatial_embedding`` (the land fraction is one of its static inputs),
+    or when the ERA5 sea-ice climatology is selected (it is zeroed on land).
     """
     if (mode == "physics" or bool(yml.get("era5_surface_fluxes", False))
-            or yml.get("near_surface_head") is not None):
+            or yml.get("near_surface_head") is not None
+            or yml.get("era5_sea_ice_climatology") is True):
         return True
     if mode in ("neural_gcm", "sfno"):
         ov = yml.get(mode, {}) or {}
@@ -1146,6 +1171,14 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
         _cn["era5_surface_fluxes"] = bool(yml.get("era5_surface_fluxes", False))
         if _cn["spatial_embedding"]:
             _cn["learned_position_embedding"] = wb_learned_position_embedding(yml)
+        if wb_prune_unused_weights(ov):
+            # The output groups the configured loss can reach, nothing more.
+            from legoesm.training.losses import column_outputs_the_loss_reads
+            # The spectral column adapter (neural_physics.make_column_physics_fn)
+            # returns state tendencies only; the network's flux outputs never
+            # reach the carry the flux loss reads.
+            _cn["kept_outputs"] = column_outputs_the_loss_reads(
+                make_loss_config(cfg, yml), lane_writes_fluxes=False)
         params = build_variant("column_nn", nlev=nlev, grid=grid, overrides=_cn)
 
         # #1464: the learned arm's only momentum physics is its own wind head,
@@ -1196,6 +1229,7 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
         _sf["era5_surface_fluxes"] = _sf_fluxes
         if _sf_spatial:
             _sf["learned_position_embedding"] = wb_learned_position_embedding(yml)
+        _sf["prune_unused_weights"] = wb_prune_unused_weights(ov)
         params = build_variant("sfno_physics", nlev=nlev, grid=grid,
                                overrides=_sf)
 
@@ -2017,6 +2051,43 @@ def wb_flux_climatology(cfg, yml, grid):
                                wb_state_cache_configs(cfg, yml)[1].flux_zarr)
 
 
+def wb_sea_ice_climatology(cfg, yml, grid):
+    """The learned arms' ERA5 sea-ice climatology (``era5_sea_ice_climatology:
+    true``, user 2026-11-06), stored next to the state cache; None when the
+    deck does not select it.  Without it the WB forcing's sea-ice plane is
+    zero everywhere."""
+    v = yml.get("era5_sea_ice_climatology", False)
+    if not isinstance(v, bool):
+        raise ValueError(f"era5_sea_ice_climatology must be true or false, got {v!r}")
+    if not v:
+        return None
+    if getattr(cfg, "mode", None) not in ("neural_gcm", "sfno"):
+        raise ValueError("era5_sea_ice_climatology is the learned arms' input; "
+                         "the CAM6 arm's sea ice is a separate decision.")
+    root = wb_state_cache_root(yml)
+    if root is None:
+        raise ValueError("era5_sea_ice_climatology needs state_cache_dir (the "
+                         "climatology is stored next to the state cache).")
+    from legoesm.training import wb_flux_climatology as wfc
+    return wfc.SeaIceClimatology(wfc.sic_store_path(root, grid, yml["era5_zarr"]))
+
+
+def with_sea_ice_climatology(forcing, clim, t0):
+    """``forcing`` with its sea-ice plane replaced by the climatology's plane
+    for the noleap day of ``t0`` (the sample's initial time), zero on land
+    columns (land fraction >= 0.5) as the AIMIP sea-ice forcing is: the
+    regridder fills land from the nearest ocean value."""
+    import jax.numpy as jnp
+
+    sic = forcing["sic"]
+    plane = jnp.asarray(clim.plane(t0), dtype=jnp.asarray(sic).dtype)
+    if plane.shape != jnp.shape(sic):
+        raise ValueError(f"sea-ice climatology plane {plane.shape} does not "
+                         f"match the forcing's sic {jnp.shape(sic)}")
+    ocean = jnp.reshape(jnp.asarray(forcing["land_frac"]), plane.shape) < 0.5
+    return {**forcing, "sic": jnp.where(ocean, plane, 0.0).astype(plane.dtype)}
+
+
 def with_flux_climatology(forcing, clim, t0, n_hours):
     """``forcing`` with the sample's own ERA5 flux planes removed and the
     climatology's hourly frames from ``t0`` over ``n_hours`` added."""
@@ -2171,6 +2242,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     _micro = wb_ic_microphysics(cfg.mode, yml)
     _aerosol = wb_aerosol_spec(yml) if cfg.mode == "physics" else None
     _clim = wb_flux_climatology(cfg, yml, grid)
+    _sic_clim = wb_sea_ice_climatology(cfg, yml, grid)
 
     def build(year, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
         s_ic, s_tg, sst_src = _sample_inputs(
@@ -2197,6 +2269,8 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
         if _clim is not None:
             forcing = with_flux_climatology(forcing, _clim, times[i_ic],
                                             stride * era5_cfg.dt_hours)
+        if _sic_clim is not None:
+            forcing = with_sea_ice_climatology(forcing, _sic_clim, times[i_ic])
         return (ic, target, forcing)
 
     mine = list(_sharded_indices(
@@ -2204,7 +2278,8 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     if wb_state_cache_root(yml) is not None:
         return _state_cached_samples(
             cfg, yml, grid, sigma, mine, leads, lead_offsets, times, ds,
-            cloud_ds, flux_ds, _micro, _aerosol, clim=_clim)
+            cloud_ds, flux_ds, _micro, _aerosol, clim=_clim,
+            sic_clim=_sic_clim)
     src = (ds, cloud_ds, flux_ds, int)
     local = _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times,
                              snaps_per_day, stride, rank, nproc,
@@ -2227,7 +2302,8 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
 
 
 def _state_cached_samples(cfg, yml, grid, sigma, mine, leads, lead_offsets,
-                          times, ds, cloud_ds, flux_ds, micro, aerosol, clim=None):
+                          times, ds, cloud_ds, flux_ds, micro, aerosol, clim=None,
+                          sic_clim=None):
     """The spectral samples, read lazily from the model-grid state cache.
 
     Gate: every ERA5 time of the FIRST sample is rebuilt from the raw store
@@ -2269,6 +2345,8 @@ def _state_cached_samples(cfg, yml, grid, sigma, mine, leads, lead_offsets,
         if clim is not None:
             hours = int((times[i_tg] - times[i_ic]) / np.timedelta64(1, "h"))
             forcing = with_flux_climatology(forcing, clim, times[i_ic], hours)
+        if sic_clim is not None:
+            forcing = with_sea_ice_climatology(forcing, sic_clim, times[i_ic])
         if leads:
             target = tuple(cache.read(i)[:2] for i in times_of(i_ic, i_tg)[1:])
         else:
@@ -2281,7 +2359,8 @@ def _state_cached_samples(cfg, yml, grid, sigma, mine, leads, lead_offsets,
     # build tag) and the ordered index tuples identify the content exactly;
     # the trainer fingerprints this instead of reading every record.
     samples.content_key = (str(cache.path), tuple(tuple(int(x) for x in m)
-                                                  for m in mine))
+                                                  for m in mine),
+                           None if sic_clim is None else str(sic_clim.path))
     validate_carry_holds_scheme(samples[0][0], micro,
                                 context=f"WB {cfg.mode} arm initial condition")
     return samples
@@ -2429,6 +2508,9 @@ def evaluate_wb2(cfg, yml, model, params, make_run_seg, grid, sigma):
     core = getattr(cfg, "training_core", "latlon")
     # v1 of the WB2 driver is spectral-only; flag a non-spectral core so a
     # default-core (latlon) run doesn't copy-paste a command the CLI rejects.
+    # A run that keeps an EMA is scored on it (vote 2026-11-06), as the
+    # campaign's prefer_ema evaluation does.
+    ckpt = "epoch_NNNN_ema.eqx" if wb_ema_decay(yml) > 0.0 else "epoch_NNNN.eqx"
     note = ("" if core == "spectral" else
             f"\n  NOTE: --training-core {core!r} checkpoints are NOT WB2-evaluable "
             "in v1 (the driver is spectral-only); retrain/score with a spectral core.")
@@ -2436,8 +2518,8 @@ def evaluate_wb2(cfg, yml, model, params, make_run_seg, grid, sigma):
         "WB2 eval is a separate driver (issue #919); this run's checkpoints are "
         "under %s. Score them with:\n"
         "  python scripts/validate/run_weatherbench_eval.py --config %s --mode %s "
-        "--training-core %s --checkpoint %s/epoch_NNNN.eqx --eval-year %s "
+        "--training-core %s --checkpoint %s/%s --eval-year %s "
         "--out %s/wb2_scorecard.json%s",
-        cfg.out_dir, cfg.config_path, cfg.mode, core, cfg.out_dir,
+        cfg.out_dir, cfg.config_path, cfg.mode, core, cfg.out_dir, ckpt,
         yml["eval_years"][0], cfg.out_dir, note)
     return None

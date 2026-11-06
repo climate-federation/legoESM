@@ -40,10 +40,16 @@ class SpectralConv(eqx.Module):
         Random key for initialization.
     """
     weight_real: jnp.ndarray  # (n_sh, out_channels, in_channels)
-    weight_imag: jnp.ndarray  # (n_sh, out_channels, in_channels)
+    weight_imag: jnp.ndarray  # (n_sh - len(real_rows), out_channels, in_channels)
     n_sh: int = eqx.field(static=True)
     in_channels: int = eqx.field(static=True)
     out_channels: int = eqx.field(static=True)
+    # SH rows whose weight is REAL (no imaginary part created): the zonal-mean
+    # (m = 0) coefficients of a real field are real, and the synthesis keeps
+    # only their real part, so an imaginary weight there cannot change the
+    # output.  Empty = every row complex (the original layout).
+    real_rows: tuple = eqx.field(static=True)
+    imag_rows: tuple = eqx.field(static=True)
 
     def __init__(
         self,
@@ -52,8 +58,12 @@ class SpectralConv(eqx.Module):
         out_channels: int,
         *,
         key: jax.Array,
+        real_rows: tuple = (),
     ):
         self.n_sh = n_sh
+        self.real_rows = tuple(int(i) for i in real_rows)
+        _real = set(self.real_rows)
+        self.imag_rows = tuple(i for i in range(n_sh) if i not in _real)
         self.in_channels = in_channels
         self.out_channels = out_channels
 
@@ -76,9 +86,13 @@ class SpectralConv(eqx.Module):
         self.weight_real = scale * jax.random.normal(
             key_r, (n_sh, out_channels, in_channels), dtype=jnp.float64
         )
-        self.weight_imag = scale * jax.random.normal(
+        imag = scale * jax.random.normal(
             key_i, (n_sh, out_channels, in_channels), dtype=jnp.float64
         )
+        # Drawn at full size and then subset, so the surviving rows are
+        # bit-identical to the full layout's initial weights.
+        self.weight_imag = (imag if not self.real_rows
+                            else imag[jnp.asarray(self.imag_rows)])
 
     def __call__(self, coeffs: jnp.ndarray) -> jnp.ndarray:
         """Apply spectral convolution.
@@ -93,7 +107,11 @@ class SpectralConv(eqx.Module):
         complex array, shape (n_sh, out_channels)
             Output spectral coefficients.
         """
-        W = self.weight_real + 1j * self.weight_imag  # (n_sh, out, in)
+        w_imag = self.weight_imag
+        if self.real_rows:
+            w_imag = jnp.zeros((self.n_sh,) + w_imag.shape[1:], w_imag.dtype
+                               ).at[jnp.asarray(self.imag_rows)].set(w_imag)
+        W = self.weight_real + 1j * w_imag  # (n_sh, out, in)
         # Einstein summation: for each SH coefficient k,
         # out[k, o] = sum_i W[k, o, i] * coeffs[k, i]
         return jnp.einsum("koi,ki->ko", W, coeffs)

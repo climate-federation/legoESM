@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-"""Build the ERA5 surface-flux climatology for the WB CAM6 arm
+"""Build the ERA5 surface-flux climatology for the WB CAM6 arm, or (``--field
+sic``) the ERA5 sea-ice climatology for the learned arms
 (``legoesm.training.wb_flux_climatology``).
 
 Run under SLURM, never on a login node:
@@ -31,7 +32,81 @@ def build_parser():
     g.add_argument("--finalize", action="store_true")
     g.add_argument("--task", type=int)
     p.add_argument("--n-tasks", type=int, default=1, dest="n_tasks")
+    p.add_argument("--field", choices=("flux", "sic"), default="flux")
     return p
+
+
+def sic_day_mean(ds, day, grid):
+    """``(n_columns,)`` training-years mean sea-ice fraction of noleap
+    ``day``, regridded exactly as the AIMIP sea-ice forcing is (land NaN
+    filled from the nearest ocean value, then clipped to [0, 1]; vote
+    2026-11-06, reuse over a second regridder)."""
+    from legoesm.training.aimip_amip_forcing import regrid_era5_field_2d
+    from legoesm.training.wb_flux_climatology import SIC_VAR, sic_day_times
+
+    lat = np.asarray(ds.lat.values, np.float64)
+    lon = np.asarray(ds.lon.values, np.float64)
+    out = []
+    for t in sic_day_times(day):
+        raw = np.asarray(ds[SIC_VAR].sel(time=np.datetime64(t, "ns"))
+                         .transpose("lat", "lon").values, np.float64)
+        out.append(np.clip(regrid_era5_field_2d(raw, lat, lon, grid).reshape(-1),
+                           0.0, 1.0))
+    return np.mean(out, axis=0)
+
+
+def main_sic(a, yml, grid, root):
+    import zarr
+
+    from legoesm.training import wb_flux_climatology as wfc
+    from legoesm.training.era5_to_state import open_era5_zarr
+
+    source = yml["era5_zarr"]
+    path = wfc.sic_store_path(root, grid, source)
+    ncol = int(grid.n_lat) * int(grid.n_lon)
+    shape = (wfc.N_DAYS, ncol)
+    print(f"sea-ice climatology {path}", flush=True)
+    if a.init:
+        if not path.exists():
+            g = zarr.open_group(str(path), mode="w")
+            for name in ("raw", "clim"):
+                g.create_array(name, shape=shape, dtype=np.float32,
+                               chunks=(1, ncol), fill_value=np.nan)
+            g.create_array("raw_done", data=np.zeros(wfc.N_DAYS, bool), chunks=(1,))
+            g.attrs.update({"complete": False, "var": wfc.SIC_VAR,
+                            "years": list(wfc.YEARS),
+                            "window_days": wfc.SIC_WINDOW_DAYS,
+                            "source": source})
+        print("created", flush=True)
+        return 0
+    g = zarr.open_group(str(path), mode="r+")
+    done = np.asarray(g["raw_done"])
+    if a.check:
+        print(f"raw days done {int(done.sum())}/{wfc.N_DAYS}; "
+              f"complete={g.attrs['complete']}", flush=True)
+        return 0 if done.all() else 1
+    if a.finalize:
+        if not done.all():
+            raise SystemExit(f"{int((~done).sum())} raw days are not done")
+        g["clim"][:] = wfc.smooth_days(np.asarray(g["raw"]),
+                                       window=wfc.SIC_WINDOW_DAYS).astype(np.float32)
+        sha = subprocess.run(["git", "-C", str(_REPO), "rev-parse", "HEAD"],
+                             capture_output=True, text=True).stdout.strip()
+        g.attrs.update({"complete": True, "git_sha": sha})
+        print("finalized", flush=True)
+        return 0
+    if not 0 <= a.task < a.n_tasks:
+        raise SystemExit(f"--task {a.task} outside 0..{a.n_tasks - 1}")
+    ds = open_era5_zarr(source)
+    if wfc.SIC_VAR not in ds:
+        raise SystemExit(f"{source} has no {wfc.SIC_VAR}")
+    for d in range(a.task, wfc.N_DAYS, a.n_tasks):
+        if done[d]:
+            continue
+        g["raw"][d] = sic_day_mean(ds, d, grid).astype(np.float32)
+        g["raw_done"][d] = True
+        print(f"day {d} done", flush=True)
+    return 0
 
 
 def hourly_planes(fds, t, grid, acc):
@@ -91,6 +166,8 @@ def main(argv=None):
     cfg = SimpleNamespace(mode="physics", training_core="spectral", smoke=False,
                           windows=None, n_days=None, multi_step_hours=None)
     _, grid, *_ = sb.build_mode_components(cfg, yml)
+    if a.field == "sic":
+        return main_sic(a, yml, grid, root)
     _, sst_cfg, _ = sb.wb_state_cache_configs(cfg, yml)
     path = wfc.store_path(root, grid)
     ncol = int(grid.n_lat) * int(grid.n_lon)

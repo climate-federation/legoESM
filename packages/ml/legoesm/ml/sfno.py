@@ -62,6 +62,11 @@ class SFNOConfig(NamedTuple):
         ACE2-style learned per-location embedding: one ``embed_dim`` vector
         per grid point, added to the encoder output, zero-initialised (so it
         starts as a no-op).  Off by default.
+    real_zonal_mean_modes : bool
+        Do not create the imaginary part of the spectral weights for the
+        zonal-mean (m = 0) coefficients: a real field's m = 0 coefficients
+        are real and the synthesis keeps only their real part, so those
+        weights cannot change the output.  Off by default (checkpoint layout).
     """
     in_channels: int = 4
     out_channels: int = 4
@@ -72,6 +77,7 @@ class SFNOConfig(NamedTuple):
     gradient_checkpoint: bool = False
     dropout: float = 0.0
     learned_position_embedding: bool = False
+    real_zonal_mean_modes: bool = False
 
 
 class SFNO(eqx.Module):
@@ -115,6 +121,7 @@ class SFNO(eqx.Module):
                 embed_dim=config.embed_dim,
                 mlp_expansion=config.mlp_expansion,
                 dropout=config.dropout,
+                real_zonal_mean_modes=config.real_zonal_mean_modes,
                 key=block_keys[i],
             )
             for i in range(config.n_blocks)

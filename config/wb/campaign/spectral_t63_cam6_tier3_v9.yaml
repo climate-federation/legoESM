@@ -23,6 +23,11 @@ train_years:
 - 2018
 - 2019
 era5_surface_fluxes: true
+# No EMA on the physics-parameter arm (pending main: user EMA answer named
+# the learned arms).
+ema_decay: 0.0
+# Sea ice for the CAM6 arm is a separate decision (user 2026-11-06).
+era5_sea_ice_climatology: false
 train_windows:
 - - 2015
   - 0

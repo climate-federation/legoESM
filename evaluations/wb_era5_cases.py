@@ -137,6 +137,7 @@ def build_forecast_cases(
     init_stride_hours, resolution_deg, ds=None, smoothing_passes=4,
     aerosol=None,
     microphysics="none", cloud_ds=None, flux_climatology=None,
+    sea_ice_climatology=None,
 ):
     """Build the WB2 forecast-eval cases for one eval year.
 
@@ -172,6 +173,10 @@ def build_forecast_cases(
     flux_climatology : FluxClimatology, optional
         ``scale_build.wb_flux_climatology(...)``: the CAM6 arm's prescribed
         fluxes, read over the longest lead (as in training).
+    sea_ice_climatology : SeaIceClimatology, optional
+        ``scale_build.wb_sea_ice_climatology(...)``: the learned arms'
+        sea-ice plane (training-years climatology), read at the init's day
+        (as in training).
 
     Returns
     -------
@@ -190,6 +195,7 @@ def build_forecast_cases(
     from legoesm.training.scale_build import (
         build_spectral_forcing,
         with_flux_climatology,
+        with_sea_ice_climatology,
     )
 
     cadence = int(era5_cfg.dt_hours)
@@ -253,6 +259,9 @@ def build_forecast_cases(
         if flux_climatology is not None:
             forcing = with_flux_climatology(forcing, flux_climatology,
                                             times[i_ic], max(leads))
+        if sea_ice_climatology is not None:
+            forcing = with_sea_ice_climatology(forcing, sea_ice_climatology,
+                                               times[i_ic])
 
         verif_by_lead = {}
         for lead in leads:

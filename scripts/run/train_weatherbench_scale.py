@@ -69,6 +69,7 @@ class ScaleConfig(NamedTuple):
     probe_scenes: int | None = None
     # Rolling mid-epoch checkpoint every n training steps (0 = epoch ends only).
     checkpoint_every_steps: int = 20
+    gate_only: bool = False
 
 
 # Scenes used for the POST-TRAINING reachability report.  A subsample, not the
@@ -101,13 +102,20 @@ def _checkpoint_paths(out_dir, epoch):
     return base + ".eqx", base + ".opt.eqx", base + ".frozen.json"
 
 
+def _ema_path(out_dir, epoch):
+    """The epoch's EMA weights (deck ``ema_decay`` > 0), in the same on-disk
+    layout as its parameters; written before the manifest, so a complete
+    epoch of an EMA run always has one."""
+    return _checkpoint_paths(out_dir, epoch)[0][:-len(".eqx")] + "_ema.eqx"
+
+
 def _partial_manifest_path(out_dir):
     import os
 
     return os.path.join(out_dir, "partial.json")
 
 
-def _save_partial(out_dir, manifest, write_params, write_opt):
+def _save_partial(out_dir, manifest, write_params, write_opt, write_ema=None):
     """Write one rolling mid-epoch checkpoint generation.
 
     The state files carry the epoch and step in their names and the manifest,
@@ -122,6 +130,9 @@ def _save_partial(out_dir, manifest, write_params, write_opt):
 
     tag = f"partial.e{int(manifest['epoch']):04d}.s{int(manifest['step']):06d}"
     names = {"params_file": tag + ".eqx", "opt_file": tag + ".opt.eqx"}
+    if write_ema is not None:
+        names["ema_file"] = tag + ".ema.eqx"
+        _atomic_write(os.path.join(out_dir, names["ema_file"]), write_ema)
     _atomic_write(os.path.join(out_dir, names["params_file"]), write_params)
     _atomic_write(os.path.join(out_dir, names["opt_file"]), write_opt)
     payload = _json.dumps({**manifest, **names})
@@ -173,7 +184,11 @@ def _read_partial(out_dir, epoch, n_samples, expect_fp, content):
             or not (isinstance(pf, str) and isinstance(of, str))
             or os.path.basename(pf) != pf or os.path.basename(of) != of
             or not (os.path.exists(os.path.join(out_dir, pf))
-                    and os.path.exists(os.path.join(out_dir, of)))):
+                    and os.path.exists(os.path.join(out_dir, of)))
+            or ("ema_file" in obj and not (
+                isinstance(obj["ema_file"], str)
+                and os.path.basename(obj["ema_file"]) == obj["ema_file"]
+                and os.path.exists(os.path.join(out_dir, obj["ema_file"]))))):
         raise RuntimeError(f"resume: {mp} is malformed or its state files "
                            "are missing")
     return obj, os.path.join(out_dir, pf), os.path.join(out_dir, of)
@@ -769,6 +784,10 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
                    help="Save a rolling mid-epoch checkpoint every n steps so "
                         "a walltime kill loses at most n steps (0 = only at "
                         "epoch ends). Single logical trainer only.")
+    p.add_argument("--gate-only", action="store_true", dest="gate_only",
+                   help="Run the gradient-access gate on the run's next real "
+                        "steps, report, and exit (0 = every trainable "
+                        "parameter has access) without training.")
     a = p.parse_args(argv)
     if a.checkpoint_every_steps < 0:
         raise SystemExit("--checkpoint-every-steps must be >= 0, got "
@@ -798,6 +817,7 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
         column_devices=a.column_devices,
         adjoint_steps=a.adjoint_steps, probe_scenes=a.probe_scenes,
         checkpoint_every_steps=a.checkpoint_every_steps,
+        gate_only=a.gate_only,
     )
 
 
@@ -1242,10 +1262,25 @@ def _main(argv=None):
         if cfg.adjoint_steps > roll_steps:
             raise SystemExit(f"--adjoint-steps {cfg.adjoint_steps} exceeds the "
                              f"{roll_steps}-step rollout")
+        # User 2026-11-06: radiation must always be differentiated.  It is
+        # refreshed every rad_update_interval_steps and cached between, and
+        # the adjoint cut detaches the cache, so a window shorter than the
+        # interval can hold no radiation refresh at all (the 1-step CAM6
+        # adjoint left every radiation-only knob with an exactly-zero
+        # gradient).  A window of >= interval steps always holds one.
+        if cfg.mode == "physics":
+            _ri = int((yml.get("classical") or {}).get(
+                "rad_update_interval_steps", 6))
+            if cfg.adjoint_steps < _ri:
+                raise SystemExit(
+                    f"--adjoint-steps {cfg.adjoint_steps} is shorter than the "
+                    f"radiation interval ({_ri} steps): the differentiated "
+                    "window would contain no radiation refresh. Use >= "
+                    f"{_ri} (or 0 = the whole rollout).")
         log.info("truncated adjoint: forecasting %d steps, differentiating the "
                  "last %d; target and scored objective unchanged. The "
-                 "reachability freeze below sees the SAME windowed gradient: a "
-                 "leaf reachable only before the window is frozen.",
+                 "gradient-access gate sees the SAME windowed gradient: a leaf "
+                 "reachable only before the window aborts the run.",
                  roll_steps, cfg.adjoint_steps)
 
     from legoesm.training.scale_build import (
@@ -1410,6 +1445,7 @@ def _main(argv=None):
     # processes have compared outcomes, so one cannot raise while the rest
     # wait in a collective.
     start_step, start_losses, start_skipped, _partial_opt = 0, [], 0, None
+    _partial_ema = None
     _partial_err, _partial_crc = None, (0, 0, 0)
     if cfg.resume and nproc == 1 and start_epoch < cfg.n_epochs:
         try:
@@ -1436,6 +1472,8 @@ def _main(argv=None):
                 start_step = int(_pm_["step"])
                 start_losses = [float(x) for x in _pm_["losses"]]
                 start_skipped = int(_pm_["skipped"])
+                if "ema_file" in _pm_:
+                    _partial_ema = _os.path.join(cfg.out_dir, _pm_["ema_file"])
                 log.info("resume: epoch %d continues after step %d/%d from "
                          "%s", start_epoch, start_step, len(local), _ppath)
             except Exception as _e:   # noqa: BLE001 -- re-raised after agreement
@@ -1501,7 +1539,6 @@ def _main(argv=None):
     # epoch loop and again after it.
     if _uses_reachability_freeze(cfg.mode):
         from legoesm.training.inert_params import (
-            freeze_unreachable,
             measure_leaf_reachability,
             mpi_max_reduce,
             probe_indices,
@@ -1551,6 +1588,18 @@ def _main(argv=None):
 
         if resumed_frozen is not None:
             # Same trainable set as the job that wrote the optimizer state.
+            # A manifest from before the gradient-access gate may list leaves
+            # frozen by the old measured zero-gradient probe, with no stated
+            # reason: refused (only the policy freeze is a reasoned exclusion).
+            from legoesm.training.inert_params import surface_policy_frozen_names
+            _pol = set(surface_policy_frozen_names(yml, params)[0] or ())
+            _legacy = sorted(set(resumed_frozen) - _pol)
+            if _legacy:
+                raise SystemExit(
+                    "resume: the checkpoint's trainable set froze leaves by the "
+                    "old zero-gradient probe, without a stated reason "
+                    f"({len(_legacy)}: {', '.join(_legacy)}); refusing to "
+                    "continue it under the gradient-access gate. Start fresh.")
             from legoesm.training.inert_params import trainable_filter_spec
 
             _arr_all = eqx.partition(params, eqx.is_inexact_array)[0]
@@ -1575,25 +1624,12 @@ def _main(argv=None):
                 import _probe_wb_mem_total as _pm
                 _pm.run(_probe_vg, eqx.partition(params, eqx.is_inexact_array)[0],
                         local[0], label=_os.environ.get("LEGOESM_WB_MEM_ARM", "?"))
-            def _save_probe_progress(n_done, absmax, n_used):
-                if rank != 0 or nproc != 1:
-                    return
-                import os as _os
-                import pathlib as _pathlib
-
-                _os.makedirs(cfg.out_dir, exist_ok=True)
-                _payload = json.dumps({
-                    "schema": _MANIFEST_SCHEMA, "fingerprint": _probe_fp,
-                    "n_done": n_done, "absmax": absmax, "n_used": n_used,
-                    **_content_payload(_probe_content)})
-                _atomic_write(_probe_progress_path(cfg.out_dir),
-                              lambda t: _pathlib.Path(t).write_text(_payload))
-
-            arr, static, frozen_names, n_probe_used = freeze_unreachable(
-                params, _probe_vg, local, n_probe=cfg.probe_scenes,
-                num_processes=nproc,
-                device_put=place_sample, resume_state=_probe_resume,
-                on_scene=_save_probe_progress)
+            # The measured zero-gradient freeze is GONE (user 2026-11-05: the
+            # silent freeze becomes an abort).  Only the POLICY freeze, whose
+            # reason is stated, removes leaves; the gradient-access gate before
+            # training aborts on any other leaf the loss cannot move.
+            arr, static = eqx.partition(params, eqx.is_inexact_array)
+            frozen_names, n_probe_used = [], 0
             arr, static, frozen_names = _policy_freeze(arr, static, frozen_names)
             # Persist the measurement immediately: at T63/si_substeps=3 the
             # probe costs ~9 h, and a link killed between here and the first
@@ -1621,13 +1657,8 @@ def _main(argv=None):
                      "checkpoint, not re-measured -- a resume must not change "
                      "the trainable set)", n_live, len(frozen_names))
         else:
-            log.info("trainable leaves: %d live, %d frozen (unreachable on "
-                     "every one of %d usable probe scenes)",
-                     n_live, len(frozen_names), n_probe_used)
-        if frozen_names:
-            log.warning("FROZEN, no gradient on any scene in this shard at "
-                        "the initial parameters: %s",
-                        ", ".join(frozen_names))
+            log.info("trainable leaves: %d live, %d frozen by policy "
+                     "(reason logged above)", n_live, len(frozen_names))
         if n_live == 0:
             raise RuntimeError(
                 "every trainable leaf is unreachable in this configuration -- "
@@ -1653,11 +1684,14 @@ def _main(argv=None):
     def _stage_of(epoch):
         return int(epoch) * len(_curriculum) // max(int(cfg.n_epochs), 1)
 
-    optimizer = create_optimizer(TrainingConfig(
+    # ONE TrainingConfig: the optimizer and the gradient-access gate's view of
+    # its learning-rate schedule come from the same object.
+    _train_cfg = TrainingConfig(
         lr=cfg.lr, optimizer=cfg.optimizer,
         warmup_steps=warmup, total_steps=total_steps,
         weight_decay=weight_decay, grad_clip_norm=grad_clip_norm,
-    ))
+    )
+    optimizer = create_optimizer(_train_cfg)
     _fingerprint = _run_fingerprint(cfg, yml, warmup, roll_steps,
                                     len(local) * nproc, nproc)
     opt_state = optimizer.init(arr)
@@ -1682,6 +1716,44 @@ def _main(argv=None):
         opt_state = place_rep(opt_state)
         _assert_processes_agree([len(frozen_names), _crc_names(frozen_names)],
                                 "frozen parameter set")
+
+    # EMA of the trained weights (deck ``ema_decay``; vote 2026-11-06: copy of
+    # the parameters at the first step, no debiasing).  A resume continues the
+    # saved EMA and refuses to start without it: re-seeding it from the
+    # resumed parameters would silently restart the average.
+    from legoesm.training.scale_build import wb_ema_decay
+    _ema_decay = wb_ema_decay(yml)
+    _ema = None
+    if _ema_decay > 0.0:
+        _ema = {"tree": None}            # None: copied from the first step's parameters
+        _ema_err = None
+        if _partial_opt is not None or start_epoch > 0:
+            _ema_src = (_partial_ema if _partial_opt is not None
+                        else _ema_path(cfg.out_dir, start_epoch - 1))
+            try:
+                if _ema_src is None or not _os.path.exists(_ema_src):
+                    raise FileNotFoundError("no EMA file saved with this checkpoint")
+                _ema_full = eqx.tree_deserialise_leaves(
+                    _ema_src, eqx.combine(arr, static))
+                _ema["tree"] = eqx.filter(_ema_full, jax.tree.map(
+                    lambda x: x is not None, arr, is_leaf=lambda x: x is None))
+                del _ema_full            # no second device copy during the gate
+            except Exception as _e:   # noqa: BLE001 -- re-raised after agreement
+                _ema_err = RuntimeError(
+                    f"resume: ema_decay={_ema_decay} but the EMA weights of the "
+                    f"checkpoint cannot be restored ({_ema_src}: {_e}). Start a "
+                    "fresh output directory.")
+        if place_rep is not None:
+            _assert_processes_agree([int(_ema_err is not None)], "EMA restore")
+        if _ema_err is not None:
+            raise _ema_err
+        if _ema["tree"] is not None:
+            # Host-parked until training starts (the gate rehearses with the
+            # parameters and optimizer state alone on the device).
+            _ema["tree"] = (jax.device_get(_ema["tree"]) if place_rep is None
+                            else place_rep(_ema["tree"]))
+        log.info("EMA of the weights on (decay %g), %s", _ema_decay,
+                 "restored" if _ema["tree"] is not None else "starting as a copy")
 
     import os
     os.makedirs(cfg.out_dir, exist_ok=True)
@@ -1758,22 +1830,32 @@ def _main(argv=None):
     def on_epoch(epoch, mean_loss, cur_arr, cur_opt_state):
         # Every rank runs the validation pass: it ends in a collective.
         val_loss, val_terms = _validation_loss(cur_arr)
+        # The EMA is scored on the same held-out samples (vote 2026-11-06:
+        # both curves; checkpoints are selected and evaluated on the EMA).
+        cur_ema = None if _ema is None else _ema["tree"]
+        val_ema, val_terms_ema = ((None, {}) if cur_ema is None
+                                  else _validation_loss(cur_ema))
         if column_mesh is not None:
             # Host copies: rank 0 alone must not launch computations on
             # arrays that span every process.
-            cur_arr, cur_opt_state = jax.device_get((cur_arr, cur_opt_state))
+            cur_arr, cur_opt_state, cur_ema = jax.device_get(
+                (cur_arr, cur_opt_state, cur_ema))
         if rank == 0:
             if val_loss is None:
                 log.info("Epoch %4d: loss=%.6f", epoch, mean_loss)
             else:
-                log.info("Epoch %4d: loss=%.6f val=%.6f",
-                         epoch, mean_loss, val_loss)
+                log.info("Epoch %4d: loss=%.6f val=%.6f%s",
+                         epoch, mean_loss, val_loss,
+                         "" if val_ema is None else f" val_ema={val_ema:.6f}")
             # One line per epoch: the two losses and every trained parameter
             # in PHYSICAL units, so the run's parameter trajectory can be read
             # without loading a checkpoint and inverting the transforms.
             _row = {"epoch": int(epoch), "train_loss": float(mean_loss),
                     "val_loss": None if val_loss is None else float(val_loss),
                     "val_terms": val_terms,
+                    **({} if cur_ema is None else
+                       {"val_loss_ema": None if val_ema is None else float(val_ema),
+                        "val_terms_ema": val_terms_ema}),
                     "params": _physical_params(eqx.combine(cur_arr, _static_h))}
             if _leads:
                 # What each loss scored: the stage's leads vs the full horizon.
@@ -1810,6 +1892,10 @@ def _main(argv=None):
                 t, checkpoint_view(eqx.combine(cur_arr, _static_h))))
             _atomic_write(opath, lambda t: eqx.tree_serialise_leaves(
                 t, cur_opt_state))
+            if cur_ema is not None:
+                _atomic_write(_ema_path(cfg.out_dir, epoch),
+                              lambda t: eqx.tree_serialise_leaves(
+                                  t, checkpoint_view(eqx.combine(cur_ema, _static_h))))
             # Written LAST: it is the marker that says this epoch is
             # complete, and the chain wrapper keys its progress check off it.
             _atomic_write(fpath, lambda t: pathlib.Path(t).write_text(
@@ -1823,8 +1909,10 @@ def _main(argv=None):
         if (nproc != 1 or not _every or n_done % _every
                 or n_done >= len(local)):
             return
+        cur_ema = None if _ema is None else _ema["tree"]
         if column_mesh is not None:
-            cur_arr, cur_opt_state = jax.device_get((cur_arr, cur_opt_state))
+            cur_arr, cur_opt_state, cur_ema = jax.device_get(
+                (cur_arr, cur_opt_state, cur_ema))
         if rank != 0:
             return
         from legoesm.ml.training import checkpoint_view
@@ -1836,7 +1924,9 @@ def _main(argv=None):
              "skipped": int(n_skipped), **_content_payload(_probe_content)},
             lambda t: eqx.tree_serialise_leaves(
                 t, checkpoint_view(eqx.combine(cur_arr, _static_h))),
-            lambda t: eqx.tree_serialise_leaves(t, cur_opt_state))
+            lambda t: eqx.tree_serialise_leaves(t, cur_opt_state),
+            None if cur_ema is None else (lambda t: eqx.tree_serialise_leaves(
+                t, checkpoint_view(eqx.combine(cur_ema, _static_h)))))
 
     # Per-epoch shuffle (deck ``shuffle_seed``): a pure function of the epoch,
     # so every process and every mid-epoch resume draws the same order.
@@ -1846,15 +1936,87 @@ def _main(argv=None):
     _epoch_order = (None if _seed is None
                     else (lambda e: epoch_permutation(_seed, e, len(local))))
 
+    # Gradient-access gate (user rule 2026-11-05), before ANY training and
+    # again at every curriculum stage switch (each stage has its own
+    # objective): the run's own next steps are rehearsed and discarded; a
+    # trainable element the loss or the update cannot reach aborts the run on
+    # every rank.
+    from legoesm.ml.training import make_lr_schedule
+    from legoesm.training.data_parallel import build_dp_value_and_grad
+    from legoesm.training.inert_params import gradient_access_gate
+
+    _stage_vg = {}
+
+    def _vg_of(k):
+        # One compiled value-and-grad per stage, shared with the training loop.
+        if k not in _stage_vg:
+            _stage_vg[k] = build_dp_value_and_grad(_stage_fns[k][0])
+        return _stage_vg[k]
+
+    def _units_from(e_start, s_start):
+        # Exactly the units the training loop visits from (e_start, s_start).
+        for _e in range(e_start, int(cfg.n_epochs)):
+            _order = (range(len(local)) if _epoch_order is None
+                      else _epoch_order(_e))
+            for _i, _kk in enumerate(_order):
+                if _e == e_start and _i < s_start:
+                    continue
+                yield _vg_of(_stage_of(_e)), local[_kk]
+
+    def _gate_from(e_start, s_start):
+        nonlocal arr, opt_state
+        # The rehearsal must not hold a second device copy of the parameters
+        # and optimizer state beside its own: park the run's copy on the host
+        # and hand the gate the only device reference (exact round trip).
+        # Column-sharded runs keep their placement (their parameters are
+        # small; the activations are what is sharded).
+        if column_mesh is None:
+            arr, opt_state = jax.device_get((arr, opt_state))
+            if _ema is not None:
+                _ema["tree"] = jax.device_get(_ema["tree"])
+            _start = list(jax.device_put((arr, opt_state)))
+        else:
+            _start = [arr, opt_state]
+        gradient_access_gate(
+            _units_from(e_start, s_start), _start, optimizer,
+            make_lr_schedule(_train_cfg), optimizer_name=cfg.optimizer,
+            num_processes=nproc,
+            place=jax.device_put if column_mesh is None else place_sample,
+            log=log)
+        if column_mesh is None:
+            arr, opt_state = jax.device_put((arr, opt_state))
+            if _ema is not None:
+                _ema["tree"] = jax.device_put(_ema["tree"])
+
+    _n_st = len(_curriculum)
+    _k_first = (_stage_of(start_epoch) if start_epoch < cfg.n_epochs
+                else _n_st)
+    if cfg.gate_only:
+        # Every remaining stage's objective, from the starting parameters.
+        for _k in range(_k_first, _n_st):
+            _e0 = _k * cfg.n_epochs // _n_st
+            if start_epoch >= _e0:
+                _gate_from(start_epoch, start_step)
+            else:
+                _gate_from(_e0, 0)
+        if _k_first >= _n_st:
+            raise SystemExit("--gate-only: no training left in this run "
+                             "(start epoch past the last stage); nothing "
+                             "was verified")
+        log.info("--gate-only: gate passed for %d stage(s), exiting without "
+                 "training", _n_st - _k_first)
+        return None
+
     # Curriculum: stage k runs epochs [k, k+1) * n_epochs / n_stages with its
     # own objective; the optimizer state and schedule carry straight through.
     history = []
-    _n_st = len(_curriculum)
-    for _k in range(_stage_of(start_epoch) if start_epoch < cfg.n_epochs
-                    else _n_st, _n_st):
+    for _k in range(_k_first, _n_st):
         _e0 = _k * cfg.n_epochs // _n_st
         _e1 = (_k + 1) * cfg.n_epochs // _n_st
         _first = start_epoch >= _e0
+        _gate_from(start_epoch if _first else _e0, start_step if _first else 0)
+        if _ema is not None and _ema["tree"] is None:
+            _ema["tree"] = arr            # copy-init (arrays are immutable)
         if _leads:
             log.info("curriculum stage %d/%d: epochs %d-%d score leads %s h",
                      _k + 1, _n_st, _e0, _e1 - 1, list(_leads[:_curriculum[_k]]))
@@ -1866,7 +2028,8 @@ def _main(argv=None):
             start_step=start_step if _first else 0,
             start_losses=start_losses if _first else (),
             start_skipped=start_skipped if _first else 0,
-            epoch_order=_epoch_order)
+            epoch_order=_epoch_order, value_and_grad_fn=_vg_of(_k),
+            ema=_ema, ema_decay=_ema_decay)
         history += list(_hist)
     params = eqx.combine(arr, static)
     log.info("training done: final loss=%.6f", history[-1] if history else float("nan"))

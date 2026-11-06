@@ -31,7 +31,7 @@ _SIC_VAR = "sea_ice_cover"
 _LSM_VAR = "land_sea_mask"
 
 
-def _regrid_field_2d(field_2d, era5_lat_deg, era5_lon_deg, grid):
+def regrid_era5_field_2d(field_2d, era5_lat_deg, era5_lon_deg, grid):
     """Regrid a (lat, lon) ERA5 field to the Gaussian grid (n_lat, n_lon).
 
     ``regrid_2d_to_gaussian`` needs ascending latitude in RADIANS; ERA5 is
@@ -92,11 +92,11 @@ def regrid_monthly_forcing_to_gaussian(forcing_path, grid, cache_path=None):
     sst_da = ds[_SST_VAR].values
     sic_da = ds[_SIC_VAR].values
     for i in range(n_t):
-        sst[i] = _regrid_field_2d(sst_da[i], lat_deg, lon_deg, grid).reshape(-1)
+        sst[i] = regrid_era5_field_2d(sst_da[i], lat_deg, lon_deg, grid).reshape(-1)
         sic[i] = np.clip(
-            _regrid_field_2d(sic_da[i], lat_deg, lon_deg, grid).reshape(-1), 0.0, 1.0
+            regrid_era5_field_2d(sic_da[i], lat_deg, lon_deg, grid).reshape(-1), 0.0, 1.0
         )
-    land = _regrid_field_2d(ds[_LSM_VAR].values, lat_deg, lon_deg, grid).reshape(-1)
+    land = regrid_era5_field_2d(ds[_LSM_VAR].values, lat_deg, lon_deg, grid).reshape(-1)
     ds.close()
 
     if cache_path is not None:
@@ -264,7 +264,7 @@ def ozone_vmr_at_date(ds_arco, date, grid, sigma_full, p_s_col):
     lon = np.asarray(ds_arco.longitude.values, dtype=np.float64)
     # Regrid each pressure level to the Gaussian grid -> (ncol, n_plev).
     o3_g = np.stack(
-        [_regrid_field_2d(o3[k], lat, lon, grid).reshape(-1) for k in range(o3.shape[0])],
+        [regrid_era5_field_2d(o3[k], lat, lon, grid).reshape(-1) for k in range(o3.shape[0])],
         axis=-1,
     )
     plev_pa = lev_hpa * 100.0

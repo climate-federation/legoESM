@@ -51,7 +51,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["assert_no_inert", "assert_no_inert_over", "measure_leaf_reachability",
            "trainable_filter_spec",
-           "mpi_max_reduce", "probe_indices", "freeze_unreachable"]
+           "mpi_max_reduce", "probe_indices", "freeze_unreachable",
+           "gradient_access_gate", "GATE_K_MAX"]
 
 
 def assert_no_inert(g: dict) -> None:
@@ -440,3 +441,408 @@ def freeze_unreachable(params, value_and_grad_fn, samples, *, n_probe=None,
     trainable, frozen = eqx.partition(params, spec)
     frozen_names = [nm for nm, m in zip(names, absmax) if not m > 0.0]
     return trainable, frozen, frozen_names, n_used
+
+
+# ---------------------------------------------------------------------------
+# Gradient-access gate (user rule 2026-11-05: "ensure we have access to the
+# parameters that need to be trained. This should always be checked before any
+# training.").  Design reviewed to GO by codex and GLM (round 7).
+# ---------------------------------------------------------------------------
+
+#: Longest rehearsal the gate runs before refusing (VOTED 3-0: Claude, codex,
+#: GLM).  Real schedules need 4 steps fresh (lr = 0 only at step 0) and 3 on
+#: resume; a schedule needing more is an unreviewed shape and fails closed.
+GATE_K_MAX = 8
+
+#: Rehearse until this many steps with lr > 0 have run (VOTED 3-0, round 2:
+#: Claude, codex, GLM).  A zero-initialised final layer delays the layers
+#: upstream of it by one update, and a zero-initialised learned embedding
+#: feeding a first layer delays that layer's embedding columns by one more:
+#: the real v9 NeuralGCM's embedding columns first get a gradient on the
+#: THIRD lr > 0 step (4 steps on a fresh run, lr = 0 at step 0).  A deeper
+#: zero-init chain aborts, named.
+_GATE_N_POSITIVE = 3
+
+#: Optimizers whose update with ZERO parameters is exactly the gradient-driven
+#: update: AdamW's decoupled decay term is ``weight_decay * params`` and its
+#: moments depend on the gradient only.  Any other optimizer refuses the run.
+_GATE_OPTIMIZERS = ("adamw",)
+
+
+class GradientAccessError(SystemExit):
+    """The gate's verdict: raised identically on every rank."""
+
+
+class _JaxControl:
+    """Control channel for a JAX multi-process job without MPI (the
+    column-sharded trainer: one logical trainer over many processes, joined
+    by ``jax.distributed``): integer gathers over every process."""
+
+    def gather(self, v: int):
+        import numpy as np
+        from jax.experimental import multihost_utils
+        return np.asarray(multihost_utils.process_allgather(
+            np.asarray(int(v), np.int64))).reshape(-1)
+
+    def Free(self):
+        pass
+
+
+def _any_rank(flag: int, comm) -> int:
+    """MAX of an integer over every process (identity without ``comm``)."""
+    if comm is None:
+        return int(flag)
+    if isinstance(comm, _JaxControl):
+        return int(comm.gather(flag).max())
+    from mpi4py import MPI
+    return int(comm.allreduce(int(flag), op=MPI.MAX))
+
+
+def _ranks_agree(value: int, comm) -> bool:
+    if comm is None:
+        return True
+    if isinstance(comm, _JaxControl):
+        g = comm.gather(value)
+        return bool(g.min() == g.max())
+    from mpi4py import MPI
+    return (comm.allreduce(int(value), op=MPI.MAX)
+            == comm.allreduce(int(value), op=MPI.MIN))
+
+
+def _schedule_count(opt_state) -> int:
+    """The step count the learning-rate schedule reads next."""
+    import optax
+    st = [x for x in jax.tree_util.tree_leaves(
+        opt_state, is_leaf=lambda x: isinstance(x, optax.ScaleByScheduleState))
+        if isinstance(x, optax.ScaleByScheduleState)]
+    if len(st) != 1:
+        raise ValueError(f"expected one learning-rate schedule in the "
+                         f"optimizer state, found {len(st)}")
+    return int(st[0].count)
+
+
+def _adamw_chain_problem(opt_state):
+    """None if ``opt_state`` has exactly the structure of
+    ``create_optimizer``'s clip + AdamW chain, else what differs.  Checked on
+    the STATE, not a name: a mislabelled or wrapped (masked, partitioned)
+    optimizer changes the state's structure."""
+    import optax
+    st = opt_state
+    ok = (isinstance(st, tuple) and len(st) == 2
+          and isinstance(st[0], optax.EmptyState)
+          and isinstance(st[1], tuple) and len(st[1]) == 3
+          and isinstance(st[1][0], optax.ScaleByAdamState)
+          and isinstance(st[1][1], optax.EmptyState)
+          and isinstance(st[1][2], optax.ScaleByScheduleState))
+    if ok:
+        return None
+    return ("optimizer state is not the clip_by_global_norm + adamw chain "
+            f"create_optimizer builds: {jax.tree_util.tree_structure(st)}")
+
+
+def gradient_access_gate(steps, start, optimizer, schedule, *,
+                         optimizer_name, num_processes=1, place=None,
+                         excluded=None, k_max=GATE_K_MAX, log=None):
+    """Rehearse the run's next real steps and abort unless every trainable
+    element is reachable by the loss AND by the update that trains it.
+
+    ``steps``: iterator of ``(value_and_grad_fn, sample)`` for the units the
+    run will take next, in order (the run's own objective per curriculum stage
+    and its own sample order).  ``start``: the LIST ``[params, opt_state]``
+    (trainable array tree and optimizer state the run starts from).  The gate
+    takes the two out and CLEARS the list, so a caller that keeps no other
+    reference lets the starting copy be freed after the first update; the
+    trees themselves are never modified (functional updates, discarded).  ``schedule``:
+    the learning rate at an optimizer step count (``make_lr_schedule``).
+
+    Each rehearsal step mirrors ``mpi_data_parallel_train_step``: local value
+    and gradient, cross-rank MEAN, ``optimizer.update``, the shared
+    ``apply_param_updates``.  With ``g`` the post-mean gradient,
+    ``du = optimizer.update(g, s, zeros)`` (decay-free update) and
+    ``ulp = |spacing(p)|``, an element passes when it ever has ``g != 0`` AND
+    ever ``du != 0`` AND, on every step where ``du != 0`` and ``|du| >= ulp``,
+    ``apply(p, du) != p``.  A leaf none of whose elements had a step with
+    ``|du| >= ulp`` aborts as "apply path unverified" (VOTED 3-0).
+
+    The rehearsal runs until the ``_GATE_N_POSITIVE``-th step with lr > 0
+    (zero-initialised layers and embeddings make what they gate live one or
+    two updates later), at most ``k_max`` steps; a run that ends sooner has
+    all its remaining steps rehearsed, of which at least one must have lr > 0.  ``excluded``: optional tree of bool masks (MEASURED exclusions,
+    elements zero by construction); an excluded element must have value 0 and
+    gradient 0 on every rehearsal step.
+
+    Every per-rank failure (exception incl. out-of-memory, non-finite loss or
+    gradient, tree mismatch) is turned into a flag combined by allreduce MAX at
+    two points per step -- before the gradient allreduce and after the update
+    -- so all ranks raise together.  A HANG (not an exception) between those
+    points is bounded only by the collective timeout and the MPI abort wrapper.
+
+    Returns a report dict (per-leaf counts, ``k``, the rehearsal's final
+    params/opt_state for tests).  Raises ``GradientAccessError`` (exit code 1)
+    on any failure, on every rank.
+    """
+    log = logger if log is None else log
+    place = (lambda x: x) if place is None else place
+    # Control flags go to EVERY process (a column-sharded run has one logical
+    # trainer, num_processes=1, over many processes) on a private duplicate
+    # communicator, so they can never interleave with the gradient traffic.
+    # MPI data parallel (num_processes > 1): a private Dup of COMM_WORLD.
+    # A JAX multi-process job without MPI data parallel (column sharding):
+    # JAX's own process gathers, since such a job need not load MPI at all.
+    # Otherwise an MPI job whose JAX is not distributed-initialised still
+    # gets the MPI channel; no MPI library at all = a single process.
+    comm = None
+    if int(num_processes) > 1:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD.Dup()
+    elif jax.process_count() > 1:
+        comm = _JaxControl()
+    else:
+        try:
+            from mpi4py import MPI
+            if MPI.COMM_WORLD.Get_size() > 1:
+                comm = MPI.COMM_WORLD.Dup()
+        except (ImportError, RuntimeError):
+            pass
+    try:
+        # ``start`` itself is handed on (not unpacked here), so no frame of
+        # this wrapper keeps the starting trees alive during the rehearsal.
+        return _gate_body(steps, start, optimizer, schedule,
+                          optimizer_name, num_processes, place, excluded,
+                          k_max, log, comm)
+    finally:
+        if comm is not None:
+            comm.Free()
+
+
+def _gate_body(steps, start, optimizer, schedule, optimizer_name,
+               num_processes, place, excluded, k_max, log, comm):
+    import zlib
+
+    import numpy as np
+    from legoesm.training.data_parallel import (
+        all_reduce_grad_mean,
+        apply_param_updates,
+    )
+
+    def fail(msg):
+        raise GradientAccessError(f"GRADIENT-ACCESS GATE FAILED: {msg}")
+
+    def sync(err, what):
+        # Every process reaches this; any local failure fails all of them.
+        if _any_rank(int(err is not None), comm):
+            fail(f"{what} (local: {err or 'ok'})")
+
+    host = np.asarray   # verdict arrays live on the HOST: no device memory
+    params, opt_state = start
+    start.clear()
+    err, sig = None, 0
+    try:
+        if optimizer_name not in _GATE_OPTIMIZERS:
+            raise ValueError(f"optimizer {optimizer_name!r} is not one the gate "
+                             f"can verify ({', '.join(_GATE_OPTIMIZERS)})")
+        problem = _adamw_chain_problem(opt_state)
+        if problem:
+            raise ValueError(problem)
+        leaves, treedef = jax.tree_util.tree_flatten(params)
+        names = [jax.tree_util.keystr(pth)
+                 for pth, _ in jax.tree_util.tree_leaves_with_path(params)]
+        if not leaves:
+            raise ValueError("the trainable tree is empty")
+        bad_dt = [n for n, x in zip(names, leaves)
+                  if jnp.dtype(x.dtype) not in (jnp.float32, jnp.float64)]
+        if bad_dt:
+            raise ValueError(f"trainable leaves must be float32/float64: {bad_dt}")
+        empty = [n for n, x in zip(names, leaves) if x.size == 0]
+        if empty:
+            raise ValueError(f"empty trainable leaves: {empty}")
+        shapes = [tuple(x.shape) for x in leaves]
+        sizes = [int(x.size) for x in leaves]
+        ex = ([np.zeros(sh, bool) for sh in shapes] if excluded is None
+              else [host(m).astype(bool) for m in treedef.flatten_up_to(excluded)])
+        if [m.shape for m in ex] != shapes:
+            raise ValueError("exclusion masks do not match the leaf shapes")
+        sig = zlib.crc32(repr((str(treedef), [(n, sh, str(x.dtype)) for n, sh, x
+                                              in zip(names, shapes, leaves)])).encode())
+        bad_ex = [n for n, x, m in zip(names, leaves, ex)
+                  if m.any() and bool(np.any(host(x)[m] != 0))]
+        if bad_ex:
+            raise ValueError("excluded elements must be exactly 0 (weight decay "
+                             f"would move them otherwise): {bad_ex}")
+        count0 = _schedule_count(opt_state)
+        # Ranks must agree on the optimizer state's structure and schedule
+        # position too, or they would rehearse different step counts.
+        sig = zlib.crc32(repr((sig, str(jax.tree_util.tree_structure(opt_state)),
+                               count0)).encode())
+        acc = {k: [np.zeros(sh, bool) for sh in shapes]
+               for k in ("g", "du", "mvfail", "checked", "exgrad")}
+    except Exception as e:   # noqa: BLE001 -- flagged, raised on all processes
+        err = f"{type(e).__name__}: {e}"
+    sync(err, "gate setup failed")
+    if not _ranks_agree(sig, comm):
+        fail("the trainable tree differs between ranks")
+
+    # Only the rehearsal's own copies stay referenced from here on: a caller
+    # that hands over its only reference (the trainer moves its own copy to
+    # the host first) frees the starting tree after the first update.
+    p, s = params, opt_state
+    del params, opt_state, leaves
+    n_pos, k, lrs = 0, 0, []
+    it = iter(steps)
+    while n_pos < _GATE_N_POSITIVE:
+        if k >= k_max:
+            fail(f"no step number {_GATE_N_POSITIVE} with lr > 0 within {k_max} rehearsal steps "
+                 f"(lr = {lrs}); the schedule keeps lr at 0 too long")
+        # --- sync (a): local step, BEFORE the gradient allreduce ---------
+        err, exhausted, gsig = None, False, 0
+        try:
+            try:
+                vg, sample = next(it)
+            except StopIteration:
+                exhausted = True
+            if not exhausted:
+                loss, g = vg(p, place(sample))
+                del sample
+                g_l = treedef.flatten_up_to(g)
+                # What the gradient allreduce will pack, per rank: must agree.
+                gsig = zlib.crc32(repr([(tuple(x.shape), str(x.dtype))
+                                        for x in g_l]).encode())
+                if not (bool(jnp.isfinite(loss)) and all(
+                        bool(jnp.all(jnp.isfinite(x))) for x in g_l)):
+                    err = f"non-finite local loss/gradient (loss={float(loss)!r})"
+                del g_l
+        except Exception as e:   # noqa: BLE001 -- flagged, raised on all ranks
+            err = f"{type(e).__name__}: {e}"
+        if _any_rank(int(exhausted), comm):
+            # Every rank must have run out together, and a rank that did run
+            # a step must not have failed it.
+            sync(err, f"rehearsal step {k + 1} failed")
+            if _any_rank(int(not exhausted), comm):
+                fail("ranks ran out of rehearsal steps at different points")
+            # The run ends before the third lr > 0 step: every remaining step
+            # was rehearsed (vote 2026-11-06, 3-0); at least one must update.
+            if n_pos == 0:
+                fail(f"no lr > 0 step left in the run (lr = {lrs}); nothing "
+                     "left whose gradient access could be verified")
+            log.warning("gradient-access gate: the run has only %d lr > 0 "
+                        "step(s) left; ALL remaining steps rehearsed (lr = %s)",
+                        n_pos, lrs)
+            break
+        sync(err, f"rehearsal step {k + 1} failed")
+        if not _ranks_agree(gsig, comm):
+            fail(f"rehearsal step {k + 1}: gradient packing differs between ranks")
+        err = None
+        try:
+            g = all_reduce_grad_mean(g, num_processes)
+            # Complete the (asynchronously dispatched) gradient collective
+            # before any host control collective can run.
+            g = jax.block_until_ready(g)
+        except Exception as e:   # noqa: BLE001
+            err = f"{type(e).__name__}: {e}"
+        sync(err, f"rehearsal step {k + 1} gradient mean failed")
+        # --- sync (b): update and verdicts, AFTER the allreduce ----------
+        # Order keeps at most one extra parameter-sized tree alive beyond
+        # what the training step itself holds: the decay-free update ``du``
+        # is formed (from a zeros tree) and judged leaf by leaf, then dropped,
+        # before the run's own update is formed.
+        err = None
+        try:
+            lr = float(schedule(count0 + k))
+            du = optimizer.update(
+                g, s, jax.tree_util.tree_map(jnp.zeros_like, p))[0]
+            # The movement probe goes through the SAME tree-level application
+            # the run uses (one transient tree), judged leaf by leaf.
+            moved = treedef.flatten_up_to(apply_param_updates(p, du))
+            for i, (gi, di, pi) in enumerate(zip(
+                    treedef.flatten_up_to(g), treedef.flatten_up_to(du),
+                    treedef.flatten_up_to(p))):
+                if not (bool(jnp.all(jnp.isfinite(gi)))
+                        and bool(jnp.all(jnp.isfinite(di)))):
+                    err = "non-finite mean gradient or update"
+                # du != 0 too: spacing(0) is 0 where denormals flush to zero,
+                # which would make a zero update "checkable" against itself.
+                chk = (di != 0) & (jnp.abs(di) >= jnp.abs(jnp.spacing(pi)))
+                mi = moved[i]
+                moved[i] = None
+                acc["g"][i] |= host(gi != 0)
+                acc["du"][i] |= host(di != 0)
+                acc["checked"][i] |= host(chk)
+                acc["mvfail"][i] |= host(chk & (mi == pi))
+                acc["exgrad"][i] |= ex[i] & host(gi != 0)
+                del mi, chk
+            del du, moved
+            upd, s = optimizer.update(g, s, p)
+            del g
+            p_new = apply_param_updates(p, upd)
+            # The run's own application must write the FULL update: p + upd
+            # exactly (what optax.apply_updates computes), leaf by leaf.
+            for i, (x, pi, ui) in enumerate(zip(treedef.flatten_up_to(p_new),
+                                                treedef.flatten_up_to(p),
+                                                treedef.flatten_up_to(upd))):
+                if not bool(jnp.all(x == (pi + ui).astype(pi.dtype))):
+                    err = f"the update was not applied to {names[i]}"
+            del upd
+            p = p_new
+            del p_new
+            for i, x in enumerate(treedef.flatten_up_to(p)):
+                if not bool(jnp.all(jnp.isfinite(x))):
+                    err = "non-finite parameters after the update"
+                if ex[i].any() and bool(np.any(host(x)[ex[i]] != 0)):
+                    err = f"excluded elements of {names[i]} moved off 0"
+        except Exception as e:   # noqa: BLE001 -- flagged, raised on all ranks
+            err = f"{type(e).__name__}: {e}"
+        sync(err, f"rehearsal step {k + 1} update failed")
+        lrs.append(lr)
+        n_pos += lr > 0.0
+        k += 1
+
+    def _dead_lines(dead):
+        # Whole dead rows / columns of a matrix leaf: names the input feature
+        # or output channel the loss cannot reach.
+        if dead.ndim != 2 or not dead.any():
+            return ""
+        rows, cols = np.nonzero(dead.all(1))[0], np.nonzero(dead.all(0))[0]
+        out = ""
+        if len(cols):
+            out += f" dead_cols={cols.tolist()[:80]}"
+        if len(rows):
+            out += f" dead_rows={rows.tolist()[:80]}"
+        return out
+
+    rows, failed = [], []
+    for i, n in enumerate(names):
+        live = ~ex[i]
+        dead = live & ~acc["g"][i]
+        row = {"leaf": n, "size": sizes[i], "excluded": int(ex[i].sum()),
+               "no_grad": int(dead.sum()),
+               "no_update": int((live & ~acc["du"][i]).sum()),
+               "not_moved": int((live & acc["mvfail"][i]).sum()),
+               "excluded_with_grad": int(acc["exgrad"][i].sum()),
+               "checked": int((live & acc["checked"][i]).sum()),
+               "where": _dead_lines(dead)}
+        row["apply_unverified"] = int(row["checked"] == 0
+                                      and row["excluded"] < row["size"])
+        rows.append(row)
+        if any(row[c] for c in ("no_grad", "no_update", "not_moved",
+                                "excluded_with_grad", "apply_unverified")):
+            failed.append(row)
+    # Verdicts are rank-identical (post-mean gradient, replicated params);
+    # the MAX makes the decision identical even if they were not.
+    if _any_rank(int(bool(failed)), comm):
+        lines = "; ".join(
+            f"{r['leaf']} ({r['size']} el: no_grad={r['no_grad']} "
+            f"no_update={r['no_update']} not_moved={r['not_moved']} "
+            f"excluded_with_grad={r['excluded_with_grad']} "
+            f"apply_unverified={r['apply_unverified']}{r['where']})"
+            for r in failed)
+        fail(f"{len(failed)} of {len(rows)} trainable leaves lack access over "
+             f"{k} rehearsal steps (lr = {lrs}): {lines}")
+    n_el = sum(r["size"] - r["excluded"] for r in rows)
+    n_chk = sum(r["checked"] for r in rows)
+    log.info("gradient-access gate PASSED: %d leaves, %d elements, %d "
+             "rehearsal steps (lr = %s); %d excluded elements; %d elements "
+             "(%.1f%%) movement-checked, the rest updated below float "
+             "precision on every step", len(rows), n_el, k, lrs,
+             sum(r["excluded"] for r in rows), n_chk,
+             100.0 * n_chk / max(n_el, 1))
+    return {"k": k, "lrs": lrs, "rows": rows, "params": p, "opt_state": s}

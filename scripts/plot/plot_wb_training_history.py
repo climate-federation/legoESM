@@ -133,6 +133,12 @@ def main() -> int:
         ve = [e for e, v in zip(epochs, val) if v is not None]
         vv = [v for v in val if v is not None]
         ax.plot(ve, vv, "s--", label="held out" + lead_label(rows, "val_leads_hours"))
+    # The EMA weights' held-out loss (deck ema_decay > 0), what the run ships.
+    vema = [r.get("val_loss_ema") for r in rows]
+    if any(v is not None for v in vema):
+        ax.plot([e for e, v in zip(epochs, vema) if v is not None],
+                [v for v in vema if v is not None], "^:",
+                color="#009E73", label="held out, EMA weights")
     ax.set_xlabel("epoch")
     ax.set_ylabel("loss")
     ax.set_title("WeatherBench training" + ("" if has_val

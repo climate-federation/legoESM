@@ -18,6 +18,8 @@ gradient must match a serial batch-mean gradient bit-closely.
 """
 from __future__ import annotations
 
+import functools
+
 __all__ = [
     "mpi_rank_size",
     "shard_samples",
@@ -362,7 +364,6 @@ def mpi_data_parallel_train_step(value_and_grad_fn, params, opt_state, optimizer
     """
     import jax
     import jax.numpy as jnp
-    import optax
 
     loss, grad = value_and_grad_fn(params, sample)
 
@@ -393,11 +394,19 @@ def mpi_data_parallel_train_step(value_and_grad_fn, params, opt_state, optimizer
 
     grad = all_reduce_grad_mean(grad, num_processes, comm=comm)
     updates, opt_state = optimizer.update(grad, opt_state, params)
-    params = optax.apply_updates(params, updates)
+    params = apply_param_updates(params, updates)
     if num_processes > 1:
         from legoesm.parallel.reductions import global_sum_mpi
         loss = global_sum_mpi(loss, comm=comm) / float(num_processes)
     return params, opt_state, loss
+
+
+def apply_param_updates(params, updates):
+    """Write an optimizer update into the parameters.  The ONE application the
+    training step and the gradient-access gate share, so the gate's check that
+    an update reaches the parameters tests the path the run actually takes."""
+    import optax
+    return optax.apply_updates(params, updates)
 
 
 def _prefetched(samples, todo):
@@ -429,13 +438,27 @@ def epoch_permutation(seed: int, epoch: int, n: int):
     return np.random.default_rng([int(seed), int(epoch)]).permutation(int(n))
 
 
+def _ema_step(tree, params, decay):
+    return _ema_jit()(tree, params, float(decay))
+
+
+@functools.cache
+def _ema_jit():
+    # One compile per run: ``decay`` is a Python float, static under filter_jit.
+    import equinox as eqx
+    from legoesm.training.ema import ema_update
+    return eqx.filter_jit(ema_update)
+
+
 @mpi_abort_on_uncaught
 def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                                     local_samples, n_epochs, num_processes, *,
                                     comm=None, on_epoch=None, start_epoch=0,
                                     place=None, on_step=None,
                                     start_step=0, start_losses=(),
-                                    start_skipped=0, epoch_order=None):
+                                    start_skipped=0, epoch_order=None,
+                                    value_and_grad_fn=None, ema=None,
+                                    ema_decay=0.0):
     """Per-rank loop over this rank's ERA5 shard, gradients averaged across ranks
     each step. All ranks run lockstep (balanced shards from ``shard_samples`` with
     ``drop_remainder``), so the per-step ``allreduce`` never deadlocks. Rank-0
@@ -465,6 +488,17 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     the samples in that order (a per-epoch shuffle).  It must be a pure function
     of the epoch, so every process and every resume of an epoch draws the same
     order and ``start_step`` skips the same samples; None = the stored order.
+
+    ``value_and_grad_fn``: a callable already built by
+    :func:`build_dp_value_and_grad` from this ``loss_fn`` (the gradient-access
+    gate builds it first; passing it here avoids a second compile).  None =
+    build it here.
+
+    ``ema``: a dict ``{"tree": params-shaped tree}`` updated in place after
+    every ACCEPTED step as ``tree <- ema_decay * tree + (1 - ema_decay) *
+    params`` (training/ema.py); a skipped (non-finite) step leaves it alone.
+    It is updated before ``on_step``/``on_epoch`` run, so those see the EMA of
+    the same step.  None = no EMA.
     """
     if not 0 <= start_epoch <= n_epochs:
         raise ValueError(
@@ -480,7 +514,8 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
 
     # #1364: ONE trace/compile for the whole run. Hoisted above BOTH loops --
     # inside either one it would be rebuilt per step and recompile every time.
-    value_and_grad_fn = build_dp_value_and_grad(loss_fn)
+    if value_and_grad_fn is None:
+        value_and_grad_fn = build_dp_value_and_grad(loss_fn)
     place = jax.device_put if place is None else place
     n_traces = getattr(value_and_grad_fn, "n_traces", None)
     retrace_warned = False
@@ -515,6 +550,8 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                 n_skipped += 1
             else:
                 losses.append(float(loss))
+                if ema is not None:
+                    ema["tree"] = _ema_step(ema["tree"], params, ema_decay)
             import logging as _logging
             _logging.getLogger(__name__).info(
                 "epoch %d step %d/%d loss=%.6g %.1f s", epoch, i_step + 1,
