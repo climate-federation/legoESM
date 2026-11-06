@@ -228,7 +228,8 @@ inputs: co and no2, which the lane never carries, with halocarbons this test lea
 matched: 0.02 LW, 0.002 SW.  ecRad's solvers against RTE on the same gas optics: 5e-4 LW,
 4e-7 SW (`scripts/validate/oracle/rrtmgp_faithfulness/ifs_gap_attribution.py`).
 
-OPEN: cloud tables are v1.8.2 (pinned by `test_rrtmgp_cloud_optics_oracle.py`);
-against the latest tables they cost up to 2.4 W/m2 SW (0.47 rms) and 1.5 W/m2 LW.
-LW solver is two-stream; upstream's default is no-scattering one-angle (OLR 0.46,
+Cloud tables are upstream's `rrtmgp-clouds-{lw,sw}-bnd.nc`, byte-identical to
+rrtmgp-data v1.9.2 and pinned by `test_rrtmgp_cloud_optics_oracle.py`.
+
+OPEN: LW solver is two-stream; upstream's default is no-scattering one-angle (OLR 0.46,
 surface down 4.5 W/m2, heating 1.07 K/day rms).

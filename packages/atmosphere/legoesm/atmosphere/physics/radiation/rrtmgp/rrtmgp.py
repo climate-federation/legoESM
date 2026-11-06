@@ -105,8 +105,8 @@ def _default_data_path(basename_nc: str) -> str:
 
 _DEFAULT_LW_GAS = _default_data_path("rrtmgp-gas-lw-g128.nc")
 DEFAULT_SW_GAS = _default_data_path("rrtmgp-gas-sw-g112.nc")
-_DEFAULT_LW_CLOUD = _default_data_path("cloudysky_lw.nc")
-_DEFAULT_SW_CLOUD = _default_data_path("cloudysky_sw.nc")
+_DEFAULT_LW_CLOUD = _default_data_path("rrtmgp-clouds-lw-bnd.nc")
+_DEFAULT_SW_CLOUD = _default_data_path("rrtmgp-clouds-sw-bnd.nc")
 
 # Module-level optics cache (shared across RRTMGP instances)
 _legoesm_optics_cache: dict = {}
