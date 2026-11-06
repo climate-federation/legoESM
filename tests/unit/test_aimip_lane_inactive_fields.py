@@ -104,10 +104,12 @@ def test_a_morrison_knob_trains_once_its_option_is_selected(pins, fields):
 
 
 def test_the_mg_resolver_decides_ice_to_snow_and_self_collection():
-    # mg overwrites ice_to_snow_scheme, so "heuristic" alone does not revive
-    # agg_coeff; an explicit "legacy" self-collection survives the resolver.
-    assert "atm.micro.MorrisonConfig.agg_coeff" in _inactive(
-        micro={"ice_to_snow_scheme": "heuristic"})
+    # mg sets ice_to_snow itself and refuses another choice, so agg_coeff can
+    # only train under the sam flavor; an explicit "legacy" self-collection
+    # survives the resolver.
+    with pytest.raises(ValueError, match="ice_to_snow_scheme"):
+        _inactive(micro={"ice_to_snow_scheme": "heuristic"})
+    assert "atm.micro.MorrisonConfig.agg_coeff" in _inactive()
     assert not {"atm.micro.MorrisonConfig.D_eq"} & _inactive(
         micro={"rain_selfcoll_scheme": "legacy"})
 
