@@ -290,6 +290,12 @@ class RRTMGPConfig(NamedTuple):
     # (no AD-memory benefit, which forward runs do not need).  Only applies to
     # the scan path (gpoint_batch_size<=0).
     gpoint_checkpoint: bool = True
+    # Where gas optics are evaluated.  'all_gpts': once before the g-point loop
+    # with row gathers over the g-point axis, holding (n_gpt, ncol, nlay) arrays
+    # for tau and Planck fraction or Rayleigh; about half the GPU solve time and
+    # a quarter of the CPU's.  'per_gpt': inside the loop, compiles 3-4x faster.
+    # The two agree to rounding.
+    gas_optics_mode: str = 'all_gpts'
     # Run the optics tables + RTE solve in float32 even when JAX x64 is on.
     # The dycore needs fp64, but radiation (a flux calculation) does not —
     # fp32 is ~2x faster on fp64-limited GPUs (e.g. RTX 8000, fp64 ≈ 1/32 of

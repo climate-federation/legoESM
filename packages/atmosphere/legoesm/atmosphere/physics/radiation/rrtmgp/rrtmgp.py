@@ -432,6 +432,7 @@ class RRTMGP:
           # the cached solver instead of silently reusing the prior one.
           getattr(config, "gpoint_batch_size", 0),
           getattr(config, "gpoint_checkpoint", True),
+          config.gas_optics_mode,
           getattr(config, "use_optimal_angle", False),
           config.S_0,
           config.aerosol_ssa,
@@ -1163,6 +1164,7 @@ class RRTMGP:
           use_optimal_angle=getattr(config, "use_optimal_angle", False),
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
           gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
+          gas_optics_mode=config.gas_optics_mode,
           cloud_path_fn=lw_path_fn,
           clear_sky=clear_sky,
       )
@@ -1187,6 +1189,7 @@ class RRTMGP:
           use_scan=config.use_scan,
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
           gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
+          gas_optics_mode=config.gas_optics_mode,
           cloud_path_fn=sw_path_fn,
           clear_sky=clear_sky,
       )

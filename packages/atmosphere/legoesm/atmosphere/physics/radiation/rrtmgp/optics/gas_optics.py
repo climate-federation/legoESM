@@ -736,3 +736,185 @@ def compute_planck_sources(
       jax.lax.optimization_barrier(lookup.totplnk)[ibnd, :],
       collections.OrderedDict({'t': lambda: interpolant}),
   )
+
+
+# All-g-point evaluation: the g-point-independent interpolation is done once per
+# cell and every table read is a row gather over the g-point axis, as in the
+# RRTMGP GPU kernels and jax-rrtmgp 537d97e.  The per-g-point functions above
+# issue one scalar gather per (cell, corner, g-point), which is what bounds them.
+_SIDES = ('interp_high', 'interp_low')
+
+
+class _Cells:
+  """Per-cell interpolation state shared by every g-point."""
+
+  def __init__(self, lookup, vmr_lib, temperature, p, vmr_fields):
+    self.lookup, self.vmr_lib, self.vmr_fields = lookup, vmr_lib, vmr_fields
+    self.temperature, self.p = temperature, p
+    self.tropo_idx = jnp.where(p <= lookup.p_ref_tropo, 1, 0)
+    self.t_interp = optics_utils.create_linear_interpolant(
+        _clip_to_table_range(temperature, lookup.t_ref), lookup.t_ref)
+    self.p_interp = _pressure_interpolant(p, lookup.p_ref, self.tropo_idx)
+    self._mix = {}
+
+  def mix(self, ibnd: int, scale_by_mixture: bool) -> dict[str, Interpolant]:
+    """Relative-abundance interpolant at each temperature corner of band ``ibnd``."""
+    key = (tuple(np.asarray(self.lookup.key_species)[ibnd].ravel().tolist()),
+           scale_by_mixture)
+    if key not in self._mix:
+      self._mix[key] = {
+          side: _compute_relative_abundance_interpolant(
+              self.lookup, self.vmr_lib, self.tropo_idx,
+              getattr(self.t_interp, side).idx, ibnd, scale_by_mixture,
+              self.vmr_fields)
+          for side in _SIDES
+      }
+    return self._mix[key]
+
+
+def _rows_tpm(table: Array, cells: _Cells, mix: dict[str, Interpolant]) -> Array:
+  """Eight-corner interpolation of a ``(t, p, eta, n)`` table, ``(*cells, n)``."""
+  total = 0.0
+  for t_side in _SIDES:
+    t = getattr(cells.t_interp, t_side)
+    for p_side in _SIDES:
+      pp = getattr(cells.p_interp, p_side)
+      for m_side in _SIDES:
+        m = getattr(mix[t_side], m_side)
+        total = total + table[t.idx, pp.idx, m.idx] * (
+            t.weight * pp.weight * m.weight)[..., None]
+  return total
+
+
+def _rows_te(table: Array, cells: _Cells, mix: dict[str, Interpolant]) -> Array:
+  """Four-corner interpolation of a ``(t, eta, n)`` table, ``(*cells, n)``."""
+  total = 0.0
+  for t_side in _SIDES:
+    t = getattr(cells.t_interp, t_side)
+    for m_side in _SIDES:
+      m = getattr(mix[t_side], m_side)
+      total = total + table[t.idx, m.idx] * (t.weight * m.weight)[..., None]
+  return total
+
+
+def _band_groups(lookup) -> list[tuple[list[int], np.ndarray]]:
+  """Bands sharing a key-species pair, hence interpolants, with their g-points."""
+  key_species = np.asarray(lookup.key_species)
+  lims = np.asarray(lookup.bnd_lims_gpt)
+  by_pair: dict[tuple[int, ...], list[int]] = {}
+  for ibnd in range(key_species.shape[0]):
+    by_pair.setdefault(tuple(key_species[ibnd].ravel().tolist()), []).append(ibnd)
+  return [
+      (bands, np.concatenate(
+          [np.arange(lims[b, 0], lims[b, 1] + 1) for b in bands]))
+      for bands in by_pair.values()
+  ]
+
+
+def _in_gpt_order(pieces: list[Array], groups) -> Array:
+  """Per-group ``(*cells, n)`` pieces as one ``(n_gpt, *cells)`` array."""
+  order = np.concatenate([gpts for _, gpts in groups])
+  return jnp.moveaxis(jnp.concatenate(pieces, axis=-1), -1, 0)[np.argsort(order)]
+
+
+def _minor_band(lookup, cells: _Cells, molecules, ibnd: int) -> Array | None:
+  """Minor optical depth of band ``ibnd``'s g-points; ``None`` if it has none."""
+  lims = np.asarray(lookup.bnd_lims_gpt)
+  width = int(lims[ibnd, 1] - lims[ibnd, 0]) + 1
+  wdtype = cells.temperature.dtype
+  vmr_fields = cells.vmr_fields
+  if vmr_fields is not None and lookup.idx_h2o in vmr_fields:
+    dry_factor = 1.0 / (1.0 + vmr_fields[lookup.idx_h2o].astype(wdtype))
+  else:
+    dry_factor = 1.0
+  mix = cells.mix(ibnd, False)
+  total = None
+  for lower, table, n_minor, start, end, gases, density, scaling_gases, complement, shift in (
+      (True, lookup.kminor_lower, lookup.n_minor_absrb_lower,
+       lookup.minor_lower_bnd_start, lookup.minor_lower_bnd_end,
+       lookup.idx_minor_gases_lower, lookup.minor_lower_scales_with_density,
+       lookup.idx_scaling_gases_lower, lookup.lower_scale_by_complement,
+       lookup.minor_lower_gpt_shift),
+      (False, lookup.kminor_upper, lookup.n_minor_absrb_upper,
+       lookup.minor_upper_bnd_start, lookup.minor_upper_bnd_end,
+       lookup.idx_minor_gases_upper, lookup.minor_upper_scales_with_density,
+       lookup.idx_scaling_gases_upper, lookup.upper_scale_by_complement,
+       lookup.minor_upper_gpt_shift),
+  ):
+    first, last = int(np.asarray(start)[ibnd]), int(np.asarray(end)[ibnd])
+    if first >= n_minor:
+      continue
+    table = jax.lax.optimization_barrier(table)
+    side = None
+    for i in range(first, last + 1):
+      gas = int(np.asarray(gases)[i]) * jnp.ones_like(cells.tropo_idx)
+      scaling = get_vmr(lookup, cells.vmr_lib, gas, vmr_fields).astype(wdtype)
+      scaling = scaling * molecules / _M2_TO_CM2_FACTOR
+      if int(np.asarray(density)[i]) == 1:
+        # The physical temperature, not the clipped one: see
+        # ``_compute_minor_optical_depth``.
+        scaling = scaling * (_PASCAL_TO_HPASCAL_FACTOR * cells.p / cells.temperature)
+        sgas = int(np.asarray(scaling_gases)[i])
+        if sgas > 0:
+          vmr = get_vmr(lookup, cells.vmr_lib, sgas * jnp.ones_like(cells.tropo_idx),
+                        vmr_fields).astype(wdtype)
+          scaling = scaling * (
+              1.0 - vmr * dry_factor
+              if int(np.asarray(complement)[i]) == 1 else vmr * dry_factor)
+      k0 = int(np.asarray(shift)[i])
+      term = _rows_te(table[..., k0:k0 + width], cells, mix).astype(wdtype) * scaling[..., None]
+      side = term if side is None else side + term
+    if side is not None:
+      in_side = (cells.p > lookup.p_ref_tropo) if lower else ~(cells.p > lookup.p_ref_tropo)
+      side = jnp.where(in_side[..., None], side, 0.0)
+      total = side if total is None else total + side
+  return total
+
+
+def optical_depth_all_gpts(lookup, vmr_lib, molecules, temperature, p, vmr_fields=None):
+  """Major plus minor optical depth of every g-point, ``(n_gpt, *cells)``."""
+  cells = _Cells(lookup, vmr_lib, temperature, p, vmr_fields)
+  kmajor = jax.lax.optimization_barrier(lookup.kmajor)
+  lims = np.asarray(lookup.bnd_lims_gpt)
+  groups = _band_groups(lookup)
+  pieces = []
+  for bands, gpts in groups:
+    major = _rows_tpm(kmajor[..., gpts], cells, cells.mix(bands[0], True))
+    major = (molecules / _M2_TO_CM2_FACTOR)[..., None] * major
+    minors = []
+    for b in bands:
+      minor = _minor_band(lookup, cells, molecules, b)
+      width = int(lims[b, 1] - lims[b, 0]) + 1
+      minors.append(jnp.zeros(molecules.shape + (width,), major.dtype)
+                    if minor is None else minor)
+    pieces.append(jnp.concatenate(minors, axis=-1) + major)
+  return _in_gpt_order(pieces, groups)
+
+
+def planck_fraction_all_gpts(lookup, vmr_lib, p, temperature, vmr_fields=None):
+  """Planck fraction of every g-point, ``(n_gpt, *cells)``."""
+  cells = _Cells(lookup, vmr_lib, temperature, p, vmr_fields)
+  table = jax.lax.optimization_barrier(lookup.planck_fraction)
+  groups = _band_groups(lookup)
+  return _in_gpt_order(
+      [_rows_tpm(table[..., gpts], cells, cells.mix(bands[0], False))
+       for bands, gpts in groups], groups)
+
+
+def rayleigh_optical_depth_all_gpts(lkp, vmr_lib, molecules, temperature, p, vmr_fields=None):
+  """Rayleigh optical depth of every g-point, ``(n_gpt, *cells)``."""
+  cells = _Cells(lkp, vmr_lib, temperature, p, vmr_fields)
+  lower = jax.lax.optimization_barrier(lkp.rayl_lower)
+  upper = jax.lax.optimization_barrier(lkp.rayl_upper)
+  factor = 1.0
+  if vmr_fields is not None and lkp.idx_h2o in vmr_fields:
+    factor = 1.0 + vmr_fields[lkp.idx_h2o]
+  groups = _band_groups(lkp)
+  pieces = []
+  for bands, gpts in groups:
+    mix = cells.mix(bands[0], False)
+    tau = jnp.where((cells.tropo_idx == 1)[..., None],
+                    _rows_te(upper[..., gpts], cells, mix),
+                    _rows_te(lower[..., gpts], cells, mix))
+    pieces.append((factor * molecules / _M2_TO_CM2_FACTOR)[..., None] * tau)
+  return _in_gpt_order(pieces, groups)

@@ -14,6 +14,7 @@
 
 """Implementations of `OpticsScheme`s and a factory method."""
 
+import copy
 from collections.abc import Mapping
 from typing import Callable, TypeAlias, cast
 
@@ -96,9 +97,32 @@ class RRTMOptics(optics_base.OpticsScheme):
     self.gas_optics_sw = lookup_gas_optics_shortwave.from_data_file(
         rrtm_params.shortwave_nc_filepath
     )
+    self._gas_all_gpts = None
     # Type narrowing
     assert self.gas_optics_lw is not None
     assert self.gas_optics_sw is not None
+
+  def with_all_gpts(
+      self,
+      is_lw: bool,
+      pressure: Array,
+      temperature: Array,
+      molecules: Array,
+      vmr_fields: dict[int, Array] | None,
+  ) -> 'RRTMOptics':
+    """A copy serving this state's gas optics from precomputed all-g-point arrays."""
+    lookup = self.gas_optics_lw if is_lw else self.gas_optics_sw
+    gas = {'optical_depth': gas_optics.optical_depth_all_gpts(
+        lookup, self.vmr_lib, molecules, temperature, pressure, vmr_fields)}
+    if is_lw:
+      gas['planck_fraction'] = gas_optics.planck_fraction_all_gpts(
+          lookup, self.vmr_lib, pressure, temperature, vmr_fields)
+    else:
+      gas['rayleigh'] = gas_optics.rayleigh_optical_depth_all_gpts(
+          lookup, self.vmr_lib, molecules, temperature, pressure, vmr_fields)
+    bound = copy.copy(self)
+    bound._gas_all_gpts = gas
+    return bound
 
   def _od_fn(
       self,
@@ -111,6 +135,8 @@ class RRTMOptics(optics_base.OpticsScheme):
   ) -> Array:
     """The actual optical_depth calculation."""
     logging.info('Calling optical depth graph.')
+    if self._gas_all_gpts is not None:
+      return self._gas_all_gpts['optical_depth'][igpt]
     lookup_gas_optics = self.gas_optics_lw if is_lw else self.gas_optics_sw
     return gas_optics.compute_minor_optical_depth(
         lookup_gas_optics,
@@ -167,6 +193,8 @@ class RRTMOptics(optics_base.OpticsScheme):
   ) -> Array:
     """The actual Rayleigh scattering calculation."""
     logging.info('Calling Rayleigh scattering graph.')
+    if self._gas_all_gpts is not None:
+      return self._gas_all_gpts['rayleigh'][igpt]
     return gas_optics.compute_rayleigh_optical_depth(
         self.gas_optics_sw,
         self.vmr_lib,
@@ -210,6 +238,8 @@ class RRTMOptics(optics_base.OpticsScheme):
   ) -> Array:
     """The actual Planck fraction calculation."""
     logging.info('Calling Planck fraction graph.')
+    if self._gas_all_gpts is not None:
+      return self._gas_all_gpts['planck_fraction'][igpt]
     return gas_optics.compute_planck_fraction(
         self.gas_optics_lw,
         self.vmr_lib,
