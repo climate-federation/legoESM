@@ -51,7 +51,17 @@ def record_arrays(carry, sfc, forcing) -> tuple[dict, dict]:
     out.update({f"f{k:03d}": v.astype(np.float32) for k, v in enumerate(f)})
     out.update({f"s_{k}": np.asarray(v).astype(np.float32)
                 for k, v in sorted(sfc.items())})
-    return out, {"carry": c_def, "forcing": f_def, "sfc": sorted(sfc)}
+    # str(treedef) omits namedtuple field names, and leaves are stored by
+    # position, so the leaf paths are what catch a renamed or reordered field
+    # (3-way vote 2026-11-06).
+    return out, {"carry": c_def, "forcing": f_def, "sfc": sorted(sfc),
+                 "carry_paths": _paths(carry), "forcing_paths": _paths(forcing)}
+
+
+def _paths(tree):
+    import jax
+    return [jax.tree_util.keystr(p)
+            for p, _ in jax.tree_util.tree_flatten_with_path(tree)[0]]
 
 
 def create_store(path, era5_indices, example, structure, meta) -> None:

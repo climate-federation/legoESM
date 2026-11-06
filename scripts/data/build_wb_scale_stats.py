@@ -159,18 +159,25 @@ def main(argv=None):
                           windows=None, n_days=None, multi_step_hours=None)
     _, grid, sigma, *_ = sb.build_mode_components(cfg, yml)
     era5_cfg, sst_cfg, micro = sb.wb_state_cache_configs(cfg, yml)
-    path = sb.wb_state_cache_path(cfg, yml, grid, sigma)
     ds = open_era5_zarr(era5_cfg.zarr_store)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
+    cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
+                if era5_cfg.load_cloud_condensate else None)
+    flux_ds = ((open_era5_zarr(sst_cfg.flux_zarr) if sst_cfg.flux_zarr else ds)
+               if sst_cfg.load_surface_fluxes else None)
+    # Names the store only (its layout is part of the name): the builder's
+    # own template time, so it exists in the ERA5 stores the cache was built
+    # from.
+    from scripts.data.build_wb_state_cache import needed_indices
+    template = sb.wb_state_record(int(needed_indices(cfg, yml, times)[0]),
+                                  era5_cfg, sst_cfg, ds, cloud_ds, flux_ds,
+                                  grid, sigma, micro, times)
+    path = sb.wb_state_cache_path(cfg, yml, grid, sigma, template)
     store_index = np.asarray(zarr.open_group(str(path), mode="r")["era5_index"])
     pairs = pairs_in_years(store_index, times)
     if not any(j is not None for _, j in pairs):
         raise SystemExit(f"{path} holds no 6 h pair of analyses in "
                          f"{YEARS[0]}-{YEARS[1]}")
-    cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
-                if era5_cfg.load_cloud_condensate else None)
-    flux_ds = ((open_era5_zarr(sst_cfg.flux_zarr) if sst_cfg.flux_zarr else ds)
-               if sst_cfg.load_surface_fluxes else None)
     fresh = sb.wb_state_record(pairs[0][0], era5_cfg, sst_cfg, ds, cloud_ds,
                                flux_ds, grid, sigma, micro, times)
     cache = wsc.StateCache(path, fresh)

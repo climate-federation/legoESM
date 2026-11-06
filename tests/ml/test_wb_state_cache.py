@@ -107,6 +107,42 @@ def test_gate_catches_structure(tmp_path):
         wsc.StateCache(p, other)
 
 
+def test_record_layout_is_part_of_the_store_name(tmp_path, monkeypatch):
+    """A carry-layout change (e.g. a merge adding a carry field) must name a
+    NEW store, not collide with the old one and trip its structure guard."""
+    cfgs = (collections.namedtuple("E", "a")(1),
+            collections.namedtuple("S", "b")(2), "mg")
+    monkeypatch.setattr(sb, "wb_state_cache_configs", lambda cfg, yml: cfgs)
+    grid = SimpleNamespace(n_max=21, n_lat=32, n_lon=64)
+    sigma = SimpleNamespace(sigma_full=np.array([0.5]),
+                            sigma_half=np.array([0.0, 1.0]))
+    yml = {"state_cache_dir": str(tmp_path)}
+
+    def path(template):
+        return sb.wb_state_cache_path(None, yml, grid, sigma, template)
+
+    c, sfc, f = _rec(10)
+    Carry3 = collections.namedtuple("Carry", "T p_s ice")
+    wider = (Carry3(c.T, c.p_s, c.p_s), sfc, f)
+    assert path(_rec(10)) == path(_rec(11))  # same layout, any time: same
+    assert path(wider) != path(_rec(10))
+    assert path((c, sfc, dict(f, extra=f["sfc_shf"]))) != path(_rec(10))
+    Renamed = collections.namedtuple("Carry", "T ps")  # same arity
+    assert path((Renamed(c.T, c.p_s), sfc, f)) != path(_rec(10))
+    Reordered = collections.namedtuple("Carry", "p_s T")
+    assert path((Reordered(c.T, c.p_s), sfc, f)) != path(_rec(10))
+
+
+def test_gate_catches_a_renamed_field_of_the_same_arity(tmp_path):
+    """Leaves are stored by position: a renamed carry field must be refused,
+    not read into the wrong field."""
+    p = _store(tmp_path, [10])
+    c, sfc, f = _rec(10)
+    Renamed = collections.namedtuple("Carry", "T ps")
+    with pytest.raises(RuntimeError, match="different sample structure"):
+        wsc.StateCache(p, (Renamed(c.T, c.p_s), sfc, f))
+
+
 def _times(start="2019-12-30", n=40):
     return np.datetime64(start) + np.arange(n) * np.timedelta64(6, "h")
 

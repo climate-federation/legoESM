@@ -89,22 +89,24 @@ def main(argv=None):
                if sst_cfg.load_surface_fluxes else None)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     idx = needed_indices(cfg, yml, times)
-    path = sb.wb_state_cache_path(cfg, yml, grid, sigma)
-    print(f"state cache {path}: {len(idx)} ERA5 times "
-          f"({times[idx[0]]} .. {times[idx[-1]]})", flush=True)
 
     def record(i):
         return sb.wb_state_record(int(i), era5_cfg, sst_cfg, ds, cloud_ds,
                                   flux_ds, grid, sigma, micro, times)
 
+    template = record(idx[0])
+    path = sb.wb_state_cache_path(cfg, yml, grid, sigma, template)
+    print(f"state cache {path}: {len(idx)} ERA5 times "
+          f"({times[idx[0]]} .. {times[idx[-1]]})", flush=True)
+
     if a.init:
-        arrays, structure = wsc.record_arrays(*record(idx[0]))
+        arrays, structure = wsc.record_arrays(*template)
         # Arms whose records are identical share one store (same tag).
         wsc.create_store(path, idx, arrays, structure, {})
         print("created", flush=True)
         return 0
     if a.check:
-        missing = wsc.StateCache(path, record(idx[0])).missing(idx)
+        missing = wsc.StateCache(path, template).missing(idx)
         print(f"written {len(idx) - len(missing)}/{len(idx)}", flush=True)
         return 1 if missing else 0
     if not 0 <= a.task < a.n_tasks:

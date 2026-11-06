@@ -2177,15 +2177,20 @@ def wb_state_cache_configs(cfg, yml):
     return era5_cfg, sst_cfg, wb_ic_microphysics(cfg.mode, yml)
 
 
-def wb_state_cache_path(cfg, yml, grid, sigma):
-    """The state-cache store this configuration reads and writes."""
+def wb_state_cache_path(cfg, yml, grid, sigma, template):
+    """The state-cache store this configuration reads and writes.
+    ``template`` = one ``(carry, sfc, forcing)`` record built the normal way:
+    its layout (the text the store's structure guard compares) is part of the
+    name, so code with a different record layout gets its own store instead of
+    refusing a shared one (3-way vote 2026-11-06)."""
     from legoesm.training import wb_state_cache as wsc
 
     era5_cfg, sst_cfg, micro = wb_state_cache_configs(cfg, yml)
     tag = wsc.cache_tag([wsc.STORE_FORMAT, era5_cfg._asdict(), sst_cfg._asdict(),
                          micro, int(grid.n_max), int(grid.n_lat), int(grid.n_lon),
                          np.asarray(sigma.sigma_full).tolist(),
-                         np.asarray(sigma.sigma_half).tolist()])
+                         np.asarray(sigma.sigma_half).tolist(),
+                         wsc.record_arrays(*template)[1]])
     return wsc.store_path(wb_state_cache_root(yml), tag)
 
 
@@ -2383,8 +2388,8 @@ def _state_cached_samples(cfg, yml, grid, sigma, mine, leads, lead_offsets,
     fresh = {i: wb_state_record(i, era5_cfg, sst_cfg, ds, cloud_ds, flux_ds,
                                 grid, sigma, micro, times)
              for i in times_of(i0, t0)}
-    cache = wsc.StateCache(wb_state_cache_path(cfg, yml, grid, sigma),
-                           fresh[i0])
+    cache = wsc.StateCache(wb_state_cache_path(cfg, yml, grid, sigma,
+                                               fresh[i0]), fresh[i0])
     need = sorted({i for _, a, b in mine for i in times_of(a, b)})
     missing = cache.missing(need)
     if missing:
