@@ -113,8 +113,9 @@ def test_level_temperature_without_overhead_layer_is_cam_tint(case):
 
 
 def _sources(opt, vmr, p, T, sfcT, tlev, ig):
-    return opt.compute_planck_sources(p, T, ig, vmr, sfc_temperature=sfcT,
-                                      level_temperature=tlev)
+    bound = opt.with_all_gpts(True, p, T, jnp.ones_like(T), vmr)
+    return bound.compute_planck_sources(p, T, ig, vmr, sfc_temperature=sfcT,
+                                        level_temperature=tlev)
 
 
 def _by_gpoint(fn, opt):

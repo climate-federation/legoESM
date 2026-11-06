@@ -261,6 +261,8 @@ class RRTMGPConfig(NamedTuple):
     include_clouds: bool = False
     use_optimal_angle: bool = False
     # G-point accumulation strategy in the two-stream RTE solve.
+    # Gas optics are held for all g-points outside this loop, so the memory
+    # bounds below are for transport; column_chunk_size bounds the gas optics.
     #   0  -> memory-frugal checkpointed ``lax.scan`` over g-points (REQUIRED
     #         for reverse-mode AD / training at high resolution).
     #   >0 -> process g-points in parallel blocks of this size via ``vmap``

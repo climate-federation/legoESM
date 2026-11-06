@@ -14,6 +14,7 @@
 
 """Implementations of `OpticsScheme`s and a factory method."""
 
+import copy
 from collections.abc import Mapping
 from typing import Callable, TypeAlias, cast
 
@@ -96,151 +97,48 @@ class RRTMOptics(optics_base.OpticsScheme):
     self.gas_optics_sw = lookup_gas_optics_shortwave.from_data_file(
         rrtm_params.shortwave_nc_filepath
     )
+    self._gas_all_gpts = None
     # Type narrowing
     assert self.gas_optics_lw is not None
     assert self.gas_optics_sw is not None
 
-  def _od_fn(
+  def with_all_gpts(
       self,
       is_lw: bool,
-      igpt: Array,
+      pressure: Array,
+      temperature: Array,
       molecules: Array,
-      temperature: Array,
-      pressure: Array,
       vmr_fields: dict[int, Array] | None,
-  ) -> Array:
-    """The actual optical_depth calculation."""
-    logging.info('Calling optical depth graph.')
-    lookup_gas_optics = self.gas_optics_lw if is_lw else self.gas_optics_sw
-    return gas_optics.compute_minor_optical_depth(
-        lookup_gas_optics,
-        self.vmr_lib,
-        molecules,
-        temperature,
-        pressure,
-        igpt,
-        vmr_fields,
-    ) + gas_optics.compute_major_optical_depth(
-        lookup_gas_optics,
-        self.vmr_lib,
-        molecules,
-        temperature,
-        pressure,
-        igpt,
-        vmr_fields,
-    )
+  ) -> 'RRTMOptics':
+    """A copy holding this state's gas optics for every g-point of one spectrum.
 
-  def _optical_depth_fn(
-      self, igpt: Array, is_lw: bool
-  ) -> Callable[[Array, Array, Array, dict[int, Array] | None], Array]:
-    """Create a function for computing the optical depth.
-
-    Args:
-      igpt: The g-point that will be used to index into the RRTMGP lookup table.
-      is_lw: If `True`, uses the longwave lookup. Otherwise, uses the shortwave
-        lookup.
-
-    Returns:
-      A callable that computes the optical depth given fields for the number of
-      molecules per area, pressure, and volume mixing ratio of various gases.
+    ``compute_*_optical_properties`` and ``compute_planck_sources`` read these
+    arrays; the state passed to them must be the one bound here.
     """
+    lookup = self.gas_optics_lw if is_lw else self.gas_optics_sw
+    if is_lw:
+      gas = {
+          'tau_lw': gas_optics.optical_depth_all_gpts(
+              lookup, self.vmr_lib, molecules, temperature, pressure, vmr_fields),
+          'planck_fraction': gas_optics.planck_fraction_all_gpts(
+              lookup, self.vmr_lib, pressure, temperature, vmr_fields),
+      }
+    else:
+      gas = {
+          'tau_sw': gas_optics.optical_depth_all_gpts(
+              lookup, self.vmr_lib, molecules, temperature, pressure, vmr_fields),
+          'rayleigh': gas_optics.rayleigh_optical_depth_all_gpts(
+              lookup, self.vmr_lib, molecules, temperature, pressure, vmr_fields),
+      }
+    bound = copy.copy(self)
+    bound._gas_all_gpts = gas
+    return bound
 
-    def od_fn(
-        molecules: Array,
-        temperature: Array,
-        pressure: Array,
-        vmr_fields: dict[int, Array] | None,
-    ) -> Array:
-      return self._od_fn(
-          is_lw, igpt, molecules, temperature, pressure, vmr_fields
-      )
-
-    return od_fn
-
-  def _rayl_fn(
-      self,
-      igpt: Array,
-      molecules: Array,
-      temperature: Array,
-      pressure: Array,
-      vmr_fields: dict[int, Array] | None,
-  ) -> Array:
-    """The actual Rayleigh scattering calculation."""
-    logging.info('Calling Rayleigh scattering graph.')
-    return gas_optics.compute_rayleigh_optical_depth(
-        self.gas_optics_sw,
-        self.vmr_lib,
-        molecules,
-        temperature,
-        pressure,
-        igpt,
-        vmr_fields,
-    )
-
-  def rayleigh_scattering_fn(
-      self, igpt: Array
-  ) -> Callable[[Array, Array, Array, dict[int, Array] | None], Array]:
-    """Create a function for computing Rayleigh scattering.
-
-    Args:
-      igpt: The g-point that will be used to index into the RRTMGP lookup table.
-
-    Returns:
-      A callable that computes the Rayleigh scattering optical depth given
-      fields for the number of molecules per area, temperature, pressure, and
-      and volume mixing ratio of various gases.
-    """
-
-    def rayl_fn(
-        molecules: Array,
-        temperature: Array,
-        pressure: Array,
-        vmr_fields: dict[int, Array] | None,
-    ) -> Array:
-      return self._rayl_fn(igpt, molecules, temperature, pressure, vmr_fields)
-
-    return rayl_fn
-
-  def _pf_fn(
-      self,
-      igpt: Array,
-      pressure: Array,
-      temperature: Array,
-      vmr_fields: dict[int, Array] | None = None,
-  ) -> Array:
-    """The actual Planck fraction calculation."""
-    logging.info('Calling Planck fraction graph.')
-    return gas_optics.compute_planck_fraction(
-        self.gas_optics_lw,
-        self.vmr_lib,
-        pressure,
-        temperature,
-        igpt,
-        vmr_fields,
-    )
-
-  def planck_fraction_fn(
-      self,
-      igpt: Array,
-  ):
-    """Create a function for computing the Planck fraction.
-
-    Args:
-      igpt: The g-point that will be used to index into the RRTMGP lookup table.
-
-    Returns:
-      A callable that computes the Planck fraction given fields for pressure,
-      temperature and volume mixing ratio of various gases.
-    """
-
-    def pf_fn(
-        pressure: Array,
-        temperature: Array,
-        vmr_fields: dict[int, Array] | None = None,
-    ) -> Array:
-      return self._pf_fn(igpt, pressure, temperature, vmr_fields)
-
-    return pf_fn
+  def gas_gpt(self, name: str, igpt: Array) -> Array:
+    """One g-point of a bound gas-optics array."""
+    if self._gas_all_gpts is None or name not in self._gas_all_gpts:
+      raise ValueError(f'gas optics {name!r} not bound; call with_all_gpts first.')
+    return self._gas_all_gpts[name][igpt]
 
   def _ps_fn(
       self,
@@ -497,10 +395,7 @@ class RRTMOptics(optics_base.OpticsScheme):
         'ssa': The longwave single-scattering albedo.
         'asymmetry_factor': The longwave asymmetry factor.
     """
-    optical_depth_fn = self._optical_depth_fn(igpt, is_lw=True)
-    optical_depth_lw = optical_depth_fn(
-        molecules, temperature, pressure, vmr_fields
-    )
+    optical_depth_lw = self.gas_gpt('tau_lw', igpt)
     optical_props = {
         'optical_depth': optical_depth_lw,
         'ssa': jnp.zeros_like(optical_depth_lw),
@@ -554,13 +449,8 @@ class RRTMOptics(optics_base.OpticsScheme):
         'ssa': The shortwave single-scattering albedo.
         'asymmetry_factor': The shortwave asymmetry factor.
     """
-    optical_depth_fn = self._optical_depth_fn(igpt, is_lw=False)
-    optical_depth_sw = optical_depth_fn(
-        molecules, temperature, pressure, vmr_fields
-    )
-
-    rayl_fn = self.rayleigh_scattering_fn(igpt)
-    rayleigh_scattering = rayl_fn(molecules, temperature, pressure, vmr_fields)
+    optical_depth_sw = self.gas_gpt('tau_sw', igpt)
+    rayleigh_scattering = self.gas_gpt('rayleigh', igpt)
 
     optical_depth_sw = optical_depth_sw + rayleigh_scattering
 
@@ -626,8 +516,7 @@ class RRTMOptics(optics_base.OpticsScheme):
         [level_temperature[:, :, :1], level_temperature], axis=2)
     temperature_top = jnp.concatenate(
         [level_temperature, level_temperature[:, :, -1:]], axis=2)
-    planck_fraction_fn = self.planck_fraction_fn(igpt)
-    planck_fraction = planck_fraction_fn(pressure, temperature, vmr_fields)
+    planck_fraction = self.gas_gpt('planck_fraction', igpt)
 
     planck_src_fn = self.planck_src_fn(igpt)
     planck_src = planck_src_fn(planck_fraction, temperature)

@@ -219,6 +219,9 @@ class OracleOptics:
             self.sw = {k: pad(v) for k, v in sw.items()}
             self.n_gpt_sw = sw["optical_depth"].shape[0]
 
+    def with_all_gpts(self, *_):
+        return self
+
     def compute_lw_optical_properties(self, p, T, mol, igpt, vmr=None, *a, **k):
         return {n: v[igpt] for n, v in self.lw.items()}
 
