@@ -310,6 +310,21 @@ def test_round349_sypd_nemo_timing_and_time_parsers(tmp_path: Path) -> None:
         "max_rss_kib": 1024.0,
     }
 
+    single_rank_text = """
+   |         Performance statistics between time step 7 and 92        |
+ Timing : values for local MPI process:
+ Section      | Net elapsed Time       | Full elapsed Time      | Frequency
+ step         | 91.619687s (100.000 %) | 91.619687s (100.000 %) |        86
+ """
+    single = r343.parse_nemo_timing_output(single_rank_text)
+    assert single["steady_steps"] == 86
+    assert np.isclose(single["seconds_per_step"], 91.619687 / 86)
+    multi_rank_text = timing_text + """
+ Timing : values for local MPI process:
+ step         |   86.000000s (100.000 %) |   86.000000s (100.000 %) |        86
+ """
+    assert np.isclose(r343.parse_nemo_timing_output(multi_rank_text)["seconds_per_step"], 0.5)
+
     bad_frequency = timing_text.replace("86", "85")
     with pytest.raises(r343.GateError, match="does not match window"):
         r343.parse_nemo_timing_output(bad_frequency)

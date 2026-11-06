@@ -2552,9 +2552,14 @@ def parse_nemo_timing_output(text: str) -> dict[str, Any]:
             first_step, last_step = int(match.group(1)), int(match.group(2))
             break
     require(header_index is not None, "NEMO timing output lacks steady time-step block")
+    steady_lines = lines[header_index + 1 :]
+    # timing.F90 writes the AVG block only when jpnij > 1; a single rank writes only its local block.
+    block = "Timing : AVG values"
+    if not any(line.strip().startswith(block) for line in steady_lines):
+        block = "Timing : values for local MPI process"
     in_average = False
-    for line in lines[header_index + 1 :]:
-        if line.strip().startswith("Timing : AVG values"):
+    for line in steady_lines:
+        if line.strip().startswith(block):
             in_average = True
             continue
         if not in_average:
