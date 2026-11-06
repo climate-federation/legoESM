@@ -389,8 +389,12 @@ def _minor_band(lookup, cells: _Cells, molecules, ibnd: int) -> Array | None:
        lookup.minor_upper_gpt_shift),
   ):
     first, last = int(np.asarray(start)[ibnd]), int(np.asarray(end)[ibnd])
-    if first >= n_minor:
+    if first == n_minor:  # the table's empty-band sentinel
       continue
+    if first < 0 or first > n_minor or last >= n_minor:
+      raise ValueError(
+          'minor absorber band limits must lie in [0, n) with n as the '
+          'empty-band sentinel')
     table = jax.lax.optimization_barrier(table)
     side = None
     for i in range(first, last + 1):

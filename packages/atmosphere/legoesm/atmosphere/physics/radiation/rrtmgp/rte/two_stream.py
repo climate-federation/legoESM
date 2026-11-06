@@ -251,6 +251,10 @@ def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
   g-point axis is embarrassingly parallel; only the vertical recurrence
   *inside* ``step_fn`` is sequential.
 
+  The memory bounds below cover the transport inside ``step_fn``.  Gas optics are
+  held for all g-points outside it, ``(n_gpt, ncol, nlay)`` per array, so only
+  ``column_chunk_size`` bounds those.
+
   ``gpoint_batch_size <= 0`` (default) — the memory-frugal path: a
   ``jax.lax.scan`` over g-points with each step wrapped in
   ``jax.checkpoint(nothing_saveable, prevent_cse=True)`` so the backward pass
