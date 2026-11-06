@@ -457,7 +457,10 @@ def saturation_adjustment_increment(T, q_v, p_full, dt, *, rh_width,
         sat_fn=saturation_specific_humidity, hard_step=True)
     if rh_width == 0.0:
         return d
-    s = rh_width * jnp.maximum(q_sat, _HARD_SAT_QSAT_FLOOR)
+    # Floor at the dtype's smallest normal: a tiny width must not underflow
+    # s to 0 (0/0 at d = 0); vote r13, 3-0.
+    s = jnp.maximum(rh_width * jnp.maximum(q_sat, _HARD_SAT_QSAT_FLOOR),
+                    jnp.finfo(q_sat.dtype).tiny)
     return -d * jnp.expm1(-d / s)
 
 

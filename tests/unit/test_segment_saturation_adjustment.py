@@ -132,5 +132,14 @@ def test_gradient_through_switch_at_default():
     assert np.any(np.asarray(g) != 0.0)
 
 
+def test_tiny_width_is_finite_in_fp32():
+    T, q_v, p = (x.astype(jnp.float32) for x in _state())
+    dq = saturation_adjustment_increment(T, q_v, p, DT, rh_width=1e-50)
+    g = jax.grad(lambda q: jnp.sum(saturation_adjustment_increment(
+        T, q, p, DT, rh_width=1e-50)))(q_v)
+    assert np.all(np.isfinite(np.asarray(dq)))
+    assert np.all(np.isfinite(np.asarray(g)))
+
+
 if __name__ == "__main__":   # print_gaps: re-measure STORED_GAPS
     print(repr([float(x) for x in _default_gaps()]))
