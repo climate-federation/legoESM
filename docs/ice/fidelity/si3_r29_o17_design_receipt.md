@@ -2482,3 +2482,14 @@ for idx, name in enumerate(SI3O17Card._fields, 1):
   - After the path guard, `nemo_si3_o17_operator_run.sh` checks `free -g` (`>= 250 GiB` available and no process above `100 GiB` RSS), runs (A) `K` parallel per-step range processes (`--labels GIVEN-NEMO-ENTRY --steps START..END`) followed by `--merge` on `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round29/oracle_o17_full_step`, and runs (B) `--free-run --n-steps 100`, writing all outputs under the operator-supplied output directory.
 
 independent review: operator
+
+## Committed NaN-fix proof scripts (2026-11-06)
+
+The two proof scripts cited above were committed byte-identical to their
+scratch sources; sha256 of source and committed copy, measured with
+`sha256sum`:
+
+- `scripts/validate/ocean_fidelity/testcases/si3_nanfix/verify_proof1_active_bits.py`:
+  `cdab33c8f83557c1df686d7e7db9ca51738f5eaf01107a4747cb2da4cae368b6`
+- `scripts/validate/ocean_fidelity/testcases/si3_nanfix/verify_proof2_orca2_step1.py`:
+  `4852e5f7177cb1a2de4f46552f86bacf407f6431af7870f3a0da1024da03d857`
