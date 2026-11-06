@@ -108,6 +108,10 @@ def test_wb_training_step_passes_the_gradient_gate(core, loss):
     sigma_full = jnp.asarray(sigma.sigma_full)
     nlev = int(yml["nlev"])
     f0 = _forcing(core, cfg, yml, grid, 0)
+    if core != "spectral":
+        # sea ice on some columns, not all: a constant plane is a dead input
+        frac = float(jnp.mean(f0.sic > 0.0))
+        assert 0.0 < frac < 0.5, frac
 
     def sample(k):
         ic = _carry(core, grid, nlev)
@@ -134,3 +138,26 @@ def test_wb_training_step_passes_the_gradient_gate(core, loss):
                                [arr, opt.init(arr)], opt, make_lr_schedule(tc),
                                optimizer_name="adamw")
     assert rep["k"] >= 1
+
+
+@pytest.mark.parametrize("mode,loss,match", [
+    ("sfno", {}, "not on 'cubed_sphere'"),
+    ("neural_gcm", {"spectral_weight": 0.5}, "needs a Gaussian grid"),
+])
+def test_cube_core_refuses_what_it_cannot_build(mode, loss, match):
+    from legoesm.training.scale_build import build_mode_components
+
+    cfg = _mod.build_scale_config_from_args(
+        ["--mode", mode, "--smoke", "--training-core", "cubed_sphere"])
+    with pytest.raises(ValueError, match=match):
+        build_mode_components(cfg, {**_YML, "loss": loss})
+
+
+@pytest.mark.parametrize("bad", [None, 0, -4, 12.0, True, "24"])
+def test_cube_n_is_required_and_a_positive_int(bad):
+    from legoesm.training.scale_build import wb_cube_n
+
+    yml = {} if bad is None else {"cube_n": bad}
+    with pytest.raises(ValueError, match="cube_n"):
+        wb_cube_n(yml)
+    assert wb_cube_n({"cube_n": 24}) == 24

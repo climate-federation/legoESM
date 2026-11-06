@@ -833,7 +833,8 @@ def _yaml_resolution_deg(cfg, yml) -> float:
     """Nominal grid spacing [deg] of the deck: 180/n_lat, or 90/cube_n on the
     cubed sphere (a face spans 90 degrees)."""
     if getattr(cfg, "training_core", "latlon") == "cubed_sphere":
-        return 90.0 / float(yml["cube_n"])
+        from legoesm.training.scale_build import wb_cube_n
+        return 90.0 / float(wb_cube_n(yml))
     return 180.0 / float(yml["n_lat"])
 
 
@@ -1189,7 +1190,8 @@ def _main(argv=None):
              cfg.lr, cfg.optimizer, cfg.n_epochs, weight_decay, grad_clip_norm)
     # Resolution comes FROM the YAML grid; an explicit mismatched --resolution
     # is a hard error, not a silent no-op (#817 papercut). Under --smoke the
-    # grid is forced to 32x64, so the derived value is used verbatim.
+    # lat-lon grid is forced to 32x64 (the cube keeps the deck's cube_n), so
+    # the derived value is used verbatim.
     res_deg = (_yaml_resolution_deg(cfg, yml) if cfg.smoke
                else _check_resolution_matches_yaml(cfg, yml))
     log.info("WB scale train: mode=%s core=%s res=%.2fdeg ranks=%d",

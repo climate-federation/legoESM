@@ -522,6 +522,16 @@ def _validated_wb_radiation(cfg, yml) -> str:
     )
 
 
+def wb_cube_n(yml) -> int:
+    """The deck's ``cube_n`` (cells per face edge) for the cubed-sphere core;
+    required, an int > 0."""
+    n = yml.get("cube_n")
+    if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
+        raise ValueError("training_core 'cubed_sphere' needs the deck key "
+                         f"cube_n (cells per face edge, int > 0); got {n!r}")
+    return n
+
+
 def _gridpoint_argv(cfg, yml):
     """run_amip grid flags for the grid-point training cores: lat-lon C-grid
     (``n_lat``) or cubed-sphere CD-grid (``cube_n`` cells per face edge)."""
@@ -530,12 +540,8 @@ def _gridpoint_argv(cfg, yml):
         return ["--grid-type", "latlon", "--discretization", "latlon_cgrid",
                 "--resolution", str(int(yml["n_lat"]))]
     if core == "cubed_sphere":
-        n = yml.get("cube_n")
-        if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
-            raise ValueError("training_core 'cubed_sphere' needs the deck key "
-                             f"cube_n (cells per face edge, int > 0); got {n!r}")
         return ["--grid-type", "cubed_sphere", "--discretization", "cdgrid",
-                "--resolution", str(n)]
+                "--resolution", str(wb_cube_n(yml))]
     raise ValueError(f"no grid-point config for training_core {core!r}")
 
 
