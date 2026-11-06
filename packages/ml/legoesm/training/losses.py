@@ -306,6 +306,15 @@ def _lat_weighted_mean(
     """
     if lat_weights is None:
         return jnp.mean(field)
+    if lat_weights.ndim > 1:
+        # per-cell areas (cubed sphere (6, n, n)): the field's leading axes
+        # are the horizontal ones; trailing axes (levels) are averaged.
+        hw = tuple(lat_weights.shape)
+        if tuple(field.shape[:len(hw)]) != hw:
+            raise ValueError(f"cell-area weights {hw} do not lead the field "
+                             f"shape {tuple(field.shape)}")
+        w = lat_weights.reshape(hw + (1,) * (field.ndim - len(hw)))
+        return jnp.mean(field * w) * lat_weights.size / jnp.sum(lat_weights)
     n_lat_w = lat_weights.shape[0]
     matching_axes = [a for a, d in enumerate(field.shape) if d == n_lat_w]
     if not matching_axes:
@@ -322,6 +331,20 @@ def _lat_weighted_mean(
     shape[axis] = n_lat_w
     w = lat_weights.reshape(shape)
     return jnp.mean(field * w) * n_lat_w / jnp.sum(lat_weights)
+
+
+def grid_area_weights(grid):
+    """The loss's default area weights for ``grid``: its latitude weights
+    (Gaussian / lat-lon ``grid.weights``), else the cubed sphere's per-cell
+    areas ``(6, n, n)`` (user decision Q2, 2026-11-06), else None (plain
+    mean)."""
+    w = getattr(grid, "weights", None)
+    if w is not None:
+        return w
+    area = getattr(grid, "area", None)
+    if area is not None and jnp.ndim(area) == 3:
+        return jnp.asarray(area)
+    return None
 
 
 # Public alias: the AIMIP lat-lon eval reuses this area-weighting helper
@@ -788,9 +811,8 @@ def combined_loss(
         Latitude weights forwarded to ``carry_mse``.  When ``grid`` is
         a ``GaussianGrid``, falls back to ``grid.weights`` if not
         provided — that's the right area weighting for the bias term
-        when ``config.w_bias_* > 0``.  Pass explicit weights for
-        cubed-sphere / lat-lon grids; ``None`` is OK on cubed-sphere
-        where cells have approximately equal area.
+        when ``config.w_bias_* > 0``; on the cubed sphere the default is
+        the per-cell area (:func:`grid_area_weights`).
     config : LossConfig
 
     Returns
@@ -798,7 +820,7 @@ def combined_loss(
     scalar — total loss
     """
     if lat_weights is None and grid is not None:
-        lat_weights = getattr(grid, "weights", None)
+        lat_weights = grid_area_weights(grid)
 
     return combined_loss_terms(pred_carry, target_carry, sigma_full,
                                grid=grid, lat_weights=lat_weights,
@@ -816,7 +838,7 @@ def combined_loss_terms(
     """``combined_loss`` plus its weighted terms (``carry_mse_terms`` names and
     ``spectral``), as ``(loss, terms)``; ``loss`` is the same value."""
     if lat_weights is None and grid is not None:
-        lat_weights = getattr(grid, "weights", None)
+        lat_weights = grid_area_weights(grid)
 
     loss, terms = carry_mse_terms(
         pred_carry, target_carry, sigma_full,
