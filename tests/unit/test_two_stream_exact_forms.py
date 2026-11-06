@@ -151,3 +151,16 @@ def test_conservative_layer_absorbs_nothing(dtype, tol):
     total = (np.asarray(o["r_dir"], np.float64).ravel() + np.asarray(o["t_dir"], np.float64).ravel()
              + np.exp(-tau / mu))
     assert np.abs(total - 1.0).max() < tol
+
+
+@pytest.mark.parametrize("g,bound", [(0.5, 4e-4), (0.7, 7e-4), (0.9, 2e-3), (0.99, 2e-2), (1.0, 0.2)])
+def test_float32_k_floor_false_absorptance_is_as_recorded(g, bound):
+    """Pins the spec's KNOWN DIFFERENCE: the worst case grows with g."""
+    tau = np.geomspace(1e-2, 2000.0, 60)
+    worst = 0.0
+    for mu in (0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 1.0):
+        o = _sw(mu, tau, np.ones(60), np.full(60, g), jnp.float32)
+        total = (np.asarray(o["r_dir"], np.float64).ravel()
+                 + np.asarray(o["t_dir"], np.float64).ravel() + np.exp(-tau / mu))
+        worst = max(worst, np.abs(total - 1.0).max())
+    assert worst < bound
