@@ -41,6 +41,7 @@ from jax import lax
 
 from legoesm import constants
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
+    RCE_CELL_AREA_M2,
     WING_P_SFC,
     WING_Q_SFC_BY_SST,
     wing2018_T_v0,
@@ -169,7 +170,6 @@ SCM_MICROPHYSICS_SUBSTEP_SCHEMES = (
     "sundqvist",
     "seifert_beheng",
     "morrison",
-    "thompson",
     "p3",
 )
 DEFAULT_DAYS = 100.0
@@ -247,7 +247,8 @@ SCHEME_SWEEPS = {
         "holtslag_boville", "ysu", "edmf",
     ),
     "microphysics": (
-        "kessler", "sundqvist", "seifert_beheng", "morrison", "thompson",
+        # thompson (WRF port) needs the resolved w this campaign lacks
+        "kessler", "sundqvist", "seifert_beheng", "morrison",
         "p3",
     ),
     "gravity_wave_drag": (
@@ -1005,12 +1006,17 @@ def make_physics_config(
         )
     # IN-SCHEME liquid super-saturation guard (the IFS/SAM "no liquid
     # super-saturation" half; the ice half is the Koop/Kärcher homogeneous-
-    # freezing allowance, which lives inside morrison/thompson/p3 and needs no
+    # freezing allowance, which lives inside morrison/thompson and needs no
     # switch here).  Threaded through the SHARED
     # ``apply_microphysics_experiment_flags`` so a scheme that cannot carry the
     # flag raises instead of silently ignoring it — never a private copy of
     # that dispatch.
     micro_cfg = cfg.microphysics._replace(scheme=microphysics)
+    if microphysics == "morrison" and micro_cfg.morrison.warm_rain_scheme is None:
+        # Pinned: an unset law resolves to kk2000_cam6 under mg, which needs
+        # CLUBB's per-cell relvar; the SCM-RCE columns run kk2000.
+        micro_cfg = micro_cfg._replace(morrison=micro_cfg.morrison._replace(
+            warm_rain_scheme="kk2000"))
     if (hard_saturation_adjustment
             or hard_sat_adjust_threshold is not None
             or hard_sat_max_heating_K is not None):
@@ -1536,6 +1542,8 @@ def run_scm_rce(
         v=0.0,
         p_s=WING_P_SFC,
         latitude_deg=0.0,
+        cell_area_m2=RCE_CELL_AREA_M2,
+        land_frac=0.0,  # RCE is an ocean case (user 2026-10-27, Q16)
         time_integrator="forward_euler",
         forcing=forcing,
         dtype=jnp.float64,
@@ -2768,6 +2776,9 @@ def tune_category_winner(
         include_tier0=include_tier0,
         exclude=exclude,
         dtype=jnp.float64,
+        # candidate zero = the run's own value of an unset-able field (e.g.
+        # Morrison DCS by flavour), not the class default
+        scheme_configs={scheme_key: subcfg},
     )
     if not params.constraints:
         return base_cfg, [], default_run, EMPTY_TUNE_STATS
@@ -3031,6 +3042,7 @@ def tune_focused_params(
         tier=tier,
         include=tuple(include),
         dtype=jnp.float64,
+        scheme_configs={k: v[1] for k, v in resolved.items()},
     )
     constraints = [c for c in params.constraints if c.name in set(include)]
     missing = sorted(set(include) - {c.name for c in constraints})

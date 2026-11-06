@@ -1490,8 +1490,10 @@ def _extract_surface_fluxes(
     u = forcing.u_lowest
     v = forcing.v_lowest
     ws = jnp.sqrt(u ** 2 + v ** 2 + 1.0e-6)
-    tau_x = tau_total * u / ws
-    tau_y = tau_total * v / ws
+    # Sign: stress ON THE AIR (opposes the wind), as the ocean bulk and
+    # SimpleSEB stresses it is tile-blended with (#2031).
+    tau_x = -tau_total * u / ws
+    tau_y = -tau_total * v / ws
 
     # Net radiation: absorbed SW + net LW
     # rnet_canopy is the full-column net radiation (canopy + soil).

@@ -53,6 +53,7 @@ def _driver(tmp_path):
     return d
 
 
+@pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
 @pytest.mark.parametrize("compiled", [False, True])
 def test_lanes_publish_the_physics_frozen_precip(tmp_path, compiled):
     d = _driver(tmp_path)

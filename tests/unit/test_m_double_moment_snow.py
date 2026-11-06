@@ -107,7 +107,10 @@ def test_snow_number_conserved_ice_to_snow():
         jnp.full((1, 1), T), jnp.full((1, 1), 1.2 * qsi), hm,
         jnp.full((1, 1), p), jnp.full((1, 2), p),
         jnp.full((1, 1), rho), jnp.full((1, 1), 1.0e9),     # huge dz ⇒ no sed
-        20.0, MorrisonConfig(N_i0=0.0))
+        # DCS pinned to 250 um (explicit wins over the mg flavour's 500 um):
+        # at 500 um autoconversion is ~30x smaller and the ice-number outflow
+        # through the finite dz exceeds the 1e-6 tolerance.
+        20.0, MorrisonConfig(N_i0=0.0, ice_snow_d_auto=250.0e-6))
     assert float(out.dN_s_dt[0, 0]) > 0.0          # snow gains autoconv number
     assert float(out.dN_i_dt[0, 0]) < 0.0          # ice loses it
     assert float(out.dN_s_dt[0, 0]) == pytest.approx(

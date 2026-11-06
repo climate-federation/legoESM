@@ -11,6 +11,7 @@ import glob
 import logging
 from pathlib import Path
 
+import jax
 import numpy as np
 import pytest
 
@@ -173,6 +174,13 @@ def test_checkpoint_with_one_face_wind_is_refused(leg1):
         _resume(tmp, str(half), "leg2_half")
 
 
+_needs_x64 = pytest.mark.skipif(
+    not jax.config.read("jax_enable_x64"),
+    reason="Spectral/Gaussian grids require JAX_ENABLE_X64=True",
+)
+
+
+@_needs_x64
 def test_sfno_run_drops_saved_face_winds(tmp_path):
     """A run that does not carry face winds (here SFNO) drops saved ones on
     entering the run, so its checkpoints never re-save them next to a newer

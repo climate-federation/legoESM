@@ -1,106 +1,167 @@
-"""SAM RCEMIP ozone: the mid-latitude-summer (MLS) standard profile.
+"""SAM RCEMIP ozone: gSAM's MLS standard profile as model-layer means.
 
-gSAM's RRTM radiation reads its trace-gas profiles from the MLS standard
-atmosphere stored in ``RUNDATA/rrtmg_lw.nc`` (variable ``AbsorberAmountMLS``)
-and scales ozone by a namelist factor (1.0 for RCEMIP). This module bundles
-that exact O3 volume-mixing-ratio profile (read directly from the gSAM data
-file) so legoESM's RRTMGP radiation can use the SAME ozone as the oracle,
-instead of the built-in skewed-Gaussian ``_standard_o3_profile`` (which
-over-estimates lower-stratospheric O3 by ~3x — 52 hPa: 4.9 vs MLS 1.49 ppm).
+ORACLE.  gSAM 1.8.8 ``SRC/RAD_RRTM/rad.f90`` ``tracesini`` (lines 1219-1431):
+gSAM's RRTM radiation reads the mid-latitude-summer (MLS) trace-gas
+soundings from ``RUNDATA/rrtmg_lw.nc`` (``Pressure``, ``AbsorberAmountMLS``),
+integrates the ozone PATH from the surface up through the model interfaces
+plus one extra layer above the model top (top interface
+``min(1e-4 hPa, 0.25*0.5*p_top)``), with the sounding linear in pressure
+between its nodes and held constant beyond its ends, and differences the
+paths so each layer gets its mass-weighted MEAN mixing ratio.  The namelist
+factor is 1 for RCEMIP.  :func:`mls_ozone_layer_vmr` ports that algorithm in
+the oracle's operation order and is checked against the running oracle in
+``tests/atmosphere/test_ozone_mls_oracle.py``.
 
-The 59 levels span 1054 hPa (surface) to 0.0097 hPa (mesosphere). Ozone is
-interpolated to the model levels LINEARLY in log(O3) vs log(p) and clamped to
-the table endpoints outside the tabulated range.
-
-Provenance: extracted from ``gSAM/.../RUNDATA/rrtmg_lw.nc`` with::
-
-    ds = xarray.open_dataset("rrtmg_lw.nc")
-    names = [decode(n) for n in ds["AbsorberNames"].values]
-    o3 = ds["AbsorberAmountMLS"].values[:, names.index("O3")]   # (59,) VMR
-    p  = ds["Pressure"].values[:59]                             # (59,) hPa
+The bundled table is ``rrtmg_lw.nc`` (sha256 4458c778...93d9) at full
+precision: ``Pressure`` [hPa] and the O3 column of ``AbsorberAmountMLS``
+[mol/mol], 59 nodes, surface first.  gSAM zeroes entries > 2 (none for O3).
 
 This is the SAM/gSAM MLS ozone (what ``nxco2/factor=1`` RCEMIP uses) — NOT the
-RCEMIP-protocol analytic ozone (Wing et al. 2018, ``g1·p^g2·exp(-p/g3)``);
-the oracle is gSAM, which reads this MLS file. Caveat (codex iter-19): SAM
-builds layer-mean O3 from column-integrated trace-gas PATHS (mass-conserving
-differencing), whereas this does pointwise log-log VMR interpolation; the two
-agree at the table nodes and to high accuracy for a smooth profile on CRM
-levels, but are not bit-identical at arbitrary intermediate pressures.
+RCEMIP-protocol analytic ozone (Wing et al. 2018, ``g1·p^g2·exp(-p/g3)``).
 """
 
 from __future__ import annotations
 
 import numpy as np
+import jax
 import jax.numpy as jnp
+
+from legoesm import constants
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py).
 __physics_contract__ = {
     "summary": (
         "SAM/gSAM RCEMIP mid-latitude-summer (MLS) standard-atmosphere ozone: "
-        "bundled O3 VMR profile interpolated (log-O3 vs log-p) to the model "
-        "levels as the RRTMGP ozone absorber."
+        "gSAM tracesini path-differenced layer-mean O3 VMR on the model "
+        "layers (plus the layer above the model top) as the RRTMGP ozone "
+        "absorber."
     ),
-    "inputs": {"p_full": "Pa"},
-    "outputs": {"o3_vmr": "mol/mol (ozone volume mixing ratio)"},
+    "inputs": {"p_half": "Pa (interface pressure, index 0 = model top)"},
+    "outputs": {"o3_vmr": "mol/mol (layer-mean ozone volume mixing ratio)"},
     "sign_convention": (
         "o3_vmr>0; a positive mole fraction peaking in the lower stratosphere; "
-        "interpolation clamps to the tabulated endpoints outside "
-        "[0.0097, 1054] hPa. Diagnoses an absorber field only (no budget)."
+        "the sounding is held at its end values beyond [0.00966, 1053.63] hPa. "
+        "Diagnoses an absorber field only (no budget)."
     ),
     "conserves": ["none"],
     "differentiable": True,
     "reference": (
         "AFGL mid-latitude-summer standard atmosphere (Anderson et al. 1986); "
-        "SAM/gSAM RUNDATA/rrtmg_lw.nc AbsorberAmountMLS (O3)."
+        "gSAM 1.8.8 RAD_RRTM/rad.f90 tracesini with RUNDATA/rrtmg_lw.nc "
+        "AbsorberAmountMLS (O3)."
     ),
     "idealized_test": (
-        "tests/unit/test_mls_ozone.py: interpolant reproduces the MLS table at "
-        "its nodes; log-log interp is AD-finite (log of clamped-positive p)."
+        "tests/atmosphere/test_ozone_mls_oracle.py: layer means match the "
+        "running gSAM tracesini to 1e-10 on three grids; tests/unit/"
+        "test_mls_ozone.py: column path is grid-invariant."
     ),
 }
 
-# MLS standard-atmosphere pressure [hPa] and O3 volume mixing ratio [mol/mol],
-# surface -> top, read from gSAM RUNDATA/rrtmg_lw.nc (AbsorberAmountMLS, O3).
+# --- MLS sounding, gSAM RUNDATA/rrtmg_lw.nc (surface -> top) ---
+# Pressure [hPa]
 _MLS_P_HPA = (
     1053.63, 862.642, 706.272, 578.246, 473.428, 387.61, 317.348, 259.823,
-    212.725, 174.164, 142.594, 116.746, 95.584, 78.257, 64.072, 52.457,
-    42.948, 35.163, 28.789, 23.571, 19.298, 15.8, 12.936, 10.591, 8.671,
-    7.099, 5.812, 4.759, 3.896, 3.19, 2.612, 2.138, 1.751, 1.433, 1.174,
-    0.961, 0.787, 0.644, 0.527, 0.432, 0.353, 0.289, 0.237, 0.194, 0.159,
-    0.13, 0.106, 0.087, 0.071, 0.058, 0.048, 0.039, 0.032, 0.026, 0.021,
-    0.018, 0.014, 0.012, 0.01,
+    212.725, 174.164, 142.594, 116.746, 95.5835, 78.2571, 64.0715, 52.4573,
+    42.9484, 35.1632, 28.7892, 23.5706, 19.298, 15.7998, 12.9358, 10.591,
+    8.67114, 7.09933, 5.81244, 4.75882, 3.89619, 3.18993, 2.6117, 2.13828,
+    1.75067, 1.43333, 1.17351, 0.960789, 0.786628, 0.644036, 0.527292,
+    0.43171, 0.353455, 0.289384, 0.236928, 0.19398, 0.158817, 0.130029,
+    0.106458, 0.0871608, 0.0713612, 0.0584256, 0.0478349, 0.0391639,
+    0.0320647, 0.0262523, 0.0214936, 0.0175975, 0.0144076, 0.0117959,
+    0.00965769,
 )
+# O3 volume mixing ratio [mol/mol] (AbsorberAmountMLS, absorber "O3")
 _MLS_O3_VMR = (
-    1.7351e-08, 1.8594e-08, 2.316e-08, 2.9776e-08, 3.6161e-08, 4.0377e-08,
-    4.0419e-08, 3.9723e-08, 3.9278e-08, 3.9966e-08, 4.3242e-08, 6.2232e-08,
-    1.4327e-07, 3.8332e-07, 8.6365e-07, 1.4865e-06, 2.2225e-06, 3.2583e-06,
-    4.6561e-06, 6.2635e-06, 7.6946e-06, 8.617e-06, 9.335e-06, 9.7664e-06,
-    9.9645e-06, 9.8541e-06, 9.4685e-06, 8.8641e-06, 8.0659e-06, 7.1325e-06,
-    6.1535e-06, 5.2523e-06, 4.5005e-06, 3.8327e-06, 3.2429e-06, 2.7352e-06,
-    2.3146e-06, 1.9814e-06, 1.7157e-06, 1.5011e-06, 1.3296e-06, 1.1901e-06,
-    1.0665e-06, 9.6507e-07, 8.8057e-07, 8.114e-07, 7.3923e-07, 6.7913e-07,
-    6.2578e-07, 5.7923e-07, 5.371e-07, 4.6702e-07, 4.0964e-07, 3.4091e-07,
-    2.7114e-07, 2.1521e-07, 1.8115e-07, 1.5325e-07, 1.596e-07,
+    1.7351146061445684e-08, 1.8594253528211756e-08, 2.315958209318113e-08,
+    2.977607283479713e-08, 3.6160692454954786e-08, 4.03765567598473e-08,
+    4.0419242276651843e-08, 3.972259096079735e-08, 3.927787357530583e-08,
+    3.9965961952221263e-08, 4.324244438418727e-08, 6.223225792007951e-08,
+    1.4326748886742276e-07, 3.833234821927476e-07, 8.636481488650343e-07,
+    1.4865046967488144e-06, 2.2224979491558506e-06, 3.2582534827057087e-06,
+    4.65608101977412e-06, 6.263463249715041e-06, 7.694613833863467e-06,
+    8.616951869010989e-06, 9.334983949150036e-06, 9.766387973227697e-06,
+    9.964502341540206e-06, 9.854079301724168e-06, 9.468470341438533e-06,
+    8.864065331820452e-06, 8.06590770780332e-06, 7.132535402553212e-06,
+    6.153457476755871e-06, 5.252318231359983e-06, 4.500507279439954e-06,
+    3.832681305095953e-06, 3.242876157647763e-06, 2.735217566682869e-06,
+    2.314578125921976e-06, 1.9813845468617263e-06, 1.715660728078452e-06,
+    1.501086740653173e-06, 1.3296361983515985e-06, 1.1900842378111121e-06,
+    1.0664678127621685e-06, 9.650660136603498e-07, 8.805738209341674e-07,
+    8.113999380401784e-07, 7.392325282634074e-07, 6.791270017275985e-07,
+    6.257790755193067e-07, 5.79229656546301e-07, 5.371014609318492e-07,
+    4.6701738877289174e-07, 4.0963751966080874e-07, 3.409109923886526e-07,
+    2.711398120755099e-07, 2.152125676507284e-07, 1.8114569410404434e-07,
+    1.5325376845061487e-07, 1.595950432797674e-07,
 )
+# --- gSAM tracesini extra layer (rad.f90: tmp_presi(nz+1) = MIN(1.e-4, 0.25*tmp_pres(nz))) ---
+_TOP_INTERFACE_CAP_HPA = 1.0e-4
 
-# Pre-sorted ASCENDING in pressure (top -> surface) for jnp.interp, with the
-# interpolation done in log space: x = log(p), y = log(O3).
-#
-# Keep these as NumPy constants.  This module is imported lazily by the radiation
-# path, which can happen while an SCM step is being traced by jax.jit/lax.scan;
-# initializing JAX arrays here would cache DynamicJaxprTracers in module globals.
-_LOGP_ASC = np.log(np.asarray(_MLS_P_HPA[::-1], dtype=np.float64))
-_LOGO3_ASC = np.log(np.asarray(_MLS_O3_VMR[::-1], dtype=np.float64))
+# Keep NumPy constants: this module can be imported lazily while a step is
+# being traced, and JAX arrays built at import would cache tracers.
+_P_TABLE = np.asarray(_MLS_P_HPA, dtype=np.float64)
+_O3_TABLE = np.asarray(_MLS_O3_VMR, dtype=np.float64)
 
 
-def mls_ozone_vmr(p_full: jnp.ndarray) -> jnp.ndarray:
-    """Interpolate the SAM MLS O3 profile to ``p_full`` [Pa].
+def mls_ozone_layer_vmr(p_half: jnp.ndarray):
+    """gSAM ``tracesini`` ozone on the layers bounded by ``p_half``.
 
-    Linear in log(O3) vs log(p); ``jnp.interp`` clamps to the table endpoints
-    outside [0.0097, 1054] hPa. Returns O3 VMR [mol/mol], same shape as
-    ``p_full``. AD-finite everywhere (log of clamped-positive pressure;
-    interp is piecewise-linear).
+    Parameters
+    ----------
+    p_half : jnp.ndarray
+        ``(ncol, nlev+1)`` interface pressure [Pa], index 0 = model top.
+
+    Returns
+    -------
+    o3_layers : jnp.ndarray
+        ``(ncol, nlev)`` layer-mean O3 VMR [mol/mol], index 0 = model top.
+    o3_above : jnp.ndarray
+        ``(ncol,)`` mean O3 VMR of gSAM's extra layer above the model top,
+        between ``p_half[:, 0]`` and ``min(1e-4 hPa, p_half[:, 0]/8)``.  Not
+        finite when ``p_half[:, 0] == 0`` (that layer then has no thickness).
+
+    The operations follow the oracle's order (surface-up cumulative path,
+    ``(dp/ggr)*tr`` per piece, difference times ``ggr/dp``) with gSAM's
+    ``ggr`` (``constants.g_gsam``; it cancels analytically), so round-off
+    matches.
     """
-    log_p = jnp.log(jnp.clip(p_full, 1.0e-2) / 100.0)   # coeff-ok: pressure floor [Pa]; /100=Pa->hPa
-    log_o3 = jnp.interp(log_p, jnp.asarray(_LOGP_ASC), jnp.asarray(_LOGO3_ASC))
-    return jnp.exp(log_o3)
+    p_half = jnp.asarray(p_half)
+    dt = p_half.dtype
+    pm = jnp.asarray(_P_TABLE, dtype=dt)
+    tr = jnp.asarray(_O3_TABLE, dtype=dt)
+    ggr = jnp.asarray(constants.g_gsam, dtype=dt)
+    n_press = _P_TABLE.shape[0]
+
+    presi = p_half[:, ::-1] / 100.0                  # (ncol, nz) hPa, surface first
+    top = jnp.minimum(_TOP_INTERFACE_CAP_HPA, 0.25 * (0.5 * presi[:, -1]))
+    tmp_presi = jnp.concatenate([presi, top[:, None]], axis=1)   # (ncol, nz+1)
+
+    def step(path, bounds):
+        a, b = bounds                    # tmp_presi(k-1) (lower), tmp_presi(k) (upper)
+        # below the sounding: concentration at its bottom node
+        path = path + jnp.where(a > pm[0], (a - jnp.maximum(b, pm[0])) / ggr * tr[0], 0.0)
+        for m in range(1, n_press):
+            plow = jnp.minimum(a, jnp.maximum(b, pm[m - 1]))
+            pupp = jnp.minimum(a, jnp.maximum(b, pm[m]))
+            pmid = 0.5 * (plow + pupp)
+            wgtlow = (pmid - pm[m]) / (pm[m - 1] - pm[m])
+            wgtupp = (pm[m - 1] - pmid) / (pm[m - 1] - pm[m])
+            path = path + jnp.where(
+                plow > pupp,
+                (plow - pupp) / ggr * (wgtlow * tr[m - 1] + wgtupp * tr[m]), 0.0)
+        # above the sounding: concentration at its top node
+        path = path + jnp.where(b < pm[n_press - 1],
+                                (jnp.minimum(a, pm[n_press - 1]) - b) / ggr * tr[n_press - 1],
+                                0.0)
+        return path, path
+
+    _, paths = jax.lax.scan(step, jnp.zeros(p_half.shape[0], dtype=dt),
+                            (tmp_presi[:, :-1].T, tmp_presi[:, 1:].T))
+    trpath = jnp.concatenate([jnp.zeros((1, p_half.shape[0]), dtype=dt), paths])  # (nz+1, ncol)
+    # Model layers and the extra layer are formed separately so a zero-thickness
+    # extra layer (p_top = 0) cannot leak a non-finite value into the layers'
+    # gradient.
+    nz = presi.shape[1]
+    godp = ggr / (presi[:, :-1] - presi[:, 1:])      # (ncol, nz-1)
+    o3_layers = (trpath[1:nz] - trpath[:nz - 1]).T * godp
+    o3_above = (trpath[nz] - trpath[nz - 1]) * (ggr / (presi[:, -1] - top))
+    return o3_layers[:, ::-1], o3_above

@@ -76,6 +76,12 @@ class TestRegistry:
         assert LATLON_RECIPES["legoesm_linear_v1"]["n_barotropic_substeps"] == 30
         assert LATLON_RECIPES["nemo_dino_v1"]["A_h_lat_scaling"] is True
 
+    def test_implicit_cn_variant_differs_only_in_barotropic_solver(self):
+        # #2114: the IGW channel recipe is default_wright_v1 + implicit_cn.
+        base = dict(LATLON_RECIPES["default_wright_v1"],
+                    barotropic_solver="implicit_cn")
+        assert LATLON_RECIPES["default_wright_implicit_cn_v1"] == base
+
 
 class TestCatalogMatchesFactories:
     """A catalog entry must equal the dycore its source factory produces — so the
@@ -131,6 +137,27 @@ class TestCatalogMatchesFactories:
         for k, v in get_recipe("omip_nemo_match_tripole_v1", "latlon").items():
             assert mc.flat_get(k) == v, k
 
+    def test_other_viscosity_operators_pin_surface_masks(self):
+        """per_level raises off the vector Laplacian, so those recipes must pin."""
+        from legoesm.ocean.recipes import LATLON_RECIPES
+        pinned = [n for n, r in LATLON_RECIPES.items()
+                  if r.get("lateral_viscosity_operator", "vector_laplacian")
+                  != "vector_laplacian"]
+        assert pinned
+        for name in pinned:
+            assert LATLON_RECIPES[name]["lateral_viscosity_mask_levels"] == "surface", name
+
+    def test_omip_nemo_match_tripole_v1_selects_per_level_masks(self):
+        """The production OMIP card names NEMO's 3-D viscosity masks."""
+        recipe = get_recipe("omip_nemo_match_tripole_v1", "latlon")
+        assert recipe["lateral_viscosity_mask_levels"] == "per_level"
+
+    def test_omip_nemo_match_tripole_v1_selects_nemo_shlat(self):
+        """The production OMIP card runs NEMO ORCA1's rn_shlat = 2 side BC."""
+        recipe = get_recipe("omip_nemo_match_tripole_v1", "latlon")
+        assert recipe["lateral_side_bc"] == "nemo_shlat"
+        assert recipe["lateral_shlat"] == 2.0
+
 
 # The PROVEN OMIP MPAS ico6 dycore — a FROZEN snapshot of the scheme + coefficient
 # fields _create_setup("mpas") produced BEFORE the factory rewire (#500).  This is
@@ -164,8 +191,13 @@ _FROZEN_MPAS_DYCORE = {
 # serve 1 degree and 1/12 degree (measured, 1e5 puts ORCA12 26x over the
 # explicit Laplacian limit).  The anchor mesh still derives 1e5, gated against
 # the real eORCA1.2 file in test_lateral_viscosity_resolution_scaling.py.
+# The SST RMSE 1.15 was scored with surface masks and free-slip sides; the
+# current masks and side BC below have not been re-scored.
 _FROZEN_TRIPOLE_DYCORE = {
     "A_h": None,
+    "lateral_viscosity_mask_levels": "per_level",
+    "lateral_side_bc": "nemo_shlat",
+    "lateral_shlat": 2.0,
     "A_v": 1.0e-4,
     "K_v": 1.0e-5,
     "B_h": 0.0,

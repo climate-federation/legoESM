@@ -50,6 +50,24 @@ def test_crps_term_is_level_weighted_mae_over_scale(var, scale_attr):
     np.testing.assert_allclose(loss, expected, rtol=1e-6)
 
 
+def test_crps_is_pointwise_and_area_weighted_on_a_mixed_sign_field():
+    """A field whose errors differ per cell and cancel in the area mean, so
+    the abs must act before the reduction and lat_weights must reach it."""
+    err = np.random.default_rng(0).normal(size=(NLAT, NLON, NLEV))
+    err -= err.mean(axis=(0, 1), keepdims=True)
+    lat_w = jnp.array([0.2, 0.8, 0.8, 0.2])
+    cfg = LossConfig(**_OFF, w_crps_T=1.0, level_weighting="pressure")
+    pred = _carry()._replace(T=jnp.asarray(err))
+    loss = float(carry_mse(pred, _carry(), SIGMA, config=cfg,
+                           lat_weights=lat_w))
+    lev_w = np.asarray(level_weights(SIGMA, config=cfg))
+    w = np.asarray(lat_w)[:, None, None]
+    expected = (np.mean(np.abs(err) * lev_w * w) * NLAT / w.sum()) / cfg.T_scale
+    unweighted = np.mean(np.abs(err) * lev_w) / cfg.T_scale
+    assert abs(expected - unweighted) > 1e-3 * expected
+    np.testing.assert_allclose(loss, expected, rtol=1e-6)
+
+
 def test_crps_uses_residual_scales_when_residual_normalize():
     cfg = LossConfig(**_OFF, w_crps_T=1.0, residual_normalize=True,
                      level_weighting="uniform")

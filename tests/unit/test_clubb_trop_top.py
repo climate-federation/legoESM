@@ -62,11 +62,11 @@ def _run(config, **overrides):
     )
 
 
-def test_default_off_is_bit_identical_to_saturated_taper():
-    """Default 0.0 takes the static no-taper branch; a cutoff so small its
-    sigmoid saturates to exactly 1.0 at every level must reproduce it
-    BIT-identically — proving the off branch is 'taper == 1', nothing else."""
-    out_off, wp2_off = _run(CLUBBConfig())
+def test_off_is_bit_identical_to_saturated_taper():
+    """0.0 (off; CAM's bare code default) takes the static no-taper branch; a
+    cutoff so small its sigmoid saturates to exactly 1.0 at every level must
+    reproduce it BIT-identically — proving the off branch is 'taper == 1'."""
+    out_off, wp2_off = _run(CLUBBConfig(trop_cloud_top_press=0.0))
     out_sat, wp2_sat = _run(
         CLUBBConfig(trop_cloud_top_press=1.0e-6))
     for a, b in zip(jax.tree.leaves(out_off), jax.tree.leaves(out_sat)):

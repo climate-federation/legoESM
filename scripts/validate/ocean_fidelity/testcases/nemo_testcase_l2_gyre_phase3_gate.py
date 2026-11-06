@@ -163,7 +163,7 @@ def _xyz(values: np.ndarray, nx: int, ny: int, nz: int) -> np.ndarray:
     return values.reshape((nx, ny, nz), order="F")[2:-2, 2:-2].transpose(1, 0, 2)
 
 
-def read_entry(path: Path) -> dict:
+def read_entry(path: Path, dims=DIMS) -> dict:
     level = _registered(path, "before")
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
@@ -171,7 +171,7 @@ def read_entry(path: Path) -> dict:
         values = np.fromfile(handle, dtype=np.float64)
     version, kt, nbb, nx, ny, nz, ntr, bits = header
     require(magic == "NEMO_L1_ENTRY_1", f"{path}: bad magic")
-    require((version, nx, ny, nz, ntr, bits) == (1, *DIMS, 2, 64), f"{path}: bad header")
+    require((version, nx, ny, nz, ntr, bits) == (1, *dims, 2, 64), f"{path}: bad header")
     count = nx * ny * nz
     require(values.size == 4 * count + nx * ny, f"{path}: bad payload")
     require(np.all(np.isfinite(values)), f"{path}: non-finite payload")
@@ -191,7 +191,14 @@ def read_entry(path: Path) -> dict:
     }
 
 
-def read_stage(path: Path, expected_stage: int) -> dict:
+def read_stage(
+    path: Path,
+    expected_stage: int,
+    dims=DIMS,
+    *,
+    expected_kt: int = 1,
+    expected_kaa: int | None = None,
+) -> dict:
     level = _registered(path, "after")
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
@@ -199,9 +206,12 @@ def read_stage(path: Path, expected_stage: int) -> dict:
         values = np.fromfile(handle, dtype=np.float64)
     version, kt, stage, kaa, nx, ny, nz, ntr, bits = header
     require(magic == "NEMO_L1_STAGE_1", f"{path}: bad magic")
-    require((version, nx, ny, nz, ntr, bits) == (1, *DIMS, 2, 64), f"{path}: bad header")
+    require((version, nx, ny, nz, ntr, bits) == (1, *dims, 2, 64), f"{path}: bad header")
+    if expected_kaa is None:
+        expected_kaa = LEVELS[expected_stage]["Kaa"]
     require(
-        (kt, stage, kaa) == (1, expected_stage, LEVELS[expected_stage]["Kaa"]),
+        (kt, stage, kaa)
+        == (expected_kt, expected_stage, expected_kaa),
         f"{path}: wrong Kaa",
     )
     count = nx * ny * nz
@@ -386,14 +396,24 @@ def _xy(values: np.ndarray, nx: int, ny: int) -> np.ndarray:
     return values.reshape((nx, ny), order="F")[2:-2, 2:-2].T
 
 
-def read_zdf_entry(path: Path) -> dict:
+def read_zdf_entry(
+    path: Path,
+    dims=DIMS,
+    *,
+    expected_kt: int = 1,
+    expected_level: int = 1,
+) -> dict:
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
         header = struct.unpack("=7i", handle.read(28))
         values = np.fromfile(handle, dtype=np.float64)
     version, kt, level, nx, ny, nz, bits = header
     require(magic == "NEMO_L2_ZDF___1", f"{path}: bad magic")
-    require((version, kt, nx, ny, nz, bits) == (1, 1, *DIMS, 64), f"{path}: bad header")
+    require(
+        (version, kt, level, nx, ny, nz, bits) ==
+        (1, expected_kt, expected_level, *dims, 64),
+        f"{path}: bad header",
+    )
     avm_count = nx * ny * nz
     avt_count = (nx - 4) * (ny - 4) * nz
     require(values.size == avm_count + avt_count, f"{path}: bad payload")
@@ -461,6 +481,37 @@ def read_tracer_stage3(path: Path) -> dict:
         result[name] = _xy(values[begin:begin + nx * ny], nx, ny)
     result.update({"registry_level": level, "Kbb": kbb, "Kmm": kmm,
                    "Krhs": krhs, "Kaa": kaa})
+    return result
+
+
+def read_tracer_stage12(path: Path, expected_stage: int, dims=DIMS) -> dict:
+    """Read the source-ordered stage-1/2 tracer accumulator and update."""
+    level = _registered(path, "now")
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=11i", handle.read(44))
+        values = np.fromfile(handle, dtype=np.float64)
+    version, kt, stage, kbb, kmm, krhs, kaa, nx, ny, nz, bits = header
+    require(magic == "NEMO_L2_RKTRA_1", f"{path}: bad magic")
+    require(
+        (version, kt, stage, nx, ny, nz, bits)
+        == (1, 1, expected_stage, *dims, 64),
+        f"{path}: bad header",
+    )
+    count = nx * ny * nz
+    require(values.size == 15 * count + 3 * nx * ny, f"{path}: bad payload")
+    names = (
+        "zero_T", "zero_S", "zFu", "zFv", "zFw",
+        "after_advection_T", "after_advection_S",
+        "after_sbc_T", "after_sbc_S", "Kbb_T", "Kbb_S",
+        "Kmm_T", "Kmm_S", "Kaa_T", "Kaa_S",
+    )
+    result = {
+        name: _xyz(values[index * count:(index + 1) * count], nx, ny, nz)
+        for index, name in enumerate(names)
+    }
+    result.update({"stage": stage, "Kbb": kbb, "Kmm": kmm,
+                   "Krhs": krhs, "Kaa": kaa, "registry_level": level})
     return result
 
 
@@ -689,63 +740,9 @@ def _mark_kt1_uninformative(row: dict, field: str, kt: int) -> dict:
 
 
 def _surface_forcings(card, state, kt: int):
-    import jax.numpy as jnp
-    from legoesm.ocean.eos import nemo_potential_temperature_from_conservative
-    from legoesm.ocean.fidelity.nemo_recipe import nemo_gyre_qns
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import gyre_surface_boundary_condition
-    from legoesm.ocean.freshwater import FreshwaterForcing
-    from legoesm.ocean.state import OceanSurfaceForcing
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import gyre_surface_forcings
 
-    sbc = gyre_surface_boundary_condition(card, kt * card.dt_s)
-    sst = state.T.data[..., 0]
-    sst_m = nemo_potential_temperature_from_conservative(
-        sst, state.S.data[..., 0])
-    # usrdef_sbc.F90:109-120,138-145: qns+qsr is the Haney term plus EMP
-    # heat content, evaluated once from the entering Kbb/Nbb SST.
-    qns = nemo_gyre_qns(
-        sst,
-        sst_m,
-        sbc.t_star_c,
-        sbc.qsr_w_m2,
-        sbc.emp_kg_m2_s,
-    )
-    # NEMO carries qns/qsr separately; the shared forcing object carries their
-    # materialized sum.
-    from legoesm.core.source_rounding import nemo_source_round
-
-    q_total = nemo_source_round(qns + sbc.qsr_w_m2)
-    surface = OceanSurfaceForcing(
-        sw_down=sbc.qsr_w_m2,
-        q_net=q_total,
-        # usrdef_sbc's utau/vtau are already NEMO native-i/native-j ocean
-        # components on the 45-degree grid.  The public forcing object carries
-        # geographic atmospheric stress, so inverse-rotate to east/north and
-        # reverse the reaction sign; surface_stress_faces then recovers exactly
-        # the source-native pair instead of rotating it a second time.
-        tau_x=-(
-            card.recipe.grid.cos_alpha_u[:, 1:] * sbc.utau_pa
-            - card.recipe.grid.sin_alpha_u[:, 1:] * sbc.vtau_pa
-        ),
-        tau_y=-(
-            card.recipe.grid.sin_alpha_u[:, 1:] * sbc.utau_pa
-            + card.recipe.grid.cos_alpha_u[:, 1:] * sbc.vtau_pa
-        ),
-        # NEMO's usrdef_sbc fields are already in the native ocean
-        # referential.  Preserve those source operands through the shared
-        # forcing interface; reconstructing them after the inverse geographic
-        # rotation loses 1--3 ulp before sbcmod.F90's face interpolation.
-        tau_i_native=sbc.utau_pa,
-        tau_j_native=sbc.vtau_pa,
-    )
-    zeros = jnp.zeros_like(sbc.emp_kg_m2_s)
-    freshwater = FreshwaterForcing(
-        precip=zeros,
-        evap=sbc.emp_kg_m2_s,
-        runoff=zeros,
-        ice_fw=zeros,
-        restoring=zeros,
-    )
-    return freshwater, surface
+    return gyre_surface_forcings(card, state, kt)
 
 
 def _trajectory_growth(steps: list[dict]) -> dict:

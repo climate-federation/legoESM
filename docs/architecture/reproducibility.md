@@ -316,8 +316,9 @@ The proposal, change by change:
    - Copy each YAML the driver read into `config_input/`.
    - Fold `run.yaml` (template, overrides, machine) into the manifest's `run`
      block.
-   - Let the runners pass `runner_tag` and `patches` (name plus sha256);
-     the manifest fields already exist.
+   - Let the runners pass `orchestrator_tag` (env `LEGOESM_RUNNER_TAG`) and
+     `patches` (name plus sha256). `runner_tag` stays the entry script's tag:
+     replay and the one-run-per-directory check key on it.
 8. **A default-snapshot gate** (prevents G1 from recurring).
    - A committed golden file lists the default of every field of every
      `*Config` NamedTuple, and a test fails when any default changes.
@@ -407,8 +408,8 @@ stays outside the scientific configuration, as in ESM-Tools and CIME.
 
 Rule of thumb: legoESM records **what actually ran**. Experiment repositories
 record **what was intended, where, and how to rebuild the environment**. The
-link between the two is a pair of fields (`runner_tag`, `patches`) that the
-manifest already has.
+link between the two is a pair of fields (`orchestrator_tag`, `patches`) in
+the manifest.
 
 ## 5. Implementation plan
 
@@ -564,7 +565,7 @@ emits v2. Old manifests keep loading.
    two catalog schemas *first*, so the column is added once (G9).
 8. Default-snapshot golden test plus the CHANGELOG convention (item 8).
 9. `config_input/` copy, and `run.yaml` folded into the manifest (item 7).
-10. Runners write `runner_tag` and patch sha256 into the upstream manifest,
+10. Runners write `orchestrator_tag` and patch sha256 into the upstream manifest,
     and reference the manifest from `experiment.tag`. This is a two-field
     change on each side.
 11. Provenance attributes in CMOR outputs (item 9).

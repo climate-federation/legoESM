@@ -8,12 +8,16 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2] / "scripts" / "bench" / "sample_cpu_cores.py"
 _spec = importlib.util.spec_from_file_location("sample_cpu_cores", _SRC)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 
 
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(),
+                    reason="needs Linux /proc")
 def test_parse_picks_utime_and_stime_not_the_child_counters():
     """A process that has just burned CPU must report it. cutime/cstime -- what
     the old shell probes actually read -- are zero here, so a wrong offset shows

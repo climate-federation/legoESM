@@ -38,24 +38,12 @@ StatesMap: TypeAlias = dict[str, Array]
 
 # Secant of the longwave diffusivity angle per Fu et al. (1997).
 _LW_DIFFUSIVE_FACTOR = 1.66
+# Guard on the adding reciprocal 1/(1 - R A); fires only where R A rounds to 1.
 _EPSILON = 1e-6
-# Minimum longwave optical depth required for nonzero source.
-_MIN_TAU_FOR_LW_SRC = 1e-4
-# --- two-stream eigenvalue floor (RRTMGP mo_rte_solver_kernels) ---
-# Dtype-aware floor on the sqrt argument k^2 = (gamma1+gamma2)*(gamma1-gamma2)
-# in ``_k_fn``.  Canonical RRTMGP (sw_two_stream / lw_two_stream) floors this
-# argument at 1e-12 in double precision — a bare zero-guard that preserves the
-# k->0 conservative-scattering limit (ssa=1 gives gamma1 == gamma2 exactly),
-# where r_diff -> gamma2*tau/(1+gamma1*tau) and t_diff -> 1/(1+gamma1*tau).
-# A legacy outer floor of k >= 1e-2 was ~1e10x larger than upstream and biased
-# thick-cloud SW reflectance/transmittance by O((k_floor*tau)^2) (~1-5% at
-# tau=50).  The floor value balances that O((k*tau)^2) floor bias against the
-# O(eps_mach/(k*tau)) cancellation noise in 1 - exp(-2*k*tau):
-# (k*tau)_opt ~ eps_mach^(1/3), i.e. k >= 1e-6 (arg 1e-12) for float64 and
-# k >= 1e-3 (arg 1e-6) for float32.  The sqrt VJP stays bounded at
-# 1/(2*k_floor), so reverse-mode AD is safe at the floor.
-_K_SQUARED_MIN_F64 = 1e-12
-_K_SQUARED_MIN_F32 = 1e-6
+# Switch between the hyperbolic (small k*tau) and exp-scaled (large k*tau) forms of
+# the diffuse two-stream quantities.  Both are algebraically exact and well
+# conditioned at k*tau = 1, so the switch adds no discontinuity beyond roundoff.
+_KTAU_SWITCH = 1.0
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py).
 __physics_contract__ = {
@@ -130,17 +118,18 @@ def lw_combine_sources(planck_srcs: StatesMap) -> StatesMap:
   """
   planck_src_top = planck_srcs['planck_src_top']
   planck_src_bottom = planck_srcs['planck_src_bottom']
-  # AD-safe floor (restored from commit 59407953): ``maximum(x, 0.0)`` gives
-  # ``sqrt(0)`` which has ``1/sqrt(0) = inf`` in the backward VJP; combined
-  # with zero cotangents (e.g. from stop_gradient'd spinup carries) this
-  # produces ``0 * inf = NaN`` by mul.  Floor at ``_EPSILON`` (the module
-  # sqrt-guard convention) so the VJP stays bounded at
-  # ``1/(2*sqrt(_EPSILON)) = O(500)``.  Floor is physically negligible:
-  # combined Planck source values are O(0.01-10) W/m²/sr, while
-  # ``sqrt(_EPSILON) = 1e-3``.
-  combined_src_top = jnp.sqrt(jnp.maximum(
-      planck_src_top * _shift_down(planck_src_bottom), _EPSILON
-  ))
+  # Double where: sqrt has an infinite derivative at 0, and a level source can be
+  # exactly 0 (halo cell) or legitimately far below any fixed floor (a cold level
+  # in a far-wing g-point).
+  product = planck_src_top * _shift_down(planck_src_bottom)
+  positive = product > 0.0
+  combined_src_top = jnp.where(
+      positive, jnp.sqrt(jnp.where(positive, product, 1.0)), 0.0)
+  # Boundary levels take the adjacent layer's Planck fraction alone, with no halo
+  # fraction: lev_src(sfc) = pfrac(1) B(tlev(sfc)) and lev_src(top) = pfrac(nlay)
+  # B(tlev(top)) (rte-rrtmgp mo_gas_optics_rrtmgp_kernels.F90 compute_Planck_source).
+  combined_src_top = combined_src_top.at[:, :, 0].set(planck_src_bottom[:, :, 1])
+  combined_src_top = combined_src_top.at[:, :, -2].set(planck_src_top[:, :, -2])
   combined_src_bottom = _shift_up(combined_src_top)
   return {
       'planck_src_top': combined_src_top,
@@ -148,139 +137,352 @@ def lw_combine_sources(planck_srcs: StatesMap) -> StatesMap:
   }
 
 
-def _k_fn(gamma1: Array, gamma2: Array) -> Array:
-  """Compute the k parameter used in the transmittance.
+def _eps_of(x: Array) -> float:
+  """Machine epsilon of ``x``'s dtype.
 
-  The floor is dtype-aware (see ``_K_SQUARED_MIN_*``): tight enough to
-  preserve the conservative-scattering k->0 limit, large enough that the
-  sqrt VJP and the ``1 - exp(-2*k*tau)`` cancellation stay well conditioned.
+  Every numerical guard in this module scales with it, so the same logic is
+  correct at float32 and float64 (fixed guards like the former ``1e-2`` k
+  floor mean very different things at different precisions and biased the
+  conservative-scattering limit at float32).
   """
-  k_sq_min = (
-      _K_SQUARED_MIN_F64
-      if jnp.result_type(gamma1, gamma2) == jnp.float64
-      else _K_SQUARED_MIN_F32
+  return float(jnp.finfo(jnp.result_type(x)).eps)
+
+
+# The hyperbolic helper below is parameterized by ``x2 = x**2``, NOT by ``x``
+# — because its only caller has ``x = k*tau`` with ``k = sqrt(k2)`` and ``k2``
+# hitting *exactly* zero for conservative scattering (an f32 Rayleigh-only
+# g-point rounds ssa to 1). The functions are analytically smooth in ``x2``,
+# but composing them as ``f(sqrt(x2))`` puts ``d sqrt/d x2 = inf`` on the
+# reverse path at ``x2 = 0`` and the chain rule manufactures ``0 * inf = NaN``
+# cotangents (this NaN'd every clear-sky SW column's temperature gradient).
+# Taking ``x2`` directly keeps the whole evaluation polynomial in ``x2``, so
+# there is no ``sqrt`` on the differentiated path at all.
+
+
+def _series_order(eps: float) -> int:
+  """Highest power of ``x2`` needed to reach ``eps`` accuracy on ``[0, 1]``.
+
+  The slowest-converging of the four quantities below is ``cosh``, whose
+  truncation error after the ``x2**n`` term is the first omitted term,
+  ``x2**(n+1)/(2n+2)!``, i.e. ``1/(2n+2)!`` at the top of the range. Solving
+  that against the working precision gives ``n = 5`` at float32 (error
+  ``1/12! = 2e-9``, well under ``eps = 1.2e-7``) and ``n = 8`` at float64
+  (``1/18! = 1.6e-16`` against ``eps = 2.2e-16``).
+  """
+  n = 1
+  while 1.0 / math.factorial(2 * n + 2) > eps:
+    n += 1
+  return n
+
+
+def _horner(x: Array, coeffs: list[float]) -> Array:
+  """Evaluate ``sum(coeffs[i] * x**i)`` by Horner's rule."""
+  acc = coeffs[-1]
+  for c in reversed(coeffs[:-1]):
+    acc = c + x * acc
+  return acc
+
+
+def _hyperbolics(x2: Array) -> tuple[Array, Array, Array, Array]:
+  """``sinh(x)/x``, ``sinh(x/2)/(x/2)``, ``sinh(x)/x - 1`` and ``cosh(x)``.
+
+  All four as functions of ``x2 = x**2``, computed together because the caller
+  always needs all four at the same argument, and evaluated as **truncated
+  Maclaurin series in x2 with no branch at all**.
+
+  A branch-free polynomial is admissible here only because the caller clips its
+  argument: ``_diffuse_quantities`` selects this (small-``k*tau``) form solely
+  for ``x2 < _KTAU_SWITCH**2 = 1`` and passes a clipped ``x2`` otherwise, so
+  the domain is exactly ``[0, 1]``. Over that domain the series converge fast
+  enough to be correctly rounded at ``_series_order(eps)`` terms — five at
+  float32 — which is where the cost goes:
+
+  * **no transcendentals.** The previous formulation switched between these
+    series and an ``exp``-based direct form at an eps-scaled threshold, and a
+    ``jnp.where`` evaluates *both* branches, so every call paid for one
+    ``sqrt`` and one ``exp`` (plus four selects and their compares) to end up
+    on the polynomial anyway over most of the range. On ``[0, 1]`` the direct
+    form buys nothing: a handful of fused multiply-adds is both cheaper and
+    *more* accurate than ``(e**x - e**-x)/2x``, which cancels mildly at the
+    small end of the interval.
+  * **no ``sqrt`` on the differentiated path.** ``x`` itself never appears —
+    see the note above on why ``sqrt(x2)`` is poison for the adjoint at the
+    conservative-scattering point ``x2 = 0``. The previous version needed a
+    masked-safe operand to keep that ``sqrt`` away from zero; with the direct
+    form gone there is nothing left to guard.
+
+  ``sinh(x)/x - 1`` is returned separately (rather than left to the caller to
+  subtract) because it is ``O(x2)`` and forming it as ``sinhc - 1`` would
+  cancel away its leading digits; its series simply omits the constant term.
+  """
+  n = _series_order(_eps_of(x2))
+  # sinh(x)/x = sum x2**i / (2i+1)!;  cosh(x) = sum x2**i / (2i)!.
+  sinhc_c = [1.0 / math.factorial(2 * i + 1) for i in range(n + 1)]
+  cosh_c = [1.0 / math.factorial(2 * i) for i in range(n + 1)]
+  # sinh(x)/x - 1 = x2 * sum x2**i / (2i+3)!, i.e. the same series with the
+  # constant term dropped and one factor of x2 pulled out front.
+  sinhc_m1_c = [1.0 / math.factorial(2 * i + 3) for i in range(n)]
+
+  return (
+      _horner(x2, sinhc_c),
+      # sinh(x/2)/(x/2) is the same series evaluated at (x/2)**2 = x2/4.
+      _horner(0.25 * x2, sinhc_c),
+      x2 * _horner(x2, sinhc_m1_c),
+      _horner(x2, cosh_c),
   )
-  return jnp.sqrt(jnp.maximum((gamma1 + gamma2) * (gamma1 - gamma2), k_sq_min))
 
 
-def _rt_denominator_diffuse(gamma1: Array, gamma2: Array, tau: Array) -> Array:
-  """Shared denominator of the diffuse reflectance and transmittance."""
-  # As in the original RRTMGP Fortran code, this expression has been
-  # refactored to avoid rounding errors when k, gamma1 are of very different
-  # magnitudes.
-  k = _k_fn(gamma1, gamma2)
-  return k * (1 + jnp.exp(-2.0 * tau * k)) + gamma1 * (
-      1 - jnp.exp(-2.0 * tau * k)
-  )
+def _k_squared(gamma1: Array, gamma2: Array) -> Array:
+  """``k^2 = (gamma1+gamma2)(gamma1-gamma2)`` (Meador & Weaver 1980).
+
+  Non-negative for physical inputs (``gamma1 >= gamma2`` whenever
+  ``ssa <= 1``); clamped at zero against roundoff. Kept as ``k^2`` — the
+  small-``k*tau`` diffuse branch is written so ``k`` itself cancels, making
+  the conservative-scattering limit ``k -> 0`` exact with no floor at all.
+  """
+  return jnp.maximum((gamma1 + gamma2) * (gamma1 - gamma2), 0.0)
 
 
-def _rt_denominator_direct(
-    gamma1: Array, gamma2: Array, tau: Array, ssa: Array, zenith: float | Array
-) -> Array:
-  """Shared denominator of direct reflectance and transmittance functions."""
-  k = _k_fn(gamma1, gamma2)
-  denom = _rt_denominator_diffuse(gamma1, gamma2, tau)
-  k_mu_squared = (k * jnp.cos(zenith)) ** 2
+def _k_fn(gamma1: Array, gamma2: Array) -> Array:
+  """``k`` with an eps-scaled floor (used by the exp-branch / direct beam).
 
-  # Guard ssa against zero: clear-sky layers have ssa=0 and the direct
-  # reflectance/transmittance is zero there (handled by downstream clipping).
-  # Using safe_ssa keeps the denominator finite for reverse-mode AD.
-  #
-  # iter-30 codex-survivor audit kept the legacy ``max(ssa, _EPSILON)``
-  # form rather than swapping to ``safe_divide``: this function is
-  # called from ``_direct_reflectance`` / ``_direct_transmittance``
-  # which then divide BY this denominator, so a ``fill=0`` from
-  # safe_divide would turn the downstream divide into ``num/0 → inf``.
-  # The legacy "denominator → eps, downstream computes huge but
-  # bounded result, output clamping handles it" pattern is the
-  # correct flow here — see iter-30 commit message.
-  safe_ssa = jnp.maximum(ssa, _EPSILON)
-
-  # Equation 14, multiplying top and bottom by exp(-k*tau) and rearranging to
-  # avoid division by 0.
-  return jnp.where(
-      jnp.abs(1.0 - k_mu_squared) >= _EPSILON,
-      denom * (1.0 - k_mu_squared) / safe_ssa,
-      denom * _EPSILON / safe_ssa,
-  )
+  The floor is ``sqrt(eps)`` of the working dtype — ``~3e-4`` at float32,
+  ``~1.5e-8`` at float64 — replacing the former fixed ``1e-2``, which biased
+  the conservative-scattering limit identically at both precisions. It is
+  kept hard (not smoothed): ``k`` feeds the removable-singularity handling
+  at ``k cos(zenith) = 1`` in ``_direct_quantities``, and the floor only
+  engages as ssa -> 1 where the small-``k*tau`` branch (which needs no
+  ``k``) carries the diffuse quantities anyway.
+  """
+  return jnp.sqrt(jnp.maximum(_k_squared(gamma1, gamma2), _eps_of(gamma1)))
 
 
-def _direct_reflectance(
+def _expm1_over_x(x: Array) -> Array:
+  """``expm1(x) / x``, exact-in-the-limit at ``x = 0`` (value 1).
+
+  ``expm1`` itself is accurate for all arguments; only the literal ``0/0`` at
+  ``x = 0`` needs the series fallback, so the switch threshold is machine eps
+  (below it ``1 + x/2`` is the correctly rounded value). Safe operands inside
+  the ``where`` keep reverse-mode gradients NaN-free.
+  """
+  near_zero = jnp.abs(x) < _eps_of(x)
+  x_safe = jnp.where(near_zero, 1.0, x)
+  return jnp.where(near_zero, 1.0 + 0.5 * x, jnp.expm1(x_safe) / x_safe)
+
+
+def _direct_quantities(
     gamma1: Array,
     gamma2: Array,
     gamma3: Array,
+    gamma4: Array,
+    alpha1: Array,
     alpha2: Array,
     tau: Array,
     ssa: Array,
     zenith: float | Array,
-) -> Array:
-  """Direct solar radiation reflectance (equation 14 of Meador and Weaver)."""
+) -> StatesMap:
+  """Direct-beam reflectance and transmittance (MW80 eqs 14-15), f32-stable.
+
+  Meador and Weaver's eqs 14-15 are catastrophically ill-conditioned in
+  float32 in two regimes:
+
+  * **thin layers** — the numerators are differences of O(1) terms whose
+    residual is O(tau) (100% relative error observed below tau ~ 1e-5);
+  * **the resonance ``k mu0 = 1``** — numerator and denominator both vanish
+    (a removable singularity; Clough et al. 1992, Toon et al. 1989), which
+    the old code papered over with a fixed-epsilon clamp on
+    ``1 - k^2 mu0^2``.
+
+  Both are cured by the same algebraic step: subtract the (exactly zero)
+  ``tau = 0`` value of each numerator, which turns every exponential into an
+  ``expm1``, and then factor the resonance ``eta = 1 - k^2 mu0^2`` out of
+  the numerator *analytically*. With ``a2 = alpha2 - k gamma3``,
+  ``c = alpha1 + k gamma4``, ``d = alpha1 - k gamma4``,
+  ``tau' = tau / (mu0 (1 + k mu0))`` and the diffuse denominator ``D``:
+
+      R = (ssa/D) [ -a2 (expm1(-2 k tau)/(1 + k mu0) + 2 k mu0 P_r)
+                    - 2 k gamma3 expm1(-(k + 1/mu0) tau)/(1 + k mu0) ]
+      T = (ssa/D) [ -c (1 + k mu0) P_t
+                    + d e^{-k tau} expm1(-(k + 1/mu0) tau)/(1 + k mu0) ]
+
+  where the resonance pairs
+
+      P_r = (e^{-2 k tau} - e^{-(k + 1/mu0) tau}) / eta
+      P_t = (e^{-tau/mu0} - e^{-k tau}) / eta
+
+  are evaluated, for ``|eta tau'| < 1``, in the exactly-equivalent factored
+  forms ``P_r = tau' e^{-(k + 1/mu0) tau} phi(eta tau')`` and
+  ``P_t = -e^{-k tau} tau' phi(-eta tau')`` with ``phi(x) = expm1(x)/x`` —
+  no division by ``eta`` anywhere, finite and smooth *through* the
+  resonance. For ``|eta tau'| >= 1`` the literal quotients are used (their
+  relative cancellation error is ~eps/|eta tau'| <= eps there). Thin-layer
+  limits are reproduced exactly: R -> ssa gamma3 tau/mu0,
+  T -> ssa gamma4 tau/mu0, and both vanish at tau = 0 and at ssa = 0 (the
+  factor ssa now *multiplies*, so no safe-divide masking is needed).
+
+  Note eq 15's full transmittance includes the unscattered beam
+  ``exp(-tau/mu0)``; as before, only the diffusely-transmitted part is
+  returned (the direct beam is handled separately in ``sw_cell_source``).
+  """
+  mu0 = jnp.cos(zenith)
   k = _k_fn(gamma1, gamma2)
-  denom = _rt_denominator_direct(gamma1, gamma2, tau, ssa, zenith)
-  k_mu = k * jnp.cos(zenith)
+  k_mu = k * mu0
+  one_plus_kmu = 1.0 + k_mu
 
-  # Transmittance of direct, unscattered beam.
-  t0 = jnp.exp(-tau / jnp.cos(zenith))
+  # These exponentials come in two families and neither can be rebuilt from
+  # the other, so each is evaluated in the form it is used in. `exp` carries a
+  # decayed value at full *relative* precision, which `1 + expm1` cannot: by
+  # k*tau = 16 float32 `expm1` has rounded to exactly -1, so `1 + expm1` gives
+  # 0 where the true exponential is 1.1e-7. `expm1` in turn resolves the O(tau)
+  # departure from 1 that `exp` rounds away entirely for a thin layer.
+  e2m1 = jnp.expm1(-2.0 * k * tau)                # exp(-2 k tau) - 1
+  denom = k * (2.0 + e2m1) - gamma1 * e2m1        # diffuse denominator D
+  etm1 = jnp.expm1(-(k + 1.0 / mu0) * tau)        # exp(-(k + 1/mu0) tau) - 1
+  e_ktmu = 1.0 + etm1                             # exp(-(k + 1/mu0) tau)
+  e_kt = jnp.exp(-k * tau)
+  t0 = jnp.exp(-tau / mu0)
 
-  # Equation 14 of Meador and Weaver (1980), multiplying top and bottom by
-  # exp(-k*tau) and rearranging to avoid division by 0.
-  exp_minusktau = jnp.exp(-k * tau)
-  exp_minus2ktau = jnp.exp(-2.0 * k * tau)
-  return (
-      (1.0 - k_mu) * (alpha2 + k * gamma3)
-      - (1.0 + k_mu) * (alpha2 - k * gamma3) * exp_minus2ktau
-      - 2.0 * (k * gamma3 - alpha2 * k_mu) * exp_minusktau * t0
-  ) / denom
-
-
-def _direct_transmittance(
-    gamma1: Array,
-    gamma2: Array,
-    gamma4: Array,
-    alpha1: Array,
-    tau: Array,
-    ssa: Array,
-    zenith: float | Array,
-) -> Array:
-  """Direct solar radiation transmittance (equation 15 of Meador and Weaver)."""
-  k = _k_fn(gamma1, gamma2)
-  denom = _rt_denominator_direct(gamma1, gamma2, tau, ssa, zenith)
-  k_mu = k * jnp.cos(zenith)
-  k_y4 = k * gamma4
-
-  # Transmittance of direct, unscattered beam.
-  t0 = jnp.exp(-tau / jnp.cos(zenith))
-
-  exp_minusktau = jnp.exp(-k * tau)
-  exp_minus2ktau = jnp.exp(-2 * k * tau)
-
-  # Equation 15 (Meador and Weaver (1980)), refactored for numerical stability
-  # by 1) multiplying top and bottom by exp(-k*tau), 2) multiplying through by
-  # exp(-tau/mu0) to prefer underflow to overflow, and 3) omitting direct
-  # transmittance.
-  out = (
-      -(
-          (1.0 + k_mu) * (alpha1 + k_y4) * t0
-          - (1.0 - k_mu) * (alpha1 - k_y4) * exp_minus2ktau * t0
-          - 2.0 * (k_y4 + alpha1 * k_mu) * exp_minusktau
-      )
-      / denom
+  eta = 1.0 - k_mu * k_mu
+  tau_p = tau / (mu0 * one_plus_kmu)
+  x = eta * tau_p
+  factored = jnp.abs(x) < 1.0
+  # Safe operands: clip the factored-form argument (its phi/tau' pieces are
+  # only well-scaled where selected) and the quotient-form divisor.
+  x_f = jnp.where(factored, x, 0.0)
+  eta_safe = jnp.where(factored, 1.0, eta)
+  # The two resonance pairs need phi at +x and -x. One evaluation serves both:
+  # phi(-x) = expm1(-x)/(-x) = (e**x - 1)/(x e**x) = phi(x) / e**x, and
+  # e**x = 1 + x phi(x) identically. On the branch where this form is selected
+  # |x| < 1, so e**x is in [0.37, 2.72] and that reconstruction loses at most
+  # ~1.5 bits -- against a whole transcendental per g-point per cell.
+  phi = _expm1_over_x(x_f)
+  phi_neg = phi / (1.0 + x_f * phi)
+  pair_r = jnp.where(
+      factored,
+      tau_p * e_ktmu * phi,
+      ((1.0 + e2m1) - e_ktmu) / eta_safe,
   )
-  return out
+  pair_t = jnp.where(
+      factored,
+      -e_kt * tau_p * phi_neg,
+      (t0 - e_kt) / eta_safe,
+  )
+
+  a2 = alpha2 - k * gamma3
+  r_dir = (ssa / denom) * (
+      -a2 * (e2m1 / one_plus_kmu + 2.0 * k_mu * pair_r)
+      - 2.0 * k * gamma3 * etm1 / one_plus_kmu
+  )
+  c = alpha1 + k * gamma4
+  d = alpha1 - k * gamma4
+  t_dir = (ssa / denom) * (
+      -c * one_plus_kmu * pair_t + d * e_kt * etm1 / one_plus_kmu
+  )
+  # Energy cap for the caller's clamp; expm1 keeps it nonzero for thin layers.
+  return {'r_dir': r_dir, 't_dir': t_dir, 'one_minus_t0': -jnp.expm1(-tau / mu0)}
 
 
-def _diffuse_reflectance(gamma1: Array, gamma2: Array, tau: Array) -> Array:
-  """The diffuse reflectance (equation 25 of Meador and Weaver (1980))."""
-  k = _k_fn(gamma1, gamma2)
-  denom = _rt_denominator_diffuse(gamma1, gamma2, tau)
-  return gamma2 * (1.0 - jnp.exp(-2.0 * tau * k)) / denom
+def _diffuse_quantities(gamma1: Array, gamma2: Array, tau: Array) -> StatesMap:
+  """Diffuse two-stream quantities (MW80 eqs 25-26), float32-stable.
 
+  Two algebraically exact evaluations are blended at ``k*tau = 1``:
 
-def _diffuse_transmittance(gamma1: Array, gamma2: Array, tau: Array) -> Array:
-  """The diffuse transmittance (equation 26 of Meador and Weaver (1980))."""
-  k = _k_fn(gamma1, gamma2)
-  denom = _rt_denominator_diffuse(gamma1, gamma2, tau)
-  return 2.0 * k * jnp.exp(-tau * k) / denom
+  * ``k*tau < 1`` — hyperbolic, k-free form. With the identities
+    ``1 - exp(-2x) = 2 exp(-x) sinh(x)`` and
+    ``1 + exp(-2x) = 2 exp(-x) cosh(x)``, MW80's refactored expressions
+    reduce to ``R = gamma2 sinh(k tau)/Dh``, ``T = k/Dh`` with
+    ``Dh = k cosh(k tau) + gamma1 sinh(k tau)``. Factoring one ``k`` out of
+    numerator and denominator (``sinh(k tau) = k tau sinhc(k tau)``) leaves
+
+        C = cosh(k tau) + gamma1 tau sinhc(k tau)
+        R = gamma2 tau sinhc(k tau) / C,      T = 1 / C
+
+    which involves only ``k^2 = (g1+g2)(g1-g2)`` (via cosh/sinhc arguments),
+    is exact at ``k = 0`` (conservative scattering — the old fixed ``1e-2``
+    floor is gone) and cancellation-free for thin layers.
+  * ``k*tau >= 1`` — the exp-scaled original (rte-rrtmgp) form with
+    ``-expm1(-2 k tau)`` replacing ``1 - exp(-2 k tau)``; ``cosh`` would
+    overflow float32 beyond ``k tau ~ 88``, and this form is
+    well-conditioned for thick layers.
+
+  Also returns the two non-cancelling combinations the longwave linear-in-tau
+  source needs (Toon et al. 1989 eqs 26-27; see
+  ``lw_cell_source_and_properties``):
+
+      one_minus_r_minus_t = 1 - R - T                       (O(tau) small)
+      g_minus_t           = (1 + R - T)/(tau (g1+g2)) - T   (O(tau) small)
+
+  Assembling these from ``R`` and ``T`` would subtract numbers agreeing to
+  ``O(tau)`` — exactly the float32 cancellation this refactor removes; the
+  closed forms below are derived from the same hyperbolic identities
+  (``cosh(x) - 1 = 2 sinh^2(x/2)``, computed as squares — never by
+  subtraction) and, on the thick branch, from
+  ``k (1 - exp(-k tau))^2 = k expm1(-k tau)^2``.
+  """
+  eps = _eps_of(gamma1)
+  k2 = _k_squared(gamma1, gamma2)
+  # The branch selector and the whole small branch are written in
+  # x2 = (k*tau)^2 = k2*tau^2 — never through sqrt(k2), whose reverse-mode
+  # derivative is infinite at the conservative-scattering point k2 = 0 (see
+  # the note above the hyperbolic helpers). ``k`` itself is used only by the
+  # large branch.
+  x2 = k2 * jnp.square(tau)
+  small = x2 < _KTAU_SWITCH**2
+  gsum = jnp.maximum(gamma1 + gamma2, eps)
+
+  # --- small-k*tau branch (safe operand: the argument is clipped to the switch
+  # point when this branch is *not* the selected one, both so the truncated
+  # series stay inside the interval they are accurate on and so their leading
+  # x2**n term cannot overflow to inf for a thick layer and put a `0 * inf`
+  # NaN into the reverse pass of the select below).
+  x2c = jnp.where(small, x2, _KTAU_SWITCH**2)
+  # All four hyperbolic quantities come from truncated series in x2 sharing one
+  # clipped argument: no sqrt, no exp, no inner branch. See `_hyperbolics`.
+  # Evaluating them separately was the single largest source of transcendentals
+  # in this solve (issue #22), and switching to an exp-based direct form over
+  # part of the range still paid for that exp on every call (issue #27).
+  shc, shc_half, shc_m1, ch = _hyperbolics(x2c)
+  c_small = ch + gamma1 * tau * shc
+  r_small = gamma2 * tau * shc / c_small
+  t_small = 1.0 / c_small
+  # 1 - R - T = tau*(k^2 tau/2 * sinhc^2(x/2) + (g1-g2) sinhc(x)) / C
+  omrt_small = tau * (0.5 * k2 * tau * jnp.square(shc_half)
+                      + (gamma1 - gamma2) * shc) / c_small
+  # G - T = (k^2 tau/(2 gsum) * sinhc^2(x/2) + sinhc_m1(x)) / C
+  gmt_small = (0.5 * k2 * tau * jnp.square(shc_half) / gsum
+               + shc_m1) / c_small
+
+  # --- large-k*tau branch (exp-scaled; safe at any tau).
+  # Unfloored k: x2 >= 1 here, so k2 > 0, and a floored k would jump at the switch
+  # wherever k2 is below the floor.
+  k = jnp.sqrt(jnp.where(small, 1.0, k2))
+  ktau_big = jnp.where(small, _KTAU_SWITCH, k * tau)
+  # One exp serves the whole branch. `expm1` and a second `exp` are not needed
+  # here: this branch is only selected for `k*tau >= 1`, so `e1 <= exp(-1)` and
+  # neither `e1 - 1` (in [-1, -0.63]) nor `1 - e1**2` (in [0.86, 1]) cancels.
+  # `expm1` earns its keep near zero, which this branch never sees.
+  e1 = jnp.exp(-ktau_big)
+  e2 = jnp.square(e1)                  # exp(-2 k tau)
+  em1 = e1 - 1.0                       # in [-1, 0)
+  a = 1.0 - e2                         # 1 - exp(-2 k tau), no cancellation
+  d_big = k * (1.0 + e2) + gamma1 * a
+  r_big = gamma2 * a / d_big
+  t_big = 2.0 * k * e1 / d_big
+  # D - 2k e^{-ktau} -/+ gamma2*(1-e^{-2ktau}) = k(1-e^{-ktau})^2 + (g1-/+g2)a
+  omrt_big = (k * jnp.square(em1) + (gamma1 - gamma2) * a) / d_big
+  # Safe operand: on the small branch (unselected here) tau can be 0;
+  # ktau >= 1 on the selected branch guarantees tau > 0.
+  tau_big = jnp.where(small, 1.0, tau)
+  g_big = (k * jnp.square(em1) + gsum * a) / (tau_big * gsum * d_big)
+  gmt_big = g_big - t_big
+
+  return {
+      'r_diff': jnp.where(small, r_small, r_big),
+      't_diff': jnp.where(small, t_small, t_big),
+      'one_minus_r_minus_t': jnp.where(small, omrt_small, omrt_big),
+      'g_minus_t': jnp.where(small, gmt_small, gmt_big),
+  }
+
 
 
 def lw_cell_source_and_properties(
@@ -329,70 +531,25 @@ def lw_cell_source_and_properties(
   # The coefficient of the antiparallel irradiance in the 2-stream RTE.
   gamma2 = lw_diffusive_factor * 0.5 * ssa * (1 - asymmetry_factor)
 
-  r_diff = _diffuse_reflectance(gamma1, gamma2, optical_depth)
-  t_diff = _diffuse_transmittance(gamma1, gamma2, optical_depth)
+  diffuse = _diffuse_quantities(gamma1, gamma2, optical_depth)
+  r_diff = diffuse['r_diff']
+  t_diff = diffuse['t_diff']
 
-  # From Toon et al. (JGR 1989) Eqs 26-27, first-order coefficient of the
-  # Taylor series expansion of the Planck function in terms of the optical
-  # depth.  Guard denominator for AD: when tau→0 the source is masked anyway,
-  # but jnp.where evaluates both branches so the division must stay finite.
-  #
-  # iter-30 audited swapping this to ``safe_divide`` for AD-safety but
-  # reverted: ``b_1`` flows into ``c_up_top/c_up_bottom`` via simple add,
-  # which downstream subtracts other quantities — replacing the legacy
-  # "denom→eps, num/eps = large but bounded" with ``safe_divide(fill=0)``
-  # silently breaks the LW source computation for cells where
-  # ``optical_depth * (gamma1+gamma2) < _EPSILON`` because the legacy
-  # large-b_1 form is what the downstream
-  # ``cell_center_src_fn(tau > _MIN_TAU_FOR_LW_SRC, src, 0.0)`` mask is
-  # designed to handle.
-  safe_denom = jnp.maximum(optical_depth * (gamma1 + gamma2), _EPSILON)
-  b_1 = (level_src_bottom - level_src_top) / safe_denom
-
-  # Compute longwave source function for upward and downward emission at cell
-  # interfaces using linear-in-tau assumption.
-  c_up_top = level_src_top + b_1
-  c_up_bottom = level_src_bottom + b_1
-  c_down_top = level_src_top - b_1
-  c_down_bottom = level_src_bottom - b_1
-
-  def cell_center_src_fn(
-      downstream_out: Array,
-      downstream_in: Array,
-      upstream_in: Array,
-      refl: Array,
-      tran: Array,
-      tau: Array,
-  ) -> Array:
-    """Compute the flux at the cell center consistent with face fluxes.
-
-    The cell center source is the residual that remains when one subtracts
-    from the downstream outward flux two contributions:
-    1. the upstream inward flux that is transmitted through the cell and
-    2. the downstream inward flux that is reflected off the cell.
-
-    Args:
-      downstream_out: Downstream outward flux.
-      downstream_in: Downstream inward flux.
-      upstream_in: Upstream inward flux.
-      refl: The grid cell reflectance.
-      tran: The grid cell transmittance.
-      tau: The grid cell optical depth.
-
-    Returns:
-      The directional radiative source at the cell center consistent with the
-      given face sources [W / m^2].
-    """
-    src = math.pi * (downstream_out - refl * downstream_in - tran * upstream_in)
-    # Filter out sources where the optical depth is too small.
-    return jnp.where(tau > _MIN_TAU_FOR_LW_SRC, src, 0.0)
-
-  src_up = cell_center_src_fn(
-      c_up_top, c_down_top, c_up_bottom, r_diff, t_diff, optical_depth
-  )
-  src_down = cell_center_src_fn(
-      c_down_bottom, c_up_bottom, c_down_top, r_diff, t_diff, optical_depth
-  )
+  # Cell-centre sources for the linear-in-tau Planck profile (Toon et al. 1989
+  # eqs 26-27).  With S_t, S_b the top/bottom face sources, dS = S_b - S_t and
+  # G = (1 + R - T) / (tau (gamma1 + gamma2)):
+  #     src_up = pi (S_t (1 - R - T) + dS (G - T))
+  #     src_dn = pi (S_b (1 - R - T) - dS (G - T))
+  # algebraically RTE's lw_source_2str.  1 - R - T and G - T are O(tau) and come
+  # from _diffuse_quantities without cancellation, so no optical-depth cutoff is
+  # needed.  KNOWN DIFFERENCE: RTE zeroes these sources for tau <= 1e-8.
+  delta_src = level_src_bottom - level_src_top
+  src_up = math.pi * (
+      level_src_top * diffuse['one_minus_r_minus_t']
+      + delta_src * diffuse['g_minus_t'])
+  src_down = math.pi * (
+      level_src_bottom * diffuse['one_minus_r_minus_t']
+      - delta_src * diffuse['g_minus_t'])
   return {
       't_diff': t_diff,
       'r_diff': r_diff,
@@ -435,17 +592,14 @@ def sw_cell_properties(
   alpha1 = gamma1 * gamma4 + gamma2 * gamma3
   alpha2 = gamma1 * gamma3 + gamma2 * gamma4
 
-  # Diffuse reflectance and transmittance.
-  r_diff = _diffuse_reflectance(gamma1, gamma2, optical_depth)
-  t_diff = _diffuse_transmittance(gamma1, gamma2, optical_depth)
+  diffuse = _diffuse_quantities(gamma1, gamma2, optical_depth)
+  r_diff = diffuse['r_diff']
+  t_diff = diffuse['t_diff']
 
-  # Direct reflectance and transmittance.
-  r_dir_unconstrained = _direct_reflectance(
-      gamma1, gamma2, gamma3, alpha2, optical_depth, ssa, zenith
-  )
-  t_dir_unconstrained = _direct_transmittance(
-      gamma1, gamma2, gamma4, alpha1, optical_depth, ssa, zenith
-  )
+  direct = _direct_quantities(
+      gamma1, gamma2, gamma3, gamma4, alpha1, alpha2, optical_depth, ssa, zenith)
+  r_dir_unconstrained = direct['r_dir']
+  t_dir_unconstrained = direct['t_dir']
 
   # Constrain reflectance and transmittance to be positive and to not go above
   # physical limits by enforcing the constraint that the direct beam can
@@ -453,9 +607,9 @@ def sw_cell_properties(
   # cell, or penetrate through but be scattered on the way.
 
   # Direct transmittance.
-  t0 = jnp.exp(-optical_depth / jnp.cos(zenith))
-  r_dir = jnp.clip(r_dir_unconstrained, 0, 1 - t0)
-  t_dir = jnp.clip(t_dir_unconstrained, 0, 1 - t0 - r_dir)
+  one_minus_t0 = direct['one_minus_t0']
+  r_dir = jnp.clip(r_dir_unconstrained, 0, one_minus_t0)
+  t_dir = jnp.clip(t_dir_unconstrained, 0, one_minus_t0 - r_dir)
 
   return {
       't_diff': t_diff,
@@ -473,6 +627,7 @@ def sw_cell_source(
     sfc_albedo_direct: Array,
     zenith: float | Array,
     use_scan: bool | None = None,
+    mu_incident: float | Array | None = None,
 ) -> StatesMap:
   """Compute the monochromatic shortwave direct-beam flux and diffuse source.
 
@@ -483,8 +638,11 @@ def sw_cell_source(
     toa_flux: The top-of-atmosphere incoming flux, a 2D field.
     sfc_albedo_direct: The surface albedo with respect to direct radiation, a 2D
       field.
-    zenith: The solar zenith angle.
+    zenith: The solar zenith angle of the slant path (attenuation).
     use_scan: Whether to use scan or for loops for the recurrent operation.
+    mu_incident: Cosine of the zenith angle that projects the incident beam,
+      ``toa_flux * mu_incident`` (RTE sw_solver_2stream: inc_flux_dir * mu0,
+      the true mu0).  ``None`` -> ``cos(zenith)``.
 
   Returns:
     A dictionary containing the following items:
@@ -499,7 +657,7 @@ def sw_cell_source(
 
   # Transmittance of direct, unscattered beam.
   t_noscat = jnp.exp(-optical_depth / jnp.cos(zenith))
-  mu = jnp.cos(zenith)
+  mu = jnp.cos(zenith) if mu_incident is None else mu_incident
 
   # The vertical component of incident flux at the top boundary.
   # ``mu`` may be 3-D ``(ncol, 1, 1)`` for per-column zenith; reshape to

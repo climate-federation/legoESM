@@ -27,8 +27,10 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm import constants
+from legoesm.thermo import CAM_QSAT_CAP_SHARPNESS
 from legoesm.atmosphere.physics.microphysics.arg_activation import ActivationConfig
 from legoesm.atmosphere.physics.microphysics.fast_sbm.config import FastSBMConfig
+from legoesm.atmosphere.physics.microphysics.ifs_cloudsc import IFSCloudscConfig
 from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
 
 
@@ -59,8 +61,7 @@ HARD_SAT_GUARD_DEFAULTS = {
 # Schemes carrying the guard (kept sorted; used in the fail-loud messages below
 # and asserted against the factory by the ratchet).
 HARD_SAT_GUARD_SCHEMES = (
-    "kessler", "ml_emulator", "morrison", "p3", "seifert_beheng",
-    "sundqvist", "thompson",
+    "ml_emulator", "morrison", "p3", "sundqvist",
 )
 # SHRINK-ONLY exemptions.  Each reason was verified in the scheme's own source,
 # not inferred from its name (CLAUDE.md: every allow-list reason string is a
@@ -87,6 +88,13 @@ HARD_SAT_GUARD_EXEMPT = {
         "nucleates cdnc embryos where S > 1), NOT bolting a bulk saturation "
         "adjustment onto a super-droplet scheme."
     ),
+    "thompson": (
+        "Faithful WRF v4.8.0 Thompson port (thompson_wrf.thompson_wrf_step, "
+        "mp_physics=8): the scheme runs the oracle's own condensation / "
+        "evaporation step (its Newton saturation adjustment in mp_thompson); "
+        "ThompsonConfig carries no hard-sat field, so an overlay would be a "
+        "departure from the oracle the port is matched to."
+    ),
     "fast_sbm": (
         "Fast spectral-bin microphysics: same reason as sdm, at bin "
         "resolution. fast_sbm/supersaturation.py::integrate_supersaturation "
@@ -95,6 +103,33 @@ HARD_SAT_GUARD_EXEMPT = {
         "dm_k/dt = B_k*s. The bin spectrum IS the adjustment; forcing q_v onto "
         "the bulk saturation curve on top of it would be inconsistent with the "
         "resolved spectrum and break the WRF FSBM-2 oracle match."
+    ),
+    "kessler": (
+        "Kessler is the faithful port of ESCOMP atmos_phys0_31_000 "
+        "kessler_run (user decision 2026-10-19: the scheme named Kessler must "
+        "BE the oracle). The oracle has no hard-adjustment guard: its own "
+        "Durran-Klemp (1983) adjustment max(prod, -q_c) removes the full "
+        "linearised supersaturation in every CFL subcycle. KesslerConfig keeps "
+        "the three guard fields only so an old deck fails loudly: "
+        "kessler.py::_require_oracle_defaults raises on any non-default value."
+    ),
+    "ifs_cloudsc": (
+        "Faithful OpenIFS 49r1 CLOUDSC port (oracle-matched, numerics "
+        "fixed): ifs_cloudsc.py calls _supersatcheck (cloud_supersatcheck."
+        "F90) on the post-solve state of every level it processes "
+        "(k >= NCLDTOP), condensing any excess over the IFS mixed/Koop "
+        "saturation limit into cloud and fraction.  The legoESM guard has no "
+        "49r1 counterpart; IFSCloudscConfig carries no guard fields."
+    ),
+    "seifert_beheng": (
+        "The scheme is gSAM 1.8.8 M2005 (liquid only, SB2001 warm rain): "
+        "seifert_beheng.py calls saturation_adjustment_gsam (gSAM's "
+        "satadj_liquid, a Newton solve onto the liquid saturation curve that "
+        "condenses AND evaporates) on EVERY call before any process rate, so "
+        "the state never leaves the call super-saturated w.r.t. liquid. The "
+        "opt-in guard has no gSAM counterpart: setting it raises (oracle port "
+        "2026-10-20; the guard fields stay on SeifertBehengConfig at their "
+        "standard defaults)."
     ),
     "none": (
         "microphysics='none' has NO scheme function at all -- "
@@ -110,16 +145,16 @@ __param_spec__ = {
         "scheme_key": "atm.micro.KesslerConfig",
         "excluded": {
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "evaporation_coeff": "not in the oracle (ESCOMP atmos_phys0_31_000 kessler_run): a non-default or traced value raises",
+            "rain_fall_speed": "not in the oracle (ESCOMP atmos_phys0_31_000 kessler_run): a non-default or traced value raises",
+            "hard_sat_adjust_threshold": "not in the oracle (ESCOMP atmos_phys0_31_000 kessler_run): a non-default or traced value raises",
+            "hard_sat_max_heating_K": "not in the oracle (ESCOMP atmos_phys0_31_000 kessler_run): a non-default or traced value raises",
         },
         "params": {
             # PRIMARY warm-rain knobs (Kessler 1969).
             "autoconversion_threshold": {"units": "kg/kg", "bounds": (0.0001, 0.003), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Kessler (1969)", "shape": None},
             "autoconversion_rate": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Kessler (1969)", "shape": None},
             "accretion_coeff": {"units": "1", "bounds": (0.5, 6.6), "tunable_tier": 1, "transform": "sigmoid", "category": "accretion", "reference": "Kessler (1969)", "shape": None},
-            "evaporation_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Kessler (1969)", "shape": None},
-            "rain_fall_speed": {"units": "m/s", "bounds": (1.0, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Kessler (1969)", "shape": None},
-            "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
-            "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
         },
     },
     "MicrophysicsMLEmulatorConfig": {
@@ -145,6 +180,15 @@ __param_spec__ = {
     "MorrisonConfig": {
         "scheme_key": "atm.micro.MorrisonConfig",
         "excluded": {
+            "gsam_satadj_excess_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
+            "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
+            "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
+            "gsam_small_removal_rh_sharpness": "numerics: smooth-switch sharpness (RULE 5), value decided by codex+GLM+Claude vote 2026-11-03",
+            "gsam_small_removal_q_sharpness": "numerics: smooth-switch sharpness (RULE 5), value decided by codex+GLM+Claude vote 2026-11-03",
+            "sb2001_autoconv_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-29 (#2232)",
+            "sb2001_accretion_qr_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
+            "sb2001_accretion_qc_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
+            "cam_qsat_cap_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             # Fall-speed power-law EXPONENTS feed math.gamma(4 + b) / math.gamma(1 + b)
             # (morrison.py, _warm_rain.py) to precompute the cons* moment factors.
             # math.gamma is a Python C function requiring a float, so a traced
@@ -168,12 +212,19 @@ __param_spec__ = {
             "lamr_min": "numerics: solver/smoothing/tolerance/iteration parameter",
             "lams_min": "numerics: solver/smoothing/tolerance/iteration parameter",
             "melt_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_ice_slope_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_qi_limit_width": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_presence_ramp_top": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_frozen_rain_ice_ramp_frac": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_drop_readjust_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_drop_early_reset_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_drop_sed_reset_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "subgrid_rh_crit": "physics-fidelity sub-grid closure: in-cloud cf critical RH, mirrors the cloud scheme (no tunable knob)",
             "subgrid_cf_min": "numerics: cloud-fraction floor capping the in-cloud enhancement (AD/numeric safety)",
-            "kk2000_cam6_relvar": "physics-fidelity: CAM6 relvarmax fallback constant (clubb_intr.F90:2416-2421) for the kk2000_cam6 option; CAM6 diagnoses relvar per cell from CLUBB variance, not ported, so this is a fixed reference value, not a calibration knob",
+            "kk2000_cam6_relvar": "physics-fidelity: CAM6 relvarmax constant (clubb_intr.F90:2416-2421) used by kk2000_cam6 only when no per-cell relvar is passed; the CLUBB liquid-partition lanes pass CLUBB's per-cell relvar (clubb_intr.F90:2425), so this is a fixed reference value, not a calibration knob",
         },
         "params": {
             # --- Warm rain (Seifert-Beheng + KK2000) ---
@@ -263,49 +314,22 @@ __param_spec__ = {
     "P3Config": {
         "scheme_key": "atm.micro.P3Config",
         "excluded": {
-            "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "cooper_supi_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "ice_sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "melt_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "rho_rim_min": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
         },
         "params": {
-            # --- Warm rain (Seifert-Beheng liquid phase) ---
-            "k_au": {"units": "m^3 kg^-1 s^-1", "bounds": (50.0, 5000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "k_ac": {"units": "m^3 kg^-1 s^-1", "bounds": (1.0, 20.0), "tunable_tier": 1, "transform": "sigmoid", "category": "accretion", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "x_star": {"units": "kg", "bounds": (5e-11, 1e-9), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "Nc_0": {"units": "1/m^3", "bounds": (1e7, 1e9), "tunable_tier": 2, "transform": "sigmoid", "category": "number_concentration", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "k_sc": {"units": "m^3 kg^-1 s^-1", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "D_eq": {"units": "m", "bounds": (0.0003, 0.0033), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "evap_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "a_v_r": {"units": "m^(1-b)/s", "bounds": (40.0, 400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "b_v_r": {"units": "1", "bounds": (0.15, 1.5), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
+            # --- Specified droplet number (WRF P3 nccnst) ---
+            "Nc_0": {"units": "1/m^3", "bounds": (1e7, 1e9), "tunable_tier": 2, "transform": "sigmoid", "category": "number_concentration", "reference": "WRF v4.8.0 P3 nccnst = 2e8 (module_mp_p3.F:196)", "shape": None},
             # --- Ice nucleation (Cooper 1986) ---
             "N_i0": {"units": "1/m^3", "bounds": (1.0, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
-            "N_i_nuc_max": {"units": "1/m^3", "bounds": (2e4, 5e6), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "gSAM P3 scheme-1 cap 100/L (module_mp_p3.f90:3090)", "shape": None},
+            "N_i_nuc_max": {"units": "1/m^3", "bounds": (2e4, 5e6), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "WRF v4.8.0 P3 cap 100/L (module_mp_p3.F:3276)", "shape": None},
             "cooper_a": {"units": "1/K", "bounds": (0.1, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
-            "cooper_T_act": {"units": "K", "bounds": (255.0, 273.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
-            "cooper_T_nuc": {"units": "K", "bounds": (248.0, 266.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "gSAM P3 scheme-1 gate T<-15C (module_mp_p3.f90:3084)", "shape": None},
-            "cooper_supi_min": {"units": "1", "bounds": (0.0, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "gSAM P3 scheme-1 gate supi>=0.05 (module_mp_p3.f90:3084)", "shape": None},
-            # --- Ice depositional growth ---
-            "dep_coeff": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
-            "q_i_min_growth": {"units": "kg/kg", "bounds": (3e-10, 3e-09), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
-            # --- Riming (collection efficiencies) ---
-            "rime_coeff": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "riming", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
-            "rain_rime_coeff": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "riming", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
-            # --- Aggregation / melting ---
-            "agg_coeff": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "aggregation", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
-            "melt_rate": {"units": "1/s", "bounds": (0.0005, 0.05), "tunable_tier": 2, "transform": "sigmoid", "category": "melting", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
-            # --- Ice fall speed (predicted-property power law) ---
-            "a_v_i": {"units": "m^(1-b)/s", "bounds": (13.0, 120.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
-            "b_v_i": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
-            "c_rim_fallspeed": {"units": "1", "bounds": (0.1, 1.2), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            "cooper_T_nuc": {"units": "K", "bounds": (248.0, 266.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "WRF v4.8.0 P3 gate T<-15C (module_mp_p3.F:3272)", "shape": None},
+            "cooper_supi_min": {"units": "1", "bounds": (0.0, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "WRF v4.8.0 P3 gate supi>=0.05 (module_mp_p3.F:3272)", "shape": None},
             # --- Rime density properties ---
             "rho_rim_max": {"units": "kg/m^3", "bounds": (300.0, 917.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
-            "rho_rim_accrete": {"units": "kg/m^3", "bounds": (132.0, 900.0), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
-            "rho_ice_ref": {"units": "kg/m^3", "bounds": (165.0, 917.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
             "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
             "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
         },
@@ -313,6 +337,12 @@ __param_spec__ = {
     "SeifertBehengConfig": {
         "scheme_key": "atm.micro.SeifertBehengConfig",
         "excluded": {
+            "gsam_satadj_excess_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
+            "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
+            "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
+            "sb2001_autoconv_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-29 (#2232)",
+            "sb2001_accretion_qr_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
+            "sb2001_accretion_qc_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
             "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -335,13 +365,20 @@ __param_spec__ = {
         "scheme_key": "atm.micro.SundqvistConfig",
         "excluded": {
             "sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "liquid_fraction_clamp_sharpness": "numerics: smoothing width of the liquid-fraction clamp (RULE 5), not a closure",
+            # Zhao-Carr namelist coefficients added by the oracle port; whether
+            # (and within which bounds) they are trainable is a pending user decision.
+            "psautco_fine": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
+            "psautco_coarse": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
+            "wminco_liquid": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
+            "wminco_ice": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
         },
         "params": {
             # PRIMARY large-scale-condensation knobs (Sundqvist et al. 1989).
             "rh_crit": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_rh", "reference": "Sundqvist et al. (1989)", "shape": None},
             "qc_crit": {"units": "kg/kg", "bounds": (0.0001, 0.0015), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist et al. (1989)", "shape": None},
             "auto_rate": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist et al. (1989)", "shape": None},
-            "evap_coeff": {"units": "1", "bounds": (0.0001, 0.0015), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Sundqvist et al. (1989)", "shape": None},
+            "evap_coeff": {"units": "1", "bounds": (1.0e-5, 0.0015), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Zhao-Carr evpco: GFS operational 2e-5 (zhaocarr_precpd.f:215); lower bound 1e-5 to hold it (user 2026-10-27). Sundqvist et al. (1989)", "shape": None},
             # SBK89 Sec. 5 precipitation-release enhancements: coalescence F1
             # (function of the precipitation flux from above) and Bergeron F2
             # (mixed-phase temperature window); c_0 is multiplied and q_c,crit
@@ -350,64 +387,6 @@ __param_spec__ = {
             "bergeron_enh_coeff": {"units": "1", "bounds": (0.0, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
             "bergeron_T_peak_K": {"units": "K", "bounds": (248.0, 268.0), "tunable_tier": 3, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
             "bergeron_T_width_K": {"units": "K", "bounds": (2.0, 15.0), "tunable_tier": 3, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
-            "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
-            "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
-        },
-    },
-    "ThompsonConfig": {
-        "scheme_key": "atm.micro.ThompsonConfig",
-        "excluded": {
-            "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "graupel_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "ice_deposition_efficiency": "physics: default at domain boundary / not sigmoid-tunable (fix via config)",
-            "ice_sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "melt_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "rain_evap_rh_floor": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
-        },
-        "params": {
-            # --- Warm rain (Seifert-Beheng helpers, gamma-corrected) ---
-            "k_au": {"units": "m^3 kg^-1 s^-1", "bounds": (50.0, 5000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "k_ac": {"units": "m^3 kg^-1 s^-1", "bounds": (1.0, 20.0), "tunable_tier": 1, "transform": "sigmoid", "category": "accretion", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "x_star": {"units": "kg", "bounds": (5e-11, 1e-9), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "Nc_0": {"units": "1/m^3", "bounds": (1e7, 1e9), "tunable_tier": 2, "transform": "sigmoid", "category": "number_concentration", "reference": "Thompson et al. (2008)", "shape": None},
-            "k_sc": {"units": "m^3 kg^-1 s^-1", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "D_eq": {"units": "m", "bounds": (0.0003, 0.0033), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "evap_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Thompson et al. (2008)", "shape": None},
-            "a_v_r": {"units": "m^(1-b)/s", "bounds": (40.0, 400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "b_v_r": {"units": "1", "bounds": (0.15, 1.5), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
-            "mu_c": {"units": "1", "bounds": (0.99, 9.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Thompson et al. (2008)", "shape": None},
-            "mu_r": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Thompson et al. (2008)", "shape": None},
-            # --- Ice nucleation (Cooper 1986) ---
-            "N_i0": {"units": "1/m^3", "bounds": (1.0, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
-            "N_i_nuc_max": {"units": "1/m^3", "bounds": (1e5, 5e6), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Thompson et al. (2008)", "shape": None},
-            "cooper_a": {"units": "1/K", "bounds": (0.1, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
-            "cooper_T_act": {"units": "K", "bounds": (255.0, 273.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
-            # --- Ice depositional growth / WBF ---
-            "dep_coeff": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "Thompson et al. (2008)", "shape": None},
-            "q_i_min_growth": {"units": "kg/kg", "bounds": (3e-10, 3e-09), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Thompson et al. (2008)", "shape": None},
-            "rho_cloud_ice": {"units": "kg/m^3", "bounds": (100.0, 917.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Thompson et al. (2008)", "shape": None},
-            "bergeron_rate": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "Thompson et al. (2008)", "shape": None},
-            "T_center": {"units": "K", "bounds": (248.0, 268.0), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Thompson et al. (2008)", "shape": None},
-            "T_width": {"units": "K", "bounds": (3.0, 30.0), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Thompson et al. (2008)", "shape": None},
-            # --- Riming ---
-            "rime_coeff": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "riming", "reference": "Thompson et al. (2008)", "shape": None},  # unclamped riming-rate multiplier (default 1.0 nominal), not a [0,1] probability
-            # --- Ice -> snow autoconversion / aggregation ---
-            "ice_snow_d_auto": {"units": "m", "bounds": (8e-05, 0.0008), "tunable_tier": 2, "transform": "sigmoid", "category": "aggregation", "reference": "Thompson et al. (2008)", "shape": None},
-            "agg_coeff": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "aggregation", "reference": "Thompson et al. (2008)", "shape": None},
-            # --- Melting ---
-            "melt_rate": {"units": "1/s", "bounds": (0.0005, 0.05), "tunable_tier": 2, "transform": "sigmoid", "category": "melting", "reference": "Thompson et al. (2008)", "shape": None},
-            # --- Graupel formation from riming ---
-            "rime_to_graupel_threshold": {"units": "kg/kg/s", "bounds": (3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "riming", "reference": "Thompson et al. (2008)", "shape": None},
-            "rime_to_graupel_rate": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "riming", "reference": "Thompson et al. (2008)", "shape": None},
-            # --- Frozen-species fall speeds ---
-            "a_v_i": {"units": "m^(1-b)/s", "bounds": (15.0, 150.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
-            "b_v_i": {"units": "1", "bounds": (0.08, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
-            "a_v_s": {"units": "m^(1-b)/s", "bounds": (9.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
-            "b_v_s": {"units": "1", "bounds": (0.09, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
-            "a_v_g": {"units": "m^(1-b)/s", "bounds": (26.0, 240.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
-            "b_v_g": {"units": "1", "bounds": (0.13, 1.2), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
             "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
             "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
         },
@@ -435,36 +414,43 @@ class KesslerConfig(NamedTuple):
 
 
 class SundqvistConfig(NamedTuple):
-    """Configuration for Sundqvist large-scale condensation."""
-    rh_crit: float = 0.8              # Critical relative humidity
-    sigmoid_sharpness: float = 20.0   # Sharpness for smooth activation
-    auto_rate: float = 1e-3           # Autoconversion rate c_0 [1/s]
-    # Critical cloud water for autoconversion: P_auto = c_0·q_c·
-    # (1 − exp(−(q_c/q_c,crit)²)) (Sundqvist 1989).  Suppresses
-    # autoconversion below q_c,crit (drizzle forms only once cloud water
-    # is large enough).  0 → the linear no-threshold limit.
-    qc_crit: float = 5e-4             # [kg/kg]
-    evap_coeff: float = 5e-4          # Sub-cloud evaporation coefficient
+    """Configuration for Sundqvist large-scale microphysics.
+
+    The precipitation stage is a port of the Zhao-Carr scheme (ccpp-physics
+    v7.0.1 ``zhaocarr_precpd_run``); see ``sundqvist.py`` for the field ->
+    oracle-name mapping.  The oracle hard-codes ``qc_crit`` = 3e-4,
+    ``coalescence_enh_coeff`` = 300 and ``bergeron_enh_coeff`` = 0.5.
+    """
+    rh_crit: float = 0.8              # Critical relative humidity (oracle u00k)
+    # Smooth RH_crit gate of the condensation surrogate and of the precipitation
+    # evaporation; the oracle is its hard-switch limit (sharpness -> inf).
+    sigmoid_sharpness: float = 20.0
+    # Liquid release rate c_0 [1/s] (oracle prautco; GFS v16/v17 namelist pair
+    # 1.5e-4, 1.5e-4, so its grid-area blend is the identity; user 2026-10-27).
+    auto_rate: float = 1.5e-4
+    # Critical cloud water m_r of the SBK89 release
+    # (1 - exp(-(m*F1*F2/(m_r*max(b, 0.01)))^2)) [kg/kg] (oracle 1/cmr).
+    qc_crit: float = 3e-4             # oracle m_r (tier-2 decision R14)
+    # Rain-evaporation coefficient (oracle evpco):
+    # E = evap_coeff*sqrt(1/dt)*(rh_crit - RH)*(dp/g dt)*sqrt(P_r).
+    evap_coeff: float = 2e-5          # GFS operational evpco (tier-2 decision R12)
     # --- SBK89 (Sec. 5) precipitation-release enhancements ---
-    # Coalescence F1 = 1 + c1·sqrt(P) with P the precipitation flux falling
-    # in from above [kg m^-2 s^-1]: existing precipitation collects cloud
-    # water and accelerates release (F1 ≈ 6 at 1 mm/h with the default).
-    # 0 → enhancement off (plain Sundqvist base autoconversion).
+    # Coalescence F1 = 1 + c1*sqrt(P/dt), P the precipitation [kg m^-2] per
+    # step falling in from above (oracle c1).
     coalescence_enh_coeff: float = 300.0   # c1 [(kg m^-2 s^-1)^-1/2]
-    # Bergeron-Findeisen F2 = 1 + c2·exp(−((T − T_peak)/T_width)²): a smooth
-    # mixed-phase window peaking near −15 °C, where the ice-liquid saturation
-    # difference e_sw − e_si (the Bergeron growth driver) is largest; decays
-    # to ~1 above freezing by construction.  0 → enhancement off.
-    bergeron_enh_coeff: float = 3.0        # peak amplification [-]
+    # Bergeron-Findeisen F2 = 1 + c2*sqrt(min(max(0, 268 K - T), 20 K)) (oracle c2).
+    bergeron_enh_coeff: float = 0.5        # c2 [K^-1/2], oracle (tier-2 decision R13)
+    # Parameters of the PRE-PORT Gaussian F2; no counterpart in the oracle.
+    # Setting either to a non-default value raises.
     bergeron_T_peak_K: float = constants.T_freeze - 15.0   # [K]
-    bergeron_T_width_K: float = 7.0        # Gaussian half-width [K]
+    bergeron_T_width_K: float = 7.0        # [K]
     # --- Hard (iterated) saturation-adjustment guard (opt-in) ---
     # The SAME guard the five bulk warm-rain schemes carry, with the SAME
     # defaults, applied to Sundqvist's OWN smooth condensation rate through the
     # shared ``_warm_rain.hard_saturation_blend`` (no second implementation).
-    # Default OFF => byte-identical to the published SBK89 smooth path: a
-    # STATIC Python ``if`` in ``diagnose_sundqvist_process_rates``, so the OFF
-    # path never even traces the hard branch.
+    # Default OFF => the smooth condensation surrogate alone: a STATIC Python
+    # ``if`` in ``sundqvist._sundqvist_step``, so the OFF path never even
+    # traces the hard branch.
     #
     # What it changes when ON (Sundqvist is NOT the same failure mode as the
     # five bulk schemes -- documented honestly): Sundqvist's smooth branch
@@ -496,10 +482,32 @@ class SundqvistConfig(NamedTuple):
     hard_saturation_adjustment: bool = False
     hard_sat_adjust_threshold: float = 1.1      # blend knob here, NOT an on/off trigger [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
+    # --- Zhao-Carr ice route and conversion thresholds ---
+    # Ice -> snow autoconversion coefficient [1/s],
+    # psaut = psautco*dt*exp(0.025*(T - 273.16))*max(0, cwm - wmini), blended
+    # by grid-cell area as GFS does (zhaocarr_precpd.f:194-198):
+    # psautco_fine*wk1 + psautco_coarse*(1 - wk1), wk1 = 1 on the finest grid
+    # (oracle psautco(1), psautco(2); GFS v16/v17 namelist 8e-4, 5e-4).
+    psautco_fine: float = 8.0e-4
+    psautco_coarse: float = 5.0e-4
+    # Condensate left unconverted, wmin = wminco*p/1e5 [kg/kg] (oracle
+    # wminco(1) liquid, wminco(2) ice; fv3atm GFS_typedefs.F90:2854 default).
+    wminco_liquid: float = 1.0e-5
+    wminco_ice: float = 1.0e-5
+    # Sharpness of the smooth clamp of the -15..0 C liquid-fraction ramp (the
+    # liquid/ice split, lanes carrying q_i); the hard clip is math.inf
+    # (RULE 5; codex + GLM 2026-10-29; 100 = the 2026-10-21 smooth-clamp value).
+    liquid_fraction_clamp_sharpness: float = 100.0
 
 
 class SeifertBehengConfig(NamedTuple):
-    """Configuration for Seifert-Beheng two-moment warm rain."""
+    """Configuration for Seifert-Beheng two-moment warm rain.
+
+    The scheme is gSAM 1.8.8 M2005 (liquid only, SB2001 warm rain, specified
+    droplet number), which reads ONLY ``Nc_0`` (gSAM's NDCNST, per-volume).
+    Every other field belonged to the former proxy rates and has no gSAM
+    counterpart: ``seifert_beheng_microphysics`` raises if one is set.
+    """
     k_au: float = 6e2                # Autoconversion rate [1/(kg*s)]
     x_star: float = 2.6e-10          # Separation mass [kg]
     # ``N_c`` per-volume: see ``_warm_rain.effective_Nc`` Notes.
@@ -525,6 +533,76 @@ class SeifertBehengConfig(NamedTuple):
     hard_saturation_adjustment: bool = False
     hard_sat_adjust_threshold: float = 1.1      # RH trigger q_v > thr*q_sat [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
+    # gSAM satadj_liquid smooth switches (RULE 5), as MorrisonConfig's; hard
+    # limit = gSAM exactly: math.inf, math.inf, 0.0.  All three values approved
+    # by user 2026-10-21.
+    gsam_satadj_excess_sharpness: float = 1.0e4   # saturation step [-]
+    gsam_satadj_qc_floor_sharpness: float = 1.0e4  # positivity, on T1 - T_l [1/K]
+    gsam_satadj_p_min_width_pa: float = 100.0     # p >= 5000 Pa gate width [Pa]
+    # RULE 5 smoothing of gSAM's SB2001 autoconversion gate q_c >= 1e-6 kg/kg
+    # (module_mp_graupel.f90:1806/2843): the C2 step reaches 1 at this value
+    # [kg/kg]; <= 1e-6 = gSAM's hard step (codex+GLM 2026-10-29, #2232; KNOWN
+    # DIFFERENCE in _warm_rain.autoconversion_sb2001).
+    sb2001_autoconv_ramp_top: float = 2.0e-6
+    # RULE 5 smoothing of gSAM's two SB2001 accretion gates q_r >= 1e-8 and
+    # q_c >= 1e-8 kg/kg (module_mp_graupel.f90:1944/3266): each C2 step
+    # reaches 1 at its value [kg/kg]; <= 1e-8 = gSAM's hard step (codex+GLM
+    # 2026-10-30, #2262; KNOWN DIFFERENCE in _warm_rain.accretion_sb2001).
+    sb2001_accretion_qr_ramp_top: float = 2.0e-8
+    sb2001_accretion_qc_ramp_top: float = 2.0e-8
+
+
+# Unset Morrison DCS per flavour [m] (MorrisonConfig.ice_snow_d_auto=None,
+# resolved by resolve_morrison_flavor): SAM clice_snow_Dauto, CAM6 MG2
+# micro_mg_dcs (namelist_defaults_cam.xml:1244).
+SAM_DCS_M = 250.0e-6
+MG2_DCS_M = 500.0e-6
+
+
+def resolve_unset_ice_snow_d_auto(cfg):
+    """THE resolution of an unset Morrison DCS: by flavour (sam 250 um, mg
+    500 um); an explicit value is returned unchanged.  Used by the scheme
+    (resolve_morrison_flavor) and by the trainable collector's seed."""
+    if cfg.ice_snow_d_auto is not None:
+        return cfg
+    if cfg.morrison_flavor == "mg":
+        return cfg._replace(ice_snow_d_auto=MG2_DCS_M)
+    if cfg.morrison_flavor == "sam":
+        return cfg._replace(ice_snow_d_auto=SAM_DCS_M)
+    return cfg      # unknown flavour: resolve_morrison_flavor raises
+
+
+def mg2_rel_ice_params(micro_leaf):
+    """``(dcs [m], ice-slope RULE 5 width)`` the CAM6 radiation ice radius
+    reads from the run's microphysics leaf config (dcs resolved by flavour);
+    ``(None, None)`` for a leaf without them, which that path refuses."""
+    if micro_leaf is None or not hasattr(micro_leaf, "mg2_ice_slope_log_width"):
+        return None, None
+    m = resolve_unset_ice_snow_d_auto(micro_leaf)
+    return m.ice_snow_d_auto, m.mg2_ice_slope_log_width
+
+
+def resolve_warm_rain_scheme(cfg) -> str:
+    """THE warm-rain law a Morrison config runs: an explicit
+    ``warm_rain_scheme`` as set; unset (None) by flavour, ``mg`` -> the CAM6
+    MG2 law ``kk2000_cam6``, ``sam`` -> gSAM M2005's ``kk2000``."""
+    if cfg.warm_rain_scheme is not None:
+        return cfg.warm_rain_scheme
+    if cfg.morrison_flavor == "mg":
+        return "kk2000_cam6"
+    if cfg.morrison_flavor == "sam":
+        return "kk2000"
+    raise ValueError(
+        f"Unknown morrison_flavor: {cfg.morrison_flavor!r}; choose 'mg' or "
+        "'sam' (an unset warm_rain_scheme resolves by flavour).")
+
+
+# Unset (None) spec'd fields -> the resolver that gives their value from a
+# config instance.  The trainable collector seeds from it (the class default
+# when no run config is passed, i.e. the default "mg" flavour), and the
+# param-spec gate requires these fields to be classified.
+__param_unset_defaults__ = {
+    "MorrisonConfig": {"ice_snow_d_auto": resolve_unset_ice_snow_d_auto}}
 
 
 class MorrisonConfig(NamedTuple):
@@ -539,21 +617,24 @@ class MorrisonConfig(NamedTuple):
     # rain (kk2000) and ice deposition (m2005) are ALREADY MG-faithful in both.
     morrison_flavor: str = "mg"      # "mg" (global default) | "sam" (CRM)
     # Warm-rain autoconversion + accretion scheme:
-    #   "kk2000" (default) = Khairoutdinov-Kogan 2000, the SAM M2005
+    #   None (default, unset) = resolved by flavour
+    #     (resolve_warm_rain_scheme): mg -> "kk2000_cam6", sam -> "kk2000".
+    #   "kk2000" = Khairoutdinov-Kogan 2000, the SAM M2005
     #     DEFAULT (IRAIN=0): PRC=1350·qc^2.47·(Nc[#/cm³])^-1.79,
     #     PRA=67·(qc·qr)^1.15. Faithful to the gSAM oracle.
-    #   "seifert_beheng" = the legacy simplified SB proxy (k_au·q_c^2·onset
-    #     sigmoid autoconv + bilinear k_ac·rho·q_c·q_r accretion). NOT the
-    #     published universal functions — only the au/x_* number closure is
-    #     SB-faithful.
-    #   "seifert_beheng_sb2001" = the PUBLISHED SB2001 universal functions —
-    #     the gSAM IRAIN=1 MASS closures (module_mp_graupel.f90:1835-1844,
-    #     :1960-1962): phi_au=600·tau^0.68·(1−tau^0.68)^3 with the q_c^4·N_c^-2
-    #     rate, phi_ac=(tau/(tau+5e-4))^4 with the fixed 5.78 kernel, plus the
-    #     au/x_* rain-number source. Faithful for a SUPPLIED nu; the default
-    #     fixed nu (0.4315) is an approximation of gSAM's spatially-diagnosed
-    #     pgam, and the SB2001-specific cloud-NUMBER sinks are not represented.
-    warm_rain_scheme: str = "kk2000"
+    #   "seifert_beheng" = the same law as "seifert_beheng_sb2001" (below);
+    #     it was a simplified proxy (k_au·q_c^2 onset sigmoid + bilinear
+    #     k_ac accretion) until the 2026-10 oracle port.  The proxy fields
+    #     k_au / x_star / k_ac / autoconversion_sharpness have no gSAM
+    #     counterpart and raise if set under it.
+    #   "seifert_beheng_sb2001" = Seifert & Beheng (2001) as gSAM M2005 runs
+    #     it (IRAIN=1, module_mp_graupel.f90:1830-1844, :1955-1962): the
+    #     phi_au / phi_ac universal-function rates with gSAM's gates, the
+    #     droplet shape nu diagnosed from N_c (gSAM default dofix_pgam=.false.)
+    #     and the droplet-slope clamp on N_c, plus the au/x_* rain-number
+    #     source. Oracle-pinned at predict_Nc=False; the SB2001-specific
+    #     cloud-NUMBER sinks (predict_Nc=True only) are not represented.
+    warm_rain_scheme: str | None = None
     predict_Nc: bool = False         # SAM M2005 dopredictNc. False (SAM DEFAULT) =
                                      # SPECIFIED constant droplet number Nc_0: the
                                      # size distribution uses Nc_0 and cloud number is
@@ -585,8 +666,9 @@ class MorrisonConfig(NamedTuple):
     subgrid_autoconversion: bool = False
     subgrid_rh_crit: float = 0.7     # critical RH for the in-cloud cf (Sundqvist)
     subgrid_cf_min: float = 0.1      # cf floor (caps enhancement at cf_min^-1.47)
-    # Warm rain (Seifert-Beheng knobs; consumed only when
-    # warm_rain_scheme="seifert_beheng")
+    # Former Seifert-Beheng PROXY knobs: k_au / x_star / k_ac are read by no
+    # law (warm_rain_scheme="seifert_beheng" now runs SB2001 as gSAM does and
+    # raises if they are set); Nc_0 is the specified droplet number.
     k_au: float = 6e2
     x_star: float = 2.6e-10
     Nc_0: float = 1e8
@@ -765,8 +847,14 @@ class MorrisonConfig(NamedTuple):
     #     N_i always and credits N_s under double-moment snow (an earlier
     #     "dropped — single-moment snow" note here was stale).
     #   "heuristic" = the legacy constant-rate agg_coeff·q_i·f_ice.
-    ice_to_snow_scheme: str = "m2005_autoconv"
-    ice_snow_d_auto: float = 250.0e-6   # SAM DCS [m] (clice_snow_Dauto)
+    # None = the flavour's (resolve_morrison_flavor): sam "m2005_autoconv",
+    # mg "mg_ferrier"; under mg any other explicit value raises (user
+    # decision 2026-10-24, 1a: the mg preset never overwrites a choice).
+    ice_to_snow_scheme: str | None = None
+    # DCS [m]; None = the flavour's (resolve_morrison_flavor at scheme entry):
+    # SAM clice_snow_Dauto 250 um, mg = CAM6 MG2 micro_mg_dcs 500 um
+    # (namelist_defaults_cam.xml:1244).  An explicit value always wins.
+    ice_snow_d_auto: float | None = None
     # Aggregation (heuristic ice→snow rate)
     agg_coeff: float = 1e-3          # Ice-to-snow aggregation rate [1/s]
     # Melting
@@ -895,7 +983,8 @@ class MorrisonConfig(NamedTuple):
     # saturation curve where q_v > hard_sat_adjust_threshold * q_sat, draining
     # local super-saturation pools the smooth sigmoid path cannot (conserving
     # c_pd*T + L_v*q_v exactly).  Default OFF => byte-identical to the smooth
-    # path.  Threaded from ExperimentConfig via
+    # path (mg flavour).  The sam flavour runs gSAM's satadj_liquid (smooth by default, RULE 5) on
+    # every call and REJECTS this guard.  Threaded from ExperimentConfig via
     # ``apply_microphysics_experiment_flags``.  See
     # ``_warm_rain.saturation_adjustment``.
     hard_saturation_adjustment: bool = False
@@ -946,7 +1035,9 @@ class MorrisonConfig(NamedTuple):
     # so the default graph and every existing run are untouched; nothing in the
     # model reads it.  Exists because the donor clamp scales all q_c sinks by a
     # common factor, so terms re-derived outside the scheme are PRE-clamp and
-    # cannot close the budget.  NOT a tunable: it selects no physics.
+    # cannot close the budget.  NOT a tunable: it selects no physics.  Under
+    # prognostic_droplet_number it also publishes the droplet-number budget
+    # (``MicrophysicsOutput.nc_budget``).
     publish_qc_budget: bool = False
     # CAM6 MG2-style warm-rain multipliers, read ONLY by the kk2000 branch
     # (appended at the END: positional ABI).  autocon_fact scales the KK2000
@@ -960,6 +1051,8 @@ class MorrisonConfig(NamedTuple):
     # (CAM6 ``relvar``).  10.0 = CAM6's ``relvarmax`` when deep convection is
     # not CLUBB (clubb_intr.F90:2416-2421), the value it falls back to where
     # CLUBB's qc variance is unavailable; CAM6 clips to [0.001, relvarmax].
+    # Read only when the caller passes no per-cell relvar (the CLUBB
+    # liquid-partition lane passes CLUBB's).
     kk2000_cam6_relvar: float = 10.0
     # CAM6 MG2 in-cloud warm rain: autoconversion + accretion on q_c/lcldm,
     # q_r/precip_frac (N_c/lcldm when prognostic), tendencies times lcldm,
@@ -1014,6 +1107,85 @@ class MorrisonConfig(NamedTuple):
     # model's only liquid source; ``ExperimentConfig.validate_strict`` refuses
     # that pairing rather than letting it run.
     liquid_from_closure: bool = False
+    # morrison_flavor="sam" gSAM satadj_liquid smooth switches (RULE 5; see
+    # _warm_rain.saturation_adjustment_gsam).  Hard limit = gSAM exactly:
+    # math.inf, math.inf, 0.0.  All three values approved by user 2026-10-21.
+    gsam_satadj_excess_sharpness: float = 1.0e4   # saturation step, on (q_t - q_s)/q_sat [-]
+    gsam_satadj_qc_floor_sharpness: float = 1.0e4  # positivity, on T1 - T_l [1/K]
+    gsam_satadj_p_min_width_pa: float = 100.0     # on/off, p >= 5000 Pa gate width [Pa]
+    # morrison_flavor="sam" gSAM M2005 sub-saturation small-condensate removal
+    # (module_mp_graupel.f90:1453-1488, :4664-4700; see
+    # _warm_rain.m2005_subsaturation_removal) smooth switches (RULE 5).  Hard
+    # limit = gSAM exactly: math.inf, math.inf.  Values by codex+GLM+Claude
+    # majority vote 2026-11-03 (0.01 width).
+    gsam_small_removal_rh_sharpness: float = 100.0  # RH < 0.9 gate, on 0.9 - q_v/q_sat [-]
+    gsam_small_removal_q_sharpness: float = 100.0   # q < 1e-8 gate, on 1 - q/1e-8 [-]
+    # RULE 5 smoothing of gSAM's SB2001 autoconversion gate q_c >= 1e-6 kg/kg
+    # (module_mp_graupel.f90:1806/2843): the C2 step reaches 1 at this value
+    # [kg/kg]; <= 1e-6 = gSAM's hard step (codex+GLM 2026-10-29, #2232; KNOWN
+    # DIFFERENCE in _warm_rain.autoconversion_sb2001).
+    sb2001_autoconv_ramp_top: float = 2.0e-6
+    # RULE 5 smoothing of gSAM's two SB2001 accretion gates q_r >= 1e-8 and
+    # q_c >= 1e-8 kg/kg (module_mp_graupel.f90:1944/3266): each C2 step
+    # reaches 1 at its value [kg/kg]; <= 1e-8 = gSAM's hard step (codex+GLM
+    # 2026-10-30, #2262; KNOWN DIFFERENCE in _warm_rain.accretion_sb2001).
+    sb2001_accretion_qr_ramp_top: float = 2.0e-8
+    sb2001_accretion_qc_ramp_top: float = 2.0e-8
+    # MG2's CAM Goff-Gratch q_sat = 1 cap (RULE 5, limiter class): sharpness
+    # on e_sat/p; math.inf = CAM's hard cap.  Value approved by user 2026-10-21.
+    cam_qsat_cap_sharpness: float = CAM_QSAT_CAP_SHARPNESS
+    # RULE 5 smoothing widths of two CAM6 MG2 limits (0 = MG2's hard form;
+    # values approved by user 2026-10-21, see the KNOWN DIFFERENCE in _warm_rain.py):
+    # LogSumExp width of the ice-slope clamp in ln(lami) (mg2_ice_slope) and
+    # of the qi-conservation factor (mg2_qi_conservation_ratio).
+    mg2_ice_slope_log_width: float = 0.01
+    mg2_qi_limit_width: float = 1.0e-2
+
+    # CAM6 prognostic cloud-droplet number (MG2's nc budget on this scheme's
+    # state).  APPENDED AT THE TUPLE END (positional ABI).  Needs
+    # warm_rain_incloud=True, warm_rain_scheme="kk2000_cam6", predict_Nc=False,
+    # nc_from_aerosol=False and liquid_from_closure=True (start-up errors); the
+    # call must pass CLUBB's
+    # per-cell ``relvar``.  Under it the warm rain reads the prognostic number
+    # (max(N_c, 0), divided by lcldm, no 1 m^-3 floor) and CLUBB's relvar.
+    # False = main's behaviour bit for bit on the configurations without a snow
+    # number (tests/atmosphere/microphysics/unit/test_morrison_switch_off_golden.py);
+    # MG2-snow mode (warm_rain_incloud + snow number) carries the approved
+    # smooth 0 C steps and slope rounding with the switch off too (2026-10-21).
+    prognostic_droplet_number: bool = False
+    # RULE 5 smoothing of the CAM6 MG2 condensate-presence test q >= qsmall
+    # (1e-18 kg/kg) in the ported droplet-number and cloud-ice code: the C2 step
+    # reaches 1 at this value [kg/kg]; 1e-18 = MG2's hard test (user decision
+    # 2026-10-22, 1a; KNOWN DIFFERENCE in _warm_rain.mg2_presence).
+    mg2_presence_ramp_top: float = 1.0e-17
+    # RULE 5 smoothing of MG2's frozen-rain destination (cloud ice where the
+    # mean drop 1/lamr < Dcs, else snow): ramp over this fraction of Dcs below
+    # it; 0 = MG2's hard test (user decision 2026-10-22, 15a; KNOWN DIFFERENCE
+    # in _warm_rain.mg2_frozen_rain_ice_fraction).
+    mg2_frozen_rain_ice_ramp_frac: float = 0.1
+    # RULE 5 smoothing of MG2's FINAL droplet mean-size readjust (in-cloud
+    # mean diameter held in [2, 50] um and ncic <= qcic/1e-20,
+    # micro_mg2_0.F90:2743-2835; prognostic droplet number only): LogSumExp
+    # width in ln space of both limits, the cloud-optics value
+    # (CloudConfig.mg2_drop_*_log_width); 0 = MG2's hard clip
+    # (#2216, codex + GLM 2026-11-01; KNOWN DIFFERENCE in
+    # _warm_rain.mg2_droplet_number_readjust).
+    mg2_drop_readjust_log_width: float = 0.01
+    # RULE 5 smoothing of MG2's EARLY droplet size reset (size_dist_param_liq
+    # before autoconversion, micro_mg2_0.F90:1296; its number and PSD feed
+    # every droplet sink and snow riming), at every call site on BOTH droplet-
+    # number paths (prognostic, and the specified number production runs:
+    # autoconversion + snow riming): same LogSumExp form and default as the
+    # readjust; 0 = MG2's hard clip (#2216, user 2026-11-01; KNOWN DIFFERENCE
+    # at the morrison.py calls).
+    mg2_drop_early_reset_log_width: float = 0.01
+    # RULE 5 smoothing of MG2's droplet size reset inside the SEDIMENTATION
+    # fall-speed coefficients (size_dist_param_liq, micro_mg2_0.F90:2056-2120;
+    # prognostic droplet number only, the only path that sediments droplets):
+    # same LogSumExp form and default as the early reset; 0 = MG2's hard clip
+    # (#2216, user 2026-11-01; KNOWN DIFFERENCE in
+    # _warm_rain.mg2_droplet_fall_coefficients).
+    mg2_drop_sed_reset_log_width: float = 0.01
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
@@ -1025,111 +1197,28 @@ SED_CFL_SUBSTEPS_MAX_LIMIT = 1024
 
 
 class ThompsonConfig(NamedTuple):
-    """Configuration for Thompson hybrid-moment microphysics."""
-    # All Morrison params
-    k_au: float = 6e2
-    x_star: float = 2.6e-10
-    Nc_0: float = 1e8
-    k_ac: float = 5.25
-    k_sc: float = 1e-3
-    D_eq: float = 1.1e-3
-    breakup_sharpness: float = 1e4
-    a_v_r: float = 130.0
-    b_v_r: float = 0.5
-    evap_coeff: float = 1.0
-    saturation_sharpness: float = 100.0
-    autoconversion_sharpness: float = 10.0  # See SB config — iter-97/99
-    # Relative-humidity-deficit resolution floor for rain evaporation: rain
-    # does not evaporate where the liquid sub-saturation is below ~RH 99.995 %.
-    # Suppresses the spurious in-cloud evaporation that rectifies float32
-    # round-off and inflated the cloudy-column LWP (18-24 % DYCOMS fp32-vs-fp64
-    # spread). Applied to the deficit itself, so resolved deficits (WBF ~0.1,
-    # sub-cloud downdrafts) lose only the ≲ floor/deficit fraction (≲0.05 %).
-    # Calibrated: the measured float32 in-cloud deficit-noise band is ~9e-6
-    # (max), and the DYCOMS cold-variant in-cloud evaporation sits at deficit
-    # ~1e-5-5e-5; 5e-5 is the smallest floor that clears BOTH (a 1-2e-5 floor
-    # bisects that band and makes the cold-case fp32-vs-fp64 spread WORSE).
-    # See _warm_rain.rain_evaporation.
-    rain_evap_rh_floor: float = 5.0e-5
-    # Cooper(1986) base ice number [1/m³] (= 0.005/L).  Was 5e3 — 1000x too
-    # high (the canonical Cooper base is 0.005/L = 5/m³, the value MorrisonConfig
-    # uses); 5e3 pinned all clouds colder than ~-15 C at the N_i_nuc_max cap.
-    N_i0: float = 5.0
-    cooper_a: float = 0.304
-    # SAM "limit to 500 L⁻¹" cap on Cooper-nucleated ice number. Without it
-    # the bare ``N_i0·exp(cooper_a·(T_freeze−T))`` diverges at very cold
-    # tropopause/sponge temperatures and overflows fp32 → N_i = inf/NaN.
-    # Mirrors ``MorrisonConfig.N_i_nuc_max``.
-    N_i_nuc_max: float = 5.0e5       # [1/m³] = 500 /L
-    cooper_T_act: float = 265.0
-    ice_sigmoid_sharpness: float = 5.0
-    dep_coeff: float = 1e-3
-    q_i_min_growth: float = 1e-9
-    # --- Faithful Thompson-2008 ice depositional growth + ice→snow ---
-    # Capacitance-based vapour-diffusion ice growth (Thompson et al. 2008,
-    # following Reisner et al. 1998 / the M2005 lineage) replaces the legacy
-    # ``dep_coeff·S_i·q_i·N_i^⅓`` heuristic when ``ice_growth_scheme="capacitance"``.
-    # PRCI depositional ice→snow autoconversion converts cloud ice whose
-    # depositional growth carries it ACROSS the snow-size threshold ``D_cs``
-    # into snow — the actual Thompson-2008 ice→snow mechanism, far stronger in
-    # supersaturated convective cores than the ``agg_coeff·q_i`` relaxation, so
-    # cloud ice drains to fast-falling snow instead of piling up and driving a
-    # latent-heating convective runaway.
-    ice_growth_scheme: str = "capacitance"   # "capacitance" | "heuristic"
-    # Snow microphysics: "thompson2008" = faithful bimodal-PSD snow (Field-2005
-    # moments, mass-weighted fall speed + ventilated vapour deposition, in
-    # ``_thompson_snow.py``); "bulk_qpower" = legacy capped power-law fall speed
-    # with no snow deposition.
-    snow_scheme: str = "thompson2008"        # "thompson2008" | "bulk_qpower"
-    rho_cloud_ice: float = 500.0             # cloud-ice bulk density [kg/m³]
-    ice_deposition_efficiency: float = 1.0   # EPSI tuning [-]
-    ice_snow_d_auto: float = 250.0e-6        # D_cs ice→snow size threshold [m]
-    bergeron_rate: float = 1e-3
-    T_center: float = 258.0
-    T_width: float = 10.0
-    rime_coeff: float = 1.0
-    agg_coeff: float = 1e-3
-    melt_rate: float = 5e-3
-    melt_sharpness: float = 2.0
-    a_v_i: float = 50.0
-    b_v_i: float = 0.25
-    a_v_s: float = 30.0
-    b_v_s: float = 0.3
-    # Graupel
-    rime_to_graupel_threshold: float = 1e-4  # Riming threshold for graupel [kg/kg/s]
-    rime_to_graupel_rate: float = 0.5        # Fraction converted to graupel
-    graupel_sharpness: float = 1e4           # Sigmoid sharpness
-    a_v_g: float = 80.0                      # Graupel fall speed coefficient
-    b_v_g: float = 0.4                       # Graupel fall speed exponent
-    # Gamma distribution shape
-    mu_c: float = 3.0                        # Cloud droplet shape parameter
-    mu_r: float = 1.0                        # Rain drop shape parameter
-    # --- Hard (iterated) saturation-adjustment guard (opt-in) ---
-    # See ``_warm_rain.saturation_adjustment`` / ``KesslerConfig``.  Newton-
-    # iterated saturation adjustment that lands q_v ON the liquid saturation
-    # curve where q_v > hard_sat_adjust_threshold * q_sat (conserving
-    # c_pd*T + L_v*q_v exactly).  Default OFF => byte-identical smooth path.
-    hard_saturation_adjustment: bool = False
-    hard_sat_adjust_threshold: float = 1.1   # RH trigger q_v > thr*q_sat [-]
-    hard_sat_max_heating_K: float = 5.0      # per-step latent-heating cap [K]
-
-    # --- IFS/SAM homogeneous-freezing ice-supersaturation allowance ---
-    # gSAM cloud.f90 (Khairoutdinov 2023, after IFS): pristine air below
-    # 235 K may stay ice-supersaturated up to rh_homo = 2.583 - T/207.8
-    # (~1.45 at 235 K, ~1.67 at 190 K); the allowance is withdrawn the
-    # moment cloud ice exists. ON by default (SAM-faithful); set False to
-    # target plain ice saturation.  See thermo.homogeneous_freezing_rh_factor.
-    homogeneous_ice_supersaturation: bool = True
+    """WRF v4.8.0 Thompson microphysics (``mp_physics=8``), the faithful port
+    :func:`.thompson_wrf.thompson_wrf_step`.  The scheme's constants are the
+    oracle's (``thompson_wrf_tables``); nothing here is tunable."""
+    # Static length of the sedimentation sub-step loop: the port runs WRF's own
+    # per-species sub-step counts inside it and a column needing more is an
+    # error (vote H1a: Morrison's ``sed_cfl_substeps_max`` default, same hard
+    # ceiling ``SED_CFL_SUBSTEPS_MAX_LIMIT``).
+    sed_substeps_max: int = MorrisonConfig._field_defaults["sed_cfl_substeps_max"]
 
 
 class P3Config(NamedTuple):
     """Configuration for P3 (Predicted Particle Properties) microphysics.
 
-    Single ice category with predicted rime mass (q_rim) and rime volume
-    (B_rim). Liquid phase uses Seifert-Beheng warm-rain helpers.
-
-    Ice particle properties (fall speed, density) are diagnosed from
-    (q_i, N_i, q_rim, B_rim) rather than assumed from a fixed habit.
+    ``p3.py`` is a faithful port of WRF v4.8.0 ``module_mp_p3.F`` (P3 v4.5.2)
+    for ``mp_physics = 50``: one 2-moment ice category with predicted rime mass
+    (q_rim) and rime volume (B_rim), lookup table v5.4_2momI, specified droplet
+    number, KK2000 warm rain, Cooper nucleation; oracle-tested to 1e-10 at the
+    hard limit.  Every field below is read by the port; the three smoothing
+    fields ``ice_sigmoid_sharpness``, ``cooper_supi_sharpness``,
+    ``melt_sharpness`` reach the oracle at 1e6 / 1e9 / 1e6.  The opt-in
+    ``hard_saturation_adjustment`` guard (not part of WRF P3, default off) is
+    applied after the P3 step as for ml_emulator.
 
     Slot reuse in HydrometeorState
     --------------------------------
@@ -1140,77 +1229,33 @@ class P3Config(NamedTuple):
     range from unrimed aggregates (~50 kg/m³) to dense graupel
     (~900 kg/m³).
     """
-    # --- Warm rain (Seifert-Beheng liquid phase) ---
-    k_au: float = 6e2
-    x_star: float = 2.6e-10
-    Nc_0: float = 1e8
-    k_ac: float = 5.25
-    k_sc: float = 1e-3
-    D_eq: float = 1.1e-3
-    breakup_sharpness: float = 1e4
-    a_v_r: float = 130.0
-    b_v_r: float = 0.5
-    evap_coeff: float = 1.0
-    saturation_sharpness: float = 100.0
-    autoconversion_sharpness: float = 10.0
-    # --- Ice nucleation (Cooper 1986, gSAM P3 scheme-1 semantics) ---
-    # Was 5e3 — 1000x the canonical Cooper base (0.005/L = 5/m³, = MorrisonConfig).
+    # --- Specified droplet number (WRF P3 nccnst, module_mp_p3.F:196) ---
+    Nc_0: float = 2e8               # [1/m³] (user decision 2026-10-21: WRF value)
+    # --- Ice nucleation (Cooper 1986, as WRF v4.8.0 P3 runs it) ---
     N_i0: float = 5.0               # Cooper base ice crystal number [1/m³] (= 0.005/L)
     cooper_a: float = 0.304         # Cooper exponent
-    # ORACLE cap: gSAM P3 scheme-1 100 L⁻¹·SCF with SCF=1 (module_mp_p3.f90:3090;
-    # scheme 2 uses 150 L⁻¹). Also bounds the Cooper exponential so cold
-    # tropopause temperatures cannot overflow fp32 (mirrors Morrison).
-    # (Was 5e5 = M2005's 500/L — a documented departure, closed 2026-07-17.)
+    # ORACLE cap: WRF P3 100 L⁻¹·SCF with SCF=1 (module_mp_p3.F:3276). Also
+    # bounds the Cooper exponential so cold tropopause temperatures cannot
+    # overflow fp32 (mirrors Morrison).
     N_i_nuc_max: float = 1.0e5      # [1/m³] = 100 /L
-    cooper_T_act: float = 265.0     # Mixed-phase process gate (dep/riming/agg) [K]
-    # Nucleation-specific ORACLE gate (module_mp_p3.f90:3084): T < −15 °C AND
+    # Nucleation-specific ORACLE gate (WRF module_mp_p3.F:3272): T < −15 °C AND
     # supi >= 0.05, smoothed by ice_sigmoid_sharpness / cooper_supi_sharpness.
     cooper_T_nuc: float = 258.15    # Nucleation activation temperature [K] (−15 °C)
     cooper_supi_min: float = 0.05   # Min ice supersaturation for nucleation [-]
     ice_sigmoid_sharpness: float = 5.0
     cooper_supi_sharpness: float = 200.0  # Sigmoid sharpness on supi gate [-]
-    # --- Ice depositional growth ---
-    dep_coeff: float = 1e-3
-    q_i_min_growth: float = 1e-9    # Minimum effective q_i for deposition [kg/kg]
-    # --- Cloud riming (ice collects cloud droplets) ---
-    rime_coeff: float = 0.5         # Collection efficiency E_ri [-]
-    # --- Rain riming (ice collects rain drops, freezes) ---
-    rain_rime_coeff: float = 0.1    # Collection efficiency E_rr [-]
-    # --- Self-collection / aggregation (N_i reduction) ---
-    agg_coeff: float = 1e-3         # Aggregation rate [1/s]
-    # --- Melting ---
-    melt_rate: float = 5e-3         # Melting rate [1/s]
     melt_sharpness: float = 2.0     # Sigmoid sharpness near T_freeze [1/K]
-    # --- P3 fall speed: V_t = a_v_i * (q_i*rho_ratio)^b_v_i * density_factor ---
-    a_v_i: float = 40.0             # Base fall speed coefficient
-    b_v_i: float = 0.3              # Fall speed exponent
     # --- Rime density limits [kg/m³] ---
     rho_rim_min: float = 50.0       # Minimum rime density (unrimed aggregates)
     rho_rim_max: float = 900.0      # Maximum rime density (dense graupel)
-    # --- Fall speed density enhancement ---
-    # V_t *= (rho_rim / rho_ice_ref)^c_rim_fallspeed
-    c_rim_fallspeed: float = 0.4    # Density enhancement exponent [-]
-    rho_ice_ref: float = 500.0      # Reference rime density for scaling [kg/m³]
-    # --- Accreted rime density (for dB_rim/dt from riming) ---
-    rho_rim_accrete: float = 400.0  # Density of newly accreted rime [kg/m³]
-    # --- Bulk ice density (for B_rim from nucleation) ---
-    rho_ice: float = constants.rho_ice  # Solid ice density [kg/m³]
     # --- Hard (iterated) saturation-adjustment guard (opt-in) ---
-    # See ``_warm_rain.saturation_adjustment`` / ``KesslerConfig``.  Newton-
-    # iterated saturation adjustment that lands q_v ON the liquid saturation
-    # curve where q_v > hard_sat_adjust_threshold * q_sat (conserving
-    # c_pd*T + L_v*q_v exactly).  Default OFF => byte-identical smooth path.
+    # See ``_warm_rain.saturation_adjustment``.  Newton-iterated saturation
+    # adjustment that lands q_v ON the liquid saturation curve where
+    # q_v > hard_sat_adjust_threshold * q_sat (conserving c_pd*T + L_v*q_v
+    # exactly).  Default OFF => byte-identical smooth path.
     hard_saturation_adjustment: bool = False
     hard_sat_adjust_threshold: float = 1.1   # RH trigger q_v > thr*q_sat [-]
     hard_sat_max_heating_K: float = 5.0      # per-step latent-heating cap [K]
-
-    # --- IFS/SAM homogeneous-freezing ice-supersaturation allowance ---
-    # gSAM cloud.f90 (Khairoutdinov 2023, after IFS): pristine air below
-    # 235 K may stay ice-supersaturated up to rh_homo = 2.583 - T/207.8
-    # (~1.45 at 235 K, ~1.67 at 190 K); the allowance is withdrawn the
-    # moment cloud ice exists. ON by default (SAM-faithful); set False to
-    # target plain ice saturation.  See thermo.homogeneous_freezing_rh_factor.
-    homogeneous_ice_supersaturation: bool = True
 
 
 class MicrophysicsMLEmulatorConfig(NamedTuple):
@@ -1256,7 +1301,7 @@ class MicrophysicsConfig(NamedTuple):
     scheme : str
         Active scheme: "kessler", "sundqvist", "seifert_beheng",
         "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
-        or "none".
+        "ifs_cloudsc", or "none".
     kessler : KesslerConfig
     sundqvist : SundqvistConfig
     seifert_beheng : SeifertBehengConfig
@@ -1273,6 +1318,9 @@ class MicrophysicsConfig(NamedTuple):
         and runs oracle condensation + Bott coalescence per step (see
         ``docs/science/specs/bin_microphysics.md``).
     ml_emulator : MicrophysicsMLEmulatorConfig
+    ifs_cloudsc : IFSCloudscConfig
+        OpenIFS 49r1 CLOUDSC (prognostic cloud fraction; MPAS column lane,
+        with the faithful IFS convection).
     """
     scheme: str = "none"
     kessler: KesslerConfig = KesslerConfig()
@@ -1284,6 +1332,7 @@ class MicrophysicsConfig(NamedTuple):
     sdm: SDMConfig = SDMConfig()
     fast_sbm: FastSBMConfig = FastSBMConfig()
     ml_emulator: MicrophysicsMLEmulatorConfig = MicrophysicsMLEmulatorConfig()
+    ifs_cloudsc: IFSCloudscConfig = IFSCloudscConfig()
 
 
 def apply_microphysics_experiment_flags(
@@ -1305,6 +1354,7 @@ def apply_microphysics_experiment_flags(
     morrison_do_graupel: bool | None = None,
     morrison_warm_rain_scheme: str | None = None,
     morrison_warm_rain_incloud: bool | None = None,
+    morrison_prognostic_droplet_number: bool | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1360,7 +1410,8 @@ def apply_microphysics_experiment_flags(
             )
         scheme_config = scheme_config._replace(subgrid_autoconversion=True)
     if hard_saturation_adjustment:
-        if "hard_saturation_adjustment" not in fields:
+        if ("hard_saturation_adjustment" not in fields
+                or scheme not in HARD_SAT_GUARD_SCHEMES):
             raise ValueError(
                 f"hard_saturation_adjustment=True is not supported by the "
                 f"{scheme!r} microphysics scheme; use one of "
@@ -1486,6 +1537,16 @@ def apply_microphysics_experiment_flags(
                 f"scheme (got {scheme!r}).")
         scheme_config = scheme_config._replace(
             warm_rain_incloud=morrison_warm_rain_incloud)
+    if morrison_prognostic_droplet_number is not None:
+        if not isinstance(morrison_prognostic_droplet_number, bool):
+            raise TypeError("morrison_prognostic_droplet_number must be a bool, got "
+                            f"{morrison_prognostic_droplet_number!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_prognostic_droplet_number is only read by the morrison "
+                f"scheme (got {scheme!r}).")
+        scheme_config = scheme_config._replace(
+            prognostic_droplet_number=morrison_prognostic_droplet_number)
     if morrison_warm_rain_scheme is not None:
         if scheme != "morrison":
             raise ValueError(
@@ -1515,7 +1576,11 @@ def apply_microphysics_experiment_flags(
         for _leaf, _val in morrison_scalars.items():
             if _val is None:
                 continue
-            _cur = float(getattr(scheme_config, _leaf))
+            _cur = getattr(scheme_config, _leaf)
+            if _cur is None:        # an unset leaf (DCS): any value applies
+                _updates[_leaf] = float(_val)
+                continue
+            _cur = float(_cur)
             # rel_tol absorbs float32-host round-trip noise
             # (float32(1e-3) != 1e-3 exactly) so a stored config that merely
             # round-tripped through a narrower dtype does not force a

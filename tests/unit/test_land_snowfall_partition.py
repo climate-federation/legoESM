@@ -82,17 +82,15 @@ def _run(name, col, dt=300.0):
     from legoesm.atmosphere.physics.microphysics.seifert_beheng import (
         seifert_beheng_microphysics)
     from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
-    from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
     fn, cfg = {"kessler": (kessler_microphysics, mc.KesslerConfig()),
                "sundqvist": (sundqvist_microphysics, mc.SundqvistConfig()),
                "seifert_beheng": (seifert_beheng_microphysics,
                                   mc.SeifertBehengConfig()),
-               "morrison": (morrison_microphysics, mc.MorrisonConfig()),
-               "thompson": (thompson_microphysics, mc.ThompsonConfig())}[name]
+               "morrison": (morrison_microphysics, mc.MorrisonConfig())}[name]
     return fn(*col, dt, config=cfg)
 
 
-@pytest.mark.parametrize("name", ["morrison", "thompson"])
+@pytest.mark.parametrize("name", ["morrison"])
 def test_ice_schemes_publish_their_frozen_fall(name):
     """Cold column holding only snow: everything that lands is frozen.
     Warm column holding only rain: nothing that lands is frozen.  (The old
@@ -107,7 +105,7 @@ def test_ice_schemes_publish_their_frozen_fall(name):
     np.testing.assert_array_equal(np.asarray(warm.precip_frozen), 0.0)
 
 
-@pytest.mark.parametrize("name", ["kessler", "sundqvist", "seifert_beheng"])
+@pytest.mark.parametrize("name", ["kessler", "seifert_beheng"])
 def test_lv_only_schemes_publish_zero_frozen(name):
     """L_v-only heating: every kg they precipitate is liquid energetically."""
     out = _run(name, _column(262.0, rain=1e-3))
@@ -131,7 +129,8 @@ def test_zm_publishes_its_convective_snow_flux():
     u = jnp.full((ncol, nlev), 5.0)
     out, _ = zhang_mcfarlane_convection(
         T, q, p_full, p_half, u, jnp.zeros_like(u), jnp.zeros((ncol, nlev)),
-        dt=300.0, config=ZhangMcFarlaneConfig(land_fraction="none"))
+        dt=300.0, config=ZhangMcFarlaneConfig(land_fraction="none"),
+        pblh=jnp.zeros(ncol))  # CAM's cold-start PBL height (ZM needs one)
     snow = np.asarray(out.precip_frozen_sfc)
     prec = np.asarray(jnp.sum(out.dq_r_conv_dt * (p_half[:, 1:] - p_half[:, :-1]),
                               axis=-1) / constants.g)

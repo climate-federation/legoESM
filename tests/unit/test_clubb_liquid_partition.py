@@ -76,11 +76,11 @@ def _run(config, col, dt=300.0, pass_qc=True, *, on=None):
         lat=jnp.zeros((_NCOL,)))                  # equator [rad]
 
 
-_OFF = CLUBBConfig(prognostic=True)
+_OFF = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)
 # The kernel config no longer carries the selector (it is a dispatch flag on
 # TurbulenceConfig; the kernel keys on q_c being supplied), so the two arms are
 # the same tunables and differ only in whether _run hands over q_c.
-_ON = CLUBBConfig(prognostic=True)
+_ON = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)
 _ON_IDS = {id(_ON)}
 
 
@@ -148,7 +148,7 @@ def test_total_water_is_conserved_by_the_partition():
 
 
 def test_liquid_is_replaced_not_accumulated():
-    """``q_c`` after the step is the closure's rcm, as CAM writes it.
+    """``q_c`` after the step is the core's rcm_out, as CAM writes it.
 
     CAM's ``ptend q(ixcldliq) = (rcm - q_cldliq)/hdtime`` REPLACES.  Applying the
     tendency must therefore land exactly on rcm regardless of what the host was
@@ -172,7 +172,7 @@ def test_liquid_is_replaced_not_accumulated():
         wet["u"], wet["v"], wet["T"], wet["q_v"], moments,
         wet["p_full"], wet["p_half"], wet["z_full"], wet["z_half"],
         wet["T_sfc"], wet["q_sfc"], wet["rho"], dt, _ON, q_c=wet["q_c"])
-    rcm = np.asarray(flip_vertical(diags["rcm"]))
+    rcm = np.asarray(flip_vertical(diags["rcm_out"]))
     # 1 ULP, not exact: the host applies a TENDENCY, so the value round-trips
     # through q_c + dt*(rcm - q_c)/dt rather than being assigned.
     np.testing.assert_allclose(q_c_final, rcm, rtol=1e-15, atol=1e-20)
@@ -223,18 +223,23 @@ def test_moist_static_energy_round_trip_is_exact_without_cloud():
 
 
 def test_latent_heat_accompanies_the_condensate():
-    """Condensing liquid must warm the column by ``L_v/c_pd`` times its mass.
+    """Condensing liquid warms the column by ``L_v/c_pd`` times its mass.
 
     The temperature and water halves of the partition are a single
-    transformation; this pins the coefficient, so a sign flip or a stray
-    ``exner`` on the latent term fails here rather than as a slow climate drift.
+    transformation.  CAM's host map (clubb_intr.F90:2048-2051) puts the
+    latent heat through the Exner function, ``T = exner*(thlm + L_v/c_pd
+    rcm)``, so locally the warming is ``exner*L_v/c_pd*rcm``; the column
+    energy fixer returns the ``(1 - exner)`` share uniformly per unit mass
+    (CAM 2138-2150), so the column total is exactly ``L_v*rcm``.  This pins
+    both, so a sign flip, a missing or doubled ``exner`` fails here rather than
+    as a slow climate drift.
     """
     col = _column(q_c_amp=0.0)
     dt = 300.0
     out_off, packed_off = _run(_OFF, col, dt=dt)
     out_on, packed_on = _run(_ON, col, dt=dt)
     from legoesm.atmosphere.physics.turbulence.clubb import (
-        flip_vertical, unpack_clubb_moments,
+        exner_function, flip_vertical, unpack_clubb_moments,
     )
     # Same seeding (q_c == 0), so the advanced moments are identical and the ONLY
     # difference between the two outputs is the outbound split.
@@ -247,8 +252,15 @@ def test_latent_heat_accompanies_the_condensate():
     dT = np.asarray(out_on.dT_dt - out_off.dT_dt) * dt
     dq = np.asarray(out_on.dq_v_dt - out_off.dq_v_dt) * dt
     np.testing.assert_allclose(dq, -rcm, rtol=1e-12, atol=1e-18)
-    np.testing.assert_allclose(
-        dT, (constants.L_v / constants.c_pd) * rcm, rtol=1e-12, atol=1e-12)
+    exner = np.asarray(exner_function(col["p_full"]))
+    # Fixer share: the same heating at every level (equal-dp column here).
+    fix = dT - exner * (constants.L_v / constants.c_pd) * rcm
+    np.testing.assert_allclose(fix, fix[:, :1] * np.ones_like(fix),
+                               rtol=1e-12, atol=1e-12)
+    dp = np.diff(np.asarray(col["p_half"]), axis=1)
+    np.testing.assert_allclose(np.sum(dp * constants.c_pd * dT, axis=1),
+                               np.sum(dp * constants.L_v * rcm, axis=1),
+                               rtol=1e-12)
 
 
 def test_sub_cycle_carries_the_liquid_between_steps():
@@ -377,10 +389,12 @@ def test_partition_hands_the_host_the_in_layer_liquid_as_cam_does():
     """The tracer written back is CLUBB's rcm AFTER the cloud-cover overwrite.
 
     With ``l_use_cloud_cover = .true.`` the reference overwrites rcm with
-    ``rcm_in_layer`` (pdf_closure_module.F90:4340-4348) and CAM writes that rcm
-    into the host liquid (clubb_intr.F90 cesm2_1_rel 1991, 2159-2160; user
-    decision 2026-10-19).  The in-layer value is the grid mean divided by a
-    vertical cloud fraction <= 1 at cloud edges, so the two keys differ there.
+    ``rcm_in_layer`` (pdf_closure_module.F90:4340-4348) and CAM writes the
+    core's rcm_out -- that in-layer closure rcm, clipped against the advanced
+    rtm -- into the host liquid (clubb_intr.F90 cesm2_1_rel 1991, 2159-2160;
+    user decisions 2026-10-19, 2026-11-01).  The in-layer value is the grid
+    mean divided by a vertical cloud fraction <= 1 at cloud edges, so the two
+    closure keys differ there.
     """
     from legoesm.atmosphere.physics.turbulence.clubb import (
         clubb_step, flip_vertical,
@@ -397,7 +411,8 @@ def test_partition_hands_the_host_the_in_layer_liquid_as_cam_does():
     in_cloud = np.asarray(flip_vertical(diags["rcm"]))
     applied = np.asarray(col["q_c"] + dt * out.dq_c_dt)
     # 1 ULP for the same reason as above: this is a tendency round trip.
-    np.testing.assert_allclose(applied, in_cloud, rtol=1e-15, atol=1e-20)
+    np.testing.assert_allclose(applied, np.asarray(flip_vertical(diags["rcm_out"])),
+                               rtol=1e-15, atol=1e-20)
     # And the two really are different, or this test proves nothing.  They agree
     # in the cloud INTERIOR by construction -- compute_cloud_cover rewrites only
     # the levels at a cloud top, a cloud base or an isolated cloudy layer -- so
@@ -532,11 +547,13 @@ def test_an_override_cannot_smuggle_the_lever_past_the_ordering_guard():
     import pytest
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig, MorrisonConfig)
 
     cfg = PhysicsConfig(
         turbulence=TurbulenceConfig(scheme="clubb", clubb=_ON, liquid_partition=True),
-        microphysics=MicrophysicsConfig(scheme="morrison"))
+        microphysics=MicrophysicsConfig(
+            scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000")))
     with pytest.raises(ValueError, match="cld_macmic_num_steps>=2"):
         make_physics(cfg, model_type="mpas", cld_macmic_num_steps=1)
     # ... and it builds once the sub-cycle is on, so the guard is about the
@@ -545,7 +562,8 @@ def test_an_override_cannot_smuggle_the_lever_past_the_ordering_guard():
     # The lever off is untouched at every N.
     off = PhysicsConfig(
         turbulence=TurbulenceConfig(scheme="clubb", clubb=_OFF),
-        microphysics=MicrophysicsConfig(scheme="morrison"))
+        microphysics=MicrophysicsConfig(
+            scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000")))
     make_physics(off, model_type="mpas", cld_macmic_num_steps=1)
 
 

@@ -54,7 +54,8 @@ def _cfg(partition=False, macmic=1):
             clubb=CLUBBConfig(prognostic=partition)),
         microphysics=MicrophysicsConfig(
             scheme="morrison",
-            morrison=MorrisonConfig(liquid_from_closure=partition)),
+            morrison=MorrisonConfig(liquid_from_closure=partition,
+                                    warm_rain_scheme="kk2000")),
         gravity_wave_drag=type(PhysicsConfig().gravity_wave_drag)(scheme="none"),
     ), macmic
 

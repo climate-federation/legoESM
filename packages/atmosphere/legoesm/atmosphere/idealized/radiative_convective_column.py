@@ -24,12 +24,13 @@ dry-adiabatic mode is the follow-up).
 
 The direct equilibrium condition is that the per-level radiative heating rate and
 the net surface flux both vanish (``rce_surface_net_flux → 0``,
-``heating_rate → 0``); the harness drives the column there.  The net
-top-of-atmosphere flux (``rce_toa_imbalance`` = absorbed SW − OLR) then approaches
-zero only up to the gray scheme's own flux-closure residual — the discretized
-flux-divergence heating rate does not sum *exactly* to the TOA-minus-surface flux
-(an O(1) W m⁻² inconsistency intrinsic to ``gray_radiation``, not this harness),
-so use the per-level heating / surface flux as the convergence metric.
+``heating_rate → 0``); the harness drives the column there.  The gray scheme's
+heating rate is a flux divergence, so its column integral telescopes to the
+TOA-minus-surface net flux to round-off (tier-2 oracle audit: <= 3e-14 W m⁻² on
+eight columns); there is no O(1) closure residual.  Note that the sigma levels
+are built at the precision policy's compute dtype, not at the x64 flag: under
+the default float32 policy they are float32 even with ``JAX_ENABLE_X64``, and
+``p_top`` is then 999.99997765 Pa rather than 1000 Pa.
 
 Everything is pure JAX, so the stepped column and its equilibrium are
 ``jax.grad``-differentiable (e.g. d(T_sfc_eq)/d(insolation) for sensitivity).

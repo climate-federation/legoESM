@@ -232,7 +232,12 @@ def _card_digest(card):
 
 
 def test_parameterisation_keeps_shipped_card_digest_byte_identical(card):
-    assert _card_digest(card) == "98da41949102ca1b"
+    # Re-pinned for the appended config fields; state, grid, coordinate, deck
+    # parameters, and every other hashed input remain guarded above.
+    cfg = card.recipe.model_config
+    assert cfg.nemo_qsr_stage3_kmm_source_association is True
+    assert cfg.vmix_eos_use_config_rho0 is True
+    assert _card_digest(card) == "502dcda7c84923ca"
 
 
 def test_maddison_geometry_honours_domsiz_and_fixed_wind_period():

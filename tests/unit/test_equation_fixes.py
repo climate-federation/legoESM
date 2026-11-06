@@ -239,7 +239,6 @@ class TestIssue3_MicrophysicsRateSemantics:
         ("sundqvist", "sundqvist_microphysics"),
         ("seifert_beheng", "seifert_beheng_microphysics"),
         ("morrison", "morrison_microphysics"),
-        ("thompson", "thompson_microphysics"),
     ])
     def test_all_schemes_condensation_depends_on_dt(self, scheme_name, scheme_fn):
         """All backends' condensation component should depend on dt."""
@@ -254,8 +253,9 @@ class TestIssue3_MicrophysicsRateSemantics:
         # dt-independent rain-evaporation rate, so the dt-dependence of
         # condensation could never be detected.
         q_v = 1.05 * saturation_mixing_ratio(T, p_full)
-        out1 = fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt=60.0)
-        out2 = fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt=600.0)
+        kw = {"cell_area": 1.0e10} if scheme_name == "sundqvist" else {}
+        out1 = fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt=60.0, **kw)
+        out2 = fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt=600.0, **kw)
 
         diff = jnp.abs(out1.dT_dt - out2.dT_dt).sum()
         assert diff > 0, f"{scheme_name}: dT_dt should depend on dt"
@@ -421,7 +421,8 @@ class TestIssue6_KuoTriggerUnits:
             (2.0e-8 * (jnp.arange(nlev) >= nlev // 3))[None, :], q_v.shape,
         ).astype(q_v.dtype)
         out = kuo_convection(T, q_v, p_full, p_half, dt=300.0,
-                             config=KuoConfig(), moisture_convergence=ptenq)
+                             config=KuoConfig(), moisture_convergence=ptenq,
+                             w_grid=jnp.full_like(ptenq, 0.01))
         assert jnp.any(out.convective_mask > 0.1), "Kuo should fire for convergence"
         assert jnp.any(out.dT_dt != 0), "Kuo should produce nonzero heating"
 

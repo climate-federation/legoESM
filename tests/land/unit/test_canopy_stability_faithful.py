@@ -180,7 +180,7 @@ def test_most_constants_match_clm5():
     assert _MOST_HEAT_CONV_COEF == _O_HEAT_CONV == 0.8
     assert _RIB_MAX == _O_RIB_MAX == 0.19
     assert _ZETA_MAX_STABLE == _O_ZETA_MAX_STABLE == 0.5
-    assert float(constants.kappa_vk) == _O_KAPPA == 0.4
+    assert float(constants.kappa_von_karman) == _O_KAPPA == 0.4
 
 
 # --- defining-property / non-vacuity pins --------------------------------------
@@ -343,7 +343,7 @@ def test_below_canopy_cs_blend_matches_oracle():
     """compute_below_canopy_resistance reproduces the clumping-weighted Cs form."""
     uav, CI, LAI = 1.5, 0.8, 3.0
     res, res2 = compute_below_canopy_resistance(_a(uav), _a(CI), _a(LAI))
-    csbare = float(constants.kappa_vk)/_CS_BARE_COEF * (
+    csbare = float(constants.kappa_von_karman)/_CS_BARE_COEF * (
         _Z0MG_BARE*max(uav, 1e-3)/_NU_AIR)**(-_CS_BARE_EXP)
     w = math.exp(-0.5*CI*LAI)
     cs = csbare*w + _CS_DENSE*(1.0 - w)

@@ -1531,6 +1531,9 @@ class FesomOceanModel:
         self.mesh = mesh
         self.z_coord = z_coord
         self.config = config
+        # The legoESM closure card (None under vertical_mixing='fesom'), kept
+        # so the run manifest records the TKE settings that ran (#2102).
+        self.vmix_config = vmix_config
 
         self._dt = (
             float(config.dt) if config.dt is not None

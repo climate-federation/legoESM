@@ -80,13 +80,19 @@ def main(argv=None):
     # state, default cam6 ramps (the production deck sets none).  The
     # checkpoint has no latitudes: aist is evaluated at the two extreme
     # analytic tropopauses (lat 0 -> 100 hPa, lat 90 -> 250 hPa) and cells
-    # where they differ are dropped from the gate (counted).
+    # where they differ are dropped from the gate (counted).  The CLUBB top
+    # cut (clubb_intr.F90:2535) uses the CLUBBConfig defaults, like the ramps.
     from legoesm.atmosphere.physics.clouds.cloud_fraction import cam6_ice_stratus_fraction
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
     cc = CloudConfig(scheme="cam6_clubb")
+    ccl = CLUBBConfig()
     ai = [np.asarray(cam6_ice_stratus_fraction(
         jnp.asarray(qv), jnp.asarray(T), jnp.asarray(p), jnp.asarray(np.maximum(qi, 0.0)),
-        jnp.full(T.shape[0], la), cc, jnp.asarray(ph[:, :-1]))) for la in (0.0, np.pi / 2)]
+        jnp.full(T.shape[0], la), cc, jnp.asarray(ph[:, :-1]),
+        trop_cloud_top_press=ccl.trop_cloud_top_press,
+        trop_cloud_taper_lnp_width=ccl.trop_cloud_taper_lnp_width))
+        for la in (0.0, np.pi / 2)]
     lat_free = ai[0] == ai[1]
     aist = ai[0]
     cf = np.maximum(np.clip(alst, 0.0, 1.0), aist)

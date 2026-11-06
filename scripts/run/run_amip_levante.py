@@ -75,7 +75,7 @@ _O3_FILES = {
 # scripts/data/adapt_cmip6_aerosol.py and adapt_cesm_forcing.py volcanic.
 _FORCING_DIR = Path("/work/bb1596/b309178/diffESM/legoesm_ap/data/forcing/cmip6_1979-2014")
 _AEROSOL_FILE = _FORCING_DIR / "aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg.nc"
-_AEROSOL_CCN_FILE = _FORCING_DIR / "aeropt_macv2sp_sw_b14_fin_1850-2014_MACv1bg.nc"
+_AEROSOL_CCN_FILE = _FORCING_DIR / "aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg.nc"
 _VOLCANIC_FILE = _FORCING_DIR / "bc_aeropt_cmip6_volc_lw_b16_sw_b14_1850-2014_IACETH-v4.nc"
 
 
@@ -344,6 +344,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Wrap with srun for multi-node MPI execution
     if args.distributed:
+        # Forward the flag: run_amip federates the SPMD lane only when
+        # --distributed is on its own command line (user decision 2026-10-28).
+        cmd.append("--distributed")
         n_ranks = args.n_ranks or int(os.environ.get("SLURM_NTASKS", 2))
         srun_prefix = [
             "srun",

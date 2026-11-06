@@ -64,7 +64,8 @@ def test_live_trace_and_raw_history_arms_are_private_and_off_by_default():
     assert "barotropic_slow_forcing_override" not in (
         LatLonCGridOceanConfig._fields)
     assert "slow_forcing_producer" in _NEMOWSLiveOperandTrace._fields
-    assert _NEMOWSLiveOperandTrace._fields[-6:] == (
+    assert _NEMOWSLiveOperandTrace._fields[-7:] == (
         "stage_rhs", "stage1_full_rhs", "stage1_rhs_walk",
         "stage_raw_velocities",
-        "barotropic_correction_geometry", "stage_outputs")
+        "barotropic_correction_geometry", "stage_outputs",
+        "stage_tracer_sources")

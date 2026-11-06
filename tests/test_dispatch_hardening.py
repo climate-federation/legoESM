@@ -135,9 +135,16 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # SI3 aEVP lateral boundary: an unknown north_fold / lbc point type
+        # must raise, never fall back to the doubly periodic halo.
+        ("packages/ice/legoesm/ice/dynamics.py", "_si3_halo"),
+        ("packages/ice/legoesm/ice/dynamics.py", "_si3_orca_f_pivot_halo"),
         # Richards post-solve psi update: retention curve -> shift (PDI/Lu) or
         # exact reset; an unknown curve must raise, never pick one silently.
         ("packages/land/legoesm/land/richards.py", "solve_richards"),
+        # SI3 column port release selector ("5.0.1" | "5.0.2"): an unknown
+        # release must raise, never run the other release's order silently.
+        ("packages/ice/legoesm/ice/bitz_lipscomb.py", "_check_nemo_version"),
         # Distributed PCG preconditioner selection ("jacobi" | "poly"):
         # an unknown name must raise, never fall back to Jacobi.
         ("packages/ocean/legoesm/ocean/dynamics/barotropic_implicit_mpas.py", "barotropic_implicit_mpas"),
@@ -168,7 +175,16 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # physical Sundqvist-1978 autoconversion on the plume q_c_u); a typo must
         # raise, not silently run the wrong precip physics.
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py", "bechtold_convection"),
-        ("packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py", "tiedtke_convection"),
+        # faithful IFS shallow closure: unknown no-supply mode must raise
+        # (moved with #2253's mode from the removed reduced chain's
+        # _ifs_closure.shallow_closure into the CUMASTRN port's entry)
+        ("packages/atmosphere/legoesm/atmosphere/physics/convection/_ifs_cumastrn.py", "cumastrn"),
+        # (tiedtke.py::tiedtke_convection removed 2026-11-03: its guard was the
+        # surrogate's precip_split_scheme selector; the WRF Tiedtke port that
+        # replaced it has no scheme selector to dispatch on.)
+        # Kain-Fritsch implementation selector ("smooth" | "wrf_kfeta", PR
+        # #2249): a typo must raise, not silently run the surrogate.
+        ("packages/atmosphere/legoesm/atmosphere/physics/convection/kain_fritsch.py", "kain_fritsch_convection"),
         # ZM land-fraction policy ("required" | "none"): a typo must raise, not
         # silently run every column with ocean coefficients.
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/zhang_mcfarlane.py", "zhang_mcfarlane_convection"),
@@ -182,9 +198,6 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "_get_microphysics_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "make_microphysics_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py", "morrison_microphysics"),
-        # thompson snow_scheme guard (hardened 2026-06-22; previously a bare
-        # ``else`` silently used the bulk power-law fall speed on a typo).
-        ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/thompson.py", "thompson_microphysics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py", "_get_radiation_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py", "make_radiation_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/optics.py", "optics_factory"),
@@ -241,6 +254,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/coupler/legoesm/driver/kernel_registry.py", "resolve_kernel"),
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "_resolve_physics_parameterization"),
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "build_physics_pipeline"),
+        # MPAS column lane sea_ice_albedo_scheme ("constant" | "maykut_untersteiner").
+        ("packages/coupler/legoesm/driver/model_driver.py", "_run_column"),
         ("packages/ice/legoesm/ice/sea_ice.py", "_bulk_flux_dispatch"),
         ("packages/ice/legoesm/ice/sea_ice.py", "step_sea_ice"),
         ("packages/ice/legoesm/ice/sea_ice.py", "_closing_rate_from_velocity"),
@@ -411,6 +426,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # defence — a typo would silently pick a different composition or run
         # the trigger on the post-explicit Kaa state.
         ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", "compute_vertical_K_profiles"),
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_nemo_ddm_literal"),
         # TKE surface-BC dispatch (surface_bc: veros_flux | nemo_dirichlet;
         # hardened 2026-07-16 with the NEMO nn_bc_surf=1 Dirichlet option — a
         # typo would silently run the Veros flux BC, a ~60x different surface

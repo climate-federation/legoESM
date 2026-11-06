@@ -21,8 +21,8 @@ are quoted here so a future change of behaviour shows up as a diff rather than
 as a silent re-tune of an assertion.
 
     scheme          hard=False  hard=True   (RH after 1 step from RH0 = 1.4)
-    kessler            1.0589      1.0000
-    seifert_beheng     1.0589      1.0000
+    kessler            1.0589      1.0000   (pre-port surrogate; now exempt)
+    seifert_beheng     1.0589      1.0000   (pre-port proxy; now exempt)
     morrison           1.0589      1.0000
     thompson           1.0589      1.0000
     p3                 1.0589      1.0000
@@ -51,6 +51,7 @@ Two honest readings of that table, both of which the assertions encode:
 from __future__ import annotations
 
 import ast
+import functools
 import os
 import pathlib
 
@@ -62,15 +63,12 @@ import numpy as np
 import pytest
 from legoesm.atmosphere.physics.microphysics.config import (
     HARD_SAT_GUARD_SCHEMES,
-    KesslerConfig,
     MicrophysicsMLEmulatorConfig,
     MorrisonConfig,
     P3Config,
     SeifertBehengConfig,
     SundqvistConfig,
-    ThompsonConfig,
 )
-from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     MicrophysicsEmulator,
     ml_microphysics,
@@ -82,7 +80,6 @@ from legoesm.atmosphere.physics.microphysics.seifert_beheng import (
     seifert_beheng_microphysics,
 )
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
-from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.thermo import saturation_specific_humidity
 
 from legoesm import constants
@@ -98,11 +95,10 @@ _P0 = 90000.0
 _RH0 = 1.4
 
 _SCHEMES = {
-    "kessler": (kessler_microphysics, KesslerConfig),
-    "sundqvist": (sundqvist_microphysics, SundqvistConfig),
+    "sundqvist": (functools.partial(sundqvist_microphysics, cell_area=1.0e10),
+                  SundqvistConfig),
     "seifert_beheng": (seifert_beheng_microphysics, SeifertBehengConfig),
     "morrison": (morrison_microphysics, MorrisonConfig),
-    "thompson": (thompson_microphysics, ThompsonConfig),
     "p3": (p3_microphysics, P3Config),
     "ml_emulator": (ml_microphysics, MicrophysicsMLEmulatorConfig),
 }
@@ -110,21 +106,25 @@ _SCHEMES = {
 # Schemes whose DEFAULT (smooth) branch leaves the column still super-saturated
 # after one step. Sundqvist is excluded because it OVERSHOOTS instead (see the
 # module docstring); it gets its own, stricter assertion below.
+# seifert_beheng is not guarded (it runs gSAM's exact satadj_liquid every call
+# and refuses the opt-in guard; HARD_SAT_GUARD_EXEMPT).
 _DEFAULT_LEAVES_SUPERSATURATED = tuple(
-    s for s in _SCHEMES if s != "sundqvist")
+    s for s in _SCHEMES if s != "sundqvist" and s in HARD_SAT_GUARD_SCHEMES)
 
 
 def _column():
     shape = (1, 4)
     T = jnp.full(shape, _T0, dtype=jnp.float64)
     p_full = jnp.full(shape, _P0, dtype=jnp.float64)
-    p_half = jnp.full((1, 5), _P0, dtype=jnp.float64)
     q_v = _RH0 * saturation_specific_humidity(T, p_full)
     z = jnp.zeros(shape, dtype=jnp.float64)
     hyd = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z,
                            N_c=z, N_r=z, N_i=z)
     rho = p_full / (constants.R_d * T)
     dz = jnp.full(shape, 500.0, dtype=jnp.float64)
+    # top-down interfaces around _P0 with dp/g == rho*dz in every layer
+    p_half = _P0 + constants.g * rho[:, :1] * 500.0 * (
+        jnp.arange(5, dtype=jnp.float64) - 2.0)
     return T, q_v, hyd, p_full, p_half, rho, dz
 
 
@@ -201,21 +201,19 @@ def test_sundqvist_default_overshoots_and_the_guard_fixes_it():
 
     Its smooth branch removes the whole excess toward q_sat(T_old) in one step
     and ignores the latent heating that raises q_sat, so from RH 1.4 it lands
-    at RH ~0.23 with a ~20 K one-step heating spike and rains out ~28 % of the
-    column water. With the guard the landing point is the enthalpy-consistent
+    at RH ~0.23 with a ~20 K one-step heating spike, and the condensate it dumps
+    is partly rained out (Zhao-Carr then stops releasing: RH < rh_crit gives
+    cloud cover 0). With the guard the landing point is the enthalpy-consistent
     equilibrium and the per-step heating is capped."""
-    rh_off, tw_off = _integrate("sundqvist", hard=False, nstep=40)
-    rh_on, tw_on = _integrate("sundqvist", hard=True, nstep=40)
+    rh_off, _ = _integrate("sundqvist", hard=False, nstep=40)
+    rh_on, _ = _integrate("sundqvist", hard=True, nstep=40)
     assert rh_off[0] < 0.4, (
         f"expected the documented one-step overshoot; got RH = {rh_off[0]}")
     assert 0.99 <= rh_on[0] <= 1.001, (
         f"guarded arm should land ON the curve; got RH = {rh_on[0]}")
-    # The overshoot is not free: it dumps condensate into autoconversion, so
-    # far more column water leaves as precipitation.
-    assert tw_off[-1] < tw_on[-1], (
-        f"guarded arm should retain MORE column water ({tw_on[-1]}) than the "
-        f"overshooting default ({tw_off[-1]})")
-    assert tw_off[-1] / tw_off[0] < 0.9
+    # (A 40-step "the overshoot rains out more water" assertion held only at
+    # the old 1e-3 liquid release rate; at GFS prautco 1.5e-4 the guarded arm
+    # keeps 0.0331 vs 0.0343 kg/kg, so it was dropped, user 2026-10-28.)
 
 
 @pytest.mark.parametrize(
@@ -336,12 +334,15 @@ def test_ml_emulator_guard_gradient_is_finite_through_the_gate():
 
 def test_guard_conserves_moist_enthalpy_in_the_bulk_schemes():
     """c_pd*T + L_v*q_v is conserved by the adjustment (the identity the shared
-    core promises). Checked on Kessler at step 1 with no rain formed yet, so
-    condensation is the only active vapour term."""
-    fn, cfg_cls = _SCHEMES["kessler"]
+    core promises). Checked on Sundqvist at step 1 with no rain formed yet,
+    so condensation is the only active vapour term.  (Kessler and
+    Seifert-Beheng, the earlier subjects, are now faithful oracle ports that
+    refuse the guard: HARD_SAT_GUARD_EXEMPT.)"""
+    fn, cfg_cls = _SCHEMES["sundqvist"]
     T, q_v, hyd, p_full, p_half, rho, dz = _column()
     cfg = cfg_cls(hard_saturation_adjustment=True)
     out = fn(T, q_v, hyd, p_full, p_half, rho, dz, _DT, cfg)
+    assert float(np.min(np.asarray(out.dq_v_dt))) < 0.0   # it condenses
     dh = (constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt) * _DT
     h0 = constants.c_pd * T + constants.L_v * q_v
     np.testing.assert_allclose(np.asarray(dh) / np.asarray(h0), 0.0, atol=1e-12)
@@ -363,11 +364,11 @@ def test_sundqvist_off_path_never_touches_the_guard(monkeypatch):
     monkeypatch.setattr(sq, "hard_saturation_blend", _bomb)
     T, q_v, hyd, p_full, p_half, rho, dz = _column()
     sq.sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, _DT,
-                              SundqvistConfig())          # must NOT raise
+                              SundqvistConfig(), cell_area=1.0e10)          # must NOT raise
     with pytest.raises(AssertionError, match="OFF path"):
         sq.sundqvist_microphysics(
             T, q_v, hyd, p_full, p_half, rho, dz, _DT,
-            SundqvistConfig(hard_saturation_adjustment=True))
+            SundqvistConfig(hard_saturation_adjustment=True), cell_area=1.0e10)
 
 
 def test_ml_emulator_off_path_never_touches_the_guard(monkeypatch):
@@ -450,21 +451,35 @@ def test_guard_positivity_claim_is_exactly_what_the_rate_limit_gives():
 # effect the guard could have (enabling it changes these tendencies by O(1)),
 # so it cannot mask a real perturbation.
 _PREGUARD_RTOL = 1.0e-13
-_SUNDQVIST_PREGUARD_DT_DT = (0.07790655134982057, 0.0042109453424112216, -2.6370890683278935e-06, 0.00120314759851969, 0.00021895372484426559)  # re-measured 2026-09-29 (specific q_sat inputs, x64 CPU)
-_SUNDQVIST_PREGUARD_DQ_V_DT = (-3.129469722034535e-05, -1.6915170447021228e-06, 1.0593063421051318e-09, -4.832987618459902e-07, -8.79526869762267e-08)
+# Re-measured 2026-10-20 after the Zhao-Carr precipitation port (x64 CPU); the
+# guard-OFF path must stay byte-identical to these.  Pre-port values (Gaussian-F2,
+# no cloud-cover gate) were dT_dt (0.07790655134982057, 0.0042109453424112216,
+# -2.6370890683278935e-06, 0.00120314759851969, 0.00021895372484426559).
+# 2026-10-27: the fixture is now top-down with real interfaces (Zhao-Carr reads
+# dp/g); re-measured, the same values in top-down order.  Then the GFS area
+# blend, wminco 1e-5 and prautco 1.5e-4 (cell_area 1e10) move level 3 only:
+# 0.0042110534620482185 -> 0.0040742395304712515.  Since then these are
+# re-pinned on the current scheme, NOT the pre-guard numbers: the test proves the
+# guard-OFF path is unchanged by the guard, not that results are comparable with
+# runs made before the 2026-10-20 port or the 2026-10-27 default changes.
+_SUNDQVIST_PREGUARD_DT_DT = (0.0002189537248470955, 0.0012031476025026462, 0.0, 0.0040742395304712515, 0.07790655142391562)
+_SUNDQVIST_PREGUARD_DQ_V_DT = (-8.795268697736346e-08, -4.83298763445925e-07, 0.0, -1.6915604758545073e-06, -3.129469725010899e-05)
 
 
 def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
-    """Numeric byte-identity against values computed BEFORE the guard existed.
+    """Guard-OFF tripwire: the default path matches pinned numbers.
 
-    The monkeypatch "bomb" tests prove the new code is not INVOKED; this proves
-    the numbers are unchanged, which is the claim that actually protects every
-    tuned parameter set and prior comparison. Arrays are compared, never
-    printed summaries (CLAUDE.md)."""
-    T = jnp.array([[300.0, 285.0, 260.0, 230.0, 205.0]], dtype=jnp.float64)
-    p = jnp.array([[95000.0, 85000.0, 60000.0, 35000.0, 15000.0]],
+    The pins were first measured BEFORE the guard existed and have since been
+    re-pinned on the current scheme (2026-10-20 port, 2026-10-27 top-down
+    fixture and defaults), so this proves the guard does not leak into the
+    guard-OFF path; it does NOT prove results are comparable with runs made
+    before those re-pins.  The monkeypatch "bomb" tests prove the new code is
+    not INVOKED.  Arrays are compared, never printed summaries (CLAUDE.md)."""
+    # top-down (level 0 = model top), the scheme's convention
+    T = jnp.array([[205.0, 230.0, 260.0, 285.0, 300.0]], dtype=jnp.float64)
+    p = jnp.array([[15000.0, 35000.0, 60000.0, 85000.0, 95000.0]],
                   dtype=jnp.float64)
-    rh = jnp.array([[1.40, 1.05, 0.90, 1.60, 2.00]], dtype=jnp.float64)
+    rh = jnp.array([[2.00, 1.60, 0.90, 1.05, 1.40]], dtype=jnp.float64)
     q_v = rh * saturation_specific_humidity(T, p)
     shape = T.shape
     z = jnp.zeros(shape, dtype=jnp.float64)
@@ -474,10 +489,13 @@ def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
         q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
     rho = p / (constants.R_d * T)
     dz = jnp.full(shape, 400.0, dtype=jnp.float64)
-    p_half = jnp.concatenate([p, p[:, -1:]], axis=1)
+    # interfaces at the level midpoints, end layers mirrored (positive dp/g)
+    mid = 0.5 * (p[:, 1:] + p[:, :-1])
+    p_half = jnp.concatenate([2.0 * p[:, :1] - mid[:, :1], mid,
+                              2.0 * p[:, -1:] - mid[:, -1:]], axis=1)
 
     out = sundqvist_microphysics(T, q_v, hyd, p, p_half, rho, dz, 300.0,
-                                 SundqvistConfig())
+                                 SundqvistConfig(), cell_area=1.0e10)
     np.testing.assert_allclose(
         np.asarray(out.dT_dt).ravel(), np.array(_SUNDQVIST_PREGUARD_DT_DT),
         rtol=_PREGUARD_RTOL, atol=0.0)
@@ -489,10 +507,11 @@ def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
     # Turning it on must violate the same tolerance by a wide margin — without
     # this, a loosened rtol could silently render the whole test decorative.
     on = sundqvist_microphysics(T, q_v, hyd, p, p_half, rho, dz, 300.0,
-                                SundqvistConfig(hard_saturation_adjustment=True))
+                                SundqvistConfig(hard_saturation_adjustment=True), cell_area=1.0e10)
+    pin = np.array(_SUNDQVIST_PREGUARD_DT_DT)
+    nz = pin != 0.0
     rel = np.max(np.abs(
-        (np.asarray(on.dT_dt).ravel() - np.array(_SUNDQVIST_PREGUARD_DT_DT))
-        / np.array(_SUNDQVIST_PREGUARD_DT_DT)))
+        (np.asarray(on.dT_dt).ravel()[nz] - pin[nz]) / pin[nz]))
     assert rel > 1.0e6 * _PREGUARD_RTOL, (
         f"enabling the guard moved dT_dt by only rel={rel}; the pinned "
         "baseline is too loose to detect a real change."
@@ -507,7 +526,7 @@ def test_guard_is_differentiable_end_to_end():
     def loss(qv):
         out = sundqvist_microphysics(
             T, qv, hyd, p_full, p_half, rho, dz, _DT,
-            SundqvistConfig(hard_saturation_adjustment=True))
+            SundqvistConfig(hard_saturation_adjustment=True), cell_area=1.0e10)
         return jnp.sum(out.dq_c_dt ** 2)
 
     g = jax.grad(loss)(q_v)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import glob
 
+import jax
 import pytest
 
 from legoesm.driver.config import (
@@ -27,6 +28,13 @@ def _cfg(out, days, grid, discretization):
         surface_bulk_scheme="none")
 
 
+_needs_x64 = pytest.mark.skipif(
+    not jax.config.read("jax_enable_x64"),
+    reason="Spectral/Gaussian grids require JAX_ENABLE_X64=True",
+)
+
+
+@_needs_x64
 def test_sfno_refuses_a_latlon_checkpoint(tmp_path):
     a = ModelDriver(_cfg(tmp_path / "ll", 1,
                          GridConfig(grid_type="latlon", resolution=10, nlev=4),

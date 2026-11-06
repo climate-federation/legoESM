@@ -23,6 +23,7 @@ from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.core.bulk_flux import (
     surface_reference_state,
     compute_most_fluxes,
+    large_yeager_widths,
     compute_sam_oceflx_fluxes,
     simple_bulk_fluxes,
     validate_bulk_scheme,
@@ -73,7 +74,7 @@ __physics_contract__ = {
 
 
 def surface_fluxes_at_lowest_level(u, v, T, q_v, T_sfc, q_sfc, rho, config,
-                                   z_low):
+                                   z_low, *, return_wind_speed=False):
     """``compute_surface_fluxes`` told how high its own input actually is.
 
     Every turbulence kernel feeds the surface solver the LOWEST FULL LEVEL's
@@ -115,10 +116,13 @@ def surface_fluxes_at_lowest_level(u, v, T, q_v, T_sfc, q_sfc, rho, config,
     if (not getattr(config, "z_ref_model_level", False)
             or z_low is None
             or config.bulk_scheme not in _STABILITY_SCHEMES):
-        return compute_surface_fluxes(u, v, T, q_v, T_sfc, q_sfc, rho, config)
+        return compute_surface_fluxes(u, v, T, q_v, T_sfc, q_sfc, rho, config,
+                                      t_bot=T,
+                                      return_wind_speed=return_wind_speed)
     T_ref, z_ref = surface_reference_state(T, config.z_ref, z_low)
     return compute_surface_fluxes(
-        u, v, T_ref, q_v, T_sfc, q_sfc, rho, config, z_ref=z_ref)
+        u, v, T_ref, q_v, T_sfc, q_sfc, rho, config, z_ref=z_ref, t_bot=T,
+        return_wind_speed=return_wind_speed)
 
 
 def compute_surface_fluxes(
@@ -131,6 +135,8 @@ def compute_surface_fluxes(
     rho: jax.Array,
     config: SurfaceLayerConfig,
     z_ref=None,
+    t_bot=None,
+    return_wind_speed=False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Compute bulk aerodynamic surface fluxes.
 
@@ -159,6 +165,11 @@ def compute_surface_fluxes(
     z_ref : array or None
         Per-column reference height [m] overriding ``config.z_ref`` (MOST
         schemes only; the constant-coefficient path ignores it).
+    t_bot : array or None
+        Lowest-level ABSOLUTE air temperature [K] (``T`` before any
+        reference-height adjustment).  Required by ``large_yeager_cesm``
+        (CESM's cold-air-outbreak wind enhancement reads it); unused by the
+        other schemes.
 
     Returns
     -------
@@ -172,8 +183,19 @@ def compute_surface_fluxes(
         Surface latent heat flux [W/m^2], shape (ncol,). Positive upward.
     ustar : jax.Array
         Friction velocity [m/s], shape (ncol,).
+    wind_speed : jax.Array
+        Only with ``return_wind_speed=True`` (appended last): the wind speed
+        [m/s] the selected scheme put in its flux formulas (gustiness and
+        floors included), the ``wspd`` WRF MYNN pairs with ``ustar``.
     """
     validate_bulk_scheme(config.bulk_scheme)
+    if return_wind_speed and (config.prescribed_tau_x_pa is not None
+                              or config.prescribed_tau_y_pa is not None):
+        raise ValueError(
+            "return_wind_speed pairs the bulk wind speed with the bulk u*; a "
+            "prescribed surface stress rebuilds u* from the stress, so the "
+            "pair would no longer belong to one exchange")
+    _ws = {"return_wind_speed": True} if return_wind_speed else {}
     # Route every stability-dependent bulk scheme — the fixed-roughness
     # Monin-Obukhov land scheme ("most") as well as the ocean air-sea schemes
     # ("coare3"/"large_yeager") — through the iterative MOST solver.  "most"
@@ -185,16 +207,16 @@ def compute_surface_fluxes(
         # fixed-iteration solver, not the generic MOST loop.  ``T`` is the
         # lane's lowest-level temperature (potential-temperature corrected by
         # the caller when ``z_ref_model_level`` is on), as for the other schemes.
-        tau_x, tau_y, shflx, lhflx, ustar = compute_sam_oceflx_fluxes(
+        tau_x, tau_y, shflx, lhflx, ustar, *_w = compute_sam_oceflx_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
-            variant="cesm",
+            variant="cesm", t_bot=t_bot, **_ws,
         )
         return _apply_prescribed_scalar_fluxes(
-            config, tau_x, tau_y, shflx, lhflx, ustar, rho)
+            config, tau_x, tau_y, shflx, lhflx, ustar, rho) + tuple(_w)
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        tau_x, tau_y, shflx, lhflx, ustar = compute_most_fluxes(
-            u, v, T, q_v, T_sfc, q_sfc, rho,
+        tau_x, tau_y, shflx, lhflx, ustar, *_w = compute_most_fluxes(
+            u, v, T, q_v, T_sfc, q_sfc, rho, **_ws,
             z_ref=(config.z_ref if z_ref is None else z_ref),
             z0_init=config.z0,
             scheme=config.bulk_scheme,
@@ -205,6 +227,7 @@ def compute_surface_fluxes(
             unstable_gamma=config.most_unstable_gamma,
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
+            **large_yeager_widths(config),
         )
         # The prescribed-flux override applies on THIS branch too. Returning
         # early without it would let a config that sets both a MOST scheme and
@@ -212,7 +235,7 @@ def compute_surface_fluxes(
         # would run on MOST-derived fluxes while the caller believed it had
         # pinned them to the deck.
         return _apply_prescribed_scalar_fluxes(
-            config, tau_x, tau_y, shflx, lhflx, ustar, rho)
+            config, tau_x, tau_y, shflx, lhflx, ustar, rho) + tuple(_w)
 
     # Constant neutral coefficients (default)
     Cd = config.Cd_neutral
@@ -235,7 +258,8 @@ def compute_surface_fluxes(
     )
 
     return _apply_prescribed_scalar_fluxes(
-        config, tau_x, tau_y, shflx, lhflx, ustar, rho)
+        config, tau_x, tau_y, shflx, lhflx, ustar, rho) + (
+            (wind_speed,) if return_wind_speed else ())
 
 
 # Floor on the prescribed stress magnitude inside ustar's nested roots; far
@@ -368,7 +392,7 @@ def neutral_land_stress(z0m, d, z_low, u, v, rho):
     displacement ``d`` for a wind ``(u, v)`` at height ``z_low`` above the local
     surface: rho (kappa |V| / ln((z_low - d)/z0m))^2, the log bounded below by 2."""
     arg = jnp.maximum((z_low - d) / z0m, _NEUTRAL_LOG_ARG_MIN)
-    cd = (constants.kappa_vk / jnp.log(arg)) ** 2
+    cd = (constants.kappa_von_karman / jnp.log(arg)) ** 2
     return rho * cd * (u * u + v * v)
 
 
@@ -586,6 +610,7 @@ def _single_tile_flux(
     rho: jax.Array,
     config: SurfaceLayerConfig,
     z_ref=None,
+    t_bot=None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Single-tile surface flux with correct fixed-roughness MOST routing.
 
@@ -602,7 +627,7 @@ def _single_tile_flux(
         return compute_sam_oceflx_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
-            variant="cesm",
+            variant="cesm", t_bot=t_bot,
         )
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         return compute_most_fluxes(
@@ -617,6 +642,7 @@ def _single_tile_flux(
             unstable_gamma=config.most_unstable_gamma,
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
+            **large_yeager_widths(config),
         )
 
     # Constant neutral coefficients.
@@ -698,10 +724,10 @@ def compute_tiled_surface_fluxes(
                 or not getattr(cfg, "z_ref_model_level", False)
                 or cfg.bulk_scheme not in _STABILITY_SCHEMES):
             return _single_tile_flux(u, v, T, q_v, T_sfc_tile, q_sfc_tile,
-                                     rho, cfg)
+                                     rho, cfg, t_bot=T)
         return _single_tile_flux(
             u, v, T + (constants.g / constants.c_pd) * z_low, q_v,
-            T_sfc_tile, q_sfc_tile, rho, cfg, z_ref=z_low)
+            T_sfc_tile, q_sfc_tile, rho, cfg, z_ref=z_low, t_bot=T)
 
     f_ocean = _tile(tiles.T_ocean, tiles.q_sfc_ocean, config_ocean)
     f_ice = _tile(tiles.T_ice, tiles.q_sfc_ice, config_ice)

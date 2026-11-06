@@ -47,6 +47,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.soil_thermal",
     "legoesm.ocean.physics.shortwave_penetration",
     "legoesm.ice.config",
+    "legoesm.ice.shortwave",
     "legoesm.coupler.config",
     "legoesm.coupler.coupled_latlon_band",
     "legoesm.coupler.lake.config",
@@ -84,6 +85,8 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.atmosphere.physics.microphysics.config",
     "legoesm.atmosphere.physics.microphysics.sdm.config",
     "legoesm.atmosphere.physics.microphysics.fast_sbm.config",
+    "legoesm.atmosphere.physics.microphysics.ifs_cloudsc",
+    "legoesm.atmosphere.physics.radiation.ecrad_ifs.config",
     "legoesm.atmosphere.physics.microphysics.aerosol_activation",
     "legoesm.atmosphere.physics.microphysics.arg_activation",
     "legoesm.atmosphere.physics.microphysics.prognostic_aerosol",
@@ -106,7 +109,7 @@ class ParamMeta(NamedTuple):
     field: str                   # NamedTuple field name
     module: str                  # dotted module path
     config_class: str
-    default: float
+    default: float | None        # None only for an explicit_only parameter
     bounds: tuple                # (lo, hi) scalar, or (lo_tuple, hi_tuple)
     tunable_tier: int
     transform: str
@@ -115,6 +118,7 @@ class ParamMeta(NamedTuple):
     reference: str
     shape_key: str | None        # dimension key for array params (else None)
     legacy_name: str | None
+    explicit_only: bool = False  # never tier-selected; needs include + init value
 
 
 def _load_spec(module_path: str):
@@ -163,7 +167,12 @@ def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
             cls = getattr(mod, cls_name, None)
             if cls is None:
                 raise ValueError(f"{module_path}.{cls_name} not found for its __param_spec__")
-            defaults = getattr(cls, "_field_defaults", {})
+            defaults = dict(getattr(cls, "_field_defaults", {}))
+            # an unset (None) field: the value its resolver gives the class
+            # default (the default flavour); a run config refines it at seed
+            for _f, _res in getattr(mod, "__param_unset_defaults__", {}).get(
+                    cls_name, {}).items():
+                defaults[_f] = getattr(_res(cls()), _f)
             scheme_key = entry["scheme_key"]
             if scheme_key in seen_keys:
                 raise ValueError(
@@ -177,6 +186,11 @@ def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
                         f"{module_path}.{cls_name}.{field} is in __param_spec__ but is "
                         f"not a defaulted NamedTuple field"
                     )
+                explicit_only = bool(p.get("explicit_only", False))
+                if defaults[field] is None and not explicit_only:
+                    raise ValueError(
+                        f"{module_path}.{cls_name}.{field} has no library default; "
+                        f"spec it explicit_only so a run must give its start value")
                 out.append(
                     ParamMeta(
                         scheme_key=scheme_key,
@@ -184,7 +198,8 @@ def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
                         field=field,
                         module=module_path,
                         config_class=cls_name,
-                        default=float(defaults[field]),
+                        default=(None if defaults[field] is None
+                                 else float(defaults[field])),
                         bounds=tuple(p["bounds"]),
                         tunable_tier=int(p["tunable_tier"]),
                         transform=p["transform"],
@@ -193,6 +208,7 @@ def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
                         reference=p["reference"],
                         shape_key=p.get("shape"),
                         legacy_name=p.get("legacy_name"),
+                        explicit_only=explicit_only,
                     )
                 )
     return out
@@ -216,6 +232,29 @@ def _resolve_shape(meta: ParamMeta, dims: dict[str, int] | None) -> tuple[int, .
 # seed this close to either bound does not survive the round trip, and its leaf
 # has no usable gradient; kept next to the check that enforces it.
 _SIGMOID_SEED_MARGIN = 0.001
+
+
+def _unset_seed(meta: ParamMeta, cfg) -> float | None:
+    """The run's value of an unset-able field (``__param_unset_defaults__``),
+    through the same resolver the scheme uses: by the run config's selection,
+    or its explicit value.  None for every other field."""
+    mod = importlib.import_module(meta.module)
+    res = getattr(mod, "__param_unset_defaults__", {}).get(
+        meta.config_class, {}).get(meta.field)
+    if res is None:
+        return None
+    cls = getattr(mod, meta.config_class)
+    if not isinstance(cfg, cls):
+        raise TypeError(
+            f"scheme_configs[{meta.scheme_key!r}] is a {type(cfg).__name__}, "
+            f"not the {meta.config_class} that seeds {meta.qualified_name}")
+    val = getattr(res(cfg), meta.field)
+    if val is None:
+        raise ValueError(
+            f"{meta.qualified_name} is unset and its resolver gives no value "
+            f"for this {meta.config_class} (unknown selection?); set it "
+            "explicitly or pass init_values")
+    return float(val)
 
 
 def _seed_raw(meta: ParamMeta, shape: tuple[int, ...], dtype,
@@ -287,6 +326,7 @@ def build_trainable_params(
     dims: dict[str, int] | None = None,
     dtype=None,
     init_values: dict[str, float] | None = None,
+    scheme_configs: dict | None = None,
 ) -> TrainablePhysicsParams:
     """Build a :class:`TrainablePhysicsParams` from the registered specs.
 
@@ -321,6 +361,11 @@ def build_trainable_params(
     dtype
         Raw-value dtype; defaults to the precision policy's compute dtype
         (guards the float64-into-float32-scan-carry hazard).
+    scheme_configs
+        ``{scheme_key: config}`` of the run: an unset-able field
+        (``__param_unset_defaults__``, e.g. Morrison DCS) is seeded from it
+        through the scheme's own resolver (its flavour, or its explicit value)
+        instead of the class default.  ``init_values`` still wins.
     """
     level = _TIER_LEVELS.get(tier, tier) if isinstance(tier, str) else int(tier)
     if not isinstance(level, int):
@@ -381,6 +426,22 @@ def build_trainable_params(
             "and excluded; "
             "an excluded parameter has no gradient and cannot be trained.")
 
+    # An explicit_only parameter is trained only when named WITH its start
+    # value; check every such request before any skip can drop it silently.
+    for name in include:
+        meta = by_name[name]
+        if not meta.explicit_only:
+            continue
+        if init_values is None or name not in init_values:
+            raise ValueError(
+                f"{name!r} is explicit_only: pass its start value in "
+                f"init_values alongside include")
+        if name in exclude_set or (active_scheme_keys is not None
+                                   and meta.scheme_key not in active_scheme_keys):
+            raise ValueError(
+                f"{name!r} is explicitly requested but not reachable: it is "
+                f"excluded or its scheme {meta.scheme_key!r} is not active")
+
     raw: dict[str, jax.Array] = {}
     constraints: list[ParamConstraint] = []
     for meta in registry:
@@ -388,7 +449,10 @@ def build_trainable_params(
             continue
         if meta.qualified_name in exclude_set:
             continue
-        selected = (1 <= meta.tunable_tier <= level) or (meta.qualified_name in include_set)
+        if meta.explicit_only and meta.qualified_name not in include_set:
+            continue  # a tier threshold never reaches it
+        selected = ((1 <= meta.tunable_tier <= level and not meta.explicit_only)
+                    or (meta.qualified_name in include_set))
         if meta.tunable_tier == 0:
             # tier 0 is fixed for GRADIENT training and cannot be reached via
             # `include`; only the explicit derivative-free opt-in admits it.
@@ -403,10 +467,11 @@ def build_trainable_params(
         elif not selected:
             continue
         shape = _resolve_shape(meta, dims)
-        raw[meta.qualified_name] = _seed_raw(
-            meta, shape, dtype,
-            None if init_values is None
-            else init_values.get(meta.qualified_name))
+        seed = (None if init_values is None
+                else init_values.get(meta.qualified_name))
+        if seed is None and scheme_configs and meta.scheme_key in scheme_configs:
+            seed = _unset_seed(meta, scheme_configs[meta.scheme_key])
+        raw[meta.qualified_name] = _seed_raw(meta, shape, dtype, seed)
         lo, hi = meta.bounds
         constraints.append(
             ParamConstraint(
@@ -419,6 +484,29 @@ def build_trainable_params(
                 field=meta.field,
             )
         )
+    if scheme_configs:
+        # like init_values: a run config for a scheme this selection does not
+        # carry would silently seed nothing
+        _cls_of = {m.scheme_key: (m.module, m.config_class) for m in registry}
+        for _k, _cfg in scheme_configs.items():
+            if _k not in _cls_of:
+                continue
+            _mod = importlib.import_module(_cls_of[_k][0])
+            # only a scheme with unset-able fields reads its config here
+            # (others may legitimately pass a wrapping sub-config)
+            if _cls_of[_k][1] in getattr(_mod, "__param_unset_defaults__", {}):
+                _cls = getattr(_mod, _cls_of[_k][1])
+                if not isinstance(_cfg, _cls):
+                    raise TypeError(
+                        f"scheme_configs[{_k!r}] is a {type(_cfg).__name__}, "
+                        f"not the {_cls_of[_k][1]} that scheme uses")
+        _scope = (set(active_scheme_keys) if active_scheme_keys is not None
+                  else {m.scheme_key for m in registry})
+        unreached_cfg = sorted(set(scheme_configs) - _scope)
+        if unreached_cfg:
+            raise ValueError(
+                f"scheme_configs for {unreached_cfg} reached no trainable "
+                "parameter: not an active (or registered) scheme")
     if init_values:
         # An init value naming a parameter this selection does not carry is a
         # SILENT no-op otherwise: the deck says "start Bechtold's mass-flux cap
@@ -430,3 +518,20 @@ def build_trainable_params(
                 f"parameter: the name is not in the registry, its scheme is "
                 f"not active, or its tier is outside this selection.")
     return TrainablePhysicsParams(raw_values=raw, constraints=constraints)
+
+
+def build_orca2_rung10_trainable_params(**kwargs) -> TrainablePhysicsParams:
+    """:func:`build_trainable_params` for the ORCA2 rung-10 card: the card's
+    frozen parameters (DECISION 149) are always excluded, and naming one in
+    ``include``/``include_tier0``/``init_values`` is refused."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import ORCA2_RUNG10_FROZEN_PARAMS
+
+    frozen = set(ORCA2_RUNG10_FROZEN_PARAMS)
+    asked = (set(kwargs.get("include", ())) | set(kwargs.get("include_tier0", ()))
+             | set(kwargs.get("init_values") or ()))
+    if asked & frozen:
+        raise ValueError(
+            f"{sorted(asked & frozen)} frozen on ORCA2 rung 10: "
+            f"{[ORCA2_RUNG10_FROZEN_PARAMS[n] for n in sorted(asked & frozen)]}")
+    kwargs["exclude"] = tuple(kwargs.get("exclude", ())) + tuple(sorted(frozen))
+    return build_trainable_params(**kwargs)

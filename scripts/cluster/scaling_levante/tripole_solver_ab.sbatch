@@ -15,8 +15,8 @@
 # under test.
 #
 # PHASE=accuracy: multicontroller at ACC_ND GPUs (default 16 = 4 nodes),
-#   same grid and 75 levels, --record-true-residual: ACC_STEPS extra untimed
-#   solves after timing; each one's TRUE global relative residual
+#   same grid and 75 levels, --record-true-residual: ACC_STEPS untimed solves
+#   from the initial state, before timing; each one's TRUE global relative residual
 #   ||rhs - A eta||/||rhs|| of the returned eta (same unweighted norm for
 #   every arm, working precision) lands in the receipt as
 #   true_residual{median,max,min,n_solves}. Its timings are perturbed by the
@@ -51,12 +51,15 @@ export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_shard_autotuning=false"
 export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16
 export SCRATCH="${SCRATCH:-/scratch/${USER:0:1}/$USER}"
 PHASE="${PHASE:?set PHASE=accuracy|timing}"
+[[ "$PHASE" == accuracy || "$PHASE" == timing ]] || { echo "PHASE=$PHASE: must be accuracy or timing" >&2; exit 1; }
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/tripole_solver_ab_${PHASE}_j${SLURM_JOB_ID:-local}}"; mkdir -p "$OUTDIR" || exit 1
 export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache_$PHASE"; mkdir -p "$LEGOESM_JIT_CACHE_DIR" || exit 1
 NODES="${SLURM_JOB_NUM_NODES:-1}"; PPN=4
-ARMS="${ARMS:-standard jacobi 0 60
+ARMS="${ARMS-standard jacobi 0 60
 single_reduce jacobi 0 60}"
-X64_LIST="${X64_LIST:-0 1}"
+X64_LIST="${X64_LIST-0 1}"
+for x in $X64_LIST; do [[ "$x" == 0 || "$x" == 1 ]] || { echo "X64_LIST entry $x: must be 0 or 1" >&2; exit 1; }; done
+[[ -n "${X64_LIST// }" && -n "${ARMS//[[:space:]]}" ]] || { echo "empty ARMS or X64_LIST" >&2; exit 1; }
 STEPS="${STEPS:-60}"; WARMUP="${WARMUP:-10}"; REPS="${REPS:-2}"; n_run=0
 echo "phase=$PHASE nodes=$NODES outdir=$OUTDIR sha=$(git rev-parse --short HEAD)"
 rc=0
@@ -96,6 +99,9 @@ arm() {  # arm <nd> <variant> <precond> <degree> <iters> <x64> <pass>
   (( deg > 0 )) && a+=(--cheb-degree "$deg")
   local launch
   a+=(--multicontroller --nlev 75)
+  # Pinned A_h=1e4 is explicitly unstable on 1.6 km polar cells at dt 600 s
+  # (NaN by step 9); mesh-scaled viscosity, user decision 2026-10-19.
+  a+=(--A-h-from-mesh)
   if [[ "$PHASE" == accuracy ]]; then
     a+=(--record-true-residual --steps "${ACC_STEPS:-10}" --warmup 2)
   else
@@ -117,6 +123,11 @@ arm() {  # arm <nd> <variant> <precond> <degree> <iters> <x64> <pass>
 }
 
 mapfile -t ARM_LINES < <(grep -v '^[[:space:]]*$' <<< "$ARMS")
+for l in "${ARM_LINES[@]}"; do
+  read -r v pc dg it extra <<< "$l"
+  [[ "$v" =~ ^(standard|single_reduce)$ && -n "$pc" && "$dg" =~ ^[0-9]+$ && "$it" =~ ^[0-9]+$ && -z "$extra" ]] \
+    || { echo "bad ARMS line '$l': want 'variant precond degree iters'" >&2; exit 1; }
+done
 if [[ "$PHASE" == accuracy ]]; then
   for x64 in $X64_LIST; do for l in "${ARM_LINES[@]}"; do arm "${ACC_ND:-16}" $l "$x64" p1; done; done
 else

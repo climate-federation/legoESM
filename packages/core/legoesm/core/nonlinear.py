@@ -176,7 +176,7 @@ def make_implicit_newton_solver(
             )
 
         initial_converged = (n_sq_0 <= atol) & accepted(x0, n_sq_0)
-        x_final, _, _, _, damping, n_iters, _ = jax.lax.while_loop(
+        x_final, _, _, n_sq_final, damping, n_iters, _ = jax.lax.while_loop(
             cond,
             body,
             (
@@ -189,8 +189,10 @@ def make_implicit_newton_solver(
                 initial_converged,
             ),
         )
-        residual_final = fun(x_final)
-        n_sq_final = jnp.sum(residual_final * residual_final)
+        # The verdict reuses the loop's own residual.  Re-evaluating it here
+        # compiles differently from the residual inside the Jacobian sweep, and
+        # at the tolerance edge that rounding flipped a column the loop had
+        # accepted onto its fallback.
         converged = ((n_sq_final <= atol + rtol * n_sq_0)
                      & accepted(x_final, n_sq_final))
         tiny = jnp.finfo(n_sq_final.dtype).tiny

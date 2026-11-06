@@ -15,7 +15,7 @@ program mg2_procs_driver
        size_dist_param_liq, size_dist_param_basic, kk2000_liq_autoconversion, &
        accrete_cloud_water_rain, self_collection_rain, evaporate_sublimate_precip
   use micro_mg2_0, only: micro_mg_init
-  use wv_sat_methods, only: qsat_water => wv_sat_qsat_water
+  use wv_sat_methods, only: qsat_water => wv_sat_qsat_water, wv_sat_methods_init
   implicit none
   real(r8), parameter :: g = 9.80616_r8, rair = 287.05_r8, rh2o = 461.51_r8
   real(r8), parameter :: cpair = 1004.64_r8, tmelt = 273.15_r8
@@ -30,6 +30,7 @@ program mg2_procs_driver
        am, lams, n0s
   real(r8) :: rhosu
   call get_command_argument(1, fin); call get_command_argument(2, fout)
+  call wv_sat_methods_init(r8, tmelt, 273.16_r8, 373.16_r8, 20._r8, rair/rh2o, err)
   call micro_mg_init(kind=r8, gravit=g, rair=rair, rh2o=rh2o, cpair=cpair, &
        tmelt_in=tmelt, latvap=latvap, latice=latice, rhmini_in=0.8_r8, &
        micro_mg_dcs=500.e-6_r8, microp_uniform_in=.false., do_cldice_in=.true., &

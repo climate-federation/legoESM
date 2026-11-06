@@ -19,7 +19,9 @@ float32 these gates measure precision floors instead of correctness
 
 The certified ``gyre_nemo_card`` row is deliberately separate from the
 small-grid variants: it starts from the card's day-0 state, enters every step
-through production ``_step_jitted``, and gates both one step and six steps.
+through production ``_step_jitted``, and gates one step in an isolated child.
+The six-step campaign row stays visibly skipped until its isolated explicit
+forward transform completes inside the registered CPU budget.
 Its four-field normalized objective and per-step composition reuse the GYRE
 gradient twin at ``origin/feat/gyre-gradient-twin-2`` commit ``901cfe0d8``.
 
@@ -87,7 +89,8 @@ def _skip_without_admitted_swg_stage_record() -> None:
 
 
 def _measure_certified_card_in_subprocess(
-        output: Path, card: str, steps: int) -> dict:
+        output: Path, card: str, steps: int,
+        schedule: str | None = None) -> dict:
     """Compile a certified-card row outside the legacy matrix process."""
     commit = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=_REPO, text=True).strip()
@@ -101,6 +104,7 @@ def _measure_certified_card_in_subprocess(
             "agreement",
             "--card", card,
             "--steps", str(steps),
+            *(() if schedule is None else ("--schedule", schedule)),
             "--expect-commit", commit,
             "--output", str(output),
         ],
@@ -117,7 +121,11 @@ def _measure_certified_card_in_subprocess(
     )
     assert output.is_file(), f"isolated {card} child wrote no strict JSON receipt"
     row = json.loads(output.read_text(encoding="utf-8"))
-    assert row["provenance"] == {"commit": commit, "dirty": False}
+    assert row["provenance"] == {
+        "commit": commit,
+        "dirty": False,
+        "verified_after_measurement": True,
+    }
     return row
 
 
@@ -247,11 +255,13 @@ def _variants():
 def test_step_gradient_health(name, tmp_path):
     if name == "gyre_nemo_card_6step":
         pytest.skip(
-            "six-step CPU GYRE row: LLVM ERROR: Unable to allocate section "
-            "memory! during the XLA large-function compile; tracked in OPEN")
+            "six-step CPU GYRE row: explicit per-step reverse compiled, but "
+            "the isolated forward transform produced no JSON within the "
+            "registered 65-minute attempt; tracked in round 7 OPEN")
     if name == "gyre_nemo_card_1step":
         row = _measure_certified_card_in_subprocess(
-            tmp_path / "gyre_nemo_card_1step.json", "GYRE-zco", 1)
+            tmp_path / "gyre_nemo_card_1step.json", "GYRE-zco", 1,
+            schedule="uniform")
         assert row["status"] == "CONFIRMED", (
             "gyre_nemo_card_1step gradient agreement failed after the "
             "active-cell CEN2 e3t(Kmm) denominator treatment "
@@ -260,6 +270,7 @@ def test_step_gradient_health(name, tmp_path):
         )
         assert row["case"] == "GYRE-zco"
         assert row["steps"] == 1
+        assert row["schedule"] == "uniform"
         assert row["backend"] == "cpu"
         assert "transcendentals='libm'" in row["precision_policy"]
         assert row["production_entry"] == "LatLonCGridOceanModel._step_jitted"

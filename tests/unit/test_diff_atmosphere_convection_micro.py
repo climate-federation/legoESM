@@ -7,7 +7,7 @@ goes at the **leaf** modules directly and widens the probe to the other
 physically meaningful inputs each scheme actually consumes:
 
   * convection ``bechtold``, ``emanuel``, ``kain_fritsch``, ``mass_flux``,
-    ``tiedtke``, ``zhang_mcfarlane`` — w.r.t. T, q_v, the prognostic carry,
+    ``zhang_mcfarlane`` — w.r.t. T, q_v, the prognostic carry,
     the KF grid-scale updraft ``w``, and the CMT wind inputs.
   * microphysics ``thompson``, ``sundqvist``, ``p3`` — w.r.t. T, q_v, q_c and
     (where the scheme has an ice phase) q_i / rime mass / rime volume.
@@ -217,12 +217,14 @@ def _conv_loss(out):
 
 _CONV_SCHEMES = (
     "bechtold", "emanuel", "kain_fritsch", "mass_flux",
-    "tiedtke", "zhang_mcfarlane",
+    "zhang_mcfarlane",
 )
+# tiedtke (WRF port) needs omega / dynamics / lagged PBL inputs this leaf
+# harness lacks; its gradients are pinned in test_tiedtke_wrf_oracle.py.
 
 #: Schemes whose ``ConvectionOutput`` carries a convective momentum transport
 #: tendency (``enable_cmt=True`` by default in their configs).
-_CMT_SCHEMES = ("bechtold", "tiedtke", "zhang_mcfarlane")
+_CMT_SCHEMES = ("bechtold", "zhang_mcfarlane")
 
 
 def _conv_carry(scheme, col):
@@ -286,21 +288,12 @@ def _call_convection(scheme, col, *, T=None, q_v=None, u=None, v=None,
             T, q_v, p_full, p_half, carry, _DT, MassFluxConfig(),
         )
         return out
-    if scheme == "tiedtke":
-        from legoesm.atmosphere.physics.convection.config import TiedtkeConfig
-        from legoesm.atmosphere.physics.convection.tiedtke import (
-            tiedtke_convection,
-        )
-        out, _prof = tiedtke_convection(
-            T, q_v, p_full, p_half, u, v, carry, _DT, TiedtkeConfig(),
-        )
-        return out
     if scheme == "zhang_mcfarlane":
         from legoesm.atmosphere.physics.convection.config import (
             ZhangMcFarlaneConfig,
         )
-        from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
-            zhang_mcfarlane_convection,
+        from tests._zm_cold_start import (  # ZM at CAM's cold-start pblh = 0
+            zm_cold_start as zhang_mcfarlane_convection,
         )
         out, _prof = zhang_mcfarlane_convection(
             T, q_v, p_full, p_half, u, v, carry, _DT,
@@ -334,12 +327,13 @@ class TestFixtureConventions:
     def test_column_is_convectively_active(self, col):
         """Cross-check the axis against a kernel that reads ``[:, -1]``.
 
-        Tiedtke diagnoses CAPE from a parcel launched at ``T[:, -1]``.  If the
+        Zhang-McFarlane (CAM cold start, pblh = 0) diagnoses CAPE from a
+        parcel launched at ``T[:, -1]``.  If the
         fixture were inverted the parcel would launch from the (cold, thin)
         model top and CAPE would collapse to zero — which is exactly the
         vacuous-test failure mode this file guards against.
         """
-        out = _call_convection("tiedtke", col)
+        out = _call_convection("zhang_mcfarlane", col)
         assert float(jnp.min(out.cape)) > 0.0, (
             f"fixture CAPE = {float(jnp.min(out.cape)):.3e} J/kg — the column "
             "is not conditionally unstable, so every convection gradient "
@@ -577,7 +571,7 @@ class TestConvectionLeafGrad:
 # Microphysics — gradients w.r.t. the state
 # ===========================================================================
 
-_MICRO_SCHEMES = ("thompson", "sundqvist", "p3")
+_MICRO_SCHEMES = ("sundqvist", "p3")  # thompson: needs w (vote K1a)
 
 
 def _call_microphysics(scheme, col, *, T=None, q_v=None, hyd=None):
@@ -586,12 +580,6 @@ def _call_microphysics(scheme, col, *, T=None, q_v=None, hyd=None):
     hyd = _hydrometeors(col) if hyd is None else hyd
     args = (T, q_v, hyd, col.p_full, col.p_half, col.rho, col.dz, _DT)
 
-    if scheme == "thompson":
-        from legoesm.atmosphere.physics.microphysics.config import ThompsonConfig
-        from legoesm.atmosphere.physics.microphysics.thompson import (
-            thompson_microphysics,
-        )
-        return thompson_microphysics(*args, ThompsonConfig())
     if scheme == "sundqvist":
         from legoesm.atmosphere.physics.microphysics.config import (
             SundqvistConfig,
@@ -599,7 +587,13 @@ def _call_microphysics(scheme, col, *, T=None, q_v=None, hyd=None):
         from legoesm.atmosphere.physics.microphysics.sundqvist import (
             sundqvist_microphysics,
         )
-        return sundqvist_microphysics(*args, SundqvistConfig())
+        # Zhao-Carr releases only above rh_crit and evaporates only below it,
+        # so a column of uniform RH can do one or the other: dry the lowest
+        # quarter of the column to 0.6x so rain from above evaporates there.
+        nlev = T.shape[1]
+        dry = jnp.where(jnp.arange(nlev) >= nlev - nlev // 4, 0.6, 1.0)
+        args = (T, q_v * dry, *args[2:])
+        return sundqvist_microphysics(*args, SundqvistConfig(), cell_area=1.0e10)
     if scheme == "p3":
         from legoesm.atmosphere.physics.microphysics.config import P3Config
         from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
@@ -653,7 +647,7 @@ class TestMicrophysicsLeafGrad:
         grad = jax.grad(loss)(hyd0.q_r)
         assert_gradient_ok(grad, f"microphysics({scheme}) w.r.t. q_r")
 
-    @pytest.mark.parametrize("scheme", ("thompson", "p3"))
+    @pytest.mark.parametrize("scheme", ("p3",))
     def test_grad_wrt_qi(self, scheme, col):
         """Ice phase: depositional growth ``N_i**(1/3)`` + ice fall speeds."""
         hyd0 = _hydrometeors(col)
@@ -665,7 +659,7 @@ class TestMicrophysicsLeafGrad:
         grad = jax.grad(loss)(hyd0.q_i)
         assert_gradient_ok(grad, f"microphysics({scheme}) w.r.t. q_i")
 
-    @pytest.mark.parametrize("scheme", ("thompson", "p3"))
+    @pytest.mark.parametrize("scheme", ("p3",))
     def test_grad_wrt_Ni(self, scheme, col):
         """Ice NUMBER — the second moment, per-mass [1/kg] by convention."""
         hyd0 = _hydrometeors(col)
@@ -1158,10 +1152,15 @@ class TestCloudFractionGrad:
         cfg = CloudConfig(scheme="sundqvist", convective_cloud=True)
         ones = jnp.ones((col.ncol, col.nlev))
         conv_precip0 = jnp.full((col.ncol,), 1.0e-4)   # ~8.6 mm/day
+        # Half the fixture's vapour (RH ~30-48 %): the stratiform cover drops
+        # below the convective one (~0.09) in the deck, so the max picks
+        # cf_conv there.  At full RH the stratiform cover wins every deck
+        # cell and the gradient is exactly zero by construction.
+        q_v = 0.5 * col.q_v
 
         def loss(conv_precip):
             props = compute_cloud_properties(
-                col.T, col.p_full, col.q_v, col.dp, cfg,
+                col.T, col.p_full, q_v, col.dp, cfg,
                 q_cloud=1.0e-4 * ones, q_ice=1.0e-5 * ones,
                 conv_precip=conv_precip,
             )

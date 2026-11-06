@@ -9,11 +9,11 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 def test_source_copy_differs_from_cyclic_south_association():
     jnp = pytest.importorskip("jax.numpy")
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-        _nemo_een_south_ff_copy,
+        _nemo_south_copy_fill,
     )
 
     field = jnp.asarray([[1.0, 2.0], [3.0, 4.0], [8.0, 9.0]])
-    copied = np.asarray(_nemo_een_south_ff_copy(field))
+    copied = np.asarray(_nemo_south_copy_fill(field))
     cyclic = np.roll(np.asarray(field), 1, axis=0)
     np.testing.assert_array_equal(copied, [[1.0, 2.0], [1.0, 2.0], [3.0, 4.0]])
     assert not np.array_equal(copied, cyclic)

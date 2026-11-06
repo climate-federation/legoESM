@@ -26,25 +26,29 @@ from legoesm.training.aimip_params import (  # noqa: E402
     aimip_classical_trainable_names,
 )
 
-DEFAULT_ARM = dict(convection="tiedtke", turbulence="louis", gwd="mcfarlane",
+# convection: tiedtke is the WRF port (no trainables) -> sbm carries the
+# convection family here.
+DEFAULT_ARM = dict(convection="sbm", turbulence="louis", gwd="mcfarlane",
                    microphysics="sundqvist", cloud="xu_randall",
                    radiation="rrtmgp", surface_bulk_scheme="constant")
 
 
 def test_default_arm_excludes_unselected_families_and_dead_surface_knobs():
     names = aimip_classical_trainable_names(**DEFAULT_ARM)
-    for dead in ("sbm_tau_c", "sbm_RH_ref", "surface_z0",
+    for dead in ("surface_z0",
                  "surface_most_unstable_gamma", "surface_most_stable_beta",
                  "surface_z0h_z0_ratio"):
         assert dead not in names
-    for live in ("tiedtke_epsilon_deep", "louis_Ri_crit", "mcfarlane_G_0",
+    for live in ("sbm_tau_c", "louis_Ri_crit", "mcfarlane_G_0",
                  "sundqvist_auto_rate", "cloud_rh_crit", "rrtmgp_sfc_albedo",
                  "surface_Cd_neutral", "surface_Ch_neutral"):
         assert live in names
     most = aimip_classical_trainable_names(
         **{**DEFAULT_ARM, "surface_bulk_scheme": "most", "convection": "sbm"})
     assert {"surface_z0", "surface_most_stable_beta", "sbm_tau_c"} <= most
-    assert "surface_Cd_neutral" not in most and "tiedtke_delta_deep" not in most
+    assert "surface_Cd_neutral" not in most
+    assert not aimip_classical_trainable_names(
+        **{**DEFAULT_ARM, "convection": "tiedtke"}) & {"sbm_tau_c", "sbm_RH_ref"}
     with pytest.raises(ValueError, match="bulk scheme"):
         aimip_classical_trainable_names(
             **{**DEFAULT_ARM, "surface_bulk_scheme": "constnat"})
@@ -79,7 +83,7 @@ def test_surface_knob_map_matches_measured_gradients(bulk):
     def f(raw):
         cfg = eqx.tree_at(lambda m: m.raw_values, p, raw).to_surface_config(
             bulk_scheme=bulk)
-        out = compute_surface_fluxes(u, v, T, q, T_sfc, q_sfc, rho, cfg)
+        out = compute_surface_fluxes(u, v, T, q, T_sfc, q_sfc, rho, cfg, t_bot=T)
         return sum(jnp.sum(wi * o) for wi, o in zip(w, out))
 
     g = jax.grad(f)(p.raw_values)
@@ -97,11 +101,12 @@ def test_frozen_knobs_keep_value_and_leaf_but_get_no_gradient(tmp_path):
     assert set(full.raw_values) == set(part.raw_values)
     for k, v in part.raw_values.items():
         assert isinstance(v, float) == (k not in names)
-        assert float(v) == float(full.raw_values[k])
+        if k in names:   # frozen knobs run at their exact value (no pull-in)
+            assert float(v) == float(full.raw_values[k])
     # the gradient reaches only the trainable knobs
     g = eqx.filter_grad(lambda m: sum(m.as_dict().values()))(part)
-    assert g.raw_values["sbm_tau_c"] is None
-    assert float(g.raw_values["tiedtke_epsilon_deep"]) != 0.0
+    assert g.raw_values["surface_z0"] is None
+    assert float(g.raw_values["sbm_tau_c"]) != 0.0
     with pytest.raises(ValueError, match="unknown AIMIP"):
         AIMIPClassicalParams.from_defaults(trainable={"no_such_knob"})
 
@@ -112,28 +117,28 @@ def test_checkpoint_loads_into_array_and_frozen_templates(tmp_path):
     dtype, and into a frozen template as a float; fp32 knobs under x64 is the
     case where a raw float would land on disk as float64 (codex review)."""
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.ml.training import save_checkpoint
+    from legoesm.ml.training import load_checkpoint, save_checkpoint
     old = get_policy()
     set_policy(PrecisionPolicy.fp32())
     try:
         names = aimip_classical_trainable_names(**DEFAULT_ARM)
         full = AIMIPClassicalParams.from_defaults()
         part = AIMIPClassicalParams.from_defaults(trainable=names)
-        part = eqx.tree_at(lambda m: m.raw_values["sbm_tau_c"], part, 0.25)
+        part = eqx.tree_at(lambda m: m.raw_values["surface_z0"], part, 0.25)
         p = tmp_path / "m.eqx"
         save_checkpoint(part, p)
-        into_full = eqx.tree_deserialise_leaves(p, full)
-        v = into_full.raw_values["sbm_tau_c"]
-        assert v.dtype == full.raw_values["sbm_tau_c"].dtype == jnp.float32
+        into_full = load_checkpoint(full, p)
+        v = into_full.raw_values["surface_z0"]
+        assert v.dtype == full.raw_values["surface_z0"].dtype == jnp.float32
         assert float(v) == 0.25
-        into_part = eqx.tree_deserialise_leaves(
-            p, AIMIPClassicalParams.from_defaults(trainable=names))
-        assert into_part.raw_values["sbm_tau_c"] == 0.25
-        assert isinstance(into_part.raw_values["sbm_tau_c"], float)
+        into_part = load_checkpoint(
+            AIMIPClassicalParams.from_defaults(trainable=names), p)
+        assert into_part.raw_values["surface_z0"] == 0.25
+        assert isinstance(into_part.raw_values["surface_z0"], float)
         # every knob frozen (no array to take the dtype from)
         save_checkpoint(AIMIPClassicalParams.from_defaults(trainable=()), p)
-        assert eqx.tree_deserialise_leaves(p, full).raw_values[
-            "sbm_tau_c"].dtype == jnp.float32
+        assert load_checkpoint(full, p).raw_values[
+            "surface_z0"].dtype == jnp.float32
     finally:
         set_policy(old)
 
@@ -182,7 +187,7 @@ def test_gate_reads_bare_params_and_bundles():
 
 def _toy_gate_run(params, tmp_path):
     """The shared loop with the gate ON, one epoch, a physics that reads only
-    tiedtke_epsilon_deep (mirrors test_neural_gcm_spectral's gate harness)."""
+    louis_Ri_crit (mirrors test_neural_gcm_spectral's gate harness)."""
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
@@ -204,7 +209,7 @@ def _toy_gate_run(params, tmp_path):
 
         def physics_fn(state, g, s, forcing=None):
             tend = jax.tree.map(jnp.zeros_like, state)
-            amp = 1.0 * d["tiedtke_epsilon_deep"]
+            amp = 1.0e-4 * d["louis_Ri_crit"]
             return tend._replace(T_hat=jax.tree.map(
                 lambda x: x.at[0].add(amp), tend.T_hat))
         return physics_fn
@@ -226,7 +231,7 @@ def test_gate_passes_with_frozen_families_and_aborts_without(tmp_path):
     with pytest.raises(ValueError, match="identically-zero"):
         _toy_gate_run(AIMIPClassicalParams.from_defaults(), tmp_path / "a")
     # only the read knob trainable: passes, and the frozen ones are untouched
-    p0 = AIMIPClassicalParams.from_defaults(trainable={"tiedtke_epsilon_deep"})
+    p0 = AIMIPClassicalParams.from_defaults(trainable={"louis_Ri_crit"})
     model, _ = _toy_gate_run(p0, tmp_path / "b")
     assert model.raw_values["sbm_tau_c"] == p0.raw_values["sbm_tau_c"]
 

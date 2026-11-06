@@ -777,6 +777,13 @@ def test_a_non_finite_saved_loss_fails_loudly(tmp_path):
         mod._read_partial(str(tmp_path), 2, 10, _FP, _content())
 
 
+def test_an_unreadable_partial_manifest_fails_loudly(tmp_path):
+    tmp_path.joinpath("partial.json").write_text("{truncated")
+    assert mod._partial_manifest_path(str(tmp_path)).endswith("partial.json")
+    with pytest.raises(RuntimeError, match="unreadable"):
+        mod._read_partial(str(tmp_path), 2, 10, _FP, _content())
+
+
 def test_a_partial_missing_its_state_files_fails_loudly(tmp_path):
     _save(tmp_path, 1.5)
     for f in tmp_path.glob("partial.e*.opt.eqx"):

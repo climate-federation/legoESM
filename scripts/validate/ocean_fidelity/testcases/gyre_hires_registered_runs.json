@@ -1,0 +1,44 @@
+{
+  "schema": "gyre-hires-registered-runs-v1",
+  "runs": {
+    "pre_fix_7b772afb8": {
+      "run_directory": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyrehr_rounds/legoesm_runs/r4_smag_gpu_1825d",
+      "commit": "7b772afb86681cc61536faa4fc766cdbe6098e9d",
+      "deck": "r4_smag",
+      "mode": "gpu-native",
+      "backend": "gpu",
+      "precision_policy": "fp64",
+      "transcendentals": "native",
+      "certified_policy": false,
+      "physical_gpu_index": null,
+      "label": "pre_fix_7b772afb8",
+      "disposition": "pre-fix Smagorinsky-port comparison; never substitute for a post-fix run"
+    },
+    "post_fix_b401ec3f3": {
+      "run_directory": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyrehr_rounds/legoesm_runs/r4_smag_gpu_1825d_post_fix_b401ec3f3",
+      "commit": "b401ec3f3b794b6e4918db372a7cacc802307e15",
+      "deck": "r4_smag",
+      "mode": "gpu-native",
+      "backend": "gpu",
+      "precision_policy": "fp64",
+      "transcendentals": "native",
+      "certified_policy": false,
+      "physical_gpu_index": 0,
+      "label": "post_fix_b401ec3f3",
+      "disposition": "post-fix Smagorinsky wall-coefficient repeat; predates the round-8 QSR and round-9 TKE-shear fixes"
+    },
+    "post_round9_219db484b": {
+      "run_directory": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyrehr_rounds/legoesm_runs/r4_smag_gpu_1825d_post_round9_219db484b",
+      "commit": "219db484b018e719f829730377e9e883ad25c7bb",
+      "deck": "r4_smag",
+      "mode": "gpu-native",
+      "backend": "gpu",
+      "precision_policy": "fp64",
+      "transcendentals": "native",
+      "certified_policy": false,
+      "physical_gpu_index": 0,
+      "label": "post_round9_219db484b",
+      "disposition": "post-round-9 rerun: Smagorinsky fmask, live QSR stretch, TKE shear time level, and source-literal Kmm stretch fixed"
+    }
+  }
+}

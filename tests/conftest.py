@@ -3,6 +3,7 @@
 import functools
 import os
 import resource
+import sys
 from pathlib import Path
 
 #: Cap the CPU affinity mask BEFORE JAX is imported (below).  XLA sizes its
@@ -238,6 +239,20 @@ def _isolate_corner_fill_process_state():
     halo._corner_fill_mode, halo._corner_fill_claimed = saved[0], saved[1]
     halo._corner_fill_traced.clear()
     halo._corner_fill_traced.update(saved[2])
+
+
+
+@pytest.fixture(autouse=True)
+def _undo_mpas_gc_freeze():
+    """An MPAS run past its first hour freezes the process heap once per
+    process.  Undo it after each test, so later tests neither inherit a frozen
+    heap nor skip the freeze path."""
+    import gc
+    yield
+    md = sys.modules.get("legoesm.driver.model_driver")
+    if md is not None and md._GC_FROZEN[0]:
+        gc.unfreeze()
+        md._GC_FROZEN[0] = False
 
 
 @functools.cache

@@ -101,18 +101,24 @@ def run_window(run, var="rsut"):
     coverage; refuse it rather than compare a truncated window.
     """
     import cftime
-    n = len(glob.glob(f"{rb.ROOT}/{run}/cmor/Amon/"
-                      f"{var}_Amon_legoESM-1-0_amip_r1i1p1f1_gn*.nc"))
+    d = rb._load_model(run, var)          # fatal if var is on both gn and gr
+    pre = f"{rb.ROOT}/{run}/cmor/Amon/{var}_Amon_legoESM-1-0_amip_r1i1p1f1_"
+    n = sum(len(glob.glob(f"{pre}{g}.nc")) + len(glob.glob(f"{pre}{g}_*.nc"))
+            for g in ("gn", "gr"))
     if n > 1:
         raise SystemExit(f"FATAL: {run} has {n} CMOR {var} files; bias_maps "
                          "reads only the last one -- extend it before use")
-    d = rb._load_model(run, var)
     if d is None:
         raise SystemExit(f"{run}: no CMOR {var} -- cannot read the run window")
     t = d["time"]
     dates = cftime.num2date(np.asarray(t), t.attrs["units"],
                             t.attrs.get("calendar", "standard"))
     return sorted({(x.year, x.month) for x in dates})
+
+
+def _tag(run):
+    """Run name as a flat output-file tag: "a/b" -> "a__b"."""
+    return run.replace("/", "__")
 
 
 def check_window(window):
@@ -203,7 +209,7 @@ def window_mean(files, var, window):
     if not files:
         raise LookupError("no file covers the window")
     want = set(window)
-    slices, seen, lat = [], [], None
+    slices, seen, lat, lon = [], [], None, None
     for path in files:              # no dask here: read only the window slices
         with xr.open_dataset(path, decode_times=xr.coders.CFDatetimeCoder(
                 use_cftime=True)) as ds:
@@ -464,7 +470,7 @@ def figure_a(run, window, rows, out_dir):
                  f"{window_label(window)} model fields vs the ESMValTool "
                  f"reference CLIMATOLOGIES of the same calendar months "
                  f"(area-weighted mean and RMS)", fontsize=11)
-    out = pathlib.Path(out_dir) / f"cmip6_bias_maps_{run}.png"
+    out = pathlib.Path(out_dir) / f"cmip6_bias_maps_{_tag(run)}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     _save(fig, out)
     plt.close(fig)
@@ -512,7 +518,7 @@ def figure_b(run, window, rows, out_dir, meta):
     fig.suptitle(f"PROVISIONAL  {run} vs CMIP6 AMIP r1 members: global "
                  f"area-weighted RMS bias, {window_label(window)} vs reference "
                  f"climatologies of the same calendar months", fontsize=11)
-    out = pathlib.Path(out_dir) / f"cmip6_rms_rank_{run}.png"
+    out = pathlib.Path(out_dir) / f"cmip6_rms_rank_{_tag(run)}.png"
     _save(fig, out)
     plt.close(fig)
     return ranks
@@ -536,7 +542,7 @@ def main(argv=None):
         print(f"    {e[0]:<8} {e[1]:<22} {e[2]:<10} {e[3]}")
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    write_csv(rows, meta, excluded, out / f"cmip6_rms_{args.run}.csv")
+    write_csv(rows, meta, excluded, out / f"cmip6_rms_{_tag(args.run)}.csv")
     figure_a(args.run, window, rows, out)
     ranks = figure_b(args.run, window, rows, out, meta)
     for var, _l, lat, _lo, _n, st, *_ in rows:

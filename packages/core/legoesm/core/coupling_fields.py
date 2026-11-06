@@ -238,6 +238,13 @@ class TileResponse(NamedTuple):
     # like the mass.  None for every other tile (their lhflx is already the
     # latent paired with their mass flux, per tile area).
     lhflx_exchange: jax.Array | None = None
+    # Sea-ice tile only (extended thermodynamics): the aggregate ice cover
+    # [0-1] the thermodynamics forwarded ice-fraction precipitation (rain, and
+    # snow when snow is not tracked) to the ocean with -- post-thermo, BEFORE
+    # the ITD remap and ridging change the area.  A forced-ocean driver gives
+    # the open water the rest, ``(1 - this) * rain``, so the two sum to the
+    # incident precip.  ``None`` for every other tile and the slab-ice paths.
+    ice_concentration_precip: jax.Array | None = None
 
 
 class SurfaceToAtm(NamedTuple):

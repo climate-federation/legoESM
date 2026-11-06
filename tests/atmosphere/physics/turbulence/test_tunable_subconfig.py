@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig, CLUBBParams
-from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
+from legoesm.atmosphere.physics.turbulence.config import LouisConfig
 from legoesm.atmosphere.physics.turbulence.tunable_subconfig import (
     rewrap_tunable_subconfig,
     tunable_subconfig,
@@ -10,13 +10,13 @@ from legoesm.atmosphere.physics.turbulence.tunable_subconfig import (
 
 
 def test_flat_config_is_its_own_tunable_leaf():
-    cfg = MYNN25Config()
+    cfg = LouisConfig()
     assert tunable_subconfig(cfg) is cfg  # flat scheme: no descent
 
 
 def test_flat_config_rewrap_returns_tuned_leaf():
-    cfg = MYNN25Config()
-    tuned = MYNN25Config(A1=0.9)
+    cfg = LouisConfig()
+    tuned = LouisConfig(b_louis=3.0)
     assert rewrap_tunable_subconfig(cfg, tuned) is tuned  # flat: identity re-wrap
 
 

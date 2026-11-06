@@ -8,49 +8,49 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 7123)
+Table of contents (sections, in order; flag reference table at line 7318)
 -----------------------------------------------------------------------------
-  1. [line  351] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2. [line  472] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
+  1. [line  355] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
+  2. [line  476] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3. [line  774] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3. [line  785] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4. [line  1105] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4. [line  1116] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5. [line  1159] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5. [line  1172] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6. [line  1333] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6. [line  1346] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7. [line  1781] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8. [line  1909] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7. [line  1794] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8. [line  1848] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9. [line  2090] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9. [line  2029] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. [line  2278] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. [line  2359] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line  2217] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line  2298] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. [line  2681] ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line  2620] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``) + the two-level-set reconciliation
       (``calc_trapezoid_zt`` / ``calc_trapezoid_zm`` / ``clip_rcm`` /
       ``compute_cloud_cover``). Every routine in this section is
       grid-agnostic: CAM evaluates the closure once per level set, so all
       regridding is the caller's.
-  13. [line  3042] Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line  2981] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. [line  3936] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line  3944] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. [line  4001] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line  4009] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. [line  4674] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line  4682] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. [line  4954] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line  4976] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. [line  5328] Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line  5359] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``calc_sfc_varnce`` / ``advance_clubb_core`` +
       the ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line  6074] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  6137] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -133,6 +133,7 @@ from legoesm.atmosphere.physics._shared import (
 )
 from legoesm.atmosphere.physics.clouds.cloud_fraction import (
     cam_chem_tropopause_level,
+    trop_cloud_top_taper,
 )
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -147,10 +148,12 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
     implicit_vertical_diffusion_theta,
 )
+from legoesm.core.smooth import smooth_min
 from legoesm.thermo import (
     saturation_vapor_pressure_flatau,
     saturation_vapor_pressure_ice_flatau,
 )
+from legoesm.timestepping.banded import lapack_band_solve
 from legoesm.timestepping.tridiagonal import thomas_solve
 
 from legoesm import constants
@@ -236,6 +239,7 @@ __param_spec__ = {
             "xp3_coef_base": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
             "xp3_coef_slope": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
             "z_displace": "no consumer in this CLUBB port (field is declared, read by nothing); re-tier in the PR that implements its physics",
+            "thlp2_rad_coef": "inert in production: CAM6 applies the radiative thlp2 source only under clubb_cloudtop_cooling (default .false., namelist_defaults_cam.xml cam_cesm2_1_rel_60), and no lane passes rad_dT_dt since the oracle-faithfulness PR #2036; re-tier if a lane routes radiation to CLUBB",
             "C8b": "off (0.0) in the CAM default flag tree; sigmoid cannot seed a lower-bound default — enable via a dedicated activation study",
             "C_invrs_tau_N2_clear_wp3": "off (0.0) in the CAM default flag tree; sigmoid cannot seed a lower-bound default — enable via a dedicated activation study",
             "C_invrs_tau_N2_wpxp": "off (0.0) in the CAM default flag tree; sigmoid cannot seed a lower-bound default — enable via a dedicated activation study",
@@ -311,7 +315,6 @@ __param_spec__ = {
             "nu6": {"units": "m^2/s", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "background_diffusion", "reference": "CLUBB background/diffusion coefficients nu* (Larson & Golaz 2005; parameters_tunable.F90)", "shape": None},
             "nu8": {"units": "m^2/s", "bounds": (1.0, 100.0), "tunable_tier": 2, "transform": "sigmoid", "category": "background_diffusion", "reference": "CLUBB background/diffusion coefficients nu* (Larson & Golaz 2005; parameters_tunable.F90)", "shape": None},
             "nu9": {"units": "m^2/s", "bounds": (1.0, 100.0), "tunable_tier": 2, "transform": "sigmoid", "category": "background_diffusion", "reference": "CLUBB background/diffusion coefficients nu* (Larson & Golaz 2005; parameters_tunable.F90)", "shape": None},
-            "thlp2_rad_coef": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "radiation_coupling", "reference": "CLUBB tunable closure coefficient (parameters_tunable.F90:set_default_parameters)", "shape": None},
             "up2_sfc_coef": {"units": "1", "bounds": (0.5, 4.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pressure_correlation", "reference": "CLUBB tunable closure coefficient (parameters_tunable.F90:set_default_parameters)", "shape": None},
             "wpxp_L_thresh": {"units": "m", "bounds": (10.0, 200.0), "tunable_tier": 3, "transform": "sigmoid", "category": "lscale_zero_blend", "reference": "CLUBB Lscale->0 pressure-term blending coefficients (parameters_tunable.F90)", "shape": None},
         },
@@ -328,6 +331,7 @@ __param_spec__ = {
             "trop_cloud_taper_lnp_width": "numerics: smooth log-pressure taper width replacing CAM's hard top_lev slice",
             "w_tol": "numerics: w-moment tolerance/floor [m/s]",
             "wp2_max": "numerics: wp2 upper clip [m^2/s^2]",
+            "up2_vp2_cap_width_m2s2": "numerics: smoothing width of the up2/vp2 <= 1000 m^2/s^2 cap (0 = the oracle's hard cap) [m^2/s^2]",
         },
         "params": {
             "q_flux_scale": {"units": "1", "bounds": (0.1, 10.0), "tunable_tier": 0, "transform": "none", "category": "mechanism_probe", "reference": "moisture-only multiplier on Kh for q_v inside a sigma band of faces; 1.0 = byte-identical (cloud-base mixing arm, 2026-09-20)", "shape": None},
@@ -632,6 +636,12 @@ class CLUBBConfig(NamedTuple):
         Tolerance for liquid-water potential temperature [K] (``thl_tol``).
     wp2_max : float
         Upper clip for ``wp2`` [m^2/s^2] (``wp2_max``).
+    up2_vp2_cap_width_m2s2 : float
+        Width [m^2/s^2] of the smooth up2/vp2 <= 1000 m^2/s^2 cap
+        (:func:`cap_up2_vp2`).  0.0 = the reference's exact hard cap (a static
+        Python switch); negative raises.  A numerics smoothing width, not a
+        tunable closure coefficient.  KNOWN DIFFERENCE at the default 10.0: see
+        :func:`cap_up2_vp2`.
     tke_min : float
         Floor for the carried TKE/wp2 state slot [m^2/s^2] (mirrors the other
         prognostic-moment schemes so ``integration.py`` can seed the state).
@@ -673,11 +683,11 @@ class CLUBBConfig(NamedTuple):
         CAM's ``ref_pres`` namelist knob of the same name ("Troposphere cloud
         physics will be done only below the top defined by this pressure"),
         which ``clubb_intr.F90`` applies to CLUBB by slicing every column at
-        ``top_lev = trop_cloud_top_lev``. Default 0.0 = OFF (CAM's own code
-        default, ``protected :: trop_cloud_top_press = 0._r8``; CAM's
-        build-namelist supplies 1 hPa, which is above every current lid here
-        and would be inert anyway) — a static Python feature gate, so
-        existing runs are byte-identical. A 32-level WeatherBench arm
+        ``top_lev = trop_cloud_top_lev``. Default 100 Pa = the CAM6
+        build-namelist value (namelist_defaults_cam.xml:1295
+        ``<trop_cloud_top_press> 1.D2``, cam_cesm2_1_rel_60).  0.0 = OFF (CAM's
+        bare code default ``protected :: trop_cloud_top_press = 0._r8``,
+        ref_pres.F90:34) is a static Python feature gate. A 32-level WeatherBench arm
         measured a stratospheric state excursion from the diagnostic phase-1
         scheme (2026-08-17); setting this to ~5000 Pa confines the scheme to
         below 50 hPa there. Unlike CAM's hard subcolumn slice, the taper is
@@ -699,12 +709,13 @@ class CLUBBConfig(NamedTuple):
     rt_tol: float = 1.0e-8
     thl_tol: float = 1.0e-2
     wp2_max: float = 1000.0
+    up2_vp2_cap_width_m2s2: float = 10.0
     tke_min: float = 1.0e-6
     T0: float = 300.0
     prognostic: bool = False
     cloud_buoyancy: bool = True
     cloud_source: str = "native"
-    trop_cloud_top_press: float = 0.0
+    trop_cloud_top_press: float = 100.0
     trop_cloud_taper_lnp_width: float = 0.15
     # Multiplier on the DIAGNOSED sub-grid variances entering the PDF closure
     # (both variances and their covariance, so the correlation is preserved).
@@ -1107,7 +1118,9 @@ def make_clubb_grid_from_levels(z_full: jax.Array, z_half: jax.Array) -> CLUBBGr
 # Thin adapters over the CANONICAL Flatau (1992) saturation curves in
 # legoesm.thermo (per the CLAUDE.md no-saturation-reimpl rule): saturation
 # mixing ratio over liquid / ice with CLUBB's denominator guard
-# (saturation.F90, CAM ``saturation_formula = flatau``).
+# (saturation.F90 with ``saturation_formula = saturation_flatau``, the
+# standalone clubb_release default; CAM6 instead selects "gfdl" Goff-Gratch,
+# CESM2.1 ``clubb_intr.F90:66``).
 
 _SAT_DENOM_MIN_PA = 1.0  # p - esat floor [Pa] (saturation.F90 convention)
 
@@ -1780,12 +1793,15 @@ def compute_mixing_length(
 # ===========================================================================
 # 7. Implicit band solvers
 # ===========================================================================
-# ``tridiag_solve`` adapts CLUBB's band storage to the shared legoESM Thomas
-# solver (legoesm.timestepping.tridiagonal.thomas_solve); ``penta_solve`` is a
-# verbatim, bit-exact port of CLUBB's pentadiagonal LU (penta_lu_solve).
+# CAM runs CLUBB with ``penta_solve_method = tridiag_solve_method = lapack``
+# (flag table below): ``lapack_tridiag_solve`` -> ``dgtsv`` and
+# ``lapack_band_solve`` -> ``dgbsv``.  Both solves here transcribe those
+# reference LAPACK routines, so the pivot choice and operation order are the
+# oracle's (legoesm.timestepping: ``thomas_solve(..., "lapack_dgtsv")`` and
+# ``banded.lapack_band_solve``).
 
 def tridiag_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
-    """Solve the CLUBB-band tridiagonal system ``lhs @ x = rhs`` per column.
+    """Solve the CLUBB-band tridiagonal system ``lhs @ x = rhs`` per column (``dgtsv``).
 
     Parameters
     ----------
@@ -1800,21 +1816,15 @@ def tridiag_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
     jax.Array
         Solution, shape ``(ngrdcol, ndim)``.
     """
-    sup = lhs[0]   # super (couples to k+1) -> Thomas c
-    mid = lhs[1]   # main diagonal          -> Thomas b
-    sub = lhs[2]   # sub (couples to k-1)   -> Thomas a
-    return thomas_solve(sub, mid, sup, rhs)
+    return thomas_solve(lhs[2], lhs[1], lhs[0], rhs, "lapack_dgtsv")
 
 
 def penta_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
-    """Solve a pentadiagonal system ``lhs @ x = rhs`` via LU (CLUBB band storage).
+    """Solve a pentadiagonal system ``lhs @ x = rhs`` (CLUBB band storage, ``dgbsv``).
 
-    Faithful port of ``penta_lu_solver.F90`` /
-    ``CLUBB-JAX/.../penta_lu_solver.py`` (``penta_lu_solve``). legoESM has no
-    pentadiagonal solver; this is the one used by the coupled moment advances
-    (``advance_wp2_wp3``, ``advance_xm_wpxp``), whose interleaved 2-field systems
-    are pentadiagonal of size ``2*nzm-1``. Pure ``lax.scan`` LU (no module-scope
-    JIT — the caller JITs the physics step); reverse-mode differentiable.
+    Used by the coupled moment advances (``advance_wp2_wp3``,
+    ``advance_xm_wpxp``), whose interleaved 2-field systems are pentadiagonal
+    of size ``2*nzm-1``.
 
     Parameters
     ----------
@@ -1822,7 +1832,7 @@ def penta_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
         Band-stored LHS, shape ``(5, ngrdcol, ndim)`` with rows
         ``[super2, super1, diag, sub1, sub2]`` (Fortran ``lhs(-2:2)``):
         ``super2``/``super1`` couple level ``k`` to ``k+2``/``k+1``;
-        ``sub1``/``sub2`` couple to ``k-1``/``k-2``. Requires ``ndim >= 3``.
+        ``sub1``/``sub2`` couple to ``k-1``/``k-2``.
     rhs : jax.Array
         Right-hand side, shape ``(ngrdcol, ndim)``.
 
@@ -1831,78 +1841,7 @@ def penta_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
     jax.Array
         Solution, shape ``(ngrdcol, ndim)``.
     """
-    super2_t = lhs[0].T   # (ndim, ngrdcol)
-    super1_t = lhs[1].T
-    diag_t = lhs[2].T
-    sub1_t = lhs[3].T
-    sub2_t = lhs[4].T
-    rhs_t = rhs.T
-    ndim = lhs.shape[2]
-
-    # ---- LU decomposition ----
-    ldi_0 = 1.0 / diag_t[0]
-    u1_0 = ldi_0 * super1_t[0]
-    u2_0 = ldi_0 * super2_t[0]
-    l1_0 = jnp.zeros_like(ldi_0)
-    l2_0 = jnp.zeros_like(ldi_0)
-
-    l1_1 = sub1_t[1]
-    l2_1 = jnp.zeros_like(ldi_0)
-    ldi_1 = 1.0 / (diag_t[1] - l1_1 * u1_0)
-    u1_1 = ldi_1 * (super1_t[1] - l1_1 * u2_0)
-    u2_1 = ldi_1 * super2_t[1]
-
-    def lu_scan_step(carry, x):
-        u1_km1, u1_km2, u2_km1, u2_km2 = carry
-        s2, s1, d, sb1, sb2 = x
-        l2 = sb2
-        l1 = sb1 - l2 * u1_km2
-        ldi = 1.0 / (d - l2 * u2_km2 - l1 * u1_km1)
-        u1 = ldi * (s1 - l1 * u2_km1)
-        u2 = ldi * s2
-        return (u1, u1_km1, u2, u2_km1), (ldi, l1, l2, u1, u2)
-
-    _, (ldi_rest, l1_rest, l2_rest, u1_rest, u2_rest) = lax.scan(
-        lu_scan_step, (u1_1, u1_0, u2_1, u2_0),
-        (super2_t[2:], super1_t[2:], diag_t[2:], sub1_t[2:], sub2_t[2:]))
-
-    ldi_t = jnp.concatenate([ldi_0[None], ldi_1[None], ldi_rest], axis=0)
-    l1_t = jnp.concatenate([l1_0[None], l1_1[None], l1_rest], axis=0)
-    l2_t = jnp.concatenate([l2_0[None], l2_1[None], l2_rest], axis=0)
-    u1_t = jnp.concatenate([u1_0[None], u1_1[None], u1_rest], axis=0)
-    u2_t = jnp.concatenate([u2_0[None], u2_1[None], u2_rest], axis=0)
-
-    # ---- Forward substitution: L y = rhs ----
-    soln_0 = ldi_t[0] * rhs_t[0]
-    soln_1 = ldi_t[1] * (rhs_t[1] - l1_t[1] * soln_0)
-
-    def fwd_scan_step(carry, x):
-        soln_km2, soln_km1 = carry
-        rhs_k, ldi_k, l1_k, l2_k = x
-        soln_k = ldi_k * (rhs_k - l2_k * soln_km2 - l1_k * soln_km1)
-        return (soln_km1, soln_k), soln_k
-
-    _, soln_rest = lax.scan(
-        fwd_scan_step, (soln_0, soln_1),
-        (rhs_t[2:], ldi_t[2:], l1_t[2:], l2_t[2:]))
-    soln_t = jnp.concatenate([soln_0[None], soln_1[None], soln_rest], axis=0)
-
-    # ---- Backward substitution: U x = y ----
-    soln_nm2 = soln_t[ndim - 2] - u1_t[ndim - 2] * soln_t[ndim - 1]
-
-    def bwd_scan_step(carry, x):
-        soln_kp1, soln_kp2 = carry
-        soln_k_fwd, u1_k, u2_k = x
-        soln_k = soln_k_fwd - u1_k * soln_kp1 - u2_k * soln_kp2
-        return (soln_k, soln_kp1), soln_k
-
-    _, soln_bwd_rev = lax.scan(
-        bwd_scan_step, (soln_nm2, soln_t[ndim - 1]),
-        (soln_t[:ndim - 2][::-1], u1_t[:ndim - 2][::-1], u2_t[:ndim - 2][::-1]))
-
-    soln_final_t = jnp.concatenate(
-        [soln_bwd_rev[::-1], soln_nm2[None], soln_t[ndim - 1:ndim]], axis=0)
-    return soln_final_t.T
+    return lapack_band_solve(lhs, rhs, kl=2, ku=2)
 
 
 # ===========================================================================
@@ -3051,6 +2990,42 @@ def compute_cloud_cover(chi_mean, cloud_frac, rcm, gr: CLUBBGrid):
 
 _MAX_MAG_CORRELATION = 0.99   # Cauchy-Schwarz correlation bound (constants_clubb)
 _MAX_MAG_CORRELATION_FLUX = 0.99  # flux correlation bound (constants_clubb)
+# Cap on the horizontal-velocity variances after their clip [m^2/s^2]
+# (advance_xp2_xpyp_module.F90:1137, 1170, clubb_release @ 54403a04;
+# absent from CESM2.1's vendor_clubb_r8099_n03).
+_UP2_VP2_MAX = 1000.0
+
+
+def cap_up2_vp2(xp2, width_m2s2):
+    """Smooth ``min(xp2, 1000)`` cap on up2/vp2 (RULE 5).
+
+    ``smooth_min`` = ``x - w*softplus((x - 1000)/w)``; ``width_m2s2 == 0`` is
+    the reference's exact ``min`` (static switch), ``< 0`` raises.
+
+    KNOWN DIFFERENCE (CLUBBConfig.up2_vp2_cap_width_m2s2): the reference
+    (advance_xp2_xpyp_module.F90:1137, 1170) caps hard; the port's default
+    width 10 m^2/s^2 always returns slightly less than ``min(x, 1000)``,
+    most within roughly 970-1030 (by w*ln2 = 6.9 at exactly 1000).  Values
+    well below the cap move by ``w*softplus(-(1000-x)/w)`` (4.5e-4 at 900, ~1e-43 at
+    typical values).  Measured worst field-normalised gaps vs the oracle on
+    the l_implemented fixture, per case, are pinned in
+    tests/atmosphere/test_clubb_core_oracle.py (``_DEFAULT_GAPS``); only the
+    capped ``bomex_bigup2`` column moves above 1e-10.  Width 0 recovers the
+    reference to 1e-10.  The smooth cap keeps the result <= 1000 but no
+    longer equal to it.
+
+    Large widths are not checked: the shift at the variance floor
+    (w_tol^2 = 4e-4) is ``w*softplus(-1000/w)``, 1e-7 at w = 50 and above
+    the floor itself from w ~ 82, so up2/vp2 go NEGATIVE there (-4.1e-3 at
+    w = 100).  Keep the width well below ~50 m^2/s^2.
+    """
+    if width_m2s2 < 0.0:
+        raise ValueError(
+            f"up2_vp2_cap_width_m2s2 must be >= 0, got {width_m2s2!r}.")
+    sharp = math.inf if width_m2s2 == 0.0 else 1.0 / width_m2s2
+    return smooth_min(xp2, _UP2_VP2_MAX, sharp)
+
+
 _ZERO_THRESHOLD = 0.0
 _ONE_THIRD = 1.0 / 3.0
 _GAMMA_OVER_IMPLICIT_TS = 1.5   # over-implicit weight (constants_clubb)
@@ -3301,11 +3276,22 @@ def windm_edsclrm_lhs(lhs_diff, lhs_ma_zt, dt, invrs_rho_ds_zt, rho_ds_zm,
 # advance_windm_edsclrm
 # ---------------------------------------------------------------------------
 
+def _xm_lhs_ma_zt(wm_zt, gr: CLUBBGrid, l_implemented):
+    """Mean-advection LHS of a zt-level mean (um/vm/edsclrm/xm, and the MFL xm
+    re-solve). CLUBB adds it only when ``.not. l_implemented``; implemented in
+    a host model it is zero (advance_windm_edsclrm_module.F90:398-411;
+    advance_xm_wpxp_module.F90:1411, 1624; mono_flux_limiter.F90:1112-1125;
+    clubb_release @ 54403a04). The w'x', variance and wp2/wp3 mean-advection
+    terms have no such branch and stay on."""
+    lhs = term_ma_zt_lhs_upwind(wm_zt, gr)
+    return jnp.zeros_like(lhs) if l_implemented else lhs
+
+
 def advance_windm_edsclrm(um, vm, upwp, vpwp, wp2, up2, vp2, wm_zt, Kh_zm,
                           ug, vg, um_forcing, vm_forcing,
                           rho_ds_zm, rho_ds_zt, invrs_rho_ds_zt, fcor,
                           c_K10, nu10, dt, gr: CLUBBGrid, l_tke_aniso=True,
-                          vector_sfc_stress=False):
+                          vector_sfc_stress=False, l_implemented=False):
     """Advance um/vm (and the diagnostic upwp/vpwp) via eddy diffusion.
 
     Faithful port of ``advance_windm_edsclrm`` for the CAM ``l_predict_upwp_vpwp
@@ -3343,6 +3329,13 @@ def advance_windm_edsclrm(um, vm, upwp, vpwp, wp2, up2, vp2, wm_zt, Kh_zm,
         for a wind-dependent bulk stress the implicit treatment is what keeps
         the drag stable. Default False keeps every existing caller
         bit-identical.
+    l_implemented : bool, default False
+        CLUBB's ``l_implemented`` (CAM: ``.true.``). True drops the um/vm mean
+        advection (advance_windm_edsclrm_module.F90:398-411, 2314) and the
+        Coriolis / geostrophic / prescribed-forcing tendency, which a host
+        model applies itself (``compute_uv_tndcy``, :2205-2211, ``xm_tndcy =
+        0``); clubb_release @ 54403a04. A ``vector_sfc_stress`` source (a
+        legoESM extension, not CLUBB forcing) is still applied.
 
     Returns
     -------
@@ -3357,7 +3350,7 @@ def advance_windm_edsclrm(um, vm, upwp, vpwp, wp2, up2, vp2, wm_zt, Kh_zm,
     Km_zm_p_nu10 = Km_zm + nu10_arr[:, None]
 
     lhs_diff = diffusion_zt_lhs(Km_zm, nu10_arr, invrs_rho_ds_zt, rho_ds_zm, gr)
-    lhs_ma_zt = term_ma_zt_lhs_upwind(wm_zt, gr)
+    lhs_ma_zt = _xm_lhs_ma_zt(wm_zt, gr, l_implemented)
 
     # sqrt(max(s^2, eps^2)) is forward-identical to the reference's
     # max(sqrt(s^2), eps) but AD-safe: it never differentiates through sqrt(0),
@@ -3391,7 +3384,18 @@ def advance_windm_edsclrm(um, vm, upwp, vpwp, wp2, up2, vp2, wm_zt, Kh_zm,
         vm_forcing = vm_forcing.at[:, 0].add(_metric * vpwp[:, 0])
         u_star_sqd = jnp.zeros_like(u_star_sqd)
 
-    um_tndcy, vm_tndcy = compute_uv_tndcy(fcor, ug, vg, um, vm, um_forcing, vm_forcing)
+    if l_implemented:
+        # compute_uv_tndcy, implemented branch: xm_tndcy = 0 (the host owns
+        # Coriolis, geostrophy and the large-scale forcing). Only the
+        # vector-stress source folded into the forcing above survives.
+        um_tndcy = jnp.zeros_like(um)
+        vm_tndcy = jnp.zeros_like(vm)
+        if vector_sfc_stress:
+            um_tndcy = um_tndcy.at[:, 0].set(_metric * upwp[:, 0])
+            vm_tndcy = vm_tndcy.at[:, 0].set(_metric * vpwp[:, 0])
+    else:
+        um_tndcy, vm_tndcy = compute_uv_tndcy(fcor, ug, vg, um, vm, um_forcing,
+                                              vm_forcing)
 
     # First Crank-Nicholson half (explicit) for upwp/vpwp.
     xpwp_u = calc_xpwp(Km_zm_p_nu10, um, gr.invrs_dzm)[:, 1:-1]
@@ -3926,8 +3930,12 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
                                     hf_lower, hf_upper, _CAM_FILL_HOLES_TYPE)
     vp2_fh = pos_definite_variances(soln_vp2, rho_ds_zm, gr.dzm, w_tol_sqd,
                                     hf_lower, hf_upper, _CAM_FILL_HOLES_TYPE)
-    up2_cv = clip_variance(up2_fh, w_tol_sqd)
-    vp2_cv = clip_variance(vp2_fh, w_tol_sqd)
+    # Clip negative values, then excessively large ones (up2/vp2 <= 1000,
+    # smooth at the default width; see cap_up2_vp2).
+    up2_cv = cap_up2_vp2(clip_variance(up2_fh, w_tol_sqd),
+                         config.up2_vp2_cap_width_m2s2)
+    vp2_cv = cap_up2_vp2(clip_variance(vp2_fh, w_tol_sqd),
+                         config.up2_vp2_cap_width_m2s2)
 
     return rtp2_cv, thlp2_cv, rtpthlp_clip, up2_cv, vp2_cv
 
@@ -4824,15 +4832,16 @@ def calc_turb_adv_range(w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm,
     return low, high
 
 
-def mfl_xm_lhs(wm_zt, invrs_dt, gr: CLUBBGrid):
+def mfl_xm_lhs(wm_zt, invrs_dt, gr: CLUBBGrid, l_implemented=False):
     """LHS of the MFL xm re-solve tridiagonal system (``mfl_xm_lhs``).
 
     The re-solve advances ``xm`` alone (the flux ``w'x'`` is now known), so it is
     a plain tridiagonal: the upwind mean-advection operator (CAM
     ``l_upwind_xm_ma = True``) plus ``1/dt`` on the main diagonal.
-    ``(3, ncol, nzt)``.
+    ``(3, ncol, nzt)``. ``l_implemented`` drops the mean advection
+    (mono_flux_limiter.F90:1112-1125).
     """
-    return term_ma_zt_lhs_upwind(wm_zt, gr).at[1, :, :].add(invrs_dt)
+    return _xm_lhs_ma_zt(wm_zt, gr, l_implemented).at[1, :, :].add(invrs_dt)
 
 
 def mfl_xm_rhs(xm_old, wpxp, xm_forcing, invrs_dt, invrs_rho_ds_zt, invrs_dzt, rho_ds_zm):
@@ -4859,7 +4868,7 @@ def monotonic_turbulent_flux_limit(
     solve_type, xm, wpxp, xm_old, xp2, wm_zt, xm_forcing,
     rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
     xp2_threshold, xm_tol, low_lev_effect, high_lev_effect,
-    gr: CLUBBGrid, dt, l_mono_flux_lim_spikefix=True,
+    gr: CLUBBGrid, dt, l_mono_flux_lim_spikefix=True, l_implemented=False,
 ):
     """Monotonic turbulent-flux limiter core (``monotonic_turbulent_flux_limit``).
 
@@ -4898,8 +4907,21 @@ def monotonic_turbulent_flux_limit(
     # Windowed min/max over the reachable level window [low, high] (masked).
     j = jnp.arange(nzt)[None, None, :]
     in_win = (j >= low_lev_effect[:, :, None]) & (j <= high_lev_effect[:, :, None])
-    min_x_allowable = jnp.min(jnp.where(in_win, min_x_lev[:, None, :], jnp.inf), axis=2)
-    max_x_allowable = jnp.max(jnp.where(in_win, max_x_lev[:, None, :], -jnp.inf), axis=2)
+    # Picked by index (argmin/argmax + gather), not jnp.min/jnp.max: the
+    # reduce_min/max JVP finds the chosen element by EQUALITY with the reduced
+    # value and divides by the match count.  Under jit (and remat) XLA can
+    # recompute the operand in a second fusion that rounds 1 ulp differently,
+    # so no element matches and the gradient is 0/0 = NaN (production CLUBB,
+    # one sub-step: ~45 % of d/dT NaN; eager finite).  The gather's VJP routes
+    # the cotangent to the chosen element with no division.  Same forward
+    # value; at an exact tie the whole cotangent goes to the first level
+    # instead of being split.
+    min_cand = jnp.where(in_win, min_x_lev[:, None, :], jnp.inf)
+    max_cand = jnp.where(in_win, max_x_lev[:, None, :], -jnp.inf)
+    min_x_allowable = jnp.take_along_axis(
+        min_cand, jnp.argmin(min_cand, axis=2, keepdims=True), axis=2)[..., 0]
+    max_x_allowable = jnp.take_along_axis(
+        max_cand, jnp.argmax(max_cand, axis=2, keepdims=True), axis=2)[..., 0]
 
     thr_term_zt = invrs_dt * gd * dzt * (xm_without_ta - min_x_allowable)
     mfl_max_term_zt = rho_ds_zt * thr_term_zt
@@ -4928,7 +4950,7 @@ def monotonic_turbulent_flux_limit(
     adj_needed = jnp.any(needed_T.T, axis=1)   # (ng,)
 
     # Re-solve xm implicitly with the limited flux (applied where adjustment fired).
-    lhs = mfl_xm_lhs(wm_zt, invrs_dt, gr)
+    lhs = mfl_xm_lhs(wm_zt, invrs_dt, gr, l_implemented)
     rhs = mfl_xm_rhs(xm_old, wpxp_new, xm_forcing, invrs_dt, invrs_rho_ds_zt,
                      invrs_dzt, rho_ds_zm)
     xm_mfl = mfl_xm_solve(lhs, rhs)
@@ -5013,7 +5035,7 @@ def calc_xm_wpxp_ta_terms(sigma_sqd_w, wp3_on_wp2_zt, rho_ds_zt, invrs_rho_ds_zm
 
 def calc_xm_wpxp_lhs_terms(wm_zm, wm_zt, wp2, Kw6, nu6, C7_Skw_fnc,
                            invrs_rho_ds_zm, rho_ds_zt, rho_ds_zm, invrs_rho_ds_zt,
-                           gr: CLUBBGrid):
+                           gr: CLUBBGrid, l_implemented=False):
     """Shared LHS terms for the xm/w'x' system (``calc_xm_wpxp_lhs_terms``).
 
     Computes once and shares: the w'x' diffusion (``Kw6 = c_K6·Kh_zt``) + mean
@@ -5021,13 +5043,15 @@ def calc_xm_wpxp_lhs_terms(wm_zm, wm_zt, wp2, Kw6, nu6, C7_Skw_fnc,
     xm<->wpxp turbulent-advection / production / accumulation operators. The ADG1
     TA operator (:func:`calc_xm_wpxp_ta_terms`) is computed separately. ``nu6`` is
     a scalar background diffusivity. Returns a dict with keys ``lhs_diff_zm,
-    lhs_ma_zm, lhs_ma_zt, lhs_ta_xm, lhs_tp, lhs_ac_pr2``.
+    lhs_ma_zm, lhs_ma_zt, lhs_ta_xm, lhs_tp, lhs_ac_pr2``. ``l_implemented``
+    zeroes the xm mean advection ``lhs_ma_zt`` only
+    (advance_xm_wpxp_module.F90:1411, 1624); the w'x' terms keep ``wm``.
     """
     nu6_arr = jnp.full((invrs_rho_ds_zm.shape[0],), nu6, dtype=wp2.dtype)
     return dict(
         lhs_diff_zm=diffusion_zm_lhs(Kw6, nu6_arr, invrs_rho_ds_zm, rho_ds_zt, gr),
         lhs_ma_zm=term_ma_zm_lhs(wm_zm, gr),
-        lhs_ma_zt=term_ma_zt_lhs_upwind(wm_zt, gr),
+        lhs_ma_zt=_xm_lhs_ma_zt(wm_zt, gr, l_implemented),
         lhs_ta_xm=xm_term_ta_lhs(invrs_rho_ds_zt, rho_ds_zm, gr),
         lhs_tp=wpxp_term_tp_lhs(wp2, gr),
         lhs_ac_pr2=wpxp_terms_ac_pr2_lhs(C7_Skw_fnc, wm_zt, gr),
@@ -5063,7 +5087,8 @@ def xm_wpxp_clipping_and_stats(solve_type, xm, wpxp_preclip, xm_old, xp2, xp2_cl
                                wp2, wm_zt, xm_forcing, rho_ds_zm, rho_ds_zt,
                                invrs_rho_ds_zm, invrs_rho_ds_zt, xp2_threshold,
                                xm_tol, low_lev_effect, high_lev_effect, field_tol,
-                               fill_holes_type, l_mono_flux_lim, dt, gr: CLUBBGrid):
+                               fill_holes_type, l_mono_flux_lim, dt, gr: CLUBBGrid,
+                               l_implemented=False):
     """Per-field post-solve clipping for advance_xm_wpxp (``xm_wpxp_clipping_and_stats``).
 
     Applied once per scalar after its solve: (1) the monotonic turbulent-flux
@@ -5083,7 +5108,8 @@ def xm_wpxp_clipping_and_stats(solve_type, xm, wpxp_preclip, xm_old, xp2, xp2_cl
         xm, wpxp_preclip = monotonic_turbulent_flux_limit(
             solve_type, xm, wpxp_preclip, xm_old, xp2, wm_zt, xm_forcing,
             rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
-            xp2_threshold, xm_tol, low_lev_effect, high_lev_effect, gr, dt)
+            xp2_threshold, xm_tol, low_lev_effect, high_lev_effect, gr, dt,
+            l_implemented=l_implemented)
     if fill_holes_type != 0 and solve_type not in (MFL_UM, MFL_VM):
         nzt = xm.shape[1]
         xm = fill_holes_vertical(xm, rho_ds_zt, gr.dzt, field_tol, 0, nzt - 1,
@@ -5179,8 +5205,10 @@ def xm_wpxp_lhs(lhs_diff_zm, lhs_ma_zm, lhs_ma_zt, lhs_ta_wpxp, lhs_ta_xm,
     """Assemble the coupled xm/wpxp pentadiagonal LHS (``xm_wpxp_lhs``).
 
     Faithful port of ``advance_xm_wpxp_module.F90:xm_wpxp_lhs`` for the CAM tree
-    (``l_implemented = False`` standalone, ``l_diffuse_rtm_and_thlm = False`` so
-    the xm rows carry NO diffusion, ``l_iter = True``). Interleaving: wpxp[k] at
+    (``l_diffuse_rtm_and_thlm = False`` so the xm rows carry NO diffusion,
+    ``l_iter = True``). ``lhs_ma_zt`` is added unconditionally; with
+    ``l_implemented`` the caller passes it as zeros
+    (:func:`calc_xm_wpxp_lhs_terms`), as the Fortran skips it. Interleaving: wpxp[k] at
     global index 2k, xm[k] at 2k+1. Bands ``[super2, super1, main, sub1, sub2]``;
     the wpxp turbulent advection and pressure-1 are over-implicit (scaled by
     gamma). wpxp lower/upper rows are identity BCs. Returns ``(5, ncol, 2*nzm-1)``.
@@ -5264,7 +5292,8 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
                     wp2, Kh_zt, rtp2, thlp2, rtpthvp, thlpthvp, thv_ds_zm,
                     wm_zm, wm_zt, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm,
                     invrs_rho_ds_zt, w_1_zm, w_2_zm, varnce_w_1_zm,
-                    varnce_w_2_zm, mixt_frac_zm, dt, gr: CLUBBGrid, config):
+                    varnce_w_2_zm, mixt_frac_zm, dt, gr: CLUBBGrid, config,
+                    l_implemented=False):
     """Advance the coupled xm/w'x' scalar pairs one step (``advance_xm_wpxp``).
 
     Faithful port of the core (CAM-default) path of
@@ -5281,8 +5310,9 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
     ``l_use_C7_Richardson = .false.`` / ``l_diag_Lscale_from_tau = .false.`` make
     these skewness functions, NOT the ARM Richardson/constant the hard-wired
     reference uses — so they are explicit inputs here). The MFL turbulent-
-    advection range is field-independent → computed once. Returns
-    ``(wprtp, rtm, wpthlp, thlm)``.
+    advection range is field-independent → computed once. ``l_implemented``
+    (CAM ``.true.``) drops the xm mean advection in the solve and in the MFL
+    re-solve, as the Fortran does. Returns ``(wprtp, rtm, wpthlp, thlm)``.
     """
     params = config.params
     Kw6 = params.c_K6 * Kh_zt
@@ -5293,7 +5323,7 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
                                    invrs_rho_ds_zm, gr)
     sh = calc_xm_wpxp_lhs_terms(wm_zm, wm_zt, wp2, Kw6, nu6, C7_Skw_fnc,
                                 invrs_rho_ds_zm, rho_ds_zt, rho_ds_zm,
-                                invrs_rho_ds_zt, gr)
+                                invrs_rho_ds_zt, gr, l_implemented)
 
     # CAM l_enable_relaxed_clipping = False (fixed): clip on the raw variances.
     rtp2_clip, thlp2_clip = rtp2, thlp2
@@ -5312,7 +5342,8 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
         return xm_wpxp_clipping_and_stats(
             mfl_id, xm_new, wpxp_pre, xm, xp2, xp2_clip, wp2, wm_zt, xm_forcing,
             rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
-            xm_tol ** 2, tol_mfl, lo, hi, field_tol, fht, l_mfl, dt, gr)
+            xm_tol ** 2, tol_mfl, lo, hi, field_tol, fht, l_mfl, dt, gr,
+            l_implemented)
 
     rtm_new, wprtp_new = _advance(
         wprtp, rtm, wprtp_forcing, rtm_forcing, C6rt_Skw_fnc, rtpthvp, rtp2,
@@ -5508,7 +5539,7 @@ def compute_pdf_closure(diag, wp2, wp3, rtp2, thlp2, rtpthlp, up2, vp2,
         rtpthvp=zm_trap["rtpthvp"], thlpthvp=zm_trap["thlpthvp"],
         rc_coef_zm=zm_out["rc_coef"],
         cloud_frac=cloud_frac, rcm=rcm, rcm_grid=rcm_grid,
-        rcm_zm=zm_out["rcm"],
+        rcm_zm=zm_out["rcm"], rcp2_zt=zt_out["rcp2"],
         wprcp=zm_out["wprcp"], rtprcp=zm_out["rtprcp"],
         thlprcp=zm_out["thlprcp"], uprcp=zm_out["uprcp"],
         vprcp=zm_out["vprcp"],
@@ -5549,9 +5580,21 @@ def _pdf_closure_on_grid(wm, rtm, thlm, um, vm, wp2, rtp2, thlp2,
         xprcp["thlprcp"], wpthlp, wprtp, hom["wp2thlp"], hom["wp2rtp"],
         rtpthlp, rtp2, thlp2)
 
+    # Cloud-water variance r_c'^2, pdf_closure_module.F90:1072-1074 (computed
+    # unconditionally under CLUBB_CAM; CAM hands it out as qclvar, :1798).
+    mf = comp["mixt_frac"]
+    rcp2 = jnp.maximum(
+        0.0,
+        mf * (comp["chi_1"] * comp["rc_1"]
+              + comp["cf_1"] * comp["stdev_chi_1"] ** 2)
+        + (1.0 - mf) * (comp["chi_2"] * comp["rc_2"]
+                        + comp["cf_2"] * comp["stdev_chi_2"] ** 2)
+        - comp["rcm"] ** 2)
+
     out = dict(adg1)
     out.update(hom)
     out.update(xprcp)
+    out.update(rcp2=rcp2)
     out.update(cloud_frac=comp["cloud_frac"], rcm=comp["rcm"],
                chi_1=comp["chi_1"], chi_2=comp["chi_2"],
                wpthvp=wpthvp, wp2thvp=wp2thvp, rtpthvp=rtpthvp,
@@ -5764,7 +5807,8 @@ def pvertinterp(p_mid: jax.Array, p_out: float, x: jax.Array) -> jax.Array:
 
 
 def expldiff_rtm_thlm(rtm, thlm, Kh_zm, c_K10h, wm_zt, rho_ds_zm,
-                      invrs_rho_ds_zt, p_in_Pa_zt, dt, gr: CLUBBGrid):
+                      invrs_rho_ds_zt, p_in_Pa_zt, dt, gr: CLUBBGrid,
+                      l_implemented=False):
     """Explicit eddy-scalar diffusion of ``rtm``/``thlm`` (CAM default on).
 
     Copies of ``thlm``/``rtm`` are diffused as eddy scalars exactly as
@@ -5774,12 +5818,13 @@ def expldiff_rtm_thlm(rtm, thlm, Kh_zm, c_K10h, wm_zt, rho_ds_zm,
     already in ``advance_xm_wpxp``) and zero top flux.  The diffused copies
     replace ``thlm``/``rtm`` only in columns where
     ``thlm(700 hPa) - thlm(1000 hPa) < 20 K`` (``pvertinterp`` of the
-    undiffused ``thlm``).  Returns ``(rtm, thlm)``.
+    undiffused ``thlm``).  ``l_implemented`` drops the mean advection, as
+    for um/vm.  Returns ``(rtm, thlm)``.
     """
     ng = rtm.shape[0]
     zeros = jnp.zeros((ng,), dtype=rtm.dtype)
     lhs_diff = diffusion_zt_lhs(Kh_zm * c_K10h, zeros, invrs_rho_ds_zt, rho_ds_zm, gr)
-    lhs = windm_edsclrm_lhs(lhs_diff, term_ma_zt_lhs_upwind(wm_zt, gr), dt,
+    lhs = windm_edsclrm_lhs(lhs_diff, _xm_lhs_ma_zt(wm_zt, gr, l_implemented), dt,
                             invrs_rho_ds_zt, rho_ds_zm, zeros,
                             jnp.ones_like(rtm), gr)   # no implicit sfc flux
     thl_ed = tridiag_solve(lhs, windm_edsclrm_rhs(lhs_diff, thlm, jnp.zeros_like(thlm), dt))
@@ -5809,7 +5854,7 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
                        p_sfc, thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
                        invrs_rho_ds_zm, invrs_rho_ds_zt, wm_zt, wm_zm,
                        sfc_elevation, fcor, ug, vg, dt, gr: CLUBBGrid, config,
-                       radht_zt=None, vector_sfc_stress=False):
+                       l_implemented, radht_zt=None, vector_sfc_stress=False):
     """One prognostic CLUBB step (the CAM-default ``advance_clubb_core`` core).
 
     Runs, in the CAM order, ``compute_clubb_diagnostics`` -> the pre-advance ADG1
@@ -5843,6 +5888,15 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         for the momentum-level PDF closure).
     dt : float
         Time step [s].
+    l_implemented : bool
+        CLUBB's ``l_implemented``, no default (CAM passes ``.true.``,
+        clubb_intr.F90:113 cam_cesm2_1_rel_60; the Fortran SCM driver
+        ``.false.``). True drops the mean advection of the means (rtm/thlm in
+        advance_xm_wpxp and its flux-limiter re-solve, um/vm, the eddy-scalar
+        rtm/thlm copies) and the um/vm Coriolis/geostrophic/forcing tendency;
+        the w'x', variance and wp2/wp3 equations keep ``wm``. Lscale is an
+        input here, so its ``l_implemented`` branches belong to the caller's
+        :func:`compute_mixing_length` / :func:`set_Lscale_max`.
     radht_zt : jax.Array | None
         Radiative theta-l tendency on the (ascending) thermodynamic grid,
         ``(ngrdcol, nzt)`` [K/s]. When given (and the tunable coefficient
@@ -5922,7 +5976,11 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         state.rtp2, state.thlp2, pdf["rtpthvp"], pdf["thlpthvp"], thv_ds_zm,
         wm_zm, wm_zt, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
         pdf["w_1_zm"], pdf["w_2_zm"], pdf["varnce_w_1_zm"], pdf["varnce_w_2_zm"],
-        pdf["mixt_frac_zm"], dt, gr, config)
+        pdf["mixt_frac_zm"], dt, gr, config, l_implemented=l_implemented)
+    # CAM's rcm_out: the pre-advance in-layer rcm clipped against the advanced
+    # rtm (advance_clubb_core_module.F90 clip_rcm after advance_xm_wpxp);
+    # clubb_intr pairs it with qclvar in relvar (:2424).
+    rcm_out = clip_rcm(rtm, pdf["rcm"])
 
     # ---- (4) advance_xp2_xpyp: rtp2/thlp2/rtpthlp/up2/vp2 (uses pre-wp2_wp3 wp2) ----
     rtp2, thlp2, rtpthlp, up2, vp2 = advance_xp2_xpyp(
@@ -5964,11 +6022,12 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         state.um, state.vm, upwp, vpwp, wp2, up2, vp2, wm_zt, diag["Kh_zm"],
         ug, vg, forcing.um, forcing.vm, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zt,
         fcor, p.c_K10, p.nu10, dt, gr, l_tke_aniso=True,  # CAM l_tke_aniso
-        vector_sfc_stress=vector_sfc_stress)
+        vector_sfc_stress=vector_sfc_stress, l_implemented=l_implemented)
     # CAM l_do_expldiff_rtm_thlm = True (fixed): at the end of
     # advance_windm_edsclrm, with the same start-of-step Kh_zm.
     rtm, thlm = expldiff_rtm_thlm(rtm, thlm, diag["Kh_zm"], p.c_K10h, wm_zt,
-                                  rho_ds_zm, invrs_rho_ds_zt, p_in_Pa_zt, dt, gr)
+                                  rho_ds_zm, invrs_rho_ds_zt, p_in_Pa_zt, dt, gr,
+                                  l_implemented=l_implemented)
 
     new_state = CLUBBMomentState(
         rtm=rtm, thlm=thlm, um=um, vm=vm, wp2=wp2, wp3=wp3, up2=up2, vp2=vp2,
@@ -5985,8 +6044,18 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         p_sfc, thv_ds_zt, thv_ds_zm, gr, config)
 
     diagnostics = dict(
-        cloud_frac=pdf_post["cloud_frac"], rcm=pdf_post["rcm"],
+        # CAM's cloud_frac_out: the PRE-advance closure's, after the cloud-cover
+        # overwrite and min(1) (CLUBB_CESM r8099 advance_clubb_core_module.F90
+        # :1404-1418, before the advances at :1957), copied to the host at
+        # clubb_intr.F90:1993.  rcm/rcm_grid/wpthvp stay post-advance (no host
+        # consumer).  The closure itself is clubb_release 54403a04's, the core
+        # oracle -- a departure from CAM-bundled 2014 CLUBB.
+        cloud_frac=pdf["cloud_frac"], rcm=pdf_post["rcm"],
         rcm_grid=pdf_post["rcm_grid"],
+        # CAM's qclvar: rcp2_zt of the PRE-advance closure (CLUBB_CESM r8099
+        # advance_clubb_core_module.F90:1150 -> :1798, before the advances).
+        rcp2_zt=pdf["rcp2_zt"],
+        rcm_out=rcm_out,
         wpthvp=pdf_post["wpthvp"], Kh_zt=diag["Kh_zt"], Kh_zm=diag["Kh_zm"])
     return new_state, diagnostics
 
@@ -6094,6 +6163,21 @@ def scale_q_diffusivity_in_band(Kh_half, p_half, config: CLUBBConfig):
     in_band = ((sigma_face >= config.q_flux_scale_sigma_lo)
                & (sigma_face <= config.q_flux_scale_sigma_hi))
     return jnp.where(in_band, scale * Kh_half, Kh_half)
+
+
+def column_energy_residual(u, v, du_dt, dv_dt, dT_dt, dq_v_dt, p_half, dt,
+                           sfc_energy_in):
+    """Column total-energy residual [W/m2, + = created] of the host update
+    u += dt*du, T += dt*dT, q_v += dt*dq against the energy the lower BCs
+    supplied (``sfc_energy_in``, + up = into the air): ``sum(dp/g (c_pd dT/dt
+    + dKE/dt + L_v dq_v/dt)) - sfc_energy_in``, with the EXACT finite KE
+    change of the host update.  Liquid reference: q_c carries no latent term.
+    """
+    dp_g = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
+    dke_dt = (du_dt * (u + 0.5 * dt * du_dt) + dv_dt * (v + 0.5 * dt * dv_dt))
+    return (jnp.sum(dp_g * (constants.c_pd * dT_dt + dke_dt
+                            + constants.L_v * dq_v_dt), axis=1)  # latent-ok: CAM6 clubb_intr energy-fix reference constant
+            - sfc_energy_in), dp_g
 
 
 def clubb_turbulence(
@@ -6288,6 +6372,21 @@ def clubb_turbulence(
     # +warming] (review 2026-10-10 F14; CAM6 clubb_do_energyfix=.true.,
     # always on: CLUBB's flags are the fixed CAM defaults).
     dT_dt = (T_new - T) / dt + ke_dissipation_heating(u, v, du_dt, dv_dt, dt)
+    # Column energy fixer, as the prognostic path: diffusing theta conserves
+    # sum(dp theta), not the host's sum(dp c_pd T), so mixing a stable column
+    # creates energy.  Closes the column against the energy the BCs supplied
+    # (= shflx + lhflx), uniform per unit mass over the whole column, or with
+    # the cutoff on over every layer at or below the cut pressure (hard mask,
+    # CAM's top_lev rule on the column pressure; user decision 2026-10-26).
+    # DEPARTURE from CAM, deliberate (energy conservation): the intake is the
+    # physical shflx + lhflx; CAM closes against shf + (latvap+latice)*cflx
+    # (clubb_intr.F90:2135), leaving lhf - L*E unbooked.
+    resid, dp_g = column_energy_residual(
+        u, v, du_dt, dv_dt, dT_dt, (q_new - q_v) / dt, p_half, dt,
+        constants.c_pd * sflx_T + constants.L_v * sflx_q)  # latent-ok: CAM6 clubb_intr energy-fix reference constant
+    w_fix = ((p_full >= config.trop_cloud_top_press).astype(dp_g.dtype)
+             if _trop_on else jnp.ones_like(dp_g))
+    dT_dt = dT_dt + column_energy_fixer_heating(resid, dp_g, w_fix)
     output = TurbulenceOutput(
         du_dt=du_dt,
         dv_dt=dv_dt,
@@ -6324,6 +6423,52 @@ def virtual_potential_temperature_with_liquid(T, q_v, q_c, exner):
     ``q_c = 0``.
     """
     return (virtual_temperature(T, q_v) - T * q_c) / exner
+
+
+# --- CAM6 relative cloud-water variance for MG2 (clubb_intr.F90, cam_cesm2_1_rel_60) ---
+_CAM6_QCLVAR_MAX = 1.0        # qclvar = min(1, rcp2_zt) (:1998)
+_CAM6_RELVARMAX = 10.0        # relvarmax, deep_scheme /= 'CLUBB_SGS' (CAM6 ZM, :2418)
+_CAM6_RELVAR_MIN = 1.0e-3     # relvar lower clip (:2425)
+
+
+@jax.custom_jvp
+def _square_over(a, q):
+    """``a**2 / q`` as ``(a/q)*a``."""
+    return (a / q) * a
+
+
+@_square_over.defjvp
+def _square_over_jvp(primals, tangents):
+    # Autodiff of a/q forms a/q**2, and q**2 underflows to 0 in fp32 at
+    # q ~ 1e-30 (gradient -inf); d/dq = -(a/q)**2 stays representable down
+    # to q ~ 1e-38 (fp32 subnormal), where the true derivative itself overflows.
+    a, q = primals
+    da, dq = tangents
+    x = a / q
+    return x * a, 2.0 * x * da - x * x * dq
+
+
+def cam6_relvar(rcm, rcp2):
+    """CAM6 relative cloud-water variance ``relvar`` handed to MG2.
+
+    ``clubb_intr.F90:1998, 2421-2425``: ``qclvar = min(1, rcp2_zt)``,
+    ``relvar = relvarmax`` by default and, where ``rcm /= 0`` and
+    ``qclvar /= 0``, ``min(relvarmax, max(0.001, rcm**2/qclvar))``.  ``rcm``
+    is CAM's ``rcm`` after the clubbtop reset: the pre-advance ``rcm_out``
+    below clubbtop, the host liquid at and above it; ``rcp2`` the
+    pre-advance closure's ``r_c'^2`` (CAM's ``qclvar_out``) on the same levels.
+    """
+    qclvar = jnp.minimum(_CAM6_QCLVAR_MAX, rcp2)
+    has = (rcm != 0.0) & (qclvar != 0.0)
+    # Branches picked by products, never by the ratio: at qclvar ~1e-30 in
+    # fp32 rcm**2/qclvar overflows and the clip-region VJP was 0*inf = NaN.
+    rcm2 = rcm * rcm
+    hi = (rcm2 >= _CAM6_RELVARMAX * qclvar) & (qclvar > 0.0)
+    lo = (rcm2 <= _CAM6_RELVAR_MIN * qclvar) | (qclvar < 0.0)
+    q_safe = jnp.where(has & ~hi & ~lo, qclvar, 1.0)
+    ratio = _square_over(rcm, q_safe)
+    out = jnp.where(hi, _CAM6_RELVARMAX, jnp.where(lo, _CAM6_RELVAR_MIN, ratio))
+    return jnp.where(has, out, _CAM6_RELVARMAX)
 
 
 # clubb_intr.F90:2043 (cam_cesm2_1_rel == cesm2_2_rel): a level whose rtp2 is
@@ -6409,6 +6554,7 @@ def clubb_step(
     radht_zt: jax.Array | None = None,
     q_c: jax.Array | None = None,
     troplev: jax.Array | None = None,
+    omega: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
 
@@ -6423,8 +6569,14 @@ def clubb_step(
 
       * Dry phase mapping ``thl ~ theta``, ``rt ~ q_v`` (``rcm`` enters only via
         the PDF closure inside ``advance_clubb_core``).
-      * Mean vertical velocity ``wm = 0`` (grid-scale subsidence is the dycore's
-        job, not the column closure).
+      * Mean vertical velocity: with the host pressure velocity ``omega``
+        [Pa/s, top-down ``(ncol, nlev)``] given, ``wm_zt = -omega / (rho_ds_zt
+        g)`` (CESM2.1 form, no ``omega_bot``: clubb_intr.F90:1676-1679
+        cam_cesm2_1_rel_60) and ``wm_zm = zt2zm(wm_zt)`` (:1778); without it
+        ``wm = 0``. CLUBB runs with ``l_implemented = .true.`` as in CAM
+        (clubb_intr.F90:113), so ``wm`` reaches the flux, variance and
+        wp2/wp3 equations and the PDF closure, while the mean advection of the
+        means stays with the host dycore.
       * Geostrophic wind ``ug = um``, ``vg = vm`` and ``fcor = 0`` → the
         Coriolis/geostrophic term in ``advance_windm_edsclrm`` vanishes (rotation
         is handled by the dycore; the turbulence scheme only diffuses).
@@ -6496,9 +6648,13 @@ def clubb_step(
     # variables the closure advances are TOTAL water and LIQUID-water potential
     # temperature, so the host's existing cloud liquid enters both. With the
     # lever off, q_c is absent and these reduce to the historical q_v / theta.
+    # CAM's HOST convention (cam_cesm2_1_rel_60 clubb_intr.F90:1550):
+    # thlm = T*exner_clubb - (latvap/cpair)*qc, i.e. theta_l = theta -
+    # (L_v/c_pd) q_c with NO 1/exner on the latent term (CLUBB's own internal
+    # thl uses L_v/(c_pd exner); the host does not -- matched to the host).
     if liquid_partition:
         q_t = q_v + q_c
-        T_l = T - (constants.L_v / constants.c_pd) * q_c
+        T_l = T - exner * (constants.L_v / constants.c_pd) * q_c
         thv = virtual_potential_temperature_with_liquid(T, q_v, q_c, exner)
     else:
         q_t = q_v
@@ -6535,6 +6691,11 @@ def clubb_step(
         0.5 * (moments.wp2 + moments.up2 + moments.vp2), config.tke_min)  # l_tke_aniso
     mu = jnp.full((ncol,), params.mu)
     lmin = derive_lmin(params.lmin_coef)
+    # The mixing length keeps CLUBB's STANDALONE branches (Lscale_max = 1e5 m,
+    # lminh ramp above z = 0) although the core below runs l_implemented =
+    # .true.: CAM's implemented branches need host_dx/host_dy (clubb_intr.F90
+    # grid_size, from the column area) and the height above ground
+    # (mixing_length.F90:523-532, 1508-1518). Open user decision, not ported.
     Lscale_max = set_Lscale_max(False, None, None, ncol)
     # No further floor: CLUBB's own floor is the lminh ramp inside
     # compute_mixing_length (mixing_length.F90:1505-1526), which goes to zero
@@ -6545,7 +6706,6 @@ def clubb_step(
 
     # ---- Surface turbulent-flux lower boundary conditions (kinematic) ----
     rho_sfc = rho[:, -1]
-    exner_sfc = exner[:, -1]
     # Each BC component is either prescribed (LES/SCM intercomparison cases) or
     # computed by CLUBB's own bulk formula from the air-surface contrast. The
     # bulk formula is evaluated only if at least one component still needs it
@@ -6558,15 +6718,26 @@ def clubb_step(
             T_sfc, q_sfc, rho_sfc, config.surface, z_full[:, -1] - z_half[:, -1])
         wprtp_b = surface_moisture_flux(config.surface, lhflx_b, T_sfc) / rho_sfc   # w'rt'  [kg/kg m/s]
         # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
-        wpthlp_b = ((shflx_b + latent_enthalpy_correction(lhflx_b, wprtp_b * rho_sfc))
-                    / (rho_sfc * constants.c_pd * exner_sfc))  # w'thl' [K m/s]
+        # CAM host convention (clubb_intr.F90:1781): wpthlp_sfc =
+        # shf/(cpair*rho_ds_zm(1)), no division by exner.
+        # The correction follows the water BC actually applied: a prescribed
+        # water flux is reported at L_v (lhflx below), so its correction is 0.
+        _corr = (latent_enthalpy_correction(lhflx_b, wprtp_b * rho_sfc)
+                 if sfc_wprtp is None else 0.0)
+        wpthlp_b = ((shflx_b + _corr)
+                    / (rho_sfc * constants.c_pd))              # w'thl' [K m/s]
         # Surface stress convention is tau = -rho*Cd*|V|*u (compute_surface_fluxes),
         # so the kinematic momentum flux is u'w'_sfc = tau_x/rho (NEGATIVE for u>0 —
         # momentum transported downward / drag), NOT -tau_x/rho.
         upwp_b = tau_x / rho_sfc                                     # u'w'   [m^2/s^2]
         vpwp_b = tau_y / rho_sfc
     # Resolve each BC: prescribed kinematic flux when given, else the bulk value.
-    wpthlp_sfc = wpthlp_b if sfc_wpthlp is None else sfc_wpthlp
+    # A prescribed heat flux with the bulk water flux still takes the bulk
+    # water's latent-enthalpy correction, so the intake is shflx + lhflx
+    # (user decision 2026-10-26); the reported shflx stays the prescribed one.
+    wpthlp_sfc = wpthlp_b if sfc_wpthlp is None else (
+        sfc_wpthlp if sfc_wprtp is not None else
+        sfc_wpthlp + _corr / (rho_sfc * constants.c_pd))
     wprtp_sfc = wprtp_b if sfc_wprtp is None else sfc_wprtp
     upwp_sfc = upwp_b if sfc_upwp is None else sfc_upwp
     vpwp_sfc = vpwp_b if sfc_vpwp is None else sfc_vpwp
@@ -6580,7 +6751,7 @@ def clubb_step(
     # the floor pins the gradient to 0 there while leaving any physical stress
     # (|u'w'| >> 1e-8) bit-unchanged.
     shflx = shflx_b if sfc_wpthlp is None else (
-        sfc_wpthlp * (rho_sfc * constants.c_pd * exner_sfc))
+        sfc_wpthlp * (rho_sfc * constants.c_pd))
     lhflx = lhflx_b if sfc_wprtp is None else sfc_wprtp * (rho_sfc * constants.L_v)
     ustar = ustar_b if (sfc_upwp is None and sfc_vpwp is None) else (
         jnp.maximum(upwp_sfc ** 2 + vpwp_sfc ** 2, 1e-30) ** 0.25)
@@ -6600,15 +6771,21 @@ def clubb_step(
         rtm=zeros_zt, thlm=zeros_zt, um=zeros_zt, vm=zeros_zt, wprtp=zeros_zm,
         wpthlp=zeros_zm, rtp2=zeros_zm, thlp2=zeros_zm, rtpthlp=zeros_zm)
     sfc_elevation = flip_vertical(z_half)[:, 0]
+    if omega is None:
+        wm_zt, wm_zm = zeros_zt, zeros_zm
+    else:
+        # clubb_intr.F90:1677-1679, 1778 (cam_cesm2_1_rel_60)
+        wm_zt = -flip_vertical(omega) / (rho_ds_zt * constants.g)
+        wm_zm = zt2zm(wm_zt, gr)
     new_state, diags = advance_clubb_core(
         state, forcing, Lscale=Lscale, brunt_vaisala_freq_sqd=brunt,
         exner_zt=exner_zt, p_in_Pa_zt=p_zt, p_sfc=flip_vertical(p_half)[:, 0],
         thv_ds_zt=thv_ds_zt,
         thv_ds_zm=thv_ds_zm, rho_ds_zm=rho_ds_zm, rho_ds_zt=rho_ds_zt,
         invrs_rho_ds_zm=invrs_rho_ds_zm, invrs_rho_ds_zt=invrs_rho_ds_zt,
-        wm_zt=zeros_zt, wm_zm=zeros_zm, sfc_elevation=sfc_elevation,
+        wm_zt=wm_zt, wm_zm=wm_zm, sfc_elevation=sfc_elevation,
         fcor=jnp.zeros((ncol,), dtype=T.dtype), ug=um, vg=vm, dt=dt, gr=gr,
-        config=config, radht_zt=radht_zt,
+        config=config, l_implemented=True, radht_zt=radht_zt,
         # A PRESCRIBED surface stress is a vector boundary condition, so it is
         # applied as one. A stress the scheme computed itself from this wind is
         # already antiparallel to it, and takes the reference path unchanged.
@@ -6629,20 +6806,22 @@ def clubb_step(
     du_dt = (u_new - u) / dt
     dv_dt = (v_new - v) / dt
     if liquid_partition:
-        # CAM's outbound split (clubb_intr.F90:2159,2160): the post-advance PDF
-        # closure's rcm IS the new cloud liquid, so vapour is the remainder of
-        # total water and the temperature carries that liquid's latent heat.
-        # That rcm is the IN-LAYER value (l_use_cloud_cover = .true. overwrites
-        # rcm with rcm_in_layer, pdf_closure_module.F90:4340-4348); it is not
-        # clipped against rtm (only the grid mean is), so q_v >= 0 is NOT
-        # guaranteed here -- the same as CAM.
-        rcm_new = flip_vertical(diags["rcm"])
+        # CAM's outbound split (clubb_intr.F90:2159,2160): the new cloud liquid
+        # is the core's rcm_out (copied into rcm at :1991, the same array the
+        # clubbtop search :2043 and relvar :2424 read), so vapour is the
+        # remainder of total water and the temperature carries that liquid's
+        # latent heat.
+        rcm_new = flip_vertical(diags["rcm_out"])
         q_new = flip_vertical(new_state.rtm) - rcm_new
-        T_new = (flip_vertical(new_state.thlm) * exner
-                 + (constants.L_v / constants.c_pd) * rcm_new)
+        # Inverse of the inbound host map (clubb_intr.F90:2048-2051:
+        # clubb_s = cpair*((thlm + (latvap/cpair)*rcm)/exner_clubb)).
+        T_new = (flip_vertical(new_state.thlm)
+                 + (constants.L_v / constants.c_pd) * rcm_new) * exner
         # REPLACES the host liquid, matching the reference; the seeding above is
         # what makes that reversible rather than a one-way ratchet.
         dq_c_dt = (rcm_new - q_c) / dt
+        # relvar's rcm (clubb_intr.F90:2424): rcm_out, host liquid above clubbtop
+        rcm_relvar = flip_vertical(diags["rcm_out"])
     else:
         T_new = flip_vertical(new_state.thlm) * exner  # thl ~ theta, no liquid
         q_new = flip_vertical(new_state.rtm)
@@ -6669,10 +6848,8 @@ def clubb_step(
         # by the surface fluxes, or into the bottom layer if that would dry a
         # level below clubbtop (CAM apply_to_surface).  Heat: the column
         # energy fixer in the caller closes it below clubbtop (2138-2150).
-        w = jax.nn.sigmoid(
-            (jnp.log(jnp.clip(p_full, 1.0, None))
-             - jnp.log(config.trop_cloud_top_press))
-            / config.trop_cloud_taper_lnp_width)
+        w = trop_cloud_top_taper(p_full, config.trop_cloud_top_press,
+                                 config.trop_cloud_taper_lnp_width)
         dp_g = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
         spread = w / jnp.sum(dp_g * w, axis=1, keepdims=True)  # [kg/m2]^-1
 
@@ -6683,17 +6860,19 @@ def clubb_step(
         dv_dt = w * dv_dt + _removed(dv_dt) * spread
         dT_dt = w * dT_dt
         clubbtop = clubb_top_level(troplev, flip_vertical(new_state.rtp2),
-                                   flip_vertical(diags["rcm"]))
+                                   flip_vertical(diags["rcm_out"]))
         below = jnp.arange(nlev)[None, :] > clubbtop[:, None]
         keep = w * below
         removed_water = jnp.sum(dp_g * (1.0 - keep) * (dq_v_dt + dq_c_dt),
                                 axis=1, keepdims=True)
         dq_c_dt = keep * dq_c_dt
+        if liquid_partition:
+            rcm_relvar = q_c + keep * (rcm_relvar - q_c)
         dq_v_dt = return_removed_water(
             keep * dq_v_dt, removed_water, dp_g, q_v, dt, below)
         diags = dict(diags, clubbtop=clubbtop)
     if liquid_partition:
-        diags = dict(diags, dq_c_dt=dq_c_dt)
+        diags = dict(diags, dq_c_dt=dq_c_dt, rcm_relvar=rcm_relvar)
     # KE removed by the momentum mixing + surface stress -> heat [K/s,
     # +warming] (review 2026-10-10 F14; CAM6 clubb_do_energyfix=.true.):
     # exact for the host update u += dt*du, T += dt*dT of this call.
@@ -6702,7 +6881,7 @@ def clubb_step(
     # host's c_pd*T + L_v*q_v: the heat BC (latent-enthalpy correction
     # included) plus the water BC at the reference L_v.  Equals shflx + lhflx
     # for the bulk and injected paths; read by the column energy fixer.
-    sfc_energy_in = rho_sfc * (constants.c_pd * exner_sfc * wpthlp_sfc
+    sfc_energy_in = rho_sfc * (constants.c_pd * wpthlp_sfc
                                + constants.L_v * wprtp_sfc)  # latent-ok: CAM6 clubb_intr energy-fix reference constant
     diags = dict(diags, ustar=ustar, shflx=shflx, lhflx=lhflx,
                  sfc_energy_in=sfc_energy_in)
@@ -6733,6 +6912,7 @@ def clubb_turbulence_prognostic(
     rad_dT_dt: jax.Array | None = None,
     q_c: jax.Array | None = None,
     lat: jax.Array | None = None,
+    omega: jax.Array | None = None,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
 
@@ -6790,6 +6970,11 @@ def clubb_turbulence_prognostic(
     fallback need it) is found ONCE from the host state, as clubb_intr.F90:1611
     does before its sub-cycle, and seeds ``clubbtop`` in every sub-step.
 
+    **Pressure velocity** (``omega``, ``(ncol, nlev)`` top-down [Pa/s]):
+    forwarded to :func:`clubb_step`, which sets CLUBB's ``wm`` from it on every
+    sub-step at the held host density (CAM computes ``wm_zt`` once, before its
+    ``nadv`` loop, clubb_intr.F90:1677 cam_cesm2_1_rel_60). ``None``: ``wm = 0``.
+
     Returns ``(TurbulenceOutput, clubb_moments_new)``; the second element flows
     back into ``PhysicsState.clubb_moments`` via the carry machinery.
     """
@@ -6837,8 +7022,6 @@ def clubb_turbulence_prognostic(
             "driver's tiled bottom BC) OR the explicit sfc_* kinematic "
             "prescriptions, not both."
         )
-    exner_sfc = exner_function(p_full[:, -1])
-
     def _sfc_bcs(rho_local):
         """Kinematic lower-BC ``(sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp)`` for
         the given near-surface density.  With an injected tiled DYNAMIC flux we
@@ -6854,9 +7037,12 @@ def clubb_turbulence_prognostic(
         rho_s = rho_local[:, -1]
         _E_sf = surface_moisture_flux(config.surface, lhflx_sf, T_sfc)
         return (
-            # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+            # Heat BC carries the latent enthalpy correction (water at L(T) vs
+            # L_v).  CAM host convention (clubb_intr.F90:1781): wpthlp_sfc =
+            # shf/(cpair*rho_ds_zm(1)), no division by exner; the (1-exner)
+            # share of the heat goes to the column energy fixer, as in CAM.
             (shflx_sf + latent_enthalpy_correction(lhflx_sf, _E_sf))
-            / (rho_s * constants.c_pd * exner_sfc),           # w'thl' [K m/s]
+            / (rho_s * constants.c_pd),                       # w'thl' [K m/s]
             _E_sf / rho_s,                                     # w'rt'  [kg/kg m/s]
             tau_x_sf / rho_s,                                  # u'w'   [m^2/s^2]
             tau_y_sf / rho_s,                                  # v'w'   [m^2/s^2]
@@ -6870,12 +7056,15 @@ def clubb_turbulence_prognostic(
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho),
-            radht_zt=radht_zt, **_liq_kw, **_top_kw)
+            radht_zt=radht_zt, omega=omega, **_liq_kw, **_top_kw)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         sfc_energy_in = diags["sfc_energy_in"]
         clubbtop = diags.get("clubbtop")
         Kh_full = flip_vertical(diags["Kh_zt"])
+        Kh_iface = flip_vertical(diags["Kh_zm"])
         cloud_frac_a = diags["cloud_frac"]
+        rcp2_a = diags["rcp2_zt"]
+        rcm_relvar_a = diags.get("rcm_relvar")
         dq_c_dt = diags.get("dq_c_dt")
     else:
         dt_sub = dt / n_sub
@@ -6900,7 +7089,7 @@ def clubb_turbulence_prognostic(
             du, dv, dT, dq, m_new, diag = clubb_step(
                 u_c, v_c, T_c, q_c_col, m_c, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, dt_sub, config, *_sfc_bcs(rho),
-                radht_zt=radht_zt, **_top_kw,
+                radht_zt=radht_zt, omega=omega, **_top_kw,
                 **({"q_c": ql_c} if _liq_on else {}))
             ql_new = ql_c + dt_sub * diag["dq_c_dt"] if _liq_on else ql_c
             carry = (u_c + dt_sub * du, v_c + dt_sub * dv, T_c + dt_sub * dT,
@@ -6925,10 +7114,14 @@ def clubb_turbulence_prognostic(
         clubbtop = (diag_stk["clubbtop"][-1] if "clubbtop" in diag_stk
                     else None)
         Kh_full = flip_vertical(diag_stk["Kh_zt"][-1])
+        Kh_iface = flip_vertical(diag_stk["Kh_zm"][-1])
         # Final sub-step, like Kh: the cloud fraction must correspond to the
         # moments being returned as the carry, not to a sub-cycle average of
         # states the host never sees.
         cloud_frac_a = diag_stk["cloud_frac"][-1]
+        rcp2_a = diag_stk["rcp2_zt"][-1]
+        rcm_relvar_a = (diag_stk["rcm_relvar"][-1] if "rcm_relvar" in diag_stk
+                        else None)
 
     # With an injected tiled flux, report the surface diagnostics as the INJECTED
     # dynamic values directly (Louis-equivalent), rather than clubb_step's
@@ -6951,11 +7144,8 @@ def clubb_turbulence_prognostic(
     # (clubb_intr.F90 2138-2150, k = clubbtop+1..pver), the whole column when
     # trop_cloud_top_press is off.  Liquid reference: q_c carries no latent
     # term; CLUBB moves no ice.
-    dp_g = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
-    dke_dt = (du_dt * (u + 0.5 * dt * du_dt) + dv_dt * (v + 0.5 * dt * dv_dt))
-    resid = (jnp.sum(dp_g * (constants.c_pd * dT_dt + dke_dt
-                             + constants.L_v * dq_v_dt), axis=1)  # latent-ok: CAM6 clubb_intr energy-fix reference constant
-             - sfc_energy_in)
+    resid, dp_g = column_energy_residual(
+        u, v, du_dt, dv_dt, dT_dt, dq_v_dt, p_half, dt, sfc_energy_in)
     if config.trop_cloud_top_press > 0.0:
         w_fix = (jnp.arange(dp_g.shape[1])[None, :]
                  > clubbtop[:, None]).astype(dp_g.dtype)
@@ -6976,10 +7166,14 @@ def clubb_turbulence_prognostic(
     # mixing no longer maintains.  Porting the exclusion, not just the formula.
     cloud_fraction_td = flip_vertical(cloud_frac_a)
     if config.trop_cloud_top_press > 0.0:
-        cloud_fraction_td = cloud_fraction_td * jax.nn.sigmoid(
-            (jnp.log(jnp.clip(p_full, 1.0, None))
-             - jnp.log(config.trop_cloud_top_press))
-            / config.trop_cloud_taper_lnp_width)
+        cloud_fraction_td = cloud_fraction_td * trop_cloud_top_taper(
+            p_full, config.trop_cloud_top_press,
+            config.trop_cloud_taper_lnp_width)
+    # MG2's relvar from the final sub-step's rcm_out and qclvar, both CAM's
+    # pre-advance timing (not the post-advance host liquid); only with the
+    # liquid partition (CAM always partitions).
+    relvar = (None if dq_c_dt is None
+              else cam6_relvar(rcm_relvar_a, flip_vertical(rcp2_a)))
     output = TurbulenceOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dq_v_dt=dq_v_dt,
         Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx,
@@ -6988,7 +7182,12 @@ def clubb_turbulence_prognostic(
         # as lhflx / L_v.
         evap_sfc=surface_moisture_flux(config.surface, lhflx, T_sfc),
         ustar=ustar,
-        h_pbl=h_pbl, cloud_fraction=cloud_fraction_td, dq_c_dt=dq_c_dt)
+        h_pbl=h_pbl, cloud_fraction=cloud_fraction_td, dq_c_dt=dq_c_dt,
+        relvar=relvar,
+        # CAM6 activation inputs (microp_aero/dropmixnuc): khzm_out of the LAST
+        # sub-step's advance (clubb_intr.F90:1915, :1997, surface interface
+        # included) and the end-of-sub-cycle wp2 left in WP2_nadv (:1987).
+        Kh_iface=Kh_iface, wp2_iface=flip_vertical(new_moments.wp2))
     return output, pack_clubb_moments(new_moments)
 
 

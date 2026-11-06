@@ -232,7 +232,7 @@ def replay(a):
                 daily.append(dict(
                     H=np.asarray(H - H0), T0=np.asarray(s.T_soil[:, 0]),
                     snow=np.asarray(s.snow_depth),
-                    skin=np.asarray(land_skin_temperature(s))))
+                    skin=np.asarray(land_skin_temperature(s, cfg))))
         res[arm] = daily
     S0 = np.asarray(state0.snow_depth)[sel]
     print("day | soil heat gain MJ/m2 off on on-off | flux into soil W/m2 off on |"

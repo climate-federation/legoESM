@@ -621,10 +621,41 @@ _CERTIFIED_CARD_DIGESTS_ROUND5 = {          # 85607c118588 + rounds 4 and 5
 # against the GYRE lane tip reports added=1 removed=0 changed=0 on GYRE, both
 # tanks and both VORTEX cards, and the companion test below asserts the added
 # field's value on each certified card.
-_CERTIFIED_CARD_DIGESTS = {                 # re-pinned 2026-10-16 (#2009, #1910 config fields)
-    "GYRE-zco": "56c5171d43504b54",
-    "LOCK_EXCHANGE-zco": "1d457b3a02df1407",
-    "OVERFLOW-zps": "f92bdb57cecb7129",
+_CERTIFIED_CARD_DIGESTS_ORCA2 = {           # ORCA2 fold-in, 2026-09-30
+    "GYRE-zco": "5850bbcfcd351c29",
+    "LOCK_EXCHANGE-zco": "4ec82201f0fae7bf",
+    "OVERFLOW-zps": "7f1ec89b3e6578f5",
+}
+# The pins above went stale as later, explicitly carded shared configuration
+# fields were added.  They were still the active expectation at the incoming
+# gradient-gate tip d678430f3, where this test failed before the round-4 CEN2
+# change.  Re-pin the complete resolved objects here: the round-4 production
+# change is confined to ``_nemo_cen2_tracer_rhs`` and leaves card construction
+# untouched, so these values are identical before and after that change.
+_CERTIFIED_CARD_DIGESTS_GRADGATE = {        # gradient-gate tip d678430f3
+    "GYRE-zco": "99b2dfce324b0f77",
+    "LOCK_EXCHANGE-zco": "70746f41480350ec",
+    "OVERFLOW-zps": "2c562be8a7d2e793",
+}
+# re-pinned 2026-10-16 (#2009, #1910 config fields); re-pinned 2026-10-17 for
+# the ORCA2 lane's new config fields (23 appended to the lat-lon config, 32 in
+# all nested configs) and each deck's explicit
+# rn_bt_alpha, and again for the card-selected flux-form external-mode
+# switch (True on LOCK_EXCHANGE and OVERFLOW) -- the non-config part of
+# every digest is unchanged.  GYRE re-pinned 2026-10-26 (user, PR 2160):
+# dca02dffba3eb14f -> 2dbf0074ab1a4b47; KPP gamma_T/S 6.33 -> 6.3275155 derived
+# from kappa_von_karman, and mxl0_min_m 0.04 -> kappa*z0 (+1 ulp).
+# GYRE re-pinned 2026-10-28 (user): 2dbf0074ab1a4b47 -> 9fa9fec09b9cb850.
+# Measured against the PR 2211 head: the resolved configuration differs by
+# one inserted field only, main's ePBL vertical-mixing config (PR 2122;
+# GYRE resolves vertical_mixing.scheme = "tke"); the non-config part of the
+# digest is identical.
+_CERTIFIED_CARD_DIGESTS = {
+    # The appended config fields move the printed NamedTuple digest; the
+    # surrounding field-by-field guards pin their resolved values below.
+    "GYRE-zco": "6bb18cf2c428e5ab",
+    "LOCK_EXCHANGE-zco": "9f64d2b817f72f5e",
+    "OVERFLOW-zps": "f3ca241ed2a098b7",
 }
 
 
@@ -645,6 +676,13 @@ def test_the_only_config_change_to_a_certified_card_is_the_added_eos_field(case)
     # certified card must keep the metric formula it already ran.
     assert cfg.lateral_viscosity_coefficient_source == "nemo_ldf_c2d"
     assert cfg.eos == "nemo_teos10"
+    assert cfg.nemo_qsr_stage3_kmm_source_association is (
+        True if case == "GYRE-zco" else None)
+    assert cfg.vmix_eos_use_config_rho0 is True
+    # Appended lateral_viscosity_mask_levels: every certified card keeps the
+    # surface masks it always ran.
+    assert cfg.lateral_viscosity_mask_levels == "surface"
+    assert cfg.lateral_shlat == 2.0 and cfg.lateral_side_bc != "nemo_shlat"
 
 
 def _card_digest(card):
@@ -1037,3 +1075,49 @@ def test_the_transcribed_nint_rounds_half_away_from_zero_like_fortran():
     assert [mod._vortex_nint(v) for v in (0.5, 1.5, 2.5, -0.5, -1.5)] == [
         1, 2, 3, -1, -2]
     assert round(0.5) == 0 and round(2.5) == 2   # the rule NOT transcribed
+
+
+# --------------------------------------------------------------------------
+# The ORCA2 lane's flux-form literal external-mode bundle and its raw-mesh
+# WS-RK3 stage faces moved VORTEX-SMT FURTHER from its kt=1-10 NEMO record
+# (main's phase-3 trajectory gate; user decision 2026-10-17), so both are
+# card-selected and no VORTEX card selects either.
+_VORTEX_CASES = (
+    "VORTEX-zco", "VORTEX-15km-zco", "VORTEX-10km-zco",
+    "VORTEX_VEC-zco", "VORTEX_VEC-15km-zco", "VORTEX_VEC-10km-zco",
+    "VORTEX_SMT-zps", "VORTEX_SMT_VEC-zps", "VORTEX_SMT1_VEC-zps",
+    "VORTEX_SMT2_VEC-zps", "VORTEX_SMT3_VEC-zps", "VORTEX_SMT4_VEC-zps")
+
+
+@pytest.mark.parametrize("case", _VORTEX_CASES)
+def test_vortex_cards_select_neither_lane_statement(case):
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        nemo_literal_external_mode_active,
+    )
+    card = build_nemo_testcase_card(case)
+    cfg = card.recipe.model_config
+    assert cfg.barotropic.nemo_literal_external_mode_flux_form is False
+    assert nemo_literal_external_mode_active(cfg) is False
+    assert getattr(card.recipe.z_coord, "nemo_stage_faces_raw_mesh", False) is False
+
+
+def test_both_vortex_smt_levers_are_live_and_card_selected():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    card = build_nemo_testcase_card("VORTEX_SMT-zps")
+    recipe = card.recipe
+    cfg, z = recipe.model_config, recipe.z_coord
+    assert z.nemo_een_barotropic is not None  # the raw mesh exists to be read
+
+    def one_step(config, coord):
+        model = LatLonCGridOceanModel(recipe.grid, coord, config)
+        state = model.step(recipe.initial_state, card.dt_s)
+        return np.asarray(state.u.data), np.asarray(state.eta.data)
+
+    base = one_step(cfg, z)
+    bundle = one_step(cfg._replace(barotropic=cfg.barotropic._replace(
+        nemo_literal_external_mode_flux_form=True)), z)
+    faces = one_step(cfg, z._replace(nemo_stage_faces_raw_mesh=True))
+    assert any(not np.array_equal(b, a) for a, b in zip(base, bundle))
+    assert any(not np.array_equal(f, a) for a, f in zip(base, faces))

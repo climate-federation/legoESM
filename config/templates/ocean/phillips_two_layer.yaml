@@ -5,7 +5,7 @@ experiment:
   tier: tier2
   complexity: primitive_equation
   extent: idealized
-  maturity: structurally_validated
+  maturity: run_tested
   description: >
     Phillips two-layer baroclinic instability: a vertically-sheared two-layer
     flow grows the fastest baroclinic mode — a classic mesoscale-instability

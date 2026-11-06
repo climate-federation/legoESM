@@ -56,6 +56,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
 from legoesm import constants
 from legoesm.core.conservation import conservative_positive_clip
 from legoesm.core.field import Field
+from legoesm.ml.checkpoint_io import deserialise_knob_aware
 from legoesm.core.tracers import (
     make_full_moisture_registry,
     make_moisture_registry,
@@ -428,11 +429,11 @@ def _load_midepoch_checkpoint(
     _tmpl5 = (model_template, opt_state_template, _ema_t, _zero, _zero)
 
     def _read4():
-        m, o, e, c = eqx.tree_deserialise_leaves(str(path), _tmpl4)
+        m, o, e, c = deserialise_knob_aware(path, _tmpl4)
         return m, o, None, int(e), int(c)
 
     def _read5():
-        m, o, em, e, c = eqx.tree_deserialise_leaves(str(path), _tmpl5)
+        m, o, em, e, c = deserialise_knob_aware(path, _tmpl5)
         return m, o, em, int(e), int(c)
 
     # ALWAYS attempt the 5-tuple layout FIRST, then fall back to 4-tuple.
@@ -444,12 +445,12 @@ def _load_midepoch_checkpoint(
     # 5-tuple template RELIABLY raises (the file's int32 epoch scalar lands
     # where the 5-tuple template expects the EMA model's float array leaf,
     # a dtype/shape mismatch), so control reaches the 4-tuple fallback.
-    _last_exc = None
+    _excs = []
     for _reader in (_read5, _read4):
         try:
             m, o, em, e, c = _reader()
         except Exception as exc:  # equinox mismatch: broad by design
-            _last_exc = exc
+            _excs.append(exc)
             continue
         if ema_template is None:
             # Caller does not want the EMA (EMA disabled this run) — drop it.
@@ -457,7 +458,7 @@ def _load_midepoch_checkpoint(
         return m, o, em, int(e), int(c)
     raise RuntimeError(
         f"Could not deserialise {path} as either the 5-tuple or 4-tuple "
-        f"mid-epoch layout: {_last_exc!r}"
+        f"mid-epoch layout: 5-tuple {_excs[0]!r}; 4-tuple {_excs[1]!r}"
     )
 
 
@@ -1192,8 +1193,10 @@ def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name)
     # Refuse configs whose explicit advection is unstable (the T63 dt=1800
     # blowup class): the CI deck gate cannot see ad-hoc YAMLs or CLI dt
     # overrides, so the bound is enforced where the integrator is built.
-    from legoesm.atmosphere.dynamics.gcm.spectral_pe import check_advective_cfl
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        check_advective_cfl, refuse_semi_implicit_hybrid)
     check_advective_cfl(int(grid.n_max), dt, pe_config)
+    refuse_semi_implicit_hybrid(pe_config, sigma_coord)
 
     if not pe_config.semi_implicit:
         def _integrate_explicit(state, tendency_fn):
@@ -3791,7 +3794,7 @@ def _train_spectral_loop(
                 Path(resume_from_dir) / f"epoch_{start_epoch - 1:04d}_ema.eqx"
             )
             if _cand.exists():
-                ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
+                ema_model = deserialise_knob_aware(_cand, ema_model)
                 logger.info(f"EMA resume: restored {_cand}")
             else:
                 logger.warning(
@@ -5669,7 +5672,7 @@ def _train_sfno_full_loop(
                 / f"epoch_{start_epoch - 1:04d}_ema.eqx"
             )
             if _cand.exists():
-                ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
+                ema_model = deserialise_knob_aware(_cand, ema_model)
                 logger.info(f"EMA resume: restored {_cand}")
             else:
                 logger.warning(

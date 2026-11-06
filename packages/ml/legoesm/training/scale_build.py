@@ -564,8 +564,32 @@ def build_latlon_config(cfg, yml):
         # unless the YAML overrides.
         "--rad-update-steps", str(int(yml.get("rad_update_steps", 1))),
     ]
+    # Prognostic sea-ice skin (#2106): auto unless the deck sets true/false.
+    _skin = yml.get("ice_skin_prognostic", "auto")
+    if _skin is True:
+        argv.append("--ice-skin-prognostic")
+    elif _skin is False:
+        argv.append("--no-ice-skin-prognostic")
+    elif _skin != "auto":
+        raise ValueError(
+            f"ice_skin_prognostic must be true, false or auto; got {_skin!r}")
     parsed = ra.build_arg_parser().parse_args(argv)
-    return ra.build_config_from_args(parsed)
+    return resolve_training_ice_skin(ra.build_config_from_args(parsed))
+
+
+def resolve_training_ice_skin(config):
+    """Resolve the ice-skin "auto" once for a trainer, as ModelDriver.setup
+    would for a single-process run, so the ERA5 carries, the physics pipeline
+    and the driver context all see the same explicit value."""
+    from legoesm.driver.config import (
+        resolve_ice_skin_prognostic, resolve_sea_ice_albedo_scheme)
+    on, why = resolve_ice_skin_prognostic(config)
+    config = config._replace(ice_skin_prognostic=on)
+    config = config._replace(
+        sea_ice_albedo_scheme=resolve_sea_ice_albedo_scheme(config))
+    logger.info("  Sea-ice albedo scheme: %s (ice skin %s: %s)",
+                config.sea_ice_albedo_scheme, "ON" if on else "OFF", why)
+    return config
 
 
 # --- campaign-YAML key validation (2026-08-24) ------------------------------
@@ -580,7 +604,8 @@ _WB_CONSUMED_TOP_KEYS = frozenset({
     "era5_sea_ice_climatology",
     "era5_zarr", "eval_years", "learned_position_embedding",
     "near_surface_head",
-    "grad_accum", "grad_clip_norm", "gravity_wave_drag", "loss", "lr",
+    "grad_accum", "grad_clip_norm", "gravity_wave_drag",
+    "ice_skin_prognostic", "loss", "lr",
     "microphysics", "n_epochs", "n_lat", "n_lon", "n_training_days",
     "neural_gcm", "nlev", "optimizer", "rad_update_steps", "radiation",
     "sfno", "shuffle_seed", "smoke_radiation", "spectral", "state_cache_dir",
@@ -650,6 +675,18 @@ def wb_ema_decay(yml: dict) -> float:
     if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v < 1.0:
         raise ValueError(f"ema_decay must be a number in [0, 1), got {v!r}")
     return float(v)
+
+
+def _pinned_morrison_config(active: set, param_fixed: dict) -> dict | None:
+    """``{scheme_key: MorrisonConfig}`` as the run builds it from the deck
+    pins, when Morrison is active; None otherwise."""
+    key = "atm.micro.MorrisonConfig"
+    if key not in active:
+        return None
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.core.param_overrides import apply_param_overrides
+    return {key: apply_param_overrides(MorrisonConfig(),
+                                       dict(param_fixed.get(key, {})))}
 
 
 def _pinned_trainable_names(param_fixed: dict) -> set:
@@ -1053,10 +1090,15 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
                         cloud_scheme=_schemes["cloud_scheme"],
                         microphysics=_schemes["microphysics_scheme"],
                         gwd=_schemes["gwd_scheme"],
+                        turbulence=_schemes["turbulence_scheme"],
                         subgrid_orography=getattr(
                             grid, "subgrid_topo_stddev", None) is not None,
                         param_fixed=_param_fixed)
                     | _pinned_trainable_names(_param_fixed))),
+                # the run's Morrison config (deck pins, e.g. a flavour) so an
+                # unset-able field (DCS) seeds where the run resolves it
+                scheme_configs=_pinned_morrison_config(
+                    _active, _param_fixed),
             )
             params = AIMIPTrainableBundle(
                 classical=params, schemes=_scheme_params)
@@ -2244,6 +2286,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     _clim = wb_flux_climatology(cfg, yml, grid)
     _sic_clim = wb_sea_ice_climatology(cfg, yml, grid)
 
+
     def build(year, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
         s_ic, s_tg, sst_src = _sample_inputs(
             era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at,
@@ -2437,8 +2480,14 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
         s_ic, s_tg, sst_src = _sample_inputs(
             era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at)
         tp = era5_terrain_product(s_ic, grid)
-        ic = era5_to_latlon_carry(s_ic, grid, sigma, target_phis=tp, microphysics=_micro)
-        target = era5_to_latlon_carry(s_tg, grid, sigma, target_phis=tp, microphysics=_micro)
+        _skin = bool(config.ice_skin_prognostic)
+        ic = era5_to_latlon_carry(s_ic, grid, sigma, target_phis=tp,
+                                  microphysics=_micro, ice_skin_prognostic=_skin,
+                                  convection=config.convection)
+        target = era5_to_latlon_carry(s_tg, grid, sigma, target_phis=tp,
+                                      microphysics=_micro,
+                                      ice_skin_prognostic=_skin,
+                                      convection=config.convection)
         sst = regrid_2d_to_gaussian(sst_src.sst, sst_src.lat, sst_src.lon, grid)
         # Prescribed surface planes the slice carries (spectral names),
         # regridded exactly like sst, then renamed to the driver-path

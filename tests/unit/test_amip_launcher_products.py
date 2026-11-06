@@ -81,6 +81,24 @@ def test_levante_python_launcher_names_the_production_products(monkeypatch, caps
     assert cmd[cmd.index("--aerosol-reference-aod") + 1] == "0.03"
 
 
+def test_levante_python_launcher_forwards_distributed(monkeypatch, capsys):
+    """run_amip federates the SPMD lane only when --distributed is on ITS
+    command line (user decision 2026-10-28), so the wrapper's --distributed
+    must reach it."""
+    spec = importlib.util.spec_from_file_location(
+        "run_amip_levante", REPO / "scripts" / "run" / "run_amip_levante.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "_check_files", lambda files: [])   # Levante paths
+    assert mod.main(["--year", "1979", "--days", "1", "--distributed",
+                     "--n-ranks", "2", "--dry-run",
+                     "--extra", "--distributed-mode", "spmd"]) == 0
+    printed = capsys.readouterr().out.split("[levante] Command:")[1]
+    cmd = [tok for tok in printed.split() if tok != "\\"]
+    assert cmd[0] == "srun"
+    assert "--distributed" in cmd[cmd.index(next(t for t in cmd if t.endswith("run_amip.py"))):]
+
+
 def test_levante_chain_does_not_swap_one_forcing_channel():
     """The GPU chain (every Levante submit_*.sh) must not re-point one of the
     aerosol / CCN / volcanic products the sourced launcher names (its

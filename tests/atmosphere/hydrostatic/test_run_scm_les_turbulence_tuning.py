@@ -40,7 +40,8 @@ def test_scheme_list_matches_the_dispatch():
     for scheme in drv.TURBULENCE_SCHEMES:
         assert f'"{scheme}"' in src, f"{scheme} not in get_turbulence_fn"
     assert "none" not in drv.TURBULENCE_SCHEMES
-    assert len(drv.TURBULENCE_SCHEMES) == 9
+    # mynn25 dropped in R3 (WRF port: no SCM-LES inputs, no tunables)
+    assert len(drv.TURBULENCE_SCHEMES) == 8
 
 
 @pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)
@@ -448,16 +449,12 @@ def test_the_derived_set_catches_what_the_old_list_missed():
 
 
 def test_the_dead_check_covers_every_scheme_not_just_clubb():
-    """It is not CLUBB-specific, and MYNN-2.5 has dead fields too.
-
-    ``C4`` is documented dead (NN09 sets it to zero and the port does not read
-    it) and ``tke_min`` is declared but unused. Both are already excluded from
-    ``__param_spec__``, so neither reaches the tuner -- but the check must SEE
-    them, or it is only ever going to notice CLUBB.
+    """It is not CLUBB-specific.  (Its MYNN-2.5 surrogate example -- dead
+    ``C4``/``tke_min`` -- went with the surrogate in R3; mynn25 is now the WRF
+    port and no longer a tuner scheme.)
     """
     from legoesm.atmosphere.physics.turbulence import config as turb_config
 
-    assert drv._dead_params_for("mynn25") == {"C4", "tke_min"}
     # Schemes whose every field is consumed must come back EMPTY -- the
     # assertion that fails loudly if the resolver ever returns everything,
     # which would silently freeze the whole model.
@@ -483,7 +480,7 @@ def test_surface_cd_is_the_neutral_log_law_at_the_les_roughness():
     from legoesm import constants
     case = _bomex_case()
     surf = drv.build_surface_config(case)
-    expect = (constants.kappa_vk / math.log(surf.z_ref / surf.z0)) ** 2
+    expect = (constants.kappa_von_karman / math.log(surf.z_ref / surf.z0)) ** 2
     assert surf.Cd_neutral == pytest.approx(expect, rel=1e-12)
     assert surf.z0 == pytest.approx(case.spec.les_z0_m)
     # z_ref must be the level whose wind the flux routine is handed
@@ -631,7 +628,7 @@ def test_neutral_drag_matches_the_in_loop_log_law():
 
     for z_ref, z0, u in ((20.0, 1e-4, 8.75), (10.0, 0.1, 5.0), (30.0, 1e-3, 12.0)):
         cd = float(neutral_drag_coefficient(z_ref, z0))
-        in_loop_ustar = constants.kappa_vk * u / max(
+        in_loop_ustar = constants.kappa_von_karman * u / max(
             float(jnp.log(z_ref / z0)), 0.5)
         assert cd ** 0.5 * u == pytest.approx(in_loop_ustar, rel=1e-12), (
             z_ref, z0)

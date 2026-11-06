@@ -84,7 +84,12 @@ class TestSchemeLiteralsResolveOrExplicitNIE:
             with pytest.raises(ValueError, match="momentum transport"):
                 _cfg(convection=scheme)
             return
-        config = _cfg(convection=scheme)
+        if scheme == "tiedtke":  # WRF port reads the turbulence lags (V21)
+            with pytest.raises(ValueError, match="turbulence='none'"):
+                _cfg(convection=scheme)
+            config = _cfg(convection=scheme, turbulence="louis")
+        else:
+            config = _cfg(convection=scheme)
         if scheme in _PIPELINE_UNSUPPORTED_CONVECTION:
             with pytest.raises(NotImplementedError, match="bridge"):
                 _resolve_convection(config)
@@ -94,7 +99,8 @@ class TestSchemeLiteralsResolveOrExplicitNIE:
 
     @pytest.mark.parametrize("scheme", MICROPHYSICS_LITERALS)
     def test_microphysics(self, scheme):
-        config = _cfg(microphysics=scheme)
+        config = _cfg(microphysics=scheme, **(
+            {"morrison_warm_rain_scheme": "kk2000"} if scheme == "morrison" else {}))
         if scheme == "none":
             assert _resolve_microphysics(config) == (None, None)
         elif scheme in _PIPELINE_UNSUPPORTED_MICROPHYSICS:

@@ -140,10 +140,17 @@ def _manifest_summary(snapshot_path):
     dirty tree") live in the run manifest, and a scorecard that only records
     the snapshot PATH loses them the moment the directory is renamed.
 
-    TWO LAYOUTS.  The tripole/MPAS writer nests everything under ``run`` and
-    ``reproducibility``; the FESOM lane writes a FLAT manifest whose command
-    line is ``argv`` and whose SHA is top-level ``git_sha``.  Reading only the
-    nested one returned all-None for every FESOM arm (measured 2026-09-16) --
+    THREE LAYOUTS.  The canonical writer -- which the OMIP drivers' tripole/
+    MPAS lanes and, since #2102, their FESOM lanes and the standalone
+    fesom_jax oracle runner use -- is NESTED: the command line is
+    ``run.command_line``, the dirty flag is under ``reproducibility``, and
+    the commit is ``legoESM.commit``.  The fesom_jax runner's manifests
+    written BEFORE #2102 are hand-written and nested: same
+    ``run.command_line``, but the SHA is ``reproducibility.git_sha`` and
+    there is no dirty flag.  OMIP FESOM manifests written BEFORE #2102 are
+    FLAT: the command line is ``argv`` and the SHA is top-level ``git_sha``.
+    Reading only the nested one returned all-None for every such old FESOM
+    arm (measured 2026-09-16) --
     the provenance silently vanished for exactly the grid whose configuration
     differs most from the others, which is the case this caveat exists for.
     """
@@ -164,7 +171,8 @@ def _manifest_summary(snapshot_path):
            "manifest_layout": "nested" if run else ("flat" if argv else "unknown"),
            "command_line": cmd,
            "git_dirty": repro.get("git_dirty"),
-           "git_sha": repro.get("git_sha", m.get("git_sha")),
+           "git_sha": repro.get("git_sha", m.get("git_sha",
+                                (m.get("legoESM") or {}).get("commit"))),
            "legoesm_version": repro.get("legoesm_version"),
            "creation_time": run.get("creation_time", m.get("creation_time"))}
     if out["command_line"] is None:

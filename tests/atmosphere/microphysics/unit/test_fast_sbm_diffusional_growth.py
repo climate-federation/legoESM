@@ -35,9 +35,9 @@ P0 = 9.0e4
 
 def test_diffusivity_reference_state():
     cfg = FastSBMConfig()
-    # At (T_freeze, p_atm_std) the law collapses to the reference value.
+    # At the oracle reference (TZERO, PZERO) the law collapses to D_MYIN.
     D = float(vapor_diffusivity(jnp.asarray(constants.T_freeze),
-                                jnp.asarray(constants.p_atm_std), cfg))
+                                jnp.asarray(constants.p_zero_fast_sbm), cfg))
     assert D == pytest.approx(cfg.d_vapor_ref_m2s, rel=1e-12)
     # Lower pressure / warmer air → faster diffusion (signs of the law).
     assert float(vapor_diffusivity(jnp.asarray(T0), jnp.asarray(P0), cfg)) > D
@@ -115,7 +115,7 @@ def test_growth_coefficient_matches_sdm_maxwell_core():
     cfg = FastSBMConfig(
         d_vapor_ref_m2s=float(
             constants.D_vapor
-            / ((constants.p_atm_std / P0)
+            / ((constants.p_zero_fast_sbm / P0)
                * (T0 / constants.T_freeze) ** FastSBMConfig().diffusivity_T_exponent)
         )
     )

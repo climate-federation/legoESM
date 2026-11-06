@@ -88,7 +88,12 @@ def test_turbulence_scheme_traits_match_seeding():
             "tke": bool(np.any(np.asarray(ps.tke) > 0)),
             "qke": bool(np.any(np.asarray(ps.qke) > 0)),
         }
-        if traits.carries_energy:
+        if scheme == "mynn25":
+            # WRF MYNN-EDMF: packed (qke, qsq, el), zero seed that the
+            # cold-start step overwrites (R3 votes N1/N3)
+            assert np.asarray(ps.qke).shape == (4, 3, 3)
+            assert not seeded["qke"] and not seeded["tke"]
+        elif traits.carries_energy:
             assert seeded[traits.energy_field], (
                 f"{scheme}: traits say energy in {traits.energy_field!r} "
                 "but init_physics_state seeded it zero"
@@ -972,6 +977,36 @@ def test_mpas_partial_physstate_checkpoint_rejected(tmp_path):
     driver_b.setup()
     driver_b.load_checkpoint(partial)   # load stages the subset
     with pytest.raises(ValueError, match="INCOMPLETE"):
+        driver_b.run()
+
+
+@pytest.mark.usefixtures("allow_version_drift")
+def test_mpas_pre_pblh_checkpoint_restart_is_refused(tmp_path):
+    """Oracle row 47 (user decision 2026-10-20): a checkpoint written before
+    the carried PBL height existed lacks ``physstate_pblh``.  CAM zero-seeds
+    PBLH only on an initial run (physpkg.F90:419-424, phys_inidat called only
+    if initial_run, :803); a restart without the pbuf field is an error
+    (physics_buffer.F90.in:1591).  So the restart must be REFUSED as
+    INCOMPLETE, naming pblh, with ZM (the consumer) configured."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _mpas_driver_cfg(convection="zhang_mcfarlane",
+                           zm_land_fraction="none")
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run() == "COMPLETED"
+    ckpt = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))[-1]
+
+    old = tmp_path / "pre_pblh.npz"
+    with np.load(ckpt) as d:
+        assert "physstate_pblh" in d.files, "save must persist pblh"
+        kept = {k: d[k] for k in d.files if k != "physstate_pblh"}
+    np.savez(old, **kept)
+
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    driver_b.load_checkpoint(old)
+    with pytest.raises(ValueError, match=r"INCOMPLETE.*missing \['pblh'\]"):
         driver_b.run()
 
 

@@ -66,7 +66,10 @@ from legoesm.atmosphere.physics.microphysics.morrison import MorrisonConfig
 from legoesm.driver import physics_pipeline as pp
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
+    DycoreConfig,
+    GridConfig,
     ZM_SCALAR_FIELDS,
+    ZM_WIDTH_FIELDS,
     ExperimentConfig,
 )
 
@@ -87,7 +90,13 @@ _RESOLVERS = {
     "convection_config_for": (
         lambda c: pp.convection_config_for(c),
         [{"convection": "bechtold"}, {"convection": "sbm"},
-         {"convection": "tiedtke"}, {"convection": "zhang_mcfarlane"}],
+         {"convection": "tiedtke"}, {"convection": "zhang_mcfarlane"},
+         # The ZM detrainment widths are legal only where they are read: the
+         # MPAS macro/micro sub-cycle with ZM + CLUBB (validate_strict).
+         {"convection": "zhang_mcfarlane", "turbulence": "clubb",
+          "cld_macmic_num_steps": 3,
+          "grid": GridConfig(grid_type="mpas"),
+          "dycore": DycoreConfig(discretization="mpas")}],
     ),
     "gwd_config_for": (
         lambda c: pp.gwd_config_for(c),
@@ -216,6 +225,7 @@ def _reads(fn, _seen: set[str] | None = None) -> set[str]:
 
 _CFG_NAMES = ("config", "cfg")
 _FIELD_TABLES = {"ZM_SCALAR_FIELDS": ZM_SCALAR_FIELDS,
+                 "ZM_WIDTH_FIELDS": ZM_WIDTH_FIELDS,
                  "CLUBB_SCALAR_FIELDS": CLUBB_SCALAR_FIELDS}
 
 
@@ -288,9 +298,9 @@ def _candidates(field, value) -> list:
     Numeric candidates are two-sided AND two-scale.  Two-sided so a default
     sitting at the EDGE of its validated range still has an admissible
     neighbour.  Two-scale because a 5% nudge cannot cross a rounding or
-    threshold boundary: a resolver doing ``int(config.hines_Fmax)`` maps both
-    0.105 and 0.095 to 0 and would be certified INERT, while the equally legal
-    1.2 changes the result (codex round 2).  ``_INERT`` means "no legal value
+    threshold boundary: a resolver doing ``int(config.mcfarlane_k_wave)`` maps both
+    +-5% of its 6.3e-5 default to 0 and would be certified INERT, while the
+    equally legal 2x+1 changes the result (codex round 2).  ``_INERT`` means "no legal value
     tried changed the output", so the sampled set has to span scales.
 
     Admissibility is NOT decided here: ``validate_strict`` (in :func:`_probe`)
@@ -704,14 +714,14 @@ class TestSelfCheck:
                       "bechtold_downdraft_entrain_rate") == _LIVE
 
     def test_rounding_resolver_is_not_called_inert(self):
-        """A 5%-only candidate list cannot cross an ``int()`` boundary: 0.105
-        and 0.095 both round to 0, so a LIVE field was certified inert
-        (codex round 2).  The legal 1.2 must be reachable as evidence."""
+        """A 5%-only candidate list cannot cross an ``int()`` boundary: +-5% of
+        6.3e-5 both round to 0, so a LIVE field was certified inert (codex
+        round 2).  The legal 2x+1 candidate (>= 1) must be reachable as evidence."""
         def _rounding(config):
-            return int(config.hines_Fmax)
+            return int(config.mcfarlane_k_wave)
 
-        assert _probe("round", _rounding, [{"gravity_wave_drag": "hines"}],
-                      "hines_Fmax") == _LIVE
+        assert _probe("round", _rounding, [{"gravity_wave_drag": "mcfarlane"}],
+                      "mcfarlane_k_wave") == _LIVE
 
     def test_elided_array_difference_is_detected(self):
         """``repr`` elides the middle of a large array, so a repr fallback

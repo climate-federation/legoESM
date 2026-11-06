@@ -36,6 +36,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.field import Field
+from legoesm.core.smooth import smoothstep_quintic
 from legoesm import constants
 from legoesm.ocean.constants_config import (
     NEMO_CONSTANTS_CONFIG as _NEMO_CONSTANTS,
@@ -868,8 +869,12 @@ class DINOConfig:
     rigid_lid_dt_mom_ratio: float = 9.0
     # Barotropic averaging filter (explicit_substep only): "cosine"
     # (legacy) | "power_law" | "box" | "nemo_boxcar_centred" (dynspg_ts
-    # ln_bt_fw=F + nn_bt_flt=1 — the DINO namelist selection).
+    # ln_bt_fw=F + nn_bt_flt=2 — the DINO namelist selection).
     barotropic_time_filter: str = "cosine"
+    # NEMO namdyn_spg rn_bt_alpha.  The NEMO DINO cards state the deck's 0.0
+    # explicitly even though nn_bt_flt=2 takes the hard-coded coefficient arm.
+    # None is an unset sentinel, never a physical fallback.
+    nemo_barotropic_filter_alpha: float | None = None
     # In-substep barotropic Coriolis (node 16): "avg" (legacy 4-pt average,
     # which annihilates the 2Δx checkerboard -> spurious deep-equatorial jet)
     # | "een" (NEMO dyn_spg_ts::dyn_cor_2D enstrophy-conserving EEN
@@ -1634,6 +1639,7 @@ DINO_RECIPES: dict[str, dict] = {
         "nemo_prognostic_barotropic_state": False,
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
+        "nemo_barotropic_filter_alpha": 0.0,
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
         # Coriolis (node 16; cures the deep-equatorial jet velocity null mode).
         # "een_metric" = METRIC-COMPLETE: folds NEMO's e1v/r1_e1u + e2u/r1_e2v
@@ -2084,8 +2090,7 @@ def _smooth_step(x, a: float, b: float):
     Paper eq A2; matches Zenodo `smooth_step` (zgr_lib lines 823-825).
     Returns 0 for x ≤ a, 1 for x ≥ b, smooth in between.
     """
-    t = jnp.clip((x - a) / (b - a), 0.0, 1.0)
-    return 6.0 * t**5 - 15.0 * t**4 + 10.0 * t**3
+    return smoothstep_quintic((x - a) / (b - a))
 
 
 def _exp_bathy(x, x_left: float, x_right: float, width: float,
@@ -4064,6 +4069,9 @@ def dino_lat_lon_model_config(
         # the faithful NEMO cards). Default "vector_laplacian" keeps the A_h·cos(φ)
         # scalar path byte-identical for every other recipe.
         lateral_viscosity_operator=cfg.lateral_viscosity_operator,
+        lateral_viscosity_mask_levels=(
+            "per_level" if cfg.lateral_viscosity_operator == "vector_laplacian"
+            else "surface"),
         # #1455: e3-weighting of the nemo_div_curl div/curl (default "off",
         # bit-identical; the kamm card leaves this at "off" -- the
         # e3-weighted variant regressed the dyn_ldf gate rows in a
@@ -4082,6 +4090,7 @@ def dino_lat_lon_model_config(
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
         barotropic_time_filter=cfg.barotropic_time_filter,
+        nemo_barotropic_filter_alpha=cfg.nemo_barotropic_filter_alpha,
         barotropic_coriolis=cfg.barotropic_coriolis,
         barotropic_coriolis_split=cfg.barotropic_coriolis_split,
         # BarotropicConfig fields (#1226; see the DINOConfig docstrings).

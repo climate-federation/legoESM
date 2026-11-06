@@ -45,7 +45,6 @@ from legoesm.atmosphere.physics.convection.config import (
     ZhangMcFarlaneConfig,
     KainFritschConfig,
     EmanuelConfig,
-    TiedtkeConfig,
     BechtoldConfig,
 )
 from legoesm.atmosphere.physics.convection.integration import (
@@ -107,10 +106,9 @@ def mpas_state(mpas_mesh, sigma_coord):
         ("zhang_mcfarlane", "zhang_mcfarlane", ZhangMcFarlaneConfig),
         ("kain_fritsch", "kain_fritsch", KainFritschConfig),
         ("emanuel", "emanuel", EmanuelConfig),
-        ("tiedtke", "tiedtke", TiedtkeConfig),
         ("bechtold", "bechtold", BechtoldConfig),
     ],
-    ids=["zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold"],
+    ids=["zhang_mcfarlane", "kain_fritsch", "emanuel", "bechtold"],
 )
 def scheme_config(request):
     """Yield a (name, ConvectionConfig) pair for each of the 5 new schemes."""
@@ -119,6 +117,15 @@ def scheme_config(request):
     kwargs = {scheme_field: (scheme_cls(land_fraction="none")
                              if name == "zhang_mcfarlane" else scheme_cls())}
     return name, ConvectionConfig(scheme=name, **kwargs)
+
+
+def _zm_ps(scheme_name, state):
+    """ZM needs the carried PBL height: a fresh PhysicsState (pblh = 0, CAM's
+    cold start) for ZM, no carry for the other schemes (as before)."""
+    if scheme_name != "zhang_mcfarlane":
+        return None
+    from tests._zm_cold_start import cold_phys_state
+    return cold_phys_state(state.T.data)
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +142,8 @@ class TestConvectionLatLon:
             cfg, model_type="hydrostatic", dt=300.0,
         )
         # Returns (tendencies, conv_prog_out).
-        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord)
+        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, latlon_state))
         # Basic structure.
         assert tend.dT_dt.data.shape == latlon_state.T.data.shape, (
             f"{scheme_name}: dT_dt shape mismatch"
@@ -156,7 +164,8 @@ class TestConvectionLatLon:
         physics_fn = make_convection_physics(
             cfg, model_type="hydrostatic", dt=300.0,
         )
-        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord)
+        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, latlon_state))
         assert tend.dT_dt.dims == latlon_state.T.dims, (
             f"{scheme_name}: dT_dt dims {tend.dT_dt.dims} should match "
             f"state.T.dims {latlon_state.T.dims}"
@@ -172,7 +181,8 @@ class TestConvectionLatLon:
         physics_fn = make_convection_physics(
             cfg, model_type="hydrostatic", dt=300.0,
         )
-        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord)
+        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, latlon_state))
         assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data))), (
             f"{scheme_name}: dT_dt has NaN/Inf"
         )
@@ -208,7 +218,8 @@ class TestConvectionMPAS:
         physics_fn = make_convection_physics(
             cfg, model_type="mpas", dt=300.0,
         )
-        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
         assert tend.dT_dt.data.shape == mpas_state.T.data.shape, (
             f"{scheme_name}: dT_dt shape mismatch"
         )
@@ -230,7 +241,8 @@ class TestConvectionMPAS:
         physics_fn = make_convection_physics(
             cfg, model_type="mpas", dt=300.0,
         )
-        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
         assert tend.dT_dt.dims == mpas_state.T.dims, (
             f"{scheme_name}: dT_dt dims {tend.dT_dt.dims} should match "
             f"state.T.dims {mpas_state.T.dims}"
@@ -246,191 +258,61 @@ class TestConvectionMPAS:
         physics_fn = make_convection_physics(
             cfg, model_type="mpas", dt=300.0,
         )
-        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
         assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data))), (
             f"{scheme_name}: dT_dt has NaN/Inf"
         )
         assert bool(jnp.all(jnp.isfinite(tend.du_dt.data)))
         assert bool(jnp.all(jnp.isfinite(tend.dp_s_dt.data)))
 
-    def test_tiedtke_mpas_passes_none_not_zeros_for_missing_mc(
+    def test_kf_wrf_variant_mpas_needs_reconstructed_winds(
         self, mpas_mesh, mpas_state, sigma_coord,
     ):
-        """MPAS state has ``state.v is None`` and no ``q_v`` tracer,
-        so the bridge cannot synthesize a moisture convergence
-        diagnostic.  Pre-fix the bridge passed ``mc_col = zeros`` to
-        the leaf, which silently bypassed Tiedtke's saturation-deficit
-        proxy (the leaf gates the proxy on
-        ``moisture_convergence is None``).  After the fix the bridge
-        passes ``None`` and the proxy fires.
+        """The opt-in WRF KF-Eta variant on MPAS: refused with mpas_cmt off
+        (it would run on zero winds), finite with the edge-normal
+        reconstruction on.  The smooth default runs either way (above)."""
+        wrf = KainFritschConfig(variant="wrf_kfeta")
+        off = make_convection_physics(
+            ConvectionConfig(scheme="kain_fritsch", kain_fritsch=wrf),
+            model_type="mpas", dt=300.0)
+        with pytest.raises(ValueError, match="mpas_cmt"):
+            off(mpas_state, mpas_mesh, sigma_coord)
+        # With the reconstruction on, the port receives exactly the
+        # reconstructed cell winds (spy on the port's entry; codex r1).
+        import numpy as np
 
-        ``smooth_positive_part`` is strictly positive everywhere
-        (it is a softplus), so a "carry > 0" assertion would pass
-        even with ``mc_col = zeros``.  Instead we exercise the leaf
-        directly twice — once with ``moisture_convergence=None``
-        (proxy path) and once with ``moisture_convergence=zeros``
-        (no-proxy path) — and assert the bridge's dT/dt matches the
-        proxy call and *differs* from the zeros call.  This pins the
-        actual semantic difference the fix is meant to deliver.
+        from legoesm.atmosphere.physics.convection import kain_fritsch_wrf
+        from legoesm.grids.voronoi import reconstruct_cell_velocity
+        real = kain_fritsch_wrf.kain_fritsch_wrf_convection
+        seen = {}
+        # the fixture starts at rest; give the edges a non-trivial wind
+        ne, nl = mpas_state.u.data.shape
+        st = mpas_state._replace(u=mpas_state.u.replace(
+            data=5.0 * jnp.sin(jnp.arange(ne, dtype=mpas_state.u.data.dtype))[:, None]
+            * jnp.ones((1, nl), dtype=mpas_state.u.data.dtype)))
 
-        For the proxy path to differ measurably from the
-        ``moisture_convergence=zeros`` path the column needs *some*
-        moisture: the proxy is ``column-integrated max(q_v - RH_crit
-        q_sat, 0)`` and vanishes identically when ``q_v = 0``.  Attach
-        a near-saturated ``q_v`` field to ``mpas_state.tracers`` so
-        the proxy fires (~2.7e-14 magnitude under q_v=0 collapses to
-        identical noise floor in both paths and the differential
-        signal vanishes).
-        """
-        from legoesm.atmosphere.physics.convection.tiedtke import (
-            tiedtke_convection,
-        )
-        from legoesm.thermo import saturation_mixing_ratio
-        from legoesm.grids.vertical import pressure_from_sigma
-        from legoesm.core.field import Field
+        def spy(*a, **kw):
+            seen["u"], seen["v"] = kw["u"], kw["v"]
+            return real(*a, **kw)
 
-        # Build a near-saturated q_v field consistent with the state's T,p_s
-        # profile, then wrap in tracers so the bridge's q_v_col path fires.
-        nlev = sigma_coord.n_levels
-        ncol = mpas_state.T.data.shape[0]
-        T_col = mpas_state.T.data.reshape(ncol, nlev)
-        _state_dtype = T_col.dtype
-        p_s_arr = mpas_state.p_s.data
-        p_full_col = pressure_from_sigma(
-            sigma_coord.sigma_full, p_s_arr,
-        ).reshape(ncol, nlev)
-        p_half_col = pressure_from_sigma(
-            sigma_coord.sigma_half, p_s_arr,
-        ).reshape(ncol, nlev + 1)
-        q_sat_col = saturation_mixing_ratio(T_col, p_full_col)
-        # 0.95 RH near the surface, ramping to 0.50 aloft — mirrors the
-        # spectral-PE test fixture.  The proxy uses RH_crit ~ 0.7, so
-        # 0.95 RH layers register as super-critical and the column-MC
-        # proxy produces a non-trivial value.
-        sigma_full = sigma_coord.sigma_full
-        rh_profile = jnp.where(sigma_full > 0.7, 0.95, 0.50)
-        q_v_col = (rh_profile[None, :] * q_sat_col).astype(_state_dtype)
-        q_v_grid = q_v_col.reshape(mpas_state.T.data.shape)
-        mpas_state = mpas_state._replace(
-            tracers={
-                "q_v": Field(
-                    data=q_v_grid, name="q_v",
-                    dims=mpas_state.T.dims, units="kg/kg",
-                ),
-            },
-        )
-
-        cfg = ConvectionConfig(scheme="tiedtke", tiedtke=TiedtkeConfig())
-
-        # Bridge call.
-        physics_fn = make_convection_physics(
-            cfg, model_type="mpas", dt=300.0,
-        )
-        tend_bridge, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
-
-        # Replicate the column inputs the bridge constructs for the
-        # MPAS Tiedtke path.  ``state.v is None`` and edge-vs-cell
-        # mismatch → u/v are zeros (this is the bridge's MPAS CMT
-        # graceful-degrade branch).  ``phys_state is None`` →
-        # conv_prog_profile is zeros at first call.
-        # Build column inputs first so we can attach a non-zero q_v
-        # both to the in-test ``mpas_state.tracers`` (bridge sees it)
-        # and to the proxy/zeros leaf calls (so the proxy path actually
-        # has sat_excess > 0 — without this, q_v=0 makes the proxy
-        # collapse to the same near-zero ``mc_gate(0)`` floor as the
-        # zeros-MC bypass, and the differential test cannot
-        # discriminate the bridge fix.  Pre-fix the test exposed
-        # ``zeros_diff/proxy_scale ≈ 0/2.6e-14``).
-        nlev = sigma_coord.n_levels
-        ncol = mpas_state.T.data.shape[0]
-        T_col = mpas_state.T.data.reshape(ncol, nlev)
-        _state_dtype = T_col.dtype
-        p_s = mpas_state.p_s.data
-        from legoesm.grids.vertical import pressure_from_sigma
-        from legoesm.thermo import saturation_mixing_ratio
-        from legoesm.core.field import Field
-        p_full_col = pressure_from_sigma(
-            sigma_coord.sigma_full, p_s,
-        ).reshape(ncol, nlev)
-        p_half_col = pressure_from_sigma(
-            sigma_coord.sigma_half, p_s,
-        ).reshape(ncol, nlev + 1)
-
-        q_sat_col = saturation_mixing_ratio(T_col, p_full_col)
-        sigma_full = sigma_coord.sigma_full
-        rh_profile = jnp.where(sigma_full > 0.7, 0.95, 0.5)
-        q_v_col = (rh_profile[None, :] * q_sat_col).astype(_state_dtype)
-        q_v_grid = q_v_col.reshape(mpas_state.T.data.shape)
-        q_v_field = Field(
-            data=q_v_grid, name="q_v",
-            dims=mpas_state.T.dims, units="kg/kg",
-        )
-        mpas_state = mpas_state._replace(tracers={"q_v": q_v_field})
-
-        u_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
-        v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
-        prog_in = jnp.zeros((ncol, nlev), dtype=_state_dtype)
-
-        # Bridge call (must come AFTER the tracer attachment).
-        physics_fn = make_convection_physics(
-            cfg, model_type="mpas", dt=300.0,
-        )
-        tend_bridge, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
-
-        # Proxy path: moisture_convergence=None → leaf engages the
-        # saturation-deficit proxy.
-        out_proxy, _ = tiedtke_convection(
-            T=T_col, q_v=q_v_col,
-            p_full=p_full_col, p_half=p_half_col,
-            u=u_col, v=v_col,
-            conv_prog_profile=prog_in,
-            dt=300.0, config=cfg.tiedtke,
-            moisture_convergence=None,
-        )
-        # No-proxy path: moisture_convergence=zeros((ncol, nlev)) →
-        # leaf computes column_MC = 0 and bypasses the proxy.
-        mc_zeros = jnp.zeros((ncol, nlev), dtype=_state_dtype)
-        out_zeros, _ = tiedtke_convection(
-            T=T_col, q_v=q_v_col,
-            p_full=p_full_col, p_half=p_half_col,
-            u=u_col, v=v_col,
-            conv_prog_profile=prog_in,
-            dt=300.0, config=cfg.tiedtke,
-            moisture_convergence=mc_zeros,
-        )
-        proxy_dT = out_proxy.dT_dt.reshape(ncol, nlev)
-        zeros_dT = out_zeros.dT_dt.reshape(ncol, nlev)
-        bridge_dT = tend_bridge.dT_dt.data.reshape(ncol, nlev)
-
-        # The bridge must have called the leaf with
-        # ``moisture_convergence=None`` — i.e. its dT/dt matches the
-        # proxy call to round-off (we use a relative tolerance so
-        # this is robust to dtype promotion in the bridge).
-        npt_max_abs = float(jnp.max(jnp.abs(bridge_dT - proxy_dT)))
-        proxy_scale = float(jnp.max(jnp.abs(proxy_dT))) + 1e-30
-        assert npt_max_abs / proxy_scale < 1e-6, (
-            "Tiedtke MPAS bridge dT/dt should match the proxy-path "
-            "leaf call (moisture_convergence=None).  "
-            f"max |bridge - proxy| / max |proxy| = "
-            f"{npt_max_abs / proxy_scale:.3e}.  Bridge may be "
-            "passing zeros for moisture_convergence instead of None."
-        )
-        # And the proxy and zero-MC paths must differ meaningfully.
-        # ``smooth_positive_part(0 - threshold)`` is small but
-        # non-zero, so this lower bound (1% of proxy magnitude) is
-        # comfortably above numerical noise but well within the
-        # pre/post-fix gap.
-        zeros_diff = float(jnp.max(jnp.abs(proxy_dT - zeros_dT)))
-        assert zeros_diff / proxy_scale > 1e-2, (
-            "Proxy path and zeros-MC path produce indistinguishable "
-            "Tiedtke tendencies — the differential test cannot "
-            "discriminate the bridge fix.  "
-            f"max |proxy - zeros| / max |proxy| = "
-            f"{zeros_diff / proxy_scale:.3e}.  Tighten the test "
-            "fixture (e.g. raise T_init or add a CAPE-positive "
-            "profile) so the proxy contribution becomes more "
-            "distinct from the zero-MC bypass."
-        )
+        mp = pytest.MonkeyPatch()
+        mp.setattr(kain_fritsch_wrf, "kain_fritsch_wrf_convection", spy)
+        try:
+            on = make_convection_physics(
+                ConvectionConfig(scheme="kain_fritsch", kain_fritsch=wrf,
+                                 mpas_cmt=True),
+                model_type="mpas", dt=300.0)
+            tend, _ = on(st, mpas_mesh, sigma_coord)
+        finally:
+            mp.undo()
+        assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data)))
+        u_ref, v_ref = reconstruct_cell_velocity(st.u.data, mpas_mesh)
+        assert float(jnp.max(jnp.abs(u_ref))) > 0.0  # non-trivial winds
+        np.testing.assert_allclose(np.asarray(seen["u"]), np.asarray(u_ref),
+                                   rtol=1e-12, atol=0.0)
+        np.testing.assert_allclose(np.asarray(seen["v"]), np.asarray(v_ref),
+                                   rtol=1e-12, atol=0.0)
 
     def test_mpas_cmt_is_zero_documented_limitation(
         self, scheme_config, mpas_mesh, mpas_state, sigma_coord,
@@ -442,13 +324,14 @@ class TestConvectionMPAS:
         will trip and prompt explicit reconsideration of this gate."""
         scheme_name, cfg = scheme_config
         # Only CMT-capable schemes have a non-trivial CMT path.
-        cmt_capable = {"zhang_mcfarlane", "tiedtke", "bechtold"}
+        cmt_capable = {"zhang_mcfarlane", "bechtold"}
         if scheme_name not in cmt_capable:
             pytest.skip(f"{scheme_name} produces no CMT")
         physics_fn = make_convection_physics(
             cfg, model_type="mpas", dt=300.0,
         )
-        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
         # CMT was disabled because state.u is on edges (shape mismatch
         # vs ncol=nCells).  du_dt should be exactly zero.
         max_du = float(jnp.max(jnp.abs(tend.du_dt.data)))
@@ -625,3 +508,59 @@ class TestTurbulenceGWDMPASStatus:
         cfg = GravityWaveDragConfig(scheme="lindzen")
         fn = make_gwd_physics(cfg, model_type="mpas", dt=300.0)
         assert callable(fn)
+
+
+# ---------------------------------------------------------------------------
+# WRF Tiedtke (own contract: dynamics q_v tendency + lagged turbulence
+# carries, omega, cell-centre winds; so not in the generic parametrisation)
+# ---------------------------------------------------------------------------
+
+def _tiedtke_ps(T_native, *, carries=True):
+    import math
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    shape = jnp.shape(T_native)
+    ncol, nlev = math.prod(shape[:-1]), shape[-1]
+    ps = init_physics_state(
+        ncol, nlev, PhysicsConfig(convection=ConvectionConfig(scheme="tiedtke")),
+        dtype=jnp.asarray(T_native).dtype)
+    if carries:
+        ps = ps._replace(dyn_tendency_qv=jnp.zeros(shape, ps.evap_sfc.dtype))
+    return ps
+
+
+def test_tiedtke_latlon_bridge_refuses_without_dynamics_tendency(
+        latlon_grid, latlon_state, sigma_coord):
+    fn = make_convection_physics(ConvectionConfig(scheme="tiedtke"),
+                                 model_type="hydrostatic", dt=300.0)
+    with pytest.raises(ValueError, match="needs PhysicsState"):
+        fn(latlon_state, latlon_grid, sigma_coord,
+           phys_state=_tiedtke_ps(latlon_state.T.data, carries=False))
+
+
+def test_tiedtke_latlon_bridge_runs_with_carries(
+        latlon_grid, latlon_state, sigma_coord):
+    fn = make_convection_physics(ConvectionConfig(scheme="tiedtke"),
+                                 model_type="hydrostatic", dt=300.0)
+    from legoesm.core.field import Field
+    T = latlon_state.T
+    st = latlon_state._replace(tracers={
+        **(latlon_state.tracers or {}),
+        "q_i": Field(jnp.zeros_like(T.data), name="q_i", dims=T.dims)})
+    tend, _ = fn(st, latlon_grid, sigma_coord,
+                 phys_state=_tiedtke_ps(T.data))
+    assert tend.dT_dt.data.shape == T.data.shape
+    assert tend.dv_dt.data.shape == latlon_state.v.data.shape
+    assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data)))
+    assert bool(jnp.all(jnp.isfinite(tend.du_dt.data)))
+
+
+def test_tiedtke_mpas_bridge_refuses_without_cell_winds(
+        mpas_mesh, mpas_state, sigma_coord):
+    """MPAS without mpas_cmt hands schemes zero winds; WRF Tiedtke's
+    cumulus friction reads u, v, so it refuses (vote V10)."""
+    fn = make_convection_physics(ConvectionConfig(scheme="tiedtke"),
+                                 model_type="mpas", dt=300.0)
+    with pytest.raises(ValueError, match="cell-centred winds"):
+        fn(mpas_state, mpas_mesh, sigma_coord,
+           phys_state=_tiedtke_ps(mpas_state.T.data))

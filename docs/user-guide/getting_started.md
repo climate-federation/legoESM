@@ -235,6 +235,11 @@ The single most useful command after editing physics:
 JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/<area>/ -x
 ```
 
+`JAX_ENABLE_X64=1` is right for scientific and conservation tests. The unit tier
+(`tests/unit/`) is the exception: CI runs it in fp32 on purpose, and unit tests that
+need x64 enable it themselves. To check a change the way CI does, see
+[Running CI's test jobs locally](../validation/TESTING.md#running-cis-test-jobs-locally).
+
 After touching the dycore on cubed-sphere, always run the atmosphere
 test matrix in quick mode and **eyeball the v-wind snapshots**:
 
@@ -272,7 +277,8 @@ Sea ice: `scripts/matrix/run_sea_ice_test_matrix.py` (15 standard benchmarks).
 ## 8. Common pitfalls
 
 - **Forgetting `JAX_ENABLE_X64=1`.** Most scientific tests need
-  `float64`. Spectral solvers *require* it.
+  `float64`. Spectral solvers *require* it. (But don't set it job-wide for
+  `tests/unit/`, which CI runs in fp32. See above.)
 - **`Buffer has been deleted` errors.** Donated input was reused.
   Use the `.raw` variant (non-donating) inside `jax.grad`.
 - **A new function that already exists.** Search before writing.
