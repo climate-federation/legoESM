@@ -17,7 +17,7 @@
 The CPU fast-literal card changes only `ocean.transcendentals` from `libm` to
 `native`; the exact recipe object and all 44 retained inventory entries remain
 unchanged.  The builder and fail-closed verifier are at
-`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:943-990`.
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:1186-1233`.
 The literal DDM, IWM, and TKE htau/etau implementations retain their written
 formulas and operation-order barriers at
 `packages/ocean/legoesm/ocean/physics/vertical_mixing/double_diffusion.py:309-358`,

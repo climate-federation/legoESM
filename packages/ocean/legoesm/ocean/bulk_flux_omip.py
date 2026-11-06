@@ -72,10 +72,8 @@ unrolled — JIT/vmap/grad safe, no data-dependent control flow).
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from typing import NamedTuple
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -1025,7 +1023,7 @@ def nemo_orca2_k0_surface_card(
 def nemo_orca2_k0_ocean_step(
     card, state, *, s0f, ice_if, s0, s2, chl,
     geothermal_heat_flux_mwm2, prior_surface=None, model=None, sponge=None,
-    nemo_kt=None, profile_annotations=False,
+    nemo_kt=None,
 ):
     """Run S0-F -> S0-M -> S1 -> S3 -> S2, then the rung-10 ocean step.
 
@@ -1071,24 +1069,16 @@ def nemo_orca2_k0_ocean_step(
         surface_mask=jnp.asarray(state.land_mask.data, dtype=jnp.float64),
     )
     ice_if = ice_if._replace(ts_surface=temperature[..., 0])
-    surface_region = (
-        jax.profiler.TraceAnnotation("orca2_round349_surface_eager")
-        if profile_annotations
-        else nullcontext()
+    fields, runoff_now, sss_target = nemo_orca2_k0_s0f(s0f)
+    s2 = s2._replace(runoff_now=runoff_now, sss_target=sss_target)
+    surface = nemo_orca2_k0_surface_card(
+        *fields[:5], *fields[5:],
+        s2.surface_mask, card.albedo, card.precip_factor,
+        card.evap_factor, card.nb_iter,
+        k0_config=card.k0, ice_if=ice_if, s0=s0, s2=s2,
+        prior_surface=prior_surface, chl=chl,
+        geothermal_heat_flux_mwm2=geothermal_heat_flux_mwm2,
     )
-    with surface_region:
-        fields, runoff_now, sss_target = nemo_orca2_k0_s0f(s0f)
-        s2 = s2._replace(runoff_now=runoff_now, sss_target=sss_target)
-        surface = nemo_orca2_k0_surface_card(
-            *fields[:5], *fields[5:],
-            s2.surface_mask, card.albedo, card.precip_factor,
-            card.evap_factor, card.nb_iter,
-            k0_config=card.k0, ice_if=ice_if, s0=s0, s2=s2,
-            prior_surface=prior_surface, chl=chl,
-            geothermal_heat_flux_mwm2=geothermal_heat_flux_mwm2,
-        )
-        if profile_annotations:
-            jax.block_until_ready(surface)
     # sbc_ice_if writes ts(:,:,1,jp_tem,Kmm) before the ocean step on forcing
     # updates.  K0 calls sbc with Kbb=Kmm, so this is the live T slot.
     if (int(nemo_kt) - 1) % int(s0.forcing_stride) == 0:

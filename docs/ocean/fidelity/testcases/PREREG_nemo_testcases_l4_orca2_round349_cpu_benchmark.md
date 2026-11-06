@@ -20,8 +20,10 @@ The registered hypothesis is:
 > regardless of n.**
 
 - **CONFIRM** if legoESM exact-mode steady median seconds/step improves by less
-  than 1.5x from `n=1` to `n=40` **and** its measured mean busy cores at `n=40`
-  is below 2.0.
+  than 1.5x from `n=1` to `n=40` **and** its steady-window mean busy cores at
+  `n=40` is below 2.0. Busy cores for each step is total process CPU seconds
+  across all threads divided by that step's wall time, with no per-thread
+  activity cutoff.
 - **REFUTE** otherwise.
 - No intermediate verdict is defined. Missing `n=1` or `n=40`, fewer than 16
   steady steps, a failed affinity/thread control, or a busy-core measurement
@@ -65,25 +67,26 @@ CPUs may be thread siblings.
 The identical CPU-ID set is passed to legoESM through `taskset -c` and to NEMO
 through Open MPI `--cpu-set <ids> --bind-to core -np n`.
 
-Installed JAX/JAXLIB is 0.10.0. Its own binary flag inventory exposes
-`--xla_cpu_multi_thread_eigen`; the repository's current backend source records
-that dashed `--intra_op_parallelism_threads=N` is rejected by this XLA. The
-installed binary also contains the legacy unprefixed parser key, and a pinned
-JAX compile probe verifies that
-`--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads=N` is accepted.
-The launcher uses that exact `XLA_FLAGS` spelling. It also sets
+Installed JAX/JAXLIB is 0.10.0. The installed
+`/home/dbalwada/legoESM/.venv/lib/python3.13/site-packages/jaxlib/xla_client.py:64-87`
+defines `make_cpu_client` without a thread-count argument and delegates directly
+to `get_tfrt_cpu_client`; this build exposes no real per-process XLA CPU-pool
+size control. The rejected/ignored `intra_op_parallelism_threads` spelling is
+not used. The launcher uses only the real
+`--xla_cpu_multi_thread_eigen=true` XLA flag. The XLA worker count is measured,
+not assumed: under each `taskset` mask it must follow the process affinity. The
+launcher also sets
 `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
-`NUMEXPR_NUM_THREADS`, and `TF_NUM_INTRAOP_THREADS` to `n`, with
-`TF_NUM_INTEROP_THREADS=1`; the process affinity mask remains an independent
-hard execution cap.
+and `NUMEXPR_NUM_THREADS` to `n` for those libraries.
 
 Every legoESM timed step records process and per-thread `utime+stime` deltas
-from `/proc/self/task/*/stat`. `cores_busy` is total CPU seconds divided by step
-wall seconds. A busy thread is one averaging at least 0.10 core over the step.
-The artifact records affinity, total OS threads, busy-thread count, and the
-per-thread deltas; an affinity mismatch or `cores_busy > n + 0.25` is fatal.
-The reported utilization and hypothesis input is the arithmetic mean
-`cores_busy` over the steady window; the median is retained as telemetry.
+from `/proc/self/task/*/stat`. `cores_busy` is total process CPU seconds divided
+by step wall seconds; there is no busy-thread threshold. The artifact records
+every thread's CPU seconds, name, and `os.sched_getaffinity(thread_id)`, plus
+the `tf_XLAEigen`, other-worker, and total thread counts. Every live thread's
+affinity must equal the selected CPU-ID set exactly or the arm is refused. The
+reported utilization and hypothesis input is the arithmetic mean `cores_busy`
+over the steady window; the median is retained as telemetry.
 
 ## 4. legoESM timing protocol
 
@@ -93,8 +96,10 @@ For each core count, run two isolated processes:
 2. `fast_literal`: the exact recipe with only native XLA transcendentals.
 
 Each full arm runs 18 steps. Steps 1 and 2 are the separate cold-start and
-carried-state compile/warm-up traces. Steps 3–18 are the 16-step steady window,
-which contains eight odd and eight even `nn_fsbc=2` parities. Record individual
+carried-state compile/warm-up traces. The steady window is derived from the
+actual requested step count as `3..steps`; an empty or odd-length steady window
+is refused so the two `nn_fsbc=2` parities have equal samples. At 18 steps this
+is steps 3–18, containing eight odd and eight even parities. Record individual
 warm-up times, estimated compile overhead, steady median/mean/IQR/min/max,
 odd/even medians, actual busy cores, active threads, affinity, host memory, and
 background-load preflight.
@@ -139,7 +144,8 @@ SYPD use the formulas above.
 
 Before any NEMO arm, the script refuses when:
 
-- any process named `nemo` exists;
+- a `nemo` or `nemo.exe` process exists, or its immediate parent is named
+  `mpirun`, `orterun`, or `prterun`;
 - available RAM is below 150 GiB;
 - any selected logical CPU or its hyperthread sibling exceeds 10% utilization
   over a 10-second sample;
@@ -148,6 +154,14 @@ Before any NEMO arm, the script refuses when:
 
 Dry-run performs topology/config/command generation only and does not copy
 files, sample for ten seconds, or launch NEMO.
+
+## Operator choices confirmed by the user (DECISION 221, 2026-11-05)
+
+- Keep the selected physical cores and their hyperthread siblings at or below
+  10% utilization over the unchanged 10-second preflight sample.
+- Keep refusal when any unrelated process averages at least 1.0 core over that
+  sample.
+- Keep `nn_istate=0` and `nn_stock=0` for the short NEMO benchmark.
 
 ## 6. legoESM profile protocol
 
@@ -180,8 +194,9 @@ surface fraction is non-exclusive with compiled-worker coverage.
 
 The combined JSON and Markdown reports contain one row per model/mode/core
 count with: seconds/step, SYPD, allocated core-seconds/step, actual busy cores,
-steps and timing window, CPU IDs, mode, dtype/backend, background-load sample,
-git/worktree provenance, input/binary identity, and artifact path. Profiles
+per-thread CPU seconds, worker counts and exact affinities, steps and timing
+window, CPU IDs, mode, dtype/backend, background-load sample, git/worktree
+provenance, input/binary identity, and artifact path. Profiles
 carry the same provenance plus the trace path and registered step.
 
 The report validator refuses duplicate rows, unregistered core counts, wrong

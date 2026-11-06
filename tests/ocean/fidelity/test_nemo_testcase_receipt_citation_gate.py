@@ -286,7 +286,7 @@ def test_orca2_round344_receipt_passes_citation_gate_and_plant_fires():
 
     citation = (
         "scripts/validate/ocean_fidelity/orca2_l4/"
-        "nemo_testcase_l4_orca2_round343_speed_benchmark.py:943-990"
+        "nemo_testcase_l4_orca2_round343_speed_benchmark.py:1186-1233"
     )
     planted = gate.run(receipt, heading, plant=citation)
     assert planted["status"] == "FAIL"

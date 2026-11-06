@@ -4,8 +4,8 @@
 - **Author**: Argon
 - **Branch**: `fidelity/nemo-testcases-orca2-rounds`
 - **Preregistration**: `docs/ocean/fidelity/testcases/PREREG_nemo_testcases_l4_orca2_round343_speed_benchmark.md`
-- **Benchmark script**: `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:139-1936`
-- **Direct unit test**: `tests/ocean/fidelity/test_orca2_round343_speed_benchmark.py:29-200`
+- **Benchmark script**: `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:382-3474`
+- **Direct unit test**: `tests/ocean/fidelity/test_orca2_round343_speed_benchmark.py:32-203`
 - **Evidence bundle**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r343/orca2_round343_speed_benchmark_report.json` (`arm_exact_cpu_fp64.json`, `arm_normal_cpu_fp64.json`, `arm_normal_gpu_fp64.json`, `arm_normal_gpu_fp32.json`)
 - **Independent review**: `independent review: operator`
 
@@ -20,7 +20,7 @@ By reading the production ORCA2 K0 standalone card builder `packages/ocean/legoe
 
 ### Complete Switch Table (`build_orca2_exact_vs_normal_switch_inventory`)
 
-All 46 inventory entries verified by `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:781-843` (`verify_switch_inventory_against_card`) against both `build_nemo_orca2_k0_ocean_card` and fresh class defaults in `packages/` (zero defaults modified):
+All 46 inventory entries verified by `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:1024-1086` (`verify_switch_inventory_against_card`) against both `build_nemo_orca2_k0_ocean_card` and fresh class defaults in `packages/` (zero defaults modified):
 
 | # | Category | Owner | Switch / Field | Exact-Mode Value | Normal Default Value | Switched in Normal Mode? | Code Citations (Exact -> Normal Default) |
 |---|---|---|---|---|---|---|---|
@@ -107,7 +107,7 @@ All four arms run `packages/ocean/legoesm/ocean/bulk_flux_omip.py:1023-1158` (`n
 Each arm is compared at the end of every simulated day (`kt = 8, 16, 24, 32, 40, 48, 56, 64`) against the saved exact-mode snapshots in `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/legoesm_year1_2920step/candidate_step{kt:08d}.npz`.
 
 - **Exact-mode control (arm `exact_cpu_fp64`)**: At Day 1 (`kt=8`, SHA-256 `ce932543...`) and Day 2 (`kt=16`, SHA-256 `cbee4521...`), `exact_cpu_fp64` reproduces the `orca2_r342` snapshots with **`0.0` SST RMS**, **`0.0` SST max**, **`0.0` 3-D `T` RMS**, and **`0.0` 3-D `T` max**.
-- **Normal `float64` CPU vs GPU consistency**: Arms **(b) `normal_cpu_fp64`** and **(c) `normal_gpu_fp64`** produce identical daily RMS and max differences to `~10⁻¹² °C` across all 8 days. Their `~1.4–5.3 × 10⁻³ °C` wet SST RMS difference relative to exact mode is dominated by the two Category A vertical-mixing substitutions that the round-343 normal-card builder made explicitly (`ddm.enabled=False`, `iwm.form="generic", tsdiff=False`) at `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:865-870`. At the time, the literal forms refused native transcendentals; round 344 supersedes that restriction without changing this historical arm.
+- **Normal `float64` CPU vs GPU consistency**: Arms **(b) `normal_cpu_fp64`** and **(c) `normal_gpu_fp64`** produce identical daily RMS and max differences to `~10⁻¹² °C` across all 8 days. Their `~1.4–5.3 × 10⁻³ °C` wet SST RMS difference relative to exact mode is dominated by the two Category A vertical-mixing substitutions that the round-343 normal-card builder made explicitly (`ddm.enabled=False`, `iwm.form="generic", tsdiff=False`) at `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:1108-1113`. At the time, the literal forms refused native transcendentals; round 344 supersedes that restriction without changing this historical arm.
 
 ### Daily SST (`T[..., 0]`) and 3-D `T` Difference Table (`°C`)
 

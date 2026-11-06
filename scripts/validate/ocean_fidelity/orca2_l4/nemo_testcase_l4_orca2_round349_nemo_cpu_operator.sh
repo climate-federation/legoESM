@@ -15,6 +15,10 @@ SCRATCH_ROOT="/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/orca2_r349_sc
 SOURCE_RUN="/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round342/s4_year/orca2_k0_year1_a_np2"
 OUTPUT_ROOT="${SCRATCH_ROOT}/nemo_cpu_sweep"
 CORE_COUNTS=(1 2 4 8 16 40)
+# Guards against initial-state diagnostic output during the timed short run.
+NEMO_NN_ISTATE=0
+# Guards against periodic/final restart output during the timed short run.
+NEMO_NN_STOCK=0
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
@@ -99,7 +103,7 @@ for CORES in "${CORE_COUNTS[@]}"; do
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "ROUND349_NEMO_DRY_RUN n=${CORES} cpu_ids=${CPU_IDS} run_dir=${RUN_DIR}"
     echo "  preflight: RAM>=150GiB; no nemo; selected-core utilization<=10%/10s; no unrelated process>=1 core"
-    echo "  config: nn_itend=96 nn_istate=0 nn_stock=0 nn_write=0"
+    echo "  config: nn_itend=96 nn_istate=${NEMO_NN_ISTATE} nn_stock=${NEMO_NN_STOCK} nn_write=0"
     echo "  command: (cd ${RUN_DIR} && ${GNU_TIME_BIN} -o gnu_time.txt ${MPIRUN_BIN} --report-bindings --bind-to core --cpu-set ${CPU_IDS} -np ${CORES} ./round349_rank_wrapper.sh)"
     continue
   fi
@@ -123,12 +127,12 @@ for CORES in "${CORE_COUNTS[@]}"; do
 
   sed -E -i \
     -e 's/^([[:space:]]*nn_itend[[:space:]]*=[[:space:]]*)[0-9]+/\1 96/' \
-    -e 's/^([[:space:]]*nn_istate[[:space:]]*=[[:space:]]*)[0-9]+/\1 0/' \
-    -e 's/^([[:space:]]*nn_stock[[:space:]]*=[[:space:]]*)[0-9]+/\1 0/' \
+    -e "s/^([[:space:]]*nn_istate[[:space:]]*=[[:space:]]*)[0-9]+/\1 ${NEMO_NN_ISTATE}/" \
+    -e "s/^([[:space:]]*nn_stock[[:space:]]*=[[:space:]]*)[0-9]+/\1 ${NEMO_NN_STOCK}/" \
     "${RUN_DIR}/namelist_cfg"
   grep -Eq '^[[:space:]]*nn_itend[[:space:]]*=[[:space:]]*96([[:space:]]|$)' "${RUN_DIR}/namelist_cfg"
-  grep -Eq '^[[:space:]]*nn_istate[[:space:]]*=[[:space:]]*0([[:space:]]|$)' "${RUN_DIR}/namelist_cfg"
-  grep -Eq '^[[:space:]]*nn_stock[[:space:]]*=[[:space:]]*0([[:space:]]|$)' "${RUN_DIR}/namelist_cfg"
+  grep -Eq "^[[:space:]]*nn_istate[[:space:]]*=[[:space:]]*${NEMO_NN_ISTATE}([[:space:]]|$)" "${RUN_DIR}/namelist_cfg"
+  grep -Eq "^[[:space:]]*nn_stock[[:space:]]*=[[:space:]]*${NEMO_NN_STOCK}([[:space:]]|$)" "${RUN_DIR}/namelist_cfg"
 
   (
     cd "${RUN_DIR}"

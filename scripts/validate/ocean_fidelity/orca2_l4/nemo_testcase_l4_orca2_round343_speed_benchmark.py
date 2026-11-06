@@ -73,7 +73,6 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 )
 from scripts.bench.sample_cpu_cores import (  # noqa: E402
     CLK_TCK,
-    cores_busy,
     parse_cpu_ticks,
 )
 from scripts.validate.fv3_native.summarize_perfetto_trace import (  # noqa: E402
@@ -140,7 +139,16 @@ ROUND349_SMOKE_STEPS = 4
 ROUND349_PROFILE_STEP = 3
 ROUND349_PROFILE_ANNOTATION = "orca2_round349_profile_step"
 ROUND349_SURFACE_ANNOTATION = "orca2_round349_surface_eager"
-ROUND349_BUSY_THREAD_FRACTION = 0.10
+# Guards the selected physical cores and their siblings from background load.
+ROUND349_PINNED_CORE_BUSY_FRACTION = 0.10
+# Guards the quiet-machine sample long enough to expose sustained CPU load.
+ROUND349_PREFLIGHT_SAMPLE_SECONDS = 10.0
+# Guards the benchmark from any unrelated process occupying one full core.
+ROUND349_OTHER_PROCESS_BUSY_CORES = 1.0
+ROUND349_JAXLIB_CPU_CLIENT_SOURCE = (
+    "/home/dbalwada/legoESM/.venv/lib/python3.13/site-packages/"
+    "jaxlib/xla_client.py:64-87"
+)
 ROUND349_SCRATCH_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/orca2_r349_scratch"
 )
@@ -160,6 +168,14 @@ class CpuTopologyRow(NamedTuple):
     core_id: int
     package_id: int
     siblings: tuple[int, ...]
+
+
+class ProcessCpuSample(NamedTuple):
+    """CPU ticks, executable name, and immediate parent for one process."""
+
+    ticks: int
+    command: str
+    parent_pid: int
 
 
 def parse_cpu_id_list(value: str) -> tuple[int, ...]:
@@ -267,29 +283,83 @@ def read_thread_cpu_ticks(pid: int | str = "self") -> dict[int, int]:
     return ticks
 
 
+def read_process_total_cpu_ticks(pid: int | str = "self") -> int:
+    """Read total process user+system CPU ticks from ``/proc/<pid>/stat``."""
+    user_ticks, system_ticks = parse_cpu_ticks(
+        Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    )
+    return user_ticks + system_ticks
+
+
+def read_thread_affinity_record(
+    expected_cpu_ids: Sequence[int], pid: int | str = "self"
+) -> dict[str, Any]:
+    """Record every live thread name and affinity; refuse any affinity escape."""
+    expected = tuple(sorted(int(cpu) for cpu in expected_cpu_ids))
+    require(bool(expected), "expected thread affinity must not be empty")
+    task_root = Path(f"/proc/{pid}/task")
+    threads: list[dict[str, Any]] = []
+    for task_dir in sorted(
+        task_root.iterdir(), key=lambda path: int(path.name) if path.name.isdigit() else -1
+    ):
+        if not task_dir.name.isdigit():
+            continue
+        tid = int(task_dir.name)
+        try:
+            name = (task_dir / "comm").read_text(encoding="utf-8").strip()
+            affinity = tuple(sorted(os.sched_getaffinity(tid)))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        threads.append({"tid": tid, "name": name, "affinity": list(affinity)})
+    require(bool(threads), f"no thread affinity records found below {task_root}")
+    mismatches = [row for row in threads if tuple(row["affinity"]) != expected]
+    require(
+        not mismatches,
+        f"thread affinity differs from selected CPU set {expected}: {mismatches}",
+    )
+    name_counts: dict[str, int] = {}
+    for row in threads:
+        name = str(row["name"])
+        name_counts[name] = name_counts.get(name, 0) + 1
+    main_tid = int(pid) if isinstance(pid, int) else os.getpid()
+    return {
+        "expected_cpu_ids": list(expected),
+        "affinity_exact": True,
+        "os_thread_count": len(threads),
+        "tf_XLAEigen_thread_count": name_counts.get("tf_XLAEigen", 0),
+        "other_worker_thread_count": sum(
+            1 for row in threads if row["tid"] != main_tid and row["name"] != "tf_XLAEigen"
+        ),
+        "thread_name_counts": dict(sorted(name_counts.items())),
+        "threads": threads,
+    }
+
+
 def summarize_thread_cpu_ticks(
     before: Mapping[int, int],
     after: Mapping[int, int],
     wall_s: float,
+    *,
+    process_ticks_before: int,
+    process_ticks_after: int,
 ) -> dict[str, Any]:
-    """Convert per-thread CPU-tick deltas into measured core utilization."""
+    """Report total busy cores and every thread's CPU seconds, without a cutoff."""
     require(np.isfinite(wall_s) and wall_s > 0.0, f"invalid wall_s={wall_s}")
-    fractions = {
-        int(tid): max(0, int(ticks) - int(before.get(tid, 0))) / CLK_TCK / wall_s
+    cpu_seconds = {
+        int(tid): max(0, int(ticks) - int(before.get(tid, 0))) / CLK_TCK
         for tid, ticks in after.items()
     }
-    total_before = sum(int(value) for value in before.values())
-    total_after = sum(int(value) for value in after.values())
-    measured_cores = cores_busy(total_before, total_after, wall_s)
-    ordered = sorted(fractions.items(), key=lambda item: (-item[1], item[0]))
+    total_process_cpu_seconds = (
+        max(0, int(process_ticks_after) - int(process_ticks_before)) / CLK_TCK
+    )
+    measured_cores = total_process_cpu_seconds / wall_s
+    ordered = sorted(cpu_seconds.items(), key=lambda item: (-item[1], item[0]))
     return {
         "cores_busy": float(measured_cores),
         "os_threads_after": len(after),
-        "busy_threads_over_10pct": sum(
-            value >= ROUND349_BUSY_THREAD_FRACTION for value in fractions.values()
-        ),
-        "thread_core_fractions": [
-            {"tid": tid, "core_fraction": float(value)} for tid, value in ordered
+        "total_process_cpu_seconds": float(total_process_cpu_seconds),
+        "thread_cpu_seconds": [
+            {"tid": tid, "cpu_seconds": float(value)} for tid, value in ordered
         ],
     }
 
@@ -1731,48 +1801,70 @@ def run_single_benchmark_arm(
         )
 
         thread_ticks_before = read_thread_cpu_ticks() if requested_cores is not None else None
+        process_ticks_before = (
+            read_process_total_cpu_ticks() if requested_cores is not None else None
+        )
         is_profile_step = profile_dir is not None and kt == ROUND349_PROFILE_STEP
         trace_context = (
             jax.profiler.trace(profile_dir, create_perfetto_trace=True)
             if is_profile_step
             else nullcontext()
         )
+        original_surface_card = bulk.nemo_orca2_k0_surface_card
+        if is_profile_step:
+            def profiled_surface_card(*args, **kwargs):
+                with jax.profiler.TraceAnnotation(ROUND349_SURFACE_ANNOTATION):
+                    surface_result = original_surface_card(*args, **kwargs)
+                    jax.block_until_ready(surface_result)
+                    return surface_result
+
+            bulk.nemo_orca2_k0_surface_card = profiled_surface_card
         with trace_context:
             annotation = (
                 jax.profiler.TraceAnnotation(ROUND349_PROFILE_ANNOTATION)
                 if is_profile_step
                 else nullcontext()
             )
-            with annotation:
-                t0 = time.perf_counter()
-                res = bulk.nemo_orca2_k0_ocean_step(
-                    card,
-                    state,
-                    model=model,
-                    nemo_kt=kt,
-                    s0f=ctrl["s0f"],
-                    ice_if=ctrl["ice_if"],
-                    s0=s0,
-                    s2=s2,
-                    chl=ctrl["chl"],
-                    geothermal_heat_flux_mwm2=ctrl["geothermal_heat_flux_mwm2"],
-                    prior_surface=prior_surface,
-                    sponge=ctrl["sponge"],
-                    profile_annotations=is_profile_step,
-                )
-                state = res.ocean.state_after if hasattr(res.ocean, "state_after") else res.ocean
-                jax.block_until_ready(res)
-                dt_wall = time.perf_counter() - t0
+            try:
+                with annotation:
+                    t0 = time.perf_counter()
+                    res = bulk.nemo_orca2_k0_ocean_step(
+                        card,
+                        state,
+                        model=model,
+                        nemo_kt=kt,
+                        s0f=ctrl["s0f"],
+                        ice_if=ctrl["ice_if"],
+                        s0=s0,
+                        s2=s2,
+                        chl=ctrl["chl"],
+                        geothermal_heat_flux_mwm2=ctrl["geothermal_heat_flux_mwm2"],
+                        prior_surface=prior_surface,
+                        sponge=ctrl["sponge"],
+                    )
+                    state = res.ocean.state_after if hasattr(res.ocean, "state_after") else res.ocean
+                    jax.block_until_ready(res)
+                    dt_wall = time.perf_counter() - t0
+            finally:
+                bulk.nemo_orca2_k0_surface_card = original_surface_card
         step_times_s.append(dt_wall)
         if thread_ticks_before is not None:
+            require(process_ticks_before is not None, "process CPU baseline is missing")
             cpu_row = summarize_thread_cpu_ticks(
-                thread_ticks_before, read_thread_cpu_ticks(), dt_wall
+                thread_ticks_before,
+                read_thread_cpu_ticks(),
+                dt_wall,
+                process_ticks_before=process_ticks_before,
+                process_ticks_after=read_process_total_cpu_ticks(),
             )
             cpu_row["kt"] = kt
+            cpu_row["thread_affinity_record"] = read_thread_affinity_record(affinity)
             require(
-                float(cpu_row["cores_busy"]) <= float(requested_cores) + 0.25,
-                f"kt={kt}: measured {cpu_row['cores_busy']:.3f} busy cores exceeds "
-                f"affinity cap {requested_cores}",
+                cpu_row["thread_affinity_record"]["tf_XLAEigen_thread_count"]
+                == requested_cores,
+                f"kt={kt}: tf_XLAEigen pool does not follow the process affinity: "
+                f"{cpu_row['thread_affinity_record']['tf_XLAEigen_thread_count']} "
+                f"workers for {requested_cores} CPUs",
             )
             step_cpu_telemetry.append(cpu_row)
 
@@ -1827,8 +1919,6 @@ def run_single_benchmark_arm(
                 "MKL_NUM_THREADS",
                 "OPENBLAS_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS",
-                "TF_NUM_INTRAOP_THREADS",
-                "TF_NUM_INTEROP_THREADS",
             )
         },
         "step_cpu_telemetry": step_cpu_telemetry,
@@ -1840,19 +1930,21 @@ def run_single_benchmark_arm(
     if step_cpu_telemetry:
         steady_cpu = step_cpu_telemetry[WARMUP_STEPS:]
         arm_report["cpu_utilization"] = {
-            "measurement": "per-thread /proc utime+stime deltas divided by step wall time",
+            "measurement": (
+                "total /proc/self/stat process utime+stime delta divided by "
+                "steady-step wall time; no per-thread activity cutoff"
+            ),
             "steady_median_cores_busy": float(
                 np.median([row["cores_busy"] for row in steady_cpu])
             ),
             "steady_mean_cores_busy": float(
                 np.mean([row["cores_busy"] for row in steady_cpu])
             ),
-            "steady_max_busy_threads_over_10pct": int(
-                max(row["busy_threads_over_10pct"] for row in steady_cpu)
-            ),
-            "steady_median_busy_threads_over_10pct": float(
-                np.median([row["busy_threads_over_10pct"] for row in steady_cpu])
-            ),
+            "steady_thread_affinity_record": steady_cpu[-1]["thread_affinity_record"],
+            "steady_thread_cpu_seconds": [
+                {"kt": row["kt"], "threads": row["thread_cpu_seconds"]}
+                for row in steady_cpu
+            ],
         }
     if profile_dir is not None:
         trace_path, _ = load_perfetto_events(profile_dir)
@@ -2160,10 +2252,6 @@ def round349_performance_row(
         f"row steady_steps={steady_steps} must be in 1..{steps}",
     )
     require(np.isfinite(busy_cores) and busy_cores >= 0.0, f"invalid busy_cores={busy_cores}")
-    require(
-        busy_cores <= cores + 0.25,
-        f"busy_cores={busy_cores} exceeds affinity allowance for cores={cores}",
-    )
     require(bool(background_load), "row is missing background-load provenance")
     require(bool(artifact), "row is missing artifact provenance")
     require(
@@ -2223,6 +2311,21 @@ def validate_round349_report(
         expected_statistic = "MPI AVG elapsed / frequency" if key[0] == "NEMO" else "steady median"
         require(row["timing_window"] == expected_window, f"row {key} has wrong timing window")
         require(row["seconds_per_step_statistic"] == expected_statistic, f"row {key} has wrong statistic")
+        if key[0] == "legoESM":
+            thread_record = row.get("thread_affinity_record", {})
+            require(
+                thread_record.get("affinity_exact") is True,
+                f"row {key} lacks an exact thread-affinity record",
+            )
+            require(
+                thread_record.get("expected_cpu_ids") == row["cpu_ids"],
+                f"row {key} thread affinity differs from row CPU IDs",
+            )
+            require(
+                len(row.get("per_thread_cpu_seconds_by_step", []))
+                == int(row["steady_steps"]),
+                f"row {key} lacks one per-thread CPU-seconds list per steady step",
+            )
         for arithmetic_key in ("sypd", "core_seconds_per_step"):
             require(
                 np.isclose(
@@ -2589,21 +2692,41 @@ def _read_proc_cpu_counters() -> dict[int, tuple[int, int]]:
     return counters
 
 
-def _read_process_cpu_ticks() -> dict[int, tuple[int, str]]:
-    """Return live process CPU ticks and command names for load preflight."""
-    rows: dict[int, tuple[int, str]] = {}
+def _read_process_cpu_ticks() -> dict[int, ProcessCpuSample]:
+    """Return live process CPU ticks, names, and parents for load preflight."""
+    rows: dict[int, ProcessCpuSample] = {}
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
         try:
-            user_ticks, system_ticks = parse_cpu_ticks(
-                (entry / "stat").read_text(encoding="utf-8")
-            )
+            stat_line = (entry / "stat").read_text(encoding="utf-8")
+            user_ticks, system_ticks = parse_cpu_ticks(stat_line)
+            stat_rest = stat_line[stat_line.rindex(")") + 1:].split()
+            parent_pid = int(stat_rest[1])
             command = (entry / "comm").read_text(encoding="utf-8").strip()
         except (FileNotFoundError, ProcessLookupError, PermissionError):
             continue
-        rows[int(entry.name)] = (user_ticks + system_ticks, command)
+        rows[int(entry.name)] = ProcessCpuSample(
+            user_ticks + system_ticks, command, parent_pid
+        )
     return rows
+
+
+def find_nemo_processes(processes: Mapping[int, ProcessCpuSample]) -> list[int]:
+    """Find NEMO executables and an immediate Open MPI launcher parent."""
+    nemo_names = {"nemo", "nemo.exe"}
+    launcher_names = {"mpirun", "orterun", "prterun"}
+    direct = {
+        pid for pid, sample in processes.items() if sample.command in nemo_names
+    }
+    launchers = {
+        sample.parent_pid
+        for pid, sample in processes.items()
+        if pid in direct
+        and sample.parent_pid in processes
+        and processes[sample.parent_pid].command in launcher_names
+    }
+    return sorted(direct | launchers)
 
 
 def _available_memory_gib() -> float:
@@ -2614,7 +2737,7 @@ def _available_memory_gib() -> float:
 
 
 def round349_nemo_preflight(
-    cpu_ids: Sequence[int], *, sample_seconds: float = 10.0
+    cpu_ids: Sequence[int], *, sample_seconds: float = ROUND349_PREFLIGHT_SAMPLE_SECONDS
 ) -> dict[str, Any]:
     """Refuse occupied NEMO benchmark resources using a measured window."""
     ids = tuple(int(cpu) for cpu in cpu_ids)
@@ -2624,9 +2747,7 @@ def round349_nemo_preflight(
     require(available_gib >= 150.0, f"available RAM {available_gib:.1f} GiB < 150 GiB")
 
     before_processes = _read_process_cpu_ticks()
-    existing_nemo = sorted(
-        pid for pid, (_, command) in before_processes.items() if command == "nemo"
-    )
+    existing_nemo = find_nemo_processes(before_processes)
     require(not existing_nemo, f"NEMO process already running: pids={existing_nemo}")
     topology = {row.cpu_id: row for row in read_cpu_topology()}
     require(all(cpu in topology for cpu in ids), "selected CPU absent from topology")
@@ -2646,26 +2767,32 @@ def round349_nemo_preflight(
         delta_total = total1 - total0
         require(delta_total > 0, f"CPU {cpu} total ticks did not advance")
         utilization[cpu] = 1.0 - (idle1 - idle0) / delta_total
-    busy_pinned = {cpu: value for cpu, value in utilization.items() if value > 0.10}
+    busy_pinned = {
+        cpu: value
+        for cpu, value in utilization.items()
+        if value > ROUND349_PINNED_CORE_BUSY_FRACTION
+    }
     require(
         not busy_pinned,
         f"selected physical cores or hyperthread siblings exceed 10% utilization: {busy_pinned}",
     )
 
-    after_nemo = sorted(
-        pid for pid, (_, command) in after_processes.items() if command == "nemo"
-    )
+    after_nemo = find_nemo_processes(after_processes)
     require(not after_nemo, f"NEMO process appeared during preflight: pids={after_nemo}")
 
     excluded = {os.getpid(), os.getppid()}
     heavy: list[dict[str, Any]] = []
-    for pid, (ticks1, command) in after_processes.items():
+    for pid, sample in after_processes.items():
         if pid in excluded:
             continue
-        ticks0 = before_processes.get(pid, (0, command))[0]
-        average_cores = max(0, ticks1 - ticks0) / CLK_TCK / elapsed
-        if average_cores >= 1.0:
-            heavy.append({"pid": pid, "command": command, "average_cores": average_cores})
+        prior = before_processes.get(
+            pid, ProcessCpuSample(0, sample.command, sample.parent_pid)
+        )
+        average_cores = max(0, sample.ticks - prior.ticks) / CLK_TCK / elapsed
+        if average_cores >= ROUND349_OTHER_PROCESS_BUSY_CORES:
+            heavy.append(
+                {"pid": pid, "command": sample.command, "average_cores": average_cores}
+            )
     require(not heavy, f"unrelated heavy process active during preflight: {heavy}")
     return {
         "sample_seconds": elapsed,
@@ -2674,7 +2801,8 @@ def round349_nemo_preflight(
         "requested_cpu_ids": list(ids),
         "sampled_cpu_ids_including_siblings": list(sampled_ids),
         "max_pinned_cpu_utilization": max(utilization.values()),
-        "heavy_process_threshold_cores": 1.0,
+        "pinned_core_busy_fraction": ROUND349_PINNED_CORE_BUSY_FRACTION,
+        "heavy_process_threshold_cores": ROUND349_OTHER_PROCESS_BUSY_CORES,
         "heavy_processes": heavy,
         "nemo_processes_before": existing_nemo,
         "nemo_processes_after": after_nemo,
@@ -2689,6 +2817,18 @@ def _round349_background_snapshot() -> dict[str, Any]:
         "available_memory_gib": _available_memory_gib(),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def round349_steady_timing_window(steps: int) -> dict[str, int]:
+    """Derive a non-empty, parity-balanced steady window after warm-up."""
+    steady_window_steps = int(steps) - WARMUP_STEPS
+    require(steady_window_steps > 0, "steady timing window is empty")
+    require(
+        steady_window_steps % 2 == 0,
+        f"steady timing window must have equal nn_fsbc parities, got "
+        f"{steady_window_steps} steps",
+    )
+    return {"first_step": WARMUP_STEPS + 1, "last_step": int(steps)}
 
 
 def run_round349_legoesm_child(
@@ -2721,6 +2861,9 @@ def run_round349_legoesm_child(
     else:
         require(steps >= ROUND349_FULL_STEPS, f"full arm requires >= {ROUND349_FULL_STEPS} steps")
         min_steady = ROUND349_STEADY_STEPS
+    timing_window = None
+    if not profile:
+        timing_window = round349_steady_timing_window(steps)
     if not smoke:
         require(preflight_path is not None and preflight_path.is_file(), "measured preflight is required")
 
@@ -2779,6 +2922,7 @@ def run_round349_legoesm_child(
         result["round349"]["profile_report"] = str(profile_path)
     else:
         utilization = result["cpu_utilization"]
+        require(timing_window is not None, "performance arm lacks a timing window")
         row = round349_performance_row(
             model="legoESM",
             mode=mode,
@@ -2801,9 +2945,13 @@ def run_round349_legoesm_child(
                     "ice_cover_sha256": sha256_file(ice_cover_path),
                 },
             },
-            timing_window={"first_step": 3, "last_step": 18},
+            timing_window=timing_window,
             seconds_per_step_statistic="steady median",
         )
+        row["thread_affinity_record"] = utilization["steady_thread_affinity_record"]
+        row["per_thread_cpu_seconds_by_step"] = utilization[
+            "steady_thread_cpu_seconds"
+        ]
         result["round349_row"] = row
     artifact_path = output_dir / artifact_name
     artifact_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
@@ -2818,16 +2966,13 @@ def _round349_child_environment(cores: int) -> dict[str, str]:
             "CUDA_VISIBLE_DEVICES": "",
             "JAX_PLATFORMS": "cpu",
             "JAX_ENABLE_X64": "1",
-            "XLA_FLAGS": (
-                "--xla_cpu_multi_thread_eigen=true "
-                f"intra_op_parallelism_threads={cores}"
-            ),
+            # Installed jaxlib xla_client.py:64-87 exposes no pool-size input;
+            # the measured XLA worker pool follows this process's taskset mask.
+            "XLA_FLAGS": "--xla_cpu_multi_thread_eigen=true",
             "OMP_NUM_THREADS": str(cores),
             "MKL_NUM_THREADS": str(cores),
             "OPENBLAS_NUM_THREADS": str(cores),
             "NUMEXPR_NUM_THREADS": str(cores),
-            "TF_NUM_INTRAOP_THREADS": str(cores),
-            "TF_NUM_INTEROP_THREADS": "1",
         }
     )
     return env
@@ -2949,7 +3094,10 @@ def run_round349_legoesm_sweep(
     for command, env in commands:
         cpu_csv = command[command.index("--round349-cpu-ids") + 1]
         preflight_path = Path(command[command.index("--round349-preflight-path") + 1])
-        preflight = round349_nemo_preflight(parse_cpu_id_list(cpu_csv), sample_seconds=10.0)
+        preflight = round349_nemo_preflight(
+            parse_cpu_id_list(cpu_csv),
+            sample_seconds=ROUND349_PREFLIGHT_SAMPLE_SECONDS,
+        )
         preflight_path.write_text(json.dumps(preflight, indent=2) + "\n", encoding="utf-8")
         print(f"[round349] launching: {' '.join(command)}", flush=True)
         subprocess.run(command, env=env, check=True, timeout=1200)
@@ -2979,13 +3127,24 @@ def _round349_markdown(report: Mapping[str, Any]) -> str:
     lines = [
         "# ORCA2 round 349 CPU benchmark report",
         "",
-        "| Model | Mode | Cores | CPU IDs | s/step | Statistic/window | SYPD | core-s/step | busy cores | steps (total/steady) |",
-        "|---|---|---:|---|---:|---|---:|---:|---:|---:|",
+        f"Installed jaxlib `{ROUND349_JAXLIB_CPU_CLIENT_SOURCE}` passes no CPU-pool size to "
+        "`get_tfrt_cpu_client`; the measured XLA worker pool follows the process "
+        "affinity selected by `taskset`.",
+        "",
+        "| Model | Mode | Cores | CPU IDs | s/step | Statistic/window | SYPD | core-s/step | busy cores | XLA/other workers | steps (total/steady) |",
+        "|---|---|---:|---|---:|---|---:|---:|---:|---:|---:|",
     ]
     ordered_rows = sorted(
         report["rows"], key=lambda item: (item["cores"], item["model"], item["mode"])
     )
     for row in ordered_rows:
+        thread_record = row.get("thread_affinity_record", {})
+        worker_counts = (
+            f"{thread_record['tf_XLAEigen_thread_count']}/"
+            f"{thread_record['other_worker_thread_count']}"
+            if thread_record
+            else "--"
+        )
         lines.append(
             f"| {row['model']} | {row['mode']} | {row['cores']} | "
             f"{','.join(str(cpu) for cpu in row['cpu_ids'])} | "
@@ -2993,6 +3152,7 @@ def _round349_markdown(report: Mapping[str, Any]) -> str:
             f"kt={row['timing_window']['first_step']}..{row['timing_window']['last_step']} | "
             f"{row['sypd']:.4f} | "
             f"{row['core_seconds_per_step']:.6f} | {row['busy_cores']:.3f} | "
+            f"{worker_counts} | "
             f"{row['steps']}/{row['steady_steps']} |"
         )
     lines.extend(
@@ -3007,7 +3167,11 @@ def _round349_markdown(report: Mapping[str, Any]) -> str:
             f"- {row['model']} {row['mode']} n={row['cores']}: "
             f"artifact `{row['artifact']}`; background "
             f"`{json.dumps(row['background_load'], sort_keys=True)}`; identity "
-            f"`{json.dumps(row['measurement_provenance'], sort_keys=True)}`."
+            f"`{json.dumps(row['measurement_provenance'], sort_keys=True)}`; "
+            f"thread affinity/counts "
+            f"`{json.dumps(row.get('thread_affinity_record'), sort_keys=True)}`; "
+            f"per-thread CPU seconds "
+            f"`{json.dumps(row.get('per_thread_cpu_seconds_by_step'), sort_keys=True)}`."
         )
     lines.extend(["", f"Hypothesis verdict: **{report['hypothesis']['verdict']}**.", ""])
     for profile in report.get("profiles", []):
@@ -3133,7 +3297,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--round349-cpu-ids", type=str, default="")
     parser.add_argument("--round349-core-counts", type=str, default="1,2,4,8,16,40")
     parser.add_argument("--round349-steps", type=int, default=ROUND349_FULL_STEPS)
-    parser.add_argument("--round349-sample-seconds", type=float, default=10.0)
+    parser.add_argument(
+        "--round349-sample-seconds",
+        type=float,
+        default=ROUND349_PREFLIGHT_SAMPLE_SECONDS,
+    )
     parser.add_argument("--round349-output-file", type=Path, default=None)
     parser.add_argument("--round349-nemo-run-dir", type=Path, default=None)
     parser.add_argument("--round349-preflight-path", type=Path, default=None)
@@ -3202,12 +3370,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         else:
             row = result["round349_row"]
+            thread_record = row["thread_affinity_record"]
             label = "SMOKE" if args.round349_smoke else "RESULT"
             print(
                 f"ROUND349_{label} mode={args.round349_mode} n={args.round349_cores} "
                 f"steps={row['steps']} steady={row['steady_steps']} "
                 f"seconds_per_step={row['seconds_per_step']:.6f} "
-                f"SYPD={row['sypd']:.4f} busy_cores={row['busy_cores']:.3f}"
+                f"SYPD={row['sypd']:.4f} busy_cores={row['busy_cores']:.3f} "
+                f"tf_XLAEigen_threads={thread_record['tf_XLAEigen_thread_count']} "
+                f"other_worker_threads={thread_record['other_worker_thread_count']} "
+                f"thread_affinity_exact={thread_record['affinity_exact']}"
             )
     elif args.round349_sweep:
         core_counts = parse_cpu_id_list(args.round349_core_counts)

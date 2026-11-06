@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import gzip
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -202,7 +203,9 @@ def test_daily_temperature_scorer_and_report_validator() -> None:
         r343.validate_benchmark_report(bad_days)
 
 
-def test_round349_cpu_pinning_and_thread_tick_parsing() -> None:
+def test_round349_cpu_pinning_and_thread_tick_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     topology = (
         r343.CpuTopologyRow(0, 0, 0, (0, 4)),
         r343.CpuTopologyRow(1, 1, 0, (1, 5)),
@@ -226,11 +229,60 @@ def test_round349_cpu_pinning_and_thread_tick_parsing() -> None:
         100: 10 + r343.CLK_TCK,
         101: 20 + r343.CLK_TCK // 2,
     }
-    usage = r343.summarize_thread_cpu_ticks(before, after, wall_s=1.0)
+    usage = r343.summarize_thread_cpu_ticks(
+        before,
+        after,
+        wall_s=1.0,
+        process_ticks_before=30,
+        process_ticks_after=30 + r343.CLK_TCK + r343.CLK_TCK // 2,
+    )
     expected = 1.0 + (r343.CLK_TCK // 2) / r343.CLK_TCK
     assert np.isclose(usage["cores_busy"], expected)
-    assert usage["busy_threads_over_10pct"] == 2
     assert usage["os_threads_after"] == 2
+    assert usage["thread_cpu_seconds"] == [
+        {"tid": 100, "cpu_seconds": 1.0},
+        {"tid": 101, "cpu_seconds": (r343.CLK_TCK // 2) / r343.CLK_TCK},
+    ]
+
+    affinity = (0, 1)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda _tid: set(affinity))
+    thread_record = r343.read_thread_affinity_record(affinity)
+    assert thread_record["affinity_exact"] is True
+    assert thread_record["expected_cpu_ids"] == list(affinity)
+    assert all(row["affinity"] == list(affinity) for row in thread_record["threads"])
+    with pytest.raises(r343.GateError, match="thread affinity differs"):
+        r343.read_thread_affinity_record((*affinity, 2))
+
+
+def test_round349_nemo_process_detection() -> None:
+    sample = r343.ProcessCpuSample
+    processes = {
+        10: sample(0, "mpirun", 1),
+        11: sample(0, "nemo", 10),
+        20: sample(0, "orterun", 1),
+        21: sample(0, "nemo.exe", 20),
+        30: sample(0, "prterun", 1),
+        31: sample(0, "nemo", 30),
+        40: sample(0, "prterun", 1),
+        41: sample(0, "python", 40),
+        50: sample(0, "nemo-helper", 1),
+    }
+    assert r343.find_nemo_processes(processes) == [10, 11, 20, 21, 30, 31]
+
+
+def test_round349_steady_window_uses_actual_steps_and_balances_parity() -> None:
+    assert r343.round349_steady_timing_window(4) == {
+        "first_step": 3,
+        "last_step": 4,
+    }
+    assert r343.round349_steady_timing_window(18) == {
+        "first_step": 3,
+        "last_step": 18,
+    }
+    with pytest.raises(r343.GateError, match="empty"):
+        r343.round349_steady_timing_window(2)
+    with pytest.raises(r343.GateError, match="equal nn_fsbc parities"):
+        r343.round349_steady_timing_window(5)
 
 
 def test_round349_sypd_nemo_timing_and_time_parsers(tmp_path: Path) -> None:
@@ -333,6 +385,19 @@ def _round349_complete_report() -> dict[str, object]:
                     seconds_per_step_statistic="steady median",
                 )
             )
+            rows[-1]["thread_affinity_record"] = {
+                "expected_cpu_ids": cpu_ids,
+                "affinity_exact": True,
+                "tf_XLAEigen_thread_count": cores,
+                "other_worker_thread_count": 0,
+                "threads": [
+                    {"tid": 100 + index, "name": "tf_XLAEigen", "affinity": cpu_ids}
+                    for index in range(cores)
+                ],
+            }
+            rows[-1]["per_thread_cpu_seconds_by_step"] = [
+                {"kt": kt, "threads": []} for kt in range(3, 19)
+            ]
     profiles = [
         {
             "mode": "exact",
@@ -382,8 +447,9 @@ def test_round349_report_schema_and_arithmetic_controls() -> None:
         r343.validate_round349_report(zero_steps)
 
     escaped_affinity = copy.deepcopy(report)
-    escaped_affinity["rows"][0]["busy_cores"] = 1.5
-    with pytest.raises(r343.GateError, match="exceeds affinity allowance"):
+    lego_row = next(row for row in escaped_affinity["rows"] if row["model"] == "legoESM")
+    lego_row["thread_affinity_record"]["affinity_exact"] = False
+    with pytest.raises(r343.GateError, match="exact thread-affinity"):
         r343.validate_round349_report(escaped_affinity)
 
 
@@ -467,7 +533,5 @@ def test_round349_dry_run_command_schema(tmp_path: Path) -> None:
         assert env["JAX_PLATFORMS"] == "cpu"
         assert env["JAX_ENABLE_X64"] == "1"
         assert env["OMP_NUM_THREADS"] == str(cores)
-        assert env["XLA_FLAGS"] == (
-            "--xla_cpu_multi_thread_eigen=true "
-            f"intra_op_parallelism_threads={cores}"
-        )
+        assert env["XLA_FLAGS"] == "--xla_cpu_multi_thread_eigen=true"
+        assert "intra_op_parallelism_threads" not in env["XLA_FLAGS"]
