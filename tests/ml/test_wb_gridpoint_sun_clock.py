@@ -1,0 +1,87 @@
+"""The WB grid-point segments place the sun at each sample's own date and time
+(user decision Q3, 2026-11-06), through the trainer's own build.
+
+Every solar-geometry call the rollout makes (the network's insolation input;
+the physics arm's radiation, both the per-step and the cadence-refresh clock)
+is recorded by wrapping the solar module, for two samples six months and
+twelve hours apart.  Before the fix both saw Jan 1 00 UTC + elapsed steps.
+Needs JAX_ENABLE_X64=1.
+"""
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+jax.config.update("jax_enable_x64", True)
+
+import legoesm.atmosphere.physics.radiation.solar as solar  # noqa: E402
+from legoesm.forcing.time_utils import day_to_calendar  # noqa: E402
+from tests.ml.test_wb_dycore_swap import _YML, _carry, _forcing, _mod  # noqa: E402
+
+N_STEPS = 2
+TIMES = ("2020-01-01T00", "2020-07-01T12")
+
+
+@pytest.fixture
+def seen(monkeypatch):
+    calls = []
+
+    def rec(doy, hour):
+        jax.debug.callback(lambda d, h: calls.append((float(d), float(h))),
+                           jnp.asarray(doy), jnp.asarray(hour))
+
+    cz, dm = solar.cos_zenith_angle, solar.daily_mean_insolation
+
+    def cos_zenith_angle(lat, lon, day_of_year, hour, *a, **k):
+        rec(day_of_year, hour)
+        return cz(lat, lon, day_of_year, hour, *a, **k)
+
+    def daily_mean_insolation(lat, day_of_year, *a, **k):
+        rec(day_of_year, -1.0)
+        return dm(lat, day_of_year, *a, **k)
+
+    monkeypatch.setattr(solar, "cos_zenith_angle", cos_zenith_angle)
+    monkeypatch.setattr(solar, "daily_mean_insolation", daily_mean_insolation)
+    return calls
+
+
+@pytest.mark.parametrize("core,mode", [("latlon", "neural_gcm"),
+                                       ("cubed_sphere", "neural_gcm"),
+                                       ("latlon", "physics")])
+def test_sun_is_the_samples_own(core, mode, seen):
+    from legoesm.training.scale_build import (
+        build_mode_components, era5_time_to_forcing_calendar)
+
+    cfg = _mod.build_scale_config_from_args(
+        ["--mode", mode, "--smoke", "--training-core", core])
+    # physics arm: radiation every 2nd step exercises the cadence refresh
+    # (the synthetic carry seeds no ice skin, so the physics arm runs without it)
+    yml = {**_YML, "rad_update_steps": 2 if mode == "physics" else 1,
+           **({"ice_skin_prognostic": False} if mode == "physics" else {})}
+    _, grid, _, params, mk, _, dt = build_mode_components(cfg, yml)
+    ic = _carry(core, grid, 8)
+    f0 = _forcing(core, cfg, yml, grid, 0)
+    for t in TIMES:
+        doy, sod = era5_time_to_forcing_calendar(np.datetime64(t, "ns"), 2020)
+        seen.clear()
+        f = f0._replace(day_of_year=jnp.asarray(doy),
+                        seconds_of_day=jnp.asarray(sod))
+        jax.block_until_ready(mk(params).raw(ic, N_STEPS, f).T)
+        assert seen, "no solar-geometry call recorded"
+        start = doy - 1.0 + sod / 86400.0
+        # the clock of the step boundaries 0..N_STEPS (end-of-step k+1 per
+        # step; the cadence refresh at the completed-step count)
+        want = {tuple(round(float(x), 9) for x in day_to_calendar(
+            start + k * dt / 86400.0)) for k in range(N_STEPS + 1)}
+        for d, h in seen:
+            if h < 0:                                   # daily mean: day only
+                assert any(abs(d - w[0]) < 1e-9 for w in want), (t, d)
+            else:
+                assert (round(d, 9), round(h * 3600.0, 9)) in want, (t, d, h)
+        if mode == "neural_gcm":
+            # the network's input: one call per step, at end-of-step k+1
+            got = [(round(d, 9), round(h * 3600.0, 9)) for d, h in seen]
+            assert got == [tuple(round(float(x), 9) for x in day_to_calendar(
+                start + (k + 1) * dt / 86400.0)) for k in range(N_STEPS)], t

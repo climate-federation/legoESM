@@ -150,10 +150,11 @@ def build_mpas_training_segment(exp, physics_fn):
     (``mpas_segment(checkpoint=True)``; voted 3-0).
 
     ``forcing`` is the grid-point ``SegmentForcing`` with ``(nCells,)``
-    planes.  Its ``day_of_year`` is the sample's start, in days since Jan 1
-    00 UTC (the WB loader's packing); step ``k`` sees the sun of
-    ``day_to_calendar(day_of_year + k*dt/86400)`` (start-of-step, as the
-    eager MPAS loop).  The condensate tracers start at zero when the carry
+    planes.  Its ``day_of_year`` / ``seconds_of_day`` are the sample's start
+    (1-based day + seconds, ``era5_time_to_forcing_calendar``, the WB
+    loader's packing); step ``k`` sees the sun of ``day_to_calendar(day0 +
+    k*dt/86400)``, ``day0 = day_of_year - 1 + seconds_of_day/86400``
+    (start-of-step, as the eager MPAS loop).  The condensate tracers start at zero when the carry
     has none (an ERA5 sample) and are carried out, so a chained call does not
     reset them."""
     from legoesm.core.state import MPASHydrostaticState
@@ -175,7 +176,8 @@ def build_mpas_training_segment(exp, physics_fn):
 
     def raw(ic, n_steps, forcing):
         f = forcing._asdict() if hasattr(forcing, "_asdict") else dict(forcing)
-        day0 = jnp.asarray(f["day_of_year"], jnp.float64)
+        day0 = (jnp.asarray(f["day_of_year"], jnp.float64) - 1.0
+                + jnp.asarray(f["seconds_of_day"], jnp.float64) / 86400.0)
         tr = {}
         for k in tracer_names:
             x = getattr(ic, k)

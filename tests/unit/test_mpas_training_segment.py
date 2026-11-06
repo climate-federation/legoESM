@@ -58,8 +58,10 @@ def test_clock_and_condensate(exp):
                                      dp_s_dt=z(state.p_s), dphis_dt=z(state.phis))
 
     seg = build_mpas_training_segment(exp, physics_fn)
-    day0 = 183.5 + 300.0 / 86400.0             # Jul 2 12:05 UTC, 0-based
-    out = seg.raw(_ic(exp), 3, {"day_of_year": jnp.asarray(day0)})
+    # Jul 2 12:05 UTC packed as era5_time_to_forcing_calendar packs it
+    out = seg.raw(_ic(exp), 3, {"day_of_year": jnp.asarray(184.0),
+                                "seconds_of_day": jnp.asarray(43500.0)})
+    day0 = 183.0 + 43500.0 / 86400.0
     jax.block_until_ready(out.T)
     want = [tuple(float(x) for x in day_to_calendar(day0 + k * DT / 86400.0))
             for k in range(3)]

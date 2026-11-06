@@ -2080,6 +2080,7 @@ def build_segment_fn(
     lon,
     start_day: float,
     gradient_checkpoint: bool | None = None,
+    start_day_from_forcing: bool = False,
     hyperdiffusion_3d_fn=None,
     tau_equator=None,
     tau_pole=None,
@@ -2152,6 +2153,14 @@ def build_segment_fn(
         Grid coordinates.
     start_day : float
         Start day for the entire run (used to compute step→day).
+    start_day_from_forcing : bool
+        False (default): the sun follows ``start_day``.  True: it follows
+        the segment's own forcing clock instead, ``(forcing.day_of_year - 1)
+        + forcing.seconds_of_day / 86400`` (the 1-based day + seconds packing
+        of ``scale_build.era5_time_to_forcing_calendar``); the WB trainers
+        set it so each ERA5 sample sees its own date and time (user decision
+        Q3, 2026-11-06).  Production keeps False: its forcing clock is the
+        segment-END time, not a start.
     gradient_checkpoint : bool or None, optional
         If True, wrap the scan body with ``jax.checkpoint`` to trade
         recomputation for O(sqrt(N)) memory during reverse-mode AD.
@@ -2277,6 +2286,12 @@ def build_segment_fn(
             "accumulate solar-time quantization (~8 s at day 1000). Set "
             "JAX_ENABLE_X64=1 (production default) for exact solar time."
         )
+
+    def _start_day(forcing):
+        """Day the solar clock counts from (see ``start_day_from_forcing``)."""
+        if not start_day_from_forcing:
+            return start_day
+        return (forcing.day_of_year - 1.0) + forcing.seconds_of_day / 86400.0
 
     # Precompute minimum grid spacing for CFL monitoring
     if hasattr(grid, 'n'):
@@ -2547,7 +2562,7 @@ def build_segment_fn(
             # the SOLAR position (declination + hour angle) uses this; the
             # seasonal forcing (SST / O3 / aerosol / GHG) stays per-segment
             # (those ride separate arrays, unaffected by these two scalars).
-            _abs_day = start_day + (step_idx + 1) * _dt / 86400.0
+            _abs_day = _start_day(forcing) + (step_idx + 1) * _dt / 86400.0
             _doy_step, _sod_step = day_to_calendar(_abs_day)
 
             if owned_face_ids is not None:
@@ -3051,7 +3066,7 @@ def build_segment_fn(
         # radiation is computed IN the last cycle step at ``(step_idx+1)*dt``
         # = the same boundary.  ``+1`` would sample one dt into the future
         # (codex round-11 Medium).
-        _abs_day = start_day + carry.step_index * _dt / 86400.0
+        _abs_day = _start_day(forcing) + carry.step_index * _dt / 86400.0
         _doy_step, _sod_step = day_to_calendar(_abs_day)
 
         if owned_face_ids is not None:

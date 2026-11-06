@@ -1622,6 +1622,7 @@ def build_mode_components(cfg, yml, column_mesh=None):
         def make_run_seg(trainable):
             return build_training_segment(
                 model, step_unified, grid, sigma, dt, fric_decay=fric_decay,
+                start_day_from_forcing=True,
                 **{**_configured, **trainable.to_segment_kwargs()})
 
     elif cfg.mode == "neural_gcm":
@@ -1659,7 +1660,7 @@ def build_mode_components(cfg, yml, column_mesh=None):
         def make_run_seg(nn_phys):
             return build_training_segment(
                 model, make_neural_step_unified(nn_phys, adapter), grid, sigma,
-                dt, fric_decay=fric_decay)
+                dt, fric_decay=fric_decay, start_day_from_forcing=True)
 
     elif cfg.mode == "sfno":
         import equinox as eqx
@@ -1725,7 +1726,8 @@ def build_mode_components(cfg, yml, column_mesh=None):
         def make_run_seg(sfno_ph):
             step = make_sfno_step_unified_latlon(sfno_ph, w_ll2g, w_g2ll)
             return build_training_segment(model, step, grid, sigma, dt,
-                                           fric_decay=fric_decay)
+                                           fric_decay=fric_decay,
+                                           start_day_from_forcing=True)
 
     else:
         raise ValueError(f"unknown mode {cfg.mode!r}")
@@ -2663,11 +2665,13 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
         plane_kwargs = {
             _spec_to_driver.get(_key, _key): _plane
             for _key, _plane in planes.items()}
-        doy = float((times[i_ic] - np.datetime64(f"{year}-01-01"))
-                    / np.timedelta64(1, "D"))
+        # The sample's own date and time, packed as the spectral loader
+        # packs it (1-based day + seconds); the segments start their sun
+        # there (start_day_from_forcing, user decision Q3).
+        doy, sod = era5_time_to_forcing_calendar(times[i_ic], year)
         forcing = pack_forcing(
             sst=sst, sic=jnp.zeros_like(sst),
-            day_of_year=jnp.asarray(doy), seconds_of_day=jnp.asarray(0.0),
+            day_of_year=jnp.asarray(doy), seconds_of_day=jnp.asarray(sod),
             solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
             o3_top_vmr=getattr(driver, "_o3_top_vmr", None),
