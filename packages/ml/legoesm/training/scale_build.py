@@ -1761,6 +1761,10 @@ def _build_mode_components_mpas(cfg, yml):
     if yml.get("era5_cloud_condensate"):
         raise ValueError("era5_cloud_condensate: the ERA5 -> MPAS converter "
                          "builds no condensate; not on 'mpas'.")
+    if yml.get("era5_surface_fluxes"):
+        raise ValueError("era5_surface_fluxes: the flux planes are built on "
+                         "structured grids only (the stress pair would need "
+                         "rotating); not on 'mpas'.")
     config = build_latlon_config(cfg, yml)
     driver = ModelDriver(config)
     driver.setup()

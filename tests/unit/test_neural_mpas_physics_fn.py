@@ -19,7 +19,7 @@ jax.config.update("jax_enable_x64", True)
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.physics import neural_physics as nph  # noqa: E402
 from tests.unit.test_learned_wind_heads import (  # noqa: E402
-    NLEV, RAW_U, RAW_V, _expected_wind, _net, _with_wind_bias,
+    NLEV, _net,
 )
 
 
@@ -48,6 +48,16 @@ def setup():
     return mesh, create_sigma_coordinate(NLEV), state, forcing
 
 
+def _live_net():
+    """Every weight random (O(0.3)): outputs vary from cell to cell."""
+    net = _net()
+    leaves, tree = jax.tree_util.tree_flatten(eqx.filter(net, eqx.is_array))
+    rng = np.random.default_rng(3)
+    return eqx.combine(jax.tree_util.tree_unflatten(
+        tree, [jnp.asarray(0.3 * rng.normal(size=x.shape)) for x in leaves]),
+        eqx.filter(net, lambda x: not eqx.is_array(x)))
+
+
 def _cell_out(net, mesh, state, forcing, uu=None, vv=None):
     """The network's cell outputs, fed the reconstructed cell winds."""
     from legoesm.core.grid_adapters import make_adapter
@@ -70,17 +80,17 @@ def _cell_out(net, mesh, state, forcing, uu=None, vv=None):
 def test_cell_wind_tendency_projects_onto_the_edge_normals(setup):
     """Edge tendency = (two-cell mean of the east tendency) cos(angleEdge)
     + (two-cell mean of the north tendency) sin(angleEdge), written out
-    here in numpy; the biased heads make east and north distinct and ~1e-4."""
+    here in numpy; a live network makes the tendencies vary between the two
+    cells of an edge (codex r1: a one-cell projection must fail)."""
     mesh, sigma, state, forcing = setup
-    net = _with_wind_bias(_net())
+    net = _live_net()
     t = nph.make_neural_mpas_physics_fn(net, mesh)(state, mesh, sigma,
                                                    forcing=forcing)
     out = _cell_out(net, mesh, state, forcing)
     du, dv = np.asarray(out.du_dt), np.asarray(out.dv_dt)
-    # the heads carry the bias (the projection below is not of zeros)
-    np.testing.assert_allclose(du.mean(0), _expected_wind(RAW_U), rtol=1e-3)
-    np.testing.assert_allclose(dv.mean(0), _expected_wind(RAW_V), rtol=1e-3)
     c0, c1 = (np.asarray(mesh.cellsOnEdge)[i] for i in (0, 1))
+    # the two cells of an edge differ by far more than the tolerance
+    assert np.abs(du[c0] - du[c1]).max() > 1e-3 * np.abs(du).max() > 1e-9
     a = np.asarray(mesh.angleEdge)[:, None]
     want = (0.5 * (du[c0] + du[c1]) * np.cos(a)
             + 0.5 * (dv[c0] + dv[c1]) * np.sin(a))
@@ -98,13 +108,7 @@ def test_cell_wind_tendency_projects_onto_the_edge_normals(setup):
 
 def test_network_sees_the_reconstructed_cell_winds(setup):
     mesh, sigma, state, forcing = setup
-    net = _net()
-    # every weight live, so the T tendency depends on the input winds
-    leaves, tree = jax.tree_util.tree_flatten(eqx.filter(net, eqx.is_array))
-    rng = np.random.default_rng(3)
-    net = eqx.combine(jax.tree_util.tree_unflatten(
-        tree, [jnp.asarray(0.3 * rng.normal(size=x.shape)) for x in leaves]),
-        eqx.filter(net, lambda x: not eqx.is_array(x)))
+    net = _live_net()   # every weight live: dT depends on the input winds
     got = nph.make_neural_mpas_physics_fn(net, mesh)(
         state, mesh, sigma, forcing=forcing).dT_dt.data
     from legoesm.grids.voronoi import reconstruct_cell_velocity
@@ -114,4 +118,4 @@ def test_network_sees_the_reconstructed_cell_winds(setup):
                                rtol=1e-12, atol=1e-18)
     # the comparison resolves the wind inputs (a swap is visible)
     swapped = _cell_out(net, mesh, state, forcing, uu=v, vv=u).dT_dt
-    assert float(jnp.abs(swapped - ref).max()) > 0.0
+    assert float(jnp.abs(swapped - ref).max()) > 1e-3 * float(jnp.abs(ref).max())

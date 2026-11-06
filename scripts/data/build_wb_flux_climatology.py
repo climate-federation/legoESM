@@ -167,9 +167,9 @@ def main(argv=None):
     root = sb.wb_state_cache_root(yml)
     if root is None:
         raise SystemExit(f"{a.config} names no state_cache_dir")
-    # sic is the learned arms' input: build its grid as they do (the MPAS core
-    # builds neural_gcm only; same grid on every core; voted 2-1).
-    cfg = SimpleNamespace(mode="neural_gcm" if a.field == "sic" else "physics",
+    # The MPAS core builds mode neural_gcm only (sic is that arm's input);
+    # the other cores keep "physics" (re-voted 2-1, codex + GLM).
+    cfg = SimpleNamespace(mode="neural_gcm" if a.training_core == "mpas" else "physics",
                           training_core=a.training_core,
                           smoke=False, windows=None, n_days=None,
                           multi_step_hours=None)

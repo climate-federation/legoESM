@@ -183,6 +183,7 @@ def test_cube_n_is_required_and_a_positive_int(bad):
     ("neural_gcm", {"w_flux_olr": 1.0}, {}, "state only"),
     ("neural_gcm", {"w_bias_flux_rsut": 1.0}, {}, "state only"),
     ("neural_gcm", {}, {"era5_cloud_condensate": True}, "no condensate"),
+    ("neural_gcm", {}, {"era5_surface_fluxes": True}, "structured grids only"),
 ])
 def test_mpas_core_refuses_what_it_cannot_build(mode, loss, extra, match):
     from legoesm.training.scale_build import build_mode_components
