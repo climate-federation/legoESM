@@ -132,6 +132,7 @@ __param_spec__ = {
             "maximum_viscosity": "numerics: cap",
             "maximum_tracer_diffusivity": "numerics: cap",
             "maximum_tke_diffusivity": "numerics: cap",
+            "surface_buoyancy_flux_shortwave": "switch (string): whether the penetrating shortwave enters the surface buoyancy flux; not a number to fit",
         },
         "params": {
             "c_surface_shear": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) mixing length", "shape": None},
@@ -1103,6 +1104,17 @@ class CATKEConfig(NamedTuple):
     maximum_viscosity: float = float("inf")           # K_u cap [m^2/s]
     maximum_tracer_diffusivity: float = float("inf")  # K_c cap [m^2/s]
     maximum_tke_diffusivity: float = float("inf")     # K_e cap [m^2/s]
+    # Shortwave in CATKE's surface buoyancy flux Jb (core-0027). Oceananigans' CATKE takes Jb from the top boundary
+    # fluxes of T and S only (catke_vertical_diffusivity.jl, top_buoyancy_flux of the top tracer BCs); with
+    # penetrating radiation (NumericalEarth/ClimaOcean TwoColorRadiation) the whole shortwave is a body forcing and
+    # shortwave_radiative_forcing returns zero for the top flux (radiative_forcing.jl, apply_air_sea_radiative_fluxes.jl),
+    # so Jb is formed from the non-solar flux. "exclude" (default) does the same here when the surface forcing
+    # carries sw_down: Jb uses q_net - sw_down. "include" keeps the earlier behaviour (Jb from the full q_net).
+    # With a skin fraction above 0 (the "auto" or default jerlov_2band path, or sweeney_2band) part of sw_down is
+    # absorbed at the top and still sits in the tracer surface flux; it is left out of Jb all the same, as
+    # NumericalEarth leaves all shortwave out even where most is absorbed in the top cell. The regional driver uses
+    # skin fraction 0, where the split is exact.
+    surface_buoyancy_flux_shortwave: str = "exclude"
 
 
 class EPBLConfig(NamedTuple):

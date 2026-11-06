@@ -1289,8 +1289,21 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         H_col = state.H_bathy.data
         hab_iface = jnp.maximum(H_col[..., jnp.newaxis] - depth_iface, 0.0)
         # Surface buoyancy flux Jb (shared helper) + friction velocity u_star.
+        # core-0027: as Oceananigans/NumericalEarth, the penetrating shortwave is a body forcing and does not enter
+        # Jb, so Jb is formed from the non-solar flux q_net - sw_down when the forcing carries sw_down.
+        _sw_mode = getattr(catke_cfg, "surface_buoyancy_flux_shortwave", "exclude")
+        if _sw_mode not in ("exclude", "include"):
+            raise ValueError(
+                "CATKEConfig.surface_buoyancy_flux_shortwave must be 'exclude' or "
+                f"'include', got {_sw_mode!r}")
+        _jb_forcing = surface_forcing
+        if (_sw_mode == "exclude" and surface_forcing is not None
+                and getattr(surface_forcing, "q_net", None) is not None
+                and getattr(surface_forcing, "sw_down", None) is not None):
+            _jb_forcing = surface_forcing._replace(
+                q_net=surface_forcing.q_net - surface_forcing.sw_down)
         Jb, _, _ = _surface_buoyancy_flux(
-            surface_forcing, state, constants_config, eos_fn=eos_fn)
+            _jb_forcing, state, constants_config, eos_fn=eos_fn)
         if Jb is None:
             Jb = jnp.zeros(T_data.shape[:-1], dtype=T_data.dtype)
         tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
