@@ -196,9 +196,14 @@ KNOWN DIFFERENCES, kept:
   reconstruction differs by up to 12 W/m2 in surface LW down.  Host choice.
 - Constants g, M_d, M_w: 4e-5 W/m2.
 - Out-of-range T, p: RTE refuses them; ours clips to the table.
-- Float32 direct beam at ssa = 1 exactly: k is floored at sqrt(eps), leaving up to
-  3e-3 false absorptance in the worst layer of a tau up to 2000 sweep.  Lower floors
-  are worse (0.01 to 0.95, measured).  Float64: 8e-9.
+- Float32 direct beam at ssa = 1 exactly: k is floored at sqrt(eps), leaving false
+  absorptance that grows with g.  Worst layer of a tau up to 2000, mu 0.05-1 sweep:
+  3.8e-4 at g = 0.5, 6.4e-4 at 0.7, 1.9e-3 at 0.9, 1.8e-2 at 0.99, 0.18 at g = 1.
+  Delta scaling holds cloud g at g/(1+g) <= 0.5, so 3.8e-4 bounds gas-plus-cloud
+  optics without aerosols.  Aerosol g is not delta scaled and mixes in by scattering
+  weight, so aerosol layers rounding to ssa = 1 can reach the larger values.
+  Lower floors are worse (0.01 to 0.95, measured).
+  Float64: 8e-9.
 
 OPEN: cloud tables are v1.8.2 (pinned by `test_rrtmgp_cloud_optics_oracle.py`);
 against the latest tables they cost up to 2.4 W/m2 SW (0.47 rms) and 1.5 W/m2 LW.
