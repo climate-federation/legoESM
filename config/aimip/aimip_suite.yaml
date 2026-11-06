@@ -6,8 +6,6 @@
 # The ladder: classical (full physics suite + RRTMGP radiation) →
 # column_nn (ALL physics incl. radiation learned by a column MLP) →
 # sfno_full (SFNO emulates the ENTIRE atmosphere: dycore + physics).
-# The intermediate ``sfno_physics`` rung (SFNO physics, dycore
-# retained) stays selectable via ``--variants sfno_physics``.
 
 base: "config/aimip/aimip_era5.yaml"
 

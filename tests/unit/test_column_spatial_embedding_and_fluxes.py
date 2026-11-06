@@ -15,12 +15,9 @@ from legoesm.grids.gaussian import create_gaussian_grid
 from legoesm.training.model_registry import (
     VARIANT_DEFAULTS,
     build_variant,
-    sfno_arch_config,
-    sfno_extra_input_channels,
 )
 from legoesm.training.neural_gcm_spectral import (
     carry_to_spectral_state,
-    make_sfno_spectral_physics,
     make_turbulence_only_spectral_physics,
 )
 
@@ -229,30 +226,9 @@ def test_output_sensitive_to_sfc_shf(grid, state):
 
 
 def test_variant_defaults_gain_new_flags():
-    for v in ("column_nn", "sfno_physics"):
-        d = VARIANT_DEFAULTS[v]
-        assert d["spatial_embedding"] is False
-        assert d["era5_surface_fluxes"] is False
-
-
-def test_sfno_extra_input_channels_matrix():
-    assert sfno_extra_input_channels(spatial_embedding=False,
-                                     era5_surface_fluxes=False) == 0
-    assert sfno_extra_input_channels(spatial_embedding=True,
-                                     era5_surface_fluxes=False) == 3  # land, sin/cos lat
-    assert sfno_extra_input_channels(spatial_embedding=False,
-                                     era5_surface_fluxes=True) == 6
-    assert sfno_extra_input_channels(spatial_embedding=True,
-                                     era5_surface_fluxes=True) == 9
-
-
-def test_sfno_arch_config_in_channels():
-    cfg = sfno_arch_config(
-        "sfno_physics", nlev=NLEV,
-        overrides={"sfno_embed_dim": 8, "sfno_n_blocks": 1,
-                   "spatial_embedding": True, "era5_surface_fluxes": True},
-    )
-    assert cfg.in_channels == cfg.out_channels + 3 + 9
+    d = VARIANT_DEFAULTS["column_nn"]
+    assert d["spatial_embedding"] is False
+    assert d["era5_surface_fluxes"] is False
 
 
 def test_build_variant_embedding_requires_grid():
@@ -266,59 +242,6 @@ def test_build_variant_embedding_with_grid_runs():
     model = build_variant("column_nn", nlev=NLEV, grid=grid8,
                           overrides={"spatial_embedding": True})
     assert model.pos_embed.shape == (len(grid8.lat) * len(grid8.lon), 8)
-
-
-# ----------------------------------------------------------------- SFNO
-
-
-def test_sfno_flag_mismatch_raises(grid):
-    sfno = build_variant(
-        "sfno_physics", nlev=NLEV, grid=grid,
-        overrides={"sfno_embed_dim": 8, "sfno_n_blocks": 1},
-    )
-    with pytest.raises(ValueError):
-        make_sfno_spectral_physics(sfno, grid, spatial_embedding=True)
-    with pytest.raises(ValueError):
-        make_sfno_spectral_physics(sfno, grid, era5_surface_fluxes=True)
-
-
-def test_sfno_flag_on_missing_flux_key_names_key(grid, state):
-    st, sigma = state
-    sfno = build_variant(
-        "sfno_physics", nlev=NLEV, grid=grid,
-        overrides={"sfno_embed_dim": 8, "sfno_n_blocks": 1,
-                   "spatial_embedding": True, "era5_surface_fluxes": True},
-    )
-    fn = make_sfno_spectral_physics(sfno, grid, spatial_embedding=True,
-                                    era5_surface_fluxes=True)
-    ncol = len(grid.lat) * len(grid.lon)
-    forcing = _flux_forcing(ncol)
-    del forcing["sfc_sw_up"]
-    with pytest.raises(KeyError, match="sfc_sw_up"):
-        fn(st, grid, sigma, forcing=forcing)
-
-
-def test_sfno_sensitive_to_flux_plane(grid, state):
-    st, sigma = state
-    sfno = build_variant(
-        "sfno_physics", nlev=NLEV, grid=grid,
-        overrides={"sfno_embed_dim": 8, "sfno_n_blocks": 1,
-                   "spatial_embedding": True, "era5_surface_fluxes": True},
-    )
-    sfno = eqx.tree_at(
-        lambda t: t.decoder.weight, sfno,
-        0.05 * jax.random.normal(jax.random.PRNGKey(31),
-                                 sfno.decoder.weight.shape),
-    )
-    fn = make_sfno_spectral_physics(sfno, grid, spatial_embedding=True,
-                                    era5_surface_fluxes=True)
-    ncol = len(grid.lat) * len(grid.lon)
-    f1 = _flux_forcing(ncol, val=0.2)
-    f2 = _flux_forcing(ncol, val=0.2)
-    f2["sfc_lhf"] = jnp.full((ncol,), 55.0)
-    o1 = fn(st, grid, sigma, forcing=f1)
-    o2 = fn(st, grid, sigma, forcing=f2)
-    assert float(jnp.max(jnp.abs(o2.T_hat.data - o1.T_hat.data))) > 0.0
 
 
 # ------------------------------------------------- turbulence-only fluxes

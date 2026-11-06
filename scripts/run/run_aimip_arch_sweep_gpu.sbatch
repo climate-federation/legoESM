@@ -9,9 +9,9 @@
 #SBATCH --output=results/aimip_arch_sweep_001/slurm-%j.out
 #SBATCH --error=results/aimip_arch_sweep_001/slurm-%j.err
 #
-# Architecture-size sweep for column_nn and sfno_physics variants
+# Architecture-size sweep for the column_nn variant
 # under the multi-step CRPS training config.  ~20-30 min per (variant,
-# size) entry on a single RTX 8000; 8 entries -> ~3-4 h.  10 h walltime
+# size) entry on a single RTX 8000; 4 entries.  10 h walltime
 # leaves headroom for ERA5 data-load variability.
 
 set -euo pipefail

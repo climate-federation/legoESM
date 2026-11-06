@@ -1,5 +1,5 @@
 #!/bin/bash
-# Retrain the AIMIP suite (classical[winner=edmf] / column_nn / sfno_physics)
+# Retrain the AIMIP suite (classical[winner=edmf] / column_nn)
 # with the ACE2-ERA5 LOSS: residual normalization (std of 6h field change),
 # 2-step autoregressive supervision, flat per-var weights, pure MSE. T63 +
 # RRTMGP kept. 2-step RRTMGP at T63 is ~2x single-step -> generous walltime;

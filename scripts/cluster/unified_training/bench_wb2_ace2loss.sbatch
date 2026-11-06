@@ -26,7 +26,7 @@ OUT_ROOT="${OUT_ROOT:-results/bench_wb2_ace2loss}"
 mkdir -p "$OUT_ROOT"
 
 # run_aimip_wb2_eval.VALID_VARIANTS = classical | column_nn | sfno_full.
-# The ace2loss campaign trained sfno_PHYSICS (SFNO physics, dycore kept),
+# The ace2loss campaign also trained the since-removed dycore-SFNO arm,
 # which the WB2 spectral-state eval harness does not score — so it is not
 # listed here (a separate sfno_full run would be the SFNO WB2 entry).
 # Canonical ace2 suite output_dir (results/aimip_ace2loss/<variant>). The

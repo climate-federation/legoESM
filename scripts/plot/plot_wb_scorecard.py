@@ -3,7 +3,7 @@
 
 Reads one or more ``scorecard.json`` files (as written by
 ``scripts/validate/run_weatherbench_eval.py::main`` — one per legoESM model
-family, e.g. ``physics``/``neural_gcm``/``sfno``) and, optionally, a CSV of
+family, e.g. ``physics``/``neural_gcm``) and, optionally, a CSV of
 PUBLISHED WB2 headline RMSE for reference models (parsed by
 ``evaluations.baselines.load_sota_headline``). Produces a multi-panel figure of
 metric (RMSE by default, ACC where present) vs forecast lead time — one subplot

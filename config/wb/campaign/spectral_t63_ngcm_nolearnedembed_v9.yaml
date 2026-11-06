@@ -258,12 +258,6 @@ neural_gcm:
   nn_hidden: 256
   nn_layers: 4
   land_inputs: true
-sfno:
-  # User 2026-11-06: weights no WB loss can reach are not created.
-  prune_unused_weights: true
-  spatial_embedding: false
-  sfno_embed_dim: 128
-  sfno_n_blocks: 8
 classical:
   convection: zhang_mcfarlane
   turbulence: louis

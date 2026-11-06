@@ -16,8 +16,8 @@ Three variants (dispatch-hardened; an unknown ``--variant`` is a hard
   rad path when ``aimip_rad_update_interval > 1``).
 * ``column_nn``  — per-column MLP as the WHOLE physics (aimip_radiation
   "none"). Rolled via ``spectral_rollout`` with the column-MLP physics_fn.
-* ``sfno_full``  — the FULL SFNO emulator (replaces dycore+physics, NOT
-  sfno_physics). Rolled by scanning ``SFNOPrimitiveEquationModel.step`` at the
+* ``sfno_full``  — the FULL SFNO emulator (replaces dycore+physics).
+  Rolled by scanning ``SFNOPrimitiveEquationModel.step`` at the
   macro step ``dt_sfno``. Leads convert to SFNO steps as
   ``round(lead_hours * 3600 / dt_sfno)``.
 

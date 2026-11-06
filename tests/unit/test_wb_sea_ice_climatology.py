@@ -111,7 +111,7 @@ def test_the_deck_switch_is_learned_arms_only(tmp_path):
 
     yml = {"era5_sea_ice_climatology": True, "state_cache_dir": str(tmp_path),
            "era5_zarr": "src"}
-    assert sb.wb_sea_ice_climatology(SimpleNamespace(mode="sfno"),
+    assert sb.wb_sea_ice_climatology(SimpleNamespace(mode="neural_gcm"),
                                      {"era5_sea_ice_climatology": False}, None) is None
     with pytest.raises(ValueError):
         sb.wb_sea_ice_climatology(SimpleNamespace(mode="physics"), yml, _grid())
@@ -122,8 +122,8 @@ def test_the_deck_switch_is_learned_arms_only(tmp_path):
 def test_selecting_the_climatology_loads_the_land_fraction():
     from legoesm.training.scale_build import wb_needs_land_frac
 
-    assert not wb_needs_land_frac("sfno", {"sfno": {}})
-    assert wb_needs_land_frac("sfno", {"sfno": {}, "era5_sea_ice_climatology": True})
+    assert not wb_needs_land_frac("neural_gcm", {"neural_gcm": {}})
+    assert wb_needs_land_frac("neural_gcm", {"neural_gcm": {}, "era5_sea_ice_climatology": True})
 
 
 def _cube():

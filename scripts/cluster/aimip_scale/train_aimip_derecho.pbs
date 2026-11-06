@@ -27,8 +27,7 @@
 # The variant ladder: classical (full physics + RRTMGP radiation),
 # column_nn (ALL physics incl. radiation learned by a column MLP),
 # sfno_full (SFNO emulates the ENTIRE atmosphere — no dycore, no
-# physics).  sfno_physics (SFNO physics, dycore retained) remains
-# available as an optional intermediate rung.
+# physics).
 #
 # SUBMIT (one per variant):
 #   qsub -v VARIANT=classical    scripts/cluster/aimip_scale/train_aimip_derecho.pbs
@@ -40,7 +39,7 @@
 # ===========================================================================
 set -uo pipefail
 
-VARIANT="${VARIANT:-sfno_full}"     # classical | column_nn | sfno_full | sfno_physics
+VARIANT="${VARIANT:-sfno_full}"     # classical | column_nn | sfno_full
 CHAIN="${CHAIN:-0}"
 CHAIN_MAX="${CHAIN_MAX:-24}"  # v2 curriculum (72h/120h phases) needs more links
 
@@ -84,7 +83,7 @@ echo "[aimip-scale] $(date) variant=$VARIANT link=$CHAIN suite=$SUITE resume=${R
 LINK_BUDGET_S=$(( 12*3600 - 45*60 ))   # 40500 s = walltime - 45 min drain
 # Resume-artifact signature (name:mtime of the newest FORWARD-PROGRESS checkpoint)
 # BEFORE this link -- so a walltime-bound link is chained ONLY if it actually
-# advanced a resumable checkpoint. The chunked variants (column_nn / sfno_physics
+# advanced a resumable checkpoint. The chunked variant (column_nn
 # with chunk_windows>0) write chunk_latest.eqx every chunk; `classical` AND
 # `sfno_full` load the full dataset with NO per-chunk checkpoint, so if such an
 # epoch exceeds the budget the link produces nothing new and blindly chaining
@@ -110,7 +109,7 @@ if [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ]; then
     echo "[aimip-scale] hit link budget ${LINK_BUDGET_S}s (rc=$RC) but NO new checkpoint" \
          "-> this variant is not mid-epoch resumable (classical/sfno_full have no" \
          "chunk_latest.eqx and the epoch did not finish); NOT chaining to avoid an" \
-         "epoch-0 restart loop. Remedy: chunked variants (column_nn/sfno_physics)" \
+         "epoch-0 restart loop. Remedy: chunked variant (column_nn)" \
          "-> chunk_windows>0; classical/sfno_full -> a walltime long enough to" \
          "finish one epoch (they do not support chunked streaming)."
     RC=1

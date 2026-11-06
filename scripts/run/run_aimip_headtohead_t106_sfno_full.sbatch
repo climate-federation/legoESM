@@ -12,9 +12,8 @@
 # T106 head-to-head: trains the sfno_full variant -- SFNO as a full
 # atmospheric emulator (no dycore, no physics tendency) via
 # ``train_sfno_full_spectral`` (dt_sfno=6 h macro step matching the
-# standard SFNO/FourCastNet cadence).  Same SFNO arch as the
-# sfno_physics variant (embed_dim=32, n_blocks=2) so model size is
-# directly comparable; only the integration path differs.
+# standard SFNO/FourCastNet cadence).  SFNO arch embed_dim=32,
+# n_blocks=2.
 #
 # Configs: config/aimip/t106_headtohead/(base.yaml + suite.yaml + variant_sfno_full.yaml)
 #
@@ -42,8 +41,8 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 export HOME="${HOME:-/burg-archive/home/pg2328}"
 
-# Dedicated cache: sfno_full's HLO graph is different from
-# sfno_physics (no dycore in the rollout), so do not share.
+# Dedicated cache: sfno_full's HLO graph has no dycore in the rollout,
+# so do not share.
 export JAX_COMPILATION_CACHE_DIR="${REPO_ROOT}/.cache/jax_compile_cache_h2h_${VARIANT}"
 mkdir -p "${JAX_COMPILATION_CACHE_DIR}"
 

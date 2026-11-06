@@ -4,7 +4,7 @@
 Multi-node data-parallel: one MPI rank per GPU, each rank trains the SAME
 replicated model on a distinct ERA5 shard; gradients are averaged across ranks
 each step via ``legoesm.training.data_parallel`` (mpi4jax ``global_sum_mpi``).
-Supports all three modes (``--mode physics|neural_gcm|sfno``) at 0.7 deg lat-lon.
+Supports both modes (``--mode physics|neural_gcm``) at 0.7 deg lat-lon.
 
 Launch: ``scripts/cluster/{derecho/train_wb.pbs, levante/train_wb.slurm}``.
 Single-process (no MPI) also works (num_processes == 1 -> the serial path), for a
@@ -20,7 +20,7 @@ import argparse
 import os as _os
 from typing import NamedTuple
 
-VALID_MODES = ("physics", "neural_gcm", "sfno")
+VALID_MODES = ("physics", "neural_gcm")
 # Historical CLI defaults, now the LAST fallback behind the campaign YAML
 # (single source: parser help, resolver and tests all read these).
 _DEFAULT_LR = 3.0e-4
@@ -592,14 +592,8 @@ def _uses_reachability_freeze(mode: str) -> bool:
     no scene opens looks identical, which is what the post-training
     re-measurement exists to catch.
 
-    A NEURAL model must never be filtered this way.  ``sfno`` is the sharp
-    case: the registry ZEROES its decoder weight and bias by policy, so the
-    untrained model emits exactly-zero tendencies and epoch 0 integrates the
-    pure dycore — and by the chain rule EVERY upstream weight then has an
-    exactly-zero gradient at step 0.  Freezing on that evidence would leave the
-    decoder as the only trainable thing in the network, permanently.
-    ``neural_gcm`` is not zero-initialized (it scales its output by 0.01
-    instead), but the argument is the same in kind: a neural weight's zero
+    A NEURAL model must never be filtered this way.  ``neural_gcm`` scales its
+    output by 0.01 at initialization; a neural weight's zero
     gradient is a property of the CURRENT weights, which the next update
     changes, not of the configuration.  Only a scheme knob can be unreachable
     in a way that training will never fix.
@@ -1234,7 +1228,7 @@ def _main(argv=None):
     # 0.10.0).  One concrete call here fills the cache — its key holds only
     # static paths/flags, never a trained leaf, so the in-trace build hits it
     # and skips the load.  It is also where a broken physics config now fails,
-    # seconds in rather than minutes.  ``neural_gcm``/``sfno`` build a cheap
+    # seconds in rather than minutes.  ``neural_gcm`` builds a cheap
     # closure here and are unaffected.  Mirrors the warm-up the AIMIP trainer
     # runs before its train step (``neural_gcm_spectral.main``).
     # Single-rank by construction in this campaign (ranks=1); at >1 rank every

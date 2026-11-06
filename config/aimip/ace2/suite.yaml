@@ -9,7 +9,7 @@
 #
 # Classical uses the SWEEP-WINNER schemes (edmf convection + louis +
 # mcfarlane + sundqvist + xu_randall) via ace2/variant_classical.yaml;
-# column_nn / sfno_physics use their standard overlays.
+# column_nn uses its standard overlay.
 base: config/aimip/aimip_era5.yaml
 
 cfg_overrides:
@@ -26,6 +26,5 @@ cfg_overrides:
 variants:
   - classical
   - column_nn
-  - sfno_physics
 
 output_dir: results/aimip_ace2loss

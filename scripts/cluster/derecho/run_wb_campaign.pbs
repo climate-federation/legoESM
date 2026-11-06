@@ -1,7 +1,7 @@
 #!/bin/bash
 # WeatherBench 3-family forecast CAMPAIGN on NCAR Derecho (PBS Pro, 4x A100/node).
 #
-# Runs the full campaign (train physics+neural_gcm+sfno -> WB2 scorecard eval ->
+# Runs the full campaign (train physics+neural_gcm -> WB2 scorecard eval ->
 # comparison plot vs the published WB2 leaderboard) via ONE Python driver,
 # scripts/run/run_weatherbench_campaign.py. The driver is MPI-aware: the TRAIN
 # stage is data-parallel across all ranks (mpi4jax gradient averaging, 1 GPU/rank);
@@ -12,7 +12,7 @@
 # Env overrides:
 #   WB_CAMPAIGN_CONFIG  campaign YAML (default config/wb/campaign/spectral_t63.yaml;
 #                       set config/wb/campaign/spectral_t106.yaml for the competitive tier)
-#   WB_MODES            families to run   (default physics,neural_gcm,sfno)
+#   WB_MODES            families to run   (default physics,neural_gcm)
 #   WB_STAGES           stages to run     (default train,eval,plot)
 #   WB_EPOCHS           override epochs    (default: the YAML value)
 #   WB_LEADS            eval leads [h]     (default 24,72,120,240)
@@ -41,7 +41,7 @@ export JAX_ENABLE_X64=1
 # one rank per GPU; count ranks from the PBS node/gpu selection
 NRANKS=$(wc -l < "${PBS_NODEFILE}")
 CONFIG="${WB_CAMPAIGN_CONFIG:-config/wb/campaign/spectral_t63.yaml}"
-MODES="${WB_MODES:-physics,neural_gcm,sfno}"
+MODES="${WB_MODES:-physics,neural_gcm}"
 STAGES="${WB_STAGES:-train,eval,plot}"
 OUT_ROOT="${WB_OUT_ROOT:-${SCRATCH:-.}/wb_campaign}"
 SOTA_CSV="${WB_SOTA_CSV:-config/wb/sota/wb2_headline_rmse.csv}"

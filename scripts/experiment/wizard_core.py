@@ -250,7 +250,7 @@ AMIP_INTEGRATORS = ("ssp_rk3", "ssp_rk3_scan", "ssp_rk34", "ssp_rk54", "rk4")
 
 # AIMIP (ML-emulated physics) intercomparison.  run_aimip.py TRAINS each variant
 # from a suite manifest + per-variant overlay; the base suite and the
-# classical/column_nn/sfno_physics/sfno_full overlays all ship under
+# classical/column_nn/sfno_full overlays all ship under
 # config/aimip/, so every non-empty AIMIP_VARIANTS entry is launchable from
 # the base suite — see aimip_launchable_variants().
 _AIMIP_BASE_SUITE = "config/aimip/aimip_suite.yaml"
@@ -320,8 +320,8 @@ def aimip_launchable_variants(repo_root: Path | str = _REPO_ROOT) -> list[str]:
 
     The ML-emulated-physics ladder: ``classical`` (full process-physics control
     incl. RRTMGP radiation) → ``column_nn`` (ALL physics incl. radiation learned
-    by a per-column NN) → ``sfno_physics`` (SFNO physics with spectral-dycore
-    coupling) → ``sfno_full`` (SFNO emulates the entire atmosphere, no dycore).
+    by a per-column NN) → ``sfno_full`` (SFNO emulates the entire atmosphere,
+    no dycore).
     A variant is offered only when it is a real
     ``AIMIP_VARIANTS`` key *and* has a ``variant_<name>.yaml`` overlay beside the
     base suite, so a renamed/removed overlay drops from the menu instead of
@@ -718,8 +718,7 @@ def _build_aimip(answers: dict[str, Any], machine: dict[str, Any]) -> LaunchPlan
 
     The *ML-emulation of physics* axis: ``classical`` (full process physics
     incl. RRTMGP radiation) → ``column_nn`` (all physics incl. radiation
-    learned per-column) → ``sfno_physics`` (SFNO physics, dycore retained) →
-    ``sfno_full`` (SFNO full-atmosphere emulator).
+    learned per-column) → ``sfno_full`` (SFNO full-atmosphere emulator).
     Routes to the shipped base suite + per-variant
     overlay under ``config/aimip/``.  This **trains** the variant (it is not a
     forward run) and needs an ERA5 cache; x64 is forced (spectral).
@@ -769,52 +768,19 @@ def _build_aimip(answers: dict[str, Any], machine: dict[str, Any]) -> LaunchPlan
 def _build_train(answers: dict[str, Any], machine: dict[str, Any]) -> LaunchPlan:
     """Train on observed data (ERA5).
 
-    Dispatches on ``train_mode``: the AIMIP intercomparison (ML-emulated physics,
-    via :func:`_build_aimip`) or the spectral neural-GCM emulator.  Only these
-    have a one-command CLI today; the grid-space modes (physics-param tuning,
-    neural physics, SFNO correction) are Python-only and are surfaced as a note
-    rather than a fabricated command.
+    Only the AIMIP intercomparison (ML-emulated physics, via
+    :func:`_build_aimip`) has a one-command CLI today; the grid-space modes
+    (physics-param tuning, neural physics) are Python-only and are surfaced as
+    a note rather than a fabricated command.
     """
     mode = answers["train_mode"]
     if mode == "aimip":
         return _build_aimip(answers, machine)
-    if mode != "neural_gcm_spectral":
-        raise ValueError(
-            f"train mode {mode!r} has no CLI launcher; only "
-            f"'neural_gcm_spectral' is launchable. The grid-space modes "
-            f"(train_physics_params / train_neural_gcm / train_sfno_coupled) are "
-            f"Python-only — see packages/ml/legoesm/training/training_driver.py."
-        )
-    script = _REPO_ROOT / "scripts" / "run" / "train_neural_gcm_spectral.py"
-    parts = [
-        "python", str(script),
-        "--n-max", str(int(answers.get("n_max", 42))),
-        "--n-levels", str(int(answers.get("n_levels", 10))),
-        "--epochs", str(int(answers.get("epochs", 50))),
-        "--lr", str(float(answers.get("lr", 3e-4))),
-        "--train-days", str(int(answers.get("train_days", 365))),
-        "--year", str(int(answers.get("year", 2015))),
-        "--cache-dir", str(answers.get("cache_dir", "data/era5_cache")),
-    ]
-    # Spectral transforms require x64 unconditionally.
-    return LaunchPlan(
-        kind="train",
-        run_cmd=_cmd(parts),
-        jax_platforms=backend_to_platforms(answers["backend"]),
-        enable_x64=True,
-        summary={
-            "objective": "train", "train_mode": mode,
-            "n_max": int(answers.get("n_max", 42)),
-            "n_levels": int(answers.get("n_levels", 10)),
-            "epochs": int(answers.get("epochs", 50)),
-            "train_days": int(answers.get("train_days", 365)),
-            "year": int(answers.get("year", 2015)),
-            "backend": answers["backend"],
-        },
-        notes=[
-            "ERA5 must be staged first: a Zarr cache at the --cache-dir (or network "
-            "access to the WeatherBench2 GCS bucket). x64 is forced (spectral).",
-        ],
+    raise ValueError(
+        f"train mode {mode!r} has no CLI launcher; only 'aimip' is "
+        f"launchable. The grid-space modes (train_physics_params / "
+        f"train_neural_gcm) are Python-only — see "
+        f"packages/ml/legoesm/training/training_driver.py."
     )
 
 

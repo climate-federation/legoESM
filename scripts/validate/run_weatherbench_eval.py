@@ -37,7 +37,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-VALID_MODES = ("physics", "neural_gcm", "sfno")
+VALID_MODES = ("physics", "neural_gcm")
 VALID_TRAINING_CORES = ("spectral", "latlon")
 _SECONDS_PER_HOUR = 3600.0
 

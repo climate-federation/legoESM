@@ -6,8 +6,8 @@
 #   (1) classical  — sweep-winner schemes (edmf/louis/mcfarlane/sundqvist/
 #                     xu_randall) + RRTMGP radiation
 #   (2) column_nn  — per-column MLP as the WHOLE physics (aimip_radiation=none)
-#   (3) sfno_full  — the FULL SFNO emulator (replaces dycore+physics; NOT
-#                     sfno_physics), iterating SFNOPrimitiveEquationModel.step
+#   (3) sfno_full  — the FULL SFNO emulator (replaces dycore+physics),
+#                     iterating SFNOPrimitiveEquationModel.step
 #                     at dt_sfno
 #
 # Base = the shared AIMIP ERA5 config (T63 / L8 / RRTMGP available / ERA5 zarr

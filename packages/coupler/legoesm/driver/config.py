@@ -45,7 +45,7 @@ _ICE_MELT_WIDTH_BOUNDS = (_ice_sw.__param_spec__["PrescribedIceSurfaceConfig"]
 # Empty string = not an AIMIP run (preserves backward-compat for
 # existing AMIP configs).
 AIMIP_VARIANTS: tuple[str, ...] = (
-    "", "classical", "column_nn", "sfno_physics", "sfno_full",
+    "", "classical", "column_nn", "sfno_full",
 )
 
 
@@ -1815,7 +1815,7 @@ class ExperimentConfig(NamedTuple):
     # When set, ``scripts/run/run_aimip.py`` dispatches to the matching
     # training entry point and ``validate_strict`` enforces the
     # corresponding scheme prerequisites.
-    aimip_variant: str = ""  # "", classical, column_nn, sfno_physics, sfno_full
+    aimip_variant: str = ""  # "", classical, column_nn, sfno_full
 
     # Performance
     precision: str = "fp32"           # fp32, fp64, mixed, or mixed_fp64_storage

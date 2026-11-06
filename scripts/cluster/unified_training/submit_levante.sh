@@ -17,7 +17,7 @@
 #
 #   # WeatherBench campaign instead (modes are '+'-separated, never commas):
 #   ALLOC=bd1083 CAMPAIGN=wb WB_SUITE=config/wb/campaign/spectral_t106.yaml \
-#     WB_MODES="physics+neural_gcm+sfno" ./scripts/cluster/unified_training/submit_levante.sh
+#     WB_MODES="physics+neural_gcm" ./scripts/cluster/unified_training/submit_levante.sh
 #
 # PREREQUISITES:
 #   - Edit scripts/cluster/scaling_levante/_env.sh (or export LEGOESM_REPO /
@@ -59,7 +59,7 @@ case "$CAMPAIGN" in
     ;;
   wb)
     WB_SUITE="${WB_SUITE:-config/wb/campaign/spectral_t106.yaml}"
-    WB_MODES="${WB_MODES:-physics+neural_gcm+sfno}"   # '+'-separated (not ',')
+    WB_MODES="${WB_MODES:-physics+neural_gcm}"   # '+'-separated (not ',')
     if [ ! -f "$REPO_ROOT/$WB_SUITE" ]; then
       echo "error: WB suite not found: $WB_SUITE" >&2
       exit 1

@@ -26,8 +26,8 @@ TRAINING_CORES = ("spectral", "latlon")
 RESERVED_CORES = ("cubed_sphere", "mpas")
 
 # Variant/mode vocabulary across both campaigns.
-AIMIP_VARIANTS = ("classical", "column_nn", "sfno_physics", "sfno_full")
-WB_MODES = ("physics", "neural_gcm", "sfno")
+AIMIP_VARIANTS = ("classical", "column_nn", "sfno_full")
+WB_MODES = ("physics", "neural_gcm")
 
 # The ONE radiation backend a WB or AIMIP run may use, for every variant.
 # Scheme swaps must not be confounded by the radiation backend, and gray
@@ -84,7 +84,7 @@ def validate_campaign_radiation(
     is simply not a campaign option.
 
     This replaced ``validate_classical_radiation``, which checked the CLASSICAL
-    variant only — column_nn / sfno_physics / sfno_full could each select gray
+    variant only — column_nn / sfno_full could each select gray
     — and carried an ``allow_non_rrtmgp`` escape that two shipped configs used.
     "Always" leaves no room for that escape, so it is gone.
 

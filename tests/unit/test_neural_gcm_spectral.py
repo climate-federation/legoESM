@@ -2,10 +2,9 @@
 
 Validates:
 - State conversion: SegmentCarry <-> SpectralHydrostaticState
-- SFNO spectral physics wrapper produces valid tendencies
 - Spectral rollout runs for a few steps without NaN
 - Loss function returns a finite scalar
-- Gradient flows through the full pipeline (SFNO weights)
+- Gradient flows through the full pipeline (column-MLP weights)
 
 Uses synthetic data only — no GCS/ERA5 access required.
 """
@@ -22,7 +21,6 @@ from legoesm.core.state import HydrostaticState
 from legoesm.driver.compiled_segments import pack_carry
 from legoesm.grids.gaussian import create_gaussian_grid
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.ml.sfno import SFNO, SFNOConfig
 from legoesm.ml.channel_packing import PE3DChannelSpec
 
 # Small grid for fast tests: T10 with 3 levels
@@ -80,22 +78,6 @@ def _assert_state_finite(pytree, label="state"):
             )
 
 
-def _make_small_sfno():
-    """Create a small SFNO for testing."""
-    from legoesm.training.neural_gcm_spectral import N_SFNO_FORCING_CHANNELS
-    spec = PE3DChannelSpec(nlev=NLEV)
-    config = SFNOConfig(
-        # state channels + the surface-forcing input planes
-        in_channels=spec.n_channels + N_SFNO_FORCING_CHANNELS,
-        out_channels=spec.n_channels,
-        embed_dim=16,
-        n_blocks=1,
-        mlp_expansion=2,
-        residual_prediction=False,
-    )
-    return SFNO(config, _GRID, key=jax.random.PRNGKey(42))
-
-
 # ---------------------------------------------------------------------------
 # 1. carry_to_spectral_state
 # ---------------------------------------------------------------------------
@@ -126,160 +108,10 @@ class TestCarryToSpectralState:
 
 
 # ---------------------------------------------------------------------------
-# 2. make_sfno_spectral_physics
-# ---------------------------------------------------------------------------
-
-class TestSFNOSpectralPhysics:
-
-    def test_returns_spectral_tendencies(self):
-        from legoesm.training.neural_gcm_spectral import (
-            carry_to_spectral_state,
-            make_sfno_spectral_physics,
-        )
-        carry = _make_gaussian_carry()
-        state = carry_to_spectral_state(carry, _GRID)
-        sfno = _make_small_sfno()
-
-        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
-        tendencies = physics_fn(state, _GRID, _SIGMA)
-
-        # Should return SpectralHydrostaticState
-        assert hasattr(tendencies, 'vor_hat')
-        assert tendencies.T_hat.data.shape == state.T_hat.data.shape
-        assert tendencies.phis_hat.data.shape == state.phis_hat.data.shape
-
-    def test_tendencies_finite(self):
-        from legoesm.training.neural_gcm_spectral import (
-            carry_to_spectral_state,
-            make_sfno_spectral_physics,
-        )
-        carry = _make_gaussian_carry()
-        state = carry_to_spectral_state(carry, _GRID)
-        sfno = _make_small_sfno()
-
-        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
-        tendencies = physics_fn(state, _GRID, _SIGMA)
-
-        _assert_state_finite(tendencies, label="tendency")
-
-    def test_channel_mismatch_raises(self):
-        """An SFNO without the forcing input planes must be rejected —
-        silently reading nlev off the wrong channel count would misalign
-        every packed field."""
-        from legoesm.training.neural_gcm_spectral import (
-            make_sfno_spectral_physics,
-        )
-        from legoesm.ml.channel_packing import PE3DChannelSpec
-        from legoesm.ml.sfno import SFNO, SFNOConfig
-        spec = PE3DChannelSpec(nlev=NLEV)
-        legacy = SFNO(
-            SFNOConfig(
-                in_channels=spec.n_channels,      # no forcing planes
-                out_channels=spec.n_channels,
-                embed_dim=16, n_blocks=1, mlp_expansion=2,
-                residual_prediction=False,
-            ),
-            _GRID, key=jax.random.PRNGKey(0),
-        )
-        with pytest.raises(ValueError, match="forcing"):
-            make_sfno_spectral_physics(legacy, _GRID)
-
-    def test_responds_to_prescribed_sst(self):
-        """Same state, different prescribed T_sfc → different SFNO
-        tendencies (the AMIP / interannual-variability pathway)."""
-        from legoesm.training.neural_gcm_spectral import (
-            carry_to_spectral_state,
-            make_sfno_spectral_physics,
-        )
-        carry = _make_gaussian_carry()
-        state = carry_to_spectral_state(carry, _GRID)
-        sfno = _make_small_sfno()
-        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
-        ncol = len(_GRID.lat) * len(_GRID.lon)
-
-        def _forcing(t_val):
-            return {
-                "T_sfc": jnp.full((ncol,), t_val, dtype=jnp.float64),
-                "sic": jnp.zeros((ncol,), dtype=jnp.float64),
-                "day_of_year": jnp.asarray(180.0),
-                "seconds_of_day": jnp.asarray(43200.0),
-            }
-
-        out_a = physics_fn(state, _GRID, _SIGMA, forcing=_forcing(285.0))
-        out_b = physics_fn(state, _GRID, _SIGMA, forcing=_forcing(300.0))
-        diff = float(jnp.max(jnp.abs(out_a.T_hat.data - out_b.T_hat.data)))
-        assert diff > 1e-12, (
-            f"SFNO tendencies must respond to prescribed T_sfc (diff={diff})"
-        )
-
-    def test_unforced_call_stays_finite(self):
-        """forcing=None (idealized/legacy path) uses internal proxies and
-        stays finite."""
-        from legoesm.training.neural_gcm_spectral import (
-            carry_to_spectral_state,
-            make_sfno_spectral_physics,
-        )
-        carry = _make_gaussian_carry()
-        state = carry_to_spectral_state(carry, _GRID)
-        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
-        _assert_state_finite(
-            physics_fn(state, _GRID, _SIGMA), label="unforced tendency",
-        )
-
-
-# ---------------------------------------------------------------------------
 # 3. spectral_rollout
 # ---------------------------------------------------------------------------
 
 class TestSpectralRollout:
-
-    def test_runs_without_nan(self):
-        from legoesm.training.neural_gcm_spectral import (
-            carry_to_spectral_state,
-            make_sfno_spectral_physics,
-            spectral_rollout,
-        )
-        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
-
-        carry = _make_gaussian_carry()
-        state = carry_to_spectral_state(carry, _GRID)
-        sfno = _make_small_sfno()
-        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
-
-        pe_config = SpectralPEConfig(
-            hyperdiff_coeff=1e14,
-            time_integrator="ssp_rk3",
-        )
-
-        result = spectral_rollout(
-            state, physics_fn, _GRID, _SIGMA, pe_config,
-            dt=1800.0, n_steps=2,
-        )
-
-        _assert_state_finite(result, label="rollout result")
-
-    def test_output_same_shape(self):
-        from legoesm.training.neural_gcm_spectral import (
-            carry_to_spectral_state,
-            make_sfno_spectral_physics,
-            spectral_rollout,
-        )
-        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
-
-        carry = _make_gaussian_carry()
-        state = carry_to_spectral_state(carry, _GRID)
-        sfno = _make_small_sfno()
-        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
-
-        pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
-
-        result = spectral_rollout(
-            state, physics_fn, _GRID, _SIGMA, pe_config,
-            dt=1800.0, n_steps=1,
-        )
-
-        assert result.T_hat.data.shape == state.T_hat.data.shape
-        assert result.lnps_hat.data.shape == state.lnps_hat.data.shape
 
     def _forcing_base(self):
         ncol = len(_GRID.lat) * len(_GRID.lon)
@@ -291,31 +123,34 @@ class TestSpectralRollout:
         }
 
     def test_forced_rollout_finite_and_sst_sensitive(self):
-        """forcing_base threads through the scan into the physics fn:
-        the forced rollout runs finite and a different prescribed SST
-        yields a different final state."""
-        from legoesm.training.neural_gcm_spectral import (
-            carry_to_spectral_state,
-            make_sfno_spectral_physics,
-            spectral_rollout,
-        )
+        """forcing_base threads through the scan into the physics fn: a
+        different prescribed SST yields a different final state.  Stand-in
+        physics (replaces the removed SFNO-dycore arm's vehicle): a T
+        tendency proportional to the prescribed mean SST anomaly, so the
+        assert fails if the rollout stops handing ``forcing`` to physics."""
         from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state, spectral_rollout,
+        )
+        state = carry_to_spectral_state(_make_gaussian_carry(), _GRID)
 
-        carry = _make_gaussian_carry()
-        state = carry_to_spectral_state(carry, _GRID)
-        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        def _sst_physics(st, grid_, sigma_, forcing=None):
+            tend = jax.tree.map(jnp.zeros_like, st)
+            anom = jnp.mean(forcing["T_sfc"]) - 290.0
+            return tend._replace(T_hat=tend.T_hat.replace(
+                data=jnp.full_like(st.T_hat.data, 1.0e-6 * anom)))
+
         pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
-
         fb = self._forcing_base()
         out_a = spectral_rollout(
-            state, physics_fn, _GRID, _SIGMA, pe_config,
+            state, _sst_physics, _GRID, _SIGMA, pe_config,
             dt=1800.0, n_steps=2, forcing_base=fb,
         )
         _assert_state_finite(out_a, label="forced rollout")
-        fb_warm = dict(fb, T_sfc=fb["T_sfc"] + 10.0)
         out_b = spectral_rollout(
-            state, physics_fn, _GRID, _SIGMA, pe_config,
-            dt=1800.0, n_steps=2, forcing_base=fb_warm,
+            state, _sst_physics, _GRID, _SIGMA, pe_config,
+            dt=1800.0, n_steps=2,
+            forcing_base=dict(fb, T_sfc=fb["T_sfc"] + 10.0),
         )
         diff = float(jnp.max(jnp.abs(out_a.T_hat.data - out_b.T_hat.data)))
         assert diff > 1e-14, "prescribed SST did not reach the rollout physics"
@@ -327,14 +162,14 @@ class TestSpectralRollout:
         sun.  The prescribed field must now reach the radiation call."""
         from legoesm.training.neural_gcm_spectral import (
             carry_to_spectral_state,
-            make_sfno_spectral_physics,
+            make_column_mlp_spectral_physics,
             spectral_rollout,
         )
         from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
-        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        physics_fn = make_column_mlp_spectral_physics(_make_small_column_mlp(), _GRID)
         pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
         seen = []
 
@@ -358,14 +193,14 @@ class TestSpectralRollout:
         drops it."""
         from legoesm.training.neural_gcm_spectral import (
             carry_to_spectral_state,
-            make_sfno_spectral_physics,
+            make_column_mlp_spectral_physics,
             spectral_rollout,
         )
         from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
-        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        physics_fn = make_column_mlp_spectral_physics(_make_small_column_mlp(), _GRID)
         pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
         seen = []
 
@@ -423,58 +258,6 @@ class TestLoss:
         )
         # Not exactly zero due to SH analysis/synthesis roundtrip, but small
         assert float(loss) < 1.0
-
-
-# ---------------------------------------------------------------------------
-# 5. Gradient flow through full pipeline
-# ---------------------------------------------------------------------------
-
-class TestGradientFlow:
-
-    def test_grad_through_rollout(self):
-        """Verify gradients flow from loss through rollout to SFNO weights."""
-        from legoesm.training.neural_gcm_spectral import (
-            carry_to_spectral_state,
-            make_sfno_spectral_physics,
-            spectral_rollout,
-            spectral_state_vs_carry_loss,
-        )
-        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
-
-        carry_ic = _make_gaussian_carry(T_val=280.0)
-        carry_target = _make_gaussian_carry(T_val=282.0)
-        state = carry_to_spectral_state(carry_ic, _GRID)
-        sigma_full = jnp.asarray(_SIGMA.sigma_full)
-
-        sfno = _make_small_sfno()
-        pe_config = SpectralPEConfig(
-            hyperdiff_coeff=1e14,
-            time_integrator="ssp_rk3",
-        )
-
-        def loss_fn(model):
-            physics_fn = make_sfno_spectral_physics(model, _GRID)
-            pred = spectral_rollout(
-                state, physics_fn, _GRID, _SIGMA, pe_config,
-                dt=1800.0, n_steps=1,
-            )
-            return spectral_state_vs_carry_loss(
-                pred, carry_target, _GRID, _SIGMA, sigma_full,
-            )
-
-        loss, grads = eqx.filter_value_and_grad(loss_fn)(sfno)
-
-        # Loss should be finite
-        assert jnp.isfinite(loss)
-
-        # Grads should be finite and non-zero for at least some params
-        grad_leaves = jax.tree.leaves(eqx.filter(grads, eqx.is_array))
-        assert len(grad_leaves) > 0
-        all_finite = all(jnp.all(jnp.isfinite(g)) for g in grad_leaves)
-        assert all_finite, "Some gradients are NaN/Inf"
-
-        has_nonzero = any(jnp.any(g != 0) for g in grad_leaves)
-        assert has_nonzero, "All gradients are zero — no signal flows"
 
 
 # ---------------------------------------------------------------------------
@@ -841,27 +624,6 @@ class TestAreaWeightedLoss:
 
 class TestBudgetConstraints:
 
-    def test_sfno_tendency_conserves_dry_mass(self):
-        """The (l=0,m=0) spectral coefficient of the SFNO's dlnps/dt — the
-        global-mean surface-pressure (mass) tendency — must be projected
-        to zero (ACE2-style dry-mass fixer)."""
-        from legoesm.training.neural_gcm_spectral import (
-            carry_to_spectral_state, make_sfno_spectral_physics,
-        )
-        import numpy as np
-        carry = _make_gaussian_carry()
-        state = carry_to_spectral_state(carry, _GRID)
-        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
-        tend = physics_fn(state, _GRID, _SIGMA)
-        mean_idx = np.where(
-            (np.asarray(_GRID.ls) == 0) & (np.asarray(_GRID.ms) == 0)
-        )[0]
-        assert mean_idx.size == 1
-        coeff = tend.lnps_hat.data[mean_idx[0]]
-        assert float(jnp.abs(coeff)) == 0.0, (
-            f"global-mean lnps tendency not projected out ({coeff})"
-        )
-
     def test_forced_rollout_keeps_qv_nonnegative(self):
         """Moisture positivity on forced learned-physics runs: q_v must be
         clipped >= 0 after every step (negative water fed the *1e3 NN
@@ -931,14 +693,14 @@ class TestRolloutCurriculum:
         """A curriculum lead without a loaded target must be a hard error."""
         from legoesm.training.neural_gcm_spectral import (
             _train_spectral_loop, carry_to_spectral_state,
-            make_sfno_spectral_physics,
+            make_column_mlp_spectral_physics,
         )
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
         cfg = self._cfg(((24, 1),), (1,))  # 24h lead, only 1h target loaded
         with pytest.raises(ValueError, match="no loaded target"):
             _train_spectral_loop(
-                _make_small_sfno(), make_sfno_spectral_physics,
+                _make_small_column_mlp(), make_column_mlp_spectral_physics,
                 _GRID, _SIGMA, [state], [(carry,)], cfg,
             )
 
@@ -947,13 +709,13 @@ class TestRolloutCurriculum:
         phase lead, scored against that lead's target, finite loss."""
         from legoesm.training.neural_gcm_spectral import (
             _train_spectral_loop, carry_to_spectral_state,
-            make_sfno_spectral_physics,
+            make_column_mlp_spectral_physics,
         )
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
         cfg = self._cfg(((1, 1),), (1,))  # one 1h-lead epoch (2 steps)
         model, hist = _train_spectral_loop(
-            _make_small_sfno(), make_sfno_spectral_physics,
+            _make_small_column_mlp(), make_column_mlp_spectral_physics,
             _GRID, _SIGMA, [state], [(carry,)], cfg,
         )
         assert len(hist) == 1 and jnp.isfinite(hist[0])
@@ -1082,7 +844,7 @@ class TestMidEpochResume:
     This is the structural fix for the Derecho walltime cliff: a T106
     epoch (~13 h) exceeds the 12 h queue cap, so a per-epoch-only
     checkpoint makes zero progress forever.  The proof below drives the
-    REAL ``_train_spectral_loop`` chunked path with a tiny SFNO + a
+    REAL ``_train_spectral_loop`` chunked path with a tiny column MLP + a
     synthetic in-memory chunk loader (no GCS/network), simulates a kill
     right after chunk 1 of epoch 0, resumes, and asserts the final
     weights are byte-identical to an uninterrupted run — which can only
@@ -1136,9 +898,9 @@ class TestMidEpochResume:
 
     def _run(self, model, cfg, loader, resume_from_dir):
         from legoesm.training.neural_gcm_spectral import (
-            _train_spectral_loop, make_sfno_spectral_physics)
+            _train_spectral_loop, make_column_mlp_spectral_physics)
         return _train_spectral_loop(
-            model, make_sfno_spectral_physics, _GRID, _SIGMA,
+            model, make_column_mlp_spectral_physics, _GRID, _SIGMA,
             None, None, cfg,
             start_epoch=0, chunk_loader=loader,
             n_samples_total=loader.n_chunks,
@@ -1152,13 +914,13 @@ class TestMidEpochResume:
         # --- (A) uninterrupted reference: 2 epochs x 3 chunks ---------------
         dir_a = tmp_path / "A"
         model_a, _ = self._run(
-            _make_small_sfno(), self._cfg(dir_a),
+            _make_small_column_mlp(), self._cfg(dir_a),
             self._make_loader(3), resume_from_dir=dir_a)
 
         # The run must actually have moved the weights off their init,
         # else "bit-identical" would be vacuously true.
         init_leaves = jax.tree_util.tree_leaves(
-            eqx.filter(_make_small_sfno(), eqx.is_array))
+            eqx.filter(_make_small_column_mlp(), eqx.is_array))
         a_leaves = jax.tree_util.tree_leaves(eqx.filter(model_a, eqx.is_array))
         assert any(
             not jnp.array_equal(i, a) for i, a in zip(init_leaves, a_leaves)
@@ -1180,7 +942,7 @@ class TestMidEpochResume:
 
         monkeypatch.setattr(mod, "_save_midepoch_checkpoint", _save_then_kill)
         with pytest.raises(_Kill):
-            self._run(_make_small_sfno(), self._cfg(dir_b),
+            self._run(_make_small_column_mlp(), self._cfg(dir_b),
                       self._make_loader(3), resume_from_dir=dir_b)
         monkeypatch.undo()   # run C uses the real, unpatched save
 
@@ -1190,7 +952,7 @@ class TestMidEpochResume:
         # --- (C) resume from B's checkpoint dir ----------------------------
         loader_c = self._make_loader(3)
         model_c, _ = self._run(
-            _make_small_sfno(), self._cfg(dir_b),
+            _make_small_column_mlp(), self._cfg(dir_b),
             loader_c, resume_from_dir=dir_b)
 
         # Resumed at chunk 2 of epoch 0 (skipped the two done chunks), then
@@ -1216,7 +978,7 @@ class TestMidEpochResume:
 
         dir_a = tmp_path / "A"
         model_a, _ = self._run(
-            _make_small_sfno(), self._cfg(dir_a),
+            _make_small_column_mlp(), self._cfg(dir_a),
             self._make_loader(3), resume_from_dir=dir_a)
         a_leaves = jax.tree_util.tree_leaves(eqx.filter(model_a, eqx.is_array))
 
@@ -1235,7 +997,7 @@ class TestMidEpochResume:
 
         monkeypatch.setattr(mod, "_save_midepoch_checkpoint", _save_then_kill)
         with pytest.raises(_Kill):
-            self._run(_make_small_sfno(), self._cfg(dir_b),
+            self._run(_make_small_column_mlp(), self._cfg(dir_b),
                       self._make_loader(3), resume_from_dir=dir_b)
         monkeypatch.undo()
 
@@ -1252,7 +1014,7 @@ class TestMidEpochResume:
 
         monkeypatch.setattr(mod, "_load_midepoch_checkpoint", _load_drop_optstate)
         model_c, _ = self._run(
-            _make_small_sfno(), self._cfg(dir_b),
+            _make_small_column_mlp(), self._cfg(dir_b),
             self._make_loader(3), resume_from_dir=dir_b)
         c_leaves = jax.tree_util.tree_leaves(eqx.filter(model_c, eqx.is_array))
         assert any(
@@ -1475,7 +1237,7 @@ class TestHostResidentDataset:
         device_put is a same-device move; the test guards the plumbing:
         tuple-target handling, forcings=None, rebind lifetime.)"""
         from legoesm.training.neural_gcm_spectral import (
-            _train_spectral_loop, make_sfno_spectral_physics,
+            _train_spectral_loop, make_column_mlp_spectral_physics,
             carry_to_spectral_state,
         )
 
@@ -1487,7 +1249,7 @@ class TestHostResidentDataset:
         for staged in (False, True):
             cfg = self._tiny_cfg(checkpoint_dir=str(tmp_path / f"s{staged}"))
             model, hist = _train_spectral_loop(
-                _make_small_sfno(), make_sfno_spectral_physics,
+                _make_small_column_mlp(), make_column_mlp_spectral_physics,
                 _GRID, _SIGMA, ics, tgts, cfg,
                 start_epoch=0, host_staged=staged,
             )

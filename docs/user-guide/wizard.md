@@ -67,7 +67,7 @@ simulation, **component**). The full axis map:
 | **Objective** | `simulate` (process-based physics) · `train` (an ML emulator on ERA5) |
 | **Component** | `atmosphere` · `coupled` (atmosphere + land/ocean/ice) · `ocean` |
 | **Atmosphere model type** | `global` (idealized / template-driven) · `amip` (prescribed-SST) · `les_crm` (doubly-periodic plane) · `scm` (single column) |
-| **Physics ↔ ML ladder** | process physics → **AIMIP** `classical` / `column_nn` / `sfno_physics` (ML-emulated physics) → `neural_gcm_spectral` (SFNO emulating dycore + physics — "ML everything") |
+| **Physics ↔ ML ladder** | process physics → **AIMIP** `classical` / `column_nn` (ML-emulated physics) |
 | **Simulation case** | a `config/templates/` template (shallow water, 3-D idealized, Held–Suarez, …); AMIP; an ocean-matrix case; an LES/CRM or SCM case |
 | **Grid / discretization / integrator** | pruned live to the driver-supported `(model_type, discretization, grid)` triples; integrators gated to what the chosen path accepts |
 | **Coupled preset** | the land-complexity ladder: `aquaplanet` → `slab_simple` → `slab_pft` → `slab_richards` → `slab_carbon` → `full_coupled` |
@@ -153,11 +153,11 @@ extra flags to change them. The Gaussian grid forces 64-bit (spectral transform)
 ```
 objective         train
 training mode     aimip
-variant           sfno_physics      (classical / column_nn / sfno_physics)
+variant           column_nn         (classical / column_nn)
 smoke test        yes
 backend           gpu
 → python scripts/run/run_aimip.py \
-        --suite <repo>/config/aimip/aimip_suite.yaml --variants sfno_physics --smoke
+        --suite <repo>/config/aimip/aimip_suite.yaml --variants column_nn --smoke
 ```
 
 This **trains** the variant over the shipped `config/aimip/` suite (base
@@ -204,21 +204,6 @@ backend / bits    cpu / 64
   `run_les_plane.py`).
 - **SCM** (single column): pick `rce` / `gabls1` / `ekman` / `wangara` → routes to
   `run_scm_test_matrix.py`.
-
-### Training the spectral neural GCM
-
-```
-objective         train
-training mode     neural_gcm_spectral
-n_max / n_levels  42 / 10
-epochs / lr       50 / 3e-4
-backend           gpu
-→ python scripts/run/train_neural_gcm_spectral.py --n-max 42 --n-levels 10 \
-        --epochs 50 --lr 0.0003 --train-days 365 --year 2015 --cache-dir data/era5_cache
-```
-
-ERA5 must be staged first (a Zarr cache at `--cache-dir`, or network access to the
-WeatherBench2 bucket). x64 is forced (spectral).
 
 ## How it stays in sync with the model
 

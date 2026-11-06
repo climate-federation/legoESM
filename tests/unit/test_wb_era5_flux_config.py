@@ -28,13 +28,9 @@ def test_wb_needs_land_frac_follows_physics_fluxes_or_the_learned_arm_flag():
     assert scale_build.wb_needs_land_frac("physics", {})
     assert scale_build.wb_needs_land_frac(
         "neural_gcm", {"neural_gcm": {"spatial_embedding": True}})
-    assert scale_build.wb_needs_land_frac(
-        "sfno", {"sfno": {"spatial_embedding": True}})
-    assert not scale_build.wb_needs_land_frac(
-        "sfno", {"neural_gcm": {"spatial_embedding": True}})
     # the classical arm never reads the learned-arm block
     assert scale_build.wb_needs_land_frac(
-        "physics", {"sfno": {"spatial_embedding": True}})
+        "physics", {"neural_gcm": {"spatial_embedding": True}})
 
 
 def test_era5_config_maps_the_flux_keys():
@@ -69,7 +65,6 @@ def test_committed_decks_declare_the_new_flags_explicitly(deck):
     yml = yaml.safe_load(deck.read_text())
     assert isinstance(yml["era5_surface_fluxes"], bool)
     assert isinstance(yml["neural_gcm"]["spatial_embedding"], bool)
-    assert isinstance(yml["sfno"]["spatial_embedding"], bool)
     scale_build.validate_wb_campaign_yaml(yml)
 
 
@@ -78,13 +73,11 @@ def test_one_committed_deck_selects_the_prescribed_fluxes():
     flags = {d.name: yaml.safe_load(d.read_text()) for d in DECKS}
     assert any(y["era5_surface_fluxes"] is True for y in flags.values())
     assert flags["spectral_t63.yaml"]["neural_gcm"]["spatial_embedding"] is False
-    assert flags["spectral_t63.yaml"]["sfno"]["spatial_embedding"] is False
     # the lat-lon deck cannot run either option: it must not select them
     latlon = yaml.safe_load(
         (REPO_ROOT / "config" / "wb" / "scale" / "train_07deg.yaml").read_text())
     assert latlon["era5_surface_fluxes"] is False
     assert latlon["neural_gcm"]["spatial_embedding"] is False
-    assert latlon["sfno"]["spatial_embedding"] is False
 
 
 def test_validate_accepts_the_new_keys_and_rejects_a_typo():
@@ -97,7 +90,7 @@ def test_validate_accepts_the_new_keys_and_rejects_a_typo():
     with pytest.raises(SystemExit, match="era5_surface_flux"):
         scale_build.validate_wb_campaign_yaml(bad)
     bad = yaml.safe_load(DECKS[0].read_text())
-    bad["sfno"]["spatial_embeding"] = True
+    bad["neural_gcm"]["spatial_embeding"] = True
     with pytest.raises(SystemExit, match="spatial_embeding"):
         scale_build.validate_wb_campaign_yaml(bad)
 

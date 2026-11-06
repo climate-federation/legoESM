@@ -335,18 +335,6 @@ def test_build_scm(wc):
     assert "--days 20.0" in plan.run_cmd
 
 
-def test_build_train_spectral_forces_x64(wc):
-    ans = {"objective": "train", "train_mode": "neural_gcm_spectral",
-           "n_max": 42, "n_levels": 10, "epochs": 5, "lr": 3e-4,
-           "train_days": 30, "year": 2015, "cache_dir": "data/era5_cache",
-           "backend": "gpu", "precision_bits": 64}
-    plan = wc.build_plan(ans)
-    assert plan.kind == "train"
-    assert "train_neural_gcm_spectral.py" in plan.run_cmd
-    assert plan.enable_x64 is True
-    assert plan.jax_platforms == "cuda"
-
-
 def test_build_train_rejects_cli_less_mode(wc):
     ans = {"objective": "train", "train_mode": "physics_params", "backend": "cpu",
            "precision_bits": 64}

@@ -1,6 +1,6 @@
 # WB2 forecast-scorecard variant: SFNO_FULL emulator.
 #
-# The FULL SFNO atmospheric emulator (NOT sfno_physics). SFNO replaces
+# The FULL SFNO atmospheric emulator. SFNO replaces
 # BOTH the dynamical core AND the physics: it maps state_t -> state_{t+1}
 # directly at the macro step dt_sfno via
 # SFNOPrimitiveEquationModel.step(state, dt_sfno) in "state_update"

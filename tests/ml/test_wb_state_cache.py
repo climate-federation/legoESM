@@ -186,7 +186,7 @@ def test_cached_samples_gate_assembly_and_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(sb, "wb_state_cache_path", lambda *a: p)
     for i in range(5):
         wsc.write_time(p, i, wsc.record_arrays(*_rec(i))[0])
-    cfg = SimpleNamespace(mode="sfno")
+    cfg = SimpleNamespace(mode="neural_gcm")
     mine = [(2015, 0, 2), (2015, 2, 4)]
     s = sb._state_cached_samples(cfg, {}, None, None, mine, (6, 12), (1, 2),
                                  _times(), None, None, None, "none", None)
@@ -216,7 +216,7 @@ def _builder():
 def test_builder_needs_train_leads_and_validation_times():
     mod = _builder()
     assert mod.build_parser().parse_args(
-        ["--config", "x", "--mode", "sfno", "--task", "1", "--n-tasks", "4"]).task == 1
+        ["--config", "x", "--mode", "neural_gcm", "--task", "1", "--n-tasks", "4"]).task == 1
     times = np.datetime64("2014-01-01") + np.arange(4 * 800) * np.timedelta64(6, "h")
     yml = {"train_windows": [[2015, 0, 1]], "eval_years": [2020],
            "loss": {"train_leads_hours": [6, 12]},
@@ -261,11 +261,11 @@ def test_deck_without_validation_block_validates_on_2014():
 def test_soil_moisture_plane_and_land_inputs_flag():
     import jax.numpy as jnp
     from types import SimpleNamespace as NS
-    assert sb.wb_needs_land_frac("sfno", {"sfno": {"land_inputs": True}})
-    assert not sb.wb_needs_land_frac("sfno", {"sfno": {}})
-    c = sb.wb_era5_config(NS(mode="sfno"), {"era5_zarr": "x", "era5_soil_moisture": True})
+    assert sb.wb_needs_land_frac("neural_gcm", {"neural_gcm": {"land_inputs": True}})
+    assert not sb.wb_needs_land_frac("neural_gcm", {"neural_gcm": {}})
+    c = sb.wb_era5_config(NS(mode="neural_gcm"), {"era5_zarr": "x", "era5_soil_moisture": True})
     assert c.load_soil_moisture
-    e, f, _ = sb.wb_state_cache_configs(NS(mode="sfno"), {"era5_zarr": "x",
+    e, f, _ = sb.wb_state_cache_configs(NS(mode="neural_gcm"), {"era5_zarr": "x",
                                                           "era5_soil_moisture": True})
     assert f.load_soil_moisture and not e.load_soil_moisture
 

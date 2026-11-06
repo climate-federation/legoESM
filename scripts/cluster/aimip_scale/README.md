@@ -12,8 +12,6 @@ The variant ladder:
   MLP; no classical scheme runs alongside it.
 - `sfno_full` — SFNO emulates the **ENTIRE atmosphere** (no dycore, no
   physics; direct `state_t → state_{t+6h}` with post-hoc dry-mass correction).
-- `sfno_physics` (optional intermediate rung) — SFNO learns all physics,
-  spectral dycore retained.
 
 ## Why single-GPU (not multi-node)
 
@@ -28,9 +26,8 @@ Derecho/Levante fits what Ginsburg's 24–40 GB could not:
 - RRTMGP radiation (not the gray fallback),
 - 2-step autoregressive rollout,
 - spatial-surface trainable coefficients,
-- higher NN capacity (column MLP 512/6; the SFNO variants' overlays pin
-  `embed_dim=64`/4 blocks — matched between `sfno_physics` and `sfno_full` —
-  and can be raised together on the 80 GB card).
+- higher NN capacity (column MLP 512/6; the `sfno_full` overlay pins
+  `embed_dim=64`/4 blocks and can be raised on the 80 GB card).
 
 If you want to go beyond one card, the levers are ensemble (one variant/seed per
 GPU, already how the three variants run) or the lat-lon C-grid PE training path
@@ -103,7 +100,6 @@ more per sample than the 12 h phase. Budget roughly (7 curriculum epochs):
 | variant       | ~12h-phase epoch (A100-80) | full curriculum |
 |---------------|----------------------------|-----------------|
 | sfno_full     | ~1–2 h (no dycore)         | ~15–30 h (epochs; no curriculum) |
-| sfno_physics  | ~2–3 h                     | ~40–60 h (4–6 links) |
 | column_nn     | ~2–3 h                     | ~40–60 h |
 | classical     | ~6–8 h (RRTMGP)            | ~120 h+ (chain) |
 

@@ -92,7 +92,7 @@ def test_spectral_amip_rollout_signature():
 
 
 def test_merged_cfg_selects_variant_overlay(tmp_path):
-    """--variant column_nn/sfno_physics must merge THAT variant's overlay
+    """--variant column_nn must merge THAT variant's overlay
     (and an unknown variant is a hard error, not a silent classical run)."""
     mod = _load_driver()
     base = tmp_path / "base.yaml"
@@ -101,15 +101,15 @@ def test_merged_cfg_selects_variant_overlay(tmp_path):
         "aimip_convection: edmf\n")
     (tmp_path / "variant_column_nn.yaml").write_text(
         "nn_hidden_dim: 123\n")
-    (tmp_path / "variant_sfno_physics.yaml").write_text(
-        "sfno_embed_dim: 48\n")
     suite = tmp_path / "suite.yaml"
     suite.write_text(f"base: {base}\n")
     assert mod._merged_cfg(suite, "column_nn")["nn_hidden_dim"] == 123
-    assert mod._merged_cfg(suite, "sfno_physics")["sfno_embed_dim"] == 48
     assert mod._merged_cfg(suite, "classical")["aimip_convection"] == "edmf"
     with pytest.raises(ValueError, match="variant"):
         mod._merged_cfg(suite, "bogus")
+    # The dycore-SFNO variant was removed (user 2026-11-06).
+    with pytest.raises(ValueError, match="variant"):
+        mod._merged_cfg(suite, "sfno_physics")
 
 
 def test_nn_rollout_signature_contract():
@@ -121,7 +121,6 @@ def test_nn_rollout_signature_contract():
     mod = importlib.import_module("legoesm.training.neural_gcm_spectral")
     params = inspect.signature(mod.spectral_rollout).parameters
     assert "forcing_base" in params
-    assert mod.N_SFNO_FORCING_CHANNELS == 3
 
 
 def test_reinit_yearly_flag_and_out_suffix():

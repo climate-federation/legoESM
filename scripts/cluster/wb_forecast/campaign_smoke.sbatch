@@ -36,7 +36,7 @@ mkdir -p "$TMPDIR" results/wb_campaign_smoke
 echo "[$(date)] WB campaign smoke on $(hostname) | PYTHONPATH head: ${_pp%%:*}"
 "$WB_PYTHON" scripts/run/run_weatherbench_campaign.py \
   --config config/wb/campaign/spectral_smoke.yaml \
-  --modes physics,neural_gcm,sfno \
+  --modes physics,neural_gcm \
   --stages train,eval,plot \
   --training-core spectral \
   --out-root results/wb_campaign_smoke \

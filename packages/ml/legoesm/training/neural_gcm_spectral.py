@@ -19,8 +19,8 @@ Both modes share the same pipeline::
 
 Relationship to other modules
 -----------------------------
-- ``sfno_dycore_coupling.py`` / ``atmosphere.physics.neural_physics``: couple
-  learned physics to *grid-space* dycores via ``build_segment_fn``.
+- ``atmosphere.physics.neural_physics``: couples learned physics to
+  *grid-space* dycores via ``build_segment_fn``.
 - ``sfno_pe.py``: SFNO replaces the entire dycore.
 - This module: learned physics *augments* the spectral PE dycore via
   ``spectral_pe_tendencies(..., physics_tendency=learned_output)``.
@@ -70,7 +70,7 @@ from legoesm.grids.gaussian import (
 )
 from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
 from legoesm.ml.sfno import SFNO, SFNOConfig
-from legoesm.ml.channel_packing import PE3DChannelSpec, pack_pe_state, unpack_pe_output
+from legoesm.ml.channel_packing import PE3DChannelSpec, pack_pe_state
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.training.era5_to_state import (
     TrainingERA5Config,
@@ -650,250 +650,6 @@ def spectral_state_to_carry(
 
 
 # =============================================================================
-# SFNO as spectral physics
-# =============================================================================
-
-# Surface-forcing planes appended to the SFNO input (prescribed-SST /
-# AMIP pathway): T_sfc, sea-ice fraction, TOA insolation.
-N_SFNO_FORCING_CHANNELS = 3
-# Per-plane normalization: T [K] ~300, sic already in [0,1], insolation
-# [W/m^2] ~1400 (matches the column-MLP feature scales in
-# ``atmosphere.physics.neural_physics``).  Kept as a plain Python tuple, NOT a
-# module-top ``jnp.array``: an import-time device allocation is forbidden by
-# test_no_module_top_jax_alloc (crashes the import chain on the experimental
-# Metal backend).  It enters the graph lazily via ``jnp.asarray`` at the use
-# site below, cast to ``in_scale``'s dtype so the concatenate result dtype is
-# identical to the former module-top ``jnp.array`` (in both x32 and x64).
-_SFNO_FORCING_INPUT_SCALE = (300.0, 1.0, 1400.0)
-# Optional extra input planes (see ``make_sfno_spectral_physics``): the static
-# land fraction, sin(lat), cos(lat), all O(1).  The six ERA5 surface-flux
-# planes take their scales from ``neural_physics.SFC_FLUX_INPUT_NORMS`` (one
-# source for both learned arms).  Plain tuple for the same reason as above.
-_SFNO_STATIC_INPUT_SCALE = (1.0, 1.0, 1.0)
-
-
-def _channel_input_scale(nlev: int) -> jnp.ndarray:
-    """Per-channel normalization factors for PE3DChannelSpec.
-
-    Divides each channel by its typical magnitude so the SFNO sees O(1)
-    inputs regardless of physical units.  Layout: [u, v, T, q, lnps, phis].
-    """
-    return jnp.concatenate([
-        jnp.full(nlev, 30.0),       # u [m/s]
-        jnp.full(nlev, 30.0),       # v [m/s]
-        jnp.full(nlev, 300.0),      # T [K]
-        jnp.full(nlev, 0.01),       # q [kg/kg]
-        jnp.array([12.0]),          # lnps [-]
-        jnp.array([50000.0]),       # phis [m2/s2]
-    ])
-
-
-def _channel_tendency_scale(nlev: int) -> jnp.ndarray:
-    """Per-channel output scaling from O(1) SFNO output to physical tendencies.
-
-    Typical atmospheric physics tendency magnitudes per second.
-    """
-    return jnp.concatenate([
-        jnp.full(nlev, 1e-4),       # du/dt [m/s^2]
-        jnp.full(nlev, 1e-4),       # dv/dt [m/s^2]
-        jnp.full(nlev, 1e-4),       # dT/dt [K/s]
-        jnp.full(nlev, 1e-7),       # dq/dt [kg/kg/s]
-        jnp.array([1e-6]),          # dlnps/dt [1/s]
-        jnp.array([0.0]),           # dphis/dt (static)
-    ])
-
-
-def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid, *,
-                               spatial_embedding: bool = False,
-                               era5_surface_fluxes: bool = False):
-    """Create a physics_fn compatible with SpectralPEModel.step().
-
-    The returned function has signature::
-
-        physics_fn(state, grid, sigma_coord, forcing=None)
-            -> SpectralHydrostaticState  (tendencies)
-
-    Includes input normalization and output scaling so that a
-    randomly-initialized SFNO produces stable, small tendencies.
-
-    Internally:
-    1. ``pack_pe_state`` transforms spectral state to grid-space tensor
-    2. Three surface-forcing planes are appended (T_sfc, sea-ice
-       fraction, TOA insolation) — the prescribed-SST / AMIP pathway
-       that gives the SFNO its interannual-variability response.  The
-       state channels stay ``PE3DChannelSpec`` (4*nlev+2); the SFNO is
-       constructed with ``in_channels = n_channels + 3`` and
-       ``out_channels = n_channels``.
-    3. Input is normalized to O(1) per channel
-    4. SFNO forward pass (residual_prediction=False) produces O(1) output
-    5. Output is scaled to physical tendency magnitudes
-    6. ``unpack_pe_output`` converts to spectral tendencies
-
-    ``forcing`` dict (traced; see ``spectral_amip_rollout``):
-    ``"T_sfc"`` (ncol,) prescribed surface T over ocean / NaN over land
-    (→ lowest-level air T proxy), ``"sic"`` (ncol,) sea-ice fraction,
-    ``"day_of_year"`` + ``"seconds_of_day"`` scalars (seasonal + diurnal
-    insolation via the shared orbital helper).  Without forcing
-    (idealized / legacy tests): T_sfc proxy = lowest model level,
-    sic = 0, insolation = S_0 (the historical constant input).
-
-    Optional extra input planes, appended AFTER the three forcing planes and
-    counted by ``model_registry.sfno_extra_input_channels`` (the network must
-    have been built with the same flags): ``spatial_embedding`` adds the
-    static planes land fraction (``forcing["land_frac"]``), sin and cos
-    latitude (orography is already a state channel), ``era5_surface_fluxes`` adds the six ERA5
-    surface-flux planes (``SFC_FLUX_FORCING_KEYS`` order).  Either flag
-    rejects ``forcing=None``.
-
-    Parameters
-    ----------
-    sfno : SFNO
-        Spherical Fourier Neural Operator (eqx.Module).
-    grid : GaussianGrid
-        Grid for SH transforms inside pack/unpack.
-    spatial_embedding, era5_surface_fluxes : bool
-        Which extra input planes to append; must match the SFNO's
-        ``in_channels``.
-
-    Returns
-    -------
-    callable
-        Physics function for the spectral PE dycore.
-    """
-    from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
-    from legoesm.atmosphere.physics.neural_physics import (
-        SFC_FLUX_FORCING_KEYS,
-        SFC_FLUX_INPUT_NORMS,
-    )
-    from legoesm.training.model_registry import sfno_extra_input_channels
-
-    n_extra = sfno_extra_input_channels(
-        spatial_embedding=spatial_embedding,
-        era5_surface_fluxes=era5_surface_fluxes)
-    # nlev from the OUTPUT channels (pure state tendencies, 4*nlev+2);
-    # in_channels additionally carries the N_SFNO_FORCING_CHANNELS
-    # forcing planes plus the optional extras.
-    nlev = (sfno.config.out_channels - 2) // 4
-    if (sfno.config.in_channels
-            != sfno.config.out_channels + N_SFNO_FORCING_CHANNELS + n_extra
-            or (sfno.config.out_channels - 2) % 4 != 0
-            or nlev < 1):
-        raise ValueError(
-            f"SFNO physics expects out_channels = 4*nlev + 2 (PE state "
-            f"layout) and in_channels = out_channels + "
-            f"{N_SFNO_FORCING_CHANNELS} (forcing planes) + {n_extra} "
-            f"(spatial_embedding={spatial_embedding}, "
-            f"era5_surface_fluxes={era5_surface_fluxes}); got "
-            f"in={sfno.config.in_channels}, out={sfno.config.out_channels}."
-        )
-    extra_scale = tuple(
-        (_SFNO_STATIC_INPUT_SCALE if spatial_embedding else ())
-        + (tuple(SFC_FLUX_INPUT_NORMS) if era5_surface_fluxes else ()))
-    in_scale = _channel_input_scale(nlev)
-    out_scale = _channel_tendency_scale(nlev)
-    spec = PE3DChannelSpec(nlev=nlev)
-    lat2d = jnp.broadcast_to(grid.lat[:, None], (len(grid.lat), len(grid.lon)))
-    lon2d = jnp.broadcast_to(grid.lon[None, :], (len(grid.lat), len(grid.lon)))
-
-    def physics_fn(state, grid_, sigma_coord, forcing=None):
-        packed = pack_pe_state(state, grid_)
-        n_lat, n_lon = packed.shape[:2]
-        # Lowest-level air T from the packed T channel (proxy for T_sfc
-        # over land / when no forcing is prescribed).
-        t_lowest = packed[..., spec.T_slice][..., -1]
-        if forcing is not None:
-            # Sanitize the inactive branch BEFORE the select: jnp.where
-            # propagates NaN cotangents from the untaken branch in reverse
-            # mode (codex HIGH) — land-NaN T_sfc would poison the training
-            # gradient through the proxy path.
-            t_raw = jnp.nan_to_num(
-                forcing["T_sfc"].reshape(n_lat, n_lon), nan=0.0,
-            )
-            t_sfc = jnp.where(
-                jnp.isfinite(forcing["T_sfc"]).reshape(n_lat, n_lon),
-                t_raw, t_lowest,
-            )
-            sic = jnp.clip(
-                jnp.nan_to_num(forcing["sic"].reshape(n_lat, n_lon), nan=0.0),
-                0.0, 1.0,
-            )
-            mu0 = cos_zenith_angle(
-                lat2d, lon2d,
-                forcing["day_of_year"], forcing["seconds_of_day"] / 3600.0,
-            )
-            insol = constants.S_0 * jnp.maximum(mu0, 0.0)
-        else:
-            if spatial_embedding or era5_surface_fluxes:
-                raise ValueError(
-                    "an SFNO built with spatial_embedding and/or "
-                    "era5_surface_fluxes needs a forcing dict (land fraction "
-                    "/ ERA5 surface-flux planes); forcing=None callers "
-                    "cannot use it")
-            t_sfc = t_lowest
-            sic = jnp.zeros((n_lat, n_lon), dtype=packed.dtype)
-            insol = jnp.full((n_lat, n_lon), constants.S_0, dtype=packed.dtype)
-        planes = [packed, t_sfc[..., None], sic[..., None], insol[..., None]]
-        if spatial_embedding:
-            if "land_frac" not in forcing:
-                raise KeyError(
-                    "spatial_embedding=True requires forcing['land_frac'] "
-                    "(ACE2-style static land-fraction plane)")
-            planes.append(jnp.clip(
-                jnp.asarray(forcing["land_frac"]).reshape(n_lat, n_lon),
-                0.0, 1.0)[..., None])
-            planes.append(jnp.sin(lat2d).astype(packed.dtype)[..., None])
-            planes.append(jnp.cos(lat2d).astype(packed.dtype)[..., None])
-        if era5_surface_fluxes:
-            for _k in SFC_FLUX_FORCING_KEYS:
-                if _k not in forcing:
-                    raise KeyError(
-                        f"era5_surface_fluxes=True requires forcing[{_k!r}]")
-                planes.append(
-                    jnp.asarray(forcing[_k]).reshape(n_lat, n_lon)[..., None])
-        packed_in = jnp.concatenate(planes, axis=-1)
-        # Normalize inputs to O(1)
-        packed_norm = packed_in / jnp.maximum(
-            jnp.concatenate([
-                in_scale,
-                jnp.asarray(_SFNO_FORCING_INPUT_SCALE + extra_scale,
-                            dtype=in_scale.dtype),
-            ]), 1e-10,
-        )
-        # SFNO forward: O(1) in, O(1) out
-        output_norm = sfno(packed_norm.astype(jnp.float32), grid_)
-        if output_norm.shape[-1] == spec.n_channels - 1:
-            # Pruned SFNO (prune_unused_weights): no surface-geopotential
-            # output channel (the LAST one, a static field); restore it as 0,
-            # what the zero-initialised, gradient-free channel always was.
-            output_norm = jnp.concatenate(
-                [output_norm, jnp.zeros_like(output_norm[..., :1])], axis=-1)
-        # Scale to physical tendency magnitudes
-        output = output_norm * out_scale
-        tend = unpack_pe_output(
-            output.astype(jnp.float64), state, grid_, mode="tendencies",
-        )
-        # DRY-MASS constraint (ACE2-style budget fixer): physics must not
-        # create or destroy air. The SFNO's raw dlnps/dt carries a nonzero
-        # global mean -> a secular surface-pressure (mass) drift that
-        # compounds over climate-length integrations and feeds the
-        # radiative-runaway class. Project out the (l=0, m=0) spectral
-        # coefficient = the global mean of the lnps tendency (the standard
-        # lnps-mean proxy for dry-mass conservation on sigma coordinates).
-        # NOTE: this is an APPROXIMATE fixer — dry mass ∝ ∫p_s dA, so the
-        # exact constraint is area_mean(p_s·dlnps/dt)=0; zeroing the
-        # area-mean dlnps/dt leaves a residual O(p_s') where p_s' is the
-        # spatial p_s anomaly (~5%). It removes the secular global-mean
-        # drift mode (the instability driver) and stays differentiable.
-        _mean_mask = jnp.asarray(
-            (grid.ls == 0) & (grid.ms == 0), dtype=tend.lnps_hat.data.dtype,
-        )
-        lnps_fixed = tend.lnps_hat.data * (1.0 - _mean_mask)
-        return tend._replace(lnps_hat=tend.lnps_hat.replace(data=lnps_fixed))
-
-    return physics_fn
-
-
-# =============================================================================
 # Column MLP as spectral physics (Rasp et al. 2018 style)
 # =============================================================================
 
@@ -1171,7 +927,7 @@ def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name)
     """Build the per-step ``(state, tendency_fn) -> new_state`` integrator for the
     differentiable spectral training rollouts.
 
-    #817: when ``pe_config.semi_implicit`` the WB neural_gcm/sfno training lane
+    #817: when ``pe_config.semi_implicit`` the WB neural_gcm training lane
     uses the pure Hoskins-Simmons SSP-RK3 **semi-implicit** step
     (:func:`ssp_rk3_step_si`) instead of the explicit
     :func:`dispatch_integrator`.  Treating the fast gravity-wave terms implicitly
@@ -4588,89 +4344,6 @@ def _maybe_build_sample_forcings(surface_forcing_path, ic_times, grid,
     return forcings
 
 
-def train_neural_gcm_spectral(
-    config: NeuralGCMSpectralConfig = NeuralGCMSpectralConfig(),
-    cache_dir: str = "data/era5_cache",
-    seed: int = 0,
-    *,
-    resume_from_dir=None,
-    surface_forcing_path: str | None = None,
-    forcing_cache_path: str | None = None,
-):
-    """Train NeuralGCM: SFNO physics + spectral PE dycore.
-
-    Parameters
-    ----------
-    resume_from_dir : str | Path | None
-        If set, scan this directory for the highest-numbered
-        ``epoch_NNNN.eqx`` checkpoint and continue training from the
-        next epoch.  Used by ``scripts/run/run_aimip.py --resume`` for
-        chained-resubmission SLURM jobs.
-    surface_forcing_path : str | None
-        Path to the AIMIP monthly SST/sea-ice forcing NetCDF.  When
-        set, per-sample prescribed surface forcing (T_sfc over ocean,
-        sea-ice fraction, orbital calendar) is fed to the SFNO's
-        forcing input planes during training — REQUIRED for a network
-        that must respond to prescribed SST at AMIP inference time.
-        ``None`` trains unforced (physics_fn internal proxies).
-    forcing_cache_path : str | None
-        Optional .npz cache for the regridded monthly forcing.
-
-    Returns (trained_sfno, loss_history).
-    """
-    grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
-    sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
-
-    spec = PE3DChannelSpec(nlev=config.n_levels)
-    # Channel layout, forcing planes and residual_prediction=False come from
-    # the shared registry, so a WB run and an AIMIP run of this variant build
-    # the same network (they had drifted to 256/8 vs 128/4).
-    from legoesm.training.model_registry import build_variant
-    sfno = build_variant(
-        "sfno_physics", nlev=config.n_levels, grid=grid, seed=seed,
-        overrides={
-            "sfno_embed_dim": config.sfno_embed_dim,
-            "sfno_n_blocks": config.sfno_n_blocks,
-            "sfno_mlp_expansion": config.sfno_mlp_expansion,
-        },
-    )
-    n_p = sum(x.size for x in jax.tree.leaves(eqx.filter(sfno, eqx.is_array)))
-    logger.info(f"SFNO: {spec.n_channels}ch, {config.sfno_embed_dim}d, "
-                f"{config.sfno_n_blocks} blocks, {n_p:,} params")
-
-    sfno, start_epoch = maybe_resume_model(sfno, resume_from_dir)
-
-    if int(config.chunk_windows or 0) > 0:
-        chunk_loader, n_total = _make_chunk_loader(
-            config, grid, sigma, cache_dir,
-            surface_forcing_path, forcing_cache_path,
-        )
-        return _train_spectral_loop(
-            sfno, make_sfno_spectral_physics,
-            grid, sigma, None, None, config,
-            start_epoch=start_epoch,
-            chunk_loader=chunk_loader, n_samples_total=n_total,
-            resume_from_dir=resume_from_dir,
-        )
-
-    ic_states, target_carries, ic_times = load_training_data(
-        config, grid, sigma, cache_dir, windows=config.windows,
-        host_resident=True,   # non-chunked full-dataset load (#1155)
-    )
-    sample_forcings = _maybe_build_sample_forcings(
-        surface_forcing_path, ic_times, grid, forcing_cache_path,
-    )
-
-    return _train_spectral_loop(
-        sfno, make_sfno_spectral_physics,
-        grid, sigma, ic_states, target_carries, config,
-        start_epoch=start_epoch,
-        sample_forcings=sample_forcings,
-        host_staged=True,   # dataset loaded host-resident above (#1155)
-        resume_from_dir=resume_from_dir,   # EMA resume needs the dir too
-    )
-
-
 # Minimum per-channel std for the sfno_full Z-score normalization.  A constant
 # channel (e.g. a spatially/temporally invariant surface field) has std 0, so
 # ``(x - mean)/std`` would divide by zero; the shared
@@ -4774,9 +4447,7 @@ def train_sfno_full_spectral(
 ):
     """Train SFNO as a full atmospheric emulator (no dycore).
 
-    Unlike :func:`train_neural_gcm_spectral` (where SFNO produces
-    physics-tendency increments that the spectral PE dycore advances),
-    here SFNO directly maps ``state_t -> state_{t+1}`` at the macro
+    The SFNO directly maps ``state_t -> state_{t+1}`` at the macro
     step ``dt_sfno`` (default 6 h, matching the standard SFNO/FourCastNet
     autoregressive cadence).  The wrapper
     :class:`SFNOPrimitiveEquationModel` applies post-hoc dry-air-mass
@@ -4823,7 +4494,7 @@ def train_sfno_full_spectral(
     # in_channels carries (1 + history) copies of the packed state; the emulator
     # wrapper validates the two agree rather than mis-slicing.
     _history_steps = int(getattr(config, "sfno_history_steps", 0) or 0)
-    # Shared registry (same source as the WB lane and as sfno_physics); the
+    # Shared registry (same source as the WB lane); the
     # arch config is read back so the emulator wrapper below cannot disagree
     # with the weights it wraps about channel counts.
     from legoesm.training.model_registry import (
@@ -6002,10 +5673,10 @@ def train_column_mlp_spectral(
 ):
     """Train column MLP physics (Rasp 2018) + spectral PE dycore.
 
-    ``surface_forcing_path`` / ``forcing_cache_path``: as in
-    :func:`train_neural_gcm_spectral` — prescribed SST/sea-ice +
-    orbital-calendar features per training sample (the AMIP /
-    interannual-variability pathway).
+    ``surface_forcing_path``: the AIMIP monthly SST/sea-ice forcing NetCDF;
+    when set, prescribed SST/sea-ice + orbital-calendar features are fed per
+    training sample (the AMIP / interannual-variability pathway).
+    ``forcing_cache_path``: optional .npz cache for the regridded forcing.
 
     Returns (trained_neural_physics, loss_history).
     """

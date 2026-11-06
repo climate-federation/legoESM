@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Architecture-size sweep for column_nn and sfno_physics variants.
+"""Architecture-size sweep for the column_nn variant.
 
 Reuses the production multi-step + CRPS training config
 (``aimip_era5_multistep.yaml``) but parameterises the network sizes.
@@ -10,7 +10,7 @@ the result to a unified sweep scorecard:
     results/aimip_arch_sweep_001/aimip_arch_sweep.json
 
 Each entry's ``variant`` key is suffixed with the arch tag (e.g.
-``column_nn_S``, ``sfno_physics_L``) so downstream plotting can
+``column_nn_S``, ``column_nn_L``) so downstream plotting can
 distinguish them from the production scorecard.
 
 Usage::
@@ -18,7 +18,7 @@ Usage::
     JAX_ENABLE_X64=1 python scripts/run_aimip_arch_sweep.py \\
         --base config/aimip/aimip_era5_multistep.yaml
 
-The sweep grid is intentionally compact (4 sizes per variant -> 8
+The sweep grid is intentionally compact (4 sizes per variant -> 4
 trainings) so it fits in roughly the same wall-clock as the
 3-variant production scorecard at this resolution.
 """
@@ -47,12 +47,6 @@ ARCH_GRID = {
         ("M",  dict(nn_hidden_dim=256, nn_n_layers=4)),
         ("L",  dict(nn_hidden_dim=512, nn_n_layers=4)),
         ("XL", dict(nn_hidden_dim=512, nn_n_layers=6)),
-    ],
-    "sfno_physics": [
-        ("S",  dict(sfno_embed_dim=64,  sfno_n_blocks=2, sfno_mlp_expansion=4)),
-        ("M",  dict(sfno_embed_dim=128, sfno_n_blocks=4, sfno_mlp_expansion=4)),
-        ("L",  dict(sfno_embed_dim=256, sfno_n_blocks=4, sfno_mlp_expansion=4)),
-        ("XL", dict(sfno_embed_dim=256, sfno_n_blocks=6, sfno_mlp_expansion=4)),
     ],
 }
 
@@ -129,7 +123,7 @@ def main():
     )
     parser.add_argument(
         "--variants", type=str, default="",
-        help="Comma-separated subset of {column_nn,sfno_physics}.",
+        help="Comma-separated subset of {column_nn}.",
     )
     parser.add_argument(
         "--sizes", type=str, default="",

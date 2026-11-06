@@ -3,9 +3,9 @@
 # Overlay applied on top of ``aimip_era5.yaml`` for a GenCast-style
 # training run (Price et al. 2024, Nature) where the loss is the
 # CRPS + MSE sum over 4 chained 6-hourly rollouts.  Sized so a single
-# variant (classical / column_nn / sfno_physics) fits in roughly an
+# variant (classical / column_nn) fits in roughly an
 # hour of wall-clock on a single GPU, leaving headroom in the
-# 12-hour ``short`` partition limit for all 3 variants sequentially.
+# 12-hour ``short`` partition limit for both variants sequentially.
 #
 # Differences from ``aimip_era5.yaml``:
 #   - Grid drops T63 -> T21 (Williamson-tractable, 32 lat x 64 lon).

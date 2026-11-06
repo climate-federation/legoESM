@@ -113,7 +113,7 @@ def _mk_dirs(tmp_path, modes):
 
 
 def test_staged_campaign_full_pipeline(tmp_path):
-    modes = ("physics", "sfno")
+    modes = ("physics", "neural_gcm")
     out_root, dirs = _mk_dirs(tmp_path, modes)
     calls = {"train": [], "eval": [], "plot": []}
 
@@ -143,7 +143,7 @@ def test_staged_campaign_full_pipeline(tmp_path):
     )
     assert calls["train"] == list(modes)
     assert [m for m, _ in calls["eval"]] == list(modes)
-    assert calls["plot"] == [["physics", "sfno"]]
+    assert calls["plot"] == [["neural_gcm", "physics"]]  # sorted
     assert set(result) == set(modes)
 
 
@@ -183,9 +183,9 @@ def test_staged_campaign_allow_missing_downgrades(tmp_path):
 
 
 def test_staged_campaign_eval_uses_ema_when_preferred(tmp_path):
-    out_root, dirs = _mk_dirs(tmp_path, ("sfno",))
-    _touch(dirs["sfno"] / "epoch_0001.eqx")
-    _touch(dirs["sfno"] / "epoch_0001_ema.eqx")
+    out_root, dirs = _mk_dirs(tmp_path, ("neural_gcm",))
+    _touch(dirs["neural_gcm"] / "epoch_0001.eqx")
+    _touch(dirs["neural_gcm"] / "epoch_0001_ema.eqx")
     seen = []
 
     def eval_fn(mode, ckpt):
@@ -193,7 +193,7 @@ def test_staged_campaign_eval_uses_ema_when_preferred(tmp_path):
         _touch(dirs[mode] / "scorecard.json", b"{}")
 
     run_staged_campaign(
-        modes=("sfno",),
+        modes=("neural_gcm",),
         stages=("eval",),
         out_root=str(out_root),
         train_fn=lambda m: None,

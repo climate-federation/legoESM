@@ -10,8 +10,8 @@ with the ensemble median as a centre line.  ERA5 is overlaid as a
 reference.
 
 This is the canonical AIMIP figure (Phase-1 paper-style time-mean and
-trend comparison).  Our local legoESM v12 classical / column_nn /
-sfno_physics models were trained on 6-hour forecast pairs, NOT on
+trend comparison).  Our local legoESM v12 classical / column_nn
+models were trained on 6-hour forecast pairs, NOT on
 46-year AMIP integrations, so we cannot honestly overlay our model
 on this figure.  Drift over 46 years from a 6h-trained model is
 unbounded; the AIMIP submissions are full inference simulations.
@@ -153,8 +153,8 @@ def _global_annual(ds: xr.Dataset, varname: str = "tas") -> xr.DataArray:
 
 # Our variants' overlay colors on the fleet figure.
 LEGOESM_VARIANT_COLORS = {
-    "classical": "#AA3377", "column_nn": "#EE7733", "sfno_physics": "#009988",
-    "column_nn_dense": "#CC3311", "sfno_physics_dense": "#33BBEE",
+    "classical": "#AA3377", "column_nn": "#EE7733",
+    "column_nn_dense": "#CC3311",
 }
 
 
@@ -243,8 +243,8 @@ def main():
         help="Annual CSV (year,annual_global_mean_surfT_K) from "
              "scripts/run/run_aimip_amip_inference.py -> overlays a trained "
              "legoESM variant's prescribed-SST AMIP run on the fleet figure. "
-             "REPEATABLE (one per variant: classical / column_nn / "
-             "sfno_physics — the variant is parsed from the filename "
+             "REPEATABLE (one per variant: classical / column_nn "
+             "— the variant is parsed from the filename "
              "legoesm_<variant>_amip*.csv). Plotted as an anomaly from its "
              "OWN baseline window (so the near-surface-vs-2m absolute offset "
              "drops out, leaving a like-for-like trend/variability "

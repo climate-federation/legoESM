@@ -2,8 +2,8 @@
 """Plot annual-mean RMSE and bias for legoESM multi-step variants vs the AIMIP fleet.
 
 Reads our :file:`aimip_scorecard.json` produced by
-``scripts/run/run_aimip.py`` for the three legoESM variants (classical,
-column_nn, sfno_physics) and overlays them against the AIMIP-1 fleet
+``scripts/run/run_aimip.py`` for the legoESM variants (classical,
+column_nn) and overlays them against the AIMIP-1 fleet
 (ACE2.1, ArchesWeather, NeuralGCM, NeuralGCM-HRD) restricted to the
 training (2015-2016) and test (2017) calendar periods.
 
@@ -88,7 +88,6 @@ COLORS = {
     "NeuralGCM-HRD": "#0072B2",
     "legoESM/classical": "#882255",
     "legoESM/column_nn": "#CC79A7",
-    "legoESM/sfno_physics": "#332288",
 }
 
 

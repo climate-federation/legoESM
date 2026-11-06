@@ -16,11 +16,11 @@ Protocol (not improvised):
 * Output = monthly global-mean near-surface (lowest sigma level, 2 m proxy) air
   temperature -> annual means for the fleet-figure overlay.
 
-All three AIMIP variants are AMIP-capable (``--variant``):
+All AIMIP dycore variants are AMIP-capable (``--variant``):
 * ``classical`` — the surface-flux scheme anchors near-surface air T to the
   prescribed SST via ``surface_T_sfc_override``; transient GHG + ozone feed
   RRTMGP.
-* ``column_nn`` / ``sfno_physics`` — the learned physics consumes the
+* ``column_nn`` — the learned physics consumes the
   prescribed SST / sea-ice / insolation directly as input features
   (``physics_fn(..., forcing=...)``), the same forcing channel it was
   trained with (``aimip_surface_forcing``); no GHG/ozone (no physical
@@ -58,7 +58,7 @@ def _load_yaml(path: Path) -> dict:
         return yaml.safe_load(fh) or {}
 
 
-_VARIANTS = ("classical", "column_nn", "sfno_physics")
+_VARIANTS = ("classical", "column_nn")
 
 
 def _merged_cfg(suite_path: Path, variant: str = "classical") -> dict:
@@ -118,8 +118,7 @@ def main():
     ap.add_argument("--variant", type=str, default="classical",
                     choices=list(_VARIANTS),
                     help="AIMIP variant to run: classical (physics), "
-                         "column_nn (per-column MLP physics), sfno_physics "
-                         "(SFNO physics). NN variants need a checkpoint "
+                         "column_nn (per-column MLP physics). column_nn needs a checkpoint "
                          "trained WITH aimip_surface_forcing (T_sfc/sic/"
                          "insolation input features).")
     ap.add_argument("--suite", type=Path, default=Path("config/aimip/ace2/suite.yaml"))
@@ -323,50 +322,26 @@ def main():
             sponge_factor=sponge, spectral_filter=sfilt, ghg_vmr=ghg, o3_vmr=o3,
         ))
     else:
-        # --- trained learned-physics model (column_nn / sfno_physics) ---
+        # --- trained learned-physics model (column_nn) ---
         # The prescribed SST/sea-ice + orbital calendar reach the network
         # as INPUT FEATURES via spectral_rollout(forcing_base=...) — the
         # same channel it was trained with (aimip_surface_forcing).
         from legoesm.training.neural_gcm_spectral import spectral_rollout
 
-        if args.variant == "column_nn":
-            from legoesm.atmosphere.physics.neural_physics import (
-                build_column_physics,
-            )
-            from legoesm.training.neural_gcm_spectral import (
-                make_column_mlp_spectral_physics,
-            )
-            nn_template = build_column_physics(
-                nlev=nlev,
-                hidden_dim=int(cfg.get("nn_hidden_dim", 256)),
-                n_layers=int(cfg.get("nn_n_layers", 4)),
-                key=jax.random.PRNGKey(int(cfg.get("nn_seed", 0))),
-            )
-            nn_model = load_checkpoint(nn_template, args.ckpt)
-            physics_fn = make_column_mlp_spectral_physics(nn_model, grid)
-        else:  # sfno_physics
-            from legoesm.ml.channel_packing import PE3DChannelSpec
-            from legoesm.ml.sfno import SFNO, SFNOConfig
-            from legoesm.training.neural_gcm_spectral import (
-                N_SFNO_FORCING_CHANNELS, make_sfno_spectral_physics,
-            )
-            spec = PE3DChannelSpec(nlev=nlev)
-            sfno_template = SFNO(
-                SFNOConfig(
-                    in_channels=spec.n_channels + N_SFNO_FORCING_CHANNELS,
-                    out_channels=spec.n_channels,
-                    # Same fallbacks as run_aimip._build_spectral_config so a
-                    # suite that omits them still builds the architecture the
-                    # checkpoint was trained with (codex).
-                    embed_dim=int(cfg.get("sfno_embed_dim", 128)),
-                    n_blocks=int(cfg.get("sfno_n_blocks", 4)),
-                    mlp_expansion=int(cfg.get("sfno_mlp_expansion", 4)),
-                    residual_prediction=False,
-                ),
-                grid, key=jax.random.PRNGKey(int(cfg.get("sfno_seed", 0))),
-            )
-            sfno_model = load_checkpoint(sfno_template, args.ckpt)
-            physics_fn = make_sfno_spectral_physics(sfno_model, grid)
+        from legoesm.atmosphere.physics.neural_physics import (
+            build_column_physics,
+        )
+        from legoesm.training.neural_gcm_spectral import (
+            make_column_mlp_spectral_physics,
+        )
+        nn_template = build_column_physics(
+            nlev=nlev,
+            hidden_dim=int(cfg.get("nn_hidden_dim", 256)),
+            n_layers=int(cfg.get("nn_n_layers", 4)),
+            key=jax.random.PRNGKey(int(cfg.get("nn_seed", 0))),
+        )
+        nn_model = load_checkpoint(nn_template, args.ckpt)
+        physics_fn = make_column_mlp_spectral_physics(nn_model, grid)
 
         seg = jax.jit(lambda st, t_sfc_col, sic_col, doy: spectral_rollout(
             st, physics_fn, grid, sigma, pe, dt, n_steps_day,
@@ -391,7 +366,7 @@ def main():
     _o3_cache: dict[tuple[int, int], jnp.ndarray] = {}  # current-month ozone
     day = start
 
-    # Variant-qualified default: classical/column_nn/sfno_physics runs in the
+    # Variant-qualified default: classical/column_nn runs in the
     # same output dir must never deserialize each other's restart (codex).
     _reinit_tag = f"_reinit{_reinit_months}mo" if _reinit_months > 0 else ""
     restart_base = args.restart_path or args.out.with_name(

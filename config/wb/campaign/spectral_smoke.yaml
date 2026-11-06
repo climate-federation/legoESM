@@ -78,13 +78,6 @@ neural_gcm:
   surface_drag_scheme: "louis"
   nn_hidden: 64
   nn_layers: 2
-sfno:
-  # ACE2-style static land-fraction input plane (Watt-Meyer et al. 2024;
-  # orography is already a state channel).  OFF by default (owner,
-  # 2026-09-17); set true to select it.
-  spatial_embedding: false
-  sfno_embed_dim: 32
-  sfno_n_blocks: 2
 
 # --- classical: the six-family physics stack (owner rule: a classical model
 # carries one parameterization of EVERY family, and radiation is always

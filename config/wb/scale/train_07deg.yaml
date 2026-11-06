@@ -107,11 +107,6 @@ neural_gcm:
   # precipitation and radiation rows the default loss never scores; keeps the
   # cloud-water/rain tendencies this lane evolves.
   prune_unused_weights: true
-sfno:
-  # ACE2-style land-fraction plane; OFF for the same reason as neural_gcm.
-  spatial_embedding: false
-  sfno_embed_dim: 256
-  sfno_n_blocks: 8
 
 # --- classical: the six-family physics stack (owner rule: a classical model
 # carries one parameterization of EVERY family, and radiation is always

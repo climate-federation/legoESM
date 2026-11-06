@@ -192,6 +192,9 @@ def test_experiment_config_aimip_variant_rejects_unknown():
     cfg = ExperimentConfig(aimip_variant="bogus")
     with pytest.raises(ValueError, match="aimip_variant"):
         cfg.validate_strict()
+    # The dycore-SFNO variant was removed (user 2026-11-06).
+    with pytest.raises(ValueError, match="aimip_variant"):
+        ExperimentConfig(aimip_variant="sfno_physics").validate_strict()
 
 
 def test_experiment_config_aimip_variant_classical_requires_tiedtke():
@@ -207,7 +210,7 @@ def test_experiment_config_aimip_variant_classical_requires_tiedtke():
         cfg.validate_strict()
 
 
-@pytest.mark.parametrize("variant", ["column_nn", "sfno_physics", "sfno_full"])
+@pytest.mark.parametrize("variant", ["column_nn", "sfno_full"])
 def test_experiment_config_aimip_variant_non_classical_round_trip(variant):
     """The column_nn / sfno_* variants have no prerequisite scheme
     constraints; ``validate_strict`` must accept them out of the box."""
@@ -260,8 +263,10 @@ def test_run_aimip_module_importable_and_lists_variants():
     """``scripts/run/run_aimip.py`` imports cleanly and exposes the variant set."""
     module = _import_run_aimip()
     assert set(module._VALID_VARIANTS) >= {
-        "classical", "column_nn", "sfno_physics", "sfno_full",
+        "classical", "column_nn", "sfno_full",
     }
+    # The dycore-SFNO variant was removed (user 2026-11-06).
+    assert "sfno_physics" not in module._VALID_VARIANTS
 
 
 def test_run_aimip_smoke_overrides_drop_windows_and_curriculum():
@@ -306,7 +311,6 @@ def _yaml(relpath):
     "config/aimip/aimip_suite_multistep.yaml",
     "config/aimip/scale/suite_classical.yaml",
     "config/aimip/scale/suite_column_nn.yaml",
-    "config/aimip/scale/suite_sfno_physics.yaml",
     "config/aimip/scale/suite_sfno_full.yaml",
 ])
 def test_aimip_suite_variants_have_overlays_and_valid_names(suite_rel):
@@ -348,10 +352,8 @@ def test_aimip_classical_merged_config_uses_rrtmgp(base_rel, overlay_rel):
 
 @pytest.mark.parametrize("overlay_rel", [
     "config/aimip/variant_column_nn.yaml",
-    "config/aimip/variant_sfno_physics.yaml",
     "config/aimip/variant_sfno_full.yaml",
     "config/aimip/scale/variant_column_nn.yaml",
-    "config/aimip/scale/variant_sfno_physics.yaml",
     "config/aimip/scale/variant_sfno_full.yaml",
 ])
 def test_aimip_nn_variant_overlays_declare_no_classical_scheme(overlay_rel):
@@ -365,16 +367,11 @@ def test_aimip_nn_variant_overlays_declare_no_classical_scheme(overlay_rel):
 def test_aimip_scale_sfno_full_neutralizes_unsupported_features():
     """sfno_full's training loop supports neither the rollout curriculum
     nor chunked streaming; its scale overlay must neutralize the base
-    keys (silent-ignore is the failure mode) and pin the SAME SFNO
-    architecture as the scale sfno_physics overlay (arch-matched
-    comparison)."""
+    keys (silent-ignore is the failure mode)."""
     base = _yaml("config/aimip/scale/base_t106_allyears.yaml")
     full = _yaml("config/aimip/scale/variant_sfno_full.yaml")
-    phys = _yaml("config/aimip/scale/variant_sfno_physics.yaml")
     merged = {**base, **full}
     assert merged["aimip_rollout_curriculum"] is None
     assert merged["aimip_chunk_windows"] == 0
     assert merged["aimip_chunk_prefetch"] is False
     assert merged["dt_sfno"] == 21600.0
-    for key in ("sfno_embed_dim", "sfno_n_blocks", "sfno_mlp_expansion"):
-        assert full[key] == phys[key], f"arch mismatch on {key}"

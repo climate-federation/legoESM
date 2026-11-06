@@ -11,7 +11,7 @@ this script:
 4. Runs ``n_days`` successive 1-day spectral rollouts, accumulating the
    area-weighted global-mean mid-level T at every saved step.
 5. Records the same daily means from the ERA5 snapshots for reference.
-6. Plots the four curves (classical, column_nn, sfno_physics, ERA5)
+6. Plots the three curves (classical, column_nn, ERA5)
    over time -- the canonical AIMIP-paper-style T(t) diagnostic.
 
 Outputs (under ``--results``):
@@ -46,11 +46,10 @@ jax.config.update("jax_enable_x64", True)
 
 logger = logging.getLogger("aimip-timeseries")
 
-_VARIANTS = ("classical", "column_nn", "sfno_physics")
+_VARIANTS = ("classical", "column_nn")
 _VARIANT_COLOURS = {
     "classical": "tab:blue",
     "column_nn": "tab:orange",
-    "sfno_physics": "tab:green",
     "era5": "k",
 }
 
@@ -126,33 +125,6 @@ def _load_column_nn(ckpt_path: Path, spec_cfg):
     return load_checkpoint(template, ckpt_path)
 
 
-def _load_sfno(ckpt_path: Path, spec_cfg, grid, variant="sfno_physics"):
-    from legoesm.ml.channel_packing import PE3DChannelSpec
-    from legoesm.ml.sfno import SFNO, SFNOConfig
-    from legoesm.ml.training import load_checkpoint
-    from legoesm.training.neural_gcm_spectral import N_SFNO_FORCING_CHANNELS
-    # sfno_physics inputs carry the surface-forcing planes (T_sfc/sic/
-    # insolation); sfno_full (whole-atmosphere emulator) stays state-only.
-    n_forcing = N_SFNO_FORCING_CHANNELS if variant == "sfno_physics" else 0
-    spec = PE3DChannelSpec(nlev=spec_cfg.n_levels)
-    template = SFNO(
-        SFNOConfig(
-            in_channels=spec.n_channels + n_forcing,
-            out_channels=spec.n_channels,
-            embed_dim=spec_cfg.sfno_embed_dim,
-            n_blocks=spec_cfg.sfno_n_blocks,
-            mlp_expansion=spec_cfg.sfno_mlp_expansion,
-            # Must match the trained arch or the PE wrapper's
-            # config-equality guard raises. Inert here (no key passed).
-            dropout=spec_cfg.sfno_dropout,
-            residual_prediction=False,
-        ),
-        grid,
-        key=jax.random.PRNGKey(0),
-    )
-    return load_checkpoint(template, ckpt_path)
-
-
 def _physics_fn_for(variant: str, model, grid, spec_cfg, base_cfg):
     from legoesm.training.aimip_params import (
         make_aimip_classical_spectral_physics,
@@ -160,7 +132,6 @@ def _physics_fn_for(variant: str, model, grid, spec_cfg, base_cfg):
     )
     from legoesm.training.neural_gcm_spectral import (
         make_column_mlp_spectral_physics,
-        make_sfno_spectral_physics,
     )
 
     if variant == "classical":
@@ -176,8 +147,6 @@ def _physics_fn_for(variant: str, model, grid, spec_cfg, base_cfg):
         )
     if variant == "column_nn":
         return make_column_mlp_spectral_physics(model, grid)
-    if variant in ("sfno_physics", "sfno_full"):
-        return make_sfno_spectral_physics(model, grid)
     raise ValueError(f"Unknown variant: {variant!r}")
 
 
@@ -388,10 +357,8 @@ def main():
         logger.info(f"[{variant}] loading {ckpt}")
         if variant == "classical":
             model = _load_classical(ckpt)
-        elif variant == "column_nn":
-            model = _load_column_nn(ckpt, spec_cfg)
         else:
-            model = _load_sfno(ckpt, spec_cfg, grid, variant)
+            model = _load_column_nn(ckpt, spec_cfg)
 
         mid_T, col_T = _run_variant_series(
             variant, model, grid, sigma, spec_cfg, base,

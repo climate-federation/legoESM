@@ -2,7 +2,7 @@
     mpirun -np 2 <py> -m pytest tests/distributed/test_aimip_data_parallel_mpi.py -v
 
 Drives the REAL ``_train_spectral_loop`` chunked path with
-``config.data_parallel=True`` under 2 ranks, a tiny SFNO, and a synthetic
+``config.data_parallel=True`` under 2 ranks, a tiny column MLP, and a synthetic
 2-sample chunk (no GCS).  Rank 0 trains sample 0, rank 1 trains sample 1; each
 step averages the two gradients across ranks and applies the SAME update, so
 the replicas must end BYTE-IDENTICAL — the core DP invariant (they never
@@ -21,8 +21,6 @@ from legoesm.core.state import HydrostaticState
 from legoesm.driver.compiled_segments import pack_carry
 from legoesm.grids.gaussian import create_gaussian_grid
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.ml.channel_packing import PE3DChannelSpec
-from legoesm.ml.sfno import SFNO, SFNOConfig
 
 N_MAX, NLEV = 10, 3
 
@@ -53,15 +51,10 @@ def _carry(grid, T_val, q_v_val):
     )
 
 
-def _small_sfno(grid):
-    from legoesm.training.neural_gcm_spectral import N_SFNO_FORCING_CHANNELS
-    spec = PE3DChannelSpec(nlev=NLEV)
-    cfg = SFNOConfig(
-        in_channels=spec.n_channels + N_SFNO_FORCING_CHANNELS,
-        out_channels=spec.n_channels, embed_dim=16, n_blocks=1,
-        mlp_expansion=2, residual_prediction=False,
-    )
-    return SFNO(cfg, grid, key=jax.random.PRNGKey(42))
+def _small_column_mlp():
+    from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
+    return NeuralPhysics(nlev=NLEV, hidden_dim=16, n_layers=2,
+                         key=jax.random.PRNGKey(99), residual_scale=0.01)
 
 
 def _cfg(ckpt_dir):
@@ -102,23 +95,23 @@ def test_dp_replicas_stay_synced(tmp_path):
         pytest.skip("needs mpirun -np 2")
     from legoesm.training.neural_gcm_spectral import (
         _train_spectral_loop,
-        make_sfno_spectral_physics,
+        make_column_mlp_spectral_physics,
     )
     from mpi4py import MPI
 
     grid = create_gaussian_grid(N_MAX, dealiasing="quadratic")
     sigma = create_sigma_coordinate(NLEV, sigma_top=0.1)
-    model0 = _small_sfno(grid)
+    model0 = _small_column_mlp()
 
     model, hist = _train_spectral_loop(
-        model0, make_sfno_spectral_physics, grid, sigma, None, None,
+        model0, make_column_mlp_spectral_physics, grid, sigma, None, None,
         _cfg(tmp_path / "dp"),
         start_epoch=0, chunk_loader=_loader_2samples(grid),
         n_samples_total=2, resume_from_dir=None,
     )
 
     fin = jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array))
-    init = jax.tree_util.tree_leaves(eqx.filter(_small_sfno(grid), eqx.is_array))
+    init = jax.tree_util.tree_leaves(eqx.filter(_small_column_mlp(), eqx.is_array))
     # (a) non-vacuous: training actually moved the weights.
     assert any(not jnp.array_equal(i, f) for i, f in zip(init, fin)), (
         "DP run did not update the weights"

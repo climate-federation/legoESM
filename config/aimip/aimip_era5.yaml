@@ -6,10 +6,10 @@
 # ``config/aimip/aimip_suite.yaml``.
 #
 # Loss:
-#   - Variants {classical, column_nn, sfno_physics} share
+#   - Variants {classical, column_nn} share
 #     ``combined_loss`` (training/losses.py) with the per-variable
 #     weights below.  Variant ``sfno_full`` (when enabled) uses the
-#     internal spectral loss of ``train_neural_gcm_spectral``; values
+#     internal spectral loss of ``train_sfno_full_spectral``; values
 #     are still comparable in rank-order to the grid-MSE because of
 #     ``normalize_by_scale=True``.
 # Optimizer:
@@ -91,7 +91,7 @@ dt: 600.0            # 10-minute dycore timestep.  T63 dt=1200 produced
 # set, ~tens of model-days of physics integration).
 aimip_n_epochs: 24         # extended (was 8); aimip_patience=3 early-stops
                            # converged variants (classical) so the still-
-                           # improving NN variants (column_nn/sfno_physics)
+                           # improving NN variant (column_nn)
                            # get the extra epochs. Resume from the epoch_0007
                            # checkpoints via run_aimip.py --resume.
 aimip_patience: 3          # tightened along with n_epochs.

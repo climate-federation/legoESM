@@ -563,17 +563,6 @@ class TestNeuralPhysics:
 
 
 # ---------------------------------------------------------------------------
-# 6. sfno_dycore_coupling
-# ---------------------------------------------------------------------------
-
-class TestSFNOCoupling:
-
-    def test_import(self):
-        from legoesm.training.sfno_dycore_coupling import SFNOPhysics
-        assert SFNOPhysics is not None
-
-
-# ---------------------------------------------------------------------------
 # 7. era5_to_state
 # ---------------------------------------------------------------------------
 
@@ -1035,33 +1024,6 @@ class TestTrainingAPISignatures:
         assert isinstance(adapter, ColumnAdapter)
         assert adapter.ncol == 6 * N * N
 
-    def test_sfno_step_unified_no_grid_param(self):
-        """make_sfno_step_unified must NOT accept a grid positional argument."""
-        from legoesm.training.sfno_dycore_coupling import make_sfno_step_unified
-        import inspect
-
-        sig = inspect.signature(make_sfno_step_unified)
-        params = list(sig.parameters.keys())
-        assert "grid" not in params
-        assert params == ["sfno_physics", "mode", "traditional_step_unified"]
-
-    def test_sfno_correction_mode_requires_pipeline(self):
-        """train_sfno_coupled with mode='correction' must require physics_pipeline."""
-        from legoesm.training.training_driver import train_sfno_coupled
-        import inspect
-
-        sig = inspect.signature(train_sfno_coupled)
-        assert "physics_pipeline" in sig.parameters
-
-    def test_sfno_replacement_mode_no_pipeline(self):
-        """train_sfno_coupled with mode='replacement' should not require physics_pipeline."""
-        from legoesm.training.training_driver import train_sfno_coupled
-        import inspect
-
-        sig = inspect.signature(train_sfno_coupled)
-        # physics_pipeline should default to None
-        assert sig.parameters["physics_pipeline"].default is None
-
     def test_neural_step_unified_accepts_optional_conv_prog_slot(self):
         from legoesm.atmosphere.physics.neural_physics import (
             NeuralPhysics,
@@ -1076,26 +1038,6 @@ class TestTrainingAPISignatures:
 
         assert phys_out.du_dt.shape == _make_state().T.data.shape
         assert len(held) == 6
-
-    def test_sfno_step_unified_accepts_optional_conv_prog_slot(self):
-        from legoesm.training.sfno_dycore_coupling import make_sfno_step_unified
-
-        class MockSFNOPhysics:
-            spatial_embedding = False
-            era5_surface_fluxes = False
-
-            def __call__(self, T, u, v, q_v, p_s, phis, dt,
-                         land_frac=None, sfc_fluxes=None):
-                del u, v, q_v, phis, dt, land_frac, sfc_fluxes
-                return PhysicsOutput(**_zero_physics_output(T, p_s))
-
-        step = make_sfno_step_unified(MockSFNOPhysics(), mode="replacement")
-
-        phys_out, held = step(*_step_unified_args(include_conv_prog=True))
-
-        assert phys_out.du_dt.shape == _make_state().T.data.shape
-        assert len(held) == 6
-
 
 # ---------------------------------------------------------------------------
 # 10. trainable_params scheme awareness

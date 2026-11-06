@@ -24,8 +24,7 @@
 # The variant ladder: classical (full physics + RRTMGP radiation),
 # column_nn (ALL physics incl. radiation learned by a column MLP),
 # sfno_full (SFNO emulates the ENTIRE atmosphere -- no dycore, no
-# physics).  sfno_physics (SFNO physics, dycore retained) remains
-# available as an optional intermediate rung.
+# physics).
 #
 # SUBMIT (one per variant; set the account):
 #   SBATCH_ACCOUNT=<proj> VARIANT=sfno_full \
@@ -36,7 +35,7 @@
 # ===========================================================================
 set -uo pipefail
 
-VARIANT="${VARIANT:-sfno_full}"     # classical | column_nn | sfno_full | sfno_physics
+VARIANT="${VARIANT:-sfno_full}"     # classical | column_nn | sfno_full
 CHAIN="${CHAIN:-0}"
 CHAIN_MAX="${CHAIN_MAX:-24}"  # v2 curriculum (72h/120h phases) needs more links
 
@@ -55,7 +54,7 @@ mkdir -p "$OUT/logs"
 
 # Resume if ANY checkpoint exists: a completed-epoch checkpoint (epoch_*.eqx)
 # OR a mid-epoch per-chunk checkpoint (chunk_latest.eqx, written by the chunked
-# column_nn / sfno_physics variants; classical and sfno_full checkpoint
+# column_nn variant; classical and sfno_full checkpoint
 # per-epoch only).
 RESUME_FLAG=""
 if ls "$OUT"/*/epoch_*.eqx >/dev/null 2>&1 \

@@ -27,7 +27,7 @@ C = _load_campaign()
 
 def test_defaults_parse():
     cfg = C.build_campaign_config_from_args([])
-    assert cfg.modes == ("physics", "neural_gcm", "sfno")
+    assert cfg.modes == ("physics", "neural_gcm")
     assert cfg.stages == ("train", "eval", "plot")
     assert cfg.training_core == "spectral"
     assert cfg.leads_hours == (24, 72, 120, 240)
@@ -41,13 +41,17 @@ def test_defaults_parse():
 
 
 def test_modes_subset_and_dedup():
-    cfg = C.build_campaign_config_from_args(["--modes", "sfno,physics,sfno"])
-    assert cfg.modes == ("sfno", "physics")   # order preserved, de-duped
+    cfg = C.build_campaign_config_from_args(
+        ["--modes", "neural_gcm,physics,neural_gcm"])
+    assert cfg.modes == ("neural_gcm", "physics")   # order preserved, de-duped
 
 
 def test_unknown_mode_is_hard_error():
     with pytest.raises(SystemExit):
         C.build_campaign_config_from_args(["--modes", "physics,bogus"])
+    # The dycore-SFNO mode was removed (user 2026-11-06).
+    with pytest.raises(SystemExit):
+        C.build_campaign_config_from_args(["--modes", "sfno"])
 
 
 def test_unknown_stage_is_hard_error():
@@ -110,12 +114,11 @@ def test_val_windows_from_yaml(tmp_path):
                 C.build_campaign_config_from_args(["--config", str(p)])
             continue
         argv = C.build_train_argv(
-            C.build_campaign_config_from_args(["--config", str(p)]), "sfno")
+            C.build_campaign_config_from_args(["--config", str(p)]), "neural_gcm")
         assert argv[argv.index("--val-windows") + 1] == "6"
 
 
-@pytest.mark.parametrize("deck", ["spectral_t63_sfno_lr3e-3.yaml",
-                                  "spectral_t63_ngcm_lr3e-3_e24.yaml"])
+@pytest.mark.parametrize("deck", ["spectral_t63_ngcm_lr3e-3_e24.yaml"])
 def test_val_window_decks_pass_trainer_key_check(deck):
     from legoesm.training import scale_build
     path = C._resolve_config_path(f"config/wb/campaign/{deck}")
@@ -134,13 +137,13 @@ def test_build_eval_argv():
     cfg = C.build_campaign_config_from_args(
         ["--out-root", "/tmp/wb", "--leads", "24,72", "--eval-year", "2020",
          "--n-inits", "5"])
-    argv = C.build_eval_argv(cfg, "sfno", "/tmp/wb/sfno/epoch_0011.eqx")
-    assert argv[argv.index("--mode") + 1] == "sfno"
-    assert argv[argv.index("--checkpoint") + 1] == "/tmp/wb/sfno/epoch_0011.eqx"
+    argv = C.build_eval_argv(cfg, "neural_gcm", "/tmp/wb/neural_gcm/epoch_0011.eqx")
+    assert argv[argv.index("--mode") + 1] == "neural_gcm"
+    assert argv[argv.index("--checkpoint") + 1] == "/tmp/wb/neural_gcm/epoch_0011.eqx"
     assert argv[argv.index("--leads") + 1] == "24,72"
     assert argv[argv.index("--eval-year") + 1] == "2020"
     assert argv[argv.index("--n-inits") + 1] == "5"
-    assert argv[argv.index("--out") + 1] == "/tmp/wb/sfno/scorecard.json"
+    assert argv[argv.index("--out") + 1] == "/tmp/wb/neural_gcm/scorecard.json"
 
 
 def test_build_eval_argv_year_from_yaml():
@@ -166,7 +169,8 @@ def test_build_plot_argv():
 
 def test_build_plot_argv_no_sota():
     cfg = C.build_campaign_config_from_args(["--sota-csv", ""])
-    argv = C.build_plot_argv(cfg, {"sfno": "/o/sfno/scorecard.json"}, "/o/p.png")
+    argv = C.build_plot_argv(cfg, {"neural_gcm": "/o/neural_gcm/scorecard.json"},
+                             "/o/p.png")
     assert "--sota-csv" not in argv
 
 
@@ -187,5 +191,5 @@ def test_barrier_noop_single_process():
 
 
 def test_paths_helpers():
-    assert C.mode_out_dir("/o", "sfno") == "/o/sfno"
-    assert C.scorecard_path("/o", "sfno") == "/o/sfno/scorecard.json"
+    assert C.mode_out_dir("/o", "neural_gcm") == "/o/neural_gcm"
+    assert C.scorecard_path("/o", "neural_gcm") == "/o/neural_gcm/scorecard.json"

@@ -1,6 +1,4 @@
-# Full-atmosphere SFNO variant overlay.  Same architecture and
-# optimizer as variant_sfno_physics.yaml (so the model size and
-# trainer setup are directly comparable), but dispatched through
+# Full-atmosphere SFNO variant overlay, dispatched through
 # train_sfno_full_spectral so the trained model emulates the full
 # atmospheric state evolution end-to-end (no dycore, no physics
 # tendency, SFNOPrimitiveEquationModel.step(state, dt_sfno) at every

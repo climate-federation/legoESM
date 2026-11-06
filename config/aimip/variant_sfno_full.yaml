@@ -20,8 +20,7 @@ cloud_scheme: "none"
 microphysics: "none"
 radiation: "none"
 
-# SFNO architecture — same budget as variant_sfno_physics for a fair
-# like-for-like comparison in the scorecard.
+# SFNO architecture.
 sfno_embed_dim: 64
 sfno_n_blocks: 4
 sfno_mlp_expansion: 4

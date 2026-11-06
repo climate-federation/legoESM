@@ -9,10 +9,10 @@ package signatures) and exposes exactly what
     load_era5_samples(cfg, yml, grid, sigma) -> list[(ic, target, forcing)]
     evaluate_wb2(cfg, yml, model, params, make_run_seg, grid, sigma)
 
-The three modes differ ONLY in the ``make_run_seg`` factory (per
+The two modes differ ONLY in the ``make_run_seg`` factory (per
 ``training_driver._build_train_step``): physics feeds
 ``TrainablePhysicsParams.to_segment_kwargs()``; neural_gcm builds a
-``NeuralPhysics`` step; sfno builds an SFNO lat-lon step. On the SPECTRAL
+``NeuralPhysics`` step. On the SPECTRAL
 core, ``physics`` is the six-family classical model shared with AIMIP
 (``make_aimip_classical_spectral_physics``), not the old 6-knob
 ``TrainablePhysicsParams`` stack — that one survives only on the lat-lon path
@@ -577,7 +577,7 @@ def build_latlon_config(cfg, yml):
             "here: zhang_mcfarlane, the default elsewhere, is refused on this "
             "lane.")
     ra = _load_run_amip()
-    # Pure-dycore WB modes (neural_gcm / sfno) replace the physics pipeline with
+    # The pure-dycore WB mode (neural_gcm) replaces the physics pipeline with
     # a neural net -- their rollout runs NO boundary-layer scheme, so the
     # turbulence field feeds ONLY _create_friction (fric_decay), nothing else
     # (dt/grid/sigma/dycore are turbulence-independent; physics_pipeline is
@@ -591,7 +591,7 @@ def build_latlon_config(cfg, yml):
     # leaving dt/grid/sigma unchanged.  Physics mode genuinely runs louis and
     # keeps it (louis owns BOTH the surface stress and the adjoint damping).
     _mode = getattr(cfg, "mode", None)
-    _turbulence = ("none" if _mode in ("neural_gcm", "sfno")
+    _turbulence = ("none" if _mode == "neural_gcm"
                    else yml.get("turbulence", "louis"))
     argv = [
         *_gridpoint_argv(cfg, yml),
@@ -659,7 +659,7 @@ _WB_CONSUMED_TOP_KEYS = frozenset({
     "ice_skin_prognostic", "loss", "lr",
     "microphysics", "n_epochs", "n_lat", "n_lon", "n_training_days",
     "neural_gcm", "nlev", "optimizer", "rad_update_steps", "radiation",
-    "sfno", "shuffle_seed", "smoke_radiation", "spectral", "state_cache_dir",
+    "shuffle_seed", "smoke_radiation", "spectral", "state_cache_dir",
     "train_windows",
     "train_years", "turbulence", "validation", "warmup_steps", "weight_decay",
 })
@@ -679,7 +679,7 @@ _WB_SPECTRAL_KEYS = frozenset({
     "fix_mass", "anchor_mass_to_initial", "vertical_advection_scheme",
     "frictional_heating", "segment_remat",
 })
-# Exactly the keys the classical / neural_gcm / sfno builders read from their
+# Exactly the keys the classical / neural_gcm builders read from their
 # nested blocks (#1663 review: these were unvalidated, so a nested typo like
 # ``nn_hiden`` silently fell back to the default -- the inert-key defect class).
 _WB_CLASSICAL_KEYS = frozenset({
@@ -696,13 +696,10 @@ _WB_CLASSICAL_KEYS = frozenset({
     "spatial_seed", "spatial_surface", "surface_bulk", "trainable_schemes",
     "turbulence",
 })
-# neural_gcm and sfno share one arch/drag key surface (both neural cores); kept
-# permissive across the two so a valid arch key is never falsely rejected.
 _WB_NEURAL_KEYS = frozenset({
     "surface_drag", "surface_drag_scheme", "surface_drag_confounded",
-    "nn_hidden", "nn_layers", "gauss_n_max", "sfno_embed_dim", "sfno_n_blocks",
-    "sfno_mlp_expansion", "spatial_embedding", "land_inputs",
-    "sfno_gradient_checkpoint", "prune_unused_weights",
+    "nn_hidden", "nn_layers", "spatial_embedding", "land_inputs",
+    "prune_unused_weights",
 })
 
 
@@ -780,7 +777,7 @@ def wb_needs_land_frac(mode: str, yml: dict) -> bool:
             or yml.get("near_surface_head") is not None
             or yml.get("era5_sea_ice_climatology") is True):
         return True
-    if mode in ("neural_gcm", "sfno"):
+    if mode == "neural_gcm":
         ov = yml.get(mode, {}) or {}
         return bool(ov.get("spatial_embedding", False)
                     or ov.get("land_inputs", False))
@@ -795,8 +792,8 @@ def validate_wb_campaign_yaml(yml: dict) -> None:
     """Refuse a campaign YAML carrying keys this training path does not read.
 
     Unknown keys raise with a nearest-match hint.  Covers the top level and
-    the ``spectral``, ``loss``, ``classical``, ``neural_gcm`` and ``sfno``
-    blocks (#1663: the last three were unchecked, so a nested typo silently
+    the ``spectral``, ``loss``, ``classical`` and ``neural_gcm``
+    blocks (#1663: the last two were unchecked, so a nested typo silently
     defaulted).
     """
     import difflib
@@ -848,8 +845,7 @@ def validate_wb_campaign_yaml(yml: dict) -> None:
             _reject(unknown, sorted(_loss_known), "loss-block")
     # Nested per-scheme blocks (#1663): typo'd keys here silently defaulted.
     for _blk, _known in (("classical", _WB_CLASSICAL_KEYS),
-                         ("neural_gcm", _WB_NEURAL_KEYS),
-                         ("sfno", _WB_NEURAL_KEYS)):
+                         ("neural_gcm", _WB_NEURAL_KEYS)):
         _b = yml.get(_blk) or {}
         _u = set(_b) - _known
         if _u:
@@ -967,7 +963,6 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
         carry_to_spectral_state,
         spectral_state_to_carry,
         spectral_rollout,
-        make_sfno_spectral_physics,
         make_column_mlp_spectral_physics,
         make_physics_params_spectral_physics,
     )
@@ -1305,43 +1300,6 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
         uses_forcing = True
         split_rad_interval = None
 
-    elif cfg.mode == "sfno":
-        # Channel count, forcing planes, residual_prediction=False and the
-        # epoch-0 decoder zero-init (so the first rollout is the pure SI
-        # dycore) now live in the registry, shared with AIMIP.
-        ov = yml.get("sfno", {})
-        # NOTE this lane's default SFNO size moved 256/8 -> the registry's
-        # 128/4 for a YAML that pins neither; every shipped config under
-        # config/wb/ pins both, so no existing run moves. `sfno_mlp_expansion`
-        # is newly honoured here (it was silently ignored before).
-        _sf = {k: int(ov[k]) for k in
-               ("sfno_embed_dim", "sfno_n_blocks", "sfno_mlp_expansion")
-               if k in ov}
-        if "sfno_gradient_checkpoint" in ov:
-            _gc = ov["sfno_gradient_checkpoint"]
-            if not isinstance(_gc, bool):
-                raise ValueError("sfno.sfno_gradient_checkpoint must be true or "
-                                 f"false, got {_gc!r}")
-            _sf["sfno_gradient_checkpoint"] = _gc
-        # ACE2-style land-fraction plane (mode block) + the six ERA5
-        # surface-flux input planes (top-level campaign flag).
-        _sf_spatial = bool(ov.get("spatial_embedding", False))
-        _sf_fluxes = bool(yml.get("era5_surface_fluxes", False))
-        _sf["spatial_embedding"] = _sf_spatial
-        _sf["era5_surface_fluxes"] = _sf_fluxes
-        if _sf_spatial:
-            _sf["learned_position_embedding"] = wb_learned_position_embedding(yml)
-        _sf["prune_unused_weights"] = wb_prune_unused_weights(ov)
-        params = build_variant("sfno_physics", nlev=nlev, grid=grid,
-                               overrides=_sf)
-
-        def make_physics_fn(p):
-            return make_sfno_spectral_physics(
-                p, grid, spatial_embedding=_sf_spatial,
-                era5_surface_fluxes=_sf_fluxes)
-        uses_forcing = True
-        split_rad_interval = None
-
     else:
         raise ValueError(f"unknown mode {cfg.mode!r}")
 
@@ -1483,7 +1441,7 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
     if _head is not None:
         params = WithHead(params, _head)
     if ("learned_position_embedding" in yml and _head is None and not (
-            cfg.mode in ("neural_gcm", "sfno")
+            cfg.mode == "neural_gcm"
             and (yml.get(cfg.mode) or {}).get("spatial_embedding", False))):
         raise ValueError("learned_position_embedding is set but nothing in "
                          "this run reads it (no near_surface_head, no "
@@ -1595,10 +1553,6 @@ def build_mode_components(cfg, yml, column_mesh=None):
             f"(Voronoi) or 'spectral' (Gaussian semi-implicit training core, "
             f"#817)")
     if core == "cubed_sphere":
-        if cfg.mode == "sfno":
-            raise ValueError("mode 'sfno' is built only on the lat-lon and "
-                             "spectral cores (its coupling regrids lat-lon <-> "
-                             "Gaussian); not on 'cubed_sphere'.")
         if float((yml.get("loss") or {}).get("spectral_weight", 0.0)) > 0.0:
             raise ValueError("loss.spectral_weight > 0 needs a Gaussian grid "
                              "(spherical-harmonic analysis); not on "
@@ -1613,12 +1567,12 @@ def build_mode_components(cfg, yml, column_mesh=None):
     # Re-deriving it here is how the old _cfl_dt handed the training
     # segment dt=81.8 s (pole-cell CFL 1.47) at the C32 smoke size: it
     # used the meridional spacing only, and the pure-dycore modes
-    # (zero-init neural_gcm / sfno) blew up to loss=nan (#797).
+    # (zero-init neural_gcm) blew up to loss=nan (#797).
     dt = float(driver.config.dycore.dt)
     # The driver's BL Rayleigh-friction profile: the training rollout needs
     # the same dissipation as production — the adjoint through an undamped
     # dycore returns NaN gradients (#797 bug 11; bites the pure-dycore
-    # epoch-0 neural_gcm/sfno modes hardest).
+    # epoch-0 neural_gcm mode hardest).
     fric_decay = driver.fric_decay
     physics_pipeline = build_physics_pipeline(grid, sigma, config)
     loss_config = make_loss_config(cfg, yml)
@@ -1681,73 +1635,6 @@ def build_mode_components(cfg, yml, column_mesh=None):
             return build_training_segment(
                 model, make_neural_step_unified(nn_phys, adapter), grid, sigma,
                 dt, fric_decay=fric_decay, start_day_from_forcing=True)
-
-    elif cfg.mode == "sfno":
-        import equinox as eqx
-        import jax.numpy as jnp
-
-        from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
-        from legoesm.training.model_registry import sfno_extra_input_channels
-        from legoesm.training.sfno_dycore_coupling import (
-            SFNOPhysics, make_sfno_step_unified_latlon,
-        )
-        from legoesm.ml.sfno import SFNO, SFNOConfig
-
-        ov = yml.get("sfno", {})
-        nlev = int(yml["nlev"])
-        spatial_embedding = bool(ov.get("spatial_embedding", False))
-        era5_surface_fluxes = bool(yml.get("era5_surface_fluxes", False))
-        n_ch = 4 * nlev + 2   # SFNOPhysics packs [u, v, T, q_v, lnps, phis]
-        # Prescribed input channels appended by SFNOPhysics (land fraction,
-        # then the six ERA5 surface-flux planes); the decoder still predicts
-        # only the n_ch tendency channels.
-        n_max = int(ov.get("gauss_n_max", max(21, int(yml["n_lat"]) // 3)))
-        gauss = create_gaussian_grid(n_max)
-        sfno = SFNO(
-            SFNOConfig(
-                in_channels=n_ch + sfno_extra_input_channels(
-                    spatial_embedding=spatial_embedding,
-                    era5_surface_fluxes=era5_surface_fluxes),
-                out_channels=n_ch,
-                embed_dim=int(ov.get("sfno_embed_dim", 256)),
-                n_blocks=int(ov.get("sfno_n_blocks", 8)),
-                # tendencies, NOT state residuals: with the default
-                # residual_prediction=True the "tendency" would contain the
-                # full state and destroy the rollout in one step.
-                residual_prediction=False,
-            ),
-            gauss, key=jax.random.PRNGKey(0))
-        # Epoch-0 stability contract (same as the NeuralPhysics zero-init):
-        # the untrained SFNO must emit exactly-zero tendencies so the first
-        # rollout is the pure dycore.
-        sfno = eqx.tree_at(
-            lambda m: (m.decoder.weight, m.decoder.bias), sfno,
-            (jnp.zeros_like(sfno.decoder.weight),
-             jnp.zeros_like(sfno.decoder.bias)))
-        params = SFNOPhysics(
-            sfno=sfno, grid=gauss, nlev=nlev,
-            spatial_embedding=spatial_embedding,
-            era5_surface_fluxes=era5_surface_fluxes)
-
-        def _flat_points(lat_1d, lon_1d):
-            lon2d, lat2d = np.meshgrid(np.asarray(lon_1d), np.asarray(lat_1d))
-            return lat2d.ravel(), lon2d.ravel()
-
-        g_lat_f, g_lon_f = _flat_points(gauss.lat, gauss.lon)
-        ll_lat_f, ll_lon_f = _flat_points(grid.lat, grid.lon)
-        w_ll2g = compute_latlon_to_voronoi_weights(
-            np.asarray(grid.lat), np.asarray(grid.lon), g_lat_f, g_lon_f,
-        )._replace(target_shape=(int(gauss.n_lat), int(gauss.n_lon)))
-        w_g2ll = compute_latlon_to_voronoi_weights(
-            np.asarray(gauss.lat), np.asarray(gauss.lon), ll_lat_f, ll_lon_f,
-        )._replace(target_shape=(int(grid.n_lat), int(grid.n_lon)))
-
-        def make_run_seg(sfno_ph):
-            step = make_sfno_step_unified_latlon(sfno_ph, w_ll2g, w_g2ll)
-            return build_training_segment(model, step, grid, sigma, dt,
-                                           fric_decay=fric_decay,
-                                           start_day_from_forcing=True)
 
     else:
         raise ValueError(f"unknown mode {cfg.mode!r}")
@@ -2260,8 +2147,8 @@ def wb_sea_ice_climatology(cfg, yml, grid):
         raise ValueError(f"era5_sea_ice_climatology must be true or false, got {v!r}")
     if not v:
         return None
-    if getattr(cfg, "mode", None) not in ("neural_gcm", "sfno"):
-        raise ValueError("era5_sea_ice_climatology is the learned arms' input; "
+    if getattr(cfg, "mode", None) != "neural_gcm":
+        raise ValueError("era5_sea_ice_climatology is the learned arm's input; "
                          "the CAM6 arm's sea ice is a separate decision.")
     root = wb_state_cache_root(yml)
     if root is None:

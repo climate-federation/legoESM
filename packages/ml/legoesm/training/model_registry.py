@@ -1,13 +1,17 @@
 """One place that builds the trainable model for a legoESM training variant.
 
-The WeatherBench and AIMIP campaigns train the SAME four model variants; what
+The WeatherBench and AIMIP campaigns train the SAME model variants; what
 differs between the campaigns is the training strategy and the loss, never the
 model.  Before this module they each constructed their own, and the
-architecture defaults had drifted: the WB lane built an ``sfno_physics`` at
-embed 256 / 8 blocks where AIMIP built 128 / 4, and the column network's width
-was read from ``neural_gcm.nn_hidden`` on one side and ``nn_hidden_dim`` on the
-other.  Both lanes now call :func:`build_variant`, so "same variant" means the
+architecture defaults had drifted (the column network's width was read from
+``neural_gcm.nn_hidden`` on one side and ``nn_hidden_dim`` on the other).
+
+Both lanes now call :func:`build_variant`, so "same variant" means the
 same pytree.
+
+The SFNO-inside-the-dynamical-core variant was removed (user 2026-11-06): an
+SFNO replaces the whole atmosphere (``sfno_full``) or is not used.  The last
+commit with it is tagged ``pre-dycore-sfno-removal``.
 
 CLASSICAL_LEGACY_NOTE: before 2026-08-12 the WB lane's "classical" was a
 different, smaller model — ``TrainablePhysicsParams``, 6 knobs, gray radiation,
@@ -21,14 +25,13 @@ that already exist (``TrainablePhysicsParams``, ``NeuralPhysics``, ``SFNO``),
 with one set of defaults and one override vocabulary.
 
 Defaults are AIMIP's, which makes routing ``run_aimip`` through this module a
-no-op; every WB config in ``config/wb/`` pins its SFNO size explicitly, so the
-choice does not move any existing run either way (verified 2026-08-11).
+no-op.
 """
 from __future__ import annotations
 
 from typing import Any
 
-VALID_VARIANTS = ("classical", "column_nn", "sfno_physics", "sfno_full")
+VALID_VARIANTS = ("classical", "column_nn", "sfno_full")
 
 # Architecture defaults, per variant, in the ONE vocabulary both campaigns use.
 # Provenance: run_aimip.py's `cfg.get(...)` defaults (the active campaign).
@@ -50,8 +53,7 @@ VARIANT_DEFAULTS: dict[str, dict[str, Any]] = {
     # so `build_column_physics` applies its own value (0.01) — what BOTH lanes
     # get today. Restating the number here would be a second source of truth.
     # ``spatial_embedding``: NeuralGCM-style static features + learned
-    # per-grid-point embedding (column_nn) / ACE2-style land-fraction plane
-    # (sfno_physics).  ``era5_surface_fluxes``: the six ERA5 surface-flux planes
+    # per-grid-point embedding (column_nn).  ``era5_surface_fluxes``: the six ERA5 surface-flux planes
     # as extra inputs.  Both OFF here so AIMIP is unchanged; the WB campaign
     # decks set them explicitly.
     # ``learned_position_embedding`` (with spatial_embedding): the learned
@@ -59,27 +61,11 @@ VARIANT_DEFAULTS: dict[str, dict[str, Any]] = {
     # Weights the training loss cannot reach are not created (user
     # 2026-11-06).  column_nn ``kept_outputs``: the output groups to create
     # (``losses.column_outputs_the_loss_reads`` of the run's loss config);
-    # None = all.  sfno_physics ``prune_unused_weights``: no imaginary part of
-    # the zonal-mean (m = 0) spectral weights and no surface-geopotential
-    # output channel (structural: no loss can reach either).  Off here so
-    # AIMIP's layout is unchanged until it opts in.
+    # None = all.
     "column_nn": {"nn_hidden_dim": 256, "n_layers": 4, "residual_scale": None,
                   "spatial_embedding": False, "era5_surface_fluxes": False,
                   "learned_position_embedding": True,
                   "kept_outputs": None},
-    "sfno_physics": {
-        "sfno_embed_dim": 128,
-        "sfno_n_blocks": 4,
-        "sfno_mlp_expansion": 4,
-        "spatial_embedding": False,
-        "era5_surface_fluxes": False,
-        # ACE2-style learned per-location embedding after the encoder.
-        "learned_position_embedding": False,
-        # Recompute each SFNO block in the backward pass (SFNOConfig
-        # gradient_checkpoint): same gradient, less memory.
-        "sfno_gradient_checkpoint": False,
-        "prune_unused_weights": False,
-    },
     "sfno_full": {
         "sfno_embed_dim": 128,
         "sfno_n_blocks": 4,
@@ -90,35 +76,6 @@ VARIANT_DEFAULTS: dict[str, dict[str, Any]] = {
         "sfno_history_steps": 0,
     },
 }
-
-# Decoder zero-init is a PHYSICS policy, not a tunable, so it is not an
-# override key: an untrained ``sfno_physics`` must emit exactly-zero tendencies
-# so epoch 0 integrates the pure dycore.  ``sfno_full`` REPLACES the dycore, so
-# there is nothing to fall back to and a zeroed decoder would emit a zero state.
-_ZERO_INIT_DECODER = {"sfno_physics": True, "sfno_full": False}
-
-
-def sfno_extra_input_channels(*, spatial_embedding: bool,
-                              era5_surface_fluxes: bool) -> int:
-    """Extra SFNO input planes beyond the three baseline forcing planes.
-
-    ``spatial_embedding`` appends the static planes (land fraction, sin and
-    cos latitude);
-    ``era5_surface_fluxes`` appends the six ERA5 surface-flux / stress planes.
-    The counts live next to the column network that shares them
-    (``atmosphere.physics.neural_physics``) so one constant feeds both arms.
-    """
-    from legoesm.atmosphere.physics.neural_physics import (
-        N_SFC_FLUX_INPUT_CHANNELS,
-        N_SFNO_STATIC_CHANNELS,
-    )
-    n = 0
-    if spatial_embedding:
-        n += N_SFNO_STATIC_CHANNELS
-    if era5_surface_fluxes:
-        n += N_SFC_FLUX_INPUT_CHANNELS
-    return n
-
 
 def _resolve(variant: str, overrides: dict[str, Any] | None) -> dict[str, Any]:
     """Merge ``overrides`` onto the variant defaults, rejecting unknown keys.
@@ -146,51 +103,28 @@ def sfno_arch_config(variant: str, *, nlev: int,
     Reading it from here keeps the emulator wrapper and the weights it wraps
     from ever disagreeing on channel counts.
     """
-    if variant not in ("sfno_physics", "sfno_full"):
+    if variant != "sfno_full":
         raise ValueError(
-            f"sfno_arch_config is for the SFNO variants, got {variant!r}")
+            f"sfno_arch_config is for the SFNO variant, got {variant!r}")
     kw = _resolve(variant, overrides)
 
     from legoesm.ml.channel_packing import PE3DChannelSpec
     from legoesm.ml.sfno import SFNOConfig
 
     spec = PE3DChannelSpec(nlev=nlev)
-    if variant == "sfno_physics":
-        # The surface-forcing planes (T_sfc, sic, insolation) ride the INPUT
-        # side only; the physics emits tendencies on the state channels.
-        # Source of truth for the count is neural_gcm_spectral, imported here
-        # rather than copied so the two cannot drift (deferred: that module
-        # pulls in the whole spectral stack).
-        from legoesm.training.neural_gcm_spectral import (
-            N_SFNO_FORCING_CHANNELS,
-        )
-        in_channels = (spec.n_channels + N_SFNO_FORCING_CHANNELS
-                       + sfno_extra_input_channels(
-                           spatial_embedding=bool(kw["spatial_embedding"]),
-                           era5_surface_fluxes=bool(kw["era5_surface_fluxes"])))
-        _prune = bool(kw["prune_unused_weights"])
-        extra = {"learned_position_embedding":
-                 bool(kw["learned_position_embedding"]),
-                 "gradient_checkpoint": bool(kw["sfno_gradient_checkpoint"]),
-                 "real_zonal_mean_modes": _prune}
-    else:  # sfno_full: the emulator sees (1 + history) copies of the state.
-        in_channels = spec.n_channels * (1 + int(kw["sfno_history_steps"]))
-        extra = {"dropout": float(kw["sfno_dropout"])}
-
-    # Pruned: no surface-geopotential output (the LAST channel, a static
-    # field whose tendency nothing reads); the physics pads it back as 0.
-    _drop_phis = variant == "sfno_physics" and bool(kw["prune_unused_weights"])
+    # The emulator sees (1 + history) copies of the state.
+    in_channels = spec.n_channels * (1 + int(kw["sfno_history_steps"]))
     return SFNOConfig(
         in_channels=in_channels,
-        out_channels=spec.n_channels - (1 if _drop_phis else 0),
+        out_channels=spec.n_channels,
         embed_dim=int(kw["sfno_embed_dim"]),
         n_blocks=int(kw["sfno_n_blocks"]),
         mlp_expansion=int(kw["sfno_mlp_expansion"]),
-        # Tendencies (or a full next state), NOT residuals on top of the
-        # input: SFNOConfig defaults this True, which would add the input
-        # state to the output and destroy the rollout in one step.
+        # A full next state, NOT a residual on top of the input:
+        # SFNOConfig defaults this True, which would add the input state to
+        # the output and destroy the rollout in one step.
         residual_prediction=False,
-        **extra,
+        dropout=float(kw["sfno_dropout"]),
     )
 
 
@@ -205,10 +139,10 @@ def build_variant(variant: str, *, nlev: int, grid=None, seed: int = 0,
         silent default: a typo must not train a different model).
     nlev : int
         Vertical levels.  Sets the column network's input size and the packed
-        channel count of both SFNO variants.
+        channel count of the SFNO.
     grid : GaussianGrid, optional
-        Spectral grid the SFNO is built on.  Required by ``sfno_physics`` and
-        ``sfno_full``; unused by the other two.
+        Spectral grid the SFNO is built on.  Required by ``sfno_full``;
+        ``column_nn`` needs it only with ``spatial_embedding``.
     seed : int, default 0
         PRNG seed for weight initialisation.
     overrides : dict, optional
@@ -220,7 +154,7 @@ def build_variant(variant: str, *, nlev: int, grid=None, seed: int = 0,
     -------
     equinox.Module
         ``TrainablePhysicsParams`` (classical), ``NeuralPhysics``
-        (column_nn), or ``SFNO`` (both sfno variants).
+        (column_nn), or ``SFNO`` (sfno_full).
     """
     if variant not in VALID_VARIANTS:
         raise ValueError(
@@ -273,20 +207,10 @@ def build_variant(variant: str, *, nlev: int, grid=None, seed: int = 0,
     if grid is None:
         raise ValueError(f"variant {variant!r} needs a spectral `grid`")
 
-    import equinox as eqx
-    import jax.numpy as jnp
-
     from legoesm.ml.sfno import SFNO
 
-    sfno = SFNO(
+    return SFNO(
         sfno_arch_config(variant, nlev=nlev, overrides=overrides),
         grid,
         key=jax.random.PRNGKey(seed),
     )
-
-    if _ZERO_INIT_DECODER[variant]:
-        sfno = eqx.tree_at(
-            lambda m: (m.decoder.weight, m.decoder.bias), sfno,
-            (jnp.zeros_like(sfno.decoder.weight),
-             jnp.zeros_like(sfno.decoder.bias)))
-    return sfno

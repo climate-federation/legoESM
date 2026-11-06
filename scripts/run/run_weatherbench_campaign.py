@@ -1,13 +1,12 @@
 #!/usr/bin/env python
-"""WeatherBench 3-family forecast campaign — one driver, runs on Ginsburg or Derecho.
+"""WeatherBench 2-family forecast campaign — one driver, runs on Ginsburg or Derecho.
 
-Trains and scores the three legoESM atmosphere families through the SHARED AIMIP
+Trains and scores the two legoESM atmosphere families through the SHARED AIMIP
 spectral stack, then plots a lead-time scorecard against the published
 WeatherBench-2 leaderboard:
 
     * ``physics``    -> differentiable trainable-physics params (NeuralGCM-hybrid)
     * ``neural_gcm`` -> per-column MLP physics (NeuralGCM-style)
-    * ``sfno``       -> SFNO replaces gridded physics, dycore retained
 
 It is a THIN orchestrator: it does NO training/eval/plot numerics of its own.
 Each stage delegates to the canonical entry points, so the campaign rolls
@@ -49,12 +48,12 @@ for _p in (_REPO, _REPO / "scripts" / "run", _REPO / "scripts" / "validate",
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-VALID_MODES = ("physics", "neural_gcm", "sfno")
+VALID_MODES = ("physics", "neural_gcm")
 VALID_STAGES = ("train", "eval", "plot")
 _SECONDS_PER_HOUR = 3600.0
 
-# The neural families (column MLP / SFNO) replace the physics pipeline; the
-# WB2 eval driver names them by the training MODE, which is what the checkpoint
+# The neural family (column MLP) replaces the physics pipeline; the
+# WB2 eval driver names it by the training MODE, which is what the checkpoint
 # was built with — so the campaign mode == the eval --mode verbatim.
 
 
@@ -125,7 +124,7 @@ def _load_campaign_yaml(config_path) -> dict:
 def build_campaign_config_from_args(argv=None) -> CampaignConfig:
     """Parse CLI into a CampaignConfig. Import-light + JAX-free (login-node testable)."""
     p = argparse.ArgumentParser(
-        description="WeatherBench 3-family forecast campaign (train + eval + scorecard).")
+        description="WeatherBench 2-family forecast campaign (train + eval + scorecard).")
     p.add_argument("--config", default="config/wb/campaign/spectral_t63.yaml",
                    help="Campaign YAML (same one every family trains + evals with).")
     p.add_argument("--modes", default=",".join(VALID_MODES),

@@ -10,7 +10,7 @@
 # backslash it reached sbatch as a second argument and sbatch took CONFIG=...
 # for the script name.
 #
-# Env: CONFIG (required), OUT (required), MODE (physics|neural_gcm|sfno,
+# Env: CONFIG (required), OUT (required), MODE (physics|neural_gcm,
 # default physics), EPOCHS, LR, WARMUP_STEPS, VAL_WINDOWS (optional).
 # VAL_WINDOWS scores that many held-out windows from the deck's eval years after
 # every epoch, so the run has a generalisation curve and not only a training
@@ -18,7 +18,7 @@
 # LR/WARMUP_STEPS
 # override the deck for THIS run without editing it, which is how a campaign
 # arm departs from a deck that other arms share -- config/wb/campaign/
-# spectral_t63.yaml is read by the column-MLP and SFNO arms too, so moving its
+# spectral_t63.yaml is read by the column-MLP arm too, so moving its
 # lr to suit one arm silently moves theirs. Every link of one chain must pass
 # the SAME values: the resume fingerprint covers the schedule, so a link that
 # changes them refuses to continue from the previous link's optimizer state.

@@ -78,9 +78,7 @@ def test_legoesm_variant_from_stem():
         "legoesm_classical_amip_annual") == "classical"
     assert mod._legoesm_variant_from_stem(
         "legoesm_column_nn_amip_r0_annual") == "column_nn"
-    assert mod._legoesm_variant_from_stem(
-        "legoesm_sfno_physics_amip_annual") == "sfno_physics"
     assert mod._legoesm_variant_from_stem("mystery_run") == "mystery_run"
     # every known variant has a color
-    for v in ("classical", "column_nn", "sfno_physics"):
+    for v in ("classical", "column_nn"):
         assert v in mod.LEGOESM_VARIANT_COLORS

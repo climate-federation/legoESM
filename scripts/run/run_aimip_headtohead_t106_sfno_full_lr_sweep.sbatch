@@ -11,9 +11,8 @@
 
 # T106 sfno_full head-to-head LR mini-sweep.  Trains SFNO as a full
 # atmospheric emulator (no dycore, no physics tendency) via the new
-# train_sfno_full_spectral path.  Same SFNO arch as the head-to-head
-# sfno_physics variant (embed_dim=32, n_blocks=2) so the trained-
-# model size is directly comparable; the macro time step is
+# train_sfno_full_spectral path.  SFNO arch embed_dim=32,
+# n_blocks=2; the macro time step is
 # dt_sfno=21600s (6 h, standard FourCastNet/SFNO cadence) -> 4 SFNO
 # steps per 24 h segment in the multi-step (24, 48, 72) h schedule.
 #
@@ -47,9 +46,8 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 export HOME="${HOME:-/burg-archive/home/pg2328}"
 
-# Dedicated XLA compile cache for the full-emulator graph (different
-# HLO shape than sfno_physics, which couples through the dycore, so
-# do not share with the sfno_seed cache).
+# Dedicated XLA compile cache for the full-emulator graph (no dycore
+# in the rollout, so do not share with the dycore-coupled caches).
 export JAX_COMPILATION_CACHE_DIR="${REPO_ROOT}/.cache/jax_compile_cache_h2h_sfno_full_lr"
 mkdir -p "${JAX_COMPILATION_CACHE_DIR}"
 

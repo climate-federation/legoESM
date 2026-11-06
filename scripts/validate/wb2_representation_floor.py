@@ -61,12 +61,11 @@ def build_parser():
     # run_weatherbench_eval.py builds it and split by land/ocean and UTC hour.
     p.add_argument("--suite", default=None)
     p.add_argument("--variant", default=None,
-                   choices=("classical", "column_nn", "sfno_full",
-                            "sfno_physics"))
+                   choices=("classical", "column_nn", "sfno_full"))
     p.add_argument("--config", default=None,
                    help="WeatherBench training deck (as run_weatherbench_eval).")
     p.add_argument("--mode", default=None,
-                   choices=("physics", "neural_gcm", "sfno"))
+                   choices=("physics", "neural_gcm"))
     p.add_argument("--training-core", default="spectral",
                    dest="training_core", choices=("spectral",))
     # Default: 2017 for --suite (unchanged); the deck's eval_years[0] for

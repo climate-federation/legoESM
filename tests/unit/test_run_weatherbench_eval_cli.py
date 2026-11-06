@@ -46,7 +46,7 @@ def test_argparse_defaults():
 
 
 def test_all_modes_accepted():
-    for m in ("physics", "neural_gcm", "sfno"):
+    for m in ("physics", "neural_gcm"):
         cfg = mod.build_eval_config_from_args(
             ["--config", "c.yaml", "--checkpoint", "e.eqx", "--mode", m])
         assert cfg.mode == m
@@ -56,6 +56,10 @@ def test_rejects_bad_mode():
     with pytest.raises(SystemExit):
         mod.build_eval_config_from_args(
             ["--config", "c.yaml", "--checkpoint", "e.eqx", "--mode", "bogus"])
+    # The dycore-SFNO mode was removed (user 2026-11-06).
+    with pytest.raises(SystemExit):
+        mod.build_eval_config_from_args(
+            ["--config", "c.yaml", "--checkpoint", "e.eqx", "--mode", "sfno"])
 
 
 def test_latlon_core_hard_errors():

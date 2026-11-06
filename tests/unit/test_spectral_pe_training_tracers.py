@@ -15,7 +15,7 @@ Pins:
   carries tracers (mirrors the model class's
   ``_ensure_tracer_filter`` / ``_apply_tracer_filter`` pathway).
 * ``jax.grad`` flows through a tracer-carrying rollout into the
-  underlying SFNO weights — full AD compatibility.
+  underlying column-MLP weights — full AD compatibility.
 """
 
 from __future__ import annotations
@@ -34,8 +34,6 @@ from legoesm.grids.gaussian import (
     sh_analysis_3d,
 )
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.ml.sfno import SFNO, SFNOConfig
-from legoesm.ml.channel_packing import PE3DChannelSpec
 from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
 
@@ -80,20 +78,13 @@ def _make_gaussian_carry(T_val=280.0, p_s_val=101325.0, q_v_val=0.005):
     )
 
 
-def _make_small_sfno():
-    """Create a small SFNO for testing."""
-    from legoesm.training.neural_gcm_spectral import N_SFNO_FORCING_CHANNELS
-    spec = PE3DChannelSpec(nlev=NLEV)
-    config = SFNOConfig(
-        # state channels + the surface-forcing input planes
-        in_channels=spec.n_channels + N_SFNO_FORCING_CHANNELS,
-        out_channels=spec.n_channels,
-        embed_dim=16,
-        n_blocks=1,
-        mlp_expansion=2,
-        residual_prediction=False,
+def _make_small_column_mlp():
+    """Create a small NeuralPhysics for testing."""
+    from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
+    return NeuralPhysics(
+        nlev=NLEV, hidden_dim=16, n_layers=2,
+        key=jax.random.PRNGKey(99), residual_scale=0.01,
     )
-    return SFNO(config, _GRID, key=jax.random.PRNGKey(42))
 
 
 # ---------------------------------------------------------------------------
@@ -202,13 +193,13 @@ class TestSpectralRolloutTracers:
         with the same tracer keys."""
         from legoesm.training.neural_gcm_spectral import (
             carry_to_spectral_state,
-            make_sfno_spectral_physics,
+            make_column_mlp_spectral_physics,
             spectral_rollout,
         )
         carry = _make_gaussian_carry(q_v_val=0.005)
         state = carry_to_spectral_state(carry, _GRID)
-        sfno = _make_small_sfno()
-        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
+        physics_fn = make_column_mlp_spectral_physics(
+            _make_small_column_mlp(), _GRID)
         pe_config = SpectralPEConfig(
             hyperdiff_coeff=1e14,
             time_integrator="ssp_rk3",
@@ -230,7 +221,7 @@ class TestSpectralRolloutTracers:
         """
         from legoesm.training.neural_gcm_spectral import (
             carry_to_spectral_state,
-            make_sfno_spectral_physics,
+            make_column_mlp_spectral_physics,
             spectral_rollout,
             _compute_tracer_filter,
         )
@@ -270,8 +261,8 @@ class TestSpectralRolloutTracers:
             "either knob is active"
         )
         # Now run a rollout and check the wave-9 amplitude decreases.
-        sfno = _make_small_sfno()
-        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
+        physics_fn = make_column_mlp_spectral_physics(
+            _make_small_column_mlp(), _GRID)
 
         result = spectral_rollout(
             state, physics_fn, _GRID, _SIGMA, pe_config,
@@ -299,10 +290,10 @@ class TestSpectralRolloutTracers:
 class TestGradientFlowWithTracers:
     def test_grad_through_rollout_with_tracers(self):
         """Gradients flow from loss (incl. q_v term) through rollout to
-        SFNO weights when the IC carries tracers."""
+        column-MLP weights when the IC carries tracers."""
         from legoesm.training.neural_gcm_spectral import (
             carry_to_spectral_state,
-            make_sfno_spectral_physics,
+            make_column_mlp_spectral_physics,
             spectral_rollout,
             spectral_state_vs_carry_loss,
         )
@@ -313,7 +304,7 @@ class TestGradientFlowWithTracers:
         state = carry_to_spectral_state(carry_ic, _GRID)
         sigma_full = jnp.asarray(_SIGMA.sigma_full)
 
-        sfno = _make_small_sfno()
+        nn = _make_small_column_mlp()
         pe_config = SpectralPEConfig(
             hyperdiff_coeff=1e14,
             time_integrator="ssp_rk3",
@@ -321,7 +312,7 @@ class TestGradientFlowWithTracers:
         cfg = LossConfig()
 
         def loss_fn(model):
-            physics_fn = make_sfno_spectral_physics(model, _GRID)
+            physics_fn = make_column_mlp_spectral_physics(model, _GRID)
             pred = spectral_rollout(
                 state, physics_fn, _GRID, _SIGMA, pe_config,
                 dt=600.0, n_steps=1,
@@ -330,7 +321,7 @@ class TestGradientFlowWithTracers:
                 pred, carry_target, _GRID, _SIGMA, sigma_full, cfg,
             )
 
-        loss, grads = eqx.filter_value_and_grad(loss_fn)(sfno)
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(nn)
         assert bool(jnp.isfinite(loss))
         # All gradients finite.
         grad_leaves = jax.tree.leaves(eqx.filter(grads, eqx.is_array))
@@ -636,29 +627,6 @@ class TestChannelPackingTracers:
         assert max_err < 1e-9, (
             f"Band-limited q_v should round-trip; max err {max_err}"
         )
-
-    def test_sfno_physics_emits_q_v_tendency(self):
-        """End-to-end: SFNO physics function applied to a state with q_v
-        emits a q_v tendency in the output (proves the bridge is
-        no-longer-dry)."""
-        from legoesm.training.neural_gcm_spectral import (
-            carry_to_spectral_state,
-            make_sfno_spectral_physics,
-        )
-        carry = _make_gaussian_carry(q_v_val=0.005)
-        state = carry_to_spectral_state(carry, _GRID)
-        sfno = _make_small_sfno()
-        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
-        tendencies = physics_fn(state, _GRID, _SIGMA)
-        # SFNO output must include q_v tendency now (was missing
-        # before the channel-packing fix).
-        assert tendencies.tracers is not None
-        assert "q_v" in tendencies.tracers
-        dq_v = tendencies.tracers["q_v"].data
-        assert bool(jnp.all(jnp.isfinite(dq_v)))
-        # The randomly-initialized SFNO should produce a non-zero
-        # q_v tendency given a non-zero q_v input.
-        assert float(jnp.max(jnp.abs(dq_v))) > 0.0
 
 
 class TestColumnMLPTracers:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Pick the best classical physics combo from stage-2, build the T106
-3-way head-to-head (classical / column_nn / sfno_physics) configs +
+2-way head-to-head (classical / column_nn) configs +
 sbatch launchers.
 
 Selection
@@ -14,16 +14,14 @@ Configs written
 ---------------
 ``config/aimip/t106_headtohead/``
   base.yaml                          — shared T106 + RRTMGP + multi-day base
-  suite.yaml                         — lists [classical, column_nn, sfno_physics]
+  suite.yaml                         — lists [classical, column_nn]
   variant_classical.yaml             — winning physics-scheme overrides
   variant_column_nn.yaml             — column_nn-specific knobs
-  variant_sfno_physics.yaml          — sfno-specific knobs
 
 Launchers written (one per variant for max parallelism)
 -------------------------------------------------------
 ``scripts/run/run_aimip_headtohead_t106_classical.sbatch``
 ``scripts/run/run_aimip_headtohead_t106_column_nn.sbatch``
-``scripts/run/run_aimip_headtohead_t106_sfno_physics.sbatch``
 
 Submit any subset; they're independent and target distinct GPUs.
 """
@@ -133,7 +131,7 @@ def _write_base_yaml(repo_root: Path, winning_overrides: dict) -> Path:
         "aimip_spatial_lr_scale": 1.0,
         "aimip_rollout_days": 1,
         "aimip_rollout_hours": 6,
-        # Winning classical schemes (column_nn / sfno variants override
+        # Winning classical schemes (column_nn overrides
         # the classical scheme keys but inherit everything else).
         "aimip_convection": winning_overrides["aimip_convection"],
         "aimip_turbulence": winning_overrides["aimip_turbulence"],
@@ -164,13 +162,13 @@ def _write_base_yaml(repo_root: Path, winning_overrides: dict) -> Path:
 
 
 def _write_variants(repo_root: Path) -> None:
-    """Write the 3 variant overlays (empty for classical since the winner
-    is baked into base; explicit knobs for column_nn / sfno_physics)."""
+    """Write the 2 variant overlays (empty for classical since the winner
+    is baked into base; explicit knobs for column_nn)."""
     out_dir = repo_root / HEADTOHEAD_DIR_REL
 
     suite_yaml = {
         "base": str(HEADTOHEAD_DIR_REL / "base.yaml"),
-        "variants": ["classical", "column_nn", "sfno_physics"],
+        "variants": ["classical", "column_nn"],
         "output_dir": str(HEADTOHEAD_RESULTS_REL),
     }
     with (out_dir / "suite.yaml").open("w") as fh:
@@ -185,14 +183,6 @@ def _write_variants(repo_root: Path) -> None:
         yaml.safe_dump({
             "column_nn_hidden_dim": 256,
             "column_nn_n_layers": 4,
-        }, fh, sort_keys=False)
-
-    # SFNO: 34M parameter model (matches the AIMIP scorecard SFNO entry).
-    with (out_dir / "variant_sfno_physics.yaml").open("w") as fh:
-        yaml.safe_dump({
-            "sfno_embed_dim": 32,
-            "sfno_n_blocks": 2,
-            "aimip_optimizer": "muon_partitioned",
         }, fh, sort_keys=False)
 
 
@@ -293,7 +283,6 @@ def main():
     sbatch_paths = [
         _write_sbatch(repo_root, "classical"),
         _write_sbatch(repo_root, "column_nn"),
-        _write_sbatch(repo_root, "sfno_physics"),
     ]
 
     # Audit trail.

@@ -85,18 +85,13 @@ _NORM_T_K = 300.0
 _NORM_WIND_M_S = 30.0
 _NORM_SOLAR_W_M2 = 1400.0
 # Optional per-column input groups (both OFF unless the network is built with
-# the matching flag; the counts are the single source of truth for the SFNO
-# arm too — ``training.model_registry`` reads them from here).
+# the matching flag).
 # Spatial embedding, NeuralGCM-style (Kochkov et al. 2024, Methods): sin(lat),
 # cos(lat), land-sea fraction, orography [km], plus a LEARNED per-grid-point
 # embedding of 8 channels (their 2.8-degree setting; zero-initialised as in
 # their ``LearnedPositionalFeatures``, then trained).
 N_COLUMN_STATIC_FEATURES = 4
 N_COLUMN_POS_EMBED = 8
-# Static input planes of the SFNO arm (owner 2026-11-02, the same set as the
-# column network): land fraction, sin(lat), cos(lat); orography is already one
-# of its state channels.
-N_SFNO_STATIC_CHANNELS = 3
 # Prescribed ERA5 surface fluxes as extra inputs: stress x/y, sensible, latent,
 # upwelling SW, upwelling LW — the order of ``SFC_FLUX_FORCING_KEYS``.
 N_SFC_FLUX_INPUT_CHANNELS = 6

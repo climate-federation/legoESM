@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Plot the final T106 head-to-head scorecard (classical / column_nn / sfno).
+"""Plot the final T106 head-to-head scorecard (classical / column_nn).
 
 Reads ``results/aimip_t106_headtohead/aimip_scorecard.json`` (written
 by ``run_aimip.py`` for the head-to-head suite) and emits a 4-panel
@@ -35,7 +35,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-_VARIANTS = ("classical", "column_nn", "sfno_physics")
+_VARIANTS = ("classical", "column_nn")
 _VARIABLES = ("T", "T_sfc", "u", "v", "q", "p_s")
 _VAR_LABELS = {
     "T": "T [K]",
@@ -56,7 +56,6 @@ _VAR_SCALE = {  # display rescale (e.g. q from kg/kg to g/kg)
 _COLORS = {
     "classical": "#1f77b4",
     "column_nn": "#2ca02c",
-    "sfno_physics": "#d62728",
 }
 
 
@@ -238,7 +237,7 @@ def main():
     _eval_loss_panel(axes[1, 1], data)
 
     fig.suptitle(
-        "AIMIP T106 head-to-head: classical vs column_nn vs sfno_physics\n"
+        "AIMIP T106 head-to-head: classical vs column_nn\n"
         "(multi-day [24,48,72]h supervision; bias + grid-CRPS + spectral-CRPS loss; RRTMGP radiation)",
         fontsize=11,
     )

@@ -313,7 +313,7 @@ import-boundary contracts (`lint-imports`).
 | **legoesm-land** | `land` | Slab + multilayer land, carbon, snow, PFT providers. Depends only on core. | `scripts/run/run_lmip.py` |
 | **legoesm-ice** | `ice` | Thermodynamic + EVP/mEVP sea ice, ITD. Depends only on core. | `scripts/matrix/run_sea_ice_test_matrix.py` |
 | **legoesm-coupler** | `coupler`, `driver` | Tile-based surface coupler + the drivers (`ModelDriver`, `CoupledESMDriver`, `EarthSystemDriver`) + reproducibility manifest. | `scripts/run/run_coupled.py`, `legoesm run`, `legoesm reproduce` |
-| **legoesm-ml** | `ml`, `training`, `da` | SFNO blocks, conservation-aware losses, ERA5 ingestion, differentiable training, variational DA, S2S. | `scripts/run/train_neural_gcm_spectral.py`, `scripts/run/ml_physics_parameterization.py` |
+| **legoesm-ml** | `ml`, `training`, `da` | SFNO blocks, conservation-aware losses, ERA5 ingestion, differentiable training, variational DA, S2S. | `scripts/run/ml_physics_parameterization.py` |
 | **legoesm-tools** | `forcing`, `diagnostics`, `experiments`, `visualization` | Forcing loaders, energy/mass diagnostics + conservation gates, the shared **test-matrix framework** (`experiments.matrix`), plotters. | (used by the matrix runners + harness) |
 
 The four components (atmosphere/ocean/land/ice) depend **only** on

@@ -1,5 +1,5 @@
 # T106 multi-step suite restricted to the column_nn variant so it can
-# run in parallel with the classical and sfno_physics jobs.  Writes
+# run in parallel with the classical job.  Writes
 # its scorecard to a per-variant output_dir to avoid races on the
 # shared scorecard JSON.
 

@@ -41,25 +41,6 @@ def test_era5_symbols_resolve():
     from legoesm.driver.compiled_segments import pack_forcing    # noqa: F401
 
 
-def test_sfno_mode_symbols_resolve():
-    # HARD assertion, no skip: the old skip-on-missing masked the sfno
-    # factory referencing a nonexistent API for weeks (the symbol was never
-    # on main; the "stale worktree" comment was wrong) — the sfno smoke then
-    # died on ImportError (#797). Every symbol the factory uses must import.
-    from legoesm.training.sfno_dycore_coupling import (      # noqa: F401
-        SFNOPhysics, make_sfno_step_unified_latlon,
-    )
-    from legoesm.grids.gaussian import create_gaussian_grid  # noqa: F401
-    from legoesm.grids.regridding import (                   # noqa: F401
-        compute_latlon_to_voronoi_weights, regrid_scalar,
-    )
-    from legoesm.ml.sfno import SFNO, SFNOConfig             # noqa: F401
-    # the wired signature: (sfno_physics, w_ll2g, w_g2ll)
-    import inspect
-    params = list(inspect.signature(make_sfno_step_unified_latlon).parameters)
-    assert params == ["sfno_physics", "w_latlon_to_gauss", "w_gauss_to_latlon"]
-
-
 def test_run_amip_parser_available():
     # build_latlon_config reuses run_amip's parser, which needs current-main
     # config symbols (e.g. EvaluationConfig). Skip on a stale checkout.

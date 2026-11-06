@@ -30,13 +30,16 @@ def test_argparse_defaults_and_all_modes():
     # hard error (see test_resolution_yaml_check below).
     assert cfg.mode == "neural_gcm" and cfg.resolution_deg is None and cfg.grad_accum == 1
     assert cfg.training_core == "latlon"   # default core: byte-unchanged path
-    for m in ("physics", "neural_gcm", "sfno"):
+    for m in ("physics", "neural_gcm"):
         assert mod.build_scale_config_from_args(["--mode", m]).mode == m
 
 
 def test_argparse_rejects_bad_mode():
     with pytest.raises(SystemExit):
         mod.build_scale_config_from_args(["--mode", "bogus"])
+    # The dycore-SFNO mode was removed (user 2026-11-06).
+    with pytest.raises(SystemExit):
+        mod.build_scale_config_from_args(["--mode", "sfno"])
 
 
 def test_argparse_training_core_roundtrip_and_rejects_bad():

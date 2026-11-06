@@ -21,9 +21,6 @@ the dycore.  The variants are:
   MLP (Rasp et al., 2018 style) via
   :func:`legoesm.training.neural_gcm_spectral.train_column_mlp_spectral`;
   no classical scheme runs alongside it.
-* ``sfno_physics`` — SFNO replaces the entire gridded physics step
-  (radiation included), dycore retained, via
-  :func:`legoesm.training.neural_gcm_spectral.train_neural_gcm_spectral`.
 * ``sfno_full`` — SFNO as the full atmospheric emulator (no dycore,
   no physics tendency) via
   :func:`legoesm.training.neural_gcm_spectral.train_sfno_full_spectral`.
@@ -141,7 +138,7 @@ def _surface_forcing_cfg(cfg: dict[str, Any]) -> tuple[str | None, str | None]:
     Returns ``(forcing_path, cache_path)``.  ``aimip_surface_forcing``
     (default True) gates it; the cache is keyed by spectral truncation so
     a T63 cache can never be silently reused at T106 (the loader also
-    hard-validates ncol).  Forcing is what gives column_nn / sfno_physics
+    hard-validates ncol).  Forcing is what gives column_nn
     a prescribed-SST (AMIP / interannual-variability) pathway.
     """
     if not bool(cfg.get("aimip_surface_forcing", True)):
@@ -236,7 +233,7 @@ def _build_spectral_config(cfg: dict[str, Any]):
     crps_ft_epochs = int(cfg.get("crps_finetune_epochs", 0))
     crps_ensemble_size = int(cfg.get("crps_ensemble_size", 2))
     # Stage 2 is implemented ONLY in the sfno_full trainer
-    # (_train_sfno_full_loop). classical / column_nn / sfno_physics dispatch to
+    # (_train_sfno_full_loop). classical / column_nn dispatch to
     # _train_spectral_loop, which never reads these fields — an active setting
     # there would run pure stage 1 and log nothing (codex review 2026-08-02).
     _variant = cfg.get("aimip_variant")
@@ -390,20 +387,6 @@ def _train_variant(
             seed=int(cfg.get("nn_seed", 0)),
             hidden_dim=int(cfg.get("nn_hidden_dim", 256)),
             n_layers=int(cfg.get("nn_n_layers", 4)),
-            resume_from_dir=resume_from_dir,
-            surface_forcing_path=forcing_path,
-            forcing_cache_path=forcing_cache,
-        )
-
-    if variant == "sfno_physics":
-        from legoesm.training.neural_gcm_spectral import (
-            train_neural_gcm_spectral,
-        )
-        forcing_path, forcing_cache = _surface_forcing_cfg(cfg)
-        return train_neural_gcm_spectral(
-            config=spec_cfg,
-            cache_dir=cache_dir,
-            seed=int(cfg.get("sfno_seed", 0)),
             resume_from_dir=resume_from_dir,
             surface_forcing_path=forcing_path,
             forcing_cache_path=forcing_cache,
@@ -755,7 +738,6 @@ def _evaluate_variant(
     from legoesm.training.neural_gcm_spectral import (
         load_training_data,
         make_column_mlp_spectral_physics,
-        make_sfno_spectral_physics,
         spectral_rollout,
         spectral_state_vs_carry_loss,
     )
@@ -793,7 +775,7 @@ def _evaluate_variant(
     # evaluated with the same inputs (a forced network scored unforced
     # would see out-of-distribution proxies and mis-rank the variants).
     eval_forcings = None
-    if variant in ("column_nn", "sfno_physics"):
+    if variant == "column_nn":
         forcing_path, forcing_cache = _surface_forcing_cfg(cfg)
         if forcing_path is not None:
             from legoesm.training.aimip_amip_forcing import (
@@ -883,8 +865,6 @@ def _evaluate_variant(
             physics_fn = built
     elif variant == "column_nn":
         physics_fn = make_column_mlp_spectral_physics(trained_model, grid)
-    elif variant == "sfno_physics":
-        physics_fn = make_sfno_spectral_physics(trained_model, grid)
     elif variant == "sfno_full":
         from legoesm.atmosphere.dynamics.neural.sfno_pe import (
             SFNOPrimitiveEquationConfig,

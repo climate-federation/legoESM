@@ -1,4 +1,4 @@
-# WeatherBench 3-family forecast campaign — spectral T106 (Derecho competitive tier).
+# WeatherBench 2-family forecast campaign — spectral T106 (Derecho competitive tier).
 #
 # Same shared AIMIP spectral stack + eval protocol as spectral_t63.yaml (read its
 # header); ONLY the grid resolution + capacity + epoch budget scale up. Use on
@@ -164,13 +164,6 @@ neural_gcm:
   surface_drag_scheme: "louis"
   nn_hidden: 384
   nn_layers: 4
-sfno:
-  # ACE2-style static land-fraction input plane (Watt-Meyer et al. 2024;
-  # orography is already a state channel).  OFF by default (owner,
-  # 2026-09-17); set true to select it.
-  spatial_embedding: false
-  sfno_embed_dim: 384
-  sfno_n_blocks: 10
 
 # --- classical: the six-family physics stack (owner rule: a classical model
 # carries one parameterization of EVERY family, and radiation is always

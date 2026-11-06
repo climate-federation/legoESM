@@ -20,10 +20,7 @@ cloud_scheme: "none"
 microphysics: "none"
 radiation: "none"
 
-# SFNO architecture — pinned to the SAME values as the scale
-# variant_sfno_physics overlay (64 / 4, which overrides the base's 96 / 6)
-# so the sfno_full vs sfno_physics comparison is architecture-matched.
-# Raise both together if you want more emulator capacity.
+# SFNO architecture: 64 / 4, which overrides the base's 96 / 6.
 sfno_embed_dim: 64
 sfno_n_blocks: 4
 sfno_mlp_expansion: 4

@@ -153,7 +153,7 @@ def test_climatology_is_physics_only_and_needs_a_cache_dir():
 
     assert sb.wb_flux_climatology(SimpleNamespace(mode="physics"), {}, None) is None
     with pytest.raises(ValueError, match="CAM6"):
-        sb.wb_flux_climatology(SimpleNamespace(mode="sfno"),
+        sb.wb_flux_climatology(SimpleNamespace(mode="neural_gcm"),
                                {"era5_flux_climatology": True}, None)
     with pytest.raises(ValueError, match="needs era5_surface_fluxes"):
         sb.wb_flux_climatology(SimpleNamespace(mode="physics"),

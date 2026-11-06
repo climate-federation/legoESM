@@ -10,14 +10,13 @@
 #SBATCH --error=results/aimip_multistep_t106_001/classical_run/slurm-%j.err
 #
 # T106 (~1.1 deg) multi-step + CRPS training, classical variant only.
-# Runs in parallel with run_aimip_t106_column_nn.sbatch and
-# run_aimip_t106_sfno.sbatch on separate GPUs; each writes its own
-# per-variant scorecard so there are no concurrent JSON merges.
+# Runs in parallel with run_aimip_t106_column_nn.sbatch on separate
+# GPUs; each writes its own per-variant scorecard so there are no
+# concurrent JSON merges.
 #
-# Submit all three with:
+# Submit both with:
 #   sbatch scripts/run_aimip_t106_classical.sbatch
 #   sbatch scripts/run/run_aimip_t106_column_nn.sbatch
-#   sbatch scripts/run/run_aimip_t106_sfno.sbatch
 
 set -euo pipefail
 

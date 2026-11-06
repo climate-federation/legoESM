@@ -2,7 +2,7 @@
 """WeatherBench data-parallel GPU ladder: s/step and efficiency per arm and lead.
 
 Reads the trainer's timing logs (``logs/wbsurface/timing_<job>_<id>.out``):
-arm and lead from the job name (``..._sfno..._72h...`` / ``..._ngcm..._6h...``),
+arm and lead from the job name (``..._ngcm..._6h...``),
 GPU count from the launcher's ``[wb_dp] ... ranks=N`` line (1 when absent, the
 single-GPU jobs).  s/step = median of the per-step times (slowest rank when
 ranks each log the step) after the first three (compile + warm-up).  One
@@ -22,8 +22,8 @@ from pathlib import Path
 
 # Okabe-Ito (no red-green pair)
 LEAD_COLOR = {6: "#0072B2", 12: "#009E73", 24: "#E69F00", 72: "#CC79A7"}
-ARMS = ("ngcm", "sfno")
-_NAME = re.compile(r"timing_[^_]+_(ngcm|sfno)[a-z0-9]*_(\d+)h")
+ARMS = ("ngcm",)
+_NAME = re.compile(r"timing_[^_]+_(ngcm)[a-z0-9]*_(\d+)h")
 _STEP = re.compile(r"epoch (\d+) step (\d+)/\d+ loss=\S+ ([0-9.]+) s")
 _RANKS = re.compile(r"\[wb_dp\].* ranks=(\d+)")
 N_WARM = 3

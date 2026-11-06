@@ -19,7 +19,6 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -29,13 +28,6 @@ _ENTRY = _ROOT / "scripts" / "run" / "train_weatherbench_scale.py"
 _spec = importlib.util.spec_from_file_location("train_wb_scale_damp", _ENTRY)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
-
-# The sfno mode builds a Gaussian grid, which hard-requires x64 (spectral
-# transforms). neural_gcm has no such dependency and always runs.
-_needs_x64 = pytest.mark.skipif(
-    not jax.config.read("jax_enable_x64"),
-    reason="sfno mode builds a Gaussian grid; needs JAX_ENABLE_X64=1",
-)
 
 _SMOKE_YML = {
     "n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0,
@@ -124,11 +116,9 @@ def test_wb_modes_receive_driver_friction(monkeypatch):
     assert bool(jnp.all(fric_none > 0.0)) and bool(jnp.all(fric_none <= 1.0))
 
 
-@pytest.mark.parametrize(
-    "mode", ["neural_gcm", pytest.param("sfno", marks=_needs_x64)]
-)
+@pytest.mark.parametrize("mode", ["neural_gcm"])
 def test_pure_dycore_wb_modes_keep_rayleigh_damping(monkeypatch, mode):
-    """End-to-end #797 guard: the pure-dycore WB modes (neural_gcm / sfno) run
+    """End-to-end #797 guard: the pure-dycore WB mode (neural_gcm) runs
     NO boundary-layer scheme, so `build_latlon_config` declares
     turbulence="none" for them -> the #931 gate KEEPS the Held-Suarez Rayleigh
     drag, which is their SOLE adjoint dissipation of the undamped dycore.

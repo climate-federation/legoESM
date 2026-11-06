@@ -10,8 +10,8 @@
 #SBATCH --error=results/aimip_multistep_001/slurm-%j.err
 #
 # GenCast-style multi-step autoregressive + CRPS training for the
-# AIMIP intercomparison suite (classical / column_nn / sfno_physics).
-# All three variants train sequentially on a single GPU; per-variant
+# AIMIP intercomparison suite (classical / column_nn).
+# Both variants train sequentially on a single GPU; per-variant
 # expected wall clock at T21 L8 gray-radiation + K=4 chained 6h
 # rollouts is ~30-60 min, total ~2-3 h.
 #

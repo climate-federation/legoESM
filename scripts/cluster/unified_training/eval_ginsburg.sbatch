@@ -11,7 +11,7 @@
 # campaign. Single-process; run AFTER the train chain completes. The eval
 # prefers the EMA checkpoint when present (campaign_driver, D3).
 #   MODES uses '+' (not ',': a comma breaks sbatch --export=ALL,k=v parsing):
-#   sbatch --export=ALL,CONFIG=config/wb/campaign/spectral_t63.yaml,MODES=physics+neural_gcm+sfno,OUT=results/wb_campaign \
+#   sbatch --export=ALL,CONFIG=config/wb/campaign/spectral_t63.yaml,MODES=physics+neural_gcm,OUT=results/wb_campaign \
 #     scripts/cluster/unified_training/eval_ginsburg.sbatch
 set -euo pipefail
 
@@ -22,7 +22,7 @@ export JAX_PLATFORMS=cuda,cpu
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 CONFIG="${CONFIG:-config/wb/campaign/spectral_t63.yaml}"
-MODES="${MODES:-physics+neural_gcm+sfno}"   # '+' separated (see header)
+MODES="${MODES:-physics+neural_gcm}"   # '+' separated (see header)
 OUT="${OUT:-results/wb_campaign}"
 MODES_CSV="${MODES//+/,}"
 

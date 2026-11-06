@@ -68,12 +68,12 @@ def main():
     ap.add_argument("--out-ckpt", type=Path,
                     default=Path("results/aimip_amip_finetune/classical_stable.eqx"))
     ap.add_argument("--variant", type=str, default="classical",
-                    choices=["classical", "column_nn", "sfno_physics"],
+                    choices=["classical", "column_nn"],
                     help="What to fine-tune: the classical scheme knobs, or "
-                         "the NN weights (column MLP / SFNO physics). NN "
+                         "the NN weights (column MLP). Learned "
                          "variants free-run to a radiative runaway exactly "
-                         "like the pre-finetune classical (sfno r0 sanity: "
-                         "435 K year-1) — same multi-day prescribed-SST "
+                         "like the pre-finetune classical (removed dycore-SFNO "
+                         "arm r0 sanity: 435 K year-1) — same multi-day prescribed-SST "
                          "rollout + drift penalty, via "
                          "spectral_rollout(forcing_base=...).")
     ap.add_argument("--suite", type=Path, default=Path("config/aimip/ace2/suite.yaml"))
@@ -292,28 +292,6 @@ def main():
             args.init_ckpt,
         )
         _make_nn_physics = make_column_mlp_spectral_physics
-    elif args.variant == "sfno_physics":
-        from legoesm.ml.channel_packing import PE3DChannelSpec
-        from legoesm.ml.sfno import SFNO, SFNOConfig
-        from legoesm.training.neural_gcm_spectral import (
-            N_SFNO_FORCING_CHANNELS, make_sfno_spectral_physics,
-        )
-        _spec = PE3DChannelSpec(nlev=nlev)
-        params0 = load_checkpoint(
-            SFNO(
-                SFNOConfig(
-                    in_channels=_spec.n_channels + N_SFNO_FORCING_CHANNELS,
-                    out_channels=_spec.n_channels,
-                    embed_dim=int(cfg.get("sfno_embed_dim", 128)),
-                    n_blocks=int(cfg.get("sfno_n_blocks", 4)),
-                    mlp_expansion=int(cfg.get("sfno_mlp_expansion", 4)),
-                    residual_prediction=False,
-                ),
-                grid, key=jax.random.PRNGKey(int(cfg.get("sfno_seed", 0))),
-            ),
-            args.init_ckpt,
-        )
-        _make_nn_physics = make_sfno_spectral_physics
     else:
         params0 = load_checkpoint(
             AIMIPClassicalParams.from_defaults(

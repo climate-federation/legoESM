@@ -1,5 +1,5 @@
 """Plain 2-panel AIMIP comparison: annual tas-anomaly time series (top) +
-scorecard table (bottom) for classical / column_nn / sfno_physics, with an
+scorecard table (bottom) for classical / column_nn, with an
 optional dense overlay per variant when its CSV is present.
 
 Anomaly = annual_global_mean_surfT_K minus that model's own 1979-2014 mean
@@ -29,11 +29,8 @@ MAX_YEAR = 2022
 SERIES = [
     ("classical", "legoesm_classical_amip_r0_annual", "#9B2D6E", "--"),
     ("column_nn", "legoesm_column_nn_my_reinit_annual", "#E8720C", "-"),
-    ("sfno_physics", "legoesm_sfno_physics_my_datactrl_annual", "#0E8C7E", "-"),
     ("column_nn (dense)", "legoesm_column_nn_dense_amip_reinit1mo_r0_annual",
      "#C42B1C", "-"),
-    ("sfno_physics (dense)", "legoesm_sfno_physics_dense_amip_reinit1mo_r0_annual",
-     "#337EBB", "-"),
 ]
 
 

@@ -9,7 +9,7 @@
 #
 # run_aimip is single-GPU spectral (NOT the data-parallel scale trainer), so this
 # runs on ONE GPU, variants sequential. classical (rrtmgp) dominates walltime.
-# For the pure-ML scale campaign (physics/neural_gcm/sfno via data-parallel), see
+# For the pure-ML scale campaign (physics/neural_gcm via data-parallel), see
 # the sibling launcher run_wb_campaign.pbs.
 #
 # Submit:  qsub run_wb_aimip_compare.pbs

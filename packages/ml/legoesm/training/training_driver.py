@@ -1,9 +1,8 @@
 """Training driver for differentiable dycore + WeatherBench.
 
-Three training modes:
+Two training modes:
 1. Physics parameter tuning (Mode 1)
 2. Neural GCM (Mode 2) — neural network replaces/augments physics
-3. SFNO coupled to dycore (Mode 3)
 
 All modes share the same core loop:
     IC from ERA5 → rollout through dycore → loss vs ERA5 target → grad → update
@@ -91,7 +90,7 @@ def build_training_segment(model, step_unified, grid, sigma, dt,
     ``fric_decay``: per-level Rayleigh-friction decay factors (the driver's
     ``exp(-k_f dt)`` boundary-layer profile). Pass the DRIVER's profile for
     rollouts whose physics provides no dissipation of its own (pure-dycore
-    epoch-0 neural_gcm / sfno): without it the forward 6 h rollout stays
+    epoch-0 neural_gcm): without it the forward 6 h rollout stays
     finite but the 720-step ADJOINT through the undamped dycore returns NaN
     gradients (#797 bug 11). ``None`` keeps the legacy no-friction ones.
     """
@@ -224,9 +223,9 @@ def _build_train_step(make_run_seg, optimizer, sigma_full, grid, dt, loss_config
         (b) the segment build is captured by the single surrounding
         ``filter_jit`` trace rather than rebuilt eagerly per sample.
         Pre-building it OUTSIDE the loss with concrete params would bake
-        the params in as constants and zero their gradients.  The three
+        the params in as constants and zero their gradients.  The two
         modes differ ONLY in this factory: physics-param tuning feeds
-        ``params.to_segment_kwargs()``; neural-GCM / SFNO build their
+        ``params.to_segment_kwargs()``; neural-GCM builds its
         ``step_unified`` from the (traced) network.
     optimizer : optax.GradientTransformation
         Captured as a closure constant (static under ``filter_jit``); its
@@ -632,84 +631,6 @@ def train_neural_gcm(
     )
     return _training_loop(
         train_step, neural_physics, optimizer,
-        initial_carries, target_carries, forcings,
-        n_epochs=n_epochs, log_every=log_every,
-    )
-
-
-# ======================================================================
-# Mode 3: SFNO coupled to dycore
-# ======================================================================
-
-def train_sfno_coupled(
-    model,
-    grid,
-    sigma,
-    sfno_physics,
-    initial_carries,
-    target_carries,
-    forcings,
-    *,
-    n_epochs: int = 100,
-    lr: float = 5e-4,
-    dt: float = 600.0,
-    coupling_mode: str = "correction",
-    physics_pipeline=None,
-    weight_decay: float = 1e-5,
-    grad_clip_norm: float = _DRIVER_GRAD_CLIP_NORM,
-    warmup_steps: int = _DRIVER_WARMUP_STEPS,
-    loss_config: LossConfig = LossConfig(),
-    log_every: int = 10,
-):
-    """Train SFNO coupled to the differentiable dycore.
-
-    Parameters
-    ----------
-    sfno_physics : SFNOPhysics (eqx.Module)
-    coupling_mode : "correction" or "replacement"
-    physics_pipeline : PhysicsPipeline, optional
-        Required when coupling_mode="correction" to provide the traditional
-        physics step that SFNO corrects.
-    (other params same as train_neural_gcm)
-
-    Returns
-    -------
-    sfno_physics : updated SFNOPhysics
-    list[float] — loss history
-    """
-    from legoesm.training.sfno_dycore_coupling import make_sfno_step_unified
-
-    sigma_full = jnp.asarray(sigma.sigma_full)
-
-    # Build traditional physics step for correction mode.
-    traditional_step = None
-    if coupling_mode == "correction":
-        if physics_pipeline is None:
-            raise ValueError(
-                "physics_pipeline is required when coupling_mode='correction'. "
-                "Pass the PhysicsPipeline so the SFNO can compute corrections "
-                "on top of traditional physics."
-            )
-        traditional_step = physics_pipeline.build_step_unified()
-
-    def make_run_seg(sfno_ph):
-        step_unified = make_sfno_step_unified(
-            sfno_ph,
-            mode=coupling_mode,
-            traditional_step_unified=traditional_step,
-        )
-        return build_training_segment(model, step_unified, grid, sigma, dt)
-
-    optimizer = _make_driver_optimizer(
-        lr, "adamw", n_epochs, len(initial_carries),
-        weight_decay=weight_decay,
-        grad_clip_norm=grad_clip_norm, warmup_steps=warmup_steps,
-    )
-    train_step = _build_train_step(
-        make_run_seg, optimizer, sigma_full, grid, dt, loss_config,
-    )
-    return _training_loop(
-        train_step, sfno_physics, optimizer,
         initial_carries, target_carries, forcings,
         n_epochs=n_epochs, log_every=log_every,
     )

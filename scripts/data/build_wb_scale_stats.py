@@ -136,7 +136,7 @@ def pairs_in_years(store_index, times, years=YEARS):
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True)
-    p.add_argument("--mode", required=True, choices=("physics", "neural_gcm", "sfno"))
+    p.add_argument("--mode", required=True, choices=("physics", "neural_gcm"))
     return p
 
 

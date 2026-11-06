@@ -143,7 +143,6 @@ def test_the_trainer_hands_the_ema_to_every_training_loop():
 
 @pytest.mark.parametrize("deck,decay", [
     ("spectral_t63_ngcm_v9", 0.995), ("spectral_t63_ngcm_nolearnedembed_v9", 0.995),
-    ("spectral_t63_sfno_v9", 0.995), ("spectral_t63_sfno_nolearnedembed_v9", 0.995),
     ("spectral_t63_cam6_tier3_v9", 0.0)])
 def test_the_v9_decks_state_their_ema(deck, decay):
     p = pathlib.Path(mod.__file__).parents[2] / "config/wb/campaign" / f"{deck}.yaml"

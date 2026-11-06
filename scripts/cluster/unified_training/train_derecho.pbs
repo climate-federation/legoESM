@@ -14,7 +14,7 @@
 # SUBMIT examples:
 #   qsub -v CAMPAIGN=aimip,SUITE=config/aimip/scale/suite_classical.yaml,VARIANT=classical \
 #     scripts/cluster/unified_training/train_derecho.pbs
-#   qsub -v CAMPAIGN=wb,SUITE=config/wb/campaign/spectral_t106.yaml,VARIANT=sfno \
+#   qsub -v CAMPAIGN=wb,SUITE=config/wb/campaign/spectral_t106.yaml,VARIANT=neural_gcm \
 #     scripts/cluster/unified_training/train_derecho.pbs
 # Paths + conda env live in scripts/cluster/scaling_derecho/_env.sh.
 # ===========================================================================

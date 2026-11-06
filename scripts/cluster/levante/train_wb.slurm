@@ -3,7 +3,7 @@
 # One MPI rank per GPU; each rank trains on its own shard of the samples and the
 # ranks average gradients every step (mpi4jax allreduce through host memory).
 #
-#   sbatch --nodes=<N> --export=ALL,WB_CONFIG=<deck>,WB_MODE=<sfno|neural_gcm>,WB_OUT=<dir> \
+#   sbatch --nodes=<N> --export=ALL,WB_CONFIG=<deck>,WB_MODE=<physics|neural_gcm>,WB_OUT=<dir> \
 #     scripts/cluster/levante/train_wb.slurm
 #
 # Optional: WB_EXTRA (extra trainer flags, e.g. "--epochs 4"), WB_TIME_ONLY=1

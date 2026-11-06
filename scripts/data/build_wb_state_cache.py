@@ -27,7 +27,7 @@ def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True)
     p.add_argument("--mode", required=True,
-                   choices=("physics", "neural_gcm", "sfno"))
+                   choices=("physics", "neural_gcm"))
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--init", action="store_true")
     g.add_argument("--check", action="store_true")

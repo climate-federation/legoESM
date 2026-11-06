@@ -155,7 +155,6 @@ def test_wb_training_step_passes_the_gradient_gate(core, loss):
 
 
 @pytest.mark.parametrize("mode,loss,match", [
-    ("sfno", {}, "not on 'cubed_sphere'"),
     ("neural_gcm", {"spectral_weight": 0.5}, "needs a Gaussian grid"),
 ])
 def test_cube_core_refuses_what_it_cannot_build(mode, loss, match):
@@ -178,7 +177,6 @@ def test_cube_n_is_required_and_a_positive_int(bad):
 
 
 @pytest.mark.parametrize("mode,loss,extra,match", [
-    ("sfno", {}, {}, "neural_gcm' only"),
     ("physics", {}, {}, "neural_gcm' only"),
     ("neural_gcm", {"spectral_weight": 0.5}, {}, "state only"),
     ("neural_gcm", {"w_flux_olr": 1.0}, {}, "state only"),

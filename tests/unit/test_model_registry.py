@@ -2,8 +2,8 @@
 
 The defect this guards: the WeatherBench lane and the AIMIP lane each
 constructed their own models and the architecture defaults drifted apart
-(``sfno_physics`` at embed 256 / 8 blocks on one side, 128 / 4 on the other),
-so "the same variant" silently meant two different networks. The decisive test
+(the removed dycore-SFNO variant at embed 256 / 8 blocks on one side, 128 / 4
+on the other), so "the same variant" silently meant two different networks. The decisive test
 is :func:`test_wb_and_aimip_build_the_same_pytree`, which builds each variant
 through the WeatherBench entry point and through the registry the AIMIP
 trainers call, and compares tree structure and every leaf shape.
@@ -54,6 +54,9 @@ def _dtypes(tree):
 def test_unknown_variant_raises():
     with pytest.raises(ValueError, match="unknown variant"):
         build_variant("sfno", nlev=_NLEV)
+    # The dycore-SFNO variant was removed (user 2026-11-06).
+    with pytest.raises(ValueError, match="unknown variant"):
+        build_variant("sfno_physics", nlev=_NLEV)
 
 
 def test_unknown_override_key_raises(grid):
@@ -69,7 +72,7 @@ def test_unknown_override_key_raises(grid):
 
 
 def test_sfno_arch_config_rejects_non_sfno_variants():
-    with pytest.raises(ValueError, match="SFNO variants"):
+    with pytest.raises(ValueError, match="SFNO variant"):
         sfno_arch_config("column_nn", nlev=_NLEV)
 
 
@@ -80,7 +83,6 @@ def test_sfno_arch_config_rejects_non_sfno_variants():
 @pytest.mark.parametrize("mode,variant,over", [
     ("physics", "classical", {}),
     ("neural_gcm", "column_nn", {"nn_hidden_dim": 32, "n_layers": 2}),
-    ("sfno", "sfno_physics", {"sfno_embed_dim": 16, "sfno_n_blocks": 2}),
 ])
 def test_wb_and_aimip_build_the_same_pytree(mode, variant, over, grid):
     """The WB builder and the registry (what the AIMIP trainers call) agree.
@@ -97,7 +99,6 @@ def test_wb_and_aimip_build_the_same_pytree(mode, variant, over, grid):
         "loss": {},
         "neural_gcm": {"nn_hidden": over.get("nn_hidden_dim", 256),
                        "nn_layers": over.get("n_layers", 4)},
-        "sfno": {k: v for k, v in over.items() if k.startswith("sfno_")},
     }
     cfg = SimpleNamespace(mode=mode, training_core="spectral", smoke=False,
                           multi_step_hours=(6,))
@@ -116,7 +117,6 @@ def test_wb_and_aimip_build_the_same_pytree(mode, variant, over, grid):
 @pytest.mark.parametrize("mode,variant", [
     ("physics", "classical"),
     ("neural_gcm", "column_nn"),
-    ("sfno", "sfno_physics"),
 ])
 def test_the_two_lanes_agree_when_NEITHER_pins_the_architecture(mode, variant,
                                                                 grid):
@@ -125,7 +125,7 @@ def test_the_two_lanes_agree_when_NEITHER_pins_the_architecture(mode, variant,
     The sibling test above pins the same size on both sides, so it would still
     pass if one lane went back to its own hardcoded defaults (codex). This one
     passes no architecture keys at all: it is the assertion that fails the
-    moment the WB lane re-grows an ``ov.get("sfno_embed_dim", 256)``.
+    moment the WB lane re-grows its own hardcoded architecture default.
     """
     from legoesm.training.scale_build import _build_mode_components_spectral
 
@@ -144,16 +144,6 @@ def test_the_two_lanes_agree_when_NEITHER_pins_the_architecture(mode, variant,
 # Per-variant contracts.
 # --------------------------------------------------------------------------
 
-def test_sfno_physics_zero_inits_its_decoder(grid):
-    """Untrained physics must emit exactly-zero tendencies: epoch 0 is then the
-    pure dycore. (The AIMIP lane did NOT do this before the registry; unifying
-    on the WB contract is a deliberate change, recorded in the commit.)"""
-    sfno = build_variant("sfno_physics", nlev=_NLEV, grid=grid,
-                         overrides={"sfno_embed_dim": 16, "sfno_n_blocks": 2})
-    assert np.all(np.asarray(sfno.decoder.weight) == 0.0)
-    assert np.all(np.asarray(sfno.decoder.bias) == 0.0)
-
-
 def test_sfno_full_does_not_zero_init_its_decoder(grid):
     """The full emulator replaces the dycore — a zeroed decoder would emit a
     zero state, not a harmless zero tendency."""
@@ -163,17 +153,12 @@ def test_sfno_full_does_not_zero_init_its_decoder(grid):
 
 
 def test_channel_counts_follow_the_variant(grid):
-    """sfno_physics carries three forcing planes on the input side; sfno_full
-    carries (1 + history) copies of the state and no forcing planes."""
+    """sfno_full carries (1 + history) copies of the state and no forcing
+    planes."""
     from legoesm.ml.channel_packing import PE3DChannelSpec
-    from legoesm.training.neural_gcm_spectral import N_SFNO_FORCING_CHANNELS
 
     n_state = PE3DChannelSpec(nlev=_NLEV).n_channels
     assert n_state == 4 * _NLEV + 2
-
-    phys = sfno_arch_config("sfno_physics", nlev=_NLEV)
-    assert phys.in_channels == n_state + N_SFNO_FORCING_CHANNELS
-    assert phys.out_channels == n_state
 
     full0 = sfno_arch_config("sfno_full", nlev=_NLEV)
     full2 = sfno_arch_config("sfno_full", nlev=_NLEV,
@@ -182,19 +167,15 @@ def test_channel_counts_follow_the_variant(grid):
     assert full2.in_channels == 3 * n_state
 
 
-def test_residual_prediction_is_off_for_both_sfno_variants():
+def test_residual_prediction_is_off_for_the_sfno_variant():
     """SFNOConfig defaults residual_prediction=True, which would add the input
     state to the output and destroy the rollout in one step."""
-    for variant in ("sfno_physics", "sfno_full"):
-        assert sfno_arch_config(variant, nlev=_NLEV).residual_prediction is False
+    assert sfno_arch_config("sfno_full", nlev=_NLEV).residual_prediction is False
 
 
 def test_defaults_are_the_aimip_values_and_are_overridable(grid):
     """Routing run_aimip through the registry must be a no-op, so the defaults
-    are AIMIP's. Every shipped WB config pins its SFNO size explicitly, so this
-    choice moves no existing run (verified 2026-08-11)."""
-    assert VARIANT_DEFAULTS["sfno_physics"]["sfno_embed_dim"] == 128
-    assert VARIANT_DEFAULTS["sfno_physics"]["sfno_n_blocks"] == 4
+    are AIMIP's."""
     assert VARIANT_DEFAULTS["column_nn"]["nn_hidden_dim"] == 256
 
     cfg = sfno_arch_config("sfno_full", nlev=_NLEV,

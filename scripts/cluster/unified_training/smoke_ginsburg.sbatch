@@ -20,7 +20,7 @@ export JAX_PLATFORMS=cuda,cpu
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 SUITE="${SUITE:-config/aimip/ace2/suite.yaml}"
-VARIANTS="${VARIANTS:-classical,column_nn,sfno_physics}"
+VARIANTS="${VARIANTS:-classical,column_nn}"
 
 echo "[uni-smoke] $(date) suite=$SUITE variants=$VARIANTS"
 "$UT_PYTHON" -u scripts/run/run_aimip.py --suite "$SUITE" --smoke --variants "$VARIANTS"

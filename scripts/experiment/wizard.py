@@ -207,7 +207,6 @@ def _flow_aimip(q, answers: dict) -> None:
         "\n  AIMIP: train an ML-emulated-physics variant on ERA5.\n"
         "    classical    — process-physics control (no ML physics)\n"
         "    column_nn    — per-column neural physics\n"
-        "    sfno_physics — SFNO physics, spectral-dycore coupling\n"
         "  Needs an ERA5 cache (base: config/aimip/aimip_era5.yaml)."
     )
     answers["aimip_variant"] = _select(q, "AIMIP variant:", variants)
@@ -217,31 +216,9 @@ def _flow_aimip(q, answers: dict) -> None:
 
 
 def _flow_train(q, answers: dict) -> None:
-    mode = _select(
-        q, "Training mode:",
-        ["aimip (ML-emulated physics: classical / column_nn / sfno_physics)",
-         "neural_gcm_spectral (SFNO emulating dycore + physics — ML everything)"],
-    )
-    answers["train_mode"] = mode.split()[0]
-    if answers["train_mode"] == "aimip":
-        _flow_aimip(q, answers)
-        return
-
-    print(
-        "\n  Training on observed data (ERA5).\n"
-        "  neural_gcm_spectral: SFNO emulating dycore+physics.\n"
-        "  Grid-space modes (physics-param tuning / neural physics / SFNO\n"
-        "  correction) are Python-only — see training_driver.py."
-    )
-    answers["n_max"] = _int(q, "Spectral truncation n_max:", 42)
-    answers["n_levels"] = _int(q, "Vertical levels:", 10)
-    answers["epochs"] = _int(q, "Training epochs:", 50)
-    answers["lr"] = _float(q, "Learning rate:", 3e-4)
-    answers["train_days"] = _int(q, "Training window (days):", 365)
-    answers["year"] = _int(q, "Start year:", 2015)
-    answers["cache_dir"] = _text(q, "ERA5 cache dir:", default="data/era5_cache")
-    answers["backend"] = _select(q, "Compute backend:", ["cpu", "gpu"])
-    answers["precision_bits"] = 64  # spectral forces x64
+    # AIMIP is the only training mode with a CLI launcher.
+    answers["train_mode"] = "aimip"
+    _flow_aimip(q, answers)
 
 
 def _collect_answers(q) -> dict:

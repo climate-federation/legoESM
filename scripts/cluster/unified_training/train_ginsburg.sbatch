@@ -14,7 +14,7 @@
 # SUBMIT examples:
 #   sbatch --export=ALL,CAMPAIGN=aimip,SUITE=config/aimip/ace2/suite.yaml,VARIANT=classical \
 #     scripts/cluster/unified_training/train_ginsburg.sbatch
-#   sbatch --export=ALL,CAMPAIGN=wb,SUITE=config/wb/campaign/spectral_t63.yaml,VARIANT=sfno \
+#   sbatch --export=ALL,CAMPAIGN=wb,SUITE=config/wb/campaign/spectral_t63.yaml,VARIANT=neural_gcm \
 #     scripts/cluster/unified_training/train_ginsburg.sbatch
 # ===========================================================================
 set -uo pipefail

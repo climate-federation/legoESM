@@ -72,10 +72,6 @@ neural_gcm:
   surface_drag_confounded: builder_refuses_classical_scheme
   nn_hidden: 256
   nn_layers: 4
-sfno:
-  spatial_embedding: false
-  sfno_embed_dim: 256
-  sfno_n_blocks: 8
 classical:
   convection: bechtold
   turbulence: clubb

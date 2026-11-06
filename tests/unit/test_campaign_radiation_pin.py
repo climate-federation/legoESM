@@ -7,8 +7,8 @@ the SCM, DA and the land drivers; it is simply not a campaign option, and it
 carries no trainable knob (see test_classical_scheme_families).
 
 The pin used to cover the CLASSICAL variant only, and carried an
-``allow_non_rrtmgp`` escape that two shipped configs used — so column_nn,
-sfno_physics and sfno_full could each select gray, and classical could opt out.
+``allow_non_rrtmgp`` escape that two shipped configs used — so column_nn
+and sfno_full could each select gray, and classical could opt out.
 Both holes are closed here.
 """
 from __future__ import annotations
