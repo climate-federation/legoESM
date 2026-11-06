@@ -749,12 +749,15 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
     p.add_argument("--optimizer", default=None,
                    help="adamw|adam|muon|muon_partitioned. Default: YAML "
                         f"`optimizer`, else {_DEFAULT_OPTIMIZER}.")
-    p.add_argument("--val-windows", type=int, default=0, dest="n_val_windows",
+    # None = the deck's ``n_val_windows`` (else 0).  The default used to be 0
+    # outright, so a deck asking for validation trained unscored whenever the
+    # trainer was launched directly (NGCM v9, 2026-11-06).
+    p.add_argument("--val-windows", type=int, default=None, dest="n_val_windows",
                    help="Held-out windows (from the deck's eval_years) scored "
                         "WITHOUT gradient after every epoch, so the run has a "
                         "generalisation curve rather than only a training "
-                        "one. 0 (default) keeps the historical behaviour: no "
-                        "validation pass.")
+                        "one. Default: the deck's n_val_windows (0 = no "
+                        "validation pass).")
     p.add_argument("--warmup-steps", type=int, default=None,
                    dest="warmup_steps",
                    help="Global-schedule warmup steps, overriding the deck's "
@@ -1119,7 +1122,12 @@ def _resolve_training_keys(cfg, yml):
         else _yml_int(yml, "n_epochs", _DEFAULT_N_EPOCHS)
     if n_epochs < 1:
         raise SystemExit(f"n_epochs must be >= 1, got {n_epochs}")
+    n_val = (cfg.n_val_windows if cfg.n_val_windows is not None
+             else _yml_int(yml, "n_val_windows", 0))
+    if n_val < 0:
+        raise SystemExit(f"n_val_windows must be >= 0, got {n_val}")
     cfg = cfg._replace(
+        n_val_windows=n_val,
         lr=float(_yml_or(yml, "lr", _DEFAULT_LR)) if cfg.lr is None else cfg.lr,
         optimizer=(str(_yml_or(yml, "optimizer", _DEFAULT_OPTIMIZER))
                    if cfg.optimizer is None else cfg.optimizer),

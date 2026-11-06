@@ -467,6 +467,24 @@ def test_yaml_training_keys_resolved():
     assert wd is None and clip is None                # caller uses TrainingConfig
 
 
+def test_deck_validation_windows_are_read_by_the_trainer():
+    """2026-11-06: the deck's n_val_windows was honoured only through the
+    campaign script, so NGCM v9 (launched directly) trained unscored.  The
+    trainer reads it itself; the CLI still wins; negative is refused."""
+    cfg = mod.build_scale_config_from_args([])
+    assert cfg.n_val_windows is None                  # CLI silent
+    cfg2, _, _ = mod._resolve_training_keys(cfg, {"n_val_windows": 24})
+    assert cfg2.n_val_windows == 24
+    cfg2, _, _ = mod._resolve_training_keys(cfg, {})
+    assert cfg2.n_val_windows == 0
+    cfg2, _, _ = mod._resolve_training_keys(
+        mod.build_scale_config_from_args(["--val-windows", "3"]),
+        {"n_val_windows": 24})
+    assert cfg2.n_val_windows == 3
+    with pytest.raises(SystemExit, match="n_val_windows"):
+        mod._resolve_training_keys(cfg, {"n_val_windows": -1})
+
+
 def test_yaml_grad_accum_is_a_hard_error():
     """grad_accum has no implementation here; a value other than 1 must
     refuse to run rather than be silently ignored."""

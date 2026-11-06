@@ -648,7 +648,7 @@ def resolve_training_ice_skin(config):
 # whole campaign (v2 trained at 3e-4 while its deck said 1.5e-3), and a typo
 # like ``learning_rate`` would silently reintroduce exactly that.
 _WB_CONSUMED_TOP_KEYS = frozenset({
-    "classical", "convection", "cube_n", "dt",
+    "classical", "convection", "n_val_windows", "cube_n", "dt",
     "mpas_level", "ema_decay", "era5_cadence_hours",
     "cache_dir", "era5_cloud_condensate", "era5_cloud_zarr", "era5_flux_zarr",
     "era5_flux_climatology", "era5_soil_moisture", "era5_surface_fluxes",
@@ -666,9 +666,10 @@ _WB_CONSUMED_TOP_KEYS = frozenset({
 # Deck metadata this trainer never reads but the decks legitimately carry
 # (documentation / other tooling).  Kept OUT of the consumed set so the
 # distinction stays visible; anything here is tolerated, not honoured.
-# ``n_val_windows`` is read by run_weatherbench_campaign.py, which forwards it
-# as --val-windows.
-_WB_METADATA_TOP_KEYS = frozenset({"grid", "n_val_windows"})
+# ``n_val_windows`` moved to the consumed set: the trainer reads it itself
+# (it used to be honoured only via run_weatherbench_campaign.py's
+# --val-windows, so a direct launch trained unscored).
+_WB_METADATA_TOP_KEYS = frozenset({"grid"})
 # Exactly the keys _spectral_pe_config + the dt lookup read from the
 # ``spectral`` block.  ``si_substep`` (typo) silently reverting a deck to the
 # unstable full step is the same defect class as the inert lr.
