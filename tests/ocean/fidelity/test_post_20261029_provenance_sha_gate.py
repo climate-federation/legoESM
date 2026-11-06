@@ -315,6 +315,45 @@ def test_same_line_citation_reanchor_remains_inherited() -> None:
     assert _sha_survives_line_history(value, 1, history)
 
 
+def test_reedited_sha_fails_real_document_validation(tmp_path: Path, monkeypatch) -> None:
+    """A one-hop inheritance revert must fail through validate_document."""
+    repository = tmp_path / "repo"
+    document = repository / "docs" / "plant_receipt.md"
+    document.parent.mkdir(parents=True)
+    run("git", "init", str(repository))
+    run("git", "-C", str(repository), "config", "user.name", "Provenance Plant")
+    run("git", "-C", str(repository), "config", "user.email", "plant@example.invalid")
+
+    document.write_text("pre-cutoff line without a token\n")
+    run("git", "-C", str(repository), "add", str(document.relative_to(repository)))
+    run("git", "-C", str(repository), "commit", "-m", "base")
+    base = run("git", "-C", str(repository), "rev-parse", "HEAD").stdout.strip()
+
+    value = "1" * 40
+    document.write_text(f"new post-cutoff citation `{value}`\n")
+    run("git", "-C", str(repository), "add", str(document.relative_to(repository)))
+    run("git", "-C", str(repository), "commit", "-m", "introduce citation")
+    document.write_text(f"edited post-cutoff citation `{value}`\n")
+    run("git", "-C", str(repository), "add", str(document.relative_to(repository)))
+    run("git", "-C", str(repository), "commit", "-m", "reedit citation")
+    head = run("git", "-C", str(repository), "rev-parse", "HEAD").stdout.strip()
+
+    repository_run = run
+
+    def run_in_repository(*args: str, cwd: Path = repository, check: bool = True):
+        return repository_run(*args, cwd=cwd, check=check)
+
+    monkeypatch.setitem(globals(), "ROOT", repository)
+    monkeypatch.setitem(globals(), "PRE_CUTOFF_BASE", base)
+    monkeypatch.setitem(globals(), "POST_CUTOFF_ORIGINS", {document: {1: (head, 1)}})
+    monkeypatch.setitem(globals(), "_REVISION_LINES", {})
+    monkeypatch.setitem(globals(), "run", run_in_repository)
+
+    failures = validate_document(document, {1})
+    assert len(failures) == 1
+    assert "unresolved Git SHA" in failures[0]
+
+
 def test_planted_wrong_file_sha256_fails(tmp_path: Path) -> None:
     artifact = tmp_path / "artifact.bin"
     artifact.write_bytes(b"real bytes")

@@ -13534,7 +13534,38 @@ FILES.update({
     'docs/ice/fidelity/si3_r18_o8_o16_master_preregister.md':
         REPO / 'docs/ice/fidelity/si3_r18_o8_o16_master_preregister.md',
 })
+_R30_FREE_RUN_RECEIPT = REPO / 'docs/ice/fidelity/si3_r30_o17_free_run_receipt.md'
+if _R30_FREE_RUN_RECEIPT.is_file():
+    # The merge commit lands before the follow-up receipt commit.  Register the
+    # receipt as soon as it is present so both commits satisfy discovery.
+    FILES['docs/ice/fidelity/si3_r30_o17_free_run_receipt.md'] = _R30_FREE_RUN_RECEIPT
 CITATION_MAP.update({
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:809-811': [
+        'if kt == 1:',
+        'carry_mismatches: dict[str, dict[str, Any]] = {}',
+        3,
+    ],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:812-815': [
+        ('else:', 3),
+        'carry_mismatches = _carried_mismatches(entry, prev_out, full, h)',
+        4,
+    ],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:839-846': [
+        'per_step[step_key] = {',
+        ('"fields": fields,', 3),
+        8,
+    ],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:848': [
+        'carried[rank] = post_step_hook(kt, rank, out) if post_step_hook is not None else out',
+    ],
+    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-972': {
+        'lines': '809-1303',
+        'anchors': [
+            'def si3_ice_thd_o12_stages(',
+            'return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out, fluxes=live_out)',
+            495,
+        ],
+    },
     'cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg:21-28': [
         '   nn_it000    =       1   !  first time step',
         '   rn_Dt       = 10800.     !  time step for the dynamics and tracer',
@@ -13621,6 +13652,176 @@ CITATION_MAP.update({
         40,
     ],
 })
+# The reverse-mode lane's Resume 4--7 re-anchors were authored before HEAD's
+# later DECISION 194 line map.  Defer them until that map has been applied so
+# each endpoint shift composes onto HEAD's live line rather than consuming the
+# historical key that DECISION 194 still needs.
+_LANE_REANCHOR_OPS = []
+_LIVE_REANCHOR = _reanchor
+_LIVE_REPIN = _repin
+
+
+def _reanchor(old: str, new: str, *, extent: int | None = None, anchors=None) -> None:
+    _LANE_REANCHOR_OPS.append(("reanchor", old, new, extent, anchors))
+
+
+def _repin(citation: str, anchors) -> None:
+    _LANE_REANCHOR_OPS.append(("repin", citation, anchors))
+
+
+# Resume 4 keeps the same certified statements while separating inactive
+# thermodynamics from live open-water formation gradients.  Re-anchor every
+# historical SI3 citation moved by that local insertion and the Decision 190
+# production-wiring assertions.
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1151',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1153',
+    anchors=['"""Direct unit and master-record tests for the SI3 O8--O14 0-ULP scoring driver."""',
+             ('    }', 8), 1153],
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:274-964',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:274-966',
+    anchors=['def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(',
+             'assert calls == ["_cumulative_remap", "_cumulative_remap"]', 693],
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1170',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1172',
+    anchors=['"""Direct unit and master-record tests for the SI3 O8--O14 0-ULP scoring driver."""',
+             '            verify(planted)', 1172],
+)
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2299-2317',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2313-2331',
+    anchors=['def si3_ice_thd_frazil(qlead, *, rn_hinew, ln_frazil) -> SI3Frazil:',
+             'return SI3Frazil(ht_i_new=ht_i_new, fraz_frac=zero)', 19],
+)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2299',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2313')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2287',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2301')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2229',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2243')
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:2226',
+       ['post_da = _si3_column_thd_da(', 1])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2322',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2336')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2354',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2368')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2393',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2407')
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2273',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2287',
+    anchors=['def si3_column_step_arrays(state: SI3ColumnArrays,', ('return trace', 2), 216],
+)
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2228-2273',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2242-2287',
+    anchors=['# `ice_thd_frazil` supplies ht_i_new', ('return trace', 2), 46],
+)
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:41,1080-1081,2175', [
+    'frq_m: jax.Array | float = 1.0',
+    'zf_tt = sr(sr(qcn_ice_bot + qsb_ice_bot) + fhld) + sr(qtr_ice_bot * frq_m)',
+    'zq_bot = _maxsd(sr(zf_tt * dt), 0.0)',
+    '"frq_m": jnp.asarray(thermo_forcing.frq_m, dtype=dtype),', 4])
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:1103-1108,1111-1121,1124-1132,2176,2178', [
+    'falling = sprecip > 0.0', 'h_s = jnp.where(falling, h_s + zh_s[0], h_s)',
+    'zdeltah = -_minsd(sr(sr(evap_ice * r1_rhos) * dt), h_s)',
+    'zdeltah = _minsd(zdeltah - zdum, 0.0)', ('for jk in range(nlay_s + 1):', 2),
+    'zh_s[jk] = jnp.where(melt, _maxsd(zh_s[jk] + zdum, 0.0), zh_s[jk])',
+    '"sprecip": jnp.asarray(thermo_forcing.snow_precipitation, dtype=dtype),',
+    '"evap_ice": jnp.asarray(thermo_forcing.evaporation, dtype=dtype),', 28])
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:1034-1035,2176-2178', [
+    'rDt_ice: float, rn_snwblow: float, rn_sinew: float, nn_icesal: int,',
+    ('constants: IceConstantsConfig,', 7),
+    '"sprecip": jnp.asarray(thermo_forcing.snow_precipitation, dtype=dtype),',
+    '"evap_ice": jnp.asarray(thermo_forcing.evaporation, dtype=dtype),', 5])
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:2176,2178', [
+    '"sprecip": jnp.asarray(thermo_forcing.snow_precipitation, dtype=dtype),',
+    '"evap_ice": jnp.asarray(thermo_forcing.evaporation, dtype=dtype),', 2])
+
+# Resume 5 removes the forward-changing inactive-state substitution.  Its
+# forward-identity custom reverse rule moves these unchanged statements by one.
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2313-2331',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2314-2332',
+    anchors=['def si3_ice_thd_frazil(qlead, *, rn_hinew, ln_frazil) -> SI3Frazil:',
+             'return SI3Frazil(ht_i_new=ht_i_new, fraz_frac=zero)', 19],
+)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2313',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2314')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2301',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2302')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2243',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2244')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2336',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2337')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2368',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2369')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2407',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2408')
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2287',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2288',
+    anchors=['def si3_column_step_arrays(state: SI3ColumnArrays,',
+             ('return trace', 2), 217],
+)
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2242-2287',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2243-2288',
+    anchors=['# `ice_thd_frazil` supplies ht_i_new', ('return trace', 2), 46],
+)
+
+# Resume 7 narrows the entry cotangent masks, inserting twelve lines in the
+# column step.  Re-anchor every moved SI3 citation explicitly.
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2226',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2238')
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:41,980-1024,1134-1222,1244-1265,2072-2213',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:41,980-1024,1134-1222,1244-1265,2072-2225',
+    extent=311,
+)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:41,1080-1081,2175',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:41,1080-1081,2187')
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1103-1108,1111-1121,1124-1132,2176,2178',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1103-1108,1111-1121,1124-1132,2188,2190',
+)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1034-1035,2176-2178',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:1034-1035,2188-2190')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2213',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2225', extent=154)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2176,2178',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2188,2190')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2200',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2212', extent=141)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2153',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2165')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2113-2115',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2125-2127')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2314-2332',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2326-2344')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2314',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2326')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2302',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2314')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2244',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2256')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2337',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2349')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2369',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2381')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2408',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2420')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2288',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2300', extent=229)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2243-2288',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2255-2300')
+
+_reanchor = _LIVE_REANCHOR
+_repin = _LIVE_REPIN
 
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")
@@ -13629,6 +13830,40 @@ UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
 # receipts' historical citation spellings, but audit their anchors at the new
 # live-source locations.  The explicit extents make insertions within a cited
 # routine visible to the full-map ratchet.
+def _line_groups(spec: str) -> list[tuple[int, int, bool]]:
+    groups = []
+    for part in spec.split(","):
+        if "-" in part:
+            first, last = (int(item) for item in part.split("-"))
+            groups.append((first, last, True))
+        else:
+            line = int(part)
+            groups.append((line, line, False))
+    return groups
+
+
+def _compose_reline(old: str, successor: str, live: str) -> str:
+    """Apply an earlier re-anchor's per-endpoint shifts to later live lines."""
+    old_groups = _line_groups(old.rsplit(":", 1)[1])
+    successor_groups = _line_groups(successor.rsplit(":", 1)[1])
+    live_groups = _line_groups(live)
+    if not (len(old_groups) == len(successor_groups) == len(live_groups)):
+        raise RuntimeError(
+            f"cannot compose citation relines {old!r} -> {successor!r} over {live!r}")
+    composed = []
+    for old_group, successor_group, live_group in zip(
+        old_groups, successor_groups, live_groups, strict=True
+    ):
+        first = live_group[0] + successor_group[0] - old_group[0]
+        last = live_group[1] + successor_group[1] - old_group[1]
+        composed.append(f"{first}-{last}" if successor_group[2] else str(first))
+    return ",".join(composed)
+
+
+def _line_extent(spec: str) -> int:
+    return sum(last - first + 1 for first, last, _ in _line_groups(spec))
+
+
 def _resume3_reline(key: str, lines: str, extent: int, anchors=None) -> None:
     value = CITATION_MAP[key]
     if anchors is None:
@@ -14239,6 +14474,47 @@ _resume3_reline(
     anchors=['def _si3_pra_subcycle_cond_dispatch(',
              'ops_2_cand = _call_step(ops_1, 2, jnp.int32(max(0, nn_hls - 2)))', 95],
 )
+
+# Compose the deferred reverse-mode lane moves onto the final O17/D194 map.
+# A dict-valued entry already points a historical receipt spelling at live
+# lines; shift those live endpoints by the lane's old-to-new citation delta.
+for _operation in _LANE_REANCHOR_OPS:
+    if _operation[0] == "repin":
+        _, _citation, _anchors = _operation
+        _existing = CITATION_MAP[_citation]
+        if isinstance(_existing, dict):
+            CITATION_MAP[_citation] = {**_existing, "anchors": _anchors}
+        else:
+            _repin(_citation, _anchors)
+        continue
+    _, _old, _new, _extent, _anchors = _operation
+    _value = CITATION_MAP[_old]
+    _live_lines = (
+        _value.get("lines", _old.rsplit(":", 1)[1])
+        if isinstance(_value, dict)
+        else _old.rsplit(":", 1)[1]
+    )
+    _composed_lines = _compose_reline(_old, _new, _live_lines)
+    _reanchor(
+        _old, _new,
+        extent=None if isinstance(_value, dict) else _extent,
+        anchors=_anchors,
+    )
+    _moved = CITATION_MAP[_new]
+    if isinstance(_value, dict):
+        _moved = _catchup_value(
+            _moved,
+            _new.rsplit(":", 1)[0] + ":" + _composed_lines,
+            _line_extent(_composed_lines),
+        )
+    if _composed_lines != _new.rsplit(":", 1)[1]:
+        CITATION_MAP[_new] = (
+            {**_moved, "lines": _composed_lines}
+            if isinstance(_moved, dict)
+            else {"lines": _composed_lines, "anchors": _moved}
+        )
+    else:
+        CITATION_MAP[_new] = _moved
 
 
 _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"

@@ -20,7 +20,7 @@ from legoesm.core import transcendentals
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ice.bitz_lipscomb import (
     SI3DHFluxes, SI3DHIncrements,
-    SI3O10CategoryStages, _guard_inactive_columns,
+    SI3O10CategoryStages, guard_inactive_columns,
     ieee_lt_zero,
     si3_ice_thd_o10_category_stages,
 )
@@ -927,7 +927,7 @@ def si3_ice_thd_o12_stages(
             }
             for k, fill in safe_fills.items():
                 if entry.get(k) is not None:
-                    entry[k] = _guard_inactive_columns(
+                    entry[k] = guard_inactive_columns(
                         entry[k], active, jnp.float64, inactive_fill=fill
                     )
             for k in (
@@ -945,18 +945,18 @@ def si3_ice_thd_o12_stages(
                 "hfx_dif",
             ):
                 if entry.get(k) is not None:
-                    entry[k] = _guard_inactive_columns(
+                    entry[k] = guard_inactive_columns(
                         entry[k], active, jnp.float64, inactive_fill=0.0
                     )
             fluxes = SI3DHFluxes(
                 **{
-                    f: _guard_inactive_columns(
+                    f: guard_inactive_columns(
                         getattr(prev_fluxes, f), active, jnp.float64, inactive_fill=0.0
                     )
                     for f in SI3DHFluxes._fields
                 }
             )
-            sfx_bri_in = _guard_inactive_columns(
+            sfx_bri_in = guard_inactive_columns(
                 prev_sfx_bri, active, jnp.float64, inactive_fill=0.0
             )
         else:
@@ -992,20 +992,20 @@ def si3_ice_thd_o12_stages(
 
         if ln_iceda:
             sfx_lam_in = (
-                _guard_inactive_columns(prev_sfx_lam, active, jnp.float64, inactive_fill=0.0)
+                guard_inactive_columns(prev_sfx_lam, active, jnp.float64, inactive_fill=0.0)
                 if active is not None
                 else cur_sfx_lam
             )
             hfx_thd_in = (
                 # NEMO icethd.F90:397,497 and icethd_da.F90:146-147 pass the DH-updated flux.
-                _guard_inactive_columns(
+                guard_inactive_columns(
                     dh.fluxes.hfx_thd, active, jnp.float64, inactive_fill=0.0
                 )
                 if active is not None
                 else dh.fluxes.hfx_thd
             )
             wfx_lam_in = (
-                _guard_inactive_columns(prev_wfx_lam, active, jnp.float64, inactive_fill=0.0)
+                guard_inactive_columns(prev_wfx_lam, active, jnp.float64, inactive_fill=0.0)
                 if active is not None
                 else cur_wfx_lam
             )

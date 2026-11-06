@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ast
 import copy
+import inspect
+import textwrap
 
 import pytest
 
@@ -56,6 +59,31 @@ def test_classifier_names_zfv_and_preserves_both_labels():
         _report("independent"), _report("given_nemo_entry")])
     assert result["first_numerical_statement"] == "zFv"
     assert result["predictions"]["R257-P3"] == "CONFIRMED"
+
+
+def test_production_cen2_call_selects_certified_nemo_storage(monkeypatch):
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
+
+    sentinel = object()
+
+    def fake_cen2(*args, **kwargs):
+        assert len(args) == 7
+        assert kwargs == {"_certified_nemo_storage": True}
+        return sentinel
+
+    monkeypatch.setattr(model_module, "_nemo_cen2_tracer_rhs", fake_cen2)
+    assert gate._certified_cen2_rhs(*range(7)) is sentinel
+
+
+def test_measure_routes_every_direct_cen2_call_through_certified_wrapper():
+    """Plant the round-257 direct caller, not only the wrapper it should use."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(gate.measure)))
+    calls = [
+        node.func.id for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    assert calls.count("_certified_cen2_rhs") == 4
+    assert "_nemo_cen2_tracer_rhs" not in calls
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])

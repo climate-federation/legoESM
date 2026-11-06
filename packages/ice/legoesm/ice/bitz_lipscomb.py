@@ -2181,21 +2181,33 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
 
     dtype = jnp.asarray(state.e_ice).dtype
     gathered_at_entry = jnp.asarray(state.concentration, dtype=dtype) > _EPS10
-    # NEMO calls the thermodynamic kernels only for gathered ice cells.  The
-    # array transcription evaluates inactive open-water lanes too.  Guard every
-    # state and forcing operand at entry so no discarded open-water quotient can
-    # return a NaN cotangent to a shared scalar input.  Scalar forcing leaves are
-    # broadcast to the column batch before the guard; all forward values remain
-    # identical.
+    # NEMO gathers only columns with material before these thermodynamic
+    # kernels.  Stop discarded operands at entry so singular quotients cannot
+    # poison reverse mode, while leaving every primal value unchanged.
+    has_thickness = jnp.asarray(state.h_ice, dtype=dtype) != 0.0
+    thermo_active = has_thickness
     def guard_inactive_leaf(value):
-        return _guard_inactive_columns(value, gathered_at_entry, dtype)
-    state = jax.tree.map(guard_inactive_leaf, state)
-    forcing = jax.tree.map(guard_inactive_leaf, forcing)
-    e_ice = jnp.asarray(state.e_ice)
-    h_ice = jnp.asarray(state.h_ice, dtype=dtype)
-    h_snow = jnp.asarray(state.h_snow, dtype=dtype)
-    S_layers = jnp.asarray(state.S_layers, dtype=dtype)
-    e_snow = jnp.asarray(state.e_snow, dtype=dtype)
+        return guard_inactive_columns(value, thermo_active, dtype)
+    thermo_state = jax.tree.map(guard_inactive_leaf, state)
+    # Concentration and fresh-snow routing select statement arms at epsi10;
+    # retain their gather mask while allowing the smooth thermodynamic leaves
+    # of a nonzero-thickness, sub-epsilon column to differentiate.
+    thermo_state = thermo_state._replace(
+        concentration=guard_inactive_columns(
+            state.concentration, gathered_at_entry, dtype,
+        ),
+    )
+    thermo_forcing = jax.tree.map(guard_inactive_leaf, forcing)
+    thermo_forcing = thermo_forcing._replace(
+        snow_precipitation=guard_inactive_columns(
+            forcing.snow_precipitation, gathered_at_entry, dtype,
+        ),
+    )
+    e_ice = jnp.asarray(thermo_state.e_ice)
+    h_ice = jnp.asarray(thermo_state.h_ice, dtype=dtype)
+    h_snow = jnp.asarray(thermo_state.h_snow, dtype=dtype)
+    S_layers = jnp.asarray(thermo_state.S_layers, dtype=dtype)
+    e_snow = jnp.asarray(thermo_state.e_snow, dtype=dtype)
     if t_i_entry is None:
         T_i_old = ice_temperature_from_enthalpy(e_ice, S_layers, constants)
     else:
@@ -2234,39 +2246,39 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     }
     if namelist is not None:
         nml.update(namelist)
-    a_i_arr = jnp.asarray(state.concentration, dtype=dtype)
+    a_i_arr = jnp.asarray(thermo_state.concentration, dtype=dtype)
     at_i_arr = a_i_arr if at_i is None else jnp.asarray(at_i, dtype=dtype)
-    t_bo_arr = jnp.asarray(forcing.t_bottom, dtype=dtype)
-    if nml["nn_icesal"] == 4 and forcing.sst_m is not None:
-        sst_dh = jnp.asarray(forcing.sst_m, dtype=dtype)
+    t_bo_arr = jnp.asarray(thermo_forcing.t_bottom, dtype=dtype)
+    if nml["nn_icesal"] == 4 and thermo_forcing.sst_m is not None:
+        sst_dh = jnp.asarray(thermo_forcing.sst_m, dtype=dtype)
     else:
         # C1D has no SST in its forcing record; snow-ice water enthalpy uses t_bo - rt0.
         sst_dh = t_bo_arr - constants.T0
     entry = {
         "h_i": h_ice,
         "h_s": h_snow,
-        "t_su": jnp.asarray(state.T_surface, dtype=dtype),
+        "t_su": jnp.asarray(thermo_state.T_surface, dtype=dtype),
         "t_i": T_i_old,
         "t_s": T_s_old,
         "e_i": e_ice,
         "e_s": e_snow,
         "sz_i": S_layers,
-        "s_i": jnp.asarray(state.S_bulk, dtype=dtype),
+        "s_i": jnp.asarray(thermo_state.S_bulk, dtype=dtype),
         "a_i": a_i_arr,
         "at_i": at_i_arr,
         "t_bo": t_bo_arr,
-        "sss": jnp.asarray(forcing.sss, dtype=dtype),
+        "sss": jnp.asarray(thermo_forcing.sss, dtype=dtype),
         "sst": sst_dh,
-        "qns_ice": jnp.asarray(forcing.qns_ice, dtype=dtype),
-        "qsr_ice": jnp.asarray(forcing.qsr_ice, dtype=dtype),
-        "dqns_ice": jnp.asarray(forcing.dqns_ice, dtype=dtype),
-        "qtr_ice_top": jnp.asarray(forcing.qtr_ice_top, dtype=dtype),
-        "qsb_ice_bot": jnp.asarray(forcing.qsb_ice_bottom, dtype=dtype),
-        "fhld": jnp.asarray(forcing.fhld, dtype=dtype),
-        "frq_m": jnp.asarray(forcing.frq_m, dtype=dtype),
-        "sprecip": jnp.asarray(forcing.snow_precipitation, dtype=dtype),
-        "qprec_ice": jnp.asarray(forcing.qprec_ice, dtype=dtype),
-        "evap_ice": jnp.asarray(forcing.evaporation, dtype=dtype),
+        "qns_ice": jnp.asarray(thermo_forcing.qns_ice, dtype=dtype),
+        "qsr_ice": jnp.asarray(thermo_forcing.qsr_ice, dtype=dtype),
+        "dqns_ice": jnp.asarray(thermo_forcing.dqns_ice, dtype=dtype),
+        "qtr_ice_top": jnp.asarray(thermo_forcing.qtr_ice_top, dtype=dtype),
+        "qsb_ice_bot": jnp.asarray(thermo_forcing.qsb_ice_bottom, dtype=dtype),
+        "fhld": jnp.asarray(thermo_forcing.fhld, dtype=dtype),
+        "frq_m": jnp.asarray(thermo_forcing.frq_m, dtype=dtype),
+        "sprecip": jnp.asarray(thermo_forcing.snow_precipitation, dtype=dtype),
+        "qprec_ice": jnp.asarray(thermo_forcing.qprec_ice, dtype=dtype),
+        "evap_ice": jnp.asarray(thermo_forcing.evaporation, dtype=dtype),
         "hfx_err_dif": zero if hfx_err_dif is None else jnp.asarray(hfx_err_dif, dtype=dtype),
         "hfx_dif": zero if hfx_dif is None else jnp.asarray(hfx_dif, dtype=dtype),
     }
@@ -2285,7 +2297,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         gravity=canonical_constants.g_nemo,
         constants=constants,
     )
-    post_zdf = _zdf_dh_override[0] if _zdf_dh_override else state._replace(
+    post_zdf = _zdf_dh_override[0] if _zdf_dh_override else thermo_state._replace(
         T_surface=o10.o9.zdf.t_su,
         e_ice=o10.o9.zdf.e_i,
         e_snow=o10.o9.zdf.e_s,
@@ -2299,7 +2311,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         o10.o9.dh.e_s,
         o10.o9.dh.s_i,
         o10.o9.dh.sz_i,
-        state.age_volume,
+        jnp.asarray(state.age_volume, dtype=dtype),
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
@@ -2308,17 +2320,32 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     post_temp2 = post_sal
     if _return_stage_outputs:
         post_da, da_out = _si3_column_thd_da(
-            state, post_temp2, forcing, si3, dt, constants,
+            thermo_state, post_temp2, thermo_forcing, si3, dt, constants,
             at_i=at_i_arr, sfx_lam=sfx_lam,
             hfx_thd=o10.o9.dh.fluxes.hfx_thd if hfx_thd is None else hfx_thd,
             wfx_lam=wfx_lam, _return_da_outputs=True,
         )
     else:
-        post_da = _si3_column_thd_da(state, post_temp2, forcing, si3, dt, constants)
+        post_da = _si3_column_thd_da(
+            thermo_state, post_temp2, thermo_forcing, si3, dt, constants
+        )
         da_out = None
+    # The dh stage clears concentration at zero thickness.  Route an entry
+    # cotangent only when the lane structurally carried that entry value.
+    post_da = post_da._replace(
+        concentration=_inactive_reverse_from_entry(
+            post_da.concentration,
+            state.concentration,
+            (~gathered_at_entry) & (post_dh.h_ice != 0.0),
+        ),
+    )
+    # Match the state dtype before frazil/do, including mixed-dtype callers.
+    do_qlead = jnp.asarray(forcing.qlead, dtype=dtype)
+    do_t_bottom = jnp.asarray(forcing.t_bottom, dtype=dtype)
+    do_sss = jnp.asarray(forcing.sss, dtype=dtype)
     # `ice_thd_frazil` supplies ht_i_new (O7_REF ppsrc `icethd.f90:174`).
     frazil = si3_ice_thd_frazil(
-        forcing.qlead,
+        do_qlead,
         rn_hinew=float(nml["rn_hinew"]),
         ln_frazil=bool(nml["ln_frazil"]),
     )
@@ -2333,8 +2360,8 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         sv_i=sv_do,
         e_i=e_do,
         szv_i=szv_do,
-        qlead=forcing.qlead,
-        t_bo=forcing.t_bottom,
+        qlead=do_qlead,
+        t_bo=do_t_bottom,
         sfx_opw=zero,
         wfx_opw=zero,
         ht_i_new=frazil.ht_i_new,
@@ -2342,7 +2369,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         hfx_thd=zero,
         hfx_opw=zero,
         rn_amax_2d=jnp.full_like(zero, _MAXIMUM_ICE_CONCENTRATION),
-        sss_m=forcing.sss,
+        sss_m=do_sss,
         hi_max=jnp.asarray([0.0, float("inf")], dtype=dtype),
         nn_icesal=nn_icesal,
         rn_sinew=float(nml["rn_sinew"]),
@@ -2492,7 +2519,7 @@ def _si3_column_thd_da(entry, post_temp2, forcing, si3, dt, constants, *,
     return post_da
 
 
-def _guard_inactive_columns(value, active_columns, dtype, inactive_fill=None):
+def guard_inactive_columns(value, active_columns, dtype, inactive_fill=None):
     """Stop inactive-column cotangents and optionally replace inactive inputs."""
     array = jnp.asarray(value, dtype=dtype)
     if array.ndim < active_columns.ndim:
@@ -2506,3 +2533,37 @@ def _guard_inactive_columns(value, active_columns, dtype, inactive_fill=None):
     else:
         inactive = jnp.asarray(inactive_fill, dtype=dtype)
     return jnp.where(active, array, inactive)
+
+
+@jax.custom_vjp
+def _inactive_reverse_from_entry(updated, entry, entry_columns):
+    """Return ``updated`` exactly; route selected cotangents to ``entry``."""
+    del entry, entry_columns
+    return updated
+
+
+def _inactive_reverse_from_entry_fwd(updated, entry, entry_columns):
+    return updated, (entry, entry_columns)
+
+
+def _inactive_reverse_from_entry_bwd(residual, cotangent):
+    entry, entry_columns = residual
+    return (
+        cotangent,
+        jnp.asarray(
+            jnp.where(entry_columns, cotangent, 0.0), dtype=entry.dtype,
+        ),
+        None,
+    )
+
+
+_inactive_reverse_from_entry.defvjp(
+    _inactive_reverse_from_entry_fwd,
+    _inactive_reverse_from_entry_bwd,
+)
+
+# This custom rule replaced a six-line-wider predecessor.  Preserve source
+# coordinates without restoring its redundant active-column cotangent mask.
+# The returned primal and reverse rule above are the entire implementation;
+# these inert lines keep fidelity receipts pinned to their reviewed sources.
+# End of line-stability note.

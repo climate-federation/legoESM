@@ -523,6 +523,7 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
         snow=SnowConfig(enabled=True, flooding=False),
         ponds=MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=namthd_pnd),
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        core2_precipitation_closure=False,
     )
 
     pnd_calls: list[str] = []
@@ -546,10 +547,11 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
         lambda *a, **kw: (pnd_calls.append("si3_ice_perm_eff"), real_perm_eff(*a, **kw))[1],
     )
 
-    next_state_pnd, _ = step_sea_ice(
+    next_state_pnd, resp_pnd = step_sea_ice(
         state_pnd, forcing_pnd, ocean_sst, z22, z22, cfg_pnd, U_min=1.0, dt=3600.0
     )
     assert pnd_calls == ["si3_ice_thd_pnd", "si3_pnd_lev", "si3_ice_perm_eff"]
+    assert resp_pnd.ice_concentration_precip is None
 
     # Reverting the wiring of si3_ice_thd_pnd in step_ponds must fail:
     with monkeypatch.context() as mp:

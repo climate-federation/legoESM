@@ -14,8 +14,13 @@ node), ahead of its prognostic-state integration:
 
 from __future__ import annotations
 
+import importlib.util
+import json
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 jax.config.update("jax_enable_x64", True)
@@ -174,6 +179,18 @@ def test_si3_column_step_reverse_mode_finite_on_open_water_and_bare_ice():
     assert bool(jnp.all(jnp.isfinite(g_h))), g_h
     assert float(jnp.abs(g_h[1:]).max()) > 0.0     # ice columns stay live
 
+    def state_loss(value):
+        result = si3_column_step_arrays(
+            value, forcing, 3600.0, c, si3=si3
+        ).exit
+        return sum(jnp.sum(leaf) for leaf in jax.tree.leaves(result))
+
+    state_gradient = jax.grad(state_loss)(state)
+    assert all(
+        bool(jnp.all(jnp.isfinite(leaf)))
+        for leaf in jax.tree.leaves(state_gradient)
+    ), state_gradient
+
 
 def test_si3_column_step_shared_forcing_gradients_finite_with_open_water_batch():
     """All seven shared inputs remain finite with 8 open-water columns."""
@@ -234,37 +251,525 @@ def test_si3_column_step_shared_forcing_gradients_finite_with_open_water_batch()
     assert all(bool(jnp.isfinite(value)) for value in gradients), gradients
 
 
+def _degenerate_four_column_step(*, compiled=False):
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        si3_column_step_arrays,
+    )
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    concentration = jnp.asarray([0.0, 0.0, 5.0e-11, 5.0e-11])
+    h_ice = jnp.asarray([0.0, 0.0, 0.5, 0.5])
+    qlead = jnp.asarray([0.0, -40.0, 0.0, -40.0])
+    zero = jnp.zeros((4,), dtype=jnp.float64)
+    zero_layers = jnp.zeros((4, 3), dtype=jnp.float64)
+    state = SI3ColumnArrays(
+        concentration, h_ice, zero, jnp.full((4,), c.T0),
+        zero_layers, zero_layers, zero, zero_layers, zero,
+    )
+    forcing = SI3SurfaceForcing(
+        qns_ice=zero, qsr_ice=zero, dqns_ice=zero, qtr_ice_top=zero,
+        t_bottom=jnp.full((4,), 271.27), sss=jnp.full((4,), 34.7),
+        evaporation=zero, snow_precipitation=zero, qprec_ice=zero,
+        qcn_ice_bottom=zero, qsb_ice_bottom=zero, fhld=zero, qlead=qlead,
+    )
+    step = lambda value: si3_column_step_arrays(  # noqa: E731
+        value, forcing, 3600.0, c, si3=SI3ThermoConfig()
+    ).exit
+    if compiled:
+        step = jax.jit(step)
+    first = step(state)
+    return first, step(first)
+
+
+@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "jit"])
+def test_degenerate_four_column_two_step_forward_bits_match_lane(compiled):
+    """Pin 920c61d884 on open-water and sub-epsilon columns exactly."""
+    expected = (
+        {
+            "concentration": (0.0, 1.0477509710156091e-05, 5e-11,
+                              1.0477559710156091e-05),
+            "h_ice": (0.0, 0.05, 0.0, 0.050002145361805514),
+            "h_snow": (0.0, 0.0, 0.0, 0.0),
+            "T_surface": (273.15, 273.15, 273.14510067184534,
+                          273.14510067184534),
+            "e_ice": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      305700631.51037043, 305769255.1803446,
+                      306405736.09880507, 305700631.51037043,
+                      305769255.1803446, 306405736.09880507),
+            "e_snow": (0.0,) * 12,
+            "S_bulk": (0.1, 0.1, 0.1, 0.1),
+            "S_layers": (0.1,) * 12,
+            "age_volume": (0.0, 0.037719034956561925, 1.8e-07,
+                           0.03771921495656193),
+        },
+        {
+            "concentration": (0.0, 2.0955019420312182e-05, 0.0,
+                              2.0955069420312182e-05),
+            "h_ice": (0.0, 0.02500000000000001, 0.0,
+                      0.04984625211138035),
+            "h_snow": (0.0, 0.0, 0.0, 0.0),
+            "T_surface": (273.15, 273.1446003491123, 273.15,
+                          271.59905056567794),
+            "e_ice": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      307618229.39976406, 307803557.08903724,
+                      308172027.764088),
+            "e_snow": (0.0,) * 12,
+            "S_bulk": (0.1, 0.1, 0.1, 0.1),
+            "S_layers": (0.1,) * 12,
+            "age_volume": (0.0, 0.11315710486968578, 1.8e-07,
+                           0.11315746486968578),
+        },
+    )
+    if compiled:
+        expected[0].update({
+            "concentration": (0.0, 1.0477509710156093e-05, 5e-11,
+                              1.0477559710156093e-05),
+            "h_ice": (0.0, 0.049999999999999996, 0.0,
+                      0.05000214536180551),
+            "age_volume": (0.0, 0.03771903495656193, 1.8e-07,
+                           0.037719214956561935),
+        })
+        expected[1].update({
+            "concentration": (0.0, 2.0955019420312186e-05, 0.0,
+                              2.0955069420312186e-05),
+            "h_ice": (0.0, 0.025, 0.0, 0.04984625211138034),
+            "age_volume": (0.0, 0.1131571048696858, 1.8e-07,
+                           0.11315746486968581),
+        })
+
+    for actual, wanted in zip(_degenerate_four_column_step(compiled=compiled),
+                              expected, strict=True):
+        for name, leaf in zip(actual._fields, actual, strict=True):
+            np.testing.assert_array_equal(
+                np.asarray(leaf).ravel(), np.asarray(wanted[name]))
+
+
+def test_ice_forming_open_water_gradients_match_main_and_lane_difference():
+    """Formation gradients follow the lane forward and agreed main values."""
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        si3_column_step_arrays,
+    )
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    zero = jnp.zeros((1,), dtype=jnp.float64)
+    zero_layers = jnp.zeros((1, 3), dtype=jnp.float64)
+
+    def run(concentration, h_ice, qlead, t_bottom, sss):
+        state = SI3ColumnArrays(
+            jnp.asarray([concentration]), jnp.asarray([h_ice]), zero,
+            jnp.asarray([c.T0]), zero_layers, zero_layers,
+            zero, zero_layers, zero,
+        )
+        forcing = SI3SurfaceForcing(
+            qns_ice=zero, qsr_ice=zero, dqns_ice=zero,
+            qtr_ice_top=zero, t_bottom=jnp.asarray([t_bottom]),
+            sss=jnp.asarray([sss]), evaporation=zero,
+            snow_precipitation=zero, qprec_ice=zero,
+            qcn_ice_bottom=zero, qsb_ice_bottom=zero, fhld=zero,
+            qlead=jnp.asarray([qlead]),
+        )
+        return si3_column_step_arrays(
+            state, forcing, 3600.0, c, si3=SI3ThermoConfig()
+        ).exit
+
+    def ice_volume(qlead, t_bottom, sss):
+        out = run(0.0, 0.0, qlead, t_bottom, sss)
+        return out.h_ice[0] * out.concentration[0]
+
+    args = (-40.0, 271.27, 34.7)
+    gradient = jax.grad(ice_volume, argnums=(0, 1, 2))(*args)
+    main_gradient = np.asarray((
+        -1.3096887137695114e-08,
+        8.220414129866561e-07,
+        4.470021523873651e-08,
+    ))
+    np.testing.assert_allclose(np.asarray(gradient), main_gradient, rtol=2e-15)
+
+    for index, epsilon in enumerate((1.0e-3, 1.0e-4, 1.0e-4)):
+        plus = list(args)
+        minus = list(args)
+        plus[index] += epsilon
+        minus[index] -= epsilon
+        finite_difference = (
+            ice_volume(*plus) - ice_volume(*minus)
+        ) / (2.0 * epsilon)
+        np.testing.assert_allclose(
+            float(gradient[index]), float(finite_difference), rtol=1e-7
+        )
+
+    concentration_gradient = jax.grad(
+        lambda concentration: run(concentration, 0.5, *args).concentration[0]
+    )(5.0e-11)
+    # Stay wholly below epsi10 while avoiding subtractive cancellation in the
+    # source-rounded forward expression.
+    epsilon = 4.0e-11
+    concentration_difference = (
+        run(5.0e-11 + epsilon, 0.5, *args).concentration[0]
+        - run(5.0e-11 - epsilon, 0.5, *args).concentration[0]
+    ) / (2.0 * epsilon)
+    np.testing.assert_allclose(
+        float(concentration_gradient), float(concentration_difference),
+        rtol=5e-11, atol=0.0,
+    )
+
+    # The dh stage clears a genuinely empty column, so equality of its zero
+    # output with the zero entry value must not manufacture an identity path.
+    def empty_outputs(concentration):
+        out = run(concentration, 0.0, 0.0, args[1], args[2])
+        return jnp.stack((out.concentration[0], out.age_volume[0]))
+
+    np.testing.assert_array_equal(
+        np.asarray(jax.jacrev(empty_outputs)(0.0)), np.zeros(2),
+    )
+
+    age_identity = jax.grad(
+        lambda age: si3_column_step_arrays(
+            SI3ColumnArrays(
+                zero, zero, zero, jnp.asarray([c.T0]), zero_layers,
+                zero_layers, zero, zero_layers, jnp.asarray([age]),
+            ),
+            SI3SurfaceForcing(
+                qns_ice=zero, qsr_ice=zero, dqns_ice=zero,
+                qtr_ice_top=zero, t_bottom=jnp.asarray([args[1]]),
+                sss=jnp.asarray([args[2]]), evaporation=zero,
+                snow_precipitation=zero, qprec_ice=zero,
+                qcn_ice_bottom=zero, qsb_ice_bottom=zero, fhld=zero,
+                qlead=zero,
+            ),
+            3600.0, c, si3=SI3ThermoConfig(),
+        ).exit.age_volume[0]
+    )(0.0)
+    assert float(age_identity) == 1.0
+
+    thickness_gradient = jax.grad(
+        lambda h_ice: run(5.0e-11, h_ice, *args).h_ice[0]
+    )(0.5)
+    thickness_difference = (
+        run(5.0e-11, 0.5 + 1.0e-5, *args).h_ice[0]
+        - run(5.0e-11, 0.5 - 1.0e-5, *args).h_ice[0]
+    ) / 2.0e-5
+    np.testing.assert_allclose(
+        float(thickness_gradient), float(thickness_difference), rtol=1e-6,
+    )
+
+
 def test_inactive_column_guard_stops_h_ice_cotangent():
-    """Removing the entry guard revives cotangents in open-water h_ice."""
+    """The helper-level plant remains bound to its cotangent mask."""
     from legoesm.ice import bitz_lipscomb as bl
 
     active = jnp.asarray([False] * 8 + [True] * 56)
     h_ice = jnp.linspace(0.0, 2.0, 64, dtype=jnp.float64)
     gradient = jax.grad(
-        lambda h: jnp.sum(bl._guard_inactive_columns(h, active, h.dtype))
+        lambda h: jnp.sum(bl.guard_inactive_columns(h, active, h.dtype))
     )(h_ice)
     assert bool(jnp.all(gradient[:8] == 0.0)), gradient
     assert bool(jnp.all(gradient[8:] == 1.0)), gradient
 
 
 def test_cumulative_remap_reverse_mode_finite_at_zero_thickness():
-    """Review F3 on the lane's live remap: a zero-total column must have a
-    finite zero cotangent without reviving main's deleted duplicate remap."""
+    """A discarded sub-epsilon remap has a finite zero cotangent."""
     from legoesm.ice import bitz_lipscomb as bl
 
-    en = jnp.asarray([3.0e8, 2.9e8, 2.8e8])
+    enthalpy = jnp.asarray([3.0e8, 2.9e8, 2.8e8])
 
     def remap(thickness):
         h_old = list(thickness)
-        content_old = list(en * thickness)
-        return bl._cumulative_remap(h_old, content_old, 3, bl.nemo_source_round)
+        content_old = list(enthalpy * thickness)
+        return bl._cumulative_remap(
+            h_old, content_old, 3, bl.nemo_source_round,
+        )
 
-    # A sub-epsilon remap with material confined to the last old layer is the
-    # discarded-column case that exposes NaN cotangents when the guard is
-    # removed.  Evenly splitting a shared total (the former fixture) was
-    # vacuous: its unguarded gradient was already finite.
-    g = jax.grad(lambda h: jnp.sum(remap(h)))(
+    gradient = jax.grad(lambda h: jnp.sum(remap(h)))(
         jnp.asarray([0.0, 0.0, 1.0e-300], dtype=jnp.float64)
     )
-    assert bool(jnp.all(jnp.isfinite(g))), g
-    assert bool(jnp.all(g == 0.0)), g
+    assert bool(jnp.all(jnp.isfinite(gradient))), gradient
+    assert bool(jnp.all(gradient == 0.0)), gradient
+
+
+def test_si3_column_step_remap_reverse_mode_finite_at_tiny_snow():
+    """The live production remap keeps an active tiny-snow gradient finite."""
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        si3_column_step_arrays,
+    )
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    zero = jnp.zeros((1,), dtype=jnp.float64)
+    zero_layers = jnp.zeros((1, 3), dtype=jnp.float64)
+    forcing = SI3SurfaceForcing(
+        qns_ice=zero, qsr_ice=zero, dqns_ice=zero, qtr_ice_top=zero,
+        t_bottom=jnp.asarray([271.27]), sss=jnp.asarray([34.7]),
+        evaporation=zero, snow_precipitation=zero, qprec_ice=zero,
+        qcn_ice_bottom=zero, qsb_ice_bottom=zero, fhld=zero, qlead=zero,
+    )
+
+    def step_exit(thickness):
+        state = SI3ColumnArrays(
+            jnp.asarray([0.5]), jnp.asarray([0.5]), thickness,
+            jnp.asarray([c.T0]), zero_layers,
+            jnp.asarray([[0.0, 0.0, -1.0e8]]), zero, zero_layers, zero,
+        )
+        return si3_column_step_arrays(
+            state, forcing, 3600.0, c, si3=SI3ThermoConfig(),
+        ).exit
+
+    jacobian = jax.jacrev(step_exit)(jnp.asarray([3.0e-200]))
+    for field, leaf in zip(jacobian._fields, jacobian):
+        assert bool(jnp.all(jnp.isfinite(leaf))), f"{field}: {leaf}"
+    np.testing.assert_array_equal(np.asarray(jacobian.h_snow), np.asarray([[1.0]]))
+    for field, leaf in zip(jacobian._fields, jacobian):
+        if field != "h_snow":
+            np.testing.assert_array_equal(
+                np.asarray(leaf), np.zeros_like(np.asarray(leaf)),
+            )
+
+
+def test_si3_column_step_mixed_dtypes_match_lane_and_differentiate():
+    """The reverse-only guards preserve 920c61d884 dtype promotion."""
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        si3_column_step_arrays,
+    )
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    zero64 = jnp.zeros((1,), dtype=jnp.float64)
+    zero_layers64 = jnp.zeros((1, 3), dtype=jnp.float64)
+    state = SI3ColumnArrays(
+        jnp.asarray([5.0e-11], dtype=jnp.float64),
+        jnp.asarray([0.5], dtype=jnp.float64),
+        zero64,
+        jnp.asarray([c.T0], dtype=jnp.float64),
+        zero_layers64,
+        zero_layers64,
+        zero64,
+        zero_layers64,
+        zero64,
+    )
+
+    def forcing(qlead_dtype):
+        return SI3SurfaceForcing(
+            qns_ice=zero64, qsr_ice=zero64, dqns_ice=zero64,
+            qtr_ice_top=zero64, t_bottom=jnp.asarray([271.27]),
+            sss=jnp.asarray([34.7]), evaporation=zero64,
+            snow_precipitation=zero64, qprec_ice=zero64,
+            qcn_ice_bottom=zero64, qsb_ice_bottom=zero64, fhld=zero64,
+            qlead=jnp.asarray([-40.0], dtype=qlead_dtype),
+        )
+
+    def step(value, surface_forcing):
+        return si3_column_step_arrays(
+            value, surface_forcing, 3600.0, c, si3=SI3ThermoConfig(),
+        )
+
+    mixed = step(state, forcing(jnp.float32))
+    all64 = step(state, forcing(jnp.float64))
+    expected_post_do = (
+        [1.0477559710156091e-05], [0.050002145361805514], [0.0],
+        [273.14510067184534],
+        [[305700631.51037043, 305769255.1803446, 306405736.09880507]],
+        [[0.0, 0.0, 0.0]], [0.1], [[0.1, 0.1, 0.1]], [0.0],
+    )
+    expected_exit = (*expected_post_do[:-1], [0.03771921495656193])
+    for mixed_stage, all64_stage in (
+        (mixed.post_do, all64.post_do), (mixed.exit, all64.exit),
+    ):
+        for mixed_leaf, all64_leaf in zip(mixed_stage, all64_stage, strict=True):
+            np.testing.assert_array_equal(
+                np.asarray(mixed_leaf), np.asarray(all64_leaf),
+            )
+    for actual, expected in zip(mixed.post_do, expected_post_do, strict=True):
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    for actual, expected in zip(mixed.exit, expected_exit, strict=True):
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+
+    state32_concentration = state._replace(
+        concentration=state.concentration.astype(jnp.float32),
+    )
+    gradient = jax.grad(
+        lambda concentration: step(
+            state32_concentration._replace(concentration=concentration),
+            forcing(jnp.float64),
+        ).exit.concentration[0]
+    )(state32_concentration.concentration)
+    assert gradient.dtype == jnp.float32
+    np.testing.assert_array_equal(
+        np.asarray(gradient), np.asarray([1.0], dtype=np.float32),
+    )
+
+    state32_energy = state._replace(
+        e_ice=state.e_ice.astype(jnp.float32),
+        age_volume=jnp.asarray([1.25], dtype=jnp.float64),
+    )
+    dtype_result = step(state32_energy, forcing(jnp.float64))
+    assert dtype_result.exit.age_volume.dtype == jnp.float32
+    np.testing.assert_array_equal(
+        np.asarray(dtype_result.exit.age_volume),
+        np.asarray([1.2877188920974731], dtype=np.float32),
+    )
+    age_gradient = jax.grad(
+        lambda age: step(
+            state32_energy._replace(age_volume=age), forcing(jnp.float64),
+        ).exit.age_volume[0]
+    )(jnp.asarray([1.25], dtype=jnp.float32))
+    assert age_gradient.dtype == jnp.float32
+    np.testing.assert_array_equal(
+        np.asarray(age_gradient), np.asarray([1.0], dtype=np.float32),
+    )
+
+
+def test_si3_column_step_full_gradient_sweep_matches_main_or_lane_difference():
+    """All exit/input leaf pairs match the reviewed main/FD oracle, eager/JIT."""
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        si3_column_step_arrays,
+    )
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    concentrations = (0.0, 1e-12, 5e-11, 1e-10, 2e-10, 0.5)
+    thicknesses = (0.0, 0.5)
+    qleads = (0.0, -40.0)
+
+    def vector(concentration, h_ice, qlead):
+        return jnp.asarray((
+            concentration, h_ice, 0.0, c.T0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 271.27, 34.7, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, qlead, 1.0,
+        ), dtype=jnp.float64)
+
+    cases = tuple(
+        (concentration, h_ice, qlead)
+        for concentration in concentrations
+        for h_ice in thicknesses
+        for qlead in qleads
+    )
+    vectors = jnp.stack([vector(*case) for case in cases])
+
+    def step(values):
+        scalar = lambda index: values[index:index + 1]
+        layers = lambda index: jnp.full((1, 3), values[index])
+        state = SI3ColumnArrays(
+            scalar(0), scalar(1), scalar(2), scalar(3), layers(4), layers(5),
+            scalar(6), layers(7), scalar(8),
+        )
+        forcing = SI3SurfaceForcing(
+            qns_ice=scalar(9), qsr_ice=scalar(10), dqns_ice=scalar(11),
+            qtr_ice_top=scalar(12), t_bottom=scalar(13), sss=scalar(14),
+            evaporation=scalar(15), snow_precipitation=scalar(16),
+            qprec_ice=scalar(17), qcn_ice_bottom=scalar(18),
+            qsb_ice_bottom=scalar(19), fhld=scalar(20), qlead=scalar(21),
+            frq_m=scalar(22), sst_m=None,
+        )
+        result = si3_column_step_arrays(
+            state, forcing, 3600.0, c, si3=SI3ThermoConfig(),
+        ).exit
+        return jnp.stack([jnp.sum(leaf) for leaf in result])
+
+    fixture_path = (
+        Path(__file__).parents[1]
+        / "ice/fidelity/fixtures/si3_reverse_sweep_oracle.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    generator_path = (
+        Path(__file__).parents[2]
+        / "scripts/validate/ocean_fidelity/testcases/si3_reverse_sweep_oracle.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "si3_reverse_sweep_oracle", generator_path,
+    )
+    assert spec is not None and spec.loader is not None
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    oracle = generator.decode(fixture["target"])
+    methods = generator.decode(fixture["methods"])
+    steps = generator.decode(fixture["steps"])
+    refinement_steps = generator.decode(fixture["refinement_steps"])
+    fd_rounding_bound = generator.decode(fixture["fd_rounding_bound"])
+    excluded = generator.decode(fixture["excluded"])
+    assert (
+        oracle.shape == methods.shape == steps.shape
+        == refinement_steps.shape == fd_rounding_bound.shape
+        == excluded.shape == (24, 9, 23)
+    )
+    assert fixture["main_sha"] == generator.MAIN_SHA
+    assert fixture["lane_sha"] == generator.LANE_SHA
+    assert fixture["selection"] == generator.SELECTION_RULE
+    assert fixture["fd_rounding_bound_formula"] == generator.FD_ROUNDING_BOUND_FORMULA
+    assert bool(np.all(steps > 0.0))
+    assert bool(np.all(np.isfinite(fd_rounding_bound) & (fd_rounding_bound >= 0.0)))
+    assert np.array_equal(excluded, methods == 4)
+    assert bool(np.all(np.isfinite(oracle[~excluded])))
+    eager = jax.vmap(jax.jacrev(step))(vectors)
+    compiled = jax.jit(jax.vmap(jax.jacrev(step)))(vectors)
+    for mode, actual in (("eager", eager), ("jit", compiled)):
+        actual = np.asarray(actual)
+        assert bool(np.all(np.isfinite(actual))), mode
+        error = np.where(excluded, 0.0, np.abs(actual - oracle))
+        relative = np.where(
+            excluded,
+            0.0,
+            error
+            / np.maximum(
+                np.maximum(np.abs(actual), np.abs(oracle)),
+                np.finfo(np.float64).tiny,
+            ),
+        )
+        passed = excluded | (relative <= 1.0e-6) | (error <= fd_rounding_bound)
+        resolved_relative = np.where(error <= fd_rounding_bound, 0.0, relative)
+        for case, worst in zip(
+            cases, np.max(resolved_relative, axis=(1, 2)), strict=True
+        ):
+            print(
+                f"gradient-sweep {mode} conc={case[0]:.12g} "
+                f"h_ice={case[1]:.1f} qlead={case[2]:.1f} worst_rel={worst:.3e}"
+            )
+        assert bool(np.all(passed)), (
+            mode,
+            int(np.count_nonzero(~passed)),
+            np.unravel_index(
+                int(np.argmax(np.where(passed, -1.0, relative))), relative.shape,
+            ),
+        )
+
+
+def test_si3_reverse_sweep_generator_records_entry_provenance():
+    """The committed fixture records an independent source/stencil/step per entry."""
+    generator_path = (
+        Path(__file__).parents[2]
+        / "scripts/validate/ocean_fidelity/testcases/si3_reverse_sweep_oracle.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "si3_reverse_sweep_oracle_meta", generator_path,
+    )
+    assert spec is not None and spec.loader is not None
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    fixture_path = (
+        Path(__file__).parents[1]
+        / "ice/fidelity/fixtures/si3_reverse_sweep_oracle.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    methods = generator.decode(fixture["methods"])
+    steps = generator.decode(fixture["steps"])
+    refinement_steps = generator.decode(fixture["refinement_steps"])
+    fd_rounding_bound = generator.decode(fixture["fd_rounding_bound"])
+    excluded = generator.decode(fixture["excluded"])
+    assert set(np.unique(methods)).issubset(generator.METHOD_LEGEND)
+    assert bool(np.all(np.isfinite(steps) & (steps > 0.0)))
+    assert bool(np.all(np.isfinite(refinement_steps) & (refinement_steps > 0.0)))
+    assert bool(np.all(np.isfinite(fd_rounding_bound) & (fd_rounding_bound >= 0.0)))
+    assert np.array_equal(excluded, methods == 4)
+    assert len(fixture["excluded_nondifferentiable"]) == int(np.count_nonzero(excluded))
+    assert fixture["selection"] == generator.SELECTION_RULE
+    assert fixture["fd_rounding_bound_formula"] == generator.FD_ROUNDING_BOUND_FORMULA

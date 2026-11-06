@@ -1,0 +1,892 @@
+{
+  "schema": 1,
+  "main_sha": "edd34c24469c834d536c511160ea0c4aef8974ae",
+  "lane_sha": "920c61d884384e18470962568cda8295f0dfbe89",
+  "selection": "main compiled reverse AD iff main/lane forwards agree in the recorded neighbourhood and main AD agrees with the lane finite difference within 1e-6 relative error; otherwise the lane finite difference. For the 36 ice-thermodynamic entries [c, 1|3|4, 2] (outputs h_ice, T_surface, e_ice with respect to h_snow at h_snow = 0.0 on the 12 h_ice = 0.5 cases), the base point h_snow = 0.0 executes the h_snow <= 0.0 no-snow branch while h_snow > 0.0 crosses the strict h_snow > 0.0 guard into the snow-present branch (so the right difference disagrees on 31 of the 36 entries), so these 36 entries are scored against the left (backward) difference at the 1e-6 refinement step along the executed h_snow <= 0.0 branch. Statement-boundary candidates ([c, :, 1] at h_ice = 0.0, and [c, :, 16], [c, 2, 2], [c, 5, 2] at h_ice = 0.5) are excluded as non-differentiable only where measured left and right one-sided lane finite differences disagree by more than both 1e-6 relative error and 1x the entry's own fd_rounding_bound (|fd_right - fd_left| > max(1e-6 * max(|fd_left|, |fd_right|, tiny), fd_rounding_bound))",
+  "fd_rounding_bound_formula": "per-entry float64 subtraction rounding bound of the lane finite-difference stencil, using s(x+-d) = max(|f(x+-d)|, d) on diagonal state entries (output_index == input_index) where the perturbed state leaf enters the column step at scale >= d and s(x+-d) = |f(x+-d)| otherwise, with s(x) = |f(x)|: (|spacing(s(x+d))| + |spacing(s(x-d))|) / (2*d) for central differences, (|spacing(s(x+d))| + |spacing(s(x))|) / d for forward differences, (|spacing(s(x))| + |spacing(s(x-d))|) / d for backward differences, and the 0.5-weighted sum of the two forward-step bounds for two-step averaged evaporation differences; boundary candidates are excluded only when |fd_right - fd_left| > max(1e-6 * max(|fd_left|, |fd_right|, tiny), fd_rounding_bound), and each unexcluded entry passes iff relative_error <= 1e-6 or |error| <= 1x fd_rounding_bound",
+  "method_legend": {
+    "0": "main_ad",
+    "1": "lane_fd_central",
+    "2": "lane_fd_forward",
+    "3": "lane_fd_backward",
+    "4": "excluded_nondifferentiable_boundary"
+  },
+  "cases": [
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      -40.0
+    ],
+    [
+      0.0,
+      0.5,
+      0.0
+    ],
+    [
+      0.0,
+      0.5,
+      -40.0
+    ],
+    [
+      1e-12,
+      0.0,
+      0.0
+    ],
+    [
+      1e-12,
+      0.0,
+      -40.0
+    ],
+    [
+      1e-12,
+      0.5,
+      0.0
+    ],
+    [
+      1e-12,
+      0.5,
+      -40.0
+    ],
+    [
+      5e-11,
+      0.0,
+      0.0
+    ],
+    [
+      5e-11,
+      0.0,
+      -40.0
+    ],
+    [
+      5e-11,
+      0.5,
+      0.0
+    ],
+    [
+      5e-11,
+      0.5,
+      -40.0
+    ],
+    [
+      1e-10,
+      0.0,
+      0.0
+    ],
+    [
+      1e-10,
+      0.0,
+      -40.0
+    ],
+    [
+      1e-10,
+      0.5,
+      0.0
+    ],
+    [
+      1e-10,
+      0.5,
+      -40.0
+    ],
+    [
+      2e-10,
+      0.0,
+      0.0
+    ],
+    [
+      2e-10,
+      0.0,
+      -40.0
+    ],
+    [
+      2e-10,
+      0.5,
+      0.0
+    ],
+    [
+      2e-10,
+      0.5,
+      -40.0
+    ],
+    [
+      0.5,
+      0.0,
+      0.0
+    ],
+    [
+      0.5,
+      0.0,
+      -40.0
+    ],
+    [
+      0.5,
+      0.5,
+      0.0
+    ],
+    [
+      0.5,
+      0.5,
+      -40.0
+    ]
+  ],
+  "output_names": [
+    "concentration",
+    "h_ice",
+    "h_snow",
+    "T_surface",
+    "e_ice",
+    "e_snow",
+    "S_bulk",
+    "S_layers",
+    "age_volume"
+  ],
+  "input_names": [
+    "concentration",
+    "h_ice",
+    "h_snow",
+    "T_surface",
+    "e_ice",
+    "e_snow",
+    "S_bulk",
+    "S_layers",
+    "age_volume",
+    "qns_ice",
+    "qsr_ice",
+    "dqns_ice",
+    "qtr_ice_top",
+    "t_bottom",
+    "sss",
+    "evaporation",
+    "snow_precipitation",
+    "qprec_ice",
+    "qcn_ice_bottom",
+    "qsb_ice_bottom",
+    "fhld",
+    "qlead",
+    "frq_m"
+  ],
+  "target": {
+    "dtype": "<f8",
+    "shape": [
+      24,
+      9,
+      23
+    ],
+    "b85_zlib": "c%1FqeM}Q)90%|Qvu<%lH#RqBB`YLkS~pPk3aRuuCBsb&@g-v<D4JOr&?#)mW?bftkOi3&8_gzaHn3Hzb8I6n;bnImOs5EnDe~eXERxD(h{(EZU3BT%wP$Fhy|%ly*Yf@R^Q0Ge?z!XPe!1TlL?QrRnYV{}1pvU8TZ&MxAW&XQem^#I@pxLYyh*vm@^zZ8-~Z(@S>DXO8afbb17D%;07MS%x>JyG{?nGsTE%eX>0=+|7WiDJ3f4?dR}QUc_Vv6FNa6DwuXwlkiLVm%UhkI~s-bP)q+C$4pLgB&$x=(qaRobC4@p~d7dFS_zgM%c_E>Z5Q*%uN6&rcqk4lN=Ipd>CTSTJXl#-~p7Ot<)Z2V&Stc16IWIvzN?lJF}+0C${^$^jYpF?C*hLNLL=ZS>$eKotEpL2KK#^s{DR~NnRxbAy@zH8KV@|`sbh8?}TityPd5Jb`w#Q&QhRL}pwpO^3Vo!%F!ByXFH1h0z>necg@pzfgVfWQQy?gZw2hlPC&-oQQq5FUSjFGJn$3f%LAlqqDk_Z`u^Gk(4AkXfGc9Xtnv3-=p9czpl8Y_r&man>F3&dWO6`wpq^^y_^`^b+zN;R*J0-2d~T&*o2`?Oy1!0dJ7+xW#wA)7C)tsZB=0V%eUnI<(a`pIleGfqUMfwiQpFFuLh8x>&BJvdSvP<PVqF&O2|UB#D-sE9@CfsPg!CbyDgbYQmV&sE+1X7wQh`jyF(uU=ql8U`oI~0T3SKJFbxLL=xO@0O3Kt1HM3?4ShCmpx(nIkngy~cfRw=#U9amlaY9kDE(zXe91arHPzqw1LwTelD=uX;|a#;VEGctX>`cga+*5Kl>FMC+CkU9dTO*zQ%;Y^);B~QHhIi<42BC7JCX)*^1AjS<U0<iJ9el$z#HT{FePB000<BA9aqSAA_?v{fbbyS0biichCZ7&Q14+9$amc0JKs@!FCAKCG7`nRVh{F-jn?_dxjmg7obz6nrEWM7pT#&GEXbyuMh8`4H}w#)DXk;*3axEATB+6SqpO=wo%}~P&Ex<77z_gxJL*?wCuO#OfPBXRb;k~M2Y7>gCnPRLYvrL{!_*R<`vf4eA>VO@d?%9Negg;(@||E&#?Lk{i?Xi&<N2DH2YNZLV{BVB)7JjR#6HW}%X{+Z38RQ)jEfhUbLiT*t8`UY;ezNxiFfDCNq?M-%b&%#n_u>(YLL=ir`gfFt3aO(eKv2P-oqr2@3_TxzEisX^0z4_Bk|kFy4fA#KdkeWx1R01!Z~kI<^JIv@p+8X!M`_BPNPGw`WhweE4`sly+Lo*?e8kn=;_D0epZd^9`Ts(G#GAD?6~CjMA`iIoyd0_P<QN5cYrs@cR~XBPOydNJ^_eq$ah>J--#r+-vGjcd?#3fo$rVT;*js4&&G(*X9J-?zT+0(`Oe_Y;**<OOljTPJGY;;)*WW$f?MYMx$DkfLuXbUajrY{b@qD0j{nu2t>kAfer~Nh#NadZ@OMuuZYRyT^r87Uty=rj+CMkBuRBdmk{JiB^@bf=SC@@mJ5Y&y#{qT64s{236NdTDznQuA;Q"
+  },
+  "methods": {
+    "dtype": "|u1",
+    "shape": [
+      24,
+      9,
+      23
+    ],
+    "b85_zlib": "c%1E3ixPt%3?tS5|K^FWfol*vaow)DL#39M9LXV}4WdnC6adqZ3ClBn9I{V})Ma1EJ%oYv&32;F!8ho%Vq`U;wHeZ|>}zR}N06S5aXMhKC&+aoCq+bGs}`xt4&|0=7%bdE=hHjg>3|;tL9UZzRw1_iUtZ)1^I+ZyLL?m!TP_kbPRG4dNyoj@5vg~=Hq6r*?(hyR(obxpr5Xkcx6tY99on)D#>GbQo8DnphSUhc@13r6sCTgGWY!whi8--Ryy>`i+&g#BDcn1M>z%?*%+YxP%q$4F"
+  },
+  "steps": {
+    "dtype": "<f8",
+    "shape": [
+      24,
+      9,
+      23
+    ],
+    "b85_zlib": "c%1Fmp-Mwx7{_66VPFz3U?8g|cP1ES8CZ?Vg4H5AgA9gv10r)642G4N)<iUT0~Yhtq-h2*C=7(NAe@~U-|>9qAKouK^;dW+HQQ&q<@M{E^N*)Sl5S~j@%?#up)&XTHdoUf?!27zzh0Bh(&cfd^|_M%`|sXg?A_iK_miyq;e4+;Xtc)r-5oyGwl~K20yj4|H#avoH#avo_mu9`!_Cdj&CSit&CSitJzMUrpq<9e&CSit&CSit&CQ+fj@oJ5+}zyU+}zyU+}zw*?$i3g;OOTeT&Hn!b8~ZZb8~ZZb8}DYj@oJ5+}zyU+}zyU+}zxg-B&?7jhmaBo12@Po12@PJKr6()3~|0xw*Nyxw*NyxhK2(K|76`o12@Po12@Po0~h|9ktWAxw*Nyxw*Nyxw*Ns+<(2?+}zyU+}zyU+}zx==8oEF+}zyU+}zyU+}zyUS?&?YC56Q"
+  },
+  "refinement_steps": {
+    "dtype": "<f8",
+    "shape": [
+      24,
+      9,
+      23
+    ],
+    "b85_zlib": "c%1Fmu`WYl7{_6^(8MI}K)QC~kQi8+SUVDf)z})4v|=%eR2K#kiC{UKl?$+#i-{O&z(69AoNlM*7+-n5<v+aN@T|Yeb9K9Wus*YRd42eH-%9pg)1!~utE4(V`SMVkm>v6ljk#<GYmd9>=Tp*~I^OBE->0*Gf8EY$_q?&yO!Dp<;};A4R(rT#XM?-?%F^&&;pXP%=H}++=H}++F6quZ+}zyU+}zyU+}zyU|I57`w9~k`xw*Nyxw*Nyxw(toQ9F&Bo12@Po12@Po0~h&y}#P*Z+_o|>ojg|Zf<UFZf<UFZtk+~sGY{m&CSit&CSit&CNa9eG;_OxVgExxw*Nyxw*Nyi``K>jhmaBo12@Po12@Pd$c<Z+G*U}+}zyU+}zyU+}y?PsGY{m&CSit&CSit&CQ+X&K%J?jhmaBo12@Po12@PyR18Er*U(0b8~ZZb8~ZZbLY8#0BT$AWd"
+  },
+  "fd_rounding_bound": {
+    "dtype": "<f8",
+    "shape": [
+      24,
+      9,
+      23
+    ],
+    "b85_zlib": "c%1E9O=w(I7`<gGQlwNm*;Hs#NL5@ku|%ZKdvD$=fm*t-i$HA`t|D4pniBj08AwcLXF*9sT$H3xyRaa!w2H10(IRLy#nO$XG-_RxELzkqB+k71eeeFfKU=i9r@q;o!hCc4<(n_}ymJl_Ld?AT&_}-5zGIE(z6c+DRAj!Q^)>mA*3GTIoK|&PpD9MJV;p>J@0z0euZ4-{?>9d$w(dRo{Th02<E#(YH_w~;cfRj<Pre9czjI9;MZ4B~qvzDqS6*N68CSZmm-cktKe}b%^G71ClUOgoT7vI?bEyBFnNN!A#mT_H=yH&pW6#^#6WQ-^pMOYa=3UY^zqo&A`i}SHFWQeAfsUd*6v%$p`iyc<+JW4Y7ecO+I9!553CcaWSzIrE^9_u8^>aFXZ>IgOH+2;45$b!J&nWx;kouksxlZC}363Nv`|fEL){Au}Mxi?AAMOdi>^+g^%=)XdC);VxeSwahpPT0VgvTi7eb$%rp5l4Q@3B2zf};t_d2b5}>%}G$qfkGm)Ax1i`)Z)0Xb;k!-1Hb_->=f1><_t4;!p_=CMf$}Dy|ood;_BuKRE}4cdpgU&kHEt`3{bEQu7Ako$Nh9;hhbjyfdJmgLw~<-Z?f&*C3c~pzq&rO>8mWcf9Xp-oj1Z$<sS>-aF$xZ%w@EDDP-`C+>UwF1p`B+4r~f`!*cPetVjXvhKZ5_C2<X>m-hp;BbPn@3m3k=f$n2fzg0ECv#7(hOY5Wp59USo6EeD);sk5Q{S%gPN<*L>HE3hPVaAd&g$tMzQ5xdAiX2|ITWAMnmFY?&x7zzp5DRW9Zl~*@lG!s@8szn4BkoW9Sq({>mB_bMAAF5-&qe$?@-@WzEkBpqRMw1=o`vsyNB|fxZmO1z6a$wRlZ|jmG3yGcVxe=^G=oTthV0i{=<FVsq!7Jv*($O|EAt)y|%n~n&!CElYP&5^8Fh1yYLhv-6tO1C;a<O_4N|0B}n&4alJU%Ffh8@NY1J9ojd9~ezg}<&o@=R^I!UGIrUY(<DA~X@Y(cyC;It=$6pC#KiBB~9-;evj_&Wn4Mth_C*9va(mAtKKkpUeT!OOi=Zill4w@Lft)ElnJO876NA^+9J5|238oX2GJ6uO|xa)ccgLm$UeCOKOo)g43H*oTu&o=*XAHRo`?{MFa`)nD{v7J467Q|=M^o~7mM}4-^J#o}$%ifb|5TDJ^JDtAI82*~OyrbzI;~tzt%6B^R{)+YkD&Oh!eFV?f1mT^G=U5=#(ew@o@1*7p!aLb}g2Fq7-T~qrL+@bTgF^Hl9Q&BRfAR-w^!_mQ+tXkq9ZLS-7=N$i+l`dqaDwDR_=WZ2R>Qz(K%GOsmvH$G_3gUPmZx_xd^RKB>FW6i!)Md-oy<LP&u7ciI~YD&TJK=^Y{uX3eEHUnmnq-bL%!8K-K%x#_d<hF)*T?-@Fe}eobU9NU_C+E_d;>K_|!8nTK2SaV!Z>H@5DS0m+ye^PM+Su;2k610pgurINr(AI~cr^);k!ylh!-f`A!WdCpmxpXg~iGDc|9~9rxL?pJR`J_-vZqvFGim&sMr8j{0mlzCDP~X6v0_L3}n%?-=*sJXpT-2ki%1zQcYjkgo~CJK4{%D7>TT9T470%^QSwviAgqcWk|b!aKI!0lWw0ynU71#Pd#a7n*Z}k>*YL&Lsc*<lBvwpvrG(-hN@dSZ87ss&nY~5-#7NzFqg(^7Iad&t~U47eRbBE#Jx96Zd?!JiUYAv!(S8hR<f?J6*pjP`ORF@5Ll%k^L?;7|D+#-LTurcLqyP<u|hL3&r)~oM&LP;%Vo^dIvM#IfIw)fbdS9-ofA<JKsU!onAQJ$<sR+ypz^D7`&6#JJ|V79VaI_>>YoA-$TlGxNpaOw(RHF7eRbBP4C$AcGPDp-4jQBw(LDQ0phdSdWZc%*L^lk?-=*sB3Qn2k@f>E-{HR#0P;0KcqjWg7KL{-y#vBKsd<C&PWGOl@Q$r_P<Y4IJAn6~<Q<+P<vZ--jWXXf7>Rc%-<jh1kZ(6$f-1iu-ti0T#U>M@efl|?o|n3~HStsOeYmwJ>E{#IeYQNkgW<E;`OX;-pH0hmGWWzipDj=CVEAlly@TPi+4;_NpmLjdPm-L4_@==~-wWx6{Z_s+RDvqMA>Jvj7neK(qYe5wvEISVcc$_39T48h(>oZvW9K_4yweNEJ9&BsgLl$;2ZMLgdIv4vG5Mx5XONu4zPI7}cHC#P`_}o!eV<L~oz%P?_1Q}I#8ICudrwThahG?L-pS${cX>zY9rGTXzwP^5o^$u}9mP8xmQ3dDzTQ#%e(d4jH!i~PJPPmF&#_p%qx236@7VK3;hpR~LE#;xcd&Rz=^gVPoHueFm+!$YwD!#eYK}4QBy%9XVg8|cpQXO1LUT^zC8*{}ywfbK7n@9s_9dU^J<<0CA>ZNq#C4x7Pw!y(Y)bF2zlPznseC7UPu%m_^7Iad&z9CZ7(Sc2Ph=klnvAmVMLMsK_Iio`j)$Mu>GyJX#B~w}ORz6N`um;YdT}l=Fj@)t^E^Kc-U*Y>WATo9K0)D~JiUX#J4)|h@lG!s@8szn4BkoW9Sq*F^$rT}EGNA4HxiId8U"
+  },
+  "excluded": {
+    "dtype": "|b1",
+    "shape": [
+      24,
+      9,
+      23
+    ],
+    "b85_zlib": "c%1E%!3h8$3<K@{OFMv7sEIT}?xhl{5pE0yL75`Mw{?(*$FgWgy$)q`!*_44tR2^8zl3vT9CnvOI#I7<chEEiyOW?^$L^qM3U((!y^h^M(-iDZf_fdhgQh9iodoeZ6ScJfN&"
+  },
+  "excluded_nondifferentiable": [
+    {
+      "index": [
+        0,
+        3,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -18797557.383536514
+    },
+    {
+      "index": [
+        1,
+        3,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -18797557.383536514
+    },
+    {
+      "index": [
+        2,
+        2,
+        2
+      ],
+      "fd_left": -0.9999999999999999,
+      "fd_right": 1.0
+    },
+    {
+      "index": [
+        2,
+        4,
+        16
+      ],
+      "fd_left": 0.0,
+      "fd_right": -9178756227895.201
+    },
+    {
+      "index": [
+        2,
+        5,
+        2
+      ],
+      "fd_left": -3300366686971284.5,
+      "fd_right": 3300365686856625.0
+    },
+    {
+      "index": [
+        3,
+        2,
+        2
+      ],
+      "fd_left": -0.9999999999999999,
+      "fd_right": 1.0
+    },
+    {
+      "index": [
+        3,
+        4,
+        16
+      ],
+      "fd_left": 0.0,
+      "fd_right": -9178756227895.201
+    },
+    {
+      "index": [
+        3,
+        5,
+        2
+      ],
+      "fd_left": -3300366686971284.5,
+      "fd_right": 3300365686856625.0
+    },
+    {
+      "index": [
+        4,
+        0,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 1e-05
+    },
+    {
+      "index": [
+        4,
+        3,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -18797557.383536514
+    },
+    {
+      "index": [
+        4,
+        8,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 0.036000000000000004
+    },
+    {
+      "index": [
+        5,
+        0,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 9.99999999392329e-06
+    },
+    {
+      "index": [
+        5,
+        1,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -0.04772125875018851
+    },
+    {
+      "index": [
+        5,
+        3,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -18797557.383536514
+    },
+    {
+      "index": [
+        5,
+        8,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 0.03599999999492898
+    },
+    {
+      "index": [
+        6,
+        2,
+        2
+      ],
+      "fd_left": -0.9999999999999999,
+      "fd_right": 1.0
+    },
+    {
+      "index": [
+        6,
+        2,
+        16
+      ],
+      "fd_left": 0.0,
+      "fd_right": 7.200300961523515
+    },
+    {
+      "index": [
+        6,
+        5,
+        2
+      ],
+      "fd_left": -3300366686971284.5,
+      "fd_right": 3300365686856625.0
+    },
+    {
+      "index": [
+        7,
+        2,
+        2
+      ],
+      "fd_left": -0.9999999999999999,
+      "fd_right": 1.0
+    },
+    {
+      "index": [
+        7,
+        2,
+        16
+      ],
+      "fd_left": 0.0,
+      "fd_right": 7.200300961523515
+    },
+    {
+      "index": [
+        7,
+        5,
+        2
+      ],
+      "fd_left": -3300366686971284.5,
+      "fd_right": 3300365686856625.0
+    },
+    {
+      "index": [
+        8,
+        0,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 0.0005
+    },
+    {
+      "index": [
+        8,
+        3,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -18797557.383536514
+    },
+    {
+      "index": [
+        8,
+        8,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 1.8
+    },
+    {
+      "index": [
+        9,
+        0,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 0.0005000000000010964
+    },
+    {
+      "index": [
+        9,
+        1,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -2.3860517803231396
+    },
+    {
+      "index": [
+        9,
+        3,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -18797557.383536514
+    },
+    {
+      "index": [
+        9,
+        8,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 1.8000000000240046
+    },
+    {
+      "index": [
+        10,
+        2,
+        2
+      ],
+      "fd_left": -0.9999999999999999,
+      "fd_right": 1.0
+    },
+    {
+      "index": [
+        10,
+        2,
+        16
+      ],
+      "fd_left": 0.0,
+      "fd_right": 7.200010284949795
+    },
+    {
+      "index": [
+        10,
+        5,
+        2
+      ],
+      "fd_left": -3300366686971284.5,
+      "fd_right": 3300365686856625.0
+    },
+    {
+      "index": [
+        11,
+        2,
+        2
+      ],
+      "fd_left": -0.9999999999999999,
+      "fd_right": 1.0
+    },
+    {
+      "index": [
+        11,
+        2,
+        16
+      ],
+      "fd_left": 0.0,
+      "fd_right": 7.200010284949795
+    },
+    {
+      "index": [
+        11,
+        5,
+        2
+      ],
+      "fd_left": -3300366686971284.5,
+      "fd_right": 3300365686856625.0
+    },
+    {
+      "index": [
+        12,
+        0,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 0.001
+    },
+    {
+      "index": [
+        12,
+        3,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -18797557.383536514
+    },
+    {
+      "index": [
+        12,
+        8,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 3.6
+    },
+    {
+      "index": [
+        13,
+        0,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 0.0010000000000021927
+    },
+    {
+      "index": [
+        13,
+        1,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -4.772080787820987
+    },
+    {
+      "index": [
+        13,
+        3,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -18797557.383536514
+    },
+    {
+      "index": [
+        13,
+        8,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 3.6000000000480092
+    },
+    {
+      "index": [
+        14,
+        2,
+        2
+      ],
+      "fd_left": -0.9999999999999999,
+      "fd_right": 1.0
+    },
+    {
+      "index": [
+        14,
+        2,
+        16
+      ],
+      "fd_left": 0.0,
+      "fd_right": 7.199998173425891
+    },
+    {
+      "index": [
+        14,
+        5,
+        2
+      ],
+      "fd_left": -3300366686971284.5,
+      "fd_right": 3300365686856625.0
+    },
+    {
+      "index": [
+        15,
+        2,
+        2
+      ],
+      "fd_left": -0.9999999999999999,
+      "fd_right": 1.0
+    },
+    {
+      "index": [
+        15,
+        2,
+        16
+      ],
+      "fd_left": 0.0,
+      "fd_right": 7.199998173425891
+    },
+    {
+      "index": [
+        15,
+        5,
+        2
+      ],
+      "fd_left": -3300366686971284.5,
+      "fd_right": 3300365686856625.0
+    },
+    {
+      "index": [
+        16,
+        0,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 0.002
+    },
+    {
+      "index": [
+        16,
+        3,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -18797557.383536514
+    },
+    {
+      "index": [
+        16,
+        8,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 7.2
+    },
+    {
+      "index": [
+        17,
+        0,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 0.0020000000000043854
+    },
+    {
+      "index": [
+        17,
+        1,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -9.544070485451028
+    },
+    {
+      "index": [
+        17,
+        3,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -18797557.383536514
+    },
+    {
+      "index": [
+        17,
+        8,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 7.2000000000266295
+    },
+    {
+      "index": [
+        18,
+        2,
+        2
+      ],
+      "fd_left": -0.9999999999999999,
+      "fd_right": 1.0
+    },
+    {
+      "index": [
+        18,
+        2,
+        16
+      ],
+      "fd_left": 0.0,
+      "fd_right": 7.199998173425891
+    },
+    {
+      "index": [
+        18,
+        5,
+        2
+      ],
+      "fd_left": -3300366686971284.5,
+      "fd_right": 3300365686856625.0
+    },
+    {
+      "index": [
+        19,
+        2,
+        2
+      ],
+      "fd_left": -0.9999999999999999,
+      "fd_right": 1.0
+    },
+    {
+      "index": [
+        19,
+        2,
+        16
+      ],
+      "fd_left": 0.0,
+      "fd_right": 7.199998173425891
+    },
+    {
+      "index": [
+        19,
+        5,
+        2
+      ],
+      "fd_left": -3300366686971284.5,
+      "fd_right": 3300365686856625.0
+    },
+    {
+      "index": [
+        20,
+        0,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 5000000.0
+    },
+    {
+      "index": [
+        20,
+        3,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -18797557.383536514
+    },
+    {
+      "index": [
+        20,
+        8,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 18000000000.0
+    },
+    {
+      "index": [
+        21,
+        0,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 5000000.0
+    },
+    {
+      "index": [
+        21,
+        1,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -499989.5227098417
+    },
+    {
+      "index": [
+        21,
+        3,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": -18797557.383536514
+    },
+    {
+      "index": [
+        21,
+        8,
+        1
+      ],
+      "fd_left": 0.0,
+      "fd_right": 18000000000.0
+    },
+    {
+      "index": [
+        22,
+        2,
+        2
+      ],
+      "fd_left": -0.9999999999999999,
+      "fd_right": 1.0
+    },
+    {
+      "index": [
+        22,
+        2,
+        16
+      ],
+      "fd_left": 0.0,
+      "fd_right": 8.009928065778764
+    },
+    {
+      "index": [
+        22,
+        5,
+        2
+      ],
+      "fd_left": -3300366686971284.5,
+      "fd_right": 3300365686856625.0
+    },
+    {
+      "index": [
+        23,
+        2,
+        2
+      ],
+      "fd_left": -0.9999999999999999,
+      "fd_right": 1.0
+    },
+    {
+      "index": [
+        23,
+        2,
+        16
+      ],
+      "fd_left": 0.0,
+      "fd_right": 8.009928065778764
+    },
+    {
+      "index": [
+        23,
+        5,
+        2
+      ],
+      "fd_left": -3300366686971284.5,
+      "fd_right": 3300365686856625.0
+    }
+  ],
+  "method_counts": {
+    "main_ad": 3744,
+    "lane_fd_central": 389,
+    "lane_fd_forward": 736,
+    "lane_fd_backward": 26,
+    "excluded_nondifferentiable_boundary": 73
+  }
+}
