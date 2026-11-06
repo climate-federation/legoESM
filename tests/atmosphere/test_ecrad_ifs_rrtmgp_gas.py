@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import jax
+import jax.experimental
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -62,7 +63,23 @@ def test_planck_terms_sum_to_a_blackbody_and_sun_to_the_constant():
     sigma_t4 = constants.sigma_sb * 280.0**4
     assert float(jnp.sum(g.lw_emission[0])) == pytest.approx(sigma_t4, rel=2e-3)
     assert float(jnp.sum(g.planck_hl[0, -1])) == pytest.approx(sigma_t4, rel=2e-3)
+    assert float(jnp.sum(g.planck_hl[0, 0])) == pytest.approx(sigma_t4, rel=2e-3)
     assert float(jnp.sum(g.incoming_sw[0])) == pytest.approx(1361.0, rel=1e-12)
+
+
+def test_level_sources_follow_the_level_temperature_top_down():
+    p = jnp.tile(jnp.geomspace(100.0, 1.0e5, 5), (1, 1))
+    t = jnp.linspace(200.0, 300.0, 5)[None, :]
+    g = go.gas_optics(p, t, jnp.zeros((1, 4, 12)), jnp.full((1,), 300.0),
+                      jnp.zeros((1, go.band_from_g_lw().size)), 1361.0, constants.g_ecrad, 1e-15)
+    level = np.asarray(jnp.sum(g.planck_hl[0], axis=-1))
+    np.testing.assert_allclose(level, constants.sigma_sb * np.asarray(t[0])**4, rtol=0.1)
+
+
+def test_tables_follow_a_precision_change():
+    with jax.experimental.disable_x64():
+        assert go._optics().gas_optics_lw.kmajor.dtype == jnp.float32
+    assert go._optics().gas_optics_lw.kmajor.dtype == jnp.float64
 
 
 def test_gas_optics_shapes_are_column_first_top_down():

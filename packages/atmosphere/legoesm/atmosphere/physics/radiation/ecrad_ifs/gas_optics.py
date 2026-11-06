@@ -11,7 +11,6 @@ molecular weights below, O2 fixed.  RRTMGP gases the lane does not carry take th
 RRTMGP library's value.
 """
 
-import functools
 from typing import NamedTuple
 
 import jax
@@ -74,9 +73,9 @@ class GasOptics(NamedTuple):
     incoming_sw: jnp.ndarray
 
 
-@functools.lru_cache(maxsize=1)
 def _optics():
-    # The first call can land inside a jit trace; tables must stay concrete.
+    # RRTMGP caches this per precision.  The first call can land inside a jit
+    # trace; tables must stay concrete.
     with jax.ensure_compile_time_eval():
         return RRTMGP.from_legoesm_config(RRTMGPConfig(include_clouds=False)).optics_lib
 
