@@ -833,7 +833,8 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             p_full = p_s_new[..., None] * sigma_full
             excess = saturation_adjustment_increment(
                 T_upd, q_v_upd, p_full, dt,
-                rh_width=SEGMENT_SAT_ADJUST_RH_WIDTH)
+                rh_width=args.get("sat_adjust_rh_width",
+                                  SEGMENT_SAT_ADJUST_RH_WIDTH))
             T_upd = T_upd + constants.L_v * excess / constants.c_pd
             # the condensate rains out WITH its mass (F13): p_s falls by the
             # column excess, every moisture field is re-weighted

@@ -347,7 +347,7 @@ def _hard_saturation_rate_limit(condensation, q_v, dt, hard_max_heating_K,
 def hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
                           hard_threshold, hard_max_heating_K,
                           sat_fn=saturation_specific_humidity,
-                          activation_width=None):
+                          hard_step=False):
     """Blend the on-curve hard adjustment into ``condensation`` + rate-limit.
 
     The ONE place the reviewed hard-adjustment logic lives, shared by
@@ -383,11 +383,10 @@ def hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
        where a cap binds, where the per-step condensation is constant (correctly
        zero sensitivity).
 
-    ``activation_width`` [RH]: ``None`` keeps the ramp
-    ``sigmoid(_HARD_SAT_MASK_SHARPNESS * (RH - hard_threshold))`` (the
-    microphysics callers, unchanged); a float ``w > 0`` uses
-    ``sigmoid((RH - hard_threshold) / w)``; ``0.0`` is the hard step
-    ``RH > hard_threshold`` (the exact on-curve adjustment).
+    ``hard_step=True`` replaces the ramp
+    ``sigmoid(_HARD_SAT_MASK_SHARPNESS * (RH - hard_threshold))`` by the step
+    ``RH > hard_threshold`` (the exact on-curve adjustment; used by
+    :func:`saturation_adjustment_increment`).
 
     Returns the final condensation rate [kg/kg/s].
     """
@@ -401,22 +400,19 @@ def hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
         cond_hard = _hard_saturation_condensation(T, q_v, p_full, dt, q_sat,
                                                   sat_fn=sat_fn)
     rel_humidity = q_v / jnp.maximum(q_sat, _HARD_SAT_QSAT_FLOOR)
-    if activation_width is None:
-        activation = jax.nn.sigmoid(
-            _HARD_SAT_MASK_SHARPNESS * (rel_humidity - hard_threshold))
-    elif activation_width == 0.0:
+    if hard_step:
         activation = (rel_humidity > hard_threshold).astype(cond_hard.dtype)
     else:
         activation = jax.nn.sigmoid(
-            (rel_humidity - hard_threshold) / activation_width)
+            _HARD_SAT_MASK_SHARPNESS * (rel_humidity - hard_threshold))
     blended = condensation + activation * (cond_hard - condensation)
     condensation = jnp.minimum(blended, cond_hard)     # no overshoot past curve
     return _hard_saturation_rate_limit(condensation, q_v, dt, hard_max_heating_K)
 
 
-# Default RH width of the segment-tail adjustment's smooth switch (RULE 5):
-# the microphysics blend's own ramp, 1/_HARD_SAT_MASK_SHARPNESS (voted Claude +
-# GLM over codex's 0.003, 2026-11-06).  0.0 = the hard step (exact adjustment).
+# Default width of the segment-tail adjustment's smooth switch (RULE 5), as a
+# fraction of q_sat: 1/_HARD_SAT_MASK_SHARPNESS (voted Claude + GLM over codex's
+# 0.003, 2026-11-06).  0.0 = the exact adjustment.
 SEGMENT_SAT_ADJUST_RH_WIDTH = 1.0 / _HARD_SAT_MASK_SHARPNESS
 
 
@@ -430,8 +426,14 @@ def saturation_adjustment_increment(T, q_v, p_full, dt, *, rh_width,
     [Pa].  The converged on-curve solve of :func:`hard_saturation_blend`
     (implicit-function gradient; ``c_pd T + L_v q_v`` conserved by the caller's
     ``T += L_v/c_pd * dq``), compared like with like against
-    ``saturation_specific_humidity``, centred on RH = 1, the switch smoothed
-    over ``rh_width`` (0.0 = hard), the reviewed 5 K per-step heating cap.
+    ``saturation_specific_humidity``, the reviewed 5 K per-step heating cap,
+    and the switch at saturation smoothed to C1 (3-way vote 2026-11-06)::
+
+        dq = d * (1 - exp(-d / s)),   s = rh_width * q_sat(T)
+
+    with ``d`` the capped exact drain (0 at RH <= 1).  ``dq`` is exactly 0 in
+    sub-saturated air, has zero slope at saturation and tends to ``d`` for
+    ``d >> s``; ``rh_width = 0`` gives ``d`` (the exact adjustment).
 
     Replaces ``dq = max(q_v - r_sat(T), 0)``, which condensed the whole excess
     at the pre-adjustment temperature (no ``1/(1 + gamma)``): it overshot to
@@ -439,17 +441,24 @@ def saturation_adjustment_increment(T, q_v, p_full, dt, *, rh_width,
     cells adjusted on consecutive steps -- a 1e77 gradient after 720 lat-lon
     steps (2026-11-06).
 
-    KNOWN DIFFERENCE from the exact adjustment (``rh_width = 0``): at the
-    default width the switch is 0.5 at RH = 1, so a cell slightly above
-    saturation drains only part of its excess per step and stays slightly
-    super-saturated; the per-case gaps are stored in
-    tests/unit/test_segment_saturation_adjustment.py.
+    KNOWN DIFFERENCE from the exact adjustment (``rh_width = 0``): a cell
+    slightly above saturation (``d`` not >> ``s``) drains only part of its
+    excess per step and stays slightly super-saturated; the per-case gaps are
+    stored in tests/unit/test_segment_saturation_adjustment.py.
     """
+    rh_width = float(rh_width)      # static: selects the hard/smooth branch
+    if not (math.isfinite(rh_width) and rh_width >= 0.0):
+        raise ValueError(
+            f"saturation adjustment rh_width must be finite and >= 0 "
+            f"(0.0 = hard step), got {rh_width!r}")
     q_sat = saturation_specific_humidity(T, p_full)
-    rate = hard_saturation_blend(
+    d = dt * hard_saturation_blend(
         jnp.zeros_like(q_v), T, q_v, p_full, dt, q_sat, 1.0, max_heating_K,
-        sat_fn=saturation_specific_humidity, activation_width=rh_width)
-    return rate * dt
+        sat_fn=saturation_specific_humidity, hard_step=True)
+    if rh_width == 0.0:
+        return d
+    s = rh_width * jnp.maximum(q_sat, _HARD_SAT_QSAT_FLOOR)
+    return -d * jnp.expm1(-d / s)
 
 
 def hard_saturation_drain(T, q_v, p_full, dt,

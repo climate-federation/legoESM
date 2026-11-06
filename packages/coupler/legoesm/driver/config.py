@@ -1307,8 +1307,8 @@ class ExperimentConfig(NamedTuple):
     # default borrow it is ignored there.
     energy_consistent_moisture_clip: bool = False
     # Segment-tail saturation adjustment (runs only with microphysics='none'):
-    # RH width [-] of the smooth activation onto the saturation curve.
-    # Default 1/30 (3-way vote 2026-11); 0.0 = the exact hard step.  See
+    # width [fraction of q_sat] of the C1 smoothing at saturation.
+    # Default 1/30 (3-way vote 2026-11); 0.0 = the exact adjustment.  See
     # microphysics._warm_rain.saturation_adjustment_increment (KNOWN DIFFERENCE).
     sat_adjust_rh_width: float = SEGMENT_SAT_ADJUST_RH_WIDTH
     # Resolved-wind moisture advection (issue #771): attach q_v/q_c/q_r/q_i/
@@ -5249,6 +5249,8 @@ class ExperimentConfig(NamedTuple):
             fix_moisture=getattr(amip_cfg, 'fix_moisture', False),
             energy_consistent_moisture_clip=getattr(
                 amip_cfg, 'energy_consistent_moisture_clip', False),
+            sat_adjust_rh_width=getattr(
+                amip_cfg, "sat_adjust_rh_width", SEGMENT_SAT_ADJUST_RH_WIDTH),
             moisture_advection=getattr(amip_cfg, 'moisture_advection', False),
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
@@ -5462,6 +5464,7 @@ class ExperimentConfig(NamedTuple):
             gravity_wave_drag=self.gravity_wave_drag,
             fix_moisture=self.fix_moisture,
             energy_consistent_moisture_clip=self.energy_consistent_moisture_clip,
+            sat_adjust_rh_width=self.sat_adjust_rh_width,
             topography=self.topography,
             topo_smoothing=self.topo_smoothing,
             T_init=self.T_init,

@@ -2502,12 +2502,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--energy-consistent-moisture-clip",
                         action="store_true", default=False)
     # Segment-tail saturation adjustment width (microphysics none only):
-    # RH width of the smooth activation; 0.0 = exact hard step.
+    # width [fraction of q_sat] of the C1 smoothing; 0.0 = exact adjustment.
     parser.add_argument("--sat-adjust-rh-width", type=float,
                         default=SEGMENT_SAT_ADJUST_RH_WIDTH,
-                        help="RH width [-] of the smooth saturation-adjustment "
-                             "activation used with --microphysics none "
-                             "(0.0 = exact hard step).")
+                        help="Width [fraction of q_sat] of the smoothing of "
+                             "the saturation adjustment used with "
+                             "--microphysics none (0.0 = exact adjustment).")
     # Resolved-wind moisture advection through the cdgrid dycore (issue #771).
     # OPT-IN / experimental (advective form, not discretely mass-conserving) —
     # default OFF is bit-identical to the legacy column-locked moisture path.

@@ -1881,7 +1881,7 @@ def finalize_split_step(carry, lz, statics):
     if statics.do_sat_adjust:
         p_full = p_s_new[..., None] * statics.sigma_full
         # Converged on-curve adjustment, specific humidity vs specific
-        # saturation, smooth switch (width statics.sat_adjust_rh_width).
+        # saturation, C1 at saturation (width statics.sat_adjust_rh_width).
         excess = saturation_adjustment_increment(
             T_upd, q_v_upd, p_full, statics.dt,
             rh_width=statics.sat_adjust_rh_width)
@@ -2197,8 +2197,8 @@ def build_segment_fn(
         kernels, and ``.raw`` stays the non-JIT, non-donating function
         that the training drivers differentiate through.
     sat_adjust_rh_width : float, optional
-        RH width [-] of the smooth switch of the tail saturation adjustment
-        (``microphysics == "none"``; 0.0 = hard step, the exact adjustment).
+        Width [fraction of q_sat] of the C1 smoothing of the tail saturation
+        adjustment (``microphysics == "none"``; 0.0 = the exact adjustment).
         Default ``SEGMENT_SAT_ADJUST_RH_WIDTH`` (= ExperimentConfig's).
     energy_consistent_moisture_clip : bool, optional
         Issue #323.  When ``True``, the physics tracer update's vapour floor

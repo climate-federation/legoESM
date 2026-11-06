@@ -165,6 +165,14 @@ class TestAMIPConversion:
         assert restored.physics_parameterization_layers == 4
         assert restored.physics_parameterization_seed == 7
 
+    def test_sat_adjust_rh_width_survives_amip_roundtrip(self):
+        cfg = ExperimentConfig(sat_adjust_rh_width=0.0)
+        restored = ExperimentConfig.from_amip_config(cfg.to_amip_config())
+        assert restored.sat_adjust_rh_width == 0.0
+        amip2 = amip_config_from_dict(json.loads(json.dumps(
+            amip_config_to_dict(cfg.to_amip_config()))))
+        assert amip2.sat_adjust_rh_width == 0.0
+
     def test_from_amip_roundtrip(self):
         amip = AMIPExperimentConfig(
             resolution=24,

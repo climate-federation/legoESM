@@ -1092,6 +1092,7 @@ def _build_segment_benchmark(
         dt=dt,
         rad_update_steps=RAD_UPDATE_STEPS,
         microphysics=config.microphysics,
+        sat_adjust_rh_width=config.sat_adjust_rh_width,
         fix_moisture=config.fix_moisture,
         fix_mass=config.dycore.fix_mass,
         fric_decay=driver._fric_decay,

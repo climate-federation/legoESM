@@ -15,6 +15,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    SEGMENT_SAT_ADJUST_RH_WIDTH)
 
 
 class AMIPExperimentConfig(NamedTuple):
@@ -178,6 +180,9 @@ class AMIPExperimentConfig(NamedTuple):
     # Issue #323: the q_v floor also books each cell's latent heat (per-cell
     # moist-static-energy-conserving borrow).  Opt-in for kessler+sbm.
     energy_consistent_moisture_clip: bool = False
+    # Segment-tail saturation adjustment switch width (microphysics none);
+    # mirrors ExperimentConfig.sat_adjust_rh_width.
+    sat_adjust_rh_width: float = SEGMENT_SAT_ADJUST_RH_WIDTH
 
     # Topography
     topography: str = "flat"  # "flat", "gaussian", or path to NetCDF file
