@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import latent_heat_vaporization, saturation_mixing_ratio
 from legoesm.forcing.time_utils import daily_forcing_bucket, day_to_calendar
 
 from legoesm.core.conservation import (
@@ -4408,7 +4408,7 @@ class ModelDriver:
         silently, the issue-#405 bug class)."""
         import numpy as _np
         from legoesm.land import init_multilayer_land_state, aridity_theta_init
-        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.thermo import latent_heat_vaporization, saturation_mixing_ratio
         from legoesm.land.clm_surface_map import (
             load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
         )
@@ -13384,6 +13384,20 @@ class ModelDriver:
         # knob over land; the turbulence factory then needs f_land even when
         # the static knob is at its neutral 1.0.
         _land_beta_soil_on = bool(getattr(cfg, "land_beta_soil", False))
+        # Prescribed land (atmosphere-only): the file's climatology stands in
+        # for the land tile on the three hand-off channels below; the land
+        # fraction is threaded into the turbulence factory exactly as for the
+        # interactive tile, so the flux keys are consumed, not refused.
+        _land_presc_path = str(getattr(cfg, "land_prescribed_flux_file", "") or "")
+        _land_presc_on = bool(_land_presc_path)
+        self._land_presc = None
+        if _land_presc_on:
+            from legoesm.forcing.prescribed_land import load_prescribed_land
+            self._land_presc = load_prescribed_land(_land_presc_path, self.grid)
+            logger.info(
+                "  Prescribed land: %s (%d anchors; land fraction blends ts, "
+                "hfss, hfls over land; no land tile)",
+                _land_presc_path, int(self._land_presc.times_doy.size))
         _land_lapse_K_m = (
             float(getattr(cfg, "land_lapse_K_per_km", 0.0)) * 1.0e-3)
         _f_land_cells = None
@@ -13569,7 +13583,8 @@ class ModelDriver:
                                 column_mesh=_column_mesh, need_rad=need_rad,
                                 f_land=(_f_land_cells
                                         if (_land_beta != 1.0
-                                            or _land_beta_soil_on)
+                                            or _land_beta_soil_on
+                                            or _land_presc_on)
                                         else None),
                                 land_beta=_land_beta,
                                 budget_ledger=_budget_ledger_on,
@@ -15566,6 +15581,24 @@ class ModelDriver:
         # LEGOESM_DIGEST_EVERY_STEPS=N: per-step restart-set digest log
         # (bitwise gate of refactors); off by default
         _DIGEST_EVERY = int(os.environ.get("LEGOESM_DIGEST_EVERY_STEPS", "0"))
+        def _presc_land_arrays(_day):
+            """Prescribed-land channels at simulated day ``_day`` (host
+            interpolation, then the lane's dtype)."""
+            from legoesm.forcing.prescribed_land import prescribed_land_at_day
+            _ts, _sh, _lh = prescribed_land_at_day(self._land_presc, float(_day))
+            _dt_ = self.state.p_s.data.dtype
+            _ts = jnp.asarray(_ts, dtype=_dt_)
+            _lh = jnp.asarray(_lh, dtype=_dt_)
+            return (_ts, jnp.asarray(_sh, dtype=_dt_), _lh,
+                    _lh / latent_heat_vaporization(_ts))
+
+        if _land_presc_on:
+            # Seed so the very first step already blends the prescribed land
+            # (the interactive tile has a one-step bootstrap lag instead).
+            (_land_T_skin, _land_shflx_cells, _land_lhflx_cells,
+             _land_evap_cells) = _presc_land_arrays(
+                _DAY_ORIGIN + start_step * DT / 86400.0)
+
         for step in range(n_steps_total):
             if step in _trace_edges:
                 jax.block_until_ready(self.state)
@@ -15855,7 +15888,7 @@ class ModelDriver:
                 # before the first land step (_land_T_skin None) the anchor is
                 # the unmodified SST field (incl. the lapse fallback) — the
                 # cold-start value the land tile itself was initialized from.
-                if (_land_ml_on and _land_T_skin is not None
+                if ((_land_ml_on or _land_presc_on) and _land_T_skin is not None
                         and "T_sfc" in _forcing):
                     _forcing["T_sfc"] = (
                         (1.0 - _f_land_cells) * _forcing["T_sfc"]
@@ -16059,6 +16092,11 @@ class ModelDriver:
             # no host sync; its skin T enters next step's forcing blend above.
             # Skipped (state held) only until the first radiation solve
             # populates the downwelling export.
+            if _land_presc_on:
+                # Prescribed land: refresh the three channels for the NEXT
+                # step's blend (same one-step lag as the interactive tile).
+                (_land_T_skin, _land_shflx_cells, _land_lhflx_cells,
+                 _land_evap_cells) = _presc_land_arrays(_force_day)
             if _land_ml_on:
                 _a2s = _marshal_land_forcing()
                 if _a2s is not None:

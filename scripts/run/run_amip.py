@@ -1807,6 +1807,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "is an error rather than a silent override. "
                              "Omitting it leaves those two flags in charge, so "
                              "existing decks are unaffected.")
+    parser.add_argument("--land-prescribed-flux-file", type=str,
+                        default=_EXPERIMENT_DEFAULTS.land_prescribed_flux_file,
+                        dest="land_prescribed_flux_file",
+                        help="Atmosphere-only AMIP (MPAS lane): NetCDF monthly "
+                             "climatology of land skin temperature ts [K] and "
+                             "land heat fluxes hfss/hfls [W/m2, positive up] "
+                             "(scripts/data/build_era5_prescribed_land.py). "
+                             "Replaces the land tile through the same T_sfc / "
+                             "shflx_land / lhflx_land channels; requires "
+                             "--no-use-multilayer-land and a land fraction.")
     parser.add_argument("--use-multilayer-land", default=False,
                         action=argparse.BooleanOptionalAction,
                         help="Replace the slab land tile with the differentiable "
@@ -3123,6 +3133,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
         land_dry_soil_albedo_boost=args.land_dry_soil_albedo_boost,
+        land_prescribed_flux_file=args.land_prescribed_flux_file,
         land_soil_freeze_thaw=args.land_soil_freeze_thaw,
         land_snow_scheme=args.land_snow_scheme,
         land_snow_emissivity=args.land_snow_emissivity,

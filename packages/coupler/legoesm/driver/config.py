@@ -1412,6 +1412,12 @@ class ExperimentConfig(NamedTuple):
     # slab knobs (C_land, emissivity_land) become unused and
     # the multilayer config below takes over.
     use_multilayer_land: bool = False
+    # Prescribed land surface (atmosphere-only AMIP, MPAS lane): a monthly
+    # climatology file of land skin temperature and land sensible/latent heat
+    # fluxes (scripts/data/build_era5_prescribed_land.py) replaces the land
+    # tile through the SAME three channels it hands over (T_sfc blend over the
+    # land fraction, forcing["shflx_land"] / ["lhflx_land"]).  Empty = off.
+    land_prescribed_flux_file: str = ""
     # Land-tile call interval [s]; 0.0 (default) advances the land every
     # host step (legacy).  A positive value calls the tile every
     # round(land_update_seconds/dt) steps with the atmosphere forcing
@@ -2389,6 +2395,24 @@ class ExperimentConfig(NamedTuple):
                     "land_fraction_source='zero' with a land tile "
                     "(use_multilayer_land / slab_land_active): land physics "
                     "on no land")
+        if self.land_prescribed_flux_file:
+            if self.grid.grid_type != "mpas":
+                errors.append(
+                    "land_prescribed_flux_file is an MPAS-lane option (the lane "
+                    "that hands the atmosphere the land's own fluxes); got "
+                    f"grid_type={self.grid.grid_type!r}")
+            if self.use_multilayer_land or self.slab_land_active:
+                errors.append(
+                    "land_prescribed_flux_file replaces the land tile: set "
+                    "use_multilayer_land=False and slab_land_active=False")
+            if self.land_beta_soil:
+                errors.append(
+                    "land_prescribed_flux_file with land_beta_soil=True: there is "
+                    "no soil to derive beta_soil from")
+            if not self.land_mask_path and self.land_fraction_source == "zero":
+                errors.append(
+                    "land_prescribed_flux_file needs a land fraction (land_mask_path "
+                    "or land_fraction_source) to blend the prescribed land in")
         # Owner decision 2026-08-16: conserving form always, and any
         # NON-conserving form must ANNOUNCE itself when invoked. These are
         # warnings, not errors — the legacy/exception paths stay selectable

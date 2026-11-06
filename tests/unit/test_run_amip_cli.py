@@ -6193,3 +6193,24 @@ def test_land_dry_soil_albedo_boost_out_of_range_is_refused(bad):
         "--dataset", "analytical", "--land-dry-soil-albedo-boost", bad]), parser))
     with pytest.raises(ValueError, match="land_dry_soil_albedo_boost"):
         cfg.validate_strict()
+
+
+def test_land_prescribed_flux_file_flag_flows_to_config():
+    """--land-prescribed-flux-file round-trips; empty = off."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_prescribed_flux_file == ""
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-prescribed-flux-file", "/x/presc.nc",
+    ]), parser))
+    assert cfg.land_prescribed_flux_file == "/x/presc.nc"
+
+
+def test_land_prescribed_flux_file_refuses_the_land_tile():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-prescribed-flux-file", "/x/presc.nc",
+        "--use-multilayer-land", "--land-mask-file", "/x/mask.nc"]), parser))
+    with pytest.raises(ValueError, match="replaces the land tile"):
+        cfg.validate_strict()
