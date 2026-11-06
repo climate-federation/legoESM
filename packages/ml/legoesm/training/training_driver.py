@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+from types import SimpleNamespace
 from typing import Callable
 
 import jax
@@ -137,6 +138,66 @@ def build_training_segment(model, step_unified, grid, sigma, dt,
         gradient_checkpoint=True,
         **seg_defaults,
     )
+
+
+def build_mpas_training_segment(exp, physics_fn):
+    """The MPAS twin of ``build_training_segment(...)``: an object whose
+    ``.raw(ic, n_steps, forcing) -> MPASCarry`` advances an ERA5
+    :class:`~legoesm.training.era5_to_state.MPASCarry` with the production
+    MPAS step (``exp`` = ``ModelDriver.export_mpas_step()``: model, dt and the
+    post-step edits) and ``physics_fn`` in place of the exported physics.
+    Non-JIT, non-donating; every step is rematerialised in the reverse pass
+    (``mpas_segment(checkpoint=True)``; voted 3-0).
+
+    ``forcing`` is the grid-point ``SegmentForcing`` with ``(nCells,)``
+    planes.  Its ``day_of_year`` is the sample's start, in days since Jan 1
+    00 UTC (the WB loader's packing); step ``k`` sees the sun of
+    ``day_to_calendar(day_of_year + k*dt/86400)`` (start-of-step, as the
+    eager MPAS loop).  The condensate tracers start at zero when the carry
+    has none (an ERA5 sample) and are carried out, so a chained call does not
+    reset them."""
+    from legoesm.core.state import MPASHydrostaticState
+    from legoesm.driver.mpas_diff_step import mpas_segment
+    from legoesm.forcing.time_utils import day_to_calendar
+    from legoesm.training.era5_to_state import MPASCarry
+
+    if exp["hold_phys"] or exp["subcycle_rad"]:
+        raise ValueError(
+            "the MPAS training segment runs one physics_fn every step; the "
+            "exported run has a physics/radiation cadence (physics_update_"
+            "steps / rad_update_steps > 1), which the network does not have")
+    template, dt = exp["state"], float(exp["dt"])
+    tracer_names = tuple((template.tracers or {}).keys())
+    unknown = set(tracer_names) - {"q_v", "q_c", "q_r"}
+    if unknown or "q_v" not in tracer_names:
+        raise ValueError(f"MPAS training segment: state tracers {tracer_names} "
+                         "are not the warm-rain set (q_v[, q_c, q_r])")
+
+    def raw(ic, n_steps, forcing):
+        f = forcing._asdict() if hasattr(forcing, "_asdict") else dict(forcing)
+        day0 = jnp.asarray(f["day_of_year"], jnp.float64)
+        tr = {}
+        for k in tracer_names:
+            x = getattr(ic, k)
+            tr[k] = template.tracers[k].replace(
+                data=jnp.zeros_like(ic.T) if x is None else x)
+        state = MPASHydrostaticState(
+            u=template.u.replace(data=ic.u), T=template.T.replace(data=ic.T),
+            p_s=template.p_s.replace(data=ic.p_s),
+            phis=template.phis.replace(data=ic.phis), tracers=tr)
+        seg_exp = dict(
+            exp, physics_fn=physics_fn, physics_fn_norad=physics_fn,
+            physics_fn_held=None,
+            calendar=lambda k: day_to_calendar(day0 + k * dt / 86400.0))
+        out, _ = mpas_segment(seg_exp, state, None, int(n_steps), forcing=f,
+                              checkpoint=True)
+        t = out.tracers
+        return MPASCarry(u=out.u.data, T=out.T.data, p_s=out.p_s.data,
+                         phis=out.phis.data, q_v=t["q_v"].data,
+                         q_c=t["q_c"].data if "q_c" in t else None,
+                         q_r=t["q_r"].data if "q_r" in t else None)
+
+    return SimpleNamespace(raw=raw, dt=dt)
 
 
 def _build_train_step(make_run_seg, optimizer, sigma_full, grid, dt, loss_config,

@@ -1900,6 +1900,11 @@ class MPASCarry(NamedTuple):
     p_s: jnp.ndarray    # (nCells,) surface pressure [Pa]
     phis: jnp.ndarray   # (nCells,) surface geopotential [m^2/s^2]
     q_v: jnp.ndarray    # (nCells, nlev) specific humidity [kg/kg]
+    # Cloud water / rain the MPAS state carries (Kessler tracers): None in an
+    # ERA5 sample (zero at initialisation, voted 3-0), filled by a rollout so a
+    # chained segment does not reset its condensate.
+    q_c: jnp.ndarray | None = None
+    q_r: jnp.ndarray | None = None
 
 
 def era5_to_mpas_carry(
