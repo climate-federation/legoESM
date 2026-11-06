@@ -1308,7 +1308,7 @@ class ExperimentConfig(NamedTuple):
     energy_consistent_moisture_clip: bool = False
     # Segment-tail saturation adjustment (runs only with microphysics='none'):
     # width [fraction of q_sat] of the C1 smoothing at saturation.
-    # Default 1/30 (3-way vote 2026-11); 0.0 = the exact adjustment.  See
+    # Default 1/300 (3-way re-vote 2026-11-06); 0.0 = the exact adjustment.  See
     # microphysics._warm_rain.saturation_adjustment_increment (KNOWN DIFFERENCE).
     sat_adjust_rh_width: float = SEGMENT_SAT_ADJUST_RH_WIDTH
     # Resolved-wind moisture advection (issue #771): attach q_v/q_c/q_r/q_i/

@@ -47,18 +47,18 @@ CASES = [
 
 # Default-width condensed vapour minus hard-limit condensed vapour [kg/kg],
 # per case, measured 2026-11-06 (C2 form) at rh_width =
-# SEGMENT_SAT_ADJUST_RH_WIDTH (1/30).  Re-measure (print_gaps below) on any change to the smooth form or
+# SEGMENT_SAT_ADJUST_RH_WIDTH (1/300).  Re-measure (print_gaps below) on any change to the smooth form or
 # its default width.
 STORED_GAPS = [
     0.0,
     0.0,
     0.0,
-    -5.133040262900747e-06,
-    -8.956177102254006e-05,
-    -0.00010834152732604012,
-    -2.051438511563151e-05,
-    -1.8313595044733267e-08,
-    -0.00013441448139283143,
+    -4.8213975310876185e-06,
+    -2.5750247182808282e-05,
+    -7.469704845898355e-07,
+    -2.286694596696781e-13,
+    0.0,
+    -3.619500532625608e-15,
 ]
 
 

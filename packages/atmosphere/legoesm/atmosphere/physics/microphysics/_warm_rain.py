@@ -410,10 +410,11 @@ def hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
     return _hard_saturation_rate_limit(condensation, q_v, dt, hard_max_heating_K)
 
 
-# Default width of the segment-tail adjustment's smooth switch (RULE 5), as a
-# fraction of q_sat: 1/_HARD_SAT_MASK_SHARPNESS (voted Claude + GLM over codex's
-# 0.003, 2026-11-06).  0.0 = the exact adjustment.
-SEGMENT_SAT_ADJUST_RH_WIDTH = 1.0 / _HARD_SAT_MASK_SHARPNESS
+# Default width of the segment-tail adjustment's C1 smoothing (RULE 5), as a
+# fraction of q_sat: 1/300 (re-vote r18, Claude + codex over GLM's 1/100,
+# 2026-11-06: the 720-step lat-lon adjoint is the same for widths 0..1/10, so
+# the smallest swept width, least under-condensation).  0.0 = exact.
+SEGMENT_SAT_ADJUST_RH_WIDTH = 1.0 / 300.0
 
 
 def saturation_adjustment_increment(T, q_v, p_full, dt, *, rh_width,
