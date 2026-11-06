@@ -469,7 +469,8 @@ def test_flux_divergence_differs_and_finite_via_config():
     from legoesm.ocean.state import LatLonCGridOceanConfig
     base = LatLonCGridOceanConfig.from_flat(A_h=2.2e5, A_h_lat_scaling=True, A_h_cos_power=1)
     t_vec = _tend(base)
-    t_fd = _tend(base._replace(lateral_viscosity_operator="flux_divergence"))
+    t_fd = _tend(base._replace(lateral_viscosity_operator="flux_divergence",
+                                lateral_viscosity_mask_levels="surface"))
     assert bool(jnp.all(jnp.isfinite(t_fd.du_dt.data)))
     assert bool(jnp.all(jnp.isfinite(t_fd.dv_dt.data)))
     assert float(jnp.max(jnp.abs(t_fd.du_dt.data - t_vec.du_dt.data))) > 0.0
@@ -495,7 +496,8 @@ def test_flux_divergence_rejects_legoesm_boosts():
     from legoesm.ocean.state import LatLonCGridOceanConfig
     cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.2e5, A_h_lat_scaling=True, A_h_cos_power=1,
-        lateral_viscosity_operator="flux_divergence", A_h_eq_boost=3.0)
+        lateral_viscosity_operator="flux_divergence",
+        lateral_viscosity_mask_levels="surface", A_h_eq_boost=3.0)
     with pytest.raises(ValueError, match="flux_divergence"):
         _tend(cfg)
 

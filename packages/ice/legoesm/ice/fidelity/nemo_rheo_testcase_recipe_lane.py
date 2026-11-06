@@ -350,6 +350,7 @@ def build_ice_rheo_card(
         iceberg_vmask=zero,
     )
     config = SI3CGridAEVPConfig(
+        north_fold="none",
         scheme=_ICE_RHEO_DYNAMICS,
         staggering=_ICE_RHEO_STAGGERING,
         dt_s=_ICE_RHEO_DT_S,

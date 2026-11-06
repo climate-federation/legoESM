@@ -117,7 +117,8 @@ def test_nemo_shlat_tendency_uses_the_shlat_vertex_mask():
 
 def test_nemo_shlat_requires_per_level_and_nonnegative_shlat():
     t, _ = _win(0)
-    cfg = LatLonCGridOceanConfig.from_flat(A_h=1.0e4, lateral_side_bc="nemo_shlat")
+    cfg = LatLonCGridOceanConfig.from_flat(A_h=1.0e4, lateral_side_bc="nemo_shlat",
+                                           lateral_viscosity_mask_levels="surface")
     with pytest.raises(ValueError, match="per_level"):
         _call(cfg, t)
     with pytest.raises(ValueError, match="lateral_shlat"):

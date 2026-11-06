@@ -2422,6 +2422,7 @@ def nemo_si3_constant_fluxes(
     Cd: float,
     Ch: float,
     Ce: float,
+    goff_floor_width_K: float,
 ) -> tuple[jnp.ndarray, ...]:
     """Constant-coefficient SI3 air--ice bulk core: ``blk_ice_1`` then ``blk_ice_2``'s turbulent terms.
 
@@ -2433,12 +2434,28 @@ def nemo_si3_constant_fluxes(
     Returns ``(tau_x, tau_y, wind, theta_ice, q_sat, dq_sat_dT,
     sensible, latent, dq_sensible_dT, dq_latent_dT)``.
     """
-    b1 = nemo_si3_blk_ice_1_cst(u_air, v_air, theta_air, q_air, p_surface, T_ice, rho_air, Cd, Ch, Ce)
-    tb = nemo_si3_ice_turbulent(T_ice, p_surface, rho_air, b1.wndm_ice, b1.Ch_ice, b1.Ce_ice,
-                                b1.theta_zu_i, b1.q_zu_i)
+    from legoesm.thermo import nemo_si3_saturation_over_ice
+
+    wind = jnp.sqrt(u_air * u_air + v_air * v_air)
+    theta_ice = T_ice * (
+        constants.p_ref / p_surface
+    ) ** (constants.R_gas_molar / (constants.M_dry_air * constants.c_p_dry_air_nemo))
+    q_sat, dq_sat_dT = nemo_si3_saturation_over_ice(
+        T_ice, p_surface, floor_width_K=goff_floor_width_K
+    )
+    rho_wind = rho_air * wind
+    stress_scale = rho_wind * Cd
+    tau_x = stress_scale * u_air
+    tau_y = stress_scale * v_air
+    sensible_scale = rho_wind * constants.c_p_air_ice_nemo * Ch
+    latent_scale = rho_wind * constants.L_sub_nemo * Ce
+    sensible = sensible_scale * (theta_ice - theta_air)
+    latent = latent_scale * (q_sat - q_air)
+    dq_sensible_dT = sensible_scale
+    dq_latent_dT = latent_scale * dq_sat_dT
     return (
-        b1.utau_ice, b1.vtau_ice, b1.wndm_ice, tb.zsipt, tb.zsq, tb.dq_sat,
-        tb.z_qsb, tb.qla_ice, tb.z_dqsb, tb.dqla_ice,
+        tau_x, tau_y, wind, theta_ice, q_sat, dq_sat_dT,
+        sensible, latent, dq_sensible_dT, dq_latent_dT,
     )
 
 

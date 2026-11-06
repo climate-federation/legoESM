@@ -203,7 +203,7 @@ class SI3CGridAEVPConfig(NamedTuple):
     # one-rank doubly periodic card (both axes wrapped).  "orca_f_pivot" =
     # NEMO 5.0.1 ORCA F-pivot lbc_lnk (E-W cyclic, closed south halo, north
     # fold on the halo rows only); see ``_si3_orca_f_pivot_halo``.
-    north_fold: str = "none"
+    north_fold: str = "orca_f_pivot"
 
 
 class SI3CGridAEVPState(NamedTuple):

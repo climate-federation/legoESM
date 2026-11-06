@@ -7,6 +7,7 @@ from typing import NamedTuple
 
 from legoesm.core.nemo_namelist import parse_namelist
 from legoesm.ice.config import (
+    SI3_HARD_SWITCHES,
     SI3ThermoConfig,
     SeaIceConfig,
     validate_si3_bulk_config,
@@ -128,6 +129,7 @@ def build_c1d_omip_l3_si3_lane_card(
     )
     config = card.config._replace(
         si3=SI3ThermoConfig(salinity_scheme=nn_icesal),
+        si3_switches=SI3_HARD_SWITCHES,
     )
     config = validate_si3_lane_thermo_config(config)
     return card._replace(config=config)

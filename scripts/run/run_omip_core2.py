@@ -6591,7 +6591,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    choices=["surface", "per_level"],
                    help="Land masks of the vector-Laplacian lateral viscosity "
                         "at each level. 'surface' applies the 2-D surface "
-                        "masks at every level (config default); 'per_level' "
+                        "masks at every level; 'per_level' (config default) "
                         "uses each level's own wet faces/vertices, as NEMO's "
                         "3-D umask/vmask/fmask. Default (None) preserves the "
                         "config.")

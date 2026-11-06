@@ -143,20 +143,22 @@ def _read_exchange_step(stream, wanted_step: int) -> dict[str, np.ndarray]:
 
 def _read_zdf_input_step(stream, wanted_step: int) -> dict[str, np.ndarray]:
     magic = stream.read(16)
-    require(magic in (b"NEMO_L3ZIN_001  ", b"NEMO_L3ZIN_002  "),
+    require(magic in (b"NEMO_L3ZIN_001  ", b"NEMO_L3ZIN_002  ", b"NEMO_L3ZIN_003  "),
             "ZDF-input magic")
     version, step, category, npti, bits, nval = struct.unpack("=6i", stream.read(24))
-    expected = len(ZDF_INPUT_NAMES) + (3 if version == 2 else 0)
+    expected = len(ZDF_INPUT_NAMES) + {1: 0, 2: 3, 3: 4}.get(version, -1)
     require((version, step, category, npti, bits, nval)
             == (version, wanted_step, 1, 1, 64, expected)
-            and version in (1, 2)
-            and magic == (b"NEMO_L3ZIN_002  " if version == 2
-                          else b"NEMO_L3ZIN_001  "), "ZDF-input header")
+            and version in (1, 2, 3)
+            and magic == f"NEMO_L3ZIN_00{version}  ".encode(), "ZDF-input header")
     values = np.fromfile(stream, np.float64, nval)
     require(values.size == nval and np.all(np.isfinite(values)), "bad ZDF-input payload")
     result = {name: values[i:i + 1] for i, name in enumerate(ZDF_INPUT_NAMES)}
-    if version == 2:
-        result["t_s"] = values[len(ZDF_INPUT_NAMES):].reshape((npti, 3), order="F")
+    if version >= 2:
+        n = len(ZDF_INPUT_NAMES)
+        result["t_s"] = values[n:n + 3 * npti].reshape((npti, 3), order="F")
+    if version == 3:   # SST [degC] for snow-ice flooding (icethd_dh.F90:454)
+        result["sst"] = values[-npti:]
     result["_version"] = np.asarray(version)
     return result
 
@@ -298,7 +300,20 @@ def _forcing(exact):
     def val(x):
         return jnp.asarray(x, dtype=jnp.float64)
 
-    return SI3SurfaceForcing(*(val(exact[name]) for name in ZDF_INPUT_NAMES))
+    return SI3SurfaceForcing(**{name: val(x) for name, x in forcing_inputs(exact).items()})
+
+
+def forcing_inputs(values) -> dict:
+    """ZDF forcing operands incl. the SST the dh step requires (no fallback, vote Y1).
+
+    Only NEMO_L3ZIN_003 records carry sst_1d; older records cannot drive the
+    column port and the gate refuses them.
+    """
+    require("sst" in values,
+            "ZDF-input record has no SST (recorder older than NEMO_L3ZIN_003): rerun the "
+            "C1D case with the v3 recorder in nemo502_si3thd_MY_SRC/icethd.F90 "
+            "(the data is not on Ginsburg)")
+    return {**{name: values[name] for name in ZDF_INPUT_NAMES}, "sst": values["sst"]}
 
 
 def _reconstructed_forcing(exchange, entry, post_zdf, exact):

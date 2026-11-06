@@ -53,6 +53,7 @@ morrison_warm_rain_scheme: kk2000   # explicit: the unset default resolves to
                                     # which needs CLUBB relvar (not wired here)
 convection: sbm             # the structural-bias fix (albedo+precip)
 turbulence: louis
+# UNCALIBRATED: tuned on the bulk Hines, not retuned for the LMDZ Doppler-spread port (#2378).
 gravity_wave_drag: hines
 diurnal_cycle: true
 orbital_insolation: true
