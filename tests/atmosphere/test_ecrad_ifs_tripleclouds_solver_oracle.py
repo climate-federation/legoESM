@@ -8,6 +8,9 @@ inputs (radiation_save writes them immediately before the solvers);
 outputs are every flux:* variable of that run.  fp64 (JAX_ENABLE_X64=1).
 """
 
+from functools import partial
+
+from tests.atmosphere.ecrad_rrtmg_band_maps import BAND_LW, BAND_SW
 import math
 import os
 
@@ -19,6 +22,13 @@ from jax.test_util import check_grads
 
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import mcica_solvers as ms
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import tripleclouds_solvers as tc
+
+_mcica_lw = partial(ms.solver_mcica_lw, band=BAND_LW)
+_mcica_sw = partial(ms.solver_mcica_sw, band=BAND_SW)
+_spectral = partial(ms.surface_spectral_sw, band=BAND_SW)
+_albedo_to_g = partial(ms.sw_albedo_to_gpoints, band=BAND_SW)
+_tc_lw = partial(tc.solver_tripleclouds_lw, band=BAND_LW)
+_tc_sw = partial(tc.solver_tripleclouds_sw, band=BAND_SW)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -95,9 +105,9 @@ def load_inputs(path):
 def run_all(inp, sharpness):
     kw = dict(cloud_fraction_threshold=CLOUD_FRACTION_THRESHOLD,
               decorrelation_scaling=DECORRELATION_SCALING, sharpness=sharpness)
-    lw = tc.solver_tripleclouds_lw(**inp["lw"], **kw)
-    sw = tc.solver_tripleclouds_sw(**inp["sw"], **kw)
-    spec = ms.surface_spectral_sw(sw, SW_ALBEDO_WAVELENGTH_BOUND, I_SW_ALBEDO_INDEX)
+    lw = _tc_lw(**inp["lw"], **kw)
+    sw = _tc_sw(**inp["sw"], **kw)
+    spec = _spectral(sw, SW_ALBEDO_WAVELENGTH_BOUND, I_SW_ALBEDO_INDEX)
     return {**lw, **sw, **spec}
 
 
@@ -242,8 +252,8 @@ def test_cloud_free_input_gives_clear_sky_fluxes(fixture8):
     sw_in = _column(inp, "sw", 1)
     for x in (lw_in, sw_in):
         x["cloud_fraction"] = np.zeros_like(x["cloud_fraction"])
-    lw = tc.solver_tripleclouds_lw(**lw_in, **kw)
-    sw = tc.solver_tripleclouds_sw(**sw_in, **kw)
+    lw = _tc_lw(**lw_in, **kw)
+    sw = _tc_sw(**sw_in, **kw)
     # Equal to rounding (XLA may contract the clear-sky a*b + c into an FMA).
     for k in ("flux_up_lw", "flux_dn_lw"):
         assert rel_err(lw[k], lw[k + "_clear"]).max() <= TOL, k
@@ -266,8 +276,8 @@ def test_homogeneous_overcast_equals_plane_parallel(fixture8):
     for x in (lw_in, sw_in):
         x["cloud_fraction"] = np.ones_like(x["cloud_fraction"])
         x["fractional_std"] = np.zeros_like(x["fractional_std"])
-    lw = tc.solver_tripleclouds_lw(**lw_in, **kw)
-    sw = tc.solver_tripleclouds_sw(**sw_in, **kw)
+    lw = _tc_lw(**lw_in, **kw)
+    sw = _tc_sw(**sw_in, **kw)
     nlev = lw_in["od"].shape[1]
 
     def mcica(x, ng):
@@ -276,9 +286,9 @@ def test_homogeneous_overcast_equals_plane_parallel(fixture8):
         y["total_cloud_cover"] = np.ones((1,))
         return y
 
-    lw_pp = ms.solver_mcica_lw(**mcica(lw_in, ms.N_G_LW),
+    lw_pp = _mcica_lw(**mcica(lw_in, BAND_LW.size),
                                cloud_fraction_threshold=CLOUD_FRACTION_THRESHOLD, sharpness=HARD)
-    sw_pp = ms.solver_mcica_sw(**mcica(sw_in, ms.N_G_SW),
+    sw_pp = _mcica_sw(**mcica(sw_in, BAND_SW.size),
                                cloud_fraction_threshold=CLOUD_FRACTION_THRESHOLD, sharpness=HARD)
     for k in ("flux_up_lw", "flux_dn_lw"):
         assert rel_err(lw[k], lw_pp[k]).max() <= 1e-12, k
@@ -303,7 +313,7 @@ def test_inhomogeneity_brightens_less_than_homogeneous(fixture8):
     up = []
     for fsd in (0.0, 1.0):
         x = dict(sw_in, fractional_std=np.full_like(sw_in["fractional_std"], fsd))
-        up.append(float(tc.solver_tripleclouds_sw(**x, **kw)["flux_up_sw"][0, 0]))
+        up.append(float(_tc_sw(**x, **kw)["flux_up_sw"][0, 0]))
     assert up[1] < up[0]
 
 
@@ -331,7 +341,7 @@ def test_gradients_finite_and_check_grads(fixture8, side):
     # The column whose lowest 14 layers hold the most cloud optical depth.
     icol = int(np.argmax(np.asarray(inp[side]["od_cloud"])[:, -14:].sum(axis=(1, 2))))
     x = _small_column(inp, side, icol, 24)
-    solver = tc.solver_tripleclouds_lw if side == "lw" else tc.solver_tripleclouds_sw
+    solver = _tc_lw if side == "lw" else _tc_sw
     key = "flux_up_lw" if side == "lw" else "flux_up_sw"
 
     def toa(cf, fsd, op):
@@ -382,7 +392,7 @@ def test_night_zero_scattering_gradient_finite(fixture8):
              ssa=np.zeros_like(x["ssa"]), ssa_cloud=np.zeros_like(x["ssa_cloud"]))
 
     def f(od):
-        return tc.solver_tripleclouds_sw(**dict(x, od=od), **kw)["flux_up_sw"].sum()
+        return _tc_sw(**dict(x, od=od), **kw)["flux_up_sw"].sum()
 
     g = jax.grad(f)(jnp.asarray(x["od"]))
     assert np.all(np.isfinite(np.asarray(g)))

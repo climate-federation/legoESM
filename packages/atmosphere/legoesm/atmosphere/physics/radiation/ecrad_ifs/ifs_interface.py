@@ -52,7 +52,7 @@ from legoesm import constants
 from legoesm.atmosphere.physics._ifs_thermo import ifs_thermo, satur_qsat
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import ecrad
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import mcica_solvers as ms
-from legoesm.atmosphere.physics.radiation.ecrad_ifs import rrtmg_prepare as prep
+from legoesm.atmosphere.physics.radiation.ecrad_ifs import gas_optics as go
 from legoesm.atmosphere.physics.radiation.ecrad_ifs.two_stream import (
     blend, lower_clamp, step, upper_clamp)
 from legoesm.core.smooth import smoothstep_cubic
@@ -384,10 +384,10 @@ def prepare_inputs(*, solar_irradiance, mu0, skin_temperature, albedo_dif, albed
     # SET_GAS_UNITS(IMassMixingRatio) converts only the well-mixed O2 VMR
     o3 = o3_dp / (pressure_hl[..., 1:] - pressure_hl[..., :-1])
     gas = [jnp.zeros_like(q)] * _N_GASES
-    gas[prep.IH2O], gas[prep.ICO2], gas[prep.IO3], gas[prep.IN2O] = q, co2, o3, n2o
-    gas[prep.ICH4], gas[prep.ICFC11], gas[prep.ICFC12] = ch4, cfc11, cfc12
-    gas[prep.IHCFC22], gas[prep.ICCL4] = hcfc22, ccl4
-    gas[prep.IO2] = jnp.full_like(q, _O2_VMR * (1.0 * _O2_MOLAR_MASS / _AIR_MOLAR_MASS * 1.0))
+    gas[go.IH2O], gas[go.ICO2], gas[go.IO3], gas[go.IN2O] = q, co2, o3, n2o
+    gas[go.ICH4], gas[go.ICFC11], gas[go.ICFC12] = ch4, cfc11, cfc12
+    gas[go.IHCFC22], gas[go.ICCL4] = hcfc22, ccl4
+    gas[go.IO2] = jnp.full_like(q, _O2_VMR * (1.0 * _O2_MOLAR_MASS / _AIR_MOLAR_MASS * 1.0))
     gas_mmr = jnp.stack(gas, axis=-1)
 
     ecrad_kwargs = dict(

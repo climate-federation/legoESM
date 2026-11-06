@@ -48,7 +48,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.atmosphere.physics.radiation.ecrad_ifs import tables
 from legoesm.atmosphere.physics.radiation.ecrad_ifs.two_stream import (
     blend,
     calc_no_scattering_transmittance_lw,
@@ -68,9 +67,6 @@ _DEN_FLOOR = {np.dtype(np.float64): float.fromhex("0x1p-500"),
 
 def den_floor(x):
     return _DEN_FLOOR[np.dtype(jnp.result_type(x))]
-
-N_G_LW = 140
-N_G_SW = 112
 
 # --- RRTMG band limits [cm-1] given to allocate_bands_only (radiation_ifs_rrtm.F90:103-106) ---
 _SW_WAVENUMBER1_BAND = (2600.0, 3250.0, 4000.0, 4650.0, 5150.0, 6150.0, 7700.0,
@@ -133,17 +129,6 @@ __physics_contract__ = {
 # --------------------------------------------------------------------------
 # Static configuration (numpy, built once)
 # --------------------------------------------------------------------------
-
-def band_from_g_lw():
-    """config%i_band_from_reordered_g_lw, zero-based (no reordering for McICA)."""
-    return np.asarray(tables.table("yoerrtftr.NGB")[:N_G_LW], dtype=np.int64) - 1
-
-
-def band_from_g_sw():
-    """config%i_band_from_reordered_g_sw = ngbsw - ngbsw(1) + 1, zero-based."""
-    ngb = np.asarray(tables.table("yoesrtm.NGBSW")[:N_G_SW], dtype=np.int64)
-    return ngb - ngb[0]
-
 
 def sw_albedo_weights(wavelength_bound, i_intervals):
     """calc_mapping_from_bands, use_bands branch, Planck = 1 (RRTMG leaves
@@ -494,13 +479,12 @@ def _solver_sw_column(od, ssa, g, od_cloud, ssa_cloud, g_cloud, albedo_direct, a
 
 def solver_mcica_lw(od, od_cloud, ssa_cloud, g_cloud, planck_hl, emission, albedo,
                     cloud_fraction, od_scaling, total_cloud_cover, *,
-                    cloud_fraction_threshold, sharpness=100.0):
+                    band, cloud_fraction_threshold, sharpness=100.0):
     """solver_mcica_lw.  Shapes: od (ncol, nlev, ng); *_cloud (ncol, nlev, nband);
     planck_hl (ncol, nlev+1, ng); emission/albedo (ncol, ng); cloud_fraction
     (ncol, nlev); od_scaling (ncol, nlev, ng); total_cloud_cover (ncol,).
     ``od_scaling`` must be finite (its value is unused where the column or
-    layer is clear)."""
-    band = band_from_g_lw()
+    layer is clear).  ``band``: band of each g-point, (ng,)."""
     f = lambda *a: _solver_lw_column(*a, cloud_fraction_threshold, sharpness, band)  # noqa: E731
     return jax.vmap(f)(od, od_cloud, ssa_cloud, g_cloud, planck_hl, emission, albedo,
                        cloud_fraction, od_scaling, total_cloud_cover)
@@ -508,20 +492,18 @@ def solver_mcica_lw(od, od_cloud, ssa_cloud, g_cloud, planck_hl, emission, albed
 
 def solver_mcica_sw(od, ssa, g, od_cloud, ssa_cloud, g_cloud, albedo_direct, albedo_diffuse,
                     incoming_sw, cos_sza, cloud_fraction, od_scaling, total_cloud_cover, *,
-                    cloud_fraction_threshold, sharpness=100.0):
-    """solver_mcica_sw.  Shapes as solver_mcica_lw with ng = 112; albedos and
+                    band, cloud_fraction_threshold, sharpness=100.0):
+    """solver_mcica_sw.  Shapes as solver_mcica_lw; albedos and
     incoming_sw (ncol, ng); cos_sza (ncol,).  Returns broadband profiles, the
     g-point surface fluxes and cloud_cover_sw."""
-    band = band_from_g_sw()
     f = lambda *a: _solver_sw_column(*a, cloud_fraction_threshold, sharpness, band)  # noqa: E731
     return jax.vmap(f)(od, ssa, g, od_cloud, ssa_cloud, g_cloud, albedo_direct, albedo_diffuse,
                        incoming_sw, cos_sza, cloud_fraction, od_scaling, total_cloud_cover)
 
 
-def surface_spectral_sw(sw_out, sw_albedo_wavelength_bound, i_sw_albedo_index):
+def surface_spectral_sw(sw_out, sw_albedo_wavelength_bound, i_sw_albedo_index, band):
     """flux_type%calc_surface_spectral, SW part, for do_surface_sw_spectral_flux
     and do_canopy_fluxes_sw with the weighted (not nearest) albedo mapping."""
-    band = band_from_g_sw()
     direct = _band_sums(sw_out["sw_dn_direct_surf_g"], band)
     total = _band_sums(sw_out["sw_dn_diffuse_surf_g"], band) + direct
     direct_c = _band_sums(sw_out["sw_dn_direct_surf_clear_g"], band)
@@ -548,7 +530,7 @@ def surface_spectral_sw(sw_out, sw_albedo_wavelength_bound, i_sw_albedo_index):
     }
 
 
-def sw_albedo_to_gpoints(albedo_intervals, sw_albedo_wavelength_bound, i_sw_albedo_index):
+def sw_albedo_to_gpoints(albedo_intervals, sw_albedo_wavelength_bound, i_sw_albedo_index, band):
     """get_albedos weighted branch: (ncol, ninput) -> (ncol, ng_sw).  Used to
     check the ported weights against the oracle's saved g-point albedo."""
     weights = sw_albedo_weights(sw_albedo_wavelength_bound, i_sw_albedo_index)
@@ -560,4 +542,4 @@ def sw_albedo_to_gpoints(albedo_intervals, sw_albedo_wavelength_bound, i_sw_albe
             if weights[jalb, jband] != 0.0:
                 acc = acc + weights[jalb, jband] * albedo_intervals[..., jalb]
         bands.append(acc)
-    return jnp.stack(bands, axis=-1)[..., band_from_g_sw()]
+    return jnp.stack(bands, axis=-1)[..., band]

@@ -8,6 +8,9 @@ generator outputs od_scaling / total_cloud_cover.  Outputs are every flux:*
 variable of the oracle run.  fp64 (JAX_ENABLE_X64=1).
 """
 
+from functools import partial
+
+from tests.atmosphere.ecrad_rrtmg_band_maps import BAND_LW, BAND_SW
 import math
 import os
 
@@ -21,6 +24,11 @@ from legoesm import constants
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import mcica_solvers as ms
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import two_stream as ts
 from legoesm.atmosphere.physics.radiation.rrtmgp.rte.two_stream import compute_heating_rate
+
+_mcica_lw = partial(ms.solver_mcica_lw, band=BAND_LW)
+_mcica_sw = partial(ms.solver_mcica_sw, band=BAND_SW)
+_spectral = partial(ms.surface_spectral_sw, band=BAND_SW)
+_albedo_to_g = partial(ms.sw_albedo_to_gpoints, band=BAND_SW)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -89,11 +97,11 @@ def load_inputs(path, gen_path):
 
 
 def run_all(inp, sharpness):
-    lw = ms.solver_mcica_lw(**inp["lw"], cloud_fraction_threshold=CLOUD_FRACTION_THRESHOLD,
+    lw = _mcica_lw(**inp["lw"], cloud_fraction_threshold=CLOUD_FRACTION_THRESHOLD,
                             sharpness=sharpness)
-    sw = ms.solver_mcica_sw(**inp["sw"], cloud_fraction_threshold=CLOUD_FRACTION_THRESHOLD,
+    sw = _mcica_sw(**inp["sw"], cloud_fraction_threshold=CLOUD_FRACTION_THRESHOLD,
                             sharpness=sharpness)
-    spec = ms.surface_spectral_sw(sw, SW_ALBEDO_WAVELENGTH_BOUND, I_SW_ALBEDO_INDEX)
+    spec = _spectral(sw, SW_ALBEDO_WAVELENGTH_BOUND, I_SW_ALBEDO_INDEX)
     return {**lw, **sw, **spec}
 
 
@@ -130,11 +138,11 @@ def test_saved_props_are_solver_inputs(fixture8):
     # Ported sw_albedo_weights reproduce the solver's g-point albedos.
     for src, dst in (("in:sw_albedo", "props:sw_albedo"),
                      ("in:sw_albedo_direct", "props:sw_albedo_direct")):
-        got = ms.sw_albedo_to_gpoints(jnp.asarray(d[src]),
+        got = _albedo_to_g(jnp.asarray(d[src]),
                                       SW_ALBEDO_WAVELENGTH_BOUND, I_SW_ALBEDO_INDEX)
         assert rel_err(got, d[dst]).max() <= TOL, src
-    assert np.array_equal(ms.band_from_g_lw()[[0, 9, 10, 139]], [0, 0, 1, 15])
-    assert np.array_equal(ms.band_from_g_sw()[[0, 5, 6, 111]], [0, 0, 1, 13])
+    assert np.array_equal(BAND_LW[[0, 9, 10, 139]], [0, 0, 1, 15])
+    assert np.array_equal(BAND_SW[[0, 5, 6, 111]], [0, 0, 1, 13])
 
 
 def test_oracle_match_hard_fixture(fixture8):
@@ -263,7 +271,7 @@ def test_heating_integral_equals_toa_minus_surface(fixture8):
 def _layer_residuals_lw(col, inp):
     """Interface flux continuity of the cloudy LW adding solution, column ``col``."""
     lw = {k: jnp.asarray(v[col]) for k, v in inp["lw"].items()}
-    band = ms.band_from_g_lw()
+    band = BAND_LW
     pt, pb = lw["planck_hl"][:-1], lw["planck_hl"][1:]
     ocn = lw["od_scaling"] * lw["od_cloud"][:, band]
     odt = lw["od"] + ocn
@@ -363,7 +371,7 @@ def test_grad_solver_cloud_switches(fixture8):
     def toa_up(cf_lev, tcc):
         cf = lw["cloud_fraction"].at[0, lev].set(cf_lev)
         a = dict(lw, cloud_fraction=cf, total_cloud_cover=jnp.reshape(tcc, (1,)))
-        o = ms.solver_mcica_lw(**a, cloud_fraction_threshold=thr, sharpness=s)
+        o = _mcica_lw(**a, cloud_fraction_threshold=thr, sharpness=s)
         return o["flux_up_lw"][0, 0] + o["lw_derivative"][0, 0]
 
     tcc0 = lw["total_cloud_cover"][0]
@@ -377,13 +385,13 @@ def test_grad_solver_cloud_switches(fixture8):
     # narrow C1 clamp bands is truncation-limited, so its check perturbs only
     # od > 0.1 elements (sweep: 6e-8 at eps 1e-4; od > 1e-2 or > 1 do not converge).
     log_od = jnp.log(jnp.maximum(lw["od"], 1e-30))
-    check_grads(lambda x: ms.solver_mcica_lw(**dict(lw, od=jnp.exp(x)), cloud_fraction_threshold=thr,
+    check_grads(lambda x: _mcica_lw(**dict(lw, od=jnp.exp(x)), cloud_fraction_threshold=thr,
                                              sharpness=s)["flux_up_lw"].sum(),
                 (log_od,), order=1, modes=["rev"], atol=1e-6, rtol=1e-6, eps=FD_EPS_LW)
     sw = {k: jnp.asarray(v[col:col + 1]) for k, v in inp["sw"].items()}
     mask = np.asarray(sw["od"]) > SW_FD_OD_MIN
     x0 = jnp.log(sw["od"][mask])
-    check_grads(lambda x: ms.solver_mcica_sw(**dict(sw, od=sw["od"].at[mask].set(jnp.exp(x))),
+    check_grads(lambda x: _mcica_sw(**dict(sw, od=sw["od"].at[mask].set(jnp.exp(x))),
                                              cloud_fraction_threshold=thr, sharpness=s)["flux_dn_sw"].sum(),
                 (x0,), order=1, modes=["rev"], atol=1e-6, rtol=1e-6, eps=FD_EPS_SW)
 
@@ -431,11 +439,11 @@ def test_grad_finite_dead_thin_branch_and_fp32_guards():
 def test_grad_finite_dead_cloudy_layer():
     """Codex round-3 finding: a clear layer with singular cloud optics
     (gas od 0, cloud ssa = g = 1) must not put NaN in the gradient."""
-    nlev, ng = 3, ms.N_G_LW
+    nlev, ng = 3, BAND_LW.size
     one = jnp.ones((1, nlev, 16))
 
     def f(ssa_c):
-        o = ms.solver_mcica_lw(
+        o = _mcica_lw(
             jnp.zeros((1, nlev, ng)), 0.1 * one, ssa_c * one, one,
             jnp.full((1, nlev + 1, ng), 50.0), jnp.full((1, ng), 5.0), jnp.zeros((1, ng)),
             jnp.zeros((1, nlev)), jnp.ones((1, nlev, ng)), jnp.zeros((1,)),
@@ -458,10 +466,10 @@ def test_finite_in_od_band_at_ssa_g_one():
 def test_grad_finite_dead_clear_derivative():
     """Codex round-5 finding: fully cloudy column whose (unused) clear-sky
     surface up-flux is 0 must not put 0/0 into the lw_derivative gradient."""
-    nlev, ng = 1, ms.N_G_LW
+    nlev, ng = 1, BAND_LW.size
 
     def f(planck, sharpness):
-        o = ms.solver_mcica_lw(
+        o = _mcica_lw(
             jnp.zeros((1, nlev, ng)), jnp.full((1, nlev, 16), 0.1), jnp.zeros((1, nlev, 16)),
             jnp.zeros((1, nlev, 16)), planck * jnp.ones((1, nlev + 1, ng)), jnp.zeros((1, ng)),
             jnp.ones((1, ng)), jnp.ones((1, nlev)), jnp.ones((1, nlev, ng)), jnp.ones((1,)),
@@ -475,10 +483,10 @@ def test_grad_finite_dead_clear_derivative():
 def test_grad_finite_tiny_gas_od_clear_column():
     """Codex round-6 finding: clear column with od = 1e-200 (fp64), at the hard
     form too, must give finite gradients (dead cloudy divisions)."""
-    nlev, ng = 2, ms.N_G_LW
+    nlev, ng = 2, BAND_LW.size
 
     def f(od, sharpness):
-        o = ms.solver_mcica_lw(
+        o = _mcica_lw(
             od * jnp.ones((1, nlev, ng)), jnp.ones((1, nlev, 16)), jnp.ones((1, nlev, 16)),
             jnp.ones((1, nlev, 16)), 5.0 * jnp.ones((1, nlev + 1, ng)), jnp.ones((1, ng)),
             jnp.zeros((1, ng)), jnp.zeros((1, nlev)), jnp.ones((1, nlev, ng)), jnp.zeros((1,)),
@@ -493,10 +501,10 @@ def test_grad_finite_dead_sw_cloudy_optics():
     """Codex round-7 finding: dead SW cloudy combination must yield valid
     optics (ssa <= 1), so a clear layer with od=100, ssa=.02, g=.5 has a
     finite od gradient at both sharpness settings, day and night."""
-    nlev, ng = 1, ms.N_G_SW
+    nlev, ng = 1, BAND_SW.size
 
     def f(od, cos, sharpness):
-        o = ms.solver_mcica_sw(
+        o = _mcica_sw(
             od * jnp.ones((1, nlev, ng)), 0.02 * jnp.ones((1, nlev, ng)), 0.5 * jnp.ones((1, nlev, ng)),
             jnp.ones((1, nlev, 14)), jnp.ones((1, nlev, 14)), 0.5 * jnp.ones((1, nlev, 14)),
             0.2 * jnp.ones((1, ng)), 0.2 * jnp.ones((1, ng)), 10.0 * jnp.ones((1, ng)),
