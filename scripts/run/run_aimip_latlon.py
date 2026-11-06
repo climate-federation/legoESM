@@ -275,6 +275,7 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
     eval rolls one 6 h forecast) and the multi-step form for TRAINING.
     """
     from legoesm.driver.compiled_segments import pack_forcing
+    from legoesm.training.scale_build import era5_time_to_forcing_calendar
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, open_era5_zarr, load_era5_slice,
         era5_to_latlon_carry, era5_to_mpas_carry, regrid_2d_to_gaussian,
@@ -347,10 +348,13 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
     def _year_to_idx(year: int) -> int:
         return int(np.searchsorted(times, np.datetime64(f"{year:04d}-01-01")))
 
-    def _doy(tidx: int) -> float:
+    def _clock(tidx: int) -> tuple:
+        """(1-based day of year, seconds of day) of snapshot ``tidx``: the
+        spectral loader's packing, which the segment's solar clock unpacks
+        (``start_day_from_forcing``, user decision Q3)."""
         d = times[tidx]
-        yr0 = d.astype("datetime64[Y]")
-        return float((d - yr0) / np.timedelta64(1, "D")) + 1.0
+        return era5_time_to_forcing_calendar(
+            d, int(str(d.astype("datetime64[Y]"))))
 
     # Forcing climatology fields (o3 / aerosol / solar) are physics-scheme
     # independent — taken once from the driver context, reused per window
@@ -399,11 +403,12 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
             sst = jnp.asarray(
                 regrid_2d_to_gaussian(ic_era5.sst, ic_era5.lat, ic_era5.lon, grid)
             )
+            _doy, _sod = _clock(ic_tidx)
             forcing = pack_forcing(
                 sst=sst,
                 sic=jnp.zeros_like(sst),
-                day_of_year=jnp.asarray(_doy(ic_tidx)),
-                seconds_of_day=jnp.asarray(0.0),
+                day_of_year=jnp.asarray(_doy),
+                seconds_of_day=jnp.asarray(_sod),
                 solar_weights=solar_weights,
                 s_0=s_0,
                 o3_vmr=o3_vmr,
@@ -542,6 +547,12 @@ def evaluate(run_seg_raw, ics, targets, forcings, grid, dt, hours=_EVAL_HOURS):
 # Variant training
 # ---------------------------------------------------------------------------
 
+# Every training/eval segment here starts its sun at the sample's own date and
+# time packed in the forcing (user decision Q3, 2026-11-06); before, every
+# sample saw Jan 1 00 UTC.
+_SAMPLE_CLOCK = {"start_day_from_forcing": True}
+
+
 def train_variant(variant, model, grid, sigma, physics_pipeline, config,
                   ics, targets, forcings, eval_data, loss_config, args, outdir):
     from legoesm.training.training_driver import (
@@ -569,7 +580,7 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
             rollout_hours=_ROLLOUT_HOURS, microphysics=args.microphysics,
             rad_update_steps=args.rad_update_steps,
             rad_stop_gradient=args.radiation_as_forcing,
-            loss_config=loss_config, log_every=1,
+            loss_config=loss_config, log_every=1, **_SAMPLE_CLOCK,
         )
         step_unified = physics_pipeline.build_step_unified(
             rad_stop_gradient=args.radiation_as_forcing)
@@ -577,7 +588,7 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
             model, step_unified, grid, sigma, args.dt,
             microphysics=args.microphysics,
             rad_update_steps=args.rad_update_steps,
-            **trained.to_segment_kwargs(),
+            **trained.to_segment_kwargs(), **_SAMPLE_CLOCK,
         )
     elif variant == "column_nn":
         from legoesm.atmosphere.physics.neural_physics import (
@@ -594,11 +605,12 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
             model, grid, sigma, nn, ics, targets, forcings,
             n_epochs=args.epochs, lr=args.lr, dt=args.dt,
             rollout_hours=_ROLLOUT_HOURS,
-            loss_config=loss_config, log_every=1,
+            loss_config=loss_config, log_every=1, **_SAMPLE_CLOCK,
         )
         adapter = make_adapter(grid)
         step_unified = make_neural_step_unified(trained, adapter)
-        seg = build_training_segment(model, step_unified, grid, sigma, args.dt)
+        seg = build_training_segment(model, step_unified, grid, sigma, args.dt,
+                                     **_SAMPLE_CLOCK)
     else:
         raise ValueError(
             f"unknown variant {variant!r}; supports 'classical', 'column_nn'."
