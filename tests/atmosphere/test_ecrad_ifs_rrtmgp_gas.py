@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 
 import jax
-import jax.experimental
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -77,8 +76,11 @@ def test_level_sources_follow_the_level_temperature_top_down():
 
 
 def test_tables_follow_a_precision_change():
-    with jax.experimental.disable_x64():
+    jax.config.update("jax_enable_x64", False)
+    try:
         assert go._optics().gas_optics_lw.kmajor.dtype == jnp.float32
+    finally:
+        jax.config.update("jax_enable_x64", True)
     assert go._optics().gas_optics_lw.kmajor.dtype == jnp.float64
 
 
