@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import gzip
+import json
 from pathlib import Path
 
 import numpy as np
@@ -198,3 +200,274 @@ def test_daily_temperature_scorer_and_report_validator() -> None:
     bad_days["arms"]["normal_gpu_fp64"]["daily_accuracy"] = normal_daily[:-1]
     with pytest.raises(r343.GateError, match="expected 8 daily_accuracy kts"):
         r343.validate_benchmark_report(bad_days)
+
+
+def test_round349_cpu_pinning_and_thread_tick_parsing() -> None:
+    topology = (
+        r343.CpuTopologyRow(0, 0, 0, (0, 4)),
+        r343.CpuTopologyRow(1, 1, 0, (1, 5)),
+        r343.CpuTopologyRow(2, 0, 1, (2, 6)),
+        r343.CpuTopologyRow(3, 1, 1, (3, 7)),
+        r343.CpuTopologyRow(4, 0, 0, (0, 4)),
+        r343.CpuTopologyRow(5, 1, 0, (1, 5)),
+        r343.CpuTopologyRow(6, 0, 1, (2, 6)),
+        r343.CpuTopologyRow(7, 1, 1, (3, 7)),
+    )
+    assert r343.select_physical_cpu_ids(4, topology) == (0, 1, 2, 3)
+    assert r343.parse_cpu_id_list("0,2-4,7") == (0, 2, 3, 4, 7)
+    assert r343.format_cpu_id_list((0, 2, 3)) == "0,2,3"
+    with pytest.raises(r343.GateError, match="requested 5 physical cores"):
+        r343.select_physical_cpu_ids(5, topology)
+    with pytest.raises(r343.GateError, match="duplicate CPU id"):
+        r343.parse_cpu_id_list("0,1,1")
+
+    before = {100: 10, 101: 20}
+    after = {
+        100: 10 + r343.CLK_TCK,
+        101: 20 + r343.CLK_TCK // 2,
+    }
+    usage = r343.summarize_thread_cpu_ticks(before, after, wall_s=1.0)
+    expected = 1.0 + (r343.CLK_TCK // 2) / r343.CLK_TCK
+    assert np.isclose(usage["cores_busy"], expected)
+    assert usage["busy_threads_over_10pct"] == 2
+    assert usage["os_threads_after"] == 2
+
+
+def test_round349_sypd_nemo_timing_and_time_parsers(tmp_path: Path) -> None:
+    assert np.isclose(r343.compute_sypd(1.0), 86400.0 / 2920.0)
+    with pytest.raises(r343.GateError, match="finite and positive"):
+        r343.compute_sypd(0.0)
+
+    timing_text = """
+   |         Performance statistics between time step 7 and 92        |
+ Timing : AVG values over all MPI processes:
+ Section      | Net elapsed Time         | Full elapsed Time        | Frequency
+ step         |   43.000000s (100.000 %) |   43.000000s (100.000 %) |        86
+ """
+    timing = r343.parse_nemo_timing_output(timing_text)
+    assert timing["steady_steps"] == 86
+    assert np.isclose(timing["seconds_per_step"], 0.5)
+
+    gnu = r343.parse_gnu_time_metrics(
+        "elapsed_s=50.0\nuser_s=150.0\nsystem_s=5.0\nmax_rss_kib=1024\n"
+    )
+    assert gnu == {
+        "elapsed_s": 50.0,
+        "user_s": 150.0,
+        "system_s": 5.0,
+        "max_rss_kib": 1024.0,
+    }
+
+    bad_frequency = timing_text.replace("86", "85")
+    with pytest.raises(r343.GateError, match="does not match window"):
+        r343.parse_nemo_timing_output(bad_frequency)
+
+    run_dir = tmp_path / "nemo"
+    run_dir.mkdir()
+    (run_dir / "timing.output").write_text(timing_text)
+    (run_dir / "gnu_time.txt").write_text(
+        "elapsed_s=50\nuser_s=1\nsystem_s=1\nmax_rss_kib=1024\n"
+    )
+    (run_dir / "rank_time0.txt").write_text(
+        "elapsed_s=49\nuser_s=44\nsystem_s=1\nmax_rss_kib=1024\n"
+    )
+    (run_dir / "binding_rank0.txt").write_text("Cpus_allowed_list:\t0\n")
+    (run_dir / "nemo").write_bytes(b"certified")
+    (run_dir / "namelist_cfg").write_text("&namrun\n/")
+    binary_sha = r343.sha256_file(run_dir / "nemo")
+    (run_dir / "producer_manifest.json").write_text(
+        json.dumps({"binary_sha256": binary_sha})
+    )
+    preflight = tmp_path / "preflight.json"
+    preflight.write_text(json.dumps({"loadavg": [0.0], "available_memory_gib": 200.0}))
+    artifact = r343.build_round349_nemo_artifact(
+        run_dir, cores=1, cpu_ids=(0,), preflight_path=preflight
+    )
+    assert artifact["rank_bindings"] == {"binding_rank0": [0]}
+    assert np.isclose(artifact["row"]["busy_cores"], 0.9)
+
+    (run_dir / "binding_rank0.txt").write_text("Cpus_allowed_list:\t1\n")
+    with pytest.raises(r343.GateError, match="differs from request"):
+        r343.build_round349_nemo_artifact(
+            run_dir, cores=1, cpu_ids=(0,), preflight_path=preflight
+        )
+
+
+def _round349_complete_report() -> dict[str, object]:
+    rows = []
+    for cores in r343.ROUND349_CORE_COUNTS:
+        cpu_ids = list(range(cores))
+        rows.append(
+            r343.round349_performance_row(
+                model="NEMO",
+                mode="nemo_5.0.2",
+                cores=cores,
+                seconds_per_step=1.0 / cores,
+                busy_cores=float(cores),
+                steps=96,
+                steady_steps=86,
+                cpu_ids=cpu_ids,
+                background_load={"max": 0.0},
+                artifact=f"nemo_n{cores}.json",
+                measurement_provenance={"backend": "NEMO", "dtype": "float64", "identity": {"sha": "x"}},
+                timing_window={"first_step": 7, "last_step": 92},
+                seconds_per_step_statistic="MPI AVG elapsed / frequency",
+            )
+        )
+        for mode in r343.ROUND349_MODES:
+            seconds = 1.0 if cores == 1 else 0.9
+            rows.append(
+                r343.round349_performance_row(
+                    model="legoESM",
+                    mode=mode,
+                    cores=cores,
+                    seconds_per_step=seconds,
+                    busy_cores=1.5 if cores == 40 else 1.0,
+                    steps=18,
+                    steady_steps=16,
+                    cpu_ids=cpu_ids,
+                    background_load={"max": 0.0},
+                    artifact=f"legoesm_{mode}_n{cores}.json",
+                    measurement_provenance={"backend": "cpu", "dtype": "float64", "identity": {"git": "x"}},
+                    timing_window={"first_step": 3, "last_step": 18},
+                    seconds_per_step_statistic="steady median",
+                )
+            )
+    profiles = [
+        {
+            "mode": "exact",
+            "cores": cores,
+            "compiled_kernel_wall_fraction": 0.75,
+            "eager_or_dispatch_fraction": 0.25,
+            "eager_surface_wall_fraction": 0.10,
+            "cost_centres": [{"cost_centre": "EOS / density"}],
+            "profile_step": r343.ROUND349_PROFILE_STEP,
+            "trace_path": "trace.json.gz",
+            "provenance": {"commit": "abc", "clean": True},
+            "background_load": {"loadavg": [0.0]},
+            "measurement_provenance": {"backend": "cpu", "dtype": "float64"},
+        }
+        for cores in (1, 40)
+    ]
+    return {"round": "orca2_r349", "rows": rows, "profiles": profiles}
+
+
+def test_round349_report_schema_and_arithmetic_controls() -> None:
+    report = _round349_complete_report()
+    r343.validate_round349_report(report)
+
+    bad_sypd = copy.deepcopy(report)
+    bad_sypd["rows"][0]["sypd"] *= 2.0
+    with pytest.raises(r343.GateError, match="invalid sypd"):
+        r343.validate_round349_report(bad_sypd)
+
+    missing_row = copy.deepcopy(report)
+    missing_row["rows"].pop()
+    with pytest.raises(r343.GateError, match="row set mismatch"):
+        r343.validate_round349_report(missing_row)
+
+    bad_profile = copy.deepcopy(report)
+    bad_profile["profiles"][0]["eager_or_dispatch_fraction"] = 1.5
+    with pytest.raises(r343.GateError, match="invalid profile"):
+        r343.validate_round349_report(bad_profile)
+
+    inconsistent_profile = copy.deepcopy(report)
+    inconsistent_profile["profiles"][0]["eager_or_dispatch_fraction"] = 0.20
+    with pytest.raises(r343.GateError, match="must sum to one"):
+        r343.validate_round349_report(inconsistent_profile)
+
+    zero_steps = copy.deepcopy(report)
+    zero_steps["rows"][0]["steps"] = 0
+    with pytest.raises(r343.GateError, match="steps must be positive"):
+        r343.validate_round349_report(zero_steps)
+
+    escaped_affinity = copy.deepcopy(report)
+    escaped_affinity["rows"][0]["busy_cores"] = 1.5
+    with pytest.raises(r343.GateError, match="exceeds affinity allowance"):
+        r343.validate_round349_report(escaped_affinity)
+
+
+def test_round349_perfetto_profile_aggregation(tmp_path: Path) -> None:
+    trace = {
+        "traceEvents": [
+            {
+                "ph": "M",
+                "name": "thread_name",
+                "pid": 1,
+                "tid": 10,
+                "args": {"name": "python-main"},
+            },
+            {
+                "ph": "M",
+                "name": "thread_name",
+                "pid": 1,
+                "tid": 20,
+                "args": {"name": "tf_XLAEigen"},
+            },
+            {
+                "ph": "X",
+                "name": r343.ROUND349_PROFILE_ANNOTATION,
+                "pid": 1,
+                "tid": 10,
+                "ts": 0.0,
+                "dur": 1000.0,
+            },
+            {
+                "ph": "X",
+                "name": "eos_density_kernel",
+                "pid": 1,
+                "tid": 20,
+                "ts": 100.0,
+                "dur": 600.0,
+            },
+            {
+                "ph": "X",
+                "name": "nemo_surface_card",
+                "pid": 1,
+                "tid": 10,
+                "ts": 0.0,
+                "dur": 100.0,
+            },
+            {
+                "ph": "X",
+                "name": r343.ROUND349_SURFACE_ANNOTATION,
+                "pid": 1,
+                "tid": 10,
+                "ts": 0.0,
+                "dur": 100.0,
+            },
+        ]
+    }
+    path = tmp_path / "perfetto_trace.json.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        json.dump(trace, handle)
+    profile = r343.summarize_round349_perfetto(path, cores=1)
+    assert np.isclose(profile["step_wall_s"], 0.001)
+    assert np.isclose(profile["compiled_kernel_wall_fraction"], 0.6)
+    assert np.isclose(profile["eager_or_dispatch_fraction"], 0.4)
+    assert np.isclose(profile["eager_surface_wall_fraction"], 0.1)
+    centres = {row["cost_centre"] for row in profile["cost_centres"]}
+    assert "EOS / density" in centres
+    assert "surface bulk flux" in centres
+
+
+def test_round349_dry_run_command_schema(tmp_path: Path) -> None:
+    commands = r343.build_round349_legoesm_commands(
+        output_dir=r343.ROUND349_SCRATCH_ROOT / "dry_run_test",
+        core_counts=(1, 2),
+        steps=r343.ROUND349_SMOKE_STEPS,
+        smoke=True,
+        include_profiles=False,
+    )
+    assert len(commands) == 2
+    for (command, env), cores in zip(commands, (1, 2), strict=True):
+        assert "taskset" in Path(command[0]).name
+        assert command[1:3] == ["-c", r343.format_cpu_id_list(r343.select_physical_cpu_ids(cores))]
+        assert env["CUDA_VISIBLE_DEVICES"] == ""
+        assert env["JAX_PLATFORMS"] == "cpu"
+        assert env["JAX_ENABLE_X64"] == "1"
+        assert env["OMP_NUM_THREADS"] == str(cores)
+        assert env["XLA_FLAGS"] == (
+            "--xla_cpu_multi_thread_eigen=true "
+            f"intra_op_parallelism_threads={cores}"
+        )

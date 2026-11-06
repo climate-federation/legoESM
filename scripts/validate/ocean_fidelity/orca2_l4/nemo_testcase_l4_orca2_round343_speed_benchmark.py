@@ -18,11 +18,14 @@ fast-literal fp64 CPU/GPU arms while retaining the round-343 interface.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import resource
+import shutil
 import subprocess
 import sys
 import time
@@ -67,6 +70,15 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
     nemo_testcase_l4_orca2_round339_common as common,
     nemo_testcase_l4_orca2_round340_standalone_gate as r340_s4,
+)
+from scripts.bench.sample_cpu_cores import (  # noqa: E402
+    CLK_TCK,
+    cores_busy,
+    parse_cpu_ticks,
+)
+from scripts.validate.fv3_native.summarize_perfetto_trace import (  # noqa: E402
+    load_perfetto_events,
+    perfetto_thread_names,
 )
 
 GateError = common.GateError
@@ -119,6 +131,167 @@ FAST_LITERAL_ARM_IDS = (
     "fast_literal_cpu_fp64",
     "fast_literal_gpu_fp64",
 )
+
+ROUND349_CORE_COUNTS = (1, 2, 4, 8, 16, 40)
+ROUND349_MODES = ("exact", "fast_literal")
+ROUND349_FULL_STEPS = 18
+ROUND349_STEADY_STEPS = 16
+ROUND349_SMOKE_STEPS = 4
+ROUND349_PROFILE_STEP = 3
+ROUND349_PROFILE_ANNOTATION = "orca2_round349_profile_step"
+ROUND349_SURFACE_ANNOTATION = "orca2_round349_surface_eager"
+ROUND349_BUSY_THREAD_FRACTION = 0.10
+ROUND349_SCRATCH_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/orca2_r349_scratch"
+)
+DEFAULT_ROUND349_OUTPUT_DIR = ROUND349_SCRATCH_ROOT / "legoesm_cpu_sweep"
+DEFAULT_ROUND349_NEMO_SOURCE = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round342/"
+    "s4_year/orca2_k0_year1_a_np2"
+)
+ROUND349_REPORT_NAME = "orca2_round349_cpu_benchmark_report.json"
+ROUND349_REPORT_MARKDOWN_NAME = "orca2_round349_cpu_benchmark_report.md"
+
+
+class CpuTopologyRow(NamedTuple):
+    """One online logical CPU and its physical-core identity."""
+
+    cpu_id: int
+    core_id: int
+    package_id: int
+    siblings: tuple[int, ...]
+
+
+def parse_cpu_id_list(value: str) -> tuple[int, ...]:
+    """Parse Linux CPU-list syntax (``0,2-4``) into unique sorted IDs."""
+    ids: list[int] = []
+    for token in value.split(","):
+        token = token.strip()
+        require(bool(token), f"empty CPU-list token in {value!r}")
+        if "-" in token:
+            lo_s, hi_s = token.split("-", maxsplit=1)
+            lo, hi = int(lo_s), int(hi_s)
+            require(0 <= lo <= hi, f"invalid CPU range {token!r}")
+            ids.extend(range(lo, hi + 1))
+        else:
+            cpu = int(token)
+            require(cpu >= 0, f"negative CPU id {cpu}")
+            ids.append(cpu)
+    require(len(ids) == len(set(ids)), f"duplicate CPU id in {value!r}")
+    return tuple(sorted(ids))
+
+
+def format_cpu_id_list(cpu_ids: Sequence[int]) -> str:
+    """Return a stable comma-separated CPU list accepted by taskset/Open MPI."""
+    values = tuple(int(cpu) for cpu in cpu_ids)
+    require(bool(values), "CPU id list must not be empty")
+    require(len(values) == len(set(values)), f"duplicate CPU ids: {values}")
+    require(all(cpu >= 0 for cpu in values), f"negative CPU id in {values}")
+    return ",".join(str(cpu) for cpu in values)
+
+
+def read_cpu_topology(
+    sysfs_root: Path = Path("/sys/devices/system/cpu"),
+) -> tuple[CpuTopologyRow, ...]:
+    """Read online logical CPUs and physical-core identities from Linux sysfs."""
+    rows: list[CpuTopologyRow] = []
+    for cpu_dir in sorted(
+        sysfs_root.glob("cpu[0-9]*"), key=lambda path: int(path.name[3:])
+    ):
+        cpu_id = int(cpu_dir.name[3:])
+        online_path = cpu_dir / "online"
+        if online_path.is_file() and online_path.read_text(encoding="utf-8").strip() != "1":
+            continue
+        topo = cpu_dir / "topology"
+        core_id = int((topo / "core_id").read_text(encoding="utf-8").strip())
+        package_id = int(
+            (topo / "physical_package_id").read_text(encoding="utf-8").strip()
+        )
+        siblings = parse_cpu_id_list(
+            (topo / "thread_siblings_list").read_text(encoding="utf-8").strip()
+        )
+        rows.append(CpuTopologyRow(cpu_id, core_id, package_id, siblings))
+    require(bool(rows), f"no online CPUs found below {sysfs_root}")
+    return tuple(rows)
+
+
+def select_physical_cpu_ids(
+    n_cores: int,
+    topology: Sequence[CpuTopologyRow] | None = None,
+) -> tuple[int, ...]:
+    """Select the lowest logical representative of each physical core."""
+    require(n_cores > 0, f"n_cores must be positive, got {n_cores}")
+    rows = tuple(read_cpu_topology() if topology is None else topology)
+    representatives: dict[tuple[int, int], CpuTopologyRow] = {}
+    for row in rows:
+        key = (row.package_id, row.core_id)
+        current = representatives.get(key)
+        if current is None or row.cpu_id < current.cpu_id:
+            representatives[key] = row
+    selected_rows = sorted(representatives.values(), key=lambda row: row.cpu_id)[:n_cores]
+    require(
+        len(selected_rows) == n_cores,
+        f"requested {n_cores} physical cores but found {len(representatives)}",
+    )
+    selected = tuple(row.cpu_id for row in selected_rows)
+    for index, row in enumerate(selected_rows):
+        overlap = set(row.siblings).intersection(selected)
+        require(
+            overlap == {row.cpu_id},
+            f"selected CPUs share a physical core: cpu={row.cpu_id}, "
+            f"siblings={row.siblings}, selected={selected}",
+        )
+        require(
+            (row.package_id, row.core_id)
+            not in {(other.package_id, other.core_id) for other in selected_rows[:index]},
+            f"duplicate physical core selected for cpu={row.cpu_id}",
+        )
+    return selected
+
+
+def read_thread_cpu_ticks(pid: int | str = "self") -> dict[int, int]:
+    """Read per-thread user+system CPU ticks for a process."""
+    ticks: dict[int, int] = {}
+    task_root = Path(f"/proc/{pid}/task")
+    for task_dir in task_root.iterdir():
+        if not task_dir.name.isdigit():
+            continue
+        try:
+            user_ticks, system_ticks = parse_cpu_ticks(
+                (task_dir / "stat").read_text(encoding="utf-8")
+            )
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        ticks[int(task_dir.name)] = user_ticks + system_ticks
+    require(bool(ticks), f"no thread CPU counters found below {task_root}")
+    return ticks
+
+
+def summarize_thread_cpu_ticks(
+    before: Mapping[int, int],
+    after: Mapping[int, int],
+    wall_s: float,
+) -> dict[str, Any]:
+    """Convert per-thread CPU-tick deltas into measured core utilization."""
+    require(np.isfinite(wall_s) and wall_s > 0.0, f"invalid wall_s={wall_s}")
+    fractions = {
+        int(tid): max(0, int(ticks) - int(before.get(tid, 0))) / CLK_TCK / wall_s
+        for tid, ticks in after.items()
+    }
+    total_before = sum(int(value) for value in before.values())
+    total_after = sum(int(value) for value in after.values())
+    measured_cores = cores_busy(total_before, total_after, wall_s)
+    ordered = sorted(fractions.items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "cores_busy": float(measured_cores),
+        "os_threads_after": len(after),
+        "busy_threads_over_10pct": sum(
+            value >= ROUND349_BUSY_THREAD_FRACTION for value in fractions.values()
+        ),
+        "thread_core_fractions": [
+            {"tid": tid, "core_fraction": float(value)} for tid, value in ordered
+        ],
+    }
 
 
 class SwitchSpec(NamedTuple):
@@ -1001,7 +1174,7 @@ def compute_step_timing_summary(
     times = np.asarray(step_times_s, dtype=np.float64)
     require(times.ndim == 1, "step_times_s must be 1-D")
     require(warmup_steps >= 1, f"warmup_steps must be >= 1, got {warmup_steps}")
-    require(min_steady_steps >= 20, f"min_steady_steps must be >= 20, got {min_steady_steps}")
+    require(min_steady_steps >= 1, f"min_steady_steps must be >= 1, got {min_steady_steps}")
     require(
         times.size >= warmup_steps + min_steady_steps,
         f"need >= {warmup_steps + min_steady_steps} total steps "
@@ -1401,6 +1574,14 @@ def run_single_benchmark_arm(
     exact_ref_dir: Path = DEFAULT_EXACT_REF_DIR,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     variant: str = "cat_a_plus_b",
+    steps_override: int | None = None,
+    min_steady_steps: int = MIN_STEADY_STEPS,
+    collect_accuracy: bool = True,
+    requested_cores: int | None = None,
+    expected_cpu_ids: Sequence[int] | None = None,
+    profile_dir: Path | None = None,
+    artifact_name: str | None = None,
+    allow_dirty_provenance: bool = False,
 ) -> dict[str, Any]:
     """Execute one benchmark arm in the current process and save its JSON artifact."""
     valid_arms = (*ARM_IDS, *FAST_LITERAL_ARM_IDS)
@@ -1449,6 +1630,38 @@ def run_single_benchmark_arm(
         steps = NORMAL_BENCHMARK_STEPS
         daily_check_steps = DAILY_CHECK_STEPS_8D
 
+    if steps_override is not None:
+        require(
+            steps_override >= WARMUP_STEPS + min_steady_steps,
+            f"steps_override={steps_override} must cover {WARMUP_STEPS} warmup + "
+            f"{min_steady_steps} steady steps",
+        )
+        steps = int(steps_override)
+    if not collect_accuracy:
+        daily_check_steps = ()
+
+    affinity = tuple(sorted(os.sched_getaffinity(0)))
+    if requested_cores is not None:
+        require(requested_cores > 0, f"requested_cores must be positive, got {requested_cores}")
+        require(
+            len(affinity) == requested_cores,
+            f"CPU affinity has {len(affinity)} CPUs, expected requested_cores={requested_cores}: "
+            f"{affinity}",
+        )
+    if expected_cpu_ids is not None:
+        expected = tuple(sorted(int(cpu) for cpu in expected_cpu_ids))
+        require(
+            affinity == expected,
+            f"CPU affinity {affinity} != expected physical CPU ids {expected}",
+        )
+    if profile_dir is not None:
+        require(
+            steps >= ROUND349_PROFILE_STEP,
+            f"profile requires step {ROUND349_PROFILE_STEP}, got steps={steps}",
+        )
+        require(not profile_dir.exists(), f"profile directory already exists: {profile_dir}")
+        profile_dir.mkdir(parents=True)
+
     t_setup_start = time.perf_counter()
     base_card = bulk.build_nemo_orca2_k0_ocean_card(deck_root)
     normal_card_check = build_normal_mode_orca2_k0_card(base_card, variant="cat_a_plus_b")
@@ -1489,6 +1702,7 @@ def run_single_benchmark_arm(
     carry_s2 = None
     prior_surface = None
     step_times_s: list[float] = []
+    step_cpu_telemetry: list[dict[str, Any]] = []
     daily_accuracy: list[dict[str, Any]] = []
 
     for kt in range(1, steps + 1):
@@ -1516,25 +1730,51 @@ def run_single_benchmark_arm(
             )
         )
 
-        t0 = time.perf_counter()
-        res = bulk.nemo_orca2_k0_ocean_step(
-            card,
-            state,
-            model=model,
-            nemo_kt=kt,
-            s0f=ctrl["s0f"],
-            ice_if=ctrl["ice_if"],
-            s0=s0,
-            s2=s2,
-            chl=ctrl["chl"],
-            geothermal_heat_flux_mwm2=ctrl["geothermal_heat_flux_mwm2"],
-            prior_surface=prior_surface,
-            sponge=ctrl["sponge"],
+        thread_ticks_before = read_thread_cpu_ticks() if requested_cores is not None else None
+        is_profile_step = profile_dir is not None and kt == ROUND349_PROFILE_STEP
+        trace_context = (
+            jax.profiler.trace(profile_dir, create_perfetto_trace=True)
+            if is_profile_step
+            else nullcontext()
         )
-        state = res.ocean.state_after if hasattr(res.ocean, "state_after") else res.ocean
-        jax.block_until_ready(state.T.data)
-        dt_wall = time.perf_counter() - t0
+        with trace_context:
+            annotation = (
+                jax.profiler.TraceAnnotation(ROUND349_PROFILE_ANNOTATION)
+                if is_profile_step
+                else nullcontext()
+            )
+            with annotation:
+                t0 = time.perf_counter()
+                res = bulk.nemo_orca2_k0_ocean_step(
+                    card,
+                    state,
+                    model=model,
+                    nemo_kt=kt,
+                    s0f=ctrl["s0f"],
+                    ice_if=ctrl["ice_if"],
+                    s0=s0,
+                    s2=s2,
+                    chl=ctrl["chl"],
+                    geothermal_heat_flux_mwm2=ctrl["geothermal_heat_flux_mwm2"],
+                    prior_surface=prior_surface,
+                    sponge=ctrl["sponge"],
+                    profile_annotations=is_profile_step,
+                )
+                state = res.ocean.state_after if hasattr(res.ocean, "state_after") else res.ocean
+                jax.block_until_ready(res)
+                dt_wall = time.perf_counter() - t0
         step_times_s.append(dt_wall)
+        if thread_ticks_before is not None:
+            cpu_row = summarize_thread_cpu_ticks(
+                thread_ticks_before, read_thread_cpu_ticks(), dt_wall
+            )
+            cpu_row["kt"] = kt
+            require(
+                float(cpu_row["cores_busy"]) <= float(requested_cores) + 0.25,
+                f"kt={kt}: measured {cpu_row['cores_busy']:.3f} busy cores exceeds "
+                f"affinity cap {requested_cores}",
+            )
+            step_cpu_telemetry.append(cpu_row)
 
         carry_s0 = res.next_s0
         carry_s2 = res.next_s2
@@ -1555,7 +1795,9 @@ def run_single_benchmark_arm(
         arr = np.asarray(getattr(state, field_name).data)
         require(bool(np.isfinite(arr).all()), f"arm {arm_id}: non-finite terminal {field_name}")
 
-    timing = compute_step_timing_summary(step_times_s)
+    timing = compute_step_timing_summary(
+        step_times_s, min_steady_steps=min_steady_steps
+    )
     memory = read_memory_telemetry()
     dev = jax.devices()[0]
 
@@ -1575,12 +1817,52 @@ def run_single_benchmark_arm(
         "timing": timing,
         "memory": memory,
         "daily_accuracy": daily_accuracy,
+        "cpu_affinity": list(affinity),
+        "requested_cores": requested_cores,
+        "thread_environment": {
+            key: os.environ.get(key)
+            for key in (
+                "XLA_FLAGS",
+                "OMP_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS",
+                "TF_NUM_INTRAOP_THREADS",
+                "TF_NUM_INTEROP_THREADS",
+            )
+        },
+        "step_cpu_telemetry": step_cpu_telemetry,
         "switch_inventory_check": inventory_check,
-        "provenance": worktree_stamp(),
+        "provenance": worktree_stamp(allow_dirty=allow_dirty_provenance),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
 
-    out_path = output_dir / f"arm_{arm_id}.json"
+    if step_cpu_telemetry:
+        steady_cpu = step_cpu_telemetry[WARMUP_STEPS:]
+        arm_report["cpu_utilization"] = {
+            "measurement": "per-thread /proc utime+stime deltas divided by step wall time",
+            "steady_median_cores_busy": float(
+                np.median([row["cores_busy"] for row in steady_cpu])
+            ),
+            "steady_mean_cores_busy": float(
+                np.mean([row["cores_busy"] for row in steady_cpu])
+            ),
+            "steady_max_busy_threads_over_10pct": int(
+                max(row["busy_threads_over_10pct"] for row in steady_cpu)
+            ),
+            "steady_median_busy_threads_over_10pct": float(
+                np.median([row["busy_threads_over_10pct"] for row in steady_cpu])
+            ),
+        }
+    if profile_dir is not None:
+        trace_path, _ = load_perfetto_events(profile_dir)
+        arm_report["profile"] = {
+            "step": ROUND349_PROFILE_STEP,
+            "annotation": ROUND349_PROFILE_ANNOTATION,
+            "trace_path": str(trace_path),
+        }
+
+    out_path = output_dir / (artifact_name or f"arm_{arm_id}.json")
     out_path.write_text(json.dumps(arm_report, indent=2) + "\n", encoding="utf-8")
     return arm_report
 
@@ -1837,6 +2119,982 @@ def run_all_arms_via_subprocesses(
     )
 
 
+def compute_sypd(seconds_per_step: float, *, year_steps: int = YEAR_STEPS) -> float:
+    """Convert steady seconds/step to simulated years per wall day."""
+    require(
+        np.isfinite(seconds_per_step) and seconds_per_step > 0.0,
+        f"seconds_per_step must be finite and positive, got {seconds_per_step}",
+    )
+    require(year_steps > 0, f"year_steps must be positive, got {year_steps}")
+    return float(86400.0 / (year_steps * seconds_per_step))
+
+
+def round349_performance_row(
+    *,
+    model: str,
+    mode: str,
+    cores: int,
+    seconds_per_step: float,
+    busy_cores: float,
+    steps: int,
+    steady_steps: int,
+    cpu_ids: Sequence[int],
+    background_load: Mapping[str, Any],
+    artifact: str,
+    measurement_provenance: Mapping[str, Any],
+    timing_window: Mapping[str, int],
+    seconds_per_step_statistic: str,
+) -> dict[str, Any]:
+    """Build one schema-checked row for the round-349 comparison table."""
+    require(model in ("NEMO", "legoESM"), f"unknown model {model!r}")
+    valid_modes = ("nemo_5.0.2", *ROUND349_MODES)
+    require(mode in valid_modes, f"unknown mode {mode!r}; expected one of {valid_modes}")
+    require(cores in ROUND349_CORE_COUNTS, f"unregistered core count {cores}")
+    ids = tuple(int(cpu) for cpu in cpu_ids)
+    require(len(ids) == cores, f"row has {len(ids)} CPU ids for cores={cores}")
+    require(len(set(ids)) == cores, f"row CPU ids are not unique: {ids}")
+    require(ids == select_physical_cpu_ids(cores), f"row CPU ids are not registered physical cores: {ids}")
+    require(steps > 0, f"row steps must be positive, got {steps}")
+    require(
+        0 < steady_steps <= steps,
+        f"row steady_steps={steady_steps} must be in 1..{steps}",
+    )
+    require(np.isfinite(busy_cores) and busy_cores >= 0.0, f"invalid busy_cores={busy_cores}")
+    require(
+        busy_cores <= cores + 0.25,
+        f"busy_cores={busy_cores} exceeds affinity allowance for cores={cores}",
+    )
+    require(bool(background_load), "row is missing background-load provenance")
+    require(bool(artifact), "row is missing artifact provenance")
+    require(
+        all(measurement_provenance.get(key) for key in ("backend", "dtype", "identity")),
+        "row is missing backend/dtype/identity provenance",
+    )
+    require(set(timing_window) == {"first_step", "last_step"}, "row timing window is missing")
+    require(bool(seconds_per_step_statistic), "row timing statistic is missing")
+    sypd = compute_sypd(seconds_per_step)
+    return {
+        "model": model,
+        "mode": mode,
+        "cores": int(cores),
+        "cpu_ids": list(ids),
+        "steps": int(steps),
+        "steady_steps": int(steady_steps),
+        "seconds_per_step": float(seconds_per_step),
+        "sypd": sypd,
+        "core_seconds_per_step": float(cores * seconds_per_step),
+        "busy_cores": float(busy_cores),
+        "background_load": dict(background_load),
+        "artifact": artifact,
+        "measurement_provenance": dict(measurement_provenance),
+        "timing_window": dict(timing_window),
+        "seconds_per_step_statistic": seconds_per_step_statistic,
+    }
+
+
+def validate_round349_report(
+    report: Mapping[str, Any], *, require_complete: bool = True
+) -> None:
+    """Validate report schema, arithmetic, full sweep, and profile coverage."""
+    require(report.get("round") == "orca2_r349", "round-349 report has wrong round")
+    rows = report.get("rows")
+    require(isinstance(rows, list) and bool(rows), "round-349 report has no rows")
+    seen: set[tuple[str, str, int]] = set()
+    for row in rows:
+        key = (str(row.get("model")), str(row.get("mode")), int(row.get("cores", 0)))
+        require(key not in seen, f"duplicate round-349 row {key}")
+        seen.add(key)
+        rebuilt = round349_performance_row(
+            model=key[0],
+            mode=key[1],
+            cores=key[2],
+            seconds_per_step=float(row.get("seconds_per_step", 0.0)),
+            busy_cores=float(row.get("busy_cores", -1.0)),
+            steps=int(row.get("steps", 0)),
+            steady_steps=int(row.get("steady_steps", 0)),
+            cpu_ids=row.get("cpu_ids", []),
+            background_load=row.get("background_load", {}),
+            artifact=str(row.get("artifact", "")),
+            measurement_provenance=row.get("measurement_provenance", {}),
+            timing_window=row.get("timing_window", {}),
+            seconds_per_step_statistic=str(row.get("seconds_per_step_statistic", "")),
+        )
+        expected_window = {"first_step": 7, "last_step": 92} if key[0] == "NEMO" else {"first_step": 3, "last_step": 18}
+        expected_statistic = "MPI AVG elapsed / frequency" if key[0] == "NEMO" else "steady median"
+        require(row["timing_window"] == expected_window, f"row {key} has wrong timing window")
+        require(row["seconds_per_step_statistic"] == expected_statistic, f"row {key} has wrong statistic")
+        for arithmetic_key in ("sypd", "core_seconds_per_step"):
+            require(
+                np.isclose(
+                    float(row.get(arithmetic_key, np.nan)),
+                    float(rebuilt[arithmetic_key]),
+                    rtol=1.0e-12,
+                    atol=0.0,
+                ),
+                f"row {key} has invalid {arithmetic_key}",
+            )
+        if key[0] == "legoESM" and require_complete:
+            require(
+                int(row.get("steady_steps", 0)) >= ROUND349_STEADY_STEPS,
+                f"row {key} has fewer than {ROUND349_STEADY_STEPS} steady steps",
+            )
+    if require_complete:
+        expected = {
+            ("NEMO", "nemo_5.0.2", n) for n in ROUND349_CORE_COUNTS
+        } | {
+            ("legoESM", mode, n)
+            for mode in ROUND349_MODES
+            for n in ROUND349_CORE_COUNTS
+        }
+        require(
+            seen == expected,
+            f"report row set mismatch: missing={sorted(expected-seen)} "
+            f"extra={sorted(seen-expected)}",
+        )
+        profiles = report.get("profiles", [])
+        require(isinstance(profiles, list), "profiles must be a list")
+        profile_cores = {int(profile.get("cores", 0)) for profile in profiles}
+        require(profile_cores == {1, 40}, f"profiles must cover cores 1 and 40, got {profile_cores}")
+        for profile in profiles:
+            require(profile.get("mode") == "exact", "profile must use exact mode")
+            require(bool(profile.get("cost_centres")), "profile has no cost centres")
+            require(profile.get("profile_step") == ROUND349_PROFILE_STEP, "profile step is not kt=3")
+            require(bool(profile.get("trace_path")), "profile trace path is missing")
+            require(bool(profile.get("provenance")), "profile provenance is missing")
+            require(bool(profile.get("background_load")), "profile background load is missing")
+            require(bool(profile.get("measurement_provenance")), "profile identity is missing")
+            for key in (
+                "compiled_kernel_wall_fraction",
+                "eager_or_dispatch_fraction",
+                "eager_surface_wall_fraction",
+            ):
+                value = float(profile.get(key, np.nan))
+                require(np.isfinite(value) and 0.0 <= value <= 1.0, f"invalid profile {key}={value}")
+            compiled = float(profile["compiled_kernel_wall_fraction"])
+            eager = float(profile["eager_or_dispatch_fraction"])
+            require(
+                np.isclose(compiled + eager, 1.0, rtol=0.0, atol=1.0e-12),
+                "compiled and eager/dispatch profile fractions must sum to one",
+            )
+
+
+_PROFILE_COST_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("surface bulk flux", ("bulk_flux", "nemo_surface", "nemo_blk", "sbc", "surface_card")),
+    ("tracer advection", ("tracer", "traadv", "fct", "advection")),
+    ("TKE / vertical mixing", ("tke", "vertical_mixing", "zdf", "thomas", "tridiagonal")),
+    ("EOS / density", ("eos", "density", "rho", "bn2", "equation_of_state")),
+    ("barotropic / free surface", ("barotropic", "free_surface", "dynspg", "ssh", "eta")),
+    ("momentum / vorticity", ("momentum", "vorticity", "dynvor", "wzv", "velocity")),
+    ("lateral mixing / GM-Redi", ("lateral_mixing", "gm_redi", "redi", "isoneutral", "mle")),
+    ("shortwave penetration", ("shortwave", "fraqsr", "traqsr", "chlorophyll")),
+    ("freshwater / runoff", ("freshwater", "runoff", "restoring", "sfx", "emp")),
+    ("compiled libm callback", ("pure_callback", "scalar_libm", "custom-call", "custom_call")),
+    ("optimization barrier / copy", ("optimization_barrier", "copy", "bitcast")),
+    ("mask / halo / north fold", ("mask", "halo", "north_fold", "lbc")),
+    ("pressure gradient", ("pressure", "dynhpg", "hydrostatic")),
+    ("bottom drag", ("bottom_drag", "drag", "drg")),
+)
+
+
+def _profile_event_text(event: Mapping[str, Any]) -> str:
+    args = event.get("args", {})
+    try:
+        args_text = json.dumps(args, sort_keys=True, default=str)
+    except TypeError:
+        args_text = str(args)
+    return f"{event.get('name', '')} {args_text}".lower()
+
+
+def _profile_cost_centre(event: Mapping[str, Any], *, compiled: bool) -> str:
+    text_value = _profile_event_text(event)
+    for category, patterns in _PROFILE_COST_PATTERNS:
+        if any(pattern in text_value for pattern in patterns):
+            return category
+    return "other compiled XLA kernels" if compiled else "Python / eager dispatch"
+
+
+def _interval_union_duration(intervals: Sequence[tuple[float, float]]) -> float:
+    if not intervals:
+        return 0.0
+    ordered = sorted((float(start), float(end)) for start, end in intervals if end > start)
+    if not ordered:
+        return 0.0
+    total = 0.0
+    start, end = ordered[0]
+    for next_start, next_end in ordered[1:]:
+        if next_start <= end:
+            end = max(end, next_end)
+        else:
+            total += end - start
+            start, end = next_start, next_end
+    return total + end - start
+
+
+def summarize_round349_perfetto(
+    trace_path: Path,
+    *,
+    cores: int,
+    mode: str = "exact",
+    top_n: int = 20,
+) -> dict[str, Any]:
+    """Aggregate the registered one-step trace into profile cost centres."""
+    resolved, events = load_perfetto_events(trace_path)
+    thread_names = perfetto_thread_names(events)
+    annotations = [
+        event
+        for event in events
+        if event.get("ph") == "X" and event.get("name") == ROUND349_PROFILE_ANNOTATION
+    ]
+    require(len(annotations) == 1, f"expected one profile annotation, found {len(annotations)}")
+    annotation = annotations[0]
+    step_start = float(annotation["ts"])
+    step_end = step_start + float(annotation["dur"])
+    require(step_end > step_start, "profile annotation has non-positive duration")
+    surface_annotations = [
+        event
+        for event in events
+        if event.get("ph") == "X" and event.get("name") == ROUND349_SURFACE_ANNOTATION
+    ]
+    require(
+        len(surface_annotations) == 1,
+        f"expected one explicit surface annotation, found {len(surface_annotations)}",
+    )
+    surface_annotation = surface_annotations[0]
+
+    totals: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    compiled_intervals: list[tuple[float, float]] = []
+    surface_eager_intervals: list[tuple[float, float]] = []
+    for event in events:
+        if event.get("ph") != "X" or event is annotation:
+            continue
+        event_start = float(event.get("ts", 0.0))
+        event_end = event_start + float(event.get("dur", 0.0))
+        clipped_start = max(step_start, event_start)
+        clipped_end = min(step_end, event_end)
+        if clipped_end <= clipped_start:
+            continue
+        thread_name = thread_names.get(
+            (event.get("pid"), event.get("tid")),
+            f"{event.get('pid')}/{event.get('tid')}",
+        )
+        thread_lower = thread_name.lower()
+        compiled = any(
+            marker in thread_lower
+            for marker in ("xla", "eigen", "pjrt", "tf_foreach", "worker")
+        )
+        centre = _profile_cost_centre(event, compiled=compiled)
+        duration = clipped_end - clipped_start
+        totals[centre] = totals.get(centre, 0.0) + duration
+        counts[centre] = counts.get(centre, 0) + 1
+        if compiled:
+            compiled_intervals.append((clipped_start, clipped_end))
+        if event is surface_annotation:
+            surface_eager_intervals.append((clipped_start, clipped_end))
+
+    total_inclusive = sum(totals.values())
+    require(total_inclusive > 0.0, "profile contains no complete events inside step")
+    step_duration = step_end - step_start
+    compiled_wall = min(step_duration, _interval_union_duration(compiled_intervals))
+    surface_eager_wall = min(step_duration, _interval_union_duration(surface_eager_intervals))
+    rows = [
+        {
+            "rank": rank,
+            "cost_centre": name,
+            "inclusive_cpu_s": duration / 1.0e6,
+            "fraction_of_classified_inclusive_cpu": duration / total_inclusive,
+            "event_count": counts[name],
+        }
+        for rank, (name, duration) in enumerate(
+            sorted(totals.items(), key=lambda item: (-item[1], item[0]))[:top_n],
+            start=1,
+        )
+    ]
+    compiled_fraction = compiled_wall / step_duration
+    return {
+        "mode": mode,
+        "cores": int(cores),
+        "profile_step": ROUND349_PROFILE_STEP,
+        "trace_path": str(resolved),
+        "step_wall_s": step_duration / 1.0e6,
+        "compiled_kernel_wall_fraction": compiled_fraction,
+        "eager_or_dispatch_fraction": 1.0 - compiled_fraction,
+        "eager_surface_wall_fraction": surface_eager_wall / step_duration,
+        "inclusive_cpu_time_note": (
+            "inclusive trace-event times can overlap; shares rank named cost centres; "
+            "unclassified work remains in other compiled/Python categories; compiled/eager "
+            "coverage is heuristic and the synchronized surface fraction is non-exclusive"
+        ),
+        "cost_centres": rows,
+    }
+
+
+_NEMO_STEADY_HEADER_RE = re.compile(
+    r"Performance statistics between time step\s+(\d+)\s+and\s+(\d+)", re.IGNORECASE
+)
+_NEMO_STEP_ROW_RE = re.compile(
+    r"^\s*step\s*\|\s*([0-9.Ee+-]+)s.*\|\s*([0-9]+)\s*$"
+)
+
+
+def parse_nemo_timing_output(text: str) -> dict[str, Any]:
+    """Parse NEMO's steady timing block, refusing the whole-run block."""
+    lines = text.splitlines()
+    header_index = None
+    first_step = last_step = None
+    for index, line in enumerate(lines):
+        match = _NEMO_STEADY_HEADER_RE.search(line)
+        if match:
+            header_index = index
+            first_step, last_step = int(match.group(1)), int(match.group(2))
+            break
+    require(header_index is not None, "NEMO timing output lacks steady time-step block")
+    in_average = False
+    for line in lines[header_index + 1 :]:
+        if line.strip().startswith("Timing : AVG values"):
+            in_average = True
+            continue
+        if not in_average:
+            continue
+        match = _NEMO_STEP_ROW_RE.match(line)
+        if match:
+            elapsed_s = float(match.group(1))
+            frequency = int(match.group(2))
+            require(frequency > 0 and elapsed_s > 0.0, "invalid NEMO steady timing row")
+            require(
+                frequency == last_step - first_step + 1,
+                f"NEMO steady frequency {frequency} does not match window "
+                f"{first_step}..{last_step}",
+            )
+            return {
+                "first_step": first_step,
+                "last_step": last_step,
+                "steady_steps": frequency,
+                "steady_elapsed_s": elapsed_s,
+                "seconds_per_step": elapsed_s / frequency,
+            }
+    raise GateError("NEMO timing output lacks AVG steady step row")
+
+
+def parse_gnu_time_metrics(text: str) -> dict[str, float]:
+    """Parse the operator script's stable GNU-time key/value format."""
+    values: dict[str, float] = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, raw = line.split("=", maxsplit=1)
+        if key in {"elapsed_s", "user_s", "system_s", "max_rss_kib"}:
+            values[key] = float(raw)
+    require(
+        set(values) == {"elapsed_s", "user_s", "system_s", "max_rss_kib"},
+        f"GNU time metrics incomplete: {sorted(values)}",
+    )
+    require(values["elapsed_s"] > 0.0, "GNU time elapsed_s must be positive")
+    require(values["user_s"] >= 0.0 and values["system_s"] >= 0.0, "negative GNU CPU time")
+    return values
+
+
+def build_round349_nemo_artifact(
+    run_dir: Path,
+    *,
+    cores: int,
+    cpu_ids: Sequence[int],
+    preflight_path: Path,
+) -> dict[str, Any]:
+    """Build a NEMO arm artifact from timing.output and GNU time telemetry."""
+    timing_path = run_dir / "timing.output"
+    time_path = run_dir / "gnu_time.txt"
+    require(timing_path.is_file(), f"missing {timing_path}")
+    require(time_path.is_file(), f"missing {time_path}")
+    require(preflight_path.is_file(), f"missing {preflight_path}")
+    timing = parse_nemo_timing_output(timing_path.read_text(encoding="utf-8"))
+    require(
+        (timing["first_step"], timing["last_step"], timing["steady_steps"]) == (7, 92, 86),
+        f"NEMO steady window is not registered 7..92/86: {timing}",
+    )
+    time_metrics = parse_gnu_time_metrics(time_path.read_text(encoding="utf-8"))
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    binding_paths = sorted(run_dir.glob("binding_rank*.txt"))
+    require(len(binding_paths) == cores, f"expected {cores} rank binding records")
+    rank_bindings: dict[str, list[int]] = {}
+    for path in binding_paths:
+        match = re.search(r"Cpus_allowed_list:\s*(\S+)", path.read_text(encoding="utf-8"))
+        require(match is not None, f"invalid rank binding record {path}")
+        allowed = list(parse_cpu_id_list(match.group(1)))
+        require(len(allowed) == 1, f"rank binding is not one hardware thread: {path}: {allowed}")
+        rank_bindings[path.stem] = allowed
+    observed_cpu_ids = sorted({cpu for allowed in rank_bindings.values() for cpu in allowed})
+    require(observed_cpu_ids == sorted(cpu_ids), "observed NEMO rank affinity differs from request")
+    rank_time_paths = sorted(run_dir.glob("rank_time*.txt"))
+    require(len(rank_time_paths) == cores, f"expected {cores} rank CPU-time records")
+    rank_times = {
+        path.stem: parse_gnu_time_metrics(path.read_text(encoding="utf-8"))
+        for path in rank_time_paths
+    }
+    manifest = json.loads((run_dir / "producer_manifest.json").read_text(encoding="utf-8"))
+    binary_sha = sha256_file(run_dir / "nemo")
+    require(binary_sha == manifest.get("binary_sha256"), "NEMO binary fails producer manifest")
+    busy = sum(value["user_s"] + value["system_s"] for value in rank_times.values()) / time_metrics["elapsed_s"]
+    row = round349_performance_row(
+        model="NEMO",
+        mode="nemo_5.0.2",
+        cores=cores,
+        seconds_per_step=float(timing["seconds_per_step"]),
+        busy_cores=busy,
+        steps=96,
+        steady_steps=int(timing["steady_steps"]),
+        cpu_ids=observed_cpu_ids,
+        background_load=preflight,
+        artifact=str(run_dir),
+        measurement_provenance={
+            "backend": "NEMO 5.0.2 / Open MPI",
+            "dtype": "float64",
+            "identity": {
+                "binary_sha256": binary_sha,
+                "producer_manifest_binary_sha256": manifest["binary_sha256"],
+                "namelist_sha256": sha256_file(run_dir / "namelist_cfg"),
+            },
+        },
+        timing_window={"first_step": 7, "last_step": 92},
+        seconds_per_step_statistic="MPI AVG elapsed / frequency",
+    )
+    return {
+        "round": "orca2_r349",
+        "kind": "nemo_cpu_arm",
+        "row": row,
+        "timing": timing,
+        "gnu_time": time_metrics,
+        "binary_sha256": binary_sha,
+        "producer_manifest_binary_sha256": manifest["binary_sha256"],
+        "rank_bindings": rank_bindings,
+        "rank_cpu_times": rank_times,
+        "namelist_sha256": sha256_file(run_dir / "namelist_cfg"),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _read_proc_cpu_counters() -> dict[int, tuple[int, int]]:
+    """Return logical-CPU ``(idle, total)`` tick counters from /proc/stat."""
+    counters: dict[int, tuple[int, int]] = {}
+    for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if not fields or not re.fullmatch(r"cpu\d+", fields[0]):
+            continue
+        values = [int(value) for value in fields[1:]]
+        require(len(values) >= 5, f"short /proc/stat row: {line}")
+        cpu_id = int(fields[0][3:])
+        idle = values[3] + values[4]
+        counters[cpu_id] = (idle, sum(values))
+    require(bool(counters), "/proc/stat contains no per-CPU counters")
+    return counters
+
+
+def _read_process_cpu_ticks() -> dict[int, tuple[int, str]]:
+    """Return live process CPU ticks and command names for load preflight."""
+    rows: dict[int, tuple[int, str]] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            user_ticks, system_ticks = parse_cpu_ticks(
+                (entry / "stat").read_text(encoding="utf-8")
+            )
+            command = (entry / "comm").read_text(encoding="utf-8").strip()
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        rows[int(entry.name)] = (user_ticks + system_ticks, command)
+    return rows
+
+
+def _available_memory_gib() -> float:
+    for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+        if line.startswith("MemAvailable:"):
+            return float(line.split()[1]) / (1024.0 * 1024.0)
+    raise GateError("/proc/meminfo lacks MemAvailable")
+
+
+def round349_nemo_preflight(
+    cpu_ids: Sequence[int], *, sample_seconds: float = 10.0
+) -> dict[str, Any]:
+    """Refuse occupied NEMO benchmark resources using a measured window."""
+    ids = tuple(int(cpu) for cpu in cpu_ids)
+    require(bool(ids), "preflight CPU list must not be empty")
+    require(sample_seconds > 0.0, f"sample_seconds must be positive, got {sample_seconds}")
+    available_gib = _available_memory_gib()
+    require(available_gib >= 150.0, f"available RAM {available_gib:.1f} GiB < 150 GiB")
+
+    before_processes = _read_process_cpu_ticks()
+    existing_nemo = sorted(
+        pid for pid, (_, command) in before_processes.items() if command == "nemo"
+    )
+    require(not existing_nemo, f"NEMO process already running: pids={existing_nemo}")
+    topology = {row.cpu_id: row for row in read_cpu_topology()}
+    require(all(cpu in topology for cpu in ids), "selected CPU absent from topology")
+    sampled_ids = tuple(sorted({sibling for cpu in ids for sibling in topology[cpu].siblings}))
+    before_cpu = _read_proc_cpu_counters()
+    started = time.monotonic()
+    time.sleep(sample_seconds)
+    elapsed = time.monotonic() - started
+    after_cpu = _read_proc_cpu_counters()
+    after_processes = _read_process_cpu_ticks()
+
+    utilization: dict[int, float] = {}
+    for cpu in sampled_ids:
+        require(cpu in before_cpu and cpu in after_cpu, f"CPU {cpu} absent from /proc/stat")
+        idle0, total0 = before_cpu[cpu]
+        idle1, total1 = after_cpu[cpu]
+        delta_total = total1 - total0
+        require(delta_total > 0, f"CPU {cpu} total ticks did not advance")
+        utilization[cpu] = 1.0 - (idle1 - idle0) / delta_total
+    busy_pinned = {cpu: value for cpu, value in utilization.items() if value > 0.10}
+    require(
+        not busy_pinned,
+        f"selected physical cores or hyperthread siblings exceed 10% utilization: {busy_pinned}",
+    )
+
+    after_nemo = sorted(
+        pid for pid, (_, command) in after_processes.items() if command == "nemo"
+    )
+    require(not after_nemo, f"NEMO process appeared during preflight: pids={after_nemo}")
+
+    excluded = {os.getpid(), os.getppid()}
+    heavy: list[dict[str, Any]] = []
+    for pid, (ticks1, command) in after_processes.items():
+        if pid in excluded:
+            continue
+        ticks0 = before_processes.get(pid, (0, command))[0]
+        average_cores = max(0, ticks1 - ticks0) / CLK_TCK / elapsed
+        if average_cores >= 1.0:
+            heavy.append({"pid": pid, "command": command, "average_cores": average_cores})
+    require(not heavy, f"unrelated heavy process active during preflight: {heavy}")
+    return {
+        "sample_seconds": elapsed,
+        "available_memory_gib": available_gib,
+        "pinned_cpu_utilization": {str(cpu): value for cpu, value in utilization.items()},
+        "requested_cpu_ids": list(ids),
+        "sampled_cpu_ids_including_siblings": list(sampled_ids),
+        "max_pinned_cpu_utilization": max(utilization.values()),
+        "heavy_process_threshold_cores": 1.0,
+        "heavy_processes": heavy,
+        "nemo_processes_before": existing_nemo,
+        "nemo_processes_after": after_nemo,
+        "loadavg": list(os.getloadavg()),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _round349_background_snapshot() -> dict[str, Any]:
+    return {
+        "loadavg": list(os.getloadavg()),
+        "available_memory_gib": _available_memory_gib(),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def run_round349_legoesm_child(
+    *,
+    mode: str,
+    cores: int,
+    cpu_ids: Sequence[int],
+    steps: int,
+    output_dir: Path,
+    smoke: bool = False,
+    profile: bool = False,
+    deck_root: Path = DEFAULT_DECK_ROOT,
+    core_manifest: Path = DEFAULT_CORE_MANIFEST,
+    ice_cover_path: Path = DEFAULT_ICE_COVER_PATH,
+    preflight_path: Path | None = None,
+) -> dict[str, Any]:
+    """Run one affinity-pinned round-349 legoESM child process."""
+    require(mode in ROUND349_MODES, f"unknown round-349 mode {mode!r}")
+    require(cores in ROUND349_CORE_COUNTS, f"unregistered core count {cores}")
+    require(len(tuple(cpu_ids)) == cores, "CPU-id count does not match cores")
+    if smoke:
+        require(mode == "fast_literal", "round-349 smoke is fast-literal only")
+        require(steps == ROUND349_SMOKE_STEPS, f"smoke requires {ROUND349_SMOKE_STEPS} steps")
+        min_steady = steps - WARMUP_STEPS
+    elif profile:
+        require(mode == "exact", "round-349 profiles use exact/libm mode")
+        require(cores in (1, 40), "round-349 profiles are registered only at n=1 and n=40")
+        require(steps == ROUND349_PROFILE_STEP, f"profile requires {ROUND349_PROFILE_STEP} steps")
+        min_steady = 1
+    else:
+        require(steps >= ROUND349_FULL_STEPS, f"full arm requires >= {ROUND349_FULL_STEPS} steps")
+        min_steady = ROUND349_STEADY_STEPS
+    if not smoke:
+        require(preflight_path is not None and preflight_path.is_file(), "measured preflight is required")
+
+    arm_id = "exact_cpu_fp64" if mode == "exact" else "fast_literal_cpu_fp64"
+    suffix = f"{mode}_n{cores}"
+    artifact_name = (
+        f"legoesm_profile_driver_{suffix}.json"
+        if profile
+        else f"legoesm_{suffix}.json"
+    )
+    trace_dir = output_dir / f"trace_{suffix}" if profile else None
+    result = run_single_benchmark_arm(
+        arm_id,
+        deck_root=deck_root,
+        core_manifest=core_manifest,
+        ice_cover_path=ice_cover_path,
+        output_dir=output_dir,
+        steps_override=steps,
+        min_steady_steps=min_steady,
+        collect_accuracy=False,
+        requested_cores=cores,
+        expected_cpu_ids=cpu_ids,
+        profile_dir=trace_dir,
+        artifact_name=artifact_name,
+        allow_dirty_provenance=smoke,
+    )
+    background_load = (
+        _round349_background_snapshot()
+        if preflight_path is None
+        else json.loads(preflight_path.read_text(encoding="utf-8"))
+    )
+    result["round349"] = {
+        "mode": mode,
+        "cores": cores,
+        "smoke": smoke,
+        "profile": profile,
+        "background_load": background_load,
+    }
+    if profile:
+        profile_report = summarize_round349_perfetto(
+            Path(result["profile"]["trace_path"]), cores=cores, mode=mode
+        )
+        profile_report["provenance"] = result["provenance"]
+        profile_report["background_load"] = background_load
+        profile_report["measurement_provenance"] = {
+            "backend": result["backend"],
+            "dtype": result["dtype"],
+            "identity": {
+                "worktree": result["provenance"],
+                "core_manifest_sha256": sha256_file(core_manifest),
+                "ice_cover_sha256": sha256_file(ice_cover_path),
+            },
+        }
+        profile_path = output_dir / f"profile_{suffix}.json"
+        profile_path.write_text(json.dumps(profile_report, indent=2) + "\n", encoding="utf-8")
+        result["round349"]["profile_report"] = str(profile_path)
+    else:
+        utilization = result["cpu_utilization"]
+        row = round349_performance_row(
+            model="legoESM",
+            mode=mode,
+            cores=cores,
+            seconds_per_step=float(result["timing"]["steady_median_s"]),
+            busy_cores=float(utilization["steady_mean_cores_busy"]),
+            steps=int(result["timing"]["total_steps"]),
+            steady_steps=int(result["timing"]["steady_state_steps"]),
+            cpu_ids=cpu_ids,
+            background_load=result["round349"]["background_load"],
+            artifact=str(output_dir / artifact_name),
+            measurement_provenance={
+                "backend": result["backend"],
+                "dtype": result["dtype"],
+                "identity": {
+                    "worktree": result["provenance"],
+                    "core_manifest": str(core_manifest),
+                    "core_manifest_sha256": sha256_file(core_manifest),
+                    "ice_cover": str(ice_cover_path),
+                    "ice_cover_sha256": sha256_file(ice_cover_path),
+                },
+            },
+            timing_window={"first_step": 3, "last_step": 18},
+            seconds_per_step_statistic="steady median",
+        )
+        result["round349_row"] = row
+    artifact_path = output_dir / artifact_name
+    artifact_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    return result
+
+
+def _round349_child_environment(cores: int) -> dict[str, str]:
+    env = dict(os.environ)
+    env.update(
+        {
+            "TMPDIR": str(ROUND349_SCRATCH_ROOT),
+            "CUDA_VISIBLE_DEVICES": "",
+            "JAX_PLATFORMS": "cpu",
+            "JAX_ENABLE_X64": "1",
+            "XLA_FLAGS": (
+                "--xla_cpu_multi_thread_eigen=true "
+                f"intra_op_parallelism_threads={cores}"
+            ),
+            "OMP_NUM_THREADS": str(cores),
+            "MKL_NUM_THREADS": str(cores),
+            "OPENBLAS_NUM_THREADS": str(cores),
+            "NUMEXPR_NUM_THREADS": str(cores),
+            "TF_NUM_INTRAOP_THREADS": str(cores),
+            "TF_NUM_INTEROP_THREADS": "1",
+        }
+    )
+    return env
+
+
+def build_round349_legoesm_commands(
+    *,
+    output_dir: Path,
+    core_counts: Sequence[int],
+    steps: int,
+    smoke: bool,
+    include_profiles: bool,
+) -> list[tuple[list[str], dict[str, str]]]:
+    """Build the isolated taskset commands used by dry-run and acquisition."""
+    taskset = shutil.which("taskset")
+    require(taskset is not None, "taskset is required for round-349 CPU binding")
+    script_path = Path(__file__).resolve()
+    commands: list[tuple[list[str], dict[str, str]]] = []
+    modes = ("fast_literal",) if smoke else ROUND349_MODES
+    for cores in core_counts:
+        require(cores in ROUND349_CORE_COUNTS, f"unregistered core count {cores}")
+        cpu_ids = select_physical_cpu_ids(cores)
+        cpu_csv = format_cpu_id_list(cpu_ids)
+        for mode in modes:
+            preflight_path = output_dir / f"preflight_{mode}_n{cores}.json"
+            cmd = [
+                taskset,
+                "-c",
+                cpu_csv,
+                sys.executable,
+                str(script_path),
+                "--round349-child",
+                "--round349-mode",
+                mode,
+                "--round349-cores",
+                str(cores),
+                "--round349-cpu-ids",
+                cpu_csv,
+                "--round349-steps",
+                str(steps),
+                "--round349-preflight-path",
+                str(preflight_path),
+                "--output-dir",
+                str(output_dir),
+            ]
+            if smoke:
+                cmd.append("--round349-smoke")
+            commands.append((cmd, _round349_child_environment(cores)))
+        if include_profiles and cores in (1, 40):
+            profile_preflight = output_dir / f"preflight_profile_exact_n{cores}.json"
+            profile_cmd = [
+                taskset,
+                "-c",
+                cpu_csv,
+                sys.executable,
+                str(script_path),
+                "--round349-child",
+                "--round349-mode",
+                "exact",
+                "--round349-cores",
+                str(cores),
+                "--round349-cpu-ids",
+                cpu_csv,
+                "--round349-steps",
+                str(ROUND349_PROFILE_STEP),
+                "--round349-profile",
+                "--round349-preflight-path",
+                str(profile_preflight),
+                "--output-dir",
+                str(output_dir),
+            ]
+            commands.append((profile_cmd, _round349_child_environment(cores)))
+    return commands
+
+
+def run_round349_legoesm_sweep(
+    *,
+    output_dir: Path,
+    core_counts: Sequence[int] = ROUND349_CORE_COUNTS,
+    steps: int = ROUND349_FULL_STEPS,
+    smoke: bool = False,
+    include_profiles: bool = True,
+    dry_run: bool = False,
+) -> list[list[str]]:
+    """Run or print the registered isolated legoESM CPU sweep."""
+    output_resolved = output_dir.resolve()
+    require(
+        output_resolved.is_relative_to(ROUND349_SCRATCH_ROOT.resolve()),
+        f"round-349 outputs must be below {ROUND349_SCRATCH_ROOT}",
+    )
+    if smoke:
+        require(tuple(core_counts) == (1, 2), "registered smoke core counts are exactly 1,2")
+        require(steps == ROUND349_SMOKE_STEPS, f"smoke steps must be {ROUND349_SMOKE_STEPS}")
+        include_profiles = False
+    else:
+        require(steps >= ROUND349_FULL_STEPS, f"full sweep requires >= {ROUND349_FULL_STEPS} steps")
+    commands = build_round349_legoesm_commands(
+        output_dir=output_dir,
+        core_counts=core_counts,
+        steps=steps,
+        smoke=smoke,
+        include_profiles=include_profiles,
+    )
+    if dry_run:
+        for command, env in commands:
+            print(
+                "ROUND349_DRY_RUN "
+                + " ".join(f"{key}={env[key]}" for key in ("CUDA_VISIBLE_DEVICES", "JAX_PLATFORMS", "JAX_ENABLE_X64", "OMP_NUM_THREADS", "XLA_FLAGS"))
+                + " "
+                + " ".join(command)
+            )
+        return [command for command, _ in commands]
+
+    require(
+        not output_dir.exists() or not any(output_dir.iterdir()),
+        f"round-349 output directory must be absent or empty: {output_dir}",
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for command, env in commands:
+        cpu_csv = command[command.index("--round349-cpu-ids") + 1]
+        preflight_path = Path(command[command.index("--round349-preflight-path") + 1])
+        preflight = round349_nemo_preflight(parse_cpu_id_list(cpu_csv), sample_seconds=10.0)
+        preflight_path.write_text(json.dumps(preflight, indent=2) + "\n", encoding="utf-8")
+        print(f"[round349] launching: {' '.join(command)}", flush=True)
+        subprocess.run(command, env=env, check=True, timeout=1200)
+    return [command for command, _ in commands]
+
+
+def _round349_hypothesis(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    exact = {
+        int(row["cores"]): row
+        for row in rows
+        if row.get("model") == "legoESM" and row.get("mode") == "exact"
+    }
+    if 1 not in exact or 40 not in exact:
+        return {"verdict": "UNMEASURED", "reason": "missing exact n=1 or n=40 row"}
+    speedup = float(exact[1]["seconds_per_step"]) / float(exact[40]["seconds_per_step"])
+    busy_40 = float(exact[40]["busy_cores"])
+    verdict = "CONFIRM" if speedup < 1.5 and busy_40 < 2.0 else "REFUTE"
+    return {
+        "verdict": verdict,
+        "n1_to_n40_speedup": speedup,
+        "n40_busy_cores": busy_40,
+        "confirm_rule": "speedup < 1.5 and n40 busy cores < 2.0",
+    }
+
+
+def _round349_markdown(report: Mapping[str, Any]) -> str:
+    lines = [
+        "# ORCA2 round 349 CPU benchmark report",
+        "",
+        "| Model | Mode | Cores | CPU IDs | s/step | Statistic/window | SYPD | core-s/step | busy cores | steps (total/steady) |",
+        "|---|---|---:|---|---:|---|---:|---:|---:|---:|",
+    ]
+    ordered_rows = sorted(
+        report["rows"], key=lambda item: (item["cores"], item["model"], item["mode"])
+    )
+    for row in ordered_rows:
+        lines.append(
+            f"| {row['model']} | {row['mode']} | {row['cores']} | "
+            f"{','.join(str(cpu) for cpu in row['cpu_ids'])} | "
+            f"{row['seconds_per_step']:.6f} | {row['seconds_per_step_statistic']} "
+            f"kt={row['timing_window']['first_step']}..{row['timing_window']['last_step']} | "
+            f"{row['sypd']:.4f} | "
+            f"{row['core_seconds_per_step']:.6f} | {row['busy_cores']:.3f} | "
+            f"{row['steps']}/{row['steady_steps']} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Per-row provenance",
+            "",
+        ]
+    )
+    for row in ordered_rows:
+        lines.append(
+            f"- {row['model']} {row['mode']} n={row['cores']}: "
+            f"artifact `{row['artifact']}`; background "
+            f"`{json.dumps(row['background_load'], sort_keys=True)}`; identity "
+            f"`{json.dumps(row['measurement_provenance'], sort_keys=True)}`."
+        )
+    lines.extend(["", f"Hypothesis verdict: **{report['hypothesis']['verdict']}**.", ""])
+    for profile in report.get("profiles", []):
+        profile_provenance = profile.get("provenance", {})
+        lines.extend(
+            [
+                f"## legoESM exact profile, n={profile['cores']}",
+                "",
+                f"Profiled step: kt={profile['profile_step']}; "
+                f"step wall={profile['step_wall_s']:.6f} s; "
+                f"trace `{profile['trace_path']}`; "
+                f"commit `{profile_provenance.get('commit', 'unknown')}`; "
+                f"clean={profile_provenance.get('clean', 'unknown')}.",
+                "",
+                f"Background `{json.dumps(profile['background_load'], sort_keys=True)}`; "
+                f"identity `{json.dumps(profile['measurement_provenance'], sort_keys=True)}`.",
+                "",
+                f"Compiled-kernel wall fraction: {profile['compiled_kernel_wall_fraction']:.4f}; "
+                f"eager/dispatch fraction: {profile['eager_or_dispatch_fraction']:.4f}; "
+                f"eager surface fraction: {profile['eager_surface_wall_fraction']:.4f}.",
+                "",
+                "| Rank | Cost centre | inclusive CPU s | share | events |",
+                "|---:|---|---:|---:|---:|",
+            ]
+        )
+        for centre in profile["cost_centres"]:
+            lines.append(
+                f"| {centre['rank']} | {centre['cost_centre']} | "
+                f"{centre['inclusive_cpu_s']:.6f} | "
+                f"{centre['fraction_of_classified_inclusive_cpu']:.4f} | "
+                f"{centre['event_count']} |"
+            )
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def assemble_round349_report(
+    *,
+    legoesm_dir: Path,
+    nemo_dir: Path,
+    output_dir: Path,
+    require_complete: bool = True,
+) -> dict[str, Any]:
+    """Assemble legoESM/NEMO artifacts into JSON and Markdown reports."""
+    require(
+        output_dir.resolve().is_relative_to(ROUND349_SCRATCH_ROOT.resolve()),
+        f"round-349 report output must be below {ROUND349_SCRATCH_ROOT}",
+    )
+    rows: list[dict[str, Any]] = []
+    for path in sorted(legoesm_dir.glob("legoesm_*.json")):
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        if "round349_row" in artifact and not artifact.get("round349", {}).get("smoke"):
+            rows.append(artifact["round349_row"])
+    for path in sorted(nemo_dir.glob("nemo_n*.json")):
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        if "row" in artifact:
+            rows.append(artifact["row"])
+    profiles = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(legoesm_dir.glob("profile_exact_n*.json"))
+    ]
+    report = {
+        "round": "orca2_r349",
+        "decision": 219,
+        "description": "Per-core CPU speed of standalone ORCA2 K0",
+        "formula": "SYPD = 86400 / (2920 * seconds_per_step)",
+        "rows": rows,
+        "profiles": profiles,
+        "hypothesis": _round349_hypothesis(rows),
+        "historical_nemo_np2": {
+            "elapsed_s": 1767.523521,
+            "steps": 2920,
+            "note": "certified year run with eight-step restart output; not a round-349 row",
+            "source": str(DEFAULT_ROUND349_NEMO_SOURCE / "timing.output"),
+        },
+        "provenance": worktree_stamp(),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    validate_round349_report(report, require_complete=require_complete)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / ROUND349_REPORT_NAME
+    markdown_path = output_dir / ROUND349_REPORT_MARKDOWN_NAME
+    json_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    markdown_path.write_text(_round349_markdown(report), encoding="utf-8")
+    return report
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1860,12 +3118,120 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=("cat_a_plus_b", "cat_a_only"),
         default="cat_a_plus_b",
     )
+    parser.add_argument("--round349-child", action="store_true")
+    parser.add_argument("--round349-sweep", action="store_true")
+    parser.add_argument("--round349-preflight", action="store_true")
+    parser.add_argument("--round349-parse-nemo", action="store_true")
+    parser.add_argument("--round349-assemble", action="store_true")
+    parser.add_argument("--round349-print-cpu-ids", action="store_true")
+    parser.add_argument("--round349-dry-run", action="store_true")
+    parser.add_argument("--round349-smoke", action="store_true")
+    parser.add_argument("--round349-profile", action="store_true")
+    parser.add_argument("--round349-allow-partial", action="store_true")
+    parser.add_argument("--round349-mode", choices=ROUND349_MODES, default="fast_literal")
+    parser.add_argument("--round349-cores", type=int, default=1)
+    parser.add_argument("--round349-cpu-ids", type=str, default="")
+    parser.add_argument("--round349-core-counts", type=str, default="1,2,4,8,16,40")
+    parser.add_argument("--round349-steps", type=int, default=ROUND349_FULL_STEPS)
+    parser.add_argument("--round349-sample-seconds", type=float, default=10.0)
+    parser.add_argument("--round349-output-file", type=Path, default=None)
+    parser.add_argument("--round349-nemo-run-dir", type=Path, default=None)
+    parser.add_argument("--round349-preflight-path", type=Path, default=None)
+    parser.add_argument("--round349-legoesm-dir", type=Path, default=DEFAULT_ROUND349_OUTPUT_DIR)
+    parser.add_argument(
+        "--round349-nemo-dir", type=Path, default=ROUND349_SCRATCH_ROOT / "nemo_cpu_sweep"
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.arm == "assemble-fast":
+    if args.round349_print_cpu_ids:
+        print(format_cpu_id_list(select_physical_cpu_ids(args.round349_cores)))
+    elif args.round349_preflight:
+        cpu_ids = parse_cpu_id_list(args.round349_cpu_ids)
+        report = round349_nemo_preflight(
+            cpu_ids, sample_seconds=args.round349_sample_seconds
+        )
+        payload = json.dumps(report, indent=2) + "\n"
+        if args.round349_output_file is not None:
+            args.round349_output_file.parent.mkdir(parents=True, exist_ok=True)
+            args.round349_output_file.write_text(payload, encoding="utf-8")
+        print(payload, end="")
+    elif args.round349_parse_nemo:
+        require(args.round349_nemo_run_dir is not None, "--round349-nemo-run-dir is required")
+        require(args.round349_preflight_path is not None, "--round349-preflight-path is required")
+        require(args.round349_output_file is not None, "--round349-output-file is required")
+        cpu_ids = parse_cpu_id_list(args.round349_cpu_ids)
+        artifact = build_round349_nemo_artifact(
+            args.round349_nemo_run_dir,
+            cores=args.round349_cores,
+            cpu_ids=cpu_ids,
+            preflight_path=args.round349_preflight_path,
+        )
+        args.round349_output_file.parent.mkdir(parents=True, exist_ok=True)
+        args.round349_output_file.write_text(
+            json.dumps(artifact, indent=2) + "\n", encoding="utf-8"
+        )
+        print(
+            f"ROUND349_NEMO_RESULT n={args.round349_cores} "
+            f"seconds_per_step={artifact['row']['seconds_per_step']:.6f} "
+            f"SYPD={artifact['row']['sypd']:.4f} "
+            f"busy_cores={artifact['row']['busy_cores']:.3f}"
+        )
+    elif args.round349_child:
+        cpu_ids = parse_cpu_id_list(args.round349_cpu_ids)
+        result = run_round349_legoesm_child(
+            mode=args.round349_mode,
+            cores=args.round349_cores,
+            cpu_ids=cpu_ids,
+            steps=args.round349_steps,
+            output_dir=args.output_dir,
+            smoke=args.round349_smoke,
+            profile=args.round349_profile,
+            deck_root=args.deck_root,
+            core_manifest=args.core_manifest,
+            ice_cover_path=args.ice_cover_path,
+            preflight_path=args.round349_preflight_path,
+        )
+        if args.round349_profile:
+            profile_path = result["round349"]["profile_report"]
+            print(
+                f"ROUND349_PROFILE mode={args.round349_mode} n={args.round349_cores} "
+                f"path={profile_path}"
+            )
+        else:
+            row = result["round349_row"]
+            label = "SMOKE" if args.round349_smoke else "RESULT"
+            print(
+                f"ROUND349_{label} mode={args.round349_mode} n={args.round349_cores} "
+                f"steps={row['steps']} steady={row['steady_steps']} "
+                f"seconds_per_step={row['seconds_per_step']:.6f} "
+                f"SYPD={row['sypd']:.4f} busy_cores={row['busy_cores']:.3f}"
+            )
+    elif args.round349_sweep:
+        core_counts = parse_cpu_id_list(args.round349_core_counts)
+        run_round349_legoesm_sweep(
+            output_dir=args.output_dir,
+            core_counts=core_counts,
+            steps=args.round349_steps,
+            smoke=args.round349_smoke,
+            include_profiles=not args.round349_smoke,
+            dry_run=args.round349_dry_run,
+        )
+    elif args.round349_assemble:
+        report = assemble_round349_report(
+            legoesm_dir=args.round349_legoesm_dir,
+            nemo_dir=args.round349_nemo_dir,
+            output_dir=args.output_dir,
+            require_complete=not args.round349_allow_partial,
+        )
+        print(
+            f"ROUND349_REPORT rows={len(report['rows'])} "
+            f"profiles={len(report['profiles'])} verdict={report['hypothesis']['verdict']} "
+            f"path={args.output_dir / ROUND349_REPORT_NAME}"
+        )
+    elif args.arm == "assemble-fast":
         report = assemble_fast_literal_benchmark_report(
             output_dir=args.output_dir,
             round343_report=args.round343_report,

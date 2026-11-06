@@ -7,28 +7,58 @@ executable; collectives show as *permute/all-reduce/all-gather thunks).
 Durations are INCLUSIVE and summed over concurrent worker threads, so
 the printed shares are CPU-time shares, not wall-time shares -- use them
 to rank op classes, not to divide a step's wall time."""
-import glob
 import gzip
 import json
 import os
 import sys
 from collections import defaultdict
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+
+def resolve_perfetto_trace(path: str | os.PathLike[str]) -> Path:
+    """Resolve a trace file or the newest Perfetto JSON below a directory."""
+    resolved = Path(path)
+    if resolved.is_dir():
+        files = sorted(
+            resolved.glob("**/*.json.gz"), key=lambda item: item.stat().st_mtime
+        )
+        if not files:
+            raise FileNotFoundError(f"no perfetto trace under {resolved}")
+        resolved = files[-1]
+    if not resolved.is_file():
+        raise FileNotFoundError(f"missing perfetto trace: {resolved}")
+    return resolved
+
+
+def load_perfetto_events(
+    path: str | os.PathLike[str],
+) -> tuple[Path, list[dict[str, Any]]]:
+    """Load one JAX Perfetto trace without interpreting its event names."""
+    resolved = resolve_perfetto_trace(path)
+    with gzip.open(resolved, "rt", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    raw_events = payload["traceEvents"] if isinstance(payload, Mapping) else payload
+    if not isinstance(raw_events, Sequence):
+        raise ValueError("Perfetto payload does not contain an event sequence")
+    events = [dict(event) for event in raw_events if isinstance(event, Mapping)]
+    return resolved, events
+
+
+def perfetto_thread_names(events: Sequence[Mapping[str, Any]]) -> dict[tuple[Any, Any], str]:
+    """Return ``(pid, tid) -> display name`` metadata from Perfetto events."""
+    names: dict[tuple[Any, Any], str] = {}
+    for event in events:
+        if event.get("ph") == "M" and event.get("name") == "thread_name":
+            args = event.get("args", {})
+            if isinstance(args, Mapping) and "name" in args:
+                names[(event.get("pid"), event.get("tid"))] = str(args["name"])
+    return names
 
 
 def main(path):
-    if os.path.isdir(path):
-        files = sorted(glob.glob(os.path.join(path, "**", "*.json.gz"),
-                                 recursive=True), key=os.path.getmtime)
-        if not files:
-            raise SystemExit(f"no perfetto trace under {path}")
-        path = files[-1]
-    with gzip.open(path, "rt") as fh:
-        ev = json.load(fh)
-    events = ev["traceEvents"] if isinstance(ev, dict) else ev
-    names = {}
-    for e in events:
-        if e.get("ph") == "M" and e.get("name") == "thread_name":
-            names[(e["pid"], e["tid"])] = e["args"]["name"]
+    path, events = load_perfetto_events(path)
+    names = perfetto_thread_names(events)
     tot = defaultdict(float)
     per_thread = defaultdict(float)
     cnt = defaultdict(int)
