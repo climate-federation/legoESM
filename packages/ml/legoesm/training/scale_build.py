@@ -2174,6 +2174,16 @@ def with_sea_ice_climatology(forcing, clim, t0):
     regridder fills land from the nearest ocean value."""
     import jax.numpy as jnp
 
+    if hasattr(forcing, "_replace"):
+        # grid-point SegmentForcing: grid-shaped planes, the store is flat
+        sic = forcing.sic
+        plane = jnp.reshape(jnp.asarray(clim.plane(t0), dtype=sic.dtype),
+                            sic.shape)
+        if forcing.land_frac is None:
+            raise ValueError("the sea-ice climatology needs the land fraction "
+                             "(its plane is zero on land columns)")
+        ocean = jnp.asarray(forcing.land_frac) < 0.5
+        return forcing._replace(sic=jnp.where(ocean, plane, 0.0).astype(sic.dtype))
     sic = forcing["sic"]
     plane = jnp.asarray(clim.plane(t0), dtype=jnp.asarray(sic).dtype)
     if plane.shape != jnp.shape(sic):
@@ -2523,6 +2533,7 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     config = build_latlon_config(cfg, yml)
     driver = _driver_for_ctx(config)
     ctx = driver._prepare_run_context(0, config.start_day, restore_carry=False)
+    _sic_clim = wb_sea_ice_climatology(cfg, yml, grid)
     # The core's own ERA5 converter (same kwargs on both grid-point cores).
     _to_carry = (era5_to_cubedsphere_carry
                  if getattr(cfg, "training_core", "latlon") == "cubed_sphere"
@@ -2574,6 +2585,8 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
             o3_top_vmr=getattr(driver, "_o3_top_vmr", None),
             **plane_kwargs)
+        if _sic_clim is not None:
+            forcing = with_sea_ice_climatology(forcing, _sic_clim, times[i_ic])
         return (ic, target, forcing)
 
     mine = list(_sharded_indices(

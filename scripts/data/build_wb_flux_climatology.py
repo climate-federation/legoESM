@@ -33,6 +33,10 @@ def build_parser():
     g.add_argument("--task", type=int)
     p.add_argument("--n-tasks", type=int, default=1, dest="n_tasks")
     p.add_argument("--field", choices=("flux", "sic"), default="flux")
+    p.add_argument("--training-core", default="spectral", dest="training_core",
+                   choices=("spectral", "latlon", "cubed_sphere"),
+                   help="the grid the store is built on (sic only for the "
+                        "grid-point cores)")
     return p
 
 
@@ -63,7 +67,7 @@ def main_sic(a, yml, grid, root):
 
     source = yml["era5_zarr"]
     path = wfc.sic_store_path(root, grid, source)
-    ncol = int(grid.n_lat) * int(grid.n_lon)
+    ncol = int(np.asarray(grid.grid_lat).size)
     shape = (wfc.N_DAYS, ncol)
     print(f"sea-ice climatology {path}", flush=True)
     if a.init:
@@ -163,8 +167,11 @@ def main(argv=None):
     root = sb.wb_state_cache_root(yml)
     if root is None:
         raise SystemExit(f"{a.config} names no state_cache_dir")
-    cfg = SimpleNamespace(mode="physics", training_core="spectral", smoke=False,
-                          windows=None, n_days=None, multi_step_hours=None)
+    cfg = SimpleNamespace(mode="physics", training_core=a.training_core,
+                          smoke=False, windows=None, n_days=None,
+                          multi_step_hours=None)
+    if a.field != "sic" and a.training_core != "spectral":
+        raise SystemExit("the flux climatology is built for the spectral core only")
     _, grid, *_ = sb.build_mode_components(cfg, yml)
     if a.field == "sic":
         return main_sic(a, yml, grid, root)

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from legoesm.training.era5_to_state import regrid_2d_to_gaussian
+from legoesm.training.era5_to_state import regrid_2d_to_grid
 
 # Default location the downloader (scripts) writes to; overridable.
 DEFAULT_AIMIP_FORCING = (
@@ -54,7 +54,9 @@ def regrid_era5_field_2d(field_2d, era5_lat_deg, era5_lon_deg, grid):
     if lat[0] > lat[-1]:  # RegularGridInterpolator requires ascending axes
         lat = lat[::-1]
         f = f[::-1, :]
-    return np.asarray(regrid_2d_to_gaussian(f, np.deg2rad(lat), np.deg2rad(lon), grid))
+    # Structured grids: regrid_2d_to_gaussian (unchanged); the cubed sphere:
+    # the cube IC converter's KD-tree weights (regrid_2d_to_grid dispatch).
+    return np.asarray(regrid_2d_to_grid(f, np.deg2rad(lat), np.deg2rad(lon), grid))
 
 
 def regrid_monthly_forcing_to_gaussian(forcing_path, grid, cache_path=None):

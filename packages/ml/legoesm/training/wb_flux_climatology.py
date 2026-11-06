@@ -99,10 +99,17 @@ def sic_day_times(day, years=YEARS, cadence_h=SIC_CADENCE_HOURS):
 
 
 def sic_store_tag(grid, source) -> str:
+    if hasattr(grid, "n_lat"):
+        # structured grids (Gaussian / lat-lon): the original tag, unchanged
+        geom = [int(grid.n_lat), int(grid.n_lon),
+                np.asarray(grid.lat).tolist(), np.asarray(grid.lon).tolist()]
+    else:
+        # any other grid: its column coordinates
+        geom = ["grid_lat_lon", np.asarray(grid.grid_lat).tolist(),
+                np.asarray(grid.grid_lon).tolist()]
     return hashlib.sha256(json.dumps([
         STORE_FORMAT, SIC_VAR, SIC_REGRID, str(source), list(YEARS), SIC_WINDOW_DAYS,
-        SIC_CADENCE_HOURS, int(grid.n_lat), int(grid.n_lon),
-        np.asarray(grid.lat).tolist(), np.asarray(grid.lon).tolist()]).encode()
+        SIC_CADENCE_HOURS, *geom]).encode()
     ).hexdigest()[:16]
 
 
