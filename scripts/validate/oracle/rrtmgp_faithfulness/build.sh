@@ -1,9 +1,9 @@
 #!/bin/bash
 # Build the latest RTE+RRTMGP (out of tree, unpatched) and the audit driver.
-# usage: build.sh <rte-rrtmgp checkout> <build dir>      (run through sbatch)
+# usage: build.sh <rte-rrtmgp checkout> <build dir> [driver dir]      (run through sbatch)
 set -euo pipefail
 R=$(cd "$1" && pwd); mkdir -p "$2"; B=$(cd "$2" && pwd)
-HERE=$(cd "$(dirname "$0")" && pwd)
+HERE=$(cd "${3:-$(dirname "$0")}" && pwd)
 module load gcc/13.4.0-gcc-13.4.0 cmake/4.2.4-gcc-13.4.0 netcdf-fortran/4.6.2-openmpi-5.0.10-gcc-13.4.0
 echo "rte-rrtmgp $(git -C "$R" describe --tags --always) $(git -C "$R" rev-parse HEAD)"
 FF="-O2 -g -fno-fast-math -ffree-line-length-none -fPIC"
