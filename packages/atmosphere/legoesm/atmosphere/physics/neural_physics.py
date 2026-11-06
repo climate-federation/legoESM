@@ -776,6 +776,59 @@ def make_neural_step_unified(
     return step_unified
 
 
+def make_neural_mpas_physics_fn(neural_physics: NeuralPhysics, mesh):
+    """The column network as an MPAS ``physics_fn`` (``MPASPrimitiveEquation
+    Model.step_pure``): ``physics_fn(state, mesh, sigma, phys_state=None,
+    forcing=None) -> HydrostaticTendencies``.
+
+    The SAME :func:`make_neural_step_unified` the grid-point cores run, fed
+    cell columns: the cell (east, north) wind is reconstructed from the
+    edge-normal ``state.u`` (``reconstruct_cell_velocity``), and the network's
+    cell wind tendency goes back to the edge normals with
+    ``cell_vector_to_edge_normal`` (plain two-cell average, as the MPAS
+    turbulence bridge; voted 3-0).  T and the tracer tendencies stay at cells
+    (only for tracers the state carries); dp_s/dt = 0 (step_pure applies the
+    water tendencies WITH their mass).  ``forcing`` is the grid-point
+    ``SegmentForcing`` as a dict (``_asdict()``) with ``(nCells,)`` planes;
+    its ``day_of_year`` / ``seconds_of_day`` are the step's clock.  The
+    network's flux outputs have no MPAS carry to land in and are dropped.
+    """
+    from legoesm.core.grid_adapters import make_adapter
+    from legoesm.core.state import HydrostaticTendencies
+    from legoesm.grids.voronoi import (
+        cell_vector_to_edge_normal, reconstruct_cell_velocity)
+
+    step_unified = make_neural_step_unified(neural_physics, make_adapter(mesh))
+
+    def physics_fn(state, mesh_, sigma_coord, phys_state=None, forcing=None):
+        del sigma_coord, phys_state
+        if forcing is None:
+            raise ValueError("the MPAS column network needs the forcing dict "
+                             "(SST, sea ice, clock, insolation)")
+        T = state.T.data
+        tr = state.tracers or {}
+        z3, z2 = jnp.zeros_like(T), jnp.zeros_like(state.p_s.data)
+        q = {k: tr[k].data if k in tr else z3 for k in ("q_v", "q_c", "q_r")}
+        u, v = reconstruct_cell_velocity(state.u.data, mesh_)
+        out, _ = step_unified(
+            True, T, state.p_s.data, q["q_v"], q["q_c"], q["q_r"], u, v,
+            forcing["sst"], forcing["sic"], mesh_.latCell, mesh_.lonCell,
+            forcing["day_of_year"], forcing["seconds_of_day"], None, None,
+            forcing["s_0"], None, None, z3, z2, z2, z2, z2, z2,
+            land_frac=forcing.get("land_frac"), phis=state.phis.data)
+        du = cell_vector_to_edge_normal(out.du_dt, out.dv_dt, mesh_)
+        dq = {"q_v": out.dq_v_dt, "q_c": out.dq_c_dt, "q_r": out.dq_r_dt}
+        return HydrostaticTendencies(
+            du_dt=state.u.replace(data=du.astype(state.u.data.dtype)),
+            dT_dt=state.T.replace(data=out.dT_dt.astype(T.dtype)),
+            dp_s_dt=state.p_s.replace(data=z2),
+            dphis_dt=state.phis.replace(data=jnp.zeros_like(state.phis.data)),
+            tracer_tendencies={k: f.replace(data=dq[k].astype(f.data.dtype))
+                               for k, f in tr.items() if k in dq} or None)
+
+    return physics_fn
+
+
 # ======================================================================
 # Spectral-PE column adapter (Rasp et al. 2018)
 # ======================================================================
