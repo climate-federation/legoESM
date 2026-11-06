@@ -2239,10 +2239,10 @@ categories that NEMO 5.0.2 excludes:
 ### 2. Model changes (exact NEMO gather/scatter; no knob, no default change)
 
 1. **`packages/ice/legoesm/ice/bitz_lipscomb.py` lines 2495–2508**:
-   Extended `_guard_inactive_columns(value, active_columns, dtype, inactive_fill=None)`
+   Extended `guard_inactive_columns(value, active_columns, dtype, inactive_fill=None)`
    to accept an optional constant `inactive_fill` (defaulting to `value` when `None`)
    placed under `jax.lax.stop_gradient` on `~active_columns`, reusing the existing
-   `_guard_inactive_columns` mechanism rather than introducing a new one.
+   `guard_inactive_columns` mechanism rather than introducing a new one.
 2. **`packages/ice/legoesm/ice/si3_o17.py` lines 382–456, 824, 899–905, 1008–1030**:
    - Added `_owned_mask(shape, h)` (`src/ICE/icethd.F90` line 130 `DO_2D(0,0,0,0)`)
      and set `active = owned_mask & (state.a_i[..., jl] > epsi10)`
@@ -2259,7 +2259,7 @@ categories that NEMO 5.0.2 excludes:
    - In `_thermo_category_loop`, resolved `active = raw_entry["active"]` (or
      `raw_entry["a_i"] > constants.epsi10` when `"active"` is omitted), guarded all
      category inputs and carried fluxes on `~active` via
-     `_guard_inactive_columns(..., inactive_fill=...)` before calling
+     `guard_inactive_columns(..., inactive_fill=...)` before calling
      `si3_ice_thd_o10_category_stages` and `si3_ice_thd_da` so inactive lanes cannot
      produce non-finite values or cotangents, and selected/scattered category outputs
      (`SI3O12CategoryOutput`, `o10.o9.zdf`, `o10.o9.dh`, `o10.sal`, `da_out`) and
@@ -2269,7 +2269,7 @@ categories that NEMO 5.0.2 excludes:
 
 1. **Proof 1 — Every ACTIVE-category forward bit unchanged vs `96bb44f0aeee` (`0` ULP, signed zeros and NaN bits included, eager AND `jax.jit`) on O12 fixtures, O8–O16 master scorer, and probe tile**:
    - **O12 fixtures and probe tile (`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_nanfix_scratch/proof1_active_bits.json`)**:
-     Measured by running `verify_proof1_active_bits.py` across `--case o12_5cat`,
+     Measured by running `scripts/validate/ocean_fidelity/testcases/si3_nanfix/verify_proof1_active_bits.py` across `--case o12_5cat`,
      `--case d194`, and `--case probe_tile`:
      - `o12_5cat_fixture` (`eager_vs_parent_96bb44f0aeee`, `jit_vs_parent_96bb44f0aeee`, `eager_vs_jit`):
        `{"compared": 32250, "differing": 0, "equal": 32250, "max_ulp": 0}`
@@ -2286,7 +2286,7 @@ categories that NEMO 5.0.2 excludes:
      - `--rung O15-O16 --steps 1..100`: `"status": "PASS_ALL_O15_O16_0_ULP"`
 
 2. **Proof 2 — On REAL ORCA2 step 1 (`kt = 1`, `rank = 0`), eager `si3_o17_step` has `0` NaN in owned outputs and fluxes, and the 9 fields at the `1,813` open-water snowfall points equal NEMO's record bit for bit (`0` ULP)**:
-   Measured by running `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_nanfix_scratch/verify_proof2_orca2_step1.py`
+   Measured by running `scripts/validate/ocean_fidelity/testcases/si3_nanfix/verify_proof2_orca2_step1.py`
    (`elapsed_seconds: 535.72`, output `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/si3_nanfix_scratch/proof2_orca2_step1.json`):
    - `total_owned_nans`: `0` across all `18` owned state fields, `43` owned flux fields,
      `14` owned output fields, and `5` owned stress fields.
