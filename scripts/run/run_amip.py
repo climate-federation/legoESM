@@ -138,7 +138,6 @@ if "--multicontroller" not in sys.argv:
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
-    VALID_RRTMGP_GAS_OPTICS_MODE,
     ZM_SCALAR_FIELDS,
     ZM_WIDTH_FIELDS,
     VALID_TURBULENCE,
@@ -733,11 +732,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rrtmgp-gpoint-batch-size", type=int,
                         default=_EXPERIMENT_DEFAULTS.rrtmgp_gpoint_batch_size,
                         help="RRTMGP g-point batch size (0 = auto/checkpointed)")
-    parser.add_argument("--rrtmgp-gas-optics-mode",
-                        choices=VALID_RRTMGP_GAS_OPTICS_MODE,
-                        default=_EXPERIMENT_DEFAULTS.rrtmgp_gas_optics_mode,
-                        help="RRTMGP gas optics once for all g-points (faster, "
-                             "slower compile) or inside the g-point loop")
     parser.add_argument("--no-rrtmgp-gpoint-checkpoint",
                         dest="rrtmgp_gpoint_checkpoint",
                         action="store_false",
@@ -2990,7 +2984,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_use_scan=args.rrtmgp_use_scan,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
-        rrtmgp_gas_optics_mode=args.rrtmgp_gas_optics_mode,
         rrtmgp_column_chunk_size=args.radiation_column_chunk,
         rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,
         diurnal_cycle=args.diurnal_cycle,

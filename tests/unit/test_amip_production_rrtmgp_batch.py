@@ -27,25 +27,3 @@ def test_code_default_stays_the_gpu_block_size():
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser))
     assert cfg.rrtmgp_gpoint_batch_size == 16
-
-
-def test_production_deck_names_all_gpoint_gas_optics():
-    from legoesm.driver.run_config_yaml import load_yaml_config
-    from scripts.run.run_amip import build_arg_parser
-    assert load_yaml_config(_CONFIG, build_arg_parser())["rrtmgp_gas_optics_mode"] == "all_gpts"
-
-
-def test_gas_optics_mode_flag_parses_and_refuses_unknown():
-    import pytest
-
-    from scripts.run.run_amip import build_arg_parser
-    parser = build_arg_parser()
-    assert parser.parse_args(["--rrtmgp-gas-optics-mode", "per_gpt"]).rrtmgp_gas_optics_mode == "per_gpt"
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--rrtmgp-gas-optics-mode", "nonsense"])
-
-
-def test_experiment_gas_optics_mode_reaches_the_solver_config():
-    from legoesm.driver.config import ExperimentConfig
-    fields = ExperimentConfig().rrtmgp_gas_optics_mode
-    assert fields == "all_gpts"

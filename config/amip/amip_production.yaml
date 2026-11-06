@@ -250,8 +250,6 @@ rrtmgp_gpoint_batch_size: 0          # CPU: one g-point at a time (code default 
                                      # cores: radiation step 13.8 s at 16, 7.9 s at 0
                                      # (~139 s per simulated day); fluxes differ only by
                                      # summation order (<= 6.1e-4 W/m2).
-rrtmgp_gas_optics_mode: all_gpts     # gas optics once for all g-points, issue 2383: same
-                                     # fluxes to rounding, about 4x faster radiation on CPU.
 rrtmgp_use_scan: true                # scan the RRTMGP column recurrence (code default:
                                      # unrolled on CPU, scan on GPU, so GPU is unchanged).
                                      # Measured 2026-10-29, this deck, MPAS res6 CPU: step

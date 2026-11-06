@@ -242,16 +242,6 @@ def _gpoint_cloud_paths(igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn):
   return cloud_path_fn(igpt)
 
 
-def _bind_gas_optics(optics_lib, mode, is_lw, pressure, temperature, molecules,
-                     vmr_fields):
-  """Optics that read gas optics per g-point or from all-g-point arrays."""
-  if mode == 'per_gpt':
-    return optics_lib
-  if mode == 'all_gpts':
-    return optics_lib.with_all_gpts(is_lw, pressure, temperature, molecules, vmr_fields)
-  raise ValueError(f"unknown gas_optics_mode {mode!r}")
-
-
 def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
                              checkpoint=True):
   """Sum the per-g-point flux contributions produced by ``step_fn``.
@@ -367,7 +357,6 @@ def solve_lw(
     use_optimal_angle: bool = False,
     gpoint_batch_size: int = 0,
     gpoint_checkpoint: bool = True,
-    gas_optics_mode: str = 'per_gpt',
     cloud_path_fn=None,
     clear_sky: bool = False,
     level_temperature: Array | None = None,
@@ -535,8 +524,7 @@ def solve_lw(
     )
     return fluxes
 
-  optics_lib = _bind_gas_optics(
-      optics_lib, gas_optics_mode, True, pressure, temperature, molecules, vmr_fields)
+  optics_lib = optics_lib.with_all_gpts(True, pressure, temperature, molecules, vmr_fields)
 
   def step_fn(igpt, cumulative_flux):
     liq_g, ice_g = _gpoint_cloud_paths(
@@ -749,6 +737,7 @@ def compute_sw_optical_field(
   if vmr_fields is not None:
     vmr_fields = _reindex_vmr_fields(vmr_fields, optics_lib.gas_optics_sw)
   n_gpt = optics_lib.n_gpt_sw
+  optics_lib = optics_lib.with_all_gpts(False, pressure, temperature, molecules, vmr_fields)
 
   def gpt_props(igpt):
     props = compute_sw_optical_props_gpt(
@@ -760,8 +749,7 @@ def compute_sw_optical_field(
     # Gas Rayleigh scattering optical depth (the gas scatter is ALL Rayleigh) as
     # a fraction of TOTAL scattering (gas + cloud + aerosol) -> the per-cell
     # probability that a scatter event is Rayleigh, for the explicit-phase split.
-    rayl_scat = optics_lib.rayleigh_scattering_fn(igpt)(
-        molecules, temperature, pressure, vmr_fields)
+    rayl_scat = optics_lib.gas_gpt('rayleigh', igpt)
     tot_scat = props['ssa'] * props['optical_depth']
     # safe_divide (not a floored raw divide) so the masked-branch VJP can't
     # overflow as tot_scat -> 0, consistent with ssa/g above. fill=1.0: a cell
@@ -771,9 +759,7 @@ def compute_sw_optical_field(
         safe_divide(rayl_scat, tot_scat, eps=1.0e-30, fill=1.0), 0.0, 1.0)
     return {**props, 'rayleigh_frac': rayleigh_frac}
 
-  # Sequential map over g-points (memory-frugal, like the solve_sw scan):
-  # stacks leaves to (n_gpt, X, Y, Z) without materializing all g-points'
-  # table lookups concurrently.
+  # Sequential map over g-points: stacks leaves to (n_gpt, X, Y, Z).
   return jax.lax.map(gpt_props, jnp.arange(n_gpt))
 
 
@@ -806,6 +792,7 @@ def compute_lw_optical_field(
   if vmr_fields is not None:
     vmr_fields = _reindex_vmr_fields(vmr_fields, optics_lib.gas_optics_lw)
   n_gpt = optics_lib.n_gpt_lw
+  optics_lib = optics_lib.with_all_gpts(True, pressure, temperature, molecules, vmr_fields)
 
   def gpt_field(igpt):
     props = optics_lib.compute_lw_optical_properties(
@@ -851,7 +838,6 @@ def solve_sw(
     use_scan: bool | None = None,
     gpoint_batch_size: int = 0,
     gpoint_checkpoint: bool = True,
-    gas_optics_mode: str = 'per_gpt',
     cloud_path_fn=None,
     clear_sky: bool = False,
 ) -> dict[str, Array]:
@@ -970,8 +956,7 @@ def solve_sw(
     )
     return sw_fluxes
 
-  optics_lib = _bind_gas_optics(
-      optics_lib, gas_optics_mode, False, pressure, temperature, molecules, vmr_fields)
+  optics_lib = optics_lib.with_all_gpts(False, pressure, temperature, molecules, vmr_fields)
 
   def step_fn(igpt, partial_fluxes):
     liq_g, ice_g = _gpoint_cloud_paths(

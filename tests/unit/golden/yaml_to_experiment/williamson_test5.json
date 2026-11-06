@@ -329,7 +329,6 @@
   "rh_init": 0.7,
   "rrtmgp_column_chunk_size": 0,
   "rrtmgp_gpoint_batch_size": 16,
-  "rrtmgp_gas_optics_mode": "all_gpts",
   "rrtmgp_gpoint_checkpoint": true,
   "rrtmgp_overhead_layer": false,
   "rrtmgp_use_scan": null,

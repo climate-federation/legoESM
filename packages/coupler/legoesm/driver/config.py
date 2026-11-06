@@ -539,7 +539,6 @@ VALID_TURBULENCE = (
 )
 
 VALID_RADIATION = ("none", "gray", "rrtmgp", "rrtmg", "ecrad_ifs")
-VALID_RRTMGP_GAS_OPTICS_MODE = ("all_gpts", "per_gpt")
 
 VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved", "cam6_clubb")
 
@@ -807,8 +806,6 @@ class ExperimentConfig(NamedTuple):
     # smaller compiled footprint / faster cold compile for FORWARD/inference
     # runs, used to relieve the XLA-CPU LLVM-JIT code-region pressure.
     rrtmgp_gpoint_checkpoint: bool = True
-    # See ``RRTMGPConfig.gas_optics_mode``.  Fluxes agree to rounding.
-    rrtmgp_gas_optics_mode: str = 'all_gpts'
     # Column-chunk the rrtmgp solve to cap the XLA compile time at higher
     # horizontal resolution (see ``RRTMGPConfig.column_chunk_size``).  0 =
     # off (byte-identical). >0 = jax.lax.map the solve over fixed-size column
@@ -2883,10 +2880,6 @@ class ExperimentConfig(NamedTuple):
         # Radiation membership (reconciled: physics_pipeline now raises on
         # unknown and builds an explicit zero-radiation fn for "none", matching
         # this accepted set = _RADIATION_BUILDERS keys).
-        if self.rrtmgp_gas_optics_mode not in VALID_RRTMGP_GAS_OPTICS_MODE:
-            raise ValueError(
-                f"rrtmgp_gas_optics_mode={self.rrtmgp_gas_optics_mode!r} not in "
-                f"{VALID_RRTMGP_GAS_OPTICS_MODE}")
         _valid_radiation = VALID_RADIATION
         if self.radiation not in _valid_radiation:
             errors.append(
