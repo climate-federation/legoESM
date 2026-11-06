@@ -3957,6 +3957,7 @@ def rrtmgp_config_from_experiment(config, **lane_fields):
         use_scan=getattr(config, 'rrtmgp_use_scan', None),
         gpoint_batch_size=getattr(config, 'rrtmgp_gpoint_batch_size', 0),
         gpoint_checkpoint=getattr(config, 'rrtmgp_gpoint_checkpoint', True),
+        gas_optics_mode=config.rrtmgp_gas_optics_mode,
         column_chunk_size=getattr(config, 'rrtmgp_column_chunk_size', 0),
         overhead_layer=bool(getattr(config, 'rrtmgp_overhead_layer', False)),
         **lane_fields,

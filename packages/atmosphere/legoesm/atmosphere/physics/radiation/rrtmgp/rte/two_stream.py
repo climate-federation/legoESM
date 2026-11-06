@@ -242,6 +242,16 @@ def _gpoint_cloud_paths(igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn):
   return cloud_path_fn(igpt)
 
 
+def _bind_gas_optics(optics_lib, mode, is_lw, pressure, temperature, molecules,
+                     vmr_fields):
+  """Optics that read gas optics per g-point or from all-g-point arrays."""
+  if mode == 'per_gpt':
+    return optics_lib
+  if mode == 'all_gpts':
+    return optics_lib.with_all_gpts(is_lw, pressure, temperature, molecules, vmr_fields)
+  raise ValueError(f"unknown gas_optics_mode {mode!r}")
+
+
 def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
                              checkpoint=True):
   """Sum the per-g-point flux contributions produced by ``step_fn``.
@@ -357,6 +367,7 @@ def solve_lw(
     use_optimal_angle: bool = False,
     gpoint_batch_size: int = 0,
     gpoint_checkpoint: bool = True,
+    gas_optics_mode: str = 'per_gpt',
     cloud_path_fn=None,
     clear_sky: bool = False,
     level_temperature: Array | None = None,
@@ -523,6 +534,9 @@ def solve_lw(
         use_scan,
     )
     return fluxes
+
+  optics_lib = _bind_gas_optics(
+      optics_lib, gas_optics_mode, True, pressure, temperature, molecules, vmr_fields)
 
   def step_fn(igpt, cumulative_flux):
     liq_g, ice_g = _gpoint_cloud_paths(
@@ -837,6 +851,7 @@ def solve_sw(
     use_scan: bool | None = None,
     gpoint_batch_size: int = 0,
     gpoint_checkpoint: bool = True,
+    gas_optics_mode: str = 'per_gpt',
     cloud_path_fn=None,
     clear_sky: bool = False,
 ) -> dict[str, Array]:
@@ -954,6 +969,9 @@ def solve_sw(
         use_scan=use_scan,
     )
     return sw_fluxes
+
+  optics_lib = _bind_gas_optics(
+      optics_lib, gas_optics_mode, False, pressure, temperature, molecules, vmr_fields)
 
   def step_fn(igpt, partial_fluxes):
     liq_g, ice_g = _gpoint_cloud_paths(
