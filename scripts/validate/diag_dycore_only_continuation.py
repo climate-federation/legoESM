@@ -71,6 +71,7 @@ def water_tendency_terms(state, model):
     tracer tendency is included); ``rest`` = total - both (vertical
     transport, filters).
     """
+    import jax
     import jax.numpy as jnp
     from legoesm import constants
     from legoesm.core.conservation import WATER_MASS_SPECIES
@@ -83,7 +84,7 @@ def water_tendency_terms(state, model):
     mesh, sc, cfg = model.mesh, model.sigma_coord, model.config
     ps = state.p_s.data
     dp = sc.layer_thickness_dp(ps)
-    dB = sc.layer_thickness_dp(jnp.ones_like(ps)) - sc.layer_thickness_dp(jnp.zeros_like(ps))
+    dB = jax.jvp(sc.layer_thickness_dp, (ps,), (jnp.ones_like(ps),))[1]  # exact d(dp)/d(p_s)
     names = [k for k in WATER_MASS_SPECIES if k in (state.tracers or {})]
     q = jnp.stack([state.tracers[k].data for k in names], axis=-1)
     u = state.u.data
