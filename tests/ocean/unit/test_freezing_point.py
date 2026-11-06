@@ -572,3 +572,13 @@ def test_run_omip_core2_freeze_scheme_wiring():
     # And the builders actually accept the override parameter.
     for b in (R.build_tripole, R.build_latlon_bathy, R.build_mpas_ocean):
         assert "freezing" in inspect.signature(b).parameters, b.__name__
+
+
+@pytest.mark.xfail(strict=True, reason="PR #2388 review item 3 (gentine 2026-11-06); fix in the next SI3 PR")
+def test_nemo_eos_fzp_integer_salinity_matches_float():
+    from legoesm.ocean.eos import nemo_eos_fzp
+
+    expected = float(nemo_eos_fzp(35.0))
+    assert expected == pytest.approx(-1.9115341547609226, abs=1e-12)
+    assert float(nemo_eos_fzp(35)) == expected
+    assert float(nemo_eos_fzp(jnp.asarray([35]))[0]) == expected
