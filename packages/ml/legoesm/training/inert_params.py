@@ -687,6 +687,8 @@ def _gate_body(steps, start, optimizer, schedule, optimizer_name,
     # the host first) frees the starting tree after the first update.
     p, s = params, opt_state
     del params, opt_state, leaves
+    import time as _time
+
     n_pos, k, lrs = 0, 0, []
     it = iter(steps)
     while n_pos < _GATE_N_POSITIVE:
@@ -694,6 +696,7 @@ def _gate_body(steps, start, optimizer, schedule, optimizer_name,
             fail(f"no step number {_GATE_N_POSITIVE} with lr > 0 within {k_max} rehearsal steps "
                  f"(lr = {lrs}); the schedule keeps lr at 0 too long")
         # --- sync (a): local step, BEFORE the gradient allreduce ---------
+        _t_step = _time.perf_counter()
         err, exhausted, gsig = None, False, 0
         try:
             try:
@@ -795,6 +798,8 @@ def _gate_body(steps, start, optimizer, schedule, optimizer_name,
         lrs.append(lr)
         n_pos += lr > 0.0
         k += 1
+        log.info("gradient-access gate: rehearsal step %d took %.1f s", k,
+                 _time.perf_counter() - _t_step)
 
     def _dead_lines(dead):
         # Whole dead rows / columns of a matrix leaf: names the input feature
