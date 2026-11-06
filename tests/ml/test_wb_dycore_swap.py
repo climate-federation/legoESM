@@ -26,7 +26,8 @@ _spec.loader.exec_module(_mod)
 N_STEPS = 2
 # --smoke only unlocks gray radiation; the grid is set here (32x64x8 lat-lon,
 # T10 spectral as in test_scale_build_spectral_core).
-_YML = {"n_lat": 32, "n_lon": 64, "cube_n": 12, "nlev": 8, "dt": 300.0,
+_YML = {"n_lat": 32, "n_lon": 64, "cube_n": 12, "mpas_level": 2, "nlev": 8,
+        "dt": 300.0,
         "radiation": "gray",
         "spectral": {"n_max": 10, "dt": 1800.0}, "loss": {},
         # as the v9 WB decks: drop network outputs the loss cannot reach
@@ -35,9 +36,20 @@ _YML = {"n_lat": 32, "n_lon": 64, "cube_n": 12, "nlev": 8, "dt": 300.0,
 
 def _carry(core, grid, nlev):
     """Smooth synthetic SegmentCarry (ERA5 stand-in) on the core's grid."""
+    import numpy as np
+    if core == "mpas":
+        # MPASCarry: a zonal jet projected onto the edge normals
+        from legoesm.training.era5_to_state import MPASCarry
+        prof = np.linspace(0.0, 1.0, nlev)
+        nc = int(grid.nCells)
+        u = (20.0 * np.cos(np.asarray(grid.latEdge)) * np.cos(
+            np.asarray(grid.angleEdge)))[:, None] * (0.4 + 0.6 * prof)
+        return MPASCarry(
+            u=jnp.asarray(u), T=jnp.asarray(np.tile(250.0 + 40.0 * prof, (nc, 1))),
+            p_s=jnp.full((nc,), 1.0e5), phis=jnp.zeros((nc,)),
+            q_v=jnp.asarray(np.tile(5e-3 * (0.1 + 0.9 * prof), (nc, 1))))
     if core != "cubed_sphere":
         return _synthetic_carry(grid, nlev)
-    import numpy as np
 
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
@@ -89,7 +101,7 @@ def _forcing(core, cfg, yml, grid, k):
 
 
 @pytest.mark.parametrize("core,loss", [
-    ("latlon", {}), ("spectral", {}), ("cubed_sphere", {}),
+    ("latlon", {}), ("spectral", {}), ("cubed_sphere", {}), ("mpas", {}),
     # lat-lon writes the network's OLR into the carry the flux loss reads, so
     # a scored OLR keeps that output row, and the gate proves it is live.
     ("latlon", {"w_flux_olr": 1.0}),
@@ -118,8 +130,9 @@ def test_wb_training_step_passes_the_gradient_gate(core, loss):
         ic = ic._replace(T=ic.T + 0.5 * k)
         # nonzero OLR target: the zero-initialised network emits 0, and a
         # zero target would make the scored OLR row dead by construction
-        target = ic._replace(T=ic.T + 1.0, u=ic.u * 0.9,
-                             held_lw_up_toa=ic.held_lw_up_toa + 240.0)
+        target = ic._replace(T=ic.T + 1.0, u=ic.u * 0.9)
+        if core != "mpas":
+            target = target._replace(held_lw_up_toa=ic.held_lw_up_toa + 240.0)
         return ic, target, f0
 
     arr, static = eqx.partition(params, eqx.is_inexact_array)
@@ -161,3 +174,41 @@ def test_cube_n_is_required_and_a_positive_int(bad):
     with pytest.raises(ValueError, match="cube_n"):
         wb_cube_n(yml)
     assert wb_cube_n({"cube_n": 24}) == 24
+
+
+@pytest.mark.parametrize("mode,loss,extra,match", [
+    ("sfno", {}, {}, "neural_gcm' only"),
+    ("physics", {}, {}, "neural_gcm' only"),
+    ("neural_gcm", {"spectral_weight": 0.5}, {}, "state only"),
+    ("neural_gcm", {"w_flux_olr": 1.0}, {}, "state only"),
+    ("neural_gcm", {"w_bias_flux_rsut": 1.0}, {}, "state only"),
+    ("neural_gcm", {}, {"era5_cloud_condensate": True}, "no condensate"),
+])
+def test_mpas_core_refuses_what_it_cannot_build(mode, loss, extra, match):
+    from legoesm.training.scale_build import build_mode_components
+
+    cfg = _mod.build_scale_config_from_args(
+        ["--mode", mode, "--smoke", "--training-core", "mpas"])
+    with pytest.raises(ValueError, match=match):
+        build_mode_components(cfg, {**_YML, **extra, "loss": loss})
+
+
+@pytest.mark.parametrize("bad", [None, 0, -1, 2.0, True, "4"])
+def test_mpas_level_is_required_and_a_positive_int(bad):
+    from legoesm.training.scale_build import wb_mpas_level
+
+    yml = {} if bad is None else {"mpas_level": bad}
+    with pytest.raises(ValueError, match="mpas_level"):
+        wb_mpas_level(yml)
+    assert wb_mpas_level({"mpas_level": 4}) == 4
+
+
+def test_mpas_pruning_follows_the_exported_state():
+    """Kept network outputs = the MPAS state's prognostics (T, both wind
+    components through the edge normal, its tracers), no fluxes."""
+    from legoesm.training.scale_build import build_mode_components
+
+    cfg = _mod.build_scale_config_from_args(
+        ["--mode", "neural_gcm", "--smoke", "--training-core", "mpas"])
+    _, _, _, params, mk, _, _ = build_mode_components(cfg, dict(_YML))
+    assert set(params.kept_outputs) == {"T", "q_v", "u", "v", "q_c", "q_r"}

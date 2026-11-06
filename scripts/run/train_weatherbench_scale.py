@@ -26,7 +26,7 @@ VALID_MODES = ("physics", "neural_gcm", "sfno")
 _DEFAULT_LR = 3.0e-4
 _DEFAULT_OPTIMIZER = "adamw"
 _DEFAULT_N_EPOCHS = 40
-VALID_TRAINING_CORES = ("latlon", "spectral", "cubed_sphere")
+VALID_TRAINING_CORES = ("latlon", "spectral", "cubed_sphere", "mpas")
 
 
 class ScaleConfig(NamedTuple):
@@ -736,7 +736,8 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
                    help="latlon = explicit C-grid production core; spectral = "
                         "Gaussian semi-implicit training core (#817 blocker 1: "
                         "bounded adjoint, no pole-cell dt clamp); cubed_sphere = "
-                        "CD-grid cube (deck key cube_n).")
+                        "CD-grid cube (deck key cube_n); mpas = Voronoi mesh "
+                        "(deck key mpas_level, neural_gcm only).")
     # None = YAML ``n_epochs``, else the historical 40 (same contract as --lr).
     p.add_argument("--epochs", type=int, default=None, dest="n_epochs")
     p.add_argument("--n-days", type=int, default=None, dest="n_days",
@@ -830,11 +831,18 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
 
 
 def _yaml_resolution_deg(cfg, yml) -> float:
-    """Nominal grid spacing [deg] of the deck: 180/n_lat, or 90/cube_n on the
-    cubed sphere (a face spans 90 degrees)."""
+    """Nominal grid spacing [deg] of the deck: 180/n_lat, 90/cube_n on the
+    cubed sphere (a face spans 90 degrees), sqrt(4 pi / nCells) on MPAS."""
     if getattr(cfg, "training_core", "latlon") == "cubed_sphere":
         from legoesm.training.scale_build import wb_cube_n
         return 90.0 / float(wb_cube_n(yml))
+    if getattr(cfg, "training_core", "latlon") == "mpas":
+        # nominal: sqrt(mean cell area) on the unit sphere, nCells =
+        # 10*4**L + 2 (not the minimum edge spacing; voted 3-0)
+        from legoesm.training.scale_build import wb_mpas_level
+        n_cells = 10 * 4 ** wb_mpas_level(yml) + 2
+        import math
+        return math.degrees(math.sqrt(4.0 * math.pi / n_cells))
     return 180.0 / float(yml["n_lat"])
 
 

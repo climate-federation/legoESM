@@ -532,6 +532,17 @@ def wb_cube_n(yml) -> int:
     return n
 
 
+def wb_mpas_level(yml) -> int:
+    """The deck's ``mpas_level`` (icosahedral subdivision level of the MPAS
+    Voronoi mesh, nCells = 10*4**L + 2) for the MPAS core; required, an
+    int >= 1 (voted 3-0)."""
+    n = yml.get("mpas_level")
+    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+        raise ValueError("training_core 'mpas' needs the deck key mpas_level "
+                         f"(icosahedral subdivision level, int >= 1); got {n!r}")
+    return n
+
+
 def _gridpoint_argv(cfg, yml):
     """run_amip grid flags for the grid-point training cores: lat-lon C-grid
     (``n_lat``) or cubed-sphere CD-grid (``cube_n`` cells per face edge)."""
@@ -542,6 +553,9 @@ def _gridpoint_argv(cfg, yml):
     if core == "cubed_sphere":
         return ["--grid-type", "cubed_sphere", "--discretization", "cdgrid",
                 "--resolution", str(wb_cube_n(yml))]
+    if core == "mpas":
+        return ["--grid-type", "mpas", "--discretization", "mpas",
+                "--resolution", str(wb_mpas_level(yml))]
     raise ValueError(f"no grid-point config for training_core {core!r}")
 
 
@@ -620,7 +634,8 @@ def resolve_training_ice_skin(config):
 # whole campaign (v2 trained at 3e-4 while its deck said 1.5e-3), and a typo
 # like ``learning_rate`` would silently reintroduce exactly that.
 _WB_CONSUMED_TOP_KEYS = frozenset({
-    "classical", "convection", "cube_n", "dt", "ema_decay", "era5_cadence_hours",
+    "classical", "convection", "cube_n", "dt",
+    "mpas_level", "ema_decay", "era5_cadence_hours",
     "cache_dir", "era5_cloud_condensate", "era5_cloud_zarr", "era5_flux_zarr",
     "era5_flux_climatology", "era5_soil_moisture", "era5_surface_fluxes",
     "era5_sea_ice_climatology",
@@ -1551,11 +1566,14 @@ def build_mode_components(cfg, yml, column_mesh=None):
     if _spectral_only:
         raise ValueError(f"{_spectral_only} are built only on the spectral "
                          f"training core; this run uses {core!r}.")
+    if core == "mpas":
+        return _build_mode_components_mpas(cfg, yml)
     if core not in ("latlon", "cubed_sphere"):
         raise ValueError(
             f"unknown training_core {core!r}; choose 'latlon' (explicit "
-            f"C-grid production core), 'cubed_sphere' (CD-grid) or "
-            f"'spectral' (Gaussian semi-implicit training core, #817)")
+            f"C-grid production core), 'cubed_sphere' (CD-grid), 'mpas' "
+            f"(Voronoi) or 'spectral' (Gaussian semi-implicit training core, "
+            f"#817)")
     if core == "cubed_sphere":
         if cfg.mode == "sfno":
             raise ValueError("mode 'sfno' is built only on the lat-lon and "
@@ -1713,6 +1731,66 @@ def build_mode_components(cfg, yml, column_mesh=None):
         raise ValueError(f"unknown mode {cfg.mode!r}")
 
     return model, grid, sigma, params, make_run_seg, loss_config, dt
+
+
+def _build_mode_components_mpas(cfg, yml):
+    """``build_mode_components`` on the MPAS Voronoi core: the production MPAS
+    step exported from a serial ModelDriver (``export_mpas_step``) with the
+    column network as its physics (``make_neural_mpas_physics_fn``).
+    neural_gcm only (voted 3-0): the physics arm's trainables are
+    compiled-segment kwargs and sfno couples lat-lon <-> Gaussian."""
+    import jax
+
+    from legoesm.atmosphere.physics.neural_physics import (
+        COLUMN_OUTPUT_GROUPS, NeuralPhysics, make_neural_mpas_physics_fn)
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.training.losses import column_outputs_the_loss_reads
+    from legoesm.training.training_driver import build_mpas_training_segment
+
+    if cfg.mode != "neural_gcm":
+        raise ValueError(f"mode {cfg.mode!r} is not built on 'mpas'; the MPAS "
+                         "core trains mode 'neural_gcm' only.")
+    lb = yml.get("loss") or {}
+    if float(lb.get("spectral_weight", 0.0)) > 0.0 or any(
+            float(v or 0.0) != 0.0 for k, v in lb.items()
+            if k.startswith(("w_flux_", "w_bias_flux_"))):
+        raise ValueError("on 'mpas' the loss scores the state only (the MPAS "
+                         "carry holds no radiation fluxes, the mesh has no "
+                         "spherical harmonics): w_flux_* / w_bias_flux_* and "
+                         "spectral_weight must be 0.")
+    if yml.get("era5_cloud_condensate"):
+        raise ValueError("era5_cloud_condensate: the ERA5 -> MPAS converter "
+                         "builds no condensate; not on 'mpas'.")
+    config = build_latlon_config(cfg, yml)
+    driver = ModelDriver(config)
+    driver.setup()
+    exp = driver.export_mpas_step()
+    grid, sigma, model = driver.grid, driver.sigma, driver.model
+    loss_config = make_loss_config(cfg, yml)
+    ov = yml.get("neural_gcm", {})
+    spatial_embedding = bool(ov.get("spatial_embedding", False))
+    kept = None
+    if wb_prune_unused_weights(ov):
+        # Derived from the exported MPAS state: its edge-normal u carries both
+        # horizontal components; its tracers are the other prognostics.
+        lane = ("T", "u", "v") + tuple(
+            k for k in (exp["state"].tracers or {}) if k in COLUMN_OUTPUT_GROUPS)
+        kept = column_outputs_the_loss_reads(loss_config,
+                                             lane_writes_fluxes=False,
+                                             lane_prognostics=lane)
+    params = NeuralPhysics(
+        nlev=int(yml["nlev"]), hidden_dim=int(ov.get("nn_hidden", 256)),
+        n_layers=int(ov.get("nn_layers", 4)), key=jax.random.PRNGKey(0),
+        spatial_embedding=spatial_embedding,
+        era5_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
+        n_columns=int(grid.nCells) if spatial_embedding else None,
+        kept_outputs=kept)
+
+    def make_run_seg(nn_phys):
+        return build_mpas_training_segment(
+            exp, make_neural_mpas_physics_fn(nn_phys, grid))
+
+    return model, grid, sigma, params, make_run_seg, loss_config, float(exp["dt"])
 
 
 def rollout_hours(cfg, yml):
@@ -2491,6 +2569,7 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     from legoesm.training.era5_to_state import (
         era5_to_cubedsphere_carry,
         era5_to_latlon_carry,
+        era5_to_mpas_carry,
         open_era5_zarr,
         regrid_2d_to_grid,
     era5_terrain_product,
@@ -2534,10 +2613,14 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     driver = _driver_for_ctx(config)
     ctx = driver._prepare_run_context(0, config.start_day, restore_carry=False)
     _sic_clim = wb_sea_ice_climatology(cfg, yml, grid)
-    # The core's own ERA5 converter (same kwargs on both grid-point cores).
-    _to_carry = (era5_to_cubedsphere_carry
-                 if getattr(cfg, "training_core", "latlon") == "cubed_sphere"
+    # The core's own ERA5 converter (same kwargs on both grid-point cores;
+    # the MPAS converter builds no condensate / ice skin / convection carry).
+    _core = getattr(cfg, "training_core", "latlon")
+    _to_carry = (era5_to_cubedsphere_carry if _core == "cubed_sphere"
                  else era5_to_latlon_carry)
+    if _core == "mpas":
+        def _to_carry(s, grid, sigma, *, target_phis, **_unused):
+            return era5_to_mpas_carry(s, grid, sigma, target_phis=target_phis)
 
     # Spectral forcing-dict name -> driver-path (pack_forcing) name for the
     # planes the two lanes name differently; the radiative planes and the

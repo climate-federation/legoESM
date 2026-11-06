@@ -34,7 +34,7 @@ def build_parser():
     p.add_argument("--n-tasks", type=int, default=1, dest="n_tasks")
     p.add_argument("--field", choices=("flux", "sic"), default="flux")
     p.add_argument("--training-core", default="spectral", dest="training_core",
-                   choices=("spectral", "latlon", "cubed_sphere"),
+                   choices=("spectral", "latlon", "cubed_sphere", "mpas"),
                    help="the grid the store is built on (sic only for the "
                         "grid-point cores)")
     return p
@@ -167,7 +167,10 @@ def main(argv=None):
     root = sb.wb_state_cache_root(yml)
     if root is None:
         raise SystemExit(f"{a.config} names no state_cache_dir")
-    cfg = SimpleNamespace(mode="physics", training_core=a.training_core,
+    # sic is the learned arms' input: build its grid as they do (the MPAS core
+    # builds neural_gcm only; same grid on every core; voted 2-1).
+    cfg = SimpleNamespace(mode="neural_gcm" if a.field == "sic" else "physics",
+                          training_core=a.training_core,
                           smoke=False, windows=None, n_days=None,
                           multi_step_hours=None)
     if a.field != "sic" and a.training_core != "spectral":
