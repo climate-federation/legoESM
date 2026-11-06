@@ -1,0 +1,15 @@
+# AGU 2026 AMIP deck (branch agu2026/amip-simple-land, 2026-11-06): the production
+# CAM6 deck on the simple surface land (soil kept, two-leaf canopy dropped; see
+# timing_simple_seb.yaml) plus the three bias levers chosen from 2-degree January
+# 1979 one-lever arms ranked against CMIP6 (amip_runs/bias_arms/report*):
+#   ice-to-snow autoconversion size 500 -> 250 um: outgoing-LW rank 43 -> 20/43
+#     (global bias -14.5 -> -3.5 W/m2; the 21 Oct size change had collapsed it)
+#   CLUBB C8 4.2 -> 6.0: restores the low cloud the smaller ice removed
+#     (global reflected SW +0.7 W/m2 with both; -7.3 with the ice change alone)
+#   dry-soil albedo brightening 0.155 -> 0: the SimpleSEB tile added it on top of
+#     the surfdata soil-colour albedo (deserts +17-28 W/m2 clear-sky)
+# Rank sum over the eight CMIP6 metrics 285 -> 251 (same code, same month).
+include: timing_simple_seb.yaml
+morrison_ice_snow_d_auto: 250.0e-6
+clubb_c8: 6.0
+land_dry_soil_albedo_boost: 0.0
