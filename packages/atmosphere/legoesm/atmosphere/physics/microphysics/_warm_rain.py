@@ -457,11 +457,11 @@ def saturation_adjustment_increment(T, q_v, p_full, dt, *, rh_width,
         sat_fn=saturation_specific_humidity, hard_step=True)
     if rh_width == 0.0:
         return d
-    # Where a tiny width underflows s (vote r13: no NaN, else unchanged) the
-    # result is the w -> 0 limit d; the double where keeps the s-gradient
-    # (~1/s**2) out of that branch.
+    # Where a tiny width leaves s**2 unrepresentable (vote r13: no NaN, else
+    # unchanged) the result is the w -> 0 limit d; the double where keeps the
+    # s-gradient (~d/s**2) out of that branch.
     s = rh_width * jnp.maximum(q_sat, _HARD_SAT_QSAT_FLOOR)
-    ok = s > jnp.finfo(s.dtype).tiny
+    ok = s > jnp.sqrt(jnp.finfo(s.dtype).tiny)
     s_safe = jnp.where(ok, s, 1.0)
     return jnp.where(ok, -d * jnp.expm1(-d / s_safe), d)
 

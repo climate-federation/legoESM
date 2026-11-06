@@ -132,11 +132,12 @@ def test_gradient_through_switch_at_default():
     assert np.any(np.asarray(g) != 0.0)
 
 
-def test_tiny_width_is_finite_in_fp32():
+@pytest.mark.parametrize("w", [1e-50, 1e-22])  # s underflows / s**2 does
+def test_tiny_width_is_finite_in_fp32(w):
     T, q_v, p = (x.astype(jnp.float32) for x in _state())
-    dq = saturation_adjustment_increment(T, q_v, p, DT, rh_width=1e-50)
+    dq = saturation_adjustment_increment(T, q_v, p, DT, rh_width=w)
     g = jax.grad(lambda t, q, pp: jnp.sum(saturation_adjustment_increment(
-        t, q, pp, DT, rh_width=1e-50)), argnums=(0, 1, 2))(T, q_v, p)
+        t, q, pp, DT, rh_width=w)), argnums=(0, 1, 2))(T, q_v, p)
     assert np.all(np.isfinite(np.asarray(dq)))
     assert all(np.all(np.isfinite(np.asarray(x))) for x in g)
 
