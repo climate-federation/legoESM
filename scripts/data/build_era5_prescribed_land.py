@@ -8,6 +8,7 @@ days of a 365-day year, for ``run_amip.py --land-prescribed-flux-file``.
 
 ERA5 sources (DKRZ /pool/data/ERA5/E5, GRIB, N320 reduced Gaussian):
   sf/an/1M/235  skt   monthly mean of analyses [K]
+  sf/an/1M/243  fal   forecast albedo, monthly mean of analyses [-] (snow/ice aware)
   sf/fc/1M/146  sshf  monthly mean of DAILY forecast accumulations [J m-2 per 24 h],
   sf/fc/1M/147  slhf  ECMWF sign: positive DOWNWARD (checked 2026-11-06: Jan 1979 global
                       mean slhf -6.89e6 J m-2 -> -79.7 W m-2 downward = 80 W m-2 up).
@@ -60,9 +61,13 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         _ymonmean("an", 235, years, a.grid, td / "skt.nc")
+        _ymonmean("an", 243, years, a.grid, td / "fal.nc")
         _ymonmean("fc", 146, years, a.grid, td / "sshf.nc")
         _ymonmean("fc", 147, years, a.grid, td / "slhf.nc")
         skt = xr.open_dataset(td / "skt.nc")
+        fal = xr.open_dataset(td / "fal.nc")
+        v_fal = [v for v in fal.data_vars if fal[v].ndim == 3][0]
+        albedo = fal[v_fal].values.astype(np.float64)
         sshf = xr.open_dataset(td / "sshf.nc")
         slhf = xr.open_dataset(td / "slhf.nc")
         v_skt = [v for v in skt.data_vars if skt[v].ndim == 3][0]
@@ -77,13 +82,15 @@ def main() -> None:
         raise ValueError(f"expected 12 climatological months, got {ts.shape[0]}")
     w = np.cos(np.deg2rad(lat))[:, None]
     gm = lambda f: float((f * w).sum() / (w * np.ones_like(f)).sum())  # noqa: E731
-    print(f"global means Jan: ts={gm(ts[0]):.2f} K hfss={gm(hfss[0]):.1f} hfls={gm(hfls[0]):.1f} W/m2 (up)")
-    if not (12.0 < gm(hfss[0]) < 25.0 and 60.0 < gm(hfls[0]) < 100.0 and 280.0 < gm(ts[0]) < 292.0):
+    print(f"global means Jan: ts={gm(ts[0]):.2f} K hfss={gm(hfss[0]):.1f} hfls={gm(hfls[0]):.1f} W/m2 (up) albedo={gm(albedo[0]):.3f}")
+    if not (12.0 < gm(hfss[0]) < 25.0 and 60.0 < gm(hfls[0]) < 100.0 and 280.0 < gm(ts[0]) < 292.0
+            and 0.12 < gm(albedo[0]) < 0.25):
         raise ValueError("global means outside the plausible range; check units/sign")
     ds = xr.Dataset(
         {"ts": (("time", "lat", "lon"), ts, {"units": "K", "long_name": "ERA5 skin temperature, climatological month mean"}),
          "hfss": (("time", "lat", "lon"), hfss, {"units": "W m-2", "positive": "up", "long_name": "ERA5 surface sensible heat flux"}),
-         "hfls": (("time", "lat", "lon"), hfls, {"units": "W m-2", "positive": "up", "long_name": "ERA5 surface latent heat flux"})},
+         "hfls": (("time", "lat", "lon"), hfls, {"units": "W m-2", "positive": "up", "long_name": "ERA5 surface latent heat flux"}),
+         "albedo": (("time", "lat", "lon"), albedo, {"units": "1", "long_name": "ERA5 forecast albedo (fal), climatological month mean"})},
         coords={"time": ("time", NOLEAP_MID_MONTH, {"units": "days since 0001-01-01", "calendar": "noleap",
                                                      "long_name": "mid-month day of a 365-day climatological year"}),
                 "lat": lat, "lon": lon},

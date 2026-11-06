@@ -23,6 +23,7 @@ from legoesm.forcing.amip import regrid_monthly_latlon_to_grid
 
 DAYS_PER_YEAR = 365.0
 REQUIRED_VARS = ("ts", "hfss", "hfls")
+OPTIONAL_VARS = ("albedo",)
 
 
 class PrescribedLand(NamedTuple):
@@ -31,6 +32,7 @@ class PrescribedLand(NamedTuple):
     hfss: np.ndarray        # (ntime, ncol) sensible heat flux [W m-2], positive up
     hfls: np.ndarray        # (ntime, ncol) latent heat flux [W m-2], positive up
     path: str
+    albedo: np.ndarray | None = None   # (ntime, ncol) broadband surface albedo [-], or None
 
 
 def load_prescribed_land(path: str, grid) -> PrescribedLand:
@@ -57,7 +59,7 @@ def load_prescribed_land(path: str, grid) -> PrescribedLand:
         lat = np.asarray(ds["lat"].values, dtype=np.float64)
         lon = np.asarray(ds["lon"].values, dtype=np.float64)
         fields = {}
-        for v in REQUIRED_VARS:
+        for v in REQUIRED_VARS + tuple(v for v in OPTIONAL_VARS if v in ds):
             arr = np.asarray(ds[v].values, dtype=np.float64)
             if arr.shape[0] != times.size:
                 raise ValueError(f"{path}: {v} has {arr.shape[0]} records, time has {times.size}")
@@ -74,13 +76,18 @@ def load_prescribed_land(path: str, grid) -> PrescribedLand:
     for v, arr in fields.items():
         reg = regrid_monthly_latlon_to_grid(arr, lat, lon, grid)
         ncol_fields[v] = reg.reshape(times.size, -1)
+    alb = ncol_fields.get("albedo")
+    if alb is not None and (alb.min() < 0.0 or alb.max() > 1.0):
+        raise ValueError(f"{path}: albedo outside [0, 1]: [{alb.min()}, {alb.max()}]")
     return PrescribedLand(times_doy=times, ts=ncol_fields["ts"],
-                          hfss=ncol_fields["hfss"], hfls=ncol_fields["hfls"], path=path)
+                          hfss=ncol_fields["hfss"], hfls=ncol_fields["hfls"], path=path,
+                          albedo=alb)
 
 
 def prescribed_land_at_day(pl: PrescribedLand, day: float):
-    """``(ts, hfss, hfls)`` at simulated ``day`` (days since 1 January of the
-    start year on the 365-day clock), linear between anchors, periodic."""
+    """``(ts, hfss, hfls, albedo)`` at simulated ``day`` (days since 1 January
+    of the start year on the 365-day clock), linear between anchors, periodic;
+    ``albedo`` is None when the file carries none."""
     doy = float(day) % DAYS_PER_YEAR
     t = pl.times_doy
     n = t.size
@@ -95,6 +102,6 @@ def prescribed_land_at_day(pl: PrescribedLand, day: float):
         t0, t1 = t[i0], t[i1]
     w = (doy - t0) / (t1 - t0)
     out = []
-    for arr in (pl.ts, pl.hfss, pl.hfls):
-        out.append((1.0 - w) * arr[i0] + w * arr[i1])
+    for arr in (pl.ts, pl.hfss, pl.hfls, pl.albedo):
+        out.append(None if arr is None else (1.0 - w) * arr[i0] + w * arr[i1])
     return tuple(out)

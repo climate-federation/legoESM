@@ -49,17 +49,29 @@ def test_load_regrids_every_month_onto_the_columns(tmp_path):
 def test_interpolation_hits_anchors_and_wraps_the_year(tmp_path):
     pl = load_prescribed_land(_write(tmp_path), _Grid())
     for i, d in enumerate(_MID):
-        ts, sh, lh = prescribed_land_at_day(pl, d)
+        ts, sh, lh, _ = prescribed_land_at_day(pl, d)
         np.testing.assert_allclose(ts, pl.ts[i], rtol=1e-12)
     # between the December and January anchors across the year boundary
-    ts_a, _, _ = prescribed_land_at_day(pl, 362.0)
-    ts_b, _, _ = prescribed_land_at_day(pl, 362.0 + 3 * DAYS_PER_YEAR)
+    ts_a, _, _, _ = prescribed_land_at_day(pl, 362.0)
+    ts_b, _, _, _ = prescribed_land_at_day(pl, 362.0 + 3 * DAYS_PER_YEAR)
     np.testing.assert_allclose(ts_a, ts_b, rtol=1e-12)
     w = (362.0 - 349.5) / (15.5 + DAYS_PER_YEAR - 349.5)
     np.testing.assert_allclose(ts_a, (1 - w) * pl.ts[11] + w * pl.ts[0], rtol=1e-12)
     # strictly inside the year, on the mid-month grid
-    ts_m, _, _ = prescribed_land_at_day(pl, 30.0)
+    ts_m, _, _, _ = prescribed_land_at_day(pl, 30.0)
     assert np.all(ts_m < pl.ts[0]) and np.all(ts_m > pl.ts[1])
+
+
+def test_optional_albedo_is_loaded_and_interpolated(tmp_path):
+    p = _write(tmp_path)
+    ds = xr.open_dataset(p); alb = xr.full_like(ds["hfss"], 0.3); alb.attrs = {"units": "1"}
+    ds = ds.assign(albedo=alb); ds.to_netcdf(str(p) + ".alb.nc"); ds.close()
+    pl = load_prescribed_land(str(p) + ".alb.nc", _Grid())
+    assert pl.albedo.shape == (12, 4)
+    ts, sh, lh, a = prescribed_land_at_day(pl, 100.0)
+    np.testing.assert_allclose(a, 0.3)
+    pl0 = load_prescribed_land(p, _Grid())
+    assert pl0.albedo is None and prescribed_land_at_day(pl0, 100.0)[3] is None
 
 
 def test_refuses_a_downward_flux_convention(tmp_path):

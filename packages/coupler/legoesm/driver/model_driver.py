@@ -13390,18 +13390,23 @@ class ModelDriver:
         # interactive tile, so the flux keys are consumed, not refused.
         _land_presc_path = str(getattr(cfg, "land_prescribed_flux_file", "") or "")
         _land_presc_on = bool(_land_presc_path)
-        _land_presc_fluxes = (_land_presc_on and str(getattr(
-            cfg, "land_prescribed_channels", "ts")) == "ts_fluxes")
+        _land_presc_mode = str(getattr(cfg, "land_prescribed_channels", "ts_lh"))
+        _land_presc_fluxes = _land_presc_on and _land_presc_mode in ("ts_lh", "ts_fluxes")
+        _land_presc_sh = _land_presc_on and _land_presc_mode == "ts_fluxes"
         self._land_presc = None
         if _land_presc_on:
             from legoesm.forcing.prescribed_land import load_prescribed_land
             self._land_presc = load_prescribed_land(_land_presc_path, self.grid)
             logger.info(
-                "  Prescribed land: %s (%d anchors; land fraction blends the "
-                "skin temperature%s; no land tile)",
+                "  Prescribed land: %s (%d anchors; mode %s; land fraction "
+                "blends the skin temperature%s%s; no land tile)",
                 _land_presc_path, int(self._land_presc.times_doy.size),
-                " and the file's sensible/latent fluxes" if _land_presc_fluxes
-                else "; land fluxes from the bulk scheme against it")
+                _land_presc_mode,
+                {"ts": "; land fluxes from the bulk scheme against it",
+                 "ts_lh": " and the file's latent heat (sensible from the bulk scheme)",
+                 "ts_fluxes": " and the file's sensible/latent fluxes"}[_land_presc_mode],
+                "; albedo from the file" if self._land_presc.albedo is not None
+                else "; albedo static")
         _land_lapse_K_m = (
             float(getattr(cfg, "land_lapse_K_per_km", 0.0)) * 1.0e-3)
         _f_land_cells = None
@@ -15589,14 +15594,15 @@ class ModelDriver:
             """Prescribed-land channels at simulated day ``_day`` (host
             interpolation, then the lane's dtype)."""
             from legoesm.forcing.prescribed_land import prescribed_land_at_day
-            _ts, _sh, _lh = prescribed_land_at_day(self._land_presc, float(_day))
+            _ts, _sh, _lh, _alb = prescribed_land_at_day(self._land_presc, float(_day))
             _dt_ = self.state.p_s.data.dtype
             _ts = jnp.asarray(_ts, dtype=_dt_)
+            _alb = None if _alb is None else jnp.asarray(_alb, dtype=_dt_)
             if not _land_presc_fluxes:
-                return _ts, None, None, None
+                return _ts, None, None, None, _alb
             _lh = jnp.asarray(_lh, dtype=_dt_)
-            return (_ts, jnp.asarray(_sh, dtype=_dt_), _lh,
-                    _lh / latent_heat_vaporization(_ts))
+            return (_ts, jnp.asarray(_sh, dtype=_dt_) if _land_presc_sh else None,
+                    _lh, _lh / latent_heat_vaporization(_ts), _alb)
 
         _land_presc_day = None
         if _land_presc_on:
@@ -15604,7 +15610,8 @@ class ModelDriver:
             # (the interactive tile has a one-step bootstrap lag instead).
             _land_presc_day = int(np.floor(_DAY_ORIGIN + start_step * DT / 86400.0))
             (_land_T_skin, _land_shflx_cells, _land_lhflx_cells,
-             _land_evap_cells) = _presc_land_arrays(float(_land_presc_day))
+             _land_evap_cells, _land_albedo_cells) = _presc_land_arrays(
+                float(_land_presc_day))
 
         for step in range(n_steps_total):
             if step in _trace_edges:
@@ -15906,7 +15913,7 @@ class ModelDriver:
                 # this is how the snow-albedo feedback reaches radiation on
                 # this lane.  Re-blend against the day's ocean/ice albedo so
                 # only the land fraction is replaced.
-                if (_land_ml_on and _land_albedo_cells is not None
+                if ((_land_ml_on or _land_presc_on) and _land_albedo_cells is not None
                         and _sea_albedo_day is not None
                         and "sfc_albedo" in _forcing):
                     _forcing["sfc_albedo"] = (
@@ -15924,6 +15931,9 @@ class ModelDriver:
                 # The land's OWN turbulent fluxes -- the actual coupling.
                 if _land_shflx_cells is not None:
                     _forcing["shflx_land"] = _land_shflx_cells
+                if _land_lhflx_cells is not None:
+                    # Latent heat alone (prescribed-land "ts_lh"): the
+                    # turbulence then keeps its bulk sensible heat over land.
                     _forcing["lhflx_land"] = _land_lhflx_cells
                     _forcing["evap_land"] = _land_evap_cells
                 if _land_taumag_cells is not None:
@@ -16105,7 +16115,8 @@ class ModelDriver:
                 # a per-step host refresh measured 108 vs 61 s/day at 2 deg).
                 _land_presc_day = int(np.floor(_force_day))
                 (_land_T_skin, _land_shflx_cells, _land_lhflx_cells,
-                 _land_evap_cells) = _presc_land_arrays(float(_land_presc_day))
+                 _land_evap_cells, _land_albedo_cells) = _presc_land_arrays(
+                    float(_land_presc_day))
             if _land_ml_on:
                 _a2s = _marshal_land_forcing()
                 if _a2s is not None:

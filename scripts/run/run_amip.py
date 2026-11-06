@@ -1818,16 +1818,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "shflx_land / lhflx_land channels; requires "
                              "--no-use-multilayer-land and a land fraction.")
     parser.add_argument("--land-prescribed-channels", type=str,
-                        choices=["ts", "ts_fluxes"],
+                        choices=["ts", "ts_lh", "ts_fluxes"],
                         default=_EXPERIMENT_DEFAULTS.land_prescribed_channels,
                         dest="land_prescribed_channels",
-                        help="With --land-prescribed-flux-file: 'ts' (default) "
-                             "prescribes the land skin temperature only and lets "
-                             "the bulk scheme compute the land fluxes against it "
-                             "(surface-air feedback kept, as AMIP SST); "
-                             "'ts_fluxes' also prescribes the file's sensible and "
-                             "latent heat fluxes (no feedback: winter continental "
-                             "air drifts cold, measured 2026-11-06).")
+                        help="With --land-prescribed-flux-file: 'ts_lh' (default) "
+                             "prescribes the land skin temperature and the file's "
+                             "latent heat flux, with the sensible heat from the "
+                             "bulk scheme against that skin (feedback kept); 'ts' "
+                             "prescribes the skin only (deserts then evaporate at "
+                             "the static land_beta fraction of saturation: +16 "
+                             "mm/day over Australia, measured 2026-11-06); "
+                             "'ts_fluxes' prescribes both fluxes (no feedback: "
+                             "winter continental air 16 K too cold). The file's "
+                             "albedo, when present, is always blended in.")
     parser.add_argument("--use-multilayer-land", default=False,
                         action=argparse.BooleanOptionalAction,
                         help="Replace the slab land tile with the differentiable "

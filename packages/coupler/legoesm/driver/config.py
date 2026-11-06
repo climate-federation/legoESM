@@ -1418,13 +1418,18 @@ class ExperimentConfig(NamedTuple):
     # tile through the SAME three channels it hands over (T_sfc blend over the
     # land fraction, forcing["shflx_land"] / ["lhflx_land"]).  Empty = off.
     land_prescribed_flux_file: str = ""
-    # Which channels the prescribed land hands over: "ts" = skin temperature
-    # only (the atmosphere's bulk scheme computes the land fluxes against it,
-    # keeping the surface-air feedback, as AMIP SST does for the ocean);
-    # "ts_fluxes" = skin temperature AND the file's sensible/latent fluxes
-    # (no feedback: measured 2026-11-06, January 2 deg, winter continental
-    # 2 m air up to 16 K too cold over West Siberia, tas rank 48/48).
-    land_prescribed_channels: str = "ts"
+    # Which channels the prescribed land hands over (the file's albedo, when
+    # present, is always blended in over land):
+    #   "ts_lh" (default): skin temperature + the file's LATENT heat flux
+    #     (moisture availability from the climatology); the bulk scheme
+    #     computes the SENSIBLE heat against the skin temperature, keeping the
+    #     surface-air temperature feedback.
+    #   "ts": skin temperature only; the land humidity falls back to the
+    #     static land_beta fraction of saturation (measured 2026-11-06: deserts
+    #     evaporate freely at the warm prescribed skin, Australia +16 mm/day).
+    #   "ts_fluxes": skin temperature AND both fluxes (no feedback: winter
+    #     continental 2 m air up to 16 K too cold, tas rank 48/48).
+    land_prescribed_channels: str = "ts_lh"
     # Land-tile call interval [s]; 0.0 (default) advances the land every
     # host step (legacy).  A positive value calls the tile every
     # round(land_update_seconds/dt) steps with the atmosphere forcing
@@ -2402,10 +2407,10 @@ class ExperimentConfig(NamedTuple):
                     "land_fraction_source='zero' with a land tile "
                     "(use_multilayer_land / slab_land_active): land physics "
                     "on no land")
-        if self.land_prescribed_channels not in ("ts", "ts_fluxes"):
+        if self.land_prescribed_channels not in ("ts", "ts_lh", "ts_fluxes"):
             errors.append(
                 f"land_prescribed_channels={self.land_prescribed_channels!r}; "
-                "expected 'ts' or 'ts_fluxes'")
+                "expected 'ts', 'ts_lh' or 'ts_fluxes'")
         if self.land_prescribed_flux_file:
             if self.grid.grid_type != "mpas":
                 errors.append(

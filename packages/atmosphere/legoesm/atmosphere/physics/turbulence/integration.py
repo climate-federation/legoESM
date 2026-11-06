@@ -1192,12 +1192,14 @@ def _make_mpas_turbulence(
         # the land solved; a flux is what crosses the boundary.  Momentum and
         # the ocean/ice fraction keep the scheme's own bulk computation.
         _shf_land = (forcing.get("shflx_land") if forcing is not None else None)
+        _lhf_only = (forcing is not None and _shf_land is None
+                     and forcing.get("lhflx_land") is not None)
         _surface_flux = None
-        if _shf_land is not None:
+        if _shf_land is not None or _lhf_only:
             if f_land is None:
                 raise ValueError(
-                    "forcing['shflx_land'] requires f_land in the turbulence "
-                    "factory (make_physics f_land=...).")
+                    "forcing['shflx_land'] / ['lhflx_land'] require f_land in the "
+                    "turbulence factory (make_physics f_land=...).")
             if not _accepts_surface_flux:
                 raise ValueError(
                     f"turbulence scheme {scheme_name!r} cannot be handed the "
@@ -1268,8 +1270,11 @@ def _make_mpas_turbulence(
                          + _fl * _ev_land)
             step_config = step_config._replace(surface=step_config.surface._replace(
                 prescribed_evap_kg_m2_s=_ev_blend))
-            _sh_land = jnp.where(
-                _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0)
+            # Latent heat alone (prescribed land, "ts_lh" mode): the land
+            # sensible heat stays the bulk value against the blended T_sfc,
+            # which over land carries the prescribed skin temperature.
+            _sh_land = (_sh if _lhf_only else jnp.where(
+                _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0))
             _surface_flux = (
                 _tx, _ty,
                 (1.0 - _fl) * _sh + _fl * _sh_land,

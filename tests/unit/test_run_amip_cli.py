@@ -6223,6 +6223,6 @@ def test_land_prescribed_channels_round_trip_and_membership():
         "--land-prescribed-channels", "ts_fluxes"]), parser))
     assert cfg.land_prescribed_channels == "ts_fluxes"
     assert build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical"]), parser)).land_prescribed_channels == "ts"
+        ["--dataset", "analytical"]), parser)).land_prescribed_channels == "ts_lh"
     with pytest.raises(ValueError, match="land_prescribed_channels"):
         cfg._replace(land_prescribed_channels="fluxes_only").validate_strict()
