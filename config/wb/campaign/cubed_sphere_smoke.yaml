@@ -16,6 +16,11 @@ era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_wi
 cache_dir: ".cache/wb_campaign_era5_smoke"
 train_years: [2020]
 era5_surface_fluxes: false
+# ERA5 2015-19 daily sea-ice climatology (user decision), stored next to the
+# state cache; build it with scripts/data/build_wb_flux_climatology.py
+# --field sic --training-core cubed_sphere (SLURM).
+era5_sea_ice_climatology: true
+state_cache_dir: .cache/wb_campaign_states
 eval_years: [2021]   # disjoint from train_years: a held-out target year drops every sample
 era5_cadence_hours: 6
 n_training_days: 2
