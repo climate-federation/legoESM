@@ -205,6 +205,14 @@ KNOWN DIFFERENCES, kept:
   Lower floors are worse (0.01 to 0.95, measured).
   Float64: 8e-9.
 
+Gas optics run once for all g-points before the spectral loop (jax-rrtmgp 537d97e):
+g-point-independent interpolation once per cell, row gathers over the g-point axis.
+Against the former per-g-point lookup, 4096 columns, 32 layers, float32, clouds, A100,
+16 g-points per block: forward 65.1 to 32.3 ms, gradient 221.7 to 95.9 ms, peak 2.17
+to 1.70 GB, compile 10 to 42 s.  CPU node, 2048 columns, one g-point at a time: 4254
+to 1227 ms.  Stage by stage the two agreed to 1e-12 relative (float64) before the old
+path was removed.
+
 OPEN: cloud tables are v1.8.2 (pinned by `test_rrtmgp_cloud_optics_oracle.py`);
 against the latest tables they cost up to 2.4 W/m2 SW (0.47 rms) and 1.5 W/m2 LW.
 LW solver is two-stream; upstream's default is no-scattering one-angle (OLR 0.46,

@@ -1,8 +1,4 @@
-"""Time one RRTMGP solve, optionally with gas-optics stages stubbed out.
-
-The stubbed runs give garbage fluxes; only their time is meaningful. Total minus
-stubbed time is what that stage costs.
-"""
+"""Time one RRTMGP solve, forward and optionally reverse mode."""
 import argparse
 import json
 import subprocess
@@ -14,26 +10,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
 from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig  # noqa: E402
-from legoesm.atmosphere.physics.radiation.rrtmgp.optics import gas_optics  # noqa: E402
 from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP  # noqa: E402
-
-
-def _stub_od(lookup, vmr_lib, molecules, temperature, p, igpt, vmr_fields=None, **_):
-    return (1e-3 + 1e-6 * igpt) * jnp.ones_like(temperature)
-
-
-def _stub_pf(lookup, vmr_lib, p, temperature, igpt, vmr_fields=None, **_):
-    return (1e-3 + 1e-6 * igpt) * jnp.ones_like(temperature)
-
-
-def ablate(stage):
-    """Replace the named gas-optics stages with a constant-per-g-point stub."""
-    if stage in ("minor", "gas"):
-        gas_optics.compute_minor_optical_depth = _stub_od
-    if stage == "gas":
-        gas_optics.compute_major_optical_depth = _stub_od
-        gas_optics.compute_rayleigh_optical_depth = _stub_od
-        gas_optics.compute_planck_fraction = _stub_pf
 
 
 def inputs(ncol, nlay):
@@ -54,18 +31,14 @@ def main():
     ap.add_argument("--ncol", type=int, default=4096)
     ap.add_argument("--nlay", type=int, default=32)
     ap.add_argument("--batch", type=int, default=16)
-    ap.add_argument("--ablate", choices=("none", "minor", "gas"), default="none")
     ap.add_argument("--reps", type=int, default=10)
-    ap.add_argument("--mode", choices=("per_gpt", "all_gpts"), default="per_gpt")
     ap.add_argument("--no-checkpoint", action="store_true", help="plain g-point scan, as the CPU deck")
     ap.add_argument("--grad", action="store_true", help="also time reverse mode")
     a = ap.parse_args()
-    ablate(a.ablate)
     temperature, kw = inputs(a.ncol, a.nlay)
     solver = RRTMGP.from_legoesm_config(RRTMGPConfig(
         compute_fp32=True, overhead_layer=True, use_scan=True, include_clouds=True,
-        gpoint_batch_size=a.batch, gas_optics_mode=a.mode,
-        gpoint_checkpoint=not a.no_checkpoint))
+        gpoint_batch_size=a.batch, gpoint_checkpoint=not a.no_checkpoint))
     f = jax.jit(lambda t: solver.solve_columns(T=t, sfc_temperature=t[:, -1], **kw).heating_rate)
     t0 = time.time()
     f(temperature).block_until_ready()
