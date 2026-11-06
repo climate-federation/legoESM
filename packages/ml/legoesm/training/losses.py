@@ -344,7 +344,21 @@ def grid_area_weights(grid):
     area = getattr(grid, "area", None)
     if area is not None and jnp.ndim(area) == 3:
         return jnp.asarray(area)
+    if getattr(grid, "areaCell", None) is not None:
+        # MPAS (nCells,) cell areas (user decision Q2/Q7): the 1-D branch of
+        # _lat_weighted_mean weights axis 0, the cell axis of every field.
+        return jnp.asarray(grid.areaCell)
     return None
+
+
+def _mpas_cell_view(carry, mesh):
+    """The scored fields of an MPAS carry with the cell (east, north) wind
+    reconstructed from its edge-normal ``u`` (user decision Q7)."""
+    from types import SimpleNamespace
+
+    from legoesm.grids.voronoi import reconstruct_cell_velocity
+    u, v = reconstruct_cell_velocity(carry.u, mesh)
+    return SimpleNamespace(T=carry.T, u=u, v=v, q_v=carry.q_v, p_s=carry.p_s)
 
 
 # Public alias: the AIMIP lat-lon eval reuses this area-weighting helper
@@ -839,6 +853,16 @@ def combined_loss_terms(
     ``spectral``), as ``(loss, terms)``; ``loss`` is the same value."""
     if lat_weights is None and grid is not None:
         lat_weights = grid_area_weights(grid)
+    if getattr(grid, "edgesOnCell", None) is not None:
+        # MPAS: edge-normal winds -> cell (u, v) on BOTH sides, then the
+        # shared terms.  The carry holds no radiation fluxes and the mesh
+        # has no spherical-harmonic transform.
+        if _any_flux_weight(config) or config.spectral_weight > 0.0:
+            raise ValueError("on the MPAS mesh the loss scores the state only: "
+                             "w_flux_* / w_bias_flux_* and spectral_weight "
+                             "must be 0")
+        pred_carry = _mpas_cell_view(pred_carry, grid)
+        target_carry = _mpas_cell_view(target_carry, grid)
 
     loss, terms = carry_mse_terms(
         pred_carry, target_carry, sigma_full,
