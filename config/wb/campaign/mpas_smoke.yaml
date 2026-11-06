@@ -8,6 +8,10 @@
 #     --training-core mpas --mode neural_gcm --out <dir>
 grid: "mpas"
 mpas_level: 4
+# Convection named, not defaulted (user 2026-11-06): the MPAS default
+# (zhang_mcfarlane) needs land, and this core's terrain is all ocean, so a
+# defaulted run stops at setup.  "sbm" is what this deck ran before.
+convection: "sbm"
 nlev: 8
 dt: 300.0
 radiation: "rrtmgp"

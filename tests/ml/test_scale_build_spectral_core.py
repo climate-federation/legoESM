@@ -615,14 +615,17 @@ def test_physics_mode_without_a_named_convection_resolves_to_zm_and_records_it(
 def test_latlon_run_without_a_named_convection_is_refused():
     """The lat-lon lane has no convection default: Zhang-McFarlane is refused
     there, and the scheme shapes the carry in every mode."""
+    from types import SimpleNamespace
+
     from legoesm.training.scale_build import build_latlon_config
 
     yml = {"n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0,
            "radiation": "rrtmgp"}
+    cfg = SimpleNamespace(mode="neural_gcm", training_core="latlon",
+                          smoke=False, multi_step_hours=(6, 12))
     with pytest.raises(ValueError, match="needs a named convection scheme"):
-        build_latlon_config(_cfg("neural_gcm"), yml)
-    assert build_latlon_config(_cfg("neural_gcm"),
-                               dict(yml, convection="sbm")).convection == "sbm"
+        build_latlon_config(cfg, yml)
+    assert build_latlon_config(cfg, dict(yml, convection="sbm")).convection == "sbm"
 
 
 def test_mpas_run_without_a_named_convection_resolves_to_zm_and_records_it():
