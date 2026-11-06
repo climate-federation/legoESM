@@ -104,10 +104,11 @@ def test_tables_are_the_ones_the_gaps_were_measured_on():
 
 _TABLES = {'rrtmgp-gas-lw-g128.nc': '77c39fc74e5cddf3', 'rrtmgp-gas-sw-g112.nc': '74f699d147cd5074'}
 # [W/m2], worst level of 20 columns, measured 2026-11-06.  Attributed by
-# scripts/validate/oracle/rrtmgp_faithfulness/ifs_gap_attribution.py: SW is the trace
-# gases IFS omits, LW also the level temperature (CAM's recipe against IFS's); with
-# both matched the gaps are 0.02 LW and 0.002 SW.  ecRad's solvers against RTE on the
-# same optics: 5e-4 LW, 4e-7 SW.
+# scripts/validate/oracle/rrtmgp_faithfulness/ifs_gap_attribution.py: predominantly
+# inputs.  SW is co, no2 and the halocarbons this test leaves zero (not separated); LW
+# also the level temperature (CAM's recipe against IFS's).  With those and gravity
+# matched the gaps are 0.02 LW and 0.002 SW.  ecRad's solvers against RTE on the same
+# optics: 5e-4 LW, 4e-7 SW.
 _GAPS = dict(lw_up=3.7, lw_dn=4.5, sw_up=0.72, sw_dn=0.86)
 
 

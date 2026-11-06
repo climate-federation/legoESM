@@ -1,8 +1,8 @@
 """Attribute the IFS lane's clear-sky gap to the RRTMGP solve.
 
 ``main``: ecRad solvers against our RTE solver on the SAME gas optics, which isolates
-the solver.  ``ablations``: removes one input difference at a time, cumulatively.
-Run one per process: the ablations rebind module constants.
+the solver.  ``ablations``: removes one input difference at a time, cumulatively, by
+rebinding module constants, so it runs last.
 """
 import importlib.util
 import sys
