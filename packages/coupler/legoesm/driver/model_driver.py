@@ -15592,12 +15592,13 @@ class ModelDriver:
             return (_ts, jnp.asarray(_sh, dtype=_dt_), _lh,
                     _lh / latent_heat_vaporization(_ts))
 
+        _land_presc_day = None
         if _land_presc_on:
             # Seed so the very first step already blends the prescribed land
             # (the interactive tile has a one-step bootstrap lag instead).
+            _land_presc_day = int(np.floor(_DAY_ORIGIN + start_step * DT / 86400.0))
             (_land_T_skin, _land_shflx_cells, _land_lhflx_cells,
-             _land_evap_cells) = _presc_land_arrays(
-                _DAY_ORIGIN + start_step * DT / 86400.0)
+             _land_evap_cells) = _presc_land_arrays(float(_land_presc_day))
 
         for step in range(n_steps_total):
             if step in _trace_edges:
@@ -16092,11 +16093,13 @@ class ModelDriver:
             # no host sync; its skin T enters next step's forcing blend above.
             # Skipped (state held) only until the first radiation solve
             # populates the downwelling export.
-            if _land_presc_on:
-                # Prescribed land: refresh the three channels for the NEXT
-                # step's blend (same one-step lag as the interactive tile).
+            if _land_presc_on and int(np.floor(_force_day)) != _land_presc_day:
+                # Prescribed land: refresh the three channels ONCE PER
+                # SIMULATED DAY (a monthly climatology resolves nothing finer;
+                # a per-step host refresh measured 108 vs 61 s/day at 2 deg).
+                _land_presc_day = int(np.floor(_force_day))
                 (_land_T_skin, _land_shflx_cells, _land_lhflx_cells,
-                 _land_evap_cells) = _presc_land_arrays(_force_day)
+                 _land_evap_cells) = _presc_land_arrays(float(_land_presc_day))
             if _land_ml_on:
                 _a2s = _marshal_land_forcing()
                 if _a2s is not None:
