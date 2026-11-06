@@ -6214,3 +6214,15 @@ def test_land_prescribed_flux_file_refuses_the_land_tile():
         "--use-multilayer-land", "--land-mask-file", "/x/mask.nc"]), parser))
     with pytest.raises(ValueError, match="replaces the land tile"):
         cfg.validate_strict()
+
+
+def test_land_prescribed_channels_round_trip_and_membership():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-prescribed-flux-file", "/x/presc.nc",
+        "--land-prescribed-channels", "ts_fluxes"]), parser))
+    assert cfg.land_prescribed_channels == "ts_fluxes"
+    assert build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical"]), parser)).land_prescribed_channels == "ts"
+    with pytest.raises(ValueError, match="land_prescribed_channels"):
+        cfg._replace(land_prescribed_channels="fluxes_only").validate_strict()

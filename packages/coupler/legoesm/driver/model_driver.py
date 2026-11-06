@@ -13390,14 +13390,18 @@ class ModelDriver:
         # interactive tile, so the flux keys are consumed, not refused.
         _land_presc_path = str(getattr(cfg, "land_prescribed_flux_file", "") or "")
         _land_presc_on = bool(_land_presc_path)
+        _land_presc_fluxes = (_land_presc_on and str(getattr(
+            cfg, "land_prescribed_channels", "ts")) == "ts_fluxes")
         self._land_presc = None
         if _land_presc_on:
             from legoesm.forcing.prescribed_land import load_prescribed_land
             self._land_presc = load_prescribed_land(_land_presc_path, self.grid)
             logger.info(
-                "  Prescribed land: %s (%d anchors; land fraction blends ts, "
-                "hfss, hfls over land; no land tile)",
-                _land_presc_path, int(self._land_presc.times_doy.size))
+                "  Prescribed land: %s (%d anchors; land fraction blends the "
+                "skin temperature%s; no land tile)",
+                _land_presc_path, int(self._land_presc.times_doy.size),
+                " and the file's sensible/latent fluxes" if _land_presc_fluxes
+                else "; land fluxes from the bulk scheme against it")
         _land_lapse_K_m = (
             float(getattr(cfg, "land_lapse_K_per_km", 0.0)) * 1.0e-3)
         _f_land_cells = None
@@ -13584,7 +13588,7 @@ class ModelDriver:
                                 f_land=(_f_land_cells
                                         if (_land_beta != 1.0
                                             or _land_beta_soil_on
-                                            or _land_presc_on)
+                                            or _land_presc_fluxes)
                                         else None),
                                 land_beta=_land_beta,
                                 budget_ledger=_budget_ledger_on,
@@ -15588,6 +15592,8 @@ class ModelDriver:
             _ts, _sh, _lh = prescribed_land_at_day(self._land_presc, float(_day))
             _dt_ = self.state.p_s.data.dtype
             _ts = jnp.asarray(_ts, dtype=_dt_)
+            if not _land_presc_fluxes:
+                return _ts, None, None, None
             _lh = jnp.asarray(_lh, dtype=_dt_)
             return (_ts, jnp.asarray(_sh, dtype=_dt_), _lh,
                     _lh / latent_heat_vaporization(_ts))

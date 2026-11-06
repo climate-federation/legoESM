@@ -1817,6 +1817,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Replaces the land tile through the same T_sfc / "
                              "shflx_land / lhflx_land channels; requires "
                              "--no-use-multilayer-land and a land fraction.")
+    parser.add_argument("--land-prescribed-channels", type=str,
+                        choices=["ts", "ts_fluxes"],
+                        default=_EXPERIMENT_DEFAULTS.land_prescribed_channels,
+                        dest="land_prescribed_channels",
+                        help="With --land-prescribed-flux-file: 'ts' (default) "
+                             "prescribes the land skin temperature only and lets "
+                             "the bulk scheme compute the land fluxes against it "
+                             "(surface-air feedback kept, as AMIP SST); "
+                             "'ts_fluxes' also prescribes the file's sensible and "
+                             "latent heat fluxes (no feedback: winter continental "
+                             "air drifts cold, measured 2026-11-06).")
     parser.add_argument("--use-multilayer-land", default=False,
                         action=argparse.BooleanOptionalAction,
                         help="Replace the slab land tile with the differentiable "
@@ -3134,6 +3145,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_snow_tau_days=args.land_snow_tau_days,
         land_dry_soil_albedo_boost=args.land_dry_soil_albedo_boost,
         land_prescribed_flux_file=args.land_prescribed_flux_file,
+        land_prescribed_channels=args.land_prescribed_channels,
         land_soil_freeze_thaw=args.land_soil_freeze_thaw,
         land_snow_scheme=args.land_snow_scheme,
         land_snow_emissivity=args.land_snow_emissivity,
