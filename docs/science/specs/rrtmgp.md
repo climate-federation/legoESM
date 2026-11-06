@@ -213,6 +213,14 @@ to 1.70 GB, compile 10 to 42 s.  CPU node, 2048 columns, one g-point at a time: 
 to 1227 ms.  Stage by stage the two agreed to 1e-12 relative (float64) before the old
 path was removed.
 
+The ecRad IFS lane takes these gas optics too (user 2026-11-06; RRTMG deleted):
+`ecrad_ifs/gas_optics.py`, tables g128/g112.  ecRad's solvers, cloud optics and McICA
+stay and keep their 49r1 Fortran tests; the lane no longer matches 49r1 end to end.
+Cloud optics stay on RRTMG bands: LW index to index, SW band b to (b - 1) mod 14.
+Clear-sky gap to the RRTMGP solve, not attributed between solver, gas preparation and
+level temperature: LW 3.6 up, 4.4 down near the surface, 0.6 at TOA; SW 0.71 up, 0.85
+down (W/m2, worst of 20 columns; `tests/atmosphere/test_ecrad_ifs_rrtmgp_gas.py`).
+
 OPEN: cloud tables are v1.8.2 (pinned by `test_rrtmgp_cloud_optics_oracle.py`);
 against the latest tables they cost up to 2.4 W/m2 SW (0.47 rms) and 1.5 W/m2 LW.
 LW solver is two-stream; upstream's default is no-scattering one-angle (OLR 0.46,

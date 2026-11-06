@@ -69,8 +69,6 @@ import jax.numpy as jnp
 from legoesm.atmosphere.physics.radiation.ecrad_ifs._libm import exp_libm
 from legoesm.atmosphere.physics.radiation.ecrad_ifs.mcica_generator import step_pos
 from legoesm.atmosphere.physics.radiation.ecrad_ifs.mcica_solvers import (
-    band_from_g_lw,
-    band_from_g_sw,
     den_floor,
     fluxes_no_scattering_lw,
     guarded_div,
@@ -551,11 +549,10 @@ def _solver_sw_column(od, ssa, g, od_cloud, ssa_cloud, g_cloud, albedo_direct, a
 
 def solver_tripleclouds_lw(od, od_cloud, ssa_cloud, g_cloud, planck_hl, emission, albedo,
                            cloud_fraction, fractional_std, overlap_param, *,
-                           cloud_fraction_threshold, decorrelation_scaling, sharpness=100.0):
+                           band, cloud_fraction_threshold, decorrelation_scaling, sharpness=100.0):
     """solver_tripleclouds_lw.  Shapes: od (ncol, nlev, 140); *_cloud (ncol, nlev, 16);
     planck_hl (ncol, nlev+1, 140); emission/albedo (ncol, 140); cloud_fraction,
     fractional_std (ncol, nlev); overlap_param (ncol, nlev-1)."""
-    band = band_from_g_lw()
     f = lambda *a: _solver_lw_column(*a, cloud_fraction_threshold,  # noqa: E731
                                      decorrelation_scaling, sharpness, band)
     return jax.vmap(f)(od, od_cloud, ssa_cloud, g_cloud, planck_hl, emission, albedo,
@@ -564,13 +561,12 @@ def solver_tripleclouds_lw(od, od_cloud, ssa_cloud, g_cloud, planck_hl, emission
 
 def solver_tripleclouds_sw(od, ssa, g, od_cloud, ssa_cloud, g_cloud, albedo_direct,
                            albedo_diffuse, incoming_sw, cos_sza, cloud_fraction,
-                           fractional_std, overlap_param, *, cloud_fraction_threshold,
+                           fractional_std, overlap_param, *, band, cloud_fraction_threshold,
                            decorrelation_scaling, sharpness=100.0):
     """solver_tripleclouds_sw.  Shapes as solver_tripleclouds_lw with ng = 112 and
     14 bands; albedos and incoming_sw (ncol, 112); cos_sza (ncol,).  Returns the
     broadband profiles, the g-point surface fluxes (input of
     :func:`.mcica_solvers.surface_spectral_sw`) and cloud_cover_sw."""
-    band = band_from_g_sw()
     f = lambda *a: _solver_sw_column(*a, cloud_fraction_threshold,  # noqa: E731
                                      decorrelation_scaling, sharpness, band)
     return jax.vmap(f)(od, ssa, g, od_cloud, ssa_cloud, g_cloud, albedo_direct, albedo_diffuse,
