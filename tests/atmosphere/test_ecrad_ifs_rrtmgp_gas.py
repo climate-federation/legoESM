@@ -2,9 +2,10 @@
 
 The clear-sky reference is the lane-independent RRTMGP solve, itself held to the
 RTE Fortran in test_rrtmgp_rte_oracle.py, on that test's RFMIP columns.  Both share
-the gas tables, so the gaps pinned here are ecRad's solvers and gas preparation.
+the gas tables, so the gaps pinned here are the inputs each lane prepares.
 """
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 
@@ -102,14 +103,16 @@ def test_tables_are_the_ones_the_gaps_were_measured_on():
 
 
 _TABLES = {'rrtmgp-gas-lw-g128.nc': '77c39fc74e5cddf3', 'rrtmgp-gas-sw-g112.nc': '74f699d147cd5074'}
-# [W/m2], worst level of 20 columns, measured 2026-11-06.  Solvers, gas preparation
-# and level temperature all differ here; not attributed between them.  LW peaks one
-# level above the surface (0.60 at TOA), SW up at TOA, SW down at the surface.
+# [W/m2], worst level of 20 columns, measured 2026-11-06.  Attributed by
+# scripts/validate/oracle/rrtmgp_faithfulness/ifs_gap_attribution.py: SW is the trace
+# gases IFS omits, LW also the level temperature (CAM's recipe against IFS's); with
+# both matched the gaps are 0.02 LW and 0.002 SW.  ecRad's solvers against RTE on the
+# same optics: 5e-4 LW, 4e-7 SW.
 _GAPS = dict(lw_up=3.7, lw_dn=4.5, sw_up=0.72, sw_dn=0.86)
 
 
-@pytest.fixture(scope="module")
-def clear():
+def clear_sky_inputs():
+    """ecRad's and the RRTMGP solve's arguments for the RFMIP columns, and the latter's result."""
     z = np.load(_FIX)
     ghg = json.loads(str(z["ghg"]))
     a = lambda k: jnp.asarray(z[k])  # noqa: E731
@@ -132,7 +135,7 @@ def clear():
     ncol, nlev = q.shape
     zero = jnp.zeros_like(q)
     ulw, usw = ecrad.draw_uniforms(jnp.arange(ncol), nlev)
-    out = ecrad.radiation(
+    args = dict(
         pressure_hl=ph, temperature_hl=th, gas_mmr=gas, skin_temperature=a("tsfc"), cos_sza=a("mu0"),
         solar_irradiance=float(z["s0"]), sw_albedo=jnp.tile(a("alb")[:, None], (1, 6)),
         sw_albedo_direct=jnp.tile(a("alb")[:, None], (1, 6)),
@@ -140,7 +143,13 @@ def clear():
         q_ice=zero, re_liquid=zero + 1e-5, re_ice=zero + 4e-5,
         overlap_param=jnp.ones((ncol, nlev - 1)), fractional_std=zero,
         uniforms_lw=ulw, uniforms_sw=usw, sharpness=np.inf)
-    return out, ref
+    return args, ref
+
+
+@pytest.fixture(scope="module")
+def clear():
+    args, ref = clear_sky_inputs()
+    return ecrad.radiation(**args), ref
 
 
 @pytest.mark.parametrize("name,ecrad_key,ref_key", [
@@ -153,3 +162,13 @@ def test_clear_sky_gap_to_rrtmgp_is_as_recorded(clear, name, ecrad_key, ref_key)
     k = int(np.unravel_index(np.abs(d).argmax(), d.shape)[1])
     print(f"GAP {name} max {gap:.4e} level {k}/{d.shape[1]-1} rms {np.sqrt((d**2).mean()):.4e}")
     assert gap <= _GAPS[name]
+
+
+def test_gap_attribution_probe_reorders_to_surface_first():
+    spec = importlib.util.spec_from_file_location(
+        "ifs_gap_attribution",
+        Path(__file__).parents[2] / "scripts/validate/oracle/rrtmgp_faithfulness/ifs_gap_attribution.py")
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    a = np.arange(6.0).reshape(1, 3, 2)  # (ncol, nlev, ng), top-down
+    np.testing.assert_array_equal(probe._sfc_first(a)[0, 0], [4.0, 2.0, 0.0])

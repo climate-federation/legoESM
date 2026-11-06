@@ -217,9 +217,11 @@ The ecRad IFS lane takes these gas optics too (user 2026-11-06; RRTMG deleted):
 `ecrad_ifs/gas_optics.py`, tables g128/g112.  ecRad's solvers, cloud optics and McICA
 stay and keep their 49r1 Fortran tests; the lane no longer matches 49r1 end to end.
 Cloud optics stay on RRTMG bands: LW index to index, SW band b to (b - 1) mod 14.
-Clear-sky gap to the RRTMGP solve, not attributed between solver, gas preparation and
-level temperature: LW 3.6 up, 4.4 down near the surface, 0.6 at TOA; SW 0.71 up, 0.85
-down (W/m2, worst of 20 columns; `tests/atmosphere/test_ecrad_ifs_rrtmgp_gas.py`).
+Clear-sky gap to the RRTMGP solve, worst of 20 columns: LW 3.6 up, 4.4 down near the
+surface, 0.6 at TOA; SW 0.71 up, 0.85 down (W/m2).  All of it is inputs: the trace gases
+IFS omits (co, no2, halocarbons) and CAM's level temperature against IFS's.  With both
+matched: 0.02 LW, 0.002 SW.  ecRad's solvers against RTE on the same gas optics: 5e-4 LW,
+4e-7 SW (`scripts/validate/oracle/rrtmgp_faithfulness/ifs_gap_attribution.py`).
 
 OPEN: cloud tables are v1.8.2 (pinned by `test_rrtmgp_cloud_optics_oracle.py`);
 against the latest tables they cost up to 2.4 W/m2 SW (0.47 rms) and 1.5 W/m2 LW.
