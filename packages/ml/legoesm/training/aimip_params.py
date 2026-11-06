@@ -1166,12 +1166,21 @@ def aimip_inactive_fields(*, cloud_scheme: str, microphysics: str, gwd: str,
     )
     from legoesm.core.param_overrides import apply_param_overrides
 
-    pins = (param_fixed or {}).get("atm.micro.MorrisonConfig", {})
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+
+    fixed = param_fixed or {}
+    pins = fixed.get("atm.micro.MorrisonConfig", {})
     probe = PhysicsConfig(
         microphysics=MicrophysicsConfig(
             scheme=microphysics,
             morrison=apply_param_overrides(MorrisonConfig(), dict(pins))),
-        gravity_wave_drag=GravityWaveDragConfig(scheme=gwd))
+        gravity_wave_drag=GravityWaveDragConfig(scheme=gwd),
+        radiation=RadiationConfig(cloud_config=apply_param_overrides(
+            CloudConfig(scheme=cloud_scheme),
+            dict(fixed.get("atm.clouds.CloudConfig", {})))),
+        turbulence=TurbulenceConfig(clubb=apply_param_overrides(
+            CLUBBConfig(), dict(fixed.get("atm.turb.CLUBBConfig", {})))))
     return (_INACTIVE_FIELDS_BY_CLOUD_SCHEME.get(cloud_scheme, frozenset())
             | resolved_inactive_fields(
                 probe, subgrid_orography=subgrid_orography))
@@ -1195,6 +1204,33 @@ def resolved_inactive_fields(physics_config, *,
     * McFarlane ``h_topo``: the scalar fallback height, read only when no
       per-column subgrid-orography field is wired (mcfarlane.py).
       ``subgrid_orography`` = the driver wired one (production: SSO file).
+
+    Morrison, on the config AFTER ``resolve_morrison_flavor`` (what
+    ``morrison_microphysics`` runs; gate 2026-11-06, codex + GLM reviewed):
+
+    * ``lami_max``/``rho_snow``/``snow_aggregation_eii``: overwritten by the
+      ``morrison_flavor == "mg"`` resolver, so a trained value never arrives.
+    * ``rain_breakup_d0``/``rain_breakup_steepness``/``rain_selfcoll_k``: only
+      ``rain_selfcoll_scheme == "sb2001"``; ``D_eq``/``k_sc``: only ``"legacy"``.
+    * ``evap_coeff``: only ``rain_evap_scheme == "bulk"``.
+    * ``a_v_i``/``b_v_i``: only ``fall_speed_scheme == "bulk_qpower"``.
+    * ``dep_coeff``: only ``ice_deposition_scheme == "heuristic"``.
+    * ``bergeron_rate``/``T_center``/``T_width``: only
+      ``wbf_scheme == "bergeron_heuristic"``.
+    * ``agg_coeff``: only ``ice_to_snow_scheme == "heuristic"``.
+    * ``hard_sat_adjust_threshold``/``hard_sat_max_heating_K``: only with
+      ``hard_saturation_adjustment`` (kept trainable whenever it is on: the
+      MPAS driver's post-step drain reads them regardless of
+      ``liquid_from_closure``).
+
+    Clouds (``radiation.cloud_config``): ``alpha_xr``/``gamma_xr``/``p_xr``
+    only ``scheme == "xu_randall"``; ``q_cloud_resolved_ref`` only
+    ``"resolved"``; ``conv_cloud_coeff``/``conv_cloud_max``/
+    ``conv_precip_scale`` only ``convective_cloud`` with a Sundqvist or
+    Xu-Randall scheme (cloud_fraction.py).
+
+    CLUBB (``turbulence.clubb``): ``pdf_variance_scale`` only by the
+    diagnostic closure, never with ``prognostic``.
     """
     out = set()
     micro = getattr(physics_config, "microphysics", None)
@@ -1206,6 +1242,46 @@ def resolved_inactive_fields(physics_config, *,
             and micro.morrison.warm_rain_scheme not in _KK2000_WARM_RAIN):
         out |= {f"atm.micro.MorrisonConfig.{f}"
                 for f in ("autocon_fact", "accre_enhan_fact")}
+    if getattr(micro, "scheme", None) == "morrison":
+        from legoesm.atmosphere.physics.microphysics.morrison import (
+            resolve_morrison_flavor,
+        )
+        m = resolve_morrison_flavor(micro.morrison)
+        mor = "atm.micro.MorrisonConfig."
+        dead = []
+        if micro.morrison.morrison_flavor == "mg":
+            dead += ["lami_max", "rho_snow", "snow_aggregation_eii"]
+        if m.rain_selfcoll_scheme != "sb2001":
+            dead += ["rain_breakup_d0", "rain_breakup_steepness", "rain_selfcoll_k"]
+        if m.rain_selfcoll_scheme != "legacy":
+            dead += ["D_eq", "k_sc"]
+        if m.rain_evap_scheme != "bulk":
+            dead += ["evap_coeff"]
+        if m.fall_speed_scheme != "bulk_qpower":
+            dead += ["a_v_i", "b_v_i"]
+        if m.ice_deposition_scheme != "heuristic":
+            dead += ["dep_coeff"]
+        if m.wbf_scheme != "bergeron_heuristic":
+            dead += ["bergeron_rate", "T_center", "T_width"]
+        if m.ice_to_snow_scheme != "heuristic":
+            dead += ["agg_coeff"]
+        if not m.hard_saturation_adjustment:
+            dead += ["hard_sat_adjust_threshold", "hard_sat_max_heating_K"]
+        out |= {mor + f for f in dead}
+    cloud = getattr(getattr(physics_config, "radiation", None), "cloud_config", None)
+    if cloud is not None:
+        cl = "atm.clouds.CloudConfig."
+        if cloud.scheme != "xu_randall":
+            out |= {cl + f for f in ("alpha_xr", "gamma_xr", "p_xr")}
+        if cloud.scheme != "resolved":
+            out.add(cl + "q_cloud_resolved_ref")
+        if not (cloud.convective_cloud
+                and cloud.scheme in ("sundqvist", "xu_randall")):
+            out |= {cl + f for f in ("conv_cloud_coeff", "conv_cloud_max",
+                                     "conv_precip_scale")}
+    clubb = getattr(getattr(physics_config, "turbulence", None), "clubb", None)
+    if clubb is not None and clubb.prognostic:
+        out.add("atm.turb.CLUBBConfig.pdf_variance_scale")
     gwd = getattr(physics_config, "gravity_wave_drag", None)
     if subgrid_orography and "mcfarlane" in str(
             getattr(gwd, "scheme", "")).split("+"):

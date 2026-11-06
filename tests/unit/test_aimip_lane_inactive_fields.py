@@ -36,19 +36,103 @@ def _load(name, rel):
     return mod
 
 
+# Option-unread knobs of the default Morrison (mg flavor) and of any cloud
+# scheme other than xu_randall / resolved without convective cloud (gate
+# 2026-11-06; one rule each, forced-option tests below).
+_MOR_DEFAULT = {"atm.micro.MorrisonConfig." + f for f in (
+    "lami_max", "rho_snow", "snow_aggregation_eii", "rain_breakup_d0",
+    "rain_breakup_steepness", "rain_selfcoll_k", "D_eq", "k_sc", "evap_coeff",
+    "a_v_i", "b_v_i", "dep_coeff", "bergeron_rate", "T_center", "T_width",
+    "agg_coeff", "hard_sat_adjust_threshold", "hard_sat_max_heating_K")}
+_CL = "atm.clouds.CloudConfig."
+_CONV = {_CL + f for f in ("conv_cloud_coeff", "conv_cloud_max", "conv_precip_scale")}
+_XR = {_CL + f for f in ("alpha_xr", "gamma_xr", "p_xr")}
+_RES = {_CL + "q_cloud_resolved_ref"}
+
+
 def test_helper_follows_scheme_pins_and_orography():
     kw = dict(cloud_scheme="cam6_clubb", microphysics="morrison",
               gwd="mcfarlane")
-    cloud = ap._INACTIVE_FIELDS_BY_CLOUD_SCHEME["cam6_clubb"]
+    cloud = ap._INACTIVE_FIELDS_BY_CLOUD_SCHEME["cam6_clubb"] | _CONV | _XR | _RES
     assert ap.aimip_inactive_fields(**kw, subgrid_orography=False) == (
-        cloud | _SB)
+        cloud | _SB | _MOR_DEFAULT)
     assert ap.aimip_inactive_fields(**kw, subgrid_orography=True) == (
-        cloud | _SB | {_HTOPO})
+        cloud | _SB | _MOR_DEFAULT | {_HTOPO})
     assert ap.aimip_inactive_fields(**kw, subgrid_orography=False,
-                                    param_fixed=_PIN_SB) == cloud | _KK
+                                    param_fixed=_PIN_SB) == cloud | _KK | _MOR_DEFAULT
     assert ap.aimip_inactive_fields(
         cloud_scheme="xu_randall", microphysics="sundqvist", gwd="none",
-        subgrid_orography=True) == frozenset()
+        subgrid_orography=True) == _CONV | _RES
+
+
+def _inactive(micro=None, cloud=None, clubb=None, cloud_scheme="cam6_clubb"):
+    fixed = {k: v for k, v in (("atm.micro.MorrisonConfig", micro),
+                               ("atm.clouds.CloudConfig", cloud),
+                               ("atm.turb.CLUBBConfig", clubb)) if v}
+    return ap.aimip_inactive_fields(cloud_scheme=cloud_scheme,
+                                    microphysics="morrison", gwd="none",
+                                    subgrid_orography=False, param_fixed=fixed)
+
+
+# (pins that select the reading option, fields that option reads); each must
+# be inactive at the defaults and active once its option is selected.
+_READERS = [
+    ({"morrison_flavor": "sam"}, ("lami_max", "rho_snow", "snow_aggregation_eii")),
+    ({"morrison_flavor": "sam"}, ("rain_breakup_d0", "rain_breakup_steepness",
+                                  "rain_selfcoll_k")),
+    ({"rain_selfcoll_scheme": "legacy"}, ("D_eq", "k_sc")),
+    ({"rain_evap_scheme": "bulk"}, ("evap_coeff",)),
+    ({"fall_speed_scheme": "bulk_qpower"}, ("a_v_i", "b_v_i")),
+    ({"ice_deposition_scheme": "heuristic"}, ("dep_coeff",)),
+    ({"wbf_scheme": "bergeron_heuristic"}, ("bergeron_rate", "T_center", "T_width")),
+    ({"morrison_flavor": "sam", "ice_to_snow_scheme": "heuristic"}, ("agg_coeff",)),
+    ({"hard_saturation_adjustment": True}, ("hard_sat_adjust_threshold",
+                                            "hard_sat_max_heating_K")),
+]
+
+
+@pytest.mark.parametrize("pins,fields", _READERS)
+def test_a_morrison_knob_trains_once_its_option_is_selected(pins, fields):
+    names = {"atm.micro.MorrisonConfig." + f for f in fields}
+    assert names <= _inactive()
+    assert not names & _inactive(micro=pins)
+
+
+def test_the_mg_resolver_decides_ice_to_snow_and_self_collection():
+    # mg overwrites ice_to_snow_scheme, so "heuristic" alone does not revive
+    # agg_coeff; an explicit "legacy" self-collection survives the resolver.
+    assert "atm.micro.MorrisonConfig.agg_coeff" in _inactive(
+        micro={"ice_to_snow_scheme": "heuristic"})
+    assert not {"atm.micro.MorrisonConfig.D_eq"} & _inactive(
+        micro={"rain_selfcoll_scheme": "legacy"})
+
+
+def test_cloud_knobs_follow_the_cloud_options():
+    assert not _XR & _inactive(cloud_scheme="xu_randall")
+    assert not _RES & _inactive(cloud_scheme="resolved")
+    assert _CONV <= _inactive(cloud_scheme="xu_randall")
+    assert not _CONV & _inactive(cloud_scheme="xu_randall",
+                                 cloud={"convective_cloud": True})
+    assert _CONV <= _inactive(cloud_scheme="resolved",
+                              cloud={"convective_cloud": True})
+
+
+def test_pdf_variance_scale_is_dead_only_with_prognostic_clubb():
+    n = "atm.turb.CLUBBConfig.pdf_variance_scale"
+    assert n not in _inactive()
+    assert n in _inactive(clubb={"prognostic": True})
+
+
+def test_the_wb_cam6_deck_excludes_the_option_unread_knobs():
+    import yaml
+
+    deck = yaml.safe_load(open(ROOT / "config/wb/campaign/spectral_t63_cam6_tier3_v9.yaml"))
+    fixed = deck["classical"]["param_fixed"]
+    got = ap.aimip_inactive_fields(cloud_scheme="cam6_clubb", microphysics="morrison",
+                                   gwd="mcfarlane", subgrid_orography=True,
+                                   param_fixed=fixed)
+    assert _MOR_DEFAULT | _CONV | _XR | _RES | {
+        "atm.turb.CLUBBConfig.pdf_variance_scale"} <= got
 
 
 def _run_aimip_bundle(monkeypatch):
