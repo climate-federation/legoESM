@@ -26,7 +26,7 @@ VALID_MODES = ("physics", "neural_gcm", "sfno")
 _DEFAULT_LR = 3.0e-4
 _DEFAULT_OPTIMIZER = "adamw"
 _DEFAULT_N_EPOCHS = 40
-VALID_TRAINING_CORES = ("latlon", "spectral")
+VALID_TRAINING_CORES = ("latlon", "spectral", "cubed_sphere")
 
 
 class ScaleConfig(NamedTuple):
@@ -735,7 +735,8 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
                    default="latlon", dest="training_core",
                    help="latlon = explicit C-grid production core; spectral = "
                         "Gaussian semi-implicit training core (#817 blocker 1: "
-                        "bounded adjoint, no pole-cell dt clamp).")
+                        "bounded adjoint, no pole-cell dt clamp); cubed_sphere = "
+                        "CD-grid cube (deck key cube_n).")
     # None = YAML ``n_epochs``, else the historical 40 (same contract as --lr).
     p.add_argument("--epochs", type=int, default=None, dest="n_epochs")
     p.add_argument("--n-days", type=int, default=None, dest="n_days",
@@ -828,6 +829,14 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
     )
 
 
+def _yaml_resolution_deg(cfg, yml) -> float:
+    """Nominal grid spacing [deg] of the deck: 180/n_lat, or 90/cube_n on the
+    cubed sphere (a face spans 90 degrees)."""
+    if getattr(cfg, "training_core", "latlon") == "cubed_sphere":
+        return 90.0 / float(yml["cube_n"])
+    return 180.0 / float(yml["n_lat"])
+
+
 def _check_resolution_matches_yaml(cfg: ScaleConfig, yml: dict) -> float:
     """Resolve the run's resolution [deg] from the YAML grid; reject a
     mismatched explicit ``--resolution`` (the #817 no-op papercut).
@@ -838,14 +847,14 @@ def _check_resolution_matches_yaml(cfg: ScaleConfig, yml: dict) -> float:
     that disagrees by more than 5% is a HARD error — the old behaviour trained
     at the YAML grid while logging the flag's value.
     """
-    derived = 180.0 / float(yml["n_lat"])
+    derived = _yaml_resolution_deg(cfg, yml)
     if cfg.resolution_deg is None:
         return derived
     if abs(cfg.resolution_deg - derived) > 0.05 * derived:
         raise SystemExit(
             f"--resolution {cfg.resolution_deg:g} deg does not match the YAML "
-            f"grid ({yml['n_lat']}x{yml['n_lon']} = {derived:.3g} deg). The "
-            f"grid comes from the YAML; edit n_lat/n_lon (and nlev) there "
+            f"grid ({derived:.3g} deg). The grid comes from the YAML; edit "
+            f"n_lat/n_lon or cube_n (and nlev) there "
             f"instead of passing --resolution.")
     return cfg.resolution_deg
 
@@ -1181,7 +1190,7 @@ def _main(argv=None):
     # Resolution comes FROM the YAML grid; an explicit mismatched --resolution
     # is a hard error, not a silent no-op (#817 papercut). Under --smoke the
     # grid is forced to 32x64, so the derived value is used verbatim.
-    res_deg = (180.0 / float(yml["n_lat"]) if cfg.smoke
+    res_deg = (_yaml_resolution_deg(cfg, yml) if cfg.smoke
                else _check_resolution_matches_yaml(cfg, yml))
     log.info("WB scale train: mode=%s core=%s res=%.2fdeg ranks=%d",
              cfg.mode, cfg.training_core, res_deg, nproc)

@@ -522,8 +522,26 @@ def _validated_wb_radiation(cfg, yml) -> str:
     )
 
 
+def _gridpoint_argv(cfg, yml):
+    """run_amip grid flags for the grid-point training cores: lat-lon C-grid
+    (``n_lat``) or cubed-sphere CD-grid (``cube_n`` cells per face edge)."""
+    core = getattr(cfg, "training_core", "latlon")
+    if core == "latlon":
+        return ["--grid-type", "latlon", "--discretization", "latlon_cgrid",
+                "--resolution", str(int(yml["n_lat"]))]
+    if core == "cubed_sphere":
+        n = yml.get("cube_n")
+        if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
+            raise ValueError("training_core 'cubed_sphere' needs the deck key "
+                             f"cube_n (cells per face edge, int > 0); got {n!r}")
+        return ["--grid-type", "cubed_sphere", "--discretization", "cdgrid",
+                "--resolution", str(n)]
+    raise ValueError(f"no grid-point config for training_core {core!r}")
+
+
 def build_latlon_config(cfg, yml):
-    """ExperimentConfig for a lat-lon C-grid PE run, via run_amip's parser."""
+    """ExperimentConfig for a grid-point PE run (lat-lon C-grid or cubed-sphere
+    CD-grid, per ``cfg.training_core``), via run_amip's parser."""
     ra = _load_run_amip()
     # Pure-dycore WB modes (neural_gcm / sfno) replace the physics pipeline with
     # a neural net -- their rollout runs NO boundary-layer scheme, so the
@@ -542,9 +560,7 @@ def build_latlon_config(cfg, yml):
     _turbulence = ("none" if _mode in ("neural_gcm", "sfno")
                    else yml.get("turbulence", "louis"))
     argv = [
-        "--grid-type", "latlon",
-        "--discretization", "latlon_cgrid",
-        "--resolution", str(int(yml["n_lat"])),
+        *_gridpoint_argv(cfg, yml),
         "--nlev", str(int(yml["nlev"])),
         "--vertical-coord", "sigma",
         "--dt", str(float(yml["dt"])),
@@ -598,7 +614,7 @@ def resolve_training_ice_skin(config):
 # whole campaign (v2 trained at 3e-4 while its deck said 1.5e-3), and a typo
 # like ``learning_rate`` would silently reintroduce exactly that.
 _WB_CONSUMED_TOP_KEYS = frozenset({
-    "classical", "convection", "dt", "ema_decay", "era5_cadence_hours",
+    "classical", "convection", "cube_n", "dt", "ema_decay", "era5_cadence_hours",
     "cache_dir", "era5_cloud_condensate", "era5_cloud_zarr", "era5_flux_zarr",
     "era5_flux_climatology", "era5_soil_moisture", "era5_surface_fluxes",
     "era5_sea_ice_climatology",
@@ -1529,11 +1545,20 @@ def build_mode_components(cfg, yml, column_mesh=None):
     if _spectral_only:
         raise ValueError(f"{_spectral_only} are built only on the spectral "
                          f"training core; this run uses {core!r}.")
-    if core != "latlon":
+    if core not in ("latlon", "cubed_sphere"):
         raise ValueError(
             f"unknown training_core {core!r}; choose 'latlon' (explicit "
-            f"C-grid production core) or 'spectral' (Gaussian semi-implicit "
-            f"training core, #817)")
+            f"C-grid production core), 'cubed_sphere' (CD-grid) or "
+            f"'spectral' (Gaussian semi-implicit training core, #817)")
+    if core == "cubed_sphere":
+        if cfg.mode == "sfno":
+            raise ValueError("mode 'sfno' is built only on the lat-lon and "
+                             "spectral cores (its coupling regrids lat-lon <-> "
+                             "Gaussian); not on 'cubed_sphere'.")
+        if float((yml.get("loss") or {}).get("spectral_weight", 0.0)) > 0.0:
+            raise ValueError("loss.spectral_weight > 0 needs a Gaussian grid "
+                             "(spherical-harmonic analysis); not on "
+                             "'cubed_sphere'.")
     config = build_latlon_config(cfg, yml)
     driver = ModelDriver(config)
     driver.setup()
@@ -1946,20 +1971,25 @@ def prescribed_surface_planes(sl, grid):
     """
     import jax.numpy as jnp
 
-    from legoesm.training.era5_to_state import regrid_2d_to_gaussian
+    from legoesm.training.era5_to_state import regrid_2d_to_grid
 
     planes = {}
     if sl.sfc_shf is not None:
+        if np.asarray(grid.grid_lat).ndim != 2:
+            # The stress pair is in the geographic frame; a cube panel needs
+            # it rotated, which this scalar regrid does not do.
+            raise ValueError("ERA5 surface-flux planes are built only on "
+                             "structured (lat-lon / Gaussian) grids.")
         for _key in ("sfc_shf", "sfc_lhf", "sfc_tau_x", "sfc_tau_y",
                      "sfc_sw_up", "sfc_sw_down", "sfc_lw_up"):
-            planes[_key] = jnp.asarray(regrid_2d_to_gaussian(
+            planes[_key] = jnp.asarray(regrid_2d_to_grid(
                 getattr(sl, _key), sl.lat, sl.lon, grid))
     if sl.soil_moisture is not None:
-        planes["soil_moisture"] = jnp.asarray(regrid_2d_to_gaussian(
+        planes["soil_moisture"] = jnp.asarray(regrid_2d_to_grid(
             sl.soil_moisture, sl.lat, sl.lon, grid))
     if sl.land_frac is not None:
         # Static 0..1 mask; interpolation can overshoot, clip back.
-        planes["land_frac"] = jnp.asarray(np.clip(regrid_2d_to_gaussian(
+        planes["land_frac"] = jnp.asarray(np.clip(regrid_2d_to_grid(
             sl.land_frac, sl.lat, sl.lon, grid), 0.0, 1.0))
     return planes
 
@@ -2443,9 +2473,10 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     import jax.numpy as jnp
 
     from legoesm.training.era5_to_state import (
+        era5_to_cubedsphere_carry,
         era5_to_latlon_carry,
         open_era5_zarr,
-        regrid_2d_to_gaussian,
+        regrid_2d_to_grid,
     era5_terrain_product,
 )
     from legoesm.driver.compiled_segments import pack_forcing
@@ -2486,6 +2517,10 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     config = build_latlon_config(cfg, yml)
     driver = _driver_for_ctx(config)
     ctx = driver._prepare_run_context(0, config.start_day, restore_carry=False)
+    # The core's own ERA5 converter (same kwargs on both grid-point cores).
+    _to_carry = (era5_to_cubedsphere_carry
+                 if getattr(cfg, "training_core", "latlon") == "cubed_sphere"
+                 else era5_to_latlon_carry)
 
     # Spectral forcing-dict name -> driver-path (pack_forcing) name for the
     # planes the two lanes name differently; the radiative planes and the
@@ -2503,14 +2538,13 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
             era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at)
         tp = era5_terrain_product(s_ic, grid)
         _skin = bool(config.ice_skin_prognostic)
-        ic = era5_to_latlon_carry(s_ic, grid, sigma, target_phis=tp,
-                                  microphysics=_micro, ice_skin_prognostic=_skin,
-                                  convection=config.convection)
-        target = era5_to_latlon_carry(s_tg, grid, sigma, target_phis=tp,
-                                      microphysics=_micro,
-                                      ice_skin_prognostic=_skin,
-                                      convection=config.convection)
-        sst = regrid_2d_to_gaussian(sst_src.sst, sst_src.lat, sst_src.lon, grid)
+        ic = _to_carry(s_ic, grid, sigma, target_phis=tp,
+                       microphysics=_micro, ice_skin_prognostic=_skin,
+                       convection=config.convection)
+        target = _to_carry(s_tg, grid, sigma, target_phis=tp,
+                           microphysics=_micro, ice_skin_prognostic=_skin,
+                           convection=config.convection)
+        sst = regrid_2d_to_grid(sst_src.sst, sst_src.lat, sst_src.lon, grid)
         # Prescribed surface planes the slice carries (spectral names),
         # regridded exactly like sst, then renamed to the driver-path
         # override names for pack_forcing.

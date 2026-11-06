@@ -1,0 +1,47 @@
+# WB smoke deck for the cubed-sphere (CD-grid) training core: the wiring check
+# the gradient-access gate runs on real ERA5 (C24 ~3.75 deg, 8 levels, gray
+# radiation via --smoke).  Same ERA5 store, window and loss as
+# spectral_smoke.yaml; grid and dt are the cube's.  Grid size voted
+# (Claude + codex + GLM, 2026-11-06).
+#   python scripts/run/train_weatherbench_scale.py --smoke --gate-only \
+#     --config config/wb/campaign/cubed_sphere_smoke.yaml \
+#     --training-core cubed_sphere --mode neural_gcm --out <dir>
+grid: "cubed_sphere"
+cube_n: 24
+nlev: 8
+dt: 300.0
+radiation: "rrtmgp"
+smoke_radiation: "gray"
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/wb_campaign_era5_smoke"
+train_years: [2020]
+era5_surface_fluxes: false
+eval_years: [2021]   # disjoint from train_years: a held-out target year drops every sample
+era5_cadence_hours: 6
+n_training_days: 2
+n_epochs: 1
+optimizer: "adamw"
+lr: 3.0e-4
+warmup_steps: 2
+weight_decay: 1.0e-5
+grad_clip_norm: 1.0
+grad_accum: 1
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.3
+  w_ps: 0.3
+  multi_step_hours: [6]
+  multi_step_weights: [1.0]
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0
+neural_gcm:
+  spatial_embedding: false
+  nn_hidden: 64
+  nn_layers: 2
+  prune_unused_weights: true
+shuffle_seed: 0

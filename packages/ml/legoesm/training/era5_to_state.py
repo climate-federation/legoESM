@@ -2080,21 +2080,9 @@ def era5_terrain_product(era5: ERA5Slice, grid, passes: int = 4):
     the product passes the driver's ``_phis_data`` instead.  Shapes follow
     the grid: ``(6, n, n)`` cube, ``(n_lat, n_lon)`` structured, ``(nCells,)``
     Voronoi."""
-    from legoesm.grids.regridding import regrid_scalar
     from legoesm.grids.topography import neighbour_table, masked_diffusion
-    lat = np.asarray(grid.grid_lat)
-    if lat.ndim == 3:
-        raw = regrid_scalar(jnp.asarray(np.asarray(era5.phis).ravel()),
-                            _get_cs_weights(era5.lat, era5.lon, grid))
-    elif lat.ndim == 2:
-        raw = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
-    else:
-        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
-        w = compute_latlon_to_voronoi_weights(
-            np.asarray(era5.lat), np.asarray(era5.lon),
-            np.asarray(grid.latCell), np.asarray(grid.lonCell))
-        raw = regrid_scalar(jnp.asarray(era5.phis), w)
-    raw = np.asarray(raw, dtype=np.float64)
+    raw = np.asarray(regrid_2d_to_grid(era5.phis, era5.lat, era5.lon, grid),
+                     dtype=np.float64)
     nb, area = neighbour_table(grid)
     out = masked_diffusion(raw.ravel(), np.ones(area.shape), nb, area, passes=passes)
     return jnp.asarray(out.reshape(raw.shape))
@@ -2280,6 +2268,27 @@ def era5_radiation_flux_planes(swd, swn, lwd, lwn, acc):
     """``(sw_up, sw_down, lw_up)``, positive as named, from the ERA5 means:
     ERA5 net = down - up (positive down), so up = down - net."""
     return (swd - swn) / acc, swd / acc, (lwd - lwn) / acc
+
+
+def regrid_2d_to_grid(field_2d, era5_lat, era5_lon, grid):
+    """Regrid a 2-D ERA5 lat-lon scalar field to ``grid``, dispatching on the
+    grid's shape: cubed sphere ``(6, n, n)`` -> the KD-tree weights the
+    cube IC converter uses; structured ``(n_lat, n_lon)`` ->
+    :func:`regrid_2d_to_gaussian`; Voronoi ``(nCells,)`` -> the lat-lon to
+    Voronoi weights.  SCALARS only: a vector component (e.g. a surface
+    stress) is in the geographic frame and needs rotating on the cube."""
+    from legoesm.grids.regridding import regrid_scalar
+    lat = np.asarray(grid.grid_lat)
+    if lat.ndim == 3:
+        return regrid_scalar(jnp.asarray(np.asarray(field_2d).ravel()),
+                             _get_cs_weights(era5_lat, era5_lon, grid))
+    if lat.ndim == 2:
+        return regrid_2d_to_gaussian(field_2d, era5_lat, era5_lon, grid)
+    from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+    w = compute_latlon_to_voronoi_weights(
+        np.asarray(era5_lat), np.asarray(era5_lon),
+        np.asarray(grid.latCell), np.asarray(grid.lonCell))
+    return regrid_scalar(jnp.asarray(field_2d), w)
 
 
 def regrid_2d_to_gaussian(field_2d, era5_lat, era5_lon, grid):

@@ -26,16 +26,43 @@ _spec.loader.exec_module(_mod)
 N_STEPS = 2
 # --smoke only unlocks gray radiation; the grid is set here (32x64x8 lat-lon,
 # T10 spectral as in test_scale_build_spectral_core).
-_YML = {"n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0, "radiation": "gray",
+_YML = {"n_lat": 32, "n_lon": 64, "cube_n": 12, "nlev": 8, "dt": 300.0,
+        "radiation": "gray",
         "spectral": {"n_max": 10, "dt": 1800.0}, "loss": {},
         # as the v9 WB decks: drop network outputs the loss cannot reach
         "neural_gcm": {"prune_unused_weights": True}}
 
 
+def _carry(core, grid, nlev):
+    """Smooth synthetic SegmentCarry (ERA5 stand-in) on the core's grid."""
+    if core != "cubed_sphere":
+        return _synthetic_carry(grid, nlev)
+    import numpy as np
+
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticState
+    from legoesm.driver.compiled_segments import pack_carry
+
+    lat = np.asarray(grid.grid_lat)                 # (6, n, n)
+    s3, prof = lat.shape + (nlev,), np.linspace(0.0, 1.0, nlev)
+    u = jnp.asarray(20.0 * np.cos(lat)[..., None] * (0.4 + 0.6 * prof))
+    T = jnp.asarray(np.broadcast_to(250.0 + 40.0 * prof, s3).copy())
+    q = jnp.asarray(np.broadcast_to(5e-3 * (0.1 + 0.9 * prof), s3).copy())
+    z3, z2 = jnp.zeros(s3), jnp.zeros(lat.shape)
+    state = HydrostaticState(
+        u=Field(u, name="u"), v=Field(z3, name="v"), T=Field(T, name="T"),
+        p_s=Field(jnp.full(lat.shape, 1.0e5), name="p_s"),
+        phis=Field(z2, name="phis"))
+    return pack_carry(state, q_v=q, q_c=z3, q_r=z3, held_dT_rad=z3,
+                      held_sw_net_sfc=z2, held_lw_net_sfc=z2,
+                      held_sw_up_toa=z2, held_lw_up_toa=z2,
+                      held_sw_down_toa=z2, step_index=0)
+
+
 def _forcing(core, cfg, yml, grid, k):
     """The forcing the core's ERA5 loader would hand the segment."""
-    ncol = int(grid.n_lat) * int(grid.n_lon)
     if core == "spectral":
+        ncol = int(grid.n_lat) * int(grid.n_lon)
         # sea ice somewhere: a zero plane makes its input weights dead by
         # construction (as in test_gradient_access_gate_real_model)
         return {"T_sfc": jnp.full((ncol,), 300.0 - k),
@@ -48,10 +75,13 @@ def _forcing(core, cfg, yml, grid, k):
     config = build_latlon_config(cfg, yml)
     driver = _driver_for_ctx(config)
     ctx = driver._prepare_run_context(0, config.start_day, restore_carry=False)
-    sst = jnp.full((int(grid.n_lat), int(grid.n_lon)), 300.0 - k)
+    import numpy as np
+    lat = np.asarray(grid.grid_lat)
+    sst = jnp.full(lat.shape, 300.0 - k)
+    # sea ice poleward of 60 deg (a zero plane = dead input weights)
     return pack_forcing(
-        sst=sst, sic=jnp.where(jnp.arange(sst.shape[0])[:, None] < 4, 0.7, 0.0)
-        * jnp.ones_like(sst), day_of_year=jnp.asarray(80.0 + k),
+        sst=sst, sic=jnp.where(jnp.abs(jnp.asarray(lat)) > np.deg2rad(60.0),
+                               0.7, 0.0), day_of_year=jnp.asarray(80.0 + k),
         seconds_of_day=jnp.asarray(0.0), solar_weights=ctx["solar_weights"],
         s_0=ctx["current_s_0"], o3_vmr=ctx["o3_vmr"],
         aerosol_od=ctx["aerosol_od"],
@@ -59,7 +89,7 @@ def _forcing(core, cfg, yml, grid, k):
 
 
 @pytest.mark.parametrize("core,loss", [
-    ("latlon", {}), ("spectral", {}),
+    ("latlon", {}), ("spectral", {}), ("cubed_sphere", {}),
     # lat-lon writes the network's OLR into the carry the flux loss reads, so
     # a scored OLR keeps that output row, and the gate proves it is live.
     ("latlon", {"w_flux_olr": 1.0}),
@@ -80,7 +110,7 @@ def test_wb_training_step_passes_the_gradient_gate(core, loss):
     f0 = _forcing(core, cfg, yml, grid, 0)
 
     def sample(k):
-        ic = _synthetic_carry(grid, nlev)
+        ic = _carry(core, grid, nlev)
         ic = ic._replace(T=ic.T + 0.5 * k)
         # nonzero OLR target: the zero-initialised network emits 0, and a
         # zero target would make the scored OLR row dead by construction
