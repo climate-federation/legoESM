@@ -1215,12 +1215,15 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
             _cn["learned_position_embedding"] = wb_learned_position_embedding(yml)
         if wb_prune_unused_weights(ov):
             # The output groups the configured loss can reach, nothing more.
-            from legoesm.training.losses import column_outputs_the_loss_reads
+            from legoesm.training.losses import (
+                STATE_TENDENCY_OUTPUTS, column_outputs_the_loss_reads)
             # The spectral column adapter (neural_physics.make_column_physics_fn)
             # returns state tendencies only; the network's flux outputs never
             # reach the carry the flux loss reads.
+            # It also advances only T, q_v and the winds (no condensate).
             _cn["kept_outputs"] = column_outputs_the_loss_reads(
-                make_loss_config(cfg, yml), lane_writes_fluxes=False)
+                make_loss_config(cfg, yml), lane_writes_fluxes=False,
+                lane_prognostics=STATE_TENDENCY_OUTPUTS)
         params = build_variant("column_nn", nlev=nlev, grid=grid, overrides=_cn)
 
         # #1464: the learned arm's only momentum physics is its own wind head,
@@ -1583,12 +1586,26 @@ def build_mode_components(cfg, yml, column_mesh=None):
         # key, era5_surface_fluxes is deck-global (the same key the loader
         # reads); the pos-embed table needs the column count.
         spatial_embedding = bool(ov.get("spatial_embedding", False))
+        kept = None
+        if wb_prune_unused_weights(ov):
+            from legoesm.atmosphere.physics.neural_physics import (
+                COLUMN_OUTPUT_GROUPS)
+            from legoesm.driver.compiled_segments import SegmentCarry
+            from legoesm.training.losses import column_outputs_the_loss_reads
+            # This lane writes the network's fluxes into the carry's held_*
+            # fields (make_neural_step_unified) and advances every column-
+            # output prognostic the SegmentCarry holds (incl. q_c, q_r).
+            kept = column_outputs_the_loss_reads(
+                make_loss_config(cfg, yml), lane_writes_fluxes=True,
+                lane_prognostics=tuple(f for f in SegmentCarry._fields
+                                       if f in COLUMN_OUTPUT_GROUPS))
         params = NeuralPhysics(
             nlev=int(yml["nlev"]), hidden_dim=int(ov.get("nn_hidden", 256)),
             n_layers=int(ov.get("nn_layers", 4)), key=jax.random.PRNGKey(0),
             spatial_embedding=spatial_embedding,
             era5_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
-            n_columns=adapter.ncol if spatial_embedding else None)
+            n_columns=adapter.ncol if spatial_embedding else None,
+            kept_outputs=kept)
 
         def make_run_seg(nn_phys):
             return build_training_segment(

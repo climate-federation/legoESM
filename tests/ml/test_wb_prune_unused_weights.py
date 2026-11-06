@@ -68,14 +68,26 @@ def test_kept_outputs_follow_what_the_loss_scores():
     from legoesm.training.losses import LossConfig, column_outputs_the_loss_reads
 
     state = ("T", "q_v", "u", "v")
-    assert column_outputs_the_loss_reads(LossConfig(),
-                                         lane_writes_fluxes=True) == state
+    assert column_outputs_the_loss_reads(LossConfig(), lane_writes_fluxes=True,
+                                         lane_prognostics=state) == state
     lc = LossConfig(w_flux_olr=1.0, w_bias_flux_sfc_sw=0.5)
-    assert column_outputs_the_loss_reads(lc, lane_writes_fluxes=True) == (
+    assert column_outputs_the_loss_reads(lc, lane_writes_fluxes=True,
+                                         lane_prognostics=state) == (
         *state, "lw_up_toa", "sw_net_sfc")
     # A lane that drops the network's fluxes (the WB spectral adapter) cannot
     # train them whatever the flux weights say.
-    assert column_outputs_the_loss_reads(lc, lane_writes_fluxes=False) == state
+    assert column_outputs_the_loss_reads(lc, lane_writes_fluxes=False,
+                                         lane_prognostics=state) == state
+    # A lane that evolves condensate keeps its tendencies (they reach the
+    # scored state through the dynamics); a lane missing a scored prognostic
+    # is refused.
+    assert column_outputs_the_loss_reads(
+        lc, lane_writes_fluxes=True,
+        lane_prognostics=("u", "v", "T", "q_v", "q_c", "q_r")) == (
+        *state, "q_c", "q_r", "lw_up_toa", "sw_net_sfc")
+    with pytest.raises(ValueError, match="lacks the scored state"):
+        column_outputs_the_loss_reads(lc, lane_writes_fluxes=True,
+                                      lane_prognostics=("T", "u", "v"))
 
 
 @pytest.mark.parametrize("n_max", [10])
@@ -138,6 +150,9 @@ def test_wb_decks_select_pruning_explicitly():
         y = yaml.safe_load(open(f"config/wb/campaign/spectral_t63_{arm}_v9.yaml"))
         assert y["neural_gcm"]["prune_unused_weights"] is True
         assert y["sfno"]["prune_unused_weights"] is True
+    # the Derecho lat-lon deck (neural_gcm; the lat-lon sfno arm has no pruning)
+    y = yaml.safe_load(open("config/wb/scale/train_07deg.yaml"))
+    assert y["neural_gcm"]["prune_unused_weights"] is True
 
 
 def test_registry_builds_the_pruned_layouts():

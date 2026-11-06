@@ -576,18 +576,31 @@ STATE_TENDENCY_OUTPUTS = ("T", "q_v", "u", "v")
 
 
 def column_outputs_the_loss_reads(config: "LossConfig", *,
-                                  lane_writes_fluxes: bool) -> tuple:
-    """Column-network output groups this loss can reach: the state tendencies
-    plus, when the lane writes the network's radiation fluxes into the carry
-    the flux loss reads (``lane_writes_fluxes``), every flux a nonzero
-    flux-loss weight scores.  Nothing in the loss reads precipitation, the
-    cloud-water / rain tendencies or the TOA downward shortwave, so a network
-    built with only these groups has exactly the weights the loss can train
-    (user 2026-11-06)."""
+                                  lane_writes_fluxes: bool,
+                                  lane_prognostics: tuple) -> tuple:
+    """Column-network output groups this loss can reach: the tendency of
+    every prognostic the lane's state carries and evolves
+    (``lane_prognostics``: the column-output group names among the lane's
+    state fields; always at least ``STATE_TENDENCY_OUTPUTS``) plus, when the
+    lane writes the network's radiation fluxes into the carry the flux loss
+    reads (``lane_writes_fluxes``), every flux a nonzero flux-loss weight
+    scores.  A tendency of a prognostic the lane evolves reaches the scored
+    state through the dynamics even when the loss does not score that
+    prognostic (lat-lon cloud water and rain); precipitation and the TOA
+    downward shortwave reach nothing.  A network built with only these
+    groups creates no weight the lane's wiring disconnects from the loss
+    (user 2026-11-06); whether a kept row has a nonzero gradient at a given
+    state (positivity fixers can zero a condensate column) is what
+    ``gradient_access_gate`` checks at run time."""
+    missing = [g for g in STATE_TENDENCY_OUTPUTS if g not in lane_prognostics]
+    if missing:
+        raise ValueError(f"lane_prognostics {tuple(lane_prognostics)!r} lacks "
+                         f"the scored state {missing}")
+    extra = tuple(g for g in lane_prognostics if g not in STATE_TENDENCY_OUTPUTS)
     fluxes = tuple(g for g, ws in _SCORED_FLUX_OUTPUTS.items()
                    if lane_writes_fluxes
                    and any(float(getattr(config, w)) != 0.0 for w in ws))
-    return STATE_TENDENCY_OUTPUTS + fluxes
+    return STATE_TENDENCY_OUTPUTS + extra + fluxes
 
 
 def check_q_resid_scale_lev_floor(config) -> None:

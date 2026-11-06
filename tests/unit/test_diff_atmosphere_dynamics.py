@@ -36,6 +36,36 @@ def assert_gradient_ok(grad_array, name="", min_nonzero_frac=0.1):
     )
 
 
+def assert_ad_correct(loss, xs, name="", jit=True):
+    """Gradient of ``loss`` w.r.t. the tuple ``xs`` (temperature and wind of
+    the initial state) matches finite differences and is eager == jit.
+
+    * FD: ``jax.test_util.check_grads`` reverse mode, order 1, eps=1e-4 in
+      input units, atol=rtol=1e-5 (JAX's float64 defaults, stated).  Needs
+      ``JAX_ENABLE_X64=1``; skipped in float32.
+    * jit parity: ``jit(grad)`` vs eager ``grad``, rtol 1e-9 plus an
+      absolute floor of 1e-12 x max|g| (XLA may reassociate sums; anything
+      above round-off is a tracer bug).
+    Side decisions voted (Claude + codex + GLM) 2026-11-06.
+    """
+    from jax.test_util import check_grads
+
+    if not jax.config.jax_enable_x64:
+        pytest.skip("FD gradient check needs JAX_ENABLE_X64=1")
+    g_eager = jax.grad(loss)(xs)
+    for i, g in enumerate(g_eager):
+        assert_gradient_ok(g, f"{name} [input {i}]")
+    if jit:
+        g_jit = jax.jit(jax.grad(loss))(xs)
+        for i, (gj, ge) in enumerate(zip(g_jit, g_eager)):
+            scale = float(jnp.max(jnp.abs(ge)))
+            assert jnp.allclose(gj, ge, rtol=1e-9, atol=1e-12 * scale), (
+                f"{name} [input {i}]: jit vs eager gradient max rel diff "
+                f"{float(jnp.max(jnp.abs(gj - ge))) / scale:.3e}")
+    check_grads(loss, (xs,), order=1, modes=("rev",), eps=1e-4,
+                atol=1e-5, rtol=1e-5)
+
+
 # ============================================================================
 # 1a  Shallow Water — CD-grid (cubed-sphere C4)
 # ============================================================================
@@ -322,6 +352,21 @@ class TestCDGridPE:
         grad = jax.grad(loss)(state.T.data)
         assert_gradient_ok(grad, "CDGrid PE 3 steps")
 
+    def test_ad_fd_and_jit_3_steps(self):
+        model, state, dt = self.model, self.state, self.dt
+
+        def loss(xs):
+            T_data, u_data = xs
+            s = state._replace(T=state.T.replace(data=T_data),
+                               u_d=state.u_d.replace(data=u_data))
+            for _ in range(3):
+                s = model.step(s, dt)
+            return (jnp.mean((s.T.data - 250.0) ** 2)
+                    + jnp.mean(s.u_d.data ** 2))
+
+        assert_ad_correct(loss, (state.T.data, state.u_d.data),
+                          "CDGrid PE 3 steps")
+
 
 # ============================================================================
 # 1b  Hydrostatic PE — lat-lon C-grid (8x16, 5 levels)
@@ -331,6 +376,9 @@ class TestLatLonPE:
 
     @pytest.fixture(autouse=True)
     def setup(self):
+        self._build()
+
+    def _build(self):
         import math
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
@@ -383,6 +431,33 @@ class TestLatLonPE:
 
         grad = jax.grad(loss)(state.T)
         assert_gradient_ok(grad, "LatLon PE 3 steps")
+
+    def test_ad_fd_and_jit_3_steps(self):
+        # The lat-lon lane stores in the precision policy's storage dtype
+        # (float32 by default) and re-casts at every step boundary, so the
+        # FD check needs an fp64 policy for the whole build + rollout.
+        from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+        old = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            self._build()
+            self._ad_check()
+        finally:
+            set_policy(old)
+
+    def _ad_check(self):
+        model, state, dt = self.model, self.state, self.dt
+        assert state.T.dtype == jnp.float64
+
+        def loss(xs):
+            s = state._replace(T=xs[0], u=xs[1])
+            for _ in range(3):
+                s = model.step(s, dt)
+            return (jnp.mean((s.T - jnp.mean(state.T)) ** 2)
+                    + jnp.mean(s.u ** 2))
+
+        assert_ad_correct(loss, (state.T, state.u), "LatLon PE 3 steps")
 
 
 # ============================================================================
@@ -517,3 +592,142 @@ class TestSpectralPE:
 
         grad = jax.grad(loss)(state.T_hat.data.real)
         assert_gradient_ok(grad, "Spectral PE 3 steps")
+
+    def test_ad_fd_and_jit_3_steps(self):
+        model, state, dt = self.model, self.state, self.dt
+
+        # Vorticity enters in units of 1e-5 (its physical scale), so the FD
+        # step check_grads takes (1e-4 in input units) is 1e-9 in vor_hat;
+        # unscaled, 1e-4 is ten times the flow and the central difference
+        # is truncation-dominated (FD/AD = 1.15 at 1e-4, 1.0015 at 1e-5,
+        # 1.000000 at 1e-7: AD right, measured 2026-11-06).
+        vor_unit = 1e-5
+
+        def loss(xs):
+            T_real, vor_scaled = xs
+            s = state._replace(
+                T_hat=state.T_hat.replace(
+                    data=T_real + 1j * state.T_hat.data.imag),
+                vor_hat=state.vor_hat.replace(
+                    data=vor_unit * vor_scaled + 1j * state.vor_hat.data.imag))
+            for _ in range(3):
+                s = model.step(s, dt)
+            # anomaly (drop the global-mean mode) + vorticity
+            return (jnp.mean(jnp.abs(s.T_hat.data[1:]) ** 2)
+                    + jnp.mean(jnp.abs(s.vor_hat.data) ** 2))
+
+        assert_ad_correct(
+            loss, (state.T_hat.data.real, state.vor_hat.data.real / vor_unit),
+            "Spectral PE 3 steps")
+
+
+# ============================================================================
+# 1e  Hydrostatic PE — MPAS / icosahedral Voronoi (level 2 = 162 cells)
+# ============================================================================
+
+class TestMPASPE:
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+            MPASPrimitiveEquationConfig, MPASPrimitiveEquationModel,
+        )
+        from legoesm.core.state import MPASHydrostaticState
+
+        nlev = 5
+        mesh = create_voronoi_mesh(2, lloyd_iterations=5)
+        sigma = create_sigma_coordinate(nlev)
+        # Same config / dt as tests/unit/test_mpas_atmosphere.py.
+        config = MPASPrimitiveEquationConfig(nu_del2=1e4, K_h=1e3)
+        self.model = MPASPrimitiveEquationModel(mesh, sigma, config)
+        self.dt = 60.0
+        k1, k2 = jax.random.split(jax.random.PRNGKey(40))
+        nc, ne = mesh.nCells, mesh.nEdges
+        self.state = MPASHydrostaticState(
+            u=Field(1.0 * jax.random.normal(k1, (ne, nlev)), name="u"),
+            T=Field(250.0 + jax.random.normal(k2, (nc, nlev)), name="T"),
+            p_s=Field(1e5 * jnp.ones(nc), name="p_s"),
+            phis=Field(jnp.zeros(nc), name="phis"),
+        )
+
+    def _loss(self, n_steps):
+        model, state, dt = self.model, self.state, self.dt
+
+        def loss(xs):
+            s = state._replace(T=state.T.replace(data=xs[0]),
+                               u=state.u.replace(data=xs[1]))
+            for _ in range(n_steps):
+                s = model.step(s, dt)
+            return (jnp.mean((s.T.data - 250.0) ** 2)
+                    + jnp.mean(s.u.data ** 2))
+        return loss
+
+    def _xs(self):
+        return (self.state.T.data, self.state.u.data)
+
+    def test_grad_single_step(self):
+        for i, g in enumerate(jax.grad(self._loss(1))(self._xs())):
+            assert_gradient_ok(g, f"MPAS PE single step [input {i}]")
+
+    def test_ad_fd_and_jit_3_steps(self):
+        assert_ad_correct(self._loss(3), self._xs(), "MPAS PE 3 steps")
+
+
+# ============================================================================
+# 1f  Hydrostatic PE — FV3 six-face duo cube (C12, km=5)
+# ============================================================================
+
+class TestFV3DuoPE:
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoConfig, FV3DuoDynamicsModel)
+        from legoesm.grids.factory import create_fv3_duo_grid
+
+        if not jax.config.jax_enable_x64:
+            pytest.skip("FV3 duo lane is fp64-only")
+        # Same grid / config / dt as tests/unit/test_dycore_energy_fixer.py.
+        self.model = FV3DuoDynamicsModel(create_fv3_duo_grid(12, 3),
+                                         FV3DuoConfig(km=5, n_split=2))
+        self.bundle = self.model.dcmip16_initial_state(n_tracers=1)
+        self.dt = 120.0
+
+    def _loss(self, n_steps):
+        model, bundle, dt = self.model, self.bundle, self.dt
+
+        def loss(xs):
+            b = {**bundle,
+                 "state": {**bundle["state"], "pt": xs[0], "u": xs[1]}}
+            for _ in range(n_steps):
+                b = model.step(b, dt)
+            pt0 = jnp.mean(bundle["state"]["pt"])
+            return (jnp.mean((b["state"]["pt"] - pt0) ** 2)
+                    + jnp.mean(b["state"]["u"] ** 2))
+        return loss
+
+    def _xs(self):
+        return (self.bundle["state"]["pt"], self.bundle["state"]["u"])
+
+    def test_ad_fd_eager_3_steps(self):
+        # Temperature only.  The wind path runs FV3's monotone transport
+        # limiters, which are piecewise: FD/AD on u stays within 0.5% but
+        # wanders 1e-4..5e-3 without converging as the step shrinks
+        # (1e-1..1e-7, 1 and 3 steps), so a 1e-5 check cannot certify it.
+        # Recorded as a finding, not loosened here.
+        bundle = self.bundle
+        u0 = bundle["state"]["u"]
+        full = self._loss(3)
+        assert_ad_correct(lambda xs: full((xs[0], u0)),
+                          (bundle["state"]["pt"],), "FV3 duo 3 steps",
+                          jit=False)
+
+    @pytest.mark.xfail(
+        strict=True, raises=jax.errors.TracerArrayConversionError,
+        reason="FV3DuoDynamicsModel.step reads nsplt on the host every call "
+               "(the C5 fail-closed check), so it cannot be traced under jit; "
+               "fix design (pure step + explicit flag vs checkify) pending.")
+    def test_jit_grad_3_steps(self):
+        jax.jit(jax.grad(self._loss(3)))(self._xs())

@@ -98,6 +98,10 @@ neural_gcm:
   surface_drag_confounded: "core_does_not_read_the_key"
   nn_hidden: 256
   nn_layers: 4
+  # No network output the loss cannot reach (user 2026-11-06): drops the
+  # precipitation and radiation rows the default loss never scores; keeps the
+  # cloud-water/rain tendencies this lane evolves.
+  prune_unused_weights: true
 sfno:
   # ACE2-style land-fraction plane; OFF for the same reason as neural_gcm.
   spatial_embedding: false

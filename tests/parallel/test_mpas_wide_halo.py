@@ -163,17 +163,15 @@ class TestWideHaloEquivalence:
 
         gw = np.asarray(_loss(step_w))
         gd = np.asarray(_loss(step_d))
-        # KNOWN PRE-EXISTING: the DEFAULT sharded path's gradient
-        # already contains non-finite entries (96 at subdiv-4/2dev,
-        # identical rows both paths — measured 2026-08-10; 0*inf in the
-        # tendency backward at rows whose primal is a halo-boundary /
-        # padding artefact). Wide halo must not ADD any: the
-        # non-finite masks must be IDENTICAL, and every finite entry
-        # must agree.
-        assert np.array_equal(np.isfinite(gw), np.isfinite(gd)), (
-            "wide halo changed WHICH gradient entries are non-finite "
-            f"(wide {int((~np.isfinite(gw)).sum())} vs default "
-            f"{int((~np.isfinite(gd)).sum())})")
+        # Both paths must be finite everywhere.  Until e9f7f9ab50 (merged in
+        # #1862) the sharded default carried 96 non-finite entries here: 0/0
+        # at the dvEdge = 0 padding edges of vector_laplacian_del2_3d,
+        # whose NaN derivative poisoned reverse mode (bisected and confirmed
+        # by reverting that guard alone, 2026-11-06).
+        for name, g in (("wide", gw), ("default", gd)):
+            assert np.all(np.isfinite(g)), (
+                f"{name}: {int((~np.isfinite(g)).sum())} non-finite gradient "
+                f"entries on the sharded step")
         fin = np.isfinite(gd)
         scale = max(float(np.max(np.abs(gd[fin]))), 1e-30)
         rel = float(np.max(np.abs(gw[fin] - gd[fin]))) / scale
