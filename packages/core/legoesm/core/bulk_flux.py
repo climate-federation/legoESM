@@ -2424,12 +2424,13 @@ def nemo_si3_constant_fluxes(
     Ce: float,
     goff_floor_width_K: float,
 ) -> tuple[jnp.ndarray, ...]:
-    """Constant-coefficient SI3 air--ice bulk core: ``blk_ice_1`` then ``blk_ice_2``'s turbulent terms.
+    """Executing constant-coefficient SI3 air--ice bulk core.
 
-    Composes :func:`nemo_si3_blk_ice_1_cst` and :func:`nemo_si3_ice_turbulent`
-    with ``T_ice`` as both ``ptsui`` and ``ptsu`` (one ice temperature).
-    ``theta_air`` is already potential temperature.  Stress uses NEMO's
-    air-to-ice sign; callers adapting to legoESM's reaction convention negate it.
+    Transcribes NEMO 5.0.2 ``sbcblk.F90:1085-1168,1231-1273`` and
+    ``sbc_phy.F90:321-358,665-790``.  ``theta_air`` is already potential
+    temperature, as at NEMO's ``blk_ice_1/2`` boundary.  Returned stress uses
+    NEMO's air-to-ice sign; callers adapting to legoESM's atmospheric reaction
+    convention negate it explicitly.
 
     Returns ``(tau_x, tau_y, wind, theta_ice, q_sat, dq_sat_dT,
     sensible, latent, dq_sensible_dT, dq_latent_dT)``.
