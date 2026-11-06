@@ -141,8 +141,9 @@ def test_cube_store_columns_follow_the_cube_layout():
     assert flat.size == lat.size
     plane = flat.reshape(lat.shape)
     lat_deg = np.degrees(lat)
-    assert np.all(plane[lat_deg > 45.0] == pytest.approx(1.0, abs=1e-12))
-    assert np.all(plane[lat_deg < 35.0] == pytest.approx(0.0, abs=1e-12))
+    # KD-tree weights sum to 1 within ~2e-8 (measured); 1e-6 checks ordering.
+    assert np.all(plane[lat_deg > 45.0] == pytest.approx(1.0, abs=1e-6))
+    assert np.all(plane[lat_deg < 35.0] == pytest.approx(0.0, abs=1e-6))
 
 
 def test_gridpoint_forcing_plane_is_reshaped_and_zero_on_land():
@@ -170,3 +171,6 @@ def test_store_tags_separate_cube_latlon_and_gaussian():
     tags = {wfc.sic_store_tag(g, "src")
             for g in (cube, _grid(), create_latlon_grid(8, 16))}
     assert len(tags) == 3
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    assert (wfc.sic_store_tag(cube, "src")
+            != wfc.sic_store_tag(create_cubed_sphere(8), "src"))
