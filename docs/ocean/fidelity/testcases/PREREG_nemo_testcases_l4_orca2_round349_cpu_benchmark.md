@@ -67,6 +67,12 @@ CPUs may be thread siblings.
 The identical CPU-ID set is passed to legoESM through `taskset -c` and to NEMO
 through Open MPI `--cpu-set <ids> --bind-to core -np n`.
 
+Deviation (2026-11-06, user decision): installed Open MPI 5.0.10 binds every
+rank to the whole `--cpu-set` under `--bind-to core` and refuses to map
+`np=40` across both sockets, so NEMO now runs `--bind-to none` and rank `r`
+pins itself with `taskset` to the `r`-th CPU of the same list (rank wrapper),
+one hardware thread per rank exactly as legoESM is pinned.
+
 Installed JAX/JAXLIB is 0.10.0. The installed
 `/home/dbalwada/legoESM/.venv/lib/python3.13/site-packages/jaxlib/xla_client.py:64-87`
 defines `make_cpu_client` without a thread-count argument and delegates directly

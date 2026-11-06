@@ -104,7 +104,7 @@ for CORES in "${CORE_COUNTS[@]}"; do
     echo "ROUND349_NEMO_DRY_RUN n=${CORES} cpu_ids=${CPU_IDS} run_dir=${RUN_DIR}"
     echo "  preflight: RAM>=150GiB; no nemo; selected-core utilization<=10%/10s; no unrelated process>=1 core"
     echo "  config: nn_itend=96 nn_istate=${NEMO_NN_ISTATE} nn_stock=${NEMO_NN_STOCK} nn_write=0"
-    echo "  command: (cd ${RUN_DIR} && ${GNU_TIME_BIN} -o gnu_time.txt ${MPIRUN_BIN} --report-bindings --bind-to core --cpu-set ${CPU_IDS} -np ${CORES} ./round349_rank_wrapper.sh)"
+    echo "  command: (cd ${RUN_DIR} && ROUND349_CPU_IDS=${CPU_IDS} ${GNU_TIME_BIN} -o gnu_time.txt ${MPIRUN_BIN} --report-bindings --bind-to none -np ${CORES} ./round349_rank_wrapper.sh)"
     continue
   fi
 
@@ -136,10 +136,10 @@ for CORES in "${CORE_COUNTS[@]}"; do
 
   (
     cd "${RUN_DIR}"
-    timeout 1200 "${GNU_TIME_BIN}" \
+    ROUND349_CPU_IDS="${CPU_IDS}" timeout 1200 "${GNU_TIME_BIN}" \
       -f $'elapsed_s=%e\nuser_s=%U\nsystem_s=%S\nmax_rss_kib=%M' \
       -o gnu_time.txt \
-      "${MPIRUN_BIN}" --report-bindings --bind-to core --cpu-set "${CPU_IDS}" \
+      "${MPIRUN_BIN}" --report-bindings --bind-to none \
       -np "${CORES}" ./round349_rank_wrapper.sh \
       >mpirun.stdout.log 2>mpirun.stderr.log
   )

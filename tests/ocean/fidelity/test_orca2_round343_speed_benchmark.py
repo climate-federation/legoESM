@@ -550,3 +550,29 @@ def test_round349_dry_run_command_schema(tmp_path: Path) -> None:
         assert env["OMP_NUM_THREADS"] == str(cores)
         assert env["XLA_FLAGS"] == "--xla_cpu_multi_thread_eigen=true"
         assert "intra_op_parallelism_threads" not in env["XLA_FLAGS"]
+
+
+def test_round349_rank_wrapper_pins_rank_to_its_listed_cpu(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+
+    allowed = sorted(os.sched_getaffinity(0))
+    if shutil.which("taskset") is None or len(allowed) < 2:
+        pytest.skip("needs taskset and two allowed CPUs")
+    wrapper = REPO_ROOT / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round349_rank_wrapper.sh"
+    stub_time = tmp_path / "time"
+    stub_time.write_text('#!/bin/bash\nshift 4\nexec "$@"\n')
+    nemo = tmp_path / "nemo"
+    nemo.write_text("#!/bin/bash\ngrep '^Cpus_allowed_list:' /proc/self/status > nemo_affinity.txt\n")
+    for path in (stub_time, nemo):
+        path.chmod(0o755)
+    env = dict(
+        os.environ,
+        OMPI_COMM_WORLD_RANK="1",
+        ROUND349_CPU_IDS=f"{allowed[0]},{allowed[-1]}",
+        GNU_TIME_BIN=str(stub_time),
+    )
+    subprocess.run(["bash", str(wrapper)], cwd=tmp_path, env=env, check=True, timeout=60)
+    expected = f"Cpus_allowed_list:\t{allowed[-1]}"
+    assert (tmp_path / "binding_rank1.txt").read_text().strip() == expected
+    assert (tmp_path / "nemo_affinity.txt").read_text().strip() == expected
