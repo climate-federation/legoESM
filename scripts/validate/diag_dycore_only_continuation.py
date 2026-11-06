@@ -97,15 +97,21 @@ def water_tendency_terms(state, model):
     def total_rate(c):
         t = mpas_hydrostatic_tendencies(state, mesh, sc, c)
         dq = jnp.stack([t.tracer_tendencies[k].data for k in names], axis=-1)
-        return glob(dp[..., None] * dq + q * (dB * t.dp_s_dt.data[:, None])[..., None])
+        return glob(dp[..., None] * dq + q * (dB * t.dp_s_dt.data[:, None])[..., None]), t
 
-    total = total_rate(cfg)
+    total, t1 = total_rate(cfg)
     dqh = tracer_horizontal_advection(q, u, mesh)
     ddp_h = -divergence_cell_3d(u * cell_to_edge_avg_3d(dp, mesh), mesh)
     horizontal = glob(dp[..., None] * dqh + q * ddp_h[..., None])
-    ps_del4 = total - total_rate(cfg._replace(nu_del4_ps=0.0)) if cfg.nu_del4_ps > 0 else 0.0
+    ps_del4 = ps_del4_air = 0.0
+    if cfg.nu_del4_ps > 0:
+        total0, t0 = total_rate(cfg._replace(nu_del4_ps=0.0))
+        ps_del4 = total - total0
+        # activity of the filter itself: area-mean |dp_s/dt| it adds [Pa/day]
+        dps = t1.dp_s_dt.data - t0.dp_s_dt.data
+        ps_del4_air = float(jnp.sum(area * jnp.abs(dps)) / jnp.sum(area) * 86400.0)
     return {"total": total, "horizontal": horizontal, "ps_del4": ps_del4,
-            "rest": total - horizontal - ps_del4}
+            "rest": total - horizontal - ps_del4, "ps_del4_air_Pa_day": ps_del4_air}
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

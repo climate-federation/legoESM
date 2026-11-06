@@ -118,3 +118,4 @@ def test_water_terms_on_a_small_mesh():
     assert w["total"] == pytest.approx(w["horizontal"] + w["ps_del4"] + w["rest"], abs=1e-15)
     assert abs(w["horizontal"]) < 1e-10
     assert abs(w["ps_del4"]) < 1e-10
+    assert w["ps_del4_air_Pa_day"] > 0.0          # control: the filter acts
