@@ -907,7 +907,11 @@ def solve_sw(
 
   # Check whether *any* column is illuminated to short-circuit a global
   # nighttime domain (preserves the original optimisation).
-  any_day = jnp.any(is_day_col)
+  # The barrier keeps this all-column reduction out of the fusion that also
+  # writes the per-column zenith fields: XLA otherwise emitted that combined
+  # fusion as ONE thread block on GPU, measured 2.7 s per radiation call at
+  # mesh 5 (2026-11-06, 75 % of the step), vs 0.03 ms when kept separate.
+  any_day = jnp.any(jax.lax.optimization_barrier(zenith) < 0.5 * jnp.pi)
 
   def _sw_gpoint_fluxes(igpt, sw_optical_props):
     """One g-point's SW fluxes from its final (aerosol-mixed) optics."""
