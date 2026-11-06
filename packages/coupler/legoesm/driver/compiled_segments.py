@@ -53,7 +53,10 @@ from legoesm.core.field import Field
 from legoesm.core.operators_cdgrid import center_to_dgrid_vector, dgrid_to_center_vector
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import face_to_cell_winds
 from legoesm.core.tracers import make_full_moisture_registry
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    SEGMENT_SAT_ADJUST_RH_WIDTH,
+    saturation_adjustment_increment,
+)
 from legoesm.forcing.time_utils import day_to_calendar
 
 logger = logging.getLogger(__name__)
@@ -1179,6 +1182,7 @@ class _SplitStepStatics:
     hs_newtonian_relax: object
     energy_consistent_moisture_clip: bool
     do_sat_adjust: bool
+    sat_adjust_rh_width: float
     fix_moisture: bool
     sigma_full: object
     dsigma: object
@@ -1211,8 +1215,8 @@ def build_operator_split_statics(
     tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref, C_H, C_E,
     albedo_ice, albedo_ocean, ghg_vmr_override,
     hs_newtonian_relax, energy_consistent_moisture_clip,
-    do_sat_adjust, fix_moisture, sigma_full, dsigma, grid,
-    owned_mask, qv_smooth_coeff, fric_decay, hyperdiffusion_3d,
+    do_sat_adjust, sat_adjust_rh_width, fix_moisture, sigma_full, dsigma,
+    grid, owned_mask, qv_smooth_coeff, fric_decay, hyperdiffusion_3d,
     pipeline=None, clear_sky_fresh="hold", budget_ledger=False,
 ):
     """Bundle the operator-split closure statics (the frozen ``_SplitStepStatics``).
@@ -1238,7 +1242,9 @@ def build_operator_split_statics(
         ghg_vmr_override=ghg_vmr_override,
         hs_newtonian_relax=hs_newtonian_relax,
         energy_consistent_moisture_clip=energy_consistent_moisture_clip,
-        do_sat_adjust=do_sat_adjust, fix_moisture=fix_moisture,
+        do_sat_adjust=do_sat_adjust,
+        sat_adjust_rh_width=float(sat_adjust_rh_width),
+        fix_moisture=fix_moisture,
         sigma_full=sigma_full, dsigma=dsigma, grid=grid,
         owned_mask=owned_mask, qv_smooth_coeff=qv_smooth_coeff,
         fric_decay=_a(fric_decay), hyperdiffusion_3d=hyperdiffusion_3d,
@@ -1874,8 +1880,11 @@ def finalize_split_step(carry, lz, statics):
     precip_accum = lz.precip_accum
     if statics.do_sat_adjust:
         p_full = p_s_new[..., None] * statics.sigma_full
-        q_sat = saturation_mixing_ratio(T_upd, p_full)
-        excess = jnp.maximum(q_v_upd - q_sat, 0.0)
+        # Converged on-curve adjustment, specific humidity vs specific
+        # saturation, smooth switch (width statics.sat_adjust_rh_width).
+        excess = saturation_adjustment_increment(
+            T_upd, q_v_upd, p_full, statics.dt,
+            rh_width=statics.sat_adjust_rh_width)
         T_upd = T_upd + constants.L_v * excess / constants.c_pd
         # The condensed excess rains out WITH its mass (F13): p_s falls by
         # the column's excess and every moisture field is re-weighted, so
@@ -2086,6 +2095,7 @@ def build_segment_fn(
     step_unified_no_rad=None,
     device_config=None,
     energy_consistent_moisture_clip: bool = False,
+    sat_adjust_rh_width: float = SEGMENT_SAT_ADJUST_RH_WIDTH,
     pipeline=None,
     advect_moisture: bool = False,
     tiled_step_fn=None,
@@ -2186,6 +2196,10 @@ def build_segment_fn(
         behaviour is byte-identical to the legacy path: donating JIT
         kernels, and ``.raw`` stays the non-JIT, non-donating function
         that the training drivers differentiate through.
+    sat_adjust_rh_width : float, optional
+        RH width [-] of the smooth switch of the tail saturation adjustment
+        (``microphysics == "none"``; 0.0 = hard step, the exact adjustment).
+        Default ``SEGMENT_SAT_ADJUST_RH_WIDTH`` (= ExperimentConfig's).
     energy_consistent_moisture_clip : bool, optional
         Issue #323.  When ``True``, the physics tracer update's vapour floor
         (the column-conserving borrow either way) also books the latent heat
@@ -2394,6 +2408,7 @@ def build_segment_fn(
             hs_newtonian_relax=hs_newtonian_relax,
             energy_consistent_moisture_clip=energy_consistent_moisture_clip,
             do_sat_adjust=do_sat_adjust,
+            sat_adjust_rh_width=sat_adjust_rh_width,
             fix_moisture=fix_moisture,
             sigma_full=sigma_full, dsigma=dsigma, grid=grid,
             owned_mask=_owned_mask,

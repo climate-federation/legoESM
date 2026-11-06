@@ -24,6 +24,8 @@ from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     C_E_BULK_DEFAULT, C_H_BULK_DEFAULT)
 from legoesm.land import snow_column as _snow_column
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    SEGMENT_SAT_ADJUST_RH_WIDTH)
 from legoesm.ice import shortwave as _ice_sw
 
 # Snow emissivity: ONE default and ONE legal range, both owned by the snow
@@ -1304,6 +1306,11 @@ class ExperimentConfig(NamedTuple):
     # floor ADDS the clipped water (announced at dycore build); with the
     # default borrow it is ignored there.
     energy_consistent_moisture_clip: bool = False
+    # Segment-tail saturation adjustment (runs only with microphysics='none'):
+    # RH width [-] of the smooth activation onto the saturation curve.
+    # Default 1/30 (3-way vote 2026-11); 0.0 = the exact hard step.  See
+    # microphysics._warm_rain.saturation_adjustment_increment (KNOWN DIFFERENCE).
+    sat_adjust_rh_width: float = SEGMENT_SAT_ADJUST_RH_WIDTH
     # Resolved-wind moisture advection (issue #771): attach q_v/q_c/q_r/q_i/
     # q_s/q_g (+ the per-mass ice number N_i) to the dycore state each step so
     # the primitive-equation step advects them.  Without it, cube moisture is

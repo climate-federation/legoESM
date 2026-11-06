@@ -6084,3 +6084,15 @@ def test_large_yeager_width_flags_thread_to_config():
     assert cfg.surface_large_yeager_neutral_width == 0.0
     assert cfg.surface_large_yeager_dthv_width == 0.02
     assert cfg.surface_large_yeager_cd_cutoff_width == 0.25
+
+
+def test_sat_adjust_rh_width_flag_flows_to_config():
+    from legoesm.atmosphere.physics.microphysics._warm_rain import (
+        SEGMENT_SAT_ADJUST_RH_WIDTH)
+    parser = build_arg_parser()
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.sat_adjust_rh_width == SEGMENT_SAT_ADJUST_RH_WIDTH
+    cfg_hard = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--sat-adjust-rh-width", "0.0"]), parser))
+    assert cfg_hard.sat_adjust_rh_width == 0.0

@@ -2213,8 +2213,12 @@ class ModelDriver:
 
         precip_ls = jnp.zeros_like(p_s)
         if sat_adjust:
-            q_sat = saturation_mixing_ratio(new_T, lay.pressure_at_full(p_s))
-            excess = jnp.maximum(moist["q_v"] - q_sat, 0.0)
+            # Same converged adjustment as the compiled lane's tail.
+            from legoesm.atmosphere.physics.microphysics._warm_rain import (
+                saturation_adjustment_increment)
+            excess = saturation_adjustment_increment(
+                new_T, moist["q_v"], lay.pressure_at_full(p_s), DT,
+                rh_width=self.config.sat_adjust_rh_width)
             new_T = new_T + constants.L_v * excess / constants.c_pd
             # The condensed excess rains out WITH its mass [kg/m2/s, +down].
             precip_ls = (jnp.sum(lay.layer_thickness_dp(p_s) * excess, axis=-1)
@@ -18333,6 +18337,7 @@ class ModelDriver:
             energy_consistent_moisture_clip=(
                 cfg.energy_consistent_moisture_clip),
             do_sat_adjust=(cfg.microphysics == "none"),
+            sat_adjust_rh_width=cfg.sat_adjust_rh_width,
             fix_moisture=cfg.fix_moisture,
             sigma_full=ctx["sigma_full"], dsigma=dsigma, grid=self.grid,
             owned_mask=None, qv_smooth_coeff=self._qv_smooth_coeff,
@@ -18978,6 +18983,7 @@ class ModelDriver:
             hs_newtonian_relax=self._hs_newtonian_relax,
             energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
             do_sat_adjust=(cfg.microphysics == "none"),
+            sat_adjust_rh_width=cfg.sat_adjust_rh_width,
             fix_moisture=cfg.fix_moisture,
             sigma_full=ctx["sigma_full"], dsigma=dsigma, grid=self.grid,
             owned_mask=None, qv_smooth_coeff=self._qv_smooth_coeff,
@@ -19868,6 +19874,7 @@ class ModelDriver:
             ghg_vmr_override=ctx["ghg_vmr"],
             hs_newtonian_relax=self._hs_newtonian_relax,
             energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+            sat_adjust_rh_width=cfg.sat_adjust_rh_width,
             advect_moisture=self._moisture_advection_active(),
             pipeline=self.physics,
             budget_ledger=cfg.output.budget_ledger,
@@ -20175,6 +20182,7 @@ class ModelDriver:
                 hs_newtonian_relax=self._hs_newtonian_relax,
                 device_config=_seg_device_config,
                 energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+                sat_adjust_rh_width=cfg.sat_adjust_rh_width,
                 advect_moisture=self._moisture_advection_active(),
                 # Un-fused-radiation host path (ExperimentConfig.unfused_radiation,
                 # default OFF): the pipeline lets build_segment_fn expose
@@ -20918,6 +20926,7 @@ class ModelDriver:
                         advect_moisture=self._moisture_advection_active(),
                         pipeline=self.physics,
                         budget_ledger=cfg.output.budget_ledger,
+                        sat_adjust_rh_width=cfg.sat_adjust_rh_width,
                     )
 
             # Checkpoint (a coupled run routes this through its own

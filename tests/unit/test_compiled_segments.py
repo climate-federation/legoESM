@@ -734,7 +734,8 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
     Replicates the logic inside _single_step but without lax.scan,
     so we can compare results for equivalence testing.
     """
-    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.atmosphere.physics.microphysics._warm_rain import (
+        SEGMENT_SAT_ADJUST_RH_WIDTH, saturation_adjustment_increment)
     from legoesm import constants
     from legoesm.core.operators_3d import hyperdiffusion_3d
     from legoesm.driver.compiled_segments import _rebuild_state
@@ -830,8 +831,9 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
         _sat_rain = 0.0
         if do_sat_adjust:
             p_full = p_s_new[..., None] * sigma_full
-            q_sat = saturation_mixing_ratio(T_upd, p_full)
-            excess = jnp.maximum(q_v_upd - q_sat, 0.0)
+            excess = saturation_adjustment_increment(
+                T_upd, q_v_upd, p_full, dt,
+                rh_width=SEGMENT_SAT_ADJUST_RH_WIDTH)
             T_upd = T_upd + constants.L_v * excess / constants.c_pd
             # the condensate rains out WITH its mass (F13): p_s falls by the
             # column excess, every moisture field is re-weighted

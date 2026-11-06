@@ -31,6 +31,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    SEGMENT_SAT_ADJUST_RH_WIDTH)
 from legoesm.core.field import Field
 from legoesm.core.state import FV3HydrostaticState
 from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -194,7 +196,8 @@ def _build(seed=3):
         C_H=None, C_E=None, albedo_ice=None, albedo_ocean=None,
         ghg_vmr_override=None, hs_newtonian_relax=None,
         energy_consistent_moisture_clip=False,
-        do_sat_adjust=True, fix_moisture=True,
+        do_sat_adjust=True, sat_adjust_rh_width=SEGMENT_SAT_ADJUST_RH_WIDTH,
+        fix_moisture=True,
         sigma_full=coord.sigma_full, dsigma=coord.dsigma, grid=grid,
         owned_mask=None, qv_smooth_coeff=0.0, fric_decay=0.9999,
         hyperdiffusion_3d=None)

@@ -346,7 +346,8 @@ def _hard_saturation_rate_limit(condensation, q_v, dt, hard_max_heating_K,
 
 def hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
                           hard_threshold, hard_max_heating_K,
-                          sat_fn=saturation_specific_humidity):
+                          sat_fn=saturation_specific_humidity,
+                          activation_width=None):
     """Blend the on-curve hard adjustment into ``condensation`` + rate-limit.
 
     The ONE place the reviewed hard-adjustment logic lives, shared by
@@ -382,6 +383,12 @@ def hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
        where a cap binds, where the per-step condensation is constant (correctly
        zero sensitivity).
 
+    ``activation_width`` [RH]: ``None`` keeps the ramp
+    ``sigmoid(_HARD_SAT_MASK_SHARPNESS * (RH - hard_threshold))`` (the
+    microphysics callers, unchanged); a float ``w > 0`` uses
+    ``sigmoid((RH - hard_threshold) / w)``; ``0.0`` is the hard step
+    ``RH > hard_threshold`` (the exact on-curve adjustment).
+
     Returns the final condensation rate [kg/kg/s].
     """
     if jax.config.jax_enable_x64:
@@ -394,11 +401,55 @@ def hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
         cond_hard = _hard_saturation_condensation(T, q_v, p_full, dt, q_sat,
                                                   sat_fn=sat_fn)
     rel_humidity = q_v / jnp.maximum(q_sat, _HARD_SAT_QSAT_FLOOR)
-    activation = jax.nn.sigmoid(
-        _HARD_SAT_MASK_SHARPNESS * (rel_humidity - hard_threshold))
+    if activation_width is None:
+        activation = jax.nn.sigmoid(
+            _HARD_SAT_MASK_SHARPNESS * (rel_humidity - hard_threshold))
+    elif activation_width == 0.0:
+        activation = (rel_humidity > hard_threshold).astype(cond_hard.dtype)
+    else:
+        activation = jax.nn.sigmoid(
+            (rel_humidity - hard_threshold) / activation_width)
     blended = condensation + activation * (cond_hard - condensation)
     condensation = jnp.minimum(blended, cond_hard)     # no overshoot past curve
     return _hard_saturation_rate_limit(condensation, q_v, dt, hard_max_heating_K)
+
+
+# Default RH width of the segment-tail adjustment's smooth switch (RULE 5):
+# the microphysics blend's own ramp, 1/_HARD_SAT_MASK_SHARPNESS (voted Claude +
+# GLM over codex's 0.003, 2026-11-06).  0.0 = the hard step (exact adjustment).
+SEGMENT_SAT_ADJUST_RH_WIDTH = 1.0 / _HARD_SAT_MASK_SHARPNESS
+
+
+def saturation_adjustment_increment(T, q_v, p_full, dt, *, rh_width,
+                                    max_heating_K=_DEFAULT_HARD_SAT_MAX_HEATING_K):
+    """Vapour condensed [kg/kg] (>= 0) by the post-step saturation adjustment
+    that the grid-point segment tails run when no microphysics scheme is
+    selected (``microphysics == "none"``).
+
+    ``T`` [K], ``q_v`` SPECIFIC humidity [kg/kg] (the model state's), ``p_full``
+    [Pa].  The converged on-curve solve of :func:`hard_saturation_blend`
+    (implicit-function gradient; ``c_pd T + L_v q_v`` conserved by the caller's
+    ``T += L_v/c_pd * dq``), compared like with like against
+    ``saturation_specific_humidity``, centred on RH = 1, the switch smoothed
+    over ``rh_width`` (0.0 = hard), the reviewed 5 K per-step heating cap.
+
+    Replaces ``dq = max(q_v - r_sat(T), 0)``, which condensed the whole excess
+    at the pre-adjustment temperature (no ``1/(1 + gamma)``): it overshot to
+    sub-saturation and its tangent map grew by ~gamma (up to ~5) per step in
+    cells adjusted on consecutive steps -- a 1e77 gradient after 720 lat-lon
+    steps (2026-11-06).
+
+    KNOWN DIFFERENCE from the exact adjustment (``rh_width = 0``): at the
+    default width the switch is 0.5 at RH = 1, so a cell slightly above
+    saturation drains only part of its excess per step and stays slightly
+    super-saturated; the per-case gaps are stored in
+    tests/unit/test_segment_saturation_adjustment.py.
+    """
+    q_sat = saturation_specific_humidity(T, p_full)
+    rate = hard_saturation_blend(
+        jnp.zeros_like(q_v), T, q_v, p_full, dt, q_sat, 1.0, max_heating_K,
+        sat_fn=saturation_specific_humidity, activation_width=rh_width)
+    return rate * dt
 
 
 def hard_saturation_drain(T, q_v, p_full, dt,

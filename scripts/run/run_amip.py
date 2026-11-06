@@ -148,6 +148,8 @@ from legoesm.driver.config import (
     OutputConfig,
     parse_gwd_spec,
 )
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    SEGMENT_SAT_ADJUST_RH_WIDTH)
 from legoesm.driver.run_status import status_to_exit_code
 
 from legoesm import constants
@@ -2499,6 +2501,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # convection (the kessler+sbm wind blow-up).  Default off => unchanged.
     parser.add_argument("--energy-consistent-moisture-clip",
                         action="store_true", default=False)
+    # Segment-tail saturation adjustment width (microphysics none only):
+    # RH width of the smooth activation; 0.0 = exact hard step.
+    parser.add_argument("--sat-adjust-rh-width", type=float,
+                        default=SEGMENT_SAT_ADJUST_RH_WIDTH,
+                        help="RH width [-] of the smooth saturation-adjustment "
+                             "activation used with --microphysics none "
+                             "(0.0 = exact hard step).")
     # Resolved-wind moisture advection through the cdgrid dycore (issue #771).
     # OPT-IN / experimental (advective form, not discretely mass-conserving) —
     # default OFF is bit-identical to the legacy column-locked moisture path.
@@ -3088,6 +3097,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,
+        sat_adjust_rh_width=args.sat_adjust_rh_width,
         moisture_advection=args.moisture_advection,
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,

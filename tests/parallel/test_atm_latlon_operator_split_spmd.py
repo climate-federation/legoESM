@@ -29,6 +29,8 @@ import numpy as np
 import pytest
 
 from legoesm import constants
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    SEGMENT_SAT_ADJUST_RH_WIDTH)
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 from legoesm.grids.latlon import create_latlon_grid
@@ -157,7 +159,8 @@ def _build_harness(use_polar_filter=False, energy_fixer=False):
         C_H=None, C_E=None, albedo_ice=None, albedo_ocean=None,
         ghg_vmr_override=None, hs_newtonian_relax=None,
         energy_consistent_moisture_clip=False,
-        do_sat_adjust=True, fix_moisture=False,
+        do_sat_adjust=True, sat_adjust_rh_width=SEGMENT_SAT_ADJUST_RH_WIDTH,
+        fix_moisture=False,
         sigma_full=sigma.sigma_full, dsigma=sigma.dsigma, grid=grid,
         owned_mask=None, qv_smooth_coeff=0.02,
         fric_decay=jnp.ones((NLEV,)), hyperdiffusion_3d=hyperdiffusion_3d,
