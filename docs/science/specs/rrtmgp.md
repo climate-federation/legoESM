@@ -212,6 +212,10 @@ Against the former per-g-point lookup, 4096 columns, 32 layers, float32, clouds,
 to 1.70 GB, compile 10 to 42 s.  CPU node, 2048 columns, one g-point at a time: 4254
 to 1227 ms.  Stage by stage the two agreed to 1e-12 relative (float64) before the old
 path was removed.
+Whole model, production deck, MPAS res 6 L32, 4 A100s, 2 days, one pair of runs: steady
+segments 358 and 368 s before, 356 and 362 s after, about 1%, because radiation runs
+hourly and is a small share of the step.  Start-up grew about 110 s, so a 2-day run took
+1117 s against 997 s.  The gain is in radiation-heavy uses, not production GPU throughput.
 
 The ecRad IFS lane takes these gas optics too (user 2026-11-06; RRTMG deleted):
 `ecrad_ifs/gas_optics.py`, tables g128/g112.  ecRad's solvers, cloud optics and McICA
