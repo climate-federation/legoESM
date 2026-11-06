@@ -37,6 +37,10 @@ class SI3SurfaceForcing(NamedTuple):
     qsb_ice_bottom: jax.Array
     fhld: jax.Array
     qlead: jax.Array
+    # Sea-surface temperature [degC] (NEMO sst_m -> sst_1d), the enthalpy of
+    # the seawater flooding snow into snow-ice (`icethd_dh.F90:454`).  No
+    # default value: the dh step raises when it is absent (vote D9a).
+    sst: jax.Array | None = None
 
 
 class SI3ZDFResult(NamedTuple):
@@ -887,6 +891,11 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     ``* a_i * r1_Dt_ice``).
     """
 
+    if forcing.sst is None:
+        raise ValueError(
+            "SI3 ice_thd_dh needs SI3SurfaceForcing.sst [degC]: snow-ice flooding "
+            "takes seawater enthalpy rcp*sst (icethd_dh.F90:454); no fallback"
+        )
     _check_nemo_version(nemo_version)
     a = state.concentration
     h_i0, h_s0 = state.h_ice, state.h_snow
@@ -1281,7 +1290,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     )
     hseg_i = hseg_i.at[..., 0].set(flood)
     flood_remaining = flood
-    flood_water_enthalpy = constants.c_ocean * (forcing.t_bottom - constants.T0)
+    flood_water_enthalpy = constants.c_ocean * forcing.sst      # zEw = rcp * sst_1d
     flood_content = (
         (constants.rho_snow - constants.rho_ice)
         * flood

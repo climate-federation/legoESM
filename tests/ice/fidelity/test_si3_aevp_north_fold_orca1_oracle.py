@@ -190,9 +190,9 @@ def test_score_rejects_non_finite():
         _rel(np.array([np.nan]), np.array([1.0]))
 
 
-def test_default_keeps_periodic_and_unknown_raises(band):
+def test_default_is_orca_fold_and_unknown_raises(band):
     data, _ = band
-    assert dyn.SI3CGridAEVPConfig._field_defaults["north_fold"] == "none"
+    assert dyn.SI3CGridAEVPConfig._field_defaults["north_fold"] == "orca_f_pivot"
     state, forcing, metrics, config = _inputs(data, "tripole_typo")
     with pytest.raises(ValueError, match="unknown SI3 north_fold"):
         dyn.si3_cgrid_aevp_solver(state, forcing, metrics, config)

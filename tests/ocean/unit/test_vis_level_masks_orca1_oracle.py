@@ -124,15 +124,14 @@ def test_per_level_tendency_is_the_level_by_level_operator(w):
     assert not np.array_equal(du, su) and not np.array_equal(dv, sv)
 
 
-def test_surface_default_is_unchanged_and_no_is_active_falls_back():
+def test_per_level_default_and_no_is_active_falls_back():
     t = _sw(_windows()[0]["tmask"]); n, nk = t.shape[0], t.shape[-1]
     geo = _geo(n); u, v = _fields(n, nk, 3)
     zc = types.SimpleNamespace(is_active=jnp.asarray(t > 0))
     dflt = LatLonCGridOceanConfig.from_flat(A_h=1.0e4)
-    assert dflt.lateral_viscosity_mask_levels == "surface"
-    a = _call(dflt, geo, t, u, v, zc)
-    b = _call(dflt._replace(lateral_viscosity_mask_levels="per_level"), geo, t, u, v,
-              types.SimpleNamespace())
+    assert dflt.lateral_viscosity_mask_levels == "per_level"
+    a = _call(dflt._replace(lateral_viscosity_mask_levels="surface"), geo, t, u, v, zc)
+    b = _call(dflt, geo, t, u, v, types.SimpleNamespace())
     np.testing.assert_array_equal(a[0], b[0]); np.testing.assert_array_equal(a[1], b[1])
 
 

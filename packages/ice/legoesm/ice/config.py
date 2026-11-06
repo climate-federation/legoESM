@@ -14,6 +14,19 @@ from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
                                       NCAR_NEUTRAL_WIDTH)
 
 __param_spec__ = {
+    "SI3SwitchConfig": {
+        "scheme_key": "ice.si3_switches",
+        "excluded": {
+            "relative_width": "numerics: smoothing width of the RULE 5 ramps, not a closure",
+            "temperature_scale_K": "numerics: ramp width scale",
+            "flux_scale_W_m2": "numerics: ramp width scale",
+            "ice_switch_scale": "numerics: ramp width scale",
+            "cut_fraction_scale": "numerics: ramp width scale",
+            "full_cover_scale": "numerics: ramp width scale",
+            "snow_ramp_width_m": "numerics: ramp width; held hard pending a user decision",
+        },
+        "params": {},
+    },
     "SI3ThermoConfig": {
         "scheme_key": "ice.si3_thermo",
         "excluded": {
@@ -360,12 +373,43 @@ def validate_si3_bulk_config(config: "SeaIceConfig") -> None:
         conflicts.append("Cd_ice=Ch_ice=Ce_ice must be ORCA1's 1e-3")
     if config.emissivity_ice != constants.emissivity_ice_nemo:
         conflicts.append("emissivity_ice must be NEMO sbc_phy emiss_i")
+    if any(not width >= 0.0 for width in config.si3_switches):
+        conflicts.append("si3_switches widths and scales must be >= 0")
     if config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG:
         conflicts.append("NEMO SI3 physical-constant set is required")
     if config.n_categories != 1 or config.ponds.enabled:
         conflicts.append("only jpl=1 with ln_pnd=.false. is certified")
     if conflicts:
         raise ValueError("invalid NEMO SI3 bulk identity: " + "; ".join(conflicts))
+
+
+class SI3SwitchConfig(NamedTuple):
+    """C1 ramp widths of the SI3 surface ports (RULE 5; ``sea_ice._nemo_si3_*``).
+
+    Each ramp is ``relative_width x scale`` wide; ``relative_width = 0.0`` is
+    NEMO's hard form.  The ports have no driver lane yet, so only the Goff
+    floor (``bulk_scheme="nemo_si3_constant"``) reads this from a run today.
+
+    KNOWN DIFFERENCE (RULE 5): NEMO's switches are hard; the smooth default
+    differs from it by at most 0.034 W/m2 in qsr and 3.1e-4 in albedo over the
+    tier-4 ORCA1 record, per case in ``si3_smooth_gaps.npz``; mass terms do not
+    change.  ``relative_width = 0.0`` recovers NEMO.
+    """
+
+    relative_width: float = 0.01         # [-] user rule 2026-10-27
+    temperature_scale_K: float = 1.0     # [K] votes W3-W8
+    flux_scale_W_m2: float = 1.0         # [W/m2]; heat contents use dt x this
+    # Fraction scales set by the tier-4 ORCA1 budget sweep (votes X1-X2): with
+    # scale 1 the ramps moved qsb/fhld/qlead in hundreds of cells by O(100 W/m2).
+    ice_switch_scale: float = 1.0e-10    # [-] epsi10
+    cut_fraction_scale: float = 1.0e-3   # [-] qlead landfast "packed" cut
+    full_cover_scale: float = 1.0e-10    # [-] epsi10
+    # Snow-free test h_s == 0 [m]: 0.0 = NEMO's hard test in every mode.  Held
+    # at 0.0 pending a user decision (vote X4; PR 2376 width table).
+    snow_ramp_width_m: float = 0.0
+
+
+SI3_HARD_SWITCHES = SI3SwitchConfig(relative_width=0.0)
 
 
 class SeaIceConfig(NamedTuple):
@@ -522,6 +566,7 @@ class SeaIceConfig(NamedTuple):
     # way, and this comment replaces two claims that could not both be true.
     thermo_scheme: str = "zero_layer"
     si3: SI3ThermoConfig = SI3ThermoConfig()
+    si3_switches: SI3SwitchConfig = SI3SwitchConfig()
     ice_constants: IceConstantsConfig = IceConstantsConfig()
     # NEMO distinguishes the Dalton (Ce) and Stanton (Ch) coefficients even
     # when ORCA1 makes them equal.

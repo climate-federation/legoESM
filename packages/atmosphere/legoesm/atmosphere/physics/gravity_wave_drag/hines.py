@@ -25,8 +25,11 @@ Departures from the oracle (each voted, spread_f4/VOTES.md V43-V51):
   clamp, turbulent-vs-molecular cutoff, ``umin`` wind floor, series-vs-log
   integral) are smooth at ``config.smooth_sharpness`` (on dimensionless
   ratios, 0.01 relative width at the default 100) and exactly the oracle's
-  hard forms at ``smooth_sharpness = inf``.  The 105 km exponential-decay
-  mask is a level selection by altitude and stays hard.
+  hard forms at ``smooth_sharpness = inf``.  KNOWN DIFFERENCE: at the default
+  the drag differs from LMDZ by up to 1.97e-2 of the column's peak (14 audit
+  columns, stored per column in test_hines_lmdz_oracle.py); ``smooth_sharpness
+  = inf`` recovers LMDZ to 2.9e-13.  The 105 km exponential-decay mask is a
+  level selection by altitude and stays hard.
 
 Arrays are top-down (index 0 = model top), the LMDZ internal order.
 """
