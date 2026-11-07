@@ -119,7 +119,7 @@ def main(argv: list[str]) -> None:
     cell_area = 4.0e6
     for intensive in (True, False):
         scale = 1.0 if intensive else cell_area
-        corrected = adv2d.apply_si3_prather_source_corrections(
+        corrected = adv2d.apply_si3_prather_source_corrections_lane(
             jnp.asarray(entry * scale),
             jnp.asarray(moved * scale),
             tracer_names=adv2d.ICE_ADV2D_TRACERS,

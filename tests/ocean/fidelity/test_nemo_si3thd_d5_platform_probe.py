@@ -1648,7 +1648,7 @@ def test_r3_all_touched_functions_gradients_and_forward_bits() -> None:
             (t_s0,),
         ),
         (
-            lambda ti, si: bl_mod.p07_conductivity(ti, si, c),
+            lambda ti, si: bl_mod._si3_502_p07_conductivity(ti, si, c),
             (t_i0, s_i0),
         ),
         (

@@ -16,10 +16,10 @@ import netCDF4
 import numpy as np
 from legoesm.core import transcendentals as tr
 from legoesm.core.source_rounding import nemo_source_round
-from legoesm.ice.dynamics import si3_cgrid_aevp_solver, si3_cgrid_deformation
-from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as recipe
+from legoesm.ice.dynamics import si3_cgrid_aevp_solver, si3_lane_cgrid_deformation
+from legoesm.ice.fidelity import nemo_rheo_testcase_recipe_lane as recipe
 from legoesm.ice.fidelity.nemo_adv2d_testcase_recipe import (
-    apply_si3_prather_source_corrections,
+    apply_si3_prather_source_corrections_lane,
 )
 from legoesm.ice.transport import (
     advect_si3_prather_2d,
@@ -101,7 +101,9 @@ def _stage_breakdown(card, state, ice_step_index: int, transport_step_index: int
     def stage_rhg(st, idx):
         forcing = recipe._forcing_for_state(card, st, idx)
         dynamics = si3_cgrid_aevp_solver(st.dynamics, forcing, card.metrics, card.dynamics_config)
-        div, delta = si3_cgrid_deformation(dynamics, forcing, card.metrics, card.dynamics_config)
+        div, delta = si3_lane_cgrid_deformation(
+            dynamics, forcing, card.metrics, card.dynamics_config
+        )
         return dynamics, div, delta
 
     @jax.jit
@@ -127,7 +129,7 @@ def _stage_breakdown(card, state, ice_step_index: int, transport_step_index: int
             subcycles=card.subcycles,
         )
         contents = si3_prather_unpack_intensives(contents, cell_area, wet)
-        contents = apply_si3_prather_source_corrections(
+        contents = apply_si3_prather_source_corrections_lane(
             st.contents,
             contents,
             tracer_names=recipe.ICE_RHEO_TRACERS,

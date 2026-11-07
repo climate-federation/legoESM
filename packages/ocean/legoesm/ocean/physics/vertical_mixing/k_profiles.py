@@ -334,24 +334,6 @@ def compute_vertical_K_profiles(
     K_v_total = jnp.full(interface_shape, K_v_background, dtype=dtype)
     A_v_total = jnp.full(interface_shape, A_v_background, dtype=dtype)
 
-    # Validate the KPP / convective-viscosity composition before evaluating
-    # the closure.  In addition to failing closed, this ordering matters for
-    # bare configuration-check callers whose lightweight state intentionally
-    # supplies only the fields needed to reach this refusal.
-    conv = physics_config.convection
-    if conv.scheme == "enhanced_diffusion":
-        _ed = conv.enhanced_diffusion
-        if vmix.scheme == "kpp" and (_ed.nu_conv != 0.0 or _ed.nu_bg != 0.0):
-            raise ValueError(
-                "EnhancedDiffusionConfig convective momentum viscosity "
-                "(nu_conv/nu_bg) cannot be combined with KPP vertical mixing: "
-                "KPP already enhances interior momentum where N²<0, so "
-                "applying nu_* on top would double-count and is suppressed. "
-                "Set EnhancedDiffusionConfig(nu_conv=0.0, nu_bg=0.0) to let "
-                "KPP own convective momentum, or choose a non-KPP "
-                "vertical_mixing scheme."
-            )
-
     tke_new = None
     if vmix.scheme != "none":
         _conv_for_shared_n2 = physics_config.convection
@@ -382,6 +364,7 @@ def compute_vertical_K_profiles(
             K_v_total = K_v_total + K_vmix
             A_v_total = A_v_total + A_vmix
 
+    conv = physics_config.convection
     if conv.scheme == "enhanced_diffusion":
         _ed = conv.enhanced_diffusion
         # ---- Time levels of the two EVD trigger arms (zdfevd MIN(rn2,rn2b)).

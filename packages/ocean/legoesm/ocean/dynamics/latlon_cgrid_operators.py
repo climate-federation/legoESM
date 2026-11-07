@@ -5684,41 +5684,6 @@ def pv_flux_al81_partial_cell(
                 inv12 * (_q_se + _q_sw + _q_ne),
             )
 
-    # The stored top V row of a T-pivot ORCA mesh is an owned vector row, not
-    # a physical pole wall.  Its northern cell is supplied by ``lbc_lnk``'s
-    # fold halo.  Keep that one halo explicit for the V update below: its F
-    # corners are the ordinary F-fold image and its U transports are the
-    # signed U-fold image.  The default remains a zero pole halo.
-    _north_t = None
-    if north_fold_grid is not None:
-        _fold = getattr(north_fold_grid, "fold", None)
-        if _fold is None or not bool(getattr(_fold, "is_active", False)):
-            raise ValueError("north_fold_grid needs an active north fold")
-        from legoesm.grids.operators_latlon_cgrid import fold_perm_f
-        _src = -3 if bool(getattr(_fold, "pivot_row_stored", False)) else -2
-        # q's column 0 is the cyclic copy of native F column n; native
-        # columns live in [1:].  Fold in that native layout, then restore the
-        # west cyclic copy.  Folding ``q[:, :n]`` shifts the reflected row by
-        # two native columns (one on each side of the reflection).
-        _q_n_native = q[_src, 1:][fold_perm_f(_fold)]
-        _q_n = jnp.concatenate([_q_n_native[-1:], _q_n_native])
-        _q_sw, _q_se = q[-1, :-1], q[-1, 1:]
-        _q_nw, _q_ne = _q_n[:-1], _q_n[1:]
-        if written_order:
-            _north_t = (
-                sr(sr(_q_sw + _q_nw) + _q_ne),
-                sr(sr(_q_nw + _q_ne) + _q_se),
-                sr(sr(_q_se + _q_sw) + _q_nw),
-                sr(sr(_q_ne + _q_se) + _q_sw),
-            )
-        else:
-            _north_t = (
-                inv12 * (_q_nw + _q_sw + _q_ne),
-                inv12 * (_q_ne + _q_se + _q_nw),
-                inv12 * (_q_sw + _q_se + _q_nw),
-                inv12 * (_q_se + _q_sw + _q_ne),
-            )
-
     # --- 4. AL81 PV flux at u-faces --------------------------------
     # u-face u[j, i] is between west cell (j, i-1) and east cell
     # (j, i).  AL81 form (NEMO dyn_vor_een, translated to our index

@@ -410,11 +410,6 @@ class GMRediConfig(NamedTuple):
     # reciprocal as a separate fp64 value before multiplying, matching
     # domhgr.F90:140 + ldfslp.F90:225-226. NEMO-identity DINO and GYRE cards opt in.
     slope_metric_evaluation: str = "division"
-    # Preserve the compiled scalar assignment boundaries in ldfslp's U/V
-    # slope and Shapiro statements under JIT.  False is the historical graph;
-    # ORCA2 L2 selects True after its instrumented slope record exposed the
-    # otherwise last-bit-only fused discrepancy.
-    slope_uv_source_rounding: bool = False
     # Vertical face thickness used by ldfslp's 7 km stability limiter.
     # ``static_face`` is the historical partial-cell min construction.
     # ``nemo_qco_live`` applies NEMO's NOW-SSH r3u/r3v dilation to that raw
@@ -426,16 +421,6 @@ class GMRediConfig(NamedTuple):
     # dilated by NOW SSH, matching traldf_iso_scheme.h90:73/90. Only the two
     # DINO NEMO cards opt in.
     redi_flux_face_thickness_evaluation: str = "tpoint_jacobian"
-    # Reference face ladder consumed by the live traldf_iso thickness build.
-    # ``tpoint_alias`` preserves the historical e3t_0 alias.  ``nemo_native``
-    # resolves the separately-carried e3u_0/e3v_0 arrays and their masks; the
-    # ORCA2 L2 card selects it because its partial-cell face ladders differ from
-    # e3t_0 at coastal and bottom steps.
-    redi_flux_reference_thickness_evaluation: str = "tpoint_alias"
-    # Sea-level time level used by the live face ladder.  ``step_entry`` is the
-    # historical path.  ``rk3_kmm`` selects the materialized stage-2 half-step
-    # state consumed as Kmm by stage-3 tra_ldf; ORCA2 L2 alone opts in.
-    redi_flux_geometry_stage: str = "step_entry"
     # T-point thickness used by traldf_iso's final flux-divergence divisor.
     # ``reference_jacobian`` preserves the historical reference/Jacobian
     # thickness. ``nemo_qco_live`` uses NEMO's live e3t(Kmm), independently
@@ -462,10 +447,6 @@ class GMRediConfig(NamedTuple):
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops
     # out.  Applied after the ML ramp (NEMO order).  Oracle-matching; opt-in.
     nemo_slope_shapiro: bool = False
-    # Apply ORCA's stored T-pivot north fold to native ldf_slp operands,
-    # Shapiro halos, and the four returned slope fields (ldfslp.f90:338).
-    # L2 selects it; closed-channel DINO/VORTEX cards retain the old path.
-    nemo_slope_north_fold: bool = False
     # NEMO nn_aht_ijk_t=20 grid-size scaling: the effective kappa_Redi is
     # cfg.kappa_Redi * cos(lat) per row (Mercator dx ∝ cos φ, so
     # aht(φ) = ½·U_d·Δx(φ) with cfg.kappa_Redi = the EQUATOR value
@@ -489,15 +470,6 @@ class GMRediConfig(NamedTuple):
     # ``nemo_literal`` follows scheme.h90's left-associated zahu*wslpi*wslpi
     # expression. NEMO-identity DINO and GYRE cards opt in.
     redi_a33_evaluation: str = "normalized_square"
-    # Preserve the materialized ahtu/ahtv values and NEMO's two-pair
-    # diffusivity reduction in traldf_iso_a33.  False keeps the shared
-    # historical graph; ORCA2 L2 alone selects the source-ordered path.
-    redi_a33_source_ordering: bool = False
-    # Feed traldf_iso's Kmm face thickness with the stored WS-RK3 r3u/r3v
-    # ratios rather than re-deriving them from the interpolated SSH.  The
-    # stored north-fold row is not a valid ldf face operand, so the consumer
-    # retains the fold-aware reconstruction there.  ORCA2 L2 alone opts in.
-    redi_flux_stored_face_ratios: bool = False
     # Stage of the W-position native slopes consumed by the Redi vertical
     # flux. ``redi_tuple`` preserves the historical all-Kmm tuple.
     # ``nemo_post_slope_pair`` carries the separately computed post-stage

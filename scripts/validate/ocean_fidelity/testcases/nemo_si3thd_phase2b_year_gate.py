@@ -705,19 +705,25 @@ def _arithmetic_replay(root: Path, constants, *, plant=False) -> dict[str, objec
 def _forcing(values, dtype):
     from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing
 
-    return SI3SurfaceForcing(**{
-        name: jnp.asarray(x, dtype=dtype) for name, x in phase2.forcing_inputs(values).items()
-    })
+    phase2.require(
+        "sss" in values and values["sss"] is not None,
+        "missing sea-surface salinity (sss)",
+    )
+    return SI3SurfaceForcing(*(
+        jnp.asarray(values[name], dtype=dtype) for name in phase2.ZDF_INPUT_NAMES
+    ))
 
 
 def _batch_forcing(exact_inputs):
     from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing
 
-    rows = [phase2.forcing_inputs(values) for values in exact_inputs]
-    return SI3SurfaceForcing(**{
-        name: jnp.asarray(np.concatenate([row[name] for row in rows]), dtype=jnp.float64)
-        for name in rows[0]
-    })
+    return SI3SurfaceForcing(*(
+        jnp.asarray(
+            np.concatenate([values[name] for values in exact_inputs]),
+            dtype=jnp.float64,
+        )
+        for name in phase2.ZDF_INPUT_NAMES
+    ))
 
 
 def _exact_1d_entry(
