@@ -4641,7 +4641,7 @@ class ExperimentConfig(NamedTuple):
             # sigmoid re-parameterisation (param_collector._seed_raw), where a
             # widening is NOT inert.  Sub-5e-5 therefore reaches the model via
             # ``--q-c-diagnostic`` or a ``--config`` YAML, but NOT via ``--params``.
-            ("cloud_q_c_diagnostic", 1.0e-6, 1.0e-3),
+            ("cloud_q_c_diagnostic", 1.0e-6, 1.5e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
             ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
             ("cloud_inhomogeneity_factor", 0.3, 1.0),
