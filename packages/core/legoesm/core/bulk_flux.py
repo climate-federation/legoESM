@@ -484,11 +484,14 @@ def _grachev_psi_h(zeta_pos):
 
 
 def _wrf_cheng_brutsaert(zeta_pos, a, b):
-    # zeta**b is NaN for zeta < 0, which the COARE neutral blend feeds this
-    # branch inside its band (|zeta| < width); there it is held at its zeta = 0
-    # value (psi = 0).  ``where`` (not max) keeps the full slope at zeta = 0.
-    z = jnp.where(zeta_pos >= 0.0, zeta_pos, 0.0)
-    return -a * jnp.log(z + (1.0 + z ** b) ** (1.0 / b))
+    # zeta**b has an unbounded second derivative at 0 (b = 1.1) and is NaN
+    # below it, and this branch is evaluated at zeta <= 0 (masked side of
+    # psi_m/psi_h, inside the COARE neutral band).  There it is replaced by its
+    # tangent line at 0, -a zeta (value and slope exact at 0, so the COARE
+    # blend stays C1), and the power sees the safe placeholder 1.
+    pos = zeta_pos > 0.0
+    z = jnp.where(pos, zeta_pos, 1.0)
+    return jnp.where(pos, -a * jnp.log(z + (1.0 + z ** b) ** (1.0 / b)), -a * zeta_pos)
 
 
 def _wrf_revmm5_psi_m(zeta_pos):
@@ -506,9 +509,8 @@ def _wrf_revmm5_psi_h(zeta_pos):
 
     phi_h is C1 for zeta > 0 with slope -> 5.3 as zeta -> 0+, but psi_h'' ~
     zeta^-0.9 is unbounded there (the zeta^1.1 term of the published form).
-    In :func:`psi_h` zeta = 0 takes the unstable side, so derivatives at 0 are
-    finite; in :func:`psi_h_coare` the neutral blend evaluates this branch at
-    0, where the second derivative is -inf (first derivative finite).
+    At zeta <= 0 the branch is its tangent line at 0 (see
+    :func:`_wrf_cheng_brutsaert`), so every derivative order is finite there.
     """
     return _wrf_cheng_brutsaert(zeta_pos, _WRF_STABLE_A_H, _WRF_STABLE_B_H)
 

@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from jax.test_util import check_grads
 
-from legoesm.core.bulk_flux import _UNSTABLE_PSI, psi_h, psi_m
+from legoesm.core.bulk_flux import _UNSTABLE_PSI, psi_h, psi_h_coare, psi_m, psi_m_coare
 
 jax.config.update("jax_enable_x64", True)
 
@@ -79,20 +79,22 @@ def test_neutral_limit(f):
 def test_phi_continuous_at_zero_and_c1_elsewhere(stable, unstable):
     """phi continuous at 0 (slope may jump there only); C1 everywhere else.
 
-    Each branch is one analytic expression on its open half-line.  C1 is
-    checked on a dense grid: every step change of the autodiff slope phi' must
-    be explained by the local curvature, |dphi'| <= h max|phi''| (1 + 10%), so
-    a planted slope jump of 0.02 between two grid points fails.
+    The C1 claim rests on the algebra: each branch is ONE analytic expression
+    on its open half-line, so there is no branch point besides 0.  The grid is
+    a supplementary guard: every step change of the autodiff slope phi' must
+    be explained by the local curvature, |dphi'| <= h max|phi''| (1 + 10%);
+    log spacing keeps the steps small where psi_h'' ~ zeta^-0.9.
     """
     eps = 1e-9
     assert abs(float(_phi(stable)(eps)) - float(_phi(unstable)(-eps))) < 1e-6
-    for f, grid in ((stable, np.linspace(1e-2, 9.99, 4001)), (unstable, -np.linspace(1e-2, 9.99, 4001))):
+    g = np.geomspace(1e-4, 9.99, 20001)
+    for f, grid in ((stable, g), (unstable, -g)):
         dphi_f = jax.grad(_phi(f))
         z = jnp.asarray(grid)
         dphi = np.asarray(jax.vmap(dphi_f)(z))
         d2phi = np.abs(np.asarray(jax.vmap(jax.grad(dphi_f))(z)))
         assert np.all(np.isfinite(dphi)) and np.all(np.isfinite(d2phi))
-        h = abs(grid[1] - grid[0])
+        h = np.abs(np.diff(grid))
         bound = 1.1 * h * np.maximum(d2phi[1:], d2phi[:-1]) + 1e-9
         assert np.all(np.abs(np.diff(dphi)) <= bound)
 
@@ -119,7 +121,10 @@ def test_gradients(z0):
             check_grads(f, (jnp.asarray(z0),), order=2, modes=["rev"])
 
 
-def test_masked_stable_branch_gradient_finite_on_unstable_side():
-    for f in (lambda z: psi_m(z, "wrf_revmm5"), lambda z: psi_h(z, "wrf_revmm5")):
-        g = jax.grad(jax.grad(f))(jnp.asarray(-0.5))
-        assert np.isfinite(float(g))
+@pytest.mark.parametrize("z0", [-0.5, -5e-4, 0.0, 5e-4])
+def test_second_derivatives_finite_both_modes_incl_coare(z0):
+    """Masked stable branch never feeds inf/NaN, in reverse and forward mode."""
+    for f in (psi_m, psi_h, psi_m_coare, psi_h_coare):
+        g = lambda z, f=f: f(z, "wrf_revmm5")
+        for d2 in (jax.grad(jax.grad(g)), jax.jacfwd(jax.jacfwd(g))):
+            assert np.isfinite(float(d2(jnp.asarray(z0)))), (f.__name__, z0)
