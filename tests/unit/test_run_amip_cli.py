@@ -621,8 +621,11 @@ def test_land_canopy_max_iters_flag_flows_to_config():
     # the calibrated decks (land_calibrated_physics) accept any cap: the cap
     # is a solver setting, not one of the values the tables were fitted under
     cfg._replace(land_canopy_max_iters=10).validate_strict()
-    src = inspect.getsource(ModelDriver._setup_multilayer_land)
-    assert "max_iters=int(self.config.land_canopy_max_iters)" in src
+    from legoesm.driver.model_driver import build_multilayer_land_tile
+    assert "build_multilayer_land_tile(" in inspect.getsource(
+        ModelDriver._setup_multilayer_land)
+    src = inspect.getsource(build_multilayer_land_tile)
+    assert "max_iters=int(config.land_canopy_max_iters)" in src
     # ... and the calibration applied right after it must not put 60 back
     from legoesm.land.config import (
         MultiLayerLandConfig, apply_biophysics_lmip_two_leaf,
