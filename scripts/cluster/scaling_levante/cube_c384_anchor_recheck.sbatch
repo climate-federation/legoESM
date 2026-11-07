@@ -41,7 +41,7 @@ JAX_ENABLE_X64=0 srun --ntasks=24 --distribution=block:block \
   --cpu-bind=cores --kill-on-bad-exit=1 \
   "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt 2 --resolution 384 --nlev 60 --steps 12 --warmup 3 \
-    --closed-loop --multicontroller \
+    --closed-loop --multicontroller --halo-grouping current \
     --out "$OUTDIR/c384_kt2_np24_clean.jsonl" \
   || { echo "recheck FAILED"; exit 1; }
 "$PY" - "$OUTDIR/c384_kt2_np24_clean.jsonl" <<'EOF'
