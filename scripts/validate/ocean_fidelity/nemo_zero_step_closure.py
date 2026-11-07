@@ -45,7 +45,7 @@ mismatch of the closure AS THIS PROBE RECONSTRUCTS IT.  It is NOT a clean
 "our mixing length is 15% short" diagnosis, because the reconstruction differs
 from the model's own tripole path in three named ways: N2 comes from
 ``n2_mode="insitu"`` rather than NEMO's ``rn2``; the stress-dependent NEMO
-surface anchor is replaced by the windless ``mxl0_min_m`` floor (the snapshot
+surface anchor is replaced by the windless derived ``rmxl_min`` floor (the snapshot
 carries no taum at the restart instant); and the bottom row uses the legacy
 ``e3t`` proxy because NEMO's extra terminal slot is unavailable here.  Quote
 the number as "the probe's reconstructed closure", never as the model's.
@@ -203,7 +203,7 @@ def main() -> int:
     from legoesm.ocean.eos import nemo_seos_eos
     from legoesm.ocean.physics.vertical_mixing._shared import compute_N2
     from legoesm.ocean.physics.vertical_mixing.tke import (
-        compute_K_from_tke, compute_mixing_lengths,
+        _mxl0_anchor_floor, compute_K_from_tke, compute_mixing_lengths,
     )
     sys.path.insert(0, str(_REPO / "scripts" / "run"))
     from run_omip_core2 import orca1_zdftke_config
@@ -304,15 +304,17 @@ def main() -> int:
     dz_ref_1d = np.nanmax(dz_c, axis=0)
     # REAL ln_mxl0 SURFACE ANCHOR (codex 9405117 #4 named the windless floor as
     # a reconstruction gap, and it is a big one). NEMO: zraug = vkarmn*2e5/
-    # (rho0*grav); zmxlm(1) = zraug*taum, floored at rn_mxl0 (zdftke.F90:575,
-    # 602) -- LINEAR in the stress modulus, not a square root. zraug is ~7.95,
+    # (rho0*grav); zmxlm(1) = zraug*taum*tmask, floored at rn_mxl0 (shipped
+    # zdftke.F90:575,602,640-642) -- LINEAR in the stress modulus, not a square
+    # root. zraug is ~7.95,
     # so a 0.2 N/m2 wind gives ~1.6 m and a Southern Ocean storm ~2.8 m,
     # against the 0.04 m floor this probe used before. A too-short anchor
     # shortens lup near the surface and therefore UNDERSTATES our l_k -- which
     # is the direction of the 0.86 zero-step ratio, so the ratio may have been
     # measuring the probe rather than the model.
-    _anchor = np.full((ncol,), cfg.mxl0_min_m)
-    _anchor_src = f"windless floor rn_mxl0={cfg.mxl0_min_m:g} m"
+    _rmxl_min = _mxl0_anchor_floor(cfg)
+    _anchor = np.full((ncol,), _rmxl_min)
+    _anchor_src = f"windless derived rmxl_min={_rmxl_min:.17g} m"
     if a.trd_tfile:
         import netCDF4 as _nc
         _ds = _nc.Dataset(a.trd_tfile)
@@ -322,7 +324,7 @@ def main() -> int:
         finally:
             _ds.close()
         _zraug = 0.4 * 2.0e5 / (constants.rho_ocean * constants.g)
-        _anchor = np.maximum(cfg.mxl0_min_m,
+        _anchor = np.maximum(_rmxl_min,
                              _zraug * np.maximum(_tm.reshape(ncol), 0.0))
         _anchor_src = (f"NEMO zraug={_zraug:.3f} x taum  "
                        f"(median {np.median(_anchor):.3f} m, "

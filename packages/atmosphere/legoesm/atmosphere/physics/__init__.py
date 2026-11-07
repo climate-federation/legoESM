@@ -27,7 +27,6 @@ from legoesm.atmosphere.physics.combined import (
 from legoesm.atmosphere.physics.neural_physics import (
     NeuralPhysics,
     make_neural_step_unified,
-    make_hybrid_step_unified,
     build_column_physics,
     make_column_physics_fn,
 )

@@ -183,16 +183,6 @@ def generate_correlated_gaussian_noise(
     return field
 
 
-def generate_perlin_like_noise(
-    latitude: xr.DataArray,
-    longitude: xr.DataArray,
-    seed: int,
-    *,
-    config: PerturbationConfig,
-) -> np.ndarray:
-    return generate_correlated_gaussian_noise(latitude, longitude, seed, config=config)
-
-
 def _broadcast_noise_to_field(field: xr.DataArray, noise: np.ndarray) -> np.ndarray:
     noise_field = xr.DataArray(
         noise,
@@ -518,7 +508,6 @@ __all__ = [
     "build_member_daily_mae_table",
     "build_member_daily_rmse_table",
     "generate_correlated_gaussian_noise",
-    "generate_perlin_like_noise",
     "member_name",
     "member_seed",
     "open_member_forecasts",

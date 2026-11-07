@@ -1,0 +1,34 @@
+--- traldf_iso.F90
++++ traldf_iso.F90
+@@ -33,6 +33,10 @@
+    USE phycst         ! physical constants
+    USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
+    USE lib_fortran    ! to use sign with key_nosignedzero
++   USE vortex_r23_ldf_terms, ONLY : r227_iso_active, r227_iso_begin, r227_iso_finish, &
++      & r227_dit, r227_djt, r227_dkt, r227_A11, r227_A22, r227_A13, r227_A23, &
++      & r227_hmsku, r227_hmskv, r227_fu, r227_fv, r227_vmsku, r227_vmskv, &
++      & r227_ahu_w, r227_ahv_w, r227_A31, r227_A32, r227_fw_lower, r227_fw_upper
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -133,6 +137,7 @@
+ !!gm idea
+       !
+       CALL traldf_iso_a33( Kmm, ah_wslp2, akz )   ! calculate  a33 element   (ah_wslp2 and akz)
++      IF( kt == nit000 )   CALL r227_iso_begin( pt, Krhs )
+       !
+       itra = SIZE( pt, dim = 4 )                   ! number of tracers
+       !
+@@ -160,6 +165,12 @@
+          !
+       END DO                          !==  end tracer loop  ==!
+       !
++      IF( r227_iso_active )   &
++         CALL r227_iso_finish( kt, Kbb, Kmm, Krhs, pt, e3t_3d, e3u_3d, e3v_3d, &
++         & tmask, umask, vmask, wmask, ahtu, ahtv, uslp, vslp, wslpi, wslpj, &
++         & ah_wslp2, akz, r3t(:,:,Kmm), r3u(:,:,Kmm), r3v(:,:,Kmm), e2_e1u, &
++         & e1_e2v, e2u, e1v, e1t, e2t, e1e2t, r1_e1e2t, e3w_1d )
++      !
+    END SUBROUTINE traldf_iso_lap
+ 
+ 

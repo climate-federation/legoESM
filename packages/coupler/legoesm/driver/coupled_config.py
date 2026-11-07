@@ -42,8 +42,6 @@ class CoupledConfig(NamedTuple):
     carbon_land : str
         Land carbon scheme: ``"none"``, ``"differland"`` (DALEC 6-pool),
         ``"seasonal"`` (prescribed NEE cycle).
-    carbon_ocean : bool
-        Enable ocean biogeochemistry CO2 exchange.
     co2_tracer : bool
         Enable prognostic atmospheric CO2 transport.
     co2_ppmv_init : float
@@ -122,7 +120,6 @@ class CoupledConfig(NamedTuple):
     # Carbon cycle
     carbon_active: bool = False
     carbon_land: str = "none"
-    carbon_ocean: bool = False
     co2_tracer: bool = False
     co2_ppmv_init: float = 415.0
     # Spun-up land carbon IC (finidat).  Path to a ``global_carbon_ic.npz`` built
@@ -154,19 +151,23 @@ class CoupledConfig(NamedTuple):
     # effect on radiation is otherwise silently dropped.
     couple_surface_radiation: bool = False
 
-    # SHARED air-sea surface fluxes (close the air-sea heat+water budget).
+    # SHARED air-sea surface fluxes.
     # When True, the coupler's tile-blended surface sensible / latent heat flux
     # (computed with ITS bulk scheme, q_sfc = 0.98*q_sat mixing ratio, and the
     # ocean-tile C_H/C_E) is fed back to the ATMOSPHERE's surface tendency each
-    # segment, so the heat + water leaving the atmosphere EQUALS what the
-    # coupler feeds the ocean -- the model becomes flux-coupled, not just
-    # SST-coupled, and the air-sea budget closes.  Default False keeps existing
+    # segment.  With the prognostic 3D ocean, whose q_net sinks the same
+    # ocean-tile fluxes, the heat + water leaving the atmosphere then EQUALS
+    # what the ocean receives and the air-sea budget closes.  It does NOT close
+    # it for the slab / two-layer ocean: that ocean computes its own turbulent
+    # fluxes, albedo and emissivity from the atmosphere forcing and never reads
+    # the coupler's ocean-tile fluxes.  Default False keeps existing
     # coupled runs byte-identical (the atmosphere computes its own bulk surface
     # fluxes, independent of the ocean-driving fluxes); recommended ON after a
-    # coupled validation run.  Incompatible with a turbulence / unified-physics
-    # scheme that owns surface exchange (the pipeline raises) -- use the bulk-BL
-    # surface path.  Lagged one coupling segment (explicit coupling), exactly
-    # like ``couple_surface_radiation``.
+    # coupled validation run.  With a turbulence scheme the shared flux is
+    # folded into the scheme's lower boundary condition (it replaces the
+    # scheme's own bulk flux); the joint learned physics_parameterization has
+    # no such hook and the pipeline raises.  Lagged one coupling segment
+    # (explicit coupling), exactly like ``couple_surface_radiation``.
     couple_surface_fluxes: bool = False
 
     # Warm-start the land soil at the atmosphere's lat-structured near-surface
@@ -352,7 +353,7 @@ def preset_slab_carbon(**overrides) -> CoupledConfig:
 
 
 def preset_full_coupled(**overrides) -> CoupledConfig:
-    """Slab ocean + Richards' land + land & ocean carbon + atm CO2."""
+    """Slab ocean + Richards' land + land carbon + atm CO2."""
     defaults = dict(
         ocean_mode="slab",
         ocean_config=SimpleOceanConfig(mode="slab", h_mix=50.0),
@@ -364,7 +365,6 @@ def preset_full_coupled(**overrides) -> CoupledConfig:
         f_land_mode="analytical",
         carbon_active=True,
         carbon_land="differland",
-        carbon_ocean=True,
         co2_tracer=True,
     )
     defaults.update(overrides)

@@ -395,7 +395,8 @@ def test_bechtold_orchestrator_one_step_finite():
     )
     ncol = 6 * 4 * 4
     ps = init_physics_state(ncol, 12, cfg)
-    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0,
+                              surface_bulk_coeffs=None)
     tend, ps_out = physics_fn(state, grid, sigma, phys_state=ps)
     assert ps_out.conv_prog_profile.shape == (ncol, 12)
     assert ps_out.conv_stoch_state.shape == (ncol,)
@@ -435,7 +436,8 @@ def test_bechtold_orchestrator_threads_prng_key():
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
     ncol = 6 * 4 * 4
-    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0,
+                              surface_bulk_coeffs=None)
 
     ps_seed_0 = init_physics_state(ncol, 12, cfg, prng_seed=0)
     ps_seed_1 = init_physics_state(ncol, 12, cfg, prng_seed=1)
@@ -490,7 +492,8 @@ def test_bechtold_orchestrator_grad_through_phys_state():
     )
     ncol = 6 * 4 * 4
     ps = init_physics_state(ncol, 12, cfg, prng_seed=42)
-    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0,
+                              surface_bulk_coeffs=None)
 
     def loss(scale):
         scaled_T = state.T.replace(data=scale * state.T.data)
@@ -528,7 +531,8 @@ def test_bechtold_orchestrator_does_not_advance_key_when_stochastic_off():
     )
     ncol = 6 * 4 * 4
     ps = init_physics_state(ncol, 12, cfg, prng_seed=11)
-    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0,
+                              surface_bulk_coeffs=None)
 
     _, ps_out = physics_fn(state, grid, sigma, phys_state=ps)
     # No advance — bit-identical key.
@@ -574,7 +578,8 @@ def test_bechtold_orchestrator_with_radiation_merges_dict_correctly():
     )
     ncol = 6 * 4 * 4
     ps = init_physics_state(ncol, 12, cfg, prng_seed=7)
-    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0,
+                              surface_bulk_coeffs=None)
     tend, ps_out = physics_fn(state, grid, sigma, phys_state=ps)
 
     # Each PhysicsState slot must be a JAX array of the right shape —
@@ -1768,7 +1773,7 @@ def test_ifs_profile_scale_limit_matches_oracle_semantics():
 # ---------------------------------------------------------------------------
 
 from legoesm.atmosphere.physics.convection.bechtold import (  # noqa: E402
-    _ifs_subcloud_rain_evaporation,
+    ifs_subcloud_rain_evaporation,
     _IFS_RCPECONS,
     _IFS_EVAP_EXPONENT,
     _IFS_RCVRFACTOR,
@@ -1845,7 +1850,7 @@ def test_ifs_subcloud_evap_analytic_fortran_mirror():
     for deep in (True, False):                          # both area branches
         dw_case = np.array([1.0 if deep else 0.0])
         evap_exp = mirror(q, qsat, dq_r, below, deep)
-        evap_rate, rain_scale, _ = _ifs_subcloud_rain_evaporation(
+        evap_rate, rain_scale, _ = ifs_subcloud_rain_evaporation(
             jnp.asarray(q), jnp.asarray(qsat), jnp.asarray(p_half),
             jnp.asarray(dp), jnp.asarray(dq_r), jnp.asarray(below),
             jnp.asarray(rh_b), jnp.asarray(rh_t), jnp.asarray(dw_case), dt,
@@ -1879,7 +1884,7 @@ def test_ifs_subcloud_evap_rh_break_and_conservation():
     dw = jnp.array([0.0])                                # non-deep branch
 
     def run(q):
-        e, sc, _ = _ifs_subcloud_rain_evaporation(
+        e, sc, _ = ifs_subcloud_rain_evaporation(
             q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
         return e, sc
 
@@ -1996,7 +2001,7 @@ def test_ifs_subcloud_evap_fractional_gate_is_convex_blend():
 
     def evap_with_gate(g_mid):
         below = jnp.asarray([[0.0, g_mid, 0.0]])        # only the middle layer
-        e, _, _ = _ifs_subcloud_rain_evaporation(
+        e, _, _ = ifs_subcloud_rain_evaporation(
             q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
         return float(e[0, 1] * dp[0, 1] / constants.g)
 
@@ -2288,14 +2293,14 @@ def test_ifs_ztaures_matches_oracle_piecewise():
     capped at 3 beyond 125 km — pinned at the oracle's own branch points,
     and the turnover tau actually consumes it (integration toggle)."""
     import math
-    from legoesm.atmosphere.physics.convection.bechtold import _ifs_ztaures
-    assert _ifs_ztaures(0.0) == 1.0                          # legacy sentinel
-    assert _ifs_ztaures(-5.0) == 1.0
-    assert _ifs_ztaures(50.0) == _ifs_ztaures(100.0)         # 100 m floor
-    assert abs(_ifs_ztaures(4.0e3) - (1 + math.log(2.0) ** 2)) < 1e-12
-    assert abs(_ifs_ztaures(8.0e3) - (1 + 1.6 * 8e3 / 125e3)) < 1e-12
-    assert abs(_ifs_ztaures(50.0e3) - (1 + 1.6 * 50e3 / 125e3)) < 1e-12
-    assert _ifs_ztaures(200.0e3) == 3.0                      # coarse cap
+    from legoesm.atmosphere.physics.convection.mass_flux import ifs_ztaures
+    assert ifs_ztaures(0.0) == 1.0                          # legacy sentinel
+    assert ifs_ztaures(-5.0) == 1.0
+    assert ifs_ztaures(50.0) == ifs_ztaures(100.0)         # 100 m floor
+    assert abs(ifs_ztaures(4.0e3) - (1 + math.log(2.0) ** 2)) < 1e-12
+    assert abs(ifs_ztaures(8.0e3) - (1 + 1.6 * 8e3 / 125e3)) < 1e-12
+    assert abs(ifs_ztaures(50.0e3) - (1 + 1.6 * 50e3 / 125e3)) < 1e-12
+    assert ifs_ztaures(200.0e3) == 3.0                      # coarse cap
     # integration: dx changes the mass flux on a convecting column.  Probed
     # on the tau-only turnover path — under the full CAPE closure this
     # fixture's mb_scale is pinned by the column-uniform profile limiter
@@ -2828,13 +2833,13 @@ def test_ifs_land_rhebc_blend_and_toggle():
     below = jnp.zeros((ncol, nlev)).at[:, 3:].set(1.0)
     rh_b, rh_t = jnp.array([0.9]), jnp.array([0.7])
     dw = jnp.array([1.0])
-    e_oc, _, _ = _ifs_subcloud_rain_evaporation(
+    e_oc, _, _ = ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
-    e_oc2, _, _ = _ifs_subcloud_rain_evaporation(
+    e_oc2, _, _ = ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
         land_frac=None)
     assert jnp.array_equal(e_oc, e_oc2), "None land_frac must be inert"
-    e_land, _, _ = _ifs_subcloud_rain_evaporation(
+    e_land, _, _ = ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
         land_frac=jnp.array([1.0]))
     # deep land break 0.70 < ocean 0.85: the ZRMIN bound releases LESS water
@@ -2896,7 +2901,7 @@ def test_ifs_snow_melt_march_oracle_pin():
     below = jnp.zeros((1, 4))                         # evap gate closed
     rh_b, rh_t = jnp.array([0.9]), jnp.array([0.8])
     dw = jnp.array([1.0])
-    e, sc, melt = _ifs_subcloud_rain_evaporation(
+    e, sc, melt = ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
         snow_melt=True, T=T, p_full=pf)
     # hand march (saturated => t_wet = T; alpha=0 at T<=tf, else FOEALFCU(T))
@@ -2978,7 +2983,7 @@ def test_ifs_snow_melt_same_layer_no_evap():
     q = qsat * 0.3                                   # dry: evap wants to fire
     dq_r = jnp.zeros((1, 4)).at[:, 0].set(4e-7)      # cold source -> all snow
     below = jnp.ones((1, 4))                         # evap gate OPEN everywhere
-    e, _, melt = _ifs_subcloud_rain_evaporation(
+    e, _, melt = ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, jnp.array([0.9]), jnp.array([0.8]),
         jnp.array([1.0]), dt, snow_melt=True, T=T, p_full=pf)
     # first melt happens at k=1 (first warm layer)

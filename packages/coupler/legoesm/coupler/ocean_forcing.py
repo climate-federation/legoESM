@@ -55,6 +55,30 @@ from legoesm.ocean.state import OceanSurfaceForcing
 _SW_TRANSMITTANCE_ICE = 0.03    # [-] fraction of SW penetrating ice+snow to ocean
 
 
+def add_frazil_ice(ice_state, ice_config, ice_mass_kg_m2):
+    """Deposit frazil ice exported by the ocean column into the slab ice tile.
+
+    ``ice_mass_kg_m2`` is :func:`legoesm.ocean.physics.frazil.apply_frazil`'s
+    surface export (kg of ice per unit cell area, >= 0).  The ocean side has
+    already removed the liquid mass, rejected the salt at
+    ``ice_config.S_ice_new`` and kept the latent heat, so the tile only gains
+    volume, with the CICE ``add_new_ice`` convention the lead-freeze path in
+    :mod:`legoesm.ice.sea_ice` uses: new ice fills lead area at the nominal
+    thickness ``h_new_ice`` (capped at the open-water fraction) and the mean
+    thickness follows from volume conservation.  Single-category slab only.
+    """
+    h, A = ice_state.h_ice.data, ice_state.concentration.data
+    V_new = jnp.maximum(ice_mass_kg_m2, 0.0) / ice_config.rho_ice
+    dA = jnp.minimum(V_new / ice_config.h_new_ice, jnp.maximum(1.0 - A, 0.0))
+    A_new = jnp.clip(A + dA, 0.0, 1.0)
+    V_new_total = h * A + V_new
+    h_new = jnp.where(A_new > 0.0, V_new_total / jnp.maximum(A_new, 1e-12), 0.0)
+    return ice_state._replace(
+        h_ice=ice_state.h_ice.replace(data=h_new),
+        concentration=ice_state.concentration.replace(data=A_new),
+    )
+
+
 def ice_ocean_forcing_from_ice_response(
     ice_resp: TileResponse,
     fracs: TileFractions,
@@ -110,6 +134,7 @@ def blend_ice_ocean_forcing(
     alpha_ocean: float | None = None,
     sw_transmittance_ice: float = _SW_TRANSMITTANCE_ICE,
     ice_owns_snow_reservoir: bool = False,
+    ice_precip=None,
 ):
     """Partition a full-cell open-ocean forcing between the open-water fraction
     ``f_open = 1 - A`` and the sea-ice tile, and add the ice->ocean exchange —
@@ -142,6 +167,13 @@ def blend_ice_ocean_forcing(
       This matches the coupled-ESM gate (``coupled_esm_driver`` uses_new_physics
       -> ``f_ocean*P``).  ``runoff`` is always full-cell; only ``evap`` (and now,
       when gated, ``precip``) is rescaled in ``open_fw``.
+
+    ``ice_precip`` (default ``None`` = ``A*P``) is the per-cell precip rate
+    the ice tile accounts for (forwarded to the ocean or stored in its snow
+    pack); the direct channel then carries ``P - ice_precip``.  A caller whose
+    ice tile takes precip at a different cover than ``ice_concentration`` (rain
+    at the post-step cover, tracked snow at the thermodynamics-time cover)
+    passes it so open + ice share sum to exactly ``P``.
 
     ``ocean_mask`` (1 = ocean, 0 = land; ``None`` = all ocean) zeroes the ice
     concentration AND every ice->ocean channel on land cells, so a spurious
@@ -257,10 +289,12 @@ def blend_ice_ocean_forcing(
         # ocean; f_open in [0,1] is a pure fraction -> positive scaling, no sign
         # flip) or the A*P ice-fraction precip is counted twice.  Mirrors
         # coupled_esm_driver's f_ocean*P gate.
-        precip = (
-            open_fw.precip * f_open
-            if ice_owns_snow_reservoir else open_fw.precip
-        )
+        if not ice_owns_snow_reservoir:
+            precip = open_fw.precip
+        elif ice_precip is None:
+            precip = open_fw.precip * f_open
+        else:
+            precip = open_fw.precip - jnp.where(wet, ice_precip, 0.0)
         fw = FreshwaterForcing(
             precip=precip,
             evap=(open_fw.evap * f_open if open_fw.evap is not None else z),

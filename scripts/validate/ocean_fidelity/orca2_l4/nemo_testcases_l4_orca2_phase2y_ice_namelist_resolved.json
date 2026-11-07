@@ -1,0 +1,72 @@
+{
+  "differing_resolved_field_count": 1,
+  "differing_resolved_fields": [
+    {
+      "block": "namini",
+      "field": "nn_iceini_file",
+      "orca1_reachability": "namini block selector (ice initial-state source), executed regardless of nn_icesal -- not part of icethd_sal.F90 dispatch",
+      "orca1_resolved": "1",
+      "variant_reachability": "namini block selector (ice initial-state source), executed regardless of nn_icesal -- not part of icethd_sal.F90 dispatch",
+      "variant_resolved": "0"
+    }
+  ],
+  "named_five_ref_differences": [
+    {
+      "block": "namthd_sal",
+      "field": "rn_time_gd",
+      "orca1_ref_default": "1.73e+6",
+      "orca1_resolved": "1.73e+6",
+      "reachable_under_nn_icesal_2": "REACHABLE under nn_icesal=2: icethd_sal.F90 CASE(2) (lines 207-249) reads this field",
+      "resolved_equal": true,
+      "variant_ref_default": "1.728e+5",
+      "variant_resolved": "1.73e+6"
+    },
+    {
+      "block": "namthd_sal",
+      "field": "rn_rc_rjw",
+      "orca1_ref_default": "9.0",
+      "orca1_resolved": "9.0",
+      "reachable_under_nn_icesal_2": "UNREACHABLE under nn_icesal=2: icethd_sal.F90 reads this field only inside CASE(4); CASE(2) (lines 207-249) never references it",
+      "resolved_equal": true,
+      "variant_ref_default": "8.0",
+      "variant_resolved": "9.0"
+    },
+    {
+      "block": "namthd_sal",
+      "field": "rn_alpha_gn",
+      "orca1_ref_default": "5.1e-4",
+      "orca1_resolved": "5.4e-4",
+      "reachable_under_nn_icesal_2": "UNREACHABLE under nn_icesal=2: icethd_sal.F90 reads this field only inside CASE(4); CASE(2) (lines 207-249) never references it",
+      "resolved_equal": true,
+      "variant_ref_default": "4.6e-4",
+      "variant_resolved": "5.4e-4"
+    },
+    {
+      "block": "namthd_sal",
+      "field": "rn_rc_gn",
+      "orca1_ref_default": "10.0",
+      "orca1_resolved": "6.4",
+      "reachable_under_nn_icesal_2": "UNREACHABLE under nn_icesal=2: icethd_sal.F90 reads this field only inside CASE(4); CASE(2) (lines 207-249) never references it",
+      "resolved_equal": true,
+      "variant_ref_default": "8.1",
+      "variant_resolved": "6.4"
+    },
+    {
+      "block": "namthd_sal",
+      "field": "rn_alpha_cw",
+      "orca1_ref_default": "4.8e-7",
+      "orca1_resolved": "9.e-7",
+      "reachable_under_nn_icesal_2": "UNREACHABLE under nn_icesal=2: icethd_sal.F90 reads this field only inside CASE(4); CASE(2) (lines 207-249) never references it",
+      "resolved_equal": true,
+      "variant_ref_default": "5.0e-7",
+      "variant_resolved": "9.e-7"
+    }
+  ],
+  "orca1_cfg": "/data/abyssal/dbalwada/ORCA1-omip/EXPREF/namelist_ice_cfg",
+  "orca1_ref": "/data/abyssal/dbalwada/ORCA1-omip/EXPREF/namelist_ice_ref",
+  "resolved_field_count": 185,
+  "resolved_nn_icesal_orca1": "2",
+  "resolved_nn_icesal_variant": "2",
+  "variant_cfg": "/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_orca1ice_phase2x_a_10step_np2/namelist_ice_cfg",
+  "variant_ref": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/SHARED/namelist_ice_ref"
+}

@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+from legoesm import constants
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -112,7 +114,7 @@ def test_the_spacing_gate_is_not_self_referential(W):
     both.  S1c pins the spacing against an independent ground truth (the mesh's
     own T-point latitudes) and must fail on either mutation."""
     import acc_thermal_wind as A
-    R = 6371229.0
+    R = constants.R_earth
     gt = np.deg2rad(np.diff(np.asarray(A.gphit, float)[:, 25])) * R
     good = float(np.max(np.abs(W._e2v[:-1, 25] - gt) / gt))
     assert good < 1e-3

@@ -35,6 +35,8 @@ from legoesm.ml.normalization import (
 )
 from legoesm.ml.channel_packing import pack_sw_state, unpack_sw_output
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.atmosphere.dynamics.neural.sfno_pe import check_state_update_dt
 
 
 class SFNOShallowWaterConfig(NamedTuple):
@@ -48,8 +50,8 @@ class SFNOShallowWaterConfig(NamedTuple):
         "state_update" or "hybrid_tendencies".
     dt_sfno : float
         Time step for SFNO predictions [s]. In state_update mode,
-        this is the interval between SFNO calls. In hybrid mode,
-        this is the SFNO tendency evaluation interval.
+        this is the interval between SFNO calls, and ``step`` refuses any
+        other ``dt``. Unused in hybrid mode (the integrator uses ``dt``).
     g : float
         Gravitational acceleration [m/s^2].
     use_normalization : bool
@@ -65,7 +67,7 @@ class SFNOShallowWaterConfig(NamedTuple):
     time_integrator: str = "ssp_rk3"
 
 
-class SFNOShallowWaterModel:
+class SFNOShallowWaterModel(IntegrationMixin):
     """SFNO-based shallow water model on the sphere.
 
     Parameters
@@ -127,6 +129,7 @@ class SFNOShallowWaterModel:
             Advanced state.
         """
         if self.config.mode == "state_update":
+            check_state_update_dt(dt, self.config.dt_sfno)
             return self._step_state_update(state)
         elif self.config.mode == "hybrid_tendencies":
             return self._step_hybrid(state, dt)
@@ -182,36 +185,3 @@ class SFNOShallowWaterModel:
             return unpack_sw_output(y, s, self.grid, mode="tendencies")
 
         return dispatch_integrator(state, tendency_fn, dt, self.config.time_integrator)
-
-    def integrate(
-        self,
-        state: SpectralSWState,
-        duration: float,
-        dt: float,
-        save_every: int = 1,
-    ) -> tuple[SpectralSWState, list]:
-        """Integrate forward for a given duration.
-
-        Parameters
-        ----------
-        state : SpectralSWState
-            Initial state.
-        duration : float
-            Total integration time [s].
-        dt : float
-            Time step [s].
-        save_every : int
-            Save state every N steps.
-
-        Returns
-        -------
-        (final_state, trajectory)
-            Final state and list of saved states.
-        """
-        n_steps = int(duration / dt)
-        trajectory = [state]
-        for i in range(n_steps):
-            state = self.step(state, dt)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-        return state, trajectory

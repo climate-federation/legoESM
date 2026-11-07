@@ -239,8 +239,15 @@ def test_the_attribute_is_load_bearing(matrix_mod):
 
 
 def test_every_voronoi_grid_reads_area_from_areaCell(matrix_mod):
-    """Not just the global one: regional and channel meshes too."""
-    m = matrix_mod
+    """Not just the global one: regional and channel meshes too.
+
+    The grid-family tables live in the shared energy-diagnostics module both
+    matrix runners now call; ``matrix_mod`` only delegates to it."""
+    spec = importlib.util.spec_from_file_location(
+        "_rm_energy_diagnostics_test",
+        _REPO / "scripts" / "matrix" / "ocean_test_matrix" / "energy_diagnostics.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
     assert "mpas" in m._MPAS_GRID_TYPES
     for g in ("mpas_regional", "mpas_channel"):
         assert g in m._MPAS_GRID_TYPES, (

@@ -43,7 +43,6 @@ from legoesm.ml.ucast import UCast, UCastConfig
 # re-exported here, since legoesm.ml must not import the ocean component
 # (component independence; see import-linter contracts).
 from legoesm.ml.channel_packing import (
-    SWChannelSpec,
     PE3DChannelSpec,
     WB2_PRESSURE_LEVELS,
     pack_sw_state,
@@ -56,8 +55,7 @@ from legoesm.ml.conservation import (
     correct_moisture,
     clip_humidity,
     correct_ocean_volume,
-    correct_ocean_heat,
-    correct_ocean_salt,
+    correct_ocean_tracer,
 )
 
 

@@ -75,13 +75,8 @@ def _load_template(name: str) -> dict:
 
 
 def _git_sha() -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "-C", str(_ROOT), "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL,
-        ).decode().strip()
-    except Exception:                                    # noqa: BLE001
-        return "unknown"
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(_ROOT).commit or "unknown"
 
 
 def _git_branch() -> str:

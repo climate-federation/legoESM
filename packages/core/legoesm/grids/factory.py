@@ -119,13 +119,13 @@ def create_grid(grid_type: str, resolution: int | None = None, **kwargs: Any):
         # ocean package or fesom_jax at module scope.
         from legoesm.ocean.dynamics.ocean_model_fesom import (
             FesomOceanGrid,
-            _require_fesom_jax,
+            require_fesom_jax,
             build_flat_bottom_mesh,
         )
 
         # Raise a clear ImportError naming the package + install command
         # rather than a raw ModuleNotFoundError from the line below.
-        _require_fesom_jax()
+        require_fesom_jax()
         from fesom_jax.mesh import DEFAULT_PI_MESH_DIR, load_mesh
 
         mesh = load_mesh(DEFAULT_PI_MESH_DIR if mesh_dir is None else mesh_dir)
@@ -172,7 +172,9 @@ class FV3DuoGridBundle(NamedTuple):
     ng: int
 
 
-def create_fv3_duo_grid(resolution: int, ng: int = 3) -> FV3DuoGridBundle:
+def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
+                        phis_filter_iter: int = 0,
+                        phis6=None) -> FV3DuoGridBundle:
     """Build the certified six-face duo-cube context pair for C``resolution``.
 
     Wraps ``build_six_face_duo_context`` (ext-bundle + oracle
@@ -181,7 +183,17 @@ def create_fv3_duo_grid(resolution: int, ng: int = 3) -> FV3DuoGridBundle:
     ``build_jax_duo_stepper_context``.  Slice 1 is flat-orography: the
     jax context's ``hs6`` defaults to zeros, which is what the NH carry's
     ``zs = phis/grav`` seed reads.
+
+    ``phis6``: a READY padded terrain stack ``(6, n+2ng, n+2ng)`` [m2/s2]
+    (halos included, already filtered) injected verbatim as ``hs6`` --
+    the restart path (M5): the checkpoint persists the terrain the run
+    stepped on, so a resume rebuilds the grid from the file, not from
+    the ERA5 source.  Exclusive with ``phis_fn``.
     """
+    if phis6 is not None and phis_fn is not None:
+        raise ValueError("create_fv3_duo_grid: phis6 (a ready terrain "
+                         "stack) and phis_fn (a terrain function) are "
+                         "exclusive")
     if resolution < 4:
         raise ValueError(
             f"create_fv3_duo_grid: resolution={resolution} is below the "
@@ -196,8 +208,31 @@ def create_fv3_duo_grid(resolution: int, ng: int = 3) -> FV3DuoGridBundle:
 
     ctx_np = build_six_face_duo_context(resolution, ng,
                                         use_ext_bundle=True,
-                                        oracle_conventions=True)
+                                        oracle_conventions=True,
+                                        topo_fn=phis_fn)
     ctx_jax = build_jax_duo_stepper_context(ctx_np)
+    if phis_fn is not None and phis_filter_iter > 0:
+        # orography (route A, M4): phis_fn(lon, lat) evaluated on the
+        # padded A-grid by the builder (halos by its ext exchange), then
+        # FV3's del-2 terrain filter ON THIS grid, then the jax context
+        # rebuilt so its hs6 is the smoothed field the step consumes
+        import numpy as np
+        from legoesm.grids.terrain_filter import terrain_filter_duo
+        hs6 = terrain_filter_duo(np.stack([np.asarray(h) for h in ctx_np["hs6"]]),
+                                 ctx_np["gs6"], ctx_np["ectx"],
+                                 n_iter=phis_filter_iter)
+        ctx_np = {**ctx_np, "hs6": [np.asarray(hs6[t]) for t in range(6)]}
+        ctx_jax = build_jax_duo_stepper_context(ctx_np)
+    if phis6 is not None:
+        import numpy as np
+        hs6 = np.asarray(phis6, dtype=np.float64)
+        m_a = int(ctx_np["n"]) + 2 * int(ctx_np["ng"])
+        if hs6.shape != (6, m_a, m_a):
+            raise ValueError(
+                f"create_fv3_duo_grid: phis6 has shape {hs6.shape}, the "
+                f"padded C{resolution} terrain stack is (6, {m_a}, {m_a})")
+        ctx_np = {**ctx_np, "hs6": [hs6[t] for t in range(6)]}
+        ctx_jax = build_jax_duo_stepper_context(ctx_np)
     return FV3DuoGridBundle(ctx_np=ctx_np, ctx_jax=ctx_jax,
                             n=int(ctx_np["n"]), ng=int(ctx_np["ng"]))
 

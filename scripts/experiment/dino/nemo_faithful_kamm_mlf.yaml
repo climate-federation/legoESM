@@ -1,0 +1,40 @@
+# DINO (Kamm, Deshayes & Madec 2025) on the NEMO-faithful card, standalone.
+#
+# Everything here runs inside legoESM; no NEMO files or binaries are read.
+# "NEMO" in the recipe name means the card selects the operators that were
+# transcribed statement-for-statement from NEMO 5.0.2's DINO configuration
+# (S-EOS, TKE, EEN Coriolis in the RHS, modified leap-frog integrator, sco
+# pressure gradient, quadratic bottom drag, GM/Redi triads) — the choices the
+# DINO/NEMO fidelity campaign certified (docs/ocean/fidelity/
+# dino_campaign_synthesis.md). `nemo_faithful_grid` rebuilds NEMO's exact
+# 52x199 DINO R1 mesh analytically from NEMO's own namelist -- equator on a
+# T-point, U-faces [0,51], sill anchored on the western face -- which is the
+# frame every certified comparison used. It is bit-exact against NEMO's
+# mesh_mask on every field but the two Coriolis arrays (<=3 ulp, the NEMO
+# binary's own vectorised sine); gated by
+# scripts/validate/ocean_fidelity/dino_1226/nemo_dino_mesh_gate.py.
+#
+# The INITIAL STATE and the WIND STRESS are NEMO's own, bit-for-bit: the card
+# starts from usr_def_istate's T/S (all 372528 cells equal to the oracle's
+# untouched Kbb level) and evaluates the stress at NEMO's stored gphiu (all
+# 9758 wet U-points equal to the oracle's utau_b). Gated by
+# scripts/validate/ocean_fidelity/dino_1226/nemo_dino_fromrest_gate.py.
+#
+# Known gap on this card (docs/ocean/fidelity/dino_config_reachability_audit.md):
+# the wind stress is the annual mean, not a seasonal cycle.
+#
+# GPU only: the XLA CPU compile of this card was observed to crash (2026-09-08,
+# on both the 48x195 and the 52x199 frame -- not introduced by the frame fix).
+#
+# Reproduce (5 model years, monthly snapshots):
+#   JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 python scripts/run/run_dino.py \
+#       --config scripts/experiment/dino/nemo_faithful_kamm_mlf.yaml
+# Any CLI flag overrides the file, e.g. `--days 90 --output-dir results/x`.
+recipe: nemo_dino_kamm_mlf
+nemo_faithful_grid: true
+grid: latlon
+dt: 2700.0                 # NEMO DINO rn_Dt; the leap-frog card is validated at this step
+days: 1800                 # 5 years; the certified spin-up window (year-5 mean)
+allow_multiyear: true
+snapshot_every_days: 30
+output_dir: results/dino_nemo_faithful_kamm_mlf

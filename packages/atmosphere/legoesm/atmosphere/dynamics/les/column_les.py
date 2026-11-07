@@ -509,6 +509,7 @@ def column_surface_kinematic_fluxes(
     p_full_col: jax.Array,
     sst_K: jax.Array,
     p_s: jax.Array,
+    z_low: Any = None,
     surface_config: Any = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Surface kinematic θ/q_v fluxes for the LES ``prescribe="fluxes"`` BC.
@@ -545,11 +546,19 @@ def column_surface_kinematic_fluxes(
     * **Constant flux.**  Computed ONCE from the time-mean column (the ``prescribe="fluxes"``
       design, iter 151) — appropriate for the short worst-column spin-off; an over-warming
       run is caught by the realism gate (``theta_drift``).
+
+    ``w_th_s`` is the LES heat LOWER BOUNDARY CONDITION, not a reported
+    surface flux: it carries the moist-enthalpy correction ``lhflx - L_v*E``
+    (the bulk law charged Kirchhoff L_v(SST) per kg, the LES credits the
+    constant L_v), exactly like the GCM turbulence kernels' ``sflx_T``.  The
+    physical sensible heat flux is ``compute_surface_fluxes``' ``shflx``; do
+    not read the θ flux back as one.
     """
     from legoesm.atmosphere.physics._shared import exner_function, virtual_temperature
     from legoesm.atmosphere.physics.turbulence.surface_layer import (
         SurfaceLayerConfig,
         compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
     )
     from legoesm.thermo import saturation_mixing_ratio
 
@@ -568,13 +577,23 @@ def column_surface_kinematic_fluxes(
     rho_1 = p_1 / (constants.R_d * virtual_temperature(T_1, q_1))
     q_sfc = saturation_mixing_ratio(sst_K, p_s)
     a1 = jnp.atleast_1d
-    _, _, shflx, lhflx, _ = compute_surface_fluxes(
-        a1(u_1), a1(v_1), a1(T_1), a1(q_1), a1(sst_K), a1(q_sfc), a1(rho_1), cfg)
+    # The height of the level these values came from, when the caller knows
+    # it: without it this diagnostic reports a flux computed under a
+    # different surface law than the model it is diagnosing (codex).  Its
+    # default constant scheme masked the omission.
+    _, _, shflx, lhflx, _ = surface_fluxes_at_lowest_level(
+        a1(u_1), a1(v_1), a1(T_1), a1(q_1), a1(sst_K), a1(q_sfc), a1(rho_1),
+        cfg, None if z_low is None else a1(z_low))
     # θ-flux = (sensible heat flux)/(ρ·c_p) · 1/Π, with the canonical Exner helper
     # (1/Π = (p_ref/p)^κ) — no re-derived Poisson power (CLAUDE.md "never re-derive").
     exner_inv = 1.0 / exner_function(p_s)
-    w_th_s = shflx[0] / (rho_1 * constants.c_pd) * exner_inv
-    w_qv_s = lhflx[0] / (rho_1 * constants.L_v)
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        latent_enthalpy_correction, surface_moisture_flux)
+    # Water: the inverse of the latent heat cfg's bulk law charged.
+    w_qv_s = surface_moisture_flux(cfg, lhflx[0], sst_K) / rho_1
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    w_th_s = ((shflx[0] + latent_enthalpy_correction(lhflx[0], w_qv_s * rho_1))
+              / (rho_1 * constants.c_pd) * exner_inv)
     return w_th_s, w_qv_s
 
 
@@ -635,7 +654,7 @@ def extract_gcm_column(
     p_half_col = jnp.asarray(sigma.pressure_at_half(p_s_col))
     T_col = jnp.asarray(T)[idx]
     q_col = jnp.asarray(q_v)[idx]
-    z_full, _ = compute_heights_from_sigma(
+    z_full, z_half = compute_heights_from_sigma(
         T_col[None, :], p_half_col[None, :], q_col[None, :]
     )
     gcm_z = z_full[0]
@@ -663,6 +682,12 @@ def extract_gcm_column(
         w_th_s, w_qv_s = column_surface_kinematic_fluxes(
             T_col=T_col, q_v_col=q_col, u_col=u_col, v_col=v_col,
             p_full_col=p_full_col, sst_K=sst_col, p_s=p_s_col,
+            # The height of the level these values came from.  Adding the
+            # argument without passing it here would have left this lane on
+            # the uncorrected surface law while advertising the fix -- the
+            # silent-absence failure this helper has now produced repeatedly
+            # (GLM).
+            z_low=z_full[0, -1] - z_half[0, -1],
             surface_config=surface_config,
         )
         ls_state = ls_state._replace(prescribe="fluxes", w_th_s=w_th_s, w_qv_s=w_qv_s)

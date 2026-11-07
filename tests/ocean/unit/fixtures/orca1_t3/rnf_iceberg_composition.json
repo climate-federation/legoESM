@@ -1,0 +1,44 @@
+{
+ "record": "/burg/glab/users/pg2328/oracle_audit/tier3/rnf/ctl_on/t3_rnf1_record_RRRR.bin (N=1 sbc_rnf at kt=nit000=17281, O['rnf_fdta'])",
+ "recorder_cfg": "NEMO 5.0.1 cfgs/ORCA1_T3RNF (MY_SRC t3_rnf.F90), ORCA1 day-30 restart, 32 ranks",
+ "input_file": "/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc",
+ "legoesm_base_sha": "ee8534602be3ffdff9b3f66dde1ee6397d3ab877",
+ "months_1based": [
+  1,
+  2
+ ],
+ "selection": "seed 20261103: 40 Icb_flux>0 cells, 20 sorunoff>0 & Icb_flux==0, 10 zero; candidates from all 32 ranks",
+ "counts": {
+  "icb": 14269,
+  "river": 11805,
+  "zero": 82718
+ },
+ "ranks": [
+  "0000",
+  "0001",
+  "0002",
+  "0003",
+  "0004",
+  "0005",
+  "0006",
+  "0007",
+  "0008",
+  "0009",
+  "0010",
+  "0011",
+  "0013",
+  "0016",
+  "0017",
+  "0019",
+  "0020",
+  "0021",
+  "0022",
+  "0023",
+  "0024",
+  "0026",
+  "0028",
+  "0030",
+  "0031"
+ ],
+ "nemo_namelist": "sn_rnf=sorunoff; ln_rnf_icb absent in namelist_cfg -> namelist_ref .false.; ocean.output reads only sorunoff"
+}

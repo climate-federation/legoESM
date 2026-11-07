@@ -51,7 +51,7 @@ WT=/burg-archive/glab/users/pg2328/_wt_mle_fix
 cd $WT || { echo "FATAL: pinned worktree missing"; exit 1; }
 echo "=== WT HEAD $(git rev-parse HEAD) ==="
 git status --porcelain | head -5
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 
 CMD_FILE=$WT/scripts/cluster/omip_nemo/_ab_fct2_d30.cmd

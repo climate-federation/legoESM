@@ -12,6 +12,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.land.multilayer_land import (
@@ -87,15 +89,16 @@ def test_land_tile_beta_soil_throttles_unsaturated_soil():
     ncol = 5
     # Unsaturated but plant-available soil (the run's mean theta ~0.177).
     theta = jnp.full((ncol, n), 0.20)
-    beta = land_tile_beta_soil(theta, cfg, land_params=None)
+    T_warm = jnp.full_like(theta, constants.T_freeze + 15.0)
+    beta = land_tile_beta_soil(theta, T_warm, cfg, land_params=None)
     beta = np.asarray(beta)
     assert beta.shape == (ncol,)
     assert np.all((beta >= cfg.beta_min - 1e-9) & (beta < 1.0))
     # Dry vs wet ordering.
     beta_dry = np.asarray(land_tile_beta_soil(
-        jnp.full((ncol, n), cfg.theta_wp), cfg))
+        jnp.full((ncol, n), cfg.theta_wp), T_warm, cfg))
     beta_wet = np.asarray(land_tile_beta_soil(
-        jnp.full((ncol, n), cfg.theta_fc), cfg))
+        jnp.full((ncol, n), cfg.theta_fc), T_warm, cfg))
     assert np.all(beta_dry <= beta) and np.all(beta <= beta_wet)
     np.testing.assert_allclose(beta_dry, cfg.beta_min, atol=1e-9)
     np.testing.assert_allclose(beta_wet, 1.0, atol=1e-9)

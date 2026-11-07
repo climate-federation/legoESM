@@ -153,6 +153,7 @@ to the state fields only.
 
 from __future__ import annotations
 
+import math
 import os
 from typing import NamedTuple
 
@@ -170,6 +171,7 @@ from legoesm.core.fv3_duo_sw_core import (
     d_sw6_duo,
 )
 from legoesm.core.fv3_pgrad import geopk, one_grad_p, p_grad_c
+from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
 from legoesm.grids.fv3_duo_halos import (
     average_allflux_shared_edges,
     average_shared_edge_bgrid,
@@ -202,16 +204,12 @@ __all__ = [
     "full_acoustic_step_sixface",
     "advance_duo_outer_step",
     "run_duo_sw",
-    "make_geopk_sw_1lev_jit",
     "make_geopk_sw_1lev_d_jit",
-    "make_p_grad_c_1lev_jit",
     "make_one_grad_p_1lev_jit",
-    "make_exchange_post_pgrad_sixface_jit",
     "make_csw_step_sixface_jit",
     "make_dsw12_step_sixface_jit",
     "make_acoustic_step_sixface_jit",
     "make_full_acoustic_step_sixface_jit",
-    "make_advance_duo_outer_step_jit",
 ]
 
 # The stepper's own state keys, in the order the NumPy twin returns
@@ -225,43 +223,6 @@ _STATE_KEYS = ("delp", "pt", "u", "v")
 # (fv3_native_duo_stepper.py:684).  Not a free parameter: the two must
 # agree or the barrier refuses the slot axis.
 _STEPPER_NQ = 1
-
-
-def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
-
-    Reads only ``.dtype`` (static under jit): a float32 operand would
-    otherwise be silently upcast -- or, with ``jax_enable_x64``
-    disabled, the whole step would silently run in float32 -- and the
-    oracle build is ``-fdefault-real-8``.
-
-    DUPLICATION, deliberate: character-identical to
-    ``fv3_duo_halos._require_f64_jax`` / ``fv3_duo_sw_core``'s, which
-    are private and therefore not importable across modules (the
-    empty-allowlist ratchet ``tests/test_no_private_cross_imports.py``).
-    FOLLOW-UP: promote ONE definition to a public name and delete the
-    copies -- tracked on the halo module's own copy.
-    """
-    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
-    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype). The
-    # "no silent fp64->fp32 downcast" guarantee now lives at the model
-    # boundary; THIS gate catches an f64 metric/workspace leaking into an
-    # f32 phase (silent promotion / lax.scan carry mismatch).
-    seen = None
-    for name, a in arrays.items():
-        if a is None:
-            continue
-        dt = jnp.asarray(a).dtype
-        if dt not in (jnp.float32, jnp.float64):
-            raise TypeError(
-                f"{fname}: {name} must be float32 or float64 (got {dt})")
-        if seen is None:
-            seen = dt
-        elif dt != seen:
-            raise TypeError(
-                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
-                f"a phase must be single-precision-uniform "
-                f"(FV3DuoConfig.storage_dtype).")
 
 
 # ---------------------------------------------------------------------
@@ -310,6 +271,28 @@ def _check_diagnostic_env(skip_b_endpoints: bool) -> None:
 # stage configuration
 # ---------------------------------------------------------------------
 
+def sponge_d2_profile(km: int, layers: int, factor: float,
+                      d2_top: float) -> tuple:
+    """Per-level additive del-2 sponge coefficient (decision B1): a tuple
+    of ``km`` Python floats, ``d2_top * factor**(-k/layers)`` for
+    ``k < layers`` and EXACTLY ``0.0`` below -- the same shape as the
+    MPAS lane's ``sponge_del2_profile`` (``factor**((n-k)/n)`` on its
+    viscosity, i.e. ``factor`` at the top and ``factor**(1/2)`` on the
+    second of two layers) expressed relative to the top-layer value.
+    Static Python numbers so the deck stays jit-static; the batched
+    tail turns them into one traced ``(km,)`` operand."""
+    if layers != int(layers) or not (0 <= int(layers) <= km):
+        raise ValueError(
+            f"sponge_del2_top_layers must be an integer in 0..km={km}, got {layers!r}")
+    layers = int(layers)
+    if not (math.isfinite(factor) and factor >= 1.0):
+        raise ValueError(f"sponge_del2_top_factor must be finite and >= 1, got {factor}")
+    if not (math.isfinite(d2_top) and d2_top >= 0.0):
+        raise ValueError(f"sponge_d2_top must be finite and >= 0, got {d2_top}")
+    return tuple(float(d2_top) * float(factor) ** (-k / layers) if k < layers
+                 else 0.0 for k in range(km))
+
+
 class SWConfig(NamedTuple):
     """The stage knobs, hashable BY VALUE so they can be jit-static.
 
@@ -338,6 +321,17 @@ class SWConfig(NamedTuple):
     d2_bg: float = 0.0
     d4_bg: float = 0.12
     nord: int = 1
+    #: Decision B1 (user 2026-10-02, option 2a): ADDITIVE del-2 top
+    #: sponge on divergence AND vorticity, equal coefficients, no mass/w
+    #: damping.  ``sponge_d2_top`` is the FV3-DIMENSIONLESS del-2
+    #: coefficient (multiplied by ``da_min_c`` like ``d2_bg``) at the top
+    #: layer; layer k < layers gets ``sponge_d2_top * factor**(-k/layers)``
+    #: (the MPAS deck's 8 : sqrt(8) ratio for 2 layers), exactly 0 below
+    #: -- see :func:`sponge_d2_profile`.  ``layers = 0`` = OFF, bitwise
+    #: the pre-B1 step (the oracle deck).  NOT MPAS's ``nu_del2`` [m^2/s].
+    sponge_del2_top_layers: int = 0
+    sponge_del2_top_factor: float = 8.0
+    sponge_d2_top: float = 0.0
 
     @classmethod
     def from_mapping(cls, cfg) -> SWConfig:
@@ -417,7 +411,9 @@ class DuoStepperContext:
 
 def build_jax_duo_stepper_context(ctx: dict, *,
                                   skip_b_endpoints: bool = False,
-                                  spmd_mesh=None
+                                  spmd_mesh=None,
+                                  dtype=None,
+                                  nq: int = _STEPPER_NQ,
                                   ) -> DuoStepperContext:
     """Convert the NumPy ``build_six_face_duo_context`` dict ONCE.
 
@@ -485,16 +481,33 @@ def build_jax_duo_stepper_context(ctx: dict, *,
             f"ctx['gs6'] holds {len(gs6)} faces, not 6 -- a short list "
             f"would silently step a subset of the cube")
 
-    tab = build_jax_duo_halo_tables(ctx["ectx"], gs6, nq=_STEPPER_NQ,
-                                    skip_b_endpoints=skip_b_endpoints)
+    # nq: how many passenger tracers the barrier stacks carry.  Default
+    # _STEPPER_NQ = 1, the frozen deck.  The tables are built PER nq (the
+    # allflux slot axis is 4+nq and tab.allflux_slots indexes it), so a
+    # different nq needs its own context -- it cannot be changed after.
+    if int(nq) < 1:
+        raise ValueError(f"nq={nq}: the duo lane carries at least one "
+                         f"passenger tracer")
+    tab = build_jax_duo_halo_tables(ctx["ectx"], gs6, nq=int(nq),
+                                    skip_b_endpoints=skip_b_endpoints,
+                                    dtype=dtype)
     if spmd_mesh is not None:
         # ENGINEERING knob (M3): route every step-side halo exchange
-        # through the O(halo) shard_map ring on this mesh.  Selects no
-        # scientific configuration; the ring exchanges are bitwise-equal
-        # to the certified path (test_fv3_duo_spmd).  Default None keeps
-        # the certified single-device trace byte-identical.
-        from legoesm.grids.fv3_duo_spmd import build_ring_comm
-        tab.ring_comm = build_ring_comm(tab, spmd_mesh)
+        # through the SPMD arm built on this mesh.  The mesh SHAPE picks
+        # the arm -- ('face',) = the O(halo) whole-face shard_map ring;
+        # ('face','tile_i','tile_j') = the tiled port's (6,kt,kt) tile
+        # arm (duo_tiled_port_scope.md M3; kt=1 is the G0 bridge).  Any
+        # other axis layout is refused by the respective builder.
+        # Selects no scientific configuration; the SPMD exchanges are
+        # bitwise-equal to the certified path (test_fv3_duo_spmd /
+        # test_fv3_duo_tiled).  Default None keeps the certified
+        # single-device trace byte-identical.
+        if tuple(spmd_mesh.axis_names) == ("face",):
+            from legoesm.grids.fv3_duo_spmd import build_ring_comm
+            tab.ring_comm = build_ring_comm(tab, spmd_mesh)
+        else:
+            from legoesm.grids.fv3_duo_spmd import build_tile_comm
+            tab.tile_comm = build_tile_comm(tab, spmd_mesh)
 
     out = DuoStepperContext()
     out.n, out.ng = n, ng
@@ -505,7 +518,19 @@ def build_jax_duo_stepper_context(ctx: dict, *,
     # ARRAYS-ONLY gridstruct per face (the traced half of the NumPy
     # lane's mixed dict); the scalars/bools go to GridFlags, which is
     # hashable by value.  Both halves are constants in this lane.
-    out.gs6 = tuple({k: jnp.asarray(v) for k, v in gs.items()
+    # dtype (2026-08-28, fp32/mixed increment 2): the gridstruct METRICS
+    # (areas, cos/sin, edge lengths, rd*c, ...) are fp64 host constants.
+    # Under the coarse fp32 policy they enter kernels alongside f32 state
+    # and would silently promote it back to f64 (and trip the uniformity
+    # gates), so cast every INEXACT metric array to the run's storage
+    # dtype. Default None keeps f64 -> byte-identical certified path.
+    # (Integer index metrics are left untouched.)
+    def _metric(v):
+        a = jnp.asarray(v)
+        if dtype is not None and jnp.issubdtype(a.dtype, jnp.inexact):
+            return a.astype(dtype)
+        return a
+    out.gs6 = tuple({k: _metric(v) for k, v in gs.items()
                      if isinstance(v, np.ndarray)} for gs in gs6)
     out.flags6 = tuple(GridFlags.from_gs(gs) for gs in gs6)
     # duo requires bounded metrics: fv_arrays.F90:1512
@@ -521,17 +546,19 @@ def build_jax_duo_stepper_context(ctx: dict, *,
                 f"the context with oracle_conventions=True")
     hs6 = ctx.get("hs6")
     m_a = out.m_a
+    _hs_dtype = dtype if dtype is not None else jnp.float64
     if hs6 is None:
         # the NumPy twin's `np.zeros_like(delp)` default, materialised
         # once instead of per call (same values, same shape)
-        out.hs6 = jnp.zeros((6, m_a, m_a), dtype=jnp.float64)
+        out.hs6 = jnp.zeros((6, m_a, m_a), dtype=_hs_dtype)
     else:
-        # no cast: an f32 topography would silently halve the precision
-        # of every gz integral, so the f64 gate below must be able to see
-        # it (the NumPy adapter's np.asarray(hs6[t-1]) does not cast
-        # either)
-        out.hs6 = stack6([np.asarray(h) for h in hs6])
-    _require_f64_jax("build_jax_duo_stepper_context", {"hs6": out.hs6})
+        # Topography follows the run's storage dtype (increment 2). For
+        # fp64 (dtype=None) it is uncast, byte-identical. For fp32 it is
+        # cast so the gz integral and the NH carry it seeds are uniform;
+        # the per-op MIXED step (a later increment) keeps the gz/energy
+        # region fp64 and would pass an f64 hs6 view instead.
+        out.hs6 = stack6([np.asarray(h) for h in hs6]).astype(_hs_dtype)
+    require_uniform_float_jax("build_jax_duo_stepper_context", {"hs6": out.hs6})
     out.duogrid = True
     # Lazily filled by fv3_phase3d_common.build_batched_gs (the
     # face-batched vmap arm's stacked view of gs6/flags6); None = not
@@ -573,7 +600,7 @@ def states_to_jax(states6, *, keep_w: bool = True) -> dict:
             f"be on all of them or none")
     if keep_w and n_w == 6:
         out["w"] = stack6([np.asarray(s["w"]) for s in states6])
-    _require_f64_jax("states_to_jax", out)
+    require_uniform_float_jax("states_to_jax", out)
     return out
 
 
@@ -608,7 +635,7 @@ def _geopk_sw_adapter(delp2d, hs, bd, pt, *, cg: bool):
     twin's literal, on the bounded lane too -- the duo range widening
     comes from ``duogrid=True``.
     """
-    _require_f64_jax("geopk_sw_1lev", {"delp": delp2d, "hs": hs})
+    require_uniform_float_jax("geopk_sw_1lev", {"delp": delp2d, "hs": hs})
     delp3 = jnp.asarray(delp2d)[:, :, None]
     pt3 = (jnp.ones_like(delp3) if pt is None
            else jnp.asarray(pt)[:, :, None])
@@ -801,7 +828,7 @@ def _state_w(states: dict):
     """
     if "w" in states:
         w = states["w"]
-        _require_f64_jax("_state_w", {"w": w})
+        require_uniform_float_jax("_state_w", {"w": w})
         return w
     return states["pt"] * 0.0
 
@@ -821,7 +848,7 @@ def csw_step_sixface(ctx: DuoStepperContext, states: dict, dt2,
     Returns the stacked ``c_sw`` outputs: ``delpc``, ``ptc``, ``wc``,
     ``uc``, ``vc``, ``ua``, ``va``, ``ut``, ``vt``, ``divg_d``.
     """
-    _require_f64_jax("csw_step_sixface",
+    require_uniform_float_jax("csw_step_sixface",
                      {k: states[k] for k in _STATE_KEYS})
     npx = ctx.npx
     w6 = _state_w(states)
@@ -885,6 +912,7 @@ def dsw12_step_sixface(ctx: DuoStepperContext, states: dict,
                     hord_tm=cfg.hord_tm, hord_dp=cfg.hord_dp,
                     nord_v=cfg.nord_v, nord_t=0,
                     damp_v=cfg.damp_v, damp_t=0.0,
+                    nq=int(ctx.tab.nq),
                     workspace_sentinel=0.0)
           for t in range(6)]
     s1s = _stack_faces(s1)
@@ -923,7 +951,7 @@ def acoustic_step_sixface(ctx: DuoStepperContext, states: dict, dt,
     ``divg_d`` and, load-bearing for the external-mode filter,
     ``delpc`` -- ``d_sw5``'s SAVED divergence).
     """
-    _require_f64_jax("acoustic_step_sixface",
+    require_uniform_float_jax("acoustic_step_sixface",
                      {k: states[k] for k in _STATE_KEYS})
     cfg = _resolve_cfg(sw_cfg)
     bd, npx, tab = ctx.bd, ctx.npx, ctx.tab
@@ -1015,7 +1043,7 @@ def full_acoustic_step_sixface(ctx: DuoStepperContext, states: dict, dt,
     campaign.  ``d_ext`` is jit-STATIC (``one_grad_p`` branches on it in
     Python).
     """
-    _require_f64_jax("full_acoustic_step_sixface",
+    require_uniform_float_jax("full_acoustic_step_sixface",
                      {k: states[k] for k in _STATE_KEYS})
     bd, npx, ng, tab = ctx.bd, ctx.npx, ctx.ng, ctx.tab
 
@@ -1125,25 +1153,9 @@ def run_duo_sw(ctx: DuoStepperContext, states: dict, dt, nsteps: int,
 # donation conflicts with reverse-mode AD, which is the point of the
 # lane.
 
-def make_geopk_sw_1lev_jit(fn=geopk_sw_1lev):
-    """Static: ``bd`` only.  ``delpc``/``hs``/``pt`` dynamic."""
-    return jax.jit(fn, static_argnums=(2,))
-
-
 def make_geopk_sw_1lev_d_jit(fn=geopk_sw_1lev_d):
     """Static: ``bd`` only.  ``delp``/``hs``/``pt`` dynamic."""
     return jax.jit(fn, static_argnums=(2,))
-
-
-def make_p_grad_c_1lev_jit(fn=p_grad_c_1lev):
-    """Static: ``bd`` only.
-
-    ``dt2`` deliberately stays DYNAMIC here even though
-    ``fv3_pgrad.make_p_grad_c_jit`` pins it static -- deviation D3: the
-    kernel uses it only as a multiplier, and a static time step would
-    recompile the stepper on every new ``dt``.
-    """
-    return jax.jit(fn, static_argnums=(7,))
 
 
 def make_one_grad_p_1lev_jit(fn=one_grad_p_1lev):
@@ -1151,11 +1163,6 @@ def make_one_grad_p_1lev_jit(fn=one_grad_p_1lev):
     branches on it in Python).  ``dt`` stays DYNAMIC, per D3."""
     return jax.jit(fn, static_argnums=(6, 7, 8),
                    static_argnames=("d_ext",))
-
-
-def make_exchange_post_pgrad_sixface_jit(fn=exchange_post_pgrad_sixface):
-    """Static: ctx + ``nord`` (a Python branch AND a window selector)."""
-    return jax.jit(fn, static_argnums=(0,), static_argnames=("nord",))
 
 
 def make_csw_step_sixface_jit(fn=csw_step_sixface):
@@ -1187,19 +1194,3 @@ def make_full_acoustic_step_sixface_jit(fn=full_acoustic_step_sixface):
                    static_argnames=("d_ext", "sw_cfg", "entry_ascalar"))
 
 
-def make_advance_duo_outer_step_jit(fn=advance_duo_outer_step):
-    """Static: ctx + n_split (a Python trip count) + d_ext + sw_cfg.
-    ``states``/``dt_atmos`` dynamic.
-
-    NOTE the cost: this compiles ``n_split`` whole steps as ONE program.
-    That is right for a test at ``n_split = 2`` and wrong for a
-    production run at 7 -- there, pass
-    ``step_fn=make_full_acoustic_step_sixface_jit()`` to
-    :func:`advance_duo_outer_step` instead and leave the block loop in
-    Python.  ``step_fn`` is declared STATIC (a callable is a dispatch
-    choice, not a traced operand, and would otherwise be flattened as a
-    pytree leaf and raise).
-    """
-    return jax.jit(fn, static_argnums=(0, 3, 4, 5),
-                   static_argnames=("n_split", "d_ext", "sw_cfg",
-                                    "step_fn"))

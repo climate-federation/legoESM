@@ -1,0 +1,614 @@
+{
+  "bar": 1e-15,
+  "comparisons": 227760,
+  "coverage": {
+    "alb_ice": {
+      "reason": "ice_alb output at POST_BLK_ICE_2; recomputed after thermodynamics",
+      "status": "VERIFIED"
+    },
+    "devap_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "dqla_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "dqns_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "emp": {
+      "reason": "registered blk_ice_2 ocean evaporation input",
+      "status": "VERIFIED"
+    },
+    "emp_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "emp_oce": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "evap_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "fr_i": {
+      "reason": "registered POST_BLK_ICE_1/2 input",
+      "status": "VERIFIED"
+    },
+    "qcn_ice": {
+      "reason": "ice_thd/ZDF output, not bulk flux",
+      "status": "WAIVED"
+    },
+    "qemp_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "qemp_oce": {
+      "reason": "POST_BLK_ICE_2 output and ice_flx_other input",
+      "status": "VERIFIED"
+    },
+    "qevap_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "qla_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "qml_ice": {
+      "reason": "ice_thd output, not bulk flux",
+      "status": "WAIVED"
+    },
+    "qns": {
+      "reason": "ocean-side NCAR output",
+      "status": "WAIVED"
+    },
+    "qns_ice": {
+      "reason": "POST_BLK_ICE_2 output; end stream later mutated by ZDF",
+      "status": "VERIFIED"
+    },
+    "qns_oce": {
+      "reason": "registered input to ice_flx_other",
+      "status": "VERIFIED"
+    },
+    "qprec_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "qsr": {
+      "reason": "registered blk_ice_2 atmospheric input",
+      "status": "VERIFIED"
+    },
+    "qsr_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "qsr_oce": {
+      "reason": "registered input to ice_flx_other",
+      "status": "VERIFIED"
+    },
+    "qtr_ice_top": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "rCdU_ice": {
+      "reason": "inactive because ln_drgice_imp is false in SAS",
+      "status": "WAIVED"
+    },
+    "sfx": {
+      "reason": "ice thermodynamic salt flux",
+      "status": "WAIVED"
+    },
+    "snwice_fmass": {
+      "reason": "thermodynamic snow/ice exchange output",
+      "status": "WAIVED"
+    },
+    "snwice_mass": {
+      "reason": "thermodynamic snow/ice exchange output",
+      "status": "WAIVED"
+    },
+    "snwice_mass_b": {
+      "reason": "thermodynamic snow/ice exchange history",
+      "status": "WAIVED"
+    },
+    "sstfrz": {
+      "reason": "eos_fzp output upstream of this rung",
+      "status": "WAIVED"
+    },
+    "taum": {
+      "reason": "ocean-side NCAR diagnostic",
+      "status": "WAIVED"
+    },
+    "tn_ice": {
+      "reason": "thermodynamic surface-temperature state",
+      "status": "WAIVED"
+    },
+    "utau": {
+      "reason": "not used by active ln_icedyn branch; ocean NCAR producer and later ice_update_tau uncertified",
+      "status": "WAIVED"
+    },
+    "utau_ice": {
+      "reason": "POST_BLK_ICE_1 output",
+      "status": "VERIFIED"
+    },
+    "vtau": {
+      "reason": "not used by active ln_icedyn branch; ocean NCAR producer and later ice_update_tau uncertified",
+      "status": "WAIVED"
+    },
+    "vtau_ice": {
+      "reason": "POST_BLK_ICE_1 output",
+      "status": "VERIFIED"
+    },
+    "wndm_ice": {
+      "reason": "POST_BLK_ICE_1 output",
+      "status": "VERIFIED"
+    }
+  },
+  "dtypes": {
+    "backend": "cpu",
+    "jax_x64": true,
+    "numpy": "float64"
+  },
+  "frame_registry": [
+    {
+      "source": "icesbc.F90:83-108; sbcblk.F90:1085-1168",
+      "stage": "POST_BLK_ICE_1",
+      "time_level": "current ice step",
+      "values": 17
+    },
+    {
+      "source": "icesbc.F90:149-194; icealb.F90:124-185; sbcblk.F90:1218-1346",
+      "stage": "POST_BLK_ICE_2",
+      "time_level": "current ice step",
+      "values": 50
+    },
+    {
+      "source": "icesbc.F90:194-199,310-437",
+      "stage": "POST_ICE_FLX_OTHER",
+      "time_level": "current ice step",
+      "values": 39
+    }
+  ],
+  "input_legitimacy_rows": [
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qsr_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qla_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "dqla_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "dqns_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qtr_ice_top"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "utau_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "vtau_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "emp_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "evap_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "devap_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qns_oce"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qsr_oce"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qemp_oce"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qemp_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qevap_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qprec_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "emp_oce"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "wndm_ice"
+    }
+  ],
+  "largest_row": {
+    "first_over_step": null,
+    "max_absolute": 2.220446049250313e-16,
+    "max_normalized": 2.220446049250313e-16,
+    "max_step": 861,
+    "over_bar_count": 0,
+    "stage": "POST_BLK_ICE_1",
+    "variable": "utau_ice"
+  },
+  "over_bar_rows": 0,
+  "private_arms": {
+    "numeric_snow_zero_comparison": {
+      "first_affected_step": 5842,
+      "hypothesis": "XLA flushes positive-subnormal h_snow in floating comparison",
+      "over_bar_rows": 35,
+      "status": "REFUTED identity arm"
+    }
+  },
+  "rows": [
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_1",
+      "variable": "wndm_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 2.220446049250313e-16,
+      "max_normalized": 2.220446049250313e-16,
+      "max_step": 861,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_1",
+      "variable": "utau_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 5.551115123125783e-17,
+      "max_normalized": 5.551115123125783e-17,
+      "max_step": 861,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_1",
+      "variable": "vtau_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 2.220446049250313e-16,
+      "max_normalized": 2.220446049250313e-16,
+      "max_step": 6320,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "albedo"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 9.466330862652142e-30,
+      "max_normalized": 9.466330862652142e-30,
+      "max_step": 6320,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qsr_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qla_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "dqla_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qns_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "dqns_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 1.6940658945086007e-21,
+      "max_normalized": 1.6940658945086007e-21,
+      "max_step": 1294,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "evap_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 8.470329472543003e-22,
+      "max_normalized": 8.470329472543003e-22,
+      "max_step": 1273,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "devap_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "tprecip"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "sprecip"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "emp_oce"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 1.3552527156068805e-20,
+      "max_normalized": 1.3552527156068805e-20,
+      "max_step": 6159,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "emp_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 2.710505431213761e-20,
+      "max_normalized": 2.710505431213761e-20,
+      "max_step": 6159,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "emp_tot"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qemp_oce"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qemp_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qns_tot"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 9.466330862652142e-30,
+      "max_normalized": 9.466330862652142e-30,
+      "max_step": 6320,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qsr_tot"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qprec_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qevap_ice"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qtr_ice_top"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_ICE_FLX_OTHER",
+      "variable": "qsb_ice_bot"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 7.105427357601002e-15,
+      "max_normalized": 2.1913153259493933e-16,
+      "max_step": 5058,
+      "over_bar_count": 0,
+      "stage": "POST_ICE_FLX_OTHER",
+      "variable": "fhld"
+    },
+    {
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_step": 1,
+      "over_bar_count": 0,
+      "stage": "POST_ICE_FLX_OTHER",
+      "variable": "qlead"
+    }
+  ],
+  "scope": {
+    "certified": "ORCA1 constant-coefficient SI3 ice-side bulk arm",
+    "uncertified": [
+      "shipped C1D ECMWF/1.4e-3 arm",
+      "ocean-side NCAR producer"
+    ]
+  },
+  "steps": 8760,
+  "streams": {
+    "bulk": {
+      "bytes": 8374560,
+      "frames": 26280,
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_sasice_bulk_phase1/oracle_si3_bulk_operands.bin",
+      "sha256": "57868f3212646bdf6b0c4add0f48701c0082718331bc76a153050c6d1d44dfe9"
+    },
+    "exchange": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_sasice_bulk_phase1/oracle_si3_exchange_frames.bin",
+      "sha256": "091395cf604e83d88fbf458c4ef76ac3df2d5a65dac9cdc502e224cc1d1af2e4"
+    }
+  },
+  "verdict": "AT-BAR"
+}

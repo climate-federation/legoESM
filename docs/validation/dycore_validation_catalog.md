@@ -85,7 +85,7 @@ Run with `JAX_ENABLE_X64=1 python scripts/matrix/run_atmosphere_test_matrix.py
 | ID | Test | Grids | Status | Module |
 | --- | --- | --- | --- | --- |
 | HS94 | Held-Suarez (1994) — Newtonian relaxation + Rayleigh friction | all | ✅ | `src/legoesm/atmosphere/held_suarez.py` |
-| HS-Topo | Held-Suarez with idealized Gaussian-mountain topography | all | ✅ M1 | `src/legoesm/atmosphere/idealized/held_suarez_topo.py` |
+| HS-Topo | Held-Suarez over the DCMIP 2012 §2-0-0 ridged cosine-bell mountain (270E/0N) | all | ✅ M1 | `src/legoesm/atmosphere/idealized/held_suarez_topo.py` |
 | WS09-SP | Small-planet Held-Suarez (Wedi & Smolarkiewicz 2009, X=125) | all | ⚠️ M1.b | helpers at `src/legoesm/atmosphere/idealized/small_planet.py`; matrix-script runner wiring deferred to a follow-up commit |
 | TJ16-MHS | Moist Held-Suarez (Thatcher & Jablonowski 2016) | all | ⚠️ stability fixture only | TBD `src/legoesm/atmosphere/idealized/moist_held_suarez.py`; existing fixture: `tests/atmosphere/hydrostatic/validation/test_spectral_pe_moist_held_suarez.py` |
 | F06-AQUA | Frierson gray-radiation aquaplanet (2006) | all | ❌ M1.b/M3 | TBD `src/legoesm/atmosphere/idealized/frierson_gray.py` |

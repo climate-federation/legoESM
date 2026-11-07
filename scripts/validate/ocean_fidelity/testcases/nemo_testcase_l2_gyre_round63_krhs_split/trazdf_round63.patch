@@ -1,0 +1,18 @@
+--- trazdf.F90.r46
++++ trazdf.F90
+@@ -31,6 +31,7 @@
+    USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
+    USE lib_mpp        ! MPP library
+    USE timing         ! Timing
++   USE l2_r63_krhs, ONLY : r63_content_finish
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -131,6 +132,7 @@
+       ENDIF
+       !
+       CALL tra_zdf_imp( 'TRA', rDt, Kbb, Kmm, Krhs, pts, Kaa, jpts )
++      IF( ll_l2_tra ) CALL r63_content_finish( Kbb, Kmm, Krhs, pts, zl2_rhs )
+ 
+ !!gm WHY here !   and I don't like that !
+       ! DRAKKAR SSS control {

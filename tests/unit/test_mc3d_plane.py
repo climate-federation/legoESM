@@ -284,3 +284,22 @@ def test_mc3d_rejects_non_plane_model_type():
   cfg = RadiationConfig(scheme="mc3d")
   with pytest.raises(ValueError, match="only wired for"):
     make_radiation_physics(cfg, model_type="hydrostatic")
+
+
+def test_mc3d_missing_rrtmgp_tables_raises():
+  """Missing RRTMGP optics tables must raise for mc3d, not silently switch
+  the 3D Monte Carlo solver to gray optics."""
+  from legoesm.atmosphere.physics.radiation.config import (
+      GrayRadiationConfig, RadiationConfig, RRTMGPConfig,
+  )
+  from legoesm.atmosphere.physics.radiation.integration import (
+      make_radiation_physics,
+  )
+  cfg = RadiationConfig(
+      scheme="mc3d", gray=GrayRadiationConfig(),
+      mc3d=MC3DRadiationConfig(photons_per_pixel=16),
+      rrtmgp=RRTMGPConfig(lw_gas_file="/nonexistent/rrtmgp-gas-lw.nc"),
+      rce_fixed_cos_zenith=0.62,
+  )
+  with pytest.raises(FileNotFoundError, match="scheme='mc3d' needs the RRTMGP optics tables"):
+    make_radiation_physics(cfg, model_type="plane")

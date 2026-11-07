@@ -109,15 +109,8 @@ def test_relaxation_rate_matches_oracle_factor():
                                        jnp.asarray(S), jnp.asarray(sfn)))
     oper2 = 0.622 / (0.622 + 0.378 * q) / q  # const-ok: oracle OPER2 statement function, verbatim fidelity reference
     rw_oracle = (oper2 + (5.42e3 / T**2) * 2500.0) * (1.0 + S) * sfn
-    # Derived L_v/R_v and L_v/c_pd vs the oracle's 5.42e3/2500 roundings:
-    # agreement must be sub-percent, not exact.
-    assert R == pytest.approx(rw_oracle, rel=7e-3)
-    # And exactly equal to the constants-derived expression.
-    eps = constants.epsilon
-    expect = ((eps / ((eps + (1 - eps) * q) * q))
-              + constants.L_v / (constants.R_v * T**2)
-              * constants.L_v / constants.c_pd) * (1 + S) * sfn
-    assert R == pytest.approx(expect, rel=1e-14)
+    # The port uses the oracle's literals (faithful port): equal to roundoff.
+    assert R == pytest.approx(rw_oracle, rel=1e-14)
 
 
 def test_differentiable_and_batched():

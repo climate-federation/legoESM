@@ -11,8 +11,12 @@ while 77% of anvil cells were super-saturated over the mixed-phase curve).
 ``saturation_scheme="mixed_phase"`` measures RH against the liquid/ice curve
 blended by the scheme's OWN condensate ice-fraction ramp (T_freeze ->
 T_ice_only; IFS alpha(T) convention, Tiedtke 1993), so the RH criterion and
-the diagnosed condensate phase agree.  ``"liquid"`` stays the byte-identical
-legacy default.
+the diagnosed condensate phase agree.  ``"mixed_phase"`` became the DEFAULT on 2026-09-17, when the same defect was
+measured at the other end of the temperature range: with "liquid", 230 K
+ice-saturated air at 900 hPa reads RH 0.662 against an rh_crit of 0.85, and the
+model published 0.0 % February cloud cover north of 80N against 35-40 %
+observed, with surface air 10-19 K too cold under it.  ``"liquid"`` remains as
+the byte-identical legacy option.
 """
 
 from __future__ import annotations
@@ -50,15 +54,20 @@ def _cold_ice_saturated_column(nlev: int = 12):
     return T, p_full, dp, q_v, np.asarray(cold)[0]
 
 
-def test_liquid_default_is_field_default():
-    assert CloudConfig().saturation_scheme == "liquid"
+def test_mixed_phase_is_the_field_default():
+    """The default moved on 2026-09-17 (see the module docstring): "liquid"
+    made cold cloud impossible, in the TTL and in the winter Arctic alike."""
+    assert CloudConfig().saturation_scheme == "mixed_phase"
 
 
 def test_ice_saturated_anvil_liquid_zero_mixed_positive():
     """THE defect: ice-saturated cold levels give cf=0 on the liquid curve and
     cf>0 (indeed ~1 at exact ice saturation) on the mixed-phase curve."""
     T, p_full, dp, q_v, cold = _cold_ice_saturated_column()
-    base = CloudConfig(scheme="sundqvist", rh_crit=0.85)
+    # EXPLICIT: this test is about the two curves, so neither arm may inherit
+    # whatever the field default happens to be (it moved to mixed_phase).
+    base = CloudConfig(scheme="sundqvist", rh_crit=0.85,
+                       saturation_scheme="liquid")
     cf_liq = np.asarray(compute_cloud_properties(
         T, p_full, q_v, dp, base).cloud_fraction)
     cf_mix = np.asarray(compute_cloud_properties(
@@ -83,7 +92,8 @@ def test_warm_column_bit_identical():
     p_half = jnp.linspace(4.8e4, 1.0e5, nlev + 1)[None, :]
     dp = p_half[:, 1:] - p_half[:, :-1]
     q_v = 0.9 * saturation_mixing_ratio(T, p_full)
-    base = CloudConfig(scheme="sundqvist", rh_crit=0.8)
+    base = CloudConfig(scheme="sundqvist", rh_crit=0.8,
+                       saturation_scheme="liquid")
     out_liq = compute_cloud_properties(T, p_full, q_v, dp, base)
     out_mix = compute_cloud_properties(
         T, p_full, q_v, dp, base._replace(saturation_scheme="mixed_phase"))
@@ -118,7 +128,7 @@ def test_xu_randall_also_gains_cold_cloud():
     T, p_full, dp, q_v, cold = _cold_ice_saturated_column()
     q_i = jnp.where(jnp.asarray(cold)[None, :], 2.0e-5, 0.0)
     q_c = jnp.zeros_like(T)
-    base = CloudConfig(scheme="xu_randall")
+    base = CloudConfig(scheme="xu_randall", saturation_scheme="liquid")
     cf_liq = np.asarray(compute_cloud_properties(
         T, p_full, q_v, dp, base, q_cloud=q_c, q_ice=q_i).cloud_fraction)
     cf_mix = np.asarray(compute_cloud_properties(
@@ -154,8 +164,9 @@ def test_jit_parity_and_finite_grad():
 def test_build_cloud_config_round_trip():
     cc = build_cloud_config("sundqvist", saturation_scheme="mixed_phase")
     assert cc.saturation_scheme == "mixed_phase"
-    # None => CloudConfig default (legacy liquid, byte-identical).
-    assert build_cloud_config("sundqvist").saturation_scheme == "liquid"
+    # None => the CloudConfig field default, which is mixed_phase since
+    # 2026-09-17; the builder must not pin a curve of its own.
+    assert build_cloud_config("sundqvist").saturation_scheme == "mixed_phase"
 
 
 def test_experiment_config_validate_strict_membership():
@@ -176,10 +187,12 @@ def test_standalone_cloud_config_forwards_saturation_scheme():
                           cloud_saturation_scheme="mixed_phase")
     assert _standalone_cloud_config(
         cfg, "sundqvist").saturation_scheme == "mixed_phase"
-    # Absent attribute => None => CloudConfig default (legacy).
+    # Absent attribute => None => the CloudConfig field default, mixed_phase
+    # since 2026-09-17.  A caller that says nothing must get the field default,
+    # not a curve this builder picked on its own.
     assert _standalone_cloud_config(
         SimpleNamespace(convective_cloud=False),
-        "sundqvist").saturation_scheme == "liquid"
+        "sundqvist").saturation_scheme == "mixed_phase"
 
 
 def test_clt_diagnostic_builder_threads_saturation_scheme():
@@ -211,3 +224,58 @@ def test_clt_diagnostic_builder_threads_saturation_scheme():
     assert "cloud_saturation_scheme" in call.group(1)
     # And the inspected symbol is live: setup() invokes it.
     assert "_create_diagnostics()" in inspect.getsource(ModelDriver.setup)
+
+
+def _polar_column(T_K=230.0, p_Pa=900e2, nlev=4):
+    """A cold, exactly ice-saturated column at Arctic winter conditions.
+
+    Not the TTL fixture above: this is the warm end of "cold", 230 K at 900 hPa,
+    where the Arctic actually has 35-60% cloud cover in February and the model
+    published 0.0%.
+    """
+    T = jnp.full((1, nlev), T_K)
+    p_full = jnp.full((1, nlev), p_Pa)
+    q_v = jnp.broadcast_to(saturation_mixing_ratio_ice(T, p_full), (1, nlev))
+    dp = jnp.full((1, nlev), 5e3)
+    return T, p_full, q_v, dp
+
+
+@pytest.mark.parametrize("scheme,expect_cloud", [("liquid", False),
+                                                 ("mixed_phase", True)])
+def test_polar_ice_saturated_air_makes_cloud_only_on_the_blended_curve(
+        scheme, expect_cloud):
+    """At 230 K the liquid curve puts ice-saturated air at RH 0.66.
+
+    With rh_crit 0.85 that is zero cover, which is why the February Arctic came
+    back with 0.0% cloud north of 80N against 35-40% observed.  The blended
+    curve reads ~1 and the same air makes cloud.  Reverting the default to
+    "liquid" leaves the model in the first column of this table.
+    """
+    T, p_full, q_v, dp = _polar_column()
+    cfg = CloudConfig(scheme="sundqvist", rh_crit=0.85,
+                      saturation_scheme=scheme)
+    out = compute_cloud_properties(T=T, p_full=p_full, q_v=q_v, dp=dp, config=cfg)
+    cover = float(jnp.max(out.cloud_fraction))
+    # the control that makes the claim readable: the RH the scheme sees
+    rh_liquid = float(q_v[0, 0] / saturation_mixing_ratio(T[0, 0], p_full[0, 0]))
+    assert 0.60 < rh_liquid < 0.72, rh_liquid
+    assert (cover > 0.0) is expect_cloud, (scheme, cover, rh_liquid)
+
+
+def test_mixed_phase_is_the_default_everywhere_it_is_selected():
+    """All three places that can select the curve must agree on mixed_phase.
+
+    A default that disagrees between the kernel, the driver and the CLI is how a
+    deck silently gets the legacy curve back.
+    """
+    import sys, os
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig as _CC
+    from legoesm.driver.config import ExperimentConfig
+    assert _CC().saturation_scheme == "mixed_phase"
+    assert ExperimentConfig().cloud_saturation_scheme == "mixed_phase"
+    _run = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        os.pardir, os.pardir, "scripts", "run")
+    sys.path.insert(0, os.path.normpath(_run))
+    from run_amip import build_arg_parser
+    assert (build_arg_parser().get_default("cloud_saturation_scheme")
+            == "mixed_phase")

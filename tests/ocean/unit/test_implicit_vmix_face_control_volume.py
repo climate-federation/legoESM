@@ -139,7 +139,7 @@ def _capture_solve_face_thickness():
 
     # disable_jit so the captured thickness is a CONCRETE array, not a tracer.
     with jax.disable_jit(), mock.patch.object(omlc, "depth_mean", _spy):
-        model.step(state, dt=_DT)
+        model._step_impl(state, dt=_DT)
 
     u_shape = (N_LAT, N_LON + 1, N_LEV)
     v_shape = (N_LAT + 1, N_LON, N_LEV)

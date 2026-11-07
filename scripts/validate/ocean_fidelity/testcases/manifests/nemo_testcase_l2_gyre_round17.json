@@ -1,0 +1,82 @@
+{
+  "format": "nemo-testcase-l2-gyre-round17-manifest-v1",
+  "session_id": "01a05cb9-7625-7f40-9e83-b3fa767b1945",
+  "date": "2026-09-04",
+  "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+  "starting_git_sha": "8b6ec4efe31e08d0f8db9c1e1378f7049ffc2409",
+  "canonical_source_rounding_source_commit": "86a8eb21d18",
+  "commits": {
+    "source_rounding_convergence": "2a7b1f7ae",
+    "hpg_preregistration": "f7409dddb",
+    "hpg_source_literal": "420c8a1c7",
+    "bt_frame_census_schema": "c89f6b65c"
+  },
+  "regime": "production-jit/cpu/fp64/oracle-v2/scalar-libm",
+  "status": "DEBT",
+  "first_non_bit_exact_boundary": {
+    "name": "stage1.post_wind_slow_forcing",
+    "u": {
+      "max_abs": 6.617444900424222e-24,
+      "max_ulp": 3,
+      "differing_cells": 415
+    },
+    "v": {
+      "max_abs": 6.617444900424222e-24,
+      "max_ulp": 4,
+      "differing_cells": 409
+    }
+  },
+  "hpg_move": {
+    "old_stage1_krhs_max_abs": 1.3869160759180077e-20,
+    "new_stage1_krhs_max_abs": 0.0,
+    "new_depth_mean_max_abs": 0.0,
+    "new_post_drag_max_abs": 0.0,
+    "depth_reduction_arm": "BIT_EXACT_NO_ARM_NEEDED",
+    "owner_label": "CONFIRMED_HPG_SOURCE_ASSOCIATION"
+  },
+  "artifacts": {
+    "source_rounding_eos_parity": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round17/source_rounding_eos_parity.json",
+      "sha256": "559c427944358a82715a087ecbf6e5c68bc12deb3185905db7f66c395ad8421b",
+      "verdict": "PASS_0_ULP"
+    },
+    "hpg_jit_parity": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round17/hpg_jit_parity.json",
+      "sha256": "bcfacdae524861242c9a42b63281612d5ab31e67016bf1f058a64b8b8bae1898",
+      "verdict": "PASS_0_ULP"
+    },
+    "hpg_slow_forcing": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round17/hpg_slow_forcing.json",
+      "sha256": "1ebdbade910d1620f1078735f90ea12c950aebedb62c448c1e31c10f5804ad0b",
+      "verdict": "DEBT_POST_WIND"
+    },
+    "hpg_slow_forcing_plant": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round17/hpg_slow_forcing_plant.json",
+      "sha256": "8d37b6e98a69c9ebee33291cf427d1c5fc9771b39f13ae10cd0d1b0d92bb36db",
+      "exit_code": 1
+    },
+    "corrected_v1_v2_census": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round17/oracle_v1_v2_census_corrected.json",
+      "sha256": "21f8416f51c87fefc2e48fe89dbaa1f143ce8e6d785f6f2154d48a739b904694"
+    },
+    "corrected_v1_v2_attribution": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round17/oracle_v1_v2_attribution_corrected.json",
+      "sha256": "774aace672c4c136284e6e758e3ab59ad4e44be59a55cf9661660733536c270e",
+      "changed_records": 41,
+      "unattributed_records": 0
+    }
+  },
+  "conditional_work": {
+    "kt1_to_10_sweep": "NOT_RUN_STAGE1_CHAIN_DEBT",
+    "overflow_lock_crosscard_gates": "NOT_RUN_STAGE1_CHAIN_DEBT",
+    "stage2_kaa": "NOT_ENTERED",
+    "stage3_transports": "NOT_ENTERED"
+  },
+  "verification": {
+    "source_rounding_prd_and_parity": "4 passed",
+    "hpg_and_isomorphism": "41 passed in 9.46 s",
+    "census_schema": "4 passed in 0.05 s",
+    "final_focused": "45 passed in 10.94 s",
+    "independent_review": "OUTSTANDING"
+  }
+}

@@ -1,0 +1,53 @@
+--- stp2d.F90.r41
++++ stp2d.F90
+@@ -18,6 +18,8 @@
+    !!    stp_2D       : RK3 case
+    !!----------------------------------------------------------------------
+    USE step_oce       ! time stepping used modules
++   USE l2_r46_stage, ONLY : r46_begin, r46_rhs, r46_ww
++                       ! round-46 WRITE-only kt1/kt2 stage recorder
+    USE domqco         ! quasi-eulerian coordinate     (dom_qco_r3c  routine)
+    USE dynspg_ts      ! 2D mode integration
+    USE dynadv_cen2    ! centred flux form advection   (dyn_adv_cen2 routine)
+@@ -128,10 +130,13 @@
+ 
+          !                             !*  hydrostatic pressure gradient (HPG))  *!   always called FIRST
+          CALL eos    ( ts, Kbb, rhd )                          ! in situ density anomaly at Kbb
++         CALL r46_begin( kt, 1, Kbb, Kmm, Krhs, Kaa, uu, vv )
+          CALL dyn_hpg( kt, Kbb     , uu, vv, Krhs )            ! horizontal gradient of Hydrostatic pressure
++         CALL r46_rhs( 'after_hpg', uu, vv, Krhs )
+          !
+          !                             !*  lateral viscosity (LDF)  *!
+          CALL dyn_ldf( kt, Kbb, Kbb, uu, vv, Krhs )
++         CALL r46_rhs( 'after_ldf', uu, vv, Krhs )
+ #if defined key_agrif
+       END DO
+       IF( ln_tile ) CALL dom_tile_stop
+@@ -147,6 +152,7 @@
+          !                             !*  COR + MET  *!   Flux Form        : Coriolis + Metric Term  
+          !                             !*     VOR     *!   Vector Inv. Form : Coriolis + relative Vorticity
+          CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )
++         CALL r46_rhs( 'after_vor', uu, vv, Krhs )
+          !
+          !                             !*  compute advection  *!   (only KEG + ZAD in Vector Inv. Form)
+          IF( .NOT.lk_linssh ) THEN
+@@ -156,6 +162,7 @@
+          ENDIF
+          !
+          CALL wzv    ( kt, Kbb, Kbb, Kaa , uu(:,:,:,Kbb), vv(:,:,:,Kbb), ww, np_velocity )  ! ww guess at Kbb (n)
++         CALL r46_ww( ww )
+          !
+          !                             !*  KEG + ZAD  *!   Vector Inv. Form : KE gradient + vertical advection
+          !                             !*     ADV     *!   Flux Form        : flux form advection
+@@ -164,8 +171,11 @@
+          CASE( np_VEC_c2  )               != 2nd order Vector Form =!                       ==>> 3D RHS
+             !
+             CALL dyn_keg( kt, nn_dynkeg, Kbb, uu, vv, Krhs )      !- horizontal Gradient of KE
++            CALL r46_rhs( 'after_keg', uu, vv, Krhs )
+             !
+             CALL dyn_zad( kt, Kbb, uu, vv, Krhs )                 !- vertical advection
++            CALL r46_rhs( 'after_zad', uu, vv, Krhs )
++            CALL r46_rhs( 'after_adv', uu, vv, Krhs )
+             !
+          CASE( np_FLX_c2  )               !=  2n order Flux Form =!   (CEN2)                ==>> 2D RHS only
+             !

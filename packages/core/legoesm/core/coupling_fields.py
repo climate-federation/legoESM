@@ -1,6 +1,7 @@
 """Fixed-slot coupling field containers.
 
-All fields pre-allocated with fixed shape — no dicts, no Optional types.
+Physical fields are pre-allocated with fixed shape. The optional forcing height
+distinguishes observed reference-height input from model-level input.
 These NamedTuples define the strict interface between atmosphere and surface.
 """
 
@@ -9,6 +10,27 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax
+import jax.numpy as jnp
+
+from legoesm import constants
+
+
+def lowest_level_height(T_lowest, p_half, p_full):
+    """Hydrostatic lowest full-level height above the LOCAL surface [m]."""
+    return (constants.R_d * T_lowest / constants.g
+            * jnp.log(p_half[..., -1] / p_full[..., -1]))
+
+
+def land_co2_ppmv(ghg_vmr, fixed_co2_ppmv):
+    """CO2 [ppmv] the land canopy sees: the SAME value radiation uses.
+
+    ``ghg_vmr`` is the radiation's GHG override (mole fractions, mol/mol;
+    present when a GHG forcing file drives radiation), else ``None``; then
+    radiation uses the run's fixed ``co2_ppmv`` and so does the land.
+    """
+    if ghg_vmr is not None and "co2" in ghg_vmr:
+        return jnp.asarray(ghg_vmr["co2"]) * 1.0e6   # mol/mol -> ppmv
+    return fixed_co2_ppmv
 
 
 def require_surface_radiation_aux(aux, *, radiation_active: bool,
@@ -30,7 +52,7 @@ def require_surface_radiation_aux(aux, *, radiation_active: bool,
 
     Gated on the atmosphere CONFIG, not on bare key presence: zero IS the
     physically correct forcing for a dry run or ``radiation="none"``, and
-    ``_run_mpas`` stashes each key only when its source produced one
+    ``_run_column`` stashes each key only when its source produced one
     (model_driver.py:5795-5802).  An unconditional "require all three keys"
     check would raise on those legitimate coupled runs.
 
@@ -46,8 +68,11 @@ def require_surface_radiation_aux(aux, *, radiation_active: bool,
     if radiation_active:
         missing += [k for k in ("held_sw_net_sfc", "held_lw_net_sfc")
                     if aux.get(k) is None]
-    if precip_active and aux.get("seg_precip") is None:
-        missing.append("seg_precip")
+    if precip_active:
+        # the segment-mean FROZEN part too (F29): the surface snowfall is the
+        # atmosphere's own phase partition, never a temperature re-split
+        missing += [k for k in ("seg_precip", "seg_precip_frozen")
+                    if aux.get(k) is None]
     if not missing:
         return
     raise RuntimeError(
@@ -58,6 +83,23 @@ def require_surface_radiation_aux(aux, *, radiation_active: bool,
         "the reconstructed lw_down is a plausible sigma*T_sfc**4). Populate "
         "the held fields in that lane, or run a lane that does (the compiled "
         "single-device lane).")
+
+
+def require_precip_frozen(precip_frozen, consumer: str):
+    """``precip_frozen`` (the atmosphere's frozen surface precipitation,
+    review 2026-10-10 F29) or a ``ValueError`` naming ``consumer`` when the
+    physics did not publish it -- the land/snow consumers take their
+    snowfall from the atmosphere's own phase partition, never from a
+    temperature re-split of the total."""
+    if precip_frozen is None:
+        raise ValueError(
+            f"{consumer}: the physics publishes surface precipitation but "
+            "not its frozen part (precip_frozen), so the snowfall cannot "
+            "take the atmosphere's own rain/snow partition (F29). Use a "
+            "microphysics/convection scheme that publishes it (every "
+            "physical scheme does; the ML microphysics emulators and neural "
+            "physics do not).")
+    return precip_frozen
 
 
 class AtmToSurface(NamedTuple):
@@ -77,6 +119,9 @@ class AtmToSurface(NamedTuple):
     co2_ppmv: jax.Array          # CO2 concentration [ppmv]
     has_radiation: jax.Array     # 1.0 = radiation fields valid, 0.0 = not
     has_precipitation: jax.Array # 1.0 = precip fields valid, 0.0 = not
+    # Appended for positional compatibility. None denotes observed forcing
+    # at the land config reference height; model-level producers supply metres.
+    z_lowest: jax.Array | None = None
 
 
 class TileResponse(NamedTuple):
@@ -184,6 +229,22 @@ class TileResponse(NamedTuple):
     # incident flux (codex r5 #1).  ``None`` for every non-ice tile and for
     # the slab-ice paths (consumers fall back to the pre-call concentration).
     ice_concentration_thermo: jax.Array | None = None
+    # Sea-ice tile only: the REALIZED latent heat paired with
+    # ``surface_mass_flux`` on that field's per-water-cell basis, i.e. the
+    # sum over categories of L_s(T_k) * m_k [W/m2, positive up].  ``lhflx``
+    # stays per ice area (on the max(pre, post) concentration basis), so the
+    # tile blend cannot rebuild the cell latent from it once L_s varies with
+    # the category temperature; blend_tiles weights this by f_water exactly
+    # like the mass.  None for every other tile (their lhflx is already the
+    # latent paired with their mass flux, per tile area).
+    lhflx_exchange: jax.Array | None = None
+    # Sea-ice tile only (extended thermodynamics): the aggregate ice cover
+    # [0-1] the thermodynamics forwarded ice-fraction precipitation (rain, and
+    # snow when snow is not tracked) to the ocean with -- post-thermo, BEFORE
+    # the ITD remap and ridging change the area.  A forced-ocean driver gives
+    # the open water the rest, ``(1 - this) * rain``, so the two sum to the
+    # incident precip.  ``None`` for every other tile and the slab-ice paths.
+    ice_concentration_precip: jax.Array | None = None
 
 
 class SurfaceToAtm(NamedTuple):

@@ -1,0 +1,13 @@
+--- trazdf.F90
++++ trazdf.F90
+@@ -114,6 +114,10 @@
+       !     horizontal structure stage 3 of step 1 created, so it is the
+       !     first record in which ah_wslp2 can be non-zero.
+       ll_l2_tra = ( lwp .AND. kt <= nit000 + 1 )
++      ! Round 125: reuse this write-only operand record over the admitted
++      ! day-180-to-day-240 magnitude interval.  The original two-step arm
++      ! stays unchanged and the widened arm reads no recorded value back.
++      IF( lwp .AND. kt >= 1081 .AND. kt <= 1440 )   ll_l2_tra = .TRUE.
+       IF( ll_l2_tra ) THEN
+          IF( l_istiled )                     CALL ctl_stop( 'tra_zdf: L2 instrument does not support domain tiling' )
+          IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'tra_zdf: L2 instrument requires 64-bit wp' )

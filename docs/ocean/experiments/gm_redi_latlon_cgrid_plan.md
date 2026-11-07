@@ -16,7 +16,7 @@ eddies; Redi rotates tracer diffusion along (not across) isopycnal surfaces.
 
 **Starting point**: A cubed-sphere GM/Redi exists (`gm_redi.py`, 16 tests passing)
 but depends on CS-specific operators and cannot be reused for the lat-lon C-grid.
-The lat-lon call site in `ocean_model_latlon_cgrid.py:526-536` expects a specific
+The lat-lon call site in `ocean_model_latlon_cgrid.py:527-537` expects a specific
 API that does not yet exist.
 
 **Research basis**: Literature review of Griffies (1998), Gent (2011), Ferrari et

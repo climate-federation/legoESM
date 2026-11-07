@@ -51,9 +51,9 @@ from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2 as _lasd_cs2
 from legoesm.atmosphere.physics.turbulence.vreman import (
-    vreman_nu_t as _vreman_nu_t_core)
+    VREMAN_BBETA_GUARD_WIDTH, vreman_nu_t as _vreman_nu_t_core)
 from legoesm.atmosphere.physics.turbulence.amd import (
-    amd_nu_t as _amd_nu_t_core)
+    AMD_DENOM_FLOOR_WIDTH, AMD_FLOOR_WIDTH, amd_nu_t as _amd_nu_t_core)
 from legoesm.core.field import Field
 from legoesm.core.state import (
     PlaneNonHydrostaticState,
@@ -587,10 +587,11 @@ def _upwind_advection_y(field_yxz: jax.Array, v_at_field: jax.Array,
 # --------------------------------------------------------------------- #
 
 
-def _van_leer_advection_x(
-    field_yxz: jax.Array, u_at_field: jax.Array, dx: float,
+def _van_leer_advection(
+    field_yxz: jax.Array, u_at_field: jax.Array, dx: float, axis: int,
 ) -> jax.Array:
-    """2nd-order Van Leer TVD upwind contribution to ``-u df/dx``.
+    """2nd-order Van Leer TVD upwind contribution to ``-u df/dx`` (``axis=1``;
+    ``axis=0`` gives ``-v df/dy``).
 
     Reconstruct field at face i+1/2 from a 4-cell stencil
     [f[i-1], f[i], f[i+1], f[i+2]] using a slope-limited 2nd-order
@@ -611,37 +612,25 @@ def _van_leer_advection_x(
     # Face i+1/2 reconstruction (HD-1-correct r sign) via the shared helper —
     # stencil [f[i-1], f[i], f[i+1], f[i+2]].
     phi_pos, phi_neg = van_leer_face_values(
-        jnp.roll(f, 1, axis=1), f, jnp.roll(f, -1, axis=1), jnp.roll(f, -2, axis=1))
+        jnp.roll(f, 1, axis=axis), f, jnp.roll(f, -1, axis=axis), jnp.roll(f, -2, axis=axis))
     # Face velocity: 2-point centred average of co-located cell velocities.
-    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=1))
+    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=axis))
     phi_R = jnp.where(u_face_R >= 0.0, phi_pos, phi_neg)
     flux_R = u_face_R * phi_R
-    flux_L = jnp.roll(flux_R, 1, axis=1)
-    u_face_L = jnp.roll(u_face_R, 1, axis=1)
+    flux_L = jnp.roll(flux_R, 1, axis=axis)
+    u_face_L = jnp.roll(u_face_R, 1, axis=axis)
     return -(flux_R - flux_L) / dx + f * (u_face_R - u_face_L) / dx
 
 
-def _van_leer_advection_y(
-    field_yxz: jax.Array, v_at_field: jax.Array, dy: float,
-) -> jax.Array:
-    """2nd-order Van Leer TVD upwind contribution to ``-v df/dy``
-    (axis=0). Same convention as :func:`_van_leer_advection_x`."""
-    from legoesm.core.flux_limiters import van_leer_face_values
-    f = field_yxz
-    phi_pos, phi_neg = van_leer_face_values(
-        jnp.roll(f, 1, axis=0), f, jnp.roll(f, -1, axis=0), jnp.roll(f, -2, axis=0))
-    v_face_R = 0.5 * (v_at_field + jnp.roll(v_at_field, -1, axis=0))
-    phi_R = jnp.where(v_face_R >= 0.0, phi_pos, phi_neg)
-    flux_R = v_face_R * phi_R
-    flux_L = jnp.roll(flux_R, 1, axis=0)
-    v_face_L = jnp.roll(v_face_R, 1, axis=0)
-    return -(flux_R - flux_L) / dy + f * (v_face_R - v_face_L) / dy
+_van_leer_advection_x = functools.partial(_van_leer_advection, axis=1)
+_van_leer_advection_y = functools.partial(_van_leer_advection, axis=0)
 
 
-def _centered_advection_x(
-    field_yxz: jax.Array, u_at_field: jax.Array, dx: float,
+def _centered_advection(
+    field_yxz: jax.Array, u_at_field: jax.Array, dx: float, axis: int,
 ) -> jax.Array:
-    """2nd-order CENTERED flux-form advection ``-u df/dx`` = gSAM `advect2_mom`.
+    """2nd-order CENTERED flux-form advection ``-u df/dx`` = gSAM `advect2_mom`
+    (``axis=1``; ``axis=0`` gives ``-v df/dy``).
 
     ADV-SPLIT #86 (codex iter-68): a 2nd-order CENTERED, NON-diffusive momentum
     scheme matching SAM's face reconstruction (``advect2_mom_xy.f90:27``:
@@ -662,26 +651,16 @@ def _centered_advection_x(
     Face value = centred 2-pt avg; stencil [i-1, i, i+1] ⇒ halo 1 (≤ van_leer's 2).
     """
     f = field_yxz
-    phi_R = 0.5 * (f + jnp.roll(f, -1, axis=1))         # centred face i+1/2
-    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=1))
+    phi_R = 0.5 * (f + jnp.roll(f, -1, axis=axis))         # centred face i+1/2
+    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=axis))
     flux_R = u_face_R * phi_R
-    flux_L = jnp.roll(flux_R, 1, axis=1)
-    u_face_L = jnp.roll(u_face_R, 1, axis=1)
+    flux_L = jnp.roll(flux_R, 1, axis=axis)
+    u_face_L = jnp.roll(u_face_R, 1, axis=axis)
     return -(flux_R - flux_L) / dx + f * (u_face_R - u_face_L) / dx
 
 
-def _centered_advection_y(
-    field_yxz: jax.Array, v_at_field: jax.Array, dy: float,
-) -> jax.Array:
-    """2nd-order CENTERED flux-form advection ``-v df/dy`` (axis=0). Momentum-leg
-    counterpart of :func:`_centered_advection_x` (= gSAM `advect2_mom`)."""
-    f = field_yxz
-    phi_R = 0.5 * (f + jnp.roll(f, -1, axis=0))
-    v_face_R = 0.5 * (v_at_field + jnp.roll(v_at_field, -1, axis=0))
-    flux_R = v_face_R * phi_R
-    flux_L = jnp.roll(flux_R, 1, axis=0)
-    v_face_L = jnp.roll(v_face_R, 1, axis=0)
-    return -(flux_R - flux_L) / dy + f * (v_face_R - v_face_L) / dy
+_centered_advection_x = functools.partial(_centered_advection, axis=1)
+_centered_advection_y = functools.partial(_centered_advection, axis=0)
 
 
 # --------------------------------------------------------------------- #
@@ -697,10 +676,11 @@ def _centered_advection_y(
 # --------------------------------------------------------------------- #
 
 
-def _weno5_advection_x(
-    field_yxz: jax.Array, u_at_field: jax.Array, dx: float,
+def _weno5_advection(
+    field_yxz: jax.Array, u_at_field: jax.Array, dx: float, axis: int,
 ) -> jax.Array:
-    """5th-order WENO-Z upwind contribution to ``-u df/dx``.
+    """5th-order WENO-Z upwind contribution to ``-u df/dx`` (``axis=1``;
+    ``axis=0`` gives ``-v df/dy``).
 
     Computes the face flux ``F_{i+1/2} = u_face · phi_face`` where
     ``phi_face`` is the WENO5-Z left-/right-biased reconstruction
@@ -718,46 +698,27 @@ def _weno5_advection_x(
     f = field_yxz
     # Stencil for face i+1/2: [f[i-2], f[i-1], f[i], f[i+1], f[i+2], f[i+3]]
     stencil_R = [
-        jnp.roll(f,  2, axis=1),
-        jnp.roll(f,  1, axis=1),
+        jnp.roll(f,  2, axis=axis),
+        jnp.roll(f,  1, axis=axis),
         f,
-        jnp.roll(f, -1, axis=1),
-        jnp.roll(f, -2, axis=1),
-        jnp.roll(f, -3, axis=1),
+        jnp.roll(f, -1, axis=axis),
+        jnp.roll(f, -2, axis=axis),
+        jnp.roll(f, -3, axis=axis),
     ]
     fR_plus, fR_minus = weno5_z(stencil_R)  # at face i+1/2
     # Face velocity = arithmetic average of co-located cell velocities.
-    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=1))
+    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=axis))
     # Upwind selection.
     phi_R = jnp.where(u_face_R >= 0.0, fR_plus, fR_minus)
     flux_R = u_face_R * phi_R
     # Face i-1/2 is just the rolled face i+1/2 of the previous cell.
-    flux_L = jnp.roll(flux_R, 1, axis=1)
-    u_face_L = jnp.roll(u_face_R, 1, axis=1)
+    flux_L = jnp.roll(flux_R, 1, axis=axis)
+    u_face_L = jnp.roll(u_face_R, 1, axis=axis)
     return -(flux_R - flux_L) / dx + f * (u_face_R - u_face_L) / dx
 
 
-def _weno5_advection_y(
-    field_yxz: jax.Array, v_at_field: jax.Array, dy: float,
-) -> jax.Array:
-    """5th-order WENO-Z upwind contribution to ``-v df/dy`` (axis=0)."""
-    from legoesm.core.weno import weno5_z
-    f = field_yxz
-    stencil_R = [
-        jnp.roll(f,  2, axis=0),
-        jnp.roll(f,  1, axis=0),
-        f,
-        jnp.roll(f, -1, axis=0),
-        jnp.roll(f, -2, axis=0),
-        jnp.roll(f, -3, axis=0),
-    ]
-    fR_plus, fR_minus = weno5_z(stencil_R)
-    v_face_R = 0.5 * (v_at_field + jnp.roll(v_at_field, -1, axis=0))
-    phi_R = jnp.where(v_face_R >= 0.0, fR_plus, fR_minus)
-    flux_R = v_face_R * phi_R
-    flux_L = jnp.roll(flux_R, 1, axis=0)
-    v_face_L = jnp.roll(v_face_R, 1, axis=0)
-    return -(flux_R - flux_L) / dy + f * (v_face_R - v_face_L) / dy
+_weno5_advection_x = functools.partial(_weno5_advection, axis=1)
+_weno5_advection_y = functools.partial(_weno5_advection, axis=0)
 
 
 def _variable_K_diffusion_vlast(
@@ -1394,7 +1355,8 @@ def _velocity_gradients_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord):
 
 
 def _compute_vreman_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
-                              c_vreman):
+                              c_vreman,
+                              bbeta_guard_width=VREMAN_BBETA_GUARD_WIDTH):
     """Vreman (2004) eddy viscosity ``K_m`` at cell centres for the plane CRM —
     OPTIONAL alternative to :func:`_compute_smagorinsky_K_m_plane` (the SAM-faithful
     default). Computes the nine A-grid velocity gradients and defers the algebra to
@@ -1409,11 +1371,13 @@ def _compute_vreman_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
     # a_cd = ∂u_c/∂x_d ; dz per-level (nlev,) broadcasts on the trailing axis.
     return _vreman_nu_t_core(
         dudx, dudy, dudz, dvdx, dvdy, dvdz, dwdx, dwdy, dwdz,
-        grid.dx, grid.dy, height_coord.dz, c_vreman)
+        grid.dx, grid.dy, height_coord.dz, c_vreman,
+        bbeta_guard_width=bbeta_guard_width)
 
 
 def _compute_amd_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
-                           c_amd):
+                           c_amd, floor_width=AMD_FLOOR_WIDTH,
+                           denom_floor_width=AMD_DENOM_FLOOR_WIDTH):
     """Anisotropic Minimum-Dissipation eddy viscosity ``K_m`` at cell centres —
     OPTIONAL alternative to :func:`_compute_smagorinsky_K_m_plane`. Computes the
     nine A-grid velocity gradients (the SAME helper Vreman uses) and defers the
@@ -1427,7 +1391,8 @@ def _compute_amd_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
         u_yxz, v_yxz, w_yxz_half, grid, height_coord)
     return _amd_nu_t_core(
         dudx, dudy, dudz, dvdx, dvdy, dvdz, dwdx, dwdy, dwdz,
-        grid.dx, grid.dy, height_coord.dz, c_amd)
+        grid.dx, grid.dy, height_coord.dz, c_amd, floor_width=floor_width,
+        denom_floor_width=denom_floor_width)
 
 
 def _compute_dynamic_smag_cs_plane(
@@ -2258,7 +2223,8 @@ def plane_compressible_euler_slow_tendencies(
             # widths, so it behaves on anisotropic Δx≠Δz grids. Purely local
             # (no plane average) ⇒ MPI-safe. K_h = K_m / Pr (same Prandtl).
             K_m = _compute_vreman_K_m_plane(
-                u, v, w, grid, height_coord, config.vreman_c)
+                u, v, w, grid, height_coord, config.vreman_c,
+                config.vreman_bbeta_guard_width)
             sgs_prandtl = config.smagorinsky_prandtl
         elif _use_amd:
             # Anisotropic Minimum-Dissipation (Rozema 2015 / Abkar-Bae-Moin
@@ -2268,7 +2234,8 @@ def plane_compressible_euler_slow_tendencies(
             # filter widths for anisotropic Δx≠Δz grids. Purely local (no plane
             # average) ⇒ MPI-safe. K_h = K_m / Pr (same Prandtl).
             K_m = _compute_amd_K_m_plane(
-                u, v, w, grid, height_coord, config.amd_c)
+                u, v, w, grid, height_coord, config.amd_c,
+                config.amd_floor_width, config.amd_denom_floor_width)
             sgs_prandtl = config.smagorinsky_prandtl
         else:
             # CRM/LES: Smagorinsky-Lilly EDDY viscosity. Full 3D strain (takes

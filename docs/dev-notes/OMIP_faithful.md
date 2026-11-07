@@ -20,6 +20,15 @@ ASO nino3 criterion; (2) mixed-layer heat-budget attribution of the day-30
 regionally-decomposed MLD (rmse 21.5->39.5 m) on every A/B scorecard.
 The corrected (_MOD) CORE-II forcing is the default resolver, gated by
 `tests/ocean/unit/test_core2_corrected_cache_default.py`.
+FORCING INTERPOLATION (user decision 2026-08-27): BILINEAR on the tripole
+(commits 089d10b75/a90bd1935) is the standard — kept despite the
+pre-registered stripe A/B falling short (MLD stripe index -32% vs -50%
+target; SST rmse 0.515->0.527 from the expected Jensen stress weakening) —
+because it is NEMO's own convention, removes the stairstep forcing at the
+source (114->0 duplicated rows), and improves MLD (21.5->20.5 m) and SSS.
+Standard-card numbers quoted above predate the switch; the next standard
+run re-baselines.  Follow-up: locate the residual MLD banding source
+(remaining nearest-sampled static maps).
 Change ONE flag per new run and A/B against this card; never edit it in place.
 Cross-grid caveat: MPAS cannot take `--dm2dc --isf --bbl-adv --sw-rgb-chl
 --iwm --nemo-monthly-init` (driver hard-errors), and it silently IGNORES
@@ -370,7 +379,7 @@ dai_trenberth.py` exists) onto the forcing → ungate the freshwater metrics.
   wind-stress SIGN BUG**: `air_sea_fluxes` returns *atmospheric*-convention tau (−ρCd|U|U,
   opposing wind); the applicator applied **+tau** → ocean driven BACKWARDS. Fixed to ocean
   reaction **−tau** across latlon/tripole/cube/mpas (matches dynamics-core
-  `ocean_pe_latlon_cgrid.py:1892`). Added sign-regression + tripole unit tests → **all 12 pass**
+  `ocean_pe_latlon_cgrid.py:1946`). Added sign-regression + tripole unit tests → **all 12 pass**
   (job 8089767). codex adversarial-review running (b9a6j470w).
 - **iter 1 (codex round 1):** adversarial review = needs-attention, 3 findings, all valid + fixed/gated:
   (1) [high] converter collapsed 6-hourly→daily before the NONLINEAR bulk flux (flux(mean U)≠mean(flux)).
@@ -457,7 +466,7 @@ dai_trenberth.py` exists) onto the forcing → ungate the freshwater metrics.
   external `apply_omip2_surface_fluxes` (forward-Euler force-then-step) is energetically inconsistent
   with the dynamics → pumps spurious KE. FAITHFUL + likely-stable path = integrate forcing INSIDE the
   step via **`model.step(state, dt, surface_forcing=OceanSurfaceForcing(tau_x,tau_y,q_net,sw_down))`**
-  (the dynamics-core tau block, ocean_pe_latlon_cgrid.py:1884 — the path run_omip's jra55 mode uses),
+  (the dynamics-core tau block, ocean_pe_latlon_cgrid.py:1938 — the path run_omip's jra55 mode uses),
   NOT the external applicator. **NEXT (leading fix):** compute CORE-II bulk tau/q_net per step → pass
   as `surface_forcing` to `model.step`; re-smoke rest-state (runaway gone?) then WOA; if WOA cold-start
   still fails → thermal-wind balanced initial velocity. **HONEST: no stable faithful global legoESM

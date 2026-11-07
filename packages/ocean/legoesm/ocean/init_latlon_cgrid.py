@@ -113,6 +113,8 @@ def rest_state_latlon_cgrid_ocean(
     land_mask_override: jnp.ndarray | None = None,
     H_bathy_override: jnp.ndarray | None = None,
     stratification: str = "exponential",
+    nemo_prognostic_barotropic_velocity: bool = False,
+    meridionally_periodic: bool = False,
 ) -> LatLonCGridOceanState:
     """Create a rest-state initial condition on a C-grid lat-lon grid.
 
@@ -157,11 +159,32 @@ def rest_state_latlon_cgrid_ocean(
           Veros ACC's ``T = (1 - z / z_bottom) * 15`` initial condition
           (``veros/setups/acc/acc.py:117``; ``T_deep=0`` there), which the
           exponential profile leaves ~1 °C too warm at the deepest cell.
+    nemo_prognostic_barotropic_velocity : bool, default False
+        Allocate NEMO key_RK3's separately carried U/V depth-mean velocity
+        pair.  At rest, ``istate.F90:143-167`` initializes both Kbb fields to
+        the depth mean of zero 3-D velocity and copies Kbb to Kmm, hence exact
+        zero.  Non-NEMO recipes leave the pair as ``None`` and gain no array
+        pytree leaves.
+    meridionally_periodic : bool, default False
+        Build the face masks under the y-wrap (the j-seam v-faces wet), as
+        the model's ``config.meridionally_periodic`` steps them.  Default =
+        the closed N/S walls.
 
     Returns
     -------
     LatLonCGridOceanState
     """
+    from legoesm.grids.halo_latlon import meridional_periodicity
+    with meridional_periodicity(meridionally_periodic):
+        return _rest_state_body(
+            grid, z_coord, T_water_init_C, T_deep, S_uniform, H_max,
+            land_lat_threshold, land_mask_override, H_bathy_override,
+            stratification, nemo_prognostic_barotropic_velocity)
+
+
+def _rest_state_body(grid, z_coord, T_water_init_C, T_deep, S_uniform, H_max,
+                     land_lat_threshold, land_mask_override, H_bathy_override,
+                     stratification, nemo_prognostic_barotropic_velocity):
     n_lat = grid.n_lat
     n_lon = grid.n_lon
     nlev = z_coord.n_levels
@@ -260,6 +283,14 @@ def rest_state_latlon_cgrid_ocean(
         u_mask=Field(data=u_mask, name="u_mask", dims=dims_u2d, units=""),
         v_mask=Field(data=v_mask, name="v_mask", dims=dims_v2d, units=""),
         w=Field(data=w_zeros, name="w", dims=dims_3d, units="m/s"),
+        uu_b=(Field(data=jnp.zeros((n_lat, n_lon + 1), dtype=dtype),
+                    name="uu_b", dims=dims_u2d, units="m/s",
+                    staggering="edge")
+              if nemo_prognostic_barotropic_velocity else None),
+        vv_b=(Field(data=jnp.zeros((n_lat + 1, n_lon), dtype=dtype),
+                    name="vv_b", dims=dims_v2d, units="m/s",
+                    staggering="edge")
+              if nemo_prognostic_barotropic_velocity else None),
     )
 
 
@@ -331,6 +362,7 @@ def replace_land_mask(
     state: LatLonCGridOceanState,
     new_land_mask: jnp.ndarray,
     seam_wall_rows: jnp.ndarray | None = None,
+    meridionally_periodic: bool = False,
 ) -> LatLonCGridOceanState:
     """Replace land_mask and recompute u_mask/v_mask atomically.
 
@@ -338,10 +370,15 @@ def replace_land_mask(
     face masks stay consistent with the cell mask.  ``seam_wall_rows``
     (optional, ``(n_lat,)``, 1 = walled) closes the periodic-seam u-face
     on those rows for a partial-periodic geometry; ``None`` (default) =
-    fully periodic (byte-identical).
+    fully periodic (byte-identical).  ``meridionally_periodic`` must match
+    the model's config (True: the j-seam v-faces stay wet); default = the
+    closed N/S walls.
     """
+    from legoesm.grids.halo_latlon import meridional_periodicity
     new_land_mask = jnp.asarray(new_land_mask)
-    u_mask, v_mask = compute_face_masks(new_land_mask, seam_wall_rows=seam_wall_rows)
+    with meridional_periodicity(meridionally_periodic):
+        u_mask, v_mask = compute_face_masks(new_land_mask,
+                                            seam_wall_rows=seam_wall_rows)
     return state._replace(
         land_mask=Field(data=new_land_mask, name="land_mask",
                         dims=state.land_mask.dims, units=""),
@@ -402,7 +439,8 @@ def apply_balanced_init(state, grid, z_coord, config,
     rho_0 = float(config.rho_0)
     g_val = float(config.g)
     is_pc = isinstance(z_coord, OceanPartialCellCoordinate)
-    eos_fn = make_eos_fn(config.eos, getattr(config, "eos_linear", None))
+    eos_fn = make_eos_fn(config.eos, getattr(config, "eos_linear", None),
+                         eos_nemo_seos=getattr(config, "eos_nemo_seos", None))
     h_actual = z_coord.h_partial if is_pc else None
 
     _, _, p_prime = iterate_eos_and_pressure_anomaly(

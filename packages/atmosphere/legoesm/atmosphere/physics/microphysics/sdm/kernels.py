@@ -103,6 +103,7 @@ _SD_TB4L = 293.15        # base temperature [K]
 _SD_SLIP = 2.510         # Cunningham slip coefficient
 _SD_D_SMALL_CM = 1.9e-3  # small-cloud upper diameter [cm]
 _SD_D_MED_CM = 1.07e-1   # large-cloud/small-rain upper diameter [cm]
+_SD_R_CAP_M = 4.0e-3     # radius cap [m] applied before the regime fits (ERF 26.09 TerminalVelocity.H l.70)
 # Safety floor on the CGS diameter so the 1/d denominators stay finite for a
 # (non-physical) r -> 0 input; far below any real droplet so it never binds
 # for r > 0. The final velocity is forced to 0 for r <= 0.
@@ -179,7 +180,6 @@ _KINETIC_8 = 8.0
 _CUNNINGHAM_A = 1.2570
 _CUNNINGHAM_B = 0.40
 _CUNNINGHAM_C = 0.550
-_BEARD_32 = 1.5
 _BEARD_COLLISION_8 = 8.0
 _STOKES_18 = 18.0
 
@@ -303,11 +303,10 @@ def brownian_kernel(
     collision kernel (``k_val += k_brown``), exactly as ported in
     ``coalescence_step`` via ``cfg.include_brownian``.
 
-    Note: the air mean-free-path expression is transcribed as the oracle wrote
-    it (``λ = 2μ/(p·√(8·M_air/(π·R_d·T)))``, SCALE-SDM lineage); it gives a
-    few× the textbook λ_air, affecting only the slip correction of sub-micron
-    droplets. Continuum-regime behaviour (slip→1) matches the classical
-    ``8k_BT/3μ`` equal-size limit.
+    The air mean free path is the oracle's
+    ``λ = 2μ/(p·√(8·mwdair/(π·boltz·avogadro·T)))`` with ERF's own
+    ``boltz``/``avogadro`` [1/kmol]/``mwdair`` [kg/kmol] (``ERF_Constants.H``),
+    i.e. the molecular mass of air over Boltzmann's constant.
 
     Parameters: radii [m], total droplet masses [kg], pressure [Pa],
     temperature [K]. Elementwise. A pair with any zero radius/mass returns
@@ -326,7 +325,7 @@ def brownian_kernel(
     d2 = 2.0 * jnp.where(valid, r_j, r_dummy)
     m1 = jnp.where(valid, m_i, m_dummy)
     m2 = jnp.where(valid, m_j, m_dummy)
-    kB = constants.k_B
+    kB = constants.k_B_erf
 
     # Dynamic viscosity [Pa·s] (Pruppacher & Klett; SI twin of _visc_air_cgs).
     Tc = T - constants.T_freeze
@@ -336,9 +335,10 @@ def brownian_kernel(
         (_VISC_MU0 + _VISC_SLOPE * Tc - _VISC_CURV * Tc * Tc) * _VISC_SCALE_SI,
     )
 
-    # Air mean free path [m] — oracle expression (see docstring note).
-    M_air_kg = constants.M_air * 1.0e-3  # coeff-ok: g/mol -> kg/mol
-    lam_air = (2.0 * visc) / (p * jnp.sqrt(_KINETIC_8 * M_air_kg / (jnp.pi * constants.R_d * T)))
+    # Air mean free path [m] (ERF Coalescence.H Brownian_SeinfeldPandis).
+    lam_air = (2.0 * visc) / (p * jnp.sqrt(
+        _KINETIC_8 * constants.M_air_erf
+        / (jnp.pi * constants.k_B_erf * constants.N_A_erf_kmol * T)))
 
     # Cunningham slip corrections.
     c1 = _CUNNINGHAM_A + _CUNNINGHAM_B * jnp.exp(-_CUNNINGHAM_C * d1 / lam_air)
@@ -348,19 +348,21 @@ def brownian_kernel(
 
     # Diffusivities [m²/s] and thermal speeds [m/s].
     dcoef = kB * T / (3.0 * jnp.pi * visc)
-    D1 = dcoef * slip1 / d1
-    D2 = dcoef * slip2 / d2
+    D1 = dcoef * (slip1 / d1)
+    D2 = dcoef * (slip2 / d2)
     vcoef = _KINETIC_8 * kB * T / jnp.pi
     cb1 = jnp.sqrt(vcoef / m1)
     cb2 = jnp.sqrt(vcoef / m2)
 
     # Droplet mean free paths and Fuchs g length terms.
-    lam1 = (_KINETIC_8 / jnp.pi) * D1 / cb1
-    lam2 = (_KINETIC_8 / jnp.pi) * D2 / cb2
-    g1 = ((d1 + lam1) ** 3
-          - jnp.exp(_BEARD_32 * jnp.log(d1 * d1 + lam1 * lam1))) / (3.0 * d1 * lam1) - d1
-    g2 = ((d2 + lam2) ** 3
-          - jnp.exp(_BEARD_32 * jnp.log(d2 * d2 + lam2 * lam2))) / (3.0 * d2 * lam2) - d2
+    # ERF's operation order, incl. x^1.5 = x*sqrt(x) (exp(1.5 log x) is off
+    # by up to 4.7e-12 relative after the cancellation in g).
+    lam1 = (_KINETIC_8 / jnp.pi) * (D1 / cb1)
+    lam2 = (_KINETIC_8 / jnp.pi) * (D2 / cb2)
+    s1 = d1 * d1 + lam1 * lam1
+    s2 = d2 * d2 + lam2 * lam2
+    g1 = ((d1 + lam1) * (d1 + lam1) * (d1 + lam1) - s1 * jnp.sqrt(s1)) / (3.0 * d1 * lam1) - d1
+    g2 = ((d2 + lam2) * (d2 + lam2) * (d2 + lam2) - s2 * jnp.sqrt(s2)) / (3.0 * d2 * lam2) - d2
 
     sumdia = d1 + d2
     sumd = D1 + D2
@@ -439,13 +441,14 @@ def terminal_velocity_cloud_rain_shima(
     large rain), returned in SI. All three regime velocities are computed and
     selected by droplet diameter (data-dependent ``where``).
     """
-    # Floor the diameter for every 1/d denominator so r -> 0 stays finite (and
-    # grad-safe through the eager jnp.where branches); zeroed at the end for r<=0.
-    diameter_cm = jnp.maximum(2.0 * r * 100.0, _DIAM_FLOOR_CM)
+    # ERF caps the radius at 4 mm (``std::min(a_r, 0.004)``). Floor the diameter
+    # for every 1/d denominator so r -> 0 stays finite (and grad-safe through
+    # the eager jnp.where branches); zeroed at the end for r<=0.
+    diameter_cm = jnp.maximum(2.0 * jnp.minimum(r, _SD_R_CAP_M) * 100.0, _DIAM_FLOOR_CM)
     P_hPa = p / 100.0
     rho_mat_cgs = constants.rho_water / 1000.0
     rho_air_cgs = rho / 1000.0
-    grav_cgs = constants.g * 100.0
+    grav_cgs = constants.g_erf * 100.0
     gxdrow = grav_cgs * (rho_mat_cgs - rho_air_cgs)
     visc = _visc_air_cgs(T)
 

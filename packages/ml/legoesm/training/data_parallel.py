@@ -395,7 +395,10 @@ def mpi_data_parallel_train_step(value_and_grad_fn, params, opt_state, optimizer
 @mpi_abort_on_uncaught
 def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                                     local_samples, n_epochs, num_processes, *,
-                                    comm=None, on_epoch=None, start_epoch=0):
+                                    comm=None, on_epoch=None, start_epoch=0,
+                                    place=None, on_step=None,
+                                    start_step=0, start_losses=(),
+                                    start_skipped=0):
     """Per-rank loop over this rank's ERA5 shard, gradients averaged across ranks
     each step. All ranks run lockstep (balanced shards from ``shard_samples`` with
     ``drop_remainder``), so the per-step ``allreduce`` never deadlocks. Rank-0
@@ -411,30 +414,52 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     job stopped, so its checkpoints do not overwrite that job's.  The learning
     -rate schedule is NOT re-derived from it — the schedule position lives in
     the optimizer state, which a resuming caller restores.
+
+    ``place(sample)`` stages one host sample on the device(s); default
+    ``jax.device_put``.  A column-sharded run passes its mesh placement here.
+
+    Mid-epoch resume: ``start_step`` skips that many samples of epoch
+    ``start_epoch`` (the sample order is fixed), seeding its running mean with
+    ``start_losses`` and its skip count with ``start_skipped``.
+    ``on_step(epoch, n_done, losses, n_skipped, params, opt_state)`` runs after
+    every step on every rank and holds what such a resume needs.
     """
     if not 0 <= start_epoch <= n_epochs:
         raise ValueError(
             f"start_epoch={start_epoch} outside [0, n_epochs={n_epochs}]")
+    if not 0 <= start_step < max(1, len(local_samples)):
+        raise ValueError(
+            f"start_step={start_step} outside [0, {len(local_samples)})")
+    if start_step and len(start_losses) + start_skipped != start_step:
+        raise ValueError(
+            f"start_step={start_step} but {len(start_losses)} losses + "
+            f"{start_skipped} skipped were carried")
     import jax
 
     # #1364: ONE trace/compile for the whole run. Hoisted above BOTH loops --
     # inside either one it would be rebuilt per step and recompile every time.
     value_and_grad_fn = build_dp_value_and_grad(loss_fn)
+    place = jax.device_put if place is None else place
     n_traces = getattr(value_and_grad_fn, "n_traces", None)
     retrace_warned = False
     n_steps_done = 0
 
     history = []
     for epoch in range(start_epoch, n_epochs):
-        losses = []
-        n_skipped = 0
-        for sample in local_samples:
+        first = epoch == start_epoch and start_step > 0
+        losses = list(start_losses) if first else []
+        n_skipped = start_skipped if first else 0
+        for i_step, sample in enumerate(local_samples):
+            if first and i_step < start_step:
+                continue
+            import time as _time
+            _t0 = _time.perf_counter()
             # #1286 fix A: samples are kept HOST-resident (numpy leaves) so the
             # whole training set is never parked in device memory; move ONE
             # sample onto the device here and let it free at the next iteration.
             # A no-op (cheap) when the sample is already device-resident (the
             # legacy eager path), so this is safe for both.
-            sample = jax.device_put(sample)
+            sample = place(sample)
             params, opt_state, loss = mpi_data_parallel_train_step(
                 value_and_grad_fn, params, opt_state, optimizer, sample,
                 num_processes, comm=comm)
@@ -446,7 +471,13 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                 n_skipped += 1
             else:
                 losses.append(float(loss))
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                "epoch %d step %d/%d loss=%.6g %.1f s", epoch, i_step + 1,
+                len(local_samples), float(loss), _time.perf_counter() - _t0)
             n_steps_done += 1
+            if on_step is not None:
+                on_step(epoch, i_step + 1, losses, n_skipped, params, opt_state)
             # #1364 retrace guard: with fixed-shape samples the rollout must be
             # traced exactly once for the whole run. More than that means a
             # per-sample leaf is going STATIC under filter_jit (a bare Python

@@ -803,14 +803,8 @@ def verify_manifest(work: str, km: int, input_sha: str) -> dict:
 
 
 def git_head() -> str | None:
-    import subprocess
-
-    try:
-        res = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"],
-                             capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return res.stdout.strip() if res.returncode == 0 else None
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(REPO).commit or None
 
 
 def _gen(work: str, km: int) -> None:

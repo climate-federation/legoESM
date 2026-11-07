@@ -211,6 +211,8 @@ def initialize_jax_distributed_multiprocess(
             f"{coordinator_port} is free and every rank can reach "
             f"{coordinator_address}. Original error: {e}"
         ) from e
+    from legoesm.parallel.early_init import pin_gloo_interface
+    pin_gloo_interface()
 
     # Validate JAX agrees with MPI (same check as initialize_distributed).
     jax_rank = jax.process_index()

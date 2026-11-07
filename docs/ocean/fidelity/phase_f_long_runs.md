@@ -27,7 +27,7 @@ Both drivers pass the ``--smoke`` path (one model day, synthetic
 forcing fallback):
 
 ```
-$ python scripts/run/ocean_long_runs/run_omip2.py --smoke --output ...
+$ python scripts/run/ocean_long_runs/run_omip2.py --smoke --allow-synthetic --output ...
 ==> Building global rest-state on latlon/36x72
    RPE_0 = -7.7476e+25 J  |  KE_0 = 0.000e+00  |  vol_0 = 2.764e+18
 ==> Year 1/1 (48 steps)

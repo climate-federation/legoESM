@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
+from legoesm import constants
+from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
 from legoesm.atmosphere.physics import (
     PhysicsConfig,
     RadiationConfig,
@@ -355,12 +358,15 @@ def _tropical_qv_profile(nlev=_RCE_NLEV):
     return 1.8e-2 * jnp.exp(-z / 3.0e3)
 
 
-def _run_and_assert_stable(cfg, integrator="forward_euler"):
+def _run_and_assert_stable(cfg, integrator="forward_euler", cell_area_m2=None,
+                           land_frac=None):
     scm = SingleColumnModel.create(
         physics_config=cfg, nlev=_RCE_NLEV, dt=_RCE_DT,
         T_profile=_tropical_T_profile(),
         q_v_profile=_tropical_qv_profile(),
         latitude_deg=0.0,
+        cell_area_m2=cell_area_m2,
+        land_frac=land_frac,
         time_integrator=integrator,
     )
     final, _ = scm.run(nsteps=_RCE_NSTEPS)
@@ -406,16 +412,26 @@ def test_swap_radiation_schemes(rad_scheme):
      "tiedtke", "bechtold"],
 )
 def test_swap_convection_schemes(conv_scheme):
+    conv = ConvectionConfig(scheme=conv_scheme)
+    if conv_scheme == "zhang_mcfarlane":  # the SCM column has no land fraction
+        conv = conv._replace(zhang_mcfarlane=conv.zhang_mcfarlane._replace(land_fraction="none"))
+    extra = {}
+    if conv_scheme == "tiedtke":
+        # WRF port reads the lagged turbulence q_v tendency / surface flux and
+        # detrains cloud ice: needs a turbulence scheme and a q_i carrier
+        extra = dict(turbulence=TurbulenceConfig(scheme="louis"),
+                     microphysics=MicrophysicsConfig(scheme="thompson"))
     cfg = _baseline_cfg(
         radiation=RadiationConfig(scheme="gray", diurnal_cycle=False),
-        convection=ConvectionConfig(scheme=conv_scheme),
+        convection=conv, **extra,
     )
     _run_and_assert_stable(cfg)
 
 
 @pytest.mark.parametrize(
     "turb_scheme",
-    ["smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+    # mynn25 (WRF port) needs q_c / cell area: tests/unit/test_mynn_lanes.py
+    ["smagorinsky", "louis", "tke", "clubb_lite",
      "holtslag_boville", "ysu", "edmf"],
 )
 def test_swap_turbulence_schemes(turb_scheme):
@@ -431,9 +447,29 @@ def test_swap_turbulence_schemes(turb_scheme):
 )
 def test_swap_microphysics_schemes(micro_scheme):
     cfg = _baseline_cfg(
-        microphysics=MicrophysicsConfig(scheme=micro_scheme),
+        microphysics=MicrophysicsConfig(
+            scheme=micro_scheme,
+            morrison=MorrisonConfig(warm_rain_scheme="kk2000")),
     )
+    if micro_scheme == "sundqvist":
+        # This case declares no GCM cell area (cell_area_m2=None), so
+        # Sundqvist refuses; see the declared-area test below.
+        with pytest.raises(ValueError, match="cell area"):
+            _run_and_assert_stable(cfg)
+        return
     _run_and_assert_stable(cfg)
+
+
+def test_thompson_runs_with_microphysics_substeps():
+    """Vote U13a: the substepped path hands WRF Thompson the prescribed w
+    (it refused for lack of w before)."""
+    cfg = _baseline_cfg(microphysics=MicrophysicsConfig(scheme="thompson"))
+    scm = SingleColumnModel.create(
+        physics_config=cfg, nlev=_RCE_NLEV, dt=_RCE_DT,
+        T_profile=_tropical_T_profile(), q_v_profile=_tropical_qv_profile(),
+        latitude_deg=0.0, microphysics_substeps=2)
+    final, _ = scm.run(nsteps=2)
+    assert jnp.all(jnp.isfinite(final.T.data))
 
 
 @pytest.mark.parametrize(
@@ -444,7 +480,16 @@ def test_swap_gwd_schemes(gwd_scheme):
     cfg = _baseline_cfg(
         gravity_wave_drag=GravityWaveDragConfig(scheme=gwd_scheme),
     )
-    _run_and_assert_stable(cfg)
+    # The swap case declares an all-land column (user 2026-10-27, Q16 item 1):
+    # CAM6 McFarlane scales its drag by the land fraction and refuses without one.
+    _run_and_assert_stable(cfg, land_frac=1.0)
+
+
+def test_mcfarlane_refuses_a_column_without_a_land_fraction():
+    cfg = _baseline_cfg(
+        gravity_wave_drag=GravityWaveDragConfig(scheme="mcfarlane"))
+    with pytest.raises(ValueError, match="land_frac"):
+        _run_and_assert_stable(cfg)
 
 
 @pytest.mark.parametrize("integrator", ["forward_euler", "rk2", "rk4"])
@@ -480,3 +525,37 @@ def test_scm_state_remains_pytree_compatible():
     assert all(isinstance(leaf, jax.Array) for leaf in leaves)
     leaves_h = jax.tree_util.tree_leaves(hist)
     assert all(isinstance(leaf, jax.Array) for leaf in leaves_h)
+
+
+def test_sundqvist_runs_on_a_column_that_declares_its_cell_area():
+    """A case that declares the GCM cell it stands for (the RCE case: the
+    production MPAS mean cell, user 2026-10-27) runs Sundqvist; the same case
+    without a declared area refuses (the swap test above)."""
+    from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
+        RCE_CELL_AREA_M2)
+    from legoesm.atmosphere.forcing.scm.scm import make_scm_grid
+    assert RCE_CELL_AREA_M2 == pytest.approx(
+        4.0 * np.pi * constants.R_earth ** 2 / 40962, rel=1e-15)
+    assert 1.2e10 < RCE_CELL_AREA_M2 < 1.3e10
+    g = make_scm_grid(0.0, cell_area_m2=RCE_CELL_AREA_M2)
+    assert float(g.grid_area.reshape(-1)[0]) == RCE_CELL_AREA_M2
+    assert make_scm_grid(0.0).grid_area is None
+    _run_and_assert_stable(
+        _baseline_cfg(microphysics=MicrophysicsConfig(scheme="sundqvist")),
+        cell_area_m2=RCE_CELL_AREA_M2)
+
+
+def test_prescribed_surface_flux_case_runs_and_warms_the_lowest_level():
+    """A prescribe='fluxes' case (Wangara-style kinematic surface fluxes)
+    runs: the dynamics hand-off strips the surface flux with prescribe='none'
+    instead of leaving a 'fluxes' forcing with no flux, which the forcing
+    validator refuses."""
+    from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
+    forcing = SCMForcing(prescribe="fluxes", w_th_s=lambda t: jnp.asarray(0.1))
+    scm = SingleColumnModel.create(
+        physics_config=_baseline_cfg(), nlev=_RCE_NLEV, dt=_RCE_DT,
+        T_profile=_tropical_T_profile(), q_v_profile=_tropical_qv_profile(),
+        latitude_deg=0.0, forcing=forcing)
+    T0 = scm.state.T.data[0, 0, 0, -1]
+    final, _ = scm.run(nsteps=2)
+    assert float(final.T.data[0, 0, 0, -1]) > float(T0)

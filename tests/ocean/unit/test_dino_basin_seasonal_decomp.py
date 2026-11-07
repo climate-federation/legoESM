@@ -114,6 +114,43 @@ def test_first_moment_is_not_the_complement_of_the_transport(P, u_random):
     assert abs(rb - ra) > 1.0               # the centroid moved by metres
 
 
+def _run_probe_self_checks_or_skip(P):
+    missing = P.missing_state_artifacts()
+    if missing:
+        pytest.skip(
+            "campaign member/restart artifacts unavailable on this machine: "
+            f"{len(missing)} missing; first missing: {missing[0]}")
+    assert P.self_checks(verbose=False) is True
+    return True
+
+
 def test_probe_self_checks_pass(P):
     """The gates the probe refuses to print a number without."""
-    assert P.self_checks(verbose=False) is True
+    _run_probe_self_checks_or_skip(P)
+
+
+def test_probe_self_checks_run_when_resolved_artifacts_exist(
+    P, monkeypatch, tmp_path,
+):
+    """The resource guard follows the real member and tiled-restart layout."""
+    lego_dir = tmp_path / "lego"
+    nemo_pattern = str(tmp_path / "RUN_VERDICT360_M%d")
+    member = "m0_control"
+    day = 10
+    monkeypatch.setattr(P, "LEGO_DIR", str(lego_dir))
+    monkeypatch.setattr(P, "NEMO_DIR", nemo_pattern)
+    monkeypatch.setattr(P, "MEMBERS", (member,))
+    monkeypatch.setattr(P, "DAYS", (day,))
+
+    with pytest.raises(pytest.skip.Exception, match="m0_control.npz"):
+        _run_probe_self_checks_or_skip(P)
+
+    lego_dir.mkdir()
+    (lego_dir / f"{member}.npz").touch()
+    nemo_dir = Path(nemo_pattern % 0)
+    nemo_dir.mkdir()
+    kt = P.G.KT_RESTART + day * P.G.STEPS_PER_DAY
+    (nemo_dir / f"DINO_{kt:08d}_restart_0000.nc").touch()
+
+    assert P.missing_state_artifacts() == []
+    assert _run_probe_self_checks_or_skip(P) is True

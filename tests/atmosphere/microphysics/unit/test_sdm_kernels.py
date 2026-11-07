@@ -140,14 +140,15 @@ def test_hall_kernel_symmetric_nonneg_zero_safe():
 
 
 def _brownian_oracle(r1, r2, m1, m2, p, T):
-    """Independent numpy transcription of ERF Brownian_SeinfeldPandis."""
-    kB = constants.k_B
+    """Independent numpy transcription of ERF Brownian_SeinfeldPandis
+    (ERF's own boltz/avogadro/mwdair, ERF_Constants.H)."""
+    kB = constants.k_B_erf
     d1, d2 = 2.0 * r1, 2.0 * r2
     Tc = T - constants.T_freeze
     visc = ((1.718 + 4.9e-3 * Tc) * 1e-5 if Tc >= 0
             else (1.718 + 4.9e-3 * Tc - 1.2e-5 * Tc * Tc) * 1e-5)
-    lam = (2.0 * visc) / (p * np.sqrt(8.0 * constants.M_air * 1e-3
-                                      / (np.pi * constants.R_d * T)))
+    lam = (2.0 * visc) / (p * np.sqrt(8.0 * constants.M_air_erf
+                                      / (np.pi * kB * constants.N_A_erf_kmol * T)))
     out = []
     for d, m in ((d1, m1), (d2, m2)):
         slip = 1.0 + 2.0 * lam * (1.2570 + 0.40 * np.exp(-0.550 * d / lam)) / d
@@ -191,8 +192,8 @@ def test_brownian_kernel_matches_independent_oracle(r1, r2):
 def test_brownian_continuum_limit_equal_spheres():
     """Large equal spheres (slip->1, g->0): K -> 8 k_B T / (3 mu), the classic
     continuum Brownian coagulation coefficient. r=10 um is deep enough into the
-    continuum for the residual ERF slip correction (inflated oracle lambda) to
-    be ~4-5%; abs=0.0 because K ~ 1e-16 << pytest.approx's default abs."""
+    continuum for the residual slip correction to be small; abs=0.0 because
+    K ~ 1e-16 << pytest.approx's default abs."""
     r = 1.0e-5
     p, T = 1.01325e5, 293.15
     m = 4.0 / 3.0 * np.pi * constants.rho_water * r**3
@@ -329,11 +330,11 @@ def _cloud_rain_shima_oracle(r, rho, p, T):
     Tc = T - constants.T_freeze
     visc = ((1.718 + 4.9e-3 * Tc) * 1e-4 if Tc >= 0
             else (1.718 + 4.9e-3 * Tc - 1.2e-5 * Tc * Tc) * 1e-4)
-    d = max(2.0 * r * 100.0, 1.0e-20)
+    d = max(2.0 * min(r, 4.0e-3) * 100.0, 1.0e-20)   # ERF 26.09 4 mm radius cap
     P_hPa = p / 100.0
     rho_mat = constants.rho_water / 1000.0
     rho_air = rho / 1000.0
-    gx = (constants.g * 100.0) * (rho_mat - rho_air)
+    gx = (constants.g_erf * 100.0) * (rho_mat - rho_air)
     sd = 6.62e-6 * (visc / 1.818e-4) * (1013.25 / P_hPa) * np.sqrt(T / 293.15)
     csc = 1.0 + 2.510 * (sd / d)
     v1 = gx / (18.0 * visc) * csc * d * d

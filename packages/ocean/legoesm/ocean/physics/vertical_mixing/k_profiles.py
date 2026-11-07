@@ -27,6 +27,7 @@ from __future__ import annotations
 
 
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.eos import (
@@ -37,6 +38,7 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.vertical_mixing._shared import (
+    eos_salinity,
     surface_buoyancy_flux,
     compute_N2,
     latitude_background_diffusivity,
@@ -105,6 +107,14 @@ def _wet_interface_mask(z_coord, dtype=None):
     return arr[..., 1:]
 
 
+def _nemo_surface_tmask(state, z_coord):
+    """Return NEMO ``tmask(:,:,1)`` from the card's wet-mask owner."""
+    is_active = getattr(z_coord, "is_active", None)
+    if is_active is not None:
+        return jnp.asarray(is_active)[..., 0]
+    return state.land_mask.data
+
+
 def compute_vertical_K_profiles(
     state,
     z_coord: "OceanZStarCoordinate",
@@ -125,8 +135,13 @@ def compute_vertical_K_profiles(
     tke_bottom_level=None,
     n2_tracers_before=None,
     eta_now=None,
+    seos_cfg=None,
     tke_p_sh2=None,
     tke_n2_bundle=None,
+    return_tke_statement_trace: bool = False,
+    tke_rhs_materialization: str = "",
+    tke_rhs_intermediate: str = "",
+    return_salt_K: bool = False,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -300,35 +315,12 @@ def compute_vertical_K_profiles(
             "Unknown VerticalMixingConfig.vmix_background_mode: must be one "
             f"of ('additive', 'nemo_max_floor'), got {_bg_mode!r}.")
     _nemo_floor = _bg_mode == "nemo_max_floor"
-    K_v_total = jnp.full(interface_shape, K_v_background, dtype=dtype)
-    A_v_total = jnp.full(interface_shape, A_v_background, dtype=dtype)
-
-    tke_new = None
-    if vmix.scheme != "none":
-        K_vmix, A_vmix, tke_new = _vmix_K_profiles(
-            state, z_coord, surface_forcing, vmix, physics_config.constants,
-            eos_fn=eos_fn,
-            tke_old=tke_old, dt_tke=dt_tke, tke_source=tke_source,
-            lat_deg=lat_deg, n2_tracers=n2_tracers,
-            tke_bottom_dirichlet=tke_bottom_dirichlet,
-            tke_bottom_level=tke_bottom_level,
-            n2_tracers_before=n2_tracers_before,
-            tke_p_sh2=tke_p_sh2,
-            tke_n2_bundle=tke_n2_bundle)
-        if _nemo_floor:
-            K_v_total = jnp.maximum(K_v_total, K_vmix)
-            A_v_total = jnp.maximum(A_v_total, A_vmix)
-        else:
-            K_v_total = K_v_total + K_vmix
-            A_v_total = A_v_total + A_vmix
-
-    conv = physics_config.convection
-    if conv.scheme == "enhanced_diffusion":
-        # Fail closed: nu_conv/nu_bg cannot be honoured under KPP (the A_conv
-        # momentum term is gated off below to avoid double-counting KPP's
-        # own interior convective viscosity).  Reject rather than silently
-        # ignore — mirrors the guard in combined.make_ocean_physics.
-        _ed = conv.enhanced_diffusion
+    # Fail closed before any profile is computed: nu_conv/nu_bg cannot be
+    # honoured under KPP (the A_conv momentum term is gated off below to avoid
+    # double-counting KPP's own interior convective viscosity).  Reject rather
+    # than silently ignore — mirrors the guard in combined.make_ocean_physics.
+    if physics_config.convection.scheme == "enhanced_diffusion":
+        _ed = physics_config.convection.enhanced_diffusion
         if vmix.scheme == "kpp" and (_ed.nu_conv != 0.0 or _ed.nu_bg != 0.0):
             raise ValueError(
                 "EnhancedDiffusionConfig convective momentum viscosity "
@@ -339,6 +331,42 @@ def compute_vertical_K_profiles(
                 "KPP own convective momentum, or choose a non-KPP "
                 "vertical_mixing scheme."
             )
+    K_v_total = jnp.full(interface_shape, K_v_background, dtype=dtype)
+    A_v_total = jnp.full(interface_shape, A_v_background, dtype=dtype)
+
+    tke_new = None
+    if vmix.scheme != "none":
+        _conv_for_shared_n2 = physics_config.convection
+        _evd_uses_before = (
+            _conv_for_shared_n2.scheme == "enhanced_diffusion"
+            and getattr(
+                _conv_for_shared_n2.enhanced_diffusion,
+                "evd_n2_time_level", "solver_state") == "nemo_now_before"
+        )
+        K_vmix, A_vmix, tke_new = _vmix_K_profiles(
+            state, z_coord, surface_forcing, vmix, physics_config.constants,
+            eos_fn=eos_fn,
+            tke_old=tke_old, dt_tke=dt_tke, tke_source=tke_source,
+            lat_deg=lat_deg, n2_tracers=n2_tracers,
+            tke_bottom_dirichlet=tke_bottom_dirichlet,
+            tke_bottom_level=tke_bottom_level,
+            n2_tracers_before=n2_tracers_before,
+            n2_before_used_by_evd=_evd_uses_before,
+            tke_p_sh2=tke_p_sh2,
+            tke_n2_bundle=tke_n2_bundle,
+            return_tke_statement_trace=return_tke_statement_trace,
+            tke_rhs_materialization=tke_rhs_materialization,
+            tke_rhs_intermediate=tke_rhs_intermediate)
+        if _nemo_floor:
+            K_v_total = jnp.maximum(K_v_total, K_vmix)
+            A_v_total = jnp.maximum(A_v_total, A_vmix)
+        else:
+            K_v_total = K_v_total + K_vmix
+            A_v_total = A_v_total + A_vmix
+
+    conv = physics_config.convection
+    if conv.scheme == "enhanced_diffusion":
+        _ed = conv.enhanced_diffusion
         # ---- Time levels of the two EVD trigger arms (zdfevd MIN(rn2,rn2b)).
         # EnhancedDiffusionConfig.evd_n2_time_level; dispatch-hardened here,
         # this being its only consumption site.
@@ -401,16 +429,40 @@ def compute_vertical_K_profiles(
             _evd_before = (_T_bb, _S_bb)
         else:
             _evd_state, _evd_before = state, n2_tracers
-        K_conv, A_conv = _enhanced_diffusion_K(_evd_state, z_coord, conv,
-                                               eos_fn=eos_fn,
-                                               before_tracers=_evd_before,
-                                               cc=physics_config.constants)
+        if getattr(_ed, "trigger_step_entry_bn2", False):
+            # zdfevd.f90:108-109 on the step-entry rn2/rn2b (stprk3.f90:171-174)
+            if (_evd_tl != "nemo_now_before" or _ed.smooth_transition
+                    or tke_n2_bundle is None or _wet_if is None):
+                raise ValueError(
+                    "EnhancedDiffusionConfig.trigger_step_entry_bn2 needs "
+                    "evd_n2_time_level='nemo_now_before', the hard threshold, "
+                    "the step-entry bn2 bundle and the wet W mask")
+            _fire = (jnp.minimum(tke_n2_bundle.rn2, tke_n2_bundle.rn2b)
+                     <= _ed.n2_threshold) & (_wet_if > 0)
+            K_conv = jnp.where(_fire, _ed.K_conv, _ed.K_bg).astype(dtype)
+            A_conv = jnp.where(_fire, _ed.nu_conv, _ed.nu_bg).astype(dtype)
+        else:
+            K_conv, A_conv = _enhanced_diffusion_K(
+                _evd_state, z_coord, conv, eos_fn=eos_fn,
+                before_tracers=_evd_before, cc=physics_config.constants,
+                seos_cfg=seos_cfg)
+        # NEMO zdfevd REPLACES the assembled coefficient where the trigger
+        # fires (zdfevd.f90:107-110, called at zdfphy.f90:359 AFTER the
+        # background/closure copy at :348-351); legoESM's historical
+        # composition ADDS.  The card states which (decision 94).
+        from legoesm.ocean.physics.convection.enhanced_diffusion import (
+            compose_evd_coefficient, resolve_evd_composition,
+        )
+        _evd_mode = resolve_evd_composition(_ed)
         # Convection enhances tracer diffusivity (convective_κz). Under
         # nemo_max_floor the EVD stable-branch background (K_bg) folds into
         # the SAME max as every other background (a no-op once K_v_total
         # already >= K_bg); the unstable branch's large K_conv still fires
         # via the max (unaffected — EVD only replaces where N²<0).
-        if _nemo_floor:
+        if _evd_mode == "nemo_replace":
+            K_v_total = compose_evd_coefficient(
+                K_v_total, K_conv, _evd_mode, convective=_ed.K_conv)
+        elif _nemo_floor:
             K_v_total = jnp.maximum(K_v_total, K_conv)
         else:
             K_v_total = K_v_total + K_conv
@@ -421,10 +473,49 @@ def compute_vertical_K_profiles(
         # When KPP is off, apply A_conv so the explicit/implicit equivalence
         # holds for the constant + convection composition.
         if vmix.scheme != "kpp":
-            if _nemo_floor:
+            if _evd_mode == "nemo_replace":
+                # nn_evdm: nu_conv is 0.0 (zdfevd.f90:121 leaves avm alone)
+                # or exactly rn_evd (:133-135); resolve_evd_composition
+                # refuses anything between.
+                A_v_total = compose_evd_coefficient(
+                    A_v_total, A_conv, _evd_mode, convective=_ed.nu_conv)
+            elif _nemo_floor:
                 A_v_total = jnp.maximum(A_v_total, A_conv)
             else:
                 A_v_total = A_v_total + A_conv
+
+    # NEMO-literal double diffusion (zdfddm), zdfphy.f90:362-363: after
+    # zdf_evd (:359), before zdf_iwm (:372); it writes avs and adds to
+    # avt/avm.  Off (every card but V3) => K_s_total stays None, no ops.
+    K_s_total = None
+    _ddm_cfg = getattr(vmix, "ddm", None)
+    if _ddm_cfg is not None and _ddm_cfg.enabled:
+        if _ddm_cfg.form not in ("hybrid", "nemo_literal"):
+            raise ValueError(
+                "Unknown DoubleDiffusionConfig.form: expected 'hybrid' or "
+                f"'nemo_literal', got {_ddm_cfg.form!r}")
+        if _ddm_cfg.form == "nemo_literal":
+            if not return_salt_K:
+                raise ValueError(
+                    "DoubleDiffusionConfig.form='nemo_literal' writes a "
+                    "separate salt diffusivity; the caller must request it "
+                    "with return_salt_K=True")
+            if (tke_n2_bundle is None
+                    or getattr(tke_n2_bundle, "ddm_operands", None) is None):
+                raise ValueError(
+                    "DoubleDiffusionConfig.form='nemo_literal' needs the "
+                    "step-entry bn2 bundle's zdt/zds (zdfddm.f90:127-128)")
+            if _wet_if is None:
+                raise ValueError(
+                    "DoubleDiffusionConfig.form='nemo_literal' needs the "
+                    "partial-cell wet W mask (zdfddm.f90:136 wmask)")
+            from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+                nemo_zdf_ddm,
+            )
+            _zdt, _zds = tke_n2_bundle.ddm_operands
+            K_v_total, K_s_total, A_v_total = nemo_zdf_ddm(
+                K_v_total, A_v_total, _zdt, _zds, tke_n2_bundle.rn2,
+                _wet_if, _ddm_cfg)
 
     # Clip to KPP K_max when KPP is the vertical mixing scheme, matching
     # the explicit path's saturation behavior.  Otherwise leave the sum
@@ -443,7 +534,52 @@ def compute_vertical_K_profiles(
     # diffusivity and momentum viscosity.  The wet-interface mask below
     # zeroes it at the seafloor (NEMO's wmask factor).
     iwm_cfg = getattr(vmix, "iwm", None)
-    if iwm_cfg is not None and iwm_cfg.enabled:
+    _iwm_form = getattr(iwm_cfg, "form", "generic")
+    if (iwm_cfg is not None and iwm_cfg.enabled
+            and _iwm_form not in ("generic", "nemo_literal")):
+        raise ValueError(
+            "Unknown IWMConfig.form (internal-wave scheme variant): expected "
+            f"'generic' or 'nemo_literal', got {_iwm_form!r}")
+    if (iwm_cfg is not None and iwm_cfg.enabled
+            and _iwm_form == "nemo_literal"):
+        # zdf_iwm (zdfiwm.f90:233-317) at zdfphy.f90:372, after zdf_ddm:
+        # adds onto avt, avs (V3's salt channel, or avs = avt when DDM is
+        # off, zdfphy.f90:365-367) and avm.
+        if not return_salt_K:
+            raise ValueError(
+                "IWMConfig.form='nemo_literal' writes the salt diffusivity "
+                "(zdfiwm.f90:314); the caller must request return_salt_K=True")
+        if (tke_n2_bundle is None
+                or getattr(tke_n2_bundle, "iwm_stretch", None) is None):
+            raise ValueError(
+                "IWMConfig.form='nemo_literal' needs the step-entry bn2 "
+                "bundle's rn2 and (1 + r3t(Kmm)) (zdfiwm.f90:234-278)")
+        if _wet_if is None or iwm_fields is None:
+            raise ValueError(
+                "IWMConfig.form='nemo_literal' needs the partial-cell wet W "
+                "mask and the card's zdfiwm forcing maps")
+        _gdept_1d = getattr(z_coord, "t_depth_ref", None)
+        _e3w_0 = getattr(z_coord, "nemo_e3w_0", None)
+        if _gdept_1d is None or _e3w_0 is None:
+            raise ValueError(
+                "IWMConfig.form='nemo_literal' reads NEMO's 1-D gdept_1d and "
+                "e3w_1d (z_coord.t_depth_ref / nemo_e3w_0)")
+        _e3w_cols = np.asarray(_e3w_0).reshape(-1, np.shape(_e3w_0)[-1])
+        if not np.array_equal(_e3w_cols, np.broadcast_to(
+                _e3w_cols[:1], _e3w_cols.shape)):
+            raise ValueError(
+                "IWMConfig.form='nemo_literal' reads the 1-D e3w_1d; this "
+                "coordinate's nemo_e3w_0 is not column-uniform")
+        from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+            nemo_zdf_iwm,
+        )
+        K_v_total, K_s_total, A_v_total = nemo_zdf_iwm(
+            K_v_total, K_v_total if K_s_total is None else K_s_total,
+            A_v_total, iwm_fields, tke_n2_bundle.rn2,
+            tke_n2_bundle.iwm_stretch, state.H_bathy.data,
+            np.asarray(_gdept_1d), _e3w_cols[0], _wet_if,
+            cfg=iwm_cfg, rho_0=physics_config.constants.rho_0)
+    elif iwm_cfg is not None and iwm_cfg.enabled:
         if iwm_cfg.tsdiff:
             # avs = avt * ratio needs a SEPARATE salinity diffusivity
             # channel through the implicit tracer solve; the lat-lon
@@ -455,6 +591,12 @@ def compute_vertical_K_profiles(
                 "IWMConfig.tsdiff=True (differential T/S wave-driven "
                 "mixing) is not supported on the shared-K implicit tracer "
                 "solve; set tsdiff=False (the ORCA1 oracle value).")
+        if K_s_total is not None:
+            # zdf_iwm also writes avs (zdfiwm); not transcribed for the
+            # literal salt channel yet -- refuse rather than drop it.
+            raise ValueError(
+                "IWMConfig.enabled with DoubleDiffusionConfig.form="
+                "'nemo_literal' is not built: zdf_iwm's avs update is missing")
         K_iwm = iwm_K_profile(
             state, z_coord, physics_config, iwm_cfg,
             eos_fn=eos_fn, iwm_fields=iwm_fields)
@@ -484,8 +626,14 @@ def compute_vertical_K_profiles(
                              tke_new.K_M_surface * state.land_mask.data),
             )
 
+    if K_s_total is not None:
+        K_s_total = K_s_total * _wet_if
     if return_tke:
+        if return_salt_K:
+            return K_v_total, A_v_total, tke_new, K_s_total
         return K_v_total, A_v_total, tke_new
+    if return_salt_K:
+        return K_v_total, A_v_total, K_s_total
     return K_v_total, A_v_total
 
 
@@ -531,13 +679,32 @@ def _surface_buoyancy_flux(surface_forcing, state, constants_config,
     )
 
 
+class _EPBLGridShim:
+    """Minimal grid object exposing ``grid_lat`` for the ePBL closure.
+
+    ``_vmix_K_profiles`` carries the latitude as ``lat_deg`` while the
+    vertical-mixing factories read ``grid.grid_lat`` in RADIANS, so this
+    adapts between the two. ``None`` means no latitude was supplied; the
+    ePBL closure then raises rather than assuming f = 0.
+    """
+
+    __slots__ = ("grid_lat",)
+
+    def __init__(self, lat_deg):
+        self.grid_lat = None if lat_deg is None else jnp.deg2rad(lat_deg)
+
+
 def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      constants_config=ConstantsConfig(), eos_fn=None,
                      *, tke_old=None, dt_tke=None, tke_source=None,
                      lat_deg=None, n2_tracers=None,
                      tke_bottom_dirichlet=None, tke_bottom_level=None,
-                     n2_tracers_before=None, tke_p_sh2=None,
-                     tke_n2_bundle=None):
+                     n2_tracers_before=None, n2_before_used_by_evd=False,
+                     tke_p_sh2=None,
+                     tke_n2_bundle=None,
+                     return_tke_statement_trace: bool = False,
+                     tke_rhs_materialization: str = "",
+                     tke_rhs_intermediate: str = ""):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -593,7 +760,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         A_v = jnp.full(shape, cfg.A_v, dtype=dtype)
         return K_v, A_v, None
 
-    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn,
+    # KPP: sqrt(S) EOSes have an infinite dRho/dS at S = 0 (land / fill
+    # cells), so its density sees the floored salinity, as ePBL's does and
+    # as the explicit KPP factory's does; Wright as is (#2243).
+    rho_state = (state._replace(
+        S=state.S.replace(data=eos_salinity(state.S.data, eos_fn)))
+        if scheme == "kpp" else state)
+    rho = _compute_rho(rho_state, z_coord, J, eos_fn=eos_fn,
                        g=constants_config.g,
                        rho0=constants_config.rho_0)
 
@@ -626,6 +799,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
 
     if scheme == "tke":
         from legoesm.ocean.physics.vertical_mixing.tke import (
+            nemo_tke_effective_ice_fraction,
             tke_vertical_mixing,
         )
         # Interpolate u, v to cell centres for the closure on C-grid;
@@ -646,6 +820,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # u_data/v_data above.
         _shear_disc = getattr(vmix_cfg.tke, "tke_shear_production",
                               "squared_centered")
+        if _shear_disc == "nemo_face_native_nbb2":
+            _shear_disc = "nemo_face_native_now2"
         _needs_before = _shear_disc in ("nemo_burchard", "nemo_face_native")
         if _needs_before and (state.u_before is None or state.v_before is None):
             raise ValueError(
@@ -724,12 +900,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             v_face_now = state.v.data
             u_face_before = u_face_now
             v_face_before = v_face_now
+        _is_active = getattr(z_coord, "is_active", None)
+        _surface_tmask = None
         _face_masks_3d = None
         if _shear_disc in ("nemo_face_native", "nemo_face_native_now2"):
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                 compute_face_masks_3d,
             )
-            _is_active = getattr(z_coord, "is_active", None)
             if _is_active is None:
                 raise ValueError(
                     "TKEConfig.tke_shear_production='nemo_face_native' "
@@ -759,6 +936,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     "sub-seafloor w-interfaces -- got a z_coord with no "
                     "is_active (a pure z-star column has no sub-seafloor row "
                     "for this option to act on).")
+        if getattr(vmix_cfg.tke, "tke_mxl_choice", 2) in (3, 4):
+            # NEMO uses tmask(:,:,1), the card's horizontal ocean mask, in
+            # the ln_mxl0 surface anchor (R56TKE ppsrc zdftke.f90:614-619).
+            # Every ocean state carries that mask, including flat-bottom
+            # OceanZStarCoordinate cards that intentionally have no
+            # per-level ``is_active`` partial-cell mask.
+            _surface_tmask = _nemo_surface_tmask(state, z_coord)
         # Before-advection (Nnow) T/S for the diffusivity-stage N²
         # (TKEConfig.n2_before_advection). None ⇒ the closure uses the
         # post-advection T_data/S_data ⇒ BIT-IDENTICAL.
@@ -787,11 +971,15 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 "tke_set_diffusivities does not accept T_n2b/S_n2b and "
                 "would silently keep step_entry. Disable tke_n2_time_level "
                 "or use the standard pre_mixing path.")
-        if _n2_tl == "step_entry" and n2_tracers_before is not None:
+        # The Nbb pair is shared with EVD's two-level MIN(rn2,rn2b) trigger.
+        # It is only unused when neither TKE nor EVD selects that operand.
+        if (_n2_tl == "step_entry" and n2_tracers_before is not None
+                and not n2_before_used_by_evd):
             raise ValueError(
                 "n2_tracers_before was passed but TKEConfig.tke_n2_time_level"
-                "='step_entry' — set 'nemo_before' to actually use it "
-                "(silent-no-op guard, mirrors bottom_level/u_before_cell).")
+                "='step_entry' and EVD does not select it — set "
+                "'nemo_before' to actually use it (silent-no-op guard, "
+                "mirrors bottom_level/u_before_cell).")
         T_n2b, S_n2b = (n2_tracers_before if _n2_tl == "nemo_before"
                        else (None, None))
         dz_half = jnp.broadcast_to(
@@ -840,13 +1028,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # scaled by the z-star Jacobian like every other thickness. On a
         # Veros u_centered coordinate -z_full_ref[0] IS 0.5·dzw_top exactly
         # (dzw_top = 2·dzt_top - dzw[-2] = -2·zt_top, numerics.py:21).
-        # Also required (Phase-2 #1317 T3) by tke_surface_bc_level="nemo_z0"
-        # — the virtual z=0 surface row's face distance to interior
-        # interface 0 uses the SAME slot.
+        # This slot is the VEROS injection volume ONLY.  The nemo_z0
+        # virtual-surface FACE distance is NEMO's e3t(1) = dz_ref[0]*J (a
+        # different metric — twice this one on a midpoint grid), derived
+        # inside tke_vertical_mixing from the dz_ref/jacobian passed below
+        # so it has a single owner (#1690).
         dz_surface = None
-        if (getattr(tke_cfg, "veros_dz_slots", False)
-                or getattr(tke_cfg, "tke_surface_bc_level",
-                           "interior_pinned") == "nemo_z0"):
+        if getattr(tke_cfg, "veros_dz_slots", False):
             dz_surface = (-z_coord.z_full_ref[0]) * J
         # Veros tke_mxl_choice=1 distance-to-boundary cap (tke.py:43-47):
         # the buoyancy mixing length may not exceed the distance to the
@@ -871,22 +1059,29 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # ``TKEConfig.eice``).  The lc/etau kernels apply ``(1 - ice_frac)``
         # internally, so the mode maps onto an EFFECTIVE ice fraction:
         #   0 (default, bit-identical): no attenuation — ice_frac stays None;
-        #   1: eff = fi              -> kernel factor (1-fi)        (nn_eice=1);
+        #   1: eff = tanh(10*fi)     -> factor 1-tanh(10*fi)        (nn_eice=1);
+        #   2: eff = fi              -> factor 1-fi                  (nn_eice=2);
         #   3: eff = min(4*fi, 1)    -> kernel factor max(0,1-4*fi) (nn_eice=3,
         #      the ORCA1 namelist choice — wave TKE fully killed at fi>=0.25).
         # Unknown values raise (dispatch hardening; static config value).
         _eice = int(getattr(tke_cfg, "eice", 0))
-        if _eice not in (0, 1, 3):
+        if _eice not in (0, 1, 2, 3):
             raise ValueError(
                 f"Unknown TKEConfig.eice={_eice!r}; expected 0 (no under-ice "
-                "attenuation), 1 ((1-fi)) or 3 (max(0,1-4*fi), NEMO nn_eice=3) "
+                "attenuation), 1 (1-tanh(10fi)), 2 (1-fi), or 3 "
+                "(max(0,1-4fi), NEMO nn_eice=3) "
                 "on the lc/etau TKE sources.")
+        # nn_mxlice=2 reads the RAW fr_i (not the nn_eice-effective one) and
+        # SI3's hm_i; None unless the card selects it (static config value)
+        _mxlice_fr_i = _mxlice_hm_i = None
+        if int(getattr(tke_cfg, "nemo_mxlice", 0)) == 2 and surface_forcing is not None:
+            _mxlice_fr_i = getattr(surface_forcing, "ice_concentration", None)
+            _mxlice_hm_i = getattr(surface_forcing, "ice_mean_thickness_hm_i", None)
         _tke_ice_fr = None
         if _eice != 0 and surface_forcing is not None:
             _fi = getattr(surface_forcing, "ice_concentration", None)
             if _fi is not None:
-                _tke_ice_fr = (_fi if _eice == 1
-                               else jnp.minimum(4.0 * _fi, 1.0))
+                _tke_ice_fr = nemo_tke_effective_ice_fraction(_fi, _eice)
         if prognostic:
             # PROGNOSTIC mode (Veros enable_tke): ONE backward-Euler step per
             # model step, seeded from the carried ``tke_old``, with dt = the
@@ -938,6 +1133,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
                     e3w_int=_bn2_e3w,
                     ice_frac=_tke_ice_fr,
+                    surface_tmask=_surface_tmask,
+                    mxlice_fr_i=_mxlice_fr_i, mxlice_hm_i=_mxlice_hm_i,
                 )
                 return K_H_old, K_M_old, _tke_ctx
             tke_out = tke_vertical_mixing(
@@ -957,6 +1154,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
                 e3w_int=_bn2_e3w,
                 ice_frac=_tke_ice_fr,
+                surface_tmask=_surface_tmask,
+                mxlice_fr_i=_mxlice_fr_i, mxlice_hm_i=_mxlice_hm_i,
                 bottom_dirichlet=tke_bottom_dirichlet,
                 bottom_level=tke_bottom_level,
                 T_n2b=T_n2b, S_n2b=S_n2b,
@@ -979,6 +1178,9 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     if getattr(state, "tke_dissl", None) is not None else None),
                 precomputed_p_sh2=tke_p_sh2,
                 precomputed_n2_bundle=tke_n2_bundle,
+                return_statement_trace=return_tke_statement_trace,
+                rhs_materialization=tke_rhs_materialization,
+                rhs_intermediate=tke_rhs_intermediate,
             )
             if (getattr(tke_cfg, "tke_preclosure_coeff_source",
                         "current_subiteration") == "carried_previous_step"):
@@ -986,9 +1188,11 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     TKECarryOutput,
                 )
                 _carry = TKECarryOutput(
-                    tke_new=tke_out.tke_new, K_M=tke_out.K_M,
+                    tke_new=tke_out.tke_new, tke_entry=_tke_seed,
+                    K_M=tke_out.K_M,
                     K_H=tke_out.K_H, K_M_surface=tke_out.K_M_surface,
-                    dissl=tke_out.dissl)
+                    dissl=tke_out.dissl,
+                    statement_trace=tke_out.statement_trace)
                 return tke_out.K_H, tke_out.K_M, _carry
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -1026,6 +1230,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
             e3w_int=_bn2_e3w,
             ice_frac=_tke_ice_fr,
+            surface_tmask=_surface_tmask,
+            mxlice_fr_i=_mxlice_fr_i, mxlice_hm_i=_mxlice_hm_i,
             # T8/T13 (tke_n2_time_level="nemo_before") + T4
             # (tke_shear_production="nemo_burchard"): Mode A (prognostic)
             # already threads these; Mode B (this diagnostic/quasi-steady
@@ -1119,9 +1325,9 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # STATIC config value so eice=0 stays bit-identical (ice_frac=None).
         # Unknown eice raises inside kpp (dispatch hardening on the static val).
         _kpp_eice = int(getattr(vmix_cfg.kpp, "eice", 0))
-        if _kpp_eice not in (0, 1, 3):
+        if _kpp_eice not in (0, 1, 2, 3):
             raise ValueError(
-                f"Unknown KPPConfig.eice={_kpp_eice!r}; expected 0, 1 or 3.")
+                f"Unknown KPPConfig.eice={_kpp_eice!r}; expected 0, 1, 2 or 3.")
         _kpp_ice_fr = (getattr(surface_forcing, "ice_concentration", None)
                        if (_kpp_eice != 0 and surface_forcing is not None)
                        else None)
@@ -1134,6 +1340,30 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             apply_diffusion=False, eos_fn=eos_fn, ice_frac=_kpp_ice_fr,
         )
         return out.K_v, out.A_v, None
+
+    if scheme == "epbl":
+        # ePBL reuses the explicit factory's physics_fn: that closure already
+        # assembles the specific-volume derivatives, the surface buoyancy
+        # flux and the top-layer TKE forcing, so routing through it keeps the
+        # implicit and explicit paths from drifting apart (there is exactly
+        # one place where ePBL's inputs are built).
+        from legoesm.ocean.physics.vertical_mixing.integration import (
+            make_vertical_mixing_physics,
+        )
+        # ePBL's energy budget is per timestep: it takes the step dt the
+        # caller passes in ``dt_tke``, exactly as CATKE does below, and never
+        # reads EPBLConfig.dt_s on this path.
+        if dt_tke is None:
+            raise ValueError(
+                "ePBL (vertical_mixing.scheme='epbl') prices mixing per "
+                "timestep and requires dt_tke (the step dt) to be passed to "
+                "compute_vertical_K_profiles.")
+        grid = _EPBLGridShim(lat_deg)
+        fn = make_vertical_mixing_physics(
+            vmix_cfg, apply_diffusion=False, constants_config=constants_config,
+            eos_fn=eos_fn)
+        tend = fn(state, grid, z_coord, surface_forcing, dt=dt_tke)
+        return tend.K_v, tend.A_v, None
 
     if scheme == "none":
         # No background closure here (handled by the caller); zero K_v/A_v.
@@ -1158,7 +1388,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
 
 def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
                           eos_fn=None, before_tracers=None,
-                          cc: ConstantsConfig = ConstantsConfig()):
+                          cc: ConstantsConfig = ConstantsConfig(),
+                          seos_cfg=None):
     """``(K_v, A_v)`` fields used by the ``enhanced_diffusion`` scheme.
 
     Returns the convective tracer diffusivity (``convective_κz``) and the
@@ -1211,6 +1442,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
         rho, z_coord.dz_ref, J, cfg,
         T=state.T.data, S=state.S.data, p_cell=ed_p_cell, eos_fn=eos_fn,
         t_depth=ed_t_depth, w_depth=ed_w_depth, e3w_int=ed_e3w,
+        seos_cfg=seos_cfg,
         g=cc.g, rho_ref=cc.rho_0,
     )
     if getattr(cfg, "two_level_trigger", False) and before_tracers is not None:
@@ -1238,6 +1470,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
             rho_b, z_coord.dz_ref, J, cfg,
             T=T_b, S=S_b, p_cell=ed_p_cell_b, eos_fn=eos_fn,
             t_depth=ed_t_depth, w_depth=ed_w_depth, e3w_int=ed_e3w,
+            seos_cfg=seos_cfg,
             g=cc.g, rho_ref=cc.rho_0,
         )
         K = jnp.maximum(K, K_b)
@@ -1271,6 +1504,17 @@ def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
     )
     from legoesm.ocean.vertical import OceanPartialCellCoordinate
 
+    # Validated at routine entry on the STATIC config, before any operand is
+    # read: a configuration that loads real de Lavergne power maps must never
+    # fall through to the uniform constant-power defaults, which are different
+    # physics and would go unnoticed.
+    if iwm_fields is None and getattr(iwm_cfg, "require_forcing_maps", False):
+        raise ValueError(
+            "IWMConfig.require_forcing_maps=True but no IWMForcing maps "
+            "reached iwm_K_profile.  This configuration reads real "
+            "internal-wave power maps; the uniform constant-power fallback "
+            "is different physics, so it is refused.  Thread the maps "
+            "through the model's iwm_forcing argument.")
     constants_config = physics_config.constants
     T = state.T.data
     dtype = T.dtype

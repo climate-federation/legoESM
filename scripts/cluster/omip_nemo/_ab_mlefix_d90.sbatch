@@ -49,7 +49,7 @@ HEAD=$(git rev-parse HEAD)
 echo "=== WT HEAD $HEAD (want $FIXSHA) ==="
 [ "$HEAD" = "$FIXSHA" ] || { echo "FATAL: worktree not at pinned SHA"; exit 1; }
 git status --porcelain | head -5
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 
 CMD_FILE=$WT/scripts/cluster/omip_nemo/_ab_mlefix_d90.cmd

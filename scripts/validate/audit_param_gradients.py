@@ -439,7 +439,8 @@ def scheme_gradients(
                                           field_values)
             cfg = _single_scheme_config(category, scheme,
                                         _rewrap(base_sub, tuned))
-            fn = make_physics(cfg, model_type="hydrostatic", dt=dt)
+            fn = make_physics(cfg, model_type="hydrostatic", dt=dt,
+                              surface_bulk_coeffs=None)   # one scheme alone
             carry_in = _spun_up_carry(fn, state, grid, sigma, spinup_steps)
             tend, carry = fn(state, grid, sigma, carry_in)
             leaves = _numeric_leaves((tend, carry))
@@ -507,7 +508,8 @@ def finite_difference_response(
         tuned = apply_param_overrides(_tunable_object(base_sub),
                                       {constraint.field: value})
         cfg = _single_scheme_config(category, scheme, _rewrap(base_sub, tuned))
-        fn = make_physics(cfg, model_type="hydrostatic", dt=dt)
+        fn = make_physics(cfg, model_type="hydrostatic", dt=dt,
+                              surface_bulk_coeffs=None)   # one scheme alone
         out = []
         for _name, state, sigma, grid in states:
             carry_in = _spun_up_carry(fn, state, grid, sigma, spinup_steps)

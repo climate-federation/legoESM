@@ -153,6 +153,40 @@ class SFNOPrimitiveEquationConfig(NamedTuple):
     history_steps: int = 0
 
 
+def check_state_update_dt(dt: float, dt_sfno: float) -> None:
+    """Refuse a caller ``dt`` that disagrees with ``dt_sfno``.
+
+    In state_update mode the network advances the state by exactly
+    ``dt_sfno`` regardless of ``dt``; silently accepting a different ``dt``
+    desynchronises the caller's clock from the model state (and, in
+    ``step_with_physics``, applies physics over ``dt`` while the dynamics
+    jumped ``dt_sfno``).  Shared by the SFNO primitive-equation and
+    shallow-water models.
+
+    ``dt`` must be a STATIC Python number on this path (it selects a
+    fixed macro step; it is not integrable).  A traced ``dt`` (e.g.
+    ``jax.jit`` over ``step`` with a jnp-scalar dt) is converted to a
+    clear contract error here instead of an opaque
+    ``TracerBoolConversionError`` downstream.
+    """
+    try:
+        dt_val = float(dt)
+    except TypeError as e:
+        raise ValueError(
+            "mode='state_update' requires a STATIC Python-float dt "
+            "(the network advances the fixed macro step dt_sfno; dt "
+            "cannot be traced). Mark dt static under jit, or call "
+            "step() outside jit."
+        ) from e
+    if abs(dt_val - dt_sfno) > 1e-6 * dt_sfno:
+        raise ValueError(
+            f"mode='state_update' advances the state by exactly "
+            f"dt_sfno={dt_sfno} s per call; got dt={dt_val}. "
+            f"Pass dt=dt_sfno (or set config.dt_sfno to the desired "
+            f"macro step)."
+        )
+
+
 class SFNOPrimitiveEquationModel:
     """SFNO-based hydrostatic primitive equation model.
 
@@ -361,38 +395,6 @@ class SFNOPrimitiveEquationModel:
                 key=key,
             )
 
-    def _check_state_update_dt(self, dt: float) -> None:
-        """Refuse a caller ``dt`` that disagrees with ``dt_sfno``.
-
-        In state_update mode the network advances the state by exactly
-        ``config.dt_sfno`` regardless of ``dt``; silently accepting a
-        different ``dt`` desynchronises the caller's clock from the
-        model state (and, in ``step_with_physics``, applies physics over
-        ``dt`` while the dynamics jumped ``dt_sfno``).
-
-        ``dt`` must be a STATIC Python number on this path (it selects a
-        fixed macro step; it is not integrable).  A traced ``dt`` (e.g.
-        ``jax.jit`` over ``step`` with a jnp-scalar dt) is converted to a
-        clear contract error here instead of an opaque
-        ``TracerBoolConversionError`` downstream.
-        """
-        try:
-            dt_val = float(dt)
-        except TypeError as e:
-            raise ValueError(
-                "mode='state_update' requires a STATIC Python-float dt "
-                "(the network advances the fixed macro step dt_sfno; dt "
-                "cannot be traced). Mark dt static under jit, or call "
-                "step() outside jit."
-            ) from e
-        if abs(dt_val - self.config.dt_sfno) > 1e-6 * self.config.dt_sfno:
-            raise ValueError(
-                f"mode='state_update' advances the state by exactly "
-                f"dt_sfno={self.config.dt_sfno} s per call; got dt={dt_val}. "
-                f"Pass dt=dt_sfno (or set config.dt_sfno to the desired "
-                f"macro step)."
-            )
-
     def step(
         self,
         state: SpectralHydrostaticState,
@@ -429,7 +431,7 @@ class SFNOPrimitiveEquationModel:
             Advanced state.
         """
         if self.config.mode == "state_update":
-            self._check_state_update_dt(dt)
+            check_state_update_dt(dt, self.config.dt_sfno)
             new_state = self._step_state_update(
                 state, key=key, prev_states=prev_states)
         elif self.config.mode == "hybrid_tendencies":
@@ -500,7 +502,7 @@ class SFNOPrimitiveEquationModel:
             # (same dt contract as step(); guard AFTER the carry-contract
             # refusal above so stateful-physics misuse stays the first,
             # more specific error).
-            self._check_state_update_dt(dt)
+            check_state_update_dt(dt, self.config.dt_sfno)
             new_state = self._step_state_update(state)
             _phys_result = physics_fn(state, self.grid, self.sigma_coord)
             phys_tend = _phys_result[0] if type(_phys_result) is tuple else _phys_result

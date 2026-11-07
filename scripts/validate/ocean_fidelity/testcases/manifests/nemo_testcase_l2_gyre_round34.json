@@ -1,0 +1,724 @@
+{
+  "addenda": [
+    "..._addendum1.json at 6ea69c28df01 (after the CLAIM review)",
+    "..._addendum2.json at 9ba367885ba8 (the two answered ASKED items)"
+  ],
+  "artifact_root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round34",
+  "commits": {
+    "049653f6a40f": "DECISION 19 -- the tanks' barotropic removal",
+    "24973be2e71b": "the second diff review's findings; the offline comparison",
+    "34fa34cb5237": "the admission gate stamps its tree; the ratchet floor moves 66 -> 67",
+    "6ea69c28df01": "addendum 1 -- the claim review broke PB2's mechanism",
+    "8cf0721aeb3b": "the round-34 receipt",
+    "8da3475fbc3d": "DECISION 17 -- the mask guard moves below the early return",
+    "947aa1e43a8e": "the first diff review's four defects",
+    "9ba367885ba8": "addendum 2 -- decisions 19 and 17 registered before either moved",
+    "a6a96b933bfb": "the round-34 preregistration",
+    "d9e77072fee5": "the admission gate learns every card; run.sh falls through",
+    "e83f1076747c": "the tanks' v face retraction; n_unequal on the shared score",
+    "f3d1c8761099": "two map anchors this round's line shifts moved, two ambiguous ones pinned",
+    "ff1d23baed27": "eight of this round's own citations re-anchored"
+  },
+  "concurrency_incident": {
+    "discarded": "round34/DISCARDED_contaminated_stage_ts.log -- every measurement between 05:14 and 05:25 is treated as contaminated",
+    "nothing_lost": "the re-applied file differs from the preserved copy only in formatting, two dropped annotations, one deleted unused constant and two improvements made on the second pass",
+    "preserved": "round33/UNEXPECTED_uncommitted_round21_admission_rewrite.{py,diff}",
+    "what": "a lingering round-33 agent committed a7aeda155abf at 05:24 and reverted this round's then-uncommitted admission rewrite at ~05:21"
+  },
+  "date": "2026-09-06",
+  "format": "nemo-testcase-l2-gyre-round34-v1",
+  "gates": {
+    "admission_plants": "both exit non-zero",
+    "focused_tests": "109 passed in 302 s across the eight files this round touched, including test_nemo_recipe at 24 passed",
+    "full_ocean_fidelity_suite": "UNMEASURED this round, and said so rather than implied: the machine was carrying nine model arms and a leftover suite from another agent",
+    "offline_compare_plants": "worsen-3ulp and at-bar-to-debt exit non-zero; improve passes",
+    "receipt_citation_gate": "PASS, 159 citations, 0 unmapped, 0 failing; every planted shift fires",
+    "tank_rule12_plants": "both exit non-zero",
+    "worktree_stamp_ratchet": "10 passed; grow-only floor 66 -> 67"
+  },
+  "no_nemo_executable_was_run_by_the_agent": true,
+  "no_nemo_source_was_edited": true,
+  "part_a2_a3_trajectories": {
+    "d17_GYRE-zco": {
+      "candidate_worktree": "8da3475fbc3d",
+      "first_over_bar_candidate": {
+        "fields": [
+          "T",
+          "S",
+          "u",
+          "v"
+        ],
+        "kt": 2
+      },
+      "first_over_bar_reference": {
+        "fields": [
+          "T",
+          "S",
+          "u",
+          "v"
+        ],
+        "kt": 2
+      },
+      "largest_field_move": 0.0,
+      "largest_oracle_residual_worsening_ulps": 0.0,
+      "largest_previous_legoesm_field_move_in_row_scale_oracle_ulps": 0.0,
+      "n_certified_rows_compared": 70,
+      "reference_worktree": "049653f6a40f",
+      "row_status_changes": [],
+      "rows_with_any_field_move": 0,
+      "status": "PASS"
+    },
+    "d17_LOCK_EXCHANGE-zco": {
+      "candidate_worktree": "8da3475fbc3d",
+      "first_over_bar_candidate": {
+        "fields": [
+          "u"
+        ],
+        "kt": 4
+      },
+      "first_over_bar_reference": {
+        "fields": [
+          "u"
+        ],
+        "kt": 4
+      },
+      "largest_field_move": 0.0,
+      "largest_oracle_residual_worsening_ulps": 0.0,
+      "largest_previous_legoesm_field_move_in_row_scale_oracle_ulps": 0.0,
+      "n_certified_rows_compared": 50,
+      "reference_worktree": "049653f6a40f",
+      "row_status_changes": [],
+      "rows_with_any_field_move": 0,
+      "status": "PASS"
+    },
+    "d17_OVERFLOW-zps": {
+      "candidate_worktree": "8da3475fbc3d",
+      "first_over_bar_candidate": {
+        "fields": [
+          "T",
+          "u"
+        ],
+        "kt": 2
+      },
+      "first_over_bar_reference": {
+        "fields": [
+          "T",
+          "u"
+        ],
+        "kt": 2
+      },
+      "largest_field_move": 0.0,
+      "largest_oracle_residual_worsening_ulps": 0.0,
+      "largest_previous_legoesm_field_move_in_row_scale_oracle_ulps": 0.0,
+      "n_certified_rows_compared": 50,
+      "reference_worktree": "049653f6a40f",
+      "row_status_changes": [],
+      "rows_with_any_field_move": 0,
+      "status": "PASS"
+    },
+    "d19_GYRE-zco": {
+      "candidate_worktree": "049653f6a40f",
+      "first_over_bar_candidate": {
+        "fields": [
+          "T",
+          "S",
+          "u",
+          "v"
+        ],
+        "kt": 2
+      },
+      "first_over_bar_reference": {
+        "fields": [
+          "T",
+          "S",
+          "u",
+          "v"
+        ],
+        "kt": 2
+      },
+      "largest_field_move": 0.0,
+      "largest_oracle_residual_worsening_ulps": 0.0,
+      "largest_previous_legoesm_field_move_in_row_scale_oracle_ulps": 0.0,
+      "n_certified_rows_compared": 70,
+      "reference_worktree": "947aa1e43a8e",
+      "row_status_changes": [],
+      "rows_with_any_field_move": 0,
+      "status": "PASS"
+    },
+    "d19_LOCK_EXCHANGE-zco": {
+      "candidate_worktree": "049653f6a40f",
+      "first_over_bar_candidate": {
+        "fields": [
+          "u"
+        ],
+        "kt": 4
+      },
+      "first_over_bar_reference": {
+        "fields": [
+          "u"
+        ],
+        "kt": 4
+      },
+      "largest_field_move": 6.938893903907228e-18,
+      "largest_oracle_residual_worsening_ulps": 0.03125,
+      "largest_previous_legoesm_field_move_in_row_scale_oracle_ulps": 0.03125,
+      "n_certified_rows_compared": 50,
+      "reference_worktree": "947aa1e43a8e",
+      "row_status_changes": [],
+      "rows_with_any_field_move": 10,
+      "status": "PASS"
+    },
+    "d19_OVERFLOW-zps": {
+      "candidate_worktree": "049653f6a40f",
+      "first_over_bar_candidate": {
+        "fields": [
+          "T",
+          "u"
+        ],
+        "kt": 2
+      },
+      "first_over_bar_reference": {
+        "fields": [
+          "T",
+          "u"
+        ],
+        "kt": 2
+      },
+      "largest_field_move": 7.105427357601002e-15,
+      "largest_oracle_residual_worsening_ulps": 1.0,
+      "largest_previous_legoesm_field_move_in_row_scale_oracle_ulps": 2.0,
+      "n_certified_rows_compared": 50,
+      "reference_worktree": "947aa1e43a8e",
+      "row_status_changes": [],
+      "rows_with_any_field_move": 13,
+      "status": "PASS"
+    }
+  },
+  "part_a_admission": {
+    "LOCK": {
+      "admitted_difference_count": 4,
+      "admitted_differences": [
+        {
+          "baseline_value": 6.9446604938568e-310,
+          "candidate_value": 6.94995035582517e-310,
+          "field": "zFw",
+          "index_0based": [
+            0,
+            0,
+            0
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s2.bin"
+        },
+        {
+          "baseline_value": 6.9446604938568e-310,
+          "candidate_value": 6.94995035582517e-310,
+          "field": "zFw",
+          "index_0based": [
+            1,
+            0,
+            0
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s2.bin"
+        },
+        {
+          "baseline_value": 6.9446604938568e-310,
+          "candidate_value": 6.94995035582517e-310,
+          "field": "zFw",
+          "index_0based": [
+            0,
+            0,
+            0
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s3.bin"
+        },
+        {
+          "baseline_value": 6.9446604938568e-310,
+          "candidate_value": 6.94995035582517e-310,
+          "field": "zFw",
+          "index_0based": [
+            1,
+            0,
+            0
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s3.bin"
+        }
+      ],
+      "baseline_oracle_records": 27,
+      "byte_identical_files": {
+        "LOCK_EXCHANGE_OMIP_L1_ZCO_00000010_restart.nc": true,
+        "mesh_mask.nc": true
+      },
+      "byte_identical_records": 25,
+      "changed_records": [
+        "oracle_transport_kt00000001_s2.bin",
+        "oracle_transport_kt00000001_s3.bin"
+      ],
+      "owned_cell_differences": 0,
+      "undefined_slot_resolution": [
+        {
+          "field": "zFw",
+          "magic": "NEMO_L1_TRANSP_1",
+          "reason": "NOT waived on this run: the switch does not resolve to the value that leaves the slot undefined, so the slot is bit-tested like any other",
+          "resolved_at": "ocean.output:705",
+          "resolved_value": "F",
+          "switch": "ln_dynadv_vec",
+          "undefined_when": "T",
+          "waived": false
+        }
+      ],
+      "verdict": "PASS"
+    },
+    "OVERFLOW": {
+      "admitted_difference_count": 16,
+      "admitted_differences": [
+        {
+          "baseline_value": 4.278534e-318,
+          "candidate_value": 4.26826e-318,
+          "field": "zFu",
+          "index_0based": [
+            1,
+            6,
+            11
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s1.bin"
+        },
+        {
+          "baseline_value": 4.22146e-318,
+          "candidate_value": 4.211183e-318,
+          "field": "zFu",
+          "index_0based": [
+            3,
+            6,
+            12
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s1.bin"
+        },
+        {
+          "baseline_value": 4.164385e-318,
+          "candidate_value": 4.15411e-318,
+          "field": "zFu",
+          "index_0based": [
+            5,
+            6,
+            13
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s1.bin"
+        },
+        {
+          "baseline_value": 4.026205e-318,
+          "candidate_value": 4.01593e-318,
+          "field": "zFu",
+          "index_0based": [
+            205,
+            1,
+            16
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s1.bin"
+        },
+        {
+          "baseline_value": 4.278534e-318,
+          "candidate_value": 4.26826e-318,
+          "field": "zFu",
+          "index_0based": [
+            1,
+            6,
+            11
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s2.bin"
+        },
+        {
+          "baseline_value": 4.22146e-318,
+          "candidate_value": 4.211183e-318,
+          "field": "zFu",
+          "index_0based": [
+            3,
+            6,
+            12
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s2.bin"
+        },
+        {
+          "baseline_value": 4.164385e-318,
+          "candidate_value": 4.15411e-318,
+          "field": "zFu",
+          "index_0based": [
+            5,
+            6,
+            13
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s2.bin"
+        },
+        {
+          "baseline_value": 4.026205e-318,
+          "candidate_value": 4.01593e-318,
+          "field": "zFu",
+          "index_0based": [
+            205,
+            1,
+            16
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s2.bin"
+        },
+        {
+          "baseline_value": 6.9361171813105e-310,
+          "candidate_value": 6.91565940118594e-310,
+          "field": "zFw",
+          "index_0based": [
+            0,
+            0,
+            0
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s2.bin"
+        },
+        {
+          "baseline_value": 6.9361171813105e-310,
+          "candidate_value": 6.91565940118594e-310,
+          "field": "zFw",
+          "index_0based": [
+            1,
+            0,
+            0
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s2.bin"
+        },
+        {
+          "baseline_value": 4.278534e-318,
+          "candidate_value": 4.26826e-318,
+          "field": "zFu",
+          "index_0based": [
+            1,
+            6,
+            11
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s3.bin"
+        },
+        {
+          "baseline_value": 4.22146e-318,
+          "candidate_value": 4.211183e-318,
+          "field": "zFu",
+          "index_0based": [
+            3,
+            6,
+            12
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s3.bin"
+        },
+        {
+          "baseline_value": 4.164385e-318,
+          "candidate_value": 4.15411e-318,
+          "field": "zFu",
+          "index_0based": [
+            5,
+            6,
+            13
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s3.bin"
+        },
+        {
+          "baseline_value": 4.026205e-318,
+          "candidate_value": 4.01593e-318,
+          "field": "zFu",
+          "index_0based": [
+            205,
+            1,
+            16
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s3.bin"
+        },
+        {
+          "baseline_value": 6.9361171813105e-310,
+          "candidate_value": 6.91565940118594e-310,
+          "field": "zFw",
+          "index_0based": [
+            0,
+            0,
+            0
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s3.bin"
+        },
+        {
+          "baseline_value": 6.9361171813105e-310,
+          "candidate_value": 6.91565940118594e-310,
+          "field": "zFw",
+          "index_0based": [
+            1,
+            0,
+            0
+          ],
+          "reason": "halo",
+          "record": "oracle_transport_kt00000001_s3.bin"
+        }
+      ],
+      "baseline_oracle_records": 27,
+      "byte_identical_files": {
+        "OVERFLOW_OMIP_L1_ZPS_00000010_restart.nc": true,
+        "mesh_mask.nc": true
+      },
+      "byte_identical_records": 24,
+      "changed_records": [
+        "oracle_transport_kt00000001_s1.bin",
+        "oracle_transport_kt00000001_s2.bin",
+        "oracle_transport_kt00000001_s3.bin"
+      ],
+      "owned_cell_differences": 0,
+      "undefined_slot_resolution": [
+        {
+          "field": "zFw",
+          "magic": "NEMO_L1_TRANSP_1",
+          "reason": "NOT waived on this run: the switch does not resolve to the value that leaves the slot undefined, so the slot is bit-tested like any other",
+          "resolved_at": "ocean.output:822",
+          "resolved_value": "F",
+          "switch": "ln_dynadv_vec",
+          "undefined_when": "T",
+          "waived": false
+        }
+      ],
+      "verdict": "PASS"
+    }
+  },
+  "part_a_rule12_round32_ordering_fix": {
+    "LOCK_EXCHANGE": {
+      "not_applicable_faces": [
+        {
+          "face": "v",
+          "nemo_barotropic_target_max_abs": 0.0,
+          "nemo_velocity_max_abs": 0.0,
+          "reason": "NEMO's own vmask in this record has 0 wet cells and the card's own wet v-face mask has 0; these tanks are 2-D x-z boxes with no wet v face at all"
+        }
+      ],
+      "open_association_rows": {
+        "u": {
+          "column_mean_divided_minus_multiplied_max_abs": 1.6155871338926322e-27,
+          "face": "u",
+          "note": "the operator DIVIDES by depth_ref; NEMO MULTIPLIES by r1_hu_0 (stprk3_stg.F90:440, domain.F90:159).  The third number is the one that matters -- it is the difference the discharge inherits -- and it is measured on NEMO's own column transport.  Changing the shared operator to multiply is not this round's business, so this stays OPEN with its size measured.",
+          "one_over_depth_minus_nemo_reciprocal_max_abs": 0.0,
+          "rebuilt_sum_minus_nemo_depth_max_abs": 0.0
+        }
+      },
+      "rows": [
+        {
+          "absolute_max": 3.0814879110195774e-33,
+          "exact": false,
+          "n": 2540,
+          "n_unequal": 20,
+          "name": "LOCK_EXCHANGE-zco.kt1.stage3.rule12_correction.u",
+          "nemo_statement": "stprk3_stg.F90:440,444",
+          "normalized_max_abs": 3.0814879110195774e-33,
+          "reference_max_abs": 0.0022144535389664547,
+          "status": "AT-BAR"
+        }
+      ],
+      "status": "AT-BAR",
+      "worktree_commit": "8da3475fbc3d"
+    },
+    "OVERFLOW": {
+      "not_applicable_faces": [
+        {
+          "face": "v",
+          "nemo_barotropic_target_max_abs": 0.0,
+          "nemo_velocity_max_abs": 0.0,
+          "reason": "NEMO's own vmask in this record has 0 wet cells and the card's own wet v-face mask has 0; these tanks are 2-D x-z boxes with no wet v face at all"
+        }
+      ],
+      "open_association_rows": {
+        "u": {
+          "column_mean_divided_minus_multiplied_max_abs": 4.336808689942018e-19,
+          "face": "u",
+          "note": "the operator DIVIDES by depth_ref; NEMO MULTIPLIES by r1_hu_0 (stprk3_stg.F90:440, domain.F90:159).  The third number is the one that matters -- it is the difference the discharge inherits -- and it is measured on NEMO's own column transport.  Changing the shared operator to multiply is not this round's business, so this stays OPEN with its size measured.",
+          "one_over_depth_minus_nemo_reciprocal_max_abs": 0.0,
+          "rebuilt_sum_minus_nemo_depth_max_abs": 0.0
+        }
+      },
+      "rows": [
+        {
+          "absolute_max": 3.851859888774472e-34,
+          "exact": false,
+          "n": 16900,
+          "n_unequal": 30,
+          "name": "OVERFLOW-zps.kt1.stage3.rule12_correction.u",
+          "nemo_statement": "stprk3_stg.F90:440,444",
+          "normalized_max_abs": 3.851859888774472e-34,
+          "reference_max_abs": 0.0965290021757989,
+          "status": "AT-BAR"
+        }
+      ],
+      "status": "AT-BAR",
+      "worktree_commit": "8da3475fbc3d"
+    }
+  },
+  "part_b_stagewise_tracers_kt1": {
+    "attribution": "the stage-3 implicit vertical TRACER solve (tra_zdf) owns kt=2's T and S; every operator upstream of it in that stage is inside an AT-BAR accumulator, and stages 1 and 2 are at bar with stage 1 BIT-EXACT",
+    "first_stage_over_bar": 3,
+    "stage1": {
+      "S": {
+        "absolute_max": 0.0,
+        "exact": true,
+        "n": 18000,
+        "n_unequal": 0,
+        "normalized_max_abs": 0.0,
+        "reference_max_abs": 36.83805769410256,
+        "status": "AT-BAR"
+      },
+      "T": {
+        "absolute_max": 0.0,
+        "exact": true,
+        "n": 18000,
+        "n_unequal": 0,
+        "normalized_max_abs": 0.0,
+        "reference_max_abs": 23.460944777681185,
+        "status": "AT-BAR"
+      }
+    },
+    "stage2": {
+      "S": {
+        "absolute_max": 0.0,
+        "exact": true,
+        "n": 18000,
+        "n_unequal": 0,
+        "normalized_max_abs": 0.0,
+        "reference_max_abs": 36.8380577293709,
+        "status": "AT-BAR"
+      },
+      "T": {
+        "absolute_max": 3.552713678800501e-15,
+        "exact": false,
+        "n": 18000,
+        "n_unequal": 3,
+        "normalized_max_abs": 1.5143096626260154e-16,
+        "reference_max_abs": 23.460945713306884,
+        "status": "AT-BAR"
+      }
+    },
+    "stage3": {
+      "S": {
+        "absolute_max": 8.171241461241152e-13,
+        "exact": false,
+        "n": 18000,
+        "n_unequal": 11229,
+        "normalized_max_abs": 2.2181101297999213e-14,
+        "reference_max_abs": 36.83875453910946,
+        "status": "DEBT"
+      },
+      "T": {
+        "absolute_max": 3.1956659540810506e-11,
+        "exact": false,
+        "n": 18000,
+        "n_unequal": 11840,
+        "normalized_max_abs": 1.3614736849003888e-12,
+        "reference_max_abs": 23.472109593619205,
+        "status": "DEBT"
+      }
+    },
+    "stage3_walk": {
+      "causal_movement": 0.0,
+      "faithful_residual": 1.3614736849003888e-12,
+      "gate_owner_label_NOT_QUOTED_AS_EVIDENCE": "ZDF_SOLVER_FIRST_OWNER_CAPABLE_BOUNDARY",
+      "nemo_operator_increments": {
+        "advection_S": 1.3231341402180686e-07,
+        "advection_T": 8.388551135404527e-08,
+        "ldf_S": 0.0,
+        "ldf_T": 0.0,
+        "qsr_S": 0.0,
+        "qsr_T": 4.154012010392861e-06,
+        "sbc_S": 0.0,
+        "sbc_T": 2.4148524126489395e-05
+      },
+      "oracle_injected_final": {
+        "S": {
+          "absolute_max": 8.171241461241152e-13,
+          "exact": false,
+          "n": 18000,
+          "n_unequal": 11229,
+          "normalized_max_abs": 2.2181101297999213e-14,
+          "reference_max_abs": 36.83875453910946,
+          "status": "DEBT"
+        },
+        "T": {
+          "absolute_max": 3.1956659540810506e-11,
+          "exact": false,
+          "n": 18000,
+          "n_unequal": 11840,
+          "normalized_max_abs": 1.3614736849003888e-12,
+          "reference_max_abs": 23.472109593619205,
+          "status": "DEBT"
+        }
+      },
+      "pre_zdf": {
+        "S": {
+          "absolute_max": 2.1316282072803006e-14,
+          "exact": false,
+          "n": 18000,
+          "n_unequal": 8620,
+          "normalized_max_abs": 5.786348021897527e-16,
+          "reference_max_abs": 36.838921530704475,
+          "status": "AT-BAR"
+        },
+        "T": {
+          "absolute_max": 1.4210854715202004e-14,
+          "exact": false,
+          "n": 18000,
+          "n_unequal": 9435,
+          "normalized_max_abs": 6.053921299982747e-16,
+          "reference_max_abs": 23.473801542881805,
+          "status": "AT-BAR"
+        }
+      },
+      "why": "the injection arm moves the output by exactly 0.0 against a residual of 1.361474e-12, so it has not been applied and its label proves nothing; the attribution rests on the two measured rows above"
+    }
+  },
+  "predictions_scored": {
+    "PA1": "CONFIRMED -- both tanks PASS, 0 owned-cell differences",
+    "PA2": "CONFIRMED -- LOCK 25/27, OVERFLOW 24/27, exactly the transport records",
+    "PA2a": "CONFIRMED -- 5 rows moved on LOCK, 6 on OVERFLOW, 0 on GYRE",
+    "PA2b": "CONFIRMED -- first-over-bar unchanged on all three cards",
+    "PA2c": "CONFIRMED, and the window was far too loose: predicted below 1e-6 (LOCK) and 1e-4 (OVERFLOW) m/s, measured 6.94e-18 and 7.11e-15",
+    "PA2d": "NOT SCORED -- the record gap is named and the write-only frame specified; the whole-trajectory effect is measured instead",
+    "PA3": "CONFIRMED -- every differing element is a halo cell holding a denormal",
+    "PA3a": "CONFIRMED -- test_nemo_recipe goes 4 failed/20 passed -> 24 passed",
+    "PA3b": "CONFIRMED cell by cell -- 0 field move on all three cards",
+    "PA3c": "CONFIRMED -- both arms present, both shown to fire",
+    "PA4": "CONFIRMED -- both plants exit non-zero",
+    "PA5": "CONFIRMED -- AT-BAR on both cards",
+    "PA6": "CONFIRMED -- both plants exit non-zero",
+    "PB1": "REFUTED as to VALUE -- stage 1 is BIT-EXACT, not one ulp; direction held",
+    "PB2": "CONFIRMED -- stage 3 is the first stage over bar",
+    "PB3": "REFUTED -- the pre-zdf accumulator is AT-BAR, so the owner is downstream of tra_ldf, not at or before it",
+    "PB4": "CONFIRMED -- kt2's five GYRE rows are bit-for-bit round 33's",
+    "PB5": "HELD -- no model fix landed on the Part-B path",
+    "PB6": "NOT SCORED and NOT NEEDED -- tra_qsr sits inside an AT-BAR accumulator",
+    "PB7": "CONFIRMED -- exact and n_unequal are reported on every stage row"
+  },
+  "preregistration": "nemo_testcase_l2_gyre_round34_preregister.json at a6a96b933bfb",
+  "probe_worktrees_flagged": [
+    "/tmp/codex-gyre-r34-before at 947aa1e43a8e (the BEFORE arm)",
+    "/tmp/codex-gyre-r34-a2 at 049653f6a40f (the decision-19 arm)"
+  ],
+  "receipt_sha256_at_8cf0721aeb3b_plus_reanchors": "e0e11c21de44d432bfcb480c3a6dc3be62bd5fe67bfc709399d60c3a7abb0509",
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "reviews": {
+    "claim": "one fresh independent agent, before any Part-B code: refuted PB2's mechanism, collapsed a self-contradicting threshold, registered the pre-zdf reconstruction gap, and named a discriminator the preregistration had missed",
+    "diff_1": "one fresh independent agent on the admission diff: PLANTED 1 m/s in an owned tank zFw cell and got PASS.  Four defects, all fixed with an arm each",
+    "diff_2": "one fresh independent agent on decisions 19 and 17: refuted a mutation count in a commit message, raised a dry-level coupling since refuted at NEMO's own matrix, and supplied ln_drg_OFF, which makes the bottom-stress zero hold at every step"
+  },
+  "starting_tip": "2c83a59bcfbe",
+  "unasked_choices": []
+}

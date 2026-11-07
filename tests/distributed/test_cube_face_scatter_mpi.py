@@ -180,7 +180,8 @@ def test_scattered_rollout_gradient_matches_reference():
             for _ in range(2):
                 s = model.step(s, _DT)
             local = jnp.sum(s.T.data ** 2)
-            return global_sum_mpi(local) if distributed else local
+            return (global_sum_mpi(local, final_loss=True) if distributed
+                    else local)
 
         return loss
 
@@ -296,7 +297,8 @@ def test_scattered_flux_form_moisture_gradient_matches_reference():
             for _ in range(2):
                 s = model.step(s, _DT)
             local = jnp.sum(s.tracers["q_v"].data ** 2)
-            return global_sum_mpi(local) if distributed else local
+            return (global_sum_mpi(local, final_loss=True) if distributed
+                    else local)
 
         return loss
 
@@ -390,7 +392,8 @@ def test_scattered_flux_form_isolated_grad_matches_reference():
         def loss(q_data):
             q_new, _ = flux_form_tracer_step(q_data, delp_, ut_, vt_, dt, cdg)
             local = jnp.sum(q_new ** 2)
-            return global_sum_mpi(local) if distributed else local
+            return (global_sum_mpi(local, final_loss=True) if distributed
+                    else local)
         return loss
 
     # Reference (full 6 faces, local backend) — BEFORE initialize_distributed.

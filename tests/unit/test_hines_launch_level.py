@@ -1,15 +1,11 @@
-"""Hines non-orographic GWD must be able to launch ABOVE the boundary layer.
+"""Hines non-orographic GWD must launch ABOVE the boundary layer.
 
-Measured failure (2026-07-30, 2.5 deg AMIP state): the launch amplitude
-``total_rms_wind = 2.0 m/s`` exceeds ``sigma_sat = N/m_star`` (1.25 m/s at
-140 m) over 78.5% of the planet's area, because N is SMALLEST in the
-well-mixed boundary layer.  The wave is therefore born supersaturated and
-breaks at its OWN launch level: 55% of its momentum lands below 1 km and
-only 35% above 12 km -- the opposite of what a non-orographic scheme should
-do.  Removing Hines entirely recovered ~26% of the missing surface wind.
-
-``launch_p`` releases the wave at a chosen pressure instead, depositing no
-drag at or below it.  Default ``None`` keeps the legacy surface launch.
+Measured failure of the former bulk scheme (2026-07-30, 2.5 deg AMIP state): a
+surface launch broke the wave in the weakly stratified boundary layer (55% of its
+momentum below 1 km).  ``launch_p`` releases the spectrum at the level nearest a
+chosen pressure (default 700 hPa; no surface launch).  In the LMDZ Hines port the
+launched flux is taken from the level just below the launch level (the flux
+divergence telescopes), so no drag reaches the levels further down.
 """
 import numpy as np
 import jax
@@ -55,73 +51,55 @@ def _run(cfg):
                      lat, 300.0, cfg)
 
 
-def test_default_is_none_and_launches_at_the_surface():
+def test_default_launches_at_700hpa_not_the_surface():
     cfg = HinesConfig()
-    assert cfg.launch_p is None
+    assert cfg.launch_p == pytest.approx(_LAUNCH_P)
     du = np.asarray(_run(cfg).du_dt)
-    # Legacy behaviour: the bottom levels receive drag.
-    assert np.abs(du[:, -3:]).max() > 0.0, (
-        "surface launch should deposit drag in the lowest levels")
+    assert np.allclose(du[:, -3:], 0.0), (
+        "the default must deposit no drag in the lowest levels")
+    assert np.abs(du).max() > 0.0, "the default must still deposit drag aloft"
 
 
-def test_launch_level_zeroes_drag_at_and_below_it():
-    """No drag at or below the launch level; the column above still gets it."""
+def test_launch_level_zeroes_drag_below_it():
+    """No drag below launch+1 (the launch flux is taken from level launch+1);
+    the column above still gets drag."""
     out = _run(HinesConfig(launch_p=_LAUNCH_P))
     du = np.asarray(out.du_dt)
     _, _, _, p_full, *_ = _column()
     pmean = np.asarray(p_full).mean(axis=0)
     k_launch = int(np.argmin(np.abs(pmean - _LAUNCH_P)))
-    assert np.allclose(du[:, k_launch:], 0.0), (
-        f"drag must vanish at/below the launch level k={k_launch} "
-        f"(p={pmean[k_launch]:.0f} Pa)")
+    assert np.allclose(du[:, k_launch + 2:], 0.0), (
+        f"drag must vanish below launch+1 (launch k={k_launch}, "
+        f"p={pmean[k_launch]:.0f} Pa)")
     assert np.abs(du[:, :k_launch]).max() > 0.0, (
         "the column above the launch level must still receive drag")
 
 
-def test_launch_level_moves_the_deposition_upward():
-    """The physical point: a launch level shifts momentum deposition OUT of
-    the boundary layer."""
-    _, _, _, _, p_half, *_ = _column()
-    # layer mass per unit area, dp/g
-    dz = np.abs(np.diff(np.asarray(p_half), axis=1)) / constants.g
-    lo = slice(-6, None)                                        # lowest levels
-
-    du_sfc = np.abs(np.asarray(_run(HinesConfig()).du_dt))
-    du_lch = np.abs(np.asarray(_run(HinesConfig(launch_p=_LAUNCH_P)).du_dt))
-    frac_sfc = (du_sfc[:, lo] * dz[:, lo]).sum() / max(
-        (du_sfc * dz).sum(), 1e-30)
-    frac_lch = (du_lch[:, lo] * dz[:, lo]).sum() / max(
-        (du_lch * dz).sum(), 1e-30)
-    assert frac_lch < frac_sfc, (
-        f"launch level must reduce the low-level share of the drag "
-        f"(surface launch {frac_sfc:.3f} -> launched {frac_lch:.3f})")
-    assert frac_lch == pytest.approx(0.0, abs=1e-12)
-
-
 def test_wave_starts_UNCLIPPED_at_the_launch_level():
-    """The defect a drag-output mask alone does NOT fix.
-
-    Zeroing the drag below the launch level still lets the amplitude CARRY
-    propagate up through the boundary layer and SATURATE there, so the wave
-    arrives at the launch level already clipped and the drag ALOFT is
-    bit-identical to a surface launch — the launch level would be cosmetic.
-    A real launch holds the carry at the launch amplitude until the launch
-    level, so the wave starts there unclipped and deposits MORE aloft.
-    """
-    _, _, _, p_full, *_ = _column()
+    """The drag ABOVE the launch level cannot depend on the stratification
+    BELOW it (a wave carried up through the boundary layer would break there)."""
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column()
     pmean = np.asarray(p_full).mean(axis=0)
     k = int(np.argmin(np.abs(pmean - _LAUNCH_P)))
+    cfg = HinesConfig(launch_p=_LAUNCH_P)
 
-    sfc = np.abs(np.asarray(_run(HinesConfig()).du_dt))
-    lch = np.abs(np.asarray(_run(HinesConfig(launch_p=_LAUNCH_P)).du_dt))
-    above_sfc = sfc[:, :k].sum()
-    above_lch = lch[:, :k].sum()
-    assert not np.allclose(sfc[:, :k], lch[:, :k], rtol=1e-12, atol=1e-30), (
-        "drag above the launch level is bit-identical to the surface launch "
-        "-> the carry was still clipped in the BL (output-mask-only bug)")
-    assert above_lch > above_sfc, (
-        f"an unclipped launch must deposit MORE drag aloft "
-        f"({above_lch:.4e} vs surface-launch {above_sfc:.4e})")
+    # Same column, but the levels strictly below the launch level made
+    # strongly stratified instead of near-neutral (changes N and rho there).
+    T2 = np.asarray(T).copy()
+    nlev = T2.shape[1]
+    T2[:, k + 1:] = np.linspace(260.0, 300.0, nlev - k - 1)[None, :]
+    T2 = jnp.asarray(T2)
+    rho2 = p_full / (constants.R_d * T2)
+    assert not np.allclose(np.asarray(T)[:, k + 1:], np.asarray(T2)[:, k + 1:])
+
+    a = np.asarray(hines_gwd(u, v, T, p_full, p_half, z_full, z_half, rho,
+                             lat, 300.0, cfg).du_dt)
+    b = np.asarray(hines_gwd(u, v, T2, p_full, p_half, z_full, z_half, rho2,
+                             lat, 300.0, cfg).du_dt)
+    assert np.abs(a[:, :k]).max() > 0.0
+    np.testing.assert_allclose(a[:, :k], b[:, :k], rtol=1e-12, atol=1e-30,
+        err_msg="drag above the launch level depends on the stratification "
+                "below it -> the carry was clipped in the BL")
 
 
 def test_launch_level_is_PER_COLUMN_not_a_global_index():
@@ -183,15 +161,80 @@ def test_jit_parity_and_finite():
     np.testing.assert_allclose(eager, jitted, rtol=1e-6, atol=1e-12)
 
 
-def test_param_spec_omits_launch_p_and_stays_valid():
-    """``launch_p`` is ``float | None``, so it is NOT spec-eligible: the gate
-    computes eligibility from a plain ``: float`` annotation and rejects a
-    non-float named in EITHER params or excluded.  Assert it is in neither,
-    and that the module's spec still validates (the real gate lives in
+def test_param_spec_excludes_launch_p():
+    """``launch_p`` picks a level INDEX by argmin, so it is excluded from
+    training with a reason, not tuned (the real gate lives in
     tests/test_param_specs.py)."""
     from legoesm.atmosphere.physics.gravity_wave_drag import config as gcfg
     hines = gcfg.__param_spec__["HinesConfig"]
     assert "launch_p" not in hines["params"]
-    assert "launch_p" not in hines["excluded"]
+    assert "launch_p" in hines["excluded"]
     # the float knobs it sits beside are still classified
     assert "total_rms_wind" in hines["params"]
+
+
+def test_driver_rejects_launch_p_outside_the_legal_range():
+    """0.0 used to mean "surface launch"; it must now be refused, and the
+    driver default must equal the scheme default."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        HINES_LAUNCH_P_RANGE_PA,
+    )
+    from legoesm.driver.config import ExperimentConfig
+
+    assert ExperimentConfig().hines_launch_p == HinesConfig().launch_p
+    lo, hi = HINES_LAUNCH_P_RANGE_PA
+    for bad in (0.0, None, lo - 1.0, hi + 1.0, float("nan")):
+        with pytest.raises(ValueError, match="hines_launch_p"):
+            ExperimentConfig(hines_launch_p=bad).validate_strict()
+    ExperimentConfig(hines_launch_p=lo).validate_strict()
+    ExperimentConfig(hines_launch_p=hi).validate_strict()
+
+
+def test_no_launch_in_the_lowest_model_layer():
+    """A plateau column whose bottom layer straddles ``launch_p`` would put
+    the launch level in its lowest layer, i.e. a surface launch: it must get
+    no source.  A sea-level column on the same levels keeps its source."""
+    ncol, nlev = 2, 10
+    sh = np.linspace(0.005, 1.0, nlev + 1)
+    ds = np.diff(sh)
+    sig = np.cumsum(ds) - 0.5 * ds
+    # column 1: lowest full level ~705 hPa, next ~600 hPa -> nearest to
+    # 700 hPa is the bottom level although p_s > 700 hPa.
+    p_s = np.array([1.0e5, 0.705e5 / sig[-1]])
+    assert p_s[1] > _LAUNCH_P
+    p_full = jnp.asarray(sig[None, :] * p_s[:, None])
+    k_near = np.argmin(np.abs(np.asarray(p_full) - _LAUNCH_P), axis=1)
+    assert k_near[1] == nlev - 1 and k_near[0] < nlev - 1
+    p_half = jnp.asarray(sh[None, :] * p_s[:, None])
+    T = jnp.asarray(np.linspace(215.0, 290.0, nlev)[None, :] * np.ones((ncol, 1)))
+    z_half = jnp.asarray(
+        _H_SCALE * np.log(_P_SFC / np.maximum(np.asarray(p_half), 1.0)))
+    z_full = jnp.asarray(
+        _H_SCALE * np.log(_P_SFC / np.maximum(np.asarray(p_full), 1.0)))
+    rho = p_full / (constants.R_d * T)
+    u = jnp.full((ncol, nlev), 20.0)
+    v = jnp.zeros((ncol, nlev))
+    du = np.abs(np.asarray(hines_gwd(
+        u, v, T, p_full, p_half, z_full, z_half, rho, jnp.zeros(ncol), 300.0,
+        HinesConfig(launch_p=_LAUNCH_P)).du_dt))
+    assert du[0].max() > 0.0
+    assert np.allclose(du[1], 0.0), "launch in the lowest layer must give no source"
+
+
+def test_driver_rejects_override_launch_p_outside_the_legal_range():
+    """A full ``gravity_wave_drag_override`` is used verbatim, so its Hines
+    launch level must be range-checked too."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        GravityWaveDragConfig,
+    )
+    from legoesm.driver.config import ExperimentConfig
+
+    for bad in (0.0, 2.0e5, None):
+        ov = GravityWaveDragConfig(scheme="hines",
+                                   hines=HinesConfig(launch_p=bad))
+        with pytest.raises(ValueError, match="override.hines.launch_p"):
+            ExperimentConfig(gravity_wave_drag="hines",
+                             gravity_wave_drag_override=ov).validate_strict()
+    ov = GravityWaveDragConfig(scheme="hines", hines=HinesConfig())
+    ExperimentConfig(gravity_wave_drag="hines",
+                     gravity_wave_drag_override=ov).validate_strict()

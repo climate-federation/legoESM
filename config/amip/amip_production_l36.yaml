@@ -1,0 +1,12 @@
+# The raised lid IS the production configuration since 2026-09-17 (user
+# decision): nlev 36, sigma_top 0.002, sigma_layout l30_trop_logstrat and the
+# CAM del2 sponge now live in amip_production.yaml, together with the spectral
+# non-orographic gravity-wave source they were measured with.
+#
+# This file is kept only so the launchers and the arm decks that name it keep
+# resolving; it adds nothing.  Point new work at amip_production.yaml.
+# Include repointed 2026-09-23: amip_production.yaml is now the CAM6 suite.
+# This deck's overrides and measurements describe the Sundqvist/L36
+# configuration, so it includes that file under its new name rather than
+# silently inheriting a different model.
+include: amip_sundqvist_l36.yaml

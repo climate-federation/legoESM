@@ -56,6 +56,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
 from legoesm import constants
 from legoesm.core.conservation import conservative_positive_clip
 from legoesm.core.field import Field
+from legoesm.ml.checkpoint_io import deserialise_knob_aware
 from legoesm.core.tracers import (
     make_full_moisture_registry,
     make_moisture_registry,
@@ -297,6 +298,25 @@ def has_spatial_surface_leaves(model) -> bool:
     )
 
 
+def _trainable_raw_values(grads) -> dict:
+    """``{name: grad}`` of the trainable leaves the no-inert gate judges: the
+    ``raw_values`` of a bare physics-params model or of an
+    ``AIMIPTrainableBundle`` (classical + spec-driven scheme halves), plus the
+    AIMIP spatial-surface coefficients (unread fields are never built).  Frozen
+    (non-array) knobs carry no gradient (``None``) and are not judged."""
+    parts = ([("", grads.raw_values)] if hasattr(grads, "raw_values") else
+             [("classical.", grads.classical.raw_values),
+              ("schemes.", grads.schemes.raw_values)])
+    out = {p + k: v for p, rv in parts for k, v in rv.items() if v is not None}
+    # AIMIP spatial-surface coefficients, minus the fields frozen as unread
+    sp = getattr(grads if hasattr(grads, "raw_values") else grads.classical,
+                 "spatial_surface", None)
+    if sp is not None:
+        out.update({f"spatial.{n}": f.coeffs for n, f in sp.fields.items()
+                    if n not in sp.frozen})
+    return out
+
+
 def maybe_resume_model(model_template, resume_from_dir):
     """Load latest epoch checkpoint from ``resume_from_dir`` into ``model_template``.
 
@@ -409,11 +429,11 @@ def _load_midepoch_checkpoint(
     _tmpl5 = (model_template, opt_state_template, _ema_t, _zero, _zero)
 
     def _read4():
-        m, o, e, c = eqx.tree_deserialise_leaves(str(path), _tmpl4)
+        m, o, e, c = deserialise_knob_aware(path, _tmpl4)
         return m, o, None, int(e), int(c)
 
     def _read5():
-        m, o, em, e, c = eqx.tree_deserialise_leaves(str(path), _tmpl5)
+        m, o, em, e, c = deserialise_knob_aware(path, _tmpl5)
         return m, o, em, int(e), int(c)
 
     # ALWAYS attempt the 5-tuple layout FIRST, then fall back to 4-tuple.
@@ -425,12 +445,12 @@ def _load_midepoch_checkpoint(
     # 5-tuple template RELIABLY raises (the file's int32 epoch scalar lands
     # where the 5-tuple template expects the EMA model's float array leaf,
     # a dtype/shape mismatch), so control reaches the 4-tuple fallback.
-    _last_exc = None
+    _excs = []
     for _reader in (_read5, _read4):
         try:
             m, o, em, e, c = _reader()
         except Exception as exc:  # equinox mismatch: broad by design
-            _last_exc = exc
+            _excs.append(exc)
             continue
         if ema_template is None:
             # Caller does not want the EMA (EMA disabled this run) — drop it.
@@ -438,7 +458,7 @@ def _load_midepoch_checkpoint(
         return m, o, em, int(e), int(c)
     raise RuntimeError(
         f"Could not deserialise {path} as either the 5-tuple or 4-tuple "
-        f"mid-epoch layout: {_last_exc!r}"
+        f"mid-epoch layout: 5-tuple {_excs[0]!r}; 4-tuple {_excs[1]!r}"
     )
 
 
@@ -645,6 +665,11 @@ N_SFNO_FORCING_CHANNELS = 3
 # site below, cast to ``in_scale``'s dtype so the concatenate result dtype is
 # identical to the former module-top ``jnp.array`` (in both x32 and x64).
 _SFNO_FORCING_INPUT_SCALE = (300.0, 1.0, 1400.0)
+# Optional extra input plane (see ``make_sfno_spectral_physics``): the
+# ACE2-style land fraction.  The six ERA5 surface-flux planes take their
+# scales from ``neural_physics.SFC_FLUX_INPUT_NORMS`` (one source for both
+# learned arms).  Plain tuple for the same reason as above.
+_SFNO_LAND_FRAC_INPUT_SCALE = (1.0,)
 
 
 def _channel_input_scale(nlev: int) -> jnp.ndarray:
@@ -678,7 +703,9 @@ def _channel_tendency_scale(nlev: int) -> jnp.ndarray:
     ])
 
 
-def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
+def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid, *,
+                               spatial_embedding: bool = False,
+                               era5_surface_fluxes: bool = False):
     """Create a physics_fn compatible with SpectralPEModel.step().
 
     The returned function has signature::
@@ -710,12 +737,23 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
     (idealized / legacy tests): T_sfc proxy = lowest model level,
     sic = 0, insolation = S_0 (the historical constant input).
 
+    Optional extra input planes, appended AFTER the three forcing planes and
+    counted by ``model_registry.sfno_extra_input_channels`` (the network must
+    have been built with the same flags): ``spatial_embedding`` adds the
+    ACE2-style static land-fraction plane (``forcing["land_frac"]``; orography
+    is already a state channel), ``era5_surface_fluxes`` adds the six ERA5
+    surface-flux planes (``SFC_FLUX_FORCING_KEYS`` order).  Either flag
+    rejects ``forcing=None``.
+
     Parameters
     ----------
     sfno : SFNO
         Spherical Fourier Neural Operator (eqx.Module).
     grid : GaussianGrid
         Grid for SH transforms inside pack/unpack.
+    spatial_embedding, era5_surface_fluxes : bool
+        Which extra input planes to append; must match the SFNO's
+        ``in_channels``.
 
     Returns
     -------
@@ -723,20 +761,34 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
         Physics function for the spectral PE dycore.
     """
     from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
+    from legoesm.atmosphere.physics.neural_physics import (
+        SFC_FLUX_FORCING_KEYS,
+        SFC_FLUX_INPUT_NORMS,
+    )
+    from legoesm.training.model_registry import sfno_extra_input_channels
 
+    n_extra = sfno_extra_input_channels(
+        spatial_embedding=spatial_embedding,
+        era5_surface_fluxes=era5_surface_fluxes)
     # nlev from the OUTPUT channels (pure state tendencies, 4*nlev+2);
     # in_channels additionally carries the N_SFNO_FORCING_CHANNELS
-    # forcing planes.
+    # forcing planes plus the optional extras.
     nlev = (sfno.config.out_channels - 2) // 4
-    if (sfno.config.in_channels != sfno.config.out_channels + N_SFNO_FORCING_CHANNELS
+    if (sfno.config.in_channels
+            != sfno.config.out_channels + N_SFNO_FORCING_CHANNELS + n_extra
             or (sfno.config.out_channels - 2) % 4 != 0
             or nlev < 1):
         raise ValueError(
             f"SFNO physics expects out_channels = 4*nlev + 2 (PE state "
             f"layout) and in_channels = out_channels + "
-            f"{N_SFNO_FORCING_CHANNELS} (forcing planes); got "
+            f"{N_SFNO_FORCING_CHANNELS} (forcing planes) + {n_extra} "
+            f"(spatial_embedding={spatial_embedding}, "
+            f"era5_surface_fluxes={era5_surface_fluxes}); got "
             f"in={sfno.config.in_channels}, out={sfno.config.out_channels}."
         )
+    extra_scale = tuple(
+        (_SFNO_LAND_FRAC_INPUT_SCALE if spatial_embedding else ())
+        + (tuple(SFC_FLUX_INPUT_NORMS) if era5_surface_fluxes else ()))
     in_scale = _channel_input_scale(nlev)
     out_scale = _channel_tendency_scale(nlev)
     spec = PE3DChannelSpec(nlev=nlev)
@@ -771,19 +823,38 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
             )
             insol = constants.S_0 * jnp.maximum(mu0, 0.0)
         else:
+            if spatial_embedding or era5_surface_fluxes:
+                raise ValueError(
+                    "an SFNO built with spatial_embedding and/or "
+                    "era5_surface_fluxes needs a forcing dict (land fraction "
+                    "/ ERA5 surface-flux planes); forcing=None callers "
+                    "cannot use it")
             t_sfc = t_lowest
             sic = jnp.zeros((n_lat, n_lon), dtype=packed.dtype)
             insol = jnp.full((n_lat, n_lon), constants.S_0, dtype=packed.dtype)
-        packed_in = jnp.concatenate(
-            [packed,
-             t_sfc[..., None], sic[..., None], insol[..., None]],
-            axis=-1,
-        )
+        planes = [packed, t_sfc[..., None], sic[..., None], insol[..., None]]
+        if spatial_embedding:
+            if "land_frac" not in forcing:
+                raise KeyError(
+                    "spatial_embedding=True requires forcing['land_frac'] "
+                    "(ACE2-style static land-fraction plane)")
+            planes.append(jnp.clip(
+                jnp.asarray(forcing["land_frac"]).reshape(n_lat, n_lon),
+                0.0, 1.0)[..., None])
+        if era5_surface_fluxes:
+            for _k in SFC_FLUX_FORCING_KEYS:
+                if _k not in forcing:
+                    raise KeyError(
+                        f"era5_surface_fluxes=True requires forcing[{_k!r}]")
+                planes.append(
+                    jnp.asarray(forcing[_k]).reshape(n_lat, n_lon)[..., None])
+        packed_in = jnp.concatenate(planes, axis=-1)
         # Normalize inputs to O(1)
         packed_norm = packed_in / jnp.maximum(
             jnp.concatenate([
                 in_scale,
-                jnp.asarray(_SFNO_FORCING_INPUT_SCALE, dtype=in_scale.dtype),
+                jnp.asarray(_SFNO_FORCING_INPUT_SCALE + extra_scale,
+                            dtype=in_scale.dtype),
             ]), 1e-10,
         )
         # SFNO forward: O(1) in, O(1) out
@@ -894,10 +965,48 @@ def make_turbulence_only_spectral_physics(dt,
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
-    raw_fn = make_physics(cfg, model_type="spectral_pe", dt=dt)
+    raw_fn = make_physics(cfg, model_type="spectral_pe", dt=dt,
+                          surface_bulk_coeffs=None)   # turbulence owns it
 
-    def physics_fn(state, grid_, sigma_coord):
-        result = raw_fn(state, grid_, sigma_coord)
+    from legoesm.atmosphere.physics.physics_state import (
+        NO_SFC_T_OVERRIDE,
+        init_physics_state,
+    )
+
+    def physics_fn(state, grid_, sigma_coord, forcing=None):
+        # PRESCRIBED ERA5 STRESS: when the forcing carries the surface stress
+        # planes, hand them to the scheme through a physics state built for
+        # this call — the same override slots the classical arm's threaded
+        # state uses — so the drag is the analysed stress, not the bulk
+        # formula's.  The surface temperature is anchored alongside, exactly
+        # as the classical rollout does, else the bulk sensible flux would be
+        # evaluated against the air temperature.  Without the stress keys the
+        # historical call runs byte-identically.
+        _has_x = forcing is not None and forcing.get("sfc_tau_x") is not None
+        _has_y = forcing is not None and forcing.get("sfc_tau_y") is not None
+        if _has_x != _has_y:
+            raise ValueError(
+                "a prescribed surface stress needs BOTH forcing['sfc_tau_x'] "
+                "and forcing['sfc_tau_y'] (stress on the atmosphere [Pa]); "
+                "got only one")
+        if not _has_x:
+            result = raw_fn(state, grid_, sigma_coord)
+            return result[0] if isinstance(result, tuple) else result
+        ncol = int(grid_.n_lat) * int(grid_.n_lon)
+        ps = init_physics_state(ncol, int(sigma_coord.n_levels), cfg)
+        _dt = ps.surface_T_sfc_override.dtype
+        # Verbatim (the loader refuses non-finite planes; see spectral_rollout).
+        tau_x = jnp.asarray(forcing["sfc_tau_x"]).reshape(ncol).astype(_dt)
+        tau_y = jnp.asarray(forcing["sfc_tau_y"]).reshape(ncol).astype(_dt)
+        _t_raw = jnp.asarray(forcing["T_sfc"]).reshape(ncol).astype(_dt)
+        t_sfc = jnp.where(jnp.isfinite(_t_raw), _t_raw, NO_SFC_T_OVERRIDE)
+        ps = ps._replace(
+            surface_tau_x_override_pa=tau_x,
+            surface_tau_y_override_pa=tau_y,
+            surface_T_sfc_override=t_sfc,
+        )
+        result = raw_fn(state, grid_, sigma_coord, phys_state=ps,
+                        forcing=forcing)
         return result[0] if isinstance(result, tuple) else result
 
     return physics_fn
@@ -906,6 +1015,13 @@ def make_turbulence_only_spectral_physics(dt,
 # =============================================================================
 # Physics-based parameterizations with trainable parameters
 # =============================================================================
+
+# The TrainablePhysicsParams names make_physics_params_spectral_physics reads
+# (on its rrtmgp path).  Any other DEFAULT_TRAINABLE leaf (C_H, C_E, albedo_ice)
+# is never consumed here and is frozen OUT of the spectral trainer (no inert
+# parameters).
+SPECTRAL_PHYSICS_TRAINABLE = ("sbm_tau_c", "sbm_RH_ref", "albedo_ocean")
+
 
 def make_physics_params_spectral_physics(params, grid, dt, *,
                                          radiation: str = "rrtmgp"):
@@ -976,8 +1092,9 @@ def make_physics_params_spectral_physics(params, grid, dt, *,
     _kwargs = {}
     if _albedo is not None and radiation == "rrtmgp":
         _kwargs["sfc_albedo_override"] = _albedo
+    # this lane runs its own surface flux (C_H / C_E above)
     raw_fn = make_physics(physics_config, model_type="spectral_pe", dt=dt,
-                          **_kwargs)
+                          surface_bulk_coeffs=None, **_kwargs)
 
     def physics_fn(state, grid_, sigma_coord):
         result = raw_fn(state, grid_, sigma_coord)
@@ -1068,8 +1185,10 @@ def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name)
     # Refuse configs whose explicit advection is unstable (the T63 dt=1800
     # blowup class): the CI deck gate cannot see ad-hoc YAMLs or CLI dt
     # overrides, so the bound is enforced where the integrator is built.
-    from legoesm.atmosphere.dynamics.gcm.spectral_pe import check_advective_cfl
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        check_advective_cfl, refuse_semi_implicit_hybrid)
     check_advective_cfl(int(grid.n_max), dt, pe_config)
+    refuse_semi_implicit_hybrid(pe_config, sigma_coord)
 
     if not pe_config.semi_implicit:
         def _integrate_explicit(state, tendency_fn):
@@ -1167,6 +1286,26 @@ def positive_tracers(tracers, sigma_coord):
     return out
 
 
+def _scan_adjoint_window(step_fn, carry0, xs, length, adjoint_steps):
+    """``lax.scan`` whose gradient flows through only the last ``adjoint_steps``.
+
+    The forward is the same per-step sequence as one scan (the step index in
+    ``xs`` continues across the cut, so radiation cadence and the solar clock
+    are unchanged); ``stop_gradient`` on the WHOLE carry at the cut (state,
+    cached radiation, prognostic physics) removes every earlier step from the
+    adjoint. ``adjoint_steps`` 0 or >= the length = ordinary scan.
+    """
+    n = int(length if xs is None else xs.shape[0])
+    k = n - int(adjoint_steps) if 0 < int(adjoint_steps) < n else 0
+    if k == 0:
+        return jax.lax.scan(step_fn, carry0, xs, length=length)
+    carry, _ = jax.lax.scan(step_fn, carry0, None if xs is None else xs[:k],
+                            length=k if xs is None else None)
+    carry = jax.lax.stop_gradient(carry)
+    return jax.lax.scan(step_fn, carry, None if xs is None else xs[k:],
+                        length=n - k if xs is None else None)
+
+
 def spectral_rollout(
     initial_state: SpectralHydrostaticState,
     physics_fn,
@@ -1184,6 +1323,10 @@ def spectral_rollout(
     forcing_base: dict | None = None,
     phys_state_in=None,
     return_phys_state: bool = False,
+    adjoint_steps: int = 0,
+    step_offset: int = 0,
+    rad_tendency_in=None,
+    return_rad_tendency: bool = False,
 ) -> SpectralHydrostaticState:
     """Roll out spectral PE + SFNO physics for n_steps using lax.scan.
 
@@ -1264,6 +1407,15 @@ def spectral_rollout(
         across the rollout (daily-AMIP granularity).  Mutually
         exclusive with the rad-gating path (the classical AMIP rollout
         ``spectral_amip_rollout`` owns that combination).
+    adjoint_steps : int
+        Differentiate only the last ``adjoint_steps`` steps (0 = all). The
+        forward rollout is unchanged; see ``_scan_adjoint_window``.
+    step_offset, rad_tendency_in, return_rad_tendency
+        Exact segment chaining (rad-gated stateful branch only): a segment
+        started at ``step_offset`` with the previous segment's physics state
+        and cached radiation tendency continues the step index, radiation
+        cadence and clock, so two chained segments equal one rollout.
+        ``return_rad_tendency`` appends the cached tendency to the return.
 
     Returns
     -------
@@ -1295,6 +1447,29 @@ def spectral_rollout(
         else None
     )
 
+    _continued = bool(step_offset) or rad_tendency_in is not None
+    if _continued or return_rad_tendency:
+        if rad_physics_fn is None or (phys_state_in is None
+                                      and not return_phys_state):
+            raise ValueError(
+                "spectral_rollout: step_offset/rad_tendency_in/"
+                "return_rad_tendency chain the rad-gated STATEFUL branch only "
+                "(rad_physics_fn plus phys_state_in or return_phys_state).")
+        if _continued and getattr(pe_config, "fix_mass", False) and getattr(
+                pe_config, "anchor_mass_to_initial", False):
+            raise ValueError(
+                "spectral_rollout: segment chaining with the dry-mass anchor "
+                "would re-anchor to the segment start, not the forecast start.")
+    if _continued and (phys_state_in is None or rad_tendency_in is None
+                       or int(step_offset) < 1):
+        raise ValueError(
+            "spectral_rollout: a continued segment needs step_offset >= 1, "
+            "the previous segment's phys_state_in AND rad_tendency_in (the "
+            "first steps may sit between radiation updates).")
+    if not 0 <= int(adjoint_steps) <= int(n_steps):
+        raise ValueError(
+            f"spectral_rollout: adjoint_steps must be in 0..{n_steps}, got "
+            f"{adjoint_steps}.")
     if rad_physics_fn is not None and rad_update_interval < 1:
         raise ValueError(
             "spectral_rollout: rad_update_interval must be >= 1, got "
@@ -1332,9 +1507,37 @@ def spectral_rollout(
                 f"shape {_raw.shape}, expected ({_ncol_grid},) — one value "
                 "per column of the physics grid.")
         _sfc_override = jnp.where(jnp.isfinite(_raw), _raw, NO_SFC_T_OVERRIDE)
+    # Prescribed turbulent surface fluxes: they must come as the full set,
+    # one value per column, and NaN-free.
+    _FLUX_OVERRIDE_KEYS = ("sfc_shf", "sfc_lhf", "sfc_tau_x", "sfc_tau_y")
+    _flux_override = None
+    _have_flux = [k for k in _FLUX_OVERRIDE_KEYS
+                  if forcing_base is not None and forcing_base.get(k) is not None]
+    if _have_flux:
+        _lack_flux = [k for k in _FLUX_OVERRIDE_KEYS if k not in _have_flux]
+        if _lack_flux:
+            raise KeyError(
+                "spectral_rollout: forcing_base carries prescribed surface "
+                f"flux keys {_have_flux} but is missing {_lack_flux} — the "
+                "turbulent lower boundary condition is prescribed as the "
+                "full set (shf, lhf, tau_x, tau_y).")
+        _ncol_grid = int(grid.n_lat) * int(grid.n_lon)
+        _flux_override = []
+        for _k in _FLUX_OVERRIDE_KEYS:
+            _raw_f = jnp.asarray(forcing_base[_k]).reshape(-1)
+            if _raw_f.shape != (_ncol_grid,):
+                raise ValueError(
+                    "spectral_rollout: the prescribed surface flux "
+                    f"{_k!r} has shape {_raw_f.shape}, expected "
+                    f"({_ncol_grid},) — one value per column of the physics "
+                    "grid.")
+            # Taken VERBATIM: the loader refuses non-finite planes, and a
+            # silent NaN->0 here would turn a broken sample into "no flux"
+            # for the classical arm while the learned arms saw the NaN.
+            _flux_override.append(_raw_f)
+        _flux_override = tuple(_flux_override)
     if forcing_base is not None:
-        _missing = [k for k in ("T_sfc", "sic", "day_of_year",
-                                "seconds_of_day") if k not in forcing_base]
+        _missing = [k for k in ("T_sfc", "sic", "day_of_year", "seconds_of_day") if k not in forcing_base]
         if _missing:
             raise KeyError(
                 "spectral_rollout: forcing_base is missing "
@@ -1355,17 +1558,23 @@ def spectral_rollout(
             jnp.asarray(forcing_base["day_of_year"], jnp.float64)
             + t / 86400.0
         )
+        # Everything else in forcing_base — the prescribed surface flux
+        # planes, the land fraction, anything a later part adds — passes
+        # through UNCHANGED: the fluxes are held fixed at their sample-start
+        # value for the whole window by construction.
+        #
+        # The RAW field, NaN over land preserved.  It is tempting to
+        # publish the sanitised copy here so every consumer sees one
+        # value, but the consumers disagree ON PURPOSE: the learned
+        # arms (SFNO, column MLP) read NaN as "no prescribed surface
+        # here" and substitute the lowest-level air temperature, and
+        # handing them the finite -1e4 sentinel instead would feed
+        # -10000 K into every land column (codex, overruling an earlier
+        # GLM suggestion).  The sentinel belongs only in the physics
+        # state's override slot, which is where its contract is defined.
+        # This is exactly what spectral_amip_rollout has always done.
         return {
-            # The RAW field, NaN over land preserved.  It is tempting to
-            # publish the sanitised copy here so every consumer sees one
-            # value, but the consumers disagree ON PURPOSE: the learned
-            # arms (SFNO, column MLP) read NaN as "no prescribed surface
-            # here" and substitute the lowest-level air temperature, and
-            # handing them the finite -1e4 sentinel instead would feed
-            # -10000 K into every land column (codex, overruling an earlier
-            # GLM suggestion).  The sentinel belongs only in the physics
-            # state's override slot, which is where its contract is defined.
-            # This is exactly what spectral_amip_rollout has always done.
+            **forcing_base,
             "T_sfc": forcing_base["T_sfc"],
             "sic": forcing_base["sic"],
             "day_of_year": jnp.mod(doy - 1.0, 365.0) + 1.0,
@@ -1500,8 +1709,9 @@ def spectral_rollout(
                 prevent_cse=True,
                 policy=jax.checkpoint_policies.nothing_saveable,
             )
-            (final_state, final_ps), _ = jax.lax.scan(
-                step_fn_ckpt, (initial_state, phys0), None, length=n_steps,
+            (final_state, final_ps), _ = _scan_adjoint_window(
+                step_fn_ckpt, (initial_state, phys0), None, n_steps,
+                adjoint_steps,
             )
             if return_phys_state:
                 return final_state, final_ps
@@ -1525,10 +1735,11 @@ def spectral_rollout(
             policy=jax.checkpoint_policies.nothing_saveable,
         )
 
-        final_state, _ = jax.lax.scan(
+        final_state, _ = _scan_adjoint_window(
             step_fn_ckpt, initial_state,
             jnp.arange(n_steps) if forcing_base is not None else None,
-            length=None if forcing_base is not None else n_steps,
+            None if forcing_base is not None else n_steps,
+            adjoint_steps,
         )
         return final_state
 
@@ -1573,7 +1784,7 @@ def spectral_rollout(
         else:
             _rad_accepts = set(_sig.parameters)
 
-    def _call_rad(s, t_seconds, step_idx=None):
+    def _call_rad(s, t_seconds, step_idx=None, phys_state=None):
         # ``forcing_base`` (when the caller supplies one) carries the
         # prescribed surface temperature and the scene's real calendar; the
         # per-step dict advances that calendar by the elapsed rollout time,
@@ -1586,9 +1797,21 @@ def spectral_rollout(
                 _rad_accepts is None or "forcing" in _rad_accepts):
             _kw["forcing"] = _forcing_at(
                 jnp.asarray(0.0 if step_idx is None else step_idx))
+        # The LAGGED physics carry (CLUBB cloud fraction, CAM6 deepcu
+        # inputs) for a radiation fn that reads it; a stateless caller
+        # passes None and the kwarg is omitted so older signatures still
+        # bind.
+        if phys_state is not None and (
+                _rad_accepts is None or "phys_state" in _rad_accepts):
+            _kw["phys_state"] = phys_state
         return rad_physics_fn(s, grid, sigma_coord, **_kw)
 
-    init_rad_tendency = _call_rad(initial_state, sim_time_offset_seconds, 0.0)
+    # Deferred: the stateful branch below must seed the physics carry
+    # FIRST and hand it to this call, because a radiation fn that reads
+    # the carry (cam6_clubb) refuses to run without it.
+    def _init_rad(phys_state=None):
+        return _call_rad(initial_state, sim_time_offset_seconds, 0.0,
+                         phys_state)
 
     # Cast the (Python-float) offset into the same dtype the gated
     # branch uses, so the radiation diurnal cycle sees a single
@@ -1642,7 +1865,7 @@ def spectral_rollout(
             new_state = anchor_lnps_to_mass(grid, new_state, _target_mass)
         return new_state
 
-    def _rad_refresh(state, cached_rad_tendency, step_idx):
+    def _rad_refresh(state, cached_rad_tendency, step_idx, phys_state=None):
         # Refresh rad tendency at the start of every gating window.
         # ``lax.cond`` retains backward-mode differentiability through
         # the rad branch; on skipped steps the cached tensor flows
@@ -1657,7 +1880,7 @@ def spectral_rollout(
         sim_time_seconds = step_idx.astype(jnp.float64) * dt + _offset
         return jax.lax.cond(
             should_refresh,
-            lambda _: _call_rad(state, sim_time_seconds, step_idx),
+            lambda _: _call_rad(state, sim_time_seconds, step_idx, phys_state),
             lambda _: cached_rad_tendency,
             operand=None,
         )
@@ -1678,7 +1901,11 @@ def spectral_rollout(
 
     def step_fn_gated_stateful(carry, step_idx):
         state, cached_rad_tendency, phys_state = carry
-        new_rad_tendency = _rad_refresh(state, cached_rad_tendency, step_idx)
+        # Radiation reads the carry ENTERING the step (lagged, as the
+        # hydrostatic chain does): the previous step's published cloud
+        # fraction and deep-convection carries.
+        new_rad_tendency = _rad_refresh(state, cached_rad_tendency, step_idx,
+                                        phys_state)
 
         # Harvest the updated prognostic physics state ONCE per step, on
         # the PRE-STEP state (operator-split convention: all RK stages of
@@ -1699,28 +1926,58 @@ def spectral_rollout(
         return (new_state, new_rad_tendency, phys_state_new), None
 
     def _with_prescribed_sfc(ps):
-        """Anchor the bulk-flux surface temperature to the prescribed field.
+        """Anchor the prescribed surface boundary data on the physics state.
 
-        Without this the turbulence/surface scheme resolves its surface
-        temperature to the lowest model level's air temperature, so the
-        sensible heat flux is identically zero and the latent flux is
-        evaluated against a surface that is by construction at the air
-        temperature — i.e. the run has no surface energy exchange at all.
-        ``spectral_amip_rollout`` has always done this; the training rollout
-        could not, because a forcing dict was refused whenever radiation was
-        sub-cycled.
+        Called once on the initial physics state of the scan carry (the
+        classical arm): the prescribed surface temperature and the four
+        prescribed turbulent fluxes are window-constant, so they are set
+        here and then CARRIED unchanged by ``update_physics_state`` for the
+        whole rollout. Raises TypeError when the threaded state type lacks
+        the matching override slot, so an anchor can never be silently
+        dropped.
+
+        Parameters
+        ----------
+        ps : PhysicsState
+            Initial physics state of the scan carry.
+
+        Returns
+        -------
+        PhysicsState
+            ``ps`` with the prescribed anchors set (cast to the anchor
+            dtype); ``ps`` itself when nothing is prescribed.
         """
-        if _sfc_override is None:
+        if _sfc_override is None and _flux_override is None:
             return ps
         _cur = getattr(ps, "surface_T_sfc_override", None)
-        if _cur is None:
-            raise TypeError(
-                "spectral_rollout: forcing_base carries a prescribed surface "
-                "temperature but the threaded physics state has no "
-                "surface_T_sfc_override slot, so the anchor would be silently "
-                f"dropped (state type {type(ps).__name__}).")
-        return ps._replace(
-            surface_T_sfc_override=_sfc_override.astype(_cur.dtype))
+        if _sfc_override is not None:
+            if _cur is None:
+                raise TypeError(
+                    "spectral_rollout: forcing_base carries a prescribed surface "
+                    "temperature but the threaded physics state has no "
+                    "surface_T_sfc_override slot, so the anchor would be silently "
+                    f"dropped (state type {type(ps).__name__}).")
+            ps = ps._replace(
+                surface_T_sfc_override=_sfc_override.astype(_cur.dtype))
+        if _flux_override is not None:
+            _slots = ("surface_shflx_override_w_m2",
+                      "surface_lhflx_override_w_m2",
+                      "surface_tau_x_override_pa",
+                      "surface_tau_y_override_pa")
+            _fields = getattr(ps, "_fields", ())
+            for _slot in _slots:
+                if _slot not in _fields:
+                    raise TypeError(
+                        "spectral_rollout: forcing_base carries prescribed "
+                        "surface fluxes but the threaded physics state has "
+                        f"no {_slot} slot, so the anchor would be silently "
+                        f"dropped (state type {type(ps).__name__}).")
+            # Cast to the T_sfc anchor slot's dtype (all anchors share it);
+            # fall back to the planes' own dtype when no T_sfc anchor exists.
+            _dt = _cur.dtype if _cur is not None else _flux_override[0].dtype
+            for _slot, _val in zip(_slots, _flux_override):
+                ps = ps._replace(**{_slot: _val.astype(_dt)})
+        return ps
 
     if _thread_phys:
         if phys_state_in is not None:
@@ -1739,16 +1996,47 @@ def spectral_rollout(
                 _nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
                 phys0 = _ps_init(_ncol, _nlev)
         phys0 = _with_prescribed_sfc(phys0)
+        # FILL THE CARRY FIRST (owner decision 2026-09-24).  A radiation fn
+        # that reads the carry (cam6_clubb: CLUBB's PDF cloud fraction, ZM's
+        # mass flux / in-cloud water) would otherwise see the ZERO seed for
+        # its whole first gating window -- at cadence 6 that is 3 h of a 6 h
+        # training sample with no liquid or deep cloud in radiation.  One
+        # non-radiative physics pass on the initial state publishes real
+        # values before the first radiation call.  Only for a FRESH seed (a
+        # chained caller's carry already holds the previous segment's values)
+        # and only when radiation actually reads the carry, so every other
+        # stateful arm is byte-identical.  Production AMIP cold-starts from the
+        # zero seed too; this is a deliberate departure for the training lane,
+        # where the transient would be half of every sample.
+        # The WHOLE carry from that pass is kept (owner decision 2026-09-24,
+        # after the reviewers split): the alternative -- taking only the
+        # three fields radiation reads -- would hand step 0 a carry whose
+        # cloud fraction was diagnosed from moments the carry then does not
+        # hold.  The cost of the whole pass is one extra relaxation step of
+        # every prognostic carry (CLUBB moments, convection profile, GWD
+        # spectrum) and one extra draw of the stochastic key, on an
+        # atmosphere that has not moved.
+        if phys_state_in is None and getattr(
+                rad_physics_fn, "_wants_phys_state_ro", False):
+            _warm = jax.checkpoint(
+                lambda ps: _ps_entry(initial_state, grid, sigma_coord, ps)[1],
+                prevent_cse=True,
+                policy=jax.checkpoint_policies.nothing_saveable,
+            )
+            phys0 = _warm(phys0)
         step_fn_ckpt = jax.checkpoint(
             step_fn_gated_stateful,
             prevent_cse=True,
             policy=jax.checkpoint_policies.nothing_saveable,
         )
-        (final_state, _, final_ps), _ = jax.lax.scan(
+        rad0 = _init_rad(phys0) if rad_tendency_in is None else rad_tendency_in
+        (final_state, final_rad, final_ps), _ = _scan_adjoint_window(
             step_fn_ckpt,
-            (initial_state, init_rad_tendency, phys0),
-            jnp.arange(n_steps),
+            (initial_state, rad0, phys0),
+            jnp.arange(step_offset, step_offset + n_steps), None, adjoint_steps,
         )
+        if return_rad_tendency:
+            return final_state, final_ps, final_rad
         if return_phys_state:
             return final_state, final_ps
         return final_state
@@ -1766,10 +2054,10 @@ def spectral_rollout(
         policy=jax.checkpoint_policies.nothing_saveable,
     )
 
-    (final_state, _), _ = jax.lax.scan(
+    (final_state, _), _ = _scan_adjoint_window(
         step_fn_ckpt,
-        (initial_state, init_rad_tendency),
-        jnp.arange(n_steps),
+        (initial_state, _init_rad()),
+        jnp.arange(n_steps), None, adjoint_steps,
     )
     return final_state
 
@@ -2933,7 +3221,9 @@ def load_training_data(
             phis=phis_era5,
             lat=lat, lon=lon, plev_Pa=plev_Pa,
         )
-        return era5_to_spectral_carry(era5, grid, sigma)
+        from legoesm.training.era5_to_state import era5_terrain_product
+        return era5_to_spectral_carry(era5, grid, sigma,
+                                      target_phis=era5_terrain_product(era5, grid))
 
     # Load all snapshots.  Position ``j`` maps to absolute index
     # ``time_indices[j]`` in the full store; window-cache mode selects the SAME
@@ -3140,9 +3430,15 @@ def _train_spectral_loop(
     n_samples_total: int | None = None,
     resume_from_dir=None,
     host_staged: bool = False,
+    assert_no_inert_params: bool = False,
 ):
     """Shared training loop for any learned-physics model coupled to the
     spectral PE dycore.
+
+    ``assert_no_inert_params=True`` (physics-parameter models with
+    ``raw_values``) runs the no-inert gate before the first update of a fresh
+    run: the gradient of THIS loop's rollout loss on every sample, and any
+    leaf zero on all of them aborts (``assert_no_inert_over``).
 
     ``host_staged=True`` declares that the PROVIDED ``ic_states`` /
     ``target_carries`` / ``sample_forcings`` were built host-resident
@@ -3421,7 +3717,7 @@ def _train_spectral_loop(
                 Path(resume_from_dir) / f"epoch_{start_epoch - 1:04d}_ema.eqx"
             )
             if _cand.exists():
-                ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
+                ema_model = deserialise_knob_aware(_cand, ema_model)
                 logger.info(f"EMA resume: restored {_cand}")
             else:
                 logger.warning(
@@ -3736,6 +4032,26 @@ def _train_spectral_loop(
     # the prefetch consumer.
     _host_staged = bool(getattr(chunk_loader, "host_staged", False)) or bool(host_staged)
     _compute_dev = jax.devices()[0] if _host_staged else None
+
+    if (assert_no_inert_params and n_epochs_total > 0
+            and start_epoch == 0 and resume_chunk == 0):
+        # Judged on the training objective itself (the rollout loss the first
+        # epoch differentiates), so a parameter that only acts later in the
+        # rollout counts as live, and no proxy can cancel a real dependence.
+        from legoesm.training.inert_params import assert_no_inert_over
+        _gate_step = _dp_grad_step_for(epoch_plan[0])
+
+        def _gate_grads():
+            for c_ics, c_tgts, c_forc in _iter_epoch_data():
+                for i, (ic, tgt) in enumerate(zip(c_ics, c_tgts)):
+                    fb = c_forc[i] if c_forc is not None else None
+                    if _host_staged:
+                        ic = _stage_tree(ic, _compute_dev)
+                        tgt = _stage_tree(tgt, _compute_dev)
+                        fb = None if fb is None else _stage_tree(fb, _compute_dev)
+                    yield _trainable_raw_values(_gate_step(model, ic, tgt, fb)[2])
+
+        assert_no_inert_over(_gate_grads())
 
     best_loss = float("inf")
     patience_counter = 0
@@ -5279,7 +5595,7 @@ def _train_sfno_full_loop(
                 / f"epoch_{start_epoch - 1:04d}_ema.eqx"
             )
             if _cand.exists():
-                ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
+                ema_model = deserialise_knob_aware(_cand, ema_model)
                 logger.info(f"EMA resume: restored {_cand}")
             else:
                 logger.warning(
@@ -5673,21 +5989,26 @@ def train_physics_params_spectral(
     physics computations and the spectral dynamical core. Gray radiation runs
     at its documented defaults — it is not trained.
 
-    Trainable parameters (via ``TrainablePhysicsParams``):
+    Trainable parameters (via ``TrainablePhysicsParams``,
+    :data:`SPECTRAL_PHYSICS_TRAINABLE`):
     - ``sbm_tau_c``: SBM convection relaxation timescale
     - ``sbm_RH_ref``: SBM convection reference relative humidity
+    - ``albedo_ocean``: surface albedo override on the rrtmgp path
 
     Returns (trained_params, loss_history).
     """
     # The IDEALIZED 2-family parameter set (convection + radiation), not the
     # campaign "classical" model — the registry's classical is the six-family
     # AIMIPClassicalParams since 2026-08-12.
-    from legoesm.training.trainable_params import TrainablePhysicsParams
+    from legoesm.training.trainable_params import (
+        DEFAULT_TRAINABLE, TrainablePhysicsParams,
+    )
 
     grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
 
-    params = TrainablePhysicsParams.from_defaults()
+    params = TrainablePhysicsParams.from_defaults(
+        [c for c in DEFAULT_TRAINABLE if c.name in SPECTRAL_PHYSICS_TRAINABLE])
     n_p = len(params.raw_values)
     logger.info(f"Physics params: {n_p} trainable ({', '.join(params.raw_values)})")
     for k, v in params.as_dict().items():
@@ -5707,4 +6028,5 @@ def train_physics_params_spectral(
         params, _make_physics_fn,
         grid, sigma, ic_states, target_carries, config,
         host_staged=True,   # dataset loaded host-resident above (#1155)
+        assert_no_inert_params=True,
     )

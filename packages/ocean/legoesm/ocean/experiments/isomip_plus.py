@@ -72,6 +72,13 @@ from legoesm.ocean.physics.ice_shelf import (
 _ISOMIP_RHO_SW = 1028.0    # [kg/m3]
 
 
+def _isomip_melt_config() -> IceShelfConfig:
+    """Three-equation melt with the protocol seawater heat capacity
+    (3974 J/kg/K, Jenkins 1991 / ISOMIP+). The IceShelfConfig default
+    (constants.c_sw) stays as is: the OMIP ice-shelf path uses it."""
+    return IceShelfConfig(c_w=constants.c_p_seawater_isomip)
+
+
 @dataclass
 class ISOMIPPlusConfig:
     """Configuration for the ISOMIP+ Ocean0 / Ocean1 cavity benchmark."""
@@ -95,15 +102,15 @@ class ISOMIPPlusConfig:
 
     @classmethod
     def ocean0_cold(cls) -> "ISOMIPPlusConfig":
-        return cls(T_far_C=-1.9, S_far_psu=34.55, melt=IceShelfConfig())
+        return cls(T_far_C=-1.9, S_far_psu=34.55, melt=_isomip_melt_config())
 
     @classmethod
     def ocean1_warm(cls) -> "ISOMIPPlusConfig":
-        return cls(T_far_C=1.0, S_far_psu=34.7, melt=IceShelfConfig())
+        return cls(T_far_C=1.0, S_far_psu=34.7, melt=_isomip_melt_config())
 
     def __post_init__(self):
         if self.melt is None:
-            object.__setattr__(self, "melt", IceShelfConfig())
+            object.__setattr__(self, "melt", _isomip_melt_config())
 
 
 def ice_draft_m(x_km, y_km, config: ISOMIPPlusConfig | None = None) -> jnp.ndarray:

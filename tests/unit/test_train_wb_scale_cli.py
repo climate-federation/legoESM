@@ -331,9 +331,14 @@ def test_the_epoch_checkpoint_carries_the_frozen_parameters():
                 and isinstance(c.func, ast.Attribute)
                 and c.func.attr == "combine"
                 and [x.id for x in c.args
-                     if isinstance(x, ast.Name)] == ["cur_arr", "static"]]
+                     if isinstance(x, ast.Name)] == ["cur_arr", "_static_h"]]
     assert combines, ("the checkpoint must serialise "
-                      "eqx.combine(cur_arr, static)")
+                      "eqx.combine(cur_arr, _static_h)")
+    # ``_static_h`` must BE the frozen half (a host copy of it under column
+    # sharding, the object itself otherwise).
+    src = ast.unparse(main)
+    assert ("_static_h = static if column_mesh is None "
+            "else jax.device_get(static)") in src
 
 
 def test_the_frozen_parameters_are_re_measured_after_training():
@@ -366,8 +371,9 @@ def test_resume_restores_the_optimizer_state_not_just_the_parameters():
     main = next(n for n in tree.body
                 if isinstance(n, ast.FunctionDef) and n.name == "_main")
     reads = [n for n in ast.walk(main)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-             and n.func.attr == "tree_deserialise_leaves"]
+             if isinstance(n, ast.Call)
+             and getattr(n.func, "attr", getattr(n.func, "id", None))
+             in ("tree_deserialise_leaves", "deserialise_knob_aware")]
     assert len(reads) >= 2, (
         "resume must deserialise BOTH the parameters and the optimizer state; "
         f"found {len(reads)} deserialise call(s)")
@@ -392,7 +398,9 @@ def test_every_epoch_writes_all_three_checkpoint_files():
                     if isinstance(n, ast.FunctionDef) and n.name == "on_epoch")
     writes = [n for n in ast.walk(on_epoch)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-              and n.func.id == "_atomic_write"]
+              and n.func.id == "_atomic_write"
+              and not (isinstance(n.args[0], ast.Name)
+                       and n.args[0].id == "_history_path")]
     assert len(writes) == 3, (
         f"on_epoch must write parameters, optimizer state and the frozen list "
         f"atomically; found {len(writes)} atomic write(s)")
@@ -463,3 +471,109 @@ def test_yaml_non_integral_epochs_rejected():
         mod._resolve_training_keys(cfg, {"n_epochs": True})
     cfg2, _, _ = mod._resolve_training_keys(cfg, {"n_epochs": 12.0})
     assert cfg2.n_epochs == 12
+
+
+def test_warmup_steps_cli_roundtrip_and_deck_default():
+    """--warmup-steps lets one campaign arm depart from a shared deck.
+
+    The flux A/B trained both arms at a warmup the deck did not carry; editing
+    the deck instead would have moved the column-MLP and SFNO arms, which read
+    the same file.
+    """
+    assert mod.build_scale_config_from_args([]).warmup_steps is None
+    assert mod.build_scale_config_from_args(
+        ["--warmup-steps", "200"]).warmup_steps == 200
+
+
+def test_a_link_that_changes_the_warmup_refuses_the_previous_state():
+    """Two links of one chain that disagree must not share optimizer state.
+
+    The resolved warmup is part of the resume fingerprint, so an arm whose
+    launcher passes a different --warmup-steps cannot silently continue on
+    Adam moments built for another schedule.  This is the invariant the
+    launcher's "every link passes the same values" note depends on.
+    """
+    cfg = mod.build_scale_config_from_args(
+        ["--mode", "physics", "--training-core", "spectral", "--epochs", "4",
+         "--lr", "1.5e-3", "--optimizer", "adamw"])
+    yml = {"n_lat": 96, "n_lon": 192, "nlev": 32, "warmup_steps": 500}
+    deck = mod._run_fingerprint(cfg, yml, 500, 12, 240, 1)
+    override = mod._run_fingerprint(cfg, yml, 200, 12, 240, 1)
+    assert deck["warmup_steps"] == 500 and override["warmup_steps"] == 200
+    assert deck != override
+    # ...and nothing else moved: the deck content is identical, so a chain
+    # that keeps its values keeps its state.
+    assert deck["config_sha256"] == override["config_sha256"]
+    assert mod._run_fingerprint(cfg, yml, 500, 12, 240, 1) == deck
+
+
+def test_only_the_first_argument_selects_the_signature_query():
+    """A value that merely EQUALS the query token must not skip training.
+
+    The pre-parser scanned every argument, so a wrapper whose CONFIG or OUT
+    held this token printed a signature and exited 0 having trained nothing —
+    and an afterany chain then repeated that no-op for every link.
+    """
+    tok = "--print-latest-complete"
+    with pytest.raises(SystemExit) as e:
+        # The token sits where CONFIG's value goes, with a following argument
+        # for the old code to mistake for a directory. Reaching argparse's
+        # rejection of the bad mode proves the pre-parser declined to claim
+        # this invocation; the old scan printed a signature and returned 0.
+        mod.main(["--config", tok, "--mode", "bogus"])
+    assert e.value.code != 0
+
+
+def test_probe_progress_round_trip_is_fingerprint_gated(tmp_path):
+    import json
+
+    import numpy as np
+
+    fp = {"a": 1}
+    samples = [np.arange(4.0), np.ones(3)]
+    content = mod._sample_fingerprint(samples)
+    (tmp_path / "probe_progress.json").write_text(json.dumps({
+        "schema": mod._MANIFEST_SCHEMA, "fingerprint": fp, "n_done": 7,
+        "absmax": [0.0, float("inf"), 2.5], "n_used": 6,
+        **mod._content_payload(content)}))
+    got = mod._read_probe_progress(str(tmp_path), fp, content)
+    assert got[0] == 7 and got[2] == 6 and got[1][1] == float("inf")
+    assert mod._read_probe_progress(str(tmp_path), {"a": 2}, content) is None
+    assert mod._read_probe_progress(str(tmp_path / "missing"), fp,
+                                    content) is None
+    # Same count and shapes, different values: the config fingerprint cannot
+    # see this, the content gate must.
+    other = mod._sample_fingerprint([np.arange(4.0) + 1.0, np.ones(3)])
+    assert other[0] == content[0]
+    assert mod._read_probe_progress(str(tmp_path), fp, other) is None
+    swapped = mod._sample_fingerprint([np.arange(4.0)[::-1].copy(), np.ones(3)])
+    assert mod._read_probe_progress(str(tmp_path), fp, swapped) is None
+    # Equal sum and position-weighted sum, different magnitudes (codex r2).
+    a = mod._sample_fingerprint([np.asarray([1.0, -1.0, 1.0])])
+    b = mod._sample_fingerprint([np.asarray([2.0, -3.0, 2.0])])
+    assert np.allclose(a[1][:, :2], b[1][:, :2])
+    assert not mod._content_matches(mod._content_payload(a), b)
+    # Equal sum, position-weighted sum AND magnitude sum (codex r3).
+    a = mod._sample_fingerprint([np.asarray([1.0, 2.0, 3.0])])
+    b = mod._sample_fingerprint([np.asarray([2.0, 0.0, 4.0])])
+    assert np.allclose(a[1][:, :3], b[1][:, :3]) and a[0] == b[0]
+    assert not mod._content_matches(mod._content_payload(a), b)
+
+
+def test_adjoint_window_and_probe_scenes_flags():
+    cfg = mod.build_scale_config_from_args(["--adjoint-steps", "3", "--probe-scenes", "48"])
+    assert (cfg.adjoint_steps, cfg.probe_scenes) == (3, 48)
+    base = mod.build_scale_config_from_args([])
+    assert (base.adjoint_steps, base.probe_scenes) == (0, None)
+    for bad in (["--adjoint-steps", "-1"], ["--probe-scenes", "0"]):
+        with pytest.raises(SystemExit):
+            mod.build_scale_config_from_args(bad)
+    yml = {"n_lat": 96, "n_lon": 192, "nlev": 32}
+    common = ["--mode", "physics", "--epochs", "1", "--lr", "1e-3", "--optimizer", "adamw"]
+    base = mod.build_scale_config_from_args(common)
+    cfg = mod.build_scale_config_from_args(
+        common + ["--adjoint-steps", "3", "--probe-scenes", "48"])
+    fp_base = mod._run_fingerprint(base, yml, 200, 12, 240, 1)
+    assert "adjoint_steps" not in fp_base and "probe_scenes" not in fp_base
+    fp = mod._run_fingerprint(cfg, yml, 200, 12, 240, 1)
+    assert fp["adjoint_steps"] == 3 and fp["probe_scenes"] == 48

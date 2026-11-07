@@ -1,32 +1,13 @@
-"""Faithfulness + scheme-design tests for the smoothed Lindzen-saturation orographic GWD.
+"""Scheme-design tests for ``lindzen_gwd`` (E3SM v3.0.1 orographic-only port).
 
-Oracle: Lindzen (1981) for the SATURATION mechanism; the on-disk E3SM path ``e3sm_cam.py``
-(McFarlane ``gw_oro_src`` launch + Lindzen ``gw_drag_prof`` saturation + WKB damping) as a faithful
-sibling. ``lindzen.py`` is a Lindzen-style SINGLE-WAVE scheme with a McFarlane-1987 ``h²`` launch —
-NOT a parameter-restricted subset of ``e3sm_cam.py`` (no ``sghmax`` cap, no WKB radiative damping).
-
-FAITHFUL to Lindzen — the saturation core (pinned against an independent NumPy reimpl):
-  * ``tau_sat = 0.5·ρ·k·|U_proj|³ / N`` (marginal-convective-instability saturation stress);
-  * the saturation-breaking hypothesis: the sigmoid breaks the wave where the carried stress
-    exceeds ``fcrit2·tau_sat`` (= tau_sat_eff, the oracle cap-scaling), softly relaxing toward ``tau_sat_eff`` (bounded by
-    ``min(tau_new, tau_carry)``), the shed stress deposited as
-    ``accel = −(tau_carry−tau_new)/(ρ·dz) = +∂τ/∂z/ρ`` (a deceleration; τ ≥ 0 decreases upward).
-DEPARTURE / DESIGN canaries:
-  * ``fcrit2`` scales the saturation CAP VALUE (oracle ``effkwv = kwv·fcrit2``
-    semantics; Lindzen's limit scales with ``Fr_c²``); default 1.0 caps at the exact
-    ``tau_sat`` but the saturation is SOFT (finite-sharpness sigmoid), not an exact cap;
-  * the LAUNCH ``tau_0 = ρ_sfc·N_sfc·k·h²·U_ll`` is McFarlane (1987), not Lindzen; it has NO
-    ``sghmax`` Froude cap, so it grows without bound as ``h²`` (departure from E3SM);
-  * critical-level treatment is DESIGN: at ``c = 0`` (``U_proj`` reversal) the residual carried
-    stress is radiated/discarded (nothing deposited on the reversed flow), NOT a deposition;
-  * the antiparallel deceleration + the KE→heat closure ``dT_dt = −(u·du+v·dv)/c_pd`` are
-    single-wave DESIGN choices; ``dT_dt`` is computed FROM the final tendency so
-    ``c_pd·Σρ·dT·dz == eps_gwd`` holds BY CONSTRUCTION — and for a c=0 wave (zero vertical
-    wave-energy flux) that IS the exact resolved-energy conservation (``conserves=["energy"]``);
-  * ``crit_level_floor``/``Fr_sharpness``/``crit_level_sharpness`` are smoothing knobs; a HARD
-    ``U_proj > 0`` mask forces the VECTOR sink ``u·du_dt + v·dv_dt ≤ 0`` strictly (componentwise
-    ``du_dt·u`` can be >0 for oblique winds).
-Dispatch hardening: an unknown GWD scheme raises ValueError.
+The term-by-term oracle match (E3SM Fortran, max rel err <= 1e-10 at the
+hard-limit smoothing) is ``test_lindzen_e3sm_oracle.py``.  This file pins the
+invariants that must hold for any input: the vector momentum sink, the
+discrete kinetic-energy heating closure, zero tendency without orography,
+the fcrit2 response, gradient safety at the small-N / U -> 0 traps and the
+dispatch hardening.  (The former helper-form pins of the surrogate launch and
+saturation formulas were removed with the surrogate; the oracle test replaces
+them.)
 """
 
 from __future__ import annotations
@@ -43,8 +24,6 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import (
 from legoesm.atmosphere.physics.gravity_wave_drag.integration import get_gwd_fn
 from legoesm.atmosphere.physics.gravity_wave_drag.lindzen import (
     __physics_contract__,
-    _lindzen_launch_stress,
-    _lindzen_saturation_stress,
     lindzen_gwd,
 )
 
@@ -121,115 +100,24 @@ def test_lindzen_config_defaults():
 
 
 # ===========================================================================
-# FAITHFUL to Lindzen (1981): the saturation stress + McFarlane launch (exact helper pins)
-# ===========================================================================
-def test_lindzen_saturation_stress_form_exact():
-    """FAITHFUL (exact to rtol 1e-12): ``_lindzen_saturation_stress`` == 0.5·ρ·k·|U_proj|³/N.
-
-    Pins the production saturation-stress closed form directly against an INDEPENDENT NumPy reimpl
-    (not the removed inline code), including the 0.1 m/s projected-wind floor and 1e-10 Pa floor.
-    """
-    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _columns(u_sfc=30.0, u_top=8.0)
-    N_full = brunt_vaisala_n_full(T, p_full, z_full)
-    U_proj = u  # v0=0 ⇒ source direction +x
-    k_wave = LindzenConfig().k_wave
-    tau_sat = np.asarray(_lindzen_saturation_stress(rho, U_proj, k_wave, N_full))
-    U_abs = np.clip(np.abs(np.asarray(U_proj)), 0.1, None)
-    tau_sat_np = np.clip(
-        0.5 * np.asarray(rho) * U_abs ** 3 * k_wave / np.asarray(N_full), 1e-10, None
-    )
-    assert np.allclose(tau_sat, tau_sat_np, rtol=1e-12, atol=0.0)
-    # floor discriminator: a near-zero-wind column is held at the 0.1 m/s floor, not driven to ~0
-    tau_floor = np.asarray(_lindzen_saturation_stress(rho, 0.0 * U_proj, k_wave, N_full))
-    tau_floor_np = np.clip(
-        0.5 * np.asarray(rho) * (0.1 ** 3) * k_wave / np.asarray(N_full), 1e-10, None
-    )
-    assert np.allclose(tau_floor, tau_floor_np, rtol=1e-12, atol=0.0)
-
-
-def test_lindzen_launch_stress_form_exact():
-    """FAITHFUL (exact to rtol 1e-12): ``_lindzen_launch_stress`` == clip(ρ·N·k·h²·U, 0)."""
-    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _columns(u_sfc=25.0, u_top=25.0)
-    N_full = brunt_vaisala_n_full(T, p_full, z_full)
-    rho_sfc, N_sfc = np.asarray(rho)[:, -1], np.asarray(N_full)[:, -1]
-    U_ll = np.abs(np.asarray(u)[:, -1])
-    k_wave, h_sq = LindzenConfig().k_wave, 600.0 ** 2
-    tau_0 = np.asarray(
-        _lindzen_launch_stress(rho[:, -1], N_full[:, -1], k_wave, h_sq, jnp.asarray(U_ll))
-    )
-    tau_0_np = np.clip(rho_sfc * N_sfc * k_wave * h_sq * U_ll, 0.0, None)
-    assert np.allclose(tau_0, tau_0_np, rtol=1e-12, atol=0.0)
-    assert np.all(tau_0 > 0.0)                                          # non-vacuity
-
-
-def test_lindzen_launch_stress_full_absorption():
-    """FAITHFUL launch: with a near-critical top (u_top→0) the column absorbs ~all of tau_0.
-
-    Approaching c=0 the saturation stress tau_sat ∝ |U|³ drops sharply (down to the 0.1 m/s U-floor,
-    where it plateaus — not exactly 0), forcing near-total breaking so the column deposits ~all of
-    the launched stress. Limiters OFF ⇒ Σ(ρ·|accel|·dz) ≈ tau_0 = ρ_sfc·N_sfc·k·h²·U_ll — pins the
-    McFarlane orographic launch magnitude.
-    """
-    cfg = _no_limiter_config()
-    h = 700.0
-    out, inp = _run(cfg, h_topo_col=jnp.full((3,), h), u_sfc=25.0, u_top=0.4)
-    u, v, T, p_full, p_half, z_full, z_half, rho, lat = inp
-    N_full = brunt_vaisala_n_full(T, p_full, z_full)
-    u_sfc, v_sfc = np.asarray(u)[:, -1], np.asarray(v)[:, -1]
-    U_ll = np.sqrt(u_sfc ** 2 + v_sfc ** 2 + 1e-10)
-    tau_0 = np.asarray(rho)[:, -1] * np.asarray(N_full)[:, -1] * cfg.k_wave * (h ** 2) * U_ll
-
-    dz = np.abs(np.asarray(z_half)[:, :-1] - np.asarray(z_half)[:, 1:])
-    dz = np.clip(dz, 1.0, None)
-    deposited = np.sum(np.asarray(rho) * np.abs(np.asarray(out.du_dt)) * dz, axis=1)
-    assert np.all(deposited > 1e-6)                                     # non-vacuity
-    # near-total absorption: within ~15% of the launched stress (residual reaches the top floor)
-    assert np.all(np.abs(deposited - tau_0) / tau_0 < 0.15)
-
-
-def test_lindzen_launch_scales_h_squared():
-    """CANARY: tau_0 ∝ h² (McFarlane orographic launch) — 2× h_topo ⇒ ~4× total deposited stress.
-
-    In the full-absorption regime the column deposits ~tau_0, so the h² launch law is observable as
-    a factor-4 in the total column drag.
-    """
-    cfg = _no_limiter_config()
-    kw = dict(u_sfc=25.0, u_top=0.4)
-    out_1x, inp = _run(cfg, h_topo_col=jnp.full((3,), 500.0), **kw)
-    out_2x, _ = _run(cfg, h_topo_col=jnp.full((3,), 1000.0), **kw)
-    dz = np.abs(np.asarray(inp[6])[:, :-1] - np.asarray(inp[6])[:, 1:])
-    dz = np.clip(dz, 1.0, None)
-    rho = np.asarray(inp[7])
-    d1 = np.sum(rho * np.abs(np.asarray(out_1x.du_dt)) * dz, axis=1)
-    d2 = np.sum(rho * np.abs(np.asarray(out_2x.du_dt)) * dz, axis=1)
-    assert np.all(d1 > 1e-6)
-    ratio = d2 / d1
-    assert np.all(np.abs(ratio - 4.0) < 0.4)                           # ~4× (h² law)
-
-
-# ===========================================================================
 # DESIGN: critical-level treatment (c = 0) + sign
 # ===========================================================================
 def test_lindzen_critical_level_absorption():
-    """DESIGN: where U_proj reverses (c=0 critical level), NO drag on the reversed flow.
-
-    A design choice (hard U_proj>0 mask + residual radiated/discarded), NOT a faithful deposition —
-    the concept of critical-level absorption is physical, but this implementation under-deposits.
-
-    u goes +20 (surface) -> −8 (top): the source-projected wind crosses zero mid-column. The hard
-    U_proj>0 mask makes du_dt EXACTLY zero in every reversed layer (no spurious acceleration).
+    """Critical level (c = 0): where the projected wind reverses, E3SM zeroes the
+    saturation stress and deposits the residual in that layer; nothing propagates
+    above it.  u goes +20 (surface) -> -8 (top).
     """
     out, inp = _run(LindzenConfig(), h_topo_col=jnp.full((3,), 800.0), u_sfc=20.0, u_top=-8.0)
     u, v = np.asarray(inp[0]), np.asarray(inp[1])
     du, dv = np.asarray(out.du_dt), np.asarray(out.dv_dt)
-    reversed_layer = u <= 0.0
+    reversed_layer = u < 0.0
     assert reversed_layer.any()                                        # non-vacuity: crit level
-    assert np.allclose(du[reversed_layer], 0.0, atol=1e-14)            # zero drag, reversed flow
-    # non-vacuity: real drag DOES act on the positive-U side (else zero-everywhere would pass)
+    # No drag well above the critical level (the wave was absorbed below).
+    k_crit = np.argmax(u[0] > 0.0)          # top-first: first positive level from the top
+    assert np.allclose(du[:, : k_crit - 1], 0.0, atol=1e-14)
     assert np.any(np.abs(du[u > 0.0]) > 1e-10)
-    # and the applied drag is a vector sink (u*du + v*dv <= 0) everywhere
-    proj = u * du + v * dv
-    assert np.all(proj <= 1e-14)
+    # The applied drag is a vector sink (u*du + v*dv <= 0) everywhere.
+    assert np.all(u * du + v * dv <= 1e-14)
 
 
 def test_lindzen_sign_and_sink():
@@ -254,47 +142,29 @@ def test_lindzen_sign_and_sink():
 # KE->heat closure = the pointwise energy conservation (c=0 wave) + rest state
 # ===========================================================================
 def test_lindzen_energy_closure_ke_to_heat():
-    """c_pd·Σρ·dT_dt·dz == eps_gwd ≥ 0 — the exact energy closure (conserves=["energy"]).
-
-    ``dT_dt`` is computed FROM the final tendency, so the identity holds BY CONSTRUCTION; for a
-    c=0 wave (zero vertical wave-energy flux, F_E = c·F_momentum = 0) that by-construction closure
-    IS the exact resolved KE+internal energy conservation the contract declares. This is a
-    regression pin of that closure against accidental desync, not an independent re-derivation.
+    """Discrete closure (E3SM gw_drag.F90:908-913): at every level
+    c_pd*dT_dt == -[KE(u + dt*du) - KE(u)]/dt, so column enthalpy gain equals the
+    resolved KE lost over the step; and it is non-negative (a sink).
     """
-    out, inp = _run(LindzenConfig(), h_topo_col=jnp.full((3,), 800.0), u_sfc=25.0, u_top=6.0)
-    rho, z_half = np.asarray(inp[7]), np.asarray(inp[6])
-    dz = np.clip(np.abs(z_half[:, :-1] - z_half[:, 1:]), 1.0, None)
-    col_heat = constants.c_pd * np.sum(rho * np.asarray(out.dT_dt) * dz, axis=1)
-    eps = np.asarray(out.eps_gwd)
-    assert np.any(eps > 1e-12)
-    assert np.allclose(col_heat, eps, rtol=1e-9, atol=1e-12)
+    dt = 300.0
+    out, inp = _run(LindzenConfig(), dt=dt, h_topo_col=jnp.full((3,), 800.0),
+                    u_sfc=25.0, u_top=6.0, v0=3.0)
+    u, v = np.asarray(inp[0]), np.asarray(inp[1])
+    du, dv = np.asarray(out.du_dt), np.asarray(out.dv_dt)
+    ke_loss = -(0.5 * ((u + dt * du) ** 2 + (v + dt * dv) ** 2) - 0.5 * (u ** 2 + v ** 2)) / dt
+    heat = constants.c_pd * np.asarray(out.dT_dt)
+    assert np.any(heat > 1e-9)
+    np.testing.assert_allclose(heat, ke_loss, rtol=1e-9, atol=1e-15)
+    assert np.all(heat >= -1e-15)
 
 
 def test_lindzen_conserves_energy():
-    """``conserves == ["energy"]`` — a STATIONARY orographic wave (c=0) carries ZERO vertical
-    wave-energy flux (F_E = c·F_momentum = 0, Eliassen–Palm), so all mean-flow KE removed is
-    returned LOCALLY as heat and resolved KE+internal energy is conserved pointwise (see the
-    KE→heat closure test above).
-
-    The discriminator is "does the launched wave carry vertical energy flux?": c=0 orographic
-    (this scheme, ``mcfarlane`` #1045, ``rayleigh`` direct-drag) ⇒ ``["energy"]``; c≠0 launched
-    spectra (``hines``, ``prognostic_spectral``) whose waves carry energy the limiter discards ⇒
-    ``["none"]``. MOMENTUM is not conserved (external source; critical-level radiation + limiter)
-    — that breaks MOMENTUM, not energy, closure. (Corrects the prior ``["none"]`` ruling, which
-    over-applied the hines c≠0 precedent to this c=0 scheme — codex #1045.)
+    """``conserves == ["energy"]``: a stationary (c = 0) wave carries no wave-energy
+    flux and the discrete closure returns the resolved KE lost as local heat (see the
+    closure test above).  Momentum is not conserved (sink to the mountain, leak
+    through the model top where tau(top) != 0, as in E3SM).
     """
     assert __physics_contract__["conserves"] == ["energy"]
-
-
-def test_lindzen_frictional_heating_form():
-    """DESIGN (regression pin): dT_dt == −(u·du_dt + v·dv_dt)/c_pd."""
-    out, inp = _run(
-        LindzenConfig(), h_topo_col=jnp.full((3,), 800.0), u_sfc=25.0, u_top=6.0, v0=3.0
-    )
-    u, v = np.asarray(inp[0]), np.asarray(inp[1])
-    assert np.any(np.abs(np.asarray(out.dT_dt)) > 1e-12)
-    dT_exp = -(u * np.asarray(out.du_dt) + v * np.asarray(out.dv_dt)) / constants.c_pd
-    assert np.allclose(np.asarray(out.dT_dt), dT_exp, rtol=1e-12, atol=0.0)
 
 
 def test_lindzen_rest_state_zero_orography():
@@ -306,45 +176,6 @@ def test_lindzen_rest_state_zero_orography():
     assert np.allclose(np.asarray(out.eps_gwd), 0.0, atol=1e-12)
 
 
-# ===========================================================================
-# CANARIES: saturation threshold + departures
-# ===========================================================================
-def test_lindzen_fcrit2_gates_breaking():
-    """CANARY: fcrit2 gates saturation breaking — fcrit2 → ∞ ⇒ the wave never breaks.
-
-    In a column with NO critical level (u > 0 throughout), the only stress sink is saturation
-    breaking. fcrit2 = 1 deposits real drag; a huge fcrit2 (break only above
-    fcrit2·tau_sat, never reached) transmits the wave and deposits ≈ 0 — proving the
-    saturation stress-ratio threshold, not the launch, gates the deposition.
-    """
-    kw = dict(h_topo_col=jnp.full((3,), 700.0), u_sfc=25.0, u_top=8.0)
-    out_on, inp = _run(_no_limiter_config(fcrit2=1.0), **kw)
-    out_off, _ = _run(_no_limiter_config(fcrit2=1.0e6), **kw)
-    dz = np.clip(np.abs(np.asarray(inp[6])[:, :-1] - np.asarray(inp[6])[:, 1:]), 1.0, None)
-    rho = np.asarray(inp[7])
-    d_on = np.sum(rho * np.abs(np.asarray(out_on.du_dt)) * dz, axis=1)
-    d_off = np.sum(rho * np.abs(np.asarray(out_off.du_dt)) * dz, axis=1)
-    assert np.all(d_on > 1e-4)                                         # breaking deposits real drag
-    assert np.all(d_off < 1e-6 * d_on)                                # unreachable ⇒ ~no drag
-
-
-def test_lindzen_no_sghmax_cap_departure():
-    """DEPARTURE canary: the launch has NO McFarlane sghmax Froude cap ⇒ tau_0 grows as h².
-
-    10× h_topo ⇒ ~100× total deposited stress (unbounded in h), unlike E3SM's capped source.
-    """
-    cfg = _no_limiter_config()
-    kw = dict(u_sfc=25.0, u_top=0.4)
-    out_1x, inp = _run(cfg, h_topo_col=jnp.full((3,), 200.0), **kw)
-    out_10x, _ = _run(cfg, h_topo_col=jnp.full((3,), 2000.0), **kw)
-    dz = np.clip(np.abs(np.asarray(inp[6])[:, :-1] - np.asarray(inp[6])[:, 1:]), 1.0, None)
-    rho = np.asarray(inp[7])
-    d1 = np.sum(rho * np.abs(np.asarray(out_1x.du_dt)) * dz, axis=1)
-    d10 = np.sum(rho * np.abs(np.asarray(out_10x.du_dt)) * dz, axis=1)
-    assert np.all(d1 > 1e-6)
-    assert np.all(d10 / d1 > 50.0)                                     # ~100x (h^2, no cap)
-
-
 @pytest.mark.parametrize(
     "neutral,label",
     [(False, "stable + zero-top-wind (U->0 trap)"),
@@ -353,10 +184,9 @@ def test_lindzen_no_sghmax_cap_departure():
 def test_lindzen_ad_safe_at_traps(neutral, label):
     """NUMERICS: grad of column drag wrt a wind-scale is finite at the small-N and U→0 traps.
 
-    The adiabatic column drives N down to its brunt floor (sqrt(1e-8)=1e-4), a large-but-finite
-    1/N cotangent (the ordinary safe_divide branch, since 1e-4 > eps=1e-6); the stable column with
-    u_top=0 exercises the |U_proj| floor / c=0 critical-level trap. (The masked safe_divide branch,
-    N < eps, is only reachable by a direct helper call — see the next test.)
+    The adiabatic column drives N down to the E3SM gw_prof floor (sqrt(n2min) = 1e-4), a
+    large-but-finite 1/N cotangent; the stable column with u_top = 0 exercises the c = 0
+    critical-level trap.
     """
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _columns(
         u_sfc=20.0, u_top=0.0, neutral=neutral
@@ -376,26 +206,6 @@ def test_lindzen_ad_safe_at_traps(neutral, label):
 
     g = jax.grad(col_drag)(1.0)
     assert np.isfinite(float(g))
-
-
-def test_lindzen_saturation_stress_ad_safe_below_eps():
-    """NUMERICS: _lindzen_saturation_stress is AD-safe when N < the safe_divide eps (1e-6).
-
-    In-scheme N is floored at 1e-4 by brunt_vaisala, so this MASKED branch is only reachable by a
-    direct call. With N=1e-8 (< eps) safe_divide returns fill=0, so tau_sat collapses to the 1e-10
-    floor (NOT the raw 0.5·ρ·U³·k/1e-8 blow-up) and the grad wrt U is finite — proving the guard,
-    not the raw 1/N, runs.
-    """
-    rho = jnp.full((2, 4), 1.0)
-    U_proj = jnp.full((2, 4), 15.0)
-    N_tiny = jnp.full((2, 4), 1e-8)                       # below safe_divide eps=1e-6 -> masked
-    k_wave = LindzenConfig().k_wave
-    val = np.asarray(_lindzen_saturation_stress(rho, U_proj, k_wave, N_tiny))
-    assert np.allclose(val, 1e-10)                        # masked (fill=0) -> floor, not blow-up
-
-    def s(scale):
-        return jnp.sum(_lindzen_saturation_stress(rho, U_proj * scale, k_wave, N_tiny))
-    assert np.isfinite(float(jax.grad(s)(1.0)))
 
 
 def test_dispatch_unknown_gwd_raises():

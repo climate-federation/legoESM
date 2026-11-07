@@ -1,0 +1,9 @@
+--- zdftke.F90.nemo
++++ zdftke.F90
+@@ -61,6 +61,7 @@
+    PUBLIC   zdf_tke        ! routine called in step module
+    PUBLIC   zdf_tke_init   ! routine called in opa module
+    PUBLIC   tke_rst        ! routine called in step module
++   PUBLIC   dissl          ! round-46 WRITE-only restart-memory recorder
+ 
+    !                      !!** Namelist  namzdf_tke  **

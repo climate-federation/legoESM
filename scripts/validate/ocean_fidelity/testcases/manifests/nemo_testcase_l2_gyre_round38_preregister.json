@@ -1,0 +1,79 @@
+{
+ "format": "nemo-testcase-l2-gyre-round38-preregister-v1",
+ "date": "2026-09-06",
+ "starting_tip": "09fafdb0fd42",
+ "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+ "record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round37_oracle_trazdf_matrix/oracle_trazdf_matrix_kt00000001.bin",
+ "the_question": "GYRE's kt=1 stage-3 tracer residual is 3.1956659540810506e-11 K on T. Round 37 exonerated the ordered solve (0/21120 given NEMO's matrix and RHS) and the right-hand side (substituting NEMO's own moves the output 5.786374251651969e-16 K, 4.3e-4 of the residual). The claim review's bound ||M^-1||_inf = 0.09996 over every wet column says the residual needs a RELATIVE matrix difference of about 1.4e-12, i.e. roughly 1e-13 m2/s of avt. So the owner is the MATRIX legoESM BUILDS -- its OPERANDS at the model's own call site. That arm does not exist.",
+
+ "what_this_round_delivers": [
+  "the matrix-operand arm: every operand legoESM's tracer matrix reads, captured LIVE through the model's own stage-3 call site, scored against the round-37 record's corresponding NEMO array on the same 21120-cell box",
+  "the FMA-flag finding: whether the installed jaxlib exposes a GLOBAL CPU flag that disables the fused-multiply-add contraction the round-37 per-site fix works around",
+  "a PLANT proving dry-cell diagonal values never reach a wet cell's solved value on any card",
+  "the disposition of tracer_combine, as an ASKED row with the grep behind it",
+  "the rounds-33/34 bookkeeping list"
+ ],
+ "what_this_round_may_not_do": [
+  "run makenemo, mpirun or any NEMO executable; modify anything under the NEMO src/ tree",
+  "change legoESM's dry-cell thickness convention, or any default, scheme selection or config value",
+  "delete tracer_combine, or wire it: both are user decisions and go in the ASKED table"
+ ],
+
+ "the_instrument": {
+  "what": "TWO capture points, both monkeypatches in the GATE (no model edit, no new hook), each wrapping a function the model looks up at call time and each emitting jax.debug.callback of its operands before delegating to the real function.",
+  "point_1": "legoesm.ocean.physics.vertical_mixing.implicit_vertical_diffusion_ocean_tracer_pair_dispatch -- the function ocean_model_latlon_cgrid.py:10237 calls under a FUNCTION-SCOPE import (:10228), so a module-attribute patch is picked up at trace time. Captures K (= K_v_cell), dz_after (= dz_cell), e3w_now (= dz_half_cell), wet (= _literal_t_wet), dt, and the two content RHS arrays.",
+  "point_2": "LatLonCGridOceanModel._apply_implicit_vertical_mixing -- captures the two PARTS of the matrix diffusivity before they are summed at :9797-9802: K_v_phys (the closure output, NEMO's avt) and K33_iso (the isoneutral vertical fold, NEMO's ah_wslp2). On GYRE, zco and ddm off, K_v_cell IS K_v_phys + K33_iso and nothing else (:9827/:9830 are the partial-cell and DDM arms).",
+  "instrument_control_run_before_any_number_is_quoted": "the model's returned T and S with the capture installed must be BIT-IDENTICAL to the same step without it. A debug callback gives an operand a SECOND CONSUMER, and round 37 measured that a second use of a product is exactly what stops XLA contracting it -- so a capture that changes the answer is a capture that changed the arithmetic it exists to observe. If the two differ the arm reports PERTURBED and no operand number is quoted.",
+  "second_control": "a --plant that perturbs one captured operand by one ulp must turn the arm red and exit non-zero."
+ },
+
+ "the_mapping": {
+  "box": "the record's interior i=[3,34] j=[3,24] (halo 2) on the pinned 36x26x31 domain; NEMO's _box gives (i,j,k) and the model's array is (lat,lon,level), so the oracle side is _box(...).transpose(1,0,2). 32*22*30 = 21120 scored cells, the same box every other arm of this gate scores.",
+  "operands": [
+   {"lego": "K_v_cell (the dispatch's K)", "nemo": "zwt_mix[..., 1:jpkm1] where zwt_mix = avt + ah_wslp2 (trazdf.f90:172-174 plus :419)", "n": 20416},
+   {"lego": "K_v_phys (part)", "nemo": "avt[..., 1:jpkm1]", "n": 20416},
+   {"lego": "K33_iso (part)", "nemo": "ah_wslp2[..., 1:jpkm1]", "n": 20416},
+   {"lego": "dz_cell (the dispatch's dz_after)", "nemo": "e3t_Kaa[..., :jpkm1]", "n": 21120},
+   {"lego": "dz_half_cell (the dispatch's e3w_now)", "nemo": "e3w_Kmm[..., 1:jpkm1]", "n": 20416},
+   {"lego": "_literal_t_wet (the dispatch's wet)", "nemo": "tmask[..., :jpkm1]", "n": 21120},
+   {"lego": "dt", "nemo": "rDt", "n": 1},
+   {"lego": "nemo_tracer_tridiagonal(live operands) -> zwi/zwd/zws", "nemo": "the record's dumped zwi/zwd/zws", "n": 21120}
+  ],
+  "why_e3t_Kbb_and_e3t_Kmm_are_not_here": "they are RIGHT-HAND-SIDE operands, not matrix operands. Round 37 measured the model's own content RHS against NEMO's at 6.821210263296962e-13 K.m on T and proved that difference CAUSALLY INERT by substitution (5.79e-16 K). This arm scores the matrix; the RHS arm exists and is exonerated."
+ },
+
+ "predictions": {
+  "PR1": {
+   "claim": "AT LEAST ONE matrix operand differs from NEMO's on wet cells. The residual cannot be explained by an operand set that is bit-exact.",
+   "falsifier": "every operand row is 0 cells unequal on wet cells AND the assembled zwi/zwd/zws from the LIVE operands are 0 cells unequal on wet cells. That REFUTES 'the owner is in the matrix' and puts the owner DOWNSTREAM of the solve -- the tmask multiply, the division by e3t_Kaa that turns content back into concentration, or the clamp -- which becomes the next round's frame."
+  },
+  "PR2": {
+   "claim": "THE FIRST OPERAND THAT DIFFERS, in the order NEMO's statements read them (trazdf.f90:443-444 read zwt=avt+ah_wslp2, rDt and e3w before :445 reads e3t), IS THE MATRIX DIFFUSIVITY K -- and within K it is the CLOSURE PART, K_v_phys against NEMO's avt, not the isoneutral fold K33_iso against ah_wslp2. Named upstream module: the TKE closure zdf_tke and the Prandtl/avt derivation in zdfphy.",
+   "why": "avt on GYRE is a LIVE prognostic-TKE closure output -- a chain of exponentials, square roots and a length-scale limiter through two independent codes -- while e3t/e3w are algebraic in eta and the mask is exact. It is the operand two codes are least likely to agree on to the last bit.",
+   "falsifier": "K is 0 cells unequal on wet cells while a thickness or the mask is not; or the differing part is K33_iso and K_v_phys is bit-exact, which would name ldfslp/traldf_iso instead."
+  },
+  "PR3": {
+   "claim": "The relative size of the first differing operand is CONSISTENT with the residual through the claim review's bound: max |dK|/|K| over wet faces lies in [1e-14, 1e-10]. Round 37's arithmetic says the residual needs about 1.4e-12 relative in the matrix.",
+   "falsifier": "the largest relative operand difference is BELOW 1e-15 -- too small to move the output by 3.196e-11 K through ||M^-1||_inf = 0.09996 -- which would mean the operands are at the bar and the residual is downstream; or it is ABOVE 1e-8, which would mean the operand difference is far too LARGE to be a rounding chain and names a structural mismatch instead."
+  },
+  "PR4": {
+   "claim": "The capture is INERT: the model's T and S are bit-identical with and without it.",
+   "falsifier": "any bit moves, in which case every operand number this arm produces is reported PERTURBED and not quoted as a measurement."
+  },
+  "PR5": {
+   "claim": "DRY-CELL DIAGONAL VALUES ARE UNCONSUMED SLOTS. On all three cards, multiplying every DRY diagonal entry by 1e3 before the solve leaves every WET cell of the solved column BIT-IDENTICAL.",
+   "falsifier": "any wet cell moves on any card, in which case the dry-cell zwd row stays DEBT and is not admissible as an unconsumed-slot identity."
+  },
+  "PR6": {
+   "claim": "The installed jaxlib (0.10.0) exposes NO global XLA CPU flag that disables the fused-multiply-add contraction. Its 404 xla_* flags contain no fma or contraction flag; the only candidate is xla_backend_extra_options carrying LLVM's -fp-contract=off.",
+   "falsifier": "some flag setting drives the round-37 gate's sweep rows to 0/21120 with the per-site rounding REMOVED. If one does, it is measured on kt=1..10 of all three cards and recorded -- the default is NOT switched, because that is a user decision."
+  }
+ },
+
+ "rule12_note": "This round's arm is READ-ONLY: it captures and scores, it changes no operator. If it lands any model change at all, that change carries its own per-card discharge. The dry-cell PLANT is likewise a control, not a change: legoESM's dry-diagonal substitution stays exactly as round 37 left it, registered, and this round only tests whether its value can reach a wet answer.",
+ "asked_items_this_round_may_not_decide": [
+  "tracer_combine: delete or wire (a lever nothing selects)",
+  "the dry-cell thickness convention (legoESM 0.0 vs NEMO's positive reference e3t below the seafloor)",
+  "whether any XLA flag becomes the default"
+ ]
+}

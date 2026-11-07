@@ -5,8 +5,8 @@ the eccentricity series for the true solar longitude), the Cooper (1969)
 single-harmonic declination, the classical spherical-astronomy zenith/hour-angle
 identity, and the Hartmann/Frierson exact diurnal-mean-insolation integral.  The
 Berger series COEFFICIENTS are those reproduced in CESM ``shr_orb_mod`` and
-climlab ``solar_longitude`` (the calendar day_VE=80 follows climlab; see
-departure #4).  Each closed form is pinned to round-off (rel 1e-12) against
+climlab ``solar_longitude``, with CESM's vernal-equinox calendar day 80.5
+(departure #4).  Each closed form is pinned to round-off (rel 1e-12) against
 an INDEPENDENT numpy reimplementation whose coefficients are typed from the
 reference (NOT read back from ``legoesm...radiation.solar`` — non-circular):
 
@@ -47,10 +47,10 @@ DEPARTURES from the closed form (all deliberate, all tested):
      branches are pinned to their OWN closed form and shown to differ.
   3. cos_zenith clips to [−1,1] (night = sun below horizon); the interior pins
      use configurations with |cos θ_z| < 1 so the clip is inert.
-  4. **Vernal-equinox calendar day day_VE = 80** (``_SOLSTICE_OFFSET_DAYS``)
-     follows climlab's convention; CESM/CLM5 document ``d_ve = 80.5`` (a ~½-day
-     offset of the whole insolation calendar).  The oracle uses 80 to match the
-     module (a convention choice, not a coefficient error).
+  4. **Vernal-equinox calendar day**: the ORBITAL longitude uses CESM2.1
+     shr_orb_decl's ``ve = 80.5`` (``_VERNAL_EQUINOX_CALDAY_SHR_ORB``; matched to
+     the compiled Fortran in tests/atmosphere/test_rad_boundary_oracle.py); the
+     CIRCULAR Cooper declination keeps day 80 (``_SOLSTICE_OFFSET_DAYS``).
 """
 
 from __future__ import annotations
@@ -80,7 +80,8 @@ jax.config.update("jax_enable_x64", True)
 
 # --- Berger (1978) / classical orbital series coefficients (typed from the
 #     reference, canaried against the module's calendar constants below). ---
-_O_DAY_VE = 80.0            # solar._SOLSTICE_OFFSET_DAYS (vernal-equinox day)
+_O_DAY_VE = 80.0            # solar._SOLSTICE_OFFSET_DAYS (circular-orbit equinox day)
+_O_DAY_VE_ORBITAL = 80.5    # CESM shr_orb_decl ve (orbital longitude)
 _O_DAYS_PER_YEAR = 365.0    # solar._DAYS_PER_YEAR
 _O_EOC1_E = 2.0             # equation of centre: coeff of e   in sin(M)
 _O_EOC1_E3 = -1.0 / 4.0     #                     coeff of e³  in sin(M)
@@ -115,7 +116,7 @@ def _lambda_oracle(day, e, w_deg):
         - (e ** 2 / 4.0) * (0.5 + beta) * math.sin(-2.0 * w)
         + (e ** 3 / 8.0) * (1.0 / 3.0 + beta) * math.sin(-3.0 * w)
     )
-    lm = lm0 + (day - _O_DAY_VE) * (2.0 * math.pi / _O_DAYS_PER_YEAR)
+    lm = lm0 + (day - _O_DAY_VE_ORBITAL) * (2.0 * math.pi / _O_DAYS_PER_YEAR)
     m = lm - w
     return (
         lm
@@ -172,6 +173,7 @@ def _orbit(o):
 
 def test_module_calendar_constants_match_oracle():
     assert solar._SOLSTICE_OFFSET_DAYS == _O_DAY_VE
+    assert solar._VERNAL_EQUINOX_CALDAY_SHR_ORB == _O_DAY_VE_ORBITAL
     assert solar._DAYS_PER_YEAR == _O_DAYS_PER_YEAR
     assert solar._EARTH_OBLIQUITY_DEG == _O_OBLIQUITY_DEFAULT_DEG
     assert solar._POLE_THRESHOLD == pytest.approx(1.0e-7, rel=1e-12)
@@ -211,7 +213,7 @@ def test_lambda_equation_of_centre_coefficients_are_non_vacuous():
             - (e ** 2 / 4.0) * (0.5 + beta) * math.sin(-2.0 * wv)
             + (e ** 3 / 8.0) * (1.0 / 3.0 + beta) * math.sin(-3.0 * wv)
         )
-        lm = lm0 + (day - _O_DAY_VE) * (2.0 * math.pi / _O_DAYS_PER_YEAR)
+        lm = lm0 + (day - _O_DAY_VE_ORBITAL) * (2.0 * math.pi / _O_DAYS_PER_YEAR)
         m = lm - wv
         return (lm + (c1e * e + c1e3 * e ** 3) * math.sin(m)
                 + c2 * e ** 2 * math.sin(2.0 * m) + c3 * e ** 3 * math.sin(3.0 * m))
@@ -226,7 +228,7 @@ def test_lambda_reduces_to_uniform_motion_at_zero_eccentricity():
     for day in _DAYS:
         got = float(_orbital_solar_longitude(day, _orbit((0.0, 23.439, 100.0))))
         assert got == pytest.approx(
-            (day - _O_DAY_VE) * (2.0 * math.pi / _O_DAYS_PER_YEAR), rel=1e-12, abs=1e-12)
+            (day - _O_DAY_VE_ORBITAL) * (2.0 * math.pi / _O_DAYS_PER_YEAR), rel=1e-12, abs=1e-12)
 
 
 # ===================== Earth-Sun distance factor (a/r)² =====================

@@ -42,7 +42,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 
 import numpy as np
@@ -51,14 +50,8 @@ import numpy as np
 
 
 def _git_sha_of(path: str) -> str:
-    d = os.path.dirname(os.path.abspath(path))
-    try:
-        out = subprocess.run(
-            ["git", "-C", d, "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=30)
-        return out.stdout.strip() or "UNKNOWN"
-    except Exception:
-        return "UNKNOWN"
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(path).commit or "UNKNOWN"
 
 
 def _count_nonfinite(name, arr, ledger):
@@ -97,6 +90,11 @@ def build_morrison_config(resolved: dict):
             resolved.get("homogeneous_ice_nucleation", False)),
         morrison_scalars=scalars,
         morrison_flavor=resolved.get("morrison_flavor"),
+        # The run's recorded law; a recorded unset (None) resolves by the
+        # recorded flavour.  A manifest without the key predates the field and
+        # replays at kk2000, as this probe always did.
+        morrison_warm_rain_scheme=resolved.get("morrison_warm_rain_scheme",
+                                               "kk2000"),
     )
 
 

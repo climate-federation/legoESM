@@ -1,0 +1,93 @@
+{
+  "format": "nemo-testcase-l2-gyre-round32-preregister-v1",
+  "date": "2026-09-06",
+  "starting_tip": "7fe79083eaef",
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "oracle_roots": {
+    "GYRE-zco": [
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round29_oracle_v2_zdf_matrix"
+    ],
+    "LOCK_EXCHANGE-zco": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+    "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10",
+    "ORCA2-zps": "detached probe worktree /tmp/codex-orca2-r27-probe; data /data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_icebergs_off_phase2v_tke_a_10step_np2"
+  },
+
+  "read_before_this_preregistration_no_prediction_carried": {
+    "r0_1": "stprk3_stg.F90:430 is the CALL dyn_zdf, guarded IF( kstg == 3 ). The barotropic correction is BELOW it: stprk3_stg.F90:440-441 builds zub/zvb from uu_b(Kaa) minus SUM(e3u_0*uu(Kaa))*r1_hu_0, and :444-445 adds zub*umask to every level 1..jpkm1. Its banner at :433 reads 'All stages: correct the barotropic component', so it runs at stages 1 and 2 as well -- where there is no dyn_zdf and no ordering question.",
+    "r0_2": "dynzdf.F90:118 selects the arm: IF( ln_dynadv_vec .OR. lk_linssh ) applies the update ON VELOCITY at :121-122 with no key_qco (1+r3u) ratios; the ELSE arm at :124-138 is the thickness-weighted one. GYRE's deck resolves ln_dynadv_vec = T (round19_oracle_v2_external/ocean.output:798, 'Vector form: 2nd order centered scheme  ln_dynadv_vec  =  T', with ln_dynadv_up3 = F at :801), so NEMO takes the :121-122 arm on this card.",
+    "r0_3": "dynzdf.F90:148 guards the pair IF( ln_drgimp .AND. ln_dynspg_ts ). Under it, :150-151 subtracts the PROGNOSTIC uu_b(ji,jj,Kaa)/vv_b(ji,jj,Kaa) from every level, and :156-159 adds zDt_2*(rCdU_bot(i+1,j)+rCdU_bot(i,j))*uu_b(Kaa)/e3u(iku,Kaa) at mbku/mbkv only. zDt_2 = rDt*0.5 (dynzdf.F90:97).",
+    "r0_4": "dynzdf.F90:296 puts the same drag on the deepest diagonal: zwd(ji,iku) = zwd(ji,iku) - zDt_2*(rCdU_bot(i+1,j)+rCdU_bot(i,j))/e3u(iku,Kaa). So the implicit matrix's deepest diagonal is 1 + c with c the SAME factor the round-31 regression used as its predictor.",
+    "r0_5": "legoESM applies the stprk3_stg.F90:440-445 correction at RK3 stage 3 BEFORE the implicit solve (ocean_model_latlon_cgrid.py:6300-6301, through _replace_stage_mean whose target is the prognostic uu_b) and re-imposes the same depth mean AFTER it (:7876-7891, nemo_stage_mean_imposition). Between them, ocean_model_latlon_cgrid.py:9867-9875 subtracts a depth mean REBUILT from the solve input (zdf_baroclinic_only) rather than the prognostic uu_b, and :9991-9996 adds the dynzdf.F90:156-159 bottom-stress term with that same rebuilt mean.",
+    "r0_6": "Composing r0_5: legoESM hands the solve A - mean(A) where NEMO hands it A - uu_b, with A the explicit stage update. Both sides then force the post-solve depth mean to uu_b, so the whole defect is the column constant uu_b - mean(A) inside the solve. That composition is READ OFF THE CODE here and is what item 1 tests."
+  },
+
+  "item1_ordering_fix": {
+    "claim_under_test": "GYRE's kt=1 stage-3 velocity error is owned by applying stprk3_stg.F90:440-445 twice -- once before dyn_zdf and once after -- while dynzdf.F90:150-151 removes a rebuilt depth mean instead of the prognostic uu_b.",
+    "landing_rule": "ONE shared WS-RK3 momentum program, no knob, no card-specific branch, no second implementation. Three statements change and they are one change:",
+    "statements_changed": [
+      "ocean_model_latlon_cgrid.py stage 3: the pre-solve call to _replace_stage_mean on u3_raw/v3_raw is removed; stage 3 hands the solve the masked explicit update, because stprk3_stg.F90:437-446 runs after stprk3_stg.F90:430, not before it. Stages 1 and 2 are untouched -- NEMO corrects there too and there is no solve in between.",
+      "ocean_model_latlon_cgrid.py zdf_baroclinic_only: the removed quantity becomes the prognostic uu_b/vv_b the state carries, matching dynzdf.F90:150-151, and only a state with no barotropic pair at all falls back to the rebuilt depth mean. The same operand then feeds the dynzdf.F90:156-159 bottom-stress term, which NEMO also writes on uu_b(Kaa).",
+      "ocean_model_latlon_cgrid.py nemo_stage_mean_imposition: after the solve the stage program applies its OWN correction closure -- target uu_b(Kaa), weights e3u_0/hu_0 -- i.e. stprk3_stg.F90:440,444-445 verbatim, instead of restoring a depth mean captured before the solve with a different weighting rule."
+    ],
+    "predictions": [
+      "P1a CONFIRM: kt=1 stage-3 returned u error at model level 30 falls from 9.482370e-07 to below 1.0e-08, and levels 1-29 from 7.131145e-08 to below 7.6e-10 -- the same f = 0.069921016765114 rank-1 ratio, because whatever survives is still mapped by stprk3_stg.F90:440.",
+      "P1b REFUTE: level 30 stays above 1.0e-07. Then the ordering is not the owner, or the transcription is wrong, and the fix does not land.",
+      "P1c NEITHER: level 30 between 1.0e-08 and 1.0e-07. Report the profile, name no owner, do not claim the fix closed it.",
+      "P1d the model's exposed pre-implicit vector IS dynzdf.F90:121-122 (boundary A) after this change, because legoESM's own barotropic removal happens inside the solver, below the exposure point. It scores below 1.0e-08 against the round-29 record's boundary A on u and v. It is 4.269765e-04 / 4.029444e-04 today only because the model's vector is a different quantity there. REFUTE at above 1.0e-06.",
+      "P1e NAMED RESIDUAL, not a target: legoESM's stage-3 explicit update carries the key_qco (1+r3u) ratios while NEMO's deck resolves ln_dynadv_vec = T and so takes dynzdf.F90:121-122, which carries none. At kt=1 from rest those ratios differ from 1 by O(ssh/H) ~ 1e-10 on a 4000 m column, so this is expected to sit near 1e-13 x the field and is registered, not fixed, this round."
+    ],
+    "instrument": "the round-31 walk gate's existing depth_profile and pre_solve modes, run BEFORE and AFTER on the same oracle root, plus the GYRE phase-3 trajectory gate --trajectory-only --max-step 10. No new instrument is built for item 1 (RULE 4: searched scripts/validate/ocean_fidelity/testcases, found both modes already plant-controlled).",
+    "before_numbers_pinned_now": {
+      "kt1_stage3_u_level30_max_abs": 9.48237e-07,
+      "kt1_stage3_u_levels1_29_max_abs": 7.131145e-08,
+      "kt1_stage3_v_max_abs": 8.949e-07,
+      "pre_solve_boundary_A_u": 0.0004269765124169735,
+      "pre_solve_boundary_A_v": 0.0004029443737139659,
+      "trajectory_first_over_bar": {"kt": 2, "fields": ["T", "S", "u", "v"], "u": 9.48236979236058e-07, "v": 8.94866292055948e-07}
+    }
+  },
+
+  "item2_rule12_per_card": {
+    "rule": "Rule 12: the change lands only if the changed operator is bit-exact given NEMO's own inputs on EVERY card that executes it, discharged explicitly per card. No prediction is registered for what the tanks and ORCA2 resolve -- that is measured, and predicting it would be reasoning about a config instead of printing it.",
+    "cards_to_discharge": ["GYRE-zco", "LOCK_EXCHANGE-zco", "OVERFLOW-zps", "ORCA2-zps"],
+    "also_executes_the_operator": "the DINO card carries zdf_baroclinic_only as well; it is outside this campaign's four cards and no DINO gate runs this round, so its discharge is registered OPEN rather than claimed.",
+    "landing_rule": "if Rule 12 is not discharged on a card that executes the operator, the commit stays on the branch and the receipt says NOT LANDED for that card. Never a per-card switch, never a revert for a gap in evidence."
+  },
+
+  "item3_the_0p27_percent": {
+    "claim_under_test": "the 0.27 per cent by which round 31's ordering regression slope sits below 1.0 is the implicit solve's own response to the wrongly ordered column constant, not a second residual.",
+    "mechanism_written_before_measuring": "the regression predictor is kappa*c with c = zDt_2*(rCdU_bot(i+1,j)+rCdU_bot(i,j))/e3u(iku,Kaa). dynzdf.F90:296 puts that same c on the deepest diagonal, so the matrix returns kappa*c divided by (1+c) plus the vertical-diffusion coupling, never kappa*c itself. The fitted slope through the origin must therefore sit BELOW 1 by O(c), and c's maximum on this card is 2.3943348583166887e-03.",
+    "measurement": "offline, no model run: from the round-29 record alone, the least-squares slope through the origin of the predictor kappa*c against the model kappa*c/(1+c), i.e. sum((kappa*c)^2/(1+c)) / sum((kappa*c)^2) over the same 580 u and 570 v columns round 31 regressed.",
+    "observed_shortfall_to_beat": {"u": 2.7399377300620900e-03, "v": 2.7399694931656800e-03},
+    "predictions": [
+      "P3a CONFIRM: the predicted shortfall 1 - slope_model lands within +/-5 per cent of the observed one, i.e. in 2.6029e-03 .. 2.8769e-03 on u. Then the 0.27 per cent is the double application's own image and there is NO second residual.",
+      "P3b REFUTE: the predicted shortfall falls outside +/-20 per cent of the observed one, i.e. outside 2.1920e-03 .. 3.2879e-03 on u. Then it is a SECOND residual; the candidate operands to discriminate are the bottom-drag factor's own operands (which velocity, e3u vs e3uw, which level, which time index, under the compiled ppsrc branch for ln_drgimp), the surface-stress boundary condition at dynzdf.F90:329-330, and the thickness used inside the solve.",
+      "P3c between 5 and 20 per cent: reported, no verdict either way.",
+      "P3d INDEPENDENT ARM, must agree with P3a/P3b: after the fix, a surviving rank-1 residual of about 2.56e-09 (0.27 per cent of 9.482e-07) carrying the same f signature also means SECOND RESIDUAL, whatever the offline arm says. If the two arms disagree, neither is recorded and the disagreement is the finding."
+    ],
+    "instrument": "one new mode, slope_model, added to the existing round-31 walk gate rather than a new script (RULE 4: it already owns read_zdf_matrix, ordering_constant, the stamp and the plant controls). It ships a plant control that must exit non-zero."
+  },
+
+  "item4_worsened_rows": {
+    "threshold": "a trajectory row is WORSENED when the gate's normalized_max_abs is larger after than before; ABOVE ROUNDOFF when the relative increase exceeds 1e-6.",
+    "rule": "every worsened row is registered with its boundary and its owner (UNKNOWN is an allowed owner and must be written as such). Rule 12: a worsened row is debt the next round walks, never a reason to revert.",
+    "also_reported": "whether this fix moved the eight worsened rows round 30 left behind."
+  },
+
+  "review": {
+    "codex": "unavailable on this account",
+    "claim_review": "one fresh independent agent reviews THIS preregistration -- the mechanism and the predictions -- BEFORE the code exists",
+    "diff_review": "a second fresh independent agent reviews the diff after it exists",
+    "neither_is_shown_the_other": true
+  },
+
+  "forbidden_this_round": [
+    "editing NEMO src/",
+    "makenemo, mpirun, any NEMO executable",
+    "git push, merge, stash, reset --hard, checkout of another commit in /tmp/codex-gyre",
+    "touching the decision-17 guard or the demo card",
+    "any configuration choice: an unavoidable one goes in the ASKED/UNASKED table and stops there"
+  ]
+}

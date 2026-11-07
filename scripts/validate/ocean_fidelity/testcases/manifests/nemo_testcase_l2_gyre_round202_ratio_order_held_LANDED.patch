@@ -1,0 +1,129 @@
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index 551cdb6bb..f5b30022e 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -7018,7 +7018,10 @@ class LatLonCGridOceanModel:
+             _qu_13, _qv_13 = _qco_ratios(_eta_live_one_third)
+             _qu_12, _qv_12 = _qco_ratios(_eta_live_one_half)
+             _qu_aa, _qv_aa = _qco_ratios(state_new.eta.data)
+-            from legoesm.ocean.eos import nemo_r3t_stretch
++            from legoesm.ocean.eos import (
++                nemo_r3t_rk3_stage1_stretch,
++                nemo_r3t_stretch,
++            )
+ 
+             def _qco_t_ratio(eta_stage):
+                 return nemo_r3t_stretch(
+@@ -7026,7 +7029,9 @@ class LatLonCGridOceanModel:
+                     evaluation="nemo_reciprocal")
+ 
+             _qt_b = _qco_t_ratio(state.eta.data)
+-            _qt_13 = _qco_t_ratio(_eta_live_one_third)
++            _qt_13 = nemo_r3t_rk3_stage1_stretch(
++                _zc, state.eta.data, state_new.eta.data,
++                state.H_bathy.data)
+             _qt_12 = _qco_t_ratio(_eta_live_one_half)
+             _qt_aa = _qco_t_ratio(state_new.eta.data)
+             _tracer_qco_weights = (
+diff --git a/packages/ocean/legoesm/ocean/eos.py b/packages/ocean/legoesm/ocean/eos.py
+index fbb19cc23..1b5e892b9 100644
+--- a/packages/ocean/legoesm/ocean/eos.py
++++ b/packages/ocean/legoesm/ocean/eos.py
+@@ -960,6 +960,40 @@ def nemo_r3t_stretch(
+     return jnp.maximum(1.0 + r3t, 1.0e-6)
+ 
+ 
++def nemo_r3t_rk3_stage1_stretch(
++    z_coord, eta_before: jnp.ndarray, eta_after: jnp.ndarray,
++    H_bathy: jnp.ndarray,
++) -> jnp.ndarray:
++    """NEMO RK3 stage-1 ``(1 + r3t(Kaa))`` source association.
++
++    ``stprk3_stg.f90:160-179`` first forms the Kbb and after-level ``r3t``
++    ratios, then assigns ``Kaa = (2/3)*Kbb + (1/3)*after``.  Interpolating
++    SSH before forming its ratio is real-equivalent but not bit-identical.
++    """
++    eta_before = jnp.asarray(eta_before)
++    eta_after = jnp.asarray(eta_after, dtype=eta_before.dtype)
++    if getattr(z_coord, "linear_free_surface", False):
++        return jnp.ones_like(eta_before)
++    depth = jnp.asarray(H_bathy, dtype=eta_before.dtype)
++    wet = depth > 0.0
++    one = jnp.asarray(1.0, dtype=eta_before.dtype)
++    safe_depth = jnp.where(wet, depth, one)
++    r1_depth = nemo_source_round(one / safe_depth)
++    r3_before = jnp.where(
++        wet, nemo_source_round(eta_before * r1_depth), 0.0)
++    r3_after = jnp.where(
++        wet, nemo_source_round(eta_after * r1_depth), 0.0)
++    one_third = nemo_source_round(
++        one / jnp.asarray(3.0, dtype=eta_before.dtype))
++    two_thirds = nemo_source_round(
++        jnp.asarray(2.0, dtype=eta_before.dtype)
++        / jnp.asarray(3.0, dtype=eta_before.dtype))
++    r3_stage = nemo_source_round(
++        nemo_source_round(two_thirds * r3_before)
++        + nemo_source_round(one_third * r3_after))
++    return jnp.where(wet, nemo_source_round(one + r3_stage), one)
++
++
+ def nemo_bn2_live_ladders(
+     z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray,
+     *, r3t_evaluation: str = "quotient",
+diff --git a/tests/ocean/unit/test_nemo_ws_tracer_rk3.py b/tests/ocean/unit/test_nemo_ws_tracer_rk3.py
+index 5104914ab..3e34d75cd 100644
+--- a/tests/ocean/unit/test_nemo_ws_tracer_rk3.py
++++ b/tests/ocean/unit/test_nemo_ws_tracer_rk3.py
+@@ -1,5 +1,7 @@
+ """Stage-program tests for NEMO's key_RK3 active tracers."""
+ 
++import inspect
++
+ import jax
+ import jax.numpy as jnp
+ import numpy as np
+@@ -53,6 +55,44 @@ def test_nemo_ws_stage_transport_preserves_fortran_product_association():
+     assert not np.array_equal(reassociated, expected)
+ 
+ 
++def test_nemo_r3t_stage1_interpolates_endpoint_ratios_in_source_order():
++    """The executing RK3 Kaa ratio uses NEMO's endpoint association."""
++    set_policy(PrecisionPolicy.fp64())
++    depth = jnp.asarray([[1.5528150381393142]], dtype=jnp.float64)
++    before = jnp.asarray([[0.366016802486834]], dtype=jnp.float64)
++    after = jnp.asarray([[0.26495575608265054]], dtype=jnp.float64)
++    z_coord = SimpleNamespace(linear_free_surface=False)
++
++    def evaluate(a, b):
++        return eos_module.nemo_r3t_rk3_stage1_stretch(
++            z_coord, a, b, depth)
++
++    eager = evaluate(before, after)
++    compiled = jax.jit(evaluate)(before, after)
++    np.testing.assert_array_equal(np.asarray(compiled), np.asarray(eager))
++
++    r1_depth = np.float64(1.0) / np.asarray(depth)
++    r3_before = np.asarray(before) * r1_depth
++    r3_after = np.asarray(after) * r1_depth
++    expected = np.float64(1.0) + (
++        (np.float64(2.0) / np.float64(3.0)) * r3_before
++        + (np.float64(1.0) / np.float64(3.0)) * r3_after)
++    np.testing.assert_array_equal(np.asarray(compiled), expected)
++
++    interpolated_ssh = np.asarray(before) + (
++        np.asarray(after) - np.asarray(before)) / np.float64(3.0)
++    wrong = np.float64(1.0) + interpolated_ssh * r1_depth
++    assert not np.array_equal(np.asarray(compiled), wrong)
++
++    gradients = jax.grad(lambda a, b: jnp.sum(evaluate(a, b)), argnums=(0, 1))(
++        before, after)
++    assert all(np.isfinite(np.asarray(value)).all() for value in gradients)
++    assert all(np.any(np.asarray(value) != 0.0) for value in gradients)
++
++    source = inspect.getsource(model_module.LatLonCGridOceanModel._step_impl)
++    assert "_qt_13 = nemo_r3t_rk3_stage1_stretch(" in source
++
++
+ def test_nemo_qco_live_t_thickness_matches_literal_source_bits():
+     """Pin domain/domqco/e3t macro association on awkward partial cells."""
+     set_policy(PrecisionPolicy.fp64())

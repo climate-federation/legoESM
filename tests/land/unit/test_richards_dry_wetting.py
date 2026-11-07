@@ -279,5 +279,8 @@ def test_budget_residual_reports_infeasible_sink_and_closes_otherwise():
         sink = jnp.zeros_like(theta0).at[:, 0].set(rate_mm_h / 1000.0 / 3600.0 / float(_DZ[0]))
         out = solve_richards(psi0, theta0, _GRID, _CH, RichardsConfig(),
                              jnp.zeros(1), sink, _DT, surface_water=jnp.zeros(1))
-        res_mm = float(out.budget_residual[0]) * 1000.0
+        # Water the step invented: the dry-floor refill of the unmet draw plus
+        # any remaining signed budget residual (RichardsOutput.refill /
+        # water_created; the branch's single ``budget_residual`` was their sum).
+        res_mm = float(out.refill[0] + out.water_created[0]) * 1000.0
         assert abs(res_mm) < _MM_TOL if feasible else res_mm > 0.5

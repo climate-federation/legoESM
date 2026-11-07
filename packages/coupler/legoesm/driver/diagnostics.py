@@ -45,17 +45,54 @@ def _frozen_condensate(state):
     return total
 
 
-class _StructuredRegridWeights:
-    """Precomputed bilinear interpolation weights for structured grids."""
-    __slots__ = ('i_lo', 'j_lo', 'wi', 'wj', 'src_nlat', 'src_nlon')
+# Sidecar key carrying the CMOR lat sampling stamp (see CFWriter append guard).
+_SIDECAR_SAMPLING_KEY = "meta.lat_sampling"
 
-    def __init__(self, i_lo, j_lo, wi, wj, src_nlat, src_nlon):
-        self.i_lo = i_lo
-        self.j_lo = j_lo
-        self.wi = wi
-        self.wj = wj
-        self.src_nlat = src_nlat
-        self.src_nlon = src_nlon
+
+class _StructuredRegridWeights:
+    """Precomputed bilinear interpolation weights for structured grids.
+
+    ``i_lo``/``i_hi`` index the native latitude axis and ``j_lo``/``j_hi``
+    the native longitude axis in the field's OWN order; ``j_hi`` wraps
+    periodically."""
+    __slots__ = ('i_lo', 'i_hi', 'j_lo', 'j_hi', 'wi', 'wj')
+
+    def __init__(self, i_lo, i_hi, j_lo, j_hi, wi, wj):
+        self.i_lo, self.i_hi = i_lo, i_hi
+        self.j_lo, self.j_hi = j_lo, j_hi
+        self.wi, self.wj = wi, wj
+
+
+def _bracket(src: np.ndarray, tgt: np.ndarray, period: float | None):
+    """Indices (into ``src`` as given) bracketing each ``tgt`` value, and the
+    linear weight of the upper one.  ``period`` wraps the axis (longitude);
+    otherwise targets outside the source range take the edge value."""
+    if period is not None:
+        src = np.mod(src, period)
+        tgt = np.mod(tgt, period)
+    order = np.argsort(src, kind="stable")
+    s = src[order]
+    n = s.size
+    k = np.searchsorted(s, tgt, side="right") - 1
+    if period is None:
+        k = np.clip(k, 0, n - 2)
+        s_lo, s_hi = s[k], s[k + 1]
+        lo, hi = k, k + 1
+    else:
+        lo, hi = np.mod(k, n), np.mod(k + 1, n)
+        s_lo = np.where(k < 0, s[-1] - period, s[lo])
+        s_hi = np.where(k + 1 >= n, s[0] + period, s[hi])
+    w = np.clip((tgt - s_lo) / np.where(s_hi == s_lo, 1.0, s_hi - s_lo),
+                0.0, 1.0)
+    return order[lo], order[hi], w
+
+
+# File comment for the MPAS-lane ``clt`` (monthly and daily), stamped when
+# the native feed derived the cloud from the collector's cloud diagnosis
+# (``_cloud_paths_radiative``); see ``_write_cmip_data``.
+_CLT_NOTE = ("Stratiform layer cloud fraction (model's own "
+             "diagnostic scheme, convective add-on excluded) "
+             "reduced by maximum-random vertical overlap.")
 
 
 def _build_structured_regrid_weights(
@@ -63,42 +100,25 @@ def _build_structured_regrid_weights(
     src_lon_rad: np.ndarray,
     tgt_nlat: int,
     tgt_nlon: int,
+    tgt_lat_deg: np.ndarray | None = None,
+    tgt_lon_deg: np.ndarray | None = None,
 ) -> _StructuredRegridWeights:
-    """Build bilinear interpolation weights from a native structured grid
-    to a regular CMIP lat-lon grid.
+    """Bilinear weights from a native structured grid (either latitude order)
+    to the CMIP lat-lon target, periodic in longitude.
 
-    Parameters
-    ----------
-    src_lat_rad : (n_lat_src,) — source latitudes in radians, S→N
-    src_lon_rad : (n_lon_src,) — source longitudes in radians, [0, 2π)
-    tgt_nlat, tgt_nlon : target CMIP grid dimensions
+    Targets default to the regular cell centres the CMOR files are labelled
+    with (``-90+dlat/2 ..``, ``dlon/2 ..``); callers pass the labels so the
+    two cannot drift.
     """
-    src_lat = np.degrees(src_lat_rad)  # S→N
-    src_lon = np.degrees(src_lon_rad)  # [0, 360)
-
     dlat = 180.0 / tgt_nlat
     dlon = 360.0 / tgt_nlon
-    tgt_lat = np.linspace(-90.0 + dlat / 2, 90.0 - dlat / 2, tgt_nlat)
-    tgt_lon = np.linspace(dlon / 2, 360.0 - dlon / 2, tgt_nlon)
-
-    # For each target lat, find bracketing source lat indices + weight
-    i_lo = np.searchsorted(src_lat, tgt_lat) - 1
-    i_lo = np.clip(i_lo, 0, len(src_lat) - 2)
-    denom_i = src_lat[i_lo + 1] - src_lat[i_lo]
-    denom_i = np.where(denom_i == 0, 1.0, denom_i)
-    wi = np.clip((tgt_lat - src_lat[i_lo]) / denom_i, 0.0, 1.0)
-
-    # For each target lon, find bracketing source lon indices + weight
-    j_lo = np.searchsorted(src_lon, tgt_lon) - 1
-    j_lo = np.clip(j_lo, 0, len(src_lon) - 2)
-    denom_j = src_lon[j_lo + 1] - src_lon[j_lo]
-    denom_j = np.where(denom_j == 0, 1.0, denom_j)
-    wj = np.clip((tgt_lon - src_lon[j_lo]) / denom_j, 0.0, 1.0)
-
-    return _StructuredRegridWeights(
-        i_lo=i_lo, j_lo=j_lo, wi=wi, wj=wj,
-        src_nlat=len(src_lat), src_nlon=len(src_lon),
-    )
+    tgt_lat = (np.linspace(-90.0 + dlat / 2, 90.0 - dlat / 2, tgt_nlat)
+               if tgt_lat_deg is None else np.asarray(tgt_lat_deg, np.float64))
+    tgt_lon = (np.linspace(dlon / 2, 360.0 - dlon / 2, tgt_nlon)
+               if tgt_lon_deg is None else np.asarray(tgt_lon_deg, np.float64))
+    i_lo, i_hi, wi = _bracket(np.degrees(src_lat_rad), tgt_lat, None)
+    j_lo, j_hi, wj = _bracket(np.degrees(src_lon_rad), tgt_lon, 360.0)
+    return _StructuredRegridWeights(i_lo, i_hi, j_lo, j_hi, wi, wj)
 
 
 def _apply_structured_regrid_2d(
@@ -107,21 +127,12 @@ def _apply_structured_regrid_2d(
 ) -> np.ndarray:
     """Apply bilinear interpolation to a 2-D field (nlat_src, nlon_src)
     → (nlat_tgt, nlon_tgt)."""
-    i0 = w.i_lo
-    i1 = np.minimum(i0 + 1, w.src_nlat - 1)
-    j0 = w.j_lo
-    j1 = np.minimum(j0 + 1, w.src_nlon - 1)
-    wi = w.wi
-    wj = w.wj
-    # Bilinear: f = (1-wi)(1-wj)*f00 + wi*(1-wj)*f10 + (1-wi)*wj*f01 + wi*wj*f11
-    f00 = field[np.ix_(i0, j0)]
-    f10 = field[np.ix_(i1, j0)]
-    f01 = field[np.ix_(i0, j1)]
-    f11 = field[np.ix_(i1, j1)]
-    return ((1 - wi[:, None]) * (1 - wj[None, :]) * f00
-            + wi[:, None] * (1 - wj[None, :]) * f10
-            + (1 - wi[:, None]) * wj[None, :] * f01
-            + wi[:, None] * wj[None, :] * f11)
+    wi = w.wi[:, None]
+    wj = w.wj[None, :]
+    return ((1 - wi) * (1 - wj) * field[np.ix_(w.i_lo, w.j_lo)]
+            + wi * (1 - wj) * field[np.ix_(w.i_hi, w.j_lo)]
+            + (1 - wi) * wj * field[np.ix_(w.i_lo, w.j_hi)]
+            + wi * wj * field[np.ix_(w.i_hi, w.j_hi)])
 
 
 def _apply_structured_regrid_3d(
@@ -129,29 +140,13 @@ def _apply_structured_regrid_3d(
     w: _StructuredRegridWeights,
 ) -> np.ndarray:
     """Apply bilinear interpolation to a 3-D field (nlat_src, nlon_src, nlev)
-    → (nlat_tgt, nlon_tgt, nlev).
-
-    Vectorised over the level axis — gather the four bilinear
-    neighbours once and apply the per-cell weights with NumPy
-    broadcasting instead of looping ``nlev`` times.  At T63L49 with
-    ~50 levels this turns 50 separate per-level NumPy calls into one.
-    """
-    i0 = w.i_lo
-    i1 = np.minimum(i0 + 1, w.src_nlat - 1)
-    j0 = w.j_lo
-    j1 = np.minimum(j0 + 1, w.src_nlon - 1)
-    wi = w.wi[:, None, None]   # (n_lat_tgt, 1, 1)
-    wj = w.wj[None, :, None]   # (1, n_lon_tgt, 1)
-    f00 = field[np.ix_(i0, j0)]   # (n_lat_tgt, n_lon_tgt, nlev)
-    f10 = field[np.ix_(i1, j0)]
-    f01 = field[np.ix_(i0, j1)]
-    f11 = field[np.ix_(i1, j1)]
-    return (
-        (1 - wi) * (1 - wj) * f00
-        + wi * (1 - wj) * f10
-        + (1 - wi) * wj * f01
-        + wi * wj * f11
-    )
+    → (nlat_tgt, nlon_tgt, nlev), vectorised over levels."""
+    wi = w.wi[:, None, None]
+    wj = w.wj[None, :, None]
+    return ((1 - wi) * (1 - wj) * field[np.ix_(w.i_lo, w.j_lo)]
+            + wi * (1 - wj) * field[np.ix_(w.i_hi, w.j_lo)]
+            + (1 - wi) * wj * field[np.ix_(w.i_lo, w.j_hi)]
+            + wi * wj * field[np.ix_(w.i_hi, w.j_hi)])
 
 
 # --- Run-time blow-up bounds (physical Earth-atmosphere range).  A state
@@ -245,6 +240,18 @@ def t_min_floor_blowup_reason(elapsed_day, T_min, T_floor):
     return None
 
 
+
+def _refuse_heat_without_water(where: str, lhflx, evspsbl) -> None:
+    """Heat without water is refused before any series grows: deriving E as
+    lhflx / L_v was the hidden 2-3 % fallback the water channel removes."""
+    if evspsbl is None and lhflx is not None:
+        raise ValueError(
+            f"DiagnosticCollector.{where}: lhflx was fed without evspsbl; "
+            "the moisture closure and CMOR evspsbl need the water the column "
+            "actually received -- feed evspsbl from the lane's water channel "
+            "(the segment carry's evap accumulator, the MPAS evap_sfc slot, "
+            "or the turbulence output's evap_sfc), never lhflx / L_v.")
+
 class DiagnosticCollector:
     """Accumulates diagnostics during a simulation.
 
@@ -261,6 +268,10 @@ class DiagnosticCollector:
         Layer thickness in sigma.
     monthly_means : bool
         Enable monthly-mean zonal diagnostics.
+    cmip_drs_tree, cmip_institution_id, cmip_source_id, cmip_variant_label
+        Passed to the CMOR ``CFWriter`` as ``drs_tree``, ``institution_id``,
+        ``model_id`` and ``variant_label`` (``OutputConfig`` fields of the
+        same names).
     cmip_output : bool
         Enable CF/CMOR NetCDF output.
     clear_sky_diag : bool
@@ -288,6 +299,11 @@ class DiagnosticCollector:
         vcoord=None,
         surface_stability_scheme: str = "dyer1974",
         surface_bulk_scheme: str = "constant",
+        clubb_config=None,
+        cmip_drs_tree: bool = False,
+        cmip_institution_id: str = "CU",
+        cmip_source_id: str = "legoESM-1-0",
+        cmip_variant_label: str = "r1i1p1f1",
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
@@ -301,9 +317,14 @@ class DiagnosticCollector:
         # similarity profile, so it keeps the historical coare3 profile —
         # which also keeps the default byte-identical.
         self.surface_stability_scheme = surface_stability_scheme
+        # surface_bulk_scheme="none": no surface layer exists, so the 2 m
+        # temperature (and its daily extremes) is not produced at all rather
+        # than published from a profile of an exchange that never happens.
+        self.produces_tas = surface_bulk_scheme != "none"
         self.tas_profile_scheme = (
             surface_bulk_scheme
-            if surface_bulk_scheme in ("most", "coare3", "large_yeager")
+            if surface_bulk_scheme in ("most", "coare3", "large_yeager",
+                                       "large_yeager_cesm")
             else "coare3"
         )
         # Vertical coordinate object (``SigmaCoordinate`` or
@@ -323,6 +344,9 @@ class DiagnosticCollector:
         # fractional cloud fraction (issue #689).  ``None`` (cloud scheme
         # 'none') => ``clt`` is not published.
         self._cloud_config = cloud_config
+        # The run's resolved CLUBBConfig (cam6_clubb only): its top cuts the
+        # ice-stratus fraction exactly as radiation and MG2 do.
+        self._clubb_config = clubb_config
         # Set by ``feed_cmip_accumulators_native`` (MPAS lane) when it derives
         # clwvi/clivi from the RADIATION cloud diagnosis (floor included).
         # The cube lane's :meth:`collect` integrates the PROGNOSTIC condensate
@@ -353,6 +377,7 @@ class DiagnosticCollector:
         self.rsdt: list[float] = []
         self.hfss: list[float] = []
         self.hfls: list[float] = []
+        self.evspsbl: list[float] = []   # surface water flux [kg/m2/s], the evap_sfc feed
         self.profiles_T: list[np.ndarray] = []
         self.profiles_qv: list[np.ndarray] = []
 
@@ -377,20 +402,6 @@ class DiagnosticCollector:
         self._spatial_monthly = None
         self._cs_regrid_weights = None  # cached cubed-sphere → lat-lon weights
         self._voronoi_regrid_weights = None  # cached MPAS cell → lat-lon weights
-        # #1353 sampling honesty: CMOR var names whose feed is a per-interval
-        # SNAPSHOT rather than a time integral (lean MPAS path at
-        # diag_days >= 1).  The writer stamps honest cell_methods/comment
-        # attrs on these instead of the bare table ``time: mean``.
-        # None/empty = table defaults everywhere (cube/lat-lon
-        # segment-accumulated path).  ``cmip_snapshot_cadence_days`` is the
-        # sampling cadence the labels describe (1.0 = once-daily 00 UTC).
-        self.cmip_snapshot_vars: set | None = None
-        self.cmip_snapshot_cadence_days: float = 1.0
-        # Time-of-day the snapshots land at, as a fraction of a day, when the
-        # cadence is a whole number of days (a fractional ``start_day`` /
-        # ``--restart-start-day`` moves it off 00 UTC — never assert 00 UTC,
-        # derive it; codex-10).  None => unknown, describe as "fixed phase".
-        self.cmip_snapshot_phase_frac: float | None = None
         # Time axis reference is the experiment start year (CMIP6 AMIP
         # convention: ``days since <start_year>-01-01``), which makes the
         # stored time values start at zero and decode to the correct
@@ -402,10 +413,13 @@ class DiagnosticCollector:
             self.cf_writer = CFWriter(
                 output_dir=cmor_dir,
                 experiment_id=experiment_id,
-                model_id="legoESM-1-0",
+                model_id=cmip_source_id,
                 freq="mon",
                 calendar="noleap",
                 ref_date=f"{start_year:04d}-01-01",
+                institution_id=cmip_institution_id,
+                variant_label=cmip_variant_label,
+                drs_tree=cmip_drs_tree,
             )
             if not monthly_means:
                 # iter-169: removed redundant local import that
@@ -430,7 +444,7 @@ class DiagnosticCollector:
             # min/max for tas so tasmin/tasmax can be emitted.
             self._spatial_daily = SpatialDailyAccumulator(
                 nlat=_cmip_nlat, nlon=_cmip_nlon,
-                track_extremes={"tas"},
+                track_extremes={"tas"} if self.produces_tas else set(),
             )
             self._cmip_nlat = _cmip_nlat
             self._cmip_nlon = _cmip_nlon
@@ -469,7 +483,8 @@ class DiagnosticCollector:
         """
         self._area_w = None if area is None else jnp.asarray(area)
 
-    def set_cmip_grid_info(self, grid_type: str, grid=None, start_year: int = 1):
+    def set_cmip_grid_info(self, grid_type: str, grid=None, start_year: int = 1,
+                           column_native_latlon=None):
         """Configure CMIP output grid and regridding weights.
 
         Must be called after setup() and before the first collect() when
@@ -483,13 +498,27 @@ class DiagnosticCollector:
             Grid object (needed for regridding weights).
         start_year : int
             Calendar start year for time axis in NetCDF files.
+        column_native_latlon : LatLonGrid, optional
+            The lat-lon COLUMN lane: the fields arrive as row-major columns
+            of this grid; they are reshaped to it and regridded with the
+            structured lat-lon weights (``grid_type`` must be "latlon").
         """
         self._cmip_start_year = start_year
         self._cmip_grid_type = grid_type
+        self._column_native_shape = None
+        if column_native_latlon is not None:
+            if grid_type != "latlon":
+                raise ValueError("column_native_latlon needs grid_type='latlon'")
+            grid = column_native_latlon
+            self._column_native_shape = (int(grid.n_lat), int(grid.n_lon))
 
         if self._spatial_monthly is None:
             return
 
+        # Sample at the SAME row latitudes the files are labelled with
+        # (cell centres); the regridders' default is pole-to-pole, which put
+        # every row up to half a cell off its label.
+        _lat_labels, _lon_labels = self._cmip_target_latlon()
         if grid_type == "cubed_sphere" and grid is not None:
             from legoesm.grids.regridding import (
                 get_cubedsphere_to_latlon_weights,
@@ -497,25 +526,44 @@ class DiagnosticCollector:
             n = grid.n
             self._cs_regrid_weights = get_cubedsphere_to_latlon_weights(
                 n, n_lon=self._cmip_nlon, n_lat=self._cmip_nlat,
+                lat_cent=_lat_labels,
             )
+            if self.cf_writer is not None:
+                self.cf_writer.require_centre_sampling_on_append = True
+            self._set_cmip_regridded_grid(
+                f"the C{n} cubed-sphere grid",
+                "face-aware bilinear interpolation")
         elif grid_type in ("latlon", "gaussian") and grid is not None:
-            # For structured grids, store native 1-D coordinates (degrees)
-            # for bilinear regridding when native shape != CMIP target.
+            # Structured grids: native 1-D coordinates are radians.
             native_lat = np.asarray(grid.lat)  # radians, 1-D
             native_lon = np.asarray(grid.lon)  # radians, 1-D
             n_lat_native = native_lat.shape[0]
             n_lon_native = native_lon.shape[0]
-            if (n_lat_native, n_lon_native) == (self._cmip_nlat, self._cmip_nlon):
-                # Native grid matches CMIP target — no regridding needed.
+            if ((n_lat_native, n_lon_native) == (self._cmip_nlat, self._cmip_nlon)
+                    and np.allclose(np.degrees(native_lat), _lat_labels,
+                                    rtol=0.0, atol=1e-6)
+                    and np.allclose(np.degrees(native_lon) % 360.0,
+                                    _lon_labels, rtol=0.0, atol=1e-6)):
+                # Native grid IS the labelled CMIP target — no regridding.
                 self._structured_regrid = None
             else:
-                # Precompute regridding from native → CMIP lat-lon.
+                # Interpolate to the labelled cell centres.  A same-SHAPE
+                # grid is not enough: the lat-lon grid's lon 0..355 sits half
+                # a cell off the 2.5..357.5 labels, a Gaussian grid's rows
+                # off the regular ones.
                 self._structured_regrid = _build_structured_regrid_weights(
                     src_lat_rad=native_lat,
                     src_lon_rad=native_lon,
                     tgt_nlat=self._cmip_nlat,
                     tgt_nlon=self._cmip_nlon,
+                    tgt_lat_deg=_lat_labels,
+                    tgt_lon_deg=_lon_labels,
                 )
+                if self.cf_writer is not None:
+                    self.cf_writer.require_centre_sampling_on_append = True
+                self._set_cmip_regridded_grid(
+                    f"the native {n_lat_native} x {n_lon_native} {grid_type} "
+                    "grid", "bilinear interpolation (periodic in longitude)")
         elif grid_type in ("mpas", "voronoi") and grid is not None:
             # SCVT/Voronoi unstructured cells → regular lat-lon via IDW
             # k-nearest weights (the AMIP forcing path does the inverse,
@@ -527,7 +575,28 @@ class DiagnosticCollector:
             self._voronoi_regrid_weights = compute_voronoi_to_latlon_weights(
                 np.asarray(grid.latCell), np.asarray(grid.lonCell),
                 n_lon=self._cmip_nlon, n_lat=self._cmip_nlat,
+                lat_cent=_lat_labels,
             )
+            if self.cf_writer is not None:
+                self.cf_writer.require_centre_sampling_on_append = True
+            _k = int(self._voronoi_regrid_weights.idx.shape[1])
+            self._set_cmip_regridded_grid(
+                f"the MPAS Voronoi (SCVT) mesh of "
+                f"{np.asarray(grid.latCell).size} cells",
+                f"inverse-distance weighting of the {_k} nearest cell centres")
+
+    def _set_cmip_regridded_grid(self, source: str, method: str) -> None:
+        """Stamp CMIP6 ``grid_label="gr"`` and a ``grid`` description on the
+        CMOR writer: every field on this path is regridded to the regular
+        lat-lon target, so ``gn`` (native) would be false.  The writer's
+        ``gn`` default stays only where the native grid IS the target."""
+        if self.cf_writer is None:
+            return
+        self.cf_writer.grid_label = "gr"
+        self.cf_writer.grid = (
+            f"data regridded from {source} to a regular "
+            f"{180.0 / self._cmip_nlat:g} x {360.0 / self._cmip_nlon:g} "
+            f"degree latitude-longitude grid by {method}")
 
     def set_fixed_fields(
         self,
@@ -583,6 +652,15 @@ class DiagnosticCollector:
                 "regridder's [-180,180) columns onto [0,360) labels.")
         return np.roll(arr, self._cmip_nlon // 2, axis=1)
 
+    def _native_of_columns(self, arr: np.ndarray, ndim: int) -> np.ndarray:
+        """A lat-lon column-lane field ``(nCells[, k])`` as ``(n_lat, n_lon[,
+        k])`` (row-major cells); anything else unchanged."""
+        shp = getattr(self, "_column_native_shape", None)
+        if (shp is not None and arr.ndim == ndim - 1
+                and arr.shape[0] == shp[0] * shp[1]):
+            return arr.reshape(shp + arr.shape[1:])
+        return arr
+
     def _regrid_to_latlon_2d(self, field) -> np.ndarray | None:
         """Regrid a 2-D field to the CMIP lat-lon grid.
 
@@ -599,7 +677,7 @@ class DiagnosticCollector:
                 np.asarray(field).reshape(-1), self._voronoi_regrid_weights,
             ))
         # Structured grids (lat-lon / Gaussian)
-        arr = np.asarray(field)
+        arr = self._native_of_columns(np.asarray(field), 2)
         if arr.ndim == 2:
             regrid = getattr(self, '_structured_regrid', None)
             if regrid is not None:
@@ -631,7 +709,7 @@ class DiagnosticCollector:
             # flattened (nCells*nlev,) inputs are not supported here.
             return self._roll_to_cmip_lon(
                 apply_voronoi_to_latlon_3d(arr, self._voronoi_regrid_weights))
-        arr = np.asarray(field)
+        arr = self._native_of_columns(np.asarray(field), 3)
         if arr.ndim == 3:
             regrid = getattr(self, '_structured_regrid', None)
             if regrid is not None:
@@ -727,11 +805,21 @@ class DiagnosticCollector:
         alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
         return f_lo + alpha * (f_hi - f_lo)
 
-    def _tas_2m(self, state, q_v, sst, sic, T_ice, u_low=None, v_low=None):
+    def _tas_2m(self, state, q_v, sst, sic, T_ice, u_low=None, v_low=None,
+                *, T_land=None, q_land=None, land_fraction=None):
         """2 m air temperature for CMIP ``tas`` from the MOST surface-layer
         similarity profile (interpolate the lowest model level down to 2 m).
         Returns the lowest-level T when the surface inputs (SST / sigma) are
         unavailable — e.g. a prescribed-SST run that does not pass SST here.
+
+        ``T_land`` / ``land_fraction`` (keyword-only) make the diagnostic
+        LAND-AWARE.  Without them the surface is the blended SST/sea-ice skin
+        with a saturated humidity EVERYWHERE, so the published ``tas`` over
+        land is the neighbouring ocean's temperature rather than the model's
+        land — the reason a February Arctic land bias could not be read from
+        this field.  There is no below-canopy 2 m profile in this code, so the
+        land branch uses the same MOST profile anchored on the land skin; do
+        not read the result as a sub-canopy screen temperature.
 
         ``u_low`` / ``v_low`` override the lowest-level winds (lets the MPAS
         path pass the reconstructed CELL winds from
@@ -750,22 +838,132 @@ class DiagnosticCollector:
         p_s = state.p_s.data
         p_low = jnp.asarray(self._p_full(p_s))[..., -1]
         rho_low = p_low / (constants.R_d * T_low)
-        T_sfc = blend_surface_temperature(sst, sic, T_ice)
-        q_sfc = saturation_mixing_ratio(T_sfc, p_s)
         # Similarity profile matched to the experiment's surface fluxes:
         # SAME bulk scheme (constant -> the historical coare3 stand-in, see
         # __init__) and SAME stable-branch selector (codex 2026-08-02: a
         # large_yeager or grachev/gryanik run otherwise published a
         # coare3-native-default tas).  The 2 m value is set by stability, so
         # gustiness is left scheme-native here (pre-existing choice).
-        *_, T_2m = compute_most_fluxes(
-            u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
-            scheme=self.tas_profile_scheme, return_2m=True,
-            stability_scheme=self.surface_stability_scheme,
-        )
-        return T_2m
+        def _profile_to_2m(T_sfc, q_sfc, *, ocean: bool):
+            """One surface's 2 m temperature.
 
-    def _clt_percent(self, T, p_s, q_v, q_c, q_i=None):
+            MERGE NOTE (#1773), and it is a physics decision, not a textual
+            one. ``main`` added a ``large_yeager_cesm`` arm that returns CESM
+            ``shr_flux_atmOcn``'s own ``tref`` instead of the MOST profile;
+            this branch split the diagnostic into a LAND surface and a SEA
+            surface. ``shr_flux_atmOcn`` is the atmosphere-OCEAN coupler law
+            (the module's own docstring: "SAM ocean surface fluxes"), with
+            Charnock roughness and a saturated surface, so handing it a land
+            skin would re-create the exact artifact this branch exists to
+            remove -- land ``tas`` computed as if the surface were ocean.
+
+            So the CESM arm applies to the SEA leg ONLY; the land leg keeps
+            the MOST profile on every scheme. Review (GLM) flagged the
+            alternative -- dispatching for both legs -- as a third scheme
+            neither side tested.
+            """
+            if ocean and self.tas_profile_scheme == "large_yeager_cesm":
+                # CESM shr_flux_atmOcn's own ``tref`` diagnostic (2 m).
+                from legoesm.core.bulk_flux import compute_sam_oceflx_fluxes
+                *_, T_2m = compute_sam_oceflx_fluxes(
+                    u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
+                    z_bot=10.0, variant="cesm", return_2m=True,
+                    t_bot=T_low,
+                )
+                return T_2m
+            *_, T_2m = compute_most_fluxes(
+                u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
+                scheme=(self.tas_profile_scheme
+                        if self.tas_profile_scheme != "large_yeager_cesm"
+                        else "large_yeager"),
+                return_2m=True,
+                stability_scheme=self.surface_stability_scheme,
+            )
+            return T_2m
+
+        T_sfc_sea = blend_surface_temperature(sst, sic, T_ice)
+        q_sfc_sea = saturation_mixing_ratio(T_sfc_sea, p_s)
+        if T_land is None or land_fraction is None:
+            # Legacy path, bit-identical: ONE profile anchored on the
+            # ocean/sea-ice skin with a saturated surface.  Over land that is
+            # the neighbouring ocean's temperature and a saturated surface the
+            # land does not have, so a caller that owns a land skin should pass
+            # it — see the land branch below.
+            return _profile_to_2m(T_sfc_sea, q_sfc_sea, ocean=True)
+
+        # Land and sea get their OWN surface, then combine by land fraction.
+        # Both branches keep the same bulk scheme and stability selector, so
+        # this introduces no second convention — only the missing surface.
+        # ``q_land`` is a surface mixing ratio; without one the land surface is
+        # treated as saturated, which is what the legacy path assumed
+        # everywhere and is an OVERESTIMATE of surface humidity over dry or
+        # frozen ground.
+        q_sfc_land = (saturation_mixing_ratio(T_land, p_s) if q_land is None
+                      else q_land)
+        T_2m_land = _profile_to_2m(T_land, q_sfc_land, ocean=False)
+        T_2m_sea = _profile_to_2m(T_sfc_sea, q_sfc_sea, ocean=True)
+        f_land = jnp.clip(jnp.asarray(land_fraction, dtype=T_2m_land.dtype),
+                          0.0, 1.0)
+        return f_land * T_2m_land + (1.0 - f_land) * T_2m_sea
+
+    def _cloud_config_for(self, cloud_fraction):
+        """The collector's cloud config, with the cloud-fraction override over
+        the WHOLE column when an advected prognostic fraction (IFS CLOUDSC)
+        is handed in, as radiation applies it (votes VC24, VC40)."""
+        if (cloud_fraction is None
+                or getattr(self._cloud_config, "scheme", None) == "cam6_clubb"):
+            return self._cloud_config
+        return self._cloud_config._replace(clubb_cf_override_p_min_pa=0.0)
+
+    def _cam6_cloud_kwargs(self, cloud_fraction, conv_mass_flux_up,
+                           conv_icwmr, lat_deg, p_s, ncol, nlev):
+        """Extra ``compute_cloud_properties`` kwargs for cloud_scheme
+        'cam6_clubb': the CLUBB cloud fraction + deep-convection carries, lat
+        [rad] and interface pressures.  For any other scheme: the advected
+        IFS cloud fraction as the override when one is handed in (VC40), else
+        empty (byte-identical call); a cam6 run without the carry raises here rather than
+        silently scoring an RH cloud cover the radiation never used.
+
+        SAMPLING: the carry handed in is the one written by THIS step's
+        physics (CLUBB's current PDF fraction), applied to the current state;
+        the radiation call read the carry as it stood at its last update
+        (one physics step behind, more under radiation subcycling).  clt/clivi
+        therefore describe the model's CURRENT cloud field, not a readout of
+        what radiation integrated -- the same convention the conv_precip
+        convective cover and the RH schemes' clt already follow."""
+        if getattr(self._cloud_config, "scheme", None) != "cam6_clubb":
+            if cloud_fraction is None:
+                return {}
+            # IFS CLOUDSC's advected cloud fraction (vote VC40), applied
+            # over the whole column as radiation applies it (VC24, see
+            # _cloud_config_for)
+            return dict(cloud_fraction_override=jnp.reshape(
+                jnp.asarray(cloud_fraction), (ncol, nlev)))
+        if (cloud_fraction is None or conv_mass_flux_up is None
+                or conv_icwmr is None or lat_deg is None):
+            raise ValueError(
+                "cloud_scheme='cam6_clubb' diagnostics need the lagged "
+                "cloud_fraction / conv_mass_flux_up / conv_icwmr carries and "
+                "lat_deg; got None.")
+        if self.vcoord is None:
+            raise ValueError(
+                "cloud_scheme='cam6_clubb' diagnostics need interface "
+                "pressures (a vertical coordinate on the collector); got none.")
+        return dict(
+            p_half=jnp.reshape(
+                jnp.asarray(self.vcoord.pressure_at_half(
+                    jnp.reshape(jnp.asarray(p_s), (ncol,)))), (ncol, nlev + 1)),
+            cloud_fraction_override=jnp.reshape(
+                jnp.asarray(cloud_fraction), (ncol, nlev)),
+            lat=jnp.deg2rad(jnp.reshape(jnp.asarray(lat_deg), (ncol,))),
+            conv_mass_flux_up=jnp.reshape(
+                jnp.asarray(conv_mass_flux_up), (ncol, nlev + 1)),
+            conv_icwmr=jnp.reshape(jnp.asarray(conv_icwmr), (ncol, nlev)),
+            clubb_config=self._clubb_config,
+        )
+
+    def _clt_percent(self, T, p_s, q_v, q_c, q_i=None, *, cloud_fraction=None,
+                     conv_mass_flux_up=None, conv_icwmr=None, lat_deg=None):
         """Total cloud cover [%] under MAXIMUM-RANDOM overlap, or ``None``.
 
         SHARED by the cube/lat-lon :meth:`collect` path and the lean MPAS
@@ -817,9 +1015,12 @@ class DiagnosticCollector:
             p_full,
             jnp.reshape(q_v, (ncol, nlev)),
             dp,
-            self._cloud_config,
+            self._cloud_config_for(cloud_fraction),
             q_cloud=jnp.reshape(q_c, (ncol, nlev)),
             q_ice=q_ice_col,
+            **self._cam6_cloud_kwargs(
+                cloud_fraction, conv_mass_flux_up, conv_icwmr, lat_deg,
+                p_s, ncol, nlev),
         )
         return np.asarray(
             jnp.reshape(maximum_random_overlap(cloud_props.cloud_fraction),
@@ -846,6 +1047,7 @@ class DiagnosticCollector:
         lat_deg_grid=None,
         shflx=None,
         lhflx=None,
+        evspsbl=None,
         sw_up_toa_clr=None,
         lw_up_toa_clr=None,
         q_i=None,
@@ -896,6 +1098,7 @@ class DiagnosticCollector:
         # GPU pipeline at every diagnostic interval.  The model step
         # following ``collect()`` cannot launch until all 12 have
         # round-tripped — fusing them collapses the stall to one.
+        _refuse_heat_without_water("collect", lhflx, evspsbl)
         if hasattr(state, 'v'):
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
@@ -923,6 +1126,7 @@ class DiagnosticCollector:
             area_weighted_mean(sw_down_toa, _aw) if sw_down_toa is not None else _zero,
             area_weighted_mean(shflx, _aw) if shflx is not None else _zero,
             area_weighted_mean(lhflx, _aw) if lhflx is not None else _zero,
+            area_weighted_mean(evspsbl, _aw) if evspsbl is not None else _zero,
         ])
         _stats_host = np.asarray(_stats)
         mean_sst = float(_stats_host[0])
@@ -940,6 +1144,7 @@ class DiagnosticCollector:
         mean_rsdt = float(_stats_host[12]) if sw_down_toa is not None else float('nan')
         mean_hfss = float(_stats_host[13]) if shflx is not None else float('nan')
         mean_hfls = float(_stats_host[14]) if lhflx is not None else float('nan')
+        mean_evspsbl = float(_stats_host[15]) if evspsbl is not None else float('nan')
 
         self.times.append(elapsed_day)
         self.sst.append(mean_sst)
@@ -957,6 +1162,7 @@ class DiagnosticCollector:
         self.rsdt.append(mean_rsdt)
         self.hfss.append(mean_hfss)
         self.hfls.append(mean_hfls)
+        self.evspsbl.append(mean_evspsbl)
 
         # Mean over all spatial axes except the last (vertical).
         # Cubed-sphere: (6,n,n,nlev) → mean over (0,1,2) → (nlev,)
@@ -990,6 +1196,8 @@ class DiagnosticCollector:
                 ),
                 'hfls': (np.asarray(lhflx) if lhflx is not None
                          else np.zeros_like(np.asarray(sst))),
+                'evspsbl': (np.asarray(evspsbl) if evspsbl is not None
+                            else np.zeros_like(np.asarray(sst))),
                 'hfss': (np.asarray(shflx) if shflx is not None
                          else np.zeros_like(np.asarray(sst))),
             }
@@ -1008,14 +1216,16 @@ class DiagnosticCollector:
             q_frozen=_frozen_condensate(state),
         )
 
-        # Moisture budget.  lhflx is the SAME field reported as CMOR hfls
-        # (positive-up evaporation source) so the E − P − dW/dt closure
-        # residual shares one flux definition with the output diagnostics;
-        # a fluxless config (lhflx None) closes against E = 0.
+        # Moisture budget.  evspsbl is the SAME water flux reported as CMOR
+        # evspsbl (positive-up evaporation source, PhysicsOutput.evap_sfc) so
+        # the E − P − dW/dt closure shares one definition with the output; a
+        # fluxless config (no surface exchange at all) closes against E = 0.
+        # Heat without water was refused at entry (before any series grew).
         self.moisture_tracker.update(
             q_v, state.p_s.data, self.dsigma,
             precip_total,
-            lhflx if lhflx is not None else jnp.zeros_like(state.p_s.data),
+            evap=(evspsbl if evspsbl is not None
+                  else jnp.zeros_like(state.p_s.data)),
             elapsed_seconds=elapsed_s,
             area_weights=self._area_w,
             dp=self._dp(state.p_s.data),
@@ -1042,6 +1252,8 @@ class DiagnosticCollector:
                 fields_2d['hfss'] = np.asarray(shflx)
             if lhflx is not None:
                 fields_2d['hfls'] = np.asarray(lhflx)
+            if evspsbl is not None:
+                fields_2d['evspsbl'] = np.asarray(evspsbl)
             # psl: sea-level pressure via hypsometric equation
             # p_sl = p_s * exp(phis / (R_d * T_lowest))
             # Reuse the T_low array already materialised above.
@@ -1090,6 +1302,7 @@ class DiagnosticCollector:
                 'rsdt': mean_rsdt,
                 'hfss': mean_hfss,
                 'hfls': mean_hfls,
+                'evspsbl': mean_evspsbl,
             })
 
         # Spatial monthly accumulation for CMIP output
@@ -1104,16 +1317,18 @@ class DiagnosticCollector:
             # MOST surface-layer similarity profile to interpolate the lowest
             # level down to 2 m (CMIP tas convention).  Falls back to the
             # lowest level if the surface-layer inputs are unavailable.
-            tas_field = self._tas_2m(state, q_v, sst, sic, T_ice)
-            if t_low_mean is not None:
-                # Segment-mean tas: instantaneous 2 m stability offset on the
-                # segment-mean lowest-level T (see the ``t_low_mean`` doc).
-                tas_field = tas_field + (
-                    np.asarray(t_low_mean) - np.asarray(state.T.data[..., -1])
-                )
-            r = self._regrid_to_latlon_2d(tas_field)
-            if r is not None:
-                fields_2d['tas'] = r
+            if self.produces_tas:
+                tas_field = self._tas_2m(state, q_v, sst, sic, T_ice)
+                if t_low_mean is not None:
+                    # Segment-mean tas: instantaneous 2 m stability offset on
+                    # the segment-mean lowest-level T (``t_low_mean`` doc).
+                    tas_field = tas_field + (
+                        np.asarray(t_low_mean)
+                        - np.asarray(state.T.data[..., -1])
+                    )
+                r = self._regrid_to_latlon_2d(tas_field)
+                if r is not None:
+                    fields_2d['tas'] = r
             r = self._regrid_to_latlon_2d(precip_total)
             if r is not None:
                 fields_2d['pr'] = r
@@ -1275,6 +1490,11 @@ class DiagnosticCollector:
                 r = self._regrid_to_latlon_2d(lhflx)
                 if r is not None:
                     fields_2d['hfls'] = r
+            # evspsbl: surface water flux [kg/m2/s] the column received
+            if evspsbl is not None:
+                r = self._regrid_to_latlon_2d(evspsbl)
+                if r is not None:
+                    fields_2d['evspsbl'] = r
 
             if fields_2d:
                 self._spatial_monthly.add_2d(doy, year, fields_2d)
@@ -1355,6 +1575,7 @@ class DiagnosticCollector:
         sw_down_toa=None,
         shflx=None,
         lhflx=None,
+        evspsbl=None,
     ) -> dict:
         """Collect only scalar reduction diagnostics (no host materialization).
 
@@ -1376,6 +1597,7 @@ class DiagnosticCollector:
         # overhead, but the previous per-scalar ``float(...)`` chain
         # serialised 12 GPU stalls per diagnostic step — exactly the
         # sin the long ``collect`` path was already corrected for.
+        _refuse_heat_without_water("collect_lightweight", lhflx, evspsbl)
         if hasattr(state, 'v'):
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
@@ -1434,9 +1656,12 @@ class DiagnosticCollector:
                  if shflx is not None else float('nan'))
         _hfls = (float(area_weighted_mean(lhflx, _aw))
                  if lhflx is not None else float('nan'))
+        _evspsbl = (float(area_weighted_mean(evspsbl, _aw))
+                    if evspsbl is not None else float('nan'))
         self.rsdt.append(_rsdt)
         self.hfss.append(_hfss)
         self.hfls.append(_hfls)
+        self.evspsbl.append(_evspsbl)
 
         # Energy-budget tracker on the lightweight path too (#1354/#1515): the
         # tracker is grid-agnostic (column integral over the trailing level
@@ -1448,7 +1673,7 @@ class DiagnosticCollector:
         _v_data = _v_data.data if _v_data is not None else None
         if sw_down_toa is not None and q_v is not None and _v_data is not None:
             # Only the grids that carry a cell-centred v (cube / lat-lon) run
-            # the tracker here; the MPAS edge-wind lane runs it in _run_mpas
+            # the tracker here; the MPAS edge-wind lane runs it in _run_column
             # with a Perot reconstruction (a None v here means edge winds we
             # must not feed the column KE term as if they were cell winds).
             self.energy_tracker.update(
@@ -1477,6 +1702,16 @@ class DiagnosticCollector:
             'mean_lw_sfc': mean_lw_sfc,
         }
 
+    def feed_daily_extremes_native(self, day: float, *, tas) -> None:
+        """Regrid an hourly temperature sample without feeding any means."""
+        if self._spatial_daily is None or not self.produces_tas:
+            return
+        field = self._regrid_to_latlon_2d(np.asarray(tas, dtype=np.float64))
+        if field is not None:
+            doy, _ = day_to_calendar(day)
+            self._spatial_daily.add_extremes_2d(
+                doy, int(day // 365.0), {"tas": field})
+
     def feed_cmip_accumulators_native(
         self,
         day: float,
@@ -1484,6 +1719,9 @@ class DiagnosticCollector:
         T,
         p_s,
         lat_deg=None,
+        cloud_fraction=None,
+        conv_mass_flux_up=None,
+        conv_icwmr=None,
         q_v=None,
         q_c=None,
         q_i=None,
@@ -1492,15 +1730,28 @@ class DiagnosticCollector:
         precip=None,
         phis=None,
         tas=None,
+        ts=None,
         rlut=None,
         rsut=None,
         rsdt=None,
         hfss=None,
         hfls=None,
+        evspsbl=None,
+        prsn=None,
         rsutcs=None,
         rlutcs=None,
+        rsds=None,
+        rsus=None,
+        rlds=None,
+        rlus=None,
+        siconc=None,
+        snw=None,
+        land_fraction=None,
+        zg=None,
+        tos=None,
         wap=None,
         flux_interval_days=None,
+        include_state=True,
     ) -> bool:
         """Feed the CMIP spatial (``Amon``/``day``) + zonal-mean monthly
         accumulators from NATIVE-grid host arrays, bypassing the heavy
@@ -1529,20 +1780,11 @@ class DiagnosticCollector:
 
         Sampling / accuracy caveats (documented, not silently hidden):
 
-        * STATE-derived fields (``tas``/``ps``/``psl``/``prw`` and the 3-D
-          ``ta``/``hus``/``ua``/``va``) are the INSTANTANEOUS end-of-interval
-          sample, not an interval mean.  At the common ``diag_days=1`` cadence
-          their monthly means average one fixed-phase snapshot per day
-          (diurnally aliased — the same alias :meth:`collect`'s ``t_low_mean``
-          mitigation targets) and the daily-table extremes
-          ``tasmin``/``tasmax`` collapse to that single sample; the driver
-          marks them ``cell_methods = "time: point"`` via
-          ``cmip_snapshot_vars`` (#1353).  The FLUX fields
-          (``precip``/``rlut``/``rsut``/``rsdt``/``hfss``/``hfls``) are fed as
-          per-step interval MEANS by the MPAS driver's ``_MPASSfcFluxAccum``
-          (#1353), so their ``time: mean`` label is true at any diag cadence.
-          Sub-daily ``diag_days`` gives multi-sample means for the state
-          fields too.
+        * STATE-derived fields are sampled hourly by the MPAS driver, before
+          cloud diagnosis, pressure interpolation and regridding. Their means
+          therefore sample the entire diurnal cycle. The independent diagnostic
+          feed passes ``include_state=False`` and supplies only per-step flux
+          interval means from ``_MPASSfcFluxAccum``; it cannot double-count state.
         * ``ua850``/``va850`` come from :meth:`_interp_to_plev19`, which BOUNDED
           -extrapolates below the lowest model level (inherited shared-helper
           behaviour, identical to :meth:`collect`; not masked to NaN).
@@ -1584,11 +1826,39 @@ class DiagnosticCollector:
             2 m air temperature [K] (MOST similarity, computed by the caller
             from sst/sic + surface-layer winds).  Falls back to the lowest
             model level when ``None`` so the field is never dropped.
+        ts : array, shape ``(nCells,)``, optional
+            Whole-cell land/sea/ice blended surface skin temperature [K].
         rsutcs, rlutcs : array, shape ``(nCells,)``, optional
             CLEAR-SKY TOA outgoing SW / LW flux [W/m2, positive up — the same
             CMOR sign as rsut/rlut] from the clouds-off second radiation pass
             (``--clear-sky-diag``, #843).  Interval means like the other flux
             fields; absent (None) keeps the output byte-identical.
+        prsn : array, shape ``(nCells,)``, optional
+            Snowfall flux [kg/m2/s]: the frozen part of *precip* as the
+            physics publishes it (``precip_frozen``), an interval mean like
+            ``pr``.  Absent (None) keeps the output byte-identical.
+            After a mid-window restart from a checkpoint written before
+            prsn was accumulated, that one window's prsn averages the
+            post-restart steps only (kept by user decision, PR #2204).
+        rsds, rsus, rlds, rlus : array, shape ``(nCells,)``, optional
+            Surface downwelling / upwelling SW and LW flux [W/m2, CMOR
+            ``positive`` down for rsds/rlds, up for rsus/rlus], from the
+            radiation call's own surface fluxes (the caller derives the
+            upwelling pair as down minus the ``+into surface`` net).
+        siconc : array, shape ``(nCells,)``, optional
+            Sea-ice area fraction [%] (CMOR SImon), a state sample like ts.
+        snw, land_fraction : array, shape ``(nCells,)``, optional
+            Surface snow amount [kg/m2] (CMOR LImon ``snw``, ``area: mean
+            where land``) and the native land fraction [0-1] it is averaged
+            with: the published value is regrid(snw*f)/regrid(f), missing
+            where the target cell has no land.  Both or neither.
+        zg : array, shape ``(nCells, nlev)``, optional
+            Geopotential height [m] on model levels (the dycore's own
+            geopotential over g); published on plev19 (Amon) and sliced at
+            850 hPa for the daily table like ua/va.
+        tos : array, shape ``(nCells,)``, optional
+            Sea-surface temperature [K] (Omon monthly, Oday daily), the
+            prescribed AMIP SST on this lane, unmasked like siconc.
         q_c, q_i : array, shape ``(nCells, nlev)``, optional
             CLOUD liquid / CLOUD ice mixing ratio [kg/kg] (the tracers the
             radiation's cloud diagnosis consumes — NOT the precipitating
@@ -1652,8 +1922,7 @@ class DiagnosticCollector:
         # February) and shift daily ``pr`` one interval late.  The feed
         # cadence divides the day evenly in practice (diag_days = 1 or
         # 1/2^k), so intervals never straddle a month boundary and midpoint
-        # binning is exact.  State-snapshot fields keep the endpoint ``day``
-        # (they ARE the state at ``day``).
+        # binning is exact. State samples use the caller-supplied hour bin.
         if flux_interval_days:
             # No clamp at 0: negative-epoch runs are supported and
             # ``day_to_calendar``/``//`` handle negatives consistently
@@ -1666,9 +1935,16 @@ class DiagnosticCollector:
             flux_doy, flux_year = doy, year
         # Flux-field name sets (Amon spatial / daily / zonal) used to split
         # the PHASE-2 commits between the two calendar bins.
-        _FLUX_2D = ("pr", "rlut", "rsut", "rsdt", "hfss", "hfls", "evspsbl",
-                    "rsutcs", "rlutcs")
-        _FLUX_DAILY = ("pr",)
+        _FLUX_2D = ("pr", "prsn", "rlut", "rsut", "rsdt", "hfss", "hfls",
+                    "evspsbl", "rsutcs", "rlutcs", "rsds", "rsus", "rlds", "rlus",
+                    "rtmt")
+        # Daily copies of fed 2-D fields (CMIP6 ``day``/``CFday``/``Oday``,
+        # placed by ``_DAILY_VARIABLE_REMAP``); the flux ones are the
+        # ``_FLUX_2D`` members, binned at the interval midpoint like monthly.
+        _DAILY_2D = ("tas", "pr", "psl", "ps", "rlut", "tos", "rsut", "rsdt",
+                     "hfls", "hfss", "rlds", "rlus", "rsds", "rsus", "prsn",
+                     "clt", "snw")
+        _FLUX_DAILY = tuple(n for n in _DAILY_2D if n in _FLUX_2D)
         _FLUX_ZONAL = ("precip",)
 
         # Coerce to a numeric float array (``dtype=float64``): a non-numeric
@@ -1693,6 +1969,7 @@ class DiagnosticCollector:
         # shape check below) so the field is never dropped.
         _f64 = np.float64
         tas_field = None if tas is None else np.asarray(tas, dtype=_f64)
+        ts_field = None if ts is None else np.asarray(ts, dtype=_f64)
         q_v_np = None if q_v is None else np.asarray(q_v, dtype=_f64)
         q_c_np = None if q_c is None else np.asarray(q_c, dtype=_f64)
         q_i_np = None if q_i is None else np.asarray(q_i, dtype=_f64)
@@ -1708,8 +1985,24 @@ class DiagnosticCollector:
         rsdt_np = None if rsdt is None else np.asarray(rsdt, dtype=_f64)
         hfss_np = None if hfss is None else np.asarray(hfss, dtype=_f64)
         hfls_np = None if hfls is None else np.asarray(hfls, dtype=_f64)
+        evspsbl_np = None if evspsbl is None else np.asarray(evspsbl, dtype=_f64)
+        prsn_np = None if prsn is None else np.asarray(prsn, dtype=_f64)
         rsutcs_np = None if rsutcs is None else np.asarray(rsutcs, dtype=_f64)
         rlutcs_np = None if rlutcs is None else np.asarray(rlutcs, dtype=_f64)
+        rsds_np = None if rsds is None else np.asarray(rsds, dtype=_f64)
+        rsus_np = None if rsus is None else np.asarray(rsus, dtype=_f64)
+        rlds_np = None if rlds is None else np.asarray(rlds, dtype=_f64)
+        rlus_np = None if rlus is None else np.asarray(rlus, dtype=_f64)
+        siconc_np = None if siconc is None else np.asarray(siconc, dtype=_f64)
+        snw_np = None if snw is None else np.asarray(snw, dtype=_f64)
+        f_land_np = (None if land_fraction is None
+                     else np.asarray(land_fraction, dtype=_f64))
+        zg_np = None if zg is None else np.asarray(zg, dtype=_f64)
+        tos_np = None if tos is None else np.asarray(tos, dtype=_f64)
+        if (snw_np is None) != (f_land_np is None):
+            raise ValueError(
+                "feed_cmip_accumulators_native: snw and land_fraction must be "
+                "supplied together (snw is a mean where land)")
 
         # Shape contract — validated UP FRONT so BOTH the spatial regrid AND the
         # zonal binning are transactional.  A malformed optional input raises
@@ -1724,13 +2017,25 @@ class DiagnosticCollector:
             ("precip", precip_np, (_ncol,)),
             ("phis", phis_np, (_ncol,)),
             ("tas", tas_field, (_ncol,)),
+            ("ts", ts_field, (_ncol,)),
             ("rlut", rlut_np, (_ncol,)),
             ("rsut", rsut_np, (_ncol,)),
             ("rsdt", rsdt_np, (_ncol,)),
             ("hfss", hfss_np, (_ncol,)),
             ("hfls", hfls_np, (_ncol,)),
+            ("evspsbl", evspsbl_np, (_ncol,)),
+            ("prsn", prsn_np, (_ncol,)),
             ("rsutcs", rsutcs_np, (_ncol,)),
             ("rlutcs", rlutcs_np, (_ncol,)),
+            ("rsds", rsds_np, (_ncol,)),
+            ("rsus", rsus_np, (_ncol,)),
+            ("rlds", rlds_np, (_ncol,)),
+            ("rlus", rlus_np, (_ncol,)),
+            ("siconc", siconc_np, (_ncol,)),
+            ("snw", snw_np, (_ncol,)),
+            ("land_fraction", f_land_np, (_ncol,)),
+            ("tos", tos_np, (_ncol,)),
+            ("zg", zg_np, (_ncol, _nlev)),
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
@@ -1743,8 +2048,11 @@ class DiagnosticCollector:
                     f"feed_cmip_accumulators_native: {_nm} shape {_arr.shape} "
                     f"!= expected {_shp}")
 
-        # tas is the 2 m MOST temperature when supplied, else the lowest level.
-        if tas_field is None:
+        # tas is the 2 m MOST temperature when supplied, else the lowest level;
+        # never produced without a surface layer.
+        if not self.produces_tas:
+            tas_field = None
+        elif tas_field is None:
             tas_field = T_low
 
         # Sea-level pressure (hypsometric) — shared by the spatial ``psl`` and
@@ -1763,18 +2071,17 @@ class DiagnosticCollector:
         fields_3d: dict[str, np.ndarray] = {}
         daily_2d: dict[str, np.ndarray] = {}
         if have_spatial:
-            # evspsbl [kg/m2/s] = latent heat flux / L_v. PRE-EXISTING
-            # documented approximation for this lane: no sublimation split
-            # (L_s over ice-covered cells => ~13% undercount there; see
-            # coupling_fields.surface_mass_flux for the phase-aware form),
-            # matching the bulk-flux scheme's own L_v-only partition of
-            # lhflx.  Wiring the phase-aware flux needs the ice fraction in
-            # this feed — tracked as a follow-up, unchanged by #1353.
-            evspsbl_np = None if hfls_np is None else hfls_np / _c.L_v
+            # evspsbl [kg/m2/s]: the water the column received (the evap_sfc
+            # feed), fed by every lane beside hfls; never rebuilt from
+            # hfls / L_v here.
             for _name, _src in (
                 ('tas', tas_field),
+                ('ts', ts_field),
+                ('siconc', siconc_np),
+                ('tos', tos_np),
                 ('ps', p_s_np),
                 ('pr', precip_np),   # CMOR kg/m2/s — native, no conversion
+                ('prsn', prsn_np),   # CMOR kg/m2/s — the frozen part of pr
                 ('psl', psl),
                 ('rlut', rlut_np),
                 ('rsut', rsut_np),
@@ -1784,13 +2091,32 @@ class DiagnosticCollector:
                 ('evspsbl', evspsbl_np),
                 ('rsutcs', rsutcs_np),
                 ('rlutcs', rlutcs_np),
+                ('rsds', rsds_np),
+                ('rsus', rsus_np),
+                ('rlds', rlds_np),
+                ('rlus', rlus_np),
             ):
-                if _src is None:
+                if _src is None or (not include_state and _name not in _FLUX_2D):
                     continue
                 r = self._regrid_to_latlon_2d(_src)
                 if r is not None:
                     fields_2d[_name] = r
-            if q_v_np is not None:
+            # rtmt (CMIP6 Amon, positive down) = rsdt - rsut - rlut from the
+            # three fed TOA fields; the regrid and the mean are linear, so
+            # this equals the difference of their published means.
+            if all(_n in fields_2d for _n in ("rsdt", "rsut", "rlut")):
+                fields_2d['rtmt'] = (fields_2d['rsdt'] - fields_2d['rsut']
+                                     - fields_2d['rlut'])
+            if include_state and snw_np is not None:
+                # ``area: mean where land``: land-weighted regrid, missing
+                # (NaN -> the writer's 1e20) where the target cell has no land.
+                _snw_w = self._regrid_to_latlon_2d(snw_np * f_land_np)
+                _f_w = self._regrid_to_latlon_2d(f_land_np)
+                if _snw_w is not None and _f_w is not None:
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        fields_2d['snw'] = np.where(
+                            _f_w > 0.0, _snw_w / _f_w, np.nan)
+            if include_state and q_v_np is not None:
                 cwv_field = np.asarray(
                     column_water_vapor(q_v_np, p_s_np, self.dsigma,
                                        dp=self._dp(p_s_np)))
@@ -1801,11 +2127,16 @@ class DiagnosticCollector:
             # ``collect`` path uses, so the MPAS lane cannot report a
             # different cloud cover for an identical state.  Skipped (not
             # zeroed) on a cloud-free run -- see ``_clt_percent``.
-            clt_field = self._clt_percent(T_np, p_s_np, q_v_np, q_c_np, q_i_np)
-            if clt_field is not None:
-                r = self._regrid_to_latlon_2d(clt_field)
-                if r is not None:
-                    fields_2d['clt'] = r
+            if include_state:
+                clt_field = self._clt_percent(
+                    T_np, p_s_np, q_v_np, q_c_np, q_i_np,
+                    cloud_fraction=cloud_fraction,
+                    conv_mass_flux_up=conv_mass_flux_up,
+                    conv_icwmr=conv_icwmr, lat_deg=lat_deg)
+                if clt_field is not None:
+                    r = self._regrid_to_latlon_2d(clt_field)
+                    if r is not None:
+                        fields_2d['clt'] = r
 
             # Cloud water paths (clwvi / clivi) from the model's OWN
             # diagnostic cloud fraction + RADIATIVE condensate — one
@@ -1835,12 +2166,9 @@ class DiagnosticCollector:
             # silently wrong number in exactly the obs comparison this feed
             # exists for.  (Today's ``_create_diagnostics`` config leaves all
             # three at their no-op defaults; the _replace makes that an
-            # invariant instead of an accident.)  Same instantaneous
-            # end-of-interval sampling as every state-derived field on this
-            # feed (the shared once-daily-00 UTC diurnal-alias caveat;
-            # labelled via ``cmip_snapshot_vars``).  Requires q_v (the
+            # invariant instead of an accident.) Requires q_v (the
             # RH-based fraction) and a cloud config; skipped otherwise.
-            if ((q_c_np is not None or q_i_np is not None)
+            if (include_state and (q_c_np is not None or q_i_np is not None)
                     and q_v_np is not None
                     and self._cloud_config is not None):
                 from legoesm.atmosphere.physics.clouds.cloud_fraction import (
@@ -1848,7 +2176,7 @@ class DiagnosticCollector:
                 )
                 _p_full_cl = jnp.asarray(self._p_full(p_s_np))
                 _dp_cl = jnp.asarray(self._dp(p_s_np))
-                _mass_cfg = self._cloud_config._replace(
+                _mass_cfg = self._cloud_config_for(cloud_fraction)._replace(
                     cloud_optics_inhomogeneity="constant",
                     cloud_inhomogeneity_factor=1.0,
                     cloud_partial_coverage_optics="none",
@@ -1863,6 +2191,9 @@ class DiagnosticCollector:
                     # still get clivi); both None keeps the fields absent.
                     q_cloud=None if q_c_np is None else jnp.asarray(q_c_np),
                     q_ice=None if q_i_np is None else jnp.asarray(q_i_np),
+                    **self._cam6_cloud_kwargs(
+                        cloud_fraction, conv_mass_flux_up, conv_icwmr,
+                        lat_deg, p_s_np, *np.shape(T_np)[-2:]),
                 )
                 self._cloud_paths_radiative = True
                 # Per-layer grid-mean paths [kg/m2] -> column path.
@@ -1875,20 +2206,43 @@ class DiagnosticCollector:
                     if r is not None:
                         fields_2d[_name] = r
 
+            # hur [%] (CMIP6 Amon): "relative humidity with respect to
+            # liquid water for T > 0 C, and with respect to ice for T < 0 C".
+            # q_v / q_sat on MODEL levels, q_sat the legoesm.thermo SPECIFIC
+            # saturation humidity (q_v, published as hus, is specific), then
+            # the same plev19 interpolation + regrid as ta/hus below.  The
+            # two curves meet at T_freeze (both 611.2 Pa), so the branch at
+            # exactly 0 C does not matter.  Owner decision 2026-10-28.
+            hur_np = None
+            if include_state and q_v_np is not None:
+                from legoesm.thermo import (
+                    saturation_specific_humidity,
+                    saturation_specific_humidity_ice,
+                )
+                _p_hur = jnp.asarray(self._p_full(p_s_np))
+                _T_hur = jnp.asarray(T_np)
+                _qs_hur = np.where(
+                    T_np >= _c.T_freeze,
+                    np.asarray(saturation_specific_humidity(_T_hur, _p_hur)),
+                    np.asarray(saturation_specific_humidity_ice(_T_hur, _p_hur)))
+                hur_np = 100.0 * q_v_np / _qs_hur
+
             # 3-D fields: model levels → plev19, then regrid.  The plev
             # interpolation is column-wise and works unchanged on native
             # (nCells, nlev) with p_s (nCells,).
             for _name, _src in (
                 ('ta', T_np),
                 ('hus', q_v_np),
+                ('hur', hur_np),
                 ('ua', u_east_np),
                 ('va', v_north_np),
                 # Pressure vertical velocity: same plev19 + regrid path as the
                 # rest, so subsidence becomes a published field instead of a
                 # continuity guess made downstream from monthly-mean winds.
                 ('wap', None if wap is None else np.asarray(wap)),
+                ('zg', zg_np),
             ):
-                if _src is None:
+                if _src is None or not include_state:
                     continue
                 _plev = self._interp_to_plev19(_src, p_s_np)
                 if _plev is None:
@@ -1900,12 +2254,13 @@ class DiagnosticCollector:
             # Daily: reuse the regridded 2-D fields + 850 hPa winds sliced from
             # the 3-D arrays (same index convention as collect()).
             if self._spatial_daily is not None:
-                for _name in ("tas", "pr", "psl"):
+                for _name in _DAILY_2D:
                     if _name in fields_2d:
                         daily_2d[_name] = fields_2d[_name]
                 _plev_sorted = np.sort(CMIP6_PLEV19)
                 _idx850 = int(np.argmin(np.abs(_plev_sorted - 85000.0)))
-                for _src_name, _dst in (("ua", "ua850"), ("va", "va850")):
+                for _src_name, _dst in (("ua", "ua850"), ("va", "va850"),
+                                        ("zg", "zg850")):
                     if (_src_name in fields_3d
                             and fields_3d[_src_name].shape[2] > _idx850):
                         daily_2d[_dst] = fields_3d[_src_name][:, :, _idx850]
@@ -1928,21 +2283,23 @@ class DiagnosticCollector:
                 raise ValueError(
                     "feed_cmip_accumulators_native: lat_deg has non-finite "
                     "values")
-            z2d['T_low'] = np.asarray(T_low)   # lowest model level, NOT 2 m tas
+            if include_state:
+                z2d['T_low'] = np.asarray(T_low)   # lowest model level, NOT 2 m tas
             if precip_np is not None:
                 z2d['precip'] = precip_np * 86400.0     # [mm/day], like collect()
-            if psl is not None:
+            if include_state and psl is not None:
                 z2d['psl'] = np.asarray(psl)
-            z3d['T'] = T_np
-            if u_east_np is not None:
-                z3d['u'] = u_east_np
-            if q_v_np is not None:
-                z3d['q_v'] = q_v_np * 1000.0             # [g/kg]
+            if include_state:
+                z3d['T'] = T_np
+                if u_east_np is not None:
+                    z3d['u'] = u_east_np
+                if q_v_np is not None:
+                    z3d['q_v'] = q_v_np * 1000.0             # [g/kg]
 
         # ================================================================
         # PHASE 2 — commit (cheap, shape-checked add_* only).  Flux fields
-        # commit under the interval-midpoint calendar bin, state snapshots
-        # under the endpoint bin (identical when flux_interval_days unset —
+        # commit under the interval-midpoint calendar bin, state samples
+        # under the caller-supplied hour bin (identical when flux_interval_days unset —
         # the split dicts are then committed in one call each; the
         # accumulators keep per-FIELD (sum, count) pairs, so a split commit
         # changes no mean).
@@ -1999,7 +2356,8 @@ class DiagnosticCollector:
                 self.monthly_accum.add_2d(doy, year, _state_z, lat_np)
             if _flux_z:
                 self.monthly_accum.add_2d(flux_doy, flux_year, _flux_z, lat_np)
-            self.monthly_accum.add_3d(doy, year, z3d, lat_np)
+            if z3d:
+                self.monthly_accum.add_3d(doy, year, z3d, lat_np)
             fed = True
 
         return fed
@@ -2039,6 +2397,7 @@ class DiagnosticCollector:
             rsdt=np.array(self.rsdt),
             hfss=np.array(self.hfss),
             hfls=np.array(self.hfls),
+            evspsbl=np.array(self.evspsbl),
             profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
             profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),
         )
@@ -2068,6 +2427,7 @@ class DiagnosticCollector:
         self.rsdt.clear()
         self.hfss.clear()
         self.hfls.clear()
+        self.evspsbl.clear()
         self.profiles_T.clear()
         self.profiles_qv.clear()
 
@@ -2136,12 +2496,10 @@ class DiagnosticCollector:
         if not data.get('days'):
             return
         lat, lon = self._cmip_target_latlon()
-        # Same honesty overrides as the end-of-run writer — without this
-        # the restart-chain path (which writes MOST day files on long
-        # runs) kept the misleading table defaults (codex-2 finding 4).
+        # Preserve hourly-extreme metadata on restart-chain flushes too.
         self.cf_writer.write_daily(
             data, lat=lat, lon=lon,
-            extra_attrs_by_var=self._daily_snapshot_attrs())
+            extra_attrs_by_var=self._daily_extreme_attrs())
 
     def finalize_cmip_fixed(self) -> None:
         """Write the CMOR ``fx`` table (areacella / sftlf / orog) if a CMIP
@@ -2193,6 +2551,9 @@ class DiagnosticCollector:
                 merged[prefix + key] = arr
         if not merged:
             return
+        if getattr(self.cf_writer, "require_centre_sampling_on_append", False):
+            from legoesm.io.cmor_output import LAT_SAMPLING_CENTRES
+            merged[_SIDECAR_SAMPLING_KEY] = np.array(LAT_SAMPLING_CENTRES)
         path = Path(path)
         tmp_path = path.parent / (path.name + ".tmp")
         try:
@@ -2225,6 +2586,18 @@ class DiagnosticCollector:
         }
         substates: dict[str, dict] = {prefix: {} for prefix in namespaced}
         with np.load(str(path), allow_pickle=False) as npz:
+            stamp = (str(npz[_SIDECAR_SAMPLING_KEY])
+                     if _SIDECAR_SAMPLING_KEY in npz.files else None)
+            from legoesm.io.cmor_output import (
+                LAT_SAMPLING_CENTRES, LatSamplingMismatchError)
+            if (stamp != LAT_SAMPLING_CENTRES and getattr(
+                    self.cf_writer, "require_centre_sampling_on_append", False)):
+                raise LatSamplingMismatchError(
+                    f"{path}: CMOR accumulators written before lat-lon output "
+                    "was sampled at its labelled cell centres (rows were "
+                    "pole-to-pole). Resuming would mix both grids in the open "
+                    "month. Resume with the code that wrote it, or delete the "
+                    "sidecar to drop the partial month.")
             for full_key in npz.files:
                 for prefix in namespaced:
                     if full_key.startswith(prefix):
@@ -2236,6 +2609,21 @@ class DiagnosticCollector:
             if accum is not None and sub:
                 accum.set_state(sub)
                 restored = True
+        if restored and not self.produces_tas:
+            buckets = [
+                *(self._spatial_monthly._data_2d.values()
+                  if self._spatial_monthly is not None else ()),
+                *(self._spatial_daily._data.values()
+                  if self._spatial_daily is not None else ()),
+            ]
+            if any("tas" in b for b in buckets):
+                raise ValueError(
+                    f"{path}: the restored CMOR accumulators hold 2 m "
+                    "temperature, but this run has surface_bulk_scheme='none' "
+                    "and produces none; resuming would publish a tas written "
+                    "under a different surface setting. Resume with the "
+                    "setting that wrote it, or delete the sidecar to drop the "
+                    "partial month.")
         return restored
 
     def save(self, output_dir: str | Path) -> None:
@@ -2263,6 +2651,7 @@ class DiagnosticCollector:
             rsdt=np.array(self.rsdt),
             hfss=np.array(self.hfss),
             hfls=np.array(self.hfls),
+            evspsbl=np.array(self.evspsbl),
             sigma=sigma,
             profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
             profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),
@@ -2317,83 +2706,22 @@ class DiagnosticCollector:
         )
         return lat, lon
 
-    def _snapshot_phase_text(self) -> str:
-        """Human text for the snapshot sampling phase (#1353 codex-10).
-
-        A whole-day cadence samples at a FIXED time of day, but that time is
-        00 UTC only when the run's day counter is integral — a fractional
-        ``start_day`` / ``--restart-start-day`` shifts it.  Derive it from
-        ``cmip_snapshot_phase_frac`` instead of asserting 00 UTC; say
-        "a fixed time of day" when the phase was not supplied.
-        """
-        frac = getattr(self, "cmip_snapshot_phase_frac", None)
-        if frac is None:
-            return "a fixed time of day"
-        frac = float(frac) % 1.0
-        if abs(frac) < 1e-9 or abs(frac - 1.0) < 1e-9:
-            return "00 UTC"
-        _sec = int(round(frac * 86400.0)) % 86400
-        if _sec == 0:                      # rounded across midnight
-            return "00 UTC"
-        return f"{_sec // 3600:02d}:{(_sec % 3600) // 60:02d} UTC"
-
-    def _daily_snapshot_attrs(self) -> dict | None:
-        """Per-var honesty overrides for the CMIP ``day`` table on the
-        snapshot-sampled feed (#1353 codex-1 MAJOR 3): tas/psl/ua850/va850
-        "daily means" are a single fixed-phase sample per diag interval and
-        tasmin/tasmax are extrema OF that sample — label ``time: point``.
-        ``pr`` is a true interval mean (per-step accumulator) and keeps the
-        table's ``time: mean``.  None when the feed is not snapshot-mode
-        (cube/lat-lon path, or sub-daily sampling)."""
-        if not self.cmip_snapshot_vars:
-            return None
-        _cad = float(getattr(self, "cmip_snapshot_cadence_days", 1.0))
-        # The day-table time axis is the shared writer's day-midpoint with
-        # whole-day bounds; the sample itself is taken at the interval END
-        # (00 UTC on the following day boundary).  Say so explicitly rather
-        # than re-time the axis, which would desynchronise this table from
-        # every other producer feeding the same writer (codex-3 MED).
-        # A cadence that is a whole number of days keeps a FIXED sampling
-        # phase (00 UTC).  A fractional one — e.g. dt=10000 s truncating the
-        # requested diag_days=1 to 8 steps = 0.926 d — DRIFTS through the
-        # day, so a day bucket can hold 0, 1 or 2 samples and the written
-        # value is their mean.  Do not claim "one sample at 00 UTC" there
-        # (codex-9).
-        if abs(_cad - round(_cad)) < 1e-9:
-            # Exactly one instantaneous sample lands in the day cell, so
-            # ``time: point`` is literally true (the extremes degenerate to
-            # that same sample).
-            _phase = self._snapshot_phase_text()
-            _pt = {"cell_methods": "time: point",
-                   "comment": (
-                       f"Single instantaneous sample per {_cad:g}-day diag "
-                       f"interval, taken at the interval END ({_phase}), not "
-                       f"at the recorded day midpoint (lean MPAS path).")}
-            _ext = {"cell_methods": "time: point",
-                    "comment": (
-                        f"Extremum of ONE instantaneous end-of-interval "
-                        f"sample ({_phase}) per {_cad:g}-day interval — NOT "
-                        f"a true daily extreme (lean MPAS path).")}
-        else:
-            # Drifting phase: a day cell holds 0, 1 or 2 samples and the
-            # written value is their MEAN, so ``time: point`` would be
-            # false; keep the table's mean/minimum/maximum cell_methods and
-            # let the comment disclose the sparse, drifting sampling.
-            _pt = {"comment": (
-                f"Mean of the 0-2 instantaneous samples that fell in this "
-                f"day: sampling is every {_cad:.6g} days at a DRIFTING "
-                f"phase (the integer step count truncates the requested "
-                f"cadence) — sparsely sampled, not a continuous daily mean "
-                f"(lean MPAS path).")}
-            _ext = {"comment": (
-                f"Extremum over the 0-2 instantaneous samples that fell in "
-                f"this day at a drifting {_cad:.6g}-day cadence — NOT a "
-                f"true daily extreme (lean MPAS path).")}
-        # ua850/va850 derive from the snapshot ua/va; all four state
-        # day-fields are snapshot-sampled under this mode.
-        out = {v: _pt for v in ("tas", "psl", "ua850", "va850")}
-        out.update({"tasmin": _ext, "tasmax": _ext})
-        return out
+    def _daily_extreme_attrs(self) -> dict | None:
+        """Per-variable daily file attributes: hourly-sampled tasmin/tasmax
+        and the MPAS-lane clt cloud disclosure."""
+        hourly = {}
+        if (self._spatial_daily is not None
+                and self._spatial_daily._extreme_max_count_ever > 0):
+            hourly = {
+                name: {"cell_methods": f"time: {method}",
+                       "comment": "Daily extremum of hourly instantaneous samples "
+                                  "(first model step at or after each hour)."}
+                for name, method in (("tasmin", "minimum"), ("tasmax", "maximum"))
+            }
+        # Daily clt carries the same disclosure as the monthly file.
+        if getattr(self, "_cloud_paths_radiative", False):
+            hourly["clt"] = {"comment": _CLT_NOTE}
+        return hourly or None
 
     def _write_cmip_daily_files(self) -> None:
         """Flush the daily accumulator to CMIP6 ``day`` NetCDF files."""
@@ -2405,7 +2733,7 @@ class DiagnosticCollector:
         lat, lon = self._cmip_target_latlon()
         self.cf_writer.write_daily(
             data, lat=lat, lon=lon,
-            extra_attrs_by_var=self._daily_snapshot_attrs())
+            extra_attrs_by_var=self._daily_extreme_attrs())
 
     def _write_cmip_fixed_files(self) -> None:
         """Write the CMIP6 ``fx`` file (orog / sftlf / areacella).
@@ -2503,46 +2831,6 @@ class DiagnosticCollector:
             time_mid = 0.5 * (day_start + day_end)
             time_bounds = (day_start, day_end)
 
-            snap_vars = self.cmip_snapshot_vars or ()
-            # CF-truthful label for a monthly mean built from sparse
-            # instantaneous samples (#1353 codex-1 BLOCKER 2: plain
-            # ``time: point`` would claim a single instant while the value
-            # IS a mean — of point samples, not of the continuous field).
-            # At exactly daily cadence CF has a precise two-part encoding;
-            # at coarser cadences no CF string fits, so the table
-            # ``time: mean`` stands and the comment carries the truth
-            # (codex-2 finding 3).
-            _cad = float(getattr(self, "cmip_snapshot_cadence_days", 1.0))
-            _phase_txt = self._snapshot_phase_text()
-            if _cad == 1.0:
-                _snap_attrs = {
-                    "cell_methods":
-                        "time: point within days time: mean over days",
-                    "comment": (
-                        f"Monthly mean of once-daily instantaneous samples "
-                        f"at {_phase_txt} (lean MPAS path, diag_days=1); "
-                        f"diurnally aliased — not a continuous time mean."),
-                }
-            elif abs(_cad - round(_cad)) < 1e-9:
-                _snap_attrs = {
-                    "comment": (
-                        f"Monthly mean of instantaneous samples taken once "
-                        f"per {_cad:g} days at a fixed phase ({_phase_txt}; "
-                        f"lean MPAS path); sparsely sampled — not a "
-                        f"continuous time mean."),
-                }
-            else:
-                # Fractional cadence: the sampling phase DRIFTS through the
-                # day, so no fixed-phase claim (codex-9).
-                _snap_attrs = {
-                    "comment": (
-                        f"Monthly mean of instantaneous samples taken every "
-                        f"{_cad:.6g} days at a DRIFTING phase (the integer "
-                        f"step count truncates the requested cadence; lean "
-                        f"MPAS path); sparsely sampled — not a continuous "
-                        f"time mean."),
-                }
-
             # Semantics notes for the MPAS-lane cloud trio.  The collector
             # recomputes the cloud from its OWN ``_cloud_config``, which
             # ModelDriver._create_diagnostics builds from the same
@@ -2553,12 +2841,8 @@ class DiagnosticCollector:
             # ARE threaded, so the floor formula matches radiation's.)  Those
             # two divergences are what the comment discloses; closing them
             # needs radiation to export its own CloudProperties, a separate
-            # change.  Keyed on
-            # ``_cloud_paths_radiative`` — the flag the NATIVE feed sets when
-            # it derives the trio from the radiation cloud diagnosis — NOT on
-            # ``snap_vars``: the sampling label and the water-path definition
-            # are independent, and a sub-daily MPAS cadence (which sets no
-            # cmip_snapshot_vars) must still say WHICH water path it reports.
+            # change. Keyed on ``_cloud_paths_radiative``, which the native
+            # feed sets when it derives the paths from cloud diagnosis.
             # The cube-lane collect() clwvi/clivi integrate the PROGNOSTIC
             # condensate q_c+q_i+q_s+q_g, never set the flag, and keep the
             # bare table attrs.
@@ -2585,23 +2869,14 @@ class DiagnosticCollector:
                 "clivi": ("DIAGNOSTIC ice water path: the cloud-ice share of "
                           "the clwvi column integral above, with the same "
                           "inclusions and exclusions."),
-                "clt": ("Stratiform layer cloud fraction (model's own "
-                        "diagnostic scheme, convective add-on excluded) "
-                        "reduced by maximum-random vertical overlap."),
+                "clt": _CLT_NOTE,
             }
             _notes_on = getattr(self, "_cloud_paths_radiative", False)
 
             def _attrs_for(var_name):
-                _base = _snap_attrs if var_name in snap_vars else None
-                _note = _cloud_notes.get(var_name) if _notes_on else None
-                if _note is None:
-                    return _base
-                if _base is None:
-                    return {"comment": _note}
-                _a = dict(_base)
-                _a["comment"] = (_a["comment"] + " " + _note
-                                 if "comment" in _a else _note)
-                return _a
+                if _notes_on and var_name in _cloud_notes:
+                    return {"comment": _cloud_notes[var_name]}
+                return None
 
             for key, arr in data.items():
                 if not key.startswith("field_2d_"):
@@ -2644,8 +2919,6 @@ class DiagnosticCollector:
                         lat=lat,
                         lon=lon,
                         plev=plev,
-                        extra_attrs=(
-                            _snap_attrs if var_name in snap_vars else None),
                     )
                 except (KeyError, ValueError):
                     pass

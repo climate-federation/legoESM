@@ -1,6 +1,6 @@
 #!/bin/bash -l
 #SBATCH --job-name=ovl_hlo
-#SBATCH --account=bd1179_gpu
+#SBATCH --account=bb1596_gpu
 #SBATCH --partition=gpu-devel
 #SBATCH --nodes=1
 #SBATCH --ntasks=2

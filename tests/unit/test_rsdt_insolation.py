@@ -2,11 +2,11 @@
 
 The CMOR ``rsdt`` (TOA incident shortwave) diagnostic must report the
 PRESCRIBED TOA insolation the radiation solver is given — ``S_0·cos(SZA)``
-(diurnal) / the daily-mean / RCE insolation — NOT the quadratically clamped
-top-halo SW flux.  ``_replace_top_flux`` (``two_stream.py``) caps that
-top-of-atmosphere SW down flux ~15% below the true TOA insolation, so reading
-``rad_out.sw_flux_down[:, 0]`` for ``rsdt`` is biased low.  The fix threads the
-prescribed insolation onto a new ``RadiationOutput.toa_insolation`` field.
+(diurnal) / the daily-mean / RCE insolation — its own boundary condition,
+not a flux read back out of the solver (at the time of #620 the top-halo SW
+flux was a clipped extrapolation ~15% low; that overwrite is gone, but the
+boundary condition remains the exact definition).  The fix threads the
+prescribed insolation onto a ``RadiationOutput.toa_insolation`` field.
 
 These fast CPU unit tests pin, WITHOUT a full model run or an RRTMGP g-point
 compile (gray solver + ``_compute_insolation`` only):

@@ -12,7 +12,7 @@ exercises the full atmospheric physics pipeline on a single
 
 Issue: [#277](https://github.com/climate-federation/legoESM/issues/277).
 
-Source: `src/legoesm/atmosphere/scm.py` (`SingleColumnModel`).
+Source: `packages/atmosphere/legoesm/atmosphere/forcing/scm/scm.py` (`SingleColumnModel`).
 Demo:   `scripts/matrix/run_scm_test_matrix.py rce` (per-case modules under `scripts/matrix/scm/`).
 
 ## Why an SCM?
@@ -44,7 +44,7 @@ equilibrium near 200 K.
 
 ```python
 import jax.numpy as jnp
-from legoesm.atmosphere.scm import SingleColumnModel
+from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 from legoesm.atmosphere.physics import (
     PhysicsConfig, RadiationConfig, TurbulenceConfig,
     ConvectionConfig, MicrophysicsConfig,
@@ -53,7 +53,7 @@ from legoesm.atmosphere.physics import (
 cfg = PhysicsConfig(
     radiation=RadiationConfig(scheme="gray"),
     turbulence=TurbulenceConfig(scheme="louis"),
-    convection=ConvectionConfig(scheme="simple_mass_flux"),
+    convection=ConvectionConfig(scheme="mass_flux"),
     microphysics=MicrophysicsConfig(scheme="kessler"),
 )
 

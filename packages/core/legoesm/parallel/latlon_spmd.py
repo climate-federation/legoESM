@@ -1356,12 +1356,21 @@ def apply_pole_end_masks(field, masks, offset: int = 0):
     applied via ``jnp.where`` so the same compiled body is bit-correct on every
     band (south pole, north pole, or interior cut).
     """
+    # Row-index selects rather than ``.at[row].set`` + a where over the
+    # whole copy: both fuse into the producer instead of costing a pass.
     south_mask, north_mask = masks
     n = field.shape[0]
-    z_south = field.at[offset].set(jnp.zeros_like(field[offset]))
-    out = jnp.where(south_mask, z_south, field)
-    z_north = out.at[n - 1 - offset].set(jnp.zeros_like(out[n - 1 - offset]))
-    out = jnp.where(north_mask, z_north, out)
+    if not 0 <= offset < n:
+        raise ValueError(
+            f"apply_pole_end_masks: offset {offset} outside the {n} rows")
+    if jnp.ndim(south_mask) != 0 or jnp.ndim(north_mask) != 0:
+        raise ValueError(
+            "apply_pole_end_masks: masks must be scalar booleans, got shapes "
+            f"{jnp.shape(south_mask)} and {jnp.shape(north_mask)}")
+    i = jnp.arange(n).reshape((-1,) + (1,) * (field.ndim - 1))
+    zero = jnp.zeros((), field.dtype)
+    out = jnp.where(south_mask & (i == offset), zero, field)
+    out = jnp.where(north_mask & (i == n - 1 - offset), zero, out)
     return out
 
 

@@ -243,76 +243,11 @@ def fv_scalar_advection_latlon(q, u, v, grid, limiter=True):
 # PPM-compatible gradients
 # ==============================================================================
 
-def fv_gradient_lon(q, grid):
-    """PPM-compatible longitude gradient using 4th-order edge values.
-
-    Computes dq/dx at cell centers by differencing PPM edge values
-    at the left and right cell boundaries.
-
-    Parameters
-    ----------
-    q : jax.Array, shape (n_lat, n_lon)
-    grid : LatLonGrid
-
-    Returns
-    -------
-    jax.Array, shape (n_lat, n_lon)
-    """
-    q_pad = pad_halo_latlon(q, halo=2)
-
-    # Strip latitude halo
-    q_strip = q_pad[2:-2, :]  # (n_lat, n_lon+4)
-
-    # Transpose for PPM along longitude
-    q_t = q_strip.T  # (n_lon+4, n_lat)
-    q_hat_t = ppm_edge_values(q_t)  # (n_lon+3, n_lat)
-
-    # Interior edges: n_lon+1
-    q_edges_t = q_hat_t[1:-1, :]  # (n_lon+1, n_lat)
-
-    # Gradient: (right - left) / cell_width
-    dq_t = q_edges_t[1:, :] - q_edges_t[:-1, :]  # (n_lon, n_lat)
-
-    # grid.dx spans 2 cells, single-cell = dx/2
-    return dq_t.T / (grid.dx / 2.0)
-
-
-def fv_gradient_lat(q, grid):
-    """PPM-compatible latitude gradient using 4th-order edge values.
-
-    Parameters
-    ----------
-    q : jax.Array, shape (n_lat, n_lon)
-    grid : LatLonGrid
-
-    Returns
-    -------
-    jax.Array, shape (n_lat, n_lon)
-    """
-    q_pad = pad_halo_latlon(q, halo=2)
-
-    # Strip longitude halo
-    q_strip = q_pad[:, 2:-2]  # (n_lat+4, n_lon)
-
-    # axis=-2 is already latitude
-    q_hat = ppm_edge_values(q_strip)  # (n_lat+3, n_lon)
-
-    # Interior edges
-    q_edges = q_hat[1:-1, :]  # (n_lat+1, n_lon)
-
-    # Gradient: (right - left) / cell_width
-    dq = q_edges[1:, :] - q_edges[:-1, :]  # (n_lat, n_lon)
-
-    # grid.dy spans 2 cells, single-cell = dy/2 (broadcast over lon).
-    return dq / (grid.dy[:, None] / 2.0)
-
-
 def fv_gradient_lon_3d(q_3d, grid, padded=None):
     """3D-native PPM-compatible longitude gradient.
 
-    Same numeric algorithm as :func:`fv_gradient_lon` but with one
-    halo pad + one PPM reconstruction shared across all vertical
-    levels — saves ``nlev`` redundant halo pads per call.
+    PPM-compatible longitude gradient: one halo pad + one PPM
+    reconstruction shared across all vertical levels.
 
     Parameters
     ----------
@@ -343,9 +278,9 @@ def fv_gradient_lon_3d(q_3d, grid, padded=None):
 def fv_gradient_lat_3d(q_3d, grid, padded=None):
     """3D-native PPM-compatible latitude gradient.
 
-    Same numeric algorithm as :func:`fv_gradient_lat` but with one
-    halo pad + one PPM reconstruction shared across all vertical
-    levels.  Optional ``padded=`` skips the internal halo pad — see
+    PPM-compatible latitude gradient: one halo pad + one PPM
+    reconstruction shared across all vertical levels.  Optional
+    ``padded=`` skips the internal halo pad — see
     :func:`fv_gradient_lon_3d` for usage.
 
     Parameters
@@ -430,23 +365,3 @@ def cgrid_fv_flux_divergence_latlon(q, u_face, v_face, grid, limiter=True):
     return -(net_lon + net_lat) / grid.area
 
 
-def _cgrid_velocity_divergence(u_face, v_face, grid):
-    """Velocity divergence from C-grid face velocities (no PPM needed).
-
-    For q=1 the upwind face value is always 1.0, so the flux divergence
-    reduces to a simple velocity divergence without halo/PPM overhead.
-
-    Returns
-    -------
-    jax.Array, shape (n_lat, n_lon)
-    """
-    R = grid.radius
-    dlon = grid.dlon
-    hy = (grid.dy * 0.5)[:, None]                            # (n_lat, 1)
-    # Band-correct v-face metric (see fv_flux_divergence_latlon).
-    hx_iface = R * dlon * grid.cos_lat_v[:, None]
-
-    net_lon = hy * (u_face[:, 1:] - u_face[:, :-1])
-    net_lat = hx_iface[1:, :] * v_face[1:, :] - hx_iface[:-1, :] * v_face[:-1, :]
-
-    return (net_lon + net_lat) / grid.area

@@ -76,6 +76,9 @@ def _find(data_dir: str, kind: str, code: str, date: str, *, monthly: bool) -> s
     return matches[0]
 
 
+#: GRIB param code of the surface geopotential in the archive's invariant file.
+_INVARIANT_Z_CODE = "128_129_z"
+
 #: GRIB param codes for the AMIP lower-boundary fields in the d633006 sfc archive.
 _AMIP_SST_CODE = "128_034_sstk"   # SST [K]
 _AMIP_SIC_CODE = "128_031_ci"     # sea-ice concentration [fraction, 0-1]
@@ -255,7 +258,8 @@ def open_local_era5_dataset(data_dir: str, date: str) -> Any:
     """Merge the local NCAR-RDA ll025 ERA5 for ``date`` (``YYYYMMDD``) into one dataset.
 
     Returns an ``xarray.Dataset`` with ``t``/``u``/``v``/``q`` (level, latitude,
-    longitude) + ``sp``/``skt`` (latitude, longitude) over the day's 24 hourly times —
+    longitude) + ``sp``/``skt`` (latitude, longitude) over the day's 24 hourly times
+    (+ static ``geopotential_at_surface`` when the invariant ``128_129_z`` file is staged) —
     ready for ``load_era5_slice(config, time_idx, ds=...)``.  Raises ``FileNotFoundError``
     (a missing required chunk) or ``ValueError`` (a malformed file) rather than silently
     dropping a field.
@@ -271,7 +275,22 @@ def open_local_era5_dataset(data_dir: str, date: str) -> Any:
     # The single-level files are MONTHLY chunks; align them to the day's pl times so the
     # merged dataset has one consistent time axis (load_era5_slice isel's into it).
     sfc = sfc.sel(time=pl.time)
-    # join="override" forces pl's lat/lon labels onto sfc — SAFE only because both come
-    # from the SAME ll025 archive (identical grid); it would mis-LABEL (not re-grid) sfc
-    # if the two ever used different lat/lon grids (codex-review iter 414).
-    return xr.merge([pl, sfc], compat="override", join="override")
+    parts = [pl, sfc]
+    # Surface geopotential: the archive's INVARIANT file (time-independent, one record),
+    # when staged in the same directory.  Without it the loader refuses the store (flat
+    # terrain + real p_s is non-hydrostatic), which stays the message for an archive that
+    # lacks it.  More than one match raises, as for every other chunk.
+    z_files = sorted(glob.glob(f"{data_dir}/e5.oper.invariant.{_INVARIANT_Z_CODE}.ll025*.nc"))
+    if len(z_files) > 1:
+        raise ValueError(
+            f"open_local_era5_dataset: {len(z_files)} surface-geopotential invariant files "
+            f"in {data_dir!r} (expected at most one): {z_files}. Remove the duplicate.")
+    if z_files:
+        z = _open_one(z_files[0], "geopotential_at_surface")   # Z [m^2/s^2], not height
+        if "time" in z.dims:
+            z = z.isel(time=0, drop=True)
+        parts.append(z)
+    # join="override" forces pl's lat/lon labels onto sfc (and z) — SAFE only because all
+    # come from the SAME ll025 archive (identical grid); it would mis-LABEL (not re-grid)
+    # if they ever used different lat/lon grids (codex-review iter 414).
+    return xr.merge(parts, compat="override", join="override")

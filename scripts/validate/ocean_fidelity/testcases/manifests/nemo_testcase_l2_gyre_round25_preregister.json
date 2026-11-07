@@ -1,0 +1,43 @@
+{
+  "format": "nemo-testcase-l2-gyre-round25-preregister-v1",
+  "date": "2026-09-05",
+  "starting_tip": "e80dd94b8276",
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "asked": {
+    "rule11_retraction": "Stage-2 and kt1 cannot consume carried Kbb; mark the earlier owner claim REFUTED_AND_ILL_POSED.",
+    "identity_card_surface": "Every NEMO identity recipe carries uu_b/vv_b; no non-NEMO state gains array leaves.",
+    "negative_tests": [
+      "stage-1 S-21 and external seed read last-step Kbb, stages 2-3 read this-step Nnn",
+      "external mode is the only live dynamics writer",
+      "non-NEMO recipes retain None leaves and unchanged state values",
+      "restart fallback is entered only when the pair is absent, never when parsing fails"
+    ],
+    "stage2_walk": "Walk EOS/HPG, dyn_vor, dyn_adv accumulation and the stage update in stprk3_stg.F90 order.",
+    "crosscard_walk": "Localize the one LOCK U bit and seven OVERFLOW U bits at the external Kaa and later Kbb-consumer boundaries."
+  },
+  "stage2_preregister": {
+    "target_u_normalized_max_abs": 2.1986806906376666e-15,
+    "target_v_normalized_max_abs": 2.2380914396075147e-15,
+    "ordered_candidates": [
+      "Krhs immediately after dyn_hpg insertion (stprk3_stg.F90:321-324)",
+      "Krhs immediately after dyn_vor insertion (stprk3_stg.F90:326-327)",
+      "Krhs immediately after dyn_adv insertion (stprk3_stg.F90:329-334)",
+      "vector-velocity update association (stprk3_stg.F90:365-369)",
+      "barotropic-mean replacement (stprk3_stg.F90:439-445)"
+    ],
+    "prediction": "The first non-bit statement is the in-place HPG insertion into Krhs: an individually AT-BAR trend does not certify NEMO's written accumulation association.",
+    "confirm": "The predicted boundary is confirmed only if all prior stage-2 operands are bit-exact and the after-HPG Krhs is the first unequal frame.",
+    "refute": "Any prior unequal operand or an exact after-HPG Krhs refutes the prediction; report the first measured boundary and do not retune the label."
+  },
+  "external_mode_preregister": {
+    "prediction": "Given equal entry operands, the first LOCK/OVERFLOW departure is the weighted external Kaa finalization/division at dynspg_ts.F90:841-847,878-891, before the later Kbb seed or S-21 read.",
+    "confirm": "Every earlier substep frame is bit-exact and the finalized U Kaa is the first unequal operand.",
+    "refute": "Any unequal substep or coefficient operand before finalization refutes the prediction."
+  },
+  "forbidden": [
+    "C1D result claim from flagged probe worktree",
+    "shipped NEMO edit or sandbox NEMO run",
+    "per-card numerical arm",
+    "push or merge"
+  ]
+}

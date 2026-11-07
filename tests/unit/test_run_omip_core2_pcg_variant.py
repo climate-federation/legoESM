@@ -62,7 +62,7 @@ def test_guard_rejects_explicit_solver_combo():
 
 # ------------------------------------------------- config-field existence
 
-def test_config_fields_exist_with_standard_default():
+def test_config_fields_exist_with_measured_defaults():
     """The flat-override key must be a REAL field on both config surfaces
     (a typo'd _ovr key would only fail at run time) with the production
     default 'standard' (single_reduce stays opt-in — regime-dependent)."""
@@ -74,7 +74,9 @@ def test_config_fields_exist_with_standard_default():
 
     from legoesm.ocean.mpas_config import MPASOceanConfig
 
-    assert MPASOceanConfig().barotropic_implicit_pcg_variant == "standard"
+    # MPAS: resolved per JAX backend when the model is built (owner decision
+    # 2026-10-04; table MPAS_BAROTROPIC_PCG_DEFAULTS in mpas_config.py).
+    assert MPASOceanConfig().barotropic_implicit_pcg_variant is None
 
 
 # ------------------------------------------------- builder threading
@@ -131,7 +133,7 @@ def test_build_mpas_ocean_threads_variant(monkeypatch, capsys):
     def _fake_setup(*a, **k):
         return (object(), object(), cfg0, object(), None)
 
-    def _stop_mesh_read(path):
+    def _stop_mesh_read(path, **_kw):
         raise _Stop
 
     monkeypatch.setattr(run_omip, "_create_setup", _fake_setup)
@@ -139,10 +141,11 @@ def test_build_mpas_ocean_threads_variant(monkeypatch, capsys):
     with pytest.raises(_Stop):
         core2.build_mpas_ocean(5, 6000.0, "dummy_mesh.nc", level=5,
                                barotropic_solver="explicit_substep",
-                               barotropic_pcg_variant="single_reduce")
+                               barotropic_pcg_variant="standard")
     out = capsys.readouterr().out
+    # the NON-default value, so the print proves the flag was threaded
     assert "barotropic_implicit_pcg_variant" in out
-    assert "single_reduce" in out
+    assert "'standard'" in out
     # codex r1 #1: the MAIN call site forwards --barotropic-solver to the
     # MPAS builder too — lock the builder-side threading for BOTH keys.
     assert "'barotropic_solver': 'explicit_substep'" in out

@@ -157,3 +157,31 @@ class TestForcingSelectorValidation:
         ExperimentConfig(
             experiment="historical", ghg_forcing="external", ghg_file="g.nc",
         ).validate_strict()
+
+
+def test_validate_strict_accepts_a_nonexistent_land_mask_path():
+    """``land_mask_path`` is checked for TRUTHINESS, never opened.
+
+    This is a contract test, and its whole purpose is to be the thing that
+    breaks first if anyone hardens validation to stat the path. Many CLI
+    fixtures name a land-mask file that does not exist (e.g. ``lsm.nc`` in
+    tests/unit/test_run_amip_cli.py) purely to give a land tile a land source,
+    because the alternative -- an idealized ``flat`` topography with no mask --
+    has f_land == 0 everywhere and makes every land flag under test inert.
+
+    Hardening this to require a real file is a defensible change. What is not
+    defensible is discovering it as fourteen FileNotFoundErrors in a CLI test
+    file with no explanation. Break THIS test instead: its name is the reason,
+    and it lives next to the validation it constrains.
+    """
+    cfg = ExperimentConfig(
+        slab_land_active=True,
+        land_mask_path="definitely-not-a-real-file-9d2f1.nc",
+    )
+    assert cfg.validate_strict() is None
+
+    # And the guard it is standing in for really does fire without a mask, so
+    # this test cannot pass for the wrong reason.
+    import pytest
+    with pytest.raises(ValueError, match="NO land anywhere"):
+        ExperimentConfig(slab_land_active=True).validate_strict()

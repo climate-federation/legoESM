@@ -40,7 +40,13 @@ first):
      4.11e-3 Sv here (ACC of the restart's now level 61.946220 Sv against its
      before level 61.950334 Sv), so the Euler start injects about 2.06e-3 Sv at
      t=0. This one DOES grow, and it is the dominant term at long lead.
-  3. it skips NEMO's step-1 after-level reconciliation (#1640 finding 3).
+  3. it USED to skip NEMO's step-1 after-level reconciliation (#1640 finding
+     3) and to drop the whole surface tracer tendency on that step. #1729
+     closed both: the Euler start is now a parameterisation of the ordinary
+     step, not an early return. CONSEQUENCE, so nobody reads an old number as
+     comparable -- ``--legacy-euler-start`` still selects the Euler START
+     MODE, but its step 1 is no longer the step 1 those pre-2026-08-24
+     artifacts were produced with.
 
 RETRACTED: an earlier version of this docstring said the Euler trajectory "IS
 the two-point running mean of the true one" full stop. That both OVERSTATES the
@@ -1559,17 +1565,13 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
 
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
     if os.environ.get("DINO_NEMO_KMM_DIVISOR") is not None:
-        # #1226 W1: NEMO-faithful implicit-solve gradient divisor (trazdf.F90:
-        # 219-220 e3w(...,Kmm), NOW/pre-solve thickness) vs legoESM's default
-        # AFTER-solve midpoint divisor. LatLonCGridOceanConfig field, set on
-        # mc post-construction (same pattern as dino_year_screen_fullframe.py).
-        _v = os.environ["DINO_NEMO_KMM_DIVISOR"]
-        if _v not in ("0", "1"):
-            raise SystemExit(
-                f"Unknown DINO_NEMO_KMM_DIVISOR={_v!r}: expected '0' or '1'")
-        # mc is a NamedTuple (LatLonCGridOceanConfig), not a dataclass -> _replace.
-        mc = mc._replace(implicit_vmix_e3t_now_divisor=(_v == "1"))
-        print(f"ABLATION: implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+        raise SystemExit(
+            "DINO_NEMO_KMM_DIVISOR is GONE. NEMO's e3w(Kmm) implicit-solve "
+            "divisor (trazdf.F90:219-221, dynzdf.F90:200-203) is no longer a "
+            "flag: it is unbranched inside the NEMO identity "
+            'zdf_implicit_solver_evaluation="nemo_literal", which this card '
+            "already selects. Compare across commits, not across this knob "
+            "(docs/ocean/fidelity/dino_zdf_divisor_arm_receipt.md).")
     # #1492 P2: NEMO-faithful step-composition A/B (docs/ocean/fidelity/
     # nemo_mlf_step_transcription_spec.md resolved decision 2). Default "" =
     # legacy (outer_integrator="leapfrog", unchanged); "nemo_mlf" routes to
@@ -1582,16 +1584,17 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
             raise SystemExit(
                 f"Unknown DINO_OUTER_INTEGRATOR={_OI!r}: expected "
                 "'leapfrog' or 'nemo_mlf'")
-        # nemo_mlf HARD-REQUIRES the NEMO e3w(Kmm) divisor at construction
-        # (spec resolved decision 4) -- auto-force it so the env knob alone
-        # is sufficient without also setting DINO_NEMO_KMM_DIVISOR.
+        # nemo_mlf HARD-REQUIRES the NEMO implicit-ZDF identity at
+        # construction (spec resolved decision 4; it carries NEMO's e3w(Kmm)
+        # divisor) -- auto-force it so the env knob alone is sufficient.
         mc = mc._replace(
             outer_integrator=_OI,
-            implicit_vmix_e3t_now_divisor=(
-                True if _OI == "nemo_mlf"
-                else mc.implicit_vmix_e3t_now_divisor))
+            zdf_implicit_solver_evaluation=(
+                "nemo_literal" if _OI == "nemo_mlf"
+                else mc.zdf_implicit_solver_evaluation))
         print(f"ABLATION: outer_integrator={mc.outer_integrator} "
-              f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+              "zdf_implicit_solver_evaluation="
+              f"{mc.zdf_implicit_solver_evaluation}")
     print(f"barotropic_diffusion_alpha={mc.barotropic.barotropic_diffusion_alpha} "
           f"barotropic_face_depth={mc.barotropic.barotropic_face_depth} "
           f"zdf_drag_in_matrix={mc.zdf_drag_in_matrix} "
@@ -2413,8 +2416,12 @@ def _parse_args(argv=None):
                         "half a step at every frequency AND injects a "
                         "permanent perturbation of half a leap-frog step of "
                         "tendency (~2.06e-3 Sv of circumpolar transport on the "
-                        "day-180 restart), and it skips NEMO's step-1 "
-                        "after-level reconciliation. Prints a loud banner.")
+                        "day-180 restart). Prints a loud banner. NOTE "
+                        "(#1729): it no longer skips NEMO's step-1 after-level "
+                        "reconciliation -- the Euler start now runs the same "
+                        "body every other step runs -- so this flag reproduces "
+                        "the START MODE of pre-2026-08-24 arms, NOT their "
+                        "numbers.")
     p.add_argument("--vmix-scheme", default=None,
                     help="override DINOConfig.vmix_scheme (e.g. 'constant' for "
                          "the #1317 TKE-vs-constant-mixing discriminator); "

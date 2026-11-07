@@ -83,7 +83,7 @@ centralized drift convention in `legoesm.diagnostics.conservation_drift`
 tolerances in one `CONS_THRESH`:
 
 - `mass_gate` (ocean/sea-ice → volume), `energy_gate` (ocean → heat content),
-  `moisture_gate`, `aam_gate`, `heat_gate`, `salt_gate`
+  `heat_gate`, `salt_gate`
 - `benchmark_error_gate` (analytic L2/Linf), `finite_gate` (NaN/Inf crash check)
 
 Feed them the *scalar timeseries* you compute from
@@ -107,9 +107,13 @@ JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/atmosphere/dycore/regression/ 
 
 Layered on legoESM's **existing** reproducibility core (do not reinvent it):
 `legoesm run <config.yaml>` writes `run_manifest.json` (resolved config +
-`state_digest` + `git_hash` + jax/numpy versions + platform), and `legoesm
-reproduce <manifest> --check` does a **bit-identical** re-run. That manifest is a
-superset of the lesommer `experiment.tag`.
+`state_digest` + legoESM commit + jax/numpy versions + platform), and `legoesm
+reproduce <manifest> --check` re-runs it and compares the final-state digest
+(a bitwise match can only be expected on the same software, hardware and
+device layout). Known
+gaps — physics-scheme parameters not recorded, drivers without a manifest, no
+commit check on replay, no input checksums — are listed in
+`docs/architecture/reproducibility.md`.
 
 The harness adds the *intent/ergonomics* layer:
 
@@ -125,7 +129,8 @@ The harness adds the *intent/ergonomics* layer:
   intent). Strict-validates *before* writing (bad override fails fast).
 - **`scripts/experiment/validate_templates.py [--write-status]`** — loads every
   template through the same `Config.from_yaml(...).to_experiment_config().validate_strict()`
-  path `legoesm run` uses; regenerates `project_status.md`.
+  path `legoesm run` uses (a `setup:` template goes through the shared matrix-case
+  selector instead); regenerates `project_status.md`.
 - **`scripts/experiment/fetch_data.py check|fetch <template>`** — resolves a
   template's `experiment.data` against `config/data_catalog.yaml` + the machine
   `data_root`; idealized templates need nothing.
@@ -136,18 +141,26 @@ The harness adds the *intent/ergonomics* layer:
 # idealized (no data)
 python scripts/experiment/fetch_data.py check 2d/williamson2_sw
 python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2 --output-dir ./runs/w2
-cd ./runs/w2 && bash run.sh
+(cd ./runs/w2 && bash run.sh)
 
-# higher resolution + longer
-python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2hi --output-dir ./runs/w2hi \
+# longer (shallow-water templates run the matrix case: besides setup.name/grid and
+# output.path, only setup.duration_days, setup.resolution and setup.quick can be set,
+# and no run_manifest.json is written)
+python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2long --output-dir ./runs/w2long \
+    -o setup.duration_days=10
+
+# higher resolution + longer (a `legoesm run` template: any config field is overridable)
+python scripts/experiment/init_experiment.py 3d_idealized/held_suarez --name hshi --output-dir ./runs/hshi \
     -o grid.resolution=96 -o time.duration_hours=240
 
-# operational (needs data)
-python scripts/experiment/fetch_data.py fetch coupled/amip
-python scripts/experiment/init_experiment.py coupled/amip --name amip1 --output-dir ./runs/amip1
+# data-gated template (the one template with a data list; the run itself is
+# idealized — for AMIP use config/amip/amip_production.yaml via run_amip.py)
+python scripts/experiment/fetch_data.py fetch 3d_idealized/hydrostatic_gray_1yr
+python scripts/experiment/init_experiment.py 3d_idealized/hydrostatic_gray_1yr --name hs1 --output-dir ./runs/hs1
 
-# reproduce any past run from its manifest
-legoesm reproduce ./runs/w2/<output>/run_manifest.json --check
+# reproduce a past `legoesm run` run from its manifest (not the matrix-case templates)
+(cd ./runs/hshi && bash run.sh)
+legoesm reproduce ./runs/hshi/output/held_suarez/run_manifest.json --check
 ```
 
 ## 5. Source-guardrail harness (AI-assisted-dev tripwires)
@@ -239,9 +252,65 @@ mpi-nightly,claude-code-review}.yml`).
 4. **New machine** → add `config/machines/<name>.yaml` with `hostnames` patterns.
 5. **New dataset** → add it to `config/data_catalog.yaml`.
 
+## Running CI's test jobs locally
+
+`pytest tests/` collects about 58,000 tests. That is far more than CI runs, and it
+can take most of a day on a laptop. To check a change against what CI checks, run
+the test steps of `.github/workflows/ci.yml` directly. Use the precision each job
+sets: the unit tier and the restart and integration smoke jobs do not set
+`JAX_ENABLE_X64` (but hundreds of unit modules, e.g. `test_zarr_checkpoint.py`,
+enable x64 at import, so a full unit run executes with x64 on); the Fortran-fidelity
+job (top-level tests, SFNO restart, FV3 native grid) and the visual-regression job
+set `JAX_ENABLE_X64=1`.
+
+```bash
+export JAX_PLATFORMS=cpu   # needed on Apple Silicon when the mps extra is installed
+
+# unit-tests (no JAX_ENABLE_X64; x64 still switches on at collection)
+.venv/bin/python -m pytest tests/unit/ --timeout=300 \
+    -k "not test_coupler_with_3d_ocean_fc_gram" --tb=short -q
+
+# top-level-fidelity-tests (x64)
+JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/test_*.py --timeout=300 \
+    --tb=short -q -n 4 --dist loadfile
+
+# SFNO restart tests (CI runs them in their own x64 step)
+JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/unit/test_sfno_refuses_latlon_start.py \
+    tests/unit/test_latlon_face_wind_restart.py --timeout=600 --tb=short -q
+
+# restart-smoke
+.venv/bin/python -m pytest tests/unit/test_cmor_experiments_restart.py \
+    tests/unit/test_zarr_checkpoint.py -v --tb=short
+
+# integration-smoke
+.venv/bin/python -m pytest tests/atmosphere/ --timeout=600 \
+    -k "test_williamson or test_held_suarez" --tb=short -q
+```
+
+`ci.yml` also runs the FV3 native-grid files under x64, plus `ruff` and `lint-imports`.
+Copy those commands from the workflow. The unit and integration steps in `ci.yml` add
+`-x`. They are shown here without it, so you see every failure instead of the first.
+
+Rough wall-clock times on a 10-core Apple M5 (CPU, 2026-10):
+
+| Job | Tests | Time |
+|---|---|---|
+| unit-tests (`-n 8 --dist loadfile`) | ~17,000 | 2 h 40 min |
+| top-level-fidelity-tests (`-n 4`) | ~17,600 | 8 min |
+| FV3 native grid + swcore | ~110 | 2 min |
+| restart-smoke | ~95 | 10 s |
+| integration-smoke | ~66 | 2 min |
+
+`--timeout=300` is per test. Under `-n 8`, CPU contention pushes some tests over it
+that pass when run alone (37 of 50 timeouts in the run above). Re-run timeouts one at
+a time before treating them as failures.
+
 ## Conventions
 
-- CPU only on Apple Silicon (`JAX_PLATFORMS=cpu`; the Metal backend is broken).
+- Apple Silicon: installing the `mps` extra makes the Apple GPU (`jax-mps`) JAX's
+  default device. It is fp32 only and single-device, so set `JAX_PLATFORMS=cpu` for
+  tests and anything x64. (`jax-metal`, which this note used to call broken, was
+  removed in #668.)
 - `JAX_ENABLE_X64=1` for scientific/conservation tests unless explicitly fp32/Metal.
 - The CI **unit tier runs fp32-by-default** (no job-wide `JAX_ENABLE_X64`); unit
   tests that need x64 self-enable it at module scope. The x64 CI jobs are

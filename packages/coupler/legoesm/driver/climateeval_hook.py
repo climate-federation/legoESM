@@ -42,9 +42,10 @@ def maybe_run_climateeval(config: ExperimentConfig, output_dir: str) -> int | No
         evaluation.climateeval_python,
         str(RUNNER_SCRIPT),
         "--cmor-dir", str(cmor_dir),
-        "--model-id", evaluation.model_id,
+        # Empty ids = the CMOR writer's own (EvaluationConfig docstring).
+        "--model-id", evaluation.model_id or config.output.cmip_source_id,
         "--experiment-id", evaluation.experiment_id,
-        "--variant-id", evaluation.variant_id,
+        "--variant-id", evaluation.variant_id or config.output.cmip_variant_label,
         "--data-root-dir", evaluation.data_root_dir,
         "--output-dir", str(output_dir),
     ]
@@ -53,6 +54,10 @@ def maybe_run_climateeval(config: ExperimentConfig, output_dir: str) -> int | No
         cmd += ["--suite", *evaluation.suites]
     if evaluation.timerange:
         cmd += ["--timerange", evaluation.timerange]
+    if config.surface_bulk_scheme == "none":
+        # No surface layer, so no 2 m temperature (nor its daily extremes)
+        # was written.
+        cmd += ["--not-produced", "tas", "tasmin", "tasmax"]
     if evaluation.fail_on_missing_data:
         cmd.append("--fail-on-missing-data")
     if evaluation.download_missing_data:

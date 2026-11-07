@@ -123,13 +123,14 @@ def build_phc3_ic(phc3_path: Path, t_var: str = "temp", s_var: str = "salt"):
     #    p_dbar = depth in metres, matching FESOM2's insitu2pot.
     #
     #    The conversion pressure is CAPPED at each column's deepest valid
-    #    source level.  ``interp_column_to_depths`` holds the deepest valid
-    #    value below the data (np.interp edge behaviour), so without the cap a
-    #    shelf column's warm bottom value would be adiabatically corrected as
-    #    if it sat at 5500 m -- an invented 1.4 degC cooling in cells that are
-    #    below the seafloor anyway.  FESOM2 has the same restriction for the
-    #    same reason: ``insitu2pot`` loops ``nz = nzmin, nzmax-1``, i.e. WET
-    #    LEVELS ONLY.
+    #    source level.  This is now REDUNDANT rather than load-bearing:
+    #    ``interp_column_to_depths`` leaves NaN below the data, so there is no
+    #    held-down value left to correct.  It used to matter, and the reason is
+    #    worth keeping -- the helper held the deepest observed value below the
+    #    data, so without the cap a shelf column's warm bottom value was
+    #    adiabatically corrected as if it sat at 5500 m.  FESOM2 has the same
+    #    restriction for the same reason: ``insitu2pot`` loops
+    #    ``nz = nzmin, nzmax-1``, i.e. WET LEVELS ONLY.
     valid = np.isfinite(T_insitu)
     any_valid = valid.any(axis=0)
     deepest_idx = np.where(any_valid,

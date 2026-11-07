@@ -17,6 +17,7 @@ and JAX-free (unit-tested on the login node); all heavy imports live inside
 from __future__ import annotations
 
 import argparse
+import os as _os
 from typing import NamedTuple
 
 VALID_MODES = ("physics", "neural_gcm", "sfno")
@@ -52,6 +53,22 @@ class ScaleConfig(NamedTuple):
     # that data-starved the column MLP). --smoke still forces 1. Appended last
     # so positional construction in existing tests stays valid.
     n_days: int | None = None
+    # None = take the deck's ``warmup_steps``. An explicit value lets one
+    # campaign arm depart from a deck its sibling arms share. Appended last so
+    # positional construction in existing tests stays valid.
+    warmup_steps: int | None = None
+    # Held-out windows scored after every epoch (0 = no validation pass).
+    n_val_windows: int = 0
+    # >0: ONE sample per step, its columns split over this many GPUs (all
+    # processes of the job form one mesh). 0 = one sample per MPI rank.
+    column_devices: int = 0
+    # Differentiate only the LAST n model steps of the rollout (0 = all). The
+    # forecast and target are unchanged; only the gradient window shrinks.
+    adjoint_steps: int = 0
+    # Scenes the start-of-run reachability freeze probes (None = every one).
+    probe_scenes: int | None = None
+    # Rolling mid-epoch checkpoint every n training steps (0 = epoch ends only).
+    checkpoint_every_steps: int = 20
 
 
 # Scenes used for the POST-TRAINING reachability report.  A subsample, not the
@@ -82,6 +99,88 @@ def _checkpoint_paths(out_dir, epoch):
 
     base = os.path.join(out_dir, f"epoch_{epoch:04d}")
     return base + ".eqx", base + ".opt.eqx", base + ".frozen.json"
+
+
+def _partial_manifest_path(out_dir):
+    import os
+
+    return os.path.join(out_dir, "partial.json")
+
+
+def _save_partial(out_dir, manifest, write_params, write_opt):
+    """Write one rolling mid-epoch checkpoint generation.
+
+    The state files carry the epoch and step in their names and the manifest,
+    replaced last, names them; the previous generation is deleted only after
+    that.  A kill at any point leaves a manifest whose files exist, so it never
+    costs more than the steps since the previous save.
+    """
+    import glob
+    import json as _json
+    import os
+    import pathlib as _pathlib
+
+    tag = f"partial.e{int(manifest['epoch']):04d}.s{int(manifest['step']):06d}"
+    names = {"params_file": tag + ".eqx", "opt_file": tag + ".opt.eqx"}
+    _atomic_write(os.path.join(out_dir, names["params_file"]), write_params)
+    _atomic_write(os.path.join(out_dir, names["opt_file"]), write_opt)
+    payload = _json.dumps({**manifest, **names})
+    _atomic_write(_partial_manifest_path(out_dir),
+                  lambda t: _pathlib.Path(t).write_text(payload))
+    for f in glob.glob(os.path.join(out_dir, "partial.e*.eqx")):
+        if os.path.basename(f) not in names.values():
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+
+def _read_partial(out_dir, epoch, n_samples, expect_fp, content):
+    """``(manifest, params_path, opt_path)`` of a mid-epoch checkpoint that
+    continues ``epoch``, or None.  One for another epoch is stale (that epoch
+    completed, or never started) and is ignored; one written by a differently
+    configured run, or on different samples, is a hard error, as for an epoch
+    checkpoint."""
+    import json as _json
+    import math
+    import os
+
+    mp = _partial_manifest_path(out_dir)
+    try:
+        with open(mp) as fh:
+            obj = _json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"resume: {mp} is unreadable ({exc}); it may hold "
+                           "this epoch's progress, so it is not skipped. "
+                           "Remove it to restart the epoch.") from exc
+    if not (isinstance(obj, dict) and obj.get("epoch") == epoch):
+        return None
+    if not (_manifest_is_valid(obj, expect_keys=expect_fp)
+            and obj["fingerprint"] == expect_fp
+            and _content_matches(obj, content)):
+        raise RuntimeError(
+            f"resume: {mp} continues epoch {epoch} but was written by a run "
+            "configured differently or on different samples. Start a fresh "
+            "output directory, or re-run with the original settings.")
+    step, losses, skipped = obj.get("step"), obj.get("losses"), obj.get("skipped")
+    pf, of = obj.get("params_file"), obj.get("opt_file")
+    if (isinstance(step, bool) or not isinstance(step, int)
+            or not 0 < step < n_samples
+            or not isinstance(losses, list)
+            or not all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                       and math.isfinite(x) for x in losses)
+            or isinstance(skipped, bool) or not isinstance(skipped, int)
+            or skipped < 0
+            or len(losses) + skipped != step
+            or not (isinstance(pf, str) and isinstance(of, str))
+            or os.path.basename(pf) != pf or os.path.basename(of) != of
+            or not (os.path.exists(os.path.join(out_dir, pf))
+                    and os.path.exists(os.path.join(out_dir, of)))):
+        raise RuntimeError(f"resume: {mp} is malformed or its state files "
+                           "are missing")
+    return obj, os.path.join(out_dir, pf), os.path.join(out_dir, of)
 
 
 def _manifest_is_valid(obj, expect_keys=None):
@@ -190,26 +289,44 @@ def print_latest_complete_signature(root):
         cand = (st.st_mtime_ns, f"{path}:{st.st_mtime_ns}:{st.st_size}")
         if best is None or cand[0] > best[0]:
             best = cand
+    # A mid-epoch checkpoint is resumable progress too, or an epoch longer
+    # than one link would stop the chain despite saved steps.
+    for d in [root] + [os.path.join(root, x) for x in children]:
+        path = _partial_manifest_path(d)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        cand = (st.st_mtime_ns, f"{path}:{st.st_mtime_ns}:{st.st_size}")
+        if best is None or cand[0] > best[0]:
+            best = cand
     if best is None:
         # A persisted reachability-probe result IS resumable progress: the
         # next link restores it and skips the ~9 h probe (see
         # _read_probe_freeze). Without this, a link that finished only the
         # probe would trip the wrapper's epoch-0 restart-loop guard and the
         # chain would stop exactly where resuming has the most to save.
+        # A partial probe (probe_progress.json, rewritten every scene) counts
+        # too, or a link that ends mid-probe would stop the chain.
         for d in [root] + [os.path.join(root, x) for x in children]:
-            try:
-                st = os.stat(_probe_freeze_path(d))
-            except OSError:
-                continue
-            cand = (st.st_mtime_ns,
-                    f"{_probe_freeze_path(d)}:{st.st_mtime_ns}:{st.st_size}")
-            if best is None or cand[0] > best[0]:
-                best = cand
+            for path in (_probe_freeze_path(d), _probe_progress_path(d)):
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                cand = (st.st_mtime_ns,
+                        f"{path}:{st.st_mtime_ns}:{st.st_size}")
+                if best is None or cand[0] > best[0]:
+                    best = cand
     if best is not None:
         print(best[1])
 
 
-_MANIFEST_SCHEMA = 1
+# Schema 2, 2026-08-26: the terrain-reconciliation fix changed the CONTENT of
+# every ingested sample while leaving the config fingerprint unchanged (the
+# ingest transform is code, not YAML) — a schema-1 checkpoint or probe result
+# was measured on pre-fix data and must not resume against post-fix samples.
+_MANIFEST_SCHEMA = 2
 
 
 def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
@@ -262,7 +379,7 @@ def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
         _defaults["muon_min_dim"] = getattr(_tr, "_MUON_MIN_DIM_DEFAULT", None)
     except Exception:                                   # pragma: no cover
         _defaults["muon_min_dim"] = None
-    return {
+    fp = {
         "optimizer_defaults": hashlib.sha256(
             _json.dumps(_defaults, sort_keys=True).encode()).hexdigest()[:16],
         "config_sha256": digest[:32], "mode": cfg.mode,
@@ -272,6 +389,79 @@ def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
         "rollout_steps": int(roll_steps),
         "n_global_samples": int(n_global_samples), "nproc": int(nproc),
     }
+    # Only when set, so runs written before these knobs still resume.
+    if getattr(cfg, "adjoint_steps", 0):
+        fp["adjoint_steps"] = int(cfg.adjoint_steps)
+    if getattr(cfg, "probe_scenes", None) is not None:
+        fp["probe_scenes"] = int(cfg.probe_scenes)
+    return fp
+
+
+def _val_yaml(yml: dict, n_windows: int) -> dict:
+    """The deck, with its training windows replaced by HELD-OUT ones.
+
+    The windows are taken from ``eval_years`` -- the same years the scorecard
+    scores -- spread evenly over the calendar so the validation number is not
+    one season's weather. Everything else (grid, cadence, lead time, loss) is
+    the deck's own, because a validation loss computed under a different
+    protocol than the training loss is not comparable to it.
+    """
+    years = list(yml.get("eval_years") or [])
+    if not years:
+        raise SystemExit(
+            "--val-windows needs `eval_years` in the campaign YAML: there is "
+            "no held-out year to validate on.")
+    # Month starts, evenly spread, cycling the eval years.
+    starts = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    windows = []
+    for i in range(int(n_windows)):
+        year = int(years[i % len(years)])
+        windows.append([year, starts[(i * 5) % len(starts)], 1])
+    out = dict(yml)
+    out["train_windows"] = windows
+    out["train_years"] = years
+    return out
+
+
+def _device_sample(sample):
+    """One host-resident sample, moved to the device for a no-gradient score.
+
+    The training loop does exactly this per step (#1286 fix A keeps the shard
+    on the host); the validation pass must not diverge from it, or the two
+    losses would not be the same measurement.
+    """
+    import jax
+
+    return jax.device_put(sample)
+
+
+def _physical_params(params) -> dict:
+    """Every trained parameter in PHYSICAL units, by qualified name.
+
+    Read from the live pytree through each bundle's own constraint transforms,
+    so the recorded numbers are the ones the physics saw -- not raw sigmoid
+    pre-images that need the bounds to interpret.
+    """
+    import numpy as np
+
+    out = {}
+    for _attr in ("classical", "schemes"):
+        _part = getattr(params, _attr, None)
+        _as_dict = getattr(_part, "as_dict", None)
+        if _as_dict is None:
+            continue
+        for _k, _v in _as_dict().items():
+            _arr = np.asarray(_v)
+            out[f"{_attr}.{_k}"] = (float(_arr) if _arr.ndim == 0
+                                    else _arr.reshape(-1).tolist())
+    if not out:
+        _as_dict = getattr(params, "as_dict", None)
+        if _as_dict is not None:
+            for _k, _v in _as_dict().items():
+                _arr = np.asarray(_v)
+                out[_k] = (float(_arr) if _arr.ndim == 0
+                           else _arr.reshape(-1).tolist())
+    return out
 
 
 def _probe_freeze_path(out_dir):
@@ -280,7 +470,32 @@ def _probe_freeze_path(out_dir):
     return os.path.join(out_dir, "probe_freeze.json")
 
 
-def _read_probe_freeze(out_dir, expect_fp):
+def _content_matches(obj, content, rtol=None):
+    """True when a saved probe payload was measured on ``content`` -- the
+    ``_sample_fingerprint`` of the probed samples and parameters (crc exact,
+    every moment to ``rtol`` of the leaf's magnitude sum)."""
+    import numpy as np
+
+    rtol = _SAMPLE_AGREE_RTOL if rtol is None else rtol
+    try:
+        crc = int(obj["content_crc"])
+        mom = np.asarray(obj["content_moments"], dtype=np.float64)
+    except (KeyError, TypeError, ValueError):
+        return False
+    if crc != content[0] or mom.shape != content[1].shape:
+        return False
+    if not mom.size:
+        return True
+    scale = np.maximum(np.abs(mom[:, 2]), np.finfo(np.float64).tiny)
+    return bool(np.max(np.abs(mom - content[1]) / scale[:, None]) <= rtol)
+
+
+def _content_payload(content):
+    return {"content_crc": int(content[0]),
+            "content_moments": content[1].tolist()}
+
+
+def _read_probe_freeze(out_dir, expect_fp, content):
     """The persisted reachability-probe result, or None.
 
     Honoured only when its fingerprint matches the CURRENT run exactly — the
@@ -303,13 +518,51 @@ def _read_probe_freeze(out_dir, expect_fp):
         return None
     if not all(isinstance(x, str) for x in obj["frozen"]):
         return None
+    if not _content_matches(obj, content):
+        return None
     return obj["frozen"]
 
 
-def _atomic_write(path, write_fn):
+def _probe_progress_path(out_dir):
+    import os
+
+    return os.path.join(out_dir, "probe_progress.json")
+
+
+def _read_probe_progress(out_dir, expect_fp, content):
+    """``(n_done, absmax, n_used)`` of a reachability probe a previous link
+    did not finish, or None.  Gated on the config fingerprint and on
+    ``content`` (see ``_content_matches``): the fingerprint sees only the
+    sample count."""
+    import json as _json
+
+    try:
+        with open(_probe_progress_path(out_dir)) as fh:
+            obj = _json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(obj, dict) or obj.get("schema") != _MANIFEST_SCHEMA
+            or obj.get("fingerprint") != expect_fp
+            or not _content_matches(obj, content)):
+        if isinstance(obj, dict):
+            import logging
+            logging.getLogger(__name__).warning(
+                "reachability probe: %s exists but was measured on "
+                "different config or inputs -- probing from scratch",
+                _probe_progress_path(out_dir))
+        return None
+    try:
+        return (int(obj["n_done"]), [float(a) for a in obj["absmax"]],
+                int(obj["n_used"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _atomic_write(path, write_fn, before_replace=None):
     """Write via a temporary file and rename, so a job killed mid-write leaves
     the PREVIOUS checkpoint intact rather than a truncated one that resume
-    would happily load."""
+    would happily load.  ``before_replace`` runs after a successful write,
+    just before the rename."""
     import os
     import socket
 
@@ -317,6 +570,8 @@ def _atomic_write(path, write_fn):
     # can share one, and they see the same shared filesystem.
     tmp = f"{path}.tmp.{socket.gethostname()}.{os.getpid()}"
     write_fn(tmp)
+    if before_replace is not None:
+        before_replace()
     os.replace(tmp, path)
 
 
@@ -447,6 +702,11 @@ def _apply_smoke_overrides(cfg: ScaleConfig, yml: dict) -> ScaleConfig:
     compile itself, with a bumped walltime) via ``smoke_radiation: rrtmgp``.
     """
     yml["n_lat"], yml["n_lon"], yml["nlev"] = 32, 64, 8
+    # The spectral core takes its grid from ``spectral.n_max`` and only falls
+    # back to n_lat; drop it so the smoke runs the same small grid (T21).
+    if "spectral" in yml:
+        yml["spectral"] = {k: v for k, v in yml["spectral"].items()
+                           if k != "n_max"}
     yml["radiation"] = str(yml.get("smoke_radiation", "gray"))
     return cfg._replace(n_epochs=1)
 
@@ -487,12 +747,54 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
     p.add_argument("--optimizer", default=None,
                    help="adamw|adam|muon|muon_partitioned. Default: YAML "
                         f"`optimizer`, else {_DEFAULT_OPTIMIZER}.")
+    p.add_argument("--val-windows", type=int, default=0, dest="n_val_windows",
+                   help="Held-out windows (from the deck's eval_years) scored "
+                        "WITHOUT gradient after every epoch, so the run has a "
+                        "generalisation curve rather than only a training "
+                        "one. 0 (default) keeps the historical behaviour: no "
+                        "validation pass.")
+    p.add_argument("--warmup-steps", type=int, default=None,
+                   dest="warmup_steps",
+                   help="Global-schedule warmup steps, overriding the deck's "
+                        "`warmup_steps`. Lets one campaign arm depart from a "
+                        "deck other arms share. Every link of a chained run "
+                        "must pass the same value (the resume fingerprint "
+                        "covers the schedule).")
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--out", default="results/wb_scale", dest="out_dir")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--eval-wb2", action="store_true")
     p.add_argument("--smoke", action="store_true")
+    p.add_argument("--column-devices", type=int, default=0,
+                   dest="column_devices",
+                   help="Split each sample's columns over this many GPUs "
+                        "(one process per node, all local GPUs visible). "
+                        "Every process trains the same single sample per "
+                        "step; no MPI data parallelism. 0 (default) = one "
+                        "sample per MPI rank, as before.")
+    p.add_argument("--adjoint-steps", type=int, default=0, dest="adjoint_steps",
+                   help="Differentiate only the LAST n model steps (0 = all). "
+                        "The forecast still runs the full horizon against the "
+                        "same target; only the gradient window shrinks.")
+    p.add_argument("--probe-scenes", type=int, default=None,
+                   dest="probe_scenes",
+                   help="Scenes the start-of-run reachability probe reads "
+                        "(spread evenly over the shard). Default: all.")
+    p.add_argument("--checkpoint-every-steps", type=int, default=20,
+                   dest="checkpoint_every_steps",
+                   help="Save a rolling mid-epoch checkpoint every n steps so "
+                        "a walltime kill loses at most n steps (0 = only at "
+                        "epoch ends). Single logical trainer only.")
     a = p.parse_args(argv)
+    if a.checkpoint_every_steps < 0:
+        raise SystemExit("--checkpoint-every-steps must be >= 0, got "
+                         f"{a.checkpoint_every_steps}")
+    if a.adjoint_steps < 0:
+        raise SystemExit(f"--adjoint-steps must be >= 0, got {a.adjoint_steps}")
+    if a.probe_scenes is not None and a.probe_scenes < 1:
+        raise SystemExit(f"--probe-scenes must be >= 1, got {a.probe_scenes}")
+    if a.column_devices < 0:
+        raise SystemExit(f"--column-devices must be >= 0, got {a.column_devices}")
     # --mode is already restricted by argparse ``choices=VALID_MODES`` (exits 2
     # on an unknown value), so no manual membership guard is needed here.
     if a.n_epochs is not None and a.n_epochs < 1:
@@ -506,8 +808,12 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
         mode=a.mode, config_path=a.config, resolution_deg=a.resolution_deg,
         n_epochs=a.n_epochs, multi_step_hours=_parse_hours(a.multi_step_hours),
         lr=a.lr, optimizer=a.optimizer, grad_accum=a.grad_accum,
+        warmup_steps=a.warmup_steps, n_val_windows=a.n_val_windows,
         out_dir=a.out_dir, resume=a.resume, eval_wb2=a.eval_wb2, smoke=a.smoke,
         training_core=a.training_core, n_days=a.n_days,
+        column_devices=a.column_devices,
+        adjoint_steps=a.adjoint_steps, probe_scenes=a.probe_scenes,
+        checkpoint_every_steps=a.checkpoint_every_steps,
     )
 
 
@@ -533,6 +839,161 @@ def _check_resolution_matches_yaml(cfg: ScaleConfig, yml: dict) -> float:
     return cfg.resolution_deg
 
 
+def _init_distributed(n_devices: int) -> None:
+    """Join every process of the job; call BEFORE anything imports legoesm or
+    touches a JAX backend (both can initialise XLA).
+
+    One process per node: JAX's SLURM auto-detection would otherwise give each
+    process ONE local GPU.
+    """
+    import os
+
+    import jax
+
+    n_proc = int(os.environ.get("SLURM_NTASKS", "1"))
+    if n_devices % n_proc:
+        raise SystemExit(f"--column-devices {n_devices} is not a multiple of "
+                         f"the {n_proc} processes")
+    if n_proc > 1:
+        jax.distributed.initialize(
+            local_device_ids=list(range(n_devices // n_proc)))
+
+
+def _init_column_mesh(n_devices: int):
+    """The ``n_devices`` column mesh over every process's GPUs (after
+    :func:`_init_distributed`)."""
+    import jax
+    from legoesm.parallel.column_shard import create_column_mesh
+
+    if jax.device_count() != n_devices:
+        raise SystemExit(f"--column-devices {n_devices} but JAX sees "
+                         f"{jax.device_count()} devices over "
+                         f"{jax.process_count()} processes")
+    return create_column_mesh(n_devices)
+
+
+def _column_placers(mesh, n_lat: int, ncol: int):
+    """``(place_sample, place_replicated, replicate_in_trace)`` for ``mesh``.
+
+    Sample leaves whose leading axis is latitude or column are split over the
+    mesh; everything else, and every parameter, is replicated.
+    """
+    import jax
+    import numpy as np
+    from jax.sharding import NamedSharding, PartitionSpec as P
+    from legoesm.parallel.mesh import multiprocess_safe_device_put
+
+    rep = NamedSharding(mesh, P())
+
+    def _spec(x):
+        shape = np.shape(x)
+        if shape and shape[0] in (n_lat, ncol):
+            return NamedSharding(mesh, P("col", *((None,) * (len(shape) - 1))))
+        return rep
+
+    def place_sample(tree):
+        return jax.tree.map(lambda x: multiprocess_safe_device_put(x, _spec(x)),
+                            tree)
+
+    def place_replicated(tree):
+        return jax.tree.map(
+            lambda x: multiprocess_safe_device_put(x, rep)
+            if isinstance(x, (jax.Array, np.ndarray)) else x, tree)
+
+    def replicate_in_trace(tree):
+        # The transpose of a sharding constraint applies it to the cotangent,
+        # so this also makes the GRADIENT come out replicated.
+        return jax.tree.map(
+            lambda x: jax.lax.with_sharding_constraint(x, rep)
+            if isinstance(x, jax.Array) else x, tree)
+
+    return place_sample, place_replicated, replicate_in_trace
+
+
+# Each process builds its own copy of the ERA5 samples (regridded on its own
+# GPU); job 27738351 showed the copies are not bit-identical. Bound for the
+# per-leaf relative difference, owner-approved 2026-09-28 (measured value is
+# logged on every run).
+_SAMPLE_AGREE_RTOL = 1e-9
+
+
+def _file_crc(path) -> int:
+    import zlib
+    with open(path, "rb") as fh:
+        return zlib.crc32(fh.read())
+
+
+def _crc_names(names) -> int:
+    import zlib
+    return zlib.crc32(",".join(sorted(names)).encode())
+
+
+def _sample_fingerprint(samples):
+    """``(structure_crc, moments)`` of a host sample list.
+
+    ``structure_crc`` covers count, tree structure, leaf shapes and dtypes and
+    must match exactly.  ``moments`` holds, per leaf, the sum, a
+    position-weighted sum (so a reordering shows), the sum of magnitudes
+    (the scale the others are compared against) and a second, quadratically
+    weighted sum.  It is a tolerant sketch, not a hash: last-bit regridding
+    differences between nodes rule out exact hashing, and contrived inputs
+    can still match every moment.
+    """
+    import zlib
+
+    import jax
+    import numpy as np
+
+    h = zlib.crc32(str(len(samples)).encode())
+    moments = []
+    for i, s in enumerate(samples):
+        leaves, treedef = jax.tree.flatten(s)
+        h = zlib.crc32(f"{i}:{treedef}".encode(), h)
+        for x in leaves:
+            a = np.asarray(x)
+            h = zlib.crc32(f"{a.shape}:{a.dtype}".encode(), h)
+            f = a.astype(np.float64).ravel()
+            w = np.arange(1, f.size + 1, dtype=np.float64) / max(f.size, 1)
+            moments.append((f.sum(), (f * w).sum(), np.abs(f).sum(),
+                            (f * w * w).sum()))
+    return h, np.asarray(moments, dtype=np.float64).reshape(-1, 4)
+
+
+def _assert_samples_agree(samples, what: str, rtol: float) -> float:
+    """Every process must hold the same samples, to ``rtol`` of each leaf's
+    magnitude sum; returns the largest relative difference seen.  Raises on
+    every process on disagreement."""
+    import jax
+    import numpy as np
+
+    crc, mom = _sample_fingerprint(samples)
+    if jax.process_count() == 1:
+        return 0.0
+    from jax.experimental import multihost_utils
+    _assert_processes_agree([crc], f"{what} structure")
+    g = np.asarray(multihost_utils.process_allgather(mom))   # (P, n, 3)
+    scale = np.maximum(np.abs(g[0][:, 2]), np.finfo(np.float64).tiny)
+    rel = float(np.max(np.abs(g[:, :, :2] - g[0][None, :, :2])
+                       / scale[None, :, None])) if g.size else 0.0
+    if not rel <= rtol:
+        raise AssertionError(
+            f"column-sharded processes hold different {what}: largest "
+            f"relative difference {rel:.3g} > {rtol:g}")
+    return rel
+
+
+def _assert_processes_agree(values, what: str) -> None:
+    """Raise on EVERY process if the processes hold different ``values``."""
+    import jax
+    import numpy as np
+
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+        multihost_utils.assert_equal(
+            np.asarray(values, dtype=np.int64),
+            f"column-sharded processes disagree on the {what}")
+
+
 def _mpi_rank_size():
     """(rank, num_processes) — shared impl in legoesm.training.data_parallel
     (one copy for both this driver and the AIMIP chunked DP loop)."""
@@ -552,14 +1013,21 @@ def main(argv=None):
     # re-implementing the answer in shell. Handled before anything heavy is
     # imported: it runs once per link, on a login-class shell.
     args = list(sys.argv[1:] if argv is None else argv)
-    if "--print-latest-complete" in args:
-        i = args.index("--print-latest-complete") + 1
-        if i >= len(args):
+    # FIRST argument only: scanning the whole list let any OTHER option's VALUE
+    # select the query mode, so a job wrapper whose CONFIG/OUT happened to hold
+    # this token printed a signature and exited 0 having trained nothing.
+    if args[:1] == ["--print-latest-complete"]:
+        if len(args) < 2:
             print("--print-latest-complete needs a directory", file=sys.stderr)
             raise SystemExit(2)
-        print_latest_complete_signature(args[i])
+        print_latest_complete_signature(args[1])
         return 0
 
+    # The training package's import initialises XLA, so the processes must
+    # join before it (job 27736774 died on exactly this).
+    _cols = build_scale_config_from_args(argv).column_devices
+    if _cols:
+        _init_distributed(_cols)
     from legoesm.training.data_parallel import mpi_abort_on_uncaught
     return mpi_abort_on_uncaught(_main)(argv)
 
@@ -640,7 +1108,14 @@ def _main(argv=None):
         mpi_data_parallel_training_loop,
     )
 
-    rank, nproc = _mpi_rank_size()
+    column_mesh = None
+    if cfg.column_devices:
+        column_mesh = _init_column_mesh(cfg.column_devices)
+        # One logical trainer: every process loads the SAME samples and the
+        # SPMD program already returns the global gradient.
+        rank, nproc = jax.process_index(), 1
+    else:
+        rank, nproc = _mpi_rank_size()
     logging.basicConfig(level=logging.INFO if rank == 0 else logging.WARNING)
     log = logging.getLogger("wb_scale")
 
@@ -675,7 +1150,18 @@ def _main(argv=None):
     #  (reuses the same package builders run_aimip_latlon uses; the mode differs
     #   only in the make_run_seg factory, per training_driver._build_train_step)
     from legoesm.training.scale_build import build_mode_components  # thin adapter (below)
-    model, grid, sigma, params, make_run_seg, loss_config, dt = build_mode_components(cfg, yml)
+    model, grid, sigma, params, make_run_seg, loss_config, dt = build_mode_components(
+        cfg, yml, column_mesh=column_mesh)
+    place_sample, place_rep, _in_trace_rep = True, None, None
+    if column_mesh is not None:
+        _n_lat, _n_lon = int(grid.n_lat), int(grid.n_lon)
+        if _n_lat % cfg.column_devices:
+            raise SystemExit(f"n_lat={_n_lat} is not divisible by "
+                             f"--column-devices {cfg.column_devices}")
+        place_sample, place_rep, _in_trace_rep = _column_placers(
+            column_mesh, _n_lat, _n_lat * _n_lon)
+        log.info("column sharding: %d devices over %d processes",
+                 cfg.column_devices, jax.process_count())
 
     # Warm the RRTMGP optics-table cache with a CONCRETE build, before anything
     # traced runs.  RRTMGP reads its NetCDF gas-optics tables on first use and
@@ -717,7 +1203,7 @@ def _main(argv=None):
              len(local))
 
     # --- data-parallel loss over Equinox array-leaves ---
-    from legoesm.training.losses import combined_loss
+    from legoesm.training.losses import combined_loss, combined_loss_terms
     from legoesm.training.scale_build import rollout_hours
     sigma_full = jnp.asarray(sigma.sigma_full)
 
@@ -726,10 +1212,39 @@ def _main(argv=None):
     # multi_step_hours lead, default 6 h).  A fixed 24 h single_day_rollout here
     # would score a 24 h forecast against a 6 h target.
     roll_steps = int(rollout_hours(cfg, yml) * 3600.0 / dt)
+    # MEMORY PROBE ONLY: override the scan trip count so the compiled gradient
+    # can be measured at several rollout lengths with EVERY other thing --
+    # shapes, physics, dt, loss -- held identical. The only difference between
+    # arms is how many times the remat'd step is scanned, which is exactly the
+    # variable that separates "the unrolled rollout holds the memory" from
+    # "one step's physics does". Never set in a training run; the forecast it
+    # produces would no longer match the target's lead.
+    if _os.environ.get("LEGOESM_WB_ROLL_STEPS"):
+        roll_steps = int(_os.environ["LEGOESM_WB_ROLL_STEPS"])
+        print(f"MEMPROBE roll_steps OVERRIDDEN to {roll_steps}", flush=True)
 
-    def _loss(trainable, sample):
+    if cfg.adjoint_steps:
+        if cfg.training_core != "spectral":
+            raise SystemExit("--adjoint-steps needs --training-core spectral")
+        if cfg.adjoint_steps > roll_steps:
+            raise SystemExit(f"--adjoint-steps {cfg.adjoint_steps} exceeds the "
+                             f"{roll_steps}-step rollout")
+        log.info("truncated adjoint: forecasting %d steps, differentiating the "
+                 "last %d; target and scored objective unchanged. The "
+                 "reachability freeze below sees the SAME windowed gradient: a "
+                 "leaf reachable only before the window is frozen.",
+                 roll_steps, cfg.adjoint_steps)
+
+    def _loss(trainable, sample, terms=False):
+        if _in_trace_rep is not None:
+            trainable = _in_trace_rep(trainable)
         ic, target, forcing = sample
-        pred = make_run_seg(trainable).raw(ic, roll_steps, forcing)
+        # Only the spectral segment takes the kwarg (checked above).
+        _kw = {"adjoint_steps": cfg.adjoint_steps} if cfg.adjoint_steps else {}
+        pred = make_run_seg(trainable).raw(ic, roll_steps, forcing, **_kw)
+        if terms:
+            return combined_loss_terms(pred, target, sigma_full, grid=grid,
+                                       config=loss_config)
         return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
 
     # Sized here rather than next to the optimizer because the resume check
@@ -743,7 +1258,8 @@ def _main(argv=None):
     # total_steps (``_clamped_warmup``): the cosine schedule needs
     # decay_steps > 0, which the tiny --smoke run otherwise violates.
     warmup = _resolve_warmup(
-        yml.get("warmup_steps", TrainingConfig().warmup_steps),
+        cfg.warmup_steps if cfg.warmup_steps is not None
+        else yml.get("warmup_steps", TrainingConfig().warmup_steps),
         total_steps, nproc)
 
     # --- resume from the last completed epoch --------------------------------
@@ -756,6 +1272,10 @@ def _main(argv=None):
     # optimizer state that was built for it, and skips the probe's cost.)
     import json
 
+    # Probe results are measurements on these exact samples and initial
+    # parameters; saved ones are honoured only if these still match.
+    _probe_content = _sample_fingerprint(list(local) + [jax.device_get(
+        jax.tree.leaves(eqx.filter(params, eqx.is_inexact_array)))])
     start_epoch, resumed_frozen = 0, None
     if cfg.resume:
         _ep = _latest_complete_checkpoint(cfg.out_dir)
@@ -778,12 +1298,9 @@ def _main(argv=None):
             # rank reads the file, another hits an OSError and re-probes)
             # would leave ranks in different collectives and hang (codex).
             # Multi-rank WB training re-probes until a root-read + broadcast
-            # exists. NOTE (codex, deferred): the fingerprint identifies the
-            # shard by sample COUNT, not content — CLI --n-days is not in it;
-            # the campaign path never passes --n-days, and adding the key
-            # would orphan payloads already written under the current key
-            # set. Add it at the next fingerprint schema change.
-            _pf = (_read_probe_freeze(cfg.out_dir, _now_fp)
+            # exists. The fingerprint sees the sample COUNT; the content gate
+            # sees the samples and initial parameters themselves.
+            _pf = (_read_probe_freeze(cfg.out_dir, _now_fp, _probe_content)
                    if nproc == 1 else None)
             if _pf is not None:
                 resumed_frozen = set(_pf)
@@ -796,7 +1313,8 @@ def _main(argv=None):
                          "starting from epoch 0", cfg.out_dir)
         else:
             _pp, _op, _fp = _checkpoint_paths(cfg.out_dir, _ep)
-            params = eqx.tree_deserialise_leaves(_pp, params)
+            from legoesm.ml.checkpoint_io import deserialise_knob_aware
+            params = deserialise_knob_aware(_pp, params)
             _manifest = json.loads(open(_fp).read())
             _saved_fp = (_manifest.get("fingerprint")
                          if isinstance(_manifest, dict) else None)
@@ -835,8 +1353,85 @@ def _main(argv=None):
                 log.info("resume: already at the requested %d epochs -- "
                          "nothing to do", cfg.n_epochs)
 
+    # Mid-epoch resume: a rolling checkpoint that continues ``start_epoch``
+    # replaces the epoch-end state.  Single logical trainer only: under MPI
+    # data parallelism each rank holds its own running losses.
+    # Every process reads the files on its own; a failure is held until the
+    # processes have compared outcomes, so one cannot raise while the rest
+    # wait in a collective.
+    start_step, start_losses, start_skipped, _partial_opt = 0, [], 0, None
+    _partial_err, _partial_crc = None, (0, 0, 0)
+    if cfg.resume and nproc == 1 and start_epoch < cfg.n_epochs:
+        try:
+            _part = _read_partial(
+                cfg.out_dir, start_epoch, len(local),
+                _run_fingerprint(cfg, yml, warmup, roll_steps,
+                                 len(local) * nproc, nproc), _probe_content)
+        except RuntimeError as _e:
+            _part, _partial_err = None, _e
+        if _part is not None:
+            _pm_, _ppath, _partial_opt = _part
+            try:
+                if (resumed_frozen is not None
+                        and set(_pm_["frozen"]) != resumed_frozen):
+                    raise RuntimeError(
+                        "resume: the mid-epoch checkpoint's frozen set "
+                        "differs from the epoch checkpoint's")
+                params = eqx.tree_deserialise_leaves(_ppath, params)
+                import zlib as _zlib
+                _partial_crc = (
+                    _file_crc(_ppath), _file_crc(_partial_opt),
+                    _zlib.crc32(json.dumps(_pm_, sort_keys=True).encode()))
+                resumed_frozen = set(_pm_["frozen"])
+                start_step = int(_pm_["step"])
+                start_losses = [float(x) for x in _pm_["losses"]]
+                start_skipped = int(_pm_["skipped"])
+                log.info("resume: epoch %d continues after step %d/%d from "
+                         "%s", start_epoch, start_step, len(local), _ppath)
+            except Exception as _e:   # noqa: BLE001 -- re-raised after agreement
+                _partial_err = RuntimeError(
+                    f"resume: cannot restore {_ppath}: {_e}")
+
+    # A reachability probe longer than one job link continues where the last
+    # link stopped (single logical trainer only: under MPI data parallelism
+    # each rank would need its own saved partial measurement).
+    _probe_fp = dict(_run_fingerprint(cfg, yml, warmup, roll_steps,
+                                      len(local) * nproc, nproc),
+                     column_devices=int(cfg.column_devices))
+    _probe_resume = (_read_probe_progress(cfg.out_dir, _probe_fp,
+                                          _probe_content)
+                     if cfg.resume and resumed_frozen is None and nproc == 1
+                     else None)
+    if _probe_resume is not None:
+        log.info("resume: reachability probe continues after %d of %d scenes",
+                 _probe_resume[0], len(local))
+
+    if _partial_err is not None and place_rep is None:
+        raise _partial_err
+    if place_rep is not None:
+        params = place_rep(params)
+        # Every process read the checkpoint/probe files and built its sample
+        # list on its own. Agree BEFORE the first collective (the freeze
+        # probe), or a disagreeing process would hang the others.
+        _assert_processes_agree(
+            [start_epoch, start_step, int(_partial_err is not None),
+             *_partial_crc,
+             -1 if resumed_frozen is None else len(resumed_frozen),
+             _crc_names(resumed_frozen or ()),
+             -1 if _probe_resume is None else _probe_resume[0]],
+            "resume point, restored frozen set or probe progress")
+        if _partial_err is not None:
+            raise _partial_err
+        _rel = _assert_samples_agree(local, "training samples",
+                                     _SAMPLE_AGREE_RTOL)
+        log.info("training samples agree across processes (largest relative "
+                 "difference %.3g)", _rel)
+
     # --- NO INERT PARAMETERS: freeze what this configuration cannot reach ---
-    # The trainable bundle carries a knob for every scheme family and for the
+    # Unselected families' knobs, the option-unread spec fields and (ERA5
+    # fluxes) the surface knobs are already OUT of the differentiated tree,
+    # by name, at build time (scale_build); this probe judges the rest.
+    # Before that (2026-10-15) the bundle carried a knob for every family and for the
     # switched-off modes of the families that ARE selected, so a large part of
     # it has no gradient path in any one run: measured on the classical arm,
     # 110 of 157 leaves had an exactly-zero gradient on all 48 probe scenes.
@@ -866,7 +1461,9 @@ def _main(argv=None):
         # TRAINED parameters at the end of the run (no second compile).
         _probe_vg = eqx.filter_jit(jax.value_and_grad(
             lambda a, s: _loss(eqx.combine(a, _probe_static), s)))
-        # n_probe=None => every sample in the shard.  That costs one extra
+        # --probe-scenes N probes N evenly spread scenes instead, which brings
+        # the sampling risk below back in exchange for time (owner, 2026-10-12).
+        # n_probe=None (--probe-scenes unset) => every sample in the shard.  That costs one extra
         # forward+adjoint pass over the data (one epoch-equivalent of the
         # twelve a link trains) and removes the SAMPLING risk entirely: a leaf
         # is frozen iff it is zero on every scene in the shard.  It does NOT
@@ -876,6 +1473,25 @@ def _main(argv=None):
         # catch.  The loss carries no parameter regularizer and the probe
         # applies no gradient clipping, so an exactly-zero gradient here is a
         # real disconnection on these scenes, not a value clipped to zero.
+        # POLICY freeze on top of the MEASURED one: with ERA5 surface fluxes
+        # prescribed the classical surface leaves (bulk exchange coefficients,
+        # roughness, albedo, emissivity, the spatial surface field) are inert
+        # by construction, and a low-sun column can still leak a tiny albedo
+        # gradient that the zero-gradient probe would not freeze.  Applied on
+        # BOTH branches (idempotent on resume) and BEFORE the persist below,
+        # so the saved list is the effective trainable set.
+        def _policy_freeze(arr_, static_, frozen_):
+            from legoesm.training.inert_params import (
+                apply_forced_freeze,
+                surface_policy_frozen_names,
+            )
+            forced, why = surface_policy_frozen_names(yml, params)
+            if why is None:
+                return arr_, static_, frozen_
+            if rank == 0 and forced:
+                log.info("FROZEN BY POLICY (%s): %s", why, ", ".join(forced))
+            return apply_forced_freeze(params, frozen_, forced)
+
         if resumed_frozen is not None:
             # Same trainable set as the job that wrote the optimizer state.
             from legoesm.training.inert_params import trainable_filter_spec
@@ -894,16 +1510,39 @@ def _main(argv=None):
                     "parameter tree; the configuration has changed since that "
                     "checkpoint and its optimizer state no longer applies.")
             n_probe_used = None          # nothing was probed; it was restored
+            arr, static, frozen_names = _policy_freeze(arr, static, frozen_names)
         else:
+            if _os.environ.get("LEGOESM_WB_MEM_PROBE") == "1":
+                import sys as _sys
+                _sys.path.insert(0, "scripts/tmp")
+                import _probe_wb_mem_total as _pm
+                _pm.run(_probe_vg, eqx.partition(params, eqx.is_inexact_array)[0],
+                        local[0], label=_os.environ.get("LEGOESM_WB_MEM_ARM", "?"))
+            def _save_probe_progress(n_done, absmax, n_used):
+                if rank != 0 or nproc != 1:
+                    return
+                import os as _os
+                import pathlib as _pathlib
+
+                _os.makedirs(cfg.out_dir, exist_ok=True)
+                _payload = json.dumps({
+                    "schema": _MANIFEST_SCHEMA, "fingerprint": _probe_fp,
+                    "n_done": n_done, "absmax": absmax, "n_used": n_used,
+                    **_content_payload(_probe_content)})
+                _atomic_write(_probe_progress_path(cfg.out_dir),
+                              lambda t: _pathlib.Path(t).write_text(_payload))
+
             arr, static, frozen_names, n_probe_used = freeze_unreachable(
-                params, _probe_vg, local, n_probe=None, num_processes=nproc)
+                params, _probe_vg, local, n_probe=cfg.probe_scenes,
+                num_processes=nproc,
+                device_put=place_sample, resume_state=_probe_resume,
+                on_scene=_save_probe_progress)
+            arr, static, frozen_names = _policy_freeze(arr, static, frozen_names)
             # Persist the measurement immediately: at T63/si_substeps=3 the
             # probe costs ~9 h, and a link killed between here and the first
             # epoch write would otherwise re-measure on every chained resume
             # (job 27194893 died exactly there). Fingerprint-gated on read.
             if rank == 0:
-                import os as _os
-
                 _os.makedirs(cfg.out_dir, exist_ok=True)
                 _pf_payload = {
                     "schema": _MANIFEST_SCHEMA,
@@ -911,6 +1550,7 @@ def _main(argv=None):
                         cfg, yml, warmup, roll_steps, len(local) * nproc,
                         nproc),
                     "frozen": sorted(frozen_names),
+                    **_content_payload(_probe_content),
                 }
                 import pathlib as _pathlib
 
@@ -943,6 +1583,9 @@ def _main(argv=None):
     def loss_fn(arr_leaves, sample):
         return _loss(eqx.combine(arr_leaves, static), sample)
 
+    def loss_terms_fn(arr_leaves, sample):
+        return _loss(eqx.combine(arr_leaves, static), sample, terms=True)
+
     optimizer = create_optimizer(TrainingConfig(
         lr=cfg.lr, optimizer=cfg.optimizer,
         warmup_steps=warmup, total_steps=total_steps,
@@ -951,23 +1594,153 @@ def _main(argv=None):
     _fingerprint = _run_fingerprint(cfg, yml, warmup, roll_steps,
                                     len(local) * nproc, nproc)
     opt_state = optimizer.init(arr)
-    if start_epoch > 0:
+    _opt_err = None
+    if _partial_opt is not None:
+        try:
+            opt_state = eqx.tree_deserialise_leaves(_partial_opt, opt_state)
+        except Exception as _e:   # noqa: BLE001 -- re-raised after agreement
+            _opt_err = RuntimeError(f"resume: cannot load {_partial_opt}: {_e}")
+    elif start_epoch > 0:
         # The moments AND the schedule step live here; restoring parameters
         # without this is a cold restart wearing a resumed run's name.
         opt_state = eqx.tree_deserialise_leaves(
             _checkpoint_paths(cfg.out_dir, start_epoch - 1)[1], opt_state)
+    if _opt_err is not None and place_rep is None:
+        raise _opt_err
+    if place_rep is not None:
+        _assert_processes_agree([int(_opt_err is not None)],
+                                "mid-epoch optimizer state restore")
+        if _opt_err is not None:
+            raise _opt_err
+        opt_state = place_rep(opt_state)
+        _assert_processes_agree([len(frozen_names), _crc_names(frozen_names)],
+                                "frozen parameter set")
 
     import os
     os.makedirs(cfg.out_dir, exist_ok=True)
 
+    # --- held-out samples, scored without gradient after each epoch --------
+    # A training curve alone cannot say whether the parameters are learning
+    # the physics or the training scenes: both fall. These come from the
+    # deck's EVAL years, the same ones the scorecard uses, so the two agree
+    # about what "held out" means.
+    val_samples = []
+    if int(getattr(cfg, "n_val_windows", 0)) > 0:
+        # The reduction below is unconditional, so a rank with an empty shard is
+        # safe; this only keeps the WARNING visible rather than silent.
+        if nproc > int(cfg.n_val_windows):
+            log.warning(
+                "--val-windows %d with %d ranks: some ranks hold no validation "
+                "samples; the held-out loss is still a global mean over the "
+                "samples that exist.", int(cfg.n_val_windows), nproc)
+        val_samples = load_era5_samples(
+            cfg, _val_yaml(yml, int(cfg.n_val_windows)), grid, sigma,
+            rank=rank, nproc=nproc, host_resident=True)
+        log.info("validation samples: %d local/rank from eval years %s",
+                 len(val_samples), yml.get("eval_years"))
+        if column_mesh is not None:
+            # Validation runs collective forwards: the lists must match too.
+            _rel = _assert_samples_agree(val_samples, "validation samples",
+                                         _SAMPLE_AGREE_RTOL)
+            log.info("validation samples agree across processes (largest "
+                     "relative difference %.3g)", _rel)
+
+    # Sharded: the same placement as training, and one compiled forward (an
+    # eager rollout of this deck does not fit on the mesh).
+    # Same forward as the training loss, returning each weighted term too, so
+    # the per-term curves add up to the validation loss.
+    _val_loss = (loss_terms_fn if column_mesh is None
+                 else eqx.filter_jit(loss_terms_fn))
+    _val_place = _device_sample if column_mesh is None else place_sample
+
+    def _validation_loss(cur_arr):
+        # EVERY rank reaches the reduction, including one whose validation
+        # shard came out empty: returning early on that rank left the others
+        # blocked in the allreduce for the rest of the walltime (GLM). The
+        # per-rank sum and count are reduced together, so the mean is over the
+        # samples that exist rather than over the ranks that have any.
+        # Returns (mean loss, {term: mean}).
+        if not val_samples and nproc <= 1:
+            return None, {}
+        total, sums = 0.0, {}
+        for _s in val_samples:
+            _l, _t = _val_loss(cur_arr, _val_place(_s))
+            total += float(_l)
+            for _k, _v in _t.items():
+                sums[_k] = sums.get(_k, 0.0) + float(_v)
+        if nproc <= 1:
+            return (total / len(val_samples),
+                    {k: v / len(val_samples) for k, v in sums.items()})
+        from mpi4py import MPI
+        g_total = float(MPI.COMM_WORLD.allreduce(total, op=MPI.SUM))
+        g_count = int(MPI.COMM_WORLD.allreduce(len(val_samples), op=MPI.SUM))
+        if g_count == 0:
+            return None, {}
+        # A rank with an empty shard has no keys of its own: take the union.
+        _names = sorted(set().union(*MPI.COMM_WORLD.allgather(sorted(sums))))
+        g_sums = {k: float(MPI.COMM_WORLD.allreduce(sums.get(k, 0.0), op=MPI.SUM))
+                  for k in _names}
+        return g_total / g_count, {k: v / g_count for k, v in g_sums.items()}
+
+    _history_path = os.path.join(cfg.out_dir, "training_history.jsonl")
+    _static_h = static if column_mesh is None else jax.device_get(static)
+
     def on_epoch(epoch, mean_loss, cur_arr, cur_opt_state):
+        # Every rank runs the validation pass: it ends in a collective.
+        val_loss, val_terms = _validation_loss(cur_arr)
+        if column_mesh is not None:
+            # Host copies: rank 0 alone must not launch computations on
+            # arrays that span every process.
+            cur_arr, cur_opt_state = jax.device_get((cur_arr, cur_opt_state))
         if rank == 0:
-            log.info("Epoch %4d: loss=%.6f", epoch, mean_loss)
+            if val_loss is None:
+                log.info("Epoch %4d: loss=%.6f", epoch, mean_loss)
+            else:
+                log.info("Epoch %4d: loss=%.6f val=%.6f",
+                         epoch, mean_loss, val_loss)
+            # One line per epoch: the two losses and every trained parameter
+            # in PHYSICAL units, so the run's parameter trajectory can be read
+            # without loading a checkpoint and inverting the transforms.
+            _row = {"epoch": int(epoch), "train_loss": float(mean_loss),
+                    "val_loss": None if val_loss is None else float(val_loss),
+                    "val_terms": val_terms,
+                    "params": _physical_params(eqx.combine(cur_arr, _static_h))}
+            # A link killed after this row but before the manifest replays the
+            # epoch, so the row is replaced rather than appended twice.
+            _rows = []
+            if os.path.exists(_history_path):
+                with open(_history_path) as _fh:
+                    for ln in (x for x in _fh if x.strip()):
+                        try:
+                            _obj = json.loads(ln)
+                            if not isinstance(_obj, dict):
+                                raise ValueError("not an object")
+                            _ep_ln = _obj.get("epoch")
+                        except ValueError:
+                            log.warning("history: dropping unreadable line "
+                                        "%r", ln[:80])
+                            continue
+                        if _ep_ln != int(epoch):
+                            _rows.append(ln if ln.endswith("\n") else ln + "\n")
+            _rows.append(json.dumps(_row) + "\n")
+            _atomic_write(_history_path, lambda t: pathlib.Path(t).write_text(
+                "".join(_rows)))
             ppath, opath, fpath = _checkpoint_paths(cfg.out_dir, epoch)
             # Parameters, optimizer state and the trainable set together --
             # any one of them missing makes the other two unresumable.
+            # On-disk view: frozen (float) knobs as arrays, so the file
+            # also loads into an all-array template (checkpoint_view).
+            from legoesm.ml.checkpoint_io import (
+                knob_record_path, write_knob_record,
+            )
+            from legoesm.ml.training import checkpoint_view
+            # The stale record goes only once the new payload is written
+            # (codex + GLM 2026-10-29: a failed write keeps old payload+record).
             _atomic_write(ppath, lambda t: eqx.tree_serialise_leaves(
-                t, eqx.combine(cur_arr, static)))       # CURRENT params
+                t, checkpoint_view(eqx.combine(cur_arr, _static_h))),
+                before_replace=lambda: knob_record_path(ppath).unlink(
+                    missing_ok=True))
+            write_knob_record(eqx.combine(cur_arr, _static_h), ppath)
             _atomic_write(opath, lambda t: eqx.tree_serialise_leaves(
                 t, cur_opt_state))
             # Written LAST: it is the marker that says this epoch is
@@ -977,9 +1750,33 @@ def _main(argv=None):
                             "frozen": frozen_names,
                             "fingerprint": _fingerprint})))
 
+    _every = int(cfg.checkpoint_every_steps)
+
+    def on_step(epoch, n_done, losses, n_skipped, cur_arr, cur_opt_state):
+        if (nproc != 1 or not _every or n_done % _every
+                or n_done >= len(local)):
+            return
+        if column_mesh is not None:
+            cur_arr, cur_opt_state = jax.device_get((cur_arr, cur_opt_state))
+        if rank != 0:
+            return
+        from legoesm.ml.training import checkpoint_view
+        _save_partial(
+            cfg.out_dir,
+            {"schema": _MANIFEST_SCHEMA, "frozen": frozen_names,
+             "fingerprint": _fingerprint, "epoch": int(epoch),
+             "step": int(n_done), "losses": [float(x) for x in losses],
+             "skipped": int(n_skipped), **_content_payload(_probe_content)},
+            lambda t: eqx.tree_serialise_leaves(
+                t, checkpoint_view(eqx.combine(cur_arr, _static_h))),
+            lambda t: eqx.tree_serialise_leaves(t, cur_opt_state))
+
     arr, opt_state, history = mpi_data_parallel_training_loop(
         loss_fn, arr, opt_state, optimizer, local, cfg.n_epochs, nproc,
-        on_epoch=on_epoch, start_epoch=start_epoch)
+        on_epoch=on_epoch, start_epoch=start_epoch,
+        place=None if column_mesh is None else place_sample,
+        on_step=on_step, start_step=start_step, start_losses=start_losses,
+        start_skipped=start_skipped)
     params = eqx.combine(arr, static)
     log.info("training done: final loss=%.6f", history[-1] if history else float("nan"))
 
@@ -996,7 +1793,8 @@ def _main(argv=None):
             _probe_vg, params,
             [local[i] for i in probe_indices(len(local),
                                              _N_REACHABILITY_REPORT)],
-            n_probe=_N_REACHABILITY_REPORT, reduce=mpi_max_reduce(nproc))
+            n_probe=_N_REACHABILITY_REPORT, reduce=mpi_max_reduce(nproc),
+            device_put=place_sample)
         _frozen = set(frozen_names)
         # Report the MAGNITUDE and every NAME, not a yes/no: a gradient of
         # 1e-30 is numerical dust, and the only non-arbitrary scale for "big

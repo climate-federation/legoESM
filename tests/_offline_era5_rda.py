@@ -107,3 +107,9 @@ def write_full_archive(tmp_path, *, nlat: int = 6, nlon: int = 8,
     _sfc("128_134_sp", "SP", 1.0e5)
     _sfc("128_034_sstk", "SSTK", 290.0, units="K")
     _sfc("128_031_ci", "CI", 0.0, units="(0-1)")
+    # The invariant surface geopotential (flat, like the synthetic config's terrain).
+    xr.Dataset(
+        {"Z": (("time", "latitude", "longitude"), np.zeros((1, nlat, nlon), "f4"),
+               {"units": "m**2 s**-2"})},
+        coords={"time": t_sfc[:1], "latitude": lat, "longitude": lon},
+    ).to_netcdf(tmp_path / "e5.oper.invariant.128_129_z.ll025sc.1979010100_1979010100.nc")

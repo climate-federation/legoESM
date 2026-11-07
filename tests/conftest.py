@@ -1,7 +1,9 @@
 """Shared test fixtures for legoESM."""
 
+import functools
 import os
 import resource
+import sys
 from pathlib import Path
 
 #: Cap the CPU affinity mask BEFORE JAX is imported (below).  XLA sizes its
@@ -220,6 +222,69 @@ def _ensure_results_tree() -> Path:
     for rel in RESULTS_SUBDIRS:
         (root / rel).mkdir(parents=True, exist_ok=True)
     return root
+
+
+@pytest.fixture(autouse=True)
+def _isolate_corner_fill_process_state():
+    """The mode a model claimed and the modes a halo fill already traced are
+    process globals that make later model builds raise; reset both per test so
+    results do not depend on test order.  The current mode is kept and restored
+    after the test."""
+    import legoesm.grids.halo as halo
+    saved = (halo._corner_fill_mode, halo._corner_fill_claimed,
+             set(halo._corner_fill_traced))
+    halo._corner_fill_claimed = None
+    halo._corner_fill_traced.clear()
+    yield
+    halo._corner_fill_mode, halo._corner_fill_claimed = saved[0], saved[1]
+    halo._corner_fill_traced.clear()
+    halo._corner_fill_traced.update(saved[2])
+
+
+
+@pytest.fixture(autouse=True)
+def _undo_mpas_gc_freeze():
+    """An MPAS run past its first hour freezes the process heap once per
+    process.  Undo it after each test, so later tests neither inherit a frozen
+    heap nor skip the freeze path."""
+    import gc
+    yield
+    md = sys.modules.get("legoesm.driver.model_driver")
+    if md is not None and md._GC_FROZEN[0]:
+        gc.unfreeze()
+        md._GC_FROZEN[0] = False
+
+
+@functools.cache
+def _tree_is_dirty() -> bool:
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(Path(__file__)).dirty
+
+
+@pytest.fixture(autouse=True)
+def _allow_version_drift_on_dirty_tree():
+    """On a tree with uncommitted changes every resume/restart test would hit
+    the version-drift gate.  Allow drift only then, so a clean checkout (CI)
+    still runs every restart test through the real gate.  The gate itself is
+    tested in tests/unit/test_version_drift.py, which unsets the variable."""
+    # Plain os.environ, not monkeypatch: requesting monkeypatch here would
+    # reorder its teardown after _isolate_corner_fill_process_state.
+    key = "LEGOESM_ALLOW_VERSION_DRIFT"
+    saved = os.environ.get(key)
+    if _tree_is_dirty():
+        os.environ[key] = "1"
+    yield
+    if saved is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = saved
+
+
+@pytest.fixture
+def allow_version_drift(monkeypatch):
+    """For tests that load hand-built checkpoints with no run manifest beside
+    them: they test loading, not provenance."""
+    monkeypatch.setenv("LEGOESM_ALLOW_VERSION_DRIFT", "1")
 
 
 @pytest.fixture(scope="session")

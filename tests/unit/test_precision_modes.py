@@ -2,7 +2,8 @@
 
 Verifies that apply_precision() correctly activates each mode, grid builders
 honor the policy, and FV dycores run one step in fp32, fp64, and
-mixed_fp64_storage modes with correct stored-state dtypes.
+mixed and mixed_fp64_storage modes with correct stored-state dtypes.
+(The #1665 interim refusal of the two mixed modes was lifted by #1675.)
 """
 
 import pytest
@@ -44,17 +45,19 @@ class TestApplyPrecision:
         assert p.storage == jnp.float64
         assert p.compute == jnp.float64
 
-    def test_mixed_is_refused(self):
-        # #1665 interim: mixed is refused loudly until it is consistent.
-        import pytest
-        with pytest.raises(NotImplementedError, match="disabled"):
-            apply_precision("mixed")
+    def test_mixed(self):
+        # #1675 lifted the #1665 interim refusal.
+        p = apply_precision("mixed")
+        assert p.storage == jnp.float32
+        assert p.compute == jnp.float32
+        assert p.accumulate == jnp.float64
+        assert p.control == jnp.float64
 
-    def test_mixed_fp64_storage_is_refused(self):
-        """#1665 interim: mixed_fp64_storage is refused loudly too."""
-        import pytest
-        with pytest.raises(NotImplementedError, match="disabled"):
-            apply_precision("mixed_fp64_storage")
+    def test_mixed_fp64_storage(self):
+        p = apply_precision("mixed_fp64_storage")
+        assert p.storage == jnp.float64
+        assert p.compute == jnp.float32
+        assert p.accumulate == jnp.float64
 
 
 # ===========================================================================
@@ -76,10 +79,10 @@ class TestGridPrecision:
         assert g.area.dtype == jnp.float64
 
     def test_cubed_sphere_mixed_fp64_storage(self):
-        # #1665 interim: mixed_fp64_storage is refused (per-grid mixed moot).
-        import pytest
-        with pytest.raises(NotImplementedError, match="disabled"):
-            apply_precision("mixed_fp64_storage")
+        apply_precision("mixed_fp64_storage")
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        g = create_cubed_sphere(8)
+        assert g.area.dtype == jnp.float64  # storage role
 
 
     def test_latlon_fp32(self):
@@ -95,10 +98,10 @@ class TestGridPrecision:
         assert g.lat.dtype == jnp.float64
 
     def test_latlon_mixed_fp64_storage(self):
-        # #1665 interim: mixed_fp64_storage is refused (per-grid mixed moot).
-        import pytest
-        with pytest.raises(NotImplementedError, match="disabled"):
-            apply_precision("mixed_fp64_storage")
+        apply_precision("mixed_fp64_storage")
+        from legoesm.grids.latlon import create_latlon_grid
+        g = create_latlon_grid(16)
+        assert g.lat.dtype == jnp.float64  # storage role
 
 
     def test_cdgrid_inherits_from_parent(self):
@@ -175,11 +178,9 @@ class TestSWCubedSpherePrecision:
         assert jnp.all(jnp.isfinite(s.h))
 
     def test_mixed_fp64_storage(self):
-        # #1665 interim: mixed_fp64_storage is refused (per-grid mixed moot).
-        import pytest
-        with pytest.raises(NotImplementedError, match="disabled"):
-            apply_precision("mixed_fp64_storage")
-
+        s, p = self._run_one_step("mixed_fp64_storage")
+        assert s.h.dtype == jnp.float64  # storage role is f64 in this mode
+        assert jnp.all(jnp.isfinite(s.h))
 
 
 class TestSWMPASPrecision:
@@ -242,7 +243,6 @@ class TestSWMPASPrecision:
         assert jnp.all(jnp.isfinite(s.h.data))
 
     def test_mixed_fp64_storage(self):
-        # #1665 interim: mixed_fp64_storage is refused (per-grid mixed moot).
-        import pytest
-        with pytest.raises(NotImplementedError, match="disabled"):
-            apply_precision("mixed_fp64_storage")
+        s, p = self._run_one_step("mixed_fp64_storage")
+        assert s.h.data.dtype == jnp.float64  # storage role is f64
+        assert jnp.all(jnp.isfinite(s.h.data))

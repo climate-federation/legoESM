@@ -1,0 +1,68 @@
+{
+ "format": "nemo-testcase-l2-gyre-round35-preregister-addendum1-v1",
+ "date": "2026-09-06",
+ "supersedes_nothing": "the base preregistration at 0e78666589ae stands as written; this addendum records what an independent CLAIM review broke in it, BEFORE any code was written against it, and what changed as a result",
+ "reviewer": "a fresh Claude agent given the preregistration, the NEMO source and legoESM's transcription, and nothing else; codex is unavailable on this account",
+ "findings": {
+  "F1": {
+   "claim_attacked": "PR4",
+   "finding": "PR4's ELIMINATION IS INVALID AS WRITTEN.  Neither arm (b) nor arm (c) ever executes legoESM's right-hand-side construction: the production solve takes the RHS as an argument (implicit_solver.py:417-424) and the RHS is built at ocean_model_latlon_cgrid.py:11977-11988.  Both arms can read 0 cells unequal with the RHS build arbitrarily wrong, and PR4 then names that same RHS its own second-ranked suspect and concludes 'operand' by elimination.",
+   "disposition": "ADOPTED.  A fourth arm was added (rhs_content) and the model's own RHS row is reported UNMEASURED with its reason rather than omitted."
+  },
+  "F2": {
+   "claim_attacked": "PR4's ranking",
+   "finding": "A LIVE FALLBACK SUBSTITUTES A DIFFERENT SYSTEM AND BOTH ARMS BYPASS IT.  _nemo_tracer_content_rhs is None (ocean_model_latlon_cgrid.py:11943) unless tracer_combine == 'thickness_weighted' (:11949, :11988); otherwise the literal solve receives _content_t = T_solve_in * dz_cell (:10220-10221), which is e3t(Kaa)*T_expl, not NEMO's e3t(Kbb)*T(Kbb) + p2dt*e3t(Kmm)*RHS (trazdf.F90:272, :276-277).",
+   "disposition": "ADOPTED, and MEASURED.  Building the three cards prints tracer_combine = 'concentration' on GYRE-zco, LOCK_EXCHANGE-zco and OVERFLOW-zps, with zdf_implicit_solver_evaluation = 'nemo_literal' on all three.  So on the very card under investigation the literal trazdf matrix is fed the concentration form and the content builder -- whose own docstring at :2179-2182 says it exists so the literal matrix can consume NEMO's content RHS -- is never selected."
+  },
+  "F3": {
+   "claim_attacked": "PR5",
+   "finding": "PR5 IS RIGHT FOR THE WRONG REASON.  GYRE's initial density is NOT horizontally uniform: usrdef_istate.F90:68 and :76 each end in * ptmask(ji,jj,jk), so land columns carry T=0, S=0 and a different rhd.  ah_wslp2 is zero because every horizontal density difference in ldf_slp is MASKED (ldfslp.F90:167-168, :181-182) and because the land rim sits outside [ntsi,ntei] at jpiglo=36 with nn_hls=2.  The VALUE claim survives; the MECHANISM is false and gives the wrong answer on any card with interior topography.",
+   "disposition": "ADOPTED as a correction.  PR5's threshold and falsifier are unchanged; its stated mechanism is REPLACED by the masked-difference one, and it is recorded that the mechanism does not transfer to ORCA2."
+  },
+  "F4": {
+   "claim_attacked": "r0_4",
+   "finding": "r0_4 cites ocean.output:664, which is the lateral diffusive velocity rn_Ud.  'Rotated laplacian operator (standard)' is at :667.",
+   "disposition": "ADOPTED.  The citation is :667.  Every other cited line verified: 158, 553, 557, 561, 562, 568, 650, 655, 657."
+  },
+  "F5": {
+   "claim_attacked": "r0_8",
+   "finding": "r0_8's istate citation stops one line short of the term that falsifies it: the statements start at :63 and :70, the * ptmask factor is at :68 and :76.",
+   "disposition": "ADOPTED, same correction as F3."
+  },
+  "F6": {
+   "claim_attacked": "PR3",
+   "finding": "PR3 IS VACUOUS ON legoESM's ONLY MASKING DIFFERENCE.  legoESM overwrites the dry diagonal with 1.0 and multiplies each face by interface_wet; NEMO does neither, its dry diagonal being e3t_3d (ppsrc trazdf.f90:233).  GYRE has no dry cell in the scored box (usrdef_zgr.F90:201-205, flat bottom, rim in halo), so PR3 cannot exercise it and its verdict will not transfer to ORCA2.",
+   "disposition": "ADOPTED.  The gate now reports NAMED DEVIATIONS with the measured condition under which each is inert, and a synthetic record with a dry bottom flips two of them LIVE and turns the assembly rows red, so the report is non-vacuous."
+  },
+  "F7": {
+   "claim_attacked": "PR3's bottom row",
+   "finding": "PR3's BOTTOM ROW PASSES BY ACCIDENT.  NEMO's zws(jpkm1) = -p2dt*zwt(jpk)/e3w(jpk,Kmm) (trazdf.F90:220) enters the last solved row's diagonal; legoESM's upper is a hard zero there.  They agree only because avt(:,:,jpk) = 0, and the gate could not distinguish correct from accidentally correct.",
+   "disposition": "ADOPTED.  The condition is now a named deviation carrying its own measured number, max |zwt_mix| at jk = jpk."
+  },
+  "F8": {
+   "claim_attacked": "PR6",
+   "finding": "PR6 HAS AN UNSCORED RANGE.  The clamp at trazdf.F90:90 runs over ALL jk including jpk, which tra_zdf_imp never assigns (its loops end at jpkm1), so a clamp at jpk would be invisible to a gate that scores 1..jpkm1.  PR6 is also only meaningful if the pre-clamp column is an independent Fortran copy rather than a rebuild.",
+   "disposition": "ADOPTED.  The clamp rows score the WHOLE column, 1..jpk.  The pre-clamp column IS an independent copy, taken inside tra_zdf_imp after the third recurrence and therefore before the clamp, so the arm is not circular."
+  }
+ },
+ "prediction_changes": {
+  "PR4": "ITS RANKING IS REFUTED, before the record exists, by a Rule-10 measurement of the built cards rather than by an argument.  The claim's SHAPE stands -- arms (b) and (c) still decide whether the owner is inside the transcription -- but the ranked first suspect is no longer avt.  It is the RIGHT-HAND SIDE, and not merely as 'the same expression with a different association': on this card legoESM's literal solve is fed a DIFFERENT expression entirely.  New ranking: (1) the RHS, because tracer_combine resolves to 'concentration'; (2) avt; (3) the e3t(Kaa)/e3w(Kmm) substitutions.",
+  "PR5": "mechanism replaced per F3; threshold and falsifier unchanged",
+  "PR6": "scored over 1..jpk rather than 1..jpkm1 per F8",
+  "PR8_new": {
+   "claim": "The content-RHS builder thickness_weighted_tracer_content, given NEMO's own operands mapped onto its slots, reproduces NEMO's dumped rhs_T and rhs_S.  The ONLY difference the mapping leaves is the ASSOCIATION of the triple product: NEMO writes p2dt*e3t(Kmm)*T(Krhs), the builder computes e3t(Kmm)*(p2dt*T(Krhs)).",
+   "threshold": "0 cells unequal on T and on S",
+   "falsifier": "any cell unequal -> flipping tracer_combine to 'thickness_weighted' would NOT be bit-exact on its own, and round 36 needs the association fixed as well",
+   "why_it_matters": "round 36 cannot flip that switch on evidence it does not have; this arm is that evidence"
+  }
+ },
+ "not_adopted_as_stated": {
+  "signed_zero": "not a review finding -- it came out of RUNNING the new gate on the synthetic twin.  NEMO's zwi at the surface row and its zws at the bottom row are NEGATIVE zeros (-p2dt*0.0/e3w with zwt(:,1)=0 at trazdf.F90:204, :219-220) where legoESM writes POSITIVE zeros.  Recorded as its own status AT-BAR-SIGNED-ZERO with its own count, not folded into AT-BAR and not called DEBT, because the bits differ and no arithmetic result does."
+ },
+ "configuration_question_raised_and_NOT_answered": {
+  "item": "tracer_combine on the three NEMO identity cards",
+  "current": "concentration (measured on all three)",
+  "proposed": "thickness_weighted, which is the form NEMO writes",
+  "status": "ASKED, NOT ANSWERED, NOT CHANGED.  This is a scientific choice about what the model computes and it is not this round's to make."
+ }
+}

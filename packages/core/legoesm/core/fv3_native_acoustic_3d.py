@@ -288,13 +288,13 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
         from legoesm.core.fv3_native_cgrid_phase_3d import (
             cgrid_nh_pressure_phase_3d,
         )
-        from legoesm.core.fv3_native_dsw_tail_3d import _ext_scalar_planes_6
+        from legoesm.core.fv3_native_dsw_tail_3d import ext_scalar_planes_6
         if first_substep:
             # :535-557 -- duo-exchange gz, then save zh = gz (padded).
             if exchange:
                 for k in range(km + 1):
                     gz_k = [nh["gz6"][t][:, :, k] for t in range(6)]
-                    _ext_scalar_planes_6(ctx, gz_k)
+                    ext_scalar_planes_6(ctx, gz_k)
                     for t in range(6):
                         nh["gz6"][t][:, :, k] = gz_k[t]
             for t in range(6):

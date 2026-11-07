@@ -12,7 +12,7 @@
 # must stay reproducible, so the old nyf.zarr is left untouched.
 set -uo pipefail
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT || exit 1
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu
 OUT=/burg-archive/home/pg2328/.cache/legoesm/ocean_fidelity/forcing/core2_nyf_mod/nyf.zarr

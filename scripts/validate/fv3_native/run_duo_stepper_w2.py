@@ -39,25 +39,16 @@ Usage: run_duo_stepper_w2.py --n 24 --dt 450 --days 5 --out w2_c24.npz
 from __future__ import annotations
 
 import argparse
-import os
-import subprocess
 import sys
 
 import numpy as np
 
 
 def _git_sha() -> str:
-    """Repo SHA, recorded in the npz so a stored score carries its
-    provenance (an artifact without its commit is not comparable to
-    anything)."""
-    try:
-        return subprocess.run(
-            ["git", "-C", os.path.dirname(os.path.abspath(__file__)),
-             "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip() or "unknown"
-    except Exception:
-        return "unknown"
+    """Repo SHA recorded in the npz (artifact without commit is not
+    comparable to anything)."""
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(__file__).commit or "unknown"
 
 
 def geographic_va(ctx, states):

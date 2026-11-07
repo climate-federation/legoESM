@@ -37,6 +37,7 @@ from legoesm.ocean.state import OceanState, OceanConfig
 from legoesm.core.precision import cast_pytree
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
+from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.dynamics.barotropic_cgrid import (
     barotropic_substeps_cgrid, barotropic_substeps_fv3sw,
     barotropic_substeps_fv3edge,
@@ -160,7 +161,11 @@ class OceanModel:
 
         # Build physics function if configured
         if self.config.physics is not None:
-            self._physics_fn = make_ocean_physics(self.config.physics)
+            # The run's EOS for the vertical-mixing closures (#2243), built
+            # as the cube dynamics build theirs.
+            self._physics_fn = make_ocean_physics(
+                self.config.physics,
+                eos_fn=make_eos_fn(self.config.eos, self.config.eos_linear))
         else:
             self._physics_fn = None
 
@@ -325,17 +330,19 @@ class OceanModel:
                 f"{max(max_land_u, max_land_v, max_land_eta):.3e}",
             )
 
-    def tendencies(self, state: OceanState, surface_forcing=None):
+    def tendencies(self, state: OceanState, surface_forcing=None, dt=None):
         """Compute baroclinic tendencies (pure function wrapper)."""
-        return self._compute_tendencies(state, surface_forcing)
+        return self._compute_tendencies(state, surface_forcing, dt)
 
-    def _compute_tendencies(self, state: OceanState, surface_forcing=None):
+    def _compute_tendencies(self, state: OceanState, surface_forcing=None,
+                            dt=None):
         """Compute baroclinic tendencies on the C-D grid backend."""
         return ocean_baroclinic_tendencies_cdgrid(
             state, self.grid, self.z_coord,
             self._cdgrid, self.config,
             physics_fn=self._physics_fn,
             surface_forcing=surface_forcing,
+            dt=dt,
         )
 
     @partial(jax.jit, static_argnums=(0,))
@@ -372,7 +379,7 @@ class OceanModel:
             # tripole RK3 fix). eta is held fixed through the stages — updated ONLY
             # by the barotropic substeps below, exactly as the Euler path. 3x cost.
             def _bc(st):
-                return self._compute_tendencies(st, surface_forcing)
+                return self._compute_tendencies(st, surface_forcing, dt)
 
             def _upd(st, k, a):  # st + a*dt*k for u,v,T,S
                 return st._replace(
@@ -396,7 +403,7 @@ class OceanModel:
                               1.0 / 3.0, 2.0 / 3.0)
         else:
             # --- 1. Baroclinic tendencies ---
-            tend = self._compute_tendencies(state, surface_forcing)
+            tend = self._compute_tendencies(state, surface_forcing, dt)
 
             # --- 2. Update tracers (forward Euler) ---
             T_new = state.T.data + dt * tend.dT_dt.data

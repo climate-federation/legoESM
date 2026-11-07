@@ -39,6 +39,15 @@ def _sigma(nlev=NLEV):
         sigma_full = jnp.linspace(0.1, 0.95, nlev)
         sigma_half = jnp.linspace(0.05, 1.0, nlev + 1)
         dsigma = jnp.diff(jnp.linspace(0.05, 1.0, nlev + 1))
+
+        def pressure_at_full(self, p_s):
+            return p_s[..., None] * self.sigma_full
+
+        def pressure_at_half(self, p_s):
+            return p_s[..., None] * self.sigma_half
+
+        def layer_thickness_dp(self, p_s):
+            return p_s[..., None] * self.dsigma
     return _S()
 
 

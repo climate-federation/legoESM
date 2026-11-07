@@ -26,7 +26,7 @@
 # tracer advection, runoff/SSS-restoring, ice, bottom drag, geothermal, iwm.
 # WHAT CANNOT MATCH (grid-intrinsic, list them with every result):
 #   tripole: --mesh eORCA1.2, --ew-cyclic-overlap, --C-smag-lap, --pgf-scheme
-#   MPAS   : --mpas-level 7, --mpas-lloyd 20, --mpas-vmix (not --tripole-vmix)
+#   MPAS   : --mpas-level 7, --mpas-lloyd 50, --mpas-vmix (not --tripole-vmix)
 #
 # SPLIT into one job PER ARM so they run in PARALLEL: sequential was
 # ~11.5h + ~11.5h = 23h against a 24h walltime, and the second arm's
@@ -57,7 +57,7 @@ cd $WT || exit 1
 [ "$(git -C $WT rev-parse HEAD)" = "$PIN" ] || { echo "FATAL: pin drift"; exit 1; }
 [ -r "$WT/data/grids/eORCA1.2_mesh_mask.nc" ] || { echo "FATAL: data/ not linked"; exit 1; }
 echo "=== pin $PIN  MXL=$MXL ==="
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 R=/burg-archive/glab/users/pg2328/legoESM
 NIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository
@@ -75,7 +75,7 @@ COMMON="--dt 150 --nemo-vertical --partial-cell --adaptive-implicit-vertadv \
 --ice-ocean-heat-coeff 70 --gateway-transports"
 TKE=""   # card defaults on BOTH grids -- see MATCHED-TKE FIX above
 echo "########## ARM: MPAS"
-$PY -u scripts/run/run_omip_core2.py --grid mpas --mpas-level 7 --mpas-lloyd 20 \
+$PY -u scripts/run/run_omip_core2.py --grid mpas --mpas-level 7 --mpas-lloyd 50 \
   $COMMON $IC $TKE --mpas-vmix tke \
   --output $R/results/omip_nemo/xgrid_mpas_mxl${MXL}_d30
 rc2=$?; echo "=== mpas rc=$rc2 ==="

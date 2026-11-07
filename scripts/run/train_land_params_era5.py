@@ -60,6 +60,9 @@ from legoesm.land.config import LandConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.surface_albedo import LandAlbedoConfig
 from legoesm.land.slab_land import step_land
+# Shared no-inert-parameters gate; also used by the sibling multilayer trainer
+# as S.assert_no_inert.
+from legoesm.training.inert_params import assert_no_inert
 from legoesm.land.surface_params import (
     LandSurfaceParams, clm5_pft_table, PARAM_NAMES)
 
@@ -100,37 +103,6 @@ _DT = 6 * 3600.0
 # same footing.  The bucket capacity W_max (root-zone storage stand-in) and root
 # depth get their gradient primarily through this term.
 _LAM_LE = 0.02
-
-
-def assert_no_inert(g: dict) -> None:
-    """STRICT RULE (user directive 2026-08-17): no inert parameters, ever.
-
-    Every leaf in the trainable pytree must carry loss gradient; a parameter the
-    forward never consumes silently pretends to be calibrated.  Called on the
-    FULL-data init gradient of every training run (never a mini-batch — a
-    seasonally/spatially gated param absent from one batch is not inert).
-
-    Raises on (a) an identically-zero leaf (inert) and (b) an all-non-finite
-    leaf — the reviewers' case: an all-NaN gradient would be zeroed by the
-    downstream sanitiser every step, i.e. silently inert while looking live.
-    A PARTIALLY zero per-PFT vector (some components live) passes with a printed
-    warning: components for PFTs absent from the sample are legitimately zero
-    and stay pinned at their prior."""
-    dead = [k for k, v in g.items() if bool(jnp.all(v == 0.0))]
-    poisoned = [k for k, v in g.items() if not bool(jnp.any(jnp.isfinite(v)))]
-    if dead or poisoned:
-        raise ValueError(
-            "no-inert-parameters gate: "
-            + (f"identically-zero gradient: {sorted(dead)}; " if dead else "")
-            + (f"all-non-finite gradient (sanitiser would zero it every step): "
-               f"{sorted(poisoned)}; " if poisoned else "")
-            + "remove the key from the trainable set, enable the physics path "
-              "that consumes it, or fix the init state (run the pre-filter)")
-    for k, v in g.items():
-        nz = int(jnp.sum(v == 0.0)); tot = int(jnp.asarray(v).size)
-        if 0 < nz and tot > 1 and nz > tot // 2:
-            print(f"# no-inert gate: {k} has {nz}/{tot} zero-gradient components "
-                  f"(PFTs absent from the sample stay at the prior)", flush=True)
 
 
 # --------------------------------------------------------------------------- #

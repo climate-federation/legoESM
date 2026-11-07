@@ -1,0 +1,65 @@
+{
+  "format": "nemo-testcase-l2-gyre-round26-preregister-v1",
+  "date": "2026-09-05",
+  "starting_tip": "991f9f95047d",
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "oracle_roots": {
+    "GYRE-zco": [
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww"
+    ],
+    "LOCK_EXCHANGE-zco": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+    "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10",
+    "LOCK_EXCHANGE-zco.external": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round25_lock_external_oracle",
+    "ORCA2": "/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_icebergs_off_phase2v_tke_a_10step_np2"
+  },
+  "already_measured_before_this_preregistration": {
+    "note": "Recorded honestly: these three were measured before the manifest was written, so they carry NO preregistered prediction and are reported as measurements only.",
+    "orca2_fourth_card": "blocked; see rule12_eligibility.orca2",
+    "guard5_body_hole": "new guard fails on a planted .body bypass; the round-25 guard passes on the same plant",
+    "fma_fact": "arch-conda-scalarmath.fcm carries no -march/-mfma/-mavx2/-ffast-math and the GYRE scalar-math nemo.exe has zero vfmadd/vfmsub/vfnmadd/vfnmsub instructions in 1868261 disassembled instructions"
+  },
+  "rule12_eligibility": {
+    "claim_under_test": "Round 25's QCO gdept_z0 source association and the nemo_sco HPG acceleration interface are eligible to land only if the changed operator is bit-exact given NEMO's own inputs on EVERY card that executes it.",
+    "cards_that_execute_it": [
+      "GYRE-zco (discharged in round 25: oracle_input_hpg = 0.0 on both components)",
+      "LOCK_EXCHANGE-zco (pgf_scheme=nemo_sco, nemo_testcase_recipe.py:92,274,914)",
+      "OVERFLOW-zps (same)",
+      "ORCA2 (same)"
+    ],
+    "lock_overflow_method": "At kt=1 both lane-1 tanks start from rest. NEMO stage 1 accumulates dyn_hpg, dyn_vor and dyn_adv into a zeroed Krhs (stprk3_stg.F90:309-334); dyn_vor and dyn_adv are bilinear in the velocity, so at u=v=0 they contribute exactly zero and the dumped stage-1 Krhs IS the HPG acceleration alone. oracle_rhs_kt00000001.bin therefore supplies the same exact-input frame that oracle_input_hpg supplies on GYRE.",
+    "preconditions_that_must_hold_or_the_row_is_void": [
+      "the card's initial state equals NEMO's oracle_step_entry_kt00000001 T/S/u/v/ssh with 0 unequal wet cells",
+      "NEMO's entry u and v are identically zero, so the row cannot pass by cancellation between HPG and a nonzero vorticity or advection term"
+    ],
+    "prediction": "0 unequal wet faces and 0.0 absolute maximum on U and V for both LOCK_EXCHANGE-zco and OVERFLOW-zps.",
+    "confirm": "Both cards report 0 / n on both components with both preconditions satisfied; Rule-12 eligibility for the round-25 change is then discharged on all lane-1 cards.",
+    "refute": "Any nonzero residual, or a violated precondition, REFUTES eligibility on that card. It is reported as REFUTED and the round-25 change is registered as ineligible on that card. It is NOT softened, and no per-card switch is added.",
+    "orca2": "UNMEASURED. The ORCA2 gates live on fidelity/nemo-testcases-l4-orca2-codex and import build_orca2_zps_card, validate_nemo_testcase_card_for_execution, nemo_qco_wzv_recurrence and nemo_transport_wzv_divergence_level, none of which exist at 991f9f95047d; the ORCA2 branch itself still carries the PRE-fix fused gdept_z0 (round-25 ablation arm A). Closing this needs a branch-integration decision, which is an open question, not a choice made here."
+  },
+  "lock_external_records": {
+    "acquisition": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round25_lock_external_oracle",
+    "admission_rule": "GYRE round 21's rule: a record whose CONSUMED fields are byte-identical is admitted even when an unconsumed workspace slot differs, and the differing byte ranges are decomposed to prove the difference is confined to that slot.",
+    "prediction": "The three oracle_transport_kt00000001_s1/s2/s3 differences are confined to the pre-tra_adv_trp zFw workspace slot; every other byte range and all 24 remaining pre-existing records are byte-identical to lock_kt1_10.",
+    "confirm": "Byte-range decomposition places 100% of differing bytes inside the zFw slot and none elsewhere.",
+    "refute": "Any differing byte outside that slot refuses admission of the acquisition."
+  },
+  "lock_external_walk": {
+    "prediction": "LOCK's one moved external-mode U bit first departs at the same dynspg_ts.F90 statement OVERFLOW's u_exit does, the flux-form external velocity update at :752-761, with every earlier substep frame (entry, midpoint, transport, continuity, PGF, slow forcing, drag) bit-exact.",
+    "confirm": "The first unequal frame in LOCK's 19-frame substep record is u_exit and all earlier frames are 0 / n.",
+    "refute": "An earlier unequal frame, or a bit-exact u_exit, refutes it; the measured boundary is reported instead and the label is not retuned."
+  },
+  "reader_changes": {
+    "nemo_testcase_overflow_barotropic_gate": "hardcoded CASE='OVERFLOW-zps' and EXPECTED=(206,7,4,19,64) gain --case/--expected so the LOCK records can be consumed; LOCK dims come from its own layout.",
+    "run_sh_line_27_28": "the cmp compares two WORK symlinks that resolve to one inode (src/OCE/DYN/dynspg_ts.F90) and is therefore vacuous. Replaced by a real check: neither source config overrides dynspg_ts.F90 in MY_SRC, and the transplanted instrumented body is a PURE ADDITION over the shipped body (no deleted or changed line)."
+  },
+  "asked": {
+    "decision_15A": "native demo GYRE card tracer integrator euler -> rk3_ws (user decision, 2026-09-05)"
+  },
+  "forbidden": [
+    "C1D result claim from the flagged probe worktree",
+    "shipped NEMO edit or sandbox NEMO run (makenemo/mpirun)",
+    "per-card numerical arm or switch",
+    "push, merge, reset --hard, stash, or deletion of data"
+  ]
+}

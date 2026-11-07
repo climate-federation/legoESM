@@ -305,6 +305,8 @@ def test_the_classical_arm_passes_its_sample_forcing():
     repo = Path(__file__).resolve().parents[2]
     yml = _yaml.safe_load(
         (repo / "config" / "wb" / "campaign" / "spectral_smoke.yaml").read_text())
+    # tiedtke (WRF port) is refused on the spectral lane
+    yml["classical"] = dict(yml.get("classical", {}), convection="sbm")
     cfg = SimpleNamespace(mode="physics", training_core="spectral",
                           smoke=True, multi_step_hours=(6,), n_days=1)
     _m, grid, sigma, params, make_run_seg, _loss, _dt = build_mode_components(
@@ -313,6 +315,7 @@ def test_the_classical_arm_passes_its_sample_forcing():
     nlev = int(jnp.shape(sigma.sigma_full)[0])
     carry = _carry(grid.n_lat, grid.n_lon, nlev=nlev, extras=False)
     bad = {
+        "land_frac": jnp.zeros((grid.n_lat * grid.n_lon,)),
         "T_sfc": jnp.full((3,), 290.0),        # deliberately not ncol
         "sic": jnp.zeros((3,)),
         "day_of_year": jnp.asarray(244.0),
@@ -338,6 +341,8 @@ def test_a_warmer_prescribed_surface_warms_the_lowest_level():
     repo = Path(__file__).resolve().parents[2]
     yml = _yaml.safe_load(
         (repo / "config" / "wb" / "campaign" / "spectral_smoke.yaml").read_text())
+    # tiedtke (WRF port) is refused on the spectral lane
+    yml["classical"] = dict(yml.get("classical", {}), convection="sbm")
     cfg = SimpleNamespace(mode="physics", training_core="spectral",
                           smoke=True, multi_step_hours=(6,), n_days=1)
     _m, grid, sigma, params, make_run_seg, _loss, _dt = build_mode_components(
@@ -350,6 +355,7 @@ def test_a_warmer_prescribed_surface_warms_the_lowest_level():
 
     def _run(T_sfc):
         fc = {
+            "land_frac": jnp.zeros((ncol,)),
             "T_sfc": jnp.full((ncol,), T_sfc),
             "sic": jnp.zeros((ncol,)),
             "day_of_year": jnp.asarray(244.0),
@@ -382,6 +388,8 @@ def _built_radiation_config(gpt_batch):
     repo = Path(__file__).resolve().parents[2]
     yml = _yaml.safe_load(
         (repo / "config" / "wb" / "campaign" / "spectral_smoke.yaml").read_text())
+    # tiedtke (WRF port) is refused on the spectral lane
+    yml["classical"] = dict(yml.get("classical", {}), convection="sbm")
     if gpt_batch is not None:
         yml["classical"] = dict(yml.get("classical", {}),
                                 rrtmgp_gpoint_batch_size=gpt_batch)

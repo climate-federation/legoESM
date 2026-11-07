@@ -33,6 +33,8 @@ import jax.numpy as jnp
 import netCDF4 as nc
 import numpy as np
 
+from legoesm.ocean.physics.vertical_mixing.tke import _mixing_length_floor
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 
@@ -402,7 +404,7 @@ def tke_equation_decomposition(
     l_eps_l = np.asarray(kw["l_eps"])
     cfg = kw["cfg"]
     dissl_l = np.sqrt(np.maximum(e_old, float(cfg.tke_background))) \
-        / np.maximum(l_eps_l, float(cfg.mxl_min))
+        / np.maximum(l_eps_l, float(_mixing_length_floor(cfg)))
     buoy_l = kh_old * n2_l
     buoy_n = avt_n * rn2_n
 
@@ -727,7 +729,7 @@ def main() -> int:
             "K_M": np.asarray(out[0]), "c_k": float(tke_cfg.c_k),
             "kappa_convention": str(tke_cfg.kappa_convention),
             "floor": float(tke_cfg.kappaM_min),
-            "mxl_min": float(tke_cfg.mxl_min),
+            "mxl_min": float(_mixing_length_floor(tke_cfg)),
             "N2": (None if kw.get("N2") is None else np.asarray(kw["N2"])),
         })
         return out

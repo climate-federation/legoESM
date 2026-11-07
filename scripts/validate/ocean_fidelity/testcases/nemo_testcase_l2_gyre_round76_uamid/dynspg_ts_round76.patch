@@ -1,0 +1,53 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -158,1 +158,2 @@
++      INTEGER  ::   l2_uamid_unit, l2_uamid_ios
+       LOGICAL  ::   ll_init               ! =T : special startup of 2d equations
+@@ -197,6 +198,7 @@
+       CHARACTER(LEN=96) :: l2_drag_filename
+       CHARACTER(LEN=96) :: l2_adv_filename
+       CHARACTER(LEN=96) :: l2_ord_filename
++      CHARACTER(LEN=96) :: l2_uamid_filename
+       CHARACTER(LEN=16) :: l2_magic
+       REAL(wp) ::   zttide   ! Time of day for tidal updates
+       !!----------------------------------------------------------------------
+@@ -610,6 +612,16 @@
+          WRITE(l2_adv_unit) l2_magic, 2, kt, icycle, jpi, jpj, STORAGE_SIZE(1._wp)
+          WRITE(l2_adv_unit) r1_wgt2s, wgtbtp2(1:icycle), r1_e2u, r1_e1v
+       ENDIF
++      ! Round-76 WRITE-only source-order record for the kt=2 U midpoint.
++      IF( lwp .AND. kt == nit000 + 1 ) THEN
++         WRITE(l2_uamid_filename,'("oracle_bt_uamid_operands_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=l2_uamid_unit, FILE=TRIM(l2_uamid_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l2_uamid_ios )
++         IF( l2_uamid_ios /= 0 )   CALL ctl_stop( 'cannot open round-76 U-midpoint trace' )
++         l2_magic = 'NEMO_L2_UAMID_1'
++         WRITE(l2_uamid_unit) l2_magic, 1, kt, icycle, jpi, jpj, STORAGE_SIZE(1._wp), &
++            & ntsi, ntei, ntsj, ntej
++      ENDIF
+
+       !                                             ! ==================== !
+       DO jn = 1, icycle                             !  sub-time-step loop  !
+@@ -652,6 +664,11 @@
+          DO_2D( 1, 1, 2, 1 )
+             va_e(ji,jj) = za1 * vn_e(ji,jj) + za2 * vb_e(ji,jj) + za3 * vbb_e(ji,jj)
+          END_2D
++         IF( lwp .AND. kt == nit000 + 1 ) THEN
++            WRITE(l2_uamid_unit) jn, za1, za2, za3
++            WRITE(l2_uamid_unit) un_e(ntsi:ntei,ntsj:ntej), ub_e(ntsi:ntei,ntsj:ntej), &
++               & ubb_e(ntsi:ntei,ntsj:ntej), ua_e(ntsi:ntei,ntsj:ntej)
++         ENDIF
+
+          IF( .NOT.lk_linssh ) THEN                        !* Update ocean depth (variable volume case only)
+             !                                             !  ------------------
+@@ -995,6 +1012,10 @@
+          !                                                 ! ==================== !
+       END DO                                               !        end loop      !
+       !                                                    ! ==================== !
++      IF( lwp .AND. kt == nit000 + 1 ) THEN
++         CLOSE(l2_uamid_unit)
++         WRITE(numout,*) 'LANE2_BT_UAMID_DUMP ', kt, icycle, TRIM(l2_uamid_filename)
++      ENDIF
+       IF( lwp .AND. kt == nit000 ) THEN
+          CLOSE(l2_unit)
+          DEALLOCATE( l2_eta_mid, l2_u_mid, l2_v_mid, l2_u_cor, l2_v_cor )

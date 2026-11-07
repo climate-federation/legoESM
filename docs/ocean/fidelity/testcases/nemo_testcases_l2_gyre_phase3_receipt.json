@@ -1,0 +1,114 @@
+{
+  "format": "nemo-testcase-l2-gyre-phase3-receipt-v1",
+  "date": "2026-09-01",
+  "session": "01a05cb9-7625-7f40-9e83-b3fa767b1945",
+  "case": "GYRE-zco",
+  "status": "DEBT",
+  "bar": 1e-15,
+  "preregister_commit": "e0e1b89639874c7d1e8c777028d30ffa9f943557",
+  "gate_commit": "99a1ab9e6",
+  "oracle": {
+    "version": "NEMO 5.0.2",
+    "configuration": "GYRE_OMIP_L2_P3",
+    "keys": ["key_qco", "key_vco_1d3d", "key_RK3"],
+    "steps": 10,
+    "completed": true,
+    "run_root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyre_kt1_10"
+  },
+  "first_over_bar": {
+    "kt": 2,
+    "fields": ["T", "S", "u", "v", "ssh"]
+  },
+  "kt2_normalized_max_abs": {
+    "T": 0.0033845756796730703,
+    "S": 0.00011181970871158484,
+    "u": 0.059613298992648146,
+    "v": 0.11394000503432558,
+    "ssh": 0.0016868983837431638
+  },
+  "kt10_normalized_max_abs": {
+    "T": 0.07854782002100048,
+    "S": 0.0005293769180801024,
+    "u": 0.05503377940554033,
+    "v": 1.6267913746004683,
+    "ssh": 0.00994681112869481
+  },
+  "stage_momentum_normalized_max_abs": {
+    "stage1": {"u": 0.0001465032210595928, "v": 0.058579299575484675},
+    "stage2": {"u": 0.00014735166781177294, "v": 0.08802447761163189},
+    "stage3": {"u": 0.059613298992648146, "v": 0.11394000503432558}
+  },
+  "owner_verdict": "UNMEASURED_AFTER_REGISTERED_ARMS",
+  "one_variable_arms": {
+    "omit_stage_barotropic_correction": {
+      "movement_over_faithful_residual": 2.8731014633985343,
+      "label": "PLAUSIBLE_CONTRIBUTOR_NOT_OWNER"
+    },
+    "omit_surface_boundary_forcing": {
+      "movement_over_faithful_residual": 1.5231060545470452,
+      "label": "PLAUSIBLE_CONTRIBUTOR_NOT_OWNER"
+    },
+    "omit_freshwater_forcing": {
+      "movement_over_faithful_residual": 0.0006021626711589655,
+      "label": "REFUTED_AS_PRIMARY_OWNER"
+    },
+    "omit_momentum_transport_reconcile": {
+      "movement_over_faithful_residual": 0.0000024539303606152927,
+      "label": "REFUTED_AS_PRIMARY_OWNER"
+    }
+  },
+  "growth": {
+    "T": {"classification": "POLYNOMIAL_FIT_PREFERRED", "tail_power": 1.3505617315357719},
+    "u": {"classification": "BOUNDED_OR_DECAYING_NO_AMPLIFYING_MODE", "tail_power": -1.8540726911292147},
+    "ssh": {"classification": "POLYNOMIAL_FIT_PREFERRED", "tail_power": 2.610959375196431}
+  },
+  "claude_phase3_redirect": {
+    "status": "DEBT",
+    "coverage_preregister_commit": "ee6b5aed0",
+    "resolved_program_blocks": 13,
+    "resolved_program_unaccounted": 0,
+    "kt1_exact": true,
+    "kt2_normalized_max_abs": {
+      "T": 0.0022011146495261743,
+      "S": 0.0001095339477691381,
+      "u": 0.05959892337101344,
+      "v": 0.037669958034661236,
+      "ssh": 0.0014793035345182532
+    },
+    "stage1_momentum_before": {
+      "u": 0.0001465032210595928,
+      "v": 0.058579299575484675,
+      "v_over_u": 399.847
+    },
+    "stage1_momentum_corrected": {
+      "u": 0.0001305741086612574,
+      "v": 0.00013169038482681593
+    },
+    "operator_scaling_owner_status": "UNMEASURED_SCALING_ONLY",
+    "gate_report_sha256": "d7fac51e3094681514fd6d0c510595388fab5c0b0972a8832f1ba598e0cdf859",
+    "backend": "cpu",
+    "dtype": "float64"
+  },
+  "unmeasured": [
+    "numerical T/S agreement at internal Kaa stages",
+    "numerical barotropic primary/advecting-frame agreement",
+    "a two-sided source-isolated owner for the first over-bar whole-step row",
+    "S and v log-log growth classifications"
+  ],
+  "sha256": {
+    "gate_report": "692534082071d7ff18e4a0ad85fa5c931505e599c294afcc70b5f30eda6ad95d",
+    "nemo_executable": "66acfda7aee933aa93813e0afb98d4b7733bcd8ec81c36169091ffa0b597148d",
+    "restart_kt10": "3271da17716957c2c043f16af62b77d3aad3213bffd83ddce433d65edb6794ba",
+    "namelist_cfg": "85d0f2b0655d7d89dbe676e1d1a0dd1b73ab387b76111dfabc1627d4ab81271d",
+    "mesh_mask": "3bf5d10e36dc52336b9797b13eb1efb4f02d25e0fb3a0c450ac6ce69e65471df",
+    "kt1_entry": "9def5f4986853f497a5e0507bea185fe1ec4348715e2aeca0b14507df8e24fa0",
+    "kt2_entry": "887f3bbb51e047ee7c072ae74b77a8e5b461525341b1ab228ae7d800fa757777"
+  },
+  "review": {
+    "claude_phase2": "SHIP; four requested corrections closed before phase 3",
+    "claude_phase3": "SHIP honest debt round; major coverage redirect implemented after review",
+    "phase3_redirect_closure_review": "OUTSTANDING",
+    "glm": "OUTSTANDING",
+    "dual_review_claim": false
+  }
+}

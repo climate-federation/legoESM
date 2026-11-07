@@ -3,14 +3,13 @@
 downwelling flux.
 
 ``PhysicsPipeline.compute_radiation_core`` previously set ``sw_down_toa`` (which
-the CMOR ``rsdt`` reads) from ``sw_flux_down`` at the top halo.  That halo is
-filled by ``rte/two_stream._replace_top_flux``, whose range-limit — kept on
-purpose to bound the BUG-B drifted-state overshoot (``tests/unit/
-test_two_stream_top_flux.py``) — caps downwelling ~15 % below the true TOA
-insolation (≈330 vs ≈340 W/m^2, C48).  ``_toa_insolation`` returns the incoming
-solar with the EXACT convention the radiation solver uses, so ``rsdt`` is exact
-and consistent with ``rsut`` (same ``S_0``/zenith) WITHOUT touching the
-(still-needed) halo clamp.  These tests pin that behaviour on the method.
+the CMOR ``rsdt`` reads) from ``sw_flux_down`` at the top halo, which at the
+time was a range-limited quadratic extrapolation ~15 % below the true TOA
+insolation (≈330 vs ≈340 W/m^2, C48; that overwrite has since been removed
+because it zeroed the top layer's radiation).  ``_toa_insolation`` returns the
+incoming solar with the EXACT convention the radiation solver uses, so
+``rsdt`` is exact and consistent with ``rsut`` (same ``S_0``/zenith).  These
+tests pin that behaviour on the method.
 """
 from __future__ import annotations
 

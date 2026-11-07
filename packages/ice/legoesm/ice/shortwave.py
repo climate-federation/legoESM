@@ -2,7 +2,7 @@
 
 Three schemes share a common ``compute_ice_sw`` entry point:
 
-- ``"constant"`` — single broadband albedo, no penetration.
+- ``"constant"`` — single broadband albedo, optional fixed transmission.
 - ``"maykut_untersteiner"`` — thin-ice α(T_sfc, h_ice) ramp.
 - ``"delta_eddington"`` — two-band (VIS + NIR) Briegleb & Light
   (2007) albedo with snow + pond modifications and an interior
@@ -27,6 +27,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.smooth import smoothstep_cubic
 
 # AD-safety floor for the thickness inside the sqrt thickness-ramps.  sqrt'(0) is
 # infinite, so differentiating sqrt(h_ice) at the open-water limit h_ice == 0
@@ -57,6 +58,34 @@ _T_MELT_WIDTH_K = 1.0            # melt-transition width below T_melt [K]
 # Maykut 1977): the i0 fraction that enters the ice column is attenuated by the
 # ice above the base so that thick ice transmits ~nothing to the ocean.
 _KAPPA_ICE_M_INV = 1.4          # sea-ice SW extinction coefficient [1/m]
+
+
+# Prescribed-ice (AMIP) surface knobs: the melt-albedo ramp read by
+# sea_ice_albedo and the smooth melt cap of the prognostic ice skin.  The
+# ExperimentConfig scalars of the same names take their default and range here.
+__param_spec__ = {
+    "PrescribedIceSurfaceConfig": {
+        "scheme_key": "atm.prescribed_ice",
+        "excluded": {
+            "ice_skin_melt_cap_width_K": "smoothing width",
+        },
+        "params": {
+            "sea_ice_melt_ramp_width_K": {
+                "units": "K", "bounds": (0.1, 5.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "radiative",
+                "reference": "melt-onset albedo ramp below 0 C "
+                             "(Maykut & Untersteiner 1971)",
+                "shape": None,
+                "legacy_name": "sea_ice_albedo_melt_width_K",
+            },
+        },
+    },
+}
+
+
+class PrescribedIceSurfaceConfig(NamedTuple):
+    sea_ice_melt_ramp_width_K: float = 1.0   # melt-ramp width below T_freeze [K]
+    ice_skin_melt_cap_width_K: float = 0.01    # smooth melt-cap width, 0 = hard [K]
 
 
 # ==============================================================================
@@ -115,16 +144,25 @@ def maykut_untersteiner_albedo(
         Thickness above which the thickness factor saturates [m].
     T_melt, T_width : float
         Upper edge and width of the smooth melt transition [K]; the
-        ramp spans ``[T_melt − T_width, T_melt]``.
+        ramp spans ``[T_melt − T_width, T_melt]`` and follows the cubic
+        smoothstep ``r^2 (3 − 2r)``, ``r = 1 + (T_sfc − T_melt)/T_width``
+        clipped to [0, 1] (C1, no kink at either end).
     albedo_ocean : float
         Open-water albedo used as the thin-ice floor.
+
+    KNOWN DIFFERENCE (RULE 5): the previous form was a LINEAR ramp in r,
+    kinked at both ends.  The smoothstep agrees at r = 0, 1/2, 1; elsewhere
+    the regime albedo differs by (α_cold − α_melt)·|s(r) − r|, at most
+    (α_cold − α_melt)/(6√3) at r = 1/2 ± 1/(2√3): measured 0.0192 at the
+    library defaults (0.70/0.50) and 0.0289 at the production cold end 0.80.
+    No field recovers the linear form; end points and width are unchanged.
     """
     # Sign/formula walk: the skin temperature is clamped at T_melt elsewhere, so
-    # the melt ramp must reach 1.0 *at* T_melt (not 0.5).  Ramp linearly over
+    # the melt ramp must reach 1.0 *at* T_melt (not 0.5).  Smoothstep over
     # [T_melt − T_width, T_melt]: melt_fraction = 0 at the cold edge, = 1 at
     # T_melt, monotonically increasing with T_sfc (warmer -> more melting ->
     # lower albedo).
-    melt_fraction = jnp.clip(1.0 + (T_sfc - T_melt) / T_width, 0.0, 1.0)
+    melt_fraction = smoothstep_cubic(1.0 + (T_sfc - T_melt) / T_width)
     alpha_regime = (
         (1.0 - melt_fraction) * albedo_cold_bare
         + melt_fraction * albedo_melt_bare
@@ -144,6 +182,33 @@ def maykut_untersteiner_albedo(
 # Delta-Eddington two-band albedo (Briegleb & Light 2007 surrogate)
 # ==============================================================================
 
+
+def sea_ice_albedo(
+    scheme: str,
+    albedo_ice: float,
+    T_skin=None,
+    h_ice_m: float | None = None,
+    melt_width_K: float = _T_MELT_WIDTH_K,
+):
+    """Sea-ice albedo a lane's radiation sees, by resolved scheme.
+
+    ``"constant"`` -> the scalar ``albedo_ice``; ``"maykut_untersteiner"`` ->
+    :func:`maykut_untersteiner_albedo` on the prognostic skin with
+    ``albedo_ice`` as the cold end.  Unknown schemes raise.
+    """
+    if scheme == "constant":
+        return albedo_ice
+    if scheme == "maykut_untersteiner":
+        if T_skin is None or h_ice_m is None:
+            raise ValueError(
+                "sea_ice_albedo('maykut_untersteiner') needs the prognostic "
+                "ice skin temperature and slab thickness.")
+        return maykut_untersteiner_albedo(
+            T_skin, h_ice_m, albedo_cold_bare=albedo_ice, T_width=melt_width_K)
+    raise ValueError(
+        f"sea_ice_albedo scheme={scheme!r} unknown; choose 'constant' or "
+        "'maykut_untersteiner' (resolve 'auto' first).")
+
 def _band_albedo_snow(
     melt_fraction: jnp.ndarray,
     h_snow: jnp.ndarray,
@@ -152,13 +217,22 @@ def _band_albedo_snow(
     alpha_melt_vis: float,
     alpha_cold_nir: float,
     alpha_melt_nir: float,
+    alpha_underlying_vis: jnp.ndarray,
+    alpha_underlying_nir: jnp.ndarray,
     h_snow_sat: float = _H_SNOW_SAT_M,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Snow-surface albedo per band, with a thin-snow ramp."""
+    """Interpolate from underlying ice to optically thick snow per band.
+
+    The existing empirical depth ramp must approach the ice albedo as snow
+    vanishes, not zero (black). Coverage is applied separately by the caller.
+    This repairs the surrogate's thin-snow darkening without changing its
+    band endpoints or ramp lengths; it is not the SI3 exponential snow fit.
+    """
     ramp = jnp.clip(h_snow / jnp.maximum(h_snow_sat, 1e-6), 0.0, 1.0)
     alpha_vis = (1.0 - melt_fraction) * alpha_cold_vis + melt_fraction * alpha_melt_vis
     alpha_nir = (1.0 - melt_fraction) * alpha_cold_nir + melt_fraction * alpha_melt_nir
-    return alpha_vis * ramp, alpha_nir * ramp
+    return (alpha_underlying_vis + (alpha_vis - alpha_underlying_vis) * ramp,
+            alpha_underlying_nir + (alpha_nir - alpha_underlying_nir) * ramp)
 
 
 def _band_albedo_bare_ice(
@@ -271,19 +345,20 @@ def delta_eddington_albedo(
     # melting albedos were never fully reached).
     melt_fraction = jnp.clip(1.0 + (T_sfc - T_melt) / T_width, 0.0, 1.0)
 
-    snow_vis, snow_nir = _band_albedo_snow(
-        melt_fraction, h_snow,
-        alpha_cold_vis=constants.alpha_snow_cold_vis,
-        alpha_melt_vis=constants.alpha_snow_melt_vis,
-        alpha_cold_nir=constants.alpha_snow_cold_nir,
-        alpha_melt_nir=constants.alpha_snow_melt_nir,
-    )
     ice_vis, ice_nir = _band_albedo_bare_ice(
         melt_fraction, h_ice,
         alpha_cold_vis=constants.alpha_ice_cold_vis,
         alpha_melt_vis=constants.alpha_ice_melt_vis,
         alpha_cold_nir=constants.alpha_ice_cold_nir,
         alpha_melt_nir=constants.alpha_ice_melt_nir,
+    )
+    snow_vis, snow_nir = _band_albedo_snow(
+        melt_fraction, h_snow,
+        alpha_underlying_vis=ice_vis, alpha_underlying_nir=ice_nir,
+        alpha_cold_vis=constants.alpha_snow_cold_vis,
+        alpha_melt_vis=constants.alpha_snow_melt_vis,
+        alpha_cold_nir=constants.alpha_snow_cold_nir,
+        alpha_melt_nir=constants.alpha_snow_melt_nir,
     )
     pond_vis, pond_nir = _band_albedo_pond(
         pond_depth, ice_vis, ice_nir,

@@ -1,5 +1,10 @@
 """Particle <-> grid coupling for the Super-Droplet Method.
 
+NOT YET FAITHFUL to ERF 26.09 ``SuperDropletsMoist::phaseChange_LV_w``: ERF
+updates theta and recomputes T/p through its own EOS, uses its own constants,
+and its water species mass excludes the solute; the latent heating here is
+``(L_v/c_p)·Δq_l`` with legoESM constants.
+
 Closes the two-way exchange between the Lagrangian super-droplets and the
 Eulerian thermodynamic state of the air they are mixed in, following ERF
 ``SuperDropletsMoist`` (``computeQcQrWater`` deposition + ``phaseChange``

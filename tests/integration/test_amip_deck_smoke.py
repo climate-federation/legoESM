@@ -2,7 +2,7 @@
 
 This is a *very* short run (1-day, C12 cubed-sphere, gray radiation,
 no aerosol/volcanic) that exercises the full
-``run_amip_cmip6_deck.py`` → ``run_amip.py`` → ``ModelDriver`` chain.
+``run_amip_smoke_deck.py`` → ``run_amip.py`` → ``ModelDriver`` chain.
 It validates that:
 
 - The forcing-file generator + deck driver compose correctly.
@@ -39,7 +39,7 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DECK_DRIVER = _REPO_ROOT / "scripts" / "run" / "run_amip_cmip6_deck.py"
+_DECK_DRIVER = _REPO_ROOT / "scripts" / "run" / "run_amip_smoke_deck.py"
 _VALIDATOR = _REPO_ROOT / "scripts" / "validate" / "validate_amip_run.py"
 
 
@@ -58,7 +58,7 @@ def _run_deck(out_dir: Path, *, forcing_dir: Path,
               ic: str = "default",
               extra: list[str] | None = None,
               timeout: int = 240) -> subprocess.CompletedProcess:
-    """Drive ``run_amip_cmip6_deck.py`` with a self-contained
+    """Drive ``run_amip_smoke_deck.py`` with a self-contained
     auto-generated forcing deck under ``forcing_dir``.
 
     ``radiation`` selects the radiation backend; ``gray`` keeps the run

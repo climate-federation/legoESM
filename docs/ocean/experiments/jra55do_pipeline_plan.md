@@ -20,7 +20,7 @@ A repo survey found the following directly reusable infrastructure:
 | **Variable-alias normalization** (CMIP names → repo names) | `_WB2_VAR_ALIASES` in `era5_loader.py` | Pattern copy |
 | **Linear-in-time forcing dispatch** (`get_forcing_at_time(forcing, day)`) | `forcing/amip.py` | Pattern copy |
 | **AMIP-style driver structure** | `scripts/run/run_amip.py` | Pattern copy |
-| **`FreshwaterForcing` namedtuple + `model.step(freshwater=...)`** | `ocean/freshwater.py`, `ocean_model_latlon_cgrid.py:363,482,806` | Use as-is |
+| **`FreshwaterForcing` namedtuple + `model.step(freshwater=...)`** | `ocean/freshwater.py`, `ocean_model_latlon_cgrid.py:364,482,806` | Use as-is |
 | **`AtmToSurface` 2D struct + `ocean_tile_response`** | `coupler/coupling_fields.py`, `coupler/coupler.py` | Use as-is |
 
 Three hard gaps the audit surfaced:

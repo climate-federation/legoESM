@@ -40,6 +40,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import jax.numpy as jnp
+import warnings
+
 import numpy as np
 
 from legoesm import constants
@@ -72,8 +74,21 @@ def interp_column_to_depths(
     NaN-safe: non-finite source entries (land, below-seafloor fill) are
     dropped before interpolating, and a column with fewer than two valid
     entries returns all-NaN so the caller's fill logic — not a fabricated
-    value — decides what goes there.  Below the deepest valid source level
-    the deepest valid value is held (``np.interp``'s edge behaviour).
+    value — decides what goes there.
+
+    BELOW the deepest valid source level the result is ``NaN``, not the
+    deepest valid value.  Holding that value (``np.interp``'s edge behaviour)
+    is how a shelf column's warm bottom water reached the abyss: re-levelling
+    the PHC3 winter climatology onto the 102 WOA depths wrote 583 source
+    columns carrying above 15 degC below 1000 m, the worst at 29.4 degC where
+    the real deep ocean is about 2 degC, and 580 of those had an exactly
+    constant sub-1000 m tail — the signature of the held value.  Those columns
+    then fed every model column standing over them.  ``NaN`` instead lets the
+    per-level nearest-valid fill in :func:`init_ocean_from_woa` take the value
+    from the nearest source column that actually has an observation at that
+    depth.  ABOVE the shallowest valid level the edge value is still held: the
+    shallowest observation is the surface, and holding it is what an
+    observational analysis does there.
 
     Shared helper for the IC-preparation scripts that re-level an external
     climatology onto :data:`WOA_DEPTHS`.  NOTE this is no longer *required*:
@@ -88,17 +103,23 @@ def interp_column_to_depths(
     src_depths : 1-D array, positive downward, ascending.
     dst_depths : 1-D array, positive downward, ascending.
     """
-    good = np.isfinite(col_src)
+    # Both sides must be finite: a valid value paired with a NaN DEPTH would
+    # otherwise enter np.interp's xp (undefined) and make the deep cutoff's
+    # ``.max()`` NaN, silently disabling it (codex adversarial review).
+    good = np.isfinite(col_src) & np.isfinite(np.asarray(src_depths, dtype=float))
     if good.sum() < 2:
         return np.full(np.shape(dst_depths), np.nan)
-    return np.interp(dst_depths, np.asarray(src_depths)[good],
-                     np.asarray(col_src)[good])
+    src_depths = np.asarray(src_depths)
+    out = np.interp(dst_depths, src_depths[good], np.asarray(col_src)[good])
+    return np.where(np.asarray(dst_depths) > src_depths[good].max(),
+                    np.nan, out)
 
 
 def _interp_profile_to_z_coord(
     profile: np.ndarray,
     woa_depths: np.ndarray,
     z_coord: OceanZStarCoordinate,
+    model_depths: np.ndarray | None = None,
 ) -> np.ndarray:
     """Interpolate a 1-D WOA profile onto model z-star full levels.
 
@@ -115,8 +136,23 @@ def _interp_profile_to_z_coord(
     array, shape (nlev,)
         Profile on model full levels.
     """
-    # Model full-level depths (positive), z_full_ref is negative
-    model_depths = np.abs(np.asarray(z_coord.z_full_ref))
+    # Model level depths (positive down).  ``model_depths`` is THIS column's
+    # true cell-centre depths when the caller has partial cells; without it the
+    # reference full-cell centres are used, which is what a pure z* column has.
+    if model_depths is None:
+        model_depths = np.abs(np.asarray(z_coord.z_full_ref))
+    else:
+        model_depths = np.abs(np.asarray(model_depths, dtype=np.float64))
+        if not np.all(np.isfinite(model_depths)):
+            raise ValueError(
+                "model_depths must be finite; a non-finite cell-centre depth "
+                "would place the profile at an undefined level")
+        if not np.all(np.diff(model_depths) >= 0.0):
+            raise ValueError(
+                "model_depths must not decrease downward; an inverted column "
+                "means an off-by-one level or a wrong sign. (A FLAT tail is "
+                "legitimate: cells below the seafloor have zero thickness and "
+                "inherit the bottom cell's depth, and they are masked out.)")
 
     # Remove NaN entries from WOA profile
     valid = ~np.isnan(profile)
@@ -412,6 +448,295 @@ def load_woa18(
     return T_woa, S_woa, lat_woa, lon_woa, depth_woa
 
 
+def _fill_source_levels_nearest_valid(
+    fields: "list[np.ndarray] | tuple[np.ndarray, ...]",
+    src_lat_deg: np.ndarray,
+    src_lon_deg: np.ndarray,
+    *,
+    void_fill: bool = False,
+) -> tuple[list[np.ndarray], int, int]:
+    """Give every source cell an observation at every depth it is missing one.
+
+    ``void_fill=True`` additionally treats a missing cell whose nearest donor
+    is NOT one of its eight grid neighbours as lying in a DATA VOID (a basin or
+    channel the climatology never observed: the Marmara, the Black Sea, the
+    Canadian Archipelago channels).  Nearest-donor filling stitches such a
+    region from whichever observed cells happen to be closest, so adjacent
+    void cells take water from different seas and the seam is a density wall
+    (3.7 kg/m3 across 6 km in the Marmara on ORCA12; 10 kg/m3 at 73N 107W).
+    Void cells are instead filled with the harmonic (Laplace) field bounded by
+    the surrounding non-void cells, per level and per field: horizontally
+    smooth, and by the maximum principle never outside the range of the
+    surrounding data.  A cell within one grid step of an observation keeps its
+    nearest donor as before.
+
+    For each depth level independently, a source cell with no observation takes
+    the value of the NEAREST source cell that does have one AT THAT SAME DEPTH.
+    This is what the observational analyses themselves do, and it is the only
+    fill that keeps a water mass both local and vertically ordered.
+
+    Why it is needed here: an observed column stops at the local seafloor, so a
+    model column standing over a shallow source cell has no observation below
+    that cell's floor.  The column fallback in
+    :func:`_interp_profile_to_z_coord` then propagated the shallowest valid
+    value down the whole column -- surface water written into the abyss.  On
+    the 28 km icosahedral mesh with ETOPO bathymetry that put 1228 wet columns
+    above 15 degC below a kilometre, the worst at 29.3 degC, against ~2 degC
+    for the real deep ocean; the resulting density contrast drove a first-step
+    pressure-gradient acceleration of 4.5e-3 m/s^2.
+
+    A level with NO observation anywhere on the source grid is left untouched:
+    there is no donor for it.  Such a level is then bridged in the VERTICAL by
+    :func:`_interp_profile_to_z_coord`, which interpolates across it from the
+    observed levels above and below — it does NOT reach the caller's constant
+    deep fill (codex adversarial review; the earlier wording here claimed it
+    did and was wrong).
+
+    All the fields are filled TOGETHER, from one donor column per cell and
+    depth: a cell counts as missing where ANY field is missing there, and the
+    donor supplies every field.  Temperature and salinity therefore always
+    describe the same water.  Choosing a donor per field would let a cell take
+    its temperature from one ocean and its salinity from another, which is a
+    density anomaly built out of two real observations.
+
+    Parameters
+    ----------
+    fields : sequence of arrays, each shape (n_lat, n_lon, n_depth)
+        Source fields with ``NaN`` marking a missing observation.
+    src_lat_deg, src_lon_deg : array, shape (n_lat,) / (n_lon,)
+        Source grid coordinates in degrees.
+
+    Returns
+    -------
+    filled : list of arrays, same shapes as ``fields``
+    n_filled : int
+        Number of (cell, level) entries per field that were given a donor.
+    n_void : int
+        Number of those entries that were harmonic-filled as data void
+        (always 0 unless ``void_fill``).
+    """
+    from legoesm.grids.regridding import fill_missing_nearest_valid
+
+    arrs = [np.asarray(f, dtype=np.float64) for f in fields]
+    if not arrs:
+        raise ValueError("fields must not be empty.")
+    arr = arrs[0]
+    for a in arrs:
+        if a.ndim != 3:
+            raise ValueError(
+                f"source field must be (n_lat, n_lon, n_depth); got {a.shape}.")
+        if a.shape != arr.shape:
+            raise ValueError(
+                f"all source fields must share a shape; got {a.shape} and "
+                f"{arr.shape}.")
+
+    # Unit-sphere Cartesian coordinates: the nearest source cell is then exact
+    # across the dateline and over the poles, which differencing degrees is not.
+    lon2d, lat2d = np.meshgrid(np.asarray(src_lon_deg, dtype=np.float64),
+                               np.asarray(src_lat_deg, dtype=np.float64))
+    lat_rad = np.radians(lat2d).ravel()
+    lon_rad = np.radians(lon2d).ravel()
+    cos_lat = np.cos(lat_rad)
+    coords = np.stack([cos_lat * np.cos(lon_rad),
+                       cos_lat * np.sin(lon_rad),
+                       np.sin(lat_rad)], axis=-1)
+
+    n_depth = arr.shape[-1]
+    n_points = arr.shape[0] * arr.shape[1]
+    missing = np.zeros((n_depth, n_points), dtype=bool)
+    for a in arrs:
+        missing |= ~np.isfinite(a.reshape(-1, n_depth).T)
+    has_donor = ~np.all(missing, axis=1)
+    # A level with no donor anywhere: every field is set to NaN wherever ANY
+    # field is missing, so T and S still describe the same water when the
+    # vertical bridge later interpolates across that level.
+    for a in arrs:
+        lv = a.reshape(-1, n_depth).T
+        lv[~has_donor, :] = np.nan   # every point on such a level misses SOME field
+    n_filled = int(missing[has_donor].sum())
+    if n_filled == 0:
+        return arrs, 0, 0
+
+    # Find the donor ONCE, as a point index, and gather every field through it.
+    # A point index is exact in float64 well past any plausible source grid.
+    donor = np.tile(np.arange(n_points, dtype=np.float64), (n_depth, 1))
+    donor[missing] = np.nan
+    donor = fill_missing_nearest_valid(donor[has_donor], coords)
+    donor = np.rint(donor).astype(np.intp)             # (n_donor_levels, n_pts)
+
+    n_lat, n_lon = arr.shape[0], arr.shape[1]
+    void = np.zeros_like(donor, dtype=bool)
+    # Source OCEAN cells = observed at some depth in every field (each field
+    # reduced over depth on its own, then intersected).  The
+    # harmonic fill works on this set only: land cells are not part of the
+    # stencil, so a void cannot be bridged across an isthmus (Suez, Panama,
+    # the archipelago land) the way a plain lat-lon Laplacian would.  A basin
+    # the climatology never sampled at ANY depth is indistinguishable from
+    # land here and is therefore not a void (it stays nearest-stitched, or is
+    # masked with --tripole-closed-seas); a bathymetry-derived source mask
+    # would be the next step if such basins must be filled.
+    ocean = np.ones(n_points, dtype=bool)
+    for a in arrs:
+        ocean &= np.isfinite(a.reshape(-1, n_depth)).any(axis=1)
+    if void_fill:
+        p = np.arange(n_points)
+        dj = np.abs(donor // n_lon - (p // n_lon)[None, :])
+        di = np.abs(donor % n_lon - (p % n_lon)[None, :])
+        di = np.minimum(di, n_lon - di)                 # periodic longitude
+        void = missing[has_donor] & ocean[None, :] & (np.maximum(dj, di) > 1)
+    n_void = int(void.sum())
+
+    out = []
+    for a in arrs:
+        levels = a.reshape(-1, n_depth).T.copy()       # (n_depth, n_points)
+        levels[has_donor] = np.take_along_axis(levels[has_donor], donor, axis=1)
+        if n_void:
+            lv = levels[has_donor]
+            for k in range(lv.shape[0]):
+                if void[k].any():
+                    lv[k] = _harmonic_fill_2d(
+                        lv[k].reshape(n_lat, n_lon),
+                        void[k].reshape(n_lat, n_lon),
+                        domain=ocean.reshape(n_lat, n_lon)).ravel()
+            levels[has_donor] = lv
+        out.append(levels.T.reshape(a.shape))
+    return out, n_filled, n_void
+
+
+# A filled level lighter than the level above it by more than this (in-situ
+# density, both evaluated at the lower level's pressure) is a cross-basin
+# donor, not water that could sit there.  Measured on PHC3 winter (1 deg, 102
+# levels, 3.25e6 filled entries): the deficit has two populations -- up to
+# ~0.1 kg/m3 from ordinary column-to-column contrast between a cell and its
+# donor (68k entries at 0.01, 16k at 0.1), and >= 0.5 kg/m3 (10k entries,
+# 7.7k columns: Baltic 19, Caspian 15, Aegean 8, Arctic shelves) from a
+# donor in another basin.  0.1 sits between them.
+_FILL_STABILITY_TOL_KG_M3 = 0.1
+
+
+def _reject_unstable_donors(
+    T: np.ndarray, S: np.ndarray, filled: np.ndarray, depth_m: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Replace a filled (donor) level that is lighter than the level above by
+    that level, top to bottom, so the fill never manufactures a static
+    inversion.  Observed levels are never changed.
+
+    Why: the per-level nearest donor is the nearest source cell with data AT
+    THAT DEPTH, wherever it is.  Where a whole basin has no observation below
+    some depth, that cell lies in another basin -- for the Aegean below
+    ~1000 m it is the Black Sea (8.9 degC / 22 psu), 150 km away across a
+    1-deg land row.  On ORCA12 that put 27 psu water under 39 psu water in
+    the North Aegean trench column (an 8 kg/m3 inversion at 1047 m, measured
+    through this module's own bilinear + vertical sampling), and the
+    velocity there grew from the first step (jobs 27459479 / 27464705).
+    Extending the last credible level downward is what the observational
+    analyses do for such a basin.  A denser wrong-basin donor still passes:
+    this guards the column, not the geography.
+
+    The comparison is against the last FINITE level above, so a source depth
+    with no donor anywhere (left NaN for the vertical bridge) does not hide an
+    inversion across it.  Returns the corrected fields and the number of
+    (cell, level) entries replaced.
+    """
+    from legoesm.ocean.eos import wright_eos
+
+    T = np.array(T, dtype=np.float64, copy=True)
+    S = np.array(S, dtype=np.float64, copy=True)
+    depth_m = np.asarray(depth_m, dtype=np.float64)
+    n_replaced = 0
+    # last finite (T, S) above each column, carried down the walk
+    fin0 = np.isfinite(T[..., 0]) & np.isfinite(S[..., 0])
+    T_ref = np.where(fin0, T[..., 0], np.nan)
+    S_ref = np.where(fin0, S[..., 0], np.nan)
+    for k in range(1, T.shape[-1]):
+        p_pa = jnp.asarray(constants.rho_ocean * constants.g * depth_m[k])
+        Tk = T[..., k]                         # views: masked writes reach T/S
+        Sk = S[..., k]
+        cand = (filled[..., k] & np.isfinite(Tk) & np.isfinite(Sk)
+                & np.isfinite(T_ref) & np.isfinite(S_ref))
+        if cand.any():
+            rho_here = np.asarray(wright_eos(jnp.asarray(Tk[cand]),
+                                             jnp.asarray(Sk[cand]), p_pa))
+            rho_above = np.asarray(wright_eos(jnp.asarray(T_ref[cand]),
+                                              jnp.asarray(S_ref[cand]), p_pa))
+            lighter = np.zeros(cand.shape, dtype=bool)
+            lighter[cand] = rho_here < rho_above - _FILL_STABILITY_TOL_KG_M3
+            if lighter.any():
+                Tk[lighter] = T_ref[lighter]
+                Sk[lighter] = S_ref[lighter]
+                n_replaced += int(lighter.sum())
+        fin = np.isfinite(Tk) & np.isfinite(Sk)
+        T_ref[fin] = Tk[fin]
+        S_ref[fin] = Sk[fin]
+    return T, S, n_replaced
+
+
+def _harmonic_fill_2d(field: np.ndarray, void: np.ndarray,
+                      domain: "np.ndarray | None" = None) -> np.ndarray:
+    """Replace ``field`` inside ``void`` by the discrete harmonic function with
+    the non-void ``domain`` cells as boundary values: 4-point Laplacian,
+    periodic in longitude (axis 1), clamped at the latitude edges; a neighbour
+    outside ``domain`` (land) is simply not a neighbour, so the fill never
+    crosses it.  Plain grid Laplacian, no spherical metric: the fill is a
+    smooth blend, not a physical diffusion.  One sparse direct solve per call.
+    A connected void region with no non-void domain neighbour at all (a basin
+    missing at this level in every cell) has no boundary to be harmonic with
+    respect to; it is set to the mean of the values it arrived with (the
+    nearest donors), which removes the wall inside it without inventing a
+    gradient."""
+    import scipy.sparse as sp
+    import scipy.sparse.csgraph as csg
+    import scipy.sparse.linalg as spla
+
+    f = np.array(field, dtype=np.float64)
+    n_lat, n_lon = f.shape
+    dom = np.ones(f.shape, dtype=bool) if domain is None else np.asarray(domain, dtype=bool)
+    void = np.asarray(void, dtype=bool) & dom
+    idx = -np.ones(f.shape, dtype=np.int64)
+    vj, vi = np.nonzero(void)
+    n_void = vj.size
+    if n_void == 0:
+        return f
+    idx[vj, vi] = np.arange(n_void)
+    rows, cols, vals = [], [], []
+    rhs = np.zeros(n_void)
+    deg = np.zeros(n_void)
+    n_fixed = np.zeros(n_void)
+    for dj, di in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        nj, ni = vj + dj, (vi + di) % n_lon
+        ok = (nj >= 0) & (nj < n_lat)
+        ok[ok] &= dom[nj[ok], ni[ok]]
+        deg[ok] += 1
+        nb = idx[nj[ok], ni[ok]]
+        r = np.arange(n_void)[ok]
+        is_void = nb >= 0
+        rows.append(r[is_void]); cols.append(nb[is_void]); vals.append(-np.ones(int(is_void.sum())))
+        np.add.at(rhs, r[~is_void], f[nj[ok][~is_void], ni[ok][~is_void]])
+        np.add.at(n_fixed, r[~is_void], 1.0)
+    adj = sp.csr_matrix((np.ones(sum(len(c) for c in cols)), (np.concatenate(rows), np.concatenate(cols))),
+                        shape=(n_void, n_void))
+    _, comp = csg.connected_components(adj, directed=False)
+    bounded = np.bincount(comp, weights=n_fixed) > 0
+    solve = bounded[comp]
+    for c in np.nonzero(~bounded)[0]:
+        m = comp == c
+        f[vj[m], vi[m]] = f[vj[m], vi[m]].mean()
+    if solve.any():
+        sub = np.cumsum(solve) - 1                      # void index -> solved index
+        keep_r = solve[np.concatenate(rows)] & solve[np.concatenate(cols)]
+        rr = sub[np.concatenate(rows)[keep_r]]; cc = sub[np.concatenate(cols)[keep_r]]
+        vv = np.concatenate(vals)[keep_r]
+        n_s = int(solve.sum())
+        A = sp.csr_matrix((np.concatenate([vv, deg[solve]]),
+                           (np.concatenate([rr, np.arange(n_s)]), np.concatenate([cc, np.arange(n_s)]))),
+                          shape=(n_s, n_s))
+        x = spla.spsolve(A.tocsc(), rhs[solve])
+        if not np.all(np.isfinite(x)):
+            raise ValueError("harmonic void fill did not converge to finite values")
+        f[vj[solve], vi[solve]] = x
+    return f
+
+
 def _nearest_neighbor_2d(
     target_lat: np.ndarray,
     target_lon: np.ndarray,
@@ -577,6 +902,41 @@ def _bilinear_2d(
     return result.reshape(out_shape)
 
 
+def _grid_lat_lon_deg(grid):
+    """Target-cell (lat_deg, lon_deg) for any ocean grid, shape = spatial layout."""
+    # Extract latitude in degrees from the grid.
+    # Dispatch order matters: GaussianGrid has both 'lat' and 'lat2d',
+    # while CubedSphereGrid has 'lat' (3D) but no 'lat2d'.
+    if hasattr(grid, 'lat2d'):
+        # Grids exposing a 2-D lat2d (GaussianGrid, LatLonGrid, and the
+        # orthogonal-curvilinear tripole LatLonCGridGeometry). Use the grid's
+        # TRUE 2-D longitude (lon2d) -- on the tripole grid longitude varies
+        # down every i-column, and grid.lon is only the 1-D SOUTHERNMOST row
+        # (lon_T[0, :]); pairing it with the 2-D lat_T mis-sampled WOA by a
+        # median ~9 deg (up to ~155 deg in the bipolar cap) at every cell. For
+        # regular lat-lon / Gaussian grids lon2d is the meshgrid of the 1-D lon,
+        # so this is identical there (no regression); fall back to the broadcast
+        # 1-D lon only for a grid that lacks lon2d.
+        lat_deg = np.asarray(grid.lat2d) * (180.0 / np.pi)
+        lon2d = getattr(grid, 'lon2d', None)
+        if lon2d is not None:
+            lon_deg = np.asarray(lon2d) * (180.0 / np.pi)
+        else:
+            lon_1d = np.asarray(grid.lon) * (180.0 / np.pi)
+            lon_deg = np.broadcast_to(lon_1d[np.newaxis, :], lat_deg.shape)
+    elif hasattr(grid, 'latCell'):
+        # VoronoiMesh: latCell in radians, shape (nCells,)
+        lat_deg = np.asarray(grid.latCell) * (180.0 / np.pi)
+        lon_deg = np.asarray(grid.lonCell) * (180.0 / np.pi)
+    elif hasattr(grid, 'lat') and hasattr(grid, 'lon'):
+        # CubedSphereGrid or LatLonGrid: lat/lon in radians
+        lat_deg = np.asarray(grid.lat) * (180.0 / np.pi)
+        lon_deg = np.asarray(grid.lon) * (180.0 / np.pi)
+    else:
+        raise TypeError(f"Unsupported grid type: {type(grid)}")
+    return lat_deg, lon_deg
+
+
 def init_ocean_from_woa(
     grid,
     z_coord: OceanZStarCoordinate,
@@ -586,13 +946,19 @@ def init_ocean_from_woa(
     month: int | None = None,
     interp: str = "bilinear",
     bathymetry_depth: np.ndarray | None = None,
+    cell_center_depths: np.ndarray | None = None,
     T_fill_C: float | None = None,
     S_fill_psu: float | None = None,
     T_var: str | None = None,
     S_var: str | None = None,
     monthly_layout: str = "concatenated",
+    void_fill: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Initialize ocean T and S from WOA18 climatology.
+
+    ``void_fill`` harmonic-fills unobserved basins/channels on the source grid
+    instead of stitching them from the nearest observed cells (see
+    :func:`_fill_source_levels_nearest_valid`).
 
     If ``T_path`` and ``S_path`` are provided, loads WOA18 NetCDF files
     and interpolates to the model grid.  Otherwise, uses analytical
@@ -682,36 +1048,7 @@ def init_ocean_from_woa(
             f"S_fill_psu must be finite; got {S_fill}."
         )
 
-    # Extract latitude in degrees from the grid.
-    # Dispatch order matters: GaussianGrid has both 'lat' and 'lat2d',
-    # while CubedSphereGrid has 'lat' (3D) but no 'lat2d'.
-    if hasattr(grid, 'lat2d'):
-        # Grids exposing a 2-D lat2d (GaussianGrid, LatLonGrid, and the
-        # orthogonal-curvilinear tripole LatLonCGridGeometry). Use the grid's
-        # TRUE 2-D longitude (lon2d) -- on the tripole grid longitude varies
-        # down every i-column, and grid.lon is only the 1-D SOUTHERNMOST row
-        # (lon_T[0, :]); pairing it with the 2-D lat_T mis-sampled WOA by a
-        # median ~9 deg (up to ~155 deg in the bipolar cap) at every cell. For
-        # regular lat-lon / Gaussian grids lon2d is the meshgrid of the 1-D lon,
-        # so this is identical there (no regression); fall back to the broadcast
-        # 1-D lon only for a grid that lacks lon2d.
-        lat_deg = np.asarray(grid.lat2d) * (180.0 / np.pi)
-        lon2d = getattr(grid, 'lon2d', None)
-        if lon2d is not None:
-            lon_deg = np.asarray(lon2d) * (180.0 / np.pi)
-        else:
-            lon_1d = np.asarray(grid.lon) * (180.0 / np.pi)
-            lon_deg = np.broadcast_to(lon_1d[np.newaxis, :], lat_deg.shape)
-    elif hasattr(grid, 'latCell'):
-        # VoronoiMesh: latCell in radians, shape (nCells,)
-        lat_deg = np.asarray(grid.latCell) * (180.0 / np.pi)
-        lon_deg = np.asarray(grid.lonCell) * (180.0 / np.pi)
-    elif hasattr(grid, 'lat') and hasattr(grid, 'lon'):
-        # CubedSphereGrid or LatLonGrid: lat/lon in radians
-        lat_deg = np.asarray(grid.lat) * (180.0 / np.pi)
-        lon_deg = np.asarray(grid.lon) * (180.0 / np.pi)
-    else:
-        raise TypeError(f"Unsupported grid type: {type(grid)}")
+    lat_deg, lon_deg = _grid_lat_lon_deg(grid)
 
     if T_path is not None and S_path is not None:
         # Load from WOA18 NetCDF files.  The guard above ensures that
@@ -722,6 +1059,31 @@ def init_ocean_from_woa(
             T_var=T_var, S_var=S_var,
             monthly_layout=monthly_layout,
         )
+
+        # Per-LEVEL nearest-valid fill on the SOURCE grid, before any
+        # horizontal interpolation: a source cell missing an observation at a
+        # given depth takes it from the nearest source cell that has one at
+        # that same depth.  Without this a model column over a shallow source
+        # cell inherited that cell's shallowest value all the way down.
+        _filled = ~(np.isfinite(T_woa) & np.isfinite(S_woa))
+        (T_woa, S_woa), n_fill, n_void = _fill_source_levels_nearest_valid(
+            (T_woa, S_woa), lat_woa, lon_woa, void_fill=void_fill)
+        _src_depths = (np.asarray(depth_woa, dtype=np.float64) if depth_woa is not None
+                       else WOA_DEPTHS[:T_woa.shape[-1]])
+        T_woa, S_woa, n_unstable = _reject_unstable_donors(
+            T_woa, S_woa, _filled & np.isfinite(T_woa), _src_depths)
+        del _filled
+        if n_unstable:
+            print(f"[setup] observed T/S: {n_unstable} filled source cell-levels "
+                  "were lighter than the level above (a cross-basin donor) and "
+                  "were replaced by the level above")
+        if n_fill:
+            n_src = T_woa.shape[0] * T_woa.shape[1] * T_woa.shape[2]
+            print(f"[setup] observed T/S: filled {n_fill} of {n_src} source "
+                  "cell-levels from the nearest source column holding an "
+                  "observation at the same depth (one donor for T and S); "
+                  f"{n_void} of them harmonic-filled as data void "
+                  f"(void_fill={void_fill})")
 
         if interp == "bilinear":
             T_woa_horiz = _bilinear_2d(
@@ -760,13 +1122,44 @@ def init_ocean_from_woa(
         else:
             woa_depths = WOA_DEPTHS[:T_woa.shape[-1]]
 
+        # Per-column sampling depths.  A partial bottom cell's centre sits
+        # ABOVE the reference full-cell centre -- by a measured median 22 m and
+        # up to 112 m at ico8/ETOPO -- so sampling the observation at the
+        # reference depth pulls water from the wrong level exactly where cells
+        # are cut, i.e. along the shelf break.
+        _cd = None
+        from legoesm.ocean.vertical import OceanPartialCellCoordinate
+        if cell_center_depths is None and isinstance(
+                z_coord, OceanPartialCellCoordinate):
+            warnings.warn(
+                "init_ocean_from_woa: partial-cell coordinate WITHOUT "
+                "cell_center_depths -- the observed profiles are being sampled "
+                "at the REFERENCE full-cell centres, which puts the wrong water "
+                "in every cut bottom cell (measured: up to 112 m of offset, a "
+                "first-step acceleration of 4.5e-3 m/s^2 at ico8/ETOPO). Pass "
+                "compute_centroid_depth(eta, H_bathy, z_coord).",
+                RuntimeWarning, stacklevel=2)
+        if cell_center_depths is not None:
+            _cd = np.abs(np.asarray(cell_center_depths, dtype=np.float64))
+            if _cd.shape[-1] != z_coord.n_levels:
+                raise ValueError(
+                    "cell_center_depths must have the model's level count "
+                    f"({z_coord.n_levels}); got shape {_cd.shape}")
+            _cd = _cd.reshape(-1, z_coord.n_levels)
+            if _cd.shape[0] != T_flat.shape[0]:
+                raise ValueError(
+                    f"cell_center_depths has {_cd.shape[0]} columns but the "
+                    f"grid has {T_flat.shape[0]}")
+
         T_out = np.stack([
-            _interp_profile_to_z_coord(T_flat[i], woa_depths, z_coord)
+            _interp_profile_to_z_coord(T_flat[i], woa_depths, z_coord,
+                                       None if _cd is None else _cd[i])
             for i in range(T_flat.shape[0])
         ]).reshape(lat_deg.shape + (z_coord.n_levels,))
 
         S_out = np.stack([
-            _interp_profile_to_z_coord(S_flat[i], woa_depths, z_coord)
+            _interp_profile_to_z_coord(S_flat[i], woa_depths, z_coord,
+                                       None if _cd is None else _cd[i])
             for i in range(S_flat.shape[0])
         ]).reshape(lat_deg.shape + (z_coord.n_levels,))
 
@@ -788,7 +1181,11 @@ def init_ocean_from_woa(
                     "or set to a small wet-cell depth); got values "
                     f"with min={float(bath_arr.min())}."
                 )
-            model_depths = np.abs(np.asarray(z_coord.z_full_ref))
+            # Partial cells: mask on the TRUE centre depths the profile was
+            # sampled at, not the reference centres, or a cut bottom cell whose
+            # reference centre lies below the floor loses its valid sample.
+            model_depths = (np.abs(np.asarray(z_coord.z_full_ref)) if _cd is None
+                            else _cd.reshape(T_out.shape))
             nlev = T_out.shape[-1]
             # Only 1-D z_full_ref of length nlev is supported here.
             # Shaped model depths (e.g. spatially varying interfaces
@@ -1032,3 +1429,348 @@ def woa_ocean_bathymetry(
     wet = H > 0.0
     H = np.where(wet, np.clip(H, min_depth_m, H_max), 0.0)
     return H.astype(np.float64)
+
+
+def _fesom_profiles_per_layer(xyz_nodes, nlevels, T_ic, S_ic, xyz_targets, k=4, chunk=200_000):
+    """T_prof, S_prof (ntarget, nz) on the FESOM layer mid-depths; for layer kk the donors are the nodes wet at kk (nlevels-2 >= kk)."""
+    from scipy.spatial import cKDTree
+
+    xyz_nodes = np.ascontiguousarray(xyz_nodes, dtype=np.float64)
+    xyz_targets = np.ascontiguousarray(xyz_targets, dtype=np.float64)
+    nlevels = np.asarray(nlevels)
+    T_ic = np.asarray(T_ic, dtype=np.float64)
+    S_ic = np.asarray(S_ic, dtype=np.float64)
+
+    nz = T_ic.shape[1] - 1
+    nt = xyz_targets.shape[0]
+
+    T_prof = np.empty((nt, nz), dtype=np.float64)
+    S_prof = np.empty((nt, nz), dtype=np.float64)
+    d0 = np.empty(nt, dtype=np.float64)
+    i0 = np.empty(nt, dtype=np.int64)
+
+    # Build one KD-tree per layer, up front; identical donor sets share a single tree.
+    # Donor sets are nested (threshold kk grows), so (size, first, last) uniquely identifies a set.
+    nlim = nlevels - 2
+    donors_l = [None] * nz
+    trees = [None] * nz
+    memo = {}
+    for kk in range(nz):
+        donors = np.flatnonzero(nlim >= kk)
+        if donors.size == 0:
+            # no node is wet at this layer: the profile holds the layer above
+            # (a shallower donor set must never be reused here -- its padded
+            # 0.0 values would enter the average)
+            donors_l[kk] = None
+            trees[kk] = None
+            continue
+        key = (int(donors.size), int(donors[0]), int(donors[-1]))
+        hit = memo.get(key)
+        if hit is None:
+            hit = (donors, cKDTree(xyz_nodes[donors]))
+            memo[key] = hit
+        donors_l[kk], trees[kk] = hit
+
+    for s in range(0, nt, chunk):
+        e = min(s + chunk, nt)
+        pts = xyz_targets[s:e]
+        m = e - s
+        for kk in range(nz):
+            donors = donors_l[kk]
+            tree = trees[kk]
+            if donors is None:
+                T_prof[s:e, kk] = T_prof[s:e, kk - 1]
+                S_prof[s:e, kk] = S_prof[s:e, kk - 1]
+                continue
+            d, j = tree.query(pts, k=min(k, donors.size))
+            d = d.reshape(m, -1)
+            j = j.reshape(m, -1)
+            if kk == 0:
+                d0[s:e] = d[:, 0]
+                i0[s:e] = donors[j[:, 0]]
+            zero = d == 0.0
+            w = 1.0 / np.maximum(d, 1e-12) ** 2
+            zr = zero.any(axis=1)
+            if zr.any():
+                w[zr] = zero[zr]
+            w /= w.sum(axis=1, keepdims=True)
+            idx = donors[j]
+            T_prof[s:e, kk] = np.einsum('ij,ij->i', w, T_ic[idx, kk])
+            S_prof[s:e, kk] = np.einsum('ij,ij->i', w, S_ic[idx, kk])
+
+    return T_prof, S_prof, d0, i0, donors_l, trees
+
+
+_FESOM_IC_CACHE_VERSION = 1  # bump when the remap algorithm changes values
+_FESOM_IC_CACHE_POLL_S = 5.0  # poll interval (s) for non-zero ranks waiting on rank 0's cache file
+
+
+def _load_fesom_ic_cache(path, spatial, nlev, log):
+    """Load a FESOM IC cache entry published by rank 0.
+
+    Returns ``(T, S)`` as float64 jax arrays, or ``None`` if the file is
+    corrupt/truncated, missing arrays, or shaped for a different grid.  Never
+    raises: the reason is logged so rank 0 can rebuild and other ranks can
+    fail with a clear message.
+    """
+    expected = tuple(spatial) + (nlev,)
+    try:
+        with np.load(path) as blob:
+            T = np.asarray(blob["T"], dtype=np.float64)
+            S = np.asarray(blob["S"], dtype=np.float64)
+    except Exception as exc:  # missing arrays, bad zip, truncated file, ...
+        log(f"init_ocean_from_fesom_mesh: unusable cache {path}: {exc!r}")
+        return None
+    if T.shape != expected or S.shape != expected:
+        log(f"init_ocean_from_fesom_mesh: unusable cache {path}: "
+            f"T.shape={T.shape}, S.shape={S.shape}, expected {expected}")
+        return None
+    log(f"init_ocean_from_fesom_mesh: cache hit {path}")
+    return (jnp.asarray(T, dtype=jnp.float64), jnp.asarray(S, dtype=jnp.float64))
+
+
+def init_ocean_from_fesom_mesh(grid, z_coord, mesh_dir, *, cell_center_depths=None,
+                               k=4, isolated_factor=3.0, wet_mask=None, log=print,
+                               cache_dir=None, cache_wait_timeout_s=6 * 3600):
+    """Build initial potential temperature and salinity on the model grid from
+    a FESOM2-JAX mesh's cached initial field.
+
+    Horizontal: for each FESOM LAYER, inverse-distance-squared weighting of the
+    ``k`` nearest nodes that are WET at that layer (chord distances on the unit
+    sphere; a coincident node gets weight 1).  A target deeper than its
+    neighbouring nodes' bottoms therefore takes the nearest nodes that ARE that
+    deep -- real water of that depth -- never a shallow profile extended
+    downward (that extension wrote 15 degC water to 2800 m in the Bismarck Sea
+    next to cells fed by deep nodes, a 2.4 kg/m3 wall).  The log line reports
+    the median and 99th-percentile donor distance at the deepest layer any wet
+    target uses, so distant-donor filling is visible.
+    Vertical: linear interpolation in depth from the 69 layer mid-depths |Z| to
+    each target level's depth (``cell_center_depths`` when given, else the
+    reference |z_full_ref|); the top value is held above |Z[0]| and the deepest
+    layer value below |Z[-1]|.
+
+    Units: T_ic/S_ic potential temperature [degC] / salinity [psu] (nod2D, 70),
+    padded with 0.0 below each node's bottom (layers 0..nlevels_nod2D-2 are
+    wet); Z [m] negative; target depths [m] positive-down; distances on the
+    unit sphere, converted with ``constants.R_earth`` for the diagnostics.
+
+    Closed seas: every target cell is filled; masking of closed seas (and land)
+    is the caller's job.  ``wet_mask`` (spatial, True = ocean) only restricts
+    the isolated-cell report (nearest surface donor farther than
+    ``isolated_factor`` x that donor's mesh resolution) to ocean cells.
+
+    ``cache_dir`` (default ``$LEGOESM_MESH_CACHE_DIR``; must be an absolute
+    path on storage shared by every process): rank 0 builds once and publishes
+    an ``.npz`` keyed on the mesh files' identity and the target geometry; the
+    other ranks wait for it and load the same bytes.  A cache hit returns the
+    stored fields without rebuilding, so the isolated-cell and donor-distance
+    diagnostics are skipped; their log lines appear only on a build.
+
+    Returns ``(T, S)`` as float64 jax arrays of shape ``spatial + (nlev,)``.
+    """
+    import hashlib
+    import os
+    import time
+
+    import jax
+
+    if cache_dir is None:
+        # same env-var convention as legoesm/grids/voronoi.py
+        cache_dir = os.environ.get("LEGOESM_MESH_CACHE_DIR") or None
+    nlev = int(z_coord.n_levels)
+    lat_deg, lon_deg = _grid_lat_lon_deg(grid)
+    lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
+    lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
+    spatial = np.shape(lat_deg)
+    ncell = lat_flat.size
+    if cell_center_depths is not None:
+        ccd = np.asarray(cell_center_depths, dtype=np.float64)
+        if ccd.shape[-1] != nlev or ccd.shape[:-1] != spatial:
+            raise ValueError(f"cell_center_depths shape {ccd.shape} != {spatial + (nlev,)}")
+        depths = ccd.reshape(ncell, nlev)
+    else:
+        depths = np.broadcast_to(
+            np.abs(np.asarray(z_coord.z_full_ref, dtype=np.float64)), (ncell, nlev))
+
+    cache_path = None
+    if cache_dir is not None:
+        # cache_dir is written by rank 0 and polled by every other rank, so it
+        # MUST be an absolute path on storage shared by all jax processes.
+        if not os.path.isabs(cache_dir):
+            raise ValueError(
+                "init_ocean_from_fesom_mesh: cache_dir must be an absolute path on a "
+                f"filesystem shared by all jax processes, got {cache_dir!r}")
+        key = hashlib.sha256()
+        # Key the mesh files by identity (basename, size, mtime_ns) instead of
+        # content -- the staleness criterion make/rsync use -- so no rank hashes
+        # ~16 GB of mesh at every launch.  An in-place edit that preserves size
+        # and mtime_ns is NOT detected; bump _FESOM_IC_CACHE_VERSION for that.
+        for name in ("T_ic.npy", "S_ic.npy", "geo_coord_nod2D.npy", "Z.npy", "nlevels_nod2D.npy"):
+            st = os.stat(os.path.join(mesh_dir, name))
+            key.update(f"{name}|{st.st_size}|{st.st_mtime_ns}\n".encode())
+        key.update(repr(tuple(spatial)).encode())
+        key.update(str(nlev).encode())
+        key.update(hashlib.sha256(np.ascontiguousarray(lat_flat)).hexdigest().encode())
+        key.update(hashlib.sha256(np.ascontiguousarray(lon_flat)).hexdigest().encode())
+        if cell_center_depths is None:
+            # depths is a broadcast of one nlev vector; hash just that vector
+            # (materialising the view is ~8 GB at ORCA12).
+            key.update(b"ref")
+            key.update(hashlib.sha256(
+                np.abs(np.asarray(z_coord.z_full_ref, dtype=np.float64)).tobytes()).hexdigest().encode())
+        else:
+            key.update(b"ccd")
+            # buffer protocol, no .tobytes() copy of the (ncell, nlev) array (8 GB at ORCA12)
+            key.update(hashlib.sha256(np.ascontiguousarray(ccd)).hexdigest().encode())
+        key.update(f"{k!r}|{isolated_factor!r}|{_FESOM_IC_CACHE_VERSION}".encode())
+        cache_path = os.path.join(
+            cache_dir, f"fesom_ic_v{_FESOM_IC_CACHE_VERSION}_{key.hexdigest()[:24]}.npz")
+    if cache_path is not None and os.path.exists(cache_path):
+        cached = _load_fesom_ic_cache(cache_path, spatial, nlev, log)
+        if cached is not None:
+            return cached
+        if jax.process_index() != 0:
+            raise RuntimeError(
+                f"init_ocean_from_fesom_mesh: cache file {cache_path} is corrupt or "
+                f"incompatible (expected T/S of shape {tuple(spatial) + (nlev,)})")
+        log(f"init_ocean_from_fesom_mesh: unusable cache, rebuilding {cache_path}")
+        # Remove the unusable file now, so peers arriving during the (long)
+        # rebuild see no file and enter the wait loop instead of raising.
+        try:
+            os.unlink(cache_path)
+        except FileNotFoundError:
+            pass
+    if cache_path is not None and jax.process_index() != 0:
+        # Never build on a non-zero rank: a per-rank build is 16x the cost, and
+        # every rank must load the very same bytes (byte-mismatch class defect
+        # seen before).  Wait for process 0 to publish the file, then load it.
+        waited = 0.0
+        last_log = 0.0
+        while not os.path.exists(cache_path):
+            if waited >= cache_wait_timeout_s:
+                raise RuntimeError(
+                    f"init_ocean_from_fesom_mesh: timed out after {waited:.0f}s waiting for "
+                    f"{cache_path} from process 0")
+            time.sleep(_FESOM_IC_CACHE_POLL_S)
+            waited += _FESOM_IC_CACHE_POLL_S
+            if waited - last_log >= 600.0:
+                log(f"init_ocean_from_fesom_mesh: still waiting for {cache_path} ({waited:.0f}s)")
+                last_log = waited
+        cached = _load_fesom_ic_cache(cache_path, spatial, nlev, log)
+        if cached is None:
+            raise RuntimeError(
+                f"init_ocean_from_fesom_mesh: cache file {cache_path} is corrupt or "
+                f"incompatible (expected T/S of shape {tuple(spatial) + (nlev,)})")
+        return cached
+
+    T_ic = np.asarray(np.load(os.path.join(mesh_dir, "T_ic.npy")), dtype=np.float64)
+    S_ic = np.asarray(np.load(os.path.join(mesh_dir, "S_ic.npy")), dtype=np.float64)
+    geo = np.asarray(np.load(os.path.join(mesh_dir, "geo_coord_nod2D.npy")), dtype=np.float64)
+    Z = np.asarray(np.load(os.path.join(mesh_dir, "Z.npy")), dtype=np.float64)
+    nlevels = np.asarray(np.load(os.path.join(mesh_dir, "nlevels_nod2D.npy")), dtype=np.int64)
+    res_path = os.path.join(mesh_dir, "mesh_resolution.npy")
+    mesh_res = (np.asarray(np.load(res_path), dtype=np.float64)
+                if os.path.exists(res_path) else None)
+
+    if T_ic.ndim != 2 or T_ic.shape != S_ic.shape:
+        raise ValueError(f"T_ic/S_ic shape mismatch: {T_ic.shape} vs {S_ic.shape}")
+    nod2, nz_full = T_ic.shape
+    if geo.shape != (nod2, 2):
+        raise ValueError(f"geo_coord_nod2D shape {geo.shape} != {(nod2, 2)}")
+    if nlevels.shape != (nod2,):
+        raise ValueError(f"nlevels_nod2D shape {nlevels.shape} != {(nod2,)}")
+    if Z.ndim != 1 or Z.shape[0] != nz_full - 1:
+        raise ValueError(f"Z shape {Z.shape} incompatible with {nz_full} profile layers")
+    if np.any(nlevels < 2) or np.any(nlevels > nz_full):
+        raise ValueError("nlevels_nod2D out of range [2, n_layers]")
+    if mesh_res is not None and mesh_res.shape != (nod2,):
+        raise ValueError(f"mesh_resolution shape {mesh_res.shape} != {(nod2,)}")
+    z_abs = np.abs(Z)
+    if np.any(np.diff(z_abs) <= 0.0):
+        raise ValueError("|Z| must be strictly increasing with depth")
+    nz = z_abs.size
+
+    def _xyz(lat_r, lon_r):
+        return np.stack((np.cos(lat_r) * np.cos(lon_r), np.cos(lat_r) * np.sin(lon_r),
+                         np.sin(lat_r)), axis=1)
+    xyz_n = _xyz(geo[:, 1], geo[:, 0])
+    xyz_t = _xyz(np.deg2rad(lat_flat), np.deg2rad(lon_flat))
+
+    T_prof, S_prof, d0, i0, donors_l, trees = _fesom_profiles_per_layer(
+        xyz_n, nlevels, T_ic, S_ic, xyz_t, k=k)
+
+    # vertical: |Z| -> target depths, top held above z_abs[0], bottom held below z_abs[-1]
+    T_out = np.empty((ncell, nlev), dtype=np.float64)
+    S_out = np.empty((ncell, nlev), dtype=np.float64)
+    chunk = 200_000
+    for s in range(0, ncell, chunk):
+        e = min(s + chunk, ncell)
+        D = depths[s:e]                                             # (m, nlev)
+        i0v = np.searchsorted(z_abs, D, side="right") - 1
+        i_lo = np.clip(i0v, 0, nz - 1)
+        i_hi = np.minimum(i_lo + 1, nz - 1)
+        lo_z = z_abs[i_lo]
+        span = z_abs[i_hi] - lo_z
+        frac = np.clip((D - lo_z) / np.where(span > 0.0, span, 1.0), 0.0, 1.0)
+        rows = np.arange(s, e)[:, None]
+        T_out[s:e] = (1.0 - frac) * T_prof[rows, i_lo] + frac * T_prof[rows, i_hi]
+        S_out[s:e] = (1.0 - frac) * S_prof[rows, i_lo] + frac * S_prof[rows, i_hi]
+    del T_prof, S_prof
+
+    # diagnostics: isolated cells (surface donor), donor distance at the deepest layer used
+    wm = (np.asarray(wet_mask, dtype=bool).reshape(ncell) if wet_mask is not None
+          else np.ones(ncell, dtype=bool))
+    if mesh_res is None:
+        thresh = isolated_factor * np.median(d0[wm]) * constants.R_earth
+    else:
+        thresh = isolated_factor * mesh_res[i0]
+    isolated = (d0 * constants.R_earth > thresh) & wm
+    n_iso = int(isolated.sum())
+    far = np.argsort(np.where(wm, d0, -1.0))[-5:][::-1]
+    far_str = ", ".join(f"({lat_flat[i]:.4f}, {lon_flat[i]:.4f})" for i in far)
+    log(f"init_ocean_from_fesom_mesh: {n_iso} isolated wet target cells "
+        f"(nearest surface donor > {isolated_factor:g} x mesh resolution); "
+        f"5 farthest (lat, lon) deg: {far_str}")
+    if wm.any():
+        # deepest layer actually read by any wet target: the UPPER bracket of
+        # the deepest target depth (the lower bracket omits the deeper donor)
+        d_max = float(np.max(depths[wm]))
+        kk_max = int(min(nz - 1, max(0, np.searchsorted(z_abs, d_max, side="right"))))
+        while trees[kk_max] is None:
+            kk_max -= 1
+        dd, _ = trees[kk_max].query(xyz_t[wm], k=1)
+        dd_km = np.asarray(dd) * constants.R_earth / 1e3
+        log(f"init_ocean_from_fesom_mesh: deepest layer used {kk_max} (|Z| {z_abs[kk_max]:.0f} m) "
+            f"has {donors_l[kk_max].size} wet donor nodes; nearest-donor distance over wet targets "
+            f"median {np.median(dd_km):.1f} km, p99 {np.percentile(dd_km, 99):.1f} km, max {dd_km.max():.1f} km")
+
+    T_out = T_out.reshape(spatial + (nlev,))
+    S_out = S_out.reshape(spatial + (nlev,))
+    if cache_path is not None:
+        import tempfile
+        os.makedirs(cache_dir, exist_ok=True)
+        # mkstemp keeps the tmp file inside cache_dir (same filesystem, so the
+        # os.replace below is atomic) and unique across hosts/jobs, unlike a
+        # pid-based name which can collide between rank 0s on different nodes.
+        # Saved arrays are the pre-jnp float64 arrays: a hit is bit-identical.
+        fd, tmp = tempfile.mkstemp(
+            dir=cache_dir, prefix=os.path.basename(cache_path) + ".tmp.")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                np.savez(fh, T=T_out, S=S_out)
+            umask = os.umask(0)   # mkstemp creates 0600; a shared cache dir needs 0644
+            os.umask(umask)
+            os.chmod(tmp, 0o644 & ~umask)
+            os.replace(tmp, cache_path)
+            log(f"init_ocean_from_fesom_mesh: cache written {cache_path}")
+        except Exception as exc:
+            log(f"init_ocean_from_fesom_mesh: WARNING: cache write failed: {exc!r}")
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            # Peers are polling for this publication; swallowing the failure
+            # would hang them until cache_wait_timeout_s.
+            if jax.process_count() > 1:
+                raise
+    return jnp.asarray(T_out, dtype=jnp.float64), jnp.asarray(S_out, dtype=jnp.float64)

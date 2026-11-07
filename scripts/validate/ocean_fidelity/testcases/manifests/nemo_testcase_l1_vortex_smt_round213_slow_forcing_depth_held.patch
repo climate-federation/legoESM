@@ -1,0 +1,105 @@
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index 7de8b291a..acc283010 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -5953,6 +5953,56 @@ class LatLonCGridOceanModel:
+         _v_pair = jnp.sum(jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
+         H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
+         F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
++        # NEMO's own depth average of the slow forcing (stp2d.F90:177-186 of
++        # the VORTEX_SMT builds): the REFERENCE face thickness and the STORED
++        # reciprocal, with no ssh stretching anywhere in the statement --
++        #   Ue_rhs = SUM( e3u_0(1:jpkm1)*uu(Krhs)*umask ) * r1_hu_0
++        # where e3u_0 is the min of the two neighbouring REFERENCE
++        # thicknesses and r1_hu_0 = ssumask/(hu_0 + 1 - ssumask) with
++        # hu_0 = SUM_k e3u_0*umask (domain.F90).  The min-rule-live form
++        # above equals this on a FULL-STEP mesh (one per-face scalar that
++        # cancels) and does NOT over partial cells, where the per-level
++        # minimum of the two STRETCHED thicknesses can follow a different
++        # column than the reference minimum does.  Static Python branch on a
++        # config string, so the default path is bit-identical.
++        _slow_depth_eval = getattr(
++            _cfg_b.barotropic, "barotropic_slow_forcing_depth_evaluation",
++            "min_rule_live")
++        if _slow_depth_eval not in ("min_rule_live", "nemo_literal"):
++            raise ValueError(
++                "unknown barotropic_slow_forcing_depth_evaluation scheme "
++                f"{_slow_depth_eval!r}: must be one of "
++                "('min_rule_live', 'nemo_literal').")
++        if _slow_depth_eval == "nemo_literal":
++            from legoesm.ocean.vertical import nemo_qco_card_mesh_operands
++            _h_ref0 = compute_layer_thickness(
++                jnp.zeros_like(state.eta.data), state.H_bathy.data, _zc,
++                min_water_column_m=_cfg_b.min_water_column_m,
++            ).astype(du_dt.dtype)
++            if isinstance(_zc, OceanPartialCellCoordinate):
++                _um3, _vm3 = compute_face_masks_3d(_zc.is_active, _grid)
++                _um3 = _um3.astype(du_dt.dtype)
++                _vm3 = _vm3.astype(du_dt.dtype)
++            else:
++                _um3 = jnp.asarray(u_mask_3d, dtype=du_dt.dtype)
++                _vm3 = jnp.asarray(v_mask_3d, dtype=du_dt.dtype)
++            _ops0 = nemo_qco_card_mesh_operands(
++                _h_ref0, _um3, _vm3, _grid, du_dt.dtype)
++            _one = jnp.asarray(1.0, dtype=du_dt.dtype)
++            _wet_u0 = (_ops0.hu_0 > 0.0).astype(du_dt.dtype)
++            _wet_v0 = (_ops0.hv_0 > 0.0).astype(du_dt.dtype)
++            _r1_hu_0 = _wet_u0 / (_ops0.hu_0 + _one - _wet_u0)
++            _r1_hv_0 = _wet_v0 / (_ops0.hv_0 + _one - _wet_v0)
++            _slow_u_native = jnp.sum(
++                _ops0.e3u_0 * du_dt[:, 1:, :] * _ops0.umask3,
++                axis=-1) * _r1_hu_0
++            _slow_v_native = jnp.sum(
++                _ops0.e3v_0 * dv_dt[1:, :, :] * _ops0.vmask3,
++                axis=-1) * _r1_hv_0
++            F_slow_u = (F_slow_u.at[:, 1:].set(_slow_u_native)
++                        * state.u_mask.data)
++            F_slow_v = (F_slow_v.at[1:, :].set(_slow_v_native)
++                        * state.v_mask.data)
+         _slow_depth_override = (
+             self._nemo_ws_test_hooks.slow_forcing_depth_override)
+         if _slow_depth_override is not None:
+diff --git a/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py b/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
+index 5466a514c..320cc9fb1 100644
+--- a/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
++++ b/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
+@@ -2584,6 +2584,13 @@ def build_vortex_smt_zps_card(momentum: str = "flux") -> NEMOTestcaseCard:
+                              else "vortex_vector_een_c2"),
+         tke_langmuir_evaluation=None,
+     )
++    # stp2d.F90:177-186 depth-averages the slow forcing with the REFERENCE
++    # face thickness and the stored reciprocal, not with the live min-rule
++    # thickness; the two differ only over partial cells (round 213).  Stated
++    # on the card, explicitly, because it is a statement choice.
++    model_config = model_config._replace(
++        barotropic=model_config.barotropic._replace(
++            barotropic_slow_forcing_depth_evaluation="nemo_literal"))
+     recipe = NEMORecipe(
+         model_config=model_config,
+         physics_config=model_config.physics,
+diff --git a/packages/ocean/legoesm/ocean/state.py b/packages/ocean/legoesm/ocean/state.py
+index d374e7516..1405b2018 100644
+--- a/packages/ocean/legoesm/ocean/state.py
++++ b/packages/ocean/legoesm/ocean/state.py
+@@ -1194,6 +1194,21 @@ class BarotropicConfig(NamedTuple):
+     # Requires barotropic_seed_face_depth="nemo_ssh_avg" so the live face
+     # thickness and its separately associated reciprocal describe one state.
+     barotropic_seed_evaluation: str = "generic"
++    # How the SLOW FORCING is depth-averaged onto the barotropic faces --
++    # NEMO's ``Ue_rhs``/``Ve_rhs`` (``stp2d.F90:177-186``).
++    # ``min_rule_live`` (DEFAULT, main's behaviour): the per-level minimum of
++    # the two neighbouring LIVE (ssh-stretched) T thicknesses, divided by
++    # their own column sum.  On a full-step mesh the two columns share one
++    # reference ladder, so that minimum is the reference face thickness times
++    # a single per-face scalar which cancels against the divisor.
++    # ``nemo_literal``: NEMO's own statement, which carries no stretching at
++    # all -- the REFERENCE face thickness ``e3u_0`` (the min of the two
++    # neighbouring REFERENCE thicknesses, ``domain.F90``/``zgr_zps``) times
++    # the stored reciprocal ``r1_hu_0 = ssumask/(hu_0 + 1 - ssumask)``
++    # (``domain.F90``), with ``hu_0 = SUM_k e3u_0*umask``.  The two disagree
++    # only where the per-level minimum can follow a DIFFERENT column than the
++    # reference minimum does, i.e. over PARTIAL CELLS.  Unknown value raises.
++    barotropic_slow_forcing_depth_evaluation: str = "min_rule_live"
+     # Does this card CARRY NEMO's prognostic external mode (``uu_b``/``vv_b``,
+     # NEMO ``oce.F90:39,99``) as model state, so the barotropic window seeds
+     # from it (``dynspg_ts.F90:484-500``) instead of re-reducing the 3-D

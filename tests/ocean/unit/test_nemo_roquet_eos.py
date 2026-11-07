@@ -6,6 +6,9 @@ independent NumPy transcription of NEMO's ``eos_insitu`` Horner form, the
 independent UNESCO surface anchor, T/S monotonicity, an at-depth regression
 pin, and finite AD gradients.
 """
+import hashlib
+import struct
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -15,6 +18,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.ocean.eos import (
     _ROQUET_EOS80,
+    _ROQUET_TEOS10,
     make_eos_fn,
     nemo_roquet_eos,
     rho_0,
@@ -125,3 +129,92 @@ def test_make_eos_fn_dispatch():
     assert 1015.0 < rho < 1055.0
     with pytest.raises(ValueError):
         make_eos_fn(eos="nemo_eos80_typo")
+
+
+def test_nemo_teos10_dispatch_is_the_canonical_roquet_polynomial():
+    """The selectable phase-3 option must not route through Veros GSW."""
+    rho_ref = 1026.0
+    T = jnp.asarray([-1.0, 10.0, 25.0], dtype=jnp.float64)
+    S = jnp.asarray([34.0, 35.0, 37.0], dtype=jnp.float64)
+    depth = jnp.asarray([0.0, 500.0, 4000.0], dtype=jnp.float64)
+    pressure = rho_ref * constants.g * depth
+    got = make_eos_fn("nemo_teos10", rho0=rho_ref)(T, S, pressure)
+    expected = nemo_roquet_eos(
+        T, S, pressure, coeffs=_ROQUET_TEOS10, rho0=rho_ref
+    )
+    np.testing.assert_array_equal(np.asarray(got), np.asarray(expected))
+
+
+def test_nemo_teos10_density_coefficient_table_has_ci_pin():
+    """Pin all 52 EOS### values without requiring a local NEMO checkout."""
+    density = {k: float(v) for k, v in _ROQUET_TEOS10.items()
+               if k.startswith("EOS")}
+    assert len(density) == 52
+
+    def digest(values):
+        hashed = hashlib.sha256()
+        for name, value in sorted(values.items()):
+            hashed.update(name.encode("ascii"))
+            hashed.update(b"\0")
+            hashed.update(struct.pack(">d", value))
+        return hashed.hexdigest()
+
+    expected = "dfb7fe0df632023d5f7dec65221cd2f0733cf4d80312494120384ae94e756239"
+    assert digest(density) == expected
+    planted = dict(density)
+    planted["EOS000"] += 1.0e-11
+    assert digest(planted) != expected
+
+
+# ---------------------------------------------------------------------------
+# The EOS-80 stratification arm.  ORCA2's namelist selects EOS-80
+# (``ln_eos80 = .true.``) and NEMO's expansion-coefficient routine runs ONE
+# polynomial for both forms -- ``rab_3d_t``'s ``CASE( np_teos10, np_eos80 )``
+# -- while its buoyancy-frequency routine ``bn2_t`` carries no equation-of-
+# state branch at all.  So the arm is a coefficient-set selection on the
+# evaluator already shipped here, and these tests pin exactly that.
+# ---------------------------------------------------------------------------
+
+def _bn2_column():
+    from legoesm.ocean import eos
+    nlev = 12
+    gdept = jnp.asarray(np.linspace(5.0, 500.0, nlev))
+    gdepw = 0.5 * (gdept[:-1] + gdept[1:])
+    profile = np.linspace(18.0, 4.0, nlev)
+    profile[5] = profile[6] - 0.5          # one statically unstable pair
+    return (eos, jnp.asarray(profile), jnp.full((nlev,), 35.0), gdept, gdepw)
+
+
+def test_bn2_eos80_arm_is_the_eos80_alpha_beta_assembly():
+    """The arm must use the EOS-80 coefficients, not TEOS-10's."""
+    eos, T, S, gdept, gdepw = _bn2_column()
+    got = eos.compute_buoyancy_frequency_nemo_bn2(
+        T, S, gdept, gdepw, eos_form="eos80", e3w_source="depth_difference")
+    alpha, beta = eos.nemo_roquet_alpha_beta(T, S, gdept, eos_form="eos80")
+    expected = eos.compute_buoyancy_frequency_nemo_bn2(
+        T, S, gdept, gdepw, e3w_source="depth_difference",
+        _alpha_beta_override=(alpha, beta))
+    np.testing.assert_array_equal(np.asarray(got), np.asarray(expected))
+
+
+def test_bn2_eos80_differs_from_teos10_and_keeps_the_sign():
+    """Non-vacuity: selecting EOS-80 must change the number, not just pass."""
+    eos, T, S, gdept, gdepw = _bn2_column()
+    eos80 = np.asarray(eos.compute_buoyancy_frequency_nemo_bn2(
+        T, S, gdept, gdepw, eos_form="eos80", e3w_source="depth_difference"))
+    teos10 = np.asarray(eos.compute_buoyancy_frequency_nemo_bn2(
+        T, S, gdept, gdepw, eos_form="teos10", e3w_source="depth_difference"))
+    assert not np.allclose(eos80, teos10), "eos80 returned the TEOS-10 answer"
+    assert eos80[5] < 0.0, "eos80 lost the statically unstable interface"
+    ratio = eos80[np.arange(eos80.size) != 5] / teos10[
+        np.arange(teos10.size) != 5]
+    assert np.all((ratio > 0.5) & (ratio < 2.0)), ratio
+
+
+def test_bn2_still_refuses_an_unknown_eos_form():
+    """Dispatch hardening survives the new arm."""
+    eos, T, S, gdept, gdepw = _bn2_column()
+    with pytest.raises(ValueError, match="eos_form"):
+        eos.compute_buoyancy_frequency_nemo_bn2(
+            T, S, gdept, gdepw, eos_form="eos-80",
+            e3w_source="depth_difference")

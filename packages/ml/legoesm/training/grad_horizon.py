@@ -40,15 +40,52 @@ def grad_norm_vs_horizon(
     """Adjoint norm of ``loss_for_horizon(n, x)`` w.r.t. ``x`` for each ``n`` in ``horizons``.
 
     ``loss_for_horizon(n_steps, x) -> scalar`` runs an ``n_steps`` rollout and
-    returns a scalar loss.  Returns ``{n: ||d loss / d x||_2}`` — sweep it to
+    returns a scalar loss.  Returns ``{n: max |d loss / d x|}`` — sweep it to
     characterise where the adjoint blows up (the usable training horizon).
+
+    The MAX-norm, not the L2 norm, for the reason given in :func:`grad_max_norm`:
+    squaring overflows fp32 above ~1.8e19, so an L2 sweep reports a blow-up at
+    exactly the magnitudes it exists to measure.  A real sweep of this repo's
+    epoch-0 neural lane reached 6.1e21 at 144 steps, where an L2 norm would have
+    manufactured an ``inf``.  The two norms differ by a factor bounded by
+    sqrt(#elements), which is constant across horizons and cancels out of a
+    growth rate.
     """
     out: dict[int, float] = {}
     for n in horizons:
         n = int(n)
         g = jax.grad(lambda z, _n=n: loss_for_horizon(_n, z))(x)
-        out[n] = float(global_grad_norm(g))
+        out[n] = grad_max_norm(leaf_grad_report(g))
     return out
+
+
+def blowup_horizon(norms_by_horizon: dict[int, float]) -> int | None:
+    """Smallest horizon whose adjoint norm is NON-FINITE (``inf`` or ``NaN``).
+
+    ``None`` when every sample is a number.  This is the headline result of a
+    horizon sweep: the step count at which the adjoint stops being a number.
+    Read it BEFORE any growth rate — a growth rate fitted across a blow-up is
+    meaningless.
+
+    A norm of exactly zero is NOT a blow-up.  It is a perfectly finite answer
+    that merely has no logarithm, so it is unusable for the growth fit and
+    nothing more; calling it a blow-up would both invent a failure and discard
+    every longer horizon behind it.  Those samples are reported separately by
+    :func:`unfittable_horizons`.
+    """
+    bad = [int(n) for n, v in norms_by_horizon.items() if not jnp.isfinite(v)]
+    return min(bad) if bad else None
+
+
+def unfittable_horizons(norms_by_horizon: dict[int, float]) -> list[int]:
+    """Finite horizons whose norm has no logarithm (``<= 0``), sorted.
+
+    Distinct from :func:`blowup_horizon`: a zero adjoint means the control has
+    no influence at that horizon, which is a finding of its own — usually a
+    severed gradient path — and never an overflow.
+    """
+    return sorted(int(n) for n, v in norms_by_horizon.items()
+                  if jnp.isfinite(v) and float(v) <= 0.0)
 
 
 def estimate_growth_rate(norms_by_horizon: dict[int, float]) -> float:
@@ -57,9 +94,34 @@ def estimate_growth_rate(norms_by_horizon: dict[int, float]) -> float:
     A positive slope means the adjoint grows exponentially (chaotic regime); its
     reciprocal is an order-of-magnitude empirical Lyapunov time in time steps.
     Needs at least two finite, positive samples.
+
+    NON-FINITE SAMPLES ARE NOT SILENTLY DROPPED.  A blow-up is the very thing
+    this sweep exists to find, and an earlier version filtered ``inf``/``NaN``
+    out of the fit — so the sweep discarded its own finding and returned a
+    reassuring slope measured on the healthy prefix alone, with nothing in the
+    return value to say so.  The rule now:
+
+    * the fit uses only horizons STRICTLY BELOW the first blow-up, because
+      samples past a blow-up are not on the same exponential branch;
+    * the dropped horizons are logged at WARNING naming the blow-up horizon;
+    * fewer than two usable samples below the blow-up returns ``nan`` rather
+      than a slope fitted through scattered survivors.
+
+    Call :func:`blowup_horizon` alongside this to get the blow-up itself — the
+    slope alone cannot express "and then it stopped being a number".
     """
-    items = sorted((n, v) for n, v in norms_by_horizon.items()
-                   if jnp.isfinite(v) and v > 0.0)
+    cut = blowup_horizon(norms_by_horizon)
+    usable = {int(n): float(v) for n, v in norms_by_horizon.items()
+              if jnp.isfinite(v) and float(v) > 0.0
+              and (cut is None or int(n) < cut)}
+    if cut is not None:
+        dropped = sorted(int(n) for n in norms_by_horizon if int(n) >= cut)
+        logger.warning(
+            "adjoint blow-up at horizon %d: dropping horizons %s from the "
+            "growth-rate fit; the slope below is the PRE-blow-up branch only, "
+            "and the blow-up itself is the finding (see blowup_horizon).",
+            cut, dropped)
+    items = sorted(usable.items())
     if len(items) < 2:
         return float("nan")
     ns = jnp.asarray([n for n, _ in items], dtype=jnp.result_type(float))
@@ -94,3 +156,97 @@ def check_grad_horizon(
         logger.warning(msg)
         return False
     return True
+
+
+def leaf_grad_report(grads) -> dict[str, tuple[float, bool]]:
+    """Per-leaf ``(max|g|, is_finite)`` keyed by its pytree path.
+
+    A global norm collapses to ``inf``/``NaN`` as soon as ONE leaf does, so it
+    cannot say whether the adjoint grew until it overflowed or whether a single
+    kernel handed back a NaN while everything else stayed small.  That is the
+    distinction the horizon sweep has to make, so record the leaves.
+
+    ``max|g|`` of a non-finite leaf is reported as ``inf`` when any element is
+    infinite and ``nan`` when any element is NaN, so the two failure modes stay
+    distinguishable in the log.
+    """
+    report: dict[str, tuple[float, bool]] = {}
+    for path, leaf in jax.tree_util.tree_flatten_with_path(grads)[0]:
+        key = jax.tree_util.keystr(path)
+        x = jnp.asarray(leaf)
+        finite = bool(jnp.all(jnp.isfinite(x)))
+        if finite:
+            val = float(jnp.max(jnp.abs(x))) if x.size else 0.0
+        elif bool(jnp.any(jnp.isnan(x))):
+            val = float("nan")
+        else:
+            val = float("inf")
+        report[key] = (val, finite)
+    return report
+
+
+def diagnose_blowup(
+    report: dict[str, tuple[float, bool]],
+    reference_max: float | None = None,
+    *,
+    growth_factor: float = 1e6,
+) -> str:
+    """Label a leaf report with the HYPOTHESIS it is consistent with.
+
+    This is a triage label, never a proof.  A cotangent is only observed at the
+    ENDS of the chain, so no endpoint report can establish where along the
+    backward sweep a value was born; a kernel that returns ``inf`` and an
+    overflow that later becomes ``NaN`` through ``inf - inf`` are genuinely
+    indistinguishable from the endpoints alone.  Localising the birth site needs
+    per-step cotangents or a NaN trap, which is a separate job.
+
+    ``reference_max`` is the largest finite per-leaf magnitude from a SHORT
+    horizon in the same sweep — the only thing that makes "small" and "large"
+    mean anything here.  Without it the amplitude evidence is unavailable and
+    every failure is reported as ``"unclassified"`` rather than guessed at.
+
+    ``"finite"``        nothing blew up.
+    ``"growth"``        surviving finite leaves have already grown past
+                        ``growth_factor`` times the reference, so the adjoint was
+                        being amplified whatever the non-finite leaves mean.
+    ``"kernel"``        a leaf is non-finite while every surviving finite leaf is
+                        still near the reference.  Amplification cannot produce a
+                        non-finite value while the rest of the adjoint is small,
+                        so this points at a kernel returning ``NaN``/``inf`` in
+                        its own right.
+    ``"unclassified"``  a failure with no reference to judge amplitude against,
+                        or one where NO finite leaf survives (nothing left to
+                        compare, so a total overflow is not mislabelled).
+    """
+    bad = [v for v, ok in report.values() if not ok]
+    if not bad:
+        return "finite"
+    if reference_max is None or not (reference_max > 0.0):
+        return "unclassified"
+    finite = [v for v, ok in report.values() if ok]
+    if not finite:
+        # Every leaf is non-finite: there is no surviving amplitude to judge,
+        # and "kernel" would have been reached only because max() of nothing
+        # defaulted to zero -- a total overflow must not be labelled a kernel.
+        return "unclassified"
+    return "growth" if max(finite) > growth_factor * reference_max else "kernel"
+
+
+def grad_max_norm(report: dict[str, tuple[float, bool]]) -> float:
+    """Overflow-free magnitude of a gradient: ``max |g|`` over every element.
+
+    Deliberately the max-norm and not the L2 norm.  ``sum(x**2)`` overflows in
+    fp32 once any element exceeds ~1.8e19, so an L2 norm manufactures the very
+    ``inf`` a horizon sweep would then report as a blow-up — a measurement that
+    fails at exactly the magnitudes it exists to measure.  A max-norm never
+    overflows, and for deciding whether an adjoint is growing or has gone
+    non-finite it carries the same information (the two norms agree to within a
+    factor of sqrt(#elements), which is constant across horizons and therefore
+    cancels out of a growth rate).
+
+    Returns ``inf``/``nan`` only when a LEAF is genuinely non-finite.
+    """
+    bad = [v for v, ok in report.values() if not ok]
+    if bad:
+        return float("nan") if any(v != v for v in bad) else float("inf")
+    return max((v for v, ok in report.values() if ok), default=0.0)

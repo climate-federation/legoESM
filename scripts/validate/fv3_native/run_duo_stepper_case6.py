@@ -79,7 +79,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 
 import numpy as np
@@ -140,14 +139,8 @@ def reference_canvas() -> tuple[np.ndarray, np.ndarray]:
 def _git_sha() -> str:
     """Repo SHA recorded in the npz (artifact without commit is not
     comparable to anything)."""
-    try:
-        return subprocess.run(
-            ["git", "-C", os.path.dirname(os.path.abspath(__file__)),
-             "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip() or "unknown"
-    except Exception:
-        return "unknown"
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(__file__).commit or "unknown"
 
 
 # Plausibility bands, mirrored by the gate (sentinel detectors, not

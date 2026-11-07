@@ -106,6 +106,47 @@ def main() -> int:
                          "needs --mesh-mask for the area divide). `wo` is a "
                          "VELOCITY [m/s] (the 5-day grid_W files) and is "
                          "compared directly.")
+    ap.add_argument("--box-budget", default=None,
+                    help="'lo,hi' longitude window: volume budget of the box "
+                         "|lat|<=--budget-lat-halfwidth, --budget-layer, ours "
+                         "(stored mass fluxes) vs NEMO (uocetr_eff/vocetr_eff/"
+                         "wo; needs --nemo-ufile/--nemo-vfile/--nemo-wfile/"
+                         "--mesh-mask/--nemo-w-recs)")
+    ap.add_argument("--budget-layer", default="50,150")
+    ap.add_argument("--heat-budget", action="store_true",
+                    help="LIMITATION FIRST (measured 2026-09-08, do not quote "
+                         "these terms as a closed budget): neither side can be "
+                         "closed from the archived fields. Ours stores "
+                         "INSTANTANEOUS fluxes, so the terms cannot match a "
+                         "15-day mean tendency; the oracle publishes 5-day "
+                         "MEANS, and a mean diffusivity times a mean gradient "
+                         "is not a mean flux -- where its mixing is "
+                         "intermittent the two are anticorrelated (avt at 50 m "
+                         "in the cold tongue: median 4.1e-04, max 3.8e+01 "
+                         "m2/s), which is what produced a +852 K/month "
+                         "diffusive term at 50-150 m. The terms are usable "
+                         "only for ORDER and SIGN in a layer with no "
+                         "intermittent mixing (15-25 m), never as a closure. "
+                         "With --box-budget: split the layer's HEAT "
+                         "budget into horizontal advection, vertical "
+                         "advection and vertical diffusion on both sides, in "
+                         "K/month, using each side's own upwind temperature "
+                         "on its own faces. Codex+GLM discriminator "
+                         "(2026-09-08) for whether the cold 20 m is advective."
+                         " Needs `to` in --nemo-gridt and `avt` in "
+                         "--nemo-wfile.")
+    ap.add_argument("--heat-budget-average", default=None,
+                    help="comma-separated legoESM snapshots to AVERAGE before "
+                         "computing the budget, so our instantaneous fluxes "
+                         "become a time mean over the oracle's own window. "
+                         "Without this the budget cannot close (2026-09-08); "
+                         "with it, pass the matching --nemo-w-recs.")
+    ap.add_argument("--heat-budget-prev", default=None,
+                    help="earlier legoESM snapshot: gives the OBSERVED dT/dt "
+                         "the three terms are checked against (the control -- "
+                         "a residual comparable to the terms means the "
+                         "instrument is being read, not the ocean).")
+    ap.add_argument("--budget-lat-halfwidth", default="2")
     ap.add_argument("--nemo-w-recs", default=None,
                     help="record selection in the wfile, `K` or `A:B` "
                          "(python slice, stop-exclusive). Default: all "
@@ -263,7 +304,312 @@ def main() -> int:
                          regrid_curv_to_latlon)
     if a.meridional_lon or a.nemo_ufile:
         _euc_merid_block(a, L, zc)
+    if a.box_budget:
+        _box_budget_block(a, L, zc)
     return 0
+
+
+_SEC_PER_MONTH = 30.0 * 86400.0
+
+
+class _MeanSnap(dict):
+    """Time-averaged snapshot: same access surface as an npz for the budget."""
+
+    @property
+    def files(self):
+        return list(self.keys())
+
+
+
+def _upwind(flux, lo_side, hi_side):
+    """Temperature carried by ``flux`` on a face: the LO-side cell when the
+    flux is positive (flowing lo -> hi), the HI-side cell otherwise."""
+    return np.where(flux > 0.0, lo_side, hi_side)
+
+
+def _heat_terms(Fw, Fs, Fup, T, K, area, zc, z_if, kl, kt, kb, box, wet):
+    """Layer heat budget, one side, in K/month.
+
+    Sign convention, stated once and used everywhere: z is UP, every returned
+    term is a TENDENCY of the layer mean temperature (positive = warming).
+      Fw   (ny, nx+1, nz)  volume flux [m3/s] through the WEST face of each
+                           cell, positive EASTWARD
+      Fs   (ny+1, nx, nz)  through the SOUTH face, positive NORTHWARD
+      Fup  (ny, nx, nz+1)  through each interface, positive UPWARD
+      K    (ny, nx, nz-1)  tracer diffusivity on the INTERIOR interfaces
+                           (interface index k maps to K[..., k-1])
+      wet  (ny, nx, nz)    True where the cell is ocean.  Cells below the
+                           bathymetry carry a FILL temperature, and a fill
+                           value next to real water is a 20 K gradient across
+                           one interface -- that produced a 852 K/month
+                           diffusive term on the oracle's side before this
+                           argument existed, so a dry neighbour zeroes the
+                           interface rather than being read as a gradient.
+    Returns (horizontal advection, vertical advection, vertical diffusion).
+    """
+    Tl = np.concatenate([T[:, :1], T], axis=1)      # cell west of each face
+    Tr = np.concatenate([T, T[:, -1:]], axis=1)     # cell east of each face
+    Wl = np.concatenate([wet[:, :1], wet], axis=1)
+    Wr = np.concatenate([wet, wet[:, -1:]], axis=1)
+    Hx = np.where(Wl & Wr, Fw * _upwind(Fw, Tl, Tr), 0.0)
+    Td = np.concatenate([T[:1], T], axis=0)         # cell south of each face
+    Tu = np.concatenate([T, T[-1:]], axis=0)        # cell north of each face
+    Wd = np.concatenate([wet[:1], wet], axis=0)
+    Wu = np.concatenate([wet, wet[-1:]], axis=0)
+    Hy = np.where(Wd & Wu, Fs * _upwind(Fs, Td, Tu), 0.0)
+    Ta = np.concatenate([T[..., :1], T], axis=-1)   # cell ABOVE each interface
+    Tb = np.concatenate([T, T[..., -1:]], axis=-1)  # cell BELOW each interface
+    Wa = np.concatenate([wet[..., :1], wet], axis=-1)
+    Wb = np.concatenate([wet, wet[..., -1:]], axis=-1)
+    Hz = np.where(Wa & Wb, Fup * _upwind(Fup, Tb, Ta), 0.0)
+
+    dz = np.diff(z_if)
+    vol = float((area[..., None] * dz[None, None, :] * wet)[..., kl][box].sum())
+    # heat leaving the box through the east/north faces minus that entering
+    out_x = float((Hx[:, 1:, :] - Hx[:, :-1, :])[..., kl].sum(-1)[box].sum())
+    out_y = float((Hy[1:, :, :] - Hy[:-1, :, :])[..., kl].sum(-1)[box].sum())
+    out_z = float((Hz[..., kt] - Hz[..., kb])[box].sum())
+    # downgradient diffusive flux, positive UP:  F = -K dT/dz = K (T_below - T_above)/dz
+    def _fd(k):
+        if k < 1 or k > K.shape[-1]:
+            return np.zeros_like(area)
+        both = wet[..., k] & wet[..., k - 1]
+        return np.where(both,
+                        K[..., k - 1] * (T[..., k] - T[..., k - 1])
+                        / (zc[k] - zc[k - 1]) * area, 0.0)
+    fd_cell = (_fd(kt) - _fd(kb))
+    out_d = float(fd_cell[box].sum())
+    f = _SEC_PER_MONTH / vol
+    # An instrument that can be dominated by ONE cell is not measuring the box:
+    # report the worst single-cell share so an outlier cannot hide in the mean.
+    worst = float(np.abs(fd_cell[box]).max()) if box.any() else 0.0
+    share = worst / max(abs(out_d), 1e-30)
+    if share > 0.25:
+        print(f"  [warn] one cell carries {100 * share:.0f}% of the diffusive term "
+              f"({worst * f:+.3f} of {-out_d * f:+.3f} K/month) -- treat it as an "
+              "instrument outlier, not the ocean")
+    return -out_x * f - out_y * f, -out_z * f, -out_d * f
+
+
+def _box_budget_block(a, L, zc):
+    """Volume budget of a lon/lat/depth box, ours vs NEMO, split by wall
+    direction: which velocity component carries the convergence that heaves
+    the lower thermocline (isopycnal probe, 2026-09-05).
+
+    OURS: the STORED tracer-advecting fluxes -- mass_flux_u/v [m^2/s] x face
+    length (dy_u/dx_v) = m^3/s, mass_flux_w [m/s] x cell_area.  NEMO:
+    uocetr_eff/vocetr_eff [m^3/s] (the effective tracer transport, same
+    quantity class as ours) and wo [m/s] x e1t*e2t.  Both sides are summed as
+    CELL divergences over the box (east face minus west face per T cell), so
+    the zonal / meridional split is exact on each side's own C-grid and no
+    wall has to be located on a curvilinear mesh.
+
+    CONTROL: the horizontal net outflow of the layer must be balanced by the
+    vertical net outflow (w_top - w_bot)*area, up to the slow z-star thickness
+    change; the residual is PRINTED on both sides and the vertical sign is
+    the one that closes it (stated, not assumed).  A residual comparable to
+    the terms means the instrument, not the ocean, is being read.
+    """
+    import netCDF4 as nc
+    lo, hi = (float(x) for x in a.box_budget.split(","))
+    z0, z1 = (float(x) for x in a.budget_layer.split(","))
+    half = float(a.budget_lat_halfwidth)
+    if a.heat_budget_average:
+        _files = [f.strip() for f in a.heat_budget_average.split(",") if f.strip()]
+        _mems = [np.load(f) for f in _files]
+        _keys = set(_mems[0].files)
+        snap = {k: (np.mean([np.asarray(m[k], dtype=np.float64) for m in _mems], axis=0)
+                    if np.asarray(_mems[0][k]).dtype.kind == "f"
+                    and np.asarray(_mems[0][k]).ndim > 0 else _mems[0][k])
+                for k in _keys}
+        snap = _MeanSnap(snap)
+        print(f"[budget] averaging {len(_files)} snapshots: "
+              f"{_files[0].split('/')[-1]} .. {_files[-1].split('/')[-1]}")
+    else:
+        snap = np.load(a.legoesm_snapshot)
+    need = ("mass_flux_u", "mass_flux_v", "mass_flux_w", "dy_u", "dx_v",
+            "cell_area")
+    miss = [k for k in need if k not in snap.files]
+    if miss:
+        raise SystemExit(f"--box-budget needs {miss} in the snapshot")
+    lat = np.asarray(L["lat"], dtype=np.float64)
+    lon = np.asarray(L["lon"], dtype=np.float64) % 360.0
+    box = (np.abs(lat) <= half) & (lon >= lo) & (lon < hi) & (
+        np.asarray(snap["land_mask"]) > 0.5)
+    kl = (zc >= z0) & (zc < z1)
+    z_if = np.concatenate([[0.0], 0.5 * (zc[:-1] + zc[1:]), [2.0 * zc[-1] - zc[-2]]])
+    kt = int(np.argmin(np.abs(z_if - z0)))
+    kb = int(np.argmin(np.abs(z_if - z1)))
+    mfu = np.asarray(snap["mass_flux_u"], dtype=np.float64) * np.asarray(snap["dy_u"])[..., None]
+    mfv = np.asarray(snap["mass_flux_v"], dtype=np.float64) * np.asarray(snap["dx_v"])[..., None]
+    mfw = np.asarray(snap["mass_flux_w"], dtype=np.float64) * np.asarray(snap["cell_area"])[..., None]
+    mfu = np.where(np.isfinite(mfu), mfu, 0.0)
+    mfv = np.where(np.isfinite(mfv), mfv, 0.0)
+    mfw = np.where(np.isfinite(mfw), mfw, 0.0)
+    ny, nx = lat.shape
+    # C-grid faces: u at (ny, nx+1), v at (ny+1, nx); east face of cell i is u[i+1]
+    div_x = (mfu[:, 1:, :] - mfu[:, :-1, :])[..., kl].sum(-1)
+    div_y = (mfv[1:, :, :] - mfv[:-1, :, :])[..., kl].sum(-1)
+    w_top = mfw[..., kt]
+    w_bot = mfw[..., kb]
+    ox = float(div_x[box].sum()) / 1e6
+    oy = float(div_y[box].sum()) / 1e6
+    wt = float(w_top[box].sum()) / 1e6
+    wb = float(w_bot[box].sum()) / 1e6
+    # vertical sign: the convention that closes continuity is reported
+    res_up = ox + oy + (wt - wb)        # w positive UP: outflow through top = +w_top
+    res_dn = ox + oy - (wt - wb)
+    sign = "up" if abs(res_up) <= abs(res_dn) else "down"
+    res = res_up if sign == "up" else res_dn
+    wt_up = wt if sign == "up" else -wt
+    wb_up = wb if sign == "up" else -wb
+    print(f"\n=== BOX VOLUME BUDGET {lo:.0f}-{hi:.0f}E |lat|<={half:g}, "
+          f"{z0:.0f}-{z1:.0f} m (levels {kl.sum()}), Sv (1e6 m3/s); + = OUT of the box ===")
+    print(f"ours ({a.legoesm_snapshot}): zonal out {ox:+.3f}  meridional out {oy:+.3f}  "
+          f"horizontal net out {ox+oy:+.3f} | w_top(up) {wt_up:+.3f} at {z_if[kt]:.0f} m, "
+          f"w_bot(up) {wb_up:+.3f} at {z_if[kb]:.0f} m => vertical net out {wt_up-wb_up:+.3f} | "
+          f"residual {res:+.3f} (w sign '{sign}' closes it; {int(box.sum())} cells)")
+    hb_ours = None
+    if a.heat_budget:
+        Tsnap = np.asarray(snap["T"], dtype=np.float64)
+        Ksnap = np.asarray(snap["K_H_diag"], dtype=np.float64)
+        area_o = np.asarray(snap["cell_area"], dtype=np.float64)
+        mfw_up = mfw if sign == "up" else -mfw
+        wet_o = np.isfinite(Tsnap) & (np.abs(Tsnap) > 1e-6)
+        hb_ours = _heat_terms(mfu, mfv, mfw_up, np.nan_to_num(Tsnap), Ksnap, area_o,
+                              zc, z_if, kl, kt, kb, box, wet_o)
+        dzl = np.diff(z_if)[kl]
+        wl = (wet_o[..., kl] * dzl)
+        tbar = float((np.nan_to_num(Tsnap)[..., kl] * wl).sum(-1)[box].sum()
+                     / wl.sum(-1)[box].sum())
+        print(f"\n=== BOX HEAT BUDGET {z0:.0f}-{z1:.0f} m, K/month (+ = warms the layer) ===")
+        print(f"ours: horizontal adv {hb_ours[0]:+.3f}   vertical adv {hb_ours[1]:+.3f}   "
+              f"vertical diff {hb_ours[2]:+.3f}   sum {sum(hb_ours):+.3f}   "
+              f"(layer mean T {tbar:.3f} C)")
+        if a.heat_budget_prev:
+            prev = np.load(a.heat_budget_prev)
+            dt_days = float(snap["time_days"]) - float(prev["time_days"])
+            Tp = np.nan_to_num(np.asarray(prev["T"], dtype=np.float64))
+            tprev = float((Tp[..., kl] * wl).sum(-1)[box].sum() / wl.sum(-1)[box].sum())
+            obs = (tbar - tprev) / dt_days * 30.0
+            print(f"  CONTROL observed dT/dt over the previous {dt_days:.0f} days: {obs:+.3f} K/month;"
+                  f" residual (sum - observed) {sum(hb_ours) - obs:+.3f}."
+                  " A residual comparable to the terms means the instrument is being read,"
+                  " not the ocean -- ours is one instantaneous snapshot, so some residual is"
+                  " expected; a residual LARGER than the vertical term voids the comparison.")
+    # NEMO
+    def _load(fn, var):
+        ds = nc.Dataset(fn)
+        try:
+            x = np.ma.filled(np.ma.masked_invalid(ds.variables[var][:]), np.nan).astype(np.float64)
+            la = np.asarray(ds.variables["nav_lat"][:]); lo_ = np.asarray(ds.variables["nav_lon"][:]) % 360.0
+            zz = np.asarray(ds.variables[[v for v in ds.variables if v.startswith("depth")][0]][:])
+        finally:
+            ds.close()
+        return np.nanmean(_select_recs(x, a.nemo_w_recs), axis=0), la, lo_, zz
+    ue, lat_u, lon_u, zu = _load(a.nemo_ufile, "uocetr_eff")
+    ve, lat_v, lon_v, zv = _load(a.nemo_vfile, "vocetr_eff")
+    wo, lat_w, lon_w, zw = _load(a.nemo_wfile, "wo")
+    dsm = nc.Dataset(a.mesh_mask)
+    try:
+        e1t = np.squeeze(np.asarray(dsm.variables["e1t"][:], dtype=np.float64))
+        e2t = np.squeeze(np.asarray(dsm.variables["e2t"][:], dtype=np.float64))
+        lat_t = np.squeeze(np.asarray(dsm.variables["gphit"][:], dtype=np.float64))
+        lon_t = np.squeeze(np.asarray(dsm.variables["glamt"][:], dtype=np.float64)) % 360.0
+    finally:
+        dsm.close()
+    ue = np.where(np.isfinite(ue), ue, 0.0); ve = np.where(np.isfinite(ve), ve, 0.0)
+    wo = np.where(np.isfinite(wo), wo, 0.0)
+    nzn, nyn, nxn = ue.shape
+    # NEMO output frames (331,360) vs mesh_mask (332,362): the file drops the
+    # cyclic columns and the fold row.  The offset is CHECKED against grid_T's
+    # own nav_lat/nav_lon, not assumed.
+    dst = nc.Dataset(a.nemo_gridt)
+    try:
+        lat_f = np.asarray(dst.variables["nav_lat"][:]); lon_f = np.asarray(dst.variables["nav_lon"][:]) % 360.0
+        tvar = next(v for v in ("to", "thetao", "votemper") if v in dst.variables)
+        wet_f = np.isfinite(np.ma.filled(np.ma.masked_invalid(dst.variables[tvar][0, 0]), np.nan))
+    finally:
+        dst.close()
+    best = None
+    for r0 in (0, 1):
+        for c0 in (0, 1, 2):
+            sl_lat = lat_t[r0:r0 + nyn, c0:c0 + nxn]
+            if sl_lat.shape != lat_f.shape:
+                continue
+            # land cells carry fill/zero coordinates in the output files:
+            # compare on wet cells only
+            d = float(np.nanmax(np.abs(sl_lat - lat_f)[wet_f]))
+            if best is None or d < best[0]:
+                best = (d, r0, c0)
+    d, r0, c0 = best
+    if d > 1e-3:
+        raise SystemExit(f"NEMO frame offset not found (best |dlat| {d:.3e}); refusing")
+    lat_t = lat_f; lon_t = lon_f
+    e1t = e1t[r0:r0 + nyn, c0:c0 + nxn]; e2t = e2t[r0:r0 + nyn, c0:c0 + nxn]
+    print(f"[frame] NEMO file = mesh_mask[{r0}:{r0+nyn}, {c0}:{c0+nxn}] (|dlat| max {d:.1e})")
+    kln = (zu >= z0) & (zu < z1)
+    z_ifn = np.concatenate([[0.0], 0.5 * (zu[:-1] + zu[1:])])
+    ktn = int(np.argmin(np.abs(zw - z0))); kbn = int(np.argmin(np.abs(zw - z1)))
+    # U(i) is the east face of T(i): div_x = U(i) - U(i-1); V(j) north face of T(j)
+    dxn = ue[kln].sum(0); dxn = dxn - np.roll(dxn, 1, axis=1)
+    dyn = ve[kln].sum(0); dyn = dyn - np.roll(dyn, 1, axis=0)
+    boxn = (np.abs(lat_t) <= half) & (lon_t >= lo) & (lon_t < hi) & wet_f
+    nx_ = float(dxn[boxn].sum()) / 1e6; ny_ = float(dyn[boxn].sum()) / 1e6
+    area = e1t * e2t
+    nwt = float((wo[ktn] * area)[boxn].sum()) / 1e6
+    nwb = float((wo[kbn] * area)[boxn].sum()) / 1e6
+    resn = nx_ + ny_ + (nwt - nwb)
+    print(f"NEMO (uocetr_eff/vocetr_eff/wo, records {a.nemo_w_recs}): zonal out {nx_:+.3f}  "
+          f"meridional out {ny_:+.3f}  horizontal net out {nx_+ny_:+.3f} | w_top(up) {nwt:+.3f} at "
+          f"{zw[ktn]:.0f} m, w_bot(up) {nwb:+.3f} at {zw[kbn]:.0f} m => vertical net out {nwt-nwb:+.3f} | "
+          f"residual {resn:+.3f} (wo positive up; {int(boxn.sum())} cells)")
+    if a.heat_budget and hb_ours is not None:
+        dst2 = nc.Dataset(a.nemo_gridt)
+        try:
+            tv = next(v for v in ("to", "thetao", "votemper") if v in dst2.variables)
+            ton = np.ma.filled(np.ma.masked_invalid(dst2.variables[tv][:]), np.nan).astype(np.float64)
+            ton = np.nanmean(_select_recs(ton, a.nemo_t_recs or a.nemo_w_recs), axis=0)
+        finally:
+            dst2.close()
+        dsw2 = nc.Dataset(a.nemo_wfile)
+        try:
+            if "avt" not in dsw2.variables:
+                raise SystemExit("--heat-budget needs `avt` in --nemo-wfile")
+            avtn = np.ma.filled(np.ma.masked_invalid(dsw2.variables["avt"][:]), np.nan).astype(np.float64)
+            avtn = np.nanmean(_select_recs(avtn, a.nemo_w_recs), axis=0)
+        finally:
+            dsw2.close()
+        wet_n = (np.isfinite(ton) & (np.abs(ton) > 1e-6)).transpose(1, 2, 0)
+        ton = np.where(np.isfinite(ton), ton, 0.0).transpose(1, 2, 0)
+        avtn = np.where(np.isfinite(avtn), avtn, 0.0).transpose(1, 2, 0)
+        uet = ue.transpose(1, 2, 0); vet = ve.transpose(1, 2, 0)
+        wot = (wo * area[None]).transpose(1, 2, 0)
+        Fw_n = np.concatenate([np.zeros_like(uet[:, :1]), uet], axis=1)
+        Fs_n = np.concatenate([np.zeros_like(vet[:1]), vet], axis=0)
+        Fup_n = np.concatenate([wot, np.zeros_like(wot[..., :1])], axis=-1)
+        z_ifn2 = np.concatenate([zw, [2.0 * zw[-1] - zw[-2]]])
+        hb_nemo = _heat_terms(Fw_n, Fs_n, Fup_n, ton, avtn[..., 1:], area,
+                              zu, z_ifn2, kln, ktn, kbn, boxn, wet_n)
+        dzn2 = np.diff(z_ifn2)[kln]
+        wln = (wet_n[..., kln] * dzn2)
+        tbn = float((ton[..., kln] * wln).sum(-1)[boxn].sum() / wln.sum(-1)[boxn].sum())
+        print(f"NEMO: horizontal adv {hb_nemo[0]:+.3f}   vertical adv {hb_nemo[1]:+.3f}   "
+              f"vertical diff {hb_nemo[2]:+.3f}   sum {sum(hb_nemo):+.3f}   "
+              f"(layer mean T {tbn:.3f} C)")
+        def _r(x, y):
+            return float("nan") if abs(y) < 1e-12 else x / y
+        print(f"RATIO ours/NEMO  horizontal {_r(hb_ours[0], hb_nemo[0]):+.3f}   "
+              f"vertical {_r(hb_ours[1], hb_nemo[1]):+.3f}   "
+              f"diffusive {_r(hb_ours[2], hb_nemo[2]):+.3f}")
+        print("READ (pre-registered 2026-09-08): the claim that the cold 20 m is ADVECTIVE "
+              "needs the vertical term to be both LEADING on our side and off NEMO's by more "
+              "than the other two. A leading horizontal term, or a vertical ratio near 1, "
+              "refutes it and points back at the mixing closure.")
+
+    print("READ: a layer that is being HEAVED DOWN has horizontal CONVERGENCE (net out < 0) "
+          "balanced by descent below it; compare the zonal and meridional columns to see which "
+          "component differs from NEMO.  Ours is one snapshot; NEMO a 5-day mean.")
 
 
 def _select_recs(x, spec):
@@ -302,6 +648,74 @@ def _euc_merid_block(a, L, zc):
         m = ((np.abs(lat2 - lat0) <= dlat)
              & (np.abs((lon2 - lon0 + 180.0) % 360.0 - 180.0) <= dlon))
         return np.nanmean(field2d[m]) if m.any() else np.nan
+
+    # ---- SEA LEVEL ALONG THE EQUATOR: the pressure-gradient test ----------
+    # An undercurrent is maintained by the zonal pressure gradient the wind
+    # sets up by piling water in the west. Our eta and NEMO's ssh are both
+    # already here, so this settles the gradient question without a momentum
+    # budget. ONLY THE ZONAL GRADIENT OF THE DIFFERENCE IS MEANINGFUL -- the
+    # two models carry different reference pressures, so the offset itself
+    # says nothing (GLM).
+    #
+    # PRE-REGISTERED (GLM, before running): the difference rising eastward by
+    # >= 5 cm between 220E and 260E means a missing eastward force
+    # g*d(delta eta)/dx >= 1.1e-7 m/s^2, about 0.28 m/s per month, which is
+    # commensurate with the measured 0.33 m/s core deficit at 220E -> the
+    # pressure gradient IS the cause. An eastward trend <= 1 cm over 200-260E
+    # implies under 0.04 m/s/month -> gradient EXONERATED.
+    #
+    # GUARD, also GLM's: eta is only the BAROTROPIC part. A flat difference
+    # does not exonerate the gradient until the steric contribution from the
+    # T(x,z) structure at 100-150 m is checked, which is why the thermocline
+    # depths are printed alongside.
+    if a.nemo_gridt:
+        _ssh_o = np.asarray(snap["eta"], dtype=np.float64)
+        _dsg = nc.Dataset(a.nemo_gridt)
+        try:
+            _cands = ("sshn", "ssh", "ssh_m", "zos", "sossheig")
+            _nm = next((v for v in _cands if v in _dsg.variables), None)
+            if _nm is None:
+                print("\n[sea level] SKIPPED: none of "
+                      f"{_cands} in {a.nemo_gridt}; available 2-D: "
+                      + ", ".join(sorted(
+                          v for v, o in _dsg.variables.items()
+                          if o.ndim == 3))[:200])
+            else:
+                _sn = np.ma.filled(np.ma.masked_invalid(
+                    _dsg.variables[_nm][:]), np.nan).astype(np.float64)
+                _sn = _select_recs(_sn, a.nemo_w_recs)
+                _sn = np.nanmean(_sn, axis=0) if _sn.ndim == 3 else _sn
+                _latn = np.asarray(_dsg.variables["nav_lat"][:], np.float64)
+                _lonn = np.asarray(_dsg.variables["nav_lon"][:],
+                                   np.float64) % 360.0
+                print(f"\nEQUATORIAL SEA LEVEL, |lat|<=1 box mean [m]. NEMO "
+                      f"variable {_nm!r}. Read the GRADIENT of the "
+                      f"difference, never its offset.")
+                print(f"{'lon':>6} {'ours':>9} {'NEMO':>9} {'diff':>9}")
+                _lons = (180, 200, 220, 240, 260, 280)
+                _d = {}
+                for lon0 in _lons:
+                    o = box_mean(_ssh_o, lat_o, lon_o, 0.0, lon0, 1.0, 2.0)
+                    n = box_mean(_sn, _latn, _lonn, 0.0, lon0, 1.0, 2.0)
+                    _d[lon0] = o - n
+                    print(f"{lon0:6d} {o:9.4f} {n:9.4f} {o - n:9.4f}")
+                _r = _d.get(260, np.nan) - _d.get(220, np.nan)
+                _r2 = _d.get(260, np.nan) - _d.get(200, np.nan)
+                print(f"\n[sea level] difference change 220E->260E: "
+                      f"{100.0 * _r:+.2f} cm; 200E->260E: {100.0 * _r2:+.2f} cm")
+                if np.isfinite(_r):
+                    _acc = 9.80665 * _r / (40.0 * 111e3 * np.cos(0.0))
+                    print(f"[sea level] implied zonal acceleration difference "
+                          f"{_acc:+.3e} m/s^2 = {_acc * 2.592e6:+.3f} m/s per "
+                          f"30 days, against a measured core deficit of "
+                          f"0.33 m/s at 220E.")
+                print("[sea level] PRE-REGISTERED: >= +5 cm rise 220E->260E "
+                      "CONFIRMS the pressure gradient as the cause; <= +1 cm "
+                      "over 200E->260E REFUTES it. Between the two, report "
+                      "the number and claim no direction. eta is BAROTROPIC "
+                      "only -- do not exonerate without the steric term.")
+        finally:
+            _dsg.close()
 
     if a.meridional_lon and a.nemo_wfile:
         w_o = np.asarray(snap["mass_flux_w"], dtype=np.float64)
@@ -359,12 +773,28 @@ def _euc_merid_block(a, L, zc):
                 print(f"{lat0:6d} {o:8.3f} {n:8.3f}")
 
     if a.nemo_ufile:
-        u_o = np.asarray(snap["u"], dtype=np.float64)
-        if u_o.shape[1] == lat_o.shape[1] + 1:
-            # C-grid u faces (ny, nx+1, nz): average the two faces of each
-            # T cell so the box selection below can use T coordinates.
-            u_o = 0.5 * (u_o[:, :-1, :] + u_o[:, 1:, :])
-        if u_o.shape[:2] != lat_o.shape:
+        if a.nemo_w_recs is None:
+            # Without a record window the U block silently averaged all 18
+            # GATEWAY records (days 1-90) against a single-day snapshot --
+            # an unmatched comparison that read as "FESOM EUC 78% of NEMO".
+            raise SystemExit("--nemo-ufile needs --nemo-w-recs (matched window); "
+                             "refusing to average every record.")
+        if lat_o.ndim == 1:
+            # Unstructured grids (MPAS cells / FESOM nodes): the snapshot
+            # carries the GEOGRAPHIC cell-centred zonal velocity written by
+            # the runner (Perot / inverse-rotation); the raw ``u`` there is
+            # edge-normal (MPAS) or absent (FESOM) and cannot be boxed.
+            if "u_east" not in snap.files:
+                raise SystemExit("unstructured snapshot without u_east -- "
+                                 "rerun with a runner that writes it.")
+            u_o = np.asarray(snap["u_east"], dtype=np.float64)
+        else:
+            u_o = np.asarray(snap["u"], dtype=np.float64)
+            if u_o.shape[1] == lat_o.shape[1] + 1:
+                # C-grid u faces (ny, nx+1, nz): average the two faces of each
+                # T cell so the box selection below can use T coordinates.
+                u_o = 0.5 * (u_o[:, :-1, :] + u_o[:, 1:, :])
+        if u_o.shape[:lat_o.ndim] != lat_o.shape:
             raise SystemExit(f"u {u_o.shape} does not align with T coords "
                              f"{lat_o.shape} -- refusing to index.")
         ds = nc.Dataset(a.nemo_ufile)
@@ -399,10 +829,12 @@ def _euc_merid_block(a, L, zc):
                 n = box_mean(un[kc_n], lat_n, lon_n, lat0, lon0, 0.5, 1.0)
                 print(f"{lat0:6d} {o:8.3f} {n:8.3f}")
 
-        print("\nEUC: equatorial zonal velocity, |lat|<=1 box mean, m/s.")
+        print(f"\nEUC: equatorial zonal velocity, |lat|<=1 box mean, m/s "
+              f"(NEMO records {a.nemo_w_recs}).")
         print("max over 0-400 m (core speed) and its depth; + = eastward.")
         print(f"{'lon':>6} {'ours_max':>9} {'@m':>5} {'nemo_max':>9} {'@m':>5} "
               f"{'ours_10m':>9} {'nemo_10m':>9}")
+        _profiles = {}
         k400_o = zc <= 400.0
         k400_n = zu <= 400.0
         k10_o = int(np.argmin(np.abs(zc - 10.0)))
@@ -423,6 +855,44 @@ def _euc_merid_block(a, L, zc):
             s10_n = box_mean(un[k10_n], lat_n, lon_n, 0.0, lon0, 1.0, 1.0)
             print(f"{lon0:6d} {mo:9.3f} {zo:5.0f} {mn:9.3f} {zn_:5.0f} "
                   f"{s10_o:9.3f} {s10_n:9.3f}")
+            _profiles[lon0] = (prof_o, zc[k400_o], prof_n, zu[k400_n])
+
+        # THE MAX AND ITS DEPTH ARE NOT ENOUGH.  A single (speed, depth) pair
+        # cannot say whether a deep maximum is a genuine subsurface JET or the
+        # top of a broad deep drift that merely happens to be the largest
+        # eastward value in the column -- and that distinction decides whether
+        # a core-depth mismatch is a displaced jet or a missing one.  Both
+        # reviewers asked for the full profiles, and the loop above already
+        # computes them, so printing costs nothing.
+        print("\nEQUATORIAL u(z), |lat|<=1 box mean, m/s; + = eastward.")
+        print("Each side on ITS OWN levels -- the levels differ, so read the "
+              "SHAPE (is there a subsurface maximum, and how sharp) rather "
+              "than pairing rows.")
+        # DEPTH-INTEGRATED TRANSPORT: does the column carry the same NET zonal
+        # momentum, merely distributed differently, or is it actually missing?
+        # That distinction is not visible in a core speed, and it is the one
+        # that separates a vertical-transfer defect from a momentum SINK.
+        # Independent of both closures -- it is just u integrated over depth.
+        print("\nNET ZONAL TRANSPORT 0-400 m, |lat|<=1 box mean [m2/s]; "
+              "+ = eastward.")
+        print(f"{'lon':>6} {'ours':>9} {'NEMO':>9} {'ours-NEMO':>10}")
+        for lon0 in sorted(_profiles):
+            po, zo_, pn, zn2 = _profiles[lon0]
+            _mo, _mn = np.isfinite(po), np.isfinite(pn)
+            _io = float(np.trapezoid(po[_mo], zo_[_mo])) if _mo.sum() > 1 else np.nan
+            _in = float(np.trapezoid(pn[_mn], zn2[_mn])) if _mn.sum() > 1 else np.nan
+            print(f"{lon0:6d} {_io:9.2f} {_in:9.2f} {_io - _in:10.2f}")
+
+        for lon0 in sorted(_profiles):
+            po, zo_, pn, zn2 = _profiles[lon0]
+            print(f"\n  {lon0}E   ours (depth m: u)          NEMO (depth m: u)")
+            for i in range(max(po.size, pn.size)):
+                lhs = (f"{zo_[i]:8.0f}:{po[i]:7.3f}"
+                       if i < po.size and np.isfinite(po[i]) else " " * 16)
+                rhs = (f"{zn2[i]:8.0f}:{pn[i]:7.3f}"
+                       if i < pn.size and np.isfinite(pn[i]) else "")
+                if lhs.strip() or rhs.strip():
+                    print(f"    {lhs}      {rhs}")
 
 
 def _upwelling_block(a, L, tgt_lat, tgt_lon, band, zc, regrid):

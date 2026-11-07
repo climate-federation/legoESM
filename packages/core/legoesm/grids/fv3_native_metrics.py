@@ -414,11 +414,6 @@ def get_area_quad(p1, p2, p3, p4) -> np.ndarray:
     return _get_area_quad(p1, p2, p3, p4)
 
 
-def mid_pt3(e1: np.ndarray, e2: np.ndarray) -> np.ndarray:
-    """Public wrapper over the certified ``mid_pt3_cart`` port."""
-    return _mid_pt3(e1, e2)
-
-
 def _cos_angle_ld(e1: np.ndarray, e2: np.ndarray, e3: np.ndarray) -> np.ndarray:
     """cos of the angle at e1 between great circles to e2 and e3 (cos_angle).
 

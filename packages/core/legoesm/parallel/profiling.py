@@ -2,8 +2,7 @@
 
 Enabled by setting the environment variable ``LEGOESM_PROFILE_MPI=1``.
 When disabled (the default), all instrumentation is a no-op with zero
-overhead — the ``mpi_timer`` context manager returns immediately and
-``record_call`` is a pass-through.
+overhead — the ``mpi_timer`` context manager returns immediately.
 
 Usage
 -----
@@ -16,14 +15,6 @@ Usage
 
     # At the end of the run:
     print_mpi_profile(rank=0)
-
-Or use the decorator form::
-
-    from legoesm.parallel.profiling import profile_mpi
-
-    @profile_mpi("global_sum_mpi")
-    def global_sum_mpi(local_value):
-        ...
 """
 
 from __future__ import annotations
@@ -32,8 +23,6 @@ import os
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-from functools import wraps
-from typing import Callable
 
 
 # ---------------------------------------------------------------------------
@@ -52,11 +41,6 @@ _stats: dict[str, list[int]] = defaultdict(lambda: [0, 0])
 # Public API
 # ---------------------------------------------------------------------------
 
-def is_profiling_enabled() -> bool:
-    """Return True if MPI profiling is active."""
-    return _ENABLED
-
-
 @contextmanager
 def mpi_timer(name: str):
     """Context manager that times a block and records it under *name*.
@@ -72,34 +56,6 @@ def mpi_timer(name: str):
     entry = _stats[name]
     entry[0] += 1
     entry[1] += elapsed
-
-
-def record_call(name: str, elapsed_ns: int) -> None:
-    """Manually record a profiling entry."""
-    if not _ENABLED:
-        return
-    entry = _stats[name]
-    entry[0] += 1
-    entry[1] += elapsed_ns
-
-
-def profile_mpi(name: str) -> Callable:
-    """Decorator that wraps a function with ``mpi_timer(name)``."""
-    def decorator(fn):
-        if not _ENABLED:
-            return fn
-
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            t0 = time.perf_counter_ns()
-            result = fn(*args, **kwargs)
-            elapsed = time.perf_counter_ns() - t0
-            entry = _stats[name]
-            entry[0] += 1
-            entry[1] += elapsed
-            return result
-        return wrapper
-    return decorator
 
 
 def get_stats() -> dict[str, dict[str, int | float]]:

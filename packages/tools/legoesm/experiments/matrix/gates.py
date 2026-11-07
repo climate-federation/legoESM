@@ -137,21 +137,6 @@ def salt_gate(ok, notes, series, *, component="ocean", tol=None):
                       key="salt_rel_drift", tol=tol)
 
 
-def moisture_gate(ok, notes, series, *, component="atmosphere", tol=None):
-    """Column-water-vapor conservation drift gate (key ``moisture_rel_drift``).
-
-    Feed the ``column_water_vapor`` global-integral series.
-    """
-    return drift_gate(ok, notes, series, label="moisture", component=component,
-                      key="moisture_rel_drift", tol=tol)
-
-
-def aam_gate(ok, notes, series, *, component="atmosphere", tol=None):
-    """Atmospheric-angular-momentum conservation drift gate (key ``aam_rel_drift``)."""
-    return drift_gate(ok, notes, series, label="aam", component=component,
-                      key="aam_rel_drift", tol=tol)
-
-
 def benchmark_error_gate(ok, notes, error, tol, *, label, units=""):
     """Gate an analytic-benchmark error scalar (e.g. Williamson L2/Linf).
 

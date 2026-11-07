@@ -1,0 +1,100 @@
+{
+ "format": "nemo-testcase-l2-gyre-round35-v1",
+ "date": "2026-09-06",
+ "starting_tip": "23c46232ea60",
+ "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+ "nemo_executable_run": false,
+ "makenemo_or_mpirun_invoked": false,
+ "nemo_source_edited": false,
+ "commits": [
+  "0e78666589ae  docs: the preregistration, before any measurement",
+  "948724ee66a1  fix: the allow-dirty stamp escape is scoped, and two stale ratchets",
+  "5bf7a83198ab  feat: the WRITE-only tra_zdf instrument and its run.sh",
+  "5e25b893e16b  feat: the reader, the given-inputs gate, and the production hooks",
+  "033dbf9c4d1e  docs: addendum 1, what the claim review broke",
+  "330e4bb7db3f  docs: the receipt section and its citations",
+  "4ee2d329c11a  test: the gate cannot pass on an empty row or a wrong-step label",
+  "2716e6f3828c  fix: the diff review's seven defects, and the result the last one exposed",
+  "7cf195f7726a  fix: a plant must MOVE a row, because the baseline is already red"
+ ],
+ "probe_worktrees_flagged": [
+  "/tmp/codex-gyre-r35-suite at 0e78666589ae -- the suite diagnosis, so a long test run could not collide with edits in the canonical tree"
+ ],
+ "instrument": {
+  "record": "oracle_trazdf_matrix_kt00000001.bin",
+  "magic": "NEMO_L2_TRAZD_1",
+  "patch": "trazdf_round35.patch, 258 added lines, 0 removed",
+  "source_cfg": "GYRE_OMIP_L2_P3_SM_R29ZDF",
+  "target_cfg": "GYRE_OMIP_L2_P3_SM_R35TRAZDF",
+  "target_run": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round35_oracle_trazdf_matrix",
+  "also_stacks": "dynzdf_round33_refgeom.patch, the SAME file the two tanks were acquired with, so the one run also gives GYRE r1_hu_0",
+  "arrays": 44,
+  "status": "WRITTEN, NOT RUN -- the acquisition is the operator's"
+ },
+ "measured_this_round": {
+  "resolved_rhs_arm": {
+   "claim": "every NEMO identity card resolves tracer_combine to 'concentration', so the literal trazdf matrix is fed T_solve_in*dz_cell and NEMO's two-term content RHS is selected on no card",
+   "method": "Rule 10 -- each card was BUILT and the field printed, not read off the source",
+   "GYRE-zco": {
+    "tracer_combine": "concentration",
+    "zdf_implicit_solver_evaluation": "nemo_literal"
+   },
+   "LOCK_EXCHANGE-zco": {
+    "tracer_combine": "concentration",
+    "zdf_implicit_solver_evaluation": "nemo_literal"
+   },
+   "OVERFLOW-zps": {
+    "tracer_combine": "concentration",
+    "zdf_implicit_solver_evaluation": "nemo_literal"
+   },
+   "status": "CONFIRMED"
+  },
+  "signed_zero_transcription_difference": {
+   "claim": "NEMO's zwi at the surface row and its zws at the bottom row are NEGATIVE zeros; legoESM writes POSITIVE zeros into both slots",
+   "citations": [
+    "trazdf.F90:204",
+    "trazdf.F90:219-220"
+   ],
+   "arithmetically_inert": "yes -- -0.0 + x == x exactly, and neither slot is ever divided by",
+   "reported_as": "AT-BAR-SIGNED-ZERO, its own status with its own count",
+   "status": "CONFIRMED, on the synthetic twin; the real record will carry the same statement"
+  },
+  "suite_failures": {
+   "test_every_oracle_comparison_has_a_row": "the ratchet's DATA is stale; four drivers landed without a disposition; FIXED, 9 passed",
+   "test_planted_stage_control_exits_nonzero_end_to_end": "the TEST froze three control keys where the gate emits four; the fourth predates this branch; FIXED",
+   "test_a_dirty_tree_refuses": "the CODE is wrong -- a process-global allow-dirty latch nothing reset; FIXED at the source; the reproducing pair was 1 failed / 23 passed and is now 24 passed in 250.67s"
+  },
+  "gates": {
+   "tests/ocean/fidelity/test_nemo_testcase_round35_trazdf.py": "50 passed",
+   "tests/ocean/fidelity/test_nemo_testcase_round35_stamp_scope.py": "6 passed",
+   "tests/ocean/unit/test_zdf_implicit_literal.py": "9 passed, unchanged by the extraction",
+   "tests/ocean/fidelity/test_recipe_case_board.py": "9 passed",
+   "citation gate, round-35 section": "PASS, 14 citations",
+   "citation gate, rounds 25 and later": "PASS, 172 citations; plant exits 1",
+   "nemo_testcase_l2_gyre_round21_admission.py on the round-29 records": "unplanted PASS exact=51/51 changed=0 admitted=0 exit 0; planted FAIL exact=50/51 changed=1 exit 1 (before this round it was GATE-ERROR at exit 0, which run.sh would have read as success)",
+   "nemo_testcase_l2_gyre_round29_zdf_matrix.py": "AT-BAR, 0/21120 on all eight rows, unchanged by this round",
+   "tests/ocean/fidelity, full suite in collection order": "969 passed, 7 skipped, 18 deselected in 2360.12s on 1109cf028e8a; the independently measured baseline was 3 failed, 910 passed, 7 skipped, 18 deselected",
+   "repo-wide ratchets": "9 failed on this tree AND the identical 9 on 23c46232ea60, in files this round did not touch; pre-existing, not this round's"
+  },
+  "rhs_association": {
+   "claim": "legoESM's content-RHS builder groups the update as h*(p2dt*T) where NEMO writes p2dt*h*T (trazdf.F90:219-220 for the matrix, the same style for the RHS), so the two are not the same floating-point expression",
+   "measured_on": "the SYNTHETIC twin, not NEMO's record; what transfers is the statement, not the cell count",
+   "row": "GYRE-zco.kt1.stage3.trazdf.rhs_content.T",
+   "status": "VALUE-AT-BAR",
+   "bit_unequal": "1 of 125",
+   "absolute_max": 2.842170943040401e-14,
+   "normalized_max_abs": 5.17e-17,
+   "consequence": "round 36 cannot flip tracer_combine to the content form and expect bit equality from that alone; the association has to move with it"
+  }
+ },
+ "unmeasured_until_the_acquisition_runs": [
+  "PR1 calibration, PR2 sweep, PR3 assembly, PR5 a33, PR6 clamp, PR8 rhs_content -- every number the gate produces"
+ ],
+ "artifact_root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round35",
+ "reviews": {
+  "claim_review": "an independent fresh Claude agent, BEFORE any code; eight findings, six adopted, two citation corrections; it refuted the round's ranking",
+  "diff_review": "an independent fresh Claude agent, AFTER the commits, briefed to make the reader accept a wrong record and the gate pass on a wrong solve",
+  "codex": "unavailable on this account",
+  "diff_review_result": "seven defects, all fixed with an arm each; three attacks failed and are recorded -- the signed-zero status could not be made to swallow a real difference, the implicit_solver extraction verified bit-identical against 23c46232ea60 across dry masks, implicit_w and nlev=1, and nemo_rebuild is provably not the code it checks"
+ }
+}

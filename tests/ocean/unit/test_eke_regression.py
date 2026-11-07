@@ -14,6 +14,11 @@ regenerate after an INTENTIONAL numerics change::
 
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
         .venv/bin/python tests/ocean/unit/test_eke_regression.py
+
+The three fixtures were re-baselined on 2026-09-18 after a first-bad
+bisection identified 66ad4bf7f, the intentional correction that centres the
+split-explicit barotropic averaging window on ``t + dt``.  All three locked
+EKE paths advance through that window; their old fixtures were stale.
 """
 
 from __future__ import annotations

@@ -271,3 +271,21 @@ def test_absent_time_integrator_stays_auto():
     """Unset must remain the grid-aware "auto" resolution — the nested default
     was a stale "ssp_rk3" that, once mapped, would have pinned every config."""
     assert _ec({}).dycore.time_integrator == "auto"
+
+
+@pytest.mark.parametrize("template", [
+    _HS_TEMPLATE, "config/templates/3d_idealized/hydrostatic_gray_1yr.yaml"])
+def test_cube_templates_carry_persistent_dgrid(template):
+    """``atmosphere.persistent_dgrid`` reaches the dycore, and both cube
+    templates set it (#1028: the per-step cc round trip damps the eddies)."""
+    assert Config.from_yaml(template).to_experiment_config(
+        ).dycore.persistent_dgrid is True
+
+
+def test_absent_persistent_dgrid_stays_off():
+    assert _ec({}).dycore.persistent_dgrid is False
+
+
+def test_non_bool_persistent_dgrid_raises():
+    with pytest.raises(ValueError, match="persistent_dgrid"):
+        _ec({"atmosphere": {"persistent_dgrid": "false"}})

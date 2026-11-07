@@ -216,129 +216,194 @@ def test_differentiable():
 
 
 # --------------------------------------------------- NEMO e3w(Kmm) divisor
-# (#1226 W1): trazdf.F90:219-220 divides the implicit flux coefficient by
-# e3w(...,Kmm), called from stpmlf.F90:370 as tra_zdf(kstp,Nbb,Nnn,Nrhs,ts,Naa)
-# -- the dummy arg Kmm binds to Nnn, NEMO's NOW time level. legoESM's default
-# divisor uses the AFTER-solve (barotropic-updated) thickness; this option
-# uses the NOW (pre-solve) thickness instead, threaded via the ``eta_now``
-# kwarg exactly as production wires it in ``_unsplit_ab2_step`` (state_corr.eta
-# is AFTER/Naa; eta_now=state.eta.data is the true pre-solve NOW/Nnn).
-
-def test_rejects_e3t_now_without_implicit_vmix():
-    with pytest.raises(ValueError, match="implicit_vertical_mixing"):
-        _channel(implicit_vmix_e3t_now_divisor=True,
-                 implicit_vertical_mixing=False)
+# trazdf.F90:219-221 divides the implicit flux coefficient by e3w(...,Kmm),
+# called from stpmlf.F90:551 as tra_zdf(kstp,Nbb,Nnn,Nrhs,ts,Naa) -- the dummy
+# Kmm binds to Nnn, NEMO's NOW time level; dynzdf.F90:200-203 divides momentum
+# by e3uw(...,Kmm), which zgr_lib.F90:111-112 sets equal to e3w on the zco
+# branch.  Under key_qco/key_vco_3d (domzgr_substitute.h90:131,108,49) that is
+#     e3w_0(i,j,k) * (1 + r3t(i,j,Nnn)),   e3w_0(k) = gdept_0(k) - gdept_0(k-1)
+# i.e. the T-POINT DEPTH DIFFERENCE, not the interface midpoint.  NEMO has no
+# switch here, so neither does legoESM: the divisor is unbranched inside the
+# NEMO identity ``zdf_implicit_solver_evaluation="nemo_literal"``, and the
+# single canonical ``nemo_e3w_kmm`` serves both the tracer and momentum solves.
 
 
-def test_e3t_now_and_dzw_slot_mutually_exclusive():
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        _channel(implicit_vmix_dzw_slot=True,
-                 implicit_vmix_e3t_now_divisor=True)
+def _stretched_nemo_zcoord(nlev=6, ssh=3.0):
+    """A coordinate whose T points are NOT the interface midpoints, carrying
+    NEMO's own mesh ``e3w_0`` -- the DINO twin's situation in miniature.
+
+    Thicknesses grow with depth; ``gdept_0`` is deliberately pulled off the
+    midpoint by a level-dependent offset, so ``diff(gdept_0)`` and
+    ``0.5*(e3t_k + e3t_{k+1})`` are different arrays at every interface.
+    """
+    from legoesm.ocean.vertical import create_z_star_from_thicknesses
+    e3t = np.array([10.0, 20.0, 40.0, 80.0, 160.0, 320.0])[:nlev]
+    gdepw = np.concatenate([[0.0], np.cumsum(e3t)])
+    # Off-centre T points (a stretching function's, not the midpoint's).
+    gdept = gdepw[:-1] + e3t * (0.5 + 0.06 * np.arange(len(e3t)))
+    e3w = np.concatenate([[2.0 * gdept[0]], np.diff(gdept)])
+    z = create_z_star_from_thicknesses(
+        e3t, t_depth_ref_m=gdept,
+        nemo_gdept_0_m=gdept, nemo_gdepw_0_m=gdepw[:-1],
+        nemo_e3t_0_m=e3t, nemo_e3w_0_m=e3w,
+        nemo_e3w_source="mesh_reference")
+    return z, e3t, gdept, ssh
 
 
-def test_e3t_now_divisor_defaults_to_state_eta_when_unthreaded():
-    """Without an explicit eta_now (every call site except the unsplit-AB2
-    one), the option falls back to state.eta -- bit-identical to a run where
-    eta_now is passed but equals state.eta.data exactly (the NO eta-tendency
-    case). Confirms the fallback wiring, not just its absence of a crash."""
+def test_nemo_e3w_kmm_reproduces_the_oracle_divisor_on_a_stretched_column():
+    """The survivor must be e3w_0*(1+r3t) to 1e-15 relative, and must NOT be
+    the midpoint it replaces (non-vacuity: the reverted expression fails).
+
+    The two divisors differ here by 3-6% per interface, so a test that passed
+    against the old midpoint arm could not also pass against this one.
+    """
+    from legoesm.ocean.physics.vertical_mixing import (
+        build_dz_half, nemo_e3w_kmm,
+    )
+    from legoesm.ocean.eos import nemo_r3t_stretch
+
+    z, e3t, gdept, ssh = _stretched_nemo_zcoord()
+    H = float(np.sum(e3t))
+    eta = jnp.asarray(np.full((3, 4), ssh))
+    H_bathy = jnp.asarray(np.full((3, 4), H))
+    stretch = nemo_r3t_stretch(z, eta, H_bathy)
+    e3t_now = jnp.asarray(e3t)[None, None, :] * stretch[..., None]
+
+    got = np.asarray(nemo_e3w_kmm(z, e3t_now, stretch))
+    want = np.diff(gdept)[None, None, :] * (1.0 + ssh / H)
+    assert got.shape == (3, 4, len(e3t) - 1)
+    assert np.max(np.abs(got / np.broadcast_to(want, got.shape) - 1.0)) < 1e-15
+
+    # Non-vacuity: the expression this replaced is a DIFFERENT array here.
+    midpoint = np.asarray(build_dz_half(e3t_now))
+    assert np.max(np.abs(midpoint / got - 1.0)) > 1e-2, (
+        "synthetic column does not separate the two divisors -- the test "
+        "would pass against the reverted midpoint arm")
+
+
+def test_nemo_e3w_kmm_face_map_is_the_same_object_as_the_tracer_divisor():
+    """``e3uw_0 == e3w_0`` (zgr_lib.F90:111-112), so the momentum solve must
+    divide by the face map OF THE TRACER DIVISOR, not by a second array."""
+    from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
+    from legoesm.ocean.eos import nemo_r3t_stretch
+
+    z, e3t, gdept, ssh = _stretched_nemo_zcoord()
+    H = float(np.sum(e3t))
+    eta = jnp.asarray(np.linspace(0.0, ssh, 12).reshape(3, 4))
+    H_bathy = jnp.asarray(np.full((3, 4), H))
+    stretch = nemo_r3t_stretch(z, eta, H_bathy)
+    e3t_now = jnp.asarray(e3t)[None, None, :] * stretch[..., None]
+
+    cell = nemo_e3w_kmm(z, e3t_now, stretch)
+    faced = nemo_e3w_kmm(z, e3t_now, stretch,
+                         to_point=lambda f: 0.5 * (f + jnp.roll(f, -1, axis=1)))
+    np.testing.assert_array_equal(
+        np.asarray(faced),
+        np.asarray(0.5 * (cell + jnp.roll(cell, -1, axis=1))))
+
+
+def test_nemo_e3w_kmm_midpoint_arm_is_exactly_build_dz_half():
+    """A card with no NEMO mesh ``e3w_0`` and midpoint T points takes arm 2,
+    which must be BIT-IDENTICAL to the expression it replaced -- this is what
+    keeps the NEMO test-case (RK3) cards unmoved."""
+    from legoesm.ocean.physics.vertical_mixing import (
+        build_dz_half, nemo_e3w_kmm, nemo_e3w0_reference,
+    )
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    z = create_ocean_z_star(n_levels=6, H_max=3000.0)
+    assert nemo_e3w0_reference(z) is None
+    rng = np.random.default_rng(11)
+    e3t_now = jnp.asarray(rng.uniform(5.0, 500.0, size=(3, 4, 6)))
+    stretch = jnp.asarray(rng.uniform(0.9, 1.1, size=(3, 4)))
+    np.testing.assert_array_equal(
+        np.asarray(nemo_e3w_kmm(z, e3t_now, stretch)),
+        np.asarray(build_dz_half(e3t_now)))
+
+
+def test_nemo_e3w_kmm_fails_closed_on_a_stretched_ladder_without_a_mesh():
+    """Arm 2 cannot build ``gdept_0(k)-gdept_0(k-1)`` from a midpoint, so a
+    coordinate that declares off-midpoint T points and supplies no NEMO mesh
+    ``e3w_0`` must RAISE rather than silently take the midpoint."""
+    from legoesm.ocean.physics.vertical_mixing import nemo_e3w0_reference
+    from legoesm.ocean.vertical import create_z_star_from_thicknesses
+
+    e3t = np.array([10.0, 20.0, 40.0, 80.0])
+    gdepw = np.concatenate([[0.0], np.cumsum(e3t)])
+    gdept = gdepw[:-1] + e3t * 0.6           # off-midpoint, no mesh supplied
+    z = create_z_star_from_thicknesses(e3t, t_depth_ref_m=gdept)
+    with pytest.raises(ValueError, match="interface-midpoint ladder"):
+        nemo_e3w0_reference(z)
+
+
+def test_dzw_slot_takes_precedence_over_the_nemo_identity():
+    """Both pick the implicit-solve gradient divisor (Veros dzw vs NEMO
+    e3w(Kmm)).  No card in the tree selects both, and the collapse did not
+    turn that combination into a new hard error; precedence is DOCUMENTED and
+    pinned here instead -- the Veros slot wins, so a Veros card can never
+    silently acquire NEMO's divisor.
+    """
+    z = _u_centered_like()          # dz_half_ref is +-40% off the midpoint
+    state, both = _channel(z_coord=z, implicit_vmix_dzw_slot=True,
+                           zdf_implicit_solver_evaluation="nemo_literal")
+    _, dzw_only = _channel(z_coord=z, implicit_vmix_dzw_slot=True)
+    _, nemo_only = _channel(z_coord=z,
+                            zdf_implicit_solver_evaluation="nemo_literal")
+    out_both = both._apply_implicit_vertical_mixing(state, _DT, None)
+    out_dzw = dzw_only._apply_implicit_vertical_mixing(state, _DT, None)
+    out_nemo = nemo_only._apply_implicit_vertical_mixing(state, _DT, None)
+    # u/v (the friction solve) carry the divisor.  Selecting both must land on
+    # the VEROS divisor: the residual against the dzw-only arm is ULP-scale
+    # (the nemo_literal MOMENTUM recurrence is a different summation order of
+    # the same matrix), while the divisor itself is a 40% lever -- so the
+    # non-vacuity leg below is what makes this test able to fail.
+    for k in ("u", "v"):
+        a = np.asarray(getattr(out_both, k).data)
+        b = np.asarray(getattr(out_dzw, k).data)
+        c = np.asarray(getattr(out_nemo, k).data)
+        scale = max(float(np.max(np.abs(b))), 1e-30)
+        assert np.max(np.abs(a - b)) / scale < 1e-13, (
+            f"{k}: selecting both did NOT take the Veros dzw divisor")
+        assert np.max(np.abs(a - c)) / scale > 1e-6, (
+            f"{k}: non-vacuity failed -- the two divisors are "
+            "indistinguishable on this coordinate, so the assertion above "
+            "cannot detect a precedence flip")
+
+
+def test_nemo_divisor_reads_the_now_eta_that_is_threaded_in():
+    """The divisor is ``e3w_0*(1+r3t(Kmm))``: it must move when the NOW eta
+    threaded through ``eta_now`` moves, on an otherwise identical state.
+
+    Without the ``eta_now`` threading at the AFTER-state call sites
+    (_leapfrog_step's naa_expl -- the DINO kamm_mlf production path -- plus
+    _unsplit_ab2_step, _ab2_step, _step_impl) the solve would divide by the
+    AFTER thickness, which is exactly the defect this arm removes.
+    """
     z = _midpoint_zstar()
-    state, model = _channel(z_coord=z, implicit_vertical_mixing=True,
-                            implicit_vmix_e3t_now_divisor=True)
-    implicit = model._apply_implicit_vertical_mixing(state, _DT, None)
-    explicit = model._apply_implicit_vertical_mixing(
-        state, _DT, None, eta_now=state.eta.data)
-    for k in ("T", "S", "u", "v"):
-        np.testing.assert_array_equal(
-            np.asarray(getattr(implicit, k).data),
-            np.asarray(getattr(explicit, k).data))
-
-
-def test_e3t_now_divisor_noop_when_eta_now_equals_state_eta():
-    """When eta_now == state.eta (no eta tendency between NOW and the AFTER
-    state the function's dz_cell is built from -- e.g. a rest-state
-    barotropic solve), the NEMO NOW-divisor and legoESM's default AFTER-
-    divisor read the SAME thickness -> bit-identical, fp64."""
-    z = _midpoint_zstar()
-    state, model = _channel(z_coord=z, implicit_vertical_mixing=True)
-    off = model._apply_implicit_vertical_mixing(state, _DT, None)
-    _, model_on = _channel(
+    state, model = _channel(
         z_coord=z, implicit_vertical_mixing=True,
-        implicit_vmix_e3t_now_divisor=True)
-    on = model_on._apply_implicit_vertical_mixing(
+        zdf_implicit_solver_evaluation="nemo_literal")
+    base = model._apply_implicit_vertical_mixing(
         state, _DT, None, eta_now=state.eta.data)
-    for k in ("T", "S", "u", "v"):
-        np.testing.assert_array_equal(
-            np.asarray(getattr(on, k).data), np.asarray(getattr(off, k).data))
-
-
-def test_e3t_now_flag_flips_via_namedtuple_replace():
-    """LatLonCGridOceanConfig is a NamedTuple: the flag is flipped with
-    ``._replace``, NOT ``dataclasses.replace`` (which raises TypeError on a
-    NamedTuple -- the exact footgun the physics-validator review caught in
-    the first driver wiring)."""
-    import dataclasses
-    from legoesm.ocean.state import LatLonCGridOceanConfig
-    cfg = LatLonCGridOceanConfig.from_flat(implicit_vertical_mixing=True)
-    on = cfg._replace(implicit_vmix_e3t_now_divisor=True)
-    assert on.implicit_vmix_e3t_now_divisor is True
-    assert cfg.implicit_vmix_e3t_now_divisor is False
-    with pytest.raises(TypeError):
-        dataclasses.replace(cfg, implicit_vmix_e3t_now_divisor=True)
-
-
-def test_e3t_now_divisor_active_on_leapfrog_step():
-    """The leapfrog-MLF step (the DINO kamm_mlf production integrator) must
-    THREAD the NOW eta into the implicit solve: without the eta_now threading
-    at _leapfrog_step's call site, the flag's fallback would read
-    naa_expl.eta -- the SAME AFTER-level eta the default divisor is built
-    from -- making ON bit-identical to OFF on a midpoint z-star. So ON != OFF
-    after leapfrog steps with evolving eta proves the threading exists."""
-    z = _midpoint_zstar()
-    # leapfrog's own config validation requires explicit_ab2 Coriolis.
-    lf = dict(outer_integrator="leapfrog", coriolis_scheme="explicit_ab2",
-              implicit_vertical_mixing=True)
-    state_off, model_off = _channel(z_coord=z, **lf)
-    state_on, model_on = _channel(z_coord=z, implicit_vmix_e3t_now_divisor=True,
-                                  **lf)
-    for _ in range(5):
-        state_off = model_off.step(state_off, _DT)
-        state_on = model_on.step(state_on, _DT)
-    dT = float(np.max(np.abs(np.asarray(state_on.T.data)
-                             - np.asarray(state_off.T.data))))
-    assert dT > 0.0, ("leapfrog ON == OFF: eta_now is NOT threaded at the "
-                      "_leapfrog_step call site (fallback reads the AFTER eta)")
-
-
-def test_e3t_now_divisor_differs_with_eta_tendency():
-    """With a NONZERO eta tendency between NOW (eta_now) and AFTER
-    (state.eta, what the default dz_cell divisor is built from -- mimicking
-    state_corr.eta post-barotropic-solve), the NOW-divisor (this option) and
-    the default AFTER-divisor read DIFFERENT thicknesses, so the solved
-    T/S/u/v must differ.
-
-    Direction: the implicit solve's diagonal is
-    ``dz_cell - (zwi+zws)`` with zwi,zws ~ -p2dt*K/dz_half (a NEGATIVE
-    off-diagonal coupling term).  Here eta_now < state.eta (column was
-    SHALLOWER at NOW, EXPANDED by the barotropic solve to AFTER) so the
-    NOW-divisor dz_half is SMALLER than the default AFTER-divisor
-    everywhere -> |zwi|,|zws| LARGER under nemo_kmm -> a MORE dissipative
-    (stronger vertical coupling) solve than the default for this scenario.
-    This test asserts only that the two differ (a magnitude/sign difference
-    is the point); the qualitative diagonal-strength direction is documented
-    for this specific eta_now<state.eta construction, matching the existing
-    test_active_on_u_centered pattern for the sibling flag."""
-    z = _midpoint_zstar()
-    state, model = _channel(z_coord=z, implicit_vertical_mixing=True)
-    # eta_now UNIFORMLY 20% shallower than state.eta (an expanding column
-    # between NOW and AFTER) -- a controlled, nonzero eta tendency.
+    # A uniformly 20% shallower NOW column (an expanding column between NOW
+    # and AFTER) -- a controlled, nonzero eta tendency.
     eta_now = state.eta.data - 0.2 * jnp.abs(state.eta.data + 10.0)
-    out_off = model._apply_implicit_vertical_mixing(state, _DT, None)
-    _, model_on = _channel(
-        z_coord=z, implicit_vertical_mixing=True,
-        implicit_vmix_e3t_now_divisor=True)
-    out_on = model_on._apply_implicit_vertical_mixing(
+    moved = model._apply_implicit_vertical_mixing(
         state, _DT, None, eta_now=eta_now)
     for k in ("T", "S", "u", "v"):
-        a = np.asarray(getattr(out_off, k).data)
-        b = np.asarray(getattr(out_on, k).data)
-        assert np.max(np.abs(a - b)) > 0.0, f"{k} unchanged by e3t_now divisor"
+        a = np.asarray(getattr(base, k).data)
+        b = np.asarray(getattr(moved, k).data)
+        assert np.max(np.abs(a - b)) > 0.0, f"{k} unchanged by the NOW eta"
+
+
+def test_legacy_midpoint_arm_is_still_the_default_divisor():
+    """Cards off the NEMO identity keep ``build_dz_half(dz_cell)`` -- the
+    contamination control for this change: nothing outside the identity moves.
+    """
+    from legoesm.ocean.physics.vertical_mixing import nemo_e3w0_reference
+
+    z = _midpoint_zstar()
+    _, model = _channel(z_coord=z, implicit_vertical_mixing=True)
+    assert model.config.zdf_implicit_solver_evaluation == "shared_thomas"
+    assert model.config.implicit_vmix_dzw_slot is False
+    assert nemo_e3w0_reference(z) is None

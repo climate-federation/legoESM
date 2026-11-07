@@ -385,12 +385,14 @@ def run_replay(n_steps: int, *, surface_tendency_placement: str | None = None,
             raise SystemExit(
                 f"Unknown DINO_OUTER_INTEGRATOR={_oi!r}: expected "
                 "'leapfrog' or 'nemo_mlf'")
-        mc = mc._replace(
-            outer_integrator=_oi,
-            implicit_vmix_e3t_now_divisor=(
-                True if _oi == "nemo_mlf" else mc.implicit_vmix_e3t_now_divisor))
-        print(f"ABLATION: outer_integrator={mc.outer_integrator} "
-              f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+            mc = mc._replace(
+                outer_integrator=_oi,
+                zdf_implicit_solver_evaluation=(
+                    "nemo_literal" if _oi == "nemo_mlf"
+                    else mc.zdf_implicit_solver_evaluation))
+            print(f"ABLATION: outer_integrator={mc.outer_integrator} "
+                  "zdf_implicit_solver_evaluation="
+                  f"{mc.zdf_implicit_solver_evaluation}")
 
     model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
     forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)

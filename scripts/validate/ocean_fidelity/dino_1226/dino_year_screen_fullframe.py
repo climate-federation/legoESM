@@ -62,10 +62,18 @@ from kamm_twin_90d import seasonal_t0_seconds  # noqa: E402
 T0_SEC = seasonal_t0_seconds(INIT_RESTART_PATH) if INIT_RESTART else 0.0
 print(f"seasonal clock: t0 = {T0_SEC:.0f} s "
       f"({'restart adatrj' if INIT_RESTART else 'from-rest arm -> 0'})")
-br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
 ALPHA = float(sys.argv[3]) if len(sys.argv) > 3 else None
 cfg = dataclasses.replace(dino_config_for_recipe(RECIPE),
     lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)   # bridge-frame lon fix
+# A card that selects NEMO's LITERAL latitude-dependent etau profile needs the
+# native T-point degree latitudes carried on the geometry, or the model refuses
+# at the first step ("grid.native_lat_T_deg is None").  Same predicate as the
+# 90-day twin uses (kamm_twin_90d.py:1317) rather than a second rule; cards
+# that do not select the literal profile keep the historical geometry pytree
+# exactly, so their runs are byte-unchanged.
+br = bridge_nemo_to_legoesm_topo(
+    g, s, periodic_i=True, full_step=True,
+    carry_native_lat_deg=(cfg.tke_htau_evaluation == "nemo_literal"))
 if os.environ.get("DINO_VMIX"):
     # Swap-the-subsystem discriminator: "constant" uses cfg.A_v_bg/K_v_bg
     # directly, which for the kamm card are 1.2e-4 / 1.2e-5 -- byte-identical
@@ -138,18 +146,13 @@ if INIT_RESTART:
     verify_day0_matches_restart(st, s, br.land_mask)
 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
 if os.environ.get("DINO_NEMO_KMM_DIVISOR") is not None:
-    # #1226 W1: NEMO-faithful implicit-solve gradient divisor (trazdf.F90:
-    # 219-220 e3w(...,Kmm), the NOW/pre-solve thickness) vs legoESM's default
-    # AFTER-solve midpoint divisor. LatLonCGridOceanConfig field (not a
-    # DINOConfig field, unlike the ablations above), set on mc post-
-    # construction. Opt-in measurement knob only -- NOT a recipe/kamm default.
-    _v = os.environ["DINO_NEMO_KMM_DIVISOR"]
-    if _v not in ("0", "1"):
-        raise SystemExit(
-            f"Unknown DINO_NEMO_KMM_DIVISOR={_v!r}: expected '0' or '1'")
-    # mc is a NamedTuple (LatLonCGridOceanConfig), not a dataclass -> _replace.
-    mc = mc._replace(implicit_vmix_e3t_now_divisor=(_v == "1"))
-    print(f"ABLATION: implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+    raise SystemExit(
+        "DINO_NEMO_KMM_DIVISOR is GONE. NEMO's e3w(Kmm) implicit-solve divisor "
+        "(trazdf.F90:219-221, dynzdf.F90:200-203) is no longer a flag: it is "
+        "unbranched inside the NEMO identity "
+        'zdf_implicit_solver_evaluation="nemo_literal", which this card already '
+        "selects. Compare across commits, not across this knob "
+        "(docs/ocean/fidelity/dino_zdf_divisor_arm_receipt.md).")
 # #1492 P2: NEMO-faithful step-composition A/B (docs/ocean/fidelity/
 # nemo_mlf_step_transcription_spec.md resolved decision 2). Default "" =
 # legacy (outer_integrator="leapfrog", i.e. _leapfrog_step, unchanged from
@@ -164,16 +167,17 @@ if _OI:
         raise SystemExit(
             f"Unknown DINO_OUTER_INTEGRATOR={_OI!r}: expected "
             "'leapfrog' or 'nemo_mlf'")
-    # nemo_mlf HARD-REQUIRES the NEMO e3w(Kmm) divisor at construction (spec
-    # resolved decision 4: a transcription that permits a non-NEMO divisor
-    # stops being a transcription at that row) -- auto-force it here so the
-    # env knob alone is sufficient without also setting DINO_NEMO_KMM_DIVISOR.
+    # nemo_mlf HARD-REQUIRES the NEMO implicit-ZDF identity at construction
+    # (spec resolved decision 4: a transcription that permits a non-NEMO
+    # divisor stops being a transcription at that row) -- auto-force it here
+    # so the env knob alone is sufficient.
     mc = mc._replace(
         outer_integrator=_OI,
-        implicit_vmix_e3t_now_divisor=(
-            True if _OI == "nemo_mlf" else mc.implicit_vmix_e3t_now_divisor))
+        zdf_implicit_solver_evaluation=(
+            "nemo_literal" if _OI == "nemo_mlf"
+            else mc.zdf_implicit_solver_evaluation))
     print(f"ABLATION: outer_integrator={mc.outer_integrator} "
-          f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+          f"zdf_implicit_solver_evaluation={mc.zdf_implicit_solver_evaluation}")
 model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
 forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
 sf = dino_step_surface_forcing(forcing)   # WIND: tau_x/taum into the dycore external-tau block

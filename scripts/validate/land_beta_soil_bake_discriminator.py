@@ -40,6 +40,7 @@ import argparse
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.multilayer_land import land_tile_beta_soil
 from legoesm.land.soil_grid import SoilGridConfig
@@ -54,6 +55,8 @@ _PREV_WP = (0.0846, 0.0915, 0.0942, 0.0907, 0.1154, 0.0988, 0.1162, 0.1062,
             0.1035, 0.0988, 0.0838, 0.0839, 0.0865, 0.0874, 0.0869, 0.0822, 0.0988)
 _PREV_FC = (0.1706, 0.2249, 0.2351, 0.2253, 0.2890, 0.2492, 0.2918, 0.2676,
             0.2599, 0.2635, 0.1995, 0.2045, 0.2164, 0.2171, 0.2193, 0.2123, 0.2469)
+# const-ok: per-plant-type root-depth table (metres), one entry per PFT --
+# the 0.622 here is a tabulated depth, not the molecular-weight ratio.
 _PREV_ROOT = (0.088, 1.706, 1.469, 1.414, 1.631, 1.675, 1.527, 1.408, 1.088,
               0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488, 0.477)
 
@@ -79,7 +82,9 @@ def _beta(theta, wp, fc, root, n_layers, total_depth, growth):
         Vc_max25=jnp.full(n, 60.0), LCMA=jnp.full(n, 60.0), g1=jnp.full(n, 9.0))
     theta_col = jnp.broadcast_to(
         jnp.asarray(theta, dtype=jnp.float64)[:, None], (n, n_layers))
-    return np.asarray(land_tile_beta_soil(theta_col, cfg, params))
+    # Default config: soil freeze/thaw off, so the soil temperature is unused.
+    return np.asarray(land_tile_beta_soil(
+        theta_col, jnp.full_like(theta_col, constants.T_freeze + 15.0), cfg, params))
 
 
 def _beta_profile(theta_prof, wp, fc, root, n_layers, total_depth, growth):
@@ -99,8 +104,10 @@ def _beta_profile(theta_prof, wp, fc, root, n_layers, total_depth, growth):
         root_depth=jnp.full(1, root),
         theta_wp=jnp.full(1, wp), theta_fc=jnp.full(1, fc),
         Vc_max25=jnp.full(1, 60.0), LCMA=jnp.full(1, 60.0), g1=jnp.full(1, 9.0))
+    theta_col = jnp.asarray(theta_prof, dtype=jnp.float64)[None, :]
     return float(land_tile_beta_soil(
-        jnp.asarray(theta_prof, dtype=jnp.float64)[None, :], cfg, params)[0])
+        theta_col, jnp.full_like(theta_col, constants.T_freeze + 15.0), cfg,
+        params)[0])
 
 
 def main() -> int:

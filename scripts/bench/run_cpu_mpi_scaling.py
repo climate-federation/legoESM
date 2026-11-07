@@ -1148,6 +1148,7 @@ def run_single_benchmark(
     dt: float | None = None,
     cs_spmd: bool = False,
     latlon_2d: bool = False,
+    profile_dir: str | None = None,
 ) -> TimingResult:
     """Run a single benchmark case and return timing."""
     _validate_physics(grid_type, physics_level)
@@ -1250,9 +1251,27 @@ def run_single_benchmark(
         # broken/absent mpi4py must not break a single-process run
         pass
 
+    # Trace the timed scan on ranks 0-3 only (one node): the profiler keeps
+    # ~1M events per process, so keep --n-timing small when tracing.
+    _tracing = profile_dir is not None and jax.process_index() < 4
+    if _tracing:
+        import pathlib
+        _pdir = pathlib.Path(profile_dir) / f"rank{jax.process_index()}"
+        _pdir.mkdir(parents=True, exist_ok=True)
+        jax.profiler.start_trace(str(_pdir))
+    # Wall-clock markers around the timed region ONLY. An external sampler
+    # (scripts/bench/sample_cpu_cores.py) needs to know which of its samples
+    # fall inside the steady-state measurement; a fixed "skip the first N
+    # seconds" guess cannot know, and at small problem sizes it lands in
+    # compile instead. Printed on every rank so a per-rank sampler can window
+    # on its own rank's phase.
+    print(f"[phase] timing-start rank={rank} epoch={time.time():.3f}", flush=True)
     t0 = time.perf_counter()
     state = _scan_run(state)
     jax.block_until_ready(jax.tree.leaves(state))
+    print(f"[phase] timing-end rank={rank} epoch={time.time():.3f}", flush=True)
+    if _tracing:
+        jax.profiler.stop_trace()
 
     # MPI barrier after timing
     try:
@@ -1529,6 +1548,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-levels", type=int, default=26)
     p.add_argument("--n-warmup", type=int, default=5)
     p.add_argument("--n-timing", type=int, default=50)
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="Write a jax.profiler trace of the timed scan from "
+                        "ranks 0-3 into <dir>/rank<k>/ (same layout as "
+                        "bench_mpas_spmd_scaling.py, so "
+                        "analyze_jax_trace_gaps.py --time-by-family reads "
+                        "it). Use a small --n-timing: the profiler holds "
+                        "~1M events per process.")
     p.add_argument(
         "--cs-spmd", action="store_true",
         help="Cubed-sphere TRUE domain decomposition via jax.distributed "
@@ -1816,6 +1842,7 @@ def main() -> int:
         n_timing=args.n_timing,
         cs_spmd=bool(args.cs_spmd),
         latlon_2d=bool(args.latlon_2d),
+        profile_dir=args.profile_dir,
     )
 
     if is_rank0:

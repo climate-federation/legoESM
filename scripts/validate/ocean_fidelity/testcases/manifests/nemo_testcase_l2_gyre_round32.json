@@ -1,0 +1,482 @@
+{
+ "format": "nemo-testcase-l2-gyre-round32-v1",
+ "date": "2026-09-06",
+ "starting_tip": "7fe79083eaef",
+ "tip": "03abd4080462bcd3ec4cea0d9d2ff6dfae3b58c3",
+ "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+ "preregistration": "manifests/nemo_testcase_l2_gyre_round32_preregister.json",
+ "probe_worktrees_flagged": [
+  "/tmp/codex-gyre-r32-before, detached at 4a9b7d732471, clean; carries the tank BEFORE arms",
+  "/tmp/codex-orca2-r27-probe and /tmp/r31-orca2-scratch, read only, nothing committed"
+ ],
+ "the_change": {
+  "statements": [
+   "stage 3 hands the solve the masked explicit update; the correction closure is deferred (stprk3_stg.F90:430 vs :437-446)",
+   "the barotropic removal takes the prognostic uu_b/vv_b (dynzdf.F90:150-151) when the state carries the pair",
+   "the deferred correction is applied unconditionally at the post-solve site"
+  ],
+  "commits": [
+   "03abd4080462 fix(ocean): the diff review's four findings, each with the control that bites",
+   "712fba7cf5bc test(ocean): discharge Rule 12 on the moved operator, and explain the 0.27 %",
+   "bc96317363a7 refactor(ocean): the RK3 stage correction becomes drivable with NEMO's operands",
+   "e6a1437fd182 fix(ocean): the stage-3 barotropic correction runs AFTER dyn_zdf, once",
+   "4a9b7d732471 docs(ocean): round-32 preregistration -- the stage-3 ordering fix, before the code"
+  ]
+ },
+ "kt1_stage3_depth_profile": {
+  "before": {
+   "u_level30": 9.48236979236058e-07,
+   "u_level1": 7.131145388777904e-08,
+   "u_max": 9.48236979236058e-07,
+   "v_max": 8.94866292055948e-07,
+   "u_level30_signed_mean": 1.3552890198424294e-08
+  },
+  "after": {
+   "u_level30": 2.2497406498497852e-13,
+   "u_level1": 1.7645468419758004e-12,
+   "u_max": 2.7922718390943624e-12,
+   "v_max": 3.387700601813204e-12,
+   "u_level30_signed_mean": -7.134777315016461e-15
+  },
+  "stamp_before": "4a9b7d732471de328b03fb7f473e239f1ad32ce9",
+  "stamp_after": "03abd4080462bcd3ec4cea0d9d2ff6dfae3b58c3"
+ },
+ "dyn_zdf_entry_boundary_A": {
+  "before": {
+   "u": 0.0004269765124169735,
+   "v": 0.0004029443737139659
+  },
+  "after": {
+   "u": 4.597497412612249e-11,
+   "v": 1.2570099171618776e-10
+  },
+  "note": "after the fix the model's exposed pre-implicit vector IS dynzdf.F90:121-122; the residual is the next round's target and its leading candidate is the key_qco arm, registered in the preregistration as P1e whose SIZE estimate is refuted"
+ },
+ "trajectory": {
+  "first_over_bar_before": {
+   "fields": [
+    "T",
+    "S",
+    "u",
+    "v"
+   ],
+   "kt": 2
+  },
+  "first_over_bar_after": {
+   "fields": [
+    "T",
+    "S",
+    "u",
+    "v"
+   ],
+   "kt": 2
+  },
+  "kt2": {
+   "T": {
+    "before": 1.3614736849003888e-12,
+    "after": 1.3614736849003888e-12
+   },
+   "S": {
+    "before": 2.2181101297999213e-14,
+    "after": 2.2181101297999213e-14
+   },
+   "u": {
+    "before": 9.48236979236058e-07,
+    "after": 2.7922718390943624e-12
+   },
+   "v": {
+    "before": 8.94866292055948e-07,
+    "after": 3.387700601813204e-12
+   },
+   "ssh": {
+    "before": 4.336808689942018e-19,
+    "after": 4.336808689942018e-19
+   }
+  },
+  "n_rows": 50,
+  "improved": 20,
+  "unchanged": 8,
+  "worsened": 22,
+  "worsened_above_roundoff": 17,
+  "worsened_rows": [
+   {
+    "row": "GYRE-zco.kt7.before.ssh",
+    "before": 6.646098587755056e-06,
+    "after": 6.749099812265562e-06,
+    "relative_increase": 0.015497998284328482,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt5.before.ssh",
+    "before": 9.360615235026477e-07,
+    "after": 9.475136565773989e-07,
+    "relative_increase": 0.01223438074016597,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt6.before.ssh",
+    "before": 3.2278369542912064e-06,
+    "after": 3.26515203915613e-06,
+    "relative_increase": 0.011560399547231042,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt8.before.ssh",
+    "before": 1.1722279529014011e-05,
+    "after": 1.1815148541758952e-05,
+    "relative_increase": 0.007922436290235146,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt4.before.ssh",
+    "before": 5.294946455237405e-07,
+    "after": 5.299464111685991e-07,
+    "relative_increase": 0.0008532015359885124,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt10.before.ssh",
+    "before": 3.3284883532392094e-05,
+    "after": 3.330665524699442e-05,
+    "relative_increase": 0.0006541021716702363,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt4.before.u",
+    "before": 0.007078541518550233,
+    "after": 0.007078770486024288,
+    "relative_increase": 3.234670213565572e-05,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt10.before.v",
+    "before": 0.008868411228378227,
+    "after": 0.008868672489502587,
+    "relative_increase": 2.945974398702115e-05,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt3.before.u",
+    "before": 0.0007193078411182607,
+    "after": 0.0007193255562295969,
+    "relative_increase": 2.4627996976442276e-05,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt3.before.v",
+    "before": 0.0008606478477050927,
+    "after": 0.0008606654054560958,
+    "relative_increase": 2.040062152006998e-05,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt6.before.u",
+    "before": 0.02776557541321676,
+    "after": 0.027765726482696727,
+    "relative_increase": 5.440891381466755e-06,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt7.before.u",
+    "before": 0.03604429604406564,
+    "after": 0.0360444727004283,
+    "relative_increase": 4.90109065931555e-06,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt6.before.v",
+    "before": 0.062092404213714036,
+    "after": 0.0620926672099385,
+    "relative_increase": 4.2355619466707615e-06,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt5.before.u",
+    "before": 0.009209028929685092,
+    "after": 0.00920906526864997,
+    "relative_increase": 3.946014846364049e-06,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt5.before.v",
+    "before": 0.04572141673556504,
+    "after": 0.04572158337432741,
+    "relative_increase": 3.6446543932790115e-06,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt8.before.u",
+    "before": 0.04300540409551965,
+    "after": 0.043005559832628416,
+    "relative_increase": 3.6213381094777906e-06,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt9.before.u",
+    "before": 0.048069473642346545,
+    "after": 0.04806953899087986,
+    "relative_increase": 1.359460138881866e-06,
+    "above_roundoff": true
+   },
+   {
+    "row": "GYRE-zco.kt7.before.v",
+    "before": 0.06143941677613973,
+    "after": 0.06143945390888905,
+    "relative_increase": 6.043799122494984e-07,
+    "above_roundoff": false
+   },
+   {
+    "row": "GYRE-zco.kt4.before.T",
+    "before": 0.001066212778793673,
+    "after": 0.0010662129545502344,
+    "relative_increase": 1.6484191985603464e-07,
+    "above_roundoff": false
+   },
+   {
+    "row": "GYRE-zco.kt4.before.S",
+    "before": 8.238302701754894e-05,
+    "after": 8.238303119015738e-05,
+    "relative_increase": 5.064888473246557e-08,
+    "above_roundoff": false
+   },
+   {
+    "row": "GYRE-zco.kt3.before.T",
+    "before": 0.0003722344204818822,
+    "after": 0.0003722344239570822,
+    "relative_increase": 9.336052252321234e-09,
+    "above_roundoff": false
+   },
+   {
+    "row": "GYRE-zco.kt5.before.T",
+    "before": 0.0030599261436702885,
+    "after": 0.0030599261674616415,
+    "relative_increase": 7.775139622724532e-09,
+    "above_roundoff": false
+   }
+  ],
+  "worsened_boundary": "every worsened row is at kt>=3, downstream of the first divergence, where neither arm has an exact entering prefix",
+  "worsened_owner": "the kt2 residual itself, five orders smaller but structurally different",
+  "oracle_relative_move_gate": {
+   "status": "FAIL",
+   "rows": 70,
+   "largest_worsening_ulps": 10631921036.368164,
+   "first_over_bar_moved_earlier": false
+  },
+  "stamp_before": "4a9b7d732471de328b03fb7f473e239f1ad32ce9",
+  "stamp_after": "03abd4080462bcd3ec4cea0d9d2ff6dfae3b58c3"
+ },
+ "slope_model": {
+  "solver_calibration": [
+   {
+    "max_abs": 5.551115123125783e-17,
+    "n": 17400,
+    "name": "GYRE-zco.kt1.stage3.solver_calibration.u",
+    "reference_max_abs": 0.05980685420449501,
+    "relative_max_abs": 9.28173734760416e-16
+   },
+   {
+    "max_abs": 5.551115123125783e-17,
+    "n": 17100,
+    "name": "GYRE-zco.kt1.stage3.solver_calibration.v",
+    "reference_max_abs": 0.060073330285551674,
+    "relative_max_abs": 9.240564984060639e-16
+   }
+  ],
+  "registered_estimator_verdict": "NO VERDICT",
+  "exact_estimator_verdict": "SOLVE RESPONSE CONFIRMED",
+  "rows": [
+   {
+    "exact_model_relative_miss": 2.8708045742071173e-06,
+    "exact_model_shortfall": 0.0027399455958878605,
+    "exact_model_slope": 0.9972600544041121,
+    "max_bottom_drag_factor": 0.0023943348583166887,
+    "max_bottom_offdiagonal": 0.0003284935433818586,
+    "n_columns": 580,
+    "name": "GYRE-zco.kt1.stage3.slope_model.u",
+    "observed_shortfall": 0.002739937730062092,
+    "observed_slope_round31": 0.9972600622699379,
+    "registered_model_relative_miss": 0.12822316190158115,
+    "registered_model_shortfall": 0.0023886142509000896,
+    "registered_model_slope": 0.9976113857490999
+   },
+   {
+    "exact_model_relative_miss": 8.671655883527323e-06,
+    "exact_model_shortfall": 0.0027399457330931076,
+    "exact_model_slope": 0.9972600542669069,
+    "max_bottom_drag_factor": 0.002394334719730749,
+    "max_bottom_offdiagonal": 0.0003284935148616743,
+    "n_columns": 570,
+    "name": "GYRE-zco.kt1.stage3.slope_model.v",
+    "observed_shortfall": 0.0027399694931656837,
+    "observed_slope_round31": 0.9972600305068343,
+    "registered_model_relative_miss": 0.12823322694266223,
+    "registered_model_shortfall": 0.0023886143633325974,
+    "registered_model_slope": 0.9976113856366674
+   }
+  ],
+  "registered_estimator_refuted_by_construction": "its value is a convex combination of 1/(1+c), so its shortfall is bounded by max c = 2.3943348583166887e-03, below the observed 2.7399377300620900e-03; no data could have confirmed it",
+  "stamp": "bc96317363a79117e91a406a16c48a998cc0a100"
+ },
+ "rule12": {
+  "GYRE-zco": {
+   "status": "AT-BAR",
+   "rows": [
+    {
+     "absolute_max": 2.168404344971009e-19,
+     "bar": 1e-15,
+     "candidate_dtype": "float64",
+     "exact": false,
+     "n": 17400,
+     "n_unequal": 1730,
+     "name": "GYRE-zco.kt1.stage3.rule12_correction.u",
+     "nemo_statement": "stprk3_stg.F90:440,444-445",
+     "normalized_max_abs": 2.168404344971009e-19,
+     "oracle_dtype": "float64",
+     "reference_max_abs": 0.059801261685050996,
+     "relative_max_abs": 3.626017719142976e-18,
+     "status": "AT-BAR"
+    },
+    {
+     "absolute_max": 6.938893903907228e-18,
+     "bar": 1e-15,
+     "candidate_dtype": "float64",
+     "exact": false,
+     "n": 17100,
+     "n_unequal": 3586,
+     "name": "GYRE-zco.kt1.stage3.rule12_correction.v",
+     "nemo_statement": "stprk3_stg.F90:440,444-445",
+     "normalized_max_abs": 6.938893903907228e-18,
+     "oracle_dtype": "float64",
+     "reference_max_abs": 0.05978747276597867,
+     "relative_max_abs": 1.1605932786400902e-16,
+     "status": "AT-BAR"
+    }
+   ],
+   "operator": "legoesm.ocean.dynamics.barotropic_common.rk3_stage_barotropic_correction, imported from the production module the step function calls",
+   "inputs_are_nemo": [
+    "oracle_zdf_matrix_kt00000001.bin:uu_Kaa_out / vv_Kaa_out",
+    "oracle_zdf_matrix_kt00000001.bin:uu_b_Kaa / vv_b_Kaa",
+    "mesh_mask.nc:e3u_0 / e3v_0 / umask / vmask"
+   ],
+   "stamp": "bc96317363a79117e91a406a16c48a998cc0a100"
+  },
+  "LOCK_EXCHANGE-zco": {
+   "executes": "the PLACEMENT only; zdf_baroclinic_only and nemo_stage_mean_imposition both resolve False",
+   "move_gate_status": "PASS",
+   "largest_worsening_ulps": 0.046875,
+   "n_violations": 0,
+   "first_over_bar_before": {
+    "fields": [
+     "u"
+    ],
+    "kt": 4
+   },
+   "first_over_bar_after": {
+    "fields": [
+     "u"
+    ],
+    "kt": 4
+   },
+   "rows_improved": 4,
+   "rows_worsened": 3,
+   "rows_unchanged": 43,
+   "stamp_before": "4a9b7d732471de328b03fb7f473e239f1ad32ce9",
+   "stamp_after": "712fba7cf5bc21d22a3a11a491890f660dd027bd"
+  },
+  "OVERFLOW-zps": {
+   "executes": "the PLACEMENT only; zdf_baroclinic_only and nemo_stage_mean_imposition both resolve False",
+   "move_gate_status": "FAIL",
+   "largest_worsening_ulps": 2001.15625,
+   "n_violations": 9,
+   "first_over_bar_before": {
+    "fields": [
+     "T",
+     "u"
+    ],
+    "kt": 2
+   },
+   "first_over_bar_after": {
+    "fields": [
+     "T",
+     "u"
+    ],
+    "kt": 2
+   },
+   "rows_improved": 11,
+   "rows_worsened": 2,
+   "rows_unchanged": 37,
+   "stamp_before": "4a9b7d732471de328b03fb7f473e239f1ad32ce9",
+   "stamp_after": "03abd4080462bcd3ec4cea0d9d2ff6dfae3b58c3"
+  },
+  "ORCA2-zps": {
+   "status": "UNMEASURED",
+   "nemo_executes": "ln_drgimp = T (ocean.output:1097), ln_dynspg_ts = T (:1363)",
+   "why_not": "this branch carries no ORCA2 card at all, and the probe lineage where ORCA2 lives predates the prognostic uu_b, so there is no operand to swap",
+   "what_would_discharge_it": "two WRITE-only frames in a new cfgs/ORCA2_OMIP_L4/MY_SRC/dynzdf.F90 copied unmodified from src/OCE/DYN/dynzdf.F90, both guarded IF( lwp .AND. kt == nit000 ): oracle_zdf_presolve_kt00000001.bin, magic NEMO_L4_ZDFPRE_1, inserted immediately after the IF( ln_drgimp .AND. ln_dynspg_ts ) block closes, carrying puu/pvv(:,:,:,Kaa) plus the solve's operands avm, e3u/e3v(Kaa), e3uw/e3vw(Kmm), rCdU_bot, uu_b/vv_b(Kaa), mbku, mbkv and rDt; and oracle_zdf_postsolve_kt00000001.bin, magic NEMO_L4_ZDFPST_1, at the end of dyn_zdf before END SUBROUTINE, carrying puu/pvv(:,:,:,Kaa). Both through this lane's l4_canon_* wrappers, never raw arrays; under key_qco every e3* is a macro and must be materialised into a buffer before the WRITE."
+  },
+  "DINO": {
+   "status": "INERT, MEASURED",
+   "not_a_campaign_card": true,
+   "executes": "zdf_baroclinic_only with the prognostic pair (dino.py:1336, :3029)",
+   "operand_change_imposed_m_per_s": 0.1249,
+   "resulting_output_change_m_per_s": 3.331e-16,
+   "control_with_the_compensation_removed_m_per_s": 0.03505,
+   "why": "M.1 = 1 + c.e_bot exactly, and DINO's solve carries no implicit_w, so the removed constant and its bottom-stress partner pass the solve together",
+   "full_A_B": "UNMEASURED; it would cost one restart-seeded run per arm"
+  }
+ },
+ "artifact_sha256": {
+  "after_depth_profile.json": "e9913650974b2e43e4380663c613f82add87cdf3405a120a272216ffa734eb97",
+  "after_depth_profile.log": "9b1647725ec3a83ba8a0884839823a66fdc035b0de69c8cf53cdea2641b162ac",
+  "after_pre_solve.json": "3f85dca21e3b2d68e2439d49cb7c5ac1fef18715142c54fdc7545044304f8a97",
+  "after_pre_solve.log": "89ede0689fbe3997e67bdd1700af3741e576300fff36d9edfa6b84146b4ba2da",
+  "after_refactor_depth_profile.json": "dadb96df62a190c6b1e26228131e853bee6be9103b3866dad57f5cf01767b5de",
+  "after_refactor_depth_profile.log": "0752217bb3b245f65498155de47998910dda2f8bb78a1d4990a6bd094030c401",
+  "after_trajectory.json": "de23a39a530834923649e5ae35eeb122d394d1b5622726d593498cec8e67c9ce",
+  "after_trajectory.log": "59e26f6aa019875e8d682b6b642e83d4f8a1508cf58de2757952423296f0653a",
+  "after_trajectory.residuals.npz": "cc11c54ae13e55015065a426a586b38bed21c17a7582cfad233e1a5130b00918",
+  "before_depth_profile.json": "c5fc25f35fa7bc058535cd3b44ec71bedc5ea94f6afea6c120053c7b50b7cf89",
+  "before_depth_profile.log": "08e3c689ff5b7c63078da4e5839e6c70879bd96725e542772820f248ea9d8080",
+  "before_pre_solve.json": "1eb6acbc894d41525f5560cb6389b247f6a4a2e5a014b4333ba1cd29f93acaf6",
+  "before_pre_solve.log": "296d9cb2a074835e0f1549205926382e0ba1c2ba02ee4ec8ce41cc371c20a2d9",
+  "before_trajectory.json": "77e1a1847ba1c259fc0fd2deac30c797116f5203ee80f7e1694b114b777cea48",
+  "before_trajectory.log": "28ce79f7456f53efc64945fd4dc70fce867ce8abffa8e161f91d937043fd6147",
+  "before_trajectory.residuals.npz": "96d2b3e845e08af4fa75b52b5c6644a8c51b32b5e0e5a133f017b3d10da2930b",
+  "citation_gate.json": "f8cb8591b2397658fa0665aeed77d340910df19b8032a5cb688b9fe7119eb0d4",
+  "compare_trajectory.json": "18e9fbf22fbdab397c84882866e4998df1487649b61f92d5a70c796213d70706",
+  "final_compare_trajectory.json": "7a6dd82724c48ebd34ad58d57bb5f84c292ca95dd90e50e362daeb18e0c60f72",
+  "final_depth_profile.json": "b384a56b4c8fdaee1440d03f5d4d499ec4e8f0192798272b8a73cc34a67fc45d",
+  "final_depth_profile.log": "cdd17d65c8736413bdb5e052309b2aeffb4dc9d3519c4b9b578b49dc4e743b8a",
+  "final_trajectory.json": "7534541632152a2b514c70a3bba5d141435d0d1317d6ec860d16058bce674bf2",
+  "final_trajectory.log": "0b48d2ca9abe9338d576fb0dbbd9b70c103ac0e194236a3d02349a9d4d17ccad",
+  "final_trajectory.residuals.npz": "cc11c54ae13e55015065a426a586b38bed21c17a7582cfad233e1a5130b00918",
+  "rule12_correction.json": "de0cdc2967e49845628731c6ec7830058bb1ff0e9d24d28dc264822bf244c31e",
+  "rule12_correction.log": "231476c222599cb04d0dff47cccfdd7a5e7b38a962789c59d0c7e0b83233eb6c",
+  "rule12_correction_plant.log": "dff11ea200872358b8f8a20d5e3ed76daf8029088539552ff08d526e3a69e81e",
+  "slope_model.json": "55e51058884a5403ac538f1e5ec96bec1d47dbb2975ab62f8d4bdd16aa20e5e9",
+  "slope_model.log": "0bf1d417c5dd926f9910493d1a501b207eaddcc9e6d0540f2ba6796c7b3a46c9",
+  "slope_model_plant.log": "f0678fd2757b3434c150f5304dc6e48595ac14dd4a50d16052cc7d30aa0168c3",
+  "tank_after_LOCK_EXCHANGE-zco.json": "e263dc168a4a65d6981b76cc195184faa6d15021f671a2ebc1818b6fbe06dc7e",
+  "tank_after_LOCK_EXCHANGE-zco.log": "7de0aac5a8dc64e0b30d32f197a8cff76738baaa2ea3336c4cac5fff9595139a",
+  "tank_after_LOCK_EXCHANGE-zco.residuals.npz": "1aed1fc0415eb8572426b31f90b6dc3b1f01abf1a4eec6f53ab621d9782696a3",
+  "tank_after_OVERFLOW-zps.json": "ce66925a4785104b60df7a486f986af13103e51e3766fe10e7a225081f3ae936",
+  "tank_after_OVERFLOW-zps.log": "4aaa4132918d533353a20e5f59eb8752bf3ab02a1bee7220d8584ac97a43b40e",
+  "tank_after_OVERFLOW-zps.residuals.npz": "80cc21e18640fab298a18ae4020b586aa8937ed9e420dac5015038a25812d758",
+  "tank_before_OVERFLOW-zps.json": "3ac0153ec3e4bd56f76ba3a88807d613e199b99ff0d3f13906fef6fcf8348536",
+  "tank_before_OVERFLOW-zps.log": "bc951ac3c27ac9f3122c5b9e268e2fa753c0030aecf89fab7c688b8185cc6d93",
+  "tank_before_OVERFLOW-zps.residuals.npz": "d110049694883987f0dacd839ac0abac90399f50cc5d0935f459d17f586dc094",
+  "tank_codex-gyre-r32-before_LOCK_EXCHANGE-zco.json": "3e8b16546234092ef25be2167d165a781a855e9c74478456c3ef7ea38442459d",
+  "tank_codex-gyre-r32-before_LOCK_EXCHANGE-zco.log": "3e8b16546234092ef25be2167d165a781a855e9c74478456c3ef7ea38442459d",
+  "tank_codex-gyre-r32-before_LOCK_EXCHANGE-zco.residuals.npz": "18a859a914a2ebdb331567cc80e5c9c2b7bec938f481a25c476f209d28c44e67",
+  "tank_codex-gyre-r32-before_OVERFLOW-zps.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "tank_compare_LOCK.json": "d3a2cac0921a451f0ad7934a76b77d96ef02ef099019576c67e46428f3cd9cfd",
+  "tank_compare_OVERFLOW.json": "938ded026c96044eb7522d08b08bbff746357796668eeb4daddfc4b0191b0d42"
+ },
+ "pre_existing_failures_confirmed_on_the_before_worktree": [
+  "tests/ocean/unit/test_nemo_recipe.py, four tests, decision 17's guard",
+  "tests/ocean/fidelity/test_recipe_case_board.py::test_every_oracle_comparison_has_a_row",
+  "tests/ocean/fidelity/test_nemo_testcase_phase3_stage_sweep_gate.py::test_planted_stage_control_exits_nonzero_end_to_end"
+ ],
+ "artifacts_sha256_file": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round32/artifacts.sha256",
+ "receipt_sha256_before_this_refresh": "12ca9d52e8da1df7f30f83e94738d60e9de1ea08d0e524c26c782c8839f19110"
+}

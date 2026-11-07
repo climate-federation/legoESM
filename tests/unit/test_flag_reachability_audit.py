@@ -61,11 +61,17 @@ import numpy as np
 import pytest
 from jax import tree_util
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
-from legoesm.atmosphere.physics.convection.config import BechtoldConfig, SBMConfig
-from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
+from legoesm.atmosphere.physics.convection.config import BechtoldConfig
 from legoesm.atmosphere.physics.microphysics.morrison import MorrisonConfig
 from legoesm.driver import physics_pipeline as pp
-from legoesm.driver.config import ExperimentConfig
+from legoesm.driver.config import (
+    CLUBB_SCALAR_FIELDS,
+    DycoreConfig,
+    GridConfig,
+    ZM_SCALAR_FIELDS,
+    ZM_WIDTH_FIELDS,
+    ExperimentConfig,
+)
 
 from tests import _ratchet_audit
 
@@ -78,12 +84,19 @@ _RESOLVERS = {
     "turbulence_config_for": (
         lambda c: pp.turbulence_config_for(c),
         [{"turbulence": "louis"}, {"turbulence": "tke"},
-         {"turbulence": "holtslag_boville"}],
+         {"turbulence": "holtslag_boville"},
+         {"turbulence": "clubb", "clubb_prognostic": True}],
     ),
     "convection_config_for": (
         lambda c: pp.convection_config_for(c),
         [{"convection": "bechtold"}, {"convection": "sbm"},
-         {"convection": "tiedtke"}, {"convection": "zhang_mcfarlane"}],
+         {"convection": "tiedtke"}, {"convection": "zhang_mcfarlane"},
+         # The ZM detrainment widths are legal only where they are read: the
+         # MPAS macro/micro sub-cycle with ZM + CLUBB (validate_strict).
+         {"convection": "zhang_mcfarlane", "turbulence": "clubb",
+          "cld_macmic_num_steps": 3,
+          "grid": GridConfig(grid_type="mpas"),
+          "dycore": DycoreConfig(discretization="mpas")}],
     ),
     "gwd_config_for": (
         lambda c: pp.gwd_config_for(c),
@@ -152,6 +165,7 @@ _STRING_ALTS = {
     "convective_precip_split": "autoconversion",
     "bechtold_subsidence_solve": "advective",
     "morrison_flavor": "sam",
+    "zm_land_fraction": "none",
 }
 
 _HINTS = typing.get_type_hints(ExperimentConfig)
@@ -190,6 +204,10 @@ def _reads(fn, _seen: set[str] | None = None) -> set[str]:
                 and node.value.id in _CFG_NAMES
                 and node.attr in fields):
             out.add(node.attr)
+        elif isinstance(node, ast.Name) and node.id in _FIELD_TABLES:
+            # Table-driven reads (``getattr(config, f)`` over a
+            # field->leaf table) are invisible to the literal matches below.
+            out |= set(_FIELD_TABLES[node.id])
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if (node.func.id == "getattr" and len(node.args) >= 2
                     and isinstance(node.args[0], ast.Name)
@@ -206,6 +224,24 @@ def _reads(fn, _seen: set[str] | None = None) -> set[str]:
 
 
 _CFG_NAMES = ("config", "cfg")
+_FIELD_TABLES = {"ZM_SCALAR_FIELDS": ZM_SCALAR_FIELDS,
+                 "ZM_WIDTH_FIELDS": ZM_WIDTH_FIELDS,
+                 "CLUBB_SCALAR_FIELDS": CLUBB_SCALAR_FIELDS}
+
+
+def _spec_midpoint(field):
+    """Midpoint of a table-mapped field's __param_spec__ range, or None."""
+    from legoesm.atmosphere.physics.convection.config import (
+        __param_spec__ as conv)
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        __param_spec__ as clubb)
+    for table, params in ((ZM_SCALAR_FIELDS,
+                           conv["ZhangMcFarlaneConfig"]["params"]),
+                          (CLUBB_SCALAR_FIELDS, clubb["CLUBBParams"]["params"])):
+        if field in table:
+            lo, hi = params[table[field]]["bounds"]
+            return 0.5 * (lo + hi)
+    return None
 
 
 def _shadows_config(node) -> bool:
@@ -262,9 +298,9 @@ def _candidates(field, value) -> list:
     Numeric candidates are two-sided AND two-scale.  Two-sided so a default
     sitting at the EDGE of its validated range still has an admissible
     neighbour.  Two-scale because a 5% nudge cannot cross a rounding or
-    threshold boundary: a resolver doing ``int(config.hines_Fmax)`` maps both
-    0.105 and 0.095 to 0 and would be certified INERT, while the equally legal
-    1.2 changes the result (codex round 2).  ``_INERT`` means "no legal value
+    threshold boundary: a resolver doing ``int(config.mcfarlane_k_wave)`` maps both
+    +-5% of its 6.3e-5 default to 0 and would be certified INERT, while the
+    equally legal 2x+1 changes the result (codex round 2).  ``_INERT`` means "no legal value
     tried changed the output", so the sampled set has to span scales.
 
     Admissibility is NOT decided here: ``validate_strict`` (in :func:`_probe`)
@@ -300,7 +336,9 @@ def _candidates(field, value) -> list:
         other = [a for a in args if a not in _SCALARS and a is not type(None)]
         if len(scalars) != 1 or other:
             return []
-        return {bool: [True], float: [0.5, 1.5], int: [2]}[scalars[0]]
+        vals = {bool: [True], float: [0.5, 1.5], int: [2]}[scalars[0]]
+        mid = _spec_midpoint(field)
+        return vals if mid is None else [mid, *vals]
     return []
 
 
@@ -411,10 +449,9 @@ def test_every_resolver_read_reaches_the_leaf():
 # load or ``getattr(<anything>, "name")`` in production source, so it also
 # credits dead code, validation/serialization/logging-only reads, a same-named
 # attribute on an unrelated object, and — the important one —
-# CONFIG-TO-CONFIG PLUMBING: ``mcfarlane_N_ref`` is documented INERT in
-# config.py (there is no ``McFarlaneConfig.N_ref`` leaf) yet passes this half,
-# because two ExperimentConfig->AMIP-config copies mention it.  That case is
-# pinned mechanically in KNOWN_INERT_DESPITE_READS below.
+# CONFIG-TO-CONFIG PLUMBING: a field whose only reads are
+# ExperimentConfig->AMIP-config copies passes this half while reaching no
+# leaf.  Such cases are pinned mechanically in KNOWN_INERT_DESPITE_READS below.
 # KNOWN FALSE POSITIVES: a dynamic ``getattr(config, name)`` or ``_asdict()``
 # access is missed entirely, so a genuinely-consumed field could look dangling.
 # Narrowing the scan to exclude config.py was measured and REJECTED: it moves
@@ -439,25 +476,13 @@ DANGLING_FIELDS = {
     # a fail-loud guard on non-Morrison schemes — and ``morrison_dep_coeff``'s
     # declaration was corrected 1e-8 -> 1e-3 to match the leaf BEFORE wiring,
     # so the overlay is a no-op at defaults.  Entries removed per exact-match.)
-    # Case 4 in the module docstring, found by the adversarial review OF this
-    # audit: BechtoldConfig/ZhangMcFarlaneConfig.buoyancy_death_memory exists
-    # and is consumed by bechtold.py / zhang_mcfarlane.py, but nothing maps the
-    # ExperimentConfig scalar onto it.  Both default False => wiring it is
-    # behaviour-preserving.  (The original baseline claimed this was "carried
-    # in SegmentCarry, not a leaf" — false on both counts.)
-    "convective_buoyancy_death_memory": (
-        "wiring gap; BechtoldConfig.buoyancy_death_memory=False agrees",
-        (BechtoldConfig, "buoyancy_death_memory", True)),
+    # (2026-09-26: convective_buoyancy_death_memory WIRED — _resolve_convection
+    # maps it onto TiedtkeConfig.buoyancy_death_memory; entry removed.)
     # --- Cause 3: the leaf field does not exist ANYWHERE.  The config comment
     # documents physics that was never implemented; these are fiction and the
     # honest fix is deletion (or implementing the described behaviour).
-                # The original baseline claimed an SBMConfig.precip_efficiency leaf;
-    # adversarial review (2026-07-25) refuted it — SBMConfig ends at
-    # cloud_mask_sharpness.  Cause 3, not cause 1.
-    "sbm_precip_efficiency": (
-        "NO SUCH LEAF: SBMConfig has no precip_efficiency "
-        "(convective_precip_efficiency is the wired knob)",
-        (SBMConfig, "precip_efficiency", False)),
+    # (2026-09-26: sbm_precip_efficiency, which had no SBMConfig leaf, was
+    # DELETED from ExperimentConfig; entry removed.)
     # --- Cause 4: advertised knob with no consumer at all.
     # run_bomex_les.py reads its own argparse ``args.micro_substeps``, NOT this
     # ExperimentConfig field, so the field itself is inert everywhere.  (The
@@ -465,12 +490,7 @@ DANGLING_FIELDS = {
     "micro_substeps": (
         "inert: the LES driver reads args.micro_substeps, not this field",
         None),
-    # Documented as "log warnings when array dtypes mismatch policy"; nothing
-    # reads it, so the advertised debug behaviour never happens.  Being a debug
-    # knob rather than a physics knob does not make an inert knob correct.
-    "debug_precision": (
-        "inert: advertised dtype-mismatch logging has no reader",
-        None),
+    # (2026-09-26: debug_precision, which had no reader, was DELETED.)
 }
 
 # Members of the target defect class that Half B structurally CANNOT see,
@@ -479,10 +499,9 @@ DANGLING_FIELDS = {
 # scope DANGLING_FIELDS uses — ``N_ref`` does exist on an unrelated ocean
 # mixing config), so wiring the knob turns this red and forces the entry out.
 # SHRINK-ONLY.
-KNOWN_INERT_DESPITE_READS = {
-    "mcfarlane_N_ref": (
-        "config->config plumbing only; no McFarlaneConfig.N_ref leaf",
-        (McFarlaneConfig, "N_ref", False)),
+KNOWN_INERT_DESPITE_READS: dict = {
+    # (2026-09-26: mcfarlane_N_ref, config->config plumbing only with no
+    # McFarlaneConfig.N_ref leaf, was DELETED from ExperimentConfig.)
 }
 
 
@@ -522,6 +541,8 @@ def _production_scan() -> frozenset:
                   and isinstance(node.args[1], ast.Constant)
                   and node.args[1].value in fields):
                 read.add(node.args[1].value)
+            elif isinstance(node, ast.Name) and node.id in _FIELD_TABLES:
+                read |= set(_FIELD_TABLES[node.id])
     return frozenset(read)
 
 
@@ -693,14 +714,14 @@ class TestSelfCheck:
                       "bechtold_downdraft_entrain_rate") == _LIVE
 
     def test_rounding_resolver_is_not_called_inert(self):
-        """A 5%-only candidate list cannot cross an ``int()`` boundary: 0.105
-        and 0.095 both round to 0, so a LIVE field was certified inert
-        (codex round 2).  The legal 1.2 must be reachable as evidence."""
+        """A 5%-only candidate list cannot cross an ``int()`` boundary: +-5% of
+        6.3e-5 both round to 0, so a LIVE field was certified inert (codex
+        round 2).  The legal 2x+1 candidate (>= 1) must be reachable as evidence."""
         def _rounding(config):
-            return int(config.hines_Fmax)
+            return int(config.mcfarlane_k_wave)
 
-        assert _probe("round", _rounding, [{"gravity_wave_drag": "hines"}],
-                      "hines_Fmax") == _LIVE
+        assert _probe("round", _rounding, [{"gravity_wave_drag": "mcfarlane"}],
+                      "mcfarlane_k_wave") == _LIVE
 
     def test_elided_array_difference_is_detected(self):
         """``repr`` elides the middle of a large array, so a repr fallback

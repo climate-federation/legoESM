@@ -72,7 +72,18 @@ def discover_py_files() -> list[pathlib.Path]:
 
     De-duplicated by resolved path; ``__pycache__`` and throwaway
     ``scripts/tmp`` probes excluded.
+
+    Exclusions are matched against the path **relative to the repo root**,
+    never the absolute checkout path: matching on ``rp.parts`` (absolute)
+    meant any checkout living under a directory literally named ``tmp`` (every
+    worktree used this week did, e.g. ``/tmp/wt-...``) put the exact part
+    ``"tmp"`` in every file's parts tuple, so ``"tmp" in parts and "scripts" in
+    parts`` was true for *every* file under ``scripts/`` — silently excluding
+    all of ``scripts/`` from every ratchet built on this discovery, in every
+    such checkout. Relative-path matching makes only the literal top-level
+    ``scripts/tmp/`` excluded, regardless of where the checkout lives.
     """
+    repo = repo_root()
     seen: set[pathlib.Path] = set()
     out: list[pathlib.Path] = []
     for root in _scan_roots():
@@ -83,16 +94,19 @@ def discover_py_files() -> list[pathlib.Path]:
             if rp in seen:
                 continue
             seen.add(rp)
-            parts = rp.parts
-            if "__pycache__" in parts:
+            rel_parts = rp.relative_to(repo).parts
+            if "__pycache__" in rel_parts:
                 continue
-            if "tmp" in parts and "scripts" in parts:
+            if rel_parts[:2] == ("scripts", "tmp"):
                 continue
             # Vendored 3rd-party backend (BSD-3 CLM-ML-JAX, not written to legoESM's
             # constant/coefficient/style conventions) — audited upstream, not here.
-            # Scoped to the exact vendored path (not any dir merely named
-            # clm_ml_backend).
-            if "/canopy/clm_ml_backend/" in rp.as_posix():
+            # Scoped to the exact vendored path *relative to the repo root* (not
+            # any dir merely named clm_ml_backend, and not matched against the
+            # absolute checkout path).
+            if "/".join(rel_parts).startswith(
+                "packages/land/legoesm/land/canopy/clm_ml_backend/"
+            ):
                 continue
             out.append(rp)
     return out

@@ -433,3 +433,75 @@ def test_precompute_si_matrices_rejects_invalid_alpha(bad_alpha):
     sigma = create_sigma_coordinate(4, sigma_top=0.01)
     with pytest.raises(ValueError, match="alpha"):
         precompute_si_matrices(grid, sigma, T_ref=_T_REF_K, alpha=bad_alpha, dt=_DT_S)
+
+
+def test_ssp_rk3_step_si_scan_matches_unrolled_stages():
+    """The stage scan is the three-stage formula written out, forward and VJP,
+    on a nonlinear tendency with a float32 tracer riding along."""
+    from legoesm.timestepping.pytree_ops import pytree_axpy, pytree_linear_combination
+    from legoesm.timestepping.semi_implicit import si_correction
+
+    grid = create_gaussian_grid(n_max=21, omega=0.0)
+    sigma = create_sigma_coordinate(4, sigma_top=0.01)
+    si_data = precompute_si_matrices(grid, sigma, T_ref=_T_REF_K, alpha=0.5, dt=_DT_S)
+    k = jax.random.split(jax.random.PRNGKey(0), 3)
+    shp = (grid.n_sh, 4)
+
+    def c(key, s):
+        a, b = jax.random.normal(key, (2,) + s)
+        return (a + 1j * b) * 1e-6
+
+    def state(div):
+        return SpectralHydrostaticState(
+            vor_hat=Field(data=c(k[0], shp), name="vor_hat", dims=()),
+            div_hat=Field(data=div, name="div_hat", dims=()),
+            T_hat=Field(data=c(k[2], shp), name="T_hat", dims=()),
+            lnps_hat=Field(data=c(k[0], (grid.n_sh,)), name="lnps_hat", dims=()),
+            phis_hat=Field(data=jnp.zeros((grid.n_sh,), jnp.complex128),
+                           name="phis_hat", dims=()),
+            tracers={"q": jnp.full((8, 4), 1e-3, jnp.float32)},
+        )
+
+    def tend(s):
+        sq = s.div_hat.data * s.T_hat.data
+        return s._replace(
+            vor_hat=s.vor_hat.replace(data=1e-3 * sq),
+            div_hat=s.div_hat.replace(data=-2e-4 * s.T_hat.data + 5e2 * sq),
+            T_hat=s.T_hat.replace(data=3e-5 * s.div_hat.data),
+            lnps_hat=s.lnps_hat.replace(data=1e-4 * s.lnps_hat.data),
+            phis_hat=s.phis_hat.replace(data=jnp.zeros_like(s.phis_hat.data)),
+            tracers={"q": -1e-7 * s.tracers["q"]},
+        )
+
+    def unrolled(s):
+        k1 = si_correction(pytree_axpy(s, tend(s), _DT_S), s, si_data, grid, _DT_S)
+        k1s = si_correction(pytree_axpy(k1, tend(k1), _DT_S), k1, si_data, grid, _DT_S)
+        k2 = pytree_linear_combination(s, k1s, 0.75, 0.25)
+        k2s = si_correction(pytree_axpy(k2, tend(k2), _DT_S), k2, si_data, grid, _DT_S)
+        return pytree_linear_combination(s, k2s, 1.0 / 3.0, 2.0 / 3.0)
+
+    def scanned(s):
+        return ssp_rk3_step_si(s, tend, _DT_S, si_data, grid)
+
+    div0 = c(k[1], shp)
+    got, ref = scanned(state(div0)), unrolled(state(div0))
+    assert got.tracers["q"].dtype == jnp.float32
+    for a, b in zip(jax.tree.leaves(got), jax.tree.leaves(ref)):
+        assert a.dtype == b.dtype
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12, atol=0)
+
+    def loss(f):
+        return lambda d: jnp.sum(jnp.abs(f(state(d)).div_hat.data) ** 2)
+    g_got, g_ref = jax.grad(loss(scanned))(div0), jax.grad(loss(unrolled))(div0)
+    assert np.max(np.abs(g_ref)) > 0
+    np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_ref), rtol=1e-10, atol=0)
+
+
+def test_ssp_rk3_step_si_promoting_state_keeps_unrolled_result():
+    """complex64 state with float64 SI matrices: the corrector promotes the
+    state, scan cannot carry that, the step must still run and promote."""
+    step_fn, grid, si_data, _ = _gw_oscillator_step(21, 0.5)
+    div = jnp.full((grid.n_sh, 1), 1e-6 + 0j, dtype=jnp.complex64)
+    out_div, out_T = step_fn(div, jnp.zeros_like(div))
+    assert out_div.dtype == jnp.complex128
+    assert bool(jnp.all(jnp.isfinite(out_div)))

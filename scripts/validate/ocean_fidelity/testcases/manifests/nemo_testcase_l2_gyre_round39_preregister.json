@@ -1,0 +1,60 @@
+{
+ "format": "nemo-testcase-l2-gyre-round39-preregister-v1",
+ "date": "2026-09-06",
+ "parent_commit": "66344f76ae25",
+ "regime": "CPU production JIT, fp64/x64, transcendentals=libm, oracle V2",
+ "scope": "ITEM 1 ONLY -- the placement of the isoneutral slopes / K33. Items 2 (what remains) and 3 (the FMA flag, measurement only, no default changed) carry no code change and are not preregistered here.",
+
+ "what_nemo_does": {
+  "the_call": "CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb ) -- src/OCE/stprk3.F90:174, compiled at cfgs/GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2/BLD/ppsrc/nemo/stprk3.f90:178.",
+  "what_state_it_reads": "prd = rhd from CALL eos ( ts, Nbb, rhd ) on the line above (stprk3.F90:173 / ppsrc:177) -- the BEFORE tracers; pn2 = rn2b, the BEFORE Brunt-Vaisala frequency; and Kbb = Kmm = Nbb, so every geometry read inside ldf_slp -- gdept, gdepw, e3u, e3v, e3w and the ssh behind them -- is at the BEFORE time level (ldfslp.F90:143,161,212-215,226-231,290).",
+  "where_it_sits": "OUTSIDE the RK3 stage loop. The three CALL stp_RK3_stg statements are stprk3.F90:195,200,207 (ppsrc:201,207,215), all AFTER :174. So wslpi/wslpj are computed ONCE per step and every stage reuses them.",
+  "how_the_matrix_gets_them": "traldf_iso.F90:135 CALL traldf_iso_a33( Kmm, ah_wslp2, akz ) fills ah_wslp2 = zahu_w*wslpi^2 + zahv_w*wslpj^2 (traldf_iso.F90:296-297) from those ONCE-PER-STEP slopes; trazdf.F90:173 then reads zwt = avt + ah_wslp2 at every stage. Only the ahtu/ahtv w-point average and akz's e3w carry the stage's Kmm; the SLOPES do not.",
+  "at_kt_1": "GYRE has ln_rstart = F and horizontally uniform analytic initial T and S, so the BEFORE-state slopes are exactly zero and NEMO's ah_wslp2 is IDENTICALLY 0.0 at every stage of step 1 -- measured on the round-37 record, absolute maximum 0."
+ },
+
+ "what_legoesm_does_today": "ocean_model_latlon_cgrid.py:6969-6970 sets _T_gm_in/_S_gm_in = T_mid/S_mid (=state_new.T/S, the forward-Euler predictor built at :4893 from the whole baroclinic tendency), :7195 builds the shared density/Jacobian from them and state_new.eta (the AFTER ssh), and :7277 hands both to compute_isoneutral_K33_latlon. So the slopes are rebuilt from a STAGE/PREDICTOR state where NEMO reads the BEFORE state, and the resulting K33 reaches 9.6620886711883531e-13 m2/s where NEMO's ah_wslp2 is 0.",
+
+ "measured_before_this_preregistration_was_written": {
+  "note": "Taken at 3dceb7b8231b on a kt=1 GYRE step through the model's own call, by wrapping ocean_model_latlon_cgrid.compute_isoneutral_K33_latlon and re-calling the SAME function outside the graph with one component swapped. Recorded as MEASUREMENTS, never as predictions.",
+  "M1": "The K33 call fires exactly ONCE in a kt=1 step.",
+  "M2": "The state it is handed differs from step entry by |T - T_entry| = 0.3372313792464041 K on 10199 of 21120 cells, |S - S_entry| = 0.0 on 0 cells, and |eta - eta_entry| = 0.002848007840713329 m on 600 of 704 cells. That 0.337 K is NOT a stage-2 tracer anomaly -- NEMO's own Kmm-minus-Kbb anomaly on this step has absolute maximum 7.25e-6 K (round 38) -- it is a FULL forward-Euler predictor. This is the four orders of magnitude round 38 could not account for.",
+  "M3_component_table": {
+   "live, as the model calls it": 9.6620886711883531e-13,
+   "CONTROL: same operands, re-called outside the graph": 9.6620886715999986e-13,
+   "tracers := step-entry (Kbb) T,S": 1.3071545538245700e-14,
+   "eta := step-entry (Kbb)": 9.6625031189531020e-13,
+   "BOTH := step-entry (Kbb)": 0.0,
+   "reading": "the TRACER time level owns 98.65 per cent of the fold and the eta/thickness time level owns 1.35 per cent; together they are EXACTLY all of it -- the before state gives 0.0 on every one of the 20416 faces, bit for bit.",
+   "control_caveat": "the outside-the-graph re-call reproduces the live value to a RELATIVE 4.3e-10, not bit for bit (density_jacobian=None recomputes the Jacobian inline under a different fusion). So the two shares are good to ~1e-10 relative, which is nine orders below the 1.35/98.65 split they support."
+  },
+  "M4": "The resolved GYRE card is gm_redi.implicit_K33=True, slope_positions='nemo_native', slope_scheme='nemo_iso_lap', slope_prd_geometry_stage='current_step', slope_n2_evaluation='recompute', kappa_GM=0.0, kappa_Redi=1000.0, outer_integrator='forward_euler', tracer_time_integrator='rk3_ws'. Printed from _cfg_b.gm_redi, the object the step reads (Rule 10; round 38 recorded a self-caught error from printing physics.lateral_mixing.gm_redi instead)."
+ },
+
+ "the_change": "In the ONE shared WS-RK3 program, the GM/Redi slope operand set becomes the step-entry (Kbb) state: the tracers _T_gm_in/_S_gm_in and the positional eta handed to gm_redi_density_and_jacobian, gm_redi_tracer_tendency_latlon and compute_isoneutral_K33_latlon. Computed once per step, reused by all three stages -- which legoESM already does structurally, since the call fires once (M1). No knob, no default preserving the old behaviour on the lane that runs NEMO's stage program. ASKED-BY-DIRECTIVE under the user's standing 'do as NEMO does'.",
+
+ "predictions": {
+  "PR1": {"claim": "GYRE kt=1 stage-3 T residual falls from 3.1956659540810506e-11 K to <= 1.43e-14 K.", "basis": "round 38's causal arm substituted NEMO's own zwt_mix at this exact call site and got 1.4210854715202004e-14 K; M3 says the before state makes legoESM's fold EXACTLY 0.0, which is NEMO's ah_wslp2 at kt=1.", "falsifier": "the residual stays above 1e-12 K, or exceeds 1.43e-14 K -- either would mean the placement is not what round 38's substitution was measuring."},
+  "PR2": {"claim": "operand.K33_fold goes from 17400/17400 wet faces unequal at 9.66209e-13 to 0/17400 at absolute maximum 0.0, EXACT.", "falsifier": "any wet face unequal."},
+  "PR3": {"claim": "operand.K goes from 17383/17400 at 9.66209e-13 to an absolute maximum <= 1.8e-18. It is NOT predicted to reach 0: round 38 measured that with legoESM's own fold subtracted back out the largest difference against NEMO's avt is 1.73472e-18, and that residual belongs to the closure, not to this change.", "falsifier": "> 1e-17."},
+  "PR4": {"claim": "GYRE kt=1 stage-3 S residual falls from 8.1712414612411521e-13 psu to <= 2.85e-14 psu (round 38's substitution gave 2.8421709430404007e-14).", "falsifier": "> 2.85e-14 psu."},
+  "PR5": {"claim": "TANKS, Rule 12. LOCK_EXCHANGE-zco and OVERFLOW-zps do not execute the changed lines at all, so their kt=1..10 trajectories are BIT-IDENTICAL before and after, every scored row, 0 moved.", "how_checked": "state from each card's RESOLVED configuration and from its NEMO namelist (ln_traldf_iso) whether isoneutral mixing executes, then MEASURE both trajectories.", "falsifier": "any scored row of either tank moves, or the resolved config says isoneutral mixing DOES execute there -- in which case the change must be discharged on that card given NEMO's inputs, not waived."},
+  "PR6": {"claim": "kt=2 RECORD, the arm the round-38 acquisition exists for. NEMO's ah_wslp2 in oracle_trazdf_matrix_kt00000002.bin is NOT identically zero, so the record can discriminate a transcription.", "falsifier": "it IS identically zero, in which case the acquisition did not close the discrimination gap and that is the finding."},
+  "PR7": {"claim": "kt=2, GIVEN NEMO'S INPUTS. legoESM's K33, built from NEMO's OWN before-state operands off the kt=2 record, is scored against NEMO's ah_wslp2 at the exact bar. NO VALUE IS PREDICTED -- this change moves WHICH STATE is read, not the slope FORMULA, and the formula has never been scored against a non-zero ah_wslp2. The row is reported AT-BAR or DEBT with a named owner either way, and a residual here belongs to the slope transcription, a separate owner from this round's placement.", "falsifier": "none; this is an ARM with a bar, not a prediction. Declaring it a prediction after seeing the number is the thing this clause forbids."},
+  "PR8": {"claim": "ORCA2 remains UNMEASURED. Spec: ORCA2 has no card on this branch, so the changed lines cannot be exercised there; the disposition is UNMEASURED-WITH-SPEC, and the spec is the same operand gate driven off an ORCA2 trazdf record that does not exist."}
+ },
+
+ "controls": {
+  "C1": "kt=1..10 before/after on all three cards, same gates, same oracle roots, same --max-step, BEFORE taken in a detached probe worktree at the parent commit so the two arms differ only in the model.",
+  "C2": "the operand gate's own three controls (call count exactly one, capture inert, in-graph identity) must still pass after the change.",
+  "C3": "the operand gate's --plant K / --plant e3w / --plant wet must still each report moved_its_own_row True and exit non-zero.",
+  "C4": "a direct test that FAILS on the parent commit: the GM/Redi slope operands on the WS-RK3 lane are the step-entry arrays, asserted by identity, and the K33 the model builds on a horizontally uniform initial state is exactly 0.0."
+ },
+
+ "forbidden_this_round": [
+  "changing any default outside the directive-covered transcription in item 1",
+  "changing the XLA FMA flag default (item 3 is MEASUREMENT ONLY)",
+  "running makenemo, mpirun or any NEMO executable; editing NEMO src/",
+  "relaxing any bar, or calling a row DISCHARGED that is not bit-exact"
+ ]
+}

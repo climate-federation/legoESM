@@ -27,7 +27,7 @@ def test_idealized_template_needs_no_data(fd, capsys):
 
 
 def test_data_gated_template_missing_is_nonzero(fd, tmp_path):
-    rc = fd.main(["check", "coupled/amip", "--data-root", str(tmp_path)])
+    rc = fd.main(["check", "3d_idealized/hydrostatic_gray_1yr", "--data-root", str(tmp_path)])
     assert rc == 1  # amip_sst_sic absent
 
 
@@ -35,7 +35,7 @@ def test_data_gated_template_present_is_zero(fd, tmp_path):
     target = tmp_path / "amip" / "sst_sic.nc"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"\0" * (1024 * 1024 + 1))   # exceed the 1 MiB integrity floor
-    rc = fd.main(["check", "coupled/amip", "--data-root", str(tmp_path)])
+    rc = fd.main(["check", "3d_idealized/hydrostatic_gray_1yr", "--data-root", str(tmp_path)])
     assert rc == 0
 
 
@@ -45,7 +45,7 @@ def test_empty_or_truncated_file_rejected_by_integrity(fd, tmp_path):
     target = tmp_path / "amip" / "sst_sic.nc"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"\0" * 16)                  # below the floor
-    rc = fd.main(["check", "coupled/amip", "--data-root", str(tmp_path)])
+    rc = fd.main(["check", "3d_idealized/hydrostatic_gray_1yr", "--data-root", str(tmp_path)])
     assert rc == 1
 
 
@@ -66,6 +66,11 @@ def test_verify_helper(fd, tmp_path):
     assert fd._verify({"marker": ".complete"}, d)[0] is True    # marker present -> ok
 
 
+def test_retired_amip_template_points_to_production_deck(fd):
+    with pytest.raises(SystemExit, match="config/amip/amip_production.yaml"):
+        fd.main(["check", "coupled/amip", "--data-root", "/tmp"])
+
+
 def test_unknown_template_raises(fd):
     with pytest.raises(SystemExit):
         fd.main(["check", "nope/missing", "--data-root", "/tmp"])
@@ -73,6 +78,6 @@ def test_unknown_template_raises(fd):
 
 def test_fetch_no_url_reports_manual(fd, tmp_path, capsys):
     # amip_sst_sic has no automatable url -> fetch must report manual + nonzero.
-    rc = fd.main(["fetch", "coupled/amip", "--data-root", str(tmp_path)])
+    rc = fd.main(["fetch", "3d_idealized/hydrostatic_gray_1yr", "--data-root", str(tmp_path)])
     assert rc == 1
     assert "obtain manually" in capsys.readouterr().out

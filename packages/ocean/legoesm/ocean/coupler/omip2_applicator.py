@@ -1,52 +1,35 @@
-"""Surface-flux applicator for the OMIP-2 / Bryan-THC drivers.
+"""OMIP-2 / CORE-II / JRA55-do surface forcing for the ocean drivers.
 
-Wraps the Large & Yeager 2009 bulk-flux module
-(``legoesm.ocean.bulk_flux_omip``) and applies the resulting
-``(tau_x, tau_y, shflx, lhflx)`` to the ocean state's top layer as a
-per-timestep forward-Euler update of u / v / T. Designed to be called
-once per model step from the long-run drivers.
+:func:`compute_omip2_surface_forcing` samples the atmospheric forcing onto the
+model grid, evaluates the NCAR bulk fluxes (``legoesm.ocean.bulk_flux_omip``)
+and assembles NEMO's ``blk_oce`` non-solar heat flux, returning an
+``OceanSurfaceForcing`` that ``model.step(state, dt, surface_forcing=...)``
+integrates inside the timestep (the dynamics core applies the ``-tau`` ocean
+reaction, the geographic->grid rotation and the shortwave penetration).
+:func:`compute_omip2_freshwater_forcing` builds the matching P - E channel
+for ``model.step(..., freshwater=...)``.
 
-State conventions handled
--------------------------
+Sign conventions: ``tau_x``/``tau_y`` in the ATMOSPHERIC convention as
+``air_sea_fluxes`` returns them; ``q_net`` positive INTO the ocean and
+including shortwave.
 
-* Lat-lon C-grid (``LatLonCGridOceanState``): ``u`` on east-west
-  faces (shape ``(n_lat, n_lon+1, n_z)``), ``v`` on north-south
-  faces (shape ``(n_lat+1, n_lon, n_z)``). The applicator
-  interpolates cell-centred tau_x / tau_y to the matching faces
-  via the C-grid 0.5*(left+right) stencil already used by the
-  prescribed-forcing path.
-* MPAS Voronoi: ``u`` on edges; ``tau_normal`` = tau_x*cos(angleEdge)
-  + tau_y*sin(angleEdge).
-* Cube C-D grid: ``u``, ``v`` collocated on cells; direct
-  application.
+Shortwave albedo is applied only when a sea-ice concentration is passed
+(``ice_albedo``); with ``ice_albedo=None`` the downwelling SW enters unchanged.
 
-All paths preserve land masking through ``state.land_mask`` /
-``state.u_mask`` / ``state.v_mask``.
-
-Sign conventions
-----------------
-``shflx`` and ``lhflx`` are defined as positive INTO the ocean
-(matching ``bulk_flux_omip.air_sea_fluxes``). The top-cell
-temperature tendency is
-
-.. math::
-    \\frac{dT}{dt}\\bigg|_{\\rm top} = \\frac{Q_{\\rm net}}{\\rho_0 c_p \\Delta z_0}
-
-with ``Q_net = shflx + lhflx + sw_down - lw_up`` (sw / lw passed
-in directly; the smoke path adds only the turbulent components).
+The operator-split forward-Euler applicator (``apply_omip2_surface_fluxes``)
+was deleted for issue #1820: it was applied outside the timestep, did not
+weight downward longwave by emissivity, and added geographic stress to
+cube-local velocities unrotated.
 """
 
 from __future__ import annotations
 
-from typing import Optional
 
 import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.core.field import Field
-from legoesm.thermo import saturation_vapor_pressure
-from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
+from legoesm.ocean.bulk_flux_omip import air_sea_fluxes, blk_oce_2
 from legoesm.ocean.eos import VALID_FREEZE_SCHEMES, freezing_point
 
 # --- per-step host-transfer ledger (scaling-M2 honest-cost accounting) ------
@@ -72,17 +55,6 @@ def host_pull_ledger() -> dict:
 
 def _record_surface_slice_pull() -> None:
     _HOST_PULL_LEDGER["surface_slice_pulls"] += 1
-
-
-def _bolton_q_sat(T_K, p_hpa: float = constants.p_atm_std / 100.0):
-    """Saturation specific humidity [kg/kg] at temperature T_K [K], pressure p_hpa [hPa].
-
-    Uses the canonical saturation vapour pressure from :mod:`legoesm.thermo`
-    (no re-derived Magnus/Tetens coefficients) and ``constants.epsilon`` for
-    the specific-humidity conversion ``q = eps e / (p - (1 - eps) e)``.
-    """
-    e_s = saturation_vapor_pressure(T_K) / 100.0  # Pa -> hPa
-    return constants.epsilon * e_s / (p_hpa - (1.0 - constants.epsilon) * e_s)
 
 
 # Cache of precomputed nearest-neighbour (lat_idx, lon_idx) maps, keyed by a
@@ -220,6 +192,259 @@ def _bilinear_interp_to_points(field, src_lat_deg, src_lon_deg,
                                       dst_lat_deg_pts, dst_lon_deg_pts)
     f = np.asarray(field, dtype=np.float64)
     return (f[i4, j4] * w4).sum(axis=0)
+
+
+# --- gap 13: bicubic, because ORCA1 remaps its WINDS bicubically ------------
+#
+# The docstring above says "NEMO interpolates CORE-II bilinearly (its weights
+# files)". That is true of the SCALAR channels and NOT of the winds. From the
+# run's own namelist_cfg:
+#
+#   sn_wndi / sn_wndj  (148-149)  weights_coreII_2_eORCA1.4.2_BICUBIC.nc
+#   sn_qsr/qlw/tair    (150-152)  weights_coreII_2_eORCA1.4.2_BILINEAR.nc
+#
+# So a single uniform method cannot be faithful whatever it is set to: the
+# oracle deliberately uses a higher-order remap for momentum and a linear one
+# for the thermodynamic fields.
+#
+# The oracle's own weight FILES are not on this machine, so this reproduces
+# NEMO's METHOD, not its exact weights. Catmull-Rom (a = -0.5) is the cubic
+# convolution SCRIPS/NEMO's bicubic remapping is built on; it is interpolating
+# (passes through the data) and reduces to the same stencil bilinear would use
+# when the field is linear.
+_BICUBIC_MAP_CACHE: dict = {}
+
+# Catmull-Rom cubic convolution kernel, a = -0.5.
+_CUBIC_A = -0.5
+
+
+def _cubic_weights(t):
+    """Cubic-convolution weights for the four points at offsets -1,0,1,2.
+
+    ``t`` in [0,1) is the fractional position between points 0 and 1. The four
+    weights sum to 1 for every t, which is what keeps a constant field exactly
+    constant through the remap.
+    """
+    t = np.asarray(t, dtype=np.float64)
+    a = _CUBIC_A
+    t1 = 1.0 + t                       # distance to the -1 point
+    t2 = t                             # to 0
+    t3 = 1.0 - t                       # to 1
+    t4 = 2.0 - t                       # to 2
+    w1 = a * (t1 ** 3) - 5 * a * (t1 ** 2) + 8 * a * t1 - 4 * a
+    w2 = (a + 2) * (t2 ** 3) - (a + 3) * (t2 ** 2) + 1.0
+    w3 = (a + 2) * (t3 ** 3) - (a + 3) * (t3 ** 2) + 1.0
+    w4 = a * (t4 ** 3) - 5 * a * (t4 ** 2) + 8 * a * t4 - 4 * a
+    return w1, w2, w3, w4
+
+
+def _bicubic_point_maps(src_lat_deg, src_lon_deg,
+                        dst_lat_deg_pts, dst_lon_deg_pts):
+    """16-point bicubic maps ``(i16, j16, w16)``, each ``(16, n_pts)``.
+
+    Longitude is PERIODIC (the stencil wraps across the seam); latitude is
+    CLAMPED at the source's outermost rows, matching what the bilinear map
+    already does there — CORE-II stops ~0.5 deg short of the pole, and a cubic
+    stencil that ran off the end would otherwise extrapolate into the gap.
+    """
+    src_lat = np.asarray(src_lat_deg, dtype=np.float64)
+    src_lon = np.asarray(src_lon_deg, dtype=np.float64)
+    # Full-content hash of EVERY coordinate array, via the collision-safe
+    # helper this module already grew for precisely this bug: a key built from
+    # endpoints alone can match two different destination grids and silently
+    # hand one of them the other's weights (codex found my first version
+    # repeating that August mistake).
+    key = _coord_key(src_lat, src_lon,
+                     np.asarray(dst_lat_deg_pts, dtype=np.float64),
+                     np.asarray(dst_lon_deg_pts, dtype=np.float64))
+    cached = _BICUBIC_MAP_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    dlat = np.asarray(dst_lat_deg_pts, dtype=np.float64).ravel()
+    dlon = np.asarray(dst_lon_deg_pts, dtype=np.float64).ravel()
+
+    ascending = src_lat[1] > src_lat[0]
+    lat_axis = src_lat if ascending else src_lat[::-1]
+    n_lat = lat_axis.size
+
+    # Bracketing row and fractional position, clamped to the interior.
+    i1 = np.clip(np.searchsorted(lat_axis, dlat, side="right") - 1,
+                 0, n_lat - 2)
+    tlat = (dlat - lat_axis[i1]) / (lat_axis[i1 + 1] - lat_axis[i1])
+    tlat = np.clip(tlat, 0.0, 1.0)
+    rows = [np.clip(i1 + k, 0, n_lat - 1) for k in (-1, 0, 1, 2)]
+    if not ascending:
+        rows = [n_lat - 1 - r for r in rows]
+
+    n_lon = src_lon.size
+    lon0 = float(src_lon[0])
+    dlon_step = float(src_lon[1] - src_lon[0])
+    x = (dlon - lon0) / dlon_step
+    j1 = np.floor(x).astype(int)
+    tlon = x - j1
+    cols = [np.mod(j1 + k, n_lon) for k in (-1, 0, 1, 2)]
+
+    wlat = _cubic_weights(tlat)
+    wlon = _cubic_weights(tlon)
+
+    i16, j16, w16 = [], [], []
+    for a_i in range(4):
+        for b_j in range(4):
+            i16.append(rows[a_i])
+            j16.append(cols[b_j])
+            w16.append(wlat[a_i] * wlon[b_j])
+    maps = (np.asarray(i16), np.asarray(j16), np.asarray(w16))
+    _BICUBIC_MAP_CACHE[key] = maps
+    return maps
+
+
+def _bicubic_interp_to_points(field, src_lat_deg, src_lon_deg,
+                              dst_lat_deg_pts, dst_lon_deg_pts):
+    """Bicubic sample of one 2-D field (see :func:`_bicubic_point_maps`)."""
+    i16, j16, w16 = _bicubic_point_maps(src_lat_deg, src_lon_deg,
+                                        dst_lat_deg_pts, dst_lon_deg_pts)
+    f = np.asarray(field, dtype=np.float64)
+    return (f[i16, j16] * w16).sum(axis=0)
+
+
+# The oracle's per-field split: momentum bicubic, everything else bilinear.
+_NEMO_BICUBIC_CHANNELS = ("u10", "v10")
+
+
+# === gap 13, exact reproduction: read NEMO's OWN SCRIP weight files ==========
+#
+# The user chose exact reproduction over the method-equivalent Catmull-Rom
+# above. The oracle's weight files ARE on this machine (an earlier claim that
+# they were not was wrong and is retracted in the gap 13 commit):
+#
+#   cfgs/ORCA1/INPUTS/weights_coreII_2_eORCA1.4.2_bicubic.nc     (winds)
+#   cfgs/ORCA1/INPUTS/weights_coreII_2_eORCA1.4.2_bilinear.nc    (scalars)
+#   .../INPUTS/orca1_inputs/data_repository/input_fields/
+#       weights_reg05_bilinear.nc                                (chlorophyll)
+#
+# The copies sitting in EXP00/RUN_GATEWAY* are BROKEN SYMLINKS; use INPUTS.
+#
+# CONVENTIONS, every one of them MEASURED before any of this was written
+# (probe jobs recorded in scripts/cluster/omip_nemo/_scrip_*.sbatch):
+#   * variables srcNN / dstNN / wgtNN; destination shape (331, 360).
+#   * src holds 1-BASED FLAT indices in C order (lat-major) into the 94x192
+#     CORE-II grid, stored as FLOAT -- they must be cast before use.
+#   * the source latitude axis is used AS-IS (ascending). Proven with
+#     ANTISYMMETRIC test fields: a symmetric field such as cos(lat) cannot
+#     detect a latitude flip at all, which is how the first probe missed it.
+#   * the destination is the INTERIOR of our (332, 362) mesh, python
+#     [0:331, 1:361]. That is not inferred from arithmetic -- it is in the
+#     file's own history attribute, `ncks -F -d lon,2,361 -d lat,1,331`,
+#     i.e. drop both cyclic-overlap columns and the north-fold row.
+#   * ACCURACY: over the 113761 full 4-point stencils (95.5% of points) a
+#     LINEAR field is reproduced to a median 2.18e-08. The residual lives in
+#     5399 partial 2-point stencils and in 180 points in the ten northernmost
+#     rows, i.e. the tripolar fold.
+#
+# CAVEAT worth carrying: the files are named for eORCA1.4.2 while our mesh is
+# eORCA1.2. They are DIMENSIONALLY identical, which is why the indices line up,
+# but the coastline/land mask may differ in detail.
+_SCRIP_CACHE: dict = {}
+
+
+def load_scrip_weights(path):
+    """Read a NEMO/SCRIP remapping weights file.
+
+    Returns ``(src0, wgt, n)`` with ``src0`` the ZERO-based flat source indices
+    and ``wgt`` the raw weights, both ``(n, ny, nx)``. ``n`` is 4 for a
+    bilinear file and 16 for a bicubic one, and that count is what selects how
+    the weights are APPLIED -- see :func:`apply_scrip_weights`.
+    """
+    import xarray as xr
+    key = str(path)
+    cached = _SCRIP_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with xr.open_dataset(path, decode_times=False) as d:
+        n = sum(1 for v in d.variables if str(v).startswith("src"))
+        if n not in (4, 16):
+            raise ValueError(
+                f"{path}: expected 4 (bilinear) or 16 (bicubic) weight "
+                f"triples, found {n}")
+        src = np.stack([np.asarray(d[f"src{k:02d}"]) for k in range(1, n + 1)])
+        wgt = np.stack([np.asarray(d[f"wgt{k:02d}"]) for k in range(1, n + 1)])
+    out = (src.astype(np.int64) - 1, np.asarray(wgt, dtype=np.float64), n)
+    _SCRIP_CACHE[key] = out
+    return out
+
+
+def _pad_source(field):
+    """One-cell halo: PERIODIC in longitude, edge-replicated in latitude.
+
+    NEMO builds the same padded array (``fly_dta``) so its bicubic stencil can
+    reach ni-1 and ni+1 around every corner. Longitude wraps because the
+    CORE-II grid is global; latitude replicates because it is not.
+    """
+    f = np.asarray(field, dtype=np.float64)
+    # Longitude: PERIODIC. NEMO first replicates the east-west edges and then,
+    # "if data grid is cyclic we can do better on east-west edges"
+    # (fldread.F90:1503), re-reads the wrap columns. CORE-II is a cyclic global
+    # grid, so the cyclic branch is the one that applies.
+    f = np.pad(f, ((0, 0), (1, 1)), mode="wrap")
+    # Latitude is NOT symmetric in NEMO, and this is easy to get wrong:
+    #   south edge  fly_dta(:,jpj1-1) = fly_dta(:,jpj1)            REPLICATE
+    #   north edge  fly_dta(:,jpj2+1) = 2*fly_dta(:,jpj2)
+    #                                   - fly_dta(:,jpj2-1)        EXTRAPOLATE
+    # (fldread.F90:1495-1499). Replicating BOTH ends -- which is what this
+    # function did first -- flattens the gradient in the northernmost source
+    # row and therefore perturbs the Arctic derivative stencils.
+    south = f[:1]
+    north = 2.0 * f[-1:] - f[-2:-1]
+    return np.concatenate([south, f, north], axis=0)
+
+
+def apply_scrip_weights(field, src0, wgt, n, src_shape):
+    """Remap one 2-D source field through NEMO's own weights.
+
+    For a BILINEAR file (n=4) this is the obvious weighted sum. For a BICUBIC
+    file (n=16) IT IS NOT: NEMO's fld_interp (fldread.F90:1543-1574) uses the
+    first four weights on the VALUES and the other twelve on CENTRED
+    DERIVATIVES of the source field --
+
+        5-8   x  0.5  * (f[i+1, j] - f[i-1, j])          d/di
+        9-12  x  0.5  * (f[i, j+1] - f[i, j-1])          d/dj
+        13-16 x  0.25 * ((f[i+1,j+1] - f[i-1,j+1])
+                         - (f[i+1,j-1] - f[i-1,j-1]))    cross
+
+    -- which is why those sixteen weights do NOT sum to one (measured range
+    0.8168 to 1.2017). Treating them as value weights would produce a
+    plausible, wrong field rather than an error.
+    """
+    ny_s, nx_s = src_shape
+    p = _pad_source(np.asarray(field).reshape(ny_s, nx_s))
+    # ALL FOUR weight groups address the SAME four corners: NEMO reuses
+    # data_jpi/data_jpj across its four `DO jn = 1,4` loops and only the weight
+    # slice changes. So the geometry comes from the first four triples, and
+    # triples 5-16 must repeat those same source indices -- asserted here
+    # rather than assumed, because if they did not this whole reading of the
+    # file would be wrong.
+    corners = src0[:4]
+    if n == 16 and not np.array_equal(np.tile(corners, (4, 1, 1)), src0):
+        raise ValueError(
+            "bicubic weights do not repeat the same four source corners "
+            "across their four weight groups; the file layout is not what "
+            "fld_interp assumes")
+    j = corners // nx_s
+    i = corners - j * nx_s
+    # Corner value in padded coordinates.
+    val = p[j + 1, i + 1]
+    if n == 4:
+        return (val * wgt).sum(axis=0)
+    out = (val * wgt[:4]).sum(axis=0)
+    d_di = 0.5 * (p[j + 1, i + 2] - p[j + 1, i])
+    d_dj = 0.5 * (p[j + 2, i + 1] - p[j, i + 1])
+    cross = 0.25 * ((p[j + 2, i + 2] - p[j + 2, i])
+                    - (p[j, i + 2] - p[j, i]))
+    out = out + (d_di * wgt[4:8]).sum(axis=0)
+    out = out + (d_dj * wgt[8:12]).sum(axis=0)
+    out = out + (cross * wgt[12:16]).sum(axis=0)
+    return out
 
 
 # Cache of pre-computed conservative-regrid weights, keyed by
@@ -379,18 +604,30 @@ def _sample_forcing_latlon(forcing, idx_t, dst_lat_deg, dst_lon_deg):
     return out
 
 
-def _sample_forcing_points(forcing, idx_t, lat_pts_deg, lon_pts_deg,
-                           method: str = "nearest"):
-    """Sample the forcing channels at a set of points (cube / MPAS / tripole
-    cell centres).  ``method``: "nearest" (legacy) or "bilinear" (the tripole
-    default — see :func:`_bilinear_point_maps` for why nearest-neighbour onto
-    a finer structured grid prints zonal forcing bands)."""
-    if method not in ("nearest", "bilinear"):
+def _sample_forcing_points(forcing, idx_t, lat_pts_deg, lon_pts_deg, *,
+                           method: str):
+    """Sample the forcing channels at a set of points (cube / MPAS / FESOM /
+    tripole cell centres).  ``method`` (REQUIRED, no default — a default here
+    was how MPAS/FESOM silently got a different remap than the tripole, F20):
+    "bilinear" (what every model grid uses — see :func:`_bilinear_point_maps`
+    for why nearest-neighbour onto a finer grid prints zonal forcing bands),
+    "nearest", or "nemo_weights"."""
+    if method not in ("nearest", "bilinear", "nemo_weights"):
         raise ValueError(f"_sample_forcing_points: unknown method {method!r}")
-    interp = (_bilinear_interp_to_points if method == "bilinear"
-              else _nn_interp_to_points)
+    _uniform = {"bilinear": _bilinear_interp_to_points,
+                "nearest": _nn_interp_to_points}.get(method)
     out = {}
     for name in _forcing_channels(forcing):
+        if method == "nemo_weights":
+            # PER-CHANNEL, because the oracle is per-channel: the winds carry
+            # bicubic weights files and every other channel carries bilinear
+            # ones. A uniform method cannot reproduce that whichever one it
+            # picks.
+            interp = (_bicubic_interp_to_points
+                      if name in _NEMO_BICUBIC_CHANNELS
+                      else _bilinear_interp_to_points)
+        else:
+            interp = _uniform
         out[name] = interp(
             getattr(forcing, name)[idx_t],
             forcing.lat, forcing.lon,
@@ -399,298 +636,91 @@ def _sample_forcing_points(forcing, idx_t, lat_pts_deg, lon_pts_deg,
     return out
 
 
-def _apply_cgrid_surface_fluxes(state, forc, *, dz_0, rho_0, c_p,
-                                rho_air, sigma_sb, dt, grid=None):
-    """Apply bulk fluxes to a lat-lon C-grid state from already-sampled forcing.
+def scrip_interior_to_full_tripole(interior, ny=332, nx=362):
+    """Place a (331, 360) SCRIP result into a full (ny, nx) tripole field.
 
-    Shared by the ``latlon`` / ``latlon_regional`` path (forcing conservatively
-    regridded onto the regular T grid) and the curvilinear ``tripole`` path
-    (forcing nearest-neighbour sampled onto the 2-D T grid) -- both use the
-    identical ``LatLonCGridOceanState`` layout (T cell-centred; u on EW faces
-    ``(n_lat, n_lon+1)``; v on NS faces ``(n_lat+1, n_lon)``). ``forc`` holds
-    the seven channels as 2-D ``(n_lat, n_lon)`` arrays. Forward-Euler update of
-    the top layer of T, u, v; land masking via state masks.
+    The oracle's weight files cover the INTERIOR only -- their own history
+    attribute records `ncks -F -d lon,2,361 -d lat,1,331`. The entries they
+    drop are not missing data, they are the grid's own redundancy, so they are
+    FILLED rather than left as zeros; a silent zero in a forcing field is the
+    failure mode this repo keeps hitting.
 
-    ``grid`` (optional) supplies ``cos_alpha_u`` / ``sin_alpha_u`` /
-    ``cos_alpha_v`` / ``sin_alpha_v`` for the geographic->grid wind-stress
-    rotation on curvilinear (tripole) geometries; absent on a regular lat-lon
-    grid, where the rotation is the identity.
+      * columns 0 and 361 are the CYCLIC OVERLAP of columns 360 and 1;
+      * row 331 is the NORTH-FOLD row, filled from the row below.
 
-    Physical constants are routed through :mod:`legoesm.constants`
-    (``emissivity_ocean``, ``rho_air``, ``sigma_sb``, ``p_atm_std``,
-    ``T_freeze``) and saturation through :mod:`legoesm.thermo`
-    (``_bolton_q_sat`` wraps ``saturation_vapor_pressure``) -- no hardcoded
-    thermodynamic literals remain here.  The wind-stress *sign* (ocean reaction
-    = -tau), by contrast, is corrected here vs the previous (+tau) latlon code
-    -- see the momentum comment below.
+    The fold fill is an APPROXIMATION: a true eORCA fold maps the row onto
+    itself with a reversal. For a smooth surface forcing field at a single row
+    the difference is small, and this is stated rather than hidden.
     """
-    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + constants.T_freeze
-    q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)), dtype=np.float64)
-    # Legacy operator-split path: pinned to the pre-NCAR two-coefficient
-    # scheme (algo='ly09_2coeff') so its regression tests stay bit-exact.
-    # The FAITHFUL in-step path (compute_omip2_surface_forcing) uses the
-    # NEMO NCAR algorithm.
-    tau_x, tau_y, sh, lh, _evap = air_sea_fluxes(
-        u10=jnp.asarray(forc["u10"]),
-        v10=jnp.asarray(forc["v10"]),
-        T_air_K=jnp.asarray(forc["T_air"]),
-        q_air=jnp.asarray(forc["q_air"]),
-        T_sfc_K=jnp.asarray(T_sfc_K),
-        q_sfc=jnp.asarray(q_sfc),
-        rho_air=jnp.asarray(rho_air),
-        algo="ly09_2coeff",
-    )
-    # --- Heat: Q_net positive into the ocean warms the top cell. ---
-    lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
-    Q_net = (np.asarray(sh) + np.asarray(lh)
-             + forc["sw_down"] - lw_up + forc["lw_down"])
-    mask = np.asarray(state.land_mask.data, dtype=np.float64)
-    T_new = np.asarray(state.T.data, dtype=np.float64).copy()
-    T_new[..., 0] = T_new[..., 0] + Q_net / (rho_0 * c_p * dz_0) * dt * mask
-
-    # --- Momentum: OCEAN REACTION force. ``air_sea_fluxes`` returns tau in the
-    # ATMOSPHERIC convention (tau = -rho_air Cd |U| U, i.e. opposing the wind),
-    # so the ocean feels -tau (Newton's 3rd law). This sign flip mirrors the
-    # dynamics-core external-tau block (ocean_pe_latlon_cgrid.py:1892); without
-    # it the wind drives the ocean BACKWARDS. Geographic east/north stress is
-    # then rotated to grid-aligned (i, j) via cos_alpha_u / sin_alpha_u when the
-    # grid is curvilinear (tripole); a regular lat-lon C-grid lacks those
-    # attributes, so the rotation is the identity (grid-i == east). ---
-    tau_e = -np.asarray(tau_x, dtype=np.float64)   # eastward stress ON ocean
-    tau_n = -np.asarray(tau_y, dtype=np.float64)   # northward stress ON ocean
-    n_lat, n_lon = tau_e.shape
-
-    def _cell_to_uface(a):
-        f = np.zeros((n_lat, n_lon + 1), dtype=np.float64)
-        f[:, 1:-1] = 0.5 * (a[:, :-1] + a[:, 1:])
-        f[:, 0] = a[:, 0]
-        f[:, -1] = a[:, -1]
-        return f
-
-    def _cell_to_vface(a):
-        f = np.zeros((n_lat + 1, n_lon), dtype=np.float64)
-        f[1:-1, :] = 0.5 * (a[:-1, :] + a[1:, :])
-        f[0, :] = a[0, :]
-        f[-1, :] = a[-1, :]
-        return f
-
-    tau_e_u, tau_n_u = _cell_to_uface(tau_e), _cell_to_uface(tau_n)
-    tau_e_v, tau_n_v = _cell_to_vface(tau_e), _cell_to_vface(tau_n)
-
-    ca_u = getattr(grid, "cos_alpha_u", None) if grid is not None else None
-    sa_u = getattr(grid, "sin_alpha_u", None) if grid is not None else None
-    ca_v = getattr(grid, "cos_alpha_v", None) if grid is not None else None
-    sa_v = getattr(grid, "sin_alpha_v", None) if grid is not None else None
-    if ca_u is not None and sa_u is not None:
-        tau_i_u = (tau_e_u * np.asarray(ca_u, dtype=np.float64)
-                   + tau_n_u * np.asarray(sa_u, dtype=np.float64))
-    else:
-        tau_i_u = tau_e_u
-    if ca_v is not None and sa_v is not None:
-        tau_j_v = (-tau_e_v * np.asarray(sa_v, dtype=np.float64)
-                   + tau_n_v * np.asarray(ca_v, dtype=np.float64))
-    else:
-        tau_j_v = tau_n_v
-
-    u_face = np.asarray(state.u.data, dtype=np.float64).copy()
-    v_face = np.asarray(state.v.data, dtype=np.float64).copy()
-    u_mask = np.asarray(state.u_mask.data, dtype=np.float64)
-    v_mask = np.asarray(state.v_mask.data, dtype=np.float64)
-    u_face[..., 0] = u_face[..., 0] + tau_i_u / (rho_0 * dz_0) * dt * u_mask
-    v_face[..., 0] = v_face[..., 0] + tau_j_v / (rho_0 * dz_0) * dt * v_mask
-
-    return state._replace(
-        T=Field(jnp.asarray(T_new), name=state.T.name,
-                dims=state.T.dims, units=state.T.units),
-        u=Field(jnp.asarray(u_face), name=state.u.name,
-                dims=state.u.dims, units=state.u.units),
-        v=Field(jnp.asarray(v_face), name=state.v.name,
-                dims=state.v.dims, units=state.v.units),
-    )
+    interior = np.asarray(interior, dtype=np.float64)
+    if interior.shape != (ny - 1, nx - 2):
+        raise ValueError(
+            f"SCRIP interior {interior.shape} does not fit a ({ny}, {nx}) "
+            f"tripole; expected {(ny - 1, nx - 2)}")
+    out = np.zeros((ny, nx), dtype=np.float64)
+    out[0:ny - 1, 1:nx - 1] = interior
+    out[0:ny - 1, 0] = out[0:ny - 1, nx - 2]
+    out[0:ny - 1, nx - 1] = out[0:ny - 1, 1]
+    out[ny - 1, :] = out[ny - 2, :]
+    return out
 
 
-def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
-                                 z_coord, grid, grid_type: str,
-                                 dt: float,
-                                 rho_0: Optional[float] = None,
-                                 c_p: Optional[float] = None,
-                                 rho_air: float = constants.rho_air):
-    """Apply one timestep of JRA55-do / CORE-II forcing to ``state``.
+# ORCA1's own weight files, per sn_* in namelist_cfg. The RUN_GATEWAY copies
+# are BROKEN SYMLINKS; these INPUTS paths are the real files.
+_ORACLE_WEIGHTS_DIR = ("/burg-archive/glab/users/pg2328/nemo_orca1/"
+                       "nemo_5.0.1/cfgs/ORCA1/INPUTS/")
+_CORE2_BICUBIC = _ORACLE_WEIGHTS_DIR + "weights_coreII_2_eORCA1.4.2_bicubic.nc"
+_CORE2_BILINEAR = _ORACLE_WEIGHTS_DIR + "weights_coreII_2_eORCA1.4.2_bilinear.nc"
 
-    Supported ``grid_type``: ``latlon`` / ``latlon_regional`` (conservative
-    regrid onto the regular T grid), ``cubed_sphere`` and ``mpas`` /
-    ``mpas_regional`` (nearest-neighbour onto cell centres), and ``tripole``
-    (curvilinear lat-lon C-grid; nearest-neighbour onto the 2-D ``lat_T``/
-    ``lon_T`` grid, sharing the latlon C-grid application via
-    ``_apply_cgrid_surface_fluxes``). The ``spectral`` grid is NOT supported
-    (its state carries no grid-space u/v faces -- forcing it needs a
-    spectral-space path; tracked as a follow-up in OMIP_faithful.md).
 
-    Returns a new ``state`` with updated top-layer u, v, T fields.
+def sample_forcing_tripole_scrip(forcing, idx_t):
+    """Remap every forcing channel onto the eORCA1 tripole with ORACLE WEIGHTS.
+
+    Per-channel, because the oracle is per-channel: sn_wndi/sn_wndj name the
+    BICUBIC weights file (namelist_cfg:148-149) and every other channel names
+    the BILINEAR one (150-152). Returns full (332, 362) fields.
+
+    This is a GRID-level routine, deliberately not a `method` on
+    :func:`_sample_forcing_points`: that function samples arbitrary POINT
+    lists, whereas a weights file encodes one fixed destination grid, and
+    pretending otherwise would let it be called for a grid it cannot serve.
     """
-    if rho_0 is None:
-        rho_0 = float(constants.rho_ocean)
-    if c_p is None:
-        c_p = float(constants.c_sw)
-
-    sigma_sb = float(constants.sigma_sb)
-    dz_0 = float(np.asarray(z_coord.dz_ref)[0])
-
-    if grid_type in ("latlon", "latlon_regional"):
-        lat_deg = np.degrees(np.asarray(grid.lat))
-        lon_deg = np.degrees(np.asarray(grid.lon))
-        forc = _sample_forcing_latlon(forcing, idx_t, lat_deg, lon_deg)
-        return _apply_cgrid_surface_fluxes(
-            state, forc, dz_0=dz_0, rho_0=rho_0, c_p=c_p,
-            rho_air=rho_air, sigma_sb=sigma_sb, dt=dt, grid=grid,
-        )
-
-    if grid_type == "tripole":
-        # Curvilinear tripolar grid: same C-grid state layout as latlon
-        # (T cell-centred; u/v on EW/NS faces) but the T-point coordinates are
-        # 2-D (lat_T, lon_T). Conservative regrid needs a regular destination
-        # grid, so sample CORE-II at each T cell BILINEARLY (nearest-neighbour
-        # copied ~1.9-deg source rows onto the 1-deg grid and printed zonal
-        # forcing bands -- see _bilinear_point_maps; cube/MPAS stay nearest). NOTE: tau_x/tau_y are geographic (eastward /
-        # northward); south of the ~50 deg N tripole join the grid is regular
-        # lat-lon (grid-i == east exactly), so only in the largely ice-masked
-        # Arctic fold is the unrotated stress application an approximation
-        # (tracked in OMIP_faithful.md).
-        lat_pts = np.degrees(np.asarray(grid.lat_T))   # (n_lat, n_lon)
-        lon_pts = np.degrees(np.asarray(grid.lon_T))
-        shp = lat_pts.shape
-        forc = _sample_forcing_points(
-            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1), method="bilinear",
-        )
-        for _k, _v in forc.items():
-            forc[_k] = _v.reshape(shp)
-        return _apply_cgrid_surface_fluxes(
-            state, forc, dz_0=dz_0, rho_0=rho_0, c_p=c_p,
-            rho_air=rho_air, sigma_sb=sigma_sb, dt=dt, grid=grid,
-        )
-
-    if grid_type == "cubed_sphere":
-        # Cube C-D grid stores u, v collocated on cell centres -- no
-        # face interpolation needed. Sample forcing at the (lat, lon)
-        # of each cell centre via nearest-neighbour.
-        lat_pts = np.degrees(np.asarray(grid.lat))   # (6, n, n)
-        lon_pts = np.degrees(np.asarray(grid.lon))
-        flat_shape = lat_pts.shape
-        forc = _sample_forcing_points(
-            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
-        )
-        for k, v in forc.items():
-            forc[k] = v.reshape(flat_shape)
-        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + constants.T_freeze
-        q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
-                           dtype=np.float64)
-        tau_x, tau_y, sh, lh, _evap = air_sea_fluxes(
-            u10=jnp.asarray(forc["u10"]),
-            v10=jnp.asarray(forc["v10"]),
-            T_air_K=jnp.asarray(forc["T_air"]),
-            q_air=jnp.asarray(forc["q_air"]),
-            T_sfc_K=jnp.asarray(T_sfc_K),
-            q_sfc=jnp.asarray(q_sfc),
-            rho_air=jnp.asarray(rho_air),
-            algo="ly09_2coeff",
-        )
-        lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
-        Q_net = (np.asarray(sh) + np.asarray(lh)
-                 + forc["sw_down"] - lw_up + forc["lw_down"])
-        mask = np.asarray(state.land_mask.data, dtype=np.float64)
-        T_new = np.asarray(state.T.data, dtype=np.float64).copy()
-        T_new[..., 0] = T_new[..., 0] + (
-            Q_net / (rho_0 * c_p * dz_0) * dt * mask
-        )
-        u_new = np.asarray(state.u.data, dtype=np.float64).copy()
-        v_new = np.asarray(state.v.data, dtype=np.float64).copy()
-        # Ocean reaction force: air_sea_fluxes returns atmospheric-convention
-        # tau (opposing the wind), so the ocean feels -tau (Newton's 3rd law),
-        # consistent with the lat-lon/tripole helper above. NOTE: applied
-        # without geographic->cube-frame rotation (pre-existing limitation;
-        # tracked in OMIP_faithful.md).
-        u_new[..., 0] = u_new[..., 0] + (
-            -np.asarray(tau_x) / (rho_0 * dz_0) * dt * mask
-        )
-        v_new[..., 0] = v_new[..., 0] + (
-            -np.asarray(tau_y) / (rho_0 * dz_0) * dt * mask
-        )
-        return state._replace(
-            T=Field(jnp.asarray(T_new), name=state.T.name,
-                    dims=state.T.dims, units=state.T.units),
-            u=Field(jnp.asarray(u_new), name=state.u.name,
-                    dims=state.u.dims, units=state.u.units),
-            v=Field(jnp.asarray(v_new), name=state.v.name,
-                    dims=state.v.dims, units=state.v.units),
-        )
-
-    if grid_type in ("mpas", "mpas_regional"):
-        # MPAS stores u on edge-normals; cell-centred tau is projected
-        # via ``tau_normal = tau_x * cos(angleEdge) + tau_y *
-        # sin(angleEdge)`` then averaged from neighbouring cells onto
-        # the shared edge.
-        lat_pts = np.degrees(np.asarray(grid.latCell))
-        lon_pts = np.degrees(np.asarray(grid.lonCell))
-        forc = _sample_forcing_points(
-            forcing, idx_t, lat_pts, lon_pts,
-        )
-        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[:, 0] + constants.T_freeze
-        q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
-                           dtype=np.float64)
-        tau_x, tau_y, sh, lh, _evap = air_sea_fluxes(
-            u10=jnp.asarray(forc["u10"]),
-            v10=jnp.asarray(forc["v10"]),
-            T_air_K=jnp.asarray(forc["T_air"]),
-            q_air=jnp.asarray(forc["q_air"]),
-            T_sfc_K=jnp.asarray(T_sfc_K),
-            q_sfc=jnp.asarray(q_sfc),
-            rho_air=jnp.asarray(rho_air),
-            algo="ly09_2coeff",
-        )
-        lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
-        Q_net = (np.asarray(sh) + np.asarray(lh)
-                 + forc["sw_down"] - lw_up + forc["lw_down"])
-        mask = np.asarray(state.land_mask.data, dtype=np.float64)
-        T_new = np.asarray(state.T.data, dtype=np.float64).copy()
-        T_new[:, 0] = T_new[:, 0] + (
-            Q_net / (rho_0 * c_p * dz_0) * dt * mask
-        )
-        # Project tau onto edge normal via the two adjacent cells.
-        c1 = np.asarray(grid.cellsOnEdge[0], dtype=np.int64)
-        c2 = np.asarray(grid.cellsOnEdge[1], dtype=np.int64)
-        angle = np.asarray(grid.angleEdge, dtype=np.float64)
-        tau_x_edge = 0.5 * (np.asarray(tau_x)[c1] + np.asarray(tau_x)[c2])
-        tau_y_edge = 0.5 * (np.asarray(tau_y)[c1] + np.asarray(tau_y)[c2])
-        # Ocean reaction force (-tau): air_sea_fluxes returns atmospheric
-        # convention. The angleEdge projection rotates geographic E/N onto the
-        # edge normal; the leading minus is the wind->ocean sign flip.
-        tau_n = -(tau_x_edge * np.cos(angle) + tau_y_edge * np.sin(angle))
-        edge_wet = ((mask[c1] > 0.5) & (mask[c2] > 0.5)).astype(np.float64)
-        u_new = np.asarray(state.u.data, dtype=np.float64).copy()
-        u_new[:, 0] = u_new[:, 0] + (
-            tau_n / (rho_0 * dz_0) * dt * edge_wet
-        )
-        return state._replace(
-            T=Field(jnp.asarray(T_new), name=state.T.name,
-                    dims=state.T.dims, units=state.T.units),
-            u=Field(jnp.asarray(u_new), name=state.u.name,
-                    dims=state.u.dims, units=state.u.units),
-        )
-
-    raise NotImplementedError(
-        f"OMIP-2 applicator does not support grid_type={grid_type!r}"
-    )
+    out = {}
+    for name in _forcing_channels(forcing):
+        path = (_CORE2_BICUBIC if name in _NEMO_BICUBIC_CHANNELS
+                else _CORE2_BILINEAR)
+        src0, wgt, n = load_scrip_weights(path)
+        field = np.asarray(getattr(forcing, name)[idx_t], dtype=np.float64)
+        interior = apply_scrip_weights(field, src0, wgt, n, field.shape)
+        out[name] = scrip_interior_to_full_tripole(interior)
+    return out
 
 
-def _sample_omip2_forcing(forcing, idx_t, grid, grid_type):
+def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                          forcing_remap="bilinear"):
     """Sample the CORE-II/JRA forcing channels onto the model grid for a record.
 
     Shared by :func:`compute_omip2_surface_forcing` (momentum/heat) and
     :func:`compute_omip2_freshwater_forcing` (P - E) so both see the SAME
     spatially-sampled fields.  ``latlon``/``latlon_regional`` use the
-    conservative regrid onto the regular T grid; ``tripole``/``cubed_sphere``/
-    ``mpas`` use nearest-neighbour onto the (possibly 2-D / 1-D) cell centres.
+    conservative regrid onto the regular T grid; every point-sampled grid
+    (``tripole``/``cubed_sphere``/``mpas``/``fesom``) uses the SAME 4-point
+    bilinear sample at its cell centres / nodes, so the cross-grid OMIP
+    comparison is not confounded by the forcing remap (review 2026-10-10 F20:
+    MPAS/FESOM/cube were nearest-neighbour while the tripole was bilinear).
+    Measured on CORE-II NYF day means (probe
+    ``scripts/validate/ocean_fidelity/omip_forcing_remap_integrals.py``): the ocean
+    area integral of precip / sw_down after either point sampling is within
+    0.4% of the first-order conservative integral, so no renormalisation.
     """
+    if forcing_remap not in ("bilinear", "nemo_scrip"):
+        raise ValueError(
+            f"unknown forcing_remap {forcing_remap!r}; expected 'bilinear' "
+            f"or 'nemo_scrip'")
+    if forcing_remap == "nemo_scrip" and grid_type != "tripole":
+        raise ValueError(
+            f"forcing_remap='nemo_scrip' is wired for the tripole only; the "
+            f"oracle's weights target that grid. Got grid_type={grid_type!r}.")
     if grid_type in ("latlon", "latlon_regional"):
         lat_deg = np.degrees(np.asarray(grid.lat))
         lon_deg = np.degrees(np.asarray(grid.lon))
@@ -699,6 +729,14 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type):
         lat_pts = np.degrees(np.asarray(grid.lat_T))
         lon_pts = np.degrees(np.asarray(grid.lon_T))
         shp = lat_pts.shape
+        if forcing_remap == "nemo_scrip":
+            if shp != (332, 362):
+                raise ValueError(
+                    f"forcing_remap='nemo_scrip' needs the (332, 362) eORCA1 "
+                    f"tripole; this grid is {shp}. The weight files encode one "
+                    f"destination grid and remapping another through them "
+                    f"would give a plausible wrong field, not an error.")
+            return sample_forcing_tripole_scrip(forcing, idx_t)
         forc = _sample_forcing_points(
             forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1), method="bilinear",
         )
@@ -709,18 +747,29 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type):
         shp = lat_pts.shape
         forc = _sample_forcing_points(
             forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
+            method="bilinear",
         )
         return {k: v.reshape(shp) for k, v in forc.items()}
     if grid_type in ("mpas", "mpas_regional"):
         lat_pts = np.degrees(np.asarray(grid.latCell))
         lon_pts = np.degrees(np.asarray(grid.lonCell))
-        return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts)
+        return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts,
+                                      method="bilinear")
+    if grid_type == "fesom":
+        # FESOM triangular mesh: 1-D PAIRED node (lat, lon) points (radians
+        # on the FesomOceanGrid facade) — same bilinear treatment as the
+        # MPAS Voronoi cell centres and the tripole.
+        lat_pts = np.degrees(np.asarray(grid.lat))
+        lon_pts = np.degrees(np.asarray(grid.lon))
+        return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts,
+                                      method="bilinear")
     raise NotImplementedError(
         f"_sample_omip2_forcing does not support grid_type={grid_type!r}"
     )
 
 
-def sample_omip2_forcing(forcing, idx_t, grid, grid_type):
+def sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                         forcing_remap="bilinear"):
     """Public wrapper for :func:`_sample_omip2_forcing`.
 
     Returns the CORE-II / JRA forcing channels (``u10``, ``v10``, ``T_air`` [K],
@@ -731,8 +780,13 @@ def sample_omip2_forcing(forcing, idx_t, grid, grid_type):
     coupler driver (e.g. the prognostic sea-ice glue in
     ``scripts/run/run_omip_core2.py``) can populate an ``AtmToSurface`` from the
     identical sampled fields rather than re-deriving the regrid (cross-module
-    callers must not import the private ``_sample_omip2_forcing``)."""
-    return _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+    callers must not import the private ``_sample_omip2_forcing``).
+
+    ``forcing_remap`` MUST be the value the ocean forcing uses, so the ice and
+    the ocean see the same sampled fields (review 2026-10-10 F19 residual: the
+    prognostic ice saw bilinear while the ocean saw ``nemo_scrip``)."""
+    return _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                                 forcing_remap=forcing_remap)
 
 
 def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
@@ -742,7 +796,8 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
                                      ramp: float = 1.0,
                                      rho_air: float = constants.rho_air,
                                      u_oce=None, v_oce=None,
-                                     wind_current_feedback_vfac: float = 0.0):
+                                     wind_current_feedback_vfac: float = 0.0,
+                                     forcing_remap: str = "bilinear"):
     """Build a :class:`FreshwaterForcing` (P, E, runoff) for the OMIP-2 run.
 
     Delivered to the ocean via the in-core channel
@@ -782,10 +837,16 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
         flux ``E`` (P - E salinity) stays the SAME physical flux as the latent
         HEAT flux in ``q_net`` (``E = -lhflx / L_vap``).  ``vfac == 0.0``
         (default) is byte-identical.
+    forcing_remap :
+        The atmosphere-to-ocean sampling, as for
+        :func:`compute_omip2_surface_forcing`; MUST be the same value so P and
+        E here are the same sampled fields as the heat flux's (review
+        2026-10-10 F19: this builder ignored ``nemo_scrip``).
     """
     from legoesm.ocean.freshwater import FreshwaterForcing
 
-    forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+    forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                                 forcing_remap=forcing_remap)
     # MPAS state is (nCells,) at the surface; cube/latlon/tripole are (..., 0).
     # Slice FIRST (device-side), THEN convert: np.asarray on the full leaf
     # would assemble the entire 3-D (possibly lat-band-sharded) T field on
@@ -835,14 +896,22 @@ def dm2dc_sw_factor(grid, dm2dc_window):
     every consumer of the CORE-II daily-mean SW (the ocean surface forcing AND
     the prognostic sea-ice AtmToSurface) sees the SAME diurnal modulation —
     codex r1 #2: the ice tile previously received the raw daily-mean SW while
-    the ocean saw the modulated one.  Lat-lon / tripole C-grid families only
-    (matches the run drivers, which reject --dm2dc elsewhere)."""
+    the ocean saw the modulated one.  Lat-lon / tripole C-grid families and the
+    MPAS Voronoi mesh (matches the run drivers' --dm2dc gate)."""
     from legoesm.ocean.forcing.diurnal_cycle import diurnal_sw_factor
     _day_of_year, _year_len, _t_lo, _t_up = dm2dc_window
     _lat_T = getattr(grid, "lat_T", None)
+    _lat_cell = getattr(grid, "latCell", None)
     if _lat_T is not None:            # tripole family (2-D, radians)
         _lat_deg = np.degrees(np.asarray(_lat_T))
         _lon_deg = np.degrees(np.asarray(grid.lon_T))
+    elif _lat_cell is not None:       # MPAS Voronoi mesh: 1-D PAIRED cell
+        # centres (radians) -- each cell carries its OWN (lat, lon), so pass the
+        # 1-D arrays directly, NOT a meshgrid.  diurnal_sw_factor is elementwise,
+        # so this returns the (nCells,) per-cell factor, matching the sw_down /
+        # q_net fields the MPAS lane modulates.
+        _lat_deg = np.degrees(np.asarray(_lat_cell))
+        _lon_deg = np.degrees(np.asarray(grid.lonCell))
     else:                             # regular lat-lon (1-D, radians)
         _lat_deg = np.degrees(np.asarray(grid.lat))[:, None]
         _lon_deg = np.degrees(np.asarray(grid.lon))[None, :]
@@ -995,14 +1064,15 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                                   tau_ice_sw: float = 0.03,
                                   dm2dc_window=None,
                                   u_oce=None, v_oce=None,
-                                  wind_current_feedback_vfac: float = 0.0):
+                                  wind_current_feedback_vfac: float = 0.0,
+                                  forcing_remap: str = "bilinear"):
     """Build an :class:`OceanSurfaceForcing` (tau_x, tau_y, q_net, sw_down) on
     the model grid from CORE-II / JRA55 forcing, for INTEGRATION INSIDE
     ``model.step(state, dt, surface_forcing=...)`` -- the dynamics-core
-    external-tau block -- rather than the operator-split forward-Euler
-    :func:`apply_omip2_surface_fluxes`. Integrating the forcing within the
-    timestep is energetically consistent with the dynamics (the split applicator
-    pumps spurious KE -> runaway velocities over a multi-month global run).
+    external-tau block.  Integrating the forcing within the timestep is
+    energetically consistent with the dynamics (the operator-split forward-Euler
+    applicator this replaced pumped spurious KE -> runaway velocities over a
+    multi-month global run; deleted for issue #1820).
 
     Conventions (matching the dynamics-core consumer, ocean_pe_latlon_cgrid):
     * ``tau_x``/``tau_y`` are left in the ATMOSPHERIC convention exactly as
@@ -1037,12 +1107,18 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     import-linter layering contract, so the top-layer run driver rotates and
     passes geographic currents here).  ``vfac == 0.0`` (default) with
     ``u_oce=v_oce=None`` is BYTE-IDENTICAL to the absolute-wind behaviour.
+
+    ``forcing_remap`` selects how the atmospheric fields reach the model grid:
+    ``"bilinear"`` (default, unchanged) or ``"nemo_scrip"``, which reads NEMO's
+    own SCRIP weight files so the winds arrive through the oracle's exact
+    interpolation -- bicubic for u10/v10, bilinear for the rest, as ORCA1's
+    namsbc_blk specifies. Tripole only; the sampler raises otherwise.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
-    sigma_sb = float(constants.sigma_sb)
     T_freeze = float(constants.T_freeze)
 
-    forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+    forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                                 forcing_remap=forcing_remap)
 
     if dm2dc_window is not None:
         # NEMO ln_dm2dc (sbcdcy, Bernie et al. 2007): modulate the DAILY-MEAN
@@ -1083,31 +1159,24 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     # (NEMO blk_oce_2 receives theta_air_zt for the rain/snow terms and the
     # ABSOLUTE skin/bulk SST for LW + evap heat content; rcp/rcpi/rLfus are
     # the NEMO-parity values.)
-    lw_net = constants.emissivity_seawater_lw * (
-        np.asarray(forc["lw_down"], dtype=np.float64) - sigma_sb * T_sfc_K ** 4
-    )
     precip_np = np.asarray(forc["precip"], dtype=np.float64)
     snow_np = (np.asarray(forc["snow"], dtype=np.float64)
                if forc.get("snow") is not None else np.zeros_like(precip_np))
-    # CORE-II precip = RAIN+SNOW; guard tiny negative rain from regridding.
-    rain_np = np.maximum(precip_np - snow_np, 0.0)
     from legoesm.ocean.bulk_flux_omip import potential_air_temperature_10m
     theta_air_j, _ = potential_air_temperature_10m(
         jnp.asarray(forc["T_air"]), jnp.asarray(forc["q_air"]),
         None if slp is None else jnp.asarray(slp))
-    theta_air_C = np.asarray(theta_air_j, dtype=np.float64) - T_freeze
-    T_sfc_C = T_sfc_K - T_freeze
-    q_precip_evap = (
-        - snow_np * float(constants.L_fus_nemo)
-        - np.asarray(evap, dtype=np.float64) * float(constants.c_p_seawater) * T_sfc_C
-        + rain_np * float(constants.c_p_seawater) * theta_air_C
-        + snow_np * float(constants.c_p_ice_nemo) * np.minimum(theta_air_C, 0.0)
+    surface = blk_oce_2(
+        np.asarray(theta_air_j, dtype=np.float64), T_sfc_K - T_freeze,
+        np.asarray(forc["lw_down"], dtype=np.float64), precip_np, snow_np,
+        np.asarray(evap, dtype=np.float64), np.asarray(sh), np.asarray(lh),
+        array_namespace=np,
     )
     # Under a prescribed-ice boundary (under_ice) ``_ice_surface_heat``
     # suppresses this on the ice-covered fraction (snow falling on ice does
     # NOT cool the ocean) and cuts the under-ice SW; otherwise it is the
     # albedo-only surrogate.
-    q_non_sw = np.asarray(sh) + np.asarray(lh) + lw_net + q_precip_evap
+    q_non_sw = surface.qns
     sw_net, q_net = _ice_surface_heat(
         forc["sw_down"], q_non_sw, ice_albedo,
         under_ice=under_ice, tau_ice_sw=tau_ice_sw)
@@ -1237,7 +1306,6 @@ def compute_omip2_surface_forcing_jax(
     until the freshwater channel is wired into the scan body.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
-    sigma_sb = float(constants.sigma_sb)
     T_freeze = float(constants.T_freeze)
 
     def _sample(name):
@@ -1268,19 +1336,12 @@ def compute_omip2_surface_forcing_jax(
     # Kirchhoff eps_w, snow fusion, rain/snow heat content at theta_air,
     # evap heat content at the absolute SST.
     from legoesm.ocean.bulk_flux_omip import potential_air_temperature_10m
-    lw_net = constants.emissivity_seawater_lw * (
-        lw_down - sigma_sb * T_sfc_K ** 4)
-    rain = jnp.maximum(precip - snow, 0.0)
     theta_air, _ = potential_air_temperature_10m(T_air, q_air, slp)
-    theta_air_C = theta_air - T_freeze
-    T_sfc_C = T_sfc_K - T_freeze
-    q_precip_evap = (
-        - snow * constants.L_fus_nemo
-        - evap * constants.c_p_seawater * T_sfc_C
-        + rain * constants.c_p_seawater * theta_air_C
-        + snow * constants.c_p_ice_nemo * jnp.minimum(theta_air_C, 0.0)
+    surface = blk_oce_2(
+        theta_air, T_sfc_K - T_freeze, lw_down, precip, snow,
+        evap, sh, lh, array_namespace=jnp,
     )
-    q_net = sh + lh + lw_net + q_precip_evap + sw_down
+    q_net = surface.qns + sw_down
     return OceanSurfaceForcing(
         tau_x=tau_x, tau_y=tau_y, q_net=q_net, sw_down=sw_down,
     )
@@ -1370,7 +1431,6 @@ def build_omip2_scan_block_fn(
 
 
 __all__ = [
-    "apply_omip2_surface_fluxes",
     "compute_omip2_surface_forcing",
     "compute_omip2_freshwater_forcing",
     "compute_omip2_surface_forcing_jax",

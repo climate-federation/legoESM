@@ -1,0 +1,297 @@
+ROUND 99 PRELIMINARY SAME-STAGE W + FULL-RHS CANDIDATE (2026-09-16; candidate e8d7c5d59880): HELD AND SUPERSEDED.
+
+DO NOT APPLY THIS PRELIMINARY HALF-STATE. The later direct walk proved that
+NEMO independently interpolates the stage-local QCO ratio and pairs it with
+the stage-local clock. The complete paired candidate and its trajectory veto
+are preserved in
+`nemo_testcase_l2_gyre_round99_held_stage1_w_ratio_clock_full_rhs.patch`.
+
+LOCAL VETO. The admitted direct W walk proves NEMO's hdiv and e3div bit-exact, then the reconstructed r3t(Kaa) remains unequal in 201/600 wet cells at 2.6469779601696886e-23 even after this candidate builds r1_ht_0 and materializes the multiplication in compiled source order. The source-rounded final W consequently remains unequal in 5,289 cells at the same maximum. Direct NEMO r3t operands make every recurrence boundary and final W bit-identical, proving the recurrence itself is not the owner.
+
+Decision 41 therefore refuses this candidate before the stage table, Rule-12 ladder, or 30-day arm. The paired Round-97 unprojected-RHS member was included only as preregistered, but cannot become eligible while W fails the earlier same-stage local proof. Production was restored. A new NEMO record must capture the exact pssh and r1_ht_0 operands beside r3t(Kaa) to distinguish operand provenance from the compiled multiply; do not infer either operand from a different acquisition.
+
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index 3c1d99ba85ed..5eb274f0275f 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -6420,7 +6420,11 @@ class LatLonCGridOceanModel:
+             # the zub advection survives (isomorphism row S-21; measured
+             # 3.136e-07 m/s^2 at the OVERFLOW kt=2 entry, exactly zero from
+             # rest).
+-            _du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert
++            # stp2d.f90:141-176 accumulates the full 3-D Krhs, then
++            # :202-213 diagnoses its depth mean into separate Ue_rhs/Ve_rhs
++            # arrays without projecting Krhs.  Stage 1 consumes that full
++            # source at compiled stprk3_stg.f90:664-673.
++            _du1_rhs, _dv1_rhs = du_dt, dv_dt
+             _stage1_rhs_base = (_du1_rhs, _dv1_rhs)
+             # The stage's NEMO e3u/e3v(Kmm) pair for the flux-form momentum
+             # advection, from the ONE kernel (_nemo_ws_qco_stage_faces) keyed
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py
+index 62caa7024ec0..5055fd2488f4 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py
+@@ -62,6 +62,7 @@ from legoesm.ocean.vertical import (
+     compute_layer_thickness,
+     compute_ocean_jacobian,
+     nemo_qco_live_face_geometry_from_operands,
++    nemo_qco_reference_t_reciprocal,
+     nemo_qco_resolved_mesh_operands,
+ )
+ from legoesm.ocean.state import (
+@@ -1612,26 +1613,22 @@ def nemo_qco_wzv_operands(
+     # barotropic column-continuity helper: that helper intentionally collapses
+     # e3t*hdiv and loses the divide/multiply boundary required by wzv.
+     tmask = jnp.asarray(mask_3d, dtype=eta_now.dtype)
+-    h0 = jnp.zeros_like(eta_now)
+-    for jk in range(nlev):
+-        h0 = jax.lax.optimization_barrier(
+-            h0 + e3t0[..., jk] * tmask[..., jk])
+-    h0_safe = jnp.where(h0 > 0.0, h0, 1.0)
+-    r1_h0 = jax.lax.optimization_barrier(1.0 / h0_safe)
+-    r3_now = jax.lax.optimization_barrier(eta_now * r1_h0)
+-    live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask
++    sr = nemo_source_round
++    r1_h0 = nemo_qco_reference_t_reciprocal(e3t0, tmask)
++    r3_now = sr(eta_now * r1_h0)
++    one = jnp.asarray(1.0, dtype=eta_now.dtype)
++    live_factor = sr(one + sr(r3_now[..., None] * tmask))
++    live_t = sr(e3t0 * live_factor) * tmask
+     e2u, e1v = ops.e2u, ops.e1v
+-    r1_area_t = jax.lax.optimization_barrier(1.0 / area_t)
++    r1_area_t = sr(one / area_t)
+     flux_levels = []
+     barotropic_div = jnp.zeros_like(eta_now)
+     for jk in range(nlev):
+         if volume_transport_override is None:
+-            flux_u = jax.lax.optimization_barrier(
+-                jax.lax.optimization_barrier(e2u * live_u_raw[..., jk])
+-                * u[:, 1:, jk]) * raw_umask[..., jk]
+-            flux_v = jax.lax.optimization_barrier(
+-                jax.lax.optimization_barrier(e1v * live_v_raw[..., jk])
+-                * v[1:, :, jk]) * raw_vmask[..., jk]
++            flux_u = sr(sr(e2u * live_u_raw[..., jk])
++                        * u[:, 1:, jk]) * raw_umask[..., jk]
++            flux_v = sr(sr(e1v * live_v_raw[..., jk])
++                        * v[1:, :, jk]) * raw_vmask[..., jk]
+         else:
+             # traadv.F90:220-226 passes the already materialized pFu/pFv
+             # from stprk3_stg.F90:276-278 into wzv(np_transport).  Consume
+@@ -1642,50 +1639,42 @@ def nemo_qco_wzv_operands(
+         west = jnp.roll(flux_u, 1, axis=1)
+         south = jnp.concatenate(
+             [jnp.zeros_like(flux_v[:1]), flux_v[:-1]], axis=0)
+-        zonal = jax.lax.optimization_barrier(flux_u - west)
+-        meridional = jax.lax.optimization_barrier(flux_v - south)
+-        numerator = jax.lax.optimization_barrier(zonal + meridional)
+-        transport_div = jax.lax.optimization_barrier(
+-            numerator * r1_area_t) * tmask[..., jk]
++        zonal = sr(flux_u - west)
++        meridional = sr(flux_v - south)
++        numerator = sr(zonal + meridional)
++        transport_div = sr(numerator * r1_area_t) * tmask[..., jk]
+         # divhor.F90:180-184 divides the transport divergence by live e3t;
+         # ssh_nxt/wzv then multiply by that same e3t.  Preserve the executed
+         # divide/multiply instead of algebraically cancelling it -- row 4 is
+         # sensitive to those last bits through the vertical recurrence.
+         safe_e3t = jnp.where(tmask[..., jk] > 0.5, live_t[..., jk], 1.0)
+-        hdiv = jax.lax.optimization_barrier(transport_div / safe_e3t)
+-        level = jax.lax.optimization_barrier(
+-            live_t[..., jk] * hdiv) * tmask[..., jk]
++        hdiv = sr(transport_div / safe_e3t)
++        level = sr(live_t[..., jk] * hdiv) * tmask[..., jk]
+         flux_levels.append(level)
+-        barotropic_div = jax.lax.optimization_barrier(barotropic_div + level)
++        barotropic_div = sr(barotropic_div + level)
+     flux_div = jnp.stack(flux_levels, axis=-1)
+ 
+     fw = (jnp.zeros_like(eta_now) if freshwater_eta_tendency is None
+           else jnp.asarray(freshwater_eta_tendency, dtype=eta_now.dtype))
+     if eta_after_override is None:
+-        eta_after = jax.lax.optimization_barrier(
+-            eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
+-        eta_after = jax.lax.optimization_barrier(
+-            eta_after + jax.lax.optimization_barrier(dt * fw)) * tmask[..., 0]
++        eta_after = sr(eta_before - sr(dt * barotropic_div))
++        eta_after = sr(eta_after + sr(dt * fw)) * tmask[..., 0]
+     else:
+-        eta_after = jax.lax.optimization_barrier(
++        eta_after = sr(
+             jnp.asarray(eta_after_override, dtype=eta_now.dtype)) * tmask[..., 0]
+-    r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)
+-    r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)
+-    r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
+-    r1_dt = jax.lax.optimization_barrier(
+-        jnp.asarray(1.0, dtype=eta_now.dtype) / dt)
+-    stretch_rate = jax.lax.optimization_barrier(
+-        (r1_dt * e3t0) * r3_delta[..., None])
++    r3_after = sr(eta_after * r1_h0)
++    r3_before = sr(eta_before * r1_h0)
++    r3_delta = sr(r3_after - r3_before)
++    r1_dt = sr(one / dt)
++    stretch_rate = sr(sr(r1_dt * e3t0) * r3_delta[..., None])
+ 
+     # sshwzv.F90 bottom-up left recurrence.  A static Python loop preserves
+     # source ordering under JIT and remains differentiable.
+     carry = jnp.zeros_like(eta_now)
+     levels = [None] * nlev
+     for jk in range(nlev - 1, -1, -1):
+-        bracket = jax.lax.optimization_barrier(
+-            flux_div[..., jk] + stretch_rate[..., jk])
+-        carry = jax.lax.optimization_barrier(
+-            carry - bracket * tmask[..., jk])
++        bracket = sr(flux_div[..., jk] + stretch_rate[..., jk])
++        carry = sr(carry - sr(bracket * tmask[..., jk]))
+         levels[jk] = carry
+     ww = jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
+     return ww, live_u, live_v
+diff --git a/packages/ocean/legoesm/ocean/vertical.py b/packages/ocean/legoesm/ocean/vertical.py
+index 47ec0caf331f..4ca9f6f49173 100644
+--- a/packages/ocean/legoesm/ocean/vertical.py
++++ b/packages/ocean/legoesm/ocean/vertical.py
+@@ -40,6 +40,35 @@ _AIMP_CU_MAX = 0.30
+ _H_FLOOR = 1.0e-10
+ 
+ 
++def nemo_qco_reference_t_reciprocal(
++    e3t_0: jnp.ndarray,
++    tmask: jnp.ndarray,
++) -> jnp.ndarray:
++    """Build NEMO's stored ``r1_ht_0`` in compiled source order.
++
++    The active branch accumulates ``ht_0 = ht_0 + e3t_0*tmask`` from surface
++    to bottom, then stores ``ssmask / (ht_0 + 1 - ssmask)`` (compiled GYRE
++    ``domain.f90:200-212``).  This source boundary, rather than a later
++    ``1/ht_0`` reconstruction, is the reciprocal consumed by
++    ``dom_qco_r3c_RK3``.  The helper is shared by every NEMO-identity QCO W
++    caller and stays differentiable/JIT-safe.
++    """
++    e3t_0 = jnp.asarray(e3t_0)
++    tmask = jnp.asarray(tmask, dtype=e3t_0.dtype)
++    if e3t_0.shape != tmask.shape:
++        raise ValueError(
++            "NEMO r1_ht_0 requires matching e3t_0/tmask shapes; got "
++            f"{e3t_0.shape}/{tmask.shape}")
++    sr = nemo_source_round
++    ht_0 = jnp.zeros(e3t_0.shape[:-1], dtype=e3t_0.dtype)
++    for jk in range(e3t_0.shape[-1]):
++        ht_0 = sr(ht_0 + sr(e3t_0[..., jk] * tmask[..., jk]))
++    one = jnp.asarray(1.0, dtype=e3t_0.dtype)
++    ssmask = tmask[..., 0]
++    denominator = sr(sr(ht_0 + one) - ssmask)
++    return sr(ssmask / denominator)
++
++
+ def nemo_qco_live_t_thickness(
+     eta: jnp.ndarray,
+     H_bathy: jnp.ndarray,
+diff --git a/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round46_kt2_stage_gate.py b/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round46_kt2_stage_gate.py
+index 4dfd3d214424..b1036e921e49 100755
+--- a/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round46_kt2_stage_gate.py
++++ b/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round46_kt2_stage_gate.py
+@@ -1458,6 +1458,8 @@ def _stage1_w_walk(
+     """Walk kt=1 stage-1 transport W from admitted NEMO operands."""
+     import jax
+     import jax.numpy as jnp
++    from legoesm.core.source_rounding import nemo_source_round
++    from legoesm.ocean.vertical import nemo_qco_reference_t_reciprocal
+ 
+     arrays = records[(1, 1)]["arrays"]
+     transport = transports[(1, 1)]
+@@ -1465,13 +1467,21 @@ def _stage1_w_walk(
+     transport_v = np.asarray(transport["zFv"])
+     direct_ww = np.asarray(direct_stage_ww[(1, 1)]["ww"])
+     wet_surface = _owned3(arrays["tmask"])[..., 0] > 0.5
+-    reference_depth = np.sum(
+-        _owned3(arrays["e3t_0"]) * _owned3(arrays["tmask"]), axis=-1)
++    e3t_0_owned = _owned3(arrays["e3t_0"])
++    tmask_owned = _owned3(arrays["tmask"])
++    reference_depth = np.sum(e3t_0_owned * tmask_owned, axis=-1)
+     require(np.all(reference_depth[wet_surface] > 0.0),
+             "kt1 stage1 cannot recover positive reference depth")
+-    r1_h0 = np.zeros_like(reference_depth)
+-    r1_h0[wet_surface] = 1.0 / reference_depth[wet_surface]
+-    r3_kaa = np.asarray(direct_stage_state[(1, 1)]["ssh"]) * r1_h0
++    legacy_r1_h0 = np.zeros_like(reference_depth)
++    legacy_r1_h0[wet_surface] = 1.0 / reference_depth[wet_surface]
++    ssh_kaa = np.asarray(direct_stage_state[(1, 1)]["ssh"])
++    legacy_r3_kaa = ssh_kaa * legacy_r1_h0
++    r1_h0 = np.asarray(jax.device_get(jax.jit(
++        nemo_qco_reference_t_reciprocal)(
++            jnp.asarray(e3t_0_owned), jnp.asarray(tmask_owned))))
++    r3_kaa = np.asarray(jax.device_get(jax.jit(
++        lambda ssh, reciprocal: nemo_source_round(ssh * reciprocal))(
++            jnp.asarray(ssh_kaa), jnp.asarray(r1_h0))))
+     r1_dt = np.float64(1.0 / direct_stage_ww[(1, 1)]["rDt_s"])
+     reference = _stage1_transport_w_scalar_reference(
+         arrays, transport_u, transport_v, r3_kaa=r3_kaa, r1_dt=r1_dt)
+@@ -1530,6 +1540,9 @@ def _stage1_w_walk(
+             direct_fields[name], reconstructed_fields[name], direct_masks[name]))
+         row["boundary"] = name
+         direct_input_rows.append(row)
++    legacy_r3_kaa_row = _classification(score(
++        "GYRE-zco.kt1.s1.w_walk.legacy_reconstructed_r3_kaa",
++        direct_fields["r3_kaa"], legacy_r3_kaa, wet_2d))
+ 
+     direct_scalar = _stage1_w_scalar_recurrence(
+         direct_fields["e3div"], direct_fields["e3t_0"],
+@@ -1652,6 +1665,7 @@ def _stage1_w_walk(
+             "header": direct_w_record["header"],
+         },
+         "direct_input_rows": direct_input_rows,
++        "legacy_reconstructed_r3_kaa": legacy_r3_kaa_row,
+         "direct_input_first_nonbit": (
+             None if direct_first is None else {
+                 key: direct_first[key] for key in (
+diff --git a/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round46_kt2_stage_gate.py b/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round46_kt2_stage_gate.py
+index 1e00e1854eec..e96083c09853 100644
+--- a/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round46_kt2_stage_gate.py
++++ b/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round46_kt2_stage_gate.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import importlib.util
++import inspect
+ import struct
+ import sys
+ from pathlib import Path
+@@ -190,6 +191,16 @@ def test_stage_twin_scores_consumed_rhs_and_reuses_operator_walk():
+     assert '"first_nonbit_model_statement"' in source
+ 
+ 
++def test_ws_stage_one_consumes_the_full_unprojected_momentum_rhs():
++    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
++        LatLonCGridOceanModel,
++    )
++
++    source = inspect.getsource(LatLonCGridOceanModel._step_impl)
++    assert "_du1_rhs, _dv1_rhs = du_dt, dv_dt" in source
++    assert "_du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert" not in source
++
++
+ def test_stage_twin_uses_the_direct_post_transport_w_reference():
+     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
+     assert 'read_stage_ww(' in source
+@@ -278,6 +289,22 @@ def test_transport_w_scalar_replay_preserves_zero_state():
+     assert np.count_nonzero(planted["incoming_carry"]) == 1
+ 
+ 
++def test_qco_reference_t_reciprocal_replays_the_stored_source_expression():
++    import jax
++    import jax.numpy as jnp
++    from legoesm.ocean.vertical import nemo_qco_reference_t_reciprocal
++
++    e3t = np.asarray([[[2.0, 3.0]], [[11.0, 13.0]]], dtype=np.float64)
++    mask = np.asarray([[[1.0, 1.0]], [[0.0, 0.0]]], dtype=np.float64)
++    got = np.asarray(jax.jit(nemo_qco_reference_t_reciprocal)(
++        jnp.asarray(e3t), jnp.asarray(mask)))
++    assert np.array_equal(got.view(np.uint64),
++                          np.asarray([[0.2], [0.0]]).view(np.uint64))
++    with pytest.raises(ValueError, match="matching e3t_0/tmask shapes"):
++        nemo_qco_reference_t_reciprocal(
++            jnp.asarray(e3t), jnp.asarray(mask[..., :1]))
++
++
+ def test_final_external_history_uses_last_pre_swap_current_and_before():
+     arrays = {}
+     for index, name in enumerate(

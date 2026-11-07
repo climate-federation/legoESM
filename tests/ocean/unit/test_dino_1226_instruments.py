@@ -2185,3 +2185,50 @@ def test_tcarry_een_omega_interaction_decision_tree_is_red_capable(instruments):
             "INVALID_STOP_LOCKED_CORNER")
     assert scorer.classify_additivity(0.0) == "ADDITIVE_BELOW_BAND"
     assert scorer.classify_additivity(2.0 * scorer.TWO_F) == "NON_ADDITIVE"
+
+
+def test_kt1_record_twin_admission_refuses_a_drifted_record(tmp_path):
+    """The admission must FAIL when a record differs, not just when it errors.
+
+    A re-acquired NEMO record is only a substitute for the certified one if
+    every restart variable is bit-identical; the whole barotropic-ladder plan
+    rests on that. This plants a one-ulp change in a copied tile and requires
+    the script to exit non-zero and name the variable.
+    """
+    import shutil
+    import subprocess
+    import netCDF4 as nc
+
+    src = sorted(Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+                      "DINO/RUN_FROMREST_KT1").glob(
+                          "DINO_00000001_restart_*.nc"))
+    if not src:
+        pytest.skip("the certified kt=1 record is not on this machine")
+    dst = tmp_path / "planted"
+    dst.mkdir()
+    for p in src:
+        shutil.copy2(p, dst / p.name)
+    with nc.Dataset(dst / src[0].name, "a") as d:
+        v = d.variables["tn"]
+        a = v[:]
+        a[0, 0, 0, 0] = np.nextafter(float(a[0, 0, 0, 0]), np.inf)
+        v[:] = a
+
+    script = (Path(__file__).resolve().parents[3] / "scripts" / "validate" /
+              "ocean_fidelity" / "dino_1226" /
+              "kt1_record_twin_admission.py")
+    r = subprocess.run(
+        [sys.executable, str(script),
+         str(Path(src[0]).parent / "DINO_00000001_restart_*.nc"),
+         str(dst / "DINO_00000001_restart_*.nc")],
+        capture_output=True, text=True)
+    assert r.returncode != 0, r.stdout[-2000:]
+    assert "tn" in r.stdout, r.stdout[-2000:]
+    # and it must PASS on the untouched pair, or the test above proves nothing
+    ok = subprocess.run(
+        [sys.executable, str(script),
+         str(Path(src[0]).parent / "DINO_00000001_restart_*.nc"),
+         str(Path(src[0]).parent / "DINO_00000001_restart_*.nc")],
+        capture_output=True, text=True)
+    assert ok.returncode == 0, ok.stdout[-2000:]
+    assert "ADMITTED" in ok.stdout

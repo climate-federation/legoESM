@@ -22,6 +22,9 @@ from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
+    latent_enthalpy_correction,
+    surface_moisture_flux,
+    surface_fluxes_at_lowest_level,
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
@@ -135,7 +138,7 @@ def _apply_predicted_diffusivity_turbulence(
             Km=Km,
             Kh=Kh,
             shflx=zeros_2d,
-            lhflx=zeros_2d,
+            lhflx=zeros_2d, evap_sfc=zeros_2d,
             ustar=zeros_2d,
             h_pbl=zeros_2d,
         )
@@ -150,7 +153,12 @@ def _apply_predicted_diffusivity_turbulence(
     dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
     dz_layer = jnp.clip(dz_layer, 1.0, None)
 
-    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+    # Through the shared helper: the pipeline runs this lane INSTEAD of
+    # ordinary turbulence and consumes its tendencies, so a direct call here
+    # left the learned lane on the uncorrected surface law while the slab it
+    # is coupled to used the corrected one -- two different laws across one
+    # interface (codex).
+    tau_x, tau_y, shflx, lhflx, ustar = surface_fluxes_at_lowest_level(
         u[:, -1],
         v[:, -1],
         T[:, -1],
@@ -159,12 +167,13 @@ def _apply_predicted_diffusivity_turbulence(
         q_sfc,
         rho[:, -1],
         surface_config,
+        z_full[:, -1] - z_half[:, -1],
     )
 
     sflx_u = tau_x
     sflx_v = tau_y
-    sflx_T = shflx / constants.c_pd
-    sflx_q = lhflx / constants.L_v
+    sflx_q = surface_moisture_flux(surface_config, lhflx, T_sfc)
+    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
 
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
@@ -180,7 +189,7 @@ def _apply_predicted_diffusivity_turbulence(
         Km=Km,
         Kh=Kh,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
     )
@@ -365,9 +374,20 @@ def apply_predicted_sundqvist_rain_survival_fraction(
     dz: jax.Array,
     dt: float,
     config,
+    carries_q_i: bool,
+    cell_area=None,
 ) -> MicrophysicsOutput:
-    """Rebuild Sundqvist microphysics from a learned column rain-survival fraction."""
+    """Rebuild Sundqvist microphysics from a learned column rain-survival fraction.
+    The rebuild has no ice slot: q_i is not read.  A lane that carries q_i is
+    refused (``carries_q_i=True`` raises): the physical path splits liquid/ice
+    there and this rebuild cannot (codex + GLM 2026-10-29)."""
+    if carries_q_i:
+        raise ValueError(
+            "learned Sundqvist rain-survival rebuild: this lane carries q_i, "
+            "but the rebuild has no liquid/ice split (the physical Sundqvist "
+            "path does); run the physical scheme on this lane")
     rates = diagnose_sundqvist_process_rates(
+        cell_area=cell_area,
         T=T,
         q_v=q_v,
         hydrometeors=hydrometeors,
@@ -378,20 +398,24 @@ def apply_predicted_sundqvist_rain_survival_fraction(
         dt=dt,
         config=config,
     )
-    # Both fluxes share the ``rho * dz`` weight on the level axis; fuse
-    # the autoconversion and base-evaporation column reductions.
+    # Both fluxes share the scheme's layer mass dp/g (Zhao-Carr del/g) on the
+    # level axis; fuse the autoconversion and base-evaporation reductions.
+    layer_mass = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
     _flux_pair = jnp.sum(
         jnp.stack([rates.autoconversion, rates.evaporation], axis=-1)
-        * (rho * dz)[..., None],
+        * layer_mass[..., None],
         axis=-2,
     )
     generated_rain_flux = _flux_pair[..., 0]
     base_evap_flux = _flux_pair[..., 1]
     target_precip = jnp.clip(predicted_rain_survival_fraction, 0.0, 1.0) * generated_rain_flux
     target_evap_flux = jnp.clip(generated_rain_flux - target_precip, 0.0, generated_rain_flux)
+    # Double where: a rain-free column has base_evap_flux == 0 exactly, and a
+    # 0/0 in the discarded branch still poisons the reverse pass with NaN.
+    _evap_ok = base_evap_flux > 1.0e-12
     scale = jnp.where(
-        base_evap_flux > 1.0e-12,
-        target_evap_flux / base_evap_flux,
+        _evap_ok,
+        target_evap_flux / jnp.where(_evap_ok, base_evap_flux, 1.0),
         1.0,
     )
     evaporation = rates.evaporation * scale[:, None]
@@ -405,10 +429,9 @@ def apply_predicted_sundqvist_rain_survival_fraction(
     dt_safe = jnp.maximum(dt, 1e-10)
     q_r_in = jnp.clip(hydrometeors.q_r, 0.0, None)
     dq_r_dt = -q_r_in / dt_safe
-    dp = p_half[:, 1:] - p_half[:, :-1]
-    q_r_drain_flux = jnp.sum(q_r_in * dp, axis=1) / (constants.g * dt_safe)
+    q_r_drain_flux = jnp.sum(q_r_in * layer_mass, axis=1) / dt_safe
     precipitation = jnp.clip(
-        generated_rain_flux - jnp.sum(evaporation * rho * dz, axis=1)
+        generated_rain_flux - jnp.sum(evaporation * layer_mass, axis=1)
         + q_r_drain_flux,
         0.0,
         None,

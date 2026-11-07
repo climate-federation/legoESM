@@ -643,9 +643,17 @@ def build_jra55_cache(
 
     chunks = {"time": RECORDS_PER_DAY,  # 1 day of 3-hourly = ~4 MB/var
               "lat": n_dst_lat, "lon": n_dst_lon}
-    cache_ds.chunk(chunks).to_zarr(
-        str(out), mode="w", consolidated=True,
-    )
+    try:
+        cache_ds.chunk(chunks).to_zarr(
+            str(out), mode="w", consolidated=True,
+        )
+    except ImportError:
+        # No dask in the environment: the arrays are already in memory, so
+        # write eagerly with the same on-disk chunking via ``encoding``.
+        enc = {v: {"chunks": tuple(chunks[d] for d in cache_ds[v].dims)}
+               for v in list(cache_ds.data_vars) + list(cache_ds.coords)
+               if all(d in chunks for d in cache_ds[v].dims)}
+        cache_ds.to_zarr(str(out), mode="w", consolidated=True, encoding=enc)
     if progress:
         print(f"[jra55_do] cache written: {out}")
     return out
@@ -1079,6 +1087,7 @@ def jra55_to_freshwater(
     slice: JRA55Slice,
     lhflx,
     *,
+    evap=None,
     L_v: float | None = None,
 ) -> FreshwaterForcing:
     """Bridge a JRA55Slice + computed latent heat flux into
@@ -1116,8 +1125,11 @@ def jra55_to_freshwater(
     -------
     FreshwaterForcing
     """
-    L = constants.L_v if L_v is None else L_v
-    evap = lhflx / L
+    if evap is None:
+        # Legacy heat-only entry: the caller has no water flux.  The tile
+        # path (run_omip) passes ``evap=tile.surface_mass_flux`` instead.
+        L = constants.L_v if L_v is None else L_v   # latent-ok: heat-only legacy entry, no surface temperature in scope
+        evap = lhflx / L
     return FreshwaterForcing(
         precip=slice.prra + slice.prsn,
         evap=evap,

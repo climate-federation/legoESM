@@ -61,7 +61,7 @@ if NEMO does it we can transcribe it); it is enumeration effort on the join laye
 
 ### W2 RESULT (2026-08-06) — NOT a port; ONE surgical defect found (3rd form-stress suspect)
 Term-by-term matrix diff of NEMO `trazdf.F90:118-293` vs lego `_apply_implicit_vertical_mixing`
-(`ocean_model_latlon_cgrid.py:5223`) + `thickness_weighted_tracer_combine` (`:854-902`), both read.
+(`ocean_model_latlon_cgrid.py:5424`) + `thickness_weighted_tracer_combine` (`:854-902`), both read.
 - **`ah_wslp2` / GM-Redi vertical term concern RETRACTED**: not omitted — config-gated on
   `gm_redi.implicit_K33` (mirrors NEMO's `l_ldfslp`), threaded end-to-end. RHS content-identity,
   diagonal thickness (both Kaa), zero-flux BCs, timestep (rDt=2dt): all CONFIRMED IDENTICAL.
@@ -75,7 +75,7 @@ Term-by-term matrix diff of NEMO `trazdf.F90:118-293` vs lego `_apply_implicit_v
   it's wired to Veros's reference thickness, not NEMO's `e3w(Kmm)`. Add a `nemo_kmm` slot value
   (NOW-time e3w from `state.eta`) + a conservation test. → moves to W1 (a form-stress suspect),
   NOT W2. So W2's "1 real port" item is REDUCED to a surgical option-add.
-- Flagged not-checked: `nemo_v1`'s `adaptive_implicit_vertadv` (ln_zad_Aimp fold) — separate lane.
+- Flagged not-checked: `legoesm_nemo_like_v1`'s `adaptive_implicit_vertadv` (ln_zad_Aimp fold; recipe renamed from `nemo_v1` 2026-09-02) — separate lane.
 
 ### W2 — The architectural port (1 real item)
 - **`tra_zdf` (z*-volume-form + GM/Redi vertical fold).** The one genuine implementation gap:

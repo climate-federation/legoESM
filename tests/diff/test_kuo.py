@@ -39,7 +39,8 @@ def _column():
 
 def _scalar_loss(T, qv, pf, ph, pq):
     out = kuo_convection(T, qv, pf, ph, dt=900.0, config=KuoConfig(),
-                         moisture_convergence=pq)
+                         moisture_convergence=pq,
+                         w_grid=jnp.full_like(pq, 0.01))
     return jnp.sum(out.dT_dt ** 2) + jnp.sum(out.dq_v_dt ** 2)
 
 
@@ -134,9 +135,11 @@ def test_kuo_jit_matches_eager():
     T, qv, pf, ph, pq = _column()
     cfg = KuoConfig()
     eager = kuo_convection(T, qv, pf, ph, dt=900.0, config=cfg,
-                           moisture_convergence=pq)
+                           moisture_convergence=pq,
+                           w_grid=jnp.full_like(pq, 0.01))
     jit_fn = jax.jit(lambda *a: kuo_convection(
-        *a, pf, ph, dt=900.0, config=cfg, moisture_convergence=pq))
+        *a, pf, ph, dt=900.0, config=cfg, moisture_convergence=pq,
+        w_grid=jnp.full_like(pq, 0.01)))
     jitted = jit_fn(T, qv)
     np.testing.assert_allclose(np.asarray(eager.dT_dt),
                                np.asarray(jitted.dT_dt), rtol=1e-9, atol=1e-14)
@@ -156,7 +159,8 @@ def test_kuo_vmap_matches_eager():
     def one(T_, q_, pf_, ph_, pq_):
         return kuo_convection(T_[None], q_[None], pf_[None], ph_[None],
                               dt=900.0, config=cfg,
-                              moisture_convergence=pq_[None]).dT_dt[0]
+                              moisture_convergence=pq_[None],
+                              w_grid=jnp.full_like(pq_[None], 0.01)).dT_dt[0]
 
     vm = jax.vmap(one)(Ts, qs, pfs, phs, pqs)
     loop = jnp.stack([one(Ts[i], qs[i], pfs[i], phs[i], pqs[i])
@@ -168,13 +172,13 @@ def test_kuo_vmap_matches_eager():
 def test_dqsat_dT_is_shared_thermo_derivative():
     """PR A #11: Kuo's ``_dqsat_dT`` was a re-inlined Tetens slope with private
     17.67/243.5 constants; it now delegates to the shared
-    ``thermo.saturation_mixing_ratio_dT``. Pin bit-equality so the dedup cannot
+    ``thermo.saturation_specific_humidity_dT``. Pin bit-equality so the dedup cannot
     silently drift from the model's own e_sat curve."""
     from legoesm.atmosphere.physics.convection.kuo import _dqsat_dT
-    from legoesm.thermo import saturation_mixing_ratio_dT
+    from legoesm.thermo import saturation_specific_humidity_dT
     T = jnp.linspace(230.0, 310.0, 41)
     p = jnp.full_like(T, 850e2)
     np.testing.assert_array_equal(
         np.asarray(_dqsat_dT(T, p)),
-        np.asarray(saturation_mixing_ratio_dT(T, p)),
+        np.asarray(saturation_specific_humidity_dT(T, p)),
     )

@@ -32,7 +32,6 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import logging
-import os
 from pathlib import Path
 
 import equinox as eqx
@@ -134,13 +133,15 @@ def main():
         open_arco_era5, ozone_vmr_at_date, regrid_monthly_forcing_to_gaussian,
     )
     from legoesm.training.aimip_params import (
-        AIMIPClassicalParams, make_aimip_classical_spectral_physics,
+        AIMIPClassicalParams, aimip_spatial_unread_fields,
+        make_aimip_classical_spectral_physics,
     )
     from legoesm.training.campaign_driver import parse_bool_flag
-    from legoesm.training.aimip_spatial import land_mask_from_phis
+    from legoesm.training.aimip_spatial import era5_land_fraction, grid_with_land_fraction
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, era5_to_spectral_carry, load_era5_ic,
-    )
+    era5_terrain_product,
+)
     from legoesm.training.neural_gcm_spectral import (
         carry_to_spectral_state, spectral_amip_rollout, spectral_rollout,
         spectral_state_vs_carry_loss,
@@ -216,8 +217,11 @@ def main():
         for k, yr in enumerate(years):
             d0 = _dt.date(int(yr), 1 + (k % 12), 15)  # spread across seasons
             d1 = d0 + _dt.timedelta(days=rollout_days)
-            ic_carry = era5_to_spectral_carry(load_era5_ic(wb2, d0.year, d0.month, d0.day), grid, sigma)
-            tgt_carry = era5_to_spectral_carry(load_era5_ic(wb2, d1.year, d1.month, d1.day), grid, sigma)
+            s0 = load_era5_ic(wb2, d0.year, d0.month, d0.day)
+            s1 = load_era5_ic(wb2, d1.year, d1.month, d1.day)
+            tp = era5_terrain_product(s0, grid)
+            ic_carry = era5_to_spectral_carry(s0, grid, sigma, target_phis=tp)
+            tgt_carry = era5_to_spectral_carry(s1, grid, sigma, target_phis=tp)
             mid = d0 + _dt.timedelta(days=rollout_days // 2)
             t_sfc_col, sic_col = _override_at(mid)
             doy = jnp.asarray(float(d0.timetuple().tm_yday))
@@ -257,8 +261,8 @@ def main():
     land_mask = None
     sizing_ps = None
     if not is_nn:
-        _, phis0 = _build_samples(1)  # phis is rollout-agnostic -> land mask once
-        land_mask = land_mask_from_phis(phis0, smooth=True)
+        land_mask = era5_land_fraction(grid)
+        grid = grid_with_land_fraction(grid, land_mask)
         sizing_ps = init_physics_state(
             ncol, nlev,
             PhysicsConfig(
@@ -312,7 +316,14 @@ def main():
         _make_nn_physics = make_sfno_spectral_physics
     else:
         params0 = load_checkpoint(
-            AIMIPClassicalParams.from_defaults(spatial_surface=True),
+            AIMIPClassicalParams.from_defaults(
+                spatial_surface=True,
+                # fields the trained schemes never read are not in the
+                # checkpoint (and are not trained here either)
+                spatial_unread=aimip_spatial_unread_fields(
+                    turbulence=str(cfg["aimip_turbulence"]),
+                    surface_bulk_scheme=str(
+                        cfg.get("aimip_surface_bulk_scheme", "constant")))),
             args.init_ckpt,
         )
         _make_nn_physics = None
@@ -482,11 +493,10 @@ def main():
             # not lose the whole fine-tune. The bias-corrected EMA is only
             # meaningful at the end; the resumable artifact is the raw
             # params. (~10 KB — cheap.)
+            # save_checkpoint is itself atomic (tmp + rename) and writes the
+            # knob record beside its own path, so it saves to _ck directly.
             _ck = args.out_ckpt.with_name(args.out_ckpt.stem + "_latest_raw.eqx")
-            _tmp = _ck.with_suffix(".eqx.tmp")
-            _ck.parent.mkdir(parents=True, exist_ok=True)
-            save_checkpoint(params, _tmp)
-            os.replace(_tmp, _ck)
+            save_checkpoint(params, _ck)
             # BEST-drift raw params across the whole fine-tune: a late-phase
             # divergence (colnn v3: 15d drift 4.2 -> 424 K^2) must not
             # overwrite the best stability state. Drift normalised by the
@@ -496,9 +506,7 @@ def main():
             if _drift_per_day < best_drift_per_day:
                 best_drift_per_day = _drift_per_day
                 _bk = args.out_ckpt.with_name(args.out_ckpt.stem + "_best_raw.eqx")
-                _btmp = _bk.with_suffix(".eqx.tmp")
-                save_checkpoint(params_at_drift, _btmp)  # the params that produced it
-                os.replace(_btmp, _bk)
+                save_checkpoint(params_at_drift, _bk)  # the params that produced it
                 logger.info(
                     f"  new BEST drift/day^2 {_drift_per_day:.4f} "
                     f"[K^2/d^2 @rd={rd}d] -> {_bk.name}"

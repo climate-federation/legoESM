@@ -466,10 +466,9 @@ def apply_tidal_forcing(du_dt, dv_dt, grid, t_seconds, config: TidalForcingConfi
 # with ``AX_cos_c = +g*grad_x(scale*A_c*G_n*cos(n*lam))`` and
 # ``AX_sin_c = -g*grad_x(scale*A_c*G_n*sin(n*lam))`` -- the minus folded in so
 # the hot-path combine is a plain additive tensordot. This is an algebraic
-# identity, NOT an approximation: :func:`tidal_acceleration_at` reproduces
-# :func:`tidal_acceleration` to round-off, which
-# ``test_tidal_forcing.py::TestPerSubstepBasis`` checks against random times out
-# to a year.
+# identity, NOT an approximation: :func:`tidal_phase_factors` followed by
+# :func:`tidal_acceleration_from_phase` reproduces :func:`tidal_acceleration`
+# to round-off.
 
 
 class TidalBasis(NamedTuple):
@@ -564,8 +563,3 @@ def tidal_acceleration_from_phase(basis: TidalBasis, cos_phase, sin_phase):
     return a_x, a_y
 
 
-def tidal_acceleration_at(basis: TidalBasis, t_seconds):
-    """Single-shot reconstruction at one time. Equals
-    :func:`tidal_acceleration` to round-off; used by tests and offline code."""
-    cos_p, sin_p = tidal_phase_factors(basis, t_seconds)
-    return tidal_acceleration_from_phase(basis, cos_p, sin_p)

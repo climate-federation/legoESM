@@ -51,7 +51,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -147,12 +146,8 @@ def two_cell_sum_delta(T0, S0, T1, S1, dz_ref, j, i, k0, k1):
 
 
 def _git_sha() -> str:
-    try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
-            cwd=_PROJECT_ROOT, check=True).stdout.strip()
-    except Exception:
-        return "unknown"
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(_PROJECT_ROOT).commit or "unknown"
 
 
 def load_dz_ref(path) -> np.ndarray:

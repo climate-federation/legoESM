@@ -38,7 +38,7 @@ ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT || exit 1
 HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$PIN" ] || { echo "FATAL: HEAD $HEAD != pinned $PIN"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 OUT=$ROOT/results/omip_nemo/nemolev_trp_shear_d30
@@ -68,7 +68,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc \
   --tripole-vmix tke --ice-init $NEMOIN/Ice_initialization.nc \
   --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
-  --tke-kappa-convention veros_sqrte --tke-shear-production nemo_face_native_now2 --sw-rgb-chl --ice-ocean-heat-coeff 70 \
+  --tke-kappa-convention veros_sqrte --tke-shear-production nemo_face_native_nbb2 --sw-rgb-chl --ice-ocean-heat-coeff 70 \
   --gateway-transports --mle --mle-ce 0.06 \
   --output $OUT 2>&1 | tail -25
 run_rc=$?

@@ -14,7 +14,7 @@
 # (combined.py); fct2 tracer advection now in the preset. 720 d = 24 months.
 set -e
 WT=/burg-archive/glab/users/pg2328/legoESM_worktrees/nemo-gaps-p4p5; cd $WT
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 echo "=== HOST ==="; hostname; nvidia-smi -L | head -1; date; git -C $WT log --oneline -1
 OUT=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/dino_r1_zco

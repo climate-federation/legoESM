@@ -157,6 +157,18 @@ def test_gamma_skw_degenerate_coefficients_constant():
     np.testing.assert_allclose(np.asarray(out), 0.3, rtol=1e-12)
 
 
+def test_gamma_skw_gradient_at_degenerate_coefficients():
+    """gc == gb is a smooth point: d/d(gamma_coef) = sum e, d/d(gamma_coefb)
+    = sum (1 - e), e = exp(-Skw^2/(2 gcf^2)).  The Fortran collapse branch as
+    a jnp.where returned 1 and 0 per element there."""
+    Skw = jnp.linspace(-3.0, 3.0, 10)
+    gc, gb = jax.grad(lambda c, b: jnp.sum(compute_gamma_Skw(Skw, c, b, _GCF)),
+                      argnums=(0, 1))(0.3, 0.3)
+    e = float(jnp.sum(jnp.exp(-0.5 * (Skw / _GCF) ** 2)))
+    assert abs(float(gc) - e) < 1e-12 * e
+    assert abs(float(gb) - (Skw.size - e)) < 1e-12 * Skw.size
+
+
 def test_gamma_skw_golden():
     out = compute_gamma_Skw(jnp.asarray([1.0]), _GC, _GB, _GCF)
     expected = _GB + (_GC - _GB) * np.exp(-0.5 * (1.0 / _GCF) ** 2)

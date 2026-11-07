@@ -39,7 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from legoesm import constants  # noqa: E402
 
-# Public ARCO ERA5 (mirrors run_amip_cmip6_deck._DEFAULT_ARCO_ERA5).
+# Public ARCO ERA5 (mirrors run_amip_smoke_deck._DEFAULT_ARCO_ERA5).
 _ARCO_ERA5 = (
     "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 )
@@ -188,7 +188,7 @@ def main(argv=None) -> int:
         sst_args = "  # (add --sst-file <input4MIPs tosbcs file>)"
     print(
         "  JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \\\n"
-        "  .venv/bin/python scripts/run/run_amip_cmip6_deck.py \\\n"
+        "  .venv/bin/python scripts/run/run_amip_smoke_deck.py \\\n"
         "    --forcing-dir data/forcing_amip --auto-generate \\\n"
         "    --start-year 1979 --end-year 2009 \\\n"
         "    --grid-type cubed_sphere --discretization finite_volume \\\n"

@@ -10,30 +10,64 @@ All operations are pure JAX and compatible with jit, grad, vmap, scan.
 
 Conventions — water-vapor mass variables
 ----------------------------------------
-This module returns the **mixing ratio** ``r_sat = ε e_sat / (p - e_sat)``
-(mass of water vapor per unit mass of *dry* air).  Throughout the
-``atmosphere/physics`` source tree the prognostic field is named
-``q_v`` and many docstrings call it "specific humidity".  In the
-typical atmospheric regime where ``e_sat ≪ p``, mixing ratio and
-specific humidity differ by ``q ≈ r / (1 + r)`` — about 1% for
-``r = 0.01``.  The codebase uses these interchangeably; physics that
-needs the distinction (vertical-flux conservation in saturated tropical
-columns, q_c bookkeeping) should read this caveat carefully and
-convert explicitly when the 1% drift matters.
+**The model state's water tracers are SPECIFIC quantities on total air
+mass** (``q_x = m_x / m_total`` with ``m_total`` = dry air + vapour +
+carried condensate, ERA5's own basis for ``q``/``clwc``/``ciwc``; the IFS
+and FV3-sphum convention; user decision 2026-09-28): every ERA5/reanalysis loader keeps ``q`` as is,
+column water is ``sum(q dp)/g``, physics water increments move the
+column mass through ``core.conservation.apply_physics_water_mass`` and
+the FV3 lane's ``fv_update_phys`` nwat block, virtual temperature is
+``T (1 + (1/ε - 1) q)``.
+
+``saturation_mixing_ratio`` and its ice/blend siblings return the
+**mixing ratio** ``r_sat = ε e_sat / (p - e_sat)`` (per unit DRY air);
+``saturation_specific_humidity`` returns ``q_sat = r_sat / (1 + r_sat)``
+(per unit total air).  A scheme working in mixing ratio internally
+converts ONCE at entry (``specific_humidity_to_mixing_ratio``) and ONCE
+at exit (``mixing_ratio_tendency_to_specific_humidity_tendency`` or the
+finite-increment map), never mid-scheme; a scheme working in specific
+humidity compares against ``q_sat``.  Ratios, Clausius-Clapeyron slopes,
+kg/kg thresholds and mass normalisations are O(q) (1-2 %) convention
+dependent; additive ``L q`` and ``T_v`` terms are O(q^2).  Schemes that
+still compare the (specific) tracer against ``r_sat`` are being migrated
+scheme by scheme (the per-scheme audit PR); until then their saturation
+reference is high by ``r_sat`` relative (RH read low by that much).
 """
 
 from __future__ import annotations
 
+import functools
+import math
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
+from legoesm.core import transcendentals
+from legoesm.core.source_rounding import nemo_source_round as sr
+from legoesm.core.smooth import max_c1, smooth_clamp, smooth_min
+
+
+# Tetens/Bolton coefficients of ``saturation_vapor_pressure`` (named so that a
+# scheme needing the same curve in another algebraic form -- the IFS
+# convection's R2ES/R3LES/R4LES -- reads them from here instead of copying).
+TETENS_E0_PA = 611.2   # satcurve-ok: definition site of the legoESM Tetens curve
+TETENS_A = 17.67       # satcurve-ok: definition site
+TETENS_B_K = 243.5     # satcurve-ok: definition site
 
 
 def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
     """Compute saturation vapor pressure using Tetens formula.
 
     e_sat = 611.2 * exp(17.67 * T_c / (T_c + 243.5))
+
+    The coefficients are Bolton's (1980) fit of the Tetens form, which CAM
+    and CLUBB label "Bolton".  Tier-2 oracle audit (fp64, T >= 150 K): max
+    relative difference 3.5e-16 vs CAM cesm2_1_rel_60
+    ``wv_sat_methods.F90`` ``Bolton_svp_water`` and 7.3e-15 vs CLUBB's
+    ``bolton`` curve.  Below 150 K the AD temperature clip (see the comment
+    in the body) departs from Bolton.
 
     Parameters
     ----------
@@ -60,7 +94,7 @@ def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
     # there instead of inf).  satcurve-ok: identical Tetens curve for
     # T ≥ 150 K; this is an AD floor, not a new saturation formula.
     T_c = jnp.clip(T, 150.0, None) - constants.T_freeze
-    return 611.2 * jnp.exp(17.67 * T_c / (T_c + 243.5))
+    return TETENS_E0_PA * jnp.exp(TETENS_A * T_c / (T_c + TETENS_B_K))
 
 
 # ---------------------------------------------------------------------------
@@ -151,15 +185,26 @@ def dd_saturation_vapor_pressure_aerk(T: jax.Array) -> jax.Array:
     return ddw * (ew - ei) + 2.0 * dw * (dew - dei) + w * ddew + (1.0 - w) * ddei
 
 
-def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
+def saturation_vapor_pressure_goff(
+    T: jax.Array, *, nemo_source_exact: bool = False
+) -> jax.Array:
     """Saturation vapour pressure over liquid water, WMO Goff (1957) [Pa].
 
-    Exact port of NEMO/aerobulk ``sbc_phy.F90::e_sat_sclr`` (the curve NEMO's
-    bulk formulas use), kept alongside the Tetens default so the OMIP/CORE-II
-    faithful ocean forcing reproduces NEMO's saturation humidity bit-for-bit.
-    Differs from :func:`saturation_vapor_pressure` by ~0.1–0.3 % over the
-    ocean-temperature range.  The temperature is floored at 180 K exactly as
-    NEMO does (guards masked/garbage cells).
+    Port of NEMO/aerobulk ``sbc_phy.F90::e_sat_sclr`` (NEMO 5.0.1, lines
+    630-653; the curve NEMO's bulk formulas use).  Tier-2 oracle audit
+    (fp64): max relative difference 4.0e-15 vs the running NEMO routine,
+    i.e. round-off, not bit-for-bit.  Only the VAPOUR PRESSURE is NEMO's:
+    NEMO's saturation humidity ``q_sat_sclr`` (lines 727-751) is a specific
+    humidity ``reps0 e/(p - (1 - reps0) e)`` with ``reps0 = 287.05/461.495``,
+    and the 0.98 salt factor is applied by its callers (``sbcblk.F90:773``).
+    Callers reproduce NEMO's humidity only if they apply that conversion
+    themselves (as ``ocean/bulk_flux_omip.py`` does);
+    :func:`saturation_mixing_ratio_goff` does not.  Like NEMO, the formula
+    uses ``T_freeze`` = 273.15 K where WMO uses 273.16 K (NEMO's own comment
+    flags this); up to 1.7e-3 relative vs CAM Goff-Gratch (1946) water over
+    233-320 K.
+    The temperature is floored at 180 K exactly as NEMO does (guards
+    masked/garbage cells).
 
     Parameters
     ----------
@@ -171,6 +216,29 @@ def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
     jax.Array
         Saturation vapor pressure [Pa].
     """
+    if nemo_source_exact:
+        from legoesm.core.source_rounding import (
+            nemo_source_barrier as B,
+            nemo_source_round as R,
+        )
+        from legoesm.core import transcendentals as tx
+
+        T_K = R(jnp.maximum(T, 180.0))
+        rt = R(constants.T_freeze / T_K)
+        term1 = R(10.79574 * R(1.0 - rt))
+        temperature_ratio = R(T_K / B(constants.T_freeze))
+        log_temperature_ratio = tx.log10(temperature_ratio)
+        term2 = R(5.028 * B(log_temperature_ratio))
+        ratio_minus_one = R(temperature_ratio - 1.0)
+        inner3 = R(-8.2969 * ratio_minus_one)
+        scale3 = R(1.50475 * tx.pow(10.0, -4.0))
+        term3 = R(scale3 * R(1.0 - tx.pow(10.0, inner3)))
+        inner4 = R(4.76955 * R(1.0 - rt))
+        scale4 = R(0.42873 * tx.pow(10.0, -3.0))
+        term4 = R(scale4 * R(tx.pow(10.0, inner4) - 1.0))
+        exponent = R(R(R(R(term1 - term2) + term3) + term4) + 0.78614)
+        return R(100.0 * tx.pow(10.0, exponent))
+
     T_K = jnp.maximum(T, 180.0)
     rt = constants.T_freeze / T_K
     log10_T = jnp.log10(T_K / constants.T_freeze)
@@ -184,14 +252,117 @@ def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
 
 
 # ---------------------------------------------------------------------------
+# CAM6 Goff & Gratch (1946) saturation (wv_sat_methods.F90)
+# ---------------------------------------------------------------------------
+# Transcribed line for line from ESCOMP/CAM cam_cesm2_1_rel_60
+# (a03b84b7c4e34f965b115686f22a043b85739e56) src/physics/cam/wv_sat_methods.F90,
+# CAM's default scheme (``initial_default_idx = GoffGratch_idx``, :53).  NOT the
+# WMO Goff (1957) curve of :func:`saturation_vapor_pressure_goff`.  The
+# vapour-pressure -> specific-humidity map is CAM's own (``wv_sat_svp_to_qsat``,
+# its q = 1 cap smooth by default per RULE 5), not the shared conversion: a different
+# formula at an oracle boundary (same as :func:`nemo_si3_saturation_over_ice`).
+
+
+def _cam_r8(*xs):
+    """CAM evaluates the Goff-Gratch curves in r8: compute at the widest
+    float JAX allows (fp64 under x64, else fp32) and hand back the inputs'
+    precision, so an fp32 caller under x64 stays fp32."""
+    out = jnp.result_type(*xs, 1.0)  # a float even for integer inputs
+    wide = jax.dtypes.canonicalize_dtype(jnp.float64)
+    return out, [jnp.asarray(x, dtype=wide) for x in xs]
+
+
+def saturation_vapor_pressure_goff_gratch(T: jax.Array) -> jax.Array:
+    """Saturation vapour pressure over liquid water [Pa], CAM
+    ``GoffGratch_svp_water`` (wv_sat_methods.F90:369-380)."""
+    out, (T,) = _cam_r8(T)
+    return _svp_water_goff_gratch_wide(T).astype(out)
+
+
+def _svp_water_goff_gratch_wide(T):
+    tboil = constants.T_boil_cam
+    return 10.0 ** (-7.90298 * (tboil / T - 1.0)
+                    + 5.02808 * jnp.log10(tboil / T)
+                    - 1.3816e-7 * (10.0 ** (11.344 * (1.0 - T / tboil)) - 1.0)
+                    + 8.1328e-3 * (10.0 ** (-3.49149 * (tboil / T - 1.0)) - 1.0)
+                    + jnp.log10(1013.246)) * 100.0
+
+
+def saturation_vapor_pressure_ice_goff_gratch(T: jax.Array) -> jax.Array:
+    """Saturation vapour pressure over ice [Pa], CAM ``GoffGratch_svp_ice``
+    (wv_sat_methods.F90:382-391)."""
+    out, (T,) = _cam_r8(T)
+    return _svp_ice_goff_gratch_wide(T).astype(out)
+
+
+def _svp_ice_goff_gratch_wide(T):
+    h2otrip = constants.T_triple_cam
+    return 10.0 ** (-9.09718 * (h2otrip / T - 1.0)
+                    - 3.56654 * jnp.log10(h2otrip / T)
+                    + 0.876793 * (1.0 - T / h2otrip)
+                    + jnp.log10(6.1071)) * 100.0
+
+
+# --- limiter class: CAM's q_sat = 1 cap where p <= e_sat (RULE 5) ---
+# Sharpness of the smooth cap on r = e_sat/p [dimensionless]; math.inf = CAM's
+# hard cap exactly.  Value approved by user 2026-10-21.
+CAM_QSAT_CAP_SHARPNESS = 1.0e3
+
+
+def _specific_humidity_from_esat_cam(e_sat: jax.Array, p: jax.Array, *,
+                                     cap_sharpness: float = CAM_QSAT_CAP_SHARPNESS
+                                     ) -> jax.Array:
+    """CAM ``wv_sat_svp_to_qsat`` (wv_sat_methods.F90:180-193): saturation
+    SPECIFIC humidity ``epsilo es / (p - omeps es)``, and 1 where
+    ``p - es <= 0``.
+
+    KNOWN DIFFERENCE (RULE 5): at the default the cap is smooth, ``r =
+    smooth_min(e_sat/p, 1)`` and ``q = eps r / (1 - (1 - eps) r)``, so
+    ``q <= 1`` and the denominator stays ``>= eps``.  The smoothed ratio sits
+    below CAM's ``min(r, 1)`` by ``log(1 + exp(-cap_sharpness |1 - r|))/cap_sharpness``
+    (on both sides of ``r = 1``; ``log 2/cap_sharpness`` at ``r = 1``), which
+    is nil for tropospheric ``r << 1``.  ``cap_sharpness = math.inf`` is CAM's
+    hard cap exactly.  ``p > 0`` is assumed."""
+    eps = constants.epsilon
+    if math.isinf(cap_sharpness):
+        return jnp.where(p - e_sat <= 0.0, 1.0,
+                         eps * e_sat / (p - (1.0 - eps) * e_sat))
+    r = smooth_min(e_sat / p, 1.0, cap_sharpness)
+    return eps * r / (1.0 - (1.0 - eps) * r)
+
+
+def saturation_specific_humidity_goff_gratch(T: jax.Array, p: jax.Array, *,
+                                             cap_sharpness: float = CAM_QSAT_CAP_SHARPNESS
+                                             ) -> jax.Array:
+    """Saturation specific humidity over liquid [kg/kg], CAM
+    ``wv_sat_qsat_water`` (wv_sat_methods.F90:195-218), the ``qsat_water``
+    MG2 calls (micro_mg2_0.F90:113-115)."""
+    out, (T, p) = _cam_r8(T, p)
+    return _specific_humidity_from_esat_cam(_svp_water_goff_gratch_wide(T), p,
+                                            cap_sharpness=cap_sharpness).astype(out)
+
+
+def saturation_specific_humidity_ice_goff_gratch(T: jax.Array, p: jax.Array, *,
+                                                 cap_sharpness: float = CAM_QSAT_CAP_SHARPNESS
+                                                 ) -> jax.Array:
+    """Saturation specific humidity over ice [kg/kg], CAM ``wv_sat_qsat_ice``
+    (wv_sat_methods.F90:220-243), the ``qsat_ice`` MG2 calls."""
+    out, (T, p) = _cam_r8(T, p)
+    return _specific_humidity_from_esat_cam(_svp_ice_goff_gratch_wide(T), p,
+                                            cap_sharpness=cap_sharpness).astype(out)
+
+
+# ---------------------------------------------------------------------------
 # Flatau et al. (1992) polynomial saturation vapor pressure
 # ---------------------------------------------------------------------------
-# CLUBB (and CAM, via ``saturation_formula = flatau``) closes its assumed-PDF
-# cloud scheme on the Flatau 8th-order polynomial fit to the SVP curve rather
-# than Tetens. These are the CANONICAL Flatau curves (added here, in the shared
-# thermo module, so the CLUBB port consumes saturation only from ``thermo`` per
-# the CLAUDE.md "no saturation re-impl" rule — the curves are NOT re-derived
-# inside the physics tree). Faithful to ``saturation.F90`` /
+# Standalone CLUBB (clubb_release ``model_flags.F90``: default
+# ``saturation_formula = saturation_flatau``) closes its assumed-PDF cloud
+# scheme on the Flatau 8th-order polynomial fit to the SVP curve.  CAM6 does
+# NOT: CESM2.1 ``clubb_intr.F90:66`` passes ``saturation_equation = "gfdl"``
+# (Goff-Gratch 1946) to CLUBB.  These are the CANONICAL Flatau curves (added
+# here, in the shared thermo module, so the CLUBB port consumes saturation
+# only from ``thermo`` per the CLAUDE.md "no saturation re-impl" rule — the
+# curves are NOT re-derived inside the physics tree). Faithful to ``saturation.F90`` /
 # ``CLUBB-JAX/.../saturation.py`` (coefficients verbatim). Reference:
 # Flatau, P. J., Walko, R. L., & Cotton, W. R. (1992). Polynomial fits to
 # saturation vapor pressure. J. Appl. Meteorol., 31, 1507-1513, Tables 3-4.
@@ -222,8 +393,15 @@ _FLATAU_ICE_A = (
 def saturation_vapor_pressure_flatau(T: jax.Array) -> jax.Array:
     """Flatau (1992) polynomial saturation vapor pressure over liquid water.
 
-    8th-order factored polynomial fit, valid roughly -85 to +50 deg C. This is
-    the SVP curve CLUBB/CAM use by default (``saturation_formula = flatau``).
+    8th-order factored polynomial fit, valid roughly -85 to +50 deg C.  This
+    is standalone CLUBB's default curve (clubb_release ``model_flags.F90``,
+    ``saturation_formula = saturation_flatau``); tier-2 oracle audit (fp64):
+    max relative difference 2.5e-15 vs clubb_release ``sat_vapor_press_liq``
+    (factored form) and 7.7e-11 vs the Horner form in CAM's vendored CLUBB
+    r8099 (the two oracles differ from each other by the same amount).  CAM6
+    does NOT run CLUBB on this curve: CESM2.1 ``clubb_intr.F90:66`` selects
+    ``saturation_equation = "gfdl"`` (Goff-Gratch), which differs from Flatau
+    by up to 0.86 % over 233-320 K (at 233 K) and 0.21 % above 273 K.
 
     Parameters
     ----------
@@ -251,6 +429,8 @@ def saturation_vapor_pressure_ice_flatau(T: jax.Array) -> jax.Array:
     """Flatau (1992) polynomial saturation vapor pressure over ice.
 
     8th-order Horner polynomial (Table 4), valid roughly -90 to 0 deg C.
+    Bitwise equal to CAM's vendored CLUBB r8099 ``sat_vapor_press_ice_flatau``
+    in the tier-2 oracle audit (fp64).
 
     Parameters
     ----------
@@ -299,9 +479,22 @@ def _mixing_ratio_from_esat(e_sat: jax.Array, p: jax.Array) -> jax.Array:
     """Saturation mixing ratio from a saturation vapour pressure [Pa].
 
     The shared (differentiable, smooth-floored/capped) ``e_sat -> q_sat``
-    conversion used by every saturation curve (Tetens, Goff), so the curve
-    is the ONLY thing that varies between conventions — no re-derived
+    conversion used by the Tetens, Goff, Clausius-Clapeyron ice and
+    CAM-transition curves (:func:`nemo_si3_saturation_over_ice` uses NEMO's
+    own conversion instead), so the curve is the ONLY thing that varies
+    between those conventions — no re-derived
     conversion numerics (#762).
+
+    NOT-YET-FAITHFUL to any oracle conversion: the softplus floor and the
+    beta = 20 smooth cap are fixed (no hard-limit setting).  Tier-2 oracle
+    audit, fp64: a constant offset of -1.03e-10 kg/kg for small r; at a
+    364 Pa model top the cap at r = 1 binds, and after ``q = r/(1 + r)``
+    q_sat is 30 % below CAM ``svp_to_qsat``; r and q go negative where the
+    true r falls below the offset (on the audit's 0.05 K grid: only at
+    p >= 7e4 Pa, warmest such point 152.4 K; the cutoff depends on p).  In fp32 the cap cancels catastrophically:
+    where q_sat < 1e-5 the error vs the unsmoothed formula has median 1.4 %
+    and max 87 %.  CAM instead returns q = 1 when p <= e_s; CLUBB returns
+    r = epsilon when p - e_s < 1.
     """
     # Smooth floor on denominator: preserves gradients near e_sat ≈ p
     # instead of a hard clip that creates a zero-gradient plateau.
@@ -320,10 +513,15 @@ def saturation_mixing_ratio_goff(
 ) -> jax.Array:
     """Saturation mixing ratio from the WMO Goff (1957) curve [kg/kg].
 
-    The NEMO/AeroBulk air-sea convention for the surface saturation
-    humidity (issue #762): identical smooth ``e_sat -> q_sat`` conversion
-    as :func:`saturation_mixing_ratio`, but over the Goff vapour-pressure
-    curve instead of Tetens — ~0.5-1 % on Δq (hence LH) at warm SST.
+    The NEMO/AeroBulk Goff vapour-pressure curve (issue #762) with the
+    shared smooth ``e_sat -> r`` conversion of
+    :func:`saturation_mixing_ratio` — ~0.5-1 % on Δq (hence LH) at warm SST
+    vs Tetens.  This is NOT NEMO's surface humidity: NEMO ``q_sat_sclr``
+    (5.0.1 ``sbc_phy.F90:727-751``) returns SPECIFIC humidity with
+    ``epsilon = 287.05/461.495`` and no smoothing, and its 0.98 salt factor
+    is applied by callers.  This function returns a MIXING RATIO with
+    ``constants.epsilon`` and the smooth floor/cap; after ``r -> q`` the
+    tier-2 audit measured 1.7e-3 max relative vs NEMO (smoothing + epsilon).
     """
     return _mixing_ratio_from_esat(saturation_vapor_pressure_goff(T), p)
 
@@ -349,12 +547,193 @@ def saturation_mixing_ratio_ice(
     jax.Array
         Ice saturation mixing ratio [kg/kg].
     """
-    e_sat_i = 611.2 * jnp.exp(
+    return _mixing_ratio_from_esat(saturation_vapor_pressure_ice(T), p)
+
+
+def saturation_vapor_pressure_ice(T: jax.Array) -> jax.Array:
+    """Saturation vapour pressure over ice [Pa] (Clausius-Clapeyron).
+
+    e_sat_i = 611.2 * exp(L_s/R_v * (1/T_freeze - 1/T)): the curve of
+    :func:`saturation_mixing_ratio_ice`, exposed for vapour-pressure blends.
+    Constant-L_s curve with no model oracle.  Tier-2 oracle audit (fp64):
+    max relative difference 1.0e-2 vs CAM ``GoffGratch_svp_ice`` (at 204.65 K)
+    and 7.2e-3 vs ``MurphyKoop_svp_ice`` over 180-273 K.
+    """
+    return 611.2 * jnp.exp(
         constants.L_s / constants.R_v * (1.0 / constants.T_freeze - 1.0 / T)
     )
-    denom = jax.nn.softplus(p - e_sat_i - 1.0) + 1.0
-    q_sat_i = constants.epsilon * e_sat_i / denom
-    return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat_i)) / 20.0
+
+
+# --- CAM liquid->ice saturation transition and SVP table (cam_cesm2_1_rel_60) ---
+_CAM_TTRICE_K = 20.0     # ttrice, wv_saturation.F90:82
+_CAM_SVP_TMIN_K = 127.16  # tmin, wv_saturation.F90:79 (table start)
+_CAM_SVP_TMAX_K = 375.16  # tmax, wv_saturation.F90:80
+# limiter class: sharpness of the smooth [tmin, tmax] clamp [1/K] (RULE 5);
+# math.inf = CAM's hard clamp exactly.  Value approved by user 2026-10-21.
+_CAM_SVP_CLAMP_SHARPNESS = 1.0
+
+
+def saturation_vapor_pressure_trans(T: jax.Array) -> jax.Array:
+    """CAM ``wv_sat_svp_trans`` [Pa] (wv_sat_methods.F90:326-361) on CAM's
+    default Goff-Gratch curves: water curve at and above ``tmelt - ttrice``
+    (0 below), then for ``T < tmelt`` the vapour pressure is blended toward
+    ice with weight ``(tmelt - T)/ttrice`` (1 below ``tmelt - ttrice``)."""
+    tmelt = constants.T_freeze
+    e_liq = jnp.where(T >= tmelt - _CAM_TTRICE_K,
+                      saturation_vapor_pressure_goff_gratch(T), 0.0)
+    weight = jnp.where(tmelt - T > _CAM_TTRICE_K, 1.0, (tmelt - T) / _CAM_TTRICE_K)
+    return jnp.where(T < tmelt,
+                     weight * saturation_vapor_pressure_ice_goff_gratch(T)
+                     + (1.0 - weight) * e_liq,
+                     e_liq)
+
+
+@functools.lru_cache(maxsize=None)
+def _cam_svp_table_fp64() -> np.ndarray:
+    plenest = math.ceil(_CAM_SVP_TMAX_K - _CAM_SVP_TMIN_K) + 2
+    with jax.ensure_compile_time_eval(), jax.enable_x64(True):
+        return np.asarray(saturation_vapor_pressure_trans(
+            _CAM_SVP_TMIN_K + jnp.arange(plenest, dtype=jnp.float64)))
+
+
+def cam_svp_table(dtype) -> jax.Array:
+    """CAM's ``estbl`` [Pa] (``wv_sat_init``, wv_saturation.F90:216-226): the
+    1-K table of :func:`saturation_vapor_pressure_trans` from ``tmin``, built
+    in fp64 as CAM builds it (r8) and cast to ``dtype``, so an fp32 run reads
+    CAM's values rounded once rather than an fp32-evaluated table."""
+    return jnp.asarray(_cam_svp_table_fp64(), dtype=dtype)
+
+
+def saturation_specific_humidity_cam_table(T: jax.Array, p: jax.Array, *,
+                                           clamp_sharpness: float = _CAM_SVP_CLAMP_SHARPNESS,
+                                           cap_sharpness: float = CAM_QSAT_CAP_SHARPNESS
+                                           ) -> jax.Array:
+    """CAM ``qsat`` (wv_saturation.F90:458-503) [kg/kg]: the 1-K table
+    :func:`cam_svp_table` (``wv_sat_init``, :216-226, ``plenest =
+    ceiling(tmax - tmin) + 2`` entries, built in fp64), linearly
+    interpolated by ``estblf`` (:306-321, ``T`` clamped to [tmin, tmax]), then
+    CAM's ``svp_to_qsat``.  The ``qsat`` ``zm_conv_evap`` calls (zm_conv.F90:1484).
+
+    KNOWN DIFFERENCE (RULE 5): at the default the [tmin, tmax] clamp is
+    ``smooth_clamp`` with ``clamp_sharpness`` [1/K]; the clamped temperature
+    departs from CAM's by ``~log(1 + exp(-clamp_sharpness d))/clamp_sharpness``
+    K at ``d`` K from a table bound: ``log 2`` K at the bound itself (q 31%
+    high at ``tmin``, 1.8% at 130 K), < 6e-11 relative in q over 150-340 K
+    where ``e_sat/p`` is away from 1 (the cap departs by 1.1e-3 at ``e_sat = p``).
+    The q = 1 cap is :func:`_specific_humidity_from_esat_cam`'s.  CAM exactly
+    is ``clamp_sharpness = cap_sharpness = math.inf``."""
+    estbl = cam_svp_table(T.dtype)
+    plenest = estbl.shape[0]
+    if math.isinf(clamp_sharpness):
+        t_tmp = jnp.maximum(jnp.minimum(T, _CAM_SVP_TMAX_K) - _CAM_SVP_TMIN_K, 0.0)
+    else:
+        t_tmp = smooth_clamp(T, _CAM_SVP_TMIN_K, _CAM_SVP_TMAX_K,
+                             clamp_sharpness) - _CAM_SVP_TMIN_K
+    # Rounding guard only (smooth_clamp may land an ulp outside the table);
+    # a -1 index would wrap to the last entry.
+    i = jnp.clip(jnp.floor(t_tmp), 0.0, plenest - 2.0)
+    weight = t_tmp - i
+    i = i.astype(jnp.int32)
+    es = (1.0 - weight) * estbl[i] + weight * estbl[i + 1]
+    return _specific_humidity_from_esat_cam(es, p, cap_sharpness=cap_sharpness)
+
+
+# Compile-time intrinsic folds of NEMO PARAMETERs (gfortran/MPFR, correctly rounded; glibc agrees).
+_NEMO_LN10 = float.fromhex("0x1.26bb1bbb55516p+1")        # LOG(10._wp), sbc_phy.f90:724,726
+_NEMO_GOFF_ICE_D = float.fromhex("0x1.9258f81f79246p-1")  # rDg_i = LOG10(6.1071_wp), sbc_phy.f90:90
+
+
+def _nemo_reps0() -> float:
+    return constants.R_d / constants.R_v_nemo                                  # sbc_phy.f90:46
+
+
+def nemo_theta_exner(pta, ppa):
+    """``theta_exner_sclr``: ``pta * ( rpref / ppa ) ** rgamma_dry`` (``sbc_phy.f90:350``)."""
+    rgamma_dry = constants.R_gas_molar / (constants.M_dry_air * constants.c_p_dry_air_nemo)  # sbc_phy.f90:54
+    return sr(pta * sr(transcendentals.pow(sr(constants.p_ref / ppa), rgamma_dry)))
+
+
+def nemo_si3_e_sat_ice(ptak):
+    """``e_sat_ice_sclr`` (``sbc_phy.f90:689-694``), NEMO source order."""
+    rtt0 = constants.T_triple_nemo
+    zta = jnp.where(constants.T_goff_floor_nemo > ptak, constants.T_goff_floor_nemo, ptak)  # MAX(ptak, 180)
+    ztmp = sr(rtt0 / zta)
+    zle = sr(constants.goff_ice_A_nemo * sr(ztmp - 1.0))
+    zle = sr(zle + sr(constants.goff_ice_B_nemo * sr(transcendentals.log10(ztmp))))
+    # Materialized divisor: XLA otherwise rewrites x / constant as x * (1 / constant).
+    zle = sr(zle + sr(constants.goff_ice_C_nemo * sr(1.0 - sr(zta / sr(jnp.asarray(rtt0))))))
+    zle = sr(zle + _NEMO_GOFF_ICE_D)
+    return sr(100.0 * sr(transcendentals.pow(10.0, zle)))
+
+
+def nemo_si3_q_sat_ice(pta, ppa):
+    """``q_sat_sclr(..., l_ice=.TRUE.)`` (``sbc_phy.f90:760,764``)."""
+    reps0 = _nemo_reps0()
+    ze_s = nemo_si3_e_sat_ice(pta)
+    return sr(sr(reps0 * ze_s) / sr(ppa - sr((1.0 - reps0) * ze_s)))
+
+
+def nemo_si3_dq_sat_dt_ice(pta, ppa):
+    """``dq_sat_dt_ice_sclr`` with ``de_sat_dt_ice_sclr`` (``sbc_phy.f90:722-726,798-803``)."""
+    reps0, rtt0 = _nemo_reps0(), constants.T_triple_nemo
+    ze_s = nemo_si3_e_sat_ice(pta)
+    zta = jnp.where(constants.T_goff_floor_nemo > pta, constants.T_goff_floor_nemo, pta)
+    zde = sr(-(constants.goff_ice_A_nemo * rtt0) / sr(zta * zta))
+    zde = sr(zde - sr(constants.goff_ice_B_nemo / sr(zta * _NEMO_LN10)))
+    zde = sr(zde - constants.goff_ice_C_nemo / rtt0)
+    zde_s_dt = sr(sr(_NEMO_LN10 * zde) * nemo_si3_e_sat_ice(zta))
+    ztmp = sr(sr((reps0 - 1.0) * ze_s) + ppa)
+    return sr(sr(sr(reps0 * ppa) * zde_s_dt) / sr(ztmp * ztmp))
+
+
+def nemo_si3_saturation_over_ice(
+    T: jax.Array,
+    p: jax.Array,
+    floor_width_K: float,
+) -> tuple[jax.Array, jax.Array]:
+    """NEMO Goff-ice ``(q_sat, dq_sat/dT)`` with a selectable smooth floor.
+
+    The cited line numbers match NEMO 5.0.1, which is the version the
+    tier-2 oracle audit ran (fp64: 8.2e-14 max relative on q_sat, 1.6e-13
+    on dq/dT); 5.0.2 itself was not run.
+
+    At ``floor_width_K = 0`` this is the literal operation order of
+    ``sbc_phy.F90:665-711,727-790``; a positive width smooths the 180 K floor
+    and scales ``dq/dT`` by the ramp slope.  It intentionally does not use the smooth generic mixing-ratio conversion:
+    that would be a different formula at an oracle boundary.  Returns
+    ``(q_sat, dq_sat_dT)`` and remains JIT/reverse-mode compatible.
+    """
+    # NEMO's MAX(T, 180 K) floor as a C1 ramp of width floor_width_K (exact
+    # outside 180..180+width K; 0.0 = NEMO's hard MAX).
+    T = jnp.asarray(T)
+    if floor_width_K == 0.0:
+        zta = max_c1(T, constants.T_goff_floor_nemo, jnp.inf)
+        dzta_dT = 1.0   # NEMO returns d/dT at the floored temperature
+    else:
+        # smooth mode: carry the ramp's slope into dq_sat/dT (1 above the band)
+        zta, dzta_dT = jax.jvp(
+            lambda t: max_c1(t, constants.T_goff_floor_nemo, 1.0 / floor_width_K),
+            (T,), (jnp.ones_like(T),),
+        )
+    ztmp = constants.T_triple_nemo / zta
+    zle = (
+        constants.goff_ice_A_nemo * (ztmp - 1.0)
+        + constants.goff_ice_B_nemo * jnp.log10(ztmp)
+        + constants.goff_ice_C_nemo * (1.0 - zta / constants.T_triple_nemo)
+        + jnp.log10(constants.goff_ice_D_pressure_hpa_nemo)
+    )
+    e_sat = 100.0 * 10.0 ** zle
+    eps = constants.R_d / constants.R_v_nemo
+    denom = (eps - 1.0) * e_sat + p
+    q_sat = eps * e_sat / denom
+    zde = (
+        -(constants.goff_ice_A_nemo * constants.T_triple_nemo) / (zta * zta)
+        - constants.goff_ice_B_nemo / (zta * jnp.log(10.0))
+        - constants.goff_ice_C_nemo / constants.T_triple_nemo
+    )
+    de_sat_dT = jnp.log(10.0) * zde * e_sat
+    dq_sat_dT = eps * p * de_sat_dT / (denom * denom) * dzta_dT
+    return q_sat, dq_sat_dT
 
 
 def homogeneous_freezing_rh_factor(
@@ -427,8 +806,8 @@ def saturation_mixing_ratio_blend(
 ) -> jax.Array:
     """FV3_3D iter 720: saturation mixing ratio with liquid/ice blend.
 
-    Reusable helper matching FV3's ``compute_qs(..., es_over_liq_and_ice=
-    .true.)`` behaviour:
+    Linear blend of the Tetens liquid and Clausius-Clapeyron ice MIXING
+    RATIOS:
 
         w_liq  = clip((T − (T_top − width)) / width, 0, 1)
         q_sat  = w_liq · q_sat_liq + (1 − w_liq) · q_sat_ice
@@ -437,8 +816,13 @@ def saturation_mixing_ratio_blend(
         T_blend_top = ``constants.T_freeze``     (273.15 K)
         T_blend_width = 20.0 K
 
-    Generalizes the inline blend in ``rh_calc_fv3 do_cmip=True``
-    (iter-715) for reuse by other diagnostics.
+    This is NOT FMS/FV3 behaviour.  FMS ``compute_qs(...,
+    es_over_liq_and_ice=.true.)`` (``sat_vapor_pres_k`` ``compute_es_liq_ice_k``)
+    switches from Goff-Gratch ice to water at 0 C with no blend; the FMS
+    default ``compute_es_k`` blends the Goff-Gratch VAPOUR PRESSURES over
+    -20..0 C.  Tier-2 audit, after ``q = r/(1 + r)`` vs the FMS specific
+    humidity: 6.0e-2 max relative vs the flagged switch (at 263 K) and
+    8.95e-3 vs the default blend.
 
     Parameters
     ----------
@@ -473,15 +857,17 @@ def saturation_mixing_ratio_dT(
     T: jax.Array,
     p: jax.Array,
 ) -> jax.Array:
-    """Analytic derivative d(q_sat)/dT consistent with ``saturation_mixing_ratio``.
+    """Slope ``epsilon * (de_sat/dT) * p / max(p - e_sat, 1)**2`` (Tetens).
 
-    Uses the same Tetens vapor-pressure formula as
-    ``saturation_vapor_pressure`` and the same hard ``p - e_sat`` floor as
-    historically used by closure schemes (CLUBB-style PDF widths).  The
-    smooth softplus floor used by ``saturation_mixing_ratio`` itself
-    is intentionally NOT applied here — for derivative use cases
-    (e.g. Gaussian PDF width scaling), the simpler ``max(p - e_sat, 1)``
-    floor is the standard convention.
+    The derivative of the unsmoothed ``epsilon e_sat/(p - e_sat)`` where
+    ``p - e_sat >= 1`` Pa and T >= 150 K; where the floor binds it is not
+    the derivative of any of the forward formulas.  ``e_sat`` comes from
+    ``saturation_vapor_pressure`` (150 K clip) but ``de_sat/dT`` uses the
+    unclipped T.  It is NOT the derivative of ``saturation_mixing_ratio``,
+    which has the softplus floor and smooth cap (tier-2 audit: 5.2e-4 max
+    relative vs ``jax.grad(saturation_mixing_ratio)`` for T >= 151 K, p > 2 e_sat, at
+    318.9 K and 2e4 Pa).  CLUBB's ``sat_mixrat_liq`` uses no such floor (it
+    returns r = epsilon when p - e_sat < 1).  No production caller.
 
     Parameters
     ----------
@@ -528,6 +914,39 @@ def saturation_specific_humidity(
     """
     w_sat = saturation_mixing_ratio(T, p)
     return w_sat / (1.0 + w_sat)
+
+
+def saturation_specific_humidity_ice(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Saturation specific humidity over ICE: ``r_i / (1 + r_i)`` with
+    ``r_i`` from :func:`saturation_mixing_ratio_ice` (the reference a
+    specific-humidity tracer is compared with in mixed-phase schemes)."""
+    w_sat = saturation_mixing_ratio_ice(T, p)
+    return w_sat / (1.0 + w_sat)
+
+
+def saturation_specific_humidity_dT(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """``d(q_sat)/dT`` for the SPECIFIC-humidity saturation: the exact
+    (forward-mode) derivative of :func:`saturation_specific_humidity`, so
+    value and slope share ONE floor convention (the softplus floor of
+    ``saturation_mixing_ratio``) and a Newton saturation adjustment lands on
+    the curve it is measured against even where ``e_sat`` approaches ``p``
+    (the mixing-ratio slope helper uses a hard ``max(p - e_sat, 1)`` clip
+    and disagrees with its own value function there: MEASURED 2026-09-29,
+    0.9 % off-curve at q_v = 0.6, p = 100 Pa).  Equals
+    ``saturation_mixing_ratio_dT / (1 + r)^2`` away from that regime.
+    Differentiable (a JVP of a smooth function); T and p broadcast.
+    """
+    T = jnp.asarray(T)
+    p = jnp.asarray(p)
+    T_b, p_b = jnp.broadcast_arrays(T, p)
+    return jax.jvp(lambda t: saturation_specific_humidity(t, p_b),
+                   (T_b,), (jnp.ones_like(T_b),))[1]
 
 
 def vapor_pressure_from_specific_humidity(
@@ -676,6 +1095,40 @@ def specific_humidity_tendency_to_mixing_ratio_tendency(
     return jnp.asarray(specific_humidity_tendency) / (denom * denom)
 
 
+def mixing_ratio_tendency_to_specific_humidity_tendency(
+    mixing_ratio: jax.Array,
+    mixing_ratio_tendency: jax.Array,
+) -> jax.Array:
+    """Convert ``dr/dt`` to ``dq/dt`` for ``q = r / (1 + r)``: the EXIT map of
+    a scheme that works in mixing ratio internally (the inverse of
+    :func:`specific_humidity_tendency_to_mixing_ratio_tendency`).  The
+    derivative is ``dq/dt = dr/dt / (1 + r)^2``.  For a FINITE increment
+    over a step use :func:`mixing_ratio_increment_to_specific_humidity`:
+    the derivative form is first-order in ``dr``.
+    """
+    r = jnp.maximum(jnp.asarray(mixing_ratio), 0.0)
+    return jnp.asarray(mixing_ratio_tendency) / ((1.0 + r) * (1.0 + r))
+
+
+def mixing_ratio_increment_to_specific_humidity(
+    mixing_ratio: jax.Array,
+    mixing_ratio_increment: jax.Array,
+) -> jax.Array:
+    """EXACT specific-humidity change for a finite mixing-ratio increment:
+    ``q(r + dr) - q(r)`` with ``q = r / (1 + r)``, i.e.
+    ``dr / ((1 + r) (1 + r + dr))``.  Use this at a scheme's exit when its
+    internal update is a finite step, so water mass is exact rather than
+    first-order (codex 2026-09-28: converting a state does not convert its
+    tendency).
+    """
+    r = jnp.maximum(jnp.asarray(mixing_ratio), 0.0)
+    r_new = jnp.maximum(r + jnp.asarray(mixing_ratio_increment), 0.0)
+    # the increment is applied to the FLOORED end state, so a depletion past
+    # zero returns exactly -q(r) and never a negative specific humidity
+    # (codex 2026-09-28); with r_new >= 0 both denominators are >= 1
+    return (r_new - r) / ((1.0 + r) * (1.0 + r_new))
+
+
 def relative_humidity(
     T: jax.Array,
     p: jax.Array,
@@ -713,18 +1166,98 @@ def relative_humidity(
     return e / saturation_vapor_pressure(T)
 
 
-def latent_heat_vaporization_sst(T_sfc_K: jax.Array) -> jax.Array:
-    """SST-dependent latent heat of vaporization [J/kg].
+def latent_heat_vaporization(
+    T: jax.Array,
+    c_liquid: float = constants.c_pw,
+) -> jax.Array:
+    """Latent heat of vaporization at ``T`` [J/kg], Kirchhoff form.
 
-    The NEMO/AeroBulk air-sea convention (sbc_phy ``L_vap``, also
-    COARE/Fairall): ``L = L_v - L_v_sst_slope (T - T_freeze)``; equals
-    ``constants.L_v`` at 0 degC by construction.  Up to ~3 % smaller than
-    the constant at warm SST (issue #762).  Dtype-preserving — the OMIP
-    NEMO-parity path wraps this with its float64 pin.
+    ``L_v(T) = L_v - (c_liquid - c_pv) (T - T_freeze)``: equals ``constants.L_v``
+    at 0 degC and falls by ``c_pw - c_pv`` = 2372 J/kg per kelvin (about 3 %
+    lower at 30 degC).  The one latent-heat family of the codebase
+    (``latent_heat_sublimation``, ``latent_heat_fusion``, ``surface_latent_heat``):
+    the NEMO/AeroBulk empirical slope (2370) was retired in its favour, and every
+    component-interface site still reading the bare constants (surface fluxes,
+    coupler tiles, land/ice/ocean exchange, budget ledgers) is tracked by
+    ``tests/test_no_bare_latent_heat.py`` for migration; the DifferBESS canopy
+    slope (2361) was retired for this formula too.
+    ``c_liquid`` exists for Emanuel's CONVECT port, which carries its own tunable
+    liquid heat capacity.  Dtype-preserving.
     """
-    return constants.L_v - constants.L_v_sst_slope * (
-        T_sfc_K - constants.T_freeze
-    )
+    return constants.L_v - (c_liquid - constants.c_pv) * (T - constants.T_freeze)
+
+
+def latent_heat_sublimation(T: jax.Array) -> jax.Array:
+    """Latent heat of sublimation at ``T`` [J/kg], Kirchhoff form.
+
+    ``L_s(T) = L_s + (c_pv - c_pi) (T - T_freeze)``; ``c_pv < c_pi`` so it
+    DEcreases with temperature (2.8347e6 at 0 degC, larger in the cold).
+    """
+    return constants.L_s + (constants.c_pv - constants.c_pi) * (T - constants.T_freeze)
+
+
+def latent_heat_fusion(T: jax.Array) -> jax.Array:
+    """Latent heat of fusion at ``T`` [J/kg]: ``L_s(T) - L_v(T)`` identically,
+    i.e. ``L_f + (c_pw - c_pi) (T - T_freeze)``."""
+    return latent_heat_sublimation(T) - latent_heat_vaporization(T)
+
+
+def surface_latent_heat(T_sfc: jax.Array, frozen_fraction: jax.Array | float) -> jax.Array:
+    """Latent heat [J/kg] of the water leaving a surface at ``T_sfc``.
+
+    ``(1 - f) L_v(T) + f L_s(T)`` with ``f`` the frozen (snow / ice) fraction of
+    the evaporating surface -- a fractional weight, not a threshold switch, so
+    the flux is continuous and differentiable across melt-out.  A tile made of
+    several evaporating components (transpiring canopy under a sublimating
+    snowpack, ice categories) sums ``L * E`` per component instead of calling
+    this with an aggregate temperature.  ``frozen_fraction`` is the caller's
+    contract to keep in [0, 1]; it is not clamped here.
+    """
+    f = jnp.asarray(frozen_fraction, dtype=jnp.asarray(T_sfc).dtype)
+    return (1.0 - f) * latent_heat_vaporization(T_sfc) + f * latent_heat_sublimation(T_sfc)
+
+
+# Surface schemes whose ported oracle charges CONSTANT latent heats rather than
+# the Kirchhoff family above: the CESM shr_flux_atmOcn air-sea law
+# (core.bulk_flux.compute_sam_oceflx_fluxes: L_v, or L_s with ``ice``) and the
+# CLM-ML canopy, whose LatVap charges ALL its water (leaf and soil) at
+# clm_varcon hvap (== constants.L_v) when its reference air temperature is above
+# freezing and hsub (== constants.L_s) otherwise (MLWaterVaporMod.LatVap at
+# tref_forcing, MLLeafFluxesMod / MLSoilFluxesMod).
+_ORACLE_CONSTANT_LATENT_SCHEMES = frozenset({"large_yeager_cesm", "clm_ml"})
+# Schemes that charge the Kirchhoff latent heat at the surface temperature: the
+# bulk laws (core.bulk_flux; "nemo_si3_constant" reaches the atmosphere surface
+# layer only through its constant-coefficient law) and the land surface schemes.
+_KIRCHHOFF_LATENT_SCHEMES = frozenset({
+    "constant", "most", "coare3", "large_yeager", "nemo_si3_constant",
+    "simple_seb", "two_leaf",
+})
+
+
+def charged_latent_heat(scheme: str, T: jax.Array, *, ice: bool = False) -> jax.Array:
+    """Latent heat [J/kg] the surface scheme ``scheme`` charged for the water it
+    moved, given the temperature ``T`` the scheme evaluates its latent heat at
+    (the surface temperature for every scheme except CLM-ML, whose ``T`` is its
+    reference AIR temperature and which ignores ``ice``; ``ice``: the
+    sublimation stream).
+
+    Dividing that scheme's latent heat flux by this returns exactly its water
+    flux -- the ONE place every water-from-heat inverse looks up the scheme, so
+    an inverse cannot disagree with the charge (a call that overrides the law's
+    latent heat with an explicit ``L_latent`` must invert with that value
+    instead).  Raises on an unknown scheme.
+    """
+    T = jnp.asarray(T)
+    if scheme == "clm_ml":
+        return jnp.where(T > constants.T_freeze, constants.L_v, constants.L_s).astype(T.dtype)
+    if scheme in _ORACLE_CONSTANT_LATENT_SCHEMES:
+        L = constants.L_s if ice else constants.L_v
+        return jnp.full(jnp.shape(T), L, dtype=T.dtype)
+    if scheme in _KIRCHHOFF_LATENT_SCHEMES:
+        return latent_heat_sublimation(T) if ice else latent_heat_vaporization(T)
+    raise ValueError(
+        f"charged_latent_heat: unknown surface scheme {scheme!r}; expected one of "
+        f"{sorted(_ORACLE_CONSTANT_LATENT_SCHEMES | _KIRCHHOFF_LATENT_SCHEMES)}.")
 
 
 def moist_air_cp(q_air: jax.Array) -> jax.Array:

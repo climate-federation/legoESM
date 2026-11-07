@@ -1,0 +1,27 @@
+--- usrdef_nam.F90	2026-09-11 07:59:45.430746033 -0400
++++ usrdef_nam.F90.new	2026-09-11 07:59:45.479744208 -0400
+@@ -28,6 +28,7 @@
+    !                              !!* namusr_def namelist *!!
+    LOGICAL, PUBLIC ::   ln_bench   ! =T benchmark test with gyre: the gridsize is constant (no need to adjust timestep or viscosity)
+    INTEGER, PUBLIC ::   nn_GYRE    ! 1/nn_GYRE = the resolution chosen in degrees and thus defining the horizontal domain size
++   INTEGER, PUBLIC ::   nn_pert_seed = 0   ! from-rest ensemble seed for the 1.e-10 K IC temperature perturbation (0 = none)
+ 
+    !! * Substitutions
+ #  include "read_nml_substitute.h90"
+@@ -61,7 +62,7 @@
+       !
+       INTEGER ::   ios   ! Local integer
+       !!
+-      NAMELIST/namusr_def/ nn_GYRE, ln_bench, jpkglo
++      NAMELIST/namusr_def/ nn_GYRE, ln_bench, jpkglo, nn_pert_seed
+       !!----------------------------------------------------------------------
+       !
+       READ_NML_(numnam_cfg,cfg,namusr_def,.TRUE.)
+@@ -117,6 +118,7 @@
+          ENDIF
+ #endif
+          WRITE(numout,*) '      number of model levels                           jpkglo = ', kpk
++         WRITE(numout,*) '      from-rest ensemble perturbation seed        nn_pert_seed = ', nn_pert_seed
+          WRITE(numout,*) '   '
+       ENDIF
+       !

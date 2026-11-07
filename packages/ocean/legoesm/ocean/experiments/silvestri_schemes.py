@@ -37,7 +37,12 @@ SILVESTRI_JET_SCHEMES: dict[str, dict] = {
                 weno_d_term=True, lateral_friction_scheme="none",
                 **_NO_EXPLICIT_VISC),
     # UP3: 3rd-order upwind-biased flux-form (implicit dissipation, no closure).
-    "UP3": dict(momentum_advection="flux_form", momentum_flux_scheme="upwind3",
+    # The paper's UP3 is Oceananigans UpwindBiased(order=3), which selects the
+    # upwind branch by the sign of the TRANSPORT for every flux family
+    # (upwind_biased_advective_fluxes.jl:18-24) -- NOT NEMO's advected-velocity
+    # pair.  See UP3_REFERENCE_SELECTOR in ocean_pe_latlon_cgrid.
+    "UP3": dict(momentum_advection="flux_form",
+                momentum_flux_scheme="oceananigans_up3",
                 lateral_friction_scheme="none", **_NO_EXPLICIT_VISC),
     # SM2: energy-conserving vorticity flux + OM4p25 Smagorinsky lateral friction.
     "SM2": dict(momentum_advection="vector_invariant",

@@ -56,7 +56,7 @@ compressible_euler_latlon_cgrid.py compressible_euler_mpas.py
 primitive_eq_cdgrid.py             primitive_eq_latlon_cgrid.py
 primitive_eq_mpas.py               semi_implicit_cdgrid.py
 shallow_water_fv3_cdgrid.py        shallow_water_latlon_cgrid.py
-shallow_water_mpas.py              shallow_water_nesting.py
+shallow_water_mpas.py
 spectral_pe.py                     spectral_sw.py
 spectral_nh.py                     sharded_atm_latlon_step.py
 tiled_step_adapter.py              tracer_transport_latlon.py
@@ -69,9 +69,8 @@ dcmip2025_ic.py
 spectral_les_plane.py    spectral_les_moist.py    spectral_plane.py
 column_les.py            column_les_diagnosis.py
 les_closure_diagnosis.py les_regime.py            les_vertical_mapping.py
-tke_sgs_plane.py
-pseudo_incompressible_plane.py       pseudo_incompressible_plane_mpi.py
-pseudo_incompressible_poisson.py     pseudo_incompressible_poisson_mpi.py
+pseudo_incompressible_plane.py
+pseudo_incompressible_poisson.py
 compressible_euler_plane.py          compressible_euler_plane_halo.py
 plane_fd_advection.py   plane_operators.py        plane_operators_halo.py
 ```

@@ -20,7 +20,7 @@ commit messages c1e0317a..HEAD.)*
 | Runs AMIP gray + full RRTMG/CMIP6 | ✅ validated clean (mass+moisture conserved, finite, stable) |
 | Metal import crash | ✅ fixed (`spectral_pe` device op → `math.log`) |
 | **Physically realistic IC** | ✅ `ic="standard"` (lat-lon): lapse-rate T + equator-pole gradient + thermal-wind jet + topography-consistent p_s + hybrid-coord-correct. CWV 84→~12 kg/m² (Earth-like), jet ~29 m/s @24°, 90-day climate stable, 22 tests |
-| Realistic IC in CMIP6 deck | ✅ `run_amip_cmip6_deck.py --ic standard` |
+| Realistic IC in CMIP6 deck | ✅ `run_amip_smoke_deck.py --ic standard` |
 | Non-flat topography on lat-lon | ✅ gaussian/zonal/schaer generators fixed for lat-lon |
 | device_config↔runtime cold-import | ✅ fixed (unblocked MPI allreduce + GPU 1st resolution) |
 | **GPU scaling harness** | 🟡 lat-lon un-blocked, single-device verified on CPU (LL128 SYPD 7.7); multi-GPU SPMD = NotImplementedError (needs sharded step + real GPU) |

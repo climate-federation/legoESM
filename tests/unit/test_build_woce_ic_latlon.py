@@ -75,13 +75,40 @@ def test_regrid_locality_cutoff_leaves_far_targets_nan():
     assert np.isnan(far).all()
 
 
-def test_vertical_interp_below_bottom_holds_edge():
-    # WOA depths deeper than the deepest valid native level hold the deepest value
+def test_vertical_interp_below_bottom_is_nan_not_the_bottom_value():
+    # Target depths deeper than the deepest valid native level must come out
+    # NaN.  Holding the deepest value there (numpy's edge behaviour, which
+    # this helper used to inherit) is how a 100 m shelf column's warm bottom
+    # water was written all the way to 5500 m; the caller's per-level
+    # nearest-valid fill takes it from a column that really was measured there.
     src_z = np.array([0.0, 100.0, 500.0])
     col = np.array([18.0, 12.0, 6.0])
     out = interp_column_to_depths(col, src_z, np.array([500.0, 1000.0, 5000.0]))
-    assert np.isclose(out[0], 6.0)
-    assert np.isclose(out[1], 6.0) and np.isclose(out[2], 6.0)   # edge-held
+    assert np.isclose(out[0], 6.0)               # the deepest observation
+    assert np.isnan(out[1]) and np.isnan(out[2])  # below it: no observation
+
+
+def test_vertical_interp_boundary_of_the_deepest_observation():
+    """The cut is strictly BELOW the deepest observation, and it survives a
+    descending target axis and a scalar target -- the three ways an off-by-one
+    here would silently drop or keep a level."""
+    src_z = np.array([0.0, 100.0, 500.0])
+    col = np.array([18.0, 12.0, 6.0])
+    # exactly AT the deepest observation: keep it, it was measured
+    assert np.isclose(interp_column_to_depths(col, src_z, np.array([500.0]))[0],
+                      6.0)
+    # a descending target axis masks the same entries
+    out = interp_column_to_depths(col, src_z,
+                                  np.array([5000.0, 500.0, 0.0]))
+    assert np.isnan(out[0]) and np.isclose(out[1], 6.0)
+    # a scalar target keeps its shape on both branches
+    assert np.shape(interp_column_to_depths(col, src_z, np.array(5000.0))) == ()
+    assert np.isnan(interp_column_to_depths(col, src_z, np.array(5000.0)))
+    # ABOVE the shallowest observation the edge value is still held: the
+    # shallowest observation is the surface.
+    assert np.isclose(
+        interp_column_to_depths(col, np.array([10.0, 100.0, 500.0]),
+                                np.array([0.0]))[0], 18.0)
 
 
 def test_vertical_interp_linear_column():
@@ -100,3 +127,15 @@ def test_vertical_interp_degenerate_is_nan():
     col = np.array([np.nan, np.nan, 4.0])            # <2 valid
     out = interp_column_to_depths(col, src_z, np.array([0.0, 50.0]))
     assert np.isnan(out).all()
+
+
+def test_a_non_finite_source_depth_is_dropped_with_its_value():
+    # A NaN DEPTH used to reach numpy's interpolation as an x-coordinate
+    # (undefined) and made the deep cutoff's max() NaN, so the cutoff silently
+    # did nothing and the deepest value was held down again.
+    src_z = np.array([0.0, np.nan, 500.0])
+    col = np.array([18.0, 12.0, 6.0])
+    out = interp_column_to_depths(col, src_z, np.array([0.0, 250.0, 5000.0]))
+    assert np.isclose(out[0], 18.0)
+    assert np.isclose(out[1], 12.0)     # midway 0-500 m on the two real levels
+    assert np.isnan(out[2])             # the cutoff still fires

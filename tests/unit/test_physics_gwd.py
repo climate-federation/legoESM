@@ -19,7 +19,7 @@ def _make_state(n=8, nlev=10, wind_speed=10.0):
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
-    grid = create_cubed_sphere(n)
+    grid = create_cubed_sphere(n)._replace(land_frac=jnp.ones(6 * n * n))
     sigma = create_sigma_coordinate(nlev)
     state = held_suarez_init(grid, sigma)
     state = state._replace(
@@ -45,8 +45,9 @@ def _run_gwd(scheme, **kwargs):
 
 
 ALL_SCHEMES = ["rayleigh", "lindzen", "mcfarlane", "hines", "prognostic_spectral"]
-# Diagnostic schemes (not multi-directional) where drag should oppose wind
-DIAGNOSTIC_SCHEMES = ["rayleigh", "lindzen", "mcfarlane", "hines"]
+# Diagnostic schemes (not multi-directional) where drag should oppose wind.
+# Hines (8-azimuth spectrum, drag relative to the launch-level wind) is not one.
+DIAGNOSTIC_SCHEMES = ["rayleigh", "lindzen", "mcfarlane"]
 
 
 # ============================================================================
@@ -76,7 +77,9 @@ def test_drag_opposes_wind(scheme):
 
 @pytest.mark.parametrize("scheme", ALL_SCHEMES)
 def test_zero_wind_zero_drag(scheme):
-    """With u = v = 0, GWD tendencies should be zero."""
+    """With u = v = 0, GWD tendencies should be zero.  Hines (LMDZ port) keeps
+    LMDZ's sign-blind |u| < 1e-3 m/s wind floor, so a resting column carries a
+    small drag (V54): bounded at 1 m/s/day instead."""
     state, grid, sigma = _make_state(wind_speed=0.0)
     state = state._replace(
         v=Field(data=jnp.zeros_like(state.v.data),
@@ -87,8 +90,9 @@ def test_zero_wind_zero_drag(scheme):
     tend, _ = gwd_fn(state, grid, sigma)
     max_du = float(jnp.max(jnp.abs(tend.du_dt.data)))
     max_dv = float(jnp.max(jnp.abs(tend.dv_dt.data)))
-    assert max_du < 1e-10, f"{scheme}: du_dt = {max_du:.2e} with zero wind"
-    assert max_dv < 1e-10, f"{scheme}: dv_dt = {max_dv:.2e} with zero wind"
+    tol = 1.0 / 86400.0 if scheme == "hines" else 1e-10
+    assert max_du < tol, f"{scheme}: du_dt = {max_du:.2e} with zero wind"
+    assert max_dv < tol, f"{scheme}: dv_dt = {max_dv:.2e} with zero wind"
 
 
 # ============================================================================
@@ -129,69 +133,6 @@ def test_rayleigh_sponge_structure():
     top_drag = float(jnp.max(jnp.abs(du_dt[..., :3])))
     bot_drag = float(jnp.max(jnp.abs(du_dt[..., -5:])))
     assert top_drag > 1e-8 or bot_drag > 1e-8, "Rayleigh: no drag anywhere"
-
-
-# ============================================================================
-# Hines: WKB amplitude growth uses inter-level rho ratio (not cumulative)
-# ============================================================================
-
-def test_hines_no_saturation_zero_drag():
-    """In the no-saturation limit (very tiny m_star, sigma_sat huge), Hines
-    drag must vanish.
-
-    The WKB envelope grows as ``sqrt(rho_sfc / rho_z)`` which for an
-    isothermal column is bounded by sqrt(rho_sfc/rho_top) ~ 30 over the
-    50-km column built below.  Setting ``m_star = 1e-9`` makes the
-    saturation amplitude ``sigma_sat = N / (m_star * rho_ratio)`` ~ 1e6
-    m/s — so a correctly-amplified wave (bounded by ~60 m/s) never
-    saturates and ``du/dt`` must be machine zero.
-
-    A bug that compounds the rho ratio at every scan step (sigma_grown
-    multiplied by the *cumulative* sqrt(rho_sfc/rho_k) instead of the
-    *inter-level* sqrt(rho[k+1]/rho[k])) over-amplifies the wave by the
-    product of cumulative ratios — order 4500x in this column — and
-    re-activates saturation even when m_star is tiny.  Pre-fix this
-    test sees max |du/dt| ~ 0.03 m/s^2.
-    """
-    import jax.numpy as _jnp
-    from legoesm import constants as _const
-    from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
-    from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
-
-    ncol, nlev = 1, 20
-    T = _jnp.full((ncol, nlev), 250.0)
-    H = _const.R_d * 250.0 / _const.g
-    z_full = _jnp.linspace(50e3, 0.0, nlev)
-    z_half_1d = _jnp.concatenate([
-        _jnp.array([z_full[0] + 1e3]),
-        0.5 * (z_full[:-1] + z_full[1:]),
-        _jnp.array([z_full[-1] - 1e3]),
-    ])
-    z_full_b = _jnp.broadcast_to(z_full[None, :], (ncol, nlev))
-    z_half_b = _jnp.broadcast_to(z_half_1d[None, :], (ncol, nlev + 1))
-    p_full = _jnp.broadcast_to(
-        (1e5 * _jnp.exp(-z_full / H))[None, :], (ncol, nlev),
-    )
-    p_half = _jnp.broadcast_to(
-        (1e5 * _jnp.exp(-z_half_1d / H))[None, :], (ncol, nlev + 1),
-    )
-    rho = p_full / (_const.R_d * T)
-    u = _jnp.full((ncol, nlev), 10.0)
-    v = _jnp.zeros((ncol, nlev))
-    lat = _jnp.zeros(ncol)
-
-    cfg = HinesConfig(m_star=1e-9, total_rms_wind=2.0)
-    out = hines_gwd(u, v, T, p_full, p_half, z_full_b, z_half_b, rho, lat,
-                   300.0, cfg)
-    max_du = float(jnp.max(jnp.abs(out.du_dt)))
-    # Post-fix expectation: drag <= numerical noise.  Pre-fix this is
-    # ~3e-2 m/s^2 from spurious cumulative compounding.
-    assert max_du < 1e-8, (
-        f"Hines: max |du/dt| = {max_du:.3e} m/s^2 in the no-saturation "
-        "limit; expected ~0 (sigma_sat is set ~1e6 m/s by tiny m_star). "
-        "A non-zero drag indicates the WKB amplitude is over-amplified "
-        "by a per-step cumulative rho-ratio compounding."
-    )
 
 
 # ============================================================================
@@ -257,7 +198,8 @@ def test_mcfarlane_drag_scales_linearly_with_k_wave():
             h_topo=200.0, k_wave=2.0 * math.pi / 100e3 * k_factor,
         )
         out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full_b, z_half_b,
-                           rho, lat, 300.0, cfg)
+                           rho, lat, 300.0, cfg, p_ref_half=p_half[0],
+                           land_frac_col=jnp.ones(u.shape[0]))
         return float(jnp.sum(jnp.abs(out.du_dt))), float(out.eps_gwd[0])
 
     drag_lo, eps_lo = drag_at_k(1.0)
@@ -350,7 +292,8 @@ def test_mcfarlane_saturation_path_fires_in_uniform_wind():
 
     cfg = McFarlaneConfig(h_topo=2000.0)
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full_b, z_half_b,
-                       rho, lat, 300.0, cfg)
+                       rho, lat, 300.0, cfg, p_ref_half=p_half[0],
+                           land_frac_col=jnp.ones(u.shape[0]))
     max_du = float(jnp.max(jnp.abs(out.du_dt)))
     eps = float(out.eps_gwd[0])
 
@@ -414,7 +357,7 @@ def _make_sheared_state(n=8, nlev=10):
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init
 
-    grid = create_cubed_sphere(n)
+    grid = create_cubed_sphere(n)._replace(land_frac=jnp.ones(6 * n * n))
     sigma = create_sigma_coordinate(nlev)
     state = held_suarez_init(grid, sigma)
     # u profile: 30 m/s at surface (level nlev-1), 0.1 m/s at top (level 0).
@@ -448,18 +391,10 @@ def _gwd_config_with_active_drag(scheme):
     the model top, so the saturation scan deposits real drag and the
     differentiability tests exercise a non-trivial code path.
 
-    For Hines, the default per-level drag cap ``Fmax=0.1`` Pa binds at
-    this coarse (10-level) strong-shear column — the deposition pins at
-    the limiter, so it no longer responds to the Brunt-Vaisala frequency
-    ``N`` (hence ``T``) and ``dT_dt`` becomes T-independent (grad → 0).
-    Raising ``Fmax`` lets the Doppler-spread ``(sigma_grown^2 -
-    sigma_sat^2)`` term — which carries the temperature dependence via
-    ``sigma_sat = N / m_*`` — be the binding term again.  (On
-    operational many-level grids the per-level deposition is « 0.1 Pa,
-    so the production default does not bind.)
+    Hines runs at its defaults.
     """
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
-        HinesConfig, LindzenConfig, McFarlaneConfig,
+        LindzenConfig, McFarlaneConfig,
     )
     if scheme == "lindzen":
         return GravityWaveDragConfig(
@@ -470,18 +405,6 @@ def _gwd_config_with_active_drag(scheme):
         return GravityWaveDragConfig(
             scheme="mcfarlane",
             mcfarlane=McFarlaneConfig(h_topo=10_000.0),
-        )
-    if scheme == "hines":
-        # Relax the E3SM-faithful magnitude limiter (``tndmax``/``umcfac``;
-        # gw_common.F90:642) for this differentiability probe. At Fmax=100 the
-        # no-reversal cap ``accel = -min(|accel|, umcfac*U_mag/dt)`` binds at
-        # every active level, and ``jnp.minimum`` routes the gradient to the
-        # T-independent cap → d(dT/dt)/dT collapses to ~0. Lifting the cap
-        # isolates the core N(T) → drag → frictional-heating path the test means
-        # to exercise (the limiter magnitude itself is covered by its own tests).
-        return GravityWaveDragConfig(
-            scheme="hines",
-            hines=HinesConfig(Fmax=100.0, tndmax_per_day=1.0e4, umcfac=1.0e3),
         )
     return GravityWaveDragConfig(scheme=scheme)
 
@@ -519,48 +442,6 @@ def test_gwd_grad_through_T_finite_and_nonzero(scheme):
         )
 
 
-def test_hines_T_gradient_is_limiter_gated_not_missing():
-    """Documents the diagnosis behind the relaxed-limiter hines config above.
-
-    The hines heating IS a differentiable function of T (via the Brunt-Väisälä
-    frequency N(theta) → saturation amplitude → drag → frictional heating). But
-    the E3SM-faithful magnitude limiter ``accel = -min(|accel|, umcfac*U_mag/dt)``
-    is intentionally T-independent *when it binds*: ``jnp.minimum`` routes the
-    gradient to the cap, so the operational (saturated, Fmax=100) regime shows a
-    ~zero dT/dT. That is the limiter doing its job, not a missing/severed T-path.
-
-    Proof that the relaxed config exposes REAL signal (not numerical noise): the
-    cap-off gradient is many orders of magnitude larger than the cap-on one.
-    """
-    from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
-
-    state, grid, sigma = _make_sheared_state()
-    T_field = state.T
-
-    def grad_for(hines_cfg):
-        def loss(dT):
-            sp = state._replace(T=T_field.replace(data=T_field.data + dT))
-            fn = make_gwd_physics(
-                GravityWaveDragConfig(scheme="hines", hines=hines_cfg),
-                model_type="hydrostatic", dt=300.0,
-            )
-            tend, _ = fn(sp, grid, sigma)
-            return jnp.sum(tend.dT_dt.data ** 2)
-        return abs(float(jax.grad(loss)(jnp.asarray(0.0))))
-
-    capped = grad_for(HinesConfig(Fmax=100.0))  # E3SM limiter binds → ~0
-    freed = grad_for(HinesConfig(Fmax=100.0, tndmax_per_day=1.0e4, umcfac=1.0e3))
-    assert jnp.isfinite(capped) and jnp.isfinite(freed)
-    assert freed > 1e-15, (
-        f"uncapped hines T-gradient should be real signal, got {freed}"
-    )
-    assert freed > 1.0e6 * capped, (
-        f"lifting the magnitude limiter must expose a far larger T-gradient "
-        f"(capped={capped:.3e}, freed={freed:.3e}) — confirms it is the cap, "
-        f"not a missing T-path, that zeroes the operational gradient."
-    )
-
-
 @pytest.mark.parametrize("scheme", ["rayleigh", "lindzen", "mcfarlane", "hines"])
 def test_gwd_grad_through_wind_finite_and_nonzero(scheme):
     """``d sum(du_dt^2) / d u`` is finite and non-zero for every scheme.
@@ -574,7 +455,10 @@ def test_gwd_grad_through_wind_finite_and_nonzero(scheme):
     u_field = state.u
 
     def loss(u_perturb):
-        u_perturbed = u_field.replace(data=u_field.data + u_perturb)
+        # Hines sees only the wind relative to its launch level (a uniform shift
+        # is exactly invisible), so it is probed with a shear-changing scaling.
+        du_p = u_field.data * u_perturb if scheme == "hines" else u_perturb
+        u_perturbed = u_field.replace(data=u_field.data + du_p)
         state_p = state._replace(u=u_perturbed)
         config = _gwd_config_with_active_drag(scheme)
         gwd_fn = make_gwd_physics(config, model_type="hydrostatic", dt=300.0)
@@ -620,120 +504,6 @@ def test_prognostic_spectral_grad_through_launch_flux():
         "non-trivial drag profile.  A zero gradient indicates the spectral "
         "prognostic state has become a non-traceable buffer."
     )
-
-
-# ============================================================================
-# Hines: drag has correct units (Pa, not kg/(m²·s))
-# ============================================================================
-
-def test_hines_drag_units_match_lindzen_pa():
-    """Audit cycle 2 P1 (deferred → fixed): the Hines drag formula
-    ``ρ · (σ_grown - σ_new)`` had units ``kg/(m²·s)`` rather than the
-    Pa expected by ``Fmax`` and the downstream ``accel = -drag/(ρ·dz)``
-    which needed Pa for ``m/s²``.  The fix uses
-    ``ρ · (σ²_grown - σ²_new)`` — wave momentum-flux divergence with
-    correct stress units.
-
-    This regression test: compute the Hines drag profile under a
-    canonical setup and check that the values are in the Pa-bounded
-    range ``[0, Fmax]``, *and* that the resulting acceleration
-    magnitude is in the physical ``m/s²`` range expected for
-    stratospheric GWD (~``1e-5`` to ``1e-3`` m/s²).  Pre-fix the
-    same fixture would also be in ``[0, 0.1]`` numerically (the cap
-    floors both forms identically) but the *acceleration* would be
-    in the wrong ``1/s`` units.
-    """
-    import jax.numpy as _jnp
-    from legoesm import constants as _const
-    from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
-    from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
-
-    ncol, nlev = 1, 20
-    T = _jnp.full((ncol, nlev), 250.0)
-    H = _const.R_d * 250.0 / _const.g
-    z_full = _jnp.linspace(50e3, 0.0, nlev)
-    z_half_1d = _jnp.concatenate([
-        _jnp.array([z_full[0] + 1e3]),
-        0.5 * (z_full[:-1] + z_full[1:]),
-        _jnp.array([z_full[-1] - 1e3]),
-    ])
-    z_full_b = _jnp.broadcast_to(z_full[None, :], (ncol, nlev))
-    z_half_b = _jnp.broadcast_to(z_half_1d[None, :], (ncol, nlev + 1))
-    p_full = _jnp.broadcast_to(
-        (1e5 * _jnp.exp(-z_full / H))[None, :], (ncol, nlev),
-    )
-    p_half = _jnp.broadcast_to(
-        (1e5 * _jnp.exp(-z_half_1d / H))[None, :], (ncol, nlev + 1),
-    )
-    rho = p_full / (_const.R_d * T)
-    u = _jnp.full((ncol, nlev), 10.0)
-    v = _jnp.zeros((ncol, nlev))
-    lat = _jnp.zeros(ncol)
-
-    # Default config: saturation is active aloft; Fmax = 0.1 Pa.
-    cfg = HinesConfig()
-    out = hines_gwd(u, v, T, p_full, p_half, z_full_b, z_half_b, rho, lat,
-                   300.0, cfg)
-
-    # 1. Acceleration sign: GWD opposes the wind (u > 0 ⇒ du/dt ≤ 0)
-    #    everywhere active drag is deposited.
-    max_pos_dudt = float(jnp.max(out.du_dt))
-    assert max_pos_dudt <= 1e-15, (
-        f"Hines: positive du/dt = {max_pos_dudt:.3e} m/s² for u > 0 — "
-        "GWD must always oppose the resolved flow."
-    )
-
-    # 2. Acceleration magnitude: stratospheric GWD is typically
-    #    1e-5–1e-3 m/s² (≈1–100 m/s/day).  Anything > 0.1 m/s² is
-    #    non-physical and would indicate a unit error like the buggy
-    #    ``1/s`` form had been retained.
-    max_abs_dudt = float(jnp.max(jnp.abs(out.du_dt)))
-    assert max_abs_dudt < 1e-2, (
-        f"Hines: max |du/dt| = {max_abs_dudt:.3e} m/s² exceeds the "
-        "physical stratospheric GWD bound (~1e-3 m/s²).  This indicates "
-        "the drag dimensional fix has regressed — units back to "
-        "``kg/(m²·s)`` and the downstream acceleration in ``1/s``."
-    )
-
-
-class TestBruntVaisalaShared:
-    """Direct tests for the shared physics._shared.brunt_vaisala_n_full helper
-    that the four GWD backends (hines/lindzen/mcfarlane/prognostic_spectral)
-    now call instead of an inline copy (ponytail dedup 2026-06-17)."""
-
-    def test_shape_and_positivity(self):
-        from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
-        from legoesm import constants
-        ncol, nlev = 4, 12
-        # Stably-stratified isothermal-ish column: θ grows with height.
-        z = jnp.broadcast_to(jnp.linspace(2.0e4, 0.0, nlev), (ncol, nlev))
-        p = jnp.broadcast_to(jnp.linspace(2.0e3, 1.0e5, nlev), (ncol, nlev))
-        T = jnp.full((ncol, nlev), 250.0)
-        N = brunt_vaisala_n_full(T, p, z)
-        assert N.shape == (ncol, nlev)
-        # N² floored at 1e-8 ⇒ N ≥ 1e-4 everywhere, finite.
-        assert jnp.all(N >= 1e-4 - 1e-12)
-        assert jnp.all(jnp.isfinite(N))
-
-    def test_matches_inline_reference(self):
-        """Byte-identical to the formula the GWD schemes used to inline."""
-        import numpy as np
-        from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
-        from legoesm import constants
-        rng = np.random.default_rng(1)
-        T = jnp.asarray(220 + 60 * rng.random((5, 12)))
-        p = jnp.asarray(np.sort(1e5 * rng.random((5, 12)))[:, ::-1].copy())
-        z = jnp.asarray(np.sort(2e4 * rng.random((5, 12))).copy())
-        theta = T * (constants.p_ref / jnp.clip(p, 1.0, None)) ** constants.kappa
-        dz = jnp.clip(jnp.abs(z[:, :-1] - z[:, 1:]), 1.0, None)
-        dth = (theta[:, :-1] - theta[:, 1:]) / dz
-        tb = 0.5 * (theta[:, :-1] + theta[:, 1:])
-        N2 = jnp.clip((constants.g / jnp.clip(tb, 1.0, None)) * dth, 1e-8, None)
-        Nh = jnp.sqrt(N2)
-        ref = jnp.concatenate(
-            [Nh[:, :1], 0.5 * (Nh[:, :-1] + Nh[:, 1:]), Nh[:, -1:]], axis=1
-        )
-        assert jnp.array_equal(brunt_vaisala_n_full(T, p, z), ref)
 
 
 # ============================================================================
@@ -845,7 +615,8 @@ def test_combined_tendency_is_exact_sum():
     h_topo = jnp.full((ncol,), 800.0)
 
     oro = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
-                        cfg.mcfarlane, h_topo_col=h_topo)
+                        cfg.mcfarlane, h_topo_col=h_topo, p_ref_half=p_half[0],
+                        land_frac_col=jnp.ones(ncol))
     spec_out, spec_new_ref = prognostic_spectral_gwd(
         u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
         cfg.prognostic_spectral, spec_in)
@@ -853,7 +624,9 @@ def test_combined_tendency_is_exact_sum():
     _, combined_fn, full_cfg = get_gwd_fn(cfg)
     combined, spec_new = combined_fn(
         u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, full_cfg,
-        spec_in, h_topo_col=h_topo)
+        spec_in, h_topo_col=h_topo,
+        mcfarlane_kwargs={"p_ref_half": p_half[0],
+                          "land_frac_col": jnp.ones(u.shape[0])})
 
     assert jnp.allclose(combined.du_dt, oro.du_dt + spec_out.du_dt, atol=1e-12)
     assert jnp.allclose(combined.dv_dt, oro.dv_dt + spec_out.dv_dt, atol=1e-12)
@@ -881,7 +654,9 @@ def test_combined_threads_and_evolves_spectrum():
     spec_in = jnp.full((ncol, sc.n_azimuths, sc.n_wavenumbers), 0.01)
     _, combined_fn, full_cfg = get_gwd_fn(cfg)
     _, spec_new = combined_fn(
-        u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, full_cfg, spec_in)
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, full_cfg, spec_in,
+        mcfarlane_kwargs={"p_ref_half": p_half[0],
+                          "land_frac_col": jnp.ones(u.shape[0])})
     assert spec_new.shape == spec_in.shape
     assert not bool(jnp.allclose(spec_new, spec_in))
 
@@ -898,12 +673,15 @@ def test_stateless_composite_sums_without_spectrum():
     dt = 300.0
     cfg = GravityWaveDragConfig(scheme="hines+mcfarlane")
     oro = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
-                        cfg.mcfarlane)
+                        cfg.mcfarlane, p_ref_half=p_half[0],
+                        land_frac_col=jnp.ones(u.shape[0]))
     hin = hines_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
                     cfg.hines)
     _, combined_fn, full_cfg = get_gwd_fn(cfg)
     combined, spec_out = combined_fn(
-        u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, full_cfg, None)
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, full_cfg, None,
+        mcfarlane_kwargs={"p_ref_half": p_half[0],
+                          "land_frac_col": jnp.ones(u.shape[0])})
     assert jnp.allclose(combined.du_dt, oro.du_dt + hin.du_dt, atol=1e-12)
     assert jnp.allclose(combined.dT_dt, oro.dT_dt + hin.dT_dt, atol=1e-12)
     assert spec_out is None  # no stateful part -> spectrum passthrough

@@ -33,8 +33,6 @@ from legoesm.ocean.physics.surface_forcing import (
 )
 from legoesm.ocean.physics.bottom_drag import (
     BottomDragConfig,
-    LinearDragConfig,
-    QuadraticDragConfig,
 )
 from legoesm.ocean.physics.convection import (
     OceanConvectionConfig,
@@ -60,8 +58,6 @@ __all__ = [
     "RestoringConfig",
     "BulkFormulaConfig",
     "BottomDragConfig",
-    "LinearDragConfig",
-    "QuadraticDragConfig",
     "OceanConvectionConfig",
     "EnhancedDiffusionConfig",
     "PlumeConfig",

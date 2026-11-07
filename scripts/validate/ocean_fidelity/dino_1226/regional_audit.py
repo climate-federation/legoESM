@@ -1303,11 +1303,12 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
             e = ledger[(bname, day)]
             r = e["ratio"]
             is_no = e["verdict"].startswith("gap-at-")
+            u_flag = ('YES' if (is_no and not e['saturated']
+                                and e['u_material'])
+                      else ('n/a' if not is_no else 'no'))
             cells.append(f"{(r if r is not None else float('nan')):>8.2f}"
                          f"{e['x2yes']:>8.2f}{e['g_lastQ']:>9.2f}"
-                         f"{('YES' if (is_no and not e['saturated']
-                                       and e['u_material']) else
-                            ('n/a' if not is_no else 'no')):>5}")
+                         f"{u_flag:>5}")
         lines.append(f"{bname:<26}" + "".join(cells)
                      + f"{ledger[(bname, 360)]['lego_share_of_floor']:>9.1%}")
     _tbl("--- DOES `u` MATTER?  the growth an unsaturated floor would need "

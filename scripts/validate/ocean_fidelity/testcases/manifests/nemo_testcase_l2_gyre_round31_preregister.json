@@ -1,0 +1,121 @@
+{
+  "format": "nemo-testcase-l2-gyre-round31-preregister-v1",
+  "date": "2026-09-06",
+  "starting_tip": "ce38f20c89a0",
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "oracle_roots": {
+    "GYRE-zco": [
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round29_oracle_v2_zdf_matrix"
+    ],
+    "LOCK_EXCHANGE-zco": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+    "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10",
+    "ORCA2-zps": "detached scratch worktree of the round-27 ORCA2 probe, under /tmp"
+  },
+  "read_before_this_preregistration_no_prediction_carried": {
+    "r0_1": "src/OCE/DYN/dynzdf.F90:121-122 is the explicit stage update dyn_zdf performs on entry: puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kbb) + rDt * puu(ji,jj,jk,Krhs) ) * umask(ji,jj,jk), taken because ln_dynadv_vec = .true. (GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:161).",
+    "r0_2": "src/OCE/DYN/dynzdf.F90:147-159 then removes the barotropic velocity uu_b(Kaa) from every level and adds the barotropic bottom stress at the deepest wet level, under IF( ln_drgimp .AND. ln_dynspg_ts ).",
+    "r0_3": "The round-29 record's uu_Kaa_pre / vv_Kaa_pre are captured AFTER r0_1 and r0_2 and BEFORE the matrix build -- the insertion point is scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round29_zdf/dynzdf_round29.patch hunk @@ -170,6 +198,18 @@, whose own comment names the three statements above it.",
+    "r0_4": "legoESM's expose_pre_implicit_state hook publishes state_new immediately before _apply_implicit_vertical_mixing (ocean_model_latlon_cgrid.py:7731-7733). legoESM performs NEMO's barotropic removal (dynzdf.F90:148-150) and its bottom-stress addition (dynzdf.F90:156-159) INSIDE that solver, under zdf_baroclinic_only / zdf_drag_in_matrix (ocean_model_latlon_cgrid.py:9865-9876 and :9991-9996). So the model's capture point aligns with NEMO's dynzdf.F90:121-122, NOT with uu_Kaa_pre.",
+    "r0_5": "The barotropic re-imposition that follows the solve is src/OCE/stprk3_stg.F90:434-445 -- NOT :430, which is the CALL dyn_zdf itself. Round 30's receipt cited :430 for it and that citation is corrected here before any measurement.",
+    "r0_6": "NEMO calls dyn_vor unconditionally on the tanks: stp2d.F90:146 has no IF, and its own banner at :144-145 names the two forms it serves, COR + MET in flux form and VOR in vector-invariant form. On LOCK and OVERFLOW the operator is a Coriolis PLUS a metric term; both vanish there because f = 0 and the grid is uniform, not 'by construction'. Round 30's 'premise REFUTED' wording is struck here in favour of that statement."
+  },
+  "item1_receipt_corrections": {
+    "not_a_measurement": true,
+    "claim_under_test": "the round-30 receipt registered 4 of the round-30 fix's worsened trajectory rows; the arms contain 8.",
+    "threshold": "a row is WORSENED when after > before on the trajectory gate's normalized_max_abs; it is ABOVE ROUNDOFF when the relative increase exceeds 1e-6 (a change visible in the sixth significant digit).",
+    "corrections_to_land": [
+      "register all 8 worsened rows with the threshold, the boundary and the owner stated",
+      "correct or withdraw the sentence 'the AFTER arm on the committed clean tree'",
+      "record the restoration hash of the one-line temporary revert",
+      "state that Rule-12 eligibility for the ldf change is discharged on NO card",
+      "fix the barotropic-correction citation from stprk3_stg.F90:430 to :434-445",
+      "reconcile the commit message's 'a second error exposed' with the receipt's 'owner UNKNOWN'",
+      "relabel the 17x prediction gap as 'bounds, does not confirm'",
+      "note the round-29 instrument's one reformatted physics line"
+    ]
+  },
+  "item2_commit_stamp": {
+    "not_a_measurement": true,
+    "claim_under_test": "a gate report cannot today show that its HEAD agreed with the code that produced it.",
+    "landing_rule": "one shared worktree_stamp() in a new zero-dependency module, wired into every report-emitting gate in scripts/validate/ocean_fidelity/testcases/, fail-closed on a DIRTY worktree (which is exactly the state a HEAD/code disagreement produces) with a single named escape recorded in the artifact, and a grow-only ratchet test that refuses a new unstamped report emitter.",
+    "predictions": [
+      "P2a the ratchet is non-vacuous: deleting the stamp from any wired gate turns the ratchet test red.",
+      "P2b the fail-closed arm is non-vacuous: a synthetic dirty tree makes worktree_stamp() raise, and the named escape records clean=false plus the diff's SHA-256."
+    ]
+  },
+  "item3_depth_structure_discriminator": {
+    "claim_under_test": "GYRE's kt=1 stage-3 velocity error (u 9.481924730527598e-07) is owned by the barotropic correction at stprk3_stg.F90:434-445 rather than by the implicit vertical solve in dyn_zdf.",
+    "instrument": "a new gate scoring legoESM's kt=1 returned u/v against oracle_stage_kt00000001_s3.bin through the model's own path, binning the signed error by model level over wet faces, and reporting per-column column-uniformity.",
+    "mechanism": "the barotropic correction adds a 2-D field uniformly down each column, so if it owned the error the error would be EXACTLY column-uniform; the implicit solve is depth-structured and peaks where the surface stress enters and where the bottom drag acts.",
+    "predictions": [
+      "P3a the error is NOT column-uniform: fewer than 10 per cent of wet u columns have (max_k e - min_k e) / max_k |e| below 1e-2. CONFIRM => the barotropic correction is EXONERATED as sole owner and the implicit solve is the candidate.",
+      "P3b REFUTE: 90 per cent or more of wet u columns are column-uniform to 1e-2 => the barotropic correction at stprk3_stg.F90:434-445 is the candidate and the solve is exonerated.",
+      "P3c neither threshold met => the profile is reported and NO owner is named."
+    ]
+  },
+  "item4_pre_solve_vector": {
+    "claim_under_test": "round 30's statement that legoESM exposes no pre-solve vector is wrong: expose_pre_implicit_state carries u/v, and it aligns with NEMO's dynzdf.F90:121-122.",
+    "instrument_calibration_rule_1e": "no number from the reconstruction may be quoted until the reconstruction is shown to reproduce the record's own uu_Kaa_pre / vv_Kaa_pre bit for bit from the record's own operands by dynzdf.F90:121-122 plus :147-159.",
+    "predictions": [
+      "P4a CALIBRATION: (uu_Kbb_in + rDt*uu_Krhs_in)*umask, minus uu_b_Kaa*umask, plus the deepest-wet-level term zDt_2*(rCdU_bot(i+1,j)+rCdU_bot(i,j))*uu_b_Kaa/e3u_Kaa, equals uu_Kaa_pre with 0 bit-unequal cells inside the writer's own tile bounds. REFUTE: any bit-unequal cell inside those bounds -- the alignment table is then wrong and nothing below is quotable.",
+      "P4b legoESM's pre-implicit u/v matches NEMO's dynzdf.F90:121-122 reconstruction to at most 5e-12 absolute on wet faces -- about rDt = 14400 times the pre-dyn_zdf RHS residual 2.0614443633579772e-16 -- i.e. five orders of magnitude below the 9.481924730527598e-07 stage-3 error. CONFIRM => dyn_zdf's own explicit update is NOT the owner and the divergence is created downstream of it.",
+      "P4c REFUTE P4b: 1e-8 or more => the explicit update statement itself diverges and dyn_zdf's FIRST statement is the owner, which would also refute the round-30 exoneration of the stage-3 RHS."
+    ],
+    "landing_rule": "no fix lands from this item unless the changed operator is bit-exact given NEMO's own inputs on every card that executes it (Rule 12), discharged explicitly per card.",
+    "addendum_written_before_the_follow_up_run": {
+      "why": "P4b is REFUTED at 4.269765124169735e-04 for u and 4.029443737139659e-04 for v, which is the SIZE OF THE VELOCITY ITSELF (the record's uu_b_Kaa peaks at 4.255e-04), not a small residual. That is the signature of comparing two different quantities, not of a diverging statement -- so the alignment row is wrong and the model's capture point is elsewhere on dyn_zdf's entry path.",
+      "follow_up": "score the model's pre-implicit u/v against ALL THREE candidate boundaries in one run instead of guessing which: A = dynzdf.F90:121-122 (the explicit update, already measured), B = A after the barotropic removal at :149-150, C = B after the barotropic bottom-stress addition at :156-159, which is the record's own uu_Kaa_pre.",
+      "predictions": [
+        "P4d B is the model's capture point: the model's pre-implicit u/v matches boundary B to at most 5e-12 absolute on wet faces. CONFIRM => legoESM removes the barotropic mode BEFORE its implicit solver, not inside it as this manifest's r0_4 read, and dyn_zdf's explicit update and its barotropic removal are both exact.",
+        "P4e C differs from B on the deepest wet level and nowhere else. That is a check on the walk, not on the model.",
+        "P4f REFUTE both: none of A, B, C is below 5e-12 => the model's pre-implicit state is not any of dyn_zdf's three entry boundaries and the exposure cannot carry this walk at all."
+      ]
+    },
+    "second_addendum_written_before_the_run": {
+      "what_the_three_boundaries_showed": "P4f is CONFIRMED: none of A, B, C is small. A is 4.269765124169735e-04 on u, B 8.524937400852e-04, C 8.535125698e-04, against a model field whose own peak is 4.255609e-04 -- and the oracle's uu_b_Kaa peaks at 4.2551722767418954e-04 on the same mask. The model's pre-implicit vector IS the barotropic velocity plus a small deviation; NEMO's pre-solve vector has the barotropic velocity REMOVED.",
+      "read_from_both_sources_before_predicting": "legoESM applies NEMO's barotropic correction to the stage-3 velocity BEFORE the implicit solve (ocean_model_latlon_cgrid.py:6300-6322, _replace_stage_mean at :5754 with target uu_b at :5776) and again after it (:7940-:7952 under nemo_stage_mean_imposition, which GYRE resolves True). NEMO applies it ONCE, after (stprk3_stg.F90:437-446), and before the solve it instead SUBTRACTS uu_b at dynzdf.F90:149-150. So legoESM's implicit solve receives a vector differing from NEMO's by the column constant mean(A) - uu_b(Kaa).",
+      "predictions": [
+        "P4g SIZE: the column constant d = (reference-weighted depth mean of NEMO's explicit update A) - uu_b(Kaa), computed from the round-29 record's own operands, has a peak of order 1e-4 m/s. A constant is not invariant under the solve because the bottom-drag diagonal is not: dynzdf.F90:296 subtracts zDt_2*(rCdU_bot(i+1,j)+rCdU_bot(i,j))/e3u(iku,Kaa) from the deepest wet diagonal, a factor f. PREDICT f * max|d| is within a factor of 3 of the observed bottom-level error 9.482369792360580e-07. CONFIRM => the ordering difference is the leading candidate for GYRE's kt2 blocker and it is sized. REFUTE (outside a factor of 3) => the ordering difference is registered as a structural difference of UNKNOWN size and no owner is named from it.",
+        "P4h the ordering difference is CONFIRMED BY READING on both sides and UNMEASURED as an owner whatever P4g says: sizing an operand is not an ablation, and no fix lands this round on it."
+      ]
+    },
+    "third_addendum_written_before_the_run": {
+      "why": "The independent CLAIM reviewer REFUTED item 3's reasoning while agreeing with its direction, and its reading is sharper than mine. NEMO's barotropic correction is NOT an additive constant: stprk3_stg.F90:440 builds zub = uu_b(Kaa) - SUM(e3u_0*uu(:,Kaa))*r1_hu_0 from the SOLVE OUTPUT, so it is a rank-1 operator that turns a single-level error into a column-uniform image of itself. A level-30-only error d becomes (1-f)*d at level 30 and -f*d at levels 1..29 with f = e3t(30)/hu_0. The reviewer read f = 0.069921 off NEMO's own ladder parameters (usrdef_zgr.F90:133-137) and matched THREE observed statistics to four significant figures on that one constant. So the measured error is exactly ONE bad number per column, at the deepest wet level, and levels 1..29 are its barotropic image -- and my column-uniformity test, while it does rule out an error in zub itself, cannot separate the two level-30 candidates.",
+      "consequence_for_P4g": "P4g's prediction was compared against the POST-correction error 9.482369792360580e-07. The quantity it actually predicts is the PRE-correction single-cell error, d = e(30)/(1-f) = 1.0195e-06. P4g's predicted 1.022324152002595e-06 sits 0.3 per cent from that, not 8 per cent.",
+      "predictions": [
+        "P4i COLUMN-WISE: across all wet u columns, the back-derived single-cell error d_c = e_c(level 30)/(1-f) regressed on the ordering term (mean(A)_c - uu_b_c) * drag_c has slope within 0.02 of 1.0 and R-squared above 0.99. CONFIRM => the ordering difference is the owner of GYRE's kt2 blocker, established column by column and not at one peak. REFUTE (slope outside 0.9..1.1 or R-squared below 0.9) => the peak agreement was a coincidence of the maxima and no owner is named.",
+        "P4j f is read from the model's own geometry rather than assumed: f = e3(deepest wet level)/column depth, taken from the card, and the gate reports it next to the regression so the rank-1 inversion is auditable.",
+        "P4k whatever P4i says, NOTHING LANDS this round: an operand sized and a regression fitted are not an ablation, and the change this points at is an ordering change in the shared WS-RK3 momentum program that needs its own Rule-12 discharge."
+      ]
+    },
+    "reviewer_findings_accepted": {
+      "claim_B_relabelled": "The calibration is entirely internal to the oracle -- record operands, NEMO's formula, the record's own dump -- so it certifies the gate's TRANSCRIPTION of dynzdf.F90:121-159 and nothing downstream. It does not prove index or halo alignment with legoESM, and it touches none of the solve's own inputs (avm, e3uw(Kmm), e3u(Kaa), rCdU_bot, utauU, rDt). Honest label: the pre-solve transcription is calibrated.",
+      "claim_D_relabelled_again": "'Bounds, does not confirm' presumes the prediction was an upper bound by construction; it was a point estimate. Missing by 17x is a REFUTATION PENDING EXPLANATION, and a 1.7e-10 move against a 9.5e-7 error confirms nothing either way."
+    }
+  },
+  "item5_decision_16": {
+    "not_a_measurement": true,
+    "disposition": "CLOSED as re-file. NEMO calls dyn_vor unconditionally on the tanks (stp2d.F90:146); it vanishes there because f = 0 and the grid is uniform. legoESM's flux-form cards apply Coriolis as a Matsuno-split velocity rotation with no metric term. No target card -- GYRE, ORCA2, the ORCA1 deck -- runs flux form WITH rotation, so nothing is landed; the residual is registered as an open card-identity gap with a named boundary."
+  },
+  "item6_decision_17": {
+    "claim_under_test": "the four remaining tests/ocean/unit/test_nemo_recipe.py failures have ONE cause -- the demo card's z-star coordinate carries no active-cell mask, so NEMO's literal QCO thickness statement refuses it.",
+    "predictions": [
+      "P6a all four failures reach the SAME raise site. CONFIRM => one cause.",
+      "P6b REFUTE: two or more distinct raise sites => the one-cause claim is false and each cause is named."
+    ],
+    "landing_rule": "the demo card is NOT changed this round whatever the verdict; giving a card with no mesh file an active-cell mask is a geometry choice."
+  },
+  "forbidden_this_round": [
+    "editing anything under /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src",
+    "makenemo, mpirun",
+    "git push, merge, stash, reset --hard, checkout of another commit in /tmp/codex-gyre",
+    "deleting files or data",
+    "any configuration or scheme choice"
+  ],
+  "rule_0_correction_after_this_manifest_was_committed": {
+    "barotropic_correction_citation": "This manifest, and the round-31 task statement it came from, both cite the barotropic correction after dyn_zdf as stprk3_stg.F90:434-445. Read against the shipped source that is off by one at both ends: :434 is a bare comment line, the block opens at the key_PSYCLONE guard on :435 and its last statement is END_3D on :446, and the two statements that add the column-uniform shift are :444-445. The citation gate already carried the correct range, stprk3_stg.F90:437-446, anchored on '#endif' and 'END_3D'. Corrected before any number was scored against it.",
+    "when": "before item3 and item4 were run"
+  }
+}

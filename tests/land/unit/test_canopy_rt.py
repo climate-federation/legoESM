@@ -54,7 +54,6 @@ def test_canopy_sw_absorption_bounded():
         Vcmax25_C3_leaf=jnp.array([60.0]),
         Vcmax25_C4_leaf=jnp.array([0.0]),
         kn=jnp.array([0.3]),
-        FNonVeg=jnp.array([0.0]),
     )
     # Energy conservation: absorbed ≤ incoming
     absorbed = out.ASW_Sun + out.ASW_Sh + out.ASW_Soil
@@ -76,7 +75,7 @@ def test_canopy_sw_night_zero():
         ALB_VIS=jnp.array([0.08]), ALB_NIR=jnp.array([0.25]),
         Vcmax25_C3_leaf=jnp.array([60.0]),
         Vcmax25_C4_leaf=jnp.array([0.0]),
-        kn=jnp.array([0.3]), FNonVeg=jnp.array([0.0]),
+        kn=jnp.array([0.3]),
     )
     assert float(out.APAR_Sun[0] + out.APAR_Sh[0]) == 0.0
     assert float(out.ASW_Sun[0] + out.ASW_Sh[0] + out.ASW_Soil[0]) == 0.0

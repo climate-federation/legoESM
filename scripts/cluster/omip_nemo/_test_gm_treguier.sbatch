@@ -8,7 +8,7 @@
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/gm_treg_test_%j.out
 set +e
 ROOT=/burg/glab/users/pg2328/legoESM; cd $ROOT
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 echo "=== --gm-treguier argparse + config-build smoke ==="

@@ -8,6 +8,7 @@ Provides common surface-property computations shared across scripts:
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -465,6 +466,7 @@ def prognostic_ice_skin_temperature(
     T_freeze_K: float = constants.T_freeze_ocean,
     k_ice_W_m_K: float = constants.k_ice_default,
     T_melt_surface_K: float = constants.T_freeze,
+    melt_cap_width_K: float = 0.0,
 ) -> jnp.ndarray:
     """Advance a prescribed-ice AMIP skin temperature one integration step.
 
@@ -539,6 +541,13 @@ def prognostic_ice_skin_temperature(
         open-water snap).
     k_ice_W_m_K : ice thermal conductivity [W/m/K].
     T_melt_surface_K : fresh-ice surface melting point [K] (upper cap).
+    melt_cap_width_K : width [K] of the smooth melt cap.  ``0`` = the hard
+        ``clip`` cap; ``> 0`` = ``smooth_min(T_new, T_melt_surface_K,
+        sharpness=1/width)`` (LogSumExp, never above the melting point), so
+        the skin keeps a nonzero gradient at the cap.  KNOWN DIFFERENCE vs the
+        hard cap: a melting skin sits slightly below 0 C, by about
+        ``width * ln(1 / (1 - exp(-dT/width)))`` for a per-step warming dT
+        (measured per case in tests/unit/test_ice_skin_smooth_cap.py).
 
     Returns
     -------
@@ -549,5 +558,196 @@ def prognostic_ice_skin_temperature(
     r = dt_s / C_areal
     T_new = (T_skin + r * (F_net_down_W_m2 + g_cond * T_freeze_K)) \
         / (1.0 + r * g_cond)
-    T_new = jnp.clip(T_new, _ICE_SKIN_FLOOR_K, T_melt_surface_K)
+    if melt_cap_width_K == 0.0:
+        T_new = jnp.clip(T_new, _ICE_SKIN_FLOOR_K, T_melt_surface_K)
+    else:
+        from legoesm.core.smooth import smooth_min
+        T_new = smooth_min(jnp.maximum(T_new, _ICE_SKIN_FLOOR_K),
+                           T_melt_surface_K, 1.0 / melt_cap_width_K)
     return jnp.where(sic > 0.0, T_new, T_freeze_K)
+
+
+def advance_ice_skin(
+    T_skin: jnp.ndarray,
+    sw_net: jnp.ndarray,
+    lw_net: jnp.ndarray,
+    shflx: jnp.ndarray | None,
+    lhflx: jnp.ndarray | None,
+    sic: jnp.ndarray,
+    dt_s: float,
+    h_ice_m: float,
+    melt_cap_width_K: float = 0.0,
+) -> jnp.ndarray:
+    """One step of the prognostic ice skin from a lane's surface fluxes.
+
+    Grid-agnostic per-column physics shared by every lane: ``F_net_down =
+    sw_net + lw_net - shflx - lhflx`` (sw/lw net [W/m^2, +into surface];
+    turbulent fluxes [W/m^2, +upward]; an absent turbulent flux contributes
+    nothing), then :func:`prognostic_ice_skin_temperature`.  Inputs are
+    flattened to columns and the result has the shape of ``T_skin``.
+    """
+    shape = jnp.shape(T_skin)
+    f_net = (jnp.asarray(sw_net).reshape(-1) + jnp.asarray(lw_net).reshape(-1))
+    if shflx is not None:
+        f_net = f_net - jnp.asarray(shflx).reshape(-1)
+    if lhflx is not None:
+        f_net = f_net - jnp.asarray(lhflx).reshape(-1)
+    out = prognostic_ice_skin_temperature(
+        jnp.asarray(T_skin).reshape(-1), f_net, jnp.asarray(sic).reshape(-1),
+        dt_s=dt_s, h_ice_m=h_ice_m, melt_cap_width_K=melt_cap_width_K)
+    return out.reshape(shape)
+
+# NOTE: the model has OTHER tropopauses (clouds/cloud_fraction.py): the CAM6
+# aist cloud switch (rhminis/rhmaxis) uses the analytic 25000 - 15000
+# cos^2(lat) Pa surface (cam6_tropopause_analytic), and CLUBB's clubbtop uses
+# CAM's chemistry tropopause (cam_chem_tropopause_level: twmo + polar rule,
+# that surface as fallback).  This WMO locator places volcanic aerosol only;
+# unifying them is an open follow-up.
+def wmo_tropopause_pressure(p_full_col: jnp.ndarray, temp_col: jnp.ndarray,
+                            p_bot: float = 5.0e4,
+                            p_top: float = 5.0e3) -> jnp.ndarray:
+    """WMO (1957) lapse-rate tropopause pressure [Pa] per column: the lowest
+    full level in [p_top, p_bot] [Pa] whose lapse rate to the next level up
+    is <= 2 K/km and whose mean lapse rate to every higher level within 2 km
+    (and to 2 km itself) stays <= 2 K/km.
+    NaN where no level qualifies -- incl. any NaN T in the column (it
+    poisons z above and every within-2-km test below).
+    ``p_full_col``/``temp_col`` (ncol, nlev) in either vertical order;
+    heights by hypsometric integration of T.
+
+    ponytail: the tropopause snaps to a full level (no sub-layer interpolation
+    of the 2 K/km crossing as in CAM's twmo), i.e. it is located to within one
+    layer -- all that the 1/0.5/0 layer weighting below resolves; dry T (not
+    virtual) in the hypsometric dz (<0.1% at these heights); the within-2-km
+    test loops over all nlev level offsets, O(nlev^2) per column (daily).
+    """
+    order = jnp.argsort(-p_full_col, axis=1)  # surface first
+    p = jnp.take_along_axis(p_full_col, order, axis=1)
+    temp = jnp.take_along_axis(temp_col, order, axis=1)
+    dz = (constants.R_d / constants.g) * 0.5 * (temp[:, :-1] + temp[:, 1:]) \
+        * jnp.log(p[:, :-1] / p[:, 1:])
+    z = jnp.concatenate([jnp.zeros_like(dz[:, :1]),
+                         jnp.cumsum(dz, axis=1)], axis=1)
+    z2 = z[:, :-1] + 2000.0
+    temp_2km = jax.vmap(jnp.interp)(z2, z, temp)  # T 2 km above each base level
+    # Mean lapse rate j->m <= 2 K/km  <=>  s_m >= s_j with s = T + 2 K/km * z.
+    s = temp + 2e-3 * z
+    ok = (((temp[:, :-1] - temp[:, 1:]) / dz <= 2e-3)
+          & (temp_2km + 2e-3 * z2 >= s[:, :-1])
+          & (z2 <= z[:, -1:])  # the 2 km test must fit in the column
+          & (p[:, :-1] <= p_bot) & (p[:, :-1] >= p_top))
+    n = s.shape[1]
+    for m in range(2, n):  # level offsets (static nlev), not columns
+        hit = (s[:, m:] >= s[:, :-m]) | (z[:, m:] - z[:, :-m] > 2000.0)
+        ok = ok & jnp.pad(hit, ((0, 0), (0, m - 1)), constant_values=True)
+    k = jnp.argmax(ok, axis=1)  # first True = lowest qualifying level
+    p_tp = jnp.take_along_axis(p[:, :-1], k[:, None], axis=1)[:, 0]
+    return jnp.where(ok.any(axis=1), p_tp, jnp.nan)
+
+
+def stratospheric_layer_weight(p_half_col: jnp.ndarray,
+                               lat_rad: jnp.ndarray,
+                               p_full_col: jnp.ndarray | None = None,
+                               temp_col: jnp.ndarray | None = None,
+                               ) -> jnp.ndarray:
+    """Per-layer weight for CMIP6 stratospheric (volcanic) aerosol at the
+    tropopause, as the ETH/SAGE-3lambda data notes prescribe: 1 above the
+    tropopause, 0.5 in the layer holding it, 0 below (the file's values below
+    the tropopause are an extrapolated matching tail, not tropospheric
+    aerosol).  ``p_half_col`` (ncol, nlev+1) [Pa] in either vertical order,
+    ``lat_rad`` (ncol,).
+
+    The tropopause is the column's WMO lapse-rate tropopause
+    (``wmo_tropopause_pressure``) when ``p_full_col``/``temp_col`` (ncol, nlev)
+    are given, falling back per column to the climatological
+    p_tp = 300 - 200 cos^2(lat) hPa (100 hPa tropics, 300 hPa poles) where
+    none is found or no T is given.
+
+    ponytail: no temporal smoothing -- the ETH notes ask for the
+    instantaneous tropopause.  Measured (scripts/validate/
+    check_wmo_tropopause_fv3duo.py, code e4d7a50ff, x64) on FV3-duo C24 L32
+    daily checkpoints duo_5d days 1-5: 0% of 3456 columns fall back (also 0%
+    at duo_60d days 5-30); the tropopause layer moves >=1 level day-to-day in
+    30% of columns, >=2 in 4% (30-60 deg 43%/7%, tropics 20%/2%), 24% of
+    moves flip back next day -- consistent with synoptic motion at L32 layer
+    spacing; threshold chatter is not separately quantified.  Smooth (e.g. a
+    running mean of p_tp) only if that proves material.
+    """
+    p_tp = (300.0 - 200.0 * jnp.cos(lat_rad) ** 2) * 100.0
+    if temp_col is not None:
+        p_wmo = wmo_tropopause_pressure(p_full_col, temp_col)
+        p_tp = jnp.where(jnp.isnan(p_wmo), p_tp, p_wmo)
+    p_tp = p_tp[:, None]
+    top = jnp.minimum(p_half_col[:, :-1], p_half_col[:, 1:])
+    bot = jnp.maximum(p_half_col[:, :-1], p_half_col[:, 1:])
+    return jnp.where(bot <= p_tp, 1.0, jnp.where(top >= p_tp, 0.0, 0.5))
+
+
+def aerosol_layer_fields(acfg, day, lat_col, p_half_col, w_strat, *,
+                         active, lw_active, dtype, lon_col=None):
+    """Per-layer aerosol forcing for one day: ``(aerosol_od, ccn_aod,
+    aerosol_lw_od)``, as the AMIP driver feeds radiation and the aerosol-CCN
+    droplet number.  ``ccn_aod`` is None when ``active`` is off; the two
+    optical-depth fields are zeros (ncol, nlev) when their switch is off.
+    ``lon_col`` [rad] reads the SW and CCN aerosol at each column's longitude;
+    None reads their zonal mean."""
+    from legoesm.forcing.external import (
+        get_aerosol_at_time,
+        get_aerosol_lw_at_time,
+        get_aerosol_sw_volcanic_at_time,
+    )
+
+    ncol, nlev = p_half_col.shape[0], p_half_col.shape[1] - 1
+    ccn_aod = None
+    aerosol_od = jnp.zeros((ncol, nlev), dtype=dtype)
+    if active:
+        _acfg = acfg
+        # Volcanic SW (CMIP6 ``ext_sun``) is placed at its true
+        # stratospheric pressure like the LW profile below, NOT spread
+        # with the tropospheric column by pressure mass.  A legacy
+        # column-only volcanic file (profile None) stays in the column.
+        volc_sw = get_aerosol_sw_volcanic_at_time(_acfg, day, lat_grid=lat_col)
+        _trop_cfg = _acfg._replace(volcanic_enabled=False)
+        aerosol_col = get_aerosol_at_time(
+            _acfg if volc_sw is None else _trop_cfg, day, lat_grid=lat_col,
+            lon_grid=lon_col,
+        )
+        aerosol_od = distribute_column_aod_to_layers(
+            jnp.asarray(aerosol_col), p_half_col,
+        )
+        if volc_sw is not None:
+            aerosol_od = aerosol_od + (place_stratospheric_aod_profile_to_layers(
+                jnp.asarray(volc_sw[0]), jnp.asarray(volc_sw[1]), p_half_col,
+            ) * w_strat
+            ).astype(aerosol_od.dtype)
+        # AOD->CCN input: TROPOSPHERIC column in the visible (550 nm)
+        # band, volcanic excluded, from ``ccn_path`` if set.  The Andreae 2009
+        # fit is local total AOT: a zonal mean gives polluted E China and the
+        # clean N Pacific one droplet number.
+        ccn_aod = jnp.asarray(get_aerosol_at_time(
+            _trop_cfg._replace(path=_acfg.ccn_path or _acfg.path),
+            day, lat_grid=lat_col, band="vis", lon_grid=lon_col,
+        )).reshape(ncol).astype(dtype)
+
+    # Volcanic stratospheric LONGWAVE aerosol (gap #9): same (ncol,
+    # nlev) shape as ``aerosol_od``, default zeros so the SegmentForcing
+    # / forcing-dict leaf is a concrete fixed-shape array (no retrace)
+    # and a run without volcanic LW aerosol is byte-identical (zeros LW
+    # od is a RRTMGP no-op).  ``get_aerosol_lw_at_time`` returns the
+    # file's height-resolved ABSORPTION profile (ext*(1-omega), Planck-
+    # weighted gray band collapse) plus its pressure edges; the profile
+    # is placed at its true stratospheric pressure by a conservative
+    # overlap remap -- NOT spread by full-column pressure mass, which
+    # dumped ~90% of a stratospheric aerosol into the troposphere.
+    aerosol_lw_od = jnp.zeros((ncol, nlev), dtype=dtype)
+    if lw_active:
+        aerosol_lw_prof = get_aerosol_lw_at_time(
+            acfg, day, lat_grid=lat_col,
+        )
+        if aerosol_lw_prof is not None:
+            prof_col, p_edges = aerosol_lw_prof
+            aerosol_lw_od = (place_stratospheric_aod_profile_to_layers(
+                jnp.asarray(prof_col), jnp.asarray(p_edges), p_half_col,
+            ) * w_strat
+            ).astype(dtype)
+    return aerosol_od, ccn_aod, aerosol_lw_od

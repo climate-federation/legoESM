@@ -55,14 +55,38 @@ logger = logging.getLogger("aimip_latlon")
 
 REPO = Path(__file__).resolve().parents[2]
 
-# Supervision horizon for training + eval (rollout length AND target lead,
-# kept in lockstep).  6 h (NeuralGCM / AIMIP convention) — a 24 h rollout
-# explodes the adjoint to NaN through the 144-step differentiable dycore
-# even when the forward is finite (1-step grad is fine; 144-step is NaN —
-# job 8533825).  6 h = 36 steps at dt=600 keeps the gradient well-
-# conditioned.  Passed as ``rollout_hours`` to the trainers and used for
-# the matched target lead in ``load_window_pairs``.
-_ROLLOUT_HOURS = 6
+# TRAINING supervision horizon: rollout length AND target lead, kept in
+# lockstep.  Passed as ``rollout_hours`` to the trainers and used for the
+# matched target lead in ``load_window_pairs``.
+#
+# Raised 6 -> 24 h on 2026-09-18 (user decision), because the reason for the
+# 6 h cap turned out not to hold.  The cap cited job 8533825 for "a 24 h
+# rollout explodes the adjoint to NaN through the 144-step differentiable
+# dycore even when the forward is finite".  Re-measured on current code
+# (jobs 9829660 sweep, 9829661 with JAX's NaN detector armed; 32x8,
+# dt=600 s, adjoint w.r.t. the initial state): NO NaN is created anywhere in
+# the backward pass at 144 steps, in either the current scheme set or the
+# June-2026 one, and the current lane's adjoint is BOUNDED — max|adjoint|
+# rises once inside the first eight steps and then sits between 1e3 and 1e5
+# out to 24 h, with no exponential branch.  Kessler and the mass-flux scheme
+# are what damp it; the June set (gray radiation, SBM convection, no
+# microphysics) instead grows at 0.28/step and reaches 3e13 by 144 steps.
+#
+# So this value is only safe for a scheme set whose adjoint is bounded.
+# Re-run scripts/validate/adjoint_horizon_sweep.py before trusting 24 h on a
+# different one; the argument is about CONDITIONING, not about the absence
+# of a NaN, and 3e13 is finite but useless to an optimiser.
+#
+# Cost: 144 steps per supervised sample instead of 36.
+_ROLLOUT_HOURS = 24
+
+# EVALUATION horizon, deliberately NOT raised with the training horizon.
+# The headline RMSE here is quoted against the canonical AIMIP scorecard
+# (``run_aimip.py::_evaluate_variant``), which scores a free 6 h forecast; a
+# 24 h eval would silently redefine every number and break comparability
+# with every result already on record.  Changing the training horizon is the
+# variable under test, so the evaluation protocol is held fixed.
+_EVAL_HOURS = 6
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +101,11 @@ def _load_run_amip():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _resolved_era5_zarr(args):
+    from legoesm.training.era5_to_state import TrainingERA5Config
+    return args.era5_zarr or TrainingERA5Config().zarr_store
 
 
 def build_latlon_config(args):
@@ -133,6 +162,9 @@ def build_latlon_config(args):
         "--convection", args.convection,
         "--turbulence", args.turbulence,
         "--microphysics", args.microphysics,
+        # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        *(["--morrison-warm-rain-scheme", "kk2000"]
+          if args.microphysics == "morrison" else []),
         "--clouds", args.clouds,
         "--gravity-wave-drag", args.gravity_wave_drag,
         # Match the training-segment sub-cycling (also resolves the None that
@@ -146,9 +178,39 @@ def build_latlon_config(args):
         "--days", "1",
         "--dataset", "analytical",   # IC/forcing replaced by ERA5 below
         "--ic", "standard",
+        # One coastline for land model, convection and drag: ERA5's, from the
+        # same store the run trains on (user 2026-10-28, R3/R4/R5).
+        "--land-fraction-source", "era5",
+        "--land-fraction-era5-zarr", _resolved_era5_zarr(args),
     ]
+    if args.ice_skin_prognostic is not None:
+        argv.append("--ice-skin-prognostic" if args.ice_skin_prognostic
+                    else "--no-ice-skin-prognostic")
     parsed = ra.build_arg_parser().parse_args(argv)
-    return ra.build_config_from_args(parsed)
+    # Land surface model.  This lane builds its ExperimentConfig from a FIXED
+    # argv that passes no land flags and no --topography, so until now it
+    # resolved to "none" — meaning NO land surface model at all: land skin
+    # temperature falls back to the neighbouring prescribed SST minus a lapse
+    # rate, with no soil, no water store and no stomatal control.  That was a
+    # default nobody had chosen, which is the shape of failure this repo has
+    # paid for before, so the choice is now explicit and printed.
+    #
+    # The switches come from the land package's own mapping rather than being
+    # spelled out here, so this driver and run_amip cannot drift apart.
+    from legoesm.land.config import describe_land_model, land_model_switches
+    for _field, _value in land_model_switches(args.land_model).items():
+        setattr(parsed, _field, _value)
+    logger.info(
+        "Land surface model: %s (slab_land_active=%s, use_multilayer_land=%s, "
+        "land_mask_file=%s)",
+        describe_land_model(
+            slab_land_active=parsed.slab_land_active,
+            use_multilayer_land=parsed.use_multilayer_land,
+            has_land_mask=bool(getattr(parsed, "land_mask_file", ""))),
+        parsed.slab_land_active, parsed.use_multilayer_land,
+        getattr(parsed, "land_mask_file", "") or "<none>")
+    from legoesm.training.scale_build import resolve_training_ice_skin
+    return resolve_training_ice_skin(ra.build_config_from_args(parsed))
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +258,8 @@ def _parse_windows(spec: str):
 
 def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
                       era5_zarr=None, microphysics="none", turbulence="none",
-                      multi_step_hours=(), grid_kind="latlon"):
+                      convection="none", multi_step_hours=(), grid_kind="latlon",
+                      ice_skin_prognostic=False):
     """Build (initial_carries, target_carries, forcings) on the model grid.
 
     Mirrors ``neural_gcm_spectral.load_training_data`` window->time-index
@@ -215,9 +278,11 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, open_era5_zarr, load_era5_slice,
         era5_to_latlon_carry, era5_to_mpas_carry, regrid_2d_to_gaussian,
-    )
+    era5_terrain_product,
+)
 
-    def _to_carry(era5, grid_or_mesh, sigma_, microphysics_, turbulence_):
+    def _to_carry(era5, grid_or_mesh, sigma_, microphysics_, turbulence_,
+                  convection_="none"):
         """ERA5 slice -> SegmentCarry on whichever horizontal grid is in use.
 
         The two converters do NOT take the same arguments.
@@ -243,10 +308,15 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
                     "era5_to_mpas_carry first, or run --grid mpas with "
                     "--microphysics none --turbulence none."
                 )
-            return era5_to_mpas_carry(era5, grid_or_mesh, sigma_)
+            return era5_to_mpas_carry(
+                era5, grid_or_mesh, sigma_,
+                target_phis=era5_terrain_product(era5, grid_or_mesh))
         return era5_to_latlon_carry(
             era5, grid_or_mesh, sigma_,
+            target_phis=era5_terrain_product(era5, grid_or_mesh),
             microphysics=microphysics_, turbulence=turbulence_,
+            convection=convection_,
+            ice_skin_prognostic=ice_skin_prognostic,
         )
 
     era5_cfg = TrainingERA5Config(dt_hours=6, load_radiation_fluxes=True)
@@ -301,7 +371,8 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
         for s in range(n_ics + max_stride):
             tidx = start + s
             era5 = load_era5_slice(era5_cfg, tidx, ds=ds, flux_ds=flux_ds)
-            block[s] = (_to_carry(era5, grid, sigma, microphysics, turbulence),
+            block[s] = (_to_carry(era5, grid, sigma, microphysics, turbulence,
+                                  convection),
                         era5, tidx)
         for d in range(n_ics):
             ic_carry, ic_era5, ic_tidx = block[d]
@@ -390,7 +461,7 @@ def _area_weighted(field, cos_lat):
     return float(lat_weighted_mean(field, cos_lat))
 
 
-def evaluate(run_seg_raw, ics, targets, forcings, grid, dt, hours=_ROLLOUT_HOURS):
+def evaluate(run_seg_raw, ics, targets, forcings, grid, dt, hours=_EVAL_HOURS):
     """RMSE + bias per prognostic + radiation flux, averaged over windows.
 
     METRIC PARITY with the canonical AIMIP scorecard (``run_aimip.py``
@@ -480,8 +551,20 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
 
     t0 = time.time()
     if variant == "classical":
+        from legoesm.training.trainable_params import (
+            trainable_constraints_for_scheme,
+        )
+        # Freeze OUT the parameters the configured schemes never read (no
+        # inert parameters): e.g. bulk C_H/C_E when a turbulence scheme owns
+        # the surface fluxes.  Radiation-as-forcing stops the gradient through
+        # radiation, so the albedos are unreachable exactly as under "none".
+        constraints = trainable_constraints_for_scheme(
+            config.convection,
+            "none" if args.radiation_as_forcing else config.radiation,
+            config.turbulence)
         trained, hist = train_physics_params(
             model, grid, sigma, physics_pipeline, ics, targets, forcings,
+            constraints=constraints,
             n_epochs=args.epochs, lr=args.lr, dt=args.dt,
             rollout_hours=_ROLLOUT_HOURS, microphysics=args.microphysics,
             rad_update_steps=args.rad_update_steps,
@@ -588,6 +671,11 @@ def build_parser():
     # default sub-cycles (N=6 -> ~hourly at dt~600s, ~15 min at the T106
     # CFL dt~155s) — never every step.  Moot for the NN-replacement variants.
     p.add_argument("--rad-update-steps", type=int, default=6)
+    p.add_argument("--ice-skin-prognostic",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="Prognostic sea-ice skin (#2106); unset = auto (on "
+                        "wherever the lane carries it). The ERA5 carries "
+                        "seed it at the seawater freezing point.")
     # Radiation-as-forcing: stop_gradient rrtmgp in the rollout so its adjoint
     # never enters the backward graph.  rrtmgp's reverse-mode is the dominant
     # XLA compile cost and it GROWS with grid size (>10 h at true T106) — this
@@ -598,14 +686,18 @@ def build_parser():
     # forward-mode path (follow-up).  Classical variant only.
     p.add_argument("--radiation-as-forcing", action="store_true", default=False)
     # GenCast-style multi-step autoregressive supervision (the canonical
-    # AIMIP protocol; spectral got classical 6.8->4.05K with it).  On the
-    # lat-lon stack the per-segment gradient is TRUNCATED (stop_gradient
-    # between segments) because the full-rollout adjoint NaNs past ~6h —
-    # so use SHORT (6h) segments: --multi-step-hours 6 12 18 24.  Empty ->
-    # single 6h horizon (legacy).
+    # AIMIP protocol; spectral got classical 6.8->4.05K with it).  The
+    # per-segment gradient is TRUNCATED (stop_gradient between segments).
+    # The old justification for that — "the full-rollout adjoint NaNs past
+    # ~6h" — does NOT reproduce on current code (see _ROLLOUT_HOURS above:
+    # no NaN at 144 steps with the detector armed).  Truncation is now a
+    # conditioning choice, not a necessity, and whether it still earns its
+    # bias is an open question worth measuring.  Empty -> a single rollout
+    # at _ROLLOUT_HOURS.
     p.add_argument("--multi-step-hours", type=int, nargs="*", default=[],
                    help="autoregressive leads in hours (multiples of 6), "
-                        "e.g. 6 12 18 24; empty -> single 6h horizon.")
+                        "e.g. 6 12 18 24; empty -> a single rollout at the "
+                        "training horizon (24 h).")
     p.add_argument("--multi-step-weights", type=float, nargs="*", default=[],
                    help="per-lead loss weights (match --multi-step-hours); "
                         "empty -> uniform.")
@@ -641,6 +733,19 @@ def build_parser():
              "no tracer slots); it refuses loudly rather than dropping them.")
     p.add_argument("--era5-zarr", default=None)
     p.add_argument("--output-dir", default="results/aimip_latlon")
+    p.add_argument("--land-model", choices=("none", "slab", "multilayer"),
+                   default="none",
+                   help="Land surface model for the physics rollout, same "
+                        "three names the coupled driver and run_amip use. "
+                        "DEFAULT 'none' preserves what this lane has always "
+                        "done, which is to run with NO land surface model: "
+                        "land skin temperature falls back to the neighbouring "
+                        "prescribed SST minus a lapse rate, with no soil, no "
+                        "water store and no stomatal control. 'slab' and "
+                        "'multilayer' act on the ERA5 land fraction this "
+                        "lane always uses (one coastline, user 2026-10-28); "
+                        "there is no land-mask file option, since the driver "
+                        "refuses a mask file together with the ERA5 source.")
     p.add_argument("--smoke", action="store_true",
                    help="tiny config (n_lat=32, 1 epoch, 1+1 short windows)")
     return p
@@ -777,15 +882,19 @@ def main(argv=None):
         rollout_hours=_ROLLOUT_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
+        convection=args.convection,
+        ice_skin_prognostic=config.ice_skin_prognostic,
         multi_step_hours=tuple(args.multi_step_hours),
     )
     logger.info("Loading eval data ...")
     eval_data = load_window_pairs(
         grid, sigma, eval_windows,
         grid_kind=args.grid,
-        rollout_hours=_ROLLOUT_HOURS, forcing_ctx=forcing_ctx,
+        rollout_hours=_EVAL_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
+        convection=args.convection,
+        ice_skin_prognostic=config.ice_skin_prognostic,
     )
 
     scorecard = {}

@@ -69,7 +69,7 @@ def test_owned_masked_means_and_extrema_single_rank():
     cwv = rng.uniform(10.0, 60.0, size=(n_cells,))
     cwv[om_c == 0] = 1.0e9
 
-    mean_T, mean_ps, max_u, T_min, T_max, finite, cwv_mean = (
+    mean_T, mean_ps, max_u, T_min, T_max, finite, cwv_mean, ni_max = (
         drv._mpas_global_diag(jnp.asarray(T), jnp.asarray(ps),
                               jnp.asarray(u), jnp.asarray(cwv)))
 
@@ -81,6 +81,20 @@ def test_owned_masked_means_and_extrema_single_rank():
     assert T_max == pytest.approx(T_own.max())
     assert finite is True
     assert cwv_mean == pytest.approx(cwv[om_c == 1].mean())
+    assert np.isnan(ni_max)          # no N_i field passed
+
+
+def test_ni_max_owned_only_and_nan_is_visible():
+    drv, om_c, _ = _make_stub(nlev=2)
+    args = (jnp.full((6, 2), 280.0), jnp.full((6,), 1.0e5),
+            jnp.zeros((5, 2)), None)
+    ni = np.full((6, 2), 1.0e4)
+    ni[0, 1] = 3.0e6                       # owned maximum
+    ni[om_c == 0] = 9.0e12                 # halo sentinel must not leak
+    assert drv._mpas_global_diag(*args, ni_field=jnp.asarray(ni))[7] == (
+        pytest.approx(3.0e6))
+    ni[1, 0] = np.nan                      # owned NaN -> +inf, not hidden
+    assert drv._mpas_global_diag(*args, ni_field=jnp.asarray(ni))[7] == np.inf
 
 
 def test_finite_flag_owned_only():
@@ -93,21 +107,21 @@ def test_finite_flag_owned_only():
     # T*dp product (codex F-B6: the where() wraps the product).
     T_halo_nan = T.copy()
     T_halo_nan[int(np.argmax(om_c == 0)), 0] = np.nan
-    mean_T_h, *_, finite, _ = drv._mpas_global_diag(
+    mean_T_h, *_, finite, _, _ = drv._mpas_global_diag(
         jnp.asarray(T_halo_nan), jnp.asarray(ps), jnp.asarray(u), None)
     assert finite is True
     assert np.isfinite(mean_T_h) and mean_T_h == pytest.approx(280.0)
     # Non-finite HALO p_s must not leak either (0*NaN trap).
     ps_halo_nan = ps.copy()
     ps_halo_nan[int(np.argmax(om_c == 0))] = np.nan
-    mean_T_p, *_, finite_p, _ = drv._mpas_global_diag(
+    mean_T_p, *_, finite_p, _, _ = drv._mpas_global_diag(
         jnp.asarray(T), jnp.asarray(ps_halo_nan), jnp.asarray(u), None)
     assert finite_p is True
     assert np.isfinite(mean_T_p) and mean_T_p == pytest.approx(280.0)
     # NaN in an OWNED cell -> False.
     T_owned_nan = T.copy()
     T_owned_nan[0, 0] = np.nan
-    *_, finite, _ = drv._mpas_global_diag(
+    *_, finite, _, _ = drv._mpas_global_diag(
         jnp.asarray(T_owned_nan), jnp.asarray(ps), jnp.asarray(u), None)
     assert finite is False
 
@@ -117,7 +131,7 @@ def test_cwv_none_returns_nan():
     out = drv._mpas_global_diag(
         jnp.full((6, 2), 280.0), jnp.full((6,), 1.0e5),
         jnp.zeros((5, 2)), None)
-    assert np.isnan(out[-1])
+    assert np.isnan(out[6]) and np.isnan(out[7])
 
 
 def test_n_cells_cache_populated_once():

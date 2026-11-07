@@ -52,6 +52,7 @@ def _synthetic():
         T=15.0 + rng.random((NY, NX, NZ)), S=35.0 + rng.random((NY, NX, NZ)),
         u=rng.random((NY, NX, NZ)), v=rng.random((NY, NX, NZ)),
         ssh=0.01 * rng.random((NY, NX)), rhd=None,
+        uu_b=rng.random((NY, NX)), vv_b=rng.random((NY, NX)),
     )
     return grid, state
 
@@ -87,23 +88,36 @@ def test_bridge_geometry_and_staggering():
     v = np.asarray(st.v.data)
     assert np.allclose(v[0, :, :], 0.0)             # south wall
     assert np.allclose(v[1:, :, :], state.v)
+    assert np.array_equal(np.asarray(st.uu_b.data)[:, 1:], state.uu_b)
+    assert np.array_equal(np.asarray(st.vv_b.data)[1:, :], state.vv_b)
     # Divergence-identity guard: under legoESM's west-face stencil the bridged
-    # zonal convergence at an interior cell equals NEMO's east-face difference
-    # (fails if the prepend flips to an append). Use a NONLINEAR u so a shift
-    # changes the interior value.
+    # zonal convergence at an interior cell equals NEMO's east-face difference.
     nemo_u_nl = (np.arange(NX) ** 2).astype(float)[None, :, None] * np.ones_like(state.u)
     out_nl = bridge_nemo_to_legoesm(grid, state._replace(u=nemo_u_nl))
     uf = np.asarray(out_nl.state.u.data)
-    for k in range(1, NX):                          # interior west faces
-        lego_diff = uf[:, k + 1, :] - uf[:, k, :]   # west-face stencil
+    for k in range(1, NX):
+        lego_diff = uf[:, k + 1, :] - uf[:, k, :]
         nemo_diff = nemo_u_nl[:, k, :] - nemo_u_nl[:, k - 1, :]
         assert np.allclose(lego_diff, nemo_diff), k
-
-    # T/S placed directly at T-points.
     assert np.allclose(np.asarray(st.T.data), state.T)
     assert np.allclose(np.asarray(st.S.data), state.S)
 
 
+def test_missing_restart_depth_mean_uses_logged_legacy_fallback(caplog):
+    """restart.F90:316-323 fallback is loud and confined to missing fields."""
+    grid, state = _synthetic()
+    e3 = np.ones_like(grid.umask)
+    # The restart loop excludes NEMO's final dummy level (jpk).
+    depth = np.sum(e3[..., :-1] * grid.umask[..., :-1], axis=-1)
+    grid = grid._replace(e3u_0=e3, e3v_0=e3, hu_0=depth, hv_0=depth)
+    state = state._replace(uu_b=None, vv_b=None)
+    with caplog.at_level("WARNING"):
+        out = bridge_nemo_to_legoesm(grid, state)
+    assert "legacy depth-mean reconstruction" in caplog.text
+    expected_u = np.sum(state.u[..., :-1], axis=-1) / depth
+    expected_v = np.sum(state.v[..., :-1], axis=-1) / depth
+    np.testing.assert_allclose(np.asarray(out.state.uu_b.data)[:, 1:], expected_u)
+    np.testing.assert_allclose(np.asarray(out.state.vv_b.data)[1:, :], expected_v)
 def test_bridge_rejects_bad_coriolis():
     import pytest
     grid, state = _synthetic()
@@ -164,6 +178,7 @@ def _synthetic_topo():
         T=15.0 + rng.random((TNY, TNX, TNZ)), S=35.0 + rng.random((TNY, TNX, TNZ)),
         u=rng.random((TNY, TNX, TNZ)), v=rng.random((TNY, TNX, TNZ)),
         ssh=0.01 * rng.random((TNY, TNX)), rhd=None,
+        uu_b=rng.random((TNY, TNX)), vv_b=rng.random((TNY, TNX)),
     )
     return grid, state, k_bot
 
@@ -228,6 +243,13 @@ def test_topo_bridge_carries_raw_een_coefficient_operands_without_rebuilding():
     for name in raw._fields:
         if name == "hf_0":
             expected = np.sum(carried.e3f_0 * carried.fmask, axis=-1)
+        elif name == "fe3mask":
+            # NEMO freezes this four-T-cell mask before lateral-slip edits;
+            # it is derived from the native tmask rather than stored on the
+            # legacy NemoGrid input record.
+            from legoesm.ocean.vertical import nemo_fe3mask_from_tmask
+
+            expected = nemo_fe3mask_from_tmask(carried.tmask)
         else:
             expected = getattr(carried, name)
         np.testing.assert_array_equal(np.asarray(getattr(raw, name)), expected)
@@ -417,6 +439,7 @@ def _synthetic_topo_mercator():
         T=15.0 + rng.random((TNY, TNX, TNZ)), S=35.0 + rng.random((TNY, TNX, TNZ)),
         u=rng.random((TNY, TNX, TNZ)), v=rng.random((TNY, TNX, TNZ)),
         ssh=0.01 * rng.random((TNY, TNX)), rhd=None,
+        uu_b=rng.random((TNY, TNX)), vv_b=rng.random((TNY, TNX)),
     )
     return grid, state, lat_face
 

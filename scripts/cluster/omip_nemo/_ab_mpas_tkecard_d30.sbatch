@@ -68,7 +68,7 @@ HEAD=$(git rev-parse HEAD)
 DIRTY=$(git status --porcelain -uno -- packages src scripts/run scripts/validate)
 [ -z "$DIRTY" ] || { echo "FATAL: model tree dirty:"; echo "$DIRTY"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
-export PYTHONPATH="$(ls -d $R/packages/*/ | sed 's:/$::' | tr '\n' ':')$R:$R/scripts/validate"
+export PYTHONPATH="$R/src:$(ls -d $R/packages/*/ | sed 's:/$::' | tr '\n' ':')$R:$R/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository
 OUT=$R/results/omip_nemo/nemolev_mpas_tke_${ARM}_d30
@@ -78,7 +78,7 @@ JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_tripole_vmix_cli.py 2>&
 rc=$?; [ $rc -eq 0 ] || { echo "FATAL: gate tests failed rc=$rc"; exit 1; }
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py \
-  --grid mpas --mpas-level 7 --mpas-lloyd 20 --mpas-vmix tke $KNOBS \
+  --grid mpas --mpas-level 7 --mpas-lloyd 50 --mpas-vmix tke $KNOBS \
   --dt 150 --nemo-vertical --partial-cell --adaptive-implicit-vertadv \
   --momentum-rk3 --geothermal --runoff --sss-restore \
   --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 --sss-ice-gate-nemo \

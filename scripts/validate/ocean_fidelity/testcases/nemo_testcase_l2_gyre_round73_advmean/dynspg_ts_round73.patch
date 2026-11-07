@@ -1,0 +1,53 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -600,0 +601,12 @@
++      ! Round-73 WRITE-only extension of the existing transport-mean stream.
++      ! kt=1 remains in the block above; this opens the identical stream at kt=2.
++      IF( lwp .AND. kt == nit000 + 1 ) THEN
++         ALLOCATE( l2_adv_before_u(jpi,jpj), l2_adv_before_v(jpi,jpj) )
++         WRITE(l2_adv_filename,'("oracle_bt_advmean_operands_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=l2_adv_unit, FILE=TRIM(l2_adv_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l2_adv_ios )
++         IF( l2_adv_ios /= 0 )   CALL ctl_stop( 'cannot open round-73 barotropic transport-mean trace' )
++         l2_magic = 'NEMO_L2_BTADV_2'
++         WRITE(l2_adv_unit) l2_magic, 2, kt, icycle, jpi, jpj, STORAGE_SIZE(1._wp)
++         WRITE(l2_adv_unit) r1_wgt2s, wgtbtp2(1:icycle), r1_e2u, r1_e1v
++      ENDIF
+@@ -736,7 +748,7 @@
+          !
+          !                             ! Sum over sub-time-steps to compute advective velocities
+          za2 = wgtbtp2(jn)             ! zhU, zhV hold fluxes extrapolated at jn+0.5
+-         IF( lwp .AND. kt == nit000 ) THEN
++         IF( lwp .AND. kt <= nit000 + 1 ) THEN
+             l2_adv_before_u(:,:) = un_adv(:,:)
+             l2_adv_before_v(:,:) = vn_adv(:,:)
+          ENDIF
+@@ -744,8 +756,13 @@
+             un_adv(ji,jj) = un_adv(ji,jj) + za2 * zhU(ji,jj) * r1_e2u(ji,jj)
+             vn_adv(ji,jj) = vn_adv(ji,jj) + za2 * zhV(ji,jj) * r1_e1v(ji,jj)
+          END_2D
+-         IF( lwp .AND. kt == nit000 ) THEN
++         IF( lwp .AND. kt <= nit000 + 1 ) THEN
+             WRITE(l2_adv_unit) jn, za2
+-            WRITE(l2_adv_unit) l2_adv_before_u, l2_adv_before_v, zhU, zhV, &
+-               & l2_u_mid, l2_v_mid, zhup2_e, zhvp2_e, un_adv, vn_adv
++            WRITE(l2_adv_unit) l2_adv_before_u, l2_adv_before_v, zhU, zhV
++            IF( kt == nit000 ) THEN
++               WRITE(l2_adv_unit) l2_u_mid, l2_v_mid
++            ELSE
++               WRITE(l2_adv_unit) ua_e, va_e
++            ENDIF
++            WRITE(l2_adv_unit) zhup2_e, zhvp2_e, un_adv, vn_adv
+          ENDIF
+@@ -996 +1013 @@
+-      IF( lwp .AND. kt == nit000 )   WRITE(l2_adv_unit) un_adv, vn_adv
++      IF( lwp .AND. kt <= nit000 + 1 )   WRITE(l2_adv_unit) un_adv, vn_adv
+@@ -1005,7 +1022,7 @@
+       ELSE
+          CALL lbc_lnk( 'dynspg_ts', un_adv, 'U', -1._wp, vn_adv, 'V', -1._wp ) ! Boundary conditions
+       ENDIF
+-      IF( lwp .AND. kt == nit000 ) THEN
++      IF( lwp .AND. kt <= nit000 + 1 ) THEN
+          WRITE(l2_adv_unit) un_adv, vn_adv
+          CLOSE(l2_adv_unit)
+          DEALLOCATE( l2_adv_before_u, l2_adv_before_v )

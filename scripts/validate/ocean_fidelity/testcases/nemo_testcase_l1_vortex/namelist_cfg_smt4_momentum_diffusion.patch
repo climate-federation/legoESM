@@ -1,0 +1,31 @@
+--- namelist_cfg_smt3
++++ namelist_cfg_smt4
+@@ -219,20 +219,22 @@
+ &namdyn_ldf    !   lateral diffusion on momentum                        (default: NO selection)
+ !-----------------------------------------------------------------------
+    !                       !  Type of the operator :
+-   ln_dynldf_OFF =  .true.     !  No operator (i.e. no explicit diffusion)
+-   ln_dynldf_lap =  .false.    !    laplacian operator
++   ln_dynldf_OFF =  .false.    !  SMT-4: ORCA2 rung-0 selects an operator
++   nn_dynldf_typ = 0           !  SMT-4: ORCA2 reference div-rot arm
++   ln_dynldf_lap =  .true.     !  SMT-4: ORCA2 rung-0 namelist_cfg:390
+    ln_dynldf_blp =  .false.    !  bilaplacian operator
+    !                       !  Direction of action  :
+-   ln_dynldf_lev =  .false.    !  iso-level
+-   ln_dynldf_hor =  .true.     !  horizontal (geopotential)
++   ln_dynldf_lev =  .true.     !  SMT-4: ORCA2 rung-0 namelist_cfg:391
++   ln_dynldf_hor =  .false.    !  level and horizontal coincide on zps
+    ln_dynldf_iso =  .false.    !  iso-neutral
+    !                       !  Coefficient
+-   nn_ahm_ijk_t  = 0           !  space/time variation of eddy coef
++   nn_ahm_ijk_t  = 20          !  Decision 93 stand-in for rung-0's -30 file
+       !                             !  =  0  constant 
+       !                        !  time invariant coefficients :  ahm = 1/2  Uv*Lv   (lap case) 
+       !                             !                            bhm = 1/12 Uv*Lv^3 (blp case)
+-      rn_Uv      = 0.1              !  lateral viscous velocity [m/s] (nn_ahm_ijk_t= 0, 10, 20, 30)
+-      rn_Lv      = 30.e+3           !  lateral viscous length   [m]   (nn_ahm_ijk_t= 0, 10)
++      rn_Uv      = 0.1         !  ORCA2 reference namelist_ref:1127 [m/s]
++      rn_Lv      = 10.e+3      !  ORCA2 reference namelist_ref:1128 [m]
++      rn_ahm_b   = 0.0         !  ORCA2 reference namelist_ref:1134 [m2/s]
+ /
+ !!======================================================================

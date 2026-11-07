@@ -77,6 +77,13 @@ def test_preset_dataset_forwards_sic_path_and_var_overrides(monkeypatch):
     assert captured["start_year"] == 1979
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="the MPAS ic='default' seed p_s reduction was deliberately REVERTED "
+           "(b31047b06; docs/dev-notes/mpas_seed_ps_reduction_nan_2026-07-23.md): "
+           "the reduced seed NaNs every moist MPAS AMIP run within day 1, root "
+           "cause open. strict: an XPASS means the reduction is back -- re-check "
+           "that NaN before removing this mark.")
 def test_mpas_default_ic_reduces_p_s_over_topography(tmp_path, monkeypatch):
     """MPAS ``ic='default'`` with real topography must construct the state with
     phis (p_s = p_ref·exp(-phis/(R_d·T_init))), not patch phis in after the
@@ -125,7 +132,7 @@ def test_zarr_rejects_held_radiation_carry_with_cadence(tmp_path):
     def _cfg(rad_steps, fmt):
         return ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=3),
-            dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic"),
             topography="flat",           # -> physics.f_land None (isolate held guard)
             radiation="gray",
             rad_update_steps=rad_steps,

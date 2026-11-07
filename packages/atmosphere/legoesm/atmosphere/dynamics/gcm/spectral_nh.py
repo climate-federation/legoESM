@@ -60,6 +60,7 @@ from legoesm.thermo import saturation_mixing_ratio
 from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     compute_exner_perturbation,
+    precompute_si_tridiag_bands,
     sponge_profile,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
@@ -632,25 +633,26 @@ def _acoustic_substeps_grid_semi_implicit(
 
     Same structure as the explicit version but the vertical pressure
     gradient in the w equation is treated implicitly via a tridiagonal
-    solve, removing the vertical acoustic CFL constraint.
+    solve, removing the vertical acoustic CFL constraint.  The tridiagonal
+    bands come from the shared :func:`precompute_si_tridiag_bands`
+    (stretched-grid metric, both couplings on the boundary diagonal).  The
+    substep body is not delegated to ``semi_implicit_acoustic_column_kernel``
+    because this model's θ' update zeroes ``∂θ/∂z`` on the top and bottom
+    levels where the shared kernel uses one-sided differences.
     """
     g = config.g
     c_p = constants.c_pd
-    R_d = constants.R_d
-    c_v = constants.c_vd
     dz = height_coord.dz
     dz_half = height_coord.dz_half
     theta_0 = height_coord.theta_ref
     rho_0 = height_coord.rho_ref
     J = terrain_metric.jacobian
 
-    # Linearized sound speed squared
-    gamma = c_p / c_v
-    T_ref = theta_0 * height_coord.exner_ref
-    cs2 = gamma * R_d * T_ref
-    cs2_half = 0.5 * (cs2[:-1] + cs2[1:])
     dz_inner = 0.5 * (dz[:-1] + dz[1:])
     nlev = theta_p_grid.shape[-1]
+    a_tri, b_tri, c_tri = precompute_si_tridiag_bands(
+        height_coord, J, dt_s, g, implicit_buoyancy=False, nlev=nlev,
+    )
 
     def substep_body(i, carry):
         w_c, theta_p_c, rho_p_c = carry
@@ -674,19 +676,6 @@ def _acoustic_substeps_grid_semi_implicit(
         )
 
         rhs = w_c[..., 1:-1] + dt_s * dw_dt_inner
-
-        # --- Tridiagonal coefficients ---
-        alpha = dt_s**2 * cs2_half / (dz_inner * J[..., None])**2
-
-        # Sub/super-diagonals: Pad HLO op replaces alloc-zeros + scatter.
-        # Main diagonal: 1 + alpha + alpha_interior collapses two
-        # boundary scatters + one full-interior expression into a single
-        # add over Pad-of-slice (and the original full-array ``2*alpha``).
-        pad_axes_a = ((0, 0),) * (alpha.ndim - 1)
-        a_tri = jnp.pad(-alpha[..., 1:], (*pad_axes_a, (1, 0)))
-        alpha_interior = jnp.pad(alpha[..., 1:-1], (*pad_axes_a, (1, 1)))
-        b_tri = 1.0 + alpha + alpha_interior
-        c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
 
         w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
         w_new = w_c.at[..., 1:-1].set(w_inner_new)

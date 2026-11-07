@@ -26,6 +26,7 @@ def make_convection_physics(
     emit_momentum_viscosity: bool = True,
     eos_fn: Callable | None = None,
     constants_config: ConstantsConfig = ConstantsConfig(),
+    seos_cfg=None,
 ) -> Callable:
     """Create an ocean convection physics function.
 
@@ -62,6 +63,7 @@ def make_convection_physics(
             config, apply_diffusion=apply_diffusion,
             emit_momentum_viscosity=emit_momentum_viscosity,
             eos_fn=eos_fn, constants_config=constants_config,
+            seos_cfg=seos_cfg,
         )
     elif scheme == "plume":
         return _make_plume(config, eos_fn=eos_fn,
@@ -75,8 +77,27 @@ def _make_enhanced_diffusion(
         apply_diffusion: bool = True,
         emit_momentum_viscosity: bool = True,
         eos_fn: Callable | None = None,
-        constants_config: ConstantsConfig = ConstantsConfig()) -> Callable:
+        constants_config: ConstantsConfig = ConstantsConfig(),
+        seos_cfg=None) -> Callable:
     cfg = config.enhanced_diffusion
+
+    # Decision 94, at CONSTRUCTION on the static config: a card whose
+    # convective trigger is NEMO's own must state how the coefficient
+    # composes, and the EXPLICIT branch cannot express NEMO's replacement --
+    # it adds a tendency, where zdfevd.f90:107-110 overwrites the assembled
+    # coefficient.  Refuse rather than silently sum.
+    from legoesm.ocean.physics.convection.enhanced_diffusion import (
+        resolve_evd_composition,
+    )
+    if resolve_evd_composition(cfg) == "nemo_replace" and apply_diffusion:
+        raise ValueError(
+            'EnhancedDiffusionConfig.evd_composition="nemo_replace" '
+            "transcribes NEMO's zdfevd, which OVERWRITES the vertical "
+            "diffusivity (zdfevd.f90:107-110); the explicit convection "
+            "branch only adds a tendency and cannot express it. Select "
+            "implicit_vertical_mixing=True (the coefficient is then "
+            "composed in the implicit solve) or state "
+            'evd_composition="additive".')
 
     # Fail closed at construction: suppression (emit_momentum_viscosity=False)
     # with a nonzero convective momentum viscosity is contradictory — the
@@ -154,6 +175,10 @@ def _make_enhanced_diffusion(
             u=u_in, v=v_in,
             p_cell=p_cell, eos_fn=eos_fn,
             eta=state.eta.data, H_bathy=state.H_bathy.data,
+            # The CARD's NEMO &nameos coefficients for the nemo_bn2 trigger
+            # (decision 94); None keeps NemoSEOSConfig()'s defaults, which is
+            # what the card's own density EOS resolves to when it states none.
+            seos_cfg=seos_cfg,
             # Recipe-pinned constants (the N^2 trigger's g / reference
             # density); defaults reproduce legoesm.constants exactly.
             g=constants_config.g, rho_ref=constants_config.rho_0,

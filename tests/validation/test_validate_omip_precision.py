@@ -25,10 +25,32 @@ def _restore_fp64():
     set_policy(PrecisionPolicy.fp64())
 
 
-def test_mixed_precision_is_refused():
-    """#1665 interim: the fp64-vs-mixed validation harness is deferred to the
-    mixed-consistency campaign; mixed is refused loudly for now. Pin that the
-    request raises rather than silently running fp64."""
-    from legoesm.runtime.precision import apply_precision
-    with pytest.raises(NotImplementedError, match="disabled"):
-        apply_precision("mixed")
+def test_precision_validation_harness_runs():
+    from scripts.validate.validate_omip_precision import run_precision_validation
+
+    result = run_precision_validation(n_lat=4, n_lon=8, n_steps=2)
+    assert set(result) == {"passed", "checks", "metrics"}
+    assert isinstance(result["passed"], bool)
+    # Both modes must integrate without blowing up at any size.
+    assert result["checks"]["fp64_finite"] is True
+    assert result["checks"]["mixed_finite"] is True
+    # Engagement: the mixed policy must genuinely engage (fp32 storage + a
+    # non-zero divergence from fp64) so the harness can never pass vacuously.
+    assert result["checks"]["mixed_storage_is_fp32"] is True
+    assert result["checks"]["fp64_storage_is_fp64"] is True
+    assert result["checks"]["mixed_differs_from_fp64"] is True
+    # The fp64 reference must conserve its own budgets on a closed basin.
+    assert result["checks"]["fp64_heat_conserved"] is True
+    assert result["checks"]["fp64_salt_conserved"] is True
+    # #1675 review finding: this test used to assert only that ``passed`` was a
+    # BOOLEAN, and never looked at the mixed-mode half of the verdict -- so a
+    # run where mixed lost heat, lost salt and disagreed with fp64 on
+    # temperature still went green. Assert the verdict and the mixed budgets.
+    assert result["checks"]["mixed_heat_conserved"] is True, result["metrics"]
+    assert result["checks"]["mixed_salt_conserved"] is True, result["metrics"]
+    assert result["passed"] is True, (
+        f"harness verdict FAILED: "
+        f"{[k for k, v in result['checks'].items() if v is not True]}")
+    # Metrics are populated (drift + cross-mode divergence numbers).
+    for key in ("fp64_heat_drift_rel", "heat_cross_rel", "T_rms_diff_rel"):
+        assert key in result["metrics"]

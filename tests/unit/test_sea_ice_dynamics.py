@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -2848,8 +2849,12 @@ class TestMulticatTransportTracerConservation:
                         jnp.sum(new.concentration.data, axis=-1)),
             1e-30,
         )
+        # Every category sits at the same input T (272 K), so the per-category
+        # Kirchhoff charges sum to one L_s(272 K) times the total mass.
+        from legoesm.thermo import latent_heat_sublimation
         assert jnp.allclose(resp.lhflx * sum_conc_safe,
-                            constants.L_s * resp.surface_mass_flux,
+                            latent_heat_sublimation(state.T_ice.data[..., 0])
+                            * resp.surface_mass_flux,
                             rtol=1e-6, atol=1e-12)
 
     def test_v2_single_cat_latent_basis_under_lead_freeze_growth(self):
@@ -2892,8 +2897,10 @@ class TestMulticatTransportTracerConservation:
         assert float(jnp.min(new.concentration.data)) > conc0
         conc_basis = jnp.maximum(
             jnp.maximum(state.concentration.data, new.concentration.data), 1e-30)
+        from legoesm.thermo import latent_heat_sublimation
         assert jnp.allclose(resp.lhflx * conc_basis,
-                            constants.L_s * resp.surface_mass_flux,
+                            latent_heat_sublimation(state.T_ice.data)
+                            * resp.surface_mass_flux,
                             rtol=1e-6, atol=1e-12)
 
     def test_transport_conserves_tracer_inventories(self):
@@ -3043,8 +3050,12 @@ class TestAllOceanGridsCoupled:
         fracs = compute_tile_fractions(tcfg, new.concentration.data)
         blended = blend_tiles(zero, resp, zero, zero, fracs)
         # Atmosphere energy <-> water pairing holds on every grid.
+        from legoesm.thermo import latent_heat_sublimation
+        _T_in = state.T_ice.data
+        if _T_in.ndim > blended.lhflx.ndim:   # categories share one input T here
+            _T_in = _T_in[..., 0]
         assert jnp.allclose(blended.lhflx,
-                            constants.L_s * blended.surface_mass_flux,
+                            latent_heat_sublimation(_T_in) * blended.surface_mass_flux,
                             rtol=1e-10, atol=1e-12)
         assert jnp.all(jnp.isfinite(blended.freshwater_flux))
         assert jnp.all(jnp.isfinite(blended.ocean_heat_extraction))
@@ -3291,3 +3302,66 @@ class TestEvpSolverInputGuards:
         # And it is differentiable w.r.t. the trainable e_yield.
         g = jax.grad(lambda e: jnp.sum(run(e) ** 2))(jnp.asarray(2.0))
         assert jnp.isfinite(g)
+
+
+def test_multicategory_latent_is_the_sum_of_per_category_charges():
+    """Two categories at DIFFERENT temperatures: the realized latent handed to
+    the atmosphere (``lhflx_exchange``) is sum_k L_s(T_k) m_k, which sits
+    strictly between the two Kirchhoff values per unit mass and is NOT the
+    constant L_s times the mass; the blend delivers exactly f_water times it."""
+    from legoesm import constants
+    from legoesm.thermo import latent_heat_sublimation
+    from legoesm.ice.config import SeaIceConfig
+    from legoesm.ice.state import init_dynamic_ice_state
+    from legoesm.coupler.tile_fractions import (
+        TileConfig, blend_tiles, compute_tile_fractions,
+    )
+    from legoesm.core.coupling_fields import TileResponse
+    n = 4
+    grid = create_cubed_sphere(n)
+    shape = (6, n, n, 2)
+    st = init_dynamic_ice_state(shape, n_categories=2)
+    conc = jnp.zeros(shape).at[..., 0].set(0.4).at[..., 1].set(0.4)
+    h = jnp.zeros(shape).at[..., 0].set(0.5).at[..., 1].set(1.5)
+    T_cold, T_warm = 255.0, 272.0
+    T_ice = jnp.zeros(shape).at[..., 0].set(T_cold).at[..., 1].set(T_warm)
+    state = st._replace(
+        h_ice=st.h_ice.replace(data=h),
+        concentration=st.concentration.replace(data=conc),
+        T_ice=st.T_ice.replace(data=T_ice),
+    )
+    config = SeaIceConfig(n_categories=2, dynamics="free_drift", transport="advect",
+                          itd_remap="lipscomb2001")
+    # Dry air: sublimation from both categories.
+    forcing = _make_forcing(shape=(6, n, n))._replace(
+        q_lowest=jnp.full((6, n, n), 1e-4), T_lowest=jnp.full((6, n, n), 265.0))
+    sst = jnp.full((6, n, n), config.T_freeze_ocean)
+    z = jnp.zeros((6, n, n))
+    new, resp = step_sea_ice(state, forcing, sst, z, z, config,
+                             U_min=1.0, dt=3600.0, grid=grid)
+    M = resp.surface_mass_flux
+    assert float(jnp.min(M)) > 0.0, "premise: both categories sublimate"
+    L_eff = resp.lhflx_exchange / M
+    L_c, L_w = float(latent_heat_sublimation(T_cold)), float(latent_heat_sublimation(T_warm))
+    assert L_w < L_c   # L_s decreases with T (c_pv < c_pi)
+    assert bool(jnp.all(L_eff > L_w)) and bool(jnp.all(L_eff < L_c))
+    # Not the constant, not either single-temperature value.
+    for L_wrong in (constants.L_s, L_c, L_w):
+        assert float(jnp.min(jnp.abs(L_eff / L_wrong - 1.0))) > 1e-6
+    # The blend hands the atmosphere exactly f_water * lhflx_exchange.
+    zt = jnp.zeros((6, n, n))
+    zero = TileResponse(
+        T_sfc=zt, albedo=zt, emissivity=zt, z0=zt, q_surface=zt,
+        shflx=zt, lhflx=zt, tau_x=zt, tau_y=zt, lw_up=zt, u_ocean_sfc=zt,
+        v_ocean_sfc=zt, co2_flux=zt, freshwater_flux=zt,
+        ocean_heat_extraction=zt, ocean_stress_x=zt, ocean_stress_y=zt,
+        surface_mass_flux=zt, salt_flux=zt, lhflx_exchange=zt)
+    fracs = compute_tile_fractions(TileConfig(f_land=zt, f_lake=zt),
+                                   jnp.sum(new.concentration.data, axis=-1))
+    blended = blend_tiles(zero, resp, zero, zero, fracs)
+    np.testing.assert_allclose(np.asarray(blended.lhflx),
+                               np.asarray(resp.lhflx_exchange), rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(blended.surface_mass_flux), np.asarray(M), rtol=1e-12)
+    # A hand-built ice tile without the channel is refused, not silently zeroed.
+    with pytest.raises(ValueError, match="lhflx_exchange"):
+        blend_tiles(zero, zero._replace(lhflx_exchange=None), zero, zero, fracs)

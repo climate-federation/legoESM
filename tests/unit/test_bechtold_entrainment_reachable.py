@@ -87,78 +87,47 @@ def test_out_of_range_is_refused(field, bad):
 
 
 def test_exposing_bechtolds_rate_does_not_expose_tiedtkes():
-    """The two schemes have a field of the same name; only one is tunable.
-
-    Tiedtke's deep base rate is still held fixed in-scheme, so it must stay in
-    that scheme's `excluded` block, and the driver route must be qualified to
-    Bechtold at every hop: the registry key, the flat field name, and the
-    constructor that actually receives it.
-    """
+    """Bechtold's entrainment knobs are routed to Bechtold only.  Tiedtke is
+    the WRF port with no tunable parameters: it has no spec block, no route,
+    and the Tiedtke lane resolves to the empty config whatever the Bechtold
+    knobs are set to."""
     import legoesm.atmosphere.physics.convection.config as cc
-    from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
-
-    tiedtke = next(b for b in cc.__param_spec__.values()
-                   if b.get("scheme_key") == "atm.conv.TiedtkeConfig")
-    assert "epsilon_deep" in tiedtke["excluded"]
-    assert "epsilon_deep" not in tiedtke["params"]
-
-    routes = build_atm_scalar_param_map()
-    for field in ("epsilon_deep", "delta_deep"):
-        assert f"atm.conv.TiedtkeConfig.{field}" not in routes
-        # The flat field the Bechtold route lands on is Bechtold-prefixed, so
-        # a Tiedtke run cannot pick it up by accident.
-        assert routes[f"atm.conv.BechtoldConfig.{field}"].startswith("bechtold_")
-
-    # The behavioural half: resolving the TIEDTKE lane with the Bechtold knobs
-    # set must leave Tiedtke's own rates at their in-scheme defaults.  Asserted
-    # on the RESOLVED config, not on a patched constructor: the pipeline reads
-    # a pre-built `ConvectionConfig().tiedtke`, so a constructor spy would
-    # never fire and would pass no matter what the knob did.
     import legoesm.driver.physics_pipeline as pp
     from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
+
+    assert not any(b.get("scheme_key") == "atm.conv.TiedtkeConfig"
+                   for b in cc.__param_spec__.values())
+    routes = build_atm_scalar_param_map()
+    assert not any(k.startswith("atm.conv.TiedtkeConfig.") for k in routes)
+    for field in ("epsilon_deep", "delta_deep"):
+        assert routes[f"atm.conv.BechtoldConfig.{field}"].startswith("bechtold_")
     _kernel, resolved = pp._resolve_convection(ExperimentConfig()._replace(
         convection="tiedtke", bechtold_epsilon_deep=3.0e-3,
         bechtold_delta_deep=1.8e-4))
-    defaults = cc.TiedtkeConfig()
-    for field in ("epsilon_deep", "delta_deep"):
-        assert getattr(resolved, field) == getattr(defaults, field), (
-            f"the Bechtold {field} knob reached the Tiedtke config: "
-            f"{getattr(resolved, field)} != {getattr(defaults, field)}")
-    # And the values it would have carried are genuinely different, or the
-    # assertion above is satisfied by a knob that does nothing anywhere.
-    assert defaults.epsilon_deep != 3.0e-3
-    assert defaults.delta_deep != 1.8e-4
+    assert resolved == cc.TiedtkeConfig() and resolved._fields == ()
 
 
-def test_the_unread_cape_sink_ratio_is_not_offered_to_a_tuner():
-    """`cape_relaxation_sink` and the ratio it scales have no consumer.
-
-    Nothing in the scheme reads them, so a tunable entry would be a search
-    dimension that can move nothing — a zero-gradient leaf handed to an
-    optimiser. The fields stay (the driver pipeline passes them to the
-    constructor); the tunable classification does not.
+def test_the_unread_cape_sink_fields_are_gone():
+    """`cape_relaxation_sink` and the ratio it scaled had no consumer, so they
+    were deleted rather than left as a lever that moves nothing (a
+    zero-gradient leaf for an optimiser, an inert switch for a deck).  Scanned
+    across the whole convection package so a reintroduction anywhere trips.
     """
-    import inspect
+    import pathlib
 
     import legoesm.atmosphere.physics.convection.bechtold as bechtold
     import legoesm.atmosphere.physics.convection.config as cc
 
     blk = _bechtold_spec()
-    assert "cape_sink_heating_ratio" not in blk["params"]
-    assert "cape_sink_heating_ratio" in blk["excluded"]
-    # And the reason is still true: promote it only together with a consumer.
-    # Scanned across the whole convection package, not just the one module, so
-    # a reader landing in a sibling file still trips this.
-    import pathlib
+    for name in ("cape_relaxation_sink", "cape_sink_heating_ratio"):
+        assert not hasattr(cc.BechtoldConfig(), name)
+        assert name not in blk["params"] and name not in blk["excluded"]
     pkg = pathlib.Path(bechtold.__file__).parent
     for path in sorted(pkg.rglob("*.py")):
-        if path.name == "config.py":
-            continue                     # where the fields are declared
         src = path.read_text(errors="replace")
         assert "cape_relaxation_sink" not in src, path.name
         assert "cape_sink_heating_ratio" not in src, path.name
-    assert inspect.ismodule(bechtold)
-    assert hasattr(cc.BechtoldConfig(), "cape_sink_heating_ratio")
 
 
 def test_the_unread_polar_cap_flag_is_gone():

@@ -20,6 +20,8 @@
 
 # --- Grid + dycore: coarse C12/L20 for cheap iteration -----------------------
 grid_type: cubed_sphere
+persistent_dgrid: true       # #1028: carry D-staggered winds between steps; the cc round trip damps eddies (C36 HS jet 13 -> 39-41 m/s). Single-process cube only.
+energy_fixer: true                   # dycore energy fixer, now wired on this lane (review 2026-10-10 F15, vote F15b-V6)
 resolution: 12
 nlev: 20
 dt: 450.0
@@ -33,8 +35,12 @@ rad_update_steps: 6
 # scheme validated realistic in amip_production.yaml (albedo 0.292, precip 3.2).
 convection: sbm
 microphysics: morrison
+morrison_warm_rain_scheme: kk2000   # explicit: the unset default resolves to
+                                    # kk2000_cam6 under morrison_flavor mg,
+                                    # which needs CLUBB relvar (not wired here)
 clouds: sundqvist
 turbulence: louis           # Louis required by the tiled/coare3 surface
+# UNCALIBRATED: tuned on the bulk Hines, not retuned for the LMDZ Doppler-spread port (#2378).
 gravity_wave_drag: hines
 
 # --- Cloud tuning (== cmip_tuned_physics.yaml / amip_production.yaml) ---------

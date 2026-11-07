@@ -5,7 +5,7 @@ discrete pressure force at topography-adjacent u-faces (channel wall pgf
 NEMO +0.586e9 vs legoESM −0.816e9 m^4/s^2 — a sign flip — while interior pgf
 matched to 1.5%).  Root cause: the legacy ``adcroft`` PGF on the masked-zco
 staircase is the eta=0 along-level gradient ONLY; NEMO ``hpg_sco``
-(dynhpg.F90 5.0.1:340-390, the DINO ``namdyn_hpg`` selection) additionally
+(NEMO 5.0.2 dynhpg.F90:340-390, selected at :117-123) additionally
 carries the qco ``(1+r3t)`` thickness stretch of the hydrostatic integral
 and the ``gdept_z0`` slope-correction term (zuap) — the eta-proportional
 terms that transmit the discrete topographic form stress at steps.
@@ -59,6 +59,7 @@ from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import (
     create_full_step_coordinate,
     create_ocean_z_star,
+    create_z_star_from_thicknesses,
 )
 
 NX, NY, NZ = 8, 6, 8
@@ -81,7 +82,10 @@ def _grid():
 
 def _staircase(bottom_level_2d):
     """Full-step staircase coordinate (NEMO ln_zco masked z-levels)."""
-    z_ref = create_ocean_z_star(n_levels=NZ, H_max=H_MAX)
+    dz = np.full((NZ,), H_MAX / NZ, dtype=np.float64)
+    gdept = (np.arange(NZ, dtype=np.float64) + 0.5) * dz[0]
+    z_ref = create_z_star_from_thicknesses(
+        dz, t_depth_ref_m=gdept, nemo_e3w_0_m=dz)
     return create_full_step_coordinate(z_ref, jnp.asarray(bottom_level_2d))
 
 
@@ -212,7 +216,7 @@ def test_f90_recurrence_oracle_nonuniform_rho():
     AND k), unequal step depths and nonzero eta (codex r3 MED): the uniform-
     rho' telescope tests cannot catch a vertical-weight/pairing error that
     preserves the free-surface identity.  Here zhpi+zuap is transliterated
-    from dynhpg.F90 5.0.1:340-390 + the qco macros — surface formula,
+    from NEMO 5.0.2 dynhpg.F90:340-390 + the qco macros — surface formula,
     (rhd(k)+rhd(k-1)) pairing, per-column (1+r3t) e3w stretch, gdept_z0
     slope term, below-seafloor rhd mask, and the metric division — and every
     wet u/v face/level must match the model's KE_PGF to roundoff."""
@@ -248,6 +252,7 @@ def test_f90_recurrence_oracle_nonuniform_rho():
     rho_p = rho - RHO_0
     active = np.asarray(coord.is_active)
     rho_m = np.where(active, rho_p, 0.0)                 # NEMO masked rhd*rho0
+    rhd = rho_m / RHO_0                                  # dynhpg's rhd
     # gdept ladder: cast the (policy-f32) coordinate values to f64 BEFORE
     # differencing — the model's quadrature does exactly that (hi_precision
     # t_q = asarray(ladder, float64)); an f32-native subtraction re-rounds
@@ -255,15 +260,16 @@ def test_f90_recurrence_oracle_nonuniform_rho():
     t = np.abs(np.asarray(coord.z_full_ref)).astype(np.float64)
     ht0 = np.asarray(jnp.sum(coord.h_partial, axis=-1))
     r3t = np.where(ht0 > 0.0, eta / np.maximum(ht0, 1.0), 0.0)
-    # per-column hydrostatic recurrence P(k) [Pa]: surface e3w(1)=2*gdept(1),
-    # interior e3w(k)=gdept(k)-gdept(k-1), pair (rhd(k)+rhd(k-1)); the qco
-    # (1+r3t) e3w factor is column-constant -> applied as one stretch.
-    P = np.zeros_like(rho_m)
-    P[..., 0] = 0.5 * g * (2.0 * t[0]) * rho_m[..., 0]
+    # Literal dimensionless-rhd recurrence selected by 0da38492e.  W-grid
+    # thickness comes from the raw mesh field (7f729c488), never reconstructed
+    # from rounded domain geometry.
+    e3w0 = np.asarray(coord.nemo_e3w_0, dtype=np.float64)
+    P = np.zeros_like(rhd)
+    P[..., 0] = 0.5 * g * e3w0[0] * rhd[..., 0]
     for k in range(1, NZ):
         P[..., k] = (P[..., k - 1]
-                     + 0.5 * g * (t[k] - t[k - 1])
-                     * (rho_m[..., k] + rho_m[..., k - 1]))
+                     + 0.5 * g * e3w0[k]
+                     * (rhd[..., k] + rhd[..., k - 1]))
     P = P * (1.0 + r3t)[..., None]                       # qco e3w stretch
     Z = t[None, None, :] * (1.0 + r3t)[..., None] - eta[..., None]  # gdept_z0
 
@@ -275,15 +281,15 @@ def test_f90_recurrence_oracle_nonuniform_rho():
     # formula only re-tests the grid's dx representation, at ~1e-5).
     P_j = jnp.asarray(P)
     Z_j = jnp.asarray(Z)
-    R_j = jnp.asarray(rho_m)
+    R_j = jnp.asarray(rhd)
     expected_u = np.asarray(
         -(gradient_x_cgrid(P_j, grid_)
           - constants.g * interp_cell_to_uface(R_j)
-          * gradient_x_cgrid(Z_j, grid_)) / RHO_0)
+          * gradient_x_cgrid(Z_j, grid_)))
     expected_v = np.asarray(
         -(gradient_y_cgrid(P_j, grid_)
           - constants.g * interp_cell_to_vface(R_j, grid_)
-          * gradient_y_cgrid(Z_j, grid_)) / RHO_0)
+          * gradient_y_cgrid(Z_j, grid_)))
     u_mask, v_mask = compute_face_masks_3d(coord.is_active, grid_)
     u_mask = np.asarray(u_mask) > 0.5
     v_mask = np.asarray(v_mask) > 0.5
@@ -316,6 +322,10 @@ def test_eta_zero_reduces_to_adcroft_bitwise():
                        np.asarray(diag.KE_PGF_v.data))
     np.testing.assert_array_equal(out["nemo_sco"][0], out["adcroft"][0])
     np.testing.assert_array_equal(out["nemo_sco"][1], out["adcroft"][1])
+    # Level-isopycnal qco rest control, not merely agreement between two
+    # potentially wrong schemes: the PGF itself must vanish on every face.
+    assert np.max(np.abs(out["nemo_sco"][0])) == 0.0
+    assert np.max(np.abs(out["nemo_sco"][1])) == 0.0
 
 
 def test_staircase_rest_stays_at_rest():
@@ -341,6 +351,16 @@ def test_nemo_sco_requires_trapezoid_quadrature():
             _cfg(pgf_quadrature="cell_integral"))
     # the valid pairing passes model validation
     LatLonCGridOceanModel._validate_config(_cfg())
+
+
+def test_nemo_sco_requires_explicit_t_depth_reference():
+    """The SCO slope term reads NEMO gdept, never an inferred midpoint."""
+    z_ref = create_z_star_from_thicknesses(
+        np.full((NZ,), H_MAX / NZ, dtype=np.float64)
+    )
+    coord = create_full_step_coordinate(z_ref, _x_staircase(3))
+    with pytest.raises(ValueError, match="requires an explicit t_depth_ref"):
+        _pgf_diag(coord, np.zeros((NY, NX)), _cfg())
 
 
 def test_nemo_sco_requires_partial_coord():

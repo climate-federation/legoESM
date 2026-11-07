@@ -8,6 +8,7 @@ References: NEMO 5.0.1 src/OCE/ZDF/zdftke.F90 (lines 305-370 Langmuir,
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -17,6 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 from legoesm.ocean.physics.vertical_mixing.tke import (
     _NEMO_TKE_EBB,
@@ -28,12 +30,160 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
     nemo_etau_injection,
     nemo_langmuir_tke_source,
     nemo_literal_langmuir_tke_update,
+    nemo_tke_effective_ice_fraction,
     tke_vertical_mixing,
 )
 
 jax.config.update("jax_enable_x64", True)
 
 _RHO0 = 1026.0
+
+
+def test_ln_mxl0_uses_derived_rmxl_min_not_raw_namelist_value():
+    """NEMO overwrites rn_mxl0=rmxl_min when ln_mxl0 is true."""
+    from legoesm import constants
+    from legoesm.ocean.physics.vertical_mixing.tke import (
+        _mixing_length_floor, _mxl0_surface_anchor,
+    )
+
+    # A NEMO card on the ln_zdfiwm=.FALSE. arm: it SELECTS the derivation
+    # (zdftke.F90:845-846) and the compiled masked anchor statement
+    # (zdftke.F90:602).  Without those two selections the card keeps its
+    # own mxl_min, which is what every non-NEMO card must keep.
+    cfg = TKEConfig(
+        tke_mxl_choice=3, mxl_min=0.04, c_k=0.1,
+        tke_background=1.0e-6, mxl0_min_m=0.04,
+        nemo_derived_mxl_min=True, nemo_mxl0_surface_tmask=True,
+        nemo_mxl0_rmxl_min_overwrite=True)
+    expected = np.float64(1.0e-6) / (
+        np.float64(cfg.c_k) * np.sqrt(np.float64(cfg.tke_background)))
+    floor = _mixing_length_floor(cfg)
+    assert np.float64(floor).view(np.uint64) == expected.view(np.uint64)
+    assert floor != 0.01  # planted old card literal is one ULP too high
+    calm = _mxl0_surface_anchor(
+        cfg, jnp.asarray([0.0]), _RHO0, constants.g, jnp.asarray([1.0]))
+    np.testing.assert_array_equal(np.asarray(calm), np.asarray([expected]))
+
+    # Shipped zdftke.F90:602 multiplies stress by tmask before the MAX floor.
+    dry = _mxl0_surface_anchor(
+        cfg, jnp.asarray([1.0]), _RHO0, constants.g, jnp.asarray([0.0]))
+    np.testing.assert_array_equal(np.asarray(dry), np.asarray([expected]))
+    # The overwrite arm IGNORES the card's rn_mxl0: zdf_tke_init has already
+    # replaced it with rmxl_min (shipped zdftke.F90:859-862; GYRE
+    # ppsrc:829-832).  Moving rn_mxl0 far above the derived floor must not
+    # move the calm anchor.
+    np.testing.assert_array_equal(
+        np.asarray(_mxl0_surface_anchor(
+            cfg._replace(mxl0_min_m=7.0), jnp.asarray([0.0]), _RHO0,
+            constants.g, jnp.asarray([1.0]))),
+        np.asarray([expected]))
+
+    with pytest.raises(ValueError, match="surface_tmask"):
+        _mxl0_surface_anchor(
+            cfg, jnp.asarray([1.0]), _RHO0, constants.g, None)
+
+    # The card fields remain differentiable; deriving the floor must not
+    # convert a traced rn_ediff to a host scalar.
+    grad = jax.grad(lambda ediff: _mixing_length_floor(
+        TKEConfig(tke_mxl_choice=3, c_k=ediff, tke_background=1.0e-6,
+                  nemo_derived_mxl_min=True)))
+    assert np.isfinite(float(grad(jnp.asarray(0.1, dtype=jnp.float64))))
+
+    # The other half of the same rule: a card that does NOT select the
+    # derivation keeps its configured floor and accepts a missing mask.
+    # NEMO's ln_zdfiwm=.TRUE. arm is exactly this case (zdftke.F90:841-843
+    # forces rmxl_min=1e-3), and so is every non-NEMO card.
+    plain = TKEConfig(tke_mxl_choice=3, mxl_min=0.04, c_k=0.1,
+                      tke_background=1.0e-6)
+    assert float(_mixing_length_floor(plain)) == 0.04
+    # ... and, on the DEFAULT (no-overwrite) arm, its CALM surface anchor is
+    # the card's own rn_mxl0, not that mixing-length floor.  The two are
+    # deliberately different numbers here so the row cannot pass by
+    # coincidence: DECISION 72 is exactly this distinction.
+    np.testing.assert_array_equal(
+        np.asarray(_mxl0_surface_anchor(
+            plain._replace(mxl0_min_m=0.11), jnp.asarray([0.0]), _RHO0,
+            constants.g, None)),
+        np.asarray([0.11]))
+    np.testing.assert_array_equal(
+        np.asarray(_mxl0_surface_anchor(
+            plain, jnp.asarray([0.0]), _RHO0, constants.g, None)),
+        np.asarray([TKEConfig().mxl0_min_m]))
+
+
+def test_zero_step_probe_uses_the_shared_derived_floor():
+    """The diagnostic must not reconstruct a different surface floor."""
+    repo = Path(__file__).resolve().parents[3]
+    source = (
+        repo / "scripts/validate/ocean_fidelity/nemo_zero_step_closure.py"
+    ).read_text()
+    assert "_rmxl_min = _mxl0_anchor_floor(cfg)" in source
+    assert "cfg.mxl0_min_m" not in source
+
+
+def test_nemo_nn_eice1_is_scalar_libm_tanh_not_linear_fraction():
+    """zdftke.F90:255: mode 1 is TANH(10*fr_i); mode 2 alone is raw fr_i.
+
+    Full ice is included because mode 1 is source-literally ``TANH(10*fr_i)``
+    and therefore never reaches complete attenuation, while mode 3's
+    ``MIN(4*fr_i, 1)`` reaches it at a quarter cover (zdftke.f90:260,262).
+    That difference is 4.1e-9 and vanishes inside NEMO's background clamp on
+    the mixing coefficients, so it is pinned HERE, on the shared
+    transcription, rather than through a diffusivity profile where the clamp
+    would hide it (round 170).
+    """
+    old = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+        fr_i = jnp.asarray([0.0, 0.01, 0.25, 0.9, 1.0], dtype=jnp.float64)
+        got = np.asarray(jax.jit(
+            lambda value: nemo_tke_effective_ice_fraction(value, 1))(fr_i))
+        import math
+        target = np.asarray([math.tanh(float(value * 10.0))
+                             for value in np.asarray(fr_i)], dtype=np.float64)
+        np.testing.assert_array_equal(got.view(np.uint64), target.view(np.uint64))
+        assert not np.array_equal(got[1:].view(np.uint64),
+                                  np.asarray(fr_i)[1:].view(np.uint64))
+        # Mode 1 at FULL ice stays strictly below the complete attenuation
+        # mode 3 already reaches at a quarter cover.
+        full_mode1 = float(nemo_tke_effective_ice_fraction(
+            jnp.asarray(1.0, dtype=jnp.float64), 1))
+        quarter_mode3 = float(nemo_tke_effective_ice_fraction(
+            jnp.asarray(0.25, dtype=jnp.float64), 3))
+        assert quarter_mode3 == 1.0
+        assert full_mode1 < quarter_mode3
+        tangent = jax.grad(lambda value: jnp.sum(
+            nemo_tke_effective_ice_fraction(value, 1)))(fr_i)
+        assert bool(jnp.all(jnp.isfinite(tangent)))
+    finally:
+        set_policy(old)
+
+
+def test_nemo_nn_eice2_is_raw_fraction_and_dispatch_is_closed():
+    """zdftke.F90:256: mode 2 preserves raw ``fr_i``; unknowns raise."""
+    fr_i = jnp.asarray([0.0, 0.01, 0.25, 0.9], dtype=jnp.float64)
+    got = np.asarray(jax.jit(
+        lambda value: nemo_tke_effective_ice_fraction(value, 2))(fr_i))
+    np.testing.assert_array_equal(got.view(np.uint64),
+                                  np.asarray(fr_i).view(np.uint64))
+    tangent = jax.grad(lambda value: jnp.sum(
+        nemo_tke_effective_ice_fraction(value, 2)))(fr_i)
+    np.testing.assert_array_equal(np.asarray(tangent), np.ones(4))
+    for mode in (0, 1, 2, 3):
+        assert nemo_tke_effective_ice_fraction(fr_i, mode).shape == fr_i.shape
+    for invalid in (-1, 4, 99):
+        with pytest.raises(ValueError, match="0, 1, 2 or 3"):
+            nemo_tke_effective_ice_fraction(fr_i, invalid)
+
+
+@pytest.mark.parametrize("invalid", [-1, 4, 99])
+def test_tke_config_validator_rejects_every_out_of_range_eice(invalid):
+    from legoesm.ocean.physics.vertical_mixing.tke import (
+        _validate_post_mixing_cfg,
+    )
+
+    with pytest.raises(ValueError, match="0, 1, 2 or 3"):
+        _validate_post_mixing_cfg(TKEConfig(eice=invalid))
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +281,45 @@ class TestLangmuirSource:
         np.testing.assert_allclose(compiled[0], eager[0], rtol=2e-15, atol=0.0)
         np.testing.assert_allclose(compiled[1], eager[1], rtol=2e-15, atol=0.0)
         assert np.isfinite(np.asarray(compiled[1])).all()
+
+    def test_literal_grad_is_finite_at_zero_stress(self):
+        """Zero surface stress (land / calm columns) must not make the
+        gradient NaN.
+
+        REGRESSION GUARD. ``zus = SQRT(2*zcof*taum)`` has an infinite
+        derivative at ``taum == 0``, and the NaN that reverse mode produces
+        there survives the ``apply`` mask (0 * inf = NaN), so a bare ``sqrt``
+        here poisons every end-to-end ``jax.grad`` of a card whose domain has
+        land. The primal is 0 either way, so only the gradient can catch it.
+        """
+        depth_w, dz_w = _col()
+        N2 = jnp.full((2, 5), 1.0e-5)
+        bottom = jnp.asarray([4, 4], dtype=jnp.int32)
+        wet = jnp.ones((2, 5), dtype=bool)
+
+        def total(taum, evaluation):
+            cfg = TKEConfig(lc=True, tke_langmuir_evaluation=evaluation)
+            return jnp.sum(nemo_langmuir_tke_source(
+                taum, N2, depth_w, dz_w, cfg,
+                bottom_level=bottom, w_active=wet))
+
+        calm = jnp.zeros((2,))
+        literal_zero = np.asarray(jax.grad(total)(calm, "nemo_literal"))
+        assert np.isfinite(literal_zero).all(), literal_zero
+        # The analytic limit: the source scales like taum^{3/2}.
+        np.testing.assert_array_equal(literal_zero, np.zeros(2))
+        np.testing.assert_array_equal(
+            literal_zero, np.asarray(jax.grad(total)(calm, "vectorized")))
+        # The primal at zero stress is untouched (exact equality).
+        np.testing.assert_array_equal(np.asarray(total(calm, "nemo_literal")), 0.0)
+
+        # Away from zero the literal gradient is unchanged by the guard: it
+        # still equals the plain-sqrt arm to the last bits.
+        forced = jnp.asarray([0.1, 0.2])
+        np.testing.assert_allclose(
+            np.asarray(jax.grad(total)(forced, "nemo_literal")),
+            np.asarray(jax.grad(total)(forced, "vectorized")),
+            rtol=2e-15, atol=0.0)
 
     def test_literal_line463_update_order_is_red_against_rate_first(self):
         depth_w, dz_w = _col()
@@ -416,7 +605,8 @@ class TestOrchestratorWiring:
                 T * 0, T * 0, T, S, rho, dz_half, tke_old, tau, tau0,
                 cfg, 1026.0, 9.81, p_cell=p, dz_ref=z.dz_ref, jacobian=J,
                 eos_fn=eos_fn, z_interface=z.z_half_ref[1:-1],
-                dz_surface=0.5 * z.dz_half_ref[0] * J)
+                dz_surface=0.5 * z.dz_half_ref[0] * J,
+                surface_tmask=jnp.ones_like(tau))
             assert (ctx.langmuir_source is not None) == lc
             n2 = jnp.full(shape[:-1] + (nlev - 1,), 1e-6)
             outs[lc] = tke_integrate_post_mixing(
@@ -602,7 +792,7 @@ class TestNemoDirichletSurfaceBC:
 
 
 def _nemo_z0_hand_solve(e_old, K_M, N2, l_eps, dz, e_sfc, dt, c_eps, alpha_tke,
-                        avm1=None, shear_sq=None):
+                        avm1=None, shear_sq=None, dz_face_sfc=None):
     """Independent NumPy Thomas solve of NEMO's (N+1)-row surface-Dirichlet
     tridiagonal (zdftke.F90:264-269,403-410), uniform dz, backward_euler
     dissipation, buoyancy sink split sign-aware (N2>=0 here so the whole
@@ -624,6 +814,11 @@ def _nemo_z0_hand_solve(e_old, K_M, N2, l_eps, dz, e_sfc, dt, c_eps, alpha_tke,
     dissipation/buoyancy terms, but must be threaded for a genuinely
     discriminating exact-avm comparison). ``P_s = K_M*shear_sq`` added to
     the RHS, matching the function-under-test's ``rhs = e_old + dt*P_s``.
+
+    ``dz_face_sfc`` (#1690): distance between the virtual z=0 W-point and
+    interior W-point 0 -- NEMO's ``e3t(1)`` in the ``zzd_lw(jk=2)``
+    denominator ``e3t(1)*e3w(2)``. ``None`` (default) => ``dz`` (uniform
+    column, where the two coincide). Only row 1's subdiagonal uses it.
     """
     N = len(e_old)
     Np1 = N + 1
@@ -639,7 +834,8 @@ def _nemo_z0_hand_solve(e_old, K_M, N2, l_eps, dz, e_sfc, dt, c_eps, alpha_tke,
         up_avm = alpha_tke * 0.5 * (Kw[row] + (Kw[row + 1] if row < N else Kw[row]))
         lo_avm = alpha_tke * 0.5 * (Kw[row] + Kw[row - 1])
         up = dt * up_avm / (dz * dz) if row < N else 0.0
-        lo = dt * lo_avm / (dz * dz)
+        _lo_face = dz if (row > 1 or dz_face_sfc is None) else dz_face_sfc
+        lo = dt * lo_avm / (_lo_face * dz)
         diss_rate = c_eps * np.sqrt(max(e_old[k], 0.0)) / l_eps[k]
         buoy_rate = K_M[k] * max(N2[k], 0.0) / max(e_old[k], 1e-12)
         P_s = K_M[k] * _shear_sq[k]
@@ -704,6 +900,8 @@ class TestNemoZ0SurfaceBCPlacement:
             l_eps=jnp.ones(shape), dz_half=jnp.ones(shape),
             surface_flux=jnp.zeros((1, 1)), dt=1.0, cfg=cfg,
             dz_surface=jnp.ones((1, 1)),
+            dz_face_surface=(jnp.ones((1, 1))
+                             if surface_bc_level == "nemo_z0" else None),
             surface_dirichlet=(None if surface_dirichlet is None else
                                jnp.full((1, 1), surface_dirichlet)),
             surface_bc_level=surface_bc_level,
@@ -749,6 +947,7 @@ class TestNemoZ0SurfaceBCPlacement:
                 P_s=zeros, N2=zeros, l_eps=jnp.ones(shape),
                 dz_half=jnp.ones(shape), surface_flux=jnp.zeros((1, 1)),
                 dt=1.0, cfg=cfg, dz_surface=jnp.ones((1, 1)),
+                dz_face_surface=jnp.ones((1, 1)),
                 surface_dirichlet=surface, surface_bc_level="nemo_z0",
                 K_M_surface=jnp.full((1, 1), 1.0e-3),
             ))
@@ -780,7 +979,8 @@ class TestNemoZ0SurfaceBCPlacement:
         out = tke_vertical_mixing(
             u, v, T, S, rho, dz_half, tke_old, tx, ty, dt=1800.0, cfg=cfg,
             rho_0=_RHO0, n_iterations=1, dz_ref=dz_ref, jacobian=jacobian,
-            dz_surface=dz_surface, z_interface=z_int)
+            dz_surface=dz_surface, z_interface=z_int,
+            surface_tmask=jnp.ones(T.shape[:-1]))
 
         # Independent hand-solve on the SAME inputs the orchestrator computed
         # internally: reconstruct N2/shear/K_M/l_eps/e_sfc from the same
@@ -813,6 +1013,65 @@ class TestNemoZ0SurfaceBCPlacement:
         np.testing.assert_allclose(
             np.asarray(out.tke_new)[0, 0], expected, rtol=1e-10)
 
+    def test_nemo_z0_surface_face_is_full_e3t1_not_the_cell_midpoint(self):
+        """#1690: the virtual-surface face distance is NEMO's e3t(1)
+        (the LIVE top-cell thickness dz_ref[0]*J), NOT the top cell's midpoint
+        depth -z_full_ref[0]*J (= half e3t(1) on a midpoint grid, which is
+        what the production orchestrator used to hand the solver).
+
+        Non-vacuity: this column feeds the honest MIDPOINT value (5 m on a
+        10 m top cell) in the ``dz_surface`` slot exactly as ``k_profiles``
+        does, so the pre-fix wiring solves a DIFFERENT system.  The two
+        candidate metrics are asserted to disagree before the model is
+        compared to either, so the test cannot pass by both being equal.
+        """
+        (u, v, T, S, rho, dz_half, z_int, tx, ty, dz_ref, jacobian,
+         _dz_surface_full) = self._column()
+        # What k_profiles actually computes for the Veros injection volume:
+        # -z_full_ref[0]*J = half the 10 m top cell.
+        dz_surface_midpoint = jnp.full((1, 1), 5.0)
+        cfg = TKEConfig(
+            surface_bc="nemo_dirichlet", tke_surface_bc_level="nemo_z0")
+        tke_old = jnp.full((1, 1, 5), cfg.tke_background)
+        out = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, tke_old, tx, ty, dt=1800.0, cfg=cfg,
+            rho_0=_RHO0, n_iterations=1, dz_ref=dz_ref, jacobian=jacobian,
+            dz_surface=dz_surface_midpoint, z_interface=z_int)
+
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            _NEMO_TKE_EBB, _NEMO_TKE_EMIN0, _safe_stress_modulus,
+            compute_K_from_tke, compute_mixing_lengths,
+        )
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            compute_N2 as _compute_N2, vertical_shear_squared as _vsq,
+        )
+        from legoesm import constants as _constants
+        N2_arr = np.asarray(_compute_N2(rho, dz_half, _RHO0, _constants.g))
+        taum = float(np.asarray(_safe_stress_modulus(tx, ty))[0, 0])
+        e_sfc = max(_NEMO_TKE_EMIN0, _NEMO_TKE_EBB / _RHO0 * taum)
+        e_old_np = np.asarray(tke_old)[0, 0]
+        l_k, l_eps = compute_mixing_lengths(
+            tke_old, jnp.asarray(N2_arr), dz_half, cfg, signed_n2=False)
+        K_M, _ = compute_K_from_tke(tke_old, l_k, cfg)
+        shear_sq_np = np.asarray(_vsq(u, v, dz_half))[0, 0]
+
+        def _hand(face):
+            return np.maximum(_nemo_z0_hand_solve(
+                e_old_np, np.asarray(K_M)[0, 0], N2_arr[0, 0],
+                np.asarray(l_eps)[0, 0], 10.0, e_sfc, 1800.0, cfg.c_eps,
+                cfg.alpha_tke, shear_sq=shear_sq_np, dz_face_sfc=face),
+                cfg.tke_background)
+
+        expected_e3t1 = _hand(10.0)          # NEMO e3t(1)
+        pre_fix_midpoint = _hand(5.0)        # -z_full_ref[0]*J, the defect
+        # The discriminator is live: doubling the coupling moves row 0.
+        assert not np.allclose(
+            expected_e3t1[0], pre_fix_midpoint[0], rtol=1e-6), (
+            "metric candidates are degenerate on this column - the "
+            "assertion below would be vacuous")
+        np.testing.assert_allclose(
+            np.asarray(out.tke_new)[0, 0], expected_e3t1, rtol=1e-10)
+
     def test_nemo_z0_exact_surface_avm_matches_hand_derived_solve(self):
         """T3-EXACT: with ``tke_mxl_choice=3`` (which computes the ln_mxl0
         surface anchor the exact face needs), the nemo_z0 face uses NEMO's
@@ -828,7 +1087,8 @@ class TestNemoZ0SurfaceBCPlacement:
         out = tke_vertical_mixing(
             u, v, T, S, rho, dz_half, tke_old, tx, ty, dt=1800.0, cfg=cfg,
             rho_0=_RHO0, n_iterations=1, dz_ref=dz_ref, jacobian=jacobian,
-            dz_surface=dz_surface, z_interface=z_int)
+            dz_surface=dz_surface, z_interface=z_int,
+            surface_tmask=jnp.ones(T.shape[:-1]))
 
         from legoesm.ocean.physics.vertical_mixing.tke import (
             _NEMO_TKE_EBB, _NEMO_TKE_EMIN0, _mxl0_surface_anchor,
@@ -848,7 +1108,8 @@ class TestNemoZ0SurfaceBCPlacement:
         taum = float(np.asarray(taum_batch)[0, 0])
         e_sfc = max(_NEMO_TKE_EMIN0, _NEMO_TKE_EBB / _RHO0 * taum)
         e_old_np = np.asarray(tke_old)[0, 0]
-        l_anchor = _mxl0_surface_anchor(cfg, taum_batch, _RHO0, g)  # (1, 1)
+        l_anchor = _mxl0_surface_anchor(
+            cfg, taum_batch, _RHO0, g, jnp.ones_like(taum_batch))  # (1, 1)
         dz_cell = dz_ref * jacobian[..., None]
         l_k, l_eps = compute_mixing_lengths(
             tke_old, jnp.asarray(N2_arr), dz_half, cfg, signed_n2=False,
@@ -974,9 +1235,12 @@ class TestNemoZ0SurfaceBCPlacement:
                 cfg=TKEConfig(tke_surface_bc_level="nemo_z0"), rho_0=_RHO0,
                 n_iterations=1, z_interface=z_int)
 
-    def test_nemo_z0_requires_dz_surface(self):
+    def test_nemo_z0_requires_the_cell_thickness_metric(self):
+        """#1690: nemo_z0 derives NEMO's e3t(1) from dz_ref/jacobian, so
+        those are what it demands -- it must NOT silently fall back to the
+        midpoint ``dz_surface`` slot."""
         u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
-        with pytest.raises(ValueError, match="dz_surface"):
+        with pytest.raises(ValueError, match="dz_ref"):
             tke_vertical_mixing(
                 u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0,
                 cfg=TKEConfig(surface_bc="nemo_dirichlet",
@@ -1099,6 +1363,8 @@ class TestNemoBottomTkeDirichlet:
         out = tke_vertical_mixing(
             u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0, cfg=cfg,
             rho_0=_RHO0, n_iterations=3, z_interface=z_int,
+            dz_ref=jnp.full((u.shape[-1],), 25.0),
+            jacobian=jnp.ones(u.shape[:-1]),
             dz_surface=dz_surface, bottom_dirichlet=bottom_val)
         np.testing.assert_allclose(
             np.asarray(out.tke_new)[..., -1], 3e-4, rtol=0, atol=1e-12)
@@ -1131,6 +1397,81 @@ class TestNemoBottomTkeDirichlet:
         # the true seafloor and remains a genuine solved/diffusing row) —
         # distinguishes this from the old unconditional-last-row behaviour.
         assert en[0, 0, -1] != pytest.approx(7e-4, abs=1e-12)
+
+    def test_bottom_level_full_depth_jpk_remains_outside_solve(self):
+        """When bottom_level == N (full-depth jpk row), the Dirichlet pin
+        lands at interior interfaces for k < N while the full-depth column's
+        last solved row (jpkm1 = N - 1) matches the unpinned solve bit-for-bit."""
+        u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
+        N = dz_half.shape[-1]   # 7 interior interfaces (nlev=8)
+        # Per-column bottom_level: shallow (2), mid (4), full-depth (N=7).
+        # The full-depth boundary is NEMO's held jpk row, outside the solve.
+        bl = jnp.asarray([2, 4, N])[:, None] * jnp.ones(
+            u.shape[:-1], dtype=jnp.int32)
+        bottom_val = jnp.full(u.shape[:-1], 7e-4)
+        out = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0,
+            cfg=TKEConfig(bottom_tke_bc=True), rho_0=_RHO0,
+            n_iterations=3, z_interface=z_int, bottom_dirichlet=bottom_val,
+            bottom_level=bl)
+        unpinned = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0,
+            cfg=TKEConfig(), rho_0=_RHO0, n_iterations=3,
+            z_interface=z_int)
+        en = np.asarray(out.tke_new)
+        en_unpinned = np.asarray(unpinned.tke_new)
+        bl_np = np.asarray(bl)
+        for i in range(bl_np.shape[0]):
+            for j in range(bl_np.shape[1]):
+                k = bl_np[i, j]
+                if k < N:
+                    assert en[i, j, k] == pytest.approx(7e-4, abs=1e-12), (
+                        f"column ({i},{j}): pin did not land at bottom_level={k}")
+                else:
+                    assert (en[i, j, -1].view(np.uint64)
+                            == en_unpinned[i, j, -1].view(np.uint64)), (
+                        f"column ({i},{j}): full-depth jpk boundary changed "
+                        "the last solved row")
+        assert en[0, 0, -1] != pytest.approx(7e-4, abs=1e-12)
+
+    def test_full_depth_row_is_the_nemo_literal_solve_bit_for_bit(self):
+        """The out-of-solve jpk BC cannot replace solved row jpkm1."""
+        shape = (1, 1, 4)
+
+        def column(values):
+            return jnp.asarray(values, dtype=jnp.float64).reshape(shape)
+
+        cfg = TKEConfig(
+            tke_matrix_evaluation="nemo_literal",
+            tke_solver_evaluation="nemo_literal",
+            dissipation_discretization="nemo_1p5_split",
+            tke_buoyancy_sink="nemo_explicit",
+            nemo_tke_matrix_rhs_source_rounded=True,
+            nemo_tke_solve_source_rounded=True,
+        )
+        solved = jax.jit(lambda: _solve_tke_backward_euler(
+            e_old=column([0.00113, 0.000271, 0.0000793, 0.0000317]),
+            K_M_old=column([0.00123, 0.000891, 0.000456, 0.000237]),
+            K_H_old=column([0.000173, 0.000121, 0.000083, 0.000041]),
+            P_s=column([1.31e-6, 8.7e-7, 4.9e-7, 2.3e-7]),
+            N2=column([1.7e-5, 2.3e-5, 3.1e-5, 4.7e-5]),
+            l_eps=column([7.3, 8.9, 11.7, 13.1]),
+            dz_half=column([9.7, 11.3, 13.9, 17.1]),
+            surface_flux=jnp.zeros((1, 1), dtype=jnp.float64),
+            dt=jnp.float64(2700.0), cfg=cfg,
+            dz_face_surface=jnp.asarray([[5.3]], dtype=jnp.float64),
+            surface_dirichlet=jnp.asarray([[0.000217]], dtype=jnp.float64),
+            surface_bc_level="nemo_z0",
+            K_M_surface=jnp.asarray([[0.000319]], dtype=jnp.float64),
+            bottom_dirichlet=jnp.asarray([[0.0007]], dtype=jnp.float64),
+            bottom_level=jnp.asarray([[shape[-1]]], dtype=jnp.int32),
+            w_active=jnp.ones(shape, dtype=bool),
+            nemo_e3t=jnp.asarray(
+                [[[4.9, 10.1, 12.7, 15.3, 18.9]]], dtype=jnp.float64),
+            dissl_old=column([0.017, 0.023, 0.031, 0.043]),
+        ))()
+        deepest_word = np.asarray(solved)[0, 0, -1].view(np.uint64)
+        assert deepest_word == np.uint64(4535269685926082061)
 
     def test_bottom_level_none_is_byte_identical(self):
         """bottom_level=None keeps the unconditional last-row pin (the prior
@@ -1186,6 +1527,8 @@ class TestNemoBottomTkeDirichlet:
         out = tke_vertical_mixing(
             u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0, cfg=cfg,
             rho_0=_RHO0, n_iterations=3, z_interface=z_int,
+            dz_ref=jnp.full((dz_half.shape[-1] + 1,), 25.0),
+            jacobian=jnp.ones((1, 1)),
             dz_surface=dz_surface, bottom_dirichlet=bottom_val,
             bottom_level=bl)
         assert float(out.tke_new[0, 0, 0]) == pytest.approx(3e-4, abs=1e-12)
@@ -1374,6 +1717,23 @@ class TestNemoBottomTkeVelocityConvention:
             "the universal factor 2, more at step columns")
         assert rel.max() > 0.7, "no column shows the step-column amplification"
 
+    def test_drag_coefficient_is_a_traced_input(self):
+        """Round 319: rn_Cd0 reaches the bottom TKE value as a traced input."""
+        model, state, _ = self._model_and_state()
+        cfg = model.config
+        bd = cfg.bottom_drag
+
+        def total(cd0):
+            c = cfg._replace(bottom_drag=bd._replace(bottom_drag_cd0=cd0))
+            return jnp.sum(model._tke_bottom_dirichlet(state, config=c))
+
+        cd0 = jnp.float64(bd.bottom_drag_cd0)
+        out = np.asarray(model._tke_bottom_dirichlet(state))
+        live = out > cfg.physics.vertical_mixing.tke.tke_background
+        assert live.sum() > 0
+        g = float(jax.jit(jax.grad(total))(cd0))
+        np.testing.assert_allclose(g, out[live].sum() / float(cd0), rtol=1e-12)
+
     def test_requires_raw_face_state(self):
         """Passing an already-collapsed (T-point) state must RAISE, never
         silently fall back to the plain average."""
@@ -1384,3 +1744,269 @@ class TestNemoBottomTkeVelocityConvention:
             u=state.u.replace(data=u_cc), v=state.v.replace(data=v_cc))
         with pytest.raises(ValueError, match="RAW face-staggered"):
             model._tke_bottom_dirichlet(collapsed)
+
+    def test_production_entry_velocity_overrides_the_post_explicit_state(self):
+        """zdftke.f90:291-293 reads Kbb, not the updated solver state."""
+        model, state, _ = self._model_and_state()
+        cfg_tke = model.config.physics.vertical_mixing.tke
+        post_explicit = np.asarray(model._tke_bottom_dirichlet(state))
+        assert np.any(post_explicit > cfg_tke.tke_background)
+
+        entry_u = jnp.zeros_like(state.u.data)
+        entry_v = jnp.zeros_like(state.v.data)
+        from_entry = np.asarray(model._tke_bottom_dirichlet(
+            state, u_now=entry_u, v_now=entry_v))
+        wet_columns = np.asarray(state.land_mask.data) > 0.5
+        np.testing.assert_array_equal(
+            from_entry[wet_columns],
+            np.full(np.count_nonzero(wet_columns), cfg_tke.tke_background),
+        )
+        assert not np.array_equal(from_entry, post_explicit)
+
+        with pytest.raises(ValueError, match="both entry-level velocities"):
+            model._tke_bottom_dirichlet(state, u_now=entry_u)
+
+    def test_production_vmix_call_routes_the_entry_velocity(self):
+        """The real vertical-mixing call must bind its entry u/v operands."""
+        from types import MethodType, SimpleNamespace
+
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+
+        class BottomVelocitySeen(Exception):
+            pass
+
+        entry_u = jnp.asarray([[[1.0]]])
+        entry_v = jnp.asarray([[[2.0]]])
+        tke = TKEConfig(
+            prognostic=True,
+            bottom_tke_bc=True,
+            tke_shear_production="nemo_face_native",
+        )
+        physics = SimpleNamespace(
+            vertical_mixing=SimpleNamespace(scheme="tke", tke=tke),
+            convection=SimpleNamespace(scheme="none"),
+        )
+        cfg = SimpleNamespace(
+            physics=physics,
+            eos="linear",
+            eos_linear=None,
+            eos_nemo_seos=None,
+            implicit_ice_ocean_top_drag=False,
+            A_v=1.0e-4,
+            K_v=1.0e-5,
+        )
+
+        def shear_spy(self, state, **kwargs):
+            return jnp.asarray([[[0.0]]])
+
+        def bottom_spy(self, state, **kwargs):
+            raise BottomVelocitySeen(kwargs.get("u_now"), kwargs.get("v_now"))
+
+        model = SimpleNamespace(
+            config=cfg,
+            z_coord=None,
+            _iwm_forcing=None,
+            grid=SimpleNamespace(lat_T=jnp.zeros((1, 1))),
+            _nemo_ws_test_hooks=SimpleNamespace(
+                zdf_momentum_observer=None,
+                tke_rhs_materialization="",
+                tke_rhs_intermediate="",
+            ),
+            _tke_post_mixing_active=lambda: False,
+            _lat_dependent_constant_vmix=lambda: False,
+        )
+        model._tke_step_entry_p_sh2 = MethodType(shear_spy, model)
+        model._tke_bottom_dirichlet = MethodType(bottom_spy, model)
+
+        with pytest.raises(BottomVelocitySeen) as seen:
+            LatLonCGridOceanModel._apply_implicit_vertical_mixing(
+                model, SimpleNamespace(), 1.0, None,
+                u_now=entry_u, v_now=entry_v)
+        assert seen.value.args[0] is entry_u
+        assert seen.value.args[1] is entry_v
+
+
+def test_nn_mxlice2_anchor_is_nemos_case2_and_refuses_missing_inputs():
+    """The under-ice mixing-length arm is NEMO CASE(2), with fail-closed inputs."""
+    from legoesm import constants
+    from legoesm.ocean.physics.vertical_mixing.tke import (
+        _NEMO_MXL0_LENGTH_SCALE, _NEMO_MXL0_VKARMN, _mixing_length_floor,
+        _mxl0_surface_anchor,
+    )
+
+    base = TKEConfig(
+        tke_mxl_choice=3, mxl_min=0.04, c_k=0.1, tke_background=1.0e-6,
+        mxl0_min_m=0.04, nemo_derived_mxl_min=True,
+        nemo_mxl0_surface_tmask=True, nemo_mxl0_rmxl_min_overwrite=True)
+    cfg = base._replace(nemo_mxlice=2)
+    taum = np.array([0.3, 0.3, 0.0, 0.8])
+    fr = np.array([0.0, 0.6, 1.0, 0.2])
+    hm = np.array([0.0, 1.7, 2.5, 0.9])
+    tm = np.array([1.0, 1.0, 1.0, 0.0])
+    zraug = _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (_RHO0 * constants.g)
+    want = np.maximum(_mixing_length_floor(cfg),
+                      ((1.0 - fr) * zraug * taum + fr * hm * 2.0) * tm)
+    got = _mxl0_surface_anchor(cfg, jnp.asarray(taum), _RHO0, constants.g,
+                               jnp.asarray(tm), jnp.asarray(fr), jnp.asarray(hm))
+    assert np.asarray(got).view(np.uint64).tolist() == want.view(np.uint64).tolist()
+    case0 = _mxl0_surface_anchor(base, jnp.asarray(taum), _RHO0, constants.g,
+                                 jnp.asarray(tm), jnp.asarray(fr), jnp.asarray(hm))
+    assert np.asarray(got)[1] != np.asarray(case0)[1]
+    assert np.asarray(got)[0] == np.asarray(case0)[0]
+    want0 = np.maximum(_mixing_length_floor(base), zraug * (taum * tm))
+    assert np.asarray(case0).view(np.uint64).tolist() == want0.view(np.uint64).tolist()
+    for kw in ({"mxlice_hm_i": None}, {"mxlice_fr_i": None}):
+        args = {"mxlice_fr_i": jnp.asarray(fr), "mxlice_hm_i": jnp.asarray(hm), **kw}
+        with pytest.raises(ValueError, match="nemo_mxlice=2"):
+            _mxl0_surface_anchor(cfg, jnp.asarray(taum), _RHO0, constants.g,
+                                 jnp.asarray(tm), **args)
+    with pytest.raises(ValueError, match="nemo_mxlice"):
+        _mxl0_surface_anchor(cfg._replace(nemo_mxlice=1), jnp.asarray(taum),
+                             _RHO0, constants.g, jnp.asarray(tm))
+
+
+def test_nn_mxlice2_anchor_materializes_nemo_source_order_under_jit():
+    """The production anchor retains NEMO's CASE(2) binary64 grouping."""
+    from legoesm.ocean.physics.vertical_mixing.tke import _mxl0_surface_anchor
+
+    taum = np.array([float.fromhex(value) for value in (
+        "0x1.d735a44329989p-4", "0x1.2cbcae8c0025ep-2",
+        "0x1.05cd0489f4d37p-3", "0x1.3663af876042bp-3",
+        "0x1.a82ec925ec55bp-1", "0x1.a221f11097f8ap-2")])
+    fr_i = np.array([float.fromhex(value) for value in (
+        "0x1.3e84b6d3548ecp-13", "0x1.8b543878e0b65p-5",
+        "0x1.adb6f8993d940p-6", "0x1.e93f71c084d23p-6",
+        "0x1.22df82c41cb8fp-5", "0x1.1ff2dd1bb1ac8p-6")])
+    hm_i = np.array([float.fromhex(value) for value in (
+        "0x1.999999999999ap-5", "0x1.4186205f8c1a2p-1",
+        "0x1.3b267de9d2378p+1", "0x1.3bbe15fe21883p+1",
+        "0x1.39a53079f7424p+1", "0x1.3e11aa8b86d80p+1")])
+    cfg = TKEConfig(
+        tke_mxl_choice=3, mxl0_min_m=0.001,
+        nemo_mxl0_surface_tmask=True, nemo_mxlice=2)
+    nemo_g = np.float64(9.80665)
+    zraug = (np.float64(0.4) * np.float64(2.0e5) /
+             (np.float64(_RHO0) * nemo_g))
+    open_water = (np.float64(1.0) - fr_i) * zraug
+    open_water = open_water * taum
+    ice = fr_i * hm_i
+    ice = ice * np.float64(2.0)
+    expected = np.maximum(np.float64(cfg.mxl0_min_m), open_water + ice)
+
+    def production_anchor(stress, fraction, thickness):
+        return _mxl0_surface_anchor(
+            cfg, stress, _RHO0, nemo_g, jnp.ones_like(stress),
+            fraction, thickness)
+
+    eager = np.asarray(production_anchor(
+        jnp.asarray(taum), jnp.asarray(fr_i), jnp.asarray(hm_i)))
+    compiled = np.asarray(jax.jit(production_anchor)(
+        jnp.asarray(taum), jnp.asarray(fr_i), jnp.asarray(hm_i)))
+    np.testing.assert_array_equal(eager.view(np.uint64), expected.view(np.uint64))
+    np.testing.assert_array_equal(compiled.view(np.uint64), expected.view(np.uint64))
+    gradient = jax.grad(lambda stress: jnp.sum(production_anchor(
+        stress, jnp.asarray(fr_i), jnp.asarray(hm_i))))(jnp.asarray(taum))
+    assert np.all(np.isfinite(np.asarray(gradient)))
+
+
+def test_surface_forcing_hm_i_changes_the_tke_profile_at_its_consumer(
+        monkeypatch):
+    """Exercise OceanSurfaceForcing.ice_mean_thickness_hm_i through k_profiles."""
+    from legoesm.ocean.state import OceanSurfaceForcing
+    from legoesm.ocean.physics.vertical_mixing import k_profiles
+    from legoesm.ocean.physics.vertical_mixing import tke as tke_module
+
+    state, z_coord = _kprof_setup(unstable=False)
+    state = SimpleNamespace(
+        **vars(state),
+        land_mask=SimpleNamespace(data=jnp.ones(state.eta.data.shape)))
+    physics = _physics_cfg("tke", 0.0)
+    tke_cfg = physics.vertical_mixing.tke._replace(
+        tke_mxl_choice=3, nemo_mxlice=2,
+        nemo_mxl0_surface_tmask=True)
+    physics = physics._replace(
+        vertical_mixing=physics.vertical_mixing._replace(tke=tke_cfg))
+    seen = []
+
+    def fake_tke(*args, **kwargs):
+        thickness = kwargs["mxlice_hm_i"]
+        seen.append(np.asarray(thickness))
+        shape = state.T.data.shape[:-1] + (state.T.data.shape[-1] - 1,)
+        value = jnp.mean(thickness)
+        return SimpleNamespace(
+            K_H=jnp.full(shape, value), K_M=jnp.full(shape, 2.0 * value),
+            tke_new=jnp.zeros(shape))
+
+    monkeypatch.setattr(tke_module, "tke_vertical_mixing", fake_tke)
+    concentration = jnp.full(state.eta.data.shape, 0.5)
+
+    def selected(value):
+        forcing = OceanSurfaceForcing(
+            ice_concentration=concentration,
+            ice_mean_thickness_hm_i=jnp.full_like(concentration, value))
+        return k_profiles.compute_vertical_K_profiles(
+            state, z_coord, forcing, physics)[0]
+
+    one = np.asarray(selected(1.25))
+    two = np.asarray(selected(2.5))
+    assert len(seen) == 2
+    np.testing.assert_array_equal(seen[0], np.full((2, 2), 1.25))
+    assert float(one[0, 0, 0]) == 1.25001
+    assert float(two[0, 0, 0]) == 2.50001
+    assert not np.array_equal(one, two)
+
+
+def test_nemo_step_entry_prandtl_uses_literal_pdlr_multiply_eager_and_jit():
+    """zdftke.f90:717 is ``pdlr*zav``, not ``zav/(1/pdlr)``."""
+    from legoesm.ocean.physics.vertical_mixing.tke import compute_K_from_tke
+
+    l_k = jnp.asarray([float.fromhex(value) for value in (
+        "0x1.d4429efef7067p-1", "0x1.243aa8be19466p+1",
+        "0x1.1e6f8ca9710d5p+0", "0x1.50fd904d36773p+0",
+        "0x1.a1c091a3acda0p+2", "0x1.a372bac71f152p+1")])
+    cfg = TKEConfig(
+        c_k=1.0, kappa_convention="veros_sqrte",
+        prandtl_mode="nemo_ri", tke_n2_evaluation_stage="step_entry",
+        prandtl_ri_coeff=10.0, kappaM_min=0.0, kappaH_min=0.0,
+        kappaM_max=100.0, enable_kappaH_profile=False)
+    ones = jnp.ones_like(l_k)
+
+    def production_closure(length):
+        return compute_K_from_tke(ones, length, cfg, N2=ones, shear_sq=ones)[1]
+
+    expected = np.float64(0.1) * np.asarray(l_k)
+    eager = np.asarray(production_closure(l_k))
+    compiled = np.asarray(jax.jit(production_closure)(l_k))
+    np.testing.assert_array_equal(eager.view(np.uint64), expected.view(np.uint64))
+    np.testing.assert_array_equal(compiled.view(np.uint64), expected.view(np.uint64))
+    gradient = np.asarray(jax.grad(lambda length: jnp.sum(
+        production_closure(length)))(l_k))
+    assert np.all(np.isfinite(gradient))
+
+
+def test_literal_raw_mixing_length_reverse_gradient_is_finite_at_zero_tke():
+    """The literal square root retains finite reverse derivatives at zero TKE."""
+    from legoesm.ocean.physics.vertical_mixing.tke import _tke_raw_mixing_length
+
+    cfg = TKEConfig(tke_mxl_raw_evaluation="nemo_literal")
+    e = jnp.asarray([0.0, 1.0e-6, 3.0e-4])
+    n2 = jnp.asarray([1.0e-5, 2.0e-5, -1.0e-6])
+    f = jax.jit(lambda x: _tke_raw_mixing_length(x, n2, cfg))
+    g = np.asarray(jax.grad(lambda x: jnp.sum(f(x)))(e))
+    assert np.all(np.isfinite(g))
+
+    rsmall = 0.5 * jnp.finfo(e.dtype).eps
+    floor = _tke_raw_mixing_length(jnp.zeros(1), n2[:1], cfg)[0]
+
+    def unguarded(x):
+        return jnp.maximum(jnp.sqrt((2.0 * x) / jnp.maximum(n2, rsmall)), floor)
+
+    g_ref = np.asarray(jax.jit(jax.grad(lambda x: jnp.sum(unguarded(x))))(e))
+    assert np.all(g_ref[1:] != 0.0)
+    np.testing.assert_array_equal(g[1:], g_ref[1:])
+    d = jnp.asarray([0.0, 2.0e-7, -5.0e-5])
+    _, t = jax.jit(lambda x, v: jax.jvp(f, (x,), (v,)))(e, d)
+    _, t_ref = jax.jit(lambda x, v: jax.jvp(unguarded, (x,), (v,)))(e, d)
+    np.testing.assert_array_equal(np.asarray(t)[1:], np.asarray(t_ref)[1:])

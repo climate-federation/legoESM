@@ -1,0 +1,163 @@
+--- shipped/src/ICE/icedyn_adv_pra.F90
++++ ORCA2_ORCA1ICE_OMIP_L4/MY_SRC/icedyn_adv_pra.F90
+@@ -16,6 +16,7 @@
+    !!   adv_pra_rst     : read/write Prather field in ice restart file, or initialized to zero
+    !!----------------------------------------------------------------------
+    USE par_ice        ! SI3 parameters
++   USE dom_oce, ONLY : nn_hls, tmask, umask, vmask, ssmask, ssumask, ssvmask, ssfmask
+    USE phycst         ! physical constant
+    USE ice            ! sea-ice variables
+    USE sbc_oce , ONLY : nn_fsbc   ! frequency of sea-ice call
+@@ -107,6 +108,8 @@
+       !!----------------------------------------------------------------------
+       !
+       IF( kt == nit000 .AND. lwp )   WRITE(numout,*) '-- ice_dyn_adv_pra: Prather advection scheme'
++      CALL l4_dump_pra( kt, 0 )
++      IF( kt <= nit000 + 4 ) CALL l4_orca1ice_pra_dump( kt, 0 )
+       !
+       IF( ln_pnd_LEV .OR. ln_pnd_TOPO ) ALLOCATE( z0ap(jpi,jpj), z0vp(jpi,jpj), z0vl(jpi,jpj), zh_ip(jpi,jpj) )
+       IF( nn_icesal == 4 ) THEN   ;     ALLOCATE( z0si (jpi,jpj,nlay_i), zsz_i(jpi,jpj,nlay_i) )
+@@ -484,6 +487,8 @@
+       END DO ! jt
+       !
+       !
++      CALL l4_dump_pra( kt, 1 )                          ! Lane-4 registered EXIT moments
++      IF( kt <= nit000 + 4 ) CALL l4_orca1ice_pra_dump( kt, 1 )
+       IF( lrst_ice )   CALL adv_pra_rst( 'WRITE', kt )   !* write Prather fields in the restart file
+       !
+       !
+@@ -496,6 +501,127 @@
+    END SUBROUTINE ice_dyn_adv_pra
+ 
+ 
++   SUBROUTINE l4_orca1ice_pra_dump( kt, kframe )
++      !! WRITE-only self-describing Prather moments for the resolved ORCA1
++      !! target (nn_icesal=2, ponds off).  Model arrays are never assigned.
++      INTEGER, INTENT(in) :: kt, kframe
++      INTEGER :: l4_unit, l4_ios, l4_payload, jf
++      INTEGER, PARAMETER :: l4_nf = 35
++      INTEGER, DIMENSION(4,l4_nf) :: l4_ext
++      CHARACTER(LEN=16), PARAMETER :: l4_magic = 'NEMO_L4_O1IPRA1'
++      CHARACTER(LEN=96) :: l4_name
++      IF( .NOT.lwp ) RETURN
++      IF( nn_icesal /= 2 .OR. ln_pnd_LEV .OR. ln_pnd_TOPO ) &
++         & CALL ctl_stop('l4_orca1ice_pra_dump: selector contract changed')
++
++      l4_ext(:, 1) = (/ SHAPE(sxice), 1 /)
++      l4_ext(:, 2) = (/ SHAPE(syice), 1 /)
++      l4_ext(:, 3) = (/ SHAPE(sxxice), 1 /)
++      l4_ext(:, 4) = (/ SHAPE(syyice), 1 /)
++      l4_ext(:, 5) = (/ SHAPE(sxyice), 1 /)
++      l4_ext(:, 6) = (/ SHAPE(sxsn), 1 /)
++      l4_ext(:, 7) = (/ SHAPE(sysn), 1 /)
++      l4_ext(:, 8) = (/ SHAPE(sxxsn), 1 /)
++      l4_ext(:, 9) = (/ SHAPE(syysn), 1 /)
++      l4_ext(:,10) = (/ SHAPE(sxysn), 1 /)
++      l4_ext(:,11) = (/ SHAPE(sxa), 1 /)
++      l4_ext(:,12) = (/ SHAPE(sya), 1 /)
++      l4_ext(:,13) = (/ SHAPE(sxxa), 1 /)
++      l4_ext(:,14) = (/ SHAPE(syya), 1 /)
++      l4_ext(:,15) = (/ SHAPE(sxya), 1 /)
++      l4_ext(:,16) = (/ SHAPE(sxage), 1 /)
++      l4_ext(:,17) = (/ SHAPE(syage), 1 /)
++      l4_ext(:,18) = (/ SHAPE(sxxage), 1 /)
++      l4_ext(:,19) = (/ SHAPE(syyage), 1 /)
++      l4_ext(:,20) = (/ SHAPE(sxyage), 1 /)
++      l4_ext(:,21) = SHAPE(sxc0)
++      l4_ext(:,22) = SHAPE(syc0)
++      l4_ext(:,23) = SHAPE(sxxc0)
++      l4_ext(:,24) = SHAPE(syyc0)
++      l4_ext(:,25) = SHAPE(sxyc0)
++      l4_ext(:,26) = SHAPE(sxe)
++      l4_ext(:,27) = SHAPE(sye)
++      l4_ext(:,28) = SHAPE(sxxe)
++      l4_ext(:,29) = SHAPE(syye)
++      l4_ext(:,30) = SHAPE(sxye)
++      l4_ext(:,31) = (/ SHAPE(sxsal), 1 /)
++      l4_ext(:,32) = (/ SHAPE(sysal), 1 /)
++      l4_ext(:,33) = (/ SHAPE(sxxsal), 1 /)
++      l4_ext(:,34) = (/ SHAPE(syysal), 1 /)
++      l4_ext(:,35) = (/ SHAPE(sxysal), 1 /)
++      l4_payload = 0
++      DO jf = 1, l4_nf
++         l4_payload = l4_payload + PRODUCT(l4_ext(:,jf))
++      END DO
++
++      WRITE(l4_name,'("oracle_orca1ice_prather_kt",I8.8,"_f",I1,".bin")') kt, kframe
++      OPEN(NEWUNIT=l4_unit, FILE=TRIM(l4_name), STATUS='REPLACE', ACCESS='STREAM', &
++         & FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=l4_ios)
++      IF( l4_ios /= 0 ) CALL ctl_stop('l4_orca1ice_pra_dump: open failed')
++      WRITE(l4_unit) l4_magic
++      WRITE(l4_unit) 1, kt, kframe, jpi, jpj, jpl, nlay_i, nlay_s, &
++         & STORAGE_SIZE(1._wp), l4_nf, l4_payload
++      WRITE(l4_unit) l4_ext
++      WRITE(l4_unit) l4_canon_3d(sxice,'T'), l4_canon_3d(syice,'T'), &
++         & l4_canon_3d(sxxice,'T'), l4_canon_3d(syyice,'T'), l4_canon_3d(sxyice,'T'), &
++         & l4_canon_3d(sxsn,'T'), l4_canon_3d(sysn,'T'), l4_canon_3d(sxxsn,'T'), &
++         & l4_canon_3d(syysn,'T'), l4_canon_3d(sxysn,'T'), l4_canon_3d(sxa,'T'), &
++         & l4_canon_3d(sya,'T'), l4_canon_3d(sxxa,'T'), l4_canon_3d(syya,'T'), &
++         & l4_canon_3d(sxya,'T'), l4_canon_3d(sxage,'T'), l4_canon_3d(syage,'T'), &
++         & l4_canon_3d(sxxage,'T'), l4_canon_3d(syyage,'T'), l4_canon_3d(sxyage,'T'), &
++         & l4_canon_4d(sxc0,'T'), l4_canon_4d(syc0,'T'), l4_canon_4d(sxxc0,'T'), &
++         & l4_canon_4d(syyc0,'T'), l4_canon_4d(sxyc0,'T'), l4_canon_4d(sxe,'T'), &
++         & l4_canon_4d(sye,'T'), l4_canon_4d(sxxe,'T'), l4_canon_4d(syye,'T'), &
++         & l4_canon_4d(sxye,'T'), l4_canon_3d(sxsal,'T'), l4_canon_3d(sysal,'T'), &
++         & l4_canon_3d(sxxsal,'T'), l4_canon_3d(syysal,'T'), l4_canon_3d(sxysal,'T')
++      CLOSE(l4_unit)
++   END SUBROUTINE l4_orca1ice_pra_dump
++
++
++   SUBROUTINE l4_dump_pra( kt, kstage )
++      !! Lane-4 read-only complete Prather-moment frame. Optional families are
++      !! guarded by the same selectors that own their allocation.
++      INTEGER, INTENT(in) :: kt, kstage
++      INTEGER :: iunit, ios
++      CHARACTER(LEN=96) :: filename
++      CHARACTER(LEN=16), PARAMETER :: cmagic = 'NEMO_L4_PRA_001'
++      IF( .NOT.lwp ) RETURN
++      IF( STORAGE_SIZE(1._wp) /= 64 ) CALL ctl_stop( 'lane4 Prather dump requires 64-bit wp' )
++      WRITE(filename,'("oracle_si3_prather_kt",I8.8,"_s",I1,".bin")') kt, kstage
++      OPEN( NEWUNIT=iunit, FILE=TRIM(filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++         &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 ) CALL ctl_stop( 'cannot open lane4 Prather frame' )
++      WRITE(iunit) cmagic, 1, kt, kstage, jpi, jpj, jpl, nlay_i, nlay_s, nn_icesal, &
++         & MERGE(1,0,ln_pnd_LEV .OR. ln_pnd_TOPO), STORAGE_SIZE(1._wp)
++      WRITE(iunit) l4_canon_3d(sxice,'T'), l4_canon_3d(syice,'T'), &
++         & l4_canon_3d(sxxice,'T'), l4_canon_3d(syyice,'T'), l4_canon_3d(sxyice,'T'), &
++         & l4_canon_3d(sxsn,'T'), l4_canon_3d(sysn,'T'), l4_canon_3d(sxxsn,'T'), &
++         & l4_canon_3d(syysn,'T'), l4_canon_3d(sxysn,'T')
++      WRITE(iunit) l4_canon_3d(sxa,'T'), l4_canon_3d(sya,'T'), l4_canon_3d(sxxa,'T'), &
++         & l4_canon_3d(syya,'T'), l4_canon_3d(sxya,'T'), l4_canon_3d(sxage,'T'), &
++         & l4_canon_3d(syage,'T'), l4_canon_3d(sxxage,'T'), l4_canon_3d(syyage,'T'), &
++         & l4_canon_3d(sxyage,'T')
++      WRITE(iunit) l4_canon_4d(sxc0,'T'), l4_canon_4d(syc0,'T'), &
++         & l4_canon_4d(sxxc0,'T'), l4_canon_4d(syyc0,'T'), l4_canon_4d(sxyc0,'T'), &
++         & l4_canon_4d(sxe,'T'), l4_canon_4d(sye,'T'), l4_canon_4d(sxxe,'T'), &
++         & l4_canon_4d(syye,'T'), l4_canon_4d(sxye,'T')
++      WRITE(iunit) l4_canon_3d(sxsal,'T'), l4_canon_3d(sysal,'T'), &
++         & l4_canon_3d(sxxsal,'T'), l4_canon_3d(syysal,'T'), l4_canon_3d(sxysal,'T')
++      IF( nn_icesal == 4 ) WRITE(iunit) l4_canon_4d(sxsi,'T'), l4_canon_4d(sysi,'T'), &
++         & l4_canon_4d(sxxsi,'T'), l4_canon_4d(syysi,'T'), l4_canon_4d(sxysi,'T')
++      IF( ln_pnd_LEV .OR. ln_pnd_TOPO ) THEN
++         WRITE(iunit) l4_canon_3d(sxap,'T'), l4_canon_3d(syap,'T'), &
++            & l4_canon_3d(sxxap,'T'), l4_canon_3d(syyap,'T'), l4_canon_3d(sxyap,'T'), &
++            & l4_canon_3d(sxvp,'T'), l4_canon_3d(syvp,'T'), l4_canon_3d(sxxvp,'T'), &
++            & l4_canon_3d(syyvp,'T'), l4_canon_3d(sxyvp,'T')
++         WRITE(iunit) l4_canon_3d(sxvl,'T'), l4_canon_3d(syvl,'T'), &
++            & l4_canon_3d(sxxvl,'T'), l4_canon_3d(syyvl,'T'), l4_canon_3d(sxyvl,'T')
++      ENDIF
++      CLOSE(iunit)
++      WRITE(numout,*) 'LANE4_PRATHER_DUMP ', kt, kstage, TRIM(filename)
++   END SUBROUTINE l4_dump_pra
++
++
+    SUBROUTINE adv_x( ihls, jcat, pdt, put , pcrh, psm , ps0 ,   &
+       &              psx, psxx, psy , psyy, psxy )
+       !!----------------------------------------------------------------------
+@@ -1580,4 +1706,6 @@
+ #endif
+ 
+    !!======================================================================
++#include "l4_oracle_canon_subroutines.h90"
++
+ END MODULE icedyn_adv_pra

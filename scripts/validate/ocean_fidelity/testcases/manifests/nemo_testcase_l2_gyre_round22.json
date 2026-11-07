@@ -1,0 +1,88 @@
+{
+  "format": "nemo-testcase-l2-gyre-round22-manifest-v1",
+  "session_id": "01a05cb9-7625-7f40-9e83-b3fa767b1945",
+  "date": "2026-09-05",
+  "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+  "starting_git_sha": "e2378f057ca814bbdc0b6a8c8ec0e768c78cbdb2",
+  "commits": {
+    "preregister": "820374d2dde28aab984f919f0c4616b6af6fcfb3",
+    "shared_cen2": "2ec14108995e7e93de10601d2699bfb04583b2a5",
+    "shared_qco_reciprocal": "8d679dee176e6b716fdefcd373645a92ebf645ba"
+  },
+  "orca2_probe_sha": "ce0f353e25a282b80ce4d134d1f937af24d1ed5e",
+  "regime": "production-jit/cpu/fp64/oracle-v2/scalar-libm",
+  "status": "HOLD_RULE12_OVERFLOW_TRAJECTORY",
+  "fct_precursor": {
+    "oracle_source": "traadv.F90:280-283,355-365 -> traadv_cen.F90:137-149,191-216; domain.F90:158; domqco.F90:159-161; domzgr_substitute.h90:45-51,126",
+    "resolved": "ln_traadv_fct=T nn_fct_h=2 nn_fct_v=2 nn_fct_imp=1 ln_zad_Aimp=F",
+    "baseline": "T 180882 / 228641 max_abs=9.952637130238029e-21; S 190802 / 228641 max_abs=1.4558378780933287e-20",
+    "source_association_arm": "T 80034 / 228641; S 81277 / 228641; max_abs=6.776263578034403e-21 both",
+    "live_e3t_only_arm": "T 176929 / 228641; S 187752 / 228641",
+    "final": "T 0 / 228641; S 0 / 228641",
+    "owner": "CONFIRMED_COMPLETE_OWNER_GIVEN_NEMO_TRANSPORTS",
+    "artifacts": {
+      "baseline": "3ea7c6d22773ed2d2132e6e72a0cc57542dffefe2ca25c23e05dd052cfc9efb7",
+      "final": "7e1f1768cd7a12f05a70f11d3cac67dedc9b9cd45b2151f792fab3c7c23a52a1",
+      "plant_exit_1": "a3cbfa309157f16bf13d0d516c02b40ef4b63a4bb994ae3b4a15c3b26cdb0784"
+    }
+  },
+  "stage_transport": {
+    "oracle_source": "domqco.F90:175-181,219-222; stprk3_stg.F90:257-278",
+    "baseline": "zFu 102431 / 228641 max_abs=4.656612873077393e-10 max_ulp=4; zFv 108307 / 228641 max_abs=9.313225746154785e-10 max_ulp=4",
+    "source_mean_only_arm": "zFu 85175 / 228641 max_ulp=4; zFv 93486 / 228641 max_ulp=5",
+    "stored_reciprocal_arm": "zFu 14 / 228641 max_abs=3.637978807091713e-12 max_ulp=1; zFv 0 / 228641",
+    "final": "zFu 0 / 228641; zFv 0 / 228641",
+    "owner": "CONFIRMED_COMPLETE_OWNER_GIVEN_NEMO_STAGE_STATE",
+    "separate_w_row": "DEBT 189969 / 228641 max_abs=3.48342299558331e-20",
+    "artifacts": {
+      "baseline": "953b2a4ca530d22a7fcfa32ac6d1e9670dbcfb12f390432b3c40cda6bcfef399",
+      "stored_reciprocal": "2165911dc9de5b2aebb3f0b091c9f55a86cd034ffe27b2d6de4838ddf31b63ac",
+      "final": "7e2bf16f852f2ade1423dfb01745d84ce274c36679d09fd073937af4571a230c"
+    }
+  },
+  "gyre_sweeps": {
+    "after_cen2": "8596843f43297fa371a61e44f8b123c27c887b2f17c4c1769018f020af57663b",
+    "after_stage_transport": "c5b231fb96904679a0183a4f1c6fe25c7ac38ed446b38f55e1e6bf67896a54ec",
+    "first_over_bar": "kt=2 fields=T,S,u,v"
+  },
+  "cross_card_after_cen2": {
+    "lock_stage_compare": "c540a87f88251ffd7c8567ae57269ab6a4e3e9cdc37b78445676703913132374",
+    "lock_trajectory_compare": "0966173e3b1570b7c61a8e4325807d017d73e35a50d670782634d58f56169819",
+    "overflow_stage_compare": "3225a71609dbb51d1f489de8bdb714811e133f531e8bb2976ab3c79dbfeb3ab0",
+    "overflow_trajectory_compare": "cc1192179b8dfd080f46802f614afb4830393b158d8e3e957a79481d49221170",
+    "verdict": "PASS all four; 0 oracle-relative worsening ulp and 0 prior-legoesm movement"
+  },
+  "cross_card_after_stage_transport": {
+    "lock_stage_compare": "ee5ad37b7b970b93ee766a2c9292bf6d188765ed22a1ffdc6069423efb528c4c",
+    "lock_stage_residuals": "cf6f72069015452d568a900bac093748f4756282cafc7ac44c4d301190fcb601",
+    "lock_trajectory_compare": "769982042ddc29408c741ce989e1db832e5c6e39208404939a4dc2ae20700e86",
+    "lock_trajectory_residuals": "bc50372f08703c16e3a65109ce679a2810a82c7dcff699f5dd89cbb5f606236d",
+    "overflow_stage_compare": "4f82b919ab9fd9c0cb84ee641877b4904c70bd36c894adbd1196c6430656b30a",
+    "overflow_stage_residuals": "04e707727634f09ec6af1e4c182f536a05d55b2dab421fefaecab7c2d454e69d",
+    "overflow_trajectory_compare": "f6eec112ac87d5b3030e3eca5d5412d757570d99166b8f2e94037ab2d4e1cca7",
+    "overflow_trajectory_residuals": "9adeee2cccef74cf412ecd2f056f7546ff3f33b862ee308f5ae3451c84429c45",
+    "verdict": "LOCK stage/trajectory PASS 0 ulp; OVERFLOW stage PASS 0 ulp; OVERFLOW trajectory FAIL 7 rows, max worsening 17.25 row-scale ulp, 0 status changes, first_over_bar unchanged kt2 T/u",
+    "rule12_debt_rows": [
+      "kt6 u cell500 2.03125 ulp",
+      "kt7 u cell501 2.03125 ulp",
+      "kt9 ssh cell19 6.25 ulp",
+      "kt9 u cell480 3.0 ulp",
+      "kt10 T cell606 4.0 ulp",
+      "kt10 ssh cell18 3.75 ulp",
+      "kt10 u cell478 2.25 ulp"
+    ]
+  },
+  "tests": {
+    "shared_identity": "44 passed in 347.46 s",
+    "cen2_direct_bits": "2 passed in 1.90 s",
+    "gyre_phase3": "21 passed in 4.65 s"
+  },
+  "open_register": [
+    "USER_DECISION: prognostic uu_b/vv_b carried state",
+    "GYRE stage-2 Kaa U=2.1986806906376666e-15 V=2.2380914396075147e-15",
+    "ORCA2 WZV 189969 / 228641 max_abs=3.48342299558331e-20",
+    "ORCA2 EEN primitive operands pending acquisition",
+    "OVERFLOW seven Rule-12 trajectory rows"
+  ],
+  "independent_review": "OUTSTANDING"
+}

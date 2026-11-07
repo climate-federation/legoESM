@@ -1,0 +1,241 @@
+{
+  "artifacts_sha256": {
+    "orca2/orca2_fourth_card_blocked_round26.json": "35e80a445bed1f1c0cf8bfe4459acf261b517d05c044f2eac9a74a1dc876a3de",
+    "verify/lock_external_admission.json": "6be537c1bb6e7d5d05c1f7743b32e39a79c6538ae6c86154f07ee6a0e782633f",
+    "verify/lock_external_admission_plant.json": "3e69c1ded8be14393c5de3d1b6a0453051d78ceeb6d6dfc26d10eb861a8efd10",
+    "verify/lock_external_walk_kt1.json": "3130a8c47de15e8115bf5ba2110a4371032f61939496d7a2fd3a7375335e5db3",
+    "verify/lock_external_walk_kt1.log": "3130a8c47de15e8115bf5ba2110a4371032f61939496d7a2fd3a7375335e5db3",
+    "verify/lock_external_walk_kt1_plant_entry.json": "a6f5052cd0b35c4c384763cc6f32bf3738038490cffa8fe0819609cdb1f56a64",
+    "verify/lock_external_walk_kt1_plant_exit.json": "99565718e878ecc20786521da761e050bae411864dd7fa5be25caee32902e7f6",
+    "verify/lock_plant_entry.log": "a6f5052cd0b35c4c384763cc6f32bf3738038490cffa8fe0819609cdb1f56a64",
+    "verify/lock_plant_exit.log": "99565718e878ecc20786521da761e050bae411864dd7fa5be25caee32902e7f6",
+    "verify/overflow_control_at_r25tip.json": "3bcde85f6424f914f6b0bdae3ca72816488d96589993756188d748f53a7c4b94",
+    "verify/overflow_regression.log": "f18c40824ebbccb0e95a169fd3e42bd90a93b96ac78e00a002c6e54275f028fc",
+    "verify/overflow_regression_kt1.json": "f18c40824ebbccb0e95a169fd3e42bd90a93b96ac78e00a002c6e54275f028fc",
+    "verify/rule12_hpg_eligibility_LOCK_EXCHANGE-zco.json": "eb126433b177b0e8103aa15b0869544010dae4bb1fd9436527209bc692556782",
+    "verify/rule12_hpg_eligibility_LOCK_EXCHANGE-zco_plant.json": "1ec1976d0793f769828911bcb0f1b30528416c0fad6a02d48b2793067420f9d3",
+    "verify/rule12_hpg_eligibility_OVERFLOW-zps.json": "cca7238aa76ef30f244bbd5b313ceebcbefc41a8688e5df0392aa6e318b6fbb7",
+    "verify/rule12_hpg_eligibility_OVERFLOW-zps_plant.json": "024013b5b3c2529fc643ae7b500fc822c4dd6f1378386cf947ea6012121ee757",
+    "verify/rule12_stp2d_momentum_rhs_LOCK_EXCHANGE-zco.json": "32589404d0dad5e4e81898eb8ec40dea4406a27d2d8c32c40dfc4c15d8643d82",
+    "verify/rule12_stp2d_momentum_rhs_LOCK_EXCHANGE-zco_plant.json": "8de4b5c86e8302e20e8ab291456c023ff558dadef3bab8d600a038a47c6f27dd",
+    "verify/rule12_stp2d_momentum_rhs_OVERFLOW-zps.json": "2eabb2ecc7d56ac65d0eb51f6120162dcbf2afd4f014b8532a8be667a58d0fc6",
+    "verify/rule12_stp2d_momentum_rhs_OVERFLOW-zps_plant.json": "b8dc264575fb6221d5f1d82e170a1a8aa3feb27c3e857c55a453d442cbba2764"
+  },
+  "bbl_test_correction": {
+    "defect": "the test picked the MEDIAN bbl_static_geometry active face; flat-bottom faces are active too and there ku_s == ku_d, so both planted cells are the same cell and no density contrast exists",
+    "fix": "select among active faces with ku_s != ku_d; TEST correction, no model change",
+    "measured": {
+      "(1,165)": {
+        "ku_s_ku_d": [
+          99,
+          99
+        ],
+        "movement": 0.0
+      },
+      "(1,22)": {
+        "ku_s_ku_d": [
+          24,
+          25
+        ],
+        "movement": 0.3200974770662164
+      },
+      "(1,40)": {
+        "ku_s_ku_d": [
+          59,
+          64
+        ],
+        "movement": 0.17292126063998048
+      },
+      "(1,94)": {
+        "ku_s_ku_d": [
+          99,
+          99
+        ],
+        "movement": 0.0
+      }
+    }
+  },
+  "commits": [
+    "2fcb991fa373 docs(ocean): round-26 preregistration for the Rule-12 eligibility sweep",
+    "907342ff0f32 fix(ocean): native GYRE card selects rk3_ws for tracers too (decision 15A)",
+    "a363e948a2bd test(ocean): close the stage-operand guard's IfExp body hole",
+    "7097103363ee feat(ocean): Rule-12 exact-input HPG row for LOCK and OVERFLOW",
+    "859d659a46bf fix(ocean): make the LOCK external-mode acquisition readable and its provenance real",
+    "a43e29d6a291 docs(ocean): cite the FMA fact at the QCO depth operand, drop the struck census",
+    "59c9c6052894 docs(ocean): round-26 receipt -- eligibility discharged on LOCK and OVERFLOW",
+    "e931d1fb62c3 fix(ocean): let the barotropic substep gate read LOCK without inventing records",
+    "66f9145c951e fix(ocean): drive the substep scaling loop from the record's own cycle count",
+    "9c89c9310550 docs(ocean): round-26 walk, BBL test correction, manifest",
+    "3689568c22e3 fix(ocean): retract the 'HPG alone' frame claim and three more review defects",
+    "1cf9af39e52b docs(ocean): record the round-26 review, its four retractions and one refutation",
+    "ee02b609bcbf docs(ocean): refresh the round-26 manifest for the renamed rows and their plants",
+    "28c3152a2ccb test(ocean): close the stage-operand guard's second hole, on the operands",
+    "aefdc9ef945e fix(ocean): make the admission --writer flag fail closed on mixed record kinds",
+    "73e482eb092d docs(ocean): both reviewer NITs were real holes; record the fixes",
+    "7482c32819af docs(ocean): the BBL fix is green against its whole module, not only itself"
+  ],
+  "corrections": {
+    "footgun": "pgf_scheme='nemo_sco' returns dp_dx/dp_dy as literal zeros (ocean_pe_latlon_cgrid.py:2045-2046); the acceleration is in direct_hpg_u/v",
+    "round24_stage2_V_unequal": {
+      "now": "17077 / 17100",
+      "source": "round25/verify/stage2/ablationA_corrected.json n_unequal",
+      "was": "17100 / 17100"
+    },
+    "struck_label_restored": "CONFIRMED_STRUCTURAL_BOUNDARY_NUMERIC_VALUE_UNMEASURED, struck-in-place in nemo_testcase_overflow_rule12_localize.py"
+  },
+  "date": "2026-09-05",
+  "decision_15A": {
+    "change": "native demo GYRE card tracer_time_integrator euler -> rk3_ws",
+    "nemo_source": "stprk3_stg.F90:65-655 is ONE routine advancing momentum (:315-430) and tracers (:463-599)",
+    "outcome": "the same five tests still fail, one guard deeper: the card resolves vertical_momentum_scheme='upwind_perturbation' and adaptive_implicit_vertadv=True, both of which disagree with NEMO (dynadv.F90:144 'keg + zad + vor'; ln_zad_Aimp=.false. at namelist_ref:1177)"
+  },
+  "fma_fact": {
+    "arch": "arch/arch-conda-scalarmath.fcm",
+    "binary": "cfgs/GYRE_OMIP_L2_P3_SM/BLD/bin/nemo.exe",
+    "binary_sha256": "207e701f740b2fc4ee5f234a22508d774c2f517646e8b9d2f1e0a2a2d58d7ea9",
+    "march_mfma_mavx2_ffastmath_hits": 0,
+    "restored_bit_patterns": [
+      "0x404E5DBFCAF8A971",
+      "0x404E5DBFCAF8A972"
+    ],
+    "restored_by_probe": "tests/ocean/unit/test_nemo_ws_tracer_rk3.py::test_nemo_qco_gdept_z0_oracle_bit_pattern",
+    "still_struck": "the 4,579-cell gdept_z0 census (no committed probe)",
+    "total_disassembled_instructions": 1868261,
+    "vfmadd_family_count": 0
+  },
+  "format": "nemo-testcase-l2-gyre-round26-v1",
+  "guard5": {
+    "hole": "IfExp unwrapped through .orelse only; a bypass in .body was invisible",
+    "planted_bypass": "(u0, v0) if _legacy_reduced_stage_transport_mean_arm else _nemo_ws_stage_barotropic_velocity(1, ...)",
+    "round25_guard_on_plant": "PASSES (the hole was real)",
+    "round26_guard_on_plant": "FAILS"
+  },
+  "lock_external_admission": {
+    "byte_identical_records": 24,
+    "changed_records": 3,
+    "plant_exit": 1,
+    "restart_byte_identical": true,
+    "retraction": "round-25 claim that the three records differ only in the unconsumed zFw slot is REFUTED: 264 signed-zero flips and three uninitialised subnormals, almost all in zFv, every one in the halo; the consumed [2:-2,2:-2,:] interior is bit-identical (changed_in_parser_projection: 0)",
+    "total_pre_existing": 27,
+    "verdict": "PASS"
+  },
+  "lock_external_walk": {
+    "absolute_max": 2.168404344971009e-19,
+    "boundary": "CONFIRMED: dynspg_ts.F90:282 zu_frc = Ue_rhs under key_RK3; dyn_cor_2D at :296 is exactly zero because usrdef_hgr.F90:103-104 sets f=0",
+    "cell": [
+      1,
+      64
+    ],
+    "first_departure_frame": "slow_u",
+    "inheritance_counter_evidence": {
+      "discriminating_measurement_not_run": "transplant NEMO's dumped zu_frc into legoESM's substep and recompute u_exit; needs no NEMO run",
+      "exit_error": 2.168404344971009e-19,
+      "note": "pure inheritance through the flux-form update (dynspg_ts.F90:750-753, coefficient about rDt_e) predicts about 3 ULP at exit; 1 was measured. 2.168404344971009e-19 is exactly 2**-62, one ULP for any value in [2**-10, 2**-9), so same-value/same-cell is weak evidence.",
+      "ratio": 0.3,
+      "slow_error_times_dt": 7.228e-19
+    },
+    "inheritance_label": "DOWNGRADED_TO_PLAUSIBLE",
+    "n": 127,
+    "owner": "PLAUSIBLE_NOT_CONFIRMED: stp2d.F90:172 (dyn_adv_up3 pUe) or stp2d.F90:185 (cumulated depth mean); no dumped frame separates them. Ue_rhs has four unconditional writers (:172, :185, :196, :200); the last two add exact zeros on this card",
+    "plants": {
+      "plant_entry": 1,
+      "plant_exit": 1
+    },
+    "prediction": "REFUTED (predicted the flux-form external update at dynspg_ts.F90:752-761)",
+    "u_exit": {
+      "absolute_max": 2.168404344971009e-19,
+      "label": "INHERITED_NOT_PRODUCED",
+      "n": 127,
+      "unequal": 1
+    },
+    "unequal": 1
+  },
+  "oracle_roots": {
+    "GYRE-zco": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+    "LOCK_EXCHANGE-zco": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+    "LOCK_EXCHANGE-zco.external": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round25_lock_external_oracle",
+    "ORCA2": "/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_icebergs_off_phase2v_tke_a_10step_np2",
+    "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10"
+  },
+  "overflow_control": {
+    "after_tip": "66f9145c951e",
+    "all_76_substep_rows_identical": true,
+    "before_tip": "991f9f95047d",
+    "first_over_bar_both": {
+      "frame": "pgf_v",
+      "normalized_max_abs": 0.00031252342425882175,
+      "substep": 2
+    },
+    "purpose": "one-variable control that the per-card generalization is a no-op on OVERFLOW",
+    "status_both": "DEBT"
+  },
+  "preregistration": "manifests/nemo_testcase_l2_gyre_round26_preregister.json",
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "review": {
+    "converged_on": "the HPG-alone frame claim",
+    "further_defects_fixed": [
+      "run.sh: `diff | grep -q '^<'` under set -o pipefail could never fire (reproduced: a deleted-line instrument passed); now counted",
+      "admission report published plant_applied: true on runs that planted nothing"
+    ],
+    "nits_that_were_real_and_are_fixed": [
+      "AST guard checked only args[0]: a same-step operand passed through the selector with the right stage number. Second hole in this one guard this round.",
+      "round-21 --writer now fails closed on mixed record kinds (GYRE default PASSes without it, FAILs with it; LOCK single-kind run unaffected)"
+    ],
+    "recorded_not_fixed": [
+      "the AST guard walks the whole module, not the routine its docstring names"
+    ],
+    "retractions": [
+      "HPG-alone frame + stprk3_stg.F90:309-334 citation",
+      "zFv consumed-identity argument is vacuous (zFv is identically zero on this card; the admission rests on the byte-identical restart plus 24/27 records)",
+      "LOCK u_exit inheritance downgraded CONFIRMED -> PLAUSIBLE",
+      "BBL comment's 'same cell' reason was false; shelf_i and deep_i are different columns"
+    ],
+    "reviewer_finding_refuted": "nn_bt_flt claim read the SHIPPED decks; the OVERFLOW oracle run has no nn_bt_flt line (namelist_ref:1092 default) and its ocean.output:875 prints nn_bt_flt = 1, while LOCK's namelist_cfg:105-106 sets 3 / 0.07. The per-card map is correct as landed.",
+    "reviewers": 2
+  },
+  "rule12_eligibility": {
+    "GYRE-zco": {
+      "absolute_max": 0.0,
+      "n": 17400,
+      "row": "oracle_input_hpg",
+      "source": "round 25",
+      "status": "bit-exact",
+      "unequal": 0
+    },
+    "LOCK_EXCHANGE-zco": {
+      "absolute_max": 0.0,
+      "n": 2540,
+      "row": "kt1.stp2d.momentum_rhs.u",
+      "status": "bit-exact",
+      "unequal": 0,
+      "v": "WAIVED_STRUCTURALLY_ABSENT (0 wet V faces)"
+    },
+    "ORCA2": {
+      "blocker": "ORCA2 gates import build_orca2_zps_card, validate_nemo_testcase_card_for_execution, nemo_qco_wzv_recurrence and nemo_transport_wzv_divergence_level, none present at this tip; the ORCA2 branch itself carries the pre-fix fused gdept_z0",
+      "status": "UNMEASURED"
+    },
+    "OVERFLOW-zps": {
+      "absolute_max": 0.0,
+      "n": 16900,
+      "row": "kt1.stp2d.momentum_rhs.u",
+      "status": "bit-exact",
+      "unequal": 0,
+      "v": "WAIVED_STRUCTURALLY_ABSENT (0 wet V faces)"
+    },
+    "frame_composition": "COMPOSITE, not dyn_hpg alone. l1_dump_rhs runs at MY_SRC/stprk3.F90:206, after stp_2D at :204 and BEFORE stage 1 at :215. Content in stp2d.F90 order: dyn_hpg :126 (assigns), dyn_ldf :129 (unconditional, inert only via ln_dynldf_OFF=.true.), dyn_vor :190 (zero at rest), then dyn_spg_ts :279 which removes the vertical mean at dynspg_ts.F90:344-345 and adds the barotropic acceleration back at :938-975 (dumped uu_b(Kaa) max 1.135e-3 LOCK, 4.503e-2 OVERFLOW). 3-D advection is at stprk3_stg.F90:315, after the dump.",
+    "plants": {
+      "LOCK_EXCHANGE-zco": 1,
+      "OVERFLOW-zps": 1
+    },
+    "prediction": "CONFIRMED on LOCK and OVERFLOW",
+    "retraction": "The round-26 'dumped frame is dyn_hpg alone' claim and its citation of stprk3_stg.F90:309-334 (the CASE(2,3) block, never run at stage 1) are REFUTED by two independent reviews and re-measured. The row value is unchanged; its isolation claim is withdrawn."
+  },
+  "starting_tip": "991f9f95047d",
+  "tests": {
+    "six_preexisting_failures": "one FIXED (overflow BBL liveness, confirmed by the post-fix 31-passed module run at the round-26 tip), five remain and need a configuration decision",
+    "tests/ocean/fidelity/test_nemo_testcase_rule12_hpg_eligibility.py": "7 passed in 0.06s; non-vacuity shown by deleting the reader time-level guard (2 red, DID NOT RAISE)",
+    "tests/ocean/unit/test_nemo_recipe.py": "5 failed, 19 passed in 49.39s (the five are open question 2)",
+    "tests/ocean/unit/test_nemo_ws_tracer_rk3.py": "31 passed in 1468.36s",
+    "wide_focused_suite": "6 failed, 111 passed in 2963.24s -- BEFORE snapshot: launched before the BBL fix and pytest imports modules at collection, so it ran the pre-fix module throughout"
+  }
+}

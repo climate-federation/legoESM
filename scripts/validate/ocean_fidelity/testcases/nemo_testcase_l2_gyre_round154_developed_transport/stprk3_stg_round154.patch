@@ -1,0 +1,17 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -21,3 +21,4 @@
+    USE step_oce       ! time stepping used modules
++   USE l2_r154_transport, ONLY : r154_transport_dump
+    USE eosbn2, ONLY : eos_l2_dump_next ! config-local WRITE-only lane-2 instrument
+    USE dynadv, ONLY : dyn_adv_round41_stage ! WRITE-only stage tag for the dyn_adv split
+@@ -317,4 +318,9 @@
+             zFv(ji,jj,jk) = e1v(ji,jj)*e3v(ji,jj,jk,Kmm) * ( vv(ji,jj,jk,Kmm) + zvb(ji,jj)*vmask(ji,jj,jk) )
+          END_3D
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp == 1081 .AND. kstg == 3 ) &
++            & CALL r154_transport_dump( kstp, kstg, Kbb, Kmm, Kaa, e2u, e1v, &
++            & e3u_3d, e3v_3d, r3u(:,:,Kmm), r3v(:,:,Kmm), umask, vmask, &
++            & uu(:,:,:,Kmm), vv(:,:,:,Kmm), zub, zvb, zFu, zFv, &
++            & un_adv, vn_adv, r1_hu_0, r1_hv_0, uu_b(:,:,Kmm), vv_b(:,:,Kmm) )
+ 
+          ! Round-13 WRITE-only stage-1 transport operand record.  It is

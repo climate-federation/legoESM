@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 from legoesm import constants
+from legoesm.atmosphere.physics.radiation.ecrad_ifs.config import EcradIFSConfig
 from legoesm.atmosphere.physics.radiation.mc3d.config import MC3DRadiationConfig
 from legoesm.atmosphere.physics.radiation.simple_lw import (
     SimpleLWConfig,
@@ -260,6 +261,8 @@ class RRTMGPConfig(NamedTuple):
     include_clouds: bool = False
     use_optimal_angle: bool = False
     # G-point accumulation strategy in the two-stream RTE solve.
+    # Gas optics are held for all g-points outside this loop, so the memory
+    # bounds below are for transport; column_chunk_size bounds the gas optics.
     #   0  -> memory-frugal checkpointed ``lax.scan`` over g-points (REQUIRED
     #         for reverse-mode AD / training at high resolution).
     #   >0 -> process g-points in parallel blocks of this size via ``vmap``
@@ -313,6 +316,12 @@ class RRTMGPConfig(NamedTuple):
     # existing positional RRTMGPConfig(...) argument binding shifts.
     aerosol_ssa_bands: tuple[float, ...] | None = None
     aerosol_g_bands: tuple[float, ...] | None = None
+    # CAM RRTMG-style transported layer from the model top to a 1 Pa lid
+    # (T, q_v of the top layer; no cloud/aerosol; overhead column-mean ozone).
+    # Its heating is discarded and TOA fluxes are reported at the lid, so the
+    # ~2 W/m2 SW absorbed above the model top leaves the column budget.
+    # False (default) = byte-identical.  Appended last (positional binding).
+    overhead_layer: bool = False
 
 
 class OzoneProfileConfig(NamedTuple):
@@ -378,7 +387,8 @@ class RadiationConfig(NamedTuple):
     Fields
     ------
     scheme : str
-        Active radiation scheme: "gray", "rrtmgp", "mc3d" or "simple_lw".
+        Active radiation scheme: "gray", "rrtmgp", "mc3d", "simple_lw" or
+        "ecrad_ifs" (OpenIFS 49r1 ecRad, MPAS column lane only).
     gray : GrayRadiationConfig
         Configuration for gray radiation.
     rrtmgp : RRTMGPConfig
@@ -462,3 +472,6 @@ class RadiationConfig(NamedTuple):
     # wiring rather than silently ignoring it.  Static Python bool (never
     # traced); ``False`` (default) adds no ops — byte-identical.
     clear_sky_diag: bool = False
+    # OpenIFS 49r1 ecRad lane settings (``scheme="ecrad_ifs"``, MPAS column
+    # lane only; see radiation/ecrad_ifs/config.py).  Read by no other scheme.
+    ecrad_ifs: EcradIFSConfig = EcradIFSConfig()

@@ -30,7 +30,7 @@ Usage::
         --in data/cmip6_forcing/solar/solarforcing-ref-day_*.nc \\
         --out data/cmip6_forcing/solar_cmip6.nc
 
-Consume it with ``run_amip_cmip6_deck.py --solar-source spectral_file
+Consume it with ``run_amip_smoke_deck.py --solar-source spectral_file
 --solar-file <out> --solar-tsi-var TSI --solar-spectral-var SSI_frac
 --solar-spectral-band-order rrtmg_sw``.
 """
@@ -263,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
     n = merged.sizes["time"]
     print(f"Wrote {args.out} ({n} records; TSI + 14-band SSI_frac, RRTMG-SW "
           f"order)")
-    print("Consume: run_amip_cmip6_deck.py --solar-source spectral_file "
+    print("Consume: run_amip_smoke_deck.py --solar-source spectral_file "
           f"--solar-file {args.out} --solar-tsi-var TSI --solar-spectral-var "
           f"SSI_frac --solar-spectral-band-order rrtmg_sw")
     return 0

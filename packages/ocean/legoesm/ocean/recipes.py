@@ -57,6 +57,22 @@ LATLON_RECIPES = {
         "tracer_time_integrator": "euler",
         "implicit_vertical_mixing": True,
     },
+    # default_wright_v1 with the implicit_cn barotropic solver — what the f-plane
+    # inertia-gravity-wave channel runner builds (it overrides the default
+    # explicit_substep solver, which propagates that case's external gravity
+    # wave ~1.86x too slowly; see run_inertia_gravity_wave_channel, #2114).
+    "default_wright_implicit_cn_v1": {
+        "eos": "wright",
+        "momentum_advection": "vector_invariant",
+        "tracer_advection": "tvd",
+        "pgf_scheme": "adcroft",
+        "ke_gradient_scheme": "centered",
+        "barotropic_solver": "implicit_cn",
+        "coriolis_scheme": "matsuno_split",
+        "outer_integrator": "forward_euler",
+        "tracer_time_integrator": "euler",
+        "implicit_vertical_mixing": True,
+    },
     # legoESM default linear-EOS dycore — the global-overturning recipe.
     "legoesm_linear_v1": {
         "eos": "linear",
@@ -99,18 +115,25 @@ LATLON_RECIPES = {
         "implicit_vmix_dzw_slot": True,
         "implicit_vertical_mixing": True,
         "lateral_viscosity_operator": "flux_divergence",
+        "lateral_viscosity_mask_levels": "surface",
         "vertical_momentum_scheme": "centered_full",
     },
-    # The FAITHFUL NEMO dycore (#487/#496) — the scheme identity of
-    # fidelity/nemo_recipe.py's nemo_lat_lon_model_config: EEN-style
-    # vector-invariant momentum + Hollingsworth KE-gradient, PPM/FCT tracers,
-    # TEOS-10-like veros_gsw EOS, smc03 PGF, RK3 momentum, adaptive-implicit
-    # vertical advection, cosine free-surface filter. NB this catalog entry is the
-    # DYCORE SCHEMES only — the full NEMO card ALSO supplies NEMO constants + the
-    # prognostic TKE physics + GM/Redi/MLE; use nemo_recipe.build_nemo_recipe for
-    # full fidelity. Distinct from nemo_dino_v1 (the cruder Wright/KPP approx).
+    # NEMO-STYLE dycore (#487/#496; RENAMED from "nemo_v1" 2026-09-02 — that
+    # name overclaimed fidelity: this entry's barotropic solver is legoESM's
+    # own generic split-explicit arm, NOT NEMO's dyn_spg_ts, since it never
+    # sets any of the 5 barotropic_*_evaluation selectors — see
+    # docs/ocean/fidelity/nemo_branch_isomorphism_map.md S-16) — the scheme
+    # identity of fidelity/nemo_recipe.py's nemo_lat_lon_model_config:
+    # EEN-style vector-invariant momentum + Hollingsworth KE-gradient,
+    # PPM/FCT tracers, TEOS-10-like veros_gsw EOS, smc03 PGF, RK3 momentum,
+    # adaptive-implicit vertical advection, cosine free-surface filter (all
+    # genuinely NEMO-referenced) riding on the generic (non-NEMO) barotropic
+    # substep loop. NB this catalog entry is the DYCORE SCHEMES only — the
+    # full NEMO card ALSO supplies NEMO constants + the prognostic TKE
+    # physics + GM/Redi/MLE; use nemo_recipe.build_nemo_recipe for full
+    # fidelity. Distinct from nemo_dino_v1 (the cruder Wright/KPP approx).
     # Drift-guarded against the card by tests/ocean/unit/test_recipes.py.
-    "nemo_v1": {
+    "legoesm_nemo_like_v1": {
         "eos": "veros_gsw",
         "momentum_advection": "vector_invariant",
         "ke_gradient_scheme": "hollingsworth",
@@ -144,9 +167,10 @@ LATLON_RECIPES = {
     # Matches NEMO ORCA1 CLIMATE: SST RMSE 1.15, corr 0.99
     # (docs/dev-notes/ocean_faithfulness_nemo.md) — a climate-match stack
     # (KPP vertical mixing + Laplacian Smagorinsky), NOT a numerics-faithful card
-    # like nemo_v1. ke_gradient/outer/tracer integrators are config defaults the
-    # tripole branch intentionally leaves unset (the Hollingsworth KE stencil is
-    # not yet north-fold-aware — see the _create_setup tripole note).
+    # like legoesm_nemo_like_v1. ke_gradient/outer/tracer integrators are config
+    # defaults the tripole branch intentionally leaves unset (the Hollingsworth
+    # KE stencil is not yet north-fold-aware — see the _create_setup tripole
+    # note).
     "omip_nemo_match_tripole_v1": {
         "eos": "wright",
         "momentum_advection": "vector_invariant",
@@ -164,6 +188,10 @@ LATLON_RECIPES = {
         # carried here so catalog-based assembly does not silently fall back to
         # the config default False (codex).
         "normalize_freshwater": True,
+        "lateral_viscosity_mask_levels": "per_level",
+        # NEMO ORCA1 rn_shlat = 2 (dommsk.F90:209-215).
+        "lateral_side_bc": "nemo_shlat",
+        "lateral_shlat": 2.0,
     },
     # Oracle dycores — the canonical numerics of the runnable oracle models. SINGLE
     # SOURCE for the *_canonical_ocean_config factory defaults (the factories splat
@@ -189,6 +217,7 @@ LATLON_RECIPES = {
         # explicit_ab2 validation) and one passes the flag via **overrides
         # (duplicate-kwarg).  Short compare decks tolerate the weak growth.
         "lateral_viscosity_operator": "flux_divergence",
+        "lateral_viscosity_mask_levels": "surface",
         "A_h_lat_scaling": False,
         "C_smag": 0.0,
         "differentiable_barotropic": True,
@@ -207,6 +236,7 @@ LATLON_RECIPES = {
         "barotropic_implicit_theta_eta": 1.0,        # fully backward-Euler free surface
         "barotropic_implicit_theta_pgf": 1.0,
         "lateral_viscosity_operator": "flux_divergence",
+        "lateral_viscosity_mask_levels": "surface",
         "A_h_lat_scaling": False,
         "C_smag": 0.0,
         "bottom_drag_r": 0.0,
@@ -244,8 +274,9 @@ MPAS_RECIPES = {
     # Matches NEMO ORCA1 CLIMATE: SST RMSE 0.84 (the best grid)
     # (docs/dev-notes/ocean_faithfulness_nemo.md) — a climate-match stack
     # (KPP vertical mixing + Laplacian Smagorinsky), NOT a numerics-faithful card
-    # like nemo_v1. eos/pv_scheme are the config defaults the mpas branch leaves
-    # unset; tracer_advection/pgf/barotropic/implicit are set explicitly.
+    # like legoesm_nemo_like_v1. eos/pv_scheme are the config defaults the mpas
+    # branch leaves unset; tracer_advection/pgf/barotropic/implicit are set
+    # explicitly.
     "omip_nemo_match_mpas_v1": {
         "eos": "wright",
         "tracer_advection": "tvd",

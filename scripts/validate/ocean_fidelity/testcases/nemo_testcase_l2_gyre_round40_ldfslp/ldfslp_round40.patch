@@ -1,0 +1,411 @@
+--- ldfslp.F90.shipped
++++ ldfslp.F90
+@@ -68,6 +68,26 @@
+ 
+    REAL(wp) ::   repsln = 1.e-25_wp       ! tiny value used as minium of di(rho), dj(rho) and dk(rho)
+ 
++   !                    !--- round-40 L2 GYRE WRITE-only ldf_slp statement instrument ---!
++   !     ldf_slp's jk loop DESCENDS and every intermediate below is a scalar or
++   !     a 2-D slab that the next level destroys, so a record written after the
++   !     loop can only carry the four OUTPUT slopes.  These 3-D buffers keep one
++   !     level of each intermediate so the record can score EVERY statement of
++   !     the routine given NEMO's own inputs, not merely their product.
++   !     Nothing written here is ever read back into a slope, a mask or a
++   !     closure coefficient: the buffers are write-only and are deallocated
++   !     before the routine returns.
++   LOGICAL , SAVE ::   ll_l2_slp = .FALSE.
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:) ::   zl2_dzr , zl2_gruk, zl2_grum, zl2_grvk, zl2_grvm
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:) ::   zl2_au  , zl2_av  , zl2_bu  , zl2_bv
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:) ::   zl2_fi  , zl2_fj  , zl2_mli , zl2_mlj
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:) ::   zl2_depu, zl2_depv, zl2_wzuv, zl2_wwuv
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:) ::   zl2_uhml, zl2_vhml
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:) ::   zl2_bw  , zl2_ci  , zl2_cj  , zl2_ai  , zl2_aj
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:) ::   zl2_bi  , zl2_bj  , zl2_fk  , zl2_mlk , zl2_ck
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:) ::   zl2_wzw , zl2_www , zl2_ihml, zl2_jhml
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:) ::   zl2_tmp            ! macro scratch
++
+    !! * Substitutions
+ #  include "do_loop_substitute.h90"
+ #  include "domzgr_substitute.h90"
+@@ -121,10 +141,48 @@
+       REAL(wp), DIMENSION(A2D(1))   ::  zvslp_hml, zwslpj_hml, r1_hmlv
+       REAL(wp), DIMENSION(A2D(1))   ::                         r1_hmlw
+       REAL(wp), DIMENSION(A2D(2),2) ::  zgru, zgrv
++      !                    !--- round-40 instrument locals ---!
++      INTEGER  ::   il2_unit, il2_ios
++      CHARACTER(LEN=16) ::   cl_l2_magic
++      CHARACTER(LEN=40) ::   cl_l2_file        ! one file per kt
+       !!----------------------------------------------------------------------
+       !
+       IF( ln_timing )   CALL timing_start('ldf_slp')
+       !
++      !                    !--- round-40 instrument set-up ---!
++      !     kt = nit000 AND nit000+1: at nit000 GYRE's analytic initial T and S
++      !     are horizontally uniform on wet cells, so every slope is exactly
++      !     zero and the record cannot discriminate any transcription of this
++      !     routine.  nit000+1 is the first step whose BEFORE state carries the
++      !     horizontal structure step 1 created.  Fail closed on domain tiling
++      !     -- the buffers are global, so a tiled call would dump one tile and
++      !     label it the whole field -- and on a build whose wp is not 64-bit,
++      !     because the reader assumes both.
++      ll_l2_slp = ( lwp .AND. kt <= nit000 + 1 )
++      IF( ll_l2_slp ) THEN
++         IF( l_istiled )                     CALL ctl_stop( 'ldf_slp: L2 instrument does not support domain tiling' )
++         IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'ldf_slp: L2 instrument requires 64-bit wp' )
++         ALLOCATE( zl2_dzr (jpi,jpj,jpk), zl2_gruk(jpi,jpj,jpk), zl2_grum(jpi,jpj,jpk),   &
++            &      zl2_grvk(jpi,jpj,jpk), zl2_grvm(jpi,jpj,jpk),                          &
++            &      zl2_au  (jpi,jpj,jpk), zl2_av  (jpi,jpj,jpk), zl2_bu  (jpi,jpj,jpk),   &
++            &      zl2_bv  (jpi,jpj,jpk), zl2_fi  (jpi,jpj,jpk), zl2_fj  (jpi,jpj,jpk),   &
++            &      zl2_mli (jpi,jpj,jpk), zl2_mlj (jpi,jpj,jpk), zl2_depu(jpi,jpj,jpk),   &
++            &      zl2_depv(jpi,jpj,jpk), zl2_wzuv(jpi,jpj,jpk), zl2_wwuv(jpi,jpj,jpk),   &
++            &      zl2_uhml(jpi,jpj,jpk), zl2_vhml(jpi,jpj,jpk), zl2_bw  (jpi,jpj,jpk),   &
++            &      zl2_ci  (jpi,jpj,jpk), zl2_cj  (jpi,jpj,jpk), zl2_ai  (jpi,jpj,jpk),   &
++            &      zl2_aj  (jpi,jpj,jpk), zl2_bi  (jpi,jpj,jpk), zl2_bj  (jpi,jpj,jpk),   &
++            &      zl2_fk  (jpi,jpj,jpk), zl2_mlk (jpi,jpj,jpk), zl2_ck  (jpi,jpj,jpk),   &
++            &      zl2_wzw (jpi,jpj,jpk), zl2_www (jpi,jpj,jpk), zl2_ihml(jpi,jpj,jpk),   &
++            &      zl2_jhml(jpi,jpj,jpk), zl2_tmp (jpi,jpj,jpk) )
++         zl2_dzr =0._wp ; zl2_gruk=0._wp ; zl2_grum=0._wp ; zl2_grvk=0._wp ; zl2_grvm=0._wp
++         zl2_au  =0._wp ; zl2_av  =0._wp ; zl2_bu  =0._wp ; zl2_bv  =0._wp ; zl2_fi  =0._wp
++         zl2_fj  =0._wp ; zl2_mli =0._wp ; zl2_mlj =0._wp ; zl2_depu=0._wp ; zl2_depv=0._wp
++         zl2_wzuv=0._wp ; zl2_wwuv=0._wp ; zl2_uhml=0._wp ; zl2_vhml=0._wp ; zl2_bw  =0._wp
++         zl2_ci  =0._wp ; zl2_cj  =0._wp ; zl2_ai  =0._wp ; zl2_aj  =0._wp ; zl2_bi  =0._wp
++         zl2_bj  =0._wp ; zl2_fk  =0._wp ; zl2_mlk =0._wp ; zl2_ck  =0._wp ; zl2_wzw =0._wp
++         zl2_www =0._wp ; zl2_ihml=0._wp ; zl2_jhml=0._wp ; zl2_tmp =0._wp
++      ENDIF
++      !
+       zeps   =  1.e-20_wp           !==   Local constant initialization   ==!
+       z1_16  =  1.0_wp / 16._wp
+       zm1_g  = -1.0_wp / grav
+@@ -182,6 +240,15 @@
+             zgrv(ji,jj,iikm1) = vmask(ji,jj,jk-1) * ( prd(ji  ,jj+1,jk-1) - prd(ji,jj,jk-1) )
+             !
+          END_2D
++         !                          !-- round-40 instrument: both toggled gradient slots at this jk --!
++         IF( ll_l2_slp ) THEN
++            DO_2D( 2, 1, 2, 1 )
++               zl2_gruk(ji,jj,jk) = zgru(ji,jj,iik  )
++               zl2_grum(ji,jj,jk) = zgru(ji,jj,iikm1)
++               zl2_grvk(ji,jj,jk) = zgrv(ji,jj,iik  )
++               zl2_grvm(ji,jj,jk) = zgrv(ji,jj,iikm1)
++            END_2D
++         ENDIF
+          !                          !==   jk: Local vertical density gradient at T-point   == !
+          DO_2D( 1, 2, 1, 2 )
+             !                                ! zdzr = d/dz(prd)= - ( prd ) / grav * mk(pn2) -- at t point
+@@ -192,6 +259,12 @@
+             zdzr(ji,jj) = zm1_g * ( prd(ji,jj,jk) + 1._wp )              &
+                &                * ( pn2(ji,jj,jk) + pn2(ji,jj,jk+1) ) * ( 1._wp - 0.5_wp * tmask(ji,jj,jk+1) )
+          END_2D
++         !                          !-- round-40 instrument: the T-point vertical density gradient --!
++         IF( ll_l2_slp ) THEN
++            DO_2D( 1, 2, 1, 2 )
++               zl2_dzr(ji,jj,jk) = zdzr(ji,jj)
++            END_2D
++         ENDIF
+          !
+          !
+          ! Cray compiler creates faulty code at vector optimisation levels >= vector1. Possibly it 
+@@ -235,6 +308,17 @@
+             !                                              ! store 1/hml*(dxR/dzR)_ml at nmln level
+             zuslp_hml(ji,jj) = zmli * zwz(ji,jj) * r1_hmlu(ji,jj) + ( 1._wp - zmli ) * zuslp_hml(ji,jj)
+             zvslp_hml(ji,jj) = zmlj * zww(ji,jj) * r1_hmlv(ji,jj) + ( 1._wp - zmlj ) * zvslp_hml(ji,jj)
++            !                    !-- round-40 instrument: the u/v scalars, which the next level destroys --!
++            IF( ll_l2_slp ) THEN
++               zl2_au  (ji,jj,jk) = zau           ;   zl2_av  (ji,jj,jk) = zav
++               zl2_bu  (ji,jj,jk) = zbu           ;   zl2_bv  (ji,jj,jk) = zbv
++               zl2_fi  (ji,jj,jk) = zfi           ;   zl2_fj  (ji,jj,jk) = zfj
++               zl2_mli (ji,jj,jk) = zmli          ;   zl2_mlj (ji,jj,jk) = zmlj
++               zl2_depu(ji,jj,jk) = zdepu         ;   zl2_depv(ji,jj,jk) = zdepv
++               zl2_wzuv(ji,jj,jk) = zwz(ji,jj)    ;   zl2_wwuv(ji,jj,jk) = zww(ji,jj)
++               zl2_uhml(ji,jj,jk) = zuslp_hml(ji,jj)
++               zl2_vhml(ji,jj,jk) = zvslp_hml(ji,jj)
++            ENDIF
+          END_2D
+          !dir$ VECTOR
+          !
+@@ -295,6 +379,17 @@
+             !                                        ! store 1/hml*(dxR/dzR)_ml at nmln+1 level (1st level above lower T-point in ML)
+             zwslpi_hml(ji,jj) = zmlk * zwz(ji,jj) * r1_hmlw(ji,jj) + ( 1._wp - zmlk ) * zwslpi_hml(ji,jj)
+             zwslpj_hml(ji,jj) = zmlk * zww(ji,jj) * r1_hmlw(ji,jj) + ( 1._wp - zmlk ) * zwslpj_hml(ji,jj)
++            !                    !-- round-40 instrument: the w scalars, which the next level destroys --!
++            IF( ll_l2_slp ) THEN
++               zl2_bw (ji,jj,jk) = zbw            ;   zl2_ci (ji,jj,jk) = zci
++               zl2_cj (ji,jj,jk) = zcj            ;   zl2_ai (ji,jj,jk) = zai
++               zl2_aj (ji,jj,jk) = zaj            ;   zl2_bi (ji,jj,jk) = zbi
++               zl2_bj (ji,jj,jk) = zbj            ;   zl2_fk (ji,jj,jk) = zfk
++               zl2_mlk(ji,jj,jk) = zmlk           ;   zl2_ck (ji,jj,jk) = zck
++               zl2_wzw(ji,jj,jk) = zwz(ji,jj)     ;   zl2_www(ji,jj,jk) = zww(ji,jj)
++               zl2_ihml(ji,jj,jk) = zwslpi_hml(ji,jj)
++               zl2_jhml(ji,jj,jk) = zwslpj_hml(ji,jj)
++            ENDIF
+          END_2D
+          !dir$ VECTOR
+          !                           !== horizontal Shapiro filter + decrease in vicinity of topography  ==!
+@@ -318,6 +413,267 @@
+       !                              !==  Lateral boundary conditions  ==!
+       CALL lbc_lnk( 'ldfslp', uslp , 'U', -1.0_wp , vslp , 'V', -1.0_wp , wslpi, 'W', -1.0_wp, wslpj, 'W', -1.0_wp )
+       !
++      !                    !--- round-40 instrument: the record ---!
++      !     Self-describing, on the round-35 pattern: a 16-character magic,
++      !     fourteen header integers, then one (name, rank, n1, n2, n3,
++      !     payload) group per array until EOF, so a reader never has to know
++      !     the list in advance.  Every group is a full (jpi,jpj[,jpk]) array;
++      !     locals declared on an A2D window are staged through zl2_tmp over
++      !     THEIR OWN defined loop bounds, so a slot the routine never assigns
++      !     is a deterministic 0._wp and never uninitialised memory.
++      IF( ll_l2_slp ) THEN
++         WRITE(cl_l2_file,'(A,I8.8,A)') 'oracle_ldfslp_kt', kt, '.bin'
++         OPEN( NEWUNIT=il2_unit, FILE=TRIM(cl_l2_file), ACCESS='STREAM',   &
++            &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=il2_ios )
++         IF( il2_ios /= 0 )   CALL ctl_stop( 'ldf_slp: cannot open L2 ldfslp dump' )
++         cl_l2_magic = 'NEMO_L2_LDFSL_1'
++         WRITE(il2_unit) cl_l2_magic
++         WRITE(il2_unit) 1, kt, Kbb, Kmm, jpi, jpj, jpk, jpkm1, nlb10,   &
++            &               ntsi, ntei, ntsj, ntej, STORAGE_SIZE(1._wp)
++         !
++         !              !-- the arm, as payload rather than as prose --!
++         WRITE(il2_unit) 'rn_slpmax       '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) rn_slpmax
++         WRITE(il2_unit) 'grav            '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) grav
++         WRITE(il2_unit) 'zeps            '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) zeps
++         WRITE(il2_unit) 'z1_slpmax       '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) z1_slpmax
++         zl2_tmp(1,1,1) = 0._wp   ;   IF( ln_isfcav      )   zl2_tmp(1,1,1) = 1._wp
++         WRITE(il2_unit) 'ln_isfcav       '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) zl2_tmp(1,1,1)
++         zl2_tmp(1,1,1) = 0._wp   ;   IF( ln_traldf_iso  )   zl2_tmp(1,1,1) = 1._wp
++         WRITE(il2_unit) 'ln_traldf_iso   '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) zl2_tmp(1,1,1)
++         zl2_tmp(1,1,1) = 0._wp   ;   IF( l_ldfslp       )   zl2_tmp(1,1,1) = 1._wp
++         WRITE(il2_unit) 'l_ldfslp        '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) zl2_tmp(1,1,1)
++         !
++         !              !-- the reference ladders --!
++         WRITE(il2_unit) 'gdept_1d        '   ;   WRITE(il2_unit) 1, jpk, 1, 1
++         WRITE(il2_unit) gdept_1d
++         WRITE(il2_unit) 'gdepw_1d        '   ;   WRITE(il2_unit) 1, jpk, 1, 1
++         WRITE(il2_unit) gdepw_1d
++         WRITE(il2_unit) 'e3t_1d          '   ;   WRITE(il2_unit) 1, jpk, 1, 1
++         WRITE(il2_unit) e3t_1d
++         WRITE(il2_unit) 'e3w_1d          '   ;   WRITE(il2_unit) 1, jpk, 1, 1
++         WRITE(il2_unit) e3w_1d
++         !
++         !              !-- the mixed-layer inputs, staged over their own bounds --!
++         zl2_tmp(:,:,:) = 0._wp
++         DO_2D( 2, 2, 2, 2 )
++            zl2_tmp(ji,jj,1) = REAL( nmln(ji,jj), wp )
++         END_2D
++         WRITE(il2_unit) 'nmln            '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) zl2_tmp(:,:,1)
++         zl2_tmp(:,:,:) = 0._wp
++         DO_2D( 2, 2, 2, 2 )
++            zl2_tmp(ji,jj,1) = hmlp(ji,jj)
++         END_2D
++         WRITE(il2_unit) 'hmlp            '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) zl2_tmp(:,:,1)
++         zl2_tmp(:,:,:) = 0._wp
++         DO_2D( 1, 2, 1, 2 )
++            zl2_tmp(ji,jj,1) = zhmlpt(ji,jj)
++         END_2D
++         WRITE(il2_unit) 'zhmlpt          '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) zl2_tmp(:,:,1)
++         zl2_tmp(:,:,:) = 0._wp
++         DO_2D( 1, 1, 1, 1 )
++            zl2_tmp(ji,jj,1) = r1_hmlu(ji,jj)
++         END_2D
++         WRITE(il2_unit) 'r1_hmlu         '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) zl2_tmp(:,:,1)
++         zl2_tmp(:,:,:) = 0._wp
++         DO_2D( 1, 1, 1, 1 )
++            zl2_tmp(ji,jj,1) = r1_hmlv(ji,jj)
++         END_2D
++         WRITE(il2_unit) 'r1_hmlv         '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) zl2_tmp(:,:,1)
++         zl2_tmp(:,:,:) = 0._wp
++         DO_2D( 1, 1, 1, 1 )
++            zl2_tmp(ji,jj,1) = r1_hmlw(ji,jj)
++         END_2D
++         WRITE(il2_unit) 'r1_hmlw         '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) zl2_tmp(:,:,1)
++         !
++         !              !-- the geometry and the index fields --!
++         WRITE(il2_unit) 'ssmask          '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) ssmask
++         zl2_tmp(:,:,1) = REAL( mikt(:,:), wp )
++         WRITE(il2_unit) 'mikt            '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) zl2_tmp(:,:,1)
++         zl2_tmp(:,:,1) = REAL( miku(:,:), wp )
++         WRITE(il2_unit) 'miku            '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) zl2_tmp(:,:,1)
++         zl2_tmp(:,:,1) = REAL( mikv(:,:), wp )
++         WRITE(il2_unit) 'mikv            '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) zl2_tmp(:,:,1)
++         zl2_tmp(:,:,1) = REAL( mbkt(:,:), wp )
++         WRITE(il2_unit) 'mbkt            '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) zl2_tmp(:,:,1)
++         WRITE(il2_unit) 'r3t_Kmm         '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) r3t(:,:,Kmm)
++         WRITE(il2_unit) 'r3u_Kmm         '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) r3u(:,:,Kmm)
++         WRITE(il2_unit) 'r3v_Kmm         '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) r3v(:,:,Kmm)
++         WRITE(il2_unit) 'e1t             '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) e1t
++         WRITE(il2_unit) 'e2t             '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) e2t
++         WRITE(il2_unit) 'e1u             '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) e1u
++         WRITE(il2_unit) 'e2v             '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) e2v
++         WRITE(il2_unit) 'r1_e1u          '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) r1_e1u
++         WRITE(il2_unit) 'r1_e2v          '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) r1_e2v
++         !
++         !              !-- the 3-D inputs.  e3u/e3v are PREPROCESSOR MACROS
++         !                 under key_qco (domzgr_substitute.h90:127-128), so the
++         !                 REFERENCE halves are materialised elementwise and the
++         !                 reader can check the substitution, not only its result.
++         WRITE(il2_unit) 'prd             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) prd
++         WRITE(il2_unit) 'pn2             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) pn2
++         WRITE(il2_unit) 'tmask           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) tmask
++         WRITE(il2_unit) 'umask           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) umask
++         WRITE(il2_unit) 'vmask           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) vmask
++         WRITE(il2_unit) 'wmask           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) wmask
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = E3u_0(ji,jj,jk)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3u_0           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = E3v_0(ji,jj,jk)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3v_0           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = e3u(ji,jj,jk,Kmm)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3u_Kmm         '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = e3v(ji,jj,jk,Kmm)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3v_Kmm         '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = e3w(ji,jj,jk,Kmm)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3w_Kmm         '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = gdept(ji,jj,jk,Kmm)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'gdept_Kmm       '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = gdepw(ji,jj,jk,Kmm)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'gdepw_Kmm       '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         !
++         !              !-- the per-jk intermediates the descending loop destroys --!
++         WRITE(il2_unit) 'zdzr            '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_dzr
++         WRITE(il2_unit) 'zgru_iik        '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_gruk
++         WRITE(il2_unit) 'zgru_iikm1      '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_grum
++         WRITE(il2_unit) 'zgrv_iik        '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_grvk
++         WRITE(il2_unit) 'zgrv_iikm1      '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_grvm
++         WRITE(il2_unit) 'zau             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_au
++         WRITE(il2_unit) 'zav             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_av
++         WRITE(il2_unit) 'zbu             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_bu
++         WRITE(il2_unit) 'zbv             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_bv
++         WRITE(il2_unit) 'zfi             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_fi
++         WRITE(il2_unit) 'zfj             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_fj
++         WRITE(il2_unit) 'zmli            '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_mli
++         WRITE(il2_unit) 'zmlj            '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_mlj
++         WRITE(il2_unit) 'zdepu           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_depu
++         WRITE(il2_unit) 'zdepv           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_depv
++         WRITE(il2_unit) 'zwz_uv          '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_wzuv
++         WRITE(il2_unit) 'zww_uv          '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_wwuv
++         WRITE(il2_unit) 'zuslp_hml       '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_uhml
++         WRITE(il2_unit) 'zvslp_hml       '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_vhml
++         WRITE(il2_unit) 'zbw             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_bw
++         WRITE(il2_unit) 'zci             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_ci
++         WRITE(il2_unit) 'zcj             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_cj
++         WRITE(il2_unit) 'zai             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_ai
++         WRITE(il2_unit) 'zaj             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_aj
++         WRITE(il2_unit) 'zbi             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_bi
++         WRITE(il2_unit) 'zbj             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_bj
++         WRITE(il2_unit) 'zfk             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_fk
++         WRITE(il2_unit) 'zmlk            '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_mlk
++         WRITE(il2_unit) 'zck             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_ck
++         WRITE(il2_unit) 'zwz_w           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_wzw
++         WRITE(il2_unit) 'zww_w           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_www
++         WRITE(il2_unit) 'zwslpi_hml      '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_ihml
++         WRITE(il2_unit) 'zwslpj_hml      '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_jhml
++         !
++         !              !-- the outputs --!
++         WRITE(il2_unit) 'uslp            '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) uslp
++         WRITE(il2_unit) 'vslp            '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) vslp
++         WRITE(il2_unit) 'wslpi           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) wslpi
++         WRITE(il2_unit) 'wslpj           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) wslpj
++         !
++         CLOSE(il2_unit)
++         DEALLOCATE( zl2_dzr , zl2_gruk, zl2_grum, zl2_grvk, zl2_grvm,   &
++            &        zl2_au  , zl2_av  , zl2_bu  , zl2_bv  , zl2_fi  ,   &
++            &        zl2_fj  , zl2_mli , zl2_mlj , zl2_depu, zl2_depv,   &
++            &        zl2_wzuv, zl2_wwuv, zl2_uhml, zl2_vhml, zl2_bw  ,   &
++            &        zl2_ci  , zl2_cj  , zl2_ai  , zl2_aj  , zl2_bi  ,   &
++            &        zl2_bj  , zl2_fk  , zl2_mlk , zl2_ck  , zl2_wzw ,   &
++            &        zl2_www , zl2_ihml, zl2_jhml, zl2_tmp )
++         ll_l2_slp = .FALSE.   ! re-armed at the top of the next ldf_slp call
++         WRITE(numout,*) 'L2_LDFSLP_DUMP ', kt, Kbb, Kmm, TRIM(cl_l2_file)
++      ENDIF
++      !
+       IF(sn_cfctl%l_prtctl) THEN
+          CALL prt_ctl(tab3d_1=uslp , clinfo1=' slp  - u : ', tab3d_2=vslp,  clinfo2=' v : ')
+          CALL prt_ctl(tab3d_1=wslpi, clinfo1=' slp  - wi: ', tab3d_2=wslpj, clinfo2=' wj: ')

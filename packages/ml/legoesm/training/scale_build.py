@@ -24,11 +24,22 @@ the cluster launch; the data-parallel gradient average is unit-tested separately
 from __future__ import annotations
 
 import calendar
+import hashlib
 import importlib.util
+import json
 import math
+import os
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
+
+import logging
+
+logger = logging.getLogger(__name__)
+# One-shot process flag: the hold-fixed warning fires once, not per shard/epoch.
+_WARNED_ERA5_FLUX_HOLD_FIXED = False
 
 _REPO = Path(__file__).resolve().parents[4]   # packages/ml/legoesm/training/ -> repo root
 
@@ -137,6 +148,255 @@ def _sharded_indices(cfg, yml, times, snaps_per_day, stride, rank, nproc):
     return idx[start:start + per]
 
 
+# --- local ERA5 snapshot cache (deck ``cache_dir``) --------------------------
+# Variables a WB sample reads beyond the TrainingERA5Config defaults, measured
+# with an xarray __getitem__ probe on the CAM6 deck (cloud + fluxes on),
+# 2026-10-22. A variable missing here does not silently change training: the
+# first-sample gate compares a cache-built sample against a remote-built one.
+_ERA5_CACHE_EXTRA_STATE_VARS = (
+    "2m_temperature", "land_sea_mask", "sea_surface_temperature")
+_ERA5_CACHE_CLOUD_VARS = (
+    "specific_cloud_liquid_water_content", "specific_cloud_ice_water_content")
+_ERA5_CACHE_FLUX_VARS = (
+    "mean_eastward_turbulent_surface_stress",
+    "mean_northward_turbulent_surface_stress",
+    "mean_surface_latent_heat_flux",
+    "mean_surface_sensible_heat_flux",
+    "mean_surface_downward_long_wave_radiation_flux",
+    "mean_surface_downward_short_wave_radiation_flux",
+    "mean_surface_net_long_wave_radiation_flux",
+    "mean_surface_net_short_wave_radiation_flux",
+)
+_CACHE_HEARTBEAT_S = 60      # builder touches its heartbeat this often
+_CACHE_STALE_S = 15 * 60     # waiters give up when the heartbeat is this old
+_CACHE_POLL_S = 30
+
+
+def wb_era5_cache_root(yml):
+    """The deck's ``cache_dir`` as an absolute path, or None (no cache).
+
+    A relative path resolves against the repo root of the running code, never
+    the working directory. ``LEGOESM_ERA5_LOCAL_CACHE=0`` switches it off.
+    """
+    root = yml.get("cache_dir")
+    if not root or os.environ.get("LEGOESM_ERA5_LOCAL_CACHE") == "0":
+        return None
+    p = Path(root)
+    return p if p.is_absolute() else _REPO / p
+
+
+def _era5_store_groups(era5_cfg, sst_cfg):
+    """``{store path: (pressure vars, surface vars)}`` a sample reads.
+
+    Mirrors load_era5_slice's store choice: an empty cloud/flux store path
+    means "read it from the state store".
+    """
+    groups = {}
+
+    def add(path, pv=(), sv=()):
+        p0, s0 = groups.get(path, ((), ()))
+        groups[path] = (p0 + tuple(v for v in pv if v not in p0),
+                        s0 + tuple(v for v in sv if v not in s0))
+
+    state = era5_cfg.zarr_store
+    add(state, era5_cfg.pressure_variables,
+        tuple(era5_cfg.surface_variables) + _ERA5_CACHE_EXTRA_STATE_VARS)
+    if era5_cfg.load_cloud_condensate:
+        add(era5_cfg.cloud_zarr or state, _ERA5_CACHE_CLOUD_VARS)
+    if sst_cfg.load_surface_fluxes:
+        add(sst_cfg.flux_zarr or state, (), _ERA5_CACHE_FLUX_VARS)
+    if sst_cfg.load_surface_fluxes or sst_cfg.load_land_frac:
+        # the loader falls back to the flux store for the land mask when the
+        # state store lacks it; a store without it is simply not given one
+        add(sst_cfg.flux_zarr or state, (), ("land_sea_mask",))
+    return groups
+
+
+def _ensure_era5_store_cache(era5_cfg, path, pv, sv, stamps, root):
+    """Window-scoped local copy of ``path`` at exactly ``stamps``."""
+    from legoesm.training.era5_to_state import (
+        ensure_local_cache, open_era5_zarr)
+
+    rt = np.asarray(open_era5_zarr(path).time.values, dtype="datetime64[ns]")
+    idx = np.searchsorted(rt, stamps)
+    hit = idx < len(rt)
+    if not (hit.all() and np.array_equal(rt[idx], stamps)):
+        raise ValueError(
+            f"ERA5 store {path} lacks {int((~hit).sum()) or 'some'} of the "
+            "requested analysis times; it cannot be cached for this deck.")
+    fp = hashlib.sha256(json.dumps({
+        "store": path, "pressure": list(pv), "surface": list(sv),
+        "levels": [float(lv) for lv in era5_cfg.levels],
+        "times": stamps.astype("int64").tolist(),
+    }).encode()).hexdigest()
+    cfg = era5_cfg._replace(
+        zarr_store=path, pressure_variables=tuple(pv),
+        surface_variables=tuple(sv))
+    return ensure_local_cache(cfg, root / f"era5_{fp[:16]}",
+                              time_selection=idx.tolist(), fingerprint=fp)
+
+
+_HEARTBEAT_STARTED = set()
+# Per-(base, rank) call count: every rank calls in the same order, so the
+# count names one attempt across ranks and an earlier attempt's markers can
+# never be read as this one's.
+_BUILD_ATTEMPTS: dict = {}
+
+
+def _start_job_heartbeat(beat):
+    """Rank 0 touches ``beat`` every _CACHE_HEARTBEAT_S for the rest of the
+    process: liveness is per JOB, so a rank waiting on a later load (training
+    then validation) never mistakes a busy rank 0 for a dead one."""
+    if beat in _HEARTBEAT_STARTED:
+        return
+    _HEARTBEAT_STARTED.add(beat)
+    beat.parent.mkdir(parents=True, exist_ok=True)
+    beat.touch()
+
+    def _beat():
+        while True:
+            time.sleep(_CACHE_HEARTBEAT_S)
+            beat.touch()
+
+    threading.Thread(target=_beat, daemon=True).start()
+
+
+def _wb_build_or_wait(build, base, rank, nproc):
+    """Rank 0 runs ``build``; other ranks wait for it, then run it themselves
+    (a complete cache returns at once). Waiters fail loudly when the builder
+    reports failure or rank 0's job heartbeat goes stale."""
+    if nproc <= 1:
+        return build()
+    job = os.environ.get("SLURM_JOB_ID")
+    if not job:
+        raise RuntimeError(
+            "the ERA5 cache needs SLURM_JOB_ID to coordinate ranks in a "
+            "multi-process run; launch with srun or set "
+            "LEGOESM_ERA5_LOCAL_CACHE=0.")
+    # a requeued job keeps its id; the restart count keeps its markers fresh
+    tag = (f"{job}.{os.environ.get('SLURM_STEP_ID', '0')}."
+           f"{os.environ.get('SLURM_RESTART_COUNT', '0')}")
+    beat = base.parent / f".heartbeat.{tag}"
+    attempt = _BUILD_ATTEMPTS.get((base, rank), 0)
+    _BUILD_ATTEMPTS[(base, rank)] = attempt + 1
+    ready, failed = (base.with_name(f"{base.name}.{k}.{tag}.{attempt}")
+                     for k in ("ready", "failed"))
+    if rank == 0:
+        _start_job_heartbeat(beat)
+        try:
+            out = build()
+        except BaseException as exc:
+            failed.write_text(repr(exc))
+            raise
+        ready.touch()
+        return out
+    t0 = time.time()
+    while True:
+        if failed.exists():
+            raise RuntimeError(
+                f"rank 0 failed to build the ERA5 cache: {failed.read_text()}")
+        if ready.exists():
+            return build()
+        last = beat.stat().st_mtime if beat.exists() else t0
+        if time.time() - last > _CACHE_STALE_S:
+            raise RuntimeError(
+                f"rank 0 went silent (no heartbeat at {beat} for "
+                f"{_CACHE_STALE_S} s) while building the ERA5 cache; it "
+                "probably died.")
+        time.sleep(_CACHE_POLL_S)
+
+
+def _store_size_gb(path):
+    return sum(f.stat().st_size for f in Path(path).rglob("*")
+               if f.is_file()) / 1e9
+
+
+def _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times, snaps_per_day,
+                     stride, rank, nproc):
+    """Local ``(ds, cloud_ds, flux_ds, at)`` replacing the remote stores, or
+    None when the deck names no cache. ``at`` maps a remote time index to its
+    position in the local state store; every mapping is verified by timestamp.
+    """
+    root = wb_era5_cache_root(yml)
+    if root is None:
+        return None
+    from legoesm.training.era5_to_state import open_era5_zarr
+
+    all_idx = sorted({i for _, a, b in _training_sample_indices(
+        cfg, yml, times, snaps_per_day, stride) for i in (a, b)})
+    if not all_idx:
+        return None
+    stamps = times[np.asarray(all_idx)]
+    groups = _era5_store_groups(era5_cfg, sst_cfg)
+    tag = hashlib.sha256(json.dumps([
+        sorted((k, list(v[0]), list(v[1])) for k, v in groups.items()),
+        [float(lv) for lv in era5_cfg.levels],
+        stamps.astype("int64").tolist()]).encode()).hexdigest()[:16]
+    logger.info("ERA5 local cache at %s: %d snapshots from %d store(s)",
+                root, len(stamps), len(groups))
+    import jax
+    # Column-sharded runs pass nproc=1 (one logical trainer) from several
+    # processes; the cache still needs one builder among all of them.
+    paths = _wb_build_or_wait(
+        lambda: {p: _ensure_era5_store_cache(era5_cfg, p, pv, sv, stamps, root)
+                 for p, (pv, sv) in groups.items()},
+        root / f".build_{tag}", rank, max(nproc, jax.process_count()))
+    if rank == 0:
+        for p, c in paths.items():
+            logger.info("ERA5 cache %s -> %s (%.1f GB)", p, c, _store_size_gb(c))
+    local = {p: open_era5_zarr(str(c)) for p, c in paths.items()}
+    ds_l = local[era5_cfg.zarr_store]
+    lt = np.asarray(ds_l.time.values, dtype="datetime64[ns]")
+    pos = np.minimum(np.searchsorted(lt, stamps), len(lt) - 1)
+    if not np.array_equal(lt[pos], stamps):
+        raise RuntimeError(
+            f"ERA5 cache {paths[era5_cfg.zarr_store]} does not hold every "
+            "requested analysis time; delete it and rerun.")
+    at = dict(zip(all_idx, pos.tolist())).__getitem__
+    state = era5_cfg.zarr_store
+    cloud_l = (local[era5_cfg.cloud_zarr or state]
+               if era5_cfg.load_cloud_condensate else None)
+    flux_l = (local[sst_cfg.flux_zarr or state]
+              if sst_cfg.load_surface_fluxes or sst_cfg.load_land_frac
+              else None)
+    return ds_l, cloud_l, flux_l, at
+
+
+def _assert_same_sample(remote, cached):
+    """Hard error unless the cache-read inputs of the first sample equal the
+    remote-read ones exactly (structure, dtype, shape, every value; NaN == NaN).
+    Inputs, not built samples: a GPU build is not bit-reproducible run to run."""
+    import jax
+
+    ra, rt = jax.tree.flatten(remote)
+    ca, ct = jax.tree.flatten(cached)
+    if rt != ct:
+        raise RuntimeError(
+            "ERA5 cache gate: the cache-read inputs have a different "
+            "structure than the remote-read ones.")
+    for k, (a, b) in enumerate(zip(ra, ca)):
+        a, b = np.asarray(a), np.asarray(b)
+        same = (a.dtype == b.dtype and a.shape == b.shape and np.array_equal(
+            a, b, equal_nan=a.dtype.kind in "fc"))
+        if not same:
+            raise RuntimeError(
+                f"ERA5 cache gate: leaf {k} of the first sample differs "
+                f"between cache and remote store (dtype {a.dtype}/{b.dtype}, "
+                f"shape {a.shape}/{b.shape}). Set LEGOESM_ERA5_LOCAL_CACHE=0 "
+                "to train from the remote store.")
+    logger.info("ERA5 cache gate passed: first sample inputs identical to remote.")
+
+
+def _sample_inputs(era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
+    """The three ERA5 slices one WB sample is built from (IC, target, and the
+    IC-time surface/forcing slice). The loaders build from these and the cache
+    gate compares them, so the gate checks exactly what training reads."""
+    from legoesm.training.era5_to_state import load_era5_slice
+    return (load_era5_slice(era5_cfg, at(i_ic), ds=ds, cloud_ds=cloud_ds),
+            load_era5_slice(era5_cfg, at(i_tg), ds=ds, cloud_ds=cloud_ds),
+            load_era5_slice(sst_cfg, at(i_ic), ds=ds, flux_ds=flux_ds))
+
+
 def _sample_to_host(sample):
     """Pull a built ``(ic, target, forcing)`` off-device to host numpy leaves.
 
@@ -215,8 +475,32 @@ def build_latlon_config(cfg, yml):
         # unless the YAML overrides.
         "--rad-update-steps", str(int(yml.get("rad_update_steps", 1))),
     ]
+    # Prognostic sea-ice skin (#2106): auto unless the deck sets true/false.
+    _skin = yml.get("ice_skin_prognostic", "auto")
+    if _skin is True:
+        argv.append("--ice-skin-prognostic")
+    elif _skin is False:
+        argv.append("--no-ice-skin-prognostic")
+    elif _skin != "auto":
+        raise ValueError(
+            f"ice_skin_prognostic must be true, false or auto; got {_skin!r}")
     parsed = ra.build_arg_parser().parse_args(argv)
-    return ra.build_config_from_args(parsed)
+    return resolve_training_ice_skin(ra.build_config_from_args(parsed))
+
+
+def resolve_training_ice_skin(config):
+    """Resolve the ice-skin "auto" once for a trainer, as ModelDriver.setup
+    would for a single-process run, so the ERA5 carries, the physics pipeline
+    and the driver context all see the same explicit value."""
+    from legoesm.driver.config import (
+        resolve_ice_skin_prognostic, resolve_sea_ice_albedo_scheme)
+    on, why = resolve_ice_skin_prognostic(config)
+    config = config._replace(ice_skin_prognostic=on)
+    config = config._replace(
+        sea_ice_albedo_scheme=resolve_sea_ice_albedo_scheme(config))
+    logger.info("  Sea-ice albedo scheme: %s (ice skin %s: %s)",
+                config.sea_ice_albedo_scheme, "ON" if on else "OFF", why)
+    return config
 
 
 # --- campaign-YAML key validation (2026-08-24) ------------------------------
@@ -226,8 +510,10 @@ def build_latlon_config(cfg, yml):
 # like ``learning_rate`` would silently reintroduce exactly that.
 _WB_CONSUMED_TOP_KEYS = frozenset({
     "classical", "convection", "dt", "era5_cadence_hours",
-    "era5_cloud_condensate", "era5_cloud_zarr", "era5_zarr", "eval_years",
-    "grad_accum", "grad_clip_norm", "gravity_wave_drag", "loss", "lr",
+    "cache_dir", "era5_cloud_condensate", "era5_cloud_zarr", "era5_flux_zarr",
+    "era5_surface_fluxes", "era5_zarr", "eval_years",
+    "grad_accum", "grad_clip_norm", "gravity_wave_drag",
+    "ice_skin_prognostic", "loss", "lr",
     "microphysics", "n_epochs", "n_lat", "n_lon", "n_training_days",
     "neural_gcm", "nlev", "optimizer", "rad_update_steps", "radiation",
     "sfno", "smoke_radiation", "spectral", "train_windows", "train_years",
@@ -236,7 +522,7 @@ _WB_CONSUMED_TOP_KEYS = frozenset({
 # Deck metadata this trainer never reads but the decks legitimately carry
 # (documentation / other tooling).  Kept OUT of the consumed set so the
 # distinction stays visible; anything here is tolerated, not honoured.
-_WB_METADATA_TOP_KEYS = frozenset({"grid", "cache_dir"})
+_WB_METADATA_TOP_KEYS = frozenset({"grid"})
 # Exactly the keys _spectral_pe_config + the dt lookup read from the
 # ``spectral`` block.  ``si_substep`` (typo) silently reverting a deck to the
 # unstable full step is the same defect class as the inert lr.
@@ -251,8 +537,16 @@ _WB_SPECTRAL_KEYS = frozenset({
 # nested blocks (#1663 review: these were unvalidated, so a nested typo like
 # ``nn_hiden`` silently fell back to the default -- the inert-key defect class).
 _WB_CLASSICAL_KEYS = frozenset({
-    "cloud", "clubb_top_press_hpa", "convection", "gwd", "microphysics",
-    "rad_update_interval_steps", "rrtmgp_gpoint_batch_size", "spatial_init_std",
+    "cld_macmic_num_steps",
+    "cloud", "clubb_liquid_partition", "clubb_top_press_hpa", "convection", "gwd", "microphysics",
+    "convective_rain_to_surface", "orbital_insolation",
+    "param_fixed", "param_init",
+    "rad_update_interval_steps", "rrtmgp_column_chunk_size",
+    "aerosol_ccn_file", "aerosol_climatology_years", "aerosol_file",
+    "aerosol_reference_aod",
+    "rrtmgp_compute_fp32", "rrtmgp_gpoint_batch_size", "rrtmgp_overhead_layer",
+    "volcanic_aerosol_file", "volcanic_aerosol_lw",
+    "spatial_init_std",
     "spatial_seed", "spatial_surface", "surface_bulk", "trainable_schemes",
     "turbulence",
 })
@@ -261,8 +555,51 @@ _WB_CLASSICAL_KEYS = frozenset({
 _WB_NEURAL_KEYS = frozenset({
     "surface_drag", "surface_drag_scheme", "surface_drag_confounded",
     "nn_hidden", "nn_layers", "gauss_n_max", "sfno_embed_dim", "sfno_n_blocks",
-    "sfno_mlp_expansion",
+    "sfno_mlp_expansion", "spatial_embedding",
 })
+
+
+def _pinned_morrison_config(active: set, param_fixed: dict) -> dict | None:
+    """``{scheme_key: MorrisonConfig}`` as the run builds it from the deck
+    pins, when Morrison is active; None otherwise."""
+    key = "atm.micro.MorrisonConfig"
+    if key not in active:
+        return None
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.core.param_overrides import apply_param_overrides
+    return {key: apply_param_overrides(MorrisonConfig(),
+                                       dict(param_fixed.get(key, {})))}
+
+
+def _pinned_trainable_names(param_fixed: dict) -> set:
+    """Deck-pinned fields that are ALSO registered trainable parameters.
+
+    Most pins are structural (an overlap choice, a sub-column count, a switch)
+    and have no leaf to exclude. The few that overlap must be excluded from the
+    trainable bundle: the pin is spliced after the trained value, so such a
+    leaf would be optimized, never reach the model, and still show up as
+    "trained" in the run's parameter report.
+    """
+    from legoesm.training.param_collector import build_registry
+    known = {m.qualified_name for m in build_registry()}
+    return {f"{key}.{field}" for key, fields in param_fixed.items()
+            for field in fields} & known
+
+
+def wb_needs_land_frac(mode: str, yml: dict) -> bool:
+    """Whether the WB sample loader must carry an ERA5 land fraction.
+
+    True for the classical ``physics`` arm (convection's land branch),
+    when the top-level ``era5_surface_fluxes`` flag is on (the flux planes
+    ship with the mask) or when the selected learned arm's block enables
+    ``spatial_embedding`` (the land fraction is one of its static inputs).
+    """
+    if mode == "physics" or bool(yml.get("era5_surface_fluxes", False)):
+        return True
+    if mode in ("neural_gcm", "sfno"):
+        ov = yml.get(mode, {}) or {}
+        return bool(ov.get("spatial_embedding", False))
+    return False
 
 
 def validate_wb_campaign_yaml(yml: dict) -> None:
@@ -335,7 +672,27 @@ def make_loss_config(cfg, yml):
     valid = set(LossConfig()._fields)
     kwargs = {k: (tuple(v) if isinstance(v, list) else v)
               for k, v in lb.items() if k in valid}
-    return LossConfig(**kwargs)
+    lc = LossConfig(**kwargs)
+    # The WB objective (combined_loss on one deterministic rollout) has no
+    # persistence-normalised or ensemble branch; refuse rather than ignore.
+    unsupported = [name for name, on in (
+        ("persistence_normalize", lc.persistence_normalize),
+        ("ensemble_size > 1", lc.ensemble_size > 1),
+        ("w_afcrps > 0", lc.w_afcrps > 0.0),
+    ) if on]
+    if unsupported:
+        raise ValueError(
+            f"WeatherBench training does not implement {unsupported}; these "
+            "loss settings would be silently ignored. Remove them from the deck.")
+    # A negative scale flips the sign of the |error| (CRPS) terms, which divide
+    # by the scale itself rather than its square, so the loss would reward error.
+    negative = [f for f in ("T_scale", "wind_scale", "q_scale", "ps_scale",
+                            "T_resid_scale", "wind_resid_scale",
+                            "q_resid_scale", "ps_resid_scale")
+                if getattr(lc, f) < 0.0]
+    if negative:
+        raise ValueError(f"WeatherBench loss scales must be >= 0, got negative {negative}.")
+    return lc
 
 
 def _spectral_pe_config(yml):
@@ -389,7 +746,7 @@ def _spectral_pe_config(yml):
     )
 
 
-def _build_mode_components_spectral(cfg, yml):
+def _build_mode_components_spectral(cfg, yml, column_mesh=None):
     """Spectral (Gaussian + semi-implicit) training-core components (#817).
 
     Same 7-tuple contract as the lat-lon path, with the rollout routed through
@@ -469,13 +826,6 @@ def _build_mode_components_spectral(cfg, yml):
         )
         _radiation = _validated_wb_radiation(cfg, yml)
         _cl = dict(yml.get("classical", {}))
-        params = build_variant(
-            "classical", nlev=nlev,
-            overrides={
-                "spatial_surface": bool(_cl.get("spatial_surface", False)),
-                "spatial_init_std": float(_cl.get("spatial_init_std", 0.0)),
-                "spatial_seed": int(_cl.get("spatial_seed", 0)),
-            })
         # Every family named explicitly in the YAML: a classical model carries
         # one of each, and defaulting them silently is how a campaign ends up
         # comparing models that differ in more than the variable under test.
@@ -487,6 +837,50 @@ def _build_mode_components_spectral(cfg, yml):
             cloud_scheme=str(_cl.get("cloud", "xu_randall")),
             surface_bulk_scheme=str(_cl.get("surface_bulk", "constant")),
         )
+        # NO INERT PARAMETERS, structurally (owner 2026-10-15: a fixed
+        # parameter must have no gradient at all, not a zero one): only the
+        # knobs the selected schemes read are arrays, as in run_aimip; the
+        # rest are plain floats outside the differentiated tree.  With ERA5
+        # surface fluxes prescribed the classical surface knobs are fixed by
+        # policy (inert_params.PRESCRIBED_SURFACE_LEAF_MARKERS) and leave the
+        # tree here too, instead of being probed and frozen afterwards.
+        from legoesm.training.aimip_params import (
+            aimip_classical_trainable_names,
+        )
+        from legoesm.training.inert_params import (
+            PRESCRIBED_SURFACE_LEAF_MARKERS,
+        )
+        _trainable = aimip_classical_trainable_names(
+            convection=_schemes["convection_scheme"],
+            turbulence=_schemes["turbulence_scheme"],
+            gwd=_schemes["gwd_scheme"],
+            microphysics=_schemes["microphysics_scheme"],
+            cloud=_schemes["cloud_scheme"],
+            radiation=_radiation,
+            surface_bulk_scheme=_schemes["surface_bulk_scheme"])
+        # The spatial surface fields are read only with a land mask
+        # (make_aimip_classical_spectral_physics), and this lane passes none,
+        # so every one of them would be a fixed parameter in the trained tree.
+        # Asking to train them is refused (owner decision 5, 2026-10-15).
+        if bool(_cl.get("spatial_surface", False)):
+            raise ValueError(
+                "classical.spatial_surface: true asks to train the spatial "
+                "surface fields, but the WB classical physics is built without "
+                "a land mask, so none of them is ever read: each would be a "
+                "fixed parameter with no gradient. Set it to false.")
+        if bool(yml.get("era5_surface_fluxes", False)):
+            _trainable = frozenset(
+                n for n in _trainable
+                if not any(m in n for m in PRESCRIBED_SURFACE_LEAF_MARKERS))
+        params = build_variant(
+            "classical", nlev=nlev,
+            overrides={
+                "spatial_surface": bool(_cl.get("spatial_surface", False)),
+                "spatial_init_std": float(_cl.get("spatial_init_std", 0.0)),
+                "spatial_seed": int(_cl.get("spatial_seed", 0)),
+                "trainable": _trainable,
+            })
+        reject_no_surface_flux_with_era5_fluxes(yml)
         _rad_interval = int(_cl.get("rad_update_interval_steps", 6))
 
         # Any scheme in any family may be swapped, and the TRAINABLE
@@ -497,10 +891,23 @@ def _build_mode_components_spectral(cfg, yml):
         # ``aimip_trainable_schemes``; WB reads it from ``classical.trainable_
         # schemes`` and defaults to the same tier so the two campaigns train
         # the same thing for the same selection.
+        _param_init = dict(_cl.get("param_init", {}) or {})
+        # Static scheme-config values the deck pins: {scheme_key: {field: v}}.
+        # For settings that are NOT trainable parameters -- a cloud-overlap
+        # choice, a sub-column count, a switch -- so a training arm can run the
+        # same configuration a production run does.
+        _param_fixed = {k: dict(v) for k, v in
+                        (_cl.get("param_fixed", {}) or {}).items()}
         _tier = _cl.get("trainable_schemes", "extended")
+        if _param_init and not _tier:
+            raise ValueError(
+                "classical.param_init needs classical.trainable_schemes: with "
+                "no spec-driven bundle there is no leaf to seed, so every "
+                "starting value would be silently ignored.")
         if _tier:
             from legoesm.training.aimip_params import (
                 AIMIPTrainableBundle,
+                aimip_inactive_fields,
                 aimip_legacy_owned_fields,
                 aimip_scheme_keys_for,
             )
@@ -517,11 +924,35 @@ def _build_mode_components_spectral(cfg, yml):
             _scheme_params = build_trainable_params(
                 active_scheme_keys=_active,
                 tier=(_tier if isinstance(_tier, str) else "extended"),
+                # Deck-supplied starting values ("scheme_key.field": value),
+                # e.g. an arm that begins from the tuned AMIP configuration
+                # rather than from library defaults. Seeded rather than
+                # overridden, so the parameter still trains; a name that
+                # reaches no selected parameter raises.
+                init_values=_param_init,
                 # Only what the hand-written route cannot reach: the splice
                 # runs after it, so a doubly-covered field would silently zero
-                # the legacy leaf's gradient.
-                exclude=tuple(sorted(aimip_legacy_owned_fields(
-                    cloud_scheme=_schemes["cloud_scheme"]))),
+                # the legacy leaf's gradient. A field the deck PINS is excluded
+                # for the same reason one step later: the pin is applied after
+                # the trained value, so training it would optimize a leaf that
+                # never reaches the model, and the trained-parameter report
+                # would show it moving.
+                exclude=tuple(sorted(
+                    set(aimip_legacy_owned_fields(
+                        cloud_scheme=_schemes["cloud_scheme"]))
+                    | aimip_inactive_fields(
+                        cloud_scheme=_schemes["cloud_scheme"],
+                        microphysics=_schemes["microphysics_scheme"],
+                        gwd=_schemes["gwd_scheme"],
+                        turbulence=_schemes["turbulence_scheme"],
+                        subgrid_orography=getattr(
+                            grid, "subgrid_topo_stddev", None) is not None,
+                        param_fixed=_param_fixed)
+                    | _pinned_trainable_names(_param_fixed))),
+                # the run's Morrison config (deck pins, e.g. a flavour) so an
+                # unset-able field (DCS) seeds where the run resolves it
+                scheme_configs=_pinned_morrison_config(
+                    _active, _param_fixed),
             )
             params = AIMIPTrainableBundle(
                 classical=params, schemes=_scheme_params)
@@ -536,6 +967,16 @@ def _build_mode_components_spectral(cfg, yml):
         # 32-level arm sets 50 hPa — the diagnostic scheme's measured
         # stratospheric excursion lives 16-50 hPa there. A non-finite or
         # non-positive value is a config error, not a silent off-switch.
+        # CAM macro/micro sub-cycle count (CAM6 namelist cld_macmic_num_steps,
+        # 3 with mg2+clubb_sgs). 1 = the parallel accumulate, unchanged.
+        # Passed through RAW: make_physics refuses a bool, a non-integer and
+        # < 1, and an int() here would turn 3.9 into 3 and true into 1.
+        _macmic = _cl.get("cld_macmic_num_steps", 1)
+        _liq_part = _cl.get("clubb_liquid_partition", False)
+        if not isinstance(_liq_part, bool):
+            raise ValueError(
+                "classical.clubb_liquid_partition must be true or false, got "
+                f"{_liq_part!r}")
         _clubb_top_hpa = _cl.get("clubb_top_press_hpa")
         if _clubb_top_hpa is None:
             _clubb_top = None
@@ -555,6 +996,18 @@ def _build_mode_components_spectral(cfg, yml):
         # block halves the radiation activations the backward pass holds, at
         # the cost of more blocks to walk.  Exposed here so a run can be made
         # to fit without editing code.
+        # Radiation COLUMN block size: the solve is split into blocks of this
+        # many columns and each block is checkpointed, so the backward pass
+        # holds one block's activations instead of every column's.  Needed
+        # when max-random overlap expands the solver's column axis by the
+        # sub-column count (8 sub-columns at T63/L32 asks for 490 GiB
+        # otherwise).  0 = off, and the value must divide the solver's column
+        # count (n_sub * ncol when sub-columns are on).
+        _col_chunk = int(_cl.get("rrtmgp_column_chunk_size", 0))
+        if _col_chunk < 0:
+            raise ValueError(
+                "classical.rrtmgp_column_chunk_size must be >= 0, got "
+                f"{_col_chunk}; 0 disables column chunking.")
         _gpt_batch = int(_cl.get("rrtmgp_gpoint_batch_size", 16))
         if _gpt_batch < 1:
             raise ValueError(
@@ -562,12 +1015,31 @@ def _build_mode_components_spectral(cfg, yml):
                 f"{_gpt_batch}; use the scan path by setting it to 1 rather "
                 "than 0 or a negative value.")
 
+        # A quoted "false" would be truthy under bool(); refuse non-bools.
+        _rad_flags = {k: _cl.get(k, False) for k in (
+            "rrtmgp_overhead_layer", "rrtmgp_compute_fp32")}
+        for _k, _v in _rad_flags.items():
+            if not isinstance(_v, bool):
+                raise ValueError(
+                    f"classical.{_k} must be a YAML boolean, got {_v!r}")
+
         def make_physics_fn(p):
             return make_aimip_classical_spectral_physics(
                 p, grid, dt, radiation=_radiation, split_rad=True,
                 rad_update_interval_steps=_rad_interval,
                 rrtmgp_gpoint_batch_size=_gpt_batch,
-                clubb_top_press=_clubb_top, **_schemes)
+                rrtmgp_column_chunk_size=_col_chunk,
+                rrtmgp_overhead_layer=_rad_flags["rrtmgp_overhead_layer"],
+                rrtmgp_compute_fp32=_rad_flags["rrtmgp_compute_fp32"],
+                param_overrides=(_param_fixed or None),
+                orbital_insolation=bool(
+                    _cl.get("orbital_insolation", False)),
+                convective_rain_to_surface=bool(
+                    _cl.get("convective_rain_to_surface", False)),
+                clubb_top_press=_clubb_top,
+                clubb_liquid_partition=_liq_part,
+                cld_macmic_num_steps=_macmic, column_mesh=column_mesh,
+                **_schemes)
         # The sample's forcing carries ERA5 skin temperature and the scene's
         # real calendar.  It used to be dropped here: the surface then sat at
         # the lowest model level's own air temperature (zero sensible heat
@@ -589,7 +1061,11 @@ def _build_mode_components_spectral(cfg, yml):
             _cn["nn_hidden_dim"] = int(ov["nn_hidden"])
         if "nn_layers" in ov:
             _cn["n_layers"] = int(ov["nn_layers"])
-        params = build_variant("column_nn", nlev=nlev, overrides=_cn)
+        # NeuralGCM-style spatial embedding (mode block) + the six ERA5
+        # surface-flux input planes (top-level campaign flag).
+        _cn["spatial_embedding"] = bool(ov.get("spatial_embedding", False))
+        _cn["era5_surface_fluxes"] = bool(yml.get("era5_surface_fluxes", False))
+        params = build_variant("column_nn", nlev=nlev, grid=grid, overrides=_cn)
 
         # #1464: the learned arm has no momentum head, so without this it runs
         # with NO surface turbulent drag while the `physics` arm it is scored
@@ -625,11 +1101,19 @@ def _build_mode_components_spectral(cfg, yml):
         _sf = {k: int(ov[k]) for k in
                ("sfno_embed_dim", "sfno_n_blocks", "sfno_mlp_expansion")
                if k in ov}
+        # ACE2-style land-fraction plane (mode block) + the six ERA5
+        # surface-flux input planes (top-level campaign flag).
+        _sf_spatial = bool(ov.get("spatial_embedding", False))
+        _sf_fluxes = bool(yml.get("era5_surface_fluxes", False))
+        _sf["spatial_embedding"] = _sf_spatial
+        _sf["era5_surface_fluxes"] = _sf_fluxes
         params = build_variant("sfno_physics", nlev=nlev, grid=grid,
                                overrides=_sf)
 
         def make_physics_fn(p):
-            return make_sfno_spectral_physics(p, grid)
+            return make_sfno_spectral_physics(
+                p, grid, spatial_embedding=_sf_spatial,
+                era5_surface_fluxes=_sf_fluxes)
         uses_forcing = True
         split_rad_interval = None
 
@@ -649,20 +1133,55 @@ def _build_mode_components_spectral(cfg, yml):
             else:
                 self._physics_fn, self._rad_fn = physics_fn, None
 
-        def raw(self, ic_carry, n_steps, forcing):
-            state0 = carry_to_spectral_state(ic_carry, grid)
+        def raw(self, ic_carry, n_steps, forcing, adjoint_steps=0):
+            final = self._roll(carry_to_spectral_state(ic_carry, grid),
+                               n_steps, forcing, adjoint_steps=adjoint_steps)
+            return spectral_state_to_carry(final, grid, sigma)
+
+        def raw_two_leg(self, suffix_seg, ic_carry, n_steps, forcing,
+                        suffix_steps):
+            """One forecast whose last ``suffix_steps`` run ``suffix_seg``'s
+            parameters, handed the full carry (state, physics state, cached
+            radiation, step clock). With ``suffix_seg is self`` it is the same
+            forecast as ``raw``; its derivative in the suffix parameters is
+            what ``raw(..., adjoint_steps=suffix_steps)`` differentiates."""
+            import jax
+
+            k0 = int(n_steps) - int(suffix_steps)
+            if not 0 < k0 < int(n_steps):
+                raise ValueError(f"suffix_steps must be in 1..{int(n_steps) - 1}, "
+                                 f"got {suffix_steps}")
+            mid, ps, rad = self._roll(
+                carry_to_spectral_state(ic_carry, grid), k0, forcing,
+                return_phys_state=True, return_rad_tendency=True)
+            mid, ps, rad = jax.lax.stop_gradient((mid, ps, rad))
+            final = suffix_seg._roll(
+                mid, int(suffix_steps), forcing, phys_state_in=ps,
+                rad_tendency_in=rad, step_offset=k0)
+            return spectral_state_to_carry(final, grid, sigma)
+
+        def _roll(self, state0, n_steps, forcing, **kw):
             forcing_base = forcing if uses_forcing else None
+            # Classical convection reads the grid's mask, not PhysicsState.
+            # Keep the per-sample plane traced and the shared grid immutable.
+            physics_grid = grid
+            if cfg.mode == "physics":
+                if forcing is None or forcing.get("land_frac") is None:
+                    raise ValueError(
+                        "physics mode requires land_frac from "
+                        "_load_era5_samples_spectral (via build_spectral_forcing)")
+                physics_grid = grid._replace(land_frac=forcing["land_frac"])
+            # Spectral radiation does not read land_frac; surface BCs come from forcing.
             gated = ({} if self._rad_fn is None else
                      {"rad_physics_fn": self._rad_fn,
                       "rad_update_interval": split_rad_interval})
-            final = spectral_rollout(
-                state0, self._physics_fn, grid, sigma, pe_config,
+            return spectral_rollout(
+                state0, self._physics_fn, physics_grid, sigma, pe_config,
                 dt, int(n_steps),
                 sponge_factor, spectral_filter,
                 forcing_base=forcing_base,
-                **gated,
+                **gated, **kw,
             )
-            return spectral_state_to_carry(final, grid, sigma)
 
     def make_run_seg(trainable):
         return _SpectralRunSeg(make_physics_fn(trainable))
@@ -727,8 +1246,12 @@ def check_surface_drag_confound(yml, mode, training_core):
             f"equalised comparison (#1464).")
     return None
 
-def build_mode_components(cfg, yml):
-    """Return (model, grid, sigma, params, make_run_seg, loss_config, dt) for cfg.mode."""
+def build_mode_components(cfg, yml, column_mesh=None):
+    """Return (model, grid, sigma, params, make_run_seg, loss_config, dt) for cfg.mode.
+
+    ``column_mesh`` shards the radiation solve across devices; spectral
+    classical mode only.
+    """
     import jax
 
     from legoesm.driver.model_driver import ModelDriver
@@ -743,14 +1266,18 @@ def build_mode_components(cfg, yml):
     if note:
         import logging
         logging.getLogger("scale_build").warning("CONFOUNDED RUN: %s", note)
+    if column_mesh is not None and (
+            core != "spectral" or getattr(cfg, "mode", None) != "physics"):
+        raise ValueError(
+            "column sharding is wired only for training_core='spectral', "
+            f"mode='physics'; got core={core!r} mode={getattr(cfg, 'mode', None)!r}")
     if core == "spectral":
-        return _build_mode_components_spectral(cfg, yml)
+        return _build_mode_components_spectral(cfg, yml, column_mesh)
     if core != "latlon":
         raise ValueError(
             f"unknown training_core {core!r}; choose 'latlon' (explicit "
             f"C-grid production core) or 'spectral' (Gaussian semi-implicit "
             f"training core, #817)")
-
     config = build_latlon_config(cfg, yml)
     driver = ModelDriver(config)
     driver.setup()
@@ -776,10 +1303,21 @@ def build_mode_components(cfg, yml):
         params = TrainablePhysicsParams.from_defaults()
         step_unified = physics_pipeline.build_step_unified()
 
+        # The configured physics, exactly as the production compiled segment
+        # passes it; the builder's defaults (no microphysics -> an extra
+        # saturation adjustment, no fixers, radiation every step) would tune a
+        # different model from the configured one.
+        _configured = dict(
+            microphysics=config.microphysics,
+            fix_moisture=config.fix_moisture,
+            fix_mass=config.dycore.fix_mass,
+            rad_update_steps=int(config.rad_update_steps),
+        )
+
         def make_run_seg(trainable):
             return build_training_segment(
                 model, step_unified, grid, sigma, dt, fric_decay=fric_decay,
-                **trainable.to_segment_kwargs())
+                **{**_configured, **trainable.to_segment_kwargs()})
 
     elif cfg.mode == "neural_gcm":
         from legoesm.atmosphere.physics.neural_physics import (
@@ -787,10 +1325,17 @@ def build_mode_components(cfg, yml):
         )
         from legoesm.core.grid_adapters import make_adapter
         ov = yml.get("neural_gcm", {})
+        adapter = make_adapter(grid)
+        # Prescribed-input options: spatial_embedding is a per-model-block
+        # key, era5_surface_fluxes is deck-global (the same key the loader
+        # reads); the pos-embed table needs the column count.
+        spatial_embedding = bool(ov.get("spatial_embedding", False))
         params = NeuralPhysics(
             nlev=int(yml["nlev"]), hidden_dim=int(ov.get("nn_hidden", 256)),
-            n_layers=int(ov.get("nn_layers", 4)), key=jax.random.PRNGKey(0))
-        adapter = make_adapter(grid)
+            n_layers=int(ov.get("nn_layers", 4)), key=jax.random.PRNGKey(0),
+            spatial_embedding=spatial_embedding,
+            era5_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
+            n_columns=adapter.ncol if spatial_embedding else None)
 
         def make_run_seg(nn_phys):
             return build_training_segment(
@@ -803,6 +1348,7 @@ def build_mode_components(cfg, yml):
 
         from legoesm.grids.gaussian import create_gaussian_grid
         from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+        from legoesm.training.model_registry import sfno_extra_input_channels
         from legoesm.training.sfno_dycore_coupling import (
             SFNOPhysics, make_sfno_step_unified_latlon,
         )
@@ -810,12 +1356,20 @@ def build_mode_components(cfg, yml):
 
         ov = yml.get("sfno", {})
         nlev = int(yml["nlev"])
+        spatial_embedding = bool(ov.get("spatial_embedding", False))
+        era5_surface_fluxes = bool(yml.get("era5_surface_fluxes", False))
         n_ch = 4 * nlev + 2   # SFNOPhysics packs [u, v, T, q_v, lnps, phis]
+        # Prescribed input channels appended by SFNOPhysics (land fraction,
+        # then the six ERA5 surface-flux planes); the decoder still predicts
+        # only the n_ch tendency channels.
         n_max = int(ov.get("gauss_n_max", max(21, int(yml["n_lat"]) // 3)))
         gauss = create_gaussian_grid(n_max)
         sfno = SFNO(
             SFNOConfig(
-                in_channels=n_ch, out_channels=n_ch,
+                in_channels=n_ch + sfno_extra_input_channels(
+                    spatial_embedding=spatial_embedding,
+                    era5_surface_fluxes=era5_surface_fluxes),
+                out_channels=n_ch,
                 embed_dim=int(ov.get("sfno_embed_dim", 256)),
                 n_blocks=int(ov.get("sfno_n_blocks", 8)),
                 # tendencies, NOT state residuals: with the default
@@ -831,7 +1385,10 @@ def build_mode_components(cfg, yml):
             lambda m: (m.decoder.weight, m.decoder.bias), sfno,
             (jnp.zeros_like(sfno.decoder.weight),
              jnp.zeros_like(sfno.decoder.bias)))
-        params = SFNOPhysics(sfno=sfno, grid=gauss, nlev=nlev)
+        params = SFNOPhysics(
+            sfno=sfno, grid=gauss, nlev=nlev,
+            spatial_embedding=spatial_embedding,
+            era5_surface_fluxes=era5_surface_fluxes)
 
         def _flat_points(lat_1d, lon_1d):
             lon2d, lat2d = np.meshgrid(np.asarray(lon_1d), np.asarray(lat_1d))
@@ -908,7 +1465,14 @@ def validate_carry_holds_scheme(carry, microphysics: str, *, context: str) -> in
     return validate_microphysics_tracer_slots(microphysics, have, context=context)
 
 
-def _era5_config(cfg, yml):
+def wb_ic_microphysics(mode, yml):
+    """The microphysics scheme the WB initial state is seeded for: the deck's
+    ``classical.microphysics`` on the physics arm, ``"none"`` otherwise."""
+    cl = dict(yml.get("classical", {})) if mode == "physics" else {}
+    return str(cl.get("microphysics", "none"))
+
+
+def wb_era5_config(cfg, yml):
     """The ERA5 store config for a training run.
 
     ``era5_cloud_condensate: true`` in the campaign YAML pulls cloud liquid and
@@ -925,7 +1489,163 @@ def _era5_config(cfg, yml):
                                                       False)))
     if yml.get("era5_cloud_zarr"):
         c = c._replace(cloud_zarr=str(yml["era5_cloud_zarr"]))
+    c = c._replace(
+        load_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
+        load_land_frac=wb_needs_land_frac(getattr(cfg, "mode", None), yml))
+    if "era5_flux_zarr" in yml:
+        # An explicit "" selects the STATE store as the flux store (the
+        # loader's documented option), so the key's presence decides.
+        c = c._replace(flux_zarr=str(yml["era5_flux_zarr"] or ""))
     return c
+
+
+def reject_no_surface_flux_with_era5_fluxes(yml) -> None:
+    """``classical.surface_bulk: none`` and ``era5_surface_fluxes: true`` are
+    two contradicting surface choices: the ERA5 planes are folded into the
+    turbulence lower boundary condition from the physics state and would
+    silently replace the zero fluxes "none" prescribes."""
+    if (str((yml.get("classical") or {}).get("surface_bulk", "constant"))
+            == "none" and bool(yml.get("era5_surface_fluxes", False))):
+        raise ValueError(
+            "classical.surface_bulk='none' (no surface fluxes) contradicts "
+            "era5_surface_fluxes=true (ERA5 surface fluxes prescribed); "
+            "choose one.")
+
+
+def prescribed_surface_planes(sl, grid):
+    """Regridded prescribed surface planes the slice carries -> dict.
+
+    ONE plane builder shared by the spectral forcing dict and the lat-lon
+    ``pack_forcing`` loader, so a model is fed exactly the same planes
+    whenever the slice carries them (i.e. whenever its
+    ``TrainingERA5Config`` asked for them).  Keys are the SPECTRAL forcing
+    names; signs are already the model's (``era5_to_state`` did the ERA5
+    flips).  Planes stay grid-shaped (n_lat, n_lon) — the spectral caller
+    flattens them to columns.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.training.era5_to_state import regrid_2d_to_gaussian
+
+    planes = {}
+    if sl.sfc_shf is not None:
+        for _key in ("sfc_shf", "sfc_lhf", "sfc_tau_x", "sfc_tau_y",
+                     "sfc_sw_up", "sfc_sw_down", "sfc_lw_up"):
+            planes[_key] = jnp.asarray(regrid_2d_to_gaussian(
+                getattr(sl, _key), sl.lat, sl.lon, grid))
+    if sl.land_frac is not None:
+        # Static 0..1 mask; interpolation can overshoot, clip back.
+        planes["land_frac"] = jnp.asarray(np.clip(regrid_2d_to_gaussian(
+            sl.land_frac, sl.lat, sl.lon, grid), 0.0, 1.0))
+    return planes
+
+
+_NOLEAP_MONTH_START = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
+
+
+def wb_aerosol_spec(yml):
+    """(AerosolConfig, years, lw_active) from the deck's classical block, or
+    None when it names no ``aerosol_file`` (every older deck: no aerosol).
+
+    The AMIP production aerosol, as its driver builds it, but on a
+    calendar-month CLIMATOLOGY over ``aerosol_climatology_years`` [first,
+    last]: the files end 2014 and the WB windows are 2015-2020 (owner
+    decision 2026-10-16)."""
+    cl = dict(yml.get("classical", {}) or {})
+    if not cl.get("aerosol_file"):
+        return None
+    from legoesm.forcing.external import AerosolConfig
+
+    years = cl.get("aerosol_climatology_years")
+    lw = cl.get("volcanic_aerosol_lw", False)
+    if (not isinstance(years, list) or len(years) != 2
+            or not all(isinstance(y, int) for y in years)
+            or years[0] > years[1]):
+        raise ValueError("classical.aerosol_climatology_years must be "
+                         f"[first, last] integer years, got {years!r}")
+    if not isinstance(lw, bool):
+        raise ValueError(
+            f"classical.volcanic_aerosol_lw must be a YAML boolean, got {lw!r}")
+    volc = str(cl.get("volcanic_aerosol_file", "") or "")
+    acfg = AerosolConfig(
+        enabled=True, source="climatology", path=str(cl["aerosol_file"]),
+        ccn_path=str(cl.get("aerosol_ccn_file", "") or ""),
+        use_reference_if_missing=True,
+        reference_aod_550=float(cl.get("aerosol_reference_aod", 0.03)),
+        volcanic_enabled=bool(volc), volcanic_path=volc,
+        volcanic_lw_enabled=(lw and bool(volc)),
+        hold_outside_file_years=False)
+    return acfg, tuple(range(years[0], years[1] + 1)), (lw and bool(volc))
+
+
+def wb_aerosol_forcing(spec, grid, sigma, carry, time_ns):
+    """``aerosol_od`` / ``aerosol_ccn_aod`` / ``aerosol_lw_od`` for one sample:
+    the AMIP driver's fields (``aerosol_layer_fields``) at the sample's
+    calendar date in each climatology year, averaged.  Columns are the
+    initial state's (p_s, T) -- the stratospheric placement uses its
+    tropopause, as the driver's daily refresh does -- and the fields are held
+    over the forecast window.  The date is put on the readers' noleap clock;
+    29 February reads 28 February."""
+    import jax.numpy as jnp
+
+    from legoesm.forcing.surface_utils import (
+        aerosol_layer_fields,
+        stratospheric_layer_weight,
+    )
+
+    acfg, years, lw_active = spec
+    t = np.datetime64(time_ns, "s").astype(object)
+    day = min(t.day, 28) if t.month == 2 else t.day
+    sim_day = (_NOLEAP_MONTH_START[t.month - 1] + day - 1
+               + (t.hour * 3600 + t.minute * 60 + t.second) / 86400.0)
+    p_s = jnp.asarray(carry.p_s).reshape(-1)
+    p_half = jnp.asarray(sigma.pressure_at_half(p_s))
+    p_full = jnp.asarray(sigma.pressure_at_full(p_s))
+    lat_col = jnp.repeat(jnp.asarray(grid.lat), int(grid.n_lon))
+    temp = jnp.asarray(carry.T).reshape(p_full.shape)
+    w_strat = stratospheric_layer_weight(p_half, lat_col, p_full, temp)
+    per_year = [aerosol_layer_fields(
+        acfg._replace(start_year=y), sim_day, lat_col, p_half, w_strat,
+        active=True, lw_active=lw_active, dtype=p_s.dtype) for y in years]
+    od, ccn, lw = (jnp.mean(jnp.stack(f), axis=0) for f in zip(*per_year))
+    return {"aerosol_od": od, "aerosol_ccn_aod": ccn, "aerosol_lw_od": lw}
+
+
+def build_spectral_forcing(sl, grid, time_ns, year, *, aerosol=None,
+                           sigma=None, ic_carry=None):
+    """The traced per-sample forcing dict of the spectral core, from a slice.
+
+    ONE builder for the training loader and the WB2 forecast eval, so a model
+    is scored with exactly the forcing it was trained with: the prescribed
+    surface-flux planes and the land fraction ride along whenever the slice
+    carries them (i.e. whenever its ``TrainingERA5Config`` asked for them),
+    regridded and flattened exactly like ``T_sfc``.  Signs are already the
+    model's: ``era5_to_state`` did the ERA5 flips.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.training.era5_to_state import regrid_2d_to_gaussian
+
+    def _plane(field):
+        return jnp.asarray(regrid_2d_to_gaussian(
+            field, sl.lat, sl.lon, grid)).reshape(-1)
+
+    sst = _plane(sl.sst)
+    doy_1based, sod = era5_time_to_forcing_calendar(time_ns, year)
+    forcing = {
+        "T_sfc": sst,
+        "sic": jnp.zeros_like(sst),
+        "day_of_year": jnp.asarray(doy_1based),
+        "seconds_of_day": jnp.asarray(sod),
+    }
+    # Shared plane builder (grid-shaped there), flattened to columns here so
+    # the output dict is identical to the pre-helper version.
+    for _key, _plane_2d in prescribed_surface_planes(sl, grid).items():
+        forcing[_key] = _plane_2d.reshape(-1)
+    if aerosol is not None:
+        forcing.update(wb_aerosol_forcing(aerosol, grid, sigma, ic_carry,
+                                          time_ns))
+    return forcing
 
 
 def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
@@ -943,17 +1663,36 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     B — no global materialization); with ``host_resident`` each built sample is
     moved off-device to host numpy (fix A — the loop ``device_put``s per batch).
     """
-    import jax.numpy as jnp
-
     from legoesm.training.era5_to_state import (
         era5_to_spectral_carry,
-        load_era5_slice,
         open_era5_zarr,
-        regrid_2d_to_gaussian,
-    )
+    era5_terrain_product,
+)
 
-    era5_cfg = _era5_config(cfg, yml)
+    # ic/target slices need the state only; the sample-start slice (2-D
+    # fields only: asking it for condensate would re-read the cloud store per
+    # sample for data it throws away) is the one that carries the prescribed
+    # surface planes.
+    sst_cfg = wb_era5_config(cfg, yml)._replace(load_cloud_condensate=False)
+    era5_cfg = wb_era5_config(cfg, yml)._replace(
+        load_surface_fluxes=False, load_land_frac=False)
+    surface_fluxes = sst_cfg.load_surface_fluxes
+    flux_ds = None
+    global _WARNED_ERA5_FLUX_HOLD_FIXED
     ds = open_era5_zarr(era5_cfg.zarr_store)
+    if surface_fluxes:
+        # Opened once for the whole sharded loop; the loader honours flux_ds.
+        # A land fraction alone is NOT a reason to open it: the state store
+        # (WB2) carries the mask and the loader falls back lazily otherwise.
+        # flux_zarr == "" means "read the fluxes from the state store".
+        flux_ds = open_era5_zarr(sst_cfg.flux_zarr) if sst_cfg.flux_zarr else ds
+    if surface_fluxes and not _WARNED_ERA5_FLUX_HOLD_FIXED:
+        _WARNED_ERA5_FLUX_HOLD_FIXED = True
+        logger.warning(
+            "era5_surface_fluxes: hourly interpolation of the ERA5 surface "
+            "fluxes is not implemented — every flux plane is HELD FIXED at "
+            "its sample-start value for the whole training window "
+            "(owner decision 2026-09-15).")
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
     roll_h = rollout_hours(cfg, yml)
@@ -962,11 +1701,6 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     # re-opening a remote zarr per sample would dominate the load.
     cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
                 if era5_cfg.load_cloud_condensate else None)
-    # The surface-temperature reload below wants 2-D fields only; asking it for
-    # condensate would re-read the cloud store once per sample for data it
-    # throws away.
-    sst_cfg = era5_cfg._replace(load_cloud_condensate=False)
-
     # Which water species the state must carry follows the scheme the arm
     # selects, and the carry builder already knows how to seed them — it was
     # simply never told which scheme was running here, so every state was built
@@ -981,33 +1715,40 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     # nowhere to put one, so seeding it would make the forecast carry
     # structurally different from the initial condition it is scored against.
     # Carrying turbulence energy across steps on this path is separate work.
-    _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
-    _micro = str(_cl.get("microphysics", "none"))
+    _micro = wb_ic_microphysics(cfg.mode, yml)
+    _aerosol = wb_aerosol_spec(yml) if cfg.mode == "physics" else None
 
 
+    def build(year, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
+        s_ic, s_tg, sst_src = _sample_inputs(
+            era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at)
+        # ERA5-derived terrain (no elevation file on the training lane)
+        tp = era5_terrain_product(s_ic, grid)
+        ic = era5_to_spectral_carry(s_ic, grid, sigma, target_phis=tp, microphysics=_micro)
+        target = era5_to_spectral_carry(s_tg, grid, sigma, target_phis=tp, microphysics=_micro)
+        # times stays the REMOTE calendar: i_ic is always a remote index
+        forcing = build_spectral_forcing(sst_src, grid, times[i_ic], year,
+                                         aerosol=_aerosol, sigma=sigma,
+                                         ic_carry=ic)
+        return (ic, target, forcing)
+
+    mine = list(_sharded_indices(
+        cfg, yml, times, snaps_per_day, stride, rank, nproc))
+    src = (ds, cloud_ds, flux_ds, int)
+    local = _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times,
+                             snaps_per_day, stride, rank, nproc)
+    if local is not None and mine:
+        _, i0, t0 = mine[0]
+        _assert_same_sample(
+            _sample_inputs(era5_cfg, sst_cfg, i0, t0, *src),
+            _sample_inputs(era5_cfg, sst_cfg, i0, t0, *local))
+        src = local
     samples = []
-    for year, i_ic, i_tg in _sharded_indices(
-            cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        ic = era5_to_spectral_carry(
-            load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds),
-            grid, sigma, microphysics=_micro)
-        target = era5_to_spectral_carry(
-            load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds),
-            grid, sigma, microphysics=_micro)
+    for year, i_ic, i_tg in mine:
+        sample = build(year, i_ic, i_tg, *src)
         if not samples:
             validate_carry_holds_scheme(
-                ic, _micro, context=f"WB {cfg.mode} arm initial condition")
-        sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds)
-        sst = jnp.asarray(regrid_2d_to_gaussian(
-            sst_src.sst, sst_src.lat, sst_src.lon, grid)).reshape(-1)
-        doy_1based, sod = era5_time_to_forcing_calendar(times[i_ic], year)
-        forcing = {
-            "T_sfc": sst,
-            "sic": jnp.zeros_like(sst),
-            "day_of_year": jnp.asarray(doy_1based),
-            "seconds_of_day": jnp.asarray(sod),
-        }
-        sample = (ic, target, forcing)
+                sample[0], _micro, context=f"WB {cfg.mode} arm initial condition")
         samples.append(_sample_to_host(sample) if host_resident else sample)
     return samples
 
@@ -1025,10 +1766,10 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
 
     from legoesm.training.era5_to_state import (
         era5_to_latlon_carry,
-        load_era5_slice,
         open_era5_zarr,
         regrid_2d_to_gaussian,
-    )
+    era5_terrain_product,
+)
     from legoesm.driver.compiled_segments import pack_forcing
 
     if getattr(cfg, "training_core", "latlon") == "spectral":
@@ -1036,7 +1777,9 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
             cfg, yml, grid, sigma,
             rank=rank, nproc=nproc, host_resident=host_resident)
 
-    era5_cfg = _era5_config(cfg, yml)
+    global _WARNED_ERA5_FLUX_HOLD_FIXED
+
+    era5_cfg = wb_era5_config(cfg, yml)
     ds = open_era5_zarr(era5_cfg.zarr_store)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
@@ -1047,33 +1790,83 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     # dominate the load (see the spectral loader).
     cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
                 if era5_cfg.load_cloud_condensate else None)
-    sst_cfg = era5_cfg._replace(load_cloud_condensate=False)   # 2-D only
-    _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
-    _micro = str(_cl.get("microphysics", "none"))
+    # 2-D only, but keeps load_surface_fluxes / load_land_frac so the
+    # sample-start slice carries the prescribed planes.
+    sst_cfg = era5_cfg._replace(load_cloud_condensate=False)
+    # Flux store opened once, only when fluxes are prescribed ("" = the
+    # state store); a land fraction alone comes from the state store.
+    flux_ds = None
+    if sst_cfg.load_surface_fluxes:
+        flux_ds = open_era5_zarr(sst_cfg.flux_zarr) if sst_cfg.flux_zarr else ds
+    _micro = wb_ic_microphysics(cfg.mode, yml)
 
     config = build_latlon_config(cfg, yml)
     driver = _driver_for_ctx(config)
     ctx = driver._prepare_run_context(0, config.start_day, restore_carry=False)
 
-    samples = []
-    for year, i_ic, i_tg in _sharded_indices(
-            cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        ic = era5_to_latlon_carry(
-            load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds),
-            grid, sigma, microphysics=_micro)
-        target = era5_to_latlon_carry(
-            load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds),
-            grid, sigma, microphysics=_micro)
-        sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds)
+    # Spectral forcing-dict name -> driver-path (pack_forcing) name for the
+    # planes the two lanes name differently; the radiative planes and the
+    # land fraction already share their names.
+    _spec_to_driver = {
+        "sfc_shf": "sfc_shflx_override",
+        "sfc_lhf": "sfc_lhflx_override",
+        "sfc_tau_x": "sfc_taux_override",
+        "sfc_tau_y": "sfc_tauy_override",
+    }
+
+    def build(year, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
+        global _WARNED_ERA5_FLUX_HOLD_FIXED
+        s_ic, s_tg, sst_src = _sample_inputs(
+            era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at)
+        tp = era5_terrain_product(s_ic, grid)
+        _skin = bool(config.ice_skin_prognostic)
+        ic = era5_to_latlon_carry(s_ic, grid, sigma, target_phis=tp,
+                                  microphysics=_micro, ice_skin_prognostic=_skin,
+                                  convection=config.convection)
+        target = era5_to_latlon_carry(s_tg, grid, sigma, target_phis=tp,
+                                      microphysics=_micro,
+                                      ice_skin_prognostic=_skin,
+                                      convection=config.convection)
         sst = regrid_2d_to_gaussian(sst_src.sst, sst_src.lat, sst_src.lon, grid)
+        # Prescribed surface planes the slice carries (spectral names),
+        # regridded exactly like sst, then renamed to the driver-path
+        # override names for pack_forcing.
+        planes = prescribed_surface_planes(sst_src, grid)
+        if "sfc_shf" in planes and not _WARNED_ERA5_FLUX_HOLD_FIXED:
+            _WARNED_ERA5_FLUX_HOLD_FIXED = True
+            logger.warning(
+                "era5_surface_fluxes: hourly interpolation of the ERA5 surface "
+                "fluxes is not implemented — every flux plane is HELD FIXED at "
+                "its sample-start value for the whole training window "
+                "(owner decision 2026-09-15).")
+        plane_kwargs = {
+            _spec_to_driver.get(_key, _key): _plane
+            for _key, _plane in planes.items()}
         doy = float((times[i_ic] - np.datetime64(f"{year}-01-01"))
                     / np.timedelta64(1, "D"))
         forcing = pack_forcing(
             sst=sst, sic=jnp.zeros_like(sst),
             day_of_year=jnp.asarray(doy), seconds_of_day=jnp.asarray(0.0),
             solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
-            o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"])
-        sample = (ic, target, forcing)
+            o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
+            o3_top_vmr=getattr(driver, "_o3_top_vmr", None),
+            **plane_kwargs)
+        return (ic, target, forcing)
+
+    mine = list(_sharded_indices(
+        cfg, yml, times, snaps_per_day, stride, rank, nproc))
+    src = (ds, cloud_ds, flux_ds, int)
+    local = _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times,
+                             snaps_per_day, stride, rank, nproc)
+    if local is not None and mine:
+        _, i0, t0 = mine[0]
+        _assert_same_sample(
+            _sample_inputs(era5_cfg, sst_cfg, i0, t0, *src),
+            _sample_inputs(era5_cfg, sst_cfg, i0, t0, *local))
+        src = local
+    samples = []
+    for year, i_ic, i_tg in mine:
+        sample = build(year, i_ic, i_tg, *src)
         samples.append(_sample_to_host(sample) if host_resident else sample)
     return samples
 

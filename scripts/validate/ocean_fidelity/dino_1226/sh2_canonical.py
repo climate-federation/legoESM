@@ -66,9 +66,12 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
+import json
 import os
 import sys
+from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 os.environ["JAX_PLATFORMS"] = "cpu"
@@ -92,6 +95,7 @@ import legoesm.ocean.physics.vertical_mixing._shared as shared_mod  # noqa: E402
 from legoesm.ocean.fidelity.precision_gate import (  # noqa: E402
     require_fp64, require_explicit_e3t_mode,
 )
+from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 from legoesm.ocean.fidelity.time_levels import time_level_for_dump  # noqa: E402
 
 # Sibling probes' helpers, imported BY PATH (scripts/ is not a package) --
@@ -139,6 +143,114 @@ def corr_ratio(lego: np.ndarray, nemo: np.ndarray, wet: np.ndarray,
     corr = float(np.corrcoef(lo, ne)[0, 1])
     ratio = float(np.mean(lo / ne))
     return dict(corr=corr, ratio=ratio, n=int(lo.size))
+
+
+def _sha256_array(value) -> str:
+    data = np.ascontiguousarray(np.asarray(value))
+    return hashlib.sha256(data.view(np.uint8)).hexdigest()
+
+
+def _routing_audit(model, state, *, plant: bool) -> dict:
+    """Hash DINO's live NOW/BEFORE shear route on its developed state.
+
+    The current full DINO runner refuses upstream in GM/Redi's raw-mesh N2
+    guard before reaching ``zdf_sh2``.  This bounded arm therefore calls the
+    SAME shared helper on the exact fields the compiled/source call chain
+    supplies, both eagerly and under an isolated JIT.  It is labelled as such
+    and is never reported as a production-step result.
+    """
+    state = model._seed_tke_preclosure_carry(state)
+    eta_now = state.eta.data
+
+    def shear(eta):
+        return model._tke_step_entry_p_sh2(
+            state, eta_now=eta, u_now=state.u.data, v_now=state.v.data,
+            return_face_metrics=True)
+
+    eager = jax.device_get(shear(eta_now))
+    isolated_jit = jax.device_get(jax.jit(shear)(eta_now))
+    if any(result[1] is None or len(result[1]) != 4
+           for result in (eager, isolated_jit)):
+        raise RuntimeError(
+            "REFUSE: DINO shear helper did not consume four live face metrics")
+
+    def arm(result):
+        p_sh2, metrics = result
+        return {
+            "p_sh2_sha256": _sha256_array(p_sh2),
+            "p_sh2_nonzero": int(np.count_nonzero(np.asarray(p_sh2))),
+            "face_metric_sha256": [_sha256_array(v) for v in metrics],
+        }
+
+    eager_report = arm(eager)
+    jit_report = arm(isolated_jit)
+    out = {
+        "execution": {
+            "eager": "isolated shared shear helper eager",
+            "jit": "isolated shared shear helper JIT; NOT production step",
+            "production_step": (
+                "UNMEASURED: current committed DINO twin refuses upstream "
+                "in GM/Redi raw-mesh N2 before zdf_sh2"),
+        },
+        "resolved_route": {
+            "Kmm": "entry NOW ssh (stpmlf Nnn -> zdf_phy Kmm)",
+            "Kbb": "carried BEFORE ssh (stpmlf Nbb -> zdf_phy Kbb)",
+            "eta_now_sha256": _sha256_array(eta_now),
+            "eta_before_sha256": _sha256_array(state.eta_before.data),
+            "now_before_bit_identical": bool(np.array_equal(
+                np.ascontiguousarray(np.asarray(eta_now)).view(np.uint64),
+                np.ascontiguousarray(
+                    np.asarray(state.eta_before.data)).view(np.uint64))),
+        },
+        "eager": eager_report,
+        "isolated_jit": jit_report,
+        "eager_jit_bit_identical": eager_report == jit_report,
+    }
+
+    if plant:
+        clean, clean_metrics = isolated_jit
+        if not np.any(np.asarray(clean) != 0.0):
+            raise RuntimeError(
+                "REFUSE: DINO shear routing plant found no live p_sh2")
+        peak = np.unravel_index(
+            int(np.argmax(np.abs(np.asarray(clean)))), np.shape(clean))
+        planted_at = tuple(int(v) for v in peak[:2])
+        baseline = float(np.asarray(eta_now)[planted_at])
+        spacing = float(np.spacing(np.float64(baseline)))
+        metric_moved = None
+        p_moved = 0
+        ulp_steps = None
+        jitted_shear = jax.jit(shear)
+        for exponent in range(21):
+            steps = 1 << exponent
+            eta_plant = np.asarray(eta_now).copy()
+            eta_plant[planted_at] = baseline + spacing * steps
+            planted, planted_metrics = jax.device_get(
+                jitted_shear(jnp.asarray(eta_plant)))
+            metric_moved = [
+                int(np.count_nonzero(
+                    np.ascontiguousarray(np.asarray(a)).view(np.uint64)
+                    != np.ascontiguousarray(np.asarray(b)).view(np.uint64)))
+                for a, b in zip(clean_metrics, planted_metrics)
+            ]
+            p_moved = int(np.count_nonzero(
+                np.ascontiguousarray(np.asarray(clean)).view(np.uint64)
+                != np.ascontiguousarray(np.asarray(planted)).view(np.uint64)))
+            if any(metric_moved) and p_moved:
+                ulp_steps = steps
+                break
+        if ulp_steps is None:
+            raise RuntimeError(
+                "REFUSE: DINO NOW-ssh ULP ladder did not reach both a "
+                "consumed face metric and p_sh2 within 2^20 ULPs")
+        out.update({
+            "plant_index": planted_at,
+            "plant_eta_baseline": baseline,
+            "plant_eta_ulp_steps": ulp_steps,
+            "plant_metric_cells_moved": metric_moved,
+            "plant_p_sh2_cells_moved": p_moved,
+        })
+    return out
 
 
 def run_and_capture_sh2(model, state, forcing, *, avm_weighting: str,
@@ -235,6 +347,14 @@ def main() -> int:
                           "path but with the 'squared_centered' (legoESM's "
                           "non-kamm default) shear discretization substituted, "
                           "to probe whether a DIFFERENT card explains 0.934.")
+    ap.add_argument(
+        "--routing-audit", action="store_true",
+        help=("drive the actual DINO MLF production closure only through its "
+              "shear call and hash the consumed NOW/BEFORE route"),
+    )
+    ap.add_argument("--expect-commit")
+    ap.add_argument("--plant-routing-eta-ulp", action="store_true")
+    ap.add_argument("--output", type=Path)
     args = ap.parse_args()
 
     from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -285,6 +405,52 @@ def main() -> int:
           "== 'nemo_face_native', confirming the DINO kamm card's setting "
           "(dino.py:1454) is what THIS twin state actually resolves to -- "
           "not assumed from reading the card's source text.")
+
+    if args.routing_audit:
+        stamp = worktree_stamp()
+        expected = (args.expect_commit or "").lower()
+        if (len(expected) != 40 or not stamp["clean"]
+                or stamp["commit"].lower() != expected):
+            print(
+                "REFUSE: DINO routing audit requires a clean exact commit "
+                f"stamp; got {stamp}, expected={expected!r}",
+                file=sys.stderr,
+            )
+            return 3
+        if getattr(tke_cfg, "tke_shear_evaluation_stage", None) != "step_entry":
+            print("REFUSE: DINO card does not select step-entry shear",
+                  file=sys.stderr)
+            return 3
+        if getattr(tke_cfg, "tke_shear_metric_source", None) != "nemo_qco_live_face":
+            print("REFUSE: DINO card does not select live QCO face metrics",
+                  file=sys.stderr)
+            return 3
+        report = {
+            "format": "dino-sh2-routing-audit-v1",
+            "worktree": stamp,
+            "recipe": RECIPE,
+            "compiled_program": (
+                "DINO/BLD/ppsrc/nemo/stpmlf.f90:187-193 -> "
+                "zdfphy.f90:316-319 -> zdfsh2.f90:84-109"),
+            "config": {
+                "tke_shear_production": resolved_shear,
+                "tke_shear_avm_weighting": resolved_avm_w,
+                "tke_shear_evaluation_stage": (
+                    tke_cfg.tke_shear_evaluation_stage),
+                "tke_shear_metric_source": tke_cfg.tke_shear_metric_source,
+            },
+            "plant": bool(args.plant_routing_eta_ulp),
+            "routing": _routing_audit(
+                model, st, plant=args.plant_routing_eta_ulp),
+            "status": ("PLANT-FIRED" if args.plant_routing_eta_ulp
+                       else "PASS"),
+        }
+        text = json.dumps(report, indent=2, sort_keys=True)
+        if args.output:
+            args.output.write_text(text + "\n")
+        print(text)
+        print("STATUS", report["status"])
+        return 1 if args.plant_routing_eta_ulp else 0
 
     # ---- geometry / masks ----
     jpi, jpj, jpk, hls = _read_dims(RUN)

@@ -214,9 +214,14 @@ class TestDistinctFromUniform:
 
 def test_equator_on_tpoint_matches_nemo_dino():
     """NEMO-faithful placement: equator ON a T-point (odd n_lat), the
-    ``usr_def_hgr`` convention.  Reproduces NEMO's DINO R1 grid (195x48,
-    φ = asin(tanh(Δλ·(j-97)))) — verified cell-for-cell against the mesh to
-    3e-6° in the DINO oracle harness.  Contrast the default equator-on-face."""
+    ``usr_def_hgr`` convention: φ(j) = asin(tanh(Δλ·(j - j_eq))).
+
+    This exercises the PLACEMENT RULE, not DINO's frame.  The 195×48 numbers
+    below are a generic odd-row case; DINO's real domain is 52×199 (see
+    ``legoesm.ocean.fidelity.nemo_dino_mesh``), and the DINO path no longer
+    goes through ``create_mercator_grid`` at all -- it is transcribed and
+    gated bit-for-bit by
+    ``scripts/validate/ocean_fidelity/dino_1226/nemo_dino_mesh_gate.py``."""
     import numpy as np
     # Default: equator on a FACE, even n_lat.
     gf = create_mercator_grid(n_lon=48, lat_max_deg=70.0,

@@ -30,7 +30,7 @@
 set -uo pipefail
 R=/burg-archive/glab/users/pg2328/legoESM; cd $R || exit 1
 echo "HEAD: $(git log --oneline -1)"
-export PYTHONPATH="$(ls -d $R/packages/*/ | sed 's:/$::' | tr '\n' ':')$R"
+export PYTHONPATH="$R/src:$(ls -d $R/packages/*/ | sed 's:/$::' | tr '\n' ':')$R"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 IN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 

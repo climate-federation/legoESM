@@ -89,11 +89,6 @@ def preload_rrtmgp_optics(config: RRTMGPConfig) -> None:
     RRTMGP.preload(config)
 
 
-def preload_rrtmgp_optics_mpi(config: RRTMGPConfig) -> None:
-    """MPI-aware preload: rank 0 reads NetCDF files, broadcasts to others."""
-    RRTMGP.preload_mpi(config)
-
-
 def rrtmgp_radiation(
     T: jnp.ndarray,
     p_full: jnp.ndarray,
@@ -111,6 +106,7 @@ def rrtmgp_radiation(
     cloud_path_ice_lw: jnp.ndarray | None = None,
     cloud_r_eff_liq: jnp.ndarray | None = None,
     cloud_r_eff_ice: jnp.ndarray | None = None,
+    cloud_rho_ice: float | None = None,
     cloud_fraction: jnp.ndarray | None = None,
     aerosol_optical_depth: jnp.ndarray | None = None,
     aerosol_absorption_optical_depth_lw: jnp.ndarray | None = None,
@@ -138,6 +134,7 @@ def rrtmgp_radiation(
         cloud_path_ice_lw=cloud_path_ice_lw,
         cloud_r_eff_liq=cloud_r_eff_liq,
         cloud_r_eff_ice=cloud_r_eff_ice,
+        cloud_rho_ice=cloud_rho_ice,
         cloud_fraction=cloud_fraction,
         aerosol_optical_depth=aerosol_optical_depth,
         aerosol_absorption_optical_depth_lw=aerosol_absorption_optical_depth_lw,

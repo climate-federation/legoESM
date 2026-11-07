@@ -12,7 +12,7 @@
 set -uo pipefail
 WT=${WT:-/burg-archive/glab/users/pg2328/_gw_pr_wt}
 cd "$WT"
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
 export JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 BT=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/_pt_gwcum_${SLURM_JOB_ID}

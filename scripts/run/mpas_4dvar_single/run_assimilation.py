@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import warnings
 from pathlib import Path
 
 import jax
@@ -27,6 +28,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--gen-be", type=Path)
     parser.add_argument("--output-dir", type=Path)
     return parser.parse_args()
+
+
+def minimizer_status_message(result) -> str:
+    """Why L-BFGS stopped: converged, line search failed, or gradient tolerance not met."""
+    if bool(result.converged):
+        return "converged"
+    if bool(result.line_search_failed):
+        return "line search failed"
+    return "gradient tolerance not met"
 
 
 def main() -> None:
@@ -106,6 +116,15 @@ def main() -> None:
         m=int(optimization["history_size"]),
     )
     jax.block_until_ready(result.x)
+    minimizer_status = minimizer_status_message(result)
+    if minimizer_status != "converged":
+        warnings.warn(
+            f"4D-Var minimizer did not converge ({minimizer_status}); the saved "
+            "4D-Var analysis is the last accepted iterate and may equal the "
+            "background.",
+            RuntimeWarning,
+            stacklevel=1,
+        )
     four_dvar_analysis = analysis(result.x)
 
     def three_dvar_operator(control):
@@ -169,6 +188,8 @@ def main() -> None:
         four_dvar_initial_cost=np.asarray(jax.device_get(initial_cost)),
         four_dvar_final_cost=np.asarray(jax.device_get(result.fun)),
         four_dvar_iterations=np.asarray(jax.device_get(result.n_iter)),
+        four_dvar_converged=np.asarray(jax.device_get(result.converged)),
+        four_dvar_minimizer_status=minimizer_status,
     )
     print(f"saved outputs in {output_directory}", flush=True)
 

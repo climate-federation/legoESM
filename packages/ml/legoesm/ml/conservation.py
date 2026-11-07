@@ -177,25 +177,25 @@ def correct_ocean_volume(
     return eta_new + correction * mask
 
 
-def correct_ocean_heat(
-    T_new: jnp.ndarray,
-    T_old: jnp.ndarray,
+def correct_ocean_tracer(
+    x_new: jnp.ndarray,
+    x_old: jnp.ndarray,
     h_k_new: jnp.ndarray,
     h_k_old: jnp.ndarray,
     grid: GaussianGrid,
     mask: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Correct ocean temperature to conserve global heat content.
+    """Correct an ocean tracer to conserve its global volume integral.
 
-    Applies a spatially uniform additive correction to T so that
-    the volume-integrated temperature is preserved.
+    Applies a spatially uniform additive correction to the tracer (T for
+    heat, S for salt) so that its volume integral is preserved.
 
     Parameters
     ----------
-    T_new : array, shape (n_lat, n_lon, nlev)
-        Predicted temperature [degC].
-    T_old : array, shape (n_lat, n_lon, nlev)
-        Original temperature [degC].
+    x_new : array, shape (n_lat, n_lon, nlev)
+        Predicted tracer (T [degC] or S [PSU]).
+    x_old : array, shape (n_lat, n_lon, nlev)
+        Original tracer, same units as x_new.
     h_k_new : array, shape (n_lat, n_lon, nlev)
         New layer thicknesses [m].
     h_k_old : array, shape (n_lat, n_lon, nlev)
@@ -208,70 +208,21 @@ def correct_ocean_heat(
     Returns
     -------
     array, shape (n_lat, n_lon, nlev)
-        Corrected temperature.
+        Corrected tracer.
     """
     weighted_area = mask * grid.grid_area  # canonical Gaussian cell area
     mask_3d = mask[..., None]
 
-    # Volume-integrated heat — fuse the 3 column reductions into one
+    # Volume-integrated tracer — fuse the 3 column reductions into one
     # stack and the 3 area reductions into one ``axis=(0, 1)`` collapse.
     _inner = jnp.sum(
-        jnp.stack([T_old * h_k_old, T_new * h_k_new, h_k_new], axis=-1),
+        jnp.stack([x_old * h_k_old, x_new * h_k_new, h_k_new], axis=-1),
         axis=-2,
     )
     _global = jnp.sum(_inner * weighted_area[..., None], axis=(0, 1))
-    heat_old = _global[..., 0]
-    heat_new = _global[..., 1]
+    total_old = _global[..., 0]
+    total_new = _global[..., 1]
     ocean_volume = _global[..., 2]
 
-    correction = (heat_old - heat_new) / jnp.maximum(ocean_volume, 1.0)
-    return T_new + correction * mask_3d
-
-
-def correct_ocean_salt(
-    S_new: jnp.ndarray,
-    S_old: jnp.ndarray,
-    h_k_new: jnp.ndarray,
-    h_k_old: jnp.ndarray,
-    grid: GaussianGrid,
-    mask: jnp.ndarray,
-) -> jnp.ndarray:
-    """Correct ocean salinity to conserve global salt content.
-
-    Same approach as heat correction but for salinity.
-
-    Parameters
-    ----------
-    S_new : array, shape (n_lat, n_lon, nlev)
-        Predicted salinity [PSU].
-    S_old : array, shape (n_lat, n_lon, nlev)
-        Original salinity [PSU].
-    h_k_new : array, shape (n_lat, n_lon, nlev)
-        New layer thicknesses [m].
-    h_k_old : array, shape (n_lat, n_lon, nlev)
-        Old layer thicknesses [m].
-    grid : GaussianGrid
-        Grid for area weighting.
-    mask : array, shape (n_lat, n_lon)
-        Ocean mask (1=ocean, 0=land).
-
-    Returns
-    -------
-    array, shape (n_lat, n_lon, nlev)
-        Corrected salinity.
-    """
-    weighted_area = mask * grid.grid_area  # canonical Gaussian cell area
-    mask_3d = mask[..., None]
-
-    # Volume-integrated salt — same 3-into-1 fusion as the heat fixer.
-    _inner = jnp.sum(
-        jnp.stack([S_old * h_k_old, S_new * h_k_new, h_k_new], axis=-1),
-        axis=-2,
-    )
-    _global = jnp.sum(_inner * weighted_area[..., None], axis=(0, 1))
-    salt_old = _global[..., 0]
-    salt_new = _global[..., 1]
-    ocean_volume = _global[..., 2]
-
-    correction = (salt_old - salt_new) / jnp.maximum(ocean_volume, 1.0)
-    return S_new + correction * mask_3d
+    correction = (total_old - total_new) / jnp.maximum(ocean_volume, 1.0)
+    return x_new + correction * mask_3d

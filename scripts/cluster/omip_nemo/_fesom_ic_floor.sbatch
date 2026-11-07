@@ -20,7 +20,7 @@ REPO=/burg-archive/glab/users/pg2328/legoESM
 FJX=/burg-archive/glab/users/pg2328/fesom_jax_repo
 cd $REPO || exit 1
 echo "=== HEAD $(git -C $REPO rev-parse HEAD)"
-export PYTHONPATH="$FJX:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
+export PYTHONPATH="$FJX:$REPO/src:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
 export JAX_PLATFORMS=cpu
 export JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python

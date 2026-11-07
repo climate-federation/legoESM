@@ -12,10 +12,16 @@ Both the gravity and capillary terms use this same index direction, so the
 signs are internally consistent and the result is correct.
 
 All operations are JAX-differentiable. The Picard loop uses
-``jax.lax.fori_loop`` with a **fixed iteration count** (default 10).
-No early-termination convergence check is performed: converged columns
-simply get near-zero updates on subsequent iterations. The ``n_iter``
-diagnostic always equals ``max_iter``.
+``jax.lax.fori_loop`` with a fixed trip count (``max_iter``) so reverse-mode
+AD works; each iteration is damped (``max_dse_per_iter``), applied in THETA
+(the storage change the linearised balance solved for, ``theta += C dpsi``,
+psi recovered by the inverse retention curve; the psi step divided that change
+by a capacity that collapses at the dry end and produced the dry-season runoff
+spikes), bounded above by the hydrostatic head of the pond with the excess
+cascaded up the column, and a column that converges (``theta_tol``) is frozen
+for the remaining trips. ``n_iter`` counts
+the iterations each column actually applied; ``converged`` flags the columns
+whose last iterate was kept unconverged.
 
 References
 ----------
@@ -47,7 +53,9 @@ __param_spec__ = {
     "RichardsConfig": {
         "scheme_key": "land.richards",
         "excluded": {
-            "theta_tol": "numerics: Newton convergence tolerance",
+            "theta_tol": "numerics: Picard convergence tolerance [m3/m3]",
+            "max_dse_per_iter": "numerics: per-iteration Picard step limit, fraction "
+            "of (theta_sat - theta_r)",
             "pond_max": "numerics: surface ponding cap before overland runoff [m]",
             "fc_drain_saturation": "config-level knob (not auto-collected): the "
             "RichardsConfig field default is 0.0 (limiter OFF, guarded by `> 0.0`), which "
@@ -56,10 +64,21 @@ __param_spec__ = {
             "0.5), but as an explicit config choice, not an auto-seeded trainable — so tune "
             "it by setting an interior S_e_fc in config, not from the 0.0 field default. "
             "(Aligning the field default to 0.5 would make it collector-tunable but changes "
-            "~15 bare RichardsConfig() call sites that rely on the 0.0=off default, so it is "
+            "the bare RichardsConfig() sites (tests only) relying on the 0.0=off default, so it is "
             "left a config knob.)",
         },
-        "params": {},
+        "params": {
+            "ice_impedance_exponent": {
+                "units": "1",
+                "bounds": (0.0, 10.0),
+                "tunable_tier": 2,
+                "transform": "sigmoid",
+                "category": "hydraulics",
+                "reference": "CLM5 e_ice, SoilWaterMovementMod IceImpedance "
+                             "(Swenson et al. 2012)",
+                "shape": None,
+            },
+        },
     },
 }
 
@@ -88,33 +107,78 @@ _CFL_SAFETY = 0.9
 _SE_DRY_FLOOR = 1.0e-4
 # The Se floor alone is not usable as a psi: for Clapp-Hornberger it sits at
 # psi_sat*10^(4b) (-1e15 m for b = 4, -1e34 m for a b = 8.5 clay) and for a flat
-# van-Genuchten curve further still.  Bound it at -1e6 m, ten times oven dryness
-# (-1e5 m = -1e6 J/kg, the Kelvin-equation potential of a 105 C oven at ambient
-# humidity, Campbell & Shiozawa 1992; CLM's smpmin = -1e8 mm).  No drier state
-# exists, and the number matters twice.  Numerically: a floor layer next to a wet
-# one puts K_half*(psi_wet - psi_floor) on the Picard right-hand side, which the
-# Thomas sweep must cancel against the much smaller storage terms; at -1e30 m
-# that cancellation needs ~25 significant digits and the float64 solve returned
-# noise (dpsi ~ 1e9 m in the wet layers, cascaded to a 1e7 m pond and reported
-# as 1e11 mm/d of runoff), at -1e6 m it needs ~4.  Physically: the surface
-# schemes take the pore relative humidity exp(g psi/(R_v T)) from the top-layer
-# psi, 1e-3 at -1e5 m and < 1e-30 at -1e6 m, so a layer at this floor neither
-# evaporates nor condenses (at -1e5 m the beta-form soil flux still evaporated
-# 1e-3 of the potential rate from oven-dry soil, ~0.2 mm/d).  theta is floored
-# at theta(psi floor) of the cell's own curve, so the state stays ON the curve
-# and the tangent capacity and conductivity never fall below their values there.
+# van-Genuchten curve (n_vg -> 1) further still (~ -1e80, -inf in float32).  Bound
+# it at -1e6 m, ten times oven dryness (-1e5 m = -1e6 J/kg, the Kelvin-equation
+# potential of a 105 C oven at ambient humidity, Campbell & Shiozawa 1992; CLM's
+# smpmin = -1e8 mm).  No drier state exists, and the number matters twice.
+# Numerically: a floor layer next to a wet one puts K_half*(psi_wet - psi_floor)
+# on the Picard right-hand side, which the Thomas sweep must cancel against the
+# much smaller storage terms; at -1e30 m that cancellation needs ~25 significant
+# digits and the float64 solve returned noise (dpsi ~ 1e9 m in the wet layers,
+# cascaded to a 1e7 m pond and reported as 1e11 mm/d of runoff; re-measured at
+# the merge: the K clip times a 1e27 m gradient created 4.9e7 mm of water on the
+# spike cell with the damping off), at -1e6 m it needs ~4.  Physically: the
+# surface schemes take the pore relative humidity exp(g psi/(R_v T)) from the
+# top-layer psi, 1e-3 at -1e5 m and < 1e-30 at -1e6 m, so a layer at this floor
+# neither evaporates nor condenses.  theta is floored at theta(psi floor) of the
+# cell's own curve, so the state stays ON the curve and the tangent capacity and
+# conductivity never fall below their values there.  Representable in both
+# precisions.
 _PSI_FLOOR_MIN = -1.0e6
+
+
+def psi_dry_floor(hydro_config: SoilHydraulicsConfig) -> jnp.ndarray:
+    """The solver's dry-side matric-potential floor (see ``_SE_DRY_FLOOR``).
+
+    psi at Se = ``_SE_DRY_FLOOR`` for the active retention curve and (possibly
+    per-column) hydraulics, capped at ``_PSI_FLOOR_MIN`` so it stays finite in
+    float32.  ``theta_from_psi(psi_dry_floor(h), h)`` is therefore the driest
+    water content the Richards step can hold; a state below it gains water on
+    its first step.
+    """
+    floor = psi_from_theta(
+        hydro_config.theta_r
+        + _SE_DRY_FLOOR * (hydro_config.theta_sat - hydro_config.theta_r),
+        hydro_config)
+    return jnp.maximum(floor, _PSI_FLOOR_MIN)
+
+
+def dry_floor(hydro_config: SoilHydraulicsConfig):
+    """``(psi_floor, theta_floor)``: the solver's dry floor as a matric
+    potential and as the water content it maps to.  The land step measures
+    the water the soil can give above ``theta_floor`` (the same curve point
+    the solver clips at), not above ``theta_r``."""
+    psi_floor = psi_dry_floor(hydro_config)
+    return psi_floor, theta_from_psi(psi_floor, hydro_config)
 
 
 class RichardsConfig(NamedTuple):
     """Configuration for the Richards equation solver.
 
-    The solver runs a fixed number of Picard iterations (``max_iter``)
-    per time step.  ``theta_tol`` is retained for future use but is
-    **not** checked during the loop.
+    The solver runs at most ``max_iter`` damped Picard iterations per time
+    step.  A column whose applied iterate changes theta by less than
+    ``theta_tol`` in every layer, on an undamped step, is converged and frozen for the
+    remaining iterations; a column still unconverged after ``max_iter`` keeps
+    its last iterate and is reported in ``RichardsOutput.converged``.
     """
-    max_iter: int = 10
-    theta_tol: float = 1e-6       # reserved for future convergence check [m3/m3]
+    # On a dry top layer the undamped Picard iterate cycles without converging
+    # (moisture capacity -> 0 at the dry end, surface supply cap switching on/off);
+    # accepting the 10th iterate put top-layer heads of 1e3-6e4 m and theta up to
+    # 2.6 into AMIP runs and created 0.7-7.4 mm of water per such step.  Measured on
+    # 35 recorded production steps: 10 iterations undamped -> 21/35 converged, max
+    # water error 7.4 mm; 30 iterations at max_dse_per_iter=0.1 -> 32/35, 0.03 mm
+    # (measured before the post-solve water take-back below existed; with it the
+    # undamped spike conserves water but still leaves theta > theta_sat on top).
+    max_iter: int = 30
+    theta_tol: float = 1e-6       # convergence: max per-layer |dtheta| per iteration [m3/m3]
+    # Damping: scale each column's (soil + surface) Picard psi update by
+    # lam = min(1, this / (max_k |dtheta_trial_k| / (theta_sat - theta_r))), where
+    # dtheta_trial is the UNDAMPED trial change.  Retention is nonlinear in psi,
+    # so the applied theta change is not bounded by this fraction (measured up
+    # to 1.04 of the range on a synthetic 180 mm/h rain on dry soil; <= 0.05 on
+    # the recorded production columns).  Changes only the path, not the
+    # converged solution.
+    max_dse_per_iter: float = 0.1
     bottom_bc: str = "free_drainage"  # "free_drainage" or "zero_flux"
     # Surface ponding: max depth [m] held on the surface before it overflows to
     # runoff (overland flow).  Excess precip ponds up to this depth (a coupled
@@ -130,6 +194,11 @@ class RichardsConfig(NamedTuple):
     # zone retains realistic water.  0.0 = OFF (unbounded gravity drainage, backward-
     # compatible).  ~0.5-0.6 = a loam-like effective field capacity.
     fc_drain_saturation: float = 0.0
+    # --- hydraulics: frozen-soil ice impedance (CLM5 e_ice, Swenson et al. 2012) ---
+    # Conductivity multiplier 10**(-e * ice fraction), ice fraction = ice volume at
+    # ice density over porosity.  Read only when the caller passes log_impedance
+    # (MultiLayerLand does so whenever soil freeze/thaw is on).  CLM5 value 6.
+    ice_impedance_exponent: float = 6.0
 
 
 class RichardsOutput(NamedTuple):
@@ -138,24 +207,13 @@ class RichardsOutput(NamedTuple):
     theta_new: jnp.ndarray     # (ncol, n_layers) updated water content [m3/m3]
     runoff_surface: jnp.ndarray   # (ncol,) surface runoff [kg/m2/s]
     runoff_subsurface: jnp.ndarray  # (ncol,) subsurface runoff [kg/m2/s]
-    n_iter: jnp.ndarray        # (ncol,) always equals max_iter (fixed-iteration solver)
+    n_iter: jnp.ndarray        # (ncol,) Picard iterations applied before convergence (or max_iter)
     surface_water: jnp.ndarray  # (ncol,) updated surface ponding depth [m]
-    budget_residual: jnp.ndarray  # (ncol,) column water budget residual over the step [m]
-
-
-def dry_floor(hydro_config: SoilHydraulicsConfig):
-    """The solver's dry bound, ``(psi_floor, theta_floor)``: the matric potential
-    at Se = _SE_DRY_FLOOR of the configured curve, bounded at _PSI_FLOOR_MIN, and
-    the water content on the curve at that potential.  Shaped like the (possibly
-    per-column, per-layer) hydraulics.  Every consumer of "the driest state the
-    soil admits" (the land step's extractable water, the restart capping script)
-    takes it from here, so the solver's clip and the demand it is given agree."""
-    psi_floor = psi_from_theta(
-        hydro_config.theta_r
-        + _SE_DRY_FLOOR * (hydro_config.theta_sat - hydro_config.theta_r),
-        hydro_config)
-    psi_floor = jnp.maximum(psi_floor, _PSI_FLOOR_MIN)
-    return psi_floor, theta_from_psi(psi_floor, hydro_config)
+    refill: jnp.ndarray        # (ncol,) part of the imposed draw [m] the column did
+    #   NOT supply (the psi dry floor refilled it): the caller must not report it
+    water_created: jnp.ndarray  # (ncol,) remaining signed budget residual [m]:
+    #   dStorage - (flux_top - sum(sink dz) - runoff) dt - refill
+    converged: jnp.ndarray     # (ncol,) bool; False = last iterate kept (residual in water_created)
 
 
 def solve_richards(
@@ -168,6 +226,7 @@ def solve_richards(
     sink: jnp.ndarray,
     dt: float,
     surface_water: jnp.ndarray | None = None,
+    log_impedance: jnp.ndarray | None = None,
 ) -> RichardsOutput:
     """Solve the Richards equation for one time step.
 
@@ -190,11 +249,31 @@ def solve_richards(
         Root water uptake [m3/m3/s], shape (ncol, n_layers).
     dt : float
         Time step [s].
+    surface_water : jnp.ndarray, optional
+        Surface ponding depth at time n [m], shape (ncol,).
+    log_impedance : jnp.ndarray, optional
+        Natural log of a per-layer conductivity multiplier, shape (ncol, n_layers)
+        (frozen-soil ice impedance, -e ln10 * ice fraction).  Held fixed through the
+        Picard loop.  Applied to the interface conductivity (log-form geometric
+        mean), the surface infiltration conductance (top layer's factor) and the
+        free-drainage bottom flux (bottom layer's factor).  None = no factor, the
+        original code path.
 
     Returns
     -------
     RichardsOutput
     """
+    # Static dispatch on the retention curve for the post-solve psi update: PDI /
+    # Lu invert theta -> psi only approximately, so their adjusted psi is SHIFTED
+    # by the inverse's difference; exact-inverse curves keep the exact reset.
+    _curve = hydro_config.retention_curve
+    if _curve in ("pdi", "lu"):
+        _shift_psi = True
+    elif _curve in ("van_genuchten", "clapp_hornberger", "campbell", "brooks_corey"):
+        _shift_psi = False
+    else:
+        raise ValueError(f"solve_richards: unknown retention curve scheme {_curve!r}")
+
     ncol = psi.shape[0]
     dz = grid.dz                  # (nlayers,)
     dz_if = grid.dz_interface     # (nlayers-1,)
@@ -230,6 +309,8 @@ def solve_richards(
     # layer 0 — this handles scalar, (ncol,1), (ncol,nlayers) and (nlayers,) configs
     # identically and never mis-maps layer variation onto columns (codex).
     _Ksat = jnp.broadcast_to(hydro_config.K_sat, theta.shape)[:, 0] * _kdecay[0]  # (ncol,)
+    if log_impedance is not None:
+        _Ksat = _Ksat * jnp.exp(log_impedance[:, 0])   # frozen top layer impedes infiltration
     # CFL cap on the surface infiltration conductivity (stability at high K_sat).
     # The Robin infiltration q01 = _Ksat*((h_s-psi0)/half0 + 1) drives the layer-0
     # Schur update EXPLICITLY (rhs_0 += q01/dz0) and its linearized conductance
@@ -255,11 +336,12 @@ def solve_richards(
     # the pond), _avail_rate < 0 and the cap forces q01 < 0 — i.e. water flows soil ->
     # surface -> atmosphere.  That is the intended BARE-SOIL EVAPORATION: with no pond
     # the demand is met from the soil, and the cell reduces to the old Neumann flux_top
-    # top BC (q01 == flux_top).  flux_top is already supply-limited upstream by the
-    # top-layer evaporative-resistance throttle, so this does not over-extract.
+    # top BC (q01 == flux_top).  A demand the dry column cannot supply ends at the
+    # psi dry floor, which refills it; that refill is returned as ``refill`` so the
+    # caller reports only the water the soil actually gave.
     _avail_rate = h_s0 / dt + flux_top
 
-    def _surface_terms(h_s, psi0, theta0):
+    def _surface_terms(h_s, psi0):
         """Return q01 (infiltration into layer 0 [m/s]), its conductance Kc_eff =
         -dq01/dpsi0, the surface residual R_s, and D_s = dR_s/dh_s, at the iterate.
 
@@ -300,31 +382,37 @@ def solve_richards(
     # --- Picard iteration ---
     psi_m = psi  # iterate
 
-    # Dry bound (see _SE_DRY_FLOOR / _PSI_FLOOR_MIN and dry_floor): psi and theta
-    # on the same curve point, so the state never sits off the retention curve
-    # and C and K (evaluated from theta for Clapp-Hornberger) match the bounded
-    # psi instead of collapsing below it.  The incoming state is floored too: a
-    # restart written before the floor existed carries psi ~ -1e11 m.
     _psi_dry_floor, _theta_floor = dry_floor(hydro_config)
-    psi_m = jnp.maximum(psi_m, _psi_dry_floor)
+
+    def _bottom_drain_K(K_m):
+        """Free-drainage bottom conductivity, CFL-capped: ONE expression shared by
+        the rhs debit, the carried runoff diagnostic and its pre-loop seed, so the
+        reported drainage is the debited drainage."""
+        K_b = K_m[:, -1]
+        if log_impedance is not None:
+            K_b = K_b * jnp.exp(log_impedance[:, -1])
+        return jnp.minimum(K_b, _CFL_SAFETY * dz[-1] / dt)
 
     def picard_body(m, carry):
-        h_s_m, psi_m, theta_m, _ = carry  # 4th slot: K_bot diagnostic (write-only)
+        h_s_m, psi_m, theta_m, k_bot_m, done_m, n_it_m = carry
 
         # Recompute hydraulic properties at current iterate
         K_m = hydraulic_conductivity(psi_m, theta_m, hydro_config) * _kdecay[None, :]  # (ncol, nlayers)
         C_m = moisture_capacity(psi_m, theta_m, hydro_config)       # (ncol, nlayers)
 
         # Interblock conductivity (geometric mean)
-        K_half = interblock_K(K_m[:, :-1], K_m[:, 1:])  # (ncol, nlayers-1)
+        if log_impedance is None:
+            K_half = interblock_K(K_m[:, :-1], K_m[:, 1:])  # (ncol, nlayers-1)
+        else:
+            K_half = interblock_K(K_m[:, :-1], K_m[:, 1:],
+                                  log_impedance[:, :-1], log_impedance[:, 1:])
 
         # CFL flux limiter (stability at high K_sat).  The gravity-drainage flux
         # is applied EXPLICITLY (grav_flux term in the rhs below), so it must not
         # move more than one cell of water per step: K_half * dt / dz <= 1.  For a
         # 30-min step a high-K sandy soil (K_sat ~ 4e-5 m/s >> dz/dt) violates this
-        # and psi/theta ran away via the specific-storage term (now capped at the
-        # hydrostatic head in the update below, but the explicit flux must still
-        # be resolvable per step).  Cap the interface
+        # and psi/theta run away via the UNBOUNDED specific-storage term (theta =
+        # theta_sat + S_s*theta_sat*psi has no upper clip).  Cap the interface
         # conductivity at 0.9*min(dz_adjacent)/dt.  No-op for low-K soils
         # (loam K_sat ~ 3e-6 << dz/dt); mass-conserving (the excess drainage is
         # simply deferred to the next step, not discarded).
@@ -421,7 +509,7 @@ def solve_richards(
         # is below the surface supply, 0 when capped) — use it, not _Kc, so a capped
         # (supply-limited) cell decouples from the soil and adds only an explicit
         # source q01/dz0, conserving exactly.
-        q01_m, Kc_m, R_s_m, D_s_m = _surface_terms(h_s_m, psi_m[:, 0], theta_m[:, 0])
+        q01_m, Kc_m, R_s_m, D_s_m = _surface_terms(h_s_m, psi_m[:, 0])
         diag = diag.at[:, 0].add(Kc_m / dz[0] * (1.0 - Kc_m / D_s_m))
         rhs = rhs.at[:, 0].add(q01_m / dz[0] - Kc_m * R_s_m / (dz[0] * D_s_m))
 
@@ -432,7 +520,7 @@ def solve_richards(
             # exactly as the interior grav flux and the surface infiltration above.
             # dz_N is the thick bottom layer, so this rarely bites, but keeps every
             # explicit K path bounded so a high-K profile cannot drain > one cell/step.
-            K_bot = jnp.minimum(K_m[:, -1], _CFL_SAFETY * dz[-1] / dt)
+            K_bot = _bottom_drain_K(K_m)
             if _f_drain is not None:
                 K_bot = K_bot * _f_drain[:, -1]   # field-capacity limit at the bottom too
             rhs = rhs.at[:, -1].add(-K_bot / dz[-1])
@@ -448,57 +536,102 @@ def solve_richards(
 
         # Recover the surface-cell increment from the Schur relation, then update.
         dh_s = (-R_s_m + Kc_m * dpsi[:, 0]) / D_s_m
+        # Damp the whole column update (soil and surface cell together, so the
+        # Schur relation still holds) by the factor that would cap the UNDAMPED
+        # trial theta change at max_dse_per_iter of the theta range.  The trial
+        # change is the one the update below APPLIES: theta + C*dpsi (the
+        # linearised storage change) clipped to the bounds the update clips to,
+        # NOT theta(psi + dpsi) - theta: on a dry layer the psi step is the flux
+        # change divided by a collapsing capacity, so the psi-based trial is
+        # enormous, lam -> 0 and the column crawls to max_iter unconverged while
+        # C*dpsi itself is small and bounded by the fluxes (measured on the
+        # global-run spike cell: 1 mm/h of rain, 30 iterations unconverged with
+        # the psi-based trial; converged in 20 with this one).  Clipped like the
+        # update so a layer held at the dry floor under a draw (its whole C*dpsi
+        # clipped away) counts as no change and the column can converge.  The
+        # PDI / Lu curves keep the psi update (their theta -> psi inverse is
+        # approximate; stepping in theta and inverting every iterate decoupled
+        # theta from psi by ~0.05), hence the psi-based trial.
+        theta_span = jnp.broadcast_to(hydro_config.theta_sat - hydro_config.theta_r,
+                                      theta_m.shape)
+
+        def _theta_cap(h_s):
+            # Water a layer holds at the hydrostatic head of the pond, z_k + h_s.
+            psi_ceiling = (grid.z_node.astype(psi_m.dtype)[None, :]
+                           + jnp.maximum(h_s, 0.0)[:, None])
+            return theta_from_psi(psi_ceiling, hydro_config)
+
+        def _theta_update(dpsi, h_s_new):
+            theta_lin = theta_m + C_m * dpsi
+            # Bounds.  Below: the config-aware dry floor (see _SE_DRY_FLOOR).
+            # Above: the water the layer holds at the hydrostatic head of the
+            # pond this iterate leaves, z_k + h_s (so the top layer never sits
+            # above the head the next iterate's surface link sees): no legitimate
+            # state exceeds it (a pond or a water table sits exactly on it), any
+            # residual overshoot does.
+            theta_cap = _theta_cap(h_s_new)
+            # Water above the cap is not discarded: it backs up into the layer
+            # above where that one has room, on up the column otherwise, and
+            # from layer 0 onto the surface store (CLM's excess-water cascade),
+            # so EVERY iterate conserves water.  A clip that lost the surplus had
+            # the surface balance re-request it next iteration, a 2-cycle that
+            # left the step unconverged and the budget open.
+            _dz_b = dz[None, :]
+            room = jnp.maximum(theta_cap - theta_lin, 0.0) * _dz_b              # [m]
+            over = jnp.maximum(theta_lin - theta_cap, 0.0) * _dz_b              # [m]
+            theta_lin = theta_lin - over / _dz_b
+            carry = jnp.zeros_like(h_s_new)
+            _cols = [None] * psi_m.shape[1]
+            for k in range(psi_m.shape[1] - 1, -1, -1):                     # deepest first
+                carry = carry + over[:, k]
+                take = jnp.minimum(carry, room[:, k])
+                _cols[k] = theta_lin[:, k] + take / dz[k]
+                carry = carry - take
+            theta_lin = jnp.stack(_cols, axis=1)
+            h_s_new = h_s_new + carry
+            theta_new = jnp.clip(theta_lin, _theta_floor, theta_cap)
+            # psi from theta (the elastic inverse above theta_sat), kept finite
+            # in the working precision at the dry end (see _PSI_FLOOR_MIN).  A
+            # layer AT the theta floor is pinned to the psi floor exactly, so the
+            # post-solve floor test does not hinge on round-off of the inverse.
+            psi_new = jnp.maximum(psi_from_theta(theta_new, hydro_config), _psi_dry_floor)
+            psi_new = jnp.where(theta_new <= _theta_floor, _psi_dry_floor, psi_new)
+            return theta_new, psi_new.astype(psi_m.dtype), h_s_new
+
+        if _shift_psi:
+            theta_try = theta_from_psi(jnp.maximum(psi_m + dpsi, _psi_dry_floor), hydro_config)
+        else:
+            theta_try = jnp.clip(theta_m + C_m * dpsi, _theta_floor, _theta_cap(h_s_m + dh_s))
+        dse_try = jnp.max(jnp.abs(theta_try - theta_m) / theta_span, axis=1)
+        # limit / max(dse, limit): equals min(1, limit/dse) without a tiny-
+        # denominator division whose float32 VJP overflows (0 * inf = NaN).
+        lam = richards_config.max_dse_per_iter / jnp.maximum(
+            dse_try, richards_config.max_dse_per_iter)
+        dpsi = dpsi * lam[:, None]
+        dh_s = dh_s * lam
         h_s_new = h_s_m + dh_s
 
         # Update in THETA, the storage change the linearised balance solved for,
-        # then psi from theta.  C*dpsi is bounded by the fluxes (~ rain*dt/dz);
-        # psi + dpsi is that same change divided by a capacity that collapses like
-        # Se^(b+1) at the dry end of a Clapp-Hornberger soil (C/dt ~ 1e-16 1/s at
-        # theta = 0.015, b = 7).  From there 1 mm of rain on a 3 mm layer gave
-        # dpsi ~ +1e10 m: a positive pressure the elastic branch turned into water
-        # and the surface link into runoff (the dry-season runoff spikes of the
-        # global runs).  The dry floor cannot catch that: it bounds the drying
-        # direction, and sits at psi_sat*10^(4b).  A saturated layer that drains
-        # (a falling water table) had the mirror problem: its elastic capacity is
-        # just as tiny and the psi step overshot to a deeply dry psi.  theta(psi)
-        # is strictly increasing through saturation (its elastic branch starts at
-        # air entry, see soil_hydraulics.air_entry_psi), so psi_from_theta is its
-        # inverse and the fixed point is unchanged: the discrete balance with
-        # theta = theta(psi).
-        theta_lin = theta_m + C_m * dpsi
-        # Bounds.  Below: the config-aware dry floor (see _SE_DRY_FLOOR).  Above:
-        # the water the layer holds at the hydrostatic head of the pond this
-        # iterate leaves, z_k + h_s (so the top layer never sits above the head the
-        # next iterate's surface link sees): no legitimate state exceeds it (a
-        # pond or a water table sits exactly on it), any residual overshoot does.
-        psi_ceiling = (grid.z_node.astype(psi_m.dtype)[None, :]
-                       + jnp.maximum(h_s_new, 0.0)[:, None])
-        theta_cap = theta_from_psi(psi_ceiling, hydro_config)
-        # Water above the cap is not discarded: it backs up into the layer above
-        # where that one has room, on up the column otherwise, and from layer 0
-        # onto the surface store (CLM's excess-water cascade), so EVERY iterate
-        # conserves water.  A clip that lost the surplus had the surface balance
-        # re-request it next iteration, a 2-cycle that left the step unconverged
-        # and the budget open.
-        _dz_b = dz[None, :]
-        room = jnp.maximum(theta_cap - theta_lin, 0.0) * _dz_b              # [m]
-        over = jnp.maximum(theta_lin - theta_cap, 0.0) * _dz_b              # [m]
-        theta_lin = theta_lin - over / _dz_b
-        carry = jnp.zeros_like(h_s_new)
-        _cols = [None] * psi_m.shape[1]
-        for k in range(psi_m.shape[1] - 1, -1, -1):                     # deepest first
-            carry = carry + over[:, k]
-            take = jnp.minimum(carry, room[:, k])
-            _cols[k] = theta_lin[:, k] + take / dz[k]
-            carry = carry - take
-        theta_lin = jnp.stack(_cols, axis=1)
-        h_s_new = h_s_new + carry
-        theta_new = jnp.clip(theta_lin, _theta_floor, theta_cap)
-        # psi from theta (the elastic inverse above theta_sat), kept finite in the
-        # working precision at the dry end (see _PSI_FLOOR_MIN).
-        psi_new = jnp.maximum(psi_from_theta(theta_new, hydro_config), _psi_dry_floor)
-        psi_new = psi_new.astype(psi_m.dtype)
-        theta_new = theta_new.astype(theta_m.dtype)
+        # then psi from theta (converged columns are frozen below).  C*dpsi is
+        # bounded by the fluxes (~ rain*dt/dz); psi + dpsi is that same change
+        # divided by a capacity that collapses like Se^(b+1) at the dry end of a
+        # Clapp-Hornberger soil (C/dt ~ 1e-16 1/s at theta = 0.015, b = 7).  From
+        # there 1 mm of rain on a 3 mm layer gave dpsi ~ +1e10 m: a positive
+        # pressure the elastic branch turned into water and the surface link into
+        # runoff (the dry-season runoff spikes of the global runs).  The dry floor
+        # cannot catch that: it bounds the drying direction.  A saturated layer
+        # that drains (a falling water table) had the mirror problem: its elastic
+        # capacity is just as tiny and the psi step overshot to a deeply dry psi.
+        # theta(psi) is strictly increasing through saturation (its elastic branch
+        # starts at air entry, see soil_hydraulics.air_entry_psi), so
+        # psi_from_theta is its inverse and the fixed point is unchanged: the
+        # discrete balance with theta = theta(psi).
+        if _shift_psi:
+            # PDI / Lu (approximate inverse): main's psi update, unchanged.
+            psi_new = jnp.maximum(psi_m + dpsi, _psi_dry_floor)
+            theta_new = theta_from_psi(psi_new, hydro_config)
+        else:
+            theta_new, psi_new, h_s_new = _theta_update(dpsi, h_s_new)
 
         # Carry the bottom-layer K THIS iteration's rhs actually DEBITED: the
         # CFL-capped free-drainage flux jnp.minimum(K_m[:,-1], 0.9*dz_N/dt) — the
@@ -513,10 +646,22 @@ def solve_richards(
         # Diagnostic bottom drainage MUST equal the flux the rhs actually debited above
         # (incl. the field-capacity limiter), else runoff_subsurface over-reports and the
         # water budget (in - out - dstorage) leaves a residual.
-        _k_bot_diag = jnp.minimum(K_m[:, -1], _CFL_SAFETY * dz[-1] / dt)
+        _k_bot_diag = _bottom_drain_K(K_m)
         if _f_drain is not None:
             _k_bot_diag = _k_bot_diag * _f_drain[:, -1]
-        return h_s_new, psi_new, theta_new, _k_bot_diag
+        # Converged columns keep their state for the rest of the loop; a column
+        # converges on an undamped step whose applied theta change (after the
+        # dry-floor clamp) is below theta_tol in every layer.
+        conv = (lam >= 1.0) & (
+            jnp.max(jnp.abs(theta_new - theta_m), axis=1) < richards_config.theta_tol)
+        # where() masks the frozen lane's cotangent but not a NaN made upstream
+        # in it: keep every division in this body finite at a converged state.
+        h_s_new = jnp.where(done_m, h_s_m, h_s_new)
+        psi_new = jnp.where(done_m[:, None], psi_m, psi_new)
+        theta_new = jnp.where(done_m[:, None], theta_m, theta_new)
+        _k_bot_diag = jnp.where(done_m, k_bot_m, _k_bot_diag)
+        n_it_new = jnp.where(done_m, n_it_m, n_it_m + 1.0)
+        return h_s_new, psi_new, theta_new, _k_bot_diag, done_m | conv, n_it_new
 
     theta_m_init = theta_from_psi(psi_m, hydro_config)
 
@@ -533,7 +678,8 @@ def solve_richards(
     # whose hydraulics are wider than ``dz`` (codex).  Byte-identical for a
     # uniform float64 / true float32 run.
     _work_dtype = jnp.result_type(
-        psi_m, theta_n, theta_m_init, dz, dz_if, flux_top, _Ksat, h_s0, sink)
+        psi_m, theta_n, theta_m_init, dz, dz_if, flux_top, _Ksat, h_s0, sink,
+        *(() if log_impedance is None else (log_impedance,)))
     _psi_c0 = psi_m.astype(_work_dtype)
     _theta_c0 = theta_m_init.astype(_work_dtype)
     # Seed for the K_bot diagnostic carry: the bottom-layer drainage K at the
@@ -541,22 +687,20 @@ def solve_richards(
     # applied, then CFL-capped) so its dtype matches the loop output (carry
     # input/output dtypes must agree).  Overwritten on the first iteration; only
     # reachable as-is for the degenerate max_iter=0.
-    _K_bot0 = jnp.minimum(
-        hydraulic_conductivity(_psi_c0, _theta_c0, hydro_config)[:, -1] * _kdecay[-1],
-        _CFL_SAFETY * dz[-1] / dt)
-    h_s_final, psi_final, theta_final, K_bot_solve = jax.lax.fori_loop(
+    _K_bot0 = _bottom_drain_K(
+        hydraulic_conductivity(_psi_c0, _theta_c0, hydro_config) * _kdecay[None, :])
+    h_s_final, psi_final, theta_final, K_bot_solve, converged, n_iter_final = jax.lax.fori_loop(
         0, richards_config.max_iter,
         picard_body,
-        (h_s0.astype(_work_dtype), _psi_c0, _theta_c0, _K_bot0),
+        (h_s0.astype(_work_dtype), _psi_c0, _theta_c0, _K_bot0,
+         jnp.zeros(ncol, dtype=bool), jnp.zeros(ncol, dtype=_work_dtype)),
     )
-    # Fixed iteration count (no convergence check; always equals max_iter)
-    n_iter_final = jnp.full(ncol, float(richards_config.max_iter))
 
     # Surface store + overland runoff, split from the converged surface cell.  The
     # surface balance R_s = 0 gives dh_s/dt = flux_top - q01, so the soil's +q01 and
     # the pond's -q01 cancel and d(soil + pond) = flux_top - sink - drainage exactly.
-    # The cap q01 <= h_s0/dt + flux_top guarantees h_s_final >= 0 AT convergence; with
-    # the fixed (non-converged) 10-iteration Picard, h_s_final can dip slightly
+    # The cap q01 <= h_s0/dt + flux_top guarantees h_s_final >= 0 AT convergence; for
+    # a column that did not converge within max_iter iterations, h_s_final can dip slightly
     # negative on Picard slack.  Clamping that to 0 would CREATE water (codex), so the
     # negative slack (the over-infiltration the pond could not actually supply) is
     # un-infiltrated from the soil column below — distributed across all layers by
@@ -591,8 +735,10 @@ def solve_richards(
     # needed -- with a Picard convergence check / more iterations, not a
     # non-physical theta clip.  psi_final is left as-is (the O(slack) psi/theta
     # mismatch re-equilibrates on the next step's Picard solve, as before).
-    theta_r = hydro_config.theta_r
-    avail = jnp.maximum((theta_final - theta_r) * dz[None, :], 0.0)   # (ncol,nlayers) [m]
+    # Available down to the solver's dry floor (not theta_r): a debit below the
+    # floor would be refilled by the next step's psi clamp, i.e. created water.
+    theta_floor = theta_from_psi(_psi_dry_floor, hydro_config)
+    avail = jnp.maximum((theta_final - theta_floor) * dz[None, :], 0.0)  # (ncol,nlayers) [m]
     avail_total = jnp.sum(avail, axis=1)                             # (ncol,) [m]
     debit_frac = jnp.minimum(
         pond_deficit / jnp.maximum(avail_total, 1e-30), 1.0)         # (ncol,) in [0,1]
@@ -621,15 +767,83 @@ def solve_richards(
     runoff_surface_kgm2s = runoff_surface * constants.rho_water
     runoff_subsurface_kgm2s = runoff_subsurface * constants.rho_water
 
-    # Column water budget over the step: storage change (soil + pond) minus the
-    # net of the fluxes the solver reports.  Zero to round-off when every demand
-    # was feasible; a positive value is water the dry floor's clip had to create
-    # because a sink asked for more than its layer held above the floor.
-    budget_residual = (
-        jnp.sum((theta_final - theta_n) * dz[None, :], axis=1)
-        + surface_water_new - h_s0
-        - dt * (flux_top - jnp.sum(sink * dz[None, :], axis=1)
-                - runoff_subsurface - runoff_surface))
+    # Column water budget of the imposed fluxes (pond + soil storage) [m]; > 0 =
+    # water the solve created.  Two sources, handled differently:
+    #  * refill: a draw (net upward top flux, root sink) the dry column could not
+    #    supply, refilled by the psi dry floor -- only up to the draws on layers
+    #    the floor clamp holds at the end of the solve.  The soil
+    #    did not give that water, so the caller must not report it as evaporation.
+    #  * everything else > 0: Picard non-convergence (from a floor-pinned layer,
+    #    e.g. drizzle on a dry crust, ~1e-2 kg/m2 per step measured; tiny on a
+    #    wet column).  That water went INTO the soil, so it is taken back out of
+    #    it, down to the dry floor, with psi recomputed so the next solve starts
+    #    consistent.  Whatever the column cannot give back stays in water_created
+    #    (signed diagnostic).
+    #  * < 0: water an unconverged (damped) last iterate lost, e.g. drizzle on a
+    #    dry column (-0.17 kg/m2/day measured).  The solve debited it from the
+    #    soil, so it is returned to the soil, the mirror of the take-back.
+    def _budget(theta_end):
+        return (jnp.sum((theta_end - theta_n) * dz[None, :], axis=1)
+                + (surface_water_new - h_s0)
+                - (flux_top - jnp.sum(sink * dz[None, :], axis=1)
+                   - runoff_surface - runoff_subsurface) * dt)
+
+    created = _budget(theta_final)
+    # Only draws on layers the floor clamp holds can have been refilled.
+    pinned = (psi_final <= _psi_dry_floor).astype(created.dtype)       # (ncol, nlayers)
+    draw = (jnp.maximum(-flux_top, 0.0) * pinned[:, 0]
+            + jnp.sum(jnp.maximum(sink, 0.0) * dz[None, :] * pinned, axis=1)) * dt
+    refill = jnp.clip(created, 0.0, draw)
+    excess = jnp.maximum(created - refill, 0.0)
+    deficit = jnp.maximum(-created, 0.0)    # refill = 0 whenever created < 0
+    # Unsaturated layers only (psi < 0).  (psi_from_theta now inverts the elastic
+    # branch too, see soil_hydraulics.air_entry_psi, but the take-back keeps to
+    # the unsaturated zone: a saturated layer sits on its hydrostatic cap and has
+    # no room; a Clapp-Hornberger layer between air entry and 0 counts as
+    # unsaturated here although it holds elastic water, which is harmless.)
+    # Excess comes out of each layer's water above the dry floor; a deficit goes
+    # into each layer's room below saturation; both in proportion, capped so no
+    # layer leaves [theta_floor, theta_sat].
+    unsat = psi_final < 0.0
+    unsat_avail = jnp.where(
+        unsat, jnp.maximum((theta_final - theta_floor) * dz[None, :], 0.0), 0.0)
+    unsat_room = jnp.where(
+        unsat, jnp.maximum((hydro_config.theta_sat - theta_final) * dz[None, :], 0.0), 0.0)
+    # Masked denominators: a 1e-30 floor's VJP (-num/den^2) overflows in float32
+    # and NaNs the gradient of a column with no room / no available water.
+    def _frac(num, cap):
+        tot = jnp.sum(cap, axis=1)
+        ok = tot > 0.0
+        return jnp.where(ok, jnp.minimum(num / jnp.where(ok, tot, 1.0), 1.0), 0.0)
+
+    take_frac = _frac(excess, unsat_avail)
+    give_frac = _frac(deficit, unsat_room)
+    # Signed per-layer change [m], + = water added to the layer (z down, so
+    # this is storage, not a flux): returned deficit minus taken-back excess.
+    adjust = unsat_room * give_frac[:, None] - unsat_avail * take_frac[:, None]
+    theta_old = theta_final
+    theta_final = theta_final + adjust / dz[None, :]
+    # Masked-out layers get a mid-curve theta so the unused psi_from_theta branch
+    # stays finite (no NaN cotangent from saturated layers under reverse mode).
+    touched = adjust != 0.0
+    theta_mid = 0.5 * (theta_floor + hydro_config.theta_sat)
+    theta_safe = jnp.where(touched, theta_final, theta_mid)
+    if _shift_psi:
+        # PDI / Lu: a reset through the approximate inverse would move psi off
+        # the solved (psi, theta) pair by the full inverse error even for a
+        # round-off adjustment; the difference vanishes with the adjustment.
+        theta_old_safe = jnp.where(touched, theta_old, theta_mid)
+        # Difference first: added to psi_final it would round psi in float32.
+        psi_new_c = psi_final + (psi_from_theta(theta_safe, hydro_config)
+                                 - psi_from_theta(theta_old_safe, hydro_config))
+    else:
+        psi_new_c = psi_from_theta(theta_safe, hydro_config)
+    psi_final = jnp.where(touched, psi_new_c, psi_final)
+    # theta keeps the exact adjustment (water conserved on every curve).  PDI / Lu
+    # invert only approximately (round trip off by up to ~0.08 m3/m3), so there
+    # the debited layer's psi carries that pre-existing inverse error; resetting
+    # theta from psi instead destroyed ~0.3 kg/m2 per step on a dry column.
+    water_created = _budget(theta_final) - refill
 
     return RichardsOutput(
         psi_new=psi_final,
@@ -638,7 +852,9 @@ def solve_richards(
         runoff_subsurface=runoff_subsurface_kgm2s,
         n_iter=n_iter_final,
         surface_water=surface_water_new,
-        budget_residual=budget_residual,
+        refill=refill,
+        water_created=water_created,
+        converged=converged,
     )
 
 

@@ -161,6 +161,12 @@ def main() -> int:
         init_multicontroller_distributed(args.coordinator)
 
     import jax
+    # Precision: state dtype comes from the precision POLICY (default fp32),
+    # NOT JAX_ENABLE_X64 — set it to match or the "float64" arm silently runs
+    # fp32 state.
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy(PrecisionPolicy.fp64() if jax.config.jax_enable_x64
+               else PrecisionPolicy.fp32())
 
     n_devices = 6 * args.kt * args.kt
     avail = len(jax.devices())

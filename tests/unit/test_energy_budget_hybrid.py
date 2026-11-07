@@ -109,10 +109,10 @@ def test_moisture_tracker_accepts_dp():
     s = _state()
     t = MoistureBudgetTracker()
     zero = jnp.zeros(NCOL)
-    a = t.update(s["q_v"], s["p_s"], coord.dsigma, zero, zero,
+    a = t.update(s["q_v"], s["p_s"], coord.dsigma, zero, evap=zero,
                  elapsed_seconds=0.0)
     t2 = MoistureBudgetTracker()
-    b = t2.update(s["q_v"], s["p_s"], coord.dsigma, zero, zero,
+    b = t2.update(s["q_v"], s["p_s"], coord.dsigma, zero, evap=zero,
                   elapsed_seconds=0.0, dp=coord.layer_thickness_dp(s["p_s"]))
     assert np.isfinite(b.column_water)
     assert abs(a.column_water - b.column_water) > 1.0e-3, (

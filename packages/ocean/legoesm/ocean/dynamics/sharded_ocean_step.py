@@ -48,7 +48,7 @@ import numpy as np
 from legoesm.parallel.geometry_consistency import (
     FLAG_ABSENT, addressable_shard_put, assert_flags_agree,
     assert_pytree_bytes_equal, assert_schema_agrees, checked_shard_put,
-    coerce_bool, coerce_count, config_digest48, name_digest48,
+    coerce_bool, coerce_count, config_digest48, mesh_axis_terms, name_digest48,
     tree_schema_digest48)
 from jax.sharding import NamedSharding, PartitionSpec as P
 
@@ -261,22 +261,6 @@ _OCEAN_MESH_ENTRY_FLAGS = (
 )
 
 
-def _ocean_mesh_axis_terms(mesh):
-    """``(axis_names, axis_sizes)`` term lists; never raises."""
-    if mesh is None:
-        return (), ()
-    try:
-        names = tuple(str(a) for a in mesh.axis_names)
-    except Exception:                       # pragma: no cover - defensive
-        return ("<unreadable>",), ("<unreadable>",)
-    try:
-        shape = dict(mesh.shape)
-        sizes = tuple(f"{n}={shape.get(n, '?')}" for n in names)
-    except Exception:                       # pragma: no cover - defensive
-        sizes = ("<unreadable>",)
-    return names, sizes
-
-
 def _agree_ocean_mesh_entry(mesh, tree=None, *, where: str) -> None:
     """Agree the mesh AND a pytree LEAF SCHEMA before a scatter/gather.
 
@@ -289,7 +273,7 @@ def _agree_ocean_mesh_entry(mesh, tree=None, *, where: str) -> None:
     One collective runs PER LEAF, so the leaf schedule (optional fields,
     dtypes, shapes) is rank-local data and is folded into one digest.
     """
-    names, sizes = _ocean_mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     assert_flags_agree(_OCEAN_MESH_ENTRY_FLAGS, (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
@@ -563,6 +547,49 @@ def gather_state_latlon(state, mesh, *, to_host: bool = False):
     return state._replace(**updates)
 
 
+def shard_cell_pytree_latlon(tree, mesh):
+    """Lay out a pytree of CELL-centred fields (leading dim ``n_lat``) for the
+    lat-band SPMD lane -- the prognostic sea-ice tile (``SeaIceState`` /
+    ``DynamicSeaIceState``: every leaf is ``(n_lat, n_lon[, n_cat])``).
+
+    Same layout as the cell fields of :func:`shard_state_latlon` (``P("lat")``
+    on axis 0, scalars replicated) so the ice tile the OMIP block scan carries
+    next to the ocean state is sharded consistently with it; ``None`` leaves
+    pass through.  NO staggered (``n_lat+1``) field may be in ``tree`` -- the
+    ice tile has none; a leading dim that is not the mesh's ``n_lat`` multiple
+    raises inside ``addressable_shard_put`` rather than silently replicating.
+    Inverse: :func:`gather_cell_pytree_latlon`.
+    """
+    _agree_ocean_mesh_entry(mesh, tree, where="shard_cell_pytree_latlon")
+    assert_pytree_bytes_equal(tree, "shard_cell_pytree_latlon")
+
+    def _put(leaf):
+        if leaf is None or not hasattr(leaf, "ndim"):
+            return leaf
+        arr = jnp.asarray(leaf)
+        spec = _lat_spec(arr) if arr.ndim >= 1 else P()
+        return addressable_shard_put(arr, NamedSharding(mesh, spec))
+
+    return jax.tree.map(_put, tree)
+
+
+def gather_cell_pytree_latlon(tree, mesh, *, to_host: bool = False):
+    """Inverse of :func:`shard_cell_pytree_latlon`: replicate every leaf to a
+    single-device / host array (route-B safe via ``replicate_leaf``)."""
+    _agree_ocean_mesh_entry(mesh, tree, where="gather_cell_pytree_latlon")
+    from legoesm.parallel.latlon_spmd import replicate_leaf
+    rep = NamedSharding(mesh, P())
+    _mp = jax.process_count() > 1
+
+    def _get(leaf):
+        if leaf is None or not hasattr(leaf, "ndim"):
+            return leaf
+        out = replicate_leaf(leaf, rep, multiprocess=_mp)
+        return np.asarray(out) if to_host else out
+
+    return jax.tree.map(_get, tree)
+
+
 # Ordered flag names for the ocean SPMD entry gate. STATIC tuple: the payload
 # width is fixed by this literal, never by rank-local data.
 _OCEAN_SPMD_ENTRY_FLAGS = (
@@ -603,7 +630,7 @@ def _agree_ocean_spmd_entry(model, mesh, *, where: str) -> None:
     # the collective (see the atm twin for the full rule).
     grid = getattr(model, "grid", None)
     fold = getattr(grid, "fold", None)
-    names, sizes = _ocean_mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     problems = []
 
     def _count(value, label, absent=FLAG_ABSENT):
@@ -668,7 +695,7 @@ def _agree_ocean_spmd_call(mesh, state, forcing, *, where: str,
     process.  See the atmosphere twin ``_agree_spmd_call`` for why gating only
     on cache misses is NOT a valid optimisation.
     """
-    names, sizes = _ocean_mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     assert_flags_agree(_OCEAN_CALL_ENTRY_FLAGS, (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),

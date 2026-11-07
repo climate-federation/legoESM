@@ -29,9 +29,11 @@ def test_synthetic_ocean_forcing_shapes_and_units():
     assert (f.precip >= 0.0).all()
 
 
-def test_load_jra55_do_synthetic_fallback():
+def test_load_jra55_do_synthetic_fallback(tmp_path):
     from legoesm.ocean.forcing import load_jra55_do
-    f = load_jra55_do(2000)
+    with pytest.raises(FileNotFoundError):           # fail-loud by default
+        load_jra55_do(2000, cache_dir=tmp_path)
+    f = load_jra55_do(2000, cache_dir=tmp_path, allow_synthetic=True)
     # Synthetic returns the canonical-shape ``OceanForcing``.
     assert f.u10.ndim == 3
     # 7 channels populated, all finite.

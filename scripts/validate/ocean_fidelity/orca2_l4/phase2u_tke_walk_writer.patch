@@ -1,0 +1,272 @@
+--- source/src/OCE/ZDF/zdftke.F90
++++ phase2u/MY_SRC/zdftke.F90
+@@ -96,6 +96,17 @@
+    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:)   ::   htau    ! depth of tke penetration (nn_htau)
+    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   dissl   ! now mixing lenght of dissipation
+ 
++   ! Lane-4 WRITE-only TKE walk storage.  It exists only for the armed kt=2
++   ! rank-zero acquisition and is never read by model arithmetic.
++   LOGICAL, SAVE :: l4_tke_dump = .FALSE.
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:) :: l4_tke_zice, l4_tke_zwlc2, &
++      & l4_tke_imlc, l4_tke_zhlc, l4_tke_zus3
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) :: l4_tke_zpelc, l4_tke_en_lc, &
++      & l4_tke_pdlr, l4_tke_zdiag_pre, l4_tke_zdlw_pre, l4_tke_zdup_pre, &
++      & l4_tke_en_rhs, l4_tke_zdiag_fwd, l4_tke_zdlw_fwd, l4_tke_en_solved, &
++      & l4_tke_en_etau, l4_tke_mxlm, l4_tke_mxld, l4_tke_avm, l4_tke_avt, &
++      & l4_tke_dissl
++
+    !! * Substitutions
+ #  include "do_loop_substitute.h90"
+ #  include "domzgr_substitute.h90"
+@@ -179,10 +190,14 @@
+       IF( nn_pdl == 1 ) ALLOCATE( z_pdlr(T2D(0),jpk) )        ! avt multiplied by the inverse Prandtl number
+ #endif
+       !
++      CALL l4_tke_begin( kt )
++      !
+       CALL tke_tke( Kbb, Kmm, p_sh2, p_avm, p_avt, z_pdlr )   ! now tke (en)
+       !
+       CALL tke_avn( Kbb, Kmm,        p_avm, p_avt, z_pdlr )   ! now avt, avm, dissl
+       !
++      CALL l4_tke_write( kt, Kbb, Kmm )
++      !
+ #if ! defined key_PSYCLONE_2p5p0
+       IF( nn_pdl == 1 ) DEALLOCATE( z_pdlr )
+ #endif
+@@ -256,6 +271,11 @@
+             CASE( 2 )   ;   zice_fra(:) =              fr_i(T1Di(0),jj)
+             CASE( 3 )   ;   zice_fra(:) = MIN( 4._wp * fr_i(T1Di(0),jj) , 1._wp )
+          END SELECT
++         IF( l4_tke_dump ) THEN
++            DO ji = ntsi, ntei
++               IF( tmask(ji,jj,1) /= 0._wp ) l4_tke_zice(ji,jj) = zice_fra(ji)
++            END DO
++         ENDIF
+          !
+          !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+          !                     !  Surface boundary condition on tke
+@@ -299,6 +319,12 @@
+                END_1D
+             ENDIF
+             !
++            IF( l4_tke_dump ) THEN
++               DO ji = ntsi, ntei
++                  IF( tmask(ji,jj,1) /= 0._wp ) l4_tke_zwlc2(ji,jj) = zWlc2(ji)
++               END DO
++            ENDIF
++            !
+          ENDIF
+          !
+          !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+@@ -370,6 +396,19 @@
+             END_2D
+             !
+          ENDIF
++         IF( l4_tke_dump ) THEN
++            DO ji = ntsi, ntei
++               IF( tmask(ji,jj,1) /= 0._wp ) THEN
++                  l4_tke_imlc(ji,jj) = REAL(imlc(ji),wp)
++                  l4_tke_zhlc(ji,jj) = zhlc(ji)
++                  l4_tke_zus3(ji,jj) = zus3(ji)
++                  DO jk = 1, MIN(mbkt(ji,jj)+1,jpk)
++                     l4_tke_zpelc(ji,jj,jk) = zpelc(ji,jk)
++                     l4_tke_en_lc(ji,jj,jk) = en(ji,jj,jk)
++                  END DO
++               ENDIF
++            END DO
++         ENDIF
+          !
+          !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+          !                     !  Now Turbulent kinetic energy (output in en)
+@@ -447,11 +486,34 @@
+ 
+             END SELECT
+          ENDIF
++         IF( l4_tke_dump ) THEN
++            DO ji = ntsi, ntei
++               IF( tmask(ji,jj,1) /= 0._wp ) THEN
++                  DO jk = 1, MIN(mbkt(ji,jj)+1,jpk)
++                     l4_tke_zdiag_pre(ji,jj,jk) = zdiag(ji,jk)
++                     l4_tke_zdlw_pre (ji,jj,jk) = zd_lw(ji,jk)
++                     l4_tke_zdup_pre (ji,jj,jk) = zd_up(ji,jk)
++                     l4_tke_en_rhs   (ji,jj,jk) = en(ji,jj,jk)
++                     IF( PRESENT(p_pdlr) .AND. jk >= 2 .AND. jk <= jpkm1 ) &
++                        & l4_tke_pdlr(ji,jj,jk) = p_pdlr(ji,jj,jk)
++                  END DO
++               ENDIF
++            END DO
++         ENDIF
+          !
+          !                          !* Matrix inversion from level 2 (tke prescribed at level 1)
+          DO_2Dik( 0, 0, 2, jpkm1, 1 )                 ! First recurrence : Dk = Dk - Lk * Uk-1 / Dk-1
+             zdiag(ji,jk) = zdiag(ji,jk) - zd_lw(ji,jk) * zd_up(ji,jk-1) / zdiag(ji,jk-1)
+          END_2D
++         IF( l4_tke_dump ) THEN
++            DO ji = ntsi, ntei
++               IF( tmask(ji,jj,1) /= 0._wp ) THEN
++                  DO jk = 1, MIN(mbkt(ji,jj)+1,jpk)
++                     l4_tke_zdiag_fwd(ji,jj,jk) = zdiag(ji,jk)
++                  END DO
++               ENDIF
++            END DO
++         ENDIF
+ !XC : commented to allow for neumann boundary condition
+ !      DO_2Dik( 0, 0, 2, jpkm1, 1 )
+ !         zd_lw(ji,2) = en(ji,jj,2) - zd_lw(ji,2) * en(ji,jj,1)    ! Surface boudary conditions on tke
+@@ -459,6 +521,15 @@
+          DO_2Dik( 0, 0, 2, jpkm1, 1 )
+             zd_lw(ji,jk) = en(ji,jj,jk) - zd_lw(ji,jk) / zdiag(ji,jk-1) * zd_lw(ji,jk-1)
+          END_2D
++         IF( l4_tke_dump ) THEN
++            DO ji = ntsi, ntei
++               IF( tmask(ji,jj,1) /= 0._wp ) THEN
++                  DO jk = 1, MIN(mbkt(ji,jj)+1,jpk)
++                     l4_tke_zdlw_fwd(ji,jj,jk) = zd_lw(ji,jk)
++                  END DO
++               ENDIF
++            END DO
++         ENDIF
+          DO_1Di( 0, 0 )                               ! Third recurrence : Ek = ( Lk - Uk * Ek+1 ) / Dk
+             en(ji,jj,jpkm1) = zd_lw(ji,jpkm1) / zdiag(ji,jpkm1)
+          END_1D
+@@ -468,6 +539,15 @@
+          DO_2Dik( 0, 0, 2, jpkm1, 1 )                 ! Set the minimum value of tke
+             en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)
+          END_2D
++         IF( l4_tke_dump ) THEN
++            DO ji = ntsi, ntei
++               IF( tmask(ji,jj,1) /= 0._wp ) THEN
++                  DO jk = 1, MIN(mbkt(ji,jj)+1,jpk)
++                     l4_tke_en_solved(ji,jj,jk) = en(ji,jj,jk)
++                  END DO
++               ENDIF
++            END DO
++         ENDIF
+          !
+          ! Kolmogorov energy of dissipation (W/kg)
+          !    ediss = Ce*sqrt(en)/L*en
+@@ -509,6 +589,15 @@
+                   &                        * MAX( 0._wp, 1._wp - zice_fra(ji) ) * wmask(ji,jj,jk) * tmask(ji,jj,1)
+             END_2D
+          ENDIF
++         IF( l4_tke_dump ) THEN
++            DO ji = ntsi, ntei
++               IF( tmask(ji,jj,1) /= 0._wp ) THEN
++                  DO jk = 1, MIN(mbkt(ji,jj)+1,jpk)
++                     l4_tke_en_etau(ji,jj,jk) = en(ji,jj,jk)
++                  END DO
++               ENDIF
++            END DO
++         ENDIF
+          !
+          !                                            ! ================= !
+       END_1D                                          !  i-k slices loop  !
+@@ -723,6 +812,19 @@
+                p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk), avtb_2d(ji,jj) * avtb(jk) ) * wmask(ji,jj,jk)
+             END_2D
+          ENDIF
++         IF( l4_tke_dump ) THEN
++            DO ji = ntsi, ntei
++               IF( tmask(ji,jj,1) /= 0._wp ) THEN
++                  DO jk = 1, MIN(mbkt(ji,jj)+1,jpk)
++                     l4_tke_mxlm (ji,jj,jk) = zmxlm(ji,jk)
++                     l4_tke_mxld (ji,jj,jk) = zmxld(ji,jk)
++                     l4_tke_avm  (ji,jj,jk) = p_avm(ji,jj,jk)
++                     l4_tke_avt  (ji,jj,jk) = p_avt(ji,jj,jk)
++                     l4_tke_dissl(ji,jj,jk) = dissl(ji,jj,jk)
++                  END DO
++               ENDIF
++            END DO
++         ENDIF
+          !                                            ! ================= !
+       END_1D                                          !  i-k slices loop  !
+       !                                               ! ================= !
+@@ -735,6 +837,88 @@
+    END SUBROUTINE tke_avn
+ 
+ 
++   SUBROUTINE l4_tke_begin( kt )
++      INTEGER, INTENT(in) :: kt
++      INTEGER :: l4_tke_ios
++      l4_tke_dump = lwp .AND. .NOT.ln_tile .AND. kt == nit000 + 1
++      IF( .NOT.l4_tke_dump ) RETURN
++      ALLOCATE( l4_tke_zice(jpi,jpj), l4_tke_zwlc2(jpi,jpj), &
++         & l4_tke_imlc(jpi,jpj), l4_tke_zhlc(jpi,jpj), l4_tke_zus3(jpi,jpj), &
++         & l4_tke_zpelc(jpi,jpj,jpk), l4_tke_en_lc(jpi,jpj,jpk), &
++         & l4_tke_pdlr(jpi,jpj,jpk), l4_tke_zdiag_pre(jpi,jpj,jpk), &
++         & l4_tke_zdlw_pre(jpi,jpj,jpk), l4_tke_zdup_pre(jpi,jpj,jpk), &
++         & l4_tke_en_rhs(jpi,jpj,jpk), l4_tke_zdiag_fwd(jpi,jpj,jpk), &
++         & l4_tke_zdlw_fwd(jpi,jpj,jpk), l4_tke_en_solved(jpi,jpj,jpk), &
++         & l4_tke_en_etau(jpi,jpj,jpk), l4_tke_mxlm(jpi,jpj,jpk), &
++         & l4_tke_mxld(jpi,jpj,jpk), l4_tke_avm(jpi,jpj,jpk), &
++         & l4_tke_avt(jpi,jpj,jpk), l4_tke_dissl(jpi,jpj,jpk), STAT=l4_tke_ios )
++      IF( l4_tke_ios /= 0 ) CALL ctl_stop( 'cannot allocate lane4 tke-walk dump storage' )
++      l4_tke_zice=0._wp ; l4_tke_zwlc2=0._wp ; l4_tke_imlc=0._wp
++      l4_tke_zhlc=0._wp ; l4_tke_zus3=0._wp ; l4_tke_zpelc=0._wp
++      l4_tke_en_lc=0._wp ; l4_tke_pdlr=0._wp ; l4_tke_zdiag_pre=0._wp
++      l4_tke_zdlw_pre=0._wp ; l4_tke_zdup_pre=0._wp ; l4_tke_en_rhs=0._wp
++      l4_tke_zdiag_fwd=0._wp ; l4_tke_zdlw_fwd=0._wp ; l4_tke_en_solved=0._wp
++      l4_tke_en_etau=0._wp ; l4_tke_mxlm=0._wp ; l4_tke_mxld=0._wp
++      l4_tke_avm=0._wp ; l4_tke_avt=0._wp ; l4_tke_dissl=0._wp
++   END SUBROUTINE l4_tke_begin
++
++
++   SUBROUTINE l4_tke_write( kt, Kbb, Kmm )
++      INTEGER, INTENT(in) :: kt, Kbb, Kmm
++      INTEGER :: l4_tke_unit, l4_tke_ios, l4_tke_payload, l4_tke_ifield
++      INTEGER, DIMENSION(3,21) :: l4_tke_extents
++      CHARACTER(LEN=96) :: l4_tke_filename
++      CHARACTER(LEN=16) :: l4_tke_magic
++      IF( .NOT.l4_tke_dump ) RETURN
++      l4_tke_extents(:, 1)=SHAPE(l4_tke_zpelc)
++      l4_tke_extents(:, 2)=SHAPE(l4_tke_en_lc)
++      l4_tke_extents(:, 3)=SHAPE(l4_tke_pdlr)
++      l4_tke_extents(:, 4)=SHAPE(l4_tke_zdiag_pre)
++      l4_tke_extents(:, 5)=SHAPE(l4_tke_zdlw_pre)
++      l4_tke_extents(:, 6)=SHAPE(l4_tke_zdup_pre)
++      l4_tke_extents(:, 7)=SHAPE(l4_tke_en_rhs)
++      l4_tke_extents(:, 8)=SHAPE(l4_tke_zdiag_fwd)
++      l4_tke_extents(:, 9)=SHAPE(l4_tke_zdlw_fwd)
++      l4_tke_extents(:,10)=SHAPE(l4_tke_en_solved)
++      l4_tke_extents(:,11)=SHAPE(l4_tke_en_etau)
++      l4_tke_extents(:,12)=SHAPE(l4_tke_mxlm)
++      l4_tke_extents(:,13)=SHAPE(l4_tke_mxld)
++      l4_tke_extents(:,14)=SHAPE(l4_tke_avm)
++      l4_tke_extents(:,15)=SHAPE(l4_tke_avt)
++      l4_tke_extents(:,16)=SHAPE(l4_tke_dissl)
++      l4_tke_extents(:,17)=(/jpi,jpj,1/)
++      l4_tke_extents(:,18)=(/jpi,jpj,1/)
++      l4_tke_extents(:,19)=(/jpi,jpj,1/)
++      l4_tke_extents(:,20)=(/jpi,jpj,1/)
++      l4_tke_extents(:,21)=(/jpi,jpj,1/)
++      l4_tke_payload=0
++      DO l4_tke_ifield=1,21
++         l4_tke_payload=l4_tke_payload+PRODUCT(l4_tke_extents(:,l4_tke_ifield))
++      END DO
++      WRITE(l4_tke_filename,'("oracle_tke_walk_kt",I8.8,".bin")') kt
++      OPEN( NEWUNIT=l4_tke_unit, FILE=TRIM(l4_tke_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++         & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_tke_ios )
++      IF( l4_tke_ios /= 0 ) CALL ctl_stop( 'cannot open lane4 tke-walk dump' )
++      l4_tke_magic='NEMO_L4_TKEW_1'
++      WRITE(l4_tke_unit) l4_tke_magic, 1, kt, Kbb, Kmm, jpi, jpj, jpk, &
++         & STORAGE_SIZE(1._wp), 16, 5, l4_tke_payload, nn_eice, nn_etau, nn_mxl, nn_pdl
++      WRITE(l4_tke_unit) l4_tke_extents
++      WRITE(l4_tke_unit) l4_tke_zpelc, l4_tke_en_lc, l4_tke_pdlr, &
++         & l4_tke_zdiag_pre, l4_tke_zdlw_pre, l4_tke_zdup_pre, l4_tke_en_rhs, &
++         & l4_tke_zdiag_fwd, l4_tke_zdlw_fwd, l4_tke_en_solved, l4_tke_en_etau, &
++         & l4_tke_mxlm, l4_tke_mxld, l4_tke_avm, l4_tke_avt, l4_tke_dissl, &
++         & l4_tke_zice, l4_tke_zwlc2, l4_tke_imlc, l4_tke_zhlc, l4_tke_zus3
++      CLOSE(l4_tke_unit)
++      DEALLOCATE( l4_tke_zice, l4_tke_zwlc2, l4_tke_imlc, l4_tke_zhlc, &
++         & l4_tke_zus3, l4_tke_zpelc, l4_tke_en_lc, l4_tke_pdlr, &
++         & l4_tke_zdiag_pre, l4_tke_zdlw_pre, l4_tke_zdup_pre, l4_tke_en_rhs, &
++         & l4_tke_zdiag_fwd, l4_tke_zdlw_fwd, l4_tke_en_solved, l4_tke_en_etau, &
++         & l4_tke_mxlm, l4_tke_mxld, l4_tke_avm, l4_tke_avt, l4_tke_dissl )
++      l4_tke_dump=.FALSE.
++      WRITE(numout,*) 'LANE4_TKE_WALK_DUMP ', kt, Kbb, Kmm
++   END SUBROUTINE l4_tke_write
++
++
+    SUBROUTINE zdf_tke_init
+       !!----------------------------------------------------------------------
+       !!                  ***  ROUTINE zdf_tke_init  ***

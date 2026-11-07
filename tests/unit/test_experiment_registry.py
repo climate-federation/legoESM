@@ -46,6 +46,11 @@ def test_get_adapter_resolves_classes():
     assert reg.get_adapter("sea_ice_only") is SeaIceExperimentConfig
 
 
+def test_retired_amip_template_points_to_production_deck():
+    with pytest.raises(ValueError, match="config/amip/amip_production.yaml"):
+        reg.load_adapter("config/templates/coupled/amip.yaml")
+
+
 def test_get_adapter_unknown_raises():
     with pytest.raises(ValueError, match="no config adapter registered"):
         reg.get_adapter("ice_only")

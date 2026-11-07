@@ -138,12 +138,15 @@ def test_trainers_route_through_the_shared_multi_step_loss():
     Asserted on ``_build_train_step``, the function that RUNS.
     """
     src = inspect.getsource(td._build_train_step)
-    assert "multi_step_rollout_loss(" in src, (
-        "the trainer still inlines its own rollout+loss")
-    assert "single_day_rollout(" not in src, (
-        "the inline single-horizon rollout is still there, so multi-step "
-        "supervision stays dead")
+    assert "_rollout_loss(" in src
     assert "rollout_hours=rollout_hours" in src
+    loss_src = inspect.getsource(td._rollout_loss)
+    assert "multi_step_rollout_loss(" in loss_src, (
+        "the trainer still inlines its own rollout+loss")
+    for s_ in (src, loss_src):
+        assert "single_day_rollout(" not in s_, (
+            "the inline single-horizon rollout is still there, so multi-step "
+            "supervision stays dead")
 
 
 # ---------------------------------------------------------------------------
@@ -268,3 +271,91 @@ def test_defaults_survive_when_the_caller_passes_nothing(monkeypatch):
     assert all(k["rad_update_steps"] == 1 for k in kws)
     # ...and with no rollout_hours the documented 24 h default is what runs.
     assert set(seen["hours"]) == {24.0}
+
+
+def _physics_fakes(monkeypatch):
+    """A segment whose rollout reads ONLY ``sbm_tau_c`` (the other default
+    trainables reach it but the forward never consumes them)."""
+    import optax
+
+    class _Seg:
+        def __init__(self, kw):
+            self.kw = kw
+
+        def raw(self, carry, n_steps, forcing):
+            return carry * self.kw["sbm_tau_c"] / 7200.0
+
+    monkeypatch.setattr(td, "build_segment_fn", lambda **kw: _Seg(kw))
+    monkeypatch.setattr(
+        td, "single_day_rollout",
+        lambda ic, forcing, run_seg_fn, *, dt, hours=24.0:
+            run_seg_fn(ic, 1, forcing))
+    monkeypatch.setattr(
+        td, "combined_loss",
+        lambda pred, target, sigma_full, grid=None, config=None:
+            ((pred - target) ** 2).sum())
+    monkeypatch.setattr(td, "_make_driver_optimizer",
+                        lambda *a, **k: optax.sgd(0.0))
+
+    class _Pipeline:
+        def build_step_unified(self, rad_stop_gradient=False):
+            return None
+
+    return _Pipeline()
+
+
+def test_classical_trainer_aborts_on_an_inert_parameter(monkeypatch):
+    """No-inert-parameters gate: a trainable leaf the rollout never reads
+    aborts the run before the first update."""
+    import pytest
+    from legoesm.training.losses import LossConfig
+
+    grid, sigma, ics, tgts, forc = _tiny_inputs()
+    pipe = _physics_fakes(monkeypatch)
+    with pytest.raises(ValueError, match="C_E"):
+        td.train_physics_params(
+            object(), grid, sigma, pipe, ics, tgts, forc, rollout_hours=6.0,
+            n_epochs=1, dt=600.0, loss_config=LossConfig(), log_every=1000)
+
+
+def test_classical_trainer_trains_only_the_given_constraints(monkeypatch):
+    """With the inert leaves frozen out the gate passes and only the given
+    parameters are trained."""
+    from legoesm.training.losses import LossConfig
+    from legoesm.training.trainable_params import DEFAULT_TRAINABLE
+
+    grid, sigma, ics, tgts, forc = _tiny_inputs()
+    pipe = _physics_fakes(monkeypatch)
+    live = [c for c in DEFAULT_TRAINABLE if c.name == "sbm_tau_c"]
+    trained, _ = td.train_physics_params(
+        object(), grid, sigma, pipe, ics, tgts, forc, rollout_hours=6.0,
+        n_epochs=1, dt=600.0, loss_config=LossConfig(), log_every=1000,
+        constraints=live)
+    assert set(trained.raw_values) == {"sbm_tau_c"}
+
+
+def test_classical_gate_uses_every_sample_not_the_first(monkeypatch):
+    """A leaf gated off on the first sample but live on a later one is not
+    inert: the gate must look at the whole training set."""
+    from legoesm.training.losses import LossConfig
+    from legoesm.training.trainable_params import DEFAULT_TRAINABLE
+
+    grid, sigma, ics, tgts, forc = _tiny_inputs()
+    pipe = _physics_fakes(monkeypatch)
+
+    class _Seg:
+        def __init__(self, kw):
+            self.kw = kw
+
+        def raw(self, carry, n_steps, forcing):
+            # C_E acts only where the forcing is non-zero (second sample).
+            return (carry * self.kw["sbm_tau_c"] / 7200.0
+                    + forcing * self.kw["C_E"])
+
+    monkeypatch.setattr(td, "build_segment_fn", lambda **kw: _Seg(kw))
+    live = [c for c in DEFAULT_TRAINABLE if c.name in ("sbm_tau_c", "C_E")]
+    trained, _ = td.train_physics_params(
+        object(), grid, sigma, pipe, ics * 2, tgts * 2,
+        [forc[0], forc[0] + 1.0], rollout_hours=6.0, n_epochs=1, dt=600.0,
+        loss_config=LossConfig(), log_every=1000, constraints=live)
+    assert set(trained.raw_values) == {"sbm_tau_c", "C_E"}

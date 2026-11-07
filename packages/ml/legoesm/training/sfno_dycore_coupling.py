@@ -53,6 +53,13 @@ class SFNOPhysics(eqx.Module):
     (replacement) variant.  None -> zeros (state-only training, the legacy
     behavior).  It is a separate float module so it trains alongside the
     SFNO without dragging the Gaussian grid's int leaves into the gradient.
+
+    ``spatial_embedding`` / ``era5_surface_fluxes`` append prescribed input
+    channels to ``packed`` — the land-fraction plane, then the six ERA5
+    surface-flux planes in ``SFC_FLUX_FORCING_KEYS`` order each divided by
+    its ``SFC_FLUX_INPUT_NORMS`` entry — supplied via the ``land_frac`` /
+    ``sfc_fluxes`` call arguments.  A flag on with its plane missing raises
+    ValueError; never silently-zero channels.
     """
 
     sfno: SFNO
@@ -60,6 +67,8 @@ class SFNOPhysics(eqx.Module):
     nlev: int = eqx.field(static=True)
     flux_head: eqx.Module = None
     flux_output_scale: float = eqx.field(static=True, default=_SFNO_FLUX_OUTPUT_SCALE)
+    spatial_embedding: bool = eqx.field(static=True, default=False)
+    era5_surface_fluxes: bool = eqx.field(static=True, default=False)
 
     def __call__(
         self,
@@ -70,11 +79,16 @@ class SFNOPhysics(eqx.Module):
         p_s: jnp.ndarray,
         phis: jnp.ndarray,
         dt: jnp.ndarray,
+        land_frac=None,
+        sfc_fluxes=None,
     ) -> PhysicsOutput:
         """Predict physics tendencies from Gaussian-grid prognostic fields.
 
         3D fields have shape (n_lat, n_lon, nlev); 2D fields (n_lat, n_lon).
-        Radiation flux outputs are zero (SFNO predicts combined tendencies).
+        ``land_frac`` and ``sfc_fluxes`` (tuple of six (n_lat, n_lon) planes
+        in ``SFC_FLUX_FORCING_KEYS`` order) are the prescribed input planes
+        required when the matching flags are on.  Radiation flux outputs are
+        zero (SFNO predicts combined tendencies).
         """
         spec = PE3DChannelSpec(nlev=self.nlev)
 
@@ -89,6 +103,38 @@ class SFNOPhysics(eqx.Module):
              ((lnps - 11.5))[..., None], (phis / 5.0e4)[..., None]],
             axis=-1,
         )
+
+        # Prescribed input planes appended AFTER the prognostic channels:
+        # land fraction (already 0..1) then the six surface-flux planes
+        # divided by SFC_FLUX_INPUT_NORMS (SFC_FLUX_FORCING_KEYS order).
+        # Flags off -> nothing appended (legacy channel count/behaviour).
+        if self.spatial_embedding or self.era5_surface_fluxes:
+            from legoesm.atmosphere.physics.neural_physics import (
+                SFC_FLUX_INPUT_NORMS,
+            )
+            extras = []
+            if self.spatial_embedding:
+                if land_frac is None:
+                    raise ValueError(
+                        "SFNOPhysics(spatial_embedding=True) requires the "
+                        "land_frac plane, got None")
+                extras.append(land_frac)
+            if self.era5_surface_fluxes:
+                if sfc_fluxes is None:
+                    raise ValueError(
+                        "SFNOPhysics(era5_surface_fluxes=True) requires the "
+                        "sfc_fluxes planes (six, in SFC_FLUX_FORCING_KEYS "
+                        "order), got None")
+                sfc_fluxes = tuple(sfc_fluxes)
+                if len(sfc_fluxes) != len(SFC_FLUX_INPUT_NORMS):
+                    raise ValueError(
+                        f"sfc_fluxes must carry {len(SFC_FLUX_INPUT_NORMS)} "
+                        f"planes, got {len(sfc_fluxes)}")
+                extras.extend(
+                    plane / norm
+                    for plane, norm in zip(sfc_fluxes, SFC_FLUX_INPUT_NORMS))
+            packed = jnp.concatenate(
+                [packed] + [plane[..., None] for plane in extras], axis=-1)
 
         # SFNO forward pass
         out = self.sfno(packed, self.grid)  # (n_lat, n_lon, n_channels)
@@ -178,7 +224,29 @@ def make_sfno_step_unified(
         ) = tail
         # SFNO tendency prediction from prognostic fields
         phis = kwargs.get("phis", jnp.zeros_like(p_s))
-        sfno_out = sfno_physics(T, u, v, q_v, p_s, phis, dt)
+        # Prescribed planes (grid-shaped, already on the SFNO's own Gaussian
+        # grid on this lane); a flag-on network names a missing one.
+        land_frac = kwargs.get("land_frac")
+        if sfno_physics.spatial_embedding and land_frac is None:
+            raise ValueError(
+                "SFNOPhysics(spatial_embedding=True) requires 'land_frac' in "
+                "the step_unified kwargs, got None")
+        sfc_fluxes = None
+        if sfno_physics.era5_surface_fluxes:
+            from legoesm.atmosphere.physics.neural_physics import (
+                SFC_FLUX_STEP_UNIFIED_KEYS,
+            )
+            sfc_fluxes = []
+            for key in SFC_FLUX_STEP_UNIFIED_KEYS:
+                plane = kwargs.get(key)
+                if plane is None:
+                    raise ValueError(
+                        f"SFNOPhysics(era5_surface_fluxes=True) requires "
+                        f"{key!r} in the step_unified kwargs, got None")
+                sfc_fluxes.append(plane)
+            sfc_fluxes = tuple(sfc_fluxes)
+        sfno_out = sfno_physics(T, u, v, q_v, p_s, phis, dt,
+                                land_frac=land_frac, sfc_fluxes=sfc_fluxes)
         if "conv_prog" in _PHYSICS_OUTPUT_FIELDS and conv_prog is not None:
             sfno_out = sfno_out._replace(conv_prog=conv_prog)
 
@@ -254,6 +322,9 @@ def make_sfno_step_unified_latlon(
         with ``target_shape`` set to the 2-D destination grid shape, so
         ``regrid_scalar`` returns (n_lat, n_lon[, nlev]) fields directly.
     """
+    from legoesm.atmosphere.physics.neural_physics import (
+        SFC_FLUX_STEP_UNIFIED_KEYS,
+    )
     from legoesm.grids.regridding import regrid_scalar
 
     def step_unified(need_rad, T, p_s, q_v, q_c, q_r, *args, **kwargs):
@@ -266,14 +337,43 @@ def make_sfno_step_unified_latlon(
             held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
         ) = tail
 
+        # Legacy callers may omit phis (zero orography); the trainer passes
+        # the carry's surface geopotential.
         phis = kwargs.get("phis", jnp.zeros_like(p_s))
 
         def to_gauss(f):
             return regrid_scalar(f, w_latlon_to_gauss)
 
+        # Prescribed input planes for SFNOPhysics's extra channels: the
+        # driver-path kwargs regridded to the Gaussian grid with the same
+        # IDW weights as the prognostics (driver keys mapped onto the
+        # SFC_FLUX_FORCING_KEYS order via SFC_FLUX_STEP_UNIFIED_KEYS).  A
+        # flag on with its keyword missing is an error naming it — never
+        # silent zeros.  Flags off -> nothing extra regridded/passed.
+        land_frac = kwargs.get("land_frac")
+        if sfno_physics.spatial_embedding:
+            if land_frac is None:
+                raise ValueError(
+                    "SFNOPhysics(spatial_embedding=True) requires "
+                    "'land_frac' in the step_unified kwargs, got None")
+            land_frac = to_gauss(land_frac)
+        if sfno_physics.era5_surface_fluxes:
+            sfc_fluxes = []
+            for key in SFC_FLUX_STEP_UNIFIED_KEYS:
+                plane = kwargs.get(key)
+                if plane is None:
+                    raise ValueError(
+                        f"SFNOPhysics(era5_surface_fluxes=True) requires "
+                        f"{key!r} in the step_unified kwargs, got None")
+                sfc_fluxes.append(to_gauss(plane))
+            sfc_fluxes = tuple(sfc_fluxes)
+        else:
+            sfc_fluxes = None
+
         sfno_out = sfno_physics(
             to_gauss(T), to_gauss(u), to_gauss(v), to_gauss(q_v),
             to_gauss(p_s), to_gauss(phis), dt,
+            land_frac=land_frac, sfc_fluxes=sfc_fluxes,
         )
 
         def to_latlon(f):

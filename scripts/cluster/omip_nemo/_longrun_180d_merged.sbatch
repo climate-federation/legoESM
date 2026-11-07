@@ -32,17 +32,19 @@
 #   STILL DRIFTS  if it keeps growing >= linearly past day 90 => implementation
 #                 defect remains; re-open with the trajectory's spatial pattern.
 # No --kprofile-snapshots (the closure is settled; save the extra tendency
-# evals).  Everything else byte-identical to the day-30 merged run.
+# evals).  2026-08-31: now carries the adopted --visc-schedule equatorial
+# viscosity ramp (commit e1fe554a6); fresh output dir so the pre-visc 180d
+# results stay untouched for comparison.
 set -uo pipefail
 PIN=${1:?usage: sbatch _longrun_180d_merged.sbatch <pinned-sha>}
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT || exit 1
 HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$PIN" ] || { echo "FATAL: HEAD $HEAD != pinned $PIN"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
-OUT=$ROOT/results/omip_nemo/nemolev_trp_long180
+OUT=$ROOT/results/omip_nemo/trp_visc180
 
 echo "=== gate ==="
 JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_default.py 2>&1 | tail -2
@@ -51,6 +53,7 @@ rc=$?; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
   --C-smag-lap 3.0 --smag-cfl-safety 0.125 \
+  --visc-schedule '0:1e4:3.0,8:1e4:1.5,16:1e4:0.5' \
   --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 \
   --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff \
   --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
@@ -86,8 +89,8 @@ for pair in "0030 5" "0060 11" "0090 17"; do
   echo "### day $1 vs GATEWAY rec $2 ###"
   $PY scripts/validate/compare_omip_nemo.py --legoesm-snapshot "$SNAP" \
     --nemo-gridt "$GW_T" --nemo-time-idx "$2" --freeze-clamp-C -1.8 \
-    --sss-faithful --grid-label long180_d$1 \
-    --output-dir $ROOT/results/omip_nemo/compare_long180_d$1 2>&1 \
+    --sss-faithful --grid-label trp_visc180_d$1 \
+    --output-dir $ROOT/results/omip_nemo/compare_trpvisc180_d$1 2>&1 \
     | grep -E "nino3_5S5N|\[SST\].*rmse" | head -3
 done
 

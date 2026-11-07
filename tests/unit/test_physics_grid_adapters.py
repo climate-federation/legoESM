@@ -76,6 +76,15 @@ def _make_sigma(nlev):
             self.sigma_full = jnp.linspace(0.1, 0.95, nlev)
             self.sigma_half = jnp.linspace(0.05, 1.0, nlev + 1)
             self.dsigma = jnp.diff(self.sigma_half)
+
+        def pressure_at_full(self, p_s):
+            return p_s[..., None] * self.sigma_full
+
+        def pressure_at_half(self, p_s):
+            return p_s[..., None] * self.sigma_half
+
+        def layer_thickness_dp(self, p_s):
+            return p_s[..., None] * self.dsigma
     return _Sigma(nlev)
 
 
@@ -236,7 +245,7 @@ class TestKernelRegistries:
     def test_microphysics_registry_has_all(self):
         expected = {
             "kessler", "sundqvist", "seifert_beheng", "morrison",
-            "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
+            "thompson", "p3", "sdm", "fast_sbm", "ml_emulator", "ifs_cloudsc",
         }
         assert expected == set(MICROPHYSICS_REGISTRY.keys())
 

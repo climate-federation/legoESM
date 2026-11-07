@@ -1,0 +1,34 @@
+commit 5c636934962773a981e2a35cc6ac3b1c894fa513
+Author: Dhruv Balwada <dhruvbalwada@gmail.com>
+Date:   Sat Sep 12 08:41:36 2026 -0400
+
+    fix(ocean): materialize NEMO tracer content statement
+
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index 7a2ada6a3..29998c4cd 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -1910,10 +1910,19 @@ def _nemo_ws_rk3_tracer_pair_step(
+     # while multiplying only the other sources by h(Kmm) is algebraically
+     # equivalent but not the compiled source association.
+     safe_h_rhs = jnp.maximum(h_one_half, 1.0e-10)
+-    rhs_a = -fd2_a / safe_h_rhs + stage_source_rates[2][0]
+-    rhs_b = -fd2_b / safe_h_rhs + stage_source_rates[2][1]
+-    content_a = h_k_old * tr_a + dt * h_one_half * rhs_a
+-    content_b = h_k_old * tr_b + dt * h_one_half * rhs_b
++    rhs_a = nemo_source_round(
++        nemo_source_round(-fd2_a / safe_h_rhs)
++        + stage_source_rates[2][0])
++    rhs_b = nemo_source_round(
++        nemo_source_round(-fd2_b / safe_h_rhs)
++        + stage_source_rates[2][1])
++    h_rhs_dt = nemo_source_round(dt * h_one_half)
++    content_a = nemo_source_round(
++        nemo_source_round(h_k_old * tr_a)
++        + nemo_source_round(h_rhs_dt * rhs_a))
++    content_b = nemo_source_round(
++        nemo_source_round(h_k_old * tr_b)
++        + nemo_source_round(h_rhs_dt * rhs_b))
+     out_a = jnp.where(
+         active_3d > 0.5,
+         content_a / jnp.maximum(h_k_new, 1.0e-10), tr_a)

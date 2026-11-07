@@ -1,0 +1,80 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -58,0 +59,2 @@
++   USE l4_r95_spgts_frames, ONLY : r95_spg_open, r95_spg_substep, &
++      & r95_spg_w2, r95_spg_w1, r95_spg_close ! round-95 write-only substeps
+@@ -604,0 +607,24 @@
++      CALL r95_spg_open(kt, Kbb, Kmm, Kaa, Krhs, icycle)
++      CALL r95_spg_substep(0)
++      CALL r95_spg_w2('ssh_frc', ssh_frc)
++      CALL r95_spg_w2('zu_frc', zu_frc)
++      CALL r95_spg_w2('zv_frc', zv_frc)
++      CALL r95_spg_w2('un_e', un_e)
++      CALL r95_spg_w2('vn_e', vn_e)
++      CALL r95_spg_w2('ub_e', ub_e)
++      CALL r95_spg_w2('vb_e', vb_e)
++      CALL r95_spg_w2('ubb_e', ubb_e)
++      CALL r95_spg_w2('vbb_e', vbb_e)
++      CALL r95_spg_w2('sshn_e', sshn_e)
++      CALL r95_spg_w2('sshb_e', sshb_e)
++      CALL r95_spg_w2('sshbb_e', sshbb_e)
++      CALL r95_spg_w2('hu_e', hu_e)
++      CALL r95_spg_w2('hv_e', hv_e)
++      CALL r95_spg_w2('hur_e', hur_e)
++      CALL r95_spg_w2('hvr_e', hvr_e)
++      CALL r95_spg_w2('zCdU_u', zCdU_u)
++      CALL r95_spg_w2('zCdU_v', zCdU_v)
++      CALL r95_spg_w1('wgtbtp1', wgtbtp1)
++      CALL r95_spg_w1('wgtbtp2', wgtbtp2)
++      CALL r95_spg_w1('entry_sc', (/ rDt_e, r1_wgt1s, r1_wgt2s, REAL(icycle,wp), &
++         & MERGE(1._wp,0._wp,ll_init), MERGE(1._wp,0._wp,ll_bt_av) /))
+@@ -696,0 +724,8 @@
++         CALL r95_spg_substep(jn)
++         CALL r95_spg_w2('ua_ext', ua_e)
++         CALL r95_spg_w2('va_ext', va_e)
++         CALL r95_spg_w2('sshp2_mid', zsshp2_e)
++         CALL r95_spg_w2('htp2_e', zhtp2_e)
++         CALL r95_spg_w2('hup2_e', zhup2_e)
++         CALL r95_spg_w2('hvp2_e', zhvp2_e)
++         CALL r95_spg_w1('ext_coef', (/ za1, za2, za3 /))
+@@ -733,0 +770,3 @@
++         CALL r95_spg_w2('zhU', zhU)
++         CALL r95_spg_w2('zhV', zhV)
++         CALL r95_spg_w2('ssha_e', ssha_e)
+@@ -750,0 +791,2 @@
++         CALL r95_spg_w2('un_adv', un_adv)
++         CALL r95_spg_w2('vn_adv', vn_adv)
+@@ -785,0 +829,2 @@
++         CALL r95_spg_w2('sshu_a', zsshu_a)
++         CALL r95_spg_w2('sshv_a', zsshv_a)
+@@ -802,0 +849,4 @@
++         CALL r95_spg_w2('sshp2_bck', zsshp2_e)
++         CALL r95_spg_w2('zu_spg', zu_spg)
++         CALL r95_spg_w2('zv_spg', zv_spg)
++         CALL r95_spg_w1('bck_coef', (/ za0, za1, za2, za3 /))
+@@ -805,0 +857,2 @@
++         CALL r95_spg_w2('cor_u', zu_trd)
++         CALL r95_spg_w2('cor_v', zv_trd)
+@@ -839,0 +894,2 @@
++         CALL r95_spg_w2('trd_u', zu_trd)
++         CALL r95_spg_w2('trd_v', zv_trd)
+@@ -936,0 +994,6 @@
++         CALL r95_spg_w2('ua_new', ua_e)
++         CALL r95_spg_w2('va_new', va_e)
++         CALL r95_spg_w2('hu_e', hu_e)
++         CALL r95_spg_w2('hv_e', hv_e)
++         CALL r95_spg_w2('hur_e', hur_e)
++         CALL r95_spg_w2('hvr_e', hvr_e)
+@@ -1008,0 +1073,4 @@
++         CALL r95_spg_w2('uub_sum', puu_b(:,:,Kaa))
++         CALL r95_spg_w2('vvb_sum', pvv_b(:,:,Kaa))
++         CALL r95_spg_w2('ssh_sum', pssh(:,:,Kaa))
++         CALL r95_spg_w1('sum_coef', (/ wgtbtp1(jn), wgtbtp2(jn) /))
+@@ -1219,0 +1289,7 @@
++      CALL r95_spg_substep(-1)
++      CALL r95_spg_w2('un_adv', un_adv)
++      CALL r95_spg_w2('vn_adv', vn_adv)
++      CALL r95_spg_w2('uu_b_aa', puu_b(:,:,Kaa))
++      CALL r95_spg_w2('vv_b_aa', pvv_b(:,:,Kaa))
++      CALL r95_spg_w2('ssh_aa', pssh(:,:,Kaa))
++      CALL r95_spg_close(kt, icycle)

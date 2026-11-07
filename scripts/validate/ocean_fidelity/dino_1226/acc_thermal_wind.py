@@ -56,7 +56,8 @@ from legoesm.ocean.eos import NemoSEOSConfig, nemo_seos_alpha_beta, nemo_seos_eo
 
 CFG = NemoSEOSConfig()          # defaults ARE the DINO/Kamm set (verified vs namelist_cfg)
 RHO0 = CFG.rho0
-DINO = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO"
+DINO = os.environ.get(
+    "DINO_DIR", "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO")
 LEGO_DIR = os.environ.get(
     "DINO_TW_LEGO_DIR",
     "/tmp/claude-10257/-home-dbalwada-legoESM/853ee94c-2651-44cc-ba12-f55bf3ed1979/scratchpad",
@@ -64,6 +65,10 @@ LEGO_DIR = os.environ.get(
 DEEP_M = 1400.0                 # the reported upper/deep split depth
 
 # ---------------------------------------------------------------- geometry ---
+# Loaded at import from the DINO oracle build (set DINO_DIR to relocate).  Where
+# the oracle build is absent (any account other than the producer's) this raises
+# FileNotFoundError at import; the dino instrument test fixture treats that as a
+# skip for the data-path tests.
 mm = nc.Dataset(f"{DINO}/RUN_TRAJ/mesh_mask.nc")
 
 

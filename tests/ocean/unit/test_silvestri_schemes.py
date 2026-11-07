@@ -54,7 +54,8 @@ def test_scheme_specifics():
     w9d = apply_silvestri_scheme(base, "W9D")
     assert w9d.momentum_advection == "weno9" and w9d.weno_smoothness == "standard"
     up3 = apply_silvestri_scheme(base, "UP3")
-    assert up3.momentum_advection == "flux_form" and up3.momentum_flux_scheme == "upwind3"
+    assert (up3.momentum_advection == "flux_form"
+            and up3.momentum_flux_scheme == "oceananigans_up3")
     sm2 = apply_silvestri_scheme(base, "SM2")
     assert sm2.momentum_advection == "vector_invariant"
     assert sm2.lateral_friction_scheme == "om4p25"

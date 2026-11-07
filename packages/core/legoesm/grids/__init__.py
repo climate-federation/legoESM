@@ -53,6 +53,7 @@ from legoesm.grids.vertical import (
     HybridSigmaPressureCoordinate,
     create_hybrid_coordinate,
     make_hybrid_levels,
+    assert_hybrid_valid_for_surface_pressure,
     standard_hybrid_levels,
     hybrid_from_sigma,
 )
@@ -67,8 +68,6 @@ from legoesm.grids.topography import (
     schaer_mountain,
     land_mask_from_topography,
     phis_from_topography,
-    smooth_phis_cubed_sphere,
-    smooth_phis_gaussian,
     TopographyConfig,
     load_real_topography,
 )

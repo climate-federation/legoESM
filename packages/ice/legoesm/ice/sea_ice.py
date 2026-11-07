@@ -28,22 +28,32 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio_ice
+from legoesm.thermo import (
+    latent_heat_sublimation,
+    nemo_si3_saturation_over_ice,
+    saturation_mixing_ratio_ice,
+)
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes,
     compute_most_fluxes,
+    large_yeager_widths,
+    surface_reference_state,
+    nemo_si3_constant_fluxes,
     validate_bulk_scheme,
 )
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.smooth import max_c1, min_c1, smoothstep_cubic
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.latlon import LatLonCGridGeometry, LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ice.dynamics import evp_solver, mevp_solver, free_drift_velocity
-from legoesm.ice.transport import advect_ice_tracers
+from legoesm.ice.transport import advect_ice_tracers, fv_flux_divergence_latlon_cgrid
 from legoesm.ice.itd import (
     aggregate_state,
     linear_remap,
     lipscomb_2001_remap,
+    si3_hfn_category_bounds,
+    si3_ice_itd_rem,
 )
 from legoesm.ice.snow import (
     accumulate_snowfall,
@@ -57,15 +67,79 @@ from legoesm.ice.ridging import apply_ridging
 from legoesm.ice.shortwave import compute_ice_sw
 from legoesm.ice.ponds import step_ponds
 from legoesm.core.surface_energy import surface_radiation_fluxes
-from legoesm.ice.config import SeaIceConfig
+from legoesm.ice.config import (
+    SI3SwitchConfig,
+    SeaIceConfig,
+    validate_si3_bulk_config,
+    validate_si3_lane_thermo_config,
+    validate_si3_thermo_config,
+)
 from legoesm.ice.rheology import strain_rates
 from legoesm.ice.state import (
     SeaIceState,
     DynamicSeaIceState,
+    SI3ColumnState,
     dynamic_to_slab,
     slab_to_dynamic,
 )
+from legoesm.ice.bitz_lipscomb import (
+    SI3ColumnArrays,
+    SI3SurfaceForcing,
+    si3_lane_column_step_arrays,
+    si3_column_step_arrays,
+)
 from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
+
+# Historical helper default: convergence only unless the caller supplies Cs.
+_NO_SHEAR_RIDGING = 0.0
+
+
+def _sharp(w):
+    """Sharpness ``1/w`` for the core.smooth helpers; ``inf`` (hard) at ``w = 0``."""
+    return jnp.inf if w == 0.0 else 1.0 / w
+
+
+def _si3_ge(x, c, w):
+    """``x >= c`` as 0/1; smooth: C1 ramp over ``[c - w, c]`` (exact 1 at and above ``c``)."""
+    if w == 0.0:
+        return (x >= c).astype(jnp.result_type(x, float))
+    return smoothstep_cubic((x - c + w) / w)
+
+
+def _si3_gt(x, c, w):
+    """``x > c`` as 0/1; smooth: C1 ramp over ``[c, c + w]`` (exact 0 at and below ``c``)."""
+    if w == 0.0:
+        return (x > c).astype(jnp.result_type(x, float))
+    return smoothstep_cubic((x - c) / w)
+
+
+def _si3_mix(weight, a, b, w):
+    """``where(weight, a, b)`` for the hard 0/1 weight (bitwise), linear blend when smooth."""
+    if w == 0.0:
+        return jnp.where(weight == 1.0, a, b)
+    return b + (a - b) * weight
+
+
+def _si3_snow_free(h_snow, w, preserve_subnormal):
+    """1 where ``h_snow == 0`` (NEMO's IEEE test); ramp ``1 - C1(h_snow / w)`` if ``w > 0``.
+
+    ``w = snow_ramp_width_m`` when the ports are smooth, else 0; held at 0.0
+    (hard) pending a user decision (vote X4): the ORCA1 record holds trace
+    snow down to 1.2e-30 m in 355 ice cells, so any ramp width >= 1e-15 m
+    changes their through-ice sunlight by up to 218 W/m2.
+    """
+    if w != 0.0:
+        return 1.0 - smoothstep_cubic(h_snow / w)
+    if preserve_subnormal:
+        # XLA CPU flushes the smallest positive fp64 snow thickness to zero in
+        # floating comparisons.  NEMO's scalar IEEE comparison does not.  A
+        # left shift discards the sign bit and preserves every nonzero payload,
+        # including subnormals; both +0 and -0 remain zero.
+        snow_bits = jax.lax.bitcast_convert_type(h_snow, jnp.uint64)
+        zero = (snow_bits << jnp.uint64(1)) == jnp.uint64(0)
+    else:  # private one-variable ablation; never exposed in SeaIceConfig
+        zero = h_snow == 0.0
+    return zero.astype(jnp.result_type(h_snow, float))
 
 
 def grid_supports_ice_dynamics(grid) -> bool:
@@ -197,8 +271,27 @@ def step_sea_ice(
     U_min: float,
     dt: float,
     grid=None,
+    *,
+    q_open_top=None,
+    ocean_dz_top_m=None,
+    ocean_freezing_temperature_K=None,
+    rn_amax_2d=None,
 ):
     """Step the sea ice model forward by dt seconds.
+
+    ``q_open_top`` [W/m2 per OPEN-water area, + into ocean] and
+    ``ocean_dz_top_m`` [m] feed ``SeaIceConfig.lead_freeze_source ==
+    "nemo_qlead"`` (NEMO's lead heat budget); ignored under "ice_skin".
+
+    ``ocean_freezing_temperature_K`` is the ocean's surface liquidus [K], with
+    exactly the SST shape (no ice-category axis). None retains the configured
+    constant. The ocean/driver owns the EOS; ice consumes this boundary value
+    for basal conduction, turbulent ocean heat and lead formation together.
+    The freshwater surface melt point ``T_melt_surface`` is independent.
+
+    ``rn_amax_2d`` is the explicit NEMO per-cell ice-area ceiling required by
+    the exact SI3-LEV O13 remap.  It has the spatial (no-category) shape and is
+    ignored by configurations which do not select that production branch.
 
     Dispatches to slab or dynamic model based on config.
 
@@ -226,6 +319,46 @@ def step_sea_ice(
     new_state : SeaIceState or DynamicSeaIceState
     response : TileResponse
     """
+    if ocean_freezing_temperature_K is not None:
+        # Refused rather than silently ignored on the layered branch: the
+        # override lands on config.T_freeze_ocean, which the zero-layer
+        # thermodynamics reads but _si3_step_with_trace never does -- it takes
+        # its bottom boundary from the SI3 forcing instead.  Neither parent of
+        # the 2026-09-25 merge could express this combination (main has no
+        # layered branch, and no caller on this lane passes the argument), so
+        # this refusal closes a fail-quiet seam the merge would otherwise have
+        # opened.  Routing the liquidus into SI3's bottom boundary is a
+        # physics decision for the SI3 lane, not for a merge.
+        if config.thermo_scheme in ("si3_bl99", "si3_orca2_o1", "si3_orca2_o2"):
+            raise ValueError(
+                "ocean_freezing_temperature_K is not routed into the layered "
+                f"SI3 thermodynamics (thermo_scheme={config.thermo_scheme!r}); pass the "
+                "liquidus through the SI3 forcing's bottom boundary instead "
+                "of the ocean-side override")
+        liquidus = jnp.asarray(ocean_freezing_temperature_K)
+        if liquidus.shape != jnp.shape(ocean_sst):
+            raise ValueError("ocean_freezing_temperature_K must have the ocean SST shape")
+        config = config._replace(T_freeze_ocean=liquidus)
+    if config.thermo_scheme not in ("zero_layer", "si3_bl99", "si3_orca2_o1", "si3_orca2_o2"):
+        raise ValueError(
+            f"Unknown sea-ice thermo_scheme {config.thermo_scheme!r}; expected "
+            "'zero_layer', 'si3_bl99', 'si3_orca2_o1', or 'si3_orca2_o2' (icethd.F90:148-183, icestp.F90:148-224)."
+        )
+    validate_si3_thermo_config(config)
+    if config.thermo_scheme == "si3_bl99":
+        if not isinstance(state, SI3ColumnState):
+            raise ValueError(
+                "thermo_scheme='si3_bl99' requires SI3ColumnState with 3+3 "
+                "layer enthalpies; a bulk SeaIceState cannot silently invent them"
+            )
+        if not isinstance(forcing, SI3SurfaceForcing):
+            raise ValueError(
+                "thermo_scheme='si3_bl99' requires SI3SurfaceForcing at the "
+                "ice_thd entry boundary (ice1D.F90:393-421)"
+            )
+        new_state, response, _ = _si3_step_with_trace(state, forcing, config, dt)
+        return new_state, response
+
     # Validate: dynamics literal + grid requirement
     if config.dynamics not in ("none", "free_drift", "evp", "mevp"):
         raise ValueError(
@@ -248,16 +381,25 @@ def step_sea_ice(
             "Pass grid=<CubedSphereGrid> to step_sea_ice()."
         )
 
-    # Grid-TYPE guards: dynamics (EVP/mEVP) + ridging call grid-specific
+    if config.ridging.closing_scheme not in ("strain", "convergence"):
+        raise ValueError(
+            f"Unknown ridging closing scheme: {config.ridging.closing_scheme!r}; "
+            "expected 'strain' or 'convergence'."
+        )
+
+    # Grid-TYPE guards: dynamics (EVP/mEVP) + full ridging call grid-specific
     # STRAIN-RATE operators (cubed-sphere / lat-lon / MPAS only); tracer
     # transport calls FLUX-DIVERGENCE operators, which additionally exist on
-    # the tripole/curvilinear C-grid (grid_supports_ice_transport).  Reject an
-    # unsupported non-None grid up front with a clear message rather than
+    # the tripole/curvilinear C-grid (grid_supports_ice_transport). Explicit
+    # convergence-only ridging uses that same divergence, without strain ops.
+    # Reject an unsupported non-None grid up front with a clear message rather than
     # letting it fall through to the cubed-sphere branch and raise an opaque
     # AttributeError deep in the EVP loop (e.g. Gaussian spectral / Plane).
     if grid is not None:
         _needs_strain_ops = (
-            config.dynamics in ("evp", "mevp") or config.ridging.enabled
+            config.dynamics in ("evp", "mevp")
+            or (config.ridging.enabled
+                and config.ridging.closing_scheme == "strain")
         )
         if _needs_strain_ops and not _grid_supports_ice_dynamics(grid):
             raise ValueError(
@@ -267,20 +409,32 @@ def step_sea_ice(
                 "dynamics='none'/'free_drift' and ridging.enabled=False on "
                 "this grid."
             )
-        if config.transport == "advect" and not grid_supports_ice_transport(grid):
+        _needs_transport_ops = (
+            config.transport == "advect"
+            or (config.ridging.enabled
+                and config.ridging.closing_scheme == "convergence")
+        )
+        if _needs_transport_ops and not grid_supports_ice_transport(grid):
             raise ValueError(
-                "Sea-ice tracer transport requires a grid with implemented "
+                "Sea-ice transport/convergence ridging requires a grid with implemented "
                 "flux-divergence operators (CubedSphereGrid, LatLonGrid, "
                 "VoronoiMesh, or the tripole LatLonCGridGeometry); got "
                 f"{type(grid).__name__}.  Use transport='none' for "
                 "thermodynamics-only on this grid."
             )
+    if config.thermo_scheme == "si3_orca2_o1":
+        return _si3_orca2_o1_step_with_trace(state, forcing, config, dt)
+    if config.thermo_scheme == "si3_orca2_o2":
+        return _si3_orca2_o2_step_with_trace(state, forcing, config, dt)
     if config.ridging.enabled and grid is None:
         raise ValueError(
             "ridging.enabled=True requires a grid argument: mechanical "
             "ridging needs the convergence (strain-rate) operator.  Pass a "
             "supported grid, or set ridging.enabled=False."
         )
+    if (config.ridging.enabled and config.ridging.closing_scheme == "convergence"
+            and config.n_categories < 2):
+        raise ValueError("Convergence ridging requires n_categories >= 2.")
 
     # F10 guard: lat-lon EVP/mEVP strain-rate + stress-divergence use the
     # spherical metric tanθ/r, singular at the geographic pole (cosθ → 0).
@@ -325,7 +479,7 @@ def step_sea_ice(
             f"step_sea_ice: config.n_categories={config.n_categories}; must be "
             "a positive integer (>= 1)."
         )
-    if config.itd_remap not in ("simple", "lipscomb2001"):
+    if not (config.ponds.enabled and config.ponds.scheme == "si3_lev") and config.itd_remap not in ("simple", "lipscomb2001"):
         raise ValueError(
             f"Unknown config.itd_remap={config.itd_remap!r}; expected "
             "'simple' or 'lipscomb2001'."
@@ -338,7 +492,7 @@ def step_sea_ice(
     # pond conservation (the per-category tracers would sit on a stale bin
     # structure).  Require the tracer-aware Lipscomb (2001) remap whenever a
     # tracer is active in multi-category mode.
-    if config.n_categories > 1:
+    if config.n_categories > 1 and not (config.ponds.enabled and config.ponds.scheme == "si3_lev"):
         # Tracer conservation: only 'lipscomb2001' carries the snow /
         # bulk-salinity / pond tracers across category bins.  Require it (NOT
         # merely reject 'simple') so a typo cannot route to the legacy linear
@@ -380,14 +534,22 @@ def step_sea_ice(
                     "init_dynamic_ice_state(shape, n_categories=...) and "
                     "distribute_to_categories before calling step_sea_ice."
                 )
-            state = slab_to_dynamic(state)
+            state = slab_to_dynamic(state, pond_scheme=config.ponds.scheme if config.ponds.enabled else "cesm")
         # Validate dynamic-state shape against the configured number of
         # categories (grid-aware) so a stale state cannot silently run a
         # multi-category config (skipping ITD remap / ridging) or vice versa.
         _validate_dynamic_state_shape(state.h_ice.data.shape, config, grid)
         return _step_dynamic_v2(state, forcing, ocean_sst, ocean_u, ocean_v,
-                                config, U_min, dt, grid)
+                                config, U_min, dt, grid,
+                                q_open_top=q_open_top,
+                                ocean_dz_top_m=ocean_dz_top_m,
+                                rn_amax_2d=rn_amax_2d)
     else:
+        if config.lead_freeze_source != "ice_skin":
+            raise ValueError(
+                f"SeaIceConfig.lead_freeze_source={config.lead_freeze_source!r} "
+                "is implemented on the new-physics (v2) thermodynamics only; "
+                "the legacy dynamic/slab paths run 'ice_skin'.")
         # Legacy dynamic path (free_drift / EVP / mEVP without new physics):
         # apply the same grid-aware shape validation as the new-physics path
         # so config.n_categories and the state array cannot disagree on any
@@ -398,9 +560,723 @@ def step_sea_ice(
                              config, U_min, dt, grid)
 
 
+def _si3_step_with_trace(state: SI3ColumnState,
+                         forcing: SI3SurfaceForcing,
+                         config: SeaIceConfig,
+                         dt: float):
+    """Private fidelity hook returning registered SI3 sub-call boundaries."""
+
+    arrays = SI3ColumnArrays(
+        state.concentration.data,
+        state.h_ice.data,
+        state.h_snow.data,
+        state.T_surface.data,
+        state.e_ice.data,
+        state.e_snow.data,
+        state.S_bulk.data,
+        state.S_layers.data,
+        state.age_volume.data,
+    )
+    trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants)
+    out = trace.exit
+    new_state = SI3ColumnState(
+        concentration=state.concentration.replace(data=out.concentration),
+        h_ice=state.h_ice.replace(data=out.h_ice),
+        h_snow=state.h_snow.replace(data=out.h_snow),
+        T_surface=state.T_surface.replace(data=out.T_surface),
+        e_ice=state.e_ice.replace(data=out.e_ice),
+        e_snow=state.e_snow.replace(data=out.e_snow),
+        S_bulk=state.S_bulk.replace(data=out.S_bulk),
+        S_layers=state.S_layers.replace(data=out.S_layers),
+        age_volume=state.age_volume.replace(data=out.age_volume),
+    )
+    z = jnp.zeros_like(out.h_ice)
+    one = jnp.ones_like(out.h_ice)
+    response = TileResponse(
+        T_sfc=out.T_surface,
+        albedo=one * config.albedo_ice,
+        emissivity=one * config.emissivity_ice,
+        z0=one * config.z0_ice,
+        q_surface=z,
+        shflx=z,
+        # SI3 oracle lane: the oracle's OWN sublimation constant
+        # (ConstantsConfig.latent_sublimation, NEMO value on the NEMO set),
+        # the same one its bulk law used to turn latent into this evaporation
+        # (_si3_bulk: evaporation_ice = latent / latent_sublimation), so heat
+        # and water stay paired on the oracle's law.  Scheme-internal oracle
+        # constant kept by user decision 2026-09-28 (5a); the Kirchhoff
+        # L_s(T_ice) applies to the native lanes only.
+        lhflx=forcing.evaporation * config.ice_constants.latent_sublimation,
+        tau_x=z,
+        tau_y=z,
+        lw_up=z,
+        u_ocean_sfc=z,
+        v_ocean_sfc=z,
+        co2_flux=z,
+        freshwater_flux=z,
+        ocean_heat_extraction=z,
+        ocean_stress_x=z,
+        ocean_stress_y=z,
+        surface_mass_flux=forcing.evaporation * out.concentration,
+        lhflx_exchange=(forcing.evaporation * config.ice_constants.latent_sublimation
+                        * out.concentration),
+        salt_flux=z,
+        T_rad=out.T_surface,
+        ice_concentration_thermo=arrays.concentration,
+    )
+    return new_state, response, trace
+
+
+def step_sea_ice_si3_lane(
+    state,
+    forcing: AtmToSurface,
+    ocean_sst: jnp.ndarray,
+    ocean_u: jnp.ndarray,
+    ocean_v: jnp.ndarray,
+    config: SeaIceConfig,
+    U_min: float,
+    dt: float,
+    grid=None,
+    *,
+    q_open_top=None,
+    ocean_dz_top_m=None,
+    ocean_freezing_temperature_K=None,
+    rn_amax_2d=None,
+):
+    """Run the SI3 lane's source-literal C1D entry without changing main's dispatcher."""
+
+    del ocean_sst, ocean_u, ocean_v, U_min, grid, q_open_top, ocean_dz_top_m, rn_amax_2d
+    if ocean_freezing_temperature_K is not None:
+        raise ValueError(
+            "ocean_freezing_temperature_K is not routed into the layered "
+            "SI3 thermodynamics; pass the liquidus through the SI3 forcing's "
+            "bottom boundary instead"
+        )
+    if config.thermo_scheme != "si3_bl99":
+        raise ValueError("step_sea_ice_si3_lane requires thermo_scheme='si3_bl99'")
+    config = validate_si3_lane_thermo_config(config)
+    if not isinstance(state, SI3ColumnState):
+        raise ValueError(
+            "thermo_scheme='si3_bl99' requires SI3ColumnState with 3+3 layer enthalpies"
+        )
+    if not isinstance(forcing, SI3SurfaceForcing):
+        raise ValueError(
+            "thermo_scheme='si3_bl99' requires SI3SurfaceForcing at the ice_thd entry boundary"
+        )
+    new_state, response, _ = _si3_lane_step_with_trace(state, forcing, config, dt)
+    return new_state, response
+
+
+def _si3_lane_step_with_trace(
+    state: SI3ColumnState,
+    forcing: SI3SurfaceForcing,
+    config: SeaIceConfig,
+    dt: float,
+):
+    """SI3 lane counterpart to main's ``_si3_step_with_trace``."""
+
+    arrays = SI3ColumnArrays(
+        state.concentration.data,
+        state.h_ice.data,
+        state.h_snow.data,
+        state.T_surface.data,
+        state.e_ice.data,
+        state.e_snow.data,
+        state.S_bulk.data,
+        state.S_layers.data,
+        state.age_volume.data,
+    )
+    trace = si3_lane_column_step_arrays(
+        arrays,
+        forcing,
+        dt,
+        config.ice_constants,
+        si3=config.si3,
+    )
+    out = trace.exit
+    new_state = SI3ColumnState(
+        concentration=state.concentration.replace(data=out.concentration),
+        h_ice=state.h_ice.replace(data=out.h_ice),
+        h_snow=state.h_snow.replace(data=out.h_snow),
+        T_surface=state.T_surface.replace(data=out.T_surface),
+        e_ice=state.e_ice.replace(data=out.e_ice),
+        e_snow=state.e_snow.replace(data=out.e_snow),
+        S_bulk=state.S_bulk.replace(data=out.S_bulk),
+        S_layers=state.S_layers.replace(data=out.S_layers),
+        age_volume=state.age_volume.replace(data=out.age_volume),
+    )
+    z = jnp.zeros_like(out.h_ice)
+    one = jnp.ones_like(out.h_ice)
+    response = TileResponse(
+        T_sfc=out.T_surface,
+        albedo=one * config.albedo_ice,
+        emissivity=one * config.emissivity_ice,
+        z0=one * config.z0_ice,
+        q_surface=z,
+        shflx=z,
+        lhflx=forcing.evaporation * config.ice_constants.latent_sublimation,
+        tau_x=z,
+        tau_y=z,
+        lw_up=z,
+        u_ocean_sfc=z,
+        v_ocean_sfc=z,
+        co2_flux=z,
+        freshwater_flux=z,
+        ocean_heat_extraction=z,
+        ocean_stress_x=z,
+        ocean_stress_y=z,
+        surface_mass_flux=forcing.evaporation * out.concentration,
+        lhflx_exchange=(
+            forcing.evaporation
+            * config.ice_constants.latent_sublimation
+            * out.concentration
+        ),
+        salt_flux=z,
+        T_rad=out.T_surface,
+        ice_concentration_thermo=arrays.concentration,
+    )
+    return new_state, response, trace
+
+
+from legoesm.ice.si3_orca2_state import (  # noqa: E402
+    SI3ORCA2Forcing,
+    SI3State,
+)
+
+
+def _si3_orca2_o1_step_with_trace(
+    state: SI3State,
+    forcing: SI3ORCA2Forcing,
+    config: SeaIceConfig,
+    dt: float,
+) -> tuple[SI3State, TileResponse]:
+    """Private fidelity hook executing one O1 ORCA2 SI3 step (`icestp.F90:148-224`)."""
+
+    if not isinstance(state, SI3State):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o1' requires SI3State with full ORCA2 "
+            "5-category 10+5-layer enthalpies/salinities and Prather moments"
+        )
+    if not isinstance(forcing, SI3ORCA2Forcing):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o1' requires SI3ORCA2Forcing carrying "
+            "tmask and optional sss_m at the icestp entry boundary (icestp.F90:148-224)"
+        )
+    if config.si3_orca2 is None:
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o1' requires an explicit si3_orca2 config; "
+            "the ice time step may not be inferred from the dispatcher dt"
+        )
+    orca2_cfg = config.si3_orca2
+    if float(dt) != float(orca2_cfg.rDt_ice):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o1' requires dt == si3_orca2.rDt_ice "
+            f"({float(dt)!r} != {float(orca2_cfg.rDt_ice)!r})"
+        )
+
+    # O1 deliberately exposes only the restart/state operator (`si3_o1_step`).
+    # Even with dynamics and thermodynamics disabled, NEMO ice_update_flx returns
+    # atmospheric/open-water heat, freshwater, and salt terms (iceupdate.F90:
+    # 115-161); SI3ORCA2Forcing does not yet carry that forcing contract.  A
+    # zero-filled TileResponse would therefore be a silent physical choice.
+    raise NotImplementedError(
+        "SI3 ORCA2 O1 state stepping is available through si3_o1_step, but "
+        "step_sea_ice is refused until the NEMO ice_update_flx forcing and "
+        "heat/freshwater/salt TileResponse contract is implemented"
+    )
+
+
+from legoesm.ice.si3_orca2_state import (  # noqa: E402
+    SI3ORCA2O2Forcing,
+)
+from legoesm.ice.si3_finalize import (  # noqa: E402
+    SI3FinalizeForcing,
+    SI3FinalizeResponse,
+    si3_ice_update_tau,
+    si3_o15_step,
+    si3_o16_step,
+)
+
+
+def _si3_orca2_o2_step_with_trace(
+    state: SI3State,
+    forcing: SI3ORCA2O2Forcing | SI3FinalizeForcing,
+    config: SeaIceConfig,
+    dt: float,
+) -> tuple[SI3State, TileResponse | SI3FinalizeResponse]:
+    """Execute the ORCA2 SI3 production entry, including its O15/O16 tail."""
+
+    if not isinstance(state, SI3State):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o2' requires SI3State with full ORCA2 "
+            "5-category 10+5-layer enthalpies/salinities and Prather moments"
+        )
+    if not isinstance(forcing, (SI3ORCA2O2Forcing, SI3FinalizeForcing)):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o2' requires SI3ORCA2O2Forcing or "
+            "SI3FinalizeForcing"
+        )
+    if config.si3_orca2 is None:
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o2' requires an explicit si3_orca2 config; "
+            "the ice time step may not be inferred from the dispatcher dt"
+        )
+    if float(dt) != float(config.si3_orca2.rDt_ice):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o2' requires dt == si3_orca2.rDt_ice "
+            f"({float(dt)!r} != {float(config.si3_orca2.rDt_ice)!r})"
+        )
+
+    if isinstance(forcing, SI3FinalizeForcing):
+        correction = si3_o15_step(
+            state,
+            forcing.fluxes,
+            sss_m=forcing.sss_m,
+            sst_m=forcing.sst_m,
+            rn_amax_2d=forcing.rn_amax_2d,
+            rn_himin=forcing.rn_himin,
+            config=config.si3_orca2,
+            _plant_skip_rebin=forcing.plant_skip_rebin,
+            _plant_strip_transfer_barriers=forcing.plant_strip_transfer_barriers,
+        )
+        h = int(config.si3_orca2.nn_hls)
+        owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
+        update_fluxes = correction.fluxes.__class__(
+            *(field[owned] for field in correction.fluxes)
+        )
+        final = si3_o16_step(
+            forcing.update_state,
+            update_fluxes,
+            forcing.update,
+            sss_m=forcing.sss_m,
+            config=config.si3_orca2,
+            surface_config=forcing.surface_config,
+            _plant_omit_hfx_res=forcing.plant_omit_hfx_res,
+        )
+        stress = si3_ice_update_tau(
+            forcing.stress,
+            config=config.si3_orca2,
+            ln_drgice_imp=forcing.ln_drgice_imp,
+        )
+        return final.state, SI3FinalizeResponse(
+            correction=correction,
+            final=final,
+            stress=stress,
+        )
+
+    # The earlier O2 initialization contract still has no heat/freshwater/salt
+    # response and remains fail-closed.  The typed late-stage forcing above is
+    # the only production continuation that owns that response.
+    raise NotImplementedError(
+        "SI3 ORCA2 O2 initialization is available through si3_o2_step, but "
+        "step_sea_ice is refused until the NEMO ice_update_flx forcing and "
+        "heat/freshwater/salt TileResponse contract is implemented"
+    )
+
+
+
 # ==============================================================================
 # Shared bulk-flux dispatch
 # ==============================================================================
+
+def _nemo_si3_ice_albedo(
+    T_surface: jnp.ndarray,
+    h_ice: jnp.ndarray,
+    h_snow: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    *,
+    land_mask: jnp.ndarray,
+    switches: SI3SwitchConfig,
+    _preserve_subnormal_snow: bool = True,
+) -> jnp.ndarray:
+    """Active no-pond SI3 albedo, ``icealb.F90:124-185``.
+
+    The ORCA1 identity fixes ``nn_snwfra=2`` and ``ln_pnd_alb=.false.``;
+    alternate snow-cover and pond branches are intentionally absent.
+    ``land_mask`` is NEMO's surface T mask ``smask0`` (1 wet, 0 land); it
+    multiplies the overcast albedo and the clear-sky correction at the same
+    two sites as ``icealb.F90:179-182``, so land albedo is 0 as in NEMO.
+    Switches (melt flag, thickness pieces) are C1 ramps of width
+    ``switches.relative_width x scale``; ``relative_width=0.0`` is NEMO's hard
+    form.  The snow-free test stays hard unless ``snow_ramp_width_m > 0``.
+    """
+    r = switches.relative_width
+    t_freeze = constants.T_freeze
+    snow_free = _si3_snow_free(
+        h_snow, switches.snow_ramp_width_m if r > 0.0 else 0.0, _preserve_subnormal_snow
+    )
+    melting = _si3_ge(T_surface, t_freeze, r * switches.temperature_scale_K)
+    snow_fraction = h_snow / (h_snow + constants.snow_cover_depth_nemo)
+    bare_thick = _si3_mix(
+        snow_free * melting,
+        constants.albedo_ice_melt_orca1,
+        constants.albedo_ice_dry_orca1,
+        r,
+    )
+    thin_break = constants.albedo_ice_thin_break_nemo
+    pivot = constants.albedo_ice_pivot_orca1
+    inv_log_interval = 1.0 / (jnp.log(pivot) - jnp.log(thin_break))
+    # log(h) is only used where h > thin_break; the inner where keeps h = 0
+    # from producing -inf (forward) / NaN (gradient) in the unused branch.
+    h_for_log = jnp.where(h_ice > thin_break, h_ice, pivot)
+    bare_mid = bare_thick + (
+        constants.albedo_ice_thin_nemo - bare_thick
+    ) * inv_log_interval * (jnp.log(pivot) - jnp.log(h_for_log))
+    inv_thin_break = 1.0 / thin_break
+    bare_thin = constants.albedo_ocean_nemo + (
+        constants.albedo_ice_thin_nemo - constants.albedo_ocean_nemo
+    ) * inv_thin_break * h_ice
+    is_thin = _si3_ge(-h_ice, -thin_break, r * thin_break)      # h <= thin_break
+    is_mid = _si3_ge(-h_ice, -pivot, r * pivot)                  # h <= pivot
+    bare = _si3_mix(is_thin, bare_thin, _si3_mix(is_mid, bare_mid, bare_thick, r), r)
+    snow_dry = constants.albedo_snow_dry_orca1 - (
+        constants.albedo_snow_dry_orca1 - bare
+    ) * jnp.exp(-h_snow * (1.0 / constants.albedo_snow_decay_dry_nemo))
+    snow_melt = constants.albedo_snow_melt_orca1 - (
+        constants.albedo_snow_melt_orca1 - bare
+    ) * jnp.exp(-h_snow * (1.0 / constants.albedo_snow_decay_melt_nemo))
+    snow = _si3_mix(melting, snow_melt, snow_dry, r)
+    overcast = (snow_fraction * snow + (1.0 - snow_fraction) * bare) * land_mask
+    clear = overcast - (
+        constants.albedo_cloud_quad_nemo * overcast * overcast
+        + constants.albedo_cloud_linear_nemo * overcast
+        + constants.albedo_cloud_offset_nemo
+    ) * land_mask
+    return (1.0 - cloud_fraction) * clear + cloud_fraction * overcast
+
+
+def _nemo_si3_blk_ice_2(
+    *,
+    T_surface,
+    h_ice,
+    h_snow,
+    cloud_fraction,
+    theta_air,
+    q_air,
+    p_surface,
+    lw_down,
+    precip,
+    snow,
+    qsr,
+    rho_air,
+    wind,
+    Ch,
+    Ce,
+    ice_fraction_before,
+    category_fraction_before,
+    sst_celsius,
+    qns_ocean,
+    qsr_ocean,
+    emp_ocean_raw,
+    precip_factor,
+    evap_factor,
+    snow_blow_exponent,
+    land_mask,
+    ice_constants,
+    switches: SI3SwitchConfig,
+    _preserve_subnormal_snow: bool = True,
+):
+    """ORCA1-resolved ``ice_alb`` + ``blk_ice_2`` scalar identity.
+
+    Formula and ordering follow NEMO 5.0.2 ``icealb.F90:124-185`` and
+    ``sbcblk.F90:1218-1346``.  It is private because partial combinations with
+    another public bulk selector are outside the certified identity.
+    ``precip_factor``, ``evap_factor`` and ``snow_blow_exponent`` are the
+    namelist ``rn_pfac``, ``rn_efac`` and ``rn_snwblow`` (``namsbc_blk`` /
+    ``nampar``): they scale total and solid precipitation, scale sublimation
+    and its T derivative, and set ``ice_var_snwblow``'s exponent.
+    ``land_mask`` is NEMO's ``smask0``; it multiplies the same terms as
+    ``sbcblk.F90`` (net longwave, total/solid precipitation and the rain,
+    snow and SST heat contents), so land cells carry NEMO's land values.
+    Switches (albedo, ``min(T_air, rt0)``, thin-ice transmission, Goff 180 K
+    floor) are C1 ramps of width ``switches.relative_width x scale``;
+    ``relative_width=0.0`` is NEMO's hard form.
+    """
+    r = switches.relative_width
+    albedo = _nemo_si3_ice_albedo(
+        T_surface, h_ice, h_snow, cloud_fraction,
+        land_mask=land_mask,
+        switches=switches,
+        _preserve_subnormal_snow=_preserve_subnormal_snow,
+    )
+    q_sat, dq_sat = nemo_si3_saturation_over_ice(
+        T_surface, p_surface, floor_width_K=r * switches.temperature_scale_K
+    )
+    theta_surface = T_surface * (
+        constants.p_ref / p_surface
+    ) ** (
+        constants.R_gas_molar
+        / (constants.M_dry_air * constants.c_p_dry_air_nemo)
+    )
+    qsr_ice = (
+        1.0 / (1.0 - constants.albedo_ocean_nemo)
+        * (1.0 - albedo) * qsr
+    )
+    surface_t3 = T_surface * T_surface * T_surface
+    q_lw = constants.emissivity_ice_nemo * (
+        lw_down - constants.sigma_sb_nemo * T_surface * surface_t3
+    ) * land_mask
+    dq_lw = (
+        4.0 * constants.emissivity_ice_nemo
+        * constants.sigma_sb_nemo * surface_t3
+    )
+    rho_wind = rho_air * wind
+    sensible_scale = rho_wind * constants.c_p_air_ice_nemo * Ch
+    sensible = sensible_scale * (theta_surface - theta_air)
+    latent_scale = rho_wind * ice_constants.latent_sublimation * Ce
+    latent = latent_scale * (q_sat - q_air)
+    dq_latent = latent_scale * dq_sat
+    qns_ice = q_lw - sensible - latent
+    dqns_ice = -(dq_lw + sensible_scale + dq_latent)
+
+    total_precip = precip * precip_factor * land_mask
+    snow_precip = snow * precip_factor * land_mask
+    ocean_evap = emp_ocean_raw + total_precip
+    evaporation_ice = evap_factor * latent / ice_constants.latent_sublimation
+    devaporation_ice = evap_factor * dq_latent / ice_constants.latent_sublimation
+    snow_on_ice_fraction = 1.0 - (
+        1.0 - ice_fraction_before
+    ) ** snow_blow_exponent
+    emp_ocean = (
+        (1.0 - ice_fraction_before) * ocean_evap
+        - (total_precip - snow_precip)
+        - snow_precip * (1.0 - snow_on_ice_fraction)
+    )
+    emp_ice = (
+        category_fraction_before * evaporation_ice
+        - snow_precip * snow_on_ice_fraction
+    )
+    emp_total = emp_ocean + emp_ice
+    rain_heat = (theta_air - ice_constants.T0) * ice_constants.c_ocean * land_mask
+    snow_heat = (
+        (min_c1(theta_air, ice_constants.T0, _sharp(r * switches.temperature_scale_K)) - ice_constants.T0)
+        * ice_constants.c_ice * land_mask
+    )
+    ocean_heat = sst_celsius * ice_constants.c_ocean * land_mask
+    qemp_ocean = (
+        -(1.0 - ice_fraction_before) * ocean_evap * ocean_heat
+        + (total_precip - snow_precip) * rain_heat
+        + snow_precip * (1.0 - snow_on_ice_fraction)
+        * (snow_heat - ice_constants.latent_fusion)
+    )
+    qemp_ice = (
+        snow_precip * snow_on_ice_fraction
+        * (snow_heat - ice_constants.latent_fusion)
+    )
+    qns_total = (
+        (1.0 - ice_fraction_before) * qns_ocean
+        + category_fraction_before * qns_ice
+        + qemp_ice + qemp_ocean
+    )
+    qsr_total = (
+        (1.0 - ice_fraction_before) * qsr_ocean
+        + category_fraction_before * qsr_ice
+    )
+    qprecip_ice = ice_constants.rho_snow * (
+        snow_heat - ice_constants.latent_fusion
+    )
+    transmission = (
+        constants.ice_sw_clear_nemo * (1.0 - cloud_fraction)
+        + constants.ice_sw_cloudy_nemo * cloud_fraction
+    )
+    thin_sw = constants.ice_sw_thin_threshold_nemo
+    is_thin = 1.0 - _si3_ge(h_ice, thin_sw, r * thin_sw)          # h < thin_sw
+    transmission = _si3_mix(
+        is_thin,
+        transmission + (1.0 - transmission) * (
+            1.0 - h_ice * constants.ice_sw_thin_inverse_nemo
+        ),
+        transmission,
+        r,
+    )
+    snow_free = _si3_snow_free(
+        h_snow, switches.snow_ramp_width_m if r > 0.0 else 0.0, _preserve_subnormal_snow
+    )
+    qtr_ice_top = _si3_mix(snow_free, qsr_ice * transmission, 0.0, r)
+    return {
+        "albedo": albedo,
+        "qsr_ice": qsr_ice,
+        # NEMO's per-category loop terms (sbcblk.F90 z_qlw, z_dqlw, z_qsb,
+        # z_dqsb): net longwave (positive down), its T derivative, sensible
+        # heat (positive up, so qns_ice = qlw_ice - qsb_ice - qla_ice) and
+        # its T derivative.  Per unit ice area, not the iom cell average.
+        "qlw_ice": q_lw,
+        "dqlw_ice": dq_lw,
+        "qsb_ice": sensible,
+        "dqsb_ice": sensible_scale,
+        "qla_ice": latent,
+        "dqla_ice": dq_latent,
+        "qns_ice": qns_ice,
+        "dqns_ice": dqns_ice,
+        "evap_ice": evaporation_ice,
+        "devap_ice": devaporation_ice,
+        "tprecip": total_precip,
+        "sprecip": snow_precip,
+        "emp_oce": emp_ocean,
+        "emp_ice": emp_ice,
+        "emp_tot": emp_total,
+        "qemp_oce": qemp_ocean,
+        "qemp_ice": qemp_ice,
+        "qns_tot": qns_total,
+        "qsr_tot": qsr_total,
+        "qprec_ice": qprecip_ice,
+        "qevap_ice": jnp.zeros_like(T_surface),
+        "qtr_ice_top": qtr_ice_top,
+    }
+
+
+def _nemo_si3_ice_flx_other(
+    *,
+    ice_fraction,
+    ice_fraction_before,
+    ice_volume,
+    u_ice,
+    u_ice_west,
+    v_ice,
+    v_ice_south,
+    u_ocean,
+    u_ocean_west,
+    v_ocean,
+    v_ocean_south,
+    drag_io,
+    frq,
+    qsr_ocean,
+    qns_ocean,
+    qemp_ocean,
+    ocean_layer_thickness,
+    sst_celsius,
+    T_bottom,
+    dt,
+    rho_ocean,
+    c_ocean,
+    T0,
+    ice_epsilon,
+    max_ice_fraction,
+    lead_cut_version,
+    land_mask,
+    switches: SI3SwitchConfig,
+):
+    """Active C1D ``ice_flx_other`` branch, ``icesbc.F90:322-437``.
+
+    The accepted run has ``ln_icedyn/ln_leadhfx/ln_icedO/ln_icedH=.true.``
+    and form drag false.  No public flags expose the inactive alternatives.
+
+    ``lead_cut_version`` selects the open-water freezing cuts:
+
+    * ``"5.0.2"`` (C1D_OMIP_L3 oracle): landfast cut needs
+      ``at_i >= rn_amax - 0.001`` AND ``vt_i >= 3 m``; full-cover cut also
+      needs ``vt_i >= 3 m``.
+    * ``"5.0.1"`` (ORCA1 oracle, icesbc.F90:391,412,416): landfast cut
+      ``zvel <= 5 mm/s .AND. at_i >= rn_amax - 0.01``; full-cover cut
+      ``at_i >= 1 - epsi10``; no thickness term.
+
+    Every switch, floor and cap is a C1 ramp of width
+    ``switches.relative_width x scale`` (``0.0`` = NEMO's hard form, used by
+    the oracle tests): the ice switch ramps on
+    ``[epsi10 (1 - relative_width), epsi10]``; ``max(at_i, epsi10)``
+    and the qsb cap are exact outside their band; ``min/max(., 0)`` of heat
+    contents and fluxes use ``positive_part_c1``; the landfast speed test acts
+    on the squared speed so its gradient is finite for ice at rest.  Smooth
+    mode writes NEMO's ``IF (zqld - zqfr < 0)`` without a branch: in every case
+    ``qlead = MIN(0, zqld - zqfr)`` and ``fhld = zswitch * MAX(0, (zqld -
+    zqfr_pos) / dt / MAX(at_i, epsi10))`` give NEMO's values (5.0.1's extra
+    ``.OR. at_i < epsi10`` is output-neutral: zswitch = 0 there).
+    """
+    if lead_cut_version not in ("5.0.1", "5.0.2"):
+        raise ValueError(
+            f"Unknown lead_cut_version {lead_cut_version!r}; expected '5.0.1' or '5.0.2'."
+        )
+    r = switches.relative_width
+    hard = r == 0.0
+    flux_w = r * switches.flux_scale_W_m2              # [W/m2]
+    energy_w = flux_w * dt                         # [J/m2]
+    du = u_ice - u_ocean
+    du_west = u_ice_west - u_ocean_west
+    dv = v_ice - v_ocean
+    dv_south = v_ice_south - v_ocean_south
+    friction = drag_io * (0.5 * (
+        (du * du + du_west * du_west) + (dv * dv + dv_south * dv_south)
+    )) * land_mask
+    if hard:
+        switch = jnp.where(ice_fraction >= ice_epsilon, land_mask, 0.0)
+    else:   # ramp on [epsi10 - w, epsi10]: exact NEMO outside it (X1 scale; GLM review)
+        switch = _si3_ge(
+            ice_fraction, ice_epsilon, r * switches.ice_switch_scale
+        ) * land_mask
+    ice_floor = max_c1(ice_fraction, ice_epsilon, _sharp(r * switches.ice_switch_scale))
+    lead_energy = land_mask * dt * (
+        (1.0 - ice_fraction_before) * qsr_ocean * frq
+        + (1.0 - ice_fraction_before) * qns_ocean
+        + qemp_ocean
+    )
+    freeze_energy = (
+        rho_ocean * c_ocean * ocean_layer_thickness
+        * (T_bottom - (sst_celsius + T0))
+    ) * land_mask
+    freeze_negative = min_c1(freeze_energy, 0.0, _sharp(energy_w))
+    freeze_positive = max_c1(freeze_energy, 0.0, _sharp(energy_w))
+    # sqrt(0) = 0 on land (friction masked) and at zero relative velocity;
+    # the inner where keeps the gradient there 0 instead of 0*inf = NaN (V15).
+    friction_positive = friction > 0.0
+    friction_velocity = jnp.where(
+        friction_positive, jnp.sqrt(jnp.where(friction_positive, friction, 1.0)), 0.0
+    )
+    qsb = (
+        switch * rho_ocean * c_ocean
+        * constants.ice_ocean_heat_transfer_nemo * friction_velocity
+        * ((sst_celsius + T0) - T_bottom)
+    )
+    qsb = switch * min_c1(qsb, -freeze_negative / dt / ice_floor, _sharp(flux_w))
+    supercool = _si3_gt(T_bottom - (sst_celsius + T0), 0.0, r * switches.temperature_scale_K)
+    stop_volume = constants.ice_supercool_volume_stop_nemo
+    thick = _si3_ge(ice_volume, stop_volume, r * stop_volume)
+    stop_supercool = supercool * thick
+    freeze_energy = _si3_mix(stop_supercool, 0.0, freeze_energy, r)
+    freeze_positive = _si3_mix(stop_supercool, 0.0, freeze_positive, r)
+    qsb = _si3_mix(stop_supercool, 0.0, qsb, r)
+    if hard:   # NEMO's branch, kept verbatim so hard mode is bitwise (+0.0; codex review)
+        cooling = lead_energy - freeze_energy < 0.0
+        fhld = jnp.where(
+            cooling, 0.0,
+            switch * jnp.maximum(0.0, (lead_energy - freeze_positive) / dt / ice_floor),
+        )
+        qlead = jnp.where(cooling, jnp.minimum(0.0, lead_energy - freeze_energy), 0.0)
+    else:
+        fhld = switch * max_c1(
+            (lead_energy - freeze_positive) / dt / ice_floor, 0.0, _sharp(flux_w)
+        )
+        qlead = min_c1(lead_energy - freeze_energy, 0.0, _sharp(energy_w))
+    if hard:
+        ice_speed = 0.5 * jnp.sqrt(
+            (u_ice_west + u_ice) * (u_ice_west + u_ice)
+            + (v_ice_south + v_ice) * (v_ice_south + v_ice)
+        )
+        slow = (ice_speed <= constants.ice_landfast_speed_stop_nemo).astype(qlead.dtype)
+    else:
+        speed_sq = 0.25 * (
+            (u_ice_west + u_ice) * (u_ice_west + u_ice)
+            + (v_ice_south + v_ice) * (v_ice_south + v_ice)
+        )
+        stop_sq = constants.ice_landfast_speed_stop_nemo ** 2
+        slow = _si3_ge(-speed_sq, -stop_sq, r * stop_sq)          # speed <= 5 mm/s
+    full = _si3_ge(ice_fraction, 1.0 - ice_epsilon, r * switches.full_cover_scale)
+    if lead_cut_version == "5.0.1":
+        packed = _si3_ge(
+            ice_fraction, max_ice_fraction - constants.ice_landfast_margin_nemo501,
+            r * switches.cut_fraction_scale,
+        )
+        cut = 1.0 - (1.0 - slow * packed) * (1.0 - full)
+    else:
+        thick_v = constants.ice_growth_thickness_stop_nemo
+        grown = _si3_ge(ice_volume, thick_v, r * thick_v)
+        packed = _si3_ge(
+            ice_fraction, max_ice_fraction - constants.ice_full_cover_margin_nemo,
+            r * switches.cut_fraction_scale,
+        )
+        cut = 1.0 - (1.0 - slow * packed * grown) * (1.0 - full * grown)
+    # hard mode assigns +0.0 as NEMO (qlead * 0 would give -0.0)
+    qlead = _si3_mix(cut, 0.0, qlead, r)
+    return {"qsb_ice_bot": qsb, "fhld": fhld, "qlead": qlead}
 
 def _bulk_flux_dispatch(
     T_ice: jnp.ndarray,
@@ -416,7 +1292,9 @@ def _bulk_flux_dispatch(
     helper centralises the choice so both paths and the diagnostic
     ``_build_response`` produce consistent values.
     """
-    valid_schemes = ("constant", "most", "coare3", "large_yeager")
+    valid_schemes = (
+        "constant", "most", "coare3", "large_yeager", "nemo_si3_constant",
+    )
     if config.bulk_scheme not in valid_schemes:
         raise ValueError(
             f"Unknown sea-ice bulk_scheme {config.bulk_scheme!r}; "
@@ -428,27 +1306,51 @@ def _bulk_flux_dispatch(
         )
     )
     rho = forcing.rho_lowest
-    q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
     validate_bulk_scheme(config.bulk_scheme)
-    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
+    if config.bulk_scheme == "nemo_si3_constant":
+        validate_si3_bulk_config(config)
+        theta_air = forcing.T_lowest * (
+            constants.p_ref / forcing.p_lowest
+        ) ** (
+            constants.R_gas_molar
+            / (constants.M_dry_air * constants.c_p_dry_air_nemo)
+        )
+        raw = nemo_si3_constant_fluxes(
+            forcing.u_lowest, forcing.v_lowest, theta_air, forcing.q_lowest,
+            T_ice, forcing.p_surface, rho,
+            config.Cd_ice, config.Ch_ice, config.Ce_ice,
+            goff_floor_width_K=(config.si3_switches.relative_width
+                                * config.si3_switches.temperature_scale_K),
+        )
+        # NEMO returns air->ice stress; TileResponse carries the equal/opposite
+        # ice->air reaction used by the existing legoESM coupling convention.
+        tau_x, tau_y = -raw[0], -raw[1]
+        shflx, lhflx = raw[6], raw[7]
+    elif config.bulk_scheme in ("most", "coare3", "large_yeager"):
+        q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
+        # Model-level forcing: surface-referenced T at its own height (#1818).
+        T_air, z_air = surface_reference_state(
+            forcing.T_lowest, config.z_ref, forcing.z_lowest)
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
+            T_air, forcing.q_lowest,
             T_ice, q_sfc, rho,
-            z_ref=config.z_ref,
+            z_ref=z_air,
             z0_init=config.z0_ice,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
-            L_latent=constants.L_s,
+            L_latent=latent_heat_sublimation(T_ice),
+            **large_yeager_widths(config),
             stability_scheme=config.stability_scheme,
         )
     else:
+        q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,
             T_ice, q_sfc, rho, wind_speed,
             config.Cd_ice, config.Ch_ice,
-            L_latent=constants.L_s,
+            L_latent=latent_heat_sublimation(T_ice),
         )
     return tau_x, tau_y, shflx, lhflx
 
@@ -468,6 +1370,10 @@ def _step_slab(
     dt: float,
 ) -> tuple[SeaIceState, TileResponse]:
     """Original slab sea ice model (backward compatible)."""
+    if not config.ponds.enabled and config.ponds.scheme != "cesm":
+        raise ValueError(
+            "config.ponds.scheme must be 'cesm' when config.ponds.enabled is False"
+        )
     h = state.h_ice.data
     T_ice = state.T_ice.data
     conc = state.concentration.data
@@ -603,7 +1509,7 @@ def _step_slab(
         z0=jnp.full(h.shape, config.z0_ice, dtype=_h_dtype),
         q_surface=q_sfc_new,
         shflx=shflx,
-        # Realized latent (== L_s * surface_mass_flux / conc): the atmosphere
+        # Realized latent (== L_s(T_ice) * surface_mass_flux / conc): the atmosphere
         # latent energy matches the skin solve and the moisture mass (#28).
         lhflx=diag["lhflx_realized"],
         tau_x=tau_x,
@@ -624,6 +1530,9 @@ def _step_slab(
         # Equals lhflx/L_s * conc in the no-clamp regime; bounded to the water
         # the ice actually lost when the over-ablation cap fires (#28, codex).
         surface_mass_flux=diag["sublim_mass_per_ice_area"] * conc,
+        # Paired by construction: the same Kirchhoff L_s(T_ice) the charge used.
+        lhflx_exchange=(latent_heat_sublimation(T_ice)
+                        * diag["sublim_mass_per_ice_area"] * conc),
         # Slab path has no bulk-ice salinity tracking — salt channel
         # is inert.  The brine-aware path uses the dynamic state and
         # populates ``salt_flux`` in ``_build_response``.
@@ -655,6 +1564,14 @@ def _step_dynamic(
     state : DynamicSeaIceState
     grid : CubedSphereGrid, required for dynamics/transport
     """
+    if not config.ponds.enabled and config.ponds.scheme != "cesm":
+        raise ValueError(
+            "config.ponds.scheme must be 'cesm' when config.ponds.enabled is False"
+        )
+    if state.h_il is not None:
+        raise ValueError(
+            "DynamicSeaIceState.h_il must be None unless config.ponds.enabled and config.ponds.scheme == 'si3_lev'"
+        )
     h = state.h_ice.data
     T_ice = state.T_ice.data
     conc = state.concentration.data
@@ -1039,7 +1956,7 @@ def _thermo_single(
             forcing.T_lowest, forcing.q_lowest,
             T_ice, q_sfc, rho, wind_speed,
             config.Cd_ice, config.Ch_ice,
-            L_latent=constants.L_s,  # sublimation over ice
+            L_latent=latent_heat_sublimation(T_ice),  # sublimation over ice, at the skin T that set q_sfc
         )
 
     # Albedo: use ice albedo over ice, ocean albedo over open water
@@ -1125,7 +2042,7 @@ def _thermo_single(
     # (Coupler-conservation audit F7.)
     dh_dt_sublim = jnp.where(
         ice_mask,
-        -lhflx / (config.rho_ice * constants.L_s),
+        -lhflx / (config.rho_ice * latent_heat_sublimation(T_ice)),
         0.0,
     )
 
@@ -1219,7 +2136,7 @@ def _thermo_single(
     # residual near zero; the guard removes it and protects validated baselines).
     lhflx_realized = jnp.where(
         removal_scale < 1.0,
-        constants.L_s * sublim_mass_per_ice_area,
+        latent_heat_sublimation(T_ice) * sublim_mass_per_ice_area,
         lhflx,
     )
     if config.latent_skin_resolve:
@@ -1368,7 +2285,7 @@ def _thermo_single(
         # Realized ice->atmosphere sublimation mass [kg/m2(ice)/s] (#28).
         "sublim_mass_per_ice_area": sublim_mass_per_ice_area,
         # Latent flux PER-ICE-AREA consistent with the realized sublimation mass
-        # (== L_s * sublim_mass_per_ice_area where the cap fires, else the bulk
+        # (== L_s(T_ice) * sublim_mass_per_ice_area where the cap fires, else the bulk
         # lhflx); fed to the coupler so the atmosphere latent energy matches the
         # skin solve and the moisture mass (#28).
         "lhflx_realized": lhflx_realized,
@@ -1413,7 +2330,7 @@ def _ocean_exchange_from_diag(diag, conc_in, config):
     return fw, heat, atmos_mass
 
 
-def _cap_multicat_concentration(conc, h, h_snow=None, pond_depth=None):
+def _cap_multicat_concentration(conc, h, h_snow=None, pond_depth=None, *, h_il=None):
     """Restore the aggregate-area invariant ``sum_k a_k <= 1`` after a
     multi-category transport step that advected each category independently.
 
@@ -1441,6 +2358,12 @@ def _cap_multicat_concentration(conc, h, h_snow=None, pond_depth=None):
     practice (the root-cause lead-freeze area bound + sub-CFL transport keep
     overfill tiny).
     """
+    if h_il is not None:
+        raise ValueError(
+            "concentration cap (_cap_multicat_concentration) cannot run with "
+            "MeltPondConfig.scheme='si3_lev'; does not carry a_ip, v_ip, v_il "
+            "(pond_area, pond_depth, h_il) as NEMO rung O6/O15 ice_cor does"
+        )
     sum_conc = jnp.sum(conc, axis=-1, keepdims=True)
     overfill = jnp.maximum(sum_conc, 1.0)
     conc = conc / overfill
@@ -1465,6 +2388,12 @@ def _pond_area_depth_from_volume(V_pond_per_cell, conc, config):
     water above ``depth_to_area_ratio * max_area**2`` would be silently lost).
     The 1e-14 sqrt floor keeps no-pond cells no-pond and the gradient finite.
     """
+    if config.ponds.enabled and config.ponds.scheme == "si3_lev":
+        raise ValueError(
+            "_pond_area_depth_from_volume (CESM pond reconstruction after "
+            "advection/ITD remap/ridging) cannot run with MeltPondConfig.scheme='si3_lev'; "
+            "does not carry a_ip, v_ip, v_il (pond_area, pond_depth, h_il) as NEMO rungs O4/O6/O13 do"
+        )
     conc_safe = jnp.maximum(conc, 1e-12)
     vol_per_ice_area = jnp.where(conc > 1e-12, V_pond_per_cell / conc_safe, 0.0)
     depth_init = jnp.sqrt(
@@ -1572,7 +2501,7 @@ def _build_response(
         ice_mask_init = h_old > config.h_ice_min
         dh_dt_sublim = jnp.where(
             ice_mask_init,
-            -lhflx / (config.rho_ice * constants.L_s),
+            -lhflx / (config.rho_ice * latent_heat_sublimation(T_ice)),
             0.0,
         )
         freshwater_flux = -config.rho_ice * (dh_dt_total - dh_dt_sublim) * exch_conc
@@ -1639,7 +2568,11 @@ def _build_response(
         # diagnostics; fallback to the uncapped bulk lhflx/L_s * conc (#28).
         surface_mass_flux=(
             surface_mass_override if surface_mass_override is not None
-            else lhflx / constants.L_s * conc
+            else lhflx / latent_heat_sublimation(T_ice) * conc
+        ),
+        lhflx_exchange=latent_heat_sublimation(T_ice) * (
+            surface_mass_override if surface_mass_override is not None
+            else lhflx / latent_heat_sublimation(T_ice) * conc
         ),
         # Salt-flux placeholder — populated by the brine-aware path
         # in ``_step_dynamic`` when ``config.brine.enabled``.  The
@@ -1658,8 +2591,9 @@ def _closing_rate_from_velocity(
     v_ice: jnp.ndarray,
     grid,
     cap: float,
-    cs_shear: float = 0.0,
-    e_yield: float = 2.0,
+    cs_shear: float = _NO_SHEAR_RIDGING,
+    e_yield: float = SeaIceConfig().e_yield,
+    closing_scheme: str = "strain",
 ) -> jnp.ndarray:
     """Ridging closing rate from the velocity field (Rothrock 1975 / CICE).
 
@@ -1676,15 +2610,33 @@ def _closing_rate_from_velocity(
     ellipse ratio; ``cs_shear`` (Cs) the shear-ridging participation fraction
     (0 recovers the old convergence-only closing).
 
-    The grid is validated for operator support at ``step_sea_ice`` entry
-    (``_grid_supports_ice_dynamics``), so ``strain_rates`` is called
-    directly — no exception-swallowing fallback, which would silently
+    ``closing_scheme='convergence'`` explicitly omits shear. On the C-grid,
+    reuse the ice transport tendency for a unit scalar: ``-div(u)`` is
+    positive for closing. This retains geographic-to-face rotation, metric
+    factors and the shared north-fold flux; it introduces no tensor operator.
+    Like that transport, it has no coastal mask or landfast constraint.
+    On other supported grids use the existing strain trace.
+
+    The grid is validated for the selected operators at ``step_sea_ice`` entry,
+    so each operator is called directly — no exception-swallowing fallback,
+    which would silently
     disable ridging and detach the gradient w.r.t. velocity (forbidden by
     the repo AD rules).  The ``1e-20`` sqrt floors keep the gradient finite at
     zero deformation (numerics floor, not tunable).
     """
+    if closing_scheme not in ("strain", "convergence"):
+        raise ValueError(
+            f"Unknown ridging closing scheme: {closing_scheme!r}; "
+            "expected 'strain' or 'convergence'."
+        )
+    if closing_scheme == "convergence" and isinstance(grid, LatLonCGridGeometry):
+        convergence = fv_flux_divergence_latlon_cgrid(
+            jnp.ones_like(u_ice), u_ice, v_ice, grid)
+        return jnp.clip(convergence, 0, cap)
     eps_11, eps_22, eps_12 = strain_rates(u_ice, v_ice, grid)
     div = eps_11 + eps_22
+    if closing_scheme == "convergence":
+        return jnp.clip(-div, 0, cap)
     shear = jnp.sqrt((eps_11 - eps_22) ** 2 + 4.0 * eps_12 ** 2 + 1e-20)
     delta = jnp.sqrt(div ** 2 + (shear / e_yield) ** 2 + 1e-20)
     closing = 0.5 * cs_shear * (delta - jnp.abs(div)) + jnp.maximum(-div, 0.0)
@@ -1707,6 +2659,10 @@ def _thermo_v2(
     *,
     open_water_fraction: jnp.ndarray | None = None,
     enable_lead_freeze: bool = True,
+    q_open_top=None,
+    ocean_dz_top_m=None,
+    h_il: jnp.ndarray | None = None,
+    at_i: jnp.ndarray | None = None,
 ) -> dict:
     """Extended thermodynamics: snow + brine + SW scheme + ponds aware.
 
@@ -1874,7 +2830,8 @@ def _thermo_v2(
     )
 
     # 7. Sublimation: snow first, then ice.  ``lhflx > 0`` → mass loss.
-    sublim_mass_per_area = (lhflx / constants.L_s) * dt
+    _L_s = latent_heat_sublimation(T_ice)   # the L the bulk charge used (same skin T)
+    sublim_mass_per_area = (lhflx / _L_s) * dt
     h_snow_after_sub, h_after_sub, snow_sub_m, ice_sub_m = consume_sublimation_from_snow_then_ice(
         sublim_mass_per_area,
         h_snow_after_melt,
@@ -1889,20 +2846,20 @@ def _thermo_v2(
     # consume_sublimation_from_snow_then_ice; deposition via min(..., 0) since
     # the helper grows snow and returns zero sub-depths under lhflx<0) is known
     # in ONE pass.  Build the latent CONSISTENT with it so the atmosphere latent
-    # energy == L_s*realized mass and the skin is cooled by that same latent.
+    # energy == L_s(T_ice)*realized mass and the skin is cooled by that same latent.
     # Use snow+ice TOTAL (snow sublimation is not bounded by ice h).  GUARD: only
     # rebase when the loss demand was not fully met, so thick / fully-supplied
     # cells return the bulk ``lhflx`` bitwise (no-op for validated baselines).
     realized_sublim_kg = (
         snow_sub_m * config.snow.rho_snow
         + ice_sub_m * config.rho_ice
-        + jnp.minimum(lhflx / constants.L_s * dt, 0.0)
+        + jnp.minimum(lhflx / _L_s * dt, 0.0)
     )
-    demanded_sublim_kg = lhflx / constants.L_s * dt
+    demanded_sublim_kg = lhflx / _L_s * dt
     sublim_capped = realized_sublim_kg < demanded_sublim_kg - 1e-30
     lhflx_realized = jnp.where(
         sublim_capped,
-        constants.L_s * realized_sublim_kg / dt,
+        _L_s * realized_sublim_kg / dt,
         lhflx,
     )
     if config.latent_skin_resolve:
@@ -1926,24 +2883,58 @@ def _thermo_v2(
     #    ``h_new_ice`` into the lead area.  Partial-cover cells DO
     #    contribute: ``(1 − conc)`` of the cell is open water and can
     #    refreeze.
-    freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
     lead_area = jnp.clip(
         (1.0 - conc) if open_water_fraction is None else open_water_fraction,
         0.0, 1.0,
     )
-    # ``dh_dt_open`` is the local lead-ice thickening rate per unit
-    # lead area, driven by the destabilising surface flux.
-    dh_dt_open_raw = freeze_flux_open / (config.rho_ice * config.L_f)
-    # Gate on ocean supercooling: lead ice cannot form over an above-freezing
-    # mixed layer.  ``freeze_flux_open`` is the ICE-skin atmospheric deficit and
-    # never sees the SST, so without this gate ice grows over warm water (audit
-    # finding #2).  ``ocean_sst <= T_freeze_ocean`` (data-dependent select).
-    dh_dt_open_raw = jnp.where(
-        ocean_sst <= config.T_freeze_ocean, dh_dt_open_raw, 0.0,
-    )
-    dh_dt_open = dh_dt_open_raw if enable_lead_freeze else jnp.zeros_like(dh_dt_open_raw)
-    # Per-grid-cell new volume contributed by lead-freezing this step.
-    delta_V_lead_freeze = jnp.maximum(dh_dt_open * lead_area * dt, 0.0)
+    if config.lead_freeze_source == "ice_skin":
+        freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
+        # ``dh_dt_open`` is the local lead-ice thickening rate per unit
+        # lead area, driven by the destabilising surface flux.
+        dh_dt_open_raw = freeze_flux_open / (config.rho_ice * config.L_f)
+        # Gate on ocean supercooling: lead ice cannot form over an
+        # above-freezing mixed layer.  ``freeze_flux_open`` is the ICE-skin
+        # atmospheric deficit and never sees the SST, so without this gate ice
+        # grows over warm water (audit finding #2).
+        dh_dt_open_raw = jnp.where(
+            ocean_sst <= config.T_freeze_ocean, dh_dt_open_raw, 0.0,
+        )
+        dh_dt_open = (dh_dt_open_raw if enable_lead_freeze
+                      else jnp.zeros_like(dh_dt_open_raw))
+        # Per-grid-cell new volume contributed by lead-freezing this step.
+        delta_V_lead_freeze = jnp.maximum(dh_dt_open * lead_area * dt, 0.0)
+    elif config.lead_freeze_source == "nemo_qlead":
+        # NEMO SI3 lead heat budget, icesbc.F90:357-405 (5.0.1):
+        #   zqld = (1-A) * qns_oce * rDt_ice         open-water cooling [J/m2]
+        #   zqfr = rho0*rcp*e3t_m*(t_bo - sst)      energy to reach freezing
+        #   qlead = MIN(0, zqld - zqfr)             -> ice_thd_do new ice
+        # The ocean cools at most to Tf: the coupler hands it zqld, and the
+        # lead term of ocean_heat_extraction RETURNS -qlead (see the sign
+        # switch at the composition).  A supercooled cell (zqfr > 0) freezes
+        # back toward Tf even at A = 1 (frazil).  Only the NON-solar
+        # open-water flux enters zqld here: SW over leads reaches the ocean
+        # through the coupler's SW channel and NEMO's frq_m surface share is
+        # a ledger item, not a sign.  ponytail: SW share omitted, add if the
+        # summer lead budget matters.
+        if q_open_top is None or ocean_dz_top_m is None:
+            raise ValueError(
+                "lead_freeze_source='nemo_qlead' needs q_open_top and "
+                "ocean_dz_top_m (step_sea_ice kwargs).")
+        zqld = lead_area * jnp.asarray(q_open_top) * dt
+        zqfr = (constants.rho_ocean * constants.c_p_seawater
+                * jnp.asarray(ocean_dz_top_m)
+                * (config.T_freeze_ocean - ocean_sst))
+        qlead = jnp.minimum(0.0, zqld - zqfr)
+        delta_V_lead_freeze = (-qlead / (config.rho_ice * config.L_f)
+                               if enable_lead_freeze else jnp.zeros_like(qlead))
+        # Area growth below reads dh_dt_open * lead_area; at A = 1 the
+        # frazil volume thickens the pack instead (V_after_lead keeps it).
+        dh_dt_open = delta_V_lead_freeze / (dt * jnp.maximum(lead_area, 1e-6))
+    else:
+        raise ValueError(
+            f"Unknown SeaIceConfig.lead_freeze_source="
+            f"{config.lead_freeze_source!r}; expected 'ice_skin' or "
+            "'nemo_qlead'.")
 
     # Update concentration and mean thickness so the lead-freeze ice
     # volume is captured even in partial-cover cells:
@@ -2018,12 +3009,32 @@ def _thermo_v2(
     dilute = jnp.where(conc_new > 1e-12, retained_area / jnp.maximum(conc_new, 1e-12), 0.0)
     # Per-grid-cell snow + pond mass shed to the ocean from the retired area,
     # taken from the PRE-conversion tracers (post-sublimation snow; old pond).
+    if not config.ponds.enabled and config.ponds.scheme != "cesm":
+        raise ValueError(
+            "config.ponds.scheme must be 'cesm' when config.ponds.enabled is False"
+        )
+    _use_si3_lev = config.ponds.enabled and config.ponds.scheme == "si3_lev"
+    if _use_si3_lev:
+        if h_il is None:
+            raise ValueError(
+                "_thermo_v2(scheme='si3_lev') requires prognostic h_il (lid thickness)"
+            )
+    elif h_il is not None:
+        raise ValueError(
+            "_thermo_v2 requires h_il=None unless config.ponds.enabled and config.ponds.scheme == 'si3_lev'"
+        )
     shed_snow_kg = shed_area * jnp.maximum(h_snow_after_sub, 0.0) * config.snow.rho_snow
-    shed_pond_kg = shed_area * pond_area * pond_depth * constants.rho_water
+    shed_pond_kg = (
+        shed_area
+        * pond_area
+        * ((pond_depth + h_il) if _use_si3_lev else pond_depth)
+        * constants.rho_water
+    )
     # Surviving tracers diluted onto the new ice area (depth-diluted; the pond
     # area FRACTION is preserved, the water VOLUME per ice-area is diluted).
     h_snow_dil = jnp.maximum(h_snow_after_sub, 0.0) * dilute
     pond_depth_dil = pond_depth * dilute
+    h_il_dil = h_il * dilute if _use_si3_lev else None
 
     # 10. Snow-ice flooding (white-ice formation) — on the diluted, new-area snow.
     if config.snow.enabled and config.snow.flooding:
@@ -2050,6 +3061,10 @@ def _thermo_v2(
             (forcing.precip_total - forcing.precip_snow) * dt / constants.rho_water,
             0.0,
         )
+        if config.core2_precipitation_closure:
+            # Same precipitation gate as the snow and no-pond rain paths.
+            rain_m_liquid = rain_m_liquid * jnp.asarray(
+                forcing.has_precipitation, dtype=h_new.dtype)
         # Surface-melt thickness is in *layer* meters (snow, ice).
         # Ponds collect liquid-water equivalent — convert with the
         # density ratio before passing to ``step_ponds``.
@@ -2078,22 +3093,80 @@ def _thermo_v2(
         pond_captured_melt_m_liquid = (
             pond_captured_m_liquid * melt_fraction_of_capture
         )
+        if config.core2_precipitation_closure:
+            # Rain the ponds cannot take (snow-blocked, or no ice before this
+            # step) runs off to the ocean instead of vanishing.
+            rain_uncaptured_m_liquid = jnp.where(
+                ice_mask & (~snow_blocks), 0.0, rain_m_liquid,
+            )
 
-        pond_area_new, pond_depth_new, drain_to_ocean_m, refreeze_m = step_ponds(
-            pond_area, pond_depth_dil,
-            melt_water_m=melt_water_m_liquid,
-            rain_water_m=rain_m_liquid,
-            ice_mask=ice_mask,
-            h_snow=h_snow_new,
-            T_air=forcing.T_lowest,
-            dt=dt,
-            drainage_timescale=config.ponds.drainage_timescale_s,
-            refreeze_threshold=config.ponds.refreeze_threshold,
-            pond_to_ice_max_area=config.ponds.pond_to_ice_max_area,
-            depth_to_area_ratio=config.ponds.depth_to_area_ratio,
-            snow_block_threshold=config.ponds.snow_block_threshold,
-            refreeze_width_K=config.ponds.refreeze_width_K,
-        )
+        if config.ponds.scheme == "si3_lev":
+            if h_il is None:
+                raise ValueError(
+                    "_thermo_v2(scheme='si3_lev') requires prognostic h_il (lid thickness)"
+                )
+            if config.n_categories > 1 and at_i is None:
+                raise ValueError(
+                    "_thermo_v2(scheme='si3_lev', n_categories > 1) requires "
+                    "category-summed at_i from ice_var_agg"
+                )
+            from legoesm.ice.si3_orca2_state import fortran_sum_categories
+            at_i_in = (
+                at_i
+                if at_i is not None
+                else fortran_sum_categories(
+                    jnp.asarray(conc_new, dtype=jnp.float64)[..., None], axis=-1
+                )
+            )
+            pond_area_new, pond_depth_new, drain_to_ocean_m, refreeze_m, h_il_new = step_ponds(
+                pond_area, pond_depth_dil,
+                melt_water_m=melt_water_m_liquid,
+                rain_water_m=rain_m_liquid,
+                ice_mask=ice_mask,
+                h_snow=h_snow_new,
+                T_air=forcing.T_lowest,
+                dt=dt,
+                drainage_timescale=config.ponds.drainage_timescale_s,
+                refreeze_threshold=config.ponds.refreeze_threshold,
+                pond_to_ice_max_area=config.ponds.pond_to_ice_max_area,
+                depth_to_area_ratio=config.ponds.depth_to_area_ratio,
+                snow_block_threshold=config.ponds.snow_block_threshold,
+                refreeze_width_K=config.ponds.refreeze_width_K,
+                scheme=config.ponds.scheme,
+                at_i=at_i_in,
+                a_i=conc_new,
+                h_i=h_new,
+                t_su=T_new,
+                h_il=h_il_dil,
+                dh_i_sum=-ice_melt_m,
+                dh_s_sum=-snow_melt_m,
+                sz_i=S_ice,
+                t_i=T_ice,
+                namthd_pnd=config.ponds.namthd_pnd,
+                rho_w=constants.rho_water,
+                gravity=constants.g_nemo,
+                ice_constants=config.ice_constants,
+            )
+            pond_captured_melt_m_liquid = jnp.zeros_like(h_new)
+        else:
+            pond_area_new, pond_depth_new, drain_to_ocean_m, refreeze_m = step_ponds(
+                pond_area, pond_depth_dil,
+                melt_water_m=melt_water_m_liquid,
+                rain_water_m=rain_m_liquid,
+                ice_mask=ice_mask,
+                h_snow=h_snow_new,
+                T_air=forcing.T_lowest,
+                dt=dt,
+                drainage_timescale=config.ponds.drainage_timescale_s,
+                refreeze_threshold=config.ponds.refreeze_threshold,
+                pond_to_ice_max_area=config.ponds.pond_to_ice_max_area,
+                depth_to_area_ratio=config.ponds.depth_to_area_ratio,
+                snow_block_threshold=config.ponds.snow_block_threshold,
+                refreeze_width_K=config.ponds.refreeze_width_K,
+                scheme=config.ponds.scheme,
+                namthd_pnd=config.ponds.namthd_pnd,
+            )
+            h_il_new = h_il_dil
         # Convert refrozen pond water [m of liquid] to equivalent ice
         # thickness [m of ice] using density.  Ice gain is
         # mass-neutral with the ocean: the water came from earlier
@@ -2104,6 +3177,7 @@ def _thermo_v2(
     else:
         pond_area_new = pond_area
         pond_depth_new = pond_depth_dil
+        h_il_new = h_il_dil
         pond_drain_to_ocean_kg_s = jnp.zeros_like(h_new)
         pond_captured_melt_m_liquid = jnp.zeros_like(h_new)
         refreeze_ice_m = jnp.zeros_like(h_new)
@@ -2122,6 +3196,7 @@ def _thermo_v2(
     h_snow_new = jnp.where(ablated, 0.0, h_snow_new)
     pond_area_new = jnp.where(ablated, 0.0, pond_area_new)
     pond_depth_new = jnp.where(ablated, 0.0, pond_depth_new)
+    h_il_new = jnp.where(ablated, 0.0, h_il_new) if h_il_new is not None else None
 
     # 12. Brine + salt budget update — uses the *final* per-cat
     #     volume (including white-ice and refrozen-pond contributions)
@@ -2218,9 +3293,15 @@ def _thermo_v2(
             pond_captured_melt_m_liquid * constants.rho_water * conc_new / dt
         )
         pond_drain_per_cell = pond_drain_to_ocean_kg_s * conc_new
-        # Rain over the ice fraction is collected by the ponds (captured or
-        # drained) — no separate runoff channel needed.
-        rain_runoff_per_cell = jnp.zeros_like(h_new)
+        if config.core2_precipitation_closure:
+            # Rain over the ice fraction is collected by the ponds where they
+            # can form; the rest runs off (per-ice-area -> per-cell).
+            rain_runoff_per_cell = (
+                rain_uncaptured_m_liquid * constants.rho_water * conc_new / dt
+            )
+        else:
+            # Certified SI3 path: pond rain has no separate runoff channel.
+            rain_runoff_per_cell = jnp.zeros_like(h_new)
     else:
         pond_drain_per_cell = pond_drain_to_ocean_kg_s  # zero array
         # No pond scheme: rain falling on the ice fraction runs off directly to
@@ -2236,6 +3317,15 @@ def _thermo_v2(
             forcing.precip_total - forcing.precip_snow, 0.0,
         ) * jnp.asarray(forcing.has_precipitation, dtype=h_new.dtype)
         rain_runoff_per_cell = rain_rate * conc_new
+    # Snow off: snowfall on the ice fraction has no pack to enter, so it goes
+    # straight to the ocean (+ve into ocean) and the ocean pays its latent heat
+    # of fusion (+ve extraction).  Same ``conc_new`` frame and precipitation
+    # gate as the rain runoff above.
+    if config.snow.enabled or not config.core2_precipitation_closure:
+        snow_off_fw_per_cell = jnp.zeros_like(h_new)
+    else:
+        snow_off_fw_per_cell = forcing.precip_snow * jnp.asarray(
+            forcing.has_precipitation, dtype=h_new.dtype) * conc_new
     fw_from_lead_freeze_per_cell = -delta_V_lead_freeze * config.rho_ice / dt
     # Snow-ice flooding draws seawater ``(rho_ice - rho_snow)*ΔV_white`` [kg/m^2
     # per ice area] into the snow pores; the ocean LOSES that water (negative
@@ -2252,8 +3342,10 @@ def _thermo_v2(
         # NOTE: open-water snowfall is intentionally NOT included here — the
         # ocean tile delivers it via ``precip_total`` (F11; see snow step).
         + pond_drain_per_cell
-        # Rain runoff over the ice fraction (no-pond path; zero when ponds on).
+        # Rain runoff over the ice fraction (all of it without ponds; the
+        # share the ponds could not take with ponds on).
         + rain_runoff_per_cell
+        + snow_off_fw_per_cell
         + fw_from_lead_freeze_per_cell
         + fw_from_flooding_per_cell
         # Orphaned ice/snow/pond mass from fully-ablated cells (11b) — sent
@@ -2285,10 +3377,16 @@ def _thermo_v2(
     #     channel and closes the energy budget without a skin re-solve — upgrade
     #     to an atmospheric credit if/when the 0-layer skin gains an enthalpy
     #     channel.
+    # Lead-freeze latent sign: "ice_skin" DEBITS the ocean (legacy; correct
+    # only where the ocean does not separately receive the open-water flux);
+    # "nemo_qlead" RETURNS it (-qlead/dt), so the coupler's (1-A)*q_open
+    # cooling nets to at most the freezing deficit (NEMO icesbc.F90:398).
+    _lead_latent_sign = -1.0 if config.lead_freeze_source == "nemo_qlead" else 1.0
     ocean_heat_extraction = (
         F_ocean * conc * ocean_heat_scale
-        + delta_V_lead_freeze * config.rho_ice * config.L_f / dt
+        + _lead_latent_sign * delta_V_lead_freeze * config.rho_ice * config.L_f / dt
         + refreeze_ice_m * config.rho_ice * config.L_f / dt * conc_new
+        + snow_off_fw_per_cell * config.L_f
         # Surplus surface-melt heat from a melt-out step warms the ocean
         # (ocean GAINS -> NEGATIVE extraction); previously this energy was
         # dropped on the floor (finding #6).
@@ -2304,10 +3402,11 @@ def _thermo_v2(
         "S_ice": S_ice_new,
         "pond_area": pond_area_new,
         "pond_depth": pond_depth_new,
+        "h_il": h_il_new,
         "alpha": alpha,
         "lw_up": lw_up,
         "shflx": shflx,
-        # Realized latent (== L_s * sublim_mass_to_atmos / conc): the atmosphere
+        # Realized latent (== L_s(T_ice) * sublim_mass_to_atmos / conc): the atmosphere
         # latent energy matches the realized sublimation mass + the skin solve
         # (#28).  Equals the bulk lhflx where the loss demand was fully met.
         "lhflx": lhflx_realized,
@@ -2321,9 +3420,12 @@ def _thermo_v2(
         # sublimated this step, capped at available snow/ice; deposition added
         # via min(lhflx/L_s*dt, 0) since the helper grows snow and returns zero
         # sub-depths under lhflx<0), weighted by the input ice fraction.  Reusing
-        # the same numerator guarantees L_s*sublim_mass_to_atmos == lhflx_realized
+        # the same numerator guarantees L_s(T_ice)*sublim_mass_to_atmos == lhflx_realized
         # * conc exactly, so the atmosphere water + energy pair (#28).
         "sublim_mass_to_atmos": realized_sublim_kg / dt * conc,
+        # Its latent-energy twin at THIS category's L_s(T_ice): summed over
+        # categories by the caller, never rebuilt from the total mass.
+        "latent_to_atmos": lhflx_realized * conc,
         # PER-GRID-CELL: weight by the INPUT ``conc`` (the ice area through
         # which shortwave penetrated DURING the step), the same snapshot used
         # for ``F_ocean * conc`` above.  This keeps the heat channel on a
@@ -2345,6 +3447,10 @@ def _step_dynamic_v2(
     U_min: float,
     dt: float,
     grid=None,
+    *,
+    q_open_top=None,
+    ocean_dz_top_m=None,
+    rn_amax_2d=None,
 ) -> tuple[DynamicSeaIceState, TileResponse]:
     """Extended dynamic sea-ice step with Tier-1 + Tier-2 physics.
 
@@ -2364,15 +3470,55 @@ def _step_dynamic_v2(
     S_ice = state.S_ice.data
     pond_area = state.pond_area.data
     pond_depth = state.pond_depth.data
+    if not config.ponds.enabled and config.ponds.scheme != "cesm":
+        raise ValueError(
+            "config.ponds.scheme must be 'cesm' when config.ponds.enabled is False"
+        )
+    validate_si3_thermo_config(config)
+    if config.ponds.enabled and config.ponds.scheme == "si3_lev":
+        if state.h_il is None:
+            raise ValueError(
+                "DynamicSeaIceState.h_il must be a Field when config.ponds.scheme == 'si3_lev'"
+            )
+        h_il = state.h_il.data
+    else:
+        if state.h_il is not None:
+            raise ValueError(
+                "DynamicSeaIceState.h_il must be None unless config.ponds.enabled and config.ponds.scheme == 'si3_lev'"
+            )
+        h_il = None
+
+    exact_si3_itd = (
+        config.n_categories > 1
+        and config.itd_remap == "lipscomb2001"
+        and config.ponds.enabled
+        and config.ponds.scheme == "si3_lev"
+    )
+    if exact_si3_itd:
+        if config.si3_orca2 is None:
+            raise ValueError(
+                "the exact SI3 O13 ITD remap requires explicit config.si3_orca2 "
+                "for jpl/nn_icesal/HFN bounds; deck values are not inferred"
+            )
+        if rn_amax_2d is None:
+            raise ValueError(
+                "the exact SI3 O13 ITD remap requires explicit rn_amax_2d "
+                "with the spatial (no-category) shape"
+            )
+        if config.si3_orca2.jpl != config.n_categories:
+            raise ValueError("config.si3_orca2.jpl must equal config.n_categories for O13")
+        rn_amax_2d = jnp.asarray(rn_amax_2d, dtype=h.dtype)
+        if rn_amax_2d.shape != h.shape[:-1]:
+            raise ValueError("rn_amax_2d must have the spatial (no-category) state shape")
 
     # Cap an already-overfilled multicat state (e.g. a restart) to
     # sum_k a_k <= 1 BEFORE the dynamics aggregate and the conc_pre snapshot,
     # so EVP/mEVP rheology and the F11 per-cell normalisation never see > 1
     # cell area.  No-op when sum <= 1; transport / ITD remap can re-introduce
     # overfill and are re-capped downstream.  Codex.
-    if config.n_categories > 1:
+    if config.n_categories > 1 and config.itd_remap != "none" and not exact_si3_itd:
         conc, h, h_snow, pond_depth = _cap_multicat_concentration(
-            conc, h, h_snow, pond_depth)
+            conc, h, h_snow, pond_depth, h_il=h_il)
 
     # Pre-step concentration snapshot — used when normalising
     # per-grid-cell fluxes to per-ice-tile fluxes so a cell that
@@ -2509,9 +3655,9 @@ def _step_dynamic_v2(
     # transport.  NOTE: a uniform mechanical thickening, NOT a bin-accurate ITD
     # redistribution — realistic sub-CFL overfill is <<1% and stays within its
     # category; bin-accurate large-overfill handling is the deferred item.
-    if is_multicat:
+    if is_multicat and config.itd_remap != "none" and not exact_si3_itd:
         conc, h, h_snow, pond_depth = _cap_multicat_concentration(
-            conc, h, h_snow, pond_depth)
+            conc, h, h_snow, pond_depth, h_il=h_il)
 
     # ---- 3. Pre-thermo per-category state (save for ITD remap) ----
     h_old = h
@@ -2521,6 +3667,13 @@ def _step_dynamic_v2(
     if is_multicat:
         n_cat = h.shape[-1]
         open_water_agg = jnp.clip(1.0 - jnp.sum(conc, axis=-1), 0.0, 1.0)
+        if config.ponds.enabled and config.ponds.scheme == "si3_lev":
+            from legoesm.ice.si3_orca2_state import fortran_sum_categories
+            at_i_agg = fortran_sum_categories(
+                jnp.asarray(conc, dtype=jnp.float64), axis=-1
+            )
+        else:
+            at_i_agg = None
 
         h_list = []
         T_list = []
@@ -2529,10 +3682,12 @@ def _step_dynamic_v2(
         S_list = []
         pa_list = []
         pd_list = []
+        hil_list = []
         salt_flux_list = []
         fw_flux_list = []
         ocean_heat_list = []
         sublim_mass_list = []
+        latent_list = []
         sw_pen_list = []
         delta_lead_list = []
         delta_white_list = []
@@ -2547,6 +3702,10 @@ def _step_dynamic_v2(
                 forcing, ocean_sst, config, U_min, dt,
                 open_water_fraction=open_water_agg,
                 enable_lead_freeze=(k == 0),
+                q_open_top=q_open_top,
+                ocean_dz_top_m=ocean_dz_top_m,
+                h_il=h_il[..., k] if h_il is not None else None,
+                at_i=at_i_agg,
             )
             h_list.append(result["h"])
             T_list.append(result["T"])
@@ -2555,10 +3714,13 @@ def _step_dynamic_v2(
             S_list.append(result["S_ice"])
             pa_list.append(result["pond_area"])
             pd_list.append(result["pond_depth"])
+            if h_il is not None:
+                hil_list.append(result["h_il"])
             salt_flux_list.append(result["salt_flux_to_ocean"])
             fw_flux_list.append(result["freshwater_to_ocean"])
             ocean_heat_list.append(result["ocean_heat_extraction"])
             sublim_mass_list.append(result["sublim_mass_to_atmos"])
+            latent_list.append(result["latent_to_atmos"])
             sw_pen_list.append(result["sw_penetrated_to_ocean"])
             delta_lead_list.append(result["delta_V_lead_freeze"])
             delta_white_list.append(result["delta_V_white_ice"])
@@ -2573,6 +3735,7 @@ def _step_dynamic_v2(
         S_ice = jnp.stack(S_list, axis=-1)
         pond_area = jnp.stack(pa_list, axis=-1)
         pond_depth = jnp.stack(pd_list, axis=-1)
+        h_il = jnp.stack(hil_list, axis=-1) if h_il is not None else None
 
         # Ice->ocean EXCHANGE fluxes (freshwater / heat / salt / SW
         # penetration): ``_thermo_v2`` already multiplied the per-cat-area
@@ -2585,7 +3748,7 @@ def _step_dynamic_v2(
         sum_conc_post = jnp.sum(conc, axis=-1, keepdims=False)
         # ``sum_conc_safe`` (== max(pre, post)) is the LATENT basis only: it
         # matches the single-cat ``conc_basis`` contract so resp.lhflx *
-        # max(pre,post) == L_s * sublim_mass_total identically across paths
+        # max(pre,post) == sum_k L_s(T_k) m_k (latent_total) identically across paths
         # (sublim_mass_total is on the INPUT-conc basis).  The SH/STRESS
         # numerators are kept per-grid-cell and divided by ``conc_agg`` at the
         # response build (findings #9 + #4), NOT by this latent basis.
@@ -2595,7 +3758,7 @@ def _step_dynamic_v2(
         # the input conc inside ``_thermo_v2``, so a zero latent basis (no ice
         # at EITHER end) implies ``sublim_mass_total == 0``; the 0.0 fallback
         # below is forward-identical and keeps the documented invariant
-        # ``resp.lhflx * max(pre, post) == L_s * sublim_mass_total`` exact
+        # ``resp.lhflx * max(pre, post) == sum_k L_s(T_k) m_k`` exact
         # (0 == 0).  MULTICAT counterpart of the single-cat site at L2635 --
         # both must be fixed together or the cross-path parity comment above
         # becomes false on the ice-free adjoint.
@@ -2613,6 +3776,7 @@ def _step_dynamic_v2(
         # Realized ice->atmosphere sublimation mass is already PER-GRID-CELL
         # (weighted by the input conc inside _thermo_v2); sum across categories.
         sublim_mass_total = jnp.sum(jnp.stack(sublim_mass_list, axis=-1), axis=-1)
+        latent_total = jnp.sum(jnp.stack(latent_list, axis=-1), axis=-1)
         # SW penetrated to the ocean is already PER-GRID-CELL (weighted by the
         # input conc inside _thermo_v2); sum across categories directly.
         sw_pen_total = jnp.sum(jnp.stack(sw_pen_list, axis=-1), axis=-1)
@@ -2636,11 +3800,11 @@ def _step_dynamic_v2(
         # MASS (same INPUT-conc basis as ``sublim_mass_total``), NOT from the
         # post-thermo conc-weighted result["lhflx"] -- otherwise melt/retreat/
         # clamp cells under-report the latent and break
-        # resp.lhflx*sum_conc == L_s*sublim_mass_total (codex).  This keeps the
+        # resp.lhflx*sum_conc == latent_total (sum_k L_s(T_k) m_k) (codex).  This keeps the
         # atmosphere latent ENERGY paired to the moisture MASS on one basis.
         lhflx_resp = jnp.where(
             _has_conc_basis_mc,
-            constants.L_s * sublim_mass_total / sum_conc_safe,
+            latent_total / sum_conc_safe,
             0.0,
         )
 
@@ -2648,6 +3812,9 @@ def _step_dynamic_v2(
         result = _thermo_v2(
             h, T_ice, conc, h_snow, S_ice, pond_area, pond_depth,
             forcing, ocean_sst, config, U_min, dt,
+            q_open_top=q_open_top,
+            ocean_dz_top_m=ocean_dz_top_m,
+            h_il=h_il,
         )
         h = result["h"]
         T_ice = result["T"]
@@ -2656,6 +3823,7 @@ def _step_dynamic_v2(
         S_ice = result["S_ice"]
         pond_area = result["pond_area"]
         pond_depth = result["pond_depth"]
+        h_il = result["h_il"]
         # Ice->ocean EXCHANGE fluxes (freshwater / heat / salt) returned by
         # ``_thermo_v2`` are PER-GRID-CELL (per-cat-area terms already
         # multiplied by ``conc`` inside the kernel).  Returned per-grid-cell:
@@ -2665,6 +3833,7 @@ def _step_dynamic_v2(
         salt_flux_total = result["salt_flux_to_ocean"]
         fw_flux_total = result["freshwater_to_ocean"]
         sublim_mass_total = result["sublim_mass_to_atmos"]
+        latent_total = result["latent_to_atmos"]
         # SW penetration is already PER-GRID-CELL (weighted by the input conc
         # inside _thermo_v2); subtract directly from the per-cell ocean heat.
         ocean_heat_total = (
@@ -2678,12 +3847,12 @@ def _step_dynamic_v2(
         # multicat path -- max(PRE-DYNAMICS conc_pre, post-thermo conc) -- so
         # single-cat and multicat expose an IDENTICAL latent<->mass invariant to
         # TileResponse consumers regardless of transport: resp.lhflx *
-        # max(conc_pre, conc_post) == L_s * surface_mass_flux.  (Using the
+        # max(conc_pre, conc_post) == L_s(T_ice) * surface_mass_flux.  (Using the
         # post-transport thermo-input conc here would diverge from the multicat
         # ``sum_conc_safe`` basis under transport='advect'.)  #28, codex.
         # float32 AD safety: UNCONDITIONAL floored divide -> NaN adjoint over
         # ice-free cells.  The documented invariant is ``resp.lhflx *
-        # max(conc_pre, conc_post) == L_s * surface_mass_flux``; with that basis
+        # max(conc_pre, conc_post) == L_s(T_ice) * surface_mass_flux``; with that basis
         # zero there is no ice at EITHER end, so ``sublim_mass_total == 0`` and
         # both sides of the invariant are 0 -- fallback 0.0 is forward-identical
         # and keeps the invariant exact.  Single-cat counterpart of the multicat
@@ -2693,26 +3862,100 @@ def _step_dynamic_v2(
         conc_basis = jnp.where(_has_conc_basis, _conc_basis_raw, 1.0)
         lhflx_resp = jnp.where(
             _has_conc_basis,
-            constants.L_s * sublim_mass_total / conc_basis,
+            latent_total / conc_basis,
             0.0,
         )
         tau_x_resp = result["tau_x"]
         tau_y_resp = result["tau_y"]
 
+    # Post-thermo aggregate cover: the frame the thermodynamics forwarded
+    # ice-fraction precip (rain, untracked snow) to the ocean in, before the
+    # ITD remap / caps / ridging below change the area.
+    conc_precip_fwd = jnp.clip(
+        jnp.sum(conc, axis=-1) if is_multicat else conc, 0.0, 1.0)
+
     # ---- 5. ITD remap ----
-    if is_multicat:
+    if is_multicat and config.itd_remap != "none":
         # Cap the aggregate area BEFORE the ITD remap so neither Lipscomb nor
         # the simple remap ever consumes sum_k a_k > 1.  With the lead-freeze
         # area now bounded inside the thermo kernels this is a no-op for
         # thermo-generated overfill, but it still guards against an overfilled
         # restart / transport remainder reaching the remapper (volume / snow /
         # pond / salt conserving; no-op when sum <= 1).  Codex.
-        conc, h, h_snow, pond_depth = _cap_multicat_concentration(
-            conc, h, h_snow, pond_depth)
+        if not exact_si3_itd:
+            conc, h, h_snow, pond_depth = _cap_multicat_concentration(
+                conc, h, h_snow, pond_depth, h_il=h_il)
         n_cat = h.shape[-1]
         # Volume of snow per cat (h_snow * a) for remap.
         V_snow_cat = h_snow * conc
-        if config.itd_remap == "lipscomb2001":
+        if exact_si3_itd:
+            si3_cfg = config.si3_orca2
+            bounds = si3_hfn_category_bounds(
+                jpl=si3_cfg.jpl,
+                rn_himean=si3_cfg.rn_himean,
+                opt_hips=si3_cfg.opt_hips,
+                rn_himax=si3_cfg.rn_himax,
+            )
+            v_i_cat = h * conc
+            a_ip_cat = pond_area * conc
+            bulk_salt = S_ice * v_i_cat
+            zero_cat = jnp.zeros_like(conc)
+            zero_layered = jnp.zeros(conc.shape[:-1] + (0, n_cat), dtype=conc.dtype)
+            remap = si3_ice_itd_rem(
+                h_i_b=h_old,
+                a_i_b=conc_old,
+                h_i=h,
+                a_i=conc,
+                v_i=v_i_cat,
+                v_s=V_snow_cat,
+                sv_i=jnp.where(si3_cfg.nn_icesal == 4, zero_cat, bulk_salt),
+                oa_i=zero_cat,
+                a_ip=a_ip_cat,
+                v_ip=pond_area * pond_depth * conc,
+                v_il=pond_area * h_il * conc,
+                t_su=T_ice,
+                e_s=zero_layered,
+                e_i=zero_layered,
+                # DynamicSeaIceState carries bulk salinity rather than ten
+                # SI3 layers.  Select the same extensive carrier as the
+                # configured SI3 salinity scheme: sv_i for bulk salinity, or
+                # one szv_i layer for nn_icesal=4.  The full O13 entry point
+                # and scorer supply all ten production-deck layers.
+                szv_i=jnp.where(
+                    si3_cfg.nn_icesal == 4,
+                    bulk_salt[..., None, :],
+                    zero_cat[..., None, :],
+                ),
+                hi_max=bounds.hi_max,
+                rn_amax_2d=rn_amax_2d,
+                nn_icesal=si3_cfg.nn_icesal,
+                ln_pnd=si3_cfg.ln_pnd_LEV or si3_cfg.ln_pnd_TOPO,
+                ln_pnd_lids=si3_cfg.ln_pnd_lids,
+                epsi10=si3_cfg.ice_constants.epsi10,
+                epsi20=si3_cfg.ice_constants.epsi20,
+                rt0=si3_cfg.ice_constants.T0,
+            )
+            h = remap["h_i"]
+            conc = remap["a_i"]
+            T_ice = remap["t_su"]
+            a_safe = jnp.where(conc > 1.0e-20, conc, 1.0)
+            v_safe = jnp.where(remap["v_i"] > 1.0e-20, remap["v_i"], 1.0)
+            aip_safe = jnp.where(remap["a_ip"] > 1.0e-20, remap["a_ip"], 1.0)
+            h_snow = jnp.where(conc > 1.0e-20, remap["v_s"] / a_safe, 0.0)
+            salt_inventory = jnp.where(
+                si3_cfg.nn_icesal == 4,
+                remap["szv_i"][..., 0, :],
+                remap["sv_i"],
+            )
+            S_ice = jnp.where(
+                remap["v_i"] > 1.0e-20,
+                salt_inventory / v_safe,
+                0.0,
+            )
+            pond_area = jnp.where(conc > 1.0e-20, remap["a_ip"] / a_safe, 0.0)
+            pond_depth = jnp.where(remap["a_ip"] > 1.0e-20, remap["v_ip"] / aip_safe, 0.0)
+            h_il = jnp.where(remap["a_ip"] > 1.0e-20, remap["v_il"] / aip_safe, 0.0)
+        elif config.itd_remap == "lipscomb2001":
             remap = lipscomb_2001_remap(
                 h_old=h_old, a_old=conc_old,
                 h_new=h, a_new=conc,
@@ -2753,14 +3996,16 @@ def _step_dynamic_v2(
         # reintroduce sum_k a_k > 1; re-cap BEFORE ridging so the ridging kernel
         # (donor area, snow/pond drainage, freshwater fluxes) never sees an
         # overfilled column.  No-op when sum <= 1.  Codex.
-        conc, h, h_snow, pond_depth = _cap_multicat_concentration(
-            conc, h, h_snow, pond_depth)
+        if not exact_si3_itd:
+            conc, h, h_snow, pond_depth = _cap_multicat_concentration(
+                conc, h, h_snow, pond_depth, h_il=h_il)
 
     # ---- 6. Ridging ----
     if config.ridging.enabled and is_multicat and grid is not None:
         closing_rate = _closing_rate_from_velocity(
             u_ice, v_ice, grid, cap=config.ridging.closing_rate_max,
             cs_shear=config.ridging.cs_shear_ridging, e_yield=config.e_yield,
+            closing_scheme=config.ridging.closing_scheme,
         )
         ridge_result = apply_ridging(
             conc, h, h_snow * conc, S_ice, closing_rate,
@@ -2798,9 +4043,9 @@ def _step_dynamic_v2(
     # compacted/grown category across bins and reintroduce sum_k a_k > 1, so
     # re-cap the post-remap/post-ridging state (volume / snow / pond / salt
     # conserving; no-op when sum <= 1).  Codex.
-    if is_multicat:
+    if is_multicat and config.itd_remap != "none" and not exact_si3_itd:
         conc, h, h_snow, pond_depth = _cap_multicat_concentration(
-            conc, h, h_snow, pond_depth)
+            conc, h, h_snow, pond_depth, h_il=h_il)
 
     # ---- 7. Build response ----
     if is_multicat:
@@ -2902,6 +4147,9 @@ def _step_dynamic_v2(
         # blend_tiles weights it by f_water and the atmosphere water budget
         # matches the state through melt-out (#28, codex).
         surface_mass_flux=sublim_mass_total,
+        # Realized per-cell latent: sum over categories of L_s(T_k) * m_k on the
+        # same input-conc basis as ``sublim_mass_total`` (never L_s(T_mean) * M).
+        lhflx_exchange=latent_total,
         salt_flux=salt_flux_total,
         # Aggregate concentration at the THERMO time level (post-transport,
         # pre-thermo ``conc_old``): the ice area the atmospheric fluxes were
@@ -2912,6 +4160,9 @@ def _step_dynamic_v2(
         ice_concentration_thermo=jnp.clip(
             (jnp.sum(conc_old, axis=-1) if is_multicat else conc_old),
             0.0, 1.0),
+        ice_concentration_precip=(
+            conc_precip_fwd
+            if config.core2_precipitation_closure else None),
     )
 
     new_state = DynamicSeaIceState(
@@ -2927,5 +4178,10 @@ def _step_dynamic_v2(
         S_ice=state.S_ice.replace(data=S_ice),
         pond_area=state.pond_area.replace(data=pond_area),
         pond_depth=state.pond_depth.replace(data=pond_depth),
+        h_il=(
+            state.h_il.replace(data=h_il)
+            if state.h_il is not None
+            else None
+        ),
     )
     return new_state, response

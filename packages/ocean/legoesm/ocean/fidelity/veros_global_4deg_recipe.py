@@ -22,7 +22,7 @@ see ``.physics-validator/transfer_global_4deg/SCOPING.md`` §E):
      default is **False** (veros/settings.py:129) — so unlike the ACC
      (which sets it True), the Redi tracer diffusivity stays the CONSTANT
      ``K_iso_0 = 1000``; only the GM skew coefficient is prognostic-EKE
-     driven.  Verified gating: ``ocean_model_latlon_cgrid.py:1677``.
+     driven.  Verified gating: ``ocean_model_latlon_cgrid.py:1703``.
   3. Lateral viscosity ``A_h = (4·degtom)³·2e-11 ≈ 1.76e6 m²/s`` (4° cell vs
      ACC's 2°), same cos¹(lat) scaling (``enable_hor_friction_cos_scaling``,
      ``hor_friction_cosPower = 1``).
@@ -521,6 +521,7 @@ def build_global_4deg_model_config() -> LatLonCGridOceanConfig:
         A_h_lat_scaling=True,                       # cos¹(lat) scaling
         A_h_cos_power=1,
         lateral_viscosity_operator="flux_divergence",
+        lateral_viscosity_mask_levels="surface",
         momentum_advection="flux_form",
         momentum_flux_scheme="centered",
         vertical_momentum_scheme="centered_full",

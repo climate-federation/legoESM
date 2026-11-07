@@ -407,7 +407,7 @@ def test_bare_ice_sqrt_ramp_saturates_at_h_bare_sat():
 def test_snow_ramp_saturates_at_h_snow_sat():
     # Full snow coverage (h_snow >= H_SNOW_MASK=0.02 so f_snow==1) isolates the
     # SNOW-BAND ramp (h_snow/H_SNOW_SAT): albedo(0.05)==albedo(0.5) (saturated);
-    # albedo(H_SNOW_SAT/2=0.025) == 0.5*saturated (linear ramp).
+    # albedo(H_SNOW_SAT/2=0.025) is midway from bare ice to snow.
     T = T_FREEZE - 3.0
     full = F_VIS * A_SNOW_COLD_VIS + (1 - F_VIS) * A_SNOW_COLD_NIR
     a_sat = float(delta_eddington_albedo(_arr(T), _arr(1.0), _arr(0.05),
@@ -418,7 +418,8 @@ def test_snow_ramp_saturates_at_h_snow_sat():
                                           _arr(0.0), _arr(0.0))[0][0])
     np.testing.assert_allclose(a_sat, full, rtol=1e-13)         # saturated at 0.05
     np.testing.assert_allclose(a_deep, full, rtol=1e-13)
-    np.testing.assert_allclose(a_half, 0.5 * full, rtol=1e-12)  # linear ramp, h=0.025
+    bare = F_VIS * A_ICE_COLD_VIS + (1 - F_VIS) * A_ICE_COLD_NIR
+    np.testing.assert_allclose(a_half, 0.5 * (bare + full), rtol=1e-12)
 
 
 def test_snow_mask_coverage_threshold_at_h_snow_mask(monkeypatch):

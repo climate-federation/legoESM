@@ -44,10 +44,39 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import (
+    nemo_fortran_max as _fortran_max,
+    nemo_fortran_sign as _fortran_sign,
+    nemo_source_round as _sr,
+)
 
 
 SECONDS_PER_DAY = 86400.0
 SECONDS_PER_YEAR = 365.25 * SECONDS_PER_DAY
+
+
+def _sbcssr_bound_wins_tie(width):
+    """Object-site map for the peeled and two-way-unrolled inner-i loop."""
+    i = jnp.arange(width)
+    return jnp.mod(i, 2) != jnp.mod(width, 2)
+
+
+def _sbcssr_bound_magnitude(bound, absolute):
+    """The three scalar ``MINSD`` sites emitted for the inner-i loop.
+
+    GCC peels one cell when the local i extent is odd, then unrolls by two.
+    Object sites 0x4e4a and 0x5034 retain ``bound`` on a tie; 0x4f55 retains
+    ``ABS(zerp)``.  Thus bound wins where i parity differs from extent parity.
+    Both operands are nonnegative, so every finite numeric tie is bit-identical;
+    the per-site selection still follows the record object literally.
+    """
+    bound = _sr(jnp.asarray(bound, dtype=jnp.float64))
+    absolute = _sr(jnp.asarray(absolute, dtype=jnp.float64))
+    width = absolute.shape[-1]
+    bound_wins_tie = _sbcssr_bound_wins_tie(width)
+    keep_bound = jnp.where(absolute < bound, absolute, bound)
+    keep_absolute = jnp.where(bound < absolute, bound, absolute)
+    return jnp.where(bound_wins_tie, keep_bound, keep_absolute)
 
 
 class RegionMaskSpec(NamedTuple):
@@ -431,6 +460,54 @@ def compute_sss_restoring_flux(
     }
 
 
+def nemo_orca2_sss_restoring(
+    sss_mean,
+    sss_target,
+    sst_mean,
+    runoff_mouth_mask,
+    surface_mask,
+    prior_coefficient,
+    *,
+    restoring_mm_per_day,
+    bound_mm_per_day,
+    seconds_per_day,
+    salinity_floor,
+    heat_capacity,
+):
+    """Literal ORCA2 ``sbc_ssr`` ``nn_sssr=2`` deck arm.
+
+    This extends the shared restoring module without changing its generic
+    OMIP defaults.  ``nn_sssr_ice=1`` makes the initial ice coefficient one;
+    active runoff-mouth damping then multiplies it by ``1-2*rnfmsk``.  The
+    returned ``erp`` uses NEMO's positive-upward convention.  ``heat_term``
+    is NEMO's materialized ``(erp * rcp) * sst_m``; callers subtract it from
+    both ``qns`` and the zero-initialized ``qrp`` diagnostic.
+
+    All resolved namelist/constants are required inputs.  This path therefore
+    cannot silently substitute ORCA1 or generic restoring settings.
+    """
+    sss = _sr(jnp.asarray(sss_mean, dtype=jnp.float64))
+    target = _sr(jnp.asarray(sss_target, dtype=jnp.float64))
+    sst = _sr(jnp.asarray(sst_mean, dtype=jnp.float64))
+    rnfmsk = _sr(jnp.asarray(runoff_mouth_mask, dtype=jnp.float64))
+    smask = _sr(jnp.asarray(surface_mask, dtype=jnp.float64))
+    coefice = _sr(jnp.asarray(prior_coefficient, dtype=jnp.float64))
+    zsrp = _sr(_sr(restoring_mm_per_day) / _sr(seconds_per_day))
+    zerp_bound = _sr(_sr(bound_mm_per_day) / _sr(seconds_per_day))
+    two_rnf = _sr(_sr(2.0) * rnfmsk)
+    runoff_damping = _sr(_sr(1.0) - two_rnf)
+    coefice = _sr(coefice * runoff_damping)
+    salinity_delta = _sr(sss - target)
+    numerator = _sr(_sr(zsrp * coefice) * salinity_delta)
+    denominator = _sr(_fortran_max(sss, _sr(salinity_floor)))
+    quotient = _sr(numerator / denominator)
+    unbounded = _sr(quotient * smask)
+    magnitude = _sr(_sbcssr_bound_magnitude(zerp_bound, _sr(jnp.abs(unbounded))))
+    erp = _sr(_fortran_sign(_sr(1.0), unbounded) * magnitude)
+    heat_term = _sr(_sr(erp * _sr(heat_capacity)) * sst)
+    return coefice, erp, heat_term
+
+
 def interp_woa_sss_to_grid(
     sss_woa: jnp.ndarray,
     lat_woa: jnp.ndarray,
@@ -451,7 +528,8 @@ def interp_woa_sss_to_grid(
     ----------
     sss_woa : array ``(n_lat_woa, n_lon_woa)`` [PSU]
     lat_woa : array ``(n_lat_woa,)`` degrees, ascending
-    lon_woa : array ``(n_lon_woa,)`` degrees in [0, 360)
+    lon_woa : array ``(n_lon_woa,)`` degrees, ascending, uniform, any origin
+        (0.5..359.5 and -179.5..179.5 both work)
     lat_target : array of shape ``S`` — degrees of the model grid
     lon_target : array of shape ``S`` — degrees of the model grid
         Both must share the same shape ``S``.
@@ -467,7 +545,7 @@ def interp_woa_sss_to_grid(
     dlon = 360.0 / nlon_w
 
     fi_lat = jnp.clip((lat_target - lat_woa[0]) / dlat, 0.0, nlat_w - 1.001)
-    fi_lon = jnp.mod(lon_target, 360.0) / dlon
+    fi_lon = jnp.mod(lon_target - lon_woa[0], 360.0) / dlon
     i0 = jnp.floor(fi_lat).astype(jnp.int32)
     j0 = jnp.floor(fi_lon).astype(jnp.int32)
     di = fi_lat - i0

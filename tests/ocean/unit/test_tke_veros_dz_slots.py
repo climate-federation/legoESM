@@ -253,11 +253,9 @@ def test_solver_dz_cell_without_dz_surface_raises():
         surface_flux=jnp.zeros((1, 1)),
         dt=100.0, cfg=TKEConfig(),
     )
-    with pytest.raises(ValueError, match="dz_cell and dz_surface"):
+    with pytest.raises(ValueError, match="dz_cell requires dz_surface"):
         _solve_tke_backward_euler(
             **args, dz_cell=jnp.asarray(DZ_CELL)[None, None, :])
-    with pytest.raises(ValueError, match="dz_cell and dz_surface"):
-        _solve_tke_backward_euler(**args, dz_surface=jnp.ones((1, 1)))
 
 
 # ---------------------------------------------------------------------------

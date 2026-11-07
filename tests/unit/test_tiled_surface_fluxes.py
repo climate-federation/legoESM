@@ -181,3 +181,41 @@ def test_jit_executes():
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_return_water_is_the_sum_of_per_tile_inverses():
+    """``return_water=True`` hands back the water each tile's law moved,
+    inverted with the L that law CHARGED (every tile: Kirchhoff L_v at the
+    tile's own temperature, since _single_tile_flux passes no L_latent) --
+    not the blended heat over one L at one temperature."""
+    from legoesm.thermo import latent_heat_vaporization as L
+    u, v, T, q_v, rho = _atm()
+    tiles = _tiles(0.5, 0.3, 0.2)
+    (tau_x, tau_y, shflx, lhflx, ustar), water = compute_tiled_surface_fluxes(
+        u, v, T, q_v, rho, tiles, _OCEAN_CFG, _ICE_CFG, _LAND_CFG, return_water=True)
+    # The tuple is unchanged by the flag.
+    for got, exp in zip((tau_x, tau_y, shflx, lhflx, ustar),
+                        _blend_call(u, v, T, q_v, rho, tiles)):
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(exp))
+    per_tile = []
+    for frac, T_s, q_s, cfg in ((1.0, tiles.T_ocean, tiles.q_sfc_ocean, _OCEAN_CFG),
+                                (1.0, tiles.T_ice, tiles.q_sfc_ice, _ICE_CFG),
+                                (1.0, tiles.T_land, tiles.q_sfc_land, _LAND_CFG)):
+        pure = SurfaceTileSpec(frac_ocean=jnp.zeros(6), frac_ice=jnp.zeros(6),
+                               frac_land=jnp.zeros(6), T_ocean=T_s, T_ice=T_s,
+                               T_land=T_s, q_sfc_ocean=q_s, q_sfc_ice=q_s,
+                               q_sfc_land=q_s)
+        # Run the single law alone through the same helper (one tile at 100 %).
+        lh_i = compute_tiled_surface_fluxes(
+            u, v, T, q_v, rho, pure._replace(frac_ocean=jnp.ones(6), T_ocean=T_s,
+                                              q_sfc_ocean=q_s),
+            cfg, cfg, cfg)[3]
+        per_tile.append(lh_i / L(T_s))
+    expected = (tiles.frac_ocean * per_tile[0] + tiles.frac_ice * per_tile[1]
+                + tiles.frac_land * per_tile[2])
+    np.testing.assert_allclose(np.asarray(water), np.asarray(expected), rtol=1e-10)
+    # ...and it is NOT the blended heat over one L (the ice tile at 271 K vs
+    # land at 305 K differ by ~3 % in L_v).
+    T_blend = (tiles.frac_ocean * tiles.T_ocean + tiles.frac_ice * tiles.T_ice
+               + tiles.frac_land * tiles.T_land)
+    assert float(jnp.max(jnp.abs(water / (lhflx / L(T_blend)) - 1.0))) > 1e-4

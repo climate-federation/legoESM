@@ -8,7 +8,33 @@ Maturity: **run_tested** (integration completed clean) · **init_only** (constru
 |---|---|---|---|---|---|---|
 | `templates/2d/williamson2_sw.yaml` | tier1 | shallow_water | global | run_tested | ✅ | Williamson (1992) Test Case 2 — steady geostrophic flow; the canonical shallow-w |
 | `templates/2d/williamson5_sw.yaml` | tier1 | shallow_water | global | run_tested | ✅ | Williamson (1992) Test Case 5 — zonal flow impinging on an isolated mountain; ex |
+| `templates/atmosphere/williamson5_sw.yaml` | tier1 | shallow_water | global | structurally_validated | ✅ | Williamson test 5: zonal flow over an isolated mountain — the standard shallow-w |
+| `templates/ocean/barotropic_wave.yaml` | tier1 | primitive_equation | idealized | structurally_validated | ✅ | Barotropic wave propagation: a single-layer wave tests the C-grid dispersion rel |
+| `templates/ocean/bench.yaml` | tier1 | primitive_equation | global | structurally_validated | ✅ | NEMO-BENCH-inspired performance benchmark: flat-bottom all-ocean box, zero analy |
+| `templates/ocean/geostrophic_adjustment.yaml` | tier1 | primitive_equation | idealized | structurally_validated | ✅ | Geostrophic adjustment: an initially-unbalanced meridional temperature front (th |
+| `templates/ocean/inertia_gravity_wave.yaml` | tier1 | primitive_equation | idealized | run_tested | ✅ | Inertia-gravity (Poincaré) wave in an f-plane channel (Bishnu et al. 2024): x-pe |
+| `templates/ocean/inertia_gravity_wave_global.yaml` | tier1 | primitive_equation | idealized | init_only | ✅ | Inertia-gravity (Poincaré) wave propagation: a barotropic-equivalent shallow-wat |
+| `templates/sea_ice/itd_roundtrip.yaml` | tier1 | itd | column | structurally_validated | ✅ | Ice-thickness-distribution (ITD) linear-remap round-trip: advecting the ITD forw |
+| `templates/sea_ice/stefan_growth.yaml` | tier1 | thermodynamic | column | structurally_validated | ✅ | Stefan problem: analytic ice-growth rate under a fixed cold surface — the canoni |
 | `templates/3d_idealized/held_suarez.yaml` | tier2 | hydrostatic | global | run_tested | ✅ | Held-Suarez (1994) — Newtonian relaxation to a zonally-symmetric radiative equil |
-| `templates/coupled/amip.yaml` | tier3 | hydrostatic | global | init_only | ✅ | AMIP-style run: hydrostatic atmosphere forced by prescribed observed SST + sea-i |
+| `templates/atmosphere/baroclinic_wave.yaml` | tier2 | hydrostatic | global | structurally_validated | ✅ | Jablonowski-Williamson baroclinic wave: a balanced jet perturbed to grow a baroc |
+| `templates/atmosphere/held_suarez.yaml` | tier2 | hydrostatic | global | structurally_validated | ✅ | Held-Suarez (1994): Newtonian-relaxation + Rayleigh-friction forcing of the dry  |
+| `templates/ocean/acc_channel.yaml` | tier2 | primitive_equation | channel | structurally_validated | ✅ | ACC-like zonally-reentrant channel (Abernathey-style): wind- and buoyancy-forced |
+| `templates/ocean/baroclinic_gyre.yaml` | tier2 | primitive_equation | regional | structurally_validated | ✅ | Wind-driven baroclinic gyre (regional): a steady wind stress spins up a stratifi |
+| `templates/ocean/eady_instability.yaml` | tier2 | primitive_equation | channel | structurally_validated | ✅ | Eady baroclinic instability: a uniformly-sheared, uniformly-stratified channel g |
+| `templates/ocean/eady_uniform.yaml` | tier2 | primitive_equation | channel | structurally_validated | ✅ | Eady baroclinic instability (uniform N², linear shear): the fastest-growing mode |
+| `templates/ocean/global_barotropic_wind.yaml` | tier2 | primitive_equation | global | structurally_validated | ✅ | Global wind-driven barotropic circulation over a simplified continent mask: a pr |
+| `templates/ocean/global_overturning.yaml` | tier2 | primitive_equation | global | structurally_validated | ✅ | Idealized global overturning: simplified-continent basin with exponential strati |
+| `templates/ocean/held_larichev.yaml` | tier2 | primitive_equation | channel | structurally_validated | ✅ | Held-Larichev geostrophic turbulence: a forced-dissipative channel equilibrates  |
+| `templates/ocean/lock_exchange.yaml` | tier2 | primitive_equation | idealized | structurally_validated | ✅ | Lock-exchange gravity current (Petersen 2015): a density front collapses into tw |
+| `templates/ocean/munk_gyre.yaml` | tier2 | primitive_equation | regional | structurally_validated | ✅ | Munk gyre: lateral-friction western boundary layer sets the gyre transport and b |
+| `templates/ocean/overflow.yaml` | tier2 | primitive_equation | idealized | structurally_validated | ✅ | Dense-water overflow down a tanh slope (DOME-like): tests the partial-cell press |
+| `templates/ocean/phillips_two_layer.yaml` | tier2 | primitive_equation | idealized | structurally_validated | ✅ | Phillips two-layer baroclinic instability: a vertically-sheared two-layer flow g |
+| `templates/ocean/stommel_gyre_tracer.yaml` | tier2 | primitive_equation | idealized | structurally_validated | ✅ | Stommel wind-driven gyre with a passive tracer: linear bottom friction sets the  |
+| `templates/sea_ice/evp_convergence.yaml` | tier2 | dynamics | global | structurally_validated | ✅ | Elastic-Viscous-Plastic (EVP) rheology convergence: the subcycled EVP momentum s |
+| `templates/sea_ice/maykut_untersteiner.yaml` | tier2 | thermodynamic | column | structurally_validated | ✅ | Maykut-Untersteiner (1971): seasonal sea-ice thermodynamics equilibrate to the o |
+| `templates/3d_idealized/hydrostatic_gray_1yr.yaml` | tier3 | hydrostatic | global | init_only | ✅ | Idealized 1-year hydrostatic atmosphere on C48/L26: analytical forcing, gray rad |
+| `templates/global_ocean/omip_latlon.yaml` | tier3 | primitive_equation | global | init_only | ✅ | OMIP-style forced global ocean: lat-lon C-grid finite-volume hydrostatic primiti |
+| `templates/global_ocean/omip_latlon_kpp.yaml` | tier3 | primitive_equation | global | structurally_validated | ✅ | OMIP-style forced global ocean (lat-lon C-grid) with the physics pipeline config |
 
-**4/4 templates valid.**
+**30/30 templates valid.**

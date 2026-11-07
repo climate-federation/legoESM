@@ -7,8 +7,8 @@ A template's ``experiment.data`` lists dataset ids resolved against
 ``data_root``.  Idealized templates list no data and report clean immediately.
 
     python scripts/experiment/fetch_data.py check 2d/williamson2_sw     # no data needed
-    python scripts/experiment/fetch_data.py check coupled/amip          # reports present/missing
-    python scripts/experiment/fetch_data.py fetch coupled/amip          # stage missing (where automatable)
+    python scripts/experiment/fetch_data.py check 3d_idealized/hydrostatic_gray_1yr       # reports present/missing
+    python scripts/experiment/fetch_data.py fetch 3d_idealized/hydrostatic_gray_1yr       # stage missing (where automatable)
 
 ``check`` exits non-zero if any required dataset is missing; ``fetch`` downloads
 catalog entries that carry a ``url`` (gs:// via gsutil, http(s):// via curl) and
@@ -43,6 +43,10 @@ def _template_data_ids(template: str, templates_dir: Path | None = None) -> list
     rel = template[:-5] if template.endswith(".yaml") else template
     path = templates_dir / f"{rel}.yaml"
     if not path.is_file():
+        from legoesm.experiment_registry import retired_template_message
+        retired = retired_template_message(template)
+        if retired is not None:
+            raise SystemExit(f"ERROR: {retired}")
         raise SystemExit(f"ERROR: template {template!r} not found at {path}")
     doc = yaml.safe_load(path.read_text()) or {}
     return list((doc.get("experiment") or {}).get("data", []) or [])
@@ -188,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("action", choices=["check", "fetch"])
-    p.add_argument("template", help="template id, e.g. coupled/amip")
+    p.add_argument("template", help="template id, e.g. 3d_idealized/hydrostatic_gray_1yr")
     p.add_argument("--data-root", default=None,
                    help="override the machine profile's data_root")
     args = p.parse_args(argv)

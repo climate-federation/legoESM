@@ -1,0 +1,22 @@
+ATTACK THIS. Rank CRITICAL/MAJOR/MINOR one line each, then ONE line: the cheapest next measurement. Do not restate my summary.
+
+SYSTEM: legoESM (JAX ocean GCM) vs NEMO 5.0.1 ORCA1 oracle, OMIP CORE-II, identical forcing, tripolar eORCA1, day 30. Region: equatorial Pacific cold tongue 220-240E, |lat|<=2.
+
+THE DEFECT: our vertical diffusivity is FLAT at ~2.95e-06 from 18 m to 155 m -- the background value, four significant figures across 140 m. The oracle carries 1.9e-03 at 20-60 m. Our TKE closure produces essentially nothing below 18 m.
+
+NOT A CLAMP (measured today): decomposing K_M = c_k*l*sqrt(2e) with our c_k=0.1, at 20-60 m the turbulence energy is 2.83e-08 (283x above its floor of 1e-10) and the implied length is 0.12 m (124x above rmxl_min = 1e-3 m). Neither is clamped. The closure runs freely and produces very little.
+
+ELIMINATED, each by its own pre-registered measurement:
+- Enhanced vertical diffusion (zdfevd): a 30-day arm FIRED (0.60 of columns at night) and DELIVERED (24% of wet columns above 50 m2/s) and changed nothing; an hourly pair showed arm and control identical at every hour.
+- Mixing length: our choice 4 = NEMO nn_mxl=2 uses the SHORTER of the two lengths for both K and dissipation, so matching the oracle would reduce our mixing further. Arm cancelled on sign.
+- Shear-production discretisation: a 30-day one-variable arm moved our form to NEMO's own zdf_sh2 (face-native differences, NOW^2 product, coastal doubling; the variant fixed by ORCA1's key_RK3 build). 20-60 m tracer K rose 2.60e-07 -> 3.19e-07 = 1.22x where >=10x was pre-registered and <2x was pre-declared refuted. Undercurrent core at 220E unchanged (0.199 vs 0.20; oracle 0.546). Both legs rc=0 and the state digest differed from the baseline's, so the change was active. An EARLIER arm on the same term was null on vertical velocity, meridional transport and the Pacific index. Hypothesis retired.
+- Advection: the 0-25 m heat budget now CLOSES (residual -5.3 K/month against terms of order 60) using our daily snapshots averaged over the oracle's own 5-day window. Ratios ours/NEMO: horizontal advection 1.29, vertical 1.25, diffusion 1.05. Our advection is STRONGER than the oracle's, not weaker.
+- The floors: taken from NEMO's own zdftke.F90 under ln_zdfiwm (rn_emin 1e-10, rmxl_min 1e-3), so faithful; and shown above to be inactive.
+- Backgrounds: both sides force molecular values under internal-wave mixing, matched by construction.
+- The Prandtl form: ours is NEMO's nn_pdl=1 with the same critical-Richardson slope.
+
+CONFIRMED TO AGREE with the oracle's namelist (do not propose these): vector-invariant momentum advection; s-coordinate hydrostatic pressure gradient; RGB penetrative solar with chlorophyll; internal-wave mixing; TKE closure with Langmuir, nn_etau=1 at rn_efr=0.08 and nn_htau=1; enhanced vertical diffusion; tracer damping off.
+
+STILL DIFFERENT from the oracle (the whole remaining list): eddy-induced velocity coefficient (oracle uses a flow-dependent Treguier coefficient with a tropical taper that drives it to ZERO at the equator; ours is a constant 600 everywhere); lateral tracer diffusion (same story, and we have no flag for it); tracer advection (oracle FCT2, ours superbee); kinetic-energy gradient (oracle Hollingsworth, ours centred because Hollingsworth is not fold-aware at our tripole seam).
+
+QUESTIONS: (1) What produces turbulence at 20-60 m in the equatorial Pacific that our closure could be missing entirely, given shear production is discretised faithfully and the floors are inactive? Name terms, not families. (2) Is there a way for a TKE closure to be "on" yet produce a near-background diffusivity over 140 m that is a BUG SHAPE rather than a physics shortfall -- e.g. a term evaluated at the wrong time level, a vertical index offset, a tridiagonal solve whose off-diagonals vanish, an implicit solve that discards the source? (3) Our diffusivity being identical to four significant figures across 140 m of ocean: what class of defect produces THAT signature specifically? (4) The cheapest single measurement to discriminate your top two answers, using snapshots that carry T, S, u, v, mass fluxes, tke, K_M and K_H.

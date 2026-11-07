@@ -45,7 +45,7 @@ solved infrastructure** wired through the realistic-coupler path. See
 - Freshwater flux — `ocean/freshwater.py` provides `FreshwaterForcing` +
   `freshwater_from_coupler()` + `virtual_salt_flux()`, and
   `LatLonCGridOceanModel.step()` already accepts a `freshwater=` kwarg
-  (`ocean_model_latlon_cgrid.py:363, 482, 806`) that drives both the η and
+  (`ocean_model_latlon_cgrid.py:364, 482, 806`) that drives both the η and
   S tendencies. No new path needed.
 
 The `bulk_formulas.py` adapter (with `dS_dt = 0` hard-coded and scalar
@@ -73,7 +73,7 @@ clear:
 |---|---|---|
 | "psl is hard-coded to 101325 Pa" | **Already plumbed** | `coupler/surface_exchange.py:90` returns `p_surface`; `coupler/coupler.py:183` uses it in `saturation_mixing_ratio(ocean_sst, forcing.p_surface)` |
 | "Atmospheric forcing is scalar zonal-only" | **Fully 2D in the realistic path** | `coupler/coupler.py:169-256` `ocean_tile_response()` takes the `AtmToSurface` 2D struct populated by `extract_atm_to_surface()` |
-| "Freshwater flux missing (`dS_dt = 0` hard-coded)" | **Fully implemented** | `ocean/freshwater.py` provides `FreshwaterForcing` + `freshwater_from_coupler()` + `virtual_salt_flux()`; `LatLonCGridOceanModel.step()` accepts `freshwater=` and applies both η and S tendencies (`ocean_model_latlon_cgrid.py:363, 482, 806`) |
+| "Freshwater flux missing (`dS_dt = 0` hard-coded)" | **Fully implemented** | `ocean/freshwater.py` provides `FreshwaterForcing` + `freshwater_from_coupler()` + `virtual_salt_flux()`; `LatLonCGridOceanModel.step()` accepts `freshwater=` and applies both η and S tendencies (`ocean_model_latlon_cgrid.py:364, 482, 806`) |
 
 The `bulk_formulas.py` file I audited is the **idealized-experiment adapter**
 (scalar wind for sin² gyres etc.). It is not on the realistic-coupling path.

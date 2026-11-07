@@ -56,16 +56,16 @@ def test_tke_lc_etau_reach_the_card():
         orca1_zdftke_config(etau_mode="surface")
 
 
-def test_shear_now2_variant_accepted_and_reaches_card():
-    """nemo_face_native_now2 (the key_RK3-oracle spatial variant) must parse,
+def test_shear_nbb2_variant_accepted_and_reaches_card():
+    """nemo_face_native_nbb2 (the key_RK3 Nbb-entry spatial variant) must parse,
     validate, and land in TKEConfig; junk still raises."""
     import pytest
     p = _build_arg_parser()
-    a = p.parse_args(["--tke-shear-production", "nemo_face_native_now2"])
-    assert a.tke_shear_production == "nemo_face_native_now2"
+    a = p.parse_args(["--tke-shear-production", "nemo_face_native_nbb2"])
+    assert a.tke_shear_production == "nemo_face_native_nbb2"
     from scripts.run.run_omip_core2 import orca1_zdftke_config
-    cfg = orca1_zdftke_config(shear_production="nemo_face_native_now2")
-    assert cfg.tke_shear_production == "nemo_face_native_now2"
+    cfg = orca1_zdftke_config(shear_production="nemo_face_native_nbb2")
+    assert cfg.tke_shear_production == "nemo_face_native_nbb2"
     with pytest.raises(ValueError):
         orca1_zdftke_config(shear_production="face_native")
 

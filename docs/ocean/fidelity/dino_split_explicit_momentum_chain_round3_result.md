@@ -91,7 +91,7 @@ it makes the residual nearly five times worse.
 NEMO evaluates `dyn_ldf` at Kbb/BEFORE.  legoESM's live first barotropic pass
 evaluates lateral friction at NOW; its later BEFORE pass keeps only the 3-D
 dissipative increment and discards that pass's barotropic result
-(`ocean_model_latlon_cgrid.py:8950-9030`).  The registered offline
+(`ocean_model_latlon_cgrid.py:9055-9135`).  The registered offline
 counterfactual uses the existing `ldf_state=BEFORE` production diagnostics
 hook and substitutes only this depth-mean forcing operand.
 

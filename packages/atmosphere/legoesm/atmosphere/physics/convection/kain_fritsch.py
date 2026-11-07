@@ -94,7 +94,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_dT
+from legoesm.thermo import saturation_specific_humidity, saturation_specific_humidity_dT
 from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
@@ -679,7 +679,7 @@ def _kf_downdraft_evaporation(
     """
     dtype = T_env.dtype
     dp = p_half[:, 1:] - p_half[:, :-1]
-    qsat = saturation_mixing_ratio(T_env, p_full)
+    qsat = saturation_specific_humidity(T_env, p_full)
     rh = jnp.clip(q_env / jnp.maximum(qsat, 1.0e-12), 0.0, _KF_DD_RH_CLIP_MAX)
 
     p_source_top = p_lcl[:, None] - _KF_DD_START_DEPTH_PA
@@ -786,8 +786,8 @@ def _kf_mixed_virtual_temperature(
     T0 = f * T_env + (1.0 - f) * T_u
     q0 = f * q_env + (1.0 - f) * q_u
     qc0 = (1.0 - f) * jnp.maximum(q_c_u, 0.0)
-    qsat = saturation_mixing_ratio(T0, p_full)
-    dqs_dT = saturation_mixing_ratio_dT(T0, p_full)
+    qsat = saturation_specific_humidity(T0, p_full)
+    dqs_dT = saturation_specific_humidity_dT(T0, p_full)
     L_over_cp = constants.L_v / constants.c_pd
     delta_q = jnp.clip(
         (q0 - qsat) / (1.0 + L_over_cp * dqs_dT),
@@ -894,8 +894,17 @@ def kain_fritsch_convection(
     conv_prog_profile: jax.Array,
     dt: float,
     config: KainFritschConfig = KainFritschConfig(),
+    *,
+    u: jax.Array | None = None,
+    v: jax.Array | None = None,
 ) -> tuple[ConvectionOutput, jax.Array]:
     """Kain-Fritsch convection (AD-safe; smooth trigger/blend/gates).
+
+    ``config.variant`` selects the implementation: ``"smooth"`` (default) runs
+    the surrogate below and ignores ``u``/``v``; ``"wrf_kfeta"`` runs the
+    faithful, NOT RULE 5 compliant WRF KF-Eta port
+    (:func:`~legoesm.atmosphere.physics.convection.kain_fritsch_wrf.kain_fritsch_wrf_convection`),
+    which needs ``u`` and ``v``.  Any other value raises ``ValueError``.
 
     Parameters
     ----------
@@ -933,6 +942,18 @@ def kain_fritsch_convection(
     conv_prog_profile_new : jax.Array, shape (ncol, nlev)
         Updated carry with diagnosed ``M_b`` packed at ``[:, -1]``.
     """
+    if config.variant == "wrf_kfeta":
+        from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import (
+            kain_fritsch_wrf_convection,
+        )
+        return kain_fritsch_wrf_convection(
+            T, q_v, p_full, p_half, w_grid, conv_prog_profile, dt, config,
+            u=u, v=v)
+    if config.variant != "smooth":
+        raise ValueError(
+            f"KainFritschConfig.variant must be one of ('smooth', 'wrf_kfeta'), "
+            f"got {config.variant!r}")
+    del u, v  # the smooth surrogate has no wind dependence
     ncol, nlev = T.shape
     del conv_prog_profile  # KF is diagnostic; we only emit a fresh profile.
 
@@ -974,7 +995,7 @@ def kain_fritsch_convection(
     # begins at the correct pressure origin.
     T_usl_at_sfc = T_usl * (p_base / jnp.maximum(p_usl, 1.0)) ** constants.kappa
     T_moist = compute_moist_adiabat(T_usl_at_sfc, p_full, q_v_base=q_usl)
-    q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
+    q_sat_parcel = saturation_specific_humidity(T_moist, p_full)
     q_v_parcel = jnp.minimum(q_usl[:, None], q_sat_parcel)
     cape = compute_cape(
         T, T_moist, p_full, p_half,
@@ -1038,9 +1059,9 @@ def kain_fritsch_convection(
         # (module_cu_kfeta.F lines 996-1017, U00=0.75).  Use the same
         # piecewise reference formula, with qsat/dT from thermo instead of
         # lookup-table coefficients.
-        qsat_lcl_env = saturation_mixing_ratio(T_env_at_lcl, lcl.p_lcl)
+        qsat_lcl_env = saturation_specific_humidity(T_env_at_lcl, lcl.p_lcl)
         rh_lcl = q_env_at_lcl / jnp.maximum(qsat_lcl_env, 1.0e-12)
-        dqssdt = saturation_mixing_ratio_dT(lcl.T_lcl, lcl.p_lcl)
+        dqssdt = saturation_specific_humidity_dT(lcl.T_lcl, lcl.p_lcl)
         dtrh_scale = q_usl / jnp.maximum(dqssdt, 1.0e-12)
         dtrh = jnp.where(
             (rh_lcl >= config.rh_trigger_u00) & (rh_lcl <= config.rh_trigger_rhmax),
@@ -1161,7 +1182,7 @@ def kain_fritsch_convection(
         / (constants.g * timec)
     )
     # Bound the *applied* M_b to a literature peak tropical value
-    # (config.M_b_max) — see ZhangMcFarlaneConfig.  The cap protects the
+    # (config.M_b_max).  The cap protects the
     # integration from the unbounded CAPE/tau closure spiking in a
     # high-CAPE column; it does NOT alter the diagnostic carry above.
     M_b = jnp.clip(M_b_closure, 0.0, config.M_b_max)
@@ -1414,6 +1435,7 @@ def kain_fritsch_convection(
         du_dt_conv=None,
         dv_dt_conv=None,
         dq_r_conv_dt=dq_r_conv_dt,
+        precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
     )
 
     # Diagnostic carry: pack the (uncapped) closure cloud-base mass flux at

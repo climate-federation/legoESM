@@ -41,6 +41,19 @@ def test_to_surface_config_default_is_constant():
     assert sfc.bulk_scheme == "constant"
 
 
+def test_to_surface_config_keeps_the_height_switch_off():
+    """The AIMIP lanes substitute the lowest air temperature for a missing
+    surface, so the MOST height adjustment must stay off here even though the
+    scheme default is True (it would invent a downward sensible heat flux)."""
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+
+    p = AIMIPClassicalParams.from_defaults()
+    assert SurfaceLayerConfig().z_ref_model_level is True      # the scheme default
+    for scheme in ("constant", "most", "coare3"):
+        assert p.to_surface_config(bulk_scheme=scheme).z_ref_model_level is False
+
+
 def test_to_surface_config_most_requested():
     from legoesm.training.aimip_params import AIMIPClassicalParams
 
@@ -99,6 +112,7 @@ def test_spatial_surface_path_carries_most():
         make_aimip_classical_spectral_physics(
             p, grid, dt=1800.0,
             radiation="gray",
+            convection_scheme="sbm",  # tiedtke (WRF port) refused on spectral
             turbulence_scheme="louis",
             surface_bulk_scheme="most",
             land_mask=land_mask,
@@ -137,6 +151,9 @@ def _assemble_physics_config(p, grid, *, turbulence_scheme, surface_bulk_scheme,
         make_aimip_classical_spectral_physics(
             p, grid, dt=1800.0,
             radiation="gray",
+            # the default convection (tiedtke, WRF port) is refused on the
+            # spectral lane; sbm keeps these surface tests buildable
+            convection_scheme="sbm",
             turbulence_scheme=turbulence_scheme,
             surface_bulk_scheme=surface_bulk_scheme,
             land_mask=land_mask,

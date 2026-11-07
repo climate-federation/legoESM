@@ -177,11 +177,8 @@ Deliberate deviations from the NumPy twin (each one declared)
    ``geopk``.  The NumPy lane's ``fort`` views index ``i - ilo``, so a
    too-small halo WRAPS to the far edge and returns numbers; here it is
    a loud error (same class as ``fv3_nh_core.update_dz_c``'s ng guard).
-6. **``_require_f64_jax`` is REPLICATED, not imported.**  The pattern-
-   setter's copy is ``fv3_nh_core._require_f64_jax`` -- a private symbol,
-   and ``tests/test_no_private_cross_imports.py`` forbids cross-module
-   private imports with a permanently EMPTY allowlist.  Promoting it
-   would edit the pattern-setter, which is outside this unit's scope.
+6. **The dtype gate is shared**: ``fv3_phase3d_common.require_uniform_float_jax``
+   (one public helper; the seven per-module private copies were merged).
 
 Differentiability
 ---------------------------------------------------------------------
@@ -251,6 +248,7 @@ from legoesm.core.fv3_native_d_sw import (
     A2B_R3,
 )
 from legoesm.core.fv3_native_sw_core import BIG_NUMBER
+from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
 
 __all__ = [
     "a2b_gridstruct_view",
@@ -280,34 +278,6 @@ __all__ = [
 # The ten geometry arrays a2b_ord4 associates (a2b_gridstruct_view).
 _A2B_GEOM_KEYS = ("grid_lon", "grid_lat", "agrid_lon", "agrid_lat",
                   "dxa", "dya", "edge_w", "edge_e", "edge_s", "edge_n")
-
-
-def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
-
-    Replicated rather than imported from ``fv3_nh_core`` -- see deviation
-    (6) in the module docstring.  Reads only ``.dtype`` (static under
-    jit): a float32 operand would otherwise be silently upcast -- or
-    worse, with x64 disabled the whole chain would silently run in
-    float32 -- and the oracle build is ``-fdefault-real-8``.
-    """
-    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
-    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype).
-    seen = None
-    for name, a in arrays.items():
-        if a is None:
-            continue
-        dt = jnp.asarray(a).dtype
-        if dt not in (jnp.float32, jnp.float64):
-            raise TypeError(
-                f"{fname}: {name} must be float32 or float64 (got {dt})")
-        if seen is None:
-            seen = dt
-        elif dt != seen:
-            raise TypeError(
-                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
-                f"a phase must be single-precision-uniform "
-                f"(FV3DuoConfig.storage_dtype).")
 
 
 def _w(lo: int, ia: int, ib: int) -> slice:
@@ -367,7 +337,7 @@ def a2b_gridstruct_view(gs: dict, bd) -> dict:
             f"a2b_gridstruct_view: gridstruct is missing {missing}; "
             f"a2b_ord4 associates all of {list(_A2B_GEOM_KEYS)}")
     out = {k: jnp.asarray(gs[k]) for k in _A2B_GEOM_KEYS}
-    _require_f64_jax("a2b_gridstruct_view", out)
+    require_uniform_float_jax("a2b_gridstruct_view", out)
     return out
 
 
@@ -943,7 +913,7 @@ def geopk(delp, pt, hs, bd, *, km: int, ptop: float, akap: float,
         raise ValueError(f"geopk: km must be >= 1, got {km!r}")
     _require_bool("geopk", "cg", cg)
     _require_bool("geopk", "sw_dynamics", sw_dynamics)
-    _require_f64_jax("geopk", {"delp": delp, "pt": pt, "hs": hs})
+    require_uniform_float_jax("geopk", {"delp": delp, "pt": pt, "hs": hs})
     del q_con  # unreferenced without -DUSE_COND; kept for interface fidelity
 
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
@@ -982,12 +952,14 @@ def geopk(delp, pt, hs, bd, *, km: int, ptop: float, akap: float,
     n_bi = ilast - ifirst + 1
     n_bj = jlast - jfirst + 1
 
-    pk = jnp.full((m_i, m_j, km + 1), unwritten_fill, dtype=jnp.float64)
-    gz = jnp.full((m_i, m_j, km + 1), unwritten_fill, dtype=jnp.float64)
+    # dtype follows storage (fp32/fp64), from delp (coarse policy; a
+    # later per-op mixed step pins this pressure column back to fp64)
+    pk = jnp.full((m_i, m_j, km + 1), unwritten_fill, dtype=delp.dtype)
+    gz = jnp.full((m_i, m_j, km + 1), unwritten_fill, dtype=delp.dtype)
     pe = jnp.full((n_i + 2, km + 1, n_j + 2), unwritten_fill,
-                  dtype=jnp.float64)
-    peln = jnp.full((n_i, km + 1, n_j), unwritten_fill, dtype=jnp.float64)
-    pkz = jnp.full((n_i, n_j, km), unwritten_fill, dtype=jnp.float64)
+                  dtype=delp.dtype)
+    peln = jnp.full((n_i, km + 1, n_j), unwritten_fill, dtype=delp.dtype)
+    pkz = jnp.full((n_i, n_j, km), unwritten_fill, dtype=delp.dtype)
 
     # --- seeds :2717-2739.  ptk uses the `**` OPERATOR (dyn_core.F90:248,
     # `ptk = ptop ** akap`) while the k loop below uses exp(akap*log(p))
@@ -1032,7 +1004,7 @@ def geopk(delp, pt, hs, bd, *, km: int, ptop: float, akap: float,
         logp = jnp.log(p1d)                          # :2746
         return p1d, (p1d, logp, jnp.exp(akap * logp))   # :2747
 
-    p1d0 = jnp.full((n_bi, n_bj), ptop, dtype=jnp.float64)
+    p1d0 = jnp.full((n_bi, n_bj), ptop, dtype=delp.dtype)
     _, (p1d_k, logp_k, pk_k) = lax.scan(
         _down, p1d0, jnp.moveaxis(delp[box_i, box_j, 0:km], 2, 0))
 
@@ -1122,7 +1094,7 @@ def p_grad_c(dt2: float, delpc, pkc, gz, uc, vc, gs: dict, bd, *,
         del delpc  # hydrostatic branch never reads it (see docstring)
     else:
         gate["delpc"] = delpc
-    _require_f64_jax("p_grad_c", gate)
+    require_uniform_float_jax("p_grad_c", gate)
 
     pkc = jnp.asarray(pkc)
     gz = jnp.asarray(gz)
@@ -1261,7 +1233,7 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
         ng = bd.ng
     _check_a2b_origin("one_grad_p", bd, ng)
 
-    _require_f64_jax("one_grad_p", {
+    require_uniform_float_jax("one_grad_p", {
         "u": u, "v": v, "pk": pk, "gz": gz, "divg2": divg2,
         "rdx": gs["rdx"], "rdy": gs["rdy"]})
     u = jnp.asarray(u)
@@ -1290,9 +1262,10 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
     # branch writes exactly [is,ie+1]x[js,je+1]; the plain branch's
     # corner/edge writes land inside that same box).
     def _a2b_replace(planes):
+        # dtype follows storage (fp32/fp64), from pk (delp is del'd in the hydrostatic branch)
         scratch = jnp.full(
             (ied - isd + 1, jed - jsd + 1, planes.shape[2]), jnp.nan,
-            dtype=jnp.float64)
+            dtype=pk.dtype)
         qin, _ = _a2b_ord4_k(planes, scratch, geom, npx, npy, is_, ie, js,
                              je, ng, replace=True, duogrid=duogrid,
                              **flags)
@@ -1314,8 +1287,8 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
         wk1 = divg2[_w(is_, is_, ie + 1), _w(js, js, je)] \
             - divg2[_w(is_, is_, ie + 1), _w(js, js + 1, je + 1)]
     else:
-        wk2 = jnp.zeros((ie - is_ + 1, je - js + 2), dtype=jnp.float64)
-        wk1 = jnp.zeros((ie - is_ + 2, je - js + 1), dtype=jnp.float64)
+        wk2 = jnp.zeros((ie - is_ + 1, je - js + 2), dtype=pk.dtype)
+        wk1 = jnp.zeros((ie - is_ + 2, je - js + 1), dtype=pk.dtype)
 
     rdx = jnp.asarray(gs["rdx"])
     rdy = jnp.asarray(gs["rdy"])
@@ -1339,7 +1312,7 @@ def one_grad_p(u, v, pk, gz, divg2, delp, gs: dict, bd, *, npx: int,
     # DEPENDENCE (the k nest): u/v are written at level k from pk/gz/wk
     # at levels k and k+1 of arrays this nest never writes.
     wk = jnp.full((ied - isd + 1, jed - jsd + 1, npz), jnp.nan,
-                  dtype=jnp.float64)
+                  dtype=pk.dtype)
     wk = wk.at[b_i, b_j, :].set(pk[b_i, b_j, 1:npz + 1]
                                 - pk[b_i, b_j, 0:npz])
 
@@ -1411,7 +1384,7 @@ def nh_p_grad(u, v, pp, gz, delp, pk3, gs: dict, bd, *, npx: int,
         ng = bd.ng
     _check_a2b_origin("nh_p_grad", bd, ng)
 
-    _require_f64_jax("nh_p_grad", {
+    require_uniform_float_jax("nh_p_grad", {
         "u": u, "v": v, "pp": pp, "gz": gz, "delp": delp, "pk3": pk3,
         "rdx": gs["rdx"], "rdy": gs["rdy"]})
     u = jnp.asarray(u)
@@ -1432,8 +1405,9 @@ def nh_p_grad(u, v, pp, gz, delp, pk3, gs: dict, bd, *, npx: int,
                  ne_corner=ne_corner, nw_corner=nw_corner)
 
     def _scratch(nk):
+        # dtype follows storage (fp32/fp64), from delp
         return jnp.full((ied - isd + 1, jed - jsd + 1, nk), jnp.nan,
-                        dtype=jnp.float64)
+                        dtype=delp.dtype)
 
     def _a2b_replace(planes):
         qin, _ = _a2b_ord4_k(planes, _scratch(planes.shape[2]), geom, npx,
@@ -1561,7 +1535,7 @@ def pk3_halo(pk3, delp, bd, *, npz: int, ptop: float, akap: float):
     DISJOINT in j, so no column is written twice and the write order
     cannot matter.
     """
-    _require_f64_jax("pk3_halo", {"pk3": pk3, "delp": delp})
+    require_uniform_float_jax("pk3_halo", {"pk3": pk3, "delp": delp})
     _require_column_depth("pk3_halo", delp, npz)
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
     isd, jsd = bd.isd, bd.jsd
@@ -1590,7 +1564,7 @@ def pln_halo(pk3, delp, bd, *, npz: int, ptop: float):
     contract.  Functional: RETURNS the updated ``pk3``.  Dead on the
     pinned deck (USE_LOGP=F) but ten lines away.
     """
-    _require_f64_jax("pln_halo", {"pk3": pk3, "delp": delp})
+    require_uniform_float_jax("pln_halo", {"pk3": pk3, "delp": delp})
     _require_column_depth("pln_halo", delp, npz)
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
     isd, jsd = bd.isd, bd.jsd
@@ -1627,7 +1601,7 @@ def pe_halo(pe, delp, bd, *, npz: int, ptop: float):
     accumulator, so the columns are independent and only the k sum is
     sequential (``lax.scan``).
     """
-    _require_f64_jax("pe_halo", {"pe": pe, "delp": delp})
+    require_uniform_float_jax("pe_halo", {"pe": pe, "delp": delp})
     _require_column_depth("pe_halo", delp, npz)
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
     isd, jsd = bd.isd, bd.jsd

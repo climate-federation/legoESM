@@ -19,7 +19,7 @@
 #              and that is what the amplitude fix uncovered.
 set -uo pipefail
 WT=/burg-archive/glab/users/pg2328/legoESM; cd $WT || exit 1
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 T=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_TRD2
 /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python -u \

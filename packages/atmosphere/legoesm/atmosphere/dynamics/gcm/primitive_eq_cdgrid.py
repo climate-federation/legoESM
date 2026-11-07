@@ -45,13 +45,14 @@ from legoesm.core.conservation import (
     zero_mean_tendency,
     fix_ps_mass,
     fix_ps_mass_target,
+    gridded_energy_fixer_dT,
 )
 from legoesm.core.operators import (
     global_integral,
     hyperdiffusion,
     laplacian_compact,
 )
-from legoesm.core.precision import resolve_dtype, cast_pytree
+from legoesm.core.precision import resolve_dtype, cast_pytree, finalize_to_storage
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -142,8 +143,6 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Apply zero_mean_tendency() to dp_s/dt every RK stage. Requires MPI allreduce.
     use_async_halo: bool = False
         # MPI interior/boundary split for compute-comm overlap.
-    use_fv3_lin_pgf: bool = False
-        # FV3 Lin (1997) cross-product PGF. FV3_3D iter 4: INERT — needs forward-backward stepping
         # for stability with RK3 (CFL-incompatible). Retained for future iter.
     div_damp_dddmp: float = 0.0
         # FV3_3D iter 5: adaptive Smag div damping. FV3 sw_core.F90:1720
@@ -275,6 +274,16 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # instead of the in-RK3 advective -(u·∇q) form.  Fixes the cube
         # column-water non-conservation / day-150 blow-up.  Default False keeps
         # the advective path bit-exact.  Appended last (positional ABI).
+    energy_fixer: bool = False
+        # CAM-style dycore total-energy fixer (check_energy_fix, review
+        # 2026-10-10 F15): at the END of a dynamics-only step (after the
+        # sponge / vorticity damping / p_s damping / mass fixer / Rayleigh
+        # post-steps, vote F15b-V2; before the tracer floor, whose hard-floor
+        # latent correction is moist) the window's total-energy change
+        # comes back as a uniform heating (``gridded_energy_fixer_dT``).
+        # Refused with physics inside the RK stages (that window would count
+        # the physics heating).  False on the raw dycore; the driver sets it
+        # from ``DycoreConfig.energy_fixer`` (default True).  Appended last.
 
 
 def validate_corner_div_damp_nord(nord: int) -> None:
@@ -363,8 +372,7 @@ def fv3_hydrostatic_tendencies(
     KE = 0.5 * (u_cell ** 2 + v_cell ** 2)
 
     # --- 5. Bernoulli function B = KE + Phi (cell centres) ---
-    # FV3_3D iter 4: Lin (1997) cross-product PGF not stable with RK3 (needs forward-backward);
-    # use_fv3_lin_pgf flag inert here.
+    # Lin (1997) cross-product PGF is not stable with RK3 (needs forward-backward).
     B = KE + Phi
 
     # --- 6. D-grid vorticity at cell centres via circulation ---
@@ -1600,15 +1608,42 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         physics_fn=None,
         target_mass=None,
         phys_state=None,
+        energy_pre=None,
     ) -> tuple:
         """Advance one time step with D-grid prognostic winds.
+
+        ``energy_pre``: the energy fixer's window START as cell-centre
+        ``(T, u, v, p_s, phis)`` -- the cc caller's own state, so the
+        cc -> D -> cc round trip's KE change is inside the closed window;
+        ``None`` = the D-grid input's cell-centre view.
 
         Returns ``(state_new, phys_state_out)``.  ``phys_state_out`` is
         the input carry when no carry/physics is active; see
         :meth:`step` for the per-RK-stage carry semantics.
         """
+        if self.config.energy_fixer and physics_fn is not None:
+            # physics rides INSIDE the RK stages here, so the window's energy
+            # change would include the physics heating (latent release read
+            # as a dycore gain and cooled away): refuse, never mis-fix
+            raise ValueError(
+                "CDGridPrimitiveEquationModel: energy_fixer=True needs a "
+                "dynamics-only step (physics_fn=None, the driver's operator "
+                "split); physics inside the RK stages would be fixed away")
         state = cast_pytree(state, None, "compute")
         cdgrid = self.cdgrid
+
+        # Process-coupled lane (physics inside the RK stages): physics'
+        # dynamics-tendency consumers read the dynamics-only tendency at
+        # step start (cell centre, same arrays as the cc view's T / q_v).
+        if (physics_fn is not None and phys_state is not None
+                and state.tracers is not None and "q_v" in state.tracers):
+            _dyn = fv3_hydrostatic_tendencies(
+                state, self.grid, self.sigma_coord, cdgrid, self.config,
+                physics_tendency=None, physics_tendency_cc=None,
+                dt_actual=dt)
+            phys_state = phys_state._replace(
+                dyn_tendency_T=_dyn.dT_dt.data,
+                dyn_tendency_qv=_dyn.tracer_tendencies["q_v"].data)
 
         def _eval_physics(s_cc):
             """Physics with the step-input carry (4-arg contract when
@@ -2004,6 +2039,22 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         if self.config.moisture_flux_form and state_new.tracers is not None:
             state_new = self._flux_form_moisture_substep(state, state_new, dt)
 
+        if self.config.energy_fixer:
+            # --- Dycore energy fixer (CAM check_energy_fix, F15): the whole
+            # dynamics window's energy change returns as a uniform heating
+            # [K, +warming].  Global sums as the mass fixer above.  BEFORE
+            # the tracer floor: the hard-floor path's latent-heat T
+            # correction is a moist-energy fix this dry fixer must not undo.
+            def _cc(s):
+                h = fv3_to_hydrostatic(s, cdgrid)
+                return (h.T.data, h.u.data, h.v.data, h.p_s.data, h.phis.data)
+            _dT_fix = gridded_energy_fixer_dT(
+                _cc(state) if energy_pre is None else energy_pre,
+                _cc(state_new), self.grid, self.sigma_coord)
+            state_new = state_new._replace(T=state_new.T.replace(
+                data=state_new.T.data
+                + _dT_fix.astype(state_new.T.data.dtype)))
+
         # Prognostic tracer floor: advective tracer transport is not
         # positive-definite, so clamp q >= 0 AFTER the RK update (the physics
         # adapters clip their INPUT; this is the prognostic floor the moist
@@ -2030,11 +2081,20 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             _tr_out, _T_out = apply_water_positivity(
                 state_new.tracers, state_new.T.data, _dp,
                 conservative=self.config.conservative_tracer_clamp,
-                energy_consistent=self.config.energy_consistent_moisture_clip)
+                energy_consistent=self.config.energy_consistent_moisture_clip,
+                area=self.cdgrid.base.area)
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
-        state_out = cast_pytree(state_new, None, "storage")
+        # #1675: ``cast_pytree`` SKIPS downcasts by default, so in ``mixed``
+        # this line never rounded the mass fixer's float64 back out of the bulk
+        # state -- adversarial review traced winds, temperature and every
+        # tracer arriving float64 on step TWO.  ``finalize_to_storage`` is the
+        # downcasting version and keeps ``p_s`` at the accumulate dtype on
+        # purpose (the exact mass correction is load-bearing).  It is a no-op
+        # whenever storage and accumulate share a dtype, i.e. in every mode
+        # except mixed, so fp32/fp64 stay byte-identical.
+        state_out = finalize_to_storage(cast_pytree(state_new, None, "storage"))
 
         # Operator-split physics carry (issue #413): one extra physics
         # evaluation on the POST-STEP state produces the carry-out
@@ -2092,7 +2152,9 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         )
         fv3_new, phys_state_out = self._step_fv3(
             fv3_state, dt, physics_fn=physics_fn, target_mass=target_mass,
-            phys_state=phys_state)
+            phys_state=phys_state,
+            energy_pre=(state.T.data, _u_in, _v_in, state.p_s.data,
+                        state.phis.data))
         return fv3_to_hydrostatic(fv3_new, self.cdgrid), phys_state_out
 
     def step_cell_centre(self, state, dt, physics_fn=None,
@@ -2319,24 +2381,3 @@ def make_legoesm_pe_min_edge_config(**overrides) -> CDGridPrimitiveEquationConfi
     )
     edge_min_overrides.update(overrides)
     return make_fv3_component_fidelity_pe_config(**edge_min_overrides)
-
-
-def make_legoesm_pe_min_edge_aggressive_config(
-    **overrides
-) -> CDGridPrimitiveEquationConfig:
-    """FV3_3D iter 484: PE mirror of NH iter-483 aggressive factory.
-
-    Stacks iter-466 hurting-flag drops + iter-481 corner_div boost
-    (d2_bg=5e-2).  iter-469/470 found PE T/u_d insensitive to most
-    factory flags at C8 — this aggressive config is unlikely to help
-    much on PE compared to NH, but provided for API symmetry with
-    NH iter-483.  Trade-off: over-damps physical waves.
-    """
-    aggressive_overrides = dict(
-        use_fv3_metric_aware_d_con=False,
-        heat_source_del2_iters=0,
-        d_con_top_zero_levels=0,
-        corner_div_damp_d2_bg=5e-2,
-    )
-    aggressive_overrides.update(overrides)
-    return make_fv3_component_fidelity_pe_config(**aggressive_overrides)

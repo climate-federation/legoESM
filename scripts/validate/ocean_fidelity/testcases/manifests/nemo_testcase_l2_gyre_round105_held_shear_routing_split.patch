@@ -1,0 +1,131 @@
+ROUND 105 GYRE SHEAR/SOLVER FREE-SURFACE ROUTING SPLIT (2026-09-17): HELD.
+
+DO NOT APPLY OR LAND UNTIL THE PRODUCTION-JIT TKE RHS BOUNDARY IS CLOSED AND
+THE COMPLETE RULE-12 GATE PASSES.
+
+Candidate commit: 55fb9165399dcd9e350ae09654a3988d9ac1966e
+Production reference: 4a057e8bb (the candidate's parent)
+
+SOURCE AND LOCAL SHEAR PROOF.  The record build executes
+stprk3.f90:168 CALL zdf_phy(kstp,Nbb,Nbb,Nrhs); zdfphy.f90:319-320 forwards
+those slots to zdf_sh2; and zdfsh2.f90:102/:107 consumes both slots in the
+u/v shear divisors.  The tracer solver remains different: stage-3 Kmm is
+N+1/2 at stprk3_stg.f90:240/:256 and trazdf.f90:461-477 consumes that Kmm.
+This patch therefore routes step-entry ssh only to zdf_sh2 while retaining
+half-step ssh for tra_zdf.  Given NEMO's recorded entry, all four captured
+face metrics and p_sh2 become BIT (zero unequal, zero maximum) in both the
+full eager closure and production-step JIT.  Before the patch p_sh2 was
+17,400/20,416 unequal at 3.811744924985501e-14.  The production-JIT ULP plant
+moved exactly one p_sh2 cell, printed STATUS PLANT-FIRED and exited 1.
+
+STAGE PROOF VETO.  Fixing p_sh2 does NOT close the next stage boundary under
+production JIT.  The compiled
+GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:439-442 en RHS remains 11,024/20,416
+cells unequal at 5.551115123125783e-17 through the production step, while the
+same full closure is BIT in eager execution.  This is the requested
+discriminator: the surviving boundary is production-fusion-sensitive, not a
+remaining p_sh2 operand error.  The first remaining non-bit statement is the
+en RHS at the same compiled lines.  Re-evaluate this patch only after that statement
+has a production-JIT-exact transcription; an eager-only proof is ineligible.
+
+TRAJECTORY VETO.  Against the immutable full before arm, the canonical Rule-12
+comparison FAILS: 82/954 rows move, 59 rows and 203,983 cells violate the
+two-ULP oracle-relative bar, no row changes class, and first-over-bar remains
+kt2 U/V.  kt2 T/S/U/V remain 1.4210854715202004e-14 /
+2.1316282072803006e-14 / 2.7377110452773967e-12 /
+3.2849219221489645e-12.  Aggregate kt3 T/S improve to
+1.6274801378912684e-4 / 6.327662326555128e-6, and day-30 T RMS improves from
+1.2397011296352737e-2 to 1.2397011237737218e-2 K, but those aggregates cannot
+override the registered cellwise veto.
+
+DINO CONTROL.  DINO's compiled MLF route remains distinct NOW x BEFORE.  Its
+before/after eager and isolated-JIT helper hashes are identical, its 128-test
+card suite passes, and its routing plant moves 12 p_sh2 cells and exits 1.
+The full DINO production step remains UNMEASURED because the committed twin
+refuses earlier in GM/Redi raw-mesh N2; do not promote the helper result to a
+full-trajectory claim.
+
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index a00d6b8ba..19478af11 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -8256,6 +8256,14 @@ class LatLonCGridOceanModel:
+                         _nemo_ws_zdf_eta_kmm
+                         if _nemo_ws_zdf_eta_kmm is not None
+                         else state.eta.data),
++                    # GYRE's compiled RK3 program calls
++                    # zdf_phy(kstp,Nbb,Nbb,Nrhs): zdf_sh2 sees the step-entry
++                    # free surface in BOTH slots, while tra_zdf still sees
++                    # stage-3 Kmm=N+1/2 through eta_now above.  DINO and all
++                    # non-WS callers omit this optional routing input.
++                    tke_shear_eta_now=(
++                        state.eta.data
++                        if _nemo_ws_zdf_eta_kmm is not None else None),
+                     u_now=state.u.data, v_now=state.v.data,
+                     effective_K_test_override=_vertical_K_test_override,
+                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
+@@ -9715,6 +9723,7 @@ class LatLonCGridOceanModel:
+         n2_tracers_before=None,
+         tke_n2_bundle=None,
+         eta_now=None,
++        tke_shear_eta_now=None,
+         u_now=None,
+         v_now=None,
+         nemo_tracer_content_rhs=None,
+@@ -9801,6 +9810,11 @@ class LatLonCGridOceanModel:
+ 
+         Called only when ``config.implicit_vertical_mixing == True``.
+ 
++        ``tke_shear_eta_now`` optionally splits the free-surface field used
++        only by step-entry ``zdf_sh2`` from ``eta_now``, which remains the
++        implicit tracer/momentum solver's Kmm divisor. ``None`` preserves the
++        existing route for DINO and every non-WS caller.
++
+         ``grid`` (optional, SPMD): default ``None`` → ``self.grid``
+         (bit-identical single-device path); a band-local grid is injected
+         by a future ``shard_map`` wrapper.
+@@ -9974,7 +9988,10 @@ class LatLonCGridOceanModel:
+                 _tke_lat_deg = jnp.degrees(_grid.lat_T)
+             if _tke_prognostic:
+                 _tke_p_sh2_result = self._tke_step_entry_p_sh2(
+-                    state, eta_now=eta_now, u_now=u_now, v_now=v_now,
++                    state,
++                    eta_now=(eta_now if tke_shear_eta_now is None
++                             else tke_shear_eta_now),
++                    u_now=u_now, v_now=v_now,
+                     z_coord=_zc, config=_cfg_b, grid=_grid,
+                     return_face_metrics=return_tke_entry)
+                 if return_tke_entry:
+diff --git a/tests/ocean/unit/test_tke_carried_coefficients.py b/tests/ocean/unit/test_tke_carried_coefficients.py
+index 5b64dc7c7..1548120aa 100644
+--- a/tests/ocean/unit/test_tke_carried_coefficients.py
++++ b/tests/ocean/unit/test_tke_carried_coefficients.py
+@@ -742,6 +742,28 @@ def test_live_qco_step_entry_helper_exposes_consumed_face_metrics():
+         state.v.data.shape[-1] - 1,)
+ 
+ 
++def test_now2_shear_metric_changes_when_routed_eta_changes():
++    """GYRE's step-entry ssh and half-step solver ssh are not interchangeable."""
++    tke_cfg = dino_mod._dino_vertical_mixing_config(
++        dino_config_for_recipe("nemo_dino_kamm_mlf")).tke._replace(
++            tke_shear_production="nemo_face_native_now2")
++    model, state = _step_entry_helper_fixture(tke_cfg)
++    half_step_eta = 0.5 * (state.eta.data + 0.3)
++
++    step_entry, step_metrics = LatLonCGridOceanModel._tke_step_entry_p_sh2(
++        model, state, eta_now=state.eta.data, return_face_metrics=True)
++    half_step, half_metrics = LatLonCGridOceanModel._tke_step_entry_p_sh2(
++        model, state, eta_now=half_step_eta, return_face_metrics=True)
++
++    assert np.array_equal(np.asarray(step_metrics[0]),
++                          np.asarray(step_metrics[1]))
++    assert np.array_equal(np.asarray(step_metrics[2]),
++                          np.asarray(step_metrics[3]))
++    assert not np.array_equal(np.asarray(step_entry), np.asarray(half_step))
++    assert any(not np.array_equal(np.asarray(a), np.asarray(b))
++               for a, b in zip(step_metrics, half_metrics))
++
++
+ def test_live_face_metric_product_matches_hand_computed_sh2():
+     # Two identical U faces, no V shear. du_now=[-2,-3], du_before=[-4,-6],
+     # avm face sums=[6,10]. The 0.25 two-face collapse gives [24,90]

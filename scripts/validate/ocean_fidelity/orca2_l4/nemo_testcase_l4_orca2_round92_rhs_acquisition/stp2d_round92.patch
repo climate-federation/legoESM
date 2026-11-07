@@ -1,0 +1,18 @@
+--- stp2d.F90
++++ stp2d.F90
+@@ -29,0 +30,2 @@
++   USE l4_r92_rhs_frames, ONLY : r92_rhs_start, r92_rhs_put_pair, &
++      & r92_rhs_finish ! round-92 write-only accumulator frames
+@@ -129,0 +132 @@
++         CALL r92_rhs_start( kt, Kbb, Krhs )
+@@ -131,0 +135 @@
++         CALL r92_rhs_put_pair( kt, 'hpg', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
+@@ -134,0 +139 @@
++         CALL r92_rhs_put_pair( kt, 'ldf', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
+@@ -149,0 +155 @@
++         CALL r92_rhs_put_pair( kt, 'vor', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
+@@ -166,0 +173 @@
++            CALL r92_rhs_put_pair( kt, 'keg', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
+@@ -168,0 +176,2 @@
++            CALL r92_rhs_put_pair( kt, 'zad', uu(:,:,:,Krhs), vv(:,:,:,Krhs) )
++            CALL r92_rhs_finish( kt )

@@ -382,12 +382,14 @@ def _compose_nh_moist_physics(model_type: str, dt: float,
             )
         from legoesm.atmosphere.physics.convection.config import (
             ConvectionConfig,
+            ZhangMcFarlaneConfig,
         )
         from legoesm.atmosphere.physics.convection.integration import (
             make_convection_physics,
         )
         conv_fn = make_convection_physics(
-            ConvectionConfig(scheme=convection_scheme),
+            # RCEMIP is an aquaplanet: ZM's land choice is recorded, not defaulted.
+            ConvectionConfig(scheme=convection_scheme, zhang_mcfarlane=ZhangMcFarlaneConfig(land_fraction="none")),
             model_type=model_type, dt=dt,
         )
 

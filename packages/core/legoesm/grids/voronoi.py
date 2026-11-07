@@ -422,8 +422,15 @@ def _order_indices_ccw(center_xyz, neighbor_xyz):
 # Mesh connectivity and geometry building
 # ============================================================================
 
+def _mesh_float_dtype():
+    """Float dtype mesh geometry is stored in: the precision policy's storage role."""
+    from legoesm.core.precision import get_policy
+    return get_policy().storage
+
+
 def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
-                                triangles=None, periodic_L_rad=None):
+                                triangles=None, periodic_L_rad=None,
+                                host_float64=False):
     """Build complete MPAS mesh from generator points on the unit sphere.
 
     Parameters
@@ -784,15 +791,13 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
     fVertex = 2.0 * omega * np.sin(latVertex)
 
     # --- Convert all arrays to JAX ---
-    # Use float64 when x64 is enabled for geometry precision, float32 otherwise.
-    import jax
-    try:
-        from legoesm.core.precision import get_policy
-        _fdtype = get_policy().storage
-    except Exception:
-        _fdtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    _fdtype = _mesh_float_dtype()
 
     def to_jax_f(arr):
+        # host_float64: numpy float64 regardless of jax_enable_x64, so a
+        # cache file never holds geometry rounded below float64.
+        if host_float64:
+            return np.asarray(arr, dtype=np.float64)
         return jnp.array(arr, dtype=_fdtype)
 
     def to_jax_i(arr):
@@ -1176,13 +1181,23 @@ def _load_voronoi_cache(path: str):
                     and _files <= set(VoronoiMesh._fields)):
                 # Stale schema (fields added/removed) -> ignore, rebuild.
                 return None
+            target = np.dtype(_mesh_float_dtype())
             fields = {}
             for field_name in _files:
                 arr = data[field_name]
                 if arr.ndim == 0:
                     fields[field_name] = arr.item()        # scalar (nCells, radius, ...)
+                elif arr.dtype.kind == "f":
+                    # A fresh build rounds float64 geometry once, to the run's
+                    # dtype. Only a float64 file (cast once here) or a file
+                    # already in the run's dtype reproduces that; anything
+                    # else (legacy float32 file for a float64 or float16 run)
+                    # -> miss, rebuild, overwrite with float64.
+                    if arr.dtype not in (np.dtype(np.float64), target):
+                        return None
+                    fields[field_name] = jnp.asarray(arr, dtype=target)
                 else:
-                    fields[field_name] = jnp.asarray(arr)  # respects current x64
+                    fields[field_name] = jnp.asarray(arr)
         return VoronoiMesh(**fields)
     except Exception as exc:  # corrupt / truncated cache file -> rebuild
         warnings.warn(
@@ -1376,9 +1391,19 @@ def create_voronoi_mesh(
         cell_points = verts
 
     # Step 4: Build complete mesh
-    mesh = _build_mesh_from_generators(cell_points, radius, omega)
     if use_cache and cache_path is not None:
+        # The file serves every precision policy, so it is written in
+        # float64, then cast once for this run.
+        mesh = _build_mesh_from_generators(cell_points, radius, omega,
+                                           host_float64=True)
         _save_voronoi_cache(cache_path, mesh)
+        target = _mesh_float_dtype()
+        mesh = mesh._replace(**{
+            k: jnp.asarray(v, dtype=target) for k in mesh._fields
+            if getattr(v := getattr(mesh, k), "dtype", None) is not None
+            and v.dtype.kind == "f"})
+    else:
+        mesh = _build_mesh_from_generators(cell_points, radius, omega)
     if _lock_path is not None:
         # Release AFTER the atomic cache save: waiters poll the cache, so
         # the lock's job is done once the mesh is loadable.
@@ -1954,12 +1979,7 @@ def load_mpas_mesh(path: str) -> VoronoiMesh:
 
     radius = float(ds.sphere_radius) if hasattr(ds, 'sphere_radius') else constants.R_earth
 
-    import jax
-    try:
-        from legoesm.core.precision import get_policy
-        _fdtype = get_policy().storage
-    except Exception:
-        _fdtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    _fdtype = _mesh_float_dtype()
 
     mesh_data = {
         'nCells': nCells, 'nEdges': nEdges, 'nVertices': nVertices,
@@ -2047,11 +2067,23 @@ def reconstruct_cell_velocity(u_edge, mesh):
     ``u_edge`` at each edge and the per-edge angle ``angleEdge`` (the
     edge normal's azimuth measured from local east), each edge
     contributes ``(cos α · u_edge, sin α · u_edge)`` weighted by
-    ``dvEdge · dcEdge / (2 · areaCell)``.  The formula is exact for
-    uniform flow on any Voronoi mesh and smoothly differentiable, so it
-    composes cleanly with ``jax.grad`` through column-physics bridges
-    (turbulence, gravity-wave drag, etc.) that previously refused
+    ``dvEdge · dcEdge / (2 · areaCell)``.  It is smoothly differentiable,
+    so it composes cleanly with ``jax.grad`` through column-physics
+    bridges (turbulence, gravity-wave drag, etc.) that previously refused
     to dispatch on MPAS (audit 2026-05-12 MEDIUM #10).
+
+    ACCURACY — this used to claim it was "exact for uniform flow on any
+    Voronoi mesh".  MEASURED on the icosahedral meshes (2026-09-18): fed
+    the edge-normal components of a constant east/north vector, the
+    median relative error is 2.4e-2 at subdivision level 2 and 4.2e-3 at
+    level 3.  It CONVERGES — a consistent second-order reconstruction —
+    but it is not exact, and code written to the old wording would be
+    wrong.  Separately, the handful of cells AT the poles show ~100%
+    error at every resolution; that is the test field's singularity (a
+    constant east/north vector is not continuous on a sphere), not a
+    defect here, but it does mean the returned COMPONENTS are not
+    meaningful in the polar cells.  Consumers that need only the
+    magnitude are unaffected away from those cells.
 
     Parameters
     ----------
@@ -2094,3 +2126,107 @@ def reconstruct_cell_velocity(u_edge, mesh):
         v_north = jnp.sum(contrib * sin_a, axis=0)
 
     return u_east, v_north
+
+
+def reconstruct_cell_velocity_wet(u_edge, mesh, wet_edge):
+    """Perot reconstruction restricted to a SUBSET of each cell's edges.
+
+    :func:`reconstruct_cell_velocity` sums ``w_e (n_e · u) n_e`` over every
+    edge of the cell, which reproduces ``u`` only because
+    ``Σ_e w_e n_e n_eᵀ`` is (close to) the identity when ALL edges are
+    present.  Simply zeroing the contribution of a land or sub-seafloor edge
+    therefore does NOT give the reconstruction restricted to the wet edges —
+    it gives a systematically SHORT vector, because the removed edge's
+    contribution to that tensor is never accounted for.  On a hexagon losing
+    one of six edges the underestimate reaches ~1/3 in the direction of the
+    missing normal, biasing any consumer of ``|u|`` low exactly at coastlines
+    and over topography, where slopes are steepest.
+
+    This solves the 2x2 system instead::
+
+        M_c x = b_c ,   M_c = Σ_wet w_e n_e n_eᵀ ,  b_c = Σ_wet w_e (n_e·u) n_e
+
+    which is exact for a field that is uniform over the wet polygon, for any
+    subset of edges.  A cell whose wet edges span fewer than two independent
+    directions has a singular ``M_c``; those cells fall back to zero rather
+    than amplifying noise through a near-singular inverse.
+
+    Parameters
+    ----------
+    u_edge : array ``(nEdges,)`` or ``(nEdges, nlev)``
+        Edge-normal component.
+    mesh : VoronoiMesh
+    wet_edge : array broadcastable to ``u_edge``
+        1 where the edge participates, 0 where it does not.
+
+    Returns
+    -------
+    u_east, v_north : same shape as ``u_edge``.
+    """
+    is_3d = u_edge.ndim == 2
+
+    eoc = mesh.edgesOnCell
+    valid = (eoc >= 0).astype(u_edge.dtype)
+    eoc_safe = jnp.maximum(eoc, 0)
+
+    dv = mesh.dvEdge[eoc_safe] * valid
+    dc = mesh.dcEdge[eoc_safe] * valid
+    angle = mesh.angleEdge[eoc_safe]
+    weight = dv * dc / (2.0 * mesh.areaCell[jnp.newaxis, :])
+    cos_a = jnp.cos(angle)
+    sin_a = jnp.sin(angle)
+
+    wet_g = jnp.asarray(wet_edge)[eoc_safe]
+    u_g = u_edge[eoc_safe]
+    if is_3d:
+        w = weight[..., jnp.newaxis] * wet_g
+        cos_a = cos_a[..., jnp.newaxis]
+        sin_a = sin_a[..., jnp.newaxis]
+    else:
+        w = weight * wet_g
+
+    wu = w * u_g
+    b_x = jnp.sum(wu * cos_a, axis=0)
+    b_y = jnp.sum(wu * sin_a, axis=0)
+    m_xx = jnp.sum(w * cos_a * cos_a, axis=0)
+    m_xy = jnp.sum(w * cos_a * sin_a, axis=0)
+    m_yy = jnp.sum(w * sin_a * sin_a, axis=0)
+
+    det = m_xx * m_yy - m_xy * m_xy
+    # The full-polygon tensor has determinant ~1 (trace 2, near-isotropic), so
+    # this threshold rejects only genuinely rank-deficient wet sets.
+    ok = det > 1.0e-6
+    det_safe = jnp.where(ok, det, 1.0)
+    u_east = jnp.where(ok, (m_yy * b_x - m_xy * b_y) / det_safe, 0.0)
+    v_north = jnp.where(ok, (m_xx * b_y - m_xy * b_x) / det_safe, 0.0)
+    return u_east, v_north
+
+
+def cell_vector_to_edge_normal(du_cell, dv_cell, mesh, dp_cell=None):
+    """Project cell-centred vector components onto the MPAS edge normals.
+
+    Each component is averaged onto the edge from its two adjacent cells
+    (``cellsOnEdge``), then dotted with the edge-normal unit vector
+    ``(cos angleEdge, sin angleEdge)``.  The single cell->edge projection every
+    physics bridge uses for its momentum tendency on this mesh.
+
+    With ``dp_cell`` (layer pressure thickness, (nCells, nlev)) the average is
+    MASS-weighted, ``(dp0*x0 + dp1*x1)/(dp0 + dp1)``: since the dycore's edge
+    layer mass is the two-cell mean of ``dp``, a tendency whose mass-weighted
+    column integral vanishes at every cell then vanishes at every edge too
+    (exact on hybrid levels with differing surface pressures; the plain
+    average only conserves on pure sigma).  ``None`` keeps the plain average
+    bit for bit.
+    """
+    c0 = mesh.cellsOnEdge[0]  # (nEdges,)
+    c1 = mesh.cellsOnEdge[1]  # (nEdges,)
+    if dp_cell is None:
+        du_e_east = 0.5 * (du_cell[c0] + du_cell[c1])
+        dv_e_north = 0.5 * (dv_cell[c0] + dv_cell[c1])
+    else:
+        w0, w1 = dp_cell[c0], dp_cell[c1]
+        inv = 1.0 / (w0 + w1)
+        du_e_east = (w0 * du_cell[c0] + w1 * du_cell[c1]) * inv
+        dv_e_north = (w0 * dv_cell[c0] + w1 * dv_cell[c1]) * inv
+    angle = mesh.angleEdge[:, None]
+    return du_e_east * jnp.cos(angle) + dv_e_north * jnp.sin(angle)

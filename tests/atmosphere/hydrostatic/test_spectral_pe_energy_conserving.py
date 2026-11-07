@@ -28,11 +28,11 @@ from legoesm import constants
 from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralPEConfig,
     _compute_sigma_dot_gaussian,
-    _vertical_advection_sigma_gaussian,
     _vertical_advection_sigma_sb,
     isothermal_rest_state_spectral,
     spectral_pe_tendencies,
 )
+from legoesm.grids.vertical import vertical_advection
 from legoesm.grids.gaussian import (
     create_gaussian_grid,
     sh_analysis,
@@ -146,7 +146,7 @@ def test_sb_mass_weighted_T_sink_far_below_upwind(grid, sigma):
     ps = jnp.exp(sh_synthesis(grid, state.lnps_hat.data))
     sigma_dot, _ = _compute_sigma_dot_gaussian(div, sigma)
 
-    up = _vertical_advection_sigma_gaussian(T, sigma_dot, sigma)
+    up = vertical_advection(T, sigma_dot, sigma)
     sb = _vertical_advection_sigma_sb(T, sigma_dot, sigma)
 
     m_up = abs(_mass_weighted_mean(grid, sigma, ps, up))
@@ -183,7 +183,7 @@ def test_sb_column_telescoping_identity_upwind_violates_it(grid, sigma):
     resid_sb = ((sb - f * dsdot) * sigma.dsigma).sum(axis=-1)
     np.testing.assert_allclose(np.asarray(resid_sb), 0.0, atol=1e-12)
 
-    up = _vertical_advection_sigma_gaussian(f, sigma_dot, sigma)
+    up = vertical_advection(f, sigma_dot, sigma)
     resid_up = ((up - f * dsdot) * sigma.dsigma).sum(axis=-1)
     assert float(jnp.abs(resid_up).max()) > 1e-8, (
         "upwind unexpectedly satisfies the identity — test is vacuous")

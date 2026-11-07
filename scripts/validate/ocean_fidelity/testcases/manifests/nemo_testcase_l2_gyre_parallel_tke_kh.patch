@@ -1,0 +1,295 @@
+# HELD PATCH — NOT A RULE-12 CANDIDATE. Do not apply.
+# Citation: GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:627-630,
+#   :669-683, :690-702; stprk3.f90:154-168.
+# LANE_DEFECT: no. The existing round-93+ stage twin installs the kt-matched
+#   physical/barotropic/TKE state at round46_kt2_stage_gate.py:896-930, then
+#   installs raw histories, kt-matched forcing, barotropic handoff, and stage
+#   entries at :1988-2018. It does not share the rejected mixed-time defect.
+# Frozen Prediction 3 (every statement row through final K_H exact): REFUTED.
+# candidate_statement_walk_fix5.json, SHA-256 6cfdd5cc016c7f74321a9c7a41eacb59
+#   f77a7538cbf3a05029e0938c4449fb91. The
+#   isolated-closure eager
+#   statement walk has all_statement_rows_exact=true (every row 0/max 0); the
+#   isolated-closure JIT walk has all_statement_rows_exact=false. Its non-exact
+#   rows are:
+#   raw_buoyancy_length: 2,098/17,400, 1.4210854715202004e-14, :627-630;
+#   bounded_mixing_length: 2,052/17,400, 3.552713678800501e-15, :634-683;
+#   raw_zav: 558/5,723, 3.469446951953614e-18, :692;
+#   avm_floor_and_mask: 558/17,400, 3.469446951953614e-18, :693;
+#   avt_floor_and_mask_before_prandtl: 1,694/17,400,
+#     3.469446951953614e-18, :694;
+#   dissipation_length_output: 1,844/17,400, 1.734723475976807e-18, :695;
+#   avt_inverse_prandtl_update: 522/17,400, 1.734723475976807e-18, :699-702.
+# Four K_H rows against NEMO avt_pre_evd:
+#   isolated-closure eager: 0/17,400 unequal, max 0;
+#   isolated-closure JIT: 522/17,400, max 1.734723475976807e-18;
+#   recorded-entry production step (_step_jitted): 4,578/17,400,
+#     max 7.506010254315632e-09;
+#   same production step with NEMO en_post_sweep injected: 4,168/17,400,
+#     max 7.498841797515254e-09 (not ULP-scale).
+# The old 5,723/17,400, max 0.05926217077024117 row is RETRACTED: it combined
+#   kt=1 state/forcing with the kt=2 target. The replacement installs the full
+#   kt=2 Nbb=Kbb=Kmm=3 before-zdf_phy entry and kt=2 forcing, then extracts
+#   returned state.tke_avt through ocean_model_latlon_cgrid.py:11012-11025
+#   (assigned from _tke_coeff_new.K_H at :10797-10802). The TKE, stage, and
+#   entry readers now validate those slots fail-closed.
+# Physical-range check before scoring: candidate wet K_H is
+#   [1.2e-05,0.0657684768931864] vs NEMO [1.2e-05,0.06576847685222414].
+#   Equal-input mismatch should be ULP-scale (8-ULP bound 1.1102230246251565e-16);
+#   en_post_sweep co-differs in 979/17,400 cells, max 6.809688013129089e-12,
+#   but injecting NEMO's value still leaves the non-ULP K_H row above.
+# ATTRIBUTION: UNMEASURED. Remaining candidates are downstream rn2/rn2b,
+#   e3t/e3w/mask, taum/surface, sh2/p_sh2/carried-avm consumption and the
+#   production mixing-length/inverse-Prandtl source-order arithmetic. Their
+#   recorded entry snapshots audit exact; none is assigned as owner.
+# Plant evidence: candidate_ulp_plant_fix5.log, SHA-256 6d81d7e22c6e4d2e88ca
+#   c49401e05c6cafeba20f92e5cec750bf0ed770b81d0b.
+#   +1 ULP at isolated TKE
+#   (15,16,0) changes one cell in each isolated row; +1 ULP at production
+#   tke_avm (1,10,0) changes one returned production K_H cell.
+# Slot evidence: candidate_slot_plant_fix5.log, SHA-256 e150afbdc4285c90ee339
+#   71cf7722294a6ed83d83945f6c21db9478f62db367d;
+#   shifted Kbb exits 1 with the named TKE record slot mismatch.
+# Owning stage: kt=1 pre-stage vertical physics/TKE closure, whose coefficients
+#   are consumed by WS-RK3 stage 1. Decision 41 keeps this patch held.
+# Scratch proof commit: 3849b99199c6dc82fb68917ac5408a9193905cbd.
+
+diff --git a/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py b/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
+index c3cb668a28e0..f871fe9a704e 100644
+--- a/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
++++ b/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
+@@ -134,7 +134,7 @@ def _model_config(
+             tke_solver_evaluation="nemo_literal",
+             tke_etau_exponential_evaluation="jax_expression",
+             tke_htau_evaluation="jax_expression",
+-            tke_mxl_raw_evaluation="factored",
++            tke_mxl_raw_evaluation="nemo_literal",  # R59TKE zdftke:627-630
+             tke_langmuir_evaluation="vectorized",
+             tke_shear_evaluation_stage="step_entry",
+             # Decision 36 (user, 2026-09-12): NEMO's shear production
+diff --git a/packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py b/packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py
+index ce84e65c6dc6..7b072897d1a3 100644
+--- a/packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py
++++ b/packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py
+@@ -852,22 +852,15 @@ def compute_mixing_lengths(
+         # documented, BOUNDED proxy (was UNBOUNDED before this fix).
+         _seed = jnp.broadcast_to(
+             jnp.asarray(mxl_min, dtype=lT.dtype), lT.shape[1:])
+-        if raw_evaluation == "nemo_literal":
+-            # NEMO leaves zmxlm(jpk) at rmxl_min and uses that UNMODIFIED
+-            # terminal pad as the carry for the first jk=jpkm1 iteration.
+-            # Do not apply a fictitious update to jpk itself from raw en(jpk).
+-            _, ldn_rest = jax.lax.scan(
+-                _down, _seed, (lT[1:-1][::-1], e3T[2:][::-1]))
+-            ldn = jnp.concatenate(
+-                [lT[:1], ldn_rest[::-1], _seed[None]], axis=0)
+-        else:
+-            # Historical shared recurrence, retained bit-for-bit outside the
+-            # two literal DINO cards.
+-            first_ldn = jnp.minimum(_seed + e3_bottom, lT[-1])
+-            _, ldn_rest = jax.lax.scan(
+-                _down, first_ldn, (lT[1:-1][::-1], e3T[2:][::-1]))
+-            ldn = jnp.concatenate(
+-                [lT[:1], ldn_rest[::-1], first_ldn[None]], axis=0)
++        # The untouched jpk pad is the seed, but NEMO's first executed
++        # iteration is jk=jpkm1: update that carried row with
++        # min(rmxl_min+e3t(jpk), raw(jpkm1)) before scanning upward
++        # (R59TKE ppsrc zdftke.f90:674-676).
++        first_ldn = jnp.minimum(_seed + e3_bottom, lT[-1])
++        _, ldn_rest = jax.lax.scan(
++            _down, first_ldn, (lT[1:-1][::-1], e3T[2:][::-1]))
++        ldn = jnp.concatenate(
++            [lT[:1], ldn_rest[::-1], first_ldn[None]], axis=0)
+         lup = jnp.moveaxis(lup, 0, -1)[..., 1:]                    # interior
+         ldn = jnp.moveaxis(ldn, 0, -1)[..., 1:]                    # interior
+         l_k = jnp.maximum(jnp.minimum(lup, ldn), mxl_min)
+@@ -1835,6 +1828,37 @@ def _solve_tke_backward_euler(
+ # ---------------------------------------------------------------------------
+
+
++def _nemo_inverse_prandtl_number(
++    N2: jnp.ndarray,
++    shear_sq: jnp.ndarray,
++    kappaM: jnp.ndarray,
++    cfg: TKEConfig,
++    p_sh2_override: jnp.ndarray | None = None,
++) -> jnp.ndarray:
++    """NEMO ``pdlr`` in compiled statement order.
++
++    NEMO stores the inverse Prandtl factor and consumes it directly in
++    ``p_avt = MAX(p_pdlr*p_avt, avtb)`` (GYRE R59TKE ppsrc
++    ``zdftke.f90:394-413,699-702``). Keeping this value avoids the two extra
++    roundings in the algebraically equivalent ``Pr=1/pdlr; avt=avm/Pr`` path.
++    """
++    bshear = jnp.asarray(getattr(cfg, "bshear_floor", 1.0e-20), dtype=N2.dtype)
++    p_sh2 = kappaM * shear_sq if p_sh2_override is None else p_sh2_override
++    zdiv = p_sh2 + bshear
++    is_zero_zdiv = zdiv == 0.0
++    safe_zdiv = jnp.where(is_zero_zdiv, 1.0, zdiv)
++    numerator = N2 * kappaM
++    if cfg.tke_n2_evaluation_stage != "step_entry":
++        raise ValueError(
++            "literal inverse Prandtl is selected only by step-entry NEMO "
++            "recipes; historical callers retain their Prandtl association")
++    zri_stratified = jnp.where(
++        is_zero_zdiv, numerator / bshear, numerator / safe_zdiv)
++    ri_cri = jnp.asarray(1.0 / cfg.prandtl_ri_coeff, dtype=N2.dtype)
++    zri = jnp.where(N2 > 0.0, zri_stratified, 0.0)
++    return jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))
++
++
+ def _prandtl_number(
+     N2: jnp.ndarray,
+     shear_sq: jnp.ndarray,
+@@ -1907,6 +1931,10 @@ def _prandtl_number(
+         Ri = N2 / jnp.maximum(shear_sq, 1e-12)
+         return jnp.maximum(1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * Ri))
+     if cfg.prandtl_mode == "nemo_ri":
++        if cfg.tke_n2_evaluation_stage == "step_entry":
++            pdlr = _nemo_inverse_prandtl_number(
++                N2, shear_sq, kappaM, cfg, p_sh2_override)
++            return 1.0 / pdlr
+         bshear = jnp.asarray(getattr(cfg, "bshear_floor", 1.0e-20),
+                              dtype=N2.dtype)
+         # p_sh2 (avm-weighted shear production, [m^2/s^3]) — zdfsh2.F90:80-94
+@@ -1955,22 +1983,11 @@ def _prandtl_number(
+         is_zero_zdiv = p_sh2 + bshear == 0.0
+         safe_zdiv = jnp.where(is_zero_zdiv, 1.0, p_sh2 + bshear)  # avoid 1/0
+         numerator = N2 * kappaM
+-        if cfg.tke_n2_evaluation_stage == "step_entry":
+-            # DINO/NEMO literal evaluation order, zdftke.F90:489-495.
+-            # Do not replace division with multiplication by a reciprocal:
+-            # the matched-state row-11 bar resolves that one-ulp difference.
+-            zri_stratified = jnp.where(
+-                is_zero_zdiv, numerator / bshear, numerator / safe_zdiv)
+-        else:
+-            # Historical association retained exactly for every card outside
+-            # the two complete DINO NEMO recipes.
+-            zri_stratified = numerator * jnp.where(
+-                is_zero_zdiv, 1.0 / bshear, 1.0 / safe_zdiv)
++        # Historical association retained exactly for every card outside
++        # the two complete DINO NEMO recipes.
++        zri_stratified = numerator * jnp.where(
++            is_zero_zdiv, 1.0 / bshear, 1.0 / safe_zdiv)
+         zri = jnp.where(N2 > 0.0, zri_stratified, 0.0)
+-        if cfg.tke_n2_evaluation_stage == "step_entry":
+-            ri_cri = jnp.asarray(1.0 / cfg.prandtl_ri_coeff, dtype=N2.dtype)
+-            pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))  # coeff-ok: NEMO zdfric pdlr floor
+-            return 1.0 / pdlr
+         return jnp.maximum(
+             1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * zri))
+     raise ValueError(
+@@ -2113,7 +2130,13 @@ def compute_K_from_tke(
+         # ONLY when the Bryan-Lewis profile below is off (enable_kappaH_profile=
+         # False, as the NEMO recipe sets for NEMO's constant avtb); with BL on the
+         # BL depth floor becomes the binding deep floor instead.
+-        K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)
++        if (cfg.prandtl_mode == "nemo_ri"
++                and cfg.tke_n2_evaluation_stage == "step_entry"):
++            pdlr = _nemo_inverse_prandtl_number(
++                _N2_pr, shear_sq, _K_M_pr, cfg, _p_sh2_pr)
++            K_H = jnp.maximum(cfg.kappaH_min, pdlr * K_M)
++        else:
++            K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)
+         # Bryan-Lewis (1979) arctan depth floor on K_H (Veros
+         # enable_kappaH_profile). Previously recorded-but-ignored; now wired
+         # on the opt-in Prandtl path. Low impact in shallow domains; raises
+diff --git a/tests/ocean/unit/test_tke_carried_coefficients.py b/tests/ocean/unit/test_tke_carried_coefficients.py
+index 0a417ebc92f8..6e6d21080e71 100644
+--- a/tests/ocean/unit/test_tke_carried_coefficients.py
++++ b/tests/ocean/unit/test_tke_carried_coefficients.py
+@@ -340,9 +340,9 @@ def test_literal_raw_mxl_matches_hand_computed_source_order_and_red_control():
+     rsmall = 0.5 * np.finfo(np.float64).eps
+     raw = np.maximum(floor, np.sqrt((2.0 * np.asarray(e))
+                                     / np.maximum(np.asarray(n2), rsmall)))
+-    # With a huge dz allowance, the scan retains the raw physical interior;
+-    # the final carried slot is NEMO's untouched jpk pad.
+-    raw[..., -1] = floor
++    # With a huge dz allowance, the scan retains both raw physical rows;
++    # R59TKE zdftke:674-676 starts at jpkm1 and updates that row from the
++    # separately held jpk floor plus e3t(jpk).
+     np.testing.assert_array_equal(np.asarray(lk).view(np.uint64),
+                                   raw.view(np.uint64))
+
+@@ -359,7 +359,7 @@ def test_literal_raw_mxl_matches_hand_computed_source_order_and_red_control():
+             l_surface_anchor=jnp.asarray([floor]))
+
+
+-def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
++def test_literal_mxl_ldown_updates_jpkm1_from_jpk_terminal_seed():
+     e = jnp.asarray([[2.0, 3.0, 1.0e8]])
+     n2 = jnp.full_like(e, 1.0e-12)
+     dz_cell = jnp.asarray([[1.0, 2.0, 3.0, 4.0]])
+@@ -369,14 +369,9 @@ def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
+     lk, _ = tke_mod.compute_mixing_lengths(
+         e, n2, jnp.ones_like(e), cfg, dz_cell=dz_cell,
+         l_surface_anchor=jnp.asarray([floor]))
+-    # The final carried slot is NEMO's untouched jpk pad, not another raw
+-    # buoyancy-length row.  The old recurrence produced 4.01 here.
+-    assert float(lk[0, -1]) == floor
+-    legacy, _ = tke_mod.compute_mixing_lengths(
+-        e, n2, jnp.ones_like(e),
+-        cfg._replace(tke_mxl_raw_evaluation="factored"),
+-        dz_cell=dz_cell, l_surface_anchor=jnp.asarray([floor]))
+-    assert float(legacy[0, -1]) != floor
++    # The uncarried NEMO jpk pad stays at the floor; the carried jpkm1 row is
++    # updated once from floor + e3t(jpk), exactly zdftke:674-676.
++    assert float(lk[0, -1]) == floor + float(dz_cell[0, -1])
+
+
+ @pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+diff --git a/tests/ocean/unit/test_tke_nemo_identity.py b/tests/ocean/unit/test_tke_nemo_identity.py
+index 0b60fce29f2e..6d1d04bacc47 100644
+--- a/tests/ocean/unit/test_tke_nemo_identity.py
++++ b/tests/ocean/unit/test_tke_nemo_identity.py
+@@ -31,6 +31,7 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
+     _nemo_literal_tke_solve,
+     _prandtl_number,
+     _solve_tke_backward_euler,
++    compute_K_from_tke,
+     compute_mixing_lengths,
+     tke_vertical_mixing,
+ )
+@@ -1736,6 +1737,42 @@ class TestNemoRiZriTranscription:
+             p_sh2_override=jnp.asarray(p_sh2)))
+         np.testing.assert_array_equal(legacy_got, old_legacy_pr)
+
++    def test_avt_multiplies_stored_pdlr_without_reciprocal_round_trip(self):
++        """R59TKE zdftke:699-702 consumes ``pdlr*p_avt`` literally."""
++        rn2b = np.asarray([
++            np.float64.fromhex("0x1.04fa0afaa6d02p-14"),
++            np.float64.fromhex("0x1.ffc95566895cap-15"),
++        ])
++        p_avm = np.asarray([
++            np.float64.fromhex("0x1.95141a74aca4ap-4"),
++            np.float64.fromhex("0x1.7d1cb254e6652p-4"),
++        ])
++        p_sh2 = np.asarray([
++            np.float64.fromhex("0x1.693ab8013e477p-16"),
++            np.float64.fromhex("0x1.9c874ac1cebd0p-16"),
++        ])
++        raw_avt = np.asarray([0.037, 0.053], dtype=np.float64)
++        ri_cri = np.float64(2.0) / (
++            np.float64(2.0) + np.float64(0.7) / np.float64(0.1))
++        zri = rn2b * p_avm / (p_sh2 + np.float64(1.0e-20))
++        pdlr = np.maximum(np.float64(0.1), ri_cri / np.maximum(ri_cri, zri))
++        expected = pdlr * raw_avt
++        old_round_trip = raw_avt / (np.float64(1.0) / pdlr)
++        assert np.any(old_round_trip != expected)
++
++        cfg = TKEConfig(
++            c_k=1.0, kappa_convention="veros_sqrte", prandtl_mode="nemo_ri",
++            kappaM_min=0.0, kappaH_min=0.0, kappaM_max=float("inf"),
++            bshear_floor=1.0e-20, prandtl_ri_coeff=float(1.0 / ri_cri),
++            tke_n2_evaluation_stage="step_entry")
++        _, got = compute_K_from_tke(
++            jnp.ones(2), jnp.asarray(raw_avt), cfg,
++            N2=jnp.asarray(rn2b), shear_sq=jnp.ones(2),
++            N2_prandtl=jnp.asarray(rn2b),
++            p_sh2_override=lambda _: jnp.asarray(p_sh2),
++            prandtl_K_M=jnp.asarray(p_avm))
++        np.testing.assert_array_equal(np.asarray(got), expected)
++
+     def test_matches_independent_loop_port_turbulent_column(self):
+         rng = np.random.default_rng(42)
+         n = 25

@@ -17,6 +17,16 @@ dt: 300.0                 # CFL-conservative for 0.7 deg; smoke-tune before scal
 era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
 cache_dir: ".cache/wb_scale_era5"
 train_years: [2015, 2016, 2017, 2018, 2019]
+
+# --- ERA5 surface fluxes as the lower boundary condition ----------------
+# When true, every sample carries ERA5's surface stress (x, y), sensible and
+# latent heat flux and upwelling SW/LW (ARCO-ERA5 mean rates at the sample
+# start), HELD FIXED over the 6 h window.  The classical arm uses them as its
+# turbulent and radiative surface boundary condition (bulk formula, surface
+# emission and reflection replaced; its surface leaves are then frozen), the
+# learned arms receive the six planes as extra inputs.  Off = the historical
+# interactive surface.
+era5_surface_fluxes: false
 eval_years: [2020]        # the WB2 canonical test year
 era5_cadence_hours: 6
 # Optional: scatter training samples across the calendar instead of the first
@@ -74,6 +84,11 @@ loss:
 
 # --- per-mode overlays (merged when --mode selects them) ---
 neural_gcm:
+  # NeuralGCM-style spatial embedding (Kochkov et al. 2024).  Owner
+  # 2026-09-16: OFF here so the lat-lon deck stays like-for-like with the
+  # earlier lat-lon runs; the spectral campaign decks set it true (the
+  # flux-prescribed deck sets it false).
+  spatial_embedding: false
   # #1464: the learned arm here has NO surface stress and cannot be given one.
   # This config runs the lat-lon training core, where the learned arm is built
   # on a different path that does not read surface_drag at all — setting the
@@ -84,6 +99,8 @@ neural_gcm:
   nn_hidden: 256
   nn_layers: 4
 sfno:
+  # ACE2-style land-fraction plane; OFF for the same reason as neural_gcm.
+  spatial_embedding: false
   sfno_embed_dim: 256
   sfno_n_blocks: 8
 

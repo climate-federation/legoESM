@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from legoesm.atmosphere.forcing.scm.sccm_arm import ARMObsReference
-from legoesm.atmosphere.les_suite.arm_obs_score import (
+from legoesm.atmosphere._future.arm_obs_score import (
     ARMComparables,
     build_arm_comparables,
     score_arm_obs,
@@ -72,7 +72,7 @@ def test_theta_offset_is_normalized_by_obs_spread():
     comp = ARMComparables(time_seconds=_TIMES, pressure_pa=_PRESS, theta=theta + delta)
     s = score_arm_obs(obs, comp)
     # normalized RMSE = |delta| / mass-weighted std of the obs theta profile.
-    from legoesm.atmosphere.les_suite.arm_obs_score import (
+    from legoesm.atmosphere._future.arm_obs_score import (
         _FLOOR_THETA_K,
         _pressure_thickness_weights,
         _profile_scale,
@@ -245,3 +245,8 @@ def test_the_first_observation_is_not_scored_against_a_later_model_state(tmp_pat
     assert short.time_seconds[0] == long.time_seconds[0]
     np.testing.assert_allclose(short.theta[0], long.theta[0], rtol=1e-8, atol=1e-8)
     np.testing.assert_allclose(short.u[0], long.u[0], rtol=1e-8, atol=1e-8)
+
+
+# Parked module: see its docstring.
+pytestmark = pytest.mark.skip(
+    reason="parked in _future/: not wired into production (ponytail #7)")

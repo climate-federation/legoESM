@@ -66,10 +66,10 @@ def main(argv=None):
     ra = _load_run_aimip()
     from evaluations.wb_era5_cases import build_forecast_cases
     from legoesm import constants
+    from legoesm.grids.vertical import vertical_advection
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         _compute_omega_gaussian,
         _compute_sigma_dot_gaussian,
-        _vertical_advection_sigma_gaussian,
         _vertical_advection_sigma_sb,
         spectral_pe_tendencies,
     )
@@ -166,7 +166,7 @@ def main(argv=None):
         # here mis-attributed the SB run's budget (the probed 'vertical
         # advection' row was a scheme the model never integrated, and the
         # difference leaked into 'horizontal_residual').
-        _vadv = {"upwind": _vertical_advection_sigma_gaussian,
+        _vadv = {"upwind": vertical_advection,
                  "sb_centered": _vertical_advection_sigma_sb}[
                      pe_config.vertical_advection_scheme]
         vert = np.asarray(_vadv(jnp.asarray(T), sigma_dot, sigma))

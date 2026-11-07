@@ -17,8 +17,12 @@ __param_spec__ = {
             "sigmoid_sharpness": "numerics: solver/CFL/smoothing parameter",
         },
         "params": {
-            "K_bg": {"units": "1", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "convective enhanced diffusion", "shape": None},
-            "K_conv": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "convective enhanced diffusion", "shape": None},
+            "K_bg": {"units": "m2/s", "bounds": (0.0, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "convective enhanced diffusion", "shape": None},
+            # Upper bound covers NEMO's own zdfevd coefficient (ORCA1
+            # rn_evd = 100 m2/s): the previous (0.33, 3.0) declared a range
+            # the oracle's setting sits 33x outside, i.e. two ranges for one
+            # parameter, with the namelist the authoritative one.
+            "K_conv": {"units": "m2/s", "bounds": (0.33, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "convective enhanced diffusion; NEMO zdfevd rn_evd", "shape": None},
         },
     },
     "PlumeConfig": {
@@ -157,6 +161,34 @@ class EnhancedDiffusionConfig(NamedTuple):
     #   k_profiles.compute_vertical_K_profiles raises if any is missing rather
     #   than silently falling back to the solver state.
     evd_n2_time_level: str = "solver_state"
+    # ----- How the EVD coefficient COMPOSES with everything else -----
+    # NEMO's zdf_evd REPLACES the already-assembled coefficient where the
+    # trigger fires -- ``p_avt(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)`` inside
+    # the IF, zdfevd.f90:107-110 of the SMT-1 build's ppsrc -- and it runs
+    # AFTER the background/closure assembly (zdfphy.f90:348-351 copies
+    # avt_k into avt, :359 then calls zdf_evd).  The momentum arm is guarded
+    # by ``IF( nn_evdm == 1 )`` (:121) and likewise REPLACES avm (:133-135).
+    # legoESM's own (Oceananigans) composition ADDS the scheme's K on top of
+    # every other contribution, which on a NEMO card leaves the background
+    # and the closure riding on top of rn_evd.
+    #   ""              unset.  A card whose trigger is NEMO's (n2_mode=
+    #                   "nemo_bn2") must STATE this -- unset raises; every
+    #                   other card keeps the additive composition.
+    #   "additive"      legoESM/Oceananigans: K_total = K_other + K_evd.
+    #   "nemo_replace"  NEMO zdfevd: K_total = rn_evd where the trigger
+    #                   fires, K_other elsewhere.  Requires the hard
+    #                   threshold (smooth_transition=False), K_bg < K_conv,
+    #                   and -- the nn_evdm statement -- nu_conv either 0.0
+    #                   (nn_evdm=0, avm untouched) or exactly K_conv
+    #                   (nn_evdm=1, avm replaced by rn_evd too).
+    evd_composition: str = ""
+
+    # True: under "nemo_now_before", the trigger reads the step-entry bn2
+    # bundle's rn2/rn2b -- the arrays zdf_evd tests (zdfevd.f90:108-109,
+    # MIN(rn2,rn2b) <= -1e-12) after bn2 on Nbb (stprk3.f90:171-174) --
+    # instead of rebuilding N2 on the caller's eta (WS-RK3 stage 3's Kmm).
+    trigger_step_entry_bn2: bool = False
+
 
 
 class PlumeConfig(NamedTuple):

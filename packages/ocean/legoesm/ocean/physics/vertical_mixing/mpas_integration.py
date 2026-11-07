@@ -38,8 +38,14 @@ from legoesm.ocean.physics.mixing import (
 )
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
-from legoesm.ocean.physics.vertical_mixing.tke import tke_vertical_mixing
-from legoesm.ocean.physics.vertical_mixing._shared import surface_buoyancy_flux
+from legoesm.ocean.physics.vertical_mixing.tke import (
+    nemo_tke_effective_ice_fraction,
+    tke_vertical_mixing,
+)
+from legoesm.ocean.physics.vertical_mixing._shared import (
+    eos_salinity,
+    surface_buoyancy_flux,
+)
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     compute_layer_thickness,
@@ -92,7 +98,7 @@ __physics_contract__ = {
 
 
 # Placeholder salinity for dry cells so the EOS stays well-defined [PSU].
-_EOS_SAFE_SALINITY_PSU = 35.0
+EOS_SAFE_SALINITY_PSU = 35.0
 
 # Diagnostic (Mode-B) quasi-steady TKE on MPAS: a long pseudo-timestep drives
 # the backward-Euler TKE solve toward local equilibrium in a few sub-iterations
@@ -104,7 +110,7 @@ _TKE_DIAGNOSTIC_N_ITER = 3       # backward-Euler sub-iterations (K within ~few 
 
 
 
-def _bn2_ladder_kwargs(cfg, z_coord, state):
+def bn2_ladder_kwargs(cfg, z_coord, state):
     """``t_depth``/``w_depth`` for ``n2_mode="nemo_bn2"``, else ``{}``.
 
     LIVE ladders, not static. NEMO evaluates bn2 on ``gdept(Kmm)`` =
@@ -241,7 +247,8 @@ def _vertical_diffusion_edge_partial(
 
 def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
                                   eos_fn=None,
-                                  constants_config=ConstantsConfig()):
+                                  constants_config=ConstantsConfig(),
+                                  floor_salinity=False):
     """Shared MPAS cell-field prep for the vertical-mixing bridges.
 
     Single-sources the edge→cell velocity reconstruction + land/partial-cell
@@ -257,6 +264,11 @@ def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
       ``rho_0``) via the model-selected ``eos_fn`` (``None`` ⇒ Wright default);
     * land-zeroing + the partial-cell sub-seafloor T/S/u/v fill (deepest active
       value) so neither closure sees a spurious T=0/u=0 discontinuity.
+
+    ``floor_salinity=True`` (the KPP and TKE bridges) builds the density on
+    salinity floored as ePBL's (``eos_salinity``; Wright as is): sqrt(S)
+    EOSes have an infinite dRho/dS at S = 0 land cells, and the land
+    ``where`` below does not stop the NaN cotangent (#2243).
 
     Returns ``(u_east_w, v_north_w, T_w, S_w, rho, J, mask)`` — the land-safe
     Jacobian ``J`` is returned because the KPP physics path reuses it for the
@@ -282,7 +294,10 @@ def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
     # The run's gravity, not the library's: the hydrostatic pressure this
     # density is built on is linear in it, and the cards this lane is compared
     # against pin a value that differs from the module default.
-    rho_real = compute_ocean_rho(state, z_coord, J_real, eos_fn=eos_fn,
+    rho_state = (state._replace(
+        S=state.S.replace(data=eos_salinity(S_3d, eos_fn)))
+        if floor_salinity else state)
+    rho_real = compute_ocean_rho(rho_state, z_coord, J_real, eos_fn=eos_fn,
                                  g=constants_config.g,
                                  rho0=constants_config.rho_0)
     rho = jnp.where(mask[:, None] > 0.5, rho_real, _RHO_0)
@@ -293,7 +308,7 @@ def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
     u_east_w = jnp.where(m3 > 0.5, u_east_raw, 0.0)
     v_north_w = jnp.where(m3 > 0.5, v_north_raw, 0.0)
     T_w = jnp.where(m3 > 0.5, T_3d, 0.0)
-    S_w = jnp.where(m3 > 0.5, S_3d, _EOS_SAFE_SALINITY_PSU)  # safe S for EOS
+    S_w = jnp.where(m3 > 0.5, S_3d, EOS_SAFE_SALINITY_PSU)  # safe S for EOS
     if hasattr(z_coord, 'is_active'):
         _active = z_coord.is_active  # (nCells, nlev) bool
         _bot_lev = z_coord.bottom_level  # (nCells,) int
@@ -337,7 +352,7 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
     # ``state.land_mask`` directly, so it is unused here.)
     u_east_w, v_north_w, T_w, S_w, rho, J, _ = _reconstruct_mpas_cell_fields(
         state, mesh, z_coord, eos_fn=eos_fn,
-        constants_config=constants_config)
+        constants_config=constants_config, floor_salinity=True)
     T_3d = state.T.data       # (nCells, nlev) — RAW surface T/S for buoyancy flux
     S_3d = state.S.data
     eta = state.eta.data
@@ -569,7 +584,8 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None,
 
 
 def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
-                           constants_config=ConstantsConfig()) -> Callable:
+                           constants_config=ConstantsConfig(),
+                           iwm_applied_by_model: bool = False) -> Callable:
     """Build KPP profile-only function for MPAS implicit vertical mixing.
 
     Returns ``(A_v_cells, K_v_cells)`` at half-levels (nCells, nlev-1)
@@ -592,11 +608,13 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
         ``profiles_fn(state, mesh, z_coord, surface_forcing=None)``
         returning ``(A_v_cells, K_v_cells)`` both shape (nCells, nlev-1).
     """
-    if getattr(config, "iwm", None) is not None and config.iwm.enabled:
+    if (getattr(config, "iwm", None) is not None and config.iwm.enabled
+            and not iwm_applied_by_model):
         raise NotImplementedError(
-            "VerticalMixingConfig.iwm.enabled=True is not wired on the MPAS "
-            "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
-            "rather than silently drop the wave-driven mixing.")
+            "VerticalMixingConfig.iwm.enabled=True: this bridge does not add "
+            "zdfiwm itself — MPASOceanModel applies it additively at the "
+            "model level (pass iwm_applied_by_model=True from there); a "
+            "standalone caller would silently drop the wave-driven mixing.")
     cfg = config.kpp
     if int(getattr(config.kpp, "eice", 0)) != 0:
         raise NotImplementedError(
@@ -652,7 +670,8 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
 
 
 def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
-                           constants_config=ConstantsConfig()) -> Callable:
+                           constants_config=ConstantsConfig(),
+                           iwm_applied_by_model: bool = False) -> Callable:
     """Build a TKE profile function (diagnostic OR prognostic) for MPAS implicit vmix.
 
     Wires the grid-agnostic Gaspar (1990) / Burchard (2002) TKE closure
@@ -740,7 +759,7 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
     # NOTE: eice (under-ice lc/etau attenuation) IS wired on this bridge —
     # profiles_fn reads surface_forcing.ice_concentration under the shared
     # static gate (mirroring _run_mpas_kpp) and threads ice_frac into
-    # tke_vertical_mixing.  Validated below: eice in {0,1,3}; eice!=0 with no
+    # tke_vertical_mixing.  Validated below: eice in {0,1,2,3}; eice!=0 with no
     # ice field FAILS FAST (the KPP-bridge contract).
     if bool(getattr(cfg, "veros_dz_slots", False)):
         raise NotImplementedError(
@@ -772,11 +791,13 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             "(the EKE-dissipation recycling source needs the eke_diss_iw / "
             "K_diss_bot routing that only the lat-lon model step threads). "
             "Set source_eke_diss=False.")
-    if getattr(config, "iwm", None) is not None and config.iwm.enabled:
+    if (getattr(config, "iwm", None) is not None and config.iwm.enabled
+            and not iwm_applied_by_model):
         raise NotImplementedError(
-            "VerticalMixingConfig.iwm.enabled=True is not wired on the MPAS "
-            "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
-            "rather than silently drop the wave-driven mixing.")
+            "VerticalMixingConfig.iwm.enabled=True: this bridge does not add "
+            "zdfiwm itself — MPASOceanModel applies it additively at the "
+            "model level (pass iwm_applied_by_model=True from there); a "
+            "standalone caller would silently drop the wave-driven mixing.")
 
     def profiles_fn(
         state: MPASOceanState,
@@ -789,7 +810,17 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
         # (the SAME helper KPP uses — one reconstruction on MPAS).
         u_east_w, v_north_w, T_w, S_w, rho, J, mask = (
             _reconstruct_mpas_cell_fields(state, mesh, z_coord, eos_fn=eos_fn,
-                                          constants_config=constants_config)
+                                          constants_config=constants_config,
+                                          floor_salinity=True)
+        )
+        # Match the lat-lon k_profiles owner rule: partial-cell geometry owns
+        # NEMO's level-0 tmask.  The 2-D column mask is equal today for normal
+        # MPAS columns, but is not a safe proxy once surface partial cells land.
+        _is_active = getattr(z_coord, "is_active", None)
+        surface_tmask = (
+            jnp.asarray(_is_active)[..., 0]
+            if _is_active is not None
+            else mask
         )
 
         # Cell-centre spacing dz_half = dz_half_ref · J (nCells, nlev-1), the
@@ -816,9 +847,9 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
         #    FAILS FAST (silent no-op forbidden — same contract as the MPAS
         #    KPP bridge).  lc/etau run fine without ice (fi=0 open water).
         _tke_eice = int(getattr(cfg, "eice", 0))
-        if _tke_eice not in (0, 1, 3):
+        if _tke_eice not in (0, 1, 2, 3):
             raise ValueError(
-                f"Unknown TKEConfig.eice={_tke_eice!r}; expected 0, 1 or 3.")
+                f"Unknown TKEConfig.eice={_tke_eice!r}; expected 0, 1, 2 or 3.")
         ice_frac = (getattr(surface_forcing, "ice_concentration", None)
                     if (_tke_eice != 0 and surface_forcing is not None)
                     else None)
@@ -836,8 +867,8 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             # SAME pre-mapping the C-grid k_profiles path does (k_profiles
             # ~:533); passing raw fi under eice=3 would silently run the
             # mode-1 (1-fi) law (codex HIGH).
-            ice_frac = (ice_frac if _tke_eice == 1
-                        else jnp.minimum(4.0 * ice_frac, 1.0))
+            ice_frac = nemo_tke_effective_ice_fraction(
+                ice_frac, _tke_eice)
         lat_deg = jnp.degrees(mesh.latCell)
 
         # Veros tke_mxl_choice=1 distance-to-boundary cap (mirrors the lat-lon
@@ -895,6 +926,10 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             # channel ever reaches MPAS (codex MED, parity with k_profiles).
             lat_deg=lat_deg,
             ice_frac=ice_frac,
+            # NEMO nn_mxl=3/4 anchors the surface mixing length with
+            # ``taum*tmask(:,:,1)``.  Partial-cell geometry owns the surface
+            # tmask when present; otherwise use the reconstructed column mask.
+            surface_tmask=surface_tmask,
             # e3t cell thicknesses (dz_ref · J) for the nn_mxl=3 lup/ldown
             # |dl/dz| <= e3t sweeps — the SAME (dz_ref, jacobian) pair the
             # C-grid k_profiles path threads.  Ignored by the kernel for
@@ -904,7 +939,7 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             # LIVE geometric depth ladders for n2_mode="nemo_bn2" -- the same
             # gdept_0*(1+eta/ht_0) stretch the C-grid path applies, so both
             # grids run the SAME stratification.
-            **_bn2_ladder_kwargs(cfg, z_coord, state),
+            **bn2_ladder_kwargs(cfg, z_coord, state),
         )
         A_v_cells = tke_out.K_M   # (nCells, nlev-1) momentum viscosity >= 0
         K_v_cells = tke_out.K_H   # (nCells, nlev-1) tracer diffusivity >= 0

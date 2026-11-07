@@ -1,0 +1,30 @@
+--- traadv.F90.round20
++++ traadv.F90
+@@ -123,6 +123,7 @@
+       !
+       INTEGER ::   ji, jj, jk        ! dummy loop index
+       REAL(wp)::   z_stfp, z_2stfp   ! local scalar
++      CHARACTER(LEN=96) :: cl_ww_dump
+       LOGICAL ::   ll_Fw             ! local logical
+ #if ! defined key_PSYCLONE_2p5p0
+       REAL(wp), DIMENSION(:,:)  , ALLOCATABLE :: zFu_cor, zFv_cor   ! 2D workspace
+@@ -233,6 +234,19 @@
+          DO_3D( 1, 1, 1, 1, 1, jpkm1 )
+             pFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)
+          END_3D
++         ! Round-21 WRITE-only coverage record.  This sits after the executed
++         ! vector-invariant tracer path's wzv(np_transport), unlike the older
++         ! stprk3_stg transport record whose zFw slot is not yet initialized.
++         ! No dumped value is read back into NEMO state.
++         IF( lwp .AND. kt == kit000 ) THEN
++            WRITE(cl_ww_dump,'("oracle_rkstage_ww_kt",I8.8,"_s",I1,".bin")') kt, kstg
++            OPEN( UNIT=994, FILE=TRIM(cl_ww_dump), ACCESS='STREAM', FORM='UNFORMATTED', &
++               &  STATUS='REPLACE', ACTION='WRITE' )
++            WRITE(994) 'NEMO_L2_STGWW_1 '
++            WRITE(994) 1, kt, kstg, Kbb, Kmm, Kaa, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++            WRITE(994) rDt, ww, pFw
++            CLOSE(994)
++         ENDIF
+          ! Lane-2 WRITE-only diagnostic: split the first over-bar stage-3
+          ! tracer vertical transport at wzv -> wAimp -> e1e2t*ww.  The
+          ! ordinary arrays above are never read from or changed by this block.

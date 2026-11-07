@@ -1,0 +1,53 @@
+{
+  "round": 24,
+  "date": "2026-09-05",
+  "starting_tip": "498b10e5aa01ec88c77f176289a1e1da5890664c",
+  "decision": "ASKED user Decision 8: carry NEMO prognostic uu_b/vv_b on NEMO-identity cards",
+  "source_contract": {
+    "declaration": "oce.F90:39,99",
+    "rest_initialisation": "istate.F90:143-167",
+    "external_seed": "dynspg_ts.F90:484-500",
+    "external_write": "dynspg_ts.F90:857-897",
+    "stage_transport_read": "stprk3_stg.F90:257-274",
+    "stage_write": "stprk3_stg.F90:115-228",
+    "final_time_level_swap": "stprk3.F90:195-213",
+    "restart_write_read_fallback": "restart.F90:175-182,304-330"
+  },
+  "implementation_arm": {
+    "one_variable": "replace live depth-mean re-derivation with one carried U-face/V-face pair on NEMO-identity state only",
+    "non_nemo_control": "non-NEMO rest states retain None/None and therefore add no array pytree leaves",
+    "restart_fallback": "derive only when an imported NEMO restart lacks uu_n/vv_n; log loudly; never use on the identity live-step route"
+  },
+  "predictions": {
+    "oracle_frame": "oracle_bt_frames already records uu_b/vv_b(Kaa); after the final Naa/Nbb swap it is the next step Kbb",
+    "first_possible_effect": "kt=3 entry for a rest-start run: kt=1 consumes the same exact zero initial pair and only writes the pair; kt=2 consumes it; kt=3 is the first persisted ordinary-state output that can move",
+    "gyre_stage2_kaa_kt1": "UNCHANGED at 2.1986806906376666e-15 U / 2.2380914396075147e-15 V; a move refutes isolation because kt=1 consumes exact zeros",
+    "gyre_kt2_first_over_bar": "UNCHANGED kt2 T/S/u/v for the same causality reason; first_over_bar must remain kt2 unless a row improves for an independent reason, which this arm forbids",
+    "gyre_kt3_to_10": "expected to move toward the oracle; success requires the carried field itself 0/n at every available Kaa/Kbb boundary, but whole-step AT-BAR is not presumed across other open operators",
+    "overflow_seven_rows": "expected to improve because uu_b/vv_b(Kbb) was their first unavailable operand; failure to improve refutes sole ownership but the source-faithful state remains under Rule 12",
+    "lock_exchange": "kt1 and kt2 entries unchanged; any movement begins at kt3 and is scored oracle-relative",
+    "orca2_production_w_and_stage": "single rest-start stage gates unchanged 0 ulp; multi-step consumers, if present, may move from kt3",
+    "c1d_pre_ssm_u_kt2": "UNCHANGED at 1.1172865e-7 because it is the entry after the zero-seeded first step; a change refutes time-level isolation",
+    "restart": "unbroken kt1-10 and kt1-5 + saved/reloaded kt6-10 must be bit-identical, including uu_b/vv_b"
+  },
+  "success": [
+    "new carried uu_b/vv_b values match every available oracle Kaa frame cellwise",
+    "non-NEMO states contain no uu_b/vv_b array leaf",
+    "restart continuation kt6-10 is bit-identical to the unbroken run",
+    "all Rule 8/12 movements and first_over_bar values are enumerated per card"
+  ],
+  "stop_conditions": [
+    "kt1 ordinary output or kt2 entry moves",
+    "carried Kaa fails against an available oracle frame",
+    "a non-NEMO recipe gains an array leaf",
+    "a consumed restart silently re-derives an available uu_n/vv_n field"
+  ],
+  "controls": [
+    "perturb one carried face by three row-scale ulp and require the state/oracle gate to fail",
+    "drop either member of the pair and require construction/validation to fail",
+    "remove the pair from a restart and require the explicit logged legacy fallback only in the NEMO bridge",
+    "restart round trip must compare every state slot, not only u/v/T/S/eta"
+  ],
+  "regime": "CPU production-JIT fp64 scalar-libm oracle V2",
+  "review": "independent review outstanding"
+}

@@ -24,7 +24,7 @@
 # trp5_eice90 before quoting any cross-grid number.
 set +e
 WT=/burg-archive/glab/users/pg2328/legoESM_worktrees/vfs-tke-fix; cd $WT
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 ROOT=/burg-archive/glab/users/pg2328/legoESM
 ROOT2=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1
@@ -37,7 +37,7 @@ SSSCLIM=$INP/sss_climatology_for_restoring.nc
 ICEIC=$ROOT2/cfgs/ORCA1/INPUTS/Ice_initialization.nc
 echo "=== HOST ==="; hostname; nvidia-smi -L 2>/dev/null | head -1; date
 echo "=== worktree (fix tree) ==="; git -C $WT log --oneline -1
-GA="--grid mpas --mpas-level 7 --mpas-lloyd 20 --dt 150"
+GA="--grid mpas --mpas-level 7 --mpas-lloyd 50 --dt 150"
 COMMON="--nemo-vertical --partial-cell --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift --years 0.3 --snapshot-every-days 30 --diag-every-days 5"
 LEVERS="--tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate"
 PARITY="--bottom-drag-scheme nemo_quadratic"

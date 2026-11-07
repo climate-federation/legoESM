@@ -1,0 +1,30 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -62,0 +63 @@
++   USE l4_r107_een_step, ONLY : r107_een_step_init, r107_een_step_dump ! round-107 write-only recurrence
+@@ -1462,0 +1464 @@
++      CALL r107_een_step_init
+@@ -1590,0 +1593,10 @@
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: r107_zpvo_nw, r107_e3u_live, r107_e3v_live
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: r107_neighbor_mask, r107_term_nw
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: r107_acc_before, r107_acc_after
++      r107_zpvo_nw(:,:,:) = 0._wp
++      r107_e3u_live(:,:,:) = 0._wp
++      r107_e3v_live(:,:,:) = 0._wp
++      r107_neighbor_mask(:,:,:) = 0._wp
++      r107_term_nw(:,:,:) = 0._wp
++      r107_acc_before(:,:,:) = 0._wp
++      r107_acc_after(:,:,:) = 0._wp
+@@ -1617,0 +1635,6 @@
++               r107_zpvo_nw(ji,jj,jk) = zpvo_nw
++               r107_e3u_live(ji,jj,jk) = e3u(ji,jj,jk,Kmm)
++               r107_e3v_live(ji,jj,jk) = e3v(ji,jj,jk,Kmm)
++               r107_neighbor_mask(ji,jj,jk) = vmask(ji,jj,jk)
++               r107_term_nw(ji,jj,jk) = e3u(ji,jj,jk,Kmm) * e3v(ji,jj,jk,Kmm) * vmask(ji,jj,jk) * zpvo_nw
++               r107_acc_before(ji,jj,jk) = ffu_nw(ji,jj)
+@@ -1618,0 +1643 @@
++               r107_acc_after(ji,jj,jk) = ffu_nw(ji,jj)
+@@ -1634,0 +1660,3 @@
++         CALL r107_een_step_dump(r107_zpvo_nw, r107_e3u_live, r107_e3v_live, &
++            & r107_neighbor_mask, r107_term_nw, r107_acc_before, r107_acc_after, mbku)
++         !

@@ -76,6 +76,7 @@ def biharmonic_lateral_mixing(
     mask: jnp.ndarray,
     grid: CubedSphereGrid,
     cfg: BiharmonicConfig,
+    dt: float | None = None,
 ) -> LateralMixingOutput:
     """Apply biharmonic lateral mixing.
 
@@ -86,6 +87,8 @@ def biharmonic_lateral_mixing(
     mask : array (6, n, n)
     grid : CubedSphereGrid
     cfg : BiharmonicConfig
+    dt : float, optional
+        The run's timestep [s]; required when ``cfg.enforce_cfl``.
 
     Returns
     -------
@@ -99,15 +102,20 @@ def biharmonic_lateral_mixing(
     # compact outer stencil (32× tighter — see the module constant).
     # Uses ``grid.resolution_km·1000`` as the nominal dx; works on a
     # cubed sphere because all cells are within a factor of √2 of this
-    # value.  Opt-in via ``cfg.enforce_cfl``.
+    # value.  ``dt`` is the run's actual timestep.
     if cfg.enforce_cfl:
+        if dt is None:
+            raise ValueError(
+                "BiharmonicConfig.enforce_cfl=True needs the run's timestep: "
+                "pass dt to biharmonic_lateral_mixing / the ocean physics_fn "
+                "(or set enforce_cfl=False explicitly).")
         dx = grid.resolution_km * 1000.0
         cfl_denom = (
             _COMPACT_OUTER_CFL_TIGHTENING if cfg.compact_outer else 1.0
         )
         coeff_cap = (
             cfg.cfl_safety * dx ** 4
-            / (cfl_denom * jnp.maximum(cfg.cfl_dt_estimate, 1.0))
+            / (cfl_denom * jnp.maximum(dt, 1.0))
         )
         B_mom_eff = jnp.minimum(cfg.B_h_momentum, coeff_cap)
         B_tr_eff = jnp.minimum(cfg.B_h_tracer, coeff_cap)

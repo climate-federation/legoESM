@@ -108,7 +108,7 @@ Each was announced, then killed — none by physics, all by measurement artifact
   `tra_zdf` (:370) applies the single state update. No routine reads what another wrote.
 - **lego composes sequentially**: `_leapfrog_step` runs `_step_impl` twice (Nnn advective,
   Nbb dissipative) then base-shifts; within one call, GM/Redi is layered on the already-updated
-  field (`ocean_model_latlon_cgrid.py:3542, 3784`). This is *deliberate*, matching NEMO's
+  field (`ocean_model_latlon_cgrid.py:3710, 3784`). This is *deliberate*, matching NEMO's
   forward-in-time Nbb diffusion.
 - Whether that structural difference produces materially different output is **untested**. It is
   an O(Δt²) commutator effect — invisible per-step, potentially significant over 57,600 steps.

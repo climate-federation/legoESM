@@ -537,24 +537,36 @@ def ssp_rk3_step_si(
     SpectralHydrostaticState
         State after one time step.
     """
-    # Stage 1: k1 = state + dt * F(state), then SI correction
-    tend_0 = tendency_fn(state)
-    k1_explicit = _pytree_axpy(state, tend_0, dt)
-    k1 = si_correction(k1_explicit, state, si_data, grid, dt)
+    # Stage s: y <- a_s * state + b_s * SI(y + dt * F(y)), with
+    # (a, b) = (0, 1), (3/4, 1/4), (1/3, 2/3).  One scan body instead of three
+    # inlined copies of tendency_fn (all physics), so the compiled program holds
+    # it once.  Stage 1 passes k1 through untouched (0 * inf would be NaN).
+    def _stage(y, ab):
+        a, b = ab
+        tend = tendency_fn(y)
+        y_step = si_correction(_pytree_axpy(y, tend, dt), y, si_data, grid, dt)
+        return jax.tree.map(
+            lambda xi, yi: jnp.where(
+                a == 0.0, yi,
+                a.astype(jnp.real(xi).dtype) * xi
+                + b.astype(jnp.real(yi).dtype) * yi),
+            state, y_step), None
 
-    # Stage 2: k2 = 3/4 * state + 1/4 * (k1 + dt * F(k1) + SI correction)
-    tend_1 = tendency_fn(k1)
-    k1_step_explicit = _pytree_axpy(k1, tend_1, dt)
-    k1_step = si_correction(k1_step_explicit, k1, si_data, grid, dt)
-    k2 = _pytree_linear_combination(state, k1_step, 0.75, 0.25)
-
-    # Stage 3: k3 = 1/3 * state + 2/3 * (k2 + dt * F(k2) + SI correction)
-    tend_2 = tendency_fn(k2)
-    k2_step_explicit = _pytree_axpy(k2, tend_2, dt)
-    k2_step = si_correction(k2_step_explicit, k2, si_data, grid, dt)
-    k3 = _pytree_linear_combination(state, k2_step, 1.0 / 3.0, 2.0 / 3.0)
-
-    return k3
+    weights = (jnp.asarray([0.0, 0.75, 1.0 / 3.0], dtype=jnp.float64),
+               jnp.asarray([1.0, 0.25, 2.0 / 3.0], dtype=jnp.float64))
+    # scan needs a type-stable carry; a lane whose SI matrices promote the
+    # state (complex64 state, float64 matrices) keeps the unrolled stages.
+    out = jax.eval_shape(lambda y: _stage(y, (weights[0][1], weights[1][1]))[0],
+                         state)
+    if jax.tree.structure(out) == jax.tree.structure(state) and all(
+            o.dtype == jnp.result_type(x) for o, x in
+            zip(jax.tree.leaves(out), jax.tree.leaves(state))):
+        k3, _ = jax.lax.scan(_stage, state, weights)
+        return k3
+    y = state
+    for i in range(3):
+        y, _ = _stage(y, (weights[0][i], weights[1][i]))
+    return y
 
 
 def euler_si_step(

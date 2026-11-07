@@ -162,7 +162,7 @@ def _liquid_water_theta(theta: Array, q_c: Array, p: Array) -> Array:
     """SCM-side θ_l: compute the Exner factor from the SCM pressure, then apply the ONE
     canonical reduction :func:`scm_coupling.liquid_water_theta` (shared with the LES recorder
     so θ_l(SCM) and θ_l(LES) use the same formula — no re-derivation). Π=(p/p_ref)^κ."""
-    exner = (jnp.asarray(p) / constants.p_ref) ** constants.kappa
+    exner = exner_function(jnp.asarray(p))
     return liquid_water_theta(theta, q_c, exner)
 
 

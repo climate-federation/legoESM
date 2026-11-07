@@ -196,6 +196,7 @@ class TestSegmentCarryJIT:
             precip_accum=jnp.zeros(shape2d, dtype=jnp.float32),
             shflx_accum=jnp.zeros(shape2d, dtype=jnp.float32),
             lhflx_accum=jnp.zeros(shape2d, dtype=jnp.float32),
+            evap_accum=jnp.zeros(shape2d, dtype=jnp.float32),
             sw_up_toa_accum=jnp.zeros(shape2d, dtype=jnp.float32),
             lw_up_toa_accum=jnp.zeros(shape2d, dtype=jnp.float32),
             sw_up_toa_clr_accum=jnp.zeros(shape2d, dtype=jnp.float32),

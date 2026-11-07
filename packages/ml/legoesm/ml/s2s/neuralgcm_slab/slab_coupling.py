@@ -197,26 +197,30 @@ def extract_surface_forcing_from_dataset(
     p_lowest_pa = 100.0 * level_value if abs(level_value) < 2_000.0 else level_value
     p_lowest = _assign_coords_like(p_lowest_pa, temperature, name="p_lowest")
     if surface_pressure is None:
-        if field_names.surface_pressure in atmospheric_output:
-            surface_pressure = atmospheric_output[field_names.surface_pressure]
-        else:
-            surface_pressure = p_lowest
+        if field_names.surface_pressure not in atmospheric_output:
+            raise ValueError(
+                "surface pressure is required: pass surface_pressure= or include "
+                f"{field_names.surface_pressure!r} in the atmospheric output "
+                "(no fallback to the lowest model level)."
+            )
+        surface_pressure = atmospheric_output[field_names.surface_pressure]
     p_surface = _coerce_to_reference(surface_pressure, temperature, name="p_surface")
 
     if radiation_dataset is None:
-        sw_down = xr.zeros_like(temperature).rename(field_names.sw_down)
-        lw_down = xr.zeros_like(temperature).rename(field_names.lw_down)
-    else:
-        sw_down = _coerce_to_reference(
-            _drop_singleton_time(radiation_dataset[field_names.sw_down], "time"),
-            temperature,
-            name=field_names.sw_down,
+        raise ValueError(
+            "radiation_dataset (sw_down, lw_down) is required; surface radiation "
+            "is not zero-filled."
         )
-        lw_down = _coerce_to_reference(
-            _drop_singleton_time(radiation_dataset[field_names.lw_down], "time"),
-            temperature,
-            name=field_names.lw_down,
-        )
+    sw_down = _coerce_to_reference(
+        _drop_singleton_time(radiation_dataset[field_names.sw_down], "time"),
+        temperature,
+        name=field_names.sw_down,
+    )
+    lw_down = _coerce_to_reference(
+        _drop_singleton_time(radiation_dataset[field_names.lw_down], "time"),
+        temperature,
+        name=field_names.lw_down,
+    )
 
     temperature_np = np.asarray(temperature, dtype=float)
     humidity_np = np.asarray(specific_humidity, dtype=float)

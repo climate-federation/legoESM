@@ -133,12 +133,18 @@ class TestPrecisionResolution:
         policy = apply_precision("fp32")
         assert get_policy() == policy
 
-    def test_apply_precision_mixed_is_refused(self):
-        # #1665 interim: apply_precision refuses mixed loudly.
-        import pytest
-        from legoesm.runtime.precision import apply_precision
-        with pytest.raises(NotImplementedError, match="disabled"):
-            apply_precision("mixed")
+    def test_apply_precision_mixed(self):
+        # #1675 lifted the #1665 interim refusal; mixed needs x64 on.
+        import jax
+        from legoesm.runtime.precision import apply_precision, get_policy
+        if not jax.config.read("jax_enable_x64"):
+            with pytest.raises(RuntimeError, match="x64"):
+                apply_precision("mixed")
+            return
+        policy = apply_precision("mixed")
+        assert get_policy() == policy
+        assert policy.storage == jnp.float32
+        assert policy.accumulate == jnp.float64
 
 
 class TestBootstrap:
@@ -164,12 +170,15 @@ class TestBootstrap:
         assert rc.x64 is True
         assert rc.precision.compute == jnp.float64
 
-    def test_bootstrap_mixed_is_refused(self):
-        # #1665 interim: bootstrap refuses mixed before touching x64.
-        import pytest
+    def test_bootstrap_mixed_enables_x64(self):
+        # #1675: mixed keeps float64 accumulate/control, so bootstrap has to
+        # turn x64 ON for it — without that JAX demotes those roles to float32
+        # and the run is not mixed precision at all.
         from legoesm.runtime.config import bootstrap
-        with pytest.raises(NotImplementedError, match="disabled"):
-            bootstrap(precision="mixed")
+        rc = bootstrap(precision="mixed")
+        assert rc.x64 is True
+        assert rc.precision.storage == jnp.float32
+        assert rc.precision.accumulate == jnp.float64
 
 
     def test_bootstrap_sets_singleton(self):
@@ -385,82 +394,44 @@ class TestYamlBootstrap:
         assert rc.precision.compute == jnp.float64
         assert rc.x64 is True
 
-    def test_yaml_mixed_via_conservation_is_refused(self):
-        # #1665 interim: legacy dyn=fp32+cons=fp64 derives the now-refused mixed.
-        import pytest
+    def test_yaml_mixed_via_conservation(self):
+        # Legacy dyn=fp32 + cons=fp64 derives 'mixed', refused for the #1665
+        # interim and re-enabled by #1675.
         from legoesm.runtime.config import bootstrap_from_yaml_config
         config = self._make_config({
             "hardware.precision.dynamics": "float32",
             "hardware.precision.conservation": "float64",
         })
-        with pytest.raises(NotImplementedError, match="disabled"):
-            bootstrap_from_yaml_config(config)
+        rc = bootstrap_from_yaml_config(config)
+        assert rc.precision.storage == jnp.float32
+        assert rc.precision.accumulate == jnp.float64
+        assert rc.x64 is True
 
 
 class TestLegacyCompat:
-    """Tests that legacy core.hardware imports still work."""
-
-    def test_legacy_get_backend_uppercase(self):
-        from legoesm.core.hardware import get_backend
-        backend = get_backend()
-        assert backend == backend.upper()
+    """Runtime equivalents of the deleted ``core.hardware`` wrappers."""
 
     def test_legacy_check_spectral_backend(self):
-        """check_spectral_backend should delegate to runtime."""
-        from legoesm.core.hardware import check_spectral_backend
+        """check_spectral_backend passes on CPU with x64."""
+        from legoesm.runtime import check_spectral_backend
         # On CPU with x64 enabled, should not raise.
         jax.config.update("jax_enable_x64", True)
         check_spectral_backend()
 
-    def test_legacy_unsupported_f64_constant(self):
-        from legoesm.core.hardware import _UNSUPPORTED_F64_BACKENDS
-        # The canonical constant stores backend names in lowercase
-        # (matching `runtime.backend._NO_F64_BACKENDS`).  Call sites
-        # always compare with `backend.lower()` before membership
-        # (see hardware.py detect_devices).  The Apple GPU backend
-        # (jax-mps / MLX) is the float32-only entry.
-        assert "mps" in _UNSUPPORTED_F64_BACKENDS
+    def test_mps_has_no_float64(self):
+        # The Apple GPU backend (jax-mps / MLX) is the float32-only entry.
+        from legoesm.runtime import supports_float64
+        assert not supports_float64("mps")
 
-    def test_legacy_parse_precision_dtype(self):
-        from legoesm.core.hardware import _parse_precision_dtype
-        assert _parse_precision_dtype("fp32", field_name="test") == jnp.float32
-        assert _parse_precision_dtype("float64", field_name="test") == jnp.float64
-
-    def test_legacy_precision_policy_roundtrip(self):
-        from legoesm.core.hardware import (
-            set_runtime_precision_policy,
-            get_runtime_precision_policy,
-            get_runtime_precision_dtype,
-        )
-        set_runtime_precision_policy(dynamics="float32", conservation=None)
-        policy = get_runtime_precision_policy()
-        assert policy["dynamics"] == jnp.float32
-        assert policy["conservation"] is None
-        assert get_runtime_precision_dtype("dynamics") == jnp.float32
+    def test_parse_precision_dtype(self):
+        from legoesm.core.precision import parse_dtype
+        assert parse_dtype("fp32", field_name="test") == jnp.float32
+        assert parse_dtype("float64", field_name="test") == jnp.float64
 
     def test_legacy_core_init_exports(self):
         from legoesm.core import check_spectral_backend, get_backend
         assert callable(check_spectral_backend)
         assert callable(get_backend)
-
-    def test_legacy_apply_hardware_config_delegates(self):
-        """apply_hardware_config should delegate to runtime.bootstrap."""
-        from legoesm.core.hardware import apply_hardware_config
-        config = MagicMock()
-        data = {
-            "hardware.precision.dynamics": "float32",
-            "hardware.precision.ml": None,
-            "hardware.precision.conservation": None,
-            "hardware.parallelism.n_devices": "auto",
-            "hardware.parallelism.backend": None,
-            "hardware.parallelism.distributed": False,
-            "hardware.devices": "auto",
-        }
-        config.get = lambda key, default=None: data.get(key, default)
-        result = apply_hardware_config(config)
-        assert "precision" in result
-        assert "distributed" in result
-        assert "device_config" in result
 
 
 # =========================================================================
@@ -492,18 +463,6 @@ class TestNoCircularImports:
     def test_import_runtime_config(self):
         import legoesm.runtime.config
         assert callable(legoesm.runtime.config.bootstrap)
-
-    def test_import_core_hardware_after_runtime(self):
-        """Importing core.hardware after runtime must not raise."""
-        import legoesm.runtime
-        import legoesm.core.hardware
-        assert callable(legoesm.core.hardware.get_backend)
-
-    def test_import_runtime_after_core_hardware(self):
-        """Importing runtime after core.hardware must not raise."""
-        import legoesm.core.hardware
-        import legoesm.runtime
-        assert callable(legoesm.runtime.get_backend)
 
 
 # =========================================================================
@@ -594,3 +553,45 @@ class TestCubedSphereLevelFallbackBootstrap:
                 n_devices=4,
                 allow_level_fallback=False,
             )
+
+
+@pytest.mark.parametrize("precision,expected", [
+    ({}, "fp32"),
+    ({"dynamics": "float64"}, "fp64"),
+    ({"dynamics": "float32", "conservation": "float64"}, "mixed"),
+    ({"dynamics": "float32"}, "fp32"),
+    ({"conservation": "float64"}, "mixed"),
+    ({"mode": "fp32", "dynamics": "float64"}, "fp32"),
+])
+def test_yaml_precision_honours_per_component_keys(precision, expected):
+    """DEFAULT_CONFIG supplies no precision mode, so a per-component request is
+    not overridden by a default mode; an explicit mode still wins."""
+    from legoesm.config import Config
+    from legoesm.runtime.config import precision_mode_from_yaml_config
+    cfg = Config.from_dict({"hardware": {"precision": precision}})
+    assert precision_mode_from_yaml_config(cfg) == expected
+
+
+def test_yaml_precision_reaches_the_driver_bootstrap(monkeypatch):
+    """The resolved YAML precision must be the precision ModelDriver boots
+    with, not only what the resolver returns (codex review of #1811)."""
+    import legoesm.runtime
+    from legoesm.config import Config
+    from legoesm.driver.model_driver import ModelDriver
+    ec = Config.from_dict(
+        {"hardware": {"precision": {"dynamics": "float64"}}}).to_experiment_config()
+    assert ec.precision == "fp64"
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_bootstrap(**kw):
+        seen.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(legoesm.runtime, "bootstrap", _fake_bootstrap)
+    driver = ModelDriver(ec)
+    with pytest.raises(_Stop):
+        driver._bootstrap_runtime()
+    assert seen["precision"] == "fp64"

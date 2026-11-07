@@ -52,6 +52,7 @@ from legoesm.atmosphere.physics import (
     ConvectionConfig,
     GravityWaveDragConfig,
 )
+from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
 from legoesm.atmosphere.physics.thermodynamics import compute_moist_adiabat
 from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 
@@ -310,7 +311,7 @@ def run_one(conv: str, turb: str, args) -> tuple[RceResult, dict]:
     T0, qv0 = build_initial_profiles(args.nlev, T_sfc=args.T_sfc)
     cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="gray", diurnal_cycle=False),
-        convection=ConvectionConfig(scheme=conv),
+        convection=ConvectionConfig(scheme=conv, zhang_mcfarlane=ZhangMcFarlaneConfig(land_fraction="none")),  # RCE: aquaplanet
         turbulence=TurbulenceConfig(scheme=turb),
         microphysics=MicrophysicsConfig(scheme="kessler"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),

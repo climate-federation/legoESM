@@ -793,7 +793,7 @@ def _stub_mpi_bcast(monkeypatch, value):
 def test_multi_rank_cmor_request_is_refused_not_warned(monkeypatch):
     """#1545: asking for CMOR output on a lane that cannot produce it must
     FAIL BEFORE ANY TIME STEPPING, not complete and write empty files hours
-    later. (Not at `setup()` — the call sits at the top of `_run_mpas`, before
+    later. (Not at `setup()` — the call sits at the top of `_run_column`, before
     its first collective and before the loop, which is what costs GPU-hours.)
 
     Since #1517 the multi-rank Voronoi CELL PARTITION *is* feedable, so this
@@ -850,15 +850,15 @@ def test_empty_cmor_override_requires_exact_1(monkeypatch, value, should_raise):
 
 
 def test_run_mpas_actually_calls_the_guard():
-    """Name the symbol that RUNS: the guard is worthless if `_run_mpas` stops
+    """Name the symbol that RUNS: the guard is worthless if `_run_column` stops
     calling it. Fails if the call is deleted from the method that executes."""
     import inspect
 
     from legoesm.driver.model_driver import ModelDriver
 
-    src = inspect.getsource(ModelDriver._run_mpas)
+    src = inspect.getsource(ModelDriver._run_column)
     assert "_require_mpas_cmip_feed_supported(" in src, (
-        "_run_mpas no longer invokes the #1545 empty-CMOR refusal")
+        "_run_column no longer invokes the #1545 empty-CMOR refusal")
 
 
 def test_override_is_agreed_across_ranks_not_read_per_rank(monkeypatch):

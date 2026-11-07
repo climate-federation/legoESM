@@ -1,0 +1,131 @@
+--- src/OCE/stprk3.F90	2026-07-14 12:56:23.252405628 -0400
++++ tests/LOCK_EXCHANGE_OMIP_L1_P3/MY_SRC/stprk3.F90	2026-09-01 06:55:58.932103244 -0400
+@@ -64,6 +64,9 @@
+       !!              -8- Outputs and diagnostics
+       !!----------------------------------------------------------------------
+       INTEGER ::   ji, jj, jk, jtile   ! dummy loop indice
++      INTEGER ::   itraj, ios_traj
++      CHARACTER(LEN=96) ::   cl_traj
++      CHARACTER(LEN=16) ::   cl_magic
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   zgdept
+       !! ---------------------------------------------------------------------
+ #if defined key_agrif
+@@ -82,6 +85,21 @@
+       !
+       IF( ln_timing )   CALL timing_start('stp_RK3')
+       !
++      ! Lane-1 certified oracle: exact step-entry Nbb state.  This is a
++      ! write-only instrument; no prognostic array is assigned here.
++      IF( lwp .AND. kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN
++         IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane1 trajectory requires 64-bit wp' )
++         WRITE(cl_traj,'("oracle_step_entry_kt",I8.8,".bin")') kstp
++         OPEN( NEWUNIT=itraj, FILE=TRIM(cl_traj), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios_traj )
++         IF( ios_traj /= 0 )   CALL ctl_stop( 'cannot open lane1 trajectory file' )
++         cl_magic = 'NEMO_L1_ENTRY_1'
++         WRITE(itraj) cl_magic, 1, kstp, Nbb, jpi, jpj, jpk, jpts, STORAGE_SIZE(1._wp)
++         WRITE(itraj) ts(:,:,:,:,Nbb), uu(:,:,:,Nbb), vv(:,:,:,Nbb), ssh(:,:,Nbb)
++         CLOSE(itraj)
++         WRITE(numout,*) 'LANE1_STEP_ENTRY_DUMP ', kstp, Nbb, STORAGE_SIZE(1._wp), TRIM(cl_traj)
++      ENDIF
++      !
+       !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+       ! update I/O and calendar
+       !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+@@ -184,6 +202,8 @@
+       !  RK3 : single first external mode computation
+       !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+       CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )         ! out: ssh, (uu_b,vv_b) at Naa and (un_adv,vn_adv) between Nbb and Naa
++      CALL l1_dump_bt_frames( kstp, Naa )
++      IF( kstp == nit000 )   CALL l1_dump_rhs( kstp, Nrhs )
+ 
+       !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+       !  RK3 time integration
+@@ -193,11 +213,13 @@
+       !
+       ! Stage 1 :
+       CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )
++      IF( kstp == nit000 )   CALL l1_dump_stage( kstp, 1, Naa )
+       !
+       Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs    ! Swap: Nbb unchanged, Nnn <==> Naa
+       !
+       ! Stage 2 :
+       CALL stp_RK3_stg( 2, kstp, Nbb, Nnn, Nrhs, Naa )
++      IF( kstp == nit000 )   CALL l1_dump_stage( kstp, 2, Naa )
+       !
+       Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs    ! Swap: Nbb unchanged, Nnn <==> Naa
+       !
+@@ -205,6 +227,7 @@
+       CALL rk3_dia( 1 )                                ! Diagnostics switched on for stage 3
+       !
+       CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )
++      IF( kstp == nit000 )   CALL l1_dump_stage( kstp, 3, Naa )
+       !
+       IF ( l_ldfeke   )  CALL ldf_eke( kstp, Nbb )                ! GEOMETRIC param. (time evolution of eiv coefficient)
+       !
+@@ -308,6 +331,65 @@
+    END SUBROUTINE stp_RK3
+ 
+ 
++   SUBROUTINE l1_dump_bt_frames( kstp, klevel )
++      !! Phase-3 frame instrument, immediately after stp_2D.  puu_b/pvv_b at
++      !! Kaa are the primary velocity-weighted substep average committed by
++      !! RK3; un_adv/vn_adv are the distinct transport-weighted time means.
++      INTEGER, INTENT(in) :: kstp, klevel
++      INTEGER :: iunit, ios
++      CHARACTER(LEN=96) :: filename
++      CHARACTER(LEN=16) :: magic
++      IF( .NOT.lwp ) RETURN
++      IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane1 frame dump requires 64-bit wp' )
++      WRITE(filename,'("oracle_bt_frames_kt",I8.8,".bin")') kstp
++      OPEN( NEWUNIT=iunit, FILE=TRIM(filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++         &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane1 frame file' )
++      magic = 'NEMO_L1_BTFRM_1'
++      WRITE(iunit) magic, 1, kstp, klevel, jpi, jpj, STORAGE_SIZE(1._wp)
++      WRITE(iunit) uu_b(:,:,klevel), vv_b(:,:,klevel), un_adv(:,:), vn_adv(:,:)
++      CLOSE(iunit)
++      WRITE(numout,*) 'LANE1_BT_FRAME_DUMP ', kstp, klevel, TRIM(filename)
++   END SUBROUTINE l1_dump_bt_frames
++
++
++   SUBROUTINE l1_dump_stage( kstp, kstage, klevel )
++      !! Phase-3 read-only stage-state instrument.  The call sites above pin
++      !! Kaa before each Nnn/Naa swap; no prognostic field is assigned here.
++      INTEGER, INTENT(in) :: kstp, kstage, klevel
++      INTEGER :: iunit, ios
++      CHARACTER(LEN=96) :: filename
++      CHARACTER(LEN=16) :: magic
++      IF( .NOT.lwp ) RETURN
++      IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane1 stage dump requires 64-bit wp' )
++      WRITE(filename,'("oracle_stage_kt",I8.8,"_s",I1,".bin")') kstp, kstage
++      OPEN( NEWUNIT=iunit, FILE=TRIM(filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++         &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane1 stage file' )
++      magic = 'NEMO_L1_STAGE_1'
++      WRITE(iunit) magic, 1, kstp, kstage, klevel, jpi, jpj, jpk, jpts, STORAGE_SIZE(1._wp)
++      WRITE(iunit) ts(:,:,:,:,klevel), uu(:,:,:,klevel), vv(:,:,:,klevel), ssh(:,:,klevel)
++      CLOSE(iunit)
++      WRITE(numout,*) 'LANE1_STAGE_DUMP ', kstp, kstage, klevel, TRIM(filename)
++   END SUBROUTINE l1_dump_stage
++
++
++   SUBROUTINE l1_dump_rhs( kstp, klevel )
++      !! Phase-3 read-only stage-1 RHS instrument, immediately after stp_2D.
++      INTEGER, INTENT(in) :: kstp, klevel
++      INTEGER :: iunit, ios
++      CHARACTER(LEN=16) :: magic
++      OPEN( NEWUNIT=iunit, FILE='oracle_rhs_kt00000001.bin', ACCESS='STREAM', &
++         &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane1 rhs file' )
++      magic = 'NEMO_L1_RHS___1'
++      WRITE(iunit) magic, 1, kstp, klevel, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++      WRITE(iunit) uu(:,:,:,klevel), vv(:,:,:,klevel)
++      CLOSE(iunit)
++      WRITE(numout,*) 'LANE1_RHS_DUMP ', kstp, klevel
++   END SUBROUTINE l1_dump_rhs
++
++
+    SUBROUTINE rk3_dia( kswitch )
+       !!----------------------------------------------------------------------
+       !!----------------------------------------------------------------------

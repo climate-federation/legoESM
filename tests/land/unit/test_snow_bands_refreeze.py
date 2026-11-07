@@ -25,7 +25,7 @@ def test_refreeze_capped_by_cold_content():
     rain = jnp.full((1, n_bands), 1e-2)                   # 36 kg/m2 over dt -- far excess
     out = step_snow_bands(
         swe, zeros, zeros, T_sfc, zeros, dt,
-        Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=rain,
+        Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=rain, snow_age_activation_K=0.0
     )
     cap = 2.0 * constants.c_pi * 10.0 / constants.L_f     # ~0.126 kg/m2
     assert float(out.refreeze[0]) <= cap + 1e-9           # capped at cold content

@@ -96,6 +96,12 @@ class TestPixelCatalog(unittest.TestCase):
             else:
                 self.assertEqual(cfg.carbon.C_wood_init, 0.0)
 
+    def test_pixels_run_the_drainage_limiter_at_the_calibrated_value(self):
+        # Calibrated at 0.5; must not inherit the RichardsConfig default (0.0).
+        for (name, lat, lon, pft, texture, T_init, precip, ft, biome) in lce.PIXELS:
+            cfg = lce.build_pixel_config(pft, texture, ft, 8, 3.0, biome)
+            self.assertEqual(cfg.richards.fc_drain_saturation, 0.5, name)
+
 
 class TestAssess(unittest.TestCase):
 

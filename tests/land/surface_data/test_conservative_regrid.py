@@ -30,6 +30,23 @@ def test_global_mean_conserved():
     assert np.isclose(src_mean, tgt_mean, rtol=2e-3)   # conservative
 
 
+def test_pole_centred_source_keeps_polar_cap():
+    """ERA5-style source (centres include +/-90): the polar rows' half-cells
+    must carry their cap area; unclamped edges at +/-90.5 gave them zero."""
+    slat = np.linspace(-90.0, 90.0, 181)
+    slon = np.arange(360) + 0.5
+    tlat, tlon = _grid(90, 180)
+    f = np.where(np.abs(slat) > 89.9, 100.0, 1.0)[:, None] * np.ones((1, 360))
+    out = cr(f, slat, slon, tlat, tlon)
+    e = np.clip(np.concatenate([[-90.0], 0.5 * (slat[:-1] + slat[1:]), [90.0]]),
+                -90.0, 90.0)
+    w_src = np.diff(np.sin(np.deg2rad(e)))[:, None]
+    src_mean = np.sum(f * w_src) / np.sum(w_src * np.ones_like(f))
+    w_tgt = np.cos(np.deg2rad(tlat))[:, None]
+    tgt_mean = np.sum(out * w_tgt) / np.sum(w_tgt * np.ones_like(out))
+    assert np.isclose(src_mean, tgt_mean, rtol=1e-6)
+
+
 def test_nan_not_propagated_to_coastal_cells():
     # NaN block in the interior (away from the 0/360 seam) to isolate masking.
     slat, slon = _grid(36, 72)

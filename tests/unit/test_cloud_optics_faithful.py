@@ -28,7 +28,8 @@ Certification (test-only; the module is a closed-form LUT combination):
    NON-midpoint, NON-affine table (so reversed or wrong interpolation weights and
    broken per-phase/per-coefficient interpolation fail), vs hand-computed values
    and an independent numpy reimplementation typed from create_linear_interpolant.
-2. Unit conventions: effective radius m->micron (1e6), ICE uses DIAMETER = 2*r,
+2. Unit conventions: effective radius m->micron (1e6), ICE uses CAM6's solid-ice
+   DIAMETER = 2*r*500/917,
    cloud path kg/m^2 -> g/m^2 (1e3) — each pinned by a discriminating placement;
    out-of-range sizes clamp to the table bounds.
 3. EXACT phase combination (tau adds, ssa tau-weighted, g ssa-weighted) with
@@ -67,9 +68,12 @@ _N_ICE = 4
 _R_LIQ_LO, _R_LIQ_HI = 2.0, 8.0
 _D_ICE_LO, _D_ICE_HI = 10.0, 40.0
 
+# Ice table coordinate = CAM6 solid-ice effective diameter
+# deffi = effi * rhoi / rhows * 2 (CAM micro_mg2_0.F90:2795; rhoi = 500, rhows = 917).
+_ICE_D_PER_R = 500.0 / 917.0 * 2.0
 # r_ice giving an ON-node ice diameter of 20 micron (used where ice is a passive
 # constant); r_liq giving an on-node 4 micron.
-_R_ICE_20UM = 20.0 / (2 * _M_TO_UM)
+_R_ICE_20UM = 20.0 / (_ICE_D_PER_R * _M_TO_UM)
 _R_LIQ_4UM = 4.0 / _M_TO_UM
 
 
@@ -148,7 +152,7 @@ def _interp1d(table_row, s, lo, hi, n):
 def _oracle(lk, path_liq, path_ice, r_liq, r_ice, ibnd, rough=_MEDIUM):
     """Independent reimplementation of compute_optical_properties."""
     s_liq = np.clip(_M_TO_UM * r_liq, _R_LIQ_LO, _R_LIQ_HI)
-    s_ice = np.clip(_M_TO_UM * 2.0 * r_ice, _D_ICE_LO, _D_ICE_HI)   # ICE = diameter = 2r
+    s_ice = np.clip(_M_TO_UM * r_ice * 500.0 / 917.0 * 2.0, _D_ICE_LO, _D_ICE_HI)  # CAM deffi
     el = np.asarray(lk.ext_liq)[ibnd]
     sl = np.asarray(lk.ssa_liq)[ibnd]
     al = np.asarray(lk.asy_liq)[ibnd]
@@ -207,13 +211,13 @@ def test_lut_interp_liquid_all_tables_off_midpoint():
 
 
 def test_lut_interp_ice_all_tables_off_midpoint():
-    # ICE diameter grid [10,20,30,40]; r_ice = 11.25 micron -> diameter 22.5 ->
+    # ICE diameter grid [10,20,30,40]; r_ice -> CAM diameter 22.5 micron ->
     # between nodes 1 (=20) and 2 (=30), w1=0.75, w2=0.25.  Non-affine tables.
     ext = [2.0, 5.0, 11.0, 23.0]
     ssa = [0.15, 0.35, 0.60, 0.75]
     asy = [0.20, 0.45, 0.65, 0.80]
     lk = _ice_only_lookup(ext, ssa, asy)
-    r_ice = 11.25 / _M_TO_UM
+    r_ice = 22.5 / (_ICE_D_PER_R * _M_TO_UM)
     od = _call(lk, 0.0, 1e-3, _R_LIQ_4UM, r_ice, 0, "optical_depth")
     ssa_out = _call(lk, 0.0, 1e-3, _R_LIQ_4UM, r_ice, 0, "ssa")
     g_out = _call(lk, 0.0, 1e-3, _R_LIQ_4UM, r_ice, 0, "asymmetry_factor")
@@ -245,13 +249,13 @@ def test_size_below_lower_bound_clamps_not_extrapolates():
     np.testing.assert_allclose(od_l, 1.0, rtol=1e-12)          # liquid node 0, not 2.5
 
     lk_i = _ice_only_lookup([2.0, 5.0, 11.0, 23.0], [1.0] * _N_ICE, [0.0] * _N_ICE)
-    # r_ice = 1 micron -> diameter 2 micron < 10 lower bound -> clamp to ice node 0.
+    # r_ice = 1 micron -> diameter 1.09 micron < 10 lower bound -> clamp to ice node 0.
     od_i = _call(lk_i, 0.0, 1e-3, _R_LIQ_4UM, 1.0 / _M_TO_UM, 0, "optical_depth")
     np.testing.assert_allclose(od_i, 2.0, rtol=1e-12)          # ice node 0, not 4.4
 
 
 # ---------------------------------------------------------------------------
-# 2. Unit conventions (m->micron, ice DIAMETER=2r, kg->g).
+# 2. Unit conventions (m->micron, ice DIAMETER=2r*500/917, kg->g).
 # ---------------------------------------------------------------------------
 def test_micron_conversion_selects_right_liquid_node():
     # A radius of 4 micron must select node index 1 (=20); a missing 1e6 factor
@@ -262,12 +266,13 @@ def test_micron_conversion_selects_right_liquid_node():
     np.testing.assert_allclose(od, 20.0, rtol=1e-12)
 
 
-def test_ice_uses_diameter_twice_radius():
-    # r_ice = 10 micron -> diameter 20 micron -> node index 1.  Using radius (not
-    # diameter) would read node 0.
+def test_ice_uses_cam_solid_ice_diameter():
+    # r_ice = 18.34 micron -> CAM deffi = r*500/917*2 = 20 micron -> node index 1.
+    # Using 2r (no density correction) would read between nodes 2 and 3, using
+    # the radius would read node 1.67.
     ext = [100.0, 200.0, 300.0, 400.0]
     lk = _ice_only_lookup(ext, [1.0] * _N_ICE, [0.0] * _N_ICE)
-    r_ice = 10.0 / _M_TO_UM                                        # -> diameter 20 micron
+    r_ice = 20.0 / (_ICE_D_PER_R * _M_TO_UM)                        # -> CAM diameter 20 micron
     od = _call(lk, 0.0, 1e-3, _R_LIQ_4UM, r_ice, 0, "optical_depth")
     np.testing.assert_allclose(od, 200.0, rtol=1e-12)              # node index 1
 

@@ -75,6 +75,19 @@ class LandAlbedoConfig(NamedTuple):
     # f(mu) = max((1/b) * ((1 + b) / (1 + 2 b mu) - 1), 0) and mu = cos(zenith).
     snow_zenith_factor: float = 0.2   # brightening weight (0 = no zenith dependence)
     snow_zenith_b: float = 2.0        # BATS shape parameter
+    # Temperature dependence of snow grain growth (BATS/CLM, Dickinson et al.
+    # 1993): the age clock accumulates dt * exp(A*(1/T_freeze - 1/T_snow))
+    # instead of dt, so cold dry snow ages far more slowly than melting snow.
+    # WHY: with a temperature-independent clock every lying snowpack older than
+    # a few decay times sits at ``alpha_snow_min`` -- measured 2026-09-09 on the
+    # production AMIP, where EVERY snow-covered cell on Earth had albedo
+    # 0.5207 (10th, 50th and 90th percentiles identical) against an observed
+    # 0.80-0.85 on the Antarctic plateau and 0.6-0.75 on Arctic tundra. One
+    # parameter cannot be right for melting spring snow and for the polar
+    # plateau: the missing dependence is temperature, not the value.
+    # Default = BATS 5000 K.  0.0 selects the calendar-time clock (the defect
+    # above) and must be set explicitly by any lane that wants it.
+    snow_age_activation_K: float = 5000.0
     # Dry-soil brightening (Oleson et al. 2013, CLM): exposed soil brightens as the
     # top layer dries, so a DESERT (low soil moisture) is far brighter than moist bare
     # soil / tundra — a contrast a single per-PFT albedo cannot represent.  The
@@ -256,6 +269,21 @@ def snow_cover_fraction(
     return jnp.tanh(snow_depth / jnp.maximum(config.snow_depth_crit, 1e-6))
 
 
+def ground_snow_cover(
+    snow_depth: jnp.ndarray,
+    config: LandAlbedoConfig = LandAlbedoConfig(),
+) -> jnp.ndarray:
+    """Snow-covered fraction of the GROUND as the land albedo blend uses it:
+    :func:`snow_cover_fraction` times the per-cell ``snow_cover_scale`` (when
+    set), clipped to [0, 1]: the cover the albedo BLEND uses.  The canopy snow
+    burial deliberately uses the unscaled :func:`snow_cover_fraction` instead
+    (the scale is a brightness calibration, not snow area; user 2026-10-03)."""
+    f_snow = snow_cover_fraction(snow_depth, config)
+    if config.snow_cover_scale is not None:
+        f_snow = jnp.clip(f_snow * jnp.asarray(config.snow_cover_scale), 0.0, 1.0)
+    return f_snow
+
+
 def dry_soil_brightening(
     theta_top: jnp.ndarray,
     config: LandAlbedoConfig = LandAlbedoConfig(),
@@ -331,21 +359,25 @@ def land_albedo(
     # albedo map and the snow feedback coexist (bright deserts AND bright ice sheets).
     alpha_veg = (land_vegetation_albedo(lat, config) if base_albedo is None
                  else base_albedo)
-    f_snow = (snow_cover_fraction(snow_depth, config) if f_snow_override is None
+    # Per-cell snow_cover_scale (forest canopies hide ground snow, scale<1; open
+    # tundra whitens faster, scale>1) is applied ONLY when this function computes
+    # the cover itself: a caller that supplies f_snow_override (the elevation-band
+    # path) must scale each BAND's cover before aggregating — post-aggregate
+    # scaling can push the snow contribution above alpha_snow at scale>1 on
+    # saturated bands (codex).
+    f_snow = (ground_snow_cover(snow_depth, config) if f_snow_override is None
               else f_snow_override)
-    if config.snow_cover_scale is not None and f_snow_override is None:
-        # Canopy snow masking: scale the effective snow-covered fraction (forest
-        # canopies hide ground snow, scale<1; open tundra whitens faster, scale>1).
-        # Applied ONLY when this function computed the cover itself: a caller that
-        # supplies f_snow_override (the elevation-band path) must scale each BAND's
-        # cover before aggregating — post-aggregate scaling can push the snow
-        # contribution above alpha_snow at scale>1 on saturated bands (codex).
-        f_snow = jnp.clip(f_snow * jnp.asarray(config.snow_cover_scale), 0.0, 1.0)
     if snow_contrib_override is not None:
         # Banded path: each elevation band already blended its own age-decayed snow
         # albedo; the aggregate snow contribution replaces alpha_snow * f_snow.
         return alpha_veg * (1.0 - f_snow) + snow_contrib_override
     alpha_snow = snow_albedo(snow_age, config, cos_zenith=cos_zenith)
+    # Snow cannot darken a surface below its own snow-free albedo: the aged
+    # value is a melting/dirty-snow asymptote, and on an ice sheet (band base
+    # 0.82 VIS / 0.62 NIR) the snow IS the surface.  No-op wherever the base
+    # is darker than aged snow (soil, vegetation), i.e. everywhere but
+    # glacier and other bright bases.
+    alpha_snow = jnp.maximum(alpha_snow, alpha_veg)
     return alpha_veg * (1.0 - f_snow) + alpha_snow * f_snow
 
 

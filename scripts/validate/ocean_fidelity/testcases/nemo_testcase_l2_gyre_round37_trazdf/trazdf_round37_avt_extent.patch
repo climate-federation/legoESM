@@ -1,0 +1,34 @@
+--- MY_SRC/trazdf.F90.round35
++++ MY_SRC/trazdf.F90
+@@ -227,10 +227,29 @@
+          WRITE(il2_unit) pts(:,:,:,jp_sal,Kaa)
+          !
+          !              !-- the operands the solve reads --!
++         !
++         !     ROUND 37.  avt and avs are NOT full-domain arrays.  zdf_oce.F90
++         !     allocates them over the INTERIOR box --
++         !        avt(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpk)
++         !     -- while avm, on the SAME ALLOCATE statement, is (jpi,jpj,jpk).
++         !     Round 35 wrote them raw under a header declaring jpi,jpj,jpk, so
++         !     each payload was 32*22*31 values where its header claimed
++         !     36*26*31: 57536 bytes short, and every array written after avs
++         !     landed at the wrong offset.  They are now staged into the same
++         !     full-domain scratch every neighbouring array already uses, so
++         !     the header describes what is actually written and no reader
++         !     needs a special case.  ln_tile is F on this card, so
++         !     ntsi:ntei,ntsj:ntej IS Nis0:Nie0,Njs0:Nje0 (dom_tile_init).
++         !     The halo cells of the staged copy are the scratch's zeros: avt
++         !     has no halo to carry, and no arm scores outside the interior.
++         zl2_tmp(:,:,:) = 0._wp
++         zl2_tmp(ntsi:ntei,ntsj:ntej,:) = avt(:,:,:)
+          WRITE(il2_unit) 'avt             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
+-         WRITE(il2_unit) avt
++         WRITE(il2_unit) zl2_tmp
++         zl2_tmp(:,:,:) = 0._wp
++         zl2_tmp(ntsi:ntei,ntsj:ntej,:) = avs(:,:,:)
+          WRITE(il2_unit) 'avs             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
+-         WRITE(il2_unit) avs
++         WRITE(il2_unit) zl2_tmp
+          zl2_tmp(:,:,:) = 0._wp
+          IF( ALLOCATED( ah_wslp2 ) )   zl2_tmp(:,:,:) = ah_wslp2(:,:,:)
+          WRITE(il2_unit) 'ah_wslp2        '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk

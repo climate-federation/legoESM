@@ -1,0 +1,104 @@
+--- dynadv_up3.F90.shipped
++++ dynadv_up3.F90
+@@ -25,6 +25,10 @@
+    USE in_out_manager ! I/O manager
+    USE prtctl         ! Print control
+    USE lib_mpp        ! MPP library
++   USE l1_r56_up3, ONLY : r56_up3_begin, r56_up3_curv, r56_up3_select_t, &
++      & r56_up3_select_f, r56_up3_hflux, r56_up3_hrhs_before, &
++      & r56_up3_hrhs_after, r56_up3_vrhs_before, r56_up3_vrhs_after, &
++      & r56_up3_bottom_before, r56_up3_finish
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -126,6 +130,9 @@
+ #if ! defined key_PSYCLONE_2p5p0
+       IF( .NOT. PRESENT( pFu ) )   ALLOCATE( zwu(T2D(1)), zwv(T2D(1)) )
+ #endif
++      IF( PRESENT(pFu) .AND. PRESENT(pFv) .AND. PRESENT(pFw) ) &
++         & CALL r56_up3_begin(kt,Kbb,Kmm,Krhs,puu(:,:,:,Kbb),pvv(:,:,:,Kbb),puu(:,:,:,Kmm),pvv(:,:,:,Kmm), &
++         & puu(:,:,:,Krhs),pvv(:,:,:,Krhs),pFu,pFv,pFw)
+       
+       IF( PRESENT( pUe ) ) THEN     ! 3D RHS cumulation : set 2D RHS to zero
+          DO_2D( 0, 0, 0, 0 )
+@@ -147,6 +154,7 @@
+                &             - ( puu(ji  ,jj  ,jk,Kbb) - puu(ji  ,jj-1,jk,Kbb) )    * fmask(ji  ,jj-1,jk)
+             zlv_vu(ji,jj) =    ( pvv(ji+1,jj  ,jk,Kbb) - pvv(ji  ,jj  ,jk,Kbb) )    * fmask(ji  ,jj  ,jk)   &
+                &             - ( pvv(ji  ,jj  ,jk,Kbb) - pvv(ji-1,jj  ,jk,Kbb) )    * fmask(ji-1,jj  ,jk)
++            CALL r56_up3_curv(ji,jj,jk,zlu_uu(ji,jj),zlv_vv(ji,jj),zlu_uv(ji,jj),zlv_vu(ji,jj))
+          END_2D
+          !
+          !                                         ! horizontal volume fluxes
+@@ -172,6 +180,7 @@
+             IF( zvj > 0 ) THEN   ;   zl_v = zlv_vv(ji,jj  )
+             ELSE                 ;   zl_v = zlv_vv(ji,jj+1)
+             ENDIF
++            CALL r56_up3_select_t(ji,jj,jk,zui,zvj,zl_u,zl_v)
+             !
+             zFu_t(ji+1,jj  ) = (  zFu(ji,jj) + zFu(ji+1,jj  )  ) * ( zui - gamma1 * zl_u )
+             zFv_t(ji  ,jj+1) = (  zFv(ji,jj) + zFv(ji  ,jj+1)  ) * ( zvj - gamma1 * zl_v )
+@@ -185,9 +194,11 @@
+             IF( zFvi > 0 ) THEN   ;    zl_u = zlu_uv(ji,jj  )
+             ELSE                  ;    zl_u = zlu_uv(ji,jj+1)
+             ENDIF
++            CALL r56_up3_select_f(ji,jj,jk,zFuj,zFvi,zl_u,zl_v)
+             !
+             zFv_f(ji  ,jj  ) = zFvi * ( ( puu(ji,jj,jk,Kmm) + puu(ji  ,jj+1,jk,Kmm) ) - gamma1 * zl_u )   ! add () for NP repro
+             zFu_f(ji  ,jj  ) = zFuj * ( ( pvv(ji,jj,jk,Kmm) + pvv(ji+1,jj  ,jk,Kmm) ) - gamma1 * zl_v )   ! add () for NP repro
++            CALL r56_up3_hflux(ji,jj,jk,zFu_t(ji+1,jj),zFv_t(ji,jj+1),zFu_f(ji,jj),zFv_f(ji,jj))
+          END_2D
+          !
+          IF( PRESENT( pUe ) ) THEN      !-  2D RHS : vertically cumulated  -!   (here MASKED jk-sum)
+@@ -202,12 +213,16 @@
+             END_2D
+          ELSE                           !-  added the 3D RHS  -!
+             DO_2D( 0, 0, 0, 0 )                       ! divergence of horizontal momentum fluxes
++               CALL r56_up3_hrhs_before(ji,jj,jk,0.25_wp*r1_e1e2u(ji,jj)/e3u(ji,jj,jk,Kmm), &
++                  & 0.25_wp*r1_e1e2v(ji,jj)/e3v(ji,jj,jk,Kmm), &
++                  & puu(ji,jj,jk,Krhs),pvv(ji,jj,jk,Krhs))
+                puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - 0.25_wp * (  ( zFu_t(ji+1,jj) - zFu_t(ji,jj  ) )    &   ! add () for NP repro
+                   &                                                 + ( zFv_f(ji  ,jj) - zFv_f(ji,jj-1) )  ) * r1_e1e2u(ji,jj)   &
+                   &                                    / e3u(ji,jj,jk,Kmm)
+                pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) - 0.25_wp * (  ( zFu_f(ji,jj  ) - zFu_f(ji-1,jj) )    &   ! add () for NP repro
+                   &                                                 + ( zFv_t(ji,jj+1) - zFv_t(ji  ,jj) )  ) * r1_e1e2v(ji,jj)   &
+                   &                                    / e3v(ji,jj,jk,Kmm)
++               CALL r56_up3_hrhs_after(ji,jj,jk,puu(ji,jj,jk,Krhs),pvv(ji,jj,jk,Krhs))
+             END_2D
+          ENDIF
+          !                          ! =============== !
+@@ -330,9 +345,14 @@
+                !                                    ! vertical flux at level k+1
+                zzFu_kp1 = 0.25_wp * ( zFw(ji,jj) + zFw(ji+1,jj  ) ) * ( puu(ji,jj,jk+1,Kmm) + puu(ji,jj,jk,Kmm) - gamma1 * zl_u )
+                zzFv_kp1 = 0.25_wp * ( zFw(ji,jj) + zFw(ji  ,jj+1) ) * ( pvv(ji,jj,jk+1,Kmm) + pvv(ji,jj,jk,Kmm) - gamma1 * zl_v )
++               CALL r56_up3_vrhs_before(ji,jj,jk,zlu_uw_kp1,zlv_vw_kp1,zFwi,zFwj,zl_u,zl_v, &
++                  & zFwu(ji,jj),zFwv(ji,jj),zzFu_kp1,zzFv_kp1, &
++                  & r1_e1e2u(ji,jj)/e3u(ji,jj,jk,Kmm),r1_e1e2v(ji,jj)/e3v(ji,jj,jk,Kmm), &
++                  & puu(ji,jj,jk,Krhs),pvv(ji,jj,jk,Krhs))
+                !                                    ! divergence of vertical momentum flux
+                puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - ( zFwu(ji,jj) - zzFu_kp1 ) * r1_e1e2u(ji,jj) / e3u(ji,jj,jk,Kmm)
+                pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) - ( zFwv(ji,jj) - zzFv_kp1 ) * r1_e1e2v(ji,jj) / e3v(ji,jj,jk,Kmm) 
++               CALL r56_up3_vrhs_after(ji,jj,jk,puu(ji,jj,jk,Krhs),pvv(ji,jj,jk,Krhs))
+                !                                    ! store vertical flux for next level calculation
+                zFwu(ji,jj) = zzFu_kp1
+                zFwv(ji,jj) = zzFv_kp1
+@@ -352,8 +372,12 @@
+          END_2D
+       ELSE                                !-  added the 3D RHS  -!
+          DO_2D( 0, 0, 0, 0 )
++            CALL r56_up3_bottom_before(ji,jj,jk,zFwu(ji,jj),zFwv(ji,jj), &
++               & r1_e1e2u(ji,jj)/e3u(ji,jj,jk,Kmm),r1_e1e2v(ji,jj)/e3v(ji,jj,jk,Kmm), &
++               & puu(ji,jj,jk,Krhs),pvv(ji,jj,jk,Krhs))
+             puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - zFwu(ji,jj) * r1_e1e2u(ji,jj) / e3u(ji,jj,jk,Kmm)
+             pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) - zFwv(ji,jj) * r1_e1e2v(ji,jj) / e3v(ji,jj,jk,Kmm) 
++            CALL r56_up3_vrhs_after(ji,jj,jk,puu(ji,jj,jk,Krhs),pvv(ji,jj,jk,Krhs))
+          END_2D
+       ENDIF
+       !
+@@ -370,6 +394,7 @@
+          CALL trd_dyn( zu_trd, zv_trd, jpdyn_zad, kt, Kmm )
+          DEALLOCATE( zu_trd, zv_trd )
+       ENDIF
++      CALL r56_up3_finish
+       !
+ #if ! defined key_PSYCLONE_2p5p0
+       IF( .NOT. PRESENT( pFu ) )   DEALLOCATE( zwu, zwv ) 

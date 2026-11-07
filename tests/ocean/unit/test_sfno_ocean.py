@@ -22,8 +22,7 @@ from legoesm.ocean.dynamics.channel_packing import (
 )
 from legoesm.ml.conservation import (
     correct_ocean_volume,
-    correct_ocean_heat,
-    correct_ocean_salt,
+    correct_ocean_tracer,
 )
 from legoesm.core.field import Field
 
@@ -192,7 +191,7 @@ class TestOceanConservation:
         T_old = jnp.ones((grid_t10.n_lat, grid_t10.n_lon, nlev)) * 15.0
         T_new = jnp.ones((grid_t10.n_lat, grid_t10.n_lon, nlev)) * 16.0
 
-        T_fixed = correct_ocean_heat(T_new, T_old, h_k, h_k, grid_t10, mask)
+        T_fixed = correct_ocean_tracer(T_new, T_old, h_k, h_k, grid_t10, mask)
 
         w = grid_t10.weights[:, None]
         dlon = 2.0 * jnp.pi / grid_t10.n_lon

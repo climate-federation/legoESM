@@ -24,7 +24,7 @@ bit-identity across XLA versions does not.  Run under ``x64`` so the
 from __future__ import annotations
 
 import jax
-# Enable x64 at import (sibling test_leapfrog_ab2 convention) so the rtol=1e-9
+# Enable x64 at import so the rtol=1e-9
 # equivalence assertions are evaluated in float64; in the default float32 config
 # the benign re-association drift is ~2e-7 and the comparison is meaningless.
 jax.config.update("jax_enable_x64", True)

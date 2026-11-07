@@ -8,7 +8,7 @@
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/cardaudit_%j.out
 set -uo pipefail
 WT=/burg-archive/glab/users/pg2328/legoESM; cd $WT || exit 1
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/run"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/run"
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python \
   scripts/validate/ocean_fidelity/audit_orca1_tke_card.py \

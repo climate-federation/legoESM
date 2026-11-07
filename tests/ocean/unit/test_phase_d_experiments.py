@@ -162,3 +162,16 @@ def test_all_phase_d_experiments_registered():
         assert "create_initial_conditions" in cfg
         assert "create_forcings" in cfg
         assert "validate" in cfg
+
+
+def test_isomip_uses_protocol_seawater_heat_capacity():
+    """ISOMIP+ melt runs with the protocol c_w = 3974 J/kg/K; the generic
+    IceShelfConfig default (used by the OMIP ice-shelf path) is unchanged."""
+    from legoesm import constants
+    from legoesm.ocean.experiments.isomip_plus import ISOMIPPlusConfig
+    from legoesm.ocean.physics.ice_shelf import IceShelfConfig
+
+    for cfg in (ISOMIPPlusConfig(), ISOMIPPlusConfig.ocean0_cold(),
+                ISOMIPPlusConfig.ocean1_warm()):
+        assert cfg.melt.c_w == 3974.0 == constants.c_p_seawater_isomip
+    assert IceShelfConfig().c_w == constants.c_sw

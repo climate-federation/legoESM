@@ -35,21 +35,6 @@ def test_default_include_is_the_union_of_the_three_active_schemes():
     assert all(n.count(".") >= 2 for n in inc)
 
 
-def test_emanuel_downdraft_knob_appears_only_when_its_branch_is_on():
-    """``EmanuelConfig.downdraft_efficiency`` is read only inside
-    ``if config.enable_unsaturated_downdraft:``, which ships False, so with the
-    branch off it is a search dimension that can move nothing."""
-    off = default_focused_include(
-        turbulence="clubb", microphysics="morrison", convection="emanuel")
-    on = default_focused_include(
-        turbulence="clubb", microphysics="morrison", convection="emanuel",
-        emanuel_unsaturated_downdraft=True)
-    name = "atm.conv.EmanuelConfig.downdraft_efficiency"
-    assert name not in off
-    assert name in on
-    assert set(on) - set(off) == {name}
-
-
 def test_the_flag_is_refused_for_a_non_emanuel_scheme():
     """Silently ignoring it would leave the run label claiming physics the run
     does not have."""

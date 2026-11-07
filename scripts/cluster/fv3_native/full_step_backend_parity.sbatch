@@ -22,7 +22,17 @@
 # ARM selects hydro (default) or nh:
 #   sbatch --export=ALL,ARM=nh full_step_backend_parity.sbatch
 #   sbatch --export=ALL,ARM=moist full_step_backend_parity.sbatch
+# There is no established tolerance for arm-to-arm agreement yet.  A guessed
+# tight ceiling would fire on rounding, so the deliberately loose ceiling is 1
+# and every run surfaces a separate warning until evidence supports tightening.
 set -uo pipefail
+# The USER chose the ceiling 1 on 2026-09-11: there is no established
+# tolerance for arm-to-arm agreement yet, a guessed tight number would fire
+# on rounding, and he wants the number surfaced every run instead. The
+# WARNING band is the value measured that day and is what gets tightened
+# first. Both stay overridable; neither is a silent default.
+export MAX_REL="${MAX_REL:-1}"
+export ARM_TO_ARM_WARN_REL="${ARM_TO_ARM_WARN_REL:-1.4e-4}"
 # REPO is overridable so a run can be pinned to a worktree
 # (scripts/cluster/fv3_native/pin_worktree.sh) instead of reading the
 # live checkout. A job that reads the tree being edited produces numbers
@@ -39,20 +49,23 @@ export PYTHONPATH=$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src
 export JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu
 cd "$REPO"
 ARM="${ARM:-hydro}"
+# Opt in to the compiled JAX arm without changing either job default.
+JIT="${JIT:-0}"
 # --max-rel makes each arm a GATE rather than a report. Without it the
 # runner printed WORST and exited 0 whatever it said, so a regression was
 # visible only to a human reading the log (GLM MINOR, job 9444414). The
 # ceilings are the certified figures with a small margin: hydro and
-# hydro-moist certify at 1.1866e-09, the two NH arms at 6.6116e-04.
+# hydro-moist certify at 1.1866e-09.  The old 1e-3 NH ceiling predates the
+# boundary-floor fix and stopped binding; the lane now measures 1.4776e-06.
 case "$ARM" in
   hydro) EXTRA="--max-rel 2e-9" ;;
-  nh)    EXTRA="--nh --max-rel 1e-3" ;;
+  nh)    EXTRA="--nh --max-rel 3e-6" ;;
   # The moist arm needs --tracers: dp1 = zvir*q(sphum) has nothing to
   # read without them, and the runner refuses the combination anyway.
   moist) EXTRA="--moist --tracers --max-rel 2e-9" ;;
   # the NH moist arm: --nh redirects to the NH decks, --moist then
   # redirects those to their moist twins.
-  nhmoist) EXTRA="--nh --moist --tracers --max-rel 1e-3" ;;
+  nhmoist) EXTRA="--nh --moist --tracers --max-rel 3e-6" ;;
   # the energy fixer: hydrostatic + dry, scored against the deck
   # with consv_te = 1.0. Same ceiling as the other hydro arms.
   consv) EXTRA="--consv 1.0 --max-rel 2e-9" ;;
@@ -63,14 +76,17 @@ mkdir -p "$OUT"
 
 for BK in numpy jax; do
   echo "########## ARM=$ARM BACKEND=$BK"
+  JFLAG=""; [ "$BK" = jax ] && [ "$JIT" = 1 ] && JFLAG="--jit"
   timeout 10800 $PY scripts/validate/fv3_native/full_step_oracle_parity.py \
-    --backend "$BK" $EXTRA --json "$OUT/${BK}.json" > "$OUT/${BK}.log" 2>&1
-  echo "rc=$?"
+    --backend "$BK" $JFLAG $EXTRA --json "$OUT/${BK}.json" > "$OUT/${BK}.log" 2>&1
+  RC=$?
+  echo "rc=$RC"
   # The decisive lines only: the residual table and the port's own
   # tendency, which is what separates "wrong in detail" from "wrong
   # step". The full log stays in $OUT for either.
   sed -n '/one-step residual/,/^$/p' "$OUT/${BK}.log" | head -25
   grep -E "^(FAIL|PASS|WORST|verdict)" "$OUT/${BK}.log" | head -5
+  [ "$RC" -eq 0 ] || exit "$RC"
 done
 
 echo "########## BACKEND DELTA (jax vs numpy, same everything else)"
@@ -80,20 +96,23 @@ try:
     a = json.load(open(sys.argv[1])); b = json.load(open(sys.argv[2]))
 except Exception as e:            # a missing json means an arm died
     print(f"cannot compare: {e}")
-    raise SystemExit(0)
+    raise SystemExit(1)
 
 def flat(d, p=""):
     for k, v in (d or {}).items():
         if isinstance(v, dict):
             yield from flat(v, f"{p}{k}.")
-        elif isinstance(v, (int, float)):
+        elif (k not in BOOKKEEPING_KEYS
+              and isinstance(v, (int, float))
+              and not isinstance(v, bool)):
             yield f"{p}{k}", float(v)
 
+BOOKKEEPING_KEYS = {"batched", "compiled", "n_steps"}
 fa, fb = dict(flat(a)), dict(flat(b))
 keys = [k for k in fa if k in fb]
 if not keys:
     print("no shared numeric keys between the two runs")
-    raise SystemExit(0)
+    raise SystemExit(1)
 print(f"{'metric':50s} {'numpy':>12s} {'jax':>12s} {'rel':>10s}")
 worst = (0.0, None)
 for k in sorted(keys):
@@ -104,5 +123,26 @@ for k in sorted(keys):
         worst = (rel, k)
     print(f"{k:50s} {x:12.5e} {y:12.5e} {rel:10.2e}")
 print(f"\nWORST BACKEND-TO-BACKEND rel = {worst[0]:.3e} at {worst[1]}")
+import math, os
+bound = float(os.environ["MAX_REL"])
+# Defaulted here too, not only in the shell above: this program is
+# extracted and run standalone by the test that proves the scan
+# skips bookkeeping keys, and a hard lookup made that test depend
+# on the job's environment.
+warning = float(os.environ.get("ARM_TO_ARM_WARN_REL", "1.4e-4"))
+if not math.isfinite(bound):
+    print("FAIL: MAX_REL must be finite")
+    raise SystemExit(1)
+if worst[0] > warning:
+    print(f"WARN: arm-to-arm worst={worst[0]:.3e} exceeds warning "
+          f"band={warning:.3e}; ceiling={bound:g} is deliberately loose and "
+          "expected to be tightened")
+if worst[0] > bound:
+    print(f"FAIL: backend-to-backend {worst[0]:.3e} exceeds MAX_REL={bound:g} "
+          f"at {worst[1]}")
+    raise SystemExit(1)
+print(f"PASS: backend-to-backend within MAX_REL={bound:g}")
 EOF
-echo BKPARITY_DONE
+BKRC=$?
+echo "BKPARITY_DONE rc=$BKRC"
+exit $BKRC

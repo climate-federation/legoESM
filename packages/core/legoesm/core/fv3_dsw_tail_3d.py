@@ -77,6 +77,7 @@ from legoesm.core.fv3_pgrad import (
     pln_halo,
 )
 from legoesm.core.fv3_phase3d_common import (
+    batch_size,
     build_batched_gs,
     require_bool,
     require_f64_jax,
@@ -84,7 +85,6 @@ from legoesm.core.fv3_phase3d_common import (
     require_nord,
     stack_faces,
     stack_levels,
-    stack_levels_batched,
     validate_stacked,
 )
 from legoesm.grids.fv3_duo_halos import (
@@ -159,6 +159,12 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     require_bool(fname, "batched", batched)
     require_no_remap_needed(km, remap_follows=remap_follows)
     deck = _TAIL_DECK if cfg is None else cfg
+    # decision B1: per-level additive del-2 sponge coefficient (static
+    # floats; exactly 0.0 below the sponge; layers = 0 -> all zero, OFF)
+    from legoesm.core.fv3_duo_stepper import sponge_d2_profile
+    d2k = sponge_d2_profile(km, deck.sponge_del2_top_layers,
+                            deck.sponge_del2_top_factor, deck.sponge_d2_top)
+    sponge_on = bool(deck.sponge_del2_top_layers > 0 and deck.sponge_d2_top > 0.0)
     if not isinstance(deck, SWConfig):
         raise TypeError(
             f"{fname}: cfg must be an SWConfig or None, got {type(deck)!r}")
@@ -194,7 +200,8 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
         # What IS checkable without a table: the face axis and the level
         # axis.  A face or level slip is the defect that would otherwise
         # broadcast silently; the stagger axes are the kernels' own.
-        if arr.ndim != 4 or arr.shape[0] != 6 or arr.shape[3] != km:
+        if (arr.ndim != 4 or arr.shape[0] != batch_size(ctx)
+                or arr.shape[3] != km):
             raise ValueError(
                 f"{fname}: d_sw outputs[{nm!r}] has shape {arr.shape}; "
                 f"expected (6, i, j, {km}) -- the face axis and the "
@@ -227,13 +234,15 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     if batched:
         return _dsw_tail_phase_3d_batched(
             ctx, state, csw_outs, dsw_outs, dt, km, deck=deck,
+            d2k=d2k, sponge_on=sponge_on,
             hydrostatic=hydrostatic, nh_damp_w=nh_damp_w)
 
     # --- d_sw3 at every level, all faces (needed before barrier 2) -------
     # Python loops, not vmap (C2): each (t, k) body is independent, but
     # vectorising would be an optimisation, not a translation.
-    s3 = [[None] * km for _ in range(6)]    # per-face operands only (C1)
-    for t in range(6):
+    nb = batch_size(ctx)
+    s3 = [[None] * km for _ in range(nb)]   # per-face operands only (C1)
+    for t in range(nb):
         # PER-FACE flags.  The first draft of this module took
         # `GridFlags.from_gridstruct(ctx.gs6[0])` -- a constructor that
         # does not exist (it is `from_gs`), and a per-RUN rather than
@@ -261,15 +270,15 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     # a fresh value, there is no buffer to alias.
     ubb_bld, vbbtemp_bld = [], []
     for k in range(km):
-        xb6 = jnp.stack([s3[t][k]["ubb"] for t in range(6)], axis=0)
-        yb6 = jnp.stack([s3[t][k]["vbbtemp"] for t in range(6)], axis=0)
+        xb6 = jnp.stack([s3[t][k]["ubb"] for t in range(nb)], axis=0)
+        yb6 = jnp.stack([s3[t][k]["vbbtemp"] for t in range(nb)], axis=0)
         xb6, yb6 = average_shared_edge_bgrid(xb6, yb6, ctx.tab)
         ubb_bld.append(xb6)
         vbbtemp_bld.append(yb6)
 
     # --- d_sw4 / d_sw5 / d_sw6 on the blended ingredients ----------------
     per_face = []
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         gs_t, fl_t = ctx.gs6[t], ctx.flags6[t]
         u_lv, v_lv, w_lv = [], [], []
         ke_corner = []          # S12, the corner KE this phase assembles
@@ -315,7 +324,8 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
                 dsw_outs["ra_y"][t][..., k],
                 s4["ke"], gs_t, fl_t, bd, npx, npx, dt=dt,
                 hord_vt=deck.hord_vt, nord=deck.nord,
-                dddmp=deck.dddmp, d2_bg=deck.d2_bg, d4_bg=deck.d4_bg,
+                dddmp=deck.dddmp, d2_bg=deck.d2_bg + d2k[k],
+                d4_bg=deck.d4_bg,
                 d_con=0.0, hydrostatic=hydrostatic,
                 w=None if hydrostatic else dsw_outs["w"][t][..., k],
                 dw=None if hydrostatic else dsw_outs["dw"][t][..., k],
@@ -324,7 +334,12 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
                            s5["wk"], s5["vortfluxx"], s5["vortfluxy"],
                            gs_t, fl_t, bd, npx, npx,
                            nord_v=deck.nord_v, damp_v=deck.damp_v,
-                           d_con=0.0)
+                           # per-level STATIC gate on the loop path: levels
+                           # below the sponge trace no del-2 chain at all
+                           # (bitwise the pre-B1 step there; the batched arm
+                           # adds an exact 0.0 flux instead)
+                           d_con=0.0, sponge_on=bool(sponge_on and d2k[k] > 0.0),
+                           d2_sponge=d2k[k])
             u_lv.append(s6["u"])
             v_lv.append(s6["v"])
             if not hydrostatic:
@@ -351,24 +366,25 @@ def dsw_tail_phase_3d(ctx, state: dict, csw_outs: dict, dsw_outs: dict,
     for nm in ("ubb", "vbb", "ubbtemp", "vbbtemp"):
         outs[nm + "_prebarrier"] = jnp.stack(
             [stack_levels(fname, nm, [s3[t][k][nm] for k in range(km)])
-             for t in range(6)], axis=0)
+             for t in range(batch_size(ctx))], axis=0)
     outs["ubb_postbarrier"] = jnp.stack(
         [stack_levels(fname, "ubb", [ubb_bld[k][t] for k in range(km)])
-         for t in range(6)], axis=0)
+         for t in range(batch_size(ctx))], axis=0)
     outs["vbbtemp_postbarrier"] = jnp.stack(
         [stack_levels(fname, "vbbtemp",
                       [vbbtemp_bld[k][t] for k in range(km)])
-         for t in range(6)], axis=0)
+         for t in range(batch_size(ctx))], axis=0)
     return outs
 
 
 def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
-                               *, deck, hydrostatic, nh_damp_w) -> dict:
+                               *, deck, hydrostatic, nh_damp_w, d2k=None, sponge_on=False) -> dict:
     """The vmap-over-faces arm of :func:`dsw_tail_phase_3d` (C2a).
 
     Entry gates already ran in the caller.  The ``d_sw3`` and
     ``d_sw4/5/6`` FACE loops become one ``jax.vmap`` per level over
-    ``build_batched_gs``'s stacked view; the LEVEL loops stay Python;
+    ``build_batched_gs``'s stacked view, nested in an outer ``jax.vmap``
+    over the LEVEL axis (independent, identical bodies: R1a);
     and BARRIER 2 sits exactly where the loop path puts it -- between
     d_sw3 and the KE assembly, one level at a time, on the full
     six-face stack (dyn_core.F90:984).  It is a cross-face collective
@@ -411,25 +427,33 @@ def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
                          dt=dt, hord_mt=deck.hord_mt)
 
     vf3 = jax.vmap(one_face_sw3, in_axes=(0,) * 7)
-    s3 = [vf3(state["u"][..., k], state["v"][..., k],
-              csw_outs["uc"][..., k], csw_outs["vc"][..., k],
-              bview["gs"], da6, dac6) for k in range(km)]
+    # LEVELS (2026-09-29, the km=32 compile): the per-level bodies are
+    # independent and identical (R1a: only data varies with k; deck
+    # statics and dt are shared), so the former Python level loops --
+    # which traced d_sw3 and the d_sw4/5/6 tail km times each -- are an
+    # outer vmap over the trailing level axis, levels outside faces.
+    # Level axis 3 in and out: the (6, i, j, km) layout the loop path
+    # and the former stack_levels_batched produced.
+    vfk3 = jax.vmap(vf3, in_axes=(3, 3, 3, 3, None, None, None),
+                    out_axes=3)
+    s3 = vfk3(state["u"], state["v"], csw_outs["uc"], csw_outs["vc"],
+              bview["gs"], da6, dac6)
 
-    # --- BARRIER 2, verbatim: one level at a time, all six faces ------
+    # --- BARRIER 2, verbatim blend, ALL LEVELS IN ONE CALL (M8-B) -----
     # (dyn_core.F90:984, BGRID_NE; extent owned by
-    # average_shared_edge_bgrid.)
-    ubb_bld, vbbtemp_bld = [], []
-    for k in range(km):
-        xb6, yb6 = average_shared_edge_bgrid(s3[k]["ubb"],
-                                             s3[k]["vbbtemp"], ctx.tab)
-        ubb_bld.append(xb6)
-        vbbtemp_bld.append(yb6)
+    # average_shared_edge_bgrid.)  The blend at a cell reads only that
+    # level, so the levels ride as a trailing axis: the flat path vmaps
+    # the certified 2-D blend over it and the window arm fires ONE
+    # exchange instead of km (the exchange rounds were the measured
+    # overhead, 2026-09-06).
+    xb6, yb6 = average_shared_edge_bgrid(s3["ubb"], s3["vbbtemp"],
+                                         ctx.tab)
 
     # --- KE assembly + d_sw4/5/6, faces vmapped -----------------------
     def one_face_tail(u_k, v_k, ut_k, vt_k, delp_k, uc_k, vc_k, ua_k,
                       va_k, dg_k, crx_k, cry_k, xfx_k, yfx_k, rax_k,
                       ray_k, ubbtemp_k, vbb_k, ubb_b, vbbtemp_b, w_k,
-                      dw_k, gs_t, da_t, dac_t):
+                      dw_k, d2_k, gs_t, da_t, dac_t):
         fl = GridFlags(da_min=da_t, da_min_c=dac_t, **shared)
         # S12 (dyn_core.F90:1015-1020): pre- x post-barrier product,
         # identical formula and window to the loop path.
@@ -442,14 +466,15 @@ def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
                        crx_k, cry_k, xfx_k, yfx_k, rax_k, ray_k,
                        s4["ke"], gs_t, fl, bd, npx, npx, dt=dt,
                        hord_vt=deck.hord_vt, nord=deck.nord,
-                       dddmp=deck.dddmp, d2_bg=deck.d2_bg,
+                       dddmp=deck.dddmp, d2_bg=deck.d2_bg + d2_k,
                        d4_bg=deck.d4_bg, d_con=0.0,
                        hydrostatic=hydrostatic, w=w_k, dw=dw_k,
                        damp_w=nh_damp_w)
         s6 = d_sw6_duo(u_k, v_k, s5["ut"], s5["vt"], s5["ke"],
                        s5["wk"], s5["vortfluxx"], s5["vortfluxy"],
                        gs_t, fl, bd, npx, npx, nord_v=deck.nord_v,
-                       damp_v=deck.damp_v, d_con=0.0)
+                       damp_v=deck.damp_v, d_con=0.0,
+                       sponge_on=sponge_on, d2_sponge=d2_k)
         face = {"u": s6["u"], "v": s6["v"], "ke_corner": ke,
                 "ke": s5["ke"], "wk": s5["wk"],
                 "divg_d": s5["divg_d"], "delpc": s5["delpc"]}
@@ -457,37 +482,46 @@ def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
             face["w"] = s5["w"]
         return face
 
-    vft = jax.vmap(one_face_tail, in_axes=(0,) * 25)
-    per_level = []
-    for k in range(km):
-        per_level.append(vft(
-            state["u"][..., k], state["v"][..., k],
-            dsw_outs["ut"][..., k], dsw_outs["vt"][..., k],
-            dsw_outs["delp"][..., k],
-            csw_outs["uc"][..., k], csw_outs["vc"][..., k],
-            csw_outs["ua"][..., k], csw_outs["va"][..., k],
-            csw_outs["divg_d"][..., k],
-            dsw_outs["crx_adv"][..., k], dsw_outs["cry_adv"][..., k],
-            dsw_outs["xfx_adv"][..., k], dsw_outs["yfx_adv"][..., k],
-            dsw_outs["ra_x"][..., k], dsw_outs["ra_y"][..., k],
-            s3[k]["ubbtemp"], s3[k]["vbb"], ubb_bld[k], vbbtemp_bld[k],
-            None if hydrostatic else dsw_outs["w"][..., k],
-            None if hydrostatic else dsw_outs["dw"][..., k],
-            bview["gs"], da6, dac6))
+    # d2_k (the per-level sponge coefficient) is one scalar per LEVEL:
+    # shared across faces (None here), mapped over its own axis 0 in the
+    # level vmap below.
+    vft = jax.vmap(one_face_tail, in_axes=(0,) * 22 + (None, 0, 0, 0))
+    # w/dw are None in the hydrostatic arm: a None operand has no
+    # leaves, so its in_axes entry is irrelevant (same as on the face
+    # vmap above); every array operand carries its level axis at 3.
+    w_ax = None if hydrostatic else 3
+    vfkt = jax.vmap(vft, in_axes=(3,) * 20 + (w_ax, w_ax, 0, None, None, None),
+                    out_axes=3)
+    d2k_arr = jnp.asarray(d2k if d2k is not None else (0.0,) * km, dtype=fdt)
+    per = vfkt(
+        state["u"], state["v"],
+        dsw_outs["ut"], dsw_outs["vt"], dsw_outs["delp"],
+        csw_outs["uc"], csw_outs["vc"], csw_outs["ua"], csw_outs["va"],
+        csw_outs["divg_d"],
+        dsw_outs["crx_adv"], dsw_outs["cry_adv"],
+        dsw_outs["xfx_adv"], dsw_outs["yfx_adv"],
+        dsw_outs["ra_x"], dsw_outs["ra_y"],
+        s3["ubbtemp"], s3["vbb"], xb6, yb6,
+        None if hydrostatic else dsw_outs["w"],
+        None if hydrostatic else dsw_outs["dw"],
+        d2k_arr,
+        bview["gs"], da6, dac6)
 
     # --- assembly: identical keys and layouts to the loop path --------
     names = ("u", "v", "ke_corner", "ke", "wk", "divg_d",
              "delpc") + (() if hydrostatic else ("w",))
-    outs = {nm: stack_levels_batched(
-        fname, nm, [per_level[k][nm] for k in range(km)])
-        for nm in names}
+    outs = {}
+    for nm in names:
+        if nm not in per or per[nm].shape[3] != km:
+            raise KeyError(
+                f"{fname}: tail returned no level-batched {nm!r} (keys "
+                f"{sorted(per)}); the 3-D assembler must not silently "
+                f"drop a stage output")
+        outs[nm] = per[nm]
     for nm in ("ubb", "vbb", "ubbtemp", "vbbtemp"):
-        outs[nm + "_prebarrier"] = stack_levels_batched(
-            fname, nm, [s3[k][nm] for k in range(km)])
-    outs["ubb_postbarrier"] = stack_levels_batched(
-        fname, "ubb", ubb_bld)
-    outs["vbbtemp_postbarrier"] = stack_levels_batched(
-        fname, "vbbtemp", vbbtemp_bld)
+        outs[nm + "_prebarrier"] = s3[nm]
+    outs["ubb_postbarrier"] = xb6
+    outs["vbbtemp_postbarrier"] = yb6
     return outs
 
 
@@ -613,14 +647,19 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
             remap_step=remap_step)
 
     per_face = []
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         # C2: the face loop is a Python loop, not vmap.  The six bodies
         # are independent -- face t reads only its own slices and geopk
         # output, and writes only its own returned arrays; no face
         # reads what another wrote -- so batching would be legal but is
         # an optimisation, not a translation.
-        hs = (jnp.asarray(hs6[t], dtype=jnp.float64) if hs6 is not None
-              else jnp.zeros((m, m), dtype=jnp.float64))
+        # hs follows the run's storage dtype (fp32/mixed increment 2):
+        # ctx.hs6 is already cast by the context builder, so DON'T force
+        # f64 here (that would promote the f32 geopk column back to f64
+        # and trip the uniformity gate). fp64 default: hs6 is f64 ->
+        # byte-identical. The zeros fallback follows a field (delp).
+        hs = (jnp.asarray(hs6[t]) if hs6 is not None
+              else jnp.zeros((m, m), dtype=dsw_outs["delp"].dtype))
         got = geopk(dsw_outs["delp"][t], dsw_outs["pt"][t], hs, bd,
                     km=km, ptop=ptop, akap=akap, cp_air=cp_air,
                     cg=False, duogrid=True, computehalo=False,
@@ -635,7 +674,8 @@ def dgrid_pressure_phase_3d(ctx, dsw_outs, tail_outs, km, *, dt, ptop, akap,
             # dyn_core.F90:1511-1519, taken BEFORE :1531 one_grad_p.
             pk_remap = pk_pre
         # divg2 freshly zero per face, exactly the spec's loop body.
-        divg2 = jnp.zeros((m + 1, m + 1), dtype=jnp.float64)
+        # dtype follows storage (fp32/fp64), from dsw_outs["delp"]
+        divg2 = jnp.zeros((m + 1, m + 1), dtype=dsw_outs["delp"].dtype)
         u_t, v_t, pk_t, gz_t = one_grad_p(
             tail_outs["u"][t], tail_outs["v"][t], got["pk"], got["gz"],
             divg2, dsw_outs["delp"][t], ctx.gs6[t], bd,
@@ -676,8 +716,9 @@ def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
     n, ng = ctx.n, ctx.ng
     m = n + 2 * ng
     hs6 = getattr(ctx, "hs6", None)
-    hs_stack = (jnp.asarray(hs6, dtype=jnp.float64) if hs6 is not None
-                else jnp.zeros((6, m, m), dtype=jnp.float64))
+    # follow storage dtype (ctx.hs6 already cast); zeros fallback -> field
+    hs_stack = (jnp.asarray(hs6) if hs6 is not None
+                else jnp.zeros((6, m, m), dtype=dsw_outs["delp"].dtype))
 
     def one_face(delp_t, pt_t, hs_t, u_t, v_t, gs_t):
         got = geopk(delp_t, pt_t, hs_t, bd, km=km, ptop=ptop,
@@ -686,7 +727,8 @@ def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
                     a2b_ord=a2b_ord, bounded_domain=False,
                     sw_dynamics=False)
         pk_pre, gz_pre = got["pk"], got["gz"]
-        divg2 = jnp.zeros((m + 1, m + 1), dtype=jnp.float64)
+        # dtype follows storage (fp32/fp64), from delp_t
+        divg2 = jnp.zeros((m + 1, m + 1), dtype=delp_t.dtype)
         u_o, v_o, pk_t, gz_t = one_grad_p(
             u_t, v_t, got["pk"], got["gz"], divg2, delp_t, gs_t, bd,
             npx=bd.ie + 1, npy=bd.je + 1, npz=km, dt=dt, ptop=ptop,
@@ -704,45 +746,6 @@ def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
     return jax.vmap(one_face, in_axes=(0,) * 6)(
         dsw_outs["delp"], dsw_outs["pt"], hs_stack,
         tail_outs["u"], tail_outs["v"], bview["gs"])
-
-
-def make_dgrid_pressure_phase_3d_jit(ctx, km, *, ptop, akap, cp_air,
-                                     a2b_ord=4, d_ext=0.0, remap_step=False,
-                                     remap_follows=False, batched=False):
-    """Build the jit-compiled :func:`dgrid_pressure_phase_3d`.
-
-    Every STATIC operand is baked in here, so an invalid static value
-    raises at MAKE time (rule 5), not at first trace; the entry gates
-    run again inside the trace on the same static values.  The
-    returned function takes the DYNAMIC operands only::
-
-        f(dsw_outs, tail_outs, dt) -> face-stacked dict
-
-    ``dt`` is an ARGUMENT, not a closure constant, so a new time step
-    reuses the compiled phase (C3).  No ``donate_argnums`` (rule 3).
-    """
-    fname = "dgrid_pressure_phase_3d"
-    km = require_km(fname, km)
-    require_bool(fname, "remap_step", remap_step)
-    require_bool(fname, "remap_follows", remap_follows)
-    require_bool(fname, "batched", batched)
-    a2b_ord = require_nord(fname, "a2b_ord", a2b_ord)
-    if a2b_ord not in (2, 4):
-        raise ValueError(f"{fname}: a2b_ord must be 2 or 4, got {a2b_ord!r}")
-    for _nm, _v in (("ptop", ptop), ("akap", akap),
-                    ("cp_air", cp_air), ("d_ext", d_ext)):
-        if isinstance(_v, jax.Array):
-            raise TypeError(f"{fname}: {_nm} is STATIC; got a traced array")
-    require_no_remap_needed(km, remap_follows=remap_follows)
-
-    def _phase(dsw_outs, tail_outs, dt):
-        return dgrid_pressure_phase_3d(
-            ctx, dsw_outs, tail_outs, km, dt=dt, ptop=ptop, akap=akap,
-            cp_air=cp_air, a2b_ord=a2b_ord, d_ext=d_ext,
-            remap_step=remap_step, remap_follows=remap_follows,
-            batched=batched)
-
-    return jax.jit(_phase)
 
 
 # ---------------------------------------------------------------------------
@@ -805,11 +808,14 @@ def nh_exchanged_area6(ctx):
     # The gridstruct arrays are STATIC (concrete numpy on the ctx), so
     # this is a build-time check on the same values the authority lane
     # checks, not a data-dependent branch on a tracer.
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         require_real_area(ctx.gs6[t]["area"], t)
     return jnp.stack(
-        [jnp.asarray(ctx.gs6[t]["area"], dtype=jnp.float64)
-         for t in range(6)], axis=0)
+        # follow storage dtype: ctx.gs6 area is already cast by the
+        # context builder (fp64 default -> byte-identical); DON'T re-force
+        # f64 or it promotes the f32 divergence back to f64.
+        [jnp.asarray(ctx.gs6[t]["area"])
+         for t in range(batch_size(ctx))], axis=0)
 
 
 def _nh_tail_cfg(fname, cfg, hord_tm, nord_w, damp_w):
@@ -950,7 +956,8 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
                 f"{fname}: dsw_outs is missing {_nm!r}; keys are "
                 f"{sorted(dsw_outs)}")
         _a = jnp.asarray(dsw_outs[_nm])
-        if _a.ndim != 4 or _a.shape[0] != 6 or _a.shape[3] != km:
+        if (_a.ndim != 4 or _a.shape[0] != batch_size(ctx)
+                or _a.shape[3] != km):
             raise ValueError(
                 f"{fname}: dsw_outs[{_nm!r}] has shape {_a.shape}; "
                 f"expected (6, i, j, {km}) -- the face and level axes "
@@ -969,15 +976,16 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     # 9417598 raised "unknown field 'crx_adv'" and "unknown field 'zh'"
     # on the way to this).
     _m_a, _npx_c = ctx.n + 2 * ctx.ng, ctx.n
+    _nb = batch_size(ctx)
     _nh_shapes = {
-        "zh": (6, _m_a, _m_a, km + 1),
-        "gz": (6, _m_a, _m_a, km + 1),
-        "pk3": (6, _m_a, _m_a, km + 1),
-        "zs": (6, _m_a, _m_a),
-        "ws": (6, _npx_c, _npx_c),
-        "pk": (6, _npx_c, _npx_c, km + 1),
-        "pe": (6,) + field_shape("pe", ctx.n, ctx.ng, km),
-        "peln": (6,) + field_shape("peln", ctx.n, ctx.ng, km),
+        "zh": (_nb, _m_a, _m_a, km + 1),
+        "gz": (_nb, _m_a, _m_a, km + 1),
+        "pk3": (_nb, _m_a, _m_a, km + 1),
+        "zs": (_nb, _m_a, _m_a),
+        "ws": (_nb, _npx_c, _npx_c),
+        "pk": (_nb, _npx_c, _npx_c, km + 1),
+        "pe": (_nb,) + field_shape("pe", ctx.n, ctx.ng, km),
+        "peln": (_nb,) + field_shape("peln", ctx.n, ctx.ng, km),
     }
     _missing = [k for k in _nh_shapes if k not in nh]
     if _missing:
@@ -999,7 +1007,8 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     # interface axis shortened, which is what this check demanded --
     # measured (6, 12, 12, 3) against a required (6, 18, 18, 3) on the
     # first NH parity run (job 9417599).
-    _want_delz = (6,) + field_shape("delz", ctx.n, ctx.ng, km)
+    _want_delz = (batch_size(ctx),) + field_shape("delz", ctx.n, ctx.ng,
+                                                  km)
     if delz.shape != _want_delz:
         raise ValueError(
             f"{fname}: delz {delz.shape} must be {_want_delz} -- "
@@ -1039,7 +1048,7 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     gs6 = ctx.gs6
     faces = []
     stage_zh: list = []
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         # The DSW1 advective fluxes are ALREADY (i, j, km) with km at
         # axis 2 on this lane -- the spec's np.stack(..., axis=2) is the
         # transport phase's own stacked layout, so this is a plain slice.
@@ -1162,7 +1171,7 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     # gridstruct, and returns (u, v, pp, pk3, gz) -- the B-grid corner
     # scratch of pp(=pkc)/pk3/gz rides the returned functional carry.
     pg_faces = []
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         u_t, v_t, pkc_t, pk3_t, gz_t = nh_p_grad(
             tail_outs["u"][t], tail_outs["v"][t], pkc6[t], gz6[t],
             delp6[t], upd["pk3"][t], gs6[t], bd,
@@ -1291,7 +1300,8 @@ def _dgrid_nh_pressure_phase_3d_batched(ctx, csw_press, dsw_outs,
         a = upd.pop("_stage_zh_after_update_dz_d")
         b = upd.pop("_stage_zh_after_riem_solver3")
         stage_zh = [{"after_update_dz_d": a[t],
-                     "after_riem_solver3": b[t]} for t in range(6)]
+                     "after_riem_solver3": b[t]}
+                    for t in range(batch_size(ctx))]
 
     # --- zh/pkc duo exchanges, gz box, second pkc exchange: verbatim --
     # (:1482-1483, :1487-1494, :1496-1502 -- the loop path's own

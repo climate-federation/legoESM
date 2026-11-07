@@ -58,7 +58,7 @@ from legoesm.core.bulk_flux import compute_most_fluxes  # noqa: E402
 from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
     air_sea_fluxes,
     exner_potential_temperature,
-    latent_heat_vaporization_sst,
+    latent_heat_vaporization_sst as latent_heat_vaporization,
     pressure_at_height,
     rho_air_moist,
     seawater_q_sat,
@@ -103,7 +103,7 @@ def oracle():
     theta_s = np.asarray(
         exner_potential_temperature(jnp.asarray(sst), jnp.asarray(slp)))
     L_sst = np.asarray(  # noqa: N806 - latent-heat notation
-        latent_heat_vaporization_sst(jnp.asarray(theta_s)))
+        latent_heat_vaporization(jnp.asarray(theta_s)))
 
     # LY09 Stanton-branch bistability discriminator: sign of the Obukhov
     # numerator evaluated with each branch's Stanton number.  Different
@@ -197,7 +197,12 @@ def test_core_large_yeager_matches_aerobulk_ncar(oracle, heights):
         jnp.asarray(inp["q_air"]), jnp.asarray(oracle["theta_s"]),
         jnp.asarray(oracle["ssq"]), jnp.asarray(rho), z_ref=10.0,
         scheme="large_yeager", n_iter=5,
-        L_latent=jnp.asarray(oracle["L_sst"]), **kw)
+        L_latent=jnp.asarray(oracle["L_sst"]), **kw,
+        # RULE 5 (#2241): oracle comparison at the hard switches (width 0);
+        # the default-width gap is pinned per state in
+        # tests/core/test_aerobulk_ncar_oracle.py.
+        large_yeager_neutral_width=0.0, large_yeager_dthv_width=0.0,
+        large_yeager_cd_cutoff_width=0.0)
     tag = f"ncar_{heights}"
     m = oracle["ly_mask"]
     # legoESM core convention: heat positive-up => compare to -aerobulk.

@@ -66,7 +66,8 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None):
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
-    rrtmgp_fn = make_physics(phys_cfg, model_type=model_type, dt=dt)
+    rrtmgp_fn = make_physics(phys_cfg, model_type=model_type, dt=dt,
+                             surface_bulk_coeffs=None)   # radiation only
 
     if hs_fn is None:
         return rrtmgp_fn
@@ -258,7 +259,7 @@ def run_cubed_sphere(days, nlev, vertical_coord):
                         diag_every, label="Cubed-Sphere C36 RRTMGP")
 
 
-def run_latlon(days, nlev, vertical_coord, sb81_omega_conversion=False):
+def run_latlon(days, nlev, vertical_coord, sb81_omega_conversion=True):
     """Run Held-Suarez + RRTMGP on lat-lon 72x144."""
     import math as _m
     from legoesm.grids.latlon import create_latlon_grid
@@ -281,7 +282,7 @@ def run_latlon(days, nlev, vertical_coord, sb81_omega_conversion=False):
     config = CGridLatLonPrimitiveEquationConfig(
         A_h=A_h,
         fix_mass=True,
-        # #1029 omega-side SB81 conversion (hybrid lane only; default OFF).
+        # #1029 omega-side SB81 conversion (hybrid lane only; default ON).
         sb81_omega_conversion=sb81_omega_conversion)
     model = CGridLatLonPrimitiveEquationModel(grid, sigma, config)
 
@@ -536,11 +537,11 @@ def main():
     parser.add_argument("--grids", type=str, nargs="+",
                         default=["cubed_sphere", "latlon", "icosahedral", "spectral"],
                         help="Which grids to run")
-    parser.add_argument("--sb81-omega-conversion", action="store_true",
-                        default=False,
+    parser.add_argument("--sb81-omega-conversion",
+                        action=argparse.BooleanOptionalAction, default=True,
                         help="SB81 alpha-weighted kT*omega/p energy conversion "
                              "on the hybrid lat-lon lane (#1029; latlon+hybrid "
-                             "only, default OFF).")
+                             "only, default ON).")
     args = parser.parse_args()
 
     output_dir = Path(args.output)

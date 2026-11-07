@@ -135,3 +135,23 @@ class Test12f_AllBounded:
         alpha = compute_ice_albedo(T, ICFG)
         assert jnp.all(alpha >= 0.0)
         assert jnp.all(alpha <= 1.0)
+
+
+def test_snow_never_darkens_a_brighter_base():
+    """Aged snow (0.52 asymptote) over an ice-sheet band (0.82) must not pull
+    the cell below the base: on the plateau the snow IS the surface.  Over a
+    dark base the overlay is untouched (the floor is a no-op there)."""
+    from legoesm.surface_albedo import LandAlbedoConfig, land_albedo, snow_albedo
+    cfg = LandAlbedoConfig()
+    lat = jnp.zeros(3)
+    deep = jnp.full(3, 500.0)                    # fully snow covered
+    old = jnp.full(3, 200.0 * 86400.0)           # 200-day-old snow
+    aged = float(snow_albedo(old[:1], cfg)[0])
+    assert aged < 0.6, aged
+    base = jnp.asarray([0.10, 0.82, 0.62])
+    out = land_albedo(lat, deep, old, cfg, base_albedo=base)
+    assert float(out[0]) == pytest.approx(aged, rel=1e-6)    # dark base: aged snow (fp32 age decay)
+    assert float(out[1]) == pytest.approx(0.82, rel=1e-12)   # ice-sheet VIS: floored
+    assert float(out[2]) == pytest.approx(0.62, rel=1e-12)   # ice-sheet NIR: floored
+    fresh = land_albedo(lat, deep, jnp.zeros(3), cfg, base_albedo=base)
+    assert bool(jnp.all(fresh >= out))                   # fresh snow still brighter

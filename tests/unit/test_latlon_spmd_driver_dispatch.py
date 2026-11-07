@@ -43,9 +43,24 @@ def test_physics_fn_dynamics_only():
     assert fn is None
 
 
-def test_physics_fn_rejects_stateful_unified_physics():
-    """A stateful scheme (radiation/convection/...) -> loud NotImplementedError,
-    never a silent per-step reseed of the un-sharded PhysicsState carry."""
-    cfg = _latlon_cfg(radiation="gray", convection="sbm")
-    with pytest.raises(NotImplementedError, match="not yet SPMD-routed"):
+@pytest.mark.parametrize("hs", [False, True])
+def test_physics_fn_refuses_active_schemes(hs):
+    """Active schemes, with or without Held-Suarez, must never reach the
+    stateless closure: it would silently drop them."""
+    cfg = _latlon_cfg(radiation="gray", convection="sbm", held_suarez_forcing=hs)
+    with pytest.raises(RuntimeError, match="operator-split"):
         ModelDriver._latlon_spmd_physics_fn(_Stub(cfg))
+
+
+@pytest.mark.parametrize("hs,schemes,expected", [
+    (True, {}, False),                       # pure HS -> stateless lane
+    (False, {}, False),                      # dynamics-only -> stateless lane
+    (False, {"turbulence": "louis"}, True),
+    (True, {"turbulence": "louis"}, True),   # HS + scheme -> operator split
+    (True, {"radiation": "gray", "convection": "sbm"}, True),
+])
+def test_operator_split_routing(hs, schemes, expected):
+    """HS is additive: any active scheme selects the operator-split lane
+    (which applies the HS relaxation on top), as on every other lane."""
+    cfg = _latlon_cfg(held_suarez_forcing=hs, **schemes)
+    assert ModelDriver._operator_split_spmd_active(_Stub(cfg)) is expected

@@ -174,6 +174,56 @@ class TestAntisymmetry:
         )
 
 
+class TestPVFluxEnergyWork:
+    """The energy-conserving PV flux does no work (Ringler 2010 Eq. 49):
+    Σ_e dc·dv · F_e · F_q(e) = 0 with F = h_edge·u, for any u, h and PV.
+
+    Holds only with the symmetric pair average ½(q_e(e)+q_e(e')) (issue
+    #1927); the one-sided q_e(e') form leaves a 3e-3..3e-2 residual here.
+    Tolerance = the weight antisymmetry tolerance above (measured new
+    residual <= 2.3e-9 on these meshes).
+    """
+
+    @staticmethod
+    def _rel_work(mesh, F, Fq, A):
+        return float(jnp.abs(jnp.sum(A * F * Fq))
+                     / jnp.sqrt(jnp.sum(A * F ** 2) * jnp.sum(A * Fq ** 2)))
+
+    def _fields(self, mesh):
+        k = jax.random.split(jax.random.PRNGKey(7), 3)
+        u = jax.random.normal(k[0], (mesh.nEdges,), dtype=jnp.float64)
+        h = 1000.0 + 100.0 * jax.random.uniform(k[1], (mesh.nCells,), dtype=jnp.float64)
+        q = jax.random.normal(k[2], (mesh.nVertices,), dtype=jnp.float64)
+        A = jnp.asarray(mesh.dcEdge) * jnp.asarray(mesh.dvEdge)
+        return u, h, q, A
+
+    def test_2d_no_work_and_one_sided_form_fails(self, mesh):
+        from legoesm.core.operators_voronoi import (
+            edge_thickness, pv_edge, pv_flux_energy_conserving)
+        u, h, q, A = self._fields(mesh)
+        F = edge_thickness(h, mesh) * u
+        rel = self._rel_work(mesh, F, pv_flux_energy_conserving(u, h, q, mesh), A)
+        assert rel < 1e-6, f"PV flux does work: rel={rel:.3e}"
+
+        # Control: the pre-#1927 one-sided PV must be caught by this check.
+        eoe = mesh.edgesOnEdge
+        s = jnp.maximum(eoe, 0)
+        q_e, h_e = pv_edge(q, mesh), edge_thickness(h, mesh)
+        one_sided = jnp.sum(mesh.weightsOnEdge * q_e[s] * h_e[s] * u[s] * (eoe >= 0), axis=0)
+        assert self._rel_work(mesh, F, one_sided, A) > 1e-6
+
+    def test_3d_no_work(self, mesh):
+        from legoesm.core.operators_voronoi import (
+            edge_thickness_3d, pv_flux_energy_conserving_3d)
+        u, h, q, A = self._fields(mesh)
+        u3, h3, q3 = (jnp.stack([u, 2.0 * u], 1), jnp.stack([h, 1.5 * h], 1),
+                      jnp.stack([q, -q], 1))
+        F3 = edge_thickness_3d(h3, mesh) * u3
+        Fq3 = pv_flux_energy_conserving_3d(u3, h3, q3, mesh)
+        rel = self._rel_work(mesh, F3, Fq3, A[:, None])
+        assert rel < 1e-6, f"3-D PV flux does work: rel={rel:.3e}"
+
+
 # ===========================================================================
 # 3.  Stencil structure.
 # ===========================================================================

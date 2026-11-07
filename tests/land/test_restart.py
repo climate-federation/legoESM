@@ -415,3 +415,100 @@ def test_any_non_default_column_requires_a_stamp(tmp_path):
         load_land_restart(path, expected_land_mode="multilayer",
                           expected_ncol=_NCOL, expected_n_layers=_NLAY,
                           expected_soil_grid=_grid(total_depth=3.0))
+
+
+# --- prognostic carbon in the land restart (additive) -----------------------
+def test_restart_round_trips_carbon_pools_and_phi(tmp_path):
+    """Pools + permafrost phi survive a save/load cycle, and a biophysics-only
+    restart reports both as None rather than fabricating them."""
+    from legoesm.land.carbon.config import CarbonState
+
+    state, ncol = _fake_state(seed=3), _NCOL
+    kw = dict(land_mode="multilayer", t_end_s=1.0, n_steps_completed=1,
+              soil_grid=_grid())
+    carbon = CarbonState(**{f: jnp.asarray(np.full(ncol, 10.0 * (i + 1)))
+                            for i, f in enumerate(CarbonState._fields)})
+    phi = jnp.asarray(np.linspace(0.0, 1.0, ncol))
+
+    p = save_land_restart(tmp_path / "c.npz", state, carbon_state=carbon,
+                          soil_frozen_fraction=phi, **kw)
+    _s, meta = load_land_restart(p, expected_land_mode="multilayer",
+                                 expected_ncol=ncol)
+    got = meta["carbon_state"]
+    assert got is not None
+    for i, f in enumerate(CarbonState._fields):
+        np.testing.assert_allclose(np.asarray(getattr(got, f)), 10.0 * (i + 1))
+    np.testing.assert_allclose(np.asarray(meta["soil_frozen_fraction"]),
+                               np.linspace(0.0, 1.0, ncol))
+
+    # Biophysics-only: absent, not invented.
+    p2 = save_land_restart(tmp_path / "b.npz", state, **kw)
+    _s2, meta2 = load_land_restart(p2, expected_land_mode="multilayer",
+                                   expected_ncol=ncol)
+    assert meta2["carbon_state"] is None
+    assert meta2["soil_frozen_fraction"] is None
+
+
+def test_restart_with_partial_carbon_pools_raises(tmp_path):
+    """A half-written carbon state must fail loudly, not resume from whatever
+    pools happen to be present."""
+    from legoesm.land.carbon.config import CarbonState
+
+    state, ncol = _fake_state(seed=4), _NCOL
+    kw = dict(land_mode="multilayer", t_end_s=1.0, n_steps_completed=1,
+              soil_grid=_grid())
+    p = save_land_restart(tmp_path / "c.npz", state, **kw)
+    d = dict(np.load(p, allow_pickle=True))
+    for f in CarbonState._fields[:-1]:                 # drop ONE pool
+        d[f"carbon_{f}"] = np.full(ncol, 1.0)
+    np.savez_compressed(p, **d)
+    with pytest.raises(ValueError, match="missing"):
+        load_land_restart(p, expected_land_mode="multilayer",
+                          expected_ncol=ncol)
+
+
+def test_snow_node_temperature_round_trips_and_grafts(tmp_path):
+    """The snow-node temperature is prognostic: it round-trips exactly, is
+    grafted onto a snow-node template, and is absent when never written."""
+    from legoesm.land.restart import merge_land_restart_into_template
+    st = _fake_state(seed=3)._replace(
+        T_snow=jnp.asarray([250.0, 255.5, 261.0, 266.25, 271.0]))
+    save_land_restart(tmp_path / "r.npz", st, land_mode="multilayer",
+                      t_end_s=0.0, n_steps_completed=0)
+    st2, _ = load_land_restart(tmp_path / "r.npz",
+                               expected_land_mode="multilayer",
+                               expected_ncol=_NCOL, expected_n_layers=_NLAY)
+    np.testing.assert_array_equal(np.asarray(st2.T_snow), np.asarray(st.T_snow))
+    tmpl = _fake_state(seed=4)._replace(T_snow=jnp.zeros(_NCOL))
+    merged = merge_land_restart_into_template(st2, tmpl)
+    np.testing.assert_array_equal(np.asarray(merged.T_snow), np.asarray(st.T_snow))
+    save_land_restart(tmp_path / "r0.npz", _fake_state(seed=5),
+                      land_mode="multilayer", t_end_s=0.0, n_steps_completed=0)
+    st3, _ = load_land_restart(tmp_path / "r0.npz",
+                               expected_land_mode="multilayer",
+                               expected_ncol=_NCOL, expected_n_layers=_NLAY)
+    assert st3.T_snow is None
+
+
+def test_snow_node_restart_into_a_run_without_it_is_refused():
+    from legoesm.land.restart import merge_land_restart_into_template
+    st = _fake_state(seed=6)._replace(T_snow=jnp.full(_NCOL, 260.0))
+    with pytest.raises(ValueError, match="T_snow"):
+        merge_land_restart_into_template(st, _fake_state(seed=7))
+
+
+def test_restart_without_snow_node_into_a_node_run_starts_from_restored_soil():
+    """A restart that lacks T_snow, merged into a node-enabled template whose
+    soil differs, starts the node from the RESTORED top soil (capped at
+    freezing under snow), not from the template's cold-start value."""
+    from legoesm import constants
+    from legoesm.land.restart import merge_land_restart_into_template
+    old = _fake_state(seed=8)
+    old = old._replace(
+        T_soil=old.T_soil.at[:, 0].set(jnp.asarray([260.0, 280.0, 265.0, 290.0, 270.0])),
+        snow_depth=jnp.asarray([5.0, 5.0, 0.0, 0.0, 1.0]))
+    tmpl = _fake_state(seed=9)._replace(T_snow=jnp.full(_NCOL, 300.0))
+    merged = merge_land_restart_into_template(old, tmpl)
+    tf = constants.T_freeze
+    np.testing.assert_array_equal(np.asarray(merged.T_snow),
+                                  np.asarray([260.0, tf, 265.0, 290.0, 270.0]))

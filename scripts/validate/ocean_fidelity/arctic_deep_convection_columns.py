@@ -47,7 +47,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -111,13 +110,9 @@ def _static_instability(rho, wet, top_levels):
     return np.nanmin(d, axis=-1) < 0.0
 
 
-def _git_sha(repo):
-    try:
-        return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                              capture_output=True, text=True,
-                              check=True).stdout.strip()
-    except Exception:  # noqa: BLE001 -- provenance is best-effort
-        return "unknown"
+def _git_sha(repo) -> str:
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(repo).commit or "unknown"
 
 
 def main() -> int:

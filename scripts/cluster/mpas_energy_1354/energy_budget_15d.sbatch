@@ -8,6 +8,11 @@
 #SBATCH --mem=64G
 #SBATCH --time=05:00:00
 #SBATCH --job-name=en1354
+# REPOINTED 2026-09-23: config/amip/amip_production.yaml became the CAM6
+# suite on that date.  This script exists to reproduce a SPECIFIC recorded
+# analysis, so it now names config/amip/amip_sundqvist_l36.yaml -- the same
+# deck under its new name, byte-unchanged -- rather than silently running a
+# different model.
 #
 # #1354 / #1515 — column energy-budget closure test.
 #
@@ -27,7 +32,7 @@
 # A LEAK ~ 0 => budget closes => the warming is a real flux imbalance (find the
 # flux).  A LEAK ~ 20 W/m2 => energy created internally => bookkeeping bug.
 #
-# EXACT #1354 recipe: config/amip/amip_production.yaml (MPAS Voronoi L5 / L30 /
+# EXACT #1354 recipe: config/amip/amip_sundqvist_l36.yaml (MPAS Voronoi L5 / L30 /
 # sigma / dt 75, bechtold + morrison + multilayer land, conservative tracer
 # clamp default-on, real CMIP6 forcing, ERA5 IC).  Machine paths from
 # amip_production.sh.  15 days is enough for the residual; --diag-days 1.
@@ -46,6 +51,7 @@ export JAX_ENABLE_X64=1
 
 # machine forcing/IC paths (defines AMIP_PATH_FLAGS)
 source config/amip/amip_production.sh
+amip_require_forcing_files || exit 3   # aerosol / CCN / volcanic staged?
 
 echo "sha=$(git rev-parse --short HEAD)$([ -n "$(git status --porcelain)" ] && echo -dirty)  host=$(hostname)  $(date -u)"
 nvidia-smi --query-gpu=name --format=csv,noheader || true
@@ -53,7 +59,7 @@ nvidia-smi --query-gpu=name --format=csv,noheader || true
 
 echo "=== run_amip 15 d, energy tracker on, $(date -u) ==="
 "${PY}" -u scripts/run/run_amip.py \
-    --config config/amip/amip_production.yaml \
+    --config config/amip/amip_sundqvist_l36.yaml \
     "${AMIP_PATH_FLAGS[@]}" \
     --days 12 --diag-days 1 --output "${OUT}"
 

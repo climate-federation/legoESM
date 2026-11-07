@@ -196,22 +196,21 @@ constructors (``CDGridCompressibleEulerConfig(...)`` /
 ### Edge-artifact-minimized factories (iter 467/468/483/484)
 
 For users prioritizing cube-edge artifact suppression over strict
-FV3-fidelity, two divergence-from-FV3 factories are provided:
+FV3-fidelity, divergence-from-FV3 factories are provided:
 
 ```python
 from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
     make_legoesm_nh_min_edge_config,             # iter-467: 50% reduction
-    make_legoesm_nh_min_edge_aggressive_config,  # iter-483: 60% reduction
 )
 from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
     make_legoesm_pe_min_edge_config,             # iter-468 (PE mirror)
-    make_legoesm_pe_min_edge_aggressive_config,  # iter-484 (PE mirror)
 )
 ```
 
 * ``min_edge`` factory: drops 3 hurting flags (iter-466 finding)
   — 50% θ′ edge ratio reduction at C8+duogrid (4.54 → 2.25).
-* ``aggressive`` factory: above + ``corner_div_damp_d2_bg=5e-2``
+* ``aggressive`` setting (factory removed, unused): pass
+  ``corner_div_damp_d2_bg=5e-2`` to the ``min_edge`` factory
   (iter-482) — 60% reduction (3.50 → 1.42×).  Trade-off:
   over-damps physical waves more than factory default.
 * PE variants are API-symmetric; iter-469/470 showed PE is
@@ -1694,9 +1693,9 @@ Key iterations:
   - iter 482: **composite iter-466 + iter-481 → 60% reduction
     (1.42×, 5 seeds pinned)**.
   - iter 483: new ``make_legoesm_nh_min_edge_aggressive_config``
-    user-facing factory.
+    user-facing factory (removed 2026-10-02, never called).
   - iter 484: PE mirror ``make_legoesm_pe_min_edge_aggressive_
-    config``.
+    config`` (removed 2026-10-02, never called).
 - **Iters 465-474 (compacted iter 480)**: edge-artifact
   empirical investigation phase 2 (per-flag + duogrid
   bisection start).

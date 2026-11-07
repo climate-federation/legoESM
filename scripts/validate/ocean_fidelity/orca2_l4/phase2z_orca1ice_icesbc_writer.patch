@@ -1,0 +1,230 @@
+--- shipped/src/ICE/icesbc.F90
++++ ORCA2_ORCA1ICE_OMIP_L4/MY_SRC/icesbc.F90
+@@ -11,6 +11,7 @@
+    !!   'key_si3' :                                     SI3 sea-ice model
+    !!----------------------------------------------------------------------
+    USE par_ice        ! SI3 parameters
++   USE dom_oce, ONLY : nn_hls, tmask, umask, vmask, ssmask, ssumask, ssvmask, ssfmask
+    USE ice            ! sea-ice: variables
+    USE sbc_oce        ! Surface boundary condition: ocean fields
+    USE sbc_ice        ! Surface boundary condition: ice   fields
+@@ -40,6 +41,11 @@
+    PUBLIC ice_sbc_flx   ! called by icestp.F90
+    PUBLIC ice_sbc_init  ! called by icestp.F90
+ 
++   INTEGER, SAVE :: num_l3bulk = -1
++   LOGICAL, SAVE :: ll_l3bulk_opened = .FALSE.
++   INTEGER, SAVE :: num_l4bulk2d = -1          ! full-domain SI3 bulk-boundary oracle stream (phase-2z)
++   LOGICAL, SAVE :: ll_l4bulk2d_opened = .FALSE.
++
+    !! * Substitutions
+ #  include "do_loop_substitute.h90"
+ #  include "read_nml_substitute.h90"
+@@ -85,6 +91,8 @@
+          CALL blk_ice_1( sf(jp_wndi)%fnow(:,:,1), sf(jp_wndj)%fnow(:,:,1), theta_air_zt(:,:), q_air_zt(:,:), & ! <<== in
+             &            sf(jp_slp )%fnow(:,:,1), tm_su(:,:),                                                & ! <<== in
+             &            putaui=utau_ice, pvtaui=vtau_ice )                                                    ! ==>> out
++         CALL l3bulk_dump_tau( kt, utau_ice, vtau_ice )
++         CALL l4_dump_bulk_tau_2d( kt, utau_ice, vtau_ice )
+          !
+          !CASE( jp_abl    )              !--- ABL formulation (utau_ice & vtau_ice are computed in ablmod)
+          !
+@@ -159,10 +167,11 @@
+          !
+       CASE( jp_blk, jp_abl )      !--- bulk formulation & ABL formulation
+          !
+-                                  CALL blk_ice_2( t_su(:,:,:), h_s(:,:,:), h_i(:,:,:),                &   ! <<== in 
++                                  CALL blk_ice_2( t_su(:,:,:), h_s(:,:,:), h_i(:,:,:),                &   ! <<== in
+                                      &            alb_ice(:,:,:), theta_air_zt(:,:), q_air_zt(:,:),   &   ! <<== in
+                                      &            sf(jp_slp)%fnow(:,:,1), sf(jp_qlw)%fnow(:,:,1),     &   ! <<== in
+                                      &            precip, sf(jp_snow)%fnow(:,:,1) )                       ! <<== in
++                                  CALL l3bulk_dump_flux( kt, 1 )
+                                   !
+          IF( ln_mixcpl        )   CALL sbc_cpl_ice_flx( kt, picefr=at_i_b(:,:), palbi=alb_ice(:,:,:), &
+                                      &                      psst=sst_m(:,:), pist=t_su(:,:,:),  &
+@@ -193,12 +202,144 @@
+       !
+       !                     !== some fluxes at the ice-ocean interface and in the leads
+       CALL ice_flx_other
++      CALL l3bulk_dump_flux( kt, 2 )
++      CALL l4_dump_bulk_flux_2d( kt )
+       !
+       IF( ln_timing )   CALL timing_stop('icesbc')
+       !
+    END SUBROUTINE ice_sbc_flx
+ 
+ 
++   SUBROUTINE l3bulk_header( kt, kstage, knval )
++      INTEGER, INTENT(in) :: kt, kstage, knval
++      CHARACTER(LEN=16), PARAMETER :: cmagic = 'NEMO_L3BULK_001 '
++      IF( .NOT. ll_l3bulk_opened ) THEN
++         OPEN( NEWUNIT=num_l3bulk, FILE='oracle_si3_bulk_operands.bin', STATUS='REPLACE', &
++            &  ACCESS='STREAM', FORM='UNFORMATTED', ACTION='WRITE' )
++         ll_l3bulk_opened = .TRUE.
++      ENDIF
++      WRITE(num_l3bulk) cmagic
++      WRITE(num_l3bulk) 1, kt, kstage, knval, 64
++   END SUBROUTINE l3bulk_header
++
++
++   SUBROUTINE l3bulk_dump_tau( kt, putau, pvtau )
++      INTEGER, INTENT(in) :: kt
++      REAL(wp), DIMENSION(jpi,jpj), INTENT(in) :: putau, pvtau
++      REAL(wp) :: z(17)
++      INTEGER :: ji, jj
++      IF( .NOT.lwp ) RETURN
++      ji = Nis0 ; jj = Njs0
++      z = (/ sf(jp_wndi)%fnow(ji,jj,1), sf(jp_wndj)%fnow(ji,jj,1), &
++         & theta_air_zt(ji,jj), q_air_zt(ji,jj), sf(jp_slp)%fnow(ji,jj,1), tm_su(ji,jj), &
++         & rhoa(ji,jj), wndm_ice(ji,jj), Cd_ice(ji,jj), Ch_ice(ji,jj), Ce_ice(ji,jj), &
++         & theta_zu_i(ji,jj), q_zu_i(ji,jj), fr_i(ji,jj), smask0(ji,jj), putau(ji,jj), pvtau(ji,jj) /)
++      CALL l3bulk_header( kt, 0, SIZE(z) )
++      WRITE(num_l3bulk) z
++      FLUSH(num_l3bulk)
++   END SUBROUTINE l3bulk_dump_tau
++
++
++   SUBROUTINE l3bulk_dump_flux( kt, kstage )
++      INTEGER, INTENT(in) :: kt, kstage
++      REAL(wp) :: z1(50), z2(39)
++      INTEGER :: ji, jj
++      IF( .NOT.lwp ) RETURN
++      ji = Nis0 ; jj = Njs0
++      IF( kstage == 1 ) THEN
++         z1 = (/ t_su(ji,jj,1), h_s(ji,jj,1), h_i(ji,jj,1), a_ip_eff(ji,jj,1), h_ip(ji,jj,1), &
++            & h_il(ji,jj,1), cloud_fra(ji,jj), theta_air_zt(ji,jj), q_air_zt(ji,jj), &
++            & sf(jp_slp)%fnow(ji,jj,1), sf(jp_qlw)%fnow(ji,jj,1), precip(ji,jj), &
++            & sf(jp_snow)%fnow(ji,jj,1), qsr(ji,jj), rhoa(ji,jj), wndm_ice(ji,jj), &
++            & Ch_ice(ji,jj), Ce_ice(ji,jj), at_i_b(ji,jj), a_i_b(ji,jj,1), sst_m(ji,jj), &
++            & qns_oce(ji,jj), qsr_oce(ji,jj), emp(ji,jj), fr_i(ji,jj), &
++            & alb_ice(ji,jj,1), qsr_ice(ji,jj,1), qla_ice(ji,jj,1), dqla_ice(ji,jj,1), &
++            & qns_ice(ji,jj,1), dqns_ice(ji,jj,1), evap_ice(ji,jj,1), devap_ice(ji,jj,1), &
++            & tprecip(ji,jj), sprecip(ji,jj), emp_oce(ji,jj), emp_ice(ji,jj), emp_tot(ji,jj), &
++            & qemp_oce(ji,jj), qemp_ice(ji,jj), qns_tot(ji,jj), qsr_tot(ji,jj), &
++            & qprec_ice(ji,jj), qevap_ice(ji,jj,1), qtr_ice_top(ji,jj,1), &
++            & l3_qsat_ice, l3_theta_ice, l3_qlw_ice, l3_qsb_ice, l3_dqlw_ice /)
++         CALL l3bulk_header( kt, 1, SIZE(z1) )
++         WRITE(num_l3bulk) z1
++      ELSE
++         z2 = (/ at_i(ji,jj), at_i_b(ji,jj), vt_i(ji,jj), &
++            & u_ice(ji,jj), u_ice(ji-1,jj), v_ice(ji,jj), v_ice(ji,jj-1), &
++            & ssu_m(ji,jj), ssu_m(ji-1,jj), ssv_m(ji,jj), ssv_m(ji,jj-1), drag_io(ji,jj), &
++            & utau(ji,jj), vtau(ji,jj), frq_m(ji,jj), qsr_oce(ji,jj), qns_oce(ji,jj), &
++            & qemp_oce(ji,jj), e3t_m(ji,jj), sst_m(ji,jj), t_bo(ji,jj), &
++            & rDt_ice, r1_Dt_ice, rho0, rcp, rt0, epsi10, rn_amax_2d(ji,jj), smask0(ji,jj), &
++            & MERGE(1._wp,0._wp,ln_icedyn), MERGE(1._wp,0._wp,ln_Cx_ice_frm), REAL(nn_frm,wp), &
++            & MERGE(1._wp,0._wp,ln_leadhfx), MERGE(1._wp,0._wp,ln_icedO), &
++            & MERGE(1._wp,0._wp,ln_icedH), rn_Cd_io, qsb_ice_bot(ji,jj), fhld(ji,jj), qlead(ji,jj) /)
++         CALL l3bulk_header( kt, 2, SIZE(z2) )
++         WRITE(num_l3bulk) z2
++      ENDIF
++      FLUSH(num_l3bulk)
++   END SUBROUTINE l3bulk_dump_flux
++
++
++   SUBROUTINE l4bulk2d_open
++      INTEGER :: ios
++      IF( .NOT. ll_l4bulk2d_opened ) THEN
++         OPEN( NEWUNIT=num_l4bulk2d, FILE='oracle_l4_bulk_boundary_2d.bin', STATUS='REPLACE', &
++            &  ACCESS='STREAM', FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=ios )
++         IF( ios /= 0 )   CALL ctl_stop( 'cannot open oracle_l4_bulk_boundary_2d.bin' )
++         ll_l4bulk2d_opened = .TRUE.
++      ENDIF
++   END SUBROUTINE l4bulk2d_open
++
++
++   SUBROUTINE l4_dump_bulk_tau_2d( kt, putau_ice, pvtau_ice )
++      !! Phase-2z WRITE-only full-domain companion to l3bulk_dump_tau (the
++      !! certified single-column C1D probe, icesbc.F90:88-91 as executed).
++      !! Captures the SI3 bulk-boundary INPUTS (theta_air, q_air, p_surface,
++      !! wind components, rho_air, lw_down, qsr, precip, snow, cloud
++      !! fraction, Ch, Ce -- all module/forcing fields already valid at this
++      !! point in ice_sbc_tau) and the tau-stage OUTPUTS (utau_ice, vtau_ice,
++      !! wndm_ice) over the real masked domain, so the already-certified
++      !! single-column identity can be re-scored under real geometry.  No
++      !! model array is assigned; masking only selects owned wet cells.
++      INTEGER , INTENT(in) :: kt
++      REAL(wp), DIMENSION(jpi,jpj), INTENT(in) :: putau_ice, pvtau_ice
++      IF( .NOT.lwp ) RETURN
++      IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'l4 bulk-2d dump requires 64-bit wp' )
++      CALL l4bulk2d_open
++      WRITE(num_l4bulk2d) 'NEMO_L4BULK2D_1 '
++      WRITE(num_l4bulk2d) 1, kt, 0, jpi, jpj, jpl, 16, 0, STORAGE_SIZE(1._wp)
++      WRITE(num_l4bulk2d) l4_canon_2d(theta_air_zt,'T'), l4_canon_2d(q_air_zt,'T'), &
++         & l4_canon_2d(sf(jp_slp)%fnow(:,:,1),'T'), l4_canon_2d(sf(jp_wndi)%fnow(:,:,1),'T'), &
++         & l4_canon_2d(sf(jp_wndj)%fnow(:,:,1),'T'), l4_canon_2d(rhoa,'T'), &
++         & l4_canon_2d(sf(jp_qlw)%fnow(:,:,1),'T'), l4_canon_2d(qsr,'T'), &
++         & l4_canon_2d(precip,'T'), l4_canon_2d(sf(jp_snow)%fnow(:,:,1),'T'), &
++         & l4_canon_2d(cloud_fra,'T'), l4_canon_2d(Ch_ice,'T'), l4_canon_2d(Ce_ice,'T'), &
++         & l4_canon_2d(putau_ice,'T'), l4_canon_2d(pvtau_ice,'T'), l4_canon_2d(wndm_ice,'T')
++   END SUBROUTINE l4_dump_bulk_tau_2d
++
++
++   SUBROUTINE l4_dump_bulk_flux_2d( kt )
++      !! Phase-2z WRITE-only full-domain companion to l3bulk_dump_flux stage
++      !! 2 (icesbc.F90:200-201 as executed, immediately after ice_flx_other).
++      !! Captures the remaining SI3 bulk-boundary OUTPUTS not yet in scope at
++      !! the tau-stage frame: per-category qla_ice/dqla_ice/devap_ice/
++      !! alb_ice/qevap_ice (jpi,jpj,jpl) and aggregate emp_ice/emp_oce/
++      !! tprecip/sprecip/qemp_oce/qemp_ice/qsb_ice_bot/fhld/qlead/drag_io/
++      !! frq_m (jpi,jpj).  No model array is assigned.
++      INTEGER, INTENT(in) :: kt
++      IF( .NOT.lwp ) RETURN
++      IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'l4 bulk-2d dump requires 64-bit wp' )
++      CALL l4bulk2d_open
++      WRITE(num_l4bulk2d) 'NEMO_L4BULK2D_1 '
++      WRITE(num_l4bulk2d) 1, kt, 1, jpi, jpj, jpl, 11, 5, STORAGE_SIZE(1._wp)
++      WRITE(num_l4bulk2d) l4_canon_3d(qla_ice,'T'), l4_canon_3d(dqla_ice,'T'), &
++         & l4_canon_3d(devap_ice,'T'), l4_canon_3d(alb_ice,'T'), l4_canon_3d(qevap_ice,'T')
++      WRITE(num_l4bulk2d) l4_canon_2d(emp_ice,'T'), l4_canon_2d(emp_oce,'T'), &
++         & l4_canon_2d(tprecip,'T'), l4_canon_2d(sprecip,'T'), l4_canon_2d(qemp_oce,'T'), &
++         & l4_canon_2d(qemp_ice,'T'), l4_canon_2d(qsb_ice_bot,'T'), l4_canon_2d(fhld,'T'), &
++         & l4_canon_2d(qlead,'T'), l4_canon_2d(drag_io,'T'), l4_canon_2d(frq_m,'T')
++      FLUSH(num_l4bulk2d)
++   END SUBROUTINE l4_dump_bulk_flux_2d
++
++
+    SUBROUTINE ice_flx_dist( k_flxdist, pat_i, pa_i, ptn_ice, palb_ice, &
+       &                                pqns_ice, pqsr_ice, pdqn_ice, pevap_ice, pdevap_ice )
+       !!-------------------------------------------------------------------
+@@ -242,7 +383,7 @@
+       SELECT CASE( k_flxdist )       !==  averaged on all ice categories  ==!
+       !
+       CASE( 0 , 1 )
+-         !       
++         !
+          ALLOCATE( z_qns_m(A2D(0)), z_qsr_m(A2D(0)), z_dqn_m(A2D(0)), z_evap_m(A2D(0)), z_devap_m(A2D(0)) )
+          !
+          DO_2D( 0, 0, 0, 0 )
+@@ -409,7 +550,7 @@
+          !                                                                      and ice is thicker than 3 meters (arbitrary)
+          !    Note: This threshold is necessary when reading a landfast mask otherwise ice grows up to its limit at 20m
+          !          The limit for ice velocity should be 0.5 mm/s as for observations of landfast but it works better with larger values
+-         !          Hence, we use 5 mm/s 
++         !          Hence, we use 5 mm/s
+          IF( zvel(ji,jj) <= 5.e-03_wp .AND. at_i(ji,jj) >= (rn_amax_2d(ji,jj)-0.001_wp) .AND. vt_i(ji,jj) >= 3._wp )   qlead(ji,jj) = 0._wp
+          !
+          ! If the grid cell is almost fully covered by ice (no leads) and ice is thicker than 3 meters (arbitrary)
+@@ -433,10 +574,10 @@
+          qsb_ice_bot(:,:) = 0._wp
+          fhld       (:,:) = 0._wp
+       ENDIF
+-      
++
+    END SUBROUTINE ice_flx_other
+-   
+-   
++
++
+    SUBROUTINE ice_sbc_init
+       !!-------------------------------------------------------------------
+       !!                  ***  ROUTINE ice_sbc_init  ***
+@@ -491,6 +632,8 @@
+       !
+    END SUBROUTINE ice_sbc_init
+ 
++#include "l4_oracle_canon_subroutines.h90"
++
+ #else
+    !!----------------------------------------------------------------------
+    !!   Default option :         Empty module         NO SI3 sea-ice model

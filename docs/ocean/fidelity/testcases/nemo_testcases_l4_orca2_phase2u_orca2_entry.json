@@ -1,0 +1,49 @@
+{
+  "boundary_1": "VERIFIED_WITH_EXPLICIT_UNMEASURED",
+  "boundary_2_ice": "UNMEASURED_STOP",
+  "boundary_2_ocean": "VERIFIED_BIT_EXACT",
+  "card": "ORCA2-zps",
+  "comparison_domain": "rank0-owned y=148,x=90 after 2-cell halo strip",
+  "entry_identity": {
+    "S": {
+      "count": 399600,
+      "unequal": 0
+    },
+    "T": {
+      "count": 399600,
+      "unequal": 0
+    },
+    "ssh": {
+      "count": 13320,
+      "unequal": 0
+    },
+    "u": {
+      "count": 399600,
+      "unequal": 0
+    },
+    "v": {
+      "count": 399600,
+      "unequal": 0
+    }
+  },
+  "execution_guard": "ORCA2-zps is not execution-ready; unresolved selected arms: staged_gm_eiv, linear_implicit_bottom_drag, internal_wave_mixing, spatial_lateral_viscosity, freshwater_budget_carry, si3_jpl5_layered_prather_state",
+  "execution_ready": false,
+  "iceberg_inputs": [],
+  "icebergs_enabled": false,
+  "input_sha256": {
+    "ORCA_R2_zps_domcfg.nc": "7125f7a54e8693ff8f1327b878d2258d258878bc7302ac123ac671f2339d2839",
+    "data_1m_potential_temperature_nomask.nc": "ca00905c27078305e80130ea6dd07fc575de2ae3257fad38003b329458cf7f7a",
+    "data_1m_salinity_nomask.nc": "ad648d972f0631bde7e1b598d98470a979b7f2649271fc9cf5ccfca158e31d0c"
+  },
+  "precision": "fp64",
+  "status": "PASS",
+  "transcendentals": "libm",
+  "unmeasured_features": [
+    "freshwater_budget_carry",
+    "internal_wave_mixing",
+    "linear_implicit_bottom_drag",
+    "si3_jpl5_layered_prather_state",
+    "spatial_lateral_viscosity",
+    "staged_gm_eiv"
+  ]
+}

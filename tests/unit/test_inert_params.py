@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from legoesm.training.inert_params import (
+    assert_no_inert_over,
     freeze_unreachable,
     measure_leaf_reachability,
     mpi_max_reduce,
@@ -292,3 +293,47 @@ def test_a_poisoned_scene_still_proves_the_other_leaves_live():
         _params(), _vg(loss), [0.0, 2.0], device_put=False)
     assert n_used == 1                      # only the good scene is usable
     assert names == [], f"froze a leaf the poisoned scene measured live: {names}"
+
+
+def test_probe_resumed_mid_way_equals_one_uninterrupted_probe():
+    """A probe split across two job links must give the same measurement."""
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.training.inert_params import measure_leaf_reachability
+
+    params = {"a": jnp.asarray(1.0), "b": jnp.asarray(2.0)}
+    samples = [np.asarray([1.0, 0.0]), np.asarray([0.0, 0.0]),
+               np.asarray([0.0, 3.0]), np.asarray([2.0, 0.0])]
+    vg = jax.jit(jax.value_and_grad(
+        lambda p, s: p["a"] * s[0] + p["b"] ** 2 * s[1]))
+
+    full, names, n_full = measure_leaf_reachability(vg, params, samples,
+                                                    n_probe=4)
+    saved = []
+    measure_leaf_reachability(vg, params, samples[:2], n_probe=2,
+                              on_scene=lambda *a: saved.append(a))
+    assert [s[0] for s in saved] == [1, 2]
+    seen = []
+
+    def counting_vg(p, s):
+        seen.append(float(np.asarray(s).sum()))
+        return vg(p, s)
+
+    resumed, _, n_res = measure_leaf_reachability(
+        counting_vg, params, samples, n_probe=4, resume_state=saved[-1])
+    assert resumed == full and n_res == n_full == 4
+    assert seen == [3.0, 2.0], "resume re-evaluated scenes it had saved"
+
+
+def test_no_inert_over_judges_the_max_over_samples():
+    """A leaf zero on the first sample but live on a later one passes; a leaf
+    zero on every sample raises; a NaN sample does not poison a live leaf."""
+    first = {"a": jnp.array(1.0), "b": jnp.array(0.0)}
+    later = {"a": jnp.array(jnp.nan), "b": jnp.array(-2.0)}
+    assert_no_inert_over([first, later])
+    with pytest.raises(ValueError, match=r"identically-zero gradient: \['b'\]"):
+        assert_no_inert_over([first, {"a": jnp.array(3.0), "b": jnp.array(0.0)}])
+    with pytest.raises(ValueError, match="no samples"):
+        assert_no_inert_over([])

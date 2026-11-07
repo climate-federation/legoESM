@@ -102,3 +102,55 @@ def test_a_normal_canopy_keeps_its_two_leaf_split():
     assert bool(converged)
     assert abs(float(x[0]) - float(x[1])) > 1e-3, (
         "sunlit and shaded leaves collapsed on a normal canopy")
+
+
+# --------------------------------------------------------------------------- #
+# bare ground: no leaves, no leaf equations                                    #
+# --------------------------------------------------------------------------- #
+
+def test_bare_ground_pins_the_empty_leaf_state():
+    """At LAI == 0 the four leaf unknowns are pinned to the canopy air and the
+    ambient CO2 instead of being solved through ~1e7 s/m resistances (where the
+    leaf temperature drifted ~100 K and 90% of non-converged solves lived)."""
+    b = _bundle(LAI=0.0, fSun=0.0)
+    x, _n, converged = solve_canopy_closure(_X0, b, CanopyConfig())
+    assert bool(converged)
+    # A leaf area below the leaf-resistance floor (1e-6) is bare ground for
+    # the closure too: bit-identical resistances, so the same pins.
+    x_dust, _n, conv_dust = solve_canopy_closure(
+        _X0, _bundle(LAI=1e-7, fSun=0.5), CanopyConfig())
+    assert bool(conv_dust)
+    np.testing.assert_allclose(np.asarray(x_dust[:2]), float(x_dust[4]),
+                               rtol=0, atol=1e-6)
+    Tc, q_c = float(x[4]), float(x[5])
+    np.testing.assert_allclose(np.asarray(x[:2]), Tc, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(x[2:4]), float(b.Ca), rtol=0, atol=1e-6)
+    # The canopy air still balances against the soil and the atmosphere.
+    assert 250.0 < Tc < 330.0 and 0.0 < q_c < 0.05
+
+
+def test_the_pins_stay_off_on_a_column_with_leaves():
+    """A tiny but nonzero leaf area is a canopy, not bare ground: the leaf
+    rows keep their own balance (the pin trigger is the resistance floor)."""
+    x, _n, converged = solve_canopy_closure(
+        _X0, _bundle(LAI=0.5, fSun=0.3), CanopyConfig())
+    assert bool(converged)
+    assert abs(float(x[0]) - float(x[4])) > 1e-3, "leaf pinned to canopy air"
+    assert abs(float(x[2]) - 400.0) > 1e-3, "leaf Ci pinned to ambient"
+
+
+@pytest.mark.parametrize("lai", [1e-5, 1e-4, 1e-3])
+def test_a_sparse_canopy_at_night_converges_near_the_canopy_air(lai):
+    """Sparse leaves at night, just above the bare-ground pin: the solve must
+    converge and the leaves sit within a few K of the canopy air.  A latent-heat
+    cap that leaked a leaf-area-independent -0.2 W/m2 at zero flux drove
+    Tf - Tc ~ 0.005/LAI K (50 K at LAI 1e-4) and stalled below LAI ~1e-5."""
+    b = _bundle(LAI=lai, fSun=0.036)._replace(
+        SZA=jnp.asarray(90.0), APAR_Sun=jnp.asarray(0.0), APAR_Sh=jnp.asarray(0.0),
+        ASW_Sun=jnp.asarray(0.0), ASW_Sh=jnp.asarray(0.0), ASW_Soil=jnp.asarray(0.0),
+        La=jnp.asarray(250.0), Ta=jnp.asarray(265.0), Tv_atm=jnp.asarray(265.5),
+        Ts_bc=jnp.asarray(264.8), q_atm=jnp.asarray(0.002))
+    x0 = jnp.array([265.0, 265.0, 280.0, 280.0, 265.0, 0.002])
+    x, _n, converged = solve_canopy_closure(x0, b, CanopyConfig())
+    assert bool(converged)
+    assert float(jnp.max(jnp.abs(x[:2] - x[4]))) < 5.0

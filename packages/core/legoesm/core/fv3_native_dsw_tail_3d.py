@@ -79,6 +79,11 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
     n, ng, bd = ctx["n"], ctx["ng"], ctx["bd"]
     npx = n + 1
     m_a = n + 2 * ng
+    # decision B1: per-level additive del-2 sponge coefficient (0 = off)
+    from legoesm.core.fv3_duo_stepper import sponge_d2_profile
+    d2k = sponge_d2_profile(km, c.get("sponge_del2_top_layers", 0),
+                            c.get("sponge_del2_top_factor", 8.0),
+                            c.get("sponge_d2_top", 0.0))
 
     # --- d_sw3 at every level, all faces (needed before barrier 2) --------
     s3 = [[None] * km for _ in range(6)]
@@ -160,7 +165,7 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
                            s1["ra_x"], s1["ra_y"], s4["ke"],
                            ctx["gs6"][t], bd, npx, npx, dt=dt,
                            hord_vt=c["hord_vt"], nord=c["nord"],
-                           dddmp=c["dddmp"], d2_bg=c["d2_bg"],
+                           dddmp=c["dddmp"], d2_bg=c["d2_bg"] + d2k[k],
                            d4_bg=c["d4_bg"], d_con=0.0,
                            hydrostatic=hydrostatic,
                            w=(None if hydrostatic
@@ -178,7 +183,7 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
                            s5["ke"], s5["wk"], s5["vortfluxx"],
                            s5["vortfluxy"], ctx["gs6"][t], bd, npx, npx,
                            nord_v=c["nord_v"], damp_v=c["damp_v"],
-                           d_con=0.0)
+                           d_con=0.0, d2_sponge=d2k[k])
             acc["u"][:, :, k] = s6["u"]
             acc["v"][:, :, k] = s6["v"]
             if not hydrostatic:
@@ -282,7 +287,7 @@ def dgrid_pressure_phase_3d(ctx: dict, dsw_outs: list, tail_outs: list,
     return press
 
 
-def _ext_scalar_planes_6(ctx: dict, planes6: list) -> None:
+def ext_scalar_planes_6(ctx: dict, planes6: list) -> None:
     """Duo A-grid scalar exchange for one 2-D plane per face, fail-closed.
 
     The NH D-stage sites (``dyn_core.F90:1482-1483``: ``ext_scalar(zh)``,
@@ -298,7 +303,7 @@ def _ext_scalar_planes_6(ctx: dict, planes6: list) -> None:
         return
     if not excluded:
         raise ValueError(
-            "_ext_scalar_planes_6: dyn_core.F90:1482-1483 exchanges "
+            "ext_scalar_planes_6: dyn_core.F90:1482-1483 exchanges "
             "zh/pkc with ext_scalar on the duo lane, and this context "
             "has no ext bundle. Build it with use_ext_bundle=True, or "
             "declare the substitution with ext_exclude=('ascalar',).")
@@ -522,11 +527,11 @@ def dgrid_nh_pressure_phase_3d(ctx: dict, csw_press: list, dsw_outs: list,
     # zh + pkc duo exchanges (:1482-1483), per interface level.
     for k in range(km + 1):
         zh_k = [nh["zh6"][t][:, :, k] for t in range(6)]
-        _ext_scalar_planes_6(ctx, zh_k)
+        ext_scalar_planes_6(ctx, zh_k)
         for t in range(6):
             nh["zh6"][t][:, :, k] = zh_k[t]
         pkc_k = [csw_press[t]["pkc"][:, :, k] for t in range(6)]
-        _ext_scalar_planes_6(ctx, pkc_k)
+        ext_scalar_planes_6(ctx, pkc_k)
         for t in range(6):
             csw_press[t]["pkc"][:, :, k] = pkc_k[t]
 
@@ -542,7 +547,7 @@ def dgrid_nh_pressure_phase_3d(ctx: dict, csw_press: list, dsw_outs: list,
     if square_domain:
         for k in range(km + 1):
             pkc_k = [csw_press[t]["pkc"][:, :, k] for t in range(6)]
-            _ext_scalar_planes_6(ctx, pkc_k)
+            ext_scalar_planes_6(ctx, pkc_k)
             for t in range(6):
                 csw_press[t]["pkc"][:, :, k] = pkc_k[t]
 

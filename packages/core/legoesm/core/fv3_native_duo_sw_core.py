@@ -1079,6 +1079,7 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
 def d_sw6_duo(u, v, ut, vt, ke, wk, vortfluxx, vortfluxy, gs: dict,
               bd: Bounds, npx: int, npy: int, *, nord_v: int = 1,
               damp_v: float = 0.2, d_con: float = 0.0,
+              d2_sponge: float = 0.0,
               duogrid: bool = True,
               workspace_sentinel: float = 1.0e30) -> dict:
     """sw_core.F90 d_sw6 (symmetryclean 1871-2006) — the final
@@ -1162,6 +1163,26 @@ def d_sw6_duo(u, v, ut, vt, ke, wk, vortfluxx, vortfluxy, gs: dict,
         for j in range(js, je + 1):
             for i in range(is_, ie + 1 + 1):
                 v[i, j] = v[i, j] - ut[i, j]
+
+    # ---- decision B1: ADDITIVE del-2 sponge on the relative vorticity --
+    # A second del6_vt_flux chain with nord=0 (the plain del-2, sw_core
+    # :2008-2017) and coefficient d2_sponge*da_min_c -- the same
+    # dimensionless coefficient the tail feeds d_sw5's d2_bg slot for
+    # the divergence, so the top layers get one isotropic Laplacian on
+    # the wind.  Its own zero-filled work arrays (the del-6 fluxes above
+    # are NOT reused), and the same u += vt / v -= ut convention.
+    if d2_sponge > 0.0:
+        vort2 = _fl(isd, ied, jsd, jed)
+        ut2 = _fl(isd, ied + 1, jsd, jed)
+        vt2 = _fl(isd, ied, jsd, jed + 1)
+        del6_vt_flux(0, npx, npy, d2_sponge * da_min_c, wk, vort2, ut2, vt2,
+                     gsf, bd, duogrid=True)
+        for j in range(js, je + 1 + 1):
+            for i in range(is_, ie + 1):
+                u[i, j] = u[i, j] + vt2[i, j]
+        for j in range(js, je + 1):
+            for i in range(is_, ie + 1 + 1):
+                v[i, j] = v[i, j] - ut2[i, j]
 
     ub = np.full((ie + 1 - is_ + 1, je + 1 - js + 1), workspace_sentinel)
     vb = np.full((ie + 1 - is_ + 1, je + 1 - js + 1), workspace_sentinel)

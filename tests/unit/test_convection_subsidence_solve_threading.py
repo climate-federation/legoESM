@@ -67,8 +67,6 @@ from legoesm.atmosphere.physics.convection.config import (
     ConvectiveEDMFConfig,
     KainFritschConfig,
     MassFluxConfig,
-    TiedtkeConfig,
-    ZhangMcFarlaneConfig,
 )
 from legoesm.atmosphere.physics.convection.kain_fritsch import (
     kain_fritsch_convection,
@@ -77,10 +75,6 @@ from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel_implicit_flux,
     edmf_convection,
     mass_flux_convection,
-)
-from legoesm.atmosphere.physics.convection.tiedtke import tiedtke_convection
-from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
-    zhang_mcfarlane_convection,
 )
 
 DT_S = 300.0
@@ -114,15 +108,6 @@ def _column(ncol=2, nlev=20, T_sfc=302.0, q_sfc=17e-3, lapse_rate=7.0,
 # ConvectionOutput.  Keeping the adapters here (rather than a copy-pasted test
 # per scheme) is what lets gates 1-4 be stated once.
 
-def _run_tiedtke(ss, T_offset=0.0):
-    T, q_v, p_full, p_half, u, v = _column()
-    cpp = jnp.zeros_like(T)
-    cfg = TiedtkeConfig() if ss is None else TiedtkeConfig(subsidence_solve=ss)
-    out, _ = tiedtke_convection(
-        T + T_offset, q_v, p_full, p_half, u, v, cpp, dt=DT_S, config=cfg)
-    return out
-
-
 def _run_kain_fritsch(ss, T_offset=0.0):
     T, q_v, p_full, p_half, _u, _v = _column()
     cpp = jnp.zeros_like(T)
@@ -131,16 +116,6 @@ def _run_kain_fritsch(ss, T_offset=0.0):
     w_grid = jnp.zeros_like(T)
     out, _ = kain_fritsch_convection(
         T + T_offset, q_v, p_full, p_half, w_grid, cpp, dt=DT_S, config=cfg)
-    return out
-
-
-def _run_zm(ss, T_offset=0.0):
-    T, q_v, p_full, p_half, u, v = _column()
-    cpp = jnp.zeros_like(T)
-    cfg = (ZhangMcFarlaneConfig() if ss is None
-           else ZhangMcFarlaneConfig(subsidence_solve=ss))
-    out, _ = zhang_mcfarlane_convection(
-        T + T_offset, q_v, p_full, p_half, u, v, cpp, dt=DT_S, config=cfg)
     return out
 
 
@@ -184,8 +159,10 @@ def _run_bechtold(ss, T_offset=0.0):
 
 
 SCHEMES = {
-    "tiedtke": (_run_tiedtke, TiedtkeConfig, "advective"),
-    "zhang_mcfarlane": (_run_zm, ZhangMcFarlaneConfig, "advective"),
+    # tiedtke: the WRF port carries its own flux-form transport (no
+    # subsidence_solve field), like zhang_mcfarlane below.
+    # zhang_mcfarlane: the CAM6 port runs its own cloud model (cldprp /
+    # q1q2_pjr), not the shared subsidence kernel -- no subsidence_solve field.
     "mass_flux": (_run_mass_flux, MassFluxConfig, "advective"),
     # Kain-Fritsch already shipped the conservative solve (hardcoded at its
     # call site, PR #988); the field promotes it with the SAME default.

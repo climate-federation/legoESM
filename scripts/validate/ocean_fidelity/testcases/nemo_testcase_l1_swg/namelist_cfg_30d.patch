@@ -1,0 +1,18 @@
+--- namelist_cfg
++++ namelist_cfg
+@@ -16,12 +16,13 @@
+ !-----------------------------------------------------------------------
+ &namrun        !   parameters of the run
+ !-----------------------------------------------------------------------
++   nn_stock    =      24   ! acquisition: daily restart at one-hour Dt
+    cn_exp      =  "SWG"    !  experience name
+    nn_it000    =       1   !  first time step
+-   nn_itend    =   172800  !  10 ans  - 30 min - SWG 1/4deg
++   nn_itend    =      720  !  acquisition: shipped physics for 30 days
+ !   nn_itend    =    86400  !  10 ans  - 1h
+    nn_leapy    =      30   !  Leap year calendar (1) or not (0)
+-   nn_write    =     480   !  frequency of write in the output file   (modulo referenced to nn_it000)
++   nn_write    =      24   !  acquisition: daily diagnostic output
+    nn_istate   =       1   !  output the initial state (1) or not (0)
+ /
+ !-----------------------------------------------------------------------

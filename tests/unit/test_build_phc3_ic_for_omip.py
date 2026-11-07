@@ -75,31 +75,40 @@ def test_conversion_cools_and_grows_with_depth(tmp_path):
     and EXACTLY equal at the surface (p_ref = 0 there)."""
     t_an, _, _, _, depths = build_phc3.build_phc3_ic(
         _write_phc3_like(tmp_path, T_insitu_C=4.0))
-    col = t_an[0, :, 1, 1]                     # an ocean column
+    # Only down to the deepest OBSERVED level: below it the column is NaN by
+    # contract now, because holding the deepest observed value there is what
+    # wrote warm shelf water into the abyss.
+    k5000 = int(np.argmin(np.abs(depths - 5000.0)))
+    col = t_an[0, :k5000 + 1, 1, 1]            # an ocean column
     assert col[0] == pytest.approx(4.0, abs=1e-12)
     drop = 4.0 - col
     assert np.all(np.diff(drop) >= -1e-12), "cooling must not reverse"
     # At 5000 m the UNESCO correction is a few tenths of a degree.
-    k5000 = int(np.argmin(np.abs(depths - 5000.0)))
-    assert 0.1 < drop[k5000] < 1.0
+    assert 0.1 < drop[-1] < 1.0
+    assert np.all(np.isnan(t_an[0, k5000 + 1:, 1, 1]))
 
 
 def test_salinity_passes_through_unchanged(tmp_path):
     """Only temperature is converted; salinity must survive the re-levelling
     of a constant column exactly."""
-    _, s_an, _, _, _ = build_phc3.build_phc3_ic(
+    _, s_an, _, _, depths = build_phc3.build_phc3_ic(
         _write_phc3_like(tmp_path, S=34.7))
-    np.testing.assert_allclose(s_an[0, :, 1, 1], 34.7, rtol=0, atol=1e-12)
+    k5000 = int(np.argmin(np.abs(depths - 5000.0)))
+    np.testing.assert_allclose(
+        s_an[0, :k5000 + 1, 1, 1], 34.7, rtol=0, atol=1e-12)
+    # Below the deepest observed level there is nothing to pass through.
+    assert np.all(np.isnan(s_an[0, k5000 + 1:, 1, 1]))
 
 
 def test_land_column_stays_nan(tmp_path):
     """A land column must come out NaN, not filled -- the downstream WOA path
     treats NaN as no-data and would otherwise get fabricated water."""
-    t_an, s_an, _, _, _ = build_phc3.build_phc3_ic(
+    t_an, s_an, _, _, depths = build_phc3.build_phc3_ic(
         _write_phc3_like(tmp_path, land_col=True))
     assert np.all(np.isnan(t_an[0, :, 0, 0]))
     assert np.all(np.isnan(s_an[0, :, 0, 0]))
-    assert np.all(np.isfinite(t_an[0, :, 1, 1]))
+    k5000 = int(np.argmin(np.abs(depths - 5000.0)))
+    assert np.all(np.isfinite(t_an[0, :k5000 + 1, 1, 1]))
 
 
 def _write_ragged(tmp_path):
@@ -148,8 +157,13 @@ def test_pressure_cap_handles_every_bottom_depth_case(tmp_path):
     # cap uses the DEEPEST valid level (5000 m), not the level above the gap.
     gap_col = t_an[0, :, 1, 0]
     full_col = t_an[0, :, 1, 1]
-    assert np.all(np.isfinite(gap_col))
-    np.testing.assert_allclose(gap_col, full_col, rtol=0, atol=1e-12)
+    assert np.all(np.isfinite(gap_col[:k5000 + 1]))
+    assert np.all(np.isnan(gap_col[k5000 + 1:]))
+    # Compare only where both are observed: below 5000 m both are NaN, and
+    # assert_allclose treats NaN == NaN as a match, so comparing the whole
+    # column would pass with the columns agreeing about nothing at all.
+    np.testing.assert_allclose(gap_col[:k5000 + 1], full_col[:k5000 + 1],
+                               rtol=0, atol=1e-12)
 
     # The cap must not touch levels shallower than the deepest valid source
     # depth -- there p_eff == the target depth.
@@ -157,16 +171,20 @@ def test_pressure_cap_handles_every_bottom_depth_case(tmp_path):
     assert 0.1 < 4.0 - full_col[k5000] < 1.0
 
 
-def test_pressure_cap_holds_below_the_deepest_valid_source_level(tmp_path):
-    """Below the source's data the potential temperature must be the value AT
-    the deepest valid depth, not an ever-growing extrapolated correction."""
-    t_an, _, _, _, depths = build_phc3.build_phc3_ic(
+def test_nothing_is_written_below_the_deepest_valid_source_level(tmp_path):
+    """Below the source's data there must be NO value at all.  This used to
+    hold the deepest observed value instead, which wrote a shelf column's warm
+    bottom water to 5500 m; the pressure cap existed only to stop that held
+    value from also being adiabatically corrected as if it sat in the abyss."""
+    t_an, s_an, _, _, depths = build_phc3.build_phc3_ic(
         _write_phc3_like(tmp_path, T_insitu_C=4.0, land_col=False))
-    col = t_an[0, :, 1, 1]
     below = depths > _DEPTHS[-1]          # deeper than the source's 5000 m
     assert below.any()
-    np.testing.assert_allclose(col[below], col[below][0],
-                               rtol=0, atol=1e-12)
+    assert np.all(np.isnan(t_an[0, below, 1, 1]))
+    assert np.all(np.isnan(s_an[0, below, 1, 1]))
+    # ... and the deepest OBSERVED level is still there, so this is a cut and
+    # not a wholesale blanking of the column.
+    assert np.isfinite(t_an[0, ~below, 1, 1]).all()
 
 
 def test_missing_variable_raises_with_the_available_names(tmp_path):

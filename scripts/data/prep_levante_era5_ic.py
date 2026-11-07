@@ -140,7 +140,7 @@ def build_era5_ic_zarr(
         log.info(f"Removing existing Zarr at {out_path}")
         shutil.rmtree(out_path)
 
-    with tempfile.TemporaryDirectory(prefix="era5ic_", dir="/scratch/b/b309178") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="era5ic_", dir=out_path.parent) as tmpdir:
         tmp = Path(tmpdir)
 
         datasets: list[xr.Dataset] = []

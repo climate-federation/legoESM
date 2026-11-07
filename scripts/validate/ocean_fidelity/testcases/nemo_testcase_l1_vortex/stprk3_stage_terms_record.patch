@@ -1,0 +1,65 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -31,5 +31,7 @@
+    !
+    USE prtctl         ! print control
++   USE vortex_r8_stage_terms, ONLY : vortex_r8_stage_begin, vortex_r8_stage_rhs,   &
++      &                              vortex_r8_stage_state, vortex_r8_stage_finish
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -302,5 +304,7 @@
+             !
+          ENDIF
++         IF( kstp == nit000 .AND. ( kstg == 2 .OR. kstg == 3 ) )   &
++            CALL vortex_r8_stage_begin( kstp, kstg, Kbb, Kmm, Kaa, Krhs, uu, vv )
+          !           !============================================!
+          !           !==   RHS : part computed at each stages   ==!
+          !           !============================================!
+@@ -322,9 +326,11 @@
+             CALL    eos    (        ts, Kmm, rhd, rhop )     ! Kmm in situ density anomaly for hpg computation
+             !                                                ! and potential density for BGC 
+             CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )  ! Hydrostratic Pressure Gradient (HPG)
++            IF( kstp == nit000 )   CALL vortex_r8_stage_rhs( 'hpg', Krhs, uu, vv )
+             !
+             !                             !* Coriolis / vorticity       ==> 3D RHS
+             CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )
++            IF( kstp == nit000 )   CALL vortex_r8_stage_rhs( 'vor', Krhs, uu, vv )
+             !
+             !                             !* advection (VIF or FF)      ==> 3D RHS
+             IF( ln_dynadv_vec ) THEN                        ! VIF: only velocities used for momentum advection
+@@ -386,6 +397,8 @@
+ #endif
+                END_3D
+             ENDIF
++            IF( kstp == nit000 .AND. kstg == 2 )   &
++               CALL vortex_r8_stage_state( 'update', Kaa, uu, vv )
+             !
+             IF(sn_cfctl%l_prtctl)   CALL prt_ctl( tab3d_1=uu(:,:,:,Kaa), clinfo1='stp stg   - Ua: ', mask1=umask,   &
+                &                                  tab3d_2=vv(:,:,:,Kaa), clinfo2=           ' Va: ', mask2=vmask, clinfo3='dyn' )
+@@ -398,6 +411,7 @@
+             !*  complete the momentum RHS *!   except ZDF (implicit)
+             !
+                                CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )     ! lateral mixing    
++            IF( kstp == nit000 )   CALL vortex_r8_stage_rhs( 'ldf', Krhs, uu, vv )
+             !
+             IF( ln_zdfosm  )   CALL dyn_osm( kstp,      Kmm, uu, vv, Krhs )     ! OSMOSIS non-local velocity fluxes
+             !
+@@ -428,6 +442,8 @@
+          !                     !*  DYN time integration + ZDF  *!   ∆t = rDt
+          !
+          IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )  ! vertical diffusion and time integration
++         IF( kstp == nit000 .AND. kstg == 3 )   &
++            CALL vortex_r8_stage_state( 'zdf', Kaa, uu, vv )
+ 
+          !
+          !                 !==  All stages: correct the barotropic component ==!   at Kaa = N+1/3, N+1/2 or N+1
+@@ -447,6 +463,8 @@
+ #if ! defined key_PSYCLONE_2p5p0
+          DEALLOCATE( zub, zvb )
+ #endif
++         IF( kstp == nit000 .AND. ( kstg == 2 .OR. kstg == 3 ) )   &
++            CALL vortex_r8_stage_finish( kstg, Kaa, uu, vv )
+ 
+          !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+          !>>>            Tracers : RHS computation + time-stepping            <<<

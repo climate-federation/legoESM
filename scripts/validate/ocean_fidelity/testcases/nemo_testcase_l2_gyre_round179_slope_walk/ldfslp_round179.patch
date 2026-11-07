@@ -1,0 +1,155 @@
+--- ldfslp.F90
++++ ldfslp.F90
+@@ -121,9 +121,40 @@
+       REAL(wp), DIMENSION(A2D(1))   ::  zvslp_hml, zwslpj_hml, r1_hmlv
+       REAL(wp), DIMENSION(A2D(1))   ::                         r1_hmlw
+       REAL(wp), DIMENSION(A2D(2),2) ::  zgru, zgrv
++      LOGICAL :: lr179_write
++      INTEGER :: r179_unit
++      CHARACTER(LEN=16)  :: r179_magic
++      CHARACTER(LEN=128) :: r179_name
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r179_e3u, r179_e3v
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r179_zgru, r179_zgrv, r179_zdzr
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r179_zau, r179_zav
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r179_zbu_raw, r179_zbv_raw
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r179_zbu, r179_zbv
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r179_zfi, r179_zfj
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r179_zmli, r179_zmlj
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r179_zdepu, r179_zdepv
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r179_zwz, r179_zww
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r179_zuslp_pre, r179_zvslp_pre
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r179_zuslp_post, r179_zvslp_post
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: r179_r3t, r179_r3u, r179_r3v
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: r179_zhmlpt
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: r179_r1_hmlu, r179_r1_hmlv, r179_r1_hmlw
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: r179_nmln, r179_miku, r179_mikv
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: r179_mikt, r179_iku, r179_ikv
+       !!----------------------------------------------------------------------
+       !
+       IF( ln_timing )   CALL timing_start('ldf_slp')
++      lr179_write = lwp .AND. kt == 1081
++      IF( lr179_write ) THEN
++         ALLOCATE( r179_e3u(jpi,jpj,jpk), r179_e3v(jpi,jpj,jpk), r179_zgru(jpi,jpj,jpk), r179_zgrv(jpi,jpj,jpk), r179_zdzr(jpi,jpj,jpk), r179_zau(jpi,jpj,jpk), r179_zav(jpi,jpj,jpk), r179_zbu_raw(jpi,jpj,jpk), r179_zbv_raw(jpi,jpj,jpk), r179_zbu(jpi,jpj,jpk), r179_zbv(jpi,jpj,jpk), r179_zfi(jpi,jpj,jpk), r179_zfj(jpi,jpj,jpk), r179_zmli(jpi,jpj,jpk), r179_zmlj(jpi,jpj,jpk), r179_zdepu(jpi,jpj,jpk), r179_zdepv(jpi,jpj,jpk), r179_zwz(jpi,jpj,jpk), r179_zww(jpi,jpj,jpk), r179_zuslp_pre(jpi,jpj,jpk), r179_zvslp_pre(jpi,jpj,jpk), r179_zuslp_post(jpi,jpj,jpk), r179_zvslp_post(jpi,jpj,jpk) )
++         ALLOCATE( r179_r3t(jpi,jpj), r179_r3u(jpi,jpj), r179_r3v(jpi,jpj), r179_zhmlpt(jpi,jpj), r179_r1_hmlu(jpi,jpj), r179_r1_hmlv(jpi,jpj), r179_r1_hmlw(jpi,jpj), r179_nmln(jpi,jpj), r179_miku(jpi,jpj), r179_mikv(jpi,jpj), r179_mikt(jpi,jpj), r179_iku(jpi,jpj), r179_ikv(jpi,jpj) )
++         r179_e3u = 0._wp ; r179_e3v = 0._wp ; r179_zgru = 0._wp ; r179_zgrv = 0._wp ; r179_zdzr = 0._wp
++         r179_zau = 0._wp ; r179_zav = 0._wp ; r179_zbu_raw = 0._wp ; r179_zbv_raw = 0._wp ; r179_zbu = 0._wp ; r179_zbv = 0._wp
++         r179_zfi = 0._wp ; r179_zfj = 0._wp ; r179_zmli = 0._wp ; r179_zmlj = 0._wp ; r179_zdepu = 0._wp ; r179_zdepv = 0._wp
++         r179_zwz = 0._wp ; r179_zww = 0._wp ; r179_zuslp_pre = 0._wp ; r179_zvslp_pre = 0._wp ; r179_zuslp_post = 0._wp ; r179_zvslp_post = 0._wp
++         r179_r3t = 0._wp ; r179_r3u = 0._wp ; r179_r3v = 0._wp ; r179_zhmlpt = 0._wp ; r179_r1_hmlu = 0._wp ; r179_r1_hmlv = 0._wp ; r179_r1_hmlw = 0._wp
++         r179_nmln = 0._wp ; r179_miku = 0._wp ; r179_mikv = 0._wp ; r179_mikt = 0._wp ; r179_iku = 0._wp ; r179_ikv = 0._wp
++      ENDIF
+       !
+       zeps   =  1.e-20_wp           !==   Local constant initialization   ==!
+       z1_16  =  1.0_wp / 16._wp
+@@ -137,10 +168,15 @@
+       ! nmln calculation in zdfmxl is only on internal points
+       DO_2D( 1, 2, 1, 2 )
+          zhmlpt(ji,jj) = REAL( nmln(ji,jj), wp )
++         IF( lr179_write ) THEN
++            r179_nmln(ji,jj) = REAL( nmln(ji,jj), wp )
++            r179_r3t(ji,jj) = r3t(ji,jj,Kmm)
++         ENDIF
+       END_2D
+       !
+       DO_2D( 1, 2, 1, 2 )                  ! depth of the last T-point inside the mixed layer
+          zhmlpt(ji,jj) = gdept(ji,jj,nmln(ji,jj)-1,Kmm) * ssmask(ji,jj)
++         IF( lr179_write )   r179_zhmlpt(ji,jj) = zhmlpt(ji,jj)
+       END_2D
+       !                             !==   Mixed layer height at u-, v- and w-points  ==!
+       IF( ln_isfcav ) THEN
+@@ -154,11 +190,23 @@
+          DO_2D( 1, 1, 1, 1 )
+             r1_hmlu(ji,jj) = 1._wp / MAX(zhmlpt(ji,jj), zhmlpt(ji+1,jj  ), 5._wp)
+             r1_hmlv(ji,jj) = 1._wp / MAX(zhmlpt(ji,jj), zhmlpt(ji  ,jj+1), 5._wp)
++            IF( lr179_write ) THEN
++               r179_r1_hmlu(ji,jj) = r1_hmlu(ji,jj)
++               r179_r1_hmlv(ji,jj) = r1_hmlv(ji,jj)
++               r179_r3u(ji,jj) = r3u(ji,jj,Kmm)
++               r179_r3v(ji,jj) = r3v(ji,jj,Kmm)
++               r179_miku(ji,jj) = REAL( miku(ji,jj), wp )
++               r179_mikv(ji,jj) = REAL( mikv(ji,jj), wp )
++            ENDIF
+          END_2D
+       ENDIF
+       !
+       DO_2D( 1, 1, 1, 1 )
+          r1_hmlw(ji,jj) = 1._wp / MAX( hmlp(ji,jj) - gdepw(ji,jj,mikt(ji,jj),Kmm), 10._wp )
++         IF( lr179_write ) THEN
++            r179_r1_hmlw(ji,jj) = r1_hmlw(ji,jj)
++            r179_mikt(ji,jj) = REAL( mikt(ji,jj), wp )
++         ENDIF
+       END_2D
+       !
+       iikm1 = 1   ;   iik = 2                              ! iik-index initialisation
+@@ -209,0 +258,11 @@
++            IF( lr179_write ) THEN
++               r179_e3u(ji,jj,jk) = e3u(ji,jj,jk,Kmm)
++               r179_e3v(ji,jj,jk) = e3v(ji,jj,jk,Kmm)
++               r179_zgru(ji,jj,jk) = zgru(ji,jj,iik)
++               r179_zgrv(ji,jj,jk) = zgrv(ji,jj,iik)
++               r179_zdzr(ji,jj,jk) = zdzr(ji,jj)
++               r179_zau(ji,jj,jk) = zau
++               r179_zav(ji,jj,jk) = zav
++               r179_zbu_raw(ji,jj,jk) = zbu
++               r179_zbv_raw(ji,jj,jk) = zbv
++            ENDIF
+@@ -213,0 +273,4 @@
++            IF( lr179_write ) THEN
++               r179_zbu(ji,jj,jk) = zbu
++               r179_zbv(ji,jj,jk) = zbv
++            ENDIF
+@@ -217,0 +281,4 @@
++            IF( lr179_write ) THEN
++               r179_iku(ji,jj) = REAL( iku, wp )
++               r179_ikv(ji,jj) = REAL( ikv, wp )
++            ENDIF
+@@ -231,0 +299,10 @@
++            IF( lr179_write ) THEN
++               r179_zfi(ji,jj,jk) = zfi
++               r179_zfj(ji,jj,jk) = zfj
++               r179_zmli(ji,jj,jk) = zmli
++               r179_zmlj(ji,jj,jk) = zmlj
++               r179_zdepu(ji,jj,jk) = zdepu
++               r179_zdepv(ji,jj,jk) = zdepv
++               r179_zuslp_pre(ji,jj,jk) = zuslp_hml(ji,jj)
++               r179_zvslp_pre(ji,jj,jk) = zvslp_hml(ji,jj)
++            ENDIF
+@@ -234,0 +312,4 @@
++            IF( lr179_write ) THEN
++               r179_zwz(ji,jj,jk) = zwz(ji,jj)
++               r179_zww(ji,jj,jk) = zww(ji,jj)
++            ENDIF
+@@ -237,0 +319,4 @@
++            IF( lr179_write ) THEN
++               r179_zuslp_post(ji,jj,jk) = zuslp_hml(ji,jj)
++               r179_zvslp_post(ji,jj,jk) = zvslp_hml(ji,jj)
++            ENDIF
+@@ -318,6 +403,28 @@
+       !                              !==  Lateral boundary conditions  ==!
+       CALL lbc_lnk( 'ldfslp', uslp , 'U', -1.0_wp , vslp , 'V', -1.0_wp , wslpi, 'W', -1.0_wp, wslpj, 'W', -1.0_wp )
+       !
++      IF( lr179_write ) THEN
++         ! ROUND179_SLOPE_WALK_DUMP
++         r179_magic = 'NEMO_L2_R179SLP'
++         WRITE(r179_name,'("oracle_slope_walk_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=r179_unit, FILE=TRIM(r179_name), ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE' )
++         WRITE(r179_unit) r179_magic
++         WRITE(r179_unit) 1, kt, Kbb, Kmm, jpi, jpj, jpk, jpkm1, 31, 17, 3, 0, 179
++         WRITE(r179_unit) prd, pn2, tmask, umask, vmask, wmask
++         WRITE(r179_unit) r179_e3u, r179_e3v, r179_zgru, r179_zgrv, r179_zdzr
++         WRITE(r179_unit) r179_zau, r179_zav, r179_zbu_raw, r179_zbv_raw, r179_zbu, r179_zbv
++         WRITE(r179_unit) r179_zfi, r179_zfj, r179_zmli, r179_zmlj, r179_zdepu, r179_zdepv
++         WRITE(r179_unit) r179_zwz, r179_zww, r179_zuslp_pre, r179_zvslp_pre, r179_zuslp_post, r179_zvslp_post
++         WRITE(r179_unit) uslp, vslp
++         WRITE(r179_unit) r179_r3t, r179_r3u, r179_r3v, r179_zhmlpt, r179_r1_hmlu, r179_r1_hmlv, r179_r1_hmlw
++         WRITE(r179_unit) hmlp, ssmask, r1_e1u, r1_e2v
++         WRITE(r179_unit) r179_nmln, r179_miku, r179_mikv, r179_mikt, r179_iku, r179_ikv
++         WRITE(r179_unit) gdept_1d, gdepw_1d, e3w_1d
++         CLOSE(r179_unit)
++         DEALLOCATE( r179_e3u, r179_e3v, r179_zgru, r179_zgrv, r179_zdzr, r179_zau, r179_zav, r179_zbu_raw, r179_zbv_raw, r179_zbu, r179_zbv, r179_zfi, r179_zfj, r179_zmli, r179_zmlj, r179_zdepu, r179_zdepv, r179_zwz, r179_zww, r179_zuslp_pre, r179_zvslp_pre, r179_zuslp_post, r179_zvslp_post )
++         DEALLOCATE( r179_r3t, r179_r3u, r179_r3v, r179_zhmlpt, r179_r1_hmlu, r179_r1_hmlv, r179_r1_hmlw, r179_nmln, r179_miku, r179_mikv, r179_mikt, r179_iku, r179_ikv )
++      ENDIF
++      !
+       IF(sn_cfctl%l_prtctl) THEN
+          CALL prt_ctl(tab3d_1=uslp , clinfo1=' slp  - u : ', tab3d_2=vslp,  clinfo2=' v : ')
+          CALL prt_ctl(tab3d_1=wslpi, clinfo1=' slp  - wi: ', tab3d_2=wslpj, clinfo2=' wj: ')

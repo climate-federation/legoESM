@@ -126,10 +126,6 @@ INLINE_IMPORT_BUDGET = {
     # set_halo_backend().  Importing the accessor is what CLAUDE.md prescribes.
     _CORE / "fv_tp_2d.py": 0,
     _CORE / "operators_fv_latlon.py": 0,
-    # core/hardware.py is the legacy wrapper for runtime.backend; hoisting
-    # its 4 inline imports recreates the same precision.py cycle (it's in
-    # the runtime-package import chain).  Pinned at measured count.
-    _CORE / "hardware.py": 4,
     _CORE / "operators.py": 2,
     _CORE / "operators_3d.py": 0,
     _CORE / "operators_cdgrid.py": 1,

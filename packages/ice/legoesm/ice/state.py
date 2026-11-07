@@ -30,6 +30,25 @@ class SeaIceState(NamedTuple):
     concentration: Field       # Ice areal fraction [0-1]
 
 
+class SI3ColumnState(NamedTuple):
+    """Single-category layered state for the selectable SI3 column path.
+
+    The bulk/category bridge follows ``icethd.F90:140-164``: ``h_i=v_i/a_i``,
+    ``h_s=v_s/a_i`` and layer enthalpies are volumetric J m-3 values while the
+    column is inside thermodynamics.
+    """
+
+    concentration: Field       # a_i [1]
+    h_ice: Field               # h_i=v_i/a_i [m]
+    h_snow: Field              # h_s=v_s/a_i [m]
+    T_surface: Field           # t_su [K]
+    e_ice: Field               # e_i[..., 3] [J/m3]
+    e_snow: Field              # e_s[..., 3] [J/m3]
+    S_bulk: Field              # s_i=sv_i/v_i [PSU]
+    S_layers: Field            # diagnostic option-2 profile [..., 3] [PSU]
+    age_volume: Field          # oa_i/a_i [s]
+
+
 class DynamicSeaIceState(NamedTuple):
     """Full dynamic sea ice state.
 
@@ -54,6 +73,7 @@ class DynamicSeaIceState(NamedTuple):
     S_ice: Field               # Bulk ice salinity [g/kg] (zero when brine disabled)
     pond_area: Field           # Melt pond area fraction of ice area [0-1]
     pond_depth: Field          # Mean melt pond depth [m]
+    h_il: Field | None = None  # Mean melt pond lid thickness [m]
 
 
 # Per-grid spatial Field dim names, keyed by spatial rank (no category axis) —
@@ -72,6 +92,7 @@ def init_dynamic_ice_state(
     n_categories: int = 1,
     S_ice_init: float = constants.S_ice_bulk_default,
     T_ice_init: float = 260.0,  # coeff-ok: initial ice temperature [K]
+    pond_scheme: str = "cesm",
 ) -> DynamicSeaIceState:
     """Create a zero-initialized DynamicSeaIceState.
 
@@ -93,7 +114,16 @@ def init_dynamic_ice_state(
         salinity).  Pass 0.0 to seed with fresh ice — but note that
         enabling brine on fresh seed ice releases no stored salt
         until new ice forms.
+    pond_scheme : {"cesm", "si3_lev"}
+        Selected melt-pond scheme.  ``h_il`` (melt-pond lid thickness)
+        is allocated only when ``pond_scheme == "si3_lev"`` and stays
+        ``None`` for ``pond_scheme == "cesm"``.
     """
+    if pond_scheme not in ("cesm", "si3_lev"):
+        raise ValueError(
+            f"init_dynamic_ice_state: unknown pond_scheme={pond_scheme!r}; "
+            "expected 'cesm' or 'si3_lev'."
+        )
     if n_categories < 1:
         raise ValueError(
             f"init_dynamic_ice_state: n_categories={n_categories}; must be a "
@@ -139,6 +169,11 @@ def init_dynamic_ice_state(
         S_ice=Field(data=jnp.full(shape, S_ice_init), name="S_ice", dims=dims, units="g/kg"),
         pond_area=Field(data=jnp.zeros(shape), name="pond_area", dims=dims, units="1"),
         pond_depth=Field(data=jnp.zeros(shape), name="pond_depth", dims=dims, units="m"),
+        h_il=(
+            Field(data=jnp.zeros(shape), name="h_il", dims=dims, units="m")
+            if pond_scheme == "si3_lev"
+            else None
+        ),
     )
 
 
@@ -147,6 +182,11 @@ def dynamic_to_slab(state: DynamicSeaIceState) -> SeaIceState:
 
     If multi-category, aggregates to single category first.
     """
+    if state.h_il is not None:
+        raise ValueError(
+            "dynamic_to_slab: state.h_il must be None (SI3 pond lid "
+            "cannot be collapsed into slab SeaIceState)."
+        )
     h = state.h_ice.data
     T = state.T_ice.data
     a = state.concentration.data
@@ -174,6 +214,7 @@ def slab_to_dynamic(
     state: SeaIceState,
     *,
     S_ice_init: float = constants.S_ice_bulk_default,
+    pond_scheme: str = "cesm",
 ) -> DynamicSeaIceState:
     """Convert SeaIceState to DynamicSeaIceState (adds zero dynamics fields).
 
@@ -185,8 +226,15 @@ def slab_to_dynamic(
     ``S_ice`` is seeded with ``constants.S_ice_bulk_default`` so the
     brine-aware path sees realistic first-year-ice salinity when a
     slab state is lifted into ``_step_dynamic_v2``.  Pass
-    ``S_ice_init=0.0`` for an explicitly fresh seed.
+    ``S_ice_init=0.0`` for an explicitly fresh seed.  ``h_il`` is
+    allocated only when ``pond_scheme == "si3_lev"`` and stays ``None``
+    for ``pond_scheme == "cesm"``.
     """
+    if pond_scheme not in ("cesm", "si3_lev"):
+        raise ValueError(
+            f"slab_to_dynamic: unknown pond_scheme={pond_scheme!r}; "
+            "expected 'cesm' or 'si3_lev'."
+        )
     s = state.h_ice.data.shape
     dims = state.h_ice.dims
     return DynamicSeaIceState(
@@ -202,6 +250,11 @@ def slab_to_dynamic(
         S_ice=Field(data=jnp.full(s, S_ice_init), name="S_ice", dims=dims, units="g/kg"),
         pond_area=Field(data=jnp.zeros(s), name="pond_area", dims=dims, units="1"),
         pond_depth=Field(data=jnp.zeros(s), name="pond_depth", dims=dims, units="m"),
+        h_il=(
+            Field(data=jnp.zeros(s), name="h_il", dims=dims, units="m")
+            if pond_scheme == "si3_lev"
+            else None
+        ),
     )
 
 
@@ -274,4 +327,20 @@ def distribute_dynamic_state_to_categories(
             state.pond_area, state.pond_area.data[..., jnp.newaxis] * occ),
         pond_depth=_lift(
             state.pond_depth, state.pond_depth.data[..., jnp.newaxis] * occ),
+        h_il=(
+            _lift(state.h_il, state.h_il.data[..., jnp.newaxis] * occ)
+            if state.h_il is not None
+            else None
+        ),
     )
+
+
+from legoesm.ice.si3_orca2_state import (  # noqa: E402,F401
+    SI3AggregatedVars,
+    SI3AllPratherMoments,
+    SI3CategoryBounds,
+    SI3EquivalentVars,
+    SI3PratherMoments,
+    SI3State,
+)
+

@@ -64,6 +64,7 @@ def depth_averaged_oro_source(
     dpm: jax.Array,
     zm: jax.Array,
     nm: jax.Array,
+    full_column: bool = False,
 ):
     """E3SM source-region selection + dp-weighted averages (gw_oro.F90:119-145).
 
@@ -77,6 +78,12 @@ def depth_averaged_oro_source(
         displacement convention the caller runs).
     pint : (ncol, nlev+1)
         Interface pressures.
+    full_column : bool
+        False (E3SM): penetration tested on the bottom-half midpoints only
+        (E3SM loop ``kk = pver-1 .. pver/2``).  True (CAM6
+        cam_cesm2_1_rel_60 gw_oro.F90:109-122): every midpoint above the
+        surface (``k = pver-1 .. 1``; CAM's joint early exit is equivalent
+        for heights increasing upward).
 
     Returns
     -------
@@ -90,7 +97,7 @@ def depth_averaged_oro_source(
     # Penetration test hdsp > sqrt(zm[i]*zm[i+1]) for bottom-half midpoints
     # i in [nlev//2 - 1, nlev-2] (E3SM loop kk = pver-1 .. pver/2, 1-based).
     gm = jnp.sqrt(jnp.abs(zm[:, :-1] * zm[:, 1:]))       # (ncol, nlev-1)
-    lo = (nlev // 2) - 1
+    lo = 0 if full_column else (nlev // 2) - 1
     in_loop = (k_idx >= lo) & (k_idx <= nlev - 2)        # (nlev,)
     gm_full = jnp.concatenate([gm, gm[:, -1:]], axis=1)  # pad idx nlev-1 (unused)
     penetrates = hdsp[:, None] > gm_full                 # (ncol, nlev)

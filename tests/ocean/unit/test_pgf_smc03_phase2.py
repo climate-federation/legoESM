@@ -258,3 +258,42 @@ class TestADSmokeTest:
 
         grad = jax.grad(loss)(rho)
         assert jnp.all(jnp.isfinite(grad))
+
+
+def test_enclosing_cell_search_matches_the_dense_table():
+    """The sorted search must pick the SAME cell the comparison table did.
+
+    The dense form built ``(..., nlev, n_t)`` booleans and took the first
+    True.  On a fine mesh that table is tens of gigabytes -- it is why the
+    scheme could not run on the ico7 Voronoi grid -- so the search is now a
+    ``searchsorted``.  Same index, including the interface tie: a target
+    sitting exactly on an interface belongs to the cell ABOVE it under both
+    rules.  Reverting the search to the old table must leave this passing,
+    which is the point: this test pins the INDEX, not the implementation.
+    """
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    rng = np.random.default_rng(20260916)
+    n_col, nlev = 37, 12
+    h = jnp.asarray(rng.uniform(5.0, 120.0, size=(n_col, nlev)))
+    z_bot = jnp.cumsum(h, axis=-1)
+    z_top = z_bot - h
+
+    # Targets: cell centroids, exact interfaces (the tie), the surface and
+    # the seafloor (the clamped ends).
+    z_centroid = z_bot - 0.5 * h
+    targets = jnp.concatenate(
+        [z_centroid, z_bot, z_top,
+         jnp.zeros((n_col, 1)), z_bot[:, -1:]], axis=-1)
+    z_t = jnp.clip(targets, min=0.0, max=z_bot[:, -1:])
+
+    in_cell = (z_t[:, None, :] >= z_top[:, :, None]) & (
+        z_t[:, None, :] <= z_bot[:, :, None])
+    k_dense = jnp.argmax(in_cell.astype(jnp.int32), axis=-2)
+
+    k_search = jax.vmap(
+        lambda b, t: jnp.searchsorted(b, t, side="left"))(z_bot, z_t)
+
+    np.testing.assert_array_equal(np.asarray(k_dense), np.asarray(k_search))

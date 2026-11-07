@@ -10,7 +10,7 @@ existing leapfrog card); (5) budget tolerance pulled from last recorded run at P
 # SPEC: `nemo_mlf` step — line-by-line transcription of `stpmlf.F90`
 
 **Status:** design only, no code changed. Read-only lane per task instructions.
-**Sources cited:** `stpmlf.F90` (NEMO, `/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/stpmlf.F90`), `stpmlf_call_coverage.py` (the join/term audit tool — 106-CALL table, `scripts/validate/ocean_fidelity/dino_1226/stpmlf_call_coverage.py`), current reimplementation `_leapfrog_step` (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:6856-7335`), plan doc (`docs/ocean/fidelity/nemo_faithful_ocean_implementation_plan.md`).
+**Sources cited:** `stpmlf.F90` (NEMO, `/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/stpmlf.F90`), `stpmlf_call_coverage.py` (the join/term audit tool — 106-CALL table, `scripts/validate/ocean_fidelity/dino_1226/stpmlf_call_coverage.py`), current reimplementation `_leapfrog_step` (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:6920-7404`), plan doc (`docs/ocean/fidelity/nemo_faithful_ocean_implementation_plan.md`).
 
 ## 1. The step skeleton
 
@@ -64,7 +64,7 @@ Rows dropped as N/A (WAIVED, dead branches / I/O / diagnostics per the audit): l
 
 ## 2. Tendency-interface delta
 
-Per-term status against the `return_rate`/explicit-arg pattern (`surface_tendency_placement="leapfrog_rhs"`, `_external_tracer_rate`, `_fct_tracer_before`, `_barotropic_before_state` — all in `_step_impl` signature, `ocean_model_latlon_cgrid.py:2687-2695`):
+Per-term status against the `return_rate`/explicit-arg pattern (`surface_tendency_placement="leapfrog_rhs"`, `_external_tracer_rate`, `_fct_tracer_before`, `_barotropic_before_state` — all in `_step_impl` signature, `ocean_model_latlon_cgrid.py:2855-2863`):
 
 **Already conformant** (state the term, cite the kwarg):
 - Row 8 (`ldf_slp`): consumes Nbb density/N² explicitly — `_step_impl` already reads `entry_state.T_before`/`N_before` per the `_n2_nemo_before_tracers` hook (`:4631`).
@@ -96,7 +96,7 @@ Per-term status against the `return_rate`/explicit-arg pattern (`surface_tendenc
 
 ## 4. Config surface
 
-**Dispatch site**: `_step_jitted` (`ocean_model_latlon_cgrid.py:6152-6231`), which already validates `outer_integrator in ("forward_euler", "ab2", "leapfrog")` and `raise ValueError` on unknown (`:6166-6169`) — dispatch-hardening-compliant pattern to extend, not replace.
+**Dispatch site**: `_step_jitted` (`ocean_model_latlon_cgrid.py:6356-6435`), which already validates `outer_integrator in ("forward_euler", "ab2", "leapfrog")` and `raise ValueError` on unknown (`:6166-6169`) — dispatch-hardening-compliant pattern to extend, not replace.
 
 **Proposed**: add `"nemo_mlf"` as a fourth literal:
 ```python

@@ -44,7 +44,9 @@ class ConvectionOutput(NamedTuple):
         ``precipitation``: convective condensate now joins the
         cloud-water bucket and is processed by microphysics, which
         owns the resulting surface precipitation diagnostic. By
-        construction this field is non-negative.
+        construction this field is non-negative, except for Kuo, whose
+        source is the Mahfouf oracle's signed rain integrand
+        ``dT_dt / alpha`` (negative where the scheme cools).
     cape : jax.Array
         CAPE diagnostic [J/kg], shape (ncol,).
     convective_mask : jax.Array
@@ -82,6 +84,46 @@ class ConvectionOutput(NamedTuple):
     100% of convective condensate loads the grid-scale cloud and the
     radiation, which microphysics cannot drain fast enough
     (source-buffered)."""
+    # Appended LAST (positional constructors keep their field order).
+    mass_flux_up: jax.Array | None = None
+    """Optional deep-updraft mass flux on INTERFACES [kg/m^2/s], shape
+    (ncol, nlev+1), top->bottom (CAM ``cmfmc``).  Published into
+    ``PhysicsState.conv_mass_flux_up`` for the CAM6 ``cam6_clubb`` deep-
+    convective cloud fraction.  ``None`` (default) = the scheme does not
+    expose one; that cloud term is then exactly zero."""
+    icwmr: jax.Array | None = None
+    """Optional deep in-cloud condensate mixing ratio [kg/kg], shape
+    (ncol, nlev) (CAM ``dp_icwmr``); companion of ``mass_flux_up``."""
+    precip_frozen_sfc: jax.Array | None = None
+    """Optional FROZEN surface precipitation [kg/m^2/s, +into surface],
+    shape (ncol,), of a scheme that books its own surface precip (CAM ZM's
+    ``zm_conv_evap`` snow flux, whose fusion heat the scheme's heating
+    already carries).  The interactive land takes its snow from it (F29).
+    ``None`` = not published."""
+    tracer_transport: dict | None = None
+    """Optional convective transport tendencies of carried tracers, keyed by
+    tracer name (e.g. ``"q_c"``), each (ncol, nlev) [tracer units / s],
+    SIGNED and column-conserving (CAM ZM ``convtran``).  Hosts ADD them to
+    any other tendency of the same tracer.  ``None`` = no transport."""
+    dq_r_detr_dt: jax.Array | None = None
+    """Optional DETRAINED rain [kg/kg/s], (ncol, nlev): precipitation the
+    scheme takes out of its falling flux and hands to the host's grid-scale
+    RAIN species (IFS PSNDE liquid).  It stays in the column; its
+    condensation heat is already in ``dT_dt``.  ``None`` = none."""
+    dq_s_detr_dt: jax.Array | None = None
+    """Optional DETRAINED snow [kg/kg/s], (ncol, nlev), to the host's SNOW
+    species (IFS PSNDE ice); as ``dq_r_detr_dt``."""
+    ifs_cloudsc_conv: tuple | None = None
+    """Optional raw CUMASTRN fields for IFS CLOUDSC, a
+    ``microphysics.ifs_cloudsc.CloudscConvection`` (PLU, PLUDE, PLUDELI,
+    PSNDE, PMFU, PMFD, LDCUM, KTYPE).  Published by the faithful IFS
+    convection only; a host running CLOUDSC hands it over INSTEAD of booking
+    ``dq_c_conv_dt`` / ``dq_r_detr_dt`` / ``dq_s_detr_dt``.  ``None`` = not
+    published."""
+    dq_i_conv_dt: jax.Array | None = None
+    """Optional detrained cloud-ICE source [kg/kg/s], (ncol, nlev) (WRF
+    Tiedtke's ice share of the detrained condensate).  Hosts add it to the
+    ``q_i`` species and refuse a state without one.  ``None`` = none."""
 
 
 def split_convective_rain(dq_c_conv_dt, precip_efficiency):

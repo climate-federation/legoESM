@@ -361,7 +361,7 @@ def test_geostrophic_wind_from_gradients_nh_sign_and_magnitude():
     dphi_dy = jnp.full((4,), -1.0e-2)   # Φ down toward north
     dphi_dx = jnp.zeros((4,))
     zero = jnp.zeros((4,))
-    u_g, v_g = geostrophic_wind_from_gradients(dphi_dx, dphi_dy, zero, zero, T_v, f)
+    u_g, v_g = geostrophic_wind_from_gradients(dphi_dx, dphi_dy, zero, zero, T_v, f, dlnp_dlnps=jnp.ones(4))
     np.testing.assert_allclose(np.asarray(u_g), 1.0e-2 / f, rtol=1e-12)  # +100
     np.testing.assert_allclose(np.asarray(v_g), 0.0, atol=1e-12)
     assert bool(jnp.all(u_g > 0.0))  # westerly
@@ -376,10 +376,46 @@ def test_geostrophic_wind_from_gradients_lnps_term():
     T_v = jnp.full((3,), 280.0)
     dlnps_dx = jnp.full((3,), 1.0e-6)
     zero = jnp.zeros((3,))
-    u_g, v_g = geostrophic_wind_from_gradients(zero, zero, dlnps_dx, zero, T_v, f)
+    u_g, v_g = geostrophic_wind_from_gradients(zero, zero, dlnps_dx, zero, T_v, f, dlnp_dlnps=jnp.ones(3))
     expected_v = constants.R_d * 280.0 * 1.0e-6 / f
     np.testing.assert_allclose(np.asarray(v_g), expected_v, rtol=1e-12)
     np.testing.assert_allclose(np.asarray(u_g), 0.0, atol=1e-12)
+
+
+def test_geostrophic_wind_hybrid_resting_isothermal_over_slope_is_small():
+    """Resting isothermal atmosphere over a 1 km / 100 km slope on CAM6 L32
+    hybrid levels: pressure surfaces are flat, so the true geostrophic wind is 0.
+    The pure-sigma σ→p term (``∂ln p/∂ln p_s = 1`` at every level) puts ~950 m/s
+    of false wind on the pure-pressure top levels; the hybrid factor ``B·p_s/p``
+    must remove it."""
+    from legoesm import constants
+    from legoesm.atmosphere.forcing.column_large_scale_extract import (
+        _geostrophic_wind_column,
+    )
+    from legoesm.grids.vertical import make_cam6_l32_levels
+
+    coord = make_cam6_l32_levels()
+    nlev = coord.n_levels
+    T0, dx = 250.0, 1.0e5
+    z_s = jnp.array([0.0, 1000.0, 2000.0])
+    phis = constants.g * z_s
+    p_s = constants.p_ref * jnp.exp(-phis / (constants.R_d * T0))
+    T = jnp.full((3, nlev), T0)
+    q_v = jnp.zeros((3, nlev))
+
+    def grad_fn(field, _grid):
+        gx = jnp.zeros_like(field).at[1].set((field[2] - field[0]) / (2.0 * dx))
+        return gx, jnp.zeros_like(field)
+
+    u_g, v_g = _geostrophic_wind_column(
+        T=T, q_v=q_v, p_s=p_s, grid=None, sigma_coord=coord, grad_fn=grad_fn,
+        lat_rad=np.deg2rad(45.0), col_index=(1,), phis=phis,
+    )
+    np.testing.assert_allclose(np.asarray(u_g), 0.0, atol=1e-12)
+    # Residual (measured 4.5 m/s on the top levels) is the geopotential's linear
+    # hypsometric layer thickness R·T·dp/(g·p_mid) over the p_s-dependent lower
+    # layers, not the coordinate term; the pure-sigma term gives ~950 m/s here.
+    assert float(jnp.max(jnp.abs(v_g))) < 10.0, np.asarray(v_g)
 
 
 def test_geostrophic_wind_southern_hemisphere_reverses_sign():
@@ -399,8 +435,8 @@ def test_geostrophic_wind_southern_hemisphere_reverses_sign():
     zero = jnp.zeros((4,))
     f_nh = 1.0e-4
     f_sh = -1.0e-4                       # same |f|, southern hemisphere
-    u_nh, v_nh = geostrophic_wind_from_gradients(dphi_dx, dphi_dy, zero, zero, T_v, f_nh)
-    u_sh, v_sh = geostrophic_wind_from_gradients(dphi_dx, dphi_dy, zero, zero, T_v, f_sh)
+    u_nh, v_nh = geostrophic_wind_from_gradients(dphi_dx, dphi_dy, zero, zero, T_v, f_nh, dlnp_dlnps=jnp.ones(4))
+    u_sh, v_sh = geostrophic_wind_from_gradients(dphi_dx, dphi_dy, zero, zero, T_v, f_sh, dlnp_dlnps=jnp.ones(4))
     # Exact value from the signed-f formula, and the antisymmetry u_sh = -u_nh.
     np.testing.assert_allclose(np.asarray(u_sh), 1.0e-2 / f_sh, rtol=1e-12)  # -100
     assert bool(jnp.all(u_sh < 0.0))                    # EASTERLY in the SH

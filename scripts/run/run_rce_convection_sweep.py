@@ -46,9 +46,10 @@ stripped-down scaffolding.  CMT and AR1 stochasticity remain
 disabled for the same reason: the lat-lon FV cell-centred wind is
 weakly damped here.
 
-**Scientific caveat**: with such a tight M_b cap, all six mass-flux-
+**Scientific caveat**: with such a tight M_b cap, the capped mass-flux-
 based schemes converge to nearly the same near-equilibrium state
-because the cap dominates each scheme's response.  Kuo (which uses a
+because the cap dominates each scheme's response.  Emanuel runs
+uncapped (CONVECT has no M_b cap).  Kuo (which uses a
 column moisture-excess closure rather than M_b) sits apart and is the
 true outlier.  This is a *stability comparison*, not a validation of
 the schemes' distinct physics.  For the latter, run the production
@@ -76,7 +77,7 @@ Usage
         --schemes all --days 5 --N 12 --nlev 20
 
     JAX_ENABLE_X64=1 python scripts/run_rce_convection_sweep.py \\
-        --schemes tiedtke,zhang_mcfarlane --days 10
+        --schemes zhang_mcfarlane,emanuel --days 10
 """
 
 from __future__ import annotations
@@ -94,9 +95,10 @@ import jax.numpy as jnp
 import numpy as np
 
 
+# tiedtke is not offered: the WRF port needs the dynamics q_v tendency,
+# omega and the previous-step turbulence inputs this offline sweep has none of.
 SCHEME_CHOICES = (
     "sbm",
-    "tiedtke",
     "zhang_mcfarlane",
     "emanuel",
     "bechtold",
@@ -156,11 +158,10 @@ def _build_convection_call(scheme: str, dt: float):
     confounded by AR1 noise.
     """
     from legoesm.atmosphere.physics.convection.config import (
-        TiedtkeConfig, ZhangMcFarlaneConfig, EmanuelConfig, BechtoldConfig,
+        ZhangMcFarlaneConfig, EmanuelConfig, BechtoldConfig,
         KuoConfig, KainFritschConfig, MassFluxConfig, SBMConfig,
     )
     from legoesm.atmosphere.physics.convection.sbm import sbm_convection
-    from legoesm.atmosphere.physics.convection.tiedtke import tiedtke_convection
     from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
         zhang_mcfarlane_convection,
     )
@@ -207,32 +208,18 @@ def _build_convection_call(scheme: str, dt: float):
             )
         init_carry_fn = lambda ncol, nlev, dtype: ()
 
-    elif scheme == "tiedtke":
-        cfg = TiedtkeConfig(enable_cmt=False, M_b_max=M_B_MAX_RCE)
-
-        def call(T, qv, pf, ph, u, v, carry):
-            (prog,) = carry
-            mc_zero = jnp.zeros_like(T)
-            out, prog_new = tiedtke_convection(
-                T=T, q_v=qv, p_full=pf, p_half=ph, u=u, v=v,
-                conv_prog_profile=prog, dt=dt, config=cfg,
-                moisture_convergence=mc_zero,
-            )
-            du = out.du_dt_conv if out.du_dt_conv is not None else jnp.zeros_like(u)
-            dv = out.dv_dt_conv if out.dv_dt_conv is not None else jnp.zeros_like(v)
-            return out.dT_dt, out.dq_v_dt, out.dq_c_conv_dt, du, dv, (prog_new,)
-        init_carry_fn = lambda ncol, nlev, dtype: (
-            jnp.zeros((ncol, nlev), dtype=dtype),
-        )
-
     elif scheme == "zhang_mcfarlane":
-        cfg = ZhangMcFarlaneConfig(enable_cmt=False, M_b_max=M_B_MAX_RCE)
+        cfg = ZhangMcFarlaneConfig(enable_cmt=False, land_fraction="none")
 
         def call(T, qv, pf, ph, u, v, carry):
             (prog,) = carry
+            # ZM reads the PBL height and refuses a call without one.  No
+            # PBL scheme runs here, so it stays at CAM's initial value 0
+            # (physpkg.F90:419-424): launch from the lowest level.
             out, prog_new = zhang_mcfarlane_convection(
                 T=T, q_v=qv, p_full=pf, p_half=ph, u=u, v=v,
                 conv_prog_profile=prog, dt=dt, config=cfg,
+                pblh=jnp.zeros(T.shape[0], T.dtype),
             )
             du = out.du_dt_conv if out.du_dt_conv is not None else jnp.zeros_like(u)
             dv = out.dv_dt_conv if out.dv_dt_conv is not None else jnp.zeros_like(v)
@@ -242,7 +229,7 @@ def _build_convection_call(scheme: str, dt: float):
         )
 
     elif scheme == "emanuel":
-        cfg = EmanuelConfig(M_b_max=M_B_MAX_RCE)
+        cfg = EmanuelConfig()  # no mass-flux cap: CONVECT has none (#2213 split)
 
         def call(T, qv, pf, ph, u, v, carry):
             (prog,) = carry
@@ -250,8 +237,10 @@ def _build_convection_call(scheme: str, dt: float):
                 T=T, q_v=qv, p_full=pf, p_half=ph,
                 conv_prog_profile=prog, dt=dt, config=cfg,
             )
+            # Emanuel's condensate is its rain source (dq_c_conv_dt = 0);
+            # this sweep's only precipitation path is the cloud bucket.
             return (
-                out.dT_dt, out.dq_v_dt, out.dq_c_conv_dt,
+                out.dT_dt, out.dq_v_dt, out.dq_c_conv_dt + out.dq_r_conv_dt,
                 jnp.zeros_like(u), jnp.zeros_like(v), (prog_new,),
             )
         init_carry_fn = lambda ncol, nlev, dtype: (
@@ -544,7 +533,7 @@ def run_one_scheme(scheme: str, args, *, output_root: Path):
             rho_low * constants.L_v * C_H * wind * (q_sat_sfc - q_v[..., -1]),
             0.0,
         )
-        evap = lhflx / constants.L_v
+        evap = lhflx / constants.L_v   # latent-ok: this script's own bulk pair, charged and inverted with the same constant
         dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
         dq_BL = constants.g * evap / dp_low
 

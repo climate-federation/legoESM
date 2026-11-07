@@ -1,0 +1,18 @@
+#!/bin/bash
+#SBATCH --job-name=cdx_fesomtke
+#SBATCH --account=glab
+#SBATCH --partition=short
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8G
+#SBATCH --time=0:50:00
+#SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/cdx_fesomtke_%j.out
+# Dual review (codex; GLM in parallel) of the FESOM legoESM-TKE closure bridge.
+set -u
+WT=/burg-archive/glab/users/pg2328/legoESM
+unset CODEX_HOME
+LOG=$WT/omip_nemo/cdx_fesomtke_${SLURM_JOB_ID}.log
+codex exec --sandbox read-only -C $WT "Adversarial review of the LAST commit (git show HEAD): FESOM now runs the legoESM/NEMO-card TKE vertical-mixing closure that the tripole and MPAS lanes run, instead of fesom_jax's own PP/KPP/cvmix-TKE. Files: packages/ocean/legoesm/ocean/physics/vertical_mixing/fesom_integration.py (NEW: make_tke_profiles_fesom, fesom_zgeom), packages/ocean/legoesm/ocean/dynamics/ocean_model_fesom.py (FesomOceanConfig.vertical_mixing, FesomOceanModel(vmix_config=), step injects vertical_mixing=(Kv,Av) and stores tke in inner.tke), mpas_integration.py (bn2_ladder_kwargs made public), scripts/run/run_omip_core2.py (--fesom-vmix default legoesm_tke, tke card knobs allowlisted for fesom, _validate_tke_card_grid accepts fesom, build_fesom_ocean(vertical_mixing, vmix_config), fesom loop attaches sf.ice_concentration), tests/ocean/unit/test_fesom_tke_bridge.py. The fesom_jax side (external repo /burg-archive/glab/users/pg2328/fesom_jax_repo, commit c9d2cea) adds step(vertical_mixing=None): if given, (Kv, Av) bypass the internal scheme and uvnode = pp.compute_vel_nodes(mesh, st.uv). MEASURED motivation: day-30 FESOM Southern Ocean MLD 18.6 m vs NEMO 41 m, SST +1.45 C; tripole/MPAS (legoESM TKE) +0.2. Attack: (1) LAYOUT: legoESM K_H/K_M/tke_new are (nod2D, nlev-1) half-levels between layers k,k+1; fesom Kv[:,k] is the interface ABOVE layer k (tracer_diff.py:39-40: a[nz] uses Kv[nz], c[nz] uses Kv[nz+1]) — is Kv[:,1:nlev]=K_H the right shift, and is the pad slot/bottom handled (node_layer_mask (nod2D, nl))? (2) Av on elements = mean of node K_M over elem_nodes — how does fesom's own scheme place Av (element-wise from uvnode shear) and does the momentum vdiff index Av like Kv? (3) dz_half = dz_half_ref*J with J = hnode[:,0]/dz_ref[0]: is the z* stretch uniform in fesom_jax (hnode = dz_ref*(1+eta/H)?) and what about the bottom partial layer; (4) density via compute_ocean_rho(eos_depth='geometric') on a SimpleNamespace state — does that path need attributes we did not pass; (5) TKE seed: inner.tke[:,1:nlev] max'ed with tke_background; first step from zeros; is tke stored back at the right slots and does fesom's OWN tke.mixing_tke ever read inner.tke when vertical_mixing is injected (double owner)? (6) surface stress: tau_x/tau_y from the legoESM OceanSurfaceForcing are GEOGRAPHIC and per unit ocean area; the closure's surface TKE flux uses |tau| — but the fesom stress_node_surf is ice-blended; is ours the OPEN-water or blended stress at the step (sf after blend_ice_ocean_forcing)? (7) lat_deg from mesh.geo_coord_nod2D[:,1] radians — confirm degrees conversion and that etau_htau_mode='latitude' expects degrees; (8) --fesom-vmix default flip: FESOM B4 card carries the same --tke-* knobs as the MPAS card (nemo_dirichlet, mxl 3, prognostic, veros_sqrte); any knob MPAS threads that fesom silently drops? (9) unforced smoke path (--fesom-unforced): surface_forcing=None -> tau None -> closure ok? (10) tests: do they fail on the wrong Kv shift (e.g. Kv[:,0:nlev-1]) or on Av transposed? Rank CRITICAL/MAJOR/MINOR, file:line, CONFIRMED vs PLAUSIBLE, under 600 words." > $LOG 2>&1
+echo "codex rc=$?"
+grep -q "Failed to refresh token\|refresh token was already used" $LOG && echo "CODEX AUTH FAILURE"
+grep -vE "^\s*$" $LOG | tail -60
+echo DONE

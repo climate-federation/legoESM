@@ -379,6 +379,8 @@ VEROS_BLOCK_MAPPING: tuple[tuple[str, str, str], ...] = (
      "True (Veros dzw spacing in the implicit tridiagonal vertical operator)"),
     ("lateral viscosity operator", "lateral_viscosity_operator",
      "flux_divergence (Veros per-component harmonic friction)"),
+    ("lateral viscosity masks", "lateral_viscosity_mask_levels",
+     "surface (flux_divergence reads the 2-D masks; per_level is vector_laplacian only)"),
     ("vertical momentum advection", "vertical_momentum_scheme",
      "centered_full (Veros centered vertical momentum flux)"),
     ("lateral viscosity coefficient", "A_h",
@@ -575,7 +577,7 @@ def build_acc_state(grid: LatLonGrid,
                 # (GeometricConfig, Torres et al. 2025 Appendix E), NOT the
                 # Eden-Greatbatch specific-energy floor e_min [m^2/s^2]. Flat-bottom
                 # ACC ⇒ H = H_max on wet columns. The step writes units "m^3/s^2"
-                # (ocean_model_latlon_cgrid.py:1950); Field.units is static pytree
+                # (ocean_model_latlon_cgrid.py:1976); Field.units is static pytree
                 # metadata, so a seed/step mismatch breaks the jax.lax.scan
                 # constant-carry on the FIRST step.
                 eke0 = eke_cfg.geometric.e0_per_depth * H_max * lm
@@ -816,6 +818,7 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         # (the energy-consistent component-wise A_h|∇u|² = Veros calc_diss_u/v),
         # since kdiss_h_flux_form=True is also set on the EKE config below.
         lateral_viscosity_operator="flux_divergence",
+        lateral_viscosity_mask_levels="surface",
         # Veros ACC momentum advection is flux-form (core/momentum.py), centered
         # 2nd-order — so the recipe selects flux_form/centered for true
         # apples-to-apples (doctrine rule H). Validated: vs the developed-flow

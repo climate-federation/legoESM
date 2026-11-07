@@ -1,0 +1,59 @@
+--- dynvor.F90
++++ dynvor.F90
+@@ -431,10 +431,16 @@
+       !
+       INTEGER  ::   ji, jj, jk           ! dummy loop indices
+       INTEGER  ::   l2_unit, l2_ios
++      INTEGER  ::   r17_unit, r17_ios
++      INTEGER  ::   r17_env_status
++      LOGICAL  ::   r17_write
+       REAL(wp) ::   zx1, zy1, zx2, zy2, ze3f, zmsk   ! local scalars
+       REAL(wp), DIMENSION(T2D(1)) ::   zwx, zwy, zwz   ! 2D workspace
+       CHARACTER(LEN=64) ::   l2_filename
+       CHARACTER(LEN=16) ::   l2_magic
++      CHARACTER(LEN=96) ::   r17_filename
++      CHARACTER(LEN=16) ::   r17_magic
++      CHARACTER(LEN=8) ::   r17_env
+       !!----------------------------------------------------------------------
+       !
+       IF( .NOT. l_istiled .OR. ntile == 1 )  THEN                       ! Do only on the first tile
+@@ -444,6 +450,8 @@
+             IF(lwp) WRITE(numout,*) '~~~~~~~~~~~'
+          ENDIF
+       ENDIF
++      CALL get_environment_variable('GYRE_R17_WRITE', r17_env, status=r17_env_status)
++      r17_write = r17_env_status == 0 .AND. TRIM(r17_env) == '1'
+       !
+       IF( lwp .AND. kt == nit000 .AND. Kmm == 3 .AND. kvor == np_CRV ) THEN
+          l2_filename = 'oracle_rkstage2_ene_operands_kt00000001.bin'
+@@ -453,6 +461,14 @@
+          l2_magic = 'NEMO_L2_ENEOP_1'
+          WRITE(l2_unit) l2_magic, 1, kt, Kmm, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
+       ENDIF
++      IF( r17_write .AND. lwp .AND. kt == nit000 .AND. kvor == np_CRV ) THEN
++         WRITE(r17_filename,'("oracle_r17_ene_q_kmm",I1,"_kt",I8.8,".bin")') Kmm, kt
++         OPEN( NEWUNIT=r17_unit, FILE=TRIM(r17_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r17_ios )
++         IF( r17_ios /= 0 )   CALL ctl_stop( 'vor_ene: cannot open round-17 ENE operand dump' )
++         r17_magic = 'NEMO_L2_R17Q__1'
++         WRITE(r17_unit) r17_magic, 1, kt, Kmm, kvor, jpi, jpj, jpkm1, STORAGE_SIZE(1._wp)
++      ENDIF
+       !                                                ! ===============
+       DO jk = 1, jpkm1                                 ! Horizontal slab
+          !                                             ! ===============
+@@ -533,6 +549,8 @@
+          END_2D
+          IF( lwp .AND. kt == nit000 .AND. Kmm == 3 .AND. kvor == np_CRV )   &
+             & WRITE(l2_unit) zwz(1:jpi,1:jpj), zwx(1:jpi,1:jpj), zwy(1:jpi,1:jpj)
++         IF( r17_write .AND. lwp .AND. kt == nit000 .AND. kvor == np_CRV )   &
++            & WRITE(r17_unit) zwz(1:jpi,1:jpj), zwx(1:jpi,1:jpj), zwy(1:jpi,1:jpj)
+          !
+          !                                   !==  compute and add the vorticity term trend  =!
+          DO_2D( 0, 0, 0, 0 )
+@@ -548,2 +566,6 @@
+       !                                                ! ===============
++      IF( r17_write .AND. lwp .AND. kt == nit000 .AND. kvor == np_CRV ) THEN
++         CLOSE(r17_unit)
++         WRITE(numout,*) 'GYRE_R17_ENE_OPERAND_DUMP ', kt, Kmm, TRIM(r17_filename)
++      ENDIF
+       IF( lwp .AND. kt == nit000 .AND. Kmm == 3 .AND. kvor == np_CRV ) THEN

@@ -1,0 +1,52 @@
+commit c03458508a76b006d6442df44544d5ef91feb52e
+Author: Dhruv Balwada <dhruvbalwada@gmail.com>
+Date:   Sat Sep 12 08:35:14 2026 -0400
+
+    fix(ocean): preserve NEMO tracer source associations
+
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index 60096be72..7a2ada6a3 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -1905,10 +1905,15 @@ def _nemo_ws_rk3_tracer_pair_step(
+     fd2_a, fd2_b, _, _ = _flux_pair(a2, b2, dt, 2, h_k_new)
+     advection_content_a = h_k_old * tr_a - dt * fd2_a
+     advection_content_b = h_k_old * tr_b - dt * fd2_b
+-    content_a = (advection_content_a
+-                 + dt * h_one_half * stage_source_rates[2][0])
+-    content_b = (advection_content_b
+-                 + dt * h_one_half * stage_source_rates[2][1])
++    # NEMO trazdf.f90:546-560 multiplies the COMPLETE accumulated Krhs by
++    # e3t(Kmm) and p2dt in one statement.  Keeping advection in content form
++    # while multiplying only the other sources by h(Kmm) is algebraically
++    # equivalent but not the compiled source association.
++    safe_h_rhs = jnp.maximum(h_one_half, 1.0e-10)
++    rhs_a = -fd2_a / safe_h_rhs + stage_source_rates[2][0]
++    rhs_b = -fd2_b / safe_h_rhs + stage_source_rates[2][1]
++    content_a = h_k_old * tr_a + dt * h_one_half * rhs_a
++    content_b = h_k_old * tr_b + dt * h_one_half * rhs_b
+     out_a = jnp.where(
+         active_3d > 0.5,
+         content_a / jnp.maximum(h_k_new, 1.0e-10), tr_a)
+diff --git a/packages/ocean/legoesm/ocean/physics/vertical_mixing/implicit_solver.py b/packages/ocean/legoesm/ocean/physics/vertical_mixing/implicit_solver.py
+index 92b43bede..546da9f96 100644
+--- a/packages/ocean/legoesm/ocean/physics/vertical_mixing/implicit_solver.py
++++ b/packages/ocean/legoesm/ocean/physics/vertical_mixing/implicit_solver.py
+@@ -551,8 +551,15 @@ def nemo_tracer_tridiagonal(
+         -jnp.asarray(dt, dtype=dtype) * K)
+     e3w_safe = jnp.where(interface_wet > 0.0, e3w_now,
+                          jnp.asarray(1.0, dtype=dtype))
+-    coeff = (jax.lax.optimization_barrier(product / e3w_safe)
+-             * interface_wet)
++    # Compiled NEMO assigns this complete quotient to zwi/zws before those
++    # arrays feed the diagonal and recurrences (trazdf.f90:474-476).  XLA CPU
++    # otherwise retains enough excess precision across the array expression
++    # to move 4,392 GYRE coefficients.  The signed-zero add forces the same
++    # fp64 materialization; its documented subnormal restriction is inert for
++    # these O(1e-4..1e4) coefficients.
++    coeff = (_round_the_multiply(
++        jax.lax.optimization_barrier(product / e3w_safe))
++        * interface_wet)
+     lower = jnp.concatenate([zero, coeff], axis=-1)
+     upper = jnp.concatenate([coeff, zero], axis=-1)
+     coefficient_sum = jax.lax.optimization_barrier(lower + upper)

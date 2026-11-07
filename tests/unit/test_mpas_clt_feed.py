@@ -2,7 +2,7 @@
 
 ``clt`` was computed ONLY inside ``DiagnosticCollector.collect`` — the
 cube/lat-lon spatial path. Production AMIP runs on ``grid_type="mpas"``, which
-dispatches to ``ModelDriver._run_mpas``; that lane never calls ``collect`` at
+dispatches to ``ModelDriver._run_column``; that lane never calls ``collect`` at
 all, feeding CMOR exclusively through ``feed_cmip_accumulators_native``, whose
 hardcoded field list had no ``clt`` and whose signature took no cloud tracers.
 Net effect: 20+ production run directories, zero ``clt`` files ever written,
@@ -295,3 +295,38 @@ def test_validation_failure_leaves_the_accumulator_untouched(mesh):
     assert set(dc._spatial_monthly._data_2d) == before_keys, \
         "a partial commit landed before validation rejected the input"
     assert dc._spatial_monthly._max_count_ever == before_max
+
+
+def test_driver_scores_the_advected_ifs_cloud_fraction_over_the_whole_column(mesh):
+    """IFS CLOUDSC (vote VC40): clt reads the advected ``cloud_fraction_ifs``
+    radiation reads, over the WHOLE column (VC24), not the condensate-diagnosed
+    'resolved' cover.  A uniform 0.5 fraction at every level gives 50 % under
+    maximum-random overlap; the resolved diagnosis would give 100 % wherever
+    the mid-level condensate sits, and a 700 hPa gate would keep it aloft."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    dc, sig = _collector(mesh, build_cloud_config("resolved"))
+    f = _fields(mesh, sig)
+    a = np.full_like(f["q_c"], 0.5)
+    fake = _fake_driver(mesh, dc, f, tracers={
+        "q_v": f["q_v"], "q_c": f["q_c"], "cloud_fraction_ifs": a})
+    # bind the native-kwargs builder the feed delegates to (as
+    # test_mpas_cmor_flux_feed._as_driver does)
+    import functools
+    import types
+    fake._mpas_cmip_native_kwargs = functools.partial(
+        ModelDriver._mpas_cmip_native_kwargs, fake)
+    fake.config = types.SimpleNamespace(
+        output=types.SimpleNamespace(diag_days=1.0, clear_sky_diag=True))
+    fake.state.v = None
+    fake._feed_mpas_moisture_budget = lambda *a, **k: None
+    direct = dc._clt_percent(f["T"], f["p_s"], f["q_v"], f["q_c"],
+                             cloud_fraction=a)
+    np.testing.assert_allclose(direct, 50.0, rtol=0, atol=1e-6)
+    ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+    out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+    assert "field_2d_clt" in out
+    clt = np.asarray(out["field_2d_clt"], dtype=float)
+    clt = clt[np.isfinite(clt)]
+    assert clt.size > 0
+    np.testing.assert_allclose(clt, 50.0, rtol=0, atol=1e-6)
