@@ -53,7 +53,8 @@ from legoesm.core.bulk_flux import (
 )
 
 # All selectable stable-regime schemes and the non-linear (non-default) subset.
-SCHEMES = ("dyer1974", "beljaars_holtslag1991", "grachev2007_sheba", "gryanik2020")
+SCHEMES = ("dyer1974", "beljaars_holtslag1991", "grachev2007_sheba", "gryanik2020",
+           "wrf_revmm5")
 NONLINEAR = tuple(s for s in SCHEMES if s != "dyer1974")
 
 
