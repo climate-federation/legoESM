@@ -1214,10 +1214,10 @@ def si3_cgrid_deformation(
     # Materialize products so LLVM x86-64 cannot contract multiply-plus-add.
     divergence_square = nemo_source_round(divergence * divergence)
     tension_square = nemo_source_round(tension * tension)
-    strain_square = nemo_source_round(tension_square + shear_square)
+    strain_square = tension_square + shear_square
     eccentricity = jnp.asarray(config.eccentricity, dtype=state.u_ice_u.dtype)
-    eccentricity_square = nemo_source_round(eccentricity * eccentricity)
-    inverse_eccentricity_square = nemo_source_round(_SI3_ONE / eccentricity_square)
+    eccentricity_square = eccentricity * eccentricity
+    inverse_eccentricity_square = _SI3_ONE / eccentricity_square
     scaled_strain_square = nemo_source_round(strain_square * inverse_eccentricity_square)
     deformation = (
         _si3_sqrt(divergence_square + scaled_strain_square)
