@@ -108,6 +108,17 @@ DEFAULT_SW_GAS = _default_data_path("rrtmgp-gas-sw-g112.nc")
 _DEFAULT_LW_CLOUD = _default_data_path("rrtmgp-clouds-lw-bnd.nc")
 _DEFAULT_SW_CLOUD = _default_data_path("rrtmgp-clouds-sw-bnd.nc")
 
+
+def cloud_table_paths(config) -> tuple[str, str]:
+    """The (longwave, shortwave) cloud-optics table files ``config`` loads.
+
+    The one resolution the loader uses, so a caller fingerprinting the tables
+    hashes exactly the files the solver reads.
+    """
+    return (config.lw_cloud_file or _DEFAULT_LW_CLOUD,
+            config.sw_cloud_file or _DEFAULT_SW_CLOUD)
+
+
 # Module-level optics cache (shared across RRTMGP instances)
 _legoesm_optics_cache: dict = {}
 
@@ -464,8 +475,7 @@ class RRTMGP:
       if key not in _legoesm_optics_cache:
           lw_file = config.lw_gas_file or _DEFAULT_LW_GAS
           sw_file = config.sw_gas_file or DEFAULT_SW_GAS
-          lw_cloud = config.lw_cloud_file or _DEFAULT_LW_CLOUD
-          sw_cloud = config.sw_cloud_file or _DEFAULT_SW_CLOUD
+          lw_cloud, sw_cloud = cloud_table_paths(config)
 
           rrtm_optics = RRTMOpticsConfig(
               longwave_nc_filepath=lw_file,

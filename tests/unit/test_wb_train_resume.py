@@ -816,3 +816,85 @@ def test_the_fingerprint_records_the_scored_leads():
     one = _run_fingerprint(_cfg_ns(), {"loss": {"multi_step_hours": [6]}}, 500, 12, 240, 1)
     two = _run_fingerprint(_cfg_ns(), {"loss": {"multi_step_hours": [6, 12]}}, 500, 12, 240, 1)
     assert "train_leads_hours" not in one and two["train_leads_hours"] == [6, 12]
+
+
+def test_a_cloud_table_swap_refuses_the_resume(tmp_path, monkeypatch):
+    """User decision 2026-11-06: the RRTMGP cloud tables are data, so swapping
+    them (#2395) leaves the deck hash unchanged while the radiation changes. The
+    fingerprint must carry the CONTENT of the tables the loader resolves, and a
+    resume across a swap must fail the trainer's drift check."""
+    from legoesm.atmosphere.physics.radiation.rrtmgp import rrtmgp
+    from scripts.run.train_weatherbench_scale import (
+        _manifest_is_valid,
+        _run_fingerprint,
+    )
+
+    lw, sw = tmp_path / "lw.nc", tmp_path / "sw.nc"
+    lw.write_bytes(b"lw-table-v1")
+    sw.write_bytes(b"sw-table-v1")
+    monkeypatch.setattr(rrtmgp, "_DEFAULT_LW_CLOUD", str(lw))
+    monkeypatch.setattr(rrtmgp, "_DEFAULT_SW_CLOUD", str(sw))
+    yml = {"warmup_steps": 500, "nlev": 32}
+
+    saved = _run_fingerprint(_cfg_ns(), yml, 500, 12, 240, 1)
+    assert "cloud_tables_sha256" in saved
+    sw.write_bytes(b"sw-table-v2")            # same path, new content
+    now = _run_fingerprint(_cfg_ns(), yml, 500, 12, 240, 1)
+    drift = {k for k, v in saved.items() if now.get(k) != v}
+    assert drift == {"cloud_tables_sha256"}
+
+    # A manifest written before the key existed cannot show its tables.
+    old = {k: v for k, v in saved.items() if k != "cloud_tables_sha256"}
+    assert not _manifest_is_valid(
+        {"schema": mod._MANIFEST_SCHEMA, "frozen": [], "fingerprint": old},
+        expect_keys=now)
+
+    # Runs that load no RRTMGP tables carry no identity (nothing to refuse):
+    # neural_gcm replaces the physics on every core.
+    for core in ("spectral", "latlon", "cubed_sphere", "mpas"):
+        assert "cloud_tables_sha256" not in _run_fingerprint(
+            _cfg_ns(mode="neural_gcm", training_core=core), yml,
+            500, 12, 240, 1), core
+        assert "cloud_tables_sha256" in _run_fingerprint(
+            _cfg_ns(training_core=core), yml, 500, 12, 240, 1), core
+    assert "cloud_tables_sha256" not in _run_fingerprint(
+        _cfg_ns(), {**yml, "radiation": "gray"}, 500, 12, 240, 1)
+    sw.unlink()
+    with pytest.raises(RuntimeError, match="not a readable file"):
+        _run_fingerprint(_cfg_ns(), yml, 500, 12, 240, 1)
+
+
+def test_a_zarr_cloud_table_store_is_hashed_by_content(tmp_path, monkeypatch):
+    """The loader prefers a Zarr store directory when one exists; its content
+    (names and bytes of every file) must reach the identity too."""
+    from legoesm.atmosphere.physics.radiation.rrtmgp import rrtmgp
+    from scripts.run.train_weatherbench_scale import _run_fingerprint
+
+    for band in ("lw", "sw"):
+        (tmp_path / band / "extliq").mkdir(parents=True)
+        (tmp_path / band / "extliq" / "0").write_bytes(b"v1")
+        (tmp_path / band / ".zattrs").write_bytes(b"{}")
+    monkeypatch.setattr(rrtmgp, "_DEFAULT_LW_CLOUD", str(tmp_path / "lw"))
+    monkeypatch.setattr(rrtmgp, "_DEFAULT_SW_CLOUD", str(tmp_path / "sw"))
+    yml = {"warmup_steps": 500, "nlev": 32}
+
+    def _id():
+        return _run_fingerprint(_cfg_ns(), yml, 500, 12, 240, 1)[
+            "cloud_tables_sha256"]
+
+    before = _id()
+    (tmp_path / "sw" / "extliq" / "0").write_bytes(b"v2")
+    assert _id() != before, "a changed chunk must change the identity"
+    (tmp_path / "sw" / "extliq" / "0").write_bytes(b"v1")
+    assert _id() == before
+    (tmp_path / "sw" / "extliq" / "0").rename(tmp_path / "sw" / "extliq" / "1")
+    assert _id() != before, "a renamed chunk must change the identity"
+    (tmp_path / "sw" / "extliq" / "1").rename(tmp_path / "sw" / "extliq" / "0")
+    (tmp_path / "sw" / ".zattrs").write_bytes(b'{"v": 2}')
+    assert _id() != before, "changed store metadata must change the identity"
+
+    # A linked directory would go unhashed (rglob does not follow it).
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "sw" / "extice").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(RuntimeError, match="linked directory"):
+        _id()

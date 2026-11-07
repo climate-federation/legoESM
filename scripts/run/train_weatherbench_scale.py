@@ -344,6 +344,51 @@ def print_latest_complete_signature(root):
 _MANIFEST_SCHEMA = 2
 
 
+def _cloud_table_identity(cfg, yml):
+    """SHA-256 over the RRTMGP cloud-optics tables this run loads, or ``None``
+    when it runs no RRTMGP: only ``physics`` mode runs it (``neural_gcm``
+    replaces the physics with the network on every core), and a gray smoke run
+    loads no tables.
+
+    User decision 2026-11-06 (option 1, after #2395 replaced the tables): the
+    tables are data, not config, so swapping them leaves the deck hash
+    unchanged while every cloudy radiative flux moves. A resume across such a
+    swap must be refused, not continued as if it were the same experiment.
+    The paths come from the loader's own resolution (a NetCDF file or a Zarr
+    store directory), so the hash covers what the solver reads.
+    """
+    import hashlib
+    from pathlib import Path
+
+    if cfg.mode != "physics" or str(yml.get("radiation", "rrtmgp")) != "rrtmgp":
+        return None
+    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+        cloud_table_paths,
+    )
+
+    h = hashlib.sha256()
+    for path in map(Path, cloud_table_paths(RRTMGPConfig())):
+        if path.is_dir() and any(f.is_symlink() and f.is_dir()
+                                 for f in path.rglob("*")):
+            # rglob does not descend linked directories, so their chunks
+            # would go unhashed: refuse rather than fingerprint part of it.
+            raise RuntimeError(
+                f"RRTMGP cloud table store {path} contains a linked "
+                "directory; its content cannot be fingerprinted for resume.")
+        files = (sorted(f for f in path.rglob("*") if f.is_file())
+                 if path.is_dir() else [path] if path.is_file() else [])
+        if not files:
+            raise RuntimeError(
+                f"RRTMGP cloud table {path} is not a readable file or store; "
+                "the run's radiation cannot be fingerprinted for resume.")
+        for f in files:
+            h.update(str(f.relative_to(path) if path.is_dir() else
+                         f.name).encode())
+            h.update(hashlib.sha256(f.read_bytes()).digest())
+    return h.hexdigest()[:32]
+
+
 def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
     """What the restored optimizer state was built for.
 
@@ -415,6 +460,12 @@ def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
     _leads = supervised_leads(yml, cfg.training_core)
     if _leads:
         fp["train_leads_hours"] = list(_leads)
+    # Present only for runs that run RRTMGP; a manifest written before this
+    # key existed then fails the exact key-set check and is refused, since it
+    # cannot show which tables its state was trained with.
+    _tables = _cloud_table_identity(cfg, yml)
+    if _tables is not None:
+        fp["cloud_tables_sha256"] = _tables
     return fp
 
 
