@@ -19,7 +19,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.coupling_fields import AtmToSurface
-from legoesm.core.bulk_flux import (GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH,
+from legoesm.core.bulk_flux import (MOST_ZETA_CAP_WIDTH,
                                       NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
                                       NCAR_NEUTRAL_WIDTH, apply_gustiness,
                                       ocean_surface_q_sat)
@@ -111,7 +111,6 @@ class SimpleOceanConfig(NamedTuple):
     # MOST smooth cap on |zeta| (RULE 5; 0 = hard clip at +-10) and the GFS
     # unstable smooth-join width (0 = the exact GFS step); bulk_flux constants.
     most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
-    gfs_unstable_join_width: float = GFS_UNSTABLE_JOIN_WIDTH
 
 
 # ============================================================================

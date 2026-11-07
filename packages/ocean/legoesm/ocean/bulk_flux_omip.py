@@ -480,7 +480,7 @@ def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
         )
         zeta = R(_ZU_M * inv_L)
         zeta = R(_sign(_fmin(jnp.abs(zeta), _ZETA_ABS_MAX), zeta))
-        psim = psi_m(zeta, nemo_source_exact=True)
+        psim = psi_m(zeta, nemo_source_exact=True, zeta_cap_width=0.0)
 
         UN10 = R(_fmax(
             _UN10_FLOOR_M_S, _un10_from_cd(_ZU_M, Ub, Cd, psim)
@@ -501,7 +501,7 @@ def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
         sqrt_Cd = R(jnp.sqrt(Cd))
 
         height_log = log_height
-        heat_psi = psi_h(zeta, nemo_source_exact=True)
+        heat_psi = psi_h(zeta, nemo_source_exact=True, zeta_cap_width=0.0)
         heat_difference = R(height_log - heat_psi)
         heat_over_k = R(heat_difference / B(k))
         zh = R(heat_over_k / B(sqrt_CdN))
@@ -580,7 +580,7 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
             theta_zu, q_zu, u_star, theta_star, q_star
         )
         zeta = jnp.clip(_ZU_M * inv_L, -_ZETA_ABS_MAX, _ZETA_ABS_MAX)
-        psim = psi_m(zeta)
+        psim = psi_m(zeta, zeta_cap_width=0.0)
         UN10 = jnp.maximum(
             _UN10_FLOOR_M_S, Ub * (1.0 + sqrt_Cd / k * psim)
         )
@@ -589,7 +589,7 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
         denom = 1.0 - sqrt_CdN / k * psim
         Cd = jnp.maximum(CdN / (denom * denom), _CX_MIN)
         sqrt_Cd = jnp.sqrt(Cd)
-        zh = -psi_h(zeta) / k / sqrt_CdN
+        zh = -psi_h(zeta, zeta_cap_width=0.0) / k / sqrt_CdN
         ratio = sqrt_Cd / sqrt_CdN
         stable = jnp.where(zeta > 0.0, 1.0, 0.0)
         ChN = _ch_n10(sqrt_CdN, stable)

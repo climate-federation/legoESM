@@ -56,6 +56,12 @@ def test_coare_width_guard_and_finite_values(u):
     z = jnp.asarray([-0.5, -1e-4, 0.0, 1e-4, 0.5])
     for f in (bf.psi_m_coare, bf.psi_h_coare):
         assert np.all(np.isfinite(f(z, "dyer1974", unstable_scheme=u)))
+    zmax = bf._UNSTABLE_ZETA_MAX[u]
+    zp = jnp.linspace(0.0, 0.999 * zmax, 1001)
+    for i in (0, 1):
+        assert np.all(np.isfinite(bf.UNSTABLE_PSI_FUNCTIONS[u][i](zp)))
+    with pytest.raises(ValueError, match="neutral_width"):
+        bf.psi_h_coare(z, "dyer1974", zmax, unstable_scheme=u)
     if u in ("wrf_revmm5", "mynn_sfc"):
         with pytest.raises(ValueError, match="neutral_width"):
             bf.psi_h_coare(z, "dyer1974", 0.05, unstable_scheme=u)
@@ -133,6 +139,8 @@ def test_cap_gradient_at_default():
 def test_cap_width_validated_and_threaded_by_the_solver(monkeypatch):
     x = [jnp.full(2, v) for v in (1.5, 0.0, 290.0, 0.008, 285.0, 0.006, 1.2)]
     for bad in (-0.1, 5.5):
+        with pytest.raises(ValueError, match="zeta_cap_width"):
+            bf.psi_m(jnp.asarray([1.0]), zeta_cap_width=bad)
         with pytest.raises(ValueError, match="most_zeta_cap_width"):
             bf.compute_most_fluxes(*x, scheme="most", most_zeta_cap_width=bad)
     seen = []
@@ -192,3 +200,37 @@ def test_cli_flags_reach_the_configs():
          "--surface-gfs-unstable-join-width", "0.1"])
     c = coupled.build_coupler_config(args)
     assert (c.most_zeta_cap_width, c.gfs_unstable_join_width) == (0.0, 0.1)
+
+
+def test_experiment_config_widths_reach_the_surface_layer():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    cfg = ExperimentConfig(turbulence="louis", surface_bulk_scheme="most",
+                           surface_most_zeta_cap_width=0.0,
+                           surface_gfs_unstable_join_width=0.1)
+    s = turbulence_config_for(cfg).louis.surface
+    assert (s.most_zeta_cap_width, s.gfs_unstable_join_width) == (0.0, 0.1)
+    d = turbulence_config_for(ExperimentConfig(turbulence="louis")).louis.surface
+    assert (d.most_zeta_cap_width, d.gfs_unstable_join_width) == (
+        bf.MOST_ZETA_CAP_WIDTH, bf.GFS_UNSTABLE_JOIN_WIDTH)
+
+
+def test_oracle_and_non_most_psi_callers_keep_the_hard_clip(monkeypatch):
+    """OMIP NCAR (both lanes), CLM canopy and LES surface call psi_m/psi_h
+    outside the MOST path; they keep the former +-10 clip (width 0)."""
+    from legoesm.atmosphere.dynamics.les import spectral_les_plane as les
+    from legoesm.land.canopy import stability as canopy
+    from legoesm.ocean import bulk_flux_omip as omip
+
+    seen = []
+    real = bf._zeta_cap
+    monkeypatch.setattr(bf, "_zeta_cap", lambda z, w: (seen.append(w), real(z, w))[1])
+    wind = jnp.asarray([0.5, 1.0, 4.0])
+    omip.ncar_transfer_coefficients(280.0, 0.005, 290.0, 0.010, wind)
+    omip._ncar_transfer_coefficients_exact(280.0, 0.005, 290.0, 0.010, wind, nb_iter=3)
+    canopy._friction_velocity(jnp.asarray([10.0]), jnp.asarray([0.1]),
+                              jnp.asarray([0.9]), jnp.asarray([2.0]))
+    assert seen and all(w == 0.0 for w in seen), seen
+    src = Path(les.__file__).read_text()
+    assert src.count("zeta_cap_width=0.0") == 2

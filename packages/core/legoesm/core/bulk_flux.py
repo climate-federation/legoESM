@@ -749,6 +749,9 @@ _UNSTABLE_ZETA_MAX = {
     "businger_dyer": 1.0 / _DYER_UNSTABLE_GAMMA,
     "wrf_revmm5": 1.0 / _WRF_CONV_C_H,
     "mynn_sfc": 1.0 / _MYNN_CONV_H,
+    # GFS: first pole of the rational fit's denominator 1 + b1 z + b2 z^2.
+    "gfs": min((-b1 - math.sqrt(b1 * b1 - 4.0 * b2)) / (2.0 * b2)
+               for b1, b2 in ((_GFS_M_B1, _GFS_M_B2), (_GFS_H_B1, _GFS_H_B2))),
 }
 
 # --- Smooth cap on |zeta| (RULE 5; user-approved, vote coscientist/vote_cap*) ---
@@ -775,6 +778,8 @@ def _zeta_cap(zeta, width):
     momentum/heat); at zeta = -10 0.73-0.93 %.  phi is continuous with a
     continuous slope; width 0 recovers the clip exactly.
     """
+    if not 0.0 <= width <= _MOST_ZETA_CAP / 2.0:
+        raise ValueError(f"zeta_cap_width must be in [0, {_MOST_ZETA_CAP / 2.0}], got {width!r}")
     if width == 0.0:
         return jnp.clip(zeta, -_MOST_ZETA_CAP, _MOST_ZETA_CAP)
     a = jnp.abs(zeta)
@@ -1192,7 +1197,7 @@ def _coare_unstable_psi_h(zn):
 
 
 def _check_coare_unstable_width(unstable_scheme, neutral_width):
-    """Businger-Dyer, WRF and MYNN unstable forms are NaN above a small positive
+    """Businger-Dyer, WRF, MYNN and GFS unstable forms blow up above a small positive
     zeta; the COARE neutral blend evaluates the unstable form up to
     zeta = neutral_width, so refuse widths that reach it (static check)."""
     zmax = _UNSTABLE_ZETA_MAX.get(unstable_scheme)
@@ -1622,8 +1627,10 @@ SURFACE_FLUX_WIDTH_DEFAULTS = {
 def surface_flux_widths(config) -> dict:
     """The smooth-switch widths a component config carries, as
     :func:`compute_most_fluxes` keyword arguments (#2241: config fields, not
-    call-site defaults).  Missing fields raise ``AttributeError``."""
-    return {k: getattr(config, k) for k in SURFACE_FLUX_WIDTH_DEFAULTS}
+    call-site defaults).  Missing fields raise ``AttributeError``.  The GFS
+    join width is carried only by configs that select ``unstable_scheme``."""
+    return {k: getattr(config, k) for k in SURFACE_FLUX_WIDTH_DEFAULTS
+            if k != "gfs_unstable_join_width" or hasattr(config, "unstable_scheme")}
 
 
 def _ncar_stable_weight(x, width):

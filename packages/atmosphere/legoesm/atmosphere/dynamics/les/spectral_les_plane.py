@@ -701,8 +701,8 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
     for _ in range(n_iter):
         inv_L = kappa * gacc * th_star / (u_star ** 2 * theta_ref + 1e-12)
         zeta = z1 * inv_L                         # +ve stable, −ve unstable
-        u_star = kappa * spd_mean / (lnz - psi_m(zeta))
-        th_star = kappa * dth / (lnz - psi_h(zeta))
+        u_star = kappa * spd_mean / (lnz - psi_m(zeta, zeta_cap_width=0.0))
+        th_star = kappa * dth / (lnz - psi_h(zeta, zeta_cap_width=0.0))
     q0 = -u_star * th_star
     cd_eff = (u_star / (spd_mean + 1e-12)) ** 2
     return u_star, th_star, q0, cd_eff
