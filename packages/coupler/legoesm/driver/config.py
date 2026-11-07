@@ -3307,13 +3307,15 @@ class ExperimentConfig(NamedTuple):
                 f"got {self.surface_unstable_scheme!r}"
             )
         elif (self.surface_unstable_scheme != "native"
-                and self.surface_bulk_scheme in ("constant", "none")
+                and self.surface_bulk_scheme not in ("coare3", "large_yeager")
                 and not _tiled_with_real_land):
+            # constant/none have no stability; large_yeager_cesm runs the CESM
+            # solver, which has its own fixed unstable form and ignores it.
             errors.append(
                 f"surface_unstable_scheme={self.surface_unstable_scheme!r} "
-                f"needs a stability-dependent surface_bulk_scheme ('coare3' or "
-                f"'large_yeager') or surface_tiled=True whose land tile runs "
-                f"MOST; otherwise only the 2 m diagnostic would move."
+                f"needs surface_bulk_scheme 'coare3' or 'large_yeager' (the "
+                f"iterative MOST solver) or surface_tiled=True whose land tile "
+                f"runs MOST; otherwise it would be ignored."
             )
         if self.surface_stability_scheme not in _valid_stability:
             errors.append(

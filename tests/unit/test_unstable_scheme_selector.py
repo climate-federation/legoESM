@@ -77,9 +77,9 @@ def test_default_matches_frozen_pre_change_outputs():
     fns = dict(psi_m=psi_m, psi_h=psi_h, psi_m_coare=psi_m_coare, psi_h_coare=psi_h_coare)
     for s in STABLE:
         for name, fn in fns.items():
-            np.testing.assert_allclose(fn(zeta, s), g[f"{name}/{s}"], rtol=1e-13, atol=0)
+            np.testing.assert_array_equal(fn(zeta, s), g[f"{name}/{s}"])
             d = jax.vmap(jax.grad(lambda z: fn(z, s)))(zeta)
-            np.testing.assert_allclose(d, g[f"d{name}/{s}"], rtol=1e-13, atol=0)
+            np.testing.assert_array_equal(d, g[f"d{name}/{s}"])
     st = {k: g[f"in/{k}"] for k in ("u", "v", "Ta", "dT", "qa", "dq")}
     n = len(st["u"])
     for scheme in ("most", "coare3", "large_yeager"):
@@ -89,8 +89,8 @@ def test_default_matches_frozen_pre_change_outputs():
                                     scheme=scheme, stability_scheme=s, return_2m=True,
                                     z0_init=1e-3)
             for i, x in enumerate(r):
-                np.testing.assert_allclose(x, g[f"flux/{scheme}/{s}/{i}"], rtol=1e-12, atol=0,
-                                           err_msg=f"{scheme}/{s}/{i}")
+                np.testing.assert_array_equal(x, g[f"flux/{scheme}/{s}/{i}"],
+                                              err_msg=f"{scheme}/{s}/{i}")
 
 
 # --- the swap: unstable side changes to the other family, stable side intact ---
@@ -243,9 +243,12 @@ def test_experiment_config_validates_and_injects():
     with pytest.raises(ValueError, match="surface_unstable_scheme"):
         ExperimentConfig(turbulence="louis", surface_bulk_scheme="coare3",
                          surface_unstable_scheme="bd").validate_strict()
-    with pytest.raises(ValueError, match="surface_unstable_scheme"):
-        ExperimentConfig(turbulence="louis", surface_bulk_scheme="constant",
-                         surface_unstable_scheme="coare3").validate_strict()
+    for bulk in ("constant", "large_yeager_cesm"):
+        with pytest.raises(ValueError, match="surface_unstable_scheme"):
+            ExperimentConfig(turbulence="louis", surface_bulk_scheme=bulk,
+                             surface_unstable_scheme="coare3").validate_strict()
+    ExperimentConfig(turbulence="louis", surface_bulk_scheme="large_yeager",
+                     surface_unstable_scheme="coare3").validate_strict()
     cfg = ExperimentConfig(turbulence="louis", surface_bulk_scheme="coare3",
                            surface_unstable_scheme="businger_dyer")
     cfg.validate_strict()

@@ -977,7 +977,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "independent of --surface-stability-scheme. native "
                              "(default, byte-identical) = each bulk scheme's own "
                              "form (Businger-Dyer on large_yeager, Fairall blend "
-                             "on coare3); businger_dyer or coare3 force that form.")
+                             "on coare3); businger_dyer or coare3 force that form "
+                             "(with gryanik2020 an explicit choice scales the "
+                             "unstable heat function by Pr0=0.98 so phi_h is "
+                             "continuous at z/L=0; native keeps the bulk scheme's "
+                             "own unscaled form). Needs coare3 or large_yeager.")
     # Large-Yeager (--surface-bulk-scheme large_yeager) RULE 5 smooth-switch
     # widths (#2241).  Defaults = the ExperimentConfig values (bit-identical);
     # 0 = AeroBulk's hard switch.  Read only by large_yeager.

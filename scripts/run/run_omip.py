@@ -546,7 +546,9 @@ def parse_args(argv: list[str] | None = None):
                         "and air-ice fluxes, independent of "
                         "--surface-stability-scheme. 'native' (default, "
                         "byte-identical) = the bulk scheme's own form; "
-                        "'businger_dyer' or 'coare3' force that form.")
+                        "'businger_dyer' or 'coare3' force that form (with "
+                        "gryanik2020 an explicit choice scales the unstable "
+                        "heat function by Pr0=0.98 so phi_h is continuous).")
     p.add_argument("--grid", type=str, default="all",
                    choices=GRID_TYPES + ["all"])
     p.add_argument("--resolution", type=str, default=None,
