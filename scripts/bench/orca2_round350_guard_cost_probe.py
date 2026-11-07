@@ -24,16 +24,36 @@ BENCH = (
 )
 
 
+STEP_FUNCTION = "_step_jitted"
+
+
+def _inside_step() -> bool:
+    frame = sys._getframe(2)
+    while frame is not None:
+        if frame.f_code.co_name == STEP_FUNCTION:
+            return True
+        frame = frame.f_back
+    return False
+
+
 def install_passthrough_guard():
-    """Swap the guard for a pass-through; return (original, {"eager": n, "traced": n})."""
+    """Swap the guard for a pass-through; return (original, call counts).
+
+    ``step`` counts traced calls made while the compiled ocean step is being traced,
+    so a swap that only reaches setup or forcing code cannot pass as valid.
+    """
     import jax
     from legoesm.core import source_rounding
 
     original = source_rounding.nemo_source_round
-    calls = {"eager": 0, "traced": 0}
+    calls = {"eager": 0, "traced": 0, "step": 0}
 
     def passthrough(value):
-        calls["traced" if isinstance(value, jax.core.Tracer) else "eager"] += 1
+        if isinstance(value, jax.core.Tracer):
+            calls["traced"] += 1
+            calls["step"] += _inside_step()
+        else:
+            calls["eager"] += 1
         return value
 
     source_rounding.nemo_source_round = passthrough
@@ -73,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.guards == "off":
         report["passthrough_calls"] = calls
         report["stale_bindings"] = stale_bindings(original)
-        ok = ok and calls["traced"] > 0 and not report["stale_bindings"]
+        ok = ok and calls["step"] > 0 and not report["stale_bindings"]
     report["valid"] = ok
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

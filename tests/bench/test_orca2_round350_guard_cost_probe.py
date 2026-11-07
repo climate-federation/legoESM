@@ -46,3 +46,20 @@ def test_caller_imported_before_swap_is_reported():
         "check()\n"
     )
     assert CALLER in out
+
+
+def test_step_count_only_inside_the_compiled_step():
+    out = _run(
+        "def check():\n"
+        "    original, calls = probe.install_passthrough_guard()\n"
+        f"    import {CALLER} as caller\n"
+        "    import jax, jax.numpy as jnp\n"
+        "    x = jnp.asarray(1.5)\n"
+        "    jax.jit(caller.nemo_source_round)(x)\n"
+        "    def _step_jitted(v):\n"
+        "        return caller.nemo_source_round(v)\n"
+        "    jax.jit(_step_jitted)(x)\n"
+        "    print(calls['traced'], calls['step'])\n"
+        "check()\n"
+    )
+    assert out == "2 1"
