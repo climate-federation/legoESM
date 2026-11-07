@@ -151,6 +151,7 @@ from legoesm.driver.config import (
 from legoesm.driver.run_status import status_to_exit_code
 
 from legoesm import constants
+from legoesm.core.bulk_flux import VALID_UNSTABLE_SCHEMES
 from legoesm.grids.halo import CORNER_FILL_MODES
 
 _DYCORE_DEFAULTS = DycoreConfig()
@@ -969,6 +970,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "a rounding-level change on coare3, and the "
                              "genuinely different strong-stable tails there "
                              "are grachev2007_sheba/gryanik2020.")
+    parser.add_argument("--surface-unstable-scheme", type=str,
+                        dest="surface_unstable_scheme", default="native",
+                        choices=list(VALID_UNSTABLE_SCHEMES),
+                        help="Unstable-branch (zeta<0) Monin-Obukhov form, "
+                             "independent of --surface-stability-scheme. native "
+                             "(default, byte-identical) = each bulk scheme's own "
+                             "form (Businger-Dyer on large_yeager, Fairall blend "
+                             "on coare3); businger_dyer or coare3 force that form.")
     # Large-Yeager (--surface-bulk-scheme large_yeager) RULE 5 smooth-switch
     # widths (#2241).  Defaults = the ExperimentConfig values (bit-identical);
     # 0 = AeroBulk's hard switch.  Read only by large_yeager.
@@ -3044,6 +3053,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         # Tuned air-sea + cloud calibration (mirror run_coupled).
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_stability_scheme=args.surface_stability_scheme,
+        surface_unstable_scheme=args.surface_unstable_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
         surface_large_yeager_neutral_width=args.surface_large_yeager_neutral_width,
         surface_large_yeager_dthv_width=args.surface_large_yeager_dthv_width,
@@ -3915,6 +3925,7 @@ def _louis_with_preserved_surface(louis_config, prev_turb_config):
             bulk_scheme=prev_surf.bulk_scheme,
             gustiness_w_zi=prev_surf.gustiness_w_zi,
             stability_scheme=prev_surf.stability_scheme,
+            unstable_scheme=prev_surf.unstable_scheme,
             z_ref_model_level=prev_surf.z_ref_model_level,
             ocean_q_sfc_saline=prev_surf.ocean_q_sfc_saline))
 

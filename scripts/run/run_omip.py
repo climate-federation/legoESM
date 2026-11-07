@@ -84,6 +84,7 @@ import numpy as np
 # OMIP ran unconditional fp64).  x64 is enabled at import (above) so the
 # fp64/mixed accumulate+control roles stay exact regardless of mode;
 # apply_precision installs the per-module mixed overrides when requested.
+from legoesm.core.bulk_flux import VALID_UNSTABLE_SCHEMES  # noqa: E402
 from legoesm.ocean.physics.lateral_mixing.config import (
     GMRediConfig,
     VisbeckConfig,
@@ -537,7 +538,15 @@ def parse_args(argv: list[str] | None = None):
                         "SHEBA; 'beljaars_holtslag1991' avoids stable flux "
                         "collapse. Unstable branch stays Businger-Dyer "
                         "(heat scaled by Pr0 = 0.98 for gryanik2020, as in "
-                        "SurfaceFluxes.jl).")
+                        "SurfaceFluxes.jl) unless --surface-unstable-scheme "
+                        "is set.")
+    p.add_argument("--surface-unstable-scheme", default="native",
+                   choices=list(VALID_UNSTABLE_SCHEMES),
+                   help="Unstable-regime (zeta<0) MOST form for the air-sea "
+                        "and air-ice fluxes, independent of "
+                        "--surface-stability-scheme. 'native' (default, "
+                        "byte-identical) = the bulk scheme's own form; "
+                        "'businger_dyer' or 'coare3' force that form.")
     p.add_argument("--grid", type=str, default="all",
                    choices=GRID_TYPES + ["all"])
     p.add_argument("--resolution", type=str, default=None,
@@ -2610,6 +2619,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         z_t_atm=10.0,
         z_q_atm=10.0,
         stability_scheme=args.surface_stability_scheme,
+        unstable_scheme=args.surface_unstable_scheme,
         ocean_albedo=float(getattr(args, "ocean_albedo", 0.06)),
     )
 
@@ -2769,6 +2779,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
             )
         _ice_kw = dict(
             stability_scheme=args.surface_stability_scheme,
+            unstable_scheme=args.surface_unstable_scheme,
             dynamics=_ice_dynamics,
             n_categories=_ice_ncat,
         )

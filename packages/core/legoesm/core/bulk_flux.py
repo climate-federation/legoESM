@@ -113,6 +113,18 @@ _VALID_STABILITY_SCHEMES = (
     "gryanik2020",
 )
 
+# ``unstable_scheme`` selects the UNSTABLE-branch (zeta < 0) psi_m, psi_h
+# independently of ``stability_scheme``.  ``"native"`` (default) keeps each bulk
+# path's own unstable form, byte-identical: Businger-Dyer on the ``most`` /
+# ``large_yeager`` paths (:func:`psi_m`), the COARE 3.0 Kansas/free-convection
+# blend on the ``coare3`` path (:func:`psi_m_coare`).  ``"businger_dyer"`` /
+# ``"coare3"`` force that form on every path.
+VALID_UNSTABLE_SCHEMES = (
+    "native",
+    "businger_dyer",
+    "coare3",
+)
+
 # --- Dyer (1974) linear stable functions ---
 # psi_m(zeta) = psi_h(zeta) = -beta*zeta (the historical default). Dyer (1974).
 _DYER_STABLE_BETA = 5.0
@@ -308,6 +320,19 @@ def validate_stability_scheme(stability_scheme: str) -> None:
         raise ValueError(
             f"Unknown stability_scheme {stability_scheme!r}; expected one of "
             f"{_VALID_STABILITY_SCHEMES}."
+        )
+
+
+def validate_unstable_scheme(unstable_scheme: str) -> None:
+    """Raise ``ValueError`` on an unknown unstable-regime stability scheme.
+
+    Static Python string, validated at function entry (dispatch hardening, as
+    :func:`validate_stability_scheme`).
+    """
+    if unstable_scheme not in VALID_UNSTABLE_SCHEMES:
+        raise ValueError(
+            f"Unknown unstable_scheme {unstable_scheme!r}; expected one of "
+            f"{VALID_UNSTABLE_SCHEMES}."
         )
 
 
@@ -508,10 +533,28 @@ def _stable_psi_h(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
     )
 
 
+def _bd_unstable_psi_m(zeta_neg, gamma):
+    """Businger-Dyer unstable psi_m (zeta <= 0), x = (1 - gamma zeta)^{1/4}."""
+    x = jnp.power(1.0 - gamma * zeta_neg, 0.25)
+    return (
+        2.0 * jnp.log((1.0 + x) / 2.0)
+        + jnp.log((1.0 + x ** 2) / 2.0)
+        - 2.0 * jnp.arctan(x)
+        + jnp.pi / 2.0
+    )
+
+
+def _bd_unstable_psi_h(zeta_neg, gamma):
+    """Businger-Dyer unstable psi_h (zeta <= 0), y = (1 - gamma zeta)^{1/2}."""
+    y = jnp.sqrt(1.0 - gamma * zeta_neg)
+    return 2.0 * jnp.log((1.0 + y) / 2.0)
+
+
 def psi_m(zeta, stability_scheme="dyer1974", *,
           unstable_gamma=_DYER_UNSTABLE_GAMMA,
           stable_beta=_DYER_STABLE_BETA,
-          nemo_source_exact: bool = False):
+          nemo_source_exact: bool = False,
+          unstable_scheme="native"):
     """MOST momentum stability function psi_m(zeta).
 
     Convention zeta = z/L (>0 stable). Unstable (zeta < 0) is Businger-Dyer for
@@ -539,12 +582,23 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     finite, with finite gradients, at 0); the stable form is selected for
     ``zeta > 0`` (SurfaceFluxes v0.12 Beljaars / v1.5.1 Gryanik), so psi(0) is
     the unstable form's exact 0.
+
+    ``unstable_scheme`` selects the unstable branch independently:
+    ``"native"`` (default) and ``"businger_dyer"`` are the Businger-Dyer form
+    above (identical here); ``"coare3"`` is the COARE 3.0 Kansas/free-convection
+    blend of :func:`psi_m_coare`, evaluated on the same clipped zeta.
     """
     validate_stability_scheme(stability_scheme)
+    validate_unstable_scheme(unstable_scheme)
     if nemo_source_exact:
         if stability_scheme != "dyer1974":
             raise ValueError(
                 "nemo_source_exact supports stability_scheme='dyer1974' only"
+            )
+        if unstable_scheme == "coare3":
+            raise ValueError(
+                "nemo_source_exact supports unstable_scheme 'native' or "
+                "'businger_dyer' only"
             )
         from legoesm.core import transcendentals as tx
         from legoesm.core.source_rounding import (
@@ -578,13 +632,10 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     # gamma does not silently perturb their unstable side.  Static Python select
     # on the (compile-time) scheme string -> no traced branch.
     _gamma = unstable_gamma if stability_scheme == "dyer1974" else _DYER_UNSTABLE_GAMMA
-    x = jnp.power(1.0 - _gamma * zeta_neg, 0.25)
-    unstable = (
-        2.0 * jnp.log((1.0 + x) / 2.0)
-        + jnp.log((1.0 + x ** 2) / 2.0)
-        - 2.0 * jnp.arctan(x)
-        + jnp.pi / 2.0
-    )
+    if unstable_scheme == "coare3":
+        unstable = _coare_unstable_psi_m(zeta_neg)
+    else:
+        unstable = _bd_unstable_psi_m(zeta_neg, _gamma)
 
     # Stable branch: static ``stability_scheme`` -> Python dispatch (only the
     # selected expression is traced), not ``jnp.where`` (which would trace all).
@@ -596,7 +647,8 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
 def psi_h(zeta, stability_scheme="dyer1974", *,
           unstable_gamma=_DYER_UNSTABLE_GAMMA,
           stable_beta=_DYER_STABLE_BETA,
-          nemo_source_exact: bool = False):
+          nemo_source_exact: bool = False,
+          unstable_scheme="native"):
     """MOST heat/moisture stability function psi_h(zeta).
 
     Convention zeta = z/L (>0 stable). Unstable (zeta < 0) is Businger-Dyer for
@@ -612,12 +664,21 @@ def psi_h(zeta, stability_scheme="dyer1974", *,
     unstable branch. Both default to the module constants (byte-identical).
     For ``"gryanik2020"`` the unstable branch is multiplied by Pr0 = 0.98, as in
     SurfaceFluxes.jl v1.5.1 (oracle: tests/core/test_surfacefluxes_psi_oracle.py).
+    ``unstable_scheme`` as in :func:`psi_m` (``"coare3"`` = the COARE 3.0
+    unstable psi_h); the gryanik2020 Pr0 factor applies to every unstable form
+    so phi_h stays continuous at zeta = 0.
     """
     validate_stability_scheme(stability_scheme)
+    validate_unstable_scheme(unstable_scheme)
     if nemo_source_exact:
         if stability_scheme != "dyer1974":
             raise ValueError(
                 "nemo_source_exact supports stability_scheme='dyer1974' only"
+            )
+        if unstable_scheme == "coare3":
+            raise ValueError(
+                "nemo_source_exact supports unstable_scheme 'native' or "
+                "'businger_dyer' only"
             )
         from legoesm.core import transcendentals as tx
         from legoesm.core.source_rounding import (
@@ -641,8 +702,10 @@ def psi_h(zeta, stability_scheme="dyer1974", *,
     # See psi_m: the trainable unstable gamma applies ONLY to dyer1974; the
     # non-linear stable schemes keep the historical gamma = 16 unstable branch.
     _gamma = unstable_gamma if stability_scheme == "dyer1974" else _DYER_UNSTABLE_GAMMA
-    y = jnp.sqrt(1.0 - _gamma * zeta_neg)
-    unstable = 2.0 * jnp.log((1.0 + y) / 2.0)
+    if unstable_scheme == "coare3":
+        unstable = _coare_unstable_psi_h(zeta_neg)
+    else:
+        unstable = _bd_unstable_psi_h(zeta_neg, _gamma)
     if stability_scheme == "gryanik2020":
         # SurfaceFluxes.jl v1.5.1 GryanikParams psi_h: the Businger fallback is
         # scaled by Pr_0, consistent with the stable branch's phi_h(0) = Pr_0.
@@ -783,7 +846,33 @@ def _coare_neutral_select(zeta, neutral_width, stable_fn, unstable_fn):
             + (1.0 - wt) * unstable_fn(jnp.minimum(zeta, neutral_width)))
 
 
-def psi_m_coare(zeta, stability_scheme="dyer1974", neutral_width=COARE_NEUTRAL_WIDTH):
+def _coare_unstable_psi_m(zn):
+    """COARE 3.0 unstable psi_m (AeroBulk ``psi_m_coare``, zeta < 0)."""
+    x = jnp.abs(1.0 - _AB_PSI_KANSAS * zn) ** 0.25
+    psi_k = (2.0 * jnp.log((1.0 + x) / 2.0) + jnp.log((1.0 + x * x) / 2.0)
+             - 2.0 * jnp.arctan(x) + 0.5 * jnp.pi)
+    return _psi_coare_unstable(zn, _AB_PSI_CONV_M, psi_k)
+
+
+def _coare_unstable_psi_h(zn):
+    """COARE 3.0 unstable psi_h (AeroBulk ``psi_h_coare``, zeta < 0)."""
+    x = jnp.abs(1.0 - _AB_PSI_KANSAS * zn) ** 0.5
+    return _psi_coare_unstable(zn, _AB_PSI_CONV_H, 2.0 * jnp.log((1.0 + x) / 2.0))
+
+
+def _check_coare_bd_width(unstable_scheme, neutral_width):
+    """Businger-Dyer is NaN for zeta > 1/gamma; the COARE neutral blend
+    evaluates the unstable form up to zeta = neutral_width, so refuse widths
+    that reach it (static Python check)."""
+    if unstable_scheme == "businger_dyer" and neutral_width >= 1.0 / _DYER_UNSTABLE_GAMMA:
+        raise ValueError(
+            f"unstable_scheme='businger_dyer' on coare3 needs neutral_width < "
+            f"{1.0 / _DYER_UNSTABLE_GAMMA}, got {neutral_width!r}"
+        )
+
+
+def psi_m_coare(zeta, stability_scheme="dyer1974", neutral_width=COARE_NEUTRAL_WIDTH,
+                *, unstable_scheme="native"):
     """COARE 3.0 momentum stability function, AeroBulk 1.0.0 ``psi_m_coare``.
 
     Faithful port of mod_common_coare.f90 ``psi_m_coare_sclr`` (Fairall et al.
@@ -811,14 +900,18 @@ def psi_m_coare(zeta, stability_scheme="dyer1974", neutral_width=COARE_NEUTRAL_W
     SIGN switch above is replaced by the compact quintic blend of
     :func:`_coare_neutral_select`; ``neutral_width = 0`` is the faithful
     AeroBulk form described here.  Same parameter on :func:`psi_h_coare`.
+
+    ``unstable_scheme``: ``"native"`` (default) / ``"coare3"`` = the COARE
+    unstable form above; ``"businger_dyer"`` = Businger-Dyer (gamma 16).
     """
     validate_stability_scheme(stability_scheme)
+    validate_unstable_scheme(unstable_scheme)
+    _check_coare_bd_width(unstable_scheme, neutral_width)
 
     def unstable(zn):
-        x = jnp.abs(1.0 - _AB_PSI_KANSAS * zn) ** 0.25
-        psi_k = (2.0 * jnp.log((1.0 + x) / 2.0) + jnp.log((1.0 + x * x) / 2.0)
-                 - 2.0 * jnp.arctan(x) + 0.5 * jnp.pi)
-        return _psi_coare_unstable(zn, _AB_PSI_CONV_M, psi_k)
+        if unstable_scheme == "businger_dyer":
+            return _bd_unstable_psi_m(zn, _DYER_UNSTABLE_GAMMA)
+        return _coare_unstable_psi_m(zn)
 
     def stable(zp):
         if stability_scheme != "dyer1974":
@@ -830,20 +923,32 @@ def psi_m_coare(zeta, stability_scheme="dyer1974", neutral_width=COARE_NEUTRAL_W
     return _coare_neutral_select(jnp.asarray(zeta), neutral_width, stable, unstable)
 
 
-def psi_h_coare(zeta, stability_scheme="dyer1974", neutral_width=COARE_NEUTRAL_WIDTH):
+def psi_h_coare(zeta, stability_scheme="dyer1974", neutral_width=COARE_NEUTRAL_WIDTH,
+                *, unstable_scheme="native"):
     """COARE 3.0 heat/moisture stability function, AeroBulk 1.0.0 ``psi_h_coare``.
 
     Faithful port of mod_common_coare.f90 ``psi_h_coare_sclr``: unstable =
     Kansas ``2 ln((1 + |1 - 15 zeta|^0.5)/2)`` blended with the free-convective
     form (``y = |1 - 34.15 zeta|^0.3333``); stable (zeta >= 0) =
     ``-(|1 + 2 zeta/3|^1.5 + 0.6667 (zeta - 14.28)/exp(min(50, 0.35 zeta))
-    + 8.525)``.  ``stability_scheme`` semantics as in :func:`psi_m_coare`.
+    + 8.525)``.  ``stability_scheme`` / ``unstable_scheme`` semantics as in
+    :func:`psi_m_coare`.  With an explicit (non-``"native"``) ``unstable_scheme``
+    and ``stability_scheme="gryanik2020"`` the unstable psi_h is scaled by Pr0
+    so phi_h is continuous at zeta = 0 (``"native"`` keeps AeroBulk's unscaled
+    form, byte-identical).
     """
     validate_stability_scheme(stability_scheme)
+    validate_unstable_scheme(unstable_scheme)
+    _check_coare_bd_width(unstable_scheme, neutral_width)
 
     def unstable(zn):
-        x = jnp.abs(1.0 - _AB_PSI_KANSAS * zn) ** 0.5
-        return _psi_coare_unstable(zn, _AB_PSI_CONV_H, 2.0 * jnp.log((1.0 + x) / 2.0))
+        if unstable_scheme == "businger_dyer":
+            psi = _bd_unstable_psi_h(zn, _DYER_UNSTABLE_GAMMA)
+        else:
+            psi = _coare_unstable_psi_h(zn)
+        if unstable_scheme != "native" and stability_scheme == "gryanik2020":
+            psi = _GRYANIK_PR0 * psi
+        return psi
 
     def stable(zp):
         if stability_scheme != "dyer1974":
@@ -1048,7 +1153,7 @@ def _first_guess_coare(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, charnock,
 def _turb_coare3p0(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, charnock,
                    zi, beta, stability_scheme, denom_floor, neutral_width,
                    charnock_ramp_width=COARE_CHARNOCK_RAMP_WIDTH,
-                   gust_onset_width=COARE_GUST_ONSET_WIDTH):
+                   gust_onset_width=COARE_GUST_ONSET_WIDTH, unstable_scheme="native"):
     """AeroBulk 1.0.0 ``TURB_COARE3P0`` (l_use_cs = l_use_wl = .false.).
 
     ``W2`` is the squared wind module ``U_zu**2``; ``equal`` is AeroBulk's
@@ -1097,16 +1202,19 @@ def _turb_coare3p0(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, charnock,
         z0t = jnp.minimum(_AB_COARE_Z0T_MAX,
                           _AB_COARE_Z0T_COEF * (nu / (z0 * us)) ** _AB_COARE_Z0T_EXP)
         z0t = jnp.clip(jnp.abs(z0t), _AB_COARE_Z_MIN, 1.0)
-        psih_u = psi_h_coare(zeta_u, stability_scheme, neutral_width)
+        psih_u = psi_h_coare(zeta_u, stability_scheme, neutral_width,
+                             unstable_scheme=unstable_scheme)
         tmp = KAPPA / _floor(log_zu - jnp.log(z0t) - psih_u)
         ts = dt * tmp
         qs = dq * tmp
         us_new = jnp.maximum(
-            Ub * KAPPA / _floor(log_zu - log_z0 - psi_m_coare(zeta_u, stability_scheme, neutral_width)),
+            Ub * KAPPA / _floor(log_zu - log_z0 - psi_m_coare(
+                zeta_u, stability_scheme, neutral_width, unstable_scheme=unstable_scheme)),
             _AB_COARE_USTAR_MIN)
         if equal is not True:
             zeta_t = jnp.clip(z_t * inv_L, -_AB_COARE_ZETA_ABS_MAX, _AB_COARE_ZETA_ABS_MAX)
-            prf = log_zt - log_zu + psih_u - psi_h_coare(zeta_t, stability_scheme, neutral_width)
+            prf = log_zt - log_zu + psih_u - psi_h_coare(
+                zeta_t, stability_scheme, neutral_width, unstable_scheme=unstable_scheme)
             t_new = t_zt - ts / KAPPA * prf
             q_new = q_zt - qs / KAPPA * prf
             t_zu = jnp.where(equal, t_zu, t_new)
@@ -1212,7 +1320,7 @@ def _cd_n10_ncar(w10, cutoff_width=NCAR_CD_CUTOFF_WIDTH):
 def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_scheme="dyer1974",
                unstable_gamma=_DYER_UNSTABLE_GAMMA, stable_beta=_DYER_STABLE_BETA,
                coeff_cap=None, neutral_width=NCAR_NEUTRAL_WIDTH, dthv_width=NCAR_DTHV_WIDTH,
-               cd_cutoff_width=NCAR_CD_CUTOFF_WIDTH):
+               cd_cutoff_width=NCAR_CD_CUTOFF_WIDTH, unstable_scheme="native"):
     """AeroBulk 1.0.0 ``TURB_NCAR`` (Large & Yeager 2004, 2009).
 
     ``W2`` is the squared wind module; ``equal`` is AeroBulk's
@@ -1250,7 +1358,8 @@ def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_sche
              equal=equal, log_zt_zu=log_zt_zu, log_zu_10=log_zu_10,
              stability_scheme=stability_scheme, unstable_gamma=unstable_gamma,
              stable_beta=stable_beta, coeff_cap=coeff_cap,
-             neutral_width=neutral_width, cd_cutoff_width=cd_cutoff_width)
+             neutral_width=neutral_width, cd_cutoff_width=cd_cutoff_width,
+             unstable_scheme=unstable_scheme)
     # Key on type and repr too: 5.0 vs np.float64(5.0) promote differently,
     # and 0.0 == -0.0, so equality alone could reuse the wrong literal.
     static = tuple((n, type(v), repr(v), v) for n, v in k.items() if _is_static_value(v))
@@ -1282,12 +1391,14 @@ def _ncar_iterate(carry, dyn, *, n_iter, static):
 
 def _ncar_body(c, *, T_s, q_s, Ub, t_zt, q_zt, z_u, z_t, equal, log_zt_zu,
                log_zu_10, stability_scheme, unstable_gamma, stable_beta,
-               coeff_cap, neutral_width, cd_cutoff_width):
+               coeff_cap, neutral_width, cd_cutoff_width, unstable_scheme):
     def _pm(z):
-        return psi_m(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+        return psi_m(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta,
+                     unstable_scheme=unstable_scheme)
 
     def _ph(z):
-        return psi_h(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+        return psi_h(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta,
+                     unstable_scheme=unstable_scheme)
 
     Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, _us, _ts, _qs, _inv_L, _resid = c
     dt = t_zu - T_s
@@ -1369,6 +1480,7 @@ def compute_most_fluxes(
     large_yeager_neutral_width=NCAR_NEUTRAL_WIDTH,
     large_yeager_dthv_width=NCAR_DTHV_WIDTH,
     large_yeager_cd_cutoff_width=NCAR_CD_CUTOFF_WIDTH,
+    unstable_scheme="native",
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -1468,8 +1580,14 @@ def compute_most_fluxes(
         is COARE-defining and always kept), so on that scheme
         ``"beljaars_holtslag1991"`` is a rounding-level change vs the default
         and the genuinely different tails are grachev/gryanik. The unstable
-        branch (zeta < 0) stays Businger-Dyer (Fairall blend for coare3)
-        regardless. Validated at function entry (a typo raises ``ValueError``).
+        branch (zeta < 0) is chosen separately by ``unstable_scheme``.
+        Validated at function entry (a typo raises ``ValueError``).
+    unstable_scheme : str
+        Unstable-regime (zeta < 0) form, independent of ``stability_scheme``:
+        ``"native"`` (default, byte-identical) = Businger-Dyer on
+        ``most``/``large_yeager`` and the Fairall blend on ``coare3``;
+        ``"businger_dyer"`` or ``"coare3"`` force that form on every path.
+        Validated at function entry.
     unstable_gamma : float
         Businger-Dyer / Dyer (1974) UNSTABLE-branch coefficient gamma in
         ``x = (1 - gamma zeta)^{1/4}`` (psi_m) / ``y = (1 - gamma zeta)^{1/2}``
@@ -1607,6 +1725,9 @@ def compute_most_fluxes(
     # ``stability_scheme`` selects the STABLE-branch psi_m/psi_h; also a static
     # string, so validate it once here rather than inside the traced loop body.
     validate_stability_scheme(stability_scheme)
+    # ``unstable_scheme`` selects the UNSTABLE-branch form independently
+    # ("native" = each bulk path's own form, byte-identical).
+    validate_unstable_scheme(unstable_scheme)
 
     # Scheme-native gustiness default (AeroBulk/COARE parity, static Python
     # resolved at trace time) via the single shared resolver — the air-sea
@@ -1705,7 +1826,8 @@ def compute_most_fluxes(
         _coare = _turb_ncar(
             u_rel ** 2 + v_rel ** 2, T_atm, q_atm, T_sfc, q_sfc, z_u, z_t, _equal,
             n_iter, stability_scheme, unstable_gamma, stable_beta, _coeff_cap,
-            large_yeager_neutral_width, large_yeager_dthv_width, large_yeager_cd_cutoff_width)
+            large_yeager_neutral_width, large_yeager_dthv_width, large_yeager_cd_cutoff_width,
+            unstable_scheme)
         u_star = _coare["us"]
         theta_star = -_coare["ts"]
         q_star_val = -_coare["qs"]
@@ -1717,7 +1839,7 @@ def compute_most_fluxes(
             u_rel ** 2 + v_rel ** 2, T_atm, q_atm, T_sfc, q_sfc, z_u, z_t, _equal,
             n_iter, charnock, gustiness_w_zi, gustiness_beta, stability_scheme,
             None if max_exchange_coeff is None else _denom_floor, coare_neutral_width,
-            coare_charnock_ramp_width, coare_gust_onset_width)
+            coare_charnock_ramp_width, coare_gust_onset_width, unstable_scheme)
         # legoESM sign convention for the scales (positive upward = surface
         # warmer/moister than the air): theta* = -AeroBulk zts.
         u_star = _coare["us"]
@@ -1821,11 +1943,14 @@ def compute_most_fluxes(
             # Businger-Dyer with the ``stability_scheme``-selectable stable
             # branch ("dyer1974" default = the -5*zeta that LY09/NEMO ncar use).
             psi_m_u = psi_m(zeta_u, stability_scheme,
-                            unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+                            unstable_gamma=unstable_gamma, stable_beta=stable_beta,
+                            unstable_scheme=unstable_scheme)
             psi_h_t = psi_h(zeta_t, stability_scheme,
-                            unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+                            unstable_gamma=unstable_gamma, stable_beta=stable_beta,
+                            unstable_scheme=unstable_scheme)
             psi_h_q = psi_h(zeta_q, stability_scheme,
-                            unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+                            unstable_gamma=unstable_gamma, stable_beta=stable_beta,
+                            unstable_scheme=unstable_scheme)
 
             # Fixed roughness ("constant"/"most").
             z0_new = z0
@@ -1917,7 +2042,8 @@ def compute_most_fluxes(
             inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
             zeta_d = jnp.clip(z_diag * inv_L, -10.0, 10.0)
             _psi_h_d = psi_h(zeta_d, stability_scheme,
-                             unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+                             unstable_gamma=unstable_gamma, stable_beta=stable_beta,
+                             unstable_scheme=unstable_scheme)
             denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - _psi_h_d
             T_2m = T_sfc - (theta_star / KAPPA) * denom_d
         else:
@@ -1929,13 +2055,14 @@ def compute_most_fluxes(
                 _zmax = _AB_COARE_ZETA_ABS_MAX
 
                 def _ph(z):
-                    return psi_h_coare(z, stability_scheme, coare_neutral_width)
+                    return psi_h_coare(z, stability_scheme, coare_neutral_width,
+                                       unstable_scheme=unstable_scheme)
             else:
                 _zmax = _AB_NCAR_ZETA_ABS_MAX
 
                 def _ph(z):
                     return psi_h(z, stability_scheme, unstable_gamma=unstable_gamma,
-                                 stable_beta=stable_beta)
+                                 stable_beta=stable_beta, unstable_scheme=unstable_scheme)
 
             def _zeta(z):
                 return jnp.clip(z * _coare["inv_L"], -_zmax, _zmax)

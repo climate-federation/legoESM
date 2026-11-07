@@ -299,6 +299,7 @@ class DiagnosticCollector:
         vcoord=None,
         surface_stability_scheme: str = "dyer1974",
         surface_bulk_scheme: str = "constant",
+        surface_unstable_scheme: str = "native",
         clubb_config=None,
         cmip_drs_tree: bool = False,
         cmip_institution_id: str = "CU",
@@ -317,6 +318,7 @@ class DiagnosticCollector:
         # similarity profile, so it keeps the historical coare3 profile —
         # which also keeps the default byte-identical.
         self.surface_stability_scheme = surface_stability_scheme
+        self.surface_unstable_scheme = surface_unstable_scheme
         # surface_bulk_scheme="none": no surface layer exists, so the 2 m
         # temperature (and its daily extremes) is not produced at all rather
         # than published from a profile of an exchange that never happens.
@@ -878,6 +880,7 @@ class DiagnosticCollector:
                         else "large_yeager"),
                 return_2m=True,
                 stability_scheme=self.surface_stability_scheme,
+                unstable_scheme=self.surface_unstable_scheme,
             )
             return T_2m
 

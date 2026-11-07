@@ -1023,6 +1023,7 @@ def _bulk_flux_dispatch(
             L_latent=latent_heat_sublimation(T_ice),
             **large_yeager_widths(config),
             stability_scheme=config.stability_scheme,
+            unstable_scheme=config.unstable_scheme,
         )
     else:
         q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)

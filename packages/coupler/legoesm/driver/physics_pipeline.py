@@ -4919,6 +4919,7 @@ def apply_surface_flux_config(tc, config):
     gzi = getattr(config, "surface_gustiness_zi", None)
     stc = getattr(config, "surface_thermo_convention", "legoesm")
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
+    sus = getattr(config, "surface_unstable_scheme", "native")
     zml = getattr(config, "surface_z_ref_model_level", None)
     # Large-Yeager smooth-switch widths (#2241): only values that differ from
     # the shared default are injected, so a default run keeps the fast path.
@@ -4958,7 +4959,8 @@ def apply_surface_flux_config(tc, config):
             "mosaic surface); this run has neither. Grid is "
             f"{getattr(getattr(config, 'grid', None), 'grid_type', '?')!r}")
     if (sbs == "constant" and gzi is None and stc == "legoesm"
-            and sss == "dyer1974" and zml is None and _qsal_req is None
+            and sss == "dyer1974" and sus == "native" and zml is None
+            and _qsal_req is None
             and not qsal and not lyw):
         # The two surface switches gate this fast path on whether they have
         # anything to SAY, not on whether they are true:
@@ -5020,6 +5022,9 @@ def apply_surface_flux_config(tc, config):
         # driven by the one --surface-stability-scheme flag) so the
         # interface cannot split Dyer-vs-SHEBA across its two sides.
         surf = surf._replace(stability_scheme=sss)
+    if sus != "native":
+        # Unstable-regime MOST form, same single flag for both interface sides.
+        surf = surf._replace(unstable_scheme=sus)
     if lyw:
         surf = surf._replace(**lyw)
     return tc._replace(**{tc.scheme: sub._replace(surface=surf)})

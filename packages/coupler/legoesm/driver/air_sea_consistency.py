@@ -72,7 +72,7 @@ _SCHEME_AXIS = "bulk_scheme"
 # both sides -- e.g. `run_coupled --bulk-thermo-convention aerobulk`, which is
 # inert under the default constant closure.  Verified: an earlier draft of this
 # module compared them unconditionally and did exactly that.
-_MOST_ONLY_AXES = ("thermo_convention", "stability_scheme", "z_ref",
+_MOST_ONLY_AXES = ("thermo_convention", "stability_scheme", "unstable_scheme", "z_ref",
                    "bulk_n_iter")
 
 # The two sides do NOT agree on what counts as MOST.  The ATMOSPHERE dispatches

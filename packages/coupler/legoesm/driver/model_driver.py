@@ -5752,6 +5752,8 @@ class ModelDriver:
                 self.config, "surface_stability_scheme", "dyer1974"),
             surface_bulk_scheme=getattr(
                 self.config, "surface_bulk_scheme", "constant"),
+            surface_unstable_scheme=getattr(
+                self.config, "surface_unstable_scheme", "native"),
         )
         # Register per-cell horizontal areas so every global-mean diagnostic
         # (<R_TOA>, <SST>, <CWV>, ...) is area-weighted.  On a lat-lon grid an

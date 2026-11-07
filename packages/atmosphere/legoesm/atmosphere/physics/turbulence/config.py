@@ -372,6 +372,12 @@ class SurfaceLayerConfig(NamedTuple):
     large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
     large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
     large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
+    # Unstable-regime (zeta < 0) MOST form, chosen independently of
+    # ``stability_scheme``: "native" (each bulk path's own form, byte-identical:
+    # Businger-Dyer on most/large_yeager, Fairall blend on coare3) |
+    # "businger_dyer" | "coare3".  Unknown -> ValueError at dispatch.  Appended
+    # last (positional order).
+    unstable_scheme: str = "native"
 
 
 class SmagorinskyConfig(NamedTuple):

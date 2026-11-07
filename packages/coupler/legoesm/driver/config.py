@@ -20,7 +20,7 @@ from typing import Any, NamedTuple
 
 from legoesm import constants
 from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
-                                      NCAR_NEUTRAL_WIDTH)
+                                      NCAR_NEUTRAL_WIDTH, VALID_UNSTABLE_SCHEMES)
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     C_E_BULK_DEFAULT, C_H_BULK_DEFAULT)
 from legoesm.land import snow_column as _snow_column
@@ -1186,6 +1186,11 @@ class ExperimentConfig(NamedTuple):
     # the genuinely different SBL tails are "grachev2007_sheba"/"gryanik2020";
     # see bulk_flux.psi_m_coare).
     surface_stability_scheme: str = "dyer1974"
+    # Unstable-regime (zeta < 0) MOST form, chosen independently of
+    # surface_stability_scheme and threaded to the same consumers: "native"
+    # (default, byte-identical: each bulk path's own form) | "businger_dyer" |
+    # "coare3".  See bulk_flux.compute_most_fluxes.
+    surface_unstable_scheme: str = "native"
     # Tiled (mosaic) surface fluxes: when True, the atmosphere surface
     # turbulent flux is computed SEPARATELY per surface tile and area-weighted
     # — ``surface_bulk_scheme`` (e.g. coare3) runs on the OCEAN tile, the
@@ -3296,6 +3301,20 @@ class ExperimentConfig(NamedTuple):
             self.land_mask_path
             or ((self.slab_land_active or self.use_multilayer_land)
                 and not _idealized_topography))
+        if self.surface_unstable_scheme not in VALID_UNSTABLE_SCHEMES:
+            errors.append(
+                f"surface_unstable_scheme must be one of {VALID_UNSTABLE_SCHEMES}, "
+                f"got {self.surface_unstable_scheme!r}"
+            )
+        elif (self.surface_unstable_scheme != "native"
+                and self.surface_bulk_scheme in ("constant", "none")
+                and not _tiled_with_real_land):
+            errors.append(
+                f"surface_unstable_scheme={self.surface_unstable_scheme!r} "
+                f"needs a stability-dependent surface_bulk_scheme ('coare3' or "
+                f"'large_yeager') or surface_tiled=True whose land tile runs "
+                f"MOST; otherwise only the 2 m diagnostic would move."
+            )
         if self.surface_stability_scheme not in _valid_stability:
             errors.append(
                 f"surface_stability_scheme must be one of {_valid_stability}, "

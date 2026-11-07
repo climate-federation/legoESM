@@ -223,6 +223,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/core/legoesm/core/bulk_flux.py", "validate_stability_scheme"),
         ("packages/core/legoesm/core/bulk_flux.py", "_stable_psi_m"),
         ("packages/core/legoesm/core/bulk_flux.py", "_stable_psi_h"),
+        # Unstable-regime MOST form selector (unstable_scheme): unknown raises.
+        ("packages/core/legoesm/core/bulk_flux.py", "validate_unstable_scheme"),
         ("packages/core/legoesm/core/tracers.py", "index"),
         ("packages/core/legoesm/grids/capability.py", "instantiate"),
         ("packages/core/legoesm/grids/capability.py", "validate_runtime"),

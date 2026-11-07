@@ -368,6 +368,7 @@ def ocean_tile_response(
             gustiness_w_zi=config.gustiness_w_zi,
             thermo_convention=_thermo_conv,
             stability_scheme=config.stability_scheme,
+            unstable_scheme=config.unstable_scheme,
             **large_yeager_widths(config),
         )
     else:
