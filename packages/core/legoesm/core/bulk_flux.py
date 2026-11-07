@@ -502,7 +502,14 @@ def _wrf_revmm5_psi_m(zeta_pos):
 
 
 def _wrf_revmm5_psi_h(zeta_pos):
-    """WRF revised MM5 stable heat psi_h (psih_stable_full), zeta > 0."""
+    """WRF revised MM5 stable heat psi_h (psih_stable_full), zeta > 0.
+
+    phi_h is C1 for zeta > 0 with slope -> 5.3 as zeta -> 0+, but psi_h'' ~
+    zeta^-0.9 is unbounded there (the zeta^1.1 term of the published form).
+    In :func:`psi_h` zeta = 0 takes the unstable side, so derivatives at 0 are
+    finite; in :func:`psi_h_coare` the neutral blend evaluates this branch at
+    0, where the second derivative is -inf (first derivative finite).
+    """
     return _wrf_cheng_brutsaert(zeta_pos, _WRF_STABLE_A_H, _WRF_STABLE_B_H)
 
 
