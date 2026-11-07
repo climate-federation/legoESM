@@ -42,7 +42,17 @@ switch argument); it equals the oracle exactly as ``sharpness -> inf``.
 KNOWN GAP AT THE DEFAULT (``saturation_sharpness = 100``, unchanged pending a
 user decision): ``k x`` is far from the hard limit for |x| ~ 1e-3, so the
 default adjusts only about half the excess per subcycle and can leave
-NEGATIVE cloud water (-1.3e-4 kg/kg on the oracle fixture columns).  The data-dependent subcycle
+NEGATIVE cloud water (-1.3e-4 kg/kg on the oracle fixture columns).
+That negative cloud water is erased by the next subcycle's ``max(q_c -
+qrprod, 0)`` floor, so with more than one CFL subcycle the default CREATES
+water (#2291; spectral bridge, T21, 10 sigma levels, warm column, dt 300 s):
+the column gains 17-19x the surface precipitation, versus a 5.3 % residual at
+the hard limit (``saturation_sharpness`` 1e12) on the same states; with one
+subcycle (dt 30 s) both give 5.4 %.  That remaining ~5 % is the oracle's own
+sedimentation over level-centre spacing (dividing by layer thickness instead
+closes it to <= 1.2e-6); it is ported, not fixed.  Remedies (a smooth form
+that never undershoots ``-q_c``, or conservative compensation of the floor
+increments) change the approved smooth form and await a user decision.  The data-dependent subcycle
 count reuses the Morrison sedimentation sub-step machinery unchanged (user
 decision 2026-10-20): a static-length masked ``fori_loop`` whose length is the
 ``MorrisonConfig.sed_cfl_substeps_max`` default, and Morrison's strict error
@@ -138,7 +148,8 @@ __physics_contract__ = {
         "rain; SURFACE PRECIPITATION (>= 0) removes water from the column. As "
         "in the oracle, the sedimentation divides by the level-centre spacing "
         "and the positivity floors are not compensated, so column water is "
-        "not exactly conserved."
+        "not exactly conserved (#2291: ~5 % at the hard limit; the smooth "
+        "default creates water over multiple subcycles, see module docstring)."
     ),
     "conserves": ["none"],
     "differentiable": True,
