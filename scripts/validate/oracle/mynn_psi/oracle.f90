@@ -1,7 +1,8 @@
 ! Oracle for legoESM bulk_flux "mynn_sfc": the four full MYNN-SFC psi functions
 ! copied verbatim from CCPP module_sf_mynnsfc_driver.F90 (psi_opt = 0), wrapped in
 ! a driver that prints zeta, psim, psih on a fixed grid.  Build:
-!   gfortran -O0 -ffree-line-length-none oracle.f90 -o oracle && ./oracle
+!   gfortran -O0 -ffree-line-length-none -fdefault-real-8 oracle.f90 -o oracle_r8   (_ORACLE_R8_*)
+!   gfortran -O0 -ffree-line-length-none oracle.f90 -o oracle_r4lit                   (_ORACLE_R4LIT_*)
 module mynn_psi
  implicit none
  integer, parameter :: kind_phys = 8

@@ -485,8 +485,13 @@ def _grachev_psi_h(zeta_pos):
 
 
 def _mynn_stable_log(zeta_pos, power):
-    """``ln(zeta + (1 + zeta^p)^(1/p))``, zeta >= 0."""
-    return jnp.log(zeta_pos + (1.0 + zeta_pos ** power) ** (1.0 / power))
+    """``ln(zeta + (1 + zeta^p)^(1/p))``, zeta >= 0.
+
+    ``|zeta|^p`` keeps the form finite and C1 for the slightly negative zeta
+    that the COARE neutral blend feeds the stable branch (``zeta >= -width``);
+    identical for zeta >= 0.
+    """
+    return jnp.log(zeta_pos + (1.0 + jnp.abs(zeta_pos) ** power) ** (1.0 / power))
 
 
 def _mynn_psi_m(zeta_pos):
