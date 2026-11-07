@@ -485,12 +485,8 @@ def _grachev_psi_h(zeta_pos):
 
 
 def _mynn_stable_log(zeta_pos, power):
-    """``ln(zeta + (1 + zeta^p)^(1/p))`` with a double-where so the masked
-    ``zeta = 0`` lane never differentiates ``zeta^p`` at its singular point."""
-    pos = zeta_pos > 0.0
-    z = jnp.where(pos, zeta_pos, 1.0)
-    val = jnp.log(z + (1.0 + z ** power) ** (1.0 / power))
-    return jnp.where(pos, val, 0.0)
+    """``ln(zeta + (1 + zeta^p)^(1/p))``, zeta >= 0."""
+    return jnp.log(zeta_pos + (1.0 + zeta_pos ** power) ** (1.0 / power))
 
 
 def _mynn_psi_m(zeta_pos):
