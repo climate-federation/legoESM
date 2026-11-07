@@ -282,6 +282,9 @@ def test_cli_flags_round_trip():
     assert p.parse_args(["--surface-unstable-scheme", "coare3"]).surface_unstable_scheme == "coare3"
     with pytest.raises(SystemExit):
         p.parse_args(["--surface-unstable-scheme", "bd"])
+    cfg = amip.build_config_from_args(p.parse_args(
+        ["--surface-bulk-scheme", "coare3", "--surface-unstable-scheme", "coare3"]))
+    assert cfg.surface_unstable_scheme == "coare3"
 
     from scripts.run.run_omip import parse_args
     assert parse_args(["--grid", "latlon"]).surface_unstable_scheme == "native"
