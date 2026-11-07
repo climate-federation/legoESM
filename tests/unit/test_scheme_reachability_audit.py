@@ -326,7 +326,7 @@ def test_every_offered_scheme_passes_validate_strict(parsers, driver):
             # MOST schemes carry a documented CROSS-FIELD contract (they need
             # turbulence != "none" so the atmosphere runs the same bulk-flux
             # algorithm as the ocean tile), so satisfy it rather than trip it.
-            if axis == "surface_bulk_scheme" and scheme != "constant":
+            if axis == "surface_bulk_scheme" and scheme not in ("constant", "none"):
                 kwargs["turbulence"] = "louis"
             # CAM6's cloud fraction IS the CLUBB PDF fraction plus the carry
             # routing, and is wired on the MPAS lane only (documented
