@@ -942,7 +942,7 @@ def tl_per_pft_errors(cp, data) -> dict:
     """Two-leaf mode: per-cell annual skin-T bias and per dominant PFT the monthly
     skin-T RMSE / bias and the MODIS VIS / NIR albedo RMSE (glacier and fill cells
     out of the albedo).  ``cp=None`` = production."""
-    T, _, _, _, Av, An = forward_tl(cp, data)
+    T, _, _, _, Av, An = jax.jit(forward_tl)(cp, data)
     w = np.asarray(data["w"]); oh = np.asarray(data["tl_dom"])
     dT = np.asarray(T - data["skt"])                                  # (12, ncol)
     ok = np.asarray(data["alb_ok_tl"])
