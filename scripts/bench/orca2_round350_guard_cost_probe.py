@@ -3,7 +3,9 @@
 One variable: ``--guards off`` replaces ``legoesm.core.source_rounding.nemo_source_round``
 with a pass-through before any model module is imported; everything else is the
 unchanged round-349 child (same arguments, pinning, preflight and timing window).
-Timing only: a guards-off run does not reproduce NEMO's bits.
+Timing only: a guards-off run does not reproduce NEMO's bits.  Scope is that one shared
+helper; the smaller guard helpers (implicit-solver multiply rounding, barotropic IEEE add,
+TKE binary64 rounding, nemo_source_barrier, raw optimization barriers) stay on in both arms.
 
 Usage: orca2_round350_guard_cost_probe.py --guards on|off --report R.json -- <child args>
 """
@@ -23,14 +25,15 @@ BENCH = (
 
 
 def install_passthrough_guard():
-    """Swap the guard for a counting pass-through; return (original, call counter)."""
+    """Swap the guard for a pass-through; return (original, {"eager": n, "traced": n})."""
+    import jax
     from legoesm.core import source_rounding
 
     original = source_rounding.nemo_source_round
-    calls = [0]
+    calls = {"eager": 0, "traced": 0}
 
     def passthrough(value):
-        calls[0] += 1
+        calls["traced" if isinstance(value, jax.core.Tracer) else "eager"] += 1
         return value
 
     source_rounding.nemo_source_round = passthrough
@@ -54,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args(argv[:split])
 
+    import legoesm.core.source_rounding  # noqa: F401  -- same import order in both arms
+
     original = calls = None
     if args.guards == "off":
         original, calls = install_passthrough_guard()
@@ -66,9 +71,9 @@ def main(argv: list[str] | None = None) -> int:
     report = {"guards": args.guards, "child_rc": child_rc}
     ok = child_rc == 0
     if args.guards == "off":
-        report["passthrough_calls"] = calls[0]
+        report["passthrough_calls"] = calls
         report["stale_bindings"] = stale_bindings(original)
-        ok = ok and calls[0] > 0 and not report["stale_bindings"]
+        ok = ok and calls["traced"] > 0 and not report["stale_bindings"]
     report["valid"] = ok
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

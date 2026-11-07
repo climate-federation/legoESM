@@ -29,10 +29,12 @@ def test_swap_before_import_reaches_callers():
         "    import jax.numpy as jnp\n"
         "    x = jnp.asarray(1.5)\n"
         "    assert caller.nemo_source_round(x) is x\n"
-        "    print(calls[0], probe.stale_bindings(original))\n"
+        "    import jax\n"
+        "    jax.jit(caller.nemo_source_round)(x)\n"
+        "    print(calls['eager'], calls['traced'], probe.stale_bindings(original))\n"
         "check()\n"
     )
-    assert out == "1 []"
+    assert out == "1 1 []"
 
 
 def test_caller_imported_before_swap_is_reported():
