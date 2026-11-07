@@ -126,12 +126,12 @@ def _is_violation(toks) -> bool:
 # Verified sigma fallbacks (shrink-only).  Each entry: file -> reason that
 # was checked in code when it was written.
 ALLOWLIST = {
-    # DiagnosticCollector._p_full (661) / _dp (668) keep a pure-sigma fallback for
+    # DiagnosticCollector._p_full (738) / _dp (745) keep a pure-sigma fallback for
     # vcoord=None; the only production construction (model_driver
     # ``self.diagnostics = DiagnosticCollector(... vcoord=self.sigma``)
     # always passes the coordinate, and
     # tests/unit/test_diagnostics_hybrid_pressure.py pins the fallback.
-    "packages/coupler/legoesm/driver/diagnostics.py": [661, 668],
+    "packages/coupler/legoesm/driver/diagnostics.py": [738, 745],
 }
 
 
