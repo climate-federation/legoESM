@@ -485,11 +485,13 @@ def _grachev_psi_h(zeta_pos):
 
 
 def _mynn_stable_log(zeta_pos, power):
-    """``ln(zeta + (1 + zeta^p)^(1/p))``, zeta >= 0.
+    """``ln(zeta + (1 + |zeta|^p)^(1/p))``; the MYNN form for zeta >= 0.
 
-    ``|zeta|^p`` keeps the form finite and C1 for the slightly negative zeta
-    that the COARE neutral blend feeds the stable branch (``zeta >= -width``);
-    identical for zeta >= 0.
+    ``|zeta|^p`` keeps it finite and C1 for the slightly negative zeta that the
+    COARE neutral blend feeds the stable branch (``zeta >= -width``).  For the
+    heat power p = 1.1 the second derivative diverges as |zeta|^-0.9 at 0: this
+    is the published MYNN form's own property (also on zeta -> 0+), so a
+    second-order derivative evaluated at exactly zeta = 0 is not finite.
     """
     return jnp.log(zeta_pos + (1.0 + jnp.abs(zeta_pos) ** power) ** (1.0 / power))
 
