@@ -688,6 +688,9 @@ def _wrf_revmm5_unstable_psi_h(zeta_neg):
 # Not yet selectable: the independent unstable selector is wired separately.
 _UNSTABLE_PSI = {
     "wrf_revmm5": (_wrf_revmm5_unstable_psi_m, _wrf_revmm5_unstable_psi_h),
+}
+
+
 def _mynn_stable_log(zeta_pos, power):
     """``ln(zeta + (1 + |zeta|^p)^(1/p))``; the MYNN form for zeta >= 0.
 
