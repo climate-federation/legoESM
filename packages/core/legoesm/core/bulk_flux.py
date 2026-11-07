@@ -76,7 +76,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.core.smooth import positive_part_c1, smoothstep_quintic
+from legoesm.core.smooth import (
+    positive_part_c1, sigmoid_switch, smooth_max, smoothstep_quintic,
+)
 
 # Physical constants
 KAPPA = constants.kappa_von_karman
@@ -111,6 +113,7 @@ _VALID_STABILITY_SCHEMES = (
     "beljaars_holtslag1991",
     "grachev2007_sheba",
     "gryanik2020",
+    "gfs",
 )
 
 # --- Dyer (1974) linear stable functions ---
@@ -158,6 +161,36 @@ _GRYANIK_B_M = 0.3
 _GRYANIK_A_H = 5.0
 _GRYANIK_B_H = 0.4
 _GRYANIK_PR0 = 0.98
+
+# --- NCEP GFS surface layer (UFS ccpp-physics sfc_diff.f, subroutine
+# stability; identical in MYNN-SFC module_sf_mynnsfc_driver.F90
+# psi{m,h}_{stable,unstable}_full_gfs, psi_opt=1) ---
+# Stable (zeta > 0), momentum AND heat: psi_GFS(zeta) = -a + ln(1 + a),
+# a = sqrt(1 + alpha4*zeta), alpha4 = 4*alpha, alpha = 5.  GFS uses it only as
+# psi_GFS(z/L) - psi_GFS(z0/L) (pm = aa0 - aa + log((1+aa)/(1+aa0))), so the
+# port subtracts psi_GFS(0) = ln 2 - 1: psi(0) = 0, as every legoESM psi.
+_GFS_ALPHA4 = 20.0
+_GFS_STABLE_PSI_AT_ZERO = math.log(2.0) - 1.0
+# Unstable (zeta < 0): rational fit for zeta >= -0.5,
+#   psi = (a0 + a1*zeta)*zeta / (1 + (b1 + b2*zeta)*zeta),
+# free-convection form below (h = -zeta):
+#   psi_m = ln h + 2 h^(-1/4) - 0.8776,  psi_h = ln h + 0.5 h^(-1/2) + 1.386.
+_GFS_UNSTABLE_SWITCH = -0.5
+_GFS_M_A0, _GFS_M_A1, _GFS_M_B1, _GFS_M_B2 = -3.975, 12.32, -7.755, 6.041
+_GFS_H_A0, _GFS_H_A1, _GFS_H_B1, _GFS_H_B2 = -7.941, 24.75, -8.705, 7.899
+_GFS_FREE_M_COEFF, _GFS_FREE_M_POWER, _GFS_FREE_M_CONST = 2.0, -0.25, -0.8776
+_GFS_FREE_H_COEFF, _GFS_FREE_H_POWER, _GFS_FREE_H_CONST = 0.5, -0.5, 1.386
+# KNOWN DIFFERENCE (RULE 5): the GFS branches do not meet at zeta = -0.5
+# (psi jumps by -0.0144 momentum / -0.0136 heat, phi by ~2 %).  Default is a
+# smooth sigmoid blend of width 1/sharpness = 0.05 in zeta (GLM+codex vote,
+# coscientist/vote_gfs_width_*) with the free branch shifted by a constant so
+# both branches meet at the switch; measured gap vs the GFS step: psi offset
+# 0.0144 (m) / 0.0136 (h) for zeta << -0.5, phi within 0.0068 (1-2 %).
+# sharpness = inf recovers the exact GFS step (no offset).
+_GFS_UNSTABLE_SWITCH_SHARPNESS = 20.0
+# Smooth floor on h for the free branch (a numerics guard: it only matters
+# near zeta = 0, where the blend weight on that branch is < e^-9).
+_GFS_FREE_H_FLOOR_SHARPNESS = 20.0
 
 # --- Thermal/momentum roughness ratio z0h/z0 ---
 # Ratio of the thermal (scalar) roughness length z0h (= z0_t = z0_q) to the
@@ -465,6 +498,76 @@ def _grachev_psi_h(zeta_pos):
     return _GRACHEV_PR0 * (-coeff * fractional_logs - quadratic_log)
 
 
+def _gfs_stable_psi(zeta_pos):
+    """GFS stable psi (momentum = heat), zeta > 0, shifted so psi(0) = 0."""
+    a = jnp.sqrt(1.0 + _GFS_ALPHA4 * zeta_pos)
+    return jnp.log1p(a) - a - _GFS_STABLE_PSI_AT_ZERO
+
+
+def _gfs_unstable_psi(zeta_neg, rational, free_coeff, free_power, free_const,
+                      sharpness):
+    """GFS unstable psi, zeta <= 0: rational fit above the switch, free
+    convection below.  ``sharpness = inf`` is the exact GFS step; finite
+    sharpness is the C-infinity offset-matched blend (see the constants)."""
+    a0, a1, b1, b2 = rational
+
+    def near(z):
+        return (a0 + a1 * z) * z / (1.0 + (b1 + b2 * z) * z)
+
+    def free(h):
+        return jnp.log(h) + free_coeff * h ** free_power + free_const
+
+    if not isinstance(sharpness, numbers.Real):
+        raise TypeError(
+            f"GFS unstable switch sharpness must be a static Python float "
+            f"(math.inf = exact GFS step), got {type(sharpness).__name__}")
+    if sharpness == math.inf:
+        # Safe input: the free branch only sees h >= 0.5.
+        h = jnp.where(zeta_neg < _GFS_UNSTABLE_SWITCH, -zeta_neg,
+                      -_GFS_UNSTABLE_SWITCH)
+        return jnp.where(zeta_neg >= _GFS_UNSTABLE_SWITCH, near(zeta_neg),
+                         free(h))
+    def floored(z):
+        return smooth_max(-z, 0.0, _GFS_FREE_H_FLOOR_SHARPNESS)
+
+    offset = near(_GFS_UNSTABLE_SWITCH) - free(floored(_GFS_UNSTABLE_SWITCH))
+
+    def blend(z):
+        w = sigmoid_switch(z - _GFS_UNSTABLE_SWITCH, sharpness)
+        return w * near(z) + (1.0 - w) * (free(floored(z)) + offset)
+
+    # Subtract the blend's ~2e-5 tail at zeta = 0 so psi(0) = 0 exactly.
+    return blend(zeta_neg) - blend(0.0)
+
+
+def _gfs_unstable_psi_m(zeta_neg, sharpness=_GFS_UNSTABLE_SWITCH_SHARPNESS):
+    """GFS unstable momentum psi, zeta <= 0."""
+    return _gfs_unstable_psi(
+        zeta_neg, (_GFS_M_A0, _GFS_M_A1, _GFS_M_B1, _GFS_M_B2),
+        _GFS_FREE_M_COEFF, _GFS_FREE_M_POWER, _GFS_FREE_M_CONST, sharpness)
+
+
+def _gfs_unstable_psi_h(zeta_neg, sharpness=_GFS_UNSTABLE_SWITCH_SHARPNESS):
+    """GFS unstable heat psi, zeta <= 0."""
+    return _gfs_unstable_psi(
+        zeta_neg, (_GFS_H_A0, _GFS_H_A1, _GFS_H_B1, _GFS_H_B2),
+        _GFS_FREE_H_COEFF, _GFS_FREE_H_POWER, _GFS_FREE_H_CONST, sharpness)
+
+
+# Unstable-branch (zeta < 0) forms selectable independently of the stable
+# scheme: name -> (psi_m, psi_h), each taking zeta <= 0.
+_UNSTABLE_PSI_BRANCHES = {
+    "gfs": (_gfs_unstable_psi_m, _gfs_unstable_psi_h),
+}
+
+
+def phi_from_psi(psi_fn, zeta):
+    """Dimensionless gradient phi = 1 - zeta dpsi/dzeta of an elementwise psi."""
+    zeta = jnp.asarray(zeta)
+    _, dpsi = jax.jvp(psi_fn, (zeta,), (jnp.ones_like(zeta),))
+    return 1.0 - zeta * dpsi
+
+
 def _stable_psi_m(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
     """Stable-branch (zeta > 0) psi_m for ``stability_scheme``.
 
@@ -483,6 +586,8 @@ def _stable_psi_m(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
         return _grachev_psi_m(zeta_pos)
     elif stability_scheme == "gryanik2020":
         return _gryanik_psi_m(zeta_pos)
+    elif stability_scheme == "gfs":
+        return _gfs_stable_psi(zeta_pos)
     raise ValueError(
         f"Unknown stability_scheme {stability_scheme!r}; expected one of "
         f"{_VALID_STABILITY_SCHEMES}."
@@ -502,6 +607,8 @@ def _stable_psi_h(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
         return _grachev_psi_h(zeta_pos)
     elif stability_scheme == "gryanik2020":
         return _gryanik_psi_h(zeta_pos)
+    elif stability_scheme == "gfs":
+        return _gfs_stable_psi(zeta_pos)
     raise ValueError(
         f"Unknown stability_scheme {stability_scheme!r}; expected one of "
         f"{_VALID_STABILITY_SCHEMES}."
@@ -525,6 +632,7 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     - ``"beljaars_holtslag1991"``: Beljaars & Holtslag (1991)
     - ``"grachev2007_sheba"``    : Grachev et al. (2007) SHEBA (Arctic/strong-stable)
     - ``"gryanik2020"``          : Gryanik et al. (2020) modified SHEBA
+    - ``"gfs"``                  : NCEP GFS (sfc_diff.f), sublinear stable tail
 
     ``unstable_gamma`` / ``stable_beta`` are the trainable Businger-Dyer
     coefficients (Businger et al. 1971 / Dyer 1974). They act ONLY when

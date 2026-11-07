@@ -3274,7 +3274,7 @@ class ExperimentConfig(NamedTuple):
                 f"got {self.surface_thermo_convention!r}"
             )
         _valid_stability = ("dyer1974", "beljaars_holtslag1991",
-                            "grachev2007_sheba", "gryanik2020")
+                            "grachev2007_sheba", "gryanik2020", "gfs")
         # A tiled surface WITH REAL LAND is exempt from the second check
         # below: its land tile is ocean_cfg._replace(bulk_scheme="most", ...)
         # (physics_pipeline ~:701), so it INHERITS the injected
