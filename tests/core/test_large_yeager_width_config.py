@@ -49,9 +49,12 @@ def test_defaults_are_the_shared_constants():
 
 @pytest.mark.parametrize("cls", CONFIGS, ids=lambda c: c.__name__)
 def test_every_bulk_config_carries_the_widths(cls):
-    assert surface_flux_widths(cls()) == SURFACE_FLUX_WIDTH_DEFAULTS
-    cfg = cls()._replace(**_HARD)
-    assert surface_flux_widths(cfg) == _HARD
+    # the GFS join width only on configs that can select unstable_scheme
+    keys = [k for k in SURFACE_FLUX_WIDTH_DEFAULTS
+            if k != "gfs_unstable_join_width" or "unstable_scheme" in cls._fields]
+    assert surface_flux_widths(cls()) == {k: SURFACE_FLUX_WIDTH_DEFAULTS[k] for k in keys}
+    hard = {k: 0.0 for k in keys}
+    assert surface_flux_widths(cls()._replace(**hard)) == hard
 
 
 def test_experiment_config_mirrors_the_widths():

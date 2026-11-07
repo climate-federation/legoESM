@@ -104,6 +104,5 @@ class LakeConfig(NamedTuple):
     large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
     large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
     large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
-    # MOST smooth cap on |zeta| (RULE 5; 0 = hard clip at +-10) and the GFS
-    # unstable smooth-join width (0 = the exact GFS step); bulk_flux constants.
+    # MOST smooth cap on |zeta| (RULE 5; 0 = hard clip at +-10); bulk_flux constant.
     most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
