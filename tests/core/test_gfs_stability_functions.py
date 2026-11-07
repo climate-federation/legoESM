@@ -78,6 +78,14 @@ def test_unstable_default_gap_recorded(z):
         assert gap == pytest.approx(RECORDED_GAP[kind][z], rel=1e-6, abs=1e-12)
 
 
+def test_far_field_gap_is_the_branch_mismatch():
+    # Hand value: rational(-0.5) - free(0.5) from the sfc_diff.f forms.
+    for kind, fn, d in (("m", bf._gfs_unstable_psi_m, -0.0143517193),
+                        ("h", bf._gfs_unstable_psi_h, -0.0136277572)):
+        gap = float(fn(jnp.array([-6.0]))[0]) - _fortran_unstable(-6.0, kind)
+        assert abs(gap - d) < 5e-5
+
+
 def test_neutral_limits():
     z = jnp.array([0.0])
     for fn in (bf._gfs_unstable_psi_m, bf._gfs_unstable_psi_h):
@@ -121,7 +129,7 @@ def test_unstable_gradients_at_default(fn, z):
     check_grads(fn, (jnp.array([z]),), order=2, modes=["fwd", "rev"])
 
 
-@pytest.mark.parametrize("z", [1e-2, 0.3, 5.0])
+@pytest.mark.parametrize("z", [-0.3, 1e-2, 0.3, 5.0])
 def test_stable_gradients(z):
     check_grads(lambda x: bf.psi_m(x, "gfs"), (jnp.array([z]),), order=2, modes=["fwd", "rev"])
 
@@ -140,9 +148,24 @@ def test_traced_sharpness_rejected():
 
 def test_driver_accepts_gfs():
     from legoesm.driver.config import ExperimentConfig
-    errs = ExperimentConfig(surface_stability_scheme="gfs",
-                            surface_bulk_scheme="coare3").validate()
-    assert not any("surface_stability_scheme" in e for e in errs)
+
+    def errs(scheme):
+        return ExperimentConfig(surface_stability_scheme=scheme,
+                                surface_bulk_scheme="coare3").validate()
+    assert errs("gfs") == errs("dyer1974")
+    assert any("surface_stability_scheme" in e for e in errs("gfs_typo"))
+
+
+def test_run_scripts_accept_gfs():
+    from scripts.run.run_amip import build_arg_parser
+    from scripts.run.run_coupled import build_parser
+    from scripts.run.run_omip import parse_args
+    assert build_arg_parser().parse_args(
+        ["--surface-stability-scheme", "gfs"]).surface_stability_scheme == "gfs"
+    assert parse_args(["--grid", "latlon", "--surface-stability-scheme", "gfs"]
+                      ).surface_stability_scheme == "gfs"
+    assert build_parser().parse_args(
+        ["--ice-stability-scheme", "gfs"]).ice_stability_scheme == "gfs"
 
 
 def test_unknown_scheme_raises():

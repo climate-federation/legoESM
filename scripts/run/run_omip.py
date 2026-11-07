@@ -527,7 +527,7 @@ def parse_args(argv: list[str] | None = None):
                         "mixing configs, e.g. KPPConfig). (issue #691)")
     p.add_argument("--surface-stability-scheme", default="dyer1974",
                    choices=["dyer1974", "beljaars_holtslag1991",
-                            "grachev2007_sheba", "gryanik2020"],
+                            "grachev2007_sheba", "gryanik2020", "gfs"],
                    help="Stable-regime (zeta>0) MOST similarity functions for "
                         "the air-sea (CouplerConfig, LY09 bulk) AND air-ice "
                         "(SeaIceConfig) turbulent fluxes. 'dyer1974' (default) "

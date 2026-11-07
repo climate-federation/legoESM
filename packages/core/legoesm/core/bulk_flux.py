@@ -632,7 +632,8 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     - ``"beljaars_holtslag1991"``: Beljaars & Holtslag (1991)
     - ``"grachev2007_sheba"``    : Grachev et al. (2007) SHEBA (Arctic/strong-stable)
     - ``"gryanik2020"``          : Gryanik et al. (2020) modified SHEBA
-    - ``"gfs"``                  : NCEP GFS (sfc_diff.f), sublinear stable tail
+    - ``"gfs"``                  : NCEP GFS (sfc_diff.f) STABLE branch only, sublinear
+      tail; the GFS unstable forms live in ``_UNSTABLE_PSI_BRANCHES``
 
     ``unstable_gamma`` / ``stable_beta`` are the trainable Businger-Dyer
     coefficients (Businger et al. 1971 / Dyer 1974). They act ONLY when

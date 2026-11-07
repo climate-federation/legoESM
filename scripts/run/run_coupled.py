@@ -756,7 +756,7 @@ def build_parser():
                              "scheme, like the land and slab tiles.")
     parser.add_argument("--ice-stability-scheme",
                         choices=["dyer1974", "beljaars_holtslag1991",
-                                 "grachev2007_sheba", "gryanik2020"],
+                                 "grachev2007_sheba", "gryanik2020", "gfs"],
                         default=None,
                         help="Stable-regime MOST functions for the ice tile "
                              "(grachev2007_sheba is the Arctic sea-ice "
