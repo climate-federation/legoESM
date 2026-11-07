@@ -313,13 +313,14 @@ def test_midepoch_resume_widens_a_trained_fp32_knob(tmp_path, with_ema):
 # The EMA, WB-resume and WB-FD loaders sit inside training/driver bodies too
 # large to run here: each named function must load model checkpoints through
 # the knob-aware spec, never bare equinox, and no bare equinox call in the
-# whole file may take a model skeleton.  (WB _main keeps one bare call, the
-# optimizer state, which holds plain arrays and no AIMIP module.)
+# whole file may take a model skeleton.  (WB _main keeps two bare calls, the
+# mid-epoch and epoch optimizer states, which hold plain arrays and no AIMIP
+# module.)
 _RAW_LOADERS = [
     ("packages/ml/legoesm/training/neural_gcm_spectral.py", "_train_spectral_loop", 0),
     ("packages/ml/legoesm/training/neural_gcm_spectral.py", "_train_sfno_full_loop", 0),
     ("packages/ml/legoesm/training/neural_gcm_spectral.py", "_load_midepoch_checkpoint", 0),
-    ("scripts/run/train_weatherbench_scale.py", "_main", 1),
+    ("scripts/run/train_weatherbench_scale.py", "_main", 2),
     ("scripts/validate/wb_gradient_fd_check.py", "main", 0),
 ]
 _MODEL_SKELETONS = {"params", "ema_model", "model", "_tmpl4", "_tmpl5"}
