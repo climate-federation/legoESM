@@ -115,6 +115,7 @@ _VALID_STABILITY_SCHEMES = (
     "gryanik2020",
     "gfs",
     "wrf_revmm5",
+    "mynn_sfc",
 )
 
 # ``unstable_scheme`` selects the UNSTABLE-branch (zeta < 0) psi_m, psi_h
@@ -220,6 +221,23 @@ _WRF_KANSAS_GAMMA = 16.0
 _WRF_CONV_C_M = 10.0
 _WRF_CONV_C_H = 34.0
 _WRF_CONV_EXP = 0.33  # WRF's literal (not 1/3)
+# --- MYNN surface layer (psi_opt = 0) stable and unstable functions ---
+# Olson et al. (2021) NOAA Tech. Memo. OAR GSL-67, doi:10.25923/f6a8-bc75;
+# coefficients from module_sf_mynnsfc_driver.F90 psim/psih_{stable,unstable}_full
+# (CCPP/MYNN-SFC).  Stable (zeta > 0):
+#   psi_m = -6.1 ln(zeta + (1 + zeta^2.5)^(1/2.5))
+#   psi_h = -5.3 ln(zeta + (1 + zeta^1.1)^(1/1.1))
+# Unstable (zeta < 0): Kansas psi_k (gamma 16) blended with the free-convective
+# psi_c (y = (1 - c zeta)^(1/3), c = 10 momentum, 34 heat) by zeta^2/(1+zeta^2).
+# MYNN evaluates these through 0.01-spaced linear lookup tables for |zeta| < 10
+# (full functions beyond); legoESM evaluates the full functions everywhere.
+_MYNN_STABLE_A_M = 6.1
+_MYNN_STABLE_P_M = 2.5
+_MYNN_STABLE_A_H = 5.3
+_MYNN_STABLE_P_H = 1.1
+_MYNN_UNSTABLE_GAMMA = 16.0
+_MYNN_CONV_M = 10.0
+_MYNN_CONV_H = 34.0
 
 # --- Thermal/momentum roughness ratio z0h/z0 ---
 # Ratio of the thermal (scalar) roughness length z0h (= z0_t = z0_q) to the
@@ -670,6 +688,62 @@ def _wrf_revmm5_unstable_psi_h(zeta_neg):
 # Not yet selectable: the independent unstable selector is wired separately.
 _UNSTABLE_PSI = {
     "wrf_revmm5": (_wrf_revmm5_unstable_psi_m, _wrf_revmm5_unstable_psi_h),
+def _mynn_stable_log(zeta_pos, power):
+    """``ln(zeta + (1 + |zeta|^p)^(1/p))``; the MYNN form for zeta >= 0.
+
+    ``|zeta|^p`` keeps it finite and C1 for the slightly negative zeta that the
+    COARE neutral blend feeds the stable branch (``zeta >= -width``).  For the
+    heat power p = 1.1 the second derivative diverges as |zeta|^-0.9 at 0: this
+    is the published MYNN form's own property (also on zeta -> 0+), so a
+    second-order derivative evaluated at exactly zeta = 0 is not finite.
+    """
+    return jnp.log(zeta_pos + (1.0 + jnp.abs(zeta_pos) ** power) ** (1.0 / power))
+
+
+def _mynn_psi_m(zeta_pos):
+    """MYNN-SFC stable momentum psi_m(zeta), zeta > 0 (psim_stable_full)."""
+    return -_MYNN_STABLE_A_M * _mynn_stable_log(zeta_pos, _MYNN_STABLE_P_M)
+
+
+def _mynn_psi_h(zeta_pos):
+    """MYNN-SFC stable heat psi_h(zeta), zeta > 0 (psih_stable_full)."""
+    return -_MYNN_STABLE_A_H * _mynn_stable_log(zeta_pos, _MYNN_STABLE_P_H)
+
+
+def _mynn_free_convective(zeta_neg, c):
+    """MYNN/Fairall free-convective psi_c with y = (1 - c zeta)^(1/3), zeta <= 0."""
+    sqrt3 = math.sqrt(3.0)
+    y = jnp.cbrt(1.0 - c * zeta_neg)
+    return (1.5 * jnp.log((y * y + y + 1.0) / 3.0)
+            - sqrt3 * jnp.arctan((2.0 * y + 1.0) / sqrt3) + jnp.pi / sqrt3)
+
+
+def mynn_psi_m_unstable(zeta_neg):
+    """MYNN-SFC unstable momentum psi_m(zeta), zeta <= 0 (psim_unstable_full).
+
+    Kansas form (gamma 16) blended with the free-convective form (c = 10) by
+    ``zeta^2/(1 + zeta^2)``.  Valid for ``zeta <= 0`` only.
+    """
+    x = jnp.power(1.0 - _MYNN_UNSTABLE_GAMMA * zeta_neg, 0.25)
+    psi_k = (2.0 * jnp.log((1.0 + x) / 2.0) + jnp.log((1.0 + x * x) / 2.0)
+             - 2.0 * jnp.arctan(x) + jnp.pi / 2.0)
+    z2 = zeta_neg * zeta_neg
+    return (psi_k + z2 * _mynn_free_convective(zeta_neg, _MYNN_CONV_M)) / (1.0 + z2)
+
+
+def mynn_psi_h_unstable(zeta_neg):
+    """MYNN-SFC unstable heat psi_h(zeta), zeta <= 0 (psih_unstable_full)."""
+    y = jnp.sqrt(1.0 - _MYNN_UNSTABLE_GAMMA * zeta_neg)
+    psi_k = 2.0 * jnp.log((1.0 + y) / 2.0)
+    z2 = zeta_neg * zeta_neg
+    return (psi_k + z2 * _mynn_free_convective(zeta_neg, _MYNN_CONV_H)) / (1.0 + z2)
+
+
+# Unstable-branch (zeta <= 0) psi functions that are not Businger-Dyer, keyed by
+# name -> (psi_m, psi_h).  Not yet reachable from psi_m/psi_h (their unstable
+# branch is Businger-Dyer); consumed by the independent unstable selector.
+UNSTABLE_PSI_FUNCTIONS = {
+    "mynn_sfc": (mynn_psi_m_unstable, mynn_psi_h_unstable),
 }
 
 
@@ -695,6 +769,8 @@ def _stable_psi_m(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
         return _gfs_stable_psi(zeta_pos)
     elif stability_scheme == "wrf_revmm5":
         return _wrf_revmm5_psi_m(zeta_pos)
+    elif stability_scheme == "mynn_sfc":
+        return _mynn_psi_m(zeta_pos)
     raise ValueError(
         f"Unknown stability_scheme {stability_scheme!r}; expected one of "
         f"{_VALID_STABILITY_SCHEMES}."
@@ -718,6 +794,8 @@ def _stable_psi_h(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
         return _gfs_stable_psi(zeta_pos)
     elif stability_scheme == "wrf_revmm5":
         return _wrf_revmm5_psi_h(zeta_pos)
+    elif stability_scheme == "mynn_sfc":
+        return _mynn_psi_h(zeta_pos)
     raise ValueError(
         f"Unknown stability_scheme {stability_scheme!r}; expected one of "
         f"{_VALID_STABILITY_SCHEMES}."
@@ -762,6 +840,7 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     - ``"gfs"``                  : NCEP GFS (sfc_diff.f) STABLE branch only, sublinear
       tail; the GFS unstable forms live in ``_UNSTABLE_PSI_BRANCHES``
     - ``"wrf_revmm5"``           : WRF revised MM5 (Jimenez et al. 2012)
+    - ``"mynn_sfc"``             : MYNN surface layer (Olson et al. 2021) stable
 
     ``unstable_gamma`` / ``stable_beta`` are the trainable Businger-Dyer
     coefficients (Businger et al. 1971 / Dyer 1974). They act ONLY when

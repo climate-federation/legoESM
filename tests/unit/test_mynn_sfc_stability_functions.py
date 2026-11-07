@@ -1,0 +1,173 @@
+"""MYNN surface-layer (psi_opt = 0) stability functions in ``legoesm.core.bulk_flux``.
+
+Oracle: the four full functions of CCPP ``module_sf_mynnsfc_driver.F90``
+(``psim/psih_{stable,unstable}_full``), compiled verbatim by
+``scripts/validate/oracle/mynn_psi/oracle.f90``.  ``_ORACLE_R8`` is that program
+built with ``-fdefault-real-8`` (the source's default-real literals ``sqrt3``,
+``atan1`` and ``p333`` promoted to double); the port must match it to round-off.
+Built without the flag, those literals are single precision and the oracle
+differs from the port by the amounts pinned in ``test_single_precision_literal_gap``.
+
+Known difference (recorded, not a defect): MYNN evaluates these functions through
+0.01-spaced linear lookup tables for |zeta| < 10; legoESM evaluates the full
+functions, which the tables interpolate.
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+from jax.test_util import check_grads
+
+from legoesm.core import bulk_flux
+from legoesm.core.bulk_flux import (
+    UNSTABLE_PSI_FUNCTIONS,
+    mynn_psi_h_unstable,
+    mynn_psi_m_unstable,
+    psi_h,
+    psi_m,
+)
+
+jax.config.update("jax_enable_x64", True)
+
+# zeta, psim_stable_full(zeta), psih_stable_full(zeta)  (oracle_r8)
+_ORACLE_R8_STABLE = [[0.001, -0.0060970291142995, -0.00770914680192798], [0.01, -0.06072117649985462, -0.08274271607578224], [0.1, -0.5883959379291543, -0.8409827713760729], [0.37, -2.0634166275095995, -2.7191555869081814], [1.0, -5.132265840104162, -5.602352254897672], [2.5, -9.936305516970481, -9.33240833848595], [7.0, -16.107631349118783, -14.261611225914109], [9.9, -18.216610839914466, -16.013491854483487], [1e-06, -6.0999969522091485e-06, -6.510268540785502e-06], [0.5, -2.7409768101751864, -3.4472326922564496], [3.0, -11.006059581878334, -10.163190428850523], [10.0, -18.277819976407347, -16.064719899140247]]
+# zeta (<0), psim_unstable_full(zeta), psih_unstable_full(zeta)  (oracle_r8)
+_ORACLE_R8_UNSTABLE = [[-0.001, 0.003980157798002412, 0.007952425492334535], [-0.01, 0.03814533390096245, 0.07558914525110617], [-0.1, 0.2833631086910307, 0.5351312987306333], [-0.37, 0.6697363682855327, 1.2004926873174397], [-1.0, 1.122645667958451, 1.8882809525330408], [-2.5, 1.67847261851383, 2.5761022163214027], [-7.0, 2.41827440854416, 3.403767080408865], [-9.9, 2.6867804992570585, 3.6966786953769377], [-1e-06, 3.999979103274541e-06, 7.999952000223759e-06], [-0.5, 0.7910478548235621, 1.3969421911358133], [-3.0, 1.8022044535392634, 2.7177980373875723], [-10.0, 2.694691672166397, 3.7052661432895944]]
+# Same, default-real literals left single precision (plain gfortran build).
+_ORACLE_R4LIT_UNSTABLE = [[-0.001, 0.003980201510392349, 0.007952425492481846], [-0.01, 0.038145377623700134, 0.07558914526624007], [-0.1, 0.2833631535403856, 0.5351313004737878], [-0.37, 0.6697364281333629, 1.2004927123263185], [-1.0, 1.1226457904555036, 1.8882810717801408], [-2.5, 1.6784728215459572, 2.5761024488306927], [-7.0, 2.4182746671172493, 3.4037673803962822], [-9.9, 2.6867807719695533, 3.696679010602716], [-1e-06, 4.043691389953855e-06, 7.999952000223906e-06], [-0.5, 0.7910479266064044, 1.3969422344446167], [-3.0, 1.8022046688668953, 2.717798285875154], [-10.0, 2.6946919452742577, 3.7052664589326354]]
+
+
+def _a(x):
+    return jnp.asarray(np.asarray(x, dtype=np.float64))
+
+
+def test_stable_matches_fortran_oracle():
+    o = np.asarray(_ORACLE_R8_STABLE)
+    np.testing.assert_allclose(psi_m(_a(o[:, 0]), "mynn_sfc"), o[:, 1], rtol=1e-13, atol=1e-15)
+    np.testing.assert_allclose(psi_h(_a(o[:, 0]), "mynn_sfc"), o[:, 2], rtol=1e-13, atol=1e-15)
+
+
+def test_unstable_matches_fortran_oracle():
+    """atol 2e-12: the source's ``atan1 = 0.785398163397`` is pi/4 truncated by
+    4.8e-13; the port uses exact pi/4 so that psi(0) = 0 exactly."""
+    o = np.asarray(_ORACLE_R8_UNSTABLE)
+    np.testing.assert_allclose(mynn_psi_m_unstable(_a(o[:, 0])), o[:, 1], rtol=1e-13, atol=2e-12)
+    np.testing.assert_allclose(mynn_psi_h_unstable(_a(o[:, 0])), o[:, 2], rtol=1e-13, atol=2e-12)
+
+
+def test_single_precision_literal_gap():
+    """Port vs the oracle with single-precision literals: recorded per point."""
+    o = np.asarray(_ORACLE_R4LIT_UNSTABLE)
+    gap_m = np.asarray(mynn_psi_m_unstable(_a(o[:, 0]))) - o[:, 1]
+    gap_h = np.asarray(mynn_psi_h_unstable(_a(o[:, 0]))) - o[:, 2]
+    np.testing.assert_allclose(gap_m, _R4LIT_GAP_M, rtol=1e-6, atol=1e-12)
+    np.testing.assert_allclose(gap_h, _R4LIT_GAP_H, rtol=1e-6, atol=1e-12)
+
+
+_R4LIT_GAP_M = [-4.371149332077495e-08, -4.372184106427035e-08, -4.484845689267658e-08, -5.984691675564591e-08, -1.2249608660752642e-07, -2.030311110345906e-07, -2.5857205621093726e-07, -2.727114609690773e-07, -4.3711390063198953e-08, -7.178191807621914e-08, -2.153266100979323e-07, -2.7310682737535785e-07]
+_R4LIT_GAP_H = [-1.4731098285647448e-13, -1.5133783115572896e-11, -1.743144295573984e-09, -2.5008754178657e-08, -1.1924658260831222e-07, -2.3250839698008008e-07, -2.9998640194150994e-07, -3.15224754299237e-07, -1.4738373282224826e-19, -4.330859626477945e-08, -2.484866494789628e-07, -3.1564201607992004e-07]
+
+
+def test_registered_in_both_tables():
+    bulk_flux.validate_stability_scheme("mynn_sfc")
+    assert UNSTABLE_PSI_FUNCTIONS["mynn_sfc"] == (mynn_psi_m_unstable, mynn_psi_h_unstable)
+
+
+def test_neutral_limit_and_phi_continuity():
+    """psi(0) = 0 on both branches; phi = 1 - zeta dpsi/dzeta -> 1 from both sides."""
+    for f in (mynn_psi_m_unstable, mynn_psi_h_unstable):
+        assert abs(float(f(_a(0.0)))) < 1e-15
+    for f in (lambda z: psi_m(z, "mynn_sfc"), lambda z: psi_h(z, "mynn_sfc")):
+        assert abs(float(f(_a(0.0)))) < 1e-15
+    eps = 1e-7
+    phi = lambda f, z: 1.0 - z * jax.grad(f)(z)  # noqa: E731
+    for f in (lambda z: psi_m(z, "mynn_sfc"), lambda z: psi_h(z, "mynn_sfc")):
+        assert abs(float(phi(f, _a(eps))) - 1.0) < 1e-5
+    for f in (mynn_psi_m_unstable, mynn_psi_h_unstable):
+        assert abs(float(phi(f, _a(-eps))) - 1.0) < 1e-5
+
+
+def _dphi(f):
+    phi = lambda z: 1.0 - z * jax.grad(f)(z)  # noqa: E731
+    return jax.grad(phi)
+
+
+@pytest.mark.parametrize("f,side,slope", [
+    (lambda z: psi_m(z, "mynn_sfc"), 1.0, 6.1),
+    (lambda z: psi_h(z, "mynn_sfc"), 1.0, 5.3),
+    (mynn_psi_m_unstable, -1.0, 4.0),
+    (mynn_psi_h_unstable, -1.0, 8.0),
+])
+def test_phi_slope_at_neutral_each_side(f, side, slope):
+    """dphi/dzeta at 0+/0-: 6.1 / 5.3 stable, gamma/4 = 4 / gamma/2 = 8 unstable.
+
+    The only slope discontinuity is at zeta = 0 (allowed); there are no other
+    branch points in either branch, so each side is C1 on its own domain.  The
+    stable heat slope approaches 5.3 only as 5.3 (1 + 1.1 zeta^0.1), hence the
+    evaluation at |zeta| = 1e-40.
+    """
+    assert float(_dphi(f)(_a(side * 1e-40))) == pytest.approx(slope, rel=2e-3)
+
+
+@pytest.mark.parametrize("f,side", [
+    (lambda z: psi_m(z, "mynn_sfc"), 1.0), (lambda z: psi_h(z, "mynn_sfc"), 1.0),
+    (mynn_psi_m_unstable, -1.0), (mynn_psi_h_unstable, -1.0),
+])
+def test_phi_is_c1_within_each_branch(f, side):
+    """No hidden kink inside a branch: dphi/dzeta changes smoothly on a fine grid.
+
+    Stops below |zeta| = 10, where psi_m/psi_h clip zeta for every scheme.
+    """
+    z = side * np.geomspace(1e-5, 9.9, 4000)
+    d = np.asarray(jax.vmap(_dphi(f))(_a(z)))
+    assert np.all(np.isfinite(d))
+    jumps = np.abs(np.diff(d)) / (np.abs(d[:-1]) + 1.0)
+    assert jumps.max() < 0.05
+
+
+@pytest.mark.parametrize("z", [-3.0, -0.2, 0.2, 3.0])
+def test_gradients_check(z):
+    check_grads(lambda x: psi_m(x, "mynn_sfc"), (_a(z),), order=2, modes=["rev"])
+    check_grads(lambda x: psi_h(x, "mynn_sfc"), (_a(z),), order=2, modes=["rev"])
+    if z < 0:
+        check_grads(mynn_psi_m_unstable, (_a(z),), order=2, modes=["rev"])
+        check_grads(mynn_psi_h_unstable, (_a(z),), order=2, modes=["rev"])
+
+
+def test_masked_stable_lane_has_finite_gradient_at_zero():
+    """At zeta <= 0 the stable branch is masked; zeta^1.1 at 0 must not leak NaN."""
+    for f in (lambda z: psi_m(z, "mynn_sfc"), lambda z: psi_h(z, "mynn_sfc")):
+        for z in (-1.0, 0.0):
+            assert np.isfinite(float(jax.grad(f)(_a(z))))
+            assert np.isfinite(float(jax.grad(jax.grad(f))(_a(z))))
+
+
+def test_other_schemes_unchanged():
+    """Adding mynn_sfc leaves every existing scheme's psi bit-identical (pinned)."""
+    z = _a(np.linspace(-5.0, 5.0, 41))
+    for sc, (pm, ph) in _EXISTING_PSI.items():
+        np.testing.assert_array_equal(np.asarray(psi_m(z, sc)), np.asarray(pm))
+        np.testing.assert_array_equal(np.asarray(psi_h(z, sc)), np.asarray(ph))
+
+
+# psi_m, psi_h on that grid from the unmodified base checkout (pre-change).
+_EXISTING_PSI = {'dyer1974': ([2.0684370555523786, 2.034350232824133, 1.9986573164445538, 1.9611919386990344, 1.9217598689670066, 1.8801323328812654, 1.8360371800326907, 1.7891470044648208, 1.7390628514704796, 1.6852913659428324, 1.6272119042234765, 1.564027751055118, 1.4946911231395577, 1.417782788114427, 1.3313082825603502, 1.2323289433524667, 1.1162322497683264, 0.9751023406075612, 0.7933591213265179, 0.5318518115050628, 0.0, -1.25, -2.5, -3.75, -5.0, -6.25, -7.5, -8.75, -10.0, -11.25, -12.5, -13.75, -15.0, -16.25, -17.5, -18.75, -20.0, -21.25, -22.5, -23.75, -25.0], [3.2188758248682006, 3.17335456414261, 3.125531793323979, 3.0751584187977725, 3.0219422160826666, 2.96553719808816, 2.905529475810829, 2.8414181188027836, 2.772588722239781, 2.698276053788623, 2.6175098495978935, 2.5290336778748217, 2.4311789317230965, 2.3216602404043445, 2.1972245773362196, 2.0530061668192157, 1.8812272842144175, 1.6682303887048024, 1.3862943611198906, 0.9624236501192069, 0.0, -1.25, -2.5, -3.75, -5.0, -6.25, -7.5, -8.75, -10.0, -11.25, -12.5, -13.75, -15.0, -16.25, -17.5, -18.75, -20.0, -21.25, -22.5, -23.75, -25.0]), 'beljaars_holtslag1991': ([2.0684370555523786, 2.034350232824133, 1.9986573164445538, 1.9611919386990344, 1.9217598689670066, 1.8801323328812654, 1.8360371800326907, 1.7891470044648208, 1.7390628514704796, 1.6852913659428324, 1.6272119042234765, 1.564027751055118, 1.4946911231395577, 1.417782788114427, 1.3313082825603502, 1.2323289433524667, 1.1162322497683264, 0.9751023406075612, 0.7933591213265179, 0.5318518115050628, 0.0, -1.2010939626887058, -2.309704161382797, -3.3346513918634253, -4.283927586665497, -5.164772785660626, -5.983745027296631, -6.746783806446445, -7.459267686273881, -8.12606659825413, -8.751589316020125, -9.339826544610997, -9.894390026583697, -10.418548029955751, -10.915257549751052, -11.387193524725076, -11.836775343381184, -12.26619088841024, -12.677418345967782, -13.072245985543027, -13.452290097386564], [3.2188758248682006, 3.17335456414261, 3.125531793323979, 3.0751584187977725, 3.0219422160826666, 2.96553719808816, 2.905529475810829, 2.8414181188027836, 2.772588722239781, 2.698276053788623, 2.6175098495978935, 2.5290336778748217, 2.4311789317230965, 2.3216602404043445, 2.1972245773362196, 2.0530061668192157, 1.8812272842144175, 1.6682303887048024, 1.3862943611198906, 0.9624236501192069, 0.0, -1.211237987379123, -2.3493048792217985, -3.4217686989508085, -4.4355850012251725, -5.397117853743835, -6.312172152042821, -7.186030785953722, -8.02349322679509, -8.828913673464605, -9.606237747634664, -10.359037209948644, -11.090542449290329, -11.803672662972277, -12.501063744252898, -13.185093951579473, -13.857907466927664, -14.521435967933206, -15.17741834596778, -15.827418703540172, -16.472842761739805]), 'grachev2007_sheba': ([2.0684370555523786, 2.034350232824133, 1.9986573164445538, 1.9611919386990344, 1.9217598689670066, 1.8801323328812654, 1.8360371800326907, 1.7891470044648208, 1.7390628514704796, 1.6852913659428324, 1.6272119042234765, 1.564027751055118, 1.4946911231395577, 1.417782788114427, 1.3313082825603502, 1.2323289433524667, 1.1162322497683264, 0.9751023406075612, 0.7933591213265179, 0.5318518115050628, 0.0, -1.1872303605096968, -2.2668874453014425, -3.25996144012601, -4.181718613481897, -5.043593234401348, -5.854374612401507, -6.620971501871255, -7.348919502288093, -8.042727792385001, -8.706122409602306, -9.342221013871985, -9.95366109150291, -10.542695774686035, -11.111266659916575, -11.661059979202587, -12.19355051625691, -12.710036361265786, -13.211666720629617, -13.699464394480213, -14.174344112363128], [3.2188758248682006, 3.17335456414261, 3.125531793323979, 3.0751584187977725, 3.0219422160826666, 2.96553719808816, 2.905529475810829, 2.8414181188027836, 2.772588722239781, 2.698276053788623, 2.6175098495978935, 2.5290336778748217, 2.4311789317230965, 2.3216602404043445, 2.1972245773362196, 2.0530061668192157, 1.8812272842144175, 1.6682303887048024, 1.3862943611198906, 0.9624236501192069, 0.0, -1.025801393632149, -1.7888158495005302, -2.4127424861249263, -2.947572428675241, -3.4191044377883038, -3.8426738479496017, -4.2282797670122685, -4.582879906871577, -4.911553565352848, -5.218147322106871, -5.505659552194043, -5.776482471546355, -6.032561513557186, -6.275504245341342, -6.506657156001417, -6.727161245880748, -6.937993194210338, -7.139996453194939, -7.33390514163896, -7.52036268642446]), 'gryanik2020': ([2.0684370555523786, 2.034350232824133, 1.9986573164445538, 1.9611919386990344, 1.9217598689670066, 1.8801323328812654, 1.8360371800326907, 1.7891470044648208, 1.7390628514704796, 1.6852913659428324, 1.6272119042234765, 1.564027751055118, 1.4946911231395577, 1.417782788114427, 1.3313082825603502, 1.2323289433524667, 1.1162322497683264, 0.9751023406075612, 0.7933591213265179, 0.5318518115050628, 0.0, -1.2199903629566577, -2.3844776585823624, -3.4993740282539765, -4.569644153055297, -5.599502264232892, -6.592559798147546, -7.551937949078691, -8.480354764257314, -9.380193451539698, -10.253556604380766, -11.10230972113514, -11.928116481508532, -12.732467602327501, -13.516704638624033, -14.28203976645589, -15.029572342569352, -15.760302857140651, -16.475144761729332, -17.174934552979337, -17.86044041487266], [3.1544983083708367, 3.109887472859758, 3.0630211574574995, 3.013655250421817, 2.961503371761013, 2.9062264541263967, 2.847418886294612, 2.784589756426728, 2.7171369477949856, 2.64431053271285, 2.5651596526059355, 2.478453004317325, 2.3825553530886348, 2.2752270355962576, 2.153280085789495, 2.011946043482831, 1.8436027385301292, 1.6348657809307063, 1.3585684738974928, 0.9431751771168227, 0.0, -1.1675497026029795, -2.233439070725944, -3.2139622397267655, -4.121784898609858, -4.9669475743250135, -5.757544458260261, -6.500196075511589, -7.200386645050958, -7.862710105611835, -8.49105296185933, -9.088732472934872, -9.658602664462311, -10.203136755955022, -10.724492032585276, -11.2245614654584, -11.705015201586095, -12.167334219375972, -12.612837860469186, -13.042706528157249, -13.458000536184345])}
+
+
+@pytest.mark.parametrize("z", [-0.01, -5e-4, 0.0, 5e-4, 0.01])
+def test_coare_neutral_blend_finite(z):
+    """The COARE blend evaluates the stable branch down to zeta = -width."""
+    for f in (bulk_flux.psi_m_coare, bulk_flux.psi_h_coare):
+        g = lambda x: f(x, "mynn_sfc")  # noqa: E731
+        assert np.isfinite(float(g(_a(z))))
+        assert np.isfinite(float(jax.grad(g)(_a(z))))
+
+
+def test_unknown_scheme_raises():
+    with pytest.raises(ValueError):
+        psi_m(_a(0.5), "mynn")
+    with pytest.raises(ValueError):
+        psi_h(_a(0.5), "mynn")
