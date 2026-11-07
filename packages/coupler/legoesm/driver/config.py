@@ -651,6 +651,13 @@ ZM_WIDTH_FIELDS = {
     "zm_detrain_phase_width_K": "detrain_phase_width_K",
     "zm_detrain_number_width_kgkg_s": "detrain_number_width_kgkg_s",
 }
+# Flat ExperimentConfig scalar -> ZhangMcFarlaneConfig RULE 5 width of the
+# cape > capelmt trigger, read wherever convection == zhang_mcfarlane.  Excluded
+# from __param_spec__; the one legal range is
+# zhang_mcfarlane.validate_trigger_width.  None = the scheme default.
+ZM_TRIGGER_FIELDS = {
+    "zm_trigger_width_J_kg": "trigger_width_J_kg",
+}
 CLUBB_SCALAR_FIELDS = {
     "clubb_c14": "C14",
     "clubb_c8": "C8",
@@ -2174,6 +2181,10 @@ class ExperimentConfig(NamedTuple):
     # droplet size reset in the sedimentation fall speeds (prognostic droplet
     # number only); 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
     morrison_mg2_drop_sed_reset_log_width: float = 0.01
+    # ZhangMcFarlaneConfig.trigger_width_J_kg (ZM_TRIGGER_FIELDS): RULE 5 width
+    # of the deep-convection trigger [J/kg]; 0 = CAM's hard switch.  None = the
+    # scheme default; the production deck names it.
+    zm_trigger_width_J_kg: float | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -3197,6 +3208,20 @@ class ExperimentConfig(NamedTuple):
                 if not _ok:
                     errors.append(f"{_f} must be a number in [{_lo}, {_hi}] "
                                   f"(the scheme's __param_spec__), got {_v!r}")
+        for _f in ZM_TRIGGER_FIELDS:
+            _v = getattr(self, _f)
+            if _v is None:
+                continue
+            if self.convection != "zhang_mcfarlane":
+                errors.append(f"{_f} is a Zhang-McFarlane field; got "
+                              f"convection={self.convection!r}")
+            from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+                validate_trigger_width,
+            )
+            try:
+                validate_trigger_width(_v)
+            except ValueError as exc:
+                errors.append(f"{_f}: {exc}")
         _zw = {f: getattr(self, f) for f in ZM_WIDTH_FIELDS
                if getattr(self, f) is not None}
         if _zw:

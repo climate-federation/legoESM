@@ -1301,9 +1301,20 @@ def ifs_subcloud_rain_evaporation(
 
     Returns
     -------
-    (evap_rate, rain_scale, melt_rate) : per-level vapor source [kg/kg/s],
-        the column-uniform rain-source debit factor in [0, 1], and the
-        per-level melt rate [kg/kg/s] (zeros when ``snow_melt=False``).
+    (evap_rate, rain_scale, melt_rate, evap_snow_rate) : per-level vapor
+        source [kg/kg/s], the column-uniform rain-source debit factor in
+        [0, 1], the per-level melt rate [kg/kg/s] (zeros when
+        ``snow_melt=False``), and the part of ``evap_rate`` that came from the
+        snow flux [kg/kg/s] (the caller books its extra fusion heat).
+
+    Evaporation acts on rain + snow (``ZRFL = PMFLXR + PMFLXS``,
+    cuflxn.F90:464) and is split between them in proportion to the entering
+    fluxes (``ZDENOM``, :484-488).  A snow flux overdrawn by melt plus its
+    share is refilled from the rain (:493-495); the oracle keeps ``PDPMEL``
+    and moves the water, the port books the same fluxes as a reduced
+    effective melt, so its fusion-heat bookkeeping stays exact.  That refill
+    is a hard ``max`` on traced state, like the march's other clips (RULE 5
+    gap, recorded).
     """
     _dtype = jnp.result_type(q_v, q_sat_env, dq_r_conv_dt, below_lcl)
     g = constants.g
@@ -1368,13 +1379,13 @@ def ifs_subcloud_rain_evaporation(
         # Snow melt acts on the flux entering the layer TOP (same ordering
         # doctrine as the evaporation below); melted snow joins the RAIN.
         melt_k = jnp.minimum(snow_top, mcap_k)
-        snow_top = snow_top - melt_k
         # Oracle ordering (codex R1 #1 + snow R1): evaporation acts on the
-        # flux entering the layer TOP (``ZRFL = PMFLXR(JK)``, cuflxn:449);
+        # rain + snow entering the layer TOP (``ZRFL = PMFLXR(JK) +
+        # PMFLXS(JK)``, cuflxn:464, before this layer's melt);
         # the layer's OWN source — and its OWN melt, which the oracle adds to
         # PMFLXR(JK+1) AFTER the evap of PMFLXR(JK) — join only downstream.
         # Same-layer melt must not evaporate in its production layer.
-        zrfl = flux_top
+        zrfl = flux_top + snow_top
         zrfl_safe = jnp.where(zrfl > _IFS_EVAP_FLUX_TINY, zrfl, 1.0)
         zdrfl1 = (
             _IFS_RCPECONS * evap_scale
@@ -1397,16 +1408,22 @@ def ifs_subcloud_rain_evaporation(
         evap_k = jnp.where(
             zrfl > _IFS_EVAP_FLUX_TINY, (zrfl - zrfln) * gate_k, 0.0,
         )
-        rain_out = (zrfl - evap_k + melt_k + alpha_k * src_k).astype(_dtype)
-        snow_out = (snow_top + (1.0 - alpha_k) * src_k).astype(_dtype)
-        return (rain_out, snow_out), (evap_k, melt_k)
+        evap_s = jnp.where(zrfl > _IFS_EVAP_FLUX_TINY,
+                           evap_k * snow_top / zrfl_safe, 0.0)
+        snow_left = snow_top - melt_k - evap_s + (1.0 - alpha_k) * src_k
+        melt_k = melt_k - jnp.maximum(-snow_left, 0.0)
+        rain_out = (flux_top - (evap_k - evap_s) + melt_k
+                    + alpha_k * src_k).astype(_dtype)
+        snow_out = jnp.maximum(snow_left, 0.0).astype(_dtype)
+        return (rain_out, snow_out), (evap_k, melt_k, evap_s)
 
     ncol = q_v.shape[0]
     zero_c = jnp.zeros((ncol,), dtype=_dtype)
-    (rain_sfc, snow_sfc), (evap_sf, melt_sf) = jax.lax.scan(
+    (rain_sfc, snow_sfc), (evap_sf, melt_sf, evap_s_sf) = jax.lax.scan(
         _step, (zero_c, zero_c), inputs)                       # (nlev, ncol)
     evap = jnp.moveaxis(evap_sf, 0, 1)                         # (ncol, nlev)
     melt = jnp.moveaxis(melt_sf, 0, 1)
+    evap_snow = jnp.moveaxis(evap_s_sf, 0, 1)
     if snow_melt:
         # FOLD: snow reaching the surface melts forcibly INTO the surface
         # layer (the melt that would occur on the ground); its cooling books
@@ -1421,7 +1438,7 @@ def ifs_subcloud_rain_evaporation(
     rain_scale = jnp.clip(
         1.0 - evap_total / jnp.maximum(rain_total, 1e-30), 0.0, 1.0,
     )
-    return evap_rate, rain_scale[:, None], melt_rate
+    return evap_rate, rain_scale[:, None], melt_rate, evap_snow * g / dp_full
 
 
 class _QadvTerms(NamedTuple):
@@ -2657,17 +2674,6 @@ def bechtold_convection(
         tau_conv = jnp.clip(
             _tau_pure * _ztaures, _IFS_TAU_MIN, _IFS_TAU_MAX,
         )
-        # The diurnal-cycle land branch wants ZTAU/ZTAURES, and ZTAU is the
-        # CLAMPED turnover time -- the oracle divides the resolution factor
-        # back out of the clamped value, it does not step around the clamp.
-        # Handing it the raw ratio skipped the 720 s floor: measured 197 s on a
-        # heated tropical land column, so the subtraction came out 3.7x too
-        # small before the departure gate shrank it further.  With the floor
-        # the land timescale is at least 720 s, which is what makes the term
-        # able to hold CAPE back through the morning.
-        _tau_capdcycl = jnp.clip(
-            _tau_pure * _ztaures, _IFS_TAU_MIN, _IFS_TAU_MAX,
-        ) / _ztaures
     if config.use_ifs_cape_closure:
         # -- Full IFS deep CAPE closure ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU)
         # (cumastrn.F90:704-833; see _ifs_cape_closure_target).  Supersedes the
@@ -2775,7 +2781,7 @@ def bechtold_convection(
                  - (p_half[:, -1] - p_parcel_source))
                 / _CAPDCYCL_GATE_W_PA)
             _zdcy = _ifs_capdcycl(
-                _supply_virt, _tau_capdcycl, _z_base, u, v, _base_w2, p_full,
+                _supply_virt, _tau_pure, _z_base, u, v, _base_w2, p_full,
                 land_frac, _gate_w, config.capdcycl_land_tau_scale,
             )
         _qadv = None
@@ -3155,7 +3161,7 @@ def bechtold_convection(
         # the helper is q_sat-named but is a generic level-index gather).
         _rh_base = _ifs_cloud_base_qsat(_rh_evap, k_lcl_smooth, levels_arr)[:, 0]
         _rh_top = _ifs_cloud_base_qsat(_rh_evap, k_lnb_smooth, levels_arr)[:, 0]
-        evap_rate_ifs, rain_scale_ifs, melt_rate_ifs = (
+        evap_rate_ifs, rain_scale_ifs, melt_rate_ifs, evap_snow_rate_ifs = (
             ifs_subcloud_rain_evaporation(
                 q_v, _q_sat_evap, p_half, dp_full, dq_r_conv_dt,
                 _below_lcl_evap, _rh_base, _rh_top, deep_weight, dt,
@@ -3169,6 +3175,11 @@ def bechtold_convection(
         dT_dt = dT_dt - (constants.L_v / constants.c_pd) * evap_rate_ifs
         dq_v_dt = dq_v_dt + evap_rate_ifs
         if config.use_ifs_snow_melt:
+            # Sublimating snow costs L_s = L_v + L_f: its formation was booked
+            # +L_f below, so the column enthalpy closes.  OpenIFS heats all of
+            # PDMFUP with the temperature blend FOELHMCU (cudtdqn.F90:281), a
+            # recorded departure.
+            dT_dt = dT_dt - (constants.L_f / constants.c_pd) * evap_snow_rate_ifs
             # Formation-side FREEZING heat (+L_f on the snow-source share:
             # our plume condensed with L_v only) paired with the march's
             # melt COOLING (-L_f, incl. the forced surface fold) — the

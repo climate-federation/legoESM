@@ -139,6 +139,7 @@ from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
     ZM_SCALAR_FIELDS,
+    ZM_TRIGGER_FIELDS,
     ZM_WIDTH_FIELDS,
     VALID_TURBULENCE,
     DycoreConfig,
@@ -1148,6 +1149,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                                  "booking (0 = CAM's hard switch; MPAS ZM + "
                                  "CLUBB with cld_macmic_num_steps>=2 only). "
                                  "Default: the scheme's own value.")
+    for _f, _leaf in ZM_TRIGGER_FIELDS.items():
+        parser.add_argument("--" + _f.replace("_", "-"), type=float,
+                            default=None, dest=_f,
+                            help=f"ZhangMcFarlaneConfig.{_leaf}: RULE 5 width "
+                                 "[J/kg] of the cape > capelmt deep-convection "
+                                 "trigger (0 = CAM's hard switch). Default: the "
+                                 "scheme's own value.")
     parser.add_argument("--clubb-q-flux-scale", type=float, default=None,
                         dest="clubb_q_flux_scale",
                         help="Moisture-only multiplier on CLUBB's q_v eddy "
@@ -3018,7 +3026,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         **{_f: getattr(args, _f)
-           for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS,
+           for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS,
                       **CLUBB_SCALAR_FIELDS}},
         clubb_q_flux_scale=args.clubb_q_flux_scale,
         clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)

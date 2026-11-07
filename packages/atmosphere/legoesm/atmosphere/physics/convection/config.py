@@ -323,6 +323,7 @@ __param_spec__ = {
             "parcel_tpert": "default 0 = disabled/off (PBL temperature perturbation; CAM6 CLUBB path has none)",
             "detrain_phase_width_K": "numerics: RULE 5 smoothing width of the detrainment liquid/ice ramp corners (0 = CAM hard switch)",
             "detrain_number_width_kgkg_s": "numerics: RULE 5 smoothing width of max(0, dlf) in the detrainment number source (0 = CAM hard switch)",
+            "trigger_width_J_kg": "numerics: RULE 5 width of the cape > capelmt deep-convection trigger ramp (0 = CAM hard switch)",
         },
         "params": {
             "c0_lnd": {"units": "1/m", "bounds": (0.002, 0.02), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM zmconv_c0_lnd namelist span (0.002-0.0075 across configurations)", "shape": None},
@@ -755,6 +756,10 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # source [kg/kg/s].  0 = CAM's hard switch.
     detrain_phase_width_K: float = 0.1
     detrain_number_width_kgkg_s: float = 1.0e-12
+    # RULE 5 width [J/kg] of the deep-convection trigger cape > capelmt: the
+    # closure mass flux is scaled by a C1 ramp from 0 at capelmt to 1 at
+    # capelmt + width (_zm_cam6 module docstring).  0 = CAM's hard switch.
+    trigger_width_J_kg: float = 10.0
 
 
 class KainFritschConfig(NamedTuple):

@@ -43,6 +43,7 @@ zm_tau: null
 zm_capelmt: null
 zm_detrain_phase_width_K: null
 zm_detrain_number_width_kgkg_s: null
+zm_trigger_width_J_kg: null
 
 # --- radiation: OpenIFS 49r1 ecRad (RRTMGP gas optics, user 2026-11-06), votes L1-L28, S1-S6 --
 # Full call hourly (rad_update_steps 32 x 112.5 s, inherited = NRADFR=-1) into

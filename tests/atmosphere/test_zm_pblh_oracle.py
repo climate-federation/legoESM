@@ -23,7 +23,8 @@ RAINQM, SNOWQM, NUMRAI (zm_conv_intr.F90:829-846, micro_mg_cam.F90:416-435) =
 legoESM ``q_c, q_i, N_c, N_i, q_r, q_s, N_r``.
 
 Tolerance: max relative error <= 1e-10 in fp64 (user decision 2026-10-19).
-ZM has no smoothing fields of its own.  Its qsat table's [tmin, tmax] clamp
+ZM's own smoothing field is the trigger width (RULE 5): the oracle match runs at
+its hard limit (``HARD``) and the default's per-column gap is pinned below.  Its qsat table's [tmin, tmax] clamp
 and q = 1 cap are smooth by default (legoesm.thermo, RULE 5); for 150-340 K
 and e_sat/p <= 0.77 (the fixture's maximum) they depart from CAM by < 3e-11
 relative, inside this tolerance (the cap departs by 1.1e-3 at e_sat = p).
@@ -126,8 +127,12 @@ def _wrapper(fx, tracers=True, config=None):
         tracers=({nm: jnp.asarray(fx[key]) for key, nm, _ in TRACERS} if tracers else None))
 
 
+# RULE 5: the cape > capelmt trigger at its hard limit (width 0) is CAM's.
+HARD = ZhangMcFarlaneConfig(trigger_width_J_kg=0.0)
+
+
 def test_wrapper_with_pblh_matches_cam_oracle(fx):
-    out, prog = _wrapper(fx)
+    out, prog = _wrapper(fx, config=HARD)
     o = _oracle_tendencies(fx)
     ours = {"dT_dt": out.dT_dt, "dq_v_dt": out.dq_v_dt, "dq_c": out.dq_c_conv_dt,
             "dq_r": out.dq_r_conv_dt, "du": out.du_dt_conv, "dv": out.dv_dt_conv,
@@ -432,3 +437,87 @@ def test_zm_without_pblh_is_refused(fx):
             land_frac=jnp.asarray(fx["land"]), pref_edge=jnp.asarray(fx["pref_edge"]))
     with pytest.raises(ValueError, match="no PBL height"):
         _bridge(fx, None)
+
+
+# --- ZM trigger width at its default (RULE 5 KNOWN DIFFERENCE) --------------
+# Per fixture column: max|default - hard| / max|hard| of each output (the hard
+# limit matches CAM at 1e-10 above).  At the fixture's capelmt 70 every deep
+# column has CAPE >= 90 J/kg, outside the 10 J/kg ramp, so the default is CAM
+# bit for bit.  At capelmt 85 columns 1 (CAPE 91.36) and 13 (90.20) sit inside
+# it, at weights 0.698 and 0.529; the mass flux gap is 1 - weight.
+_GAP_IN_RAMP = {
+    "mb": (1, 0.3017320239406961, 13, 0.47061057534488854),
+    "dT_dt": (1, 0.30818775243147684, 13, 0.44057101371884433),
+    "dq_v_dt": (1, 0.3017320239406961, 13, 0.49483739482567646),
+    "dq_r": (1, 0.30173202394069615, 13, 0.4965484865744797),
+    "dq_c": (1, 0.3017320239406961, 13, 0.4706105753448884),
+    "du": (1, 0.301732023940696, 13, 0.4706105753448888),
+    "dv": (1, 0.3017320239406967, 13, 0.47061057534488876),
+    "q_i_transport": (1, 0.3017320239406963, 13, 0.47061057534488837),
+}
+
+
+_MASK_IN_RAMP = {1: 0.6982679760593039, 13: 0.5293894246551115}
+
+
+def _outputs(fx, cfg):
+    out, prog = _wrapper(fx, config=cfg)
+    return {"mb": prog[:, -1:], "dT_dt": out.dT_dt, "dq_v_dt": out.dq_v_dt,
+            "dq_r": out.dq_r_conv_dt, "mask": out.convective_mask[:, None],
+            "dq_c": out.dq_c_conv_dt, "du": out.du_dt_conv, "dv": out.dv_dt_conv,
+            "q_i_transport": out.tracer_transport["q_i"]}
+
+
+def _col_gap(ours, ref):
+    ours, ref = np.asarray(ours, float), np.asarray(ref, float)
+    d = np.max(np.abs(ours - ref), axis=1)
+    s = np.max(np.abs(ref), axis=1)
+    return np.where(s > 0, d / np.where(s > 0, s, 1.0), d)
+
+
+def test_default_trigger_width_gap_per_case(fx):
+    assert ZhangMcFarlaneConfig().trigger_width_J_kg == 10.0
+    d, h = _outputs(fx, ZhangMcFarlaneConfig()), _outputs(fx, HARD)
+    for k in d:
+        np.testing.assert_array_equal(np.asarray(d[k]), np.asarray(h[k]), err_msg=k)
+    d = _outputs(fx, ZhangMcFarlaneConfig(capelmt=85.0))
+    h = _outputs(fx, HARD._replace(capelmt=85.0))
+    want_mask = fx["oracle_ideep"].astype(float)
+    for i, w in _MASK_IN_RAMP.items():
+        want_mask[i] = w
+    np.testing.assert_allclose(np.asarray(d["mask"])[:, 0], want_mask, rtol=1e-6,
+                               atol=1e-12)
+    for k, (i, gi, j, gj) in _GAP_IN_RAMP.items():
+        want = np.zeros(15)
+        want[i], want[j] = gi, gj
+        np.testing.assert_allclose(_col_gap(d[k], h[k]), want, rtol=1e-6, atol=1e-12,
+                                   err_msg=k)
+
+
+def test_trigger_gradient_at_default_width(fx):
+    """Finite, non-zero derivative through the ramp (columns 1 and 13 inside
+    it at capelmt 85), and it is not the hard path's derivative."""
+    from jax.test_util import check_grads
+
+    def total(capelmt, width):
+        out, _ = _wrapper(fx, tracers=False, config=ZhangMcFarlaneConfig(
+            capelmt=capelmt, trigger_width_J_kg=width))
+        return jnp.sum(out.dq_r_conv_dt[jnp.array([1, 13])]) * 1.0e6
+
+    check_grads(lambda c: total(c, 10.0), (85.0,), order=1, modes=("rev",))
+    g = float(jax.grad(total)(85.0, 10.0))
+    g_hard = float(jax.grad(total)(85.0, 0.0))
+    assert np.isfinite(g) and g != 0.0 and g != g_hard, (g, g_hard)
+
+
+def test_trigger_weight_reverse_pass_ignores_nan_cape_of_shallow_columns():
+    """A non-deep column's CAPE never reaches the ramp, even when it is NaN."""
+    from legoesm.atmosphere.physics.convection._zm_cam6 import trigger_weight
+    cape = jnp.array([jnp.nan, 90.0])
+
+    def total(capelmt):
+        return jnp.sum(trigger_weight(cape, capelmt, cape > capelmt, 10.0))
+
+    assert float(total(85.0)) == pytest.approx(0.5)
+    g = float(jax.grad(total)(85.0))
+    assert np.isfinite(g) and g != 0.0
