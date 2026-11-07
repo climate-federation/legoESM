@@ -148,12 +148,11 @@ def test_traced_sharpness_rejected():
 
 def test_driver_accepts_gfs():
     from legoesm.driver.config import ExperimentConfig
-
-    def errs(scheme):
-        return ExperimentConfig(surface_stability_scheme=scheme,
-                                surface_bulk_scheme="coare3").validate()
-    assert errs("gfs") == errs("dyer1974")
-    assert any("surface_stability_scheme" in e for e in errs("gfs_typo"))
+    ExperimentConfig(turbulence="louis", surface_stability_scheme="gfs",
+                     surface_bulk_scheme="coare3").validate_strict()
+    with pytest.raises(ValueError, match="surface_stability_scheme"):
+        ExperimentConfig(turbulence="louis", surface_stability_scheme="gfs_typo",
+                         surface_bulk_scheme="coare3").validate_strict()
 
 
 def test_run_scripts_accept_gfs():
