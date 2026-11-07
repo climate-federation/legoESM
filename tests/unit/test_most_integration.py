@@ -217,8 +217,9 @@ def test_experiment_config_widths_reach_the_surface_layer():
 
 
 def test_oracle_and_non_most_psi_callers_keep_the_hard_clip(monkeypatch):
-    """OMIP NCAR (both lanes), CLM canopy and LES surface call psi_m/psi_h
-    outside the MOST path; they keep the former +-10 clip (width 0)."""
+    """OMIP NCAR, CLM canopy and LES surface call psi_m/psi_h
+    outside the MOST path; they keep the former +-10 clip (width 0).  (The
+    NEMO-exact lane returns before the cap.)"""
     from legoesm.atmosphere.dynamics.les import spectral_les_plane as les
     from legoesm.land.canopy import stability as canopy
     from legoesm.ocean import bulk_flux_omip as omip

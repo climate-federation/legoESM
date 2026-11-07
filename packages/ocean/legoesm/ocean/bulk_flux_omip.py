@@ -480,7 +480,7 @@ def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
         )
         zeta = R(_ZU_M * inv_L)
         zeta = R(_sign(_fmin(jnp.abs(zeta), _ZETA_ABS_MAX), zeta))
-        psim = psi_m(zeta, nemo_source_exact=True, zeta_cap_width=0.0)
+        psim = psi_m(zeta, nemo_source_exact=True)
 
         UN10 = R(_fmax(
             _UN10_FLOOR_M_S, _un10_from_cd(_ZU_M, Ub, Cd, psim)
@@ -501,7 +501,7 @@ def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
         sqrt_Cd = R(jnp.sqrt(Cd))
 
         height_log = log_height
-        heat_psi = psi_h(zeta, nemo_source_exact=True, zeta_cap_width=0.0)
+        heat_psi = psi_h(zeta, nemo_source_exact=True)
         heat_difference = R(height_log - heat_psi)
         heat_over_k = R(heat_difference / B(k))
         zh = R(heat_over_k / B(sqrt_CdN))
