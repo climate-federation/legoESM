@@ -406,8 +406,9 @@ def main() -> int:
         _dd = pathlib.Path(args.dump_state)
         _dd.mkdir(parents=True, exist_ok=True)
         np.savez(_dd / f"rank{jax.process_index()}.npz", **{
-            f"leaf{i}": np.asarray(x.addressable_shards[0].data)
-            for i, x in enumerate(jax.tree.leaves(s))})
+            f"leaf{i}_{j}": np.asarray(sh.data)
+            for i, x in enumerate(jax.tree.leaves(s))
+            for j, sh in enumerate(x.addressable_shards)})
         if jax.process_index() == 0:
             (_dd / "hlo.txt").write_text(hlo)
 
