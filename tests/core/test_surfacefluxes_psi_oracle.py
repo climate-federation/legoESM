@@ -53,7 +53,7 @@ def test_psi_matches_surfacefluxes(scheme, fn):
     d = _fixture()
     z = d["zeta"]
     m = _domain(z, scheme)
-    ours = np.asarray(fn(jnp.asarray(z[m]), scheme))
+    ours = np.asarray(fn(jnp.asarray(z[m]), scheme, zeta_cap_width=0.0))  # hard cap = oracle clip
     ref = d[f"{scheme}_{fn.__name__}"][m]
     zero = ref == 0.0
     assert np.any(zero)  # zeta = 0 is on the grid

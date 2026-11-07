@@ -1,8 +1,8 @@
 """WRF/MPAS revised MM5 surface-layer stability functions (Jimenez et al. 2012).
 
 Stable branch is selectable as ``stability_scheme="wrf_revmm5"``; the unstable
-branch lives in ``bulk_flux._UNSTABLE_PSI["wrf_revmm5"]`` until the independent
-unstable selector wires it.  Oracle: MMM-physics sf_sfclayrev.F90
+branch is ``unstable_scheme="wrf_revmm5"`` (``bulk_flux.UNSTABLE_PSI_FUNCTIONS``); the
+independent selector wires it.  Oracle: MMM-physics sf_sfclayrev.F90
 ``psi{m,h}_{stable,unstable}_full`` compiled with gfortran -fdefault-real-8, kind_phys = 8
 (scripts/validate/oracle/wrf_sfclayrev/oracle.f90).
 
@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from jax.test_util import check_grads
 
-from legoesm.core.bulk_flux import _UNSTABLE_PSI, psi_h, psi_h_coare, psi_m, psi_m_coare
+from legoesm.core.bulk_flux import UNSTABLE_PSI_FUNCTIONS, psi_h, psi_h_coare, psi_m, psi_m_coare
 
 jax.config.update("jax_enable_x64", True)
 
@@ -39,7 +39,7 @@ _ORACLE = np.array([
 _ORACLE_RTOL = 1e-12
 _ORACLE_ATOL = 1e-15
 
-_UNSTABLE_M, _UNSTABLE_H = _UNSTABLE_PSI["wrf_revmm5"]
+_UNSTABLE_M, _UNSTABLE_H = UNSTABLE_PSI_FUNCTIONS["wrf_revmm5"]
 
 
 def _phi(psi):
@@ -49,8 +49,8 @@ def _phi(psi):
 
 def test_stable_matches_fortran():
     z = jnp.asarray(_ORACLE[:, 0])
-    np.testing.assert_allclose(psi_m(z, "wrf_revmm5"), _ORACLE[:, 1], rtol=_ORACLE_RTOL, atol=_ORACLE_ATOL)
-    np.testing.assert_allclose(psi_h(z, "wrf_revmm5"), _ORACLE[:, 2], rtol=_ORACLE_RTOL, atol=_ORACLE_ATOL)
+    np.testing.assert_allclose(psi_m(z, "wrf_revmm5", zeta_cap_width=0.0), _ORACLE[:, 1], rtol=_ORACLE_RTOL, atol=_ORACLE_ATOL)
+    np.testing.assert_allclose(psi_h(z, "wrf_revmm5", zeta_cap_width=0.0), _ORACLE[:, 2], rtol=_ORACLE_RTOL, atol=_ORACLE_ATOL)
 
 
 def test_unstable_table_matches_fortran():

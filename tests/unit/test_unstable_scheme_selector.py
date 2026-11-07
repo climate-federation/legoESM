@@ -74,7 +74,11 @@ _GOLDEN = REPO / "tests" / "core" / "oracle_fixtures" / "unstable_scheme_native_
 def test_default_matches_frozen_pre_change_outputs():
     g = np.load(_GOLDEN)
     zeta = jnp.asarray(g["zeta"])
-    fns = dict(psi_m=psi_m, psi_h=psi_h, psi_m_coare=psi_m_coare, psi_h_coare=psi_h_coare)
+    # psi_m/psi_h at the hard |zeta| clip (the smooth cap is a later,
+    # user-approved change; its hard limit must reproduce the old outputs).
+    hard = dict(zeta_cap_width=0.0)
+    fns = dict(psi_m=lambda z, s: psi_m(z, s, **hard), psi_h=lambda z, s: psi_h(z, s, **hard),
+               psi_m_coare=psi_m_coare, psi_h_coare=psi_h_coare)
     for s in STABLE:
         for name, fn in fns.items():
             np.testing.assert_array_equal(fn(zeta, s), g[f"{name}/{s}"])
@@ -87,7 +91,7 @@ def test_default_matches_frozen_pre_change_outputs():
             r = compute_most_fluxes(st["u"], st["v"], st["Ta"], st["qa"], st["Ta"] + st["dT"],
                                     np.maximum(st["qa"] + st["dq"], 1e-5), np.full(n, 1.2),
                                     scheme=scheme, stability_scheme=s, return_2m=True,
-                                    z0_init=1e-3)
+                                    z0_init=1e-3, most_zeta_cap_width=0.0)
             for i, x in enumerate(r):
                 np.testing.assert_array_equal(x, g[f"flux/{scheme}/{s}/{i}"],
                                               err_msg=f"{scheme}/{s}/{i}")

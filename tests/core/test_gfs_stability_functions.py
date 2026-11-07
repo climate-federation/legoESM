@@ -43,10 +43,10 @@ UNSTABLE_Z = [-1e-3, -0.1, -0.3, -0.5, -0.5000001, -0.7, -2.0, -6.0]
 @pytest.mark.parametrize("z", STABLE_Z)
 def test_stable_matches_gfs_with_and_without_z0_term(z):
     for fn in (bf.psi_m, bf.psi_h):
-        got = float(fn(jnp.array([z]), "gfs")[0])
+        got = float(fn(jnp.array([z]), "gfs", zeta_cap_width=0.0)[0])
         assert got == pytest.approx(_fortran_pm_stable(z, 0.0), rel=1e-12, abs=1e-14)
         z0 = z * 1e-3  # z0/L term: the psi(0) shift cancels in the difference
-        diff = got - float(fn(jnp.array([z0]), "gfs")[0])
+        diff = got - float(fn(jnp.array([z0]), "gfs", zeta_cap_width=0.0)[0])
         assert diff == pytest.approx(_fortran_pm_stable(z, z0), rel=1e-10, abs=1e-14)
 
 
@@ -135,7 +135,7 @@ def test_stable_gradients(z):
 
 
 def test_unstable_registry_and_stable_selector_keep_businger_dyer():
-    assert bf._UNSTABLE_PSI_BRANCHES["gfs"] == (bf._gfs_unstable_psi_m, bf._gfs_unstable_psi_h)
+    assert bf.UNSTABLE_PSI_FUNCTIONS["gfs"] == (bf._gfs_unstable_psi_m, bf._gfs_unstable_psi_h)
     z = jnp.array([-2.0, -0.3, -0.01])
     np.testing.assert_array_equal(bf.psi_m(z, "gfs"), bf.psi_m(z, "dyer1974"))
     np.testing.assert_array_equal(bf.psi_h(z, "gfs"), bf.psi_h(z, "dyer1974"))

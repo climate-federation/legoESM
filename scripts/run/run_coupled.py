@@ -301,6 +301,8 @@ def build_coupler_config(args):
         large_yeager_neutral_width=args.surface_large_yeager_neutral_width,
         large_yeager_dthv_width=args.surface_large_yeager_dthv_width,
         large_yeager_cd_cutoff_width=args.surface_large_yeager_cd_cutoff_width,
+        most_zeta_cap_width=args.surface_most_zeta_cap_width,
+        gfs_unstable_join_width=args.surface_gfs_unstable_join_width,
     )
 
 def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,

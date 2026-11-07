@@ -1005,6 +1005,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Large-Yeager smoothing band of the 33 m/s drag "
                              "cutoff [m/s]. 0 = AeroBulk hard cutoff. Read only "
                              "by large_yeager.")
+    parser.add_argument("--surface-most-zeta-cap-width",
+                        dest="surface_most_zeta_cap_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_most_zeta_cap_width,
+                        help="Half-width of the smooth cap on |z/L| at 10 in the "
+                             "Monin-Obukhov stability functions (identity below "
+                             "10 - width). 0 = the hard clip.")
+    parser.add_argument("--surface-gfs-unstable-join-width",
+                        dest="surface_gfs_unstable_join_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_gfs_unstable_join_width,
+                        help="Width in z/L of the smooth join of the GFS unstable "
+                             "branches at z/L = -0.5. 0 = the exact GFS step. "
+                             "Read only with --surface-unstable-scheme gfs.")
     parser.add_argument("--hb-kvf-min", dest="hb_kvf_min", type=float,
                         default=None,
                         help="Free-atmosphere diffusivity floor override "
@@ -3063,6 +3075,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_large_yeager_neutral_width=args.surface_large_yeager_neutral_width,
         surface_large_yeager_dthv_width=args.surface_large_yeager_dthv_width,
         surface_large_yeager_cd_cutoff_width=args.surface_large_yeager_cd_cutoff_width,
+        surface_most_zeta_cap_width=args.surface_most_zeta_cap_width,
+        surface_gfs_unstable_join_width=args.surface_gfs_unstable_join_width,
         surface_z_ref_model_level=args.surface_z_ref_model_level,
         surface_ocean_q_sfc_saline=args.surface_ocean_q_sfc_saline,
         hb_kvf_min=args.hb_kvf_min,

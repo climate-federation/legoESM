@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from legoesm import constants
-from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+from legoesm.core.bulk_flux import (GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH,
+                                      NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
                                       NCAR_NEUTRAL_WIDTH, VALID_UNSTABLE_SCHEMES)
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     C_E_BULK_DEFAULT, C_H_BULK_DEFAULT)
@@ -2180,6 +2181,11 @@ class ExperimentConfig(NamedTuple):
     # (default, byte-identical: each bulk path's own form) | "businger_dyer" |
     # "coare3".  See bulk_flux.compute_most_fluxes.
     surface_unstable_scheme: str = "native"
+    # APPENDED LAST.  RULE 5 widths threaded into every MOST surface config
+    # (bulk_flux.surface_flux_widths): smooth |zeta| cap half-width (0 = hard
+    # clip at +-10) and the GFS unstable join width (0 = exact GFS step).
+    surface_most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
+    surface_gfs_unstable_join_width: float = GFS_UNSTABLE_JOIN_WIDTH
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?

@@ -46,8 +46,8 @@ def _a(x):
 
 def test_stable_matches_fortran_oracle():
     o = np.asarray(_ORACLE_R8_STABLE)
-    np.testing.assert_allclose(psi_m(_a(o[:, 0]), "mynn_sfc"), o[:, 1], rtol=1e-13, atol=1e-15)
-    np.testing.assert_allclose(psi_h(_a(o[:, 0]), "mynn_sfc"), o[:, 2], rtol=1e-13, atol=1e-15)
+    np.testing.assert_allclose(psi_m(_a(o[:, 0]), "mynn_sfc", zeta_cap_width=0.0), o[:, 1], rtol=1e-13, atol=1e-15)
+    np.testing.assert_allclose(psi_h(_a(o[:, 0]), "mynn_sfc", zeta_cap_width=0.0), o[:, 2], rtol=1e-13, atol=1e-15)
 
 
 def test_unstable_matches_fortran_oracle():

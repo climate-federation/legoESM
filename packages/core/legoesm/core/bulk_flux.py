@@ -764,7 +764,17 @@ GFS_UNSTABLE_JOIN_WIDTH = 1.0 / _GFS_UNSTABLE_SWITCH_SHARPNESS
 
 
 def _zeta_cap(zeta, width):
-    """Cap |zeta| at ``_MOST_ZETA_CAP``: hard clip for width 0, else C2 ramp."""
+    """Cap |zeta| at ``_MOST_ZETA_CAP``: hard clip for width 0, else C2 ramp.
+
+    KNOWN DIFFERENCE vs the former hard clip, default width 2, measured
+    (scripts/tmp/probe_cap_change.py; per-scheme values pinned in
+    tests/unit/test_most_integration.py): psi unchanged (bit-identical) for
+    |zeta| <= 8, so at |zeta| = 1, 3, 5 and at |zeta| >= 12 (both saturate at
+    10); at zeta = +10 |psi| is 1.0-3.1 % smaller (dyer 3.1 %, BH91 1.7/3.0 %,
+    SHEBA 1.8/1.3 %, Gryanik 2.1/1.6 %, GFS 1.9 %, WRF/MYNN 1.1/1.0 %
+    momentum/heat); at zeta = -10 0.73-0.93 %.  phi is continuous with a
+    continuous slope; width 0 recovers the clip exactly.
+    """
     if width == 0.0:
         return jnp.clip(zeta, -_MOST_ZETA_CAP, _MOST_ZETA_CAP)
     a = jnp.abs(zeta)
@@ -873,8 +883,8 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
           gfs_unstable_join_width=GFS_UNSTABLE_JOIN_WIDTH):
     """MOST momentum stability function psi_m(zeta).
 
-    Convention zeta = z/L (>0 stable). Unstable (zeta < 0) is Businger-Dyer for
-    every scheme:
+    Convention zeta = z/L (>0 stable). Unstable (zeta < 0) is Businger-Dyer by
+    default (``unstable_scheme`` below):
         psi_m = 2 ln((1+x)/2) + ln((1+x^2)/2) - 2 arctan(x) + pi/2,
         with x = (1 - gamma zeta)^{1/4}, gamma = ``unstable_gamma`` (default 16).
     Stable (zeta > 0) is selected by ``stability_scheme``:
@@ -885,7 +895,7 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     - ``"grachev2007_sheba"``    : Grachev et al. (2007) SHEBA (Arctic/strong-stable)
     - ``"gryanik2020"``          : Gryanik et al. (2020) modified SHEBA
     - ``"gfs"``                  : NCEP GFS (sfc_diff.f) STABLE branch only, sublinear
-      tail; the GFS unstable forms live in ``_UNSTABLE_PSI_BRANCHES``
+      tail; the GFS unstable form is ``unstable_scheme="gfs"``
     - ``"wrf_revmm5"``           : WRF revised MM5 (Jimenez et al. 2012)
     - ``"mynn_sfc"``             : MYNN surface layer (Olson et al. 2021) stable
 
@@ -906,7 +916,12 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     ``unstable_scheme`` selects the unstable branch independently:
     ``"native"`` (default) and ``"businger_dyer"`` are the Businger-Dyer form
     above (identical here); ``"coare3"`` is the COARE 3.0 Kansas/free-convection
-    blend of :func:`psi_m_coare`, evaluated on the same clipped zeta.
+    blend of :func:`psi_m_coare`; ``"gfs"``, ``"wrf_revmm5"``, ``"mynn_sfc"``
+    are those models' unstable forms (``UNSTABLE_PSI_FUNCTIONS``; the GFS join
+    width is ``gfs_unstable_join_width``).
+
+    |zeta| is capped at 10 by :func:`_zeta_cap` (``zeta_cap_width``, default
+    smooth; 0 = the former hard clip).
     """
     validate_stability_scheme(stability_scheme)
     validate_unstable_scheme(unstable_scheme)

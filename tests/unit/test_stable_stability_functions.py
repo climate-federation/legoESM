@@ -126,8 +126,8 @@ def test_dyer1974_is_byte_identical_default():
     # except at zeta = 0: the original returned -5e-10 (stable branch on a
     # 1e-10 floor); SurfaceFluxes.jl and this port return exactly 0.
     nz = np.asarray(zetas) != 0.0
-    np.testing.assert_array_equal(np.asarray(psi_m(zetas))[nz], np.asarray(_old_psi_m(zetas))[nz])
-    np.testing.assert_array_equal(np.asarray(psi_h(zetas))[nz], np.asarray(_old_psi_h(zetas))[nz])
+    np.testing.assert_array_equal(np.asarray(psi_m(zetas, zeta_cap_width=0.0))[nz], np.asarray(_old_psi_m(zetas))[nz])
+    np.testing.assert_array_equal(np.asarray(psi_h(zetas, zeta_cap_width=0.0))[nz], np.asarray(_old_psi_h(zetas))[nz])
     np.testing.assert_array_equal(np.asarray(psi_m(zetas))[~nz], 0.0)
     np.testing.assert_array_equal(np.asarray(psi_h(zetas))[~nz], 0.0)
 
@@ -136,8 +136,8 @@ def test_dyer1974_stable_branch_is_minus_5_zeta():
     # Stable zeta in (0, 10): psi = -5*zeta exactly (no clip/floor active).
     zetas = jnp.asarray([0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 9.0])
     expected = -5.0 * zetas
-    np.testing.assert_array_equal(np.asarray(psi_m(zetas, "dyer1974")), np.asarray(expected))
-    np.testing.assert_array_equal(np.asarray(psi_h(zetas, "dyer1974")), np.asarray(expected))
+    np.testing.assert_array_equal(np.asarray(psi_m(zetas, "dyer1974", zeta_cap_width=0.0)), np.asarray(expected))
+    np.testing.assert_array_equal(np.asarray(psi_h(zetas, "dyer1974", zeta_cap_width=0.0)), np.asarray(expected))
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +401,7 @@ def test_stable_beta_scales_linearly(beta):
     zetas = jnp.asarray([0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 9.0])
     expected = -beta * zetas
     for fn in (psi_m, psi_h):
-        got = np.asarray(fn(zetas, "dyer1974", stable_beta=beta))
+        got = np.asarray(fn(zetas, "dyer1974", stable_beta=beta, zeta_cap_width=0.0))
         np.testing.assert_allclose(got, np.asarray(expected), rtol=0, atol=0)
 
 
@@ -907,10 +907,10 @@ def test_coare3_return_2m_scheme_sensitive():
     for scheme in NONLINEAR:
         np.testing.assert_array_equal(
             np.asarray(psi_h_coare(z_pos, scheme, neutral_width=0.0)),
-            np.asarray(psi_h(z_pos, scheme)))
+            np.asarray(psi_h(z_pos, scheme, zeta_cap_width=0.0)))
         np.testing.assert_array_equal(
             np.asarray(psi_m_coare(z_pos, scheme, neutral_width=0.0)),
-            np.asarray(psi_m(z_pos, scheme)))
+            np.asarray(psi_m(z_pos, scheme, zeta_cap_width=0.0)))
 
 
 @pytest.mark.parametrize("scheme", SCHEMES)
