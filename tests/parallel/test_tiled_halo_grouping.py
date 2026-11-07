@@ -1,4 +1,4 @@
-"""Opt-in grouping: real closed-loop steps, AD and structural control.
+"""Halo grouping: real closed-loop steps, AD and structural control.
 
 Run via Slurm with 24/96 CPU virtual devices. No timing claim from this test.
 """
