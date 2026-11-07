@@ -158,12 +158,59 @@ def positive_part_c1(x: jax.Array, sharpness: float) -> jax.Array:
     ``4/(27 s)``, at ``x = 1/(3s)``).  Unlike :func:`smooth_relu` (softplus,
     positive everywhere, offset everywhere) it creates nothing from a
     non-positive input and is exact for ``x >= 1/s``; exactly ``max(x, 0)``
-    at ``sharpness = inf``.
+    at ``sharpness = inf``, static or traced (a traced ``inf`` selects the hard
+    form; the smooth branch then runs at sharpness 1 so it holds no ``inf * 0``).
     """
     if _hard(sharpness):
         return jnp.maximum(x, 0.0)
-    t = jnp.clip(x * sharpness, 0.0, 1.0)
-    return jnp.where(t >= 1.0, x, t * t * (2.0 - t) / sharpness)
+    hard = jnp.isinf(sharpness)
+    s = jnp.where(hard, 1.0, sharpness)
+    t = jnp.clip(x * s, 0.0, 1.0)
+    smooth = jnp.where(t >= 1.0, x, t * t * (2.0 - t) / s)
+    return jnp.where(hard, jnp.maximum(x, 0.0), smooth)
+
+
+def smooth_min_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
+    """C1 min(a, b), EXACT outside ``|a - b| >= width/2``; ``width = 0`` is ``jnp.minimum``.
+
+    Inside the band ``y = a - b + width/2`` in ``(0, width)`` it is
+    ``a - y**2 / (2 width)``: monotone in ``a`` (slope ``1 - y/width``), never
+    above ``min(a, b)`` and at most ``width/8`` below it (at ``a = b``).
+    Unlike ``x - positive_part_c1(x - b)`` it does not overshoot ``b``.
+    """
+    if width == 0:
+        return jnp.minimum(a, b)
+    y = a - b + 0.5 * width
+    inside = a - y * y / (2.0 * width)
+    return jnp.where(y <= 0.0, a, jnp.where(y >= width, b + 0.0 * a, inside))
+
+
+def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
+    """C1 max(a, b): ``-smooth_min_c1(-a, -b, width)``; ``width = 0`` is ``jnp.maximum``."""
+    if width == 0:
+        return jnp.maximum(a, b)
+    return -smooth_min_c1(-a, -b, width)
+
+
+def max_c1(a: jax.Array, b: jax.Array, sharpness: float) -> jax.Array:
+    """C1 ``max(a, b)`` that is EXACTLY ``a`` for ``a - b >= 1/s`` and ``b`` for ``a <= b``.
+
+    ``b + positive_part_c1(a - b, s)`` inside the band ``0 < a - b < 1/s``;
+    outside it the hard operand is returned unchanged (bitwise), so a floor
+    or cap that is inactive by more than ``1/s`` costs nothing.  Never above
+    ``max(a, b)``.  Exactly ``jnp.maximum`` at ``sharpness = inf``.
+    """
+    if _hard(sharpness):
+        return jnp.maximum(a, b)
+    d = a - b
+    return jnp.where(d * sharpness >= 1.0, a, b + positive_part_c1(d, sharpness))
+
+
+def min_c1(a: jax.Array, b: jax.Array, sharpness: float) -> jax.Array:
+    """C1 ``min(a, b)``, exact outside the band ``0 < b - a < 1/s``: ``-max_c1(-a, -b, s)``."""
+    if _hard(sharpness):
+        return jnp.minimum(a, b)
+    return -max_c1(-a, -b, sharpness)
 
 
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:

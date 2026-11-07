@@ -46,6 +46,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     lat_ends_are_poles,  # noqa: F401 — re-export for ocean dynamics call sites
     pad_ns_scalar,
     fold_row,
+    fold_perm_f,
     fold_ghost_source_T,
     pad_ns_vector_v,
     pad_lon_cgrid,
@@ -4293,6 +4294,97 @@ def compute_face_masks_3d(
     return u_mask, v_mask
 
 
+def per_level_viscosity_masks(
+    is_active_3d: jnp.ndarray,
+    grid,
+    mask: jnp.ndarray | None,
+    u_mask: jnp.ndarray | None,
+    v_mask: jnp.ndarray | None,
+    vertex_mask: jnp.ndarray | None,
+    dtype,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Per-level cell / u-face / v-face / vertex masks for the vector Laplacian.
+
+    NEMO builds its momentum masks level by level from the 3-D tmask
+    (dommsk.F90:148-153): ``umask = tmask*tmask(i+1)``, ``vmask =
+    tmask*tmask(j+1)`` and the free-slip ``fmask`` = product of the four
+    surrounding T cells, all at level k.  Each level here is built the same
+    way from ``is_active_3d`` (neighbour cells through the backend pads, so
+    MPI partition cuts see the neighbour rank's cells; ``compute_vertex_mask``
+    on the 3-D mask for the vertices), then multiplied by
+    the caller's 2-D masks broadcast over levels, so a face or vertex the
+    caller closes (fold wall, seam, partition cut) stays closed at every
+    level.  Returns ``(mask3, u_mask3, v_mask3, vertex_mask3)`` with a
+    trailing level axis, in ``dtype``.
+    """
+    from legoesm.grids.halo_latlon import (
+        get_meridionally_flat, get_meridionally_periodic, pad_with_pole_bc_lat)
+    cell = jnp.asarray(is_active_3d).astype(dtype)
+    if mask is not None:
+        cell = cell * jnp.asarray(mask, dtype)[..., jnp.newaxis]
+
+    # Neighbour cells through the backend-dispatched pads (as in
+    # compute_vertex_mask), all levels in one pad: a face on an MPI partition
+    # cut sees the neighbour rank's true edge cell instead of a zero.
+    lon = pad_lon_cgrid(cell, halo=1)                         # (n_lat, n_lon+2, nlev)
+    lat = pad_with_pole_bc_lat(cell, halo=1, south_value=0.0, north_value=0.0)
+    um3, vm3 = lon[:, :-1] * lon[:, 1:], lat[:-1] * lat[1:]
+    if get_meridionally_periodic() or get_meridionally_flat():
+        # y-re-entrant boundary v-faces wrap; compute_face_masks_3d owns that.
+        vm3 = compute_face_masks_3d(cell, grid)[1]
+    um3 = um3.astype(dtype)
+    vm3 = vm3.astype(dtype)
+    if u_mask is not None:
+        um3 = um3 * jnp.asarray(u_mask, dtype)[..., jnp.newaxis]
+    if v_mask is not None:
+        vm3 = vm3 * jnp.asarray(v_mask, dtype)[..., jnp.newaxis]
+    vx3 = compute_vertex_mask(cell, grid=grid).astype(dtype)
+    if vertex_mask is not None:
+        vx3 = vx3 * jnp.asarray(vertex_mask, dtype)[..., jnp.newaxis]
+    return cell, um3, vm3, vx3
+
+
+def nemo_shlat_vertex_mask(
+    vertex_mask: jnp.ndarray,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+    shlat: float,
+    grid=None,
+) -> jnp.ndarray:
+    """NEMO's f-mask with the lateral momentum boundary condition rn_shlat.
+
+    dommsk.F90:209-215: where the free-slip f-mask is 0,
+    ``fmask = rn_shlat * MIN(1, MAX(umask(i,j), umask(i,j+1), vmask(i,j),
+    vmask(i+1,j)))`` -- a coastal vorticity point next to any wet face takes
+    rn_shlat (0 free slip, 2 no slip).  NEMO f(i,j) is vertex [j+1, i+1] here,
+    so its four faces are u[r-1, c], u[r, c], v[r, c-1], v[r, c].  The
+    neighbours come through the backend-dispatched pads (MPI cuts see the
+    neighbour rank).  As NEMO's lbc_lnk(fmask, 'F') after the change, a
+    tripolar fold row is then re-filled from its fold partners (the same
+    mapping compute_vertex_mask uses).  Masks are static geometry, so the hard
+    MAX/MIN carry no gradient.  2-D or per-level (trailing level axis) masks.
+    Rows at a physical (non-fold) latitude end stay as the vector Laplacian
+    treats them: the curl is zero on those wall rows, so no rn_shlat stress
+    reaches a wet cell in the array's first or last row.
+    """
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    vx = jnp.asarray(vertex_mask)
+    u_pad = pad_with_pole_bc_lat(jnp.asarray(u_mask, vx.dtype), halo=1,
+                                 south_value=0.0, north_value=0.0)
+    v_pad = pad_lon_cgrid(jnp.asarray(v_mask, vx.dtype), halo=1)
+    adj = jnp.maximum(jnp.maximum(u_pad[:-1], u_pad[1:]),
+                      jnp.maximum(v_pad[:, :-1], v_pad[:, 1:]))
+    coast = jnp.asarray(shlat, vx.dtype) * jnp.minimum(adj, 1.0)
+    full = jnp.where(vx == 0.0, coast, vx)
+    nmask = north_fold_mask(grid)
+    if grid is not None and (fold_is_local(grid) or nmask is not None):
+        fold = grid.fold
+        north = fold_row(full[-2:-1], fold_perm_f(fold), 1.0,
+                         fold.perm_T.shape[0])
+        full = apply_north_fold(full, north, grid, north_mask=nmask)
+    return full
+
+
 def _nemo_hpg_sco_literal_cgrid_impl(
     rhd: jnp.ndarray,
     e3w: jnp.ndarray,
@@ -4336,7 +4428,6 @@ def _nemo_hpg_sco_literal_cgrid_impl(
 
     rhd_i1 = jnp.roll(rhd, -1, axis=1)
     rhd_j1 = jnp.roll(rhd, -1, axis=0)
-    fold = getattr(grid, "fold", None)
     if _north_fold_density:
         # dynhpg.f90:414-416,445-453 reads jj+1 at V points.  At NEMO's
         # northern fold that neighbour is the T-point fold ghost supplied by
@@ -5558,6 +5649,40 @@ def pv_flux_al81_partial_cell(
         t_NW = sr(sr(q_SW + q_NW) + q_NE)
         t_SE = sr(sr(q_NE + q_SE) + q_SW)
         t_SW = sr(sr(q_SE + q_SW) + q_NW)
+    # The stored top V row of a T-pivot ORCA mesh is an owned vector row, not
+    # a physical pole wall.  Its northern cell is supplied by ``lbc_lnk``'s
+    # fold halo.  Keep that one halo explicit for the V update below: its F
+    # corners are the ordinary F-fold image and its U transports are the
+    # signed U-fold image.  The default remains a zero pole halo.
+    _north_t = None
+    if north_fold_grid is not None:
+        _fold = getattr(north_fold_grid, "fold", None)
+        if _fold is None or not bool(getattr(_fold, "is_active", False)):
+            raise ValueError("north_fold_grid needs an active north fold")
+        from legoesm.grids.operators_latlon_cgrid import fold_perm_f
+        _src = -3 if bool(getattr(_fold, "pivot_row_stored", False)) else -2
+        # q's column 0 is the cyclic copy of native F column n; native
+        # columns live in [1:].  Fold in that native layout, then restore the
+        # west cyclic copy.  Folding ``q[:, :n]`` shifts the reflected row by
+        # two native columns (one on each side of the reflection).
+        _q_n_native = q[_src, 1:][fold_perm_f(_fold)]
+        _q_n = jnp.concatenate([_q_n_native[-1:], _q_n_native])
+        _q_sw, _q_se = q[-1, :-1], q[-1, 1:]
+        _q_nw, _q_ne = _q_n[:-1], _q_n[1:]
+        if written_order:
+            _north_t = (
+                sr(sr(_q_sw + _q_nw) + _q_ne),
+                sr(sr(_q_nw + _q_ne) + _q_se),
+                sr(sr(_q_se + _q_sw) + _q_nw),
+                sr(sr(_q_ne + _q_se) + _q_sw),
+            )
+        else:
+            _north_t = (
+                inv12 * (_q_nw + _q_sw + _q_ne),
+                inv12 * (_q_ne + _q_se + _q_nw),
+                inv12 * (_q_sw + _q_se + _q_nw),
+                inv12 * (_q_se + _q_sw + _q_ne),
+            )
 
     # The stored top V row of a T-pivot ORCA mesh is an owned vector row, not
     # a physical pole wall.  Its northern cell is supplied by ``lbc_lnk``'s

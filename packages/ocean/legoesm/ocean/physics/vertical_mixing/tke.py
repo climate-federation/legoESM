@@ -262,8 +262,8 @@ def _mxl0_surface_anchor(
         zraug = _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)
         # CASE( 2 ): zmxlm(1) = ((1-fr_i)*zraug*taum + fr_i*hm_i*2)*tmask(1),
         # then MAX(rn_mxl0, zmxlm(1)) (zdftke.f90:620-623, :635-637)
-        raw = (((1.0 - fr_i) * zraug * taum + fr_i * hm_i * 2.0)
-               * jnp.asarray(surface_tmask, dtype=taum.dtype))
+        raw = _nemo_mxlice2_anchor_raw(
+            fr_i, hm_i, taum, zraug, surface_tmask)
         return jnp.maximum(
             jnp.asarray(_mxl0_anchor_floor(cfg), dtype=taum.dtype), raw)
     if not cfg.nemo_mxl0_surface_tmask:
@@ -1358,11 +1358,12 @@ def _solve_tke_backward_euler(
         so this was never a correctness bug, just a BC that didn't fire at
         the physically correct row). ``bottom_level`` supplied (T15-exact):
         the Dirichlet row is scattered to interior interface
-        ``bottom_level`` PER COLUMN (NEMO's ``mbkt+1`` — interface
+        ``bottom_level`` PER COLUMN when ``bottom_level < N`` (NEMO's
+        ``mbkt+1 <= jpkm1`` — interface
         ``bottom_level`` sits between T-cells ``bottom_level`` and
         ``bottom_level+1`` in legoESM's 0-based indexing, exactly ``mbkt``'s
-        seafloor cell), clamped to ``[0, N-1]`` (N = number of carried
-        interfaces) so a dry/degenerate column cannot index out of bounds.
+        seafloor cell). A full-depth ``bottom_level == N`` maps to NEMO's
+        held ``jpk`` row and is therefore not scattered into the solve.
         ``None`` (default) ⇒ BIT-IDENTICAL (the ``[..., -1]`` pin above).
 
     w_active : (..., nlev-1) or None — NEMO's ``wmask`` at the interior
@@ -1803,10 +1804,10 @@ def _solve_tke_backward_euler(
         # NEMO bottom TKE BC (zdftke.F90:279-288): en(mbkt+1) =
         # MAX(0.001875·CdU_bot·|u_bot|, rn_emin)*ssmask, set the SAME way as
         # the surface value (a plain identity row — NEMO solves the
-        # tridiagonal only from jk=2 to jpkm1, so the bottom row jpk is
-        # ALSO held, not coupled). Held AFTER the diffusion assembly so the
-        # pinned row's super/sub-diagonal entries are zeroed too (no
-        # leftover coupling into a row now pinned).
+        # tridiagonal only from jk=2 to jpkm1. Thus an in-range shallower
+        # bottom is an identity row, while a full-depth jpk boundary remains
+        # outside the solve). Applied AFTER diffusion assembly so an in-range
+        # pinned row has no leftover coupling.
         _e_bd = jnp.asarray(bottom_dirichlet, dtype=e_old.dtype)
         if bottom_level is None:
             # BIT-IDENTICAL legacy: unconditional pin at the array's last
@@ -1815,15 +1816,18 @@ def _solve_tke_backward_euler(
             diag = diag.at[..., -1].set(1.0)
             rhs = rhs.at[..., -1].set(_e_bd)
         else:
-            # T15-exact: scatter the pin to the PER-COLUMN seafloor
-            # interface (NEMO's mbkt), clamped into range so a dry column
-            # cannot index out of bounds. take/put_along_axis over the last
-            # (interface) axis — differentiable (pure gather/scatter, no
-            # data-dependent control flow).
+            # T15-exact: scatter the pin to the PER-COLUMN seafloor interface
+            # only when NEMO's mbkt+1 lies inside its solved 2:jpkm1 rows.
+            # Full-depth mbkt+1=jpk is a held row outside this carried array;
+            # clamping it onto N-1 would replace NEMO's last solved row by an
+            # identity equation. take/put_along_axis over the last axis stays
+            # differentiable (pure gather/scatter, no data-dependent control
+            # flow).
             N = e_old.shape[-1]
-            idx = jnp.clip(
-                jnp.asarray(bottom_level), 0, N - 1)[..., jnp.newaxis]
-            is_bottom = jnp.arange(N) == idx    # (..., N) one-hot per column
+            raw_idx = jnp.asarray(bottom_level)
+            idx = jnp.clip(raw_idx, 0, N - 1)[..., jnp.newaxis]
+            in_solve = ((raw_idx >= 0) & (raw_idx < N))[..., jnp.newaxis]
+            is_bottom = (jnp.arange(N) == idx) & in_solve
             a_diff = jnp.where(is_bottom, 0.0, a_diff)
             c_diff = jnp.where(is_bottom, 0.0, c_diff)
             diag = jnp.where(is_bottom, 1.0, diag)
@@ -2034,6 +2038,8 @@ def _prandtl_number(
     kappaM: jnp.ndarray,
     cfg: TKEConfig,
     p_sh2_override: jnp.ndarray | None = None,
+    *,
+    return_pdlr: bool = False,
 ) -> jnp.ndarray:
     r"""Turbulent Prandtl number for the K_H = K_M / Pr relation.
 
@@ -2093,6 +2099,9 @@ def _prandtl_number(
 
     Differentiable; the ``min``/``max`` clamps are sub-gradient-safe and
     the ``6.6`` / ``1`` / ``10`` are Veros's fixed scheme constants.
+    ``return_pdlr=True`` is the NEMO step-entry source form used by
+    :func:`compute_K_from_tke`; the default reciprocal preserves every other
+    caller's established Prandtl-number API.
     """
     if cfg.prandtl_mode == "constant":
         return jnp.full_like(kappaM, cfg.Prandtl_tke0)
@@ -2163,7 +2172,7 @@ def _prandtl_number(
         if cfg.tke_n2_evaluation_stage == "step_entry":
             ri_cri = jnp.asarray(1.0 / cfg.prandtl_ri_coeff, dtype=N2.dtype)
             pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))  # coeff-ok: NEMO zdfric pdlr floor
-            return 1.0 / pdlr
+            return pdlr if return_pdlr else 1.0 / pdlr
         return jnp.maximum(
             1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * zri))
     raise ValueError(
@@ -2294,11 +2303,16 @@ def compute_K_from_tke(
                 f"got {_K_M_pr.shape} vs {K_M.shape}.")
         _p_sh2_pr = (None if p_sh2_override is None
                      else p_sh2_override(_K_M_pr))
-        Pr = _prandtl_number(_N2_pr, shear_sq, _K_M_pr, cfg, _p_sh2_pr)
+        _nemo_literal_pdlr = (
+            cfg.prandtl_mode == "nemo_ri"
+            and cfg.tke_n2_evaluation_stage == "step_entry")
+        Pr_or_pdlr = _prandtl_number(
+            _N2_pr, shear_sq, _K_M_pr, cfg, _p_sh2_pr,
+            return_pdlr=_nemo_literal_pdlr)
         # Tracer floor is INDEPENDENT of the momentum floor (NEMO zdftke:
         # avt = max(avtb, pdlr*zav), avm = max(avmb, zav), both from the raw K).
-        # Divide the ceilinged-but-UN-kappaM_min-floored K_M by Pr, then floor at
-        # kappaH_min — else the momentum floor kappaM_min leaks into the tracer
+        # Apply the Prandtl ratio to the ceilinged-but-UN-kappaM_min-floored
+        # K_M, then floor at kappaH_min — else the momentum floor kappaM_min leaks into the tracer
         # floor (K_H -> kappaM_min/Pr > kappaH_min) in quiescent cells where the
         # raw K < kappaM_min (the abyss). Only those cells change; active/interior
         # cells (raw K >= kappaM_min) are unaffected, so the verified avt match
@@ -2306,7 +2320,13 @@ def compute_K_from_tke(
         # ONLY when the Bryan-Lewis profile below is off (enable_kappaH_profile=
         # False, as the NEMO recipe sets for NEMO's constant avtb); with BL on the
         # BL depth floor becomes the binding deep floor instead.
-        K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)
+        if _nemo_literal_pdlr:
+            # NEMO updates avt with ``p_pdlr * p_avt`` (zdftke.f90:717),
+            # not division by the reciprocal Pr.  XLA happened to rewrite
+            # the old division under JIT, hiding the eager one-ULP mismatch.
+            K_H = jnp.maximum(cfg.kappaH_min, Pr_or_pdlr * K_M)
+        else:
+            K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr_or_pdlr)
         # Bryan-Lewis (1979) arctan depth floor on K_H (Veros
         # enable_kappaH_profile). Previously recorded-but-ignored; now wired
         # on the opt-in Prandtl path. Low impact in shallow domains; raises
@@ -2685,18 +2705,6 @@ def _nemo_glibc234_vector_sin(argument: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(ordinary, literal, jnp.sin(argument))
 
 
-def _require_libm_policy(field: str) -> None:
-    """'nemo_scalar_libm' promises NEMO's scalar libm; the native policy
-    would silently substitute XLA's own sin/exp."""
-    from legoesm.core.precision import get_policy
-
-    if get_policy().transcendentals != "libm":
-        raise ValueError(
-            f"TKEConfig.{field}='nemo_scalar_libm' requires the precision "
-            "policy's transcendentals='libm'; got "
-            f"{get_policy().transcendentals!r}")
-
-
 def _nemo_etau_htau(
     lat_deg: jnp.ndarray,
     cfg: TKEConfig,
@@ -2717,7 +2725,10 @@ def _nemo_etau_htau(
         if evaluation == "nemo_literal":
             sine = _nemo_glibc234_vector_sin(phase)
         else:
-            _require_libm_policy("tke_htau_evaluation")
+            # Historical selector name: the active precision policy owns the
+            # transcendental backend.  Exact cards select scalar libm; the
+            # fast-literal card selects native XLA.  Phase construction and
+            # all surrounding NEMO operation-order barriers are identical.
             sine = precision_sin(phase)
     else:
         raise ValueError(
@@ -2793,7 +2804,8 @@ def nemo_etau_injection(
     if exp_evaluation == "jax_expression":
         profile = jnp.exp(-depth_w / htau)
     elif exp_evaluation == "nemo_scalar_libm":
-        _require_libm_policy("tke_etau_exponential_evaluation")
+        # As for htau, exact and fast-literal modes share this written
+        # expression and differ only in the policy-dispatched EXP rounding.
         profile = precision_exp(-depth_w / htau)
     else:  # validated above
         profile = _nemo_glibc234_vector_exp(-depth_w / htau)
@@ -2910,12 +2922,15 @@ def tke_vertical_mixing(
     bottom_dirichlet : (...,) or None — NEMO bottom TKE BC value (T15;
         :func:`nemo_bottom_tke_dirichlet`), held at the DEEPEST carried
         interface (or, when ``bottom_level`` is also given, at the
-        PER-COLUMN seafloor interface — T15-exact). REQUIRED when
+        PER-COLUMN seafloor interface when that row is inside NEMO's solve —
+        T15-exact). REQUIRED when
         ``cfg.bottom_tke_bc=True`` (raises otherwise — the gate has no
         meaning without a value); ignored (and must be None) when the gate
         is off.
     bottom_level : (...,) int or None — per-column T-point bottom-cell
-        index (:class:`OceanPartialCellCoordinate.bottom_level`). None
+        index (:class:`OceanPartialCellCoordinate.bottom_level`). A full-depth
+        column has ``bottom_level == nlev-1``; its NEMO boundary is the held
+        ``jpk`` row outside the carried ``2:jpkm1`` solve. None
         (default, BIT-IDENTICAL) ⇒ ``bottom_dirichlet`` pins the array's
         last interface unconditionally (exact on a flat-bottom column,
         the historical behaviour). Ignored when ``bottom_dirichlet`` is
@@ -4199,6 +4214,16 @@ def tke_integrate_post_mixing(
     # Veros surface clamp (tke.py:238-244) acts on the (discarded) surface
     # row; the carried interior stays UNFLOORED (energy debt allowed).
     return e_new_w[..., 1:]
+
+
+def _nemo_mxlice2_anchor_raw(fr_i, hm_i, taum, zraug, surface_tmask):
+    """Materialize zdftke CASE(2) source operations under production JIT."""
+    open_water = nemo_source_round(
+        nemo_source_round(nemo_source_round(1.0 - fr_i) * zraug) * taum)
+    ice = nemo_source_round(nemo_source_round(fr_i * hm_i) * 2.0)
+    return nemo_source_round(
+        nemo_source_round(open_water + ice)
+        * jnp.asarray(surface_tmask, dtype=taum.dtype))
 
 
 __all__ = (

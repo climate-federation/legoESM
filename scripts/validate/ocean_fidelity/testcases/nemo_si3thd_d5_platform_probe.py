@@ -11,7 +11,7 @@ Evaluates on the active JAX backend (CPU or GPU, under ``JAX_ENABLE_X64=1`` and
    recorded C1D ``h_s_1d`` operand across all subnormal-snow steps
    (``kt = 5842..5867``).
 3. Stage C -- Exact compiled ZDF (``_si3_zdf_bl99_step`` and full-step
-   ``si3_column_step_arrays``) outputs on the recorded operands at ``kt = 5841``,
+   ``si3_lane_column_step_arrays``) outputs on the recorded operands at ``kt = 5841``,
    ``kt = 5842``, ``kt = 5860`` (the Phase 6 ``0.02510099530281747`` row), and
    ``kt = 5867``, plus all 26 subnormal-snow steps before and after the
    selectable ``_nemo_zdf_layer_reciprocals`` statement fix.
@@ -51,11 +51,11 @@ from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ice.bitz_lipscomb import (
     SI3SurfaceForcing,
     # _si3_zdf_bl99_step moved to phase2 gate in DECISION 186
-    ice_temperature_from_enthalpy,
-    si3_column_step_arrays,
-    snow_temperature_from_enthalpy,
+    _si3_502_ice_temperature_from_enthalpy,
+    si3_lane_column_step_arrays,
+    _si3_502_snow_temperature_from_enthalpy,
 )
-from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_si3_lane_card
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 TESTCASES_DIR = Path(__file__).resolve().parent
@@ -421,7 +421,7 @@ def run_step1_reviewer_reproduction(
        - Step 2 + Step 3 model statement: ``(e_s / v_s) * 3.0`` +
          ``icevar.F90:412-413`` (``7,385`` of ``7,385`` snow steps at 0 ULP).
     2. Recorded ZDF-entry ice temperature (``exact["t_i"]``) and layer salinity
-       (``frames[1]["sz_i"]``) vs Step 2 harness + ``ice_temperature_from_enthalpy``
+       (``frames[1]["sz_i"]``) vs Step 2 harness + ``_si3_502_ice_temperature_from_enthalpy``
        (``8,760`` of ``8,760`` steps at 0 ULP).
     3. ``POST_ZDF`` (``t_su``, ``e_i``, ``e_s`` across the ``8,734`` normal
        steps = ``26,202`` rows) under:
@@ -429,7 +429,7 @@ def run_step1_reviewer_reproduction(
        - NEMO-exact ZDF inputs without source rounding (``_nemo_entry_conversion=True, _nemo_glo2eqv_snow_temp=True, _nemo_source_round=False``)
        - NEMO-exact ZDF inputs with Step 4 ``nemo_source_round`` (``_nemo_entry_conversion=True, _nemo_glo2eqv_snow_temp=True, _nemo_source_round=True``)
     """
-    card = build_c1d_omip_l3_card(oracle_root=oracle_dir)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=oracle_dir)
     c = card.config.ice_constants
     nsteps = card.nsteps if max_steps is None else min(int(max_steps), card.nsteps)
     thd_path = oracle_dir / "oracle_si3_thd_frames.bin"
@@ -482,7 +482,7 @@ def run_step1_reviewer_reproduction(
     )
 
     ts_r2_fn = jax.jit(
-        lambda es: snow_temperature_from_enthalpy(
+        lambda es: _si3_502_snow_temperature_from_enthalpy(
             es,
             c,
             _nemo_order=True,
@@ -491,7 +491,7 @@ def run_step1_reviewer_reproduction(
         )
     )
     ts_s2_s3_fn = jax.jit(
-        lambda es: snow_temperature_from_enthalpy(
+        lambda es: _si3_502_snow_temperature_from_enthalpy(
             es,
             c,
             _nemo_order=True,
@@ -810,7 +810,7 @@ def run_year_rescore(
     use_jit: bool = True,
 ) -> dict:
     """Stage D: full 8,760-step C1D exact-entry operator sweep across Round 2 & Round 3 arms."""
-    card = build_c1d_omip_l3_card(oracle_root=oracle_dir)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=oracle_dir)
     nsteps = card.nsteps if max_steps is None else min(int(max_steps), card.nsteps)
     thd_path = oracle_dir / "oracle_si3_thd_frames.bin"
     zin_path = oracle_dir / "oracle_si3_zdf_inputs.bin"
@@ -1911,7 +1911,7 @@ def run_probe(
         plant_zero_input=(plant == "zero_subnormal_input")
     )
 
-    card = build_c1d_omip_l3_card(oracle_root=oracle_dir)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=oracle_dir)
     thd_path = oracle_dir / "oracle_si3_thd_frames.bin"
     zin_path = oracle_dir / "oracle_si3_zdf_inputs.bin"
 

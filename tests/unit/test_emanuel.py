@@ -147,7 +147,7 @@ def test_emanuel_downdraught_on_by_default():
 
 @pytest.mark.parametrize("override", [
     dict(use_genuine_mixing=False), dict(n_mixing_fractions=4),
-    dict(cu_coefficient=0.9), dict(delta_0=3e-4), dict(epsilon_0=1e-3),
+    dict(delta_0=3e-4), dict(epsilon_0=1e-3),
     dict(smooth_trigger_sharpness=1.0), dict(parcel_perturb_T=0.0),
     dict(parcel_perturb_q=0.0), dict(precip_efficiency_water=0.5),
     dict(precip_efficiency_lcl=0.1), dict(mse_min_search_offset=4e4),

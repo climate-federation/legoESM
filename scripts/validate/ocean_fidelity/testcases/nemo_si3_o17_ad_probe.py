@@ -100,7 +100,7 @@ RUNG_SPECS: tuple[dict[str, Any], ...] = (
     {
         "k": 2,
         "name": "o5_aevp",
-        "funcs": ("si3_orca2_aevp_solver", "si3_cgrid_deformation"),
+        "funcs": ("si3_orca2_aevp_solver", "si3_lane_cgrid_deformation"),
         "description": "O5 100-subcycle aEVP rheology solver and C-grid deformation",
     },
     {

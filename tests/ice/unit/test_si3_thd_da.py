@@ -500,10 +500,10 @@ def _production_case():
         option2_salinity_profile,
         snow_enthalpy_from_temperature,
     )
-    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_si3_lane_card
     from legoesm.ice.state import SI3ColumnState
 
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_si3_lane_card()
     n = len(PROD_CELLS)
     a, hs, sst = (np.array(col, dtype=np.float64) for col in zip(*PROD_CELLS, strict=True))
     hi = np.random.default_rng(18).uniform(0.3, 3.0, n)
@@ -544,18 +544,22 @@ def _lateral_melt_config(card, beta, dmin):
 def _dispatch(config, state, forcing, dt, traced=False):
     """Jitted step_sea_ice; ``traced`` passes &namthd_da as jit arguments (training override)."""
     from legoesm.ice.config import SI3LateralMeltConfig
-    from legoesm.ice.sea_ice import step_sea_ice
+    from legoesm.ice.sea_ice import step_sea_ice_si3_lane
 
     cpu = jax.devices("cpu")[0]
     z = jnp.zeros(state.concentration.data.shape)
     state, forcing = jax.device_put((state, forcing), cpu)
     if not traced:
-        out, _ = jax.jit(lambda s, f: step_sea_ice(s, f, z, z, z, config, 1.0, dt))(state, forcing)
+        out, _ = jax.jit(
+            lambda s, f: step_sea_ice_si3_lane(s, f, z, z, z, config, 1.0, dt)
+        )(state, forcing)
         return out
 
     def step(s, f, beta, dmin):
         si3 = config.si3._replace(namthd_da=SI3LateralMeltConfig(rn_beta=beta, rn_dmin=dmin))
-        return step_sea_ice(s, f, z, z, z, config._replace(si3=si3), 1.0, dt)[0]
+        return step_sea_ice_si3_lane(
+            s, f, z, z, z, config._replace(si3=si3), 1.0, dt
+        )[0]
 
     nam = config.si3.namthd_da
     return jax.jit(step)(state, forcing, jnp.float64(nam.rn_beta), jnp.float64(nam.rn_dmin))
@@ -563,11 +567,14 @@ def _dispatch(config, state, forcing, dt, traced=False):
 
 def _production_expected(card, state, forcing, beta, dmin):
     """Oracle ice_thd_da on the column's post-ice_thd_temp state, then non-cooling ice_thd_do."""
-    from legoesm.ice.bitz_lipscomb import SI3ColumnArrays, si3_column_step_arrays
+    from legoesm.ice.bitz_lipscomb import SI3ColumnArrays, si3_lane_column_step_arrays
 
     arrays = SI3ColumnArrays(*(f.data for f in state))
-    pre = jax.jit(lambda s, f: si3_column_step_arrays(s, f, card.dt_seconds, ICE, si3=card.config.si3))(
-        *jax.device_put((arrays, forcing), jax.devices("cpu")[0])).post_temp2
+    pre = jax.jit(
+        lambda s, f: si3_lane_column_step_arrays(
+            s, f, card.dt_seconds, ICE, si3=card.config.si3
+        )
+    )(*jax.device_put((arrays, forcing), jax.devices("cpu")[0])).post_temp2
     pre = jax.tree.map(np.asarray, pre)
     entry_a = np.asarray(state.concentration.data)
     want = {"concentration": [], "h_ice": [], "h_snow": []}
@@ -605,6 +612,50 @@ def test_d5_card_keeps_lateral_melt_off():
     on = _dispatch(_lateral_melt_config(card, *_deck()), state, forcing, card.dt_seconds)
     off = _dispatch(card.config, state, forcing, card.dt_seconds)
     assert not np.array_equal(_bits(on.concentration.data), _bits(off.concentration.data))
+
+
+def test_lane_validator_resolves_namelist_ice_ref_lateral_melt_defaults():
+    from legoesm.ice.config import (
+        SI3LateralMeltConfig,
+        validate_si3_lane_thermo_config,
+    )
+
+    card, state, forcing = _production_case()
+    beta, dmin = _deck()
+    unresolved = card.config._replace(
+        si3=card.config.si3._replace(lateral_melt=True)
+    )
+    resolved = validate_si3_lane_thermo_config(unresolved)
+    assert resolved.si3.namthd_da == SI3LateralMeltConfig(
+        rn_beta=beta,
+        rn_dmin=dmin,
+    )
+    explicit = _lateral_melt_config(card, beta, dmin)
+    assert validate_si3_lane_thermo_config(explicit) == explicit
+    resolved_out = _dispatch(unresolved, state, forcing, card.dt_seconds)
+    explicit_out = _dispatch(explicit, state, forcing, card.dt_seconds)
+    for resolved_field, explicit_field in zip(resolved_out, explicit_out, strict=True):
+        assert np.array_equal(_bits(resolved_field.data), _bits(explicit_field.data))
+
+
+def test_lane_validator_ignores_namthd_da_when_lateral_melt_is_off():
+    from legoesm.ice.config import (
+        SI3LateralMeltConfig,
+        validate_si3_lane_thermo_config,
+    )
+
+    card, state, forcing = _production_case()
+    beta, dmin = _deck()
+    supplied = card.config._replace(
+        si3=card.config.si3._replace(
+            namthd_da=SI3LateralMeltConfig(rn_beta=beta, rn_dmin=dmin)
+        )
+    )
+    assert validate_si3_lane_thermo_config(supplied) == card.config
+    supplied_out = _dispatch(supplied, state, forcing, card.dt_seconds)
+    missing_out = _dispatch(card.config, state, forcing, card.dt_seconds)
+    for supplied_field, missing_field in zip(supplied_out, missing_out, strict=True):
+        assert np.array_equal(_bits(supplied_field.data), _bits(missing_field.data))
 
 
 @pytest.mark.parametrize(

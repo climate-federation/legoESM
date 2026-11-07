@@ -906,12 +906,22 @@ class DiagnosticCollector:
                           0.0, 1.0)
         return f_land * T_2m_land + (1.0 - f_land) * T_2m_sea
 
+    def _cloud_config_for(self, cloud_fraction):
+        """The collector's cloud config, with the cloud-fraction override over
+        the WHOLE column when an advected prognostic fraction (IFS CLOUDSC)
+        is handed in, as radiation applies it (votes VC24, VC40)."""
+        if (cloud_fraction is None
+                or getattr(self._cloud_config, "scheme", None) == "cam6_clubb"):
+            return self._cloud_config
+        return self._cloud_config._replace(clubb_cf_override_p_min_pa=0.0)
+
     def _cam6_cloud_kwargs(self, cloud_fraction, conv_mass_flux_up,
                            conv_icwmr, lat_deg, p_s, ncol, nlev):
         """Extra ``compute_cloud_properties`` kwargs for cloud_scheme
         'cam6_clubb': the CLUBB cloud fraction + deep-convection carries, lat
-        [rad] and interface pressures.  Empty (byte-identical call) for every
-        other scheme; a cam6 run without the carry raises here rather than
+        [rad] and interface pressures.  For any other scheme: the advected
+        IFS cloud fraction as the override when one is handed in (VC40), else
+        empty (byte-identical call); a cam6 run without the carry raises here rather than
         silently scoring an RH cloud cover the radiation never used.
 
         SAMPLING: the carry handed in is the one written by THIS step's
@@ -922,7 +932,13 @@ class DiagnosticCollector:
         what radiation integrated -- the same convention the conv_precip
         convective cover and the RH schemes' clt already follow."""
         if getattr(self._cloud_config, "scheme", None) != "cam6_clubb":
-            return {}
+            if cloud_fraction is None:
+                return {}
+            # IFS CLOUDSC's advected cloud fraction (vote VC40), applied
+            # over the whole column as radiation applies it (VC24, see
+            # _cloud_config_for)
+            return dict(cloud_fraction_override=jnp.reshape(
+                jnp.asarray(cloud_fraction), (ncol, nlev)))
         if (cloud_fraction is None or conv_mass_flux_up is None
                 or conv_icwmr is None or lat_deg is None):
             raise ValueError(
@@ -999,7 +1015,7 @@ class DiagnosticCollector:
             p_full,
             jnp.reshape(q_v, (ncol, nlev)),
             dp,
-            self._cloud_config,
+            self._cloud_config_for(cloud_fraction),
             q_cloud=jnp.reshape(q_c, (ncol, nlev)),
             q_ice=q_ice_col,
             **self._cam6_cloud_kwargs(
@@ -2160,7 +2176,7 @@ class DiagnosticCollector:
                 )
                 _p_full_cl = jnp.asarray(self._p_full(p_s_np))
                 _dp_cl = jnp.asarray(self._dp(p_s_np))
-                _mass_cfg = self._cloud_config._replace(
+                _mass_cfg = self._cloud_config_for(cloud_fraction)._replace(
                     cloud_optics_inhomogeneity="constant",
                     cloud_inhomogeneity_factor=1.0,
                     cloud_partial_coverage_optics="none",

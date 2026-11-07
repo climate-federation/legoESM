@@ -17,7 +17,7 @@ import netCDF4
 import numpy as np
 from legoesm.core.precision import PrecisionPolicy, get_policy
 from legoesm.ice.dynamics import si3_cgrid_aevp_solver
-from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as recipe
+from legoesm.ice.fidelity import nemo_rheo_testcase_recipe_lane as recipe
 from legoesm.ice.transport import (
     SI3_PRATHER_MOMENT_NAMES,
     advect_si3_prather_2d,
@@ -434,7 +434,7 @@ def run_replay(
         },
         "between_advection_moment_handling": {
             "status": "EXACTLY-UNCHANGED",
-            "source": "nemo_rheo_testcase_recipe.py:646-704",
+            "source": "nemo_rheo_testcase_recipe_lane.py:646-704",
             "input_transport_moment_sha256": input_moment_hash,
         },
         "plant": {

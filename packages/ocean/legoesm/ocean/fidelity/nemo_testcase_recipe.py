@@ -36,9 +36,8 @@ from legoesm.ocean.physics.convection.config import (
     OceanConvectionConfig,
 )
 from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConfig
-from legoesm.ocean.state import LatLonCGridOceanConfig
+from legoesm.ocean.state import ENSVorticityConfig, LatLonCGridOceanConfig
 from legoesm.ocean.sponge import SpongeForcing
-from legoesm.ocean.state import ENSVorticityConfig
 from legoesm.ocean.vertical import (
     NemoEENBarotropicOperands,
     nemo_fe3mask_from_tmask,
@@ -81,6 +80,21 @@ class NEMOTestcaseCard(NamedTuple):
     # leave this unset until their own deck audit is promoted; SWG and GYRE
     # require it at their public validation boundary.
     resolved_namelist: object | None = None
+
+
+class GYRERouting(NamedTuple):
+    """The four explicit routing choices on a resolved GYRE card."""
+
+    tke_shear_step_entry_ssh: bool
+    qsr_kbb_live_stretch: bool
+    qsr_kmm_source_association: bool
+    vmix_eos_use_config_rho0: bool
+
+
+GYRE_MAIN_ROUTING = GYRERouting(True, True, True, True)
+GYRE_LANE_CERTIFIED_ROUTING = GYRERouting(False, False, False, False)
+# DECISION 191 (user, 2026-10-31): the shipped GYRE card keeps main's routing.
+GYRE_CARD_ROUTING = GYRE_MAIN_ROUTING
 
 
 class GyreResolvedNamelist(NamedTuple):
@@ -635,6 +649,9 @@ def _model_config(
             # stage.  On RK3 the canonical nemo_before operand is the same
             # whole-step entry tracer used by the EVD twin below.
             tke_n2_time_level="nemo_before",
+            # Main's shared GYRE path routed zdf_sh2 through the whole-step
+            # entry sea level.  Resolved cards override this explicitly.
+            nemo_sh2_step_entry_ssh=True,
         )
         physics = config.physics._replace(
             vertical_mixing=config.physics.vertical_mixing._replace(
@@ -667,7 +684,9 @@ def _model_config(
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
-                scheme="nemo_qsr_2bd", water_type="I", nemo_time_step_s=14400.0
+                scheme="nemo_qsr_2bd", water_type="I",
+                nemo_time_step_s=14400.0,
+                nemo_qsr_kbb_live_stretch=True,
             ),
             mle=None,
         )
@@ -691,6 +710,8 @@ def _model_config(
             # overrides it back to False, because it resolves the identical
             # program but has never been measured under it.
             nemo_stage_momentum_wzv_split=True,
+            nemo_qsr_stage3_kmm_source_association=True,
+            vmix_eos_use_config_rho0=True,
             vorticity_scheme="ene_total",
             # key_qco e3f_vor = e3f_0vor*(1+r3f); dom_qco_r3c_RK3 builds
             # r3f from the four-cell surface-weighted SSH average
@@ -711,6 +732,7 @@ def _model_config(
             # velocity (dynspg_ts.F90:359,689; nn_bt_flt=3).
             barotropic_coriolis_split="live",
             lateral_viscosity_operator="nemo_div_curl",
+            lateral_viscosity_mask_levels="surface",
             lateral_viscosity_e3_weighting="nemo_e3",
             surface_stress_implicit=True,
             bbl_adv_option=bbl_adv_option,
@@ -788,6 +810,9 @@ def _model_config(
 
     return LatLonCGridOceanConfig.from_flat(
         constants=NEMO_CONSTANTS_CONFIG,
+        # Certified cards keep the masks their records were made with; moving
+        # them to NEMO's 3-D masks is a re-certification, not done here.
+        lateral_viscosity_mask_levels="surface",
         # Resolved ln_TEOS10=.true.; NEMO 5.0.2 eosbn2.F90:1920-2108
         # selects the Roquet TEOS-10 coefficient table and :260-288 evaluates it.
         eos="nemo_teos10",
@@ -1303,6 +1328,7 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
 
 def build_gyre_zco_card(
     namelist: GyreResolvedNamelist = GYRE_SHIPPED_NAMELIST,
+    *, routing: GYRERouting = GYRE_CARD_ROUTING,
 ) -> NEMOTestcaseCard:
     """Certified GYRE from a resolved rotated-beta-plane OMIP deck."""
 
@@ -1408,6 +1434,18 @@ def build_gyre_zco_card(
         whole_step_identity="gyre_vector_ene_c2",
         tke_langmuir_evaluation="nemo_literal",
     )
+    vertical = model_config.physics.vertical_mixing
+    vertical = vertical._replace(tke=vertical.tke._replace(
+        nemo_sh2_step_entry_ssh=routing.tke_shear_step_entry_ssh))
+    shortwave = model_config.physics.shortwave_penetration._replace(
+        nemo_qsr_kbb_live_stretch=routing.qsr_kbb_live_stretch)
+    model_config = model_config._replace(
+        physics=model_config.physics._replace(
+            vertical_mixing=vertical, shortwave_penetration=shortwave),
+        nemo_qsr_stage3_kmm_source_association=(
+            routing.qsr_kmm_source_association),
+        vmix_eos_use_config_rho0=routing.vmix_eos_use_config_rho0,
+    )
     # stprk3 computes rn2b once from Nbb before zdf_phy, which consumes that
     # field in zdf_mxl, and then passes the same rn2b to ldf_slp.  Keep the
     # mixed-layer recurrence and the slope denominator on that one carried
@@ -1464,6 +1502,15 @@ def build_gyre_zco_card(
     )
     validate_nemo_testcase_card(card)
     return card
+
+
+def build_gyre_zco_lane_certified_card(
+    namelist: GyreResolvedNamelist = GYRE_SHIPPED_NAMELIST,
+) -> NEMOTestcaseCard:
+    """The pre-catch-up GYRE program, with all four routes stated."""
+
+    return build_gyre_zco_card(
+        namelist, routing=GYRE_LANE_CERTIFIED_ROUTING)
 
 
 def gyre_surface_boundary_condition(
@@ -1739,9 +1786,9 @@ def build_orca2_ts_at_step(
     salinity_path,
     tmask,
     *,
-    kt: int,
-    dt_s: float,
+    kt: int, dt_s: float,
     apply_hand_alterations: bool = True,
+    mask_evaluation: str = "where_zero",
 ):
     """ORCA2's time-interpolated T/S climatology for one NEMO step.
 
@@ -1804,7 +1851,90 @@ def build_orca2_ts_at_step(
     if apply_hand_alterations:
         apply_orca2_hand_alterations(temperature, salinity)
 
+    if mask_evaluation == "nemo_tmask_multiply":
+        # dtatsd.f90:306-311 multiplies ptsd(:,:,:,jp_tem/jp_sal) by REAL(wp)
+        # tmask(:,:,:), leaving IEEE-754 -0.0 where raw interpolated
+        # temperature is negative on dry cells.
+        mask_f64 = np.asarray(tmask, dtype=np.float64)
+        return (temperature * mask_f64, salinity * mask_f64)
+    if mask_evaluation != "where_zero":
+        raise ValueError(
+            f"unknown ORCA2 T/S mask_evaluation={mask_evaluation!r}; "
+            "expected 'where_zero' or 'nemo_tmask_multiply'"
+        )
     return (np.where(tmask, temperature, 0.0), np.where(tmask, salinity, 0.0))
+
+
+class ORCA2InitialIce(NamedTuple):
+    """SI3 ``&namini`` analytic initial ice, each pair (north, south).
+
+    ``pond_concentration`` is the pond area per cell (NEMO's zapnd_ini =
+    rn_apd_ini * a_i, iceistate.F90:324,335; zero when ln_pnd = F, :343-346).
+    """
+
+    thres_sst: float
+    ice_concentration: tuple[float, float]
+    ice_thickness_m: tuple[float, float]
+    snow_thickness_m: tuple[float, float]
+    pond_concentration: tuple[float, float]
+    pond_depth_m: tuple[float, float]
+
+
+# The ORCA2 deck's five-category, ponds-on initial ice (a_p = .2*a_i, h_p = .05 m).
+ORCA2_DECK_INITIAL_ICE = ORCA2InitialIce(
+    thres_sst=2.0,
+    ice_concentration=(0.9, 0.9),
+    ice_thickness_m=(2.0, 1.0),
+    snow_thickness_m=(0.2, 0.2),
+    pond_concentration=(0.18, 0.18),
+    pond_depth_m=(0.05, 0.05),
+)
+
+
+def orca2_initial_ice_ssh(temperature, salinity, tmask, f_t, e1e2t,
+                          ice: ORCA2InitialIce) -> np.ndarray:
+    """Initial SSH after SI3's levitating initial snow+ice+pond mass.
+
+    iceistate.F90:262-291 creates one-category ice from the surface T/S and
+    hemisphere, :309-393 distributes it over jpl categories while conserving
+    volume, and :398-427 removes the globally averaged snow+ice+pond mass
+    from SSH.
+    """
+
+    surface_s = salinity[..., 0]
+    surface_t = temperature[..., 0]
+    freezing_t = (
+        -0.0575
+        + 1.710523e-3 * np.sqrt(surface_s)
+        - 2.154996e-4 * surface_s
+    ) * surface_s
+    surface_wet = tmask[..., 0]
+    initial_ice = (((surface_t - freezing_t) * surface_wet < ice.thres_sst)
+                   & surface_wet)
+    north = f_t >= 0.0
+
+    def hemisphere(pair):
+        return np.where(north, pair[0], pair[1])
+
+    snow_ice_pond_mass = np.where(
+        initial_ice,
+        hemisphere(ice.ice_concentration) * (
+            constants.rho_snow * hemisphere(ice.snow_thickness_m)
+            + constants.rho_ice * hemisphere(ice.ice_thickness_m))
+        + constants.rho_water * hemisphere(ice.pond_concentration)
+        * hemisphere(ice.pond_depth_m),
+        0.0,
+    )
+    # dom_uniq (domutl.F90:91-121) excludes the duplicated right half of the
+    # T-fold row from glob_2Dsum.  On this de-haloed T-fold, the retained
+    # half is i < n_lon/2.  With the deck ice the exact reduction below
+    # reproduces the source-produced -0.09343505872684969 m adjustment.
+    unique_t = np.ones(surface_wet.shape, dtype=np.float64)
+    unique_t[-1, surface_wet.shape[1] // 2 :] = 0.0
+    ssh_adjustment = np.sum(
+        snow_ice_pond_mass / NEMO_CONSTANTS_CONFIG.rho_0 * e1e2t * unique_t
+    ) / np.sum(e1e2t * surface_wet * unique_t)
+    return np.where(surface_wet, -ssh_adjustment, 0.0)
 
 
 def build_orca2_initial_ts(
@@ -1813,6 +1943,7 @@ def build_orca2_initial_ts(
     tmask,
     *,
     apply_hand_alterations: bool = True,
+    mask_evaluation: str = "where_zero",
 ):
     """ORCA2's kt=1 independent initial T/S, retained as the stable API."""
 
@@ -1820,6 +1951,51 @@ def build_orca2_initial_ts(
         temperature_path, salinity_path, tmask,
         kt=1, dt_s=10800.0,
         apply_hand_alterations=apply_hand_alterations,
+        mask_evaluation=mask_evaluation,
+    )
+
+
+def build_orca2_istate_for_mode(
+    temperature_path,
+    salinity_path,
+    tmask,
+    *,
+    f_t,
+    e1e2t,
+    initial_state: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build ORCA2 initial ``(T, S, ssh)`` for an explicit card ``initial_state`` mode.
+
+    ``initial_state`` has no default:
+    * ``"si3_iceistate"`` retains the certified ORCA2+SI3 card's ``where_zero``
+      tracer mask and SI3 ``ice_istate`` levitating-ice sea-level depression
+      (``iceistate.F90:398-427``).
+    * ``"nemo_k0_istate"`` reproduces NEMO K0 (``nn_ice = 1``): ``dta_tsd``
+      masks ``T`` and ``S`` by ``REAL(wp)`` ``tmask`` multiplication
+      (``istate.f90:118``, ``dtatsd.f90:306-311``), and ``sbc_init`` skips
+      ``ice_init``/``ice_istate`` so ``ssh`` starts at ``0._wp``
+      (``sbcmod.f90:376-384``, ``restart.f90:398,405,408``).
+    """
+
+    if initial_state == "si3_iceistate":
+        t_init, s_init = build_orca2_initial_ts(
+            temperature_path, salinity_path, tmask,
+            mask_evaluation="where_zero",
+        )
+        initial_ssh = orca2_initial_ice_ssh(
+            t_init, s_init, tmask, f_t, e1e2t, ORCA2_DECK_INITIAL_ICE
+        )
+        return t_init, s_init, initial_ssh
+    if initial_state == "nemo_k0_istate":
+        t_init, s_init = build_orca2_initial_ts(
+            temperature_path, salinity_path, tmask,
+            mask_evaluation="nemo_tmask_multiply",
+        )
+        initial_ssh = np.zeros(np.asarray(tmask).shape[:2], dtype=np.float64)
+        return t_init, s_init, initial_ssh
+    raise ValueError(
+        f"unknown ORCA2 initial_state={initial_state!r}; "
+        "expected 'si3_iceistate' or 'nemo_k0_istate'"
     )
 
 
@@ -1828,7 +2004,12 @@ _ORCA2_RESTO_SHA256 = (
 
 
 def build_orca2_damping_for_step(
-    deck_root: str | Path, tmask, *, kt: int, dt_s: float,
+    deck_root: str | Path,
+    tmask,
+    *,
+    kt: int,
+    dt_s: float,
+    mask_evaluation: str = "where_zero",
 ) -> SpongeForcing:
     """Build ORCA2 ``tra_dmp`` inputs from the SHA-pinned local products."""
 
@@ -1851,6 +2032,7 @@ def build_orca2_damping_for_step(
         root / "data_1m_potential_temperature_nomask.nc",
         root / "data_1m_salinity_nomask.nc",
         tmask, kt=kt, dt_s=dt_s, apply_hand_alterations=True,
+        mask_evaluation=mask_evaluation,
     )
     return SpongeForcing(
         gamma=jnp.asarray(rate, dtype=jnp.float64),
@@ -1898,7 +2080,11 @@ def _orca2_iwm_forcing(path, surface_tmask: np.ndarray, lat_t, lon_t):
     )
 
 
-def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
+def build_orca2_zps_card(
+    deck_root: str | Path,
+    *,
+    initial_state: str = "si3_iceistate",
+) -> NEMOTestcaseCard:
     """Build the source-file-driven ORCA2+SI3 card through ocean kt=1 entry.
 
     This constructor intentionally requires the external deck path.  It reads
@@ -2038,41 +2224,22 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_e3t_jpk=jnp.asarray(e3t_jpk, dtype=jnp.float64),
     )
 
-    temperature, salinity = build_orca2_initial_ts(
-        temperature_path, salinity_path, tmask)
+    if initial_state == "si3_iceistate":
+        temperature, salinity = build_orca2_initial_ts(
+            temperature_path, salinity_path, tmask)
 
-    # iceistate.F90:262-291 creates one-category ice from the surface T/S and
-    # hemisphere, :309-393 distributes it over jpl=5 while conserving volume,
-    # and :398-427 removes the globally averaged snow+ice+pond mass from SSH.
-    # The resolved pond arm is live (a_p=.2*a_i, h_p=.05 m), so it contributes
-    # 9 kg m-2 wherever initial ice exists; omitting it misses the oracle SSH.
-    surface_s = salinity[..., 0]
-    surface_t = temperature[..., 0]
-    freezing_t = (
-        -0.0575
-        + 1.710523e-3 * np.sqrt(surface_s)
-        - 2.154996e-4 * surface_s
-    ) * surface_s
-    surface_wet = tmask[..., 0]
-    initial_ice = ((surface_t - freezing_t) * surface_wet < 2.0) & surface_wet
-    ice_thickness = np.where(np.asarray(grid.f_T) >= 0.0, 2.0, 1.0)
-    snow_ice_pond_mass = np.where(
-        initial_ice,
-        0.9 * (constants.rho_snow * 0.2 + constants.rho_ice * ice_thickness)
-        + constants.rho_water * 0.18 * 0.05,
-        0.0,
-    )
-    # dom_uniq (domutl.F90:91-121) excludes the duplicated right half of the
-    # T-fold row from glob_2Dsum.  On this de-haloed 180-column T-fold, the
-    # retained half is i=0:89.  The exact reduction below reproduces the
-    # source-produced -0.09343505872684969 m adjustment.
-    unique_t = np.ones(surface_wet.shape, dtype=np.float64)
-    unique_t[-1, grid.n_lon // 2 :] = 0.0
-    area = metric["e1t"] * metric["e2t"]
-    ssh_adjustment = np.sum(
-        snow_ice_pond_mass / NEMO_CONSTANTS_CONFIG.rho_0 * area * unique_t
-    ) / np.sum(area * surface_wet * unique_t)
-    initial_ssh = np.where(surface_wet, -ssh_adjustment, 0.0)
+        initial_ssh = orca2_initial_ice_ssh(
+            temperature, salinity, tmask, np.asarray(grid.f_T),
+            metric["e1t"] * metric["e2t"], ORCA2_DECK_INITIAL_ICE)
+    else:
+        temperature, salinity, initial_ssh = build_orca2_istate_for_mode(
+            temperature_path,
+            salinity_path,
+            tmask,
+            f_t=np.asarray(grid.f_T),
+            e1e2t=metric["e1t"] * metric["e2t"],
+            initial_state=initial_state,
+        )
 
     state = rest_state_latlon_cgrid_ocean(
         grid,
@@ -2111,6 +2278,10 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     model_config = model_config._replace(
         een_fold_image_v_row=True,
         rk3_stage1_ssh_nemo_literal=True,
+        # ORCA2 retains the pre-catch-up routes.  Its RGB shortwave makes the
+        # Kmm selector inert, but the card still states it explicitly.
+        nemo_qsr_stage3_kmm_source_association=False,
+        vmix_eos_use_config_rho0=False,
         barotropic=model_config.barotropic._replace(
             barotropic_fold_top_v_face_ssh=True,
             barotropic_substep_dt_nemo_literal=True,
@@ -2119,9 +2290,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     # Decision 122 (ORCA2 round 278): geometry-ladder-certified statements
     # whose cited line the ORCA2 build executes, each meeting no-exact-loss and
     # first-over-bar-not-away on rung 0, OMT-1..4 and rung 10 (both labels).
-    # Left off: G1's EEN vorticity order (certified on the np_COR line, ORCA2
-    # runs np_CRV) and the completed-stage top-V fold exchange (held: rung-0
-    # ten-step SSH maximum 0.38 -> 8.39 m).
+    # Left off: the completed-stage top-V fold exchange (held, Decision 125:
+    # rung-0 ten-step SSH maximum 0.38 -> 8.39 m).
     model_config = model_config._replace(
         # G1b round 2 / ORCA2 round 282: np_CRV divides its relative
         # circulation by NEMO's F-cell area e1f*e2f (vor_een,
@@ -2356,6 +2526,12 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     model_config = model_config._replace(
         **orca2_l8_krhs_selection(),
         physics=model_config.physics._replace(mle=orca2_l5_mle()))
+    # ORCA2 round 325 (Decision 122, DECISION 151): lane A rung L9 = L8 plus
+    # L3's eddy-induced velocity (gridladder e4f204272d): &namtra_eiv
+    # ln_ldfeiv = T, nn_aei_ijk_t = 21, rn_Ue = 0.03, rn_Le = 200 km (EXP00
+    # namelist_cfg:317-323), ln_eke_equ = F (namelist_ref:980).
+    model_config = model_config._replace(
+        gm_redi=orca2_l3_eiv_gm_redi(), rk3_stage3_l9_eiv_nemo_order=True)
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
@@ -3539,6 +3715,7 @@ def build_vortex_smt_zps_card(
                 C_leith=0.0,
             ),
             lateral_viscosity_operator="nemo_div_curl",
+            lateral_viscosity_mask_levels="surface",
             lateral_viscosity_e3_weighting="nemo_e3",
             lateral_viscosity_coefficient_source="nemo_ldf_c2d",
             lateral_side_bc="free_slip",
@@ -5166,6 +5343,7 @@ def build_swg_card(
         een_e3f_scheme="nemo_avg4", een_metric_weighting="nemo",
         een_q_boundary="nemo_live",
         lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_mask_levels="surface",
         lateral_viscosity_e3_weighting="nemo_e3",
         lateral_viscosity_coefficient_source="nemo_constant",
         lateral_viscosity=base.lateral_viscosity._replace(A_h=constant_ahm),
@@ -5274,7 +5452,6 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         _validate_swg_card(card)
         return
     _validate_pre_swg_testcase_card(card)
-
 # ---------------------------------------------------------------------------
 # ORCA2G1 (grid ladder rung G1, DECISION 117): the TSUNAMI program on ORCA2's
 # horizontal grid -- T-pivot north fold, cyclic east-west, ORCA2's coast --
@@ -5745,6 +5922,7 @@ __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
     "build_gyre_zco_card",
+    "build_gyre_zco_lane_certified_card",
     "build_lock_exchange_zco_card",
     "build_overflow_zps_card",
     "apply_orca2_hand_alterations",

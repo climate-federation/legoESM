@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import math
+import textwrap
 
 import jax
 import jax.numpy as jnp
@@ -146,15 +148,48 @@ def test_tsdiff_false_ratio_is_the_wet_mask():
         assert np.array_equal(g, w)
 
 
-def test_literal_form_refuses_mevar_native_policy_and_the_generic_form():
+def test_literal_form_refuses_mevar_and_generic_form_but_runs_native_policy():
     case = _cases(4)
     with pytest.raises(ValueError, match="ln_mevar"):
         _card(case, cfg=CFG._replace(mevar=True))
     with pytest.raises(ValueError, match="form='nemo_literal'"):
         _card(case, cfg=CFG._replace(form="generic"))
+    from types import SimpleNamespace
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _nemo_iwm_literal
+
+    assert _nemo_iwm_literal(SimpleNamespace(physics=SimpleNamespace(
+        vertical_mixing=SimpleNamespace(iwm=CFG)))) is True
+    assert _nemo_iwm_literal(SimpleNamespace(physics=SimpleNamespace(
+        vertical_mixing=SimpleNamespace(iwm=CFG._replace(form="generic"))))) is False
     set_policy(PrecisionPolicy.fp64(transcendentals="native"))
-    with pytest.raises(ValueError, match="libm"):
-        _card(case)
+    with jax.disable_jit():
+        eager = _card(case)
+    compiled = _card(case, jax.jit(
+        nemo_zdf_iwm, static_argnames=("cfg", "rho_0")))
+    for left, right in zip(eager, compiled, strict=True):
+        assert np.isfinite(left).all()
+        np.testing.assert_array_equal(left, right)
+
+    # Plant: remove only the source-rounding barrier on LOG10's result.  XLA
+    # then fuses ``log(x) * log10(e) - 0.60`` and changes native JIT bits.
+    source = textwrap.dedent(inspect.getsource(nemo_zdf_iwm))
+    needle = """zlog = r(precision_log10(jnp.maximum(
+            _EPS_DENOM, r(r(zreb * _NEMO_IWM_TSDIFF_FIVE) * _NEMO_IWM_R1_6))))"""
+    replacement = """zlog = precision_log10(jnp.maximum(
+            _EPS_DENOM, r(r(zreb * _NEMO_IWM_TSDIFF_FIVE) * _NEMO_IWM_R1_6)))"""
+    assert source.count(needle) == 1
+    namespace = vars(__import__(nemo_zdf_iwm.__module__, fromlist=["*"])).copy()
+    exec(source.replace(needle, replacement, 1), namespace)
+    planted = namespace["nemo_zdf_iwm"]
+    with jax.disable_jit():
+        planted_eager = _card(case, planted)
+    planted_jit = _card(
+        case, jax.jit(planted, static_argnames=("cfg", "rho_0")))
+    unequal = sum(
+        int(np.sum(left != right))
+        for left, right in zip(planted_eager, planted_jit, strict=True)
+    )
+    assert unequal > 0
 
 
 def test_literal_iwm_reverse_gradient_is_finite_where_n2_is_clipped(monkeypatch):

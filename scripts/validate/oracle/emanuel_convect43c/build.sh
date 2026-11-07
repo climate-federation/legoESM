@@ -4,9 +4,10 @@
 #
 # The oracle is Kerry Emanuel's convect43c.f, CONVECT version 4.3c (20 May
 # 2002), sha256 below -- the copy the 2026-10-19 tier-2 audit compiled.  Its
-# upstream (texmex.mit.edu/pub/emanuel/CONVECT4) no longer serves it; climt
-# (CliMT/climt 3ebe9427, climt/_lib/emanuel/convect43c.f90) carries the same
-# algorithm lines.  patch_oracle.py (from the audit, unchanged) adds only
+# upstream still serves it (texmex.mit.edu/pub/emanuel/CONVECT4/convect43c.f,
+# re-downloaded 2026-10-31 with this sha256 for the #2266 FU/FV regeneration);
+# climt (CliMT/climt 3ebe9427, climt/_lib/emanuel/convect43c.f90) carries the
+# same algorithm lines.  patch_oracle.py (from the audit, unchanged) adds only
 # COMMON-block switches and debug copies: legoESM constants (CPD CPV CL RV RD
 # LV0 G) in place of CONVECT's stock values, as CONVECT asks of its host; an
 # IDDOFF switch that takes the oracle's own EP(INB)<1e-4 skip of the

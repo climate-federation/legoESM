@@ -143,20 +143,22 @@ def _read_exchange_step(stream, wanted_step: int) -> dict[str, np.ndarray]:
 
 def _read_zdf_input_step(stream, wanted_step: int) -> dict[str, np.ndarray]:
     magic = stream.read(16)
-    require(magic in (b"NEMO_L3ZIN_001  ", b"NEMO_L3ZIN_002  "),
+    require(magic in (b"NEMO_L3ZIN_001  ", b"NEMO_L3ZIN_002  ", b"NEMO_L3ZIN_003  "),
             "ZDF-input magic")
     version, step, category, npti, bits, nval = struct.unpack("=6i", stream.read(24))
-    expected = len(ZDF_INPUT_NAMES) + (3 if version == 2 else 0)
+    expected = len(ZDF_INPUT_NAMES) + {1: 0, 2: 3, 3: 4}.get(version, -1)
     require((version, step, category, npti, bits, nval)
             == (version, wanted_step, 1, 1, 64, expected)
-            and version in (1, 2)
-            and magic == (b"NEMO_L3ZIN_002  " if version == 2
-                          else b"NEMO_L3ZIN_001  "), "ZDF-input header")
+            and version in (1, 2, 3)
+            and magic == f"NEMO_L3ZIN_00{version}  ".encode(), "ZDF-input header")
     values = np.fromfile(stream, np.float64, nval)
     require(values.size == nval and np.all(np.isfinite(values)), "bad ZDF-input payload")
     result = {name: values[i:i + 1] for i, name in enumerate(ZDF_INPUT_NAMES)}
-    if version == 2:
-        result["t_s"] = values[len(ZDF_INPUT_NAMES):].reshape((npti, 3), order="F")
+    if version >= 2:
+        n = len(ZDF_INPUT_NAMES)
+        result["t_s"] = values[n:n + 3 * npti].reshape((npti, 3), order="F")
+    if version == 3:   # SST [degC] for snow-ice flooding (icethd_dh.F90:454)
+        result["sst"] = values[-npti:]
     result["_version"] = np.asarray(version)
     return result
 
@@ -298,7 +300,37 @@ def _forcing(exact):
     def val(x):
         return jnp.asarray(x, dtype=jnp.float64)
 
-    return SI3SurfaceForcing(*(val(exact[name]) for name in ZDF_INPUT_NAMES))
+    return SI3SurfaceForcing(**{name: val(x) for name, x in forcing_inputs(exact).items()})
+
+
+def forcing_inputs(values) -> dict:
+    """ZDF forcing operands incl. the SST the dh step requires (no fallback, vote Y1).
+
+    Only NEMO_L3ZIN_003 records carry sst_1d; older records cannot drive the
+    column port and the gate refuses them.
+    """
+    require("sst" in values,
+            "ZDF-input record has no SST (recorder older than NEMO_L3ZIN_003): rerun the "
+            "C1D case with the v3 recorder in nemo502_si3thd_MY_SRC/icethd.F90 "
+            "(the data is not on Ginsburg)")
+    return {**{name: values[name] for name in ZDF_INPUT_NAMES}, "sst": values["sst"]}
+
+
+def _lane_forcing(exact):
+    """Construct the lane's pre-SST 13-field forcing boundary explicitly."""
+    import jax.numpy as jnp
+    from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing
+
+    require(
+        "sss" in exact and exact["sss"] is not None,
+        "missing sea-surface salinity (sss)",
+    )
+    return SI3SurfaceForcing(
+        **{
+            name: jnp.asarray(exact[name], dtype=jnp.float64)
+            for name in ZDF_INPUT_NAMES
+        }
+    )
 
 
 def _reconstructed_forcing(exchange, entry, post_zdf, exact):
@@ -307,7 +339,7 @@ def _reconstructed_forcing(exchange, entry, post_zdf, exact):
     qns_entry = exchange["qns_ice"] - exchange["dqns_ice"] * (
         post_zdf["t_su"] - entry.T_surface
     )
-    return _forcing(exact)._replace(qns_ice=qns_entry)
+    return _lane_forcing(exact)._replace(qns_ice=qns_entry)
 
 
 def _score(rows, name, oracle, lego, *, plant=False, exact=False):
@@ -386,11 +418,11 @@ def _si3_zdf_bl99_step(
     h_snow = jnp.asarray(h_snow, dtype=dtype)
     S_layers = jnp.asarray(S_layers, dtype=dtype)
     e_snow = jnp.asarray(e_snow, dtype=dtype)
-    T_i_old = bl.ice_temperature_from_enthalpy(
+    T_i_old = bl._si3_502_ice_temperature_from_enthalpy(
         e_ice, S_layers, constants,
         _nemo_order=_nemo_eos_order, _nemo_source_round=_nemo_source_round,
     )
-    T_s_old = bl.snow_temperature_from_enthalpy(
+    T_s_old = bl._si3_502_snow_temperature_from_enthalpy(
         e_snow, constants,
         _nemo_order=_nemo_eos_order,
         _nemo_glo2eqv_snow_temp=_nemo_glo2eqv_snow_temp,
@@ -449,11 +481,11 @@ def _si3_zdf_bl99_step(
         _nemo_source_round=_nemo_source_round,
     )
     Tsu, Ti, Ts = core.t_su, core.t_i, core.t_s
-    e_i = bl.ice_enthalpy_from_temperature(
+    e_i = bl._si3_502_ice_enthalpy_from_temperature(
         Ti, S_layers, constants,
         _nemo_order=_nemo_eos_order, _nemo_source_round=_nemo_source_round,
     )
-    e_s = bl.snow_enthalpy_from_temperature(
+    e_s = bl._si3_502_snow_enthalpy_from_temperature(
         Ts, constants, _nemo_source_round=_nemo_source_round
     )
     if _nemo_zdf_layer_reciprocals:
@@ -463,11 +495,11 @@ def _si3_zdf_bl99_step(
         dz_i = jnp.maximum(h_ice, bl._H_MIN) / nlay_i
         dz_s = jnp.maximum(h_snow, bl._H_MIN) / nlay_s
         snow_present = h_snow > 0.0
-        k_top_i = bl.p07_conductivity(
+        k_top_i = bl._si3_502_p07_conductivity(
             Ti[..., 0], S_layers[..., 0], constants,
             _nemo_source_round=_nemo_source_round,
         ) / dz_i
-        k_base_i = bl.p07_conductivity(
+        k_base_i = bl._si3_502_p07_conductivity(
             T_bottom, S_layers[..., -1], constants,
             _nemo_source_round=_nemo_source_round,
         ) / dz_i
@@ -989,7 +1021,7 @@ def _si3_column_step_arrays_ablation(
     _nemo_source_round: bool = True,
     si3=None,
 ):
-    """D5 harness step wrapper: delegates to production `si3_column_step_arrays` unless an ablation arm is requested."""
+    """D5 wrapper: delegate to the NEMO-literal lane step unless ablating it."""
     import jax.numpy as jnp
     from legoesm import constants as canonical_constants
     from legoesm.ice import bitz_lipscomb as bl
@@ -1016,7 +1048,9 @@ def _si3_column_step_arrays_ablation(
         _nemo_glo2eqv_snow_temp,
         _nemo_source_round,
     )):
-        return bl.si3_column_step_arrays(state, forcing, dt, constants, si3=si3)
+        return bl.si3_lane_column_step_arrays(
+            state, forcing, dt, constants, si3=si3
+        )
 
     zdf = _si3_zdf_bl99_step(
         state.e_ice, state.e_snow, state.S_layers, state.h_ice, state.h_snow,
@@ -1070,14 +1104,14 @@ def _si3_column_step_arrays_ablation(
     S_layers = (
         sal_out.sz_i
         if (_nemo_source_round and _nemo_salprof_factoring)
-        else bl.option2_salinity_profile(
+        else bl._si3_502_option2_salinity_profile(
             S_bulk,
             forcing.sss,
             _nemo_source_round=_nemo_source_round,
             _nemo_salprof_factoring=_nemo_salprof_factoring,
         )
     )
-    return bl.si3_column_step_arrays(
+    return bl.si3_lane_column_step_arrays(
         state, forcing, dt, constants, si3=si3,
         _zdf_dh_override=(post_zdf, post_dh, S_bulk, S_layers),
     )
@@ -1086,7 +1120,7 @@ def _si3_column_step_arrays_ablation(
 def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.ice.bitz_lipscomb import si3_column_step_arrays
+    from legoesm.ice.bitz_lipscomb import si3_lane_column_step_arrays
     from legoesm.ice.c1d_omip_l3 import (
         FORCING_SHA256,
         ORACLE_V1_EXCHANGE_STREAM_SHA256,
@@ -1094,7 +1128,7 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
         ORACLE_V1_ZDF_INPUT_STREAM_SHA256,
         ORACLE_V1_ZDF_OPERAND_STREAM_SHA256,
         THERMO_STREAM_SHA256,
-        build_c1d_omip_l3_card,
+        build_c1d_omip_l3_si3_lane_card,
     )
     from legoesm.ice.config import SI3ThermoConfig, validate_si3_thermo_config
 
@@ -1104,7 +1138,7 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
     # This is the retained Phase-2 boundary gate and its original compact ZDF
     # operand schema.  Pin it explicitly to V1 while the canonical card points
     # new certification at scalar-math V2.
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V1_ROOT)
     if plant_selector:
         bad = card.config._replace(si3=SI3ThermoConfig(n_ice_layers=2))
         validate_si3_thermo_config(bad)  # must raise
@@ -1181,8 +1215,8 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
         step_entry_jax = jax.tree.map(
             lambda x: jnp.asarray(x, dtype=jnp.float64), step_entry
         )
-        step_forcing = _forcing(step_input)
-        trace = si3_column_step_arrays(
+        step_forcing = _lane_forcing(step_input)
+        trace = si3_lane_column_step_arrays(
             step_entry_jax,
             step_forcing,
             card.dt_seconds,

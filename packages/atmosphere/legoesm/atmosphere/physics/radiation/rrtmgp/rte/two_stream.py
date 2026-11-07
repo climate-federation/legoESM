@@ -251,6 +251,10 @@ def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
   g-point axis is embarrassingly parallel; only the vertical recurrence
   *inside* ``step_fn`` is sequential.
 
+  The memory bounds below cover the transport inside ``step_fn``.  Gas optics are
+  held for all g-points outside it, ``(n_gpt, ncol, nlay)`` per array, so only
+  ``column_chunk_size`` bounds those.
+
   ``gpoint_batch_size <= 0`` (default) — the memory-frugal path: a
   ``jax.lax.scan`` over g-points with each step wrapped in
   ``jax.checkpoint(nothing_saveable, prevent_cse=True)`` so the backward pass
@@ -524,6 +528,8 @@ def solve_lw(
     )
     return fluxes
 
+  optics_lib = optics_lib.with_all_gpts(True, pressure, temperature, molecules, vmr_fields)
+
   def step_fn(igpt, cumulative_flux):
     liq_g, ice_g = _gpoint_cloud_paths(
         igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn)
@@ -735,6 +741,7 @@ def compute_sw_optical_field(
   if vmr_fields is not None:
     vmr_fields = _reindex_vmr_fields(vmr_fields, optics_lib.gas_optics_sw)
   n_gpt = optics_lib.n_gpt_sw
+  optics_lib = optics_lib.with_all_gpts(False, pressure, temperature, molecules, vmr_fields)
 
   def gpt_props(igpt):
     props = compute_sw_optical_props_gpt(
@@ -746,8 +753,7 @@ def compute_sw_optical_field(
     # Gas Rayleigh scattering optical depth (the gas scatter is ALL Rayleigh) as
     # a fraction of TOTAL scattering (gas + cloud + aerosol) -> the per-cell
     # probability that a scatter event is Rayleigh, for the explicit-phase split.
-    rayl_scat = optics_lib.rayleigh_scattering_fn(igpt)(
-        molecules, temperature, pressure, vmr_fields)
+    rayl_scat = optics_lib.gas_gpt('rayleigh', igpt)
     tot_scat = props['ssa'] * props['optical_depth']
     # safe_divide (not a floored raw divide) so the masked-branch VJP can't
     # overflow as tot_scat -> 0, consistent with ssa/g above. fill=1.0: a cell
@@ -757,9 +763,7 @@ def compute_sw_optical_field(
         safe_divide(rayl_scat, tot_scat, eps=1.0e-30, fill=1.0), 0.0, 1.0)
     return {**props, 'rayleigh_frac': rayleigh_frac}
 
-  # Sequential map over g-points (memory-frugal, like the solve_sw scan):
-  # stacks leaves to (n_gpt, X, Y, Z) without materializing all g-points'
-  # table lookups concurrently.
+  # Sequential map over g-points: stacks leaves to (n_gpt, X, Y, Z).
   return jax.lax.map(gpt_props, jnp.arange(n_gpt))
 
 
@@ -792,6 +796,7 @@ def compute_lw_optical_field(
   if vmr_fields is not None:
     vmr_fields = _reindex_vmr_fields(vmr_fields, optics_lib.gas_optics_lw)
   n_gpt = optics_lib.n_gpt_lw
+  optics_lib = optics_lib.with_all_gpts(True, pressure, temperature, molecules, vmr_fields)
 
   def gpt_field(igpt):
     props = optics_lib.compute_lw_optical_properties(
@@ -888,16 +893,12 @@ def solve_sw(
 
   # --- Per-column day/night handling ---
   # ``zenith`` may be a scalar (single-column) or an array with a column
-  # dimension, e.g. shape ``(ncol, 1)``.  To avoid division-by-zero in
-  # ``exp(-tau / cos(zenith))`` for nighttime columns (cos(zenith) ~ 0),
-  # we clamp the zenith used in the slant path (exp(-tau/mu) and the
-  # two-stream R/T) to at most ~89.4 degrees (cos > 0.01).  The incident
-  # beam is projected with the TRUE cos(zenith), as RTE does
-  # (sw_solver_2stream: flux_dir(top) = inc_flux_dir * mu0); projecting it
-  # with the floored value gave a sun just above the horizon up to
-  # S_0*(0.01 - cos z) extra insolation.  After the solve, nighttime columns
-  # are zeroed out.
-  _ZENITH_MAX = jnp.arccos(jnp.asarray(0.01, dtype=temperature.dtype))  # coeff-ok: min cos(zenith) floor
+  # dimension, e.g. shape ``(ncol, 1)``.  The slant path (exp(-tau/mu) and the
+  # two-stream R/T) uses max(mu0, sqrt(eps)), as RTE sw_dif_and_source does; the
+  # incident beam is projected with the true cos(zenith) (sw_solver_2stream:
+  # flux_dir(top) = inc_flux_dir * mu0).  After the solve, nighttime columns are
+  # zeroed out.
+  _ZENITH_MAX = jnp.arccos(jnp.sqrt(jnp.finfo(temperature.dtype).eps))
   safe_zenith = jnp.minimum(zenith, _ZENITH_MAX)
 
   # Build a per-column boolean mask that is True for daytime columns.
@@ -958,6 +959,8 @@ def solve_sw(
         use_scan=use_scan,
     )
     return sw_fluxes
+
+  optics_lib = optics_lib.with_all_gpts(False, pressure, temperature, molecules, vmr_fields)
 
   def step_fn(igpt, partial_fluxes):
     liq_g, ice_g = _gpoint_cloud_paths(

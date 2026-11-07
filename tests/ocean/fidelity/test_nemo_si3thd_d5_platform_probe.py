@@ -19,11 +19,11 @@ import pytest
 from legoesm.core.precision import PrecisionPolicy, set_policy
 import legoesm.ice.bitz_lipscomb as bl_mod
 from legoesm.ice.bitz_lipscomb import (
-    _radiation,
+    _si3_502_radiation,
     # _si3_zdf_bl99_step moved to phase2 gate in DECISION 186
     bitz_lipscomb_conduction_step,
 )
-from legoesm.ice.c1d_omip_l3 import ORACLE_V2_ROOT, build_c1d_omip_l3_card
+from legoesm.ice.c1d_omip_l3 import ORACLE_V2_ROOT, build_c1d_omip_l3_si3_lane_card
 from legoesm.timestepping.tridiagonal import _thomas_solve_impl
 from nemo_si3thd_phase2_gate import _nemo_ice_enthalpy_remap, _nemo_snow_enthalpy_remap, _piecewise_remap, _si3_column_step_arrays_ablation, _si3_zdf_bl99_step  # noqa: E402,E501
 set_policy(PrecisionPolicy.fp64())
@@ -77,7 +77,7 @@ def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_when_reverted
        bit-exact check and the ``1e-15`` bar check to FAIL (716 ULPs on ``e_s``
        at ``kt = 5841`` and 597 ULPs on ``e_s`` at ``kt = 5860``).
     """
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
 
     # 1. Verify exact operand bit patterns for clamped snow thickness
@@ -123,7 +123,7 @@ def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_when_reverted
         lambda v: jnp.asarray(v, dtype=jnp.float64), entry_4242
     )
     forcing_4242 = probe_module.year_gate._forcing(exact_in_4242, jnp.float64)
-    trace_fixed_4242 = bl_mod.si3_column_step_arrays(
+    trace_fixed_4242 = bl_mod.si3_lane_column_step_arrays(
         jax_entry_4242,
         forcing_4242,
         card.dt_seconds,
@@ -326,7 +326,7 @@ def test_d5_zdf_gradients_are_finite_and_reverse_equals_forward_with_literal_for
     - Reverse-mode ``jax.grad`` agrees with forward-mode ``jax.jvp``.
     - A planted ``jax.lax.stop_gradient`` violation is caught and fails.
     """
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
     steps = _load_step_operands(probe_module, (1, 5841))
 
@@ -445,7 +445,7 @@ def test_d5_zdf_gradients_are_finite_and_reverse_equals_forward_with_literal_for
     tsu_rad = jnp.asarray([268.0], dtype=jnp.float64)
 
     def rad_loss(hi, hs, qtr):
-        ab_s, ab_i, tr_bot = _radiation(
+        ab_s, ab_i, tr_bot = _si3_502_radiation(
             hi, hs, qtr, tsu_rad, rn_kappa_i=1.0, rn_kappa_s=10.0, _nemo_zdf_layer_reciprocals=True  # C1D card
         )
         return jnp.sum(0.3 * ab_s) + jnp.sum(0.7 * ab_i) + jnp.sum(1.1 * tr_bot)
@@ -485,7 +485,7 @@ def _parent_commit_bitz_lipscomb_conduction_step(
     else:
         dz = jnp.maximum(h, bl_mod._H_MIN) / n
     dz_e = dz[..., None]
-    T_old = bl_mod.ice_temperature_from_enthalpy(q_layers, S_b)
+    T_old = bl_mod._si3_502_ice_temperature_from_enthalpy(q_layers, S_b)
     c_i = bl_mod.ice_specific_heat(T_old, S_b)
     k_c = bl_mod.ice_thermal_conductivity(T_old, S_b)
     k_iface = (
@@ -765,7 +765,7 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
     for arr_cur, arr_r5p in zip(current_bits, r5_parent_bits, strict=True):
         np.testing.assert_array_equal(arr_cur, arr_r5p)
 
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     si3_steps = _load_step_operands(probe_module, (43, 3996, 5241, 5460))
     dims = ("column",)
     sst_1d = jnp.full((1,), 271.35, dtype=jnp.float64)
@@ -842,7 +842,7 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
         )
         return st_kt, forc_kt, fr_kt
 
-    def _run_si3_dispatcher(
+    def _run_parent_si3_dispatcher(
         mods: dict[str, types.ModuleType], kt_val: int
     ) -> tuple[SI3ColumnState, object, dict]:
         m_bl_mod = mods["legoesm.ice.bitz_lipscomb"]
@@ -863,15 +863,30 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
         st_out, resp_out = fn(st_in, forc_in)
         return st_out, resp_out, fr_kt
 
+    def _run_lane_si3_dispatcher(
+        mods: dict[str, types.ModuleType], kt_val: int
+    ) -> tuple[SI3ColumnState, object, dict]:
+        m_bl_mod = mods["legoesm.ice.bitz_lipscomb"]
+        m_sea_ice_mod = mods["legoesm.ice.sea_ice"]
+        st_in, forc_in, fr_kt = _build_si3_state_and_forcing(kt_val, m_bl_mod)
+        fn = jax.jit(
+            lambda s, f: m_sea_ice_mod.step_sea_ice_si3_lane(
+                s, f, sst_1d, zvel_1d, zvel_1d, card.config, 1.0,
+                card.dt_seconds,
+            )
+        )
+        st_out, resp_out = fn(st_in, forc_in)
+        return st_out, resp_out, fr_kt
+
     def _verify_si3_dispatcher_vs_parent(
         cand_mods: dict[str, types.ModuleType],
     ) -> None:
         # 1. Against Round 6 parent (`071dfa844369`) at kt = 43: all 9 state
         #    fields and all 22 response fields are bit-for-bit identical, while
         #    against Round 5 parent (`a572f4b254`) ONLY `e_ice` changes to 0 ULP.
-        par_st43, par_rp43, fr43 = _run_si3_dispatcher(parent_mods, 43)
-        r5p_st43, _, _ = _run_si3_dispatcher(r5_parent_mods, 43)
-        cur_st43, cur_rp43, _ = _run_si3_dispatcher(cand_mods, 43)
+        par_st43, par_rp43, fr43 = _run_parent_si3_dispatcher(parent_mods, 43)
+        r5p_st43, _, _ = _run_parent_si3_dispatcher(r5_parent_mods, 43)
+        cur_st43, cur_rp43, _ = _run_lane_si3_dispatcher(cand_mods, 43)
         oracle_ei43 = (
             np.asarray(fr43[2]["e_i"], dtype=np.float64).ravel().view(np.uint64)
         )
@@ -916,8 +931,8 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
             (5460, ("h_snow", "e_snow"), {"h_snow": "h_s", "e_snow": "e_s"}),
         )
         for kt_val, changed_fields, oracle_map in expected_changes:
-            par_st, par_rp, fr_kt = _run_si3_dispatcher(parent_mods, kt_val)
-            cur_st, cur_rp, _ = _run_si3_dispatcher(cand_mods, kt_val)
+            par_st, par_rp, fr_kt = _run_parent_si3_dispatcher(parent_mods, kt_val)
+            cur_st, cur_rp, _ = _run_lane_si3_dispatcher(cand_mods, kt_val)
             for fname in changed_fields:
                 par_bits = (
                     np.asarray(getattr(par_st, fname).data, dtype=np.float64)
@@ -959,10 +974,10 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
 
     _verify_si3_dispatcher_vs_parent(current_mods)
 
-    # Planted control 5a (in `step_sea_ice` -> `_si3_step_with_trace` dispatcher
+    # Planted control 5a (`step_sea_ice_si3_lane` -> `_si3_lane_step_with_trace`)
     # at `sea_ice.py:287-299,497-514`): perturbing an unchanged output (`concentration`)
-    # by 1 ULP inside `_si3_step_with_trace` must make the dispatcher control fail.
-    orig_si3_step = sea_ice_mod._si3_step_with_trace
+    # by 1 ULP inside the lane trace must make the dispatcher control fail.
+    orig_si3_step = sea_ice_mod._si3_lane_step_with_trace
 
     def _planted_si3_step_perturb_a(*a, **kw):
         new_st, resp, tr = orig_si3_step(*a, **kw)
@@ -973,12 +988,12 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
 
     with monkeypatch.context() as mp:
         mp.setattr(
-            sea_ice_mod, "_si3_step_with_trace", _planted_si3_step_perturb_a
+            sea_ice_mod, "_si3_lane_step_with_trace", _planted_si3_step_perturb_a
         )
         with pytest.raises(AssertionError):
             _verify_si3_dispatcher_vs_parent(current_mods)
 
-    # Planted control 5b (in `_si3_step_with_trace` -> `si3_column_step_arrays`
+    # Planted control 5b (`_si3_lane_step_with_trace` -> `si3_lane_column_step_arrays`
     # call at `sea_ice.py:514`): reverting `_nemo_dh_ice_content_accumulation=False`
     # inside the dispatcher must make the Statement Family 1 check (`kt = 5241, 3996`) fail.
     orig_si3_arrays = probe_module.phase2._si3_column_step_arrays_ablation
@@ -995,13 +1010,13 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
     with monkeypatch.context() as mp:
         mp.setattr(
             sea_ice_mod,
-            "si3_column_step_arrays",
+            "si3_lane_column_step_arrays",
             _planted_si3_arrays_no_r6_step1,
         )
         with pytest.raises(AssertionError):
             _verify_si3_dispatcher_vs_parent(current_mods)
 
-    # Planted control 5c (in `_si3_step_with_trace` -> `si3_column_step_arrays`
+    # Planted control 5c (`_si3_lane_step_with_trace` -> `si3_lane_column_step_arrays`
     # call at `sea_ice.py:514`): reverting `_nemo_dh_snow_update=False` inside
     # the dispatcher must make the Statement Family 2 check (`kt = 5460`) fail.
     def _planted_si3_arrays_no_r6_step2(arrays, forcing, dt, ice_constants, **kw):
@@ -1016,7 +1031,7 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
     with monkeypatch.context() as mp:
         mp.setattr(
             sea_ice_mod,
-            "si3_column_step_arrays",
+            "si3_lane_column_step_arrays",
             _planted_si3_arrays_no_r6_step2,
         )
         with pytest.raises(AssertionError):
@@ -1236,7 +1251,7 @@ def test_r3_step2_harness_entry_conversion_is_bit_exact_and_fails_when_reverted(
     probe_module,
 ) -> None:
     """Pin Step 2 harness entry conversion (`icevar.F90:368,374,390,412,488-506`) bit-for-bit."""
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
     steps = _load_step_operands(probe_module, (1, 2, 15))
 
@@ -1288,7 +1303,7 @@ def test_r3_step2_harness_entry_conversion_is_bit_exact_and_fails_when_reverted(
         == 1
     )
     ts_nemo_15 = np.asarray(
-        bl_mod.snow_temperature_from_enthalpy(
+        bl_mod._si3_502_snow_temperature_from_enthalpy(
             jnp.asarray(entry_nemo_15.e_snow, dtype=jnp.float64),
             c,
             _nemo_glo2eqv_snow_temp=True,
@@ -1297,7 +1312,7 @@ def test_r3_step2_harness_entry_conversion_is_bit_exact_and_fails_when_reverted(
         dtype=np.float64,
     ).ravel()
     ts_rev_15 = np.asarray(
-        bl_mod.snow_temperature_from_enthalpy(
+        bl_mod._si3_502_snow_temperature_from_enthalpy(
             jnp.asarray(entry_rev_15.e_snow, dtype=np.float64),
             c,
             _nemo_glo2eqv_snow_temp=True,
@@ -1321,7 +1336,7 @@ def test_r3_step2_harness_entry_conversion_is_bit_exact_and_fails_when_reverted(
     sss_low = np.asarray([4.0], dtype=np.float64)  # 0.5 * 0.75 * 4.0 = 1.5 <= 2.0
     got_low_sss = probe_module.phase2._nemo_salprof(s_low_sss, sss_m=sss_low)
     ref_low_sss = np.asarray(
-        bl_mod.option2_salinity_profile(
+        bl_mod._si3_502_option2_salinity_profile(
             jnp.asarray(s_low_sss), jnp.asarray(sss_low)
         ),
         dtype=np.float64,
@@ -1362,7 +1377,7 @@ def test_r3_step3_snow_temperature_from_enthalpy_is_bit_exact_and_fails_when_rev
     probe_module,
 ) -> None:
     """Pin Step 3 `snow_temperature_from_enthalpy` (`icevar.F90:412-413`) bit-for-bit."""
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
     steps = _load_step_operands(probe_module, (2, 15, 1334))
 
@@ -1376,7 +1391,7 @@ def test_r3_step3_snow_temperature_from_enthalpy_is_bit_exact_and_fails_when_rev
 
         got_fixed = np.asarray(
             jax.jit(
-                lambda e: bl_mod.snow_temperature_from_enthalpy(
+                lambda e: bl_mod._si3_502_snow_temperature_from_enthalpy(
                     e,
                     c,
                     _nemo_order=True,
@@ -1388,7 +1403,7 @@ def test_r3_step3_snow_temperature_from_enthalpy_is_bit_exact_and_fails_when_rev
         ).ravel()
         got_reverted = np.asarray(
             jax.jit(
-                lambda e: bl_mod.snow_temperature_from_enthalpy(
+                lambda e: bl_mod._si3_502_snow_temperature_from_enthalpy(
                     e,
                     c,
                     _nemo_order=True,
@@ -1462,7 +1477,7 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
     probe_module,
 ) -> None:
     """Pin Step 4 `nemo_source_round` fusion prevention (DECISION 158) across POST_ZDF and POST_DH..EXIT bit-for-bit."""
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
     steps = _load_step_operands(
         probe_module,
@@ -1601,7 +1616,7 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
 
 def test_r3_all_touched_functions_gradients_and_forward_bits() -> None:
     """Verify finite non-zero gradients, reverse == forward, and literal forward bits on all Round 3 touched functions."""
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
 
     e_s0 = jnp.asarray([[1.12e8, 1.09e8, 1.05e8]], dtype=jnp.float64)
@@ -1617,19 +1632,19 @@ def test_r3_all_touched_functions_gradients_and_forward_bits() -> None:
 
     for fn, args in (
         (
-            lambda es: bl_mod.snow_temperature_from_enthalpy(es, c),
+            lambda es: bl_mod._si3_502_snow_temperature_from_enthalpy(es, c),
             (e_s0,),
         ),
         (
-            lambda ei, si: bl_mod.ice_temperature_from_enthalpy(ei, si, c),
+            lambda ei, si: bl_mod._si3_502_ice_temperature_from_enthalpy(ei, si, c),
             (e_i0, s_i0),
         ),
         (
-            lambda ti, si: bl_mod.ice_enthalpy_from_temperature(ti, si, c),
+            lambda ti, si: bl_mod._si3_502_ice_enthalpy_from_temperature(ti, si, c),
             (t_i0, s_i0),
         ),
         (
-            lambda ts: bl_mod.snow_enthalpy_from_temperature(ts, c),
+            lambda ts: bl_mod._si3_502_snow_enthalpy_from_temperature(ts, c),
             (t_s0,),
         ),
         (
@@ -1637,7 +1652,7 @@ def test_r3_all_touched_functions_gradients_and_forward_bits() -> None:
             (t_i0, s_i0),
         ),
         (
-            lambda sb: bl_mod.option2_salinity_profile(sb, sss0),
+            lambda sb: bl_mod._si3_502_option2_salinity_profile(sb, sss0),
             (s_bulk0,),
         ),
         (
@@ -1746,12 +1761,12 @@ def test_r5_step1_nemo_ice_enthalpy_remap_is_bit_exact_and_fails_when_reverted(
     sig = inspect.signature(_piecewise_remap)
     assert "_nemo_source_round" not in sig.parameters
 
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
     steps = _load_step_operands(probe_module, (43, 704, 3898, 4230, 4922))
 
     step_nemo = jax.jit(
-        lambda ent, f: bl_mod.si3_column_step_arrays(
+        lambda ent, f: bl_mod.si3_lane_column_step_arrays(
             ent,
             f,
             card.dt_seconds,
@@ -1812,7 +1827,7 @@ def test_r5_step2_ice_density_reciprocal_in_dh_step_is_bit_exact_and_fails_when_
     probe_module,
 ) -> None:
     """Pin Statement 2 (`-e_i * r1_rhoi`, `icethd_dh.F90:254,391`) bit-for-bit at kt=4893 and fail when reverted."""
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
     steps = _load_step_operands(probe_module, (4893,))
     fr, ex = steps[4893]
@@ -1904,12 +1919,12 @@ def test_r5_step3_option2_salinity_profile_factoring_is_bit_exact_and_fails_when
     probe_module,
 ) -> None:
     """Pin Statement 3 (`option2_salinity_profile`, `icevar.F90:504-505,575-576`) bit-for-bit and fail when reverted."""
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
     steps = _load_step_operands(probe_module, (3961, 3963, 4413))
 
     step_nemo = jax.jit(
-        lambda e, f: bl_mod.si3_column_step_arrays(
+        lambda e, f: bl_mod.si3_lane_column_step_arrays(
             e,
             f,
             card.dt_seconds,
@@ -1983,7 +1998,7 @@ def test_r5_step4_harness_salprof_zsi1_zsi0_and_missing_sss_refusal(
     sss_val = np.asarray([34.0], dtype=np.float64)
     got_default = probe_module.phase2._nemo_salprof(s_mid, sss_m=sss_val)
     ref_default = np.asarray(
-        bl_mod.option2_salinity_profile(
+        bl_mod._si3_502_option2_salinity_profile(
             jnp.asarray(s_mid), jnp.asarray(sss_val)
         ),
         dtype=np.float64,
@@ -2048,7 +2063,7 @@ def test_r5_all_touched_functions_gradients_and_forward_bits(
     probe_module, monkeypatch
 ) -> None:
     """Verify finite nonzero gradients, reverse == forward, and literal 0-ULP forward bits through all Round 5 touched functions."""
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
 
     # 1. _nemo_ice_enthalpy_remap and option2_salinity_profile
@@ -2070,7 +2085,7 @@ def test_r5_all_touched_functions_gradients_and_forward_bits(
             (h_seg0, e_seg0),
         ),
         (
-            lambda sb, sss: bl_mod.option2_salinity_profile(
+            lambda sb, sss: bl_mod._si3_502_option2_salinity_profile(
                 sb, sss, _nemo_source_round=True, _nemo_salprof_factoring=True
             ),
             (s_bulk0, sss0),
@@ -2117,7 +2132,7 @@ def test_r5_all_touched_functions_gradients_and_forward_bits(
             atol=1.0e-11,
         )
 
-    # 2. Full _dh_step and si3_column_step_arrays at an active melt/remap step (kt = 4413)
+    # 2. Full _dh_step and si3_lane_column_step_arrays at an active melt/remap step (kt = 4413)
     steps = _load_step_operands(probe_module, (4413,))
     fr, ex = steps[4413]
     ent = jax.tree.map(
@@ -2131,7 +2146,7 @@ def test_r5_all_touched_functions_gradients_and_forward_bits(
     def col_tuple(h_i, e_i, s_bulk, qns):
         st = ent._replace(h_ice=h_i, e_ice=e_i, S_bulk=s_bulk)
         fc = forc._replace(qns_ice=qns)
-        tr = bl_mod.si3_column_step_arrays(st, fc, card.dt_seconds, c, si3=card.config.si3)
+        tr = bl_mod.si3_lane_column_step_arrays(st, fc, card.dt_seconds, c, si3=card.config.si3)
         return (
             tr.post_dh.h_ice,
             tr.post_dh.e_ice,
@@ -2213,7 +2228,7 @@ def test_r6_step1_dh_ice_content_accumulation_is_bit_exact_and_fails_when_revert
     probe_module,
 ) -> None:
     """Pin Round 6 Statement Family 1 (`_nemo_dh_ice_content_accumulation`, `icethd_dh.f90:138-147,243-325,340-374,378-434,480-495,521`) bit-for-bit on inexact C1D steps and snow-ice flooding, and fail when reverted."""
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
     over_bar_kts = (3996, 4014, 4092, 4400, 4413, 5241)
     steps = _load_step_operands(probe_module, over_bar_kts + (4359,))
@@ -2356,7 +2371,7 @@ def test_r6_step2_dh_snow_update_is_bit_exact_and_fails_when_reverted(
     probe_module,
 ) -> None:
     """Pin Round 6 Statement Family 2 (`_nemo_dh_snow_update`, `icethd_dh.f90:178-187,194-195,231`) bit-for-bit on all 7 snow over-bar steps and cancelling-pair steps, and fail when reverted."""
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
     snow_over_bar_kts = (4943, 4945, 5460, 5644, 5822, 5960, 5962)
     cancelling_pair_kts = (5733, 5932)
@@ -2365,7 +2380,7 @@ def test_r6_step2_dh_snow_update_is_bit_exact_and_fails_when_reverted(
     )
 
     step_nemo = jax.jit(
-        lambda ent, f: bl_mod.si3_column_step_arrays(
+        lambda ent, f: bl_mod.si3_lane_column_step_arrays(
             ent,
             f,
             card.dt_seconds,
@@ -2488,7 +2503,7 @@ def test_r6_all_touched_functions_gradients_and_forward_bits(
     probe_module, monkeypatch
 ) -> None:
     """Verify finite nonzero gradients, reverse == forward, and literal 0-ULP forward bits through all Round 6 touched functions."""
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
 
     # 1. `_nemo_ice_enthalpy_remap` with direct `content=ze_i_old` input (`icevar.f90:971-1048`)
@@ -2539,7 +2554,7 @@ def test_r6_all_touched_functions_gradients_and_forward_bits(
         atol=1.0e-11,
     )
 
-    # 2. Full `si3_column_step_arrays` and `_dh_step` across both an active
+    # 2. Full `si3_lane_column_step_arrays` and `_dh_step` across both an active
     #    ice-melt step (kt = 5241) and an active snow-precip/sublimation/melt step (kt = 5460)
     steps = _load_step_operands(probe_module, (5241, 5460))
     for kt in (5241, 5460):
@@ -2555,7 +2570,7 @@ def test_r6_all_touched_functions_gradients_and_forward_bits(
         def col_r6_tuple(h_i, h_s, e_i, e_s, sprecip, evap):
             st = ent._replace(h_ice=h_i, h_snow=h_s, e_ice=e_i, e_snow=e_s)
             fc = forc._replace(snow_precipitation=sprecip, evaporation=evap)
-            tr = bl_mod.si3_column_step_arrays(
+            tr = bl_mod.si3_lane_column_step_arrays(
                 st,
                 fc,
                 card.dt_seconds,
@@ -2660,7 +2675,7 @@ def test_r6_literal_denominators_never_zero_under_record_and_frq_m_scales_qtr_ic
     probe_module,
 ) -> None:
     """Prove `at_i_1d` (`icethd_dh.f90:179`) and `zdE` (`icethd_dh.f90:268,405`) never hit zero across all 8,760 C1D steps, and verify `frq_m` (`icethd_dh.f90:129`)."""
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
     inv_rho_i = 1.0 / c.rho_ice
 
@@ -2718,7 +2733,7 @@ def test_r6_literal_denominators_never_zero_under_record_and_frq_m_scales_qtr_ic
     # perturbing `frq_m = 0.0` or `0.25` fails bit-exactness against the oracle.
     steps = _load_step_operands(probe_module, (1, 4242))
     step_fn = jax.jit(
-        lambda s, f: bl_mod.si3_column_step_arrays(
+        lambda s, f: bl_mod.si3_lane_column_step_arrays(
             s,
             f,
             card.dt_seconds,
@@ -2789,7 +2804,7 @@ def _o8_production_exit(probe_module):
     assert cfg[("ice", "namthd_do", "rn_hinew")][0] == bl_mod._NEW_ICE_THICKNESS
     assert cfg[("ice", "namthd_do", "ln_frazil")][0] is False
     yg = probe_module.year_gate
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_si3_lane_card()
     frames, exact = yg._read_exact_steps(yg.REPLAY_ROOT, (1,))[1]
     n = len(_O8_QLEAD)
     entry = jax.tree.map(lambda v: jnp.repeat(jnp.asarray(v, jnp.float64), n, axis=0),
@@ -2800,7 +2815,7 @@ def _o8_production_exit(probe_module):
                else jnp.broadcast_to(getattr(forcing, name), (n,)))
         for name in ("qns_ice", "qsr_ice", "dqns_ice", "qtr_ice_top", "t_bottom", "sss", "evaporation",
                      "snow_precipitation", "qprec_ice", "qcn_ice_bottom", "qsb_ice_bottom", "fhld", "qlead")})
-    step = jax.jit(lambda s, f: bl_mod.si3_column_step_arrays(s, f, card.dt_seconds, card.config.ice_constants, si3=card.config.si3))
+    step = jax.jit(lambda s, f: bl_mod.si3_lane_column_step_arrays(s, f, card.dt_seconds, card.config.ice_constants, si3=card.config.si3))
     out = step(*jax.device_put((entry, forcing), jax.devices("cpu")[0])).post_do
     return np.stack([np.asarray(out.concentration), np.asarray(out.h_ice)]).view(np.uint64)
 

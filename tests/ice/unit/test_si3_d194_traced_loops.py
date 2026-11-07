@@ -202,7 +202,7 @@ def test_ssl_snow_transmission_is_not_contracted_under_jit():
     n = 4000
     args = (jnp.asarray(rng.uniform(0.2, 3.0, n)), jnp.asarray(rng.uniform(0.05, 0.6, n)),
             jnp.asarray(rng.uniform(1.0, 100.0, n)), jnp.full(n, 260.0))
-    run = lambda *a: bl._radiation(*a, rn_kappa_i=1.0, rn_kappa_s=10.0, _nlay=(10, 5))  # noqa: E731
+    run = lambda *a: bl._si3_502_radiation(*a, rn_kappa_i=1.0, rn_kappa_s=10.0, _nlay=(10, 5))  # noqa: E731
     compiled = jax.jit(run)(*args)
     with jax.disable_jit():
         eager = run(*args)

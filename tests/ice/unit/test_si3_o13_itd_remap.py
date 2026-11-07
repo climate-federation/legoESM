@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 from legoesm.ice.itd import si3_ice_itd_rem
 
 
@@ -160,7 +161,11 @@ def _oracle_column(src: dict[str, np.ndarray], col: int) -> dict[str, np.ndarray
         q["a_i"] *= src["rn_amax_2d"][col] / total
     live = q["a_i"] >= 1.0e-20
     q["h_i"] = np.where(live, q["v_i"] / np.where(live, q["a_i"], 1.0), 0.0)
-    q["t_su"] = np.where(live, ats / np.where(live, q["a_i"], 1.0), 273.15)
+    q["t_su"] = np.where(
+        live,
+        ats / np.where(live, q["a_i"], 1.0),
+        NEMO_SI3_CONSTANTS_CONFIG.T0,
+    )
     return q
 
 
@@ -171,7 +176,9 @@ def _call_kwargs(values: dict[str, np.ndarray]) -> dict[str, jax.Array]:
 def _model(values: dict[str, jax.Array]) -> dict[str, jax.Array]:
     return si3_ice_itd_rem(
         **values, nn_icesal=4, ln_pnd=True, ln_pnd_lids=True,
-        epsi10=1.0e-10, epsi20=1.0e-20, rt0=273.15,
+        epsi10=NEMO_SI3_CONSTANTS_CONFIG.epsi10,
+        epsi20=NEMO_SI3_CONSTANTS_CONFIG.epsi20,
+        rt0=NEMO_SI3_CONSTANTS_CONFIG.T0,
     )
 
 

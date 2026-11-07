@@ -453,7 +453,7 @@ def _ice_itd_reb(
         from legoesm.ice.itd import SI3IceCorConfig, si3_ice_itd_reb
 
         cor_cfg = SI3IceCorConfig(
-            rn_himin=0.1,
+            rn_himin=0.1,  # coeff-ok: frozen ORCA2_SAS_ICE rn_himin deck value
             rn_simin=config.rn_simin,
             rn_sinew=config.rn_sinew,
             nn_icesal=config.nn_icesal,

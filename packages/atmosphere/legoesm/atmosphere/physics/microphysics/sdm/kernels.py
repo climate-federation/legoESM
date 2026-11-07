@@ -180,7 +180,6 @@ _KINETIC_8 = 8.0
 _CUNNINGHAM_A = 1.2570
 _CUNNINGHAM_B = 0.40
 _CUNNINGHAM_C = 0.550
-_BEARD_32 = 1.5
 _BEARD_COLLISION_8 = 8.0
 _STOKES_18 = 18.0
 
@@ -349,19 +348,21 @@ def brownian_kernel(
 
     # Diffusivities [m²/s] and thermal speeds [m/s].
     dcoef = kB * T / (3.0 * jnp.pi * visc)
-    D1 = dcoef * slip1 / d1
-    D2 = dcoef * slip2 / d2
+    D1 = dcoef * (slip1 / d1)
+    D2 = dcoef * (slip2 / d2)
     vcoef = _KINETIC_8 * kB * T / jnp.pi
     cb1 = jnp.sqrt(vcoef / m1)
     cb2 = jnp.sqrt(vcoef / m2)
 
     # Droplet mean free paths and Fuchs g length terms.
-    lam1 = (_KINETIC_8 / jnp.pi) * D1 / cb1
-    lam2 = (_KINETIC_8 / jnp.pi) * D2 / cb2
-    g1 = ((d1 + lam1) ** 3
-          - jnp.exp(_BEARD_32 * jnp.log(d1 * d1 + lam1 * lam1))) / (3.0 * d1 * lam1) - d1
-    g2 = ((d2 + lam2) ** 3
-          - jnp.exp(_BEARD_32 * jnp.log(d2 * d2 + lam2 * lam2))) / (3.0 * d2 * lam2) - d2
+    # ERF's operation order, incl. x^1.5 = x*sqrt(x) (exp(1.5 log x) is off
+    # by up to 4.7e-12 relative after the cancellation in g).
+    lam1 = (_KINETIC_8 / jnp.pi) * (D1 / cb1)
+    lam2 = (_KINETIC_8 / jnp.pi) * (D2 / cb2)
+    s1 = d1 * d1 + lam1 * lam1
+    s2 = d2 * d2 + lam2 * lam2
+    g1 = ((d1 + lam1) * (d1 + lam1) * (d1 + lam1) - s1 * jnp.sqrt(s1)) / (3.0 * d1 * lam1) - d1
+    g2 = ((d2 + lam2) * (d2 + lam2) * (d2 + lam2) - s2 * jnp.sqrt(s2)) / (3.0 * d2 * lam2) - d2
 
     sumdia = d1 + d2
     sumd = D1 + D2

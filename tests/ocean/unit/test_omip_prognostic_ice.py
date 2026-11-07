@@ -726,9 +726,8 @@ def test_runoff_component_vars_exclude_isf():
     """Fix D: --runoff + --isf must not double-count the ice-shelf melt.  The
     loader's component list drops sornfisf when ISF is separately applied, and
     the runner passes exclude_isf=args.isf."""
-    assert R._runoff_component_vars(False) == ("sorunoff", "sornfisf",
-                                               "Icb_flux")
-    assert R._runoff_component_vars(True) == ("sorunoff", "Icb_flux")
+    assert R._runoff_component_vars(False) == ("sorunoff", "sornfisf")
+    assert R._runoff_component_vars(True) == ("sorunoff",)
     import inspect
     src = inspect.getsource(R.main)
     assert "exclude_isf=args.isf" in src

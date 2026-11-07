@@ -16,11 +16,15 @@ Monin-Obukhov similarity theory (MOST). Three schemes:
    floors, height adjustment of t/q.  Oracle-matched by
    tests/core/test_aerobulk_ncar_oracle.py.
 
-RULE 5 (#2241): coare3's Charnock wind ramp and gustiness onset are smooth by
-default (``coare_charnock_ramp_width``, ``coare_gust_onset_width``; 0 = the
-oracle).  Still hard as in AeroBulk, pending user decisions (#2241): the
-dt/dq sign floors (both schemes), and on large_yeager the neutral Stanton
-switches (first guess and loop) and the 33 m/s drag cutoff.
+RULE 5 (#2241): coare3's Charnock wind ramp and gustiness onset, and
+large_yeager's neutral Stanton switches (first guess and loop) and 33 m/s drag
+cutoff, are smooth by default (``coare_charnock_ramp_width``,
+``coare_gust_onset_width``, ``large_yeager_neutral_width``,
+``large_yeager_dthv_width``, ``large_yeager_cd_cutoff_width``; 0 = the
+oracle).  The three large_yeager widths are fields of every component config
+that selects a bulk scheme, passed by each caller via
+:func:`large_yeager_widths` (the 2 m diagnostic still uses the defaults).  coare3's dt/dq sign floors stay hard as in AeroBulk (division guard,
+user decision 2026-10-31; KNOWN DIFFERENCE, see :func:`_sign_floor`).
 
 The iterative Obukhov length loop uses ``jax.lax.fori_loop`` for
 full JAX differentiability (compatible with jax.grad, jax.jit).
@@ -63,6 +67,7 @@ cross-checked against CliMA ``SurfaceFluxes.jl`` (``UniversalFunctions``).
 
 from __future__ import annotations
 
+import functools
 import math
 import numbers
 from typing import NamedTuple
@@ -308,7 +313,9 @@ def validate_stability_scheme(stability_scheme: str) -> None:
         )
 
 
-def large_yeager_neutral_cd(wind, *, nemo_parity: bool = False):
+def large_yeager_neutral_cd(
+    wind, *, nemo_parity: bool = False, nemo_source_exact: bool = False
+):
     """Large & Yeager (2009) Eq. 6 neutral 10-m drag coefficient ``C_DN``.
 
     .. math::
@@ -330,8 +337,41 @@ def large_yeager_neutral_cd(wind, *, nemo_parity: bool = False):
     no upper clip, so the calm-wind ``2.7/U`` enhancement (up to ``5.54e-3``
     at the 0.5 m/s floor) is kept.  The two conventions differ only for
     ``U < ~0.97 m/s`` (where the 3.0e-3 clip binds) and ``U > 33 m/s``.
+
+    ``nemo_parity=True`` applies NO wind floor: NEMO's ``cd_n10_ncar``
+    (sbcblk_algo_ncar.F90:242-255) has none, and its caller ``turb_ncar``
+    floors the argument itself -- ``MAX(0.5, U_zu)`` for the first guess
+    (:115) and ``MAX(0.25, UN10)`` inside the iteration (:192).  Re-flooring
+    at 0.5 here overrode the 0.25 neutral-wind floor on calm cells (tier-3
+    ORCA1 audit BLK D1: Cd 86% off on 67 cells).  Callers passing
+    ``nemo_parity=True`` MUST therefore supply a positive, already-floored
+    wind (both ``ncar_transfer_coefficients`` call sites do).
     """
-    U = jnp.maximum(jnp.asarray(wind), 0.5)
+    if nemo_source_exact:
+        if not nemo_parity:
+            raise ValueError("nemo_source_exact requires nemo_parity=True")
+        from legoesm.core.source_rounding import (
+            nemo_fortran_sign as fortran_sign,
+            nemo_source_barrier as B,
+            nemo_source_round as R,
+        )
+
+        U = jnp.asarray(wind)
+        U3 = R(U * U * U)
+        U6 = R(U3 * U3)
+        inverse_wind = R(2.7 / U)
+        linear_wind = R(U / B(13.09))
+        high_wind = R(3.14807e-10 * U6)
+        low = R(R(R(inverse_wind + 0.142) + linear_wind) - high_wind)
+        gt33 = R(0.5 + fortran_sign(0.5, R(U - 33.0)))
+        below = R(R(1.0 - gt33) * low)
+        above = R(gt33 * 2.34)
+        C_DN = R(1.0e-3 * R(below + above))
+        return R(jnp.maximum(C_DN, 0.1e-3))
+
+    U = jnp.asarray(wind)
+    if not nemo_parity:
+        U = jnp.maximum(U, 0.5)
     C_DN = (
         2.7 / U + 0.142 + U / 13.09 - 3.14807e-10 * U ** 6
     ) * 1e-3
@@ -472,7 +512,8 @@ def _stable_psi_h(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
 
 def psi_m(zeta, stability_scheme="dyer1974", *,
           unstable_gamma=_DYER_UNSTABLE_GAMMA,
-          stable_beta=_DYER_STABLE_BETA):
+          stable_beta=_DYER_STABLE_BETA,
+          nemo_source_exact: bool = False):
     """MOST momentum stability function psi_m(zeta).
 
     Convention zeta = z/L (>0 stable). Unstable (zeta < 0) is Businger-Dyer for
@@ -502,6 +543,29 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     the unstable form's exact 0.
     """
     validate_stability_scheme(stability_scheme)
+    if nemo_source_exact:
+        if stability_scheme != "dyer1974":
+            raise ValueError(
+                "nemo_source_exact supports stability_scheme='dyer1974' only"
+            )
+        from legoesm.core import transcendentals as tx
+        from legoesm.core.source_rounding import (
+            nemo_fortran_sign as fortran_sign,
+            nemo_source_round as R,
+        )
+
+        z = jnp.asarray(zeta, dtype=jnp.float64)
+        x2 = R(jnp.sqrt(jnp.abs(1.0 - 16.0 * z)))
+        x2 = R(jnp.maximum(x2, 1.0))
+        x = R(jnp.sqrt(x2))
+        unstable = R(
+            2.0 * tx.log((1.0 + x) * 0.5)
+            + tx.log((1.0 + x2) * 0.5)
+            - 2.0 * tx.atan(x) + jnp.pi * 0.5
+        )
+        stable_value = R(-5.0 * z)
+        stable = R(0.5 + fortran_sign(0.5, z))
+        return R(stable * stable_value + (1.0 - stable) * unstable)
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
     # Safe inputs: each branch only sees valid arguments
     # where (not min/max): at zeta = 0 the selected (unstable) branch gets the
@@ -533,7 +597,8 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
 
 def psi_h(zeta, stability_scheme="dyer1974", *,
           unstable_gamma=_DYER_UNSTABLE_GAMMA,
-          stable_beta=_DYER_STABLE_BETA):
+          stable_beta=_DYER_STABLE_BETA,
+          nemo_source_exact: bool = False):
     """MOST heat/moisture stability function psi_h(zeta).
 
     Convention zeta = z/L (>0 stable). Unstable (zeta < 0) is Businger-Dyer for
@@ -551,6 +616,24 @@ def psi_h(zeta, stability_scheme="dyer1974", *,
     SurfaceFluxes.jl v1.5.1 (oracle: tests/core/test_surfacefluxes_psi_oracle.py).
     """
     validate_stability_scheme(stability_scheme)
+    if nemo_source_exact:
+        if stability_scheme != "dyer1974":
+            raise ValueError(
+                "nemo_source_exact supports stability_scheme='dyer1974' only"
+            )
+        from legoesm.core import transcendentals as tx
+        from legoesm.core.source_rounding import (
+            nemo_fortran_sign as fortran_sign,
+            nemo_source_round as R,
+        )
+
+        z = jnp.asarray(zeta, dtype=jnp.float64)
+        x2 = R(jnp.sqrt(jnp.abs(1.0 - 16.0 * z)))
+        x2 = R(jnp.maximum(x2, 1.0))
+        unstable = R(2.0 * tx.log(0.5 * (1.0 + x2)))
+        stable_value = R(-5.0 * z)
+        stable = R(0.5 + fortran_sign(0.5, z))
+        return R(stable * stable_value + (1.0 - stable) * unstable)
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
     # where (not min/max): at zeta = 0 the selected (unstable) branch gets the
     # full derivative instead of half of it at a min/max tie.
@@ -808,7 +891,16 @@ def resolve_gustiness_w_zi(gustiness_w_zi, scheme) -> float:
 # ============================================================================
 
 def _sign_floor(x, x_min):
-    """Fortran ``SIGN(MAX(ABS(x), x_min), x)`` (gfortran: -0.0 counts negative)."""
+    """Fortran ``SIGN(MAX(ABS(x), x_min), x)`` (gfortran: -0.0 counts negative).
+
+    Kept hard as in AeroBulk (user decision 2026-10-31, #2241): it is the
+    division guard of ``Ch = r*ts/dt`` / ``Ce = r*qs/dq`` in TURB_COARE3P0.
+    KNOWN DIFFERENCE from RULE 5: a jump of ``2*x_min`` (2e-6 K in dt, 2e-9
+    kg/kg in dq) where the air-sea difference crosses zero.  It flips the
+    sign of theta* (q*) at that state, which changes 1/L by that scale's
+    tiny buoyancy contribution; the derivative there is undefined.  Not a gap
+    to the oracle (same form).
+    """
     m = jnp.maximum(jnp.abs(x), x_min)
     return jnp.where(jnp.signbit(x), -m, m)
 
@@ -1053,21 +1145,76 @@ _AB_NCAR_ZETA_ABS_MAX = 10.0
 _AB_NCAR_CHN_STABLE = 18.0     # 1e-3 sqrt(CdN) * 18   (zeta >= 0)
 _AB_NCAR_CHN_UNSTABLE = 32.7   # 1e-3 sqrt(CdN) * 32.7 (zeta < 0)
 _AB_NCAR_CEN = 34.6            # 1e-3 sqrt(CdN) * 34.6
+_AB_NCAR_CD_CUTOFF_U = 33.0    # cd_n10_ncar: 2.34e-3 plateau for U >= 33 m/s
+_AB_NCAR_CD_PLATEAU = 2.34
+# RULE 5 smooth defaults (#2241, user decisions 2026-10-31); 0.0 = AeroBulk's
+# hard switch in each case.
+# Half-width in zeta_u of the compact quintic blend of the stable/unstable
+# neutral Stanton numbers (18 vs 32.7) inside the iteration (the N6 form).
+NCAR_NEUTRAL_WIDTH = 1.0e-3
+# Half-width [K] of the same blend in dthv for the first guess.
+NCAR_DTHV_WIDTH = 1.0e-2
+# Width [m/s] of the one-sided quintic blend of the LY09 polynomial into the
+# 2.34e-3 plateau over [33 - w, 33] m/s (the plateau stays exact from 33 m/s).
+NCAR_CD_CUTOFF_WIDTH = 0.5
+# Config-field name -> default of the three widths above (#2241).
+LARGE_YEAGER_WIDTH_DEFAULTS = {
+    "large_yeager_neutral_width": NCAR_NEUTRAL_WIDTH,
+    "large_yeager_dthv_width": NCAR_DTHV_WIDTH,
+    "large_yeager_cd_cutoff_width": NCAR_CD_CUTOFF_WIDTH,
+}
 
 
-def _cd_n10_ncar(w10):
+def large_yeager_widths(config) -> dict:
+    """The three Large-Yeager smooth-switch widths a component config carries,
+    as :func:`compute_most_fluxes` keyword arguments (#2241: config fields, not
+    call-site defaults).  Missing fields raise ``AttributeError``."""
+    return {k: getattr(config, k) for k in LARGE_YEAGER_WIDTH_DEFAULTS}
+
+
+def _ncar_stable_weight(x, width):
+    """Weight of the stable neutral Stanton number (18) in TURB_NCAR.
+
+    ``x`` is ``zeta_u`` in the iteration or ``dthv`` [K] in the first guess.
+    ``width == 0``: AeroBulk's ``x >= 0`` step.  ``width = w > 0`` (RULE 5):
+    ``smoothstep_quintic((x + w) / (2 w))``, C2, exactly 0 for ``x <= -w`` and
+    1 for ``x >= w`` (0.5 at ``x = 0``, where the hard step is 1).
+    """
+    if width == 0.0:
+        return jnp.where(x >= 0.0, 1.0, 0.0)
+    return smoothstep_quintic((x + width) / (2.0 * width))
+
+
+def _cd_n10_ncar(w10, cutoff_width=NCAR_CD_CUTOFF_WIDTH):
     """AeroBulk ``cd_n10_ncar``: LY09 Eq. 6 neutral 10 m drag, 2.34e-3 for
-    U >= 33 m/s, floored at Cx_min.  No wind floor (callers floor U)."""
-    w6 = w10 * w10 * w10
-    w6 = w6 * w6
-    poly = 2.7 / w10 + 0.142 + w10 / 13.09 - 3.14807e-10 * w6
-    cd = 1.0e-3 * jnp.where(w10 >= 33.0, 2.34, poly)
-    return jnp.maximum(cd, _AB_CX_MIN)
+    U >= 33 m/s, floored at Cx_min.  No wind floor (callers floor U).
+
+    ``cutoff_width == 0``: AeroBulk's hard switch at 33 m/s (a 0.074 % jump,
+    2.33827 -> 2.34).  ``cutoff_width = w > 0`` (RULE 5 default 0.5 m/s):
+    ``s * 2.34 + (1 - s) * poly`` with ``s = smoothstep_quintic((U - 33 + w)/w)``,
+    exactly the polynomial below ``33 - w`` and exactly 2.34 from 33 m/s.  The
+    smooth path evaluates the polynomial at ``min(U, 33)`` (only its weight
+    ``1 - s = 0`` reaches it above 33 m/s), so a huge wind cannot overflow
+    its ``U**6`` term into ``0 * inf = NaN``.
+    """
+    def _poly(w):
+        w6 = w * w * w
+        w6 = w6 * w6
+        return 2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w6
+
+    if cutoff_width == 0.0:
+        cd = jnp.where(w10 >= _AB_NCAR_CD_CUTOFF_U, _AB_NCAR_CD_PLATEAU, _poly(w10))
+    else:
+        s = smoothstep_quintic((w10 - _AB_NCAR_CD_CUTOFF_U + cutoff_width) / cutoff_width)
+        cd = (s * _AB_NCAR_CD_PLATEAU
+              + (1.0 - s) * _poly(jnp.minimum(w10, _AB_NCAR_CD_CUTOFF_U)))
+    return jnp.maximum(1.0e-3 * cd, _AB_CX_MIN)
 
 
 def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_scheme="dyer1974",
                unstable_gamma=_DYER_UNSTABLE_GAMMA, stable_beta=_DYER_STABLE_BETA,
-               coeff_cap=None):
+               coeff_cap=None, neutral_width=NCAR_NEUTRAL_WIDTH, dthv_width=NCAR_DTHV_WIDTH,
+               cd_cutoff_width=NCAR_CD_CUTOFF_WIDTH):
     """AeroBulk 1.0.0 ``TURB_NCAR`` (Large & Yeager 2004, 2009).
 
     ``W2`` is the squared wind module; ``equal`` is AeroBulk's
@@ -1082,18 +1229,12 @@ def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_sche
     last iteration, as AeroBulk returns it), the AeroBulk-sign scales theta*,
     q*, 1/L and the last-iteration relative u* change.
     """
-    def _pm(z):
-        return psi_m(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta)
-
-    def _ph(z):
-        return psi_h(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta)
-
     Ub = jnp.maximum(_AB_NCAR_UB_MIN, _safe_sqrt(W2))
     log_zt_zu = jnp.log(z_t / z_u)
     log_zu_10 = jnp.log(z_u / 10.0)
     dthv = t_zt * (1.0 + _AB_RCTV0 * q_zt) - T_s * (1.0 + _AB_RCTV0 * q_s)
-    stab = jnp.where(dthv >= 0.0, 1.0, 0.0)
-    CdN = _cd_n10_ncar(Ub)
+    stab = _ncar_stable_weight(dthv, dthv_width)
+    CdN = _cd_n10_ncar(Ub, cd_cutoff_width)
     sqrt_CdN = jnp.sqrt(CdN)
     Cd = CdN
     Ce = jnp.maximum(1.0e-3 * (_AB_NCAR_CEN * sqrt_CdN), _AB_CX_MIN)
@@ -1104,58 +1245,91 @@ def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_sche
     q_zu = jnp.maximum(q_zt, _AB_Q_MIN)
     zero = jnp.zeros_like(Ub)
 
-    def body(_, c):
-        Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, _us, _ts, _qs, _inv_L, _resid = c
-        dt = t_zu - T_s
-        dq = q_zu - q_s
-        us = sqrt_Cd * Ub
-        ts = Ch / sqrt_Cd * dt
-        qs = Ce / sqrt_Cd * dq
-        inv_L = _one_on_l_aerobulk(t_zu, q_zu, us, ts, qs)
-        zeta_u = jnp.clip(z_u * inv_L, -_AB_NCAR_ZETA_ABS_MAX, _AB_NCAR_ZETA_ABS_MAX)
-        psih_u = _ph(zeta_u)
-        if equal is not True:
-            zeta_t = jnp.clip(z_t * inv_L, -_AB_NCAR_ZETA_ABS_MAX, _AB_NCAR_ZETA_ABS_MAX)
-            tmp = log_zt_zu + psih_u - _ph(zeta_t)
-            t_zu = jnp.where(equal, t_zu, t_zt - ts / KAPPA * tmp)
-            q_zu = jnp.where(equal, q_zu, jnp.maximum(0.0, q_zt - qs / KAPPA * tmp))
-        psim = _pm(zeta_u)
-        # UN10_from_CD: sqrt(Cd) Ub / kappa * ln(10 / z0_from_Cd(zu, Cd, psi_m))
-        sq = jnp.sqrt(Cd)
-        z0 = z_u * jnp.exp(-(KAPPA / sq + psim))
-        un10 = jnp.maximum(_AB_NCAR_UN10_MIN, sq * Ub / KAPPA * jnp.log(10.0 / z0))
-        CdN = _cd_n10_ncar(un10)
-        sqrt_CdN = jnp.sqrt(CdN)
-        tmp = 1.0 + sqrt_CdN / KAPPA * (log_zu_10 - psim)
-        Cd = jnp.maximum(CdN / (tmp * tmp), _AB_CX_MIN)
-        sqrt_Cd = jnp.sqrt(Cd)
-        tmp = (log_zu_10 - psih_u) / KAPPA / sqrt_CdN
-        tmp2 = sqrt_Cd / sqrt_CdN
-        stab = jnp.where(zeta_u >= 0.0, 1.0, 0.0)
-        ChN = 1.0e-3 * sqrt_CdN * (_AB_NCAR_CHN_STABLE * stab
-                                   + _AB_NCAR_CHN_UNSTABLE * (1.0 - stab))
-        CeN = 1.0e-3 * (_AB_NCAR_CEN * sqrt_CdN)
-        Ch = jnp.maximum(ChN * tmp2 / (1.0 + ChN * tmp), _AB_CX_MIN)
-        Ce = jnp.maximum(CeN * tmp2 / (1.0 + CeN * tmp), _AB_CX_MIN)
-        if coeff_cap is not None:
-            sqrt_Cd = jnp.minimum(sqrt_Cd, coeff_cap)
-            Cd = sqrt_Cd * sqrt_Cd
-            Ch = jnp.minimum(Ch, coeff_cap * sqrt_Cd)
-            Ce = jnp.minimum(Ce, coeff_cap * sqrt_Cd)
-        resid = jnp.abs(sqrt_Cd * Ub - us) / jnp.maximum(jnp.abs(sqrt_Cd * Ub), 1e-6)
-        return (Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, us, ts, qs, inv_L, resid)
-
     carry = (Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, zero, zero, zero, zero, jnp.ones_like(Ub))
+    dtypes = tuple(jnp.result_type(c) for c in carry)
+    carry = tuple(jnp.asarray(c).astype(d) for c, d in zip(carry, dtypes))
+    k = dict(T_s=T_s, q_s=q_s, Ub=Ub, t_zt=t_zt, q_zt=q_zt, z_u=z_u, z_t=z_t,
+             equal=equal, log_zt_zu=log_zt_zu, log_zu_10=log_zu_10,
+             stability_scheme=stability_scheme, unstable_gamma=unstable_gamma,
+             stable_beta=stable_beta, coeff_cap=coeff_cap,
+             neutral_width=neutral_width, cd_cutoff_width=cd_cutoff_width)
+    # Key on type and repr too: 5.0 vs np.float64(5.0) promote differently,
+    # and 0.0 == -0.0, so equality alone could reuse the wrong literal.
+    static = tuple((n, type(v), repr(v), v) for n, v in k.items() if _is_static_value(v))
+    dyn = {n: v for n, v in k.items() if not _is_static_value(v)}
+    Cd, Ch, Ce, _sqrt_Cd, t_zu, q_zu, us, ts, qs, inv_L, resid = _ncar_iterate(
+        carry, dyn, n_iter=n_iter, static=static)
+    return dict(Cd=Cd, Ch=Ch, Ce=Ce, t_zu=t_zu, q_zu=q_zu, Ub=Ub, us=us, ts=ts, qs=qs,
+                inv_L=inv_L, resid=resid)
+
+
+def _is_static_value(v):
+    return v is None or isinstance(v, (str, bool, numbers.Number))
+
+
+# One module-level jit, keyed on the Python scalars, so an eager caller (the 2 m
+# temperature diagnostic) reuses the compiled loop; a per-call closure body made
+# the eager fori_loop retrace and recompile on every call.
+@functools.partial(jax.jit, static_argnames=("n_iter", "static"))
+def _ncar_iterate(carry, dyn, *, n_iter, static):
+    k = {**{n: v for n, _, _, v in static}, **dyn}
     dtypes = tuple(jnp.result_type(c) for c in carry)
 
     def body_pinned(i, c):
-        return tuple(jnp.asarray(o).astype(d) for o, d in zip(body(i, c), dtypes))
+        return tuple(jnp.asarray(o).astype(d)
+                     for o, d in zip(_ncar_body(c, **k), dtypes))
 
-    carry = tuple(jnp.asarray(c).astype(d) for c, d in zip(carry, dtypes))
-    Cd, Ch, Ce, _sqrt_Cd, t_zu, q_zu, us, ts, qs, inv_L, resid = jax.lax.fori_loop(
-        0, n_iter, body_pinned, carry)
-    return dict(Cd=Cd, Ch=Ch, Ce=Ce, t_zu=t_zu, q_zu=q_zu, Ub=Ub, us=us, ts=ts, qs=qs,
-                inv_L=inv_L, resid=resid)
+    return jax.lax.fori_loop(0, n_iter, body_pinned, carry)
+
+
+def _ncar_body(c, *, T_s, q_s, Ub, t_zt, q_zt, z_u, z_t, equal, log_zt_zu,
+               log_zu_10, stability_scheme, unstable_gamma, stable_beta,
+               coeff_cap, neutral_width, cd_cutoff_width):
+    def _pm(z):
+        return psi_m(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+
+    def _ph(z):
+        return psi_h(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+
+    Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, _us, _ts, _qs, _inv_L, _resid = c
+    dt = t_zu - T_s
+    dq = q_zu - q_s
+    us = sqrt_Cd * Ub
+    ts = Ch / sqrt_Cd * dt
+    qs = Ce / sqrt_Cd * dq
+    inv_L = _one_on_l_aerobulk(t_zu, q_zu, us, ts, qs)
+    zeta_u = jnp.clip(z_u * inv_L, -_AB_NCAR_ZETA_ABS_MAX, _AB_NCAR_ZETA_ABS_MAX)
+    psih_u = _ph(zeta_u)
+    if equal is not True:
+        zeta_t = jnp.clip(z_t * inv_L, -_AB_NCAR_ZETA_ABS_MAX, _AB_NCAR_ZETA_ABS_MAX)
+        tmp = log_zt_zu + psih_u - _ph(zeta_t)
+        t_zu = jnp.where(equal, t_zu, t_zt - ts / KAPPA * tmp)
+        q_zu = jnp.where(equal, q_zu, jnp.maximum(0.0, q_zt - qs / KAPPA * tmp))
+    psim = _pm(zeta_u)
+    # UN10_from_CD: sqrt(Cd) Ub / kappa * ln(10 / z0_from_Cd(zu, Cd, psi_m))
+    sq = jnp.sqrt(Cd)
+    z0 = z_u * jnp.exp(-(KAPPA / sq + psim))
+    un10 = jnp.maximum(_AB_NCAR_UN10_MIN, sq * Ub / KAPPA * jnp.log(10.0 / z0))
+    CdN = _cd_n10_ncar(un10, cd_cutoff_width)
+    sqrt_CdN = jnp.sqrt(CdN)
+    tmp = 1.0 + sqrt_CdN / KAPPA * (log_zu_10 - psim)
+    Cd = jnp.maximum(CdN / (tmp * tmp), _AB_CX_MIN)
+    sqrt_Cd = jnp.sqrt(Cd)
+    tmp = (log_zu_10 - psih_u) / KAPPA / sqrt_CdN
+    tmp2 = sqrt_Cd / sqrt_CdN
+    stab = _ncar_stable_weight(zeta_u, neutral_width)
+    ChN = 1.0e-3 * sqrt_CdN * (_AB_NCAR_CHN_STABLE * stab
+                               + _AB_NCAR_CHN_UNSTABLE * (1.0 - stab))
+    CeN = 1.0e-3 * (_AB_NCAR_CEN * sqrt_CdN)
+    Ch = jnp.maximum(ChN * tmp2 / (1.0 + ChN * tmp), _AB_CX_MIN)
+    Ce = jnp.maximum(CeN * tmp2 / (1.0 + CeN * tmp), _AB_CX_MIN)
+    if coeff_cap is not None:
+        sqrt_Cd = jnp.minimum(sqrt_Cd, coeff_cap)
+        Cd = sqrt_Cd * sqrt_Cd
+        Ch = jnp.minimum(Ch, coeff_cap * sqrt_Cd)
+        Ce = jnp.minimum(Ce, coeff_cap * sqrt_Cd)
+    resid = jnp.abs(sqrt_Cd * Ub - us) / jnp.maximum(jnp.abs(sqrt_Cd * Ub), 1e-6)
+    return (Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, us, ts, qs, inv_L, resid)
 
 
 # ============================================================================
@@ -1187,12 +1361,16 @@ def compute_most_fluxes(
     stability_scheme="dyer1974",
     return_convergence=False,
     *,
+    return_wind_speed=False,
     unstable_gamma=_DYER_UNSTABLE_GAMMA,
     stable_beta=_DYER_STABLE_BETA,
     z0h_z0_ratio=_Z0H_Z0_RATIO_DEFAULT,
     coare_neutral_width=COARE_NEUTRAL_WIDTH,
     coare_charnock_ramp_width=COARE_CHARNOCK_RAMP_WIDTH,
     coare_gust_onset_width=COARE_GUST_ONSET_WIDTH,
+    large_yeager_neutral_width=NCAR_NEUTRAL_WIDTH,
+    large_yeager_dthv_width=NCAR_DTHV_WIDTH,
+    large_yeager_cd_cutoff_width=NCAR_CD_CUTOFF_WIDTH,
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -1351,6 +1529,35 @@ def compute_most_fluxes(
         (RULE 5); ``0.0`` is AeroBulk's form (infinite slope at x = 0+).
         KNOWN DIFFERENCE (#2241, same fixture, this width alone): max relative
         gap 3.9e-5 in stress, 2.7e-5 in heat fluxes, 3.1e-5 in u*.
+    large_yeager_neutral_width : float
+        ``large_yeager`` only: half-width in zeta_u of the compact quintic blend
+        (:func:`_ncar_stable_weight`) of the stable/unstable neutral Stanton
+        numbers (18 vs 32.7) inside the iteration (static Python float).
+        Default ``NCAR_NEUTRAL_WIDTH`` = 1e-3 (RULE 5); ``0.0`` is AeroBulk's
+        hard ``zeta_u >= 0`` switch.  KNOWN DIFFERENCE (#2241, measured
+        2026-10-31 on the 1549-state AeroBulk TURB_NCAR fixture, this width
+        alone): 73 states at z_t = 10 m and 96 at 2 m move by more than 1e-9
+        relative, mostly high-wind ones (small |zeta| at every stratification);
+        max sensible-heat gap 45.7 W/m2 (0.33 relative) at 10 m and 28.9 W/m2
+        (0.72) at 2 m; max relative gap in stress 3.6e-3 / 3.9e-2, latent heat
+        3.8e-3 / 2.2e-2, u* 5.4e-3 / 1.9e-2 (10 m / 2 m).
+    large_yeager_dthv_width : float
+        ``large_yeager`` only: half-width [K] of the same blend in the first
+        guess, across ``dthv = 0`` (virtual potential temperature air - sea).
+        Default ``NCAR_DTHV_WIDTH`` = 1e-2 (RULE 5); ``0.0`` is AeroBulk's
+        ``dthv >= 0``.  KNOWN DIFFERENCE (same fixture, this width alone): 1
+        state at 10 m and 3 at 2 m move by more than 1e-9; max relative gap
+        7.9e-7 (sensible heat, 2 m).
+    large_yeager_cd_cutoff_width : float
+        ``large_yeager`` only: width [m/s] of the one-sided quintic blend of the
+        LY09 drag polynomial into the 2.34e-3 plateau over ``[33 - w, 33]``
+        (:func:`_cd_n10_ncar`; static Python float, ``0 <= w <= 33``).  Default
+        ``NCAR_CD_CUTOFF_WIDTH`` = 0.5 (RULE 5); ``0.0`` is AeroBulk's hard
+        switch.  KNOWN DIFFERENCE (same fixture, this width alone): 5 states
+        move; max relative gap 7.4e-4 in stress, 3.7e-4 in heat fluxes and u*.
+        With all three defaults: 77 states (10 m) / 101 (2 m), maxima as for
+        the neutral width alone; per state in
+        ``tests/core/oracle_fixtures/aerobulk_ncar_default_gap.npz``.
     return_convergence : bool
         When True, additionally return the MOST fixed-point convergence
         residual (the relative change in ``u*`` over the FINAL iteration).
@@ -1466,7 +1673,11 @@ def compute_most_fluxes(
 
     for _name, _w, _w_max in (("coare_charnock_ramp_width", coare_charnock_ramp_width,
                                _COARE_CHARNOCK_U_HI - _COARE_CHARNOCK_U_LO),
-                              ("coare_gust_onset_width", coare_gust_onset_width, math.inf)):
+                              ("coare_gust_onset_width", coare_gust_onset_width, math.inf),
+                              ("large_yeager_neutral_width", large_yeager_neutral_width, math.inf),
+                              ("large_yeager_dthv_width", large_yeager_dthv_width, math.inf),
+                              ("large_yeager_cd_cutoff_width", large_yeager_cd_cutoff_width,
+                               _AB_NCAR_CD_CUTOFF_U)):
         if not (isinstance(_w, numbers.Real) and math.isfinite(_w) and 0.0 <= _w <= _w_max):
             raise ValueError(f"{_name} must be a finite float in [0, {_w_max}], got {_w!r}")
 
@@ -1495,7 +1706,8 @@ def compute_most_fluxes(
                 f"got gustiness_w_zi={gustiness_w_zi!r}.")
         _coare = _turb_ncar(
             u_rel ** 2 + v_rel ** 2, T_atm, q_atm, T_sfc, q_sfc, z_u, z_t, _equal,
-            n_iter, stability_scheme, unstable_gamma, stable_beta, _coeff_cap)
+            n_iter, stability_scheme, unstable_gamma, stable_beta, _coeff_cap,
+            large_yeager_neutral_width, large_yeager_dthv_width, large_yeager_cd_cutoff_width)
         u_star = _coare["us"]
         theta_star = -_coare["ts"]
         q_star_val = -_coare["qs"]
@@ -1688,6 +1900,11 @@ def compute_most_fluxes(
         shflx = rho * _cp * _c["Ch"] * _c["Ub"] * (T_sfc - _c["t_zu"])
         lhflx = rho * _L * _c["Ce"] * _c["Ub"] * (q_sfc - _c["q_zu"])
 
+    # ``return_wind_speed``: the speed THIS solver put in its flux formulas
+    # (U_eff incl. gustiness/floor, or AeroBulk's Ub), appended LAST, for a
+    # closure that must pair it with this u* (WRF MYNN's ust**2/wspd drag).
+    _wind_out = (U_eff_final,) if return_wind_speed else ()
+
     if return_2m:
         # Air temperature at the diagnostic height (default 2 m) from the
         # converged MOST similarity profile: T(z) = T_sfc − (θ*/κ)·[ln(z/z0t) −
@@ -1731,12 +1948,13 @@ def compute_most_fluxes(
         hi = jnp.maximum(T_atm, T_sfc)
         T_2m = jnp.clip(T_2m, lo, hi)
         if return_convergence:
-            return tau_x, tau_y, shflx, lhflx, u_star, T_2m, most_residual
-        return tau_x, tau_y, shflx, lhflx, u_star, T_2m
+            return (tau_x, tau_y, shflx, lhflx, u_star, T_2m, most_residual
+                    ) + _wind_out
+        return (tau_x, tau_y, shflx, lhflx, u_star, T_2m) + _wind_out
 
     if return_convergence:
-        return tau_x, tau_y, shflx, lhflx, u_star, most_residual
-    return tau_x, tau_y, shflx, lhflx, u_star
+        return (tau_x, tau_y, shflx, lhflx, u_star, most_residual) + _wind_out
+    return (tau_x, tau_y, shflx, lhflx, u_star) + _wind_out
 
 
 def sam_ocean_surface_q(
@@ -1880,6 +2098,7 @@ def compute_sam_oceflx_fluxes(
     return_2m: bool = False,
     z_diag: float = 2.0,
     t_bot: jnp.ndarray | None = None,
+    return_wind_speed: bool = False,
 ) -> tuple[jnp.ndarray, ...]:
     """SAM ocean surface fluxes — faithful port of ``oceflx.f90`` (CESM1).
 
@@ -1988,12 +2207,14 @@ def compute_sam_oceflx_fluxes(
             "absolute lowest-level air temperature: CESM2.1's cold-air-"
             "outbreak wind enhancement (coldair_outbreak_mod) reads tbot - ts.")
 
-    # Safe sqrt (+eps) so the calm-wind (u=v=wd=0) reverse-mode gradient
-    # stays finite — bare sqrt(0) gives a 0·inf NaN even though the value
-    # is floored to umin (Codex iter-5). eps ≪ umin² so the primal is
-    # unchanged to round-off.
+    # Safe sqrt so the calm-wind (u=v=wd=0) reverse-mode gradient stays
+    # finite — bare sqrt(0) gives a 0·inf NaN even though the value is floored
+    # to umin (Codex iter-5).  Double where, not an additive eps: a 1e-12 m²/s²
+    # eps moved ustar by up to 1.5e-12 relative at ~1 m/s winds vs CESM.
+    wind2 = u_atm ** 2 + v_atm ** 2 + wd ** 2
+    windy = wind2 != 0.0   # NaN stays NaN (GLM review)
     vmag = jnp.maximum(
-        umin, jnp.sqrt(u_atm ** 2 + v_atm ** 2 + wd ** 2 + 1e-12)
+        umin, jnp.where(windy, jnp.sqrt(jnp.where(windy, wind2, 1.0)), 0.0)
     )
     if variant == "cesm":
         # shr_flux_atmOcn cold-air-outbreak block (use_coldair_outbreak_mod):
@@ -2094,8 +2315,11 @@ def compute_sam_oceflx_fluxes(
           if variant == "cesm" else constants.c_pd)
     shflx = -rho * cp * u_star * t_star
     lhflx = -rho * constants.L_v * u_star * q_star
+    # ``return_wind_speed``: the floored speed these fluxes used (vmag),
+    # appended LAST, for a closure pairing it with this u* (WRF MYNN drag).
+    _wind_out = (vmag,) if return_wind_speed else ()
     if not return_2m:
-        return tau_x, tau_y, shflx, lhflx, u_star
+        return (tau_x, tau_y, shflx, lhflx, u_star) + _wind_out
     # CESM ``tref`` (shr_flux_atmOcn diagnostics block): re-evaluate the
     # stability function at ztref, integrate the theta profile from zbot down
     # to ztref, then the 0.01 K/m potential-to-temperature correction.
@@ -2106,7 +2330,7 @@ def compute_sam_oceflx_fluxes(
     psix2 = -5.0 * hol2 * stable + (1.0 - stable) * psixhu(xqq2)
     fac = (rh / karman) * (alz + al2 - psixh + psix2)
     tref = theta_atm - delt * fac - 0.01 * z_diag  # coeff-ok: CESM 0.01 K/m theta->T
-    return tau_x, tau_y, shflx, lhflx, u_star, tref
+    return (tau_x, tau_y, shflx, lhflx, u_star, tref) + _wind_out
 
 
 @jax.custom_jvp
@@ -2198,23 +2422,41 @@ def nemo_si3_constant_fluxes(
     Cd: float,
     Ch: float,
     Ce: float,
+    goff_floor_width_K: float,
 ) -> tuple[jnp.ndarray, ...]:
-    """Constant-coefficient SI3 air--ice bulk core: ``blk_ice_1`` then ``blk_ice_2``'s turbulent terms.
+    """Executing constant-coefficient SI3 air--ice bulk core.
 
-    Composes :func:`nemo_si3_blk_ice_1_cst` and :func:`nemo_si3_ice_turbulent`
-    with ``T_ice`` as both ``ptsui`` and ``ptsu`` (one ice temperature).
-    ``theta_air`` is already potential temperature.  Stress uses NEMO's
-    air-to-ice sign; callers adapting to legoESM's reaction convention negate it.
+    Transcribes NEMO 5.0.2 ``sbcblk.F90:1085-1168,1231-1273`` and
+    ``sbc_phy.F90:321-358,665-790``.  ``theta_air`` is already potential
+    temperature, as at NEMO's ``blk_ice_1/2`` boundary.  Returned stress uses
+    NEMO's air-to-ice sign; callers adapting to legoESM's atmospheric reaction
+    convention negate it explicitly.
 
     Returns ``(tau_x, tau_y, wind, theta_ice, q_sat, dq_sat_dT,
     sensible, latent, dq_sensible_dT, dq_latent_dT)``.
     """
-    b1 = nemo_si3_blk_ice_1_cst(u_air, v_air, theta_air, q_air, p_surface, T_ice, rho_air, Cd, Ch, Ce)
-    tb = nemo_si3_ice_turbulent(T_ice, p_surface, rho_air, b1.wndm_ice, b1.Ch_ice, b1.Ce_ice,
-                                b1.theta_zu_i, b1.q_zu_i)
+    from legoesm.thermo import nemo_si3_saturation_over_ice
+
+    wind = jnp.sqrt(u_air * u_air + v_air * v_air)
+    theta_ice = T_ice * (
+        constants.p_ref / p_surface
+    ) ** (constants.R_gas_molar / (constants.M_dry_air * constants.c_p_dry_air_nemo))
+    q_sat, dq_sat_dT = nemo_si3_saturation_over_ice(
+        T_ice, p_surface, floor_width_K=goff_floor_width_K
+    )
+    rho_wind = rho_air * wind
+    stress_scale = rho_wind * Cd
+    tau_x = stress_scale * u_air
+    tau_y = stress_scale * v_air
+    sensible_scale = rho_wind * constants.c_p_air_ice_nemo * Ch
+    latent_scale = rho_wind * constants.L_sub_nemo * Ce
+    sensible = sensible_scale * (theta_ice - theta_air)
+    latent = latent_scale * (q_sat - q_air)
+    dq_sensible_dT = sensible_scale
+    dq_latent_dT = latent_scale * dq_sat_dT
     return (
-        b1.utau_ice, b1.vtau_ice, b1.wndm_ice, tb.zsipt, tb.zsq, tb.dq_sat,
-        tb.z_qsb, tb.qla_ice, tb.z_dqsb, tb.dqla_ice,
+        tau_x, tau_y, wind, theta_ice, q_sat, dq_sat_dT,
+        sensible, latent, dq_sensible_dT, dq_latent_dT,
     )
 
 

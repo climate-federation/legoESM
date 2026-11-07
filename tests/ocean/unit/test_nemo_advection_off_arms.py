@@ -6,6 +6,7 @@ the selection back and must move the same output.
 """
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -19,10 +20,7 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     _bc_horizontal_momentum_advection_flux_form,
     _bc_vertical_momentum_advection,
 )
-from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-    build_tsunami_zco_card,
-    build_vortex_smt_zps_card,
-)
+from legoesm.ocean.fidelity.nemo_testcase_recipe import build_tsunami_zco_card
 
 
 @pytest.fixture(scope="module")
@@ -31,7 +29,10 @@ def card():
 
 
 @pytest.fixture(scope="module")
-def explicit_card():
+def vortex_off_card():
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_vortex_smt_zps_card,
+    )
     base = build_vortex_smt_zps_card()
     config = base.recipe.model_config._replace(
         momentum_flux_scheme="none",
@@ -53,8 +54,8 @@ def test_tsunami_card_selects_every_off_arm(card):
         "flux_form", "none", "none", "none")
 
 
-def test_explicit_card_config_selects_every_off_arm(explicit_card):
-    m = explicit_card.recipe.model_config
+def test_explicit_card_config_selects_every_off_arm(vortex_off_card):
+    m = vortex_off_card.recipe.model_config
     assert (m.momentum_advection, m.momentum_flux_scheme,
             m.vertical_momentum_scheme, m.tracer_advection) == (
         "flux_form", "none", "none", "none")
@@ -93,6 +94,43 @@ def test_vertical_none_leaves_rhs_unchanged_and_up3_plant_moves_it(card):
     assert not np.array_equal(plant[0], du)
 
 
+def test_nemo_zad_written_association_changes_compiled_operator_bits(
+        vortex_off_card):
+    """Run both config branches through the compiled dynzad operator."""
+    g = vortex_off_card.recipe.grid
+    cfg = vortex_off_card.recipe.model_config._replace(
+        vertical_momentum_scheme="nemo_advective")
+    nj, ni = g.f_T.shape
+    nlev = 3
+    rng = np.random.default_rng(1226)
+
+    def values(shape):
+        return jnp.asarray(
+            rng.standard_normal(shape) * np.exp(rng.uniform(-20, 20, shape)))
+
+    u = values((nj, ni + 1, nlev))
+    v = values((nj + 1, ni, nlev))
+    du, dv = jnp.zeros_like(u), jnp.zeros_like(v)
+    w = values((nj, ni, nlev + 1)).at[..., 0].set(0.0).at[..., -1].set(0.0)
+    hu, hv = jnp.full(u.shape, 10.0), jnp.full(v.shape, 10.0)
+    umask, vmask = jnp.ones(u.shape), jnp.ones(v.shape)
+
+    def selected(flag):
+        selected_cfg = cfg._replace(nemo_zad_written_association=flag)
+        call = jax.jit(lambda du, dv, u, v, w, hu, hv, um, vm:
+            _bc_vertical_momentum_advection(
+                du, dv, u, v, w, hu, hv, um, vm, g, "flux_form", 5,
+                selected_cfg, u_full=u, v_full=v))
+        return tuple(np.asarray(item) for item in call(
+            du, dv, u, v, w, hu, hv, umask, vmask))
+
+    on, off = selected(True), selected(False)
+    assert np.count_nonzero(
+        on[0].view(np.uint64) != off[0].view(np.uint64)) == 1478
+    assert on[0].view(np.uint64)[0, 6, 1] == np.uint64(13881778523158873640)
+    assert off[0].view(np.uint64)[0, 6, 1] == np.uint64(13881778523158873639)
+
+
 @pytest.mark.parametrize("flux, vert", [("none", "upwind_perturbation"),
                                         ("centered", "none")])
 def test_half_off_selection_is_refused(card, flux, vert):
@@ -102,8 +140,8 @@ def test_half_off_selection_is_refused(card, flux, vert):
         LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
 
 
-def test_tracer_none_dispatch_is_zero(explicit_card):
-    g = explicit_card.recipe.grid
+def test_tracer_none_dispatch_is_zero(vortex_off_card):
+    g = vortex_off_card.recipe.grid
     nj, ni = g.f_T.shape
     tr = _field((nj, ni, 1), 9)
     z = jnp.zeros((nj, ni, 1))

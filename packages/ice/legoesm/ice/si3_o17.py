@@ -28,7 +28,7 @@ from legoesm.ice.dynamics import (
     SI3ORCA2FoldProgram,
     SI3ORCA2Strength,
     SI3ORCA2StrengthConfig,
-    si3_cgrid_deformation,
+    si3_lane_cgrid_deformation,
     si3_orca2_aevp_solver,
     si3_orca2_ice_strength,
 )
@@ -648,7 +648,7 @@ def si3_o17_step(
     # icedyn_rhg_evp.F90:838-843 stores the lbc-linked zs1/zs2/zs12 arithmetic
     # result, signed zeros included; no canonicalisation follows.
     state = state._replace(u_ice=aevp.u_ice_u, v_ice=aevp.v_ice_v)
-    divu, delta = si3_cgrid_deformation(  # icedyn_rhg_evp.F90:788-836
+    divu, delta = si3_lane_cgrid_deformation(  # icedyn_rhg_evp.F90:788-836
         aevp,
         aevp_forcing,
         forcing.aevp_metrics,

@@ -586,3 +586,223 @@ def test_partial_probe_counts_as_chain_progress(tmp_path, capsys):
     (sub / "probe_progress.json").write_text("{}")
     mod.print_latest_complete_signature(str(tmp_path))
     assert "probe_progress.json" in capsys.readouterr().out
+
+
+# --- mid-epoch resume ------------------------------------------------------
+def _mid_epoch_setup():
+    import jax.numpy as jnp
+    import optax
+
+    samples = [jnp.asarray(float(i) + 1.0) for i in range(4)]
+    n_epochs = 3
+
+    def loss_fn(p, sample):
+        return jnp.sum((p["w"] * sample - 3.0) ** 2)
+
+    def fresh():
+        sched = optax.warmup_cosine_decay_schedule(
+            0.0, 0.1, warmup_steps=2, decay_steps=n_epochs * len(samples))
+        return optax.adamw(sched, weight_decay=1e-4)
+
+    return samples, n_epochs, loss_fn, fresh, {"w": jnp.asarray(0.5)}
+
+
+def _snap_at(epoch, step):
+    got = {}
+
+    def on_step(e, n, losses, skipped, p, s):
+        if (e, n) == (epoch, step):
+            got.update(p=p, s=s, losses=list(losses), skipped=skipped)
+    return got, on_step
+
+
+def test_a_run_cut_mid_epoch_matches_an_uninterrupted_one():
+    """Killed after step 2 of epoch 1 and resumed from that step's state: the
+    final parameters AND the reported epoch-1 mean must equal the straight
+    run's, so a walltime kill costs only the steps since the last save."""
+    from legoesm.training.data_parallel import mpi_data_parallel_training_loop
+
+    samples, n_epochs, loss_fn, fresh, p0 = _mid_epoch_setup()
+    opt = fresh()
+    straight, s_straight, h_straight = mpi_data_parallel_training_loop(
+        loss_fn, p0, opt.init(p0), opt, samples, n_epochs, 1)
+
+    got, on_step = _snap_at(1, 2)
+    opt = fresh()
+    _p, _s, h_first = mpi_data_parallel_training_loop(
+        loss_fn, p0, opt.init(p0), opt, samples, 2, 1, on_step=on_step)
+    resumed, _s2, h_rest = mpi_data_parallel_training_loop(
+        loss_fn, got["p"], got["s"], opt, samples, n_epochs, 1,
+        start_epoch=1, start_step=2, start_losses=got["losses"],
+        start_skipped=got["skipped"])
+
+    import jax
+
+    assert float(resumed["w"]) == float(straight["w"])
+    assert h_rest[0] == h_straight[1]
+    assert len(h_rest) == n_epochs - 1
+    assert all(bool((a == b).all()) for a, b in zip(
+        jax.tree.leaves(_s2), jax.tree.leaves(s_straight)))
+
+
+def test_resuming_mid_epoch_without_skipping_the_done_steps_differs():
+    """Control: replaying the already-taken steps (start_step ignored) moves
+    the parameters, so the test above measures the skip."""
+    from legoesm.training.data_parallel import mpi_data_parallel_training_loop
+
+    samples, n_epochs, loss_fn, fresh, p0 = _mid_epoch_setup()
+    opt = fresh()
+    straight, _s, _h = mpi_data_parallel_training_loop(
+        loss_fn, p0, opt.init(p0), opt, samples, n_epochs, 1)
+    got, on_step = _snap_at(1, 2)
+    opt = fresh()
+    mpi_data_parallel_training_loop(
+        loss_fn, p0, opt.init(p0), opt, samples, 2, 1, on_step=on_step)
+    replayed, _s2, _h2 = mpi_data_parallel_training_loop(
+        loss_fn, got["p"], got["s"], opt, samples, n_epochs, 1, start_epoch=1)
+    assert float(replayed["w"]) != pytest.approx(float(straight["w"]), rel=1e-6)
+
+
+@pytest.mark.parametrize("step,losses,skipped", [(4, [], 0), (2, [1.0], 0)])
+def test_the_loop_refuses_an_inconsistent_mid_epoch_start(step, losses, skipped):
+    from legoesm.training.data_parallel import mpi_data_parallel_training_loop
+
+    samples, _n, loss_fn, fresh, p0 = _mid_epoch_setup()
+    opt = fresh()
+    with pytest.raises(ValueError):
+        mpi_data_parallel_training_loop(
+            loss_fn, p0, opt.init(p0), opt, samples, 3, 1, start_epoch=1,
+            start_step=step, start_losses=losses, start_skipped=skipped)
+
+
+_FP = {"k": 1}
+
+
+def _content():
+    import numpy as np
+
+    return (7, np.asarray([[1.0, 2.0, 3.0]]))
+
+
+def _manifest(epoch=2, step=3, losses=(0.1, 0.2), skipped=1, **over):
+    obj = {"schema": mod._MANIFEST_SCHEMA, "frozen": ["a"], "fingerprint": _FP,
+           "epoch": epoch, "step": step, "losses": list(losses),
+           "skipped": skipped, **mod._content_payload(_content())}
+    obj.update(over)
+    return obj
+
+
+def _save(d, value, **kw):
+    import equinox as eqx
+    import jax.numpy as jnp
+
+    tree = {"w": jnp.asarray(float(value))}
+    mod._save_partial(str(d), _manifest(**kw),
+                      lambda t: eqx.tree_serialise_leaves(t, tree),
+                      lambda t: eqx.tree_serialise_leaves(t, tree))
+
+
+def _load(path):
+    import equinox as eqx
+    import jax.numpy as jnp
+
+    return float(eqx.tree_deserialise_leaves(path, {"w": jnp.asarray(0.0)})["w"])
+
+
+def test_a_saved_partial_round_trips_and_keeps_one_generation(tmp_path):
+    _save(tmp_path, 1.5, step=3)
+    _save(tmp_path, 2.5, step=5, losses=(0.1, 0.2, 0.3, 0.4), skipped=1)
+    obj, pp, op = mod._read_partial(str(tmp_path), 2, 10, _FP, _content())
+    assert (obj["step"], obj["skipped"]) == (5, 1)
+    assert _load(pp) == 2.5 and _load(op) == 2.5
+    assert len(list(tmp_path.glob("partial.e*.eqx"))) == 2   # params + opt
+
+
+@pytest.mark.parametrize("kill_at", [1, 2, 3])
+def test_a_kill_during_a_save_keeps_the_previous_generation(
+        tmp_path, monkeypatch, kill_at):
+    """Killed after the k-th of the three writes of the NEXT save, resume
+    still finds the previous save, never nothing."""
+    _save(tmp_path, 1.5, step=3)
+    real, n = mod._atomic_write, {"i": 0}
+
+    def dying(path, fn):
+        n["i"] += 1
+        if n["i"] == kill_at:
+            raise KeyboardInterrupt
+        real(path, fn)
+
+    monkeypatch.setattr(mod, "_atomic_write", dying)
+    with pytest.raises(KeyboardInterrupt):
+        _save(tmp_path, 2.5, step=5, losses=(0.1, 0.2, 0.3, 0.4), skipped=1)
+    monkeypatch.setattr(mod, "_atomic_write", real)
+    obj, pp, op = mod._read_partial(str(tmp_path), 2, 10, _FP, _content())
+    assert obj["step"] == 3 and _load(pp) == 1.5 and _load(op) == 1.5
+
+
+def test_a_partial_for_another_epoch_is_ignored(tmp_path):
+    _save(tmp_path, 1.5)
+    assert mod._read_partial(str(tmp_path), 3, 10, _FP, _content()) is None
+    assert mod._read_partial(str(tmp_path / "none"), 2, 10, _FP,
+                             _content()) is None
+
+
+@pytest.mark.parametrize("over,fp", [
+    ({}, {"k": 2}),                         # config drift
+    ({"content_crc": 8}, _FP),              # different samples
+    ({"step": 5}, _FP),                     # losses + skipped != step
+    ({"step": True}, _FP),                  # bool is not a step
+    ({"params_file": "../x.eqx"}, _FP),     # outside the run directory
+    ({"losses": [None, 0.2]}, _FP),         # not numbers
+    ({"skipped": True}, _FP),               # bool is not a count
+    ({"losses": [0.1, 0.2, 0.3, 0.4], "skipped": -1}, _FP),   # negative skips
+])
+def test_a_mismatched_partial_for_this_epoch_fails_loudly(tmp_path, over, fp):
+    _save(tmp_path, 1.5)
+    mp = mod._partial_manifest_path(str(tmp_path))
+    pathlib.Path(mp).write_text(json.dumps(
+        {**json.loads(pathlib.Path(mp).read_text()), **over}))
+    with pytest.raises(RuntimeError):
+        mod._read_partial(str(tmp_path), 2, 10, fp, _content())
+
+
+def test_a_non_finite_saved_loss_fails_loudly(tmp_path):
+    _save(tmp_path, 1.5)
+    mp = mod._partial_manifest_path(str(tmp_path))
+    txt = pathlib.Path(mp).read_text().replace('"losses": [0.1, 0.2]',
+                                                '"losses": [NaN, 0.2]')
+    assert "NaN" in txt
+    pathlib.Path(mp).write_text(txt)
+    with pytest.raises(RuntimeError):
+        mod._read_partial(str(tmp_path), 2, 10, _FP, _content())
+
+
+def test_an_unreadable_partial_manifest_fails_loudly(tmp_path):
+    tmp_path.joinpath("partial.json").write_text("{truncated")
+    assert mod._partial_manifest_path(str(tmp_path)).endswith("partial.json")
+    with pytest.raises(RuntimeError, match="unreadable"):
+        mod._read_partial(str(tmp_path), 2, 10, _FP, _content())
+
+
+def test_a_partial_missing_its_state_files_fails_loudly(tmp_path):
+    _save(tmp_path, 1.5)
+    for f in tmp_path.glob("partial.e*.opt.eqx"):
+        f.unlink()
+    with pytest.raises(RuntimeError):
+        mod._read_partial(str(tmp_path), 2, 10, _FP, _content())
+
+
+def test_a_partial_counts_as_progress_for_the_chain_wrapper(tmp_path, capsys):
+    mod.print_latest_complete_signature(str(tmp_path))
+    assert capsys.readouterr().out == ""
+    _save(tmp_path, 1.5)
+    mod.print_latest_complete_signature(str(tmp_path))
+    assert "partial.json" in capsys.readouterr().out
+
+
+def test_the_checkpoint_cadence_flag():
+    assert mod.build_scale_config_from_args([]).checkpoint_every_steps == 20
+    assert mod.build_scale_config_from_args(
+        ["--checkpoint-every-steps", "0"]).checkpoint_every_steps == 0
+    with pytest.raises(SystemExit):
+        mod.build_scale_config_from_args(["--checkpoint-every-steps", "-1"])

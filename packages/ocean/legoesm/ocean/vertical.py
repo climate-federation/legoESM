@@ -535,13 +535,13 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     r1_area_f = nemo_qco_r1_area_f(raw, geom_grid, dtype)
     r3f = b(b(b(quarter * quad) * r1_hf0) * r1_area_f)
     if r3f_native is not None and r3f_override is not None:
-        raise ValueError("pass only one of r3f_native and r3f_override")
+        raise ValueError("r3f_native and r3f_override are mutually exclusive")
     supplied_r3f = r3f_native if r3f_native is not None else r3f_override
     if supplied_r3f is not None:
         supplied = jnp.asarray(supplied_r3f, dtype=dtype)
         if supplied.shape != r3f.shape:
             raise ValueError(
-                "r3f_override must use NEMO's native A2D F layout with "
+                "supplied r3f must use NEMO's native A2D F layout with "
                 f"shape {r3f.shape}; got {supplied.shape}")
         r3f = supplied
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
@@ -1530,7 +1530,6 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
-    nemo_e3t_jpk: jnp.ndarray | None = None
     # NEMO ldf_dyn_init's READ coefficient (nn_ahm_ijk_t = -30,
     # ldfdyn.f90:348-353): the whole 3-D lateral momentum viscosity, already
     # exchanged and masked as that routine leaves it.  ``nemo_ldf_ahmt`` is on
@@ -1545,6 +1544,9 @@ class OceanPartialCellCoordinate(NamedTuple):
     # it moved the kt=1-10 NEMO-record distance further, so every other card
     # keeps the reconstructed source (user decision 2026-10-17).
     nemo_stage_faces_raw_mesh: bool = False
+
+    nemo_e3t_jpk: jnp.ndarray | None = None
+
 
 
 def create_partial_cell_coordinate(

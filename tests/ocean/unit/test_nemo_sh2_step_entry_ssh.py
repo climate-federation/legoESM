@@ -6,6 +6,8 @@ dyn_zdf/tra_zdf read.
 """
 from __future__ import annotations
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -16,9 +18,11 @@ from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 STAGE, ENTRY = jnp.asarray([0.3]), jnp.asarray([0.1])
 
 
-def test_default_keeps_the_stage_eta_on_every_other_card():
+def test_default_preserves_mains_ws_step_entry_override_when_supplied():
     assert _nemo_sh2_eta(TKEConfig(), prognostic=True, eta_now=STAGE,
-                         eta_step_entry=ENTRY) is STAGE
+                         eta_step_entry=ENTRY) is ENTRY
+    assert _nemo_sh2_eta(TKEConfig(), prognostic=True, eta_now=STAGE,
+                         eta_step_entry=None) is STAGE
 
 
 def test_selected_flag_reads_the_whole_step_entry_eta():
@@ -80,6 +84,15 @@ def _shear_eta_at_call_site(flag):
 def test_production_shear_call_site_routes_through_the_selector():
     assert _shear_eta_at_call_site(True) is ENTRY
     assert _shear_eta_at_call_site(False) is STAGE
+
+
+def test_whole_step_does_not_bypass_the_card_selector():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    source = inspect.getsource(LatLonCGridOceanModel._step_impl)
+    assert "tke_shear_eta_now" not in source
 
 
 class _LatSeen(Exception):

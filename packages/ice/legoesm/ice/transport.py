@@ -28,6 +28,7 @@ from jax import lax
 from legoesm.core.operators_3d import fv_flux_divergence_3d
 from legoesm.core.operators_fv import fv_flux_divergence
 from legoesm.core.operators_fv_latlon import fv_flux_divergence_latlon
+from legoesm.core.smooth import positive_part_c1
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.operators_voronoi import (
     divergence_cell,
@@ -124,6 +125,12 @@ def si3_prather_unpack_intensives(
     intensives = nemo_source_round(contents * reciprocal_area[..., None])
     return nemo_source_round(intensives * wet[..., None])
 _SI3_PRA_CFL_THREE_CYCLE_THRESHOLD = 1.5  # icedyn_adv_pra.F90:124-126
+# Smooth width of NEMO's open-water MAX(0, .) (icedyn_adv_pra.F90:426):
+# 1e-7 = 0.01 * (1 - rn_amax) with ORCA1 rn_amax = 0.99999 (namelist_ice_ref),
+# so the C1 ramp sits two decades below the smallest physical open water.  The
+# repo-default width 0.01 would under-report open water in the 3,556 of 64,915
+# wet ORCA1 cells whose value lies in (0, 0.01).  Voted (D2 V1 b).
+SI3_PRA_OPEN_WATER_FLOOR_SHARPNESS = 1.0e7  # [1/area fraction]
 _SI3_PRA_HBIG_CONCENTRATION_THRESHOLD = 0.15  # icedyn_adv_pra.F90:1000
 _SI3_PRA_HBIG_MAX_THICKNESS_M = 99.0  # namelist_ice_ref:46; ORCA1 does not override
 
@@ -623,8 +630,7 @@ def _si3_prather_limit_x(
     second_upper = sr(
         sr(_SI3_PRA_SECOND_MOMENT_FACTOR * content) - sr(one_third * abs_sx)
     )
-    excess_x = sr(abs_sx - content)
-    second_lower = sr(jnp.where(excess_x > sxx, excess_x, sxx))  # MAXSD: tie keeps zpsxx
+    second_lower = sr(jnp.maximum(sr(abs_sx - content), sxx))
     sxx = sr(jnp.minimum(second_upper, second_lower))
     negative_content = sr(-content)
     sxy = sr(jnp.minimum(content, sr(jnp.maximum(negative_content, sxy))))
@@ -657,8 +663,75 @@ def _si3_prather_limit_y(
     second_upper = sr(
         sr(_SI3_PRA_SECOND_MOMENT_FACTOR * content) - sr(one_third * abs_sy)
     )
+    second_lower = sr(jnp.maximum(sr(abs_sy - content), syy))
+    syy = sr(jnp.minimum(second_upper, second_lower))
+    negative_content = sr(-content)
+    sxy = sr(jnp.minimum(content, sr(jnp.maximum(negative_content, sxy))))
+    wet3 = wet[..., None].astype(content.dtype)
+    active3 = content > _SI3_PRA_ZERO
+    return content, (
+        sr(jnp.where(active3, sr(sx * wet3), _SI3_PRA_ZERO)),
+        sr(jnp.where(active3, sr(sy * wet3), _SI3_PRA_ZERO)),
+        sr(jnp.where(active3, sr(sxx * wet3), _SI3_PRA_ZERO)),
+        sr(jnp.where(active3, sr(syy * wet3), _SI3_PRA_ZERO)),
+        sr(jnp.where(active3, sr(sxy * wet3), _SI3_PRA_ZERO)),
+    )
+
+
+def si3_lane_prather_limit_x(
+    content: jnp.ndarray,
+    moments: SI3PratherMoments,
+    wet: jnp.ndarray,
+) -> tuple[jnp.ndarray, SI3PratherMoments]:
+    """SI3 lane x limiter with gfortran ``MAXSD`` tie operand order."""
+
+    sr = nemo_source_round
+    sx, sy, sxx, syy, sxy = moments
+    one_third = sr(_SI3_PRA_ONE / _SI3_PRA_THREE)
+    content = sr(jnp.maximum(_SI3_PRA_ZERO, content))
+    slope_cap = sr(_SI3_PRA_SLOPE_CAP_FACTOR * content)
+    negative_slope_cap = sr(-slope_cap)
+    sx = sr(jnp.minimum(slope_cap, sr(jnp.maximum(negative_slope_cap, sx))))
+    abs_sx = sr(jnp.abs(sx))
+    second_upper = sr(
+        sr(_SI3_PRA_SECOND_MOMENT_FACTOR * content) - sr(one_third * abs_sx)
+    )
+    excess_x = sr(abs_sx - content)
+    second_lower = sr(jnp.where(excess_x > sxx, excess_x, sxx))
+    sxx = sr(jnp.minimum(second_upper, second_lower))
+    negative_content = sr(-content)
+    sxy = sr(jnp.minimum(content, sr(jnp.maximum(negative_content, sxy))))
+    wet3 = wet[..., None].astype(content.dtype)
+    active3 = content > _SI3_PRA_ZERO
+    return content, (
+        sr(jnp.where(active3, sr(sx * wet3), _SI3_PRA_ZERO)),
+        sr(jnp.where(active3, sr(sy * wet3), _SI3_PRA_ZERO)),
+        sr(jnp.where(active3, sr(sxx * wet3), _SI3_PRA_ZERO)),
+        sr(jnp.where(active3, sr(syy * wet3), _SI3_PRA_ZERO)),
+        sr(jnp.where(active3, sr(sxy * wet3), _SI3_PRA_ZERO)),
+    )
+
+
+def si3_lane_prather_limit_y(
+    content: jnp.ndarray,
+    moments: SI3PratherMoments,
+    wet: jnp.ndarray,
+) -> tuple[jnp.ndarray, SI3PratherMoments]:
+    """SI3 lane y limiter with gfortran ``MAXSD`` tie operand order."""
+
+    sr = nemo_source_round
+    sx, sy, sxx, syy, sxy = moments
+    one_third = sr(_SI3_PRA_ONE / _SI3_PRA_THREE)
+    content = sr(jnp.maximum(_SI3_PRA_ZERO, content))
+    slope_cap = sr(_SI3_PRA_SLOPE_CAP_FACTOR * content)
+    negative_slope_cap = sr(-slope_cap)
+    sy = sr(jnp.minimum(slope_cap, sr(jnp.maximum(negative_slope_cap, sy))))
+    abs_sy = sr(jnp.abs(sy))
+    second_upper = sr(
+        sr(_SI3_PRA_SECOND_MOMENT_FACTOR * content) - sr(one_third * abs_sy)
+    )
     excess_y = sr(abs_sy - content)
-    second_lower = sr(jnp.where(excess_y > syy, excess_y, syy))  # MAXSD: tie keeps zpsyy
+    second_lower = sr(jnp.where(excess_y > syy, excess_y, syy))
     syy = sr(jnp.minimum(second_upper, second_lower))
     negative_content = sr(-content)
     sxy = sr(jnp.minimum(content, sr(jnp.maximum(negative_content, sxy))))
@@ -918,7 +991,14 @@ def _si3_prather_x_substep(
         else zpsm_init
     )
 
-    limited_content, limited_moments = _si3_prather_limit_x(contents, moments, wet)
+    if strict_loop_domains:
+        limited_content, limited_moments = si3_lane_prather_limit_x(
+            contents, moments, wet
+        )
+    else:
+        limited_content, limited_moments = _si3_prather_limit_x(
+            contents, moments, wet
+        )
     content = sr(jnp.where(limit_mask_xy[..., None], limited_content, contents))
     moments = cast(
         SI3PratherMoments,
@@ -1411,7 +1491,14 @@ def _si3_prather_y_substep(
         else zpsm_init
     )
 
-    limited_content, limited_moments = _si3_prather_limit_y(contents, moments, wet)
+    if strict_loop_domains:
+        limited_content, limited_moments = si3_lane_prather_limit_y(
+            contents, moments, wet
+        )
+    else:
+        limited_content, limited_moments = _si3_prather_limit_y(
+            contents, moments, wet
+        )
     content = sr(jnp.where(limit_mask_xy[..., None], limited_content, contents))
     moments = cast(
         SI3PratherMoments,
@@ -1836,6 +1923,32 @@ def _si3_periodic_halo_xy(value: jnp.ndarray, halo_width: int) -> jnp.ndarray:
     return nemo_source_round(jnp.pad(interior, padding, mode="wrap"))
 
 
+def _validate_si3_prather_spacings(dx, dy, shape, subcycles) -> None:
+    """Refuse spacing layouts the CFL selector cannot honour.
+
+    The kernels use ``dy`` as the U-face length (``zudy = u * e2u``) and ``dx``
+    as the V-face length (``zvdx = v * e1v``, ``icedyn_adv_pra.F90:135-136``).
+    A scalar pair is a uniform Cartesian card, where the same numbers are also
+    the CFL lengths.  Array spacings carry ``e1v``/``e2u``, but NEMO's CFL
+    divides by ``e1u``/``e2v`` (:119-120) and is a delayed global maximum
+    (``mpp_max cdelay='cflice'``, :122), so with arrays the caller must pass
+    NEMO's resolved ``subcycles``; the in-kernel estimate is refused.
+    """
+
+    for name, value in (("dx", dx), ("dy", dy)):
+        if jnp.ndim(value) == 0:
+            continue
+        if jnp.shape(value) != tuple(shape):
+            raise ValueError(
+                f"si3_prather array {name} shape {jnp.shape(value)} != velocity shape {tuple(shape)}"
+            )
+        if subcycles is None:
+            raise ValueError(
+                f"si3_prather array {name} (e1v/e2u face lengths) cannot select the CFL "
+                "cycle count; pass NEMO's resolved subcycles"
+            )
+
+
 def advect_si3_prather_1d(
     contents: jnp.ndarray,
     moments: SI3PratherMoments,
@@ -1845,8 +1958,8 @@ def advect_si3_prather_1d(
     wet: jnp.ndarray,
     dt: float,
     *,
-    dx: float,
-    dy: float,
+    dx: float | jnp.ndarray,
+    dy: float | jnp.ndarray,
     halo_width: int = 2,
     ice_volume_index: int | None = None,
     concentration_index: int | None = None,
@@ -1874,6 +1987,7 @@ def advect_si3_prather_1d(
         raise ValueError("si3_prather requires volume and concentration indices for Hbig")
     if ice_volume_index is None or concentration_index is None:
         raise ValueError("si3_prather Hbig requires both volume and concentration indices")
+    _validate_si3_prather_spacings(dx, dy, u_ice.shape, subcycles)
     if subcycles is None:
         cfl = float(jnp.max(jnp.abs(u_ice)) * dt / dx)
         subcycles = (
@@ -1983,8 +2097,8 @@ def advect_si3_prather_2d(
     wet: jnp.ndarray,
     dt: float,
     *,
-    dx: float,
-    dy: float,
+    dx: float | jnp.ndarray,
+    dy: float | jnp.ndarray,
     ice_step_index: int,
     nn_fsbc: int = 1,
     halo_width: int = 2,
@@ -2011,6 +2125,7 @@ def advect_si3_prather_2d(
         raise ValueError("si3_prather requires volume and concentration indices for Hbig")
     if ice_step_index < 1 or nn_fsbc < 1:
         raise ValueError("si3_prather requires positive ice_step_index and nn_fsbc")
+    _validate_si3_prather_spacings(dx, dy, u_ice.shape, subcycles)
     if subcycles is None:
         cfl = max(
             float(jnp.max(jnp.abs(u_ice)) * dt / dx),
@@ -2165,8 +2280,7 @@ def advect_si3_prather_2d(
     return out, out_moments, subcycles
 
 
-# ==============================================================================
-# Rung O4: Full-state ORCA2 SI3 Prather advection elemental kernels
+# =======================================================================# Rung O4: Full-state ORCA2 SI3 Prather advection elemental kernels
 # (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:513-1156,1519-1588`,
 # `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icevar.f90:615-853`).
 # ==============================================================================
@@ -3281,3 +3395,44 @@ def si3_var_zapsmall(
         sfx_res,
     )
 
+def si3_prather_open_water(
+    open_water: jnp.ndarray,
+    concentration_before: jnp.ndarray,
+    concentration_after: jnp.ndarray,
+    u_ice: jnp.ndarray,
+    v_ice: jnp.ndarray,
+    *,
+    dy_u: jnp.ndarray | float,
+    dx_v: jnp.ndarray | float,
+    cell_area: jnp.ndarray,
+    dt: float,
+    floor_sharpness: float = SI3_PRA_OPEN_WATER_FLOOR_SHARPNESS,
+) -> jnp.ndarray:
+    """SI3 Prather open-water update, ``icedyn_adv_pra.F90:423-428`` (5.0.1).
+
+    ``ato_i <- MAX(0, ato_i - (A_after - A_before)
+    - ((u e2u - (u e2u)_{i-1}) + (v e1v - (v e1v)_{j-1})) / e1e2t * dt)``:
+    the total (ice + open water) fraction is advected as a unit field, so the
+    open water absorbs the transport divergence minus the ice-area change.
+    ``concentration_before`` is the category-summed area at the start of the
+    advection cycle, ``concentration_after`` after Hbig/Hsnow/zapneg; ``dt`` is
+    the cycle step ``rDt_ice / icycle``.  Same-index NEMO layout: u at the
+    east face (i, i-1 = roll +1 on axis 0), v at the north face (axis 1).
+
+    The ``MAX(0, .)`` is the C1 positive part (exactly 0 for a non-positive
+    argument, exact above ``1/floor_sharpness``); ``floor_sharpness=inf`` is
+    NEMO's hard MAX.  Halo cells are computed by the same periodic rolls and
+    are not meaningful (NEMO never reads open water in the halo, :429).
+    """
+
+    sr = nemo_source_round
+    u_transport = sr(u_ice * dy_u)
+    v_transport = sr(v_ice * dx_v)
+    divergence = sr(
+        sr(u_transport - jnp.roll(u_transport, 1, axis=0))
+        + sr(v_transport - jnp.roll(v_transport, 1, axis=1))
+    )
+    area_change = sr(concentration_after - concentration_before)
+    transport = sr(sr(divergence * sr(_SI3_PRA_ONE / cell_area)) * dt)
+    unclamped = sr(sr(open_water - area_change) - transport)
+    return sr(positive_part_c1(unclamped, floor_sharpness))

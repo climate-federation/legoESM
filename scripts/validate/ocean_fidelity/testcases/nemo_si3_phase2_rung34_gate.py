@@ -12,7 +12,7 @@ from typing import cast
 
 import netCDF4
 import numpy as np
-from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
+from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import (
     ICE_RHEO_TRACERS,
     build_ice_rheo_card,
     step_ice_rheo_card,

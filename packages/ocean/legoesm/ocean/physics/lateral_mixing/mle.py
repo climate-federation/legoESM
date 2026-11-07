@@ -39,7 +39,9 @@ from legoesm.core.source_rounding import nemo_source_round
 
 # --- Fox-Kemper MLE fixed constants (NEMO 5.0.1 TRA/tramle.F90) ---
 # Vertical-structure factor 5/21 in mu(z) = (1-zeta^2)(1 + 5/21 zeta^2).
-_R5_21 = 5.0 / 21.0
+R5_21 = 5.0 / 21.0
+# NEMO degree->radian factor, phycst.F90:26 rad = 3.141592653589793_wp / 180._wp.
+_NEMO_RAD = 3.141592653589793 / 180.0
 # Reference horizontal scale in the nn_mle=1 coefficient
 # rc_f = rn_ce / (RC_F_LENGTH_SCALE_M * f0); NEMO hard-codes 5 km (= "5.e3").
 # Not a tunable knob (it is the fixed normalising length of the FK closure); the
@@ -64,7 +66,6 @@ __param_spec__ = {
             # Numerics guards: grid-scale cap and the optional bolus-CFL clamp.
             "max_grid_scale_m": "numerics: min(111 km, e1u) grid-scale cap",
             "bolus_cfl_cap": "numerics: optional |w_mle| Courant clamp (0 = off = oracle)",
-            "nemo_association": "numerics: NEMO statement association and reductions",
         },
         "params": {
             # The single FK efficiency knob (NEMO rn_ce); typical 0.06-0.08.
@@ -149,9 +150,8 @@ def mle_coefficient(
         if omega is None:
             raise ValueError("nemo_association requires the card's omega")
         # tramle.f90:697, verbatim left-to-right denominator association.
-        rad = 3.141592653589793 / 180.0
         return ce / (_RC_F_LENGTH_SCALE_M * 2.0 * float(omega)
-                     * math.sin(rad * lat))
+                     * math.sin(_NEMO_RAD * lat))
     f0 = 2.0 * float(constants.Omega) * math.sin(math.radians(lat))
     # Do NOT cast ``ce``: it is the registered tunable (MLEConfig.ce, tier-2,
     # SPEC_MODULES, transform=sigmoid).  A prior ``float(ce)`` raised
@@ -197,7 +197,7 @@ def mle_vertical_structure(gdepw_over_H: jnp.ndarray) -> jnp.ndarray:
     """
     zeta = 1.0 - 2.0 * gdepw_over_H
     z2 = zeta * zeta
-    return jnp.maximum(0.0, (1.0 - z2) * (1.0 + _R5_21 * z2))
+    return jnp.maximum(0.0, (1.0 - z2) * (1.0 + R5_21 * z2))
 
 
 def mle_mld_and_buoyancy(

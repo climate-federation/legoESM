@@ -245,7 +245,7 @@ def _dh_owner_evidence(root: Path, card, *, plant=False,
 
     (
         _piecewise_remap,
-        si3_column_step_arrays,
+        si3_column_step_arrays_ablation,
     ) = (phase2._piecewise_remap, phase2._si3_column_step_arrays_ablation)
 
     operand_path = root / "oracle_si3_dh_operands.bin"
@@ -340,7 +340,7 @@ def _dh_owner_evidence(root: Path, card, *, plant=False,
             lambda value: jnp.asarray(value, dtype=jnp.float64),
             _exact_1d_entry(frames, sss_m=exact.get("sss")),
         )
-        return jax.device_get(si3_column_step_arrays(
+        return jax.device_get(si3_column_step_arrays_ablation(
             state, _forcing(exact, jnp.float64), card.dt_seconds,
             card.config.ice_constants, si3=card.config.si3, **kwargs,
         ))
@@ -705,13 +705,19 @@ def _arithmetic_replay(root: Path, constants, *, plant=False) -> dict[str, objec
 def _forcing(values, dtype):
     from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing
 
-    phase2.require(
-        "sss" in values and values["sss"] is not None,
-        "missing sea-surface salinity (sss)",
-    )
-    return SI3SurfaceForcing(*(
-        jnp.asarray(values[name], dtype=dtype) for name in phase2.ZDF_INPUT_NAMES
-    ))
+    return SI3SurfaceForcing(**{
+        name: jnp.asarray(x, dtype=dtype) for name, x in phase2.forcing_inputs(values).items()
+    })
+
+
+def _batch_forcing(exact_inputs):
+    from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing
+
+    rows = [phase2.forcing_inputs(values) for values in exact_inputs]
+    return SI3SurfaceForcing(**{
+        name: jnp.asarray(np.concatenate([row[name] for row in rows]), dtype=jnp.float64)
+        for name in rows[0]
+    })
 
 
 def _exact_1d_entry(
@@ -848,7 +854,6 @@ def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
                     snapshot_steps: tuple[int, ...] = ()) -> dict[str, object]:
     """Run oracle-entry steps in eager batches, preserving the reviewed gate order."""
 
-    from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing
 
     summary: dict[str, object] = {
         "frames_compared": 0, "field_rows_compared": 0,
@@ -880,13 +885,7 @@ def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
                                             dtype=jnp.float64),
                 *entries,
             )
-            batch_forcing = SI3SurfaceForcing(*(
-                jnp.asarray(
-                    np.concatenate([values[name] for values in exact_inputs]),
-                    dtype=jnp.float64,
-                )
-                for name in phase2.ZDF_INPUT_NAMES
-            ))
+            batch_forcing = _batch_forcing(exact_inputs)
             batch_maps = _stage_maps(jax.device_get(
                 step_function(batch_entry, batch_forcing)
             ))
@@ -1030,7 +1029,9 @@ def _array_max_ulp(left: np.ndarray, right: np.ndarray) -> int | None:
 def _scope_ablation_sweep(thd_path: Path, zin_path: Path, card) -> dict[str, object]:
     """Measure each formerly bundled operation as a private one-variable arm."""
 
-    from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing, si3_column_step_arrays
+    from legoesm.ice.bitz_lipscomb import (
+        si3_lane_column_step_arrays,
+    )
 
     summaries = {
         name: {
@@ -1074,14 +1075,8 @@ def _scope_ablation_sweep(thd_path: Path, zin_path: Path, card) -> dict[str, obj
                                             dtype=jnp.float64),
                 *entries,
             )
-            batch_forcing = SI3SurfaceForcing(*(
-                jnp.asarray(
-                    np.concatenate([values[name] for values in exact_inputs]),
-                    dtype=jnp.float64,
-                )
-                for name in phase2.ZDF_INPUT_NAMES
-            ))
-            enabled_maps = _stage_maps(jax.device_get(si3_column_step_arrays(
+            batch_forcing = _batch_forcing(exact_inputs)
+            enabled_maps = _stage_maps(jax.device_get(si3_lane_column_step_arrays(
                 batch_entry, batch_forcing, card.dt_seconds,
                 card.config.ice_constants, si3=card.config.si3,
             )))
@@ -1451,7 +1446,7 @@ def _owner_arms(root: Path, card, *, plant_deposition=False,
                 plant_surface=False, plant_snow_temperature=False) -> dict[str, object]:
     """Evaluate preregistered one-variable DH arms on exact NEMO entries."""
 
-    si3_column_step_arrays = phase2._si3_column_step_arrays_ablation
+    si3_column_step_arrays_ablation = phase2._si3_column_step_arrays_ablation
 
     selected = _read_exact_steps(root, (73, 74, 3836, 4238, 4239, 5285))
 
@@ -1461,7 +1456,7 @@ def _owner_arms(root: Path, card, *, plant_deposition=False,
             lambda value: jnp.asarray(value, dtype=jnp.float64),
             _exact_1d_entry(frames, sss_m=exact.get("sss")),
         )
-        return jax.device_get(si3_column_step_arrays(
+        return jax.device_get(si3_column_step_arrays_ablation(
             state, _forcing(exact, jnp.float64), card.dt_seconds,
             card.config.ice_constants, si3=card.config.si3, **kwargs,
         ))
@@ -1584,7 +1579,9 @@ def _owner_arms(root: Path, card, *, plant_deposition=False,
 def _melt_scaling(root: Path, card) -> dict[str, object]:
     """Independent exact-entry candidate scales over all 8,760 ice steps."""
 
-    from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing, si3_column_step_arrays
+    from legoesm.ice.bitz_lipscomb import (
+        si3_lane_column_step_arrays,
+    )
 
     totals = {
         "surface_ice_m": 0.0,
@@ -1612,13 +1609,10 @@ def _melt_scaling(root: Path, card) -> dict[str, object]:
                                             dtype=jnp.float64),
                 *entries,
             )
-            forcing = SI3SurfaceForcing(*(
-                jnp.asarray(np.concatenate([row[name] for row in exact_inputs]),
-                            dtype=jnp.float64)
-                for name in phase2.ZDF_INPUT_NAMES
-            ))
-            full = si3_column_step_arrays(
-                state, forcing, card.dt_seconds, card.config.ice_constants, si3=card.config.si3
+            forcing = _batch_forcing(exact_inputs)
+            full = si3_lane_column_step_arrays(
+                state, forcing, card.dt_seconds, card.config.ice_constants,
+                si3=card.config.si3,
             )
             no_surface = phase2._si3_column_step_arrays_ablation(
                 state, forcing, card.dt_seconds, card.config.ice_constants,
@@ -1628,7 +1622,7 @@ def _melt_scaling(root: Path, card) -> dict[str, object]:
                 state, forcing, card.dt_seconds, card.config.ice_constants,
                 si3=card.config.si3, _basal_melt=False,
             )
-            no_shortwave = si3_column_step_arrays(
+            no_shortwave = si3_lane_column_step_arrays(
                 state,
                 forcing._replace(qtr_ice_top=jnp.zeros_like(forcing.qtr_ice_top)),
                 card.dt_seconds,
@@ -1801,16 +1795,16 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         plant_entry_bridge=False,
         plant_missing_sss=False) -> dict[str, object]:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.ice.bitz_lipscomb import si3_column_step_arrays
+    from legoesm.ice.bitz_lipscomb import si3_lane_column_step_arrays
     from legoesm.ice.c1d_omip_l3 import (
         FORCING_SHA256, ORACLE_VERSION, THERMO_STREAM_SHA256,
-        build_c1d_omip_l3_card,
+        build_c1d_omip_l3_si3_lane_card,
     )
 
     set_policy(PrecisionPolicy.fp64())
     phase2.require(get_policy() == PrecisionPolicy.fp64(), "precision policy")
     phase2.require(jax.default_backend() == "cpu", "CPU backend")
-    card = build_c1d_omip_l3_card(oracle_root=root)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=root)
     thd_path = root / "oracle_si3_thd_frames.bin"
     zin_path = root / "oracle_si3_zdf_inputs.bin"
     phase2.require(phase2.sha256(card.forcing_path) == FORCING_SHA256, "forcing SHA256")
@@ -1829,11 +1823,11 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
     )
 
     def eager_step(state, forcing):
-        return si3_column_step_arrays(
+        return si3_lane_column_step_arrays(
             state, forcing, card.dt_seconds, card.config.ice_constants, si3=card.config.si3
         )
 
-    step = jax.jit(lambda state, forcing: si3_column_step_arrays(
+    step = jax.jit(lambda state, forcing: si3_lane_column_step_arrays(
         state, forcing, card.dt_seconds, card.config.ice_constants, si3=card.config.si3
     ))
     no_surface_step = jax.jit(lambda state, forcing: phase2._si3_column_step_arrays_ablation(

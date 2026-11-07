@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 
 from legoesm.atmosphere.physics.convection._ifs_cumastrn import cumastrn
-from legoesm.atmosphere.physics.convection._ifs_cuthermo import (
+from legoesm.atmosphere.physics._ifs_thermo import (
     ifs_thermo, lego_thermo, satur_qsat,
 )
 

@@ -16,7 +16,7 @@ from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG  # noqa: E402
 
 
 # Frozen independently from NEMO 5.0.2 phycst/eos and the admitted namelist.
-T0 = 273.15
+T0 = 273.15  # const-ok: independent oracle copy of NEMO phycst rt0, not the model constant
 RHOI = 917.0
 RCPI = 2096.7
 RCP = 3991.86795711963
@@ -214,9 +214,9 @@ def test_gradients_finite_and_match_central_difference_away_from_switches(
 
 
 def test_column_step_vanished_ice_has_finite_concentration_and_thickness_gradients():
-    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_si3_lane_card
 
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_si3_lane_card()
     z1 = jnp.zeros(1, dtype=jnp.float64)
     z3 = jnp.zeros((1, 3), dtype=jnp.float64)
     state = bl.SI3ColumnArrays(z1, z1, z1, z1, z3, z3, z1, z3, z1)
@@ -237,7 +237,7 @@ def test_column_step_vanished_ice_has_finite_concentration_and_thickness_gradien
     )
 
     def loss(concentration, h_ice):
-        trace = bl.si3_column_step_arrays(
+        trace = bl.si3_lane_column_step_arrays(
             state._replace(concentration=concentration, h_ice=h_ice),
             forcing,
             card.dt_seconds,

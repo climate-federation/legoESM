@@ -265,7 +265,7 @@ def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
     * land-zeroing + the partial-cell sub-seafloor T/S/u/v fill (deepest active
       value) so neither closure sees a spurious T=0/u=0 discontinuity.
 
-    ``floor_salinity=True`` (the KPP bridge only) builds the density on
+    ``floor_salinity=True`` (the KPP and TKE bridges) builds the density on
     salinity floored as ePBL's (``eos_salinity``; Wright as is): sqrt(S)
     EOSes have an infinite dRho/dS at S = 0 land cells, and the land
     ``where`` below does not stop the NaN cotangent (#2243).
@@ -810,7 +810,8 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
         # (the SAME helper KPP uses — one reconstruction on MPAS).
         u_east_w, v_north_w, T_w, S_w, rho, J, mask = (
             _reconstruct_mpas_cell_fields(state, mesh, z_coord, eos_fn=eos_fn,
-                                          constants_config=constants_config)
+                                          constants_config=constants_config,
+                                          floor_salinity=True)
         )
         # Match the lat-lon k_profiles owner rule: partial-cell geometry owns
         # NEMO's level-0 tmask.  The 2-D column mask is equal today for normal

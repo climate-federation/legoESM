@@ -1,5 +1,5 @@
 {
- "_note": "Emanuel CONVECT v4.3c default-smoothing gap per fixture column vs the running oracle (max_k|ours-oracle|/max_k|oracle|, absolute where the oracle column is 0); written by tests/atmosphere/test_emanuel_convect43c_oracle.py, fp64, EmanuelConfig() = {'n_mixing_fractions': 8, 'cu_coefficient': 0.7, 'precip_efficiency_water': 1.0, 'precip_efficiency_lcl': 0.0, 'cape_threshold': 70.0, 'cape_sharpness': 0.1, 'parcel_perturb_T': 0.5, 'parcel_perturb_q': 0.001, 'alpha_closure': 0.2, 'damp_coefficient': 0.1, 'dtmax': 0.9, 'lcl_pressure_sharpness': 0.001, 'cbmf_carry_max': 0.3, 'enable_unsaturated_downdraft': True, 'downdraft_sigd': 0.05, 'downdraft_sigs': 0.12, 'downdraft_omtrain_pa_s': 50.0, 'downdraft_omtsnow_pa_s': 5.5, 'downdraft_coeffr': 1.0, 'downdraft_coeffs': 0.8, 'downdraft_freeze_transition_K': 1.0, 'downdraft_inertia_scale_hPa': 20.0, 'downdraft_taper_p_fraction': 0.949, 'downdraft_dhdp_min': 10.0, 'downdraft_ep_gate_threshold': 0.0001, 'downdraft_ep_gate_width': 1e-05, 'smooth_trigger_sharpness': 0.5, 'epsilon_0': 0.0002, 'delta_0': 0.0002, 'M_b_max': 0.05, 'use_genuine_mixing': True, 'c_l_emanuel': 2500.0, 'elcrit': 0.0011, 'tlcrit': -55.0, 'entp': 1.5, 'level_window_sharpness': 6.0, 'sij_gate_sharpness': 40.0, 'sij_upper_gate': 0.9, 'denom_floor': 0.01, 'mse_min_search_offset': 50000.0, 'sat_branch_sharpness': 100.0, 'strict_index_sharpness': 20.0, 'precip_efficiency_max': 0.999, 'source_temperature_gate_sharpness': 1.0, 'source_humidity_gate_sharpness': 1000000.0, 'plcl_gate_sharpness': 0.001, 'stable_exit_sharpness': 10.0, 'cold_start_sharpness': 10000.0, 'cbmf_sharpness': 10000.0, 'precip_efficiency_sharpness': 1000.0, 'condensate_sharpness': 1000000.0, 'scrit_floor_sharpness': 1000.0, 'frac_sharpness': 100.0, 'defrac_floor_sharpness': 10000.0, 'tlift_floor_sharpness': 1.0, 'denom_floor_sharpness': 100000.0, 'nent_count_sharpness': 10.0, 'bsum_sharpness': 100000000.0, 'asij_floor_sharpness': 10.0, 'sort_sharpness': 40.0, 'rain_placement_sharpness': 1000000000.0, 'rain_column_sharpness': 100000.0, 'tlift_freeze_sharpness': 1.0, 'qsat_floor_sharpness': 1.0, 'downdraft_evap_sharpness': 10000000.0, 'downdraft_dhdp_sharpness': 10.0, 'downdraft_mp_sharpness': 10000.0, 'downdraft_taper_band_sharpness': 0.01}",
+ "_note": "Emanuel CONVECT v4.3c default-smoothing gap per fixture column vs the running oracle (max_k|ours-oracle|/max_k|oracle|, absolute where the oracle column is 0); written by tests/atmosphere/test_emanuel_convect43c_oracle.py, fp64, EmanuelConfig() = {'n_mixing_fractions': 8, 'cu_coefficient': 0.7, 'precip_efficiency_water': 1.0, 'precip_efficiency_lcl': 0.0, 'cape_threshold': 70.0, 'cape_sharpness': 0.1, 'parcel_perturb_T': 0.5, 'parcel_perturb_q': 0.001, 'alpha_closure': 0.2, 'damp_coefficient': 0.1, 'dtmax': 0.9, 'lcl_pressure_sharpness': 0.001, 'cbmf_carry_max': 0.3, 'enable_unsaturated_downdraft': True, 'downdraft_sigd': 0.05, 'downdraft_sigs': 0.12, 'downdraft_omtrain_pa_s': 50.0, 'downdraft_omtsnow_pa_s': 5.5, 'downdraft_coeffr': 1.0, 'downdraft_coeffs': 0.8, 'downdraft_freeze_transition_K': 1.0, 'downdraft_inertia_scale_hPa': 20.0, 'downdraft_taper_p_fraction': 0.949, 'downdraft_dhdp_min': 10.0, 'downdraft_ep_gate_threshold': 0.0001, 'downdraft_ep_gate_width': 1e-05, 'smooth_trigger_sharpness': 0.5, 'epsilon_0': 0.0002, 'delta_0': 0.0002, 'M_b_max': 0.05, 'use_genuine_mixing': True, 'c_l_emanuel': 2500.0, 'elcrit': 0.0011, 'tlcrit': -55.0, 'entp': 1.5, 'level_window_sharpness': 6.0, 'sij_gate_sharpness': 40.0, 'sij_upper_gate': 0.9, 'denom_floor': 0.01, 'mse_min_search_offset': 50000.0, 'sat_branch_sharpness': 100.0, 'strict_index_sharpness': 20.0, 'precip_efficiency_max': 0.999, 'source_temperature_gate_sharpness': 1.0, 'source_humidity_gate_sharpness': 1000000.0, 'plcl_gate_sharpness': 0.001, 'stable_exit_sharpness': 10.0, 'cold_start_sharpness': 10000.0, 'cbmf_sharpness': 10000.0, 'precip_efficiency_sharpness': 1000.0, 'condensate_sharpness': 1000000.0, 'scrit_floor_sharpness': 1000.0, 'frac_sharpness': 100.0, 'defrac_floor_sharpness': 10000.0, 'tlift_floor_sharpness': 1.0, 'denom_floor_sharpness': 100000.0, 'nent_count_sharpness': 10.0, 'bsum_sharpness': 100000000.0, 'asij_floor_sharpness': 10.0, 'sort_sharpness': 40.0, 'rain_placement_sharpness': 1000000000.0, 'rain_column_sharpness': 100000.0, 'tlift_freeze_sharpness': 1.0, 'qsat_floor_sharpness': 1.0, 'downdraft_evap_sharpness': 10000000.0, 'downdraft_dhdp_sharpness': 10.0, 'downdraft_mp_sharpness': 10000.0, 'downdraft_taper_band_sharpness': 0.01, 'enable_cmt': False}",
  "gaps": {
   "nodd_cb0/FT": [
    0.05938703967539317,
@@ -52,6 +52,40 @@
    0.1427124843785772,
    0.0019847275384047886
   ],
+  "nodd_cb0/FU": [
+   0.07667855973709511,
+   0.1533884580627015,
+   0.07565179853231188,
+   8.629419414729747e-59,
+   4.010431839534394e-108,
+   9.129954736827429e-07,
+   0.0,
+   0.0,
+   9.564156636008465e-55,
+   2.874476632939963,
+   5.4519042470249524e-15,
+   0.30233901726341883,
+   0.15377094479821718,
+   0.22001689039233657,
+   0.03519812760008972
+  ],
+  "nodd_cb0/FV": [
+   0.17225679407109534,
+   0.14046260421480433,
+   0.10823345634771107,
+   2.0695312288787295e-59,
+   1.0608641549395298e-108,
+   1.5067543735687618e-06,
+   0.0,
+   0.0,
+   3.865520438285939e-55,
+   3.785699393259173,
+   2.1181845488512253e-15,
+   0.34398694973744004,
+   0.1314840924021926,
+   0.1533055056060997,
+   0.01795505792081251
+  ],
   "nodd_cbw/FT": [
    0.05782305154759036,
    0.2889210370261691,
@@ -102,6 +136,40 @@
    0.03054407720816786,
    0.1095662770557102,
    0.0017190838099681864
+  ],
+  "nodd_cbw/FU": [
+   0.07467157749106487,
+   0.1476254341082489,
+   0.07651699136724896,
+   4.313039013023587e-41,
+   3.972078249248316e-89,
+   0.2116318100031214,
+   0.0,
+   0.0,
+   4.1991477604935844e-37,
+   0.6854156171758546,
+   0.3757512479456992,
+   0.26335023729356366,
+   0.1536700602157521,
+   0.18985958434049235,
+   0.03531302191694685
+  ],
+  "nodd_cbw/FV": [
+   0.16978028530250847,
+   0.13630422315450602,
+   0.10906815620209026,
+   1.0343649439020979e-41,
+   1.0507186267830263e-89,
+   0.24123700239255627,
+   0.0,
+   0.0,
+   1.6971586841706982e-37,
+   0.6046410644671771,
+   0.2930489827982626,
+   0.2965233389932618,
+   0.12817912591225758,
+   0.12139004220395293,
+   0.01802142812861085
   ],
   "dd_cb0/FT": [
    0.07782122273806594,
@@ -154,6 +222,40 @@
    0.1427124843785772,
    0.0019847275384047886
   ],
+  "dd_cb0/FU": [
+   0.05277102795866211,
+   0.15347048904162475,
+   0.07565035474217707,
+   8.629419414729747e-59,
+   4.010431839534394e-108,
+   2.0285223258420915e-06,
+   0.0,
+   0.0,
+   9.564156636008465e-55,
+   3.6265672504421733,
+   5.4519042470249524e-15,
+   0.2722536307801689,
+   0.15362145307571348,
+   0.2674150155348818,
+   0.029570785926061743
+  ],
+  "dd_cb0/FV": [
+   0.12805615595896133,
+   0.1407301478856713,
+   0.10823166395625247,
+   2.0695312288787295e-59,
+   1.0608641549395298e-108,
+   2.817013455595995e-06,
+   0.0,
+   0.0,
+   3.865520438285939e-55,
+   5.21887756523353,
+   2.1181845488512253e-15,
+   0.11431807526864535,
+   0.0486309895988205,
+   0.17013494575048194,
+   0.02579168639878226
+  ],
   "dd_cbw/FT": [
    0.0734278341045916,
    0.29559542772484554,
@@ -204,6 +306,40 @@
    0.03054407720816786,
    0.1095662770557102,
    0.0017190838099681864
+  ],
+  "dd_cbw/FU": [
+   0.052512933726573764,
+   0.14770050651501887,
+   0.07651563891877022,
+   4.313039013023587e-41,
+   3.972078249248316e-89,
+   0.23198353130707106,
+   0.0,
+   0.0,
+   4.1991477604935844e-37,
+   0.35799131125489764,
+   0.389237361793677,
+   0.26334474502879324,
+   0.1535381802069804,
+   0.2465084289015377,
+   0.031566936437752866
+  ],
+  "dd_cbw/FV": [
+   0.131835818110011,
+   0.13654710834000652,
+   0.1090664772066044,
+   1.0343649439020979e-41,
+   1.0507186267830263e-89,
+   0.24617059560547805,
+   0.0,
+   0.0,
+   1.6971586841706982e-37,
+   0.26633688643850006,
+   0.39771608661132246,
+   0.05383034303096864,
+   0.05063946575044853,
+   0.14948755998125932,
+   0.024032340557039875
   ]
  }
 }

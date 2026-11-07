@@ -25,7 +25,7 @@ import jax.numpy as jnp
 
 from legoesm.core.profile_metrics import safe_sqrt_nan
 
-from ._ifs_cuthermo import (
+from .._ifs_thermo import (
     cuadjtq, foealfa, foealfcu, foeewm, QSAT_CAP, RKAP,
 )
 

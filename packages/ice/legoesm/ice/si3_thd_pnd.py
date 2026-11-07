@@ -912,17 +912,17 @@ def si3_ice_thd_o12_stages(
                 "a_i": 1.0,
                 "at_i": 1.0,
                 "h_i": 1.0,
-                "h_s": 0.1,
+                "h_s": 0.1,  # coeff-ok: inactive-only finite AD guard; never selected
                 "t_su": constants.T0 - 1.0,
                 "t_i": constants.T0 - 1.0,
                 "t_s": constants.T0 - 1.0,
-                "t_bo": constants.T0 - 0.1,
+                "t_bo": constants.T0 - 0.1,  # coeff-ok: inactive-only finite AD guard; never selected
                 "sst": 0.0,
-                "sss": 34.0,
+                "sss": 34.0,  # coeff-ok: inactive-only finite AD guard; never selected
                 "s_i": 4.0,
                 "sz_i": 4.0,
-                "e_i": 3.0e8,
-                "e_s": 1.0e8,
+                "e_i": 3.0e8,  # coeff-ok: inactive-only finite AD guard; never selected
+                "e_s": 1.0e8,  # coeff-ok: inactive-only finite AD guard; never selected
                 "o_i": 0.0,
             }
             for k, fill in safe_fills.items():

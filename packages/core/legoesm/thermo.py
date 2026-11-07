@@ -46,7 +46,7 @@ import numpy as np
 from legoesm import constants
 from legoesm.core import transcendentals
 from legoesm.core.source_rounding import nemo_source_round as sr
-from legoesm.core.smooth import smooth_clamp, smooth_min
+from legoesm.core.smooth import max_c1, smooth_clamp, smooth_min
 
 
 # Tetens/Bolton coefficients of ``saturation_vapor_pressure`` (named so that a
@@ -185,7 +185,9 @@ def dd_saturation_vapor_pressure_aerk(T: jax.Array) -> jax.Array:
     return ddw * (ew - ei) + 2.0 * dw * (dew - dei) + w * ddew + (1.0 - w) * ddei
 
 
-def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
+def saturation_vapor_pressure_goff(
+    T: jax.Array, *, nemo_source_exact: bool = False
+) -> jax.Array:
     """Saturation vapour pressure over liquid water, WMO Goff (1957) [Pa].
 
     Port of NEMO/aerobulk ``sbc_phy.F90::e_sat_sclr`` (NEMO 5.0.1, lines
@@ -214,6 +216,29 @@ def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
     jax.Array
         Saturation vapor pressure [Pa].
     """
+    if nemo_source_exact:
+        from legoesm.core.source_rounding import (
+            nemo_source_barrier as B,
+            nemo_source_round as R,
+        )
+        from legoesm.core import transcendentals as tx
+
+        T_K = R(jnp.maximum(T, 180.0))
+        rt = R(constants.T_freeze / T_K)
+        term1 = R(10.79574 * R(1.0 - rt))
+        temperature_ratio = R(T_K / B(constants.T_freeze))
+        log_temperature_ratio = tx.log10(temperature_ratio)
+        term2 = R(5.028 * B(log_temperature_ratio))
+        ratio_minus_one = R(temperature_ratio - 1.0)
+        inner3 = R(-8.2969 * ratio_minus_one)
+        scale3 = R(1.50475 * tx.pow(10.0, -4.0))
+        term3 = R(scale3 * R(1.0 - tx.pow(10.0, inner3)))
+        inner4 = R(4.76955 * R(1.0 - rt))
+        scale4 = R(0.42873 * tx.pow(10.0, -3.0))
+        term4 = R(scale4 * R(tx.pow(10.0, inner4) - 1.0))
+        exponent = R(R(R(R(term1 - term2) + term3) + term4) + 0.78614)
+        return R(100.0 * tx.pow(10.0, exponent))
+
     T_K = jnp.maximum(T, 180.0)
     rt = constants.T_freeze / T_K
     log10_T = jnp.log10(T_K / constants.T_freeze)
@@ -664,14 +689,51 @@ def nemo_si3_dq_sat_dt_ice(pta, ppa):
 def nemo_si3_saturation_over_ice(
     T: jax.Array,
     p: jax.Array,
+    floor_width_K: float,
 ) -> tuple[jax.Array, jax.Array]:
-    """NEMO 5.0.2 Goff-ice ``(q_sat, dq_sat/dT)``, the one SI3 implementation.
+    """NEMO Goff-ice ``(q_sat, dq_sat/dT)`` with a selectable smooth floor.
 
-    Literal operation order of ``sbc_phy.f90:689-694,722-726,760-764,798-803``
-    with source-order barriers; ``log10``/``pow`` follow the precision policy.
-    JIT/reverse-mode compatible.
+    The cited line numbers match NEMO 5.0.1, which is the version the
+    tier-2 oracle audit ran (fp64: 8.2e-14 max relative on q_sat, 1.6e-13
+    on dq/dT); 5.0.2 itself was not run.
+
+    At ``floor_width_K = 0`` this is the literal operation order of
+    ``sbc_phy.F90:665-711,727-790``; a positive width smooths the 180 K floor
+    and scales ``dq/dT`` by the ramp slope.  It intentionally does not use the smooth generic mixing-ratio conversion:
+    that would be a different formula at an oracle boundary.  Returns
+    ``(q_sat, dq_sat_dT)`` and remains JIT/reverse-mode compatible.
     """
-    return nemo_si3_q_sat_ice(T, p), nemo_si3_dq_sat_dt_ice(T, p)
+    # NEMO's MAX(T, 180 K) floor as a C1 ramp of width floor_width_K (exact
+    # outside 180..180+width K; 0.0 = NEMO's hard MAX).
+    T = jnp.asarray(T)
+    if floor_width_K == 0.0:
+        zta = max_c1(T, constants.T_goff_floor_nemo, jnp.inf)
+        dzta_dT = 1.0   # NEMO returns d/dT at the floored temperature
+    else:
+        # smooth mode: carry the ramp's slope into dq_sat/dT (1 above the band)
+        zta, dzta_dT = jax.jvp(
+            lambda t: max_c1(t, constants.T_goff_floor_nemo, 1.0 / floor_width_K),
+            (T,), (jnp.ones_like(T),),
+        )
+    ztmp = constants.T_triple_nemo / zta
+    zle = (
+        constants.goff_ice_A_nemo * (ztmp - 1.0)
+        + constants.goff_ice_B_nemo * jnp.log10(ztmp)
+        + constants.goff_ice_C_nemo * (1.0 - zta / constants.T_triple_nemo)
+        + jnp.log10(constants.goff_ice_D_pressure_hpa_nemo)
+    )
+    e_sat = 100.0 * 10.0 ** zle
+    eps = constants.R_d / constants.R_v_nemo
+    denom = (eps - 1.0) * e_sat + p
+    q_sat = eps * e_sat / denom
+    zde = (
+        -(constants.goff_ice_A_nemo * constants.T_triple_nemo) / (zta * zta)
+        - constants.goff_ice_B_nemo / (zta * jnp.log(10.0))
+        - constants.goff_ice_C_nemo / constants.T_triple_nemo
+    )
+    de_sat_dT = jnp.log(10.0) * zde * e_sat
+    dq_sat_dT = eps * p * de_sat_dT / (denom * denom) * dzta_dT
+    return q_sat, dq_sat_dT
 
 
 def homogeneous_freezing_rh_factor(

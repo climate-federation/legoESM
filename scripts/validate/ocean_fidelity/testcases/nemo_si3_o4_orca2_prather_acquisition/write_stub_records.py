@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
+from legoesm import constants
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o4_orca2_prather_gate import (
     GRID, KINDS, MAGIC, MOMENTS, RESIDUALS, STATE, TRANSPORT_DIAGNOSTICS,
 )
@@ -171,7 +172,7 @@ def main() -> None:
     e2u = np.full_like(one, 9500.0); e1v = np.full_like(one, 10500.0)
     area = 1.0e8 + rng.uniform(-1.0e6, 1.0e6, one.shape)
     u = np.zeros_like(one); v = np.zeros_like(one)
-    sss=np.zeros_like(one); sst=np.full_like(one,-273.15)
+    sss=np.zeros_like(one); sst=np.full_like(one, -constants.T_freeze)
     grid_fields = dict(zip(GRID, (e1u, e2v, 1/e1u, 1/e2v, e2u, e1v, area, 1/area,
                                   one, one, one, u, v, sss, sst), strict=True))
     zero3 = np.zeros((jpi, jpj, jpl))
@@ -199,14 +200,14 @@ def main() -> None:
     expected_state["ato_i"] = _lbc_t_point(expected_state["ato_i"], 1.0, h)
     post_zap={name:np.asarray(expected_state[name]).copy() for name in STATE}
     post_zap["h_i"][h:-h,h:-h,:]=0.0
-    post_zap["t_i"][h:-h,h:-h,:,:]=273.15
-    post_zap["t_s"][h:-h,h:-h,:,:]=273.15
+    post_zap["t_i"][h:-h,h:-h,:,:]=constants.T_freeze
+    post_zap["t_s"][h:-h,h:-h,:,:]=constants.T_freeze
     post_lbc={name:np.asarray(post_zap[name]).copy() for name in STATE}
     final_state={name:np.asarray(post_lbc[name]).copy() for name in STATE}
     final_state["ato_i"][:]=1.0
     final_state["h_i"][:]=0.0
-    final_state["t_i"][:]=273.15
-    final_state["t_s"][:]=273.15
+    final_state["t_i"][:]=constants.T_freeze
+    final_state["t_s"][:]=constants.T_freeze
     expected_moments = {
         name: _lbc_t_point(value, -1.0 if name.rsplit(".", 1)[1] in {"sx", "sy"} else 1.0, h)
         for name, value in moment_fields.items()

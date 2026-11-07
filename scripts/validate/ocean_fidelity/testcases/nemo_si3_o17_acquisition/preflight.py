@@ -30,7 +30,7 @@ ORDER = (
     "si3_ice_sbc_tau_lbc",
     "si3_orca2_ice_strength",
     "si3_orca2_aevp_solver",
-    "si3_cgrid_deformation",
+    "si3_lane_cgrid_deformation",
     "si3_dyn_orca2",
     "si3_ice_dyn_rdgrft",
     "si3_ice_cor_dyn",

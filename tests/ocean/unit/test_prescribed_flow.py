@@ -290,6 +290,43 @@ def test_positional_construction_unshifted_by_tail_field():
         "rk3_stage_tracer_written_order",
         "rk3_stage3_heat_nemo_written",
         "rk3_stage3_tracer_nemo_stored_thickness",
+        "bbl_nemo_stage3_krhs",
+        "bbl_nemo_pivot_ghost",
+        "rk3_stage2_tracer_nemo_stored_thickness",
+        "rk3_stage3_salt_nemo_written",
+        "implicit_ice_ocean_top_drag",
+        "nemo_bottom_drag_written_statements",
+        "nemo_hpg_sco_fold_geometry",
+        "rk3_vector_raw_vmask",
+        "nemo_wzv_stored_r3_ratios",
+        "nemo_zad_written_association",
+        "nemo_stage2_momentum_wzv_half_step",
+        "nemo_stage_momentum_wzv_stored_kmm_ratios",
+        "rk3_vector_rhs_nemo_order",
+        "nemo_ldf_stored_f_area",
+        "nemo_ldf_fold_rows",
+        "rk3_stage1_ldf_source_order",
+        "nemo_ldf_stage_r3f",
+        "rk3_stage_transport_raw_vmask",
+        "rk3_stage_transport_fold_exchanges",
+        "fct_fold_exchange",
+        "rk3_end_of_stage_pivot_fold",
+        "rk3_stage_wzv_nemo_clock_pair",
+        "rk3_stage3_tracer_krhs_nemo_order",
+        "rk3_stage_tracer_wzv_stored_kmm_ratios",
+        "rk3_stage_transport_stored_r3uv",
+        "rk3_stage3_geothermal_nemo_written",
+        "rk3_stage3_geothermal_after_ldf_nemo_order",
+        "rk3_stage3_damping_after_geothermal_nemo_order",
+        "rk3_stage3_l8_nemo_order",
+        "rk3_stage3_l9_eiv_nemo_order",
+        "nemo_qsr_stage3_kmm_source_association",
+        "vmix_eos_use_config_rho0",
+        # appended by the ocean oracle-fix campaign (tier-3 RNF)
+        "runoff_depth_spread_levels",
+        "lateral_viscosity_mask_levels",
+        "lateral_shlat",
+        "runoff_temperature_floor_sharpness",
     )
     # Head layout unchanged — the slots any positional caller binds first.
     assert f[:9] == (
@@ -305,6 +342,11 @@ def test_positional_construction_unshifted_by_tail_field():
     assert cfg.K_h == 55.0
     assert cfg.K_bih == 0.0                 # first defaulted slot after the 6
     assert cfg.prescribed_flow is None      # tail default untouched
+
+
+def test_prescribed_flow_config_index_preserved():
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    assert LatLonCGridOceanConfig._fields.index("prescribed_flow") == 97
 
 
 def _isolationbreaking_physics(mle=None, lateral_scheme="none"):

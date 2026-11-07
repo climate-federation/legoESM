@@ -10,8 +10,23 @@ from legoesm.ice.constants_config import (
     NEMO_SI3_CONSTANTS_CONFIG,
     IceConstantsConfig,
 )
+from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+                                      NCAR_NEUTRAL_WIDTH)
 
 __param_spec__ = {
+    "SI3SwitchConfig": {
+        "scheme_key": "ice.si3_switches",
+        "excluded": {
+            "relative_width": "numerics: smoothing width of the RULE 5 ramps, not a closure",
+            "temperature_scale_K": "numerics: ramp width scale",
+            "flux_scale_W_m2": "numerics: ramp width scale",
+            "ice_switch_scale": "numerics: ramp width scale",
+            "cut_fraction_scale": "numerics: ramp width scale",
+            "full_cover_scale": "numerics: ramp width scale",
+            "snow_ramp_width_m": "numerics: ramp width; held hard pending a user decision",
+        },
+        "params": {},
+    },
     "SI3ThermoConfig": {
         "scheme_key": "ice.si3_thermo",
         "excluded": {
@@ -111,6 +126,9 @@ __param_spec__ = {
     "SeaIceConfig": {
         "scheme_key": "ice.sea_ice",
         "excluded": {
+            "large_yeager_neutral_width": "numerics: RULE 5 smoothing width of the Large-Yeager neutral Stanton switch (zeta_u)",
+            "large_yeager_dthv_width": "numerics: RULE 5 smoothing width of the Large-Yeager first-guess stability switch [K]",
+            "large_yeager_cd_cutoff_width": "numerics: RULE 5 smoothing band of the Large-Yeager 33 m/s drag cutoff [m/s]",
             "h_ice_min": "numerics: min ice thickness for smooth ops",
             "T_ice_min": "numerics: lower temperature bound for stability",
             "z_ref": "convention: MOST reference height (10 m standard)",
@@ -313,7 +331,7 @@ def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
 
     if config.thermo_scheme != "si3_bl99":
         return _validate_si3_orca2_o1_config(config) or _validate_si3_orca2_o4_config(config) or _validate_si3_lev_pond_config(config)
-    wanted = SI3ThermoConfig(lateral_melt=config.si3.lateral_melt, namthd_da=config.si3.namthd_da)
+    wanted = SI3ThermoConfig()
     if config.si3 != wanted:
         raise ValueError(
             "thermo_scheme='si3_bl99' supports only the ORCA1-resolved "
@@ -338,6 +356,46 @@ def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
         raise ValueError("invalid SI3 C1D identity: " + "; ".join(conflicts))
 
 
+def validate_si3_lane_thermo_config(config: "SeaIceConfig") -> "SeaIceConfig":
+    """Resolve and validate the SI3 lane identity used by its literal step."""
+
+    if config.thermo_scheme != "si3_bl99":
+        raise ValueError("the SI3 lane requires thermo_scheme='si3_bl99'")
+    if config.si3.lateral_melt and config.si3.namthd_da is None:
+        config = config._replace(
+            si3=config.si3._replace(
+                namthd_da=_SI3_NAMELIST_ICE_REF_DEFAULTS["namthd_da"]
+            )
+        )
+    if not config.si3.lateral_melt and config.si3.namthd_da is not None:
+        config = config._replace(si3=config.si3._replace(namthd_da=None))
+    wanted = SI3ThermoConfig(
+        lateral_melt=config.si3.lateral_melt,
+        namthd_da=config.si3.namthd_da,
+    )
+    if config.si3 != wanted:
+        raise ValueError(
+            "the SI3 lane supports only the resolved source-literal "
+            f"identity {wanted!r}; got {config.si3!r}"
+        )
+    if config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG:
+        raise ValueError(
+            "the SI3 lane requires the NEMO 5.0.2 phycst/EOS constant set"
+        )
+    conflicts = []
+    if config.n_categories != 1:
+        conflicts.append("n_categories must be 1")
+    if config.ponds.enabled:
+        conflicts.append("ponds.enabled must be False")
+    if config.ridging.enabled:
+        conflicts.append("ridging is inert in the C1D thermodynamic column")
+    if config.dynamics != "none" or config.transport != "none":
+        conflicts.append("dynamics and transport must both be 'none' in C1D")
+    if conflicts:
+        raise ValueError("invalid SI3 lane C1D identity: " + "; ".join(conflicts))
+    return config
+
+
 def validate_si3_bulk_config(config: "SeaIceConfig") -> None:
     """Reject mixtures outside the ORCA1 constant-coefficient ice identity.
 
@@ -355,12 +413,43 @@ def validate_si3_bulk_config(config: "SeaIceConfig") -> None:
         conflicts.append("Cd_ice=Ch_ice=Ce_ice must be ORCA1's 1e-3")
     if config.emissivity_ice != constants.emissivity_ice_nemo:
         conflicts.append("emissivity_ice must be NEMO sbc_phy emiss_i")
+    if any(not width >= 0.0 for width in config.si3_switches):
+        conflicts.append("si3_switches widths and scales must be >= 0")
     if config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG:
         conflicts.append("NEMO SI3 physical-constant set is required")
     if config.n_categories != 1 or config.ponds.enabled:
         conflicts.append("only jpl=1 with ln_pnd=.false. is certified")
     if conflicts:
         raise ValueError("invalid NEMO SI3 bulk identity: " + "; ".join(conflicts))
+
+
+class SI3SwitchConfig(NamedTuple):
+    """C1 ramp widths of the SI3 surface ports (RULE 5; ``sea_ice._nemo_si3_*``).
+
+    Each ramp is ``relative_width x scale`` wide; ``relative_width = 0.0`` is
+    NEMO's hard form.  The ports have no driver lane yet, so only the Goff
+    floor (``bulk_scheme="nemo_si3_constant"``) reads this from a run today.
+
+    KNOWN DIFFERENCE (RULE 5): NEMO's switches are hard; the smooth default
+    differs from it by at most 0.034 W/m2 in qsr and 3.1e-4 in albedo over the
+    tier-4 ORCA1 record, per case in ``si3_smooth_gaps.npz``; mass terms do not
+    change.  ``relative_width = 0.0`` recovers NEMO.
+    """
+
+    relative_width: float = 0.01         # [-] user rule 2026-10-27
+    temperature_scale_K: float = 1.0     # [K] votes W3-W8
+    flux_scale_W_m2: float = 1.0         # [W/m2]; heat contents use dt x this
+    # Fraction scales set by the tier-4 ORCA1 budget sweep (votes X1-X2): with
+    # scale 1 the ramps moved qsb/fhld/qlead in hundreds of cells by O(100 W/m2).
+    ice_switch_scale: float = 1.0e-10    # [-] epsi10
+    cut_fraction_scale: float = 1.0e-3   # [-] qlead landfast "packed" cut
+    full_cover_scale: float = 1.0e-10    # [-] epsi10
+    # Snow-free test h_s == 0 [m]: 0.0 = NEMO's hard test in every mode.  Held
+    # at 0.0 pending a user decision (vote X4; PR 2376 width table).
+    snow_ramp_width_m: float = 0.0
+
+
+SI3_HARD_SWITCHES = SI3SwitchConfig(relative_width=0.0)
 
 
 class SeaIceConfig(NamedTuple):
@@ -517,10 +606,18 @@ class SeaIceConfig(NamedTuple):
     # way, and this comment replaces two claims that could not both be true.
     thermo_scheme: str = "zero_layer"
     si3: SI3ThermoConfig = SI3ThermoConfig()
+    si3_switches: SI3SwitchConfig = SI3SwitchConfig()
     ice_constants: IceConstantsConfig = IceConstantsConfig()
     # NEMO distinguishes the Dalton (Ce) and Stanton (Ch) coefficients even
     # when ORCA1 makes them equal.
     Ce_ice: float = constants.bulk_transfer_ice_default
+    # Large-Yeager (bulk_scheme="large_yeager", AeroBulk TURB_NCAR) RULE 5
+    # smooth-switch widths (#2241): in-loop neutral Stanton switch half-width
+    # in zeta_u, first-guess switch half-width in dthv [K], 33 m/s drag-cutoff
+    # band [m/s]; 0.0 = AeroBulk's hard switch.  Read only by that scheme.
+    large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
+    large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
+    large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
     # Optional ORCA2 5-category 10+5-layer SI3 state configuration (`thermo_scheme='si3_orca2_o1'`).
     si3_orca2: SI3ORCA2StateConfig | None = None
     # Select CORE-II's exact precipitation closure (pond runoff, untracked
@@ -593,6 +690,7 @@ def build_si3_orca2_o1_config(
     cfg = si3_orca2 if si3_orca2 is not None else SI3ORCA2StateConfig()
     return SeaIceConfig(
         thermo_scheme="si3_orca2_o1",
+        si3_switches=SI3_HARD_SWITCHES,
         ice_constants=cfg.ice_constants,
         si3_orca2=cfg,
     )
@@ -607,6 +705,7 @@ def build_si3_orca2_o2_config(
     cfg = si3_orca2
     return SeaIceConfig(
         thermo_scheme="si3_orca2_o2",
+        si3_switches=SI3_HARD_SWITCHES,
         ice_constants=cfg.ice_constants,
         si3_orca2=cfg,
     )
@@ -624,6 +723,7 @@ def build_si3_orca2_o17_config(card: object) -> SeaIceConfig:
         dynamics="none",
         transport="none",
         thermo_scheme="si3_orca2_o2",
+        si3_switches=SI3_HARD_SWITCHES,
         ice_constants=card.constants,
         si3_orca2=card.state,
         core2_precipitation_closure=False,
@@ -634,10 +734,16 @@ def build_si3_orca2_o17_config(card: object) -> SeaIceConfig:
 
 
 class SI3LateralMeltConfig(NamedTuple):
-    """``&namthd_da`` values read by ``ice_thd_da`` (``namelist_ice_ref:179,183``); no defaults."""
+    """Resolved ``&namthd_da`` values read by ``ice_thd_da``."""
 
     rn_beta: float
     rn_dmin: float
+
+
+_SI3_NAMELIST_ICE_REF_DEFAULTS = {
+    # NEMO 5.0.2 cfgs/SHARED/namelist_ice_ref:179,183.
+    "namthd_da": SI3LateralMeltConfig(rn_beta=1.0, rn_dmin=8.0),
+}
 
 
 def _validate_si3_orca2_o4_config(config: "SeaIceConfig") -> None:
@@ -681,6 +787,7 @@ def build_si3_orca2_o4_config(
         )
     cfg = SeaIceConfig(
         thermo_scheme="si3_orca2_o4",
+        si3_switches=SI3_HARD_SWITCHES,
         ice_constants=si3_orca2.ice_constants,
         si3_orca2=si3_orca2,
     )

@@ -22,7 +22,7 @@ import jax.numpy as jnp
 import netCDF4
 import numpy as np
 from legoesm.ice.dynamics import SI3CGridAEVPState, si3_cgrid_aevp_solver
-from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
+from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import (
     _forcing_for_state,
     build_ice_rheo_card,
 )

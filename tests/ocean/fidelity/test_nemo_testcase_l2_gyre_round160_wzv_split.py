@@ -151,6 +151,13 @@ class _Config:
 
     adaptive_implicit_vertadv = False
     min_water_column_m = 10.0
+    rk3_vector_raw_vmask = False
+    rk3_stage_transport_fold_exchanges = False
+    rk3_stage_wzv_nemo_clock_pair = False
+    nemo_wzv_stored_r3_ratios = False
+    rk3_stage_tracer_wzv_stored_kmm_ratios = False
+    nemo_stage2_momentum_wzv_half_step = False
+    nemo_stage_momentum_wzv_stored_kmm_ratios = False
 
 
 def _stage_transport_inputs(card):

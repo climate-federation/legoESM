@@ -32,7 +32,7 @@ from legoesm.ice.bitz_lipscomb import (
     SI3DHFluxes,
     SI3DHIncrements,
     SI3SurfaceForcing,
-    si3_column_step_arrays,
+    si3_lane_column_step_arrays,
     si3_ice_thd_category_stages,
     si3_ice_thd_dh,
     si3_ice_thd_frazil,
@@ -808,7 +808,7 @@ def _build_compiled_kernels(
             rn_kappa_i=float(namelist["rn_kappa_i"]),
             rn_kappa_s=float(namelist["rn_kappa_s"]),
         )
-        ab_s, ab_i, qtr_bot = bl._radiation(
+        ab_s, ab_i, qtr_bot = bl._si3_502_radiation(
             h_i,
             h_s,
             qtr_ice_top,
@@ -945,7 +945,7 @@ def _build_compiled_kernels(
             frq_m=entry["frq_m"],
             sst_m=entry["sst"],
         )
-        return si3_column_step_arrays(
+        return si3_lane_column_step_arrays(
             state,
             forcing,
             rDt_ice,
@@ -1532,7 +1532,7 @@ def score_o8_to_o12(
                         spec.name, r5["fields"][spec.name], f6[spec.name], kt=kt, category=jl
                     )
 
-            # O9 composed category path & production si3_column_step_arrays (Kind 3 -> Kind 4..9)
+            # O9 composed category path & production si3_lane_column_step_arrays (Kind 3 -> Kind 4..9)
             entry_pad = _pad_dict(f3, CAT_ENTRY_KEYS)
             sfx_bri_pad = _pad_1d(f3["sfx_bri"])
             sfx_lam_pad = _pad_1d(r8["fields"]["sfx_lam"])
@@ -1730,7 +1730,7 @@ def score_o8_to_o12(
                         spec.name, r8["fields"][spec.name], f9[spec.name], kt=kt, category=jl
                     )
 
-            # Production entry point: si3_column_step_arrays (Kind 3 -> Kind 4, 5, 6, 7, 8, 9)
+            # Production entry point: si3_lane_column_step_arrays (Kind 3 -> Kind 4, 5, 6, 7, 8, 9)
             for fname in ZDF_UPDATED_FIELDS:
                 prod_column_acc.update(
                     f"zdf.{fname}",
@@ -1858,7 +1858,7 @@ def score_o8_to_o12(
         },
         "O9": {
             "production_functions": [
-                "legoesm.ice.bitz_lipscomb.si3_column_step_arrays",
+                "legoesm.ice.bitz_lipscomb.si3_lane_column_step_arrays",
                 "legoesm.ice.bitz_lipscomb.si3_ice_thd_zdf_bl99",
                 "legoesm.ice.bitz_lipscomb.si3_ice_thd_dh",
                 "legoesm.ice.bitz_lipscomb.si3_ice_thd_temp",
@@ -1878,7 +1878,7 @@ def score_o8_to_o12(
         },
         "O10": {
             "production_functions": [
-                "legoesm.ice.bitz_lipscomb.si3_column_step_arrays",
+                "legoesm.ice.bitz_lipscomb.si3_lane_column_step_arrays",
                 "legoesm.ice.bitz_lipscomb.si3_ice_thd_sal",
                 "legoesm.ice.bitz_lipscomb.si3_ice_thd_temp",
                 "legoesm.ice.bitz_lipscomb.si3_ice_thd_o10_category_stages",
@@ -1894,7 +1894,7 @@ def score_o8_to_o12(
         },
         "O11": {
             "production_function": "legoesm.ice.si3_thd_da.si3_ice_thd_da",
-            "production_entry_point": "legoesm.ice.bitz_lipscomb.si3_column_step_arrays",
+            "production_entry_point": "legoesm.ice.bitz_lipscomb.si3_lane_column_step_arrays",
             "entry_kind": 8,
             "exit_kind": 9,
             "score": o11_da_acc.summary(),

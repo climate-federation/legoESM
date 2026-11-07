@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.physics.vertical_mixing import tke as tke_mod
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
@@ -160,17 +161,30 @@ def test_scalar_libm_etau_exp_is_glibc_exp(libm):
         run(cfg._replace(tke_etau_exponential_evaluation="jax_expression")), got)
 
 
-def test_scalar_libm_arms_refuse_the_native_policy():
+def test_scalar_literal_arms_use_native_policy_transcendentals():
     before = get_policy()
     set_policy(PrecisionPolicy.fp64(transcendentals="native"))
     try:
-        with pytest.raises(ValueError, match="transcendentals='libm'"):
-            tke_mod._nemo_etau_htau(jnp.asarray([10.0]), TKEConfig(
-                tke_htau_evaluation="nemo_scalar_libm"), jnp.float64)
-        with pytest.raises(ValueError, match="transcendentals='libm'"):
-            tke_mod.nemo_etau_injection(
-                jnp.zeros((1, 2)), jnp.zeros(1), jnp.ones((1, 2)), TKEConfig(
-                    etau_mode="below_ml", etau_htau_mode="constant10m",
-                    tke_etau_exponential_evaluation="nemo_scalar_libm"))
+        lat = jnp.asarray([10.0], dtype=jnp.float64)
+        htau_cfg = TKEConfig(tke_htau_evaluation="nemo_scalar_libm")
+        got_htau = tke_mod._nemo_etau_htau(lat, htau_cfg, jnp.float64)
+        phase = tke_mod._nemo_binary64_round(
+            lat * float.fromhex("0x1.1df46a2529d39p-6"))
+        want_htau = jnp.maximum(0.5, jnp.minimum(30.0, 45.0 * jnp.abs(jnp.sin(phase))))
+        np.testing.assert_array_equal(np.asarray(got_htau), np.asarray(want_htau))
+
+        e = jnp.zeros((1, 2), dtype=jnp.float64)
+        taum = jnp.asarray([0.1], dtype=jnp.float64)
+        depth = jnp.asarray([[1.0, 20.0]], dtype=jnp.float64)
+        etau_cfg = TKEConfig(
+            etau_mode="below_ml", etau_htau_mode="constant10m",
+            tke_etau_exponential_evaluation="nemo_scalar_libm")
+        got_etau = tke_mod.nemo_etau_injection(e, taum, depth, etau_cfg)
+        e_sfc = jnp.maximum(
+            tke_mod._NEMO_TKE_EMIN0,
+            tke_mod._NEMO_TKE_EBB / constants.rho_ocean * taum,
+        )
+        want_etau = e + etau_cfg.etau_frac * e_sfc[..., None] * jnp.exp(-depth / 10.0)
+        np.testing.assert_array_equal(np.asarray(got_etau), np.asarray(want_etau))
     finally:
         set_policy(before)

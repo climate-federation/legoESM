@@ -283,7 +283,7 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
     from legoesm.ice import ponds as ponds_mod
     from legoesm.ice import si3_thd_da as da_mod
     from legoesm.ice import si3_thd_pnd as pnd_mod
-    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_si3_lane_card
     from legoesm.ice.config import (
         MeltPondConfig,
         SI3LateralMeltConfig,
@@ -292,26 +292,24 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
         SnowConfig,
     )
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
-    from legoesm.ice.sea_ice import step_sea_ice
+    from legoesm.ice.sea_ice import step_sea_ice, step_sea_ice_si3_lane
     from legoesm.ice.state import SI3ColumnState, init_dynamic_ice_state
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
 
-    # 1. Duplicate helpers must not exist on bitz_lipscomb + AST arithmetic guard:
+    # 1. Lane-only duplicate helpers must not exist + AST arithmetic guard.
+    # Main's reviewed public BL99 implementation intentionally survives beside
+    # the source-literal lane core (duplicate inventory row: ZDF iterative solve).
     for deleted_name in (
-        "_si3_zdf_bl99_step",
-        "_dh_step",
         "_c1d_dh_via_core",
-        "_piecewise_remap",
-        "_nemo_snow_enthalpy_remap",
         "_nemo_ice_enthalpy_remap",
     ):
         assert not hasattr(bl, deleted_name), f"duplicate {deleted_name} still exists on bitz_lipscomb"
     _assert_no_duplicate_o8_o12_arithmetic()
-    # 2. Production step_sea_ice(thermo_scheme='si3_bl99') -> si3_column_step_arrays calls
+    # 2. Production step_sea_ice_si3_lane(thermo_scheme='si3_bl99') -> si3_lane_column_step_arrays calls
     #    si3_ice_thd_zdf_bl99, si3_ice_thd_dh, si3_ice_thd_temp (x2), si3_ice_thd_sal(nn_icesal=2),
     #    si3_ice_thd_da (when lateral_melt=True), and si3_ice_thd_frazil.
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_si3_lane_card()
     cfg_c1d = card.config._replace(
         si3=card.config.si3._replace(
             lateral_melt=True,
@@ -321,11 +319,11 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
     n_col = 4
     sss_c1d = jnp.full(n_col, 34.0, dtype=jnp.float64)
     s_bulk_c1d = jnp.full(n_col, 5.0, dtype=jnp.float64)
-    s_lay_c1d = bl.option2_salinity_profile(s_bulk_c1d, sss_c1d)
+    s_lay_c1d = bl._si3_502_option2_salinity_profile(s_bulk_c1d, sss_c1d)
     ice_c = card.config.ice_constants
     t_ice_c1d = jnp.broadcast_to(jnp.linspace(265.0, 271.0, 3), (n_col, 3))
-    e_i_c1d = bl.ice_enthalpy_from_temperature(t_ice_c1d, s_lay_c1d, ice_c)
-    e_s_c1d = bl.snow_enthalpy_from_temperature(jnp.full((n_col, 3), 266.0), ice_c)
+    e_i_c1d = bl._si3_502_ice_enthalpy_from_temperature(t_ice_c1d, s_lay_c1d, ice_c)
+    e_s_c1d = bl._si3_502_snow_enthalpy_from_temperature(jnp.full((n_col, 3), 266.0), ice_c)
 
     def _fld(v, layered=False):
         dims = ("column", "layer") if layered else ("column",)
@@ -406,7 +404,7 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
         lambda **kw: (called_stages.append(("do", kw["nn_icesal"])), real_do(**kw))[1],
     )
 
-    next_state_c1d, _ = step_sea_ice(
+    next_state_c1d, _ = step_sea_ice_si3_lane(
         state_c1d, forcing_c1d, z1, z1, z1, cfg_c1d, 1.0, card.dt_seconds
     )
     assert called_stages == [
@@ -438,7 +436,7 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
                 hfx_opw=kw["hfx_opw"],
             ),
         )
-        rev_do_state, _ = step_sea_ice(
+        rev_do_state, _ = step_sea_ice_si3_lane(
             state_c1d, forcing_c1d, z1, z1, z1, cfg_c1d, 1.0, card.dt_seconds
         )
         assert not np.array_equal(
@@ -463,7 +461,7 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
                 kw["s_i"],
             ),
         )
-        rev_state_c1d, _ = step_sea_ice(
+        rev_state_c1d, _ = step_sea_ice_si3_lane(
             state_c1d, forcing_c1d, z1, z1, z1, cfg_c1d, 1.0, card.dt_seconds
         )
         assert not np.array_equal(
@@ -471,7 +469,7 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
             np.asarray(rev_state_c1d.S_layers.data).view(np.uint64),
         )
 
-    # 3. Production step_sea_ice with ponds.scheme='si3_lev' -> step_ponds(scheme='si3_lev')
+    # 3. Main production step_sea_ice with ponds.scheme='si3_lev' -> step_ponds(scheme='si3_lev')
     #    calls si3_ice_thd_pnd -> si3_pnd_lev -> si3_ice_perm_eff, and fails when reverted.
     namthd_pnd = SI3PondConfig(
         rn_himin=0.1,
@@ -595,6 +593,13 @@ _KNOWN_ARITH_CALLS = frozenset({
 
 _CANONICAL_O8_O12_KERNELS: dict[str, set[str]] = {
     "packages/ice/legoesm/ice/bitz_lipscomb.py": {
+        "_si3_zdf_bl99_step",
+        "_piecewise_remap",
+        "_dh_step",
+        "_si3_column_step_arrays_ablation",
+        "_nemo_snow_enthalpy_remap",
+        "_dh_step",
+        "_dh_step_fluxes",
         "_si3_zdf_bl99_core",
         "si3_ice_thd_zdf_bl99",
         "_cumulative_remap",
@@ -605,7 +610,7 @@ _CANONICAL_O8_O12_KERNELS: dict[str, set[str]] = {
         "_sal_fl",
         "si3_ice_thd_sal",
         "si3_ice_thd_o10_category_stages",
-        "si3_column_step_arrays",
+        "si3_lane_column_step_arrays",
         "_si3_column_thd_da",
         "si3_ice_thd_do",
         "si3_ice_thd_frazil",
@@ -617,6 +622,14 @@ _CANONICAL_O8_O12_KERNELS: dict[str, set[str]] = {
         "si3_ice_perm_eff",
     },
     "packages/ice/legoesm/ice/itd.py": {"si3_ice_itd_rem"},
+    # Historical ablation adapter: delegates to the lane kernel on the live
+    # arm and owns explicit planted-reversion arithmetic on disabled arms.
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py": {
+        "_si3_zdf_bl99_step",
+        "_piecewise_remap",
+        "_dh_step",
+        "_si3_column_step_arrays_ablation",
+    },
 }
 
 
@@ -774,8 +787,8 @@ def _assert_no_duplicate_o8_o12_arithmetic(
 
     abl_fn = phase2_funcs["_si3_column_step_arrays_ablation"]
     abl_calls = _called_names(abl_fn)
-    assert "si3_column_step_arrays" in abl_calls, (
-        "_si3_column_step_arrays_ablation does not delegate to si3_column_step_arrays"
+    assert "si3_lane_column_step_arrays" in abl_calls, (
+        "_si3_column_step_arrays_ablation does not delegate to si3_lane_column_step_arrays"
     )
     assert "si3_ice_thd_sal" in abl_calls, (
         "_si3_column_step_arrays_ablation does not delegate to si3_ice_thd_sal"
@@ -786,7 +799,7 @@ def _assert_no_duplicate_o8_o12_arithmetic(
     )
 
 
-def test_si3_column_step_arrays_requires_explicit_si3_and_c1d_reads_namelist(
+def test_si3_lane_column_step_arrays_requires_explicit_si3_and_c1d_reads_namelist(
     tmp_path,
 ) -> None:
     """Verify missing SI3 config raises ValueError (no silent nn_icesal default) and C1D reads nn_icesal from its namelist."""
@@ -796,14 +809,14 @@ def test_si3_column_step_arrays_requires_explicit_si3_and_c1d_reads_namelist(
     from legoesm.ice import bitz_lipscomb as bl
     from legoesm.ice.c1d_omip_l3 import (
         C1D_OMIP_L3_NAMELIST_ICE_CFG,
-        build_c1d_omip_l3_card,
+        build_c1d_omip_l3_si3_lane_card,
     )
     from legoesm.ice.config import SI3ThermoConfig
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
 
-    card = build_c1d_omip_l3_card()
+    card = build_c1d_omip_l3_si3_lane_card()
     assert card.config.si3.salinity_scheme == 2
 
     z1 = jnp.zeros(1, dtype=jnp.float64)
@@ -837,15 +850,15 @@ def test_si3_column_step_arrays_requires_explicit_si3_and_c1d_reads_namelist(
 
     with pytest.raises(
         ValueError,
-        match=r"si3_column_step_arrays requires an explicit SI3ThermoConfig \(si3\); no default",
+        match=r"si3_lane_column_step_arrays requires an explicit SI3ThermoConfig \(si3\); no default",
     ):
-        bl.si3_column_step_arrays(st, forcing, 3600.0, NEMO_SI3_CONSTANTS_CONFIG)
+        bl.si3_lane_column_step_arrays(st, forcing, 3600.0, NEMO_SI3_CONSTANTS_CONFIG)
 
     with pytest.raises(
         ValueError,
-        match=r"si3_column_step_arrays requires an explicit SI3ThermoConfig \(si3\); no default",
+        match=r"si3_lane_column_step_arrays requires an explicit SI3ThermoConfig \(si3\); no default",
     ):
-        bl.si3_column_step_arrays(
+        bl.si3_lane_column_step_arrays(
             st,
             forcing,
             3600.0,
@@ -867,7 +880,7 @@ def test_si3_column_step_arrays_requires_explicit_si3_and_c1d_reads_namelist(
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="salinity_scheme=4"):
-        build_c1d_omip_l3_card(namelist_ice_path=nml_scheme4)
+        build_c1d_omip_l3_si3_lane_card(namelist_ice_path=nml_scheme4)
 
     nml_missing = tmp_path / "namelist_ice_cfg_missing"
     nml_missing.write_text(
@@ -875,7 +888,7 @@ def test_si3_column_step_arrays_requires_explicit_si3_and_c1d_reads_namelist(
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="nn_icesal"):
-        build_c1d_omip_l3_card(namelist_ice_path=nml_missing)
+        build_c1d_omip_l3_si3_lane_card(namelist_ice_path=nml_missing)
 
 
 def test_no_duplicate_o8_o12_arithmetic_ast_guard_and_plants(monkeypatch) -> None:

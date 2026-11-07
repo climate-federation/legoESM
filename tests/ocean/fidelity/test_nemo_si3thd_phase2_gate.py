@@ -19,8 +19,15 @@ from legoesm.ice.bitz_lipscomb import (
     snow_enthalpy_from_temperature,
     snow_temperature_from_enthalpy,
 )
-from legoesm.ice.c1d_omip_l3 import ORACLE_V1_ROOT, build_c1d_omip_l3_card
-from legoesm.ice.config import SI3ThermoConfig, validate_si3_thermo_config
+from legoesm.ice.c1d_omip_l3 import (
+    ORACLE_V1_ROOT,
+    build_c1d_omip_l3_si3_lane_card,
+)
+from legoesm.ice.config import (
+    SI3LateralMeltConfig,
+    SI3ThermoConfig,
+    validate_si3_thermo_config,
+)
 from legoesm.ice.constants_config import (
     NEMO_SI3_CONSTANTS_CONFIG,
     IceConstantsConfig,
@@ -57,6 +64,7 @@ def _forcing() -> SI3SurfaceForcing:
         evaporation=a(0.0), snow_precipitation=a(5.0e-6),
         qprec_ice=a(0.0), qcn_ice_bottom=a(0.0),
         qsb_ice_bottom=a(0.0), fhld=a(0.0), qlead=a(0.0),
+        sst=a(271.27 - NEMO_SI3_CONSTANTS_CONFIG.T0),   # t_bottom in degC
     )
 
 
@@ -118,7 +126,7 @@ def test_shared_flooding_is_bit_exact_with_former_inline_path() -> None:
 
 
 def test_selector_rejects_frankenstein_identity() -> None:
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V1_ROOT)
     validate_si3_thermo_config(card.config)
     with pytest.raises(ValueError, match="ORCA1-resolved"):
         validate_si3_thermo_config(
@@ -127,6 +135,15 @@ def test_selector_rejects_frankenstein_identity() -> None:
     with pytest.raises(ValueError, match="mixing canonical"):
         validate_si3_thermo_config(
             card.config._replace(ice_constants=IceConstantsConfig())
+        )
+    with pytest.raises(ValueError, match="ORCA1-resolved"):
+        validate_si3_thermo_config(
+            card.config._replace(
+                si3=SI3ThermoConfig(
+                    lateral_melt=True,
+                    namthd_da=SI3LateralMeltConfig(rn_beta=1.0, rn_dmin=8.0),
+                )
+            )
         )
 
 
@@ -180,7 +197,7 @@ def test_shared_nemo_thomas_mode_is_bit_exact_with_written_order() -> None:
 
 
 def test_existing_column_driver_dispatches_selected_si3() -> None:
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V1_ROOT)
     model = IceColumnModel.create(
         forcing=_forcing(), config=card.config, ncol=1, dt=card.dt_seconds,
         h_ice_init=2.0, h_snow_init=0.2, concentration_init=0.9,
@@ -228,7 +245,7 @@ def test_gate_owns_qns_time_level_and_reports_current_first_divergence(gate_modu
 def test_gate_binary_cursor_advances_to_second_step(gate_module) -> None:
     """The kt=1 stop does not hide a broken later-step stream cursor."""
 
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V1_ROOT)
     with (
         (card.oracle_root / "oracle_si3_thd_frames.bin").open("rb") as thd,
         (card.oracle_root / "oracle_si3_exchange_frames.bin").open("rb") as xchg,
@@ -243,7 +260,7 @@ def test_gate_binary_cursor_advances_to_second_step(gate_module) -> None:
 def test_zdf_operand_reader_is_complete_and_fails_closed(
     gate_module, tmp_path: Path
 ) -> None:
-    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V1_ROOT)
+    card = build_c1d_omip_l3_si3_lane_card(oracle_root=ORACLE_V1_ROOT)
     path = card.oracle_root / "oracle_si3_zdf_operands.bin"
     frames = gate_module._read_zdf_operands(path)
     assert [(frame["frame"], frame["iteration"]) for frame in frames] == (
@@ -269,3 +286,30 @@ def test_zdf_operand_reader_is_complete_and_fails_closed(
 def test_gate_plants_exit_red(gate_module, kwargs, error) -> None:
     with pytest.raises((gate_module.GateError, ValueError), match=error):
         gate_module.run(**kwargs)
+
+
+
+def _zin_record(names: int, version: int, step: int = 3) -> bytes:
+    import struct
+    extra = {1: 0, 2: 3, 3: 4}[version]
+    vals = np.arange(1.0, names + extra + 1.0)
+    return (f"NEMO_L3ZIN_00{version}  ".encode()
+            + struct.pack("=6i", version, step, 1, 1, 64, names + extra) + vals.tobytes())
+
+
+def test_zin_v3_record_carries_sst_and_older_records_are_refused(gate_module, tmp_path) -> None:
+    """Vote Y1: SST comes from the v3 recorder; v1/v2 records cannot drive the column (no fallback)."""
+    n = len(gate_module.ZDF_INPUT_NAMES)
+
+    def read(version):
+        path = tmp_path / f"zin{version}.bin"
+        path.write_bytes(_zin_record(n, version))
+        with path.open("rb") as stream:     # reader uses np.fromfile: needs a real file
+            return gate_module._read_zdf_input_step(stream, 3)
+    v3 = read(3)
+    assert float(v3["sst"][0]) == n + 4.0 and float(v3["t_s"][0, 2]) == n + 3.0
+    assert float(gate_module._forcing(v3).sst[0]) == n + 4.0
+    for version in (1, 2):
+        old = read(version)
+        with pytest.raises(gate_module.GateError, match="no SST"):
+            gate_module.forcing_inputs(old)

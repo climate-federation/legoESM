@@ -55,3 +55,12 @@ def test_days_flag_overrides_years_and_smoke_budget() -> None:
     assert args.days is None
     args = parser.parse_args(["--smoke", "--days", "30"])
     assert args.days == 30.0
+
+
+def test_runoff_depth_nemo_levels_flag_default_off() -> None:
+    """--runoff-depth-nemo-levels defaults to False (fractional spread kept);
+    the flag opts into NEMO's whole-level nk_rnf spread."""
+    parser = _parser()
+    assert parser.parse_args([]).runoff_depth_nemo_levels is False
+    args = parser.parse_args(["--runoff-depth-nemo-ini", "--runoff-depth-nemo-levels"])
+    assert args.runoff_depth_nemo_levels is True and args.runoff_depth_nemo_ini is True
