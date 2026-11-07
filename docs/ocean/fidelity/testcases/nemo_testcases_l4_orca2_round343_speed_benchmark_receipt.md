@@ -4,7 +4,7 @@
 - **Author**: Argon
 - **Branch**: `fidelity/nemo-testcases-orca2-rounds`
 - **Preregistration**: `docs/ocean/fidelity/testcases/PREREG_nemo_testcases_l4_orca2_round343_speed_benchmark.md`
-- **Benchmark script**: `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:382-3479`
+- **Benchmark script**: `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:382-3478`
 - **Direct unit test**: `tests/ocean/fidelity/test_orca2_round343_speed_benchmark.py:32-203`
 - **Evidence bundle**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r343/orca2_round343_speed_benchmark_report.json` (`arm_exact_cpu_fp64.json`, `arm_normal_cpu_fp64.json`, `arm_normal_gpu_fp64.json`, `arm_normal_gpu_fp32.json`)
 - **Independent review**: `independent review: operator`

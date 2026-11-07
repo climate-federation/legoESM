@@ -2859,7 +2859,6 @@ def run_round349_legoesm_child(
         require(steps == ROUND349_SMOKE_STEPS, f"smoke requires {ROUND349_SMOKE_STEPS} steps")
         min_steady = steps - WARMUP_STEPS
     elif profile:
-        require(mode == "exact", "round-349 profiles use exact/libm mode")
         require(cores in (1, 40), "round-349 profiles are registered only at n=1 and n=40")
         require(steps == ROUND349_PROFILE_STEP, f"profile requires {ROUND349_PROFILE_STEP} steps")
         min_steady = 1

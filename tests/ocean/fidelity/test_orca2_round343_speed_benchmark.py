@@ -576,3 +576,13 @@ def test_round349_rank_wrapper_pins_rank_to_its_listed_cpu(tmp_path: Path) -> No
     expected = f"Cpus_allowed_list:\t{allowed[-1]}"
     assert (tmp_path / "binding_rank1.txt").read_text().strip() == expected
     assert (tmp_path / "nemo_affinity.txt").read_text().strip() == expected
+
+
+@pytest.mark.parametrize("mode", ["exact", "fast_literal"])
+def test_round349_child_profile_accepts_both_modes(tmp_path: Path, mode: str) -> None:
+    # The mode guard passes for both modes; the next guard (measured preflight) is the one that refuses.
+    with pytest.raises(r343.GateError, match="measured preflight is required"):
+        r343.run_round349_legoesm_child(
+            mode=mode, cores=1, cpu_ids=(0,), steps=r343.ROUND349_PROFILE_STEP,
+            output_dir=tmp_path, profile=True, preflight_path=None,
+        )

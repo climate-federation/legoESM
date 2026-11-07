@@ -180,6 +180,11 @@ is fatal, and the annotated surface result is synchronized before the region
 closes so its duration is a serialized surface-path wall cost. The trace parser clips complete events to
 the registered step annotation and reports:
 
+Deviation (2026-11-06, user decision): the child also accepts `--round349-profile`
+with `--round349-mode fast_literal`, so the `n=1` fast-literal step (the mode timed
+against NEMO) can be profiled with the same trace protocol. The round-349 report
+validator still accepts exact-mode profiles only.
+
 - top cost centres by inclusive CPU time, grouped from event name and source
   metadata into tracer advection, TKE/vertical mixing, EOS/density,
   barotropic/free surface, momentum/vorticity, lateral mixing/GM-Redi, surface

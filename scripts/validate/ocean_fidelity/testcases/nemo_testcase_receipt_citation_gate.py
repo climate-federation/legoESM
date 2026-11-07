@@ -5074,7 +5074,7 @@ CITATION_MAP = {
     'tests/ocean/unit/test_orca2_round341_stage2_thickness.py:168-604': ['def test_stage2_transport_uses_stored_h_s2_kmm_and_fails_on_revert() -> None:',
  'np.asarray(h_rev, dtype=np.float64).view(np.uint64),',
  437],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:382-3479': ['def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:', 'raise SystemExit(main())', 3098],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:382-3478': ['def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:', 'raise SystemExit(main())', 3097],
     'tests/ocean/fidelity/test_orca2_round343_speed_benchmark.py:32-203': ['def test_switch_inventory_citations_and_class_defaults() -> None:', 'r343.validate_benchmark_report(bad_days)', 172],
     'packages/ocean/legoesm/ocean/bulk_flux_omip.py:894-967': ['next_s2: NemoS2Inputs', ('),', 33), 74],
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2264-2527': [('bbl_aht_m2_s=1000.0,', 2), ('1,', 51), 264],
