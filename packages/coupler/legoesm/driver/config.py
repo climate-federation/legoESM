@@ -1186,11 +1186,6 @@ class ExperimentConfig(NamedTuple):
     # the genuinely different SBL tails are "grachev2007_sheba"/"gryanik2020";
     # see bulk_flux.psi_m_coare).
     surface_stability_scheme: str = "dyer1974"
-    # Unstable-regime (zeta < 0) MOST form, chosen independently of
-    # surface_stability_scheme and threaded to the same consumers: "native"
-    # (default, byte-identical: each bulk path's own form) | "businger_dyer" |
-    # "coare3".  See bulk_flux.compute_most_fluxes.
-    surface_unstable_scheme: str = "native"
     # Tiled (mosaic) surface fluxes: when True, the atmosphere surface
     # turbulent flux is computed SEPARATELY per surface tile and area-weighted
     # — ``surface_bulk_scheme`` (e.g. coare3) runs on the OCEAN tile, the
@@ -2180,6 +2175,11 @@ class ExperimentConfig(NamedTuple):
     # droplet size reset in the sedimentation fall speeds (prognostic droplet
     # number only); 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
     morrison_mg2_drop_sed_reset_log_width: float = 0.01
+    # APPENDED LAST (positional order).  Unstable-regime (zeta < 0) MOST form, chosen independently of
+    # surface_stability_scheme and threaded to the same consumers: "native"
+    # (default, byte-identical: each bulk path's own form) | "businger_dyer" |
+    # "coare3".  See bulk_flux.compute_most_fluxes.
+    surface_unstable_scheme: str = "native"
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
