@@ -517,21 +517,24 @@ class AIMIPClassicalParams(eqx.Module):
         A knob read into an ARRAY slot (all-array template) of another dtype:
         a knob the checkpoint's record lists as frozen takes the template
         dtype; a trained knob may only widen losslessly (fp32 -> fp64); a
-        narrowing, or any dtype change with no record to classify the knob,
-        raises (user 2026-10-28, Q).  A record whose ranges differ from this
-        module's raises: no decoding across range sets yet.  Every other leaf
+        narrowing raises (user 2026-10-28, Q).  A missing record, or one whose
+        ranges differ from this module's, raises: raw values decode through the
+        current ranges, so a file of unknown ranges could load shifted.  Every other leaf
         loads as equinox's default (a Python-float slot gets the exact float).
         """
         default = eqx.default_deserialise_filter_spec
-        if record is not None:
-            mine = {c.name: [c.min_val, c.max_val] for c in self.constraints}
-            if record["ranges"] != mine:
-                diff = sorted(k for k in set(mine) | set(record["ranges"])
-                              if mine.get(k) != record["ranges"].get(k))
-                raise ValueError(
-                    f"checkpoint trained with other AIMIP knob ranges or knobs "
-                    f"({diff}); decoding across range sets is not implemented")
-        frozen = None if record is None else frozenset(record["frozen"])
+        if record is None:
+            raise ValueError(
+                "checkpoint has no knob record, so the AIMIP knob ranges it "
+                "was trained with are unknown; refusing to decode it")
+        mine = {c.name: [c.min_val, c.max_val] for c in self.constraints}
+        if record["ranges"] != mine:
+            diff = sorted(k for k in set(mine) | set(record["ranges"])
+                          if mine.get(k) != record["ranges"].get(k))
+            raise ValueError(
+                f"checkpoint trained with other AIMIP knob ranges or knobs "
+                f"({diff}); decoding across range sets is not implemented")
+        frozen = frozenset(record["frozen"])
 
         def knob(name):
             def spec(f, x):
@@ -540,10 +543,6 @@ class AIMIPClassicalParams(eqx.Module):
                 disk = np.load(f)
                 if disk.dtype == x.dtype:
                     return jnp.asarray(disk)
-                if frozen is None:
-                    raise ValueError(
-                        f"knob {name}: checkpoint dtype {disk.dtype} vs template "
-                        f"{x.dtype} and no knob record to tell frozen from trained")
                 if name in frozen or np.can_cast(disk.dtype, x.dtype, "safe"):
                     return jnp.asarray(disk, dtype=x.dtype)
                 raise ValueError(
