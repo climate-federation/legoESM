@@ -11431,13 +11431,13 @@ _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1957-1964', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1970-1977')
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1806-1871', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1819-1884')
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1858-1880', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1871-1893')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:172', 'tests/ice/unit/test_si3_o5_strength_aevp.py:173')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:198', 'tests/ice/unit/test_si3_o5_strength_aevp.py:199')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:226', 'tests/ice/unit/test_si3_o5_strength_aevp.py:227')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:280', 'tests/ice/unit/test_si3_o5_strength_aevp.py:281')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:291', 'tests/ice/unit/test_si3_o5_strength_aevp.py:310')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:317', 'tests/ice/unit/test_si3_o5_strength_aevp.py:336')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:400', 'tests/ice/unit/test_si3_o5_strength_aevp.py:419')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:172', 'tests/ice/unit/test_si3_o5_strength_aevp.py:174')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:198', 'tests/ice/unit/test_si3_o5_strength_aevp.py:200')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:226', 'tests/ice/unit/test_si3_o5_strength_aevp.py:228')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:280', 'tests/ice/unit/test_si3_o5_strength_aevp.py:282')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:291', 'tests/ice/unit/test_si3_o5_strength_aevp.py:311')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:317', 'tests/ice/unit/test_si3_o5_strength_aevp.py:337')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:400', 'tests/ice/unit/test_si3_o5_strength_aevp.py:420')
 # The O4 Prather implementation was prepared before O2/O3/O5/O7 landed.  The
 # composed rebase retains every rung and therefore moves all later O4/O2/O3
 # anchors.  Re-anchor the historical keys only after the landed-rung chain
@@ -13119,13 +13119,13 @@ def _round29_reanchor_or_defer(old: str, new: str, extent: int | None = None) ->
 
 
 for _old, _new in (
-    ('packages/ice/legoesm/ice/dynamics.py:1221', 'packages/ice/legoesm/ice/dynamics.py:1226'),
-    ('packages/ice/legoesm/ice/dynamics.py:1273', 'packages/ice/legoesm/ice/dynamics.py:1278'),
-    ('packages/ice/legoesm/ice/dynamics.py:1938', 'packages/ice/legoesm/ice/dynamics.py:1943'),
-    ('packages/ice/legoesm/ice/dynamics.py:1970', 'packages/ice/legoesm/ice/dynamics.py:1975'),
-    ('packages/ice/legoesm/ice/dynamics.py:2029', 'packages/ice/legoesm/ice/dynamics.py:2034'),
-    ('packages/ice/legoesm/ice/dynamics.py:2106', 'packages/ice/legoesm/ice/dynamics.py:2111'),
-    ('packages/ice/legoesm/ice/dynamics.py:2127', 'packages/ice/legoesm/ice/dynamics.py:2132'),
+    ('packages/ice/legoesm/ice/dynamics.py:1221', 'packages/ice/legoesm/ice/dynamics.py:1234'),
+    ('packages/ice/legoesm/ice/dynamics.py:1273', 'packages/ice/legoesm/ice/dynamics.py:1286'),
+    ('packages/ice/legoesm/ice/dynamics.py:1938', 'packages/ice/legoesm/ice/dynamics.py:1951'),
+    ('packages/ice/legoesm/ice/dynamics.py:1970', 'packages/ice/legoesm/ice/dynamics.py:1983'),
+    ('packages/ice/legoesm/ice/dynamics.py:2029', 'packages/ice/legoesm/ice/dynamics.py:2042'),
+    ('packages/ice/legoesm/ice/dynamics.py:2106', 'packages/ice/legoesm/ice/dynamics.py:2119'),
+    ('packages/ice/legoesm/ice/dynamics.py:2127', 'packages/ice/legoesm/ice/dynamics.py:2140'),
     ('packages/ice/legoesm/ice/config.py:607-611', 'packages/ice/legoesm/ice/config.py:636-640'),
     ('packages/ice/legoesm/ice/config.py:581-589', 'packages/ice/legoesm/ice/config.py:589-597'),
     ('packages/ice/legoesm/ice/config.py:645-659', 'packages/ice/legoesm/ice/config.py:674-688'),
