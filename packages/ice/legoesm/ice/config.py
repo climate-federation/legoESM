@@ -330,7 +330,7 @@ def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
     """Reject unsupported SI3 selector mixtures before any tendency runs."""
 
     if config.thermo_scheme != "si3_bl99":
-        return _validate_si3_orca2_o1_config(config) or _validate_si3_orca2_o4_config(config) or _validate_si3_lev_pond_config(config)
+        return _validate_si3_orca2_o1_config(config) or _validate_si3_lev_pond_config(config)
     wanted = SI3ThermoConfig()
     if config.si3 != wanted:
         raise ValueError(
@@ -424,7 +424,7 @@ def validate_si3_bulk_config(config: "SeaIceConfig") -> None:
 
 
 class SI3SwitchConfig(NamedTuple):
-    """C1 ramp widths of the SI3 surface ports (RULE 5; ``sea_ice._nemo_si3_*``).
+    """C1 ramp widths of the SI3 surface ports (RULE 5; ``sea_ice._nemo_si3_*``, ``si3_surface``).
 
     Each ramp is ``relative_width x scale`` wide; ``relative_width = 0.0`` is
     NEMO's hard form.  The ports have no driver lane yet, so only the Goff
@@ -714,55 +714,6 @@ _SI3_NAMELIST_ICE_REF_DEFAULTS = {
     # NEMO 5.0.2 cfgs/SHARED/namelist_ice_ref:179,183.
     "namthd_da": SI3LateralMeltConfig(rn_beta=1.0, rn_dmin=8.0),
 }
-
-
-def _validate_si3_orca2_o4_config(config: "SeaIceConfig") -> None:
-    """Validate rung-O4 ORCA2 SI3 Prather advection configuration (`thermo_scheme='si3_orca2_o4'`)."""
-    if config.thermo_scheme != "si3_orca2_o4":
-        return
-    orca2_cfg = config.si3_orca2
-    if not isinstance(orca2_cfg, SI3ORCA2StateConfig):
-        raise ValueError(
-            "thermo_scheme='si3_orca2_o4' requires config.si3_orca2 to be "
-            "an explicit SI3ORCA2StateConfig"
-        )
-    if (
-        config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG
-        or orca2_cfg.ice_constants != NEMO_SI3_CONSTANTS_CONFIG
-    ):
-        raise ValueError(
-            "thermo_scheme='si3_orca2_o4' requires the NEMO 5.0.2 phycst/EOS "
-            "constant set on both SeaIceConfig.ice_constants and "
-            "SI3ORCA2StateConfig.ice_constants"
-        )
-    conflicts = []
-    if not orca2_cfg.ln_icedyn or not orca2_cfg.ln_dynadv_pra or orca2_cfg.ln_icethd:
-        conflicts.append(
-            "ln_icedyn and ln_dynadv_pra must be True and ln_icethd must be False at rung O4 "
-            "(icestp.f90:211,235; icedyn_adv.f90:124-129)"
-        )
-    if config.dynamics != "none" or config.transport != "none":
-        conflicts.append("native dynamics and transport must both be 'none' at rung O4")
-    if conflicts:
-        raise ValueError("invalid SI3 ORCA2 O4 identity: " + "; ".join(conflicts))
-
-
-def build_si3_orca2_o4_config(
-    si3_orca2: SI3ORCA2StateConfig,
-) -> SeaIceConfig:
-    """Return the rung-O4 ORCA2 SI3 Prather advection `SeaIceConfig`."""
-    if not isinstance(si3_orca2, SI3ORCA2StateConfig):
-        raise ValueError(
-            "build_si3_orca2_o4_config requires an explicit SI3ORCA2StateConfig"
-        )
-    cfg = SeaIceConfig(
-        thermo_scheme="si3_orca2_o4",
-        si3_switches=SI3_HARD_SWITCHES,
-        ice_constants=si3_orca2.ice_constants,
-        si3_orca2=si3_orca2,
-    )
-    _validate_si3_orca2_o4_config(cfg)
-    return cfg
 
 
 class SI3PondConfig(NamedTuple):

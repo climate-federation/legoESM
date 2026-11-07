@@ -9,7 +9,7 @@ Fixtures are the tier-4 NEMO 5.0.1 ORCA1 extracts used by the oracle tests
   ``fixtures/orca1_t4/si3_smooth_gaps.npz`` (1e-6 relative, 1e-12 absolute floor).  A change to the
   smooth form or a width re-records it with ``SI3_RECORD_GAPS=1`` and states why.
 * Gradients: at a point inside each ramp, jax.grad matches a central finite difference.
-The snow-free test (h_s == 0) stays hard by default (flagged; see sea_ice._si3_snow_free).
+The snow-free test (h_s == 0) stays hard by default (flagged; see si3_surface.si3_snow_free).
 """
 from __future__ import annotations
 

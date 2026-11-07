@@ -2391,14 +2391,26 @@ class NemoSI3IceTurbulent(NamedTuple):
     dqla_ice: jax.Array
 
 
-def nemo_si3_ice_turbulent(ptsu, pslp, rhoa, wndm_ice, Ch_ice, Ce_ice, theta_zu_i, q_zu_i):
+def nemo_si3_ice_turbulent(
+    ptsu, pslp, rhoa, wndm_ice, Ch_ice, Ce_ice, theta_zu_i, q_zu_i, goff_floor_width_K=0.0,
+):
     """``blk_ice_2`` saturation and turbulent statements (``sbcblk.f90:1224-1225,1246-1256``).
 
     Elementwise; a category axis is carried by broadcasting the caller's arrays.
+    ``goff_floor_width_K > 0`` smooths the 180 K saturation floor; 0 is NEMO's source order.
     """
-    from legoesm.thermo import nemo_si3_dq_sat_dt_ice, nemo_si3_q_sat_ice, nemo_theta_exner
+    from legoesm.thermo import (
+        nemo_si3_dq_sat_dt_ice,
+        nemo_si3_q_sat_ice,
+        nemo_si3_saturation_over_ice,
+        nemo_theta_exner,
+    )
 
-    zsq = nemo_si3_q_sat_ice(ptsu, pslp)                                        # :1224
+    if goff_floor_width_K > 0.0:
+        zsq, dq_sat = nemo_si3_saturation_over_ice(ptsu, pslp, goff_floor_width_K)
+    else:
+        zsq = nemo_si3_q_sat_ice(ptsu, pslp)                                    # :1224
+        dq_sat = nemo_si3_dq_sat_dt_ice(ptsu, pslp)
     zsipt = nemo_theta_exner(ptsu, pslp)                                        # :1225
     zzblk = sr(rhoa * wndm_ice)                                                 # :1246
     zztmp1 = sr(sr(zzblk * constants.c_p_air_ice_nemo) * Ch_ice)                # :1249
@@ -2406,7 +2418,6 @@ def nemo_si3_ice_turbulent(ptsu, pslp, rhoa, wndm_ice, Ch_ice, Ce_ice, theta_zu_
     z_dqsb = zztmp1                                                             # :1251
     zztmp1 = sr(sr(zzblk * constants.L_sub_nemo) * Ce_ice)                      # :1254
     qla = sr(zztmp1 * sr(zsq - q_zu_i))                                         # :1255
-    dq_sat = nemo_si3_dq_sat_dt_ice(ptsu, pslp)
     dqla = sr(zztmp1 * dq_sat)                                                  # :1256
     return NemoSI3IceTurbulent(zsq=zsq, zsipt=zsipt, dq_sat=dq_sat, z_qsb=z_qsb, z_dqsb=z_dqsb, qla_ice=qla, dqla_ice=dqla)
 
