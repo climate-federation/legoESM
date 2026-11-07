@@ -15612,6 +15612,9 @@ class ModelDriver:
             (_land_T_skin, _land_shflx_cells, _land_lhflx_cells,
              _land_evap_cells, _land_albedo_cells) = _presc_land_arrays(
                 float(_land_presc_day))
+            # The published ts/tas read the land skin from here; without it
+            # they fall back to the ocean anchor over land.
+            self._land_T_skin_last = _land_T_skin
 
         for step in range(n_steps_total):
             if step in _trace_edges:
@@ -16117,6 +16120,7 @@ class ModelDriver:
                 (_land_T_skin, _land_shflx_cells, _land_lhflx_cells,
                  _land_evap_cells, _land_albedo_cells) = _presc_land_arrays(
                     float(_land_presc_day))
+                self._land_T_skin_last = _land_T_skin
             if _land_ml_on:
                 _a2s = _marshal_land_forcing()
                 if _a2s is not None:
