@@ -128,11 +128,13 @@ def main() -> int:
     has_val = any(v is not None for v in val)
 
     fig, ax = plt.subplots(figsize=(7.0, 4.2))
-    ax.plot(epochs, train, "o-", label="training" + lead_label(rows, "train_leads_hours"))
+    ax.plot(epochs, train, "o-", color="#0072B2",
+            label="training" + lead_label(rows, "train_leads_hours"))
     if has_val:
         ve = [e for e, v in zip(epochs, val) if v is not None]
         vv = [v for v in val if v is not None]
-        ax.plot(ve, vv, "s--", label="held out" + lead_label(rows, "val_leads_hours"))
+        ax.plot(ve, vv, "s--", color="#E69F00",
+                label="held out" + lead_label(rows, "val_leads_hours"))
     # The EMA weights' held-out loss (deck ema_decay > 0), what the run ships.
     vema = [r.get("val_loss_ema") for r in rows]
     if any(v is not None for v in vema):
