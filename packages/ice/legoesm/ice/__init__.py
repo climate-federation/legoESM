@@ -62,7 +62,11 @@ from legoesm.ice.rheology import (
     vp_stress,
 )
 from legoesm.ice.ridging import (
+    SI3JPL1RidgingConfig,
+    SI3JPL1RidgingLosses,
+    SI3JPL1RidgingState,
     apply_ridging,
+    apply_si3_jpl1_ridging,
     participation_weights,
 )
 from legoesm.ice.sea_ice import (
@@ -158,7 +162,11 @@ __all__ = [
     "SaltBudgetResult",
     # Ridging
     "apply_ridging",
+    "apply_si3_jpl1_ridging",
     "participation_weights",
+    "SI3JPL1RidgingConfig",
+    "SI3JPL1RidgingLosses",
+    "SI3JPL1RidgingState",
     # Shortwave
     "compute_ice_sw",
     "delta_eddington_albedo",
@@ -219,7 +227,6 @@ from legoesm.ice.si3_orca2_state import (  # noqa: E402
     si3_var_snwfra_3d,
     write_si3_netcdf_restart,
 )
-from legoesm.ice.config import build_si3_orca2_o4_config  # noqa: E402
 from legoesm.ice.si3_orca2_state import (  # noqa: E402
     SI3AdvectionDiagnostics,
     SI3ORCA2AdvectionGrid,
@@ -240,7 +247,6 @@ from legoesm.ice.transport import (  # noqa: E402
 
 __all__.extend(
     (
-        "build_si3_orca2_o4_config",
         "SI3ORCA2AdvectionGrid",
         "SI3AdvectionDiagnostics",
         "si3_adv_x",

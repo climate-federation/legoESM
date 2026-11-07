@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.ice import sea_ice as sea_ice_module
-from legoesm.ice.config import build_si3_orca2_o2_config
+from legoesm.ice.config import SI3_HARD_SWITCHES, build_si3_orca2_o2_config
 from legoesm.ice.si3_finalize import (
     SI3CorrectionResult,
     SI3FinalizeForcing,
@@ -54,7 +54,7 @@ def _surface_config(*, nn_hls: int = 0) -> SI3SurfaceConfig:
         ln_blk=True, ln_mixcpl=False, ln_Cx_ice_cst=True,
         ln_Cx_ice_frm=False, ln_Cx_ice_AN05=False, ln_Cx_ice_LU12=False,
         ln_Cx_ice_LG15=False, nn_flxdist=-1, ln_cndflx=False,
-        ln_leadhfx=True, ln_icedO=True, ln_icedH=True,
+        ln_leadhfx=True, ln_icedO=True, ln_icedH=True, switches=SI3_HARD_SWITCHES,
     )
 
 
@@ -350,6 +350,25 @@ def test_o16_tau_gradient_matches_central_difference() -> None:
     np.testing.assert_allclose(grad, central, rtol=2e-7, atol=2e-7)
 
 
+def test_o16_tau_gradient_is_finite_at_zero_relative_velocity() -> None:
+    cfg = _config(nn_hls=1)
+    shape = (4, 4)
+    z = jnp.zeros(shape, dtype=jnp.float64)
+
+    def objective(speed: jax.Array) -> jax.Array:
+        inputs = SI3StressInputs(
+            uu_kbb=z, vv_kbb=z, umask_k1=jnp.ones(shape), vmask_k1=jnp.ones(shape),
+            u_ice=jnp.ones(shape) * speed, v_ice=z, u_oce=z, v_oce=z,
+            drag_io=jnp.ones(shape) * 0.005, at_i=jnp.ones(shape) * 0.5, utau=z, vtau=z, tmod_io=z,
+            taum=jnp.ones((2, 2)), utau_oce=z[1:-1, 1:-1], vtau_oce=z[1:-1, 1:-1],
+        )
+        return jnp.sum(si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=True).utau)
+
+    zero = jnp.asarray(0.0, dtype=jnp.float64)
+    assert float(objective(zero)) == 0.0
+    assert float(jax.grad(objective)(zero)) == 0.0     # NaN before: 0 * d sqrt(0)
+
+
 def test_step_sea_ice_executes_finalize_stages_and_o15_removal_changes_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -393,7 +412,6 @@ def test_step_sea_ice_executes_finalize_stages_and_o15_removal_changes_output(
     )
     forcing = SI3FinalizeForcing(
         fluxes=_fluxes(shape),
-        update_state=state0,
         update=update,
         stress=stress,
         sss_m=jnp.full(shape, 34.0),
@@ -411,9 +429,12 @@ def test_step_sea_ice_executes_finalize_stages_and_o15_removal_changes_output(
             sea_cfg, 0.0, cfg.rDt_ice,
         )
 
-    _, response = step()
+    returned, response = step()
     assert isinstance(response, SI3FinalizeResponse)
     assert np.any(np.asarray(response.correction.state.a_i[1:-1, 1:-1]) != 0.5)
+    np.testing.assert_array_equal(returned.v_i, response.correction.state.v_i)
+    np.testing.assert_array_equal(returned.sv_i, response.correction.state.sv_i)
+    np.testing.assert_array_equal(returned.aggregated.at_i, response.final.state.aggregated.at_i)
     assert np.any(np.asarray(response.stress.utau[1:-1, 1:-1]) != 0.0)
 
     monkeypatch.setattr(
@@ -421,8 +442,11 @@ def test_step_sea_ice_executes_finalize_stages_and_o15_removal_changes_output(
         "si3_o15_step",
         lambda state, fluxes, **_: SI3CorrectionResult(state=state, fluxes=fluxes),
     )
-    _, bypassed = step()
+    bypassed_state, bypassed = step()
     assert not np.array_equal(
         np.asarray(response.correction.state.a_i),
         np.asarray(bypassed.correction.state.a_i),
     )
+    # The correction must reach the returned state and the stress, not only the fluxes.
+    assert not np.array_equal(np.asarray(returned.a_i), np.asarray(bypassed_state.a_i))
+    assert not np.array_equal(np.asarray(response.stress.taum), np.asarray(bypassed.stress.taum))

@@ -22,6 +22,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from legoesm.core.bulk_flux import sqrt_zero_subgradient
 from legoesm.core.source_rounding import nemo_source_round as sr
 from legoesm.ice.si3_orca2_state import (
     SI3ORCA2StateConfig,
@@ -194,7 +195,6 @@ class SI3FinalizeForcing(NamedTuple):
     """
 
     fluxes: SI3Fluxes
-    update_state: SI3State
     update: SI3UpdateFluxForcing
     stress: SI3StressInputs
     sss_m: Field
@@ -987,7 +987,7 @@ def si3_ice_update_tau(
     zv = sr(sr(inputs.v_ice[1:-1, 1:-1] + inputs.v_ice[1:-1, :-2]) -
             sr(inputs.v_oce[1:-1, 1:-1] + inputs.v_oce[1:-1, :-2]))
     zmod = sr(_QUARTER * sr(sr(zu * zu) + sr(zv * zv)))
-    tmod_inner = sr(sr(rho0 * inputs.drag_io[1:-1, 1:-1]) * jnp.sqrt(zmod))
+    tmod_inner = sr(sr(rho0 * inputs.drag_io[1:-1, 1:-1]) * sqrt_zero_subgradient(zmod))
     tmod_io = inputs.tmod_io.at[1:-1, 1:-1].set(tmod_inner)
 
     sl = (slice(h, -h), slice(h, -h))

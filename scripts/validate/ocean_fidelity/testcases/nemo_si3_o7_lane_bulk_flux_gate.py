@@ -381,6 +381,7 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
 
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ice import si3_surface
+    from legoesm.ice.config import SI3_HARD_SWITCHES
     from legoesm.ice.si3_surface import SI3SurfaceConfig
 
     runtime = runtime_versions()
@@ -409,7 +410,8 @@ def evaluate(root: Path = DEFAULT_ROOT, *, plant: str | None = None) -> dict[str
 
     # Deck scalars from the C1D run's own resolved namelists (never hard-coded).
     cfg = SI3SurfaceConfig.from_resolved_namelists(
-        root / "output.namelist.dyn", root / "output.namelist.ice")
+        root / "output.namelist.dyn", root / "output.namelist.ice",
+    )._replace(switches=SI3_HARD_SWITCHES)
     for name, model_value in (
         ("dt", cfg.rDt_ice), ("drag_io", cfg.rn_Cd_io), ("rho_ocean", si3_surface._RHO0),
         ("c_ocean", si3_surface._RCP), ("T0", si3_surface._RT0), ("ice_epsilon", si3_surface._EPSI10),
