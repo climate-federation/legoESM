@@ -23,7 +23,7 @@ from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.core.bulk_flux import (
     surface_reference_state,
     compute_most_fluxes,
-    large_yeager_widths,
+    surface_flux_widths,
     compute_sam_oceflx_fluxes,
     simple_bulk_fluxes,
     validate_bulk_scheme,
@@ -228,7 +228,7 @@ def compute_surface_fluxes(
             unstable_gamma=config.most_unstable_gamma,
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
-            **large_yeager_widths(config),
+            **surface_flux_widths(config),
         )
         # The prescribed-flux override applies on THIS branch too. Returning
         # early without it would let a config that sets both a MOST scheme and
@@ -644,7 +644,7 @@ def _single_tile_flux(
             unstable_gamma=config.most_unstable_gamma,
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
-            **large_yeager_widths(config),
+            **surface_flux_widths(config),
         )
 
     # Constant neutral coefficients.

@@ -22,7 +22,7 @@ from legoesm.thermo import (
     saturation_mixing_ratio_ice,
 )
 from legoesm.core.bulk_flux import (
-    simple_bulk_fluxes, compute_most_fluxes, large_yeager_widths,
+    simple_bulk_fluxes, compute_most_fluxes, surface_flux_widths,
     surface_reference_state)
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.core.surface_energy import surface_radiation_fluxes
@@ -91,7 +91,7 @@ def step_lake(
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
             L_latent=L_eff,
-            **large_yeager_widths(config),
+            **surface_flux_widths(config),
         )
     else:
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(

@@ -668,7 +668,7 @@ def test_large_yeager_width_defaults_match_both_configs():
         assert v == getattr(CouplerConfig(), f"large_yeager_{f}_width")
 
 
-def test_large_yeager_widths_reach_the_coupler_ocean_tile():
+def test_surface_flux_widths_reach_the_coupler_ocean_tile():
     """The widths reach the coupler ocean tile config main() hands the driver."""
     cpl = mod.build_coupler_config(mod.build_parser().parse_args(_LY_FLAGS))
     assert cpl.bulk_scheme == "large_yeager"
@@ -677,7 +677,7 @@ def test_large_yeager_widths_reach_the_coupler_ocean_tile():
     assert cpl.large_yeager_cd_cutoff_width == 0.25
 
 
-def test_main_really_passes_large_yeager_widths_to_both_sides(monkeypatch):
+def test_main_really_passes_surface_flux_widths_to_both_sides(monkeypatch):
     """PRODUCTION reachability: main() hands the driver an atmosphere config
     and a coupler config both carrying the CLI widths (no air-sea split)."""
     import legoesm.driver.coupled_esm_driver as ced

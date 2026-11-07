@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm import constants
-from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+from legoesm.core.bulk_flux import (GFS_UNSTABLE_JOIN_WIDTH, MOST_ZETA_CAP_WIDTH,
+                                      NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
                                       NCAR_NEUTRAL_WIDTH)
 
 __param_spec__ = {
@@ -16,6 +17,8 @@ __param_spec__ = {
             "large_yeager_neutral_width": "numerics: RULE 5 smoothing width of the Large-Yeager neutral Stanton switch (zeta_u)",
             "large_yeager_dthv_width": "numerics: RULE 5 smoothing width of the Large-Yeager first-guess stability switch [K]",
             "large_yeager_cd_cutoff_width": "numerics: RULE 5 smoothing band of the Large-Yeager 33 m/s drag cutoff [m/s]",
+            "most_zeta_cap_width": "numerics: RULE 5 half-width of the smooth |zeta| cap at 10 (0 = hard clip)",
+            "gfs_unstable_join_width": "numerics: RULE 5 width of the GFS unstable smooth join at zeta = -0.5 (0 = exact step)",
         },
         "params": {
             "h_epi": {
@@ -102,3 +105,7 @@ class LakeConfig(NamedTuple):
     large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
     large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
     large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
+    # MOST smooth cap on |zeta| (RULE 5; 0 = hard clip at +-10) and the GFS
+    # unstable smooth-join width (0 = the exact GFS step); bulk_flux constants.
+    most_zeta_cap_width: float = MOST_ZETA_CAP_WIDTH
+    gfs_unstable_join_width: float = GFS_UNSTABLE_JOIN_WIDTH

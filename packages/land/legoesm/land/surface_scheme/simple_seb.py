@@ -27,7 +27,7 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
     beta_limited_surface_humidity,
 )
 from legoesm.core.bulk_flux import (
-    simple_bulk_fluxes, compute_most_fluxes, large_yeager_widths,
+    simple_bulk_fluxes, compute_most_fluxes, surface_flux_widths,
     surface_reference_state)
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.core.surface_energy import surface_radiation_fluxes
@@ -212,7 +212,7 @@ def compute_simple_seb_fluxes(
                 n_iter=land_config.bulk_n_iter,
                 L_latent=L,
                 max_exchange_coeff=LAND_MAX_EXCHANGE_COEFF,
-                **large_yeager_widths(land_config),
+                **surface_flux_widths(land_config),
             )
         else:
             ustar = None   # constant-coefficient law: no friction velocity
