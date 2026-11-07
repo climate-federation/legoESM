@@ -779,7 +779,8 @@ _O6_PRE_AUDIT_BLOBS = {
 _MODEL_FUNCS = {
     "packages/ice/legoesm/ice/ridging.py": ("_rdgrft_prep", "_rdgrft_shift", "si3_ice_dyn_rdgrft"),
     "packages/ice/legoesm/ice/itd.py": ("si3_var_roundoff", "_si3_itd_shiftice", "si3_ice_itd_reb",
-                                        "si3_var_zapsmall", "si3_ice_cor_dyn"),
+                                        "si3_var_zapsmall", "si3_ice_cor_salinity_bounds",
+                                        "si3_ice_cor_dyn"),
 }
 _ORACLE_FUNCS = ("_prep_cell", "_shift_cell", "_roundoff_cell", "oracle_rdgrft", "_shiftice_cell", "oracle_ice_cor")
 
