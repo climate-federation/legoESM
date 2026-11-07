@@ -111,6 +111,7 @@ _VALID_STABILITY_SCHEMES = (
     "beljaars_holtslag1991",
     "grachev2007_sheba",
     "gryanik2020",
+    "wrf_revmm5",
 )
 
 # --- Dyer (1974) linear stable functions ---
@@ -158,6 +159,23 @@ _GRYANIK_B_M = 0.3
 _GRYANIK_A_H = 5.0
 _GRYANIK_B_H = 0.4
 _GRYANIK_PR0 = 0.98
+
+# --- WRF/MPAS revised MM5 surface layer (Jimenez et al. 2012, MWR 140, 898-918) ---
+# MMM-physics sf_sfclayrev.F90 psi{m,h}_{stable,unstable}_full (the analytic
+# forms its 0.01-spaced lookup tables are built from):
+#   stable   psi_m = -a_m ln(zeta + (1 + zeta^b_m)^(1/b_m))   (Cheng & Brutsaert 2005)
+#            psi_h = -a_h ln(zeta + (1 + zeta^b_h)^(1/b_h))
+#   unstable psi = (psi_kansas + zeta^2 psi_conv) / (1 + zeta^2)   (Fairall et al. 1996 blend)
+#            psi_kansas: Businger-Dyer with gamma = 16;
+#            psi_conv: free-convective form with y = (1 - c zeta)^0.33.
+_WRF_STABLE_A_M = 6.1
+_WRF_STABLE_B_M = 2.5
+_WRF_STABLE_A_H = 5.3
+_WRF_STABLE_B_H = 1.1
+_WRF_KANSAS_GAMMA = 16.0
+_WRF_CONV_C_M = 10.0
+_WRF_CONV_C_H = 34.0
+_WRF_CONV_EXP = 0.33  # WRF's literal (not 1/3)
 
 # --- Thermal/momentum roughness ratio z0h/z0 ---
 # Ratio of the thermal (scalar) roughness length z0h (= z0_t = z0_q) to the
@@ -465,6 +483,60 @@ def _grachev_psi_h(zeta_pos):
     return _GRACHEV_PR0 * (-coeff * fractional_logs - quadratic_log)
 
 
+def _wrf_cheng_brutsaert(zeta_pos, a, b):
+    # zeta**b is NaN for zeta < 0, which the COARE neutral blend feeds this
+    # branch inside its band (|zeta| < width); there it is held at its zeta = 0
+    # value (psi = 0).  ``where`` (not max) keeps the full slope at zeta = 0.
+    z = jnp.where(zeta_pos >= 0.0, zeta_pos, 0.0)
+    return -a * jnp.log(z + (1.0 + z ** b) ** (1.0 / b))
+
+
+def _wrf_revmm5_psi_m(zeta_pos):
+    """WRF revised MM5 stable momentum psi_m (psim_stable_full), zeta > 0.
+
+    KNOWN DIFFERENCE: WRF evaluates this through a linear-interpolation table
+    at 0.01 spacing for zeta < 10; the analytic form is ported (the table's
+    limit).  C-infinity for zeta > 0, so no smoothing is needed.
+    """
+    return _wrf_cheng_brutsaert(zeta_pos, _WRF_STABLE_A_M, _WRF_STABLE_B_M)
+
+
+def _wrf_revmm5_psi_h(zeta_pos):
+    """WRF revised MM5 stable heat psi_h (psih_stable_full), zeta > 0."""
+    return _wrf_cheng_brutsaert(zeta_pos, _WRF_STABLE_A_H, _WRF_STABLE_B_H)
+
+
+def _wrf_free_convection_psi(zeta_neg, c):
+    y = (1.0 - c * zeta_neg) ** _WRF_CONV_EXP
+    sqrt3 = math.sqrt(3.0)
+    return (1.5 * jnp.log((y * y + y + 1.0) / 3.0)
+            - sqrt3 * jnp.arctan((2.0 * y + 1.0) / sqrt3) + math.pi / sqrt3)
+
+
+def _wrf_revmm5_unstable_psi_m(zeta_neg):
+    """WRF revised MM5 unstable momentum psi_m (psim_unstable_full), zeta <= 0."""
+    x = (1.0 - _WRF_KANSAS_GAMMA * zeta_neg) ** 0.25
+    kansas = (2.0 * jnp.log(0.5 * (1.0 + x)) + jnp.log(0.5 * (1.0 + x * x))
+              - 2.0 * jnp.arctan(x) + 0.5 * math.pi)
+    z2 = zeta_neg * zeta_neg
+    return (kansas + z2 * _wrf_free_convection_psi(zeta_neg, _WRF_CONV_C_M)) / (1.0 + z2)
+
+
+def _wrf_revmm5_unstable_psi_h(zeta_neg):
+    """WRF revised MM5 unstable heat psi_h (psih_unstable_full), zeta <= 0."""
+    y = (1.0 - _WRF_KANSAS_GAMMA * zeta_neg) ** 0.5
+    z2 = zeta_neg * zeta_neg
+    return (2.0 * jnp.log(0.5 * (1.0 + y))
+            + z2 * _wrf_free_convection_psi(zeta_neg, _WRF_CONV_C_H)) / (1.0 + z2)
+
+
+# Unstable-branch (zeta <= 0) psi functions keyed by scheme, (psi_m, psi_h).
+# Not yet selectable: the independent unstable selector is wired separately.
+_UNSTABLE_PSI = {
+    "wrf_revmm5": (_wrf_revmm5_unstable_psi_m, _wrf_revmm5_unstable_psi_h),
+}
+
+
 def _stable_psi_m(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
     """Stable-branch (zeta > 0) psi_m for ``stability_scheme``.
 
@@ -483,6 +555,8 @@ def _stable_psi_m(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
         return _grachev_psi_m(zeta_pos)
     elif stability_scheme == "gryanik2020":
         return _gryanik_psi_m(zeta_pos)
+    elif stability_scheme == "wrf_revmm5":
+        return _wrf_revmm5_psi_m(zeta_pos)
     raise ValueError(
         f"Unknown stability_scheme {stability_scheme!r}; expected one of "
         f"{_VALID_STABILITY_SCHEMES}."
@@ -502,6 +576,8 @@ def _stable_psi_h(zeta_pos, stability_scheme, stable_beta=_DYER_STABLE_BETA):
         return _grachev_psi_h(zeta_pos)
     elif stability_scheme == "gryanik2020":
         return _gryanik_psi_h(zeta_pos)
+    elif stability_scheme == "wrf_revmm5":
+        return _wrf_revmm5_psi_h(zeta_pos)
     raise ValueError(
         f"Unknown stability_scheme {stability_scheme!r}; expected one of "
         f"{_VALID_STABILITY_SCHEMES}."
@@ -525,6 +601,7 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     - ``"beljaars_holtslag1991"``: Beljaars & Holtslag (1991)
     - ``"grachev2007_sheba"``    : Grachev et al. (2007) SHEBA (Arctic/strong-stable)
     - ``"gryanik2020"``          : Gryanik et al. (2020) modified SHEBA
+    - ``"wrf_revmm5"``           : WRF revised MM5 (Jimenez et al. 2012)
 
     ``unstable_gamma`` / ``stable_beta`` are the trainable Businger-Dyer
     coefficients (Businger et al. 1971 / Dyer 1974). They act ONLY when
