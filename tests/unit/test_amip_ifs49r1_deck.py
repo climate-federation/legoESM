@@ -32,9 +32,11 @@ _EXPECTED_DIFF = {
     "cloud_cam6_rhmaxis",
     "zm_c0_lnd", "zm_c0_ocn", "zm_ke", "zm_dmpdz", "zm_tau", "zm_capelmt",
     "zm_detrain_phase_width_K", "zm_detrain_number_width_kgkg_s",
-    # ecRad 49r1 radiation (votes L1, L18, L20): the scheme, its aerosols-off
-    # forcing row, and the RRTMGP-only overhead layer that errors under it
+    # ecRad 49r1 radiation (votes L1, L18, L20, C2/C3): the scheme, the lane
+    # aerosol row it never reads, the RRTMGP-only overhead layer that errors
+    # under it, and ecRad's own CAMS aerosol climatology
     "radiation", "aerosol_forcing", "rrtmgp_overhead_layer",
+    "ecrad_ifs_aerosol_file",
 }
 
 
@@ -75,9 +77,10 @@ def test_deck_resolves_to_the_ifs_lane_and_validates():
     assert cfg.cloud_scheme == "resolved"
     assert cfg.dycore.discretization == "mpas"
     assert cfg.radiation == "ecrad_ifs" and cfg.aerosol_forcing == "off"
+    assert cfg.ecrad_ifs_aerosol_file.endswith("aerosol_cams_climatology_43R3a.nc")
     # the launcher supplies the land/IC files both decks need; with them
     # absent, the IFS deck raises no error production does not raise
-    # (aerosols off: it may raise fewer)
+    # (lane aerosols off: it may raise fewer)
     assert _strict_errors(cfg) <= _strict_errors(_cfg(_PROD))
 
 

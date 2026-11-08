@@ -35,8 +35,11 @@ clamps, the TOA flux ``RII0*AMU0`` for the RADINTG surface-flux tests, and
 1e-9 kg/kg (ecRad's cloud mixing-ratio threshold) for condensate presence.
 Oracle guards that bind only where their branch weight is exactly zero stay
 hard, with benign inputs substituted there (vote IF5).  SATUR saturation
-(aerosol hydration only; aerosols are off) reuses the convection helper under
-``stop_gradient`` (vote IF4).
+(aerosol hydration only) reuses the convection helper (vote IF4), with its
+gradient kept now that it feeds the RH bin of the aerosol optics (vote A9a).
+Aerosols: ``aerosol=None`` is the Tegen arm with ecRad aerosols off (vote IV1);
+an :class:`.ifs_aerosol.MaccAerosol` selects the NAERMACC=1 arm with ecRad
+aerosols on (:mod:`.ifs_aerosol`, :mod:`.aerosol_optics`).
 """
 
 from __future__ import annotations
@@ -50,7 +53,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.atmosphere.physics._ifs_thermo import ifs_thermo, satur_qsat
-from legoesm.atmosphere.physics.radiation.ecrad_ifs import ecrad
+from legoesm.atmosphere.physics.radiation.ecrad_ifs import aerosol_optics, ecrad, ifs_aerosol
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import mcica_solvers as ms
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import gas_optics as go
 from legoesm.atmosphere.physics.radiation.ecrad_ifs.two_stream import (
@@ -356,10 +359,11 @@ def prepare_inputs(*, solar_irradiance, mu0, skin_temperature, albedo_dif, albed
                    pressure_fl, temperature_fl, pressure_hl, temperature_hl, q,
                    co2, ch4, n2o, cfc11, cfc12, hcfc22, ccl4, o3_dp,
                    cloud_fraction, q_liquid, q_ice, q_rain, q_snow, aerosol_old,
-                   nindat, nstep, tstep, sharpness=100.0):
+                   nindat, nstep, tstep, sharpness=100.0, aerosol=None):
     """RADIATION_SCHEME lines 300-618.  ``mu0`` is the curvature-corrected value
     radintg passes (:func:`curvature_mu0`); ``aerosol_old`` (ncol, 6, nlev) the
-    Tegen layer optical depths (aerosols are off in ecRad, vote IF6).
+    Tegen layer optical depths, read only when ``aerosol`` is None (aerosols off
+    in ecRad, vote IF6); ``aerosol`` an :class:`.ifs_aerosol.MaccAerosol`.
 
     Returns ``(ecrad_kwargs, extra)``: the keyword arguments of
     :func:`.ecrad.radiation` except the McICA uniforms, and the other ecRad
@@ -371,8 +375,7 @@ def prepare_inputs(*, solar_irradiance, mu0, skin_temperature, albedo_dif, albed
     t_sfc = temperature_fl[..., -1] + 0.5 * (temperature_hl[..., -1] - temperature_hl[..., -2])
     t_hl = jnp.concatenate([temperature_hl[..., :-1], t_sfc[..., None]], axis=-1)
     # SATUR(..., KFLAG=2) = FOEEWM branch (vote IF4)
-    h2o_sat = jax.lax.stop_gradient(
-        satur_qsat(_satur_thermo(), temperature_fl, pressure_fl))
+    h2o_sat = satur_qsat(_satur_thermo(), temperature_fl, pressure_fl)   # vote A9a: no stop_gradient
 
     iseed = mcica_seed(nindat, nstep, tstep, gelam, gemu)
 
@@ -385,9 +388,15 @@ def prepare_inputs(*, solar_irradiance, mu0, skin_temperature, albedo_dif, albed
     alpha = overlap_param(pressure_hl, t_hl, decorr_km * _KM_TO_M)
     fractional_std = jnp.full_like(cloud_fraction, _RCLOUD_FRAC_STD)
 
-    # Tegen arm (:584-592): optical depth per unit dry-air mass
     layer_mass = (pressure_hl[..., 1:] - pressure_hl[..., :-1]) * _INV_G_ECRAD
-    aerosol_mr = jnp.swapaxes(aerosol_old, -1, -2) / layer_mass[..., None]
+    if aerosol is None:
+        # Tegen arm (:584-592): optical depth per unit dry-air mass
+        aerosol_mr = jnp.swapaxes(aerosol_old, -1, -2) / layer_mass[..., None]
+    else:
+        # NAERMACC=1 arm (:545-575), aerosols on in ecRad (ifs_aerosol, aerosol_optics)
+        aerosol_mr = ifs_aerosol.macc_mixing_ratio(
+            aerosol.paerosol, aerosol.paer1, aerosol.paer6, layer_mass,
+            **aerosol_optics.background_mass_ext(), sharpness=sharpness)
 
     # ozone Pa*kg/kg -> kg/kg (:597-602) and gases in ecRad order (:604-617);
     # SET_GAS_UNITS(IMassMixingRatio) converts only the well-mixed O2 VMR
@@ -406,6 +415,8 @@ def prepare_inputs(*, solar_irradiance, mu0, skin_temperature, albedo_dif, albed
         cloud_fraction=cloud_fraction, q_liquid=q_liquid, q_ice=q_ice_rad,
         re_liquid=re_liq_um * _UM_TO_M, re_ice=re_ice_um * _UM_TO_M,
         overlap_param=alpha, fractional_std=fractional_std)
+    if aerosol is not None:
+        ecrad_kwargs.update(aerosol_mixing_ratio=aerosol_mr, h2o_sat_liq=h2o_sat)
     extra = dict(
         iseed=iseed, h2o_sat_liq=h2o_sat, aerosol_mixing_ratio=aerosol_mr,
         gas_iunits=np.zeros(_N_GASES, dtype=np.int64),     # all IMassMixingRatio (= 0)
