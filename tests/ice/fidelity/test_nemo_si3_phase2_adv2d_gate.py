@@ -10,7 +10,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from tests._nemo_si3_oracle import needs_oracle
 from legoesm.ice.fidelity.nemo_adv2d_testcase_recipe import (
     ICE_ADV2D_TRACERS,
     apply_ice_adv2d_source_corrections,
@@ -19,6 +18,8 @@ from legoesm.ice.fidelity.nemo_adv2d_testcase_recipe import (
     save_ice_adv2d_restart,
     step_ice_adv2d_card,
 )
+
+from tests._nemo_si3_oracle import needs_oracle
 
 GATE_PATH = Path(__file__).parents[3] / (
     "scripts/validate/ocean_fidelity/testcases/nemo_si3_phase2_adv2d_gate.py"

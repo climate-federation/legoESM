@@ -10,7 +10,6 @@ import jax.numpy as jnp
 import netCDF4
 import numpy as np
 import pytest
-from tests._nemo_si3_oracle import needs_oracle
 from legoesm.core.precision import get_policy
 from legoesm.ice.dynamics import (
     SI3CGridAEVPState,
@@ -27,6 +26,8 @@ from legoesm.ice.transport import (
     si3_prather_pack_intensives,
     si3_prather_unpack_intensives,
 )
+
+from tests._nemo_si3_oracle import needs_oracle
 
 _ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_adv2d_rhg/final")
 _ORACLE_GATE = Path(__file__).parents[3] / (

@@ -10,7 +10,6 @@ import jax
 import netCDF4
 import numpy as np
 import pytest
-from tests._nemo_si3_oracle import needs_oracle
 from legoesm.core.precision import get_policy
 from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import (
     ICE_RHEO_TRACERS,
@@ -19,6 +18,8 @@ from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import (
     step_ice_rheo_card,
     validate_ice_rheo_card,
 )
+
+from tests._nemo_si3_oracle import needs_oracle
 
 _ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 _ORACLE_GATE = Path(__file__).parents[3] / (

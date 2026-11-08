@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from tests._nemo_si3_oracle import needs_oracle
 
 _GATE_PATH = Path(__file__).parents[3] / (
@@ -91,7 +92,7 @@ def test_existing_a_grid_solver_is_byte_identical_to_preregister_boundary():
         assert result["before_sha256"] == result["after_sha256"]
 
 
-@needs_oracle(gate.ROOT)
+@needs_oracle(replay.ROOT)
 def test_source_rounded_replay_is_bit_exact_from_oracle_entry():
     report, code = replay.run_replay()
     assert code == 0

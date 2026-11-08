@@ -6,6 +6,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+
 from tests._nemo_si3_oracle import needs_oracle
 
 REPLAY_PATH = Path(__file__).parents[3] / (
