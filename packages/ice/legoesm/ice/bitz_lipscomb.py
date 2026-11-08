@@ -9,6 +9,7 @@ the iterative surface-flux boundary condition.  Source identity:
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import NamedTuple
 
@@ -330,26 +331,42 @@ def _pos(x, w: float):
     return positive_part_c1(x, _sharp(w))
 
 
-def _st_where(pred, a, b, weight):
-    """``where(pred, a, b)``; with a soft ``weight`` (C1, 1 where ``a`` is chosen) the
-    forward value stays the hard selection and the gradient is that of
-    ``b + (a - b) * weight`` (straight-through, user ruling 3a pattern)."""
-    hard = jnp.where(pred, a, b)
-    if weight is None:
+def _st_pair(hard, soft, mode: str = "st"):
+    """Select by mode: the hard value, the soft surrogate, or straight-through (hard forward, soft gradient)."""
+    if mode == "hard":
         return hard
-    return straight_through(hard, b + (a - b) * weight)
+    return soft if mode == "soft" else straight_through(hard, soft)
 
 
-def _st_min(x, y, w: float):
-    """``MIN(x, y)`` forward; with ``w`` > 0 the gradient is that of the C1 ``min_c1`` (vote Z49)."""
+def _st_tree(hard, soft):
+    """Step-level straight-through (vote Z55): every float field takes the hard value forward and
+    the soft column's derivative; integer fields (iteration counts) are the hard ones."""
+    def one(h, s):
+        return straight_through(h, s) if jnp.issubdtype(jnp.result_type(h), jnp.floating) else h
+    return jax.tree_util.tree_map(one, hard, soft)
+
+
+def _st_where(pred, a, b, weight, mode: str = "st"):
+    """``where(pred, a, b)``; soft surrogate ``b + (a - b) * weight`` (C1, 1 where ``a`` is chosen)."""
+    hard = jnp.where(pred, a, b)
+    if weight is None or mode == "hard":
+        return hard
+    return _st_pair(hard, b + (a - b) * weight, mode)
+
+
+def _st_min(x, y, w: float, mode: str = "st"):
+    """``MIN(x, y)``; soft surrogate the C1 ``min_c1`` at width ``w`` (vote Z49)."""
     hard = jnp.minimum(x, y)
-    return hard if w == 0.0 else straight_through(hard, min_c1(x, y, _sharp(w)))
+    return hard if (w == 0.0 or mode == "hard") else _st_pair(hard, min_c1(x, y, _sharp(w)), mode)
 
 
-def _st_max(x, y, w: float):
-    """``MAX(x, y)`` forward; with ``w`` > 0 the gradient is that of the C1 ``max_c1``."""
+def _st_max(x, y, w: float, mode: str = "st"):
+    """``MAX(x, y)``; soft surrogate the C1 ``max_c1`` at width ``w``."""
     hard = jnp.maximum(x, y)
-    return hard if w == 0.0 else straight_through(hard, max_c1(x, y, _sharp(w)))
+    return hard if (w == 0.0 or mode == "hard") else _st_pair(hard, max_c1(x, y, _sharp(w)), mode)
+
+
+_ST_WHERE, _ST_MIN, _ST_MAX = _st_where, _st_min, _st_max
 
 
 def _clip_c1(x, lo, hi, w: float):
@@ -581,7 +598,17 @@ def _radiation(h_i, h_s, qtr_top, T_surface, width_m: float = 0.0):
     return ab_s, ab_i, tr_i[..., -1]
 
 
-def _si3_zdf_bl99_step(
+def _si3_zdf_bl99_step(*args, _st_mode: str = "st", **kw):
+    """Step-level straight-through wrapper (vote Z55) around ``_si3_zdf_bl99_step_impl``: in smooth mode
+    the step runs all-hard and all-soft and each output takes the hard value forward and the
+    soft column's derivative; width 0 (or ``_st_mode`` "hard"/"soft") runs one pass."""
+    smooth = kw.get("switches", SI3SwitchConfig()).relative_width > 0.0
+    if _st_mode == "st" and smooth:
+        return _st_tree(_si3_zdf_bl99_step_impl(*args, _st_mode="hard", **kw), _si3_zdf_bl99_step_impl(*args, _st_mode="soft", **kw))
+    return _si3_zdf_bl99_step_impl(*args, _st_mode=("hard" if _st_mode == "st" else _st_mode), **kw)
+
+
+def _si3_zdf_bl99_step_impl(
     e_ice,
     e_snow,
     S_layers,
@@ -599,6 +626,7 @@ def _si3_zdf_bl99_step(
     t_clamp_width: float = _T_CLAMP_WIDTH_K,
     nemo_version: str = "5.0.2",
     switches: SI3SwitchConfig = SI3SwitchConfig(),
+    _st_mode: str = "hard",
 ) -> SI3ZDFResult:
     """Iterative 3+3-layer BL99/P07 solve for the resolved ORCA1 arm.
 
@@ -607,6 +635,10 @@ def _si3_zdf_bl99_step(
     available, unlike a data-dependent ``while_loop``.  The private iteration
     bound exists only to expose a single Picard iterate to the oracle gate.
     """
+
+    _stw = functools.partial(_ST_WHERE, mode=_st_mode)
+    _stmin = functools.partial(_ST_MIN, mode=_st_mode)
+    _stmax = functools.partial(_ST_MAX, mode=_st_mode)
 
     _check_nemo_version(nemo_version)
     w = _column_widths(switches)
@@ -789,7 +821,7 @@ def _si3_zdf_bl99_step(
                 m = si3_ge(Tsu, constants.T0, tm_width) * jnp.where(_nemo_branch_ranges, 1.0, 0.0)
                 hard_rows = melt_rows(melting_surface, a, b, c, d)
                 all_rows = melt_rows(jnp.ones_like(melting_surface), a, b, c, d)
-                a, b, c, d = (straight_through(h, f + (x - f) * m[..., None])
+                a, b, c, d = (_st_pair(h, f + (x - f) * m[..., None], _st_mode)
                               for h, x, f in zip(hard_rows, all_rows, (a, b, c, d)))
             else:
                 a, b, c, d = melt_rows(melting_surface, a, b, c, d)
@@ -801,7 +833,7 @@ def _si3_zdf_bl99_step(
             # min_c1/max_c1 are exact AT the bound, so T_su >= T0 and T_i >= Tmelt
             # still fire in smooth mode (vote Z20; the symmetric form sat w/8 below).
             Tsu_candidate = max_c1(
-                min_c1(_st_where(melting_surface, Tsu, solved_surface, m if st_melt else None),
+                min_c1(_stw(melting_surface, Tsu, solved_surface, m if st_melt else None),
                        constants.T0, _sharp(tm_width)),
                 constants.T0 - 100.0, _sharp(t_clamp_width),
             )
@@ -881,7 +913,7 @@ def _si3_zdf_bl99_step(
     # the blended enthalpy.  Enthalpy content is linear in e at fixed h, so the
     # soft column's heat change is the same blend of the two systems'.
     w_snow = switches.snow_ramp_width_m if switches.relative_width > 0.0 else 0.0
-    if w_snow == 0.0:
+    if w_snow == 0.0 or _st_mode == "hard":
         return _solve(h_snow > 0.0)
     snow = _solve(jnp.ones_like(h_snow, dtype=bool))
     bare = _solve(jnp.zeros_like(h_snow, dtype=bool))
@@ -922,6 +954,8 @@ def _si3_zdf_bl99_step(
         mix(snow.qcn_ice_top, bare.qcn_ice_top), mix(snow.qcn_ice_bottom, bare.qcn_ice_bottom),
         jnp.maximum(snow.iterations, bare.iterations),
     )
+    if _st_mode == "soft":
+        return soft
     return SI3ZDFResult(*(straight_through(h, so) for h, so in zip(hard[:-1], soft[:-1])),
                         hard.iterations)
 
@@ -1019,7 +1053,17 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     return _dh_step_fluxes(state, zdf, forcing, dt, constants, **kwargs)[0]
 
 
-def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
+def _dh_step_fluxes(*args, _st_mode: str = "st", **kw):
+    """Step-level straight-through wrapper (vote Z55) around ``_dh_step_fluxes_impl``: in smooth mode
+    the step runs all-hard and all-soft and each output takes the hard value forward and the
+    soft column's derivative; width 0 (or ``_st_mode`` "hard"/"soft") runs one pass."""
+    smooth = kw.get("switches", SI3SwitchConfig()).relative_width > 0.0
+    if _st_mode == "st" and smooth:
+        return _st_tree(_dh_step_fluxes_impl(*args, _st_mode="hard", **kw), _dh_step_fluxes_impl(*args, _st_mode="soft", **kw))
+    return _dh_step_fluxes_impl(*args, _st_mode=("hard" if _st_mode == "st" else _st_mode), **kw)
+
+
+def _dh_step_fluxes_impl(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                     forcing: SI3SurfaceForcing, dt: float,
                     constants: IceConstantsConfig, *,
                     _snow_deposition: bool = True,
@@ -1033,6 +1077,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                     nemo_version: str = "5.0.2",
                     growth_gate_width: float = _GROWTH_GATE_WIDTH_WM2,
                     switches: SI3SwitchConfig = SI3SwitchConfig(),
+    _st_mode: str = "hard",
                     ) -> tuple[SI3ColumnArrays, SI3ExchangeFluxes]:
     """Resolved no-lateral-melt thickness sequence (`icethd_dh.F90:91-533`).
 
@@ -1040,6 +1085,10 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     term the NEMO accumulator update of the same block (grid-cell mean,
     ``* a_i * r1_Dt_ice``).
     """
+
+    _stw = functools.partial(_ST_WHERE, mode=_st_mode)
+    _stmin = functools.partial(_ST_MIN, mode=_st_mode)
+    _stmax = functools.partial(_ST_MAX, mode=_st_mode)
 
     if forcing.sst is None:
         raise ValueError(
@@ -1138,7 +1187,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         # (`icethd_dh.F90:204-280`).  Unlike the shared bulk snow helper, this path
         # must retain each NEMO enthalpy segment for the subsequent conservative
         # remap, so it is expressed on the existing segment carrier.
-        qml = _st_where(
+        qml = _stw(
             zdf.T_surface >= constants.T0,
             zdf.qns_ice + forcing.qsr_ice - forcing.qtr_ice_top - zdf.qcn_ice_top,
             0.0,
@@ -1150,7 +1199,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             active = (hseg_s[..., k] > 0.0) & (surface_energy > 0.0)
             delta = jnp.where(
                 active,
-                _st_max(
+                _stmax(
                     -surface_energy / jnp.maximum(eseg_s[..., k], 1.0e-20),
                     -hseg_s[..., k],
                     w.H if st else 0.0,     # Z49 (MIN cap on the snow layer)
@@ -1198,7 +1247,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         remaining_mass = jnp.maximum(forcing.evaporation * dt, 0.0)
         kept = []
         for k in range(4):
-            remove = _st_min(
+            remove = _stmin(
                 remaining_mass / constants.rho_snow, hseg_s[..., k], w.H if st else 0.0
             )
             kept.append(hseg_s[..., k] - remove)
@@ -1233,12 +1282,12 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             -constants.liquidus_slope * state.S_layers[..., k]
         )
         energy_difference = ice_specific - water_specific
-        surface_remove = _st_where(
+        surface_remove = _stw(
             internal_melt,
             old_h[..., k],
             jnp.where(
                 _surface_melt,
-                _st_min(
+                _stmin(
                     jnp.maximum(
                         surface_energy
                         / jnp.maximum(-energy_difference * constants.rho_ice, 1.0e-20),
@@ -1256,15 +1305,15 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         melt_mass = constants.rho_ice * surface_remove * ar
         fx = _add_fluxes(
             fx,
-            hfx_res=_st_where(internal_melt, ice_specific * melt_mass, 0.0, imw),
-            wfx_res=_st_where(internal_melt, melt_mass, 0.0, imw),
-            sfx_res=_st_where(internal_melt, melt_mass * S_flux, 0.0, imw),
-            hfx_thd=_st_where(internal_melt, 0.0, water_specific * melt_mass, imw),
-            hfx_sum=_st_where(internal_melt, 0.0, -energy_difference * melt_mass, imw),
-            wfx_sum=_st_where(internal_melt, 0.0, melt_mass, imw),
-            sfx_sum=_st_where(internal_melt, 0.0, melt_mass * S_flux, imw),
+            hfx_res=_stw(internal_melt, ice_specific * melt_mass, 0.0, imw),
+            wfx_res=_stw(internal_melt, melt_mass, 0.0, imw),
+            sfx_res=_stw(internal_melt, melt_mass * S_flux, 0.0, imw),
+            hfx_thd=_stw(internal_melt, 0.0, water_specific * melt_mass, imw),
+            hfx_sum=_stw(internal_melt, 0.0, -energy_difference * melt_mass, imw),
+            wfx_sum=_stw(internal_melt, 0.0, melt_mass, imw),
+            sfx_sum=_stw(internal_melt, 0.0, melt_mass * S_flux, imw),
         )
-        surface_energy = _st_where(
+        surface_energy = _stw(
             internal_melt,
             surface_energy,
             jnp.maximum(
@@ -1274,7 +1323,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             ),
             imw,
         )
-        sublimation = _st_min(
+        sublimation = _stmin(
             remaining_mass / constants.rho_ice, old_h[..., k], w.H if st else 0.0
         )
         old_h = old_h.at[..., k].add(-sublimation)
@@ -1348,10 +1397,10 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             energy_difference = ice_specific - water_specific
             basal_remove = jnp.where(
                 _basal_melt,
-                _st_where(
+                _stw(
                     internal_melt,
                     old_h[..., k],
-                    _st_min(
+                    _stmin(
                         jnp.maximum(
                             basal_energy
                             / jnp.maximum(
@@ -1371,15 +1420,15 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             melt_mass = constants.rho_ice * basal_remove * ar
             fx = _add_fluxes(
                 fx,
-                hfx_res=_st_where(internal_melt, ice_specific * melt_mass, 0.0, imw),
-                wfx_res=_st_where(internal_melt, melt_mass, 0.0, imw),
-                sfx_res=_st_where(internal_melt, melt_mass * S_flux, 0.0, imw),
-                hfx_thd=_st_where(internal_melt, 0.0, water_specific * melt_mass, imw),
-                hfx_bom=_st_where(internal_melt, 0.0, -energy_difference * melt_mass, imw),
-                wfx_bom=_st_where(internal_melt, 0.0, melt_mass, imw),
-                sfx_bom=_st_where(internal_melt, 0.0, melt_mass * S_flux, imw),
+                hfx_res=_stw(internal_melt, ice_specific * melt_mass, 0.0, imw),
+                wfx_res=_stw(internal_melt, melt_mass, 0.0, imw),
+                sfx_res=_stw(internal_melt, melt_mass * S_flux, 0.0, imw),
+                hfx_thd=_stw(internal_melt, 0.0, water_specific * melt_mass, imw),
+                hfx_bom=_stw(internal_melt, 0.0, -energy_difference * melt_mass, imw),
+                wfx_bom=_stw(internal_melt, 0.0, melt_mass, imw),
+                sfx_bom=_stw(internal_melt, 0.0, melt_mass * S_flux, imw),
             )
-            basal_energy = _st_where(
+            basal_energy = _stw(
                 internal_melt,
                 basal_energy,
                 jnp.maximum(
@@ -1485,7 +1534,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         for i, k in enumerate((3, 2, 1, 0)):
             total = total + flooded_snow[k]
             cum = flood if i == 3 else min_c1(flood, total, _sharp(w.H))
-            amounts[k] = straight_through(amounts[k], cum - taken)
+            amounts[k] = _st_pair(amounts[k], cum - taken, _st_mode)
             taken = cum
     for k in (3, 2, 1, 0):
         amount = amounts[k]
@@ -1624,9 +1673,19 @@ def _sal_step(post_dh: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     return S_bulk, S_layers, fluxes
 
 
-def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
+def _do_step(*args, _st_mode: str = "st", **kw):
+    """Step-level straight-through wrapper (vote Z55) around ``_do_step_impl``: in smooth mode
+    the step runs all-hard and all-soft and each output takes the hard value forward and the
+    soft column's derivative; width 0 (or ``_st_mode`` "hard"/"soft") runs one pass."""
+    smooth = kw.get("switches", SI3SwitchConfig()).relative_width > 0.0
+    if _st_mode == "st" and smooth:
+        return _st_tree(_do_step_impl(*args, _st_mode="hard", **kw), _do_step_impl(*args, _st_mode="soft", **kw))
+    return _do_step_impl(*args, _st_mode=("hard" if _st_mode == "st" else _st_mode), **kw)
+
+
+def _do_step_impl(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
              constants: IceConstantsConfig, nemo_version: str = "5.0.2",
-             switches: SI3SwitchConfig = SI3SwitchConfig()):
+             switches: SI3SwitchConfig = SI3SwitchConfig(), _st_mode: str = "hard"):
     """ice_thd_do, jpl = 1, nn_icesal = 2, no frazil (`icethd_do.F90:171-307`).
 
     New ice forms at t_bo with salinity rn_sinew*SSS; its enthalpy and
@@ -1634,6 +1693,10 @@ def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     accreted at the base and remapped, and the snow VOLUME is kept.  Returns
     (post_do, exchange contributions).
     """
+
+    _stw = functools.partial(_ST_WHERE, mode=_st_mode)
+    _stmin = functools.partial(_ST_MIN, mode=_st_mode)
+    _stmax = functools.partial(_ST_MAX, mode=_st_mode)
 
     # Open-water growth (`icethd_do.F90:171-307`), active only for qlead<0.
     # Smooth mode: every switch below keeps NEMO's forward value and takes its
@@ -1656,7 +1719,7 @@ def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     )
     zEi = -e_new / constants.rho_ice
     zEw = constants.c_ocean * Tbo_c
-    vnew = _st_where(
+    vnew = _stw(
         forcing.qlead < 0.0,
         -(-forcing.qlead / (zEi - zEw)) / constants.rho_ice,
         0.0,
@@ -1669,10 +1732,10 @@ def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     a_lateral = vnew / _NEW_ICE_THICKNESS
     capped = a_lateral > room
     cap_w = si3_gt(a_lateral - room, 0.0, w_cut) if st else None
-    excess_area = _st_where(capped, a_lateral - room, 0.0, cap_w)
+    excess_area = _stw(capped, a_lateral - room, 0.0, cap_w)
     residual = excess_area * _NEW_ICE_THICKNESS                    # zdv_res
-    anew = _st_where(capped, jnp.maximum(0.0, a_lateral - excess_area), a_lateral, cap_w)
-    v_lateral = _st_where(capped, jnp.maximum(0.0, vnew - residual), vnew, cap_w)
+    anew = _stw(capped, jnp.maximum(0.0, a_lateral - excess_area), a_lateral, cap_w)
+    v_lateral = _stw(capped, jnp.maximum(0.0, vnew - residual), vnew, cap_w)
     v_old = post_temp2.h_ice * a_old
     a_total = a_old + anew
     v_mixed = v_old + v_lateral
@@ -1682,13 +1745,13 @@ def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     had_ice = (a_old > 0.0)[..., None]
     had_w = si3_gt(a_old, 0.0, w_ice)[..., None] if st else None
     v_den = jnp.maximum(v_mixed, _EPS20)[..., None]
-    e_mixed = _st_where(
+    e_mixed = _stw(
         had_ice,
         (e_new[..., None] * v_lateral[..., None] + post_temp2.e_ice * v_old[..., None]) / v_den,
         jnp.broadcast_to(e_new[..., None], post_temp2.e_ice.shape),
         had_w,
     )
-    S_layers_new = _st_where(
+    S_layers_new = _stw(
         had_ice,
         (s_new[..., None] * v_lateral[..., None] + post_temp2.S_layers * v_old[..., None]) / v_den,
         jnp.broadcast_to(s_new[..., None], post_temp2.S_layers.shape),
@@ -1698,8 +1761,8 @@ def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     # a category whose area is below epsi20 is emptied (numerics guard).
     keep = (a_total >= _EPS20) | (vnew <= 0.0)
     keep_w = (1.0 - (1.0 - si3_ge(a_total, _EPS20, w_ice)) * si3_gt(vnew, 0.0, w.H)) if st else None
-    accreted = _st_where(keep, residual, 0.0, keep_w)
-    a_total = _st_where(keep, a_total, 0.0, keep_w)
+    accreted = _stw(keep, residual, 0.0, keep_w)
+    a_total = _stw(keep, a_total, 0.0, keep_w)
     v_total = v_mixed + accreted
     layer = v_mixed * (1.0 / 3.0)
     vseg = jnp.stack([jnp.zeros_like(layer), layer, layer, layer, accreted], axis=-1)
@@ -1719,13 +1782,13 @@ def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     post_do = post_temp2._replace(
         concentration=a_total,
         h_ice=h_total,
-        h_snow=_st_where(new_ice, h_snow_new, post_temp2.h_snow, new_w),
-        e_ice=_st_where(new_ice[..., None], e_ice_new, post_temp2.e_ice, new_w3),
-        S_bulk=_st_where(new_ice, S_bulk_new, post_temp2.S_bulk, new_w),
-        S_layers=_st_where(new_ice[..., None], S_layers_new, post_temp2.S_layers, new_w3),
+        h_snow=_stw(new_ice, h_snow_new, post_temp2.h_snow, new_w),
+        e_ice=_stw(new_ice[..., None], e_ice_new, post_temp2.e_ice, new_w3),
+        S_bulk=_stw(new_ice, S_bulk_new, post_temp2.S_bulk, new_w),
+        S_layers=_stw(new_ice[..., None], S_layers_new, post_temp2.S_layers, new_w3),
     )
     # ice_thd_do exchange in NEMO's operation order (`icethd_do.F90:204-221`).
-    zfmdt = _st_where(forcing.qlead < 0.0, -forcing.qlead / (zEi - zEw), 0.0, cools if st else None)
+    zfmdt = _stw(forcing.qlead < 0.0, -forcing.qlead / (zEi - zEw), 0.0, cools if st else None)
     r1_dt = 1.0 / dt
     do_fluxes = _zero_fluxes(vnew)._replace(
         hfx_thd=zfmdt * zEw * r1_dt,
