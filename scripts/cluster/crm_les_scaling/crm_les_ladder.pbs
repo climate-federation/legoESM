@@ -23,8 +23,10 @@
 #               defaults plus --semi-implicit (REQUIRED: the driver's default
 #               substepped horizontal acoustics refuses to run without it, and
 #               every production deck passes it). NOTE: the driver defaults
-#               (separate centred momentum advection, vertical SGS) raise on
-#               >1 rank today.
+#               (separate centred momentum advection, vertical SGS) have no
+#               halo kernels yet, so they raise at EVERY rank count: 1 rank
+#               also runs the halo core (bench --single-rank-path halo, the
+#               like-for-like baseline).
 #
 # 1 node : qsub -v RANKS="1 2 4 8 16 32 64 128" crm_les_ladder.pbs
 # 2 nodes: qsub -l select=2:ncpus=128:mpiprocs=128:mem=230GB -v RANKS=256 crm_les_ladder.pbs
@@ -88,6 +90,17 @@ if [ "$BOUNDS" = 1 ]; then
                 --output-dir "$OUT/bounds" || rc_all=1
         fi
     done
+    # Comm bound = in-jit per-op cost (chain slope); roofline_probe's
+    # one-op-per-jit rows are dominated by JAX's ~260 us per-dispatch cost.
+    run 2 2 scripts/bench/probe_mpi_transport.py --tag pair_node \
+        --output "$OUT/bounds/transport.jsonl" || rc_all=1
+    run "$CORES" "$CORES" scripts/bench/probe_mpi_transport.py --tag full_node \
+        --log2-bytes 3,10,14,17 --n-timing 50 \
+        --output "$OUT/bounds/transport.jsonl" || rc_all=1
+    if [ "$NODES" -ge 2 ]; then
+        run 2 1 scripts/bench/probe_mpi_transport.py --tag pair_xnode \
+            --output "$OUT/bounds/transport.jsonl" || rc_all=1
+    fi
 fi
 
 for N in $RANKS; do

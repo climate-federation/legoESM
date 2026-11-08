@@ -40,7 +40,8 @@ def test_crm_bench_single_rank(tmp_path, mode):
         "--mode", mode, "--nx", "8", "--ny", "8", "--nlev", "8",
         "--warmup-steps", "1", "--time-steps", "2", "--windows", "2",
         "--semi-implicit", "--theta-noise-amp", "0.1", "--time-physics", "--physics-calls", "1",
-        "--radiation", "gray", "--output", str(out),
+        "--radiation", "gray", "--single-rank-path", "serial",
+        "--output", str(out),
     ], timeout_s=900)
     fail_on_nonzero(result, "bench_plane_crm_dd_scaling.py",
                     extra_kwargs=f" --mode {mode}")
@@ -57,6 +58,46 @@ def test_crm_bench_single_rank(tmp_path, mode):
     assert phys["radiation_interval"] > 1  # driver default gates radiation
     assert phys["amortised_ms_per_step"] == pytest.approx(
         3 * phys["non_rad_ms"] + phys["rad_ms"] / phys["radiation_interval"])
+
+
+_HALO_OK = ["--momentum-advection", "van_leer", "--no-sgs-vertical"]
+_TINY = ["--mode", "strong", "--nx", "8", "--ny", "8", "--nlev", "8",
+         "--warmup-steps", "1", "--time-steps", "2", "--windows", "2",
+         "--semi-implicit", "--theta-noise-amp", "0.1"]
+
+
+def test_crm_bench_single_rank_default_reaches_halo_core(tmp_path):
+    # The default single-rank path is the multi-rank halo core. The driver's
+    # production defaults have no halo kernels yet (centred momentum
+    # advection, vertical SGS), so reaching that core at one rank raises; the
+    # serial shortcut would not. Invert once those kernels are ported.
+    result = run_bench(CRM, _TINY + ["--output", str(tmp_path / "x.jsonl")],
+                       timeout_s=900)
+    assert result.returncode != 0
+    assert "NotImplementedError" in result.stderr + result.stdout
+
+
+def test_crm_bench_single_rank_halo_matches_serial(tmp_path):
+    recs = {}
+    for path in ("serial", "halo"):
+        out = tmp_path / f"{path}.jsonl"
+        result = run_bench(CRM, _TINY + _HALO_OK + [
+            "--precision", "float64", "--single-rank-path", path,
+            "--output", str(out)], timeout_s=900)
+        fail_on_nonzero(result, "bench_plane_crm_dd_scaling.py",
+                        extra_kwargs=f" --single-rank-path {path}")
+        recs[path] = _one_record(out)
+        assert recs[path]["single_rank_path"] == path
+        assert recs[path]["forced_halo_core"] is (path == "halo")
+        assert recs[path]["finite"] is True
+    s, h = (recs[p]["state_checksums"] for p in ("serial", "halo"))
+    assert recs["serial"]["max_abs_dtheta_prime"] > 0.0
+    names = ("u", "v", "w", "theta_prime", "rho_prime", "tracers")
+    assert set(s) == {n + x for n in names for x in ("", "_abs")}
+    for name in names:  # fp64: same physics on both paths, every prognostic
+        scale = s[name + "_abs"]
+        assert scale > 0.0, name
+        assert abs(h[name] - s[name]) <= 1e-9 * scale, (name, h[name], s[name])
 
 
 @pytest.mark.parametrize("mode", ["strong", "weak"])
