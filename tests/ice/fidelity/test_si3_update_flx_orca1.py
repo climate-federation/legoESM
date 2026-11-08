@@ -43,7 +43,8 @@ def _load():
 
 
 def _config(d):
-    cfg = SI3ORCA2StateConfig()._replace(nn_hls=0, rDt_ice=1.0 / float(d["in_r1_Dt_ice"]))
+    cfg = SI3ORCA2StateConfig()._replace(nn_hls=0, ln_icethd=True,   # ORCA1 ln_icethd = T
+                                         rDt_ice=1.0 / float(d["in_r1_Dt_ice"]))
     c = cfg.ice_constants
     # NEMO's rhos/rhoi/rhow are the constant set the routine uses (no override)
     assert (c.rho_snow, c.rho_ice, constants.rho_water) == (
@@ -104,6 +105,25 @@ def test_smooth_default_keeps_column_heat_and_matches_hard_off_ramp():
     w_f = SI3SwitchConfig().relative_width * SI3SwitchConfig().flux_scale_W_m2
     off_ramp = (d["in_fhld"] <= 0) | (d["in_fhld"] >= w_f)
     np.testing.assert_array_equal(np.asarray(smooth.qsr)[off_ramp], np.asarray(hard.qsr)[off_ramp])
+
+
+def test_blend_conserves_column_heat_inside_both_ramps():
+    """Cells placed inside the fhld ramp and inside the at_i ramp: qsr moves, qsr + qns does not."""
+    d = _load()
+    sw = SI3SwitchConfig()
+    w_f, w_a = sw.relative_width * sw.flux_scale_W_m2, sw.relative_width * sw.ice_switch_scale
+    fh = d["in_fhld"].copy()
+    at = d["in_at_i"].copy()
+    warm = np.argwhere(d["in_fhld"] > 0)
+    (i1, j1), (i2, j2) = warm[0], warm[1]
+    fh[i1, j1] = 0.4 * w_f                      # fhld ramp
+    at[i2, j2] = 0.6 * w_a                      # at_i ramp
+    _, hard = _call(d, SI3_HARD_SWITCHES, fhld=fh, at_i=at)
+    _, smooth = _call(d, sw, fhld=fh, at_i=at)
+    for i, j in ((i1, j1), (i2, j2)):
+        assert float(smooth.qsr[i, j]) != float(hard.qsr[i, j])          # the ramp is active here
+        np.testing.assert_allclose(float(smooth.qsr[i, j] + smooth.qns[i, j]),
+                                   float(hard.qsr[i, j] + hard.qns[i, j]), rtol=1e-13, atol=0)
 
 
 def test_smooth_blend_inside_the_ramp_and_gradient():
