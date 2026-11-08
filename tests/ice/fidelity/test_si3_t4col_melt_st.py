@@ -188,9 +188,12 @@ def test_soft_column_do_budgets_close_inside_the_bands(monkeypatch):
         o, fx = bl._do_step(st, fz._replace(qlead=q), DT, K, nemo_version="5.0.1", switches=SMOOTH)
         a0, a1 = np.asarray(st.concentration), np.asarray(o.concentration)
         v0, v1 = np.asarray(st.h_ice) * a0, np.asarray(o.h_ice) * a1
-        np.testing.assert_allclose(c * (v1 - v0) / DT, -np.asarray(fx.wfx_opw), rtol=1e-11, atol=1e-18)
+        # Tiny-flux arm differences O(1e-11 m) out of O(1 m) volumes: atol at the
+        # inventory's roundoff scale (vote Z59).
+        tol = lambda x: 1e-14 * c * np.abs(x).max() / DT   # noqa: E731
+        np.testing.assert_allclose(c * (v1 - v0) / DT, -np.asarray(fx.wfx_opw), rtol=1e-11, atol=max(1e-18, tol(v0)))
         s0, s1 = np.asarray(st.S_bulk) * v0, np.asarray(o.S_bulk) * v1
-        np.testing.assert_allclose(c * (s1 - s0) / DT, -np.asarray(fx.sfx_opw), rtol=1e-12, atol=1e-16)
+        np.testing.assert_allclose(c * (s1 - s0) / DT, -np.asarray(fx.sfx_opw), rtol=1e-12, atol=max(1e-16, tol(s0)))
         q0, q1 = np.sum(st.e_ice, -1) * v0 / 3.0, np.sum(o.e_ice, -1) * v1 / 3.0
         np.testing.assert_allclose((q1 - q0) / DT, np.asarray(fx.hfx_thd - fx.hfx_opw), rtol=1e-10, atol=1e-8)
         np.testing.assert_allclose(np.asarray(o.h_snow) * a1, np.asarray(st.h_snow) * a0, rtol=1e-14, atol=0)
