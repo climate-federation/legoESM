@@ -61,6 +61,7 @@ from legoesm.ice.si3_orca2_state import (  # noqa: E402
     si3_lbc_lnk_orca2,
     si3_o3_istate_fill_fields,
     si3_o4_step,
+    si3_update_snwice_mass,
     si3_var_agg,
     si3_var_glo2eqv,
 )
@@ -171,7 +172,7 @@ def state_template(cfg: SI3ORCA2StateConfig, delayed: bool) -> SI3State:
 
 def _bits(a):
     a = np.asarray(a)
-    return a.view(np.uint64) if a.dtype == np.float64 else a
+    return a.view(f"u{a.itemsize}") if a.dtype.kind == "f" else a
 
 
 def _owned(x):
@@ -243,6 +244,9 @@ def build_inputs(rng: np.random.Generator) -> dict[str, np.ndarray]:
     d["ssh_m"] = _lbc(rng.uniform(-0.5, 0.5, (JPI, JPJ)) * tmask, "T")
     d["u_ice_b"] = _lbc(rng.uniform(-0.1, 0.1, (JPI, JPJ)) * umask, "U", -1.0)
     d["v_ice_b"] = _lbc(rng.uniform(-0.1, 0.1, (JPI, JPJ)) * vmask, "V", -1.0)
+    # vote R3: entry velocities distinct from the previous-step ones.
+    d["u_ice_entry"] = _lbc(rng.uniform(-0.1, 0.1, (JPI, JPJ)) * umask, "U", -1.0)
+    d["v_ice_entry"] = _lbc(rng.uniform(-0.1, 0.1, (JPI, JPJ)) * vmask, "V", -1.0)
 
     # finalize forcing (vote V12): heat +-200 W/m2, water/salt +-1e-4.
     for name in SI3Fluxes._fields:
@@ -300,7 +304,15 @@ def base_state(d: dict[str, np.ndarray], cfg: SI3ORCA2StateConfig) -> SI3State:
         v_ip=s.v_ip, v_il=s.v_il, t_su=s.t_su, t_si=s.t_si, e_s=s.e_s, e_i=s.e_i,
         szv_i=s.szv_i, a_ip_eff=eqv.a_ip_eff, t_i=eqv.t_i, t_s=eqv.t_s, kn=2, config=cfg,
     )
-    return s._replace(a_i=eqv.a_i, v_s=eqv.v_s, equivalent=eqv, aggregated=agg)
+    # vote R1: ice/snow mass consistent with the volumes (ice_istate, is_init).
+    mass, mass_b, fmass = si3_update_snwice_mass(
+        vt_i=agg.vt_i, vt_s=agg.vt_s, vt_ip=agg.vt_ip, vt_il=agg.vt_il,
+        snwice_mass_prev=s.snwice_mass, tmask=j["tmask"], config=cfg, is_init=True,
+    )
+    return s._replace(
+        a_i=eqv.a_i, v_s=eqv.v_s, equivalent=eqv, aggregated=agg,
+        snwice_mass=mass, snwice_mass_b=mass_b, snwice_fmass=fmass,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -383,14 +395,11 @@ def rung_rheo(d):
     out = {}
     for full in (True, False):
         fold = SI3ORCA2FoldProgram(nn_hls=NN_HLS, nfd_full_when_absent=full)
-        for smooth in (True, False):
+        for smooth in (False, True):  # the aEVP below reads the smoothed (True) one
             st = si3_orca2_ice_strength(
                 a_i=s.a_i, v_i=s.v_i, tmask=j["tmask"], config=_strength_cfg(smooth), fold=fold
             )
             out.update(pack(f"strength/{full}/{smooth}", st))
-        st = si3_orca2_ice_strength(
-            a_i=s.a_i, v_i=s.v_i, tmask=j["tmask"], config=_strength_cfg(True), fold=fold
-        )
         forcing = SI3CGridAEVPForcing(
             concentration_t=st.at_i,
             ice_volume_t=jnp.sum(s.v_i, axis=-1),
@@ -404,7 +413,7 @@ def rung_rheo(d):
             fast_tmask=z, depth_t=z, depth_u=z, depth_v=z,
             iceberg_tmask=z, iceberg_umask=z, iceberg_vmask=z,
         )
-        state0 = SI3CGridAEVPState(u_ice_u=j["u_ice_b"], v_ice_v=j["v_ice_b"], stress1_t=z, stress2_t=z, stress12_f=z)
+        state0 = SI3CGridAEVPState(u_ice_u=j["u_ice_entry"], v_ice_v=j["v_ice_entry"], stress1_t=z, stress2_t=z, stress12_f=z)
         kw = dict(
             strength_t=st.strength, u_ice_b=j["u_ice_b"], v_ice_b=j["v_ice_b"], ssh_m=j["ssh_m"],
             snwice_mass=s.snwice_mass, snwice_mass_b=s.snwice_mass_b, ln_ice_embd=False, fold=fold,
@@ -503,7 +512,8 @@ def _inputs_for(rung: str, base: dict, state: SI3State, halo_state: SI3State) ->
     keys = {
         "o4": masks + ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "sss_m", "sst_m"),
         "rheo": masks + ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f", "coriolis_t",
-                         "air_u_t", "air_v_t", "ocean_u_u", "ocean_v_v", "ssh_m", "u_ice_b", "v_ice_b"),
+                         "air_u_t", "air_v_t", "ocean_u_u", "ocean_v_v", "ssh_m", "u_ice_b", "v_ice_b",
+                         "u_ice_entry", "v_ice_entry"),
         "finalize": masks + ("sss_m", "sst_m", "rn_amax_2d")
         + tuple(k for k in base if k.startswith(("flx_", "upd_", "str_"))),
     }[rung]
@@ -517,8 +527,9 @@ def main() -> None:
     with set_pin_policy():
         base = build_inputs(rng)
         state = base_state(base, state_config())
-        # Halo rung input: base state with nonzero Prather moments everywhere so
-        # the -1 sign on sx/sy is observable (fold/seam act on halos only).
+        # Halo rung input: base state plus nonzero Prather moments, velocities
+        # and mass flux so every exchanged leaf (and the -1 sign on sx/sy, u, v)
+        # is observable (fold/seam act on halos only).
         leaves, treedef = jax.tree_util.tree_flatten(state.prather)
         # Vote H1: random in category 1 (and layer 1 of the 4-D families) only.
         def _cat1(x):
@@ -532,6 +543,7 @@ def main() -> None:
             prather=prather,
             u_ice=jnp.asarray(rng.uniform(-0.2, 0.2, (JPI, JPJ))),
             v_ice=jnp.asarray(rng.uniform(-0.2, 0.2, (JPI, JPJ))),
+            snwice_fmass=jnp.asarray(rng.uniform(-1.0e-3, 1.0e-3, (JPI, JPJ))),  # vote R2
         )
         total = 0
         for rung, fn in RUNGS.items():

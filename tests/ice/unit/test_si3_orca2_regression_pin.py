@@ -5,7 +5,7 @@ outputs in ``tests/ice/fixtures/si3_orca2_regression/`` are what the lane
 computed on deterministic synthetic ORCA2-shaped inputs when the fixture was
 generated (``provenance.json``); they say nothing about agreement with NEMO.
 The test recomputes every rung from the stored inputs and requires every
-output leaf to be bit-identical (float64 compared through ``uint64`` views,
+output leaf to be bit-identical (floats compared through same-width unsigned views,
 so ``-0.0``/``+0.0`` and NaN payloads also count).  A change that moves any
 bit fails here; if it was intended, regenerate with ``make_fixture.py`` and
 say so in the PR.
@@ -42,17 +42,21 @@ def _load_generator():
 GEN = _load_generator()
 
 
+PROVENANCE = (FIXTURE / "provenance.json").read_text()
+
+
 def _bits(a: np.ndarray) -> np.ndarray:
     a = np.asarray(a)
-    return a.view(np.uint64) if a.dtype == np.float64 else a
+    return a.view(f"u{a.itemsize}") if a.dtype.kind == "f" else a
 
 
 def _assert_bitwise(expected: dict, actual: dict) -> None:
-    assert sorted(actual) == sorted(expected), "output leaf set changed"
+    where = f"\nfixture provenance: {PROVENANCE}"
+    assert sorted(actual) == sorted(expected), "output leaf set changed" + where
     for key in expected:
         exp, got = np.asarray(expected[key]), np.asarray(actual[key])
-        assert got.dtype == exp.dtype and got.shape == exp.shape, key
-        np.testing.assert_array_equal(_bits(got), _bits(exp), err_msg=key)
+        assert got.dtype == exp.dtype and got.shape == exp.shape, key + where
+        np.testing.assert_array_equal(_bits(got), _bits(exp), err_msg=key + where)
 
 
 def _load(rung: str) -> tuple[dict, dict]:
@@ -64,6 +68,8 @@ def _load(rung: str) -> tuple[dict, dict]:
 
 @pytest.fixture
 def pin_policy():
+    if jax.default_backend() != "cpu":
+        pytest.skip("the pin runs under the CPU-only libm transcendental policy")
     with GEN.set_pin_policy():
         yield
 
