@@ -518,7 +518,7 @@ def test_lane3_rhg_card_parent_vs_current_bit_identical():
 def test_lane3_rheo_card_parent_vs_current_bit_identical():
     """One ICE_RHEO step (rhg -> adv -> rdgrft -> cor): ~4 min per arm eager on 1004x1004."""
     import netCDF4
-    from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as rheo_cur
+    from legoesm.ice.fidelity import nemo_rheo_testcase_recipe_lane as rheo_cur
 
     parent = _parent_lane3()
     gate = _gate_module()

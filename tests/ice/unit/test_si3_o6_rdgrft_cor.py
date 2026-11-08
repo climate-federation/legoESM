@@ -1087,7 +1087,7 @@ def test_lane3_rheo_card_merge_parent_vs_current_bit_identical():
     import importlib.util
 
     import netCDF4
-    from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as rheo_cur
+    from legoesm.ice.fidelity import nemo_rheo_testcase_recipe_lane as rheo_cur
 
     from legoesm import constants as C
 

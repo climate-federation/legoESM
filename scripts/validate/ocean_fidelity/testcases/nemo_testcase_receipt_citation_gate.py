@@ -15375,6 +15375,23 @@ def audit_map() -> list[dict]:
             if row["status"] != "OK"]
 
 
+# The deleted-code controls need a file that is ABSENT from the tree, or removing
+# the content pin silently falls back to the live file.  The D196 merge restored
+# main's tests/ice/fidelity/test_si3_jpl1_ridging.py (byte-identical to its D177
+# blob), so that path no longer qualifies; this lane-only test (deleted by D177,
+# never on main) does.
+_DELETED_CODE_CITATION = "tests/ice/test_nemo_si3_o6_lane3_routing_probe.py:31-35"
+FILES["tests/ice/test_nemo_si3_o6_lane3_routing_probe.py"] = (
+    REPO / "tests/ice/test_nemo_si3_o6_lane3_routing_probe.py")
+_DELETED_CODE_PIN = {
+    "anchors": [
+        "def test_identical_reports_have_no_change_even_with_different_stamps():",
+        'assert d["rows"] == 3 and d["rows_with_any_change"] == 0 and d["rows_missing_or_added"] == []',
+        5],
+    "blob": "502a0b667d4ddd0c359f29621f4698b0f7554e96",
+}
+
+
 def self_test() -> list[dict]:
     """The audit's own non-vacuity: three planted defects it MUST flag.
 
@@ -15412,15 +15429,15 @@ def self_test() -> list[dict]:
                 3])),
     ]
     # a content-pinned citation of deleted code is still line-exact in that file
-    pinned = CITATION_MAP["tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250"]
+    pinned = _DELETED_CODE_PIN
     planted.append(("content-pinned endpoint shifted",
-                    check("tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250", pinned, shift=2)))
+                    check(_DELETED_CODE_CITATION, pinned, shift=2)))
     planted.append(("content pin removed from deleted code",
-                    check("tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250", pinned["anchors"])))
+                    check(_DELETED_CODE_CITATION, pinned["anchors"])))
     planted.append(("content blob made unreachable",
-                    check("tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250",
-                          {**pinned, "blob": "0" * 40})))
+                    check(_DELETED_CODE_CITATION, {**pinned, "blob": "0" * 40})))
     # and the unplanted entry must still PASS, or the controls prove nothing
+    deleted_baseline = check(_DELETED_CODE_CITATION, pinned)
     baseline = check("stprk3_stg.F90:309-334", good)
     comma_baseline = check(
         "BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355",
@@ -15433,6 +15450,9 @@ def self_test() -> list[dict]:
     rows.append({"planted": "unplanted comma baseline must pass",
                  "status": comma_baseline["status"],
                  "fired": comma_baseline["status"] == "OK"})
+    rows.append({"planted": "unplanted deleted-code baseline must pass",
+                 "status": deleted_baseline["status"],
+                 "fired": deleted_baseline["status"] == "OK"})
     return rows
 
 
