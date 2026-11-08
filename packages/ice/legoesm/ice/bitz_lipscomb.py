@@ -9,13 +9,16 @@ the iterative surface-flux boundary condition.  Source identity:
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 from legoesm.core import transcendentals
 from legoesm.core.source_rounding import nemo_source_round
-from legoesm.core.smooth import smooth_max_c1, smooth_min_c1, smoothstep_cubic
+from legoesm.core.smooth import (max_c1, min_c1, positive_part_c1, smooth_max_c1, smooth_min_c1,
+                                 smoothstep_cubic)
+from legoesm.ice.config import SI3SwitchConfig
 from legoesm.ice.constants_config import IceConstantsConfig
 from legoesm.ice.snow import snow_ice_flooding
 from legoesm.timestepping.tridiagonal import thomas_solve
@@ -295,8 +298,43 @@ def option2_salinity_profile(S_bulk, sss):
     return S_bulk[..., None] * (alpha[..., None] * z + (1.0 - alpha[..., None]))
 
 
+class _ColumnWidths(NamedTuple):
+    """C1 ramp widths of the column port from :class:`SI3SwitchConfig` (sweep votes Z1-Z20)."""
+
+    per_fix: float      # factor on the per-fix widths (t_clamp, full_melt, growth_gate, sal_gate, err_blend)
+    T: float            # temperature bounds [K]
+    Tm: float           # melting-point bounds of ice temperature [K] (vote Z17)
+    H: float            # thickness floors, zh_min [m] (votes Z8, Z14)
+    S: float            # salinity floors and bounds [g/kg] (vote Z14)
+    E: float            # energy floors [J m-2] = width x flux scale x dt (vote Z19)
+
+
+def _column_widths(switches: SI3SwitchConfig, dt: float = 0.0) -> _ColumnWidths:
+    rw = switches.relative_width
+    if not (rw >= 0.0 and rw < math.inf):
+        raise ValueError(f"SI3SwitchConfig.relative_width must be finite and >= 0, got {rw!r}")
+    T = rw * switches.temperature_scale_K
+    return _ColumnWidths(rw / 0.01, T, T * switches.melt_point_scale_K, rw * switches.thickness_scale_m,
+                         rw * switches.salinity_scale, rw * switches.flux_scale_W_m2 * dt)
+
+
+def _sharp(w: float) -> float:
+    """Sharpness 1/w for the core.smooth one-sided helpers; inf (hard) at w = 0 (as si3_surface.si3_sharp)."""
+    return math.inf if w == 0.0 else 1.0 / w
+
+
+def _pos(x, w: float):
+    """C1 MAX(x, 0): exact for x <= 0 and x >= w (positive_part_c1); w = 0 is hard."""
+    return positive_part_c1(x, _sharp(w))
+
+
+def _clip_c1(x, lo, hi, w: float):
+    """C1 clip to [lo, hi], EXACT at and beyond each bound (min_c1 / max_c1); w = 0 is jnp.clip."""
+    return max_c1(min_c1(x, hi, _sharp(w)), lo, _sharp(w))
+
+
 def ice_enthalpy_from_temperature(T_K, S, constants: IceConstantsConfig, *,
-                                  _nemo_order: bool = True):
+                                  _nemo_order: bool = True, width: float = 0.0):
     """NEMO positive energy-of-melting `icevar.F90:938-946` [J m-3]."""
 
     T_m = -constants.liquidus_slope * S
@@ -312,7 +350,7 @@ def ice_enthalpy_from_temperature(T_K, S, constants: IceConstantsConfig, *,
     # Kelvin temperature, then form Celsius, and finally evaluate the three
     # parenthesised energy terms.  This is the selected SI3 identity's
     # operation order, not a user-selectable numerical variant.
-    T_clipped = jnp.minimum(T_K, T_m + constants.T0)
+    T_clipped = min_c1(T_K, T_m + constants.T0, _sharp(width))   # MIN(T, Tmelt), C1 (votes Z4, Z17, Z20)
     T_c = T_clipped - constants.T0
     sensible = constants.c_ice * (T_m - T_c)
     liquid = jnp.maximum(
@@ -451,7 +489,7 @@ def snow_enthalpy_from_temperature(T_K, constants: IceConstantsConfig):
 
 
 def snow_temperature_from_enthalpy(e, constants: IceConstantsConfig, *,
-                                   _nemo_order: bool = True):
+                                   _nemo_order: bool = True, width: float = 0.0):
     """Invert snow enthalpy with NEMO's global-to-equivalent bounds.
 
     `icevar.F90:404-416` reconstructs this diagnostic immediately before each
@@ -469,7 +507,7 @@ def snow_temperature_from_enthalpy(e, constants: IceConstantsConfig, *,
         unbounded = constants.T0 + (
             -e / constants.rho_snow + constants.latent_fusion
         ) / constants.c_ice
-    return jnp.clip(unbounded, constants.T0 - 100.0, constants.T0)
+    return _clip_c1(unbounded, constants.T0 - 100.0, constants.T0, width)   # vote Z4
 
 
 def p07_conductivity(T_K, S, constants: IceConstantsConfig):
@@ -484,20 +522,21 @@ def p07_conductivity(T_K, S, constants: IceConstantsConfig):
     )
 
 
-def _radiation(h_i, h_s, qtr_top, T_surface):
+def _radiation(h_i, h_s, qtr_top, T_surface, width_m: float = 0.0):
     """SSL transmission/absorption, `icethd_zdf_bl99.F90:143-230`."""
 
     del T_surface  # nn_qtrice=0 in the resolved deck
     dtype = h_i.dtype
     js = jnp.arange(1, 4, dtype=dtype)
     ji = jnp.arange(1, 4, dtype=dtype)
-    dzs = jnp.maximum(h_s, _H_MIN)[..., None] / 3.0
-    dzi = jnp.maximum(h_i, _H_MIN)[..., None] / 3.0
+    # MAX(zh_min, h) binds on real thin snow (0 < h_s < 1 mm): C1 (vote Z8).
+    dzs = max_c1(h_s, _H_MIN, _sharp(width_m))[..., None] / 3.0
+    dzi = max_c1(h_i, _H_MIN, _sharp(width_m))[..., None] / 3.0
     snow_fraction = h_s / (
         h_s + _SNOW_FRACTION_DEPTH
     )  # nn_snwfra=2, icevar.F90:1598-1599
     tr_s = qtr_top[..., None] * jnp.exp(
-        -_SNOW_EXTINCTION * jnp.maximum(0.0, dzs * js - _SNOW_SSL_DEPTH)
+        -_SNOW_EXTINCTION * _pos(dzs * js - _SNOW_SSL_DEPTH, width_m)     # vote Z14
     )
     tr_s0 = jnp.concatenate([qtr_top[..., None], tr_s], axis=-1)
     ab_s = tr_s0[..., :-1] - tr_s0[..., 1:]
@@ -505,9 +544,9 @@ def _radiation(h_i, h_s, qtr_top, T_surface):
     top_i = snow_fraction * through_snow + (1.0 - snow_fraction) * qtr_top
     tr_i = (
         snow_fraction[..., None] * through_snow[..., None]
-        * jnp.exp(-jnp.maximum(0.0, dzi * ji - _H_MIN))
+        * jnp.exp(-_pos(dzi * ji - _H_MIN, width_m))
         + (1.0 - snow_fraction)[..., None] * qtr_top[..., None]
-        * jnp.exp(-jnp.maximum(0.0, dzi * ji - _ICE_SSL_DEPTH))
+        * jnp.exp(-_pos(dzi * ji - _ICE_SSL_DEPTH, width_m))
     )
     tr_i0 = jnp.concatenate([top_i[..., None], tr_i], axis=-1)
     ab_i = tr_i0[..., :-1] - tr_i0[..., 1:]
@@ -531,6 +570,7 @@ def _si3_zdf_bl99_step(
     _nemo_eos_order: bool = True,
     t_clamp_width: float = _T_CLAMP_WIDTH_K,
     nemo_version: str = "5.0.2",
+    switches: SI3SwitchConfig = SI3SwitchConfig(),
 ) -> SI3ZDFResult:
     """Iterative 3+3-layer BL99/P07 solve for the resolved ORCA1 arm.
 
@@ -541,6 +581,10 @@ def _si3_zdf_bl99_step(
     """
 
     _check_nemo_version(nemo_version)
+    w = _column_widths(switches)
+    # Melting-point bounds of ice temperature at 1e-3 K (vote Z17), other temperature bounds 0.01 K.
+    t_clamp_width = t_clamp_width * w.per_fix
+    tm_width = t_clamp_width * switches.melt_point_scale_K
     if nemo_version == "5.0.1":
         _maximum_iterations = min(_maximum_iterations, _MAX_ITERATIONS_501)
     e_ice = jnp.asarray(e_ice)
@@ -551,11 +595,11 @@ def _si3_zdf_bl99_step(
     S_layers = jnp.asarray(S_layers, dtype=dtype)
     T_i_old = ice_temperature_from_enthalpy(
         e_ice, S_layers, constants, _nemo_order=_nemo_eos_order,
-        width=t_clamp_width,
+        width=tm_width,
     )
     e_snow = jnp.asarray(e_snow, dtype=dtype)
     T_s_old = snow_temperature_from_enthalpy(
-        e_snow, constants, _nemo_order=_nemo_eos_order
+        e_snow, constants, _nemo_order=_nemo_eos_order, width=t_clamp_width
     )
     if not _nemo_snow_temperature_bounds:
         # Gate-only one-variable arm reproducing the pre-Phase-4 operand.
@@ -569,16 +613,16 @@ def _si3_zdf_bl99_step(
     # (`icevar.F90:404-416`).  The stored absent-layer enthalpy is therefore
     # not a temperature carrier when h_s == 0.
     T_s_old = jnp.where((h_snow > 0.0)[..., None], T_s_old, constants.T0)
-    T_surface = jnp.minimum(T_surface_input, constants.T0 - _T_SURFACE_EPS)
+    T_surface = min_c1(T_surface_input, constants.T0 - _T_SURFACE_EPS, _sharp(tm_width))   # vote Z20
     qns_initial = jnp.asarray(forcing.qns_ice, dtype=dtype)
     dqns = jnp.asarray(forcing.dqns_ice, dtype=dtype)
     qsr = jnp.asarray(forcing.qsr_ice, dtype=dtype)
     qtr_top = jnp.asarray(forcing.qtr_ice_top, dtype=dtype)
     T_bottom = jnp.asarray(forcing.t_bottom, dtype=dtype)
-    ab_s, ab_i, qtr_bottom = _radiation(h_ice, h_snow, qtr_top, T_surface)
+    ab_s, ab_i, qtr_bottom = _radiation(h_ice, h_snow, qtr_top, T_surface, width_m=w.H)
 
-    dz_i = jnp.maximum(h_ice, _H_MIN) / 3.0
-    dz_s = jnp.maximum(h_snow, _H_MIN) / 3.0
+    dz_i = max_c1(h_ice, _H_MIN, _sharp(w.H)) / 3.0      # zh_min, vote Z8
+    dz_s = max_c1(h_snow, _H_MIN, _sharp(w.H)) / 3.0
     snow_present = h_snow > 0.0
 
     def body(_iteration, carry):
@@ -707,20 +751,20 @@ def _si3_zdf_bl99_step(
         solved_surface = jnp.where(
             branch_snow_present, solution[..., 0], solution[..., 3]
         )
-        Tsu_candidate = jnp.clip(
-            jnp.where(melting_surface, Tsu, solved_surface),
-            constants.T0 - 100.0,
-            constants.T0,
+        # min_c1/max_c1 are exact AT the bound, so T_su >= T0 and T_i >= Tmelt
+        # still fire in smooth mode (vote Z20; the symmetric form sat w/8 below).
+        Tsu_candidate = max_c1(
+            min_c1(jnp.where(melting_surface, Tsu, solved_surface), constants.T0, _sharp(tm_width)),
+            constants.T0 - 100.0, _sharp(t_clamp_width),
         )
         Ts_candidate = jnp.where(
             branch_snow_present[..., None],
-            jnp.clip(solution[..., 1:4], constants.T0 - 100.0, constants.T0),
+            _clip_c1(solution[..., 1:4], constants.T0 - 100.0, constants.T0, t_clamp_width),
             Ts,
         )
         melt = constants.T0 - constants.liquidus_slope * S_layers
-        Ti_candidate = jnp.maximum(
-            jnp.minimum(solution[..., 4:7], melt), constants.T0 - 100.0
-        )
+        Ti_candidate = max_c1(min_c1(solution[..., 4:7], melt, _sharp(tm_width)),
+                              constants.T0 - 100.0, _sharp(t_clamp_width))
         delta = jnp.maximum(
             jnp.abs(Tsu_candidate - Tsu),
             jnp.maximum(
@@ -762,7 +806,7 @@ def _si3_zdf_bl99_step(
         0, _maximum_iterations, body, init
     )
     e_i = ice_enthalpy_from_temperature(
-        Ti, S_layers, constants, _nemo_order=_nemo_eos_order
+        Ti, S_layers, constants, _nemo_order=_nemo_eos_order, width=tm_width
     )
     e_s = snow_enthalpy_from_temperature(Ts, constants)
 
@@ -887,6 +931,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                     full_melt_width: float = _FULL_MELT_SNOW_WIDTH_M,
                     nemo_version: str = "5.0.2",
                     growth_gate_width: float = _GROWTH_GATE_WIDTH_WM2,
+                    switches: SI3SwitchConfig = SI3SwitchConfig(),
                     ) -> tuple[SI3ColumnArrays, SI3ExchangeFluxes]:
     """Resolved no-lateral-melt thickness sequence (`icethd_dh.F90:91-533`).
 
@@ -901,6 +946,9 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             "takes seawater enthalpy rcp*sst (icethd_dh.F90:454); no fallback"
         )
     _check_nemo_version(nemo_version)
+    w = _column_widths(switches, dt)
+    full_melt_width = full_melt_width * w.per_fix
+    growth_gate_width = growth_gate_width * w.per_fix
     a = state.concentration
     h_i0, h_s0 = state.h_ice, state.h_snow
     ar = a / dt                          # a_i_1d * r1_Dt_ice
@@ -991,7 +1039,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             zdf.qns_ice + forcing.qsr_ice - forcing.qtr_ice_top - zdf.qcn_ice_top,
             0.0,
         )
-        surface_energy = jnp.where(_surface_melt, jnp.maximum(qml * dt, 0.0), 0.0)
+        surface_energy = jnp.where(_surface_melt, _pos(qml * dt, w.E), 0.0)     # vote Z14
         melted_snow = []
         for k in range(4):
             active = (hseg_s[..., k] > 0.0) & (surface_energy > 0.0)
@@ -1173,7 +1221,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     )
     # Warm-ocean basal melt, limited to the available column; surface-melt and
     # internal-melt arms remain zero until their actual flux becomes positive.
-    basal_energy = dt * jnp.maximum(zf, 0.0)
+    basal_energy = _pos(dt * zf, w.E)       # vote Z14
     if _nemo_basal_layer_loop:
         h_run = h_run + dh_growth
         for k in (2, 1, 0):
@@ -1365,6 +1413,7 @@ def _zdf_exchange_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                          forcing: SI3SurfaceForcing, dt: float,
                          constants: IceConstantsConfig, *,
                          err_blend_width: float = _ERR_DIF_BLEND_WIDTH_K,
+                         switches: SI3SwitchConfig = SI3SwitchConfig(),
                          ) -> SI3ExchangeFluxes:
     """hfx_dif / hfx_err_dif of one BL99 call (`icethd_zdf_bl99.F90:768-830`).
 
@@ -1373,6 +1422,7 @@ def _zdf_exchange_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     (0.0 = hard); it never feeds back into the prognostic state.
     """
 
+    err_blend_width = err_blend_width * _column_widths(switches).per_fix
     a = state.concentration
 
     def content(e_i, e_s):
@@ -1398,7 +1448,8 @@ def _zdf_exchange_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
 
 def _sal_step(post_dh: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
               constants: IceConstantsConfig, *,
-              gate_width: float = _SAL_GATE_WIDTH_M):
+              gate_width: float = _SAL_GATE_WIDTH_M,
+              switches: SI3SwitchConfig = SI3SwitchConfig()):
     """nn_icesal=2 drainage/flushing + bounds (`icethd_sal.F90:202-240`).
 
     Both act only where h_i > rn_sal_himin (C1 one-sided gate over
@@ -1408,18 +1459,20 @@ def _sal_step(post_dh: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
 
     if not gate_width >= 0:
         raise ValueError(f"sal gate_width must be >= 0 m, got {gate_width!r}")
+    w = _column_widths(switches)
+    gate_width = gate_width * w.per_fix
     if gate_width == 0:
         gate = (post_dh.h_ice > _SAL_MIN_THICKNESS).astype(post_dh.h_ice.dtype)
     else:
         gate = smoothstep_cubic((post_dh.h_ice - _SAL_MIN_THICKNESS) / gate_width)
     drain = jnp.where(
         post_dh.T_surface >= constants.T0,
-        -jnp.maximum(post_dh.S_bulk - _FLUSHING_TARGET, 0.0)
+        -_pos(post_dh.S_bulk - _FLUSHING_TARGET, w.S)     # vote Z14
         * dt
         / _FLUSHING_TIMESCALE,
         jnp.where(
             post_dh.T_surface <= forcing.t_bottom,
-            -jnp.maximum(post_dh.S_bulk - _DRAINAGE_TARGET, 0.0)
+            -_pos(post_dh.S_bulk - _DRAINAGE_TARGET, w.S)
             * dt
             / _DRAINAGE_TIMESCALE,
             0.0,
@@ -1427,10 +1480,11 @@ def _sal_step(post_dh: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     )
     drain = gate * drain
     drained = post_dh.S_bulk + drain
-    S_bulk = drained + gate * (jnp.clip(
+    S_bulk = drained + gate * (_clip_c1(
         drained,
         _MINIMUM_ICE_SALINITY,
         _NEW_ICE_SALINITY_FRACTION * forcing.sss,
+        w.S,
     ) - drained)
     S_layers = option2_salinity_profile(S_bulk, forcing.sss)
     mass_rate = constants.rho_ice * post_dh.concentration * post_dh.h_ice / dt
@@ -1554,6 +1608,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            nemo_version: str = "5.0.2",
                            growth_gate_width: float = _GROWTH_GATE_WIDTH_WM2,
                            sal_gate_width: float = _SAL_GATE_WIDTH_M,
+                           switches: SI3SwitchConfig = SI3SwitchConfig(),
                            ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
@@ -1565,10 +1620,11 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _nemo_eos_order=_nemo_eos_order,
         t_clamp_width=t_clamp_width,
         nemo_version=nemo_version,
+        switches=switches,
     )
     post_zdf = state._replace(T_surface=zdf.T_surface, e_ice=zdf.e_ice,
                               e_snow=zdf.e_snow)
-    zdf_fluxes = _zdf_exchange_fluxes(state, zdf, forcing, dt, constants)
+    zdf_fluxes = _zdf_exchange_fluxes(state, zdf, forcing, dt, constants, switches=switches)
     post_dh, dh_fluxes = _dh_step_fluxes(
         post_zdf, zdf, forcing, dt, constants,
         _snow_deposition=_snow_deposition,
@@ -1581,11 +1637,12 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         full_melt_width=full_melt_width,
         nemo_version=nemo_version,
         growth_gate_width=growth_gate_width,
+        switches=switches,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
     S_bulk, S_layers, sal_fluxes = _sal_step(post_dh, forcing, dt, constants,
-                                              gate_width=sal_gate_width)
+                                              gate_width=sal_gate_width, switches=switches)
     post_sal = post_temp1._replace(S_bulk=S_bulk, S_layers=S_layers)
     post_temp2 = post_sal
 
