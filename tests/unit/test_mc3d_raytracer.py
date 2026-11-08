@@ -1,7 +1,7 @@
 """Phase-1 tests for the 3D Monte-Carlo ray tracer (``radiation/mc3d``).
 
-Truth tiers first: analytic slab (Beer-Lambert), exact photon-wise energy
-conservation, MC 1/sqrt(N) convergence, horizontal-grid-bias check, determinism.
+Truth tiers first: analytic slab (Beer-Lambert), per-realization energy
+conservation of the weighted walk, MC 1/sqrt(N) convergence, horizontal-grid-bias check, determinism.
 Run with ``JAX_ENABLE_X64=1``.
 """
 
@@ -14,8 +14,6 @@ from legoesm.atmosphere.physics.radiation.mc3d import (
     MC3DRadiationConfig,
     PlaneRTGeometry,
     solve_sw_monochromatic,
-    tally_batch,
-    trace_batch,
 )
 
 
@@ -39,7 +37,7 @@ def test_beer_lambert_slab_transmittance():
   k_ext, ssa, g = _uniform_fields(geom, tau / H, 0.0, 0.0)
   cfg = MC3DRadiationConfig(photons_per_pixel=4000)
   res = solve_sw_monochromatic(
-      k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.0,
+      k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.0, diffuse_frac=0.0,
       config=cfg, key=jax.random.PRNGKey(0))
 
   exact = np.exp(-tau)
@@ -58,7 +56,7 @@ def test_slant_beam_beer_lambert():
   k_ext, ssa, g = _uniform_fields(geom, tau / H, 0.0, 0.0)
   cfg = MC3DRadiationConfig(photons_per_pixel=4000)
   res = solve_sw_monochromatic(
-      k_ext, ssa, g, geom, mu0=mu0, azimuth=0.7, albedo=0.0,
+      k_ext, ssa, g, geom, mu0=mu0, azimuth=0.7, albedo=0.0, diffuse_frac=0.0,
       config=cfg, key=jax.random.PRNGKey(1))
   exact = np.exp(-tau / mu0)
   n = geom.nx * geom.ny * cfg.photons_per_pixel
@@ -67,17 +65,18 @@ def test_slant_beam_beer_lambert():
 
 
 def test_energy_conservation_scattering():
-  """Analog MC: every photon ends in exactly one bin -> the four fractions sum
-  to 1 to floating-point, for a scattering + reflecting field."""
+  """Weighted walk without roulette: deposits telescope, so the budget sums to
+  1 to round-off in every realization, for a scattering + reflecting field."""
   geom = _geom()
   k_ext, ssa, g = _uniform_fields(geom, 3e-3, 0.9, 0.5)
   cfg = MC3DRadiationConfig(photons_per_pixel=2000)
   res = solve_sw_monochromatic(
-      k_ext, ssa, g, geom, mu0=0.7, azimuth=0.3, albedo=0.2,
+      k_ext, ssa, g, geom, mu0=0.7, azimuth=0.3, albedo=0.2, diffuse_frac=0.0,
       config=cfg, key=jax.random.PRNGKey(2))
   total = (float(res.vol_abs_total) + float(res.sfc_abs_total)
-           + float(res.tod_up_frac))
-  assert abs(total - 1.0) < 1e-12         # integer counts -> exact budget
+           + float(res.tod_up_frac)
+           + float(res.residual_frac))
+  assert abs(total - 1.0) < 1e-12         # per-realization budget
   assert float(res.maxiter_frac) < 1e-3   # tracking cap effectively never hit
 
 
@@ -87,33 +86,34 @@ def test_albedo_one_no_surface_absorption():
   k_ext, ssa, g = _uniform_fields(geom, 2e-3, 0.8, 0.3)
   cfg = MC3DRadiationConfig(photons_per_pixel=2000)
   res = solve_sw_monochromatic(
-      k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=1.0,
+      k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=1.0, diffuse_frac=0.0,
       config=cfg, key=jax.random.PRNGKey(3))
-  assert float(res.sfc_abs_total) == 0.0
-  total = float(res.vol_abs_total) + float(res.tod_up_frac)
+  assert abs(float(res.sfc_abs_total)) < 1e-12
+  total = (float(res.vol_abs_total) + float(res.tod_up_frac)
+           + float(res.residual_frac))
   assert abs(total - 1.0) < 1e-12
 
 
 def test_mc_convergence_rate():
-  """Error in slab transmittance shrinks ~ 1/sqrt(N): 4x photons -> ~2x tighter.
-  Checked statistically by requiring both estimates within their own stderr."""
+  """Error in slab transmittance shrinks ~ 1/sqrt(N): 4x photons -> ~2x lower
+  RMS error over independent seeds (one realization per size is too noisy)."""
   geom = _geom()
   H = float(geom.z_faces[-1])
   tau = 1.0
   k_ext, ssa, g = _uniform_fields(geom, tau / H, 0.0, 0.0)
   exact = np.exp(-tau)
-  errs = []
+  rms = []
   for p in (500, 2000):
     cfg = MC3DRadiationConfig(photons_per_pixel=p)
-    res = solve_sw_monochromatic(
-        k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.0,
-        config=cfg, key=jax.random.PRNGKey(7))
+    errs = [float(solve_sw_monochromatic(
+        k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.0, diffuse_frac=0.0,
+        config=cfg, key=jax.random.PRNGKey(7 + s)).sfc_abs_total) - exact
+        for s in range(32)]
     n = geom.nx * geom.ny * p
-    errs.append(abs(float(res.sfc_abs_total) - exact))
     stderr = np.sqrt(exact * (1 - exact) / n)
-    assert errs[-1] < 5 * stderr
-  # Larger N should not be dramatically worse than the 4x-tighter expectation.
-  assert errs[1] < errs[0] * 1.5
+    assert max(abs(e) for e in errs) < 5 * stderr
+    rms.append(np.sqrt(np.mean(np.square(errs))))
+  assert rms[0] / rms[1] > 1.3   # expected 2
 
 
 def test_no_horizontal_grid_bias():
@@ -123,7 +123,7 @@ def test_no_horizontal_grid_bias():
   k_ext, ssa, g = _uniform_fields(geom, 1e-3, 0.0, 0.0)
   cfg = MC3DRadiationConfig(photons_per_pixel=3000)
   res = solve_sw_monochromatic(
-      k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.0,
+      k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.0, diffuse_frac=0.0,
       config=cfg, key=jax.random.PRNGKey(11))
   col = np.asarray(res.sfc_abs_frac)
   p = cfg.photons_per_pixel
@@ -135,7 +135,7 @@ def test_determinism_same_key():
   geom = _geom()
   k_ext, ssa, g = _uniform_fields(geom, 2e-3, 0.7, 0.4)
   cfg = MC3DRadiationConfig(photons_per_pixel=512)
-  args = dict(mu0=0.8, azimuth=0.1, albedo=0.3, config=cfg,
+  args = dict(mu0=0.8, azimuth=0.1, albedo=0.3, diffuse_frac=0.0, config=cfg,
               key=jax.random.PRNGKey(5))
   a = solve_sw_monochromatic(k_ext, ssa, g, geom, **args)
   b = solve_sw_monochromatic(k_ext, ssa, g, geom, **args)
@@ -148,7 +148,7 @@ def test_jit_compiles():
   cfg = MC3DRadiationConfig(photons_per_pixel=256)
   fn = jax.jit(
       lambda ke, w, gg, k: solve_sw_monochromatic(
-          ke, w, gg, geom, mu0=0.9, azimuth=0.0, albedo=0.1,
+          ke, w, gg, geom, mu0=0.9, azimuth=0.0, albedo=0.1, diffuse_frac=0.0,
           config=cfg, key=k),
   )
   res = fn(k_ext, ssa, g, jax.random.PRNGKey(0))
@@ -163,10 +163,11 @@ def test_n_batches_invariance():
   k_ext, ssa, g = _uniform_fields(geom, 2e-3, 0.6, 0.3)
   cfg = MC3DRadiationConfig(photons_per_pixel=1024, n_batches=4)
   res = solve_sw_monochromatic(
-      k_ext, ssa, g, geom, mu0=0.8, azimuth=0.2, albedo=0.2,
+      k_ext, ssa, g, geom, mu0=0.8, azimuth=0.2, albedo=0.2, diffuse_frac=0.0,
       config=cfg, key=jax.random.PRNGKey(9))
   total = (float(res.vol_abs_total) + float(res.sfc_abs_total)
-           + float(res.tod_up_frac))
+           + float(res.tod_up_frac)
+           + float(res.residual_frac))
   assert abs(total - 1.0) < 1e-12
 
 
@@ -176,22 +177,7 @@ def test_n_batches_must_divide():
   cfg = MC3DRadiationConfig(photons_per_pixel=10, n_batches=7)
   with pytest.raises(ValueError, match="must divide"):
     solve_sw_monochromatic(k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0,
-                           albedo=0.0, config=cfg, key=jax.random.PRNGKey(0))
-
-
-def test_overflow_guard_raises_without_x64():
-  """Non-vacuity self-test: with x64 OFF and N > int32 capacity the integer
-  tally would wrap, so the guard must refuse loudly (no silent coerce). x64 is
-  a read-only JAX property, so the pure guard fn is exercised directly."""
-  from legoesm.atmosphere.physics.radiation.mc3d.tally import (
-      assert_count_capacity,
-  )
-  # Below capacity with x64 off: allowed. Above: raises.
-  assert_count_capacity(2**31 - 1, x64_enabled=False)
-  with pytest.raises(ValueError, match="int32"):
-    assert_count_capacity(2**31, x64_enabled=False)
-  # x64 on: any size allowed (true int64 accumulator).
-  assert_count_capacity(2**40, x64_enabled=True)
+                           albedo=0.0, diffuse_frac=0.0, config=cfg, key=jax.random.PRNGKey(0))
 
 
 def test_qrng_launch_unbiased_and_conserves():
@@ -204,7 +190,7 @@ def test_qrng_launch_unbiased_and_conserves():
   tau = 1.0
   k_ext, ssa, g = _uniform_fields(geom, tau / H, 0.0, 0.0)
   res = solve_sw_monochromatic(
-      k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.0,
+      k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.0, diffuse_frac=0.0,
       config=MC3DRadiationConfig(photons_per_pixel=4000, use_qrng=True),
       key=jax.random.PRNGKey(0))
   exact = np.exp(-tau)
@@ -212,7 +198,8 @@ def test_qrng_launch_unbiased_and_conserves():
   stderr = np.sqrt(exact * (1 - exact) / n)
   assert abs(float(res.sfc_abs_total) - exact) < 6 * stderr
   tot = (float(res.vol_abs_total) + float(res.sfc_abs_total)
-         + float(res.tod_up_frac))
+         + float(res.tod_up_frac)
+           + float(res.residual_frac))
   assert abs(tot - 1.0) < 1e-12
 
 
@@ -224,7 +211,7 @@ def test_qrng_capacity_guard():
   cfg = MC3DRadiationConfig(photons_per_pixel=2 ** 24 + 1, use_qrng=True)
   with pytest.raises(ValueError, match="Halton base-2 capacity"):
     solve_sw_monochromatic(k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0,
-                           albedo=0.0, config=cfg, key=jax.random.PRNGKey(0))
+                           albedo=0.0, diffuse_frac=0.0, config=cfg, key=jax.random.PRNGKey(0))
 
 
 def test_rayleigh_phase_matches_isotropic_and_conserves():
@@ -235,7 +222,7 @@ def test_rayleigh_phase_matches_isotropic_and_conserves():
   nx, ny, nz = geom.nx, geom.ny, geom.nz
   k_ext = jnp.full((nx, ny, nz), 2.0 / float(geom.z_faces[-1]))  # tau~2
   ssa = jnp.ones((nx, ny, nz))                                   # conservative
-  base = dict(mu0=1.0, azimuth=0.0, albedo=0.0,
+  base = dict(mu0=1.0, azimuth=0.0, albedo=0.0, diffuse_frac=0.0,
               config=MC3DRadiationConfig(photons_per_pixel=4000))
 
   rayleigh = solve_sw_monochromatic(
@@ -256,7 +243,8 @@ def test_rayleigh_phase_matches_isotropic_and_conserves():
   assert float(fwd.tod_up_frac) < float(rayleigh.tod_up_frac) - 20 * stderr
   # Conservation holds with the Rayleigh split.
   tot = (float(rayleigh.vol_abs_total) + float(rayleigh.sfc_abs_total)
-         + float(rayleigh.tod_up_frac))
+         + float(rayleigh.tod_up_frac)
+           + float(rayleigh.residual_frac))
   assert abs(tot - 1.0) < 1e-12
 
 
@@ -270,7 +258,7 @@ def test_coarse_majorant_unbiased_vs_scalar():
   k_ext = jnp.full((nx, ny, nz), 1e-4).at[2:6, 2:6, nz // 2:].set(0.02)
   ssa = jnp.where(k_ext > 1e-3, 0.7, 0.0)
   g = jnp.where(k_ext > 1e-3, 0.5, 0.0)
-  base = dict(mu0=1.0, azimuth=0.0, albedo=0.1)
+  base = dict(mu0=1.0, azimuth=0.0, albedo=0.1, diffuse_frac=0.0)
 
   scalar = solve_sw_monochromatic(
       k_ext, ssa, g, geom, **base,
@@ -288,7 +276,8 @@ def test_coarse_majorant_unbiased_vs_scalar():
   # Both still conserve exactly.
   for r in (scalar, coarse):
     tot = (float(r.vol_abs_total) + float(r.sfc_abs_total)
-           + float(r.tod_up_frac))
+           + float(r.tod_up_frac)
+           + float(r.residual_frac))
     assert abs(tot - 1.0) < 1e-12
 
 
@@ -301,7 +290,7 @@ def test_coarse_majorant_unbiased_slant_scattering():
   k_ext = jnp.full((nx, ny, nz), 2e-3).at[1:4, 5:8, nz // 3:2 * nz // 3].set(0.02)
   ssa = jnp.where(k_ext > 1e-2, 0.85, 0.3)   # scattering everywhere
   g = jnp.full((nx, ny, nz), 0.4)
-  base = dict(mu0=0.5, azimuth=0.7, albedo=0.3)   # slant + reflecting surface
+  base = dict(mu0=0.5, azimuth=0.7, albedo=0.3, diffuse_frac=0.0)   # slant + reflecting surface
   scalar = solve_sw_monochromatic(
       k_ext, ssa, g, geom, **base,
       config=MC3DRadiationConfig(photons_per_pixel=5000),
@@ -316,7 +305,8 @@ def test_coarse_majorant_unbiased_slant_scattering():
   assert abs(float(scalar.tod_up_frac) - float(coarse.tod_up_frac)) < 0.025
   for r in (scalar, coarse):
     tot = (float(r.vol_abs_total) + float(r.sfc_abs_total)
-           + float(r.tod_up_frac))
+           + float(r.tod_up_frac)
+           + float(r.residual_frac))
     assert abs(tot - 1.0) < 1e-12
     assert float(r.maxiter_frac) < 5e-3
 
@@ -364,30 +354,6 @@ def test_horizontal_photon_on_top_face_no_nan():
                    free_path_floor_sharpness=MC3DRadiationConfig().free_path_floor_sharpness)
     assert bool(jnp.all(jnp.isfinite(st.pos)))
     assert int(st.status) in (1, 2, 3, 4)   # terminated in a real bin
-
-
-def test_tally_batch_direct():
-  """Exercise trace_batch + tally_batch directly (leaf-module coverage)."""
-  geom = _geom(nx=4, ny=4, nz=8)
-  k_ext, ssa, g = _uniform_fields(geom, 2e-3, 0.0, 0.0)
-  from legoesm.atmosphere.physics.radiation.mc3d import build_majorant_grid
-  maj = build_majorant_grid(k_ext, geom.z_faces, 1e-3)
-  p = 200
-  ncols = geom.nx * geom.ny
-  n = ncols * p
-  keys = jax.random.split(jax.random.PRNGKey(0), n)
-  # one photon per column footprint, vertical beam at TOD
-  col = jnp.repeat(jnp.arange(ncols), p)
-  ix, iy = col // geom.ny, col % geom.ny
-  pos = jnp.stack([(ix + 0.5) * geom.dx, (iy + 0.5) * geom.dx,
-                   jnp.full((n,), geom.z_faces[-1])], axis=1)
-  dirs = jnp.broadcast_to(jnp.array([0.0, 0.0, -1.0]), (n, 3))
-  states = trace_batch(keys, pos, dirs, k_ext, ssa, g, maj, 0.0, geom, 4096,
-                       free_path_floor_sharpness=MC3DRadiationConfig().free_path_floor_sharpness)
-  res = tally_batch(states, geom, p)
-  total = (float(res.vol_abs_total) + float(res.sfc_abs_total)
-           + float(res.tod_up_frac))
-  assert abs(total - 1.0) < 1e-12
 
 
 # ---------------------------------------------------------------------------
@@ -463,3 +429,114 @@ def test_hg_mu_finite_at_clip_bound_worst_case_u0(monkeypatch):
   s_raw = (1.0 - g_raw * g_raw) / (1.0 - g_raw + 2.0 * g_raw * u0)
   mu_raw = (1.0 + g_raw * g_raw - s_raw * s_raw) / (2.0 * g_raw)
   assert bool(jnp.isnan(mu_raw))
+
+
+# ---------------------------------------------------------------------------
+# microhh weighted estimator (trace_batch_weighted): direct/diffuse split,
+# diffuse top-of-domain incidence, weight floor.
+# ---------------------------------------------------------------------------
+
+
+def test_direct_beam_transmittance_independent_of_scattering():
+  """The DIRECT surface flux is exp(-tau/mu0) whatever ssa and g are: a photon
+  stays direct until its first scattering (microhh Photon_kind::Direct)."""
+  geom = _geom()
+  H = float(geom.z_faces[-1])
+  tau, mu0 = 0.7, 0.8
+  k_ext, ssa, g = _uniform_fields(geom, tau / H, 0.9, 0.6)
+  cfg = MC3DRadiationConfig(photons_per_pixel=4000)
+  res = solve_sw_monochromatic(
+      k_ext, ssa, g, geom, mu0=mu0, azimuth=0.4, albedo=0.3, diffuse_frac=0.0,
+      config=cfg, key=jax.random.PRNGKey(21))
+  exact = np.exp(-tau / mu0)
+  n = geom.nx * geom.ny * cfg.photons_per_pixel
+  stderr = np.sqrt(exact * (1 - exact) / n)
+  assert abs(float(jnp.mean(res.sfc_dir_frac)) - exact) < 5 * stderr
+  assert float(jnp.mean(res.sfc_dif_frac)) > 10 * stderr   # scattering arrives
+  np.testing.assert_allclose(
+      np.asarray(res.abs_dir_frac + res.abs_dif_frac), np.asarray(res.abs_frac),
+      rtol=0, atol=1e-12)
+  np.testing.assert_allclose(
+      np.asarray(res.sfc_dir_frac + res.sfc_dif_frac - res.sfc_up_frac),
+      np.asarray(res.sfc_abs_frac), rtol=0, atol=1e-12)
+  assert abs(float(jnp.mean(res.tod_up_col_frac)) - float(res.tod_up_frac)) < 1e-12
+
+
+def test_diffuse_incidence_transmittance_2e3():
+  """diffuse_frac = 1: cosine-weighted incidence on an absorbing slab transmits
+  2 E3(tau) (diffuse transmittance); the direct tallies stay exactly zero."""
+  geom = _geom()
+  H = float(geom.z_faces[-1])
+  tau = 0.5
+  k_ext, ssa, g = _uniform_fields(geom, tau / H, 0.0, 0.0)
+  cfg = MC3DRadiationConfig(photons_per_pixel=4000)
+  res = solve_sw_monochromatic(
+      k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.0, diffuse_frac=1.0,
+      config=cfg, key=jax.random.PRNGKey(22))
+  mu = np.linspace(1e-6, 1.0, 200001)
+  y = mu * np.exp(-tau / mu)
+  exact = 2.0 * float(np.sum(0.5 * (y[1:] + y[:-1]) * np.diff(mu)))
+  n = geom.nx * geom.ny * cfg.photons_per_pixel
+  stderr = np.sqrt(exact * (1 - exact) / n)
+  assert abs(float(res.sfc_abs_total) - exact) < 5 * stderr
+  assert float(jnp.sum(res.sfc_dir_frac)) == 0.0
+  assert float(jnp.sum(res.abs_dir_frac)) == 0.0
+
+
+def test_diffuse_frac_out_of_range_raises():
+  geom = _geom(nx=2, ny=2, nz=2)
+  k_ext, ssa, g = _uniform_fields(geom, 1e-3, 0.0, 0.0)
+  with pytest.raises(ValueError, match="diffuse_frac"):
+    solve_sw_monochromatic(
+        k_ext, ssa, g, geom, mu0=1.0, azimuth=0.0, albedo=0.0,
+        diffuse_frac=1.5, config=MC3DRadiationConfig(photons_per_pixel=4),
+        key=jax.random.PRNGKey(0))
+
+
+def test_weight_floor_terminates_conservative_walk():
+  """Conservative cloud over a white surface: no absorption anywhere, so
+  photons only leave through the top; the weight floor must not be needed and
+  nothing may stay in flight. With absorption the floor fires, still closing
+  the budget (the remainder is deposited, not dropped)."""
+  geom = _geom(nz=10)
+  k_ext, _, g = _uniform_fields(geom, 5.0 / float(geom.z_faces[-1]), 1.0, 0.5)
+  for ssa_val, alb, floor in ((1.0, 1.0, 1e-6), (0.99, 0.9, 0.3)):
+    ssa = jnp.full_like(k_ext, ssa_val)
+    cfg = MC3DRadiationConfig(photons_per_pixel=500, weight_floor=floor)
+    res = solve_sw_monochromatic(
+        k_ext, ssa, g, geom, mu0=0.9, azimuth=0.0, albedo=alb,
+        diffuse_frac=0.0, config=cfg, key=jax.random.PRNGKey(23))
+    total = (float(res.vol_abs_total) + float(res.sfc_abs_total)
+             + float(res.tod_up_frac) + float(res.residual_frac))
+    assert abs(total - 1.0) < 1e-12
+    assert float(res.residual_frac) == 0.0
+    assert float(res.maxiter_frac) == 0.0
+  # conservative case: everything escapes through the top
+  cfg = MC3DRadiationConfig(photons_per_pixel=500)
+  res = solve_sw_monochromatic(
+      k_ext, jnp.ones_like(k_ext), g, geom, mu0=0.9, azimuth=0.0, albedo=1.0,
+      diffuse_frac=0.0, config=cfg, key=jax.random.PRNGKey(24))
+  assert abs(float(res.tod_up_frac) - 1.0) < 1e-12
+
+
+def test_trace_batch_weighted_direct_call():
+  """Leaf call of the weighted walk: per-photon budget closes, residual 0."""
+  from legoesm.atmosphere.physics.radiation.mc3d import build_majorant_grid
+  from legoesm.atmosphere.physics.radiation.mc3d.photon_walk import (
+      trace_batch_weighted,
+  )
+  geom = _geom(nx=4, ny=4, nz=8)
+  k_ext, ssa, g = _uniform_fields(geom, 2e-3, 0.5, 0.3)
+  maj = build_majorant_grid(k_ext, geom.z_faces, 1e-3)
+  n = 256
+  pos = jnp.stack([jnp.full((n,), 25.0), jnp.full((n,), 75.0),
+                   jnp.full((n,), geom.z_faces[-1])], axis=1)
+  dirs = jnp.broadcast_to(jnp.array([0.0, 0.0, -1.0]), (n, 3))
+  t = trace_batch_weighted(
+      jax.random.PRNGKey(0), pos, dirs, jnp.ones((n,), bool), k_ext, ssa, g,
+      maj, 0.2, geom, 4096, 1e-6,
+      free_path_floor_sharpness=MC3DRadiationConfig().free_path_floor_sharpness)
+  total = float(jnp.sum(t.abs_dir + t.abs_dif) + jnp.sum(t.sfc_dir + t.sfc_dif
+                - t.sfc_up) + jnp.sum(t.tod_up) + t.residual)
+  assert abs(total - n) < 1e-9
+  assert int(t.n_capped) == 0
