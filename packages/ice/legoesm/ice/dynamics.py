@@ -911,6 +911,46 @@ def _si3_halo(
     )
 
 
+_SI3_ORCA_METRIC_POINTS = (
+    ("e1t", "T"), ("e2t", "T"), ("e1u", "U"), ("e2u", "U"),
+    ("e1v", "V"), ("e2v", "V"), ("e1f", "F"), ("e2f", "F"),
+)
+
+
+def si3_orca_cgrid_metrics(domain_cfg) -> SI3CGridMetrics:
+    """eORCA1 SI3 C-grid metrics in NEMO 5.0.1's same-index nn_hls=2 layout.
+
+    ``domain_cfg`` maps ``e1t`` ... ``e2f`` to the no-halo ``(j, i)`` arrays of
+    ``domain_cfg.nc`` (read by the caller).  NEMO's ``dom_hgr`` reads them with
+    ``iom_get(..., kfill=jpfillcopy)`` and forms the areas after the fill
+    (domhgr.F90:144-160, 212-220): E-W cyclic, north halo = F-pivot fold
+    (sign +1, per point type; :func:`si3_orca_f_pivot_halo`), south halo =
+    mirror copy (halo row 1 <- inner row 1, halo row 2 <- inner row 2;
+    lbc_lnk_pt2pt_generic.h90:308-345), ``e1e2* = e1* * e2*``.  Strait-reduced ``e1e2u``/``e1e2v`` (read by NEMO
+    when the file carries them) are not ported and are refused.
+    """
+
+    if "e1e2u" in domain_cfg or "e1e2v" in domain_cfg:
+        raise ValueError("si3_orca_cgrid_metrics: strait-reduced e1e2u/e1e2v are not ported")
+    halo = _SI3_REQUIRED_HALO
+    out = {}
+    for name, point in _SI3_ORCA_METRIC_POINTS:
+        inner = jnp.asarray(domain_cfg[name], dtype=jnp.float64)
+        if inner.ndim != 2:
+            raise ValueError(f"si3_orca_cgrid_metrics: {name} must be a 2-D (j, i) array; got {inner.shape}")
+        value = jnp.pad(inner.T, halo)
+        value = si3_orca_f_pivot_halo(value, point, 1.0)
+        value = value.at[:, halo - 1].set(value[:, halo]).at[:, halo - 2].set(value[:, halo + 1])
+        out[name] = value
+    return SI3CGridMetrics(
+        **out,
+        area_t=out["e1t"] * out["e2t"],
+        area_u=out["e1u"] * out["e2u"],
+        area_v=out["e1v"] * out["e2v"],
+        area_f=out["e1f"] * out["e2f"],
+    )
+
+
 def _si3_config_halo(config: "SI3CGridAEVPConfig"):
     """Adapt the configured periodic/ORCA-F halo to the shared lbc_lnk call shape."""
 
