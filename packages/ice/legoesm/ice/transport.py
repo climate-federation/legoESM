@@ -20,6 +20,7 @@ All functions are JAX-compatible (differentiable, JIT-friendly).
 
 from __future__ import annotations
 
+import math
 from typing import cast
 
 import jax
@@ -28,7 +29,7 @@ from jax import lax
 from legoesm.core.operators_3d import fv_flux_divergence_3d
 from legoesm.core.operators_fv import fv_flux_divergence
 from legoesm.core.operators_fv_latlon import fv_flux_divergence_latlon
-from legoesm.core.smooth import positive_part_c1
+from legoesm.core.smooth import max_c1, min_c1, positive_part_c1, smoothstep_cubic
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.operators_voronoi import (
     divergence_cell,
@@ -86,6 +87,13 @@ _SI3_PRA_ZERO = 0.0  # icedyn_adv_pra.F90:549,563-567,772,786-790
 _SI3_PRA_THREE = 3.0  # icedyn_adv_pra.F90:534
 _SI3_PRA_AREA_FLOOR = 1.0e-20  # icedyn_adv_pra.F90:547,770; epsi20
 _SI3_PRA_ICE_PRESENCE = 1.0e-10  # icedyn_adv_pra.F90:170,175; epsi10
+# Smooth Prather limiter (user rule: every limit differentiable; coordinator
+# ruling 2026-11-08; votes SW W0/W4).  Band width = scale / limit_sharpness_scale
+# on one side of each limit, bitwise NEMO outside it; ``math.inf`` = NEMO hard.
+# Scales: content floor and active gate epsi20 (absolute); slope / second /
+# cross-moment clamps the local cap + epsi20 (relative, finite at cap = 0);
+# sweep-area floor epsi20.
+SI3_PRA_DEFAULT_LIMIT_SHARPNESS_SCALE = 100.0
 _SI3_PRA_CFL_TWO_CYCLE_THRESHOLD = 0.5  # icedyn_adv_pra.F90:124-126
 
 
@@ -612,13 +620,64 @@ def zero_si3_prather_moments(contents: jnp.ndarray) -> SI3PratherMoments:
     return zero, zero, zero, zero, zero
 
 
+def _si3_prather_limit_smooth(
+    content: jnp.ndarray,
+    moments: SI3PratherMoments,
+    wet: jnp.ndarray,
+    limit_sharpness_scale: float,
+    along_x: bool,
+) -> tuple[jnp.ndarray, SI3PratherMoments]:
+    """C1 form of the SI3 x/y limiter (``icedyn_adv_pra.F90:534-568,757-791``).
+
+    Same statement order as the hard limiter; every ``MAX``/``MIN``/``ABS`` and
+    the ``content > 0`` gate is a one-sided C1 limit (``core.smooth``), bitwise
+    NEMO outside its band.  ``|s|`` is ``ramp(s) + ramp(-s)``: exact for
+    ``|s| >= w``, never above ``|s|``, zero at zero.
+    """
+
+    sr = nemo_source_round
+    s = limit_sharpness_scale
+    sx, sy, sxx, syy, sxy = moments
+    slope, second = (sx, sxx) if along_x else (sy, syy)
+    one_third = sr(_SI3_PRA_ONE / _SI3_PRA_THREE)
+    content = sr(positive_part_c1(content, s / _SI3_PRA_AREA_FLOOR))
+    slope_cap = sr(_SI3_PRA_SLOPE_CAP_FACTOR * content)
+    # Band widths relative to the local cap are numerical constants for AD (stop_gradient): their own
+    # derivative is a smoothing artefact, and at zero content it overflows in fp32 (s / epsi20 = 1e22,
+    # squared) into NaN cotangents (codex SW rev1 HIGH).
+    s_cap = lax.stop_gradient(s / (slope_cap + _SI3_PRA_AREA_FLOOR))
+    s_content = lax.stop_gradient(s / (content + _SI3_PRA_AREA_FLOOR))
+    slope = sr(min_c1(sr(max_c1(slope, -slope_cap, s_cap)), slope_cap, s_cap))
+    abs_slope = sr(positive_part_c1(slope, s_cap) + positive_part_c1(-slope, s_cap))
+    second_upper = sr(
+        sr(_SI3_PRA_SECOND_MOMENT_FACTOR * content) - sr(one_third * abs_slope)
+    )
+    second_lower = sr(max_c1(second, sr(abs_slope - content), s_content))
+    second = sr(min_c1(second_lower, second_upper, s_content))
+    sxy = sr(min_c1(sr(max_c1(sxy, -content, s_content)), content, s_content))
+    if along_x:
+        sx, sxx = slope, second
+    else:
+        sy, syy = slope, second
+    wet3 = wet[..., None].astype(content.dtype)
+    active3 = smoothstep_cubic(content * (s / _SI3_PRA_AREA_FLOOR))
+    return content, tuple(
+        sr(sr(value * wet3) * active3) for value in (sx, sy, sxx, syy, sxy)
+    )
+
+
 def _si3_prather_limit_x(
     content: jnp.ndarray,
     moments: SI3PratherMoments,
     wet: jnp.ndarray,
+    limit_sharpness_scale: float = math.inf,
 ) -> tuple[jnp.ndarray, SI3PratherMoments]:
     """SI3 x-sweep limiter, ``icedyn_adv_pra.F90:534-568``."""
 
+    if limit_sharpness_scale != math.inf:
+        return _si3_prather_limit_smooth(
+            content, moments, wet, limit_sharpness_scale, along_x=True
+        )
     sr = nemo_source_round
     sx, sy, sxx, syy, sxy = moments
     one_third = sr(_SI3_PRA_ONE / _SI3_PRA_THREE)
@@ -649,9 +708,14 @@ def _si3_prather_limit_y(
     content: jnp.ndarray,
     moments: SI3PratherMoments,
     wet: jnp.ndarray,
+    limit_sharpness_scale: float = math.inf,
 ) -> tuple[jnp.ndarray, SI3PratherMoments]:
     """SI3 y-sweep limiter, ``icedyn_adv_pra.F90:757-791``."""
 
+    if limit_sharpness_scale != math.inf:
+        return _si3_prather_limit_smooth(
+            content, moments, wet, limit_sharpness_scale, along_x=False
+        )
     sr = nemo_source_round
     sx, sy, sxx, syy, sxy = moments
     one_third = sr(_SI3_PRA_ONE / _SI3_PRA_THREE)
@@ -949,6 +1013,7 @@ def _si3_prather_x_substep(
     _plant_omit_donor_readjust: bool = False,
     _plant_symmetric_neg_zfx: bool = False,
     _plant_corrupt_receiver_flux: bool = False,
+    limit_sharpness_scale: float = math.inf,
 ) -> tuple[jnp.ndarray, SI3PratherMoments, jnp.ndarray]:
     """One x sweep of SI3 ``adv_x`` (``icedyn_adv_pra.f90:513-733``)."""
 
@@ -979,12 +1044,21 @@ def _si3_prather_x_substep(
     else:
         pcrh_val = jnp.asarray(pcrh, dtype=contents.dtype)
     one_minus_pcrh = sr(_SI3_PRA_ONE - pcrh_val)
-    zpsm_init = sr(
-        jnp.maximum(
-            sr(sr(pcrh_val * cell_area) + sr(one_minus_pcrh * initial_area)),
-            _SI3_PRA_AREA_FLOOR,
+    if limit_sharpness_scale == math.inf:
+        zpsm_init = sr(
+            jnp.maximum(
+                sr(sr(pcrh_val * cell_area) + sr(one_minus_pcrh * initial_area)),
+                _SI3_PRA_AREA_FLOOR,
+            )
         )
-    )
+    else:  # C1 epsi20 area floor (band epsi20 / limit_sharpness_scale)
+        zpsm_init = sr(
+            max_c1(
+                sr(sr(pcrh_val * cell_area) + sr(one_minus_pcrh * initial_area)),
+                _SI3_PRA_AREA_FLOOR,
+                limit_sharpness_scale / _SI3_PRA_AREA_FLOOR,
+            )
+        )
     sweep_area = (
         sr(jnp.where(limit_mask_xy, zpsm_init, initial_area))
         if strict_loop_domains
@@ -997,7 +1071,7 @@ def _si3_prather_x_substep(
         )
     else:
         limited_content, limited_moments = _si3_prather_limit_x(
-            contents, moments, wet
+            contents, moments, wet, limit_sharpness_scale
         )
     content = sr(jnp.where(limit_mask_xy[..., None], limited_content, contents))
     moments = cast(
@@ -1448,6 +1522,7 @@ def _si3_prather_y_substep(
     strict_loop_domains: bool = False,
     _plant_omit_donor_readjust: bool = False,
     _plant_corrupt_receiver_flux: bool = False,
+    limit_sharpness_scale: float = math.inf,
 ) -> tuple[jnp.ndarray, SI3PratherMoments, jnp.ndarray]:
     """One y sweep of SI3 ``adv_y`` (``icedyn_adv_pra.f90:736-957``)."""
 
@@ -1479,12 +1554,21 @@ def _si3_prather_y_substep(
     else:
         pcrh_val = jnp.asarray(pcrh, dtype=contents.dtype)
     one_minus_pcrh = sr(_SI3_PRA_ONE - pcrh_val)
-    zpsm_init = sr(
-        jnp.maximum(
-            sr(sr(pcrh_val * cell_area) + sr(one_minus_pcrh * initial_area)),
-            _SI3_PRA_AREA_FLOOR,
+    if limit_sharpness_scale == math.inf:
+        zpsm_init = sr(
+            jnp.maximum(
+                sr(sr(pcrh_val * cell_area) + sr(one_minus_pcrh * initial_area)),
+                _SI3_PRA_AREA_FLOOR,
+            )
         )
-    )
+    else:  # C1 epsi20 area floor (band epsi20 / limit_sharpness_scale)
+        zpsm_init = sr(
+            max_c1(
+                sr(sr(pcrh_val * cell_area) + sr(one_minus_pcrh * initial_area)),
+                _SI3_PRA_AREA_FLOOR,
+                limit_sharpness_scale / _SI3_PRA_AREA_FLOOR,
+            )
+        )
     sweep_area = (
         sr(jnp.where(limit_mask_xy, zpsm_init, initial_area))
         if strict_loop_domains
@@ -1497,7 +1581,7 @@ def _si3_prather_y_substep(
         )
     else:
         limited_content, limited_moments = _si3_prather_limit_y(
-            contents, moments, wet
+            contents, moments, wet, limit_sharpness_scale
         )
     content = sr(jnp.where(limit_mask_xy[..., None], limited_content, contents))
     moments = cast(
@@ -1969,6 +2053,7 @@ def advect_si3_prather_1d(
     ice_volume_index: int | None = None,
     concentration_index: int | None = None,
     subcycles: int | None = None,
+    limit_sharpness_scale: float = SI3_PRA_DEFAULT_LIMIT_SHARPNESS_SCALE,
 ) -> tuple[jnp.ndarray, SI3PratherMoments, int]:
     """Selectable SI3 Prather transport for the certified 1-D ice rung.
 
@@ -1980,6 +2065,8 @@ def advect_si3_prather_1d(
     ``subcycles`` argument when enclosing the kernel in ``jax.jit``.
     """
 
+    if not limit_sharpness_scale > _SI3_PRA_ZERO:
+        raise ValueError("si3_prather limit_sharpness_scale must be > 0 (math.inf = hard NEMO)")
     if contents.ndim != 3:
         raise ValueError("si3_prather requires (x, y, tracer) packed contents")
     if any(moment.shape != contents.shape for moment in moments):
@@ -2050,6 +2137,7 @@ def advect_si3_prather_1d(
             halo_width=halo_width,
             subcycle_index=subcycle_index,
             subcycles=subcycles,
+            limit_sharpness_scale=limit_sharpness_scale,
         )
         # Hbig_pra.F90:946-1002: if transport creates ice thicker than the
         # pre-subcycle 9-point maximum at low concentration, increase only
@@ -2111,6 +2199,7 @@ def advect_si3_prather_2d(
     concentration_index: int | None = None,
     subcycles: int | None = None,
     north_fold: str = "none",
+    limit_sharpness_scale: float = SI3_PRA_DEFAULT_LIMIT_SHARPNESS_SCALE,
 ) -> tuple[jnp.ndarray, SI3PratherMoments, int]:
     """SI3 Prather x/y split for the shipped single-category ICE_ADV2D card.
 
@@ -2125,6 +2214,8 @@ def advect_si3_prather_2d(
     This is the exact selector at ``icedyn_adv_pra.F90:253-351``.
     """
 
+    if not limit_sharpness_scale > _SI3_PRA_ZERO:
+        raise ValueError("si3_prather limit_sharpness_scale must be > 0 (math.inf = hard NEMO)")
     if contents.ndim != 3:
         raise ValueError("si3_prather requires (x, y, tracer) packed contents")
     if any(moment.shape != contents.shape for moment in moments):
@@ -2205,6 +2296,7 @@ def advect_si3_prather_2d(
                 halo_width=halo_width,
                 subcycle_index=subcycle_index,
                 subcycles=subcycles,
+                limit_sharpness_scale=limit_sharpness_scale,
             )
             out, out_moments, area = _si3_prather_y_substep(
                 out,
@@ -2218,6 +2310,7 @@ def advect_si3_prather_2d(
                 halo_width=halo_width,
                 subcycle_index=subcycle_index,
                 subcycles=subcycles,
+                limit_sharpness_scale=limit_sharpness_scale,
             )
         else:
             out, out_moments, area = _si3_prather_y_substep(
@@ -2232,6 +2325,7 @@ def advect_si3_prather_2d(
                 halo_width=halo_width,
                 subcycle_index=subcycle_index,
                 subcycles=subcycles,
+                limit_sharpness_scale=limit_sharpness_scale,
             )
             out, out_moments, area = _si3_prather_x_substep(
                 out,
@@ -2245,6 +2339,7 @@ def advect_si3_prather_2d(
                 halo_width=halo_width,
                 subcycle_index=subcycle_index,
                 subcycles=subcycles,
+                limit_sharpness_scale=limit_sharpness_scale,
             )
 
         volume = sr(out[..., ice_volume_index] / cell_area)

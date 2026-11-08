@@ -619,11 +619,10 @@ def test_composed_grad_full_level_t_hard(fx, uniforms):
     _strict_grad_check(_composed_functional(fx, uniforms, HARD, 0), "composed T_fl inf")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "votes C7/C9: the FD side fails, not AD: fp64 round-off in the SW two-stream kernel "
-    "on nearly conservative layers makes the central FD in full-level T (via the "
-    "effective radii) noisy; AD is correct; FD error 3.3e-7 at h=3e-5, 3.47e-5 at h=1e-4"))
 def test_composed_grad_full_level_t_smooth(fx, uniforms):
+    """Was a strict xfail (votes C7/C9, FD noise from many weakly smoothed layers);
+    with exact McICA sampling and per-quantity widths AD and both FDs agree at
+    4.1e-8, FD vs FD 2.3e-8, against rtol 1e-6 (RRTMGP gas lane, 2026-11-08; vote T7)."""
     _strict_grad_check(_composed_functional(fx, uniforms, 100.0, 0), "composed T_fl 100")
 
 

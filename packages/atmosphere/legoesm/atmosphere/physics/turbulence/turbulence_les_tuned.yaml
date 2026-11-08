@@ -76,12 +76,6 @@ atm.turb.SmagorinskyConfig.C_s: 0.2969328413
 atm.turb.SmagorinskyConfig.Pr_t: 0.6953027164
 atm.turb.SmagorinskyConfig.l_mix_max: 125.117309
 
-# --- TKEConfig ---
-atm.turb.TKEConfig.Ce: 0.1483135179
-atm.turb.TKEConfig.Ck: 0.105736405
-atm.turb.TKEConfig.Pr_t: 0.3292365915
-atm.turb.TKEConfig.l_mix_max: 112.3040263
-
 # --- TurbulentEDMFConfig ---
 atm.turb.TurbulentEDMFConfig.Ce: 0.08788749871
 atm.turb.TurbulentEDMFConfig.Ck: 0.1854224056

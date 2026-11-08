@@ -12,6 +12,7 @@ Extended band rows (axis 1): 0-1 recorded rows below the band (south pad),
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import jax
@@ -125,7 +126,7 @@ def _rel(a, b):
 
 
 def _worst(data, north_fold):
-    out = dyn.si3_cgrid_aevp_solver(*_inputs(data, north_fold))
+    out = dyn.si3_cgrid_aevp_solver(*_inputs(data, north_fold), limit_sharpness_scale=math.inf)  # NEMO hard limits
     pairs = {
         "sub1_u_ice": out.u_ice_u,
         "sub1_v_ice": out.v_ice_v,

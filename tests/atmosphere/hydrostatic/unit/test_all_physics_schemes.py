@@ -378,5 +378,10 @@ class TestFullPhysicsCombinations:
             microphysics=MicrophysicsConfig(scheme="sundqvist"),
             gravity_wave_drag=GravityWaveDragConfig(scheme="lindzen"),
         )
-        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        # Sundqvist (and TKE) carry state: thread a cold-start PhysicsState.
+        from legoesm.atmosphere.physics.physics_state import init_physics_state
+        ncol = int(state.T.data.size // state.T.data.shape[-1])
+        ps = init_physics_state(ncol, state.T.data.shape[-1], cfg)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(
+            state, grid, sigma, phys_state=ps)
         _check_tendencies(tend, "advanced_stack")

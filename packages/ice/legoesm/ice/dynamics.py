@@ -36,6 +36,7 @@ References
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax
@@ -44,6 +45,7 @@ import numpy as np
 from legoesm.core import transcendentals
 from legoesm.core.field import Field
 from legoesm.core.operators import gradient_x, gradient_y
+from legoesm.core.smooth import max_c1, positive_part_c1, smoothstep_cubic
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo_latlon import pad_halo_latlon
@@ -109,6 +111,20 @@ _SI3_ORCA1_LF_BFR_N_M3 = 15.0  # ORCA1 namelist_ice_ref:61
 _SI3_ORCA1_LF_RELAX_S_INV = 1.0e-5  # ORCA1 namelist_ice_ref:62
 _SI3_ORCA1_LF_TENSILE = 0.05  # ORCA1 namelist_ice_ref:63
 
+# Smooth limits (user rule: every limit differentiable; coordinator ruling
+# 2026-11-08).  Each hard NEMO limit of the ORCA1 aEVP / landfast /
+# deformation arm is a C1 limit of band width ``scale / limit_sharpness_scale``
+# on ONE side of its threshold (``core.smooth``: ``max_c1``,
+# ``positive_part_c1``, ``smoothstep_cubic``), bitwise NEMO outside the band.
+# ``limit_sharpness_scale = math.inf`` runs NEMO's literal hard statements
+# (the oracle tests).  Default 100 = 0.01 x each quantity's own scale, as in
+# ``si3_ice_cor`` (#2365).  Scales (voted, SW W3): the thresholds themselves
+# (epsi10, 1 kg/m2, 1e-3, 50, 1e-20; the mass > 0 gate uses rho_i x epsi10, vote
+# M1) plus two with no NEMO threshold:
+SI3_AEVP_DEFAULT_LIMIT_SHARPNESS_SCALE = 100.0
+_SI3_STATIC_FRICTION_FORCE_SCALE_N_M2 = 0.1  # typical air-ice stress magnitude
+_SI3_LANDFAST_EXCESS_SCALE_M = 1.0  # ice thickness scale of the L16 critical volume
+
 # Future ORCA2-variant oracle contract for the ORCA1 landfast selector.  These
 # are distinct carried/file operands, not values inferred from other dumps.
 SI3_LANDFAST_L16_ORACLE_OPERANDS = (
@@ -150,6 +166,37 @@ def _si3_div(left, right):
     """Binary64 divide materialized at one NEMO source operation."""
 
     return nemo_source_round(left / right)
+
+
+def _si3_step_c1(x, scale: float, limit_sharpness_scale: float) -> jnp.ndarray:
+    """Smooth ``(x > 0)`` gate: exactly 0 for ``x <= 0``, exactly 1 for
+    ``x >= scale / limit_sharpness_scale``, C1 ``smoothstep_cubic`` between.
+    The band always lies inside the region where NEMO's predicate is TRUE (also
+    for NEMO's ``>=`` tests: only the measure-zero equality differs), so a
+    product of gates is exactly 0 wherever NEMO's conjunction is false -- e.g.
+    the static-friction branch with zero basal stress.  Callers run NEMO's
+    literal comparison instead when the scale is ``inf``."""
+
+    return smoothstep_cubic(x * (limit_sharpness_scale / scale))
+
+
+def _si3_blend_c1(weight, one_value, zero_value):
+    """``weight * one_value + (1 - weight) * zero_value`` that returns the literal operand
+    (bitwise) at ``weight`` 1 or 0, i.e. outside the gate band."""
+
+    return jnp.where(
+        weight >= _SI3_ONE,
+        one_value,
+        jnp.where(weight <= _SI3_ZERO, zero_value, zero_value + weight * (one_value - zero_value)),
+    )
+
+
+def _si3_validate_limit_sharpness(limit_sharpness_scale: float) -> bool:
+    """Return True for the hard NEMO arm (``math.inf``); reject non-positive."""
+
+    if not limit_sharpness_scale > _SI3_ZERO:
+        raise ValueError("SI3 limit_sharpness_scale must be > 0 (math.inf = hard NEMO)")
+    return limit_sharpness_scale == math.inf
 
 
 class SI3CGridMetrics(NamedTuple):
@@ -1177,8 +1224,14 @@ def si3_cgrid_landfast_l16_basal_stress(
     config: SI3CGridAEVPConfig,
     area_fraction_u: jnp.ndarray,
     area_fraction_v: jnp.ndarray,
+    *,
+    limit_sharpness_scale: float = SI3_AEVP_DEFAULT_LIMIT_SHARPNESS_SCALE,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Return Lemieux-2016 U/V basal coefficients and T diagnostic.
+
+    ``MAX(0, v - v_crit)`` (``:338-359``) is ``positive_part_c1`` over a band
+    of ``_SI3_LANDFAST_EXCESS_SCALE_M / limit_sharpness_scale`` (exactly 0 at
+    or below the critical volume); ``math.inf`` is NEMO's hard ``MAX``.
 
     This is the single source-ordered implementation of
     ``icedyn_rhg_evp.F90:333-363``.  Negative coefficients multiply velocity
@@ -1186,6 +1239,7 @@ def si3_cgrid_landfast_l16_basal_stress(
     is returned for coverage.
     """
 
+    hard = _si3_validate_limit_sharpness(limit_sharpness_scale)
     if not config.landfast:
         zero = jnp.zeros_like(forcing.concentration_t)
         return zero, zero, zero
@@ -1224,7 +1278,13 @@ def si3_cgrid_landfast_l16_basal_stress(
     def depth_limited_base(volume, area_fraction, depth, iceberg_mask):
         critical = _si3_mul(area_fraction, config.landfast_depth_fraction)
         critical = _si3_mul(critical, depth)
-        excess = jnp.maximum(_SI3_ZERO, _si3_sub(volume, critical))
+        if hard:
+            excess = jnp.maximum(_SI3_ZERO, _si3_sub(volume, critical))
+        else:
+            excess = positive_part_c1(
+                _si3_sub(volume, critical),
+                limit_sharpness_scale / _SI3_LANDFAST_EXCESS_SCALE_M,
+            )
         exponent = _si3_mul(
             -config.strength_decay,
             _si3_sub(_SI3_ONE, area_fraction),
@@ -1291,8 +1351,14 @@ def si3_cgrid_deformation(
     forcing: SI3CGridAEVPForcing,
     metrics: SI3CGridMetrics,
     config: SI3CGridAEVPConfig,
+    *,
+    limit_sharpness_scale: float = SI3_AEVP_DEFAULT_LIMIT_SHARPNESS_SCALE,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Return final C-grid divergence and deformation for redistribution.
+
+    The ice-presence mask ``at_i >= epsi10`` is a C1 gate over the band
+    ``epsi10 / limit_sharpness_scale`` above epsi10 (``math.inf`` = NEMO's
+    hard mask; see :func:`si3_cgrid_aevp_solver`).
 
     This is main's ORCA1 implementation of ``icedyn_rhg_evp.F90:788-836`` used
     by the rung-3.4 ``rhg -> adv -> rdgrft`` composition.  The returned T-point
@@ -1302,6 +1368,7 @@ def si3_cgrid_deformation(
     """
 
     _validate_si3_cgrid_aevp_static(config)
+    hard = _si3_validate_limit_sharpness(limit_sharpness_scale)
     shape = state.u_ice_u.shape
     leaves = (*state, *forcing, *metrics)
     if len(shape) != 2 or any(value.shape != shape for value in leaves):
@@ -1317,7 +1384,12 @@ def si3_cgrid_deformation(
     divergence, tension, shear_square = _si3_t_deformation(
         state.u_ice_u, state.v_ice_v, shear_f, metrics
     )
-    ice_mask = (forcing.concentration_t >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
+    if hard:
+        ice_mask = (forcing.concentration_t >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
+    else:
+        ice_mask = _si3_step_c1(
+            forcing.concentration_t - _SI3_ICE_PRESENCE, _SI3_ICE_PRESENCE, limit_sharpness_scale
+        )
     divergence = divergence * ice_mask
     deformation = (
         _si3_sqrt(
@@ -1419,6 +1491,7 @@ def si3_cgrid_aevp_solver(
     *,
     differentiable: bool = False,
     stress_divergence_outer_weight: float = _SI3_HALF,
+    limit_sharpness_scale: float = SI3_AEVP_DEFAULT_LIMIT_SHARPNESS_SCALE,
 ) -> SI3CGridAEVPState:
     """Run NEMO/SI3's C-grid adaptive-EVP momentum solver.
 
@@ -1431,16 +1504,55 @@ def si3_cgrid_aevp_solver(
     ``stress_divergence_outer_weight`` is an instrumentation seam for a scored
     planted-violation run; production retains NEMO's 0.5 at
     ``icedyn_rhg_evp.F90:497,505``.
+
+    Limits are smooth by default (``limit_sharpness_scale``, band width =
+    threshold scale / ``limit_sharpness_scale`` on one side, bitwise NEMO
+    outside it): the epsi10 ice-presence mask and strength gate, the 1 kg/m2
+    mass floor, the mass > 0 and low-mass/low-concentration velocity gates,
+    ``MAX(50, pi sqrt(...))`` for alpha/beta and the neighbour ``MAX`` of beta,
+    the 1e-20 denominator floor, the landfast ``MAX(0, beta - dt relax)`` and
+    the static-friction branch.  ``math.inf`` runs NEMO's literal hard
+    statements (oracle tests).
     """
 
     _validate_si3_cgrid_aevp_static(config)
+    hard = _si3_validate_limit_sharpness(limit_sharpness_scale)
+
+    def floor_above(value, floor):
+        """NEMO ``MAX(floor, value)``; C1 band ``(floor, floor + floor/s)``."""
+        if hard:
+            return jnp.maximum(floor, value)
+        return max_c1(value, floor, limit_sharpness_scale / floor)
+
+    def zero_floor(value, scale):
+        """NEMO ``MAX(0, value)``; C1 band ``(0, scale/s)``."""
+        if hard:
+            return jnp.maximum(_SI3_ZERO, value)
+        return positive_part_c1(value, limit_sharpness_scale / scale)
+
+    def beta_max(left, right):
+        """NEMO neighbour ``MAX`` of beta (>= 50); C1 band 50/s.  ``max_c1`` is
+        ``right + positive_part_c1(left - right)`` >= ``right`` exactly, so the
+        chained neighbour max never drops below the 50 floor (keep this
+        right-anchored form; GLM SW review)."""
+        if hard:
+            return jnp.maximum(left, right)
+        return max_c1(left, right, limit_sharpness_scale / _SI3_ALPHA_FLOOR)
+
+    def gate(value, scale):
+        """``(value > 0)`` as the field dtype; C1 band ``(0, scale/s)``."""
+        return _si3_step_c1(value, scale, limit_sharpness_scale)
+
     shape = state.u_ice_u.shape
     leaves = (*state, *forcing, *metrics)
     if len(shape) != 2 or any(value.shape != shape for value in leaves):
         raise ValueError("SI3 C-grid aEVP requires same-shape two-dimensional leaves")
 
     at_i = forcing.concentration_t
-    zmsk = (at_i >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
+    if hard:
+        zmsk = (at_i >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
+    else:
+        zmsk = gate(at_i - _SI3_ICE_PRESENCE, _SI3_ICE_PRESENCE)
     tmask = forcing.tmask_t
     # The pinned ORCA1/case deck resolves rn_ishlat=2.  Reproduce the
     # nonzero-boundary repair from icedyn_rhg_evp.F90:215-224 even though the
@@ -1460,7 +1572,10 @@ def si3_cgrid_aevp_solver(
         ),
     )
     mass_coriolis_t = _si3_mul(mass_t, forcing.coriolis_t)
-    dt_over_mass_t = _si3_div(config.dt_s, jnp.maximum(mass_t, _SI3_MASS_FLOOR_KG_M2))
+    if hard:
+        dt_over_mass_t = _si3_div(config.dt_s, jnp.maximum(mass_t, _SI3_MASS_FLOOR_KG_M2))
+    else:
+        dt_over_mass_t = _si3_div(config.dt_s, floor_above(mass_t, _SI3_MASS_FLOOR_KG_M2))
 
     # H79 guard is deliberately outside the shared helper, matching
     # icedyn_rdgrft.F90:1048-1056 and leaving the A-grid helper unchanged.
@@ -1471,7 +1586,12 @@ def si3_cgrid_aevp_solver(
         config.strength_decay,
         source_exact=True,
     )
-    strength_t = nemo_source_round(jnp.where(at_i > _SI3_ICE_PRESENCE, strength_formula, _SI3_ZERO))
+    if hard:
+        strength_t = nemo_source_round(jnp.where(at_i > _SI3_ICE_PRESENCE, strength_formula, _SI3_ZERO))
+    else:
+        strength_t = nemo_source_round(
+            strength_formula * gate(at_i - _SI3_ICE_PRESENCE, _SI3_ICE_PRESENCE)
+        )
     tensile_fraction = (
         config.landfast_tensile_fraction if config.landfast else _SI3_ZERO
     )
@@ -1635,12 +1755,27 @@ def si3_cgrid_aevp_solver(
         ),
         _si3_div(_SI3_ONE, metrics.e2v),
     )
-    mass_mask_u = (mass_u > _SI3_ZERO).astype(state.u_ice_u.dtype)
-    mass_mask_v = (mass_v > _SI3_ZERO).astype(state.v_ice_v.dtype)
-    active_u = ~((mass_u <= _SI3_MASS_FLOOR_KG_M2) & (za_u <= _SI3_LOW_CONCENTRATION))
-    active_v = ~((mass_v <= _SI3_MASS_FLOOR_KG_M2) & (za_v <= _SI3_LOW_CONCENTRATION))
-    active_u = active_u.astype(state.u_ice_u.dtype)
-    active_v = active_v.astype(state.v_ice_v.dtype)
+    if hard:
+        mass_mask_u = (mass_u > _SI3_ZERO).astype(state.u_ice_u.dtype)
+        mass_mask_v = (mass_v > _SI3_ZERO).astype(state.v_ice_v.dtype)
+        active_u = ~((mass_u <= _SI3_MASS_FLOOR_KG_M2) & (za_u <= _SI3_LOW_CONCENTRATION))
+        active_v = ~((mass_v <= _SI3_MASS_FLOOR_KG_M2) & (za_v <= _SI3_LOW_CONCENTRATION))
+        active_u = active_u.astype(state.u_ice_u.dtype)
+        active_v = active_v.astype(state.v_ice_v.dtype)
+    else:
+        # mass > 0 at the mass of NEMO's own epsi10 ice presence (vote SW M1 b/b/b)
+        mass_presence_scale = config.rho_ice * _SI3_ICE_PRESENCE
+        mass_mask_u = gate(mass_u, mass_presence_scale)
+        mass_mask_v = gate(mass_v, mass_presence_scale)
+        # inactive <=> mass <= 1 AND a <= 1e-3: active = 1 - (1 - g_m)(1 - g_a)
+        active_u = _SI3_ONE - (
+            (_SI3_ONE - gate(mass_u - _SI3_MASS_FLOOR_KG_M2, _SI3_MASS_FLOOR_KG_M2))
+            * (_SI3_ONE - gate(za_u - _SI3_LOW_CONCENTRATION, _SI3_LOW_CONCENTRATION))
+        )
+        active_v = _SI3_ONE - (
+            (_SI3_ONE - gate(mass_v - _SI3_MASS_FLOOR_KG_M2, _SI3_MASS_FLOOR_KG_M2))
+            * (_SI3_ONE - gate(za_v - _SI3_LOW_CONCENTRATION, _SI3_LOW_CONCENTRATION))
+        )
     fast_u = jnp.maximum(forcing.fast_tmask, jnp.roll(forcing.fast_tmask, -1, axis=0))
     fast_v = jnp.maximum(forcing.fast_tmask, jnp.roll(forcing.fast_tmask, -1, axis=1))
     basal_u, basal_v, _basal_t = si3_cgrid_landfast_l16_basal_stress(
@@ -1649,6 +1784,7 @@ def si3_cgrid_aevp_solver(
         config,
         za_u,
         za_v,
+        limit_sharpness_scale=limit_sharpness_scale,
     )
 
     halo_one = slice(1, -1)
@@ -1688,9 +1824,9 @@ def si3_cgrid_aevp_solver(
         alpha_inner = _si3_mul(alpha_inner, _si3_div(_SI3_ONE, metrics.area_t))
         alpha_inner = _si3_mul(alpha_inner, dt_over_mass_t)
         alpha_t = nemo_source_round(
-            jnp.maximum(
-                _SI3_ALPHA_FLOOR,
+            floor_above(
                 _si3_mul(jnp.pi, nemo_source_round(_si3_sqrt(alpha_inner))),
+                _SI3_ALPHA_FLOOR,
             )
         )
         inverse_alpha_t = _si3_div(_SI3_ONE, _si3_add(alpha_t, _SI3_ONE))
@@ -1714,15 +1850,15 @@ def si3_cgrid_aevp_solver(
         stress2 = _si3_set(stress2, slice(1, None), stress2_value)
 
         beta_t = nemo_source_round(
-            jnp.maximum(
-                _SI3_ALPHA_FLOOR,
+            floor_above(
                 _si3_mul(jnp.pi, nemo_source_round(_si3_sqrt(alpha_inner))),
+                _SI3_ALPHA_FLOOR,
             )
         )
         alpha_f = nemo_source_round(
-            jnp.maximum(
-                jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=0)),
-                jnp.maximum(
+            beta_max(
+                beta_max(beta_t, jnp.roll(beta_t, -1, axis=0)),
+                beta_max(
                     jnp.roll(beta_t, -1, axis=1),
                     jnp.roll(jnp.roll(beta_t, -1, axis=0), -1, axis=1),
                 ),
@@ -1819,7 +1955,7 @@ def si3_cgrid_aevp_solver(
             rhs = _si3_add(rhs, coriolis_u)
             rhs = _si3_add(rhs, slope_u)
             rhs = _si3_add(rhs, ocean_stress)
-            beta_u = jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=0))
+            beta_u = beta_max(beta_t, jnp.roll(beta_t, -1, axis=0))
             numerator = _si3_add(_si3_mul(beta_u, current_u), state.u_ice_u)
             numerator = _si3_mul(mass_over_dt_u, numerator)
             numerator = _si3_add(numerator, rhs)
@@ -1844,14 +1980,14 @@ def si3_cgrid_aevp_solver(
                 denominator = _si3_sub(denominator, basal_ratio)
                 dynamic_value = _si3_div(
                     numerator,
-                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                    floor_above(denominator, _SI3_DENOMINATOR_FLOOR),
                 )
-                static_decay = jnp.maximum(
-                    _SI3_ZERO,
+                static_decay = zero_floor(
                     _si3_sub(
                         beta_u,
                         _si3_mul(config.dt_s, config.landfast_relaxation_s_inv),
                     ),
+                    _SI3_ALPHA_FLOOR,
                 )
                 static_numerator = _si3_add(
                     state.u_ice_u,
@@ -1861,16 +1997,26 @@ def si3_cgrid_aevp_solver(
                     static_numerator,
                     _si3_add(beta_u, _SI3_ONE),
                 )
-                static_friction = (_si3_add(rhs, basal_u) < _SI3_ZERO) & (
-                    rhs >= _SI3_ZERO
-                )
-                value = nemo_source_round(
-                    jnp.where(static_friction, static_value, dynamic_value)
-                )
+                if hard:
+                    static_friction = (_si3_add(rhs, basal_u) < _SI3_ZERO) & (
+                        rhs >= _SI3_ZERO
+                    )
+                    value = nemo_source_round(
+                        jnp.where(static_friction, static_value, dynamic_value)
+                    )
+                else:
+                    # rhs + basal < 0 AND rhs >= 0 as a product of C1 gates
+                    static_weight = gate(
+                        -_si3_add(rhs, basal_u), _SI3_STATIC_FRICTION_FORCE_SCALE_N_M2
+                    ) * gate(rhs, _SI3_STATIC_FRICTION_FORCE_SCALE_N_M2)
+                    # literal operands outside the band (bitwise NEMO at weight 0 / 1)
+                    value = nemo_source_round(
+                        _si3_blend_c1(static_weight, static_value, dynamic_value)
+                    )
             else:
                 value = _si3_div(
                     numerator,
-                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                    floor_above(denominator, _SI3_DENOMINATOR_FLOOR),
                 )
             value = _si3_add(
                 _si3_mul(value, active_u),
@@ -1922,7 +2068,7 @@ def si3_cgrid_aevp_solver(
             rhs = _si3_add(rhs, coriolis_v)
             rhs = _si3_add(rhs, slope_v)
             rhs = _si3_add(rhs, ocean_stress)
-            beta_v = jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=1))
+            beta_v = beta_max(beta_t, jnp.roll(beta_t, -1, axis=1))
             numerator = _si3_add(_si3_mul(beta_v, current_v), state.v_ice_v)
             numerator = _si3_mul(mass_over_dt_v, numerator)
             numerator = _si3_add(numerator, rhs)
@@ -1947,14 +2093,14 @@ def si3_cgrid_aevp_solver(
                 denominator = _si3_sub(denominator, basal_ratio)
                 dynamic_value = _si3_div(
                     numerator,
-                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                    floor_above(denominator, _SI3_DENOMINATOR_FLOOR),
                 )
-                static_decay = jnp.maximum(
-                    _SI3_ZERO,
+                static_decay = zero_floor(
                     _si3_sub(
                         beta_v,
                         _si3_mul(config.dt_s, config.landfast_relaxation_s_inv),
                     ),
+                    _SI3_ALPHA_FLOOR,
                 )
                 static_numerator = _si3_add(
                     state.v_ice_v,
@@ -1964,16 +2110,26 @@ def si3_cgrid_aevp_solver(
                     static_numerator,
                     _si3_add(beta_v, _SI3_ONE),
                 )
-                static_friction = (_si3_add(rhs, basal_v) < _SI3_ZERO) & (
-                    rhs >= _SI3_ZERO
-                )
-                value = nemo_source_round(
-                    jnp.where(static_friction, static_value, dynamic_value)
-                )
+                if hard:
+                    static_friction = (_si3_add(rhs, basal_v) < _SI3_ZERO) & (
+                        rhs >= _SI3_ZERO
+                    )
+                    value = nemo_source_round(
+                        jnp.where(static_friction, static_value, dynamic_value)
+                    )
+                else:
+                    # rhs + basal < 0 AND rhs >= 0 as a product of C1 gates
+                    static_weight = gate(
+                        -_si3_add(rhs, basal_v), _SI3_STATIC_FRICTION_FORCE_SCALE_N_M2
+                    ) * gate(rhs, _SI3_STATIC_FRICTION_FORCE_SCALE_N_M2)
+                    # literal operands outside the band (bitwise NEMO at weight 0 / 1)
+                    value = nemo_source_round(
+                        _si3_blend_c1(static_weight, static_value, dynamic_value)
+                    )
             else:
                 value = _si3_div(
                     numerator,
-                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                    floor_above(denominator, _SI3_DENOMINATOR_FLOOR),
                 )
             value = _si3_add(
                 _si3_mul(value, active_v),
@@ -2265,6 +2421,8 @@ def _si3_orca2_cgrid_aevp_core(
         config,
         za_u,
         za_v,
+        # ORCA2 5.0.2 ladder: out of the ORCA1 smooth-limit sweep, NEMO hard form.
+        limit_sharpness_scale=math.inf,
     )
 
     halo_one = slice(1, -1)

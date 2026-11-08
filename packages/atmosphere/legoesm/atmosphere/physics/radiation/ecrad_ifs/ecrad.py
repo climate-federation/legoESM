@@ -3,7 +3,7 @@
 Port of ``radiation_interface.F90:radiation`` (compiled file lines 190-495,
 ``bld49/src``) for the configuration of ``config49r1_rrtmg.nam``, with RRTMGP
 gas optics in place of RRTMG (:mod:`.gas_optics`, user decision 2026-11-06):
-``use_general_cloud_optics = false``, aerosols off,
+``use_general_cloud_optics = false``, aerosols off or on,
 McICA LW and SW solvers, ``do_lw_derivatives``, ``do_surface_sw_spectral_flux``
 and ``do_canopy_fluxes_sw``.  The call order is the oracle's:
 
@@ -13,7 +13,8 @@ and ``do_canopy_fluxes_sw``.  The call order is the oracle's:
 2. :func:`.gas_optics.gas_optics`: full levels, gas units, LW and SW gas
    optics, Planck terms, incoming SW;
 3. ``crop_cloud_fraction`` + ``cloud_optics`` (per band);
-4. aerosols off: ``g_sw = 0`` (line 381; LW aerosol scattering is off);
+4. aerosols off: ``g_sw = 0`` (line 381; LW aerosol scattering is off); on
+   (``aerosol_mixing_ratio`` given): ``add_aerosol_optics`` (:mod:`.aerosol_optics`);
 5. ``solver_mcica_lw`` / ``solver_mcica_sw``, each running the McICA
    ``cloud_generator`` first (LW seed ``iseed + 997``, SW seed ``iseed``);
    the band->g-point mapping of the cloud optics is inside the solvers;
@@ -22,7 +23,7 @@ and ``do_canopy_fluxes_sw``.  The call order is the oracle's:
 Every numerical step is a section module (no code duplicated here).  Not
 ported (outside this configuration): ``radiation_reverse`` (inputs must be
 top-down, index 0 = TOA, as the IFS passes them), other gas/solver/overlap
-options, aerosol optics, ``calc_toa_spectral`` (McICA saves no spectral flux).
+options, ``calc_toa_spectral`` (McICA saves no spectral flux).
 
 Random numbers (user decision A16, vote G1): the McICA uniforms are explicit
 inputs in the generator layout (:mod:`.mcica_generator`), one 4-tuple per
@@ -39,6 +40,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.atmosphere.physics.radiation.ecrad_ifs import aerosol_optics
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import cloud_optics as co
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import gas_optics as go
 from legoesm.atmosphere.physics.radiation.ecrad_ifs import mcica_generator as mg
@@ -132,7 +134,8 @@ def draw_uniforms(iseed, nlev):
 def radiation(pressure_hl, temperature_hl, gas_mmr, skin_temperature, cos_sza,
               solar_irradiance, sw_albedo, sw_albedo_direct, lw_emissivity,
               cloud_fraction, q_liquid, q_ice, re_liquid, re_ice, overlap_param,
-              fractional_std, uniforms_lw, uniforms_sw, sharpness=100.0):
+              fractional_std, uniforms_lw, uniforms_sw, sharpness=100.0,
+              aerosol_mixing_ratio=None, h2o_sat_liq=None):
     """radiation_interface.F90:radiation for config49r1_rrtmg.nam.
 
     Shapes (column first, levels top-down): pressure_hl, temperature_hl
@@ -160,8 +163,16 @@ def radiation(pressure_hl, temperature_hl, gas_mmr, skin_temperature, cos_sza,
                             sharpness)
     fraction = cloud.cloud_fraction
 
-    # 4. use_aerosols = false: g_sw = 0 (line 381)
-    g_sw = jnp.zeros_like(gas.od_sw)
+    # 4. aerosols (line 370): off -> g_sw = 0 (line 381); on -> add_aerosol_optics
+    #    (line 376), NAERMACC=1 mixing ratios (aerosol_optics, ifs_aerosol)
+    if aerosol_mixing_ratio is None:
+        od_sw, ssa_sw, od_lw = gas.od_sw, gas.ssa_sw, gas.od_lw
+        g_sw = jnp.zeros_like(od_sw)
+    else:
+        od_sw, ssa_sw, g_sw, od_lw = aerosol_optics.add_aerosol_optics(
+            gas.od_sw, gas.ssa_sw, gas.od_lw, pressure_hl, gas_mmr[..., go.IH2O], h2o_sat_liq,
+            aerosol_mixing_ratio, sharpness, tables=aerosol_optics.lane_tables(),
+            band_sw=band_sw, band_lw=band_lw)
 
     # 5. McICA: generator then solver, LW (line 414) and SW (line 451)
     def generate(uniforms):
@@ -173,12 +184,12 @@ def radiation(pressure_hl, temperature_hl, gas_mmr, skin_temperature, cos_sza,
 
     scaling_lw, tcc_lw = generate(uniforms_lw)
     flux_lw = ms.solver_mcica_lw(
-        gas.od_lw, cloud.od_lw, cloud.ssa_lw, cloud.g_lw, gas.planck_hl, gas.lw_emission,
+        od_lw, cloud.od_lw, cloud.ssa_lw, cloud.g_lw, gas.planck_hl, gas.lw_emission,
         lw_albedo, fraction, scaling_lw, tcc_lw, band=band_lw,
         cloud_fraction_threshold=_CLOUD_FRACTION_THRESHOLD, sharpness=sharpness)
     scaling_sw, tcc_sw = generate(uniforms_sw)
     flux_sw = ms.solver_mcica_sw(
-        gas.od_sw, gas.ssa_sw, g_sw, cloud.od_sw, cloud.ssa_sw, cloud.g_sw, sw_alb_direct,
+        od_sw, ssa_sw, g_sw, cloud.od_sw, cloud.ssa_sw, cloud.g_sw, sw_alb_direct,
         sw_alb_diffuse, gas.incoming_sw, cos_sza, fraction, scaling_sw, tcc_sw, band=band_sw,
         cloud_fraction_threshold=_CLOUD_FRACTION_THRESHOLD, sharpness=sharpness)
 

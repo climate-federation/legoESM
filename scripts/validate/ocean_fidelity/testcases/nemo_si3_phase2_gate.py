@@ -9,6 +9,8 @@ outside it.
 
 from __future__ import annotations
 
+import math
+
 import argparse
 import hashlib
 import importlib.util
@@ -577,6 +579,7 @@ def inactive_source_arm_gate(card) -> dict[str, dict]:
             halo_width=card.halo_width,
             subcycle_index=1,
             subcycles=2,
+            limit_sharpness_scale=math.inf,
         )
         contents, moments, _ = advect_si3_prather_1d(
             state.contents,
@@ -592,6 +595,7 @@ def inactive_source_arm_gate(card) -> dict[str, dict]:
             ice_volume_index=ICE_ADV1D_TRACERS.index("v_i"),
             concentration_index=ICE_ADV1D_TRACERS.index("a_i"),
             subcycles=2,
+            limit_sharpness_scale=math.inf,
         )
         min_pre_zapneg = min(
             min_pre_zapneg,

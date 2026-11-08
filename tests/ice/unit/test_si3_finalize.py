@@ -339,6 +339,7 @@ def test_o16_tau_gradient_matches_central_difference() -> None:
             u_oce=z, v_oce=z, drag_io=jnp.ones(shape) * 0.005,
             at_i=jnp.ones(shape) * 0.5, utau=z, vtau=z, tmod_io=z,
             taum=jnp.ones((2, 2)), utau_oce=z[1:-1, 1:-1], vtau_oce=z[1:-1, 1:-1],
+            tmask_k1=jnp.ones(shape),
         )
         return jnp.sum(si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=True).utau)
 
@@ -361,6 +362,7 @@ def test_o16_tau_gradient_is_finite_at_zero_relative_velocity() -> None:
             u_ice=jnp.ones(shape) * speed, v_ice=z, u_oce=z, v_oce=z,
             drag_io=jnp.ones(shape) * 0.005, at_i=jnp.ones(shape) * 0.5, utau=z, vtau=z, tmod_io=z,
             taum=jnp.ones((2, 2)), utau_oce=z[1:-1, 1:-1], vtau_oce=z[1:-1, 1:-1],
+            tmask_k1=jnp.ones(shape),
         )
         return jnp.sum(si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=True).utau)
 
