@@ -15,6 +15,7 @@
 """Implementations of `OpticsScheme`s and a factory method."""
 
 import copy
+import math
 from collections.abc import Mapping
 from typing import Callable, TypeAlias, cast
 
@@ -98,6 +99,7 @@ class RRTMOptics(optics_base.OpticsScheme):
         rrtm_params.shortwave_nc_filepath
     )
     self._gas_all_gpts = None
+    self._sharpness = math.inf   # set by with_all_gpts; inf = hard clips
     # Type narrowing
     assert self.gas_optics_lw is not None
     assert self.gas_optics_sw is not None
@@ -109,29 +111,37 @@ class RRTMOptics(optics_base.OpticsScheme):
       temperature: Array,
       molecules: Array,
       vmr_fields: dict[int, Array] | None,
+      sharpness: float = math.inf,
   ) -> 'RRTMOptics':
     """A copy holding this state's gas optics for every g-point of one spectrum.
 
     ``compute_*_optical_properties`` and ``compute_planck_sources`` read these
-    arrays; the state passed to them must be the one bound here.
+    arrays; the state passed to them must be the one bound here.  ``sharpness``
+    (static): ``math.inf`` = the hard tropopause split and temperature clips
+    (bitwise the unsmoothed path); finite smooths them (``gas_optics``), and
+    the bound copy's Planck sources use the same value.
     """
     lookup = self.gas_optics_lw if is_lw else self.gas_optics_sw
     if is_lw:
       gas = {
           'tau_lw': gas_optics.optical_depth_all_gpts(
-              lookup, self.vmr_lib, molecules, temperature, pressure, vmr_fields),
+              lookup, self.vmr_lib, molecules, temperature, pressure, vmr_fields,
+              sharpness),
           'planck_fraction': gas_optics.planck_fraction_all_gpts(
-              lookup, self.vmr_lib, pressure, temperature, vmr_fields),
+              lookup, self.vmr_lib, pressure, temperature, vmr_fields, sharpness),
       }
     else:
       gas = {
           'tau_sw': gas_optics.optical_depth_all_gpts(
-              lookup, self.vmr_lib, molecules, temperature, pressure, vmr_fields),
+              lookup, self.vmr_lib, molecules, temperature, pressure, vmr_fields,
+              sharpness),
           'rayleigh': gas_optics.rayleigh_optical_depth_all_gpts(
-              lookup, self.vmr_lib, molecules, temperature, pressure, vmr_fields),
+              lookup, self.vmr_lib, molecules, temperature, pressure, vmr_fields,
+              sharpness),
       }
     bound = copy.copy(self)
     bound._gas_all_gpts = gas
+    bound._sharpness = sharpness
     return bound
 
   def gas_gpt(self, name: str, igpt: Array) -> Array:
@@ -149,7 +159,7 @@ class RRTMOptics(optics_base.OpticsScheme):
     """The actual Planck source calculation."""
     logging.info('Calling Planck source graph.')
     return gas_optics.compute_planck_sources(
-        self.gas_optics_lw, planck_fraction, temperature, igpt
+        self.gas_optics_lw, planck_fraction, temperature, igpt, self._sharpness
     )
 
   def planck_src_fn(

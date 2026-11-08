@@ -151,17 +151,26 @@ _UM_TO_M = 1.0e-6                                   # :443, :448
 # --- radintg.F90 ---
 _MU0_CURV_THRESHOLD = 1.0e-10                       # :548
 _ALBEDO_MAX = 0.9999                                # :1917
-_RADINTG_EPS = 1000.0 * float(np.finfo(np.float64).tiny)   # :484
+_RADINTG_TINY_FACTOR = 1000.0                       # :484 1000*TINY(1.0_JPRB)
 
 # --- radheatn.F90 ---
-_EPS = float(np.finfo(np.float64).eps)
-_RADHEATN_EPS = 100.0 * _EPS                        # :282
-_RADHEATN_EPS1 = 10000.0 * _EPS                     # :283
+_RADHEATN_EPS_FACTOR = 100.0                        # :279 ZEPSILON = 100*EPSILON
+_RADHEATN_EPS1_FACTOR = 10000.0                     # :280 ZEPSILON1
 _LW_DN_DIFF_RATIO = float(np.float32(0.2))          # :203 default-real literal
 _MANNERS_HALF = 0.5                                 # :425 half to surface, half to space
 
 # --- condensate presence scale: ecRad cloud_mixing_ratio_threshold (vote IF2) ---
 _Q_PRESENCE_SCALE = 1.0e-9                          # radiation_config.F90:187
+
+
+# EPSILON/TINY of the working precision (the oracle's JPRB kind; vote F1).
+def _eps(x):
+    return float(np.finfo(np.dtype(jnp.result_type(x))).eps)
+
+
+def _tiny(x):
+    return float(np.finfo(np.dtype(jnp.result_type(x))).tiny)
+
 
 # IFS constants (49r1 yomcst via legoesm.constants, vote IF8)
 _RD = constants.R_d_ifs
@@ -450,7 +459,8 @@ def scheme_outputs(flux, mu0, skin_temperature, spectral_emiss, sharpness=100.0)
         "flux_sw_dn_toa": flux["flux_dn_sw"][..., 0],
     }
     # WHERE (PMU0 > EPSILON(1.0)) dir/mu0 ELSE 0 (:686-689)
-    w = step(mu0, _EPS, _EPS, sharpness, strict=True)
+    eps = _eps(mu0)
+    w = step(mu0, eps, eps, sharpness, strict=True)
     out["flux_dir_into_sun"] = blend(w, out["flux_dir"] / jnp.where(w > 0.0, mu0, 1.0), 0.0)
     band = flux["spectral_flux_dn_sw_surf"]
     out["flux_uv"] = _weighted_band_sum(band, UV_WEIGHTS)
@@ -519,7 +529,7 @@ def radintg_post(rs, solar_irradiance, amu0, albedo_dif, albedo_dir, mu0_rad, sh
     for j in range(dirb.shape[-1]):                      # Fortran SUM order
         s_dir = s_dir + dirb[..., j] * albedo_dir[..., j]
         s_dif = s_dif + difb[..., j] * albedo_dif[..., j]
-    den = jnp.sign(d_s) * jnp.maximum(jnp.abs(d_s), _RADINTG_EPS)                   # IF5: hard
+    den = jnp.sign(d_s) * jnp.maximum(jnp.abs(d_s), _RADINTG_TINY_FACTOR * _tiny(d_s))  # IF5: hard
     albedo = _clamp((s_dir + s_dif) / den, 0.0, _ALBEDO_MAX, 1.0, 1.0, sharpness)
     dn_top = solar_irradiance * amu0
     up_top = dn_top - n_t
@@ -572,13 +582,14 @@ def radiation_scheme(*, mu0, uniforms_lw, uniforms_sw, sharpness=100.0, **scheme
 
 def _mu0_curv_radheatn(mu0, sharpness):
     """radheatn.F90:401-410 (IF mu0 >= ZEPSILON1), same formula as radintg."""
-    return _curvature(mu0, _RADHEATN_EPS1, False, sharpness)
+    return _curvature(mu0, _RADHEATN_EPS1_FACTOR * _eps(mu0), False, sharpness)
 
 
 def _manners(zi0, mu0, w_mu0, ratio, fdiri, trsod, trso_sfc, sharpness):
     """radheatn.F90:418-447 (one sky): (net diff, direct scaling, surface scaling)."""
-    w = (w_mu0 * step(fdiri, _RADHEATN_EPS1, _RADHEATN_EPS1, sharpness, strict=False)
-         * step(trsod, _RADHEATN_EPS1, _RADHEATN_EPS1, sharpness, strict=False))
+    e1 = _RADHEATN_EPS1_FACTOR * _eps(fdiri)
+    w = (w_mu0 * step(fdiri, e1, e1, sharpness, strict=False)
+         * step(trsod, e1, e1, sharpness, strict=False))
     live = w > 0.0
     f = jnp.where(live, fdiri, 0.5)
     t = jnp.where(live, trsod, 1.0)
@@ -600,7 +611,9 @@ def radheatn(carry, pressure_hl, q, skin_temperature, mu0, solar_irradiance, te=
     if te is None:
         te = jnp.zeros_like(q)
     # 2. incident solar radiation (:293-307)
-    w0 = step(mu0, _RADHEATN_EPS, _RADHEATN_EPS, sharpness, strict=False)
+    e0 = _RADHEATN_EPS_FACTOR * _eps(mu0)
+    e1 = _RADHEATN_EPS1_FACTOR * _eps(mu0)
+    w0 = step(mu0, e0, e0, sharpness, strict=False)
     zi0 = blend(w0, solar_irradiance * mu0, 0.0)
     dsrp = w0
 
@@ -617,7 +630,7 @@ def radheatn(carry, pressure_hl, q, skin_temperature, mu0, solar_irradiance, te=
     mu0_curv = _mu0_curv_radheatn(mu0, sharpness)
     mu0m_curv = _mu0_curv_radheatn(carry.mu0_rad, sharpness)
     ratio = mu0m_curv / mu0_curv
-    w_mu0 = step(mu0, _RADHEATN_EPS1, _RADHEATN_EPS1, sharpness, strict=False)
+    w_mu0 = step(mu0, e1, e1, sharpness, strict=False)
     net_diff, dir_scal, sfc_scal = _manners(zi0, mu0, w_mu0, ratio, carry.fdir, carry.trsod,
                                             carry.trso[..., -1], sharpness)
     net_diff_c, dir_scal_c, sfc_scal_c = _manners(zi0, mu0, w_mu0, ratio, carry.cdir,
@@ -625,7 +638,7 @@ def radheatn(carry, pressure_hl, q, skin_temperature, mu0, solar_irradiance, te=
 
     # scale transmissivities (:462-475) and surface floor (:480-484)
     frso = zi0[..., None] * carry.trso + net_diff[..., None]
-    frso = frso.at[..., -1].set(lower_clamp(frso[..., -1], _RADHEATN_EPS, _RADHEATN_EPS, sharpness))
+    frso = frso.at[..., -1].set(lower_clamp(frso[..., -1], e0, e0, sharpness))
     frsoc = jnp.stack([zi0 * carry.trsc[..., 0] + net_diff_c,
                        zi0 * carry.trsc[..., -1] + net_diff_c], axis=-1)
     frsod = zi0 * carry.trsod * sfc_scal
