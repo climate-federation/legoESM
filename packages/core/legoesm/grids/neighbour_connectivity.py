@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 from legoesm.core.neighbour_ops import Connectivity, NeighbourMesh, offsets, table
 
@@ -49,6 +50,16 @@ def _check_latlon_scope(grid: Any) -> None:
         raise ValueError(
             "latlon_neighbour_mesh supports only a regular global lat-lon grid "
             f"on one device; got: {', '.join(bad)}")
+
+
+def latlon_neighbour_supported(grid: Any) -> bool:
+    """True when :func:`latlon_neighbour_mesh` can build ``grid``'s mesh
+    (False for out-of-scope grids and for traced grid geometry)."""
+    try:
+        _check_latlon_scope(grid)
+    except (ValueError, jax.errors.ConcretizationTypeError):
+        return False
+    return True
 
 
 def latlon_neighbour_mesh(grid: Any) -> NeighbourMesh:

@@ -104,7 +104,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "CGridLatLonShallowWaterModel": ("legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid", "CGridLatLonShallowWaterModel"),
     "CGridLatLonShallowWaterConfig": ("legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid", "CGridLatLonShallowWaterConfig"),
     "CGridLatLonShallowWaterState": ("legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid", "CGridLatLonShallowWaterState"),
-    "cgrid_latlon_sw_tendencies": ("legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid", "cgrid_latlon_sw_tendencies"),
+    "cgrid_latlon_sw_tendencies": ("legoesm.atmosphere.dynamics.gcm.shallow_water_generic", "cgrid_latlon_sw_tendencies"),
     "CGridLatLonPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid", "CGridLatLonPrimitiveEquationModel"),
     "CGridLatLonPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid", "CGridLatLonPrimitiveEquationConfig"),
     "CGridLatLonHydrostaticState": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid", "CGridLatLonHydrostaticState"),

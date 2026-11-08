@@ -9,13 +9,12 @@ from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     CGridLatLonShallowWaterModel,
     CGridLatLonShallowWaterConfig,
     CGridLatLonShallowWaterState,
-    cgrid_latlon_sw_tendencies,
     williamson_test2_cgrid,
     williamson_test2_exact_cgrid,
     williamson_test5_cgrid,
     compute_error_norms_cgrid,
-    kinetic_energy_cgrid,
 )
+from legoesm.atmosphere.dynamics.gcm.shallow_water_generic import cgrid_latlon_sw_tendencies, kinetic_energy_cgrid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     interp_cell_to_uface,
     interp_cell_to_vface,

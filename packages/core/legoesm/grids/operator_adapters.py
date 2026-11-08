@@ -16,10 +16,15 @@ module supplies the lat-lon C-grid adapter (over the shared operators in
 :class:`~legoesm.grids.operator_protocol.EdgeOperators` sibling, over the TRiSK
 kernels in :mod:`legoesm.core.operators_voronoi`).
 
-**Load-bearing status.**  Two production dycores actually *route through* their
-adapter (byte-identical, since the adapter delegates to the same free functions):
-the lat-lon C-grid shallow-water core (``ops.divergence``/``gradient``/``vorticity``)
-and the MPAS shallow-water core (``ops.divergence``/``gradient``).  The cubed-sphere
+**Load-bearing status.**  The shared shallow-water core
+(:mod:`legoesm.atmosphere.dynamics.gcm.shallow_water_generic`, the tendency of the
+lat-lon C-grid and MPAS shallow-water models) calls ``ops.divergence``/``gradient``
+on the neighbour-sum adapters below (:class:`LatLonNeighbourOperators`,
+:class:`MPASNeighbourOperators`); lat-lon grids outside the neighbour mesh's scope
+fall to :class:`LatLonCGridOperators` via :func:`latlon_sw_grid_operators`.  The
+free-function adapters stay the grid-capability registry default
+(:mod:`legoesm.grids.capability`) and supply the lat-lon Coriolis vorticity.
+The cubed-sphere
 SW core is FV3-faithful with *bespoke* operators (FB-mode, 2-stage, duogrid corner
 work — ``dgrid_to_cgrid``, ``d_sw5_corner_divergence``, ``fv3_del6_vorticity_damping``),
 NOT the generic ``cgrid_*`` functions the cube adapter wraps, so the cube adapter is
@@ -32,6 +37,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from legoesm.core import neighbour_ops
+from legoesm.grids.neighbour_connectivity import (
+    latlon_neighbour_mesh,
+    latlon_neighbour_supported,
+    mpas_neighbour_mesh,
+)
 from legoesm.grids.operators_latlon_cgrid import (
     curl_vertex_cgrid,
     divergence_cgrid,
@@ -283,3 +294,78 @@ class MPASEdgeOperators:
 def mpas_edge_operators(mesh: Any) -> MPASEdgeOperators:
     """Wrap an MPAS/Voronoi mesh in its :class:`EdgeOperators` adapter."""
     return MPASEdgeOperators(mesh)
+
+
+class LatLonNeighbourOperators(LatLonCGridOperators):
+    """:class:`GridOperators` whose divergence, gradient and vorticity are the
+    grid-generic neighbour sums of :mod:`legoesm.core.neighbour_ops`.
+
+    Multi-level fields and ``interpolate``/``halo_fill`` use the parent.
+    Scope is that of
+    :func:`~legoesm.grids.neighbour_connectivity.latlon_neighbour_mesh`
+    (regular global grid, one device); it raises otherwise.
+    """
+
+    def __init__(self, grid: Any) -> None:
+        super().__init__(grid)
+        self._nmesh = latlon_neighbour_mesh(grid)
+
+    def divergence(self, u: Any, v: Any) -> Any:
+        if u.ndim != 2:
+            return super().divergence(u, v)
+        return neighbour_ops.divergence(self._nmesh, (u, v))
+
+    def gradient(self, scalar: Any) -> Any:
+        if scalar.ndim != 2:
+            return super().gradient(scalar)
+        return neighbour_ops.gradient(self._nmesh, scalar)
+
+    def vorticity(self, u: Any, v: Any) -> Any:
+        if u.ndim != 2:
+            return super().vorticity(u, v)
+        return neighbour_ops.curl(self._nmesh, (u, v))
+
+
+def latlon_neighbour_operators(grid: Any) -> LatLonNeighbourOperators:
+    """Neighbour-sum :class:`GridOperators` for a lat-lon C-grid."""
+    return LatLonNeighbourOperators(grid)
+
+
+class MPASNeighbourOperators(MPASEdgeOperators):
+    """:class:`EdgeOperators` whose single-level divergence, gradient and
+    vorticity are the neighbour sums of :mod:`legoesm.core.neighbour_ops`;
+    multi-level fields and ``tangential``/``cell_to_edge`` use the parent."""
+
+    def __init__(self, mesh: Any) -> None:
+        super().__init__(mesh)
+        self._nmesh = mpas_neighbour_mesh(mesh)
+
+    def divergence(self, u_edge: Any) -> Any:
+        if u_edge.ndim != 1:
+            return super().divergence(u_edge)
+        return neighbour_ops.divergence(self._nmesh, u_edge)
+
+    def gradient(self, phi_cell: Any) -> Any:
+        if phi_cell.ndim != 1:
+            return super().gradient(phi_cell)
+        return neighbour_ops.gradient(self._nmesh, phi_cell)[0]
+
+    def vorticity(self, u_edge: Any) -> Any:
+        if u_edge.ndim != 1:
+            return super().vorticity(u_edge)
+        return neighbour_ops.curl(self._nmesh, u_edge)
+
+
+def latlon_sw_grid_operators(grid: Any) -> LatLonCGridOperators:
+    """Lat-lon :class:`GridOperators` for the shared shallow-water core: the
+    neighbour-sum adapter where :func:`latlon_neighbour_supported`, else the
+    free-function adapter (regional, tripolar, rich-metric, MPI/SPMD grids,
+    traced geometry)."""
+    if latlon_neighbour_supported(grid):
+        return LatLonNeighbourOperators(grid)
+    return LatLonCGridOperators(grid)
+
+
+def mpas_neighbour_operators(mesh: Any) -> MPASNeighbourOperators:
+    """Neighbour-sum :class:`EdgeOperators` for an MPAS/Voronoi mesh."""
+    return MPASNeighbourOperators(mesh)

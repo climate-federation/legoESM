@@ -1,23 +1,27 @@
-"""Shallow-water equations written once over the neighbour-offset layer.
+"""Shallow-water equations written once over the grid operator contract.
 
 Vector-invariant form, shared by every grid::
 
     dh/dt   = mass tendency (default -div(h_edge * u))
     dvel/dt = -grad(KE + g (h + h_s)) + vorticity term + dissipation
 
-Divergence and gradient come from :mod:`legoesm.core.neighbour_ops`, the same
-code on every grid (structured offsets on lat-lon, index tables on MPAS).  The
-grid-specific numerics stay plug-ins (:class:`SWOperators`): mass-flux
-reconstruction (lat-lon PPM computes its own flux divergence), kinetic energy,
-the Coriolis / PV-flux term, viscosity and the velocity boundary condition.
+Divergence and gradient are the B2 operator contract
+(:mod:`legoesm.grids.operator_protocol`) implemented by the neighbour-sum
+adapters (:func:`~legoesm.grids.operator_adapters.latlon_neighbour_operators`,
+:func:`~legoesm.grids.operator_adapters.mpas_neighbour_operators`): the same
+:mod:`legoesm.core.neighbour_ops` code on every grid (structured offsets on
+lat-lon, index tables on MPAS).  Lat-lon grids the neighbour mesh does not cover
+(regional, tripolar, rich metrics, MPI/SPMD) get the free-function adapter
+instead (:func:`~legoesm.grids.operator_adapters.latlon_sw_grid_operators`).
+The grid-specific numerics stay plug-ins
+(:class:`SWOperators`): mass-flux reconstruction (lat-lon PPM computes its own
+flux divergence), kinetic energy, the Coriolis / PV-flux term, viscosity and the
+velocity boundary condition.
 
-Pilot status: reproduces :mod:`.shallow_water_latlon_cgrid` (to round-off) and
-:mod:`.shallow_water_mpas` (bit-for-bit) tendencies, proven by
-``test_shallow_water_generic_equivalence``.  Not wired into a model or the dycore
-factory; the drop-in tendency functions below share the existing signatures.
-Known limits: the lat-lon and MPAS vorticity terms still compute their own curl
-(the generic :func:`~legoesm.core.neighbour_ops.curl` is equivalence-tested but
-not routed into them); lat-lon scope is a regular global grid on one device.
+This is the tendency of both :class:`.shallow_water_latlon_cgrid.CGridLatLonShallowWaterModel`
+and :class:`.shallow_water_mpas.MPASShallowWaterModel`.  Known limits: the
+lat-lon and MPAS vorticity terms still compute their own curl (the contract's
+``vorticity`` is not routed into them).
 """
 
 from __future__ import annotations
@@ -27,15 +31,15 @@ from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
-from legoesm.core.neighbour_ops import NeighbourMesh, divergence, gradient
+from legoesm.grids.operator_adapters import latlon_sw_grid_operators, mpas_neighbour_operators
 
 Edge = tuple[jax.Array, ...]
 
 
 class SWOperators(NamedTuple):
-    """Grid plug-ins around the shared operators."""
+    """Grid operator contract plus the grid plug-ins around it."""
 
-    mesh: NeighbourMesh
+    grid_ops: Any
     mass_tendency: Callable[[jax.Array, Edge], jax.Array]
     kinetic_energy: Callable[[Edge], jax.Array]
     vorticity_term: Callable[[Edge, jax.Array, Edge], Edge]  # (vel, h, dvel) -> dvel
@@ -49,7 +53,10 @@ def shallow_water_tendencies(
     """``(dh/dt, dvel/dt)`` for any grid; ``vel`` is a tuple of edge families."""
     dh_dt = ops.mass_tendency(h, vel)
     bernoulli = g * (h + h_s) + ops.kinetic_energy(vel)
-    dvel = tuple(-gb for gb in gradient(ops.mesh, bernoulli))
+    grad = ops.grid_ops.gradient(bernoulli)
+    # Component-velocity grids return (gx, gy); edge-normal grids one array.
+    grad = grad if isinstance(grad, tuple) else (grad,)
+    dvel = tuple(-gb for gb in grad)
     dvel = ops.vorticity_term(vel, h, dvel)
     dvel = ops.dissipation(vel, dvel)
     return dh_dt, ops.boundary(dvel)
@@ -59,15 +66,21 @@ def shallow_water_tendencies(
 # Lat-lon C-grid plug-ins
 # ============================================================================
 
+def kinetic_energy_cgrid(u: jax.Array, v: jax.Array) -> jax.Array:
+    """Cell-centre ``0.5 * (u_c**2 + v_c**2)`` from C-grid face velocities."""
+    u_c = 0.5 * (u[:, :-1] + u[:, 1:])   # (n_lat, n_lon)
+    v_c = 0.5 * (v[:-1, :] + v[1:, :])   # (n_lat, n_lon)
+    return 0.5 * (u_c**2 + v_c**2)
+
+
 def latlon_sw_operators(grid: Any, config: Any, dt: Any = None) -> SWOperators:
-    """Plug-ins reproducing :func:`.shallow_water_latlon_cgrid.cgrid_latlon_sw_tendencies`."""
+    """Lat-lon C-grid plug-ins (PPM or centered mass flux, absolute-vorticity
+    Coriolis, optional del-2 / del-4 viscosity, polar wall on v)."""
     from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         absolute_vorticity_coriolis,
-        kinetic_energy_cgrid,
         nu_del4_row_profiles,
     )
     from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
-    from legoesm.grids.neighbour_connectivity import latlon_neighbour_mesh
     from legoesm.grids.operators_latlon_cgrid import (
         interp_cell_to_uface,
         interp_cell_to_vface,
@@ -76,18 +89,18 @@ def latlon_sw_operators(grid: Any, config: Any, dt: Any = None) -> SWOperators:
 
     if config.nu_del4 > 0.0 and dt is None:
         raise ValueError(
-            "latlon_sw_operators: nu_del4 > 0 requires dt "
-            "(per-row pole stability cap needs it).")
-    mesh = latlon_neighbour_mesh(grid)
+            "cgrid_latlon_sw_tendencies: nu_del4 > 0 requires the "
+            "dt argument (per-row pole stability cap needs it).")
+    grid_ops = latlon_sw_grid_operators(grid)
 
     if config.use_ppm_transport:
         def mass_tendency(h, vel):
             return cgrid_fv_flux_divergence_latlon(h, vel[0], vel[1], grid)
     else:
+        # 2nd-order averaging of h to faces, legacy grid=None (pole-inert) form.
         def mass_tendency(h, vel):
-            flux = (interp_cell_to_uface(h) * vel[0],
-                    interp_cell_to_vface(h) * vel[1])
-            return -divergence(mesh, flux)
+            return -grid_ops.divergence(interp_cell_to_uface(h) * vel[0],
+                                        interp_cell_to_vface(h) * vel[1])
 
     def vorticity_term(vel, h, dvel):
         cor_u, cor_v = absolute_vorticity_coriolis(vel[0], vel[1], grid)
@@ -95,10 +108,12 @@ def latlon_sw_operators(grid: Any, config: Any, dt: Any = None) -> SWOperators:
 
     def dissipation(vel, dvel):
         du, dv = dvel
+        # +A_h * lap(u): the Laplacian of a local extremum is negative -> damping.
         if config.A_h > 0.0:
             lap_u, lap_v = vector_laplacian_cgrid(vel[0], vel[1], grid)
             du = du + config.A_h * lap_u
             dv = dv + config.A_h * lap_v
+        # -nu4 * lap(lap(u)): lap^2 -> +k^4 for a Fourier mode, so "-" decays.
         if config.nu_del4 > 0.0:
             lap_u, lap_v = vector_laplacian_cgrid(vel[0], vel[1], grid)
             lap2_u, lap2_v = vector_laplacian_cgrid(lap_u, lap_v, grid)
@@ -109,16 +124,24 @@ def latlon_sw_operators(grid: Any, config: Any, dt: Any = None) -> SWOperators:
         return (du, dv)
 
     def boundary(dvel):
-        # Wall BC: zero meridional tendency on the polar v faces.
+        # Wall BC: zero meridional tendency on the polar v faces, so RK stages
+        # never see polar v feeding divergence/Coriolis.
         return (dvel[0], jnp.pad(dvel[1][1:-1, :], ((1, 1), (0, 0))))
 
-    return SWOperators(mesh, mass_tendency,
+    return SWOperators(grid_ops, mass_tendency,
                        lambda vel: kinetic_energy_cgrid(vel[0], vel[1]),
                        vorticity_term, dissipation, boundary)
 
 
-def latlon_sw_tendencies_generic(state: Any, grid: Any, config: Any, dt: Any = None):
-    """Drop-in for ``cgrid_latlon_sw_tendencies``: returns ``(dh, du, dv)``."""
+def cgrid_latlon_sw_tendencies(state: Any, grid: Any, config: Any = None, dt: Any = None):
+    """Lat-lon C-grid shallow-water tendencies ``(dh, du, dv)`` at
+    (cell centres, lon faces, lat faces); ``config`` defaults to
+    ``CGridLatLonShallowWaterConfig()``."""
+    if config is None:
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
+            CGridLatLonShallowWaterConfig,
+        )
+        config = CGridLatLonShallowWaterConfig()
     h, u, v, h_s = state
     ops = latlon_sw_operators(grid, config, dt)
     dh, (du, dv) = shallow_water_tendencies(h, (u, v), h_s, ops, config.g)
@@ -130,7 +153,7 @@ def latlon_sw_tendencies_generic(state: Any, grid: Any, config: Any, dt: Any = N
 # ============================================================================
 
 def mpas_sw_operators(mesh: Any, config: Any, dt: float = 0.0) -> SWOperators:
-    """Plug-ins reproducing :func:`.shallow_water_mpas.mpas_shallow_water_tendencies`."""
+    """MPAS / TRiSK plug-ins (thickness flux, PV flux, APVM, del-2 / del-4)."""
     from legoesm.core.operators_voronoi import (
         apvm_correction,
         kinetic_energy_cell,
@@ -141,7 +164,6 @@ def mpas_sw_operators(mesh: Any, config: Any, dt: float = 0.0) -> SWOperators:
         vector_laplacian_del2,
         vector_laplacian_del4,
     )
-    from legoesm.grids.neighbour_connectivity import mpas_neighbour_mesh
 
     if config.pv_scheme == "energy":
         pv_flux = pv_flux_energy_conserving
@@ -151,16 +173,15 @@ def mpas_sw_operators(mesh: Any, config: Any, dt: float = 0.0) -> SWOperators:
         raise ValueError(
             f"Unknown pv_scheme {config.pv_scheme!r}; "
             "expected one of: 'energy', 'enstrophy'.")
-    nmesh = mpas_neighbour_mesh(mesh)
+    grid_ops = mpas_neighbour_operators(mesh)
 
     def mass_tendency(h, vel):
-        return -divergence(nmesh, (thickness_flux(h, vel[0], mesh,
-                                                  order=config.thickness_order),))
+        return -grid_ops.divergence(
+            thickness_flux(h, vel[0], mesh, order=config.thickness_order))
 
     def vorticity_term(vel, h, dvel):
         q = potential_vorticity_vertex(vel[0], h, mesh.fVertex, mesh)
-        # Same Python check as the reference: dt must be concrete here, and
-        # dt == 0 skips APVM (the reference's behaviour, kept for equivalence).
+        # Python check: dt must be concrete here, and dt == 0 skips APVM.
         if config.apvm_scale > 0 and dt > 0:
             q = apvm_correction(q, vel[0], mesh, config.apvm_scale * dt)
         return (dvel[0] + pv_flux(vel[0], h, q, mesh),)
@@ -173,15 +194,19 @@ def mpas_sw_operators(mesh: Any, config: Any, dt: float = 0.0) -> SWOperators:
             du = du + config.nu_del4 * vector_laplacian_del4(vel[0], mesh)
         return (du,)
 
-    return SWOperators(nmesh, mass_tendency,
+    return SWOperators(grid_ops, mass_tendency,
                        lambda vel: kinetic_energy_cell(vel[0], mesh),
                        vorticity_term, dissipation, lambda dvel: dvel)
 
 
-def mpas_sw_tendencies_generic(state: Any, mesh: Any, config: Any, dt: float = 0.0):
-    """Drop-in for ``mpas_shallow_water_tendencies``."""
+def mpas_shallow_water_tendencies(state: Any, mesh: Any, config: Any = None, dt: float = 0.0):
+    """MPAS shallow-water tendencies; ``dt`` feeds APVM; ``config`` defaults to
+    ``MPASShallowWaterConfig()``."""
     from legoesm.core.state import MPASShallowWaterTendencies
 
+    if config is None:
+        from legoesm.atmosphere.dynamics.gcm.shallow_water_mpas import MPASShallowWaterConfig
+        config = MPASShallowWaterConfig()
     ops = mpas_sw_operators(mesh, config, dt)
     dh, (du,) = shallow_water_tendencies(
         state.h.data, (state.u.data,), state.h_s.data, ops, config.g)
