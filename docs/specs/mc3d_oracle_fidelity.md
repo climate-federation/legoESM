@@ -21,7 +21,8 @@ targets.
 | Rayleigh + cloud (Mie CDF) + aerosol scattering; surface BRDF | EXPLICIT Rayleigh (1+mu^2) gas + microhh Mie-CDF cloud (`mie.py`, microhh's `mie_lut_broadband.nc` + `mie_sample_angle`) by per-cell r_eff & band; Lambertian surface | ✅ Rayleigh + Mie-CDF cloud BIT-EXACT to microhh (max|Δcos|=0 vs `mie_sample_angle` on microhh's LUT). aerosol-as-HG 3-way = future (plane path is aerosol-free) |
 | Sobol quasi-RNG per thread (cuRAND) | counter-based `threefry` per photon (default) + opt-in Halton low-discrepancy launch (`config.use_qrng`, `qrng.py`) | ✅ QRNG variance-reduction hook (Halton + Cranley-Patterson on the launch; table-driven Sobol = drop-in upgrade). threefry is reproducible cross-backend (Sobol-via-cuRAND is not) |
 | LW: `Rte_lw_rt.cu` emission MC | `raytracer_lw` forward thermal-emission MC (4π k B dV vol + π ε B dA sfc, net = ε(abs−emit)), RRTMGP-spectral per-g-point optics + Planck, linear-in-τ in-cell emission | ✅ same emission-MC scheme; RRTMGP-spectral cloud-aware LW (Phase 3b), linear-in-τ source (Phase 3c) |
-| Atomic `count_to_flux` scatter-add tally | analog single-deposit + `segment_sum` (integer counts) | ✅ equivalent, exact conservation |
+| Weighted photons (Iwabuchi 2006): deposit `w(1-f)` at every real/null collision, surface `w*albedo`, direct/diffuse tallies, diffuse TOD incidence, atomic scatter-add (`ray_tracer_kernel`) | `photon_walk.trace_batch_weighted`: same estimator, batch-synchronous `while_loop` with scatter-add tallies | ✅ same estimator; DEPARTURE: Russian roulette (`w<0.5`) replaced by a weight floor that deposits the remainder in place, so energy closes per realization (user rule: conservation over fidelity) |
+| (shortwave walk vs CUDA tracer) | `tests/atmosphere/test_mc3d_walk_oracle.py` | statistical: 20 seeds per side, Welch t, Bonferroni 3-sigma familywise, 5 cases |
 | Per-g-point optics resident (memory) | g-point serial scan, one field resident | ✅ same memory lever |
 
 ## Truth-tier validation (outranks oracle-matching)
@@ -32,8 +33,9 @@ Cleared by `tests/unit/test_mc3d_{raytracer,plane,lw,parallel,bomex}.py`:
   LW optically-thin isothermal cooling `→ -4kσT⁴dz`; two-stream cross-check vs
   the validated `sw_cell_properties`. These are exactly the limits the oracle's
   estimator must reproduce.
-- **Tier 0 — conservation.** Analog MC closes the energy budget exactly
-  (integer counts): SW `vol+sfc+tod=1`; LW `net_atmos+net_sfc+OLR+unresolved=0`.
+- **Tier 0 — conservation.** SW: the weighted walk telescopes, so
+  `vol+sfc+tod+residual=1` to round-off per realization; LW (analog):
+  `net_atmos+net_sfc+OLR+unresolved=0`.
 - **Tier 1 — equivariance / no grid bias.** Horizontal-shift equivariance;
   uniform-field heating is horizontally uniform to MC noise.
 - **MC convergence.** Error ∝ 1/√N verified.
@@ -59,7 +61,7 @@ this checkout; the architecture (compressible-plane + ls-forcing + microphysics
 ## GPU parallelization & memory
 
 - **Memory is not the bottleneck**: per-g-point serial loop keeps one optical
-  field resident; photon batches `lax.scan`-chunked; integer-count tallies are
+  field resident; photon batches `lax.scan`-chunked; tallies are
   grid-sized. (See `docs/specs/mc3d_raytracer.md` for the byte budget.)
 - **Photon-sharding** (`parallel.py`): replicate the (cheap) per-g-point optics
   per device, shard photons, combine by `pmean` / allreduce-SUM (AD-safe).
@@ -92,7 +94,9 @@ flux-fidelity gap.
 FLUX/heating fidelity (the tracer's purpose — radiative heating for the LES) is
 COMPLETE: SW + LW with RRTMGP-spectral cloud-aware per-g-point optics, Woodcock
 null-collision tracking with a coarse `k_null` majorant, linear-in-τ LW emission,
-analog single-deposit tally with exact conservation, photon-shard parallelism.
+microhh's weighted estimator with per-realization conservation, photon-shard parallelism.
+The longwave Monte Carlo has NO microhh counterpart (microhh's longwave is
+two-stream only); it is a legoESM extension without a reference.
 All analytic truth tiers cleared; OLR matches the RRTMGP two-stream to O(1);
 codex-clean across all phases.
 

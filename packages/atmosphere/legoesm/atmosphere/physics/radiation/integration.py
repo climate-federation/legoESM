@@ -2313,7 +2313,10 @@ def _mc3d_plane_heating(
     key = _t_base
     dT_dt_sw, _sfc_sw, _tod = plane_adapter.compute_plane_sw_heating(
         tau_td, ssa_td, g_td, incident_flux, grid, z_half_td, rho_total,
-        mu0=mu0, albedo=gray_cfg.sfc_albedo, config=mc_cfg, key=key,
+        mu0=mu0, albedo=gray_cfg.sfc_albedo,
+        # incident_flux is the unattenuated flux at the domain top, so all of
+        # it is the direct beam (microhh tod_inc_diffuse = 0).
+        diffuse_frac=0.0, config=mc_cfg, key=key,
         rayleigh_frac_td=rayleigh_td, mie_lut_cdf=mie_lut_cdf,
         mie_lut_ang=mie_lut_ang, band_of_gpt=band_of_gpt, r_eff_td=r_eff_td)
 
