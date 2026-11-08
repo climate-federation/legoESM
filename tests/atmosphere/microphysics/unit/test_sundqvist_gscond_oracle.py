@@ -21,6 +21,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -145,7 +147,7 @@ def test_zero_carry_is_the_explicit_fresh_start_bitwise():
     T, q, qc, pf, ph = a("T"), a("q_v"), a("q_c"), a("p_full"), a("p_half")
     z = jnp.zeros_like(T)
     hyd = HydrometeorState(q_c=qc, q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
-    rho = pf / 287.0 / T
+    rho = pf / constants.R_d / T
 
     def run(prev):
         return sundqvist_microphysics(T, q, hyd, pf, ph, rho, jnp.ones_like(T), 600.0,

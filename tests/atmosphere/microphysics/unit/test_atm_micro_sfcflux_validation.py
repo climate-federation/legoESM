@@ -277,9 +277,12 @@ class TestSundqvist:
 
     def test_differentiability_grad_and_params(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
+        # 1% moistening since the previous step: gscond condenses it.
+        prev = {"zc_T_prev": T, "zc_q_v_prev": 0.99 * q_v,
+                "zc_p_s_prev": p_half[:, -1]}
 
         def loss(qv):
-            out = sundqvist_microphysics(T, qv, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10, prev_state=_sq_fresh(T))
+            out = sundqvist_microphysics(T, qv, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10, prev_state=prev)
             return jnp.sum(out.precipitation)
 
         g = jax.grad(loss)(q_v)
@@ -288,7 +291,7 @@ class TestSundqvist:
 
         def loss_rate(rate):
             cfg = SundqvistConfig(auto_rate=rate)
-            out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cfg, cell_area=1.0e10, prev_state=_sq_fresh(T))
+            out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cfg, cell_area=1.0e10, prev_state=prev)
             return jnp.sum(out.precipitation)
 
         gr = jax.grad(loss_rate)(SundqvistConfig().auto_rate)
