@@ -1755,9 +1755,14 @@ class PhysicsPipeline:
             from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
             q_c_col = ad.flatten_3d(q_c)
             q_r_col = ad.flatten_3d(q_r)
-            rho_col = p_full_col / (constants.R_d * T_col)
-            dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
-            dz_col = dp_col / (rho_col * constants.g)
+            # the column bridges' moist (virtual-temperature) density and
+            # layer thickness (vote U1a; this lane used the dry p/(R_d T))
+            from legoesm.atmosphere.physics._shared import (
+                compute_layer_dz,
+                compute_rho,
+            )
+            rho_col = compute_rho(T_col, p_full_col, q_v_col)
+            dz_col = compute_layer_dz(T_col, p_half_col, q_v_col)
             _z = jnp.zeros_like(q_c_col)
             # Aerosol-CCN specified droplet number: under specified-Nc
             # (``predict_Nc=False`` — the N_c carry slot exists for
@@ -1850,7 +1855,6 @@ class PhysicsPipeline:
                 from legoesm.atmosphere.physics.microphysics.config import (
                     ThompsonConfig,
                 )
-                from legoesm.atmosphere.physics._shared import compute_rho
                 from legoesm.atmosphere.physics.microphysics.integration import (
                     number_per_mass_to_per_volume,
                     number_per_volume_to_per_mass,
@@ -1875,7 +1879,7 @@ class PhysicsPipeline:
                 # bridges always did this; this lane fed the carry raw to
                 # every scheme but thompson).  The aerosol-CCN N_c is
                 # already per volume (as the bridges' activated field).
-                _rho_n = compute_rho(T_col, p_full_col, q_v_col)
+                _rho_n = rho_col
                 hydrometeors = hydrometeors._replace(
                     N_c=(hydrometeors.N_c if _nc_aer_specified else
                          number_per_mass_to_per_volume(hydrometeors.N_c, _rho_n)),
