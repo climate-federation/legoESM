@@ -316,7 +316,9 @@ class TestMicrophysicsAudit:
         def loss(x):
             cfg = SundqvistConfig()._replace(rh_crit=x)
             out = sundqvist_microphysics(T, 0.9 * q_v, hydro, p_full, p_half,
-                rho, dz, 60.0, config=cfg, cell_area=1.0e10)
+                rho, dz, 60.0, config=cfg, cell_area=1.0e10,
+                prev_state={"zc_T_prev": T, "zc_q_v_prev": 0.99 * 0.9 * q_v,
+                            "zc_p_s_prev": p_half[:, -1]})
             # Zhao-Carr: liquid release carries no latent heat and this
             # column has no sub-rh_crit layer under the cloud, so rh_crit
             # reaches the output through the cloud cover b -> precipitation.

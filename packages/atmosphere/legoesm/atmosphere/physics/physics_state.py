@@ -303,6 +303,16 @@ class PhysicsState(NamedTuple):
     # (zeros without it), from which WRF Tiedtke's omega is formed on a grid
     # with no divergence operator.  Per-call INPUT, reset like dyn_tendency_*.
     dyn_w_ls: jnp.ndarray = None
+    # Sundqvist (Zhao-Carr gscond) previous-step state: the post-condensation
+    # T [K] and q_v [kg/kg], (ncol, nlev), and surface pressure [Pa], (ncol,),
+    # of the last microphysics call (the oracle's tp, qp, psp,
+    # zhaocarr_gscond.f:508-523), from which gscond forms the other-process
+    # tendencies that drive its condensation.  Zeros = fresh start (a column
+    # whose zc_p_s_prev is 0 starts with no other-process tendency).
+    # Materialised only when microphysics is ``sundqvist`` (None otherwise).
+    zc_T_prev: jnp.ndarray = None
+    zc_q_v_prev: jnp.ndarray = None
+    zc_p_s_prev: jnp.ndarray = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -515,7 +525,18 @@ def init_physics_state(
         ecrad_carry=_ecrad_carry_seed(physics_config, ncol, nlev, dtype),
         turb_tendency_qv=turb_tendency_qv,
         evap_sfc=evap_sfc,
+        zc_T_prev=_zc_seed(physics_config, (ncol, nlev), dtype),
+        zc_q_v_prev=_zc_seed(physics_config, (ncol, nlev), dtype),
+        zc_p_s_prev=_zc_seed(physics_config, (ncol,), dtype),
     )
+
+
+def _zc_seed(physics_config, shape, dtype):
+    """Zero (fresh-start) Sundqvist gscond carry when microphysics is
+    ``sundqvist``, else None."""
+    if getattr(physics_config.microphysics, "scheme", None) != "sundqvist":
+        return None
+    return jnp.zeros(shape, dtype=dtype)
 
 
 def _ecrad_carry_seed(physics_config, ncol, nlev, dtype):
@@ -626,6 +647,9 @@ def update_physics_state(phys_state, updates):
                                            phys_state.turb_tendency_qv)),
         evap_sfc=_tiedtke_evap_update(phys_state.evap_sfc, updates),
         dyn_w_ls=updates.get("dyn_w_ls", None),
+        zc_T_prev=updates.get("zc_T_prev", phys_state.zc_T_prev),
+        zc_q_v_prev=updates.get("zc_q_v_prev", phys_state.zc_q_v_prev),
+        zc_p_s_prev=updates.get("zc_p_s_prev", phys_state.zc_p_s_prev),
     )
 
 

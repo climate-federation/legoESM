@@ -15132,6 +15132,12 @@ class ModelDriver:
                 "clubb_wp2_iface",
                 "clubb_kh_iface",
                 "cloud_fraction_old",
+                # zc_* (2026-11-04): the Sundqvist gscond previous-step state;
+                # a zero carry is a fresh start (no other-process tendency
+                # on the first step, zhaocarr_gscond.f:168-181).
+                "zc_T_prev",
+                "zc_q_v_prev",
+                "zc_p_s_prev",
             })
             if _any_physstate:
                 from legoesm.atmosphere.physics.physics_state import (
