@@ -38,7 +38,7 @@ from legoesm.core.profile_metrics import safe_sqrt
 
 from legoesm import constants
 
-from .bridge import LESReferenceArtifact, total_turbulent_flux
+from .bridge import LESReferenceArtifact, is_cloudbench, total_turbulent_flux
 from .candidate import (
     Candidate,
     ColumnInputs,
@@ -62,6 +62,7 @@ from .score import (
     PROFILE_FLOOR_WIND,
     case_score_weights,
     normalized_rmse_series,
+    weights_below,
 )
 
 Array = jnp.ndarray
@@ -555,6 +556,16 @@ class E2Profiles(NamedTuple):
     floors: dict
 
 
+def score_weights(artifact: LESReferenceArtifact, z: Array) -> Array:
+    """Layer weights for scoring ``artifact`` on its heights ``z``: a CloudBench case
+    is cut at its recorded nudging base (PI 2026-10-31: above it the LES is nudged to
+    the GCM, not turbulence truth); any other case at its catalog sponge base."""
+    if is_cloudbench(artifact):
+        z_cut = float(artifact.les_setup["forcing_recipe"]["nudge_z_i_m"])
+        return weights_below(artifact.case_name, z, z_cut)
+    return case_score_weights(artifact.case_name, z)
+
+
 def e2_profiles(artifact: LESReferenceArtifact, rec: RolloutRecord,
                 dt: float) -> E2Profiles:
     """The SCM and LES profiles :func:`e2_score` scores (see there)."""
@@ -565,7 +576,7 @@ def e2_profiles(artifact: LESReferenceArtifact, rec: RolloutRecord,
                          f"{rec.fluxes.wtheta.shape[0]} steps; E2 needs e2_nsteps = "
                          f"{steps[-1] + 1} (the flux AT the last frame)")
     z = jnp.asarray(artifact.heights_m)
-    w = case_score_weights(artifact.case_name, z)
+    w = score_weights(artifact, z)
     sl = slice(1, None)
     truth = {
         "theta": jnp.asarray(artifact.theta)[sl], "u": jnp.asarray(artifact.u)[sl],

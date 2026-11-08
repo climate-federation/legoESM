@@ -460,6 +460,11 @@ def load_artifact(path) -> LESReferenceArtifact:
     return LESReferenceArtifact(**kwargs)
 
 
+def is_cloudbench(artifact: LESReferenceArtifact) -> bool:
+    """Whether ``artifact`` is a CloudBench LES case (its run record names the source)."""
+    return str((artifact.les_setup or {}).get("source", "")).startswith("CloudBench")
+
+
 def surface_roughness(artifact: LESReferenceArtifact) -> tuple[float, float]:
     """The LES run's surface roughness ``(z0 momentum, z0h heat)`` [m], read from the
     artifact's run record (``les_setup``). ``z0h`` is ``z0`` when the run used a

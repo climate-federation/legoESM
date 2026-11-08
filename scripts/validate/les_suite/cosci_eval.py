@@ -53,12 +53,16 @@ from legoesm.atmosphere.les_suite import (  # noqa: E402
 )
 from legoesm.atmosphere.les_suite.bridge import (  # noqa: E402
     CUM_CHANNELS,
+    is_cloudbench,
     load_artifact,
     surface_drag_law,
     surface_roughness,
     total_turbulent_flux,
 )
 from legoesm.atmosphere.les_suite.candidate import column_inputs, load_candidate  # noqa: E402
+from legoesm.atmosphere.les_suite.cloudbench import HELD_OUT_FILE, case_split  # noqa: E402
+from legoesm.atmosphere.les_suite.cloudbench_scm import build_cloudbench_scm  # noqa: E402
+from legoesm.atmosphere.les_suite.conservation import check_conservation  # noqa: E402
 from legoesm.atmosphere.les_suite.candidate_eval import (  # noqa: E402
     AD_LR,
     AD_STEPS,
@@ -168,7 +172,53 @@ def _git_sha() -> str:
         return "unknown"
 
 
+#: SCM step of every CloudBench run [s] (PI 2026-10-30: >= 10 min; 2026-10-31: 600 s).
+CLOUDBENCH_DT_S = 600.0
+
+#: CloudBench inputs of this run: the forcing directory and ``{case: (regime,
+#: held_out)}``, set by :func:`configure_cloudbench` from the command line.
+_CLOUDBENCH: dict = {"forcing_dir": None, "split": {}}
+
+
+def configure_cloudbench(artifacts, forcing_dir, stats_path) -> dict:
+    """Record the CloudBench forcing directory and split every CloudBench artifact
+    by regime and held-out site (:func:`~legoesm.atmosphere.les_suite.cloudbench.
+    case_split`, held-out list read next to the artifact). Returns provenance."""
+    cb = [(p, a) for p, a in artifacts if is_cloudbench(a)]
+    _CLOUDBENCH.update(forcing_dir=None, split={})
+    if not cb:
+        return {}
+    if forcing_dir is None or stats_path is None:
+        raise SystemExit("CloudBench artifacts need --cloudbench-forcing and "
+                         "--cloudbench-stats")
+    held_files = {Path(p).parent / HELD_OUT_FILE for p, _ in cb}
+    if len(held_files) != 1:
+        raise SystemExit(f"CloudBench artifacts from several directories: {held_files}")
+    held = held_files.pop()
+    _CLOUDBENCH["forcing_dir"] = Path(forcing_dir)
+    _CLOUDBENCH["split"] = case_split([a.case_name for _, a in cb], stats_path, held)
+    return {"forcing_dir": str(forcing_dir), "stats": {"path": str(stats_path),
+            "sha256": _sha256(stats_path)}, "held_out": {"path": str(held),
+            "sha256": _sha256(held)}}
+
+
+def _cloudbench_split(case_name: str):
+    """``(regime, held_out)`` of a CloudBench case, ``None`` for another case; a
+    CloudBench name without a configured split raises (it must not default to
+    training)."""
+    if not case_name.startswith("cloudbench_"):
+        return None
+    try:
+        return _CLOUDBENCH["split"][case_name]
+    except KeyError:
+        raise SystemExit(f"{case_name}: CloudBench case without a regime/held-out "
+                         "split; run configure_cloudbench first") from None
+
+
 def _regime(case_name: str) -> str:
+    cb = _cloudbench_split(case_name)
+    if cb is not None:
+        return cb[0]
     if not list_cases():
         register_default_catalog()
     try:
@@ -178,6 +228,9 @@ def _regime(case_name: str) -> str:
 
 
 def _held_out(case_name: str) -> bool:
+    cb = _cloudbench_split(case_name)
+    if cb is not None:
+        return cb[1]
     low = case_name.lower()
     return any(f in low for f in HELD_OUT_FAMILIES)
 
@@ -202,6 +255,14 @@ class Arm:
         a record)."""
         _require_kessler(artifact)
         turb = _case_turb(self.base_turb if turb is None else turb, artifact)
+        if is_cloudbench(artifact):
+            # the shared surface law gives every closure its surface fluxes and
+            # stress (PI 2026-11-03), so no wall-drag record is read; a baseline
+            # runs in energy form, the one total the gate holds it to
+            scm, _grid = build_cloudbench_scm(
+                artifact, turb, forcing_dir=_CLOUDBENCH["forcing_dir"], nlev=nlev, dt=dt)
+            return (scm, scm_physics_config(artifact, turb), None, None, 0.0, None,
+                    self.candidate is None)
         scm, _grid = build_cbl_scm_from_artifact(artifact, turb, les_tuned=False,
                                                 nlev=nlev, dt=dt)
         forcing = scm.forcing_arg
@@ -212,13 +273,14 @@ class Arm:
         ug = None if forcing is None else _geo(forcing.u_geo)
         vg = None if forcing is None else _geo(forcing.v_geo)
         return (scm, scm_physics_config(artifact, turb), ug, vg, f_c,
-                surface_drag_law(artifact) == "most")
+                surface_drag_law(artifact) == "most", False)
 
     def run_prepared(self, prep, nsteps, params=None):
-        scm, phys, ug, vg, f_c, drag_most = prep
+        scm, phys, ug, vg, f_c, drag_most, energy_form = prep
         return rollout(scm, phys, nsteps, candidate=self.candidate, params=params,
                        heat_form=self.heat_form, ke_heating=self.ke_heating,
-                       f_c=f_c, u_geo=ug, v_geo=vg, sfc_drag_most=drag_most)
+                       f_c=f_c, u_geo=ug, v_geo=vg, sfc_drag_most=drag_most,
+                       energy_form_baseline=energy_form)
 
     def run_with_turb(self, prep, artifact, nsteps, turb):
         """BASELINE rollout of a column prepared with the concrete base, with its
@@ -229,12 +291,12 @@ class Arm:
         rebuild at perturbed values is tested."""
         if self.candidate is not None:
             raise ValueError("run_with_turb is for baseline arms (no candidate)")
-        scm, _, ug, vg, f_c, drag_most = prep
+        scm, _, ug, vg, f_c, drag_most, energy_form = prep
         cfg = scm_physics_config(artifact, _case_turb(turb, artifact))
         col = copy.copy(scm)
         col.physics_fn = make_physics(cfg, model_type="hydrostatic", dt=scm.dt)
         return rollout(col, cfg, nsteps, f_c=f_c, u_geo=ug, v_geo=vg,
-                       sfc_drag_most=drag_most)
+                       sfc_drag_most=drag_most, energy_form_baseline=energy_form)
 
     def run(self, artifact, nsteps, *, params=None, turb=None, nlev, dt):
         return self.run_prepared(self.prepare(artifact, turb=turb, nlev=nlev, dt=dt),
@@ -495,15 +557,53 @@ def stage_e1(arms: dict, artifacts, nlev, dt) -> dict:
 # --- E2 -------------------------------------------------------------------------------
 
 def _case_scores(arm, artifacts, nlev, dt, params=None, turb=None):
+    """Per-case E2 scores. A CloudBench run must pass the conservation gate and give
+    a finite score, else it is recorded ``failed`` with the reason (PI 2026-10-31,
+    11-02) and enters no mean (see :func:`failure_summary`)."""
     out = {}
     for path, art in artifacts:
         n = e2_nsteps(art, dt)
-        rec, _ = arm.run(art, n, params=params, turb=turb, nlev=nlev, dt=dt)
-        s = e2_score(art, rec, dt)
-        out[Path(path).name] = {"per_var": {k: float(v) for k, v in s.per_var.items()},
-                                "combined": float(s.combined)}
+        try:
+            rec, _ = arm.run(art, n, params=params, turb=turb, nlev=nlev, dt=dt)
+            s = e2_score(art, rec, dt)
+        except Exception as err:   # noqa: BLE001  recorded, never a silent pass
+            if not is_cloudbench(art):
+                raise
+            out[Path(path).name] = {"failed": f"exception: {type(err).__name__}: {err}"}
+            jax.clear_caches()
+            continue
+        entry = {"per_var": {k: float(v) for k, v in s.per_var.items()},
+                 "combined": float(s.combined)}
+        if is_cloudbench(art):
+            gate = check_conservation(rec, dt)
+            entry["conservation_passed"] = bool(gate.passed)
+            if not gate.passed:
+                entry["failed"] = "conservation: " + gate.reason
+            elif not math.isfinite(entry["combined"]):
+                entry["failed"] = "non-finite score"
+        out[Path(path).name] = entry
         jax.clear_caches()   # one case's executables at a time (kernel mapping cap)
     return out
+
+
+def failure_summary(scores: dict, split: dict) -> dict:
+    """Per training/held-out set and regime: case count, failed count and fraction,
+    and the mean combined score over the cases that did not fail."""
+    groups: dict = {}
+    for name, s in scores.items():
+        sp = split[name]
+        g = groups.setdefault("held_out" if sp["held_out"] else "train", {}).setdefault(
+            sp["regime"], {"n": 0, "failed": 0, "ok": []})
+        g["n"] += 1
+        if "failed" in s:
+            g["failed"] += 1
+        else:
+            g["ok"].append(s["combined"])
+    return {k: {r: {"n": g["n"], "failed": g["failed"],
+                    "failure_fraction": g["failed"] / g["n"],
+                    "mean_over_survivors": (sum(g["ok"]) / len(g["ok"]) if g["ok"]
+                                            else None)}
+                for r, g in v.items()} for k, v in groups.items()}
 
 
 RECORDED_SETTINGS = ("dt", "nlev", "heat_form", "ke_heating", "baseline")
@@ -632,8 +732,17 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
         base_rec_diff = {}
         for path, art in artifacts:
             n = e2_nsteps(art, dt)
-            rc, _ = cand_arm.run(art, n, params=cand.default_params(), nlev=nlev, dt=dt)
-            rb, _ = Arm(cand_arm.base_turb).run(art, n, nlev=nlev, dt=dt)
+            try:
+                rc, _ = cand_arm.run(art, n, params=cand.default_params(), nlev=nlev,
+                                     dt=dt)
+                rb, _ = Arm(cand_arm.base_turb).run(art, n, nlev=nlev, dt=dt)
+            except Exception as err:   # noqa: BLE001  as in _case_scores
+                if not is_cloudbench(art):
+                    raise
+                base_rec_diff[Path(path).name] = {
+                    "failed": f"exception: {type(err).__name__}: {err}"}
+                jax.clear_caches()
+                continue
             base_rec_diff[Path(path).name] = {
                 k: float(jnp.max(jnp.abs(getattr(rc.inputs, k) - getattr(rb.inputs, k))))
                 for k in ("theta_l", "q_t", "u", "v")}
@@ -686,7 +795,19 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
             entry["ad_recorded"] = {"params": ov, "scores": _case_scores(
                 arm, artifacts, nlev, dt, turb=apply_overrides_to_base(base, ov))}
         res["arms"]["baseline:" + name] = entry
+    res["summary"] = {key: {arm: failure_summary(sc, res["split"])
+                            for arm, sc in _score_sets(entry)}
+                      for key, entry in res["arms"].items()}
     return res
+
+
+def _score_sets(entry):
+    """``(arm, per-case scores)`` for each scored parameter set of an arm entry."""
+    for arm in ("default", "les_tuned", "ad", "ad_recorded"):
+        v = entry.get(arm)
+        if not isinstance(v, dict) or "not_scored" in v:
+            continue
+        yield arm, v["scores"] if "scores" in v else v
 
 
 # --- E0 -------------------------------------------------------------------------------
@@ -742,6 +863,12 @@ def parse_args(argv=None):
     p.add_argument("--recorded-params", type=Path, default=None,
                    help="E2 output whose tuned parameters of every scored arm are "
                         "scored too (needs --stage E2 --no-tune)")
+    p.add_argument("--cloudbench-forcing", type=Path, default=None,
+                   help="CloudBench forcing directory (<site>/<month>/<exp>/sounding.csv); "
+                        "required with CloudBench artifacts")
+    p.add_argument("--cloudbench-stats", type=Path, default=None,
+                   help="CloudBench statistics file (cloud_cover sets each case's "
+                        "regime); required with CloudBench artifacts")
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args(argv)
     if args.candidate is None and not args.baseline_only:
@@ -772,6 +899,11 @@ def main(argv=None) -> int:
     if not jax.config.read("jax_enable_x64"):
         raise SystemExit("run with JAX_ENABLE_X64=1 (conservation checks need float64)")
     artifacts = [(str(p), load_artifact(p)) for p in args.artifacts]
+    cloudbench_prov = configure_cloudbench(artifacts, args.cloudbench_forcing,
+                                           args.cloudbench_stats)
+    if cloudbench_prov and args.dt != CLOUDBENCH_DT_S:
+        raise SystemExit(f"CloudBench cases run at --dt {CLOUDBENCH_DT_S:g} (PI), "
+                         f"not {args.dt:g}")
     cand_arm = None
     arms = {}
     if args.candidate is not None:
@@ -819,6 +951,7 @@ def main(argv=None) -> int:
             "l_stage_constants": {k: v for k, v in globals().items()
                                   if k.startswith("_L_")},
             "artifacts": {p: _sha256(p) for p, _ in artifacts},
+            "cloudbench": cloudbench_prov,
             "recorded_params": None if args.recorded_params is None else {
                 "path": str(args.recorded_params),
                 "sha256": _sha256(args.recorded_params)},

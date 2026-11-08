@@ -30,7 +30,6 @@ surface fluxes) and at most 6.6 m off anywhere at the start.
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -51,8 +50,14 @@ from legoesm.grids.vertical import create_sigma_coordinate
 
 from legoesm import constants
 
-from .bridge import LESReferenceArtifact, rad_tendency_fn
-from .cloudbench import DOMAIN_TOP_M, SWIRL_G_M_S2, read_sounding, surface_theta_l
+from .bridge import LESReferenceArtifact, is_cloudbench, rad_tendency_fn
+from .cloudbench import (
+    DOMAIN_TOP_M,
+    SWIRL_G_M_S2,
+    parse_case_name,
+    read_sounding,
+    surface_theta_l,
+)
 from .scm_coupling import interp_profile, liquid_water_theta
 from .scm_runner import SCMGridSpec, moist_scm_microphysics, scm_physics_config, seed_rain
 
@@ -66,9 +71,9 @@ _CB_MOST_GAMMA = 15.0
 
 
 def _require_cloudbench(artifact: LESReferenceArtifact) -> dict:
-    setup = artifact.les_setup or {}
-    if not str(setup.get("source", "")).startswith("CloudBench"):
+    if not is_cloudbench(artifact):
         raise ValueError(f"{artifact.case_name}: not a CloudBench artifact")
+    setup = artifact.les_setup
     recipe = setup.get("forcing_recipe") or {}
     for key, want in (("subsidence", "theta_l and q_t, first-order upwind"),
                       ("nudge_targets", "frame 0 theta_l and q_t"),
@@ -139,10 +144,7 @@ def build_cloudbench_scm(artifact: LESReferenceArtifact, turbulence, *, forcing_
     ``<site>/<month>/<exp>/sounding.csv``, checked against the artifact's hash."""
     setup = _require_cloudbench(artifact)
     par = setup["parameters"]
-    name = re.fullmatch(r"cloudbench_s(\d+)_m\d+_.+", artifact.case_name)
-    if name is None:
-        raise ValueError(f"{artifact.case_name}: not a CloudBench case name")
-    site = int(name[1])
+    site = parse_case_name(artifact.case_name)[0]
     path = Path(forcing_dir) / str(site) / str(int(par["month"])) / par["experiment"] / "sounding.csv"
     if _sha256(path) != setup["sounding_sha256"]:
         raise ValueError(f"{artifact.case_name}: {path} is not the sounding the "

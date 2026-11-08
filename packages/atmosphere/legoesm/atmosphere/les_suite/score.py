@@ -138,13 +138,19 @@ def case_score_weights(case_name: str, heights_m: Array) -> Array:
     (user 2026-10-19: the damped layer is not LES truth). No cutoff for a case
     without a sponge; a name that is not a catalog case raises. The cut is decided
     in float64 on the concrete heights."""
-    w = layer_weights_from_heights(heights_m)
     z_sp = sponge_base_for_score(case_name, heights_m)
     if z_sp is None:
-        return w
-    keep = _concrete_heights(case_name, heights_m) <= z_sp
+        return layer_weights_from_heights(heights_m)
+    return weights_below(case_name, heights_m, z_sp)
+
+
+def weights_below(case_name: str, heights_m: Array, z_cut_m: float) -> Array:
+    """Thickness weights with zero weight on every level above ``z_cut_m``,
+    renormalised to 1; decided in float64 on the concrete heights."""
+    w = layer_weights_from_heights(heights_m)
+    keep = _concrete_heights(case_name, heights_m) <= z_cut_m
     if not keep.any():
-        raise ValueError(f"{case_name}: no level lies below the sponge base {z_sp:g} m")
+        raise ValueError(f"{case_name}: no level lies below the cutoff {z_cut_m:g} m")
     w = jnp.where(jnp.asarray(keep), w, 0.0)
     return w / jnp.sum(w)
 

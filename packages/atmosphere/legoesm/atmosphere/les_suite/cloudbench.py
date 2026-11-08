@@ -100,6 +100,10 @@ MICROPHYSICS = MicrophysicsConfig(scheme="kessler",
                                   kessler=KesslerConfig(parameter_set="cloudbench"))
 HELD_OUT_FRACTION = 0.2
 HELD_OUT_SEED = 20261031
+HELD_OUT_FILE = "held_out_sites.json"
+#: A case is stratocumulus iff its cloud cover is at least this, else shallow
+#: cumulus (PI 2026-10-31).
+STRATOCUMULUS_MIN_COVER = 0.5
 SGS_NAME = "smagorinsky"
 _FIELDS = ("u", "v", "w", "theta_li", "q_t", "q_c", "q_r", "T", "rho", "p_ref",
            "rad_heat_src", "theta_li_les_tendency", "q_t_les_tendency")
@@ -107,6 +111,43 @@ _FIELDS = ("u", "v", "w", "theta_li", "q_t", "q_c", "q_r", "T", "rho", "p_ref",
 
 def case_name(site: int, month: int, exp: str) -> str:
     return CASE_NAME.format(site=int(site), month=int(month), exp=exp)
+
+
+def parse_case_name(name: str) -> tuple[int, int, str]:
+    """``(site, month, experiment)`` of a :data:`CASE_NAME`; raises on any other name."""
+    m = re.fullmatch(r"cloudbench_s(\d{3})_m(\d{2})_(.+)", name)
+    if m is None:
+        raise ValueError(f"{name}: not a CloudBench case name")
+    return int(m[1]), int(m[2]), m[3]
+
+
+def case_split(names, stats_path, held_out_path) -> dict:
+    """``{case name: (regime, held_out)}``. Regime from the CloudBench statistics
+    file's ``cloud_cover`` (:data:`STRATOCUMULUS_MIN_COVER`); held out iff the site is
+    in the stored held-out list (written with the artifacts, PI 2026-10-31). Raises
+    for a case missing from the statistics or with a non-finite cover, and for a
+    held-out file that is not this module's draw."""
+    import xarray as xr  # noqa: PLC0415
+
+    rec = json.loads(Path(held_out_path).read_text())
+    if (rec.get("fraction"), rec.get("seed")) != (HELD_OUT_FRACTION, HELD_OUT_SEED):
+        raise ValueError(f"{held_out_path}: fraction/seed {rec.get('fraction')}/"
+                         f"{rec.get('seed')}, expected {HELD_OUT_FRACTION}/{HELD_OUT_SEED}")
+    held = {int(s) for s in rec["held_out_sites"]}
+    out = {}
+    with xr.open_dataset(stats_path) as ds:
+        cover = ds["cloud_cover"].load()
+    for name in names:
+        site, month, exp = parse_case_name(name)
+        try:
+            c = float(cover.sel(site=site, month=month, experiment=exp))
+        except KeyError:
+            raise ValueError(f"{name}: not in the statistics file {stats_path}") from None
+        if not np.isfinite(c):
+            raise ValueError(f"{name}: cloud cover {c} in {stats_path}")
+        regime = "stratocumulus" if c >= STRATOCUMULUS_MIN_COVER else "shallow_cumulus"
+        out[name] = (regime, site in held)
+    return out
 
 
 def _pad_z(f, bc):
