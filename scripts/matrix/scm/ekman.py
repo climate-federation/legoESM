@@ -25,6 +25,7 @@ import sys
 
 import jax.numpy as jnp
 
+from legoesm.atmosphere.idealized.rcemip_initial_conditions import RCE_CELL_AREA_M2
 from legoesm import constants
 from legoesm.atmosphere.physics import (
     ConvectionConfig,
@@ -89,6 +90,8 @@ def build_scm(
         sigma_top=sigma_top,
         forcing=forcing,
         time_integrator="forward_euler",
+        # mynn25 (WRF port) reads q_c and the GCM cell area (votes T1a/T2a/T3b)
+        q_c_profile=jnp.zeros(nlev), cell_area_m2=RCE_CELL_AREA_M2,
     )
 
 
@@ -108,7 +111,7 @@ def run(args: argparse.Namespace) -> int:
     scm.run(nsteps=nsteps)
     u_low = float(scm.state.u.data[0, 0, 0, -1])
     v_low = float(scm.state.v.data[0, 0, 0, -1])
-    qke_low = float(scm.phys_state.qke[0, -1])
+    qke_low = float(scm.phys_state.qke[0, 0, -1])   # (ncol, 3, nlev) carry: qke slot
     T_low = float(scm.state.T.data[0, 0, 0, -1])
     speed_low = (u_low ** 2 + v_low ** 2) ** 0.5
     veer = jnp.rad2deg(jnp.arctan2(v_low, u_low))
