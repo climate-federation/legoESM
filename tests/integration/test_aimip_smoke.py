@@ -71,24 +71,6 @@ def test_aimip_classical_params_as_dict_within_bounds():
         )
 
 
-def test_aimip_classical_params_to_tiedtke_preserves_defaults():
-    """``to_tiedtke_config`` at defaults equals the canonical TiedtkeConfig."""
-    from legoesm.atmosphere.physics.convection.config import TiedtkeConfig
-    from legoesm.training.aimip_params import AIMIPClassicalParams
-    params = AIMIPClassicalParams.from_defaults()
-    cfg = params.to_tiedtke_config()
-    canon = TiedtkeConfig()
-    for field in (
-        "tau_M_u_relax", "tau_MC_proxy", "cape_threshold",
-        "downdraft_alpha", "downdraft_RH_min",
-    ):
-        assert math.isclose(
-            float(getattr(cfg, field)),
-            float(getattr(canon, field)),
-            rel_tol=1e-3, abs_tol=1e-3,
-        ), f"{field}: cfg={getattr(cfg, field)} canon={getattr(canon, field)}"
-
-
 def test_aimip_classical_params_to_louis_preserves_defaults():
     from legoesm.atmosphere.physics.turbulence.config import LouisConfig
     from legoesm.training.aimip_params import AIMIPClassicalParams
@@ -146,8 +128,13 @@ def test_make_aimip_classical_spectral_physics_callable():
     )
     params = AIMIPClassicalParams.from_defaults()
     grid = create_gaussian_grid(21, dealiasing="quadratic")
-    fn = make_aimip_classical_spectral_physics(params, grid, dt=1800.0)
+    fn = make_aimip_classical_spectral_physics(params, grid, dt=1800.0,
+                                               convection_scheme="sbm")
     assert callable(fn)
+    # The classical default convection (tiedtke) is now the WRF port, which
+    # the spectral lane refuses (no omega / dynamics / lagged PBL inputs).
+    with pytest.raises(ValueError, match="spectral lane does not supply"):
+        make_aimip_classical_spectral_physics(params, grid, dt=1800.0)
 
 
 def test_aimip_classical_params_gradient_through_synthetic_loss():

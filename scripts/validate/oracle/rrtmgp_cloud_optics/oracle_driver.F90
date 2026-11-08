@@ -1,4 +1,4 @@
-! RTE-RRTMGP v1.8 cloud-optics oracle driver for
+! RTE-RRTMGP cloud-optics oracle driver for
 ! tests/atmosphere/oracle_fixtures/rrtmgp_cloud_optics.npz.
 ! Unmodified oracle code is called: mo_cloud_optics_rrtmgp%cloud_optics (LUT path)
 ! into a ty_optical_props_1scl (absorption only, the LW reference treatment) and a
@@ -14,7 +14,7 @@ program oracle_driver
   use mo_rte_kind,            only: wp
   use mo_optical_props,       only: ty_optical_props_2str, ty_optical_props_1scl
   use mo_cloud_optics_rrtmgp, only: ty_cloud_optics_rrtmgp
-  use mo_load_cloud_coefficients, only: load_cld_lutcoeff
+  use mo_optics_utils_rrtmgp, only: load_cloud_optics
   implicit none
   character(len=512) :: lutfile, dir, arg
   integer :: ncol, nlay, nbnd, u, icergh
@@ -34,7 +34,7 @@ program oracle_driver
   read(u) clwp, rel, ciwp, rei
   close(u)
 
-  call load_cld_lutcoeff(cop, trim(lutfile))
+  call load_cloud_optics(cop, trim(lutfile))
   call stop_on_err(cop%set_ice_roughness(icergh))
   if (cop%get_nband() /= nbnd) call stop_on_err('band count mismatch')
 

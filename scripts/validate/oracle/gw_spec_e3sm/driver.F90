@@ -20,6 +20,10 @@ program gw_spec_driver
   use gw_convect, only: gw_convect_init, gw_beres_src
   use gw_oro, only: gw_oro_init, gw_oro_src
   use interpolate_data, only: lininterp
+#ifdef MFCC_FILE
+  use gw_beres_table, only: gw_init_beres, bt_maxh => maxh, bt_maxuh => maxuh, &
+       bt_pgwv => pgwv, gw_drag_file
+#endif
   implicit none
   integer :: ncol, pver, pgwv, i, k, l, iu, ou
   integer :: iconv, ifront, ioro, ifix, alpha_mode, itaper, kmode
@@ -48,7 +52,7 @@ program gw_spec_driver
   end type cam_in_t
   type(ptend_t) :: ptend
   type(cam_in_t) :: cam_in
-  character(len=512) :: errstring, fin, fout
+  character(len=512) :: errstring, fin, fout, mfcc_file
 
   call get_command_argument(1, fin); call get_command_argument(2, fout)
   open(newunit=iu, file=trim(fin), status='old', action='read')
@@ -67,7 +71,18 @@ program gw_spec_driver
   if (use_gw_convect) then
      read(iu,*) maxh, maxuh
      allocate(mfcc(maxh,-maxuh:maxuh,-pgwv:pgwv))
+#ifdef MFCC_FILE
+     ! argv(3) = the gw_drag_file netcdf: E3SM's own gw_init_beres reads it
+     ! (gw_drag.F90:513-571, verbatim; see ../gw_beres_table/build.sh) instead of text.
+     if (command_argument_count() < 3) stop 'MFCC_FILE build needs argv(3) = gw_drag_file'
+     call get_command_argument(3, mfcc_file)
+     if (maxh /= bt_maxh .or. maxuh /= bt_maxuh) stop 'mfcc dims differ from gw_drag.F90 maxh/maxuh'
+     bt_pgwv = pgwv
+     gw_drag_file = mfcc_file
+     call gw_init_beres(mfcc)
+#else
      read(iu,*) mfcc
+#endif
   end if
   allocate(pint(ncol,pver+1), pmid(ncol,pver), t(ncol,pver), u(ncol,pver), v(ncol,pver), &
        zm(ncol,pver), dse(ncol,pver), frontgf(ncol,pver), ttend_dp(ncol,pver), &
@@ -151,6 +166,9 @@ program gw_spec_driver
   write(ou,'(a,4i6)') 'hdr', ncol, pver, pgwv, merge(1,0,orographic_only)
   write(ou,'(a,6i6)') 'kidx', kbotbg, kfront, k700, kbotbg_e, kfront_e, k700_e
   write(ou,'(a,1000es25.16e3)') 'alpha', alpha
+#ifdef MFCC_FILE
+  if (use_gw_convect) write(ou,'(a,*(1x,es25.16e3))') 'mfcc', mfcc
+#endif
 
   call gw_prof(ncol, cpair, t, pmid, pint, rhoi, ti, nm, ni)
   call dump2('rhoi', rhoi); call dump2('ni', ni); call dump2('nm', nm)

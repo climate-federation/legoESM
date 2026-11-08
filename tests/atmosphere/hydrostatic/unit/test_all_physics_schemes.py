@@ -282,6 +282,13 @@ class TestMicrophysicsSchemes:
 
     def test_thompson(self):
         state, grid, sigma = _make_hydrostatic_setup()
+        # the WRF port needs the full registry (votes W1a/Y3a): zeros, the
+        # values the bridge used to zero-fill on this dry state
+        from legoesm.core.tracers import make_full_moisture_registry
+        z = jnp.zeros_like(state.T.data)
+        state = state._replace(tracers={
+            n: Field(data=z, name=n, dims=state.T.dims, units="")
+            for n in make_full_moisture_registry().names})
         cfg = _none_config(microphysics=MicrophysicsConfig(scheme="thompson"))
         tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "microphysics/thompson")

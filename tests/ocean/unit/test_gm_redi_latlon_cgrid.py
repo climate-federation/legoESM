@@ -34,7 +34,9 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_tracer_tendency_latlon,
     gm_redi_lateral_mixing_latlon,
     compute_isoneutral_K33_latlon,
+    nemo_iso_a33,
     nemo_iso_lap_tracer_tendency_latlon_cgrid,
+    nemo_iso_w_kappa_sums,
 )
 from tests.legoesm_paths import legoesm_source_path
 
@@ -98,6 +100,506 @@ def _stratified_with_meridional_tilt(n_lat=10, n_lon=20, nlev=5, slope=1e-4):
 
     return (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
             jacobian, rho, T, S, cfg)
+
+
+def test_nemo_a33_source_order_is_exact_under_jit_and_left_fold_fails():
+    """traldf_iso.f90:788-829: exact A33/akz values, including under JIT."""
+    rng = np.random.default_rng(1903)
+    aht = rng.uniform(1.0e-3, 1.0e4, size=(2, 3, 7)).astype(np.float64)
+    aht_v = rng.uniform(1.0e-3, 1.0e4, size=(2, 3, 7)).astype(np.float64)
+    mask = np.ones_like(aht)
+
+    def numpy_nemo_pairs(field, horizontal_axis):
+        a = field
+        b = np.roll(field, +1, axis=horizontal_axis)
+        return ((np.roll(a, +1, axis=2) + b)
+                + (np.roll(b, +1, axis=2) + a))
+
+    def numpy_left_fold(field, horizontal_axis):
+        a = field
+        b = np.roll(field, +1, axis=horizontal_axis)
+        return (((np.roll(a, +1, axis=2) + b)
+                 + np.roll(b, +1, axis=2)) + a)
+
+    expected = (numpy_nemo_pairs(aht, 1), numpy_nemo_pairs(aht_v, 0))
+    left_fold = (numpy_left_fold(aht, 1), numpy_left_fold(aht_v, 0))
+    assert sum(np.count_nonzero(a != b)
+               for a, b in zip(left_fold, expected, strict=True)) > 0
+
+    @jax.jit
+    def traced(u, v, wet):
+        ku, _, kv, _ = nemo_iso_w_kappa_sums(
+            u, wet, wet, aht_v=v, source_ordered=True)
+        return ku, kv
+
+    got = traced(jnp.asarray(aht), jnp.asarray(aht_v), jnp.asarray(mask))
+    for actual, want in zip(got, expected, strict=True):
+        np.testing.assert_array_equal(np.asarray(actual), want)
+
+    wi = rng.uniform(-1.0e-2, 1.0e-2, size=aht.shape).astype(np.float64)
+    wj = rng.uniform(-1.0e-2, 1.0e-2, size=aht.shape).astype(np.float64)
+    zahu, zahv = expected[0] * np.float64(0.25), expected[1] * np.float64(0.25)
+    term_u = (zahu * wi) * wi
+    term_v = (zahv * wj) * wj
+    expected_ah = term_u + term_v
+
+    @jax.jit
+    def traced_a33(u, v, wet, sx, sy):
+        return nemo_iso_a33(
+            u, wet, wet, wet, sx, sy,
+            jnp.ones(wet.shape[:2]), jnp.ones(wet.shape[:2]), wet,
+            msc=False, aht_v=v, evaluation="nemo_literal",
+            source_ordered=True)[0]
+
+    got_ah = traced_a33(
+        jnp.asarray(aht), jnp.asarray(aht_v), jnp.asarray(mask),
+        jnp.asarray(wi), jnp.asarray(wj))
+    np.testing.assert_array_equal(np.asarray(got_ah), expected_ah)
+
+    e1u = rng.uniform(4.0e3, 1.2e5, size=mask.shape[:2]).astype(np.float64)
+    e2v = rng.uniform(4.0e3, 1.2e5, size=mask.shape[:2]).astype(np.float64)
+    e3w2 = rng.uniform(4.0, 2.5e3, size=mask.shape).astype(np.float64)
+    dt = np.float64(10800.0)
+    up = lambda a: np.roll(a, +1, axis=2)
+    im1 = lambda a: np.roll(a, +1, axis=1)
+    jm1 = lambda a: np.roll(a, +1, axis=0)
+    u0 = (aht + up(aht)) / ((e1u * e1u)[..., None])
+    u1 = (im1(aht) + up(im1(aht))) / ((im1(e1u) * im1(e1u))[..., None])
+    v0 = (aht_v + up(aht_v)) / ((e2v * e2v)[..., None])
+    v1 = (jm1(aht_v) + up(jm1(aht_v))) / ((jm1(e2v) * jm1(e2v))[..., None])
+    akz_h = ((u0 + u1) + (v0 + v1)) * np.float64(0.25)
+    zcoef0 = dt * (akz_h + expected_ah / e3w2)
+    expected_akz = (np.maximum(zcoef0 - np.float64(0.5), np.float64(0.0))
+                    * e3w2) * (np.float64(1.0) / dt)
+
+    @jax.jit
+    def traced_akz(u, v, wet, sx, sy, metric_u, metric_v, thickness2, step):
+        return nemo_iso_a33(
+            u, wet, wet, wet, sx, sy, metric_u, metric_v, thickness2,
+            dt=step, msc=True, aht_v=v, evaluation="nemo_literal",
+            source_ordered=True)[1]
+
+    got_akz = traced_akz(
+        jnp.asarray(aht), jnp.asarray(aht_v), jnp.asarray(mask),
+        jnp.asarray(wi), jnp.asarray(wj), jnp.asarray(e1u), jnp.asarray(e2v),
+        jnp.asarray(e3w2), jnp.asarray(dt))
+    assert jax.config.x64_enabled
+    np.testing.assert_array_equal(np.asarray(got_akz), expected_akz)
+
+    # Fixed plant: the former implementation multiplies by reciprocal metrics,
+    # left-folds all four terms, and divides by dt at the final statement.
+    inv_e1u2 = 1.0 / (e1u ** 2)
+    inv_e2v2 = 1.0 / (e2v ** 2)
+    legacy_h = np.float64(0.25) * (
+        (aht + up(aht)) * inv_e1u2[..., None]
+        + (im1(aht) + up(im1(aht))) * im1(inv_e1u2)[..., None]
+        + (aht_v + up(aht_v)) * inv_e2v2[..., None]
+        + (jm1(aht_v) + up(jm1(aht_v))) * jm1(inv_e2v2)[..., None])
+    legacy_zcoef0 = dt * (legacy_h + expected_ah / e3w2)
+    legacy_akz = (np.maximum(
+        legacy_zcoef0 - np.float64(0.5), np.float64(0.0)) * e3w2 / dt)
+    assert np.count_nonzero(legacy_akz != expected_akz) == 13
+
+
+def test_redi_a33_source_ordering_config_changes_operator_bits():
+    """Run the config-selected A33 branch through production GM/Redi consumers."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.grids.tripole import create_synthetic_tripole
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        orca2_l2_isoneutral_gm_redi,
+    )
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_isoneutral_K33_latlon,
+    )
+
+    prev_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid_a33 = create_synthetic_tripole(4, 6, dtype=jnp.float64)
+        base_z_a33 = create_ocean_z_star(4, 400.0)
+        st_a33 = rest_state_latlon_cgrid_ocean(
+            grid_a33, base_z_a33, T_water_init_C=20.0, T_deep=2.0,
+            S_uniform=35.0, H_max=400.0)
+        raw2 = np.ones((4, 6), dtype=np.float64)
+        raw3 = np.broadcast_to(
+            np.asarray(base_z_a33.dz_ref), st_a33.T.data.shape).copy()
+        zc_a33 = create_partial_cell_coordinate(
+            create_z_star_from_thicknesses(
+                np.asarray(base_z_a33.dz_ref),
+                nemo_e3t_0_m=raw3 * 1.0000001,
+                nemo_e3w_0_m=raw3 * 1.0000003,
+                nemo_hu_0_m=raw2 * 400.0,
+                nemo_hv_0_m=raw2 * 400.0,
+                nemo_e1e2t_m=np.asarray(grid_a33.area) * 1.0000007,
+                nemo_e1e2u_m=np.asarray(grid_a33.dx_u * grid_a33.dy_u)[:, 1:],
+                nemo_e1e2v_m=np.asarray(grid_a33.dx_v * grid_a33.dy_v)[1:, :],
+                nemo_e2u_m=np.asarray(grid_a33.dy_u)[:, 1:],
+                nemo_e1v_m=np.asarray(grid_a33.dx_v)[1:, :],
+            ),
+            st_a33.H_bathy.data,
+        )
+        rng_a33 = np.random.default_rng(1903)
+        T_a33 = st_a33.T.data + jnp.asarray(
+            0.8 * rng_a33.standard_normal(st_a33.T.data.shape))
+        S_a33 = st_a33.S.data + jnp.asarray(
+            0.2 * rng_a33.standard_normal(st_a33.S.data.shape))
+        eta_a33 = jnp.asarray(
+            0.15 * rng_a33.standard_normal(st_a33.eta.data.shape))
+        aht_3d = jnp.asarray(
+            rng_a33.uniform(1.0e-3, 1.0e4, size=st_a33.T.data.shape))
+        cfg_a33_base = orca2_l2_isoneutral_gm_redi()._replace(
+            nemo_slope_north_fold=False,
+            slope_n2_evaluation="recompute",
+            slope_prd_evaluation="density_roundtrip",
+            slope_depth_evaluation="legacy_jacobian_t_surface",
+            redi_w_slope_stage_evaluation="redi_tuple",
+            redi_flux_reference_thickness_evaluation="tpoint_alias",
+            redi_flux_stored_face_ratios=False,
+            redi_a33_evaluation="nemo_literal",
+        )
+
+        def selected_tendency(flag):
+            cfg = cfg_a33_base._replace(
+                msc_stabilize=True, redi_a33_source_ordering=flag)
+            dT, dS = gm_redi_tracer_tendency_latlon(
+                T_a33, S_a33, eta_a33, st_a33.H_bathy.data, grid_a33, zc_a33,
+                cfg, eos="nemo_eos80", mask=st_a33.land_mask.data,
+                u_mask=st_a33.u_mask.data, v_mask=st_a33.v_mask.data,
+                kappa_redi_override=aht_3d, dt=300.0,
+            )
+            return np.asarray(dT).view(np.uint64), np.asarray(dS).view(np.uint64)
+
+        def selected_k33(flag):
+            cfg = cfg_a33_base._replace(
+                msc_stabilize=False, redi_a33_source_ordering=flag)
+            k33 = compute_isoneutral_K33_latlon(
+                T_a33, S_a33, eta_a33, st_a33.H_bathy.data, grid_a33, zc_a33,
+                cfg, eos="nemo_eos80", mask=st_a33.land_mask.data,
+                u_mask=st_a33.u_mask.data, v_mask=st_a33.v_mask.data,
+                kappa_redi_override=aht_3d, dt=300.0,
+            )
+            return np.asarray(k33).view(np.uint64)
+
+        dt_on, ds_on = selected_tendency(True)
+        dt_off, ds_off = selected_tendency(False)
+        # Re-pinned with the card's own EOS (nemo_eos80): the S-EOS-on-linear
+        # fixture this pinned before is now rejected for slope_n2='nemo_bn2'.
+        assert np.count_nonzero(dt_on != dt_off) == 2
+        assert np.count_nonzero(ds_on != ds_off) == 1
+        assert dt_on[1, 2, 0] == np.uint64(13730951617157274263)
+        assert dt_off[1, 2, 0] == np.uint64(13730951617157274259)
+
+        k33_on = selected_k33(True)
+        k33_off = selected_k33(False)
+        assert np.count_nonzero(k33_on != k33_off) == 6
+        assert k33_on[0, 4, 0] == np.uint64(4484438105626536215)
+        assert k33_off[0, 4, 0] == np.uint64(4484438105626536216)
+    finally:
+        set_policy(prev_policy)
+
+
+def test_orca2_l2_config_selects_every_new_redi_operand_route():
+    """The record-free certified L2 constructor reaches all six new fields."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        orca2_l2_isoneutral_gm_redi,
+    )
+
+    cfg = orca2_l2_isoneutral_gm_redi()
+    assert cfg.slope_uv_source_rounding is True
+    assert cfg.redi_flux_reference_thickness_evaluation == "nemo_native"
+    assert cfg.redi_flux_geometry_stage == "rk3_kmm"
+    assert cfg.nemo_slope_north_fold is True
+    assert cfg.redi_a33_source_ordering is True
+    assert cfg.redi_flux_stored_face_ratios is True
+
+
+def test_orca2_l2_new_routes_reach_the_record_free_operator(monkeypatch):
+    """Exercise the five formerly attribute-only fields at their consumers."""
+    from legoesm.grids.tripole import create_synthetic_tripole
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        orca2_l2_isoneutral_gm_redi,
+    )
+
+    setup = _stratified_with_meridional_tilt(n_lat=5, n_lon=6, nlev=4)
+    (grid, base_z, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+     rho, T, S, _) = setup
+    tripole = create_synthetic_tripole(5, 6, dtype=jnp.float64)
+    grid = tripole._replace(
+        fold=tripole.fold._replace(pivot_row_stored=True))
+    raw = np.broadcast_to(np.asarray(base_z.dz_ref), T.shape).copy()
+    z_coord = create_partial_cell_coordinate(
+        create_z_star_from_thicknesses(
+            np.asarray(base_z.dz_ref), nemo_e3t_0_m=raw,
+            nemo_e3w_0_m=raw),
+        H_bathy)
+    cfg = orca2_l2_isoneutral_gm_redi()._replace(
+        slope_prd_evaluation="density_roundtrip",
+        redi_w_slope_stage_evaluation="redi_tuple",
+        gm_bolus_advection="through_fct",
+    )
+    seen = {
+        "source_round": [], "mesh": 0, "preserve": [], "face_grid": [],
+        "mask_north_fold": [], "operator": [], "treguier_final": [],
+        "k33_source_ordered": [], "k33_round_calls": [],
+    }
+    from types import SimpleNamespace
+
+    def depth_spy(ssh, bathy, zc, dtype, **kwargs):
+        seen["source_round"].append(kwargs["source_round"])
+        stretch = 1.0 + jnp.asarray(ssh, dtype=dtype) / bathy
+        dz = jnp.asarray(zc.dz_ref, dtype=dtype)
+        gdept = jnp.cumsum(dz) - 0.5 * dz
+        gdepw = jnp.cumsum(dz) - dz
+        return (gdept * stretch[..., None],
+                gdepw * stretch[..., None], stretch)
+
+    def mesh_spy(_zc, _grid, umask3, vmask3, dtype, nlev):
+        seen["mesh"] += 1
+        e3 = jnp.asarray(_zc.nemo_e3t_0, dtype=dtype)[..., :nlev]
+        e3u = jnp.broadcast_to(e3[:, :1], umask3.shape)
+        e3v = jnp.broadcast_to(e3[:1, :1], vmask3.shape)
+        return SimpleNamespace(
+            e3u_0=e3u, e3v_0=e3v,
+            umask3=umask3, vmask3=vmask3)
+
+    def face_spy(*args, **kwargs):
+        if "preserve_north_fold" in kwargs:
+            seen["preserve"].append(kwargs["preserve_north_fold"])
+            seen["face_grid"].append(kwargs.get("grid") is grid)
+        # The downstream operator is spied too; retaining the resolved native
+        # reference arrays is enough to prove this routing boundary.
+        return args[2], args[3]
+
+    orig_face_masks = gm_module.nemo_iso_face_masks
+
+    def face_masks_spy(*args, **kwargs):
+        seen["mask_north_fold"].append(kwargs.get("north_fold"))
+        return orig_face_masks(*args, **kwargs)
+
+    def operator_spy(q, *_args, **kwargs):
+        seen["operator"].append(kwargs)
+        return jnp.zeros_like(q)
+
+    def treguier_spy(*_args, **kwargs):
+        seen["treguier_final"].append(kwargs.get("source_ordered_final"))
+        return jnp.zeros_like(T[:, :, 0])
+
+    orig_round = gm_module.nemo_source_round
+    round_counter = [0]
+
+    def round_spy(x):
+        round_counter[0] += 1
+        return orig_round(x)
+
+    def a33_spy(*args, **kwargs):
+        seen["k33_source_ordered"].append(kwargs.get("source_ordered"))
+        return jnp.zeros_like(args[0]), jnp.zeros_like(args[0])
+
+    monkeypatch.setattr(gm_module, "_nemo_qco_live_slope_depths", depth_spy)
+    monkeypatch.setattr(gm_module, "nemo_qco_resolved_mesh_operands", mesh_spy)
+    monkeypatch.setattr(gm_module, "nemo_qco_live_face_thicknesses", face_spy)
+    monkeypatch.setattr(gm_module, "nemo_iso_face_masks", face_masks_spy)
+    monkeypatch.setattr(
+        gm_module, "nemo_iso_lap_tracer_tendency_latlon_cgrid", operator_spy)
+    monkeypatch.setattr(
+        gm_module, "compute_treguier_kappa_gm_nemo_native", treguier_spy)
+    monkeypatch.setattr(gm_module, "nemo_iso_a33", a33_spy)
+    monkeypatch.setattr(gm_module, "nemo_source_round", round_spy)
+    gm_redi_tracer_tendency_latlon(
+        T, S, eta, H_bathy, grid, z_coord, cfg,
+        eos="nemo_eos80", mask=mask, u_mask=u_mask, v_mask=v_mask,
+        redi_flux_eta=eta + 0.125)
+    gm_module.native_treguier_kappa_for_state(
+        rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
+        make_eos_fn("linear", None), jacobian, eta, H_bathy,
+        None, None, None, None, jnp.ones_like(eta) * 1.0e-4,
+        constants.rho_ocean, constants.g, constants.Omega)
+    for flag in (True, False):
+        round_counter[0] = 0
+        compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord,
+            cfg._replace(redi_a33_source_ordering=flag),
+            eos="nemo_eos80", mask=mask, u_mask=u_mask, v_mask=v_mask,
+            dt=300.0)
+        seen["k33_round_calls"].append(round_counter[0])
+
+    assert seen["source_round"] == [True, True, True, True]
+    assert seen["mesh"] == 1
+    assert seen["preserve"] == [True]
+    assert seen["face_grid"] == [True]
+    assert seen["mask_north_fold"] == [True, True, True]
+    assert seen["treguier_final"] == [True]
+    assert seen["k33_source_ordered"] == [True, False]
+    assert seen["k33_round_calls"][0] == seen["k33_round_calls"][1] + 1
+    assert len(seen["operator"]) == 2
+    for routed in seen["operator"]:
+        assert routed["face_thickness_u"] is not None
+        assert routed["face_thickness_v"] is not None
+        assert routed["a33_source_ordering"] is True
+        assert routed["horizontal_flux_evaluation"] == "nemo_literal_divergence"
+        assert routed["area_reciprocal_evaluation"] == "nemo_stored"
+        assert routed["north_fold"] is True
+
+
+def test_redi_flux_geometry_stage_changes_live_flux_result():
+    """Run step-entry and RK3-Kmm flux geometry through LatLonCGridOceanModel.step."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.grids.tripole import create_synthetic_tripole
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        orca2_l2_isoneutral_gm_redi,
+    )
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig,
+    )
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VerticalMixingConfig,
+    )
+    from legoesm.ocean.state import (
+        LatLonCGridOceanConfig,
+        OceanSurfaceForcing,
+    )
+
+    prev_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        grid_gm = create_synthetic_tripole(4, 6, dtype=jnp.float64)
+        base_z_gm = create_ocean_z_star(3, 300.0)
+        st_gm = rest_state_latlon_cgrid_ocean(
+            grid_gm, base_z_gm, T_water_init_C=20.0, T_deep=2.0,
+            S_uniform=35.0, H_max=300.0)
+        raw3 = np.broadcast_to(
+            np.asarray(base_z_gm.dz_ref), st_gm.T.data.shape).copy()
+        raw2 = np.ones(st_gm.T.data.shape[:2], dtype=np.float64)
+        zc_gm = create_partial_cell_coordinate(
+            create_z_star_from_thicknesses(
+                np.asarray(base_z_gm.dz_ref),
+                nemo_e3t_0_m=raw3,
+                nemo_e3w_0_m=raw3,
+                nemo_hu_0_m=raw2 * 300.0,
+                nemo_hv_0_m=raw2 * 300.0,
+                nemo_e1e2t_m=np.asarray(grid_gm.area),
+                nemo_e1e2u_m=np.asarray(grid_gm.dx_u * grid_gm.dy_u)[:, 1:],
+                nemo_e1e2v_m=np.asarray(grid_gm.dx_v * grid_gm.dy_v)[1:, :],
+                nemo_e2u_m=np.asarray(grid_gm.dy_u)[:, 1:],
+                nemo_e1v_m=np.asarray(grid_gm.dx_v)[1:, :],
+            ),
+            st_gm.H_bathy.data,
+        )
+        rng_gm = np.random.default_rng(71)
+        st_gm = st_gm._replace(
+            u=st_gm.u.replace(data=jnp.asarray(
+                0.08 * rng_gm.standard_normal(st_gm.u.data.shape))),
+            v=st_gm.v.replace(data=jnp.asarray(
+                0.08 * rng_gm.standard_normal(st_gm.v.data.shape))),
+            T=st_gm.T.replace(data=st_gm.T.data + jnp.asarray(
+                0.6 * rng_gm.standard_normal(st_gm.T.data.shape))),
+            S=st_gm.S.replace(data=st_gm.S.data + jnp.asarray(
+                0.15 * rng_gm.standard_normal(st_gm.S.data.shape))),
+            eta=st_gm.eta.replace(data=jnp.asarray(
+                0.25 * rng_gm.standard_normal(st_gm.eta.data.shape))),
+        )
+        gm_base = orca2_l2_isoneutral_gm_redi()._replace(
+            nemo_slope_north_fold=False,
+            slope_n2_evaluation="recompute",
+            slope_prd_evaluation="density_roundtrip",
+            slope_depth_evaluation="legacy_jacobian_t_surface",
+            redi_w_slope_stage_evaluation="redi_tuple",
+            redi_flux_reference_thickness_evaluation="tpoint_alias",
+            redi_flux_stored_face_ratios=False,
+        )
+        forcing_gm = OceanSurfaceForcing(
+            q_nonsolar=jnp.asarray(
+                -120.0 + 15.0 * rng_gm.standard_normal((4, 6)),
+                dtype=jnp.float64),
+            sw_down=jnp.asarray(
+                180.0 + 20.0 * rng_gm.standard_normal((4, 6)),
+                dtype=jnp.float64),
+            chl=jnp.full((4, 6), 0.1, dtype=jnp.float64),
+        )
+
+        def selected(stage, *, stored_thickness=True):
+            cfg = LatLonCGridOceanConfig.from_flat(
+                barotropic_solver="explicit_substep",
+                momentum_time_integrator="rk3_ws",
+                tracer_time_integrator="rk3_ws",
+                tracer_advection="fct2",
+                momentum_advection="flux_form",
+                momentum_flux_scheme="none",
+                vertical_momentum_scheme="none",
+                barotropic_slow_forcing_depth_evaluation="min_rule_live",
+                barotropic_face_depth="nemo_ssh_avg",
+                surface_stress_implicit=True,
+                implicit_vertical_mixing=False,
+                rk3_stage3_heat_nemo_written=True,
+                rk3_stage3_tracer_nemo_stored_thickness=stored_thickness,
+                eos="nemo_eos80",   # ORCA2's own EOS (slope_n2='nemo_bn2')
+                n_barotropic_substeps=2,
+                enable_runtime_checks=False,
+                gm_redi=gm_base._replace(redi_flux_geometry_stage=stage),
+                physics=OceanPhysicsConfig(
+                    vertical_mixing=VerticalMixingConfig(scheme="constant"),
+                    lateral_mixing=LateralMixingConfig(scheme="none"),
+                    shortwave_penetration=ShortwavePenetrationConfig(
+                        scheme="nemo_qsr_rgb", nemo_time_step_s=300.0),
+                ),
+            )
+            return LatLonCGridOceanModel(grid_gm, zc_gm, cfg).step(
+                st_gm, 300.0, surface_forcing=forcing_gm)
+
+        with pytest.raises(ValueError, match="rk3_kmm Redi geometry"):
+            selected("rk3_kmm", stored_thickness=False)
+        with pytest.raises(ValueError, match="redi_flux_geometry_stage"):
+            gm_redi_tracer_tendency_latlon(
+                st_gm.T.data, st_gm.S.data, st_gm.eta.data,
+                st_gm.H_bathy.data, grid_gm, zc_gm,
+                gm_base._replace(redi_flux_geometry_stage="invalid"),
+                eos="nemo_eos80", mask=st_gm.land_mask.data,
+                u_mask=st_gm.u_mask.data, v_mask=st_gm.v_mask.data)
+
+        gm_on = selected("rk3_kmm")
+        gm_off = selected("step_entry")
+        t_on = np.asarray(gm_on.T.data).view(np.uint64)
+        t_off = np.asarray(gm_off.T.data).view(np.uint64)
+        s_on = np.asarray(gm_on.S.data).view(np.uint64)
+        s_off = np.asarray(gm_off.S.data).view(np.uint64)
+        assert np.count_nonzero(t_on != t_off) == 18
+        assert np.count_nonzero(s_on != s_off) == 18
+        # Re-pinned with eos='nemo_eos80' (see the a33 test above).
+        assert t_on[1, 0, 0] == np.uint64(4626170872078521070)
+        assert t_off[1, 0, 0] == np.uint64(4626170872078513176)
+    finally:
+        set_policy(prev_policy)
+
+
+def test_orca2_l2_north_fold_selector_reaches_the_slope_guard():
+    """A non-fold grid cannot silently ignore the ORCA pivot selection."""
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        orca2_l2_isoneutral_gm_redi,
+    )
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_nemo_native_slopes,
+    )
+
+    setup = _stratified_with_meridional_tilt(n_lat=5, n_lon=7, nlev=4)
+    (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+     rho, T, S, _) = setup
+    cfg = orca2_l2_isoneutral_gm_redi()._replace(
+        slope_prd_evaluation="density_roundtrip",
+        slope_depth_evaluation="legacy_jacobian_t_surface")
+    with pytest.raises(ValueError, match="stored ORCA T-pivot"):
+        compute_nemo_native_slopes(
+            rho, T, S, mask, u_mask, v_mask, z_coord, grid, cfg,
+            make_eos_fn("linear", None), jacobian=jacobian,
+            eta=eta, H_bathy=H_bathy)
 
 
 def test_nemo_iso_lap_defaults_and_latlon_callers_are_fail_closed():

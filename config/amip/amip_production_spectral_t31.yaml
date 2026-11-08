@@ -1,0 +1,55 @@
+# =============================================================================
+# legoESM AMIP -- the CAM6 production deck on the SPECTRAL COLUMN lane, T31 L32
+# =============================================================================
+# composable physics P4 (fv3_duo_gaps/fu/composable_physics_design.md): the
+# spectral primitive-equation dycore behind the shared column loop (its
+# operator-split step, spectral_column.py), so EVERY physics / land / cadence /
+# forcing row is the MPAS production deck's by inclusion.  Only the grid /
+# dycore rows below differ; `diff` against amip_production.yaml IS the
+# cross-grid configuration table (user rule 2026-10-01/10-09: same
+# configuration on every grid, no improvised deck values).
+include: amip_production.yaml
+
+# ---- grid / dycore -------------------------------------------------------------
+grid_type: gaussian
+resolution: 31              # T31: n_lat 48 x n_lon 96 (quadratic Gaussian grid), ~417 km at the
+                            # equator -- the SAME 48 x 96 columns as the lat-lon-48 deck (C24 class)
+discretization: spectral
+column_lane: true           # the spectral dycore is the dynamics operator of the CAM6 column loop
+time_integrator: ssp_rk54   # D5: the self-starting 5-stage SSP-RK (leapfrog refused on this lane);
+                            # explicit, no semi-implicit substeps
+dt: 450.0                   # decision A rule (MPAS / duo / lat-lon decks): 0.82 x the generic CFL
+                            # limit 0.8 dx / (390 m/s sqrt 2) on the TRUE T31 quadratic-grid spacing
+                            # (417 km, the lat-lon-48 deck's 48 x 96 columns: 605 s -> 496 s), rounded
+                            # DOWN to a divisor of 1800 s -> 450 s (user-approved 2026-10-27).
+                            # FINDING (separate issue, user 2026-10-27): the driver's Gaussian dx
+                            # estimator (cfl.py estimate_min_dx_gaussian) assumes the LINEAR grid
+                            # n_lon = 2(n_max+1) = 64, so its clamp is 906 s (would pass 900 s)
+physics_update_steps: 4     # CAM6: physics every 1800 s (4 x 450 s)
+rad_update_steps: 8         # CAM6 f09: radiation hourly (8 x 450 s); checkpoint_days 30 = 5760
+                            # steps, a multiple of 8 (D-REX-1: checkpoints on radiation boundaries)
+# ---- MPAS-dycore rows of the included deck: inert on this dycore, pinned OFF -------
+# (the MPAS deck's sponge / vertical-advection rows are MPAS numerics; the
+# spectral dycore has its own factory-set del-2 hyperdiffusion (0.5 h
+# e-folding at n_max), 2/3 dealiasing truncation and anchored DRY-mass
+# fixer, inherited; the CAM check_energy_fix global energy fixer
+# (energy_fixer: true, inherited) runs on this lane's split step as on the
+# MPAS / lat-lon lanes).  Values below are the code defaults, spelled out so
+# no row rests on a default.  User 2026-10-27: no div-4 damping on this
+# dycore (the lat-lon-48 deck runs CAM-FV ldiv4, mpas_div_damp4_scale 1.0,
+# so the cross-grid ledger has ONE row that differs) and no top sponge
+# (sponge_tau 0 stands).
+mpas_sponge_del2_top_layers: 0
+mpas_sponge_del2_top_factor: 1.0
+mpas_vert_advection_scheme: upwind
+mpas_div_damp4_scale: 0.0
+mpas_qv_smooth_del2_m2s: 0.0
+mpas_qv_smooth_del4_m4s: 0.0        # refused non-zero on the column lane (edge operator)
+# ---- land IC -------------------------------------------------------------------
+land_ic: data/lmip_soil_ic/soil_ic_spectral_t31_era5T_19790101.npz
+                            # the spun-up soil IC regridded to the T31 Gaussian grid (same recipe /
+                            # source / batch as the MPAS res-6, duo C24 and lat-lon-48 files,
+                            # regrid_land_ic.py at 294495454, from restart_1985_d000h00.npz + ERA5
+                            # 1979-01-01 soil T, built 2026-10-12).  md5 1f4e0e6cd20a5e6b994ea89dee54fa84
+                            # (data/ is not tracked; copy the file beside the deck's data dir).
+                            # adopted (user 2026-10-27), as the lat-lon-48 file was

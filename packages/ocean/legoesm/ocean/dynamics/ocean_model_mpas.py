@@ -324,6 +324,14 @@ class MPASOceanModel(IntegrationMixin):
                     "(build it with nemo_runoff_depth_map, which floors at 1 m) "
                     "— zero/negative cells would silently drop the runoff "
                     "dilution.")
+        _rdsl = getattr(self.config, "runoff_depth_spread_levels", None)
+        if _rdsl is not None:
+            import numpy as _np
+            _rdsl_np = _np.asarray(_rdsl)
+            if (not _np.issubdtype(_rdsl_np.dtype, _np.integer)) or (_rdsl_np < 1).any():
+                raise ValueError(
+                    "runoff_depth_spread_levels must be an integer map >= 1 "
+                    "(build it with nemo_runoff_level_count).")
         # Reserved distributed-PCG knobs (single-rank stock CG today; see
         # barotropic_implicit_mpas.py Step-4 TODO).  Validate so the
         # schema stays consistent with the lat-lon path.
@@ -1231,7 +1239,8 @@ class MPASOceanModel(IntegrationMixin):
             )
             _F_entry, _entry_heat = real_freshwater_entry(
                 freshwater, F_slow_eta, h_k_new, mask, config.rho_0,
-                T_corrected, runoff_spread_m=resolve_runoff_spread_arg(config))
+                T_corrected, runoff_spread_m=resolve_runoff_spread_arg(config),
+                runoff_t_floor_sharpness=config.runoff_temperature_floor_sharpness)
             _dS_dil, _dT_dil = real_freshwater_dilution_tendencies(
                 F_slow_eta, S_corrected, T_corrected, h_k_new, mask,
                 F_entry=_F_entry, entry_heat=_entry_heat)

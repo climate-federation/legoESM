@@ -49,6 +49,11 @@ def test_helper_follows_scheme_pins_and_orography():
     assert ap.aimip_inactive_fields(
         cloud_scheme="xu_randall", microphysics="sundqvist", gwd="none",
         subgrid_orography=True) == frozenset()
+    # smagorinsky's default WRF km_opt=3 arm reads none of the Lilly knobs
+    assert ap.aimip_inactive_fields(
+        cloud_scheme="xu_randall", microphysics="sundqvist", gwd="none",
+        subgrid_orography=True, turbulence="smagorinsky") == frozenset(
+        "atm.turb.SmagorinskyConfig." + f for f in ("C_s", "Pr_t", "l_mix_max"))
 
 
 def _run_aimip_bundle(monkeypatch):
@@ -139,7 +144,9 @@ def test_wb_classical_tree_holds_only_the_selected_schemes_knobs(monkeypatch):
         microphysics="morrison", cloud="xu_randall", radiation="gray",
         surface_bulk_scheme="constant")
     assert _array_knobs(cl) == want
-    assert "sbm_tau_c" not in want and "tiedtke_epsilon_deep" in want
+    # tiedtke (WRF port) has no trainables: no convection knob is wanted
+    assert "sbm_tau_c" not in want and not any(k.startswith("tiedtke_")
+                                                for k in want)
     assert type(cl.raw_values["sbm_tau_c"]) is float   # same leaf, no grad
     arr, _ = eqx.partition(cl, eqx.is_inexact_array)
     assert arr.raw_values["sbm_tau_c"] is None

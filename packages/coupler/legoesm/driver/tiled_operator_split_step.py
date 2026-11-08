@@ -271,7 +271,9 @@ def build_tile_step_unified(grid, sigma, config, kt: int, *,
         traits = convection_scheme_traits(config.convection)
         if (getattr(traits, "is_w_grid_consumer", False)
                 or getattr(traits, "is_mc_consumer", False)
-                or getattr(traits, "is_simple_mc_consumer", False)):
+                or getattr(traits, "is_simple_mc_consumer", False)
+                # WRF Tiedtke diagnoses omega by horizontal divergence
+                or config.convection == "tiedtke"):
             raise NotImplementedError(
                 f"build_tile_step_unified: convection={config.convection!r} "
                 "consumes horizontal grid operators (w-grid / moisture "

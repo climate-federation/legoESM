@@ -367,7 +367,7 @@ class TestSmagorinsky:
         p_half = jnp.linspace(8e4, 1.0e5, nlev + 1)[None, :].repeat(ncol, 0)
         p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
         rho = p_full / (constants.R_d * 280.0)
-        cfg = SmagorinskyConfig()
+        cfg = SmagorinskyConfig(stability_form="lilly")
 
         def run(shear, dTdz):
             u = shear * z_full
@@ -405,7 +405,7 @@ class TestSmagorinsky:
         p_half = jnp.linspace(8e4, 1.0e5, nlev + 1)[None, :].repeat(ncol, 0)
         p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
         rho = p_full / (constants.R_d * 280.0)
-        cfg = SmagorinskyConfig()
+        cfg = SmagorinskyConfig(stability_form="lilly")
         u = jnp.zeros((ncol, nlev))            # ZERO resolved shear
         v = jnp.zeros((ncol, nlev))
         q_v = jnp.full((ncol, nlev), 1e-3)

@@ -321,6 +321,10 @@ def _base_turbulence(scheme: str, *, clubb_cloud_buoyancy: bool = True,
     if scheme == "clubb":
         sub = config_cls(surface=surf, cloud_buoyancy=clubb_cloud_buoyancy,
                          cloud_source=clubb_cloud_source)
+    elif scheme == "smagorinsky":
+        # the CBL tuning campaign is a Lilly-arm study (its C_s/Pr_t/l_mix_max are
+        # unread by the WRF km_opt=3 default arm)
+        sub = config_cls(surface=surf, stability_form="lilly")
     else:
         sub = config_cls(surface=surf)
     turb = TurbulenceConfig(scheme=scheme, **{scheme: sub})

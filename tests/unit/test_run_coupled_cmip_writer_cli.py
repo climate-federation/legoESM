@@ -19,16 +19,17 @@ _FIELDS = ("cmip_drs_tree", "cmip_institution_id", "cmip_source_id",
 
 
 def test_defaults_are_outputconfig_defaults():
-    kw = mod.cmip_writer_output_kwargs(mod.build_parser().parse_args([]))
+    out = mod._coupled_atm_config(mod.build_parser().parse_args([])).output
     out0 = OutputConfig()
-    assert kw == {f: getattr(out0, f) for f in _FIELDS}
+    assert {f: getattr(out, f) for f in _FIELDS} == {
+        f: getattr(out0, f) for f in _FIELDS}
 
 
 def test_flags_round_trip_to_outputconfig():
     args = mod.build_parser().parse_args([
         "--cmip-drs-tree", "--cmip-institution-id", "INST-X",
         "--cmip-source-id", "SRC-1-0", "--cmip-variant-label", "r2i1p1f1"])
-    out = OutputConfig(**mod.cmip_writer_output_kwargs(args))
+    out = mod._coupled_atm_config(args).output
     assert (out.cmip_drs_tree, out.cmip_institution_id, out.cmip_source_id,
             out.cmip_variant_label) == (True, "INST-X", "SRC-1-0", "r2i1p1f1")
 

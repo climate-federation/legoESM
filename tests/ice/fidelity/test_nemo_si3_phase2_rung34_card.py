@@ -11,15 +11,13 @@ import netCDF4
 import numpy as np
 import pytest
 from legoesm.core.precision import get_policy
-from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
+from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import (
     ICE_RHEO_TRACERS,
     build_ice_rheo_card,
     ice_rheo_air_stress,
     step_ice_rheo_card,
     validate_ice_rheo_card,
 )
-
-from legoesm import constants
 
 _ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 _ORACLE_GATE = Path(__file__).parents[3] / (
@@ -67,8 +65,8 @@ def oracle_card():
     with netCDF4.Dataset(_ROOT / "mesh_mask.nc") as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in names}
     with netCDF4.Dataset(_ROOT / "output.init_ice.nc") as dataset:
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
-    return build_ice_rheo_card(frame, mesh, ocean_temperature_k), frame, mesh
+        sst_m = np.asarray(dataset["sst"][0])
+    return build_ice_rheo_card(frame, mesh, sst_m), frame, mesh
 
 
 def _mesh_xy(value: np.ndarray) -> np.ndarray:
@@ -147,6 +145,15 @@ def test_rung34_card_rejects_frankenstein_selector(oracle_card) -> None:
     card, _, _ = oracle_card
     with pytest.raises(ValueError, match="selector composition"):
         validate_ice_rheo_card(card._replace(ridging_scheme="lipscomb2007"))
+    rdg, cor = card.ridging_config, card.cor_config
+    for wrong in (
+        card._replace(ridging_config=rdg._replace(rn_murdg=4.0)),
+        card._replace(ridging_config=rdg._replace(ln_distf_lin=True, ln_distf_exp=False)),
+        card._replace(ridging_config=rdg._replace(rn_porordg=0.3)),
+        card._replace(cor_config=cor._replace(rn_himin=0.2)),
+    ):
+        with pytest.raises(ValueError, match="resolved deck"):
+            validate_ice_rheo_card(wrong)
 
 
 def test_rung34_kt1_full_dynall_gate(oracle_card) -> None:

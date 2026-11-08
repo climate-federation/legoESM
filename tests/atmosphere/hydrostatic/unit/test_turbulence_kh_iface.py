@@ -22,7 +22,7 @@ from legoesm import constants  # noqa: E402
 from legoesm.thermo import saturation_mixing_ratio  # noqa: E402
 from legoesm.atmosphere.physics._shared import half_to_full  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.config import (  # noqa: E402
-    CLUBBLiteConfig, HoltslagBovilleConfig, LouisConfig, MYNN25Config, SmagorinskyConfig,
+    CLUBBLiteConfig, HoltslagBovilleConfig, LouisConfig, SmagorinskyConfig,
     TKEConfig, TurbulentEDMFConfig,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_lite_turbulence  # noqa: E402
@@ -31,7 +31,6 @@ from legoesm.atmosphere.physics.turbulence.holtslag_boville import (  # noqa: E4
     holtslag_boville_turbulence,
 )
 from legoesm.atmosphere.physics.turbulence.louis import louis_turbulence  # noqa: E402
-from legoesm.atmosphere.physics.turbulence.mynn25 import mynn25_turbulence  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.smagorinsky import (  # noqa: E402
     smagorinsky_turbulence,
 )
@@ -66,8 +65,6 @@ def _run(name):
         return holtslag_boville_turbulence(u, v, T, q_v, *common, dt=300.0,
                                            config=HoltslagBovilleConfig())
     tke0 = jnp.full((NCOL, NLEV), 0.5)
-    if name == "mynn25":
-        return mynn25_turbulence(u, v, T, q_v, tke0, *common, dt=300.0, config=MYNN25Config())[0]
     if name == "tke":
         return tke_turbulence(u, v, T, q_v, tke0, *common, dt=300.0, config=TKEConfig())[0]
     if name == "edmf":
@@ -81,7 +78,7 @@ def _run(name):
 
 # ysu exports the WRF exch_h layout (K of the interface below each level), not
 # a full-level average: its Kh_iface contract is pinned in test_ysu_route.py.
-@pytest.mark.parametrize("name", ["smagorinsky", "louis", "holtslag_boville", "mynn25"])
+@pytest.mark.parametrize("name", ["smagorinsky", "louis", "holtslag_boville"])
 def test_interface_native_schemes_export_kh_iface(name):
     out = _run(name)
     k = np.asarray(out.Kh_iface)

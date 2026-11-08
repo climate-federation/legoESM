@@ -104,9 +104,9 @@ class PhysicsState(NamedTuple):
         this override, anchoring ``T[..., -1]`` to the prescribed value
         collapses the sensible-flux gradient — Phase B codex iter-1
         finding).
-    qke : jax.Array, shape (ncol, nlev)
-        Prognostic ``qke = 2·TKE`` [m²/s²] for the MYNN-2.5 turbulence
-        scheme (Nakanishi-Niino 2009).  Carried in a slot **distinct**
+    qke : jax.Array, shape (ncol, nlev); (ncol, 3, nlev) under mynn25
+        WRF MYNN-EDMF's turbulence state, packed ``(qke = 2·TKE [m²/s²],
+        qsq [kg²/kg²], el [m])`` along axis 1, top-down.  Carried in a slot **distinct**
         from :attr:`tke` so a restart that switches schemes between
         MY-2.5 (``tke``) and MYNN-2.5 (``qke``) cannot silently feed
         the wrong moment as energy — the active scheme reads its own
@@ -284,6 +284,25 @@ class PhysicsState(NamedTuple):
     # CAM6 pbuf CLDO: the previous macmic sub-step's ast, set after the
     # microphysics (micro_mg_cam.F90:1829); 0 at cold start (:1047).
     cloud_fraction_old: jnp.ndarray = None
+    # OpenIFS 49r1 ecRad between-call carry (radiation="ecrad_ifs" only,
+    # votes L3a/S1a): the RadiationCarry RADHEATN reads, packed to
+    # (ncol, 5*(nlev+1)+13) by ecrad_ifs.lane.pack_carry.  Written by every
+    # full radiation call, read by every step.  ``None`` on every other run
+    # (no leaves; the checkpoint skips it).  Appended LAST.
+    ecrad_carry: jnp.ndarray = None
+    # WRF Tiedtke inputs from the PREVIOUS step's turbulence (on every lane
+    # turbulence runs after convection): the boundary-layer moisture tendency
+    # (ncol, nlev) [kg/kg/s] (WRF ``qvpblten``) and the surface water flux
+    # (ncol,) [kg/m^2/s, positive up] (WRF ``qfx``).  Zeros at cold start;
+    # materialised only when convection is ``tiedtke`` (None otherwise, so no
+    # other run carries them).  Appended LAST.
+    turb_tendency_qv: jnp.ndarray = None
+    evap_sfc: jnp.ndarray = None
+    # OPTIONAL per-call prescribed large-scale vertical velocity [m/s,
+    # positive up], same layout as T: the SCM's ``SCMForcing.subsidence_w``
+    # (zeros without it), from which WRF Tiedtke's omega is formed on a grid
+    # with no divergence operator.  Per-call INPUT, reset like dyn_tendency_*.
+    dyn_w_ls: jnp.ndarray = None
     # turbulence=ysu: the WRF revised MM5 surface layer's carried state,
     # shape (ncol, 6) in ``turbulence.ysu.SFCLAY_FIELDS`` order (ust, mol,
     # znt, hfx, qfx, pblh), seeded at WRF's cold start; None for every other
@@ -303,11 +322,11 @@ class PhysicsState(NamedTuple):
 # must carry them across its intermediate carry updates so every sub-module of
 # the same call sees them; only the call's final update may clear them.
 PHYSSTATE_PER_CALL_INPUTS = (
-    "dyn_tendency_T", "dyn_tendency_qv",
+    "dyn_tendency_T", "dyn_tendency_qv", "dyn_w_ls",
     "surface_wth_override", "surface_wqv_override",
 )
 PHYSSTATE_INPUT_FIELDS = frozenset({
-    "dyn_tendency_T", "dyn_tendency_qv",
+    "dyn_tendency_T", "dyn_tendency_qv", "dyn_w_ls",
     # per-job physics-cadence cache: carried across steps, never persisted
     "held_physics",
     "surface_wth_override", "surface_wqv_override",
@@ -381,8 +400,11 @@ def init_physics_state(
     else:
         tke = jnp.zeros((ncol, nlev), dtype=dtype)
     if _turb_traits.energy_field == "qke":
-        qke_min = getattr(turb_cfg.mynn25, "tke_min", 1e-10)
-        qke = jnp.full((ncol, nlev), qke_min, dtype=dtype)
+        # WRF MYNN-EDMF (qke, qsq, el), packed (ncol, 3, nlev); zeros, which
+        # the cold-start (initflag) step overwrites (votes N1, N3).
+        from legoesm.atmosphere.physics.turbulence.mynn_wrf_adapter import (
+            cold_start_carry)
+        qke = cold_start_carry(ncol, nlev, dtype)
     else:
         qke = jnp.zeros((ncol, nlev), dtype=dtype)
 
@@ -411,6 +433,10 @@ def init_physics_state(
         conv_prog_profile = conv_prog_profile.at[:, -1].set(
             conv_cfg.edmf.a_u_init
         )
+
+    _tiedtke = conv_cfg.scheme == "tiedtke"
+    turb_tendency_qv = jnp.zeros((ncol, nlev), dtype=dtype) if _tiedtke else None
+    evap_sfc = jnp.zeros((ncol,), dtype=dtype) if _tiedtke else None
 
     # --- Convection stochastic AR1 noise state (Bechtold/IFS) ---
     conv_stoch_state = jnp.zeros((ncol,), dtype=dtype)
@@ -491,8 +517,20 @@ def init_physics_state(
         clubb_wp2_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         clubb_kh_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         cloud_fraction_old=jnp.zeros((ncol, nlev), dtype=dtype),
+        ecrad_carry=_ecrad_carry_seed(physics_config, ncol, nlev, dtype),
+        turb_tendency_qv=turb_tendency_qv,
+        evap_sfc=evap_sfc,
         sfclay=_init_sfclay(ncol, physics_config, dtype),
     )
+
+
+def _ecrad_carry_seed(physics_config, ncol, nlev, dtype):
+    """Zero carry for radiation="ecrad_ifs" (the first step of every run is
+    a full radiation call, so the zeros are never read), else None."""
+    if getattr(physics_config.radiation, "scheme", None) != "ecrad_ifs":
+        return None
+    from legoesm.atmosphere.physics.radiation.ecrad_ifs.lane import carry_width
+    return jnp.zeros((ncol, carry_width(nlev)), dtype=dtype)
 
 
 def _init_sfclay(ncol, physics_config, dtype):
@@ -596,5 +634,23 @@ def update_physics_state(phys_state, updates):
         clubb_kh_iface=updates.get("clubb_kh_iface", phys_state.clubb_kh_iface),
         cloud_fraction_old=updates.get(
             "cloud_fraction_old", phys_state.cloud_fraction_old),
+        ecrad_carry=updates.get("ecrad_carry", phys_state.ecrad_carry),
+        # Tiedtke-only slots: written only when materialised (see the field).
+        turb_tendency_qv=(None if phys_state.turb_tendency_qv is None
+                          else updates.get("turb_tendency_qv",
+                                           phys_state.turb_tendency_qv)),
+        evap_sfc=_tiedtke_evap_update(phys_state.evap_sfc, updates),
+        dyn_w_ls=updates.get("dyn_w_ls", None),
         sfclay=updates.get("sfclay", phys_state.sfclay),
     )
+
+
+def _tiedtke_evap_update(current, updates):
+    if current is None:
+        return None
+    if "evap_sfc" in updates and updates["evap_sfc"] is None:
+        raise ValueError(
+            "convection='tiedtke' reads the previous step's surface water "
+            "flux (WRF qfx) from the turbulence scheme, but this turbulence "
+            "scheme returned evap_sfc=None")
+    return updates.get("evap_sfc", current)

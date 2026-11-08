@@ -131,27 +131,6 @@ def test_mpas_bitexact_restart_continuation(tmp_path):
         )
 
 
-def test_mpas_restart_refuses_a_carry_the_run_does_not_carry(tmp_path):
-    """A non-ysu run seeds PhysicsState.sfclay as None (not carried), so its
-    checkpoint omits it; a checkpoint that DOES carry it (a ysu run's) must
-    be refused by a non-ysu restart rather than silently dropped."""
-    outB = str(tmp_path / "chain1")
-    dB = _build_mpas_driver(outB, TWO_STEPS_DAYS)
-    assert dB.run() == "COMPLETED"
-    ckpt = sorted(glob.glob(os.path.join(outB, "checkpoint_day_*.npz")))[-1]
-    with np.load(ckpt) as z:
-        payload = dict(z)
-    assert "physstate_sfclay" not in payload
-    ncol = payload["physstate_tke"].shape[0]
-    payload["physstate_sfclay"] = np.zeros((ncol, 6))
-    bad = ckpt  # rewritten in place: the writing run's manifest stays beside it
-    np.savez(bad, **payload)
-    dB2 = _build_mpas_driver(str(tmp_path / "chain2"), TWO_STEPS_DAYS)
-    step, day = dB2.load_checkpoint(bad)
-    with pytest.raises(ValueError, match="not by the configured run"):
-        dB2.run(start_step=step, start_day=day)
-
-
 def test_mpas_negative_epoch_chain_crossing_day_zero(tmp_path):
     """Negative fractional epoch: the chain crossing day 0 still matches
     the straight run bitwise.

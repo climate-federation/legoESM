@@ -542,7 +542,11 @@ _WB_CLASSICAL_KEYS = frozenset({
     "convective_rain_to_surface", "orbital_insolation",
     "param_fixed", "param_init",
     "rad_update_interval_steps", "rrtmgp_column_chunk_size",
-    "rrtmgp_gpoint_batch_size", "spatial_init_std",
+    "aerosol_ccn_file", "aerosol_climatology_years", "aerosol_file",
+    "aerosol_reference_aod",
+    "rrtmgp_compute_fp32", "rrtmgp_gpoint_batch_size", "rrtmgp_overhead_layer",
+    "volcanic_aerosol_file", "volcanic_aerosol_lw",
+    "spatial_init_std",
     "spatial_seed", "spatial_surface", "surface_bulk", "trainable_schemes",
     "turbulence",
 })
@@ -668,7 +672,27 @@ def make_loss_config(cfg, yml):
     valid = set(LossConfig()._fields)
     kwargs = {k: (tuple(v) if isinstance(v, list) else v)
               for k, v in lb.items() if k in valid}
-    return LossConfig(**kwargs)
+    lc = LossConfig(**kwargs)
+    # The WB objective (combined_loss on one deterministic rollout) has no
+    # persistence-normalised or ensemble branch; refuse rather than ignore.
+    unsupported = [name for name, on in (
+        ("persistence_normalize", lc.persistence_normalize),
+        ("ensemble_size > 1", lc.ensemble_size > 1),
+        ("w_afcrps > 0", lc.w_afcrps > 0.0),
+    ) if on]
+    if unsupported:
+        raise ValueError(
+            f"WeatherBench training does not implement {unsupported}; these "
+            "loss settings would be silently ignored. Remove them from the deck.")
+    # A negative scale flips the sign of the |error| (CRPS) terms, which divide
+    # by the scale itself rather than its square, so the loss would reward error.
+    negative = [f for f in ("T_scale", "wind_scale", "q_scale", "ps_scale",
+                            "T_resid_scale", "wind_resid_scale",
+                            "q_resid_scale", "ps_resid_scale")
+                if getattr(lc, f) < 0.0]
+    if negative:
+        raise ValueError(f"WeatherBench loss scales must be >= 0, got negative {negative}.")
+    return lc
 
 
 def _spectral_pe_config(yml):
@@ -920,6 +944,7 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
                         cloud_scheme=_schemes["cloud_scheme"],
                         microphysics=_schemes["microphysics_scheme"],
                         gwd=_schemes["gwd_scheme"],
+                        turbulence=_schemes["turbulence_scheme"],
                         subgrid_orography=getattr(
                             grid, "subgrid_topo_stddev", None) is not None,
                         param_fixed=_param_fixed)
@@ -990,12 +1015,22 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
                 f"{_gpt_batch}; use the scan path by setting it to 1 rather "
                 "than 0 or a negative value.")
 
+        # A quoted "false" would be truthy under bool(); refuse non-bools.
+        _rad_flags = {k: _cl.get(k, False) for k in (
+            "rrtmgp_overhead_layer", "rrtmgp_compute_fp32")}
+        for _k, _v in _rad_flags.items():
+            if not isinstance(_v, bool):
+                raise ValueError(
+                    f"classical.{_k} must be a YAML boolean, got {_v!r}")
+
         def make_physics_fn(p):
             return make_aimip_classical_spectral_physics(
                 p, grid, dt, radiation=_radiation, split_rad=True,
                 rad_update_interval_steps=_rad_interval,
                 rrtmgp_gpoint_batch_size=_gpt_batch,
                 rrtmgp_column_chunk_size=_col_chunk,
+                rrtmgp_overhead_layer=_rad_flags["rrtmgp_overhead_layer"],
+                rrtmgp_compute_fp32=_rad_flags["rrtmgp_compute_fp32"],
                 param_overrides=(_param_fixed or None),
                 orbital_insolation=bool(
                     _cl.get("orbital_insolation", False)),
@@ -1505,7 +1540,79 @@ def prescribed_surface_planes(sl, grid):
     return planes
 
 
-def build_spectral_forcing(sl, grid, time_ns, year):
+_NOLEAP_MONTH_START = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
+
+
+def wb_aerosol_spec(yml):
+    """(AerosolConfig, years, lw_active) from the deck's classical block, or
+    None when it names no ``aerosol_file`` (every older deck: no aerosol).
+
+    The AMIP production aerosol, as its driver builds it, but on a
+    calendar-month CLIMATOLOGY over ``aerosol_climatology_years`` [first,
+    last]: the files end 2014 and the WB windows are 2015-2020 (owner
+    decision 2026-10-16)."""
+    cl = dict(yml.get("classical", {}) or {})
+    if not cl.get("aerosol_file"):
+        return None
+    from legoesm.forcing.external import AerosolConfig
+
+    years = cl.get("aerosol_climatology_years")
+    lw = cl.get("volcanic_aerosol_lw", False)
+    if (not isinstance(years, list) or len(years) != 2
+            or not all(isinstance(y, int) for y in years)
+            or years[0] > years[1]):
+        raise ValueError("classical.aerosol_climatology_years must be "
+                         f"[first, last] integer years, got {years!r}")
+    if not isinstance(lw, bool):
+        raise ValueError(
+            f"classical.volcanic_aerosol_lw must be a YAML boolean, got {lw!r}")
+    volc = str(cl.get("volcanic_aerosol_file", "") or "")
+    acfg = AerosolConfig(
+        enabled=True, source="climatology", path=str(cl["aerosol_file"]),
+        ccn_path=str(cl.get("aerosol_ccn_file", "") or ""),
+        use_reference_if_missing=True,
+        reference_aod_550=float(cl.get("aerosol_reference_aod", 0.03)),
+        volcanic_enabled=bool(volc), volcanic_path=volc,
+        volcanic_lw_enabled=(lw and bool(volc)),
+        hold_outside_file_years=False)
+    return acfg, tuple(range(years[0], years[1] + 1)), (lw and bool(volc))
+
+
+def wb_aerosol_forcing(spec, grid, sigma, carry, time_ns):
+    """``aerosol_od`` / ``aerosol_ccn_aod`` / ``aerosol_lw_od`` for one sample:
+    the AMIP driver's fields (``aerosol_layer_fields``) at the sample's
+    calendar date in each climatology year, averaged.  Columns are the
+    initial state's (p_s, T) -- the stratospheric placement uses its
+    tropopause, as the driver's daily refresh does -- and the fields are held
+    over the forecast window.  The date is put on the readers' noleap clock;
+    29 February reads 28 February."""
+    import jax.numpy as jnp
+
+    from legoesm.forcing.surface_utils import (
+        aerosol_layer_fields,
+        stratospheric_layer_weight,
+    )
+
+    acfg, years, lw_active = spec
+    t = np.datetime64(time_ns, "s").astype(object)
+    day = min(t.day, 28) if t.month == 2 else t.day
+    sim_day = (_NOLEAP_MONTH_START[t.month - 1] + day - 1
+               + (t.hour * 3600 + t.minute * 60 + t.second) / 86400.0)
+    p_s = jnp.asarray(carry.p_s).reshape(-1)
+    p_half = jnp.asarray(sigma.pressure_at_half(p_s))
+    p_full = jnp.asarray(sigma.pressure_at_full(p_s))
+    lat_col = jnp.repeat(jnp.asarray(grid.lat), int(grid.n_lon))
+    temp = jnp.asarray(carry.T).reshape(p_full.shape)
+    w_strat = stratospheric_layer_weight(p_half, lat_col, p_full, temp)
+    per_year = [aerosol_layer_fields(
+        acfg._replace(start_year=y), sim_day, lat_col, p_half, w_strat,
+        active=True, lw_active=lw_active, dtype=p_s.dtype) for y in years]
+    od, ccn, lw = (jnp.mean(jnp.stack(f), axis=0) for f in zip(*per_year))
+    return {"aerosol_od": od, "aerosol_ccn_aod": ccn, "aerosol_lw_od": lw}
+
+
+def build_spectral_forcing(sl, grid, time_ns, year, *, aerosol=None,
+                           sigma=None, ic_carry=None):
     """The traced per-sample forcing dict of the spectral core, from a slice.
 
     ONE builder for the training loader and the WB2 forecast eval, so a model
@@ -1535,6 +1642,9 @@ def build_spectral_forcing(sl, grid, time_ns, year):
     # the output dict is identical to the pre-helper version.
     for _key, _plane_2d in prescribed_surface_planes(sl, grid).items():
         forcing[_key] = _plane_2d.reshape(-1)
+    if aerosol is not None:
+        forcing.update(wb_aerosol_forcing(aerosol, grid, sigma, ic_carry,
+                                          time_ns))
     return forcing
 
 
@@ -1606,6 +1716,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     # structurally different from the initial condition it is scored against.
     # Carrying turbulence energy across steps on this path is separate work.
     _micro = wb_ic_microphysics(cfg.mode, yml)
+    _aerosol = wb_aerosol_spec(yml) if cfg.mode == "physics" else None
 
 
     def build(year, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
@@ -1616,7 +1727,9 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
         ic = era5_to_spectral_carry(s_ic, grid, sigma, target_phis=tp, microphysics=_micro)
         target = era5_to_spectral_carry(s_tg, grid, sigma, target_phis=tp, microphysics=_micro)
         # times stays the REMOTE calendar: i_ic is always a remote index
-        forcing = build_spectral_forcing(sst_src, grid, times[i_ic], year)
+        forcing = build_spectral_forcing(sst_src, grid, times[i_ic], year,
+                                         aerosol=_aerosol, sigma=sigma,
+                                         ic_carry=ic)
         return (ic, target, forcing)
 
     mine = list(_sharded_indices(
@@ -1708,10 +1821,12 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
         tp = era5_terrain_product(s_ic, grid)
         _skin = bool(config.ice_skin_prognostic)
         ic = era5_to_latlon_carry(s_ic, grid, sigma, target_phis=tp,
-                                  microphysics=_micro, ice_skin_prognostic=_skin)
+                                  microphysics=_micro, ice_skin_prognostic=_skin,
+                                  convection=config.convection)
         target = era5_to_latlon_carry(s_tg, grid, sigma, target_phis=tp,
                                       microphysics=_micro,
-                                      ice_skin_prognostic=_skin)
+                                      ice_skin_prognostic=_skin,
+                                      convection=config.convection)
         sst = regrid_2d_to_gaussian(sst_src.sst, sst_src.lat, sst_src.lon, grid)
         # Prescribed surface planes the slice carries (spectral names),
         # regridded exactly like sst, then renamed to the driver-path

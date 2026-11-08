@@ -71,6 +71,11 @@ class NEMORecipe(NamedTuple):
     # runs NEMO's wave-driven mixing.  None everywhere else, so every
     # existing recipe is unchanged.
     iwm_forcing: object = None
+    # Full-column tracer damping supplied by cards whose deck selects
+    # ``tra_dmp``.  The stored target is the kt=1 field; multi-step drivers
+    # refresh its T/S references with the card's climatology helper each step.
+    # None everywhere else, preserving all inherited execution paths.
+    tracer_damping: object = None
 
 
 @dataclass(frozen=True)
@@ -879,7 +884,7 @@ def nemo_gyre_wind(lat_deg, t_seconds: float = 0.0):
     return sr((-ztaun) * sine), sr(ztaun * sine)
 
 
-def _nemo_ddpdd_sum_2d(values, mask):
+def nemo_ddpdd_sum_2d(values, mask):
     """NEMO reproducible masked sum in Fortran ``ji``-inner order."""
     import jax
     import jax.numpy as jnp
@@ -907,7 +912,7 @@ def nemo_gyre_zero_mean_emp(emp_raw, wet):
 
     values = jnp.asarray(emp_raw, dtype=jnp.float64)
     mask = jnp.asarray(wet, dtype=values.dtype)
-    mean = sr(_nemo_ddpdd_sum_2d(values, mask) / _nemo_ddpdd_sum_2d(mask, mask))
+    mean = sr(nemo_ddpdd_sum_2d(values, mask) / nemo_ddpdd_sum_2d(mask, mask))
     return sr(values - sr(mean * mask))
 
 

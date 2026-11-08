@@ -176,7 +176,12 @@ def apply_les_tuned_turbulence(
             "running LIBRARY DEFAULTS untuned. Tuned schemes: %s.",
             turb.scheme, cls_name, sorted(overrides))
         return turb
-    return turb._replace(**{field: apply_param_overrides(sub, scheme_overrides)})
+    tuned = apply_param_overrides(sub, scheme_overrides)
+    if cls_name == "SmagorinskyConfig":
+        # The Smagorinsky LES fit was made on the Lilly arm; its C_s, Pr_t and
+        # l_mix_max mean nothing to the WRF km_opt=3 default arm.
+        tuned = tuned._replace(stability_form="lilly")
+    return turb._replace(**{field: tuned})
 
 
 def _apply_clubb(turb, field, sub, overrides):

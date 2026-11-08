@@ -110,14 +110,13 @@ def test_flag_reaches_every_lane(monkeypatch):
         physics_pipeline._build_rrtmgp_radiation_fn(ExperimentConfig(
             radiation="rrtmgp", rrtmgp_overhead_layer=True))
     assert seen["cfg"].overhead_layer is True
-    # MPAS / duo-column and spectral lanes build RRTMGPConfig inline in the
-    # driver: every construction must forward the flag.
-    for mod in (model_driver, physics_pipeline):
-        src = inspect.getsource(mod)
-        n_cfg = len(re.findall(r"\bRRTMGPConfig\(\n", src))
-        n_flag = src.count('rrtmgp_overhead_layer", False)') + src.count(
-            "rrtmgp_overhead_layer', False)")
-        assert n_cfg >= 1 and n_flag == n_cfg, mod.__name__
+    # MPAS / duo-column and spectral lanes take the same builder the spy above
+    # went through: no driver construction may bypass it.
+    driver_src = inspect.getsource(model_driver)
+    assert not re.search(r"\bRRTMGPConfig\(", driver_src)
+    assert driver_src.count("rrtmgp=rrtmgp_config_from_experiment(") == 2
+    assert len(re.findall(r"\bRRTMGPConfig\(",
+                          inspect.getsource(physics_pipeline))) == 1
 
     # integration (MPAS / spectral) forwards o3_top_vmr with the override.
     from legoesm.atmosphere.physics.radiation import integration
@@ -140,8 +139,8 @@ def test_cli_and_cam6_decks():
     assert coupled_parser().parse_args(
         ["--rrtmgp-overhead-layer"]).rrtmgp_overhead_layer is True
     from scripts.run import run_coupled
-    assert ("rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,"
-            in inspect.getsource(run_coupled.main))
+    assert run_coupled._coupled_atm_config(coupled_parser().parse_args(
+        ["--rrtmgp-overhead-layer"])).rrtmgp_overhead_layer is True
     from legoesm.driver.run_config_yaml import read_yaml_with_includes
     for deck in ("amip_production.yaml", "amip_production_fv3duo_c24.yaml"):
         d = read_yaml_with_includes(_REPO / "config" / "amip" / deck)

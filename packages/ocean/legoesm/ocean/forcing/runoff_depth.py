@@ -86,3 +86,58 @@ def nemo_runoff_depth_map(
     h = np.minimum(h, np.maximum(np.asarray(H_bathy, dtype=np.float64),
                                  h_dry))
     return np.maximum(h, h_dry)
+
+
+def nemo_runoff_level_count(
+    runoff_monthly: np.ndarray,
+    gdept_1d: np.ndarray,
+    *,
+    dep_max: float = _RN_DEP_MAX_DEFAULT,
+    rnf_max: float = _RN_RNF_MAX_DEFAULT,
+) -> np.ndarray:
+    """Per-cell NEMO ``nk_rnf``: number of top levels receiving runoff.
+
+    Transcribes sbcrnf.F90:415-433 (``ln_rnf_depth_ini``)::
+
+        h = (rn_dep_max/rn_rnf_max) * max_month(rnf)     where rnf > 0
+        h = MIN(h, gdept_0(mbkt))
+        jk = 2 ; DO WHILE (jk < mbkt .AND. gdept_0(jk) < h) ; jk = jk+1
+        nk_rnf = jk  (1 where the climatology is zero)
+
+    i.e. the first ``jk >= 2`` with ``gdept(jk) >= h``, capped at ``mbkt``.
+    ``gdept_0(jk) = gdept_1d(jk)`` on every full cell ``jk < mbkt`` and
+    increases with ``jk``, so ``nk = 2 + #{jk >= 2 : gdept_1d(jk) < h}``
+    before the cap; the ``gdept_0(mbkt)`` clamp only lets the loop reach
+    that same cap.  The cap is NOT applied here: the runtime weights
+    (:class:`legoesm.ocean.freshwater.RunoffSpreadLevels`) never weight a
+    level below the seafloor, which is NEMO's ``nk <= mbkt`` cap for every
+    column with ``mbkt >= 2``.
+
+    KNOWN DIFFERENCE (``mbkt = 1``): NEMO's loop starts at ``jk = 2``, so a
+    one-level column gets ``nk_rnf = 2`` and its ``h_rnf`` includes the DRY
+    level 2's ``e3t``; here that column keeps all its runoff in its one wet
+    level (``h_rnf = e3t(1)``), so no water or salt enters a dry cell
+    (vote V3).  ORCA1 has no such runoff column (minimum ``mbkt`` 10).
+
+    Parameters
+    ----------
+    runoff_monthly : (n_month, ...)  runoff climatology [kg/m^2/s]; the
+        month axis is reduced with ``max`` as sbcrnf's read loop
+    gdept_1d : (nlev,)  reference T-point depths [m, positive down]
+    dep_max, rnf_max : ``rn_dep_max`` [m], ``rn_rnf_max`` [kg/m^2/s]
+    """
+    rnf = np.asarray(runoff_monthly, dtype=np.float64)
+    if rnf.ndim < 2:
+        raise ValueError("runoff_monthly must be (n_month, ...); got shape "
+                         f"{rnf.shape}")
+    zr = rnf.max(axis=0)
+    g = np.asarray(gdept_1d, dtype=np.float64)
+    if g.ndim != 1 or g.size < 2 or not np.all(np.diff(g) > 0.0):
+        raise ValueError("gdept_1d must be a 1-D strictly increasing ladder "
+                         f"of >= 2 levels; got shape {g.shape}")
+    if dep_max <= 0.0 or rnf_max <= 0.0:
+        raise ValueError(
+            f"dep_max ({dep_max}) and rnf_max ({rnf_max}) must be > 0")
+    h = (dep_max / rnf_max) * zr
+    n_below = np.sum(g[None, 1:] < h.reshape(-1, 1), axis=-1).reshape(zr.shape)
+    return np.where(zr > 0.0, 2 + n_below, 1).astype(np.int32)

@@ -94,6 +94,7 @@ def _fixture():
         iceberg_vmask=zero,
     )
     config = SI3CGridAEVPConfig(
+        north_fold="none",
         scheme="si3_aevp",
         staggering="si3_c_grid",
         dt_s=_DT_S,

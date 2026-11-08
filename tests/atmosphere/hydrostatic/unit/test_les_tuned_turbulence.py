@@ -20,8 +20,9 @@ from legoesm.atmosphere.physics.turbulence.les_tuned import (
 
 # The 7 FLAT closures (params land directly on the sub-config). CLUBB is tuned
 # too but nested (CLUBBParams) — covered by dedicated tests below, not here.
-# ysu has no tunable coefficients (WRF YSU + WRF surface layer, R4 vote X17).
-_TUNED_SCHEMES = ["smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+# mynn25 (WRF MYNN-EDMF, R3) and ysu (WRF YSU + WRF surface layer, R4 vote X17)
+# have no tunable coefficients.
+_TUNED_SCHEMES = ["smagorinsky", "louis", "tke", "clubb_lite",
                   "holtslag_boville", "edmf"]
 
 

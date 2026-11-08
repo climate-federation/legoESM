@@ -680,12 +680,14 @@ class TestGWDE3SMCAMGrad:
         path (``q0^2/AL``), not the table index — see the companion
         exactly-zero documentation in the class docstring of the table test.
         """
-        from legoesm.atmosphere.physics.gravity_wave_drag.config import E3SMCAMConfig
+        from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+            E3SMBeresConfig, E3SMCAMConfig)
         from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import e3sm_cam_gwd
 
         col = self._col(ncol=3, nlev=24)
         ncol, nlev = col["u"].shape
-        cfg = E3SMCAMConfig(source="convective", pgwv=4, dc=5.0, effgw=0.4)
+        cfg = E3SMCAMConfig(source="convective", pgwv=4, dc=5.0, effgw=0.4,
+                            beres=E3SMBeresConfig(use_stand_in_table=True))  # explicit stand-in
         # Deep heating (~ surface to mid-troposphere) so the depth test fires.
         sig = col["sigma_full"]
         netdt = 8.0e-4 * jnp.exp(-((sig - 0.6) / 0.25) ** 2)[None, :] * (
@@ -734,7 +736,8 @@ class TestGWDE3SMExcludedKnobsGrad:
         base = gcfg.E3SMCAMConfig(
             source=source, pgwv=4, dc=5.0, effgw=0.4,
             orographic=gcfg.E3SMOrographicConfig(sgh_default=200.0),
-            frontal=gcfg.E3SMFrontalConfig(taubgnd=1.5e-3, frontgfc=1e-10))
+            frontal=gcfg.E3SMFrontalConfig(taubgnd=1.5e-3, frontgfc=1e-10),
+            beres=gcfg.E3SMBeresConfig(use_stand_in_table=True))   # explicit stand-in
         kw = {}
         if source == "frontal":
             kw["frontgf_col"] = jnp.full((ncol, nlev), 1e-9)
@@ -1180,7 +1183,8 @@ def _turb_column(ncol=8, nlev=12, seed=1):
 
 
 # scheme -> (carries a prognostic TKE/qke carry?)
-TURB_CARRY = ["tke", "mynn25", "clubb_lite", "edmf"]
+# mynn25 (WRF port, own grad tests in test_mynn25_oracle) dropped in R3
+TURB_CARRY = ["tke", "clubb_lite", "edmf"]
 TURB_DIAGNOSTIC = ["ysu", "holtslag_boville"]
 TURB_ALL = TURB_CARRY + TURB_DIAGNOSTIC
 
@@ -1308,7 +1312,7 @@ class TestTurbulenceLeafGrad:
     # (a Richardson number / buoyancy-flux stability function evaluated this
     # step) vs schemes that diagnose K purely from the carried TKE and a
     # geometric length scale.  Measured, not assumed — see the two tests below.
-    TURB_K_STABILITY = ["mynn25", "ysu", "holtslag_boville"]
+    TURB_K_STABILITY = ["ysu", "holtslag_boville"]
     TURB_K_FROM_CARRY = ["tke", "clubb_lite", "edmf"]
 
     @pytest.mark.parametrize("scheme", TURB_K_STABILITY)
