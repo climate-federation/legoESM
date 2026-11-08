@@ -43,7 +43,7 @@ def test_scheme_list_matches_the_dispatch():
     assert "none" not in drv.TURBULENCE_SCHEMES and "ysu" not in drv.TURBULENCE_SCHEMES
     # mynn25 dropped in R3 (WRF port: no SCM-LES inputs, no tunables)
     assert "tke" not in drv.TURBULENCE_SCHEMES
-    assert len(drv.TURBULENCE_SCHEMES) == 7
+    assert len(drv.TURBULENCE_SCHEMES) == 6
 
 
 @pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)
