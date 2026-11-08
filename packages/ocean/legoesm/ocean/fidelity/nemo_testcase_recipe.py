@@ -7,6 +7,7 @@ the shared lat-lon C-grid model; this module contains no solver or oracle I/O.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from pathlib import Path
 from typing import NamedTuple
@@ -36,6 +37,7 @@ from legoesm.ocean.physics.convection.config import (
 )
 from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConfig
 from legoesm.ocean.state import ENSVorticityConfig, LatLonCGridOceanConfig
+from legoesm.ocean.sponge import SpongeForcing
 from legoesm.ocean.vertical import (
     NemoEENBarotropicOperands,
     nemo_fe3mask_from_tmask,
@@ -78,6 +80,21 @@ class NEMOTestcaseCard(NamedTuple):
     # leave this unset until their own deck audit is promoted; SWG and GYRE
     # require it at their public validation boundary.
     resolved_namelist: object | None = None
+
+
+class GYRERouting(NamedTuple):
+    """The four explicit routing choices on a resolved GYRE card."""
+
+    tke_shear_step_entry_ssh: bool
+    qsr_kbb_live_stretch: bool
+    qsr_kmm_source_association: bool
+    vmix_eos_use_config_rho0: bool
+
+
+GYRE_MAIN_ROUTING = GYRERouting(True, True, True, True)
+GYRE_LANE_CERTIFIED_ROUTING = GYRERouting(False, False, False, False)
+# DECISION 191 (user, 2026-10-31): the shipped GYRE card keeps main's routing.
+GYRE_CARD_ROUTING = GYRE_MAIN_ROUTING
 
 
 class GyreResolvedNamelist(NamedTuple):
@@ -632,6 +649,9 @@ def _model_config(
             # stage.  On RK3 the canonical nemo_before operand is the same
             # whole-step entry tracer used by the EVD twin below.
             tke_n2_time_level="nemo_before",
+            # Main's shared GYRE path routed zdf_sh2 through the whole-step
+            # entry sea level.  Resolved cards override this explicitly.
+            nemo_sh2_step_entry_ssh=True,
         )
         physics = config.physics._replace(
             vertical_mixing=config.physics.vertical_mixing._replace(
@@ -664,7 +684,9 @@ def _model_config(
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
-                scheme="nemo_qsr_2bd", water_type="I", nemo_time_step_s=14400.0
+                scheme="nemo_qsr_2bd", water_type="I",
+                nemo_time_step_s=14400.0,
+                nemo_qsr_kbb_live_stretch=True,
             ),
             mle=None,
         )
@@ -688,6 +710,8 @@ def _model_config(
             # overrides it back to False, because it resolves the identical
             # program but has never been measured under it.
             nemo_stage_momentum_wzv_split=True,
+            nemo_qsr_stage3_kmm_source_association=True,
+            vmix_eos_use_config_rho0=True,
             vorticity_scheme="ene_total",
             # key_qco e3f_vor = e3f_0vor*(1+r3f); dom_qco_r3c_RK3 builds
             # r3f from the four-cell surface-weighted SSH average
@@ -708,6 +732,7 @@ def _model_config(
             # velocity (dynspg_ts.F90:359,689; nn_bt_flt=3).
             barotropic_coriolis_split="live",
             lateral_viscosity_operator="nemo_div_curl",
+            lateral_viscosity_mask_levels="surface",
             lateral_viscosity_e3_weighting="nemo_e3",
             surface_stress_implicit=True,
             bbl_adv_option=bbl_adv_option,
@@ -785,6 +810,9 @@ def _model_config(
 
     return LatLonCGridOceanConfig.from_flat(
         constants=NEMO_CONSTANTS_CONFIG,
+        # Certified cards keep the masks their records were made with; moving
+        # them to NEMO's 3-D masks is a re-certification, not done here.
+        lateral_viscosity_mask_levels="surface",
         # Resolved ln_TEOS10=.true.; NEMO 5.0.2 eosbn2.F90:1920-2108
         # selects the Roquet TEOS-10 coefficient table and :260-288 evaluates it.
         eos="nemo_teos10",
@@ -1300,6 +1328,7 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
 
 def build_gyre_zco_card(
     namelist: GyreResolvedNamelist = GYRE_SHIPPED_NAMELIST,
+    *, routing: GYRERouting = GYRE_CARD_ROUTING,
 ) -> NEMOTestcaseCard:
     """Certified GYRE from a resolved rotated-beta-plane OMIP deck."""
 
@@ -1405,6 +1434,18 @@ def build_gyre_zco_card(
         whole_step_identity="gyre_vector_ene_c2",
         tke_langmuir_evaluation="nemo_literal",
     )
+    vertical = model_config.physics.vertical_mixing
+    vertical = vertical._replace(tke=vertical.tke._replace(
+        nemo_sh2_step_entry_ssh=routing.tke_shear_step_entry_ssh))
+    shortwave = model_config.physics.shortwave_penetration._replace(
+        nemo_qsr_kbb_live_stretch=routing.qsr_kbb_live_stretch)
+    model_config = model_config._replace(
+        physics=model_config.physics._replace(
+            vertical_mixing=vertical, shortwave_penetration=shortwave),
+        nemo_qsr_stage3_kmm_source_association=(
+            routing.qsr_kmm_source_association),
+        vmix_eos_use_config_rho0=routing.vmix_eos_use_config_rho0,
+    )
     # stprk3 computes rn2b once from Nbb before zdf_phy, which consumes that
     # field in zdf_mxl, and then passes the same rn2b to ldf_slp.  Keep the
     # mixed-layer recurrence and the slope denominator on that one carried
@@ -1461,6 +1502,15 @@ def build_gyre_zco_card(
     )
     validate_nemo_testcase_card(card)
     return card
+
+
+def build_gyre_zco_lane_certified_card(
+    namelist: GyreResolvedNamelist = GYRE_SHIPPED_NAMELIST,
+) -> NEMOTestcaseCard:
+    """The pre-catch-up GYRE program, with all four routes stated."""
+
+    return build_gyre_zco_card(
+        namelist, routing=GYRE_LANE_CERTIFIED_ROUTING)
 
 
 def gyre_surface_boundary_condition(
@@ -1722,16 +1772,27 @@ def apply_orca2_hand_alterations(temperature, salinity):
         red_sea_t[..., k0 - 1:k1] = np.float64(value)
 
 
-def build_orca2_initial_ts(
+_ORCA2_MONTH_CENTRES_DAY = np.asarray(
+    (15.5, 45.0, 74.5, 105.0, 135.5, 166.0,
+     196.5, 227.5, 258.0, 288.5, 319.0, 349.5),
+    dtype=np.float64,
+)
+_ORCA2_YEAR_DAYS = np.float64(365.0)
+_ORCA2_SECONDS_PER_DAY = np.float64(86400.0)
+
+
+def build_orca2_ts_at_step(
     temperature_path,
     salinity_path,
     tmask,
     *,
+    kt: int, dt_s: float,
     apply_hand_alterations: bool = True,
+    mask_evaluation: str = "where_zero",
 ):
-    """ORCA2's independent initial temperature and salinity, as NEMO builds it.
+    """ORCA2's time-interpolated T/S climatology for one NEMO step.
 
-    The executed order is the compiled one: read the monthly input files, do
+    The executed order is the compiled one: select the two monthly records, do
     ``fldread``'s two-record time interpolation, apply the ORCA_R2 hand
     alterations (``dtatsd.f90:218-253``), then mask.  The z/zps branch
     (``dtatsd.f90:307-310``) masks AFTER the copy, which is why the alterations
@@ -1744,25 +1805,241 @@ def build_orca2_initial_ts(
     is what NEMO executes.
     """
 
+    if isinstance(kt, bool) or not isinstance(kt, (int, np.integer)) or kt < 1:
+        raise ValueError(f"kt must be a positive integer, got {kt!r}")
+    if not np.isfinite(dt_s) or dt_s <= 0.0:
+        raise ValueError(f"dt_s must be finite and positive, got {dt_s!r}")
+
     import netCDF4  # noqa: N813
 
-    # fld_read.F90:181-227: at kt=1 (0.0625 d), December and January are
-    # centred at -15.5 and +15.5 d.  Preserve the source multiply-add order.
-    after_weight = np.float64(249.0 / 496.0)
+    # fldread.f90:200-246 uses the half-step date of the current call.  The
+    # no-leap ORCA2 records are centred in each calendar month; extend the
+    # December/January pair across the cyclic yearly seam.
+    elapsed_day = np.float64((np.float64(kt) - np.float64(0.5))
+                             * np.float64(dt_s) / _ORCA2_SECONDS_PER_DAY)
+    year_day = np.float64(elapsed_day % _ORCA2_YEAR_DAYS)
+    after_slot = int(np.searchsorted(
+        _ORCA2_MONTH_CENTRES_DAY, year_day, side="right"))
+    if after_slot == 0:
+        before_index, after_index = 11, 0
+        before_day, after_day = np.float64(-15.5), np.float64(15.5)
+    elif after_slot == 12:
+        before_index, after_index = 11, 0
+        before_day, after_day = np.float64(349.5), np.float64(380.5)
+    else:
+        before_index, after_index = after_slot - 1, after_slot
+        before_day = _ORCA2_MONTH_CENTRES_DAY[before_index]
+        after_day = _ORCA2_MONTH_CENTRES_DAY[after_index]
+    after_weight = np.float64(
+        (year_day - before_day) / (after_day - before_day))
     before_weight = np.float64(1.0) - after_weight
     with netCDF4.Dataset(temperature_path, "r") as ds:
-        t_dec = np.asarray(ds.variables["votemper"][11, :30], dtype=np.float64)
-        t_jan = np.asarray(ds.variables["votemper"][0, :30], dtype=np.float64)
+        t_before = np.asarray(
+            ds.variables["votemper"][before_index, :30], dtype=np.float64)
+        t_after = np.asarray(
+            ds.variables["votemper"][after_index, :30], dtype=np.float64)
     with netCDF4.Dataset(salinity_path, "r") as ds:
-        s_dec = np.asarray(ds.variables["vosaline"][11, :30], dtype=np.float64)
-        s_jan = np.asarray(ds.variables["vosaline"][0, :30], dtype=np.float64)
-    temperature = np.moveaxis(before_weight * t_dec + after_weight * t_jan, 0, -1)
-    salinity = np.moveaxis(before_weight * s_dec + after_weight * s_jan, 0, -1)
+        s_before = np.asarray(
+            ds.variables["vosaline"][before_index, :30], dtype=np.float64)
+        s_after = np.asarray(
+            ds.variables["vosaline"][after_index, :30], dtype=np.float64)
+    temperature = np.moveaxis(
+        before_weight * t_before + after_weight * t_after, 0, -1)
+    salinity = np.moveaxis(
+        before_weight * s_before + after_weight * s_after, 0, -1)
 
     if apply_hand_alterations:
         apply_orca2_hand_alterations(temperature, salinity)
 
+    if mask_evaluation == "nemo_tmask_multiply":
+        # dtatsd.f90:306-311 multiplies ptsd(:,:,:,jp_tem/jp_sal) by REAL(wp)
+        # tmask(:,:,:), leaving IEEE-754 -0.0 where raw interpolated
+        # temperature is negative on dry cells.
+        mask_f64 = np.asarray(tmask, dtype=np.float64)
+        return (temperature * mask_f64, salinity * mask_f64)
+    if mask_evaluation != "where_zero":
+        raise ValueError(
+            f"unknown ORCA2 T/S mask_evaluation={mask_evaluation!r}; "
+            "expected 'where_zero' or 'nemo_tmask_multiply'"
+        )
     return (np.where(tmask, temperature, 0.0), np.where(tmask, salinity, 0.0))
+
+
+class ORCA2InitialIce(NamedTuple):
+    """SI3 ``&namini`` analytic initial ice, each pair (north, south).
+
+    ``pond_concentration`` is the pond area per cell (NEMO's zapnd_ini =
+    rn_apd_ini * a_i, iceistate.F90:324,335; zero when ln_pnd = F, :343-346).
+    """
+
+    thres_sst: float
+    ice_concentration: tuple[float, float]
+    ice_thickness_m: tuple[float, float]
+    snow_thickness_m: tuple[float, float]
+    pond_concentration: tuple[float, float]
+    pond_depth_m: tuple[float, float]
+
+
+# The ORCA2 deck's five-category, ponds-on initial ice (a_p = .2*a_i, h_p = .05 m).
+ORCA2_DECK_INITIAL_ICE = ORCA2InitialIce(
+    thres_sst=2.0,
+    ice_concentration=(0.9, 0.9),
+    ice_thickness_m=(2.0, 1.0),
+    snow_thickness_m=(0.2, 0.2),
+    pond_concentration=(0.18, 0.18),
+    pond_depth_m=(0.05, 0.05),
+)
+
+
+def orca2_initial_ice_ssh(temperature, salinity, tmask, f_t, e1e2t,
+                          ice: ORCA2InitialIce) -> np.ndarray:
+    """Initial SSH after SI3's levitating initial snow+ice+pond mass.
+
+    iceistate.F90:262-291 creates one-category ice from the surface T/S and
+    hemisphere, :309-393 distributes it over jpl categories while conserving
+    volume, and :398-427 removes the globally averaged snow+ice+pond mass
+    from SSH.
+    """
+
+    surface_s = salinity[..., 0]
+    surface_t = temperature[..., 0]
+    freezing_t = (
+        -0.0575
+        + 1.710523e-3 * np.sqrt(surface_s)
+        - 2.154996e-4 * surface_s
+    ) * surface_s
+    surface_wet = tmask[..., 0]
+    initial_ice = (((surface_t - freezing_t) * surface_wet < ice.thres_sst)
+                   & surface_wet)
+    north = f_t >= 0.0
+
+    def hemisphere(pair):
+        return np.where(north, pair[0], pair[1])
+
+    snow_ice_pond_mass = np.where(
+        initial_ice,
+        hemisphere(ice.ice_concentration) * (
+            constants.rho_snow * hemisphere(ice.snow_thickness_m)
+            + constants.rho_ice * hemisphere(ice.ice_thickness_m))
+        + constants.rho_water * hemisphere(ice.pond_concentration)
+        * hemisphere(ice.pond_depth_m),
+        0.0,
+    )
+    # dom_uniq (domutl.F90:91-121) excludes the duplicated right half of the
+    # T-fold row from glob_2Dsum.  On this de-haloed T-fold, the retained
+    # half is i < n_lon/2.  With the deck ice the exact reduction below
+    # reproduces the source-produced -0.09343505872684969 m adjustment.
+    unique_t = np.ones(surface_wet.shape, dtype=np.float64)
+    unique_t[-1, surface_wet.shape[1] // 2 :] = 0.0
+    ssh_adjustment = np.sum(
+        snow_ice_pond_mass / NEMO_CONSTANTS_CONFIG.rho_0 * e1e2t * unique_t
+    ) / np.sum(e1e2t * surface_wet * unique_t)
+    return np.where(surface_wet, -ssh_adjustment, 0.0)
+
+
+def build_orca2_initial_ts(
+    temperature_path,
+    salinity_path,
+    tmask,
+    *,
+    apply_hand_alterations: bool = True,
+    mask_evaluation: str = "where_zero",
+):
+    """ORCA2's kt=1 independent initial T/S, retained as the stable API."""
+
+    return build_orca2_ts_at_step(
+        temperature_path, salinity_path, tmask,
+        kt=1, dt_s=10800.0,
+        apply_hand_alterations=apply_hand_alterations,
+        mask_evaluation=mask_evaluation,
+    )
+
+
+def build_orca2_istate_for_mode(
+    temperature_path,
+    salinity_path,
+    tmask,
+    *,
+    f_t,
+    e1e2t,
+    initial_state: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build ORCA2 initial ``(T, S, ssh)`` for an explicit card ``initial_state`` mode.
+
+    ``initial_state`` has no default:
+    * ``"si3_iceistate"`` retains the certified ORCA2+SI3 card's ``where_zero``
+      tracer mask and SI3 ``ice_istate`` levitating-ice sea-level depression
+      (``iceistate.F90:398-427``).
+    * ``"nemo_k0_istate"`` reproduces NEMO K0 (``nn_ice = 1``): ``dta_tsd``
+      masks ``T`` and ``S`` by ``REAL(wp)`` ``tmask`` multiplication
+      (``istate.f90:118``, ``dtatsd.f90:306-311``), and ``sbc_init`` skips
+      ``ice_init``/``ice_istate`` so ``ssh`` starts at ``0._wp``
+      (``sbcmod.f90:376-384``, ``restart.f90:398,405,408``).
+    """
+
+    if initial_state == "si3_iceistate":
+        t_init, s_init = build_orca2_initial_ts(
+            temperature_path, salinity_path, tmask,
+            mask_evaluation="where_zero",
+        )
+        initial_ssh = orca2_initial_ice_ssh(
+            t_init, s_init, tmask, f_t, e1e2t, ORCA2_DECK_INITIAL_ICE
+        )
+        return t_init, s_init, initial_ssh
+    if initial_state == "nemo_k0_istate":
+        t_init, s_init = build_orca2_initial_ts(
+            temperature_path, salinity_path, tmask,
+            mask_evaluation="nemo_tmask_multiply",
+        )
+        initial_ssh = np.zeros(np.asarray(tmask).shape[:2], dtype=np.float64)
+        return t_init, s_init, initial_ssh
+    raise ValueError(
+        f"unknown ORCA2 initial_state={initial_state!r}; "
+        "expected 'si3_iceistate' or 'nemo_k0_istate'"
+    )
+
+
+_ORCA2_RESTO_SHA256 = (
+    "f4b6aec4695f984eab3a3ad9f2efdcf80d19180cf5f55aa4a93e3f45639b8634")
+
+
+def build_orca2_damping_for_step(
+    deck_root: str | Path,
+    tmask,
+    *,
+    kt: int,
+    dt_s: float,
+    mask_evaluation: str = "where_zero",
+) -> SpongeForcing:
+    """Build ORCA2 ``tra_dmp`` inputs from the SHA-pinned local products."""
+
+    import netCDF4  # noqa: N813
+
+    root = Path(deck_root)
+    resto_path = root / "resto.nc"
+    if not resto_path.is_file():
+        raise FileNotFoundError(f"missing ORCA2 damping file: {resto_path}")
+    if hashlib.sha256(resto_path.read_bytes()).hexdigest() != _ORCA2_RESTO_SHA256:
+        raise ValueError(f"ORCA2 damping file has wrong SHA-256: {resto_path}")
+    with netCDF4.Dataset(resto_path, "r") as ds:
+        ds.set_auto_maskandscale(False)
+        raw = np.asarray(ds.variables["resto"][:30], dtype=np.float64)
+    rate = np.moveaxis(raw, 0, -1)
+    if rate.shape != np.asarray(tmask).shape:
+        raise ValueError(
+            f"resto shape {rate.shape!r} != tracer mask {np.asarray(tmask).shape!r}")
+    temperature, salinity = build_orca2_ts_at_step(
+        root / "data_1m_potential_temperature_nomask.nc",
+        root / "data_1m_salinity_nomask.nc",
+        tmask, kt=kt, dt_s=dt_s, apply_hand_alterations=True,
+        mask_evaluation=mask_evaluation,
+    )
+    return SpongeForcing(
+        gamma=jnp.asarray(rate, dtype=jnp.float64),
+        T_ref=jnp.asarray(temperature, dtype=jnp.float64),
+        S_ref=jnp.asarray(salinity, dtype=jnp.float64),
+        nemo_kt=int(kt),
+    )
 
 
 # --- ORCA2 internal-wave mixing (NEMO zdfiwm; de Lavergne et al. 2020) ---
@@ -1803,7 +2080,11 @@ def _orca2_iwm_forcing(path, surface_tmask: np.ndarray, lat_t, lon_t):
     )
 
 
-def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
+def build_orca2_zps_card(
+    deck_root: str | Path,
+    *,
+    initial_state: str = "si3_iceistate",
+) -> NEMOTestcaseCard:
     """Build the source-file-driven ORCA2+SI3 card through ocean kt=1 entry.
 
     This constructor intentionally requires the external deck path.  It reads
@@ -1838,6 +2119,9 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     with netCDF4.Dataset(domain_path, "r") as ds:
         e3t_1d = np.asarray(ds.variables["e3t_1d"][:30], dtype=np.float64)
         e3w_1d = np.asarray(ds.variables["e3w_1d"][:30], dtype=np.float64)
+        # Level jpk is NEMO's masked dummy bottom; zdftke's bottom-up
+        # mixing-length scan reads its thickness (zdftke.f90:690-692).
+        e3t_jpk = np.asarray(ds.variables["e3t_0"][30], dtype=np.float64)
         bottom = np.asarray(ds.variables["bottom_level"][:], dtype=np.int32)
         strait = np.asarray(ds.variables["strait_shlat"][:], dtype=np.float64)
         raw_e3 = {
@@ -1866,7 +2150,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # card is the NEMO-literal one, so it opts in; every other tripole
         # caller keeps the analytic default.
         use_mesh_coriolis=True,
-    )
+    )._replace(  # htau reads native gphit, zdftke.f90:864
+        native_lat_T_deg=jnp.asarray(metric["gphit"], dtype=jnp.float64))
     tmask, umask, vmask, fmask = _orca2_masks(bottom, strait)
     # dommsk.F90:146-198 copies the four-T-cell free-slip mask into
     # fe3mask before rn_shlat and strait_shlat alter the vorticity fmask.
@@ -1936,43 +2221,25 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_e3t_0=jnp.asarray(raw_e3["e3t_0"], dtype=jnp.float64),
         nemo_bbl_e3u_0=jnp.asarray(raw_e3["e3u_0"], dtype=jnp.float64),
         nemo_bbl_e3v_0=jnp.asarray(raw_e3["e3v_0"], dtype=jnp.float64),
+        nemo_e3t_jpk=jnp.asarray(e3t_jpk, dtype=jnp.float64),
     )
 
-    temperature, salinity = build_orca2_initial_ts(
-        temperature_path, salinity_path, tmask)
+    if initial_state == "si3_iceistate":
+        temperature, salinity = build_orca2_initial_ts(
+            temperature_path, salinity_path, tmask)
 
-    # iceistate.F90:262-291 creates one-category ice from the surface T/S and
-    # hemisphere, :309-393 distributes it over jpl=5 while conserving volume,
-    # and :398-427 removes the globally averaged snow+ice+pond mass from SSH.
-    # The resolved pond arm is live (a_p=.2*a_i, h_p=.05 m), so it contributes
-    # 9 kg m-2 wherever initial ice exists; omitting it misses the oracle SSH.
-    surface_s = salinity[..., 0]
-    surface_t = temperature[..., 0]
-    freezing_t = (
-        -0.0575
-        + 1.710523e-3 * np.sqrt(surface_s)
-        - 2.154996e-4 * surface_s
-    ) * surface_s
-    surface_wet = tmask[..., 0]
-    initial_ice = ((surface_t - freezing_t) * surface_wet < 2.0) & surface_wet
-    ice_thickness = np.where(np.asarray(grid.f_T) >= 0.0, 2.0, 1.0)
-    snow_ice_pond_mass = np.where(
-        initial_ice,
-        0.9 * (constants.rho_snow * 0.2 + constants.rho_ice * ice_thickness)
-        + constants.rho_water * 0.18 * 0.05,
-        0.0,
-    )
-    # dom_uniq (domutl.F90:91-121) excludes the duplicated right half of the
-    # T-fold row from glob_2Dsum.  On this de-haloed 180-column T-fold, the
-    # retained half is i=0:89.  The exact reduction below reproduces the
-    # source-produced -0.09343505872684969 m adjustment.
-    unique_t = np.ones(surface_wet.shape, dtype=np.float64)
-    unique_t[-1, grid.n_lon // 2 :] = 0.0
-    area = metric["e1t"] * metric["e2t"]
-    ssh_adjustment = np.sum(
-        snow_ice_pond_mass / NEMO_CONSTANTS_CONFIG.rho_0 * area * unique_t
-    ) / np.sum(area * surface_wet * unique_t)
-    initial_ssh = np.where(surface_wet, -ssh_adjustment, 0.0)
+        initial_ssh = orca2_initial_ice_ssh(
+            temperature, salinity, tmask, np.asarray(grid.f_T),
+            metric["e1t"] * metric["e2t"], ORCA2_DECK_INITIAL_ICE)
+    else:
+        temperature, salinity, initial_ssh = build_orca2_istate_for_mode(
+            temperature_path,
+            salinity_path,
+            tmask,
+            f_t=np.asarray(grid.f_T),
+            e1e2t=metric["e1t"] * metric["e2t"],
+            initial_state=initial_state,
+        )
 
     state = rest_state_latlon_cgrid_ocean(
         grid,
@@ -2000,7 +2267,9 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         bbl_diffusive_option=1,
         bbl_aht_m2_s=1000.0,
         whole_step_identity="orca2_vector_een_c2",
-        tke_langmuir_evaluation="vectorized",
+        # ln_lc: the literal Langmuir source, imlc = mbkt+1 when no level
+        # crosses (zdftke.f90:311-378, :354; Decision 135, round 312).
+        tke_langmuir_evaluation="nemo_literal",
     )
     # Geometry-ladder G1 rounds 2-3: ORCA2's T-pivot fold retains NEMO's
     # fold-image V transport in vor_een and in the split-explicit live face
@@ -2009,6 +2278,10 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     model_config = model_config._replace(
         een_fold_image_v_row=True,
         rk3_stage1_ssh_nemo_literal=True,
+        # ORCA2 retains the pre-catch-up routes.  Its RGB shortwave makes the
+        # Kmm selector inert, but the card still states it explicitly.
+        nemo_qsr_stage3_kmm_source_association=False,
+        vmix_eos_use_config_rho0=False,
         barotropic=model_config.barotropic._replace(
             barotropic_fold_top_v_face_ssh=True,
             barotropic_substep_dt_nemo_literal=True,
@@ -2017,9 +2290,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     # Decision 122 (ORCA2 round 278): geometry-ladder-certified statements
     # whose cited line the ORCA2 build executes, each meeting no-exact-loss and
     # first-over-bar-not-away on rung 0, OMT-1..4 and rung 10 (both labels).
-    # Left off: G1's EEN vorticity order (certified on the np_COR line, ORCA2
-    # runs np_CRV) and the completed-stage top-V fold exchange (held: rung-0
-    # ten-step SSH maximum 0.38 -> 8.39 m).
+    # Left off: the completed-stage top-V fold exchange (held, Decision 125:
+    # rung-0 ten-step SSH maximum 0.38 -> 8.39 m).
     model_config = model_config._replace(
         # G1b round 2 / ORCA2 round 282: np_CRV divides its relative
         # circulation by NEMO's F-cell area e1f*e2f (vor_een,
@@ -2049,12 +2321,85 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         rk3_stage_tracer_written_order=True,
         rk3_stage3_heat_nemo_written=True,
         rk3_stage3_tracer_nemo_stored_thickness=True,
+        # G5 round 4 / ORCA2 round 304: stage-1/2 stored Kmm divisor and EMP
+        # dilution (trasbc.f90:284-286; r3t(Kaa) stprk3_stg.f90:177) and the
+        # stage-3 recorded-sfx salt Krhs (trasbc.f90:308).
+        rk3_stage2_tracer_nemo_stored_thickness=True,
+        rk3_stage3_salt_nemo_written=True,
+        # Decision 133 / round 305: G7's bottom residual and dyn_zdf bottom
+        # RHS on the ln_lin bundle applied below.  G5's ice-ocean top drag
+        # stays off until the card computes rCdU_ice itself.
+        nemo_bottom_drag_written_statements=True,
+        # G6 rounds 1-8 / ORCA2 round 308 (Decision 122): the vector Krhs
+        # order HPG -> VOR -> KEG with the KEG product rounded
+        # (stp2d.f90:141/:147/:164), vor_een's written order and np_CRV's
+        # top-F U fold halo (dynvor.f90:762-766), and the momentum wzv/zad
+        # forms: stored r3 ratios (sshwzv.f90:297-298), the stage-2 clock
+        # pair rn_Dt/2 with r3t(Kaa) = r1_2*(r3t(Kbb)+r3ta) and the stored
+        # Kmm ratios (stprk3_stg.f90:188-189, :221, :327), dyn_zad's written
+        # association (dynzad.f90:112-126).  Lines: ORCA2_OMIP_L4 ppsrc.
+        # Left off: G6's fold statements (raw pivot V mask, fold unit, HPG
+        # fold geometry, top-V exchange); they need the stage-1 transport
+        # V mask (stprk3_stg.f90:283), which no rung certifies.
+        rk3_vector_rhs_nemo_order=True,
+        een_vorticity_written_order=True,
+        een_nemo_top_f_u_halo=True,
+        nemo_wzv_stored_r3_ratios=True,
+        nemo_zad_written_association=True,
+        nemo_stage2_momentum_wzv_half_step=True,
+        nemo_stage_momentum_wzv_stored_kmm_ratios=True,
+        # G8 round 1 / ORCA2 round 310 (Decision 122): dyn_ldf_lev's curl
+        # term reads the stored r1_e1e2f (domhgr.f90:156 -> dynldf_lev.f90:123)
+        # and stage 3 reads r3f = r1_2*(r3fb + r3fa) (stprk3_stg.f90:245).
+        # Round 311: stp_2D's stage-1 order hpg -> ldf -> vor -> keg
+        # (stp2d.f90:141/:144/:147/:164), G1b's dyn_keg guard kept.
+        nemo_ldf_stored_f_area=True,
+        nemo_ldf_stage_r3f=True,
+        rk3_stage1_ldf_source_order=True,
+        # ORCA2 round 318 (Decision 122, Decisions 125/137 re-measured): the
+        # north-fold set, which passes only as a whole.  G9 (gridladder round
+        # 52): stage transport V mask after its fold exchange and the vn_adv/
+        # r3v exchanges (stprk3_stg.f90:283, dommsk.f90:232, dynspg_ts.f90:844,
+        # stprk3_stg.f90:169), FCT fold images (traadv_fct.f90:311), the
+        # end-of-stage pivot fold (stprk3_stg.f90:795-796), the stage wzv
+        # clock pair, stored tracer-wzv r3t and stored r3u/r3v (stprk3_stg.f90
+        # :177-179, :221-223, :282-283); G6's raw pivot V mask, vector fold
+        # unit and top-V exchange; G8's fold rows.  G9's stage-3 Krhs order
+        # stays off: its path refuses the diffusive BBL and needs the forced
+        # stage-3 heat/salt forms.
+        rk3_stage_transport_raw_vmask=True,
+        rk3_stage_transport_fold_exchanges=True,
+        fct_fold_exchange=True,
+        rk3_end_of_stage_pivot_fold=True,
+        rk3_stage_wzv_nemo_clock_pair=True,
+        rk3_stage_tracer_wzv_stored_kmm_ratios=True,
+        rk3_stage_transport_stored_r3uv=True,
+        rk3_vector_raw_vmask=True,
+        rk3_fold_exchange_top_v_row=True,
+        nemo_ldf_fold_rows=True,
         barotropic=model_config.barotropic._replace(
             barotropic_een_ratio_fold_exchange=True,
             barotropic_een_fe3mask_pivot_row=True,
             barotropic_een_ratio_written_order=True,
+            barotropic_literal_fold_unit_vector_form=True,
         ),
     )
+    # Decision 132 via Decision 122 (round 308): the first vector-form wzv
+    # (stp2d.f90:152/:156) reads NEMO's carried slot ssh(Naa) =
+    # 2*ssh(Nbb) - ssh(Naa) (stprk3.f90:237 in ORCA2_OMIP_L4).
+    model_config = with_first_wzv_after_ssh(
+        model_config, "rk3_extrapolated_carried")
+    # Decision 133: namelist_cfg's &namdrg ln_lin = T with ln_drgimp = T
+    # replaces the quadratic law inherited from the GYRE base.
+    model_config = _nemo_linear_bottom_drag(model_config)
+    # V3 round 13 / ORCA2 round 309 (Decision 122): zdf_evd's trigger
+    # MIN(rn2, rn2b) <= -1e-12 (zdfevd.f90:108-109) reads the step-entry bn2
+    # on Nbb (stprk3.f90:171/174), not N2 rebuilt on the stage-3 sea level.
+    _ph = model_config.physics
+    model_config = model_config._replace(physics=_ph._replace(
+        convection=_ph.convection._replace(
+            enhanced_diffusion=_ph.convection.enhanced_diffusion._replace(
+                trigger_step_entry_bn2=True))))
     # zdfphy.F90:146-173 initializes the pre-closure coefficient memory
     # before zdf_tke_init.  This deck resolves nn_avb=0, nn_havtb=1, so avm_k
     # is constant rn_avm0=1.2e-4 while avt_k is rn_avt0=1.2e-5 times the
@@ -2112,26 +2457,81 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # MAX(zav, avmb) / MAX(zav, avtb_2d*avtb) (zdftke.f90:709-710).
         kappaM_min=_ORCA2_IWM_AVMB,
         kappaH_min=_ORCA2_IWM_AVTB,
+        # Decision 122 / round 307: vertical-mixing rung V1's certified
+        # statements (gridladder-vmix rounds 6-11), each measured on this
+        # card under both labels.  The compiled routines are byte-identical
+        # to the V1 build: eosbn2.f90 rab_3d_t/bn2_t; zdf_sh2 at the
+        # step-entry level (stprk3.f90:179 zdf_phy(kstp,Nbb,Nbb,Nrhs)),
+        # pivot-row V face and stored r3u/r3v (zdfsh2.f90:98-108,
+        # domqco.f90:266-269); zdftke.f90:420,423-426 and :466,472.
+        nemo_bn2_source_rounded=True,
+        nemo_sh2_step_entry_ssh=True,
+        nemo_tke_solve_source_rounded=True,
+        nemo_sh2_fold_top_v=True,
+        nemo_tke_matrix_rhs_source_rounded=True,
+        nemo_sh2_r3_source_rounded=True,
+        nemo_sh2_r3_stored_reciprocal=True,
+        # Decision 135 / round 312: V1's remaining certified forms, each
+        # measured on this card under both labels (gridladder-vmix
+        # 0b9443cef2).  nn_etau=1 (namelist_cfg) with nn_htau=1
+        # (namelist_ref): the increment * wmask * tmask(1) and its EXP
+        # (zdftke.f90:498-502), htau from native gphit (:864).
+        etau_mode="below_ml",
+        etau_htau_mode="latitude",
+        nemo_etau_wmask=True,
+        tke_htau_evaluation="nemo_scalar_libm",
+        tke_etau_exponential_evaluation="nemo_scalar_libm",
+        # nn_mxl=3: the literal raw length (:644-645) and the dummy-bottom
+        # e3t(jpk) step of the bottom-up scan (:690-692).
+        tke_mxl_raw_evaluation="nemo_literal",
+        nemo_mxl_terminal_e3t=True,
+        # nn_mxlice=2 stays 0: it reads SI3's hm_i, which this card does not
+        # compute itself (Decision 135).
     )
-    # namelist_cfg's namzdf_iwm: ln_mevar=.false. (constant mixing efficiency)
-    # and ln_tsdiff=.true. (salt and heat get different wave diffusivities).
-    # The efficiency option is taken; the salt/heat differential is NOT, and it
-    # is not silently dropped either: legoESM's implicit tracer solve carries
-    # ONE diffusivity for both tracers, so a separate salt coefficient has
-    # nowhere to go, and the gap is declared in the card's unmeasured features
-    # below rather than hidden behind a False.  The heat and momentum halves of
-    # the arm, which are what the retired mixing-length floor was standing in
-    # for, are unaffected by that gap.
+    # Decision 122 / round 313: V4's NEMO-literal zdf_iwm (gridladder-vmix
+    # 1fc44b9b98) with namelist_cfg's &namzdf_iwm: ln_mevar=.false. (:423),
+    # ln_tsdiff=.true. (:424); and V3's literal zdf_ddm, ln_zdfddm=.true.,
+    # rn_avts=1e-4, rn_hsbfr=1.6 (:393-395).  zdf_phy runs EVD, DDM, IWM in
+    # that order (zdfphy.f90:359, :363, :372); salt gets its own matrix
+    # because ln_zdfddm is on (trazdf.f90:175-176).
     iwm_config = model_config.physics.vertical_mixing.iwm._replace(
         enabled=True,
+        form="nemo_literal",
         mevar=False,
-        tsdiff=False,
+        tsdiff=True,
         require_forcing_maps=True,
     )
+    ddm_config = model_config.physics.vertical_mixing.ddm._replace(
+        enabled=True, form="nemo_literal", rn_avts=1.0e-4, rn_hsbfr=1.6)
     model_config = model_config._replace(
         physics=model_config.physics._replace(
             vertical_mixing=model_config.physics.vertical_mixing._replace(
-                tke=tke_config, iwm=iwm_config)))
+                tke=tke_config, iwm=iwm_config, ddm=ddm_config)),
+        # Decision 126: runoff at the surface only.  namelist_ref sets
+        # ln_rnf_depth = ln_rnf_depth_ini = .false., so sbc_rnf_init takes
+        # nk_rnf = 1 (sbcrnf.f90:486-489) and sbc_rnf_div the surface branch
+        # (sbcrnf.f90:279-282); rn_dep_max = 150 is never read.
+        runoff_depth_spread_m=0.0, runoff_depth_spread_map=None)
+    # ORCA2 round 320 (Decision 122): lane B rung L2's certified isoneutral
+    # block replaces the generic constant-1000 m2/s one: ln_traldf_lap/iso/msc,
+    # nn_aht_ijk_t = 20, rn_Ud = 0.018 (EXP00 namelist_cfg:300-307), EOS-80
+    # slopes.  Rung 0 and the OMT cards still state their own block.
+    model_config = model_config._replace(gm_redi=orca2_l2_isoneutral_gm_redi())
+    # ORCA2 round 323 (Decision 122): lane A rung L8's stage-3 Krhs walk with
+    # the diffusive BBL, geothermal (ln_trabbc, nn_geoflx = 2) and full-column
+    # damping (ln_tradmp, nn_zdmp = 0) in NEMO's order (EXP00
+    # namelist_cfg:256-273, :325-330), and lane B rung L5's mixed-layer
+    # eddies (ln_mle, namelist_cfg:310-313).  The step needs the deck's
+    # geothermal_heating.nc and, each step, tra_dmp's target (sponge, nemo_kt).
+    model_config = model_config._replace(
+        **orca2_l8_krhs_selection(),
+        physics=model_config.physics._replace(mle=orca2_l5_mle()))
+    # ORCA2 round 325 (Decision 122, DECISION 151): lane A rung L9 = L8 plus
+    # L3's eddy-induced velocity (gridladder e4f204272d): &namtra_eiv
+    # ln_ldfeiv = T, nn_aei_ijk_t = 21, rn_Ue = 0.03, rn_Le = 200 km (EXP00
+    # namelist_cfg:317-323), ln_eke_equ = F (namelist_ref:980).
+    model_config = model_config._replace(
+        gm_redi=orca2_l3_eiv_gm_redi(), rk3_stage3_l9_eiv_nemo_order=True)
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
@@ -2142,28 +2542,23 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         initial_state=state,
         iwm_forcing=_orca2_iwm_forcing(
             iwm_path, tmask[..., 0], metric["gphit"], metric["glamt"]),
+        tracer_damping=build_orca2_damping_for_step(
+            root, tmask, kt=1, dt_s=10800.0),
     )
     card = NEMOTestcaseCard(
         "ORCA2-zps",
         recipe,
         10800.0,
-        2920,
+        2920,  # DECISION 142 (user, 2026-10-20): one year, deliberate; EXP00 runs 5840
         1,
         0,
         1,
         1000.0,
-        0.0,
+        10.0,   # rn_gambbl, read and inert with nn_bbl_adv = 0
         surface_boundary_condition="ncar_core_sbcblk",
         surface_input_operator="nemo_fld_read",
         unmeasured_features=(
             "staged_gm_eiv",
-            "linear_implicit_bottom_drag",
-            # The deck's ln_tsdiff: NEMO gives salt a different wave-driven
-            # diffusivity from heat, and the shared-K implicit tracer solve
-            # cannot carry two.  The deck's second salt/heat differential,
-            # ln_zdfddm, is unbuilt for the same reason.
-            "internal_wave_salt_heat_differential",
-            "double_diffusive_salt_heat_split",
             "spatial_lateral_viscosity",
             "freshwater_budget_carry",
             "si3_jpl5_layered_prather_state",
@@ -2754,9 +3149,178 @@ _SMT1_RN_EVD = 100.0             # enhanced vertical diffusion     [m2/s]
 _SMT2_RN_CD0 = 1.0e-3            # linear drag coefficient         [-]
 _SMT2_RN_UC0 = 0.4               # linear-law reference velocity   [m/s]
 
+
+def _nemo_linear_bottom_drag(model_config):
+    """namdrg ln_lin with namelist_ref's &namdrg_bot and ln_drgimp = T, as ONE
+    composition (SMT-2; grid-ladder G7): see the SMT-2 block's derivation."""
+
+    return model_config._replace(
+        bottom_drag=model_config.bottom_drag._replace(
+            bottom_drag_scheme="nemo_linear",
+            bottom_drag_cd0=_SMT2_RN_CD0,
+            bottom_drag_uc0=_SMT2_RN_UC0,
+            # np_lin reads neither of these; they are stated so the card
+            # records what the namelist resolved rather than leaving the
+            # library default to speak for the run.
+            bottom_drag_cdmax=0.1,
+            bottom_drag_z0=3.0e-3,
+            bottom_drag_ke0=2.5e-3,
+            # ln_boost = .false.: no regional boost, and NEMO applies the
+            # drag to the bottom cell alone, never over a K&E99 band.
+            bottom_drag_bbl_thickness=0.0,
+            bottom_drag_bg_velocity=0.0,
+            bottom_drag_r=0.0,
+        ),
+        zdf_drag_in_matrix=True,
+        zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+    )
+
+
 # --- rung SMT-3 (decision 93): ORCA2 rung 0's namtra_ldf ------------
 _SMT3_RN_UD = 0.018              # lateral diffusive velocity       [m/s]
 _SMT3_RN_LD = 200.0e3            # lateral diffusive length         [m]
+_ORCA2_EIV_RN_UE = 0.03          # namtra_eiv.rn_Ue                 [m/s]
+_ORCA2_EIV_RN_LE = 200.0e3       # namtra_eiv.rn_Le                 [m]
+
+
+def _orca2_isoneutral_gm_redi(
+    kappa_redi: float,
+    *, slope_prd_evaluation: str = "nemo_literal", north_fold: bool = False,
+    redi_flux_reference_thickness_evaluation: str = "tpoint_alias",
+    redi_flux_geometry_stage: str = "step_entry", slope_uv_source_rounding: bool = False,
+    redi_a33_source_ordering: bool = False,
+    redi_flux_stored_face_ratios: bool = False,
+    eddy_induced_velocity: bool = False,
+):
+    """ORCA2's shared standard-isoneutral ``&namtra_ldf`` selection.
+
+    ``kappa_redi`` records the nominal/equatorial scalar; mode 20's executed
+    coefficient is evaluated independently at U and V points from ``rn_Ud``
+    and the live metrics.  Both VORTEX SMT-3 and grid-ladder L2 call this one
+    constructor so the ORCA2 block cannot drift between cards.
+    """
+
+    from legoesm.ocean.physics.lateral_mixing.config import (
+        GMRediConfig,
+        TreguierConfig,
+        VisbeckConfig,
+    )
+    aei0 = 0.5 * _ORCA2_EIV_RN_UE * _ORCA2_EIV_RN_LE
+    return GMRediConfig(
+        kappa_GM=aei0 if eddy_induced_velocity else 0.0,
+        kappa_Redi=kappa_redi,
+        S_max=0.01,
+        visbeck=VisbeckConfig(enabled=False),
+        treguier=TreguierConfig(
+            enabled=eddy_induced_velocity, aei0=aei0, kappa_min=0.0),
+        slope_scheme="nemo_iso_lap",
+        gm_bolus_advection=("through_fct" if eddy_induced_velocity else "centred"),
+        gm_bolus_kappa_face_average=eddy_induced_velocity,
+        slope_density="neutral",
+        slope_limit="nemo_cap",
+        slope_positions="nemo_native",
+        nemo_mld_slope_ramp=True,
+        mld_criterion="n2_integral",
+        slope_n2="nemo_bn2",
+        slope_n2_evaluation="carried_step_entry",
+        slope_prd_geometry_stage="before_step",
+        slope_prd_evaluation=slope_prd_evaluation,
+        slope_metric_evaluation="nemo_reciprocal",
+        slope_uv_source_rounding=slope_uv_source_rounding,
+        slope_face_thickness_evaluation="nemo_qco_live",
+        redi_flux_face_thickness_evaluation="nemo_qco_live",
+        redi_divisor_thickness_evaluation="nemo_qco_live",
+        redi_flux_reference_thickness_evaluation=(
+            redi_flux_reference_thickness_evaluation),
+        redi_flux_geometry_stage=redi_flux_geometry_stage,
+        slope_depth_evaluation="nemo_qco_live_literal",
+        nemo_slope_shapiro=True,
+        nemo_slope_north_fold=north_fold,
+        kappa_redi_lat_scaling=True,
+        kappa_redi_horizontal_evaluation="nemo_metric_literal",
+        kappa_redi_diffusive_velocity=_SMT3_RN_UD,
+        redi_vertical_skew_evaluation="nemo_literal",
+        redi_a33_evaluation="nemo_literal",
+        redi_a33_source_ordering=redi_a33_source_ordering,
+        redi_flux_stored_face_ratios=redi_flux_stored_face_ratios,
+        redi_w_slope_stage_evaluation="nemo_post_slope_pair",
+        treguier_vertical_reduction_evaluation=(
+            "nemo_left" if eddy_induced_velocity else "tree"),
+        treguier_sqrt_evaluation=(
+            "nemo_forward_exact" if eddy_induced_velocity else "guarded_floor"),
+        msc_stabilize=True,
+        implicit_K33=True,
+    )
+
+def orca2_l2_isoneutral_gm_redi():
+    """Lane B rung L2's certified isoneutral selection (gridladder-vmix 51b2582f5e).
+
+    The same arguments as the L2 card; the scalar records the nominal
+    0.5*rn_Ud*rn_Ld, mode 20 evaluates the executed coefficient per face.
+    """
+
+    return _orca2_isoneutral_gm_redi(
+        0.5 * _SMT3_RN_UD * _SMT3_RN_LD, slope_prd_evaluation="nemo_eos80_literal",
+        north_fold=True, redi_flux_reference_thickness_evaluation="nemo_native",
+        redi_flux_geometry_stage="rk3_kmm", slope_uv_source_rounding=True,
+        redi_a33_source_ordering=True,
+        redi_flux_stored_face_ratios=True)
+
+
+def orca2_l3_eiv_gm_redi():
+    """Lane B rung L3's certified selection (gridladder-vmix fb02c4b29f).
+
+    L2's arguments plus ORCA2's eddy-induced velocity (&namtra_eiv:
+    ln_ldfeiv, nn_aei_ijk_t = 21, aei0 = 0.5*rn_Ue*rn_Le).
+    """
+
+    return _orca2_isoneutral_gm_redi(
+        0.5 * _SMT3_RN_UD * _SMT3_RN_LD, slope_prd_evaluation="nemo_eos80_literal",
+        north_fold=True, redi_flux_reference_thickness_evaluation="nemo_native",
+        redi_flux_geometry_stage="rk3_kmm", slope_uv_source_rounding=True,
+        redi_a33_source_ordering=True,
+        redi_flux_stored_face_ratios=True, eddy_induced_velocity=True)
+
+
+def orca2_l8_krhs_selection() -> dict[str, object]:
+    """Lane A rung L8's certified stage-3 Krhs selectors (gridladder ce9636bc1f).
+
+    zero Krhs -> tra_adv -> tra_sbc -> tra_qsr -> tra_ldf -> tra_bbc ->
+    tra_bbl -> tra_dmp (stprk3_stg.f90:600-749); ORCA2's diffusive BBL
+    (nn_bbl_ldf = 1, rn_ahtbbl = 1000, rn_gambbl = 10, read and inert with
+    nn_bbl_adv = 0).  The card must also carry L2, FCT and the stage-3
+    written order, as the model's L8 guard requires.
+    """
+
+    return {
+        "rk3_stage3_tracer_krhs_nemo_order": True,
+        "rk3_stage3_geothermal_nemo_written": True,
+        "rk3_stage3_geothermal_after_ldf_nemo_order": True,
+        "rk3_stage3_damping_after_geothermal_nemo_order": True,
+        "rk3_stage3_l8_nemo_order": True,
+        "bbl_nemo_stage3_krhs": True,
+        "bbl_nemo_pivot_ghost": True,
+        "rk3_end_of_stage_pivot_fold": True,
+        "bbl_adv_option": 0, "bbl_diffusive_option": 1,
+        "bbl_aht_m2_s": 1000.0, "bbl_gamma_s": 10.0,
+    }
+
+
+def orca2_l5_mle():
+    """Lane B rung L5's certified mixed-layer eddies (gridladder-vmix 43071fbf2).
+
+    &namtra_mle as ORCA2 resolves it (ln_mle = T over namelist_ref's
+    nn_mle = 1, rn_ce = 0.06, rn_lat = 20, rn_rho_c_mle = 0.01, nn_mld_uv =
+    0, nn_conv = 0), through NEMO's stage-3 FCT transports.
+    """
+    from legoesm.ocean.physics.lateral_mixing.mle import MLEConfig
+
+    return MLEConfig(
+        ce=0.06, lat_ref_deg=20.0, rho_c_mle=0.01, ref_depth_m=10.0,
+        mld_uv="min", no_mle_in_convection=False, max_grid_scale_m=111.0e3,
+        through_fct=True, nemo_association=True)
+
 
 # --- rung SMT-4 (decision 93): ORCA2 rung 0's namdyn_ldf ----------
 # Decision 93 replaces ORCA2's unavailable file-backed coefficient only with
@@ -3120,27 +3684,7 @@ def build_vortex_smt_zps_card(
         # correction (dynzdf.f90:160-169), and the bottom-cell implicit
         # diagonal over PARTIAL cells (dynzdf.f90:306, :473 -- divisor
         # e3u_3d(iku)*(1+r3u(Kaa)*umask(iku)) at iku = mbku).
-        model_config = model_config._replace(
-            bottom_drag=model_config.bottom_drag._replace(
-                bottom_drag_scheme="nemo_linear",
-                bottom_drag_cd0=_SMT2_RN_CD0,
-                bottom_drag_uc0=_SMT2_RN_UC0,
-                # np_lin reads neither of these; they are stated so the card
-                # records what the namelist resolved rather than leaving the
-                # library default to speak for the run.
-                bottom_drag_cdmax=0.1,
-                bottom_drag_z0=3.0e-3,
-                bottom_drag_ke0=2.5e-3,
-                # ln_boost = .false.: no regional boost, and NEMO applies the
-                # drag to the bottom cell alone, never over a K&E99 band.
-                bottom_drag_bbl_thickness=0.0,
-                bottom_drag_bg_velocity=0.0,
-                bottom_drag_r=0.0,
-            ),
-            zdf_drag_in_matrix=True,
-            zdf_baroclinic_only=True,
-            barotropic_drag_substep=True,
-        )
+        model_config = _nemo_linear_bottom_drag(model_config)
     if rung in ("smt3", "smt4"):
         # DECISION 93 (user), rung SMT-3: ORCA2 rung 0's namtra_ldf block.
         # The deck selects laplacian standard isoneutral diffusion with MSC,
@@ -3149,40 +3693,10 @@ def build_vortex_smt_zps_card(
         # 0.5*rn_Ud*MAX(e1u,e2u)=270 m2/s; the production operator evaluates
         # the face coefficient from the metric and rn_Ud rather than relying
         # on that derived scalar.
-        from legoesm.ocean.physics.lateral_mixing.config import (
-            GMRediConfig, VisbeckConfig,
-        )
         model_config = model_config._replace(
             K_h=0.0,
-            gm_redi=GMRediConfig(
-                kappa_GM=0.0,
-                kappa_Redi=0.5 * _SMT3_RN_UD * res.dx_m,
-                S_max=0.01,
-                visbeck=VisbeckConfig(enabled=False),
-                slope_scheme="nemo_iso_lap",
-                slope_density="neutral",
-                slope_limit="nemo_cap",
-                slope_positions="nemo_native",
-                nemo_mld_slope_ramp=True,
-                mld_criterion="n2_integral",
-                slope_n2="nemo_bn2",
-                slope_n2_evaluation="carried_step_entry",
-                slope_prd_geometry_stage="current_step",
-                slope_prd_evaluation="nemo_literal",
-                slope_metric_evaluation="nemo_reciprocal",
-                slope_face_thickness_evaluation="nemo_qco_live",
-                redi_flux_face_thickness_evaluation="nemo_qco_live",
-                redi_divisor_thickness_evaluation="nemo_qco_live",
-                slope_depth_evaluation="nemo_qco_live_literal",
-                nemo_slope_shapiro=True,
-                kappa_redi_horizontal_evaluation="nemo_metric_literal",
-                kappa_redi_diffusive_velocity=_SMT3_RN_UD,
-                redi_vertical_skew_evaluation="nemo_literal",
-                redi_a33_evaluation="nemo_literal",
-                redi_w_slope_stage_evaluation="nemo_post_slope_pair",
-                msc_stabilize=True,
-                implicit_K33=True,
-            ),
+            gm_redi=_orca2_isoneutral_gm_redi(
+                0.5 * _SMT3_RN_UD * res.dx_m),
         )
     if rung == "smt4":
         # DECISION 93: div-rot, level Laplacian momentum diffusion with
@@ -3201,6 +3715,7 @@ def build_vortex_smt_zps_card(
                 C_leith=0.0,
             ),
             lateral_viscosity_operator="nemo_div_curl",
+            lateral_viscosity_mask_levels="surface",
             lateral_viscosity_e3_weighting="nemo_e3",
             lateral_viscosity_coefficient_source="nemo_ldf_c2d",
             lateral_side_bc="free_slip",
@@ -3652,7 +4167,7 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         "LOCK_EXCHANGE-zco": ("nemo_ab3am4", 1, 0, 0.0, 0, 0.0),
         "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3, 2, 20.0, 0, 1000.0),
         "GYRE-zco": ("nemo_ab3am4", gyre_count, 0, 0.0, 0, 0.0),
-        "ORCA2-zps": ("nemo_ab3am4", 65, 0, 0.0, 1, 1000.0),
+        "ORCA2-zps": ("nemo_ab3am4", 65, 0, 10.0, 1, 1000.0),  # rn_gambbl = 10 (record ocean.output:1266; inert, nn_bbl_adv = 0)
         "VORTEX-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
         # The vector-EEN deck differs from the flux deck only in the momentum
         # scheme set, so every row this table checks is the same row.
@@ -3780,14 +4295,10 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                 f"ke_gradient_scheme='c2'); got "
                 f"{cfg.momentum_advection!r}, {cfg.ke_gradient_scheme!r}")
         tke = cfg.physics.vertical_mixing.tke
-        expected_langmuir = (
-            "nemo_literal" if card.case == "GYRE-zco" else "vectorized"
-        )
-        if tke.tke_langmuir_evaluation != expected_langmuir:
+        if tke.tke_langmuir_evaluation != "nemo_literal":
             raise ValueError(
                 f"{card.case} requires tke_langmuir_evaluation="
-                f"{expected_langmuir!r}, got "
-                f"{tke.tke_langmuir_evaluation!r}")
+                f"'nemo_literal', got {tke.tke_langmuir_evaluation!r}")
         expected_baro_coriolis = (
             "ene_metric" if card.case == "GYRE-zco" else "een_metric"
         )
@@ -4832,6 +5343,7 @@ def build_swg_card(
         een_e3f_scheme="nemo_avg4", een_metric_weighting="nemo",
         een_q_boundary="nemo_live",
         lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_mask_levels="surface",
         lateral_viscosity_e3_weighting="nemo_e3",
         lateral_viscosity_coefficient_source="nemo_constant",
         lateral_viscosity=base.lateral_viscosity._replace(A_h=constant_ahm),
@@ -4940,7 +5452,6 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         _validate_swg_card(card)
         return
     _validate_pre_swg_testcase_card(card)
-
 # ---------------------------------------------------------------------------
 # ORCA2G1 (grid ladder rung G1, DECISION 117): the TSUNAMI program on ORCA2's
 # horizontal grid -- T-pivot north fold, cyclic east-west, ORCA2's coast --
@@ -5411,6 +5922,7 @@ __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
     "build_gyre_zco_card",
+    "build_gyre_zco_lane_certified_card",
     "build_lock_exchange_zco_card",
     "build_overflow_zps_card",
     "apply_orca2_hand_alterations",
@@ -5453,3 +5965,12 @@ __all__ = (
     "validate_nemo_testcase_card_for_execution",
     "with_first_wzv_after_ssh",
 )
+
+
+# DECISION 149: parameters a rung-10 trainer must pass as ``exclude``. Since
+# round 320 the card runs mode 20, whose coefficient comes from rn_Ud; the
+# kappa_Redi scalar only records the nominal aht0 (gradient exactly 0, round 319
+# traced-scalar scan). rn_Ud is trained instead, only when a run names it.
+ORCA2_RUNG10_FROZEN_PARAMS = {
+    "ocean.lat.gm_redi.kappa_Redi": "inert on rung 10 since round 320 (mode 20 reads rn_Ud)",
+}

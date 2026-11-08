@@ -80,6 +80,7 @@ from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezi
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     saturation_adjustment_gsam,
+    m2005_subsaturation_removal,
     effective_Nc,
     autoconversion_sb2001,
     autoconversion_kk2000,
@@ -148,6 +149,7 @@ from legoesm.atmosphere.physics.microphysics.config import (
     SED_CFL_SUBSTEPS_MAX_LIMIT,
     MorrisonConfig,
     resolve_unset_ice_snow_d_auto,
+    resolve_warm_rain_scheme,
 )
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -247,6 +249,25 @@ def _reject_sb_proxy_fields(config: MorrisonConfig) -> None:
             "defaults.")
 
 
+def _gsam_small_removal(T, q_v, hyd, p_full, config):
+    """:func:`_warm_rain.m2005_subsaturation_removal` on a HydrometeorState
+    (liquid q_r, q_c; frozen q_i, q_s, q_g in gSAM's order); each removed
+    species' number scales by ``1 - w`` (N_c is specified in sam, untouched;
+    an N_g passed while graupel is single-moment has no tendency to carry the
+    scaling and is left as the caller passed it)."""
+    T, q_v, (q_r, q_c), (q_i, q_s, q_g), (w_r, _), (w_i, w_s, w_g) = (
+        m2005_subsaturation_removal(
+            T, q_v, _saturation_specific_humidity(T, p_full),
+            _saturation_specific_humidity_ice(T, p_full),
+            (hyd.q_r, hyd.q_c), (hyd.q_i, hyd.q_s, hyd.q_g),
+            rh_sharpness=config.gsam_small_removal_rh_sharpness,
+            q_sharpness=config.gsam_small_removal_q_sharpness))
+    scale = lambda n, w: None if n is None else n * (1.0 - w)  # noqa: E731
+    return T, q_v, hyd._replace(
+        q_r=q_r, q_c=q_c, q_i=q_i, q_s=q_s, q_g=q_g, N_r=scale(hyd.N_r, w_r),
+        N_i=scale(hyd.N_i, w_i), N_s=scale(hyd.N_s, w_s), N_g=scale(hyd.N_g, w_g))
+
+
 def resolve_morrison_flavor(config: MorrisonConfig) -> MorrisonConfig:
     """Resolve ``morrison_flavor`` into the concrete parameter set.
 
@@ -271,11 +292,12 @@ def resolve_morrison_flavor(config: MorrisonConfig) -> MorrisonConfig:
     =====================  ============  =============
 
     The rain rows are CAM6 MG2 (cam_cesm2_1_rel_60 micro_mg_utils.F90).
-    ``warm_rain_scheme`` is NOT resolved here: ``kk2000`` is the SAM/E3SM law,
-    ``kk2000_cam6`` the CAM6 MG2 law (select it explicitly).  Ice deposition
-    (``m2005``) is unchanged.
+    An unset ``warm_rain_scheme`` resolves by flavour
+    (``resolve_warm_rain_scheme``: mg -> ``kk2000_cam6``, sam -> ``kk2000``);
+    an explicit one is kept.  Ice deposition (``m2005``) is unchanged.
     """
     config = resolve_unset_ice_snow_d_auto(config)
+    config = config._replace(warm_rain_scheme=resolve_warm_rain_scheme(config))
     if config.morrison_flavor == "mg":
         if config.ice_to_snow_scheme not in (None, "mg_ferrier"):
             raise ValueError(
@@ -399,6 +421,13 @@ def morrison_microphysics(
     config = resolve_morrison_flavor(config)
     ncol, nlev = T.shape
     _prog_nc = bool(getattr(config, "prognostic_droplet_number", False))
+    # RULE 5 widths of MG2's early droplet size reset (micro_mg2_0.F90:1296),
+    # every call site, both droplet-number paths; 0 = MG2's hard clip.
+    _early_reset_w = dict(number_cap_log_width=config.mg2_drop_early_reset_log_width,
+                          slope_log_width=config.mg2_drop_early_reset_log_width)
+    # Droplet-number budget publication (``MicrophysicsOutput.nc_budget``):
+    # the same static switch as ``qc_budget``, MG2 prognostic number only.
+    _nc_pub = _prog_nc and bool(getattr(config, "publish_qc_budget", False))
     if _prog_nc:
         # Start-up guards (static config; user decisions 2026-10-19 2a, Q-I/10a,
         # Q-B 3a, 18a; 2026-10-20 Q4): CAM6 MG2 droplet number lives only on the MG2 warm-rain
@@ -431,13 +460,18 @@ def morrison_microphysics(
     gsam_satadj = config.morrison_flavor == "sam"
     if gsam_satadj:
         _reject_fields_without_gsam_counterpart(config)
-        T_in, q_v_in, q_c_in = T, q_v, hydrometeors.q_c
+        T_in, q_v_in, q_c_in, hyd0 = T, q_v, hydrometeors.q_c, hydrometeors
         T, q_v, q_c_adj = saturation_adjustment_gsam(
             T, q_v, hydrometeors.q_c, p_full,
             excess_sharpness=config.gsam_satadj_excess_sharpness,
             qc_floor_sharpness=config.gsam_satadj_qc_floor_sharpness,
             p_min_width_pa=config.gsam_satadj_p_min_width_pa)
         hydrometeors = hydrometeors._replace(q_c=q_c_adj)
+        hyd_in = hydrometeors
+        # then gSAM M2005's sub-saturation small-condensate removal
+        # (module_mp_graupel.f90:1453-1488), on the adjusted state.
+        T, q_v, hydrometeors = _gsam_small_removal(
+            T, q_v, hydrometeors, p_full, config)
     q_c = hydrometeors.q_c
     q_r = hydrometeors.q_r
     q_i = hydrometeors.q_i
@@ -613,7 +647,7 @@ def morrison_microphysics(
         _, uns_ic = mg2_snow_fall_speeds(lams_ic, rho, config)
         eps_s, mu_air = mg2_snow_vent_eps(n0s_ic, lams_ic, T, p_full, rho,
                                           config)
-    # Warm-rain autoconversion + accretion. KK2000 (default) is the SAM
+    # Warm-rain autoconversion + accretion (law resolved above). KK2000 is the SAM
     # M2005 oracle scheme; Seifert-Beheng retained for back-compat.
     if config.warm_rain_scheme == "kk2000":
         dq_c_au, dN_r_au, x_c = autoconversion_kk2000(
@@ -636,11 +670,35 @@ def morrison_microphysics(
             # droplet-number sink below.
             # The shape (pgam, lamc) comes from the PRE-reset number, as MG2
             # keeps it (:1296); riming reads it below.
-            N_c_ic, _pgam_c, _lamc_c = mg2_size_dist_liq(q_c_ic, N_c_ic, rho)
+            # RULE 5: both size limits rounded by mg2_drop_early_reset_log_width
+            # (0 = MG2's hard clip).  KNOWN DIFFERENCE (#2216): the port moves
+            # the number (and lamc) of cells within a few widths of a bound
+            # (in ln lambda) inward too; the 2 um / qcic/1e-20 limits hold for
+            # every width, 50 um is passed by at most
+            # w*ln(1 + 25**(-1/w)) in ln D (see mg2_droplet_number_readjust).
+            # Measured at the default 0.01 on the prognostic-number oracle
+            # fixtures (x64, every other switch hard): the whole-call droplet
+            # tendency moves by up to 1.9e-5 of the column's largest MG2
+            # droplet tendency; per-column table GAP in tests/atmosphere/
+            # microphysics/unit/test_morrison_mg2_drop_early_reset_smooth.py.
+            N_c_ic, _pgam_c, _lamc_c = mg2_size_dist_liq(
+                q_c_ic, N_c_ic, rho, **_early_reset_w)
+        # Specified droplet number (production): the same MG2 reset, inside
+        # the autoconversion, with the same RULE 5 width (#2216, user
+        # 2026-11-01).  KNOWN DIFFERENCE: as above.  Measured at the default
+        # 0.01 (x64): on the specified-number oracle fixtures, every other
+        # switch hard, the whole-call quantities move by <= 7.5e-15 of the
+        # column's largest MG2 value and the MG2 kernel points' autoconversion
+        # rate by up to 1.0e-8 relative (50 um side); per-case tables GAP and
+        # POINT_GAP in tests/atmosphere/microphysics/unit/
+        # test_morrison_mg2_specnc_reset_smooth.py.  On production-deck
+        # states (one step, jan1979_main1027_ncaero days 10/20/30, mass-
+        # weighted global and 40-65S means) autoconversion and snow riming
+        # move by <= 2e-6 relative and the rain-number tendency by <= 2e-4.
         dq_c_au, dN_r_au, x_c = autoconversion_kk2000_cam6(
             q_c_ic, N_c_ic, rho, _relvar,
             fact=config.autocon_fact, nc_floor=not _prog_nc,
-            size_reset=not _prog_nc)
+            size_reset=not _prog_nc, **_early_reset_w)
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff
         dq_c_ac = accretion_kk2000(
@@ -670,10 +728,15 @@ def morrison_microphysics(
         # ``-dq_c_au·rho/x_c`` sink below is used instead.
         dq_c_au, dN_r_au, x_c = autoconversion_sb2001(
             q_c_ic, q_r_ic, N_c_ic, rho,
+            ramp_top=config.sb2001_autoconv_ramp_top,
         )
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff
-        dq_c_ac = accretion_sb2001(q_c_ic, q_r_ic, rho) * cf_eff
+        dq_c_ac = accretion_sb2001(
+            q_c_ic, q_r_ic, rho,
+            qr_ramp_top=config.sb2001_accretion_qr_ramp_top,
+            qc_ramp_top=config.sb2001_accretion_qc_ramp_top,
+        ) * cf_eff
     else:
         raise ValueError(
             f"Unknown warm_rain_scheme: {config.warm_rain_scheme!r}; choose "
@@ -1103,7 +1166,10 @@ def morrison_microphysics(
             if _prog_nc:     # N_c_ic is already MG2's reset number (above)
                 _nc_liq, _pgam, _lamc = N_c_ic, _pgam_c, _lamc_c
             else:
-                _nc_liq, _pgam, _lamc = mg2_size_dist_liq(q_c_ic, N_c_ic, rho)
+                # specified number: MG2's reset again, same RULE 5 width
+                # (KNOWN DIFFERENCE at the autoconversion call above)
+                _nc_liq, _pgam, _lamc = mg2_size_dist_liq(q_c_ic, N_c_ic, rho,
+                                                          **_early_reset_w)
             riming_s = mg2_accrete_cloud_water_snow(
                 T, rho, mu_air, uns_ic, q_c_ic, _nc_liq, q_sic, _pgam, _lamc,
                 lams_ic, n0s_ic, config,
@@ -1490,10 +1556,20 @@ def morrison_microphysics(
         # MG2 conservation of nc with omsm (micro_mg2_0.F90:1628-1642), against
         # the post-activation grid-mean number.
         _nclim = nc_sink * dt > N_c_act
-        nc_sink = nc_sink * jnp.where(
+        _nc_lim = jnp.where(
             _nclim,
             N_c_act / dt / jnp.where(_nclim, nc_sink, 1.0) * _MG2_OMSM,
             1.0)
+        nc_sink = nc_sink * _nc_lim
+        if _nc_pub:
+            # APPLIED (post-limiter) sinks, split by process; they sum to
+            # ``nc_sink`` up to round-off.
+            _nc_terms = {
+                "autoconversion": -dq_c_au * _nc_per_qc * _nc_lim,
+                "accretion": -dq_c_ac * _nc_per_qc * _nc_lim,
+                "riming_snow": -riming_s * _nc_per_qc * _nc_lim,
+                "riming_graupel": -riming_g * _nc_per_qc * _nc_lim,
+            }
     qc_avail = jnp.clip(q_c, 0.0)
     if config.warm_rain_incloud:
         # CAM6 MG2 q_c limiter form (micro_mg2_0.F90:1566-1590): only where
@@ -2275,6 +2351,8 @@ def morrison_microphysics(
         # MG2 nctend (micro_mg2_0.F90:1947) + activation re-applied everywhere
         # (:2019-2022).
         dN_c_dt = -nc_sink + npccn
+        if _nc_pub:
+            _nc_terms["activation"] = npccn
     elif getattr(config, "predict_Nc", False):
         dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15) - dN_c_riming
     else:
@@ -2331,7 +2409,11 @@ def morrison_microphysics(
         (sed_c, sed_nc_kg, sed_qv, sed_T, precip_c,
          _req_c) = mg2_cloud_sedimentation(
             q_c + dq_c_dt * dt, (N_c + dN_c_dt * dt) / rho, cf_eff, T, rho,
-            p_half, dt, _nsub, presence_top=config.mg2_presence_ramp_top)
+            p_half, dt, _nsub, presence_top=config.mg2_presence_ramp_top,
+            # RULE 5: the fall-speed size reset rounded by its width (0 = MG2's
+            # hard clip; KNOWN DIFFERENCE in mg2_droplet_fall_coefficients)
+            number_cap_log_width=config.mg2_drop_sed_reset_log_width,
+            slope_log_width=config.mg2_drop_sed_reset_log_width)
         if config.sed_cfl_substeps:
             sed_substeps_required = jnp.maximum(sed_substeps_required, _req_c)
             if config.sed_cfl_substeps_strict:
@@ -2344,6 +2426,8 @@ def morrison_microphysics(
                 _sed_poison = jnp.where(_overflow_c, jnp.nan, _sed_poison)
         dq_c_dt = dq_c_dt + sed_c
         dN_c_dt = dN_c_dt + sed_nc_kg * rho
+        if _nc_pub:
+            _nc_terms["sedimentation"] = sed_nc_kg * rho
         dq_v_dt = dq_v_dt + sed_qv
         dT_dt = dT_dt + sed_T
     if mg2_snow:
@@ -2365,8 +2449,11 @@ def morrison_microphysics(
         _dqc = jnp.where(_chg, (_q_c_end - _q_c_raw) / dt, 0.0)
         dq_c_dt = dq_c_dt + _dqc
         if _prog_nc or config.predict_Nc:
-            dN_c_dt = dN_c_dt + jnp.where(
+            _dnc_mf = jnp.where(
                 _chg, (_N_c_end * rho - (N_c + dN_c_dt * dt)) / dt, 0.0)
+            dN_c_dt = dN_c_dt + _dnc_mf
+            if _nc_pub:
+                _nc_terms["ice_melt_homog_freeze"] = _dnc_mf
         dq_i_dt = dq_i_dt + jnp.where(
             _chg, (_q_i_end - (q_i + dq_i_dt * dt)) / dt, 0.0)
         dN_i_dt = dN_i_dt + jnp.where(
@@ -2377,13 +2464,20 @@ def morrison_microphysics(
     if _prog_nc:
         # MG2 final droplet mean-size re-adjust (micro_mg2_0.F90:2743-2753,
         # :2812-2830; Q2'a).
+        _dnc_pre = dN_c_dt
         dN_c_dt = mg2_droplet_number_readjust(
             q_c + dq_c_dt * dt, N_c + dN_c_dt * dt, N_c, cf_eff, rho, dt, dN_c_dt,
-            presence_top=config.mg2_presence_ramp_top)
+            presence_top=config.mg2_presence_ramp_top,
+            log_width=config.mg2_drop_readjust_log_width)
+        if _nc_pub:
+            _nc_terms["size_readjust"] = dN_c_dt - _dnc_pre
+            _dnc_pre = dN_c_dt
         # MG2's last droplet-number write (micro_mg2_0.F90:2913): no cloud
         # water left after the step => no droplets.
         _on = mg2_presence(q_c + dq_c_dt * dt, config.mg2_presence_ramp_top)
         dN_c_dt = _on * dN_c_dt + (1.0 - _on) * (-N_c / dt)
+        if _nc_pub:
+            _nc_terms["no_cloud_clear"] = dN_c_dt - _dnc_pre
 
     # === Non-negativity floor on the cloud/rain/ice NUMBER tendencies ===
     # Each individual number sink above is bounded (evap/riming ∝ N/dt,
@@ -2647,6 +2741,39 @@ def morrison_microphysics(
         dT_dt = dT_dt + (T - T_in) / dt
         dq_v_dt = dq_v_dt + (q_v - q_v_in) / dt
         dq_c_dt = dq_c_dt + condensation
+        # The removal's increments (relative to the adjusted state; its T,
+        # q_v, q_c parts are already in the two lines above).
+        dq_r_dt = dq_r_dt + (hydrometeors.q_r - hyd_in.q_r) / dt
+        dq_i_dt = dq_i_dt + (hydrometeors.q_i - hyd_in.q_i) / dt
+        dq_s_dt = dq_s_dt + (hydrometeors.q_s - hyd_in.q_s) / dt
+        dq_g_dt = dq_g_dt + (hydrometeors.q_g - hyd_in.q_g) / dt
+        dN_r_dt = dN_r_dt + (hydrometeors.N_r - hyd_in.N_r) / dt
+        dN_i_dt = dN_i_dt + (hydrometeors.N_i - hyd_in.N_i) / dt
+        if dN_s_dt is not None:
+            dN_s_dt = dN_s_dt + (hydrometeors.N_s - hyd_in.N_s) / dt
+        if dN_g_dt is not None:
+            dN_g_dt = dN_g_dt + (hydrometeors.N_g - hyd_in.N_g) / dt
+        # Post-step removal (:4664-4700) on the end-of-step state.
+        tend = dict(q_c=dq_c_dt, q_r=dq_r_dt, q_i=dq_i_dt, q_s=dq_s_dt, q_g=dq_g_dt,
+                    N_r=dN_r_dt, N_i=dN_i_dt, N_s=dN_s_dt, N_g=dN_g_dt)
+        new = hyd0._replace(**{k: getattr(hyd0, k) + dt * v for k, v in tend.items()
+                               if v is not None})
+        T_new, q_v_new = T_in + dt * dT_dt, q_v_in + dt * dq_v_dt
+        T_rm, q_v_rm, rm = _gsam_small_removal(T_new, q_v_new, new, p_full, config)
+        dT_dt = dT_dt + (T_rm - T_new) / dt
+        dq_v_dt = dq_v_dt + (q_v_rm - q_v_new) / dt
+        small_removal_c = (rm.q_c - new.q_c) / dt
+        dq_c_dt = dq_c_dt + small_removal_c
+        dq_r_dt = dq_r_dt + (rm.q_r - new.q_r) / dt
+        dq_i_dt = dq_i_dt + (rm.q_i - new.q_i) / dt
+        dq_s_dt = dq_s_dt + (rm.q_s - new.q_s) / dt
+        dq_g_dt = dq_g_dt + (rm.q_g - new.q_g) / dt
+        dN_r_dt = dN_r_dt + (rm.N_r - new.N_r) / dt
+        dN_i_dt = dN_i_dt + (rm.N_i - new.N_i) / dt
+        if dN_s_dt is not None:
+            dN_s_dt = dN_s_dt + (rm.N_s - new.N_s) / dt
+        if dN_g_dt is not None:
+            dN_g_dt = dN_g_dt + (rm.N_g - new.N_g) / dt
 
     # (No placeholder outputs here — every MicrophysicsOutput field below is
     # a computed tendency, so no dtype pin is needed; a former bare
@@ -2695,11 +2822,20 @@ def morrison_microphysics(
             "homogeneous_freezing": -homo_freeze_c,
             "bergeron_snow": -bergs,
         })
+        if gsam_satadj:
+            # post-step M2005 small-condensate removal (the preamble one is
+            # inside "condensation", relative to the input q_c)
+            out.qc_budget["small_removal"] = small_removal_c
         if _prog_nc:
             out.qc_budget["sedimentation"] = sed_c
         if mg2_snow:
             out.qc_budget["ice_melt"] = _qc_ice_melt
             out.qc_budget["homogeneous_freezing"] = _qc_homog
+    if _nc_pub:
+        # Droplet-number terms [1/(m^3 s)], APPLIED: each later stage is booked
+        # as the increment it made to ``dN_c_dt``, so they sum to ``dN_c_dt``
+        # up to round-off (the probe asserts the residual).
+        out = out._replace(nc_budget=_nc_terms)
     if _sed_poison is not None:
         # Strict mode: every FLOAT field carries the overflow guard.  Static
         # Python branch -- the non-strict graph is untouched.

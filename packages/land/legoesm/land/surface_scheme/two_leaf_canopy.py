@@ -75,6 +75,10 @@ _DEFAULT_PICARD_OMEGA = 0.15
 # the whole rank up to the iteration cap; groups stop independently.  Pure
 # performance: measured on recorded production batches, iteration counts and
 # converged flags identical, state differs only by rounding (<= 5e-13 K).
+# Size 64 chosen by the user (2026-11-03) from a sweep on the AMIP production
+# deck (2 days from day 360, two repeats; land solve s per call): 1 GPU
+# 64: 15.84, 256: 15.94, 1024: 22.21, one batch: 38.90; 4 GPUs 64: 5.24,
+# 256: 5.38, 1024: 7.23, one batch: 13.20.  A batching count, never a config.
 _CANOPY_SOLVE_GROUP = 64
 # Picard passes after the first order their columns by the previous pass's
 # Newton iterations before grouping, so hard columns share groups.  Pure
@@ -548,11 +552,11 @@ def compute_two_leaf_canopy_fluxes(
     # A column with no converged solution yet alternates its seed across passes
     # between the caller's seed and the (slightly cooled) retry state, so a seed
     # that led the solve astray gets a different retry inside the same call.  The
-    # passes run over every column anyway (vmap), so this costs nothing.  A failed
-    # pass still relaxes the soil boundary with its cold-state fallback flux (the
-    # one the land step accepts if the column ends unsolved); freezing it held
-    # desert columns at their start-of-step soil.  Acceptance stays tied to the
-    # LAST pass.
+    # passes run over every column anyway (in groups), so this costs nothing.  A
+    # failed pass still relaxes the soil boundary with its cold-state fallback
+    # flux (the one the land step accepts if the column ends unsolved); freezing
+    # it held desert columns at their start-of-step soil.  Acceptance stays tied
+    # to the LAST pass.
     x_conv = jnp.full_like(initial_state, jnp.nan)
     n_iters = None  # set by each pass; the sort reads the previous pass's
     for _picard_iter in range(n_picard):

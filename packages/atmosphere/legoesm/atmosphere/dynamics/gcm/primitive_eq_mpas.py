@@ -39,6 +39,7 @@ from legoesm.core.precision import cast_pytree, finalize_to_storage
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
+    with_dyn_tendencies,
     MPAS_SFC_DIAG_EXTRA_KEYS,
     MPASHydrostaticState,
     MPASHydrostaticTendencies,
@@ -866,10 +867,12 @@ def mpas_hydrostatic_tendencies(
         omega_ps = sigma_coord.sigma_full * dp_s_dt[:, None]
 
     # Surface pressure hyperdiffusion: -nu * del2(del2(p_s))
+    _dps_del4 = None
     if config.nu_del4_ps > 0:
         del2_ps = divergence_cell(gradient_edge(p_s, mesh), mesh)
         del4_ps = divergence_cell(gradient_edge(del2_ps, mesh), mesh)
-        dp_s_dt = dp_s_dt - config.nu_del4_ps * del4_ps
+        _dps_del4 = -config.nu_del4_ps * del4_ps
+        dp_s_dt = dp_s_dt + _dps_del4
 
     # Vertical advection of u: approximate via edge-averaged sigma-dot
     if _hybrid:
@@ -962,6 +965,15 @@ def mpas_hydrostatic_tendencies(
                 lambda qk: vertical_advection(
                     qk, sigma_dot, sigma_coord, scheme=_vert_scheme),
                 in_axes=-1, out_axes=-1)(q)
+        if _dps_del4 is not None:
+            # The p_s hyperdiffusion moves layer mass dB_k * _dps_del4 that no
+            # tracer flux accompanies; count it as dry air so each tracer's
+            # layer mass q*dp is unchanged: dq = -q dB_k _dps_del4 / dp_k.
+            # Without this it removed ~0.009 mm/day of water at res 6.
+            _dB = (sigma_coord.dB if _hybrid else sigma_coord.dsigma).astype(p_s.dtype)
+            _dp_c = sigma_coord.layer_thickness_dp(p_s)
+            _dp_c = jnp.where(_dp_c != 0, _dp_c, 1.0)  # halo padding (p_s = 0)
+            dq = dq - q * (_dB * _dps_del4[:, None] / _dp_c)[..., None]
         # #930 vertical checkerboard damper on TRACERS (same operator + rate
         # as the T filter above).  The 2026-07-23 moist-AMIP blowup forensics
         # (Tibetan-plateau cell, ±140 K 2Δσ T zigzag with 66 g/kg q_v pooling
@@ -1336,6 +1348,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         _state_postdyn = state_new
         _led_phys_rows = None
         if physics_fn is not None:
+            phys_state = with_dyn_tendencies(phys_state, state, state_new, dt)
             _pr = physics_fn(state_new, self.mesh, self.sigma_coord,
                              phys_state=phys_state, forcing=forcing)
             if type(_pr) is tuple:

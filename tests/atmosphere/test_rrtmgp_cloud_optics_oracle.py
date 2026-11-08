@@ -1,4 +1,4 @@
-"""Oracle match: RRTMGP cloud optics (LW absorption-only, SW v1.8.2 table, CAM ice size).
+"""Oracle match: RRTMGP cloud optics (LW absorption-only, SW, CAM ice size).
 
 Production path: ``two_stream.solve_lw/solve_sw`` -> ``RRTMOptics.add_cloud_optical_properties``
 -> ``_combine_gas_and_cloud_properties`` -> ``cloud_optics.compute_optical_properties``
@@ -6,14 +6,14 @@ Production path: ``two_stream.solve_lw/solve_sw`` -> ``RRTMOptics.add_cloud_opti
 ``add_cloud_optical_properties`` with zero gas optics so the cloud contribution is compared
 alone.
 
-Fixture ``oracle_fixtures/rrtmgp_cloud_optics.npz``: outputs come from RUNNING RTE+RRTMGP v1.8
-(rte-rrtmgp 41c5fcd950fed09b8afe186dede266824eca7fd3) ``mo_cloud_optics_rrtmgp%cloud_optics``
-on rrtmgp-data v1.8.2 (34967d68703e682305ec4da72ee22bbe1f11b198) rrtmgp-clouds-{lw,sw}.nc,
+Fixture ``oracle_fixtures/rrtmgp_cloud_optics.npz``: outputs come from RUNNING RTE+RRTMGP
+(rte-rrtmgp d4b3c51992a613d0c234026246705fdf68ffd7a3) ``mo_cloud_optics_rrtmgp%cloud_optics``
+on rrtmgp-data v1.9.2 (8ba21ca40c506d886fac5c8d3be1e812b4b8cc54) rrtmgp-clouds-{lw,sw}-bnd.nc,
 ice roughness medium: LW into ty_optical_props_1scl (absorption tau, no scattering), SW into
 ty_optical_props_2str + delta_scale.  Ice table coordinate = CAM6 deffi = effi*500/917*2 (CAM
 cam_cesm2_1_rel_60 micro_mg2_0.F90:2795).  Inputs: 5 CAM6-L32 columns through the production
 compute_cloud_properties (amip_production.yaml CloudConfig) and McICA in-cloud paths.
-Generator: scripts/validate/oracle/rrtmgp_cloud_optics/{build.sh,oracle_driver.F90,make_fixture.py}.
+Generator: scripts/validate/oracle/rrtmgp_cloud_optics/{oracle_driver.F90,make_fixture.py}.
 
 Excluded layers = legoESM's existing AD-safety regulariser ``cloud_optics._EPSILON`` (1e-6):
 a phase path in (0, 1e-6) g/m2 is masked out, and ssa/g are filled 0 where tau or tau*ssa
@@ -82,14 +82,14 @@ def _max_rel(ours, ref, mask):
     return float(np.max(np.abs(ours[nz] - ref[nz]) / np.abs(ref[nz])))
 
 
-def test_bundled_cloud_tables_are_rrtmgp_data_v182():
-    sha = {t: hashlib.sha256((_DATA / f"cloudysky_{t}.nc").read_bytes()).hexdigest()
+def test_bundled_cloud_tables_are_rrtmgp_data_v192():
+    sha = {t: hashlib.sha256((_DATA / f"rrtmgp-clouds-{t}-bnd.nc").read_bytes()).hexdigest()
            for t in ("lw", "sw")}
     z = np.load(_FIX)
     assert sha["lw"] == str(z["sha256_lw"])
     assert sha["sw"] == str(z["sha256_sw"])
-    assert sha["sw"] == "fced616f92c682809dc0be387841b1e71c40cfc73285362b64354464c855104d"
-    assert "v1.8.2" in json.loads(str(z["meta"]))["rrtmgp_data"]
+    assert sha["sw"] == "7671835992a45afe66244b591a02c0b3df73d7d59ecb746bbffd9763497651cd"
+    assert "v1.9.2" in json.loads(str(z["meta"]))["rrtmgp_data"]
 
 
 def test_lw_cloud_is_absorption_only_and_matches_rrtmgp_1scl(case):

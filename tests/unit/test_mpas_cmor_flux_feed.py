@@ -1814,6 +1814,107 @@ class TestSurfaceRadiationFeed:
         assert 9 in _MPASSfcFluxAccum.SLOTS
 
 
+
+class TestSnowfallFeed:
+    """CMOR prsn = the physics' own frozen surface flux (``_sfc_diag``
+    ``precip_frozen`` slot, the one the land's snowfall reads), an interval
+    mean like pr; absent when the physics does not export it."""
+
+    PR, PRSN = 3.0e-5, 1.2e-5
+
+    def _fake(self, mesh, dc, *, with_frozen, via_accum):
+        import types
+
+        from legoesm.core.state import (
+            MPAS_SFC_DIAG_BASE_KEYS, MPAS_SFC_DIAG_EXTRA_KEYS)
+        from legoesm.driver.model_driver import (
+            _MPASSfcFluxAccum, _sfc_diag_slot)
+
+        f = _base_fields(mesh, np.linspace(0.05, 0.98, NLEV))
+        n = f["p_s"].shape[0]
+        n_slots = len(MPAS_SFC_DIAG_BASE_KEYS) + len(MPAS_SFC_DIAG_EXTRA_KEYS)
+        k = _sfc_diag_slot("precip_frozen")
+
+        def _field(a):
+            return types.SimpleNamespace(data=np.asarray(a))
+
+        def _slots(pr, prsn):
+            sfc = [None] * n_slots
+            sfc[2] = _field(np.full(n, pr))
+            if with_frozen:
+                sfc[k] = _field(np.full(n, prsn))
+            return tuple(sfc)
+
+        acc = None
+        if via_accum:
+            acc = _MPASSfcFluxAccum()
+            acc.add(_slots(self.PR - 1e-5, self.PRSN - 1e-5))
+            acc.add(_slots(self.PR + 1e-5, self.PRSN + 1e-5))
+            snap = _slots(self.PR * 9, self.PRSN * 9)   # must not leak
+        else:
+            snap = _slots(self.PR, self.PRSN)
+        ns = types.SimpleNamespace(
+            diagnostics=dc, grid=mesh,
+            config=types.SimpleNamespace(
+                output=types.SimpleNamespace(diag_days=1.0)),
+            state=types.SimpleNamespace(
+                u=_field(np.zeros((int(mesh.nEdges), NLEV))),
+                T=_field(f["T"]), p_s=_field(f["p_s"]),
+                phis=_field(f["phis"]), tracers=None, v=None),
+            model=types.SimpleNamespace(_sfc_diag=snap),
+        )
+        if acc is not None:
+            ns._mpas_sfc_accum = acc
+        return _as_driver(ns)
+
+    @pytest.mark.parametrize("via_accum", [False, True])
+    def test_prsn_published_from_frozen_slot(self, mesh, via_accum):
+        from legoesm.driver.model_driver import ModelDriver
+
+        dc, _ = _make_collector(mesh)
+        ModelDriver._feed_mpas_cmip_accumulators(
+            self._fake(mesh, dc, with_frozen=True, via_accum=via_accum),
+            day=15.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_prsn"], self.PRSN, rtol=1e-9)
+        np.testing.assert_allclose(out["field_2d_pr"], self.PR, rtol=1e-9)
+
+    def test_without_frozen_slot_publishes_no_prsn(self, mesh):
+        from legoesm.driver.model_driver import ModelDriver
+
+        dc, _ = _make_collector(mesh)
+        ModelDriver._feed_mpas_cmip_accumulators(
+            self._fake(mesh, dc, with_frozen=False, via_accum=False),
+            day=15.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_prsn" not in out
+        assert "field_2d_pr" in out
+
+    def test_frozen_slot_is_accumulated(self):
+        from legoesm.driver.model_driver import (
+            _MPASSfcFluxAccum, _sfc_diag_slot)
+
+        assert _sfc_diag_slot("precip_frozen") in _MPASSfcFluxAccum.SLOTS
+
+    def test_prsn_written_to_amon(self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+
+        dc, _ = _make_collector(mesh)
+        dc.cf_writer = CFWriter(
+            output_dir=tmp_path, experiment_id="amip",
+            model_id="legoESM", ref_date="1979-01-01")
+        nlat, nlon = dc._cmip_nlat, dc._cmip_nlon
+        dc._write_cmip_data({
+            "months": [(0, 1)],
+            "field_2d_prsn": np.full((1, nlat, nlon), self.PRSN)})
+        files = sorted(tmp_path.rglob("prsn_Amon_*.nc"))
+        assert files
+        with xr.open_dataset(files[0]) as ds:
+            assert ds["prsn"].attrs["units"] == "kg m-2 s-1"
+            np.testing.assert_allclose(ds["prsn"].values, self.PRSN)
+
+
 class TestSeaIceSnowFeed:
     """Prescribed sea-ice concentration (SImon siconc) and the land's snow
     water equivalent (LImon snw, a mean WHERE LAND) reach the CMOR feed as
@@ -2001,3 +2102,163 @@ class TestDailySurfacePressure:
         assert files and not list(tmp_path.rglob("ps_day_*.nc"))
         with xr.open_dataset(files[0]) as ds:
             np.testing.assert_allclose(ds["ps"].values, 1.0e5, rtol=1e-6)
+
+
+class TestRtmtAndDailyExports:
+    """rtmt (Amon) from the fed TOA trio, and daily copies of the fed 2-D
+    fields: rsut/rsdt (CFday), hfls hfss rlds rlus rsds rsus prsn clt snw
+    (day)."""
+
+    SFC = dict(rsds=180.0, rsus=25.0, rlds=330.0, rlus=390.0, prsn=4.0e-6)
+    DAILY_FLUX = ("rsut", "rsdt", "hfls", "hfss", "rlds", "rlus", "rsds",
+                  "rsus", "prsn")
+
+    def _feed(self, dc, mesh, sigma_full, day, **extra):
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        vals = {**FLUXES, **self.SFC}
+        dc.feed_cmip_accumulators_native(
+            day, **f, flux_interval_days=1.0,
+            snw=np.full(n, 50.0), land_fraction=np.full(n, 0.5),
+            **{k: np.full(n, v) for k, v in vals.items()}, **extra)
+
+    def test_rtmt_is_rsdt_minus_rsut_minus_rlut(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        self._feed(dc, mesh, sigma_full, 15.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        want = FLUXES["rsdt"] - FLUXES["rsut"] - FLUXES["rlut"]
+        np.testing.assert_allclose(out["field_2d_rtmt"], want, rtol=1e-12)
+
+    def test_rtmt_absent_without_the_full_trio(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        dc.feed_cmip_accumulators_native(
+            15.0, **f, rsdt=np.full(n, 340.0), rsut=np.full(n, 99.0))
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_rtmt" not in out
+
+    def test_daily_fluxes_bin_to_covered_day_state_to_endpoint(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        self._feed(dc, mesh, sigma_full, 15.0)
+        daily = dc._spatial_daily._data
+        for name in self.DAILY_FLUX:
+            assert name in daily.get((0, 15), {}), name
+            assert name not in daily.get((0, 16), {}), name
+        assert "snw" in daily.get((0, 16), {})
+        assert "rtmt" not in daily.get((0, 15), {})   # no daily CMIP6 rtmt
+
+    def test_daily_clt_is_fed_and_carries_the_cloud_note(self, mesh):
+        from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+        dc, sigma_full = _make_collector(
+            mesh, cloud_config=build_cloud_config("xu_randall"))
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        q_v = 1.0e-3 * (1.0 - sigma_full)[None, :] * np.ones((n, 1))
+        vert = np.exp(-((sigma_full - 0.55) ** 2) / 0.02)
+        q_c = 3.0e-4 * vert[None, :] * np.ones((n, 1))
+        dc.feed_cmip_accumulators_native(15.0, **f, q_v=q_v, q_c=q_c)
+        assert "clt" in dc._spatial_daily._data[(0, 16)]   # state: endpoint day
+        attrs = dc._daily_extreme_attrs()
+        assert attrs["clt"]["comment"].startswith("Stratiform layer cloud")
+
+    def test_files_land_in_the_cmip6_tables(self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+        dc, sigma_full = _make_collector(mesh)
+        dc.cf_writer = CFWriter(output_dir=tmp_path, experiment_id="amip",
+                                model_id="legoESM", ref_date="1979-01-01")
+        for d in (15.0, 16.0):
+            self._feed(dc, mesh, sigma_full, d)
+        dc.finalize_cmip_daily(current_day=17.0)
+        for name in ("rsut", "rsdt"):
+            assert sorted(tmp_path.rglob(f"{name}_CFday_*.nc")), name
+            assert not list(tmp_path.rglob(f"{name}_day_*.nc")), name
+        for name in ("hfls", "hfss", "rlds", "rlus", "rsds", "rsus", "prsn",
+                     "snw"):
+            assert sorted(tmp_path.rglob(f"{name}_day_*.nc")), name
+        with xr.open_dataset(sorted(tmp_path.rglob("snw_day_*.nc"))[0]) as ds:
+            assert ds["snw"].attrs["cell_methods"] == (
+                "area: mean where land time: mean")
+        dc._write_cmip_data(dc._spatial_monthly.finalize(min_sample_fraction=0))
+        files = sorted(tmp_path.rglob("rtmt_Amon_*.nc"))
+        assert files
+        with xr.open_dataset(files[0]) as ds:
+            assert ds["rtmt"].attrs["positive"] == "down"
+            np.testing.assert_allclose(ds["rtmt"].values, 3.0, rtol=1e-5)
+
+
+class TestCmipWriterIdentity:
+    def test_collector_passes_identity_and_drs_tree_to_writer(self, tmp_path):
+        sigma_full = np.linspace(0.05, 0.98, NLEV)
+        dc = DiagnosticCollector(
+            nlev=NLEV, sigma_full=sigma_full, dsigma=np.full(NLEV, 1.0 / NLEV),
+            experiment_id="amip", cmip_output=True, n_days=30,
+            output_dir=str(tmp_path), cmip_resolution_deg=10.0,
+            cmip_drs_tree=True, cmip_institution_id="INST-X",
+            cmip_source_id="SRC-1-0", cmip_variant_label="r2i1p1f1")
+        w = dc.cf_writer
+        assert (w.drs_tree, w.institution_id, w.model_id, w.variant_label) == (
+            True, "INST-X", "SRC-1-0", "r2i1p1f1")
+        rel = w._output_path("tas", "Amon").relative_to(tmp_path / "cmor")
+        assert rel.parts[:7] == ("CMIP6", "CMIP", "INST-X", "SRC-1-0", "amip",
+                                 "r2i1p1f1", "Amon")
+        assert rel.name == "tas_Amon_SRC-1-0_amip_r2i1p1f1_gn.nc"
+
+    def test_defaults_keep_the_flat_layout(self, tmp_path):
+        sigma_full = np.linspace(0.05, 0.98, NLEV)
+        dc = DiagnosticCollector(
+            nlev=NLEV, sigma_full=sigma_full, dsigma=np.full(NLEV, 1.0 / NLEV),
+            experiment_id="amip", cmip_output=True, n_days=30,
+            output_dir=str(tmp_path), cmip_resolution_deg=10.0)
+        w = dc.cf_writer
+        assert (w.drs_tree, w.institution_id, w.model_id, w.variant_label) == (
+            False, "CU", "legoESM-1-0", "r1i1p1f1")
+        assert w._output_path("tas", "Amon").parent == tmp_path / "cmor" / "Amon"
+
+
+class TestHur:
+    """hur (Amon plev19): q_v / q_sat on model levels, water above 0 C and
+    ice below (the CMIP6 table comment), then plev19 + regrid like ta."""
+
+    def _qsat_switch(self, dc, T, p_s):
+        from legoesm.thermo import (
+            saturation_specific_humidity, saturation_specific_humidity_ice)
+        p = np.asarray(dc._p_full(p_s))
+        liq = np.asarray(saturation_specific_humidity(T, p))
+        ice = np.asarray(saturation_specific_humidity_ice(T, p))
+        return np.where(T >= constants.T_freeze, liq, ice), liq
+
+    def test_half_saturated_column_reads_50_percent_across_freezing(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        # Column spanning the freezing level: 240 K aloft to 290 K below.
+        T = np.broadcast_to(240.0 + 50.0 * sigma_full, f["T"].shape).copy()
+        assert T.min() < constants.T_freeze < T.max()
+        f["T"] = T
+        qs, liq = self._qsat_switch(dc, T, f["p_s"])
+        assert np.max(np.abs(qs / liq - 1.0)) > 0.05   # ice branch matters
+        dc.feed_cmip_accumulators_native(15.0, **f, q_v=0.5 * qs)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_3d_hur"], 50.0, rtol=1e-9)
+
+    def test_hur_absent_without_q_v(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        dc.feed_cmip_accumulators_native(15.0, **_base_fields(mesh, sigma_full))
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_3d_hur" not in out
+
+    def test_hur_file_is_amon_plev19_percent(self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+        dc, sigma_full = _make_collector(mesh)
+        dc.cf_writer = CFWriter(output_dir=tmp_path, experiment_id="amip",
+                                model_id="legoESM", ref_date="1979-01-01")
+        f = _base_fields(mesh, sigma_full)
+        qs, _ = self._qsat_switch(dc, f["T"], f["p_s"])
+        dc.feed_cmip_accumulators_native(15.0, **f, q_v=0.5 * qs)
+        dc._write_cmip_data(dc._spatial_monthly.finalize(min_sample_fraction=0))
+        [path] = sorted(tmp_path.rglob("hur_Amon_*.nc"))
+        with xr.open_dataset(path) as ds:
+            assert ds["hur"].attrs["units"] == "%"
+            assert ds["hur"].sizes["plev"] == 19

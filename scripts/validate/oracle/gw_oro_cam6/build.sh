@@ -7,6 +7,9 @@
 set -euo pipefail
 CAM=${1:?CAM cam_cesm2_1_rel_60 checkout}; B=${2:?build dir}
 HERE=$(cd "$(dirname "$0")" && pwd)
+SHA=a03b84b7c4e34f965b115686f22a043b85739e56
+test "$(git -C "$CAM" rev-parse HEAD)" = "$SHA" || { echo "CAM not at $SHA" >&2; exit 1; }
+test -z "$(git -C "$CAM" status --porcelain)" || { echo "CAM checkout not clean" >&2; exit 1; }
 mkdir -p "$B"; cd "$B"
 cp -f "$CAM"/src/utils/{coords_1d,linear_1d_operators,interpolate_data}.F90 .
 cp -f "$CAM"/src/physics/cam/{gw_utils,vdiff_lu_solver,gw_diffusion,gw_common,gw_oro}.F90 .

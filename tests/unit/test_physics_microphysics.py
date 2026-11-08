@@ -10,22 +10,74 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import pytest
+import numpy as np
 
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
-from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
 from legoesm.atmosphere.physics.microphysics.config import (
     KesslerConfig, SundqvistConfig, SeifertBehengConfig, MorrisonConfig,
-    ThompsonConfig, P3Config,
+    P3Config,
 )
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
 )
 from legoesm.thermo import saturation_specific_humidity
+
+
+def test_sundqvist_water_closes_on_dp_over_g_not_rho_dz():
+    """Tier-2 decision R9/C12: the layer mass is the oracle's del/g = dp/g, so
+    the column water budget closes in the pressure coordinate even when the
+    caller's rho*dz disagrees with dp/g (here rho is 20% off)."""
+    T, q_v, hydro, p_full, p_half, rho, dz = _make_column(T_sfc=290.0, q_c_val=1e-3)
+    q_v = saturation_specific_humidity(T, p_full)
+    hydro = hydro._replace(q_r=jnp.zeros_like(hydro.q_r).at[..., 8:12].set(5e-4))
+    out = sundqvist_microphysics(
+        T, q_v, hydro, p_full, p_half, 1.2 * rho, dz, 300.0, SundqvistConfig(), cell_area=1.0e10)
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    tend = jnp.sum((out.dq_v_dt + out.dq_c_dt + out.dq_r_dt) * dp, axis=1) / constants.g
+    imbalance = float(jnp.max(jnp.abs(tend + out.precipitation)))
+    assert float(jnp.max(out.precipitation)) > 0.0
+    assert imbalance < 1e-12 * max(float(jnp.max(out.precipitation)), 1.0), imbalance
+
+
+def test_sundqvist_precpd_runs_on_pre_condensation_state():
+    """R17 (precpd on the post-condensation state, the oracle's gscond ->
+    precpd order) is deferred to the gscond port (user 2026-10-27): with the
+    condensation surrogate's overshoot the post-condensation column is below
+    rh_crit and precpd re-evaporates its own production.  Until then precpd
+    sees the pre-step T and q_v, and condensation adds on top."""
+    from legoesm.atmosphere.physics.microphysics.sundqvist import (
+        diagnose_sundqvist_process_rates, gfs_area_weight, zhao_carr_precpd)
+    T, q_v, hydro, p_full, p_half, rho, dz = _make_column(
+        T_sfc=290.0, q_c_val=1e-3, supersaturated=True)
+    cfg = SundqvistConfig()
+    dt = 300.0
+    cond = diagnose_sundqvist_process_rates(
+        T, q_v, hydro, p_full, p_half, rho, dz, dt, cfg, cell_area=1.0e10).condensation
+    assert float(jnp.max(cond)) > 0.0
+    zc = zhao_carr_precpd(
+        T, q_v, hydro.q_c + cond * dt, p_full,
+        (p_half[:, 1:] - p_half[:, :-1]) / constants.g, dt, cfg,
+        wk1=gfs_area_weight(jnp.full(T.shape[:1], 1.0e10)))
+    out = sundqvist_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, cfg, cell_area=1.0e10)
+    np.testing.assert_allclose(
+        np.asarray(T + out.dT_dt * dt),
+        np.asarray(zc.T + constants.L_v * cond * dt / constants.c_pd),
+        rtol=1e-13, atol=0.0)
+    np.testing.assert_allclose(np.asarray(q_v + out.dq_v_dt * dt),
+                               np.asarray(zc.q_v - cond * dt),
+                               rtol=1e-12, atol=1e-18)
+
+
+def test_sundqvist_release_constants_default_to_the_oracle():
+    """Tier-2 decisions R13/R14: zhaocarr_precpd hard-codes c2 = 0.5 and
+    m_r = 3e-4; the config defaults are those values."""
+    assert SundqvistConfig().bergeron_enh_coeff == 0.5
+    assert SundqvistConfig().qc_crit == 3.0e-4
 
 
 # ---------------------------------------------------------------------------
@@ -80,16 +132,13 @@ def _call_scheme(name, T, q_v, hydro, p_full, p_half, rho, dz, dt=300.0):
                                      config=KesslerConfig())
     elif name == "sundqvist":
         return sundqvist_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt,
-                                       config=SundqvistConfig())
+                                       config=SundqvistConfig(), cell_area=1.0e10)
     elif name == "seifert_beheng":
         return seifert_beheng_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt,
                                             config=SeifertBehengConfig())
     elif name == "morrison":
         return morrison_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt,
                                       config=MorrisonConfig())
-    elif name == "thompson":
-        return thompson_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt,
-                                      config=ThompsonConfig())
     elif name == "p3":
         return p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt,
                                config=P3Config())
@@ -97,34 +146,9 @@ def _call_scheme(name, T, q_v, hydro, p_full, p_half, rho, dz, dt=300.0):
         raise ValueError(f"Unknown scheme: {name}")
 
 
-# ============================================================================
-# Dispatch hardening — Thompson snow_scheme must raise on an unknown value
-# ============================================================================
-
-def test_thompson_unknown_snow_scheme_raises():
-    """A typo in ``snow_scheme`` must raise, not silently fall back to the
-    bulk power-law fall speed (which also leaves Thompson-2008 snow
-    deposition disabled — a silent physics change)."""
-    T, q_v, hydro, p_full, p_half, rho, dz = _make_column()
-    with pytest.raises(ValueError, match="Unknown snow_scheme"):
-        thompson_microphysics(
-            T, q_v, hydro, p_full, p_half, rho, dz, 300.0,
-            config=ThompsonConfig(snow_scheme="thompson_2008"),  # typo
-        )
-
-
-@pytest.mark.parametrize("snow_scheme", ["thompson2008", "bulk_qpower"])
-def test_thompson_valid_snow_scheme_runs(snow_scheme):
-    """Both supported snow schemes produce finite output."""
-    T, q_v, hydro, p_full, p_half, rho, dz = _make_column()
-    out = thompson_microphysics(
-        T, q_v, hydro, p_full, p_half, rho, dz, 300.0,
-        config=ThompsonConfig(snow_scheme=snow_scheme),
-    )
-    assert jnp.all(jnp.isfinite(out.dq_s_dt))
-
-
-ALL_SCHEMES = ["kessler", "sundqvist", "seifert_beheng", "morrison", "thompson", "p3"]
+# thompson (WRF port) is certified by its oracle + adapter tests; it needs
+# the resolved w these synthetic columns lack (vote K1a).
+ALL_SCHEMES = ["kessler", "sundqvist", "seifert_beheng", "morrison", "p3"]
 
 
 # ============================================================================
@@ -204,10 +228,10 @@ def test_precipitation_non_negative(scheme):
 
 
 # ============================================================================
-# 4e  Ice-phase temperature bounds (Morrison, Thompson)
+# 4e  Ice-phase temperature bounds (Morrison)
 # ============================================================================
 
-@pytest.mark.parametrize("scheme", ["morrison", "thompson"])
+@pytest.mark.parametrize("scheme", ["morrison"])
 def test_ice_no_formation_above_freezing(scheme):
     """Above freezing (T > 273.15 K), ALL ice tendencies must be negligible.
 
@@ -307,7 +331,7 @@ def test_heating_rate_bounded(scheme):
 
 @pytest.mark.parametrize(
     "scheme,call",
-    [("morrison", morrison_microphysics), ("thompson", thompson_microphysics)],
+    [("morrison", morrison_microphysics)],
 )
 def test_qc_does_not_go_negative_at_long_dt(scheme, call):
     """An explicit Euler step must not drive q_c below zero in mixed-phase.
@@ -323,7 +347,7 @@ def test_qc_does_not_go_negative_at_long_dt(scheme, call):
     additionally evaporate cloud water; layer thickness is large
     (10 km) to keep sedimentation Courant well below 1.
     """
-    cfg_class = MorrisonConfig if scheme == "morrison" else ThompsonConfig
+    cfg_class = MorrisonConfig
     ncol, nlev = 1, 5
     T = jnp.full((ncol, nlev), 250.0)  # mixed-phase regime
     p_full = jnp.full((ncol, nlev), 5e4)
@@ -358,53 +382,6 @@ def test_qc_does_not_go_negative_at_long_dt(scheme, call):
     )
 
 
-def test_thompson_qi_does_not_go_negative_warm():
-    """Thompson melt processes must not over-extract q_i above freezing.
-
-    Morrison clamps melt_ice/melt_snow with ``min(rate*q*frac, q/dt)``;
-    Thompson did not, so at T=280K (above freezing) and dt=1200s with
-    default rates, q_i was driven below zero.  After fix, melt is clamped
-    to available mass.
-
-    Layer thickness is 10 km so sedimentation Courant
-    ``V_t * dt / dz <= 5*1200/10000 = 0.6`` stays below 1.
-    """
-    ncol, nlev = 1, 5
-    T = jnp.full((ncol, nlev), 280.0)  # above freezing
-    p_full = jnp.full((ncol, nlev), 5e4)
-    p_half = jnp.broadcast_to(
-        jnp.linspace(4e4, 6e4, nlev + 1)[None, :], (ncol, nlev + 1),
-    )
-    rho = p_full / (constants.R_d * T)
-    dz = jnp.full((ncol, nlev), 10_000.0)
-    q_c = jnp.full((ncol, nlev), 1e-3)
-    q_i = jnp.full((ncol, nlev), 1e-4)
-    q_s = jnp.full((ncol, nlev), 1e-4)
-    hydro = HydrometeorState(
-        q_c=q_c, q_r=jnp.zeros_like(q_c), q_i=q_i, q_s=q_s,
-        q_g=jnp.zeros_like(q_c),
-        N_c=1e8 * jnp.ones_like(q_c),
-        N_r=jnp.zeros_like(q_c),
-        N_i=1e4 * jnp.ones_like(q_c),
-    )
-    q_v = 0.8 * saturation_specific_humidity(T, p_full)
-    dt = 1200.0
-    out = thompson_microphysics(
-        T, q_v, hydro, p_full, p_half, rho, dz, dt, ThompsonConfig(),
-    )
-    q_i_after = q_i + out.dq_i_dt * dt
-    # Skip the top level: with q_i uniform throughout the column the top
-    # level always loses sedimentation flux without compensating inflow,
-    # which is a sedimentation-CFL concern rather than a melt-clamp one.
-    # The melt-clamp bug shows up uniformly in interior levels.
-    min_qi_interior = float(jnp.min(q_i_after[:, 1:]))
-    assert min_qi_interior >= -1e-9, (
-        f"Thompson: interior q_i went negative ({min_qi_interior:.3e}) at "
-        f"T=280 K with dt=1200s — melt rate × q_i × melt_frac × dt exceeded "
-        "q_i without a donor clamp."
-    )
-
-
 @pytest.mark.parametrize(
     "scheme,call",
     [
@@ -412,7 +389,6 @@ def test_thompson_qi_does_not_go_negative_warm():
             strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")),
         ("seifert_beheng", seifert_beheng_microphysics),
         ("morrison", morrison_microphysics),
-        ("thompson", thompson_microphysics),
     ],
 )
 def test_subsaturated_clear_air_does_not_create_negative_qc(scheme, call):
@@ -437,10 +413,8 @@ def test_subsaturated_clear_air_does_not_create_negative_qc(scheme, call):
             "kessler": KesslerConfig,
             "seifert_beheng": SeifertBehengConfig,
         }[scheme]
-    elif scheme == "morrison":
-        config_cls = MorrisonConfig
     else:
-        config_cls = ThompsonConfig
+        config_cls = MorrisonConfig
 
     ncol, nlev = 1, 5
     T = jnp.full((ncol, nlev), 280.0)
@@ -479,84 +453,13 @@ def test_subsaturated_clear_air_does_not_create_negative_qc(scheme, call):
     )
 
 
-def test_thompson_rime_to_graupel_donor_split():
-    """Audit cycle 2 (Codex): the Thompson rime-to-graupel conversion
-    must subtract from the SOURCE species (q_i for ``riming_i``,
-    q_s for ``riming_s``), not split via fixed 1.0 / 0.5 / 1.5
-    coefficients on the total.
-
-    Pathological column: ``q_c > 0`` (cloud water source for riming),
-    ``q_i = 0`` (no ice to be rimed), ``q_s > 0`` (snow that gets
-    rimed by cloud water), ``T < T_freeze`` (active ice phase).  In
-    this column ``riming_i = 0`` (no q_i to rime) and ``riming_s > 0``
-    (q_c × q_s × f_ice).  Pre-fix:
-        rime_to_graupel = rate * (riming_i + riming_s) > 0
-        dq_i_dt -= rime_to_graupel              # full subtraction!
-        dq_s_dt -= 0.5 * rime_to_graupel
-        dq_g_dt += 1.5 * rime_to_graupel
-    drives ``q_i`` negative and creates 1.5× extra mass — both
-    conservation violations.  Post-fix the donor split scales by
-    ``riming_i / riming_s`` and only the actually-rimed species is
-    drained.  Total mass moved (``rime_to_graupel_from_i +
-    rime_to_graupel_from_s``) goes 1:1 to graupel.
-    """
-    ncol, nlev = 1, 5
-    T = jnp.full((ncol, nlev), 250.0)  # below freezing — ice active
-    p_full = jnp.full((ncol, nlev), 5e4)
-    p_half = jnp.broadcast_to(
-        jnp.linspace(4e4, 6e4, nlev + 1)[None, :], (ncol, nlev + 1),
-    )
-    rho = p_full / (constants.R_d * T)
-    dz = jnp.full((ncol, nlev), 10_000.0)
-    # The pathological mix: cloud water + snow, NO ice.
-    q_c = jnp.full((ncol, nlev), 5e-3)
-    q_i = jnp.zeros((ncol, nlev))                # zero ice — would be drained negative pre-fix
-    q_s = jnp.full((ncol, nlev), 1e-3)            # snow gets rimed
-    hydro = HydrometeorState(
-        q_c=q_c, q_r=jnp.zeros_like(q_c), q_i=q_i, q_s=q_s,
-        q_g=jnp.zeros_like(q_c),
-        N_c=1e8 * jnp.ones_like(q_c),
-        N_r=jnp.zeros_like(q_c),
-        N_i=jnp.zeros_like(q_c),
-    )
-    q_v = 0.5 * saturation_specific_humidity(T, p_full)
-    dt = 1200.0
-    out = thompson_microphysics(
-        T, q_v, hydro, p_full, p_half, rho, dz, dt, ThompsonConfig(),
-    )
-    q_i_after = q_i + out.dq_i_dt * dt
-    # q_i must remain non-negative (donor split: only riming_i drains q_i).
-    min_qi = float(jnp.min(q_i_after))
-    assert min_qi >= -1e-9, (
-        f"Thompson: q_i went negative ({min_qi:.3e}) when starting at "
-        "q_i=0 with q_s>0 and active riming.  Pre-fix the rime_to_graupel "
-        "subtracted the full conversion from q_i regardless of which "
-        "species was actually rimed.  Audit cycle 2 Codex finding "
-        "'Thompson graupel conversion can draw from the wrong donor' "
-        "has regressed."
-    )
-    # Mass conservation: ∑ dq_i + dq_s + dq_g (pure ice phase) should
-    # equal sed_i + sed_s + sed_g (sedimentation only escapes the column);
-    # internal phase changes cancel in the sum.  We can verify rime->graupel
-    # specifically by checking that any q_g gain matches a q_s loss.
-    dq_g_total = float(jnp.sum(out.dq_g_dt))
-    # Without melting (T well below freeze), all q_g must come from
-    # rime_to_graupel.  q_g production must be matched by q_s loss
-    # (donor split: only riming_s active here).
-    assert dq_g_total >= 0.0, (
-        f"Thompson: dq_g_dt total ({dq_g_total:.3e}) is negative "
-        "without graupel sedimentation source — graupel mass conservation "
-        "violation."
-    )
-
-
 # ============================================================================
 # Morrison/Thompson moist-enthalpy conservation (latent heat of fusion)
 # ============================================================================
 
 @pytest.mark.parametrize(
     "scheme,call",
-    [("morrison", morrison_microphysics), ("thompson", thompson_microphysics)],
+    [("morrison", morrison_microphysics)],
 )
 def test_freezing_releases_latent_heat_of_fusion(scheme, call):
     """Bergeron + riming (cloud water → ice/snow) must release ``L_f``.
@@ -576,7 +479,7 @@ def test_freezing_releases_latent_heat_of_fusion(scheme, call):
     Post-fix the residual collapses to the small contribution from
     sedimentation flux divergence at the interior of the column.
     """
-    cfg_class = MorrisonConfig if scheme == "morrison" else ThompsonConfig
+    cfg_class = MorrisonConfig
     ncol, nlev = 1, 5
     # Mid mixed-phase regime, sub-saturated wrt liquid (suppresses
     # condensation/evaporation as the dominant balance) so the
@@ -676,8 +579,7 @@ def test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat():
     # Case 1: RH = 1.0 exactly (saturated, no supersat to remove).
     q_v_sat = q_sat.copy()
     out_s = sundqvist_microphysics(
-        T, q_v_sat, hydro, p_full, p_half, rho, dz, dt, cfg,
-    )
+        T, q_v_sat, hydro, p_full, p_half, rho, dz, dt, cfg, cell_area=1.0e10)
     # Vapor removed must be at most ``q_v - q_sat`` * f_smooth.
     # At RH=1, q_v - q_sat = 0, so the only allowed removal is
     # float-roundoff from ``saturation_specific_humidity``.  Pre-fix this
@@ -709,8 +611,7 @@ def test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat():
     # over-condense and drop RH to ~0.81.
     q_v_sub = 0.95 * q_sat
     out_s_sub = sundqvist_microphysics(
-        T, q_v_sub, hydro, p_full, p_half, rho, dz, dt, cfg,
-    )
+        T, q_v_sub, hydro, p_full, p_half, rho, dz, dt, cfg, cell_area=1.0e10)
     rh_after = float(
         (q_v_sub[0, 0] + out_s_sub.dq_v_dt[0, 0] * dt) / q_sat[0, 0]
     )
@@ -724,8 +625,7 @@ def test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat():
     # bring RH back to ~1.0 (within sigmoid smoothing).
     q_v_super = 1.20 * q_sat
     out_s_super = sundqvist_microphysics(
-        T, q_v_super, hydro, p_full, p_half, rho, dz, dt, cfg,
-    )
+        T, q_v_super, hydro, p_full, p_half, rho, dz, dt, cfg, cell_area=1.0e10)
     rh_after_super = float(
         (q_v_super[0, 0] + out_s_super.dq_v_dt[0, 0] * dt) / q_sat[0, 0]
     )
@@ -752,8 +652,7 @@ def test_sundqvist_column_water_budget_closes():
     q_sat = saturation_specific_humidity(T, p_full)
     q_v = q_sat
     out = sundqvist_microphysics(
-        T, q_v, hydro, p_full, p_half, rho, dz, 300.0, SundqvistConfig(),
-    )
+        T, q_v, hydro, p_full, p_half, rho, dz, 300.0, SundqvistConfig(), cell_area=1.0e10)
     dp = p_half[:, 1:] - p_half[:, :-1]
     col_water_tend = jnp.sum(
         (out.dq_v_dt + out.dq_c_dt + out.dq_r_dt) * dp, axis=1,
@@ -792,8 +691,7 @@ def test_sundqvist_drains_incoming_qr_to_precipitation():
 
     dt = 300.0
     out = sundqvist_microphysics(
-        T, q_v_sub, hydro_with_qr, p_full, p_half, rho, dz, dt, SundqvistConfig(),
-    )
+        T, q_v_sub, hydro_with_qr, p_full, p_half, rho, dz, dt, SundqvistConfig(), cell_area=1.0e10)
     q_r_after = q_r_in + out.dq_r_dt * dt
     # q_r must drain to zero in one step (modulo float round-off).
     max_qr_residual = float(jnp.max(jnp.abs(q_r_after)))
@@ -1293,8 +1191,7 @@ def test_sundqvist_sbk89_grad_finite_at_zero_precip():
     def objective(q_c):
         h = hydro._replace(q_c=q_c)
         out = sundqvist_microphysics(
-            T, q_v, h, p_full, p_half, rho, dz, 300.0, SundqvistConfig(),
-        )
+            T, q_v, h, p_full, p_half, rho, dz, 300.0, SundqvistConfig(), cell_area=1.0e10)
         return jnp.sum(out.precipitation) + jnp.sum(out.dq_c_dt)
 
     g = jax.grad(objective)(jnp.zeros_like(hydro.q_c))

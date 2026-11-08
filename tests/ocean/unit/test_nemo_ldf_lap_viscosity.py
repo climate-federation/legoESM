@@ -170,7 +170,8 @@ def test_variable_coefficient_is_dissipative():
 
 def _visc_config(operator, **lv):
     return LatLonCGridOceanConfig.from_flat(
-        lateral_viscosity_operator=operator, A_h=1.5e4, A_h_lat_scaling=True, **lv)
+        lateral_viscosity_operator=operator, lateral_viscosity_mask_levels="surface",
+        A_h=1.5e4, A_h_lat_scaling=True, **lv)
 
 
 def _call_visc(geo, config):
@@ -251,6 +252,7 @@ def test_dino_recipe_wires_nemo_div_curl_and_propagates():
 def _ahm_source_config(source, operator="nemo_div_curl"):
     return LatLonCGridOceanConfig.from_flat(
         lateral_viscosity_operator=operator,
+        lateral_viscosity_mask_levels="surface",
         lateral_viscosity_coefficient_source=source,
         A_h=1.5e4, A_h_lat_scaling=True)
 
@@ -385,6 +387,7 @@ def test_file_source_refuses_a_no_slip_side_drag():
     geo = _geo()
     cfg = LatLonCGridOceanConfig.from_flat(
         lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_mask_levels="surface",
         lateral_viscosity_coefficient_source="nemo_ahm_3d_file",
         lateral_side_bc="no_slip", A_h=1.5e4, A_h_lat_scaling=True)
     with pytest.raises(ValueError, match="no_slip"):
@@ -398,6 +401,7 @@ def test_file_source_refuses_the_flux_form_kdiss_diagnostic():
     geo = _geo()
     cfg = LatLonCGridOceanConfig.from_flat(
         lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_mask_levels="surface",
         lateral_viscosity_coefficient_source="nemo_ahm_3d_file",
         A_h=1.5e4, A_h_lat_scaling=True)
     eke = types.SimpleNamespace(source_kdiss_h=True, kdiss_h_flux_form=True)

@@ -41,7 +41,7 @@ def solver():
 def _mcica(solver, kw, cf, lwp, iwp):
     liq, ice = in_cloud_paths(cf, lwp, iwp)
     return solver.solve_columns(**kw, cloud_path_liq=liq, cloud_path_ice=ice,
-                                mcica_cloud_fraction=cf)
+                                mcica_cloud_fraction=cf, mcica_mask_width=0.0)
 
 
 def _same(a, b, atol=0.0):
@@ -85,7 +85,7 @@ def test_fused_clear_sky_equals_the_separate_cloud_free_solve(solver, aerosol):
         kw["aerosol_optical_depth"] = jnp.full((NCOL, NLEV), 0.01)
         kw["aerosol_absorption_optical_depth_lw"] = jnp.full((NCOL, NLEV), 0.002)
     liq, ice = in_cloud_paths(cf, lwp, iwp)
-    cloudy = dict(cloud_path_liq=liq, cloud_path_ice=ice, mcica_cloud_fraction=cf)
+    cloudy = dict(cloud_path_liq=liq, cloud_path_ice=ice, mcica_cloud_fraction=cf, mcica_mask_width=0.0)
     fused = solver.solve_columns(**kw, **cloudy, clear_sky=True)
     allsky = solver.solve_columns(**kw, **cloudy)
     clear = solver.solve_columns(**kw)
@@ -109,7 +109,7 @@ def test_fused_clear_sky_all_night(solver):
     kw["cos_zenith"] = jnp.full(NCOL, -0.2)
     liq, ice = in_cloud_paths(cf, lwp, iwp)
     fused = solver.solve_columns(**kw, cloud_path_liq=liq, cloud_path_ice=ice,
-                                 mcica_cloud_fraction=cf, clear_sky=True)
+                                 mcica_cloud_fraction=cf, mcica_mask_width=0.0, clear_sky=True)
     clear = solver.solve_columns(**kw)
     np.testing.assert_array_equal(np.asarray(fused.sw_flux_up_toa_clr), 0.0)
     np.testing.assert_allclose(np.asarray(fused.lw_flux_up_toa_clr),
@@ -121,10 +121,10 @@ def test_column_chunking_is_exact(solver):
     kw, cf, lwp, iwp = _columns()
     liq, ice = in_cloud_paths(cf, lwp, iwp)
     whole = solver.solve_columns(**kw, cloud_path_liq=liq, cloud_path_ice=ice,
-                                 mcica_cloud_fraction=cf)
+                                 mcica_cloud_fraction=cf, mcica_mask_width=0.0)
     chunked = solver.solve_columns_chunked(
         column_chunk_size=NCOL // 2, **kw, cloud_path_liq=liq,
-        cloud_path_ice=ice, mcica_cloud_fraction=cf)
+        cloud_path_ice=ice, mcica_cloud_fraction=cf, mcica_mask_width=0.0)
     _same(whole, chunked, atol=1e-9)
 
 
@@ -134,7 +134,7 @@ def test_refuses_optical_depth_scaling_or_separate_longwave_paths(solver):
                   {"sw_optical_field_only": True}, {"lw_optical_field_only": True}):
         with pytest.raises(ValueError, match="mcica_cloud_fraction"):
             solver.solve_columns(**kw, cloud_path_liq=lwp, cloud_path_ice=iwp,
-                                 mcica_cloud_fraction=cf, **extra)
+                                 mcica_cloud_fraction=cf, mcica_mask_width=0.0, **extra)
 
 
 def test_run_amip_cli_offers_mcica():

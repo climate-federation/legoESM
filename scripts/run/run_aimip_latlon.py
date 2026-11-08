@@ -103,6 +103,11 @@ def _load_run_amip():
     return mod
 
 
+def _resolved_era5_zarr(args):
+    from legoesm.training.era5_to_state import TrainingERA5Config
+    return args.era5_zarr or TrainingERA5Config().zarr_store
+
+
 def build_latlon_config(args):
     """Build an ExperimentConfig for a lat-lon C-grid AMIP run."""
     ra = _load_run_amip()
@@ -157,6 +162,9 @@ def build_latlon_config(args):
         "--convection", args.convection,
         "--turbulence", args.turbulence,
         "--microphysics", args.microphysics,
+        # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        *(["--morrison-warm-rain-scheme", "kk2000"]
+          if args.microphysics == "morrison" else []),
         "--clouds", args.clouds,
         "--gravity-wave-drag", args.gravity_wave_drag,
         # Match the training-segment sub-cycling (also resolves the None that
@@ -170,6 +178,10 @@ def build_latlon_config(args):
         "--days", "1",
         "--dataset", "analytical",   # IC/forcing replaced by ERA5 below
         "--ic", "standard",
+        # One coastline for land model, convection and drag: ERA5's, from the
+        # same store the run trains on (user 2026-10-28, R3/R4/R5).
+        "--land-fraction-source", "era5",
+        "--land-fraction-era5-zarr", _resolved_era5_zarr(args),
     ]
     if args.ice_skin_prognostic is not None:
         argv.append("--ice-skin-prognostic" if args.ice_skin_prognostic
@@ -188,8 +200,6 @@ def build_latlon_config(args):
     from legoesm.land.config import describe_land_model, land_model_switches
     for _field, _value in land_model_switches(args.land_model).items():
         setattr(parsed, _field, _value)
-    if getattr(args, "land_mask_file", ""):
-        parsed.land_mask_file = args.land_mask_file
     logger.info(
         "Land surface model: %s (slab_land_active=%s, use_multilayer_land=%s, "
         "land_mask_file=%s)",
@@ -248,7 +258,7 @@ def _parse_windows(spec: str):
 
 def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
                       era5_zarr=None, microphysics="none", turbulence="none",
-                      multi_step_hours=(), grid_kind="latlon",
+                      convection="none", multi_step_hours=(), grid_kind="latlon",
                       ice_skin_prognostic=False):
     """Build (initial_carries, target_carries, forcings) on the model grid.
 
@@ -271,7 +281,8 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
     era5_terrain_product,
 )
 
-    def _to_carry(era5, grid_or_mesh, sigma_, microphysics_, turbulence_):
+    def _to_carry(era5, grid_or_mesh, sigma_, microphysics_, turbulence_,
+                  convection_="none"):
         """ERA5 slice -> SegmentCarry on whichever horizontal grid is in use.
 
         The two converters do NOT take the same arguments.
@@ -304,6 +315,7 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
             era5, grid_or_mesh, sigma_,
             target_phis=era5_terrain_product(era5, grid_or_mesh),
             microphysics=microphysics_, turbulence=turbulence_,
+            convection=convection_,
             ice_skin_prognostic=ice_skin_prognostic,
         )
 
@@ -359,7 +371,8 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
         for s in range(n_ics + max_stride):
             tidx = start + s
             era5 = load_era5_slice(era5_cfg, tidx, ds=ds, flux_ds=flux_ds)
-            block[s] = (_to_carry(era5, grid, sigma, microphysics, turbulence),
+            block[s] = (_to_carry(era5, grid, sigma, microphysics, turbulence,
+                                  convection),
                         era5, tidx)
         for d in range(n_ics):
             ic_carry, ic_era5, ic_tidx = block[d]
@@ -600,6 +613,8 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
     vdir.mkdir(parents=True, exist_ok=True)
     ckpt = vdir / "params.eqx"
     eqx.tree_serialise_leaves(str(ckpt), trained)
+    from legoesm.ml.checkpoint_io import write_knob_record
+    write_knob_record(trained, ckpt)
 
     return {
         "variant": variant,
@@ -729,14 +744,10 @@ def build_parser():
                         "land skin temperature falls back to the neighbouring "
                         "prescribed SST minus a lapse rate, with no soil, no "
                         "water store and no stomatal control. 'slab' and "
-                        "'multilayer' need somewhere for land to exist, so "
-                        "pass --land-mask-file with them (this lane builds a "
-                        "flat topography, and the driver refuses a land tile "
-                        "that would have no land under it).")
-    p.add_argument("--land-mask-file", type=str, default="",
-                   help="Land-mask NetCDF forwarded to the ExperimentConfig. "
-                        "Required to give --land-model slab/multilayer any "
-                        "land to act on, since this lane runs flat topography.")
+                        "'multilayer' act on the ERA5 land fraction this "
+                        "lane always uses (one coastline, user 2026-10-28); "
+                        "there is no land-mask file option, since the driver "
+                        "refuses a mask file together with the ERA5 source.")
     p.add_argument("--smoke", action="store_true",
                    help="tiny config (n_lat=32, 1 epoch, 1+1 short windows)")
     return p
@@ -873,6 +884,7 @@ def main(argv=None):
         rollout_hours=_ROLLOUT_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
+        convection=args.convection,
         ice_skin_prognostic=config.ice_skin_prognostic,
         multi_step_hours=tuple(args.multi_step_hours),
     )
@@ -883,6 +895,7 @@ def main(argv=None):
         rollout_hours=_EVAL_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
+        convection=args.convection,
         ice_skin_prognostic=config.ice_skin_prognostic,
     )
 

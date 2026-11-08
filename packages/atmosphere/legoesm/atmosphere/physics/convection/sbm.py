@@ -48,6 +48,21 @@ Interface notes
   ``cape_threshold = 0`` and ``smooth_trigger_sharpness -> inf`` the trigger is
   the oracle's ``CAPE > 0`` and the scheme IS the oracle; at the default
   (70 J/kg, 0.1) it is a smoothed, thresholded version of it.
+* KNOWN DIFFERENCE (user decided 2026-10-28: keep the 70 J/kg default).  The
+  oracle convects whenever ``CAPE > 0``; the port scales every tendency and
+  the precipitation by ``sigmoid(0.1 (CAPE - 70))``, so a convecting column's
+  relative gap to the oracle is ``1 - sigmoid(0.1 (CAPE - 70))``.  Measured at
+  the production setting (``SBMConfig()``; no deck overrides it) on the
+  oracle fixture, per column: CAPE 94 J/kg (columns 0, 2) 8.3 %; CAPE 41
+  (column 14) 94.6 %; CAPE 34 (column 13) 97.2 %; every other column is
+  round-off (CAPE >= 780 gives a full trigger, or the oracle does not
+  convect).  Stored per column in
+  ``test_default_trigger_gap_to_oracle_per_column``.  ``cape_threshold = 0``
+  with ``smooth_trigger_sharpness = 1e12`` recovers the oracle to 1e-10.
+  Setting only ``cape_threshold = 0`` (sharpness 0.1) does NOT: the
+  column's own hard ``CAPE > 0`` gate then meets a trigger of
+  ``sigmoid(0) = 0.5``, so tendencies jump from zero to half the oracle's as
+  CAPE crosses 0.
 * The column precipitation ``Pq`` is handed out as the existing per-level
   condensate source ``dq_c_conv_dt`` (local drying rescaled so its column
   integral equals ``Pq``), as before.

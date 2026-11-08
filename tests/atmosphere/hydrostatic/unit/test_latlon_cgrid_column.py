@@ -452,6 +452,7 @@ def test_ice_curve_drain_acts_on_the_column_lane(tmp_path):
     post-step T / water edits reach the native state (the run differs from
     the same run with the drain off)."""
     base = dict(days=3 * DT / 86400.0, microphysics="morrison",
+                morrison_warm_rain_scheme="kk2000",
                 hard_saturation_adjustment=True, ic="standard", rh_init=1.0)
     on = _driver(tmp_path / "on", hard_sat_ice_curve=True, **base)
     off = _driver(tmp_path / "off", hard_sat_ice_curve=False, **base)

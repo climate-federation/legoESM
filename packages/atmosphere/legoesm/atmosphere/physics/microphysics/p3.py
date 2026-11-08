@@ -41,7 +41,9 @@ activation (``mp_physics = 51``), triple-moment ice (53), multi-category ice
 Kogan warm rain (``iparam`` 1, 2, 4), the sub-grid cloud / precipitation
 fraction (SCPF), predicted supersaturation, the first-time-step (``it <= 1``)
 saturation adjustment, and the diagnostic outputs (reflectivity, effective
-radii, visibility, precipitation types).
+radii, visibility, precipitation types).  Predicted Nc (``mp_physics = 51``)
+and the carried ``th_old`` / ``qv_old`` state are deferred until a committed
+config selects ``p3`` (tier-2 decision C9).
 
 Interface glue (the oracle-fixture harness's, which the oracle match
 certifies): levels are top-down here (surface at ``[:, -1]``), bottom-up in the
@@ -98,6 +100,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.scipy.special import gamma as _gamma
+from jax.scipy.special import gammaln as _gammaln
 
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity as _qsat_liq
@@ -958,11 +961,19 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
 
     # --- immersion freezing of cloud (2984-3015) and rain (3021-3043) ---
     het_c = cmask & (t <= _T_IMMERSION)
-    dumh = (1.0 / lamc_s) ** 3
     tmpdbl1 = jnp.exp(_AIMM * (_T0 - t))
-    tmp1h = cdist1 * tmpdbl1
-    qcheti = jnp.where(het_c, _CONS6 * _gamma(_HET_GAMMA_A + mu_c) * tmp1h * dumh ** 2, 0.0)
-    ncheti = jnp.where(het_c, _CONS5 * _gamma(mu_c + 4.0) * tmp1h * dumh, 0.0)
+    # WRF's product cdist1*exp(aimm*(T0-T))*gamma(7+mu_c)*dumh**2 is formed in
+    # log space (tier-2 decision C8): the same value to round-off in fp64, no
+    # fp32 overflow of the intermediate product for cloud at or below ~190 K.
+    # Masked lanes take 1.0 inside the logs and exponent 0, so neither the
+    # value nor the gradient there is inf/NaN (fp32 at very low T).
+    log_c1 = jnp.log(jnp.where(het_c, cdist1, 1.0))
+    log_lc = jnp.log(jnp.where(het_c, lamc_s, 1.0))       # log(dumh) = -3*log_lc
+    log_h = log_c1 + _AIMM * (_T0 - t)
+    ex_q = jnp.where(het_c, _gammaln(_HET_GAMMA_A + mu_c) + log_h - 6.0 * log_lc, 0.0)
+    ex_n = jnp.where(het_c, _gammaln(mu_c + 4.0) + log_h - 3.0 * log_lc, 0.0)
+    qcheti = jnp.where(het_c, _CONS6 * jnp.exp(ex_q), 0.0)
+    ncheti = jnp.where(het_c, _CONS5 * jnp.exp(ex_n), 0.0)
     het_r = rmask & (t <= _T_IMMERSION)
     cds = jnp.where(het_r, cdistr, 1.0)
     lrs = jnp.where(het_r, lamr, 1.0)

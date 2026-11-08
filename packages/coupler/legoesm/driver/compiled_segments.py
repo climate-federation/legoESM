@@ -341,6 +341,12 @@ class SegmentCarry(NamedTuple):
     # by the physics step (#2106).  None unless ice_skin_prognostic is on =>
     # byte-identical legacy carry.
     ice_T_skin: jax.Array = None
+    # WRF Tiedtke's previous-step turbulence inputs: the turbulence q_v
+    # tendency (``qvpblten``, q_v shape) and surface water flux (``qfx``, p_s
+    # shape) of the last physics step.  None unless convection is tiedtke
+    # (the driver seeds zeros then) => byte-identical legacy carry.
+    turb_dq_v_prev: jax.Array = None
+    evap_sfc_prev: jax.Array = None
     # FROZEN part of the surface precip [kg/m²/s] (review 2026-10-10 F29):
     # ``precip_frozen_prev`` lags it one step (like ``conv_precip_prev``) for
     # the radiation-step multilayer land tile's snowfall;
@@ -371,6 +377,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                land_ml=None, w_land=None, snow=None,
                conv_prog_nlev=None, budget_ledger_accum=None,
                precip_frozen_prev=None, precip_frozen_accum=None,
+               turb_dq_v_prev=None, evap_sfc_prev=None,
                ice_T_skin=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
@@ -541,7 +548,31 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                              else _promote(precip_frozen_accum, storage)),
         ice_T_skin=(None if ice_T_skin is None
                     else _promote(ice_T_skin, storage)),
+        turb_dq_v_prev=(None if turb_dq_v_prev is None
+                        else _promote(turb_dq_v_prev, storage)),
+        evap_sfc_prev=(None if evap_sfc_prev is None
+                       else _promote(evap_sfc_prev, storage)),
     )
+
+
+def tiedtke_lag_seeds(convection, q_v, p_s, prev=None):
+    """``pack_carry`` kwargs seeding WRF Tiedtke's previous-step turbulence
+    carries: ``prev`` (a ``(turb_dq_v_prev, evap_sfc_prev)`` pair persisted
+    from the previous segment) when given, else zeros shaped like ``q_v`` /
+    ``p_s`` (cold start); ``{}`` for any other convection scheme (carry
+    pytree unchanged)."""
+    if convection != "tiedtke":
+        return {}
+    if prev is not None and (prev[0] is None) != (prev[1] is None):
+        raise ValueError(
+            "tiedtke lag carries: restored pair has only one of "
+            "(turb_dq_v_prev, evap_sfc_prev); a checkpoint carries both or "
+            "neither")
+    if prev is not None and prev[0] is not None:
+        return {"turb_dq_v_prev": prev[0], "evap_sfc_prev": prev[1]}
+    p_s = getattr(p_s, "data", p_s)
+    return {"turb_dq_v_prev": jnp.zeros_like(q_v),
+            "evap_sfc_prev": jnp.zeros_like(p_s)}
 
 
 def unpack_carry(carry, state_template):
@@ -1164,6 +1195,9 @@ class _SplitStepStatics:
     # every call, for the static rad-every-call step_unified).  Defaults keep
     # the lat-band-SPMD lane (which does not pass them) byte-identical.
     pipeline: object = None
+    #: the band's / tile's own cell areas (grid shape) for Sundqvist's GFS area
+    #: blend on lanes that share one pipeline build; None = the build's areas
+    cell_area: object = None
     clear_sky_fresh: str = "hold"
     # Per-process budget ledger (diagnostics.process_ledger): static Python
     # bool — when True the split body fills the dynamics/clips rows and
@@ -1284,6 +1318,8 @@ class _SplitStepLocals(NamedTuple):
     precip_frozen_prev_new: object = None
     precip_frozen_accum: object = None
     ice_T_skin_new: object = None
+    phys_turb_dq_v: object = None
+    phys_evap_sfc: object = None
 
 
 MOIST_FIELDS = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i")
@@ -1544,6 +1580,12 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         _fld = getattr(carry, _nm)
         if _fld is not None:
             _dm_in[_nm] = _fld
+    if carry.turb_dq_v_prev is not None:
+        # WRF Tiedtke: this step's dynamics q_v tendency (post-dynamics minus
+        # the carried, post-previous-physics q_v) + the lagged turbulence pair.
+        _dm_in["dq_v_dt_dyn"] = (moist["q_v"] - carry.q_v) / statics.dt
+        _dm_in["turb_dq_v_prev"] = carry.turb_dq_v_prev
+        _dm_in["evap_sfc_prev"] = carry.evap_sfc_prev
     _ret = statics.step_unified(
         need_rad,
         T_new, p_s_new,
@@ -1582,6 +1624,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         conv_precip_frozen=carry.precip_frozen_prev,
         w_land=carry.w_land, snow=carry.snow,
         **_dm_in, **_skin_kw(carry.ice_T_skin),
+        **({} if statics.cell_area is None else {"cell_area": statics.cell_area}),
     )
     phys_out, held_new = _ret[0], _ret[1]
     ice_T_skin_new = _ret[4] if len(_ret) > 4 else carry.ice_T_skin
@@ -1778,6 +1821,8 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         phys_cloud_fraction=phys_out.cloud_fraction,
         budget_ledger_step=_led_step,
         ice_T_skin_new=ice_T_skin_new,
+        phys_turb_dq_v=getattr(phys_out, "turb_dq_v_dt", None),
+        phys_evap_sfc=getattr(phys_out, "evap_sfc", None),
     )
 
 
@@ -1988,8 +2033,25 @@ def finalize_split_step(carry, lz, statics):
                                                carry.precip_frozen_accum)),
         ice_T_skin=(None if carry.ice_T_skin is None
                     else _match_dtype(lz.ice_T_skin_new, carry.ice_T_skin)),
+        turb_dq_v_prev=(None if carry.turb_dq_v_prev is None
+                        else _match_dtype(_required_lag(
+                            lz.phys_turb_dq_v, "turbulence q_v tendency"),
+                            carry.turb_dq_v_prev)),
+        evap_sfc_prev=(None if carry.evap_sfc_prev is None
+                       else _match_dtype(_required_lag(
+                           lz.phys_evap_sfc, "surface water flux evap_sfc"),
+                           carry.evap_sfc_prev)),
     )
     return new_carry
+
+
+def _required_lag(value, what):
+    if value is None:
+        raise ValueError(
+            f"convection='tiedtke' carries the previous step's {what}, but "
+            "this step's physics published none (no turbulence scheme / "
+            "surface flux?)")
+    return value
 
 
 def build_segment_fn(
@@ -2474,6 +2536,11 @@ def build_segment_fn(
             _doy_step, _sod_step = day_to_calendar(_abs_day)
 
             if owned_face_ids is not None:
+                if carry.turb_dq_v_prev is not None:
+                    raise NotImplementedError(
+                        "convection='tiedtke' is wired on the single-rank compiled "
+                        "segment only; the MPI owned-face physics does not thread its "
+                        "dynamics / lagged turbulence inputs")
                 # MPI replicated dynamics: physics on owned faces only.
                 # Dynamics state is full (6, n, n, ...) but physics inputs
                 # (forcing, lat/lon) are rank-local.  Extract owned faces
@@ -2973,6 +3040,11 @@ def build_segment_fn(
         _doy_step, _sod_step = day_to_calendar(_abs_day)
 
         if owned_face_ids is not None:
+            if carry.turb_dq_v_prev is not None:
+                raise NotImplementedError(
+                    "convection='tiedtke' is wired on the single-rank compiled "
+                    "segment only; the MPI owned-face physics does not thread its "
+                    "dynamics / lagged turbulence inputs")
             _ofi = owned_face_ids
             _T_land_in = (carry.T_land[_ofi]
                           if carry.T_land is not None else None)

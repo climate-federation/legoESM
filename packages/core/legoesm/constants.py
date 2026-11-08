@@ -137,6 +137,12 @@ T_ref_cam6_activation = 273.0       # [K]  CAM6 ndrop t0 (ndrop.F90:120); NOT T_
 # ports (CESM, CAM, COARE, KPP, NEMO, CLM5) use 0.4; a change needs fixtures
 # regenerated or per-port config.
 kappa_von_karman = 0.4
+lmd94_c_star = 10.0             # C*, KPP nonlocal-flux constant (Large, McWilliams &
+                                # Doney 1994, Rev. Geophys.: value with eq. 19, used in eq. 20)
+nemo_mxl0_z0_m = 0.1            # z0 [m] in the factorisation rn_mxl0 = kappa*z0 of NEMO's
+                                # surface mixing-length minimum. NEMO itself sets the literal
+                                # rn_mxl0 = 0.04 (namelist_ref, zdftke.F90; ln_mxl0 comment
+                                # "F(kappa*z)"); z0 = 0.04/0.4 is inferred, not a NEMO parameter.
 nu_ocean_molecular = 1.4e-6     # Molecular kinematic viscosity of seawater
                                 # [m^2/s] (~10 degC; NEMO phycst/zdfiwm ``rnu``)
 kappa_T_ocean_molecular = 1.4e-7  # Molecular thermal diffusivity of seawater
@@ -223,6 +229,8 @@ bulk_transfer_ice_orca1 = 1.0e-3
 ice_ocean_drag_orca1 = 5.0e-3
 snow_cover_depth_nemo = 0.02    # [m] icevar.F90:1583
 snow_blow_exponent_orca1 = 0.66
+precip_factor_orca1 = 1.0       # [-] namsbc_blk rn_pfac
+evap_factor_orca1 = 1.0         # [-] namsbc_blk rn_efac
 ice_sw_clear_nemo = 0.18
 ice_sw_cloudy_nemo = 0.35
 ice_sw_thin_threshold_nemo = 0.1  # [m]
@@ -231,6 +239,7 @@ ice_ocean_heat_transfer_nemo = 0.0057
 ice_supercool_volume_stop_nemo = 20.0  # [m] icesbc.F90:376-381
 ice_landfast_speed_stop_nemo = 5.0e-3  # [m/s] icesbc.F90:421
 ice_full_cover_margin_nemo = 1.0e-3
+ice_landfast_margin_nemo501 = 1.0e-2  # [-] NEMO 5.0.1 icesbc.F90:412 rn_amax - 0.01
 ice_growth_thickness_stop_nemo = 3.0  # [m]
 
 # WRF v4.8.0 Thompson microphysics (phys/module_mp_thompson.F, commit
@@ -273,6 +282,11 @@ R_v_fast_sbm = 461.5                # [J/(kg*K)] :1768 JERRATE_KS RV_MY=461.5D4 
 L_v_fast_sbm = 2.5e6                # [J/kg] :1816 JERRATE_KS AL1_MY(1)=2.5D10 erg/g
 k_air_fast_sbm = 2.4e-2             # [W/(m*K)] :1768 JERRATE_KS CF_MY=2.4D3 erg/(cm*s*K)
 p_zero_fast_sbm = 101300.0          # [Pa] :1782 JERRATE_KS PZERO=1.013D6 dyn/cm^2
+# WRF v4.8.0 MYNN-EDMF (phys/MYNN-EDMF/module_bl_mynnedmf.F90, submodule
+# 8f8e8b59021249949c04d1686edc5a02ca325627): qsat_blend writes the vapour/dry-air
+# molecular-weight ratio as a literal, not as R_d/R_v; the faithful port
+# (turbulence/mynnedmf_wrf.py) uses it there.
+epsilon_wrf_mynn = 0.622         # [-] qsat_blend literal
 
 # Active no-pond ice_alb identity, icealb.F90:124-185 and accepted namalb.
 albedo_snow_dry_orca1 = 0.85
@@ -293,6 +307,39 @@ albedo_cloud_offset_nemo = -0.0148
 # from legoESM's globals in the 4th-5th digit; the faithful path uses these
 # so flux-level golden tests against the NEMO formulas close exactly.
 g_nemo = 9.80665                # [m/s^2]  NEMO phycst grav
+# gSAM 1.8.8 gravity (SRC/consts.f90 ``ggr``).  Used only where a gSAM port
+# must repeat the oracle's operations (radiation/ozone_mls.py: it cancels
+# analytically there).
+g_gsam = 9.79764                # [m/s^2]  gSAM consts.f90 ggr
+# ecRad (OpenIFS 49r1 bundled) gravity, radiation_constants.F90:26
+# ``AccelDueToGravity``; used only by the ecrad_ifs port.
+g_ecrad = 9.80665               # [m/s^2]
+# ecRad dry-air gas constant, radiation_constants.F90:30 ``GasConstantDryAir``
+# (cloud overlap parameter from decorrelation length); ecrad_ifs port only.
+R_d_ecrad = 287.058             # [J/(kg*K)]
+# OpenIFS 49r1 YOMCST (arpifs/module/yomcst.F90 SETUP_CONSTANTS, LAPE=F
+# branch), formed by yomcst's own expressions so the derived values carry the
+# same rounding: used only by the ecrad_ifs IFS-interface port (vote IF8).
+k_B_ifs = 1.380658e-23          # [J/K]      RKBOL, yomcst.F90:511
+N_A_ifs = 6.0221367e23          # [1/mol]    RNAVO, :512
+c_light_ifs = 299792458.0       # [m/s]      RCLUM, :509
+h_planck_ifs = 6.6260755e-34    # [J s]      RHPLA, :510
+M_dry_air_ifs = 28.9644         # [g/mol]    RMD, :581
+M_water_ifs = 18.0153           # [g/mol]    RMV, :582
+g_ifs = 9.80665                 # [m/s^2]    RG, :553
+R_d_ifs = 1000.0 * (N_A_ifs * k_B_ifs) / M_dry_air_ifs   # RD = 1000*R/RMD, R = RNAVO*RKBOL (:580,:584)
+R_v_ifs = 1000.0 * (N_A_ifs * k_B_ifs) / M_water_ifs     # RV = 1000*R/RMV
+c_pd_ifs = 3.5 * R_d_ifs                                  # RCPD = 3.5*RD (:586)
+T_triple_ifs = 273.16           # [K]        RTT, :623
+L_v_ifs = 2.5008e6              # [J/kg]     RLVTT, :625
+L_s_ifs = 2.8345e6              # [J/kg]     RLSTT, :626
+# RSIGMA = 2*RPI**5*(RKBOL/RHPLA)**3*RKBOL/(15*RCLUM**2) (:564); integer powers
+# as the repeated products gfortran expands them to.
+_pi_ifs = float(jnp.pi)         # RPI = 2*ASIN(1) (:508), the same double
+_pi2_ifs = _pi_ifs * _pi_ifs
+_kh_ifs = k_B_ifs / h_planck_ifs
+sigma_sb_ifs = (2.0 * (_pi2_ifs * _pi2_ifs * _pi_ifs) * (_kh_ifs * _kh_ifs * _kh_ifs)
+                * k_B_ifs / (15.0 * (c_light_ifs * c_light_ifs)))  # [W/(m^2*K^4)]
 R_v_nemo = 461.495              # [J/(kg*K)] NEMO sbc_phy R_vap (ours: 461.51)
 L_fus_nemo = 0.3333601e6        # [J/kg]   NEMO phycst rLfus (ours L_f: 3.337e5)
 L_fus_isf_nemo = 0.334e6        # [J/kg]   NEMO isf_oce rLfusisf (ISF melt latent

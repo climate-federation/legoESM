@@ -642,11 +642,20 @@ _CERTIFIED_CARD_DIGESTS_GRADGATE = {        # gradient-gate tip d678430f3
 # all nested configs) and each deck's explicit
 # rn_bt_alpha, and again for the card-selected flux-form external-mode
 # switch (True on LOCK_EXCHANGE and OVERFLOW) -- the non-config part of
-# every digest is unchanged.
+# every digest is unchanged.  GYRE re-pinned 2026-10-26 (user, PR 2160):
+# dca02dffba3eb14f -> 2dbf0074ab1a4b47; KPP gamma_T/S 6.33 -> 6.3275155 derived
+# from kappa_von_karman, and mxl0_min_m 0.04 -> kappa*z0 (+1 ulp).
+# GYRE re-pinned 2026-10-28 (user): 2dbf0074ab1a4b47 -> 9fa9fec09b9cb850.
+# Measured against the PR 2211 head: the resolved configuration differs by
+# one inserted field only, main's ePBL vertical-mixing config (PR 2122;
+# GYRE resolves vertical_mixing.scheme = "tke"); the non-config part of the
+# digest is identical.
 _CERTIFIED_CARD_DIGESTS = {
-    "GYRE-zco": "dca02dffba3eb14f",
-    "LOCK_EXCHANGE-zco": "10516c2a4d166c73",
-    "OVERFLOW-zps": "9be98498ac9f50de",
+    # The appended config fields move the printed NamedTuple digest; the
+    # surrounding field-by-field guards pin their resolved values below.
+    "GYRE-zco": "6bb18cf2c428e5ab",
+    "LOCK_EXCHANGE-zco": "9f64d2b817f72f5e",
+    "OVERFLOW-zps": "f3ca241ed2a098b7",
 }
 
 
@@ -667,6 +676,13 @@ def test_the_only_config_change_to_a_certified_card_is_the_added_eos_field(case)
     # certified card must keep the metric formula it already ran.
     assert cfg.lateral_viscosity_coefficient_source == "nemo_ldf_c2d"
     assert cfg.eos == "nemo_teos10"
+    assert cfg.nemo_qsr_stage3_kmm_source_association is (
+        True if case == "GYRE-zco" else None)
+    assert cfg.vmix_eos_use_config_rho0 is True
+    # Appended lateral_viscosity_mask_levels: every certified card keeps the
+    # surface masks it always ran.
+    assert cfg.lateral_viscosity_mask_levels == "surface"
+    assert cfg.lateral_shlat == 2.0 and cfg.lateral_side_bc != "nemo_shlat"
 
 
 def _card_digest(card):

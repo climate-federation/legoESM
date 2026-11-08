@@ -223,7 +223,9 @@ def _gwd_leaf(scheme):
     if scheme == "mcfarlane":
         # CAM6 gw_oro needs the reference interfaces (CAM pref_edge).
         import functools
-        fn = functools.partial(fn, p_ref_half=_gwd_p_ref_half())
+        fn = functools.partial(
+            fn, p_ref_half=_gwd_p_ref_half(),
+            land_frac_col=jnp.ones(_gwd_column()["u"].shape[0]))
     return fn, cfg
 
 
@@ -678,12 +680,14 @@ class TestGWDE3SMCAMGrad:
         path (``q0^2/AL``), not the table index — see the companion
         exactly-zero documentation in the class docstring of the table test.
         """
-        from legoesm.atmosphere.physics.gravity_wave_drag.config import E3SMCAMConfig
+        from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+            E3SMBeresConfig, E3SMCAMConfig)
         from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import e3sm_cam_gwd
 
         col = self._col(ncol=3, nlev=24)
         ncol, nlev = col["u"].shape
-        cfg = E3SMCAMConfig(source="convective", pgwv=4, dc=5.0, effgw=0.4)
+        cfg = E3SMCAMConfig(source="convective", pgwv=4, dc=5.0, effgw=0.4,
+                            beres=E3SMBeresConfig(use_stand_in_table=True))  # explicit stand-in
         # Deep heating (~ surface to mid-troposphere) so the depth test fires.
         sig = col["sigma_full"]
         netdt = 8.0e-4 * jnp.exp(-((sig - 0.6) / 0.25) ** 2)[None, :] * (
@@ -732,7 +736,8 @@ class TestGWDE3SMExcludedKnobsGrad:
         base = gcfg.E3SMCAMConfig(
             source=source, pgwv=4, dc=5.0, effgw=0.4,
             orographic=gcfg.E3SMOrographicConfig(sgh_default=200.0),
-            frontal=gcfg.E3SMFrontalConfig(taubgnd=1.5e-3, frontgfc=1e-10))
+            frontal=gcfg.E3SMFrontalConfig(taubgnd=1.5e-3, frontgfc=1e-10),
+            beres=gcfg.E3SMBeresConfig(use_stand_in_table=True))   # explicit stand-in
         kw = {}
         if source == "frontal":
             kw["frontgf_col"] = jnp.full((ncol, nlev), 1e-9)
@@ -836,7 +841,8 @@ class TestGWDCompositeGrad:
         def loss(u):
             out, _spec = fn(*_gwd_args(col, u=u), 300.0, cfg, None,
                             h_topo_col=jnp.full((ncol,), 400.0),
-                            mcfarlane_kwargs={"p_ref_half": _gwd_p_ref_half()})
+                            mcfarlane_kwargs={"p_ref_half": _gwd_p_ref_half(),
+                                              "land_frac_col": jnp.ones(ncol)})
             return jnp.sum(out.du_dt ** 2)
 
         grad = jax.grad(loss)(col["u"])
@@ -862,7 +868,8 @@ class TestGWDCompositeGrad:
         def loss(spectrum_in):
             out, spec_new = fn(*_gwd_args(col), 300.0, cfg, spectrum_in,
                                h_topo_col=jnp.full((ncol,), 400.0),
-                               mcfarlane_kwargs={"p_ref_half": _gwd_p_ref_half()})
+                               mcfarlane_kwargs={"p_ref_half": _gwd_p_ref_half(),
+                                              "land_frac_col": jnp.ones(ncol)})
             return jnp.sum(spec_new ** 2) + jnp.sum(out.du_dt ** 2)
 
         grad = jax.grad(loss)(spec)
@@ -1041,7 +1048,7 @@ class TestGWDHydrostaticBridgeGrad:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
 
-        grid = create_cubed_sphere(n)
+        grid = create_cubed_sphere(n)._replace(land_frac=jnp.ones(6 * n * n))
         sigma = create_sigma_coordinate(nlev, dtype=jnp.float64)
         sigma_full = jnp.asarray(sigma.sigma_full, dtype=jnp.float64)
         shape_3d = (6, n, n, nlev)
@@ -1176,7 +1183,8 @@ def _turb_column(ncol=8, nlev=12, seed=1):
 
 
 # scheme -> (carries a prognostic TKE/qke carry?)
-TURB_CARRY = ["tke", "mynn25", "clubb_lite", "edmf"]
+# mynn25 (WRF port, own grad tests in test_mynn25_oracle) dropped in R3
+TURB_CARRY = ["tke", "clubb_lite", "edmf"]
 TURB_DIAGNOSTIC = ["ysu", "holtslag_boville"]
 TURB_ALL = TURB_CARRY + TURB_DIAGNOSTIC
 
@@ -1295,7 +1303,7 @@ class TestTurbulenceLeafGrad:
     # (a Richardson number / buoyancy-flux stability function evaluated this
     # step) vs schemes that diagnose K purely from the carried TKE and a
     # geometric length scale.  Measured, not assumed — see the two tests below.
-    TURB_K_STABILITY = ["mynn25", "ysu", "holtslag_boville"]
+    TURB_K_STABILITY = ["ysu", "holtslag_boville"]
     TURB_K_FROM_CARRY = ["tke", "clubb_lite", "edmf"]
 
     @pytest.mark.parametrize("scheme", TURB_K_STABILITY)
@@ -1962,42 +1970,22 @@ class TestSolarGeometryGrad:
 class TestOzoneGrad:
     """MLS climatological ozone + the ML (ridge-regression) ozone predictor."""
 
-    def test_mls_ozone_grad_wrt_p_full_in_table_range(self):
-        """``mls_ozone_vmr`` is a log-log ``jnp.interp``: differentiable in p
-        wherever p lies INSIDE the tabulated 0.0097-1054 hPa range."""
-        from legoesm.atmosphere.physics.radiation.ozone_mls import mls_ozone_vmr
+    def test_mls_ozone_grad_wrt_p_half_in_table_range(self):
+        """``mls_ozone_layer_vmr`` (gSAM layer means) is differentiable in the
+        interface pressures inside the tabulated 0.0097-1054 hPa range."""
+        from legoesm.atmosphere.physics.radiation.ozone_mls import (
+            mls_ozone_layer_vmr,
+        )
 
         # 50 hPa .. 900 hPa, comfortably inside the table.
-        p_full = jnp.linspace(5.0e3, 9.0e4, 30)
+        p_half = jnp.linspace(5.0e3, 9.0e4, 31)[None, :]
 
         def loss(p):
-            return jnp.sum(mls_ozone_vmr(p) ** 2)
+            return jnp.sum(mls_ozone_layer_vmr(p)[0] ** 2)
 
-        grad = jax.grad(loss)(p_full)
-        assert_gradient_ok(grad, "mls_ozone_vmr w.r.t. p_full (in range)",
+        grad = jax.grad(loss)(p_half)
+        assert_gradient_ok(grad, "mls_ozone_layer_vmr w.r.t. p_half (in range)",
                            min_nonzero_frac=0.9)
-
-    def test_mls_ozone_grad_is_exactly_zero_outside_table(self):
-        """MEASURED ZERO — ``jnp.interp`` clamps to the table endpoints.
-
-        Above 1054 hPa (and below 0.0097 hPa) the interpolant returns a
-        CONSTANT endpoint value, so d(O3)/dp is identically 0 there.  This is
-        the documented clamp behaviour, not a bug, but it means a column whose
-        surface pressure exceeds the table top has no ozone sensitivity at its
-        bottom level — worth having asserted rather than assumed.
-        """
-        from legoesm.atmosphere.physics.radiation.ozone_mls import mls_ozone_vmr
-
-        p_out = jnp.linspace(1.2e5, 1.5e5, 8)   # 1200-1500 hPa, above the table
-
-        def loss(p):
-            return jnp.sum(mls_ozone_vmr(p) ** 2)
-
-        grad = jax.grad(loss)(p_out)
-        assert_exactly_zero(
-            grad, "mls_ozone_vmr w.r.t. p_full (above table top)",
-            reason="jnp.interp clamps to the 1053.63 hPa endpoint -> constant",
-        )
 
     def _synthetic_ml_coefficients(self, n_lev=6, n_lat=4, n_lon=8, seed=0):
         """Build ``MLOzoneCoefficients`` directly (no NetCDF dependency)."""

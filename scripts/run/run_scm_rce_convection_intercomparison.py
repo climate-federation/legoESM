@@ -257,8 +257,8 @@ SUBCLOUD_MICROPHYSICS_INCLUDE = {
 #: is different physics and enters the checkpoint signature.
 SUBCLOUD_CONVECTION_INCLUDE = {
     "bechtold": ("atm.conv.BechtoldConfig.downdraft_evap_efficiency",),
-    "tiedtke": ("atm.conv.TiedtkeConfig.downdraft_evap_efficiency",),
 }
+# Tiedtke has no entry: it is the WRF port, which has no tunable parameters.
 
 
 def default_focused_include(

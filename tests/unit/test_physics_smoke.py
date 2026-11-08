@@ -121,7 +121,8 @@ def test_convection_smoke(scheme):
 def test_microphysics_smoke(scheme):
     """Each microphysics scheme produces finite tendencies."""
     from legoesm.atmosphere.physics.microphysics.integration import make_microphysics_physics
-    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig, MorrisonConfig)
 
     state, grid, sigma = make_hydrostatic_setup()
     # Put some cloud water in lowest 5 levels to trigger microphysics
@@ -134,7 +135,17 @@ def test_microphysics_smoke(scheme):
                          dims=("face", "x", "y", "level"), units="kg/kg"),
         }
     )
-    config = MicrophysicsConfig(scheme=scheme)
+    if scheme == "thompson":
+        # the WRF port needs the full registry (vote W1a/Y3a): zeros for the
+        # absent species, the values the bridge used to zero-fill
+        from legoesm.core.tracers import make_full_moisture_registry
+        state = state._replace(tracers={
+            **{n: Field(jnp.zeros_like(q_c_data), name=n,
+                        dims=("face", "x", "y", "level"), units="")
+               for n in make_full_moisture_registry().names},
+            **state.tracers})
+    config = MicrophysicsConfig(
+        scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
     micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)
     tend = micro_fn(state, grid, sigma)
     check_tendencies_finite(tend, f"microphysics({scheme})")
@@ -174,6 +185,9 @@ def test_gwd_smoke(scheme):
     from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
 
     state, grid, sigma = make_hydrostatic_setup()
+    # all land: CAM6 gw_oro (mcfarlane) needs a land fraction; lf = 1 is its
+    # unscaled drag
+    grid = grid._replace(land_frac=jnp.ones(6 * 8 * 8))
     config = GravityWaveDragConfig(scheme=scheme)
     gwd_fn = make_gwd_physics(config, model_type="hydrostatic", dt=300.0)
     tend, prog = gwd_fn(state, grid, sigma)

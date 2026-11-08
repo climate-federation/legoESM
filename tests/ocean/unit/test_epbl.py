@@ -108,7 +108,8 @@ def test_find_pe_chg_orig_matches_independent_reimplementation():
                 dt_to_dpe_a=2.7e3, ds_to_dpe_a=-1.9e3,
                 pres_z=1.1e4,
                 dt_to_dcolht_k=1.7e-4, ds_to_dcolht_k=-8.0e-5,
-                dt_to_dcolht_a=1.3e-4, ds_to_dcolht_a=-6.0e-5)
+                dt_to_dcolht_a=1.3e-4, ds_to_dcolht_a=-6.0e-5,
+                colht_sharpness=math.inf)  # MOM6's exact min(colht, 0)
     pe, dpe, pe_max, dpe0 = _find_pe_chg_orig(**args)
 
     # Independent transcription of MOM_energetic_PBL.F90:3460-3519.
@@ -170,7 +171,7 @@ def test_find_pe_chg_condensed_agrees_with_orig_on_a_shared_case():
         hp_a * (T_a - T_b), hp_a * (S_a - S_b),
         T_b - T_a, S_b - S_a,
         dt_to_dpe_k, ds_to_dpe_k, dt_to_dpe_a, ds_to_dpe_a,
-        pres, dt_ch_k, ds_ch_k, dt_ch_a, ds_ch_a)
+        pres, dt_ch_k, ds_ch_k, dt_ch_a, ds_ch_a, colht_sharpness=math.inf)
     assert float(pe_new) == pytest.approx(float(pe_orig), rel=1e-10)
 
 
@@ -209,16 +210,19 @@ def test_mstar_reichl_h18_matches_independent_reimplementation():
 
 def test_mstar_convective_reduction_bites_only_when_cooling():
     """MSTAR_CONV_ADJ must reduce mstar under cooling and not under heating."""
-    cfg = _ref_cfg()
+    # MOM6's exact min(0, b_flux): at b_flux = 0 the smooth default leaves a
+    # residual convective reduction (test_epbl_smooth_switches.py).
+    exact = dict(smooth_bflux_sharpness_s3m2=math.inf)
+    cfg = _ref_cfg(**exact)
     kw = dict(u_star=jnp.asarray(0.014), bld=jnp.asarray(22.0),
               absf=jnp.asarray(9.37e-5))
     cool = float(_find_mstar(cfg, jnp.asarray(-3.0e-7), **kw))
     warm = float(_find_mstar(cfg, jnp.asarray(0.0), **kw))
-    no_adj = float(_find_mstar(_ref_cfg(mstar_convect_coef=0.0),
+    no_adj = float(_find_mstar(_ref_cfg(mstar_convect_coef=0.0, **exact),
                                jnp.asarray(-3.0e-7), **kw))
     assert cool < no_adj, "cooling must reduce mstar when MSTAR_CONV_ADJ > 0"
     assert warm == pytest.approx(
-        float(_find_mstar(_ref_cfg(mstar_convect_coef=0.0),
+        float(_find_mstar(_ref_cfg(mstar_convect_coef=0.0, **exact),
                           jnp.asarray(0.0), **kw)), rel=1e-12), (
         "with no convection the reduction factor must be exactly 1")
 
@@ -703,3 +707,783 @@ def test_budget_check_catches_overspending():
     """Control: tripling ePBL's Kd must break the bound, or the check above
     could not fail (measured: 17 of the 18 columns go red at x3)."""
     assert _budget_residual(_ref_cfg(), 0.0, 0.05, kd_scale=3.0) > 1e-6
+
+
+# --- missing forcing (#2179) ------------------------------------------------
+
+@pytest.mark.parametrize("drop", ["tau_x", "tau_y", "q_net", "freshwater"])
+def test_factory_refuses_missing_forcing(drop):
+    """A missing wind, heat or freshwater channel raises (as MOM6 does)
+    instead of silently running the boundary layer unforced."""
+    import types
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+    scm, _ = _epbl_scm(-200.0, False, nsteps=1)
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, scm.state.eta.data.shape, scm.state.T.data.dtype)
+    grid = types.SimpleNamespace(grid_lat=jnp.deg2rad(40.0))
+    scm.physics_fn(scm.state, grid, scm.z_coord, surface_forcing=sfc)
+    with pytest.raises(ValueError, match=drop):
+        scm.physics_fn(scm.state, grid, scm.z_coord,
+                       surface_forcing=sfc._replace(**{drop: None}))
+    with pytest.raises(ValueError, match="tau_x"):
+        scm.physics_fn(scm.state, grid, scm.z_coord, surface_forcing=None)
+
+
+@pytest.mark.parametrize("fn", ["epbl_vertical_mixing", "epbl_diagnostics"])
+@pytest.mark.parametrize("drop", ["tau_x", "tau_y", "B_flux", "tke_forcing"])
+def test_kernels_refuse_missing_forcing(fn, drop):
+    """The public kernels no longer default absent forcing to zero."""
+    from legoesm.ocean.physics.vertical_mixing import epbl as mod
+    cfg = _ref_cfg()
+    h, T, S, dSV_dT, dSV_dS = _column()
+    kw = dict(tau_x=jnp.asarray([0.2]), tau_y=jnp.asarray([0.0]),
+              B_flux=jnp.asarray([0.0]), tke_forcing=jnp.zeros_like(T)[None],
+              absf=jnp.asarray([1e-4]), g=G, rho_0=RHO0)
+    args = (T[None] * 0.0, T[None] * 0.0, T[None], S[None],
+            dSV_dT[None], dSV_dS[None], h, cfg)
+    getattr(mod, fn)(*args, **kw)
+    kw[drop] = None
+    with pytest.raises(ValueError, match=drop):
+        getattr(mod, fn)(*args, **kw)
+
+
+# --- surface buoyancy through the shared helper (#2178) ---------------------
+
+def _factory_forcing(monkeypatch, salt):
+    """Run the ePBL factory on a 20-level SCM column and capture the B_flux
+    and TKE forcing it hands the closure."""
+    import types
+    from legoesm.ocean.physics.vertical_mixing import integration
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+    scm, _ = _epbl_scm(-200.0, False, nsteps=1)
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, scm.state.eta.data.shape, scm.state.T.data.dtype)
+    sfc = sfc._replace(freshwater=jnp.full_like(sfc.q_net, 3e-5),
+                       salt_flux=(None if salt is None
+                                  else jnp.full_like(sfc.q_net, salt)))
+    from legoesm.ocean.physics.vertical_mixing.epbl import (
+        epbl_vertical_mixing as real,
+    )
+    seen = {}
+
+    def spy(*a, **kw):
+        seen.update(kw, args=a)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(integration, "epbl_vertical_mixing", spy)
+    grid = types.SimpleNamespace(grid_lat=jnp.deg2rad(40.0))
+    scm.physics_fn(scm.state, grid, scm.z_coord, surface_forcing=sfc)
+    # Uninstall the spy: the next call's SCM run must not overwrite `seen`.
+    monkeypatch.setattr(integration, "epbl_vertical_mixing", real)
+    st = scm.state
+    return seen, sfc, st.T.data[..., 0], st.S.data[..., 0]
+
+
+def test_buoyancy_flux_is_mom6_rho0_form_with_brine(monkeypatch):
+    """B_flux = -(g/rho_0)(drho_dT netHeat + drho_dS netSalt) at p = 0, with
+    netSalt = -S*fw/rho_0 + brine*1e3/rho_0 (MOM6 calculateBuoyancyFlux1d,
+    GoRho = g/Rho0).  Reverting to the inline form drops the brine term;
+    the helper's default rho(T,S,0) normalisation is off by ~0.1-0.3 %."""
+    from legoesm.ocean.constants_config import ConstantsConfig
+    cc = ConstantsConfig()
+    g, rho0, c_sw = cc.g, cc.rho_0, cc.c_sw
+    brine = 2e-6                                   # kg salt / m^2 / s
+    seen, sfc, T0, S0 = _factory_forcing(monkeypatch, brine)
+    drho_dT, drho_dS = eos_density_derivatives(
+        make_eos_fn(), T0, S0, jnp.zeros_like(T0))
+    net_heat = sfc.q_net / (rho0 * c_sw)
+    net_salt = -S0 * sfc.freshwater / rho0 + brine * 1e3 / rho0
+    want = -(g / rho0) * (drho_dT * net_heat + drho_dS * net_salt)
+    np.testing.assert_allclose(np.asarray(seen["B_flux"]), np.asarray(want),
+                               rtol=1e-12, atol=0.0)
+    # Top-layer TKE forcing: MOM6 cTKE with the same net salt flux
+    # [psu kg/m^2/s] = -S*fw + brine*1e3.
+    _, _, _, _, dSV_dT, dSV_dS, h, cfg = seen["args"]
+    tke_want = surface_tke_forcing(
+        sfc.q_net, -S0 * sfc.freshwater + brine * 1e3, h[..., 0],
+        dSV_dT[..., 0], dSV_dS[..., 0], g=g, rho_0=rho0, c_sw=c_sw,
+        dt=cfg.dt_s)
+    np.testing.assert_allclose(np.asarray(seen["tke_forcing"][..., 0]),
+                               np.asarray(tke_want), rtol=1e-12, atol=0.0)
+
+
+def test_brine_enters_buoyancy_and_tke_forcing(monkeypatch):
+    """Brine rejection makes the surface denser: B_flux falls (less
+    stabilizing) and the top-layer TKE forcing changes; salt_flux None
+    is zero brine."""
+    with_b, *_ = _factory_forcing(monkeypatch, 2e-6)
+    none_b, *_ = _factory_forcing(monkeypatch, None)
+    zero_b, *_ = _factory_forcing(monkeypatch, 0.0)
+    assert float(with_b["B_flux"].ravel()[0]) < float(none_b["B_flux"].ravel()[0])
+    assert (float(with_b["tke_forcing"][..., 0].ravel()[0])
+            != float(none_b["tke_forcing"][..., 0].ravel()[0]))
+    np.testing.assert_array_equal(np.asarray(none_b["B_flux"]),
+                                  np.asarray(zero_b["B_flux"]))
+
+
+# --- the run's EOS reaches ePBL and Richardson (#2177) ----------------------
+
+def _linear_eos():
+    from legoesm.ocean.eos import LinearEOSConfig
+    return make_eos_fn(eos="linear", eos_linear=LinearEOSConfig())
+
+
+def test_epbl_uses_the_supplied_eos(monkeypatch):
+    """eos_fn=None and an explicit Wright give the same closure inputs; a
+    linear EOS changes the specific-volume derivatives and the buoyancy."""
+    import types
+    from legoesm.ocean.physics.vertical_mixing import integration
+    from legoesm.ocean.physics.vertical_mixing.epbl import (
+        epbl_vertical_mixing as real,
+    )
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+    from legoesm.ocean.eos import wright_eos
+
+    scm, _ = _epbl_scm(-200.0, False, nsteps=1)
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, scm.state.eta.data.shape, scm.state.T.data.dtype)
+    sfc = sfc._replace(freshwater=jnp.full_like(sfc.q_net, 3e-5))
+    grid = types.SimpleNamespace(grid_lat=jnp.deg2rad(40.0))
+    vm = VerticalMixingConfig(scheme="epbl", epbl=EPBLConfig(dt_s=1200.0))
+
+    def inputs(eos_fn):
+        seen = {}
+
+        def spy(*a, **kw):
+            seen.update(kw, args=a)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(integration, "epbl_vertical_mixing", spy)
+        fn = integration.make_vertical_mixing_physics(
+            vm, apply_diffusion=False, eos_fn=eos_fn)
+        fn(scm.state, grid, scm.z_coord, surface_forcing=sfc)
+        monkeypatch.setattr(integration, "epbl_vertical_mixing", real)
+        return seen
+
+    base, wright, lin = inputs(None), inputs(wright_eos), inputs(_linear_eos())
+    for k in ("B_flux", "tke_forcing"):
+        np.testing.assert_array_equal(np.asarray(base[k]), np.asarray(wright[k]))
+    np.testing.assert_array_equal(np.asarray(base["args"][4]),
+                                  np.asarray(wright["args"][4]))
+    assert not np.allclose(np.asarray(base["args"][4]),
+                           np.asarray(lin["args"][4]), rtol=1e-3)
+    assert not np.allclose(np.asarray(base["B_flux"]),
+                           np.asarray(lin["B_flux"]), rtol=1e-3)
+
+
+@pytest.mark.parametrize("n2_mode", ["insitu", "adiabatic"])
+def test_richardson_density_uses_the_supplied_eos(monkeypatch, n2_mode):
+    """The Richardson factory hands the run's EOS to the density helper."""
+    import types
+    from legoesm.ocean.physics.vertical_mixing import integration
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        RichardsonVerticalMixingConfig,
+    )
+    got = []
+
+    def rho(*a, eos_fn=None, **kw):
+        got.append(eos_fn)
+        raise StopIteration
+
+    monkeypatch.setattr(integration, "_compute_rho", rho)
+    monkeypatch.setattr(integration, "_compute_rho_and_pressure", rho)
+    eos = _linear_eos()
+    vm = VerticalMixingConfig(
+        scheme="richardson",
+        richardson=RichardsonVerticalMixingConfig(n2_mode=n2_mode))
+    fn = integration.make_vertical_mixing_physics(vm, eos_fn=eos)
+    scm, _ = _epbl_scm(0.0, False, nsteps=1)
+    with pytest.raises(StopIteration):
+        fn(scm.state, types.SimpleNamespace(), scm.z_coord)
+    assert got == [eos]
+
+
+def test_latlon_model_hands_its_eos_to_the_physics(monkeypatch):
+    """The lat-lon model builds its physics with the run's EOS."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as mod
+    from legoesm.ocean.eos import LinearEOSConfig
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.lateral_mixing.config import (
+        LateralMixingConfig,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    seen = {}
+    real = mod.make_ocean_physics
+
+    def spy(*a, **kw):
+        seen.update(kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(mod, "make_ocean_physics", spy)
+    lin = LinearEOSConfig()
+    cfg = LatLonCGridOceanConfig.from_flat(
+        eos="linear", eos_linear=lin, implicit_vertical_mixing=True,
+        physics=OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="epbl", epbl=EPBLConfig(dt_s=600.0)),
+            lateral_mixing=LateralMixingConfig(scheme="none")))
+    mod.LatLonCGridOceanModel(create_latlon_grid(n_lat=8, n_lon=16),
+                              create_ocean_z_star(n_levels=4, H_max=400.0),
+                              cfg)
+    T, S, p = jnp.asarray(10.0), jnp.asarray(35.0), jnp.asarray(0.0)
+    want = make_eos_fn(eos="linear", eos_linear=lin)(T, S, p)
+    assert float(seen["eos_fn"](T, S, p)) == float(want)
+    assert float(want) != float(make_eos_fn()(T, S, p))
+
+
+def test_k_profile_fallback_forwards_the_eos_to_epbl(monkeypatch):
+    """The implicit K-profile fallback's ePBL branch passes its eos_fn on."""
+    from legoesm.ocean.physics.vertical_mixing import integration, k_profiles
+    seen = []
+
+    def factory(*a, eos_fn=None, **kw):
+        seen.append(eos_fn)
+        raise StopIteration
+
+    monkeypatch.setattr(integration, "make_vertical_mixing_physics", factory)
+    eos = _linear_eos()
+    scm, _ = _epbl_scm(0.0, False, nsteps=1)
+    vm = VerticalMixingConfig(scheme="epbl", epbl=EPBLConfig(dt_s=1200.0))
+    with pytest.raises(StopIteration):
+        k_profiles._vmix_K_profiles(scm.state, scm.z_coord, None, vm,
+                                    eos_fn=eos, lat_deg=40.0, dt_tke=1200.0)
+    assert seen == [eos]
+
+
+def test_rho0_norm_buoyancy_same_for_none_and_explicit_wright():
+    """A run that passes wright_eos explicitly gets the default Wright
+    buoyancy bit for bit, also where the surface is nearly fresh (no
+    salinity floor for Wright)."""
+    from legoesm.ocean.eos import wright_eos
+    from legoesm.ocean.physics.vertical_mixing._shared import (
+        surface_buoyancy_flux,
+    )
+    T = jnp.asarray([5.0, 20.0])
+    S = jnp.asarray([1e-4, 35.0])
+    q, fw, salt = jnp.asarray([-100.0, 50.0]), jnp.full(2, 3e-5), jnp.full(2, 1e-6)
+    kw = dict(g=G, rho_0=RHO0, c_sw=C_SW, real_salt_in_qs=True,
+              rho_0_norm=True)
+    a = surface_buoyancy_flux(q, fw, salt, T, S, **kw)
+    b = surface_buoyancy_flux(q, fw, salt, T, S, eos_fn=wright_eos, **kw)
+    for x, y in zip(a, b):
+        np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_richardson_adiabatic_n2_uses_the_supplied_eos(monkeypatch):
+    """The adiabatic N^2 inside the Richardson closure gets the run's EOS
+    too, not only the density."""
+    import types
+    from legoesm.ocean.physics.vertical_mixing import integration
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        RichardsonVerticalMixingConfig,
+    )
+    got = []
+
+    def closure(*a, eos_fn=None, **kw):
+        got.append(eos_fn)
+        raise StopIteration
+
+    monkeypatch.setattr(integration, "richardson_vertical_mixing", closure)
+    eos = _linear_eos()
+    vm = VerticalMixingConfig(
+        scheme="richardson",
+        richardson=RichardsonVerticalMixingConfig(n2_mode="adiabatic"))
+    fn = integration.make_vertical_mixing_physics(vm, eos_fn=eos)
+    scm, _ = _epbl_scm(0.0, False, nsteps=1)
+    with pytest.raises(StopIteration):
+        fn(scm.state, types.SimpleNamespace(), scm.z_coord)
+    assert got == [eos]
+
+
+def test_epbl_sqrt_s_eos_is_finite_at_zero_salinity(monkeypatch):
+    """A sqrt(S) EOS (veros_gsw) has dRho/dS = NaN at S = 0 (measured); the
+    layer derivatives handed to the closure are taken at the floored
+    salinity, so they and ePBL's K stay finite."""
+    import types
+    from legoesm.ocean.physics.vertical_mixing import integration
+    from legoesm.ocean.physics.vertical_mixing.epbl import (
+        epbl_vertical_mixing as real,
+    )
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+
+    seen = {}
+
+    def spy(*a, **kw):
+        seen["args"] = a
+        return real(*a, **kw)
+
+    monkeypatch.setattr(integration, "epbl_vertical_mixing", spy)
+    scm, _ = _epbl_scm(-200.0, False, nsteps=1)
+    st = scm.state
+    st = st._replace(S=st.S.replace(data=st.S.data.at[..., -1].set(0.0)))
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, st.eta.data.shape, st.T.data.dtype)
+    vm = VerticalMixingConfig(scheme="epbl", epbl=EPBLConfig(dt_s=1200.0))
+    fn = integration.make_vertical_mixing_physics(
+        vm, apply_diffusion=False, eos_fn=make_eos_fn(eos="veros_gsw"))
+    tend = fn(st, types.SimpleNamespace(grid_lat=jnp.deg2rad(40.0)),
+              scm.z_coord, surface_forcing=sfc)
+    for dsv in seen["args"][4:6]:
+        assert bool(jnp.all(jnp.isfinite(dsv)))
+    assert bool(jnp.all(jnp.isfinite(tend.K_v)))
+
+
+# --- the run's EOS reaches KPP and the other callers (#2243) ----------------
+
+def test_kpp_uses_the_supplied_eos(monkeypatch):
+    """The explicit KPP factory hands the run's EOS to its density, surface
+    buoyancy and boundary-layer depth, as the K-profile fallback does;
+    eos_fn=None and an explicit Wright give the same inputs."""
+    import types
+    from legoesm.ocean.eos import wright_eos
+    from legoesm.ocean.physics.vertical_mixing import integration
+    from legoesm.ocean.physics.vertical_mixing.kpp import (
+        kpp_vertical_mixing as real,
+    )
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+
+    scm, _ = _epbl_scm(-200.0, False, nsteps=1)
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, scm.state.eta.data.shape, scm.state.T.data.dtype)
+    sfc = sfc._replace(freshwater=jnp.full_like(sfc.q_net, 3e-5))
+    vm = VerticalMixingConfig(scheme="kpp")
+
+    def inputs(eos_fn):
+        seen = {}
+
+        def spy(*a, **kw):
+            seen.update(kw, args=a)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(integration, "kpp_vertical_mixing", spy)
+        fn = integration.make_vertical_mixing_physics(
+            vm, apply_diffusion=False, eos_fn=eos_fn)
+        fn(scm.state, types.SimpleNamespace(), scm.z_coord,
+           surface_forcing=sfc)
+        monkeypatch.setattr(integration, "kpp_vertical_mixing", real)
+        return seen
+
+    lin_eos = _linear_eos()
+    base, wright, lin = inputs(None), inputs(wright_eos), inputs(lin_eos)
+    assert lin["eos_fn"] is lin_eos and base["eos_fn"] is None
+    np.testing.assert_array_equal(np.asarray(base["B_f"]),
+                                  np.asarray(wright["B_f"]))
+    assert not np.allclose(np.asarray(base["B_f"]), np.asarray(lin["B_f"]),
+                           rtol=1e-3)
+    np.testing.assert_array_equal(np.asarray(base["args"][4]),
+                                  np.asarray(wright["args"][4]))
+    assert not np.allclose(np.asarray(base["args"][4]),
+                           np.asarray(lin["args"][4]), rtol=1e-6)
+
+
+def test_cube_model_hands_its_eos_to_the_physics(monkeypatch):
+    """The cubed-sphere ocean model builds its physics with its own EOS."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.ocean.dynamics import ocean_model as mod
+    from legoesm.ocean.eos import LinearEOSConfig
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.state import OceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    seen = {}
+    real = mod.make_ocean_physics
+
+    def spy(*a, **kw):
+        seen.update(kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(mod, "make_ocean_physics", spy)
+    lin = LinearEOSConfig()
+    mod.OceanModel(create_cubed_sphere(8),
+                   create_ocean_z_star(n_levels=4, H_max=400.0),
+                   OceanConfig(eos="linear", eos_linear=lin,
+                               physics=OceanPhysicsConfig(),
+                               enable_runtime_checks=False))
+    T, S, p = jnp.asarray(10.0), jnp.asarray(35.0), jnp.asarray(0.0)
+    want = make_eos_fn(eos="linear", eos_linear=lin)(T, S, p)
+    assert float(seen["eos_fn"](T, S, p)) == float(want)
+    assert float(want) != float(make_eos_fn()(T, S, p))
+
+
+def test_momentum_diagnostic_script_passes_its_eos():
+    """The momentum-balance diagnostic builds its physics with the
+    config's EOS (#2243)."""
+    import inspect
+
+    from scripts.run.global_overturning import diagnose_momentum_balance as d
+
+    src = inspect.getsource(d.main)
+    assert ("eos_fn=make_eos_fn(eos=ocean_config.eos,\n"
+            "                           eos_linear=ocean_config.eos_linear,\n"
+            "                           eos_nemo_seos=ocean_config.eos_nemo_seos)"
+            ) in src
+
+
+def test_kpp_buoyancy_same_for_none_and_explicit_wright():
+    """The KPP / CATKE surface buoyancy (rho(T,S,0)-normalised form) is the
+    same bit for bit for eos_fn=None and an explicit wright_eos, also where
+    the surface is nearly fresh: Wright gets no salinity floor (#2243).
+    The EOS comes from make_eos_fn, as the models build it."""
+    from legoesm.ocean.physics.vertical_mixing._shared import (
+        surface_buoyancy_flux,
+    )
+    wright_eos = make_eos_fn("wright")
+    T = jnp.asarray([10.0, 10.0, 20.0])
+    S = jnp.asarray([0.0, 1e-4, 35.0])
+    q, fw, salt = jnp.full(3, -150.0), jnp.full(3, 3e-5), jnp.full(3, 1e-6)
+    kw = dict(g=G, rho_0=RHO0, c_sw=C_SW, real_salt_in_qs=True)
+    a = surface_buoyancy_flux(q, fw, salt, T, S, **kw)
+    b = surface_buoyancy_flux(q, fw, salt, T, S, eos_fn=wright_eos, **kw)
+    for x, y in zip(a, b):
+        np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+@pytest.mark.parametrize("path", ["explicit", "k_profile_fallback"])
+def test_kpp_sqrt_s_eos_gradient_finite_at_zero_salinity(path):
+    """A sqrt(S) EOS (veros_gsw) has an infinite dRho/dS at S = 0; KPP's
+    density sees the floored salinity in both paths (explicit factory and
+    implicit K-profile fallback), as ePBL's does, so d(sum K_v)/dS stays
+    finite at a zero-salinity cell (#2243)."""
+    import types
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing import integration
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        compute_vertical_K_profiles,
+    )
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+
+    scm, _ = _epbl_scm(-200.0, False, nsteps=1)
+    st = scm.state
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, st.eta.data.shape, st.T.data.dtype)
+    vm = VerticalMixingConfig(scheme="kpp")
+    eos = make_eos_fn(eos="veros_gsw")
+    if path == "explicit":
+        fn = integration.make_vertical_mixing_physics(
+            vm, apply_diffusion=False, eos_fn=eos)
+
+        def k_v(s):
+            return fn(st._replace(S=st.S.replace(data=s)),
+                      types.SimpleNamespace(), scm.z_coord,
+                      surface_forcing=sfc).K_v
+    else:
+        phys = OceanPhysicsConfig(vertical_mixing=vm)
+
+        def k_v(s):
+            return compute_vertical_K_profiles(
+                st._replace(S=st.S.replace(data=s)), scm.z_coord, sfc,
+                phys, eos_fn=eos)[0]
+
+    S0 = st.S.data.at[..., -1].set(0.0)
+    grad = jax.grad(lambda s: jnp.sum(k_v(s)))(S0)
+    assert bool(jnp.all(jnp.isfinite(k_v(S0))))
+    assert bool(jnp.all(jnp.isfinite(grad)))
+
+
+# --- penetrating shortwave in the TKE forcing and buoyancy (#2178) ----------
+
+def _mom6_pen_tke_loop(sw_bands, inv_scale, h, dsv_dt, dt, c_sw, g, rho0):
+    """Line-by-line numpy transcription of MOM6 absorbRemainingSW's TKE
+    (MOM_opacity.F90, adjustAbsorptionProfile=.false.), without its
+    small-heating absorption threshold."""
+    pen = np.asarray(sw_bands, float) * dt / (rho0 * c_sw)
+    tke = np.zeros(len(h))
+    g_hconv2 = g * rho0**2
+    for k in range(len(h)):
+        for n in range(len(pen)):
+            od = h[k] * inv_scale[n]
+            sw_trans = math.exp(-od)
+            heat = pen[n] * (1.0 - sw_trans)
+            if od > 1e-2:
+                fac = (od * (1.0 + sw_trans) - 2.0 * (1.0 - sw_trans)) / (
+                    od * (1.0 - sw_trans))
+            else:
+                fac = (od / 6.0) * (1.0 - od**2 / 60.0)
+            tke[k] -= heat * dsv_dt[k] * (0.5 * h[k] * g_hconv2) * fac
+            pen[n] *= sw_trans
+    return tke
+
+
+_PEN_H = np.array([1.0e-3, 0.5, 1.0, 2.0, 5.0, 1.0e-3, 10.0, 30.0])
+
+
+def test_penetrating_sw_tke_matches_mom6_loop():
+    """Both shape-factor branches (1 mm layers take the Taylor form) and the
+    band attenuation through the layers above."""
+    from legoesm.ocean.physics.vertical_mixing.epbl import penetrating_sw_tke
+    rng = np.random.default_rng(0)
+    dsv = 2e-7 * (1.0 + rng.random(_PEN_H.size))
+    sw, inv = np.array([116.0, 84.0]), np.array([1 / 0.35, 1 / 23.0])
+    kw = dict(dt=1200.0, c_sw=3994.0, g=constants.g, rho0=1025.0)
+    want = _mom6_pen_tke_loop(sw, inv, _PEN_H, dsv, **kw)
+    got = penetrating_sw_tke(
+        jnp.asarray(sw), jnp.asarray(inv), jnp.asarray(_PEN_H),
+        jnp.asarray(dsv), c_sw=kw["c_sw"], dt=kw["dt"], g=kw["g"],
+        rho_0=kw["rho0"])
+    np.testing.assert_allclose(np.asarray(got), want, rtol=1e-12, atol=0.0)
+    assert np.all(want <= 0.0) and np.any(want < 0.0)   # heating stabilises
+
+
+def test_penetrating_sw_tke_gradients_through_both_branches():
+    from jax.test_util import check_grads
+    from legoesm.ocean.physics.vertical_mixing.epbl import penetrating_sw_tke
+    inv = jnp.asarray([1 / 0.35, 1 / 23.0])
+    dsv = jnp.full(_PEN_H.size, 2e-7)
+
+    def f(sw, h):
+        return penetrating_sw_tke(sw, inv, h, dsv, c_sw=3994.0, dt=1200.0)
+
+    check_grads(f, (jnp.asarray([116.0, 84.0]), jnp.asarray(_PEN_H)),
+                order=2, modes=("fwd", "rev"))
+    g = jax.grad(lambda h: jnp.sum(f(jnp.asarray([116.0, 84.0]), h)))(
+        jnp.asarray(_PEN_H))
+    assert np.all(np.isfinite(np.asarray(g))) and np.any(np.asarray(g) != 0)
+
+
+def _sw_scm(sw_cfg, sw_down=200.0, q_net=-100.0):
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    from legoesm.ocean.scm import OceanColumnModel
+    from legoesm.ocean.scm_forcing import OceanSCMForcing
+    from legoesm.ocean.vertical import create_ocean_z_star
+    nz = 20
+    phys = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(
+            scheme="epbl", epbl=EPBLConfig(dt_s=1200.0)),
+        convection=OceanConvectionConfig(scheme="none"),
+        shortwave_penetration=sw_cfg)
+    forcing = OceanSCMForcing(
+        f_c=2.0 * OMEGA * math.sin(math.radians(40.0)),
+        tau_x=lambda t: 0.2, tau_y=lambda t: 0.0, q_net=lambda t: q_net,
+        e_minus_p=lambda t: 0.0,
+        sw_down=None if sw_down is None else (lambda t: sw_down))
+    return OceanColumnModel.create(
+        nlev=nz, dt=1200.0,
+        T_profile=20.0 - 5.0 * (np.arange(nz) + 0.5) / nz, S_profile=35.0,
+        physics_config=phys,
+        z_coord=create_ocean_z_star(n_levels=nz, H_max=20.0, dz_surface=1.0,
+                                    dz_deep=1.0),
+        latitude_deg=40.0, forcing=forcing, implicit_vertical_mixing=True)
+
+
+def test_scm_shortwave_enters_epbl_buoyancy_and_tke(monkeypatch):
+    """MOM6 applyBoundaryFluxesInOut: buoyancy from netHeat + netPen (q_net +
+    sw_down here), cTKE = top-layer non-penetrating term + the penetrating
+    shortwave's per-layer energy for the scheme's Jerlov bands."""
+    import types
+    from legoesm.ocean.physics.shortwave_penetration import (
+        JERLOV_TYPES, ShortwavePenetrationConfig)
+    from legoesm.ocean.physics.vertical_mixing import integration
+    from legoesm.ocean.physics.vertical_mixing.epbl import (
+        epbl_vertical_mixing as real, penetrating_sw_tke)
+    from legoesm.ocean.physics.vertical_mixing._shared import (
+        surface_buoyancy_flux)
+    from legoesm.ocean.constants_config import ConstantsConfig
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+    cc = ConstantsConfig()
+    scm = _sw_scm(ShortwavePenetrationConfig(water_type="I"))
+    st = scm.state
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, st.eta.data.shape, st.T.data.dtype)
+    seen = {}
+
+    def spy(*a, **kw):
+        seen.update(kw, args=a)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(integration, "epbl_vertical_mixing", spy)
+    scm.physics_fn(st, types.SimpleNamespace(grid_lat=jnp.deg2rad(40.0)),
+                   scm.z_coord, surface_forcing=sfc)
+    _, _, T, S, dSV_dT, dSV_dS, h, cfg = seen["args"]
+    B_f, _, _ = surface_buoyancy_flux(
+        sfc.q_net + sfc.sw_down, sfc.freshwater, None, T[..., 0], S[..., 0],
+        g=cc.g, rho_0=cc.rho_0, c_sw=cc.c_sw, real_salt_in_qs=True,
+        rho_0_norm=True)
+    np.testing.assert_allclose(np.asarray(seen["B_flux"]), np.asarray(-B_f),
+                               rtol=1e-12, atol=0.0)
+    jer = JERLOV_TYPES["I"]
+    sw_b = sfc.sw_down[..., None] * jnp.asarray([jer.R, 1.0 - jer.R])
+    want = penetrating_sw_tke(
+        sw_b, jnp.asarray([1 / jer.zeta1, 1 / jer.zeta2]), h, dSV_dT,
+        c_sw=cc.c_sw, dt=cfg.dt_s, g=cc.g, rho_0=cc.rho_0)
+    want = want.at[..., 0].add(surface_tke_forcing(
+        sfc.q_net, -S[..., 0] * sfc.freshwater, h[..., 0], dSV_dT[..., 0],
+        dSV_dS[..., 0], g=cc.g, rho_0=cc.rho_0, c_sw=cc.c_sw, dt=cfg.dt_s))
+    np.testing.assert_allclose(np.asarray(seen["tke_forcing"]),
+                               np.asarray(want), rtol=1e-12, atol=1e-300)
+    assert float(seen["tke_forcing"][..., 5].ravel()[0]) < 0.0
+
+
+def test_shortwave_without_a_penetration_scheme_raises():
+    scm = _sw_scm(None)
+    with pytest.raises(ValueError, match="sw_down"):
+        scm.step()
+
+
+def test_shortwave_with_a_non_jerlov_scheme_raises():
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig)
+    scm = _sw_scm(ShortwavePenetrationConfig(scheme="sweeney_2band"))
+    with pytest.raises(NotImplementedError, match="jerlov_2band"):
+        scm.step()
+
+
+def test_shortwave_outside_the_scm_raises():
+    """Lat-lon lanes build ePBL without epbl_shortwave (their q_net already
+    holds the solar heat), so a supplied sw_down must not be ignored."""
+    import types
+    from legoesm.ocean.physics.vertical_mixing.integration import (
+        make_vertical_mixing_physics)
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+    scm = _sw_scm(None)
+    fn = make_vertical_mixing_physics(
+        VerticalMixingConfig(scheme="epbl", epbl=EPBLConfig(dt_s=1200.0)),
+        apply_diffusion=False)
+    st = scm.state
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, st.eta.data.shape, st.T.data.dtype)
+    with pytest.raises(ValueError, match="sw_down"):
+        fn(st, types.SimpleNamespace(grid_lat=jnp.deg2rad(40.0)), scm.z_coord,
+           surface_forcing=sfc)
+
+
+# --- lat-lon C-grid model: ePBL takes the step dt, like CATKE --------------
+
+def _latlon_epbl_setup(dt_s=1800.0, convection="none", **flat):
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.surface_forcing.config import (
+        SurfaceForcingConfig,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    grid = create_latlon_grid(n_lat=8, n_lon=16)
+    z_coord = create_ocean_z_star(n_levels=8, H_max=4000.0)
+    phys = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(
+            scheme="epbl", epbl=EPBLConfig(dt_s=dt_s)),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        surface_forcing=SurfaceForcingConfig(scheme="none"),
+        bottom_drag=BottomDragConfig(scheme="none"),
+        convection=OceanConvectionConfig(scheme=convection),
+        shortwave_penetration=None,
+    )
+    cfg = LatLonCGridOceanConfig.from_flat(
+        A_h=1.0e4, implicit_vertical_mixing=True, physics=phys, **flat)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0)
+    return grid, z_coord, cfg, phys, state
+
+
+def _windy_forcing(state):
+    from legoesm.ocean.state import OceanSurfaceForcing
+    shape = state.T.data.shape[:-1]
+    return OceanSurfaceForcing(tau_x=jnp.full(shape, 0.1),
+                               tau_y=jnp.zeros(shape),
+                               q_net=jnp.full(shape, -100.0),
+                               freshwater=jnp.zeros(shape))
+
+
+def test_k_profiles_epbl_uses_dt_tke_not_dt_s():
+    """On the K-profile path ePBL prices mixing with the dt it is passed:
+    dt_s does not matter there, dt_tke does, and a missing dt_tke raises."""
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        compute_vertical_K_profiles,
+    )
+    grid, z_coord, _, phys_a, state = _latlon_epbl_setup(dt_s=1800.0)
+    _, _, _, phys_b, _ = _latlon_epbl_setup(dt_s=600.0)
+    forcing = _windy_forcing(state)
+    lat_deg = jnp.degrees(grid.lat2d)   # as the tendency probe passes it
+
+    def _kv(phys, dt_tke):
+        K_v, _ = compute_vertical_K_profiles(
+            state, z_coord, forcing, phys, dt_tke=dt_tke, lat_deg=lat_deg)
+        return np.asarray(K_v)
+
+    k_a = _kv(phys_a, 1200.0)
+    assert np.max(k_a) > 0.0          # forced: the comparison is not of zeros
+    np.testing.assert_array_equal(k_a, _kv(phys_b, 1200.0))
+    # Surface diffusivity (shallowest interior interface; k=0 at the surface)
+    # must differ exactly, in every column, between the two dts.
+    assert np.all(k_a[..., 0] != _kv(phys_a, 300.0)[..., 0])
+    with pytest.raises(ValueError, match="requires dt_tke"):
+        compute_vertical_K_profiles(state, z_coord, forcing, phys_a,
+                                    lat_deg=lat_deg)
+
+
+def _record_epbl_dt(monkeypatch):
+    import legoesm.ocean.physics.vertical_mixing as vertical_mixing
+    real = vertical_mixing.compute_vertical_K_profiles
+    seen = []
+
+    def _spy(*args, **kwargs):
+        # The model step is jitted, so dt_tke is a tracer here: read its
+        # runtime value through a host callback.
+        dt_tke = kwargs.get("dt_tke")
+        if dt_tke is None:
+            seen.append(None)
+        else:
+            jax.debug.callback(lambda x: seen.append(float(x)), dt_tke)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(vertical_mixing, "compute_vertical_K_profiles", _spy)
+    return seen
+
+
+@pytest.mark.parametrize("convection", ["none", "enhanced_diffusion"])
+def test_latlon_model_passes_step_dt_to_epbl(monkeypatch, convection):
+    """The lat-lon C-grid model hands ePBL its step dt (CATKE's dt_mom), not
+    EPBLConfig.dt_s -- also when another scheme (enhanced diffusion)
+    surfaces K from the physics pipeline, which would otherwise skip the
+    K-profile path."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid, z_coord, cfg, _, state = _latlon_epbl_setup(
+        dt_s=1800.0, convection=convection)
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
+    seen = _record_epbl_dt(monkeypatch)
+    new = model.step(state, 900.0, surface_forcing=_windy_forcing(state))
+    jax.block_until_ready(new)
+    assert seen and all(d == 900.0 for d in seen)
+    assert np.all(np.isfinite(np.asarray(new.T.data)))
+
+
+def test_latlon_leapfrog_passes_euler_start_then_two_dt_to_epbl(monkeypatch):
+    """Leapfrog: the Euler start hands ePBL dt, later steps 2*dt, the same
+    dt_mom CATKE receives."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid, z_coord, cfg, _, state = _latlon_epbl_setup(
+        dt_s=1800.0, outer_integrator="leapfrog", enable_runtime_checks=False,
+        coriolis_scheme="explicit_ab2", vorticity_scheme="een_total")
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
+    seen = _record_epbl_dt(monkeypatch)
+    forcing = _windy_forcing(state)
+    s1 = jax.block_until_ready(
+        model.step(state, 900.0, surface_forcing=forcing))
+    first = list(seen)
+    seen.clear()
+    jax.block_until_ready(model.step(s1, 900.0, surface_forcing=forcing))
+    assert first and all(d == 900.0 for d in first)
+    assert seen and all(d == 1800.0 for d in seen)
+
+
+def test_latlon_model_rejects_epbl_with_dt_mom_ratio():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid, z_coord, cfg, _, _ = _latlon_epbl_setup(
+        dt_mom_ratio=2.0, barotropic_solver="rigid_lid")
+    with pytest.raises(ValueError, match="epbl.*dt_mom_ratio == 1.0"):
+        LatLonCGridOceanModel(grid, z_coord, cfg)

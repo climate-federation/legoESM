@@ -21,7 +21,8 @@
 !
 ! usage: oracle_driver <in.bin> <out.bin>
 !   in.bin : n, dcs, rhow, then qc qi ni ncnst cldf rho (n each; ni per kg grid mean,
-!            ncnst per m3 in-cloud, cldf = CAM6 ast, rho = legoESM moist density)
+!            ncnst per m3 in-cloud, cldf = CAM6 ast, rho = legoESM moist density,
+!            rhod = p/(R_d T), the REL density micro_mg_cam.F90:2507-2508)
 !   out.bin: lcldm dumc effc_mg2 effi_mg2 ni_adj effc_wrf rel_cam  (n each)
 program oracle_driver
   use micro_mg_utils, only: r8, pi, rhoi, rhows, mincld, qsmall, micro_mg_utils_init, &
@@ -32,7 +33,7 @@ program oracle_driver
   real(r8) :: dcs, rhow_lego
   character(len=512) :: fin, fout
   character(128) :: errstring
-  real(r8), allocatable :: a_qc(:), a_qi(:), a_ni(:), a_nc(:), a_cf(:), a_rho(:)
+  real(r8), allocatable :: a_qc(:), a_qi(:), a_ni(:), a_nc(:), a_cf(:), a_rho(:), a_rhod(:)
   real(r8), allocatable :: o_lcldm(:), o_dumc(:), o_effc(:), o_effi(:), o_niadj(:), o_wrf(:), o_rel(:)
   ! micro_mg_cam locals (shapes (pcols,pver) = (1,1); top_lev = ngrdcol = 1)
   type :: state_t
@@ -58,10 +59,10 @@ program oracle_driver
   call get_command_argument(2, fout)
   open(newunit=u, file=trim(fin), access='stream', form='unformatted', status='old')
   read(u) n, dcs, rhow_lego
-  allocate(a_qc(n), a_qi(n), a_ni(n), a_nc(n), a_cf(n), a_rho(n))
+  allocate(a_qc(n), a_qi(n), a_ni(n), a_nc(n), a_cf(n), a_rho(n), a_rhod(n))
   allocate(o_lcldm(n), o_dumc(n), o_effc(n), o_effi(n), o_niadj(n), o_wrf(n), o_rel(n))
   ngrdcol = 1; top_lev = 1
-  read(u) a_qc, a_qi, a_ni, a_nc, a_cf, a_rho
+  read(u) a_qc, a_qi, a_ni, a_nc, a_cf, a_rho, a_rhod
   close(u)
   ! Only dcs reaches effc/effi (ice lambda bounds); the thermodynamic constants
   ! set rain/snow properties that are not used here.
@@ -71,7 +72,10 @@ program oracle_driver
   QSMALLW = 1.E-14_r8; CONS26 = pi/6._r8*rhow_lego
   do j = 1, n
      cldn = a_cf(j); liqcldf = a_cf(j); icecldf = a_cf(j)   ! CAM6: alst_mic, aist_mic => ast
-     qc = a_qc(j); qi = a_qi(j); ni = a_ni(j); ncnst = a_nc(j); rho = a_rho(j)
+     ! MG2 runs at CAM's dry rho; ncnst is rescaled so ncnst/rho is the number
+     ! per kg at legoESM's moist density (follow-up rows 47-48)
+     qc = a_qc(j); qi = a_qi(j); ni = a_ni(j); rho = a_rhod(j)
+     ncnst = a_nc(j)*a_rhod(j)/a_rho(j)
      nc = ncnst/rho*max(a_cf(j), mincld)
      qctend = 0._r8; qitend = 0._r8; nctend = 0._r8; nitend = 0._r8
      qr = 0._r8; qrtend = 0._r8; nr = 0._r8; nrtend = 0._r8; qs = 0._r8; qstend = 0._r8
@@ -83,17 +87,18 @@ program oracle_driver
      o_niadj(j) = merge(1._r8, 0._r8, nitend(1,1) /= 0._r8)
 #include "mg2_liq.inc"
      o_effc(j) = effc(1,1); o_effi(j) = effi(1,1)
-     ! micro_mg_cam grid REL from the same grid-mean state (qc, nc = ncnst/rho*lcldm)
-     state_loc%q(1,1,ixcldliq) = a_qc(j); state_loc%q(1,1,ixnumliq) = nc(1,1)
+     ! micro_mg_cam grid REL from the post-MG2 state: physics_update applies
+     ! MG2's number tendency (incl. the mean-size re-adjust) before REL
+     state_loc%q(1,1,ixcldliq) = a_qc(j); state_loc%q(1,1,ixnumliq) = nc(1,1) + nctend(1,1)*deltat
      liqcldf = a_cf(j)
      i = 1; k = 1
 #include "mgcam_icw.inc"
      icwmrst_grid = icwmrst; liqcldf_grid = liqcldf      ! L2445, L2447
-     nc_grid = state_loc%q(:,:,ixnumliq); rho_grid = rho  ! L2455, L2512
+     nc_grid = state_loc%q(:,:,ixnumliq); rho_grid = a_rhod(j)  ! L2455; L2507-2512 dry rho
 #include "mgcam_rel.inc"
      o_rel(j) = rel_grid(1,1)
      ! WRF M2005 PSD on MG2's in-cloud water and the in-cloud number per kg of air
-     QC3D(1) = o_dumc(j); NC3D(1) = ncnst/a_rho(j); RHOM(1) = a_rho(j)
+     QC3D(1) = o_dumc(j); NC3D(1) = a_nc(j)/a_rho(j); RHOM(1) = a_rho(j)
      PGAM3 = 0._r8; LAMC3 = 0._r8
      K = 1
 #include "wrf_liq.inc"

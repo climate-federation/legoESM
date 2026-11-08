@@ -8,7 +8,7 @@ of the three lanes that run legoESM's atmospheric physics:
   homogeneous-freezing ramp ``rh_homo = 2.583 - T/207.8`` (gSAM 1.8.7
   ``MICRO_SAM1MOM/cloud.f90``, "modeled after IFS"), withdrawn where cloud ice
   already exists.  Implemented as ``thermo.homogeneous_freezing_rh_factor`` and
-  applied to the DEPOSITION target of morrison / thompson (p3: faithful WRF P3, no allowance).
+  applied to the DEPOSITION target of morrison (p3 and thompson: faithful WRF ports, no allowance).
 * **LIQUID** — no liquid super-saturation: the excess is condensed onto the
   saturation curve.  Implemented as the in-scheme
   ``hard_saturation_adjustment`` guard, which is opt-in; the sam-flavour
@@ -65,9 +65,6 @@ from legoesm.atmosphere.physics.microphysics.morrison import (
     morrison_microphysics,
 )
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
-from legoesm.atmosphere.physics.microphysics.thompson import (
-    thompson_microphysics,
-)
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 
 # gSAM cloud.f90 ramp, written out independently of the shipped helper so the
@@ -79,7 +76,8 @@ GSAM_QCI_GATE = 1.0e-8
 
 # p3 is not listed: it is a faithful WRF P3 port, which has no rh_homo
 # allowance (that is SAM cloud.f90); P3Config has no such field.
-ICE_SCHEMES = ("morrison", "thompson")
+# thompson is not listed either: it is now the faithful WRF Thompson port.
+ICE_SCHEMES = ("morrison",)
 # The liquid guard (opt-in post-step adjustment) is still carried by p3.
 LIQUID_SCHEMES = ICE_SCHEMES + ("p3",)
 ICE_FIELD = "homogeneous_ice_supersaturation"
@@ -140,7 +138,7 @@ MIN_RELATIVE_EFFECT_LIQUID = 0.01
 # docstring.  morrison and thompson reduce EXACTLY to a deposition-target
 # multiplier (0.000 %), so they are pinned there with only round-off slack;
 # p3 does not, for a reason not yet identified, so it keeps the gross bound.
-_TARGET_ISOLATION_BOUND = {"morrison": 1.0e-9, "thompson": 1.0e-9}
+_TARGET_ISOLATION_BOUND = {"morrison": 1.0e-9}
 
 
 def _gsam_rh_homo(T: np.ndarray, q_ice: np.ndarray | None = None) -> np.ndarray:
@@ -217,14 +215,12 @@ def _column(T_K: float, p_Pa: float, q_v: float, q_i: float = 0.0):
 def _scheme_fn_and_config(scheme: str):
     """(tendency function, config factory) for one ice-carrying scheme."""
     from legoesm.atmosphere.physics.microphysics.config import (
-        MorrisonConfig, P3Config, ThompsonConfig,
+        MorrisonConfig, P3Config,
     )
     if scheme == "morrison":
         # SAM M2005 flavor: the plane CRM's oracle-matching configuration.
         return morrison_microphysics, (
             lambda **kw: MorrisonConfig(morrison_flavor="sam", **kw))
-    if scheme == "thompson":
-        return thompson_microphysics, (lambda **kw: ThompsonConfig(**kw))
     if scheme == "p3":
         return p3_microphysics, (lambda **kw: P3Config(**kw))
     raise ValueError(f"no ice-scheme entry point for {scheme!r}")
@@ -476,8 +472,11 @@ def _lane_gcm(scheme: str, *, guard: bool = False):
     # coupled driver calls (kernel_registry documents it as such).
     from legoesm.driver.config import ExperimentConfig
     from legoesm.driver.physics_pipeline import _resolve_microphysics
+    # Morrison names kk2000: the unset mg law (kk2000_cam6) needs CLUBB relvar.
     cfg = ExperimentConfig(microphysics=scheme,
-                           hard_saturation_adjustment=guard)
+                           hard_saturation_adjustment=guard,
+                           morrison_warm_rain_scheme=(
+                               "kk2000" if scheme == "morrison" else None))
     _fn, micro_cfg = _resolve_microphysics(cfg)
     return micro_cfg
 

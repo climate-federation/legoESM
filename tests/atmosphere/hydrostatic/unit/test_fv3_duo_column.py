@@ -599,10 +599,19 @@ def _walk_bundle(b):
     return out
 
 
+def test_driver_column_lane_refuses_mynn25_on_its_hybrid_coordinate(tmp_path):
+    """R3 vote S1a: WRF MYNN-EDMF diagnoses w by PURE-sigma continuity, so
+    this hybrid-coordinate lane refuses it (as R1 Tiedtke does) instead of
+    running a wrong omega; native-omega w is a separate follow-up.  (The
+    surrogate-era mynn25 arm of the restart test below went with it.)"""
+    with pytest.raises(ValueError, match="PURE-sigma"):
+        _run_driver(tmp_path, dt=1920.0, days=1, microphysics="kessler",
+                    turbulence="mynn25")
+
+
 @pytest.mark.parametrize("phys", [
     dict(surface_bulk_scheme="none"),
     dict(microphysics="kessler"),
-    dict(microphysics="kessler", turbulence="mynn25"),
 ])
 def test_driver_column_lane_restart_is_bitwise(tmp_path, phys):
     """PRE-REGISTERED acceptance (M5): run A = 2 days straight with a
@@ -879,7 +888,8 @@ def test_driver_column_lane_accepts_ice_microphysics_with_nine_slots(tmp_path):
     the run starts with one slot per name (no silent 3-slot bundle)."""
     from legoesm.driver.model_driver import ModelDriver
     cfg = _driver_cfg(tmp_path, days=2 * 600.0 / 86400.0, dt=600.0,
-                      microphysics="morrison")
+                      microphysics="morrison",
+                      morrison_warm_rain_scheme="kk2000")
     drv = ModelDriver(cfg, output_dir=tmp_path)
     drv.setup()
     assert drv.model.tracer_names == FULL_NAMES and drv.model.nwat == 6

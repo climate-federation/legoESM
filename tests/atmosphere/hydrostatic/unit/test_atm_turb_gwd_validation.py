@@ -63,7 +63,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
 DT = 600.0
 
 TURB_SCHEMES = {
-    "smagorinsky": (smagorinsky_turbulence, lambda: SmagorinskyConfig(surface=SurfaceLayerConfig())),
+    "smagorinsky": (smagorinsky_turbulence, lambda: SmagorinskyConfig(surface=SurfaceLayerConfig(), stability_form="lilly")),
     "louis": (louis_turbulence, lambda: LouisConfig(surface=SurfaceLayerConfig())),
     "holtslag_boville": (holtslag_boville_turbulence, lambda: HoltslagBovilleConfig(surface=SurfaceLayerConfig())),
     "ysu": (ysu_turbulence, lambda: YSUConfig(surface=SurfaceLayerConfig())),
@@ -149,8 +149,11 @@ def _run_turb(fn, cfg, d):
 
 def _gwd_kw(gwd, d):
     """CAM6 gw_oro (``mcfarlane``) needs the reference interface pressures
-    (CAM pref_edge); these test columns use their own first column."""
-    return {"p_ref_half": d["p_half"][0]} if gwd is mcfarlane_gwd else {}
+    (CAM pref_edge) and the land fraction; these test columns use their own
+    first column, all land (lf = 1 is CAM's unscaled drag)."""
+    return ({"p_ref_half": d["p_half"][0],
+             "land_frac_col": jnp.ones(d["u"].shape[0])}
+            if gwd is mcfarlane_gwd else {})
 
 
 # ===========================================================================
@@ -171,9 +174,10 @@ def test_sign_shflx_warm_surface_positive(name):
     assert jnp.all(out_c.shflx < 0.0), f"{name}: cold surface gave shflx>=0"
 
 
+# Hines (LMDZ port) is excluded: its spectrum's drag is relative to the
+# launch-level wind, not antiparallel to the local wind (V55).
 @pytest.mark.parametrize("gwd,mk", [
     (mcfarlane_gwd, McFarlaneConfig),
-    (hines_gwd, HinesConfig),
 ])
 def test_sign_gwd_momentum_sink(gwd, mk):
     d = gwd_breaking_column()
@@ -343,7 +347,7 @@ def test_diff_turb_params_finite_match_fd(name):
 
 @pytest.mark.parametrize("gwd,mk,params", [
     (mcfarlane_gwd, McFarlaneConfig, ["G_0", "h_topo", "efficiency", "fcrit2"]),
-    (hines_gwd, HinesConfig, ["total_rms_wind", "Fmax", "m_star"]),
+    (hines_gwd, HinesConfig, ["total_rms_wind", "f1", "f2"]),
 ])
 def test_diff_gwd_params_finite_match_fd(gwd, mk, params):
     d = gwd_breaking_column(ncol=2, nlev=40)
@@ -398,13 +402,13 @@ def test_gwd_no_nan_in_reversed_flow():
         out = mcfarlane_gwd(
             d["u"], d["v"], d["T"], d["p_full"], d["p_half"],
             d["z_full"], d["z_half"], d["rho"], d["lat"], DT,
-            McFarlaneConfig(G_0=g0), p_ref_half=d["p_half"][0],
+            McFarlaneConfig(G_0=g0), **_gwd_kw(mcfarlane_gwd, d),
         )
         return jnp.sum(out.du_dt ** 2)
     out = mcfarlane_gwd(
         d["u"], d["v"], d["T"], d["p_full"], d["p_half"],
         d["z_full"], d["z_half"], d["rho"], d["lat"], DT, McFarlaneConfig(),
-        p_ref_half=d["p_half"][0],
+        **_gwd_kw(mcfarlane_gwd, d),
     )
     assert not bool(jnp.any(jnp.isnan(out.du_dt)))
     g = jax.grad(loss)(0.5)
@@ -418,7 +422,7 @@ def test_gwd_no_nan_in_reversed_flow():
 # ===========================================================================
 
 def test_idealized_smagorinsky_lilly_cutoff():
-    cfg = SmagorinskyConfig(surface=SurfaceLayerConfig())
+    cfg = SmagorinskyConfig(surface=SurfaceLayerConfig(), stability_form="lilly")
     d_stab = _base_column(1, 30, 360.0, 300.0, 4.0, 18.0)  # strongly stable
     d_stab["T_sfc"] = d_stab["T"][:, -1]
     d_stab["q_sfc"] = d_stab["q_v"][:, -1]

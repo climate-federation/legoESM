@@ -648,3 +648,58 @@ def test_main_ice_config_survives_the_params_rebinding(monkeypatch, tmp_path):
     ice = captured["ice_config"]
     assert ice.snow.enabled is True, "--ice-snow lost to the --params rebinding"
     assert ice.ridging.e_star == 0.5, "--params did not apply"
+
+
+_LY_FLAGS = ["--surface-bulk-scheme", "large_yeager",
+             "--surface-large-yeager-neutral-width", "0",
+             "--surface-large-yeager-dthv-width", "0.02",
+             "--surface-large-yeager-cd-cutoff-width", "0.25"]
+
+
+def test_large_yeager_width_defaults_match_both_configs():
+    """Unset width flags (#2241) equal the ExperimentConfig AND CouplerConfig
+    defaults, so a default run is bit-identical on both sides."""
+    from legoesm.coupler.config import CouplerConfig
+    from legoesm.driver.config import ExperimentConfig
+    args = mod.build_parser().parse_args([])
+    for f in ("neutral", "dthv", "cd_cutoff"):
+        v = getattr(args, f"surface_large_yeager_{f}_width")
+        assert v == getattr(ExperimentConfig(), f"surface_large_yeager_{f}_width")
+        assert v == getattr(CouplerConfig(), f"large_yeager_{f}_width")
+
+
+def test_large_yeager_widths_reach_the_coupler_ocean_tile():
+    """The widths reach the coupler ocean tile config main() hands the driver."""
+    cpl = mod.build_coupler_config(mod.build_parser().parse_args(_LY_FLAGS))
+    assert cpl.bulk_scheme == "large_yeager"
+    assert cpl.large_yeager_neutral_width == 0.0
+    assert cpl.large_yeager_dthv_width == 0.02
+    assert cpl.large_yeager_cd_cutoff_width == 0.25
+
+
+def test_main_really_passes_large_yeager_widths_to_both_sides(monkeypatch):
+    """PRODUCTION reachability: main() hands the driver an atmosphere config
+    and a coupler config both carrying the CLI widths (no air-sea split)."""
+    import legoesm.driver.coupled_esm_driver as ced
+
+    captured = {}
+
+    class _StopError(Exception):
+        pass
+
+    def _recorder(*a, **kw):
+        captured["args"] = a
+        captured.update(kw)
+        raise _StopError
+
+    monkeypatch.setattr(ced, "CoupledESMDriver", _recorder)
+    monkeypatch.setattr(sys, "argv", ["run_coupled", "--days", "1"] + _LY_FLAGS)
+    with pytest.raises(_StopError):
+        mod.main()
+    atm = captured["args"][0]
+    cpl = captured["coupler_config"]
+    assert (atm.surface_large_yeager_neutral_width,
+            atm.surface_large_yeager_dthv_width,
+            atm.surface_large_yeager_cd_cutoff_width) == (0.0, 0.02, 0.25)
+    assert (cpl.large_yeager_neutral_width, cpl.large_yeager_dthv_width,
+            cpl.large_yeager_cd_cutoff_width) == (0.0, 0.02, 0.25)

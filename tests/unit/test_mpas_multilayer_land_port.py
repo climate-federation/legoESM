@@ -513,10 +513,12 @@ def test_ocean_surface_key_reaches_turbulence_from_the_first_step(
     without orography equal to T_sfc on step 0 (no land skin yet) and
     different once the land skin is blended into T_sfc; over a mountain with
     the land lapse correction on, different already on step 0 (the lapse
-    cools only the land share of T_sfc, never the ocean anchor)."""
+    cools only the land share of T_sfc, never the ocean anchor).  "On" is
+    the default AUTO (None, oracle audit row 56), which resolves on here."""
     _patch_land_loaders(monkeypatch)
     u = {}
-    for on in (False, True):
+    for flag in (False, None):
+        on = flag is None
         seen, gaps = _record_turbulence_forcing_keys(monkeypatch)
         extra = {}
         if lapse:
@@ -533,7 +535,7 @@ def test_ocean_surface_key_reaches_turbulence_from_the_first_step(
                          land_lapse_K_per_km=6.5)
         d = _build_driver(str(tmp_path / str(on)), TWO_STEPS_DAYS, **_LS_KW,
                           ice_skin_prognostic=ice_skin,
-                          ocean_flux_on_ocean_surface=on, **extra)
+                          ocean_flux_on_ocean_surface=flag, **extra)
         assert d.run() == "COMPLETED"
         assert seen, "the turbulence was never traced"
         has = ["T_sfc_ocean" in s for s in seen]

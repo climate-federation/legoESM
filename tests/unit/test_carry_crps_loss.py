@@ -1,0 +1,127 @@
+"""Grid-space CRPS (deterministic M=1 limit = |error|) in ``carry_mse``.
+
+The WeatherBench objective is ``combined_loss`` -> ``carry_mse``; decks set
+``w_crps_*`` and the terms used to be ignored.  Each term is the area mean of
+``|pred - target|`` x level weight, divided by the variable scale (not
+scale^2), mirroring the spectral lane's deterministic CRPS.
+"""
+from typing import NamedTuple
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from legoesm.training.losses import LossConfig, carry_mse, level_weights
+
+
+class _Carry(NamedTuple):
+    T: object
+    u: object
+    v: object
+    q_v: object
+    p_s: object
+
+
+NLAT, NLON, NLEV = 4, 8, 3
+SIGMA = jnp.linspace(0.1, 0.9, NLEV)
+_OFF = dict(w_T=0.0, w_u=0.0, w_v=0.0, w_q=0.0, w_ps=0.0)
+
+
+def _carry(e3=0.0, e2=0.0):
+    z3 = jnp.zeros((NLAT, NLON, NLEV))
+    z2 = jnp.zeros((NLAT, NLON))
+    return _Carry(T=z3 + e3, u=z3 + e3, v=z3 + e3, q_v=z3 + e3, p_s=z2 + e2)
+
+
+@pytest.mark.parametrize("var,scale_attr", [
+    ("T", "T_scale"), ("u", "wind_scale"), ("v", "wind_scale"),
+    ("q", "q_scale"), ("ps", "ps_scale"),
+])
+def test_crps_term_is_level_weighted_mae_over_scale(var, scale_attr):
+    err = jnp.array([-1.0, 2.0, -4.0])          # sign must not cancel
+    cfg = LossConfig(**_OFF, **{f"w_crps_{var}": 0.7},
+                     level_weighting="pressure")
+    pred = _carry(e3=err, e2=-3.0)
+    loss = float(carry_mse(pred, _carry(), SIGMA, config=cfg))
+    lev_w = np.asarray(level_weights(SIGMA, config=cfg))
+    mae = 3.0 if var == "ps" else float(np.mean(np.abs(np.asarray(err)) * lev_w))
+    expected = 0.7 * mae / getattr(cfg, scale_attr)
+    assert expected > 0
+    np.testing.assert_allclose(loss, expected, rtol=1e-6)
+
+
+def test_crps_is_pointwise_and_area_weighted_on_a_mixed_sign_field():
+    """A field whose errors differ per cell and cancel in the area mean, so
+    the abs must act before the reduction and lat_weights must reach it."""
+    err = np.random.default_rng(0).normal(size=(NLAT, NLON, NLEV))
+    err -= err.mean(axis=(0, 1), keepdims=True)
+    lat_w = jnp.array([0.2, 0.8, 0.8, 0.2])
+    cfg = LossConfig(**_OFF, w_crps_T=1.0, level_weighting="pressure")
+    pred = _carry()._replace(T=jnp.asarray(err))
+    loss = float(carry_mse(pred, _carry(), SIGMA, config=cfg,
+                           lat_weights=lat_w))
+    lev_w = np.asarray(level_weights(SIGMA, config=cfg))
+    w = np.asarray(lat_w)[:, None, None]
+    expected = (np.mean(np.abs(err) * lev_w * w) * NLAT / w.sum()) / cfg.T_scale
+    unweighted = np.mean(np.abs(err) * lev_w) / cfg.T_scale
+    assert abs(expected - unweighted) > 1e-3 * expected
+    np.testing.assert_allclose(loss, expected, rtol=1e-6)
+
+
+def test_crps_uses_residual_scales_when_residual_normalize():
+    cfg = LossConfig(**_OFF, w_crps_T=1.0, residual_normalize=True,
+                     level_weighting="uniform")
+    loss = float(carry_mse(_carry(e3=2.0), _carry(), SIGMA, config=cfg))
+    lev_w = np.asarray(level_weights(SIGMA, config=cfg))
+    np.testing.assert_allclose(loss, 2.0 * np.mean(lev_w) / cfg.T_resid_scale,
+                               rtol=1e-6)
+
+
+@pytest.mark.parametrize("setting", [
+    {"persistence_normalize": True},
+    {"ensemble_size": 4},
+    {"w_afcrps": 0.5},
+])
+def test_wb_loss_config_refuses_unimplemented_settings(setting):
+    from legoesm.training.scale_build import make_loss_config
+
+    with pytest.raises(ValueError, match="does not implement"):
+        make_loss_config(None, {"loss": setting})
+    make_loss_config(None, {"loss": {"w_crps_T": 0.5}})   # supported: no raise
+
+
+def test_crps_zero_residual_scale_uses_the_mse_floor():
+    """A zero residual scale is floored exactly like the MSE term
+    (scale^2 >= 1e-30), so the loss stays finite."""
+    cfg = LossConfig(**_OFF, w_crps_T=1.0, residual_normalize=True,
+                     T_resid_scale=0.0, level_weighting="uniform")
+    loss = float(carry_mse(_carry(e3=2.0), _carry(), SIGMA, config=cfg))
+    lev_w = np.asarray(level_weights(SIGMA, config=cfg))
+    assert np.isfinite(loss)
+    np.testing.assert_allclose(loss, 2.0 * np.mean(lev_w) / 1e-15, rtol=1e-6)
+
+
+@pytest.mark.parametrize("field", ["T_scale", "wind_resid_scale"])
+def test_wb_loss_config_refuses_negative_scale(field):
+    from legoesm.training.scale_build import make_loss_config
+
+    with pytest.raises(ValueError, match="must be >= 0"):
+        make_loss_config(None, {"loss": {field: -1.0}})
+
+
+def test_terms_sum_to_the_loss_and_name_every_active_term():
+    from legoesm.training.losses import carry_mse_terms, combined_loss_terms
+
+    cfg = LossConfig(w_crps_T=0.5, w_crps_ps=0.15, w_bias_u=1.0,
+                     level_weighting="pressure")
+    rng = np.random.default_rng(0)
+    pred = _Carry(*(jnp.asarray(rng.normal(size=(NLAT, NLON, NLEV)))
+                    for _ in range(4)), jnp.asarray(rng.normal(size=(NLAT, NLON))))
+    loss, terms = carry_mse_terms(pred, _carry(), SIGMA, config=cfg)
+    assert set(terms) == {"mse_T", "mse_u", "mse_v", "mse_q", "mse_ps",
+                          "bias_u", "crps_T", "crps_ps"}
+    assert float(loss) == float(carry_mse(pred, _carry(), SIGMA, config=cfg))
+    np.testing.assert_allclose(sum(float(v) for v in terms.values()),
+                               float(loss), rtol=1e-12)
+    c_loss, c_terms = combined_loss_terms(pred, _carry(), SIGMA, config=cfg)
+    assert float(c_loss) == float(loss) and set(c_terms) == set(terms)

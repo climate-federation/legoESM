@@ -128,6 +128,17 @@ class MicrophysicsOutput(NamedTuple):
     # (no ice phase: all their precipitation is liquid energetically); None =
     # the scheme does not publish it (an interactive land then refuses).
     precip_frozen: jax.Array | None = None
+    # Optional: the APPLIED cloud-droplet NUMBER budget terms [1/(m^3 s)],
+    # per-volume like ``dN_c_dt``, as a dict keyed by process.  Populated only
+    # under ``MorrisonConfig.publish_qc_budget`` with the MG2 prognostic
+    # droplet number (static branch, default graph untouched).  The terms sum
+    # to ``dN_c_dt`` up to round-off.
+    nc_budget: dict | None = None
+    # Optional: the scheme's UPDATED prognostic cloud fraction [1], (ncol,
+    # nlev), for a scheme that carries one (IFS CLOUDSC).  The host writes
+    # it back to its advected cloud-fraction tracer.  None = the scheme has
+    # no prognostic cloud fraction.
+    cloud_fraction_new: jax.Array | None = None
 
 
 def make_zero_hydrometeors(
@@ -177,6 +188,7 @@ def sedimentation_tendency(
     n_substeps_max: int = 1,
     cfl_speed: jax.Array | None = None,
     return_substeps: bool = False,
+    dz_floor: bool = True,
 ) -> jax.Array | tuple:
     """Compute sedimentation tendency from vertical flux divergence.
 
@@ -227,6 +239,10 @@ def sedimentation_tendency(
         Extra fall speed entering the sub-step count only (MG2 sizes one
         ``nstep`` per species from ``max(mass-, number-weighted)`` speed
         so the number falls in lock-step with the mass).
+    dz_floor : bool, default True
+        Floor ``dz`` at 1 m in the divergence and the CFL count (the MG2
+        machinery's guard).  gSAM's warm rain has no such floor and passes
+        False.
     return_substeps : bool, default False
         Append the per-column REQUIRED sub-step count ``(ncol,)`` int32
         (``1 + floor(max_k V dt/dz)``, NOT clipped to ``n_substeps_max``) to
@@ -248,7 +264,7 @@ def sedimentation_tendency(
             raise ValueError("sedimentation sub-stepping needs dt")
         return _sedimentation_substepped(
             q_pos, rho, V_t, dz, dt, return_surface_flux, extra_sink,
-            int(n_substeps_max), cfl_speed, return_substeps)
+            int(n_substeps_max), cfl_speed, return_substeps, dz_floor)
     flux = V_t * q_pos * rho  # (ncol, nlev) outgoing flux density [kg/m^2/s]
 
     if dt is not None:
@@ -269,17 +285,17 @@ def sedimentation_tendency(
     # ``jnp.pad`` (single Pad HLO) instead of allocating a fresh
     # zero buffer + concatenate.
     flux_in = jnp.pad(flux[:, :-1], ((0, 0), (1, 0)))
-    dz_safe = jnp.clip(dz, 1.0, None)
+    dz_safe = jnp.clip(dz, 1.0, None) if dz_floor else dz
     tendency = (flux_in - flux) / (rho * dz_safe)
 
     # Bottom outgoing flux is the precipitation reaching the surface.
     out = (tendency, flux[:, -1]) if return_surface_flux else (tendency,)
     if return_substeps:
-        out = out + (_required_substeps(V_t, dz, dt, cfl_speed),)
+        out = out + (_required_substeps(V_t, dz, dt, cfl_speed, dz_floor),)
     return out if len(out) > 1 else out[0]
 
 
-def _required_substeps(V_t, dz, dt, cfl_speed):
+def _required_substeps(V_t, dz, dt, cfl_speed, dz_floor=True):
     """``1 + floor(max_k V dt/dz)`` per column, int32, never clipped.
 
     ``dt`` None (a rate-only call) cannot overflow anything, so the count is
@@ -290,8 +306,8 @@ def _required_substeps(V_t, dz, dt, cfl_speed):
     if dt is None:
         return jnp.ones(V_t.shape[0], dtype=jnp.int32)
     v_cfl = V_t if cfl_speed is None else jnp.maximum(V_t, cfl_speed)
-    cfl = jnp.max(v_cfl * jnp.maximum(dt, 1.0e-12) / jnp.clip(dz, 1.0, None),
-                  axis=1)
+    dz_cfl = jnp.clip(dz, 1.0, None) if dz_floor else dz
+    cfl = jnp.max(v_cfl * jnp.maximum(dt, 1.0e-12) / dz_cfl, axis=1)
     # bounded BOTH ways: int32 headroom above, and a negative fall speed must
     # not report a nonsensical count the strict gate would never catch.
     # coeff-ok: int32 headroom for an infinite CFL
@@ -302,7 +318,8 @@ def _required_substeps(V_t, dz, dt, cfl_speed):
 
 
 def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
-                              extra_sink, n_max, cfl_speed, return_substeps):
+                              extra_sink, n_max, cfl_speed, return_substeps,
+                              dz_floor=True):
     """MG2 ``micro_mg2_0.F90`` sedimentation loop (see caller docstring).
 
     Static-shape ``lax.fori_loop`` over ``n_max`` with sub-steps beyond a
@@ -310,7 +327,7 @@ def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
     AD flows through every active sub-step.  ``nstep`` is an integer (no
     gradient), as in the reference.
     """
-    dz_safe = jnp.clip(dz, 1.0, None)
+    dz_safe = jnp.clip(dz, 1.0, None) if dz_floor else dz
     dt = jnp.maximum(dt, 1.0e-12)
     v_cfl = V_t if cfl_speed is None else jnp.maximum(V_t, cfl_speed)
     cfl = jnp.max(v_cfl * dt / dz_safe, axis=1, keepdims=True)  # (ncol, 1)

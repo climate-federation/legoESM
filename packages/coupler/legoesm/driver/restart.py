@@ -1575,7 +1575,8 @@ def validate_run_manifest(manifest: dict) -> None:
 
 def record_state_digest(manifest_path, state_digest: str, *,
                         corner_fill_traced: list[str] | None = None,
-                        companion_digests: dict | None = None) -> Path:
+                        companion_digests: dict | None = None,
+                        ice_state_digest: str | None = None) -> Path:
     """Record the post-run final ``state_digest`` into an existing manifest.
 
     The run-start manifest is otherwise immutable; this is the single sanctioned
@@ -1588,6 +1589,9 @@ def record_state_digest(manifest_path, state_digest: str, *,
     ``companion_digests`` records the final digests of the run's companion
     manifests at this moment (``result.companion_state_digests``), so the
     pair stays together when either record is later archived or updated.
+    ``ice_state_digest`` records a separate digest of a prognostic sea-ice
+    state the run carries outside the digested ocean state
+    (``result.ice_state_digest``); ``state_digest`` itself is unchanged.
     """
     manifest_path = Path(manifest_path)
     if manifest_path.is_dir():
@@ -1599,6 +1603,8 @@ def record_state_digest(manifest_path, state_digest: str, *,
         manifest["result"]["corner_fill_traced"] = list(corner_fill_traced)
     if companion_digests is not None:
         manifest["result"]["companion_state_digests"] = dict(companion_digests)
+    if ice_state_digest is not None:
+        manifest["result"]["ice_state_digest"] = ice_state_digest
     tmp = manifest_path.with_name(f"{manifest_path.name}.{os.getpid()}.tmp")
     with open(tmp, "w") as f:
         json.dump(_json_safe(manifest), f, indent=2, sort_keys=True)

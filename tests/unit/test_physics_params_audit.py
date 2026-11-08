@@ -98,29 +98,19 @@ class TestConvectionAudit:
             return jnp.sum(out.dT_dt ** 2)
         assert_grad_ok(loss, 1.75e-3, "bechtold.epsilon_deep")
 
-    def test_emanuel_cu_coefficient(self):
+    def test_emanuel_alpha_closure(self):
         from legoesm.atmosphere.physics.convection.emanuel import emanuel_convection
         from legoesm.atmosphere.physics.convection.config import EmanuelConfig
-        # ``cu_coefficient`` is the sub-cloud buoyancy-sort multiplier that
-        # scales detrainment (``delta_0 * sort_multiplier``) ONLY in the
-        # mass-flux-kernel branch.  The default ``use_genuine_mixing=True``
-        # path computes detrainment via the buoyancy-sorted mixer and never
-        # reads ``cu_coefficient`` (its gradient is then exactly zero — the
-        # parameter is simply inactive in that mode, not a wiring bug).
-        # Audit AD-reachability in the mode where the knob is live, on a
-        # destabilised column so the buoyancy sort yields a nonzero
-        # negatively-buoyant share for ``cu_coefficient`` to act on.
+        # Audit AD-reachability of the CONVECT closure slope ALPHA
+        # (``cu_coefficient`` is read only with ``enable_cmt``).  The shared column convects from rest.
         T, q_v, p_full, p_half = _column()
-        T = T.at[:, -1].add(20.0)  # hot, convecting boundary layer
 
         def loss(x):
-            cfg = EmanuelConfig()._replace(
-                use_genuine_mixing=False, cu_coefficient=x,
-            )
+            cfg = EmanuelConfig()._replace(alpha_closure=x)
             out = emanuel_convection(T, q_v, p_full, p_half,
                 jnp.zeros((_NCOL, _NLEV)), 600.0, config=cfg)[0]
             return jnp.sum(out.dT_dt ** 2)
-        assert_grad_ok(loss, 0.7, "emanuel.cu_coefficient")
+        assert_grad_ok(loss, 0.2, "emanuel.alpha_closure")
 
     def test_kain_fritsch_cape_consumption_time(self):
         from legoesm.atmosphere.physics.convection.kain_fritsch import kain_fritsch_convection
@@ -150,19 +140,6 @@ class TestConvectionAudit:
                 A["prog"], 600.0, config=cfg)[0]
             return jnp.sum(out.dT_dt ** 2)
         assert_grad_ok(loss, 2400.0, "kain_fritsch.cape_consumption_time")
-
-    def test_tiedtke_epsilon_deep(self):
-        from legoesm.atmosphere.physics.convection.tiedtke import tiedtke_convection
-        from legoesm.atmosphere.physics.convection.config import TiedtkeConfig
-        T, q_v, p_full, p_half = _column()
-        A = _aux()
-
-        def loss(x):
-            cfg = TiedtkeConfig()._replace(epsilon_deep=x)
-            out = tiedtke_convection(T, q_v, p_full, p_half, A["u"], A["v"],
-                A["prog"], 600.0, config=cfg)[0]
-            return jnp.sum(out.dT_dt ** 2)
-        assert_grad_ok(loss, 1.0e-4, "tiedtke.epsilon_deep")
 
     def test_zhang_mcfarlane_tau(self):
         from tests._zm_cold_start import zm_cold_start as zhang_mcfarlane_convection
@@ -215,7 +192,7 @@ class TestConvectionAudit:
         # Both are live, used config fields (rain/cloud split): Bechtold ON by
         # default (#929), Tiedtke OFF by default (legacy byte-identity).
         assert BechtoldConfig().precip_efficiency == 0.7
-        assert TiedtkeConfig().precip_efficiency == 0.0
+        assert TiedtkeConfig()._fields == ()   # WRF port: no knobs at all
         # Guard the AIMIP trainable set: precip_efficiency stays a config knob,
         # never a sigmoid-trained AIMIP parameter re-introduced from off.
         from legoesm.training.aimip_params import AIMIPClassicalParams
@@ -323,18 +300,6 @@ def _ice_column():
 
 
 class TestMicrophysicsAudit:
-    def test_thompson_k_ac(self):
-        from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
-        from legoesm.atmosphere.physics.microphysics.config import ThompsonConfig
-        T, q_v, hydro, p_full, p_half, rho, dz = _ice_column()
-
-        def loss(x):
-            cfg = ThompsonConfig()._replace(k_ac=x)
-            out = thompson_microphysics(T, q_v, hydro, p_full, p_half, rho, dz,
-                60.0, config=cfg)
-            return jnp.sum(out.dq_r_dt ** 2)
-        assert_grad_ok(loss, 5.25, "thompson.k_ac")
-
     def test_sundqvist_RH_crit(self):
         from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
         from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
@@ -351,7 +316,7 @@ class TestMicrophysicsAudit:
         def loss(x):
             cfg = SundqvistConfig()._replace(rh_crit=x)
             out = sundqvist_microphysics(T, 0.9 * q_v, hydro, p_full, p_half,
-                rho, dz, 60.0, config=cfg)
+                rho, dz, 60.0, config=cfg, cell_area=1.0e10)
             # Zhao-Carr: liquid release carries no latent heat and this
             # column has no sub-rh_crit layer under the cloud, so rh_crit
             # reaches the output through the cloud cover b -> precipitation.
@@ -382,12 +347,6 @@ class TestTurbulenceAudit:
         from legoesm.atmosphere.physics.turbulence.config import TKEConfig
         assert_grad_ok(lambda x: _turb_call(tke_turbulence,
             TKEConfig()._replace(Ck=x), True), 0.1, "tke.Ck")
-
-    def test_mynn25_A1(self):
-        from legoesm.atmosphere.physics.turbulence.mynn25 import mynn25_turbulence
-        from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
-        assert_grad_ok(lambda x: _turb_call(mynn25_turbulence,
-            MYNN25Config()._replace(A1=x), True), 1.18, "mynn25.A1")
 
     def test_clubb_lite_C_K(self):
         from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_lite_turbulence
@@ -427,8 +386,6 @@ class TestTurbulenceAudit:
 def _gwd_call(fn, cfg, extra=(), **kw):
     A = _aux()
     T, q_v, p_full, p_half = _column()
-    if kw.pop("p_ref_from_column", False):
-        kw["p_ref_half"] = p_half.reshape(-1, p_half.shape[-1])[0]
     out = fn(A["u"], A["v"], T, p_full, p_half, A["z_full"], A["z_half"],
              A["rho"], A["lat"], 60.0, cfg, *extra, **kw)
     # GWDOutput is itself a NamedTuple (==tuple); only unwrap the
@@ -447,21 +404,40 @@ class TestGWDRadiationCloudsAudit:
     def test_lindzen_h_topo(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.lindzen import lindzen_gwd
         from legoesm.atmosphere.physics.gravity_wave_drag.config import LindzenConfig
+        # E3SM orographic launch: tau0 ~ min(hdsp^2, fcrit2*(U/N)^2) with
+        # hdsp = 2*h_topo; on this weak-wind column (U/N ~ 200 m) the Froude
+        # cap binds at h_topo = 500 and h_topo is (correctly) inert there, so
+        # evaluate below the cap.
         assert_grad_ok(lambda x: _gwd_call(lindzen_gwd,
-            LindzenConfig()._replace(h_topo=x)), 500.0, "lindzen.h_topo")
+            LindzenConfig()._replace(h_topo=x)), 50.0, "lindzen.h_topo")
 
     def test_mcfarlane_G_0(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd
         from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
-        assert_grad_ok(lambda x: _gwd_call(mcfarlane_gwd,
-            McFarlaneConfig()._replace(G_0=x), p_ref_from_column=True),
-            0.5, "mcfarlane.G_0")
+        from pathlib import Path
+        # The shared audit column has a 0 Pa model top, which CAM6 gw_oro
+        # refuses (log(pint)); audit on the CAM6 oracle fixture columns.
+        npz = np.load(Path(__file__).resolve().parents[1] / "atmosphere"
+                      / "oracle_fixtures" / "gw_oro_cam6.npz")
+        f = {k: jnp.asarray(npz[k]) for k in (
+            "u", "v", "T", "p_full", "p_half", "z_full", "z_half", "rho",
+            "lat", "dt", "sgh", "p_ref_half", "lf")}
+
+        def loss(x):
+            out = mcfarlane_gwd(
+                f["u"], f["v"], f["T"], f["p_full"], f["p_half"], f["z_full"],
+                f["z_half"], f["rho"], f["lat"], float(f["dt"]),
+                McFarlaneConfig()._replace(G_0=x), h_topo_col=f["sgh"],
+                p_ref_half=f["p_ref_half"], land_frac_col=f["lf"])
+            return jnp.sum(out.du_dt ** 2)
+
+        assert_grad_ok(loss, 0.5, "mcfarlane.G_0")
 
     def test_hines_total_rms_wind(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
         from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
         assert_grad_ok(lambda x: _gwd_call(hines_gwd,
-            HinesConfig()._replace(total_rms_wind=x)), 2.0, "hines.total_rms_wind")
+            HinesConfig()._replace(total_rms_wind=x)), 1.0, "hines.total_rms_wind")
 
     def test_prognostic_spectral_launch_flux(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.prognostic_spectral import prognostic_spectral_gwd

@@ -18,9 +18,10 @@ from legoesm.atmosphere.physics.turbulence.les_tuned import (
     scm_turbulence_config,
 )
 
-# The 8 FLAT closures (params land directly on the sub-config). CLUBB is tuned
+# The 7 FLAT closures (params land directly on the sub-config). CLUBB is tuned
 # too but nested (CLUBBParams) — covered by dedicated tests below, not here.
-_TUNED_SCHEMES = ["smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+# mynn25 is the WRF MYNN-EDMF port since R3: no tunables, no tuned values.
+_TUNED_SCHEMES = ["smagorinsky", "louis", "tke", "clubb_lite",
                   "holtslag_boville", "ysu", "edmf"]
 
 
@@ -28,8 +29,8 @@ def test_yaml_exists_and_parses():
     # packaged resource resolves (raises if missing); loader validates fully
     _read_tuned_yaml_text(None)
     grouped = load_les_tuned_overrides()
-    # 8 flat scheme classes + CLUBB's nested CLUBBParams = 9 override groups
-    assert len(grouped) == 9
+    # 7 flat scheme classes + CLUBB's nested CLUBBParams = 8 override groups
+    assert len(grouped) == 8
     assert "CLUBBParams" in grouped        # CLUBB now tuned (nested)
     assert len(grouped["CLUBBParams"]) >= 30
 

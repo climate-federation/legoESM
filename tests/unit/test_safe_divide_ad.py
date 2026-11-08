@@ -28,12 +28,11 @@ from legoesm.atmosphere.physics.convection.config import (
     SBMConfig, DCAConfig, KuoConfig,
 )
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
-from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import (
     seifert_beheng_microphysics,
 )
 from legoesm.atmosphere.physics.microphysics.config import (
-    MorrisonConfig, ThompsonConfig, SeifertBehengConfig,
+    MorrisonConfig, SeifertBehengConfig,
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.physics.radiation.solar import (
@@ -222,8 +221,7 @@ class TestMicrophysicsADSafety:
     @pytest.mark.parametrize("scheme_fn,config", [
         (seifert_beheng_microphysics, SeifertBehengConfig()),
         (morrison_microphysics, MorrisonConfig()),
-        (thompson_microphysics, ThompsonConfig()),
-    ], ids=["seifert_beheng", "morrison", "thompson"])
+    ], ids=["seifert_beheng", "morrison"])
     def test_grad_finite_in_cloud_free_column(self, scheme_fn, config):
         T, q_v, p_full, p_half, rho, dz = _moist_column()
         hydro = _cloud_free_state()
@@ -242,8 +240,7 @@ class TestMicrophysicsADSafety:
 
     @pytest.mark.parametrize("scheme_fn,config", [
         (morrison_microphysics, MorrisonConfig()),
-        (thompson_microphysics, ThompsonConfig()),
-    ], ids=["morrison", "thompson"])
+    ], ids=["morrison"])
     def test_dN_i_dt_trace_positive_q_i_matches_legacy_limit(self, scheme_fn, config):
         """Forward regression for the ``aggregation * N_i / q_i`` term
         in the trace-positive-ice regime ``q_i ∈ (1e-15, 1e-12]`` —
@@ -319,8 +316,7 @@ class TestMicrophysicsADSafety:
 
     @pytest.mark.parametrize("scheme_fn,config", [
         (morrison_microphysics, MorrisonConfig()),
-        (thompson_microphysics, ThompsonConfig()),
-    ], ids=["morrison", "thompson"])
+    ], ids=["morrison"])
     def test_dN_i_dt_sub_floor_q_i_uses_clip(self, scheme_fn, config):
         """Forward regression in the ``q_i < 1e-15`` sub-clip regime.
         The legacy / production form ``aggregation * N_i / clip(q_i,
@@ -394,8 +390,7 @@ class TestMicrophysicsADSafety:
 
     @pytest.mark.parametrize("scheme_fn,config", [
         (morrison_microphysics, MorrisonConfig()),
-        (thompson_microphysics, ThompsonConfig()),
-    ], ids=["morrison", "thompson"])
+    ], ids=["morrison"])
     def test_dN_i_dt_grad_finite_through_q_i(self, scheme_fn, config):
         """``dN_i_dt`` must stay finite (forward AND VJP) when
         differentiating *through ``q_i``* at exactly zero — the singular
@@ -559,15 +554,10 @@ def _isothermal_column(ncol=2, nlev=10):
 class TestGWDADSafety:
 
     def test_lindzen_tau_sat_floor_preserves_breaking(self):
-        """Forward-physics regression: when ``tau_sat`` saturates at its
-        ``1e-10`` pre-clip floor and ``tau_carry`` is well above the
-        floor, the smooth-breaking sigmoid must still fire.  The first
-        AD-fix iteration used ``safe_divide(eps=1e-10)`` with the
-        default ``fill=0.0``, which silently zeroed ``excess`` in
-        floor-clipped cells and disabled breaking — a forward-physics
-        change Codex flagged in adversarial review of issue #249.  The
-        production fix tightens ``eps`` to ``1e-12`` (strictly below
-        the pre-clip floor) so the divide always proceeds.
+        """Near-calm column (0.05 m/s).  The former surrogate floored |U| at
+        0.1 m/s and still broke the wave here; the E3SM v3.0.1 port launches
+        nothing below the orovmin = 2 m/s source-wind gate (gw_oro.F90:165),
+        so the outputs must be finite and exactly zero, with a finite gradient.
         """
         ncol, nlev = 2, 6
         u = jnp.full((ncol, nlev), 0.05)  # below the 0.1 m/s |U_proj| floor
@@ -588,17 +578,15 @@ class TestGWDADSafety:
         out = lindzen_gwd(
             u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg,
         )
-        # If the safe_divide fill kicks in at the floor, ``excess =
-        # - 1`` (the pinned threshold) and the breaking sigmoid clamps to ≈0, so
-        # column dissipation collapses to zero.  Production behaviour
-        # (and the legacy clip+divide) launches a finite tau_0 that
-        # saturates against the tau_sat floor and dissipates.
         assert jnp.all(jnp.isfinite(out.eps_gwd))
-        assert jnp.any(jnp.abs(out.eps_gwd) > 0.0), (
-            "Lindzen breaking did not fire at the tau_sat floor — "
-            "safe_divide eps choice is masking out the floor branch "
-            "(issue #249 codex follow-up)"
-        )
+        assert jnp.all(out.eps_gwd == 0.0)
+        assert jnp.all(out.du_dt == 0.0) and jnp.all(out.dT_dt == 0.0)
+
+        def loss(uu):
+            o = lindzen_gwd(uu, v, T, p_full, p_half, z_full, z_half, rho,
+                            lat, 300.0, cfg)
+            return jnp.sum(o.du_dt ** 2) + jnp.sum(o.dT_dt ** 2)
+        assert jnp.all(jnp.isfinite(jax.grad(loss)(u)))
 
     def test_lindzen_grad_finite_in_neutral_column(self):
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _isothermal_column()

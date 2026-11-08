@@ -145,6 +145,8 @@ def _per_var_metrics(pred_grid, target_carry, grid):
 def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
     """Train the classical AIMIP pipeline with the given scheme overrides,
     evaluate on the held-out eval windows, return metrics."""
+    from legoesm.training.aimip_spatial import grid_with_land_fraction
+    grid = grid_with_land_fraction(grid)
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_spectral_filter,
         compute_sponge_factor,
@@ -152,6 +154,7 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
     )
     from legoesm.training.aimip_params import (
         AIMIPClassicalParams,
+        aimip_declared_knobs,
         make_aimip_classical_spectral_physics,
     )
     from legoesm.training.neural_gcm_spectral import (
@@ -160,7 +163,8 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
         spectral_rollout,
     )
 
-    params = AIMIPClassicalParams.from_defaults()
+    params = AIMIPClassicalParams.from_defaults(
+        declared=aimip_declared_knobs(base_cfg))
 
     eval_windows = tuple(
         tuple(int(x) for x in w[:3])

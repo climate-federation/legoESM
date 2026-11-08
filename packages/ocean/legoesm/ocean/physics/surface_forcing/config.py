@@ -6,6 +6,8 @@ from typing import NamedTuple
 
 from legoesm import constants
 from legoesm.ocean.eos import FreezingPointConfig
+from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+                                      NCAR_NEUTRAL_WIDTH)
 
 
 __param_spec__ = {
@@ -51,6 +53,9 @@ __param_spec__ = {
     "BulkFormulaConfig": {
         "scheme_key": "ocean.sf.bulk",
         "excluded": {
+            "large_yeager_neutral_width": "numerics: RULE 5 smoothing width of the Large-Yeager neutral Stanton switch (zeta_u)",
+            "large_yeager_dthv_width": "numerics: RULE 5 smoothing width of the Large-Yeager first-guess stability switch [K]",
+            "large_yeager_cd_cutoff_width": "numerics: RULE 5 smoothing band of the Large-Yeager 33 m/s drag cutoff [m/s]",
             "LW_down": "forcing: prescribed downwelling longwave [W/m2]",
             "SW_down": "forcing: prescribed downwelling shortwave [W/m2]",
             "T_a": "forcing: prescribed air temperature [K]",
@@ -256,6 +261,13 @@ class BulkFormulaConfig(NamedTuple):
     # columns (jacobian=0 -> dz_0=0) get zero surface tendency instead of the
     # huge 1/max(dz_0,1e-10) value that would contaminate neighbour faces.
     min_wet_cell_thickness_m: float = 1.0e-3
+    # Large-Yeager (bulk_scheme="large_yeager", AeroBulk TURB_NCAR) RULE 5
+    # smooth-switch widths (#2241): in-loop neutral Stanton switch half-width
+    # in zeta_u, first-guess switch half-width in dthv [K], 33 m/s drag-cutoff
+    # band [m/s]; 0.0 = AeroBulk's hard switch.  Read only by that scheme.
+    large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
+    large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
+    large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
 
 
 class SurfaceForcingConfig(NamedTuple):

@@ -1,0 +1,76 @@
+# =============================================================================
+# legoESM AMIP -- OpenIFS 49r1 cloud + convection on the production lane
+# =============================================================================
+# Votes (oracle_audit/ifs_port/vote_1103/VOTES.md VC2a, VC22-VC29): the
+# production deck (MPAS res6, CAM L32, every other row unchanged) with the IFS
+# 49r1 prognostic cloud scheme CLOUDSC and the faithful IFS convection
+# CUMASTRN, which hands CLOUDSC its raw detrainment and mass fluxes.
+# Radiation reads CLOUDSC's advected cloud fraction (cloud_fraction_ifs) over
+# the whole column, with CLOUDSC's grid-mean condensate (VC3a, VC24).
+include: amip_production.yaml
+
+microphysics: ifs_cloudsc          # OpenIFS 49r1 CLOUDSC (ifs_cloudsc.py)
+convection: bechtold               # the IFS convection ...
+bechtold_use_ifs_ascent: true      # ... as CUMASTRN runs it (_ifs_faithful.py)
+# bechtold_ifs_shallow_nosupply: zero (inherited) = the repo default, a
+# recorded departure from OpenIFS (first_guess); kept (VC28).
+
+# IFS order (VC23): convection, then CLOUDSC once per physics step at the full
+# step; no macro/micro sub-cycle.
+cld_macmic_num_steps: 1
+
+# --- production rows that ERROR or CONFLICT under ifs_cloudsc (VC25) --------
+morrison_ice_snow_d_auto: null     # Morrison-only override (validate_strict error)
+morrison_warm_rain_scheme: null    # Morrison-only warm-rain law (validate_strict error)
+homogeneous_ice_nucleation: false  # Morrison-only Koop cirrus nucleation (build error)
+morrison_warm_rain_incloud: false  # Morrison-only in-cloud warm rain (validate_strict error)
+aerosol_ccn: false                 # aerosol droplet number: Morrison-only (build error)
+# VC32: with aerosol_ccn false, radiation's liquid effective radius uses the
+# radiation default droplet number (no aerosol CCN); the ecRad port will
+# supersede this.
+use_clubb_cloud_fraction: false    # the optics read cloud_fraction_ifs instead
+clouds: resolved                   # override + grid-mean condensate, no RH floor
+clubb_liquid_partition: false      # CLUBB would replace CLOUDSC's cloud liquid
+cloud_cam6_rhmini: null            # CAM6 aist ramp: read only by cloud_scheme
+cloud_cam6_rhmaxi: null            #   'cam6_clubb' (validate_strict error)
+cloud_cam6_rhminis: null
+cloud_cam6_rhmaxis: null
+zm_c0_lnd: null                    # Zhang-McFarlane parameters: refused by
+zm_c0_ocn: null                    #   convection='bechtold' (build error)
+zm_ke: null
+zm_dmpdz: null
+zm_tau: null
+zm_capelmt: null
+zm_detrain_phase_width_K: null
+zm_detrain_number_width_kgkg_s: null
+
+# --- radiation: OpenIFS 49r1 ecRad (RRTMGP gas optics, user 2026-11-06), votes L1-L28, S1-S6 --
+# Full call hourly (rad_update_steps 32 x 112.5 s, inherited = NRADFR=-1) into
+# the between-call carry; RADHEATN updates SW/LW every physics step.  The lane
+# REFUSES to build until the IFS TSI and GHG climatologies (A15) and the
+# Cariolle ozone (A11) are available or the user approves interim sources
+# (L12-L14).  Departures recorded: CCN 900/50 (LERADS=F arm, L25), lane orbit
+# (L17), broadband albedo/emissivity in every band (L10/L11), no ozone above
+# the model top (L18), aerosols off.
+radiation: ecrad_ifs
+aerosol_forcing: "off"          # ecRad aerosols are OFF (L20): refused otherwise
+rrtmgp_overhead_layer: false    # RRTMGP-only row (validate_strict error); L18
+
+# --- production rows INERT under ifs_cloudsc + CUMASTRN (left as inherited) --
+# Morrison: morrison_flavor, morrison_do_graupel, morrison_autocon_fact,
+#   morrison_accre_enhan_fact,
+#   morrison_sed_cfl_substeps, morrison_sed_cfl_substeps_strict,
+#   morrison_prognostic_droplet_number, morrison_mg2_drop_early_reset_log_width,
+#   morrison_mg2_drop_sed_reset_log_width
+# Zhang-McFarlane: zm_land_fraction, zm_transport_cloud_tracers
+# Saturation guard: hard_saturation_adjustment, hard_sat_ice_curve (no guard
+#   fields on IFSCloudscConfig)
+# Diagnostic cloud floors (sundqvist/xu_randall only): cloud_q_c_diagnostic,
+#   conv_cloud_condensate, convective_cloud
+# RRTMGP / repo cloud optics (ecrad_ifs reads none of them, L19): cloud_fsd,
+#   cloud_partial_coverage_optics, cloud_optics_inhomogeneity,
+#   cloud_inhomogeneity_factor, cloud_vertical_overlap_optics,
+#   cloud_n_subcolumns, rrtmgp_gpoint_batch_size, rrtmgp_use_scan;
+#   ozone_forcing, ghg_forcing (loaded only for rrtmg/rrtmgp) and
+#   solar_source/solar_tsi_var/solar_spectral_* (the TSI is loaded, ecrad_ifs
+#   does not read it yet, L12)
