@@ -5258,7 +5258,17 @@ def _build_atm_to_surface_core2(forc, ramp=1.0):
     )
 
 
+_HOST_JIT = {}   # patch 7: jitted call-site wrappers (bbl, ice step), keyed by name / ice dt
+
+
 def _ice_apply_ew_overlap(ice_pytree):
+    return (_ice_apply_ew_overlap_eager if _HOST_JIT_OFF[0] else _ice_apply_ew_overlap_jit)(ice_pytree)
+
+
+_HOST_JIT_OFF = [False]   # set from args.no_host_jit in main()
+
+
+def _ice_apply_ew_overlap_eager(ice_pytree):
     """Slave a sea-ice pytree's two longitude HALO columns to their ORCA
     2-point cyclic-overlap partners (``--ew-cyclic-overlap``): every ice
     state field AND every TileResponse array is CELL-CENTRED, so the cell
@@ -5279,6 +5289,9 @@ def _ice_apply_ew_overlap(ice_pytree):
         return a.at[:, nx - 1].set(a[:, 1])
     return jax.tree.map(_ovl, ice_pytree)
 
+
+
+_ice_apply_ew_overlap_jit = jax.jit(_ice_apply_ew_overlap_eager)
 
 def _validate_kpp_freshwater_contract(app_grid_type: str, sf_scheme: str):
     """Fail fast if routing the physical net freshwater through
@@ -7625,6 +7638,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(drag removed afterwards -> free run).")
     from legoesm.ocean.biogeochemistry.omip_hooks import add_arguments as _bgc_add_args
     _bgc_add_args(p)
+    p.add_argument("--no-host-jit", action="store_true",
+                   help="Run the BBL post-step, the sea-ice step and the seam re-slaving eagerly "
+                        "(pre-patch-7 behaviour). Default: jax.jit-wrapped call sites.")
     p.add_argument("--ice-substeps", type=int, default=1,
                    help="Sub-step the prognostic sea ice: call step_sea_ice N times with dt/N per ocean "
                         "step (ocean-side inputs held fixed; fluxes averaged). Default 1.")
@@ -7640,6 +7656,7 @@ def main() -> int:
     # preserving for existing callers.
     p = _build_arg_parser()
     args = p.parse_args()
+    _HOST_JIT_OFF[0] = bool(getattr(args, 'no_host_jit', False))
     _validate_omip_redi_selection(
         args.redi_coefficient, args.gm_slope_positions, args.gm_slope_scheme,
         args.gm_treguier, args.gm_kappa_min, args.no_gm_redi, args.redi_aht0,
@@ -9292,6 +9309,7 @@ def main() -> int:
         "restart_branch_from_different_config",
         # operator-split BGC (omip_hooks): outside the ocean state; its own sidecar
         "biogeo", "pco2_atm", "bgc_init_dir", "bgc_k_bg", "bgc_diag_every_days", "bgc_every",
+        "no_host_jit",
         "marbl_ic", "marbl_forcing", "marbl_batch_size", "marbl_n_iter",
     })
     # Path-valued args are normalised before hashing so an equivalent relative
@@ -10470,10 +10488,20 @@ def main() -> int:
                 q_open_top=_q_open_top(sf, float(np.asarray(z_coord.dz_ref)[0])),
                 ocean_dz_top_m=float(np.asarray(z_coord.dz_ref)[0]))
             _n_ice = max(1, int(getattr(args, "ice_substeps", 1)))
+            _dt_ice = float(dt) / _n_ice
+            if ("ice", _dt_ice) not in _HOST_JIT:
+                def _ice_eager(st, atm, sst, uo, vo, tfreeze, qopen, _dt=_dt_ice, _cfg=ice_config,
+                               _grid=grid, _dz=float(np.asarray(z_coord.dz_ref)[0])):
+                    return step_sea_ice(st, atm, sst, uo, vo, _cfg, U_min=0.0, dt=_dt, grid=_grid,
+                                        ocean_freezing_temperature_K=tfreeze, q_open_top=qopen,
+                                        ocean_dz_top_m=_dz)
+                _HOST_JIT[("ice", _dt_ice)] = _ice_eager if args.no_host_jit else jax.jit(_ice_eager)
+                print(f"[host-jit] sea-ice step {'EAGER' if args.no_host_jit else 'jitted'} "
+                      f"(dt_ice={_dt_ice:.0f} s)", flush=True)
+            _ice_fn = _HOST_JIT[("ice", _dt_ice)]
+            _ice_args = (_ice_kw["ocean_freezing_temperature_K"], _ice_kw["q_open_top"])
             if _n_ice == 1:
-                ice_state, ice_resp = step_sea_ice(
-                    ice_state, atm_ice, sst_K, ocn_u, ocn_v,
-                    ice_config, U_min=0.0, dt=dt, grid=grid, **_ice_kw)
+                ice_state, ice_resp = _ice_fn(ice_state, atm_ice, sst_K, ocn_u, ocn_v, *_ice_args)
             else:
                 # Sub-stepped ice: ocean inputs fixed over the ocean step; the response handed
                 # to the ocean is the sub-step mean of the (step-averaged) flux fields and the
@@ -10482,9 +10510,7 @@ def main() -> int:
                 _end_state_fields = {"T_sfc", "albedo", "emissivity", "z0", "q_surface", "lw_up"}
                 _acc = None
                 for _k in range(_n_ice):
-                    ice_state, _r = step_sea_ice(
-                        ice_state, atm_ice, sst_K, ocn_u, ocn_v,
-                        ice_config, U_min=0.0, dt=dt / _n_ice, grid=grid, **_ice_kw)
+                    ice_state, _r = _ice_fn(ice_state, atm_ice, sst_K, ocn_u, ocn_v, *_ice_args)
                     if args.ew_cyclic_overlap and app_grid_type == "tripole":
                         # re-slave the duplicated ORCA seam columns after EVERY transport
                         # sub-step (see the note below the single-step call)
@@ -11010,9 +11036,13 @@ def main() -> int:
                     nlev=int(bbl_geom.h_ref.shape[-1]))
             else:
                 from legoesm.ocean.physics.bbl_adv import apply_bbl_adv_step
-                state = apply_bbl_adv_step(
-                    state, bbl_geom, dt,
-                    gamma_s=args.bbl_gamma_s,
+                if "bbl" not in _HOST_JIT:
+                    _HOST_JIT["bbl"] = (apply_bbl_adv_step if args.no_host_jit else
+                                        jax.jit(apply_bbl_adv_step,
+                                                static_argnames=("dt", "gamma_s", "rho_0", "nlev")))
+                state = _HOST_JIT["bbl"](
+                    state, bbl_geom, float(dt),
+                    gamma_s=float(args.bbl_gamma_s),
                     rho_0=float(model.config.rho_0),
                     area_2d=jnp.asarray(grid.area),
                     dy_u_faces=bbl_face_widths[0],
