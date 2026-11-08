@@ -120,8 +120,11 @@ _CF_FLOOR = 1.0e-3             # matches clouds.cloud_fraction._INHOM_CF_FLOOR
 _SHIFT_LAYER_SLOPE = 2.0 ** 0.5
 _SHIFT_LAYER_STEP = (5.0 ** 0.5 - 1.0) / 2.0
 # ecRad inhomogeneity uniforms (rand_inhom1, rand_inhom2): own permutation
-# tables and a column-shift offset each, so neither repeats the mask's draw.
+# tables, and a column shift frac(K*shift + offset) whose large irrational K
+# scrambles the mask's shift, so a cloudy cell's draw does not depend on why
+# it is cloudy (an additive offset kept r1 a fixed function of the mask draw).
 _INHOM_PERM_SEEDS = (_PERM_SEED + 1, _PERM_SEED + 2)
+_INHOM_SHIFT_SCALES = (1000.0 * 2.0 ** 0.5, 1000.0 * 3.0 ** 0.5)
 _INHOM_SHIFT_OFFSETS = (_SHIFT_LAYER_SLOPE % 1.0, (2.0 * _SHIFT_LAYER_SLOPE) % 1.0)
 
 
@@ -197,6 +200,11 @@ def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT,
                            width=width)
 
 
+def inhomogeneity_shift(shift, i):
+    """Column shift of inhomogeneity stream ``i`` (0: rand_inhom1, 1: rand_inhom2)."""
+    return jnp.mod(_INHOM_SHIFT_SCALES[i] * jnp.asarray(shift) + _INHOM_SHIFT_OFFSETS[i], 1.0)
+
+
 def ecrad_inhomogeneity_scaling(mask, fractional_std, lat, p_half, T_half, shift=None):
     """ecRad McICA in-cloud optical-depth scaling per subcolumn cell.
 
@@ -218,14 +226,16 @@ def ecrad_inhomogeneity_scaling(mask, fractional_std, lat, p_half, T_half, shift
         inhomogeneity_od_scaling)
     mask = jnp.asarray(mask)
     n_sub, _, nlev = mask.shape
+    if nlev < 2:
+        raise ValueError(f"ecrad_inhomogeneity_scaling needs >= 2 layers, got {nlev}")
     dtype = mask.dtype if jnp.issubdtype(mask.dtype, jnp.floating) else jnp.asarray(p_half).dtype
     decorr_km, ratio = cloud_overlap_decorr_len(jnp.sin(jnp.asarray(lat)))
     op = overlap_param(jnp.asarray(p_half), jnp.asarray(T_half), decorr_km * 1000.0,
                        r_over_g=constants.R_d / constants.g)          # (ncol, nlev-1)
     op_inhom_above = jnp.concatenate([jnp.ones_like(op[:, :1]), op ** (1.0 / ratio)], axis=1)
-    r1, r2 = (_shifted_uniforms(n_sub, nlev, None if shift is None else jnp.mod(shift + o, 1.0),
+    r1, r2 = (_shifted_uniforms(n_sub, nlev, None if shift is None else inhomogeneity_shift(shift, i),
                                 dtype, seed)
-              for seed, o in zip(_INHOM_PERM_SEEDS, _INHOM_SHIFT_OFFSETS))
+              for i, seed in enumerate(_INHOM_PERM_SEEDS))
     repeat = (r2 < op_inhom_above[None]).astype(dtype)
     return inhomogeneity_od_scaling(mask.astype(dtype), repeat, jnp.asarray(fractional_std, dtype),
                                     r1)

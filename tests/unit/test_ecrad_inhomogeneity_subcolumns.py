@@ -62,9 +62,9 @@ def _reference(mask, fsd, lat, p_half, T_half, r1, r2):
 
 
 def _uniforms(n_sub, nlev, shift):
-    return [np.asarray(sub._shifted_uniforms(n_sub, nlev, jnp.mod(shift + o, 1.0),
+    return [np.asarray(sub._shifted_uniforms(n_sub, nlev, sub.inhomogeneity_shift(shift, i),
                                              jnp.float64, seed))
-            for seed, o in zip(sub._INHOM_PERM_SEEDS, sub._INHOM_SHIFT_OFFSETS)]
+            for i, seed in enumerate(sub._INHOM_PERM_SEEDS)]
 
 
 def test_matches_the_ecrad_recursion_on_the_lane_mask():
@@ -79,16 +79,26 @@ def test_matches_the_ecrad_recursion_on_the_lane_mask():
     assert np.any(np.asarray(mask)) and np.all(got[~np.asarray(mask)] == 0.0)
 
 
-def test_homogeneous_cloud_keeps_the_mask():
-    ncol, nlev = 4, 10
+@pytest.mark.parametrize("width", [0.0, 0.05])
+def test_homogeneous_cloud_reproduces_the_plain_subcolumn_paths(width):
+    """fsd = 0: in-cloud path x scaling is exactly the plain lane's path, for
+    boolean and smooth masks alike (cover is weighted once, not squared)."""
+    ncol, nlev, n_sub = 4, 10, 8
     p_half, T_half, lat = _column(ncol, nlev)
-    mask = sub.generate_subcolumns(_cf(ncol, nlev), 8, shift=jnp.full(ncol, 0.3), width=0.0)
-    got = sub.ecrad_inhomogeneity_scaling(mask, 0.0, lat, p_half, T_half, shift=jnp.full(ncol, 0.3))
-    np.testing.assert_allclose(np.asarray(got), np.asarray(mask, np.float64), atol=1e-12)
+    shift = jnp.full(ncol, 0.3)
+    cf = _cf(ncol, nlev)
+    lwp = jnp.asarray(np.random.default_rng(3).random((ncol, nlev))) * cf
+    mask = sub.generate_subcolumns(cf, n_sub, shift=shift, width=width)
+    x = sub.ecrad_inhomogeneity_scaling(mask, 0.0, lat, p_half, T_half, shift=shift)
+    ic, _ = sub.in_cloud_paths(cf, lwp, lwp)
+    plain, _ = sub.subcolumn_paths(mask, cf, lwp, lwp)
+    np.testing.assert_allclose(np.reshape(np.asarray(x * ic[None]), (n_sub * ncol, nlev)),
+                               np.asarray(plain), rtol=1e-12, atol=1e-15)
 
 
-def test_cell_scaling_has_unit_mean_and_the_requested_spread():
-    ncol, nlev, n_sub, fsd = 512, 4, 8, 0.75
+@pytest.mark.parametrize("n_sub", [8, 1])
+def test_cell_scaling_has_unit_mean_and_the_requested_spread(n_sub):
+    ncol, nlev, fsd = 512, 4, 0.75
     p_half, T_half, lat = _column(ncol, nlev)
     mask = jnp.ones((n_sub, ncol, nlev), bool)
     shift = jnp.asarray(np.random.default_rng(0).random(ncol))
@@ -128,9 +138,10 @@ def test_gradient_in_fsd_matches_finite_difference():
     def f(fsd):
         return jnp.sum(sub.ecrad_inhomogeneity_scaling(
             mask, fsd, lat, p_half, T_half, shift=shift) * paths[None])
-    g = float(jax.grad(f)(0.8))
+    fsd = 0.825    # mid-way between gamma-table knots (step 0.05)
+    g = float(jax.grad(f)(fsd))
     eps = 1e-6
-    fd = (float(f(0.8 + eps)) - float(f(0.8 - eps))) / (2 * eps)
+    fd = (float(f(fsd + eps)) - float(f(fsd - eps))) / (2 * eps)
     assert np.isfinite(g) and g != 0.0
     assert g == pytest.approx(fd, rel=1e-5)
 
@@ -193,3 +204,25 @@ def test_backend_hands_the_solver_the_scaled_paths(monkeypatch):
         mask, 1.0, lat, p_half, cam_interface_temperature(T, p_full, p_half, t_sfc), shift=shift))
     np.testing.assert_allclose(scaled, plain * x, rtol=1e-12, atol=0.0)
     assert np.any(np.abs(x[np.asarray(mask)] - 1.0) > 0.1)
+
+
+@pytest.mark.parametrize("n_sub", [8, 1])
+@pytest.mark.parametrize("cf_value", [0.3, 0.7])
+def test_partly_cloudy_cells_see_an_unbiased_draw(n_sub, cf_value):
+    """The inhomogeneity uniforms must be independent of the mask draw: the
+    mean scaling over the cells a partly cloudy layer makes cloudy is 1."""
+    ncol, nlev, fsd = 4096, 3, 0.75
+    p_half, T_half, lat = _column(ncol, nlev)
+    shift = jnp.asarray(np.random.default_rng(4).random(ncol))
+    cf = jnp.full((ncol, nlev), cf_value)
+    mask = sub.generate_subcolumns(cf, n_sub, shift=shift, width=0.0)
+    x = np.asarray(sub.ecrad_inhomogeneity_scaling(mask, fsd, lat, p_half, T_half, shift=shift))
+    m = np.asarray(mask)[..., 0]
+    assert m.sum() > 500
+    assert abs(x[..., 0][m].mean() - 1.0) < 0.03
+
+
+def test_single_layer_is_refused():
+    p_half, T_half, lat = _column(2, 1)
+    with pytest.raises(ValueError, match=">= 2 layers"):
+        sub.ecrad_inhomogeneity_scaling(jnp.ones((8, 2, 1), bool), 0.75, lat, p_half, T_half)
