@@ -17,7 +17,7 @@ import jax.numpy as jnp
 from legoesm.core import transcendentals
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.smooth import (max_c1, min_c1, positive_part_c1, smooth_max_c1, smooth_min_c1,
-                                 smoothstep_cubic)
+                                 smoothstep_cubic, straight_through)
 from legoesm.ice.config import SI3SwitchConfig
 from legoesm.ice.constants_config import IceConstantsConfig
 from legoesm.ice.snow import snow_ice_flooding
@@ -627,206 +627,250 @@ def _si3_zdf_bl99_step(
 
     dz_i = max_c1(h_ice, _H_MIN, _sharp(w.H)) / 3.0      # zh_min, vote Z8
     dz_s = max_c1(h_snow, _H_MIN, _sharp(w.H)) / 3.0
-    snow_present = h_snow > 0.0
+    def _solve(snow_present):
+        """One BL99 solve with the snow/no-snow row range chosen by ``snow_present``."""
 
-    def body(_iteration, carry):
-        Tsu, Tsu_previous, Ti, Ts, qns, converged, iterations, k_top_ice = carry
-        active = ~converged
+        def body(_iteration, carry):
+            Tsu, Tsu_previous, Ti, Ts, qns, converged, iterations, k_top_ice = carry
+            active = ~converged
 
-        # P07 conductivity at the four ice interfaces (top, 2 interior, base).
-        Ti_iface = 0.5 * (Ti[..., :-1] + Ti[..., 1:])
-        S_iface = 0.5 * (S_layers[..., :-1] + S_layers[..., 1:])
-        k0 = p07_conductivity(Ti[..., 0], S_layers[..., 0], constants)
-        km = p07_conductivity(Ti_iface, S_iface, constants)
-        kb = p07_conductivity(T_bottom, S_layers[..., -1], constants)
-        k_i = jnp.concatenate([k0[..., None], km, kb[..., None]], axis=-1) / dz_i[..., None]
-        k_s_bulk = jnp.full_like(k_i, constants.k_snow) / dz_s[..., None]
-        k_si = constants.k_snow * (k_i[..., 0] * dz_i) / (
-            0.5 * ((k_i[..., 0] * dz_i) * dz_s + constants.k_snow * dz_i)
-        )
-        k_s = k_s_bulk.at[..., -1].set(k_si)
-        k_i = k_i.at[..., 0].set(jnp.where(snow_present, k_si, k_i[..., 0]))
+            # P07 conductivity at the four ice interfaces (top, 2 interior, base).
+            Ti_iface = 0.5 * (Ti[..., :-1] + Ti[..., 1:])
+            S_iface = 0.5 * (S_layers[..., :-1] + S_layers[..., 1:])
+            k0 = p07_conductivity(Ti[..., 0], S_layers[..., 0], constants)
+            km = p07_conductivity(Ti_iface, S_iface, constants)
+            kb = p07_conductivity(T_bottom, S_layers[..., -1], constants)
+            k_i = jnp.concatenate([k0[..., None], km, kb[..., None]], axis=-1) / dz_i[..., None]
+            k_s_bulk = jnp.full_like(k_i, constants.k_snow) / dz_s[..., None]
+            k_si = constants.k_snow * (k_i[..., 0] * dz_i) / (
+                0.5 * ((k_i[..., 0] * dz_i) * dz_s + constants.k_snow * dz_i)
+            )
+            k_s = k_s_bulk.at[..., -1].set(k_si)
+            k_i = k_i.at[..., 0].set(jnp.where(snow_present, k_si, k_i[..., 0]))
 
-        ci = constants.c_ice + _BRINE_HEAT_CAPACITY_FACTOR * S_layers / jnp.maximum(
-            (Ti - constants.T0) * (T_i_old - constants.T0), _EPS10
-        )
-        eta_i = dt / (constants.rho_ice * dz_i[..., None] * ci)
-        eta_s = dt / (constants.rho_snow * dz_s[..., None] * constants.c_ice)
+            ci = constants.c_ice + _BRINE_HEAT_CAPACITY_FACTOR * S_layers / jnp.maximum(
+                (Ti - constants.T0) * (T_i_old - constants.T0), _EPS10
+            )
+            eta_i = dt / (constants.rho_ice * dz_i[..., None] * ci)
+            eta_s = dt / (constants.rho_snow * dz_s[..., None] * constants.c_ice)
 
-        qns_new = qns + dqns * (Tsu - Tsu_previous)
-        fnet = qsr - qtr_top + qns_new
+            qns_new = qns + dqns * (Tsu - Tsu_previous)
+            fnet = qsr - qtr_top + qns_new
 
-        shape = Ti.shape[:-1] + (7,)
-        a = jnp.zeros(shape, dtype=dtype)
-        b = jnp.zeros(shape, dtype=dtype)
-        c = jnp.zeros(shape, dtype=dtype)
-        d = jnp.zeros(shape, dtype=dtype)
+            shape = Ti.shape[:-1] + (7,)
+            a = jnp.zeros(shape, dtype=dtype)
+            b = jnp.zeros(shape, dtype=dtype)
+            c = jnp.zeros(shape, dtype=dtype)
+            d = jnp.zeros(shape, dtype=dtype)
 
-        # Surface plus snow rows, NEMO jm=1..4 (:438-448,:419-425).
-        b = b.at[..., 0].set(dqns - 2.0 * k_s[..., 0])
-        c = c.at[..., 0].set(2.0 * k_s[..., 0])
-        d = d.at[..., 0].set(dqns * Tsu - fnet)
-        a = a.at[..., 1].set(-eta_s[..., 0] * 2.0 * k_s[..., 0])
-        b = b.at[..., 1].set(1.0 + eta_s[..., 0] * (k_s[..., 1] + 2.0 * k_s[..., 0]))
-        c = c.at[..., 1].set(-eta_s[..., 0] * k_s[..., 1])
-        d = d.at[..., 1].set(T_s_old[..., 0] + eta_s[..., 0] * ab_s[..., 0])
-        for k in (1, 2):
-            row = k + 1
-            a = a.at[..., row].set(-eta_s[..., k] * k_s[..., k])
-            b = b.at[..., row].set(1.0 + eta_s[..., k] * (k_s[..., k] + k_s[..., k + 1]))
-            c = c.at[..., row].set(-eta_s[..., k] * k_s[..., k + 1])
-            d = d.at[..., row].set(T_s_old[..., k] + eta_s[..., k] * ab_s[..., k])
+            # Surface plus snow rows, NEMO jm=1..4 (:438-448,:419-425).
+            b = b.at[..., 0].set(dqns - 2.0 * k_s[..., 0])
+            c = c.at[..., 0].set(2.0 * k_s[..., 0])
+            d = d.at[..., 0].set(dqns * Tsu - fnet)
+            a = a.at[..., 1].set(-eta_s[..., 0] * 2.0 * k_s[..., 0])
+            b = b.at[..., 1].set(1.0 + eta_s[..., 0] * (k_s[..., 1] + 2.0 * k_s[..., 0]))
+            c = c.at[..., 1].set(-eta_s[..., 0] * k_s[..., 1])
+            d = d.at[..., 1].set(T_s_old[..., 0] + eta_s[..., 0] * ab_s[..., 0])
+            for k in (1, 2):
+                row = k + 1
+                a = a.at[..., row].set(-eta_s[..., k] * k_s[..., k])
+                b = b.at[..., row].set(1.0 + eta_s[..., k] * (k_s[..., k] + k_s[..., k + 1]))
+                c = c.at[..., row].set(-eta_s[..., k] * k_s[..., k + 1])
+                d = d.at[..., row].set(T_s_old[..., k] + eta_s[..., k] * ab_s[..., k])
 
-        # Ice rows, NEMO jm=5..7 (:399-413).
-        for k in (0, 1):
-            row = k + 4
-            a = a.at[..., row].set(-eta_i[..., k] * k_i[..., k])
-            b = b.at[..., row].set(1.0 + eta_i[..., k] * (k_i[..., k] + k_i[..., k + 1]))
-            c = c.at[..., row].set(-eta_i[..., k] * k_i[..., k + 1])
-            d = d.at[..., row].set(T_i_old[..., k] + eta_i[..., k] * ab_i[..., k])
-        a = a.at[..., 6].set(-eta_i[..., 2] * k_i[..., 2])
-        b = b.at[..., 6].set(1.0 + eta_i[..., 2] * (k_i[..., 2] + 2.0 * k_i[..., 3]))
-        d = d.at[..., 6].set(
-            T_i_old[..., 2]
-            + eta_i[..., 2] * (ab_i[..., 2] + 2.0 * k_i[..., 3] * T_bottom)
+            # Ice rows, NEMO jm=5..7 (:399-413).
+            for k in (0, 1):
+                row = k + 4
+                a = a.at[..., row].set(-eta_i[..., k] * k_i[..., k])
+                b = b.at[..., row].set(1.0 + eta_i[..., k] * (k_i[..., k] + k_i[..., k + 1]))
+                c = c.at[..., row].set(-eta_i[..., k] * k_i[..., k + 1])
+                d = d.at[..., row].set(T_i_old[..., k] + eta_i[..., k] * ab_i[..., k])
+            a = a.at[..., 6].set(-eta_i[..., 2] * k_i[..., 2])
+            b = b.at[..., 6].set(1.0 + eta_i[..., 2] * (k_i[..., 2] + 2.0 * k_i[..., 3]))
+            d = d.at[..., 6].set(
+                T_i_old[..., 2]
+                + eta_i[..., 2] * (ab_i[..., 2] + 2.0 * k_i[..., 3] * T_bottom)
+            )
+
+            # BL99 changes the solved row range at two physical boundaries
+            # (`icethd_zdf_bl99.F90:433-513`): snow-free columns put the surface
+            # equation in row 4, and a melting surface is fixed at T0 and removed
+            # from the solve.  Keeping a seven-row carrier is convenient for JAX,
+            # but unused rows must be identities so no phantom snow layer couples
+            # into the ice solution.
+            no_snow_a = jnp.zeros_like(a)
+            no_snow_b = jnp.ones_like(b)
+            no_snow_c = jnp.zeros_like(c)
+            no_snow_d = jnp.zeros_like(d)
+            no_snow_b = no_snow_b.at[..., 3].set(dqns - 2.0 * k_i[..., 0])
+            no_snow_c = no_snow_c.at[..., 3].set(2.0 * k_i[..., 0])
+            no_snow_d = no_snow_d.at[..., 3].set(dqns * Tsu - fnet)
+            no_snow_a = no_snow_a.at[..., 4].set(-eta_i[..., 0] * 2.0 * k_i[..., 0])
+            no_snow_b = no_snow_b.at[..., 4].set(
+                1.0 + eta_i[..., 0] * (k_i[..., 1] + 2.0 * k_i[..., 0])
+            )
+            no_snow_c = no_snow_c.at[..., 4].set(-eta_i[..., 0] * k_i[..., 1])
+            no_snow_d = no_snow_d.at[..., 4].set(
+                T_i_old[..., 0] + eta_i[..., 0] * ab_i[..., 0]
+            )
+            for row in (5, 6):
+                no_snow_a = no_snow_a.at[..., row].set(a[..., row])
+                no_snow_b = no_snow_b.at[..., row].set(b[..., row])
+                no_snow_c = no_snow_c.at[..., row].set(c[..., row])
+                no_snow_d = no_snow_d.at[..., row].set(d[..., row])
+            branch_snow_present = (
+                snow_present if _nemo_branch_ranges else jnp.ones_like(snow_present)
+            )
+            a = jnp.where(branch_snow_present[..., None], a, no_snow_a)
+            b = jnp.where(branch_snow_present[..., None], b, no_snow_b)
+            c = jnp.where(branch_snow_present[..., None], c, no_snow_c)
+            d = jnp.where(branch_snow_present[..., None], d, no_snow_d)
+
+            melting_surface = jnp.where(
+                _nemo_branch_ranges, Tsu >= constants.T0, False
+            )
+            snow_melting = branch_snow_present & melting_surface
+            no_snow_melting = (~branch_snow_present) & melting_surface
+            b = b.at[..., 0].set(jnp.where(snow_melting, 1.0, b[..., 0]))
+            c = c.at[..., 0].set(jnp.where(snow_melting, 0.0, c[..., 0]))
+            d = d.at[..., 0].set(jnp.where(snow_melting, Tsu, d[..., 0]))
+            a = a.at[..., 1].set(jnp.where(snow_melting, 0.0, a[..., 1]))
+            d = d.at[..., 1].set(jnp.where(
+                snow_melting,
+                T_s_old[..., 0] + eta_s[..., 0]
+                * (ab_s[..., 0] + 2.0 * k_s[..., 0] * Tsu),
+                d[..., 1],
+            ))
+            b = b.at[..., 3].set(jnp.where(no_snow_melting, 1.0, b[..., 3]))
+            c = c.at[..., 3].set(jnp.where(no_snow_melting, 0.0, c[..., 3]))
+            d = d.at[..., 3].set(jnp.where(no_snow_melting, Tsu, d[..., 3]))
+            a = a.at[..., 4].set(jnp.where(no_snow_melting, 0.0, a[..., 4]))
+            d = d.at[..., 4].set(jnp.where(
+                no_snow_melting,
+                T_i_old[..., 0] + eta_i[..., 0]
+                * (ab_i[..., 0] + 2.0 * k_i[..., 0] * Tsu),
+                d[..., 4],
+            ))
+
+            solution = thomas_solve(a, b, c, d, "nemo_unnormalised_unrounded")
+            solved_surface = jnp.where(
+                branch_snow_present, solution[..., 0], solution[..., 3]
+            )
+            # min_c1/max_c1 are exact AT the bound, so T_su >= T0 and T_i >= Tmelt
+            # still fire in smooth mode (vote Z20; the symmetric form sat w/8 below).
+            Tsu_candidate = max_c1(
+                min_c1(jnp.where(melting_surface, Tsu, solved_surface), constants.T0, _sharp(tm_width)),
+                constants.T0 - 100.0, _sharp(t_clamp_width),
+            )
+            Ts_candidate = jnp.where(
+                branch_snow_present[..., None],
+                _clip_c1(solution[..., 1:4], constants.T0 - 100.0, constants.T0, t_clamp_width),
+                Ts,
+            )
+            melt = constants.T0 - constants.liquidus_slope * S_layers
+            Ti_candidate = max_c1(min_c1(solution[..., 4:7], melt, _sharp(tm_width)),
+                                  constants.T0 - 100.0, _sharp(t_clamp_width))
+            delta = jnp.maximum(
+                jnp.abs(Tsu_candidate - Tsu),
+                jnp.maximum(
+                    jnp.max(jnp.abs(Ts_candidate - Ts), axis=-1),
+                    jnp.max(jnp.abs(Ti_candidate - Ti), axis=-1),
+                ),
+            )
+            just_converged = active & (delta < _T_CONVERGENCE)
+            Tsu = jnp.where(active, Tsu_candidate, Tsu)
+            Ti = jnp.where(active[..., None], Ti_candidate, Ti)
+            Ts = jnp.where(active[..., None], Ts_candidate, Ts)
+            qns = jnp.where(active, qns_new, qns)
+            iterations = jnp.where(just_converged, _iteration + 1, iterations)
+            return (
+                Tsu,
+                jnp.where(active, carry[0], Tsu_previous),
+                Ti,
+                Ts,
+                qns,
+                converged | just_converged,
+                iterations,
+                # ztcond_i(0) of the last iteration, frozen at its START (the
+                # temperatures it was evaluated from), as NEMO's qcn_ice_top
+                # uses it (`icethd_zdf_bl99.F90:283,325,771`).
+                jnp.where(active, k0 / dz_i, k_top_ice),
+            )
+
+        init = (
+            T_surface,
+            T_surface_input,
+            T_i_old,
+            T_s_old,
+            qns_initial,
+            jnp.zeros_like(h_ice, dtype=bool),
+            jnp.full_like(h_ice, _maximum_iterations, dtype=jnp.int32),
+            jnp.zeros_like(h_ice),
+        )
+        Tsu, _, Ti, Ts, qns, _, iterations, k_top_i = jax.lax.fori_loop(
+            0, _maximum_iterations, body, init
+        )
+        e_i = ice_enthalpy_from_temperature(
+            Ti, S_layers, constants, _nemo_order=_nemo_eos_order, width=tm_width
+        )
+        e_s = snow_enthalpy_from_temperature(Ts, constants)
+
+        # Interface conductive diagnostics, `icethd_zdf_bl99.F90:743-761`.
+        k_base_i = p07_conductivity(T_bottom, S_layers[..., -1], constants) / dz_i
+        k_top = jnp.where(
+            snow_present,
+            constants.k_snow / dz_s,
+            k_top_i,
+        )
+        T_first = jnp.where(snow_present, Ts[..., 0], Ti[..., 0])
+        qcn_top = 2.0 * k_top * (Tsu - T_first)
+        qcn_bottom = 2.0 * k_base_i * (Ti[..., -1] - T_bottom)
+        return SI3ZDFResult(
+            Tsu, Ti, Ts, e_i, e_s, qns, qtr_bottom, qcn_top, qcn_bottom, iterations
         )
 
-        # BL99 changes the solved row range at two physical boundaries
-        # (`icethd_zdf_bl99.F90:433-513`): snow-free columns put the surface
-        # equation in row 4, and a melting surface is fixed at T0 and removed
-        # from the solve.  Keeping a seven-row carrier is convenient for JAX,
-        # but unused rows must be identities so no phantom snow layer couples
-        # into the ice solution.
-        no_snow_a = jnp.zeros_like(a)
-        no_snow_b = jnp.ones_like(b)
-        no_snow_c = jnp.zeros_like(c)
-        no_snow_d = jnp.zeros_like(d)
-        no_snow_b = no_snow_b.at[..., 3].set(dqns - 2.0 * k_i[..., 0])
-        no_snow_c = no_snow_c.at[..., 3].set(2.0 * k_i[..., 0])
-        no_snow_d = no_snow_d.at[..., 3].set(dqns * Tsu - fnet)
-        no_snow_a = no_snow_a.at[..., 4].set(-eta_i[..., 0] * 2.0 * k_i[..., 0])
-        no_snow_b = no_snow_b.at[..., 4].set(
-            1.0 + eta_i[..., 0] * (k_i[..., 1] + 2.0 * k_i[..., 0])
-        )
-        no_snow_c = no_snow_c.at[..., 4].set(-eta_i[..., 0] * k_i[..., 1])
-        no_snow_d = no_snow_d.at[..., 4].set(
-            T_i_old[..., 0] + eta_i[..., 0] * ab_i[..., 0]
-        )
-        for row in (5, 6):
-            no_snow_a = no_snow_a.at[..., row].set(a[..., row])
-            no_snow_b = no_snow_b.at[..., row].set(b[..., row])
-            no_snow_c = no_snow_c.at[..., row].set(c[..., row])
-            no_snow_d = no_snow_d.at[..., row].set(d[..., row])
-        branch_snow_present = (
-            snow_present if _nemo_branch_ranges else jnp.ones_like(snow_present)
-        )
-        a = jnp.where(branch_snow_present[..., None], a, no_snow_a)
-        b = jnp.where(branch_snow_present[..., None], b, no_snow_b)
-        c = jnp.where(branch_snow_present[..., None], c, no_snow_c)
-        d = jnp.where(branch_snow_present[..., None], d, no_snow_d)
+    # Snow/no-snow row switch, user ruling 3a (2026-11-04): the forward value
+    # is NEMO's hard single solve (class A); with the surrogate width
+    # w = snow_ramp_width_m > 0 the gradient comes from a soft column
+    # (straight-through, votes Z22 = c, Z28-Z34).  The soft column solves both
+    # systems and blends the conserved outputs (layer enthalpies, conductive
+    # fluxes) with s = C1 ramp(h_s / w); its temperatures are diagnosed from
+    # the blended enthalpy.  Enthalpy content is linear in e at fixed h, so the
+    # soft column's heat change is the same blend of the two systems'.
+    w_snow = switches.snow_ramp_width_m if switches.relative_width > 0.0 else 0.0
+    if w_snow == 0.0:
+        return _solve(h_snow > 0.0)
+    snow = _solve(jnp.ones_like(h_snow, dtype=bool))
+    bare = _solve(jnp.zeros_like(h_snow, dtype=bool))
 
-        melting_surface = jnp.where(
-            _nemo_branch_ranges, Tsu >= constants.T0, False
-        )
-        snow_melting = branch_snow_present & melting_surface
-        no_snow_melting = (~branch_snow_present) & melting_surface
-        b = b.at[..., 0].set(jnp.where(snow_melting, 1.0, b[..., 0]))
-        c = c.at[..., 0].set(jnp.where(snow_melting, 0.0, c[..., 0]))
-        d = d.at[..., 0].set(jnp.where(snow_melting, Tsu, d[..., 0]))
-        a = a.at[..., 1].set(jnp.where(snow_melting, 0.0, a[..., 1]))
-        d = d.at[..., 1].set(jnp.where(
-            snow_melting,
-            T_s_old[..., 0] + eta_s[..., 0]
-            * (ab_s[..., 0] + 2.0 * k_s[..., 0] * Tsu),
-            d[..., 1],
-        ))
-        b = b.at[..., 3].set(jnp.where(no_snow_melting, 1.0, b[..., 3]))
-        c = c.at[..., 3].set(jnp.where(no_snow_melting, 0.0, c[..., 3]))
-        d = d.at[..., 3].set(jnp.where(no_snow_melting, Tsu, d[..., 3]))
-        a = a.at[..., 4].set(jnp.where(no_snow_melting, 0.0, a[..., 4]))
-        d = d.at[..., 4].set(jnp.where(
-            no_snow_melting,
-            T_i_old[..., 0] + eta_i[..., 0]
-            * (ab_i[..., 0] + 2.0 * k_i[..., 0] * Tsu),
-            d[..., 4],
-        ))
+    def per_cell(x, v):
+        return x.reshape(x.shape + (1,) * (jnp.ndim(v) - x.ndim))
 
-        solution = thomas_solve(a, b, c, d, "nemo_unnormalised_unrounded")
-        solved_surface = jnp.where(
-            branch_snow_present, solution[..., 0], solution[..., 3]
-        )
-        # min_c1/max_c1 are exact AT the bound, so T_su >= T0 and T_i >= Tmelt
-        # still fire in smooth mode (vote Z20; the symmetric form sat w/8 below).
-        Tsu_candidate = max_c1(
-            min_c1(jnp.where(melting_surface, Tsu, solved_surface), constants.T0, _sharp(tm_width)),
-            constants.T0 - 100.0, _sharp(t_clamp_width),
-        )
-        Ts_candidate = jnp.where(
-            branch_snow_present[..., None],
-            _clip_c1(solution[..., 1:4], constants.T0 - 100.0, constants.T0, t_clamp_width),
-            Ts,
-        )
-        melt = constants.T0 - constants.liquidus_slope * S_layers
-        Ti_candidate = max_c1(min_c1(solution[..., 4:7], melt, _sharp(tm_width)),
-                              constants.T0 - 100.0, _sharp(t_clamp_width))
-        delta = jnp.maximum(
-            jnp.abs(Tsu_candidate - Tsu),
-            jnp.maximum(
-                jnp.max(jnp.abs(Ts_candidate - Ts), axis=-1),
-                jnp.max(jnp.abs(Ti_candidate - Ti), axis=-1),
-            ),
-        )
-        just_converged = active & (delta < _T_CONVERGENCE)
-        Tsu = jnp.where(active, Tsu_candidate, Tsu)
-        Ti = jnp.where(active[..., None], Ti_candidate, Ti)
-        Ts = jnp.where(active[..., None], Ts_candidate, Ts)
-        qns = jnp.where(active, qns_new, qns)
-        iterations = jnp.where(just_converged, _iteration + 1, iterations)
-        return (
-            Tsu,
-            jnp.where(active, carry[0], Tsu_previous),
-            Ti,
-            Ts,
-            qns,
-            converged | just_converged,
-            iterations,
-            # ztcond_i(0) of the last iteration, frozen at its START (the
-            # temperatures it was evaluated from), as NEMO's qcn_ice_top
-            # uses it (`icethd_zdf_bl99.F90:283,325,771`).
-            jnp.where(active, k0 / dz_i, k_top_ice),
-        )
+    present = h_snow > 0.0
+    hard = SI3ZDFResult(*(jnp.where(per_cell(present, x1), x1, x0) for x1, x0 in zip(snow, bare)))
+    s = smoothstep_cubic(h_snow / w_snow)
 
-    init = (
-        T_surface,
-        T_surface_input,
-        T_i_old,
-        T_s_old,
-        qns_initial,
-        jnp.zeros_like(h_ice, dtype=bool),
-        jnp.full_like(h_ice, _maximum_iterations, dtype=jnp.int32),
-        jnp.zeros_like(h_ice),
+    def mix(x1, x0):
+        return x0 + (x1 - x0) * per_cell(s, x1)
+
+    e_i = mix(snow.e_ice, bare.e_ice)
+    e_s = mix(snow.e_snow, e_snow)          # snow layers inert in the no-snow system (Z31)
+    band = per_cell((s > 0.0) & (s < 1.0), snow.T_ice)
+    soft = SI3ZDFResult(
+        mix(snow.T_surface, bare.T_surface),
+        jnp.where(band, ice_temperature_from_enthalpy(
+            e_i, S_layers, constants, _nemo_order=_nemo_eos_order, width=tm_width),
+            mix(snow.T_ice, bare.T_ice)),
+        jnp.where(band, snow_temperature_from_enthalpy(
+            e_s, constants, _nemo_order=_nemo_eos_order, width=t_clamp_width),
+            mix(snow.T_snow, bare.T_snow)),
+        e_i, e_s,
+        mix(snow.qns_ice, bare.qns_ice), snow.qtr_ice_bottom,
+        mix(snow.qcn_ice_top, bare.qcn_ice_top), mix(snow.qcn_ice_bottom, bare.qcn_ice_bottom),
+        jnp.maximum(snow.iterations, bare.iterations),
     )
-    Tsu, _, Ti, Ts, qns, _, iterations, k_top_i = jax.lax.fori_loop(
-        0, _maximum_iterations, body, init
-    )
-    e_i = ice_enthalpy_from_temperature(
-        Ti, S_layers, constants, _nemo_order=_nemo_eos_order, width=tm_width
-    )
-    e_s = snow_enthalpy_from_temperature(Ts, constants)
-
-    # Interface conductive diagnostics, `icethd_zdf_bl99.F90:743-761`.
-    k_base_i = p07_conductivity(T_bottom, S_layers[..., -1], constants) / dz_i
-    k_top = jnp.where(
-        snow_present,
-        constants.k_snow / dz_s,
-        k_top_i,
-    )
-    T_first = jnp.where(snow_present, Ts[..., 0], Ti[..., 0])
-    qcn_top = 2.0 * k_top * (Tsu - T_first)
-    qcn_bottom = 2.0 * k_base_i * (Ti[..., -1] - T_bottom)
-    return SI3ZDFResult(
-        Tsu, Ti, Ts, e_i, e_s, qns, qtr_bottom, qcn_top, qcn_bottom, iterations
-    )
+    return SI3ZDFResult(*(straight_through(h, so) for h, so in zip(hard[:-1], soft[:-1])),
+                        hard.iterations)
 
 
 def _piecewise_remap(thickness, enthalpy, new_total, n_layers: int = 3):
