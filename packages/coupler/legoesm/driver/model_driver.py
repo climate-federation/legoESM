@@ -17402,7 +17402,7 @@ class ModelDriver:
         # Gated on a PRESENT callback → the standalone spectral path is
         # byte-identical (no callback ⇒ this whole block is dead).
         _has_segcb = getattr(self, "_segment_callback", None) is not None
-        _last_coupling_day = None
+        _seg_n = 0   # steps since the last coupling boundary
 
         def _spectral_sfc_net_rad(state, day):
             """(sw_net_sfc, lw_net_sfc) [W/m^2, +into surface] from the current
@@ -17463,57 +17463,59 @@ class ModelDriver:
         _sp_seg = _sp_acc_new()
         _sp_diag = _sp_acc_new()
 
+        def _state_finite(st, every_leaf=False):
+            """Spectral coefficients finite (complex: both parts); with
+            ``every_leaf`` every inexact array of the state, tracers included."""
+            arrs = ([x for x in jax.tree.leaves(st)
+                     if jnp.issubdtype(jnp.result_type(x), jnp.inexact)]
+                    if every_leaf else
+                    [f.data for f in (st.vor_hat, st.div_hat, st.T_hat,
+                                      st.lnps_hat)])
+            return all(bool(jnp.all(jnp.isfinite(a))) for a in arrs)
+
+        def _couple(n):
+            """Hand the coupler the ``n`` steps since the last boundary (#2290).
+
+            Called at the END of the step that closes a day or the run.
+            """
+            _sw_net, _lw_net = _spectral_sfc_net_rad(
+                self.state, float(daily_forcing_bucket(self._current_day)))
+            if not isinstance(self._carry_aux, dict):
+                self._carry_aux = {}
+            self._carry_aux["held_sw_net_sfc"] = _sw_net
+            self._carry_aux["held_lw_net_sfc"] = _lw_net
+            # Surface precipitation export [kg/m^2/s, +down] (#2277): the
+            # segment-MEAN rate over the steps since the last boundary (the
+            # compiled lanes' segment_accum_to_rate semantics).  Its frozen
+            # part is None when a precipitating module does not publish one
+            # -- the coupler then refuses (require_surface_radiation_aux).
+            # The dry legacy path precipitates nothing: an exact zero.
+            if _full_physics:
+                if not _sp_seg["ok"] or _sp_seg["p"] is None:
+                    raise RuntimeError(
+                        "coupled spectral lane: a step since the last "
+                        "coupling boundary published no surface "
+                        "precipitation (model._sfc_precip is None: the "
+                        "step path does not integrate it, e.g. the "
+                        "semi-implicit RK); run the driver's explicit "
+                        "ssp_rk54 or leapfrog_si integrator.")
+                _seg_s = _sp_seg["n"] * DT
+                self._carry_aux["seg_precip"] = (
+                    _sp_seg["p"] / _seg_s).reshape(shape_2d)
+                self._carry_aux["seg_precip_frozen"] = (
+                    None if _sp_seg["frozen"] is None
+                    else (_sp_seg["frozen"] / _seg_s).reshape(shape_2d))
+                _sp_seg.update(_sp_acc_new())
+            else:
+                self._carry_aux["seg_precip"] = jnp.zeros_like(_sw_net)
+                # nothing falls, nothing frozen (F29: the coupler needs it)
+                self._carry_aux["seg_precip_frozen"] = jnp.zeros_like(_sw_net)
+            # The segment's real length: a full day, or the steps a restart
+            # link or the run's last partial day actually took.
+            self._segment_callback(self, self._current_day, n * DT)
+
         for step in range(start_step, n_steps_total):
             self._current_day = START_DAY + (step + 1) * DT / 86400.0
-
-            # Coupled daily boundary (explicit coupling, mirrors _run_column): at
-            # the first step of a new day, recompute + stash the surface fluxes
-            # from the CURRENT (end-of-elapsed-day) state and step the coupler's
-            # ocean/land for that day BEFORE this step advances the atmosphere.
-            # The fluxes are recomputed from the SAME state the callback's
-            # _build_atm_forcing reads, so forcing + state are self-consistent.
-            # Step 0 has nothing to step yet (_last_coupling_day is None).
-            if _has_segcb:
-                _cd_int = daily_forcing_bucket(self._current_day)
-                if (_last_coupling_day is not None
-                        and _cd_int != _last_coupling_day):
-                    _sw_net, _lw_net = _spectral_sfc_net_rad(
-                        self.state, float(_cd_int))
-                    if not isinstance(self._carry_aux, dict):
-                        self._carry_aux = {}
-                    self._carry_aux["held_sw_net_sfc"] = _sw_net
-                    self._carry_aux["held_lw_net_sfc"] = _lw_net
-                    # Surface precipitation export [kg/m^2/s, +down] (#2277):
-                    # the segment-MEAN rate over the steps since the last
-                    # boundary (the compiled lanes' segment_accum_to_rate
-                    # semantics), from the precip each step's physics applied.
-                    # Its frozen part is None when a precipitating module does
-                    # not publish one -- the coupler then refuses
-                    # (require_surface_radiation_aux).  The dry legacy path
-                    # precipitates nothing: an exact zero.
-                    if _full_physics:
-                        if not _sp_seg["ok"] or _sp_seg["p"] is None:
-                            raise RuntimeError(
-                                "coupled spectral lane: a step since the last "
-                                "coupling boundary published no surface "
-                                "precipitation (model._sfc_precip is None: the "
-                                "step path does not integrate it, e.g. the "
-                                "semi-implicit RK); run the driver's explicit "
-                                "ssp_rk54 or leapfrog_si integrator.")
-                        _seg_s = _sp_seg["n"] * DT
-                        self._carry_aux["seg_precip"] = (
-                            _sp_seg["p"] / _seg_s).reshape(shape_2d)
-                        self._carry_aux["seg_precip_frozen"] = (
-                            None if _sp_seg["frozen"] is None
-                            else (_sp_seg["frozen"] / _seg_s).reshape(shape_2d))
-                        _sp_seg = _sp_acc_new()
-                    else:
-                        self._carry_aux["seg_precip"] = jnp.zeros_like(_sw_net)
-                        # nothing falls, nothing frozen (F29: the coupler needs it)
-                        self._carry_aux["seg_precip_frozen"] = jnp.zeros_like(
-                            _sw_net)
-                    self._segment_callback(self, self._current_day, 86400.0)
-                _last_coupling_day = _cd_int
 
             if _full_physics:
                 # Traced forcing for the unified pipeline: SST/SIC-blend
@@ -17677,6 +17679,27 @@ class ModelDriver:
                     self._write_blowup_state(step + 1, self._current_day)
                     break
 
+            # Coupled boundary (explicit coupling, as _run_column): the step
+            # whose end enters a new day closes the segment, so the coupler
+            # sees the state after the whole day; the run's last step closes
+            # a trailing partial day.  After the blow-up check (never hand the
+            # coupler a state that check rejects), before the checkpoint (it
+            # then holds the post-coupling ocean/land).
+            if _has_segcb:
+                _seg_n += 1
+                if (step == n_steps_total - 1
+                        or daily_forcing_bucket(self._current_day)
+                        != daily_forcing_bucket(
+                            START_DAY + step * DT / 86400.0)):
+                    if not _state_finite(self.state, every_leaf=True):
+                        run_status = (
+                            f"BLOWUP at day {self._current_day - START_DAY:.1f}")
+                        logger.error(f"{run_status} (at the coupling boundary)")
+                        self._write_blowup_state(step + 1, self._current_day)
+                        break
+                    _couple(_seg_n)
+                    _seg_n = 0
+
             # Periodic checkpoint (FIX_RESTART_TIME iteration 4) —
             # cadence on ABSOLUTE steps, independent of the diagnostic
             # interval.  Guard finiteness FIRST (MPAS pattern): the
@@ -17686,18 +17709,7 @@ class ModelDriver:
             # subsequent chain link).
             if (CHECKPOINT_INTERVAL > 0
                     and (step + 1) % CHECKPOINT_INTERVAL == 0):
-                _s = self.state
-
-                def _all_finite_c(arr):
-                    # Complex coefficients: finite iff BOTH parts are.
-                    return (jnp.all(jnp.isfinite(arr.real))
-                            & jnp.all(jnp.isfinite(arr.imag)))
-
-                _finite = (_all_finite_c(_s.vor_hat.data)
-                           & _all_finite_c(_s.div_hat.data)
-                           & _all_finite_c(_s.T_hat.data)
-                           & _all_finite_c(_s.lnps_hat.data))
-                if not bool(_finite):
+                if not _state_finite(self.state):
                     run_status = (
                         f"BLOWUP at day {self._current_day - START_DAY:.1f}")
                     logger.error(
