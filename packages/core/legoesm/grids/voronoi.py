@@ -1126,7 +1126,8 @@ _BIG_MESH_LOCK_STALE_S = 7200.0   # lloyd=50 at subdiv-9 ~ 5 h; lloyd=0 ~ min
 # unchanged args (e.g. edits to _lloyd_relaxation / _build_mesh_from_generators).
 # The schema check below only catches FIELD changes; a value-changing algorithm
 # edit must invalidate old caches via this token.
-_MESH_CACHE_VERSION = 1
+# v2: geometry stored float64, rounded once to the run dtype (#2381/#2382).
+_MESH_CACHE_VERSION = 2
 
 
 def _voronoi_cache_disabled() -> bool:
