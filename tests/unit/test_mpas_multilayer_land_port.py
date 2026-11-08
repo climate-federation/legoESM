@@ -773,7 +773,10 @@ def test_radiation_upward_lw_is_the_lw_the_land_lost(monkeypatch, tmp_path):
     land call whose outputs that radiation step reads (land is called after
     radiation within a step, so radiation call i reads land call i-1).
     Before the fix the radiation emitted from the canopy-AIR temperature at
-    the scalar E: this test fails by O(1) W/m2 there."""
+    the scalar E: this test fails by O(1) W/m2 there.  Runs the production
+    two-leaf canopy, whose LW_out is the LW its solve balanced (SimpleSEB's
+    exported lw_up is a post-step diagnostic of a linearized solve: vote
+    SEB-a, a follow-up)."""
     import legoesm.land.multilayer_land as _mll
     import legoesm.atmosphere.physics.radiation.integration as _rint
     _patch_land_loaders(monkeypatch)
@@ -805,7 +808,8 @@ def test_radiation_upward_lw_is_the_lw_the_land_lost(monkeypatch, tmp_path):
     monkeypatch.setattr(_mll, "step_multilayer_land_with_diagnostics", _land)
     monkeypatch.setattr(_rint, "resolve_prescribed_radiative_bc", _bc)
     d = _build_driver(str(tmp_path), FOUR_STEPS_DAYS, radiation="rrtmgp",
-                      **_LS_KW)
+                      **{k: v for k, v in _LS_KW.items()
+                         if k != "land_surface_scheme"})
     assert d.run() == "COMPLETED"
     assert len(land_calls) >= 2 and len(rad_calls) >= 2, (
         len(land_calls), len(rad_calls))

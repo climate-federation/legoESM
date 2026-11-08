@@ -279,12 +279,20 @@ def land_radiating_surface(T_sea, f_land, E_sea, T_rad_land, eps_land):
     ``T_sea`` so an ``f == 0`` cell returns ``(T_sea, E_sea)`` bitwise
     (``E_sea/E_sea == 1``).  No floor: every temperature and emissivity is
     positive on the domain (vote V7a), so the map is smooth there.
+
+    Formed at the promoted precision of all inputs (a float32 land mask must
+    not round ``(1-f)*E_sea`` before the float64 fields join it) and
+    returned in ``T_sea``'s dtype, the dtype of the cold-start seed, so the
+    forcing pytree keeps one dtype from the first step.
     """
-    eps_g = (1.0 - f_land) * E_sea + f_land * eps_land
-    T_g = T_sea * (((1.0 - f_land) * E_sea
-                    + f_land * eps_land * (T_rad_land / T_sea) ** 4)
-                   / eps_g) ** 0.25
-    return T_g, eps_g
+    wdt = jnp.result_type(T_sea, f_land, T_rad_land, eps_land)
+    T_s, f, T_l, e_l = (jnp.asarray(x, wdt)
+                        for x in (T_sea, f_land, T_rad_land, eps_land))
+    eps_g = (1.0 - f) * E_sea + f * e_l
+    T_g = T_s * (((1.0 - f) * E_sea + f * e_l * (T_l / T_s) ** 4)
+                 / eps_g) ** 0.25
+    out_dt = jnp.asarray(T_sea).dtype
+    return T_g.astype(out_dt), eps_g.astype(out_dt)
 
 
 # Per-cell fields of the MPAS land step tuple, after the state: T_sfc, albedo,

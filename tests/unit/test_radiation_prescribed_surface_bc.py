@@ -178,6 +178,10 @@ def test_land_radiating_surface_closes_the_tile_lw_and_keeps_sea_cells():
         want = ((1.0 - f) * (E * sb * T_sea ** 4 + (1.0 - E) * La)
                 + f * (eps_l * sb * T_l ** 4 + (1.0 - eps_l) * La))
         np.testing.assert_allclose(seen, want, rtol=1e-13, atol=0.0)
+    # a float32 land mask must not round E before the float64 fields join
+    T32, e32 = land_radiating_surface(T_sea, f.astype(jnp.float32), E, T_l,
+                                      eps_l)
+    assert T32.dtype == T_sea.dtype and float(e32[0]) == E
     m = slice(1, 4)
     check_grads(lambda a, b, c, d: land_radiating_surface(a, b, E, c, d)[0],
                 (T_sea[m], f[m], T_l[m], eps_l[m]), order=2,
