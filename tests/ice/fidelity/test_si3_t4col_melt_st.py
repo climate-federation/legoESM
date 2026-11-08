@@ -189,17 +189,27 @@ def test_soft_column_do_budgets_close_inside_the_bands(monkeypatch):
     hard_cap = _with(monkeypatch, "hard", lambda q: run(st, q)[0].h_ice, jnp.asarray(q_cap))
     soft_cap = _with(monkeypatch, "soft", lambda q: run(st, q)[0].h_ice, jnp.asarray(q_cap))
     assert np.all(np.asarray(hard_cap) != np.asarray(soft_cap))       # cap band hit in every cell
+    every = np.ones(len(room), bool)
+    # Thin arm: only the cells ice_thd_do acts on; below epsi10 the hard step itself
+    # zeroes h, a pre-existing behaviour outside PR 3 (vote Z62).
+    arms = ((st, jnp.full_like(fz.qlead, -0.5 * WF), every), (st, jnp.asarray(q_cap), every),
+            (thin, fz.qlead, np.asarray(fz.qlead) < 0.0))
+    for s_, q, _ in arms:      # Z62: real straight_through gradient finite in every arm
+        g = jax.grad(lambda q_: jnp.sum(run(s_, q_)[0].h_ice * run(s_, q_)[0].concentration
+                                         * (1.0 + jnp.sum(run(s_, q_)[0].e_ice, -1))))(q)
+        assert np.all(np.isfinite(np.asarray(g)))
     monkeypatch.setattr(bl, "straight_through", lambda h, s: s)
-    for st, q in ((st, jnp.full_like(fz.qlead, -0.5 * WF)), (st, jnp.asarray(q_cap)), (thin, fz.qlead)):
-        o, fx = run(st, q)
-        a0, a1 = np.asarray(st.concentration), np.asarray(o.concentration)
-        v0, v1 = np.asarray(st.h_ice) * a0, np.asarray(o.h_ice) * a1
+    for s_, q, m in arms:
+        o, fx = run(s_, q)
+        a0, a1 = np.asarray(s_.concentration)[m], np.asarray(o.concentration)[m]
+        v0, v1 = np.asarray(s_.h_ice)[m] * a0, np.asarray(o.h_ice)[m] * a1
+        g_ = lambda k: np.asarray(getattr(fx, k))[m]  # noqa: E731
         # Tiny-flux arm differences O(1e-11 m) out of O(1 m) volumes: atol at the
         # inventory's roundoff scale (vote Z59).
         tol = lambda x: 1e-14 * c * np.abs(x).max() / DT   # noqa: E731
-        np.testing.assert_allclose(c * (v1 - v0) / DT, -np.asarray(fx.wfx_opw), rtol=1e-11, atol=max(1e-18, tol(v0)))
-        s0, s1 = np.asarray(st.S_bulk) * v0, np.asarray(o.S_bulk) * v1
-        np.testing.assert_allclose(c * (s1 - s0) / DT, -np.asarray(fx.sfx_opw), rtol=1e-12, atol=max(1e-16, tol(s0)))
-        q0, q1 = np.sum(st.e_ice, -1) * v0 / 3.0, np.sum(o.e_ice, -1) * v1 / 3.0
-        np.testing.assert_allclose((q1 - q0) / DT, np.asarray(fx.hfx_thd - fx.hfx_opw), rtol=1e-10, atol=1e-8)
-        np.testing.assert_allclose(np.asarray(o.h_snow) * a1, np.asarray(st.h_snow) * a0, rtol=1e-14, atol=0)
+        np.testing.assert_allclose(c * (v1 - v0) / DT, -g_("wfx_opw"), rtol=1e-11, atol=max(1e-18, tol(v0)))
+        s0, s1 = np.asarray(s_.S_bulk)[m] * v0, np.asarray(o.S_bulk)[m] * v1
+        np.testing.assert_allclose(c * (s1 - s0) / DT, -g_("sfx_opw"), rtol=1e-12, atol=max(1e-16, tol(s0)))
+        q0, q1 = np.sum(np.asarray(s_.e_ice)[m], -1) * v0 / 3.0, np.sum(np.asarray(o.e_ice)[m], -1) * v1 / 3.0
+        np.testing.assert_allclose((q1 - q0) / DT, g_("hfx_thd") - g_("hfx_opw"), rtol=1e-10, atol=1e-8)
+        np.testing.assert_allclose(np.asarray(o.h_snow)[m] * a1, np.asarray(s_.h_snow)[m] * a0, rtol=1e-14, atol=0)
