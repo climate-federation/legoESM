@@ -2295,16 +2295,15 @@ def advect_si3_prather_2d(
             # multi-cycle step ran on the extended halo); every field when ihls == 0 and jt < icycle;
             # the moments only at jt == icycle.  Contents are folded at the end instead of in
             # icedyn.F90 (the lbc only overwrites halo rows, so the interior is the same).
-            if ihls > 0:
-                continue
-            out = si3_orca_f_pivot_halo(out, "T", 1.0)
-            out_moments = cast(
-                SI3PratherMoments,
-                tuple(
-                    si3_orca_f_pivot_halo(value, "T", sign)
-                    for value, sign in zip(out_moments, _SI3_PRA_MOMENT_LBC_SIGNS)
-                ),
-            )
+            if ihls == 0 or subcycle_index == subcycles:
+                out = si3_orca_f_pivot_halo(out, "T", 1.0)
+                out_moments = cast(
+                    SI3PratherMoments,
+                    tuple(
+                        si3_orca_f_pivot_halo(value, "T", sign)
+                        for value, sign in zip(out_moments, _SI3_PRA_MOMENT_LBC_SIGNS)
+                    ),
+                )
         else:
             out = _si3_periodic_halo_xy(out, halo_width)
             out_moments = cast(
