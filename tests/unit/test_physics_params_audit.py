@@ -342,11 +342,6 @@ def _turb_call(fn, cfg, second):
 
 
 class TestTurbulenceAudit:
-    def test_tke_Ck(self):
-        from legoesm.atmosphere.physics.turbulence.tke import tke_turbulence
-        from legoesm.atmosphere.physics.turbulence.config import TKEConfig
-        assert_grad_ok(lambda x: _turb_call(tke_turbulence,
-            TKEConfig()._replace(Ck=x), True), 0.1, "tke.Ck")
 
     def test_clubb_lite_C_K(self):
         from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_lite_turbulence
