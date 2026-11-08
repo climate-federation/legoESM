@@ -1530,6 +1530,7 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    nemo_e3t_jpk: jnp.ndarray | None = None
     # NEMO ldf_dyn_init's READ coefficient (nn_ahm_ijk_t = -30,
     # ldfdyn.f90:348-353): the whole 3-D lateral momentum viscosity, already
     # exchanged and masked as that routine leaves it.  ``nemo_ldf_ahmt`` is on
@@ -1544,10 +1545,6 @@ class OceanPartialCellCoordinate(NamedTuple):
     # it moved the kt=1-10 NEMO-record distance further, so every other card
     # keeps the reconstructed source (user decision 2026-10-17).
     nemo_stage_faces_raw_mesh: bool = False
-
-    nemo_e3t_jpk: jnp.ndarray | None = None
-
-
 
 def create_partial_cell_coordinate(
     z_coord: OceanZStarCoordinate,

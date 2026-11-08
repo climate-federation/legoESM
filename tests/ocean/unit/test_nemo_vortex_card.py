@@ -651,11 +651,13 @@ _CERTIFIED_CARD_DIGESTS_GRADGATE = {        # gradient-gate tip d678430f3
 # GYRE resolves vertical_mixing.scheme = "tke"); the non-config part of the
 # digest is identical.
 _CERTIFIED_CARD_DIGESTS = {
-    # The appended config fields move the printed NamedTuple digest; the
-    # surrounding field-by-field guards pin their resolved values below.
-    "GYRE-zco": "6bb18cf2c428e5ab",
-    "LOCK_EXCHANGE-zco": "9f64d2b817f72f5e",
-    "OVERFLOW-zps": "f3ca241ed2a098b7",
+    # Catch-up merge audit: state/grid/z/land/tail components are unchanged,
+    # and every common config leaf is value-identical to main.  The digest
+    # moves for the combined NamedTuple field order plus the appended fields
+    # whose values are pinned by the surrounding field-by-field guards.
+    "GYRE-zco": "6e62ad9e2f13da2b",
+    "LOCK_EXCHANGE-zco": "fe969dad638d27b6",
+    "OVERFLOW-zps": "7a4559a730c1079d",
 }
 
 

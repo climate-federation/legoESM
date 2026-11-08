@@ -290,8 +290,6 @@ def test_positional_construction_unshifted_by_tail_field():
         "rk3_stage_tracer_written_order",
         "rk3_stage3_heat_nemo_written",
         "rk3_stage3_tracer_nemo_stored_thickness",
-        "bbl_nemo_stage3_krhs",
-        "bbl_nemo_pivot_ghost",
         "rk3_stage2_tracer_nemo_stored_thickness",
         "rk3_stage3_salt_nemo_written",
         "implicit_ice_ocean_top_drag",
@@ -346,7 +344,7 @@ def test_positional_construction_unshifted_by_tail_field():
 
 def test_prescribed_flow_config_index_preserved():
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    assert LatLonCGridOceanConfig._fields.index("prescribed_flow") == 97
+    assert LatLonCGridOceanConfig._fields.index("prescribed_flow") == 99
 
 
 def _isolationbreaking_physics(mle=None, lateral_scheme="none"):

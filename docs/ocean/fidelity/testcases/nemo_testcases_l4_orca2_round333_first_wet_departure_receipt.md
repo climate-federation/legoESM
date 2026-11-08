@@ -67,7 +67,7 @@ already recorded completed stage and fold exchange.
 
 The earliest possible owner in that order is therefore the `tra_adv` call at
 line 637. Its legoESM counterpart is the production stage-3 `_flux_pair`
-call at `ocean_model_latlon_cgrid.py:2994-2995`. This assignment is
+call at `ocean_model_latlon_cgrid.py:2988-2989`. This assignment is
 **PLAUSIBLE, not CONFIRMED**: the existing kt-2 records jump from the preceding
 completed stage to the completed stage-3 frame, so they cannot distinguish
 advection from any later tracer statement. No single statement is eligible
