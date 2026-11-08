@@ -18,9 +18,9 @@ from legoesm.atmosphere.physics.turbulence.les_tuned import (
     scm_turbulence_config,
 )
 
-# The 8 FLAT closures (params land directly on the sub-config). CLUBB is tuned
+# The 7 FLAT closures (params land directly on the sub-config). CLUBB is tuned
 # too but nested (CLUBBParams) — covered by dedicated tests below, not here.
-_TUNED_SCHEMES = ["smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+_TUNED_SCHEMES = ["smagorinsky", "louis", "tke", "mynn25",
                   "holtslag_boville", "ysu", "edmf"]
 
 

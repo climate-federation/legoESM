@@ -166,8 +166,7 @@ def _assemble_physics_config(p, grid, *, turbulence_scheme, surface_bulk_scheme,
 # path).  That is a pre-existing, unrelated limitation; the config-level
 # threading for mynn25 is covered by test_mynn25_config_threads_most below,
 # which does not go through make_physics.
-@pytest.mark.parametrize("turb_scheme", ["edmf", "holtslag_boville", "ysu",
-                                         "clubb_lite"])
+@pytest.mark.parametrize("turb_scheme", ["edmf", "holtslag_boville", "ysu"])
 def test_non_louis_turbulence_honours_bulk_scheme(turb_scheme):
     """A non-Louis turbulence scheme must NOT stay pinned to constant.
 

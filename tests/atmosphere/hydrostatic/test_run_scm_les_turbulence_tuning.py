@@ -32,7 +32,7 @@ drv = _load_driver()
 # --- scheme coverage --------------------------------------------------------
 
 def test_scheme_list_matches_the_dispatch():
-    """Every selectable closure except 'none' must be a candidate."""
+    """Every selectable closure except 'none' and the retired clubb_lite."""
     import inspect
 
     from legoesm.atmosphere.physics.turbulence import integration
@@ -40,7 +40,8 @@ def test_scheme_list_matches_the_dispatch():
     for scheme in drv.TURBULENCE_SCHEMES:
         assert f'"{scheme}"' in src, f"{scheme} not in get_turbulence_fn"
     assert "none" not in drv.TURBULENCE_SCHEMES
-    assert len(drv.TURBULENCE_SCHEMES) == 9
+    assert "clubb_lite" not in drv.TURBULENCE_SCHEMES
+    assert len(drv.TURBULENCE_SCHEMES) == 8
 
 
 @pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)
@@ -462,7 +463,7 @@ def test_the_dead_check_covers_every_scheme_not_just_clubb():
     # assertion that fails loudly if the resolver ever returns everything,
     # which would silently freeze the whole model.
     for scheme in ("ysu", "louis", "edmf", "holtslag_boville",
-                   "smagorinsky", "clubb_lite", "tke"):
+                   "smagorinsky", "tke"):
         got = drv._dead_params_for(scheme)
         assert got == frozenset(), f"{scheme}: unexpected dead fields {got}"
         assert turb_config is not None

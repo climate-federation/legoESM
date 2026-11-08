@@ -424,7 +424,7 @@ def test_swap_convection_schemes(conv_scheme):
 
 @pytest.mark.parametrize(
     "turb_scheme",
-    ["smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+    ["smagorinsky", "louis", "tke", "mynn25",
      "holtslag_boville", "ysu", "edmf"],
 )
 def test_swap_turbulence_schemes(turb_scheme):

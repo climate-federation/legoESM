@@ -24,7 +24,7 @@ _ZERO_PRESCRIBED = ("prescribed_shflx_w_m2", "prescribed_lhflx_w_m2",
 # ------------------------------------------------------- training builder
 
 @pytest.mark.parametrize("turb", ["louis", "tke", "smagorinsky", "edmf",
-                                  "holtslag_boville", "ysu", "clubb_lite"])
+                                  "holtslag_boville", "ysu"])
 def test_none_prescribes_zero_surface_exchange_for_every_scheme(turb):
     from tests.unit.test_aimip_surface_bulk_scheme import (
         _assemble_physics_config)

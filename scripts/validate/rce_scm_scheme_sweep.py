@@ -63,7 +63,7 @@ CONVECTION_SCHEMES = (
     "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
 )
 TURBULENCE_SCHEMES = (
-    "smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+    "smagorinsky", "louis", "tke", "mynn25",
     "holtslag_boville", "ysu", "edmf",
 )
 

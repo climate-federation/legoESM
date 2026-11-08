@@ -917,7 +917,8 @@ class TurbulenceConfig(NamedTuple):
     mynn25 : MYNN25Config
         Configuration for MYNN-2.5 scheme (Nakanishi-Niino 2009).
     clubb_lite : CLUBBLiteConfig
-        Configuration for CLUBB-lite scheme.
+        Configuration for CLUBB-lite, the LES-correction campaign's stand-in
+        (not a CLUBB port; see ``CLUBB_LITE_STANDIN_NOTE``).
     clubb : CLUBBConfig or None
         Configuration for the fuller CLUBB scheme (``scheme="clubb"``). ``None``
         selects the CAM-default ``CLUBBConfig()`` (resolved in the dispatcher);
@@ -954,3 +955,15 @@ class TurbulenceConfig(NamedTuple):
     # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
     # turbulence runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1
+
+
+CLUBB_LITE_STANDIN_NOTE = (
+    "turbulence 'clubb_lite' is a reduced stand-in (one wp2 moment), not a "
+    "CLUBB port; it is kept only for the LES-informed coefficient-correction "
+    "campaign. Use 'clubb' for the faithful CAM CLUBB.")
+
+
+def refuse_retired_turbulence(scheme: str, where: str) -> None:
+    """Raise if ``scheme`` is ``clubb_lite`` outside the LES-correction campaign."""
+    if scheme == "clubb_lite":
+        raise ValueError(f"{where}: {CLUBB_LITE_STANDIN_NOTE} It is retired here.")

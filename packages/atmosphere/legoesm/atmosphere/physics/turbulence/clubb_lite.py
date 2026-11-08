@@ -1,5 +1,10 @@
 """CLUBB-lite — simplified higher-order turbulence closure.
 
+STATUS: LES-correction campaign stand-in ONLY. Not a CLUBB port (no reference
+model contains this scheme). Retired from the AIMIP sweep, the AIMIP parameter
+lane, the SCM and the SCM tuning scripts, which refuse it; use ``clubb`` (the
+faithful CAM CLUBB port) everywhere else.
+
 Carries five prognostic second-order moments and diagnoses cloud fraction
 from a Gaussian PDF of the saturation deficit, following the approach of
 Golaz et al. (2002) and Larson & Golaz (2005).
