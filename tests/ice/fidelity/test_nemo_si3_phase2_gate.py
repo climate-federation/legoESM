@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import tempfile
 from pathlib import Path
 
@@ -89,6 +90,7 @@ def test_zero_content_zeroes_all_five_prather_moments():
         ice_volume_index=0,
         concentration_index=0,
         subcycles=1,
+        limit_sharpness_scale=math.inf,  # NEMO hard limiter (oracle)
     )
     assert all(
         np.array_equal(np.asarray(value)[2:-2, 2:-2], np.zeros((3, 3, 1)))
@@ -137,6 +139,7 @@ def test_prather_requires_hbig_indices():
             dx=1.0,
             dy=1.0,
             subcycles=1,
+            limit_sharpness_scale=math.inf,  # NEMO hard limiter (oracle)
         )
 
 
@@ -161,6 +164,7 @@ def test_prather_dual_outflow_uses_nemo_sequential_donor_residual():
         ice_volume_index=0,
         concentration_index=1,
         subcycles=1,
+        limit_sharpness_scale=math.inf,  # NEMO hard limiter (oracle)
     )
     # icedyn_adv_pra.F90:590-597 first leaves the right-going residual;
     # :618-664 then extracts the left-going slab from that residual.
@@ -214,6 +218,7 @@ def test_hbig_concentration_correction_is_non_vacuous(monkeypatch):
             ice_volume_index=ICE_ADV1D_TRACERS.index("v_i"),
             concentration_index=ICE_ADV1D_TRACERS.index("a_i"),
             subcycles=2,
+            limit_sharpness_scale=math.inf,  # NEMO hard limiter (oracle)
         )
         without_hbig = apply_ice_adv1d_zapsmall(
             card, without_hbig, contents, moments

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import hashlib
 import json
 from pathlib import Path
@@ -1050,6 +1052,7 @@ def step_ice_adv2d_card(
         ice_volume_index=ICE_ADV2D_TRACERS.index("v_i"),
         concentration_index=ICE_ADV2D_TRACERS.index("a_i"),
         subcycles=card.subcycles,
+        limit_sharpness_scale=math.inf,
     )
     if _use_legacy_extensive_correction_order:
         contents = apply_ice_adv2d_source_corrections(

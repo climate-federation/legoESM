@@ -9,6 +9,8 @@ replace only the surface-stress association or the five rheology outputs.
 
 from __future__ import annotations
 
+import math
+
 import argparse
 import importlib.util
 import json
@@ -268,7 +270,7 @@ def _dynamics_rows(card, state, target: dict[str, np.ndarray]) -> list[dict[str,
     forcing = _forcing_for_state(card, state, ENTRY_STEP)
     result = jax.jit(
         lambda dynamics, applied: si3_cgrid_aevp_solver(
-            dynamics, applied, card.metrics, card.dynamics_config
+            dynamics, applied, card.metrics, card.dynamics_config, limit_sharpness_scale=math.inf
         )
     )(state.dynamics, forcing)
     jax.block_until_ready(result)
