@@ -457,8 +457,10 @@ def test_pipeline_stateless_gwd_composite_runs_and_sums(setup):
     assert jnp.allclose(du_composite, du_sum, atol=1e-10)
 
 
-@pytest.mark.parametrize("scheme", ["thompson", "morrison", "p3", "seifert_beheng"])
-def test_pipeline_numbers_match_bridge(scheme):
+@pytest.mark.parametrize("scheme,ccn", [("thompson", False), ("morrison", False),
+                                        ("p3", False), ("seifert_beheng", False),
+                                        ("morrison", True)])
+def test_pipeline_numbers_match_bridge(scheme, ccn):
     """Each double-moment scheme through the driver pipeline and through the
     hydrostatic bridge on the same columns: the pipeline converts its
     per-mass N_c/N_r carry to the schemes' per-volume numbers and back, as
@@ -494,6 +496,9 @@ def test_pipeline_numbers_match_bridge(scheme):
         convection="none", radiation="none", microphysics=scheme,
         # morrison's default warm rain needs CLUBB's relvar (not on this lane)
         **({"morrison_warm_rain_scheme": "kk2000"} if scheme == "morrison" else {}),
+        # aerosol-CCN specified N_c: already per volume, must pass through
+        # unconverted on both lanes (GLM review)
+        **({"nc_from_aerosol": True, "aerosol_forcing": "external"} if ccn else {}),
     )
     config.validate_strict()
     pipe = build_physics_pipeline(grid, sigma, config)
@@ -504,24 +509,35 @@ def test_pipeline_numbers_match_bridge(scheme):
             f["u"], f["v"], f["sst"], f["sic"], f["lat"], DT,
             z3, f["z2"], f["z2"], f["z2"], f["z2"], f["z2"], **kw)
 
-    full = dict(q_i=z3, q_s=z3, q_g=z3, N_c=n_c, N_r=n_r, N_i=z3)
+    ncol = int(np.prod(f["p_s"].shape))
+    aod = jnp.full((ncol, NLEV), 0.3 / NLEV)                  # column AOD 0.3
+    full = dict(q_i=z3, q_s=z3, q_g=z3, N_c=n_c, N_r=n_r, N_i=z3,
+                **({"aerosol_od": aod} if ccn else {}))
     out = step(**full)
     bridge = make_microphysics_physics(
         MicrophysicsConfig(scheme=scheme,
-                           morrison=MorrisonConfig(warm_rain_scheme="kk2000")),
+                           morrison=MorrisonConfig(warm_rain_scheme="kk2000",
+                                                   nc_from_aerosol=ccn)),
         model_type="hydrostatic", dt=DT)
     d3 = state.T.dims
     tr = {k: Field(x, name=k, dims=d3) for k, x in (
         ("q_v", q_v), ("q_c", q_c), ("q_r", q_r), ("q_i", z3),
         ("q_s", z3), ("q_g", z3), ("N_c", n_c), ("N_r", n_r), ("N_i", z3))}
-    tend = bridge(state._replace(tracers=tr), grid, sigma)
+    tend = bridge(state._replace(tracers=tr), grid, sigma,
+                  forcing={"aerosol_od": aod} if ccn else None)
     for pipe_x, ref, what in (
             (out.dN_r_dt, tend.tracer_tendencies["N_r"].data, "dN_r"),
             (out.dq_r_dt, tend.tracer_tendencies["q_r"].data, "dq_r"),
+            (out.dq_c_dt, tend.tracer_tendencies["q_c"].data, "dq_c"),
             (out.precip, tend.precip.data, "precip")):
         scale = float(jnp.max(jnp.abs(ref)))
         assert scale > 0.0, f"no {what}"
         assert float(jnp.max(jnp.abs(pipe_x - ref))) <= 1e-9 * scale, what
+    if ccn:      # the activated number actually drives the answer
+        tend0 = bridge(state._replace(tracers=tr), grid, sigma,
+                       forcing={"aerosol_od": 3.0 * aod})
+        assert not np.allclose(np.asarray(tend0.tracer_tendencies["q_c"].data),
+                               np.asarray(out.dq_c_dt), rtol=1e-6, atol=0.0)
     if scheme == "thompson":
         with pytest.raises(ValueError, match="N_i"):
             step(**{**full, "N_i": None})
