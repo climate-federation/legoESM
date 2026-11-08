@@ -32,7 +32,8 @@ from legoesm.ice.si3_orca2_state import (
     si3_var_agg,
     si3_var_glo2eqv,
 )
-from legoesm.ice.si3_surface import SI3SurfaceConfig, si3_ice_alb
+from legoesm.ice.config import SI3SwitchConfig
+from legoesm.ice.si3_surface import SI3SurfaceConfig, si3_gt, si3_ice_alb, si3_mix
 from legoesm.ice.transport import si3_var_zapsmall
 
 from legoesm import constants as canonical_constants
@@ -772,17 +773,72 @@ def si3_ice_update_flx(
     surface_config: SI3SurfaceConfig,
     _plant_omit_hfx_res: bool = False,
 ) -> tuple[SI3Fluxes, SI3UpdateFluxOutputs]:
-    """Execute the active production-deck ``ice_update_flx`` arm."""
-    if not config.ln_icethd:
-        raise ValueError("O16 requires resolved ln_icethd=True")
-    if surface_config.ln_cndflx:
-        raise ValueError("O16 owns the resolved ln_cndflx=False arm")
-
+    """Execute the active production-deck ``ice_update_flx`` arm on the ORCA2 state (ice albedo included)."""
     agg = state.aggregated
     eqv = state.equivalent
     h = int(config.nn_hls)
     sl = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
-    at_i_interior = agg.at_i[sl]
+    fluxes_out, outputs = si3_ice_update_flx_columns(
+        at_i=agg.at_i, vt_i=agg.vt_i, vt_s=agg.vt_s, vt_ip=agg.vt_ip, vt_il=agg.vt_il,
+        t_su=state.t_su, fluxes=fluxes, forcing=forcing, config=config,
+        switches=surface_config.switches, ln_cndflx=surface_config.ln_cndflx,
+        _plant_omit_hfx_res=_plant_omit_hfx_res)
+    alb_ice = si3_ice_alb(
+        t_su=state.t_su[sl],
+        h_i=eqv.h_i[sl],
+        h_s=eqv.h_s[sl],
+        a_ip_eff=eqv.a_ip_eff[sl],
+        h_ip=eqv.h_ip[sl],
+        h_il=eqv.h_il[sl],
+        cloud_fra=forcing.cloud_fra,
+        smask0=forcing.smask0,
+        config=surface_config,
+    )
+    return fluxes_out, outputs._replace(alb_ice=alb_ice)
+
+
+def si3_ice_update_flx_columns(
+    *,
+    at_i: Field,
+    vt_i: Field,
+    vt_s: Field,
+    vt_ip: Field,
+    vt_il: Field,
+    t_su: Field,
+    fluxes: SI3Fluxes,
+    forcing: SI3UpdateFluxForcing,
+    config: SI3ORCA2StateConfig,
+    switches: SI3SwitchConfig,
+    ln_cndflx: bool = False,
+    _plant_omit_hfx_res: bool = False,
+) -> tuple[SI3Fluxes, SI3UpdateFluxOutputs]:
+    """``ice_update_flx`` (NEMO 5.0.1 ``iceupdate.F90:84-200``, ``ln_cndflx=F``) on aggregated ice arrays.
+
+    State-free form: the caller passes the category-summed ice fields (``at_i``, ``vt_i``, ``vt_s``,
+    ``vt_ip``, ``vt_il``; ``t_su`` with the category axis) with ``config.nn_hls`` halo cells, so any SI3
+    state carrier can use it (the ORCA2 ``SI3State`` through :func:`si3_ice_update_flx`; the ORCA1
+    ``jpl=1`` column state, ponds off -> ``vt_ip = vt_il = 0``).  ``alb_ice`` is returned as None
+    (the ice albedo is the surface port's, computed by the caller).
+
+    The lead-warming branch (``fhld > 0`` and ``at_i > 0``: ``qsr = (1-frq_m)*(open SW + transmitted SW)``)
+    is NEMO's hard switch at ``switches.relative_width == 0``; otherwise a C1 blend of the two ``qsr``
+    forms over ``relative_width * flux_scale_W_m2`` in ``fhld`` and ``relative_width * ice_switch_scale``
+    in ``at_i`` (RULE 5).  ``qns = qt_oce_ai - qsr``, so the blend moves heat between the solar and
+    non-solar channels and never changes the column total.
+
+    KNOWN DIFFERENCE (RULE 5): on the tier-4 ORCA1 record (NEMO 5.0.1, kt 17281, 108,432 interior cells)
+    the smooth default moves qsr in 3 cells (0 < fhld < 0.01 W/m2 or 0 < at_i < 1e-12) by up to 8.9 W/m2,
+    with qsr + qns unchanged (max difference 0); inside a ramp the gap reaches the full jump between the two
+    NEMO forms.  ``switches=SI3_HARD_SWITCHES`` recovers NEMO.
+    """
+    if not config.ln_icethd:
+        raise ValueError("O16 requires resolved ln_icethd=True")
+    if ln_cndflx:
+        raise ValueError("O16 owns the resolved ln_cndflx=False arm")
+
+    h = int(config.nn_hls)
+    sl = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
+    at_i_interior = at_i[sl]
     qt_atm_oi = sr(forcing.qns_tot + forcing.qsr_tot)
     transmitted = _category_sum(sr(forcing.a_i_b * sr(forcing.qsr_ice - forcing.qtr_ice_bot)))
     zqsr = sr(forcing.qsr_tot - transmitted)
@@ -808,7 +864,10 @@ def si3_ice_update_flx(
     ice_qsr = _category_sum(sr(forcing.a_i_b * forcing.qtr_ice_bot))
     ice_qsr = sr(ice_qsr * one_minus_frq)
     warm_qsr = sr(open_qsr + ice_qsr)
-    qsr = jnp.where((fluxes.fhld > _ZERO) & (at_i_interior > _ZERO), warm_qsr, zqsr)
+    w = switches.relative_width
+    warm = (si3_gt(fluxes.fhld, _ZERO, w * switches.flux_scale_W_m2)
+            * si3_gt(at_i_interior, _ZERO, w * switches.ice_switch_scale))
+    qsr = si3_mix(warm, warm_qsr, zqsr, w)
     qns = sr(qt_oce_ai - qsr)
 
     wfx_sub = sr(fluxes.wfx_snw_sub + fluxes.wfx_ice_sub)
@@ -844,28 +903,14 @@ def si3_ice_update_flx(
     )
 
     snwice_mass, snwice_mass_b, snwice_fmass = si3_update_snwice_mass(
-        vt_i=agg.vt_i,
-        vt_s=agg.vt_s,
-        vt_ip=agg.vt_ip,
-        vt_il=agg.vt_il,
+        vt_i=vt_i,
+        vt_s=vt_s,
+        vt_ip=vt_ip,
+        vt_il=vt_il,
         snwice_mass_prev=forcing.snwice_mass,
         tmask=forcing.tmask,
         config=config,
         is_init=False,
-    )
-    fr_i = agg.at_i
-
-    tn_ice = state.t_su[sl]
-    alb_ice = si3_ice_alb(
-        t_su=state.t_su[sl],
-        h_i=eqv.h_i[sl],
-        h_s=eqv.h_s[sl],
-        a_ip_eff=eqv.a_ip_eff[sl],
-        h_ip=eqv.h_ip[sl],
-        h_il=eqv.h_il[sl],
-        cloud_fra=forcing.cloud_fra,
-        smask0=forcing.smask0,
-        config=surface_config,
     )
     fluxes_out = fluxes._replace(
         wfx_sub=wfx_sub,
@@ -881,9 +926,9 @@ def si3_ice_update_flx(
         wfx_ice=wfx_ice,
         wfx_snw=wfx_snw,
         wfx_pnd=fluxes.wfx_pnd,
-        fr_i=fr_i,
-        tn_ice=tn_ice,
-        alb_ice=alb_ice,
+        fr_i=at_i,
+        tn_ice=t_su[sl],
+        alb_ice=None,
         snwice_mass=snwice_mass,
         snwice_mass_b=snwice_mass_b,
         snwice_fmass=snwice_fmass,
@@ -1040,6 +1085,7 @@ __all__ = (
     "SI3UpdateFluxOutputs",
     "si3_ice_cor",
     "si3_ice_update_flx",
+    "si3_ice_update_flx_columns",
     "si3_ice_update_tau",
     "si3_o15_step",
     "si3_o16_step",
