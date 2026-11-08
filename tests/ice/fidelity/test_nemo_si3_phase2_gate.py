@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import legoesm.ice.transport as ice_transport
 import numpy as np
 import pytest
+from tests._nemo_si3_oracle import needs_oracle
 from legoesm.ice.fidelity.nemo_testcase_recipe import (
     ICE_ADV1D_TRACERS,
     apply_ice_adv1d_zapsmall,
@@ -35,6 +36,7 @@ def _build_card():
     return build_ice_adv1d_card(gate._oracle_surface_temperature_c(gate.ROOT))
 
 
+@needs_oracle(gate.ROOT)
 def test_card_is_fp64_and_default_ice_state_layout_is_unchanged():
     from legoesm.ice.state import init_dynamic_ice_state
 
@@ -44,6 +46,7 @@ def test_card_is_fp64_and_default_ice_state_layout_is_unchanged():
     assert len(jax.tree.leaves(init_dynamic_ice_state((2, 2)))) == 12
 
 
+@needs_oracle(gate.ROOT)
 def test_prather_rung_rejects_a_nonzero_y_velocity():
     card = _build_card()
     with pytest.raises(ValueError, match="v_ice == 0 exactly"):
@@ -55,6 +58,7 @@ def test_prather_rung_rejects_a_nonzero_y_velocity():
         )
 
 
+@needs_oracle(gate.ROOT)
 def test_complete_card_step_jits_and_has_nonzero_finite_reverse_mode_gradient():
     card = _build_card()
     state = card.initial_state
@@ -96,6 +100,7 @@ def test_zero_content_zeroes_all_five_prather_moments():
     )
 
 
+@needs_oracle(gate.ROOT)
 def test_kt1_and_first_completed_step_clear_the_pointwise_bar():
     card = _build_card()
     _, first = gate.oracle_gate.read_frame(
@@ -188,6 +193,7 @@ def test_prather_dual_outflow_uses_nemo_sequential_donor_residual():
     assert float(result_moments[2][3, 2, 0]) == pytest.approx(expected_sxx)
 
 
+@needs_oracle(gate.ROOT)
 def test_hbig_concentration_correction_is_non_vacuous(monkeypatch):
     card = _build_card()
     with_hbig = card.initial_state
@@ -229,6 +235,7 @@ def test_hbig_concentration_correction_is_non_vacuous(monkeypatch):
     assert float(np.max(np.abs(bad - oracle))) / scale > 1.0e-11
 
 
+@needs_oracle(gate.ROOT)
 def test_moment_restart_carry_and_perturbation_control():
     card = _build_card()
     assert gate.restart_carry_control(card)["status"] == "VERIFIED"
@@ -240,6 +247,7 @@ def test_moment_restart_carry_and_perturbation_control():
         gate.restart_carry_control(card, retype_moment=True)
 
 
+@needs_oracle(gate.ROOT)
 def test_complete_restart_refuses_a_retyped_moment():
     card = _build_card()
     with tempfile.TemporaryDirectory() as directory:
@@ -253,6 +261,7 @@ def test_complete_restart_refuses_a_retyped_moment():
             load_ice_adv1d_restart(path, card)
 
 
+@needs_oracle(gate.ROOT)
 def test_complete_restart_refuses_selector_forcing_and_clock_changes():
     card = _build_card()
     with tempfile.TemporaryDirectory() as directory:
@@ -286,6 +295,7 @@ def test_complete_restart_refuses_selector_forcing_and_clock_changes():
             load_ice_adv1d_restart(path, card)
 
 
+@needs_oracle(gate.ROOT)
 def test_geometry_and_state_plants_go_red():
     card = _build_card()
     rows: list[dict] = []
@@ -297,6 +307,7 @@ def test_geometry_and_state_plants_go_red():
     assert rows[0]["status"] == "DEBT"
 
 
+@needs_oracle(gate.ROOT)
 def test_unaccounted_mesh_array_control_goes_red():
     with pytest.raises(gate.oracle_gate.GateError, match="PLANTED_UNACCOUNTED"):
         gate._mesh_coverage(gate.ROOT, plant_unaccounted=True)
@@ -304,6 +315,7 @@ def test_unaccounted_mesh_array_control_goes_red():
         gate.candidate_frame_contract(plant_unaccounted=True)
 
 
+@needs_oracle(gate.ROOT)
 def test_real_gate_reports_core_at_bar_and_loud_restart_moment_debt():
     report, code = gate.run_gate(gate.ROOT)
     assert code == 1

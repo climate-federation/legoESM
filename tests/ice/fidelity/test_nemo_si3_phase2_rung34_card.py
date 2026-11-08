@@ -10,6 +10,7 @@ import jax
 import netCDF4
 import numpy as np
 import pytest
+from tests._nemo_si3_oracle import needs_oracle
 from legoesm.core.precision import get_policy
 from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import (
     ICE_RHEO_TRACERS,
@@ -75,6 +76,7 @@ def _mesh_xy(value: np.ndarray) -> np.ndarray:
     return value.T
 
 
+@needs_oracle(_ROOT)
 def test_rung34_card_geometry_and_dtype_gate(oracle_card) -> None:
     card, _, mesh = oracle_card
     assert get_policy().transcendentals == "libm"
@@ -108,6 +110,7 @@ def test_rung34_card_geometry_and_dtype_gate(oracle_card) -> None:
         )
 
 
+@needs_oracle(_ROOT)
 def test_rung34_initial_state_is_the_oracle_entry_frame(oracle_card) -> None:
     card, frame, _ = oracle_card
     index = ICE_RHEO_TRACERS.index
@@ -119,6 +122,7 @@ def test_rung34_initial_state_is_the_oracle_entry_frame(oracle_card) -> None:
     assert all(np.count_nonzero(np.asarray(value)) == 0 for value in card.initial_state.moments)
 
 
+@needs_oracle(_ROOT)
 def test_rung34_shipped_wind_integer_exponent_branch(oracle_card) -> None:
     card, _, _ = oracle_card
     stress_u, stress_v = ice_rheo_air_stress(card.initial_state, 1)
@@ -141,6 +145,7 @@ def test_rung34_shipped_wind_integer_exponent_branch(oracle_card) -> None:
         ice_rheo_air_stress(card.initial_state, 0)
 
 
+@needs_oracle(_ROOT)
 def test_rung34_card_rejects_frankenstein_selector(oracle_card) -> None:
     card, _, _ = oracle_card
     with pytest.raises(ValueError, match="selector composition"):
@@ -156,6 +161,7 @@ def test_rung34_card_rejects_frankenstein_selector(oracle_card) -> None:
             validate_ice_rheo_card(wrong)
 
 
+@needs_oracle(_ROOT)
 def test_rung34_kt1_full_dynall_gate(oracle_card) -> None:
     card, _, _ = oracle_card
     gate = _oracle_gate_module()

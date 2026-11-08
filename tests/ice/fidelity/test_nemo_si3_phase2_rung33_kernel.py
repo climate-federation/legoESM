@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import netCDF4
 import numpy as np
 import pytest
+from tests._nemo_si3_oracle import needs_oracle
 from legoesm.core.precision import get_policy
 from legoesm.ice.dynamics import (
     SI3CGridAEVPState,
@@ -60,6 +61,7 @@ def _normalized(oracle: np.ndarray, candidate: np.ndarray) -> float:
     )
 
 
+@needs_oracle(_ROOT)
 def test_rung33_card_is_fp64_and_fail_closed():
     card = _card()
     assert get_policy().transcendentals == "libm"
@@ -86,6 +88,7 @@ def test_rung33_card_is_fp64_and_fail_closed():
         )
 
 
+@needs_oracle(_ROOT)
 def test_prather_bridge_is_the_jitted_nemo_pack_then_reciprocal_products():
     card = _card()
     area = card.metrics.area_t
@@ -105,6 +108,7 @@ def test_prather_bridge_is_the_jitted_nemo_pack_then_reciprocal_products():
     np.testing.assert_array_equal(recovered, expected_recovered)
 
 
+@needs_oracle(_ROOT)
 def test_stress_divergence_weight_plant_reaches_scored_card_trajectory():
     card = _card()
     baseline = step_ice_adv2d_rhg_card(card, completed_steps=0)
@@ -121,6 +125,7 @@ def test_stress_divergence_weight_plant_reaches_scored_card_trajectory():
     assert difference / max(1.0, scale) > _POINTWISE_BAR
 
 
+@needs_oracle(_ROOT)
 def test_rn_ishlat_outside_resolved_orca1_arm_is_rejected_before_tracing():
     card = _card()
     assert card.dynamics_config.rn_ishlat == 2.0
@@ -133,6 +138,7 @@ def test_rn_ishlat_outside_resolved_orca1_arm_is_rejected_before_tracing():
         )
 
 
+@needs_oracle(_ROOT)
 def test_drag_io_t_is_directionally_averaged_like_nemo():
     card = _card()
     forcing = _forcing_for_state(card.forcing_template, card.initial_state, card.base)
@@ -162,6 +168,7 @@ def test_drag_io_t_is_directionally_averaged_like_nemo():
     )
 
 
+@needs_oracle(_ROOT)
 def test_f_stress_deliberately_has_no_t_presence_mask():
     card = _card()
     one = jnp.ones_like(card.initial_state.dynamics.stress1_t)
@@ -182,6 +189,7 @@ def test_f_stress_deliberately_has_no_t_presence_mask():
     assert float(jnp.max(jnp.abs(result.stress12_f))) > 0.0
 
 
+@needs_oracle(_ROOT)
 def test_final_deformation_diagnostic_binds_to_velocity_gradients():
     card = _card()
     forcing = _forcing_for_state(
@@ -207,6 +215,7 @@ def test_final_deformation_diagnostic_binds_to_velocity_gradients():
     assert float(jnp.max(deformation)) > 0.0
 
 
+@needs_oracle(_ROOT)
 def test_full_hundred_subcycle_kernel_jits_and_differentiates():
     card = _card()
     forcing = _forcing_for_state(card.forcing_template, card.initial_state, card.base)
@@ -238,6 +247,7 @@ def test_full_hundred_subcycle_kernel_jits_and_differentiates():
     assert float(jnp.max(jnp.abs(gradient))) > 0.0
 
 
+@needs_oracle(_ROOT)
 def test_kt1_full_dynamics_is_bit_exact_from_pinned_intensive_entry():
     """Pin the Round-11 bridge result for all five aEVP carries."""
 

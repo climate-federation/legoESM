@@ -6,6 +6,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+from tests._nemo_si3_oracle import needs_oracle
 
 REPLAY_PATH = Path(__file__).parents[3] / (
     "scripts/validate/ocean_fidelity/testcases/nemo_si3_phase2_adv2d_replay.py"
@@ -23,6 +24,7 @@ def test_ulp_distance_is_exact_and_non_vacuous():
     assert np.array_equal(replay._ulp_distance(value, neighbor), np.ones(3, dtype=np.uint64))
 
 
+@needs_oracle(replay.ROOT)
 def test_written_order_replay_classifies_and_plant_changes_output():
     report = replay.run_replay(replay.ROOT)
     assert report["classification"] in {
