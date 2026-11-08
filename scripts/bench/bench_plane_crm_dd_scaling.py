@@ -3,9 +3,9 @@
 The dycore configuration, height coordinate, tracer count and initial state
 come from the production RCEMIP plane driver (``scripts/run/run_rcemip_plane.py``)
 through its own builders: every argument this bench does not own is handed to
-that driver's ``parse_args``, so its defaults ARE the driver's defaults and any
-driver flag (``--advection``, ``--sgs-vertical``, ``--semi-implicit``, ...) can
-be passed here unchanged.
+that driver's ``parse_args`` after ``RCEMIP1_DECK_ARGV`` (the production deck
+``run_rcemip1_crm.sh`` values, nlev 64), so any driver flag (``--advection``,
+``--sgs-vertical``, ...) passed here overrides the deck value.
 
 * ``--mode strong``: ``--nx/--ny`` are the GLOBAL grid.
   Efficiency(N) = t(1) / (N * t(N)).
@@ -44,6 +44,18 @@ import time
 from pathlib import Path
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
+
+# Production deck = scripts/run/run_rcemip1_crm.sh (production phase) where it
+# differs from the driver defaults, with nlev 64 (user decision 2026-11-04).
+# Prepended to the driver argv, so an explicit flag on the command line wins.
+RCEMIP1_DECK_ARGV = (
+    "--dx", "4000", "--dt", "6", "--hyperdiff", "1.0e7",
+    "--n-acoustic-substeps", "6", "--off-centering", "0.1",
+    "--smag-cs", "0.19", "--semi-implicit", "--microphysics", "morrison",
+    "--nlev", "64", "--T-sfc", "300.0", "--insolation", "rcemip",
+    "--radiation", "rrtmgp", "--clouds", "--radiation-interval", "150",
+)
 
 
 def bench_parser() -> argparse.ArgumentParser:
@@ -165,7 +177,7 @@ def main(argv=None):
 
     import run_rcemip_plane as rcp
     from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
-        HORIZONTAL_ADVECTION_HALO_REQUIREMENT, PlaneCompressibleEulerModel,
+        PlaneCompressibleEulerModel, horizontal_advection_halo_width,
         make_flat_plane_terrain_metric,
     )
     from legoesm.grids.plane import create_plane_grid
@@ -175,7 +187,8 @@ def main(argv=None):
 
     jax.config.update("jax_enable_x64", bargs.precision == "float64")
     dtype = jnp.float32 if bargs.precision == "float32" else jnp.float64
-    rargs = rcp.parse_args(runner_argv + ["--precision", bargs.precision])
+    rargs = rcp.parse_args([*RCEMIP1_DECK_ARGV, *runner_argv,
+                            "--precision", bargs.precision])
     if rargs.hyperdiff is None:  # same resolution as the driver's main()
         rargs.hyperdiff = rcp.dx_aware_hyperdiff(rargs.dx)
     if rargs.sam_grd is not None or rargs.sounding is not None:
@@ -193,7 +206,7 @@ def main(argv=None):
     ny_g, nx_g = global_grid_shape(bargs.mode, rargs.ny, rargs.nx,
                                    n_ranks_y, n_ranks_x)
     cfg = rcp.build_dycore_config(rargs)
-    halo = HORIZONTAL_ADVECTION_HALO_REQUIREMENT[cfg.horizontal_advection_scheme]
+    halo = horizontal_advection_halo_width(cfg)
     layout = make_plane_pencil_layout(
         rank=rank, n_ranks=n_ranks, n_ranks_y=n_ranks_y, n_ranks_x=n_ranks_x,
         ny_global=ny_g, nx_global=nx_g, halo=halo,

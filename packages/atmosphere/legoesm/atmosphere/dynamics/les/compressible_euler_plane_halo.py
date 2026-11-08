@@ -79,9 +79,10 @@ from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig, sponge_profile, compute_exner_perturbation,
 )
 from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
-    full_level_centred_d_dz, moisture_buoyancy_w_half,
+    centered_advection, full_level_centred_d_dz, moisture_buoyancy_w_half,
     safe_sqrt_strain, sgs_brunt_vaisala_sq,
-    vertical_advection_van_leer_plane,
+    vertical_advection_van_leer_plane, vertical_K_diffusion_full,
+    vertical_K_diffusion_w,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.core.state import (
@@ -354,6 +355,32 @@ def _require_single_rank_closure(closure: str) -> None:
             "rank, or use turbulence_closure='smagorinsky' under MPI.")
 
 
+def _halo_advection_pair(scheme: str):
+    """``(adv_x, adv_y)`` halo-path horizontal advection for ``scheme``.
+
+    Each takes ``(f_pad, u_pad, d, h)`` and returns the interior tendency.
+    ``centered`` runs the serial roll kernel on the padded slab and keeps the
+    interior: its stencil reaches only i±1, so with ``h >= 1`` every interior
+    value reads the same neighbours as the serial roll on the global array.
+    """
+    if scheme == "weno5":
+        return oh.weno5_advection_x_halo, oh.weno5_advection_y_halo
+    if scheme == "van_leer":
+        return oh.van_leer_advection_x_halo, oh.van_leer_advection_y_halo
+    if scheme == "upwind1":
+        return oh.upwind_advection_x_halo, oh.upwind_advection_y_halo
+    if scheme == "centered":
+        def _crop(axis):
+            return lambda f_pad, u_pad, d, h: centered_advection(
+                f_pad, u_pad, d, axis=axis)[h:-h, h:-h, ...]
+        return _crop(1), _crop(0)
+    # A scheme added to HORIZONTAL_ADVECTION_HALO_REQUIREMENT but not wired
+    # here must not fall through to another scheme (iter-192).
+    raise NotImplementedError(
+        f"horizontal advection scheme {scheme!r} has no halo-path wiring in "
+        "compressible_euler_plane_halo._halo_advection_pair.")
+
+
 def plane_compressible_euler_slow_tendencies_halo(
     state: PlaneNonHydrostaticState,
     grid: PlaneGrid,
@@ -403,6 +430,14 @@ def plane_compressible_euler_slow_tendencies_halo(
     # one raised after several MPI rounds.
     _require_single_rank_closure(
         getattr(config, "turbulence_closure", "smagorinsky"))
+    # The dynamic (Germano / LASD) C_s(z) needs plane averages the halo K_m
+    # kernel does not compute; it would silently run the fixed C_s instead.
+    if (getattr(config, "turbulence_closure", "smagorinsky") == "smagorinsky"
+            and config.smagorinsky_cs > 0.0
+            and getattr(config, "smagorinsky_dynamic", False)):
+        raise NotImplementedError(
+            "smagorinsky_dynamic=True is single-rank only (no MPI-halo dynamic "
+            "C_s); the halo path would silently use the fixed smagorinsky_cs.")
 
     h = layout.halo if hasattr(layout, "halo") else 1
 
@@ -529,7 +564,7 @@ def plane_compressible_euler_slow_tendencies_halo(
     # ONE place; the driver script (run_rce_mpi_long.py) reads the
     # same map at layout construction.
     from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
-        HORIZONTAL_ADVECTION_HALO_REQUIREMENT,
+        HORIZONTAL_ADVECTION_HALO_REQUIREMENT, horizontal_advection_halo_width,
     )
     scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
     if scheme not in HORIZONTAL_ADVECTION_HALO_REQUIREMENT:
@@ -538,67 +573,22 @@ def plane_compressible_euler_slow_tendencies_halo(
             f"Expected one of "
             f"{sorted(HORIZONTAL_ADVECTION_HALO_REQUIREMENT)}."
         )
-    # ADV-SPLIT (#86): the per-field momentum/scalar advection split is wired in
-    # the SERIAL slow-tendency path; the MPI halo path here still applies ONE
-    # scheme to both legs. Fail LOUD rather than silently diverge serial≠MPI
-    # (CLAUDE.md: serial/MPI bit-identical) until the split is wired here too.
-    _mscheme = getattr(config, "horizontal_momentum_advection_scheme", None)
-    if _mscheme is not None and _mscheme != scheme:
-        raise NotImplementedError(
-            "horizontal_momentum_advection_scheme (ADV-SPLIT #86) is not yet "
-            "wired into the MPI halo dycore path — it would silently diverge "
-            "from the serial split. Use the serial (single-rank) path, or set "
-            "horizontal_momentum_advection_scheme=None for MPI runs."
-        )
-    # SGS-VERT (#81): the VERTICAL SGS flux ∂_z(K ∂_z φ) is wired in the serial
-    # path but NOT here. Fail LOUD rather than silently diverge serial≠MPI (the
-    # horizontal-only #80 tracer SGS IS mirrored below). Wiring needs a
-    # column-local vertical-flux call on u/v/θ'/tracers/w + a parity test.
-    if getattr(config, "sgs_vertical_diffusion", False):
-        raise NotImplementedError(
-            "sgs_vertical_diffusion (SGS-VERT #81) is not yet wired into the "
-            "MPI halo dycore path (vertical SGS flux is serial-only) — it would "
-            "silently diverge from the serial path. Use the serial (single-rank) "
-            "path, or set sgs_vertical_diffusion=False for MPI runs."
-        )
-    _required_halo = HORIZONTAL_ADVECTION_HALO_REQUIREMENT[scheme]
+    # ADV-SPLIT (#86): MOMENTUM legs (u/v/w) may use their own scheme, exactly
+    # as the serial slow tendency does; None ⇒ the scalar scheme.
+    mscheme = getattr(
+        config, "horizontal_momentum_advection_scheme", None) or scheme
+    _required_halo = horizontal_advection_halo_width(config)
     if h < _required_halo:
         raise ValueError(
-            f"horizontal_advection_scheme={scheme!r} requires "
+            f"horizontal_advection_scheme={scheme!r} / "
+            f"horizontal_momentum_advection_scheme={mscheme!r} require "
             f"layout.halo >= {_required_halo}; got halo={h}. "
             f"Construct the layout with "
-            f"make_plane_pencil_layout(..., halo={_required_halo}) "
-            f"or rely on the driver's iter-187 auto-selection."
+            f"make_plane_pencil_layout(..., "
+            f"halo=horizontal_advection_halo_width(config))."
         )
-    if scheme == "weno5":
-        adv_x = lambda f_pad, u_pad_, dx_, h_: (
-            oh.weno5_advection_x_halo(f_pad, u_pad_, dx_, h_)
-        )
-        adv_y = lambda f_pad, v_pad_, dy_, h_: (
-            oh.weno5_advection_y_halo(f_pad, v_pad_, dy_, h_)
-        )
-    elif scheme == "van_leer":
-        adv_x = lambda f_pad, u_pad_, dx_, h_: (
-            oh.van_leer_advection_x_halo(f_pad, u_pad_, dx_, h_)
-        )
-        adv_y = lambda f_pad, v_pad_, dy_, h_: (
-            oh.van_leer_advection_y_halo(f_pad, v_pad_, dy_, h_)
-        )
-    elif scheme == "upwind1":
-        adv_x = oh.upwind_advection_x_halo
-        adv_y = oh.upwind_advection_y_halo
-    else:
-        # iter-192 Codex MEDIUM: a fourth scheme added to
-        # HORIZONTAL_ADVECTION_HALO_REQUIREMENT but NOT wired into
-        # this dispatch would silently fall through to upwind on the
-        # halo path. Refuse loudly so the failure mode matches the
-        # serial path (compressible_euler_plane.py raises identically).
-        raise NotImplementedError(
-            f"horizontal_advection_scheme={scheme!r} is in "
-            f"HORIZONTAL_ADVECTION_HALO_REQUIREMENT but has no halo-path "
-            f"wiring in compressible_euler_plane_halo.py. Add the "
-            f"adv_x / adv_y branch alongside upwind1 / van_leer / weno5."
-        )
+    adv_x, adv_y = _halo_advection_pair(scheme)
+    madv_x, madv_y = _halo_advection_pair(mscheme)
     # POSITIVITY GUARD (codex CRM-dycore review): mirror the serial dycore —
     # positive-definite TRACERS use the monotone van_leer limiter under weno5
     # (θ′ below keeps weno5). van_leer_*_halo accepts halo>=2 and, given
@@ -637,18 +627,18 @@ def plane_compressible_euler_slow_tendencies_halo(
     )
 
     # 6. Horizontal momentum advection — u advected by (u, v_at_xface),
-    #    v advected by (u_at_yface, v).
+    #    v advected by (u_at_yface, v). MOMENTUM scheme (madv; ADV-SPLIT #86).
     v_at_xface = oh.interp_yface_to_xface_vlast_halo(v_pad, grid, h)
     u_at_yface = oh.interp_xface_to_yface_vlast_halo(u_pad, grid, h)
     v_at_xface_pad = _re_pad_halo(v_at_xface, layout, h)
     u_at_yface_pad = _re_pad_halo(u_at_yface, layout, h)
     du_adv = (
-        adv_x(u_pad, u_pad, grid.dx, h)
-        + adv_y(u_pad, v_at_xface_pad, grid.dy, h)
+        madv_x(u_pad, u_pad, grid.dx, h)
+        + madv_y(u_pad, v_at_xface_pad, grid.dy, h)
     )
     dv_adv = (
-        adv_x(v_pad, u_at_yface_pad, grid.dx, h)
-        + adv_y(v_pad, v_pad, grid.dy, h)
+        madv_x(v_pad, u_at_yface_pad, grid.dx, h)
+        + madv_y(v_pad, v_pad, grid.dy, h)
     )
 
     # 7. Vertical advection (column-local).
@@ -658,12 +648,12 @@ def plane_compressible_euler_slow_tendencies_halo(
     du_dt = du_adv + du_vert + du_pg + du_cor
     dv_dt = dv_adv + dv_vert + dv_pg + dv_cor
 
-    # 8. w slow part — same scheme as theta + momentum (set above).
+    # 8. w slow part — MOMENTUM scheme, like the serial path.
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
     w_full_pad = _re_pad_halo(w_full, layout, h)
     dw_full = (
-        adv_x(w_full_pad, u_center_pad, grid.dx, h)
-        + adv_y(w_full_pad, v_center_pad, grid.dy, h)
+        madv_x(w_full_pad, u_center_pad, grid.dx, h)
+        + madv_y(w_full_pad, v_center_pad, grid.dy, h)
     )
     pad_axes = ((0, 0),) * (dw_full.ndim - 1)
     dw_dt = jnp.pad(
@@ -820,6 +810,17 @@ def plane_compressible_euler_slow_tendencies_halo(
         dtheta_p_dt = dtheta_p_dt + oh.variable_K_diffusion_vlast_halo(
             theta_p_pad, K_h_pad, grid, h,
         )
+        # SGS-VERT (#81): column-local vertical SGS flux on interior arrays,
+        # same helpers, staggering and addition order as the serial path.
+        _sgs_vert = getattr(config, "sgs_vertical_diffusion", False)
+        K_h_int = K_m_int / sgs_prandtl
+        if _sgs_vert:
+            du_dt = du_dt + vertical_K_diffusion_full(
+                u, K_xface_int, height_coord)
+            dv_dt = dv_dt + vertical_K_diffusion_full(
+                v, K_yface_int, height_coord)
+            dtheta_p_dt = dtheta_p_dt + vertical_K_diffusion_full(
+                theta_p, K_h_int, height_coord)
         # K_m at half level for w: column-local mean + rigid zero BC.
         K_m_half_interior = 0.5 * (K_m_pad[..., :-1] + K_m_pad[..., 1:])
         pad_axes_K = ((0, 0),) * (K_m_half_interior.ndim - 1)
@@ -829,6 +830,8 @@ def plane_compressible_euler_slow_tendencies_halo(
         dw_dt = dw_dt + oh.variable_K_diffusion_vlast_halo(
             w_pad_half, K_m_half_pad, grid, h,
         )
+        if _sgs_vert:
+            dw_dt = dw_dt + vertical_K_diffusion_w(w, K_m_int, height_coord)
 
     # 12. Tracer advection.
     tracers = state.tracers.data
@@ -866,11 +869,18 @@ def plane_compressible_euler_slow_tendencies_halo(
         # leg here so the two stay bit-identical (K_h_pad is in scope only
         # inside the closure block above — Smagorinsky OR molecular/DNS).
         if _use_smag or _use_mol:
-            dtracers_dt = dtracers_dt + jax.vmap(
+            # Serial grouping: adv + (horizontal SGS + vertical SGS).
+            tracer_sgs = jax.vmap(
                 lambda q_pad: oh.variable_K_diffusion_vlast_halo(
                     q_pad, K_h_pad, grid, h),
                 in_axes=-1, out_axes=-1,
             )(tracers_pad)
+            if _sgs_vert:
+                tracer_sgs = tracer_sgs + jax.vmap(
+                    lambda q: vertical_K_diffusion_full(q, K_h_int, height_coord),
+                    in_axes=-1, out_axes=-1,
+                )(tracers)
+            dtracers_dt = dtracers_dt + tracer_sgs
     else:
         dtracers_dt = jnp.zeros_like(tracers)
     zero_phis = jnp.zeros_like(state.phis.data)
@@ -1182,6 +1192,11 @@ def slow_tendency_jit_split(
         or state.tracers.data.shape[-1] > 0
         or config.use_coriolis
         or _advection != "upwind1"
+        # ADV-SPLIT momentum scheme and vertical SGS live only in the eager
+        # kernel; this fast path would silently drop them.
+        or (getattr(config, "horizontal_momentum_advection_scheme", None)
+            or _advection) != _advection
+        or getattr(config, "sgs_vertical_diffusion", False)
         or _w_hyperdiff > 0.0
         # Full Skamarock-Klemp split: the PG/continuity gating lives in
         # the eager path; this fast path would double-count both.

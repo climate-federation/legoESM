@@ -133,3 +133,17 @@ def test_driver_builders_resolve_production_defaults():
         register_default_catalog()
     lc = les.cbl_les_config(get_case("cbl_nieuwstadt").grid, la, "lasd")
     assert lc.dealias and lc.time_scheme == "rk3" and not lc.sgs_buoyancy
+
+
+def test_crm_bench_defaults_are_the_rcemip1_production_deck():
+    """The bench's CRM settings resolve to run_rcemip1_crm.sh's production
+    values (nlev 64), and an explicit flag still overrides the deck."""
+    import run_rcemip_plane as rcp
+    a = rcp.parse_args(list(crm.RCEMIP1_DECK_ARGV))
+    cfg = rcp.build_dycore_config(a)
+    assert (a.dx, a.dt, a.nlev, a.microphysics, a.radiation) == (
+        4000.0, 6.0, 64, "morrison", "rrtmgp")
+    assert (a.hyperdiff, a.n_acoustic_substeps, a.off_centering,
+            a.smag_cs) == (1.0e7, 6, 0.1, 0.19)
+    assert cfg.semi_implicit_acoustic and cfg.substep_horizontal_acoustic
+    assert rcp.parse_args([*crm.RCEMIP1_DECK_ARGV, "--nlev", "8"]).nlev == 8

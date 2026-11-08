@@ -293,13 +293,13 @@ def test_vertical_sgs_diffusion_conserves_column_integral():
     ρ_ref[k]·dz_k = F_top − F_bot = 0`` (codex iter-64 [HIGH]: plain ``dz`` is
     NOT the conserved measure for a density-weighted vertical flux)."""
     from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
-        _vertical_K_diffusion_full,
+        vertical_K_diffusion_full,
     )
     _, grid, hc, _, _ = _setup()
     rng = np.random.default_rng(11)
     f = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
     K = jnp.asarray(np.abs(rng.standard_normal((grid.ny, grid.nx, grid.nlev))))
-    tend = _vertical_K_diffusion_full(f, K, hc)
+    tend = vertical_K_diffusion_full(f, K, hc)
     mass = jnp.asarray(hc.rho_ref) * jnp.asarray(hc.dz)   # ρ₀·dz column weight
     col_int = jnp.sum(tend * mass, axis=-1)        # (ny, nx) per column
     rel = float(jnp.max(jnp.abs(col_int))) / max(
@@ -316,13 +316,13 @@ def test_vertical_sgs_diffusion_is_dissipative():
     integration by parts ⇒ ``−Σ ρ_w·K·(∂_z f)²/dz_half ≤ 0``). Guards the
     sign of the mass-weighted vertical flux divergence."""
     from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
-        _vertical_K_diffusion_full,
+        vertical_K_diffusion_full,
     )
     _, grid, hc, _, _ = _setup()
     rng = np.random.default_rng(12)
     f = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
     K = jnp.asarray(np.abs(rng.standard_normal((grid.ny, grid.nx, grid.nlev))))
-    tend = _vertical_K_diffusion_full(f, K, hc)
+    tend = vertical_K_diffusion_full(f, K, hc)
     mass = jnp.asarray(hc.rho_ref) * jnp.asarray(hc.dz)
     dissipation = float(jnp.sum(f * tend * mass))
     assert dissipation <= 0.0, (
@@ -340,7 +340,7 @@ def test_vertical_sgs_w_diffusion_is_dissipative_and_respects_rigid_bc():
     staggering — a wrong index/sign would break the energy sign or leak a
     boundary tendency."""
     from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
-        _vertical_K_diffusion_w,
+        vertical_K_diffusion_w,
     )
     _, grid, hc, _, _ = _setup()
     nlev = grid.nlev
@@ -350,7 +350,7 @@ def test_vertical_sgs_w_diffusion_is_dissipative_and_respects_rigid_bc():
     w[..., -1] = 0.0          # rigid top
     w = jnp.asarray(w)
     K = jnp.asarray(np.abs(rng.standard_normal((grid.ny, grid.nx, nlev))))
-    tend = _vertical_K_diffusion_w(w, K, hc)
+    tend = vertical_K_diffusion_w(w, K, hc)
     # (b) boundary interfaces untouched (w held by the rigid BC).
     assert float(jnp.max(jnp.abs(tend[..., 0]))) == 0.0
     assert float(jnp.max(jnp.abs(tend[..., -1]))) == 0.0
@@ -369,13 +369,13 @@ def test_vertical_sgs_diffusion_zero_on_vertically_uniform_field():
     SGS flux ⇒ exactly zero tendency. Catches index/sign/boundary bugs
     (a stencil that leaked a spurious top/bottom flux would fail here)."""
     from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
-        _vertical_K_diffusion_full,
+        vertical_K_diffusion_full,
     )
     _, grid, hc, _, _ = _setup()
     rng = np.random.default_rng(13)
     f = jnp.full((grid.ny, grid.nx, grid.nlev), 3.7)
     K = jnp.asarray(np.abs(rng.standard_normal((grid.ny, grid.nx, grid.nlev))))
-    tend = _vertical_K_diffusion_full(f, K, hc)
+    tend = vertical_K_diffusion_full(f, K, hc)
     assert float(jnp.max(jnp.abs(tend))) < 1.0e-13, (
         "vertical SGS flux nonzero on a vertically-uniform field "
         f"(max|tend|={float(jnp.max(jnp.abs(tend))):.3e}) — spurious "
