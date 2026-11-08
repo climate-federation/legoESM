@@ -138,7 +138,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # SI3 aEVP lateral boundary: an unknown north_fold / lbc point type
         # must raise, never fall back to the doubly periodic halo.
         ("packages/ice/legoesm/ice/dynamics.py", "_si3_halo"),
-        ("packages/ice/legoesm/ice/dynamics.py", "_si3_orca_f_pivot_halo"),
+        ("packages/ice/legoesm/ice/dynamics.py", "si3_orca_f_pivot_halo"),
         # Richards post-solve psi update: retention curve -> shift (PDI/Lu) or
         # exact reset; an unknown curve must raise, never pick one silently.
         ("packages/land/legoesm/land/richards.py", "solve_richards"),
