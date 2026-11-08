@@ -94,7 +94,7 @@ if [ "$BOUNDS" = 1 ]; then
     run 2 2 scripts/bench/probe_mpi_transport.py --tag pair_node \
         --output "$OUT/bounds/transport.jsonl" || rc_all=1
     run "$CORES" "$CORES" scripts/bench/probe_mpi_transport.py --tag full_node \
-        --log2-bytes 3,10,14,17 --n-timing 50 \
+        --log2-bytes 3,10,14,17 --n-timing 50 --chain-bytes 8,16384 \
         --output "$OUT/bounds/transport.jsonl" || rc_all=1
     if [ "$NODES" -ge 2 ]; then
         run 2 1 scripts/bench/probe_mpi_transport.py --tag pair_xnode \

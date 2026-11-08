@@ -60,28 +60,16 @@ def test_crm_bench_single_rank(tmp_path, mode):
         3 * phys["non_rad_ms"] + phys["rad_ms"] / phys["radiation_interval"])
 
 
-_HALO_OK = ["--momentum-advection", "van_leer", "--no-sgs-vertical"]
 _TINY = ["--mode", "strong", "--nx", "8", "--ny", "8", "--nlev", "8",
          "--warmup-steps", "1", "--time-steps", "2", "--windows", "2",
          "--semi-implicit", "--theta-noise-amp", "0.1"]
-
-
-def test_crm_bench_single_rank_default_reaches_halo_core(tmp_path):
-    # The default single-rank path is the multi-rank halo core. The driver's
-    # production defaults have no halo kernels yet (centred momentum
-    # advection, vertical SGS), so reaching that core at one rank raises; the
-    # serial shortcut would not. Invert once those kernels are ported.
-    result = run_bench(CRM, _TINY + ["--output", str(tmp_path / "x.jsonl")],
-                       timeout_s=900)
-    assert result.returncode != 0
-    assert "NotImplementedError" in result.stderr + result.stdout
 
 
 def test_crm_bench_single_rank_halo_matches_serial(tmp_path):
     recs = {}
     for path in ("serial", "halo"):
         out = tmp_path / f"{path}.jsonl"
-        result = run_bench(CRM, _TINY + _HALO_OK + [
+        result = run_bench(CRM, _TINY + [
             "--precision", "float64", "--single-rank-path", path,
             "--output", str(out)], timeout_s=900)
         fail_on_nonzero(result, "bench_plane_crm_dd_scaling.py",
