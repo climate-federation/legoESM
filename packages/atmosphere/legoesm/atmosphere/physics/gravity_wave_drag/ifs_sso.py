@@ -223,8 +223,11 @@ def _s(width):
     return math.inf if width == 0.0 else 1.0 / width
 
 
-def _step(x, width):
-    """Heaviside(x) (hard: x >= 0)."""
+def _step(x, width, strict=False):
+    """Heaviside(x); hard (width 0): x > 0 if strict else x >= 0, as the oracle's test."""
+    if width == 0.0 and strict:
+        x = jnp.asarray(x)
+        return (x > 0).astype(x.dtype)
     return sigmoid_switch(x, _s(width))
 
 
@@ -232,17 +235,18 @@ def _max(a, b, width):
     return smooth_max(a, b, _s(width))
 
 
-def _min_below(a, b, width_frac):
+def _min_below(a, b, width_frac, b_floor):
     """MIN(a, b) for b >= 0 as b - (b - a)^+: EXACTLY b wherever a >= b.
 
     GWPROFIL's unsaturated branch returns a == b (up to rounding) at every
     level, so a symmetric smooth min would shave every level and compound
     with height; this one-sided form is exact there and smooth (C1 positive
-    part, width = width_frac * b) only where the saturated stress is lower.
+    part, width = width_frac * max(b, b_floor)) only where the saturated stress
+    is lower.  The floor keeps the reverse pass finite for vanishing b.
     """
     if width_frac == 0.0:
         return jnp.minimum(a, b)
-    bs = jnp.where(b > 0.0, b, 1.0)
+    bs = smooth_max(jnp.where(b > 0.0, b, b_floor), b_floor, 1.0 / (width_frac * b_floor))
     return jnp.where(b > 0.0, b - bs * positive_part_c1((b - a) / bs, 1.0 / width_frac),
                      jnp.minimum(a, b))
 
@@ -290,7 +294,7 @@ def _column(ph, pf, geo, T, u, v, std, gamma, theta, sig, nktopg, ngwdtop, ngwdl
     c2 = g ** 2 / cpd
     z1d2rg = 1.0 / (2.0 * g)
 
-    on = _step(std - _STD_ON_M, cfg.std_switch_width_m)
+    on = _step(std - _STD_ON_M, cfg.std_switch_width_m, strict=True)      # PHSTD > 50
     std_s = jnp.where(std > 0.0, std, 1.0)       # inactive columns: on ~ 0
     gamma = _max(gamma, cfg.gtsec, fw * cfg.gtsec)
 
@@ -356,7 +360,7 @@ def _column(ph, pf, geo, T, u, v, std, gamma, theta, sig, nktopg, ngwdtop, ngwdl
 
     def shifted(x):
         """ZU = x + 2*GVSEC where -GVSEC <= x < GVSEC (smooth window)."""
-        w = (_step(cfg.gvsec_m_s - x, cfg.gvsec_width_m_s)
+        w = (_step(cfg.gvsec_m_s - x, cfg.gvsec_width_m_s, strict=True)
              * _step(x + cfg.gvsec_m_s, cfg.gvsec_width_m_s))
         return x + 2.0 * cfg.gvsec_m_s * w
 
@@ -451,9 +455,9 @@ def _column(ph, pf, geo, T, u, v, std, gamma, theta, sig, nktopg, ngwdtop, ngwdl
         zbb = 1.0 / gr + 2.0 / zsqr
         zalpha = 0.5 * (-zbb + jnp.sqrt(zdel))
         zdz2n = (vk * zalpha) ** 2 / sk
-        sat = _step(gr - zriw, cfg.ri_width)
+        sat = _step(gr - zriw, cfg.ri_width, strict=True)                # ZRIW < GRCRIT
         t = sat * (znrm * zdz2n) + (1.0 - sat) * (znrm * zdz2)
-        t = _min_below(t, tau_next, cfg.tau_min_width_frac)
+        t = _min_below(t, tau_next, cfg.tau_min_width_frac, cfg.gtsec)
         alive = _step(tau_next - cfg.gtsec, cfg.gtsec_width) * (k > kcrit)
         t = alive * t
         out = jnp.where(k >= kknu2, tau_b, t)
@@ -476,7 +480,7 @@ def _column(ph, pf, geo, T, u, v, std, gamma, theta, sig, nktopg, ngwdtop, ngwdl
     zdelp0 = ph[ngwdtop] - ph[0]
     t_top = -g * (ptau[ngwdtop + 1] - ptau[1]) * dp / (vph_b * zdelp0 ** 2)
     t_mid = -g * (ptau[2:klev + 2] - ptau[1:klev + 1]) / (dp * vph_b)
-    wtop = _step(cfg.grfplm_pa - pf[1:klev + 1], cfg.top_width_pa)
+    wtop = _step(cfg.grfplm_pa - pf[1:klev + 1], cfg.top_width_pa, strict=True)  # PAPM1 < GRFPLM
     ztemp = wtop * t_top + (1.0 - wtop) * t_mid
     teu = (ulow * d1 - vlow * d2) * ztemp / dmod
     tev = (vlow * d1 + ulow * d2) * ztemp / dmod

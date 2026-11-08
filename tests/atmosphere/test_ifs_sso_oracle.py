@@ -240,3 +240,36 @@ def test_tofd_smooth_form_finite_grad(fix):
     hard = ifs_tofd_coefficient(a("geo_full"), a("u"), a("v"), a("sigflt"), hard_tofd_config())
     soft = ifs_tofd_coefficient(a("geo_full"), a("u"), a("v"), a("sigflt"), IFSTOFDConfig())
     assert _err(soft, np.asarray(hard)) < 0.05
+
+
+def test_std_threshold_is_strict(fix):
+    """GWDRAG runs only where PHSTD > 50 m: exactly 50 m gives zero (hard form)."""
+    g = "L32"
+    i = _drag_column(fix, g)
+    rg, rd, cpd = _consts(fix, "L", g)
+    lev = _levels(fix, g)
+    a = {k: jnp.asarray(fix[f"{g}_{k}"][i:i + 1], jnp.float64)
+         for k in ("p_half", "p_full", "geo_full", "T", "u", "v", "gamma", "theta", "sigma")}
+    o = ifs_sso_tendencies(a["p_half"], a["p_full"], a["geo_full"], a["T"], a["u"], a["v"],
+                           jnp.asarray([50.0]), a["gamma"], a["theta"], a["sigma"],
+                           lev[i:i + 1, 0], lev[i:i + 1, 1], lev[i:i + 1, 2], hard_config(), rg, rd, cpd)
+    assert float(jnp.abs(o.soteu).max() + o.sobeta.max()) == 0.0
+
+
+@pytest.mark.parametrize("g", _GROUPS)
+def test_reverse_grad_finite_on_every_fixture_column(fix, g):
+    """Smooth form: d(sum of outputs)/d(SSO params, wind) finite on every column."""
+    rg, rd, cpd = _consts(fix, "L", g)
+    lev = _levels(fix, g)
+    a = {k: jnp.asarray(fix[f"{g}_{k}"], jnp.float64)
+         for k in ("p_half", "p_full", "geo_full", "T", "u", "v", "std", "gamma", "theta", "sigma")}
+
+    def f(std, gamma, theta, sigma, u):
+        o = ifs_sso_tendencies(a["p_half"], a["p_full"], a["geo_full"], a["T"], u, a["v"],
+                               std, gamma, theta, sigma, lev[:, 0], lev[:, 1], lev[:, 2],
+                               IFSSSOConfig(), rg, rd, cpd)
+        return jnp.sum(o.soteu) * 1e4 + jnp.sum(o.sotev) * 1e4 + jnp.sum(o.sobeta)
+
+    grads = jax.grad(f, argnums=(0, 1, 2, 3, 4))(a["std"], a["gamma"], a["theta"], a["sigma"], a["u"])
+    for gr in grads:
+        assert np.all(np.isfinite(np.asarray(gr)))
