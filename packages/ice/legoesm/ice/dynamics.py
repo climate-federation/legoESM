@@ -1251,8 +1251,6 @@ def si3_cgrid_deformation(
     forcing: SI3CGridAEVPForcing,
     metrics: SI3CGridMetrics,
     config: SI3CGridAEVPConfig,
-    *,
-    fold: SI3ORCA2FoldProgram | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Return final C-grid divergence and deformation for redistribution.
 
@@ -1361,13 +1359,21 @@ def si3_lane_cgrid_deformation(
     divergence, tension, shear_square = _si3_t_deformation(
         state.u_ice_u, state.v_ice_v, shear_f, metrics
     )
-    ice_mask = (forcing.concentration_t >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
+    ice_mask = jax.lax.optimization_barrier(
+        (forcing.concentration_t >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
+    )
     divergence = divergence * ice_mask
+    # NEMO's gfortran build evaluates icedyn_rhg_evp.F90:827 without FMA.
+    # Materialize products so LLVM x86-64 cannot contract multiply-plus-add.
+    divergence_square = nemo_source_round(divergence * divergence)
+    tension_square = nemo_source_round(tension * tension)
+    strain_square = tension_square + shear_square
+    eccentricity = jnp.asarray(config.eccentricity, dtype=state.u_ice_u.dtype)
+    eccentricity_square = eccentricity * eccentricity
+    inverse_eccentricity_square = _SI3_ONE / eccentricity_square
+    scaled_strain_square = nemo_source_round(strain_square * inverse_eccentricity_square)
     deformation = (
-        _si3_sqrt(
-            divergence * divergence
-            + (tension * tension + shear_square) / (config.eccentricity * config.eccentricity)
-        )
+        _si3_sqrt(divergence_square + scaled_strain_square)
         * ice_mask
     )
     interior = slice(2, -2)

@@ -11431,13 +11431,13 @@ _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1957-1964', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1970-1977')
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1806-1871', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1819-1884')
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1858-1880', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1871-1893')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:172', 'tests/ice/unit/test_si3_o5_strength_aevp.py:173')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:198', 'tests/ice/unit/test_si3_o5_strength_aevp.py:199')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:226', 'tests/ice/unit/test_si3_o5_strength_aevp.py:227')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:280', 'tests/ice/unit/test_si3_o5_strength_aevp.py:281')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:291', 'tests/ice/unit/test_si3_o5_strength_aevp.py:310')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:317', 'tests/ice/unit/test_si3_o5_strength_aevp.py:336')
-_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:400', 'tests/ice/unit/test_si3_o5_strength_aevp.py:419')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:172', 'tests/ice/unit/test_si3_o5_strength_aevp.py:174')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:198', 'tests/ice/unit/test_si3_o5_strength_aevp.py:200')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:226', 'tests/ice/unit/test_si3_o5_strength_aevp.py:228')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:280', 'tests/ice/unit/test_si3_o5_strength_aevp.py:282')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:291', 'tests/ice/unit/test_si3_o5_strength_aevp.py:311')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:317', 'tests/ice/unit/test_si3_o5_strength_aevp.py:337')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:400', 'tests/ice/unit/test_si3_o5_strength_aevp.py:420')
 # The O4 Prather implementation was prepared before O2/O3/O5/O7 landed.  The
 # composed rebase retains every rung and therefore moves all later O4/O2/O3
 # anchors.  Re-anchor the historical keys only after the landed-rung chain
@@ -13119,13 +13119,13 @@ def _round29_reanchor_or_defer(old: str, new: str, extent: int | None = None) ->
 
 
 for _old, _new in (
-    ('packages/ice/legoesm/ice/dynamics.py:1221', 'packages/ice/legoesm/ice/dynamics.py:1226'),
-    ('packages/ice/legoesm/ice/dynamics.py:1273', 'packages/ice/legoesm/ice/dynamics.py:1278'),
-    ('packages/ice/legoesm/ice/dynamics.py:1938', 'packages/ice/legoesm/ice/dynamics.py:1943'),
-    ('packages/ice/legoesm/ice/dynamics.py:1970', 'packages/ice/legoesm/ice/dynamics.py:1975'),
-    ('packages/ice/legoesm/ice/dynamics.py:2029', 'packages/ice/legoesm/ice/dynamics.py:2034'),
-    ('packages/ice/legoesm/ice/dynamics.py:2106', 'packages/ice/legoesm/ice/dynamics.py:2111'),
-    ('packages/ice/legoesm/ice/dynamics.py:2127', 'packages/ice/legoesm/ice/dynamics.py:2132'),
+    ('packages/ice/legoesm/ice/dynamics.py:1221', 'packages/ice/legoesm/ice/dynamics.py:1234'),
+    ('packages/ice/legoesm/ice/dynamics.py:1273', 'packages/ice/legoesm/ice/dynamics.py:1286'),
+    ('packages/ice/legoesm/ice/dynamics.py:1938', 'packages/ice/legoesm/ice/dynamics.py:1951'),
+    ('packages/ice/legoesm/ice/dynamics.py:1970', 'packages/ice/legoesm/ice/dynamics.py:1983'),
+    ('packages/ice/legoesm/ice/dynamics.py:2029', 'packages/ice/legoesm/ice/dynamics.py:2042'),
+    ('packages/ice/legoesm/ice/dynamics.py:2106', 'packages/ice/legoesm/ice/dynamics.py:2119'),
+    ('packages/ice/legoesm/ice/dynamics.py:2127', 'packages/ice/legoesm/ice/dynamics.py:2140'),
     ('packages/ice/legoesm/ice/config.py:607-611', 'packages/ice/legoesm/ice/config.py:636-640'),
     ('packages/ice/legoesm/ice/config.py:581-589', 'packages/ice/legoesm/ice/config.py:589-597'),
     ('packages/ice/legoesm/ice/config.py:645-659', 'packages/ice/legoesm/ice/config.py:674-688'),
@@ -15141,12 +15141,12 @@ for _citation, _lines in (
     ('packages/ice/legoesm/ice/sea_ice.py:600-620', '765-785'),
     ('nemo_testcase_recipe.py:561,817,4097', '575,842,4274'),
     ('packages/ice/legoesm/ice/sea_ice.py:642-725', '807-827'),
-    ('packages/ice/legoesm/ice/dynamics.py:1226', '1381'),
-    ('packages/ice/legoesm/ice/dynamics.py:1943', '2679'),
-    ('packages/ice/legoesm/ice/dynamics.py:1975', '2712'),
-    ('packages/ice/legoesm/ice/dynamics.py:2034', '2771'),
-    ('packages/ice/legoesm/ice/dynamics.py:2111', '2848'),
-    ('packages/ice/legoesm/ice/dynamics.py:2132', '2869'),
+    ('packages/ice/legoesm/ice/dynamics.py:1234', '1387'),
+    ('packages/ice/legoesm/ice/dynamics.py:1951', '2685'),
+    ('packages/ice/legoesm/ice/dynamics.py:1983', '2718'),
+    ('packages/ice/legoesm/ice/dynamics.py:2042', '2777'),
+    ('packages/ice/legoesm/ice/dynamics.py:2119', '2854'),
+    ('packages/ice/legoesm/ice/dynamics.py:2140', '2875'),
     ('tke.py:3643-3654', '3658-3669'),
     ('packages/ice/legoesm/ice/config.py:636-640', '736-740'),
     ('packages/ice/legoesm/ice/config.py:589-597', '686-695'),
@@ -15330,7 +15330,7 @@ for _citation, _lines, _anchors in (
     ('packages/core/legoesm/timestepping/tridiagonal.py:173-173', '176', ['def unnormalised_backward(reverse_k, current):', 1]),
     ('packages/core/legoesm/core/transcendentals.py:169', '244', ['def pow(left, right) -> jax.Array:', 1]),
     ('packages/ice/legoesm/ice/sea_ice.py:526', '580', ['trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants)', 1]),
-    ('packages/ice/legoesm/ice/dynamics.py:1278', '2014', ['def _si3_orca2_cgrid_aevp_core(', 1]),
+    ('packages/ice/legoesm/ice/dynamics.py:1286', '2020', ['def _si3_orca2_cgrid_aevp_core(', 1]),
     ('packages/ice/legoesm/ice/sea_ice.py:428-441,483,1811-1815,2462-2487,2553-2619,2923-2971,3108-3188,3328-3451,3496-3498,3618-3635', '482-495,537,2379-2383,3030-3055,3121-3187,3491-3539,3676-3756,3896-4019,4064-4066,4186-4205', ['if not (config.ponds.enabled and config.ponds.scheme == "si3_lev") and config.itd_remap not in ("simple", "lipscomb2001"):', 'if config.n_categories > 1 and not (config.ponds.enabled and config.ponds.scheme == "si3_lev"):', 'state = slab_to_dynamic(state, pond_scheme=config.ponds.scheme if config.ponds.enabled else "cesm")', ('if h_il is not None:', 1), '(pond_area, pond_depth, h_il) as NEMO rung O6/O15 ice_cor does', ('if not config.ponds.enabled and config.ponds.scheme != "cesm":', 3), 'h_il_dil = h_il * dilute if _use_si3_lev else None', 'if config.ponds.scheme == "si3_lev":', ('h_il_new = h_il_dil', 1), ('if not config.ponds.enabled and config.ponds.scheme != "cesm":', 4), ('conc, h, h_snow, pond_depth, h_il=h_il)', 1), ('if is_multicat and config.itd_remap != "none" and not exact_si3_itd:', 1), 'h_il = jnp.stack(hil_list, axis=-1) if h_il is not None else None', 'if is_multicat and config.itd_remap != "none":', ('conc, h, h_snow, pond_depth, h_il=h_il)', 4), ('if is_multicat and config.itd_remap != "none" and not exact_si3_itd:', 2), ('conc, h, h_snow, pond_depth, h_il=h_il)', 5), ('new_state = DynamicSeaIceState(', 2), ('return new_state, response', 7), 357]),
     ('packages/ice/legoesm/ice/bitz_lipscomb.py:980-1025', '2401-2465', ['def _cumulative_remap(h_old, content_old, nlay, sr):', ('    ], axis=-1)', 2), 65]),
     ('packages/ice/legoesm/ice/bitz_lipscomb.py:1001-1025', '2422-2465', ['zero = nemo_source_round(jnp.zeros_like(h_old[0]))', ('    ], axis=-1)', 2), 44]),

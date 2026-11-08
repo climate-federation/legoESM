@@ -26,6 +26,7 @@ from legoesm.ice.dynamics import (
     SI3CGridMetrics,
     SI3ORCA2FoldProgram,
     SI3ORCA2StrengthConfig,
+    si3_lane_cgrid_deformation,
     si3_orca2_aevp_trace,
     si3_orca2_aevp_solver,
     si3_orca2_ice_strength,
@@ -538,3 +539,26 @@ def test_lane3_rheo_card_parent_vs_current_bit_identical():
 
 STRENGTH_PIN = "097712318bf93aaa1444855ebddff76db8ff21b3c59cd9672dddff9830391223"
 AEVP_PIN = "cf17eb690a4e2345eb1a3b4d6a650c9ccd951f5684744c5de776ef8d78f1c147"
+
+
+@pytest.mark.parametrize("eccentricity", [2.0, 1.5])
+def test_cgrid_deformation_compiled_equals_eager_bitwise(eccentricity):
+    """Source-rounded deformation resists CPU multiply-add contraction."""
+
+    state, forcing, metrics, _, _ = _aevp_inputs()
+    config = _aevp_config(1)._replace(eccentricity=eccentricity)
+    with jax.disable_jit():
+        eager = si3_lane_cgrid_deformation(state, forcing, metrics, config, fold=_fold(True))
+    compiled = jax.jit(
+        lambda state, forcing, metrics: si3_lane_cgrid_deformation(
+            state, forcing, metrics, config, fold=_fold(True)
+        )
+    )(state, forcing, metrics)
+
+    # Compare deformation first so a value mismatch cannot be hidden by a
+    # preceding signed-zero mismatch in divergence.
+    for compiled_field, eager_field in ((compiled[1], eager[1]), (compiled[0], eager[0])):
+        np.testing.assert_array_equal(
+            np.asarray(compiled_field).view(np.uint64),
+            np.asarray(eager_field).view(np.uint64),
+        )

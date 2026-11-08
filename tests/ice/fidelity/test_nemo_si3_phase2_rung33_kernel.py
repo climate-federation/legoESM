@@ -14,7 +14,7 @@ from legoesm.core.precision import get_policy
 from legoesm.ice.dynamics import (
     SI3CGridAEVPState,
     si3_cgrid_aevp_solver,
-    si3_cgrid_deformation,
+    si3_lane_cgrid_deformation,
 )
 from legoesm.ice.fidelity.nemo_adv2d_rhg_testcase_recipe import (
     _forcing_for_state,
@@ -189,7 +189,7 @@ def test_final_deformation_diagnostic_binds_to_velocity_gradients():
     )._replace(
         concentration_t=jnp.ones_like(card.forcing_template.concentration_t)
     )
-    zero_divergence, zero_deformation = si3_cgrid_deformation(
+    zero_divergence, zero_deformation = si3_lane_cgrid_deformation(
         card.initial_state.dynamics, forcing, card.metrics, card.dynamics_config
     )
     np.testing.assert_array_equal(zero_divergence, 0.0)
@@ -200,7 +200,7 @@ def test_final_deformation_diagnostic_binds_to_velocity_gradients():
             _TEST_PERTURBATION
         )
     )
-    divergence, deformation = si3_cgrid_deformation(
+    divergence, deformation = si3_lane_cgrid_deformation(
         impulse, forcing, card.metrics, card.dynamics_config
     )
     assert float(jnp.max(jnp.abs(divergence))) > 0.0

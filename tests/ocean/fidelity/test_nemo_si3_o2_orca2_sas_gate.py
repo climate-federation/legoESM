@@ -210,7 +210,7 @@ def test_o2_parent_vs_current_all_callers_bit_identical(monkeypatch) -> None:
     def _f2d(arr, name, units):
         return Field(data=arr, dims=("x", "z"), units=units, name=name)
 
-    def _run_si3_lane3(si_module, st_module, bl_module, c1d_module):
+    def _run_si3_lane3(st_module, bl_module, build_card, step):
         col_state = st_module.SI3ColumnState(
             concentration=_f1d(jnp.array([0.92], dtype=jnp.float64), "a_i", "1"),
             h_ice=_f1d(jnp.array([1.65], dtype=jnp.float64), "h_i", "m"),
@@ -237,21 +237,21 @@ def test_o2_parent_vs_current_all_callers_bit_identical(monkeypatch) -> None:
             fhld=jnp.array([1.5], dtype=jnp.float64),
             qlead=jnp.array([-10.0], dtype=jnp.float64),
         )
-        card = c1d_module.build_c1d_omip_l3_card()
+        card = build_card()
         sst = jnp.array([t0 - 1.75], dtype=jnp.float64)
         zero_vel = jnp.zeros((1,), dtype=jnp.float64)
-        new_st, resp = si_module.step_sea_ice(
+        new_st, resp = step(
             col_state, frc_in, sst, zero_vel, zero_vel, card.config, 0.1, 3600.0
         )
         return new_st, resp
 
     p_l3_st, p_l3_resp = _run_si3_lane3(
-        parent_mods["legoesm.ice.sea_ice"],
         parent_mods["legoesm.ice.state"],
         parent_mods["legoesm.ice.bitz_lipscomb"],
-        parent_mods["legoesm.ice.c1d_omip_l3"],
+        parent_mods["legoesm.ice.c1d_omip_l3"].build_c1d_omip_l3_card,
+        parent_mods["legoesm.ice.sea_ice"].step_sea_ice,
     )
-    c_l3_st, c_l3_resp = _run_si3_lane3(sea_ice_mod, state_mod, bl_mod, c1d_mod)
+    c_l3_st, c_l3_resp = _run_si3_lane3(state_mod, bl_mod, c1d_mod.build_c1d_omip_l3_si3_lane_card, sea_ice_mod.step_sea_ice_si3_lane)
     for fname in p_l3_st._fields:
         _assert_zero_ulp(
             getattr(p_l3_st, fname).data,
