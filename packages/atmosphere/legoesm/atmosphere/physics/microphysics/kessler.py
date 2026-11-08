@@ -36,24 +36,17 @@ Mapping onto legoESM (each one a recorded convention, not oracle physics):
 Differentiability: the oracle's switches are kept exact (``jnp.maximum`` /
 ``jnp.minimum``, piecewise differentiable); fractional powers go through
 ``safe_pow``.  The existing ``KesslerConfig.saturation_sharpness`` smooths the
-saturation-adjustment switch ``max(prod, -q_c)`` as the sigmoid blend
-``s*prod + (1-s)*(-q_c)``, ``s = sigmoid(sharpness*(prod + q_c))`` (the
-field's existing ``sigmoid(k x) x`` smooth ramp, applied to the oracle's
-switch argument); it equals the oracle exactly as ``sharpness -> inf``.
-KNOWN GAP AT THE DEFAULT (``saturation_sharpness = 100``, unchanged pending a
-user decision): ``k x`` is far from the hard limit for |x| ~ 1e-3, so the
-default adjusts only about half the excess per subcycle and can leave
-NEGATIVE cloud water (-1.3e-4 kg/kg on the oracle fixture columns).
-That negative cloud water is erased by the next subcycle's ``max(q_c -
-qrprod, 0)`` floor, so with more than one CFL subcycle the default CREATES
-water (#2291; spectral bridge, T21, 10 sigma levels, warm column, dt 300 s):
-the column gains 17-19x the surface precipitation, versus a 5.3 % residual at
-the hard limit (``saturation_sharpness`` 1e12) on the same states; with one
-subcycle (dt 30 s) both give 5.4 %.  That remaining ~5 % is the oracle's own
-sedimentation over level-centre spacing (see DEPARTURE below).  Remedies for
-the smooth default (a smooth form that never undershoots ``-q_c``, or
-conservative compensation of the floor increments) change the approved smooth
-form and await a user decision.
+saturation-adjustment switch ``max(prod, -q_c) = -q_c + clip(prod + q_c, 0,
+q_v + q_c)`` (the upper bound never binds in the oracle, since ``prod <
+q_v``) by smoothing both sides of the clip with ``smooth_positive_part`` at a
+width of ``q_vs / k`` (1 % of saturation at the default ``k = 100``): the cloud
+left after adjustment lies in ``[0, q_v + q_c]``, so neither the cloud nor the
+vapour floor creates water, and it equals the oracle exactly as ``sharpness
+-> inf``.  The price is a condensate residual of at most ``ln 2 * q_vs / k`` at
+``prod + q_c = 0`` (and never more than the water present), decaying
+exponentially below it (vapour -> cloud, water conserved).  The earlier absolute-width sigmoid blend evaporated about half
+of ``|prod|`` of cloud that did not exist in dry air, so the positivity floor
+created water.
 
 DEPARTURE FROM THE ORACLE (user decision 2026-11-09):
 ``KesslerConfig.conserving_sedimentation`` (default True) divides the
@@ -99,6 +92,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics._shared import heights_from_layer_dz
+from legoesm.atmosphere.physics.convection._triggers import smooth_positive_part
 from legoesm.atmosphere.physics.microphysics._warm_rain import safe_pow
 from legoesm.atmosphere.physics.microphysics.config import (
     KesslerConfig,
@@ -164,8 +158,8 @@ __physics_contract__ = {
         "(conserving_sedimentation; the oracle's level-centre form, selected "
         "by False, reports more rain than leaves the column). As in the oracle "
         "the positivity floors are not "
-        "compensated, so column water is not exactly conserved (the smooth "
-        "default creates water over multiple subcycles, see module docstring)."
+        "compensated; the bounded smooth saturation adjustment keeps cloud and "
+        "vapour non-negative, so it never triggers them (see module docstring)."
     ),
     "conserves": ["none"],
     "differentiable": True,
@@ -353,9 +347,14 @@ def kessler_step_states(T, q_v, q_c0, q_r0, p_full, rho, dz, dt,
                     / (_EVAP_D1 * pc / (_QVS_P_HPA * qvs) + _EVAP_D2))
             * (jnp.maximum(qvs - qv, 0.0) / (r * qvs)),
             jnp.maximum(-prod - qc_n, 0.0)), qr_n)
-        # saturation adjustment max(prod, -qc), smoothed by saturation_sharpness
-        s = jax.nn.sigmoid(sharpness * (prod + qc_n))
-        adj = s * prod - (1.0 - s) * qc_n
+        # saturation adjustment max(prod, -qc) = -qc + clip(prod + qc, 0, qv + qc)
+        # (the upper bound never binds in the oracle), each side smoothed with a
+        # width of qvs/sharpness: the cloud left is in [0, qv + qc], so neither
+        # positivity floor (cloud, vapour) creates water
+        x = (prod + qc_n) / qvs
+        avail = (qv + qc_n) / qvs
+        adj = -qc_n + qvs * (smooth_positive_part(x, sharpness)
+                             - smooth_positive_part(x - avail, sharpness))
         theta_n = theta + lv_cp_pk * (adj - ern)
         qv_n = jnp.maximum(qv - adj + ern, 0.0)
         qc_n = qc_n + adj

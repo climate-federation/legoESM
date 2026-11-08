@@ -134,7 +134,6 @@ class TestKessler:
         cond_mask = out.dT_dt > 1e-8
         assert jnp.all(out.dq_v_dt[cond_mask] < 0.0)
 
-    @pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
     def test_sign_subsaturated_clear_no_negative_qc(self):
         """Subsaturated clear air (q_c=0): no spurious negative cloud water."""
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=0.6)
