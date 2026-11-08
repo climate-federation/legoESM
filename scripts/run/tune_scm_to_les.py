@@ -276,7 +276,6 @@ def _cbl_scheme_table():
         LouisConfig,
         MYNN25Config,
         SmagorinskyConfig,
-        TKEConfig,
         TurbulentEDMFConfig,
         YSUConfig,
     )
@@ -293,7 +292,6 @@ def _cbl_scheme_table():
         "louis": (LouisConfig, "atm.turb.LouisConfig"),                     # local
         "holtslag_boville": (HoltslagBovilleConfig, "atm.turb.HoltslagBovilleConfig"),  # nonlocal
         "ysu": (YSUConfig, "atm.turb.YSUConfig"),                          # nonlocal
-        "tke": (TKEConfig, "atm.turb.TKEConfig"),                          # 1.5-order (k-l)
         "mynn25": (MYNN25Config, "atm.turb.MYNN25Config"),                 # 1.5-order (MYNN)
         "clubb_lite": (CLUBBLiteConfig, "atm.turb.CLUBBLiteConfig"),       # higher-order
         "edmf": (TurbulentEDMFConfig, "atm.turb.TurbulentEDMFConfig"),     # mass-flux

@@ -96,9 +96,10 @@ from legoesm.training.trainable_params import (  # noqa: E402
 )
 
 # Every selectable closure in turbulence/integration.py::get_turbulence_fn,
-# minus "none" (which is the absence of a closure, not a candidate).
+# minus "none" (which is the absence of a closure, not a candidate) and the WRF
+# ports with no tunable parameters ("tke" = MYJ, "mynn25").
 TURBULENCE_SCHEMES: tuple[str, ...] = (
-    "smagorinsky", "louis", "tke", "clubb_lite", "clubb",
+    "smagorinsky", "louis", "clubb_lite", "clubb",
     "holtslag_boville", "ysu", "edmf",
 )
 
