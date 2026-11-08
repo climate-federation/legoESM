@@ -16,11 +16,11 @@ This module provides one under a **slab decomposition along y** (axis 0): rank
 
 and the inverse reverses it. The transpose is a single ``alltoall``.
 
-Decomposition choice. Slab (1-D) is the natural and minimal decomposition for a
-2-D FFT: exactly one transpose, one ``alltoall``. A 2-D pencil decomposition
-would need two transposes; it is only worth it past ``P > min(ny, nkx)``, well
-beyond a single socket. The plane LES MPI layout therefore uses ``n_ranks_x = 1``
-for spectral runs; the compressible CRM/LES keeps its 2-D pencil ``step_halo``.
+Decomposition choice. Slab (1-D) is the minimal decomposition for a 2-D FFT:
+exactly one transpose, one ``alltoall``, but it caps the rank count at ``ny``
+(and idles ranks in spectral space past ``nx//2+1``). The x-y PENCIL functions
+at the end of this module lift that cap at two all-to-alls per transform (one
+on a row sub-communicator, one on a column sub-communicator).
 
 AD. ``mpi4jax.alltoall`` is a permutation (orthogonal data movement); its adjoint
 is the same all-to-all applied to the cotangent. We wrap it in a ``custom_vjp``
@@ -306,3 +306,159 @@ def distributed_truncate_from_fine(f_fine, *, ny_global, nx, n_ranks, comm):
     spec_c = _truncate_ky(spec, nyf, ny_global)           # (ny_global, B_loc, nz)
     coarse = _y_itranspose(spec_c, ny_global, P, comm, nx)  # (ny_local, nx, nz)
     return (9.0 / 4.0) * coarse
+
+
+# --------------------------------------------------------------------------- #
+# x-y PENCIL decomposition (Py x Px rank grid)                                 #
+# --------------------------------------------------------------------------- #
+# Rank (ry, rx) = divmod(rank, Px) owns the physical block (ny/Py, nx/Px, nzf).
+# Every pencil transform is the slab transform above run on the COLUMN
+# communicator (size Py, the ranks sharing rx) over data made x-whole by one
+# ROW all-to-all (size Px) that splits z instead (zero-padded to Px chunks; z
+# is never transformed). Spectral layout per rank: (ny, kx chunk ry, z chunk
+# rx) — every pointwise spectral multiply is z-independent, and the pressure
+# projection gathers z with one more row transpose (``pencil_spec_to_zwhole``).
+# The z-padding makes the padded length ambiguous (nz-1, nz and nz+1 fields
+# coexist), so every inverse takes the caller's static ``nz_out``.
+# Batching note: the z axis is a free axis of every row transpose, so several
+# fields can be concatenated along z and moved through ONE transform pair.
+def _alltoall_any(blocks, comm):
+    if jnp.iscomplexobj(blocks):
+        return _alltoall_complex(blocks, comm)
+    return ad_alltoall(blocks, comm)
+
+
+def chunk_slice(n, n_parts, idx):
+    """``(start, stop)`` of chunk ``idx`` when length ``n`` is zero-padded to
+    ``n_parts * ceil(n / n_parts)`` and split into equal chunks."""
+    loc = -(-n // n_parts)
+    return idx * loc, (idx + 1) * loc
+
+
+def split_concat_transpose(x, split_axis, concat_axis, n_ranks, comm):
+    """All-to-all transpose over ``comm`` (size ``n_ranks``), real or complex.
+
+    ``split_axis`` is zero-padded to ``n_ranks * ceil(n / n_ranks)`` and cut
+    into equal chunks; chunk ``j`` goes to rank ``j``. The blocks received are
+    concatenated along ``concat_axis`` in source-rank order, so that axis grows
+    by ``n_ranks`` (every rank holds the same local shape). AD via
+    :func:`ad_alltoall` (a permutation; its adjoint is the same collective)."""
+    P = n_ranks
+    n = x.shape[split_axis]
+    loc = -(-n // P)
+    if P * loc != n:
+        pad = [(0, 0)] * x.ndim
+        pad[split_axis] = (0, P * loc - n)
+        x = jnp.pad(x, pad)
+    shp = list(x.shape)
+    shp[split_axis:split_axis + 1] = [P, loc]
+    blocks = jnp.moveaxis(x.reshape(shp), split_axis, 0)   # (P, ..., loc, ...)
+    recv = _alltoall_any(blocks, comm)                     # block i from rank i
+    out = jnp.moveaxis(recv, 0, concat_axis)               # (..., P, c, ...)
+    oshp = list(out.shape)
+    oshp[concat_axis:concat_axis + 2] = [oshp[concat_axis] * oshp[concat_axis + 1]]
+    return out.reshape(oshp)
+
+
+def _check_pencil(shape, ny_global, nx, n_ranks_y, n_ranks_x):
+    nyl, nxl = shape[0], shape[1]
+    if nyl * n_ranks_y != ny_global or nxl * n_ranks_x != nx:
+        raise ValueError(
+            f"pencil block {nyl}x{nxl} x mesh {n_ranks_y}x{n_ranks_x} != global "
+            f"{ny_global}x{nx}")
+
+
+def _trim_z(x, nz_out, n_ranks_x):
+    if -(-nz_out // n_ranks_x) * n_ranks_x != x.shape[-1]:
+        raise ValueError(
+            f"nz_out={nz_out} inconsistent with padded z {x.shape[-1]} at Px={n_ranks_x}")
+    return x[..., :nz_out]
+
+
+def pencil_rfft2(u_local, *, ny_global, nx, n_ranks_y, n_ranks_x, comm_row,
+                 comm_col):
+    """Pencil ``rfft2`` of ``(ny/Py, nx/Px, nzf)`` → ``(ny, nkx_loc, nzl)``:
+    full ky, kx chunk ``ry`` of ``Py`` (zero-padded, as the slab), z chunk ``rx``
+    of ``Px`` (``nzl = ceil(nzf/Px)``, zero-padded)."""
+    _check_pencil(u_local.shape, ny_global, nx, n_ranks_y, n_ranks_x)
+    a = split_concat_transpose(u_local, 2, 1, n_ranks_x, comm_row)  # (nyl, nx, nzl)
+    return distributed_rfft2(a, ny_global=ny_global, nx=nx, n_ranks=n_ranks_y,
+                             comm=comm_col)
+
+
+def pencil_irfft2(fh_local, *, nz_out, ny_global, nx, n_ranks_y, n_ranks_x,
+                  comm_row, comm_col):
+    """Inverse of :func:`pencil_rfft2`; returns ``(ny/Py, nx/Px, nz_out)``."""
+    a = distributed_irfft2(fh_local, ny_global=ny_global, nx=nx,
+                           n_ranks=n_ranks_y, comm=comm_col)       # (nyl, nx, nzl)
+    b = split_concat_transpose(a, 1, 2, n_ranks_x, comm_row)        # (nyl, nxl, Px*nzl)
+    return _trim_z(b, nz_out, n_ranks_x)
+
+
+def pencil_pad_to_fine(f_local, *, ny_global, nx, n_ranks_y, n_ranks_x,
+                       comm_row, comm_col):
+    """Pencil 3/2 zero-pad: ``(ny/Py, nx/Px, nz)`` → ``(3ny/2Py, 3nx/2Px, nz)``.
+    Needs ``ny/Py`` and ``nx/Px`` even."""
+    _check_pencil(f_local.shape, ny_global, nx, n_ranks_y, n_ranks_x)
+    if f_local.shape[1] % 2:
+        raise ValueError(
+            f"3/2-rule pencil needs nx/Px even, got {f_local.shape[1]}")
+    nzf = f_local.shape[2]
+    a = split_concat_transpose(f_local, 2, 1, n_ranks_x, comm_row)  # (nyl, nx, nzl)
+    fine = distributed_pad_to_fine(a, ny_global=ny_global, nx=nx,
+                                   n_ranks=n_ranks_y, comm=comm_col)  # (nyfl, nxf, nzl)
+    b = split_concat_transpose(fine, 1, 2, n_ranks_x, comm_row)
+    return _trim_z(b, nzf, n_ranks_x)
+
+
+def pencil_truncate_from_fine(f_fine, *, ny_global, nx, n_ranks_y, n_ranks_x,
+                              comm_row, comm_col):
+    """Inverse grid of :func:`pencil_pad_to_fine` (with the 9/4 scaling)."""
+    nzf = f_fine.shape[2]
+    a = split_concat_transpose(f_fine, 2, 1, n_ranks_x, comm_row)   # (nyfl, nxf, nzl)
+    c = distributed_truncate_from_fine(a, ny_global=ny_global, nx=nx,
+                                       n_ranks=n_ranks_y, comm=comm_col)
+    b = split_concat_transpose(c, 1, 2, n_ranks_x, comm_row)        # (nyl, nxl, Px*nzl)
+    return _trim_z(b, nzf, n_ranks_x)
+
+
+def pencil_spec_to_zwhole(fh_local, *, nz_out, n_ranks_x, comm_row):
+    """Spectral ``(ny, nkx_loc, nzl)`` → ``(nky_loc, nkx_loc, nz_out)``: ky chunk
+    ``rx`` of ``Px`` (zero-padded rows), whole z (padding levels trimmed)."""
+    b = split_concat_transpose(fh_local, 0, 2, n_ranks_x, comm_row)
+    return _trim_z(b, nz_out, n_ranks_x)
+
+
+def pencil_zwhole_to_spec(fz_local, *, ny_global, n_ranks_x, comm_row):
+    """Inverse of :func:`pencil_spec_to_zwhole` (z re-padded with zeros, padded
+    ky rows dropped)."""
+    b = split_concat_transpose(fz_local, 2, 0, n_ranks_x, comm_row)
+    return b[:ny_global]
+
+
+def layout_is_pencil(layout):
+    return getattr(layout, "n_ranks_x", 1) > 1
+
+
+def layout_rfft2(f, layout):
+    """Slab or pencil forward transform selected by ``layout``. The slab call
+    is exactly the pre-pencil one (bit-identical)."""
+    if not layout_is_pencil(layout):
+        return distributed_rfft2(f, ny_global=layout.ny_global, nx=layout.nx,
+                                 n_ranks=layout.n_ranks, comm=layout.comm)
+    return pencil_rfft2(f, ny_global=layout.ny_global, nx=layout.nx,
+                        n_ranks_y=layout.n_ranks_y, n_ranks_x=layout.n_ranks_x,
+                        comm_row=layout.comm_row, comm_col=layout.comm_col)
+
+
+def layout_irfft2(fh, layout, nz_out):
+    """Inverse of :func:`layout_rfft2` (``nz_out`` used only by the pencil)."""
+    if not layout_is_pencil(layout):
+        return distributed_irfft2(fh, ny_global=layout.ny_global, nx=layout.nx,
+                                  n_ranks=layout.n_ranks, comm=layout.comm)
+    if nz_out is None:
+        raise ValueError("pencil inverse FFT needs the field's nz_out")
+    return pencil_irfft2(fh, nz_out=nz_out, ny_global=layout.ny_global,
+                         nx=layout.nx, n_ranks_y=layout.n_ranks_y,
+                         n_ranks_x=layout.n_ranks_x, comm_row=layout.comm_row,
+                         comm_col=layout.comm_col)
