@@ -858,10 +858,13 @@ def _si3_zdf_bl99_step(
     band = per_cell((s > 0.0) & (s < 1.0), snow.T_ice)
     below_one = per_cell(s < 1.0, snow.T_snow)
     sg = jax.lax.stop_gradient
-    # The inversion's unselected branch must carry no cotangent: at S == 0 its
-    # sqrt has infinite slope at the melting point, and 0 * inf = NaN (Z36).
+    # At S == 0 the inversion's sqrt has infinite slope at the melting point:
+    # the soft column reads S >= rn_simin there, so disc >= 4 c L |Tm(rn_simin)|
+    # > 0 (Z39; forward values are the hard solve's), and the unselected branch
+    # carries no cotangent (0 * inf = NaN, Z36).
+    S_soft = jnp.maximum(S_layers, _MINIMUM_ICE_SALINITY)
     T_from_e = ice_temperature_from_enthalpy(
-        jnp.where(band, e_i, sg(e_i)), jnp.where(band, S_layers, sg(S_layers)), constants,
+        jnp.where(band, e_i, sg(e_i)), jnp.where(band, S_soft, sg(S_soft)), constants,
         _nemo_order=_nemo_eos_order, width=tm_width)
     soft = SI3ZDFResult(
         mix(snow.T_surface, bare.T_surface),

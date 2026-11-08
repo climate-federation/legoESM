@@ -115,3 +115,18 @@ def test_unselected_inversion_carries_no_cotangent(monkeypatch):
                         lambda e, S, c, **kw: jnp.sqrt(0.0 * e) + 0.0 * S + K.T0)   # d/de = NaN everywhere
     g = jax.grad(lambda x: jnp.sum(_zdf(fx, ON, x).T_ice))(jnp.asarray(0.05))   # h_s >= w: no band cell
     assert bool(jnp.isfinite(g)), g
+
+
+def test_band_cell_at_zero_salinity_and_melting_has_a_finite_gradient():
+    """Z39: S == 0 ice at its melting point inside the band (sqrt slope infinite unfloored)."""
+    fx = load("c3_qcn_top_k")
+    e_i, e_s, sz, h_i, h_s, t_su, fz = zdf_args(fx)
+    sz = jnp.zeros_like(sz)
+    e_i = bl.ice_enthalpy_from_temperature(jnp.full_like(e_i, K.T0), sz, K)
+    T_from = bl.ice_temperature_from_enthalpy
+    g_raw = jax.grad(lambda e: jnp.sum(T_from(e, sz, K)))(e_i)
+    assert not bool(jnp.all(jnp.isfinite(g_raw)))        # the unfloored inversion is singular here
+    g = jax.grad(lambda x: jnp.sum(bl._si3_zdf_bl99_step(
+        e_i, e_s, sz, h_i, jnp.full_like(h_s, x), t_su, fz, dt(fx), K,
+        nemo_version="5.0.1", switches=ON).T_ice))(jnp.asarray(0.5 * W))
+    assert bool(jnp.isfinite(g)), g
