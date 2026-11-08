@@ -231,25 +231,37 @@ def test_aggregate_freezes_only_parameters_whose_probes_change_nothing(monkeypat
     rows = {"c1": [_row(1.0), _row(1.0), _row(1.0), _row(0.9), _row(1.1)],
             "c2": [_row(2.0), _row(2.0), _row(2.0), _row(2.0), _row(2.0)],
             "h1": [_row(5.0), _row(4.0), _row(4.0), _row(5.0), _row(5.0)]}
-    st = ce.df_aggregate([_shard(rows, cands, held=("h1",))], None, None)
+    st = ce.df_aggregate([_shard(rows, cands, held=("h1",))], None)
     assert set(st["frozen"]) == {"a"}            # held-out differences do not count
     assert st["incumbent_at"] == [0, 3]          # train mean 1.45 beats 1.5
     rows["c2"][1] = _row(2.0, failed=True)       # a failed probe is no evidence
-    st = ce.df_aggregate([_shard(rows, cands, held=("h1",))], None, "survivor_mean")
+    st = ce.df_aggregate([_shard(rows, cands, held=("h1",))], None)
     assert set(st["frozen"]) == set()
 
 
-def test_aggregate_needs_the_pi_rule_once_a_training_run_fails(monkeypatch):
+def test_a_candidate_with_a_failed_training_run_is_never_the_incumbent(monkeypatch):
     monkeypatch.setattr(ce, "_scheme_tunable_metas", lambda *_: [])
     cands = [{}, {"a": 1}, {"a": 2}, {"b": 1}, {"b": 2}]
     rows = {"c1": [_row(3.0), _row(1.0, failed=True), _row(2.0), _row(2.5), _row(3.0)],
-            "c2": [_row(3.0), _row(1.0), _row(2.0), _row(2.5, failed=True), _row(3.0)]}
-    with pytest.raises(SystemExit, match="PI"):
-        ce.df_aggregate([_shard(rows, cands)], None, None)
-    pick = {s: ce.df_aggregate([_shard(rows, cands)], None, s)["incumbent_at"]
-            for s in ce.DF_SELECT}
-    assert pick == {"reject_failed": [0, 2], "fewest_failures": [0, 2],
-                    "survivor_mean": [0, 1]}
+            "c2": [_row(3.0), _row(1.0), _row(2.0), _row(2.5, failed=True), _row(3.0)],
+            "h1": [_row(3.0), _row(1.0), _row(1.0, failed=True), _row(1.0), _row(1.0)]}
+    st = ce.df_aggregate([_shard(rows, cands, held=("h1",))], None)
+    assert st["incumbent_at"] == [0, 2]   # best admissible; a held-out failure is no bar
+    assert st["rounds_all_failed"] == []
+
+
+def test_a_round_with_no_admissible_candidate_keeps_the_incumbent(monkeypatch):
+    monkeypatch.setattr(ce, "_scheme_tunable_metas", lambda *_: [])
+    cands = [{}, {"a": 1}, {"a": 2}, {"b": 1}, {"b": 2}]
+    rows = {"c1": [_row(2.0), _row(1.5), _row(2.0), _row(2.0), _row(2.0)]}
+    s0 = ce.df_aggregate([_shard(rows, cands)], None)
+    r1 = {"c1": [_row(0.1, failed=True), _row(0.2, failed=True)]}
+    s1 = ce.df_aggregate([_shard(r1, [{"b": 3}, {"b": 4}], rnd=1)], s0)
+    assert s1["incumbent_at"] == s0["incumbent_at"] == [0, 1]
+    assert s1["rounds_all_failed"] == [1]
+    bad = {"c1": [_row(1.0, failed=True)] * 5}
+    s0 = ce.df_aggregate([_shard(bad, cands)], None)
+    assert s0["incumbent"] is None and s0["rounds_all_failed"] == [0]
 
 
 def test_aggregate_refuses_a_missing_or_mixed_shard(monkeypatch):
@@ -257,38 +269,36 @@ def test_aggregate_refuses_a_missing_or_mixed_shard(monkeypatch):
     cands = [{}, {"a": 1}, {"a": 2}, {"b": 1}, {"b": 2}]
     rows = {"c1": [_row(1.0)] * 5}
     with pytest.raises(SystemExit, match="every shard"):
-        ce.df_aggregate([_shard(rows, cands, k=0, n=2, n_cases=2)], None, None)
+        ce.df_aggregate([_shard(rows, cands, k=0, n=2, n_cases=2)], None)
     with pytest.raises(SystemExit, match="every shard"):
         ce.df_aggregate([_shard(rows, cands, k=0, n=2, n_cases=2),
                          _shard({"c2": [_row(1.0)] * 5}, cands[:4] + [{"b": 3}], k=1,
-                                n=2, n_cases=2)], None, None)
+                                n=2, n_cases=2)], None)
     with pytest.raises(SystemExit, match="two shards"):
         ce.df_aggregate([_shard(rows, cands, k=0, n=2, n_cases=2),
-                         _shard(rows, cands, k=1, n=2, n_cases=2)], None, None)
+                         _shard(rows, cands, k=1, n=2, n_cases=2)], None)
     with pytest.raises(SystemExit, match="the list has"):
-        ce.df_aggregate([_shard(rows, cands, n_cases=2)], None, None)
+        ce.df_aggregate([_shard(rows, cands, n_cases=2)], None)
 
 
 def test_aggregate_chains_rounds_of_one_scheme_and_rule(monkeypatch):
     monkeypatch.setattr(ce, "_scheme_tunable_metas", lambda *_: [])
     cands = [{}, {"a": 1}, {"a": 2}, {"b": 1}, {"b": 2}]
     rows = {"c1": [_row(1.0), _row(1.0), _row(1.0), _row(0.5), _row(2.0)]}
-    s0 = ce.df_aggregate([_shard(rows, cands)], None, None)
+    s0 = ce.df_aggregate([_shard(rows, cands)], None)
     r1 = {"c1": [_row(0.4), _row(0.7)]}
     with pytest.raises(SystemExit, match="needs the state"):
-        ce.df_aggregate([_shard(r1, [{"b": 3}, {"b": 4}], rnd=1)], None, None)
+        ce.df_aggregate([_shard(r1, [{"b": 3}, {"b": 4}], rnd=1)], None)
     with pytest.raises(SystemExit, match="needs the state"):
-        ce.df_aggregate([_shard(r1, [{"b": 3}, {"b": 4}], rnd=2)], s0, None)
+        ce.df_aggregate([_shard(r1, [{"b": 3}, {"b": 4}], rnd=2)], s0)
     with pytest.raises(SystemExit, match="needs the state"):
-        ce.df_aggregate([_shard(r1, [{"b": 3}, {"b": 4}], rnd=1)], s0, "survivor_mean")
-    with pytest.raises(SystemExit, match="needs the state"):
-        ce.df_aggregate([_shard(rows, cands)], s0, None)        # round 0 twice
-    s1 = ce.df_aggregate([_shard(r1, [{"b": 3}, {"b": 4}], rnd=1)], s0, None)
+        ce.df_aggregate([_shard(rows, cands)], s0)        # round 0 twice
+    s1 = ce.df_aggregate([_shard(r1, [{"b": 3}, {"b": 4}], rnd=1)], s0)
     assert set(s1["rounds"]) == {"0", "1"} and s1["incumbent_at"] == [1, 0]
     other = _shard(r1, [{"b": 3}, {"b": 4}], rnd=1)
     other["case_sha256"] = {"c1": "changed"}
     with pytest.raises(SystemExit, match="differ from the earlier"):
-        ce.df_aggregate([other], s0, None)
+        ce.df_aggregate([other], s0)
 
 
 def test_round_zero_runs_each_candidate_through_the_scored_path(inputs, tmp_path):
@@ -338,7 +348,7 @@ def test_aggregate_refuses_shards_that_are_not_every_nth_case(monkeypatch):
     swapped = [_shard({"c2": [_row(1.0)] * 5}, cands, k=0, n=2, n_cases=2),
                _shard({"c1": [_row(1.0)] * 5}, cands, k=1, n=2, n_cases=2)]
     with pytest.raises(SystemExit, match="every n-th"):
-        ce.df_aggregate(swapped, None, None)
+        ce.df_aggregate(swapped, None)
 
 
 def test_a_round_refuses_a_state_from_another_setup_before_running():
@@ -352,4 +362,4 @@ def test_a_non_finite_training_objective_ranks_last(monkeypatch):
     monkeypatch.setattr(ce, "_scheme_tunable_metas", lambda *_: [])
     cands = [{}, {"a": 1}, {"a": 2}, {"b": 1}, {"b": 2}]
     rows = {"c1": [_row(float("nan")), _row(2.0), _row(3.0), _row(4.0), _row(5.0)]}
-    assert ce.df_aggregate([_shard(rows, cands)], None, None)["incumbent_at"] == [0, 1]
+    assert ce.df_aggregate([_shard(rows, cands)], None)["incumbent_at"] == [0, 1]

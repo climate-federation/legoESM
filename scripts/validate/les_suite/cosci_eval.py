@@ -839,10 +839,6 @@ DF_RANDOM = 16
 DF_SEED = 0
 DF_BOX_FRAC = 0.25
 DF_ROUNDS = (0, 1, 2)
-#: How failed training runs rank candidates: a PI decision (it defines the objective).
-#: Without one, selection is refused unless no training run of any candidate failed,
-#: where all three agree.
-DF_SELECT = ("reject_failed", "fewest_failures", "survivor_mean")
 
 
 def df_round_candidates(metas, rnd: int, state: dict | None) -> list[dict]:
@@ -948,11 +944,17 @@ def _train_objective(rows: dict, split: dict) -> tuple[int, float]:
     return failed, (obj if math.isfinite(obj) else math.inf)   # NaN ranks last
 
 
-def df_aggregate(shards: list, state: dict | None, select: str | None) -> dict:
+def df_aggregate(shards: list, state: dict | None) -> dict:
     """Combine one round's shards (all of them, once each) with the earlier rounds'
     ``state``; after round 0 freeze every parameter whose two probes score
     bit-identically to the default on every training case (no failed run among
-    them); pick the incumbent over every candidate so far."""
+    them); pick the incumbent over every candidate so far.
+
+    PI 2026-11-08: a candidate with any failed training run (gate failure, raised
+    run or non-finite score) is inadmissible: it never becomes the incumbent. A
+    round with no admissible candidate is recorded in ``rounds_all_failed`` and
+    keeps the earlier incumbent (``None`` if there is none yet; round 2 then
+    refuses). Votes me + codex + GLM 3-0."""
     rnd, name = shards[0]["round"], shards[0]["scheme"]
     n, settings = shards[0]["shard"][1], shards[0]["settings"]
     if sorted(s["shard"][0] for s in shards) != list(range(n)) or any(
@@ -961,10 +963,9 @@ def df_aggregate(shards: list, state: dict | None, select: str | None) -> dict:
         raise SystemExit("--df-shards must be every shard of one round, once each, "
                          "from one case list, code and settings")
     if (rnd == 0) != (state is None) or (state is not None and (
-            state["scheme"], state["round"], state["select"])
-            != (name, rnd - 1, select)):
+            state["scheme"], state["round"]) != (name, rnd - 1)):
         raise SystemExit(f"round {rnd} of {name} needs the state of round {rnd - 1} of "
-                         "the same scheme and --df-select (none for round 0)")
+                         "the same scheme (none for round 0)")
     cases, split, sha = {}, {}, {}
     for s in shards:
         if set(s["cases"]) & set(cases):
@@ -1004,17 +1005,17 @@ def df_aggregate(shards: list, state: dict | None, select: str | None) -> dict:
             table.append({"round": int(r), "index": j, "overrides": cand,
                           "train_failed": failed, "train_objective": obj,
                           "summary": failure_summary(rows, split)})
-    if any(t["train_failed"] for t in table) and select is None:
-        raise SystemExit("training runs failed: how they rank candidates is the PI's "
-                         f"choice; pass --df-select one of {DF_SELECT}")
-    pool = [t for t in table if select != "reject_failed" or t["train_failed"] == 0]
-    key = ((lambda t: (t["train_failed"], t["train_objective"]))
-           if select == "fewest_failures" else (lambda t: t["train_objective"]))
-    best = min(pool, key=key) if pool else None   # ties: the earliest (default first)
+    pool = [t for t in table if t["train_failed"] == 0]
+    best = (min(pool, key=lambda t: t["train_objective"]) if pool
+            else None)   # ties: the earliest (default first)
+    all_failed = [] if state is None else list(state["rounds_all_failed"])
+    if not any(t["train_failed"] == 0 for t in table if t["round"] == rnd):
+        all_failed.append(rnd)
     metas = _scheme_tunable_metas(_roster_base(name)[1], (1,))
     incumbent = None if best is None else {
         m.field: float(best["overrides"].get(m.field, m.default)) for m in metas}
-    return {"scheme": name, "round": rnd, "select": select, "frozen": frozen,
+    return {"scheme": name, "round": rnd, "rounds_all_failed": all_failed,
+            "frozen": frozen,
             "split": split, "case_sha256": sha, "settings": settings,
             "rounds": rounds, "candidates": table,
             "incumbent": incumbent,
@@ -1088,8 +1089,6 @@ def parse_args(argv=None):
                    help="DFAGG output of the previous round")
     p.add_argument("--df-shards", nargs="*", type=Path, default=[],
                    help="DFAGG: every shard output of one round")
-    p.add_argument("--df-select", choices=DF_SELECT, default=None,
-                   help="DFAGG: how failed training runs rank candidates (PI choice)")
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args(argv)
     if args.df_round is not None and not (args.stage == "E2" and args.candidate is None
@@ -1131,7 +1130,7 @@ def main(argv=None) -> int:
     if args.stage == "DFAGG":
         state = df_aggregate([json.loads(Path(s).read_text())["result"]
                               for s in args.df_shards],
-                             _load_state(args.df_state), args.df_select)
+                             _load_state(args.df_state))
         state["provenance"] = {"git_sha": _git_sha(), "shards": {
             str(s): _sha256(s) for s in args.df_shards}, "df_state": None if
             args.df_state is None else {"path": str(args.df_state),
