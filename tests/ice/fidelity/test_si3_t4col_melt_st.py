@@ -216,19 +216,27 @@ def test_soft_column_do_budgets_close_inside_the_bands(monkeypatch):
 
 
 def test_do_step_keep_switch_soft_pass_keeps_the_category(monkeypatch):
-    """Z63: below epsi20 total area the hard step empties the category; the soft pass
-    keeps it (updated branch, Z61), so the gradient of the area is the growth's."""
+    """Z63/Z64: below epsi20 total area the hard step empties the category; the soft pass
+    keeps its own growth (updated branch, Z61).  The band sits inside the open-water
+    ramp (|qlead| ~ 1e-16 W/m2), so the soft growth carries that ramp."""
     from test_si3_t4col_thd_do import DT, _state
     st, fz = _state()
     st = st._replace(concentration=jnp.zeros_like(st.concentration))
+    c = float(K.rho_ice)
     v_unit = -np.asarray(bl._do_step(st, fz._replace(qlead=-jnp.ones_like(fz.qlead)), DT, K,
-                                     nemo_version="5.0.1")[1].wfx_opw) * DT / float(K.rho_ice)
-    a_lat = 0.5 * bl._EPS20
-    q = jnp.asarray(-a_lat * bl._NEW_ICE_THICKNESS / v_unit)
-    area = lambda q_: bl._do_step(st, fz._replace(qlead=q_), DT, K, nemo_version="5.0.1",  # noqa: E731
-                                  switches=SMOOTH)[0].concentration
+                                     nemo_version="5.0.1")[1].wfx_opw) * DT / c
+    q = jnp.asarray(-0.5 * bl._EPS20 * bl._NEW_ICE_THICKNESS / v_unit)
+    run = lambda q_: bl._do_step(st, fz._replace(qlead=q_), DT, K, nemo_version="5.0.1",  # noqa: E731
+                                 switches=SMOOTH)
+    area = lambda q_: run(q_)[0].concentration  # noqa: E731
     assert np.all(np.asarray(_with(monkeypatch, "hard", area, q)) == 0.0)
-    soft = np.asarray(_with(monkeypatch, "soft", area, q))
-    assert np.all(soft == np.asarray(-q * v_unit / bl._NEW_ICE_THICKNESS))   # a_lateral, exact
+    soft_area, soft_wfx = _with(monkeypatch, "soft", lambda q_: (area(q_), run(q_)[1].wfx_opw), q)
+    grown = -np.asarray(soft_wfx) * DT / (c * bl._NEW_ICE_THICKNESS)
+    assert np.all(grown > 0.0)
+    np.testing.assert_allclose(np.asarray(soft_area), grown, rtol=1e-12, atol=0)
     g = np.asarray(jax.grad(lambda q_: jnp.sum(area(q_)))(q))
-    np.testing.assert_allclose(g, soft / np.asarray(q), rtol=1e-12, atol=0)
+    h = 1e-6 * np.abs(np.asarray(q))
+    fd = np.array([(float(jnp.sum(_with(monkeypatch, "soft", area, q.at[k].add(h[k]))))
+                    - float(jnp.sum(_with(monkeypatch, "soft", area, q.at[k].add(-h[k]))))) / (2 * h[k])
+                   for k in range(q.size)])
+    np.testing.assert_allclose(g, fd, rtol=1e-6, atol=0)
