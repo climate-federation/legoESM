@@ -175,6 +175,8 @@ class SI3StressInputs(NamedTuple):
     taum: Field
     utau_oce: Field
     vtau_oce: Field
+    # Level-1 T mask; read only by the implicit arm (rCdU_ice, iceupdate.F90:391 in NEMO 5.0.1).
+    tmask_k1: Field | None = None
 
 
 class SI3StressOutputs(NamedTuple):
@@ -184,6 +186,8 @@ class SI3StressOutputs(NamedTuple):
     tmod_io: Field
     utau_oce: Field
     vtau_oce: Field
+    # Implicit ice-ocean top drag (< 0, m/s) on DO_2D(1,1,1,1); None on the explicit arm (NEMO does not set it there).
+    rCdU_ice: Field | None = None
 
 
 class SI3FinalizeForcing(NamedTuple):
@@ -1004,10 +1008,18 @@ def si3_ice_update_tau(
     *,
     config: SI3ORCA2StateConfig,
     ln_drgice_imp: bool,
+    ice_step: bool = True,
 ) -> SI3StressOutputs:
-    """Execute the production-deck ``ice_update_tau`` resolved drag arm."""
-    if config.nn_fsbc != 1:
-        raise ValueError("O16 master record requires resolved nn_fsbc=1")
+    """``ice_update_tau`` (NEMO 5.0.1 ``iceupdate.F90:345-405``; same statements in the 5.0.2 deck).
+
+    ``ice_step`` is NEMO's ``MOD(kt-1, nn_fsbc) == 0`` (a static Python bool, decided by the caller).  True recomputes
+    ``tmod_io`` and ``taum`` and saves ``utau_oce``/``vtau_oce``; False (an ocean step between two ice steps, only
+    possible when ``nn_fsbc > 1``) carries ``inputs.tmod_io``, ``inputs.taum``, ``inputs.utau_oce`` and
+    ``inputs.vtau_oce`` unchanged and redoes only the every-ocean-step blend.  Under ``ln_drgice_imp`` the
+    every-ocean-step block also returns ``rCdU_ice = -tmod_io*at_i*tmask/rho0`` on ``DO_2D(1,1,1,1)`` (the array
+    shrunk by ``nn_hls-1`` per side), the drag the ocean's implicit top friction consumes; the implicit arm
+    requires ``inputs.tmask_k1``.
+    """
     h = int(config.nn_hls)
     if h < 1:
         raise ValueError("ice_update_tau requires at least one halo cell")
@@ -1022,36 +1034,54 @@ def si3_ice_update_tau(
         name for name in ("taum", "utau_oce", "vtau_oce")
         if getattr(inputs, name).shape != interior_shape
     )
+    if ln_drgice_imp and inputs.tmask_k1 is None:
+        # zflagi = 0 drops the explicit current term; without the mask there is no rCdU_ice
+        # either, so the drag's ocean-current dependence would be lost silently (vote D7 b).
+        raise ValueError("ice_update_tau ln_drgice_imp=True requires tmask_k1 to form rCdU_ice")
+    if inputs.tmask_k1 is not None and inputs.tmask_k1.shape != full_shape:
+        wrong.append("tmask_k1")
     if wrong:
         raise ValueError("ice_update_tau forcing/config shape mismatch: " + ", ".join(wrong))
     dtype = inputs.u_ice.dtype
     rho0 = jnp.asarray(config.ice_constants.rho_ocean, dtype=dtype)
 
-    zu = sr(sr(inputs.u_ice[1:-1, 1:-1] + inputs.u_ice[:-2, 1:-1]) -
-            sr(inputs.u_oce[1:-1, 1:-1] + inputs.u_oce[:-2, 1:-1]))
-    zv = sr(sr(inputs.v_ice[1:-1, 1:-1] + inputs.v_ice[1:-1, :-2]) -
-            sr(inputs.v_oce[1:-1, 1:-1] + inputs.v_oce[1:-1, :-2]))
-    zmod = sr(_QUARTER * sr(sr(zu * zu) + sr(zv * zv)))
-    tmod_inner = sr(sr(rho0 * inputs.drag_io[1:-1, 1:-1]) * sqrt_zero_subgradient(zmod))
-    tmod_io = inputs.tmod_io.at[1:-1, 1:-1].set(tmod_inner)
-
     sl = (slice(h, -h), slice(h, -h))
     left = (slice(h - 1, -h - 1), slice(h, -h))
     below = (slice(h, -h), slice(h - 1, -h - 1))
-    zu_i = sr(sr(inputs.u_ice[sl] + inputs.u_ice[left]) -
-              sr(inputs.u_oce[sl] + inputs.u_oce[left]))
-    zv_i = sr(sr(inputs.v_ice[sl] + inputs.v_ice[below]) -
-              sr(inputs.v_oce[sl] + inputs.v_oce[below]))
-    zmod_i = sr(_QUARTER * sr(sr(zu_i * zu_i) + sr(zv_i * zv_i)))
     at_i = inputs.at_i[sl]
-    drag_i = inputs.drag_io[sl]
-    taum_ice = sr(sr(sr(at_i * rho0) * drag_i) * zmod_i)
-    taum = sr(sr(sr(_ONE - at_i) * inputs.taum) + taum_ice)
 
-    utau_oce = inputs.utau[sl]
-    vtau_oce = inputs.vtau[sl]
-    # The admitted deck resolves ln_drgice_imp=F, hence zflagi=1.  Keeping the
-    # resolved logical explicit also preserves the already supported implicit arm.
+    if ice_step:
+        # ``IF( MOD( kt-1, nn_fsbc ) == 0 )`` block (:362-385)
+        zu = sr(sr(inputs.u_ice[1:-1, 1:-1] + inputs.u_ice[:-2, 1:-1]) -
+                sr(inputs.u_oce[1:-1, 1:-1] + inputs.u_oce[:-2, 1:-1]))
+        zv = sr(sr(inputs.v_ice[1:-1, 1:-1] + inputs.v_ice[1:-1, :-2]) -
+                sr(inputs.v_oce[1:-1, 1:-1] + inputs.v_oce[1:-1, :-2]))
+        zmod = sr(_QUARTER * sr(sr(zu * zu) + sr(zv * zv)))
+        tmod_inner = sr(sr(rho0 * inputs.drag_io[1:-1, 1:-1]) * sqrt_zero_subgradient(zmod))
+        tmod_io = inputs.tmod_io.at[1:-1, 1:-1].set(tmod_inner)
+
+        zu_i = sr(sr(inputs.u_ice[sl] + inputs.u_ice[left]) -
+                  sr(inputs.u_oce[sl] + inputs.u_oce[left]))
+        zv_i = sr(sr(inputs.v_ice[sl] + inputs.v_ice[below]) -
+                  sr(inputs.v_oce[sl] + inputs.v_oce[below]))
+        zmod_i = sr(_QUARTER * sr(sr(zu_i * zu_i) + sr(zv_i * zv_i)))
+        drag_i = inputs.drag_io[sl]
+        taum_ice = sr(sr(sr(at_i * rho0) * drag_i) * zmod_i)
+        taum = sr(sr(sr(_ONE - at_i) * inputs.taum) + taum_ice)
+        utau_oce = inputs.utau[sl]
+        vtau_oce = inputs.vtau[sl]
+    else:
+        tmod_io = inputs.tmod_io
+        taum = inputs.taum
+        utau_oce = inputs.utau_oce
+        vtau_oce = inputs.vtau_oce
+
+    # every ocean time step (:387-404)
+    rcdu_ice = None
+    if ln_drgice_imp:
+        r1_rho0 = sr(_ONE / rho0)
+        g = (slice(h - 1, full_shape[0] - h + 1), slice(h - 1, full_shape[1] - h + 1))
+        rcdu_ice = sr(sr(sr(-r1_rho0 * tmod_io[g]) * inputs.at_i[g]) * inputs.tmask_k1[g])
     zflagi = _ZERO if ln_drgice_imp else _ONE
     pu = sr(inputs.uu_kbb[sl] + inputs.uu_kbb[left])
     pv = sr(inputs.vv_kbb[sl] + inputs.vv_kbb[below])
@@ -1070,6 +1100,7 @@ def si3_ice_update_tau(
         tmod_io=tmod_io,
         utau_oce=utau_oce,
         vtau_oce=vtau_oce,
+        rCdU_ice=rcdu_ice,
     )
 
 
