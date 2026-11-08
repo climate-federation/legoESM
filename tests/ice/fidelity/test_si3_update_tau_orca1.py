@@ -83,10 +83,15 @@ def test_rcdu_ice_covers_halo_one_and_is_masked():
     d = _load()
     out = si3_ice_update_tau(_inputs(d), config=_config(d, 96), ln_drgice_imp=True)
     assert out.rCdU_ice.shape == d["u_ice"].shape      # DO_2D(1,1,1,1) at nn_hls=1 = the whole array
+    i, j = np.unravel_index(np.argmin(np.asarray(out.rCdU_ice)), out.rCdU_ice.shape)
+    assert float(out.rCdU_ice[i, j]) < 0.0             # perturb a cell that carries drag
     tm = d["tmask_k1"].copy()
-    tm[0, 0] = 0.0
+    tm[i, j] = 0.0
     masked = si3_ice_update_tau(_inputs(d, tmask_k1=tm), config=_config(d, 96), ln_drgice_imp=True)
-    assert float(masked.rCdU_ice[0, 0]) == 0.0
+    assert float(masked.rCdU_ice[i, j]) == 0.0
+    keep = np.ones(tm.shape, bool)
+    keep[i, j] = False
+    np.testing.assert_array_equal(np.asarray(masked.rCdU_ice)[keep], np.asarray(out.rCdU_ice)[keep])
 
 
 def test_explicit_arm_returns_no_rcdu_ice():
@@ -117,23 +122,62 @@ def test_ocean_step_between_ice_steps_holds_ice_step_quantities():
     cfg = _config(d, 96)
     held = si3_ice_update_tau(_inputs(d), config=cfg, ln_drgice_imp=True, ice_step=True)
     u_new = d["u_ice"] * 1.3 + 0.01
+    v_new = d["v_ice"] * 0.6 - 0.02
     pu_new = d["pu_oce"] * 0.7
-    nxt = _inputs(d, u_ice=u_new, uu_kbb=pu_new, u_oce=d["u_oce"] * 5.0, taum=held.taum,
+    pv_new = d["pv_oce"] * 1.4
+    nxt = _inputs(d, u_ice=u_new, v_ice=v_new, uu_kbb=pu_new, vv_kbb=pv_new, u_oce=d["u_oce"] * 5.0,
+                  utau=d["utau"] * 3.0, vtau=d["vtau"] * 3.0, taum=held.taum,
                   tmod_io=held.tmod_io, utau_oce=held.utau_oce, vtau_oce=held.vtau_oce)
     for imp in (True, False):
         out = si3_ice_update_tau(nxt, config=cfg, ln_drgice_imp=imp, ice_step=False)
         np.testing.assert_array_equal(out.tmod_io, held.tmod_io)
         np.testing.assert_array_equal(out.taum, held.taum)
         np.testing.assert_array_equal(out.utau_oce, held.utau_oce)
+        np.testing.assert_array_equal(out.vtau_oce, held.vtau_oce)
         tm = np.asarray(held.tmod_io)[1:-1, 1:-1]
         at = d["at_i"][1:-1, 1:-1]
         flag = 0.0 if imp else 1.0
         urel = (u_new[1:-1, 1:-1] + u_new[:-2, 1:-1]) - flag * (pu_new[1:-1, 1:-1] + pu_new[:-2, 1:-1])
+        vrel = (v_new[1:-1, 1:-1] + v_new[1:-1, :-2]) - flag * (pv_new[1:-1, 1:-1] + pv_new[1:-1, :-2])
         ref_u = (1.0 - at) * np.asarray(held.utau_oce) + at * (0.5 * tm * urel)
+        ref_v = (1.0 - at) * np.asarray(held.vtau_oce) + at * (0.5 * tm * vrel)
         assert _rel(out.utau[1:-1, 1:-1], ref_u) <= 1e-15
+        assert _rel(out.vtau[1:-1, 1:-1], ref_v) <= 1e-15
         if imp:
             ref_r = -(1.0 / float(d["rho0"])) * np.asarray(held.tmod_io) * d["at_i"] * d["tmask_k1"]
             assert _rel(out.rCdU_ice, ref_r) <= 1e-15
+
+
+def test_loop_extents_at_nn_hls_2():
+    """nn_hls=2: tmod_io on DO_2D(1) (untouched outer ring), blend on DO_2D(0), rCdU_ice on DO_2D(1) (array shrunk by 1)."""
+    cfg = SI3ORCA2StateConfig()._replace(nn_hls=2, nn_fsbc=96)
+    n = 8
+    rng = np.random.default_rng(0)
+    f = lambda: jnp.asarray(rng.uniform(0.1, 0.5, (n, n)))  # noqa: E731
+    sentinel = 7.0
+    inp = SI3StressInputs(
+        uu_kbb=f(), vv_kbb=f(), umask_k1=jnp.ones((n, n)), vmask_k1=jnp.ones((n, n)), u_ice=f(), v_ice=f(),
+        u_oce=f(), v_oce=f(), drag_io=f() * 0.01, at_i=f(), utau=jnp.full((n, n), sentinel),
+        vtau=jnp.full((n, n), sentinel), tmod_io=jnp.full((n, n), sentinel), taum=jnp.ones((n - 4, n - 4)),
+        utau_oce=jnp.zeros((n - 4, n - 4)), vtau_oce=jnp.zeros((n - 4, n - 4)), tmask_k1=jnp.ones((n, n)))
+    out = si3_ice_update_tau(inp, config=cfg, ln_drgice_imp=True)
+    tm = np.asarray(out.tmod_io)
+    assert np.all(tm[0, :] == sentinel) and np.all(tm[:, -1] == sentinel)
+    assert np.all(tm[1:-1, 1:-1] != sentinel)
+    ut = np.asarray(out.utau)
+    assert np.all(ut[1, :] == sentinel) and np.all(ut[2:-2, 2:-2] != sentinel)
+    assert out.rCdU_ice.shape == (n - 2, n - 2)
+    np.testing.assert_array_equal(out.rCdU_ice, -(1.0 / cfg.ice_constants.rho_ocean) * tm[1:-1, 1:-1]
+                                  * np.asarray(inp.at_i)[1:-1, 1:-1])
+
+
+def test_jit_matches_eager():
+    d = _load()
+    cfg = _config(d, 96)
+    eager = si3_ice_update_tau(_inputs(d), config=cfg, ln_drgice_imp=True)
+    jitted = jax.jit(lambda x: si3_ice_update_tau(x, config=cfg, ln_drgice_imp=True))(_inputs(d))
+    for a, b in zip(eager, jitted):
+        np.testing.assert_array_equal(a, b)
 
 
 def test_ice_step_true_equals_previous_single_call_form():
