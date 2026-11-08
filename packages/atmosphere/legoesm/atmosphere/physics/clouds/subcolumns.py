@@ -120,13 +120,16 @@ _CF_FLOOR = 1.0e-3             # matches clouds.cloud_fraction._INHOM_CF_FLOOR
 _SHIFT_LAYER_SLOPE = 2.0 ** 0.5
 _SHIFT_LAYER_STEP = (5.0 ** 0.5 - 1.0) / 2.0
 # ecRad inhomogeneity uniforms (rand_inhom1, rand_inhom2): own permutation
-# tables, and a column shift frac(K*shift + offset) whose large irrational K
-# scrambles the mask's shift, so a cloudy cell's draw does not depend on why
-# it is cloudy (an additive offset kept r1 a fixed function of the mask draw).
+# tables plus a per-(column, layer) offset hashed in uint32 from the column
+# shift, so a cloudy cell's draw is independent of the mask draw, each layer's
+# offset is uniform, and eager and jit give the same bits within a dtype
+# (float offsets of large arguments wrapped differently under jit in fp32).
 _INHOM_PERM_SEEDS = (_PERM_SEED + 1, _PERM_SEED + 2)
-_INHOM_SHIFT_SCALES = (1000.0 * 2.0 ** 0.5, 1000.0 * 3.0 ** 0.5)
-_INHOM_SHIFT_OFFSETS = (_SHIFT_LAYER_SLOPE % 1.0, (2.0 * _SHIFT_LAYER_SLOPE) % 1.0)
-_INHOM_LAYER_SLOPE_SCALE = 1000.0   # per-layer offsets uniform to ~1e-3
+_HASH_SHIFT_BITS = 24
+_HASH_GOLDEN = 0x9E3779B9          # splitmix / lowbias32 constants
+_HASH_LAYER = 0x85EBCA6B
+_HASH_MUL1 = 0x7FEB352D
+_HASH_MUL2 = 0x846CA68B
 
 
 @functools.lru_cache(maxsize=32)
@@ -156,18 +159,14 @@ def _stratified_table(n_sub: int, nlev: int, seed: int = _PERM_SEED) -> np.ndarr
     return np.array(_stratified_table_cached(int(n_sub), int(nlev), int(seed)), copy=True)
 
 
-def _shifted_uniforms(n_sub, nlev, shift, dtype, seed=_PERM_SEED, slope_scale=1.0):
-    """``(n_sub, ncol or 1, nlev)`` stratified uniforms, per-layer column shift.
-
-    A large ``slope_scale`` makes each layer's offset frac(shift*slope) uniform
-    for a uniform shift (to O(1/slope)); at 1 it is not (n_sub = 1 shows it).
-    """
+def _shifted_uniforms(n_sub, nlev, shift, dtype, seed=_PERM_SEED):
+    """``(n_sub, ncol or 1, nlev)`` stratified uniforms, per-layer column shift."""
     u = jnp.asarray(_stratified_table(int(n_sub), int(nlev), seed), dtype=dtype)
     u = u[:, None, :]                                   # (n_sub, 1, nlev)
     if shift is not None:
         k = jnp.arange(nlev, dtype=dtype)
-        off = (jnp.asarray(shift, dtype=dtype)[:, None]
-               * (slope_scale * (1.0 + k * _SHIFT_LAYER_SLOPE)) + k * _SHIFT_LAYER_STEP)
+        off = (jnp.asarray(shift, dtype=dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
+               + k * _SHIFT_LAYER_STEP)                  # (ncol, nlev)
         u = jnp.mod(u + off[None, :, :], 1.0)
     return u
 
@@ -205,9 +204,34 @@ def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT,
                            width=width)
 
 
-def inhomogeneity_shift(shift, i):
-    """Column shift of inhomogeneity stream ``i`` (0: rand_inhom1, 1: rand_inhom2)."""
-    return jnp.mod(_INHOM_SHIFT_SCALES[i] * jnp.asarray(shift) + _INHOM_SHIFT_OFFSETS[i], 1.0)
+def _lowbias32(h):
+    u32 = jnp.uint32
+    h = h ^ (h >> u32(16))
+    h = h * u32(_HASH_MUL1)
+    h = h ^ (h >> u32(15))
+    h = h * u32(_HASH_MUL2)
+    return h ^ (h >> u32(16))
+
+
+def inhomogeneity_uniforms(n_sub, nlev, shift, dtype):
+    """``(rand_inhom1, rand_inhom2)``, each ``(n_sub, ncol or 1, nlev)``.
+
+    Stratified permutation table of the stream, plus a uint32-hashed offset of
+    ``(column shift, stream, layer)``.  Same bits eager and under jit for a
+    given dtype; the shift's own resolution (fp32: ~1/128) still bounds how
+    many distinct columns there are, as for the mask.
+    """
+    u32 = jnp.uint32
+    q = (jnp.zeros((1,), dtype) if shift is None else jnp.asarray(shift, dtype))
+    q = (q * float(1 << _HASH_SHIFT_BITS)).astype(u32)[:, None]          # (ncol, 1)
+    k = jnp.arange(nlev, dtype=u32)[None, :]
+    out = []
+    for seed in _INHOM_PERM_SEEDS:
+        h = _lowbias32(q ^ (u32(seed) * u32(_HASH_GOLDEN) + k * u32(_HASH_LAYER)))
+        off = (h >> u32(32 - _HASH_SHIFT_BITS)).astype(dtype) * (1.0 / (1 << _HASH_SHIFT_BITS))
+        table = jnp.asarray(_stratified_table(int(n_sub), int(nlev), seed), dtype=dtype)
+        out.append(jnp.mod(table[:, None, :] + off[None], 1.0))
+    return tuple(out)
 
 
 def ecrad_inhomogeneity_scaling(mask, fractional_std, lat, p_half, T_half, shift=None):
@@ -238,9 +262,7 @@ def ecrad_inhomogeneity_scaling(mask, fractional_std, lat, p_half, T_half, shift
     op = overlap_param(jnp.asarray(p_half), jnp.asarray(T_half), decorr_km * 1000.0,
                        r_over_g=constants.R_d / constants.g)          # (ncol, nlev-1)
     op_inhom_above = jnp.concatenate([jnp.ones_like(op[:, :1]), op ** (1.0 / ratio)], axis=1)
-    r1, r2 = (_shifted_uniforms(n_sub, nlev, None if shift is None else inhomogeneity_shift(shift, i),
-                                dtype, seed, _INHOM_LAYER_SLOPE_SCALE)
-              for i, seed in enumerate(_INHOM_PERM_SEEDS))
+    r1, r2 = inhomogeneity_uniforms(n_sub, nlev, shift, dtype)
     repeat = (r2 < op_inhom_above[None]).astype(dtype)
     return inhomogeneity_od_scaling(mask.astype(dtype), repeat, jnp.asarray(fractional_std, dtype),
                                     r1)

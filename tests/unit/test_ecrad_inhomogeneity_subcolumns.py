@@ -62,9 +62,7 @@ def _reference(mask, fsd, lat, p_half, T_half, r1, r2):
 
 
 def _uniforms(n_sub, nlev, shift):
-    return [np.asarray(sub._shifted_uniforms(n_sub, nlev, sub.inhomogeneity_shift(shift, i),
-                                             jnp.float64, seed, sub._INHOM_LAYER_SLOPE_SCALE))
-            for i, seed in enumerate(sub._INHOM_PERM_SEEDS)]
+    return [np.asarray(r) for r in sub.inhomogeneity_uniforms(n_sub, nlev, shift, jnp.float64)]
 
 
 def test_matches_the_ecrad_recursion_on_the_lane_mask():
@@ -147,9 +145,7 @@ def test_gradient_in_fsd_matches_finite_difference():
 
 
 def test_jit_parity():
-    """Recursion at 1e-12; the uniform generator separately at 1e-9, because
-    frac of a ~1e4 argument rounds differently under jit (FMA), measured 3e-11
-    on the scaling (a draw landing within an ulp of an integer could wrap)."""
+    """Recursion at 1e-12 (fp64); the integer-hashed uniforms bit-identical."""
     from legoesm.atmosphere.physics.radiation.ecrad_ifs.mcica_generator import (
         inhomogeneity_od_scaling)
     ncol, nlev, n_sub = 4, 10, 8
@@ -160,9 +156,22 @@ def test_jit_parity():
     f = lambda m, rep, r: inhomogeneity_od_scaling(m, rep, jnp.asarray(0.75), r)  # noqa: E731
     np.testing.assert_allclose(np.asarray(jax.jit(f)(mask, repeat, r1)),
                                np.asarray(f(mask, repeat, r1)), rtol=1e-12, atol=1e-12)
-    g = lambda s: sub._shifted_uniforms(n_sub, nlev, sub.inhomogeneity_shift(s, 0), jnp.float64,  # noqa: E731
-                                        sub._INHOM_PERM_SEEDS[0], sub._INHOM_LAYER_SLOPE_SCALE)
-    np.testing.assert_allclose(np.asarray(jax.jit(g)(shift)), np.asarray(g(shift)), rtol=0, atol=1e-9)
+    g = lambda s: sub.inhomogeneity_uniforms(n_sub, nlev, s, jnp.float64)  # noqa: E731
+    for a, b in zip(jax.jit(g)(shift), g(shift)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_fp32_jit_parity_of_the_full_scaling():
+    """fp32: the draw must not depend on compile mode (a float offset of a
+    ~5e4 argument once wrapped to different draws, scalings differing by 5)."""
+    ncol, nlev, n_sub = 128, 36, 8
+    p_half, T_half, lat = (jnp.asarray(a, jnp.float32) for a in _column(ncol, nlev))
+    shift = jnp.arange(ncol, dtype=jnp.float32) / ncol
+    cf = jnp.asarray(np.random.default_rng(5).random((ncol, nlev)), jnp.float32)
+    mask = sub.generate_subcolumns(cf, n_sub, shift=shift, width=0.0)
+    f = lambda m, s: sub.ecrad_inhomogeneity_scaling(m, 0.75, lat, p_half, T_half, shift=s)  # noqa: E731
+    np.testing.assert_allclose(np.asarray(jax.jit(f)(mask, shift)), np.asarray(f(mask, shift)),
+                               rtol=1e-5, atol=1e-6)
 
 
 def test_backend_hands_the_solver_the_scaled_paths(monkeypatch):

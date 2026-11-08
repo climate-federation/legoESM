@@ -233,7 +233,8 @@ def test_two_region_refuses_partial_coverage():
     """two_region is per-subcolumn McICA scaling; two_column has no subcolumns."""
     cfg = build_cloud_config(
         "sundqvist", cloud_optics_inhomogeneity="two_region",
-        cloud_partial_coverage_optics="two_column")
+        cloud_partial_coverage_optics="two_column")._replace(
+            cloud_vertical_overlap_optics="max_random")
     with pytest.raises(ValueError, match="two_region"):
         compute_cloud_properties(config=cfg, subcolumn_inhomogeneity=True, **_inputs())
 
