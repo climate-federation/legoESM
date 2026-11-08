@@ -100,13 +100,13 @@ def test_explicit_arm_returns_no_rcdu_ice():
     assert out.rCdU_ice is None
 
 
-def test_implicit_arm_without_tmask_forms_no_rcdu_ice():
-    """No mask, no drag: rCdU_ice is None (the ocean's implicit top drag refuses a None input); the stress is unchanged."""
+def test_implicit_arm_refuses_missing_tmask():
+    """Implicit arm without a mask would drop both the explicit current term and rCdU_ice (vote D7 b)."""
     d = _load()
-    a = si3_ice_update_tau(_inputs(d, tmask_k1=None), config=_config(d, 96), ln_drgice_imp=True)
-    b = si3_ice_update_tau(_inputs(d), config=_config(d, 96), ln_drgice_imp=True)
-    assert a.rCdU_ice is None
-    np.testing.assert_array_equal(a.utau, b.utau)
+    with pytest.raises(ValueError, match="tmask_k1"):
+        si3_ice_update_tau(_inputs(d, tmask_k1=None), config=_config(d, 96), ln_drgice_imp=True)
+    assert si3_ice_update_tau(_inputs(d, tmask_k1=None), config=_config(d, 96),
+                              ln_drgice_imp=False).rCdU_ice is None
 
 
 def test_wrong_tmask_shape_is_refused():
