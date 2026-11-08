@@ -70,9 +70,10 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[3]
 NAMELISTS = REPO / "tests" / "ice" / "unit" / "data" / "orca2_sas_ice_expref"
 
-# Voted detail choices (see the PR body): V1/V19 grid, V2 seed.
+# Voted detail choices (see the PR body): V1 grid 16x12 shrunk to 12x10 by V19
+# (fixture budget), V2 seed.
 SEED = 20261108
-JPI, JPJ = 16, 12
+JPI, JPJ = 12, 10
 NN_HLS = 2
 NATURES = ("T", "U", "V", "F")
 
@@ -168,6 +169,11 @@ def state_template(cfg: SI3ORCA2StateConfig, delayed: bool) -> SI3State:
     return s._replace(cflice_delayed=jnp.zeros(())) if delayed else s
 
 
+def _bits(a):
+    a = np.asarray(a)
+    return a.view(np.uint64) if a.dtype == np.float64 else a
+
+
 def _owned(x):
     h = NN_HLS
     return x[h:-h, h:-h]
@@ -179,7 +185,7 @@ def _owned(x):
 
 
 def _lbc(x, nat, sgn=1.0):
-    return np.asarray(si3_lbc_lnk_orca2(jnp.asarray(x), nat, sgn, nn_hls=NN_HLS, ldfull=True))
+    return np.array(si3_lbc_lnk_orca2(jnp.asarray(x), nat, sgn, nn_hls=NN_HLS, ldfull=True))
 
 
 def _metric(rng, nat):
@@ -459,8 +465,20 @@ def rung_finalize(d):
     returned, resp = sea_ice_module._si3_orca2_o2_step_with_trace(
         s, forcing, build_si3_orca2_o2_config(cfg), cfg.rDt_ice
     )
-    out.update(pack("dispatch/returned", returned))
-    out.update(pack("dispatch/response", resp))
+    # The dispatcher's O15/O16 stages are pinned through the direct calls
+    # above (stored once): they must agree bit for bit, then only the stress
+    # stage adds new leaves.
+    same = (
+        (pack("o15", resp.correction), pack("o15", cor)),
+        (pack("o16", resp.final), pack("o16", fin)),
+        (pack("o16.state", returned), pack("o16.state", fin.state)),
+    )
+    for got, want in same:
+        if sorted(got) != sorted(want) or any(
+            not np.array_equal(_bits(got[k]), _bits(want[k])) for k in want
+        ):
+            raise AssertionError("dispatcher O15/O16 differ from the direct O15/O16 calls")
+    out.update(pack("dispatch/stress", resp.stress))
     return out
 
 
@@ -502,9 +520,14 @@ def main() -> None:
         # Halo rung input: base state with nonzero Prather moments everywhere so
         # the -1 sign on sx/sy is observable (fold/seam act on halos only).
         leaves, treedef = jax.tree_util.tree_flatten(state.prather)
-        prather = jax.tree_util.tree_unflatten(
-            treedef, [jnp.asarray(rng.uniform(-1.0, 1.0, x.shape)) for x in leaves]
-        )
+        # Vote H1: random in category 1 (and layer 1 of the 4-D families) only.
+        def _cat1(x):
+            out = np.zeros(x.shape)
+            idx = (slice(None), slice(None)) + (0,) * (x.ndim - 2)
+            out[idx] = rng.uniform(-1.0, 1.0, (JPI, JPJ))
+            return jnp.asarray(out)
+
+        prather = jax.tree_util.tree_unflatten(treedef, [_cat1(x) for x in leaves])
         halo_state = state._replace(
             prather=prather,
             u_ice=jnp.asarray(rng.uniform(-0.2, 0.2, (JPI, JPJ))),
@@ -530,13 +553,20 @@ def main() -> None:
             )
             total += path.stat().st_size
             print(f"{rung}: {len(inputs)} inputs, {len(outputs)} outputs, {path.stat().st_size} B")
-    sha = subprocess.run(
-        ["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-    ).stdout.strip()
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(REPO), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    # The PR changes no model code, so the lane that produced the outputs is
+    # origin/main at the merge base; the generator blob pins this script.
+    main_sha = git("merge-base", "HEAD", "origin/main")
+    blob = git("hash-object", "tests/ice/fixtures/si3_orca2_regression/make_fixture.py")
     prov = {
         "kind": "self-referenced regression pin, NOT an oracle",
         "generator": "tests/ice/fixtures/si3_orca2_regression/make_fixture.py",
-        "generated_at_git_sha": sha,
+        "origin_main_sha": main_sha,
+        "generator_blob_sha": blob,
         "seed": SEED,
         "grid": [JPI, JPJ],
         "nn_hls": NN_HLS,
