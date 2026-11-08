@@ -1850,14 +1850,13 @@ class PhysicsPipeline:
                 from legoesm.atmosphere.physics.microphysics.config import (
                     ThompsonConfig,
                 )
-                _thompson = isinstance(self.micro_config, ThompsonConfig)
-                if _thompson:
-                    from legoesm.atmosphere.physics._shared import compute_rho
-                    from legoesm.atmosphere.physics.microphysics.integration import (
-                        number_per_mass_to_per_volume,
-                        number_per_volume_to_per_mass,
-                        require_thompson_tracers,
-                    )
+                from legoesm.atmosphere.physics._shared import compute_rho
+                from legoesm.atmosphere.physics.microphysics.integration import (
+                    number_per_mass_to_per_volume,
+                    number_per_volume_to_per_mass,
+                    require_thompson_tracers,
+                )
+                if isinstance(self.micro_config, ThompsonConfig):
                     # the column bridges' full-registry refusal (vote W1a/Y2a)
                     require_thompson_tracers("thompson", [
                         k for k, x in (("q_v", q_v), ("q_c", q_c),
@@ -1871,23 +1870,25 @@ class PhysicsPipeline:
                             u, v, p_s, ad.ncol, nlev, _winds_on_t_grid,
                             "microphysics='thompson'"),
                         T_col, p_full_col, q_v_col)
-                    # per-mass N_c/N_r carry <-> the scheme's per-volume
-                    # numbers, with the bridges' moist density (vote Y1b;
-                    # the other schemes still get the carry raw: finding)
-                    _rho_n = compute_rho(T_col, p_full_col, q_v_col)
-                    hydrometeors = hydrometeors._replace(
-                        N_c=number_per_mass_to_per_volume(hydrometeors.N_c, _rho_n),
-                        N_r=number_per_mass_to_per_volume(hydrometeors.N_r, _rho_n))
+                # The per-mass N_c/N_r carry <-> every scheme's per-volume
+                # numbers, with the column bridges' moist density (the
+                # bridges always did this; this lane fed the carry raw to
+                # every scheme but thompson).  The aerosol-CCN N_c is
+                # already per volume (as the bridges' activated field).
+                _rho_n = compute_rho(T_col, p_full_col, q_v_col)
+                hydrometeors = hydrometeors._replace(
+                    N_c=(hydrometeors.N_c if _nc_aer_specified else
+                         number_per_mass_to_per_volume(hydrometeors.N_c, _rho_n)),
+                    N_r=number_per_mass_to_per_volume(hydrometeors.N_r, _rho_n))
                 micro_out = self.micro_fn(
                     T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
                     p_full=p_full_col, p_half=p_half_col,
                     rho=rho_col, dz=dz_col, dt=dt,
                     config=self.micro_config, **_sq_kw,
                 )
-                if _thompson:
-                    micro_out = micro_out._replace(
-                        dN_c_dt=number_per_volume_to_per_mass(micro_out.dN_c_dt, _rho_n),
-                        dN_r_dt=number_per_volume_to_per_mass(micro_out.dN_r_dt, _rho_n))
+                micro_out = micro_out._replace(
+                    dN_c_dt=number_per_volume_to_per_mass(micro_out.dN_c_dt, _rho_n),
+                    dN_r_dt=number_per_volume_to_per_mass(micro_out.dN_r_dt, _rho_n))
             dT_dt_micro = ad.unflatten_3d(micro_out.dT_dt)
             dq_v_dt_micro = ad.unflatten_3d(micro_out.dq_v_dt)
             dq_c_dt = ad.unflatten_3d(micro_out.dq_c_dt)

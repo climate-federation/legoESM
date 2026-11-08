@@ -457,14 +457,19 @@ def test_pipeline_stateless_gwd_composite_runs_and_sums(setup):
     assert jnp.allclose(du_composite, du_sum, atol=1e-10)
 
 
-def test_thompson_pipeline_numbers_match_bridge():
-    """WRF Thompson through the driver pipeline and the hydrostatic bridge on
-    the same columns: the pipeline converts its per-mass N_r carry to the
-    scheme's per-volume number and back, as the bridge does (vote Y1b), so
-    the rain-number tendency agrees and is non-zero; a carry without the
-    full registry refuses (vote Y2a)."""
+@pytest.mark.parametrize("scheme", ["thompson", "morrison", "p3", "seifert_beheng"])
+def test_pipeline_numbers_match_bridge(scheme):
+    """Each double-moment scheme through the driver pipeline and through the
+    hydrostatic bridge on the same columns: the pipeline converts its
+    per-mass N_c/N_r carry to the schemes' per-volume numbers and back, as
+    the bridge does, so the rain-number tendency agrees and is non-zero
+    (thompson: vote Y1b; the others fed the raw carry until this fix).
+    thompson also refuses a carry without the full registry (vote Y2a)."""
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig,
+        MorrisonConfig,
+    )
     from legoesm.atmosphere.physics.microphysics.integration import (
         make_microphysics_physics,
     )
@@ -478,7 +483,9 @@ def test_thompson_pipeline_numbers_match_bridge():
     config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
         dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
-        convection="none", radiation="none", microphysics="thompson",
+        convection="none", radiation="none", microphysics=scheme,
+        # morrison's default warm rain needs CLUBB's relvar (not on this lane)
+        **({"morrison_warm_rain_scheme": "kk2000"} if scheme == "morrison" else {}),
     )
     config.validate_strict()
     pipe = build_physics_pipeline(grid, sigma, config)
@@ -492,7 +499,9 @@ def test_thompson_pipeline_numbers_match_bridge():
     full = dict(q_i=z3, q_s=z3, q_g=z3, N_c=z3, N_r=n_r, N_i=z3)
     out = step(**full)
     bridge = make_microphysics_physics(
-        MicrophysicsConfig(scheme="thompson"), model_type="hydrostatic", dt=DT)
+        MicrophysicsConfig(scheme=scheme,
+                           morrison=MorrisonConfig(warm_rain_scheme="kk2000")),
+        model_type="hydrostatic", dt=DT)
     d3 = state.T.dims
     tr = {k: Field(x, name=k, dims=d3) for k, x in (
         ("q_v", f["q_v"]), ("q_c", f["q_c"]), ("q_r", q_r), ("q_i", z3),
@@ -502,5 +511,6 @@ def test_thompson_pipeline_numbers_match_bridge():
     scale = float(jnp.max(jnp.abs(ref)))
     assert scale > 0.0, "no rain-number tendency"
     assert float(jnp.max(jnp.abs(out.dN_r_dt - ref))) <= 1e-9 * scale
-    with pytest.raises(ValueError, match="N_i"):
-        step(**{**full, "N_i": None})
+    if scheme == "thompson":
+        with pytest.raises(ValueError, match="N_i"):
+            step(**{**full, "N_i": None})
