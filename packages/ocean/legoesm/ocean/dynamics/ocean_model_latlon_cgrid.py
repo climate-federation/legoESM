@@ -4801,7 +4801,7 @@ class LatLonCGridOceanModel:
         # #1455: e3-weighting selector for the "nemo_div_curl" operator only.
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             VALID_LATERAL_VISCOSITY_MASK_LEVELS)
-        _mlev = getattr(config, "lateral_viscosity_mask_levels", "surface")
+        _mlev = getattr(config, "lateral_viscosity_mask_levels", "per_level")
         if _mlev not in VALID_LATERAL_VISCOSITY_MASK_LEVELS:
             raise ValueError(
                 "lateral_viscosity_mask_levels must be one of "

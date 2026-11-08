@@ -44,7 +44,7 @@ zm_capelmt: null
 zm_detrain_phase_width_K: null
 zm_detrain_number_width_kgkg_s: null
 
-# --- radiation: OpenIFS 49r1 ecRad (RRTMG gas optics), votes L1-L28, S1-S6 --
+# --- radiation: OpenIFS 49r1 ecRad (RRTMGP gas optics, user 2026-11-06), votes L1-L28, S1-S6 --
 # Full call hourly (rad_update_steps 32 x 112.5 s, inherited = NRADFR=-1) into
 # the between-call carry; RADHEATN updates SW/LW every physics step.  The lane
 # REFUSES to build until the IFS TSI and GHG climatologies (A15) and the

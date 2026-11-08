@@ -192,6 +192,27 @@ def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
     return -smooth_min_c1(-a, -b, width)
 
 
+def max_c1(a: jax.Array, b: jax.Array, sharpness: float) -> jax.Array:
+    """C1 ``max(a, b)`` that is EXACTLY ``a`` for ``a - b >= 1/s`` and ``b`` for ``a <= b``.
+
+    ``b + positive_part_c1(a - b, s)`` inside the band ``0 < a - b < 1/s``;
+    outside it the hard operand is returned unchanged (bitwise), so a floor
+    or cap that is inactive by more than ``1/s`` costs nothing.  Never above
+    ``max(a, b)``.  Exactly ``jnp.maximum`` at ``sharpness = inf``.
+    """
+    if _hard(sharpness):
+        return jnp.maximum(a, b)
+    d = a - b
+    return jnp.where(d * sharpness >= 1.0, a, b + positive_part_c1(d, sharpness))
+
+
+def min_c1(a: jax.Array, b: jax.Array, sharpness: float) -> jax.Array:
+    """C1 ``min(a, b)``, exact outside the band ``0 < b - a < 1/s``: ``-max_c1(-a, -b, s)``."""
+    if _hard(sharpness):
+        return jnp.minimum(a, b)
+    return -max_c1(-a, -b, sharpness)
+
+
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
     """Smooth approximation to |x|.
 

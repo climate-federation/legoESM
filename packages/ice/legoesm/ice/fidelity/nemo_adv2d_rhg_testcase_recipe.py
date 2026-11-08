@@ -217,6 +217,7 @@ def build_ice_adv2d_rhg_card(
         t_surface=t_surface,
     )
     config = SI3CGridAEVPConfig(
+        north_fold="none",
         scheme=_RHG_SCHEME,
         staggering=_RHG_STAGGERING,
         dt_s=base.dt_s,
