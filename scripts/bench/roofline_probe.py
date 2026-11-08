@@ -452,7 +452,7 @@ class CollectivePoint:
 
 @dataclass
 class CollectiveResult:
-    transport: str           # "ppermute_spmd" | "mpi4jax_sendrecv".
+    transport: str           # "ppermute_spmd" | "mpi4jax_sendrecv" | "mpi4jax_alltoall".
     n_participants: int
     dtype: str
     points: list[CollectivePoint] = field(default_factory=list)
@@ -657,6 +657,76 @@ def measure_sendrecv_collective(
             achieved_gbps=gbps,
         ))
 
+    if res.points:
+        res.latency_floor_ms = res.points[0].time_per_call_ms
+        res.asymptotic_gbps = res.points[-1].achieved_gbps
+    return res
+
+
+def measure_alltoall_collective(
+    *,
+    log2_lo: int = 10,
+    log2_hi: int = 22,
+    dtype=jnp.float32,
+    n_warmup: int = 5,
+    n_timing: int = 100,
+    max_rank_bytes: int = 1 << 26,
+) -> CollectiveResult | None:
+    """Time the model's AD-safe ``mpi4jax`` all-to-all
+    (``distributed_fft.ad_alltoall``, the spectral-LES transpose) over a
+    payload sweep, under ``mpirun``.  ``n_elements``/``payload_bytes`` are
+    PER PEER (each rank sends that much to every rank); ``achieved_gbps``
+    is the OFF-RANK bytes sent per rank, ``payload_bytes * (P - 1)``, over
+    the call time.  Same latency-mode timing as the sendrecv sweep: block
+    every call, barrier-bracketed, MAX over ranks.  One op per jit call, so
+    small payloads measure JAX's per-dispatch cost of an ordered-effect jit
+    (~260 us on Derecho CPU, 2026-11-04), not MPI; only the large-payload
+    points are a bandwidth bound.  The in-jit per-op cost is the chain slope
+    from ``probe_mpi_transport.py``.  Payloads whose per-rank
+    send buffer ``P * n * itemsize`` exceeds ``max_rank_bytes`` are skipped
+    (at 128 ranks the sendrecv sweep's 2**22 top would be 2 GB per rank).
+    ``None`` outside MPI or with <2 ranks."""
+    try:
+        from mpi4py import MPI
+    except ImportError:
+        return None
+    comm = MPI.COMM_WORLD
+    nproc = comm.Get_size()
+    if nproc < 2:
+        return None
+    rank = comm.Get_rank()
+    from legoesm.parallel.distributed_fft import ad_alltoall
+
+    res = CollectiveResult(transport="mpi4jax_alltoall",
+                           n_participants=nproc, dtype=str(jnp.dtype(dtype)))
+    itemsize = jnp.dtype(dtype).itemsize
+    run = jax.jit(lambda x: ad_alltoall(x, comm))
+    for n in _payload_sweep(log2_lo, log2_hi):
+        if nproc * n * itemsize > max_rank_bytes:
+            break
+        x = jnp.full((nproc, n), rank, dtype=dtype)
+        jax.block_until_ready(x)
+        r = run(x)
+        for _ in range(n_warmup):
+            r = run(x)
+        jax.block_until_ready(r)
+        # Row i must come from rank i, or the timing is of a broken exchange.
+        rows_ok = np.all(np.asarray(r) == np.arange(nproc)[:, None])
+        if not comm.allreduce(int(rows_ok), op=MPI.MIN):
+            raise RuntimeError(f"alltoall returned wrong rows at n={n}")
+        comm.Barrier()
+        t0 = time.perf_counter()
+        for _ in range(n_timing):
+            r = run(x)
+            jax.block_until_ready(r)
+        local_elapsed = time.perf_counter() - t0
+        ms = comm.allreduce(local_elapsed, op=MPI.MAX) / n_timing * 1e3
+        payload_bytes = n * itemsize
+        res.points.append(CollectivePoint(
+            n_elements=n, payload_bytes=payload_bytes,
+            dtype=str(jnp.dtype(dtype)), time_per_call_ms=ms,
+            achieved_gbps=payload_bytes * (nproc - 1) / (ms * 1e-3) / 1e9,
+        ))
     if res.points:
         res.latency_floor_ms = res.points[0].time_per_call_ms
         res.asymptotic_gbps = res.points[-1].achieved_gbps
@@ -1300,6 +1370,15 @@ def main() -> int:
                 print(f"[2b] mpi4jax sendrecv: latency floor "
                       f"{srv.latency_floor_ms*1e3:.1f} us, "
                       f"asymptotic {srv.asymptotic_gbps:.1f} GB/s")
+        a2a = measure_alltoall_collective(
+            log2_lo=args.coll_log2_lo, log2_hi=args.coll_log2_hi,
+            dtype=bw_dtype, n_warmup=args.n_warmup, n_timing=args.n_timing)
+        if a2a is not None:
+            collectives.append(asdict(a2a))
+            if rank0:
+                print(f"[2c] mpi4jax alltoall: latency floor "
+                      f"{a2a.latency_floor_ms*1e3:.1f} us, "
+                      f"asymptotic {a2a.asymptotic_gbps:.1f} GB/s off-rank")
     payload["collectives"] = collectives
 
     # --- Ceiling 3: allreduce --------------------------------------------

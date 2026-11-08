@@ -26,6 +26,26 @@ def test_most_square_factors_ladder_values():
                    256: (16, 16), 512: (16, 32)}
 
 
+def test_state_checksum_is_decomposition_invariant_and_permutation_sensitive():
+    import numpy as np
+    from legoesm.parallel.plane_mpi import make_plane_pencil_layout
+
+    rng = np.random.default_rng(0)
+    f = rng.standard_normal((6, 8, 3))
+    whole = make_plane_pencil_layout(rank=0, n_ranks=1, n_ranks_y=1,
+                                     n_ranks_x=1, ny_global=6, nx_global=8)
+    ref = crm.state_checksum(f, whole)
+    parts = 0.0
+    for r in range(4):
+        lay = make_plane_pencil_layout(rank=r, n_ranks=4, n_ranks_y=2,
+                                       n_ranks_x=2, ny_global=6, nx_global=8)
+        parts += crm.state_checksum(
+            f[lay.iy_start:lay.iy_end, lay.ix_start:lay.ix_end], lay)
+    assert parts == pytest.approx(ref, rel=1e-12)
+    for g in (f[::-1], f[:, ::-1], f[:, :, ::-1], np.roll(f, 1, axis=1)):
+        assert abs(crm.state_checksum(g, whole) - ref) > 1e-6 * abs(ref)
+
+
 def test_global_grid_shape():
     assert crm.global_grid_shape("strong", 512, 512, 8, 16) == (512, 512)
     assert crm.global_grid_shape("weak", 64, 64, 8, 16) == (512, 1024)

@@ -59,6 +59,15 @@ def bench_parser() -> argparse.ArgumentParser:
     p.add_argument("--time-physics", action="store_true")
     p.add_argument("--physics-calls", type=int, default=5,
                    help="Calls per physics timing (after one warm-up call).")
+    p.add_argument("--single-rank-path", choices=["serial", "halo"],
+                   default="halo",
+                   help="1 rank only: 'serial' = step_halo's own shortcut to "
+                        "the serial step() (slower than the halo core at the "
+                        "same size, so not a like-for-like efficiency "
+                        "baseline); 'halo' = the multi-rank halo core "
+                        "with local periodic wraps (layout n_ranks faked to 2 "
+                        "on a 1x1 rank grid; every reduction is then over one "
+                        "process).")
     p.add_argument("--output", type=str, default=None,
                    help="Append one JSON line (rank 0).")
     return p
@@ -81,6 +90,26 @@ def global_grid_shape(mode: str, ny: int, nx: int,
     if mode == "weak":
         return ny * n_ranks_y, nx * n_ranks_x
     raise ValueError(f"unknown mode {mode!r}")
+
+
+def state_checksum(data, layout, absolute: bool = False) -> float:
+    """This rank's share of ``sum(field * w)`` with a weight that depends on
+    each cell's GLOBAL (y, x, trailing) index, so a sum over ranks is
+    independent of the decomposition but changes under any permutation.
+    ``absolute`` gives ``sum(|field| * w)``, the scale to compare it at."""
+    import numpy as np
+    a = np.asarray(data, dtype=np.float64)
+    ny, nx = layout.ny_local, layout.nx_local
+    if a.shape[:2] != (ny, nx):
+        raise ValueError(f"field leading shape {a.shape[:2]} != {(ny, nx)}")
+    r = int(np.prod(a.shape[2:], dtype=np.int64))
+    gy = layout.iy_start + np.arange(ny)
+    gx = layout.ix_start + np.arange(nx)
+    cell = gy[:, None] * layout.nx_global + gx[None, :]
+    idx = cell[:, :, None] * r + np.arange(r)[None, None, :]
+    w = 1.0 + idx / float(layout.ny_global * layout.nx_global * max(r, 1))
+    a = a.reshape(ny, nx, r)
+    return float(np.sum((np.abs(a) if absolute else a) * w))
 
 
 def provenance() -> dict:
@@ -198,7 +227,12 @@ def main(argv=None):
         rank=rank, n_ranks=n_ranks, n_ranks_y=n_ranks_y, n_ranks_x=n_ranks_x,
         ny_global=ny_g, nx_global=nx_g, halo=halo,
     )
-    if n_ranks > 1:
+    if n_ranks == 1 and bargs.single_rank_path == "halo":
+        # step_halo short-cuts n_ranks == 1 to step(); n_ranks is only a
+        # branch flag (counts come from ny/nx_global), and with a 1x1 rank
+        # grid every halo is a local wrap.
+        layout = layout._replace(n_ranks=2)
+    if layout.n_ranks > 1:
         grid = make_plane_pencil_grid(
             layout, dx=rargs.dx, dy=rargs.dx, nlev=rargs.nlev, dtype=dtype,
             coriolis_mode=rargs.coriolis_mode, f0=rargs.f0, beta=rargs.beta)
@@ -242,6 +276,11 @@ def main(argv=None):
     finite_all = comm.allreduce(int(finite_ok), op=MPI.MIN) == 1
     max_dtheta = comm.allreduce(
         float(jnp.max(jnp.abs(state.theta_prime.data - theta_ic))), op=MPI.MAX)
+    checksums = {f"{name}{sfx}": comm.allreduce(
+        state_checksum(getattr(state, name).data, layout, absolute=bool(sfx)),
+        op=MPI.SUM)
+        for name in ("u", "v", "w", "theta_prime", "rho_prime", "tracers")
+        for sfx in ("", "_abs")}
 
     physics = None
     if bargs.time_physics:
@@ -298,6 +337,11 @@ def main(argv=None):
             "ny_global": ny_g, "nx_global": nx_g,
             "ny_local": layout.ny_local, "nx_local": layout.nx_local,
             "nlev": rargs.nlev, "halo": halo, "dt": rargs.dt,
+            "single_rank_path": (bargs.single_rank_path if n_ranks == 1
+                                 else "halo"),
+            "forced_halo_core": layout.n_ranks != n_ranks,
+            "mpi_size": n_ranks,
+            "state_checksums": checksums,
             "time_steps": bargs.time_steps, "windows": bargs.windows,
             "compile_plus_first_step_s": t_compile,
             "ms_per_step_windows": [1e3 * s for s in per_step],
