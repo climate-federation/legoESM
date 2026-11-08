@@ -193,19 +193,27 @@ def test_prather_limiter_smooth_exact_outside_bands(axis):
     assert not (changed & ~planted).any()
 
 
-@pytest.mark.parametrize("limit", [tr._si3_prather_limit_x, tr._si3_prather_limit_y])
-def test_prather_limiter_smooth_check_grads(limit):
-    """check_grads w.r.t. the moments (one slope planted inside its cap band).  The cap-relative band widths are
-    stop_gradient constants, so the content derivative is checked for finiteness only."""
+@pytest.mark.parametrize("axis", [0, 1])
+def test_prather_limiter_smooth_check_grads(axis):
+    """check_grads w.r.t. the swept slope and second moment (slope planted inside its cap band); the cap-relative
+    band widths are stop_gradient constants, so the content derivative is checked for finiteness only."""
+    limit = (tr._si3_prather_limit_x, tr._si3_prather_limit_y)[axis]
     content, moments, wet = _limit_inputs(1, epsi20_cells=False)
+    moments = list(moments)
+    moments[axis] = moments[axis].at[2, 0, 0].set(1.5 * content[2, 0, 0] * (1.0 - 0.002))
+    slope_i, second_i = (0, 2) if axis == 0 else (1, 3)
 
-    def f(m0, m2):
-        mom = (m0, moments[1], m2, moments[3], moments[4])
-        out_c, out_m = limit(content, mom, wet, _SCALE)
+    def f(slope, second, lss=_SCALE):
+        mom = list(moments)
+        mom[slope_i], mom[second_i] = slope, second
+        out_c, out_m = limit(content, tuple(mom), wet, lss)
         return jnp.sum(out_c) + sum(jnp.sum(m * m) for m in out_m)
 
-    check_grads(f, (moments[0], moments[2]), order=1, modes=["rev"], atol=1e-6, rtol=1e-6, eps=1e-7)
-    gc = jax.grad(lambda c: sum(jnp.sum(m * m) for m in limit(c, moments, wet, _SCALE)[1]))(content)
+    check_grads(f, (moments[slope_i], moments[second_i]), order=1, modes=["rev"], atol=1e-6, rtol=1e-6, eps=1e-7)
+    smooth_g = jax.grad(f)(moments[slope_i], moments[second_i])
+    hard_g = jax.grad(lambda m, n: f(m, n, math.inf))(moments[slope_i], moments[second_i])
+    assert float(smooth_g[2, 0, 0]) != float(hard_g[2, 0, 0])  # the planted band cell is on the smooth path
+    gc = jax.grad(lambda c: sum(jnp.sum(m * m) for m in limit(c, tuple(moments), wet, _SCALE)[1]))(content)
     assert np.isfinite(np.asarray(gc)).all()
 
 
@@ -282,9 +290,22 @@ def test_prather_smooth_default_budget(w):
 
 
 def test_prather_default_is_smooth():
-    f = _window(0)
+    """The default (argument omitted) reaches the smooth limiter in the sweeps: on the ORCA1 windows it moves
+    the transported moments off the hard arm (codex SW rev2: a hard-sweep regression must fail here)."""
     assert tr.advect_si3_prather_2d.__kwdefaults__["limit_sharpness_scale"] == tr.SI3_PRA_DEFAULT_LIMIT_SHARPNESS_SCALE
-    sc_default, _ = _prather(f, tr.SI3_PRA_DEFAULT_LIMIT_SHARPNESS_SCALE)
-    assert np.isfinite(sc_default).all()
+    changed = 0
+    for w in (0, 1, 2):
+        f = _window(w)
+        x, area = jnp.asarray(f["X"]), jnp.asarray(f["e1e2t"])
+        _, mom_default, _ = tr.advect_si3_prather_2d(
+            tr.si3_prather_pack_intensives(x, area), tuple(jnp.asarray(m) for m in f["MOM"]),
+            jnp.asarray(f["u_ice"]), jnp.asarray(f["v_ice"]), area, jnp.asarray(f["tmask1"] > 0), DT,
+            dx=jnp.asarray(f["e1v"]), dy=jnp.asarray(f["e2u"]), ice_step_index=int(KT), nn_fsbc=int(NN_FSBC),
+            halo_width=2, ice_volume_index=TR.index("v_i"), concentration_index=TR.index("a_i"),
+            subcycles=int(ICYCLE))
+        _, mom_hard = _prather(f, math.inf)
+        changed += sum(int((np.asarray(a) != b).sum()) for a, b in zip(mom_default, mom_hard))
+        assert all(np.isfinite(np.asarray(a)).all() for a in mom_default)
+    assert changed > 0
     with pytest.raises(ValueError, match="limit_sharpness_scale"):
         _prather(f, 0.0)

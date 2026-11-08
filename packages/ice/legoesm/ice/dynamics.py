@@ -1491,7 +1491,10 @@ def si3_cgrid_aevp_solver(
         return positive_part_c1(value, limit_sharpness_scale / scale)
 
     def beta_max(left, right):
-        """NEMO neighbour ``MAX`` of beta (>= 50); C1 band 50/s."""
+        """NEMO neighbour ``MAX`` of beta (>= 50); C1 band 50/s.  ``max_c1`` is
+        ``right + positive_part_c1(left - right)`` >= ``right`` exactly, so the
+        chained neighbour max never drops below the 50 floor (keep this
+        right-anchored form; GLM SW review)."""
         if hard:
             return jnp.maximum(left, right)
         return max_c1(left, right, limit_sharpness_scale / _SI3_ALPHA_FLOOR)

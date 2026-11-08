@@ -133,6 +133,7 @@ def test_basal_coefficients_match_hand_written_depth_and_iceberg_branches():
             config,
             area_fraction,
             area_fraction,
+            limit_sharpness_scale=math.inf,  # NEMO hard statements (hand-written oracle)
         )
     )()
     critical = _CONCENTRATION * _LF_DEPFRA * _DEPTH_M
@@ -243,7 +244,7 @@ def test_dynamic_basal_denominator_matches_hand_algebra():
         ),
     )
     result = jax.jit(
-        lambda: si3_cgrid_aevp_solver(state, forcing, metrics, config)
+        lambda: si3_cgrid_aevp_solver(state, forcing, metrics, config, limit_sharpness_scale=math.inf)
     )()
 
     mass = _RHO_SNOW * _SNOW_VOLUME_M + _RHO_ICE * _ICE_VOLUME_M
@@ -281,7 +282,7 @@ def test_tensile_stress_matches_hand_written_nonzero_strain_update():
     zero = jnp.zeros(_SHAPE, dtype=jnp.float64)
     strained = state._replace(u_ice_u=u_ice, v_ice_v=zero)
     result = jax.jit(
-        lambda: si3_cgrid_aevp_solver(strained, forcing, metrics, config)
+        lambda: si3_cgrid_aevp_solver(strained, forcing, metrics, config, limit_sharpness_scale=math.inf)
     )()
 
     metric = np.float64(math.sqrt(_AREA_M2))
