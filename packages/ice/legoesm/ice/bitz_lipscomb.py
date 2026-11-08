@@ -1473,11 +1473,24 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         wfx_snw_sni=constants.rho_snow * flood * ar,
     )
     flooded_snow = list(jnp.moveaxis(hseg_s, -1, 0))
+    amounts = {}
     for k in (3, 2, 1, 0):
-        amount = _st_min(flood_remaining, flooded_snow[k], w.H if st else 0.0)     # Z49
+        amounts[k] = jnp.minimum(flood_remaining, flooded_snow[k])
+        flood_remaining = jnp.maximum(flood_remaining - amounts[k], 0.0)
+    if st:
+        # Soft surrogate (vote Z50): telescoping cumulative MIN, so the soft
+        # amounts sum to the flooded snow exactly (a per-layer C1 MIN does not,
+        # and leaked ~1e-4 W/m2 from the soft column's heat identity).
+        taken, total = jnp.zeros_like(flood), jnp.zeros_like(flood)
+        for i, k in enumerate((3, 2, 1, 0)):
+            total = total + flooded_snow[k]
+            cum = flood if i == 3 else min_c1(flood, total, _sharp(w.H))
+            amounts[k] = straight_through(amounts[k], cum - taken)
+            taken = cum
+    for k in (3, 2, 1, 0):
+        amount = amounts[k]
         flooded_snow[k] = jnp.maximum(flooded_snow[k] - amount, 0.0)
         flood_content = flood_content + amount * eseg_s[..., k]
-        flood_remaining = jnp.maximum(flood_remaining - amount, 0.0)
     hseg_s = jnp.stack(flooded_snow, axis=-1)
     eseg_i = eseg_i.at[..., 0].set(jnp.where(
         flood > 0.0, flood_content / jnp.maximum(flood, 1.0e-20), 0.0

@@ -3,8 +3,10 @@
 Smooth mode keeps NEMO's forward value at every site (straight-through, user ruling 3a
 pattern) and takes the gradient from a C1 surrogate.  Checked here on tier-4 fixtures
 (NEMO 5.0.1 SI3 ORCA1, kt=17281) with the inputs moved inside each switch's band:
-* the gradient equals the central FD of the soft surrogate (straight_through -> soft);
-* it differs from the hard gradient (the surrogate term is present: non-vacuous);
+* each helper's forward is the hard value bitwise and its derivative the soft one;
+* where one site feeds the output, the gradient equals the central FD of the soft
+  surrogate; through chains of sites (AD linearises downstream hard ops at the hard
+  primal, vote Z51) the gradient is finite and differs from the hard gradient;
 * the soft column's mass, heat and salt identities of ice_thd_dh still close.
 Forward bitwise equality with the pre-PR code is the literal-row gate.
 """
@@ -43,24 +45,49 @@ def _with(monkeypatch, mode, f, x):
         monkeypatch.undo()
 
 
-def _check(monkeypatch, f, x0, width):
+def _grads(monkeypatch, f, x0):
     g = float(jax.grad(f)(jnp.asarray(x0)))
-    eps = 1e-6 * width                                   # Z35 convention
-    fd = (float(_with(monkeypatch, "soft", f, x0 + eps)) - float(_with(monkeypatch, "soft", f, x0 - eps))) / (2 * eps)
     g_hard = float(_with(monkeypatch, "hard", jax.grad(f), jnp.asarray(x0)))
     assert np.isfinite(g)
-    np.testing.assert_allclose(g, fd, rtol=1e-4)
     assert abs(g - g_hard) > 1e-3 * max(abs(g_hard), 1e-30), (g, g_hard)    # surrogate term present
+    return g
+
+
+def _check_single(monkeypatch, f, x0, width):
+    """One straight-through site feeds the output: gradient == FD of the soft surrogate."""
+    g = _grads(monkeypatch, f, x0)
+    eps = 1e-6 * width                                   # Z35 convention
+    fd = (float(_with(monkeypatch, "soft", f, x0 + eps)) - float(_with(monkeypatch, "soft", f, x0 - eps))) / (2 * eps)
+    np.testing.assert_allclose(g, fd, rtol=1e-4)
+
+
+def test_helpers_are_hard_forward_soft_derivative():
+    x = jnp.asarray([0.2, 0.4999, 0.5, 0.5003, 0.9])
+    y, w = jnp.full_like(x, 0.5), 1e-3
+    for st_f, hard, soft in ((bl._st_min, jnp.minimum, lambda a, b: bl.min_c1(a, b, 1.0 / w)),
+                             (bl._st_max, jnp.maximum, lambda a, b: bl.max_c1(a, b, 1.0 / w))):
+        np.testing.assert_array_equal(np.asarray(st_f(x, y, w)), np.asarray(hard(x, y)))
+        np.testing.assert_array_equal(np.asarray(st_f(x, y, 0.0)), np.asarray(hard(x, y)))
+        g = jax.vmap(jax.grad(lambda a, b: st_f(a, b, w)))(x, y)
+        gs = jax.vmap(jax.grad(soft))(x, y)
+        np.testing.assert_array_equal(np.asarray(g), np.asarray(gs))
+    wt = bl.smoothstep_cubic((x - 0.5 + w) / w)
+    a, b = 3.0 * x, -x
+    np.testing.assert_array_equal(np.asarray(bl._st_where(x >= 0.5, a, b, wt)), np.asarray(jnp.where(x >= 0.5, a, b)))
+    g = jax.grad(lambda z: jnp.sum(bl._st_where(z >= 0.5, 3.0 * z, -z, bl.smoothstep_cubic((z - 0.5 + w) / w))))(x)
+    gs = jax.grad(lambda z: jnp.sum(-z + (3.0 * z + z) * bl.smoothstep_cubic((z - 0.5 + w) / w)))(x)
+    np.testing.assert_allclose(np.asarray(g), np.asarray(gs), rtol=1e-13)
 
 
 def test_do_step_open_water_switch_gradient_is_the_surrogate(monkeypatch):
-    st, _, fz = dh_args(load("c9_exchange"))
+    fx = load("c9_exchange")
+    st, _, fz = dh_args(fx)
 
-    def f(q):
-        out, fx = bl._do_step(st, fz._replace(qlead=jnp.full_like(fz.qlead, q)), dt(load("c9_exchange")), K,
-                              nemo_version="5.0.1", switches=SMOOTH)
-        return jnp.sum(out.h_ice * out.concentration) + jnp.sum(fx.hfx_opw)
-    _check(monkeypatch, f, -0.5 * WF, WF)
+    def run(q):
+        return bl._do_step(st, fz._replace(qlead=jnp.full_like(fz.qlead, q)), dt(fx), K,
+                           nemo_version="5.0.1", switches=SMOOTH)
+    _check_single(monkeypatch, lambda q: jnp.sum(run(q)[1].hfx_opw), -0.5 * WF, WF)     # zfmdt only
+    _grads(monkeypatch, lambda q: jnp.sum(run(q)[0].h_ice * run(q)[0].concentration), -0.5 * WF)
 
 
 def test_dh_surface_melt_switch_gradient_is_the_surrogate(monkeypatch):
@@ -71,7 +98,7 @@ def test_dh_surface_melt_switch_gradient_is_the_surrogate(monkeypatch):
         z = zr._replace(T_surface=jnp.full_like(zr.T_surface, t))
         out, fl = bl._dh_step_fluxes(st, z, fz, dt(fx), K, nemo_version="5.0.1", switches=SMOOTH)
         return jnp.sum(out.h_ice) + jnp.sum(out.h_snow)
-    _check(monkeypatch, f, K.T0 - 0.5 * TM, TM)
+    _grads(monkeypatch, f, K.T0 - 0.5 * TM)
 
 
 def test_dh_internal_melt_switch_gradient_is_the_surrogate(monkeypatch):
@@ -83,7 +110,7 @@ def test_dh_internal_melt_switch_gradient_is_the_surrogate(monkeypatch):
         z = zr._replace(T_ice=melt - d)
         out, fl = bl._dh_step_fluxes(st, z, fz, dt(fx), K, nemo_version="5.0.1", switches=SMOOTH)
         return jnp.sum(fl.hfx_res) + jnp.sum(fl.hfx_sum) + jnp.sum(fl.hfx_bom)
-    _check(monkeypatch, f, 0.5 * TM, TM)
+    _grads(monkeypatch, f, 0.5 * TM)
 
 
 def test_soft_column_dh_budgets_close_inside_the_bands(monkeypatch):
@@ -91,7 +118,7 @@ def test_soft_column_dh_budgets_close_inside_the_bands(monkeypatch):
     every switch inside its band (fractional surrogate weights)."""
     monkeypatch.setattr(bl, "straight_through", lambda h, s: s)
     checked = 0
-    for name in ("c4_fullmelt", "c6_melt_order", "c9_exchange", "c3_qcn_top_k"):
+    for name in ("c4_fullmelt", "c6_melt_order", "c9_exchange", "c3_qcn_top_k", "c5_flood_sst"):
         fx = load(name)
         st, zr, fz = dh_args(fx)
         melt = K.T0 - K.liquidus_slope * st.S_layers
@@ -112,7 +139,7 @@ def test_soft_column_dh_budgets_close_inside_the_bands(monkeypatch):
         np.testing.assert_allclose(dq, rhs, rtol=0, atol=1e-11 * max(1.0, np.abs(dq).max()))
         checked += 1
     monkeypatch.undo()
-    assert checked == 4
+    assert checked == 5
 
 
 def test_zdf_melting_row_switch_gradient_is_finite_and_the_surrogate(monkeypatch):
@@ -123,4 +150,4 @@ def test_zdf_melting_row_switch_gradient_is_finite_and_the_surrogate(monkeypatch
         r = bl._si3_zdf_bl99_step(e_i, e_s, sz, h_i, h_s, jnp.full_like(t_su, t), fz, dt(fx), K,
                                   nemo_version="5.0.1", switches=SMOOTH._replace(snow_ramp_width_m=0.0))
         return jnp.sum(r.qcn_ice_top)
-    _check(monkeypatch, f, K.T0 - 0.5 * TM, TM)
+    _grads(monkeypatch, f, K.T0 - 0.5 * TM)
