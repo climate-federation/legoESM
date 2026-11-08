@@ -1443,6 +1443,48 @@ class TestThinIceAblationClosure:
             f"rain-on-ice runoff not delivered: got {d_fw:.3e}, "
             f"expected ~{rain * conc0:.3e}")
 
+    @pytest.mark.xfail(strict=True, reason="PR #2388 review item 2 (gentine 2026-11-06); fix in the next SI3 PR")
+    def test_rain_on_ice_is_conserved_with_si3_lev_ponds(self):
+        """Rain on the ice fraction must end up in the ponds or in the ocean
+        freshwater with the SI3-LEV pond scheme.  Two-point (rain vs no rain),
+        cold air (no melt): pond storage change + runoff must equal rain*conc.
+        """
+        from legoesm.ice.sea_ice import _thermo_v2
+        from legoesm.ice.config import SeaIceConfig, MeltPondConfig, SI3PondConfig
+        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.thermo import saturation_mixing_ratio_ice
+        shape = (4, 4)
+        f = lambda v: jnp.full(shape, v)
+        cfg = SeaIceConfig(
+            ponds=MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=SI3PondConfig(
+                rn_himin=0.1, rn_apnd_min=0.15, rn_apnd_max=0.85, rn_pnd_flush=0.1,
+                ln_pnd_lids=True)),
+            itd_remap="none",
+        )
+        T_air, conc0, rain, dt = 250.0, 0.8, 1.0e-4, 3600.0
+        qsat = float(saturation_mixing_ratio_ice(jnp.array(T_air), jnp.array(1.0e5)))
+
+        def run(precip_total):
+            forcing = AtmToSurface(
+                sw_down=f(0.0), lw_down=f(constants.sigma_sb * T_air ** 4),
+                precip_total=f(precip_total), precip_snow=f(0.0), T_lowest=f(T_air),
+                q_lowest=f(qsat), u_lowest=f(0.01), v_lowest=f(0.0),
+                p_lowest=f(1.0e5), p_surface=f(1.0e5), rho_lowest=f(1.3),
+                cos_zenith=f(0.0), co2_ppmv=f(400.0), has_radiation=f(1.0),
+                has_precipitation=f(1.0),
+            )
+            res = _thermo_v2(f(1.0), f(constants.T_freeze_ocean), f(conc0), f(0.0),
+                             f(0.0), f(0.0), f(0.0), forcing,
+                             f(constants.T_freeze_ocean), cfg, 1.0, dt,
+                             enable_lead_freeze=False, h_il=f(0.0))
+            stored = float(jnp.mean(res["pond_area"] * res["pond_depth"] * res["conc"]))
+            return float(jnp.mean(res["freshwater_to_ocean"])) * dt, stored * constants.rho_water
+
+        (fw1, store1), (fw0, store0) = run(rain), run(0.0)
+        delivered = (fw1 - fw0) + (store1 - store0)
+        assert delivered == pytest.approx(rain * conc0 * dt, rel=1e-3), (
+            f"rain lost: delivered {delivered:.4e} kg/m2 of {rain * conc0 * dt:.4e}")
+
     def test_subgrid_ablation_water_closure(self):
         """Codex repro: thin ice (h<h_ice_min) fully ablating must route ALL
         column water to the ocean (no survivor-area snow/pond silently deleted

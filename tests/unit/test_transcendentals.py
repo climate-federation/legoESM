@@ -112,3 +112,13 @@ def test_libm_policy_custom_jvp_matches_finite_difference(function):
 
     reverse = jax.grad(lambda value: function(value))(point)
     assert np.isfinite(float(reverse))
+
+
+@pytest.mark.xfail(strict=True, reason="PR #2388 review item 5 (gentine 2026-11-06); fix in the next SI3 PR")
+@pytest.mark.parametrize("base,exponent,slope", [(0.0, 1.0, 1.0), (-2.0, 2.0, -4.0)])
+def test_libm_pow_gradient_at_zero_and_negative_bases(base, exponent, slope):
+    from legoesm.core.transcendentals import pow as libm_pow
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    grad = jax.grad(lambda x: libm_pow(x, exponent))(jnp.asarray(base, dtype=jnp.float64))
+    assert float(grad) == slope
