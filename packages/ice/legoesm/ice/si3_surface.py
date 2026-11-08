@@ -371,12 +371,27 @@ def si3_ice_sbc_tau_lbc(utau_interior, vtau_interior, fold: SI3ORCA2FoldProgram)
     return tuple(out)
 
 
-def si3_ice_alb(*, t_su, h_i, h_s, a_ip_eff, h_ip, h_il, cloud_fra, smask0, config):
+def si3_ice_alb(*, t_su, h_i, h_s, a_ip_eff, h_ip, h_il, cloud_fra, smask0, config,
+                _soft_snow=False):
     """``ice_alb`` (``icealb.f90:183-244``); pond arm when ``ld_pnd_alb``, else the no-pond arm.
 
     Arrays carry the category axis last: ``(..., jpl)``; ``cloud_fra``/``smask0`` are ``(...)``.
+
+    ``nn_snwfra = 0`` in smooth mode is straight-through over the WHOLE albedo
+    (vote A, 3-0): forward = the hard snow-free test, bitwise; gradient = the
+    albedo evaluated with the soft indicator ``1 - C1(h_s / w)``.  A per-site
+    straight-through there feeds the hard snow fraction into the bare-ice floor
+    and pond cap, which bind and drop a cancelling term (d alb / d h_s 7x the
+    soft path, ~500x with ponds).  ``_soft_snow`` is that internal soft pass.
     """
     _validate(config)
+    sw = config.switches
+    if (not _soft_snow and config.nn_snwfra == 0 and sw.relative_width > 0.0
+            and sw.snow_ramp_width_m > 0.0):
+        kw = dict(t_su=t_su, h_i=h_i, h_s=h_s, a_ip_eff=a_ip_eff, h_ip=h_ip, h_il=h_il,
+                  cloud_fra=cloud_fra, smask0=smask0)
+        hard = si3_ice_alb(**kw, config=config._replace(switches=sw._replace(snow_ramp_width_m=0.0)))
+        return straight_through(hard, si3_ice_alb(**kw, config=config, _soft_snow=True))
     pt_su, ph_ice, ph_snw = _req("t_su", t_su), _req("h_i", h_i), _req("h_s", h_s)
     pafrac_pnd, ph_pnd, ph_lid = _req("a_ip_eff", a_ip_eff), _req("h_ip", h_ip), _req("h_il", h_il)
     cloud = _req("cloud_fra", cloud_fra)[..., None]
@@ -396,6 +411,8 @@ def si3_ice_alb(*, t_su, h_i, h_s, a_ip_eff, h_ip, h_il, cloud_fra, smask0, conf
     if r > 0.0:
         fraction_sharp = si3_sharp(r * sw.cut_fraction_scale)
         snow_free = si3_snow_free(ph_snw, sw.snow_ramp_width_m, True)
+        if _soft_snow:      # whole-step soft pass (see docstring); width already checked above
+            snow_free = 1.0 - smoothstep_cubic(ph_snw / sw.snow_ramp_width_m)
         if config.nn_snwfra == 0:                                                   # icevar.f90 h_s > 0
             za_s_fra = sr(1.0 - snow_free)
         melting = si3_ge(pt_su, _RT0, r * sw.temperature_scale_K)
