@@ -925,8 +925,8 @@ def si3_orca_cgrid_metrics(domain_cfg) -> SI3CGridMetrics:
     ``iom_get(..., kfill=jpfillcopy)`` and forms the areas after the fill
     (domhgr.F90:144-160, 212-220): E-W cyclic, north halo = F-pivot fold
     (sign +1, per point type; :func:`si3_orca_f_pivot_halo`), south halo =
-    mirror copy (halo row 1 <- inner row 1, halo row 2 <- inner row 2),
-    ``e1e2* = e1* * e2*``.  Strait-reduced ``e1e2u``/``e1e2v`` (read by NEMO
+    mirror copy (halo row 1 <- inner row 1, halo row 2 <- inner row 2;
+    lbc_lnk_pt2pt_generic.h90:308-345), ``e1e2* = e1* * e2*``.  Strait-reduced ``e1e2u``/``e1e2v`` (read by NEMO
     when the file carries them) are not ported and are refused.
     """
 
