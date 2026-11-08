@@ -438,3 +438,10 @@ prandtl_air = 0.71              # Molecular Prandtl number of air ν/α [-] (DNS
 # Shallow Water Test Case Constants
 # ==============================================================================
 H_MEAN = 1.0e4                  # Mean fluid depth for shallow water [m]
+
+# ==============================================================================
+# CLM-ml multilayer canopy (CLM-ml v1 Fortran oracle)
+# ==============================================================================
+lapse_rate_clmml = 0.0098       # [K/m] MLclm_varcon.F90:26 lapse_rate (CLM-ml v1);
+                                # NOT g/c_pd (0.00976): the oracle value is used for
+                                # the reference-height potential temperature.
