@@ -3,8 +3,17 @@
  "record": "/burg/glab/users/pg2328/oracle_audit/tier4/dyn/ctl_on/t4_rdg_record_*.bin (32 files, md5-of-md5s 12be3e720fe2de45d1309c0a69ab25b4); hook MY_SRC t4_dyn.F90 channel rdg (ice_dyn_rdgrft entry/exit)",
  "spread": "20-seed 1-ulp per-cell spread, tier4/dyn/seeds/out_*.npz vs ctl_stop (shared perturb.py)",
  "harness": "tier4/dyn/t4lib.py assemble/interior (ext idx -> interior global 0-based i,j)",
- "extractor": "/burg/glab/users/pg2328/oracle_audit/si3dyn_fix/D5/extract.py",
- "legoesm_branch_sha": "01546ffdacd2781c6e75d0ce6c27b1ada02f5a6d",
+ "extractor": "scripts/validate/ice_fidelity/si3_rdg_openwater_extract.py",
+ "producer_scripts": {
+  "extract.py": "scripts/validate/ice_fidelity/si3_rdg_openwater_extract.py",
+  "budget.py": "scripts/validate/ice_fidelity/si3_rdg_openwater_budget.py",
+  "ridging_base.py": "git show 01546ffdac:packages/ice/legoesm/ice/ridging.py"
+ },
+ "producer_sha256": {
+  "extract.py": "433426d6fdb4711da1e948042e0b666add3f4c00166c77275c4e98863459b507",
+  "budget.py": "47977cdbbe340f9fbcc570615aab0c1952426f4321e35c0820b929df7a2e3a79"
+ },
+ "legoesm_branch_sha": "d8b8baabbe61624fe8f7fd81a8c0d5aa38260796",
  "nemo_retention": "rn_fsnwrdg=rn_fsnwrft=rn_fpndrdg=rn_fpndrft=0.5 (snow/pond only; not in fixture outputs)",
  "cell_classes": {
   "deficit_base_miss": 16,
@@ -129,16 +138,5 @@
    "net_area_weighted_m2": 5784135989.99853
   },
   "ocean_area_m2_interior": 507514522746686.1
- },
- "producer_sha256": {
-  "extract.py": "6a6bae6e504b6e15edce276b4afb581324f056cc3c578a818579188fcd8af9a2",
-  "budget.py": "47977cdbbe340f9fbcc570615aab0c1952426f4321e35c0820b929df7a2e3a79",
-  "ridging_base.py": "22e1e6e98bd8fce6c493b463bb48082f431a6cddf001fd0122897479a7a0635d"
- },
- "producer_note": "Producers committed (bytes equal to producer_sha256); they read the tier-4 harness t4lib.py and the NEMO binary records under /burg/glab/users/pg2328/oracle_audit/tier4/dyn (not in the repo).",
- "producer_scripts": {
-  "extract.py": "scripts/validate/ice_fidelity/si3_rdg_openwater_extract.py",
-  "budget.py": "scripts/validate/ice_fidelity/si3_rdg_openwater_budget.py",
-  "ridging_base.py": "git show 01546ffdac:packages/ice/legoesm/ice/ridging.py (pre-fix port, base arm of the extractor)"
  }
 }

@@ -1,7 +1,8 @@
 """D5: full-field score of SI3 jpl1 ridging open water (base vs branch) + small fixture extraction.
 
-usage: extract.py <fixture.npz>   (PYTHONPATH = branch worktree packages; base module loaded from D5/ridging_base.py)
-Config: validator-allowed default (retention 1.0).  Open water / ice area / ice volume / ice enthalpy / age are
+usage: si3_rdg_openwater_extract.py <fixture.npz>   (run from the repo root; PYTHONPATH = packages + the tier-4
+harness dir; base arm = `git show 01546ffdac:` ridging.py).  Branch arm: hard (oracle) open-water limits.
+Config: validator-allowed retention default (1.0).  Open water / ice area / ice volume / ice enthalpy / age are
 retention-independent (retention only scales snow & pond inventories), so they are scored vs NEMO (retention 0.5).
 Per-cell spread: max over 20 seeds of rel(seed ato_i_out, NEMO stop-run ato_i_out) (tier4/dyn/rdg/closure_arm.py).
 """
@@ -9,8 +10,11 @@ import glob
 import hashlib
 import importlib.util
 import json
+import math
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 import numpy as np
 
@@ -24,7 +28,12 @@ from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
 import legoesm.ice.ridging as RB  # noqa: E402  (branch)
 
 set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-spec = importlib.util.spec_from_file_location("ridging_base", "/burg/glab/users/pg2328/oracle_audit/si3dyn_fix/D5/ridging_base.py")
+# Base arm = the pre-fix port, read from git (01546ffdac, the D5 PR's original base).
+_BASE_SRC = subprocess.run(["git", "show", "01546ffdac:packages/ice/legoesm/ice/ridging.py"],
+                           capture_output=True, text=True, check=True).stdout
+_tmp = tempfile.NamedTemporaryFile("w", suffix="_ridging_base.py", delete=False)
+_tmp.write(_BASE_SRC); _tmp.close()
+spec = importlib.util.spec_from_file_location("ridging_base", _tmp.name)
 RA = importlib.util.module_from_spec(spec); spec.loader.exec_module(RA)
 
 OUT = sys.argv[1]
@@ -41,7 +50,12 @@ NO = dict(a_i_out=I("a_i_out", w="out"), ato_i_out=I("ato_i_out", w="out"), v_i_
           oa_i_out=I("oa_i_out", w="out"), e_i_out=I("e_i_out", 3, "out"))
 
 
-def run(R, d, sl=(...,)):
+# NEMO comparisons use the hard (oracle) open-water limits on the branch arm.
+HARD = (RB.SI3JPL1RidgingConfig(open_water_limit_sharpness=math.inf)
+        if "open_water_limit_sharpness" in RB.SI3JPL1RidgingConfig._fields else RB.SI3JPL1RidgingConfig())
+
+
+def run(R, d, sl=(...,), config=None):
     st = R.SI3JPL1RidgingState(
         ice_area=jnp.asarray(d["a_i"][sl]), open_water_area=jnp.asarray(d["ato_i"][sl]),
         ice_volume=jnp.asarray(d["v_i"][sl]), snow_volume=jnp.asarray(d["v_s"][sl]),
@@ -49,7 +63,8 @@ def run(R, d, sl=(...,)):
         pond_volume=jnp.asarray(d["v_ip"][sl]), pond_lid_volume=jnp.asarray(d["v_il"][sl]),
         snow_enthalpy=jnp.asarray(d["e_s"][sl]), ice_enthalpy=jnp.asarray(d["e_i"][sl]),
         ice_salt_content=jnp.asarray(d["szv_i"][sl]))
-    return R.apply_si3_jpl1_ridging(st, jnp.asarray(d["divu_i"][sl]), jnp.asarray(d["delta_i"][sl]), dt)
+    kw = {} if config is None else {"config": config}
+    return R.apply_si3_jpl1_ridging(st, jnp.asarray(d["divu_i"][sl]), jnp.asarray(d["delta_i"][sl]), dt, **kw)
 
 
 # per-cell NEMO spread of ato_i_out / a_i_out (20 seeds vs stop-run)
@@ -66,7 +81,7 @@ for k in ("ato_i_out", "a_i_out"):
     sp[k] = s
 
 base, base_l = run(RA, IN)
-fix, fix_l = run(RB, IN)
+fix, fix_l = run(RB, IN, config=HARD)
 mask = np.ones_like(IN["a_i"], bool); mask[:, -1] = False     # G1a: fold row dropped
 summary = {}
 for nm, (st, ls) in (("base", (base, base_l)), ("branch", (fix, fix_l))):
@@ -120,13 +135,19 @@ fx |= {"spread_ato_i_out": sp["ato_i_out"][ii, jj], "spread_a_i_out": sp["a_i_ou
 np.savez_compressed(OUT, **fx)
 files = sorted(glob.glob(f"{RD}/t4_rdg_record_*.bin"))
 md5 = hashlib.md5(b"".join(hashlib.md5(open(f, "rb").read()).digest() for f in files)).hexdigest()
-fix_sub, _ = run(RB, fx)
+fix_sub, _ = run(RB, fx, config=HARD)
 prov = dict(
     source="NEMO 5.0.1 SI3, cfg ORCA1_T4DYN (eORCA1 360x331, 32 ranks, nn_hls=2), build job 11022552, kt=17281=nit000, jpl=1",
     record=f"{RD}/t4_rdg_record_*.bin (32 files, md5-of-md5s {md5}); hook MY_SRC t4_dyn.F90 channel rdg (ice_dyn_rdgrft entry/exit)",
     spread="20-seed 1-ulp per-cell spread, tier4/dyn/seeds/out_*.npz vs ctl_stop (shared perturb.py)",
     harness="tier4/dyn/t4lib.py assemble/interior (ext idx -> interior global 0-based i,j)",
-    extractor="/burg/glab/users/pg2328/oracle_audit/si3dyn_fix/D5/extract.py",
+    extractor="scripts/validate/ice_fidelity/si3_rdg_openwater_extract.py",
+    producer_scripts={"extract.py": "scripts/validate/ice_fidelity/si3_rdg_openwater_extract.py",
+                      "budget.py": "scripts/validate/ice_fidelity/si3_rdg_openwater_budget.py",
+                      "ridging_base.py": "git show 01546ffdac:packages/ice/legoesm/ice/ridging.py"},
+    producer_sha256={k: hashlib.sha256((Path(__file__).parent / n).read_bytes()).hexdigest()
+                     for k, n in (("extract.py", "si3_rdg_openwater_extract.py"),
+                                  ("budget.py", "si3_rdg_openwater_budget.py"))},
     legoesm_branch_sha=subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip(),
     nemo_retention="rn_fsnwrdg=rn_fsnwrft=rn_fpndrdg=rn_fpndrft=0.5 (snow/pond only; not in fixture outputs)",
     cell_classes=cnt, full_field_summary=summary,
