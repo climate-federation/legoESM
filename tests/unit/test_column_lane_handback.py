@@ -373,3 +373,317 @@ def test_driver_refuses_a_window_off_the_radiation_cadence(tmp_path,
     d2.get_surface_handback = lambda: _H(ncol)  # no coupling window at all
     with pytest.raises(ValueError, match="coupling window"):
         d2.run(segment_callback=lambda *a: None)
+
+
+def test_driver_refuses_the_handback_off_the_column_loop(tmp_path):
+    """Only ``_run_column`` reads the hook; the lat-lon per-step lane would
+    keep its own bulk fluxes over ice and lakes, so setting it there raises
+    before any step."""
+    from legoesm.driver.config import (
+        DycoreConfig, ExperimentConfig, GridConfig, OutputConfig,
+    )
+    from legoesm.driver.model_driver import ModelDriver
+    dt = 100.0
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=4),
+        dycore=DycoreConfig(model_type="hydrostatic",
+                            discretization="latlon_cgrid", dt=dt),
+        output=OutputConfig(output_dir=str(tmp_path), diag_days=0,
+                            checkpoint_days=0),
+        days=dt / 86400.0, dataset="analytical", held_suarez_forcing=False,
+        turbulence="louis", radiation="none", convection="none",
+        microphysics="none", gravity_wave_drag="none", cloud_scheme="none",
+        distributed=False, n_devices=1)
+    d = ModelDriver(cfg, output_dir=str(tmp_path))
+    d.setup()
+    d.get_surface_handback = lambda: None
+    with pytest.raises(NotImplementedError, match="only the MPAS column loop"):
+        d.run()
+
+
+# --------------------------------------------------------------------------
+# K3: what the column loop exports per coupling window, and its restart
+# --------------------------------------------------------------------------
+
+def _split(a, S, L, sw_net, lw_net):
+    from legoesm.forcing.surface_utils import handback_tile_radiation
+    return handback_tile_radiation(
+        S, L, sw_net, lw_net, a["f_land"], a["f_ice"], a["f_lake"],
+        a["albedo_land"], a["T_land"], a["emissivity"], a["lw_emit_ice_lake"],
+        a["albedo_ice"], a["albedo_lake"], a["emissivity_ice"],
+        a["emissivity_lake"])
+
+
+def test_tile_radiation_split_is_the_open_water_share_of_the_net():
+    """Fed the net a solver given ``handback_surface_boundary`` computes (SW:
+    down x (1 - albedo); LW: eps x down - eps sigma T_rad^4), the open-water
+    residual is exactly f_ow x its own absorption (SW) and absorption minus
+    emission at the SST (LW); the ice/lake bookings are per tile area.  A
+    direct-beam open-water albedo change moves only the open-water share."""
+    a = _bnd_inputs()
+    b = handback_surface_boundary(**a)
+    S = jnp.array([400.0, 250.0, 120.0, 600.0])
+    L = jnp.array([300.0, 260.0, 220.0, 350.0])
+    eps, T = b["sfc_emissivity"], b["T_sfc_rad"]
+    sw_net = S * (1.0 - b["sfc_albedo"])
+    lw_net = eps * L - eps * SB * T ** 4
+    t = _split(a, S, L, sw_net, lw_net)
+    f_ow = b["f_ow"]
+    np.testing.assert_allclose(t["ow_sw_net"], f_ow * S * (1.0 - 0.06),
+                               rtol=1e-12, atol=1e-10)
+    np.testing.assert_allclose(t["ow_lw_net"],
+                               f_ow * EPS * (L - SB * a["sst"] ** 4),
+                               rtol=1e-11, atol=1e-9)
+    np.testing.assert_allclose(t["booked_sw_net_ice"],
+                               S * (1.0 - a["albedo_ice"]), rtol=1e-15)
+    np.testing.assert_allclose(t["booked_lw_abs_lake"],
+                               a["emissivity_lake"] * L, rtol=1e-15)
+    # direct beam: 60 % of S sees an open-water albedo 0.02 lower
+    d_sw = f_ow * 0.6 * S * 0.02
+    t2 = _split(a, S, L, sw_net + d_sw, lw_net)
+    np.testing.assert_allclose(t2["ow_sw_net"] - t["ow_sw_net"], d_sw,
+                               rtol=1e-12, atol=1e-10)
+    for k in ("booked_sw_net_ice", "booked_sw_net_lake"):
+        np.testing.assert_array_equal(t2[k], t[k])
+
+
+_K3_KW = dict(land_update_seconds=900.0)     # land every 3 steps, window 6
+# Where there is no open water the radiation residual is RRTMGP's net minus
+# the land/ice/lake shares built from the same boundary.  Measured
+# 2026-11-08 (6 steps, 642 cells, x64): SW 1.46e-5, LW 1.99e-2 W/m2 -- the
+# solver's surface emission is not exactly eps sigma T_rad^4 (PLAUSIBLE:
+# band-integrated Planck).  The residual hands it to the open water, so the
+# tiles still sum to what the atmosphere applied (vote K3-V13).
+K3_RAD_RESIDUAL_TOL = {"seg_ow_sw_net": 1e-4, "seg_ow_lw_net": 5e-2}
+
+
+def _k3_run(tmp_path, monkeypatch, n_steps, H, **kw):
+    d = _driver(tmp_path, monkeypatch, days=(n_steps * 300.0 + 1.0) / 86400.0,
+                **_K3_KW, **kw)
+    cb = _couple(d, H)
+    return d, cb
+
+
+def _rain(d, ncol, rate=(1e-5, 3e-5), seen=None):
+    """The analytical IC is dry: publish a per-cell surface precip after
+    every model step so the window has rain to split.  ``seen`` collects the
+    land runoff rates the step finds (those of the latest land call)."""
+    from legoesm.core.field import Field
+    step = d.model.step
+    P = Field(jnp.linspace(*rate, ncol), name="precip", dims=("cell",),
+              units="kg/m^2/s")
+
+    from legoesm.driver.model_driver import _sfc_diag_slot
+    S = P.replace(data=0.25 * P.data, name="precip_frozen")
+
+    def wet(*a, **k):
+        if seen is not None:
+            ls = d._land_ml_state
+            seen.append(np.asarray(ls.runoff_surface + ls.runoff_subsurface))
+        out = step(*a, **k)
+        sd = list(d.model._sfc_diag)
+        sd[2], sd[_sfc_diag_slot("precip_frozen")] = P, S
+        d.model._sfc_diag = tuple(sd)
+        return out
+    d.model.step = wet
+
+
+def _exports(d):
+    return {k: np.asarray(v) for k, v in d._carry_aux.items()
+            if k.startswith("seg_")}
+
+
+def test_window_exports_open_water_share_and_tile_precip(tmp_path,
+                                                         monkeypatch):
+    """One window (6 steps).  With no open water (ice + lake fill what land
+    leaves) every open-water export is exactly zero while the booked ice
+    radiation is not; with open water they are not; the tile precip sums to
+    the window precip."""
+    probe = _driver(tmp_path / "p", monkeypatch)
+    ncol = int(np.asarray(probe.state.p_s.data).size)
+    f_land = 0.5                    # the patched loader: half land everywhere
+    out = {}
+    for tag, f_ice in (("closed", 1.0 - f_land - 0.1), ("open", 0.2)):
+        d, cb = _k3_run(tmp_path / tag, monkeypatch, 6,
+                        _H(ncol, f_ice=f_ice, f_lake=0.1))
+        _rain(d, ncol)
+        assert d.run(segment_callback=cb) == "COMPLETED"
+        out[tag] = _exports(d)
+    c, o = out["closed"], out["open"]
+    for k in ("seg_shflx_ow", "seg_lhflx_ow", "seg_evap_ow", "seg_taux_ow",
+              "seg_tauy_ow", "seg_precip_ow", "seg_ow_sw_net",
+              "seg_ow_lw_net"):
+        print("K3MEASURE", k, float(np.max(np.abs(c[k]))),
+              float(np.max(np.abs(o[k]))))
+    for k in ("seg_shflx_ow", "seg_lhflx_ow", "seg_evap_ow", "seg_taux_ow",
+              "seg_tauy_ow", "seg_precip_ow"):
+        assert np.max(np.abs(c[k])) < 1e-12, k
+        assert np.max(np.abs(o[k])) > 0.0, k
+    # No open water: the radiation residual is RRTMGP's own net minus the
+    # land, ice and lake shares -- zero iff the solver applied exactly the
+    # boundary's albedo, emissivity and T_rad (the assumption of the split).
+    for k in ("seg_ow_sw_net", "seg_ow_lw_net"):
+        assert np.max(np.abs(c[k])) < K3_RAD_RESIDUAL_TOL[k], k
+        assert np.max(np.abs(o[k])) > 1.0, k
+    assert np.min(c["seg_booked_sw_net_ice"]) >= 0.0
+    assert np.max(c["seg_booked_sw_net_ice"]) > 0.0
+    assert np.max(c["seg_booked_lw_abs_ice"]) > 0.0
+    for e in (c, o):
+        tot = sum(e[f"seg_precip_{t}"] for t in ("ow", "ice", "lake", "land"))
+        np.testing.assert_allclose(tot, e["seg_precip"], rtol=1e-12,
+                                   atol=0)
+        assert np.min(e["seg_precip"]) > 0.0
+        np.testing.assert_allclose(e["seg_precip_ice"],
+                                   (0.4 if e is c else 0.2) * e["seg_precip"],
+                                   rtol=1e-12)
+
+
+def test_land_runoff_is_booked_in_the_window_the_land_debits_it(
+        tmp_path, monkeypatch):
+    """Window 6, land every 3: a one-sample bootstrap call at step 0 and a
+    three-sample call at step 3.  The window's runoff export is f_land x
+    (rate_0 x 1 + rate_3 x 3) / 6, the rates the two calls left."""
+    probe = _driver(tmp_path / "p", monkeypatch)
+    ncol = int(np.asarray(probe.state.p_s.data).size)
+    d, cb = _k3_run(tmp_path / "r", monkeypatch, 6, _H(ncol))
+    seen = []
+    _rain(d, ncol, rate=(0.2, 0.3), seen=seen)   # ponds past pond_max
+    assert d.run(segment_callback=cb) == "COMPLETED"
+    ls = d._land_ml_state
+    r0 = seen[1]
+    r3 = np.asarray(ls.runoff_surface + ls.runoff_subsurface)
+    np.testing.assert_array_equal(seen[4], r3)   # no call at steps 4, 5
+    print("K3MEASURE runoff max", float(r0.max()), float(r3.max()))
+    assert r3.max() > 0.0, "no runoff: the test cannot see the impulse"
+    want = 0.5 * (r0 * 1 + r3 * 3) / 6
+    np.testing.assert_allclose(_exports(d)["seg_runoff_land"], want,
+                               rtol=1e-12, atol=0)
+
+
+def test_no_hook_exports_nothing_new(tmp_path, monkeypatch):
+    d = _driver(tmp_path, monkeypatch)
+    assert d.run(segment_callback=None) == "COMPLETED"
+    assert not any(k.startswith("seg_ow_") or k.startswith("seg_booked_")
+                   for k in (d._carry_aux or {}))
+
+
+def _leaves(d):
+    st = [np.asarray(x) for x in jax.tree_util.tree_leaves(d.state)]
+    land = [np.asarray(x) for x in
+            jax.tree_util.tree_leaves(d._land_ml_state)]
+    win = {k: np.asarray(v) for k, v in (d._cpl_window or {}).items()}
+    return st, land, win
+
+
+def _changing(d, ncol, H0):
+    """Hook + window callback of a coupler whose handback changes at every
+    exchange (H_k from the exchange's absolute day)."""
+    cur = [H0]
+    d._coupling_dt_s = 1800.0
+    d.get_surface_handback = lambda: cur[0]
+
+    def cb(drv, day, dt):
+        k = int(round(day * 86400.0 / 1800.0)) % 5 + 1
+        cur[0] = _H(ncol, f_ice=0.2 + 0.01 * k, sh=5.0 + k)
+    return cb
+
+
+@pytest.mark.usefixtures("allow_version_drift")
+@pytest.mark.parametrize("n_first", [4, 6])
+def test_restart_is_bitwise_mid_window_and_on_the_boundary(
+        tmp_path, monkeypatch, n_first):
+    """n_first steps (window 6, land every 3) + checkpoint + the rest of 8
+    == 8 unbroken steps, bit for bit: state, land, window sums, exports, and
+    the handback the checkpoint carries -- with a handback that changes at
+    every exchange, so a checkpoint written on the boundary must carry the
+    NEXT window's handback."""
+    import glob
+    import os
+    probe = _driver(tmp_path / "p", monkeypatch)
+    ncol = int(np.asarray(probe.state.p_s.data).size)
+    days = lambda n: (n * 300.0 + 1.0) / 86400.0  # noqa: E731
+    dA = _driver(tmp_path / "a", monkeypatch, days=days(n_first), **_K3_KW)
+    cbA = _changing(dA, ncol, _H(ncol))
+    assert dA.run(segment_callback=cbA) == "COMPLETED"
+    ckpt = sorted(glob.glob(os.path.join(str(tmp_path / "a"),
+                                         "checkpoint_day_*.npz")))[-1]
+    with np.load(ckpt) as z:
+        assert int(z["cpl_win_n"]) == n_first % 6
+        assert ("cpl_win_sum_shflx_ow" in z.files) == (n_first % 6 > 0)
+        assert "cpl_win_hb_shflx" in z.files
+    dC = _driver(tmp_path / "c", monkeypatch, days=days(8), **_K3_KW)
+    cbC = _changing(dC, ncol, _H(ncol))
+    assert dC.run(segment_callback=cbC) == "COMPLETED"
+    dB = _driver(tmp_path / "b", monkeypatch, days=days(8 - n_first),
+                 **_K3_KW)
+    step, day = dB.load_checkpoint(ckpt)
+    assert step == n_first
+    Hck = dB.surface_handback_from_checkpoint()
+    assert Hck is not None
+    if n_first == 6:     # the post-exchange handback, not window 1's
+        assert float(np.asarray(Hck.shflx)[0]) != 5.0
+    cbB = _changing(dB, ncol, Hck)
+    assert dB.run(start_step=step, start_day=day,
+                  segment_callback=cbB) == "COMPLETED"
+    sB, lB, wB = _leaves(dB)
+    sC, lC, wC = _leaves(dC)
+    for a, b in zip(sB + lB, sC + lC):
+        np.testing.assert_array_equal(a, b)
+    assert wB.keys() == wC.keys()
+    for k in wB:
+        np.testing.assert_array_equal(wB[k], wC[k])
+    if n_first < 6:      # B closed window 1 itself
+        eB, eC = _exports(dB), _exports(dC)
+        assert "seg_shflx_ow" in eC and eB.keys() == eC.keys()
+        for k in eC:
+            np.testing.assert_array_equal(eB[k], eC[k])
+
+
+def test_restart_refuses_a_handback_window_without_its_sums(tmp_path,
+                                                            monkeypatch):
+    import glob
+    import os
+    probe = _driver(tmp_path / "p", monkeypatch)
+    ncol = int(np.asarray(probe.state.p_s.data).size)
+    H = _H(ncol)
+    dA, cbA = _k3_run(tmp_path / "a", monkeypatch, 4, H)
+    assert dA.run(segment_callback=cbA) == "COMPLETED"
+    ckpt = sorted(glob.glob(os.path.join(str(tmp_path / "a"),
+                                         "checkpoint_day_*.npz")))[-1]
+    with np.load(ckpt) as z:
+        stripped = {k: z[k] for k in z.files
+                    if not k.startswith("cpl_win_sum_")
+                    or k[len("cpl_win_sum_"):] in (
+                        "sw_net_sfc", "lw_net_sfc", "precip",
+                        "precip_frozen")}
+        full = {k: z[k] for k in z.files}
+    old = str(tmp_path / "old_checkpoint_day_0000.npz")
+    np.savez(old, **stripped)
+    dB, cbB = _k3_run(tmp_path / "b", monkeypatch, 4, H)
+    step, day = dB.load_checkpoint(old)
+    with pytest.raises(ValueError, match="cannot be resumed"):
+        dB.run(start_step=step, start_day=day, segment_callback=cbB)
+    # ... and a handback window resumed by a run with no handback
+    dN = _driver(tmp_path / "n", monkeypatch, **_K3_KW)
+    dN._coupling_dt_s = 1800.0
+    step, day = dN.load_checkpoint(ckpt)
+    with pytest.raises(ValueError, match="no handback is set"):
+        dN.run(start_step=step, start_day=day,
+               segment_callback=lambda *a: None)
+    # ... and a boundary checkpoint (no pending sums, a pending handback)
+    # resumed with no handback and no coupling window at all
+    dE, cbE = _k3_run(tmp_path / "e", monkeypatch, 6, H)
+    assert dE.run(segment_callback=cbE) == "COMPLETED"
+    ckE = sorted(glob.glob(os.path.join(str(tmp_path / "e"),
+                                        "checkpoint_day_*.npz")))[-1]
+    with np.load(ckE) as z:
+        assert int(z["cpl_win_n"]) == 0 and "cpl_win_hb_shflx" in z.files
+    dM = _driver(tmp_path / "m", monkeypatch, **_K3_KW)
+    step, day = dM.load_checkpoint(ckE)
+    with pytest.raises(ValueError, match="pending coupler ice/lake handback"):
+        dM.run(start_step=step, start_day=day)
+    # a partial handback set is refused by the reader
+    from legoesm.driver.model_driver import surface_handback_from_payload
+    part = {k: v for k, v in full.items() if k != "cpl_win_hb_lw_emit"}
+    with pytest.raises(ValueError, match="partial coupler handback"):
+        surface_handback_from_payload(part)

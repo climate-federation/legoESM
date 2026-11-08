@@ -1609,6 +1609,15 @@ _WIN_SCALAR_KEYS = ("land_win_n", "cpl_win_n", "cpl_win_k")
 # Coupling window (P5b): per-step sums of the fluxes the coupler consumes as
 # window MEANS, in the order (net SW, net LW, precip, frozen precip).
 _CPL_WIN_FIELDS = ("sw_net_sfc", "lw_net_sfc", "precip", "precip_frozen")
+# Extra window sums under the coupler ice/lake handback (P5c K3): the
+# open-water share of the radiation and turbulent exchange (per grid cell),
+# the radiation booked for the ice and lake (per unit tile area) and the land
+# runoff (per grid cell).
+_CPL_HB_RAD_FIELDS = ("ow_sw_net", "ow_lw_net", "booked_sw_net_ice",
+                      "booked_lw_abs_ice", "booked_sw_net_lake",
+                      "booked_lw_abs_lake")
+_CPL_HB_OW_FIELDS = ("shflx_ow", "lhflx_ow", "evap_ow", "taux_ow", "tauy_ow")
+_CPL_HB_FIELDS = _CPL_HB_RAD_FIELDS + _CPL_HB_OW_FIELDS + ("runoff_land",)
 # Coupler ice/lake handback (P5c): how far below zero the open-water fraction
 # 1 - f_land - f_ice - f_lake may sit (round-off) before the atmosphere's land
 # fraction and the coupler's tile fractions are declared different partitions
@@ -1616,12 +1625,14 @@ _CPL_WIN_FIELDS = ("sw_net_sfc", "lw_net_sfc", "precip", "precip_frozen")
 _HB_PARTITION_TOL = 1.0e-9
 
 
-def coupling_window_from_checkpoint(payload, cpl_k, n_cells):
+def coupling_window_from_checkpoint(payload, cpl_k, n_cells,
+                                    fields=_CPL_WIN_FIELDS):
     """``(sums, n)`` of a persisted coupling window (``cpl_win_*`` keys).
 
     Refuses a window written under a different cadence (``cpl_win_k`` !=
     ``cpl_k``) and per-cell arrays not shaped ``(n_cells,)``.  ``sums`` holds
-    ``None`` for a field the window never received (dry run)."""
+    ``None`` for a field the window never received (dry run), in ``fields``
+    order."""
     n = int(payload.get("cpl_win_n", 0))
     k = int(payload.get("cpl_win_k", cpl_k))
     if k != cpl_k or not 0 <= n < cpl_k:
@@ -1630,7 +1641,7 @@ def coupling_window_from_checkpoint(payload, cpl_k, n_cells):
             f"{k}-step window, but this run couples every {cpl_k} step(s); "
             "the coupling interval changed across the restart.")
     sums = []
-    for f in _CPL_WIN_FIELDS:
+    for f in fields:
         v = payload.get(f"cpl_win_sum_{f}")
         if v is not None and np.shape(v) != (n_cells,):
             raise ValueError(
@@ -1638,6 +1649,28 @@ def coupling_window_from_checkpoint(payload, cpl_k, n_cells):
                 f"(nCells={n_cells},) -- mesh mismatch.")
         sums.append(None if v is None else jnp.asarray(v))
     return sums, n
+
+
+def surface_handback_payload(H):
+    """Checkpoint keys of the coupler ice/lake handback the column loop is
+    consuming (``cpl_win_hb_<field>``): the pending exchange H_n (plan P1),
+    which the next window cannot recompute."""
+    return {f"cpl_win_hb_{f}": getattr(H, f) for f in H._fields}
+
+
+def surface_handback_from_payload(payload):
+    """The ``SurfaceHandback`` a checkpoint carries, or ``None`` when it
+    carries none; a partial set is refused."""
+    from legoesm.coupler.coupler import SurfaceHandback
+    keys = [f"cpl_win_hb_{f}" for f in SurfaceHandback._fields]
+    have = [k for k in keys if k in payload]
+    if not have:
+        return None
+    if len(have) != len(keys):
+        raise ValueError(
+            "checkpoint carries a partial coupler handback: "
+            f"{sorted(set(keys) - set(have))} missing.")
+    return SurfaceHandback(*(jnp.asarray(payload[k]) for k in keys))
 
 
 _LAND_HELD_NAMES = ("T_skin", "albedo", "qsfc_last", "qsfc", "shflx", "lhflx",
@@ -2056,6 +2089,16 @@ class ModelDriver:
         undamped training rollout produces NaN gradients (#797 bug 11).
         """
         return self._fric_decay
+
+    def surface_handback_from_checkpoint(self):
+        """The coupler ice/lake handback a loaded checkpoint carries (the H
+        the column loop was consuming when it was written), or ``None``.
+
+        A coupled driver resuming a handback run serves this from its hook
+        until its next exchange.  Read it after ``load_checkpoint`` and
+        before ``run``, which consumes the checkpoint's coupling keys."""
+        ck = self._carry_aux if isinstance(self._carry_aux, dict) else {}
+        return surface_handback_from_payload(ck)
 
     def current_tracer(self, name: str):
         """Grid-space tracer ``name`` as the running lane holds it (None if absent).
@@ -15451,10 +15494,24 @@ class ModelDriver:
         # the daily call.
         _cpl_ck = {k: _lw_ck.pop(k) for k in list(_lw_ck)
                    if k.startswith("cpl_win_")}
+        # The pending ice/lake exchange cannot be dropped silently: a run
+        # resuming it must consume a handback (vote K3-V12).
+        if _hb_fn is None and any(k.startswith("cpl_win_hb_") for k in _cpl_ck):
+            raise ValueError(
+                "checkpoint carries a pending coupler ice/lake handback "
+                "(cpl_win_hb_*), but no handback is set on this run.")
         self._cpl_window = None
         _cpl_dt = getattr(self, "_coupling_dt_s", None)
         _CPL_K = None
-        _cpl_sums, _cpl_n = [None] * len(_CPL_WIN_FIELDS), 0
+        # Window sums in ``_cpl_fields`` order; the handback adds the
+        # open-water, booked ice/lake and land-runoff sums (P5c K3).
+        _cpl_fields = _CPL_WIN_FIELDS + (_CPL_HB_FIELDS if _hb_fn is not None
+                                         else ())
+        _cpl_sums, _cpl_n = [None] * len(_cpl_fields), 0
+        # Handback radiation split of the latest radiation solve, held across
+        # held-radiation steps like the solve's net fluxes; the boundary
+        # inputs it is split with; this step's land runoff impulse.
+        _hb_rad_in = _hb_rad_held = _hb_runoff_now = None
         # Not persisted: a resumed link's first step re-samples SST/SIC from
         # the restored ocean anyway (_last_force_day starts None).
         _cpl_sst_due = False
@@ -15482,7 +15539,24 @@ class ModelDriver:
             if _cpl_ck:
                 _cpl_sums, _cpl_n = coupling_window_from_checkpoint(
                     _cpl_ck, _CPL_K,
-                    int(jnp.asarray(self.state.p_s.data).reshape(-1).shape[0]))
+                    int(jnp.asarray(self.state.p_s.data).reshape(-1).shape[0]),
+                    fields=_cpl_fields)
+                # A handback window cannot be resumed without its own sums,
+                # nor its sums under a run that no longer consumes a handback
+                # (votes K3-V6/V9).
+                _hb_ck = [f"cpl_win_sum_{f}" in _cpl_ck for f in _CPL_HB_FIELDS]
+                if _hb_fn is not None and _cpl_n > 0 and not all(_hb_ck):
+                    raise ValueError(
+                        "checkpoint coupling window: the coupler ice/lake "
+                        f"handback is set and {_cpl_n} step(s) are pending, "
+                        "but the checkpoint carries no open-water / booked "
+                        "ice-lake / runoff sums; the window cannot be "
+                        "resumed.")
+                if _hb_fn is None and any(_hb_ck):
+                    raise ValueError(
+                        "checkpoint coupling window was written by a run "
+                        "consuming a coupler ice/lake handback, but no "
+                        "handback is set on this run.")
             elif start_step > 0:
                 logger.warning(
                     "  Coupling window: the checkpoint carries no coupling "
@@ -16003,18 +16077,20 @@ class ModelDriver:
                     )
                     _alb_l = (_land_albedo_cells if _land_albedo_cells
                               is not None else _albedo_land_static)
+                    _T_l_hb = _hc(_land_T_skin if _land_T_skin is not None
+                                  else _forcing["T_sfc"])
+                    _alb_l_hb = 0.0 if _alb_l is None else _hc(_alb_l)
                     _bnd = handback_surface_boundary(
-                        _fl_hb, _fi_hb, _fk_hb,
-                        _hc(_land_T_skin if _land_T_skin is not None
-                            else _forcing["T_sfc"]),
+                        _fl_hb, _fi_hb, _fk_hb, _T_l_hb,
                         _sst_day, _hb_eps, _hc(_H.lw_emit),
                         _hc(_H.emissivity_ice), _hc(_H.emissivity_lake),
-                        0.0 if _alb_l is None else _hc(_alb_l),
+                        _alb_l_hb,
                         _alb_ocean_cur, _hc(_H.albedo_ice),
                         _hc(_H.albedo_lake))
                     _forcing["sfc_albedo"] = _bnd["sfc_albedo"]
                     _forcing["sfc_emissivity"] = _bnd["sfc_emissivity"]
                     _forcing["T_sfc_rad"] = _bnd["T_sfc_rad"]
+                    _hb_rad_in = (_fow, _fl_hb, _alb_l_hb, _T_l_hb, _hb_eps, _H)
                     if "open_ocean_frac" in _forcing:
                         _forcing["open_ocean_frac"] = _fow
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
@@ -16220,6 +16296,7 @@ class ModelDriver:
                         cos_zenith=_land_cz_wsum / _land_w_sum)
                     _land_fn = (_land_step_fn if _land_a2s_n >= _LAND_K
                                 else _land_step_boot_fn)
+                    _land_call_n = _land_a2s_n
                     _land_a2s_sum = None
                     _land_a2s_n = 0
                     _pt0 = time.perf_counter() if _PHASE_TIMERS else 0.0
@@ -16238,6 +16315,20 @@ class ModelDriver:
                         jnp.asarray(_doy - 1.0, dtype=jnp.float64),
                         jnp.asarray(_lml_year0 + _force_day / 365.0,
                                     dtype=jnp.float64))
+                    if _hb_fn is not None:
+                        # Land runoff [kg/m2/s per land area] over this call's
+                        # samples, booked as one impulse in the coupling
+                        # window the land debited it in (K3-V4).
+                        # A reverted column keeps its old state, runoff
+                        # included, and discharges nothing (K3-V11).
+                        _ro = jnp.asarray(
+                            self._land_ml_state.runoff_surface
+                            + self._land_ml_state.runoff_subsurface
+                        ).reshape(-1)
+                        _rv = jnp.asarray(_land_held_step).reshape(-1) > 0.5
+                        _hb_runoff_now = jnp.where(
+                            (_f_land_cells > 0.0) & ~_rv,
+                            _f_land_cells * _ro * _land_call_n, 0.0)
                     if _PHASE_TIMERS:
                         jax.block_until_ready(_land_T_skin)
                         _phase_t["land"] += time.perf_counter() - _pt0
@@ -16828,7 +16919,7 @@ class ModelDriver:
             # and an empty window.
             if _CPL_K is not None:
                 _sd = getattr(self.model, "_sfc_diag", None)
-                _cpl_now = [None] * len(_CPL_WIN_FIELDS)
+                _cpl_now = [None] * len(_cpl_fields)
                 if _sd is not None:
                     for _i in range(3):
                         if len(_sd) > _i and _sd[_i] is not None:
@@ -16838,6 +16929,36 @@ class ModelDriver:
                             self, "_requires_surface_flux_export", False)):
                         _cpl_now[3] = land_snowfall_from_sfc_diag(
                             _sd, _cpl_now[2]).reshape(-1)
+                if _hb_fn is not None:
+                    # Coupler handback (P5c K3): split each radiation solve
+                    # with the boundary it was fed and hold the split across
+                    # held-radiation steps, as the solve's net fluxes are
+                    # held (K3-V2); the open-water turbulent share as the
+                    # kernel published it; the land runoff impulse (zero on a
+                    # step without a land call).
+                    _sdv = lambda k: jnp.asarray(  # noqa: E731
+                        _sd[_sfc_diag_slot(k)].data).reshape(-1)
+                    if _use_rad:
+                        from legoesm.forcing.surface_utils import (
+                            handback_tile_radiation,
+                        )
+                        _fo, _flr, _alr, _Tlr, _eo, _Hr = _hb_rad_in
+                        _hc = lambda a: jnp.asarray(  # noqa: E731
+                            a, dtype=_fo.dtype).reshape(-1)
+                        _tr = handback_tile_radiation(
+                            _sdv("sw_down_sfc"), _sdv("lw_down_sfc"),
+                            _sdv("sw_net_sfc"), _sdv("lw_net_sfc"), _flr,
+                            _hc(_Hr.f_ice), _hc(_Hr.f_lake), _alr, _Tlr, _eo,
+                            _hc(_Hr.lw_emit), _hc(_Hr.albedo_ice),
+                            _hc(_Hr.albedo_lake), _hc(_Hr.emissivity_ice),
+                            _hc(_Hr.emissivity_lake))
+                        _hb_rad_held = [_tr[f] for f in _CPL_HB_RAD_FIELDS]
+                    _nb = len(_CPL_WIN_FIELDS)
+                    _cpl_now[_nb:] = (
+                        _hb_rad_held + [_sdv(f) for f in _CPL_HB_OW_FIELDS]
+                        + [jnp.zeros_like(_hb_rad_held[0])
+                           if _hb_runoff_now is None else _hb_runoff_now])
+                    _hb_runoff_now = None
                 _cpl_sums = [
                     s if v is None else (v if s is None else s + v)
                     for s, v in zip(_cpl_sums, _cpl_now)]
@@ -16852,6 +16973,28 @@ class ModelDriver:
                         if _s is not None:
                             self._carry_aux[_key] = jnp.reshape(
                                 _s / _cpl_n, _shp)
+                    if _hb_fn is not None:
+                        # Window means of the handback exports (K3-V5), and
+                        # the precipitation split by the window's tile
+                        # fractions, constant within a window (K3-V3).
+                        _nb = len(_CPL_WIN_FIELDS)
+                        for _f, _s in zip(_CPL_HB_FIELDS, _cpl_sums[_nb:]):
+                            self._carry_aux[f"seg_{_f}"] = jnp.reshape(
+                                _s / _cpl_n, _shp)
+                        _fo = _hb_rad_in[0]
+                        _Hr = _hb_rad_in[5]
+                        _hc = lambda a: jnp.asarray(  # noqa: E731
+                            a, dtype=_fo.dtype).reshape(-1)
+                        _tiles = (("ow", _fo), ("ice", _hc(_Hr.f_ice)),
+                                  ("lake", _hc(_Hr.f_lake)),
+                                  ("land", _f_land_cells.astype(_fo.dtype)))
+                        for _key, _s in (("precip", _cpl_sums[2]),
+                                         ("precip_frozen", _cpl_sums[3])):
+                            if _s is None:
+                                continue
+                            for _t, _ft in _tiles:
+                                self._carry_aux[f"seg_{_key}_{_t}"] = (
+                                    jnp.reshape(_ft * _s / _cpl_n, _shp))
                     for _key, _v in zip(("held_sw_net_sfc", "held_lw_net_sfc"),
                                         _cpl_now[:2]):
                         if _v is not None:
@@ -16860,15 +17003,19 @@ class ModelDriver:
                                 + (start_step + step + 1) * DT / 86400.0)
                     self._current_day = _cpl_day
                     self._segment_callback(self, _cpl_day, _cpl_n * DT)
-                    _cpl_sums = [None] * len(_CPL_WIN_FIELDS)
+                    _cpl_sums = [None] * len(_cpl_fields)
                     _cpl_n = 0
                     _cpl_sst_due = True
                 self._cpl_window = {
                     "cpl_win_n": np.asarray(_cpl_n, dtype=np.int64),
                     "cpl_win_k": np.asarray(_CPL_K, dtype=np.int64),
                     **{f"cpl_win_sum_{f}": s
-                       for f, s in zip(_CPL_WIN_FIELDS, _cpl_sums)
-                       if s is not None}}
+                       for f, s in zip(_cpl_fields, _cpl_sums)
+                       if s is not None},
+                    # The pending exchange the next steps consume: after an
+                    # exchange the hook already serves the new one (K3-V7).
+                    **(surface_handback_payload(_hb_fn())
+                       if _hb_fn is not None else {})}
 
             if _DIGEST_EVERY > 0 and (step + 1) % _DIGEST_EVERY == 0:
                 _lv = locals()

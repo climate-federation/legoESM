@@ -221,6 +221,51 @@ def handback_surface_boundary(
     )
 
 
+def handback_tile_radiation(
+    sw_down: jnp.ndarray,
+    lw_down: jnp.ndarray,
+    sw_net: jnp.ndarray,
+    lw_net: jnp.ndarray,
+    f_land: jnp.ndarray,
+    f_ice: jnp.ndarray,
+    f_lake: jnp.ndarray,
+    albedo_land: "float | jnp.ndarray",
+    T_land: jnp.ndarray,
+    emissivity: "float | jnp.ndarray",
+    lw_emit_ice_lake: jnp.ndarray,
+    albedo_ice: jnp.ndarray,
+    albedo_lake: jnp.ndarray,
+    emissivity_ice: jnp.ndarray,
+    emissivity_lake: jnp.ndarray,
+) -> dict:
+    """Per-tile split of one radiation solve's surface fluxes [W/m2, + into
+    the surface] for the boundary ``handback_surface_boundary`` built (same
+    fractions, albedos, emissivities, land skin and ice/lake emission).
+
+    ``booked_*``: what the ice and lake absorb per unit TILE area (SW, and
+    LW excluding their own emission) -- the coupler's ``OwnedTileForcing``;
+    their albedo, like the land's, is the same for both beams.
+    ``ow_sw_net``/``ow_lw_net``: the open-water share per grid cell area, the
+    solved net minus the land, ice and lake shares (plus the ice/lake
+    emission the coupler debits), so the tiles sum to the net the atmosphere
+    applied exactly -- also when the open-water direct beam sees a
+    zenith-dependent albedo the diffuse blend does not carry (vote K3-V10).
+    """
+    sb = constants.sigma_sb
+    sw_ice, sw_lake = sw_down * (1.0 - albedo_ice), sw_down * (1.0 - albedo_lake)
+    lw_ice, lw_lake = emissivity_ice * lw_down, emissivity_lake * lw_down
+    return dict(
+        ow_sw_net=(sw_net - f_land * sw_down * (1.0 - albedo_land)
+                   - f_ice * sw_ice - f_lake * sw_lake),
+        ow_lw_net=(lw_net - f_land * emissivity * (lw_down - sb * T_land ** 4)
+                   - f_ice * lw_ice - f_lake * lw_lake + lw_emit_ice_lake),
+        booked_sw_net_ice=sw_ice,
+        booked_lw_abs_ice=lw_ice,
+        booked_sw_net_lake=sw_lake,
+        booked_lw_abs_lake=lw_lake,
+    )
+
+
 def surface_temperature_for_lw_boundary(
     radiation: str,
     *,

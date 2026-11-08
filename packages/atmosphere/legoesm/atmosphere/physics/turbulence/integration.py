@@ -1193,6 +1193,7 @@ def _make_mpas_turbulence(
         # the ocean/ice fraction keep the scheme's own bulk computation.
         _shf_land = (forcing.get("shflx_land") if forcing is not None else None)
         _surface_flux = None
+        _ow_flux = None
         if _shf_land is not None:
             if f_land is None:
                 raise ValueError(
@@ -1325,6 +1326,13 @@ def _make_mpas_turbulence(
                 _surface_flux = handback_into_surface_flux(
                     _surface_flux, _tx, _ty, 1.0 - _fl - _w_bulk,
                     _hb_cells("taux_hb"), _hb_cells("tauy_hb"), rho[:, -1])
+                # The open-water share, exactly the terms blended above: the
+                # ocean is debited this (P5c K3 export).
+                _ow_flux = (
+                    _w_bulk * _sh, _w_bulk * _lh,
+                    _w_bulk * _lh / charged_latent_heat(
+                        step_config.surface.bulk_scheme, _T_bulk),
+                    _w_bulk * _tx, _w_bulk * _ty)
         elif forcing is not None and forcing.get("shflx_hb") is not None:
             raise ValueError(
                 "forcing['shflx_hb'] (coupler ice/lake flux handback) is only "
@@ -1529,6 +1537,12 @@ def _make_mpas_turbulence(
             evap_sfc=None if _evp is None else state.p_s.replace(
                 data=_evp.reshape(p_s.shape), name="evap_sfc_turb",
                 units="kg/m^2/s"),
+            **({} if _ow_flux is None else {
+                _k: state.p_s.replace(data=_v.reshape(p_s.shape),
+                                      name=f"{_k}_turb", units=_u)
+                for _k, _v, _u in zip(
+                    ("shflx_ow", "lhflx_ow", "evap_ow", "taux_ow", "tauy_ow"),
+                    _ow_flux, ("W/m^2", "W/m^2", "kg/m^2/s", "Pa", "Pa"))}),
         )
         return tendencies, _carry_update_with_cloud_fraction(
             carry_field, tke_out, turb_out)
