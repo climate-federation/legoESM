@@ -13,21 +13,15 @@ Two complementary gates:
    vector-invariant momentum (vorticity + Bernoulli gradient, incl. the
    absolute-vorticity Coriolis) and the centered flux-form continuity
    reconstruct the band cut EXACTLY from halo'd neighbour rows, so du/dv/dp_s
-   and cor_u/cor_v are BIT-EXACT (fp64) on every band.  The ONLY non-bit-exact
-   term is the LIMITED FV PPM scalar (T/tracer) advection: ``ppm_edge_values``
-   uses a 2nd-order edge at the outermost ``halo=2`` padded row, where serial
-   computes a 4th-order edge, and the CW84 limiter leaks a ~5e-12 difference
-   into the two cut-ADJACENT T rows (verified: scalar-advection diff is
-   confined to those rows; the scalar halo ghost rows are byte-identical).
-   This is a PRE-EXISTING boundary-order property of band-decomposed limited
-   FV PPM — the production MPI lat-band path uses the SAME backend-dispatched
-   operator — NOT an SPMD bug, so it is asserted as a BOUNDED residual.
+   and cor_u/cor_v are BIT-EXACT (fp64) on every band.  The limited FV PPM
+   scalar (T/tracer) advection pads halo=3, so its cut faces see the same
+   4th-order edges as serial and dT is held to the same tolerance on every row
+   (at halo=2 a 2nd-order outermost edge fed the CW84 limiter and left a
+   ~5e-12, non-conservative difference at cut-adjacent rows).
 
 2. ``test_atm_latlon_spmd_step_matches_serial`` — the integrated full-step
-   gate through the PUBLIC make_sharded interface.  Over a few RK3 steps the
-   tiny cut-row T truncation advects into the small-magnitude u field; bound it
-   FAR below any real decomposition error (~1e-3) while above the PPM
-   truncation floor.
+   gate through the PUBLIC make_sharded interface: a few RK3 steps match
+   serial to fp64 round-off (measured <= 3.5e-14).
 
 Runs on host CPU devices (``XLA_FLAGS=--xla_force_host_platform_device_count=4``);
 the production target is multi-GPU/TPU but the shard_map/ppermute/psum logic is
@@ -186,9 +180,8 @@ def _serial_and_band_tendency(use_polar_filter):
 @pytest.mark.parametrize("use_polar_filter", [False, True])
 def test_atm_latlon_spmd_tendency_matches_serial(use_polar_filter):
     """RIGOROUS decomposition gate: the single-tendency band reconstruction is
-    BIT-EXACT for momentum + continuity; only the limited FV PPM T advection
-    carries a bounded ~5e-12 truncation at the cut-adjacent rows (see module
-    docstring). RK-stage-independent, so it isolates the decomposition from the
+    BIT-EXACT for momentum + continuity and round-off tight for the halo=3
+    limited FV PPM T advection on every row (see module docstring). RK-stage-independent, so it isolates the decomposition from the
     downstream propagation tested below."""
     (du_s, dv_s, dT_s, dps_s), (du_b, dv_b, dT_b, dps_b) = \
         _serial_and_band_tendency(use_polar_filter)
@@ -217,27 +210,17 @@ def test_atm_latlon_spmd_tendency_matches_serial(use_polar_filter):
                 f"bug (Coriolis/v-face interp at cuts, band geometry, mass "
                 f"denominator, or v-face reconstruction)."))
 
-    # Temperature: bit-exact at every INTERIOR row; cut-adjacent rows carry the
-    # bounded FV-PPM halo-2 boundary-order truncation only.
-    cut_rows = _cut_adjacent_lat_rows()
-    interior = [j for j in range(N_LAT) if j not in cut_rows]
+    # Temperature: the halo=3 PPM reconstructs every cut face from the same
+    # 4th-order inputs as serial, so no row is exempt.
     np.testing.assert_allclose(
-        dT_b[interior], dT_s[interior], rtol=1e-10, atol=1e-12,
-        err_msg="dT_dt diverged at an INTERIOR (non-cut) row — real bug.")
-    cut_resid = float(np.max(np.abs(dT_b[sorted(cut_rows)] - dT_s[sorted(cut_rows)])))
-    assert cut_resid < 1e-9, (
-        f"cut-row dT_dt residual {cut_resid:.2e} exceeds the FV-PPM halo-2 "
-        f"truncation floor (~5e-12) by too much — investigate (expected the "
-        f"limited PPM boundary-order reduction only, not a gross cut bug).")
+        dT_b, dT_s, rtol=1e-10, atol=1e-12,
+        err_msg="dT_dt diverged from serial — a band-cut PPM or decomposition bug.")
 
 
 @pytest.mark.parametrize("use_polar_filter", [False, True])
 def test_atm_latlon_spmd_step_matches_serial(use_polar_filter):
     """Integrated full-step gate through the PUBLIC make_sharded interface. Over
-    a few RK3 steps the bounded cut-row T truncation (see the tendency gate)
-    advects into the small-magnitude u field; this asserts the integrated
-    difference stays FAR below any real decomposition error (~1e-3) while above
-    the PPM truncation floor."""
+    a few RK3 steps the band trajectory matches serial to fp64 round-off."""
     mesh = _mesh()
     model, state = _model_and_state(use_polar_filter)
     dt = 100.0
@@ -256,18 +239,18 @@ def test_atm_latlon_spmd_step_matches_serial(use_polar_filter):
         sc = sharded_step(sc, dt)
     spmd_out = gather_state_atm_latlon(sc, mesh)
 
-    # atol=1e-9 bounds the integrated FV-PPM cut truncation (measured ~8e-11 in
+    # halo=3 PPM: band cuts reproduce serial to round-off (measured 3.5e-14 in
     # u after 3 steps); a real band-decomposition bug is O(1e-3), 6+ orders up.
     for field in ("u", "v", "T", "p_s"):
         a = np.asarray(getattr(spmd_out, field))
         b = np.asarray(getattr(serial_out, field))
         assert a.shape == b.shape, f"{field} shape {a.shape} vs {b.shape}"
         np.testing.assert_allclose(
-            a, b, rtol=1e-6, atol=1e-9,
+            a, b, rtol=1e-10, atol=1e-12,
             err_msg=(
                 f"atm lat-band SPMD ({N_DEV} bands, polar_filter="
                 f"{use_polar_filter}) diverged from serial in '{field}' beyond "
-                f"the FV-PPM cut-truncation bound — a real band-decomposition "
+                f"fp64 round-off — a real band-decomposition "
                 f"bug (Coriolis/v-face interp at cuts, band geometry, mass "
                 f"denominator, or v-face reconstruction)."))
 
@@ -374,7 +357,8 @@ def test_run_atm_latlon_spmd_segment_matches_serial(use_polar_filter):
     # Non-vacuity guard A — the bridge ACTUALLY shards across the mesh (else the
     # segment trivially == serial and the comparison below proves nothing).
     sharded_c = shard_hydrostatic_to_atm_latlon(hs0, spmd_model.grid, mesh)
-    assert sharded_c.T.sharding.num_devices == N_DEV, (
+    assert (sharded_c.T.sharding.num_devices == N_DEV
+            and not sharded_c.T.sharding.is_fully_replicated), (
         f"bridge did not shard across the mesh: "
         f"{sharded_c.T.sharding.num_devices} devices != {N_DEV}")
 
@@ -389,23 +373,11 @@ def test_run_atm_latlon_spmd_segment_matches_serial(use_polar_filter):
         b = np.asarray(getattr(hs_s, field).data)
         assert a.shape == b.shape, f"{field} shape {a.shape} vs {b.shape}"
         np.testing.assert_allclose(
-            a, b, rtol=1e-6, atol=1e-9,
+            a, b, rtol=1e-10, atol=1e-12,
             err_msg=(
                 f"Stage-7 SPMD segment (HydrostaticState, polar_filter="
                 f"{use_polar_filter}) diverged from the serial model.step loop "
-                f"in '{field}' beyond the FV-PPM cut-truncation bound."))
-
-    # Non-vacuity guard B — the band decomposition is GENUINELY exercised: the
-    # limited-FV-PPM scalar advection truncates at cut rows (~8e-11 in u after 3
-    # steps, Stage 5), so the SPMD trajectory must differ from serial by MORE
-    # than the fp64 roundoff floor. A zero diff would mean sharding silently
-    # collapsed to single-device (the one way this gate could pass vacuously).
-    u_diff = float(np.max(np.abs(
-        np.asarray(hs_b.u.data) - np.asarray(hs_s.u.data))))
-    assert u_diff > 1e-13, (
-        f"SPMD u is bit-identical to serial ({u_diff:.2e}) — the FV-PPM cut "
-        f"truncation is absent, so the band decomposition did not actually run "
-        f"(sharding collapsed to single-device); this gate would be vacuous.")
+                f"in '{field}' beyond fp64 round-off."))
 
 
 # ==============================================================================
@@ -483,7 +455,7 @@ def test_stochastic_draw_is_decomposition_invariant():
         np.testing.assert_allclose(
             np.asarray(getattr(hs_b, field).data),
             np.asarray(getattr(hs_s, field).data),
-            rtol=1e-6, atol=1e-9,
+            rtol=1e-10, atol=1e-12,
             err_msg=f"stochastic SPMD diverged from serial in '{field}' — "
                     "the per-global-column draw is decomposition-variant")
     np.testing.assert_allclose(
@@ -549,7 +521,7 @@ def test_run_atm_latlon_spmd_segment_stateful_carry_matches_serial():
         np.testing.assert_allclose(
             np.asarray(getattr(hs_b, field).data),
             np.asarray(getattr(hs_s, field).data),
-            rtol=1e-6, atol=1e-9,
+            rtol=1e-10, atol=1e-12,
             err_msg=f"stateful-carry SPMD diverged from serial in '{field}'")
     np.testing.assert_allclose(
         np.asarray(ps_b.tke), np.asarray(ps_s.tke), rtol=1e-6, atol=1e-12,
@@ -607,11 +579,11 @@ def test_run_atm_latlon_spmd_segment_physics_matches_serial():
         a = np.asarray(getattr(hs_b, field).data)
         b = np.asarray(getattr(hs_s, field).data)
         np.testing.assert_allclose(
-            a, b, rtol=1e-6, atol=1e-9,
+            a, b, rtol=1e-10, atol=1e-12,
             err_msg=(
                 f"SPMD Held-Suarez segment diverged from the serial "
                 f"model.step(physics_fn) loop in '{field}' beyond the FV-PPM "
-                f"cut-truncation bound — band physics coupling bug."))
+                f"fp64 round-off — band physics coupling bug."))
 
 
 # ==============================================================================
@@ -691,5 +663,5 @@ def test_run_atm_latlon_spmd_segmentation_invariant_and_matches_serial():
         np.testing.assert_allclose(
             np.asarray(getattr(hs_seg4, field).data),
             np.asarray(getattr(hs_s, field).data),
-            rtol=1e-6, atol=1e-9,
+            rtol=1e-10, atol=1e-12,
             err_msg=f"production runner diverged from serial in '{field}'.")

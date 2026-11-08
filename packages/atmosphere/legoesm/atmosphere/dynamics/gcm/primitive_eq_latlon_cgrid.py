@@ -549,7 +549,7 @@ def cgrid_latlon_hydrostatic_tendencies(
     # ``LEGOESM_LATLON_PACKED_EXCHANGE=1``, armed 1-D lat-band SPMD mesh
     # only).  Merges the three per-stage exchanges whose operands are all
     # live here — P1 the ``[B|ln p]`` gradient-stack fold pad (halo 1,
-    # gradient_y_cgrid), P4 the PPM T-advection fold pad (halo 2), and P2
+    # gradient_y_cgrid), P4 the PPM T-advection fold pad (halo 3), and P2
     # the fused wall-BC entry pad (T, u, dp[, p_s], halo 1) — into ONE
     # north+south ppermute pair per RK stage: raw un-lon-padded edge rows
     # ride one buffer per dtype group; wall constants / pole folds / lon
@@ -579,7 +579,9 @@ def cgrid_latlon_hydrostatic_tendencies(
             # ghost rows ride this epoch.
             dp = p_s[..., jnp.newaxis] * sigma_coord.dsigma.astype(p_s.dtype)
             _wall_ins = (T, u, dp)
-        _packed_specs = (("fold", 1, False), ("fold", 2, False)) + (
+        # PPM T advection needs halo 3; the gradient fallback reads halo 2.
+        _T_halo = 3 if config.use_ppm_transport else 2
+        _packed_specs = (("fold", 1, False), ("fold", _T_halo, False)) + (
             ("wall", 1, 0.0, 0.0),) * len(_wall_ins)
         _packed_out = make_latlon_band_packed_pad_body(
             _packed_mesh, _packed_specs)(_Bln_stack, T, *_wall_ins)
@@ -770,7 +772,7 @@ def cgrid_latlon_hydrostatic_tendencies(
     # --- 11. Temperature equation ---
     if config.use_ppm_transport:
         # C-grid PPM advection of T (4th-order, shared operator).
-        # ``q_pad``: the packed epoch's halo-2 fold pad of T (None off the
+        # ``q_pad``: the packed epoch's halo-3 fold pad of T (None off the
         # packed path — the operator pads internally, byte-identical).
         horiz_adv_T = cgrid_fv_scalar_advection_latlon_3d(
             T, u, v, grid, q_pad=_T_ppm_pad)

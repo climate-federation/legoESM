@@ -2821,6 +2821,15 @@ def make_latlon_mpi_step(
     # of the mask + filter output is pinned by
     # ``tests/distributed/test_latlon_mpi_polar_filter.py``.
 
+    # Checked on global sizes so every rank refuses together (a rank-local
+    # raise would leave its neighbours blocked in the halo exchange).
+    if layout.n_ranks > 1 and layout.n_lat_global // layout.n_ranks < 3:
+        raise ValueError(
+            f"make_latlon_mpi_step: the smallest lat band has "
+            f"{layout.n_lat_global // layout.n_ranks} rows "
+            f"(n_lat={layout.n_lat_global} on {layout.n_ranks} ranks); the "
+            f"PPM halo=3 exchange needs >= 3.")
+
     # Activate the MPI halo backend.  Every pad_halo_latlon /
     # pad_with_pole_bc_lat call inside the dycore now dispatches
     # through inter-rank sendrecv at partition cuts and constant /
