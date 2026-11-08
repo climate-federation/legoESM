@@ -270,7 +270,6 @@ CANONICAL_FORMULAS = {
             # mf_buoyancy), a genuinely different (non-N²) form.
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 2,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/holtslag_boville.py": 4,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/mynn25.py": 3,
             # ysu.py: 4 inline g/θ buoyancy/N² re-derivations migrated to
             # physics._shared.buoyancy_coefficient (audit item 7) → budget 0
             # (entry removed; was 3, which had already gone stale at 4 actual).

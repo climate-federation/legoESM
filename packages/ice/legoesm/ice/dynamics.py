@@ -48,6 +48,7 @@ from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo_latlon import pad_halo_latlon
 from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.operators_latlon_cgrid import fold_row
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.rheology import (
@@ -101,6 +102,7 @@ _SI3_FAST_MASK_REDUCTION = 0.99
 _SI3_REQUIRED_HALO = 2
 _SI3_REQUIRED_CATEGORY_COUNT = 1
 _SI3_REQUIRED_RN_ISHLAT = 2.0
+SI3_NORTH_FOLD_CHOICES = ("none", "orca_f_pivot")
 _SI3_LANDFAST_SPEED_FLOOR_M_S = 5.0e-5  # icedyn_rhg_evp.F90:541,592,647,699
 _SI3_ORCA1_LF_DEPFRA = 0.125  # ORCA1 namelist_ice_ref:59
 _SI3_ORCA1_LF_BFR_N_M3 = 15.0  # ORCA1 namelist_ice_ref:61
@@ -197,6 +199,11 @@ class SI3CGridAEVPConfig(NamedTuple):
     landfast_relaxation_s_inv: float
     landfast_tensile_fraction: float
     convergence_check: int
+    # Lateral boundary condition of the same-index halo.  "none" = the
+    # one-rank doubly periodic card (both axes wrapped).  "orca_f_pivot" =
+    # NEMO 5.0.1 ORCA F-pivot lbc_lnk (E-W cyclic, closed south halo, north
+    # fold on the halo rows only); see ``_si3_orca_f_pivot_halo``.
+    north_fold: str = "orca_f_pivot"
 
 
 class SI3CGridAEVPState(NamedTuple):
@@ -207,6 +214,24 @@ class SI3CGridAEVPState(NamedTuple):
     stress1_t: jnp.ndarray
     stress2_t: jnp.ndarray
     stress12_f: jnp.ndarray
+
+
+class SI3ORCA2AEVPTrace(NamedTuple):
+    """Preregistered O5 diagnostics at NEMO's exact aEVP call points.
+
+    The leading axis of every frame field is the one-based ``jter`` sequence.
+    This is an observation result from the shared solver, not a second solver.
+    """
+
+    final: SI3CGridAEVPState
+    fimask: jnp.ndarray
+    zdelta: jnp.ndarray
+    zp_delt: jnp.ndarray
+    stress1: jnp.ndarray
+    stress2: jnp.ndarray
+    stress12: jnp.ndarray
+    u_ice: jnp.ndarray
+    v_ice: jnp.ndarray
 
 
 class SI3CGridAEVPForcing(NamedTuple):
@@ -822,6 +847,80 @@ def _si3_periodic_halo(value: jnp.ndarray) -> jnp.ndarray:
     return nemo_source_round(jnp.pad(interior, padding, mode="wrap"))
 
 
+def _si3_lane3_halo(label, value, nature, sign, ldfull):
+    """Lane-3 one-rank doubly periodic halo program (every lbc_lnk site)."""
+
+    del label, nature, sign, ldfull
+    return _si3_periodic_halo(value)
+def _si3_orca_f_pivot_halo(value: jnp.ndarray, point: str, sign: float) -> jnp.ndarray:
+    """NEMO 5.0.1 ``lbc_lnk`` on an ORCA F-pivot grid for one same-index field.
+
+    Halo = 2 (validated).  E-W cyclic; the south halo rows are closed (zero,
+    NEMO's south boundary is land); the two north halo rows are the F-pivot
+    fold images of the inner rows (``lbc_nfd_generic.h90``, ``c_NFtype='F'``,
+    halo rows only: icedyn_rhg_evp.F90's ``lbc_lnk`` has no ``ldfull``):
+    halo row ``jj`` above the top inner row takes inner row
+    ``Nj - jj`` (T/U points) or ``Nj - jj - 1`` (V/F points, whose top inner
+    row lies on the fold line), i-permuted and multiplied by ``sign``.
+
+    The i-permutation is the repo's ORCA halo-row-stored tripole ``perm_T``
+    (``tripole.py``: ``perm[i] = n_lon - 1 - i``) applied through the shared
+    ``fold_row``; NEMO stores U and F at the EAST face of T column ``i``, so
+    those points use ``perm_T`` shifted by one column, ``(N - 2 - i) mod N``.
+    Applying the fold to the inner columns and then the E-W wrap reproduces
+    NEMO's halo-column fold pairs (verified against NEMO's recorded halos).
+    """
+
+    halo = _SI3_REQUIRED_HALO
+    core = value[halo:-halo, halo:-halo, ...]
+    n_i, n_j = core.shape[0], core.shape[1]
+    perm_t = jnp.arange(n_i - 1, -1, -1, dtype=jnp.int32)
+    if point in ("T", "V"):
+        perm = perm_t
+    elif point in ("U", "F"):
+        # jnp `%` is floor-mod: perm_t - 1 = -1 at i = N-1 maps to N-1 (self pair).
+        perm = (perm_t - 1) % n_i
+    else:
+        raise ValueError(f"unknown SI3 lbc point type {point!r} for the aEVP solver halo")
+    lag = 0 if point in ("T", "U") else 1
+    north = jnp.stack(
+        [
+            fold_row(core[None, :, n_j - jj - lag, ...], perm, sign, n_i)[0]
+            for jj in range(1, halo + 1)
+        ],
+        axis=1,
+    )
+    south = jnp.zeros((n_i, halo) + core.shape[2:], core.dtype)
+    column = jnp.concatenate([south, core, north], axis=1)
+    tail = ((0, 0),) * (value.ndim - 2)
+    return nemo_source_round(jnp.pad(column, ((halo, halo), (0, 0)) + tail, mode="wrap"))
+
+
+def _si3_halo(
+    value: jnp.ndarray, config: "SI3CGridAEVPConfig", point: str, sign: float
+) -> jnp.ndarray:
+    """Halo refresh selected by ``config.north_fold`` (validated statically)."""
+
+    if config.north_fold == "orca_f_pivot":
+        return _si3_orca_f_pivot_halo(value, point, sign)
+    if config.north_fold == "none":
+        return _si3_periodic_halo(value)
+    raise ValueError(
+        f"unknown SI3 north_fold lbc scheme {config.north_fold!r}; "
+        f"expected {SI3_NORTH_FOLD_CHOICES}"
+    )
+
+
+def _si3_config_halo(config: "SI3CGridAEVPConfig"):
+    """Adapt the configured periodic/ORCA-F halo to the shared lbc_lnk call shape."""
+
+    def halo(label, value, nature, sign, ldfull):
+        del label, ldfull
+        return _si3_halo(value, config, nature, sign)
+
+    return halo
+
+
 def _si3_set(array: jnp.ndarray, row_slice: slice, value: jnp.ndarray) -> jnp.ndarray:
     """Functional write helper for a two-dimensional same-index SI3 array."""
 
@@ -978,14 +1077,17 @@ def _si3_stress_divergence(
     return _si3_set(zeros, halo_one, force_u), _si3_set(zeros, halo_one, force_v)
 
 
-def _validate_si3_cgrid_aevp_static(config: SI3CGridAEVPConfig) -> None:
+def _validate_si3_cgrid_aevp_static(
+    config: SI3CGridAEVPConfig,
+    category_count: int = _SI3_REQUIRED_CATEGORY_COUNT,
+) -> None:
     """Reject every unimplemented selector cross-product before tracing."""
 
     expected = (
         "si3_aevp",
         "si3_c_grid",
         _SI3_REQUIRED_HALO,
-        _SI3_REQUIRED_CATEGORY_COUNT,
+        category_count,
         _SI3_REQUIRED_RN_ISHLAT,
         0,
     )
@@ -1004,6 +1106,11 @@ def _validate_si3_cgrid_aevp_static(config: SI3CGridAEVPConfig) -> None:
         )
     if config.n_subcycles < 1:
         raise ValueError("SI3 C-grid aEVP requires at least one subcycle")
+    if config.north_fold not in SI3_NORTH_FOLD_CHOICES:
+        raise ValueError(
+            f"unknown SI3 north_fold lbc scheme {config.north_fold!r}; "
+            f"expected {SI3_NORTH_FOLD_CHOICES}"
+        )
     if config.landfast:
         landfast_actual = (
             config.landfast_depth_fraction,
@@ -1136,7 +1243,7 @@ def _si3_cgrid_fmask(
         ),
     )
     raw = jnp.where(ocean == _SI3_ZERO, boundary, ocean).astype(dtype)
-    return _si3_periodic_halo(_si3_set(jnp.zeros_like(raw), slice(2, -2), raw))
+    return _si3_halo(_si3_set(jnp.zeros_like(raw), slice(2, -2), raw), config, "F", _SI3_ONE)
 
 
 def si3_cgrid_deformation(
@@ -1147,7 +1254,7 @@ def si3_cgrid_deformation(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Return final C-grid divergence and deformation for redistribution.
 
-    This is the single implementation of ``icedyn_rhg_evp.F90:788-836`` used
+    This is main's ORCA1 implementation of ``icedyn_rhg_evp.F90:788-836`` used
     by the rung-3.4 ``rhg -> adv -> rdgrft`` composition.  The returned T-point
     arrays populate only NEMO's physical ``DO_2D(0,0,0,0)`` region; diagnostics
     outside that region are intentionally zero because SI3 does not exchange
@@ -1160,6 +1267,83 @@ def si3_cgrid_deformation(
     if len(shape) != 2 or any(value.shape != shape for value in leaves):
         raise ValueError("SI3 C-grid deformation requires same-shape 2-D leaves")
     fimask = _si3_cgrid_fmask(forcing, config, state.u_ice_u.dtype)
+    shear_f = _si3_f_shear(
+        state.u_ice_u,
+        state.v_ice_v,
+        metrics,
+        fimask,
+        jnp.zeros_like(state.stress12_f),
+    )
+    divergence, tension, shear_square = _si3_t_deformation(
+        state.u_ice_u, state.v_ice_v, shear_f, metrics
+    )
+    ice_mask = (forcing.concentration_t >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
+    divergence = divergence * ice_mask
+    deformation = (
+        _si3_sqrt(
+            divergence * divergence
+            + (tension * tension + shear_square) / (config.eccentricity * config.eccentricity)
+        )
+        * ice_mask
+    )
+    interior = slice(2, -2)
+    zero = jnp.zeros_like(divergence)
+    return (
+        _si3_set(zero, interior, divergence),
+        _si3_set(zero, interior, deformation),
+    )
+
+
+
+def _si3_orca2_cgrid_fmask(
+    forcing: SI3CGridAEVPForcing,
+    config: SI3CGridAEVPConfig,
+    dtype,
+    halo,
+) -> jnp.ndarray:
+    """Construct SI3's F-point ocean/boundary mask at source lines 204-224."""
+
+    tmask = forcing.tmask_t
+    ocean = (
+        tmask
+        * jnp.roll(tmask, -1, axis=0)
+        * jnp.roll(tmask, -1, axis=1)
+        * jnp.roll(jnp.roll(tmask, -1, axis=0), -1, axis=1)
+    )
+    boundary = config.rn_ishlat * jnp.minimum(
+        _SI3_ONE,
+        jnp.maximum(
+            jnp.maximum(forcing.umask_u, jnp.roll(forcing.umask_u, -1, axis=1)),
+            jnp.maximum(forcing.vmask_v, jnp.roll(forcing.vmask_v, -1, axis=0)),
+        ),
+    )
+    raw = jnp.where(ocean == _SI3_ZERO, boundary, ocean).astype(dtype)
+    # icedyn_rhg_evp.f90:238 runs only at kt == nit000, where mpp_nfd forces
+    # the full north-fold update (lbcnfd.f90:1617); lbc_nfd always does it.
+    return halo("fimask", _si3_set(jnp.zeros_like(raw), slice(2, -2), raw), "F", _SI3_ONE, True)
+
+
+def si3_lane_cgrid_deformation(
+    state: SI3CGridAEVPState,
+    forcing: SI3CGridAEVPForcing,
+    metrics: SI3CGridMetrics,
+    config: SI3CGridAEVPConfig,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return final C-grid divergence and deformation for redistribution.
+
+    This is the SI3 lane's ICE_RHEO implementation of ``icedyn_rhg_evp.F90:788-836`` used
+    by the rung-3.4 ``rhg -> adv -> rdgrft`` composition.  The returned T-point
+    arrays populate only NEMO's physical ``DO_2D(0,0,0,0)`` region; diagnostics
+    outside that region are intentionally zero because SI3 does not exchange
+    their halos before ``icedyn_rdgrft.F90:234-237`` packs physical cells.
+    """
+
+    _validate_si3_cgrid_aevp_static(config)
+    shape = state.u_ice_u.shape
+    leaves = (*state, *forcing, *metrics)
+    if len(shape) != 2 or any(value.shape != shape for value in leaves):
+        raise ValueError("SI3 C-grid deformation requires same-shape 2-D leaves")
+    fimask = _si3_orca2_cgrid_fmask(forcing, config, state.u_ice_u.dtype, _si3_lane3_halo)
     shear_f = _si3_f_shear(
         state.u_ice_u,
         state.v_ice_v,
@@ -1447,9 +1631,14 @@ def si3_cgrid_aevp_solver(
             ),
             zmsk,
         )
-        delta_t = _si3_periodic_halo(_si3_set(jnp.zeros_like(delta_value), interior, delta_value))
-        p_over_delta_t = _si3_periodic_halo(
-            _si3_set(jnp.zeros_like(p_over_delta_value), interior, p_over_delta_value)
+        delta_t = _si3_halo(
+            _si3_set(jnp.zeros_like(delta_value), interior, delta_value), config, "T", _SI3_ONE
+        )
+        p_over_delta_t = _si3_halo(
+            _si3_set(jnp.zeros_like(p_over_delta_value), interior, p_over_delta_value),
+            config,
+            "T",
+            _SI3_ONE,
         )
 
         # SI3 intentionally recomputes these operands for the wide stress loop.
@@ -1781,8 +1970,8 @@ def si3_cgrid_aevp_solver(
             odd_pair,
             (u_ice, v_ice),
         )
-        u_ice = _si3_periodic_halo(u_ice)
-        v_ice = _si3_periodic_halo(v_ice)
+        u_ice = _si3_halo(u_ice, config, "U", -_SI3_ONE)
+        v_ice = _si3_halo(v_ice, config, "V", -_SI3_ONE)
         return u_ice, v_ice, stress1, stress2, stress12
 
     initial = tuple(state)
@@ -1803,9 +1992,1019 @@ def si3_cgrid_aevp_solver(
     return SI3CGridAEVPState(
         u_ice_u=u_final,
         v_ice_v=v_final,
-        stress1_t=_si3_periodic_halo(stress1_final),
-        stress2_t=_si3_periodic_halo(stress2_final),
-        stress12_f=_si3_periodic_halo(stress12_final),
+        stress1_t=_si3_halo(stress1_final, config, "T", _SI3_ONE),
+        stress2_t=_si3_halo(stress2_final, config, "T", _SI3_ONE),
+        stress12_f=_si3_halo(stress12_final, config, "F", _SI3_ONE),
+    )
+
+
+# ==============================================================================
+# mEVP solver
+# ==============================================================================
+
+
+
+def _si3_orca2_cgrid_aevp_core(
+    state: SI3CGridAEVPState,
+    forcing: SI3CGridAEVPForcing,
+    metrics: SI3CGridMetrics,
+    config: SI3CGridAEVPConfig,
+    *,
+    strength_t: jnp.ndarray,
+    u_ice_b: jnp.ndarray,
+    v_ice_b: jnp.ndarray,
+    halo,
+    differentiable: bool,
+    stress_divergence_outer_weight: float,
+    swap_parity: bool,
+    capture_trace: bool = False,
+) -> SI3CGridAEVPState | SI3ORCA2AEVPTrace:
+    """ORCA2 lane aEVP body; ``halo(label, field, nature, sign, ldfull)`` is the lbc_lnk program.
+
+    ``u_ice_b``/``v_ice_b`` are NEMO's previous-step velocities
+    (``icedyn_rhg_evp.f90:574,625``), distinct inputs from the entry ``state``.
+    """
+
+    at_i = forcing.concentration_t
+    zmsk = (at_i >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
+    tmask = forcing.tmask_t
+    # The pinned ORCA1/case deck resolves rn_ishlat=2.  Reproduce the
+    # nonzero-boundary repair from icedyn_rhg_evp.F90:215-224 even though the
+    # all-wet periodic rung makes it inert; static validation rejects every
+    # selector other than this one measured arm.
+    fimask = _si3_orca2_cgrid_fmask(forcing, config, state.u_ice_u.dtype, halo)
+    eccentricity_square = _si3_mul(config.eccentricity, config.eccentricity)
+    inverse_eccentricity_square = _si3_div(_SI3_ONE, eccentricity_square)
+    mass_t = _si3_add(
+        _si3_add(
+            _si3_mul(config.rho_snow, forcing.snow_volume_t),
+            _si3_mul(config.rho_ice, forcing.ice_volume_t),
+        ),
+        _si3_mul(
+            config.rho_water,
+            _si3_add(forcing.pond_volume_t, forcing.lid_volume_t),
+        ),
+    )
+    mass_coriolis_t = _si3_mul(mass_t, forcing.coriolis_t)
+    dt_over_mass_t = _si3_div(config.dt_s, jnp.maximum(mass_t, _SI3_MASS_FLOOR_KG_M2))
+
+    tensile_fraction = (
+        config.landfast_tensile_fraction if config.landfast else _SI3_ZERO
+    )
+
+    area_t_east = jnp.roll(metrics.area_t, -1, axis=0)
+    area_t_north = jnp.roll(metrics.area_t, -1, axis=1)
+    mass_t_east = jnp.roll(mass_t, -1, axis=0)
+    mass_t_north = jnp.roll(mass_t, -1, axis=1)
+    at_i_east = jnp.roll(at_i, -1, axis=0)
+    at_i_north = jnp.roll(at_i, -1, axis=1)
+    za_u = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _SI3_HALF,
+                _si3_add(
+                    _si3_mul(at_i, metrics.area_t),
+                    _si3_mul(at_i_east, area_t_east),
+                ),
+            ),
+            _si3_div(_SI3_ONE, metrics.area_u),
+        ),
+        forcing.umask_u,
+    )
+    za_v = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _SI3_HALF,
+                _si3_add(
+                    _si3_mul(at_i, metrics.area_t),
+                    _si3_mul(at_i_north, area_t_north),
+                ),
+            ),
+            _si3_div(_SI3_ONE, metrics.area_v),
+        ),
+        forcing.vmask_v,
+    )
+    mass_u = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _SI3_HALF,
+                _si3_add(
+                    _si3_mul(mass_t, metrics.area_t),
+                    _si3_mul(mass_t_east, area_t_east),
+                ),
+            ),
+            _si3_div(_SI3_ONE, metrics.area_u),
+        ),
+        forcing.umask_u,
+    )
+    mass_v = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _SI3_HALF,
+                _si3_add(
+                    _si3_mul(mass_t, metrics.area_t),
+                    _si3_mul(mass_t_north, area_t_north),
+                ),
+            ),
+            _si3_div(_SI3_ONE, metrics.area_v),
+        ),
+        forcing.vmask_v,
+    )
+    ocean_v_u = _si3_mul(
+        _si3_mul(
+            _SI3_QUARTER,
+            _si3_add(
+                _si3_add(
+                    forcing.ocean_v_v,
+                    jnp.roll(forcing.ocean_v_v, 1, axis=1),
+                ),
+                _si3_add(
+                    jnp.roll(forcing.ocean_v_v, -1, axis=0),
+                    jnp.roll(jnp.roll(forcing.ocean_v_v, -1, axis=0), 1, axis=1),
+                ),
+            ),
+        ),
+        forcing.umask_u,
+    )
+    ocean_u_v = _si3_mul(
+        _si3_mul(
+            _SI3_QUARTER,
+            _si3_add(
+                _si3_add(
+                    forcing.ocean_u_u,
+                    jnp.roll(forcing.ocean_u_u, 1, axis=0),
+                ),
+                _si3_add(
+                    jnp.roll(forcing.ocean_u_u, -1, axis=1),
+                    jnp.roll(jnp.roll(forcing.ocean_u_u, 1, axis=0), -1, axis=1),
+                ),
+            ),
+        ),
+        forcing.vmask_v,
+    )
+    inverse_dt = _si3_div(_SI3_ONE, config.dt_s)
+    mass_over_dt_u = _si3_mul(mass_u, inverse_dt)
+    mass_over_dt_v = _si3_mul(mass_v, inverse_dt)
+    tau_air_u = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _si3_mul(za_u, _SI3_HALF),
+                _si3_add(
+                    forcing.air_stress_u_t,
+                    jnp.roll(forcing.air_stress_u_t, -1, axis=0),
+                ),
+            ),
+            _si3_sub(_SI3_TWO, forcing.umask_u),
+        ),
+        jnp.maximum(tmask, jnp.roll(tmask, -1, axis=0)),
+    )
+    tau_air_v = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _si3_mul(za_v, _SI3_HALF),
+                _si3_add(
+                    forcing.air_stress_v_t,
+                    jnp.roll(forcing.air_stress_v_t, -1, axis=1),
+                ),
+            ),
+            _si3_sub(_SI3_TWO, forcing.vmask_v),
+        ),
+        jnp.maximum(tmask, jnp.roll(tmask, -1, axis=1)),
+    )
+    drag_u = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _si3_mul(_si3_mul(config.rho_ocean, za_u), _SI3_HALF),
+                _si3_add(
+                    forcing.drag_io_t,
+                    jnp.roll(forcing.drag_io_t, -1, axis=0),
+                ),
+            ),
+            _si3_sub(_SI3_TWO, forcing.umask_u),
+        ),
+        jnp.maximum(tmask, jnp.roll(tmask, -1, axis=0)),
+    )
+    drag_v = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _si3_mul(_si3_mul(config.rho_ocean, za_v), _SI3_HALF),
+                _si3_add(
+                    forcing.drag_io_t,
+                    jnp.roll(forcing.drag_io_t, -1, axis=1),
+                ),
+            ),
+            _si3_sub(_SI3_TWO, forcing.vmask_v),
+        ),
+        jnp.maximum(tmask, jnp.roll(tmask, -1, axis=1)),
+    )
+    slope_u = _si3_mul(
+        _si3_mul(
+            _si3_mul(-mass_u, config.gravity),
+            _si3_sub(jnp.roll(forcing.ssh_t, -1, axis=0), forcing.ssh_t),
+        ),
+        _si3_div(_SI3_ONE, metrics.e1u),
+    )
+    slope_v = _si3_mul(
+        _si3_mul(
+            _si3_mul(-mass_v, config.gravity),
+            _si3_sub(jnp.roll(forcing.ssh_t, -1, axis=1), forcing.ssh_t),
+        ),
+        _si3_div(_SI3_ONE, metrics.e2v),
+    )
+    mass_mask_u = (mass_u > _SI3_ZERO).astype(state.u_ice_u.dtype)
+    mass_mask_v = (mass_v > _SI3_ZERO).astype(state.v_ice_v.dtype)
+    active_u = ~((mass_u <= _SI3_MASS_FLOOR_KG_M2) & (za_u <= _SI3_LOW_CONCENTRATION))
+    active_v = ~((mass_v <= _SI3_MASS_FLOOR_KG_M2) & (za_v <= _SI3_LOW_CONCENTRATION))
+    active_u = active_u.astype(state.u_ice_u.dtype)
+    active_v = active_v.astype(state.v_ice_v.dtype)
+    fast_u = jnp.maximum(forcing.fast_tmask, jnp.roll(forcing.fast_tmask, -1, axis=0))
+    fast_v = jnp.maximum(forcing.fast_tmask, jnp.roll(forcing.fast_tmask, -1, axis=1))
+    basal_u, basal_v, _basal_t = si3_cgrid_landfast_l16_basal_stress(
+        forcing,
+        metrics,
+        config,
+        za_u,
+        za_v,
+    )
+
+    halo_one = slice(1, -1)
+    interior = slice(2, -2)
+
+    def subcycle_with_frame(iteration, carry):
+        u_ice, v_ice, stress1, stress2, stress12 = carry
+        shear = _si3_f_shear(u_ice, v_ice, metrics, fimask, jnp.zeros_like(stress12))
+        divergence, tension, shear_square = _si3_t_deformation(u_ice, v_ice, shear, metrics)
+        tension_square = _si3_mul(tension, tension)
+        delta_inner = _si3_add(tension_square, shear_square)
+        delta_inner = _si3_mul(delta_inner, inverse_eccentricity_square)
+        divergence_square = _si3_mul(divergence, divergence)
+        delta_inner = _si3_add(divergence_square, delta_inner)
+        delta_value = _si3_mul(nemo_source_round(_si3_sqrt(delta_inner)), zmsk)
+        p_over_delta_value = _si3_mul(
+            _si3_div(
+                strength_t,
+                _si3_add(delta_value, config.creep_limit_s_inv),
+            ),
+            zmsk,
+        )
+        # icedyn_rhg_evp.f90:440, no ldfull argument.
+        delta_t = halo(
+            "zdelta",
+            _si3_set(jnp.zeros_like(delta_value), interior, delta_value),
+            "T",
+            _SI3_ONE,
+            None,
+        )
+        p_over_delta_t = halo(
+            "zp_delt",
+            _si3_set(jnp.zeros_like(p_over_delta_value), interior, p_over_delta_value),
+            "T",
+            _SI3_ONE,
+            None,
+        )
+
+        # SI3 intentionally recomputes these operands for the wide stress loop.
+        divergence, tension, ignored_shear_square = _si3_t_deformation(u_ice, v_ice, shear, metrics)
+        del ignored_shear_square
+        alpha_inner = _si3_mul(_SI3_HALF, p_over_delta_t)
+        alpha_inner = _si3_mul(alpha_inner, _si3_div(_SI3_ONE, metrics.area_t))
+        alpha_inner = _si3_mul(alpha_inner, dt_over_mass_t)
+        alpha_t = nemo_source_round(
+            jnp.maximum(
+                _SI3_ALPHA_FLOOR,
+                _si3_mul(jnp.pi, nemo_source_round(_si3_sqrt(alpha_inner))),
+            )
+        )
+        inverse_alpha_t = _si3_div(_SI3_ONE, _si3_add(alpha_t, _SI3_ONE))
+        stress1_target = _si3_sub(
+            _si3_mul(divergence, _si3_add(_SI3_ONE, tensile_fraction)),
+            _si3_mul(delta_t, _si3_sub(_SI3_ONE, tensile_fraction)),
+        )
+        stress1_target = _si3_mul(p_over_delta_t, stress1_target)
+        stress1_value = _si3_add(_si3_mul(stress1, alpha_t), stress1_target)
+        stress1_value = _si3_mul(stress1_value, inverse_alpha_t)
+        stress1_value = _si3_mul(stress1_value, zmsk)
+        stress2_target = _si3_mul(
+            _si3_mul(tension, inverse_eccentricity_square),
+            _si3_add(_SI3_ONE, tensile_fraction),
+        )
+        stress2_target = _si3_mul(p_over_delta_t, stress2_target)
+        stress2_value = _si3_add(_si3_mul(stress2, alpha_t), stress2_target)
+        stress2_value = _si3_mul(stress2_value, inverse_alpha_t)
+        stress2_value = _si3_mul(stress2_value, zmsk)
+        stress1 = _si3_set(stress1, slice(1, None), stress1_value)
+        stress2 = _si3_set(stress2, slice(1, None), stress2_value)
+
+        beta_t = nemo_source_round(
+            jnp.maximum(
+                _SI3_ALPHA_FLOOR,
+                _si3_mul(jnp.pi, nemo_source_round(_si3_sqrt(alpha_inner))),
+            )
+        )
+        alpha_f = nemo_source_round(
+            jnp.maximum(
+                jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=0)),
+                jnp.maximum(
+                    jnp.roll(beta_t, -1, axis=1),
+                    jnp.roll(jnp.roll(beta_t, -1, axis=0), -1, axis=1),
+                ),
+            )
+        )
+        inverse_alpha_f = _si3_div(_SI3_ONE, _si3_add(alpha_f, _SI3_ONE))
+        p_over_delta_f = _si3_mul(
+            _SI3_QUARTER,
+            _si3_add(
+                _si3_add(p_over_delta_t, jnp.roll(p_over_delta_t, -1, axis=0)),
+                _si3_add(
+                    jnp.roll(p_over_delta_t, -1, axis=1),
+                    jnp.roll(jnp.roll(p_over_delta_t, -1, axis=0), -1, axis=1),
+                ),
+            ),
+        )
+        stress12_target = _si3_mul(
+            _si3_mul(shear, inverse_eccentricity_square),
+            _si3_add(_SI3_ONE, tensile_fraction),
+        )
+        stress12_target = _si3_mul(p_over_delta_f, stress12_target)
+        stress12_target = _si3_mul(stress12_target, _SI3_SHEAR_STRESS_WEIGHT)
+        stress12_value = _si3_add(_si3_mul(stress12, alpha_f), stress12_target)
+        stress12_value = _si3_mul(stress12_value, inverse_alpha_f)
+        stress12 = _si3_set(stress12, slice(0, -1), stress12_value)
+
+        force_u, force_v = _si3_stress_divergence(
+            stress1,
+            stress2,
+            stress12,
+            metrics,
+            outer_weight=stress_divergence_outer_weight,
+        )
+        cross_v_u = _si3_mul(
+            _si3_mul(
+                _SI3_QUARTER,
+                _si3_add(
+                    _si3_add(v_ice, jnp.roll(v_ice, 1, axis=1)),
+                    _si3_add(
+                        jnp.roll(v_ice, -1, axis=0),
+                        jnp.roll(jnp.roll(v_ice, -1, axis=0), 1, axis=1),
+                    ),
+                ),
+            ),
+            forcing.umask_u,
+        )
+        cross_u_v = _si3_mul(
+            _si3_mul(
+                _SI3_QUARTER,
+                _si3_add(
+                    _si3_add(u_ice, jnp.roll(u_ice, 1, axis=0)),
+                    _si3_add(
+                        jnp.roll(u_ice, -1, axis=1),
+                        jnp.roll(jnp.roll(u_ice, 1, axis=0), -1, axis=1),
+                    ),
+                ),
+            ),
+            forcing.vmask_v,
+        )
+
+        def update_u(current_u, current_v, write_slice):
+            delta_u = _si3_sub(current_u, forcing.ocean_u_u)
+            delta_v = _si3_sub(cross_v_u, ocean_v_u)
+            drag_magnitude = _si3_mul(
+                drag_u,
+                nemo_source_round(
+                    _si3_sqrt(
+                        _si3_add(
+                            _si3_mul(delta_u, delta_u),
+                            _si3_mul(delta_v, delta_v),
+                        )
+                    )
+                ),
+            )
+            # icedyn_rhg_evp.f90:611-613,666-668; every operation rounded (no FMA).
+            coriolis_u = _si3_mul(
+                _si3_mul(_SI3_QUARTER, _si3_div(_SI3_ONE, metrics.e1u)),
+                _si3_add(
+                    _si3_mul(
+                        mass_coriolis_t,
+                        _si3_add(
+                            _si3_mul(metrics.e1v, current_v),
+                            _si3_mul(
+                                jnp.roll(metrics.e1v, 1, axis=1),
+                                jnp.roll(current_v, 1, axis=1),
+                            ),
+                        ),
+                    ),
+                    _si3_mul(
+                        jnp.roll(mass_coriolis_t, -1, axis=0),
+                        _si3_add(
+                            _si3_mul(
+                                jnp.roll(metrics.e1v, -1, axis=0),
+                                jnp.roll(current_v, -1, axis=0),
+                            ),
+                            _si3_mul(
+                                jnp.roll(jnp.roll(metrics.e1v, -1, axis=0), 1, axis=1),
+                                jnp.roll(jnp.roll(current_v, -1, axis=0), 1, axis=1),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            ocean_stress = _si3_mul(drag_magnitude, _si3_sub(forcing.ocean_u_u, current_u))
+            rhs = _si3_add(force_u, tau_air_u)
+            rhs = _si3_add(rhs, coriolis_u)
+            rhs = _si3_add(rhs, slope_u)
+            rhs = _si3_add(rhs, ocean_stress)
+            beta_u = jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=0))
+            numerator = _si3_add(_si3_mul(beta_u, current_u), u_ice_b)
+            numerator = _si3_mul(mass_over_dt_u, numerator)
+            numerator = _si3_add(numerator, rhs)
+            numerator = _si3_add(numerator, _si3_mul(drag_magnitude, current_u))
+            denominator = _si3_add(
+                _si3_mul(mass_over_dt_u, _si3_add(beta_u, _SI3_ONE)),
+                drag_magnitude,
+            )
+            if config.landfast:
+                basal_speed = _si3_add(
+                    _SI3_LANDFAST_SPEED_FLOOR_M_S,
+                    nemo_source_round(
+                        _si3_sqrt(
+                            _si3_add(
+                                _si3_mul(cross_v_u, cross_v_u),
+                                _si3_mul(current_u, current_u),
+                            )
+                        )
+                    ),
+                )
+                basal_ratio = _si3_div(basal_u, basal_speed)
+                denominator = _si3_sub(denominator, basal_ratio)
+                dynamic_value = _si3_div(
+                    numerator,
+                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                )
+                static_decay = jnp.maximum(
+                    _SI3_ZERO,
+                    _si3_sub(
+                        beta_u,
+                        _si3_mul(config.dt_s, config.landfast_relaxation_s_inv),
+                    ),
+                )
+                static_numerator = _si3_add(
+                    u_ice_b,
+                    _si3_mul(current_u, static_decay),
+                )
+                static_value = _si3_div(
+                    static_numerator,
+                    _si3_add(beta_u, _SI3_ONE),
+                )
+                static_friction = (_si3_add(rhs, basal_u) < _SI3_ZERO) & (
+                    rhs >= _SI3_ZERO
+                )
+                value = nemo_source_round(
+                    jnp.where(static_friction, static_value, dynamic_value)
+                )
+            else:
+                value = _si3_div(
+                    numerator,
+                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                )
+            value = _si3_add(
+                _si3_mul(value, active_u),
+                _si3_mul(
+                    _si3_mul(forcing.ocean_u_u, _SI3_LOW_MASS_OCEAN_FACTOR),
+                    _si3_sub(_SI3_ONE, active_u),
+                ),
+            )
+            value = _si3_mul(value, mass_mask_u)
+            value = _si3_mul(
+                value,
+                _si3_sub(_SI3_ONE, _si3_mul(_SI3_FAST_MASK_REDUCTION, fast_u)),
+            )
+            return _si3_set(current_u, write_slice, value)
+
+        def update_v(current_u, current_v, write_slice):
+            delta_v = _si3_sub(current_v, forcing.ocean_v_v)
+            delta_u = _si3_sub(cross_u_v, ocean_u_v)
+            drag_magnitude = _si3_mul(
+                drag_v,
+                nemo_source_round(
+                    _si3_sqrt(
+                        _si3_add(
+                            _si3_mul(delta_v, delta_v),
+                            _si3_mul(delta_u, delta_u),
+                        )
+                    )
+                ),
+            )
+            # icedyn_rhg_evp.f90:560-562,718-720; Fortran's leading minus negates
+            # the whole product (exact).  Every operation rounded (no FMA).
+            coriolis_v = -_si3_mul(
+                _si3_mul(_SI3_QUARTER, _si3_div(_SI3_ONE, metrics.e2v)),
+                _si3_add(
+                    _si3_mul(
+                        mass_coriolis_t,
+                        _si3_add(
+                            _si3_mul(metrics.e2u, current_u),
+                            _si3_mul(
+                                jnp.roll(metrics.e2u, 1, axis=0),
+                                jnp.roll(current_u, 1, axis=0),
+                            ),
+                        ),
+                    ),
+                    _si3_mul(
+                        jnp.roll(mass_coriolis_t, -1, axis=1),
+                        _si3_add(
+                            _si3_mul(
+                                jnp.roll(metrics.e2u, -1, axis=1),
+                                jnp.roll(current_u, -1, axis=1),
+                            ),
+                            _si3_mul(
+                                jnp.roll(jnp.roll(metrics.e2u, 1, axis=0), -1, axis=1),
+                                jnp.roll(jnp.roll(current_u, 1, axis=0), -1, axis=1),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            ocean_stress = _si3_mul(drag_magnitude, _si3_sub(forcing.ocean_v_v, current_v))
+            rhs = _si3_add(force_v, tau_air_v)
+            rhs = _si3_add(rhs, coriolis_v)
+            rhs = _si3_add(rhs, slope_v)
+            rhs = _si3_add(rhs, ocean_stress)
+            beta_v = jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=1))
+            numerator = _si3_add(_si3_mul(beta_v, current_v), v_ice_b)
+            numerator = _si3_mul(mass_over_dt_v, numerator)
+            numerator = _si3_add(numerator, rhs)
+            numerator = _si3_add(numerator, _si3_mul(drag_magnitude, current_v))
+            denominator = _si3_add(
+                _si3_mul(mass_over_dt_v, _si3_add(beta_v, _SI3_ONE)),
+                drag_magnitude,
+            )
+            if config.landfast:
+                basal_speed = _si3_add(
+                    _SI3_LANDFAST_SPEED_FLOOR_M_S,
+                    nemo_source_round(
+                        _si3_sqrt(
+                            _si3_add(
+                                _si3_mul(current_v, current_v),
+                                _si3_mul(cross_u_v, cross_u_v),
+                            )
+                        )
+                    ),
+                )
+                basal_ratio = _si3_div(basal_v, basal_speed)
+                denominator = _si3_sub(denominator, basal_ratio)
+                dynamic_value = _si3_div(
+                    numerator,
+                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                )
+                static_decay = jnp.maximum(
+                    _SI3_ZERO,
+                    _si3_sub(
+                        beta_v,
+                        _si3_mul(config.dt_s, config.landfast_relaxation_s_inv),
+                    ),
+                )
+                static_numerator = _si3_add(
+                    v_ice_b,
+                    _si3_mul(current_v, static_decay),
+                )
+                static_value = _si3_div(
+                    static_numerator,
+                    _si3_add(beta_v, _SI3_ONE),
+                )
+                static_friction = (_si3_add(rhs, basal_v) < _SI3_ZERO) & (
+                    rhs >= _SI3_ZERO
+                )
+                value = nemo_source_round(
+                    jnp.where(static_friction, static_value, dynamic_value)
+                )
+            else:
+                value = _si3_div(
+                    numerator,
+                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                )
+            value = _si3_add(
+                _si3_mul(value, active_v),
+                _si3_mul(
+                    _si3_mul(forcing.ocean_v_v, _SI3_LOW_MASS_OCEAN_FACTOR),
+                    _si3_sub(_SI3_ONE, active_v),
+                ),
+            )
+            value = _si3_mul(value, mass_mask_v)
+            value = _si3_mul(
+                value,
+                _si3_sub(_SI3_ONE, _si3_mul(_SI3_FAST_MASK_REDUCTION, fast_v)),
+            )
+            return _si3_set(current_v, write_slice, value)
+
+        # jter is one-based in NEMO.  Even: V halo-1 then U interior; odd:
+        # U halo-1 then V interior (icedyn_rhg_evp.F90:530-741).
+        def even_pair(pair):
+            pair_u, pair_v = pair
+            pair_v = update_v(pair_u, pair_v, halo_one)
+            pair_u = update_u(pair_u, pair_v, interior)
+            return pair_u, pair_v
+
+        def odd_pair(pair):
+            pair_u, pair_v = pair
+            pair_u = update_u(pair_u, pair_v, halo_one)
+            pair_v = update_v(pair_u, pair_v, interior)
+            return pair_u, pair_v
+
+        # lax.fori_loop supplies a zero-based iteration index.
+        first, second = (odd_pair, even_pair) if swap_parity else (even_pair, odd_pair)
+        u_ice, v_ice = jax.lax.cond(
+            (iteration + 1) % 2 == 0,
+            first,
+            second,
+            (u_ice, v_ice),
+        )
+        # icedyn_rhg_evp.f90:647,754 (ldfull=.true.).
+        u_ice = halo("u_ice", u_ice, "U", -_SI3_ONE, True)
+        v_ice = halo("v_ice", v_ice, "V", -_SI3_ONE, True)
+        updated = (u_ice, v_ice, stress1, stress2, stress12)
+        frame = (delta_t, p_over_delta_t, stress1, stress2, stress12, u_ice, v_ice)
+        return updated, frame
+
+    def subcycle(iteration, carry):
+        updated, _ = subcycle_with_frame(iteration, carry)
+        return updated
+
+    initial = tuple(state)
+    frames = None
+    if capture_trace:
+
+        def trace_scan_body(carry, iteration):
+            return subcycle_with_frame(iteration, carry)
+
+        final, frames = jax.lax.scan(
+            trace_scan_body,
+            initial,
+            xs=jnp.arange(config.n_subcycles),
+        )
+    elif differentiable:
+
+        def scan_body(carry, iteration):
+            updated = subcycle(iteration, carry)
+            return updated, None
+
+        final, _ = jax.lax.scan(
+            scan_body,
+            initial,
+            xs=jnp.arange(config.n_subcycles),
+        )
+    else:
+        final = jax.lax.fori_loop(0, config.n_subcycles, subcycle, initial)
+    u_final, v_final, stress1_final, stress2_final, stress12_final = final
+    # icedyn_rhg_evp.f90:845, no ldfull argument.
+    final_state = SI3CGridAEVPState(
+        u_ice_u=u_final,
+        v_ice_v=v_final,
+        stress1_t=halo("zs1", stress1_final, "T", _SI3_ONE, None),
+        stress2_t=halo("zs2", stress2_final, "T", _SI3_ONE, None),
+        stress12_f=halo("zs12", stress12_final, "F", _SI3_ONE, None),
+    )
+    if not capture_trace:
+        return final_state
+    assert frames is not None
+    return SI3ORCA2AEVPTrace(final_state, fimask, *frames)
+
+
+def si3_h79_strength_raw(
+    volume_sum_t: jnp.ndarray,
+    concentration_t: jnp.ndarray,
+    strength_parameter_pa: float,
+    strength_decay: float,
+) -> jnp.ndarray:
+    """H79 strength statement, ``icedyn_rdgrft.f90:1080-1084``.
+
+    ``IF( at_i > epsi10 ) strength = rn_pstar * SUM(v_i) * EXP( -rn_crhg *
+    ( 1 - at_i ) ) ELSE strength = 0``; ``volume_sum_t`` is ``SUM(v_i)``.
+    """
+
+    strength_formula = ice_strength(
+        volume_sum_t,
+        concentration_t,
+        strength_parameter_pa,
+        strength_decay,
+        source_exact=True,
+    )
+    return nemo_source_round(
+        jnp.where(concentration_t > _SI3_ICE_PRESENCE, strength_formula, _SI3_ZERO)
+    )
+
+
+# ==============================================================================
+# ==============================================================================
+# SI3 ORCA2 (rung O5): five-category H79 strength + aEVP on the tripole
+# ==============================================================================
+
+_SI3_ORCA2_CATEGORY_COUNT = 5
+_SI3_STRENGTH_SMOOTH_CENTRE_WEIGHT = 4.0  # icedyn_rdgrft.f90:1102,1105
+
+
+class SI3ORCA2FoldProgram(NamedTuple):
+    """NEMO's lbc_lnk program on ORCA2 (cyclic seam, T-pivot fold, closed south).
+
+    ``nfd_full_when_absent``: whether an ``lbc_lnk`` call WITHOUT ``ldfull``
+    also folds the duplicated pivot line.  True when ``jpni == 1`` (self fold,
+    ``lbclnk.f90:2112``) or ``ncom_stp <= nit000`` (``lbcnfd.f90:1617``);
+    False for a multi-rank ``ln_nnogather`` run after its first step.  It is a
+    property of the recorded NEMO run, so it has no default.
+    """
+
+    nn_hls: int
+    nfd_full_when_absent: bool
+
+
+class SI3ORCA2StrengthConfig(NamedTuple):
+    """Resolved ``namdyn_rdgrft`` H79 selectors (``namelist_ice_ref:76-83``)."""
+
+    ln_str_h79: bool
+    rn_pstar: float
+    rn_crhg: float
+    ln_str_smooth: bool
+
+
+class SI3ORCA2Strength(NamedTuple):
+    at_i: jnp.ndarray
+    strength_raw: jnp.ndarray
+    strength: jnp.ndarray
+
+
+def _si3_orca2_halo(program: SI3ORCA2FoldProgram, plant_sign: frozenset):
+    from legoesm.ice.si3_orca2_state import si3_lbc_lnk_orca2
+
+    def halo(label, value, nature, sign, ldfull):
+        full = program.nfd_full_when_absent if ldfull is None else ldfull
+        return si3_lbc_lnk_orca2(
+            value,
+            nature,
+            sign,
+            nn_hls=program.nn_hls,
+            ldfull=full,
+            _plant_wrong_nfd_sign=label in plant_sign,
+        )
+
+    return halo
+
+
+def _require(name: str, value):
+    if value is None:
+        raise ValueError(f"SI3 ORCA2 O5 requires the NEMO array {name!r}; no default")
+    return jnp.asarray(value, dtype=jnp.float64)
+
+
+def _validate_fold_program(program: SI3ORCA2FoldProgram) -> None:
+    if not isinstance(program, SI3ORCA2FoldProgram):
+        raise TypeError("SI3 ORCA2 O5 requires an explicit SI3ORCA2FoldProgram")
+    if program.nn_hls != _SI3_REQUIRED_HALO or not isinstance(program.nfd_full_when_absent, bool):
+        raise ValueError(f"SI3 ORCA2 fold program {program!r} is not the nn_hls=2 deck")
+
+
+def si3_orca2_ice_strength(
+    *,
+    a_i: jnp.ndarray,
+    v_i: jnp.ndarray,
+    tmask: jnp.ndarray,
+    config: SI3ORCA2StrengthConfig,
+    fold: SI3ORCA2FoldProgram,
+    _plant_fold_sign: frozenset = frozenset(),
+    _plant_exchange_before_smooth: bool = False,
+    _plant_unmasked_smooth: bool = False,
+) -> SI3ORCA2Strength:
+    """``ice_strength`` H79 arm with smoothing, ``icedyn_rdgrft.f90:949-1118``.
+
+    Inputs are NEMO's exact arrays at ``ice_strength`` entry: ``a_i`` and
+    ``v_i`` shaped ``(jpi, jpj, jpl=5)`` and ``tmask(:,:,1)``.  Returns NEMO's
+    recomputed ``at_i`` (``:973``), the H79 strength on the full
+    ``nn_hls`` extent (``:1079-1085``) and the smoothed, halo-exchanged
+    strength (``:1099-1114``).  ``_plant_*`` are test-only code-path plants.
+    """
+
+    from legoesm.ice.si3_orca2_state import fortran_sum_categories
+
+    if not isinstance(config, SI3ORCA2StrengthConfig):
+        raise TypeError("SI3 ORCA2 strength requires an explicit SI3ORCA2StrengthConfig")
+    if not config.ln_str_h79:
+        raise ValueError("SI3 ORCA2 O5 implements only ln_str_H79 (np_strh79)")
+    _validate_fold_program(fold)
+    a_i = _require("a_i", a_i)
+    v_i = _require("v_i", v_i)
+    tmask = _require("tmask", tmask)
+    if a_i.ndim != 3 or a_i.shape[-1] != _SI3_ORCA2_CATEGORY_COUNT or v_i.shape != a_i.shape:
+        raise ValueError("SI3 ORCA2 strength requires (jpi, jpj, 5) a_i and v_i")
+    if tmask.shape != a_i.shape[:2]:
+        raise ValueError("SI3 ORCA2 strength requires tmask(:,:,1) on the a_i grid")
+    halo = _si3_orca2_halo(fold, _plant_fold_sign)
+
+    at_i = fortran_sum_categories(a_i, axis=-1)  # :973 at_i(:,:) = SUM( a_i, dim=3 )
+    strength_raw = si3_h79_strength_raw(
+        fortran_sum_categories(v_i, axis=-1), at_i, config.rn_pstar, config.rn_crhg
+    )
+    if not config.ln_str_smooth:
+        return SI3ORCA2Strength(at_i=at_i, strength_raw=strength_raw, strength=strength_raw)
+
+    source = (
+        halo("strength", strength_raw, "T", _SI3_ONE, None)
+        if _plant_exchange_before_smooth
+        else strength_raw
+    )
+    weight = jnp.ones_like(tmask) if _plant_unmasked_smooth else tmask
+    west = jnp.roll(source, 1, axis=0)
+    east = jnp.roll(source, -1, axis=0)
+    south = jnp.roll(source, 1, axis=1)
+    north = jnp.roll(source, -1, axis=1)
+    t_w = jnp.roll(weight, 1, axis=0)
+    t_e = jnp.roll(weight, -1, axis=0)
+    t_s = jnp.roll(weight, 1, axis=1)
+    t_n = jnp.roll(weight, -1, axis=1)
+    numerator = _si3_add(
+        _si3_mul(_SI3_STRENGTH_SMOOTH_CENTRE_WEIGHT, source),
+        _si3_add(
+            _si3_add(_si3_mul(west, t_w), _si3_mul(east, t_e)),
+            _si3_add(_si3_mul(south, t_s), _si3_mul(north, t_n)),
+        ),
+    )
+    denominator = _si3_add(
+        _si3_add(_si3_add(_si3_add(_SI3_STRENGTH_SMOOTH_CENTRE_WEIGHT, t_w), t_e), t_s), t_n
+    )
+    smoothed = nemo_source_round(
+        jnp.where(at_i > _SI3_ICE_PRESENCE, _si3_div(numerator, denominator), _SI3_ZERO)
+    )
+    interior = slice(fold.nn_hls, -fold.nn_hls)
+    strength = _si3_set(source, interior, smoothed)  # :1111-1113
+    if not _plant_exchange_before_smooth:
+        strength = halo("strength", strength, "T", _SI3_ONE, None)  # :1114
+    return SI3ORCA2Strength(at_i=at_i, strength_raw=strength_raw, strength=strength)
+
+
+def si3_var_sshdyn(
+    *,
+    ssh_m: jnp.ndarray,
+    snwice_mass: jnp.ndarray,
+    snwice_mass_b: jnp.ndarray,
+    ln_ice_embd: bool,
+) -> jnp.ndarray:
+    """``ice_var_sshdyn``, ``icevar.f90:1050-1093``; levitating arm only.
+
+    ``ln_ice_embd = .false.`` gives ``ice_var_sshdyn(:,:) = pssh(:,:)``
+    (``:1090``); the snow/ice masses are read by the embedded arm alone.
+    """
+
+    ssh_m = _require("ssh_m", ssh_m)
+    _require("snwice_mass", snwice_mass)
+    _require("snwice_mass_b", snwice_mass_b)
+    if ln_ice_embd is not False:
+        raise ValueError("SI3 ORCA2 O5 owns only the levitating (ln_ice_embd=F) arm")
+    return ssh_m
+
+
+def si3_orca2_aevp_solver(
+    state: SI3CGridAEVPState,
+    forcing: SI3CGridAEVPForcing,
+    metrics: SI3CGridMetrics,
+    config: SI3CGridAEVPConfig,
+    *,
+    strength_t: jnp.ndarray,
+    u_ice_b: jnp.ndarray,
+    v_ice_b: jnp.ndarray,
+    ssh_m: jnp.ndarray,
+    snwice_mass: jnp.ndarray,
+    snwice_mass_b: jnp.ndarray,
+    ln_ice_embd: bool,
+    fold: SI3ORCA2FoldProgram,
+    differentiable: bool,
+    _plant_fold_sign: frozenset = frozenset(),
+    _plant_swap_parity: bool = False,
+) -> SI3CGridAEVPState:
+    """``ice_dyn_rhg_evp`` aEVP on ORCA2's tripole (``icedyn_rhg_evp.f90:200-850``).
+
+    The same aEVP body as the lane-3 periodic arm, with NEMO's ORCA2 lbc_lnk
+    program (``si3_lbc_lnk_orca2``) at every exchange, NEMO's post-strength
+    field ``strength_t`` (``ice_strength`` called at ``:268``) as exact input,
+    and ``zsshdyn = ice_var_sshdyn(ssh_m, snwice_mass, snwice_mass_b)``
+    (``:281``).  ``forcing.ssh_t`` must be ``None``: the levitating arm owns it.
+    ``u_ice_b``/``v_ice_b`` are NEMO's recorded previous-step velocities
+    (``:574,625``), never substituted by the entry ``state``.
+    ``forcing.concentration_t`` is NEMO's ``at_i`` after ``ice_strength``.
+    """
+
+    result = _si3_orca2_aevp_run(
+        state,
+        forcing,
+        metrics,
+        config,
+        strength_t=strength_t,
+        u_ice_b=u_ice_b,
+        v_ice_b=v_ice_b,
+        ssh_m=ssh_m,
+        snwice_mass=snwice_mass,
+        snwice_mass_b=snwice_mass_b,
+        ln_ice_embd=ln_ice_embd,
+        fold=fold,
+        differentiable=differentiable,
+        plant_fold_sign=_plant_fold_sign,
+        plant_swap_parity=_plant_swap_parity,
+        capture_trace=False,
+    )
+    assert isinstance(result, SI3CGridAEVPState)
+    return result
+
+
+def si3_orca2_aevp_trace(
+    state: SI3CGridAEVPState,
+    forcing: SI3CGridAEVPForcing,
+    metrics: SI3CGridMetrics,
+    config: SI3CGridAEVPConfig,
+    *,
+    strength_t: jnp.ndarray,
+    u_ice_b: jnp.ndarray,
+    v_ice_b: jnp.ndarray,
+    ssh_m: jnp.ndarray,
+    snwice_mass: jnp.ndarray,
+    snwice_mass_b: jnp.ndarray,
+    ln_ice_embd: bool,
+    fold: SI3ORCA2FoldProgram,
+    differentiable: bool,
+    _plant_fold_sign: frozenset = frozenset(),
+    _plant_swap_parity: bool = False,
+) -> SI3ORCA2AEVPTrace:
+    """Return O5's B2/B3 frames from the shared ORCA2 aEVP execution."""
+
+    result = _si3_orca2_aevp_run(
+        state,
+        forcing,
+        metrics,
+        config,
+        strength_t=strength_t,
+        u_ice_b=u_ice_b,
+        v_ice_b=v_ice_b,
+        ssh_m=ssh_m,
+        snwice_mass=snwice_mass,
+        snwice_mass_b=snwice_mass_b,
+        ln_ice_embd=ln_ice_embd,
+        fold=fold,
+        differentiable=differentiable,
+        plant_fold_sign=_plant_fold_sign,
+        plant_swap_parity=_plant_swap_parity,
+        capture_trace=True,
+    )
+    assert isinstance(result, SI3ORCA2AEVPTrace)
+    return result
+
+
+def _si3_orca2_aevp_run(
+    state: SI3CGridAEVPState,
+    forcing: SI3CGridAEVPForcing,
+    metrics: SI3CGridMetrics,
+    config: SI3CGridAEVPConfig,
+    *,
+    strength_t: jnp.ndarray,
+    u_ice_b: jnp.ndarray,
+    v_ice_b: jnp.ndarray,
+    ssh_m: jnp.ndarray,
+    snwice_mass: jnp.ndarray,
+    snwice_mass_b: jnp.ndarray,
+    ln_ice_embd: bool,
+    fold: SI3ORCA2FoldProgram,
+    differentiable: bool,
+    plant_fold_sign: frozenset,
+    plant_swap_parity: bool,
+    capture_trace: bool,
+) -> SI3CGridAEVPState | SI3ORCA2AEVPTrace:
+    _validate_si3_cgrid_aevp_static(config, _SI3_ORCA2_CATEGORY_COUNT)
+    if config.landfast:
+        raise ValueError("SI3 ORCA2 O5 deck has ln_landfast_L16 = .false.")
+    _validate_fold_program(fold)
+    if forcing.ssh_t is not None:
+        raise ValueError("SI3 ORCA2 O5 takes SSH only through ice_var_sshdyn(ssh_m, ...)")
+    sshdyn = si3_var_sshdyn(
+        ssh_m=ssh_m,
+        snwice_mass=snwice_mass,
+        snwice_mass_b=snwice_mass_b,
+        ln_ice_embd=ln_ice_embd,
+    )
+    forcing = forcing._replace(ssh_t=sshdyn)
+    strength_t = _require("strength_t", strength_t)
+    u_ice_b = _require("u_ice_b", u_ice_b)
+    v_ice_b = _require("v_ice_b", v_ice_b)
+    shape = state.u_ice_u.shape
+    leaves = (*state, *forcing, *metrics, strength_t, u_ice_b, v_ice_b)
+    if len(shape) != 2 or any(value is None or value.shape != shape for value in leaves):
+        raise ValueError("SI3 ORCA2 aEVP requires every NEMO array, same-shape 2-D")
+    return _si3_orca2_cgrid_aevp_core(
+        state,
+        forcing,
+        metrics,
+        config,
+        strength_t=strength_t,
+        u_ice_b=u_ice_b,
+        v_ice_b=v_ice_b,
+        halo=_si3_orca2_halo(fold, plant_fold_sign),
+        differentiable=differentiable,
+        stress_divergence_outer_weight=_SI3_HALF,
+        swap_parity=plant_swap_parity,
+        capture_trace=capture_trace,
     )
 
 

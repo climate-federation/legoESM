@@ -352,7 +352,7 @@ def test_load_mfcc_table_orientation_matches_gw_init_beres(tmp_path):
                 "PS": np.arange(n_ps, dtype=np.float64),
                 "MW": np.arange(n_mw, dtype=np.float64)},
     ).to_netcdf(path)
-    tbl = load_mfcc_table(str(path), PGWV)
+    tbl = load_mfcc_table(str(path), PGWV, allow_unpinned=True)
     ngwv_file = (n_ps - 1) // 2
     assert tbl.shape == (MAXH, 2 * MAXUH + 1, 2 * PGWV + 1)
     for h in range(1, MAXH + 1):
@@ -364,15 +364,17 @@ def test_load_mfcc_table_orientation_matches_gw_init_beres(tmp_path):
                 want = (ps_1based - 1) * 1e4 + (uh + MAXUH) * 1e2 + (h - 1)
                 assert tbl[h - 1, uh + MAXUH, ell + PGWV] == want
     with pytest.raises(ValueError, match="does not cover"):
-        load_mfcc_table(str(path), ngwv_file + 1)
+        load_mfcc_table(str(path), ngwv_file + 1, allow_unpinned=True)
     bad = tmp_path / "bad.nc"
     xr.Dataset({"mfcc": (("HD", "MW", "PS"), np.zeros((n_hd, n_mw, n_ps)))},
                coords={"HD": np.arange(1, n_hd + 1, dtype=np.float64)}).to_netcdf(bad)
-    assert load_mfcc_table(str(bad), 1).shape == (n_hd, n_mw, 3)   # dim ORDER free
+    assert load_mfcc_table(str(bad), 1, allow_unpinned=True).shape == (n_hd, n_mw, 3)   # dim ORDER free
     bad2 = tmp_path / "bad2.nc"
     xr.Dataset({"mfcc": (("X", "MW", "PS"), np.zeros((n_hd, n_mw, n_ps)))}).to_netcdf(bad2)
     with pytest.raises(ValueError, match="expected dims"):
-        load_mfcc_table(str(bad2), 1)
+        load_mfcc_table(str(bad2), 1, allow_unpinned=True)
+    with pytest.raises(ValueError, match="not the pinned"):   # V40: hash gate
+        load_mfcc_table(str(path), PGWV)
 
 
 def test_real_table_index_arithmetic_through_the_kernel(tmp_path):
@@ -386,7 +388,7 @@ def test_real_table_index_arithmetic_through_the_kernel(tmp_path):
     path = tmp_path / "t.nc"
     xr.Dataset({"mfcc": (("PS", "MW", "HD"), data)},
                coords={"HD": np.arange(1, MAXH + 1, dtype=np.float64)}).to_netcdf(path)
-    tbl = load_mfcc_table(str(path), PGWV)
+    tbl = load_mfcc_table(str(path), PGWV, allow_unpinned=True)
     ncol, pver, u, v, netdt, zm, _, k = _synthetic()
     hd_m = 1000.0 * np.arange(1, MAXH + 1)
     ref = _cam6_gw_beres_src_ref(u, v, netdt, zm, k, tbl, hd_m, 1000.0, PGWV, DC)
@@ -419,7 +421,7 @@ def _column_state(ncol=6, nlev=30, seed=11):
 
 def test_multi_source_sums_single_sources_with_own_effgw():
     args, kw = _column_state()
-    beres = E3SMBeresConfig(effgw=0.4, hdepth_min_km=1.0)
+    beres = E3SMBeresConfig(effgw=0.4, hdepth_min_km=1.0, use_stand_in_table=True)   # explicit stand-in
     cfg = E3SMCAMConfig(source="orographic+frontal+convective", pgwv=PGWV,
                         effgw=0.125, frontal=E3SMFrontalConfig(effgw=1.0),
                         beres=beres)

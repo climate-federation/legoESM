@@ -1,0 +1,28 @@
+{
+ "data_set": "openifs-48r1-ifsdata-b8364fe2ab722bf2249b42106fd4ba1d",
+ "generator": "scripts/validate/oracle/ecrad_ifs/export_cloud_optics_npz.py",
+ "ice_file": "fu_ice_scattering_rrtm.nc",
+ "ice_sha256": "e3ebdeba95765fcb54fbc2d9f5b2a957e55e9e4b7119bbf6df5f5242b048bbb8",
+ "liq_file": "socrates_droplet_scattering_rrtm.nc",
+ "liq_sha256": "c42557dd3188b25254fdbe2da5e05cacdb214bfd0338442a47b0ac5e8a0005df",
+ "npz_sha256": "1e9fc51ec121264c6880d744696e1caead507c3ee569984170a3568161c2b261",
+ "oracle": "openifs-8f6f722f732b92fed2c39af763d8fcd1ab15f573",
+ "shapes": {
+  "ice.coeff_lw": [
+   16,
+   11
+  ],
+  "ice.coeff_sw": [
+   14,
+   10
+  ],
+  "liq.coeff_lw": [
+   16,
+   16
+  ],
+  "liq.coeff_sw": [
+   14,
+   16
+  ]
+ }
+}

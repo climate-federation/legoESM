@@ -125,6 +125,9 @@ def load_yaml_config(path, parser, *, example_keys: str | None = None,
     would otherwise reach the run as a str.  Returns the mapping so the caller
     can feed it to ``parser.set_defaults`` (an explicit CLI flag still wins).
 
+    A key with ``choices`` must hold one of them, except ``null`` on a key whose
+    flag default is None, which means "unset" (the flag default).
+
     ``example_keys`` is an optional human hint (driver-specific example dests)
     appended to the unknown-key error to help operators fix typos.
     """
@@ -154,15 +157,20 @@ def load_yaml_config(path, parser, *, example_keys: str | None = None,
         # via --config would otherwise reach the factory unvalidated.  Enforce
         # it here so a typo'd scheme fails loudly at load (dispatch-hardening),
         # exactly as an explicit CLI flag would.
+        # ``null`` on a choices key whose flag default is None means "the flag
+        # default" (unset), e.g. a deck un-setting a row its include sets.
         choices = getattr(actions[key], "choices", None)
-        if choices is not None and value not in choices:
+        unset_ok = value is None and actions[key].default is None
+        if choices is not None and value not in choices and not unset_ok:
             try:
                 allowed = sorted(choices)
             except TypeError:
                 allowed = list(choices)
             raise SystemExit(
                 f"--config {path}: key '{key}' value {value!r} is not one of "
-                f"the allowed choices {allowed}.")
+                f"the allowed choices {allowed}"
+                + (" (null is accepted only for a key whose flag default is "
+                   "None)." if value is None else "."))
         out[key] = value
     return out
 
@@ -310,8 +318,6 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # they are --params-reachable (2026-07-23; previously baselined CLI-only).
     "atm.conv.BechtoldConfig.downdraft_alpha": "bechtold_downdraft_alpha",
     "atm.conv.BechtoldConfig.downdraft_entrain_rate": "bechtold_downdraft_entrain_rate",
-    "atm.conv.TiedtkeConfig.autoconv_pe_max": "autoconv_pe_max",
-    "atm.conv.TiedtkeConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
     # Zhang-McFarlane + CLUBB tunables -> _resolve_convection's ZM branch and
     # turbulence_config_for (ZM_SCALAR_FIELDS / CLUBB_SCALAR_FIELDS in
     # driver/config.py), the resolvers every lane (MPAS included) consumes.
@@ -344,8 +350,6 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.micro.P3Config.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.SeifertBehengConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.SeifertBehengConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
-    "atm.micro.ThompsonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
-    "atm.micro.ThompsonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.SundqvistConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.SundqvistConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.MicrophysicsMLEmulatorConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
@@ -362,7 +366,6 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # (FV pipeline / MPAS / spectral) now routes through.  Before it, these
     # scalars existed on ExperimentConfig but NO production path read them.
     "atm.gwd.HinesConfig.total_rms_wind": "hines_total_rms_wind",
-    "atm.gwd.HinesConfig.Fmax": "hines_Fmax",
     "atm.gwd.McFarlaneConfig.directional_spread": "mcfarlane_directional_spread",
     "atm.gwd.McFarlaneConfig.effgw_oro": "mcfarlane_effgw_oro",
     # NOTE: ``mcfarlane_k_wave`` is threaded too but has NO ``__param_spec__``

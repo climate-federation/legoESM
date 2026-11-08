@@ -110,14 +110,13 @@ def test_flag_reaches_every_lane(monkeypatch):
         physics_pipeline._build_rrtmgp_radiation_fn(ExperimentConfig(
             radiation="rrtmgp", rrtmgp_overhead_layer=True))
     assert seen["cfg"].overhead_layer is True
-    # MPAS / duo-column and spectral lanes build RRTMGPConfig inline in the
-    # driver: every construction must forward the flag.
-    for mod in (model_driver, physics_pipeline):
-        src = inspect.getsource(mod)
-        n_cfg = len(re.findall(r"\bRRTMGPConfig\(\n", src))
-        n_flag = src.count('rrtmgp_overhead_layer", False)') + src.count(
-            "rrtmgp_overhead_layer', False)")
-        assert n_cfg >= 1 and n_flag == n_cfg, mod.__name__
+    # MPAS / duo-column and spectral lanes take the same builder the spy above
+    # went through: no driver construction may bypass it.
+    driver_src = inspect.getsource(model_driver)
+    assert not re.search(r"\bRRTMGPConfig\(", driver_src)
+    assert driver_src.count("rrtmgp=rrtmgp_config_from_experiment(") == 2
+    assert len(re.findall(r"\bRRTMGPConfig\(",
+                          inspect.getsource(physics_pipeline))) == 1
 
     # integration (MPAS / spectral) forwards o3_top_vmr with the override.
     from legoesm.atmosphere.physics.radiation import integration

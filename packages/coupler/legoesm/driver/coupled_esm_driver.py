@@ -224,6 +224,9 @@ class CoupledESMDriver:
         # diagnostic samplers) is what ModelDriver._reject_coupled_lane gates
         # on.
         self._atm._requires_surface_flux_export = True
+        # The column loop calls _segment_hook every coupling_dt with
+        # window-mean surface fluxes (P5b); other lanes ignore it.
+        self._atm._coupling_dt_s = float(self.coupled_cfg.coupling_dt)
         self._coupler_config = coupler_config
         self._ice_config = ice_config
         self._lake_config = lake_config
@@ -2939,6 +2942,10 @@ class CoupledESMDriver:
         coupled_path = self.output_dir / f"coupled_day_{int(elapsed_day):04d}.npz"
         arrays = self.coupled_checkpoint_arrays()
         if arrays:
+            # The atmosphere step this file pairs with: sub-daily saves can
+            # reuse this name under a different atmosphere file name, and the
+            # resume refuses a mismatched pair (P5b).
+            arrays["_atm_step"] = np.asarray(int(step), dtype=np.int64)
             np.savez(coupled_path, **arrays)
             logger.info(f"  Coupled checkpoint: {coupled_path.name}")
 
@@ -3007,7 +3014,8 @@ class CoupledESMDriver:
 
     def load_coupled_checkpoint(self, step_day: float,
                                checkpoint_dir: str | Path | None = None,
-                               *, required: bool = False) -> None:
+                               *, required: bool = False,
+                               atm_step: int | None = None) -> None:
         """Load coupled state saved alongside an atmosphere checkpoint.
 
         Parameters
@@ -3034,6 +3042,13 @@ class CoupledESMDriver:
             return
 
         data = np.load(coupled_path)
+        if (atm_step is not None and "_atm_step" in data.files
+                and int(data["_atm_step"]) != int(atm_step)):
+            raise ValueError(
+                f"Coupled checkpoint {coupled_path.name} was saved with "
+                f"atmosphere step {int(data['_atm_step'])}, but the atmosphere "
+                f"checkpoint being resumed is step {int(atm_step)}: refusing "
+                "a mismatched atmosphere/ocean pair.")
 
         # Validate provenance FIRST — a checkpoint from a different format
         # version or a different ocean grid must NOT be mapped into a mismatched

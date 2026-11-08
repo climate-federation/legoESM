@@ -34,6 +34,86 @@ def _load_run_amip():
     return mod
 
 
+def global_masses(state, area, sigma_coord):
+    """Global mass [kg] of air, total water and each tracer, all in f64.
+
+    Tracer mass is ``sum_cells area * sum_k q_k dp_k / g`` with ``dp`` the
+    coordinate's own layer thickness at the state's ``p_s``; air mass is
+    ``sum area * p_s / g``.  Water = the mass species the dry-mass fixer
+    counts (no number concentrations).
+    """
+    from legoesm import constants
+    from legoesm.core.conservation import WATER_MASS_SPECIES
+    ps = np.asarray(state.p_s.data, dtype=np.float64)
+    area = np.asarray(area, dtype=np.float64)
+    dp = np.asarray(sigma_coord.layer_thickness_dp(ps), dtype=np.float64)
+    out = {"air": float(np.sum(area * ps) / constants.g)}
+    water = 0.0
+    for name, f in (state.tracers or {}).items():
+        q = np.asarray(getattr(f, "data", f), dtype=np.float64)
+        m = float(np.sum(area[:, None] * q * dp) / constants.g)
+        out[name] = m
+        if name in WATER_MASS_SPECIES:
+            water += m
+    out["water"] = water
+    return out
+
+
+def water_tendency_terms(state, model):
+    """Instantaneous global total-water tendency [kg/m2/day], split by term.
+
+    Tracer mass per layer is ``q*dp/g``, so its rate is ``(dp*dq + q*ddp)/g``
+    with ``ddp = dB*dp_s_dt``.  ``total`` uses the dycore's own tendencies
+    (physics off).  ``horizontal`` is the advective horizontal tracer term
+    with the matching layer-mass divergence ``-div(u*dp_edge)``; ``ps_del4``
+    is the NET change in ``total`` from the surface-pressure hyperdiffusion
+    (total minus total with ``nu_del4_ps = 0``, so any compensation in the
+    tracer tendency is included); ``rest`` = total - both (vertical
+    transport, filters).
+    """
+    import jax
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.core.conservation import WATER_MASS_SPECIES
+    from legoesm.core.operators_voronoi import (
+        cell_to_edge_avg_3d, divergence_cell_3d)
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        mpas_hydrostatic_tendencies)
+    from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
+        tracer_horizontal_advection)
+    mesh, sc, cfg = model.mesh, model.sigma_coord, model.config
+    ps = state.p_s.data
+    dp = sc.layer_thickness_dp(ps)
+    dB = jax.jvp(sc.layer_thickness_dp, (ps,), (jnp.ones_like(ps),))[1]  # exact d(dp)/d(p_s)
+    names = [k for k in WATER_MASS_SPECIES if k in (state.tracers or {})]
+    q = jnp.stack([state.tracers[k].data for k in names], axis=-1)
+    u = state.u.data
+    area = jnp.asarray(mesh.areaCell)
+    day_per_area = 86400.0 / float(jnp.sum(area))
+
+    def glob(rate):  # (nCells, nlev, nspecies) kg/kg*Pa/s -> kg/m2/day
+        return float(jnp.sum(area[:, None, None] * rate) / constants.g * day_per_area)
+
+    def total_rate(c):
+        t = mpas_hydrostatic_tendencies(state, mesh, sc, c)
+        dq = jnp.stack([t.tracer_tendencies[k].data for k in names], axis=-1)
+        return glob(dp[..., None] * dq + q * (dB * t.dp_s_dt.data[:, None])[..., None]), t
+
+    total, t1 = total_rate(cfg)
+    dqh = tracer_horizontal_advection(q, u, mesh)
+    ddp_h = -divergence_cell_3d(u * cell_to_edge_avg_3d(dp, mesh), mesh)
+    horizontal = glob(dp[..., None] * dqh + q * ddp_h[..., None])
+    ps_del4 = ps_del4_air = 0.0
+    if cfg.nu_del4_ps > 0:
+        total0, t0 = total_rate(cfg._replace(nu_del4_ps=0.0))
+        ps_del4 = total - total0
+        # activity of the filter itself: area-mean |dp_s/dt| it adds [Pa/day]
+        dps = t1.dp_s_dt.data - t0.dp_s_dt.data
+        ps_del4_air = float(jnp.sum(area * jnp.abs(dps)) / jnp.sum(area) * 86400.0)
+    return {"total": total, "horizontal": horizontal, "ps_del4": ps_del4,
+            "rest": total - horizontal - ps_del4, "ps_del4_air_Pa_day": ps_del4_air}
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True)
@@ -44,6 +124,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--hot-threshold", type=float, default=300.0)
     ap.add_argument("--thermo-terms", action="store_true",
                     help="decompose dT/dt at the restart state and exit (no integration)")
+    ap.add_argument("--tracer-mass", action="store_true",
+                    help="also print global mass of air, total water and every tracer "
+                         "(sum area*q*dp/g, f64) at each report")
+    ap.add_argument("--inject-qv", type=float, default=0.0,
+                    help="instrument self-test: multiply q_v by (1+X) after step "
+                         "--inject-step; the tracer-mass report must show a +X jump")
+    ap.add_argument("--inject-step", type=int, default=5)
+    ap.add_argument("--water-terms", action="store_true",
+                    help="print the instantaneous global water tendency split by term "
+                         "at the first and last report")
     ap.add_argument("--extra", nargs=argparse.REMAINDER, default=[],
                     help="run_amip path flags (see config/amip/amip_production.sh)")
     return ap
@@ -86,6 +176,13 @@ def main():
         print(f"step {n:5d}  t={n*dt/3600:7.3f} h  Tmax={T.max():8.2f}  "
               f"Tmax(k={a.hot_level})={T[:, a.hot_level].max():8.2f}  "
               f"hot_mean={h.mean():8.2f}  |u|max={np.abs(u).max():8.2f}", flush=True)
+        if a.tracer_mass:
+            m = global_masses(s, driver.model.mesh.areaCell, driver.model.sigma_coord)
+            print("  mass " + " ".join(f"{k}={v:.17e}" for k, v in m.items()), flush=True)
+        if a.water_terms and n in (0, a.steps):
+            w = water_tendency_terms(s, driver.model)
+            print("  water_terms kg/m2/day " + " ".join(f"{k}={v:+.6e}" for k, v in w.items()),
+                  flush=True)
 
     report(0, state)
 
@@ -111,6 +208,13 @@ def main():
 
     for n in range(1, a.steps + 1):
         state = driver.model.step(state, dt)
+        if a.inject_qv and n == a.inject_step:
+            report(n, state)
+            qv = state.tracers["q_v"]
+            state = state._replace(tracers={**state.tracers, "q_v": qv.replace(
+                data=qv.data * (1.0 + a.inject_qv))})
+            print(f"  injected q_v *= 1+{a.inject_qv:g} after step {n}", flush=True)
+            report(n, state)
         if n % a.stride == 0 or n == a.steps:
             report(n, state)
             if not np.isfinite(np.asarray(state.T.data)).all():

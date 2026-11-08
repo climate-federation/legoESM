@@ -75,6 +75,19 @@ TILED_PARITY_ATOL = {"u": 2e-5, "v": 2e-5, "T": 1e-4, "p_s": 0.06}
 _count_collective_permutes = count_collective_permutes
 
 
+def tile_device_order(kt: int, placement: str) -> np.ndarray:
+    """(6, kt, kt) array of indices into the rank-ordered device list."""
+    if placement == "rows":
+        return np.arange(6 * kt * kt).reshape(6, kt, kt)
+    if placement != "block2x2":
+        raise ValueError(f"unknown tile placement {placement!r}")
+    if kt % 2:
+        raise SystemExit("--tile-placement block2x2 needs even --kt")
+    i, j = np.meshgrid(np.arange(kt), np.arange(kt), indexing="ij")
+    local = ((i // 2) * (kt // 2) + j // 2) * 4 + (i % 2) * 2 + j % 2
+    return np.arange(6)[:, None, None] * kt * kt + local[None]
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -119,6 +132,18 @@ def main() -> int:
     p.add_argument("--multicontroller", action="store_true",
                    help="Route-B: one process per GPU; shared hardened "
                         "init (jax.distributed) BEFORE any JAX use.")
+    p.add_argument("--halo-grouping", choices=("current", "bundled"),
+                   default="bundled",
+                   help="Grouping of independently ready tiled halos.")
+    p.add_argument("--tile-placement", choices=("rows", "block2x2"),
+                   default="rows",
+                   help="Device-to-tile map. rows = jax.devices() reshaped "
+                        "(6,kt,kt) in rank order; block2x2 = each run of four "
+                        "consecutive devices (one node) owns a 2x2 tile block "
+                        "of one face (needs even kt).")
+    p.add_argument("--dump-state", type=str, default=None,
+                   help="Diagnostic: write each rank's final local state "
+                        "shards and rank 0's compiled HLO to this directory.")
     p.add_argument("--coordinator", type=str, default=None)
     p.add_argument("--out", type=str,
                    default="results/a1/cube_tiled_scaling.jsonl")
@@ -234,20 +259,23 @@ def main() -> int:
     # RAW (6, kt, kt) mesh + local halo backend — the adapter-gate setup
     # (the tiled stage manages its own ppermutes through the mesh).
     set_halo_backend("local")
-    dev = np.array(jax.devices()[:n_devices]).reshape(6, args.kt, args.kt)
+    dev = np.array(jax.devices()[:n_devices])[
+        tile_device_order(args.kt, args.tile_placement)]
     mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
     if args.closed_loop:
         # Persistent blocked layout: enter ONCE, feed the step its own
         # output (input layout == output layout — the production loop).
         enter, loop_step, loop_exit = make_tiled_cc_loop(
-            model, mesh, kt=args.kt, dt=args.dt)
+            model, mesh, kt=args.kt, dt=args.dt,
+            halo_grouping=args.halo_grouping)
         blk0 = enter(state0)
         jax.block_until_ready(jax.tree.leaves(blk0))
         tiled_step = jax.jit(loop_step)
         _lower_arg = blk0
     else:
-        tiled_step = jax.jit(make_tiled_cc_step(model, mesh, kt=args.kt,
-                                                dt=args.dt))
+        tiled_step = jax.jit(make_tiled_cc_step(
+            model, mesh, kt=args.kt, dt=args.dt,
+            halo_grouping=args.halo_grouping))
         _lower_arg = state0
 
     # --- Anti-fake HLO census on the compiled step --------------------------
@@ -372,6 +400,18 @@ def main() -> int:
                   "timed window — refusing to record the row.", flush=True)
             return 6
 
+    if args.dump_state:
+        import pathlib
+
+        _dd = pathlib.Path(args.dump_state)
+        _dd.mkdir(parents=True, exist_ok=True)
+        np.savez(_dd / f"rank{jax.process_index()}.npz", **{
+            f"leaf{i}_{j}": np.asarray(sh.data)
+            for i, x in enumerate(jax.tree.leaves(s))
+            for j, sh in enumerate(x.addressable_shards)})
+        if jax.process_index() == 0:
+            (_dd / "hlo.txt").write_text(hlo)
+
     steady = per_step_ms[args.warmup:]
     med = float(np.median(steady))
     total_cells = 6 * args.resolution ** 2 * args.nlev
@@ -380,6 +420,8 @@ def main() -> int:
         grid="cubed-sphere",
         mode="strong",
         closed_loop=bool(args.closed_loop),
+        tile_placement=args.tile_placement,
+        halo_grouping=args.halo_grouping,
         kt=args.kt, n_devices=n_devices,
         resolution=args.resolution, nlev=args.nlev,
         steps=args.steps, dt=args.dt,
@@ -430,6 +472,7 @@ def main() -> int:
             # Route-B transport facts (the PBS wrapper's contract): a
             # multi-node row without an NCCL net plugin is falsifiable.
             "nccl": (_nccl_report if args.multicontroller else None),
+            "halo_grouping": args.halo_grouping,
             "kt": args.kt,
             "steps": args.steps,
             "warmup": args.warmup,
