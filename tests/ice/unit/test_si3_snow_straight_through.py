@@ -114,6 +114,15 @@ def test_ports_forward_unchanged_by_the_surrogate():
         assert np.array_equal(np.asarray(run(a, on)).view(np.int64), np.asarray(run(a, off)).view(np.int64))
 
 
+def test_subnormal_width_is_refused():
+    from legoesm.ice.si3_surface import si3_snow_free
+    with pytest.raises(ValueError, match="subnormal"):
+        si3_snow_free(jnp.asarray(0.0), 1e-308, True)
+    w = float(np.finfo(np.float64).tiny)                 # smallest normal: finite gradients
+    for h0 in (-1.0, 0.0, 0.5 * w, 1.0):
+        assert np.isfinite(float(jax.grad(lambda h: si3_snow_free(h, w, True))(jnp.asarray(h0))))
+
+
 @pytest.mark.parametrize("h0", [1e-30, 2e-5, 1e-4, 1.9e-4])
 def test_snow_free_gradient_is_the_surrogate_derivative(h0):
     """jax.grad of the straight-through indicator == central FD of the surrogate 1 - smoothstep(h/w)."""

@@ -319,6 +319,8 @@ def si3_snow_free(h_snow, w, preserve_subnormal):
     hard = zero.astype(jnp.result_type(h_snow, float))
     if w == 0.0:
         return hard
+    if 0.0 < w < jnp.finfo(jnp.float64).tiny:   # vote: subnormal widths make h / w NaN the tangent
+        raise ValueError(f"snow_ramp_width_m={w!r} is subnormal; use 0.0 or a normal positive width")
     return straight_through(hard, 1.0 - smoothstep_cubic(h_snow / w))
 
 
