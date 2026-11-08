@@ -126,6 +126,7 @@ _SHIFT_LAYER_STEP = (5.0 ** 0.5 - 1.0) / 2.0
 _INHOM_PERM_SEEDS = (_PERM_SEED + 1, _PERM_SEED + 2)
 _INHOM_SHIFT_SCALES = (1000.0 * 2.0 ** 0.5, 1000.0 * 3.0 ** 0.5)
 _INHOM_SHIFT_OFFSETS = (_SHIFT_LAYER_SLOPE % 1.0, (2.0 * _SHIFT_LAYER_SLOPE) % 1.0)
+_INHOM_LAYER_SLOPE_SCALE = 1000.0   # per-layer offsets uniform to ~1e-3
 
 
 @functools.lru_cache(maxsize=32)
@@ -155,14 +156,18 @@ def _stratified_table(n_sub: int, nlev: int, seed: int = _PERM_SEED) -> np.ndarr
     return np.array(_stratified_table_cached(int(n_sub), int(nlev), int(seed)), copy=True)
 
 
-def _shifted_uniforms(n_sub, nlev, shift, dtype, seed=_PERM_SEED):
-    """``(n_sub, ncol or 1, nlev)`` stratified uniforms, per-layer column shift."""
+def _shifted_uniforms(n_sub, nlev, shift, dtype, seed=_PERM_SEED, slope_scale=1.0):
+    """``(n_sub, ncol or 1, nlev)`` stratified uniforms, per-layer column shift.
+
+    A large ``slope_scale`` makes each layer's offset frac(shift*slope) uniform
+    for a uniform shift (to O(1/slope)); at 1 it is not (n_sub = 1 shows it).
+    """
     u = jnp.asarray(_stratified_table(int(n_sub), int(nlev), seed), dtype=dtype)
     u = u[:, None, :]                                   # (n_sub, 1, nlev)
     if shift is not None:
         k = jnp.arange(nlev, dtype=dtype)
-        off = (jnp.asarray(shift, dtype=dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
-               + k * _SHIFT_LAYER_STEP)                  # (ncol, nlev)
+        off = (jnp.asarray(shift, dtype=dtype)[:, None]
+               * (slope_scale * (1.0 + k * _SHIFT_LAYER_SLOPE)) + k * _SHIFT_LAYER_STEP)
         u = jnp.mod(u + off[None, :, :], 1.0)
     return u
 
@@ -234,7 +239,7 @@ def ecrad_inhomogeneity_scaling(mask, fractional_std, lat, p_half, T_half, shift
                        r_over_g=constants.R_d / constants.g)          # (ncol, nlev-1)
     op_inhom_above = jnp.concatenate([jnp.ones_like(op[:, :1]), op ** (1.0 / ratio)], axis=1)
     r1, r2 = (_shifted_uniforms(n_sub, nlev, None if shift is None else inhomogeneity_shift(shift, i),
-                                dtype, seed)
+                                dtype, seed, _INHOM_LAYER_SLOPE_SCALE)
               for i, seed in enumerate(_INHOM_PERM_SEEDS))
     repeat = (r2 < op_inhom_above[None]).astype(dtype)
     return inhomogeneity_od_scaling(mask.astype(dtype), repeat, jnp.asarray(fractional_std, dtype),

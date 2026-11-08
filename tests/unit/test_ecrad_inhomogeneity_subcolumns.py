@@ -63,7 +63,7 @@ def _reference(mask, fsd, lat, p_half, T_half, r1, r2):
 
 def _uniforms(n_sub, nlev, shift):
     return [np.asarray(sub._shifted_uniforms(n_sub, nlev, sub.inhomogeneity_shift(shift, i),
-                                             jnp.float64, seed))
+                                             jnp.float64, seed, sub._INHOM_LAYER_SLOPE_SCALE))
             for i, seed in enumerate(sub._INHOM_PERM_SEEDS)]
 
 
@@ -98,7 +98,7 @@ def test_homogeneous_cloud_reproduces_the_plain_subcolumn_paths(width):
 
 @pytest.mark.parametrize("n_sub", [8, 1])
 def test_cell_scaling_has_unit_mean_and_the_requested_spread(n_sub):
-    ncol, nlev, fsd = 512, 4, 0.75
+    ncol, nlev, fsd = 4096, 4, 0.75
     p_half, T_half, lat = _column(ncol, nlev)
     mask = jnp.ones((n_sub, ncol, nlev), bool)
     shift = jnp.asarray(np.random.default_rng(0).random(ncol))
@@ -147,13 +147,22 @@ def test_gradient_in_fsd_matches_finite_difference():
 
 
 def test_jit_parity():
-    ncol, nlev = 4, 10
-    p_half, T_half, lat = _column(ncol, nlev)
+    """Recursion at 1e-12; the uniform generator separately at 1e-9, because
+    frac of a ~1e4 argument rounds differently under jit (FMA), measured 3e-11
+    on the scaling (a draw landing within an ulp of an integer could wrap)."""
+    from legoesm.atmosphere.physics.radiation.ecrad_ifs.mcica_generator import (
+        inhomogeneity_od_scaling)
+    ncol, nlev, n_sub = 4, 10, 8
     shift = jnp.linspace(0.1, 0.9, ncol)
-    mask = sub.generate_subcolumns(_cf(ncol, nlev), 8, shift=shift, width=0.0)
-    f = lambda m, s: sub.ecrad_inhomogeneity_scaling(m, 0.75, lat, p_half, T_half, shift=s)  # noqa: E731
-    np.testing.assert_allclose(np.asarray(jax.jit(f)(mask, shift)), np.asarray(f(mask, shift)),
-                               rtol=1e-12, atol=1e-12)
+    mask = sub.generate_subcolumns(_cf(ncol, nlev), n_sub, shift=shift, width=0.0).astype(jnp.float64)
+    r1, r2 = (jnp.asarray(r) for r in _uniforms(n_sub, nlev, shift))
+    repeat = (r2 < 0.6).astype(jnp.float64)
+    f = lambda m, rep, r: inhomogeneity_od_scaling(m, rep, jnp.asarray(0.75), r)  # noqa: E731
+    np.testing.assert_allclose(np.asarray(jax.jit(f)(mask, repeat, r1)),
+                               np.asarray(f(mask, repeat, r1)), rtol=1e-12, atol=1e-12)
+    g = lambda s: sub._shifted_uniforms(n_sub, nlev, sub.inhomogeneity_shift(s, 0), jnp.float64,  # noqa: E731
+                                        sub._INHOM_PERM_SEEDS[0], sub._INHOM_LAYER_SLOPE_SCALE)
+    np.testing.assert_allclose(np.asarray(jax.jit(g)(shift)), np.asarray(g(shift)), rtol=0, atol=1e-9)
 
 
 def test_backend_hands_the_solver_the_scaled_paths(monkeypatch):
