@@ -477,9 +477,17 @@ def test_pipeline_numbers_match_bridge(scheme):
     grid, _, f, state = _make_setup(NLEV)
     sigma = create_sigma_coordinate(NLEV, sigma_top=0.02)
     z3 = f["z3"]
-    low = jnp.arange(NLEV) >= NLEV - 6
-    q_r = jnp.broadcast_to(jnp.where(low, 2.0e-4, 0.0), z3.shape)
-    n_r = jnp.broadcast_to(jnp.where(low, 5.0e4, 0.0), z3.shape)   # per kg
+    # A saturated 20-level rain layer (rain survives the step, so the number
+    # response is non-linear in N_r and a wrong conversion does not cancel)
+    # with a non-zero droplet number (vote U2a).
+    from legoesm.thermo import saturation_mixing_ratio
+    low = jnp.arange(NLEV) >= NLEV - 20
+    q_v = jnp.where(low, saturation_mixing_ratio(
+        f["T"], sigma.sigma_full * f["p_s"][..., None]), f["q_v"])
+    q_c = jnp.broadcast_to(jnp.where(low, 1.0e-4, 0.0), z3.shape)
+    q_r = jnp.broadcast_to(jnp.where(low, 3.0e-4, 0.0), z3.shape)
+    n_r = jnp.broadcast_to(jnp.where(low, 2.0e4, 0.0), z3.shape)   # per kg
+    n_c = jnp.broadcast_to(jnp.where(low, 1.0e8, 0.0), z3.shape)   # per kg
     config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
         dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
@@ -492,11 +500,11 @@ def test_pipeline_numbers_match_bridge(scheme):
 
     def step(**kw):
         return pipe.physics_step_no_rad(
-            f["T"], f["p_s"], f["q_v"], f["q_c"], q_r, None,
+            f["T"], f["p_s"], q_v, q_c, q_r, None,
             f["u"], f["v"], f["sst"], f["sic"], f["lat"], DT,
             z3, f["z2"], f["z2"], f["z2"], f["z2"], f["z2"], **kw)
 
-    full = dict(q_i=z3, q_s=z3, q_g=z3, N_c=z3, N_r=n_r, N_i=z3)
+    full = dict(q_i=z3, q_s=z3, q_g=z3, N_c=n_c, N_r=n_r, N_i=z3)
     out = step(**full)
     bridge = make_microphysics_physics(
         MicrophysicsConfig(scheme=scheme,
@@ -504,13 +512,16 @@ def test_pipeline_numbers_match_bridge(scheme):
         model_type="hydrostatic", dt=DT)
     d3 = state.T.dims
     tr = {k: Field(x, name=k, dims=d3) for k, x in (
-        ("q_v", f["q_v"]), ("q_c", f["q_c"]), ("q_r", q_r), ("q_i", z3),
-        ("q_s", z3), ("q_g", z3), ("N_c", z3), ("N_r", n_r), ("N_i", z3))}
+        ("q_v", q_v), ("q_c", q_c), ("q_r", q_r), ("q_i", z3),
+        ("q_s", z3), ("q_g", z3), ("N_c", n_c), ("N_r", n_r), ("N_i", z3))}
     tend = bridge(state._replace(tracers=tr), grid, sigma)
-    ref = tend.tracer_tendencies["N_r"].data
-    scale = float(jnp.max(jnp.abs(ref)))
-    assert scale > 0.0, "no rain-number tendency"
-    assert float(jnp.max(jnp.abs(out.dN_r_dt - ref))) <= 1e-9 * scale
+    for pipe_x, ref, what in (
+            (out.dN_r_dt, tend.tracer_tendencies["N_r"].data, "dN_r"),
+            (out.dq_r_dt, tend.tracer_tendencies["q_r"].data, "dq_r"),
+            (out.precip, tend.precip.data, "precip")):
+        scale = float(jnp.max(jnp.abs(ref)))
+        assert scale > 0.0, f"no {what}"
+        assert float(jnp.max(jnp.abs(pipe_x - ref))) <= 1e-9 * scale, what
     if scheme == "thompson":
         with pytest.raises(ValueError, match="N_i"):
             step(**{**full, "N_i": None})
