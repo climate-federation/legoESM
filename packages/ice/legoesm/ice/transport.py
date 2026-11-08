@@ -1915,6 +1915,11 @@ def _si3_prather_y_substep(
     return content, moments, area
 
 
+# lbc_lnk signs of the five Prather moments (sx, sy, sxx, syy, sxy), icedyn_adv_pra.F90:438-520:
+# first moments change sign across the north fold, second moments do not.
+_SI3_PRA_MOMENT_LBC_SIGNS = (-1.0, -1.0, 1.0, 1.0, 1.0)
+
+
 def _si3_periodic_halo_xy(value: jnp.ndarray, halo_width: int) -> jnp.ndarray:
     """Apply ICE_ADV2D's bi-periodic T-point halo (`usrdef_nam.F90:99`)."""
 
@@ -1988,6 +1993,12 @@ def advect_si3_prather_1d(
     if ice_volume_index is None or concentration_index is None:
         raise ValueError("si3_prather Hbig requires both volume and concentration indices")
     _validate_si3_prather_spacings(dx, dy, u_ice.shape, subcycles)
+    from legoesm.ice.dynamics import SI3_NORTH_FOLD_CHOICES, si3_orca_f_pivot_halo
+    if north_fold not in SI3_NORTH_FOLD_CHOICES:
+        raise ValueError(
+            f"si3_prather north_fold must be one of {SI3_NORTH_FOLD_CHOICES}; got {north_fold!r}")
+    if north_fold == "orca_f_pivot" and halo_width != 2:
+        raise ValueError("si3_prather north_fold='orca_f_pivot' needs halo_width == 2 (NEMO nn_hls)")
     if subcycles is None:
         cfl = float(jnp.max(jnp.abs(u_ice)) * dt / dx)
         subcycles = (
@@ -2105,8 +2116,15 @@ def advect_si3_prather_2d(
     ice_volume_index: int | None = None,
     concentration_index: int | None = None,
     subcycles: int | None = None,
+    north_fold: str = "none",
 ) -> tuple[jnp.ndarray, SI3PratherMoments, int]:
     """SI3 Prather x/y split for the shipped single-category ICE_ADV2D card.
+
+    ``north_fold`` selects the halo refresh after each ``jt``: ``"none"`` = the bi-periodic
+    ICE_ADV2D halo; ``"orca_f_pivot"`` = NEMO 5.0.1 ``lbc_lnk`` on an ORCA F-pivot grid (E-W
+    cyclic, closed south, north fold; ``halo_width == 2``), the shared aEVP lbc
+    (``dynamics.si3_orca_f_pivot_halo``) with NEMO's signs: +1 for contents, -1 for the
+    first moments ``sx``/``sy``, +1 for ``sxx``/``syy``/``sxy`` (icedyn_adv_pra.F90:438-520).
 
     Odd ice steps start with x and even ice steps start with y; when CFL
     subcycling is active, the first direction alternates again with ``jt``.
@@ -2272,11 +2290,21 @@ def advect_si3_prather_2d(
         # The shipped root ICE_ADV2D domain is bi-periodic.  NEMO refreshes
         # contents and all five moments after every `jt` at
         # icedyn_adv_pra.F90:432-479.
-        out = _si3_periodic_halo_xy(out, halo_width)
-        out_moments = cast(
-            SI3PratherMoments,
-            tuple(_si3_periodic_halo_xy(value, halo_width) for value in out_moments),
-        )
+        if north_fold == "orca_f_pivot":
+            out = si3_orca_f_pivot_halo(out, "T", 1.0)
+            out_moments = cast(
+                SI3PratherMoments,
+                tuple(
+                    si3_orca_f_pivot_halo(value, "T", sign)
+                    for value, sign in zip(out_moments, _SI3_PRA_MOMENT_LBC_SIGNS)
+                ),
+            )
+        else:
+            out = _si3_periodic_halo_xy(out, halo_width)
+            out_moments = cast(
+                SI3PratherMoments,
+                tuple(_si3_periodic_halo_xy(value, halo_width) for value in out_moments),
+            )
     return out, out_moments, subcycles
 
 

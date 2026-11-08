@@ -160,7 +160,7 @@ _KNOWN = (
 def test_fold_halo_reproduces_nemo_recorded_halo(band, key, point, sign, ew):
     data, _ = band
     recorded = data[key]
-    rebuilt = np.asarray(dyn._si3_orca_f_pivot_halo(jnp.asarray(recorded), point, sign))
+    rebuilt = np.asarray(dyn.si3_orca_f_pivot_halo(jnp.asarray(recorded), point, sign))
     north = (slice(None), slice(-_HALO, None))
     np.testing.assert_array_equal(rebuilt[north], recorded[north])
     if ew:
@@ -197,14 +197,14 @@ def test_default_is_orca_fold_and_unknown_raises(band):
     with pytest.raises(ValueError, match="unknown SI3 north_fold"):
         dyn.si3_cgrid_aevp_solver(state, forcing, metrics, config)
     with pytest.raises(ValueError, match="unknown SI3 lbc point type"):
-        dyn._si3_orca_f_pivot_halo(jnp.zeros((8, 8)), "W", 1.0)
+        dyn.si3_orca_f_pivot_halo(jnp.zeros((8, 8)), "W", 1.0)
 
 
 @pytest.mark.parametrize("point,sign", (("T", 1.0), ("U", -1.0), ("V", -1.0), ("F", 1.0)))
 def test_fold_halo_gradients(point, sign):
     value = jax.random.normal(jax.random.PRNGKey(0), (10, 9), jnp.float64)
     check_grads(
-        lambda x: dyn._si3_orca_f_pivot_halo(x, point, sign),
+        lambda x: dyn.si3_orca_f_pivot_halo(x, point, sign),
         (value,),
         order=2,
         modes=("fwd", "rev"),

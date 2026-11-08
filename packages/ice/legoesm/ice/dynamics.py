@@ -202,7 +202,7 @@ class SI3CGridAEVPConfig(NamedTuple):
     # Lateral boundary condition of the same-index halo.  "none" = the
     # one-rank doubly periodic card (both axes wrapped).  "orca_f_pivot" =
     # NEMO 5.0.1 ORCA F-pivot lbc_lnk (E-W cyclic, closed south halo, north
-    # fold on the halo rows only); see ``_si3_orca_f_pivot_halo``.
+    # fold on the halo rows only); see ``si3_orca_f_pivot_halo``.
     north_fold: str = "orca_f_pivot"
 
 
@@ -852,7 +852,7 @@ def _si3_lane3_halo(label, value, nature, sign, ldfull):
 
     del label, nature, sign, ldfull
     return _si3_periodic_halo(value)
-def _si3_orca_f_pivot_halo(value: jnp.ndarray, point: str, sign: float) -> jnp.ndarray:
+def si3_orca_f_pivot_halo(value: jnp.ndarray, point: str, sign: float) -> jnp.ndarray:
     """NEMO 5.0.1 ``lbc_lnk`` on an ORCA F-pivot grid for one same-index field.
 
     Halo = 2 (validated).  E-W cyclic; the south halo rows are closed (zero,
@@ -902,7 +902,7 @@ def _si3_halo(
     """Halo refresh selected by ``config.north_fold`` (validated statically)."""
 
     if config.north_fold == "orca_f_pivot":
-        return _si3_orca_f_pivot_halo(value, point, sign)
+        return si3_orca_f_pivot_halo(value, point, sign)
     if config.north_fold == "none":
         return _si3_periodic_halo(value)
     raise ValueError(
