@@ -463,6 +463,29 @@ def test_gyre_r4_card_resolves_grid_clock_and_mixing_from_namelist():
     assert sbc.qsr_w_m2.shape == (82, 122)
 
 
+def test_gyre_precomputed_emp_means_reproduce_per_step_forcing_bits():
+    """E-P wet means computed before the time loop move no forcing bit."""
+    from jax.tree_util import tree_leaves
+
+    set_policy(PrecisionPolicy.fp64())
+    card = build_nemo_testcase_card("GYRE-zco")
+    state = card.recipe.initial_state
+    kts = np.arange(1, 5)
+    table = np.asarray(testcase_recipe.gyre_emp_means(card, kts))
+    assert len(set(table.tolist())) == len(kts)
+    for kt, mean in zip(kts, table):
+        inline = tree_leaves(gyre_surface_forcings(card, state, int(kt)))
+        given = tree_leaves(gyre_surface_forcings(card, state, int(kt), mean))
+        moved = tree_leaves(gyre_surface_forcings(
+            card, state, int(kt), np.nextafter(mean, np.inf)))
+        for a, b in zip(inline, given, strict=True):
+            np.testing.assert_array_equal(
+                np.asarray(a).view(np.uint64), np.asarray(b).view(np.uint64))
+        # the supplied mean must be the one consumed, not silently recomputed
+        assert any(not np.array_equal(np.asarray(a), np.asarray(c))
+                   for a, c in zip(inline, moved, strict=True))
+
+
 def test_gyre_nemo_qsr_pipeline_uses_live_kbb_stretch():
     """The shared Kbb deposit must be the field stage 3 later subtracts."""
     from legoesm.ocean.physics.shortwave_penetration import (

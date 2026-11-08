@@ -1927,7 +1927,7 @@ CITATION_MAP = {
         ('DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)', 4),
         ('&              + ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)                      )', 3), 20],
     # --- GYRE gradient-gate round 6: exact program and oracle statements ---
-    'nemo_testcase_recipe.py:4182': 'def build_nemo_testcase_card(',
+    'nemo_testcase_recipe.py:4208': 'def build_nemo_testcase_card(',
     'ocean_model_latlon_cgrid.py:14386': 'def _step_jitted(',
     'nemo_testcase_l2_gyre_gradient_gate.py:292': (
         'def build_context(card: str, *, transcendentals: str = "libm") -> GateContext:'),
@@ -2343,7 +2343,7 @@ CITATION_MAP = {
         'if vorticity_scheme not in (',
         'f"\'al81\', \'ene\', \'ene_total\', \'ens_total\', \'een_total\', or \'een_planetary\'"', 5],
     'nemo_recipe.py:58': 'NEMO_CONSTANTS_CONFIG = _CANONICAL_NEMO_CONSTANTS',
-    'nemo_testcase_recipe.py:3260-3575': [
+    'nemo_testcase_recipe.py:3286-3601': [
         'class TsunamiResolvedNamelist(NamedTuple):', ('return card', 7), 316],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:282-286': [
         'NAMELIST/namrun/ cn_ocerst_indir',
@@ -2758,12 +2758,12 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
     'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
-    'nemo_testcase_recipe.py:3775':
+    'nemo_testcase_recipe.py:3801':
         'if (cfg.momentum_advection != "vector_invariant"',
     'ocean_pe_latlon_cgrid.py:5561': ('if _mom_adv == "flux_form":', 2),
     'ocean_pe_latlon_cgrid.py:5579': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
-    'nemo_testcase_recipe.py:3778':
+    'nemo_testcase_recipe.py:3804':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
@@ -5531,7 +5531,7 @@ CITATION_MAP = {
         '&      + ( ahtv(ji,jj-1,jk-1) + ahtv(ji,jj  ,jk) )  ) * zmskv', 4],
     'domqco.F90:160': (
         'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)   !==  ratio at t-point  ==!', 1),
-    'fidelity/nemo_recipe.py:1009': ('def build_nemo_gyre_recipe(', 1),
+    'fidelity/nemo_recipe.py:1023': ('def build_nemo_gyre_recipe(', 1),
     'ocean_model_latlon_cgrid.py:6359': (
         'T_new = state.T.data + dt * tend.dT_dt.data', 1),
     'round38_oracle_trazdf_kt2/ocean.output:798': (
@@ -6069,7 +6069,7 @@ CITATION_MAP = {
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; later card additions moved all three to their current
     # merged locations without changing the anchor text.
-    'nemo_testcase_recipe.py:558,814,3759': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:558,814,3785': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',

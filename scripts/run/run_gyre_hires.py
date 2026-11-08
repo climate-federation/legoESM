@@ -319,8 +319,8 @@ def build_scanned_day_mean_stepper(model, card, n_steps: int):
 
     def scan_body(carry, values):
         state, means = carry
-        kt, count = values
-        freshwater, surface = gyre_surface_forcings(card, state, kt)
+        kt, count, emp_mean = values
+        freshwater, surface = gyre_surface_forcings(card, state, kt, emp_mean)
         state = model.step(state, card.dt_s, freshwater=freshwater, surface_forcing=surface)
         sample = _mean_accumulators(state, card)
         old_count = count - jnp.asarray(1, dtype=count.dtype)
@@ -328,20 +328,22 @@ def build_scanned_day_mean_stepper(model, card, n_steps: int):
         return (state, means), None
 
     @jax.jit
-    def compiled(state, first_kt, means, initial_count):
+    def compiled(state, first_kt, means, initial_count, emp_means):
         steps = jnp.arange(n_steps, dtype=jnp.int64) + first_kt
         counts = jnp.arange(1, n_steps + 1, dtype=state.eta.data.dtype) + initial_count
-        (state, means), _ = jax.lax.scan(scan_body, (state, means), (steps, counts))
+        (state, means), _ = jax.lax.scan(
+            scan_body, (state, means), (steps, counts, emp_means))
         return state, _finalize_means(means)
 
-    def scanned(state, first_kt, initial_means=None, initial_count=0):
+    def scanned(state, first_kt, initial_means=None, initial_count=0, emp_means=None):
         means = (
             tuple(jnp.zeros_like(value) for value in _mean_accumulators(state, card))
             if initial_means is None
             else initial_means
         )
         return compiled(
-            state, first_kt, means, jnp.asarray(initial_count, dtype=state.eta.data.dtype)
+            state, first_kt, means, jnp.asarray(initial_count, dtype=state.eta.data.dtype),
+            emp_means,
         )
 
     return scanned
@@ -358,8 +360,8 @@ def build_scanned_day_budget_stepper(model, card, n_steps: int):
 
     def scan_body(carry, values):
         state, climate_sums, budget_sums = carry
-        kt, = values
-        freshwater, surface = gyre_surface_forcings(card, state, kt)
+        kt, emp_mean = values
+        freshwater, surface = gyre_surface_forcings(card, state, kt, emp_mean)
         trace = model.step(
             state, card.dt_s, freshwater=freshwater,
             surface_forcing=surface)
@@ -375,7 +377,7 @@ def build_scanned_day_budget_stepper(model, card, n_steps: int):
         return (state, climate_sums, budget_sums), None
 
     @jax.jit
-    def compiled(state, first_kt):
+    def compiled(state, first_kt, emp_means=None):
         climate_sums = tuple(
             jnp.zeros_like(value) for value in _mean_accumulators(state, card))
         mask = state.v_mask.data[1:, :] > 0.5
@@ -384,7 +386,7 @@ def build_scanned_day_budget_stepper(model, card, n_steps: int):
             for _ in BUDGET_TERMS)
         steps = jnp.arange(n_steps, dtype=jnp.int64) + first_kt
         (state, climate_sums, budget_sums), _ = jax.lax.scan(
-            scan_body, (state, climate_sums, budget_sums), (steps,))
+            scan_body, (state, climate_sums, budget_sums), (steps, emp_means))
         count = jnp.asarray(n_steps, dtype=state.v.data.dtype)
         climate_means = _finalize_means(tuple(
             total / count for total in climate_sums))
@@ -671,6 +673,7 @@ def run_long(
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_gyre_zco_card,
+        gyre_emp_means,
         validate_gyre_namelist,
     )
 
@@ -726,8 +729,10 @@ def run_long(
     state = card.recipe.initial_state
     cold_tail = None
     cold_sample = None
+    emp_means = None
     if mode == "gpu-native" and not per_step:
         state, cold_sample = cold_start_scan_state(model, card, state)
+        emp_means = gyre_emp_means(card, np.arange(1, namelist.nn_itend + 1))
         cold_tail = build_scanned_day_mean_stepper(model, card, steps_per_day - 1)
         scanned_day = build_scanned_day_mean_stepper(model, card, steps_per_day)
         if budget_model is not None:
@@ -816,6 +821,8 @@ def run_long(
     passive_identity = None
     for day in range(1, days + 1):
         first_kt = (day - 1) * steps_per_day + 1
+        day_emp = (None if emp_means is None
+                   else emp_means[first_kt - 1:first_kt - 1 + steps_per_day])
         full_means = None
         budget_means = None
         if (momentum_budget_window is not None
@@ -824,9 +831,10 @@ def run_long(
             assert budget_day is not None and scanned_day is not None
             entry_state = state
             state, means, budget_means, live_mask = budget_day(
-                state, first_kt)
+                state, first_kt, day_emp)
             if day == momentum_budget_window[0]:
-                control_state, _ = scanned_day(entry_state, first_kt)
+                control_state, _ = scanned_day(
+                    entry_state, first_kt, emp_means=day_emp)
                 jax.block_until_ready(control_state.eta.data)
                 jax.block_until_ready(state.eta.data)
                 passive_identity = state_bitwise_identity(
@@ -859,9 +867,11 @@ def run_long(
                 model, card, state, first_kt, steps_per_day)
         elif day == 1:
             assert cold_tail is not None and cold_sample is not None
-            state, means = cold_tail(state, 2, initial_means=cold_sample, initial_count=1)
+            state, means = cold_tail(
+                state, 2, initial_means=cold_sample, initial_count=1,
+                emp_means=day_emp[1:])
         else:
-            state, means = scanned_day(state, first_kt)
+            state, means = scanned_day(state, first_kt, emp_means=day_emp)
         jax.block_until_ready(state.eta.data)
         arrays = {
             "schema": np.str_(manifest["schema"]),

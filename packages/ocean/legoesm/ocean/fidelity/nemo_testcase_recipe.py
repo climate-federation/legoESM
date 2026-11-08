@@ -1464,14 +1464,15 @@ def build_gyre_zco_card(
 
 
 def gyre_surface_boundary_condition(
-    card: NEMOTestcaseCard, t_seconds: float
+    card: NEMOTestcaseCard, t_seconds: float, emp_mean=None,
 ) -> GYRESurfaceBoundaryCondition:
     """Evaluate GYRE's source-defined seasonal SBC on its rotated T grid.
 
     ``t_seconds`` is NEMO's current ``kt * rn_Dt`` clock, matching
     ``usrdef_sbc.F90:84-107,109-145,161-184``.  Stress is returned in NEMO's
     grid-aligned ocean convention; no atmosphere/ocean sign conversion is
-    applied in this transcription receipt.
+    applied in this transcription receipt.  ``emp_mean``, when given, is this
+    clock's :func:`gyre_emp_means` entry.
     """
 
     if card.case != "GYRE-zco":
@@ -1486,7 +1487,7 @@ def gyre_surface_boundary_condition(
     # 104 non-owned boundary-ring cells.  Those are the same cells represented
     # by ``wet=False`` in this cropped 22x32 card.  The oracle kt=1 eta update
     # pins the resulting 600-owned-cell numerator exactly.
-    emp = nemo_gyre_zero_mean_emp(emp_raw, wet)
+    emp = nemo_gyre_zero_mean_emp(emp_raw, wet, emp_mean)
     utau, vtau = nemo_gyre_wind(lat, t_seconds)
     taum = jnp.sqrt(utau * utau + vtau * vtau)
     wndm = jnp.sqrt(taum / (1.22 * 1.5e-3))
@@ -1501,12 +1502,39 @@ def gyre_surface_boundary_condition(
     )
 
 
-def gyre_surface_forcings(card: NEMOTestcaseCard, state, kt):
+def _gyre_clock(card: NEMOTestcaseCard, kt):
+    """NEMO's ``kt * rn_Dt`` seasonal clock; ``kt`` may be a JAX scalar."""
+    from legoesm.core.source_rounding import nemo_source_round
+
+    step = jnp.asarray(kt, dtype=jnp.float64)
+    return nemo_source_round(
+        step * jnp.asarray(card.dt_s, dtype=jnp.float64))
+
+
+def gyre_emp_means(card: NEMOTestcaseCard, kts):
+    """GYRE's E-P wet mean for every step index in ``kts``.
+
+    It reads only the clock and the fixed land mask, never model state, so a
+    run can evaluate its serial DDPDD sums before the time loop, not per step.
+    """
+    import jax
+    from legoesm.ocean.fidelity.nemo_recipe import nemo_gyre_emp_mean
+
+    lat = jnp.asarray(card.recipe.grid.native_lat_T_deg, dtype=jnp.float64)
+    wet = jnp.asarray(card.recipe.land_mask) > 0.5
+    # ponytail: 2**25-word batches bound memory; each batch is one serial sum.
+    return jax.lax.map(
+        lambda kt: nemo_gyre_emp_mean(nemo_gyre_emp(lat, _gyre_clock(card, kt)), wet),
+        jnp.asarray(kts), batch_size=max(1, 2**25 // lat.size))
+
+
+def gyre_surface_forcings(card: NEMOTestcaseCard, state, kt, emp_mean=None):
     """Materialize the executed GYRE freshwater and surface forcing pair.
 
     ``kt`` may be a JAX scalar.  Keeping the seasonal clock in this shared
     function lets an outer ``lax.scan`` evaluate it from each step index
     inside the compiled day instead of freezing one day's forcing.
+    ``emp_mean``, when given, is the step's :func:`gyre_emp_means` entry.
     """
 
     from legoesm.core.source_rounding import nemo_source_round
@@ -1515,10 +1543,8 @@ def gyre_surface_forcings(card: NEMOTestcaseCard, state, kt):
     from legoesm.ocean.freshwater import FreshwaterForcing
     from legoesm.ocean.state import OceanSurfaceForcing
 
-    step = jnp.asarray(kt, dtype=jnp.float64)
-    clock = nemo_source_round(
-        step * jnp.asarray(card.dt_s, dtype=jnp.float64))
-    sbc = gyre_surface_boundary_condition(card, clock)
+    sbc = gyre_surface_boundary_condition(
+        card, _gyre_clock(card, kt), emp_mean)
     sst = state.T.data[..., 0]
     sst_m = nemo_potential_temperature_from_conservative(
         sst, state.S.data[..., 0])

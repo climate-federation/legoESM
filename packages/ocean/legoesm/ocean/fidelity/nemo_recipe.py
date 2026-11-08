@@ -900,14 +900,28 @@ def _nemo_ddpdd_sum_2d(values, mask):
     return high
 
 
-def nemo_gyre_zero_mean_emp(emp_raw, wet):
-    """Apply GYRE's masked DDPDD ``glob_2Dsum`` mean subtraction literally."""
+def nemo_gyre_emp_mean(emp_raw, wet):
+    """GYRE's masked DDPDD ``glob_2Dsum`` wet-domain mean of ``emp_raw``."""
     import jax.numpy as jnp
     from legoesm.core.source_rounding import nemo_source_round as sr
 
     values = jnp.asarray(emp_raw, dtype=jnp.float64)
     mask = jnp.asarray(wet, dtype=values.dtype)
-    mean = sr(_nemo_ddpdd_sum_2d(values, mask) / _nemo_ddpdd_sum_2d(mask, mask))
+    return sr(_nemo_ddpdd_sum_2d(values, mask) / _nemo_ddpdd_sum_2d(mask, mask))
+
+
+def nemo_gyre_zero_mean_emp(emp_raw, wet, mean=None):
+    """Apply GYRE's masked DDPDD ``glob_2Dsum`` mean subtraction literally.
+
+    ``mean``, when given, is :func:`nemo_gyre_emp_mean` of the same inputs.
+    """
+    import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round as sr
+
+    values = jnp.asarray(emp_raw, dtype=jnp.float64)
+    mask = jnp.asarray(wet, dtype=values.dtype)
+    if mean is None:
+        mean = nemo_gyre_emp_mean(values, mask)
     return sr(values - sr(mean * mask))
 
 
@@ -1347,6 +1361,7 @@ __all__ = (
     "build_nemo_gyre_recipe",
     "build_nemo_recipe",
     "build_nemo_rest_recipe",
+    "nemo_gyre_emp_mean",
     "nemo_gyre_initial_T_S",
     "nemo_gyre_latitudes",
     "nemo_gyre_qns",
