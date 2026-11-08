@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import math
+
 import argparse
 import importlib.util
 import json
@@ -128,7 +130,7 @@ def run_ridging_regime_scan(
         )
         forcing = card.forcing_template._replace(concentration_t=current["a_i"][..., 0])
         divergence, deformation = si3_cgrid_deformation(
-            dynamics, forcing, card.metrics, card.dynamics_config
+            dynamics, forcing, card.metrics, card.dynamics_config, limit_sharpness_scale=math.inf
         )
         interior = (
             slice(gate._HALO_WIDTH, -gate._HALO_WIDTH),
@@ -274,7 +276,7 @@ def _active_ridging_projection(card, frame: dict[str, np.ndarray], next_frame, *
     )
     forcing = card.forcing_template._replace(concentration_t=frame["a_i"][..., 0])
     divergence, deformation = si3_cgrid_deformation(
-        dynamics, forcing, card.metrics, card.dynamics_config
+        dynamics, forcing, card.metrics, card.dynamics_config, limit_sharpness_scale=math.inf
     )
     area = jnp.asarray(frame["a_i"][..., 0])
     open_water = 1.0 - area

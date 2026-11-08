@@ -92,7 +92,7 @@ def test_mie_in_tracer_forward_scatters_and_conserves():
   b = 7
   band_of_gpt = jnp.array([b])                        # single g-point -> band b
   cfg = MC3DRadiationConfig(photons_per_pixel=4000)
-  kw = dict(mu0=1.0, azimuth=0.0, albedo=0.0, config=cfg)
+  kw = dict(mu0=1.0, azimuth=0.0, albedo=0.0, diffuse_frac=0.0, config=cfg)
 
   mie = solve_sw_spectral(tau, ssa, g, jnp.array([1.0]), geom,
                           key=jax.random.PRNGKey(0), rayleigh_frac=rfrac,

@@ -129,7 +129,7 @@ class EarthSystemDriver:
 
         # Cell-centre view: a lat-lon C-grid run carries face winds between steps.
         state = self._atm.cell_centre_state()
-        q_v = self._atm.q_v
+        q_v = self._atm.current_tracer("q_v")
         p_s = state.p_s.data
         T_low = state.T.data[..., -1]
         u_low = state.u.data[..., -1]

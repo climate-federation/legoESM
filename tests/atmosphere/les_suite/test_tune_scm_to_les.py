@@ -56,17 +56,17 @@ def test_candidate_overrides_include_default_and_probes():
 
 def test_tune_returns_best_no_worse_than_default():
     m = _tuner()
-    base, scheme_key = m._base_turbulence("tke")
+    base, scheme_key = m._base_turbulence("louis")
     result = m.tune_closure_derivative_free(
         _cbl_artifact(), base, scheme_key,
         tiers=(1,), n_random=2, nlev=NZ, dt=20.0, seed=0,
     )
-    assert result.scheme == "tke"
+    assert result.scheme == "louis"
     assert np.isfinite(result.best_loss)
     # the default is always among the candidates, so best <= default
     assert result.best_loss <= result.default_loss + 1e-9
     assert result.n_evaluated >= 3
-    # best_overrides is a dict of tke fields (or empty if default won)
+    # best_overrides is a dict of louis fields (or empty if default won)
     assert isinstance(result.best_overrides, dict)
 
 
@@ -90,9 +90,9 @@ def test_clubb_no_cloud_buoyancy_flag_builds_control_arm():
     assert base_native.clubb.cloud_source == "native"
     assert base_shared.clubb.cloud_source == "shared"
     # non-clubb schemes ignore the kwargs (no cloud_buoyancy/cloud_source field to set)
-    base_tke, _ = m._base_turbulence("tke", clubb_cloud_buoyancy=False,
-                                     clubb_cloud_source="shared")
-    assert base_tke.scheme == "tke"
+    base_louis, _ = m._base_turbulence("louis", clubb_cloud_buoyancy=False,
+                                       clubb_cloud_source="shared")
+    assert base_louis.scheme == "louis"
 
 
 def test_scm_les_loss_jax_is_differentiable():
@@ -159,7 +159,7 @@ def test_all_wired_schemes_build_with_registry_key():
     # every CBL-wired closure builds a TurbulenceConfig with the right scheme and a
     # registry scheme_key that has scalar tunable params.
     m = _tuner()
-    for scheme in ("smagorinsky", "louis", "holtslag_boville", "tke",
+    for scheme in ("smagorinsky", "louis", "holtslag_boville",
                    "clubb_lite", "edmf", "clubb"):
         base, key = m._base_turbulence(scheme)
         assert base.scheme == scheme
@@ -188,10 +188,10 @@ def test_clubb_override_descends_into_nested_params():
 def test_apply_overrides_flat_scheme_lands_on_config():
     # for a flat scheme the same apply-site sets the field on the sub-config directly.
     m = _tuner()
-    base, key = m._base_turbulence("tke")
+    base, key = m._base_turbulence("louis")
     field = m._scheme_tunable_metas(key, tiers=(1,))[0].field
     cfg = m.apply_overrides_to_base(base, {field: 0.4321})
-    assert getattr(cfg.tke, field) == pytest.approx(0.4321)
+    assert getattr(cfg.louis, field) == pytest.approx(0.4321)
 
 
 def test_no_tunable_params_raises():
@@ -210,7 +210,7 @@ def test_main_stamps_flux_provenance(tmp_path):
     save_artifact(_cbl_artifact(), art)
     out = tmp_path / "tuned.json"
     rc = m.main([
-        "--artifact", str(art), "--scheme", "tke", "--tiers", "1",
+        "--artifact", str(art), "--scheme", "louis", "--tiers", "1",
         "--n-random", "1", "--dt", "20", "--nlev", str(NZ), "--output", str(out),
     ])
     assert rc == 0

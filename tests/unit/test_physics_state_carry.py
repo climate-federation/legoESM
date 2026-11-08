@@ -677,6 +677,11 @@ def test_pipeline_refuses_dropped_active_carry():
         PhysicsConfig(turbulence=TurbulenceConfig(scheme="clubb_lite")))
     assert not physics_config_requires_phys_state(
         PhysicsConfig(turbulence=TurbulenceConfig(scheme="louis")))
+    # Sundqvist's gscond reads its previous-step carry (zc_*).
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    assert physics_config_requires_phys_state(PhysicsConfig(
+        turbulence=TurbulenceConfig(scheme="louis"),
+        microphysics=MicrophysicsConfig(scheme="sundqvist")))
 
 
 def test_sharded_wrapper_refuses_stateful_physics():

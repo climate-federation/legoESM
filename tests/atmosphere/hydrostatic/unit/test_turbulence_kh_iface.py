@@ -1,11 +1,11 @@
 """TurbulenceOutput.Kh_iface — interface heat diffusivity export.
 
-The five schemes that compute their heat diffusivity on interfaces (Smagorinsky,
-Louis, YSU, Holtslag-Boville, MYNN 2.5) export those interior values on all
+The six schemes that compute their heat diffusivity on interfaces (Smagorinsky,
+Louis, YSU, Holtslag-Boville, MYNN 2.5, MYJ = "tke") export those interior values on all
 ``nlev+1`` interfaces with zero at the model top and the surface (CAM6's non-CLUBB
 ``kvh`` convention).  The interior must be the very array the full-level ``Kh``
 diagnostic is averaged from, i.e. the one the scheme's own diffusion solve used.
-Schemes that compute diffusivity on full levels only (TKE, EDMF, CLUBB-lite) leave it
+Schemes that compute diffusivity on full levels only (EDMF, CLUBB-lite) leave it
 None; prognostic CLUBB is not exported yet either (its interface diffusivity is a separate stage).
 """
 
@@ -78,7 +78,7 @@ def _run(name):
 
 # ysu exports the WRF exch_h layout (K of the interface below each level), not
 # a full-level average: its Kh_iface contract is pinned in test_ysu_route.py.
-@pytest.mark.parametrize("name", ["smagorinsky", "louis", "holtslag_boville"])
+@pytest.mark.parametrize("name", ["smagorinsky", "louis", "holtslag_boville", "tke"])
 def test_interface_native_schemes_export_kh_iface(name):
     out = _run(name)
     k = np.asarray(out.Kh_iface)
@@ -92,6 +92,6 @@ def test_interface_native_schemes_export_kh_iface(name):
                                   np.asarray(out.Kh))
 
 
-@pytest.mark.parametrize("name", ["tke", "edmf", "clubb_lite"])
+@pytest.mark.parametrize("name", ["edmf", "clubb_lite"])
 def test_full_level_schemes_leave_kh_iface_unset(name):
     assert _run(name).Kh_iface is None

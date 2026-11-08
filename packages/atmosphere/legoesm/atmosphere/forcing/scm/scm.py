@@ -612,6 +612,12 @@ class SingleColumnModel:
                     "microphysics_substeps > 1 is currently supported only "
                     "with time_integrator='forward_euler'."
                 )
+            if getattr(microphysics_fn, "_writes_phys_state", False):
+                raise ValueError(
+                    "microphysics_substeps > 1 cannot thread a microphysics "
+                    "carry (Sundqvist's gscond previous-step state, CAM6's "
+                    "CLDO): the reference calls the scheme once per physics "
+                    "step.  Use microphysics_substeps=1.")
         step_fn_obj = TIME_INTEGRATORS[time_integrator]
         if forcing is not None:
             validate_forcing(forcing)

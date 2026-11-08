@@ -95,29 +95,30 @@ def test_production_config_converges_and_conserves_on_dry_top_layer():
     assert abs(residual) < 1e-7  # m of water
 
 
-def test_unconverged_column_is_flagged_without_a_spike():
+def test_formerly_unconverged_column_now_converges_without_a_spike():
+    """Column B stayed unconverged for 30 damped psi iterations; with the
+    update applied in theta (richards.py) it converges, with no spike and a
+    closed budget."""
     out, residual = _solve(_COL_B, MultiLayerLandConfig().richards)
-    assert not bool(out.converged[0])
+    assert bool(out.converged[0])
     assert float(out.theta_new[0, 0]) <= 0.39
     assert float(out.psi_new[0, 0]) < 0.0
-    # The unconverged iterate lost 3.4e-5 m; the post-solve correction returns it.
     assert abs(residual) < 1e-12  # m
     assert abs(float(out.water_created[0])) < 1e-12
 
 
-def test_former_undamped_ten_iterations_spike_on_these_columns():
-    """The recorded columns do bite: the former iteration settings still spike.
-
-    Main's take-back now closes the water budget of the spiked step (measured
-    residual ~1e-17 m on both columns) by draining the layers below, so the
-    defect left is the spike itself: a positive top-layer head of 3e4-6e4 m
-    and theta 1.5-2.6 against theta_sat 0.39.
+def test_former_undamped_ten_iterations_no_longer_spike_on_these_columns():
+    """The recorded columns bit the psi-stepping solver: 10 undamped
+    iterations returned a top-layer head of 3e4-6e4 m and theta 1.5-2.6
+    against theta_sat 0.39 (the take-back closed the budget by draining the
+    layers below, the spike itself remained).  Stepping in theta with the
+    hydrostatic ceiling removes the spike at the former settings too: the
+    top layer stays below saturation and under no positive head.
     """
     for col in (_COL_A, _COL_B):
         out, _ = _solve(col, _former())
-        assert not bool(out.converged[0])
-        assert float(out.theta_new[0, 0]) > 1.0
-        assert float(out.psi_new[0, 0]) > 1e4
+        assert float(out.theta_new[0, 0]) <= 0.39
+        assert float(out.psi_new[0, 0]) < 0.0
 
 
 def test_float32_gradient_finite_through_converged_frozen_columns():
