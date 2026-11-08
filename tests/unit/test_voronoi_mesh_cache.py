@@ -243,8 +243,9 @@ def test_cache_version_in_name_separates_formats(cache_dir, monkeypatch):
     """A format bump must change the file name, so old and new code never share a file."""
     import legoesm.grids.voronoi as vor
 
-    new = _voronoi_cache_path(_LEVEL, 1.0, _LLOYD, 0.0)
+    new = vor._voronoi_cache_path(_LEVEL, 1.0, _LLOYD, 0.0)
     assert os.path.basename(new).startswith("scvt_v2_")
     monkeypatch.setattr(vor, "_MESH_CACHE_VERSION", 1)
-    old = _voronoi_cache_path(_LEVEL, 1.0, _LLOYD, 0.0)
+    old = vor._voronoi_cache_path(_LEVEL, 1.0, _LLOYD, 0.0)
+    assert os.path.basename(old).startswith("scvt_v1_")
     assert old != new

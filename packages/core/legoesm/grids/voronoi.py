@@ -1127,6 +1127,7 @@ _BIG_MESH_LOCK_STALE_S = 7200.0   # lloyd=50 at subdiv-9 ~ 5 h; lloyd=0 ~ min
 # The schema check below only catches FIELD changes; a value-changing algorithm
 # edit must invalidate old caches via this token.
 # v2: geometry stored float64, rounded once to the run dtype (#2381/#2382).
+# Bumping this also requires updating test_cache_version_in_name_separates_formats.
 _MESH_CACHE_VERSION = 2
 
 
