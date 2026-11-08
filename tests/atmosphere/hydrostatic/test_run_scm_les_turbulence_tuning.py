@@ -42,7 +42,7 @@ def test_scheme_list_matches_the_dispatch():
         assert f'"{scheme}"' in src, f"{scheme} not in get_turbulence_fn"
     assert "none" not in drv.TURBULENCE_SCHEMES and "ysu" not in drv.TURBULENCE_SCHEMES
     # mynn25 dropped in R3 (WRF port: no SCM-LES inputs, no tunables)
-    assert len(drv.TURBULENCE_SCHEMES) == 8
+    assert len(drv.TURBULENCE_SCHEMES) == 7
 
 
 @pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)
