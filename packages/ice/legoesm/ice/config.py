@@ -24,6 +24,9 @@ __param_spec__ = {
             "cut_fraction_scale": "numerics: ramp width scale",
             "full_cover_scale": "numerics: ramp width scale",
             "snow_ramp_width_m": "numerics: surrogate-gradient width; forward value stays NEMO's hard test",
+            "thickness_scale_m": "numerics: ramp width scale",
+            "salinity_scale": "numerics: ramp width scale",
+            "melt_point_scale_K": "numerics: ramp width scale",
         },
         "params": {},
     },
@@ -449,6 +452,12 @@ class SI3SwitchConfig(NamedTuple):
     # surrogate 1 - C1(h_s / width) (straight-through).  0.0 = no surrogate
     # (zero gradient).  2e-4 m = 0.01 x snow_cover_depth_nemo (vote Y1).
     snow_ramp_width_m: float = 2.0e-4
+    # SI3 column port (bitz_lipscomb, sweep votes Z1-Z20): thickness floors and
+    # the BL99 minimum conduction thickness, salinity bounds, and the
+    # melting-point bounds of ice temperature (vote Z17: 1e-3 K at 0.01).
+    thickness_scale_m: float = 1.0e-3    # [m]
+    salinity_scale: float = 1.0          # [g/kg]
+    melt_point_scale_K: float = 0.1      # [K]
 
 
 SI3_HARD_SWITCHES = SI3SwitchConfig(relative_width=0.0)
