@@ -279,12 +279,18 @@ def test_sampling_exact_across_transition(case):
     print(f"{case}: d/d frac,op max={np.abs(np.concatenate([gf, gop])).max():.3e} "
           f"d/d uniform smooth={float(g_r):.3e} value 100={v100!r} inf={vinf!r}")
     assert float(g_r) == 0.0
-    # the boundary case's draw decides the same way at 100 as at inf
+    # the boundary case's draw decides the same way at 100 as at inf, and the
+    # decision really flips inside +-1e-9 at both (a crossing, not false == false)
+    side = {}
+    for s in (100.0, math.inf):
+        for d in (-1e-9, 1e-9):
+            r = list(rand)
+            r[which] = r[which].at[slot].add(d)
+            side[s, d] = float(_small(f, op, tuple(r), s))
+    for s in (100.0, math.inf):
+        assert side[s, -1e-9] != side[s, 1e-9], (case, s, "no crossing")
     for d in (-1e-9, 1e-9):
-        r = list(rand)
-        r[which] = r[which].at[slot].add(d)
-        assert ((float(_small(f, op, tuple(r), 100.0)) != v100)
-                == (float(_small(f, op, tuple(r), math.inf)) != vinf)), (case, d)
+        assert (side[100.0, d] != v100) == (side[math.inf, d] != vinf), (case, d)
 
 
 def test_strict_compare_and_single_layer():

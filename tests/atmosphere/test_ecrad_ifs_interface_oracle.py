@@ -622,7 +622,7 @@ def test_composed_grad_full_level_t_hard(fx, uniforms):
 def test_composed_grad_full_level_t_smooth(fx, uniforms):
     """Was a strict xfail (votes C7/C9, FD noise from many weakly smoothed layers);
     with exact McICA sampling and per-quantity widths AD and both FDs agree at
-    1.3e-7 (2026-11-04, vote T7)."""
+    4.1e-8, FD vs FD 2.3e-8, against rtol 1e-6 (RRTMGP gas lane, 2026-11-08; vote T7)."""
     _strict_grad_check(_composed_functional(fx, uniforms, 100.0, 0), "composed T_fl 100")
 
 
