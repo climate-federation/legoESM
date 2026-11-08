@@ -97,6 +97,11 @@ def test_dh_surface_melt_switch_gradient_is_the_surrogate(monkeypatch):
     for name in ("c3_qcn_top_k", "c6_melt_order", "c9_exchange"):
         fx = load(name)
         st, zr, fz = dh_args(fx)
+        # Net surface melt flux = flux_scale (1 W/m2) in every cell: positive, and small
+        # enough that the layer caps do not bind (1000 W/m2 melted whole columns).
+        fz = fz._replace(qsr_ice=SMOOTH.flux_scale_W_m2 - zr.qns_ice + fz.qtr_ice_top + zr.qcn_ice_top)
+        net = np.asarray(zr.qns_ice + fz.qsr_ice - fz.qtr_ice_top - zr.qcn_ice_top)
+        assert np.all(net > 0), "precondition: no positive surface melt flux"
 
         def f(t, st=st, zr=zr, fz=fz, fx=fx):
             z = zr._replace(T_surface=jnp.full_like(zr.T_surface, t))
