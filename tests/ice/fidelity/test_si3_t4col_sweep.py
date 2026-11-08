@@ -48,6 +48,9 @@ def _dh(fx, **kw):
 
 
 def test_hard_switches_equal_every_width_zero():
+    """SI3_HARD_SWITCHES == every per-fix width 0.  Bitwise equality with the
+    pre-sweep hard code is the literal-row gate (hard rows at this commit vs
+    main), not this test."""
     for name in FIXTURES:
         fx = load(name)
         a, b = _zdf(fx, **HARD), _zdf(fx, **HARD, t_clamp_width=0.0)
@@ -162,6 +165,20 @@ def test_one_sided_clip_is_exact_at_and_beyond_the_bounds():
     assert T0 - 0.5 * w < y < T0                                     # pulled toward, never above, T0
     g = jax.grad(lambda t: bl._clip_c1(t, T0 - 100.0, T0, w))(jnp.asarray(T0 - 0.5 * w))
     assert 0.0 < float(g) < 1.0
+
+
+def test_hard_clip_keeps_jnp_clip_order_on_an_inverted_interval():
+    """Width 0 is jnp.clip also where 0.75*sss < rn_simin (hi < lo): returns hi."""
+    x = jnp.asarray([-1.0, 0.05, 0.5])
+    np.testing.assert_array_equal(np.asarray(bl._clip_c1(x, 0.1, 0.0, 0.0)),
+                                  np.asarray(jnp.clip(x, 0.1, 0.0)))
+    fx = load("c8_sal_himin")
+    st, _, fz = dh_args(fx)
+    fz0 = fz._replace(sss=jnp.zeros_like(fz.sss))
+    S, _, _ = bl._sal_step(st, fz0, dt(fx), K, switches=SI3_HARD_SWITCHES)
+    gate = (np.asarray(st.h_ice) > bl._SAL_MIN_THICKNESS)
+    assert gate.any(), "no gated cell (vacuous)"
+    np.testing.assert_array_equal(np.asarray(S)[gate], 0.0)
 
 
 def test_smooth_mode_keeps_the_melting_branches_reachable():
