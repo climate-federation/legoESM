@@ -111,7 +111,7 @@ def test_initial_handback_is_zero_exchange_with_the_tiles_own_optics():
                    * s0.lake.T_epi.data ** 4), rtol=1e-14)
     # Optics are exactly what an owned exchange reports for the state it
     # leaves: the next exchange's start state.
-    s1, h1 = owned()(s0, forcing(), TILES, SST, ZU, ZU, 1800.0,
+    s1, h1, _ = owned()(s0, forcing(), TILES, SST, ZU, ZU, 1800.0,
                      owned_forcing=booked(s0, 250.0, 290.0))
     h0_of_s1 = initial_handback(s1, TILES, ICE, LAKE)
     for k in ("f_ice", "f_lake", "albedo_ice", "albedo_lake",
@@ -558,6 +558,29 @@ def test_land_runoff_is_booked_in_the_window_the_land_debits_it(
     want = 0.5 * (r0 * 1 + r3 * 3) / 6
     np.testing.assert_allclose(_exports(d)["seg_runoff_land"], want,
                                rtol=1e-12, atol=0)
+
+
+def test_a_held_land_column_discharges_no_runoff(tmp_path, monkeypatch):
+    """A land column whose surface solve the land model rejects (held) keeps
+    its old state and discharges nothing (K3-V11); its neighbours do.  The
+    hold is forced on column 0 so the test does not wait for a real one."""
+    import legoesm.land.multilayer_land as ml
+    probe = _driver(tmp_path / "p", monkeypatch)
+    ncol = int(np.asarray(probe.state.p_s.data).size)
+    orig = ml._hold_unsolved_columns
+
+    def hold_col0(*a, **k):
+        out = list(orig(*a, **k))
+        held = jnp.asarray(out[3])
+        out[3] = held | (jnp.arange(held.shape[0]) == 0)
+        return tuple(out)
+    monkeypatch.setattr(ml, "_hold_unsolved_columns", hold_col0)
+    d, cb = _k3_run(tmp_path / "r", monkeypatch, 6, _H(ncol))
+    _rain(d, ncol, rate=(0.2, 0.3))             # ponds past pond_max
+    assert d.run(segment_callback=cb) == "COMPLETED"
+    ro = _exports(d)["seg_runoff_land"].reshape(-1)
+    assert ro[0] == 0.0
+    assert np.min(ro[1:]) > 0.0
 
 
 def test_no_hook_exports_nothing_new(tmp_path, monkeypatch):

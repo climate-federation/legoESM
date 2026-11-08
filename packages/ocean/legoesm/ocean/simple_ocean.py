@@ -232,6 +232,7 @@ def _slab_step(
     dt: float,
     q_flux: jnp.ndarray | None = None,
     open_water_frac: jnp.ndarray | float = 1.0,
+    surface_flux: jnp.ndarray | None = None,
 ) -> tuple[SlabOceanState, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Single mixed-layer energy balance step.
 
@@ -272,7 +273,11 @@ def _slab_step(
     # The atmospheric surface terms act only on the ice-free fraction
     # ``open_water_frac`` (1 = full cell); q_flux is ocean heat transport and
     # applies under ice too.
-    q_sfc_net = open_water_frac * (sw_net + lw_net - shflx - lhflx)
+    # ``surface_flux`` [W/m2 per unit water area, + into the layer]: the
+    # atmosphere's own open-water exchange (it owns the open-water fluxes)
+    # replaces this slab's bulk/radiation estimate.
+    q_sfc_net = (open_water_frac * (sw_net + lw_net - shflx - lhflx)
+                 if surface_flux is None else surface_flux)
     dT_dt = (q_sfc_net + q_flux_eff) / C_mix
     T_sfc_trial = T_sfc + dt * dT_dt
 
@@ -313,6 +318,7 @@ def _two_layer_step(
     dt: float,
     q_flux: jnp.ndarray | None = None,
     open_water_frac: jnp.ndarray | float = 1.0,
+    surface_flux: jnp.ndarray | None = None,
 ) -> tuple[SlabOceanState, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Two-layer slab ocean: mixed layer + deep layer.
 
@@ -352,7 +358,8 @@ def _two_layer_step(
     q_flux_eff = config.Q_flux if q_flux is None else q_flux
     C_mix = config.rho_ocean * config.c_ocean * config.h_mix
     # Atmospheric surface terms on the ice-free fraction only (see _slab_step).
-    q_sfc_net = open_water_frac * (sw_net + lw_net - shflx - lhflx)
+    q_sfc_net = (open_water_frac * (sw_net + lw_net - shflx - lhflx)
+                 if surface_flux is None else surface_flux)
     dT_sfc_dt = (q_sfc_net + q_flux_eff - F_mix) / C_mix
     T_sfc_trial = T_sfc + dt * dT_sfc_dt
 
@@ -415,7 +422,8 @@ def make_ocean(config: SimpleOceanConfig, sst_map=None):
     # climatology and passes it in each coupling interval (eager path, no
     # recompile); a caller that never sets it is unchanged.
     if mode == "fixed":
-        def step_fixed(state, forcing, dt, q_flux=None, open_water_frac=1.0):
+        def step_fixed(state, forcing, dt, q_flux=None, open_water_frac=1.0,
+                       surface_flux=None):
             if sst_map is not None:
                 sst = sst_map
             else:
@@ -428,15 +436,19 @@ def make_ocean(config: SimpleOceanConfig, sst_map=None):
         return step_fixed
 
     elif mode == "slab":
-        def step_slab(state, forcing, dt, q_flux=None, open_water_frac=1.0):
+        def step_slab(state, forcing, dt, q_flux=None, open_water_frac=1.0,
+                       surface_flux=None):
             return _slab_step(state, forcing, config, dt, q_flux=q_flux,
-                              open_water_frac=open_water_frac)
+                              open_water_frac=open_water_frac,
+                              surface_flux=surface_flux)
         return step_slab
 
     elif mode == "two_layer":
-        def step_two_layer(state, forcing, dt, q_flux=None, open_water_frac=1.0):
+        def step_two_layer(state, forcing, dt, q_flux=None, open_water_frac=1.0,
+                       surface_flux=None):
             return _two_layer_step(state, forcing, config, dt, q_flux=q_flux,
-                                   open_water_frac=open_water_frac)
+                                   open_water_frac=open_water_frac,
+                                   surface_flux=surface_flux)
         return step_two_layer
 
     else:

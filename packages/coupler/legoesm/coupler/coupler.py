@@ -153,6 +153,21 @@ class SurfaceHandback(NamedTuple):
     emissivity_lake: jnp.ndarray
 
 
+class OwnedOceanExchange(NamedTuple):
+    """What the ice and lake hand the OCEAN in the ``atm_owns`` mode, per grid
+    cell with the ``blend_tiles`` weights: the ice's per-cell exchange
+    channels x f_water, the lake's P-E x f_lake, the ice-ocean stress x the
+    start-of-step f_ice (the fraction the handback stress uses, vote K4-V3).
+    Signs as ``SurfaceToAtm``: freshwater and salt + into the ocean, heat
+    extraction + ocean loses heat, stress the force ON the ocean."""
+
+    ice_lake_freshwater_flux: jnp.ndarray
+    ocean_heat_extraction: jnp.ndarray
+    salt_flux: jnp.ndarray
+    ocean_stress_x: jnp.ndarray
+    ocean_stress_y: jnp.ndarray
+
+
 def _tile_optics(ice, lake, fractions, ice_config: SeaIceConfig,
                  lake_config: LakeConfig) -> dict:
     """The ``SurfaceHandback`` fractions, albedos, emissivities and emission
@@ -654,7 +669,8 @@ def make_coupler(
     step_surface : callable
         (SurfaceState, AtmToSurface, TileConfig, ocean_sst, ocean_u,
          ocean_v, dt, doy) -> (SurfaceState, SurfaceToAtm), or
-        (SurfaceState, SurfaceHandback) in the ``atm_owns`` mode.
+        (SurfaceState, SurfaceHandback, OwnedOceanExchange) in the
+        ``atm_owns`` mode.
     """
     _validate_coupler_config(coupler_config)
     _atm_owned = _validate_atm_owns(atm_owns, ice_config, lake_config)
@@ -833,8 +849,16 @@ def make_coupler(
             tau_y=fi * ice_r.tau_y + fk * lake_r.tau_y,
             **_tile_optics(ice1, lake1, fr1, ice_config, lake_config),
         )
+        to_ocean = OwnedOceanExchange(
+            ice_lake_freshwater_flux=(f_water * ice_r.freshwater_flux
+                                      + fk * lake_r.freshwater_flux),
+            ocean_heat_extraction=f_water * ice_r.ocean_heat_extraction,
+            salt_flux=f_water * ice_r.salt_flux,
+            ocean_stress_x=fi * ice_r.ocean_stress_x,
+            ocean_stress_y=fi * ice_r.ocean_stress_y,
+        )
         new_state = sfc_state._replace(ice=ice1, lake=lake1)
-        return new_state, handback
+        return new_state, handback, to_ocean
 
     def step_surface(
         sfc_state: SurfaceState,

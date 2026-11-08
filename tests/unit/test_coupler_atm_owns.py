@@ -90,7 +90,7 @@ def test_tiles_absorb_exactly_the_booked_radiation():
     s0 = _state()
     sw, lw = 250.0, 290.0
     forcing = _forcing(sw, lw)
-    s1, _ = _owned_coupler()(s0, _forcing(17.0, 3.0), TILES, SST, ZU, ZU, DT,
+    s1, _, _ = _owned_coupler()(s0, _forcing(17.0, 3.0), TILES, SST, ZU, ZU, DT,
                              owned_forcing=_booked_from(s0, sw, lw))
     ice_ref, _ = step_sea_ice(s0.ice, forcing, SST, ZU, ZU, ICE_CFG,
                               CouplerConfig().U_min, DT)
@@ -112,7 +112,7 @@ def test_handback_fields_are_start_fraction_weighted():
     s0 = _state()
     sw, lw = 250.0, 290.0
     forcing = _forcing(sw, lw)
-    s1, hb = _owned_coupler()(s0, _forcing(17.0, 3.0), TILES, SST, ZU, ZU, DT,
+    s1, hb, _ = _owned_coupler()(s0, _forcing(17.0, 3.0), TILES, SST, ZU, ZU, DT,
                               owned_forcing=_booked_from(s0, sw, lw))
     assert isinstance(hb, SurfaceHandback)
     U = CouplerConfig().U_min
@@ -154,7 +154,7 @@ def test_handback_fields_are_start_fraction_weighted():
 
 def test_owned_mode_leaves_land_and_accumulator_untouched():
     s0 = _state()
-    s1, _ = _owned_coupler()(s0, _forcing(), TILES, SST, ZU, ZU, DT,
+    s1, _, _ = _owned_coupler()(s0, _forcing(), TILES, SST, ZU, ZU, DT,
                              owned_forcing=_booked_from(s0, 250.0, 290.0))
     for a, b in zip(jax.tree.leaves((s0.land, s0.accumulator, s0.carbon)),
                     jax.tree.leaves((s1.land, s1.accumulator, s1.carbon))):
@@ -184,7 +184,7 @@ def test_handback_is_differentiable_in_booked_radiation():
     step = _owned_coupler()
 
     def loss(sw):
-        s1, hb = step(s0, _forcing(), TILES, SST, ZU, ZU, DT,
+        s1, hb, _ = step(s0, _forcing(), TILES, SST, ZU, ZU, DT,
                       owned_forcing=_booked_from(s0, sw, 290.0))
         return (jnp.sum(s1.lake.T_epi.data) + jnp.sum(s1.ice.T_ice.data)
                 + jnp.sum(hb.albedo_lake))
@@ -204,7 +204,7 @@ def test_owned_coupler_builds_with_traced_parameters():
         cfg = ICE_CFG._replace(emissivity_ice=e_ice)
         step = make_coupler(CouplerConfig(), LandConfig(), cfg, LAKE_CFG,
                             atm_owns=("land", "ocean"))
-        _, hb = step(s0, _forcing(), TILES, SST, ZU, ZU, DT,
+        _, hb, _ = step(s0, _forcing(), TILES, SST, ZU, ZU, DT,
                      owned_forcing=_booked_from(s0, 250.0, 290.0))
         return jnp.sum(hb.lw_emit)
 
