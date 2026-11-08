@@ -307,6 +307,7 @@ class _ColumnWidths(NamedTuple):
     H: float            # thickness floors, zh_min [m] (votes Z8, Z14)
     S: float            # salinity floors and bounds [g/kg] (vote Z14)
     E: float            # energy floors [J m-2] = width x flux scale x dt (vote Z19)
+    F: float            # heat-flux predicates [W m-2] = width x flux scale (vote Z46)
 
 
 def _column_widths(switches: SI3SwitchConfig, dt: float = 0.0) -> _ColumnWidths:
@@ -315,7 +316,8 @@ def _column_widths(switches: SI3SwitchConfig, dt: float = 0.0) -> _ColumnWidths:
         raise ValueError(f"SI3SwitchConfig.relative_width must be finite and >= 0, got {rw!r}")
     T = rw * switches.temperature_scale_K
     return _ColumnWidths(rw / 0.01, T, T * switches.melt_point_scale_K, rw * switches.thickness_scale_m,
-                         rw * switches.salinity_scale, rw * switches.flux_scale_W_m2 * dt)
+                         rw * switches.salinity_scale, rw * switches.flux_scale_W_m2 * dt,
+                         rw * switches.flux_scale_W_m2)
 
 
 def _sharp(w: float) -> float:
@@ -326,6 +328,28 @@ def _sharp(w: float) -> float:
 def _pos(x, w: float):
     """C1 MAX(x, 0): exact for x <= 0 and x >= w (positive_part_c1); w = 0 is hard."""
     return positive_part_c1(x, _sharp(w))
+
+
+def _st_where(pred, a, b, weight):
+    """``where(pred, a, b)``; with a soft ``weight`` (C1, 1 where ``a`` is chosen) the
+    forward value stays the hard selection and the gradient is that of
+    ``b + (a - b) * weight`` (straight-through, user ruling 3a pattern)."""
+    hard = jnp.where(pred, a, b)
+    if weight is None:
+        return hard
+    return straight_through(hard, b + (a - b) * weight)
+
+
+def _st_min(x, y, w: float):
+    """``MIN(x, y)`` forward; with ``w`` > 0 the gradient is that of the C1 ``min_c1`` (vote Z49)."""
+    hard = jnp.minimum(x, y)
+    return hard if w == 0.0 else straight_through(hard, min_c1(x, y, _sharp(w)))
+
+
+def _st_max(x, y, w: float):
+    """``MAX(x, y)`` forward; with ``w`` > 0 the gradient is that of the C1 ``max_c1``."""
+    hard = jnp.maximum(x, y)
+    return hard if w == 0.0 else straight_through(hard, max_c1(x, y, _sharp(w)))
 
 
 def _clip_c1(x, lo, hi, w: float):
@@ -589,6 +613,9 @@ def _si3_zdf_bl99_step(
     # Melting-point bounds of ice temperature at 1e-3 K (vote Z17), other temperature bounds 0.01 K.
     t_clamp_width = t_clamp_width * w.per_fix
     tm_width = t_clamp_width * switches.melt_point_scale_K
+    st_melt = tm_width > 0.0     # smooth mode: straight-through melting row switch (Z44)
+    if st_melt:
+        from legoesm.ice.si3_surface import si3_ge
     if nemo_version == "5.0.1":
         _maximum_iterations = min(_maximum_iterations, _MAX_ITERATIONS_501)
     e_ice = jnp.asarray(e_ice)
@@ -729,28 +756,43 @@ def _si3_zdf_bl99_step(
             melting_surface = jnp.where(
                 _nemo_branch_ranges, Tsu >= constants.T0, False
             )
-            snow_melting = branch_snow_present & melting_surface
-            no_snow_melting = (~branch_snow_present) & melting_surface
-            b = b.at[..., 0].set(jnp.where(snow_melting, 1.0, b[..., 0]))
-            c = c.at[..., 0].set(jnp.where(snow_melting, 0.0, c[..., 0]))
-            d = d.at[..., 0].set(jnp.where(snow_melting, Tsu, d[..., 0]))
-            a = a.at[..., 1].set(jnp.where(snow_melting, 0.0, a[..., 1]))
-            d = d.at[..., 1].set(jnp.where(
-                snow_melting,
-                T_s_old[..., 0] + eta_s[..., 0]
-                * (ab_s[..., 0] + 2.0 * k_s[..., 0] * Tsu),
-                d[..., 1],
-            ))
-            b = b.at[..., 3].set(jnp.where(no_snow_melting, 1.0, b[..., 3]))
-            c = c.at[..., 3].set(jnp.where(no_snow_melting, 0.0, c[..., 3]))
-            d = d.at[..., 3].set(jnp.where(no_snow_melting, Tsu, d[..., 3]))
-            a = a.at[..., 4].set(jnp.where(no_snow_melting, 0.0, a[..., 4]))
-            d = d.at[..., 4].set(jnp.where(
-                no_snow_melting,
-                T_i_old[..., 0] + eta_i[..., 0]
-                * (ab_i[..., 0] + 2.0 * k_i[..., 0] * Tsu),
-                d[..., 4],
-            ))
+            def melt_rows(mask, a, b, c, d):
+                """Melting-surface rows (`icethd_zdf_bl99.F90:433-513`) where ``mask``."""
+                snow_melting = branch_snow_present & mask
+                no_snow_melting = (~branch_snow_present) & mask
+                b = b.at[..., 0].set(jnp.where(snow_melting, 1.0, b[..., 0]))
+                c = c.at[..., 0].set(jnp.where(snow_melting, 0.0, c[..., 0]))
+                d = d.at[..., 0].set(jnp.where(snow_melting, Tsu, d[..., 0]))
+                a = a.at[..., 1].set(jnp.where(snow_melting, 0.0, a[..., 1]))
+                d = d.at[..., 1].set(jnp.where(
+                    snow_melting,
+                    T_s_old[..., 0] + eta_s[..., 0]
+                    * (ab_s[..., 0] + 2.0 * k_s[..., 0] * Tsu),
+                    d[..., 1],
+                ))
+                b = b.at[..., 3].set(jnp.where(no_snow_melting, 1.0, b[..., 3]))
+                c = c.at[..., 3].set(jnp.where(no_snow_melting, 0.0, c[..., 3]))
+                d = d.at[..., 3].set(jnp.where(no_snow_melting, Tsu, d[..., 3]))
+                a = a.at[..., 4].set(jnp.where(no_snow_melting, 0.0, a[..., 4]))
+                d = d.at[..., 4].set(jnp.where(
+                    no_snow_melting,
+                    T_i_old[..., 0] + eta_i[..., 0]
+                    * (ab_i[..., 0] + 2.0 * k_i[..., 0] * Tsu),
+                    d[..., 4],
+                ))
+                return a, b, c, d
+
+            if st_melt:
+                # User ruling 3a pattern (votes Z44, Z45): the solved rows are NEMO's
+                # hard selection; the gradient comes from rows blended with the
+                # one-sided ramp m on [T0 - tm, T0] (exact 1 at T0).
+                m = si3_ge(Tsu, constants.T0, tm_width) * jnp.where(_nemo_branch_ranges, 1.0, 0.0)
+                hard_rows = melt_rows(melting_surface, a, b, c, d)
+                all_rows = melt_rows(jnp.ones_like(melting_surface), a, b, c, d)
+                a, b, c, d = (straight_through(h, f + (x - f) * m[..., None])
+                              for h, x, f in zip(hard_rows, all_rows, (a, b, c, d)))
+            else:
+                a, b, c, d = melt_rows(melting_surface, a, b, c, d)
 
             solution = thomas_solve(a, b, c, d, "nemo_unnormalised_unrounded")
             solved_surface = jnp.where(
@@ -759,7 +801,8 @@ def _si3_zdf_bl99_step(
             # min_c1/max_c1 are exact AT the bound, so T_su >= T0 and T_i >= Tmelt
             # still fire in smooth mode (vote Z20; the symmetric form sat w/8 below).
             Tsu_candidate = max_c1(
-                min_c1(jnp.where(melting_surface, Tsu, solved_surface), constants.T0, _sharp(tm_width)),
+                min_c1(_st_where(melting_surface, Tsu, solved_surface, m if st_melt else None),
+                       constants.T0, _sharp(tm_width)),
                 constants.T0 - 100.0, _sharp(t_clamp_width),
             )
             Ts_candidate = jnp.where(
@@ -1006,6 +1049,9 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     _check_nemo_version(nemo_version)
     w = _column_widths(switches, dt)
     full_melt_width = full_melt_width * w.per_fix
+    st = w.Tm > 0.0      # smooth mode: straight-through branch predicates and MIN caps (Z42, Z43)
+    if st:
+        from legoesm.ice.si3_surface import si3_ge, si3_gt
     growth_gate_width = growth_gate_width * w.per_fix
     a = state.concentration
     h_i0, h_s0 = state.h_ice, state.h_snow
@@ -1092,10 +1138,11 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         # (`icethd_dh.F90:204-280`).  Unlike the shared bulk snow helper, this path
         # must retain each NEMO enthalpy segment for the subsequent conservative
         # remap, so it is expressed on the existing segment carrier.
-        qml = jnp.where(
+        qml = _st_where(
             zdf.T_surface >= constants.T0,
             zdf.qns_ice + forcing.qsr_ice - forcing.qtr_ice_top - zdf.qcn_ice_top,
             0.0,
+            si3_ge(zdf.T_surface, constants.T0, w.Tm) if st else None,     # Z45
         )
         surface_energy = jnp.where(_surface_melt, _pos(qml * dt, w.E), 0.0)     # vote Z14
         melted_snow = []
@@ -1103,9 +1150,10 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             active = (hseg_s[..., k] > 0.0) & (surface_energy > 0.0)
             delta = jnp.where(
                 active,
-                jnp.maximum(
+                _st_max(
                     -surface_energy / jnp.maximum(eseg_s[..., k], 1.0e-20),
                     -hseg_s[..., k],
+                    w.H if st else 0.0,     # Z49 (MIN cap on the snow layer)
                 ),
                 0.0,
             )
@@ -1150,8 +1198,8 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         remaining_mass = jnp.maximum(forcing.evaporation * dt, 0.0)
         kept = []
         for k in range(4):
-            remove = jnp.minimum(
-                remaining_mass / constants.rho_snow, hseg_s[..., k]
+            remove = _st_min(
+                remaining_mass / constants.rho_snow, hseg_s[..., k], w.H if st else 0.0
             )
             kept.append(hseg_s[..., k] - remove)
             fx = _add_fluxes(
@@ -1178,41 +1226,45 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     melt_temperature = constants.T0 - constants.liquidus_slope * state.S_layers
     for k in range(3):
         internal_melt = _surface_melt & (zdf.T_ice[..., k] >= melt_temperature[..., k])
+        imw = (si3_ge(zdf.T_ice[..., k], melt_temperature[..., k], w.Tm) * float(_surface_melt)
+               if st else None)     # Z45
         ice_specific = -zdf.e_ice[..., k] / constants.rho_ice
         water_specific = constants.c_ocean * (
             -constants.liquidus_slope * state.S_layers[..., k]
         )
         energy_difference = ice_specific - water_specific
-        surface_remove = jnp.where(
+        surface_remove = _st_where(
             internal_melt,
             old_h[..., k],
             jnp.where(
                 _surface_melt,
-                jnp.minimum(
+                _st_min(
                     jnp.maximum(
                         surface_energy
                         / jnp.maximum(-energy_difference * constants.rho_ice, 1.0e-20),
                         0.0,
                     ),
                     old_h[..., k],
+                    w.H if st else 0.0,     # Z49
                 ),
                 0.0,
             ),
+            imw,
         )
         old_h = old_h.at[..., k].add(-surface_remove)
         h_run = jnp.maximum(0.0, h_run - surface_remove)
         melt_mass = constants.rho_ice * surface_remove * ar
         fx = _add_fluxes(
             fx,
-            hfx_res=jnp.where(internal_melt, ice_specific * melt_mass, 0.0),
-            wfx_res=jnp.where(internal_melt, melt_mass, 0.0),
-            sfx_res=jnp.where(internal_melt, melt_mass * S_flux, 0.0),
-            hfx_thd=jnp.where(internal_melt, 0.0, water_specific * melt_mass),
-            hfx_sum=jnp.where(internal_melt, 0.0, -energy_difference * melt_mass),
-            wfx_sum=jnp.where(internal_melt, 0.0, melt_mass),
-            sfx_sum=jnp.where(internal_melt, 0.0, melt_mass * S_flux),
+            hfx_res=_st_where(internal_melt, ice_specific * melt_mass, 0.0, imw),
+            wfx_res=_st_where(internal_melt, melt_mass, 0.0, imw),
+            sfx_res=_st_where(internal_melt, melt_mass * S_flux, 0.0, imw),
+            hfx_thd=_st_where(internal_melt, 0.0, water_specific * melt_mass, imw),
+            hfx_sum=_st_where(internal_melt, 0.0, -energy_difference * melt_mass, imw),
+            wfx_sum=_st_where(internal_melt, 0.0, melt_mass, imw),
+            sfx_sum=_st_where(internal_melt, 0.0, melt_mass * S_flux, imw),
         )
-        surface_energy = jnp.where(
+        surface_energy = _st_where(
             internal_melt,
             surface_energy,
             jnp.maximum(
@@ -1220,9 +1272,10 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                 - surface_remove * (-energy_difference * constants.rho_ice),
                 0.0,
             ),
+            imw,
         )
-        sublimation = jnp.minimum(
-            remaining_mass / constants.rho_ice, old_h[..., k]
+        sublimation = _st_min(
+            remaining_mass / constants.rho_ice, old_h[..., k], w.H if st else 0.0
         )
         old_h = old_h.at[..., k].add(-sublimation)
         h_run = jnp.maximum(0.0, h_run - sublimation)
@@ -1286,6 +1339,8 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             internal_melt = (zf > 0.0) & (
                 zdf.T_ice[..., k] >= melt_temperature[..., k]
             )
+            imw = (si3_gt(zf, 0.0, w.F) * si3_ge(zdf.T_ice[..., k], melt_temperature[..., k], w.Tm)
+                   if st else None)     # Z45, zf > 0 at the heat-flux width (Z46 convention)
             ice_specific = -zdf.e_ice[..., k] / constants.rho_ice
             water_specific = constants.c_ocean * (
                 -constants.liquidus_slope * state.S_layers[..., k]
@@ -1293,10 +1348,10 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             energy_difference = ice_specific - water_specific
             basal_remove = jnp.where(
                 _basal_melt,
-                jnp.where(
+                _st_where(
                     internal_melt,
                     old_h[..., k],
-                    jnp.minimum(
+                    _st_min(
                         jnp.maximum(
                             basal_energy
                             / jnp.maximum(
@@ -1305,7 +1360,9 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                             0.0,
                         ),
                         old_h[..., k],
+                        w.H if st else 0.0,     # Z49
                     ),
+                    imw,
                 ),
                 0.0,
             )
@@ -1314,15 +1371,15 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             melt_mass = constants.rho_ice * basal_remove * ar
             fx = _add_fluxes(
                 fx,
-                hfx_res=jnp.where(internal_melt, ice_specific * melt_mass, 0.0),
-                wfx_res=jnp.where(internal_melt, melt_mass, 0.0),
-                sfx_res=jnp.where(internal_melt, melt_mass * S_flux, 0.0),
-                hfx_thd=jnp.where(internal_melt, 0.0, water_specific * melt_mass),
-                hfx_bom=jnp.where(internal_melt, 0.0, -energy_difference * melt_mass),
-                wfx_bom=jnp.where(internal_melt, 0.0, melt_mass),
-                sfx_bom=jnp.where(internal_melt, 0.0, melt_mass * S_flux),
+                hfx_res=_st_where(internal_melt, ice_specific * melt_mass, 0.0, imw),
+                wfx_res=_st_where(internal_melt, melt_mass, 0.0, imw),
+                sfx_res=_st_where(internal_melt, melt_mass * S_flux, 0.0, imw),
+                hfx_thd=_st_where(internal_melt, 0.0, water_specific * melt_mass, imw),
+                hfx_bom=_st_where(internal_melt, 0.0, -energy_difference * melt_mass, imw),
+                wfx_bom=_st_where(internal_melt, 0.0, melt_mass, imw),
+                sfx_bom=_st_where(internal_melt, 0.0, melt_mass * S_flux, imw),
             )
-            basal_energy = jnp.where(
+            basal_energy = _st_where(
                 internal_melt,
                 basal_energy,
                 jnp.maximum(
@@ -1330,6 +1387,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                     - basal_remove * (-energy_difference * constants.rho_ice),
                     0.0,
                 ),
+                imw,
             )
         h_i_pre_flood = h_run
     else:
@@ -1416,7 +1474,7 @@ def _dh_step_fluxes(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     )
     flooded_snow = list(jnp.moveaxis(hseg_s, -1, 0))
     for k in (3, 2, 1, 0):
-        amount = jnp.minimum(flood_remaining, flooded_snow[k])
+        amount = _st_min(flood_remaining, flooded_snow[k], w.H if st else 0.0)     # Z49
         flooded_snow[k] = jnp.maximum(flooded_snow[k] - amount, 0.0)
         flood_content = flood_content + amount * eseg_s[..., k]
         flood_remaining = jnp.maximum(flood_remaining - amount, 0.0)
@@ -1554,7 +1612,8 @@ def _sal_step(post_dh: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
 
 
 def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
-             constants: IceConstantsConfig, nemo_version: str = "5.0.2"):
+             constants: IceConstantsConfig, nemo_version: str = "5.0.2",
+             switches: SI3SwitchConfig = SI3SwitchConfig()):
     """ice_thd_do, jpl = 1, nn_icesal = 2, no frazil (`icethd_do.F90:171-307`).
 
     New ice forms at t_bo with salinity rn_sinew*SSS; its enthalpy and
@@ -1564,6 +1623,15 @@ def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     """
 
     # Open-water growth (`icethd_do.F90:171-307`), active only for qlead<0.
+    # Smooth mode: every switch below keeps NEMO's forward value and takes its
+    # gradient from a C1 ramp (straight-through, votes Z42, Z46).
+    w = _column_widths(switches, dt)
+    st = w.F > 0.0
+    if st:
+        from legoesm.ice.si3_surface import si3_ge, si3_gt
+        rw = switches.relative_width
+        w_ice, w_cut = rw * switches.ice_switch_scale, rw * switches.cut_fraction_scale
+        cools = si3_gt(-forcing.qlead, 0.0, w.F)
     Tm = -constants.liquidus_slope * (
         _NEW_ICE_SALINITY_FRACTION * forcing.sss
     )
@@ -1575,10 +1643,11 @@ def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     )
     zEi = -e_new / constants.rho_ice
     zEw = constants.c_ocean * Tbo_c
-    vnew = jnp.where(
+    vnew = _st_where(
         forcing.qlead < 0.0,
         -(-forcing.qlead / (zEi - zEw)) / constants.rho_ice,
         0.0,
+        cools if st else None,
     )
     # Lateral growth up to rn_amax; the excess volume is accreted at the base
     # (`icethd_do.F90:233-247`).
@@ -1586,10 +1655,11 @@ def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     room = jnp.maximum(0.0, _MAXIMUM_ICE_CONCENTRATION - a_old)
     a_lateral = vnew / _NEW_ICE_THICKNESS
     capped = a_lateral > room
-    excess_area = jnp.where(capped, a_lateral - room, 0.0)
+    cap_w = si3_gt(a_lateral - room, 0.0, w_cut) if st else None
+    excess_area = _st_where(capped, a_lateral - room, 0.0, cap_w)
     residual = excess_area * _NEW_ICE_THICKNESS                    # zdv_res
-    anew = jnp.where(capped, jnp.maximum(0.0, a_lateral - excess_area), a_lateral)
-    v_lateral = jnp.where(capped, jnp.maximum(0.0, vnew - residual), vnew)
+    anew = _st_where(capped, jnp.maximum(0.0, a_lateral - excess_area), a_lateral, cap_w)
+    v_lateral = _st_where(capped, jnp.maximum(0.0, vnew - residual), vnew, cap_w)
     v_old = post_temp2.h_ice * a_old
     a_total = a_old + anew
     v_mixed = v_old + v_lateral
@@ -1597,22 +1667,26 @@ def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     # takes the new-ice values (`icethd_do.F90:250-259`).
     s_new = _NEW_ICE_SALINITY_FRACTION * forcing.sss
     had_ice = (a_old > 0.0)[..., None]
+    had_w = si3_gt(a_old, 0.0, w_ice)[..., None] if st else None
     v_den = jnp.maximum(v_mixed, _EPS20)[..., None]
-    e_mixed = jnp.where(
+    e_mixed = _st_where(
         had_ice,
         (e_new[..., None] * v_lateral[..., None] + post_temp2.e_ice * v_old[..., None]) / v_den,
         jnp.broadcast_to(e_new[..., None], post_temp2.e_ice.shape),
+        had_w,
     )
-    S_layers_new = jnp.where(
+    S_layers_new = _st_where(
         had_ice,
         (s_new[..., None] * v_lateral[..., None] + post_temp2.S_layers * v_old[..., None]) / v_den,
         jnp.broadcast_to(s_new[..., None], post_temp2.S_layers.shape),
+        had_w,
     )
     # Basal accretion of the residual and enthalpy remap (`icethd_do.F90:262-294`);
     # a category whose area is below epsi20 is emptied (numerics guard).
     keep = (a_total >= _EPS20) | (vnew <= 0.0)
-    accreted = jnp.where(keep, residual, 0.0)
-    a_total = jnp.where(keep, a_total, 0.0)
+    keep_w = (1.0 - (1.0 - si3_ge(a_total, _EPS20, w_ice)) * si3_gt(vnew, 0.0, w.H)) if st else None
+    accreted = _st_where(keep, residual, 0.0, keep_w)
+    a_total = _st_where(keep, a_total, 0.0, keep_w)
     v_total = v_mixed + accreted
     layer = v_mixed * (1.0 / 3.0)
     vseg = jnp.stack([jnp.zeros_like(layer), layer, layer, layer, accreted], axis=-1)
@@ -1627,16 +1701,18 @@ def _do_step(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
     # Snow volume is untouched by ice_thd_do: thickness spreads over the new area.
     h_snow_new = jnp.where(_has_ice, post_temp2.h_snow * a_old / jnp.where(_has_ice, a_total, 1.0), 0.0)
     new_ice = vnew > 0.0
+    new_w = si3_gt(vnew, 0.0, w.H) if st else None
+    new_w3 = new_w[..., None] if st else None
     post_do = post_temp2._replace(
         concentration=a_total,
         h_ice=h_total,
-        h_snow=jnp.where(new_ice, h_snow_new, post_temp2.h_snow),
-        e_ice=jnp.where(new_ice[..., None], e_ice_new, post_temp2.e_ice),
-        S_bulk=jnp.where(new_ice, S_bulk_new, post_temp2.S_bulk),
-        S_layers=jnp.where(new_ice[..., None], S_layers_new, post_temp2.S_layers),
+        h_snow=_st_where(new_ice, h_snow_new, post_temp2.h_snow, new_w),
+        e_ice=_st_where(new_ice[..., None], e_ice_new, post_temp2.e_ice, new_w3),
+        S_bulk=_st_where(new_ice, S_bulk_new, post_temp2.S_bulk, new_w),
+        S_layers=_st_where(new_ice[..., None], S_layers_new, post_temp2.S_layers, new_w3),
     )
     # ice_thd_do exchange in NEMO's operation order (`icethd_do.F90:204-221`).
-    zfmdt = jnp.where(forcing.qlead < 0.0, -forcing.qlead / (zEi - zEw), 0.0)
+    zfmdt = _st_where(forcing.qlead < 0.0, -forcing.qlead / (zEi - zEw), 0.0, cools if st else None)
     r1_dt = 1.0 / dt
     do_fluxes = _zero_fluxes(vnew)._replace(
         hfx_thd=zfmdt * zEw * r1_dt,
@@ -1704,7 +1780,8 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     post_sal = post_temp1._replace(S_bulk=S_bulk, S_layers=S_layers)
     post_temp2 = post_sal
 
-    post_do, do_fluxes = _do_step(post_temp2, forcing, dt, constants, nemo_version)
+    post_do, do_fluxes = _do_step(post_temp2, forcing, dt, constants, nemo_version,
+                                  switches=switches)
     fluxes = SI3ExchangeFluxes(*(
         sum(parts) for parts in zip(zdf_fluxes, dh_fluxes, sal_fluxes, do_fluxes)
     ))
