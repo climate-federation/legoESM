@@ -30,8 +30,8 @@ def test_yaml_exists_and_parses():
     # packaged resource resolves (raises if missing); loader validates fully
     _read_tuned_yaml_text(None)
     grouped = load_les_tuned_overrides()
-    # 7 flat scheme classes + CLUBB's nested CLUBBParams = 8 override groups
-    # (YSUConfig's surrogate fit was deleted with the surrogate, R4 X17)
+    # 6 flat scheme classes + CLUBB's nested CLUBBParams = 7 override groups
+    # (MYNN removed in R3; the YSU surrogate fit deleted with it, R4 X17)
     assert len(grouped) == 7
     assert "CLUBBParams" in grouped        # CLUBB now tuned (nested)
     assert len(grouped["CLUBBParams"]) >= 30
