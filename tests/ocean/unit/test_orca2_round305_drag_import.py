@@ -90,11 +90,13 @@ def test_quadratic_top_plus_bottom_substeps_receive_nonlinear_tfield(vortex, mon
     from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.state import OceanSurfaceForcing
-    real, seen = pe.nemo_ice_ocean_top_drag_coeff_faces, []
+    real, seen, firsts = pe.nemo_ice_ocean_top_drag_coeff_faces, [], []
 
     def spy(*args, rCdU_bot=None, **kw):
         if rCdU_bot is not None:
             jax.debug.callback(lambda v: seen.append(np.asarray(v)), rCdU_bot)
+        else:   # dyn_zdf passes the bottom field (and the residuals the top field) positionally
+            jax.debug.callback(lambda v: firsts.append(np.asarray(v)), args[0])
         return real(*args, rCdU_bot=rCdU_bot, **kw)
 
     monkeypatch.setattr(pe, "nemo_ice_ocean_top_drag_coeff_faces", spy)
@@ -118,7 +120,10 @@ def test_quadratic_top_plus_bottom_substeps_receive_nonlinear_tfield(vortex, mon
     want = np.where(wet, -np.asarray(r_t), -0.0)
     lin = np.where(wet, -(recipe._SMT2_RN_CD0 * recipe._SMT2_RN_UC0), -0.0)
     assert not np.allclose(want[wet], lin[wet]), "the non-linear law must differ from the linear constant here"
-    np.testing.assert_allclose(seen[0], want, rtol=1e-12, atol=0)
+    for got in seen:                                   # every substep-coefficient call
+        np.testing.assert_allclose(got, want, rtol=1e-12, atol=0)
+    # dyn_zdf's bottom RHS forms its pair from the same non-linear field
+    assert any(f.shape == want.shape and np.allclose(f, want, rtol=1e-12, atol=0) for f in firsts)
 
 
 def test_substeps_receive_nemos_bottom_tfield(vortex, monkeypatch):

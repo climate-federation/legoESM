@@ -77,9 +77,16 @@ def _port_cell_rate():
     return np.asarray(jnp.where(jnp.asarray(bl) >= 0, -r_t, -0.0))
 
 
-def test_window_is_ice_covered_and_has_land():
-    assert _PROV["ice_cells"] >= 200 and _PROV["land_cells"] >= 1
-    assert np.any(_D["rcdu_ice"] < 0)
+def test_window_is_ice_covered_and_has_scored_land():
+    assert np.sum(_D["rcdu_ice"] < 0) >= 200
+    assert np.any(_D["bottom_level"][_IN] < 0)            # land inside the scored interior
+
+
+def test_land_columns_carry_negative_zero_bottom_rate():
+    land = _D["bottom_level"][_IN] < 0
+    bot = _port_cell_rate()[_IN][land]
+    assert np.all(bot == 0.0) and np.all(np.signbit(bot))   # -0 on dry columns, NEMO rCd0_bot*ssmask
+    assert np.all(_D["nemo_rcdu_bot"][_IN][land] == 0.0)
 
 
 def test_nemo_top_coefficient_is_si3_rcdu_ice():
@@ -102,8 +109,9 @@ def test_combined_substep_coefficient_matches_nemo_statement():
     assert _rel(np.asarray(cv)[2:-2, 1:-1], want_v[1:-1, 1:-1]) <= _TOL
     # residual / dyn_zdf read the top pair alone
     assert _rel(np.asarray(su)[1:-1, 2:-2], (nt[:, 1:] + nt[:, :-1])[1:-1, 1:-1]) <= _TOL
-    # non-vacuity: the bottom pair is not negligible against the top pair here
-    assert np.max(np.abs(nb[_IN])) > 0.1 * np.max(np.abs(nt[_IN]))
+    # non-vacuity: dropping the bottom pair (the G5 form) fails the same comparison
+    cu0 = nemo_ice_ocean_top_drag_coeff_faces(jnp.asarray(_D["rcdu_ice"]), None)[0]
+    assert _rel(np.asarray(cu0)[1:-1, 2:-2], want_u[1:-1, 1:-1]) > 1e-6
 
 
 def test_combined_coefficient_gradient_is_finite():
