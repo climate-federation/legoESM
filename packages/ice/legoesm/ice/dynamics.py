@@ -171,9 +171,24 @@ def _si3_div(left, right):
 def _si3_step_c1(x, scale: float, limit_sharpness_scale: float) -> jnp.ndarray:
     """Smooth ``(x > 0)`` gate: exactly 0 for ``x <= 0``, exactly 1 for
     ``x >= scale / limit_sharpness_scale``, C1 ``smoothstep_cubic`` between.
-    Callers run NEMO's literal comparison instead when the scale is ``inf``."""
+    The band always lies inside the region where NEMO's predicate is TRUE (also
+    for NEMO's ``>=`` tests: only the measure-zero equality differs), so a
+    product of gates is exactly 0 wherever NEMO's conjunction is false -- e.g.
+    the static-friction branch with zero basal stress.  Callers run NEMO's
+    literal comparison instead when the scale is ``inf``."""
 
     return smoothstep_cubic(x * (limit_sharpness_scale / scale))
+
+
+def _si3_blend_c1(weight, one_value, zero_value):
+    """``weight * one_value + (1 - weight) * zero_value`` that returns the literal operand
+    (bitwise) at ``weight`` 1 or 0, i.e. outside the gate band."""
+
+    return jnp.where(
+        weight >= _SI3_ONE,
+        one_value,
+        jnp.where(weight <= _SI3_ZERO, zero_value, zero_value + weight * (one_value - zero_value)),
+    )
 
 
 def _si3_validate_limit_sharpness(limit_sharpness_scale: float) -> bool:
@@ -1951,8 +1966,9 @@ def si3_cgrid_aevp_solver(
                     static_weight = gate(
                         -_si3_add(rhs, basal_u), _SI3_STATIC_FRICTION_FORCE_SCALE_N_M2
                     ) * gate(rhs, _SI3_STATIC_FRICTION_FORCE_SCALE_N_M2)
+                    # literal operands outside the band (bitwise NEMO at weight 0 / 1)
                     value = nemo_source_round(
-                        dynamic_value + static_weight * (static_value - dynamic_value)
+                        _si3_blend_c1(static_weight, static_value, dynamic_value)
                     )
             else:
                 value = _si3_div(
@@ -2063,8 +2079,9 @@ def si3_cgrid_aevp_solver(
                     static_weight = gate(
                         -_si3_add(rhs, basal_v), _SI3_STATIC_FRICTION_FORCE_SCALE_N_M2
                     ) * gate(rhs, _SI3_STATIC_FRICTION_FORCE_SCALE_N_M2)
+                    # literal operands outside the band (bitwise NEMO at weight 0 / 1)
                     value = nemo_source_round(
-                        dynamic_value + static_weight * (static_value - dynamic_value)
+                        _si3_blend_c1(static_weight, static_value, dynamic_value)
                     )
             else:
                 value = _si3_div(

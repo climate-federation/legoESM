@@ -52,7 +52,8 @@ def _ice_cells(forcing):
 
 
 def _plant(forcing, cells, rho_i):
-    """Put cells inside the epsi10 presence band and the 1 kg/m2 mass-floor band (rho_i v = 1.004 kg/m2)."""
+    """Put cells inside the epsi10 presence band (above epsi10) and the 1 kg/m2 mass-floor band
+    (rho_i v = 1.004 kg/m2)."""
     at = np.asarray(forcing.concentration_t).copy()
     vi = np.asarray(forcing.ice_volume_t).copy()
     vs = np.asarray(forcing.snow_volume_t).copy()
@@ -72,6 +73,28 @@ def test_step_gate_exact_outside_band():
     assert 0.0 < float(g[2]) < 1.0
     with pytest.raises(ValueError, match="limit_sharpness_scale"):
         dyn._si3_validate_limit_sharpness(0.0)
+    # band inside the TRUE region: a product of a (x > 0) and a (-x > 0) gate is exactly 0 everywhere
+    xs = jnp.linspace(-0.02, 0.02, 41)
+    assert float(jnp.max(dyn._si3_step_c1(xs, 1.0, _SCALE) * dyn._si3_step_c1(-xs, 1.0, _SCALE))) == 0.0
+
+
+def test_blend_returns_literal_operands_outside_band():
+    """At weight 1 / 0 the static-friction blend is bitwise the static / dynamic operand, not
+    dynamic + 1 * (static - dynamic) (codex SW rev1 MED: differs by ulps for disparate magnitudes)."""
+    one, zero = jnp.array([3.0e-4, -7.1e-9]), jnp.array([1.0e8, 2.3e5])
+    assert np.array_equal(np.asarray(dyn._si3_blend_c1(jnp.ones(2), one, zero)), np.asarray(one))
+    assert np.array_equal(np.asarray(dyn._si3_blend_c1(jnp.zeros(2), one, zero)), np.asarray(zero))
+    mid = np.asarray(dyn._si3_blend_c1(jnp.full(2, 0.25), one, zero))
+    assert np.allclose(mid, 0.25 * np.asarray(one) + 0.75 * np.asarray(zero), rtol=1e-15)
+
+
+def test_traced_limit_scale_is_refused():
+    """A traced limit_sharpness_scale cannot silently pick an arm: the static check raises under jit."""
+    state, forcing, metrics, config = _band()
+    with pytest.raises(jax.errors.ConcretizationTypeError):
+        jax.jit(lambda s: dyn.si3_cgrid_aevp_solver(state, forcing, metrics, config, limit_sharpness_scale=s))(
+            100.0
+        )
 
 
 def test_aevp_default_is_smooth_and_bounded_in_planted_bands():
@@ -172,14 +195,52 @@ def test_prather_limiter_smooth_exact_outside_bands(axis):
 
 @pytest.mark.parametrize("limit", [tr._si3_prather_limit_x, tr._si3_prather_limit_y])
 def test_prather_limiter_smooth_check_grads(limit):
+    """check_grads w.r.t. the moments (one slope planted inside its cap band).  The cap-relative band widths are
+    stop_gradient constants, so the content derivative is checked for finiteness only."""
     content, moments, wet = _limit_inputs(1, epsi20_cells=False)
 
-    def f(c, m0, m2):
+    def f(m0, m2):
         mom = (m0, moments[1], m2, moments[3], moments[4])
-        out_c, out_m = limit(c, mom, wet, _SCALE)
+        out_c, out_m = limit(content, mom, wet, _SCALE)
         return jnp.sum(out_c) + sum(jnp.sum(m * m) for m in out_m)
 
-    check_grads(f, (content, moments[0], moments[2]), order=1, modes=["rev"], atol=1e-6, rtol=1e-6, eps=1e-7)
+    check_grads(f, (moments[0], moments[2]), order=1, modes=["rev"], atol=1e-6, rtol=1e-6, eps=1e-7)
+    gc = jax.grad(lambda c: sum(jnp.sum(m * m) for m in limit(c, moments, wet, _SCALE)[1]))(content)
+    assert np.isfinite(np.asarray(gc)).all()
+
+
+@pytest.mark.parametrize("limit", [tr._si3_prather_limit_x, tr._si3_prather_limit_y])
+def test_prather_limiter_fp32_zero_content_gradient_finite(limit):
+    """fp32, zero and epsi20-band content: reverse gradients stay finite (codex SW rev1 HIGH)."""
+    content = jnp.asarray(np.array([[[0.0], [3.0e-23], [1.0]]], np.float32))
+    moments = tuple(jnp.asarray(np.full(content.shape, v, np.float32)) for v in (0.0, 0.1, 0.0, 0.2, 0.0))
+    wet = jnp.ones(content.shape[:2], jnp.float32)
+
+    def f(c, m0):
+        out_c, out_m = limit(c, (m0, *moments[1:]), wet, _SCALE)
+        return jnp.sum(out_c) + sum(jnp.sum(m) for m in out_m)
+
+    gc, gm = jax.grad(f, argnums=(0, 1))(content, moments[0])
+    assert np.isfinite(np.asarray(gc)).all() and np.isfinite(np.asarray(gm)).all()
+
+
+def test_static_friction_smooth_default_is_bitwise_outside_band():
+    """Static-friction branch: with the force balance far outside the 1e-3 N/m2 band the smooth default returns
+    the literal operand (bitwise the hard arm), not dynamic + 1 * (static - dynamic) (codex SW rev1 MED)."""
+    from tests.ice.unit.test_si3_landfast_l16 import _INITIAL_SPEED_M_S, _fixture
+
+    state, forcing, metrics, config = _fixture()
+    # zero strength and a huge dt: static and dynamic values differ by many orders, so
+    # dynamic + 1 * (static - dynamic) is not bitwise static (codex SW rev1 reproducer)
+    config = config._replace(strength_parameter_pa=0.0, dt_s=1.0e7)
+    # positive air stress: rhs >= 0.01 N/m2 lies outside the rhs > 0 gate band (the static cell stays static)
+    forcing = forcing._replace(air_stress_u_t=forcing.air_stress_u_t + 0.01, air_stress_v_t=forcing.air_stress_v_t + 0.01)
+    hard = dyn.si3_cgrid_aevp_solver(state, forcing, metrics, config, limit_sharpness_scale=math.inf)
+    smooth = dyn.si3_cgrid_aevp_solver(state, forcing, metrics, config)
+    # zero strength -> beta = 50; decay = MAX(0, 50 - dt relax) = 0: the static branch value is u0 / 51
+    assert float(hard.u_ice_u[3, 3]) == _INITIAL_SPEED_M_S / 51.0
+    assert float(hard.u_ice_u[3, 3]) == float(smooth.u_ice_u[3, 3])
+    assert float(hard.v_ice_v[3, 3]) == float(smooth.v_ice_v[3, 3])
 
 
 def _prather(f, lss):

@@ -642,8 +642,11 @@ def _si3_prather_limit_smooth(
     one_third = sr(_SI3_PRA_ONE / _SI3_PRA_THREE)
     content = sr(positive_part_c1(content, s / _SI3_PRA_AREA_FLOOR))
     slope_cap = sr(_SI3_PRA_SLOPE_CAP_FACTOR * content)
-    s_cap = s / (slope_cap + _SI3_PRA_AREA_FLOOR)
-    s_content = s / (content + _SI3_PRA_AREA_FLOOR)
+    # Band widths relative to the local cap are numerical constants for AD (stop_gradient): their own
+    # derivative is a smoothing artefact, and at zero content it overflows in fp32 (s / epsi20 = 1e22,
+    # squared) into NaN cotangents (codex SW rev1 HIGH).
+    s_cap = lax.stop_gradient(s / (slope_cap + _SI3_PRA_AREA_FLOOR))
+    s_content = lax.stop_gradient(s / (content + _SI3_PRA_AREA_FLOOR))
     slope = sr(min_c1(sr(max_c1(slope, -slope_cap, s_cap)), slope_cap, s_cap))
     abs_slope = sr(positive_part_c1(slope, s_cap) + positive_part_c1(-slope, s_cap))
     second_upper = sr(
