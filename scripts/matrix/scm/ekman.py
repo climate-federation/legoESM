@@ -111,7 +111,7 @@ def run(args: argparse.Namespace) -> int:
     scm.run(nsteps=nsteps)
     u_low = float(scm.state.u.data[0, 0, 0, -1])
     v_low = float(scm.state.v.data[0, 0, 0, -1])
-    qke_low = float(scm.phys_state.qke[0, -1])
+    qke_low = float(scm.phys_state.qke[0, 0, -1])   # (ncol, 3, nlev) carry: qke slot
     T_low = float(scm.state.T.data[0, 0, 0, -1])
     speed_low = (u_low ** 2 + v_low ** 2) ** 0.5
     veer = jnp.rad2deg(jnp.arctan2(v_low, u_low))

@@ -98,7 +98,7 @@ def test_gabls1_surface_qke_matches_friction_velocity_bc(gabls1_run):
     v_low = float(gabls1_run.state.v.data[0, 0, 0, -1])
     V = np.sqrt(u_low ** 2 + v_low ** 2 + 1e-4)
     expected = (24.0 ** (2 / 3)) * 1.5e-3 * V * V
-    actual = float(gabls1_run.phys_state.qke[0, -1])
+    actual = float(gabls1_run.phys_state.qke[0, 0, -1])   # qke slot (vote Z1a)
     np.testing.assert_allclose(actual, expected, rtol=0.10)
 
 

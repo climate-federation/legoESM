@@ -155,7 +155,7 @@ def _tke_diag(phys_state, turbulence: str):
     if turbulence == "clubb":
         wp2 = np.asarray(phys_state.clubb_moments)[0, 4, :]
         return float(wp2[0]), float(wp2.max())     # ascending: index 0 = surface
-    qke = np.asarray(phys_state.qke)[0]
+    qke = np.asarray(phys_state.qke)[0, 0]   # (ncol, 3, nlev) carry: qke slot
     return float(qke[-1]), float(qke.max())        # top-down: last = surface
 
 
