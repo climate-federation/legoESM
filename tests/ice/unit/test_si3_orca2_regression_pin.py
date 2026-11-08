@@ -45,9 +45,7 @@ GEN = _load_generator()
 PROVENANCE = (FIXTURE / "provenance.json").read_text()
 
 
-def _bits(a: np.ndarray) -> np.ndarray:
-    a = np.asarray(a)
-    return a.view(f"u{a.itemsize}") if a.dtype.kind == "f" else a
+_bits = GEN._bits
 
 
 def _assert_bitwise(expected: dict, actual: dict) -> None:
@@ -69,7 +67,9 @@ def _load(rung: str) -> tuple[dict, dict]:
 @pytest.fixture
 def pin_policy():
     if jax.default_backend() != "cpu":
-        pytest.skip("the pin runs under the CPU-only libm transcendental policy")
+        pytest.skip(
+            f"bitwise pin runs under the CPU-only libm policy; backend={jax.default_backend()}"
+        )
     with GEN.set_pin_policy():
         yield
 

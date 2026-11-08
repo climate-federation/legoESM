@@ -275,6 +275,10 @@ def build_inputs(rng: np.random.Generator) -> dict[str, np.ndarray]:
     d["str_taum"] = rng.uniform(0.0, 0.3, o2)
     d["str_utau_oce"] = rng.uniform(-0.2, 0.2, o2)
     d["str_vtau_oce"] = rng.uniform(-0.2, 0.2, o2)
+    # vote S1: nonzero carried-in aEVP stresses (drawn last: other rungs unchanged).
+    d["stress1_t"] = _lbc(rng.uniform(-2.0e4, 2.0e4, (JPI, JPJ)) * tmask, "T")
+    d["stress2_t"] = _lbc(rng.uniform(-2.0e4, 2.0e4, (JPI, JPJ)) * tmask, "T")
+    d["stress12_f"] = _lbc(rng.uniform(-1.0e4, 1.0e4, (JPI, JPJ)), "F")
     return d
 
 
@@ -395,11 +399,13 @@ def rung_rheo(d):
     out = {}
     for full in (True, False):
         fold = SI3ORCA2FoldProgram(nn_hls=NN_HLS, nfd_full_when_absent=full)
-        for smooth in (False, True):  # the aEVP below reads the smoothed (True) one
-            st = si3_orca2_ice_strength(
+        strengths = {}
+        for smooth in (False, True):
+            strengths[smooth] = si3_orca2_ice_strength(
                 a_i=s.a_i, v_i=s.v_i, tmask=j["tmask"], config=_strength_cfg(smooth), fold=fold
             )
-            out.update(pack(f"strength/{full}/{smooth}", st))
+            out.update(pack(f"strength/{full}/{smooth}", strengths[smooth]))
+        st = strengths[True]  # the deck smooths (ln_str_smooth = .true.)
         forcing = SI3CGridAEVPForcing(
             concentration_t=st.at_i,
             ice_volume_t=jnp.sum(s.v_i, axis=-1),
@@ -413,7 +419,7 @@ def rung_rheo(d):
             fast_tmask=z, depth_t=z, depth_u=z, depth_v=z,
             iceberg_tmask=z, iceberg_umask=z, iceberg_vmask=z,
         )
-        state0 = SI3CGridAEVPState(u_ice_u=j["u_ice_entry"], v_ice_v=j["v_ice_entry"], stress1_t=z, stress2_t=z, stress12_f=z)
+        state0 = SI3CGridAEVPState(u_ice_u=j["u_ice_entry"], v_ice_v=j["v_ice_entry"], stress1_t=j["stress1_t"], stress2_t=j["stress2_t"], stress12_f=j["stress12_f"])
         kw = dict(
             strength_t=st.strength, u_ice_b=j["u_ice_b"], v_ice_b=j["v_ice_b"], ssh_m=j["ssh_m"],
             snwice_mass=s.snwice_mass, snwice_mass_b=s.snwice_mass_b, ln_ice_embd=False, fold=fold,
@@ -513,7 +519,7 @@ def _inputs_for(rung: str, base: dict, state: SI3State, halo_state: SI3State) ->
         "o4": masks + ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "sss_m", "sst_m"),
         "rheo": masks + ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f", "coriolis_t",
                          "air_u_t", "air_v_t", "ocean_u_u", "ocean_v_v", "ssh_m", "u_ice_b", "v_ice_b",
-                         "u_ice_entry", "v_ice_entry"),
+                         "u_ice_entry", "v_ice_entry", "stress1_t", "stress2_t", "stress12_f"),
         "finalize": masks + ("sss_m", "sst_m", "rn_amax_2d")
         + tuple(k for k in base if k.startswith(("flx_", "upd_", "str_"))),
     }[rung]
