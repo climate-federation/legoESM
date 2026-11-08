@@ -1953,6 +1953,20 @@ class ModelDriver:
         """
         return self._fric_decay
 
+    def current_tracer(self, name: str):
+        """Grid-space tracer ``name`` as the running lane holds it (None if absent).
+
+        The column loop (MPAS grid or ``dycore.column_lane``) advances the
+        tracers it carries in ``state.tracers``; the driver's own store keeps
+        their initial copy there.  A tracer the loop does not carry (e.g. a dry
+        run's ``q_v``) only exists in the driver store.
+        """
+        if self.config.dycore.column_lane or self.config.grid.grid_type == "mpas":
+            x = (getattr(self.state, "tracers", None) or {}).get(name)
+            if x is not None:
+                return getattr(x, "data", x)
+        return self.tracers.get(name)
+
     # Backward-compatible accessors for individual tracers.
     @property
     def q_v(self) -> jax.Array:
