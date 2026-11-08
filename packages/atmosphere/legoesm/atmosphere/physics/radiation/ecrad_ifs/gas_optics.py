@@ -91,6 +91,23 @@ def band_from_g_sw():
     return (bands - 1) % (bands.max() + 1)
 
 
+def _band_edges(lookup, lane):
+    lims = np.asarray(lookup.bnd_lims_wn, np.float64)
+    edges = np.full((lane.max() + 1, 2), np.nan)
+    edges[lane] = lims[np.asarray(lookup.g_point_to_bnd, np.int64)]
+    return edges
+
+
+def band_edges_lw():
+    """RRTMGP LW band edges (cm-1, ``(nband, 2)``), indexed as band_from_g_lw."""
+    return _band_edges(_optics().gas_optics_lw, band_from_g_lw())
+
+
+def band_edges_sw():
+    """RRTMGP SW band edges (cm-1, ``(nband, 2)``), indexed as band_from_g_sw."""
+    return _band_edges(_optics().gas_optics_sw, band_from_g_sw())
+
+
 def _cells(a):
     """(ncol, nlev) top-down -> (ncol, 1, nlev+2) surface-first with halo cells."""
     a = a[:, None, ::-1]

@@ -1,0 +1,52 @@
+{
+ "data_set": "openifs-48r1-ifsdata-b8364fe2ab722bf2249b42106fd4ba1d",
+ "departure": "49r1 reads aerosol_ifs_49R1_20230725.nc (su_radiation_scheme.F90:441); the public 48r1 aerosol_ifs_49R1_20230119.nc is used under that name (user decision 2026-11-04, votes A1a, A2a)",
+ "npz_sha256": "2b76015fff497a2fca473e7f951ac0d176f717c8e9da5f363740aee6e38c1ad6",
+ "optics_file": "aerosol_ifs_49R1_20230119.nc",
+ "optics_sha256": "47bc7892fd11b412d38c1f3c1e2f67583fb58472bb17d57d89de92a8782d4349",
+ "shapes": {
+  "g_philic": [
+   331,
+   12,
+   13
+  ],
+  "g_phobic": [
+   331,
+   18
+  ],
+  "mass_ext_philic": [
+   331,
+   12,
+   13
+  ],
+  "mass_ext_phobic": [
+   331,
+   18
+  ],
+  "rh_lower": [
+   12
+  ],
+  "ssa_philic": [
+   331,
+   12,
+   13
+  ],
+  "ssa_phobic": [
+   331,
+   18
+  ],
+  "wavenumber": [
+   331
+  ]
+ },
+ "variables": {
+  "g_philic": "asymmetry_hydrophilic",
+  "g_phobic": "asymmetry_hydrophobic",
+  "mass_ext_philic": "mass_ext_hydrophilic",
+  "mass_ext_phobic": "mass_ext_hydrophobic",
+  "rh_lower": "relative_humidity1",
+  "ssa_philic": "ssa_hydrophilic",
+  "ssa_phobic": "ssa_hydrophobic",
+  "wavenumber": "wavenumber"
+ }
+}
