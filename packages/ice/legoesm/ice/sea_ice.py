@@ -42,7 +42,7 @@ from legoesm.core.bulk_flux import (
     validate_bulk_scheme,
 )
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
-from legoesm.core.smooth import max_c1, min_c1, smoothstep_cubic
+from legoesm.core.smooth import max_c1, min_c1, smoothstep_cubic, straight_through
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.latlon import LatLonCGridGeometry, LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh
@@ -91,7 +91,7 @@ _NO_SHEAR_RIDGING = 0.0
 # ``switch_width x scale`` (user rule 2026-10-27: smooth at 0.01; 0.0 = NEMO's
 # hard form, used by the oracle tests).  Scales (votes W3-W8): temperature
 # 1 K, heat flux 1 W/m2 (heat content: dt x 1 W/m2), snow-free test
-# _SI3_SNOW_RAMP_WIDTH_M (held hard), thickness / volume / fraction thresholds themselves.
+# hard forward + straight-through gradient, thickness / volume / fraction thresholds themselves.
 _SI3_SWITCH_RELATIVE_WIDTH = 0.01
 _SI3_T_SCALE_K = 1.0
 _SI3_FLUX_SCALE_W_M2 = 1.0
@@ -102,11 +102,13 @@ _SI3_FLUX_SCALE_W_M2 = 1.0
 _SI3_ICE_SWITCH_SCALE = 1.0e-10    # ice switch ramp width scale (epsi10)
 _SI3_CUT_FRACTION_SCALE = 1.0e-3   # qlead landfast "packed" cut (5.0.2 margin)
 _SI3_FULL_COVER_SCALE = 1.0e-10    # qlead full-cover cut (epsi10)
-# Snow-free test (h_s == 0) ramp width [m]: 0.0 = NEMO's hard test in every
-# mode.  HELD at 0.0 pending a user decision (vote X4 escalated; trace snow
-# 1e-30..1e-15 m sits in 355 ORCA1 ice cells, see the PR's width table);
-# a positive value gives ``1 - C1 ramp(h_s / width)`` when switch_width > 0.
-_SI3_SNOW_RAMP_WIDTH_M = 0.0
+# Snow-free test (h_s == 0), user ruling 2026-11-04 (option 3a): the forward
+# value is NEMO's exact hard test in every mode (class A); in smooth mode the
+# gradient comes from the surrogate ``1 - C1 ramp(h_s / width)``
+# (straight-through), width 0.01 x snow_cover_depth_nemo (vote Y1).  The
+# ORCA1 record holds trace snow down to 1.2e-30 m in 355 ice cells, so no
+# smooth FORWARD width is negligible there.
+_SI3_SNOW_SURROGATE_WIDTH_M = 0.01 * constants.snow_cover_depth_nemo
 
 
 def _sharp(w):
@@ -136,15 +138,11 @@ def _si3_mix(weight, a, b, w):
 
 
 def _si3_snow_free(h_snow, w, preserve_subnormal):
-    """1 where ``h_snow == 0`` (NEMO's IEEE test); ramp ``1 - C1(h_snow / w)`` if ``w > 0``.
+    """1 where ``h_snow == 0`` (NEMO's IEEE test) -- forward value hard in every mode.
 
-    ``w = switch_width > 0 ? _SI3_SNOW_RAMP_WIDTH_M : 0``; the module width is
-    held at 0.0 (hard) pending a user decision (vote X4): the ORCA1 record
-    holds trace snow down to 1.2e-30 m in 355 ice cells, so any ramp width
-    >= 1e-15 m changes their through-ice sunlight by up to 218 W/m2.
+    ``w > 0`` (smooth mode): straight-through, gradient of the surrogate
+    ``1 - C1 ramp(h_snow / w)``; ``w == 0``: plain hard indicator.
     """
-    if w != 0.0:
-        return 1.0 - smoothstep_cubic(h_snow / w)
     if preserve_subnormal:
         # XLA CPU flushes the smallest positive fp64 snow thickness to zero in
         # floating comparisons.  NEMO's scalar IEEE comparison does not.  A
@@ -154,7 +152,10 @@ def _si3_snow_free(h_snow, w, preserve_subnormal):
         zero = (snow_bits << jnp.uint64(1)) == jnp.uint64(0)
     else:  # private one-variable ablation; never exposed in SeaIceConfig
         zero = h_snow == 0.0
-    return zero.astype(jnp.result_type(h_snow, float))
+    hard = zero.astype(jnp.result_type(h_snow, float))
+    if w == 0.0:
+        return hard
+    return straight_through(hard, 1.0 - smoothstep_cubic(h_snow / w))
 
 
 def grid_supports_ice_dynamics(grid) -> bool:
@@ -659,7 +660,7 @@ def _nemo_si3_ice_albedo(
     r = switch_width
     t_freeze = constants.T_freeze
     snow_free = _si3_snow_free(
-        h_snow, _SI3_SNOW_RAMP_WIDTH_M if r > 0.0 else 0.0, _preserve_subnormal_snow
+        h_snow, _SI3_SNOW_SURROGATE_WIDTH_M if r > 0.0 else 0.0, _preserve_subnormal_snow
     )
     melting = _si3_ge(T_surface, t_freeze, r * _SI3_T_SCALE_K)
     snow_fraction = h_snow / (h_snow + constants.snow_cover_depth_nemo)
@@ -846,7 +847,7 @@ def _nemo_si3_blk_ice_2(
         r,
     )
     snow_free = _si3_snow_free(
-        h_snow, _SI3_SNOW_RAMP_WIDTH_M if r > 0.0 else 0.0, _preserve_subnormal_snow
+        h_snow, _SI3_SNOW_SURROGATE_WIDTH_M if r > 0.0 else 0.0, _preserve_subnormal_snow
     )
     qtr_ice_top = _si3_mix(snow_free, qsr_ice * transmission, 0.0, r)
     return {
