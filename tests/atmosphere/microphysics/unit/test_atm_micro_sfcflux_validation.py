@@ -291,11 +291,13 @@ class TestSundqvist:
 
         def loss_rate(rate):
             cfg = SundqvistConfig(auto_rate=rate)
-            out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cfg, cell_area=1.0e10, prev_state=prev)
+            # dt 60 s: at 1800 s the release is capped by the available cloud
+            # and carries no gradient in the rate.
+            out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 60.0, cfg, cell_area=1.0e10, prev_state=prev)
             return jnp.sum(out.precipitation)
 
         gr = jax.grad(loss_rate)(SundqvistConfig().auto_rate)
-        assert jnp.isfinite(gr)
+        assert jnp.isfinite(gr) and jnp.abs(gr) > 0.0
 
     def test_idealized_dry_column_zero(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=0.3)
