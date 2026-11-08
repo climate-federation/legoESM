@@ -1,0 +1,53 @@
+{
+  "kind": "self-referenced regression pin, NOT an oracle",
+  "generator": "tests/ice/fixtures/si3_orca2_regression/make_fixture.py",
+  "origin_main_sha": "efa650f75e466a91a7d7c08308d7f3820948b814",
+  "generator_blob_sha": "d60135f20914b07c7396701f88950746708295a5",
+  "seed": 20261108,
+  "grid": [
+    12,
+    10
+  ],
+  "nn_hls": 2,
+  "jax": "0.9.1",
+  "jaxlib": "0.9.1",
+  "numpy": "2.4.3",
+  "python": "3.11.15",
+  "JAX_ENABLE_X64": "1",
+  "platform": "cpu",
+  "precision_policy": "PrecisionPolicy.fp64(transcendentals='libm')",
+  "aevp_subcycles": {
+    "solver": 100,
+    "trace": 4
+  },
+  "o4_cases": [
+    [
+      "c1",
+      "state",
+      0.1,
+      0.05,
+      true,
+      null,
+      1
+    ],
+    [
+      "c2",
+      "c1",
+      8.0,
+      -4.0,
+      false,
+      null,
+      2
+    ],
+    [
+      "cdelay",
+      "c1",
+      8.0,
+      -4.0,
+      false,
+      2.0,
+      3
+    ]
+  ],
+  "total_npz_bytes": 2276809
+}
