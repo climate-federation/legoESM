@@ -213,3 +213,22 @@ def test_soft_column_do_budgets_close_inside_the_bands(monkeypatch):
         q0, q1 = np.sum(np.asarray(s_.e_ice)[m], -1) * v0 / 3.0, np.sum(np.asarray(o.e_ice)[m], -1) * v1 / 3.0
         np.testing.assert_allclose((q1 - q0) / DT, g_("hfx_thd") - g_("hfx_opw"), rtol=1e-10, atol=1e-8)
         np.testing.assert_allclose(np.asarray(o.h_snow)[m] * a1, np.asarray(s_.h_snow)[m] * a0, rtol=1e-14, atol=0)
+
+
+def test_do_step_keep_switch_soft_pass_keeps_the_category(monkeypatch):
+    """Z63: below epsi20 total area the hard step empties the category; the soft pass
+    keeps it (updated branch, Z61), so the gradient of the area is the growth's."""
+    from test_si3_t4col_thd_do import DT, _state
+    st, fz = _state()
+    st = st._replace(concentration=jnp.zeros_like(st.concentration))
+    v_unit = -np.asarray(bl._do_step(st, fz._replace(qlead=-jnp.ones_like(fz.qlead)), DT, K,
+                                     nemo_version="5.0.1")[1].wfx_opw) * DT / float(K.rho_ice)
+    a_lat = 0.5 * bl._EPS20
+    q = jnp.asarray(-a_lat * bl._NEW_ICE_THICKNESS / v_unit)
+    area = lambda q_: bl._do_step(st, fz._replace(qlead=q_), DT, K, nemo_version="5.0.1",  # noqa: E731
+                                  switches=SMOOTH)[0].concentration
+    assert np.all(np.asarray(_with(monkeypatch, "hard", area, q)) == 0.0)
+    soft = np.asarray(_with(monkeypatch, "soft", area, q))
+    assert np.all(soft == np.asarray(-q * v_unit / bl._NEW_ICE_THICKNESS))   # a_lateral, exact
+    g = np.asarray(jax.grad(lambda q_: jnp.sum(area(q_)))(q))
+    np.testing.assert_allclose(g, soft / np.asarray(q), rtol=1e-12, atol=0)
