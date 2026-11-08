@@ -74,13 +74,51 @@ def test_guard_refuses_partial_top_plus_bottom(vortex, change):
         LatLonCGridOceanModel(vortex.recipe.grid, vortex.recipe.z_coord, cfg)
 
 
-def test_guard_refuses_quadratic_top_plus_bottom(vortex):
+def test_guard_refuses_loglayer_top_plus_bottom(vortex):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     cfg = recipe._nemo_linear_bottom_drag(vortex.recipe.model_config)
     cfg = cfg._replace(implicit_ice_ocean_top_drag=True, bottom_drag=cfg.bottom_drag._replace(
-        bottom_drag_scheme="nemo_quadratic"))
-    with pytest.raises(ValueError, match="full linear bundle"):
+        bottom_drag_scheme="nemo_loglayer"))
+    with pytest.raises(ValueError, match="full bundle"):
         LatLonCGridOceanModel(vortex.recipe.grid, vortex.recipe.z_coord, cfg)
+
+
+def test_quadratic_top_plus_bottom_substeps_receive_nonlinear_tfield(vortex, monkeypatch):
+    # ORCA1 (ln_non_lin + ln_drgimp + ln_drgice_imp): the composition now builds, and the
+    # substeps get rCdU_bot = -rCd0_bot*SQRT(0.25*(zut^2+zvt^2)+rn_ke0) (zdfdrg.F90:186-190),
+    # the same cell rate the ORCA1 oracle (test_ice_top_drag_nonlin_orca1_oracle) certifies.
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.state import OceanSurfaceForcing
+    real, seen = pe.nemo_ice_ocean_top_drag_coeff_faces, []
+
+    def spy(*args, rCdU_bot=None, **kw):
+        if rCdU_bot is not None:
+            jax.debug.callback(lambda v: seen.append(np.asarray(v)), rCdU_bot)
+        return real(*args, rCdU_bot=rCdU_bot, **kw)
+
+    monkeypatch.setattr(pe, "nemo_ice_ocean_top_drag_coeff_faces", spy)
+    cfg = recipe._nemo_linear_bottom_drag(vortex.recipe.model_config)
+    cfg = cfg._replace(implicit_ice_ocean_top_drag=True, bottom_drag=cfg.bottom_drag._replace(
+        bottom_drag_scheme="nemo_quadratic"))
+    model = LatLonCGridOceanModel(vortex.recipe.grid, vortex.recipe.z_coord, cfg)
+    s0 = vortex.recipe.initial_state
+    rng = np.random.default_rng(11)
+    s0 = s0._replace(u=s0.u.replace(data=jnp.asarray(0.05 * rng.standard_normal(s0.u.data.shape))))
+    zero = jnp.zeros_like(s0.eta.data)
+    out = model.step(s0, dt=vortex.dt_s, surface_forcing=OceanSurfaceForcing(
+        tau_x=zero, tau_y=zero, ice_ocean_top_drag_rCdu=_field(vortex, 1.5e-3, 5)))
+    assert np.all(np.isfinite(np.asarray(out.eta.data)))
+    assert len(seen) == 2, "the substeps never passed rCdU_bot"
+    zc = vortex.recipe.z_coord
+    # the quadratic law does not read the thickness (any finite array of the cell shape)
+    r_t = pe.nemo_bottom_drag_rate_faces(s0.u.data, s0.v.data, jnp.ones(zc.is_active.shape), zc, cfg,
+                                         vortex.recipe.grid, return_cell_rate=True)[4]
+    wet = np.asarray(zc.bottom_level) >= 0
+    want = np.where(wet, -np.asarray(r_t), -0.0)
+    lin = np.where(wet, -(recipe._SMT2_RN_CD0 * recipe._SMT2_RN_UC0), -0.0)
+    assert not np.allclose(want[wet], lin[wet]), "the non-linear law must differ from the linear constant here"
+    np.testing.assert_allclose(seen[0], want, rtol=1e-12, atol=0)
 
 
 def test_substeps_receive_nemos_bottom_tfield(vortex, monkeypatch):
