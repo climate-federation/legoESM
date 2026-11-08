@@ -88,3 +88,19 @@ def test_unknown_fold_scheme_is_refused():
 def test_fold_refresh_gradient_is_finite():
     g = jax.grad(lambda s: jnp.sum(_run("orca_f_pivot", s)[1][0][:, -_H:, 0]))(jnp.asarray(1.0))
     assert np.isfinite(float(g)) and float(g) != 0.0
+
+
+@pytest.mark.parametrize("icycle, n_exchanges", [(1, 1), (2, 1), (3, 2)])
+def test_fold_exchange_follows_nemo_cadence(monkeypatch, icycle, n_exchanges):
+    # icedyn_adv_pra.F90:435-525 with nn_hls=2: no exchange while ihls = max(0, 2 - jt) > 0, so
+    # jt=1 of a multi-cycle step exchanges nothing; one exchange = contents + 5 moments.
+    import legoesm.ice.dynamics as dyn
+
+    calls = []
+    real = dyn.si3_orca_f_pivot_halo
+    monkeypatch.setattr(dyn, "si3_orca_f_pivot_halo", lambda v, p, s: calls.append(s) or real(v, p, s))
+    _D_icycle = dict(_D, icycle=np.asarray(icycle))
+    monkeypatch.setitem(globals(), "_D", _D_icycle)
+    contents, _ = _run("orca_f_pivot")
+    assert len(calls) == 6 * n_exchanges
+    np.testing.assert_array_equal(np.asarray(real(contents, "T", 1.0)), np.asarray(contents))  # contents halo folded

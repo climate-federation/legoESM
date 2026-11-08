@@ -2291,6 +2291,12 @@ def advect_si3_prather_2d(
         # contents and all five moments after every `jt` at
         # icedyn_adv_pra.F90:432-479.
         if north_fold == "orca_f_pivot":
+            # NEMO's cadence (icedyn_adv_pra.F90:435-525): no exchange while ihls > 0 (jt=1 of a
+            # multi-cycle step ran on the extended halo); every field when ihls == 0 and jt < icycle;
+            # the moments only at jt == icycle.  Contents are folded at the end instead of in
+            # icedyn.F90 (the lbc only overwrites halo rows, so the interior is the same).
+            if ihls > 0:
+                continue
             out = si3_orca_f_pivot_halo(out, "T", 1.0)
             out_moments = cast(
                 SI3PratherMoments,
