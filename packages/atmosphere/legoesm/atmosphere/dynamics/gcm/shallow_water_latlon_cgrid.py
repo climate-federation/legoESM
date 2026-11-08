@@ -308,7 +308,7 @@ def absolute_vorticity_coriolis(
     return cor_u, cor_v
 
 
-def _kinetic_energy_cgrid(
+def kinetic_energy_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,
 ) -> jnp.ndarray:
@@ -433,7 +433,7 @@ def cgrid_latlon_sw_tendencies(
         dh_dt = -ops.divergence(F_u, F_v)
 
     # --- 2. Bernoulli function at cell centers ---
-    KE = _kinetic_energy_cgrid(u, v)   # (n_lat, n_lon)
+    KE = kinetic_energy_cgrid(u, v)   # (n_lat, n_lon)
     B = g * (h + h_s) + KE             # (n_lat, n_lon)
 
     # --- 3. Pressure gradient + KE gradient (Bernoulli gradient) ---
