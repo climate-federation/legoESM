@@ -321,7 +321,9 @@ def build_ice_rheo_card(
         empty_surface_temperature=_periodic_halo(ocean_temperature.T),
         forcing_template=forcing,
         dynamics_config=config,
-        ridging_config=SI3JPL1RidgingConfig(),
+        # Oracle deck: NEMO's hard open-water limits (the smooth model
+        # default differs from NEMO by a documented class-B gap).
+        ridging_config=SI3JPL1RidgingConfig(open_water_limit_sharpness=math.inf),
         initial_state=initial,
         dt_s=_ICE_RHEO_DT_S,
         n_steps=_ICE_RHEO_N_STEPS,
