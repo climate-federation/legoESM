@@ -28,7 +28,7 @@ FIXTURES = ("c2_ti_clamp", "c3_qcn_top_k", "c4_fullmelt", "c5_flood_sst", "c6_me
             "c7_remap_eps", "c8_sal_himin", "c9_exchange")
 W = 2.0e-4      # surrogate width = 0.01 x snow_cover_depth_nemo (#2407 vote Y1, Z34)
 ON = SI3SwitchConfig(snow_ramp_width_m=W)
-OFF = SI3SwitchConfig()
+OFF = SI3SwitchConfig(snow_ramp_width_m=0.0)     # explicit: #2428 defaults the width to W
 
 
 @pytest.fixture(autouse=True)
