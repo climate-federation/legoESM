@@ -32,7 +32,7 @@ drv = _load_driver()
 # --- scheme coverage --------------------------------------------------------
 
 def test_scheme_list_matches_the_dispatch():
-    """Every selectable closure except 'none' must be a candidate."""
+    """Every selectable closure except 'none' and the untunable 'tke' (MYJ) is a candidate."""
     import inspect
 
     from legoesm.atmosphere.physics.turbulence import integration
@@ -40,7 +40,8 @@ def test_scheme_list_matches_the_dispatch():
     for scheme in drv.TURBULENCE_SCHEMES:
         assert f'"{scheme}"' in src, f"{scheme} not in get_turbulence_fn"
     assert "none" not in drv.TURBULENCE_SCHEMES
-    assert len(drv.TURBULENCE_SCHEMES) == 9
+    assert "tke" not in drv.TURBULENCE_SCHEMES
+    assert len(drv.TURBULENCE_SCHEMES) == 8
 
 
 @pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)
@@ -205,7 +206,7 @@ def test_apply_trainable_params_actually_moves_a_parameter(scheme):
     assert out.radiation == cfg.radiation
 
 
-@pytest.mark.parametrize("scheme", ["louis", "tke"])
+@pytest.mark.parametrize("scheme", ["louis", "ysu"])
 def test_bounds_hold_at_initialization(scheme):
     drv._assert_strict_bounds(drv._initial_params(scheme, "extended"))
 
@@ -384,16 +385,6 @@ def test_scheme_keys_are_all_atmospheric():
             assert key.startswith("atm.turb."), (scheme, key)
 
 
-def test_ocean_tke_config_really_does_collide():
-    """Proves the guard is not vacuous: the collision it defends against
-    exists in the registry right now."""
-    from legoesm.training.param_collector import build_registry
-    keys = {m.scheme_key for m in build_registry()
-            if m.config_class == "TKEConfig"}
-    assert len(keys) > 1, "expected an atm/ocean TKEConfig name collision"
-    assert any(not k.startswith("atm.turb.") for k in keys)
-
-
 # --- CLUBB: prognostic path makes most parameters live ----------------------
 
 def test_clubb_defaults_to_the_prognostic_path():
@@ -462,7 +453,7 @@ def test_the_dead_check_covers_every_scheme_not_just_clubb():
     # assertion that fails loudly if the resolver ever returns everything,
     # which would silently freeze the whole model.
     for scheme in ("ysu", "louis", "edmf", "holtslag_boville",
-                   "smagorinsky", "clubb_lite", "tke"):
+                   "smagorinsky", "clubb_lite"):
         got = drv._dead_params_for(scheme)
         assert got == frozenset(), f"{scheme}: unexpected dead fields {got}"
         assert turb_config is not None

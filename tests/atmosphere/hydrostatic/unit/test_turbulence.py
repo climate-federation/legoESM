@@ -12,6 +12,7 @@ Tests cover:
 from __future__ import annotations
 
 import jax
+import numpy as np
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -564,43 +565,109 @@ class TestTKE:
         assert tke_new.shape == (ncol, nlev)
 
     def test_tke_increases_with_shear(self):
-        """More shear should produce higher TKE."""
+        """MYJ: in a neutral (constant-theta) column, uniform wind gives no
+        turbulence (TKE at its EPSQ2/2 floor aloft) and strong shear raises it."""
         ncol, nlev = 2, 10
-        _, _, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        _, _, _, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        T = 300.0 * (p_full / constants.p_ref) ** (constants.R_d / constants.c_pd)
+        q_v = jnp.zeros_like(T)
         T_sfc = T[:, -1]
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        tke = jnp.full((ncol, nlev), 0.1)
+        q_sfc = jnp.zeros_like(T_sfc)
+        tke = jnp.full((ncol, nlev), 0.2)
         config = TKEConfig()
-
-        # Weak shear
         u_weak = jnp.full((ncol, nlev), 1.0)
-        v_weak = jnp.zeros((ncol, nlev))
+        u_strong = jnp.broadcast_to(jnp.linspace(60.0, 0.0, nlev)[None, :], (ncol, nlev))
+        v = jnp.zeros((ncol, nlev))
+        _, tke_weak = tke_turbulence(u_weak, v, T, q_v, tke, p_full, p_half, z_full,
+                                     z_half, T_sfc, q_sfc, rho, dt=300.0, config=config)
+        _, tke_strong = tke_turbulence(u_strong, v, T, q_v, tke, p_full, p_half, z_full,
+                                       z_half, T_sfc, q_sfc, rho, dt=300.0, config=config)
+        assert float(jnp.max(tke_weak[:, 1:-2])) < 0.1 + 1e-3
+        assert float(jnp.max(tke_strong[:, 1:-2])) > 0.2
 
-        _, tke_weak = tke_turbulence(
-            u_weak, v_weak, T, q_v, tke, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt=300.0, config=config,
-        )
+    def test_surface_heat_flux_warms_and_is_delivered(self):
+        """The lane's upward sensible heat flux enters MYJ's implicit surface
+        exchange: the column warms at the bottom and the column heating is the
+        lane's flux to within the implicit-step reduction (< 10 % at dt 60 s)."""
+        ncol, nlev = 2, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        T_sfc = T[:, -1] + 3.0
+        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
+        out, _ = tke_turbulence(u, v, T, q_v, jnp.full((ncol, nlev), 0.2), p_full, p_half,
+                                z_full, z_half, T_sfc, q_sfc, rho, dt=60.0, config=TKEConfig())
+        assert bool(jnp.all(out.shflx > 0)) and bool(jnp.all(out.dT_dt[:, -1] > 0))
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        heating = jnp.sum(out.dT_dt * dp, axis=1) / constants.g * constants.c_pd
+        np.testing.assert_allclose(np.asarray(heating), np.asarray(out.shflx), rtol=0.1)
 
-        # Strong shear
-        u_strong = jnp.broadcast_to(
-            jnp.linspace(30.0, 0.0, nlev)[None, :], (ncol, nlev),
-        )
-        v_strong = jnp.zeros((ncol, nlev))
+    def test_prescribed_stress_vector_and_calm_flux_are_delivered(self):
+        """A prescribed meridional stress under a purely zonal wind accelerates v
+        (MYJ's UZ0/VZ0 carry the direction), and a calm column (u = v = 0)
+        still receives a prescribed heat flux (exchange _AK_CALM_M_S)."""
+        ncol, nlev = 2, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        T_sfc, q_sfc = T[:, -1], saturation_mixing_ratio(T[:, -1], p_full[:, -1])
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        tke0 = jnp.full((ncol, nlev), 0.2)
+        cfg = TKEConfig(surface=SurfaceLayerConfig(prescribed_tau_x_pa=-0.05,
+                                                   prescribed_tau_y_pa=0.1))
+        out, _ = tke_turbulence(jnp.full_like(u, 5.0), jnp.zeros_like(v), T, q_v, tke0,
+                                p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho,
+                                dt=60.0, config=cfg)
+        mom_y = np.asarray(jnp.sum(out.dv_dt * dp, axis=1) / constants.g)
+        np.testing.assert_allclose(mom_y, 0.1, rtol=0.1)
+        cfg = TKEConfig(surface=SurfaceLayerConfig(prescribed_shflx_w_m2=100.0))
+        out, _ = tke_turbulence(jnp.zeros_like(u), jnp.zeros_like(v), T, q_v, tke0,
+                                p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho,
+                                dt=60.0, config=cfg)
+        heating = np.asarray(jnp.sum(out.dT_dt * dp, axis=1) / constants.g * constants.c_pd)
+        np.testing.assert_allclose(heating, 100.0, rtol=0.1)
 
-        _, tke_strong = tke_turbulence(
-            u_strong, v_strong, T, q_v, tke, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt=300.0, config=config,
-        )
+    def test_moisture_tendency_is_myj_dqdt(self):
+        """dq_v/dt is WRF's specific-humidity DQDT, i.e. RQVBLTEN*(1-q_new)^2
+        (module_bl_myjpbl.F: RQVBLTEN = DQDT/(1-QK)^2), not a mixing-ratio
+        step converted back (second-order wrong at long dt)."""
+        import legoesm.atmosphere.physics.turbulence.tke as tke_mod
+        ncol, nlev = 2, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        T_sfc = T[:, -1] + 3.0
+        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
+        dt = 1800.0
+        seen = {}
 
-        assert float(jnp.mean(tke_strong)) > float(jnp.mean(tke_weak))
+        class _Jax:                                    # records MYJ's batched output
+            def __getattr__(self, name):
+                return getattr(jax, name)
+
+            def vmap(self, fn):
+                vf = jax.vmap(fn)
+
+                def run(c):
+                    o = vf(c)
+                    seen["rqv"] = o.rqvblten
+                    return o
+                return run
+
+        saved, tke_mod.jax = tke_mod.jax, _Jax()
+        try:
+            out, _ = tke_turbulence(u, v, T, q_v, jnp.full((ncol, nlev), 0.2), p_full,
+                                    p_half, z_full, z_half, T_sfc, q_sfc, rho, dt=dt,
+                                    config=TKEConfig())
+        finally:
+            tke_mod.jax = saved
+        q_new = q_v + dt * out.dq_v_dt
+        rqv = np.asarray(seen["rqv"])[:, ::-1]
+        np.testing.assert_allclose(np.asarray(out.dq_v_dt),
+                                   rqv * np.asarray(1.0 - q_new) ** 2,
+                                   rtol=0, atol=1e-9 * np.abs(rqv).max())
 
     def test_tke_stays_above_minimum(self):
-        """TKE should never fall below tke_min."""
+        """MYJ floors q^2 = 2 TKE at EPSQ2 = 0.2, so TKE >= 0.1 even from ~0."""
         ncol, nlev = 2, 10
         u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
         T_sfc = T[:, -1]
         q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        config = TKEConfig(tke_min=1e-4)
+        config = TKEConfig()
 
         # Start with very small TKE
         tke = jnp.full((ncol, nlev), 1e-8)
@@ -610,7 +677,7 @@ class TestTKE:
             T_sfc, q_sfc, rho, dt=300.0, config=config,
         )
 
-        assert jnp.all(tke_new >= config.tke_min)
+        assert jnp.all(tke_new >= 0.1)
 
     def test_differentiable(self):
         """jax.grad should work through TKE turbulence."""

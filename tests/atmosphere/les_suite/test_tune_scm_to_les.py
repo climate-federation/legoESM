@@ -158,7 +158,7 @@ def test_all_wired_schemes_build_with_registry_key():
     # every CBL-wired closure builds a TurbulenceConfig with the right scheme and a
     # registry scheme_key that has scalar tunable params.
     m = _tuner()
-    for scheme in ("smagorinsky", "louis", "holtslag_boville", "ysu", "tke",
+    for scheme in ("smagorinsky", "louis", "holtslag_boville", "ysu",
                    "mynn25", "clubb_lite", "edmf", "clubb"):
         base, key = m._base_turbulence(scheme)
         assert base.scheme == scheme
