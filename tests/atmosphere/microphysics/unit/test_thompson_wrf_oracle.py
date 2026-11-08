@@ -164,6 +164,16 @@ def test_fixture_exercises_the_scheme():
     assert neg.sum() == 2 and np.all(fx["cols_dt300_out_qv"][dry][neg] > 0.0)
     for v in ("qcten", "qiten", "qrten", "qsten", "qgten", "nrten", "niten"):
         assert np.count_nonzero(fx[f"cols_dt300_ten_{v}"]) > 20, v
+    # Thompson's own saturation adjustment is exercised: the ice and snow sets
+    # each hold inputs >5% supersaturated over water (margin over the <1% gap
+    # between the Tetens curve here and WRF's own) where the oracle condenses
+    # cloud water (votes V2b, V5a).
+    from legoesm.thermo import saturation_mixing_ratio
+    for tag in ("ice", "snow"):
+        q_sat = np.asarray(saturation_mixing_ratio(
+            jnp.asarray(fx[f"{tag}_in_T"]), jnp.asarray(fx[f"{tag}_in_p"])))
+        ss = fx[f"{tag}_in_qv"] > 1.05 * q_sat
+        assert np.count_nonzero(ss & (fx[f"{tag}_dt300_ten_qcten"] > 0.0)) >= 1, tag
 
 
 # Entries where XLA's fused arithmetic (jit) leaves eager by more than TOL, as
