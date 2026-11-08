@@ -36,6 +36,7 @@ def _load():
 
 # thompson is HARD_SAT_GUARD_EXEMPT now (the WRF port, vote K3)
 GUARDED = ("sundqvist", "morrison", "p3", "ml_emulator")
+EXEMPT = ("sdm", "fast_sbm", "kessler", "seifert_beheng", "thompson")
 
 
 @pytest.mark.parametrize("scheme", GUARDED)
@@ -86,8 +87,7 @@ def test_float_override_without_the_gate_is_refused():
 
 
 # HARD_SAT_GUARD_EXEMPT schemes: refused when the config is built.
-@pytest.mark.parametrize("scheme", ["sdm", "fast_sbm", "kessler", "seifert_beheng",
-                                    "thompson"])
+@pytest.mark.parametrize("scheme", EXEMPT)
 def test_exempt_schemes_reject_the_flag_loudly(scheme):
     """Exempt schemes (HARD_SAT_GUARD_EXEMPT) refuse the guard flag via the
     SHARED helper when the config is built, never silently do nothing."""
@@ -149,6 +149,33 @@ def test_defaults_from_real_argv_leave_the_guard_off(monkeypatch):
     assert args.hard_saturation_adjustment is False
     assert args.hard_sat_adjust_threshold is None
     assert args.hard_sat_max_heating_k is None
+
+
+def test_param_lists_partition_the_cli_choices(monkeypatch):
+    """The hardcoded lists above are exactly the config's guarded / exempt sets
+    restricted to the driver's real --microphysics choices, and together cover
+    every choice but 'none' (vote V1b): a scheme moving between the config
+    sets, or a new CLI choice, turns this red instead of going untested."""
+    import argparse
+
+    from legoesm.atmosphere.physics.microphysics.config import (
+        HARD_SAT_GUARD_EXEMPT, HARD_SAT_GUARD_SCHEMES)
+    rcp = _load()
+    seen = []
+    real = argparse.ArgumentParser.parse_args
+
+    def grab(self, *a, **k):
+        seen.append(self)
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", grab)
+    rcp.parse_args([])
+    choices = set(next(a for p in seen for a in p._actions
+                       if a.dest == "microphysics").choices)
+    assert set(GUARDED) == set(HARD_SAT_GUARD_SCHEMES) & choices
+    assert set(EXEMPT) == (set(HARD_SAT_GUARD_EXEMPT) & choices) - {"none"}
+    assert set(GUARDED) | set(EXEMPT) == choices - {"none"}
+    assert not set(GUARDED) & set(EXEMPT)
 
 
 def test_none_scheme_still_returns_none():
