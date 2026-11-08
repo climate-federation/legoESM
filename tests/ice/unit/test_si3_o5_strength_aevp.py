@@ -513,14 +513,75 @@ def test_lane3_rhg_card_parent_vs_current_bit_identical():
     assert not np.array_equal(np.asarray(planted.dynamics.u_ice_u), np.asarray(first.dynamics.u_ice_u))
 
 
+_RHEO_PARENT_CHILD = """
+import importlib.util, os, sys
+from pathlib import Path
+roots = os.environ["PYTHONPATH"].split(os.pathsep)
+sys.path[:] = [p for p in sys.path if p in roots or not os.path.isdir(os.path.join(p, "legoesm"))]
+import jax, netCDF4, numpy as np
+from legoesm.core.precision import PrecisionPolicy, set_policy
+set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+from legoesm import constants
+from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as rheo_par
+record, out, revision = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location(
+    "o5_oracle_gate", "scripts/validate/ocean_fidelity/testcases/nemo_si3_oracle_gate.py")
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+_, frame = gate.read_frame(record / "oracle_ice_step_entry_kt00000001.bin")
+names = ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f", "tmask", "umask", "vmask")
+with netCDF4.Dataset(record / "mesh_mask.nc") as ds:
+    mesh = {name: np.asarray(ds[name][:]) for name in names}
+with netCDF4.Dataset(record / "output.init_ice.nc") as ds:
+    sst_c = np.asarray(ds["sst"][0])
+rp = rheo_par.build_ice_rheo_card(frame, mesh, sst_c + constants.T_freeze)
+sp = rheo_par.step_ice_rheo_card(rp, rp.initial_state, completed_steps=0)
+leaves = [np.asarray(leaf) for leaf in jax.tree_util.tree_leaves(sp)]
+copy = os.path.realpath(os.getcwd()) + os.sep
+outside = sorted(n for n, m in sys.modules.items() if n.startswith("legoesm") and not all(
+    os.path.realpath(p).startswith(copy)
+    for p in ([m.__file__] if getattr(m, "__file__", None) else m.__path__)))
+assert not outside, f"parent arm imported legoesm modules from outside {copy}: {outside}"
+np.savez(out, revision=revision, **{f"leaf{i:05d}": leaf for i, leaf in enumerate(leaves)})
+"""
+
+
+def _parent_rheo_leaves(tmp_path, rev):
+    """``rev``'s ICE_RHEO card state leaves after one step, from a git-archive copy of ``rev``."""
+    import os
+
+    # Own process: in-process parent modules resolved shared helpers from the current tree.
+    rev = subprocess.check_output(
+        ["git", "rev-parse", f"{rev}^{{commit}}"], cwd=REPO_ROOT, text=True).strip()
+    copy = tmp_path / "parent"
+    copy.mkdir()
+    gates = "scripts/validate/ocean_fidelity/testcases/"
+    archive = subprocess.run(
+        ["git", "archive", rev, "src", "packages/core", "packages/ice", "packages/ocean",
+         gates + "nemo_si3_oracle_gate.py", gates + "nemo_testcase_oracle_gate.py"],
+        cwd=REPO_ROOT, capture_output=True, check=True,
+    ).stdout
+    subprocess.run(["tar", "-x", "-C", str(copy)], input=archive, check=True)
+    roots = (".", "packages/core", "packages/ocean", "packages/atmosphere", "packages/coupler",
+             "packages/ice", "packages/land", "packages/ml", "packages/tools", "src")
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(str(copy / root) for root in roots),
+           "CUDA_VISIBLE_DEVICES": "", "JAX_PLATFORMS": "cpu", "JAX_ENABLE_X64": "1"}
+    out = tmp_path / "parent_leaves.npz"
+    subprocess.run([sys.executable, "-c", _RHEO_PARENT_CHILD, str(_RHEO_ROOT), str(out), rev],
+                   cwd=copy, env=env, check=True)
+    with np.load(out) as saved:
+        assert str(saved["revision"]) == rev
+        return [saved[key] for key in sorted(saved.files) if key != "revision"]
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(not _RHEO_ROOT.exists(), reason="lane-3 ICE_RHEO record absent")
-def test_lane3_rheo_card_parent_vs_current_bit_identical():
+def test_lane3_rheo_card_parent_vs_current_bit_identical(tmp_path):
     """One ICE_RHEO step (rhg -> adv -> rdgrft -> cor): ~4 min per arm eager on 1004x1004."""
     import netCDF4
     from legoesm.ice.fidelity import nemo_rheo_testcase_recipe_lane as rheo_cur
 
-    parent = _parent_lane3()
+    parent = _parent_rheo_leaves(tmp_path, O5_PARENT_COMMIT)
     gate = _gate_module()
     _, frame = gate.read_frame(_RHEO_ROOT / "oracle_ice_step_entry_kt00000001.bin")
     names = ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f", "tmask", "umask", "vmask")
@@ -528,13 +589,16 @@ def test_lane3_rheo_card_parent_vs_current_bit_identical():
         mesh = {name: np.asarray(ds[name][:]) for name in names}
     with netCDF4.Dataset(_RHEO_ROOT / "output.init_ice.nc") as ds:
         sst_c = np.asarray(ds["sst"][0])
-    rheo_par = parent["legoesm.ice.fidelity.nemo_rheo_testcase_recipe"]
     # DECISION 177: the current card ridges through the O6 kernels and takes SST in degC.
     rc = rheo_cur.build_ice_rheo_card(frame, mesh, sst_c)
-    rp = rheo_par.build_ice_rheo_card(frame, mesh, sst_c + constants.T_freeze)
     sc = rheo_cur.step_ice_rheo_card(rc, rc.initial_state, completed_steps=0)
-    sp = rheo_par.step_ice_rheo_card(rp, rp.initial_state, completed_steps=0)
-    _assert_trees_identical(sc, sp, "ICE_RHEO step 1")
+    current = jax.tree_util.tree_leaves(sc)
+    assert len(current) == len(parent), (len(current), len(parent))
+    for index, (x, y) in enumerate(zip(current, parent)):
+        np.testing.assert_array_equal(
+            np.asarray(x, dtype=np.float64).view(np.uint64), y.astype(np.float64).view(np.uint64),
+            err_msg=f"ICE_RHEO step 1 leaf {index}",
+        )
 
 
 STRENGTH_PIN = "097712318bf93aaa1444855ebddff76db8ff21b3c59cd9672dddff9830391223"

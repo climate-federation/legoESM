@@ -969,15 +969,8 @@ COR_PIN = "929051ba6c3889e31c92fa0e014810d45c99b5b5594ca566185d73ebde4cd0af"
 
 # ------------------------------------------------- parent-vs-current controls
 O6_PARENT_COMMIT = "e8ee89ece8cb"
-# File-content identities immediately before DECISION 177 removed lane 3's own
-# jpl=1 ridging and ice_cor.  Each blob is reachable from this lane and protects
-# the parent/current production-card comparison without naming an O6 commit.
-D177_PARENT_BLOBS = {
-    "packages/ice/legoesm/ice/itd.py": "9ad1652db3140884432e84ffd56aea71420a1d05",
-    "packages/ice/legoesm/ice/ridging.py": "d3b5c6411f87fa9f1453c0e34af269818b075141",
-    "packages/ice/legoesm/ice/si3_surface.py": "d9d3c34dec7c5b58258f463abc03f1f0bd4939a5",
-    "packages/ice/legoesm/ice/fidelity/nemo_rheo_testcase_recipe.py": "56bfdb50f2da94dfe7ca8e2d3c956c0b7e79de53",
-}
+# Last commit before DECISION 177 removed lane 3's own jpl=1 ridging and ice_cor.
+D177_PARENT_COMMIT = "ee11e509a71d8d0ab3d440450221eeb0069f6c09"
 _RHEO_ROOT = __import__("pathlib").Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 _TOUCHED = (
     ("legoesm.ice.itd", "packages/ice/legoesm/ice/itd.py"),
@@ -986,20 +979,19 @@ _TOUCHED = (
 )
 
 
-def _load_parent(extra=(), rev=O6_PARENT_COMMIT, touched=_TOUCHED, blobs=None):
+def _load_parent(rev=O6_PARENT_COMMIT, touched=_TOUCHED):
     import subprocess
     import sys
     import types
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[3]
-    names = tuple(touched) + tuple(extra)
+    names = tuple(touched)
     saved = {n: sys.modules.get(n) for n, _ in names}
     loaded = {}
     try:
         for name, rel in names:
-            src = (_git_blob_text(blobs[rel]) if blobs is not None else
-                   subprocess.check_output(["git", "show", f"{rev}:{rel}"], cwd=root, text=True))
+            src = subprocess.check_output(["git", "show", f"{rev}:{rel}"], cwd=root, text=True)
             mod = types.ModuleType(name)
             mod.__file__ = f"<git:{rev}:{rel}>"
             sys.modules[name] = mod
@@ -1075,28 +1067,87 @@ def test_parent_vs_current_shared_ridging_three_input_gradients():
         )
 
 
+_RHEO_PARENT_CHILD = """
+import importlib.util, os, sys
+from pathlib import Path
+roots = os.environ["PYTHONPATH"].split(os.pathsep)
+sys.path[:] = [p for p in sys.path if p in roots or not os.path.isdir(os.path.join(p, "legoesm"))]
+import jax, netCDF4, numpy as np
+from legoesm.core.precision import PrecisionPolicy, set_policy
+set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+from legoesm import constants as C
+from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as rheo_par
+assert hasattr(rheo_par, "apply_si3_jpl1_ridging")
+record, out, revision = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location(
+    "o6_gate", "scripts/validate/ocean_fidelity/testcases/nemo_si3_oracle_gate.py")
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+_, frame = gate.read_frame(record / "oracle_ice_step_entry_kt00000001.bin")
+names = ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f", "tmask", "umask", "vmask")
+with netCDF4.Dataset(record / "mesh_mask.nc") as ds:
+    mesh = {n: np.asarray(ds[n][:]) for n in names}
+with netCDF4.Dataset(record / "output.init_ice.nc") as ds:
+    sst_c = np.asarray(ds["sst"][0])
+rp = rheo_par.build_ice_rheo_card(frame, mesh, sst_c + C.T_freeze)
+sp = rheo_par.step_ice_rheo_card(rp, rp.initial_state, completed_steps=0)
+leaves = [np.asarray(leaf) for leaf in jax.tree_util.tree_leaves(sp)]
+copy = os.path.realpath(os.getcwd()) + os.sep
+outside = sorted(n for n, m in sys.modules.items() if n.startswith("legoesm") and not all(
+    os.path.realpath(p).startswith(copy)
+    for p in ([m.__file__] if getattr(m, "__file__", None) else m.__path__)))
+assert not outside, f"parent arm imported legoesm modules from outside {copy}: {outside}"
+np.savez(out, revision=revision, **{f"leaf{i:05d}": leaf for i, leaf in enumerate(leaves)})
+"""
+
+
+def _parent_rheo_leaves(tmp_path, rev):
+    """``rev``'s ICE_RHEO card state leaves after one step, from a git-archive copy of ``rev``."""
+    import os
+    import subprocess
+    import sys
+
+    # Own process: in-process parent modules resolved shared helpers from the current tree.
+    rev = subprocess.check_output(
+        ["git", "rev-parse", f"{rev}^{{commit}}"], cwd=_REPO, text=True).strip()
+    copy = tmp_path / "parent"
+    copy.mkdir()
+    gates = "scripts/validate/ocean_fidelity/testcases/"
+    archive = subprocess.run(
+        ["git", "archive", rev, "src", "packages/core", "packages/ice", "packages/ocean",
+         gates + "nemo_si3_oracle_gate.py", gates + "nemo_testcase_oracle_gate.py"],
+        cwd=_REPO, capture_output=True, check=True,
+    ).stdout
+    subprocess.run(["tar", "-x", "-C", str(copy)], input=archive, check=True)
+    roots = (".", "packages/core", "packages/ocean", "packages/atmosphere", "packages/coupler",
+             "packages/ice", "packages/land", "packages/ml", "packages/tools", "src")
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(str(copy / root) for root in roots),
+           "CUDA_VISIBLE_DEVICES": "", "JAX_PLATFORMS": "cpu", "JAX_ENABLE_X64": "1"}
+    out = tmp_path / "parent_leaves.npz"
+    subprocess.run([sys.executable, "-c", _RHEO_PARENT_CHILD, str(_RHEO_ROOT), str(out), rev],
+                   cwd=copy, env=env, check=True)
+    with np.load(out) as saved:
+        assert str(saved["revision"]) == rev
+        return [saved[key] for key in sorted(saved.files) if key != "revision"]
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(not _RHEO_ROOT.exists(), reason="lane-3 ICE_RHEO record absent")
-def test_lane3_rheo_card_merge_parent_vs_current_bit_identical():
+def test_lane3_rheo_card_merge_parent_vs_current_bit_identical(tmp_path):
     """One ICE_RHEO step (rhg -> adv -> rdgrft -> cor): lane 3's own kernels vs the O6 kernels.
 
     The parent is the last commit before DECISION 177 deleted lane 3's jpl=1
-    ridging and ice_cor; its card, ridging, ITD and surface modules are loaded
-    from git.  A rn_murdg plant on the current card must break the equality.
+    ridging and ice_cor; it runs whole, from a git-archive copy, in a separate
+    process.  A rn_murdg plant on the current card must break the equality.
     """
     import importlib.util
 
     import netCDF4
     from legoesm.ice.fidelity import nemo_rheo_testcase_recipe_lane as rheo_cur
 
-    from legoesm import constants as C
-
     root = __import__("pathlib").Path(__file__).resolve().parents[3]
-    par = _load_parent((("legoesm.ice.fidelity.nemo_rheo_testcase_recipe",
-                         "packages/ice/legoesm/ice/fidelity/nemo_rheo_testcase_recipe.py"),),
-                       rev=None, blobs=D177_PARENT_BLOBS)
-    rheo_par = par["legoesm.ice.fidelity.nemo_rheo_testcase_recipe"]
-    assert hasattr(rheo_par, "apply_si3_jpl1_ridging") and not hasattr(rheo_cur, "apply_si3_jpl1_ridging")
+    parent = _parent_rheo_leaves(tmp_path, D177_PARENT_COMMIT)
+    assert not hasattr(rheo_cur, "apply_si3_jpl1_ridging")
     spec = importlib.util.spec_from_file_location(
         "o6_gate", root / "scripts/validate/ocean_fidelity/testcases/nemo_si3_oracle_gate.py")
     gate = importlib.util.module_from_spec(spec)
@@ -1108,10 +1159,10 @@ def test_lane3_rheo_card_merge_parent_vs_current_bit_identical():
     with netCDF4.Dataset(_RHEO_ROOT / "output.init_ice.nc") as ds:
         sst_c = np.asarray(ds["sst"][0])
     rc = rheo_cur.build_ice_rheo_card(frame, mesh, sst_c)
-    rp = rheo_par.build_ice_rheo_card(frame, mesh, sst_c + C.T_freeze)
     sc = rheo_cur.step_ice_rheo_card(rc, rc.initial_state, completed_steps=0)
-    sp = rheo_par.step_ice_rheo_card(rp, rp.initial_state, completed_steps=0)
-    for x, y in zip(jax.tree_util.tree_leaves(sc), jax.tree_util.tree_leaves(sp)):
+    current = jax.tree_util.tree_leaves(sc)
+    assert len(current) == len(parent), (len(current), len(parent))
+    for x, y in zip(current, parent):
         np.testing.assert_array_equal(_bits(x), _bits(y))
     planted = rc._replace(ridging_config=rc.ridging_config._replace(rn_murdg=rc.ridging_config.rn_murdg * (1 + 1e-10)))
     with pytest.raises(ValueError, match="ridging namelist"):
