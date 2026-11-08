@@ -510,7 +510,9 @@ def test_pipeline_numbers_match_bridge(scheme, ccn):
             z3, f["z2"], f["z2"], f["z2"], f["z2"], f["z2"], **kw)
 
     ncol = int(np.prod(f["p_s"].shape))
-    aod = jnp.full((ncol, NLEV), 0.3 / NLEV)                  # column AOD 0.3
+    # non-uniform per-layer AOD, column 0.3 (GLM final review)
+    w_aod = jnp.linspace(0.2, 1.8, NLEV)
+    aod = jnp.broadcast_to(0.3 * w_aod / jnp.sum(w_aod), (ncol, NLEV))
     full = dict(q_i=z3, q_s=z3, q_g=z3, N_c=n_c, N_r=n_r, N_i=z3,
                 **({"aerosol_od": aod} if ccn else {}))
     out = step(**full)
@@ -538,6 +540,10 @@ def test_pipeline_numbers_match_bridge(scheme, ccn):
                        forcing={"aerosol_od": 3.0 * aod})
         assert not np.allclose(np.asarray(tend0.tracer_tendencies["q_c"].data),
                                np.asarray(out.dq_c_dt), rtol=1e-6, atol=0.0)
+        out3 = step(**{**full, "aerosol_od": 3.0 * aod})   # and on the pipeline
+        np.testing.assert_allclose(np.asarray(out3.dq_c_dt),
+                                   np.asarray(tend0.tracer_tendencies["q_c"].data),
+                                   rtol=1e-9, atol=1e-30)
     if scheme == "thompson":
         with pytest.raises(ValueError, match="N_i"):
             step(**{**full, "N_i": None})
