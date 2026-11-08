@@ -1699,14 +1699,14 @@ def _do_step_impl(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: f
     _stmax = functools.partial(_ST_MAX, mode=_st_mode)
 
     # Open-water growth (`icethd_do.F90:171-307`), active only for qlead<0.
-    # Smooth mode: every switch below keeps NEMO's forward value and takes its
-    # gradient from a C1 ramp (straight-through, votes Z42, Z46).
+    # Smooth mode: every switch below keeps NEMO's forward value; the open-water and
+    # area-cap switches take their gradient from a C1 ramp (straight-through, votes
+    # Z42, Z46), the continuous ones from the updated branch (Z57, Z60, Z61).
     w = _column_widths(switches, dt)
     st = w.F > 0.0
     if st:
-        from legoesm.ice.si3_surface import si3_ge, si3_gt
-        rw = switches.relative_width
-        w_ice, w_cut = rw * switches.ice_switch_scale, rw * switches.cut_fraction_scale
+        from legoesm.ice.si3_surface import si3_gt
+        w_cut = switches.relative_width * switches.cut_fraction_scale
         cools = si3_gt(-forcing.qlead, 0.0, w.F)
     Tm = -constants.liquidus_slope * (
         _NEW_ICE_SALINITY_FRACTION * forcing.sss
@@ -1744,7 +1744,10 @@ def _do_step_impl(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: f
     # takes the new-ice values (`icethd_do.F90:250-259`).
     s_new = _NEW_ICE_SALINITY_FRACTION * forcing.sss
     had_ice = (a_old > 0.0)[..., None]
-    had_w = si3_gt(a_old, 0.0, w_ice)[..., None] if st else None
+    # had_ice and keep are continuous at their boundaries (mixed enthalpy -> e_new as
+    # v_old -> 0; emptying below epsi20 is a sub-epsi20 jump), so the soft pass takes the
+    # updated branch, as for new_ice (votes Z57, Z60, Z61).
+    had_w = jnp.ones_like(a_old)[..., None] if st else None
     v_den = jnp.maximum(v_mixed, _EPS20)[..., None]
     e_mixed = _stw(
         had_ice,
@@ -1761,7 +1764,7 @@ def _do_step_impl(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: f
     # Basal accretion of the residual and enthalpy remap (`icethd_do.F90:262-294`);
     # a category whose area is below epsi20 is emptied (numerics guard).
     keep = (a_total >= _EPS20) | (vnew <= 0.0)
-    keep_w = (1.0 - (1.0 - si3_ge(a_total, _EPS20, w_ice)) * si3_gt(vnew, 0.0, w.H)) if st else None
+    keep_w = jnp.ones_like(a_total) if st else None
     accreted = _stw(keep, residual, 0.0, keep_w)
     a_total = _stw(keep, a_total, 0.0, keep_w)
     v_total = v_mixed + accreted

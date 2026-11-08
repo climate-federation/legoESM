@@ -183,9 +183,15 @@ def test_soft_column_do_budgets_close_inside_the_bands(monkeypatch):
     room = np.maximum(0.0, bl._MAXIMUM_ICE_CONCENTRATION - np.asarray(st.concentration))
     w_cut = SMOOTH.relative_width * SMOOTH.cut_fraction_scale
     q_cap = -(room + 0.5 * w_cut) * bl._NEW_ICE_THICKNESS / v_unit
+    w_ice = SMOOTH.relative_width * SMOOTH.ice_switch_scale
+    thin = st._replace(concentration=jnp.full_like(st.concentration, 0.5 * w_ice))   # had/keep band (Z61)
+    run = lambda s_, q: bl._do_step(s_, fz._replace(qlead=q), DT, K, nemo_version="5.0.1", switches=SMOOTH)  # noqa: E731
+    hard_cap = _with(monkeypatch, "hard", lambda q: run(st, q)[0].h_ice, jnp.asarray(q_cap))
+    soft_cap = _with(monkeypatch, "soft", lambda q: run(st, q)[0].h_ice, jnp.asarray(q_cap))
+    assert np.all(np.asarray(hard_cap) != np.asarray(soft_cap))       # cap band hit in every cell
     monkeypatch.setattr(bl, "straight_through", lambda h, s: s)
-    for q in (jnp.full_like(fz.qlead, -0.5 * WF), jnp.asarray(q_cap)):
-        o, fx = bl._do_step(st, fz._replace(qlead=q), DT, K, nemo_version="5.0.1", switches=SMOOTH)
+    for st, q in ((st, jnp.full_like(fz.qlead, -0.5 * WF)), (st, jnp.asarray(q_cap)), (thin, fz.qlead)):
+        o, fx = run(st, q)
         a0, a1 = np.asarray(st.concentration), np.asarray(o.concentration)
         v0, v1 = np.asarray(st.h_ice) * a0, np.asarray(o.h_ice) * a1
         # Tiny-flux arm differences O(1e-11 m) out of O(1 m) volumes: atol at the
