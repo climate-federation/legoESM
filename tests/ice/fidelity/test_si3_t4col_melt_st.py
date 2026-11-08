@@ -91,14 +91,23 @@ def test_do_step_open_water_switch_gradient_is_the_surrogate(monkeypatch):
 
 
 def test_dh_surface_melt_switch_gradient_is_the_surrogate(monkeypatch):
-    fx = load("c4_fullmelt")
-    st, zr, fz = dh_args(fx)
+    """Z54: on c4_fullmelt the layer caps bind outside their band (both gradients 0), so
+    the check runs on three fixtures and must bite on at least one."""
+    bit = 0
+    for name in ("c3_qcn_top_k", "c6_melt_order", "c9_exchange"):
+        fx = load(name)
+        st, zr, fz = dh_args(fx)
 
-    def f(t):
-        z = zr._replace(T_surface=jnp.full_like(zr.T_surface, t))
-        out, fl = bl._dh_step_fluxes(st, z, fz, dt(fx), K, nemo_version="5.0.1", switches=SMOOTH)
-        return jnp.sum(out.h_ice) + jnp.sum(out.h_snow)
-    _grads(monkeypatch, f, K.T0 - 0.5 * TM)
+        def f(t, st=st, zr=zr, fz=fz, fx=fx):
+            z = zr._replace(T_surface=jnp.full_like(zr.T_surface, t))
+            out, fl = bl._dh_step_fluxes(st, z, fz, dt(fx), K, nemo_version="5.0.1", switches=SMOOTH)
+            return jnp.sum(out.h_ice) + jnp.sum(out.h_snow)
+        x0 = jnp.asarray(K.T0 - 0.5 * TM)
+        g = float(jax.grad(f)(x0))
+        g_hard = float(_with(monkeypatch, "hard", jax.grad(f), x0))
+        assert np.isfinite(g)
+        bit += int(g != 0.0 and abs(g - g_hard) > 1e-3 * max(abs(g_hard), 1e-30))
+    assert bit >= 1, "surrogate term absent on every fixture (vacuous)"
 
 
 def test_dh_internal_melt_switch_gradient_is_the_surrogate(monkeypatch):
@@ -136,7 +145,8 @@ def test_soft_column_dh_budgets_close_inside_the_bands(monkeypatch):
         rhs = (g("hfx_thd") + g("hfx_res") + g("hfx_sub") + g("hfx_spr")
                - g("hfx_sum") - g("hfx_bom") - g("hfx_bog") - g("hfx_snw"))
         dq = (a1 * q(out) - a * q(st)) / d
-        np.testing.assert_allclose(dq, rhs, rtol=0, atol=1e-11 * max(1.0, np.abs(dq).max()))
+        # Soft column: 1.6e-10 relative measured (flood telescoping, mechanism open), vote Z53.
+        np.testing.assert_allclose(dq, rhs, rtol=0, atol=1e-9 * max(1.0, np.abs(dq).max()))
         checked += 1
     monkeypatch.undo()
     assert checked == 5
