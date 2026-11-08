@@ -159,3 +159,18 @@ def test_jit_matches_eager():
     jitted = jax.jit(lambda: _call(d, SI3SwitchConfig())[1])()
     for k in ("qsr", "qns", "emp", "sfx", "snwice_fmass"):
         np.testing.assert_array_equal(getattr(eager, k), getattr(jitted, k))
+
+
+def test_hard_mode_is_nemo_strict_switch_including_threshold_values():
+    """relative_width 0: qsr == where(fhld > 0 & at_i > 0, warm, zqsr) exactly, also at fhld = 0 and at_i = 0."""
+    d = _load()
+    fh = d["in_fhld"].copy()
+    at = d["in_at_i"].copy()
+    fh[0, 0] = 0.0
+    at[1, 1] = 0.0
+    fh[1, 1] = abs(fh[1, 1]) + 1.0
+    _, out = _call(d, SI3_HARD_SWITCHES, fhld=fh, at_i=at)
+    _, zq = _call(d, SI3_HARD_SWITCHES, fhld=np.full_like(fh, -1.0), at_i=at)
+    _, wq = _call(d, SI3_HARD_SWITCHES, fhld=np.full_like(fh, 1.0), at_i=np.where(at > 0, at, 1.0))
+    want = np.where((fh > 0) & (at > 0), np.asarray(wq.qsr), np.asarray(zq.qsr))
+    np.testing.assert_array_equal(np.asarray(out.qsr), want)
