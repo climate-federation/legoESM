@@ -329,7 +329,7 @@ def _pos(x, w: float):
 
 
 def _clip_c1(x, lo, hi, w: float):
-    """C1 clip to [lo, hi], EXACT at and beyond each bound (min_c1 / max_c1); w = 0 is jnp.clip.
+    """C1 clip to [lo, hi], EXACT at and beyond each bound when hi - lo >= w; w = 0 is jnp.clip.
 
     Same order as jnp.clip (MAX with lo first, then MIN with hi), so an inverted
     interval hi < lo returns hi exactly as the hard code did.

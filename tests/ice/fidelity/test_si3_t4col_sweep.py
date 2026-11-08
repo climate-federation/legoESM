@@ -146,7 +146,7 @@ def test_zh_min_smooth_exact_outside_band_and_differentiable():
     mid = bl._H_MIN + 0.5 * w
     assert np.any(np.asarray(qtop(mid, SI3SwitchConfig())) != np.asarray(qtop(mid, SI3_HARD_SWITCHES)))
     g = jax.grad(lambda hs: jnp.sum(qtop(hs, SI3SwitchConfig())))(jnp.asarray(mid))
-    eps = 1e-9
+    eps = 1e-8      # vote Z23: 1e-9/1e-10 are FD-roundoff dominated (job 11094794)
     fd = (float(jnp.sum(qtop(mid + eps, SI3SwitchConfig())))
           - float(jnp.sum(qtop(mid - eps, SI3SwitchConfig())))) / (2 * eps)
     assert bool(jnp.isfinite(g))
@@ -164,7 +164,7 @@ def test_one_sided_clip_is_exact_at_and_beyond_the_bounds():
     y = float(bl._clip_c1(jnp.asarray(T0 - 0.5 * w), T0 - 100.0, T0, w))
     assert T0 - 0.5 * w < y < T0                                     # pulled toward, never above, T0
     g = jax.grad(lambda t: bl._clip_c1(t, T0 - 100.0, T0, w))(jnp.asarray(T0 - 0.5 * w))
-    assert 0.0 < float(g) < 1.0
+    assert 0.0 < float(g) <= 4.0 / 3.0 + 1e-12      # vote Z24: positive_part_c1 slope peaks at 4/3
 
 
 def test_hard_clip_keeps_jnp_clip_order_on_an_inverted_interval():
