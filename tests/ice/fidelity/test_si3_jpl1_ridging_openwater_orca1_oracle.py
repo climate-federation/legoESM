@@ -172,6 +172,12 @@ def test_smooth_default_check_grads() -> None:
         return apply_si3_jpl1_ridging(st, div, dlt, dt)[0].open_water_area
 
     check_grads(f, (jnp.float64(1.0),), order=1, modes=("fwd", "rev"), eps=1.0e-9)
+    # non-vacuity: the derivative is nonzero on cells the ramp actually moved
+    _, tangent = jax.jvp(f, (jnp.float64(1.0),), (jnp.float64(1.0),))
+    in_band = np.abs(d["smooth_ato_i_out"] - d["ato_i_out"]) > 1.0e-9
+    assert in_band.sum() >= 3
+    assert np.all(np.isfinite(np.asarray(tangent)))
+    assert np.max(np.abs(np.asarray(tangent)[in_band])) > 1.0e-9
 
 
 def test_sharpness_validation() -> None:
