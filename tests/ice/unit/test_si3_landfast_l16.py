@@ -213,8 +213,9 @@ def test_landfast_depth_path_has_finite_nonzero_gradient():
 
 def test_static_friction_branch_matches_hand_written_aevp_update():
     state, forcing, metrics, config = _fixture()
+    # NEMO's literal hard statements (the smooth default is tested in test_si3_dyn_smooth_limits.py)
     result = jax.jit(
-        lambda: si3_cgrid_aevp_solver(state, forcing, metrics, config)
+        lambda: si3_cgrid_aevp_solver(state, forcing, metrics, config, limit_sharpness_scale=math.inf)
     )()
     mass = _RHO_SNOW * _SNOW_VOLUME_M + _RHO_ICE * _ICE_VOLUME_M
     strength = (
