@@ -267,6 +267,13 @@ def test_teos_zero_salinity_adjoint_and_nonzero_forward():
                                _reference(SAMPLES, "nemo_teos10") - constants.T_freeze, atol=1e-13)
 
 
+def test_teos_integer_salinity_matches_the_float_value():
+    np.testing.assert_allclose(nemo_eos_fzp(35), nemo_eos_fzp(35.0), rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(nemo_eos_fzp(jnp.array([35, 30])),
+                               nemo_eos_fzp(jnp.array([35.0, 30.0])), rtol=0.0, atol=0.0)
+    assert float(nemo_eos_fzp(35)) < -1.9
+
+
 def test_shape_guard_and_default_config_unchanged(monkeypatch):
     _fixed_bulk(monkeypatch)
     st, forcing, cfg, s = _case(1)

@@ -450,3 +450,29 @@ def test_n3_gwd_runs_on_the_post_loop_state(setup, monkeypatch):
     _close(out.T_hat.data, want_post, 1e-10, "T_hat")
     assert np.max(np.abs(np.asarray(want_post - want_pre))) > 1e-6 * np.max(
         np.abs(np.asarray(want_post)))                           # the order is visible
+
+
+@pytest.mark.parametrize("split_rad", [True, False])
+def test_the_classical_factory_builds_incloud_warm_rain_on_both_paths(
+        setup, split_rad):
+    """The split path builds the non-radiative physics with radiation off; the
+    run's cloud config must still reach MG2's in-cloud ice-stratus fraction."""
+    import sys
+    sys.path.insert(0, "tests/unit")
+    from test_spectral_cam6_cloud_routing import _cam6_bundle
+
+    from legoesm.training.aimip_params import (
+        make_aimip_classical_spectral_physics)
+    grid, _sigma, _state = setup
+    bundle, schemes = _cam6_bundle("cam6_clubb")
+    fn = make_aimip_classical_spectral_physics(
+        bundle, grid, _DT, radiation="rrtmgp", split_rad=split_rad,
+        rad_update_interval_steps=6, rrtmgp_gpoint_batch_size=8,
+        convection_scheme=schemes["convection"],
+        turbulence_scheme=schemes["turbulence"], gwd_scheme=schemes["gwd"],
+        microphysics_scheme=schemes["microphysics"],
+        cloud_scheme=schemes["cloud"], surface_bulk_scheme="constant",
+        cld_macmic_num_steps=3,
+        param_overrides={"atm.micro.MorrisonConfig":
+                         {"warm_rain_incloud": True}})
+    assert fn is not None

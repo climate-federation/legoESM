@@ -77,7 +77,7 @@ Usage
         --schemes all --days 5 --N 12 --nlev 20
 
     JAX_ENABLE_X64=1 python scripts/run_rce_convection_sweep.py \\
-        --schemes tiedtke,zhang_mcfarlane --days 10
+        --schemes zhang_mcfarlane,emanuel --days 10
 """
 
 from __future__ import annotations
@@ -95,9 +95,10 @@ import jax.numpy as jnp
 import numpy as np
 
 
+# tiedtke is not offered: the WRF port needs the dynamics q_v tendency,
+# omega and the previous-step turbulence inputs this offline sweep has none of.
 SCHEME_CHOICES = (
     "sbm",
-    "tiedtke",
     "zhang_mcfarlane",
     "emanuel",
     "bechtold",
@@ -157,11 +158,10 @@ def _build_convection_call(scheme: str, dt: float):
     confounded by AR1 noise.
     """
     from legoesm.atmosphere.physics.convection.config import (
-        TiedtkeConfig, ZhangMcFarlaneConfig, EmanuelConfig, BechtoldConfig,
+        ZhangMcFarlaneConfig, EmanuelConfig, BechtoldConfig,
         KuoConfig, KainFritschConfig, MassFluxConfig, SBMConfig,
     )
     from legoesm.atmosphere.physics.convection.sbm import sbm_convection
-    from legoesm.atmosphere.physics.convection.tiedtke import tiedtke_convection
     from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
         zhang_mcfarlane_convection,
     )
@@ -207,24 +207,6 @@ def _build_convection_call(scheme: str, dt: float):
                 jnp.zeros_like(u), jnp.zeros_like(v), (),
             )
         init_carry_fn = lambda ncol, nlev, dtype: ()
-
-    elif scheme == "tiedtke":
-        cfg = TiedtkeConfig(enable_cmt=False, M_b_max=M_B_MAX_RCE)
-
-        def call(T, qv, pf, ph, u, v, carry):
-            (prog,) = carry
-            mc_zero = jnp.zeros_like(T)
-            out, prog_new = tiedtke_convection(
-                T=T, q_v=qv, p_full=pf, p_half=ph, u=u, v=v,
-                conv_prog_profile=prog, dt=dt, config=cfg,
-                moisture_convergence=mc_zero,
-            )
-            du = out.du_dt_conv if out.du_dt_conv is not None else jnp.zeros_like(u)
-            dv = out.dv_dt_conv if out.dv_dt_conv is not None else jnp.zeros_like(v)
-            return out.dT_dt, out.dq_v_dt, out.dq_c_conv_dt, du, dv, (prog_new,)
-        init_carry_fn = lambda ncol, nlev, dtype: (
-            jnp.zeros((ncol, nlev), dtype=dtype),
-        )
 
     elif scheme == "zhang_mcfarlane":
         cfg = ZhangMcFarlaneConfig(enable_cmt=False, land_fraction="none")

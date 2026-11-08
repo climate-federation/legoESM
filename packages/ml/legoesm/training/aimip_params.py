@@ -34,7 +34,6 @@ from legoesm import constants
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.atmosphere.physics.convection.config import (
     ConvectionConfig,
-    TiedtkeConfig,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     GravityWaveDragConfig,
@@ -60,30 +59,8 @@ from legoesm.training.aimip_spatial import AIMIPSpatialSurfaceParams
 # scheme's published defaults.  All transforms are 'sigmoid' so the
 # unconstrained optimizer-space leaves are unbounded reals.
 
-_TIEDTKE_TRAINABLE: list[ParamConstraint] = [
-    ParamConstraint("tiedtke_tau_M_u_relax", 600.0, 14400.0, "sigmoid"),
-    ParamConstraint("tiedtke_tau_MC_proxy", 1800.0, 28800.0, "sigmoid"),
-    # tiedtke_cape_threshold REMOVED (#1417): the trigger sigmoid saturates
-    # to exactly 1.0 in a convecting column and CAPE clamps to exactly 0 in a
-    # stable one, so its gradient is EXACTLY zero in both regimes. It was
-    # being optimised with no signal; its spec is tier 0 for the same reason.
-    ParamConstraint("tiedtke_downdraft_alpha", 0.05, 0.6, "sigmoid"),
-    ParamConstraint("tiedtke_downdraft_RH_min", 0.1, 0.6, "sigmoid"),
-    # Extended: entrainment / detrainment + closure knobs (audit pass).
-    ParamConstraint("tiedtke_epsilon_deep", 2.0e-5, 5.0e-4, "sigmoid"),
-    ParamConstraint("tiedtke_delta_deep", 2.0e-5, 5.0e-4, "sigmoid"),
-    ParamConstraint("tiedtke_epsilon_shallow", 1.0e-4, 1.0e-3, "sigmoid"),
-    ParamConstraint("tiedtke_delta_shallow", 1.0e-4, 1.0e-3, "sigmoid"),
-    ParamConstraint("tiedtke_epsilon_midlevel", 2.0e-5, 5.0e-4, "sigmoid"),
-    ParamConstraint("tiedtke_delta_midlevel", 2.0e-5, 5.0e-4, "sigmoid"),
-    ParamConstraint("tiedtke_cmt_c_u", 0.3, 1.0, "sigmoid"),
-    ParamConstraint("tiedtke_cmt_c_d", 0.3, 1.0, "sigmoid"),
-    ParamConstraint("tiedtke_parcel_dT", 0.1, 1.5, "sigmoid"),
-    ParamConstraint("tiedtke_parcel_dq", 1.0e-4, 5.0e-3, "sigmoid"),
-    ParamConstraint("tiedtke_cloud_depth_deep", 1500.0, 5000.0, "sigmoid"),
-    ParamConstraint("tiedtke_cloud_depth_shallow_max", 500.0, 3000.0, "sigmoid"),
-    ParamConstraint("tiedtke_mc_proxy_RH_crit", 0.4, 0.9, "sigmoid"),
-]
+# Tiedtke has no trainables: the convection is the faithful WRF port, whose
+# constants are fixed (oracle-fidelity routing R1, 2026-11).
 
 _LOUIS_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("louis_l_mix_max", 20.0, 400.0, "sigmoid"),
@@ -128,7 +105,7 @@ _XU_RANDALL_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("cloud_rh_crit", 0.5, 0.95, "sigmoid"),
     ParamConstraint("cloud_alpha_xr", 25.0, 400.0, "sigmoid"),
     ParamConstraint("cloud_p_xr", 0.1, 1.0, "sigmoid"),
-    ParamConstraint("cloud_q_c_diagnostic", 1.0e-6, 1.0e-3, "sigmoid"),  # = spec and driver range (one parameter, one range)
+    ParamConstraint("cloud_q_c_diagnostic", 1.0e-6, 1.5e-3, "sigmoid"),  # = spec and driver range (one parameter, one range)
     # Cloud particle effective radii (drive RRTMGP cloud optics).
     ParamConstraint("cloud_r_eff_liq", 5.0e-6, 30.0e-6, "sigmoid"),
     ParamConstraint("cloud_r_eff_ice", 10.0e-6, 100.0e-6, "sigmoid"),
@@ -188,8 +165,8 @@ _SUNDQVIST_TRAINABLE: list[ParamConstraint] = [
 _SBM_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("sbm_tau_c", 1800.0, 21600.0, "sigmoid"),
     ParamConstraint("sbm_RH_ref", 0.5, 0.9, "sigmoid"),
-    # sbm_CAPE_threshold REMOVED (#1417): same AD-unreachable trigger as
-    # tiedtke_cape_threshold — see the note there.
+    # sbm_CAPE_threshold REMOVED (#1417): the trigger sigmoid saturates to
+    # exactly 1.0 / CAPE clamps to 0, so its gradient is exactly zero.
 ]
 
 # RRTMGP knobs (active when ``aimip_radiation=rrtmgp``).
@@ -220,8 +197,7 @@ _AIMIP_COMMON_TRAINABLE: list[ParamConstraint] = []   # see _GRAY_RAD_TRAINABLE
 
 
 AIMIP_CLASSICAL_CONSTRAINTS: list[ParamConstraint] = (
-    _TIEDTKE_TRAINABLE
-    + _LOUIS_TRAINABLE
+    _LOUIS_TRAINABLE
     + _SURFACE_TRAINABLE
     + _MCFARLANE_TRAINABLE
     + _XU_RANDALL_TRAINABLE
@@ -307,7 +283,7 @@ def aimip_classical_trainable_names(*, convection, turbulence, gwd,
         raise ValueError(
             f"unknown surface bulk scheme {surface_bulk_scheme!r}; expected "
             f"one of {sorted(_SURFACE_KNOBS_BY_BULK)}")
-    fams = {"tiedtke": _TIEDTKE_TRAINABLE, "sbm": _SBM_TRAINABLE}.get(
+    fams = {"sbm": _SBM_TRAINABLE}.get(
         convection, [])
     fams = list(fams)
     if turbulence == "louis":
@@ -541,21 +517,24 @@ class AIMIPClassicalParams(eqx.Module):
         A knob read into an ARRAY slot (all-array template) of another dtype:
         a knob the checkpoint's record lists as frozen takes the template
         dtype; a trained knob may only widen losslessly (fp32 -> fp64); a
-        narrowing, or any dtype change with no record to classify the knob,
-        raises (user 2026-10-28, Q).  A record whose ranges differ from this
-        module's raises: no decoding across range sets yet.  Every other leaf
+        narrowing raises (user 2026-10-28, Q).  A missing record, or one whose
+        ranges differ from this module's, raises: raw values decode through the
+        current ranges, so a file of unknown ranges could load shifted.  Every other leaf
         loads as equinox's default (a Python-float slot gets the exact float).
         """
         default = eqx.default_deserialise_filter_spec
-        if record is not None:
-            mine = {c.name: [c.min_val, c.max_val] for c in self.constraints}
-            if record["ranges"] != mine:
-                diff = sorted(k for k in set(mine) | set(record["ranges"])
-                              if mine.get(k) != record["ranges"].get(k))
-                raise ValueError(
-                    f"checkpoint trained with other AIMIP knob ranges or knobs "
-                    f"({diff}); decoding across range sets is not implemented")
-        frozen = None if record is None else frozenset(record["frozen"])
+        if record is None:
+            raise ValueError(
+                "checkpoint has no knob record, so the AIMIP knob ranges it "
+                "was trained with are unknown; refusing to decode it")
+        mine = {c.name: [c.min_val, c.max_val] for c in self.constraints}
+        if record["ranges"] != mine:
+            diff = sorted(k for k in set(mine) | set(record["ranges"])
+                          if mine.get(k) != record["ranges"].get(k))
+            raise ValueError(
+                f"checkpoint trained with other AIMIP knob ranges or knobs "
+                f"({diff}); decoding across range sets is not implemented")
+        frozen = frozenset(record["frozen"])
 
         def knob(name):
             def spec(f, x):
@@ -564,10 +543,6 @@ class AIMIPClassicalParams(eqx.Module):
                 disk = np.load(f)
                 if disk.dtype == x.dtype:
                     return jnp.asarray(disk)
-                if frozen is None:
-                    raise ValueError(
-                        f"knob {name}: checkpoint dtype {disk.dtype} vs template "
-                        f"{x.dtype} and no knob record to tell frozen from trained")
                 if name in frozen or np.can_cast(disk.dtype, x.dtype, "safe"):
                     return jnp.asarray(disk, dtype=x.dtype)
                 raise ValueError(
@@ -593,32 +568,6 @@ class AIMIPClassicalParams(eqx.Module):
     # ``eqx.filter_value_and_grad`` traces gradients through each
     # constructed config field.
     # ------------------------------------------------------------------
-
-    def to_tiedtke_config(self) -> TiedtkeConfig:
-        d = self.as_dict()
-        base = TiedtkeConfig()
-        return base._replace(
-            tau_M_u_relax=d["tiedtke_tau_M_u_relax"],
-            tau_MC_proxy=d["tiedtke_tau_MC_proxy"],
-            # cape_threshold is NOT overridden: #1417 dropped it from
-            # _TIEDTKE_TRAINABLE (AD-unreachable trigger), so it is absent
-            # from as_dict() and TiedtkeConfig's published default stands.
-            downdraft_alpha=d["tiedtke_downdraft_alpha"],
-            downdraft_RH_min=d["tiedtke_downdraft_RH_min"],
-            epsilon_deep=d["tiedtke_epsilon_deep"],
-            delta_deep=d["tiedtke_delta_deep"],
-            epsilon_shallow=d["tiedtke_epsilon_shallow"],
-            delta_shallow=d["tiedtke_delta_shallow"],
-            epsilon_midlevel=d["tiedtke_epsilon_midlevel"],
-            delta_midlevel=d["tiedtke_delta_midlevel"],
-            cmt_c_u=d["tiedtke_cmt_c_u"],
-            cmt_c_d=d["tiedtke_cmt_c_d"],
-            parcel_dT=d["tiedtke_parcel_dT"],
-            parcel_dq=d["tiedtke_parcel_dq"],
-            cloud_depth_deep=d["tiedtke_cloud_depth_deep"],
-            cloud_depth_shallow_max=d["tiedtke_cloud_depth_shallow_max"],
-            mc_proxy_RH_crit=d["tiedtke_mc_proxy_RH_crit"],
-        )
 
     def to_surface_config(
         self, bulk_scheme: str = "constant",
@@ -759,7 +708,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         RRTMGPConfig,
     )
 
-    t = TiedtkeConfig()
     lo = LouisConfig()
     su = SurfaceLayerConfig()
     mc = McFarlaneConfig()
@@ -768,25 +716,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
     sbm = SBMConfig()
     rr = RRTMGPConfig()
     return {
-        # Tiedtke (base + extended)
-        "tiedtke_tau_M_u_relax": float(t.tau_M_u_relax),
-        "tiedtke_tau_MC_proxy": float(t.tau_MC_proxy),
-        "tiedtke_cape_threshold": float(t.cape_threshold),
-        "tiedtke_downdraft_alpha": float(t.downdraft_alpha),
-        "tiedtke_downdraft_RH_min": float(t.downdraft_RH_min),
-        "tiedtke_epsilon_deep": float(t.epsilon_deep),
-        "tiedtke_delta_deep": float(t.delta_deep),
-        "tiedtke_epsilon_shallow": float(t.epsilon_shallow),
-        "tiedtke_delta_shallow": float(t.delta_shallow),
-        "tiedtke_epsilon_midlevel": float(t.epsilon_midlevel),
-        "tiedtke_delta_midlevel": float(t.delta_midlevel),
-        "tiedtke_cmt_c_u": float(t.cmt_c_u),
-        "tiedtke_cmt_c_d": float(t.cmt_c_d),
-        "tiedtke_parcel_dT": float(t.parcel_dT),
-        "tiedtke_parcel_dq": float(t.parcel_dq),
-        "tiedtke_cloud_depth_deep": float(t.cloud_depth_deep),
-        "tiedtke_cloud_depth_shallow_max": float(t.cloud_depth_shallow_max),
-        "tiedtke_mc_proxy_RH_crit": float(t.mc_proxy_RH_crit),
         # Louis
         "louis_l_mix_max": float(lo.l_mix_max),
         "louis_Ri_crit": float(lo.Ri_crit),
@@ -918,14 +847,15 @@ def aimip_active_scheme_keys(physics_config) -> set[str]:
             active = getattr(fam_cfg, part, None)
             if active is None:
                 continue
-            # Descend into a nested ``params`` holder when that is what carries
-            # the spec (CLUBBConfig.params -> CLUBBParams).
-            target = getattr(active, "params", None)
-            if target is None or not hasattr(target, "_fields"):
-                target = active
-            cls = type(target).__name__
+            # The scheme config AND a nested ``params`` holder can both carry
+            # a spec (CLUBBConfig.pdf_variance_scale; CLUBBConfig.params ->
+            # CLUBBParams), so collect both.
+            classes = {type(active).__name__}
+            nested = getattr(active, "params", None)
+            if nested is not None and hasattr(nested, "_fields"):
+                classes.add(type(nested).__name__)
             keys |= {m.scheme_key for m in registry
-                     if m.config_class == cls
+                     if m.config_class in classes
                      and m.scheme_key.startswith(prefixes)}
     return keys
 
@@ -1248,7 +1178,8 @@ _INACTIVE_FIELDS_BY_CLOUD_SCHEME = {
 
 def aimip_inactive_fields(*, cloud_scheme: str, microphysics: str, gwd: str,
                           subgrid_orography: bool,
-                          param_fixed: dict | None = None) -> frozenset:
+                          param_fixed: dict | None = None,
+                          turbulence: str = "none") -> frozenset:
     """Qualified ``scheme_key.field`` names with no gradient path under this
     scheme selection, frozen OUT of the trainable set by name (no-inert-parameters
     rule, the ``_inactive_keys`` pattern) rather than left to a measured
@@ -1267,6 +1198,7 @@ def aimip_inactive_fields(*, cloud_scheme: str, microphysics: str, gwd: str,
         MicrophysicsConfig,
         MorrisonConfig,
     )
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     from legoesm.core.param_overrides import apply_param_overrides
 
     pins = (param_fixed or {}).get("atm.micro.MorrisonConfig", {})
@@ -1274,7 +1206,8 @@ def aimip_inactive_fields(*, cloud_scheme: str, microphysics: str, gwd: str,
         microphysics=MicrophysicsConfig(
             scheme=microphysics,
             morrison=apply_param_overrides(MorrisonConfig(), dict(pins))),
-        gravity_wave_drag=GravityWaveDragConfig(scheme=gwd))
+        gravity_wave_drag=GravityWaveDragConfig(scheme=gwd),
+        turbulence=TurbulenceConfig(scheme=turbulence))
     return (_INACTIVE_FIELDS_BY_CLOUD_SCHEME.get(cloud_scheme, frozenset())
             | resolved_inactive_fields(
                 probe, subgrid_orography=subgrid_orography))
@@ -1329,6 +1262,14 @@ def resolved_inactive_fields(physics_config, *,
     if (getattr(conv, "scheme", None) == "emanuel"
             and not conv.emanuel.enable_cmt):
         out.add("atm.conv.EmanuelConfig.cu_coefficient")
+    turb = getattr(physics_config, "turbulence", None)
+    if getattr(turb, "scheme", None) == "smagorinsky":
+        # The WRF km_opt=3 arm reads only wrf_c_s / wrf_prandtl; the Lilly and
+        # Deardorff arms read only C_s / Pr_t / l_mix_max (smagorinsky.py).
+        unread = (("C_s", "Pr_t", "l_mix_max")
+                  if turb.smagorinsky.stability_form == "wrf_km3"
+                  else ("wrf_c_s", "wrf_prandtl"))
+        out |= {f"atm.turb.SmagorinskyConfig.{f}" for f in unread}
     gwd = getattr(physics_config, "gravity_wave_drag", None)
     if subgrid_orography and "mcfarlane" in str(
             getattr(gwd, "scheme", "")).split("+"):
@@ -1482,6 +1423,10 @@ def make_aimip_classical_spectral_physics(
     rrtmgp_gpoint_checkpoint: bool = True,
     rrtmgp_gpoint_batch_size: int = 16,
     rrtmgp_column_chunk_size: int = 0,
+    # CAM RRTMG lid layer above the model top / fp32 optics+RTE (the AMIP
+    # production MPAS path runs both on); off = byte-identical.
+    rrtmgp_overhead_layer: bool = False,
+    rrtmgp_compute_fp32: bool = False,
     column_mesh=None,
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
@@ -1663,6 +1608,8 @@ def make_aimip_classical_spectral_physics(
             gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
             gpoint_batch_size=rrtmgp_gpoint_batch_size,
             column_chunk_size=rrtmgp_column_chunk_size,
+            overhead_layer=bool(rrtmgp_overhead_layer),
+            compute_fp32=bool(rrtmgp_compute_fp32),
         )
         rad_cfg = RadiationConfig(
             scheme="rrtmgp",
@@ -1708,11 +1655,7 @@ def make_aimip_classical_spectral_physics(
         )
 
     # ---- Convection ----
-    if convection_scheme == "tiedtke":
-        conv_cfg = ConvectionConfig(
-            scheme="tiedtke", tiedtke=params.to_tiedtke_config(),
-        )
-    elif convection_scheme == "sbm":
+    if convection_scheme == "sbm":
         conv_cfg = ConvectionConfig(
             scheme="sbm", sbm=params.to_sbm_config(),
         )
@@ -1974,7 +1917,10 @@ def make_aimip_classical_spectral_physics(
         resolved_clubb_config,
     )
     non_rad_cfg = PhysicsConfig(
-        radiation=RadiationConfig(scheme="none"),
+        # Radiation is off here, but the run's (spliced) cloud config rides
+        # along: MG2 in-cloud warm rain reads its aist rh ramps.
+        radiation=RadiationConfig(scheme="none",
+                                  cloud_config=rad_cfg.cloud_config),
         convection=conv_cfg,
         turbulence=turb_cfg,
         microphysics=micro_cfg,

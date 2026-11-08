@@ -12,6 +12,10 @@ and writes two figures next to it:
 * ``training_history_loss.png`` — training and held-out loss vs epoch. The
   held-out curve is absent for a run launched without ``--val-windows``, and
   the figure says so rather than drawing a training curve alone unlabelled.
+* ``training_history_terms.png`` — each weighted held-out loss term
+  (``val_terms``: MSE, bias and CRPS per variable, flux, spectral) vs epoch on
+  a log axis; colour = variable, line style = kind. Skipped for histories
+  written before the trainer logged terms.
 * ``training_history_params.png`` — every parameter that MOVED, as a fraction
   of its epoch-0 value, so knobs whose units differ by ten orders of magnitude
   share one axis. Parameters that never moved are listed in the caption
@@ -32,6 +36,16 @@ import json
 from pathlib import Path
 
 _MOVED_REL = 1e-6      # a parameter counts as moved above this relative change
+# Okabe-Ito, one colour per variable; line style per term kind.
+_VAR_COLOR = {"T": "#E69F00", "u": "#56B4E9", "v": "#009E73",
+              "q": "#0072B2", "ps": "#D55E00"}
+_KIND_STYLE = {"mse": "-", "crps": "--", "bias": ":"}
+
+
+def term_series(rows: list[dict]) -> dict[str, list]:
+    """{term: [value or None per epoch]} from each row's ``val_terms``."""
+    names = sorted({k for r in rows for k in (r.get("val_terms") or {})})
+    return {n: [(r.get("val_terms") or {}).get(n) for r in rows] for n in names}
 
 
 def load_history(path: Path) -> list[dict]:
@@ -122,6 +136,36 @@ def main() -> int:
     fig.savefig(loss_png, dpi=140)
     plt.close(fig)
 
+    # A log axis cannot show a zero (a zero-weight term): those are listed in
+    # the console output instead of drawn as empty legend entries.
+    all_terms = term_series(rows)
+    terms = {n: v for n, v in all_terms.items()
+             if any(x is not None and x > 0 for x in v)}
+    zero_terms = sorted(set(all_terms) - set(terms))
+    terms_png = out_dir / "training_history_terms.png"
+    terms_png.unlink(missing_ok=True)
+    if not terms:
+        terms_png = None
+    else:
+        fig, ax = plt.subplots(figsize=(8.0, 5.0))
+        for name, series in terms.items():
+            kind, _, var = name.partition("_")
+            pts = [(e, v) for e, v in zip(epochs, series)
+                   if v is not None and v > 0]
+            ax.plot([p[0] for p in pts], [p[1] for p in pts],
+                    _KIND_STYLE.get(kind, "-."), marker="o", ms=3,
+                    color=_VAR_COLOR.get(var, "#000000"), label=name)
+        ax.set_yscale("log")
+        ax.set_xlabel("epoch")
+        ax.set_ylabel("weighted held-out loss term")
+        ax.set_title("Held-out loss by term (colour: variable; "
+                     "solid MSE, dashed CRPS, dotted bias)")
+        ax.grid(alpha=0.3, which="both")
+        ax.legend(fontsize=7, ncol=3)
+        fig.tight_layout()
+        fig.savefig(terms_png, dpi=140)
+        plt.close(fig)
+
     moved, flat = split_params(rows)
     fig, ax = plt.subplots(figsize=(8.0, 5.0))
     ranked = sorted(moved.items(),
@@ -143,6 +187,10 @@ def main() -> int:
 
     print(f"wrote {loss_png}")
     print(f"wrote {par_png}")
+    if terms_png is not None:
+        print(f"wrote {terms_png}")
+    if zero_terms:
+        print(f"terms always zero (not drawn): {', '.join(zero_terms)}")
     if flat:
         print(f"{len(flat)} parameters never moved: {', '.join(flat[:10])}"
               + (" ..." if len(flat) > 10 else ""))

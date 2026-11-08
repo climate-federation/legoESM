@@ -5,6 +5,8 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.core.smooth import (
+    max_c1,
+    min_c1,
     pnorm_smooth_min, positive_part_c1, sigmoid_switch, smooth_max, smooth_min, smooth_clamp,
     smooth_relu, smooth_abs, smoothstep_cubic, smoothstep_quintic,
 )
@@ -138,3 +140,29 @@ def test_positive_part_c1_is_zero_below_and_c1():
     for j in (0.0, 1.0 / s):
         lo, hi = g(jnp.array([j - 1e-7, j + 1e-7]))
         assert abs(float(hi - lo)) < 1e-5
+
+
+def test_max_c1_min_c1_exact_outside_band_and_c1():
+    """Bitwise the hard operand outside the band 0 < a - b < 1/s, C1 across both joins,
+    never above max(a, b); min_c1 mirrors it; sharpness inf is jnp.maximum/minimum."""
+    s = 4.0
+    b = jnp.array(1.0)
+    a = jnp.array([0.0, 1.0, 1.1, 1.25, 1.3, 3.0])
+    y = max_c1(a, b, s)
+    assert jnp.array_equal(y[:2], jnp.ones(2)) and jnp.array_equal(y[3:], a[3:])
+    assert jnp.all(y <= jnp.maximum(a, b)) and jnp.all(y >= b)
+    assert jnp.array_equal(min_c1(-a, -b, s), -y)
+    assert jnp.array_equal(max_c1(a, b, jnp.inf), jnp.maximum(a, b))
+    assert jnp.array_equal(min_c1(a, b, jnp.inf), jnp.minimum(a, b))
+    g = jax.vmap(jax.grad(lambda t: max_c1(t, b, s)))
+    for j in (1.0, 1.0 + 1.0 / s):
+        lo, hi = g(jnp.array([j - 1e-7, j + 1e-7]))
+        assert abs(float(hi - lo)) < 1e-5
+def test_positive_part_c1_traced_inf_is_hard_and_finite():
+    """A TRACED sharpness = inf gives max(x, 0) with finite gradients (no inf * 0)."""
+    x = jnp.array([-1.0, 0.0, 0.3, 2.0])
+    f = jax.jit(lambda x, s: positive_part_c1(x, s))
+    assert jnp.array_equal(f(x, jnp.inf), jnp.maximum(x, 0.0))
+    g = jax.jit(jax.grad(lambda x, s: jnp.sum(positive_part_c1(x, s))))(x, jnp.inf)
+    assert jnp.all(jnp.isfinite(g))
+    assert jnp.array_equal(f(x, 4.0), positive_part_c1(x, 4.0))

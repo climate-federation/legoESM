@@ -79,6 +79,7 @@ def _dino_ldf_zad_config():
     return LatLonCGridOceanConfig.from_flat(
         A_h=1.0e4, A_v=1.0e-4, bottom_drag_r=1.1e-3,
         lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_mask_levels="surface",
         vertical_momentum_scheme="nemo_advective",
     )
 

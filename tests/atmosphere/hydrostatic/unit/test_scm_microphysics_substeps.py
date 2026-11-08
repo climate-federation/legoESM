@@ -152,14 +152,9 @@ def test_scm_substeps_prevent_campaign_negative_condensate() -> None:
     assert morrison_single >= _TINY_NEGATIVE
     assert morrison_subbed >= _TINY_NEGATIVE
 
-    # thompson gained a scheme-level sublimation/sedimentation flux-limiter fix
-    # (#477) that keeps condensate non-negative even at a single dt=600 s step;
-    # the SCM substep is then redundant-but-harmless defense. Assert both paths
-    # stay non-negative (documents the #477 + substep alignment).
-    thompson_single = _campaign_style_min_qcond("thompson", microphysics_substeps=1)
-    thompson_subbed = _campaign_style_min_qcond("thompson", microphysics_substeps=_SUBSTEPS)
-    assert thompson_single >= _TINY_NEGATIVE
-    assert thompson_subbed >= _TINY_NEGATIVE
+    # thompson (WRF port) is not run here: this campaign-style column
+    # prescribes no w, which the port requires (vote V5a; the campaign
+    # scripts dropped thompson too).
 
 
 def _substep_water_residual(scheme: str) -> tuple[float, float]:
@@ -244,7 +239,10 @@ def _substep_water_residual(scheme: str) -> tuple[float, float]:
     return float(jnp.max(jnp.abs(residual / scale))), float(min_cond)
 
 
-@pytest.mark.parametrize("scheme", ("morrison", "thompson"))
+# thompson: the WRF port leaves WRF's own residual (not 1e-10); its host
+# budget is pinned against the port's own in tests/unit/test_thompson_adapter.py
+# (vote V4b).
+@pytest.mark.parametrize("scheme", ("morrison",))
 def test_scm_substep_sequence_conserves_water_plus_precipitation(
     scheme: str,
 ) -> None:

@@ -4581,6 +4581,8 @@ def make_voronoi_sharded_step(
             #     cell fields such as latCell). ---
             phys_state_out = phys_state
             if _phys is not None:
+                from legoesm.core.state import with_dyn_tendencies
+                phys_state = with_dyn_tendencies(phys_state, state, state_new, dt)
                 _pr = _phys(state_new, global_mesh, sigma,
                             phys_state=phys_state, forcing=forcing)
                 # NB ``type(...) is tuple`` (not isinstance): tendencies

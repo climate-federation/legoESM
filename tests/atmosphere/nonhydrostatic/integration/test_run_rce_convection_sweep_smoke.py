@@ -1,7 +1,7 @@
 """Smoke test for ``scripts/run/run_rce_convection_sweep.py``.
 
-iter-273: ``run_rce_convection_sweep.py`` sweeps 8 cumulus
-convection schemes (sbm, tiedtke, zhang_mcfarlane, emanuel,
+iter-273: ``run_rce_convection_sweep.py`` sweeps 7 cumulus
+convection schemes (sbm, zhang_mcfarlane, emanuel,
 bechtold, kuo, kain_fritsch, mass_flux) on a fixed-SST lat-lon
 FV column with gray radiation + bulk BL + warm-rain microphysics.
 Pre iter-273 it had ZERO test coverage.
@@ -44,7 +44,7 @@ _SUMMARY_RE = re.compile(
 
 
 _ALL_SCHEMES = (
-    "sbm", "tiedtke", "zhang_mcfarlane", "emanuel",
+    "sbm", "zhang_mcfarlane", "emanuel",
     "bechtold", "kuo", "kain_fritsch", "mass_flux",
 )
 

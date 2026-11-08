@@ -227,10 +227,11 @@ def test_all_nh_cube_branches_use_corner_div_damp_factory_pair():
             f"iter-17 regression: {tc} cube NH config lost "
             "``corner_div_damp_nord=1``."
         )
-        assert "corner_div_damp_d4_bg=0.16" in blocks[tc], (
+        assert "corner_div_damp_d4_bg=_nh_cdd_d4bg" in blocks[tc], (
             f"iter-17 regression: {tc} cube NH config lost "
-            "``corner_div_damp_d4_bg=0.16``."
+            "``corner_div_damp_d4_bg=_nh_cdd_d4bg``."
         )
+    assert '"LEGOESM_NH_CDD_D4BG", "0.16"' in SCRIPT_PATH.read_text()
 
 
 def _find_pe_baroclinic_cube_config_block() -> str:
