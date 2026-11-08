@@ -1769,6 +1769,32 @@ def _make_hydrostatic_radiation(
                     "forcing carries both a prescribed surface shortwave "
                     "(sfc_sw_up) and open_ocean_frac; the prescribed albedo "
                     "would be overwritten on the direct beam.")
+        # Tile-blended radiative surface boundary (coupled column lane, P5c):
+        # per-column emissivity eps_eff and the radiating temperature T_rad
+        # with eps_eff*sigma*T_rad^4 = the tiles' emitted longwave.  T_rad is
+        # read by radiation only; every other consumer keeps forcing["T_sfc"].
+        # Absent keys -> the config emissivity and T_sfc, byte-identical.
+        _emis_ext = (forcing.get("sfc_emissivity")
+                     if forcing is not None else None)
+        _trad_ext = forcing.get("T_sfc_rad") if forcing is not None else None
+        if (_emis_ext is None) != (_trad_ext is None):
+            raise ValueError(
+                "forcing['sfc_emissivity'] and forcing['T_sfc_rad'] form one "
+                "radiative surface boundary (eps*sigma*T^4 = emitted LW); "
+                "got only one of them.")
+        if _emis_ext is not None:
+            if radiation_config.scheme != "rrtmgp":
+                raise ValueError(
+                    "a per-column surface emissivity is only consumed by "
+                    f"rrtmgp; radiation scheme is {radiation_config.scheme!r}.")
+            if forcing.get("sfc_lw_up") is not None:
+                raise ValueError(
+                    "forcing carries both a prescribed upwelling LW "
+                    "(sfc_lw_up) and a tile-blended emissivity/T_sfc_rad; "
+                    "one would silently replace the other.")
+            _emis_col = jnp.asarray(_emis_ext).reshape(ncol)
+            T_sfc_col = jnp.asarray(_trad_ext, dtype=T_sfc_col.dtype).reshape(
+                ncol)
         T_sfc_col, _alb_col, _emis_col = resolve_prescribed_radiative_bc(
             forcing, radiation_config, ncol, T_sfc_col, _alb_col, _emis_col)
 

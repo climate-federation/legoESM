@@ -1609,6 +1609,11 @@ _WIN_SCALAR_KEYS = ("land_win_n", "cpl_win_n", "cpl_win_k")
 # Coupling window (P5b): per-step sums of the fluxes the coupler consumes as
 # window MEANS, in the order (net SW, net LW, precip, frozen precip).
 _CPL_WIN_FIELDS = ("sw_net_sfc", "lw_net_sfc", "precip", "precip_frozen")
+# Coupler ice/lake handback (P5c): how far below zero the open-water fraction
+# 1 - f_land - f_ice - f_lake may sit (round-off) before the atmosphere's land
+# fraction and the coupler's tile fractions are declared different partitions
+# (vote V2 2026-11-08: GLM/codex/Claude raise, no clipping).
+_HB_PARTITION_TOL = 1.0e-9
 
 
 def coupling_window_from_checkpoint(payload, cpl_k, n_cells):
@@ -1952,6 +1957,12 @@ class ModelDriver:
         # None (AMIP / standalone) means the atmosphere computes its own bulk
         # surface fluxes (byte-identical to the pre-shared-flux behaviour).
         self.get_sfc_flux_override = None
+        # Optional coupler ice/lake handback hook (P5c, atmosphere owns land
+        # and open water): a callable ``() -> SurfaceHandback`` returning the
+        # handback for the CURRENT coupling window, read by the MPAS column
+        # loop every step.  None = the atmosphere's own bulk law covers every
+        # non-land fraction (byte-identical).
+        self.get_surface_handback = None
         self.diagnostics = None
         self._phis_data = None
         self._f_land = None
@@ -10039,6 +10050,13 @@ class ModelDriver:
                 # discovering its host callback has nowhere to land
                 # (GLM 2026-09-22)
                 require_cpu_for_strict_sedimentation()
+            if (self.get_surface_handback is not None
+                    and not (self.config.dycore.column_lane
+                             or self.config.grid.grid_type == "mpas")):
+                raise NotImplementedError(
+                    "a coupler ice/lake handback (get_surface_handback) is set "
+                    "but only the MPAS column loop reads it; this lane would "
+                    "keep its own bulk fluxes over ice and lakes.")
             if self.config.dycore.column_lane:
                 self._reject_unconsumed_flux_override("the FV3-duo column lane")
                 status = self._run_column_lane(start_step, start_day)
@@ -14237,6 +14255,33 @@ class ModelDriver:
         # Validated (validate_strict) to imply the land-flux handoff, so the
         # turbulence always receives T_sfc_ocean together with shflx_land.
         _ocean_sfc_on = resolve_ocean_flux_on_ocean_surface(cfg)
+        # Coupler ice/lake handback (P5c K2): the atmosphere owns land and
+        # open water; the bulk law covers the open-water fraction only and
+        # the coupler's ice+lake fluxes, emission, albedo and emissivity fill
+        # the rest (plan L2'/P2).  Needs the land model's own fluxes (the
+        # only channel that hands the kernel a surface flux), the SST, and
+        # rrtmgp (the only scheme that takes a per-column emissivity).
+        _hb_fn = self.get_surface_handback
+        _hb_last = None
+        if _hb_fn is not None:
+            _hb_missing = [_nm for _nm, _ok in (
+                ("the interactive land model's own fluxes "
+                 "(use_multilayer_land)", _land_ml_on),
+                ("a land fraction", _f_land_cells is not None),
+                ("the SST surface forcing", _sst_forcing),
+                ("rrtmgp radiation", _rad_scheme == "rrtmgp"),
+            ) if not _ok]
+            if _hb_missing:
+                raise ValueError(
+                    "the coupler ice/lake handback needs "
+                    + ", ".join(_hb_missing) + " on the MPAS column loop.")
+            _hb_eps = phys_cfg.radiation.rrtmgp.sfc_emissivity
+            if (isinstance(_hb_eps, (int, float))
+                    and not 0.0 < float(_hb_eps) <= 1.0):
+                raise ValueError(
+                    "the handback's radiating temperature divides by the "
+                    "land/open-water emissivity; rrtmgp sfc_emissivity must be "
+                    f"in (0, 1], got {_hb_eps!r}")
         print(f"  Non-land surface fluxes evaluated on: "
               f"{'OCEAN/ICE surface' if _ocean_sfc_on else 'land-blended surface'}"
               f" (ocean_flux_on_ocean_surface={_ocean_sfc_on})")
@@ -15421,6 +15466,19 @@ class ModelDriver:
                     f"coupling_dt={_cpl_dt!r} s must be a positive multiple "
                     f"of 1800 s and of the atmosphere step DT={DT} s.")
             _CPL_K = int(round(_k))
+        if _hb_fn is not None:
+            # The handback changes at window boundaries; each window must open
+            # on a radiation and physics solve, or the held radiation / physics
+            # would keep the previous window's ice and lake (vote V16).
+            _hb_rad = RAD_UPDATE_STEPS if _subcycle_rad else 1
+            _hb_phys = PHYS_UPDATE_STEPS if _hold_phys else 1
+            if _CPL_K is None or _CPL_K % _hb_rad or _CPL_K % _hb_phys:
+                raise ValueError(
+                    "the coupler ice/lake handback needs a coupling window "
+                    "(coupling_dt) whose length in steps is a multiple of the "
+                    f"radiation ({_hb_rad}) and physics ({_hb_phys}) update "
+                    f"intervals; window = {_CPL_K} steps.")
+        if _CPL_K is not None:
             if _cpl_ck:
                 _cpl_sums, _cpl_n = coupling_window_from_checkpoint(
                     _cpl_ck, _CPL_K,
@@ -15907,6 +15965,58 @@ class ModelDriver:
                     _ls_reused_win = _ls_reused_win + jnp.sum(
                         _land_stress_landcell & _land_taumag_valid
                         & ~_land_taumag_fresh, dtype=jnp.int32)
+                if _hb_fn is not None:
+                    # Coupler ice/lake handback for this window (P5c K2).  Its
+                    # fluxes are per grid cell, already weighted by the tile
+                    # area; the open-water fraction is what the coupler's
+                    # post-exchange ice and lake leave (vote V1).
+                    _H = _hb_fn()
+                    _hdt = _sst_day.dtype
+                    _hc = lambda a: jnp.asarray(  # noqa: E731
+                        a, dtype=_hdt).reshape(-1)
+                    _fl_hb = _f_land_cells.astype(_hdt)
+                    _fi_hb, _fk_hb = _hc(_H.f_ice), _hc(_H.f_lake)
+                    _fow = 1.0 - _fl_hb - _fi_hb - _fk_hb
+                    if _H is not _hb_last:
+                        _fow_min = float(jnp.min(_fow))
+                        if _fow_min < -_HB_PARTITION_TOL:
+                            raise ValueError(
+                                "coupler handback: 1 - f_land - f_ice - f_lake "
+                                f"reaches {_fow_min:.3e}; the atmosphere's land "
+                                "fraction and the coupler's tile fractions are "
+                                "not the same partition.")
+                        _hb_last = _H
+                    _forcing["T_sfc_ocean"] = _sst_day
+                    _forcing["f_ow"] = _fow
+                    for _k, _v in (("shflx_hb", _H.shflx),
+                                   ("lhflx_hb", _H.lhflx),
+                                   ("evap_hb", _H.evap),
+                                   ("taux_hb", _H.tau_x),
+                                   ("tauy_hb", _H.tau_y)):
+                        _forcing[_k] = _hc(_v)
+                    # Radiative boundary (plan L2'): land and open water emit
+                    # at their own skin this step, ice and lake what the
+                    # coupler debits for this window (V15).  No land albedo
+                    # only where this rank has no land (checked above).
+                    from legoesm.forcing.surface_utils import (
+                        handback_surface_boundary,
+                    )
+                    _alb_l = (_land_albedo_cells if _land_albedo_cells
+                              is not None else _albedo_land_static)
+                    _bnd = handback_surface_boundary(
+                        _fl_hb, _fi_hb, _fk_hb,
+                        _hc(_land_T_skin if _land_T_skin is not None
+                            else _forcing["T_sfc"]),
+                        _sst_day, _hb_eps, _hc(_H.lw_emit),
+                        _hc(_H.emissivity_ice), _hc(_H.emissivity_lake),
+                        0.0 if _alb_l is None else _hc(_alb_l),
+                        _alb_ocean_cur, _hc(_H.albedo_ice),
+                        _hc(_H.albedo_lake))
+                    _forcing["sfc_albedo"] = _bnd["sfc_albedo"]
+                    _forcing["sfc_emissivity"] = _bnd["sfc_emissivity"]
+                    _forcing["T_sfc_rad"] = _bnd["T_sfc_rad"]
+                    if "open_ocean_frac" in _forcing:
+                        _forcing["open_ocean_frac"] = _fow
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is

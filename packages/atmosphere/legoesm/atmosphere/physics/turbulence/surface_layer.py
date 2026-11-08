@@ -450,6 +450,25 @@ def land_stress_into_surface_flux(surface_flux, tau_land_mag, land_valid,
     return rebuilt[:4] + (jnp.where(has_land, rebuilt[4], surface_flux[4]),)
 
 
+def handback_into_surface_flux(surface_flux, bulk_tau_x, bulk_tau_y,
+                               f_handback, tau_x_hb, tau_y_hb, rho_sfc):
+    """``(tau_x, tau_y, shflx, lhflx, ustar)`` with the coupler's ice+lake
+    stress handback in place of the bulk stress over that fraction.
+
+    ``surface_flux`` carries the bulk stress over every non-land fraction
+    (with the land stress already blended in, or the bulk over land too);
+    ``f_handback`` x the bulk stress is removed and the handback stress
+    (per grid cell, already weighted by the ice/lake area) added.  ``ustar``
+    is rebuilt from the blended stress in EVERY column, so it moves
+    continuously as the prognostic ice fraction goes to zero (vote V14).
+    Heat fluxes pass through unchanged.
+    """
+    tx = surface_flux[0] - f_handback * bulk_tau_x + tau_x_hb
+    ty = surface_flux[1] - f_handback * bulk_tau_y + tau_y_hb
+    return prescribed_into_surface_flux(surface_flux, rho_sfc,
+                                        tau_x=tx, tau_y=ty)
+
+
 def _apply_prescribed_scalar_fluxes(config, tau_x, tau_y, shflx, lhflx, ustar, rho):
     """Override the turbulent surface fluxes with prescribed values.
 

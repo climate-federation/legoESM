@@ -121,22 +121,26 @@ def test_handback_fields_are_start_fraction_weighted():
     fr = compute_tile_fractions(TILES, s0.ice.concentration.data)
     fw = fr.f_ocean + fr.f_ice
     sb = constants.sigma_sb
-    T_i, T_k = s0.ice.T_ice.data, s0.lake.T_epi.data
+    # Emission: what the NEXT exchange debits (explicit at its start state,
+    # i.e. this step's end state, over this step's post fractions; V15).
+    fr1 = compute_tile_fractions(TILES, s1.ice.concentration.data)
+    T_i, T_k = s1.ice.T_ice.data, s1.lake.T_epi.data
     exp = {
         "shflx": fr.f_ice * ir.shflx + fr.f_lake * kr.shflx,
         "lhflx": fw * ir.lhflx_exchange + fr.f_lake * kr.lhflx,
         "evap": fw * ir.surface_mass_flux + fr.f_lake * kr.surface_mass_flux,
         "tau_x": fr.f_ice * ir.tau_x + fr.f_lake * kr.tau_x,
         "tau_y": fr.f_ice * ir.tau_y + fr.f_lake * kr.tau_y,
-        "lw_emit": (fr.f_ice * ICE_CFG.emissivity_ice * sb * T_i ** 4
-                    + fr.f_lake * LAKE_CFG.emissivity_lake * sb * T_k ** 4),
+        "lw_emit": (fr1.f_ice * ICE_CFG.emissivity_ice * sb * T_i ** 4
+                    + fr1.f_lake * LAKE_CFG.emissivity_lake * sb * T_k ** 4),
     }
     for name, val in exp.items():
         npt.assert_allclose(getattr(hb, name), val, rtol=1e-12, atol=1e-15,
                             err_msg=name)
     # Ice evaporation must not be scaled by the ice fraction a second time.
     assert float(jnp.max(jnp.abs(ir.surface_mass_flux))) > 0.0
-    fr1 = compute_tile_fractions(TILES, s1.ice.concentration.data)
+    # discriminates start- from end-state emission
+    assert float(jnp.max(jnp.abs(s1.ice.T_ice.data - s0.ice.T_ice.data))) > 0.0
     npt.assert_allclose(hb.f_ice, fr1.f_ice, rtol=0, atol=0)
     npt.assert_allclose(hb.f_lake, fr1.f_lake, rtol=0, atol=0)
     npt.assert_allclose(

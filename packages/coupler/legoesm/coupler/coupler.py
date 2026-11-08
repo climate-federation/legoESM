@@ -123,16 +123,20 @@ class SurfaceHandback(NamedTuple):
     """Ice + lake exchange H_n handed back to the atmosphere for the next
     coupling window when the atmosphere owns land and open water.
 
-    Fluxes are per grid cell, already weighted by the tile area the ice and
-    lake models debited during this exchange (start-of-step fractions):
-    SH/LH [W/m2, + up], evaporation [kg/m2/s, + up], stress [Pa, on the
-    atmosphere], emitted longwave eps*sigma*T^4 at the start-of-step skin
-    temperature the tiles charged [W/m2, + up].
+    Turbulent fluxes are per grid cell, already weighted by the tile area the
+    ice and lake models debited during this exchange (start-of-step
+    fractions): SH/LH [W/m2, + up], evaporation [kg/m2/s, + up], stress [Pa,
+    on the atmosphere]; the atmosphere receives them during the next window.
 
-    ``f_ice``/``f_lake`` are the post-step fractions, and ``albedo_*`` /
-    ``emissivity_*`` the per-tile values the tiles will apply at the start of
-    the next exchange, so the atmosphere books the next window's radiation
-    with what the tiles will absorb.
+    ``lw_emit`` [W/m2, + up, per grid cell] is the emission the tiles will be
+    debited for in the NEXT exchange: both radiate explicitly at their
+    start-of-step skin temperature, so it is eps*sigma*T^4 of the post-step
+    state weighted by the post-step fractions, and the atmosphere radiates it
+    during the very window that exchange integrates (no longwave lag; vote
+    V15).  ``f_ice``/``f_lake`` are the post-step fractions, and
+    ``albedo_*``/``emissivity_*`` the per-tile values the tiles will apply at
+    the start of the next exchange, so the atmosphere books the next window's
+    radiation with what the tiles will absorb.
     """
 
     shflx: jnp.ndarray
@@ -147,6 +151,47 @@ class SurfaceHandback(NamedTuple):
     albedo_lake: jnp.ndarray
     emissivity_ice: jnp.ndarray
     emissivity_lake: jnp.ndarray
+
+
+def _tile_optics(ice, lake, fractions, ice_config: SeaIceConfig,
+                 lake_config: LakeConfig) -> dict:
+    """The ``SurfaceHandback`` fractions, albedos, emissivities and emission
+    of an ice and lake state: what those tiles apply, and the longwave they
+    are debited for, in their next step (both radiate at the start-of-step
+    skin temperature)."""
+    sb = constants.sigma_sb
+    return dict(
+        lw_emit=(fractions.f_ice * ice_config.emissivity_ice * sb
+                 * ice.T_ice.data ** 4
+                 + fractions.f_lake * lake_config.emissivity_lake * sb
+                 * lake.T_epi.data ** 4),
+        f_ice=fractions.f_ice,
+        f_lake=fractions.f_lake,
+        albedo_ice=slab_surface_albedo(ice.h_ice.data, ice.T_ice.data,
+                                       ice_config),
+        albedo_lake=lake_surface_albedo(lake.T_epi.data, lake_config),
+        emissivity_ice=jnp.full_like(ice.T_ice.data, ice_config.emissivity_ice),
+        emissivity_lake=jnp.full_like(lake.T_epi.data,
+                                      lake_config.emissivity_lake),
+    )
+
+
+def initial_handback(sfc_state: SurfaceState, tile_config: TileConfig,
+                     ice_config: SeaIceConfig,
+                     lake_config: LakeConfig) -> SurfaceHandback:
+    """H_{-1}, the handback the atmosphere reads during the first coupling
+    window: no ice/lake exchange has happened yet, so every turbulent flux is
+    zero (nothing was debited from the ice or lake, plan P2); fractions,
+    albedos, emissivities and the emitted longwave are those of the initial
+    state, which the tiles apply and are debited for in their first step."""
+    _validate_atm_owns(ATM_OWNS_LAND_OCEAN, ice_config, lake_config)
+    z = jnp.zeros_like(sfc_state.ice.T_ice.data)
+    fr = compute_tile_fractions(tile_config,
+                                sfc_state.ice.concentration.data)
+    return SurfaceHandback(
+        shflx=z, lhflx=z, evap=z, tau_x=z, tau_y=z,
+        **_tile_optics(sfc_state.ice, sfc_state.lake, fr, ice_config,
+                       lake_config))
 
 
 def _validate_atm_owns(atm_owns, ice_config: SeaIceConfig,
@@ -777,7 +822,6 @@ def make_coupler(
         fr1 = compute_tile_fractions(tile_config, ice1.concentration.data)
         fi, fk = fr0.f_ice, fr0.f_lake
         f_water = fr0.f_ocean + fr0.f_ice
-        sb = constants.sigma_sb
         # Ice evaporation and its latent heat are per grid cell (already
         # concentration-weighted by the ice model): weight by f_water, never by
         # f_ice again.  Every other ice field is per ice area.
@@ -787,15 +831,7 @@ def make_coupler(
             evap=f_water * ice_r.surface_mass_flux + fk * lake_r.surface_mass_flux,
             tau_x=fi * ice_r.tau_x + fk * lake_r.tau_x,
             tau_y=fi * ice_r.tau_y + fk * lake_r.tau_y,
-            lw_emit=(fi * e_ice * sb * T_ice0 ** 4
-                     + fk * e_lake * sb * T_epi0 ** 4),
-            f_ice=fr1.f_ice,
-            f_lake=fr1.f_lake,
-            albedo_ice=slab_surface_albedo(ice1.h_ice.data, ice1.T_ice.data,
-                                           ice_config),
-            albedo_lake=lake_surface_albedo(lake1.T_epi.data, lake_config),
-            emissivity_ice=jnp.full_like(T_ice0, e_ice),
-            emissivity_lake=jnp.full_like(T_epi0, e_lake),
+            **_tile_optics(ice1, lake1, fr1, ice_config, lake_config),
         )
         new_state = sfc_state._replace(ice=ice1, lake=lake1)
         return new_state, handback

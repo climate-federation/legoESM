@@ -171,6 +171,56 @@ def blended_surface_albedo(
     return f_land * albedo_land + (1.0 - f_land) * albedo
 
 
+def handback_surface_boundary(
+    f_land: jnp.ndarray,
+    f_ice: jnp.ndarray,
+    f_lake: jnp.ndarray,
+    T_land: jnp.ndarray,
+    sst: jnp.ndarray,
+    emissivity: "float | jnp.ndarray",
+    lw_emit_ice_lake: jnp.ndarray,
+    emissivity_ice: jnp.ndarray,
+    emissivity_lake: jnp.ndarray,
+    albedo_land: "float | jnp.ndarray",
+    albedo_ocean: "float | jnp.ndarray",
+    albedo_ice: jnp.ndarray,
+    albedo_lake: jnp.ndarray,
+) -> dict:
+    """Radiative surface boundary of a cell whose land and open water belong
+    to the atmosphere and whose ice and lake belong to the coupler (P5c L2').
+
+    Open water is what the four tiles leave, ``f_ow = 1 - f_land - f_ice -
+    f_lake``.  Albedo and emissivity are area blends; the emitted longwave is
+    the land and open-water emission at their own skin this step plus the ice
+    and lake emission the coupler debits for this window (``lw_emit_ice_lake``,
+    per grid cell).  ``T_rad`` is the single temperature with
+    ``eps_eff * sigma * T_rad^4`` equal to that emission, so a solver given
+    ``(eps_eff, T_rad)`` emits exactly it and reflects ``(1 - eps_eff)`` of
+    the downward longwave, the blend of the tiles' reflection.
+
+    Returns a dict with ``f_ow``, ``sfc_albedo``, ``sfc_emissivity`` and
+    ``T_sfc_rad``.  The root is guarded so a cell with no emission would get
+    ``T_rad = 0`` with a finite, zero derivative (vote V5); RRTMGP clips its
+    Planck tables at 160 K, so such a cell would still emit, which is why the
+    ice/lake emission is never zero (vote V15).
+    """
+    f_ow = 1.0 - f_land - f_ice - f_lake
+    eps_eff = (emissivity * (f_land + f_ow) + f_ice * emissivity_ice
+               + f_lake * emissivity_lake)
+    sb = constants.sigma_sb
+    emit = (emissivity * sb * (f_land * T_land ** 4 + f_ow * sst ** 4)
+            + lw_emit_ice_lake)
+    x = emit / (sb * eps_eff)
+    pos = x > 0.0
+    return dict(
+        f_ow=f_ow,
+        sfc_albedo=(f_land * albedo_land + f_ow * albedo_ocean
+                    + f_ice * albedo_ice + f_lake * albedo_lake),
+        sfc_emissivity=eps_eff,
+        T_sfc_rad=jnp.where(pos, jnp.where(pos, x, 1.0) ** 0.25, 0.0),
+    )
+
+
 def surface_temperature_for_lw_boundary(
     radiation: str,
     *,

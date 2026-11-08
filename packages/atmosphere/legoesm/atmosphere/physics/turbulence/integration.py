@@ -1263,17 +1263,33 @@ def _make_mpas_turbulence(
                 forcing["evap_land"], dtype=q_sfc.dtype).reshape(nCells)
             _ev_land = jnp.where(_fl > 0.0, _ev_land, 0.0)
             _lh_land = jnp.where(_fl > 0.0, _lh_land, 0.0)   # 0 * NaN would poison the blend
-            _ev_blend = ((1.0 - _fl) * _lh / charged_latent_heat(
+            # Coupled column lane with the atmosphere owning land and open
+            # water (P5c): the bulk law covers only the open-water fraction
+            # ``f_ow``; the coupler's ice+lake handback (per grid cell, already
+            # weighted by those tiles' area) supplies the rest.  Absent keys:
+            # the bulk law covers every non-land fraction, as before.
+            _hb = forcing.get("shflx_hb")
+            if _hb is not None:
+                _hb_cells = lambda k: jnp.asarray(  # noqa: E731
+                    forcing[k], dtype=q_sfc.dtype).reshape(nCells)
+                _w_bulk = _hb_cells("f_ow")
+                _hb_sh, _hb_lh, _hb_ev = (_hb_cells("shflx_hb"),
+                                          _hb_cells("lhflx_hb"),
+                                          _hb_cells("evap_hb"))
+            else:
+                _w_bulk = 1.0 - _fl
+                _hb_sh = _hb_lh = _hb_ev = 0.0
+            _ev_blend = (_w_bulk * _lh / charged_latent_heat(
                              step_config.surface.bulk_scheme, _T_bulk)
-                         + _fl * _ev_land)
+                         + _fl * _ev_land + _hb_ev)
             step_config = step_config._replace(surface=step_config.surface._replace(
                 prescribed_evap_kg_m2_s=_ev_blend))
             _sh_land = jnp.where(
                 _fl > 0.0, jnp.asarray(_shf_land, dtype=q_sfc.dtype).reshape(nCells), 0.0)
             _surface_flux = (
                 _tx, _ty,
-                (1.0 - _fl) * _sh + _fl * _sh_land,
-                (1.0 - _fl) * _lh + _fl * _lh_land,
+                _w_bulk * _sh + _fl * _sh_land + _hb_sh,
+                _w_bulk * _lh + _fl * _lh_land + _hb_lh,
                 _us,
             )
             # ``forcing["taumag_land"]`` (land_stress_from_land): the land
@@ -1302,6 +1318,18 @@ def _make_mpas_turbulence(
                     _cells("z0m_land"), _cells("d_land"),
                     u_col[:, -1], v_col[:, -1],
                     z_full[:, -1] - z_half[:, -1], _fl, rho[:, -1])
+            if _hb is not None:
+                from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                    handback_into_surface_flux,
+                )
+                _surface_flux = handback_into_surface_flux(
+                    _surface_flux, _tx, _ty, 1.0 - _fl - _w_bulk,
+                    _hb_cells("taux_hb"), _hb_cells("tauy_hb"), rho[:, -1])
+        elif forcing is not None and forcing.get("shflx_hb") is not None:
+            raise ValueError(
+                "forcing['shflx_hb'] (coupler ice/lake flux handback) is only "
+                "consumed together with the land's own heat fluxes "
+                "(forcing['shflx_land']); without them it would be ignored.")
         elif forcing is not None and forcing.get("T_sfc_ocean") is not None:
             raise ValueError(
                 "forcing['T_sfc_ocean'] (non-land surface anchor) is only "
