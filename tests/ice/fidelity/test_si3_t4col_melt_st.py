@@ -152,6 +152,9 @@ def test_soft_column_dh_budgets_close_inside_the_bands(monkeypatch):
         dq = (a1 * q(out) - a * q(st)) / d
         # Soft column: 1.6e-10 relative measured (flood telescoping, mechanism open), vote Z53.
         np.testing.assert_allclose(dq, rhs, rtol=0, atol=1e-9 * max(1.0, np.abs(dq).max()))
+        salt = K.rho_ice * (a1 * np.asarray(out.h_ice * out.S_bulk) - a * np.asarray(st.h_ice * st.S_bulk)) / d
+        ssum = sum(np.asarray(getattr(f, k)) for k in bl.SI3ExchangeFluxes._fields if k.startswith("sfx"))
+        np.testing.assert_allclose(salt, -ssum, rtol=0, atol=1e-11 * max(1.0, np.abs(salt).max()))   # Z58
         checked += 1
     monkeypatch.undo()
     assert checked == 5
@@ -166,3 +169,28 @@ def test_zdf_melting_row_switch_gradient_is_finite_and_the_surrogate(monkeypatch
                                   nemo_version="5.0.1", switches=SMOOTH._replace(snow_ramp_width_m=0.0))
         return jnp.sum(r.qcn_ice_top)
     _grads(monkeypatch, f, K.T0 - 0.5 * TM)
+
+
+def test_soft_column_do_budgets_close_inside_the_bands(monkeypatch):
+    """Z56-Z58: the soft ice_thd_do column keeps the hard step's mass, salt, heat and snow
+    identities (tolerances of test_si3_t4col_thd_do) with the open-water and area-cap
+    switches inside their bands."""
+    from test_si3_t4col_thd_do import DT, _state
+    st, fz = _state()
+    c = float(K.rho_ice)
+    v_unit = -np.asarray(bl._do_step(st, fz._replace(qlead=-jnp.ones_like(fz.qlead)), DT, K,
+                                     nemo_version="5.0.1")[1].wfx_opw) * DT / c          # vnew per -1 W/m2
+    room = np.maximum(0.0, bl._MAXIMUM_ICE_CONCENTRATION - np.asarray(st.concentration))
+    w_cut = SMOOTH.relative_width * SMOOTH.cut_fraction_scale
+    q_cap = -(room + 0.5 * w_cut) * bl._NEW_ICE_THICKNESS / v_unit
+    monkeypatch.setattr(bl, "straight_through", lambda h, s: s)
+    for q in (jnp.full_like(fz.qlead, -0.5 * WF), jnp.asarray(q_cap)):
+        o, fx = bl._do_step(st, fz._replace(qlead=q), DT, K, nemo_version="5.0.1", switches=SMOOTH)
+        a0, a1 = np.asarray(st.concentration), np.asarray(o.concentration)
+        v0, v1 = np.asarray(st.h_ice) * a0, np.asarray(o.h_ice) * a1
+        np.testing.assert_allclose(c * (v1 - v0) / DT, -np.asarray(fx.wfx_opw), rtol=1e-11, atol=1e-18)
+        s0, s1 = np.asarray(st.S_bulk) * v0, np.asarray(o.S_bulk) * v1
+        np.testing.assert_allclose(c * (s1 - s0) / DT, -np.asarray(fx.sfx_opw), rtol=1e-12, atol=1e-16)
+        q0, q1 = np.sum(st.e_ice, -1) * v0 / 3.0, np.sum(o.e_ice, -1) * v1 / 3.0
+        np.testing.assert_allclose((q1 - q0) / DT, np.asarray(fx.hfx_thd - fx.hfx_opw), rtol=1e-10, atol=1e-8)
+        np.testing.assert_allclose(np.asarray(o.h_snow) * a1, np.asarray(st.h_snow) * a0, rtol=1e-14, atol=0)

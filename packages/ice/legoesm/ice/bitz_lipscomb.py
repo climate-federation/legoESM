@@ -1734,8 +1734,9 @@ def _do_step_impl(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: f
     cap_w = si3_gt(a_lateral - room, 0.0, w_cut) if st else None
     excess_area = _stw(capped, a_lateral - room, 0.0, cap_w)
     residual = excess_area * _NEW_ICE_THICKNESS                    # zdv_res
-    anew = _stw(capped, jnp.maximum(0.0, a_lateral - excess_area), a_lateral, cap_w)
-    v_lateral = _stw(capped, jnp.maximum(0.0, vnew - residual), vnew, cap_w)
+    # excess_area already carries the cap ramp; blending again would leak volume (vote Z56).
+    anew = jnp.maximum(0.0, a_lateral - excess_area)
+    v_lateral = jnp.maximum(0.0, vnew - residual)
     v_old = post_temp2.h_ice * a_old
     a_total = a_old + anew
     v_mixed = v_old + v_lateral
@@ -1777,7 +1778,9 @@ def _do_step_impl(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: f
     # Snow volume is untouched by ice_thd_do: thickness spreads over the new area.
     h_snow_new = jnp.where(_has_ice, post_temp2.h_snow * a_old / jnp.where(_has_ice, a_total, 1.0), 0.0)
     new_ice = vnew > 0.0
-    new_w = si3_gt(vnew, 0.0, w.H) if st else None
+    # Soft pass takes the updated branch unconditionally: it tends to the old state as
+    # vnew -> 0, and a fractional blend would create snow volume (vote Z57).
+    new_w = jnp.ones_like(vnew) if st else None
     new_w3 = new_w[..., None] if st else None
     post_do = post_temp2._replace(
         concentration=a_total,
