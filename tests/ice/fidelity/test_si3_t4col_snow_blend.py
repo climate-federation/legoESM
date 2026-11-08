@@ -15,6 +15,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from legoesm.ice import bitz_lipscomb as bl
 from legoesm.ice.config import SI3SwitchConfig
@@ -28,6 +29,14 @@ FIXTURES = ("c2_ti_clamp", "c3_qcn_top_k", "c4_fullmelt", "c5_flood_sst", "c6_me
 W = 2.0e-4      # surrogate width = 0.01 x snow_cover_depth_nemo (#2407 vote Y1, Z34)
 ON = SI3SwitchConfig(snow_ramp_width_m=W)
 OFF = SI3SwitchConfig()
+
+
+@pytest.fixture(autouse=True)
+def _release_executables():
+    """The eager two-solve tests compile many executables; in one pytest process with the
+    sweep/unit files they exhausted vm.max_map_count (65532 maps, vote Z41)."""
+    yield
+    jax.clear_caches()
 
 
 def _zdf(fx, sw, h_s=None):
