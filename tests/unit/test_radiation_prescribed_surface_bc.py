@@ -155,3 +155,52 @@ def test_scalar_prescribed_planes_broadcast_over_the_columns(setup):
                      {"sfc_sw_up": 400.0, "sfc_sw_down": 500.0,
                       "sfc_lw_up": 380.0})
     assert scalar == pytest.approx(per_col, rel=1e-9)
+
+
+# --- land-coupled radiating surface (tier-5 U11-1) ---------------------------
+
+def test_land_radiating_surface_closes_the_tile_lw_and_keeps_sea_cells():
+    """``eps_g*sigma*T_g^4 + (1-eps_g)*La`` is the area sum of the two tiles'
+    grey-body LW at ANY La; an f=0 cell is returned bitwise; check_grads."""
+    import numpy as np
+    from jax.test_util import check_grads
+    from legoesm.driver.model_driver import land_radiating_surface
+    sb = constants.sigma_sb
+    f = jnp.array([0.0, 0.3, 0.999, 1.0])
+    T_sea = jnp.array([290.0, 285.0, 271.0, 300.0])
+    T_l = jnp.array([0.0, 301.0, 250.0, 310.0])      # 0: zero-filled ocean cell
+    eps_l = jnp.array([0.0, 0.95, 0.986, 0.96])
+    E = 0.98
+    T_g, eps_g = land_radiating_surface(T_sea, f, E, T_l, eps_l)
+    assert float(T_g[0]) == float(T_sea[0]) and float(eps_g[0]) == E
+    for La in (150.0, 420.0):
+        seen = eps_g * sb * T_g ** 4 + (1.0 - eps_g) * La
+        want = ((1.0 - f) * (E * sb * T_sea ** 4 + (1.0 - E) * La)
+                + f * (eps_l * sb * T_l ** 4 + (1.0 - eps_l) * La))
+        np.testing.assert_allclose(seen, want, rtol=1e-13, atol=0.0)
+    m = slice(1, 4)
+    check_grads(lambda a, b, c, d: land_radiating_surface(a, b, E, c, d)[0],
+                (T_sea[m], f[m], T_l[m], eps_l[m]), order=2,
+                modes=("fwd", "rev"))
+
+
+def test_land_radiative_bc_pair_scheme_and_identity():
+    from legoesm.atmosphere.physics.radiation.integration import (
+        resolve_land_radiative_bc)
+    cfg = RadiationConfig(scheme="rrtmgp")
+    T0 = jnp.full(3, 280.0)
+    assert resolve_land_radiative_bc({}, cfg, 3, T0, None) == (T0, None)
+    T, e = resolve_land_radiative_bc(
+        {"T_sfc_rad": jnp.full(3, 290.0), "sfc_emissivity": jnp.full(3, 0.95)},
+        cfg, 3, T0, None)
+    assert float(T[0]) == 290.0 and float(e[0]) == 0.95
+    with pytest.raises(ValueError, match="needs BOTH"):
+        resolve_land_radiative_bc({"T_sfc_rad": T0}, cfg, 3, T0, None)
+    with pytest.raises(ValueError, match="ncol=4"):
+        resolve_land_radiative_bc(
+            {"T_sfc_rad": T0, "sfc_emissivity": jnp.ones(3)}, cfg, 4,
+            jnp.ones(4), None)
+    with pytest.raises(ValueError, match="only consumed by the rrtmgp"):
+        resolve_land_radiative_bc(
+            {"T_sfc_rad": T0, "sfc_emissivity": jnp.ones(3)},
+            RadiationConfig(scheme="gray"), 3, T0, None)
