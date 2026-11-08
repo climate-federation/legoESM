@@ -106,3 +106,12 @@ def test_soft_column_at_zero_snow_is_the_no_snow_system(monkeypatch):
     # Soft snow temperature is continuous at h_s -> 0+ (Z37).
     tiny = _soft(monkeypatch, fx, 1e-30)
     np.testing.assert_allclose(np.asarray(tiny.T_snow), np.asarray(at0.T_snow), rtol=1e-13)   # Z35 closure tolerance
+
+
+def test_unselected_inversion_carries_no_cotangent(monkeypatch):
+    """Z36: an inversion with a non-finite derivative must not reach cells outside the band."""
+    fx = load("c3_qcn_top_k")
+    monkeypatch.setattr(bl, "ice_temperature_from_enthalpy",
+                        lambda e, S, c, **kw: jnp.sqrt(0.0 * e) + 0.0 * S + K.T0)   # d/de = NaN everywhere
+    g = jax.grad(lambda x: jnp.sum(_zdf(fx, ON, x).T_ice))(jnp.asarray(0.05))   # h_s >= w: no band cell
+    assert bool(jnp.isfinite(g)), g
