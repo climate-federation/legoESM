@@ -120,6 +120,14 @@ def test_blend_conserves_column_heat_inside_both_ramps():
     at[i2, j2] = 0.6 * w_a                      # at_i ramp
     _, hard = _call(d, SI3_HARD_SWITCHES, fhld=fh, at_i=at)
     _, smooth = _call(d, sw, fhld=fh, at_i=at)
+    _, zq = _call(d, SI3_HARD_SWITCHES, fhld=np.where(np.ones_like(fh, bool), -1.0, fh), at_i=at)
+    _, wq = _call(d, SI3_HARD_SWITCHES, fhld=np.where(np.ones_like(fh, bool), 1.0, fh),
+                  at_i=np.where(at > 0, np.maximum(at, 1.0e-6), at))
+    # pinned per-case gap: qsr = zqsr + (warm - zqsr) * C1(x), C1(x) = 3x^2 - 2x^3 at x = 0.4 and 0.6
+    for (i, j), weight in (((i1, j1), 0.352), ((i2, j2), 0.648)):
+        z, wv = float(zq.qsr[i, j]), float(wq.qsr[i, j])
+        assert z != wv
+        np.testing.assert_allclose(float(smooth.qsr[i, j]), z + (wv - z) * weight, rtol=1e-12, atol=1e-12)
     for i, j in ((i1, j1), (i2, j2)):
         assert float(smooth.qsr[i, j]) != float(hard.qsr[i, j])          # the ramp is active here
         np.testing.assert_allclose(float(smooth.qsr[i, j] + smooth.qns[i, j]),

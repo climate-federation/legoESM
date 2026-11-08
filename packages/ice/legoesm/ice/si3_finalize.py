@@ -825,6 +825,11 @@ def si3_ice_update_flx_columns(
     forms over ``relative_width * flux_scale_W_m2`` in ``fhld`` and ``relative_width * ice_switch_scale``
     in ``at_i`` (RULE 5).  ``qns = qt_oce_ai - qsr``, so the blend moves heat between the solar and
     non-solar channels and never changes the column total.
+
+    KNOWN DIFFERENCE (RULE 5): on the tier-4 ORCA1 record (NEMO 5.0.1, kt 17281, 108,432 interior cells)
+    the smooth default moves qsr in 3 cells (0 < fhld < 0.01 W/m2 or 0 < at_i < 1e-12) by up to 8.9 W/m2,
+    with qsr + qns unchanged (max difference 0); inside a ramp the gap reaches the full jump between the two
+    NEMO forms.  ``switches=SI3_HARD_SWITCHES`` recovers NEMO.
     """
     if not config.ln_icethd:
         raise ValueError("O16 requires resolved ln_icethd=True")
