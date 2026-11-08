@@ -30,6 +30,12 @@ from legoesm.coupler.lake.config import LakeConfig
 from legoesm.coupler.lake.state import LakeState
 
 
+def lake_surface_albedo(T_epi, config: LakeConfig):
+    """Albedo the lake applies to shortwave for an epilimnion temperature."""
+    return jnp.where(T_epi <= config.T_freeze, config.albedo_lake_ice,
+                     config.albedo_lake)
+
+
 def step_lake(
     state: LakeState,
     forcing: AtmToSurface,
@@ -68,7 +74,7 @@ def step_lake(
     # q_sat / L_s switch above (not the open-water 0.08).  Keeps the
     # in-step energy budget consistent with the albedo reported to the
     # atmosphere in the response below.
-    albedo_eff = jnp.where(is_frozen, config.albedo_lake_ice, config.albedo_lake)
+    albedo_eff = lake_surface_albedo(T_epi, config)
 
     # Bulk fluxes
     rho = forcing.rho_lowest
@@ -105,7 +111,7 @@ def step_lake(
     # Radiation.  A frozen lake reflects like ice/snow, not open water —
     # completes the ``is_frozen`` switch already applied to q_sfc and L_eff.
     # (Diagnostic-only ice: no prognostic thickness yet; upgrade = FLake ice.)
-    albedo_eff = jnp.where(is_frozen, config.albedo_lake_ice, config.albedo_lake)
+    albedo_eff = lake_surface_albedo(T_epi, config)
     sw_net, lw_net, lw_up = surface_radiation_fluxes(
         forcing.sw_down, forcing.lw_down, T_epi, albedo_eff,
         config.emissivity_lake,
@@ -267,8 +273,7 @@ def step_lake(
         # Reported albedo tracks the POST-step phase (like q_surface_new): the
         # atmosphere sees the end-of-step surface next.  (SW absorbed THIS step
         # used the pre-step albedo_eff above — correct for the state it had.)
-        albedo=jnp.where(is_frozen_new, config.albedo_lake_ice,
-                         config.albedo_lake).astype(_t_dtype),
+        albedo=lake_surface_albedo(T_epi_new, config).astype(_t_dtype),
         emissivity=jnp.full(T_epi.shape, config.emissivity_lake, dtype=_t_dtype),
         z0=jnp.full(T_epi.shape, config.z0_lake, dtype=_t_dtype),
         q_surface=q_sfc_new,

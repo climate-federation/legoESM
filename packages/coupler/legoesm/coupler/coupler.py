@@ -47,12 +47,15 @@ from legoesm.core.coupling_fields import (
 # Required by OMIP-2 protocol (Griffies 2016 §2.2 → Large & Yeager 2009 §3).
 _Q_SAT_SALINE_FACTOR = constants.q_sat_saline_fraction
 from legoesm.coupler.lake import LakeConfig, LakeState, step_lake
+from legoesm.coupler.lake.two_layer_lake import lake_surface_albedo
 from legoesm.coupler.tile_fractions import (
     blend_tiles,
     compute_tile_fractions,
 )
 from legoesm.ice.config import SeaIceConfig
-from legoesm.ice.sea_ice import step_sea_ice
+from legoesm.ice.sea_ice import (
+    slab_surface_albedo, step_sea_ice, uses_new_physics,
+)
 from legoesm.ice.state import (
     SeaIceState, DynamicSeaIceState, init_dynamic_ice_state,
 )
@@ -97,6 +100,97 @@ class _TileContext(NamedTuple):
     ocean_u: jnp.ndarray
     ocean_v: jnp.ndarray
     land_params: Any  # materialized LandSurfaceParams, or None
+
+
+ATM_OWNS_LAND_OCEAN = ("land", "ocean")
+
+
+class OwnedTileForcing(NamedTuple):
+    """Radiation the atmosphere booked for the ice and lake tiles over one
+    coupling window, per unit TILE area [W/m2, + into the surface].
+
+    ``sw_net_*`` is absorbed shortwave; ``lw_abs_*`` is absorbed longwave
+    (emissivity x downward LW), excluding the tile's own emission.
+    """
+
+    sw_net_ice: jnp.ndarray
+    lw_abs_ice: jnp.ndarray
+    sw_net_lake: jnp.ndarray
+    lw_abs_lake: jnp.ndarray
+
+
+class SurfaceHandback(NamedTuple):
+    """Ice + lake exchange H_n handed back to the atmosphere for the next
+    coupling window when the atmosphere owns land and open water.
+
+    Fluxes are per grid cell, already weighted by the tile area the ice and
+    lake models debited during this exchange (start-of-step fractions):
+    SH/LH [W/m2, + up], evaporation [kg/m2/s, + up], stress [Pa, on the
+    atmosphere], emitted longwave eps*sigma*T^4 at the start-of-step skin
+    temperature the tiles charged [W/m2, + up].
+
+    ``f_ice``/``f_lake`` are the post-step fractions, and ``albedo_*`` /
+    ``emissivity_*`` the per-tile values the tiles will apply at the start of
+    the next exchange, so the atmosphere books the next window's radiation
+    with what the tiles will absorb.
+    """
+
+    shflx: jnp.ndarray
+    lhflx: jnp.ndarray
+    evap: jnp.ndarray
+    tau_x: jnp.ndarray
+    tau_y: jnp.ndarray
+    lw_emit: jnp.ndarray
+    f_ice: jnp.ndarray
+    f_lake: jnp.ndarray
+    albedo_ice: jnp.ndarray
+    albedo_lake: jnp.ndarray
+    emissivity_ice: jnp.ndarray
+    emissivity_lake: jnp.ndarray
+
+
+def _validate_atm_owns(atm_owns, ice_config: SeaIceConfig,
+                       lake_config: LakeConfig) -> bool:
+    """True for the atmosphere-owns-land-and-open-water mode; raise on anything
+    else this coupler cannot run."""
+    if tuple(atm_owns) == ():
+        return False
+    if tuple(atm_owns) != ATM_OWNS_LAND_OCEAN:
+        raise ValueError(
+            f"atm_owns must be () or {ATM_OWNS_LAND_OCEAN!r}, got {atm_owns!r}")
+    # The handback inverts the booked absorption with the albedo the tile
+    # applies at the start of its step; only the single-category slab ice
+    # exposes that albedo (slab_surface_albedo).
+    if (ice_config.thermo_scheme != "zero_layer" or ice_config.dynamics != "none"
+            or ice_config.n_categories != 1 or uses_new_physics(ice_config)):
+        raise ValueError(
+            "atm_owns=('land', 'ocean') supports only the single-category slab "
+            "sea ice (thermo_scheme='zero_layer', dynamics='none', "
+            "n_categories=1, no snow/brine/ridging/ponds/shortwave scheme)")
+    _alb = [ice_config.albedo_ocean, lake_config.albedo_lake,
+            lake_config.albedo_lake_ice]
+    _alb += ([ice_config.ice_albedo.alpha_ice_cold,
+              ice_config.ice_albedo.alpha_ice_warm]
+             if ice_config.temp_dependent_albedo else [ice_config.albedo_ice])
+    # Checked only where the configuration is concrete: traced overrides (a
+    # parameter being trained) keep their gradient and are bounded by their
+    # parameter-spec ranges instead.  The runtime albedo is a convex blend of
+    # these constituents, so bounding them bounds 1 - albedo away from zero.
+    def _concrete(v):
+        return isinstance(v, (int, float))
+
+    for a in filter(_concrete, _alb):
+        if not 0.0 <= float(a) < 1.0:
+            raise ValueError(
+                f"atm_owns mode inverts absorbed shortwave by 1 - albedo; "
+                f"every ice/lake albedo must be in [0, 1), got {a!r}")
+    for e in filter(_concrete, (ice_config.emissivity_ice,
+                                lake_config.emissivity_lake)):
+        if not 0.0 < float(e) <= 1.0:
+            raise ValueError(
+                f"atm_owns mode inverts absorbed longwave by the emissivity; "
+                f"ice/lake emissivity must be in (0, 1], got {e!r}")
+    return True
 
 
 def _validate_coupler_config(config: CouplerConfig) -> None:
@@ -465,6 +559,7 @@ def make_coupler(
     land_param_provider=None,
     land_features: jnp.ndarray | None = None,
     land_soil_frozen_fraction: jnp.ndarray | None = None,
+    atm_owns: tuple = (),
 ):
     """Factory that returns step_surface function.
 
@@ -501,13 +596,23 @@ def make_coupler(
         Static feature matrix ``(ncol, n_input)`` for neural provider.
         Required when ``land_param_provider`` is a ``NeuralParamProvider``.
 
+    atm_owns : tuple, optional
+        ``()`` (default): the coupler steps all four tiles and returns their
+        blend.  ``("land", "ocean")``: the atmosphere owns the land and
+        open-water fluxes; ``step_surface`` then requires ``owned_forcing``
+        (an :class:`OwnedTileForcing`), never steps the land tile or computes
+        an ocean-tile flux, steps only ice and lake with exactly the booked
+        absorbed radiation, and returns a :class:`SurfaceHandback`.
+
     Returns
     -------
     step_surface : callable
         (SurfaceState, AtmToSurface, TileConfig, ocean_sst, ocean_u,
-         ocean_v, dt, doy) -> (SurfaceState, SurfaceToAtm)
+         ocean_v, dt, doy) -> (SurfaceState, SurfaceToAtm), or
+        (SurfaceState, SurfaceHandback) in the ``atm_owns`` mode.
     """
     _validate_coupler_config(coupler_config)
+    _atm_owned = _validate_atm_owns(atm_owns, ice_config, lake_config)
     U_min = coupler_config.U_min
     coupling_dt = float(coupler_config.coupling_dt)
     _lat = lat
@@ -645,6 +750,56 @@ def make_coupler(
         ("lake", _step_lake_tile),
     )
 
+    def _step_owned(sfc_state, atm_forcing, owned, tile_config, ocean_sst,
+                    ocean_u, ocean_v, dt):
+        ice0 = sfc_state.ice
+        lake0 = sfc_state.lake
+        T_ice0 = ice0.T_ice.data
+        T_epi0 = lake0.T_epi.data
+        # Albedo/emissivity each tile applies in THIS step (its start state):
+        # inverting the booked absorption with them makes the tile absorb
+        # exactly what the atmosphere removed.
+        a_ice = slab_surface_albedo(ice0.h_ice.data, T_ice0, ice_config)
+        a_lake = lake_surface_albedo(T_epi0, lake_config)
+        e_ice = ice_config.emissivity_ice
+        e_lake = lake_config.emissivity_lake
+        f_ice_forcing = atm_forcing._replace(
+            sw_down=owned.sw_net_ice / (1.0 - a_ice),
+            lw_down=owned.lw_abs_ice / e_ice)
+        f_lake_forcing = atm_forcing._replace(
+            sw_down=owned.sw_net_lake / (1.0 - a_lake),
+            lw_down=owned.lw_abs_lake / e_lake)
+        ice1, ice_r = step_sea_ice(ice0, f_ice_forcing, ocean_sst, ocean_u,
+                                   ocean_v, ice_config, U_min, dt, grid=_grid)
+        lake1, lake_r = step_lake(lake0, f_lake_forcing, lake_config, U_min, dt)
+
+        fr0 = compute_tile_fractions(tile_config, ice0.concentration.data)
+        fr1 = compute_tile_fractions(tile_config, ice1.concentration.data)
+        fi, fk = fr0.f_ice, fr0.f_lake
+        f_water = fr0.f_ocean + fr0.f_ice
+        sb = constants.sigma_sb
+        # Ice evaporation and its latent heat are per grid cell (already
+        # concentration-weighted by the ice model): weight by f_water, never by
+        # f_ice again.  Every other ice field is per ice area.
+        handback = SurfaceHandback(
+            shflx=fi * ice_r.shflx + fk * lake_r.shflx,
+            lhflx=f_water * ice_r.lhflx_exchange + fk * lake_r.lhflx,
+            evap=f_water * ice_r.surface_mass_flux + fk * lake_r.surface_mass_flux,
+            tau_x=fi * ice_r.tau_x + fk * lake_r.tau_x,
+            tau_y=fi * ice_r.tau_y + fk * lake_r.tau_y,
+            lw_emit=(fi * e_ice * sb * T_ice0 ** 4
+                     + fk * e_lake * sb * T_epi0 ** 4),
+            f_ice=fr1.f_ice,
+            f_lake=fr1.f_lake,
+            albedo_ice=slab_surface_albedo(ice1.h_ice.data, ice1.T_ice.data,
+                                           ice_config),
+            albedo_lake=lake_surface_albedo(lake1.T_epi.data, lake_config),
+            emissivity_ice=jnp.full_like(T_ice0, e_ice),
+            emissivity_lake=jnp.full_like(T_epi0, e_lake),
+        )
+        new_state = sfc_state._replace(ice=ice1, lake=lake1)
+        return new_state, handback
+
     def step_surface(
         sfc_state: SurfaceState,
         atm_forcing: AtmToSurface,
@@ -655,6 +810,7 @@ def make_coupler(
         dt: float,
         doy: float = 0.0,
         year: float | None = None,
+        owned_forcing: OwnedTileForcing | None = None,
     ) -> tuple[SurfaceState, SurfaceToAtm]:
         """Step all surface tiles and return blended response.
 
@@ -674,6 +830,20 @@ def make_coupler(
                 "tile_config.f_lake shape must match forcing shape, got "
                 f"{tile_config.f_lake.shape!r} vs {atm_forcing.sw_down.shape!r}",
             )
+
+        if _atm_owned:
+            if owned_forcing is None:
+                raise ValueError(
+                    "coupler built with atm_owns=('land', 'ocean'): the "
+                    "atmosphere owns the land and open-water fluxes, so a "
+                    "blended step would count them twice; pass owned_forcing")
+            return _step_owned(sfc_state, atm_forcing, owned_forcing,
+                               tile_config, ocean_sst, ocean_u_sfc,
+                               ocean_v_sfc, dt)
+        if owned_forcing is not None:
+            raise ValueError(
+                "owned_forcing given to a coupler that owns every tile; build "
+                "it with atm_owns=('land', 'ocean')")
 
         # 1. Materialize spatial land params (once per coupler step)
         if _land_param_provider is not None:
