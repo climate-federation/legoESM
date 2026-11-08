@@ -1398,6 +1398,8 @@ def test_store_mass_flux_is_the_last_config_field():
             "rk3_stage_tracer_written_order",
             "rk3_stage3_heat_nemo_written",
             "rk3_stage3_tracer_nemo_stored_thickness",
+            "bbl_nemo_stage3_krhs",
+            "bbl_nemo_pivot_ghost",
             "rk3_stage2_tracer_nemo_stored_thickness",
             "rk3_stage3_salt_nemo_written",
             "implicit_ice_ocean_top_drag",
@@ -1440,11 +1442,11 @@ def test_store_mass_flux_is_the_last_config_field():
         "otherwise")
 
 
-def test_store_mass_flux_retains_slot_105_and_combined_prefix():
+def test_store_mass_flux_retains_slot_103_and_main_prefix():
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
     fields = LatLonCGridOceanConfig._fields
-    combined_prefix = (
+    main_prefix = (
         "metric_convention", "vface_zonal_metric_evaluation",
         "coriolis_placement", "lateral_viscosity", "bottom_drag", "K_h",
         "K_bih", "A_v", "K_v", "barotropic", "hyperdiff_coeff",
@@ -1461,8 +1463,7 @@ def test_store_mass_flux_retains_slot_105_and_combined_prefix():
         "wall_grid_filter_rate_s", "tracer_wall_neumann_fill", "pgf_scheme",
         "pgf_quadrature", "eos_depth", "tracer_time_integrator",
         "bbl_adv_option", "bbl_gamma_s", "bbl_diffusive_option",
-        "bbl_aht_m2_s", "bbl_nemo_stage3_krhs", "bbl_nemo_pivot_ghost",
-        "ab2_epsilon", "outer_integrator", "asselin_gamma",
+        "bbl_aht_m2_s", "ab2_epsilon", "outer_integrator", "asselin_gamma",
         "tracer_combine", "implicit_vertical_mixing", "constants",
         "momentum_flux_scheme", "vertical_momentum_scheme",
         "zad_bottom_face_mask", "zad_qco_evaluation", "wzv_call2_evaluation",
@@ -1507,8 +1508,8 @@ def test_store_mass_flux_retains_slot_105_and_combined_prefix():
         "rk3_stage3_heat_nemo_written",
         "rk3_stage3_tracer_nemo_stored_thickness",
     )
-    assert fields[:len(combined_prefix)] == combined_prefix
-    assert fields.index("store_mass_flux") == 105
+    assert fields[:len(main_prefix)] == main_prefix
+    assert fields.index("store_mass_flux") == 103
 
 
 def test_store_mass_flux_survives_flat_construction_and_replace():

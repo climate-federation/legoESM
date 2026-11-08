@@ -1399,12 +1399,6 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # tuple member independently replaces density reciprocal, face stresses,
     # or live inverse depths; None retains the production operand.
     slow_forcing_wind_operand_override: object = None
-    # G5 non-vacuity controls: omit exactly one of the three downstream
-    # consumers of the already-tested ice/ocean face coefficient.  These are
-    # private test arms; no constructible model configuration can select them.
-    omit_ice_top_drag_residual: bool = False
-    omit_ice_top_drag_substeps: bool = False
-    omit_ice_top_drag_zdf: bool = False
     # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
     # leaving legoESM's carried state untouched.  This covers both a cold-start
     # ll_init frame and a continuation frame; private fidelity measurement only.
@@ -1871,14 +1865,6 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # is involved; the round-135 gate compares every ordinary state leaf with
     # the unobserved step before admitting the array.
     expose_stage3_fct_inputs: bool = False
-    # Passive trace of the exact pFu/pFv statement boundary at
-    # ldftra.f90:954-955.  These are the volume transports passed to the
-    # stage-3 WZV/FCT path, not the metric-free generic mass-flux diagnostic.
-    expose_l3_eiv_transport: bool = False
-    # Passive trace of the exact pFu/pFv statement boundary around
-    # tra_mle_trp at tramle.f90:344-348.  Like the L3 trace, this is attached
-    # only after the ordinary compiled step has completed.
-    expose_l5_mle_transport: bool = False
     # One-variable causal arm paired with the seam above.  Replace only the
     # T/S arrays entering the ordinary implicit ZDF solve; production leaves
     # this None.  The gate supplies a source-reconstructed NEMO pre-ZDF seed.
@@ -1924,6 +1910,23 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # QSR/GM process program, so the unforced ORCA2 hierarchy can observe its
     # own ``tra_zdf`` boundary without enabling an absent module.
     tracer_zdf_trace: bool = False
+
+    # G5 non-vacuity controls: omit exactly one of the three downstream
+    # consumers of the already-tested ice/ocean face coefficient.  These are
+    # private test arms; no constructible model configuration can select them.
+    omit_ice_top_drag_residual: bool = False
+    omit_ice_top_drag_substeps: bool = False
+    omit_ice_top_drag_zdf: bool = False
+    # Passive trace of the exact pFu/pFv statement boundary at
+    # ldftra.f90:954-955.  These are the volume transports passed to the
+    # stage-3 WZV/FCT path, not the metric-free generic mass-flux diagnostic.
+    expose_l3_eiv_transport: bool = False
+    # Passive trace of the exact pFu/pFv statement boundary around
+    # tra_mle_trp at tramle.f90:344-348.  Like the L3 trace, this is attached
+    # only after the ordinary compiled step has completed.
+    expose_l5_mle_transport: bool = False
+
+
 
 def rk3_stage_velocity_update(
     velocity_before,
@@ -2517,12 +2520,6 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     tke_statement_trace: object
     barotropic_targets: object
     slow_forcing_producer: object
-    stage3_composed_source: object
-    stage3_before_geothermal: object
-    stage3_geothermal_rate: object
-    stage3_before_damping: object
-    stage3_damping_rate: object
-    stage3_explicit_temperature: object
     stage_rhs: object
     stage1_full_rhs: object
     stage1_rhs_walk: object
@@ -2530,6 +2527,15 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     barotropic_correction_geometry: object
     stage_outputs: object
     stage_tracer_sources: object
+
+    stage3_composed_source: object
+    stage3_before_geothermal: object
+    stage3_geothermal_rate: object
+    stage3_before_damping: object
+    stage3_damping_rate: object
+    stage3_explicit_temperature: object
+
+
 
 class _NEMOWSMomentumBudgetTrace(NamedTuple):
     """Private passive surface-V production increments for GYRE."""
