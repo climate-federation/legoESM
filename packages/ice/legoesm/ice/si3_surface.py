@@ -43,7 +43,7 @@ from legoesm.core.bulk_flux import (
     sqrt_zero_subgradient,
 )
 from legoesm.core.nemo_namelist import overlay, parse_namelist
-from legoesm.core.smooth import max_c1, min_c1, smoothstep_cubic
+from legoesm.core.smooth import max_c1, min_c1, smoothstep_cubic, straight_through
 from legoesm.core.source_rounding import nemo_source_round as sr
 from legoesm.ice.config import SI3SwitchConfig
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
@@ -118,8 +118,9 @@ class SI3SurfaceConfig(NamedTuple):
     in qlead, fhld or the mass terms; 96 seeded pond and lead-cut columns show
     no gap above 6e-17.  Inside a ramp the gap reaches the step itself (0.054
     albedo mid-way through the melt ramp).  Per case in
-    ``si3_lane_smooth_gaps.npz``.  The snow-free test stays hard until
-    ``snow_ramp_width_m`` is ruled (see ``si3_snow_free``).
+    ``si3_lane_smooth_gaps.npz``.  The snow-free test is hard in the forward
+    pass in every mode; ``snow_ramp_width_m`` only sets its surrogate gradient
+    (see ``si3_snow_free``).
     ``switches=SI3_HARD_SWITCHES`` recovers NEMO.
     """
 
@@ -297,15 +298,15 @@ def si3_mix(weight, a, b, w):
 
 
 def si3_snow_free(h_snow, w, preserve_subnormal):
-    """1 where ``h_snow == 0`` (NEMO's IEEE test); ramp ``1 - C1(h_snow / w)`` if ``w > 0``.
+    """1 where ``h_snow == 0`` (NEMO's IEEE test) -- the forward value is hard in every mode.
 
-    ``w = snow_ramp_width_m`` when the ports are smooth, else 0; held at 0.0
-    (hard) pending a user decision (vote X4): the ORCA1 record holds trace
-    snow down to 1.2e-30 m in 355 ice cells, so any ramp width >= 1e-15 m
-    changes their through-ice sunlight by up to 218 W/m2.
+    ``w = snow_ramp_width_m`` when the ports are smooth, else 0.  ``w > 0``:
+    straight-through (user ruling 3a), forward NEMO's hard test bit for bit,
+    gradient of the surrogate ``1 - C1(h_snow / w)``.  A forward ramp is not
+    used: the ORCA1 record holds trace snow down to 1.2e-30 m in 355 ice
+    cells, so any ramp width >= 1e-15 m changes their through-ice sunlight by
+    up to 218 W/m2.
     """
-    if w != 0.0:
-        return 1.0 - smoothstep_cubic(h_snow / w)
     if preserve_subnormal:
         # XLA CPU flushes the smallest positive fp64 snow thickness to zero in
         # floating comparisons.  NEMO's scalar IEEE comparison does not.  A
@@ -315,7 +316,10 @@ def si3_snow_free(h_snow, w, preserve_subnormal):
         zero = (snow_bits << jnp.uint64(1)) == jnp.uint64(0)
     else:  # private one-variable ablation; never exposed in SeaIceConfig
         zero = h_snow == 0.0
-    return zero.astype(jnp.result_type(h_snow, float))
+    hard = zero.astype(jnp.result_type(h_snow, float))
+    if w == 0.0:
+        return hard
+    return straight_through(hard, 1.0 - smoothstep_cubic(h_snow / w))
 
 
 def _sum0(terms):

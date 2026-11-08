@@ -194,10 +194,24 @@ def test_hard_limit_is_bitwise_the_parent_commit():
     assert np.any(pin["flx_qlead"][cut] == 0.0) and np.any(pin["flx_qlead"] != 0.0)
 
 
-def test_default_is_smooth_and_the_snow_width_stays_parked():
+def test_default_is_smooth_and_the_snow_switch_is_straight_through():
     assert _deck().switches == ice_config.SI3SwitchConfig()
     assert _deck().switches.relative_width > 0.0
-    assert _deck().switches.snow_ramp_width_m == 0.0
+    assert _deck().switches.snow_ramp_width_m == 2.0e-4
+
+
+def test_snow_surrogate_leaves_the_lane_forward_bitwise():
+    """Forward value of the snow-free test is NEMO's hard test: the surrogate width changes no output."""
+    fx = _load()
+    cfg = _orca1(fx)
+    off = cfg._replace(switches=cfg.switches._replace(snow_ramp_width_m=0.0))
+    i = _sec(fx, "blk2_in")
+    a, b = _blk(i, cfg), _blk(i, off)
+    for k in a._fields:
+        np.testing.assert_array_equal(np.asarray(getattr(a, k)).view(np.int64),
+                                      np.asarray(getattr(b, k)).view(np.int64), err_msg=k)
+    i = _sec(fx, "alb_in")
+    np.testing.assert_array_equal(np.asarray(_alb(i, cfg)).view(np.int64), np.asarray(_alb(i, off)).view(np.int64))
 
 
 def test_smooth_default_gap_per_fixture_cell():
@@ -277,13 +291,15 @@ def test_nn_snwfra_zero_reads_the_snow_width():
     fx = _load()
     i = _col(fx, "alb", fx["alb_in:h_s"] == 0.0)
     cfg = _orca1(fx)._replace(nn_snwfra=0)
-    wide = cfg._replace(switches=cfg.switches._replace(snow_ramp_width_m=1.0e-6))
+    off = cfg._replace(switches=cfg.switches._replace(snow_ramp_width_m=0.0))
     f = lambda h, c: _alb(i, c, h_s=h)  # noqa: E731
-    h = jnp.asarray(0.5e-6)
+    h = jnp.asarray(0.5e-4)
     v = lambda t, c: jnp.sum(f(t, c))  # noqa: E731
-    assert float(v(h, cfg)) == float(v(h, _hard(cfg)))     # width 0: NEMO's h_s > 0
-    assert float(v(h, wide)) != float(v(h, cfg))
-    assert np.isfinite(float(jax.grad(lambda t: v(t, wide))(h)))
+    # forward: NEMO's h_s > 0 in every mode (straight-through)
+    assert float(v(h, cfg)) == float(v(h, _hard(cfg))) == float(v(h, off))
+    g, g_off = (float(jax.grad(lambda t: v(t, c))(h)) for c in (cfg, off))
+    assert np.isfinite(g) and g != g_off                   # the surrogate carries a gradient
+    assert np.isfinite(float(jax.grad(lambda t: v(t, cfg))(jnp.asarray(0.0))))   # snow-free cell
 
 
 def test_gradients_inside_the_blk_ice_2_ramps():

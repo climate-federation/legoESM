@@ -213,6 +213,19 @@ def min_c1(a: jax.Array, b: jax.Array, sharpness: float) -> jax.Array:
     return -max_c1(-a, -b, sharpness)
 
 
+def straight_through(hard: jax.Array, soft: jax.Array) -> jax.Array:
+    """Forward value ``hard`` EXACTLY, derivative of ``soft`` (straight-through estimator).
+
+    ``hard - (stop_gradient(soft) - soft)``: the bracket is exactly +0.0 for any
+    finite ``soft``, and ``x - (+0.0)`` is ``x`` bit for bit for every ``x``
+    including -0.0 (``x + 0.0`` would turn -0.0 into +0.0); ``hard`` is wrapped
+    in stop_gradient, so the derivative is exactly that of ``soft``.  (The other
+    common form, ``soft + stop_gradient(hard - soft)``, is only ``hard`` up to
+    rounding.)  ``soft`` must be finite wherever it is evaluated (NaN propagates).
+    """
+    return jax.lax.stop_gradient(hard) - (jax.lax.stop_gradient(soft) - soft)
+
+
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
     """Smooth approximation to |x|.
 

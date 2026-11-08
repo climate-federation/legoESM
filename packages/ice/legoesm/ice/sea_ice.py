@@ -857,7 +857,8 @@ def _nemo_si3_ice_albedo(
     two sites as ``icealb.F90:179-182``, so land albedo is 0 as in NEMO.
     Switches (melt flag, thickness pieces) are C1 ramps of width
     ``switches.relative_width x scale``; ``relative_width=0.0`` is NEMO's hard
-    form.  The snow-free test stays hard unless ``snow_ramp_width_m > 0``.
+    form.  The snow-free test is hard in the forward pass; ``snow_ramp_width_m``
+    sets its straight-through surrogate gradient.
     """
     r = switches.relative_width
     t_freeze = constants.T_freeze
