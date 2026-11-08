@@ -44,8 +44,11 @@ def test_straight_through_forward_is_hard_bitwise():
     from legoesm.core.smooth import straight_through
     hard = jnp.asarray([0.0, 1.0, 1.0, 0.0, -0.0])
     soft = jnp.asarray([0.3, 0.7, 1e-300, 0.999999, 0.5])
-    out = straight_through(hard, soft)
-    assert np.array_equal(np.asarray(out).view(np.int64), np.asarray(hard).view(np.int64))   # incl. -0.0
+    for f in (straight_through, jax.jit(straight_through)):
+        out = f(hard, soft)
+        assert np.array_equal(np.asarray(out).view(np.int64), np.asarray(hard).view(np.int64))   # incl. -0.0
+        out = f(hard, jnp.full_like(soft, jnp.nan))      # a NaN surrogate never reaches the forward value
+        assert np.array_equal(np.asarray(out).view(np.int64), np.asarray(hard).view(np.int64))
     g = jax.grad(lambda s: jnp.sum(straight_through(hard, s * s)))(soft)
     np.testing.assert_array_equal(np.asarray(g), 2.0 * np.asarray(soft))
     # a hard term that depends on the input contributes nothing to the gradient
@@ -66,11 +69,14 @@ def test_default_surrogate_width():
 
 def test_snow_free_forward_bitwise_hard_on_all_fixtures():
     from legoesm.ice.si3_surface import si3_snow_free
-    h = _all_fixture_snow()
+    tiny = np.nextafter(0.0, 1.0)                         # smallest subnormal
+    h = jnp.concatenate([_all_fixture_snow(), jnp.asarray([tiny, -tiny, -0.0, np.nan])])
     for preserve in (True, False):
-        hard = si3_snow_free(h, 0.0, preserve)
-        smooth = si3_snow_free(h, _width(), preserve)
-        assert np.array_equal(np.asarray(hard).view(np.int64), np.asarray(smooth).view(np.int64))
+        for f in (si3_snow_free, jax.jit(si3_snow_free, static_argnums=(1, 2))):
+            hard = f(h, 0.0, preserve)
+            smooth = f(h, _width(), preserve)
+            assert np.array_equal(np.asarray(hard).view(np.int64), np.asarray(smooth).view(np.int64))
+    assert float(si3_snow_free(jnp.asarray(tiny), _width(), True)) == 0.0   # subnormal snow is snow
 
 
 def _blk2(i, switches):
@@ -94,13 +100,18 @@ def test_ports_forward_unchanged_by_the_surrogate():
     z = np.load(FIXDIR / "si3_land_mask.npz")
     i = {k.split(":", 1)[1]: jnp.asarray(z[k]) for k in z.files if k.startswith("blk2_in:")}
     on, off = SI3SwitchConfig(), SI3SwitchConfig()._replace(snow_ramp_width_m=0.0)
-    with_st, without = _blk2(i, on), _blk2(i, off)
-    for k in with_st:
-        assert np.array_equal(np.asarray(with_st[k]).view(np.int64), np.asarray(without[k]).view(np.int64)), k
+    for run in (_blk2, jax.jit(_blk2, static_argnums=1)):
+        with_st, without = run(i, on), run(i, off)
+        for k in with_st:
+            assert np.array_equal(np.asarray(with_st[k]).view(np.int64),
+                                  np.asarray(without[k]).view(np.int64)), (run, k)
     a = {k.split(":", 1)[1]: jnp.asarray(z[k]) for k in z.files if k.startswith("alb_in:")}
-    alb = lambda sw: si._nemo_si3_ice_albedo(a["t_su"], a["h_i"], a["h_s"], a["cloud_fra"],  # noqa: E731
-                                             land_mask=a["smask0"], switches=sw)
-    assert np.array_equal(np.asarray(alb(on)).view(np.int64), np.asarray(alb(off)).view(np.int64))
+
+    def alb(a, sw):
+        return si._nemo_si3_ice_albedo(a["t_su"], a["h_i"], a["h_s"], a["cloud_fra"],
+                                       land_mask=a["smask0"], switches=sw)
+    for run in (alb, jax.jit(alb, static_argnums=1)):
+        assert np.array_equal(np.asarray(run(a, on)).view(np.int64), np.asarray(run(a, off)).view(np.int64))
 
 
 @pytest.mark.parametrize("h0", [1e-30, 2e-5, 1e-4, 1.9e-4])

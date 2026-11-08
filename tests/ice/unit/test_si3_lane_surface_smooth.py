@@ -205,13 +205,14 @@ def test_snow_surrogate_leaves_the_lane_forward_bitwise():
     fx = _load()
     cfg = _orca1(fx)
     off = cfg._replace(switches=cfg.switches._replace(snow_ramp_width_m=0.0))
-    i = _sec(fx, "blk2_in")
-    a, b = _blk(i, cfg), _blk(i, off)
-    for k in a._fields:
-        np.testing.assert_array_equal(np.asarray(getattr(a, k)).view(np.int64),
-                                      np.asarray(getattr(b, k)).view(np.int64), err_msg=k)
-    i = _sec(fx, "alb_in")
-    np.testing.assert_array_equal(np.asarray(_alb(i, cfg)).view(np.int64), np.asarray(_alb(i, off)).view(np.int64))
+    for blk, alb in ((_blk, _alb), (jax.jit(_blk, static_argnums=1), jax.jit(_alb, static_argnums=1))):
+        i = _sec(fx, "blk2_in")
+        a, b = blk(i, cfg), blk(i, off)
+        for k in a._fields:
+            np.testing.assert_array_equal(np.asarray(getattr(a, k)).view(np.int64),
+                                          np.asarray(getattr(b, k)).view(np.int64), err_msg=k)
+        i = _sec(fx, "alb_in")
+        np.testing.assert_array_equal(np.asarray(alb(i, cfg)).view(np.int64), np.asarray(alb(i, off)).view(np.int64))
 
 
 def test_smooth_default_gap_per_fixture_cell():

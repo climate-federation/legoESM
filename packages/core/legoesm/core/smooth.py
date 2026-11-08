@@ -213,17 +213,24 @@ def min_c1(a: jax.Array, b: jax.Array, sharpness: float) -> jax.Array:
     return -max_c1(-a, -b, sharpness)
 
 
+@jax.custom_jvp
 def straight_through(hard: jax.Array, soft: jax.Array) -> jax.Array:
     """Forward value ``hard`` EXACTLY, derivative of ``soft`` (straight-through estimator).
 
-    ``hard - (stop_gradient(soft) - soft)``: the bracket is exactly +0.0 for any
-    finite ``soft``, and ``x - (+0.0)`` is ``x`` bit for bit for every ``x``
-    including -0.0 (``x + 0.0`` would turn -0.0 into +0.0); ``hard`` is wrapped
-    in stop_gradient, so the derivative is exactly that of ``soft``.  (The other
-    common form, ``soft + stop_gradient(hard - soft)``, is only ``hard`` up to
-    rounding.)  ``soft`` must be finite wherever it is evaluated (NaN propagates).
+    A ``custom_jvp``: the primal is ``hard`` itself, so ``soft`` is dead code in
+    the forward pass and the compiled forward is the hard one bit for bit,
+    under jit too.  (The arithmetic form ``hard - (sg(soft) - soft)`` is exact
+    eagerly, but under jit on CPU it was measured to differ from ``hard`` at the
+    smallest subnormal snow depth and in the sign of zero downstream, and it
+    propagates a NaN ``soft`` into the forward value.)  The tangent is that of
+    ``soft``; ``hard`` carries none.
     """
-    return jax.lax.stop_gradient(hard) - (jax.lax.stop_gradient(soft) - soft)
+    return hard
+
+
+@straight_through.defjvp
+def _straight_through_jvp(primals, tangents):
+    return primals[0], tangents[1]
 
 
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
