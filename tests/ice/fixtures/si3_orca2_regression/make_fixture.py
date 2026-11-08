@@ -275,7 +275,8 @@ def build_inputs(rng: np.random.Generator) -> dict[str, np.ndarray]:
     d["str_taum"] = rng.uniform(0.0, 0.3, o2)
     d["str_utau_oce"] = rng.uniform(-0.2, 0.2, o2)
     d["str_vtau_oce"] = rng.uniform(-0.2, 0.2, o2)
-    # vote S1: nonzero carried-in aEVP stresses (drawn last: other rungs unchanged).
+    # vote S1: nonzero carried-in aEVP stresses (last build_inputs draws; the halo
+    # rung, drawn after build_inputs, shifts with them).
     d["stress1_t"] = _lbc(rng.uniform(-2.0e4, 2.0e4, (JPI, JPJ)) * tmask, "T")
     d["stress2_t"] = _lbc(rng.uniform(-2.0e4, 2.0e4, (JPI, JPJ)) * tmask, "T")
     d["stress12_f"] = _lbc(rng.uniform(-1.0e4, 1.0e4, (JPI, JPJ)), "F")
