@@ -1993,12 +1993,6 @@ def advect_si3_prather_1d(
     if ice_volume_index is None or concentration_index is None:
         raise ValueError("si3_prather Hbig requires both volume and concentration indices")
     _validate_si3_prather_spacings(dx, dy, u_ice.shape, subcycles)
-    from legoesm.ice.dynamics import SI3_NORTH_FOLD_CHOICES, si3_orca_f_pivot_halo
-    if north_fold not in SI3_NORTH_FOLD_CHOICES:
-        raise ValueError(
-            f"si3_prather north_fold must be one of {SI3_NORTH_FOLD_CHOICES}; got {north_fold!r}")
-    if north_fold == "orca_f_pivot" and halo_width != 2:
-        raise ValueError("si3_prather north_fold='orca_f_pivot' needs halo_width == 2 (NEMO nn_hls)")
     if subcycles is None:
         cfl = float(jnp.max(jnp.abs(u_ice)) * dt / dx)
         subcycles = (
@@ -2144,6 +2138,12 @@ def advect_si3_prather_2d(
     if ice_step_index < 1 or nn_fsbc < 1:
         raise ValueError("si3_prather requires positive ice_step_index and nn_fsbc")
     _validate_si3_prather_spacings(dx, dy, u_ice.shape, subcycles)
+    from legoesm.ice.dynamics import SI3_NORTH_FOLD_CHOICES, si3_orca_f_pivot_halo
+    if north_fold not in SI3_NORTH_FOLD_CHOICES:
+        raise ValueError(
+            f"si3_prather north_fold must be one of {SI3_NORTH_FOLD_CHOICES}; got {north_fold!r}")
+    if north_fold == "orca_f_pivot" and halo_width != 2:
+        raise ValueError("si3_prather north_fold='orca_f_pivot' needs halo_width == 2 (NEMO nn_hls)")
     if subcycles is None:
         cfl = max(
             float(jnp.max(jnp.abs(u_ice)) * dt / dx),
