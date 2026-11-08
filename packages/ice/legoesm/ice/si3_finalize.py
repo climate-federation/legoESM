@@ -972,7 +972,8 @@ def si3_ice_update_tau(
     possible when ``nn_fsbc > 1``) carries ``inputs.tmod_io``, ``inputs.taum``, ``inputs.utau_oce`` and
     ``inputs.vtau_oce`` unchanged and redoes only the every-ocean-step blend.  Under ``ln_drgice_imp`` the
     every-ocean-step block also returns ``rCdU_ice = -tmod_io*at_i*tmask/rho0`` on ``DO_2D(1,1,1,1)`` (the array
-    shrunk by ``nn_hls-1`` per side), the drag the ocean's implicit top friction consumes.
+    shrunk by ``nn_hls-1`` per side), the drag the ocean's implicit top friction consumes; it needs
+    ``inputs.tmask_k1`` and is None without it.
     """
     h = int(config.nn_hls)
     if h < 1:
@@ -988,11 +989,8 @@ def si3_ice_update_tau(
         name for name in ("taum", "utau_oce", "vtau_oce")
         if getattr(inputs, name).shape != interior_shape
     )
-    if ln_drgice_imp:
-        if inputs.tmask_k1 is None:
-            raise ValueError("ice_update_tau ln_drgice_imp=True requires tmask_k1 for rCdU_ice")
-        if inputs.tmask_k1.shape != full_shape:
-            wrong.append("tmask_k1")
+    if inputs.tmask_k1 is not None and inputs.tmask_k1.shape != full_shape:
+        wrong.append("tmask_k1")
     if wrong:
         raise ValueError("ice_update_tau forcing/config shape mismatch: " + ", ".join(wrong))
     dtype = inputs.u_ice.dtype
@@ -1030,8 +1028,9 @@ def si3_ice_update_tau(
         vtau_oce = inputs.vtau_oce
 
     # every ocean time step (:387-404)
+    # Without tmask_k1 the drag is not formed (rCdU_ice None); the ocean's implicit top drag refuses a None input.
     rcdu_ice = None
-    if ln_drgice_imp:
+    if ln_drgice_imp and inputs.tmask_k1 is not None:
         r1_rho0 = sr(_ONE / rho0)
         g = (slice(h - 1, full_shape[0] - h + 1), slice(h - 1, full_shape[1] - h + 1))
         rcdu_ice = sr(sr(sr(-r1_rho0 * tmod_io[g]) * inputs.at_i[g]) * inputs.tmask_k1[g])

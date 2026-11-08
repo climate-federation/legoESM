@@ -61,7 +61,7 @@ def _inputs(d, **over):
         tmask_k1=d["tmask_k1"],
     )
     kw.update(over)
-    return SI3StressInputs(**{k: jnp.asarray(v) for k, v in kw.items()})
+    return SI3StressInputs(**{k: (None if v is None else jnp.asarray(v)) for k, v in kw.items()})
 
 
 def test_ice_step_matches_nemo_orca1_including_rcdu_ice():
@@ -95,10 +95,19 @@ def test_explicit_arm_returns_no_rcdu_ice():
     assert out.rCdU_ice is None
 
 
-def test_implicit_arm_refuses_missing_tmask():
+def test_implicit_arm_without_tmask_forms_no_rcdu_ice():
+    """No mask, no drag: rCdU_ice is None (the ocean's implicit top drag refuses a None input); the stress is unchanged."""
+    d = _load()
+    a = si3_ice_update_tau(_inputs(d, tmask_k1=None), config=_config(d, 96), ln_drgice_imp=True)
+    b = si3_ice_update_tau(_inputs(d), config=_config(d, 96), ln_drgice_imp=True)
+    assert a.rCdU_ice is None
+    np.testing.assert_array_equal(a.utau, b.utau)
+
+
+def test_wrong_tmask_shape_is_refused():
     d = _load()
     with pytest.raises(ValueError, match="tmask_k1"):
-        si3_ice_update_tau(_inputs(d, tmask_k1=None), config=_config(d, 96), ln_drgice_imp=True)
+        si3_ice_update_tau(_inputs(d, tmask_k1=d["tmask_k1"][1:, :]), config=_config(d, 96), ln_drgice_imp=True)
 
 
 def test_ocean_step_between_ice_steps_holds_ice_step_quantities():
