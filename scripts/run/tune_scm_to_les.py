@@ -75,28 +75,33 @@ def _scheme_tunable_metas(scheme_key: str, tiers: tuple[int, ...]) -> list:
     return metas
 
 
-def _candidate_overrides(metas: list, n_random: int, seed: int) -> list[dict]:
+def _candidate_overrides(metas: list, n_random: int, seed: int, *, probes: bool = True,
+                         box: dict | None = None) -> list[dict]:
     """Default + per-param 25%/75% coordinate probes + ``n_random`` uniform draws.
 
     Deterministic given ``seed`` (numpy Generator). Every candidate is a dict of
     ``{field: value}`` for the scheme's tunable fields; the default candidate is the
-    empty dict (no override).
+    empty dict (no override). ``probes=False`` gives the random draws only; ``box``
+    (``{field: (lo, hi)}``) replaces a field's bounds for the draws (fields not in
+    ``metas`` are never drawn, so they stay at their defaults).
     """
     defaults = {m.field: float(m.default) for m in metas}
-    cands: list[dict] = [{}]  # the defaults (no override)
-    # coordinate probes: one param moved to 25% / 75% of its bound, others default
-    for m in metas:
-        lo, hi = float(m.bounds[0]), float(m.bounds[1])
-        for frac in (0.25, 0.75):
-            c = dict(defaults)
-            c[m.field] = lo + frac * (hi - lo)
-            cands.append(c)
+    cands: list[dict] = []
+    if probes:
+        cands.append({})  # the defaults (no override)
+        # coordinate probes: one param moved to 25% / 75% of its bound, others default
+        for m in metas:
+            lo, hi = float(m.bounds[0]), float(m.bounds[1])
+            for frac in (0.25, 0.75):
+                c = dict(defaults)
+                c[m.field] = lo + frac * (hi - lo)
+                cands.append(c)
     # random fill
     rng = np.random.default_rng(seed)
     for _ in range(max(0, n_random)):
         c = {}
         for m in metas:
-            lo, hi = float(m.bounds[0]), float(m.bounds[1])
+            lo, hi = (box or {}).get(m.field, (float(m.bounds[0]), float(m.bounds[1])))
             c[m.field] = float(rng.uniform(lo, hi))
         cands.append(c)
     return cands

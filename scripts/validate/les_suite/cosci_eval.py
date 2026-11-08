@@ -108,6 +108,7 @@ _REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO / "scripts" / "run"))
 from tune_scm_to_les import (  # noqa: E402
     _base_turbulence,
+    _candidate_overrides,
     _scheme_tunable_metas,
     apply_overrides_to_base,
     with_surface_roughness,
@@ -170,6 +171,16 @@ def _git_sha() -> str:
                               capture_output=True, text=True, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
+
+
+def _code_id() -> str:
+    """HEAD plus the sha256 of the uncommitted diff against it (the code that ran)."""
+    try:
+        diff = subprocess.run(["git", "-C", str(_REPO), "diff", "HEAD"],
+                              capture_output=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as err:
+        raise SystemExit(f"cannot identify the code that runs ({err})") from None
+    return f"{_git_sha()}+{hashlib.sha256(diff).hexdigest()[:16]}"
 
 
 #: SCM step of every CloudBench run [s] (PI 2026-10-30: >= 10 min; 2026-10-31: 600 s).
@@ -563,27 +574,33 @@ def _case_scores(arm, artifacts, nlev, dt, params=None, turb=None):
     out = {}
     for path, art in artifacts:
         n = e2_nsteps(art, dt)
-        try:
-            rec, _ = arm.run(art, n, params=params, turb=turb, nlev=nlev, dt=dt)
-            s = e2_score(art, rec, dt)
-        except Exception as err:   # noqa: BLE001  recorded, never a silent pass
-            if not is_cloudbench(art):
-                raise
-            out[Path(path).name] = {"failed": f"exception: {type(err).__name__}: {err}"}
-            jax.clear_caches()
-            continue
-        entry = {"per_var": {k: float(v) for k, v in s.per_var.items()},
-                 "combined": float(s.combined)}
-        if is_cloudbench(art):
-            gate = check_conservation(rec, dt)
-            entry["conservation_passed"] = bool(gate.passed)
-            if not gate.passed:
-                entry["failed"] = "conservation: " + gate.reason
-            elif not math.isfinite(entry["combined"]):
-                entry["failed"] = "non-finite score"
-        out[Path(path).name] = entry
+        out[Path(path).name] = _scored_entry(
+            art, lambda: arm.run(art, n, params=params, turb=turb, nlev=nlev, dt=dt)[0],
+            dt)
         jax.clear_caches()   # one case's executables at a time (kernel mapping cap)
     return out
+
+
+def _scored_entry(art, run, dt) -> dict:
+    """E2 entry of the rollout ``run()``; for a CloudBench case a raised run, a
+    failed conservation gate or a non-finite score is recorded ``failed``."""
+    try:
+        rec = run()
+        s = e2_score(art, rec, dt)
+    except Exception as err:   # noqa: BLE001  recorded, never a silent pass
+        if not is_cloudbench(art):
+            raise
+        return {"failed": f"exception: {type(err).__name__}: {err}"}
+    entry = {"per_var": {k: float(v) for k, v in s.per_var.items()},
+             "combined": float(s.combined)}
+    if is_cloudbench(art):
+        gate = check_conservation(rec, dt)
+        entry["conservation_passed"] = bool(gate.passed)
+        if not gate.passed:
+            entry["failed"] = "conservation: " + gate.reason
+        elif not math.isfinite(entry["combined"]):
+            entry["failed"] = "non-finite score"
+    return entry
 
 
 def failure_summary(scores: dict, split: dict) -> dict:
@@ -810,6 +827,200 @@ def _score_sets(entry):
         yield arm, v["scores"] if "scores" in v else v
 
 
+# --- E2 derivative-free tuning (PI 2026-11-08) -----------------------------------------
+# AD through the 5-day CloudBench rollouts is exponentially sensitive (AD == FD to 1 h,
+# 1e8-1e30 apart at 5 days), so baselines are tuned on the true E2 score by batch
+# rounds of the LES-suite tuner's candidates (votes me + codex + GLM 2026-11-08, 3-0):
+# round 0 screens (default + coordinate probes) and freezes parameters it measures
+# inactive; round 1 draws over the active parameters; round 2 draws in a box around the
+# incumbent. Each round runs sharded over cases; ``DFAGG`` combines the shards.
+
+DF_RANDOM = 16
+DF_SEED = 0
+DF_BOX_FRAC = 0.25
+DF_ROUNDS = (0, 1, 2)
+#: How failed training runs rank candidates: a PI decision (it defines the objective).
+#: Without one, selection is refused unless no training run of any candidate failed,
+#: where all three agree.
+DF_SELECT = ("reject_failed", "fewest_failures", "survivor_mean")
+
+
+def df_round_candidates(metas, rnd: int, state: dict | None) -> list[dict]:
+    """Overrides of round ``rnd``: 0 = default + 25 %/75 % coordinate probes; 1 =
+    ``DF_RANDOM`` draws over the bounds of the parameters ``state`` did not freeze;
+    2 = ``DF_RANDOM`` draws within ``DF_BOX_FRAC`` of each range around the incumbent
+    (clipped to the bounds). Frozen parameters stay at their defaults; the draws of
+    round ``r`` use seed ``DF_SEED + r``."""
+    if rnd == 0:
+        return _candidate_overrides(metas, 0, DF_SEED)
+    if state is None:
+        raise SystemExit(f"round {rnd} needs --df-state from the earlier rounds")
+    active = [m for m in metas if m.field not in state["frozen"]]
+    box = None
+    if rnd == 2:
+        if state["incumbent"] is None:
+            raise SystemExit("no incumbent: every candidate failed a training run")
+        box = {}
+        for m in active:
+            lo, hi = float(m.bounds[0]), float(m.bounds[1])
+            c, r = float(state["incumbent"][m.field]), DF_BOX_FRAC * (hi - lo)
+            box[m.field] = (max(lo, c - r), min(hi, c + r))
+    return _candidate_overrides(active, DF_RANDOM, DF_SEED + rnd, probes=False, box=box)
+
+
+def df_case_table(arm, base, metas, cands, artifacts, nlev, dt) -> dict:
+    """``{case: [entry per candidate]}``: each case is built and compiled once with the
+    parameters traced, then run for every candidate."""
+    fields = [m.field for m in metas]
+    dflt = {m.field: float(m.default) for m in metas}
+    out = {}
+    for path, art in artifacts:
+        prep = arm.prepare(art, nlev=nlev, dt=dt)
+        n = e2_nsteps(art, dt)
+        run = jax.jit(lambda x, prep=prep, art=art, n=n: arm.run_with_turb(
+            prep, art, n, apply_overrides_to_base(base, dict(zip(fields, x))))[0])
+        out[Path(path).name] = [
+            _scored_entry(art, lambda c=c: run(jnp.asarray([c.get(f, dflt[f])
+                                                             for f in fields])), dt)
+            for c in cands]
+        jax.clear_caches()
+    return out
+
+
+def parse_shard(text: str) -> tuple[int, int]:
+    try:
+        k, n = (int(v) for v in text.split("/"))
+    except ValueError:
+        raise SystemExit(f"--shard {text!r}: expected k/n") from None
+    if not 0 <= k < n:
+        raise SystemExit(f"--shard {text}: need 0 <= k < n")
+    return k, n
+
+
+def df_shard_paths(paths, shard):
+    """The cases of ``shard`` = ``(k, n)``: every n-th path in sorted order from the
+    k-th. Case names (file names) must be unique: results are keyed by them."""
+    k, n = shard
+    if not 0 <= k < n:
+        raise SystemExit(f"--shard {k}/{n}: need 0 <= k < n")
+    names = [Path(p).name for p in paths]
+    if len(set(names)) != len(names):
+        raise SystemExit("two artifacts share a file name; results are keyed by it")
+    return sorted(paths, key=lambda p: Path(p).name)[k::n]   # DFAGG's order
+
+
+def df_manifest(paths) -> str:
+    """Fingerprint of the whole case list a round was sharded from."""
+    return hashlib.sha256("\n".join(sorted(str(p) for p in paths)).encode()).hexdigest()
+
+
+def stage_df_round(name, rnd, state, artifacts, shard, nlev, dt, manifest) -> dict:
+    """One round of baseline ``name`` on ``artifacts``, the cases of ``shard``
+    (:func:`df_shard_paths`)."""
+    base, key = _roster_base(name)
+    metas = _scheme_tunable_metas(key, (1,))
+    if state is not None and (state["scheme"], state["round"]) != (name, rnd - 1):
+        raise SystemExit(f"--df-state is {state['scheme']} round {state['round']}; "
+                         f"round {rnd} of {name} needs round {rnd - 1}")
+    if state is not None and (state["settings"]["dt"], state["settings"]["nlev"],
+                              state["settings"]["manifest"], state["settings"]["git_sha"]
+                              ) != (dt, nlev, manifest[0], _code_id()):
+        raise SystemExit("--df-state was run with another dt, nlev, case list or code")
+    cands = df_round_candidates(metas, rnd, state)
+    mine = sorted(artifacts, key=lambda pa: pa[0])
+    return {"scheme": name, "round": rnd, "shard": list(shard),
+            "settings": {"dt": dt, "nlev": nlev, "git_sha": _code_id(),
+                         "manifest": manifest[0], "n_cases": manifest[1]},
+            "case_sha256": {Path(p).name: _sha256(p) for p, _ in mine},
+            "fields": [m.field for m in metas], "candidates": cands,
+            "split": {Path(p).name: {"held_out": _held_out(a.case_name),
+                                     "regime": _regime(a.case_name)} for p, a in mine},
+            "cases": df_case_table(Arm(base), base, metas, cands, mine, nlev, dt)}
+
+
+def _train_objective(rows: dict, split: dict) -> tuple[int, float]:
+    """``(failed training runs, regime mean of the survivors' mean E2)``."""
+    summ = failure_summary(rows, split).get("train", {})
+    means = [g["mean_over_survivors"] for g in summ.values()]
+    failed = sum(g["failed"] for g in summ.values())
+    obj = (math.inf if not means or any(m is None for m in means)
+           else sum(means) / len(means))
+    return failed, (obj if math.isfinite(obj) else math.inf)   # NaN ranks last
+
+
+def df_aggregate(shards: list, state: dict | None, select: str | None) -> dict:
+    """Combine one round's shards (all of them, once each) with the earlier rounds'
+    ``state``; after round 0 freeze every parameter whose two probes score
+    bit-identically to the default on every training case (no failed run among
+    them); pick the incumbent over every candidate so far."""
+    rnd, name = shards[0]["round"], shards[0]["scheme"]
+    n, settings = shards[0]["shard"][1], shards[0]["settings"]
+    if sorted(s["shard"][0] for s in shards) != list(range(n)) or any(
+            (s["round"], s["scheme"], s["shard"][1], s["candidates"], s["settings"])
+            != (rnd, name, n, shards[0]["candidates"], settings) for s in shards):
+        raise SystemExit("--df-shards must be every shard of one round, once each, "
+                         "from one case list, code and settings")
+    if (rnd == 0) != (state is None) or (state is not None and (
+            state["scheme"], state["round"], state["select"])
+            != (name, rnd - 1, select)):
+        raise SystemExit(f"round {rnd} of {name} needs the state of round {rnd - 1} of "
+                         "the same scheme and --df-select (none for round 0)")
+    cases, split, sha = {}, {}, {}
+    for s in shards:
+        if set(s["cases"]) & set(cases):
+            raise SystemExit("a case appears in two shards")
+        cases.update(s["cases"])
+        split.update(s["split"])
+        sha.update(s["case_sha256"])
+    if len(cases) != settings["n_cases"]:
+        raise SystemExit(f"shards hold {len(cases)} cases, the list has "
+                         f"{settings['n_cases']}")
+    order = sorted(cases)
+    if any(set(s["cases"]) != set(order[s["shard"][0]::n]) for s in shards):
+        raise SystemExit("a shard does not hold every n-th case from its k-th")
+    rounds = dict(state["rounds"]) if state is not None else {}
+    rounds[str(rnd)] = {"candidates": shards[0]["candidates"], "cases": cases}
+    if state is not None and ((state["split"], state["case_sha256"], state["settings"])
+                              != (split, sha, settings)):
+        raise SystemExit("this round's cases, artifacts or settings differ from the "
+                         "earlier rounds'")
+    frozen = {} if state is None else dict(state["frozen"])
+    fields = shards[0]["fields"]
+    if rnd == 0:
+        train = [c for c in cases if not split[c]["held_out"]]
+        for i, fld in enumerate(fields):
+            same = all("failed" not in cases[c][j] and cases[c][j]["combined"]
+                       == cases[c][0]["combined"] for c in train for j in (0, 1 + 2 * i,
+                                                                            2 + 2 * i))
+            if same and train:
+                frozen[fld] = ("inactive in default-background probes: the 25 % and "
+                               "75 % probes score bit-identically to the default on "
+                               f"all {len(train)} training cases")
+    table = []
+    for r, rd in sorted(rounds.items()):
+        for j, cand in enumerate(rd["candidates"]):
+            rows = {c: rd["cases"][c][j] for c in rd["cases"]}
+            failed, obj = _train_objective(rows, split)
+            table.append({"round": int(r), "index": j, "overrides": cand,
+                          "train_failed": failed, "train_objective": obj,
+                          "summary": failure_summary(rows, split)})
+    if any(t["train_failed"] for t in table) and select is None:
+        raise SystemExit("training runs failed: how they rank candidates is the PI's "
+                         f"choice; pass --df-select one of {DF_SELECT}")
+    pool = [t for t in table if select != "reject_failed" or t["train_failed"] == 0]
+    key = ((lambda t: (t["train_failed"], t["train_objective"]))
+           if select == "fewest_failures" else (lambda t: t["train_objective"]))
+    best = min(pool, key=key) if pool else None   # ties: the earliest (default first)
+    metas = _scheme_tunable_metas(_roster_base(name)[1], (1,))
+    incumbent = None if best is None else {
+        m.field: float(best["overrides"].get(m.field, m.default)) for m in metas}
+    return {"scheme": name, "round": rnd, "select": select, "frozen": frozen,
+            "split": split, "case_sha256": sha, "settings": settings,
+            "rounds": rounds, "candidates": table,
+            "incumbent": incumbent,
+            "incumbent_at": None if best is None else [best["round"], best["index"]]}
+
+
 # --- E0 -------------------------------------------------------------------------------
 
 def stage_e0(cand_arm, artifacts, nlev, dt) -> dict:
@@ -844,7 +1055,7 @@ def stage_e0(cand_arm, artifacts, nlev, dt) -> dict:
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage", required=True, choices=("E0", "L", "E1", "E2"))
+    p.add_argument("--stage", required=True, choices=("E0", "L", "E1", "E2", "DFAGG"))
     p.add_argument("--candidate", type=Path, default=None)
     p.add_argument("--baseline", default=None,
                    help="roster closure supplying the non-owned part (required with --candidate)")
@@ -869,8 +1080,25 @@ def parse_args(argv=None):
     p.add_argument("--cloudbench-stats", type=Path, default=None,
                    help="CloudBench statistics file (cloud_cover sets each case's "
                         "regime); required with CloudBench artifacts")
+    p.add_argument("--df-round", type=int, choices=DF_ROUNDS, default=None,
+                   help="E2: run this derivative-free tuning round of the one "
+                        "--baseline-only closure on --shard's cases")
+    p.add_argument("--shard", default="0/1", help="k/n: every n-th case from the k-th")
+    p.add_argument("--df-state", type=Path, default=None,
+                   help="DFAGG output of the previous round")
+    p.add_argument("--df-shards", nargs="*", type=Path, default=[],
+                   help="DFAGG: every shard output of one round")
+    p.add_argument("--df-select", choices=DF_SELECT, default=None,
+                   help="DFAGG: how failed training runs rank candidates (PI choice)")
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args(argv)
+    if args.df_round is not None and not (args.stage == "E2" and args.candidate is None
+                                          and len(args.baseline_only) == 1):
+        p.error("--df-round tunes one --baseline-only closure at --stage E2")
+    if args.stage == "DFAGG":
+        if not args.df_shards:
+            p.error("--stage DFAGG needs --df-shards")
+        return args
     if args.candidate is None and not args.baseline_only:
         p.error("give --candidate and/or --baseline-only")
     if args.candidate is not None and args.baseline is None:
@@ -894,11 +1122,30 @@ def check_kind_choices(kind: str, heat_form, ke_heating) -> None:
         raise SystemExit('a "both" candidate needs --heat-form and --ke-heating')
 
 
+def _load_state(path):
+    return None if path is None else json.loads(Path(path).read_text())
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if args.stage == "DFAGG":
+        state = df_aggregate([json.loads(Path(s).read_text())["result"]
+                              for s in args.df_shards],
+                             _load_state(args.df_state), args.df_select)
+        state["provenance"] = {"git_sha": _git_sha(), "shards": {
+            str(s): _sha256(s) for s in args.df_shards}, "df_state": None if
+            args.df_state is None else {"path": str(args.df_state),
+                                        "sha256": _sha256(args.df_state)}}
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(state, indent=1, default=float))
+        print(f"[cosci_eval] stage=DFAGG -> {args.out}")
+        return 0
     if not jax.config.read("jax_enable_x64"):
         raise SystemExit("run with JAX_ENABLE_X64=1 (conservation checks need float64)")
-    artifacts = [(str(p), load_artifact(p)) for p in args.artifacts]
+    shard = parse_shard(args.shard) if args.df_round is not None else None
+    paths = (df_shard_paths(args.artifacts, shard) if args.df_round is not None
+             else args.artifacts)
+    artifacts = [(str(p), load_artifact(p)) for p in paths]
     cloudbench_prov = configure_cloudbench(artifacts, args.cloudbench_forcing,
                                            args.cloudbench_stats)
     if cloudbench_prov and args.dt != CLOUDBENCH_DT_S:
@@ -921,6 +1168,11 @@ def main(argv=None) -> int:
         result = stage_l(arms, artifacts, args.nlev, args.dt)
     elif args.stage == "E1":
         result = stage_e1(arms, artifacts, args.nlev, args.dt)
+    elif args.df_round is not None:
+        result = stage_df_round(args.baseline_only[0], args.df_round,
+                                _load_state(args.df_state), artifacts, shard,
+                                args.nlev, args.dt,
+                                (df_manifest(args.artifacts), len(args.artifacts)))
     else:
         recorded = None
         if args.recorded_params is not None:
