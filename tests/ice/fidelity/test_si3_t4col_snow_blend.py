@@ -28,7 +28,6 @@ FIXTURES = ("c2_ti_clamp", "c3_qcn_top_k", "c4_fullmelt", "c5_flood_sst", "c6_me
 W = 2.0e-4      # surrogate width = 0.01 x snow_cover_depth_nemo (#2407 vote Y1, Z34)
 ON = SI3SwitchConfig(snow_ramp_width_m=W)
 OFF = SI3SwitchConfig()
-STORED = ("e_ice", "e_snow", "qcn_ice_top", "qcn_ice_bottom", "qns_ice")
 
 
 def _zdf(fx, sw, h_s=None):
@@ -98,8 +97,12 @@ def test_soft_column_is_the_blend_of_the_two_systems(monkeypatch):
 
 
 def test_soft_column_at_zero_snow_is_the_no_snow_system(monkeypatch):
+    """At h_s = 0 the soft column equals the independent hard no-snow solve (Z38)."""
     fx = load("c3_qcn_top_k")
-    at0, bare = _soft(monkeypatch, fx, 0.0), _soft(monkeypatch, fx, 0.0, pin=0.0)
-    for k in STORED + ("T_surface", "T_ice"):
+    at0, hard = _soft(monkeypatch, fx, 0.0), _zdf(fx, OFF, 0.0)
+    for k in ("e_ice", "qcn_ice_top", "qcn_ice_bottom", "qns_ice", "T_surface", "T_ice"):
         assert np.all(np.isfinite(np.asarray(getattr(at0, k)))), k     # no NaN from the snow system at h_s = 0
-        np.testing.assert_array_equal(np.asarray(getattr(at0, k)), np.asarray(getattr(bare, k)))
+        np.testing.assert_array_equal(np.asarray(getattr(at0, k)), np.asarray(getattr(hard, k)))
+    # Soft snow temperature is continuous at h_s -> 0+ (Z37).
+    tiny = _soft(monkeypatch, fx, 1e-30)
+    np.testing.assert_allclose(np.asarray(tiny.T_snow), np.asarray(at0.T_snow), rtol=1e-13)   # Z35 closure tolerance

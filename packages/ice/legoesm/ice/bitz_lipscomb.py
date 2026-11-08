@@ -856,12 +856,19 @@ def _si3_zdf_bl99_step(
     e_i = mix(snow.e_ice, bare.e_ice)
     e_s = mix(snow.e_snow, e_snow)          # snow layers inert in the no-snow system (Z31)
     band = per_cell((s > 0.0) & (s < 1.0), snow.T_ice)
+    below_one = per_cell(s < 1.0, snow.T_snow)
+    sg = jax.lax.stop_gradient
+    # The inversion's unselected branch must carry no cotangent: at S == 0 its
+    # sqrt has infinite slope at the melting point, and 0 * inf = NaN (Z36).
+    T_from_e = ice_temperature_from_enthalpy(
+        jnp.where(band, e_i, sg(e_i)), jnp.where(band, S_layers, sg(S_layers)), constants,
+        _nemo_order=_nemo_eos_order, width=tm_width)
     soft = SI3ZDFResult(
         mix(snow.T_surface, bare.T_surface),
-        jnp.where(band, ice_temperature_from_enthalpy(
-            e_i, S_layers, constants, _nemo_order=_nemo_eos_order, width=tm_width),
-            mix(snow.T_ice, bare.T_ice)),
-        jnp.where(band, snow_temperature_from_enthalpy(
+        jnp.where(band, T_from_e, mix(snow.T_ice, bare.T_ice)),
+        # Snow inversion is linear; diagnosing it also at s == 0 removes the
+        # bare system's T0 reset from the surrogate (Z37: 4-14 K jump at 0+).
+        jnp.where(below_one, snow_temperature_from_enthalpy(
             e_s, constants, _nemo_order=_nemo_eos_order, width=t_clamp_width),
             mix(snow.T_snow, bare.T_snow)),
         e_i, e_s,
