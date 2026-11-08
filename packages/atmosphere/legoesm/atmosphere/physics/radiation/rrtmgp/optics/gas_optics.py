@@ -77,12 +77,35 @@ def _clip_to_table_range(temperature: Array, t_ref: Array) -> Array:
 def _pressure_interpolant(
     p: Array, p_ref: Array, troposphere_offset: Array | None = None
 ) -> Interpolant:
-  """Create a pressure interpolant based on reference pressure values."""
+  """Pressure interpolant in ln p.
+
+  Inside the table, including its end nodes, this is the generic linear
+  interpolant, unchanged.  Outside ``[p_ref.min(), p_ref.max()]`` (1.005 Pa ..
+  1096.6 hPa) it follows upstream RTE+RRTMGP with its value checks off
+  (mo_gas_optics_rrtmgp_kernels.F90:115-117, ``jpress = min(npres-1, max(1,
+  int(locpress)))``, ``fpress = locpress - jpress``): the end interval, with
+  the weight not clamped, i.e. linear extrapolation.  The generic interpolant
+  alone mirrors above the table (``abs`` weight) and reads flat below it.
+  In/out is decided on the actual table ends, not on the floor index: ln p_ref
+  is not exactly uniform, so a pressure just inside p_ref.min() can carry the
+  last index (votes: author/codex/GLM).
+  """
   log_p = jnp.log(p)
   log_p_ref = jnp.log(p_ref)
-  return optics_utils.create_linear_interpolant(
-      log_p, log_p_ref, offset=troposphere_offset
-  )
+  size = log_p_ref.shape[0]
+  delta = log_p_ref[1] - log_p_ref[0]
+  below = log_p < log_p_ref[-1]           # p < p_ref.min(): beyond the low-pressure end
+  outside = below | (log_p > log_p_ref[0])
+  idx_low = jnp.where(below, size - 2, optics_utils.floor_idx(log_p, log_p_ref))
+  idx_high = jnp.minimum(idx_low + 1, size - 1)
+  weight2 = (log_p - (log_p_ref[0] + delta * idx_low.astype(log_p_ref.dtype))) / delta
+  weight2 = jnp.where(outside, weight2, jnp.abs(weight2))
+  if troposphere_offset is not None:
+    idx_low = idx_low + troposphere_offset
+    idx_high = idx_high + troposphere_offset
+  return optics_utils.Interpolant(
+      optics_utils.IndexAndWeight(idx_low, 1.0 - weight2),
+      optics_utils.IndexAndWeight(idx_high, weight2))
 
 
 def _mixing_fraction_interpolant(
