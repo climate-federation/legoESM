@@ -69,6 +69,8 @@ def test_gradient_is_the_soft_column_derivative(monkeypatch):
         fd = (float(jnp.sum(_soft(monkeypatch, fx, h + eps).qcn_ice_top))
               - float(jnp.sum(_soft(monkeypatch, fx, h - eps).qcn_ice_top))) / (2 * eps)
         assert bool(jnp.isfinite(g)) and float(g) != 0.0
+        g_hard = jax.grad(lambda x: jnp.sum(_zdf(fx, OFF, x).qcn_ice_top))(jnp.asarray(h))
+        assert abs(float(g) - float(g_hard)) > 1e-3 * abs(float(g_hard))    # the blend term is present
         np.testing.assert_allclose(float(g), fd, rtol=1e-4)
     g0 = jax.grad(lambda x: jnp.sum(_zdf(fx, ON, x).qcn_ice_top))(jnp.asarray(0.0))
     assert bool(jnp.isfinite(g0))
@@ -84,6 +86,7 @@ def test_soft_column_is_the_blend_of_the_two_systems(monkeypatch):
     def content(r):
         return (np.sum(np.asarray(r.e_ice), -1) * np.asarray(h_i)
                 + np.sum(np.asarray(r.e_snow), -1) * h) / 3.0
+    assert np.any(content(snow) != content(bare))       # the two systems differ (non-vacuous)
     blend = s * content(snow) + (1 - s) * content(bare)
     np.testing.assert_allclose(content(mid), blend, rtol=1e-13)
     for k in ("qcn_ice_top", "qcn_ice_bottom", "qns_ice"):
