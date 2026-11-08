@@ -637,8 +637,6 @@ def _si3_zdf_bl99_step_impl(
     """
 
     _stw = functools.partial(_ST_WHERE, mode=_st_mode)
-    _stmin = functools.partial(_ST_MIN, mode=_st_mode)
-    _stmax = functools.partial(_ST_MAX, mode=_st_mode)
 
     _check_nemo_version(nemo_version)
     w = _column_widths(switches)
@@ -1695,8 +1693,6 @@ def _do_step_impl(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: f
     """
 
     _stw = functools.partial(_ST_WHERE, mode=_st_mode)
-    _stmin = functools.partial(_ST_MIN, mode=_st_mode)
-    _stmax = functools.partial(_ST_MAX, mode=_st_mode)
 
     # Open-water growth (`icethd_do.F90:171-307`), active only for qlead<0.
     # Smooth mode: every switch below keeps NEMO's forward value; the open-water and
@@ -1744,29 +1740,28 @@ def _do_step_impl(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: f
     # takes the new-ice values (`icethd_do.F90:250-259`).
     s_new = _NEW_ICE_SALINITY_FRACTION * forcing.sss
     had_ice = (a_old > 0.0)[..., None]
-    # had_ice and keep are continuous at their boundaries (mixed enthalpy -> e_new as
-    # v_old -> 0; emptying below epsi20 is a sub-epsi20 jump), so the soft pass takes the
-    # updated branch, as for new_ice (votes Z57, Z60, Z61).
-    had_w = jnp.ones_like(a_old)[..., None] if st else None
+    # had_ice, keep and new_ice are continuous at their boundaries (mixed enthalpy ->
+    # e_new as v_old -> 0; emptying below epsi20 is a sub-epsi20 jump), so the soft pass
+    # takes the updated branch exactly (votes Z57, Z60, Z61); a unit-weight blend
+    # b + (a - b) would lose a's digits when |a| << |b|.
+    def _upd(pred, a, b):
+        return _st_pair(jnp.where(pred, a, b), a, _st_mode) if st else jnp.where(pred, a, b)
     v_den = jnp.maximum(v_mixed, _EPS20)[..., None]
-    e_mixed = _stw(
+    e_mixed = _upd(
         had_ice,
         (e_new[..., None] * v_lateral[..., None] + post_temp2.e_ice * v_old[..., None]) / v_den,
         jnp.broadcast_to(e_new[..., None], post_temp2.e_ice.shape),
-        had_w,
     )
-    S_layers_new = _stw(
+    S_layers_new = _upd(
         had_ice,
         (s_new[..., None] * v_lateral[..., None] + post_temp2.S_layers * v_old[..., None]) / v_den,
         jnp.broadcast_to(s_new[..., None], post_temp2.S_layers.shape),
-        had_w,
     )
     # Basal accretion of the residual and enthalpy remap (`icethd_do.F90:262-294`);
     # a category whose area is below epsi20 is emptied (numerics guard).
     keep = (a_total >= _EPS20) | (vnew <= 0.0)
-    keep_w = jnp.ones_like(a_total) if st else None
-    accreted = _stw(keep, residual, 0.0, keep_w)
-    a_total = _stw(keep, a_total, 0.0, keep_w)
+    accreted = _upd(keep, residual, 0.0)
+    a_total = _upd(keep, a_total, 0.0)
     v_total = v_mixed + accreted
     layer = v_mixed * (1.0 / 3.0)
     vseg = jnp.stack([jnp.zeros_like(layer), layer, layer, layer, accreted], axis=-1)
@@ -1781,17 +1776,13 @@ def _do_step_impl(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: f
     # Snow volume is untouched by ice_thd_do: thickness spreads over the new area.
     h_snow_new = jnp.where(_has_ice, post_temp2.h_snow * a_old / jnp.where(_has_ice, a_total, 1.0), 0.0)
     new_ice = vnew > 0.0
-    # Soft pass takes the updated branch unconditionally: it tends to the old state as
-    # vnew -> 0, and a fractional blend would create snow volume (vote Z57).
-    new_w = jnp.ones_like(vnew) if st else None
-    new_w3 = new_w[..., None] if st else None
     post_do = post_temp2._replace(
         concentration=a_total,
         h_ice=h_total,
-        h_snow=_stw(new_ice, h_snow_new, post_temp2.h_snow, new_w),
-        e_ice=_stw(new_ice[..., None], e_ice_new, post_temp2.e_ice, new_w3),
-        S_bulk=_stw(new_ice, S_bulk_new, post_temp2.S_bulk, new_w),
-        S_layers=_stw(new_ice[..., None], S_layers_new, post_temp2.S_layers, new_w3),
+        h_snow=_upd(new_ice, h_snow_new, post_temp2.h_snow),
+        e_ice=_upd(new_ice[..., None], e_ice_new, post_temp2.e_ice),
+        S_bulk=_upd(new_ice, S_bulk_new, post_temp2.S_bulk),
+        S_layers=_upd(new_ice[..., None], S_layers_new, post_temp2.S_layers),
     )
     # ice_thd_do exchange in NEMO's operation order (`icethd_do.F90:204-221`).
     zfmdt = _stw(forcing.qlead < 0.0, -forcing.qlead / (zEi - zEw), 0.0, cools if st else None)
