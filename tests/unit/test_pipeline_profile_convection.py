@@ -457,14 +457,21 @@ def test_pipeline_stateless_gwd_composite_runs_and_sums(setup):
     assert jnp.allclose(du_composite, du_sum, atol=1e-10)
 
 
-def test_thompson_pipeline_numbers_match_bridge():
-    """WRF Thompson through the driver pipeline and the hydrostatic bridge on
-    the same columns: the pipeline converts its per-mass N_r carry to the
-    scheme's per-volume number and back, as the bridge does (vote Y1b), so
-    the rain-number tendency agrees and is non-zero; a carry without the
-    full registry refuses (vote Y2a)."""
+@pytest.mark.parametrize("scheme,ccn", [("thompson", False), ("morrison", False),
+                                        ("p3", False), ("seifert_beheng", False),
+                                        ("morrison", True)])
+def test_pipeline_numbers_match_bridge(scheme, ccn):
+    """Each double-moment scheme through the driver pipeline and through the
+    hydrostatic bridge on the same columns: the pipeline converts its
+    per-mass N_c/N_r carry to the schemes' per-volume numbers and back, as
+    the bridge does, so the rain-number tendency agrees and is non-zero
+    (thompson: vote Y1b; the others fed the raw carry until this fix).
+    thompson also refuses a carry without the full registry (vote Y2a)."""
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig,
+        MorrisonConfig,
+    )
     from legoesm.atmosphere.physics.microphysics.integration import (
         make_microphysics_physics,
     )
@@ -472,35 +479,71 @@ def test_thompson_pipeline_numbers_match_bridge():
     grid, _, f, state = _make_setup(NLEV)
     sigma = create_sigma_coordinate(NLEV, sigma_top=0.02)
     z3 = f["z3"]
-    low = jnp.arange(NLEV) >= NLEV - 6
-    q_r = jnp.broadcast_to(jnp.where(low, 2.0e-4, 0.0), z3.shape)
-    n_r = jnp.broadcast_to(jnp.where(low, 5.0e4, 0.0), z3.shape)   # per kg
+    # A saturated 20-level rain layer (rain survives the step, so the number
+    # response is non-linear in N_r and a wrong conversion does not cancel)
+    # with a non-zero droplet number (vote U2a).
+    from legoesm.thermo import saturation_mixing_ratio
+    low = jnp.arange(NLEV) >= NLEV - 20
+    q_v = jnp.where(low, saturation_mixing_ratio(
+        f["T"], sigma.sigma_full * f["p_s"][..., None]), f["q_v"])
+    q_c = jnp.broadcast_to(jnp.where(low, 1.0e-4, 0.0), z3.shape)
+    q_r = jnp.broadcast_to(jnp.where(low, 3.0e-4, 0.0), z3.shape)
+    n_r = jnp.broadcast_to(jnp.where(low, 2.0e4, 0.0), z3.shape)   # per kg
+    n_c = jnp.broadcast_to(jnp.where(low, 1.0e8, 0.0), z3.shape)   # per kg
     config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
         dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
-        convection="none", radiation="none", microphysics="thompson",
+        convection="none", radiation="none", microphysics=scheme,
+        # morrison's default warm rain needs CLUBB's relvar (not on this lane)
+        **({"morrison_warm_rain_scheme": "kk2000"} if scheme == "morrison" else {}),
+        # aerosol-CCN specified N_c: already per volume, must pass through
+        # unconverted on both lanes (GLM review)
+        **({"nc_from_aerosol": True, "aerosol_forcing": "external"} if ccn else {}),
     )
     config.validate_strict()
     pipe = build_physics_pipeline(grid, sigma, config)
 
     def step(**kw):
         return pipe.physics_step_no_rad(
-            f["T"], f["p_s"], f["q_v"], f["q_c"], q_r, None,
+            f["T"], f["p_s"], q_v, q_c, q_r, None,
             f["u"], f["v"], f["sst"], f["sic"], f["lat"], DT,
             z3, f["z2"], f["z2"], f["z2"], f["z2"], f["z2"], **kw)
 
-    full = dict(q_i=z3, q_s=z3, q_g=z3, N_c=z3, N_r=n_r, N_i=z3)
+    ncol = int(np.prod(f["p_s"].shape))
+    # non-uniform per-layer AOD, column 0.3 (GLM final review)
+    w_aod = jnp.linspace(0.2, 1.8, NLEV)
+    aod = jnp.broadcast_to(0.3 * w_aod / jnp.sum(w_aod), (ncol, NLEV))
+    full = dict(q_i=z3, q_s=z3, q_g=z3, N_c=n_c, N_r=n_r, N_i=z3,
+                **({"aerosol_od": aod} if ccn else {}))
     out = step(**full)
     bridge = make_microphysics_physics(
-        MicrophysicsConfig(scheme="thompson"), model_type="hydrostatic", dt=DT)
+        MicrophysicsConfig(scheme=scheme,
+                           morrison=MorrisonConfig(warm_rain_scheme="kk2000",
+                                                   nc_from_aerosol=ccn)),
+        model_type="hydrostatic", dt=DT)
     d3 = state.T.dims
     tr = {k: Field(x, name=k, dims=d3) for k, x in (
-        ("q_v", f["q_v"]), ("q_c", f["q_c"]), ("q_r", q_r), ("q_i", z3),
-        ("q_s", z3), ("q_g", z3), ("N_c", z3), ("N_r", n_r), ("N_i", z3))}
-    tend = bridge(state._replace(tracers=tr), grid, sigma)
-    ref = tend.tracer_tendencies["N_r"].data
-    scale = float(jnp.max(jnp.abs(ref)))
-    assert scale > 0.0, "no rain-number tendency"
-    assert float(jnp.max(jnp.abs(out.dN_r_dt - ref))) <= 1e-9 * scale
-    with pytest.raises(ValueError, match="N_i"):
-        step(**{**full, "N_i": None})
+        ("q_v", q_v), ("q_c", q_c), ("q_r", q_r), ("q_i", z3),
+        ("q_s", z3), ("q_g", z3), ("N_c", n_c), ("N_r", n_r), ("N_i", z3))}
+    tend = bridge(state._replace(tracers=tr), grid, sigma,
+                  forcing={"aerosol_od": aod} if ccn else None)
+    for pipe_x, ref, what in (
+            (out.dN_r_dt, tend.tracer_tendencies["N_r"].data, "dN_r"),
+            (out.dq_r_dt, tend.tracer_tendencies["q_r"].data, "dq_r"),
+            (out.dq_c_dt, tend.tracer_tendencies["q_c"].data, "dq_c"),
+            (out.precip, tend.precip.data, "precip")):
+        scale = float(jnp.max(jnp.abs(ref)))
+        assert scale > 0.0, f"no {what}"
+        assert float(jnp.max(jnp.abs(pipe_x - ref))) <= 1e-9 * scale, what
+    if ccn:      # the activated number actually drives the answer
+        tend0 = bridge(state._replace(tracers=tr), grid, sigma,
+                       forcing={"aerosol_od": 3.0 * aod})
+        assert not np.allclose(np.asarray(tend0.tracer_tendencies["q_c"].data),
+                               np.asarray(out.dq_c_dt), rtol=1e-6, atol=0.0)
+        out3 = step(**{**full, "aerosol_od": 3.0 * aod})   # and on the pipeline
+        np.testing.assert_allclose(np.asarray(out3.dq_c_dt),
+                                   np.asarray(tend0.tracer_tendencies["q_c"].data),
+                                   rtol=1e-9, atol=1e-30)
+    if scheme == "thompson":
+        with pytest.raises(ValueError, match="N_i"):
+            step(**{**full, "N_i": None})
