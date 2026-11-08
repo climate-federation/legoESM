@@ -6,7 +6,7 @@
 #PBS -l walltime=04:00:00
 #PBS -j oe
 #
-# CRM (plane compressible step_halo) + spectral LES (y-slab FFT) MPI scaling
+# CRM (plane compressible step_halo) + spectral LES (y-slab and x-y pencil FFT) MPI scaling
 # ladder on Derecho CPU nodes. One rank per core, ONE core per rank (pinned with
 # an explicit core list, spread evenly over the node), single-threaded XLA.
 # Each run appends one JSON line (timings + resolved config + provenance) to
@@ -22,11 +22,9 @@
 #   CRM_EXTRA   extra run_rcemip_plane flags for the CRM on top of the driver's
 #               defaults plus --semi-implicit (REQUIRED: the driver's default
 #               substepped horizontal acoustics refuses to run without it, and
-#               every production deck passes it). NOTE: the driver defaults
-#               (separate centred momentum advection, vertical SGS) have no
-#               halo kernels yet, so they raise at EVERY rank count: 1 rank
-#               also runs the halo core (bench --single-rank-path halo, the
-#               like-for-like baseline).
+#               every production deck passes it). 1 rank runs the halo core
+#               too (bench --single-rank-path halo, the like-for-like baseline).
+#   LES_DECOMPS "slab pencil"  y-slabs and/or the most-square x-y pencil mesh
 #
 # 1 node : qsub -v RANKS="1 2 4 8 16 32 64 128" crm_les_ladder.pbs
 # 2 nodes: qsub -l select=2:ncpus=128:mpiprocs=128:mem=230GB -v RANKS=256 crm_les_ladder.pbs
@@ -40,6 +38,7 @@ set -uo pipefail
 : "${MODES:=strong weak}"
 : "${BOUNDS:=1}"
 : "${CRM_EXTRA:=}"
+: "${LES_DECOMPS:=slab pencil}"
 : "${STRONG_NX:=512}" "${WEAK_NX:=64}" "${CRM_NLEV:=64}" "${LES_NZ:=128}"
 : "${WARMUP:=3}" "${TIME_STEPS:=5}" "${WINDOWS:=3}"
 : "${OUT:=/glade/derecho/scratch/${USER}/crm_les_scaling/${PBS_JOBID:-local}}"
@@ -62,7 +61,7 @@ NODES=$(sort -u "${PBS_NODEFILE:-/dev/null}" 2>/dev/null | wc -l)
 CORES=128
 echo "[ladder] sha=$(git rev-parse HEAD) dirty=$(git status --porcelain --untracked-files=no | wc -l) nodes=$NODES"
 echo "[ladder] RANKS=[$RANKS] MODELS=[$MODELS] PRECISIONS=[$PRECISIONS] MODES=[$MODES]"
-echo "[ladder] STRONG_NX=$STRONG_NX WEAK_NX=$WEAK_NX CRM_NLEV=$CRM_NLEV LES_NZ=$LES_NZ"
+echo "[ladder] LES_DECOMPS=$LES_DECOMPS STRONG_NX=$STRONG_NX WEAK_NX=$WEAK_NX CRM_NLEV=$CRM_NLEV LES_NZ=$LES_NZ"
 echo "[ladder] WARMUP=$WARMUP TIME_STEPS=$TIME_STEPS WINDOWS=$WINDOWS CRM_EXTRA=[$CRM_EXTRA]"
 echo "[ladder] XLA_FLAGS=$XLA_FLAGS OUT=$OUT"
 
@@ -122,9 +121,11 @@ for N in $RANKS; do
                 "${COMMON[@]}" --nlev "$CRM_NLEV" --semi-implicit $PHYS $CRM_EXTRA \
                 --output "$OUT/crm.jsonl" || { echo "FAILED crm $MODE $PREC n=$N"; rc_all=1; } ;;
           les)
+            for DEC in $LES_DECOMPS; do
             run "$N" "$PPN" scripts/bench/bench_spectral_les_dd_scaling.py \
-                "${COMMON[@]}" --nz "$LES_NZ" \
-                --output "$OUT/les.jsonl" || { echo "FAILED les $MODE $PREC n=$N"; rc_all=1; } ;;
+                "${COMMON[@]}" --nz "$LES_NZ" --decomp "$DEC" \
+                --output "$OUT/les.jsonl" || { echo "FAILED les $DEC $MODE $PREC n=$N"; rc_all=1; }
+            done ;;
           *) echo "unknown MODEL=$MODEL"; exit 2 ;;
         esac
       done

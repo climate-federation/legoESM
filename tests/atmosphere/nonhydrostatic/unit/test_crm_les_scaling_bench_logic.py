@@ -130,6 +130,11 @@ def test_les_slab_ic_independent_of_rank_count():
     stacked = jnp.concatenate([p.theta for p in parts], axis=0)
     assert float(jnp.std(whole.theta[..., 0])) > 0.01  # noise present
     assert float(jnp.max(jnp.abs(stacked - whole.theta))) == 0.0
+    tiles = [[les_b.local_cbl_state(sl, g, args, ry * 4, 4, 0.0, jnp.float64,
+                                    ix_start=rx * 4, nx_local=4).theta
+              for rx in range(2)] for ry in range(2)]
+    pencil = jnp.concatenate([jnp.concatenate(r, axis=1) for r in tiles], axis=0)
+    assert float(jnp.max(jnp.abs(pencil - whole.theta))) == 0.0
 
 
 def test_driver_builders_resolve_production_defaults():

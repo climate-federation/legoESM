@@ -51,6 +51,9 @@ def bench_parser() -> argparse.ArgumentParser:
     p.add_argument("--precision", choices=["float32", "float64"],
                    default="float64")
     p.add_argument("--case", default="cbl_nieuwstadt")
+    p.add_argument("--decomp", choices=["slab", "pencil"], default="slab",
+                   help="slab = y-slabs over all ranks; pencil = most-square "
+                        "y x x rank mesh")
     p.add_argument("--nx", type=int, required=True)
     p.add_argument("--ny", type=int, required=True)
     p.add_argument("--nz", type=int, required=True)
@@ -71,7 +74,7 @@ def scaled_grid(case_grid, nx: int, ny: int, nz: int):
 
 
 def local_cbl_state(sl, g, args, iy_start: int, ny_local: int, u_geo: float,
-                    dtype):
+                    dtype, ix_start: int = 0, nx_local: int | None = None):
     """The driver's dry-CBL IC on rows ``iy_start .. iy_start+ny_local``.
 
     Same profile as ``run_les_suite._build_cbl`` (mixed layer below
@@ -84,6 +87,7 @@ def local_cbl_state(sl, g, args, iy_start: int, ny_local: int, u_geo: float,
 
     cfg = g.cfg
     nx, nz = cfg.nx, cfg.nz
+    nx_l = nx if nx_local is None else nx_local
     z = g.z_c
     th = jnp.where(z > args.zi0, args.theta0 + args.gamma * (z - args.zi0),
                    args.theta0).astype(dtype)
@@ -91,11 +95,12 @@ def local_cbl_state(sl, g, args, iy_start: int, ny_local: int, u_geo: float,
     rows = jnp.arange(iy_start, iy_start + ny_local)
     noise = jax.vmap(lambda r: jax.random.normal(
         jax.random.fold_in(key, r), (nx, nz), dtype=dtype))(rows)
-    th3 = (jnp.broadcast_to(th, (ny_local, nx, nz)).astype(dtype)
+    noise = noise[:, ix_start:ix_start + nx_l]
+    th3 = (jnp.broadcast_to(th, (ny_local, nx_l, nz)).astype(dtype)
            + 0.1 * noise * (z < args.zi0).astype(dtype))
-    u = jnp.full((ny_local, nx, nz), dtype(u_geo), dtype)
-    v = jnp.zeros((ny_local, nx, nz), dtype)
-    w = jnp.zeros((ny_local, nx, nz + 1), dtype)
+    u = jnp.full((ny_local, nx_l, nz), dtype(u_geo), dtype)
+    v = jnp.zeros((ny_local, nx_l, nz), dtype)
+    w = jnp.zeros((ny_local, nx_l, nz + 1), dtype)
     return sl.SpectralLESState(
         u=u, v=v, w=w, rhs_u_prev=jnp.zeros_like(u),
         rhs_v_prev=jnp.zeros_like(v), rhs_w_prev=jnp.zeros_like(w),
@@ -144,15 +149,18 @@ def main(argv=None):
     rank, n = comm.Get_rank(), comm.Get_size()
     n_y, n_x = most_square_factors(n)
     ny_g, nx_g = global_grid_shape(bargs.mode, bargs.ny, bargs.nx, n_y, n_x)
-    if ny_g % n:
-        raise SystemExit(f"global ny {ny_g} not divisible by {n} ranks")
-    ny_l = ny_g // n
+    p_y, p_x = (n_y, n_x) if bargs.decomp == "pencil" else (n, 1)
+    if ny_g % p_y or nx_g % p_x:
+        raise SystemExit(f"global {ny_g}x{nx_g} not divisible by mesh {p_y}x{p_x}")
+    ny_l, nx_l = ny_g // p_y, nx_g // p_x
     grid = scaled_grid(case.grid, nx_g, ny_g, bargs.nz)
     cfg = les.cbl_les_config(grid, args, sgs)
-    layout = (sl.SpectralLESLayout(rank=rank, n_ranks=n, ny_global=ny_g,
-                                   nx=nx_g, comm=comm) if n > 1 else None)
+    layout = (sl.make_spectral_les_pencil_layout(comm, p_y, p_x, ny_g, nx_g)
+              if n > 1 else None)
     g = sl.make_grid(cfg, dtype=dtype, layout=layout)
-    st = local_cbl_state(sl, g, args, rank * ny_l, ny_l, u_geo, dtype)
+    ry, rx = divmod(rank, p_x)
+    st = local_cbl_state(sl, g, args, ry * ny_l, ny_l, u_geo, dtype,
+                         ix_start=rx * nx_l, nx_local=nx_l)
     step = les._make_emit_step(g, case.regime, (u_geo, 0.0), f_cor, Q0,
                                grid.Lz_m, dtype)
     dt0 = (float(args.dt) if args.dt is not None else
@@ -192,7 +200,8 @@ def main(argv=None):
             "model": "spectral_les", "case": case.name, "sgs": sgs,
             "mode": bargs.mode, "precision": bargs.precision, "n_ranks": n,
             "ny_global": ny_g, "nx_global": nx_g, "nz": bargs.nz,
-            "ny_local": ny_l, "dx": g.dx, "dy": g.dy, "dz": g.dz, "dt": dt0,
+            "ny_local": ny_l, "nx_local": nx_l, "decomp": bargs.decomp,
+            "mesh": [p_y, p_x], "dx": g.dx, "dy": g.dy, "dz": g.dz, "dt": dt0,
             "time_steps": bargs.time_steps, "windows": bargs.windows,
             "compile_plus_first_step_s": t_compile,
             "ms_per_step_windows": [1e3 * s for s in per],
