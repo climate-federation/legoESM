@@ -495,6 +495,10 @@ def _thomas(dt, rkh, rho, s, z, rkct=None):
 
     sm = jnp.moveaxis(s[..., 1:L - 1], -1, 0)
     srcm = jnp.moveaxis(src, -1, 0)
+    # carry in the promoted dtype of the sweep (a float32 species against float64
+    # metrics would otherwise change the scan carry's dtype after one step)
+    ct = jnp.result_type(cm1, rs1, dtoz, rkh, cr, rho, s, src)
+    cm1, rs1 = cm1.astype(ct), rs1.astype(ct)
     _, (cmr, rsr) = lax.scan(fwd, (cm1, rs1),
                              (dtoz[1:], rkh[:-1], rkh[1:], cr[:-1], rho[1:L - 1], sm, srcm))
     cm = jnp.concatenate([cm1[None], cmr])
