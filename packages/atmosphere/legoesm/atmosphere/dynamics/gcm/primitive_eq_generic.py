@@ -23,6 +23,22 @@ face products to cells; MPAS uses ``div(vel L_face) - L div(vel)``), the
 optional lat-lon PPM temperature flux, damping, tracers, the surface-pressure
 post-hook (lat-lon zero-mean, MPAS del-4) and the velocity boundary condition.
 Lat-lon SPMD packed exchanges are not used: the plain operators are called.
+
+Vertical form, an explicit required choice (``vertical_form``, no default):
+
+* ``"sb81_theta"`` -- the form above (SB81 ``ln p_k`` PGF, theta-form vertical
+  T, omega_ps split).  Not energy-conserving: the upwind theta transport
+  creates energy (6-day JW drift +4.6e-4 lat-lon, +5.5e-4 MPAS).
+* ``"as83"`` -- Arakawa-Suarez (1983), hybrid coordinate only: layer Exner
+  ``pi_k``, PGF ``-grad(Phi + K) - c_p theta_f grad(pi)``, hydrostatic
+  ``Phi_k - Phi_{k+1} = c_p theta_{k+1/2} (pi_{k+1} - pi_k)``, mass-weighted
+  theta transport with the SAME face theta, centred vertical transports, and on
+  lat-lon the TRiSK-form kinetic energy and an energy-neutral Coriolis term.
+  The semi-discrete total energy is conserved to round-off.
+  KNOWN DIFFERENCE (#1029): an isothermal atmosphere at rest over terrain is
+  not exactly at rest -- the hybrid column quadrature is not isothermal-exact
+  (measured on the DCMIP 2-0-0 mountain, hybrid L20: max |dv/dt| 9.1e-6 m/s^2
+  MPAS, 1.3e-5 lat-lon; the ``"sb81_theta"`` form: 2e-16 / 2e-15).
 """
 
 from __future__ import annotations
@@ -80,6 +96,16 @@ class PEOperators(NamedTuple):
     vert_scheme: str
     p_floor: float
     p_ceil: float
+    vertical_form: str
+
+
+VERTICAL_FORMS = ("as83", "sb81_theta")
+
+
+def _check_vertical_form(vertical_form: str) -> None:
+    if vertical_form not in VERTICAL_FORMS:
+        raise ValueError(f"unknown vertical_form {vertical_form!r}; expected one of "
+                         f"{VERTICAL_FORMS}")
 
 
 def _as_tuple(x: Any) -> tuple:
@@ -87,11 +113,12 @@ def _as_tuple(x: Any) -> tuple:
 
 
 def vertical_momentum_advection(vel: jax.Array, vv_face: jax.Array, ps_face: jax.Array,
-                                sigma_coord: Any, hybrid: bool, scheme: str) -> jax.Array:
-    """Column vertical advection of one velocity family at its faces (the
-    hybrid branch has a single scheme, as in both old cores)."""
+                                sigma_coord: Any, hybrid: bool, scheme: str,
+                                centred: bool = False) -> jax.Array:
+    """Column vertical advection of one velocity family at its faces; ``centred``
+    selects the Simmons-Burridge centred form (conserves kinetic energy)."""
     if hybrid:
-        if scheme == "as83":   # centred Simmons-Burridge form: conserves kinetic energy
+        if centred:
             return vertical_advection_hybrid_sb(vel, vv_face, ps_face, sigma_coord)
         return vertical_advection_hybrid(vel, vv_face, ps_face, sigma_coord)
     return vertical_advection(vel, vv_face, sigma_coord, scheme=scheme)
@@ -105,7 +132,8 @@ def primitive_equation_tendencies(
     face families with the level axis last."""
     R_d, kappa = constants.R_d, constants.kappa
     hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
-    as83 = ops.vert_scheme == "as83"
+    _check_vertical_form(ops.vertical_form)
+    as83 = ops.vertical_form != "sb81_theta"
     if as83 and not hybrid:
         raise ValueError("the Arakawa-Suarez vertical form needs a hybrid coordinate")
     gops = ops.grid_ops
@@ -135,8 +163,10 @@ def primitive_equation_tendencies(
     dB = tuple(g[..., :nlev] for g in grads)
     dL = tuple(g[..., nlev:] for g in grads)
     T_face = ops.to_face(T)
+    if as83:
+        theta_f = ops.to_face(theta)
     # PGF coefficient on faces: R_d T_f (ln p form) or c_p theta_f (Exner form)
-    pgf_coef = (tuple(constants.c_pd * f for f in ops.to_face(theta)) if as83
+    pgf_coef = (tuple(constants.c_pd * f for f in theta_f) if as83
                 else tuple(R_d * f for f in T_face))
     dvel = tuple(-(db + c * dl) for db, c, dl in zip(dB, pgf_coef, dL))
 
@@ -170,14 +200,13 @@ def primitive_equation_tendencies(
     vv_face = ops.to_face(vv)
     ps_face = tuple(f[..., 0] for f in ops.to_face(p_s[..., None]))
     terms["vert_mom"] = tuple(
-        vertical_momentum_advection(v, vf, pf, sigma_coord, hybrid, ops.vert_scheme)
+        vertical_momentum_advection(v, vf, pf, sigma_coord, hybrid, ops.vert_scheme, centred=as83)
         for v, vf, pf in zip(vel, vv_face, ps_face))
     dvel = tuple(d + a for d, a in zip(dvel, terms["vert_mom"]))
 
     div_u = gops.divergence(*vel)
     ctx["div_u"] = div_u
     if as83:   # mass-weighted theta transport, same face theta as the PGF
-        theta_f = ops.to_face(theta)
         flux = gops.divergence(*(v * d * t for v, d, t in zip(vel, dp_face, theta_f)))
         horiz_T = pi * (-flux + theta * div_dp) / dp
         vert_T = pi * as83_vertical_theta_flux(theta, theta_half, vv) / dp
@@ -205,8 +234,30 @@ def primitive_equation_tendencies(
 # Lat-lon C-grid plug-ins
 # ============================================================================
 
-def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = None) -> PEOperators:
-    """Lat-lon C-grid plug-ins (fields ``(n_lat, n_lon(+1), nlev)``)."""
+def latlon_face_metrics(grid: Any, gops: Any) -> tuple[jax.Array, ...]:
+    """``(l_u, d_u, l_v, d_v)``: face length and centre distance of the u faces
+    ``(n_lat,)`` and v faces ``(n_lat+1,)``, read off the divergence and gradient
+    operators themselves so ``A_f = l_f d_f`` is exactly their summation-by-parts
+    weight.  Pole v faces have ``l_v = d_v = 0``."""
+    nj, ni = grid.n_lat, grid.n_lon
+    area = jnp.asarray(grid.area)[:, 0]
+    col = jnp.broadcast_to(jnp.arange(ni + 1.0), (nj, ni + 1))
+    l_u = area * gops.divergence(col, jnp.zeros((nj + 1, ni)))[:, 0]
+    d_u = 1.0 / gops.gradient(jnp.broadcast_to(jnp.arange(ni * 1.0), (nj, ni)))[0][:, 1]
+    div_v = gops.divergence(jnp.zeros((nj, ni + 1)), jnp.ones((nj + 1, ni)))[:, 0]
+    l_v = jnp.concatenate([jnp.zeros(1), jnp.cumsum(area * div_v)])
+    g = gops.gradient(jnp.broadcast_to(jnp.arange(nj * 1.0)[:, None], (nj, ni)))[1][:, 0]
+    d_v = jnp.where(g != 0, 1.0 / jnp.where(g != 0, g, 1.0), 0.0)
+    l_v = l_v.at[0].set(0.0).at[-1].set(0.0)
+    return l_u, d_u, l_v, d_v
+
+
+def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = None, *,
+                        vertical_form: str) -> PEOperators:
+    """Lat-lon C-grid plug-ins (fields ``(n_lat, n_lon(+1), nlev)``).  The
+    Arakawa-Suarez forms use the TRiSK-form kinetic energy and the
+    energy-neutral Coriolis term; ``"sb81_theta"`` keeps the current ones."""
+    _check_vertical_form(vertical_form)
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         latlon_dissipation,
         latlon_pole_bc,
@@ -226,12 +277,58 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
         interp_cell_to_vface_halo,
     )
 
+    gops_ll = latlon_sw_grid_operators(grid)
+    ni = grid.n_lon
+    west = (jnp.arange(ni + 1) - 1) % ni      # cell west of u face i (periodic)
+    east = jnp.arange(ni + 1) % ni            # cell east of u face i
+
     def to_face(f):
         return (interp_cell_to_uface(f), interp_cell_to_vface_halo(f))
 
-    def vorticity_term(ctx, dvel):
+    def vorticity_term_current(ctx, dvel):
         cor_u, cor_v = absolute_vorticity_coriolis(ctx["vel"][0], ctx["vel"][1], grid)
         return (dvel[0] + cor_u, dvel[1] + cor_v)
+
+    l_u, d_u, l_v, d_v = latlon_face_metrics(grid, gops_ll)
+    A_u, A_v = l_u * d_u, l_v * d_v
+    area = jnp.asarray(grid.area)
+    inv_dv = jnp.where(d_v > 0, 1.0 / jnp.where(d_v > 0, d_v, 1.0), 0.0)
+    lat = jnp.asarray(grid.lat)
+    two_omega = 2.0 * grid.omega
+    f_vert = jnp.pad(two_omega * jnp.sin(0.5 * (lat[:-1] + lat[1:])), (1, 1),
+                     constant_values=(-two_omega, two_omega))     # (n_lat+1,)
+
+    def kinetic_energy_dual(vel):
+        """K_c = sum_f A_f u_f^2 / (4 A_c) (the TRiSK form)."""
+        u, v = vel
+        ku = A_u[:, None, None] * (u[:, :-1] ** 2 + u[:, 1:] ** 2)
+        kv = A_v[:-1, None, None] * v[:-1] ** 2 + A_v[1:, None, None] * v[1:] ** 2
+        return (ku + kv) / (4.0 * area[..., None])
+
+    def vorticity_term_energy(ctx, dvel):
+        """Vertex-PV Coriolis on mass transports U = l dp u, V = l dp v:
+        cor_u = (1/4 d_u) sum Q V, cor_v = -(1/4 d_v) sum Q U over the four
+        (face, vertex) pairs -> zero kinetic-energy work for any state."""
+        u, v = ctx["vel"]
+        dp_u, dp_v = ctx["dp_face"]
+        dp = ctx["dp"]
+        U = l_u[:, None, None] * dp_u * u
+        V = l_v[:, None, None] * dp_v * v
+        zeta = gops_ll.vorticity(u, v)                            # (n_lat+1, n_lon+1, nlev)
+        dpx = 0.5 * (dp[:, west] + dp[:, east])                   # (n_lat, n_lon+1, nlev)
+        dpv = jnp.concatenate([dpx[:1], 0.5 * (dpx[:-1] + dpx[1:]), dpx[-1:]], axis=0)
+        Q = (zeta + f_vert[:, None, None]) / dpv
+        sV = V[:, west] + V[:, east]                              # (n_lat+1, n_lon+1, nlev)
+        cor_u = (Q[:-1] * sV[:-1] + Q[1:] * sV[1:]) / (4.0 * d_u[:, None, None])
+        Up = jnp.pad(U, ((1, 1), (0, 0), (0, 0)))
+        sU = Up[:-1] + Up[1:]                                     # (n_lat+1, n_lon+1, nlev)
+        cor_v = -(Q[:, :-1] * sU[:, :-1] + Q[:, 1:] * sU[:, 1:]) * (inv_dv[:, None, None] / 4.0)
+        return (dvel[0] + cor_u, dvel[1] + cor_v)
+
+    as83 = vertical_form != "sb81_theta"
+    vorticity_term = vorticity_term_energy if as83 else vorticity_term_current
+    kinetic_energy = (kinetic_energy_dual if as83
+                      else (lambda vel: kinetic_energy_cgrid(vel[0], vel[1])))
 
     def v_dot_grad_L(ctx):
         u_c, v_c = cell_winds_cgrid(*ctx["vel"])
@@ -265,14 +362,15 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
         return (dvel[0], latlon_pole_bc(dvel[1], config))
 
     return PEOperators(
-        latlon_sw_grid_operators(grid), to_face,
-        lambda vel: kinetic_energy_cgrid(vel[0], vel[1]),
+        gops_ll, to_face, kinetic_energy,
         vorticity_term, v_dot_grad_L, horizontal_T, dissipation, tracer_fn,
-        ps_post, boundary, "upwind", config.p_floor, config.p_ceil)
+        ps_post, boundary, "upwind", config.p_floor, config.p_ceil,
+        vertical_form)
 
 
 def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
-                               config: Any = None, *, geom_pads: Any = None, dt: Any = None):
+                               config: Any = None, *, vertical_form: str,
+                               geom_pads: Any = None, dt: Any = None):
     """Drop-in twin of ``cgrid_latlon_hydrostatic_tendencies`` on the shared core:
     ``(du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends)``."""
     if geom_pads is not None:
@@ -282,7 +380,7 @@ def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
             CGridLatLonPrimitiveEquationConfig,
         )
         config = CGridLatLonPrimitiveEquationConfig()
-    ops = latlon_pe_operators(grid, config, state.tracers, dt)
+    ops = latlon_pe_operators(grid, config, state.tracers, dt, vertical_form=vertical_form)
     (du, dv), dT, dps, tt, _ = primitive_equation_tendencies(
         state.T, (state.u, state.v), state.p_s, state.phis, sigma_coord, ops)
     return du, dv, dT, dps, tt
@@ -292,7 +390,8 @@ def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
 # MPAS / TRiSK plug-ins
 # ============================================================================
 
-def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0.0) -> PEOperators:
+def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0.0, *,
+                      vertical_form: str) -> PEOperators:
     """MPAS / TRiSK plug-ins (fields ``(nCells|nEdges, nlev)``)."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         mpas_momentum_dissipation,
@@ -375,15 +474,17 @@ def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0
         d4 = ps_del4(ctx)
         return dps if d4 is None else dps + d4
 
+    _check_vertical_form(vertical_form)
     return PEOperators(
         gops, lambda f: (cell_to_edge_avg_3d(f, mesh),),
         lambda vel: kinetic_energy_cell_3d(vel[0], mesh),
         vorticity_term, v_dot_grad_L, None, dissipation, tracer_fn, ps_post,
-        lambda dvel: dvel, scheme, config.p_floor, config.p_ceil)
+        lambda dvel: dvel, scheme, config.p_floor, config.p_ceil,
+        vertical_form)
 
 
 def mpas_pe_tendencies(state: Any, mesh: Any, sigma_coord: Any, config: Any = None,
-                       physics_tendency: Any = None, dt: float = 0.0):
+                       physics_tendency: Any = None, dt: float = 0.0, *, vertical_form: str):
     """Drop-in twin of ``mpas_hydrostatic_tendencies`` on the shared core."""
     if physics_tendency is not None:
         raise ValueError("the shared PE core does not add physics tendencies")
@@ -395,7 +496,7 @@ def mpas_pe_tendencies(state: Any, mesh: Any, sigma_coord: Any, config: Any = No
             MPASPrimitiveEquationConfig,
         )
         config = MPASPrimitiveEquationConfig()
-    ops = mpas_pe_operators(mesh, config, state.tracers, dt)
+    ops = mpas_pe_operators(mesh, config, state.tracers, dt, vertical_form=vertical_form)
     (du,), dT, dps, tt, _ = primitive_equation_tendencies(
         state.T.data, (state.u.data,), state.p_s.data, state.phis.data, sigma_coord, ops)
     return MPASHydrostaticTendencies(

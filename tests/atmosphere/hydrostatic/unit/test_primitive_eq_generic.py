@@ -12,6 +12,8 @@ Run with ``JAX_ENABLE_X64=1``.
 
 from __future__ import annotations
 
+from functools import partial
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -71,13 +73,13 @@ def _ll_state(grid, nlev=NLEV, seed=0):
         tracers={"q": jnp.asarray(1e-3 * r.rand(nj, ni, nlev))})
 
 
-def _ll_pair(state, grid, coord, cfg, dt=600.0):
+def _ll_pair(state, grid, coord, cfg, dt=600.0, form="sb81_theta"):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         cgrid_latlon_hydrostatic_tendencies,
     )
     return (cgrid_latlon_hydrostatic_tendencies(state, grid, coord, cfg, dt=dt),
-            cgrid_latlon_pe_tendencies(state, grid, coord, cfg, dt=dt))
+            cgrid_latlon_pe_tendencies(state, grid, coord, cfg, dt=dt, vertical_form=form))
 
 
 # ---------------------------------------------------------------------------
@@ -108,11 +110,11 @@ def _mpas_state(mesh, nlev=NLEV, seed=0, tracers=True):
         tracers=tr)
 
 
-def _mpas_pair(state, mesh, coord, cfg, dt=600.0):
+def _mpas_pair(state, mesh, coord, cfg, dt=600.0, form="sb81_theta"):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import mpas_hydrostatic_tendencies
     return (mpas_hydrostatic_tendencies(state, mesh, coord, cfg, dt=dt),
-            mpas_pe_tendencies(state, mesh, coord, cfg, dt=dt))
+            mpas_pe_tendencies(state, mesh, coord, cfg, dt=dt, vertical_form=form))
 
 
 # ===========================================================================
@@ -327,7 +329,8 @@ def _run_ll(generic, n_steps, dt, monkeypatch):
     from legoesm.grids.latlon import create_latlon_grid
     from tests.test_cases.baroclinic_wave import baroclinic_wave_init_latlon
     if generic:
-        monkeypatch.setattr(pl, "cgrid_latlon_hydrostatic_tendencies", cgrid_latlon_pe_tendencies)
+        monkeypatch.setattr(pl, "cgrid_latlon_hydrostatic_tendencies",
+                            partial(cgrid_latlon_pe_tendencies, vertical_form="sb81_theta"))
     grid, coord = create_latlon_grid(32, 64), _coord("sigma", 15)
     cfg = pl.CGridLatLonPrimitiveEquationConfig(use_polar_filter=True)
     model = pl.CGridLatLonPrimitiveEquationModel(grid, coord, cfg, dt=dt)
@@ -351,7 +354,8 @@ def _run_mpas(generic, n_steps, dt, monkeypatch):
     from legoesm.grids.voronoi import create_voronoi_mesh
     from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
     if generic:
-        monkeypatch.setattr(pm, "mpas_hydrostatic_tendencies", mpas_pe_tendencies)
+        monkeypatch.setattr(pm, "mpas_hydrostatic_tendencies",
+                            partial(mpas_pe_tendencies, vertical_form="sb81_theta"))
     mesh, coord = create_voronoi_mesh(4, lloyd_iterations=5), _coord("sigma", 15)
     model = pm.MPASPrimitiveEquationModel(mesh, coord, pm.MPASPrimitiveEquationConfig(nu_del4=1e15))
     s = baroclinic_wave_init_mpas(mesh, coord)
@@ -488,7 +492,7 @@ def test_mass_and_energy_tendency_budgets():
 # (e) jit parity, check_grads order 2, gradient through 100 steps
 # ===========================================================================
 
-def _ll_fn(kind, ppm=False):
+def _ll_fn(kind, ppm=False, form="sb81_theta"):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationConfig,
@@ -501,12 +505,13 @@ def _ll_fn(kind, ppm=False):
 
     def f(T, u, v, p_s, q):
         out = cgrid_latlon_pe_tendencies(
-            s0._replace(T=T, u=u, v=v, p_s=p_s, tracers={"q": q}), grid, coord, cfg, dt=600.0)
+            s0._replace(T=T, u=u, v=v, p_s=p_s, tracers={"q": q}), grid, coord, cfg, dt=600.0,
+            vertical_form=form)
         return out[:4] + (out[4]["q"],)
     return f, (s0.T, s0.u, s0.v, s0.p_s, s0.tracers["q"])
 
 
-def _mpas_fn(kind):
+def _mpas_fn(kind, form="sb81_theta"):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
     mesh, coord = _mesh(), _coord(kind)
@@ -517,21 +522,24 @@ def _mpas_fn(kind):
         st = s0._replace(T=s0.T.replace(data=T), u=s0.u.replace(data=u),
                          p_s=s0.p_s.replace(data=p_s),
                          tracers={"q_v": s0.tracers["q_v"].replace(data=q)})
-        t = mpas_pe_tendencies(st, mesh, coord, cfg, dt=600.0)
+        t = mpas_pe_tendencies(st, mesh, coord, cfg, dt=600.0, vertical_form=form)
         return (t.du_dt.data, t.dT_dt.data, t.dp_s_dt.data,
                 t.tracer_tendencies["q_v"].data)
     return f, (s0.T.data, s0.u.data, s0.p_s.data, s0.tracers["q_v"].data)
 
 
+_KIND_FORM = [("sigma", "sb81_theta"), ("hybrid", "sb81_theta"), ("hybrid", "as83")]
+
+
 @pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
-@pytest.mark.parametrize("kind", ["sigma", "hybrid"])
-def test_jit_parity_and_check_grads(grid_kind, kind):
+@pytest.mark.parametrize("kind,form", _KIND_FORM)
+def test_jit_parity_and_check_grads(grid_kind, kind, form):
     from jax.test_util import check_grads
     if grid_kind == "latlon":   # jit parity also on the PPM path
-        fp, ap = _ll_fn(kind, ppm=True)
+        fp, ap = _ll_fn(kind, ppm=True, form=form)
         for a, b in zip(fp(*ap), jax.jit(fp)(*ap)):
             assert _rel(b, a) < _TOL_SAME
-    f, args = (_ll_fn if grid_kind == "latlon" else _mpas_fn)(kind)
+    f, args = (_ll_fn if grid_kind == "latlon" else _mpas_fn)(kind, form=form)
     eager, jitted = f(*args), jax.jit(f)(*args)
     for a, b in zip(eager, jitted):
         assert _rel(b, a) < _TOL_SAME
@@ -549,11 +557,11 @@ def test_jit_parity_and_check_grads(grid_kind, kind):
 
 
 @pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
-@pytest.mark.parametrize("kind", ["sigma", "hybrid"])
-def test_gradient_through_100_steps(grid_kind, kind):
+@pytest.mark.parametrize("kind,form", _KIND_FORM)
+def test_gradient_through_100_steps(grid_kind, kind, form):
     """Forward-Euler 100 steps of the shared core: d(loss)/d(perturbation of T
     and tracer) is finite, non-zero and matches a central finite difference."""
-    f, args = (_ll_fn if grid_kind == "latlon" else _mpas_fn)(kind)
+    f, args = (_ll_fn if grid_kind == "latlon" else _mpas_fn)(kind, form=form)
     dt, n = 20.0, 100
     pert = jnp.asarray(np.random.RandomState(7).randn(*args[0].shape))
     pert_q = 1e-5 * jnp.asarray(np.random.RandomState(8).randn(*args[-1].shape))
@@ -577,7 +585,7 @@ def test_gradient_through_100_steps(grid_kind, kind):
     g = float(jax.grad(loss)(0.0))
     h = 1e-4
     fd = float((loss(h) - loss(-h)) / (2 * h))
-    print(f"\n100-step grad {grid_kind} {kind}: AD {g:.6e} FD {fd:.6e}")
+    print(f"\n100-step grad {grid_kind} {kind} {form}: AD {g:.6e} FD {fd:.6e}")
     assert np.isfinite(g) and g != 0.0
     assert abs(g - fd) / abs(fd) < 1e-5
 
@@ -593,6 +601,7 @@ def test_gradient_through_100_steps(grid_kind, kind):
 # the momentum equation).  dE/dt at one state = jvp of E along the tendency.
 
 _E_NLEV = 20
+_FORMS = ("sb81_theta", "as83")
 
 
 def _energy_fn(grid_kind, ops, coord, area, phis):
@@ -605,9 +614,9 @@ def _energy_fn(grid_kind, ops, coord, area, phis):
     return E
 
 
-def _jw_case(grid_kind, nlev=_E_NLEV):
-    """(ops, T, vel, p_s, phis, area, coord, old_fn) for the JW initial state on
-    a constant-lid hybrid coordinate."""
+def _jw_case(grid_kind, form="sb81_theta", nlev=_E_NLEV):
+    """(ops, T, vel, p_s, phis, area, coord, old_fn, (grid|mesh, cfg, state)) for
+    the JW initial state on a constant-lid hybrid coordinate."""
     from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
     coord = _coord("hybrid", nlev)
     if grid_kind == "latlon":
@@ -617,20 +626,21 @@ def _jw_case(grid_kind, nlev=_E_NLEV):
         grid = create_latlon_grid(32, 64)
         cfg = pl.CGridLatLonPrimitiveEquationConfig()
         s = pl.hydrostatic_to_cgrid(baroclinic_wave_init_latlon(grid, coord), grid)
-        ops = g.latlon_pe_operators(grid, cfg, {}, 600.0)
+        ops = g.latlon_pe_operators(grid, cfg, {}, 600.0, vertical_form=form)
 
         def old(T, vel, p_s):
             o = pl.cgrid_latlon_hydrostatic_tendencies(
                 s._replace(T=T, u=vel[0], v=vel[1], p_s=p_s, tracers={}), grid, coord, cfg, dt=600.0)
             return o[2], (o[0], o[1]), o[3]
-        return ops, s.T, (s.u, s.v), s.p_s, s.phis, jnp.asarray(grid.area), coord, old, (grid, cfg, s)
+        return (ops, s.T, (s.u, s.v), s.p_s, s.phis, jnp.asarray(grid.area), coord, old,
+                (grid, cfg, s))
     import legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas as pm
     from legoesm.grids.voronoi import create_voronoi_mesh
     from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
     mesh = create_voronoi_mesh(3, lloyd_iterations=5)
     cfg = pm.MPASPrimitiveEquationConfig()
     s = baroclinic_wave_init_mpas(mesh, coord)
-    ops = g.mpas_pe_operators(mesh, cfg, None, 600.0)
+    ops = g.mpas_pe_operators(mesh, cfg, None, 600.0, vertical_form=form)
 
     def old(T, vel, p_s):
         st = s._replace(T=s.T.replace(data=T), u=s.u.replace(data=vel[0]),
@@ -639,43 +649,6 @@ def _jw_case(grid_kind, nlev=_E_NLEV):
         return o.dT_dt.data, (o.du_dt.data,), o.dp_s_dt.data
     return (ops, s.T.data, (s.u.data,), s.p_s.data, s.phis.data,
             jnp.asarray(mesh.areaCell), coord, old, (mesh, cfg, s))
-
-
-def _energy_attribution(grid_kind, variant="core"):
-    """Per-term contributions to dE/dt [W] at the JW state, plus totals."""
-    from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
-    from legoesm.grids import vertical as vt
-    ops, T, vel, p_s, phis, area, coord, old, _ = _jw_case(grid_kind)
-    # a non-trivial, smooth state: JW plus a smooth temperature/wind wave
-    lat_like = jnp.linspace(0.0, 3.0, T.shape[0])[:, None, None] if grid_kind == "latlon" \
-        else jnp.linspace(0.0, 3.0, T.shape[0])[:, None]
-    T = T + 2.0 * jnp.sin(lat_like) * jnp.ones_like(T)
-    E = _energy_fn(grid_kind, ops, coord, area, phis)
-    mp = pytest.MonkeyPatch()
-    if variant in ("sb_T", "sb_all"):
-        ops = ops._replace(vert_scheme="sb")
-    if variant == "sb_all":
-        mp.setattr(g, "vertical_advection_hybrid", vt.vertical_advection_hybrid_sb)
-    try:
-        dvel, dT, dps, _, ctx = g.primitive_equation_tendencies(T, vel, p_s, phis, coord, ops)
-    finally:
-        mp.undo()
-    zT, zv, zp = jnp.zeros_like(T), tuple(jnp.zeros_like(v) for v in vel), jnp.zeros_like(p_s)
-
-    def dE(tT=None, tv=None, tp=None):
-        return float(jax.jvp(E, (T, vel, p_s),
-                             (zT if tT is None else tT, zv if tv is None else tv,
-                              zp if tp is None else tp))[1])
-    t = ctx["terms"]
-    out = {k: dE(tv=t[k]) for k in ("pgf", "coriolis", "vert_mom")}
-    out.update({k: dE(tT=t[k]) for k in ("horiz_T", "vert_T", "conv_ps", "conv_vgl")})
-    out["dps"] = dE(tp=dps)
-    out["TOTAL"] = dE(dT, dvel, dps)
-    oT, ov, ops_ = old(T, vel, p_s)
-    out["OLD_TOTAL"] = dE(oT, ov, ops_)
-    out["OLD_minus_new_dT"] = dE(tT=oT - dT)
-    out["gross"] = sum(abs(v) for k, v in out.items() if k[0].islower())
-    return out
 
 
 def test_energy_instrument_known_answers():
@@ -691,44 +664,172 @@ def test_energy_instrument_known_answers():
         assert abs(got / (constants.c_pd * 1e-5 * M) - 1.0) < 1e-12
 
 
+def _noisy_jw(grid_kind, form, seed=3):
+    ops, T, vel, p_s, phis, area, coord, old, extra = _jw_case(grid_kind, form)
+    r = np.random.RandomState(seed)
+    T = T + jnp.asarray(r.randn(*T.shape))
+    vel = tuple(v + jnp.asarray(r.randn(*v.shape)) for v in vel)
+    if grid_kind == "latlon":   # periodic duplicate u face; polar v faces at rest (wall)
+        vel = (vel[0].at[:, -1].set(vel[0][:, 0]), vel[1].at[0].set(0.0).at[-1].set(0.0))
+    p_s = p_s + 100.0 * jnp.asarray(r.randn(*p_s.shape))
+    return ops, T, vel, p_s, phis, area, coord, old
+
+
+def _energy_groups(grid_kind, form):
+    """dE/dt split into the KE group (must cancel alone) and the enthalpy +
+    potential group at the JW state plus noise (identities hold for any state)."""
+    from legoesm import constants
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
+    ops, T, vel, p_s, phis, area, coord, _ = _noisy_jw(grid_kind, form)
+    dvel, dT, dps, _, ctx = g.primitive_equation_tendencies(T, vel, p_s, phis, coord, ops)
+    t, gops = ctx["terms"], ops.grid_ops
+    KE = ops.kinetic_energy(vel)
+    dp = ctx["dp"]
+    gr = lambda f: g._as_tuple(gops.gradient(f))
+
+    def dK(piece):   # sum area sum_k dK_k dp_k / g along a velocity tendency
+        return float(jax.jvp(lambda v: jnp.sum(area * jnp.sum(ops.kinetic_energy(v) * dp, -1)),
+                             (vel,), (piece,))[1]) / constants.g
+    cp = lambda x: float(jnp.sum(area * jnp.sum(constants.c_pd * x * dp, -1))) / constants.g
+    dB = coord.dB.astype(p_s.dtype)
+    out = {
+        "W_gradPhi": dK(tuple(-x for x in gr(ctx["Phi"]))),
+        "W_gradK": dK(tuple(-x for x in gr(KE))),
+        "W_pgfL": dK(tuple(-c * dl for c, dl in zip(ctx["pgf_coef"], ctx["dL"]))),
+        "W_coriolis": dK(t["coriolis"]), "W_vert_mom": dK(t["vert_mom"]),
+        "H_horiz": cp(t["horiz_T"]), "H_vert": cp(t["vert_T"]),
+        "H_conv_ps": cp(t["conv_ps"]), "H_conv_vgl": cp(t["conv_vgl"]),
+        "M_K": float(jnp.sum(area * jnp.sum(KE * dB, -1) * dps)) / constants.g,
+        "M_cpT": float(jnp.sum(area * jnp.sum(constants.c_pd * T * dB, -1) * dps)) / constants.g,
+        "M_phis": float(jnp.sum(area * phis * dps)) / constants.g,
+    }
+    ke = out["W_gradK"] + out["W_coriolis"] + out["W_vert_mom"] + out["M_K"]
+    th = sum(v for k, v in out.items() if k in (
+        "W_gradPhi", "W_pgfL", "H_horiz", "H_vert", "H_conv_ps", "H_conv_vgl", "M_cpT", "M_phis"))
+    E = _energy_fn(grid_kind, ops, coord, area, phis)
+    total = float(jax.jvp(E, (T, vel, p_s), (dT, dvel, dps))[1])
+    gross = sum(abs(v) for v in out.values())
+    mass = float(jnp.sum(area * dps) / jnp.sum(area * jnp.abs(dps)))
+    return out, ke, th, total, gross, mass
+
+
 @pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
-def test_semi_discrete_energy_attribution(grid_kind):
-    """Print per-term dE/dt [W] at one state for the shared core (upwind),
-    theta-form SB-flux T ('sb_T'), and SB-centred T and momentum ('sb_all')."""
-    for variant in ("core", "sb_T", "sb_all"):
-        out = _energy_attribution(grid_kind, variant)
-        print(f"\nENERGY {grid_kind} {variant}: residual/gross = "
-              f"{out['TOTAL'] / out['gross']:.3e}; old core total/gross = "
-              f"{out['OLD_TOTAL'] / out['gross']:.3e}; "
-              + ", ".join(f"{k} {v:.4e}" for k, v in out.items()))
+@pytest.mark.parametrize("form", _FORMS)
+def test_variant_energy_and_mass(grid_kind, form):
+    """Semi-discrete energy residual (target round-off for the AS forms) and raw
+    mass closure, noisy JW state, hybrid L20."""
+    out, ke, th, total, gross, mass = _energy_groups(grid_kind, form)
+    print(f"\nHARNESS energy {grid_kind} {form}: total/gross {total / gross:.3e}, "
+          f"KE group {ke / gross:.3e}, thermo group {th / gross:.3e}, "
+          f"Coriolis work {out['W_coriolis'] / gross:.3e}, mass {mass:.3e}")
+    assert abs(ke + th - total) < 1e-10 * gross   # the recorded terms are complete
+    assert abs(mass) < 1e-12
+    if form != "sb81_theta":
+        assert abs(total) < 1e-12 * gross
+
+
+def _theta_exner(form, coord, p_s):
+    """(theta-like reference, d pi/dps) for the #930 check: the scheme's own Exner."""
+    from legoesm import constants
+    from legoesm.grids import vertical as vt
+    if form == "sb81_theta":
+        p = vt.pressure_from_hybrid(coord, p_s)
+        pi = (p / constants.p_ref) ** constants.kappa
+        return pi, constants.kappa * pi * coord.B_full / (p + 1e-10)
+    _, pi, dpi = vt.as83_layer_exner(coord, p_s)
+    return pi, dpi
+
+
+@pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
+@pytest.mark.parametrize("form", _FORMS)
+def test_variant_930_and_1029(grid_kind, form):
+    """#930: uniform theta (the scheme's own Exner), uniform p_s, divergent wind:
+    dT = theta (d pi/d p_s) dp_s/dt exactly.  #1029: isothermal rest over the
+    DCMIP mountain; the AS forms carry a recorded KNOWN DIFFERENCE."""
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
+    ops, T, vel, p_s, phis, area, coord, _ = _noisy_jw(grid_kind, form, seed=5)
+    ps0 = jnp.full_like(p_s, 1.0e5)
+    pi, dpi = _theta_exner(form, coord, ps0)
+    _, dT, dps, _, _ = g.primitive_equation_tendencies(
+        300.0 * pi, vel, ps0, jnp.zeros_like(ps0), coord, ops)
+    res = dT - 300.0 * dpi * dps[..., None]
+    r930 = float(jnp.abs(res).max()) / float(jnp.abs(dT).max())
+    rc = _coord("hybrid", 20)
+    if grid_kind == "latlon":
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+            CGridLatLonPrimitiveEquationConfig,
+        )
+        grid, s = _rest_ll(rc)
+        o = g.latlon_pe_operators(grid, CGridLatLonPrimitiveEquationConfig(), {}, 600.0,
+                                  vertical_form=form)
+        dvel, *_ = g.primitive_equation_tendencies(s.T, (s.u, s.v), s.p_s, s.phis, rc, o)
+    else:
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
+        mesh, sm = _rest_mpas(rc)
+        o = g.mpas_pe_operators(mesh, MPASPrimitiveEquationConfig(), None, 600.0,
+                                vertical_form=form)
+        dvel, *_ = g.primitive_equation_tendencies(
+            sm.T.data, (sm.u.data,), sm.p_s.data, sm.phis.data, rc, o)
+    r1029 = max(float(jnp.abs(d).max()) for d in dvel)
+    print(f"\nHARNESS rest {grid_kind} {form}: #930 residual/max|dT| {r930:.3e}, "
+          f"#1029 max|dv/dt| {r1029:.3e} m/s^2")
+    assert r930 < 1e-12
+    if form == "sb81_theta":
+        assert r1029 < _REST_TOL
+    else:   # KNOWN DIFFERENCE, recorded in the module docstring; re-measure on change
+        assert abs(r1029 / _AS_REST_GAP[(grid_kind, form)] - 1.0) < 1e-2
+
+
+# measured max |dv/dt| [m/s^2], isothermal rest over the DCMIP mountain, hybrid L20
+_AS_REST_GAP = {("latlon", "as83"): 1.284e-5, ("mpas", "as83"): 9.093e-6}
+
+
+def test_latlon_face_metrics_match_grid():
+    """The operator-derived face metrics equal the grid's analytic ones."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import latlon_face_metrics
+    from legoesm.grids.operator_adapters import latlon_sw_grid_operators
+    grid = _ll_grid()
+    l_u, d_u, l_v, d_v = latlon_face_metrics(grid, latlon_sw_grid_operators(grid))
+    lat = np.asarray(grid.lat)
+    R, dlon, dy = float(grid.radius), float(grid.dlon), np.asarray(grid.dy)
+    np.testing.assert_allclose(l_u, 0.5 * dy, rtol=1e-12)
+    np.testing.assert_allclose(d_u, R * dlon * np.cos(lat), rtol=1e-12)
+    lat_v = 0.5 * (lat[:-1] + lat[1:])
+    np.testing.assert_allclose(l_v[1:-1], R * dlon * np.cos(lat_v), rtol=1e-10)
+    np.testing.assert_allclose(d_v[1:-1], 0.5 * (0.5 * dy[:-1] + 0.5 * dy[1:]), rtol=1e-12)
+    assert float(l_v[0]) == float(l_v[-1]) == float(d_v[0]) == float(d_v[-1]) == 0.0
 
 
 _E_DT = {"latlon": 60.0, "mpas": 600.0}   # lat-lon: no polar filter -> pole CFL
 
 
-def _jw_energy_trajectory(grid_kind, core, dt, days):
+def _jw_energy_trajectory(grid_kind, form, dt, days):
     """Inviscid, unfiltered JW on the constant-lid hybrid coordinate in the
     model's own time loop: (E(t_end)/E0 - 1, integral of the semi-discrete
-    dE/dt / E0 sampled every 6 h)."""
+    dE/dt / E0 sampled every 6 h, final (T, vel, p_s)).  ``form="old"`` runs
+    the old core."""
     from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
-    ops, T, vel, p_s, phis, area, coord, old, (obj, cfg, s) = _jw_case(grid_kind)
+    ops, T, vel, p_s, phis, area, coord, old, (obj, cfg, s) = _jw_case(
+        grid_kind, "sb81_theta" if form == "old" else form)
     E = _energy_fn(grid_kind, ops, coord, area, phis)
 
     def new(T, vel, p_s):
         dvel, dT, dps, _, _ = g.primitive_equation_tendencies(T, vel, p_s, phis, coord, ops)
         return dT, dvel, dps
-    tend = jax.jit(new if core == "new" else old)
+    tend = jax.jit(old if form == "old" else new)
     mp = pytest.MonkeyPatch()
     if grid_kind == "latlon":
         import legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid as pl
-        if core == "new":
-            mp.setattr(pl, "cgrid_latlon_hydrostatic_tendencies", g.cgrid_latlon_pe_tendencies)
+        if form != "old":
+            mp.setattr(pl, "cgrid_latlon_hydrostatic_tendencies",
+                       partial(g.cgrid_latlon_pe_tendencies, vertical_form=form))
         model = pl.CGridLatLonPrimitiveEquationModel(obj, coord, cfg._replace(use_polar_filter=False), dt=dt)
         unpack = lambda st: (st.T, (st.u, st.v), st.p_s)
     else:
         import legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas as pm
-        if core == "new":
-            mp.setattr(pm, "mpas_hydrostatic_tendencies", g.mpas_pe_tendencies)
+        if form != "old":
+            mp.setattr(pm, "mpas_hydrostatic_tendencies",
+                       partial(g.mpas_pe_tendencies, vertical_form=form))
         model = pm.MPASPrimitiveEquationModel(obj, coord, cfg)
         unpack = lambda st: (st.T.data, (st.u.data,), st.p_s.data)
 
@@ -745,84 +846,28 @@ def _jw_energy_trajectory(grid_kind, core, dt, days):
             if (i + 1) % every == 0:
                 rates.append(rate(s))
                 integ += 0.5 * (rates[-1] + rates[-2]) * every * dt
-        E1 = float(E(*unpack(s)))
+        x1 = unpack(s)
+        E1 = float(E(*x1))
     finally:
         mp.undo()
     assert np.isfinite(E1)
-    return E1 / E0 - 1.0, integ / E0
+    return E1 / E0 - 1.0, integ / E0, x1
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
-@pytest.mark.parametrize("core", ["old", "new"])
+@pytest.mark.parametrize("form", ("old",) + _FORMS)
 @pytest.mark.parametrize("dt_factor", [1.0, 0.5])
-def test_jw_energy_dt_halving(grid_kind, core, dt_factor):
+def test_jw_energy_dt_halving(grid_kind, form, dt_factor):
+    """6-day JW energy drift at dt and dt/2 (spatial = dt-independent part), and
+    at dt the wave-state difference against the old core."""
     dt = _E_DT[grid_kind] * dt_factor
-    drift, semi = _jw_energy_trajectory(grid_kind, core, dt, _JW_DAYS)
-    print(f"\nEDRIFT {grid_kind} {core} dt={dt:g}: E drift {drift:.4e}, "
-          f"integrated semi-discrete {semi:.4e}, difference (temporal+fixers) {drift - semi:.4e}")
-
-
-def _energy_groups(grid_kind, variant="sb_all", seed=3):
-    """dE/dt split into the KE group (must cancel alone) and the enthalpy +
-    potential group, at the JW state plus noise (identities hold for any state)."""
-    from legoesm import constants
-    from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
-    from legoesm.grids import vertical as vt
-    ops, T, vel, p_s, phis, area, coord, _, _ = _jw_case(grid_kind)
-    r = np.random.RandomState(seed)
-    T = T + jnp.asarray(r.randn(*T.shape))
-    vel = tuple(v + jnp.asarray(r.randn(*v.shape)) for v in vel)
-    if grid_kind == "latlon":   # periodic duplicate u face; polar v faces at rest (wall)
-        vel = (vel[0].at[:, -1].set(vel[0][:, 0]), vel[1].at[0].set(0.0).at[-1].set(0.0))
-    p_s = p_s + 100.0 * jnp.asarray(r.randn(*p_s.shape))
-    mp = pytest.MonkeyPatch()
-    if variant in ("sb_T", "sb_all"):
-        ops = ops._replace(vert_scheme="sb")
-    if variant == "sb_all":
-        mp.setattr(g, "vertical_advection_hybrid", vt.vertical_advection_hybrid_sb)
-    if variant == "as83":
-        ops = ops._replace(vert_scheme="as83")
-    try:
-        dvel, dT, dps, _, ctx = g.primitive_equation_tendencies(T, vel, p_s, phis, coord, ops)
-    finally:
-        mp.undo()
-    t, gops = ctx["terms"], ops.grid_ops
-    KE = ops.kinetic_energy(vel)
-    dp = ctx["dp"]
-    gr = lambda f: g._as_tuple(gops.gradient(f))
-
-    def dK(piece):   # sum area sum_k dK_k dp_k / g along a velocity tendency
-        return float(jax.jvp(lambda v: jnp.sum(area * jnp.sum(ops.kinetic_energy(v) * dp, -1)),
-                             (vel,), (piece,))[1]) / constants.g
-    cp = lambda x: float(jnp.sum(area * jnp.sum(constants.c_pd * x * dp, -1))) / constants.g
-    dB = coord.dB.astype(p_s.dtype)
-    out = {
-        "W_gradPhi": dK(tuple(-x for x in gr(ctx["Phi"]))),
-        "W_gradK": dK(tuple(-x for x in gr(KE))),
-        "W_RTgradL": dK(tuple(-c * dl for c, dl in zip(ctx["pgf_coef"], ctx["dL"]))),
-        "W_coriolis": dK(t["coriolis"]), "W_vert_mom": dK(t["vert_mom"]),
-        "H_horiz": cp(t["horiz_T"]), "H_vert": cp(t["vert_T"]),
-        "H_conv_ps": cp(t["conv_ps"]), "H_conv_vgl": cp(t["conv_vgl"]),
-        "M_K": float(jnp.sum(area * jnp.sum(KE * dB, -1) * dps)) / constants.g,
-        "M_cpT": float(jnp.sum(area * jnp.sum(constants.c_pd * T * dB, -1) * dps)) / constants.g,
-        "M_phis": float(jnp.sum(area * phis * dps)) / constants.g,
-    }
-    ke = out["W_gradK"] + out["W_coriolis"] + out["W_vert_mom"] + out["M_K"]
-    th = sum(v for k, v in out.items() if k in (
-        "W_gradPhi", "W_RTgradL", "H_horiz", "H_vert", "H_conv_ps", "H_conv_vgl", "M_cpT", "M_phis"))
-    E = _energy_fn(grid_kind, ops, coord, area, phis)
-    total = float(jax.jvp(E, (T, vel, p_s), (dT, dvel, dps))[1])
-    gross = sum(abs(v) for v in out.values())
-    return out, ke, th, total, gross
-
-
-@pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
-def test_energy_groups_report(grid_kind):
-    for variant in ("core", "sb_all"):
-        out, ke, th, total, gross = _energy_groups(grid_kind, variant)
-        # the recorded terms reconstruct the full tendency's energy change
-        assert abs(ke + th - total) < 1e-10 * gross, (ke + th, total)
-        print(f"\nEGROUP {grid_kind} {variant}: total/gross {total / gross:.3e}, "
-              f"KE group/gross {ke / gross:.3e}, thermo group/gross {th / gross:.3e}; "
-              + ", ".join(f"{k} {v:.4e}" for k, v in out.items()))
+    drift, semi, x1 = _jw_energy_trajectory(grid_kind, form, dt, _JW_DAYS)
+    msg = (f"\nEDRIFT {grid_kind} {form} dt={dt:g}: E drift {drift:.4e}, "
+           f"integrated semi-discrete {semi:.4e}")
+    if dt_factor == 1.0 and form != "old":
+        _, _, xo = _jw_energy_trajectory(grid_kind, "old", dt, _JW_DAYS)
+        du = float(jnp.sqrt(jnp.mean((x1[1][0] - xo[1][0]) ** 2)))
+        dps = float(jnp.abs(x1[2] - xo[2]).max())
+        msg += f"; vs old at day {_JW_DAYS:g}: rms du {du:.3e} m/s, max dps {dps:.3e} Pa"
+    print(msg)
