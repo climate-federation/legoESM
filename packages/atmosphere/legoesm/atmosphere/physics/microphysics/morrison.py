@@ -71,7 +71,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import latent_heat_fusion
+from legoesm.thermo import latent_heat_fusion, latent_heat_vaporization
 from legoesm.thermo import saturation_specific_humidity as _saturation_specific_humidity
 from legoesm.thermo import saturation_specific_humidity_goff_gratch as _qsat_water_goff_gratch
 from legoesm.core.smooth import smooth_min
@@ -574,7 +574,7 @@ def morrison_microphysics(
         hard_threshold=config.hard_sat_adjust_threshold,
         hard_max_heating_K=config.hard_sat_max_heating_K,
         sat_fn=qsat_water_fn,
-        l_v=constants.L_v,  # latent-ok: Morrison/MG2 oracle constant (the host heats with xxlv)
+        l_v=latent_heat_vaporization(constants.T_freeze),  # = L_v, the host's heating
     )
     # CAM6 arrangement: when the turbulence closure already diagnosed this
     # layer's cloud liquid and handed it to the host, MG2 carries NO
