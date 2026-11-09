@@ -456,7 +456,7 @@ def _finalize_inputs(d):
         u_ice=j["str_u_ice"], v_ice=j["str_v_ice"], u_oce=j["str_u_oce"], v_oce=j["str_v_oce"],
         drag_io=jnp.full((JPI, JPJ), RN_CD_IO), at_i=s.aggregated.at_i, utau=j["str_utau"],
         vtau=j["str_vtau"], tmod_io=j["str_tmod_io"], taum=j["str_taum"],
-        utau_oce=j["str_utau_oce"], vtau_oce=j["str_vtau_oce"],
+        utau_oce=j["str_utau_oce"], vtau_oce=j["str_vtau_oce"], tmask_k1=j["tmask"],
     )
     return cfg, s, j, fluxes, update, stress
 

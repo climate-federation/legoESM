@@ -97,10 +97,11 @@ from legoesm.training.trainable_params import (  # noqa: E402
 
 # Every selectable closure in turbulence/integration.py::get_turbulence_fn,
 # minus "none" (which is the absence of a closure, not a candidate) and the WRF
-# ports with no tunable parameters ("tke" = MYJ, "mynn25").
+# ports with no tunable parameters ("tke" = MYJ, "mynn25", "ysu" = WRF YSU +
+# WRF surface layer, R4 vote X17).
 TURBULENCE_SCHEMES: tuple[str, ...] = (
     "smagorinsky", "louis", "clubb_lite", "clubb",
-    "holtslag_boville", "ysu", "edmf",
+    "holtslag_boville", "edmf",
 )
 
 # Cases whose LES applies a radiative forcing the SCM cannot reproduce. Scoring
@@ -361,7 +362,7 @@ def _dead_params_for(scheme: str) -> frozenset[str]:
     cls_name = {
         "smagorinsky": "SmagorinskyConfig", "louis": "LouisConfig",
         "tke": "TKEConfig",
-        "clubb_lite": "CLUBBLiteConfig", "ysu": "YSUConfig",
+        "clubb_lite": "CLUBBLiteConfig",
         "holtslag_boville": "HoltslagBovilleConfig",
         "edmf": "TurbulentEDMFConfig",
     }.get(scheme)

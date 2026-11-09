@@ -284,3 +284,38 @@ def test_cam_qsat_reads_the_fp64_built_table_in_fp32(monkeypatch):
         q_fp32_table = np.asarray(thermo.saturation_specific_humidity_cam_table(T, p))
     np.testing.assert_array_equal(q, q_cast)
     assert np.any(q != q_fp32_table)
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+def test_smooth_cap_has_no_cancellation(dtype):
+    """The 1 kg/kg smooth cap min_20(q, 1) is evaluated without cancellation on
+    both sides of 1: error vs a long-double evaluation of the same formula, in
+    ulps of max(|q|, |result|) <= 32 for q < 1 (VC63), and in ulps of |result|
+    <= 32 for q >= 1 (VC64).
+    ``1 - softplus(20(1-q))/20`` alone fails q << 1 (~1e10 ulp in fp64) and
+    ``q - softplus(20(q-1))/20`` alone fails q >> 1 (~1.6e4 ulp in fp32).  The
+    conversion's denominator is >= 1, so the pre-cap value reached here stays
+    below epsilon * p ~ 6e4 (the q >= 1 half of the grid saturates there)."""
+    from legoesm import constants
+    if np.finfo(np.longdouble).eps > 1e-18:   # VC65: no extended-precision reference
+        pytest.skip("np.longdouble has no extra precision on this platform")
+    q = np.concatenate([np.logspace(-10, 0, 2001)[:-1], np.logspace(0, 8, 2001)]).astype(dtype)
+    p = np.full_like(q, 1.0e5)
+    e = (q * p / (constants.epsilon + q)).astype(dtype)
+    prev = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        got = np.asarray(_mixing_ratio_from_esat(jnp.asarray(e), jnp.asarray(p)))
+    finally:
+        jax.config.update("jax_enable_x64", prev)
+    assert got.dtype == dtype
+    got = got.astype(np.float64)
+    el, pl = e.astype(np.longdouble), p.astype(np.longdouble)
+    L = constants.epsilon * el / (np.logaddexp(0, pl - el - 1) + 1)
+    z = 20.0 * (L - 1.0)
+    ref = L - (np.maximum(z, 0) + np.log1p(np.exp(-np.abs(z)))) / 20.0
+    d = np.abs(got - ref)
+    lo = (d / np.spacing(np.maximum(np.abs(L), np.abs(ref)).astype(dtype)).astype(np.float64)).astype(np.float64)[q < 1]
+    hi = (d / np.spacing(np.abs(ref).astype(dtype)).astype(np.float64)).astype(np.float64)[q >= 1]
+    assert lo.max() <= 32, lo.max()
+    assert hi.max() <= 32, hi.max()

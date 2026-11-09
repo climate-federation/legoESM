@@ -550,11 +550,14 @@ def nemo_zu_air_state(theta_air_K, q_air, *,
 
 def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
                                wind_speed, *, nb_iter: int = _NB_ITER_NCAR,
-                               zu_floor_rel_width: float = _ZU_FLOOR_REL_WIDTH):
+                               zu_floor_rel_width: float = _ZU_FLOOR_REL_WIDTH,
+                               cd_cutoff_width: float | None = None):
     """Legacy/public coefficient interface.
 
     The first-guess stability uses the RAW ``theta``/``q`` (NEMO ``t_zt``/
-    ``q_zt``); the iteration uses the floored :func:`nemo_zu_air_state`."""
+    ``q_zt``); the iteration uses the floored :func:`nemo_zu_air_state`.
+    ``cd_cutoff_width`` (None = ``NCAR_CD_CUTOFF_WIDTH``, 0 = NEMO's hard
+    switch): RULE 5 width of the 33 m/s drag-plateau blend (#2241)."""
     from legoesm.core.bulk_flux import large_yeager_neutral_cd, psi_m, psi_h
 
     k = constants.kappa_von_karman
@@ -565,7 +568,7 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
     Ub = jnp.maximum(jnp.asarray(wind_speed, dtype=jnp.float64), _U10_FLOOR_M_S)
     dTv = _virt_temp(theta, q) - _virt_temp(sst, ssq)
     stable = jnp.where(dTv > 0.0, 1.0, 0.0)
-    CdN = large_yeager_neutral_cd(Ub, nemo_parity=True)
+    CdN = large_yeager_neutral_cd(Ub, nemo_parity=True, cd_cutoff_width=cd_cutoff_width)
     sqrt_CdN = jnp.sqrt(CdN)
     Cd = CdN
     Ch = _ch_n10(sqrt_CdN, stable)
@@ -587,7 +590,8 @@ def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
         UN10 = jnp.maximum(
             _UN10_FLOOR_M_S, Ub * (1.0 + sqrt_Cd / k * psim)
         )
-        CdN = large_yeager_neutral_cd(UN10, nemo_parity=True)
+        CdN = large_yeager_neutral_cd(UN10, nemo_parity=True,
+                                      cd_cutoff_width=cd_cutoff_width)
         sqrt_CdN = jnp.sqrt(CdN)
         denom = 1.0 - sqrt_CdN / k * psim
         Cd = jnp.maximum(CdN / (denom * denom), _CX_MIN)
@@ -1638,7 +1642,8 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
                    rho_air=None, *, slp_Pa=None, algo: str = "ncar",
                    nb_iter: int = _NB_ITER_NCAR, L_latent=None,
                    u_oce=None, v_oce=None, vfac: float = 0.0,
-                   zu_floor_rel_width: float = _ZU_FLOOR_REL_WIDTH):
+                   zu_floor_rel_width: float = _ZU_FLOOR_REL_WIDTH,
+                   cd_cutoff_width: float | None = None):
     """Open-ocean bulk fluxes ``(tau_x, tau_y, shflx, lhflx, evap)``.
 
     Sign conventions: ``shflx``/``lhflx`` > 0 add heat to the ocean;
@@ -1683,6 +1688,10 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
         NCAR only: C1 transition width of the NEMO ``t_zu``/``q_zu`` floors
         as a fraction of each floor (numerics, not tunable); ``0.0`` = NEMO's
         hard MAX (oracle tests).
+    cd_cutoff_width : float or None
+        NCAR only: width [m/s] of the RULE 5 blend into the 33 m/s neutral
+        drag plateau (#2241); None = ``NCAR_CD_CUTOFF_WIDTH`` (0.5), ``0.0`` =
+        NEMO's hard switch (oracle tests).
     """
     if algo not in _VALID_OMIP_BULK_ALGOS:
         raise ValueError(
@@ -1742,7 +1751,7 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
     theta_sst = exner_potential_temperature(sst, slp_for_sst)
     Cd, Ch, Ce, Ub = ncar_transfer_coefficients(
         theta_air, q_a, theta_sst, ssq, wind_speed, nb_iter=nb_iter,
-        zu_floor_rel_width=zu_floor_rel_width,
+        zu_floor_rel_width=zu_floor_rel_width, cd_cutoff_width=cd_cutoff_width,
     )
     rho = rho_air_moist(T_air, q_a, p10) if rho_air is None else jnp.asarray(
         rho_air, dtype=jnp.float64)

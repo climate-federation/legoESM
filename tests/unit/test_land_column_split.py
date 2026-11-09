@@ -23,13 +23,13 @@ class _State(NamedTuple):
 
 def _step(state, cols):
     """Column-independent stand-in for the land step on columns ``cols``:
-    the same tuple layout (state, 8 per-cell fields, 5 counts, iter max)."""
+    the same tuple layout (state, 10 per-cell fields, 5 counts, iter max)."""
     T = state.T_soil.at[cols].set(state.T_soil[cols] * 1.01 + 0.5)
     wet = state.wet.at[cols].set(T[cols, 0] > 290.0)
     f = jnp.zeros(NCOL).at[cols].set(T[cols, 0] - 273.0)
     held = jnp.zeros(NCOL).at[cols].set((T[cols, 1] > 280.0).astype(float))
     n = jnp.sum(T[cols, 0] > 290.0).astype(jnp.int32)
-    return ((_State(T, wet),) + (f,) * 7 + (held,)
+    return ((_State(T, wet),) + (f,) * 7 + (held,) + (f, f)
             + (n, n, n, 2 * n, n) + (jnp.max(cols).astype(jnp.int32),))
 
 

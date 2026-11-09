@@ -69,7 +69,7 @@ def _patch_land_loaders(monkeypatch):
 
 
 def _build_driver(tmpdir: str, days: float, *, turbulence: str = "none",
-                  beta_soil: bool = False,
+                  beta_soil: bool = False, radiation: str = "gray",
                   use_multilayer: bool = True, distributed: bool = False,
                   **extra) -> ModelDriver:
     # The default land scheme is the two-leaf canopy; it needs the real
@@ -81,7 +81,7 @@ def _build_driver(tmpdir: str, days: float, *, turbulence: str = "none",
                         nlev=MPAS_NLEV, vertical_coord="hybrid"),
         dycore=DycoreConfig(discretization="mpas", dt=DT),
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=1),
-        days=days, dataset="analytical", radiation="gray",
+        days=days, dataset="analytical", radiation=radiation,
         convection="none", turbulence=turbulence, precision="fp64",
         distributed=distributed,
         land_mask_path="synthetic.nc",      # truthy -> land block (loader patched)
@@ -688,9 +688,9 @@ def test_land_window_payload_roundtrip():
     rng = np.random.default_rng(3)
     a2s = AtmToSurface(*[jnp.asarray(rng.normal(size=n_cells))
                          for _ in AtmToSurface._fields])
-    # all eight held outputs (T_skin, albedo, qsfc_last, qsfc, shflx, lhflx,
-    # evap, beta): a shorter tuple would zip-truncate beta off the trip
-    held = tuple(jnp.asarray(rng.normal(size=n_cells)) for _ in range(8))
+    # all ten held outputs (T_skin, albedo, qsfc_last, qsfc, shflx, lhflx,
+    # evap, beta, T_rad, emis): a shorter tuple would zip-truncate the tail
+    held = tuple(jnp.asarray(rng.normal(size=n_cells)) for _ in range(10))
     cz, w = jnp.asarray(rng.normal(size=n_cells)), jnp.ones(n_cells)
     pay = land_window_checkpoint_payload(a2s, 2, cz, w, held)
     buf = io.BytesIO()
@@ -698,7 +698,7 @@ def test_land_window_payload_roundtrip():
     buf.seek(0)
     with np.load(buf) as z:
         back = {k: z[k] for k in z.files}
-    assert "land_held_beta" in back
+    assert "land_held_beta" in back and "land_held_emis" in back
     a2s_b, n_b, cz_b, w_b, held_b = land_window_from_checkpoint(back, 3, n_cells)
     assert n_b == 2 and len(held_b) == len(held)
     for x, y in zip(a2s, a2s_b):
@@ -719,7 +719,7 @@ def test_land_window_payload_roundtrip():
     empty = {k: v for k, v in back.items() if not k.startswith("land_win_")}
     empty["land_win_n"] = np.asarray(0, dtype=np.int64)
     land_window_from_checkpoint(empty, 3, n_cells)
-    for drop in ("land_held_evap", "land_held_T_skin"):
+    for drop in ("land_held_evap", "land_held_T_skin", "land_held_emis"):
         bad = {k: v for k, v in empty.items() if k != drop}
         with pytest.raises(ValueError, match="partial held land-output set"):
             land_window_from_checkpoint(bad, 3, n_cells)
@@ -758,3 +758,77 @@ def test_the_mpas_run_freezes_once_after_its_first_hourly_step(
     assert d2.run() == "COMPLETED"
     assert "freeze" not in ev, ev                       # once per process
     assert [e for e in ev if isinstance(e, int)][-1] == hour + 2, ev
+
+
+def test_radiation_upward_lw_is_the_lw_the_land_lost(monkeypatch, tmp_path):
+    """Tier-5 U11-1: the upward LW the radiation emits from a cell is the area
+    sum of what its tiles balanced their energy with,
+
+        eps_r*sigma*T_r^4 + (1-eps_r)*La
+            == (1-f)*[E*sigma*T_sea^4 + (1-E)*La] + f*LW_out_land,
+
+    evaluated at the land's own downwelling La (the reflected term then
+    cancels identically when the boundary is right).  (T_r, eps_r) are what
+    the radiation backend is handed; LW_out_land, Tc and La come from the
+    land call whose outputs that radiation step reads (land is called after
+    radiation within a step, so radiation call i reads land call i-1).
+    Before the fix the radiation emitted from the canopy-AIR temperature at
+    the scalar E: this test fails by O(1) W/m2 there.  Runs the production
+    two-leaf canopy, whose LW_out is the LW its solve balanced (SimpleSEB's
+    exported lw_up is a post-step diagnostic of a linearized solve: vote
+    SEB-a, a follow-up)."""
+    import legoesm.land.multilayer_land as _mll
+    import legoesm.atmosphere.physics.radiation.integration as _rint
+    _patch_land_loaders(monkeypatch)
+    land_calls, rad_calls = [], []
+    real_land = _mll.step_multilayer_land_with_diagnostics
+
+    def _land(state, forcing, *a, **k):
+        out = real_land(state, forcing, *a, **k)
+        resp = out[1]
+        jax.debug.callback(
+            lambda *xs: land_calls.append([np.asarray(x) for x in xs]),
+            forcing.lw_down, resp.T_sfc, resp.lw_up)
+        return out
+
+    real_bc = _rint.resolve_prescribed_radiative_bc
+    E_cfg = []
+
+    def _bc(forcing, cfg, ncol, T_col, alb, emis):
+        E_cfg.append(float(cfg.rrtmgp.sfc_emissivity))
+        T_out, alb_out, emis_out = real_bc(forcing, cfg, ncol, T_col, alb,
+                                           emis)
+        e = (jnp.full((ncol,), cfg.rrtmgp.sfc_emissivity) if emis_out is None
+             else jnp.broadcast_to(jnp.asarray(emis_out), (ncol,)))
+        jax.debug.callback(
+            lambda *xs: rad_calls.append([np.asarray(x) for x in xs]),
+            jnp.asarray(forcing["T_sfc"]).reshape(-1), T_out, e)
+        return T_out, alb_out, emis_out
+
+    monkeypatch.setattr(_mll, "step_multilayer_land_with_diagnostics", _land)
+    monkeypatch.setattr(_rint, "resolve_prescribed_radiative_bc", _bc)
+    d = _build_driver(str(tmp_path), FOUR_STEPS_DAYS, radiation="rrtmgp",
+                      **{k: v for k, v in _LS_KW.items()
+                         if k != "land_surface_scheme"})
+    assert d.run() == "COMPLETED"
+    assert len(land_calls) >= 2 and len(rad_calls) >= 2, (
+        len(land_calls), len(rad_calls))
+    f = np.asarray(d._f_land).reshape(-1)
+    E = E_cfg[0]          # the scalar the radiation gives a column by default
+    sb = constants.sigma_sb
+    checked = 0
+    for i in range(1, min(len(rad_calls), len(land_calls) + 1)):
+        T_turb, T_r, eps_r = rad_calls[i]
+        La, Tc, lw_out = land_calls[i - 1]
+        land = f > 0.0
+        assert La.shape == f.shape, "land response must be full-grid here"
+        # The turbulent anchor is (1-f)*T_sea + f*Tc: recover the sea part.
+        assert np.all(f < 1.0)       # half-land mesh: every cell is mixed
+        T_sea = (T_turb - f * Tc) / (1.0 - f)
+        seen = eps_r * sb * T_r ** 4 + (1.0 - eps_r) * La
+        want = ((1.0 - f) * (E * sb * T_sea ** 4 + (1.0 - E) * La)
+                + f * lw_out)
+        np.testing.assert_allclose(seen[land], want[land], rtol=0.0,
+                                   atol=1e-9)
+        checked += int(land.sum())
+    assert checked > 0

@@ -42,7 +42,7 @@ end module lego_c
  e = esat(t)
  d = softplus(p - e - 1.0) + 1.0
  r0 = eps*e/d
- r = 1.0 - softplus(20.0*(1.0 - r0))/20.0
+ r = merge(r0 - softplus(20.0*(r0 - 1.0))/20.0, 1.0 - softplus(20.0*(1.0 - r0))/20.0, r0 < 1.0)
  qsat = r/(1.0 + r)
  END FUNCTION qsat
 
@@ -58,7 +58,7 @@ end module lego_c
  if (t < 150.0) de = 0.0
  d = softplus(p - e - 1.0) + 1.0
  r0 = eps*e/d
- r = 1.0 - softplus(20.0*(1.0 - r0))/20.0
+ r = merge(r0 - softplus(20.0*(r0 - 1.0))/20.0, 1.0 - softplus(20.0*(1.0 - r0))/20.0, r0 < 1.0)
  dr0 = eps*de*(d + e*sigm(p - e - 1.0))/d**2
  dr = sigm(20.0*(1.0 - r0))*dr0
  dqsat = dr/(1.0 + r)**2

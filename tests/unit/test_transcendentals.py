@@ -501,3 +501,12 @@ def test_default_cache_root_uses_xdg_not_shared_tmp(
     monkeypatch.delenv("LEGOESM_SCALAR_LIBM_CACHE", raising=False)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
     assert tx._cache_root() == tmp_path / "xdg" / "legoesm" / "scalar-libm"
+
+
+@pytest.mark.parametrize("base,exponent,slope", [(0.0, 1.0, 1.0), (-2.0, 2.0, -4.0)])
+def test_libm_pow_gradient_at_zero_and_negative_bases(base, exponent, slope):
+    from legoesm.core.transcendentals import pow as libm_pow
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    grad = jax.grad(lambda x: libm_pow(x, exponent))(jnp.asarray(base, dtype=jnp.float64))
+    assert float(grad) == slope

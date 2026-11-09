@@ -66,7 +66,7 @@ for i, (ts, ttp, q0, c, ice, u0, du) in enumerate(cols):
     u[i] = u0 + du * (1.0 - pm / 1e5)
 q0ref = 0.9 * q
 
-lines = [f"{ncol} {nlev} {NMAC}"] + [repr(float(v)) for v in (C.c_pd, C.L_v, C.L_f, C.g, ZTODT)]
+lines = [f"{ncol} {nlev} {NMAC}"] + [repr(float(v)) for v in (C.c_pd, C.L_v, C.L_f, C.g, ZTODT)]  # latent-ok: CAM6 oracle constant
 lines += [f17(pm), f17(dp)]
 for i in range(ncol):
     lines += [f17(a[i]) for a in (T, q, qc, qi, u, q0ref)]
@@ -105,5 +105,5 @@ meta = {
     "modes": "rad_post gw_post dlf_clubb qneg_on (1 = CAM)", "nmac": NMAC, "ztodt": ZTODT,
 }
 np.savez(OUT, meta=json.dumps(meta), T=T, q=q, qc=qc, qi=qi, u=u, q0ref=q0ref, pm=pm, dp=dp,
-         cp=C.c_pd, Lv=C.L_v, g=C.g, **out)
+         cp=C.c_pd, Lv=C.L_v, g=C.g, **out)  # latent-ok: CAM6 oracle constant
 print("FIXTURE_OK", OUT, meta["sha"])
