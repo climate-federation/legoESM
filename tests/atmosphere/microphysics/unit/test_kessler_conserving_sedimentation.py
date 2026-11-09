@@ -79,3 +79,23 @@ def test_traced_switch_raises():
     with pytest.raises(ValueError, match="conserving_sedimentation"):
         jax.jit(lambda flag: kessler_step_states(
             *args, 300.0, KesslerConfig(conserving_sedimentation=flag)))(True)
+
+
+def test_top_layer_courant_is_limited():
+    """Heavy rain in a thin top layer: the conserving CFL covers the top level
+    too, so the outflow never overdraws the layer and no water is clipped."""
+    from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
+    from legoesm.atmosphere.physics.microphysics.kessler import kessler_step_states
+    f = np.load(FIXTURE)
+    T, qv, qc, qr, pf, rho, dz = (np.array(f[k]) for k in (
+        "col_T", "col_q_v", "col_q_c", "col_q_r", "col_p_full", "col_rho",
+        "col_dz"))
+    qr[:, 0] = 5.0e-3
+    dz[:, 0] = 20.0
+    args = [jnp.asarray(a) for a in (T, qv, qc, qr, pf, rho, dz)]
+    out = kessler_step_states(*args, 300.0, KesslerConfig(**HARD))
+    w0 = jnp.sum((args[1] + args[2] + args[3]) * args[5] * args[6], -1)
+    w1 = jnp.sum((out[1] + out[2] + out[3]) * args[5] * args[6], -1)
+    rain = out[4] * 300.0
+    res = np.asarray(w1 - w0 + rain)
+    assert np.all(np.abs(res) <= CONSERVE_RTOL * np.asarray(rain)), res
