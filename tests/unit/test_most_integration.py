@@ -302,3 +302,20 @@ def test_omip_core2_cap_flag_reaches_every_ncar_flux_call():
     for c in calls:
         kw = {k.arg: ast.unparse(k.value) for k in c.keywords}
         assert kw.get("zeta_cap_width") == "zeta_cap_width", ast.unparse(c)
+
+
+@pytest.mark.parametrize("scheme", ("large_yeager", "coare3"))
+def test_oracle_solvers_and_2m_diagnostic_use_the_cap_width(monkeypatch, scheme):
+    """Every oracle-clip site (solver and the 2 m height shift) gets the
+    configured width; psi itself runs at width 0 there (no second ramp)."""
+    seen = []
+    real = bf._zeta_cap
+    monkeypatch.setattr(bf, "_zeta_cap",
+                        lambda z, w, *a: (seen.append((w, a)), real(z, w, *a))[1])
+    x = [jnp.full(2, v) for v in (3.0, 0.0, 290.0, 0.008, 292.0, 0.012, 1.2)]
+    bf.compute_most_fluxes(*x, z_ref=10.0, z_t=10.0, scheme=scheme, return_2m=True,
+                           most_zeta_cap_width=1.234)
+    oracle_sites = [w for w, a in seen if a]
+    assert len(oracle_sites) >= 3, seen      # solver zeta_u/zeta_t + 2 m shift
+    assert all(w == 1.234 for w in oracle_sites), seen
+    assert all(w == 0.0 for w, a in seen if not a), seen
