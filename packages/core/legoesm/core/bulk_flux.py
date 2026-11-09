@@ -766,8 +766,9 @@ MOST_ZETA_CAP_WIDTH = 2.0
 GFS_UNSTABLE_JOIN_WIDTH = 1.0 / _GFS_UNSTABLE_SWITCH_SHARPNESS
 
 
-def _zeta_cap(zeta, width):
-    """Cap |zeta| at ``_MOST_ZETA_CAP``: hard clip for width 0, else C2 ramp.
+def _zeta_cap(zeta, width, cap=_MOST_ZETA_CAP):
+    """Cap |zeta| at ``cap``: hard clip for width 0, else C2 ramp.  ``cap`` is
+    10 here and in TURB_NCAR, 50 in TURB_COARE3P0 (each solver's own clip).
 
     KNOWN DIFFERENCE vs the former hard clip, default width 2, measured
     (scripts/tmp/probe_cap_change.py; per-scheme values pinned in
@@ -778,12 +779,12 @@ def _zeta_cap(zeta, width):
     momentum/heat); at zeta = -10 0.73-0.93 %.  phi is continuous with a
     continuous slope; width 0 recovers the clip exactly.
     """
-    if not 0.0 <= width <= _MOST_ZETA_CAP / 2.0:
-        raise ValueError(f"zeta_cap_width must be in [0, {_MOST_ZETA_CAP / 2.0}], got {width!r}")
+    if not 0.0 <= width <= cap / 2.0:
+        raise ValueError(f"zeta_cap_width must be in [0, {cap / 2.0}], got {width!r}")
     if width == 0.0:
-        return jnp.clip(zeta, -_MOST_ZETA_CAP, _MOST_ZETA_CAP)
+        return jnp.clip(zeta, -cap, cap)
     a = jnp.abs(zeta)
-    onset = _MOST_ZETA_CAP - width
+    onset = cap - width
     u = jnp.clip((a - onset) / (2.0 * width), 0.0, 1.0)
     # 2w * integral_0^u (1 - smoothstep_quintic); equals w at u = 1.
     ramp = 2.0 * width * (u - (u ** 6 - 3.0 * u ** 5 + 2.5 * u ** 4))
@@ -1495,7 +1496,8 @@ def _turb_coare3p0(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, charnock,
                    zi, beta, stability_scheme, denom_floor, neutral_width,
                    charnock_ramp_width=COARE_CHARNOCK_RAMP_WIDTH,
                    gust_onset_width=COARE_GUST_ONSET_WIDTH, unstable_scheme="native",
-                   gfs_unstable_join_width=GFS_UNSTABLE_JOIN_WIDTH):
+                   gfs_unstable_join_width=GFS_UNSTABLE_JOIN_WIDTH,
+                   zeta_cap_width=MOST_ZETA_CAP_WIDTH):
     """AeroBulk 1.0.0 ``TURB_COARE3P0`` (l_use_cs = l_use_wl = .false.).
 
     ``W2`` is the squared wind module ``U_zu**2``; ``equal`` is AeroBulk's
@@ -1507,6 +1509,12 @@ def _turb_coare3p0(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, charnock,
     Returns AeroBulk's outputs (Cd, Ch, Ce, t_zu, q_zu, Ub, u*) plus the
     internal state the legoESM diagnostics read (theta*, q* in AeroBulk's
     positive-downward sign, z0t, 1/L) and the last-iteration relative u* change.
+
+    KNOWN DIFFERENCE (RULE 5, user-approved): AeroBulk clips zeta to +-50;
+    here that clip is the smooth C2 cap (``zeta_cap_width``, default 2, so
+    identical for |zeta| <= 48; 0 = AeroBulk's clip).  Measured on the
+    1549-state AeroBulk fixture: 1 state moves (z_t 2 m), by 4.5e-7 of the
+    field maximum (tests/core/oracle_fixtures/aerobulk_coare3p0_zeta_cap_gap.npz).
     """
     log_zu = jnp.log(z_u)
     log_10 = jnp.log(10.0)
@@ -1535,7 +1543,7 @@ def _turb_coare3p0(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, charnock,
             Ub = jnp.maximum(_safe_sqrt(W2 + gust2), _COARE_UB_FLOOR)
         else:
             Ub = jnp.maximum(_safe_sqrt(W2), _COARE_UB_FLOOR)
-        zeta_u = jnp.clip(z_u * inv_L, -_AB_COARE_ZETA_ABS_MAX, _AB_COARE_ZETA_ABS_MAX)
+        zeta_u = _zeta_cap(z_u * inv_L, zeta_cap_width, _AB_COARE_ZETA_ABS_MAX)
         un10 = us / KAPPA * (log_10 - log_z0)
         z0 = (_coare3p0_charnock(un10, charnock, charnock_ramp_width) * us2 / _AB_GRAV
               + _AB_COARE_SMOOTH * nu / us)
@@ -1556,7 +1564,7 @@ def _turb_coare3p0(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, charnock,
                 gfs_unstable_join_width=gfs_unstable_join_width)),
             _AB_COARE_USTAR_MIN)
         if equal is not True:
-            zeta_t = jnp.clip(z_t * inv_L, -_AB_COARE_ZETA_ABS_MAX, _AB_COARE_ZETA_ABS_MAX)
+            zeta_t = _zeta_cap(z_t * inv_L, zeta_cap_width, _AB_COARE_ZETA_ABS_MAX)
             prf = log_zt - log_zu + psih_u - psi_h_coare(
                 zeta_t, stability_scheme, neutral_width, unstable_scheme=unstable_scheme,
                 gfs_unstable_join_width=gfs_unstable_join_width)
@@ -1676,7 +1684,8 @@ def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_sche
                unstable_gamma=_DYER_UNSTABLE_GAMMA, stable_beta=_DYER_STABLE_BETA,
                coeff_cap=None, neutral_width=NCAR_NEUTRAL_WIDTH, dthv_width=NCAR_DTHV_WIDTH,
                cd_cutoff_width=NCAR_CD_CUTOFF_WIDTH, unstable_scheme="native",
-               gfs_unstable_join_width=GFS_UNSTABLE_JOIN_WIDTH):
+               gfs_unstable_join_width=GFS_UNSTABLE_JOIN_WIDTH,
+               zeta_cap_width=MOST_ZETA_CAP_WIDTH):
     """AeroBulk 1.0.0 ``TURB_NCAR`` (Large & Yeager 2004, 2009).
 
     ``W2`` is the squared wind module; ``equal`` is AeroBulk's
@@ -1690,6 +1699,13 @@ def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_sche
     Returns Cd, Ch, Ce, t_zu, q_zu, Ub, u* (u* = sqrt(Cd) Ub at the start of the
     last iteration, as AeroBulk returns it), the AeroBulk-sign scales theta*,
     q*, 1/L and the last-iteration relative u* change.
+
+    KNOWN DIFFERENCE (RULE 5, user-approved): AeroBulk clips zeta to +-10;
+    here that clip is the smooth C2 cap (``zeta_cap_width``, default 2; 0 =
+    AeroBulk's clip, matched to 1e-10 on the fixture).  Measured on the
+    1549-state AeroBulk fixture: 3 (z_t 10 m) / 12 (z_t 2 m) states move, all
+    near-calm unstable ones; largest change 2.2e-5 of the field maximum
+    (tests/core/oracle_fixtures/aerobulk_ncar_zeta_cap_gap.npz).
     """
     Ub = jnp.maximum(_AB_NCAR_UB_MIN, _safe_sqrt(W2))
     log_zt_zu = jnp.log(z_t / z_u)
@@ -1716,7 +1732,8 @@ def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_sche
              stable_beta=stable_beta, coeff_cap=coeff_cap,
              neutral_width=neutral_width, cd_cutoff_width=cd_cutoff_width,
              unstable_scheme=unstable_scheme,
-             gfs_unstable_join_width=gfs_unstable_join_width)
+             gfs_unstable_join_width=gfs_unstable_join_width,
+             zeta_cap_width=zeta_cap_width)
     # Key on type and repr too: 5.0 vs np.float64(5.0) promote differently,
     # and 0.0 == -0.0, so equality alone could reuse the wrong literal.
     static = tuple((n, type(v), repr(v), v) for n, v in k.items() if _is_static_value(v))
@@ -1749,9 +1766,10 @@ def _ncar_iterate(carry, dyn, *, n_iter, static):
 def _ncar_body(c, *, T_s, q_s, Ub, t_zt, q_zt, z_u, z_t, equal, log_zt_zu,
                log_zu_10, stability_scheme, unstable_gamma, stable_beta,
                coeff_cap, neutral_width, cd_cutoff_width, unstable_scheme,
-               gfs_unstable_join_width):
-    # zeta_cap_width=0: TURB_NCAR clips zeta to +-10 itself (oracle port, kept
-    # hard), so the psi cap is the idempotent hard clip here.
+               gfs_unstable_join_width, zeta_cap_width):
+    # TURB_NCAR clips zeta to +-10 before psi: that clip is the smooth cap
+    # below (width 0 = AeroBulk), so psi itself is called with the idempotent
+    # hard clip (no second ramp).
     _kw = dict(unstable_gamma=unstable_gamma, stable_beta=stable_beta,
                unstable_scheme=unstable_scheme, zeta_cap_width=0.0,
                gfs_unstable_join_width=gfs_unstable_join_width)
@@ -1769,10 +1787,10 @@ def _ncar_body(c, *, T_s, q_s, Ub, t_zt, q_zt, z_u, z_t, equal, log_zt_zu,
     ts = Ch / sqrt_Cd * dt
     qs = Ce / sqrt_Cd * dq
     inv_L = _one_on_l_aerobulk(t_zu, q_zu, us, ts, qs)
-    zeta_u = jnp.clip(z_u * inv_L, -_AB_NCAR_ZETA_ABS_MAX, _AB_NCAR_ZETA_ABS_MAX)
+    zeta_u = _zeta_cap(z_u * inv_L, zeta_cap_width, _AB_NCAR_ZETA_ABS_MAX)
     psih_u = _ph(zeta_u)
     if equal is not True:
-        zeta_t = jnp.clip(z_t * inv_L, -_AB_NCAR_ZETA_ABS_MAX, _AB_NCAR_ZETA_ABS_MAX)
+        zeta_t = _zeta_cap(z_t * inv_L, zeta_cap_width, _AB_NCAR_ZETA_ABS_MAX)
         tmp = log_zt_zu + psih_u - _ph(zeta_t)
         t_zu = jnp.where(equal, t_zu, t_zt - ts / KAPPA * tmp)
         q_zu = jnp.where(equal, q_zu, jnp.maximum(0.0, q_zt - qs / KAPPA * tmp))
@@ -2195,7 +2213,7 @@ def compute_most_fluxes(
             u_rel ** 2 + v_rel ** 2, T_atm, q_atm, T_sfc, q_sfc, z_u, z_t, _equal,
             n_iter, stability_scheme, unstable_gamma, stable_beta, _coeff_cap,
             large_yeager_neutral_width, large_yeager_dthv_width, large_yeager_cd_cutoff_width,
-            unstable_scheme, gfs_unstable_join_width)
+            unstable_scheme, gfs_unstable_join_width, most_zeta_cap_width)
         u_star = _coare["us"]
         theta_star = -_coare["ts"]
         q_star_val = -_coare["qs"]
@@ -2208,7 +2226,7 @@ def compute_most_fluxes(
             n_iter, charnock, gustiness_w_zi, gustiness_beta, stability_scheme,
             None if max_exchange_coeff is None else _denom_floor, coare_neutral_width,
             coare_charnock_ramp_width, coare_gust_onset_width, unstable_scheme,
-            gfs_unstable_join_width)
+            gfs_unstable_join_width, most_zeta_cap_width)
         # legoESM sign convention for the scales (positive upward = surface
         # warmer/moister than the air): theta* = -AeroBulk zts.
         u_star = _coare["us"]
@@ -2447,7 +2465,7 @@ def compute_most_fluxes(
                                  gfs_unstable_join_width=gfs_unstable_join_width)
 
             def _zeta(z):
-                return jnp.clip(z * _coare["inv_L"], -_zmax, _zmax)
+                return _zeta_cap(z * _coare["inv_L"], most_zeta_cap_width, _zmax)
             prf = jnp.log(z_t / z_diag) + _ph(_zeta(z_diag)) - _ph(_zeta(z_t))
             T_2m = T_atm - _coare["ts"] / KAPPA * prf
         # Guard against profile extrapolation outside [T_atm, T_sfc].

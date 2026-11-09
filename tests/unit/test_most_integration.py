@@ -145,7 +145,7 @@ def test_cap_width_validated_and_threaded_by_the_solver(monkeypatch):
             bf.compute_most_fluxes(*x, scheme="most", most_zeta_cap_width=bad)
     seen = []
     real = bf._zeta_cap
-    monkeypatch.setattr(bf, "_zeta_cap", lambda z, w: (seen.append(w), real(z, w))[1])
+    monkeypatch.setattr(bf, "_zeta_cap", lambda z, w, *a: (seen.append(w), real(z, w, *a))[1])
     out = bf.compute_most_fluxes(*x, scheme="most", most_zeta_cap_width=1.234)
     assert np.all(np.isfinite(np.asarray(out[2])))
     assert seen and all(w == 1.234 for w in seen), seen
@@ -216,22 +216,89 @@ def test_experiment_config_widths_reach_the_surface_layer():
         bf.MOST_ZETA_CAP_WIDTH, bf.GFS_UNSTABLE_JOIN_WIDTH)
 
 
-def test_oracle_and_non_most_psi_callers_keep_the_hard_clip(monkeypatch):
-    """OMIP NCAR, CLM canopy and LES surface call psi_m/psi_h
-    outside the MOST path; they keep the former +-10 clip (width 0).  (The
-    NEMO-exact lane returns before the cap.)"""
+def test_non_most_psi_callers_keep_the_hard_clip_omip_ncar_threads_the_width(monkeypatch):
+    """CLM canopy and LES surface keep the former +-10 clip (width 0); the
+    OMIP NCAR routine forwards its zeta_cap_width (default = the shared one).
+    (The NEMO-exact lane returns before the cap.)"""
     from legoesm.atmosphere.dynamics.les import spectral_les_plane as les
     from legoesm.land.canopy import stability as canopy
     from legoesm.ocean import bulk_flux_omip as omip
 
     seen = []
     real = bf._zeta_cap
-    monkeypatch.setattr(bf, "_zeta_cap", lambda z, w: (seen.append(w), real(z, w))[1])
-    wind = jnp.asarray([0.5, 1.0, 4.0])
-    omip.ncar_transfer_coefficients(280.0, 0.005, 290.0, 0.010, wind)
-    omip._ncar_transfer_coefficients_exact(280.0, 0.005, 290.0, 0.010, wind, nb_iter=3)
+    monkeypatch.setattr(bf, "_zeta_cap",
+                        lambda z, w, *a: (seen.append(w), real(z, w, *a))[1])
     canopy._friction_velocity(jnp.asarray([10.0]), jnp.asarray([0.1]),
                               jnp.asarray([0.9]), jnp.asarray([2.0]))
     assert seen and all(w == 0.0 for w in seen), seen
     src = Path(les.__file__).read_text()
     assert src.count("zeta_cap_width=0.0") == 2
+    wind = jnp.asarray([0.5, 1.0, 4.0])
+    for kw, want in (({}, bf.MOST_ZETA_CAP_WIDTH), ({"zeta_cap_width": 0.0}, 0.0)):
+        seen.clear()
+        omip.ncar_transfer_coefficients(280.0, 0.005, 290.0, 0.010, wind, **kw)
+        assert seen and all(w == want for w in seen), seen
+
+
+def _choices(parser, dest):
+    return tuple(next(a for a in parser._actions if a.dest == dest).choices)
+
+
+def test_every_stable_scheme_is_selectable_from_every_driver():
+    """Each driver's stable-scheme choices are exactly the core dispatch set,
+    and mynn_sfc round-trips into the configs each driver builds."""
+    from legoesm.driver.config import ExperimentConfig
+    from scripts.run.run_omip import parse_args as omip_parse
+
+    core = bf._VALID_STABILITY_SCHEMES
+    amip = _load("run_amip")
+    p = amip.build_arg_parser()
+    assert _choices(p, "surface_stability_scheme") == core
+    cfg = amip.build_config_from_args(p.parse_args(
+        ["--surface-bulk-scheme", "coare3", "--surface-stability-scheme", "mynn_sfc"]))
+    assert cfg.surface_stability_scheme == "mynn_sfc"
+    ExperimentConfig(turbulence="louis", surface_bulk_scheme="coare3",
+                     surface_stability_scheme="mynn_sfc").validate_strict()
+    with pytest.raises(ValueError, match="surface_stability_scheme"):
+        ExperimentConfig(turbulence="louis", surface_bulk_scheme="coare3",
+                         surface_stability_scheme="mynn").validate_strict()
+
+    a = omip_parse(["--grid", "latlon", "--surface-stability-scheme", "mynn_sfc"])
+    assert a.surface_stability_scheme == "mynn_sfc"
+    with pytest.raises(SystemExit):
+        omip_parse(["--grid", "latlon", "--surface-stability-scheme", "mynn"])
+
+    coupled = _load("run_coupled")
+    cp = coupled.build_parser()
+    assert _choices(cp, "surface_stability_scheme") == core
+    assert _choices(cp, "ice_stability_scheme") == core
+    args = cp.parse_args(["--surface-bulk-scheme", "coare3",
+                          "--surface-stability-scheme", "mynn_sfc"])
+    assert coupled.build_coupler_config(args).stability_scheme == "mynn_sfc"
+    args = cp.parse_args(["--ice-bulk-scheme", "most", "--ice-stability-scheme", "mynn_sfc"])
+    assert coupled.build_sea_ice_config(args).stability_scheme == "mynn_sfc"
+
+
+def test_omip_core2_cap_flag_reaches_every_ncar_flux_call():
+    import ast
+    core2 = _load("run_omip_core2")
+    p = core2._build_arg_parser()
+    assert p.parse_args([]).most_zeta_cap_width == bf.MOST_ZETA_CAP_WIDTH
+    assert p.parse_args(["--most-zeta-cap-width", "0"]).most_zeta_cap_width == 0.0
+    tree = ast.parse((REPO / "scripts" / "run" / "run_omip_core2.py").read_text())
+    names = {"compute_omip2_surface_forcing", "compute_omip2_freshwater_forcing",
+             "build_omip2_scan_block_fn"}
+    calls = [c for c in ast.walk(tree) if isinstance(c, ast.Call)
+             and getattr(c.func, "id", None) in names]
+    assert len(calls) == 6
+    for c in calls:
+        kw = {k.arg: ast.unparse(k.value) for k in c.keywords}
+        assert kw.get("zeta_cap_width") == "args.most_zeta_cap_width", ast.unparse(c)
+    app = ast.parse((REPO / "packages" / "ocean" / "legoesm" / "ocean" / "coupler"
+                     / "omip2_applicator.py").read_text())
+    calls = [c for c in ast.walk(app) if isinstance(c, ast.Call)
+             and getattr(c.func, "id", None) in ("air_sea_fluxes", "compute_omip2_surface_forcing_jax")]
+    assert len(calls) == 4
+    for c in calls:
+        kw = {k.arg: ast.unparse(k.value) for k in c.keywords}
+        assert kw.get("zeta_cap_width") == "zeta_cap_width", ast.unparse(c)

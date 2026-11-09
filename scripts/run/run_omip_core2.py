@@ -52,6 +52,7 @@ if not _FP32:
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.core.bulk_flux import MOST_ZETA_CAP_WIDTH
 from legoesm.ocean.eos import VALID_FREEZE_SCHEMES
 
 _SEC_PER_DAY = 86400.0
@@ -3185,6 +3186,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             state, forcing=forcing, idx_t=it,
             grid=grid, grid_type="fesom",
             dm2dc_window=_dm2dc_win,
+            zeta_cap_width=args.most_zeta_cap_width,
         )
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
@@ -3235,7 +3237,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             fw = compute_omip2_freshwater_forcing(
                 state, forcing=forcing, idx_t=it, grid=grid,
                 grid_type="fesom", runoff_R=_R,
-                emp=args.emp_freshwater, ramp=ramp)
+                emp=args.emp_freshwater, ramp=ramp,
+                zeta_cap_width=args.most_zeta_cap_width)
         if ice_resp is not None:
             # ONE shared, mask-aware partition (coupler.ocean_forcing):
             # open-water stress/evap/heat/SW x f_open=(1-A); ice basal
@@ -7668,6 +7671,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "damps mesoscale (eddy-killing). Shorthand for "
                         "--wind-vfac 1.0. lat-lon / tripole / mpas only "
                         "(cubed_sphere parked). Default off (absolute wind).")
+    p.add_argument("--most-zeta-cap-width", type=float,
+                   default=MOST_ZETA_CAP_WIDTH,
+                   help="Half-width of the smooth C2 cap on |z/L| at 10 in the "
+                        "NCAR bulk transfer coefficients (0 = NEMO's hard "
+                        "clip). Default: the shared MOST cap width.")
     p.add_argument("--wind-vfac", type=float, default=None,
                    help="NEMO rn_vfac current-feedback fraction in [0, 1] "
                         "(0=absolute wind=default; 1=full feedback="
@@ -10148,7 +10156,9 @@ def main() -> int:
         # Scan blocks trace _step_impl directly — prime build-once
         # caches from the concrete state first (vertex-mask constant).
         model.prime_step_caches(state)
-        block_fn = build_omip2_scan_block_fn(model, dt, gshape, ramp_s=ramp_s)
+        block_fn = build_omip2_scan_block_fn(
+            model, dt, gshape, ramp_s=ramp_s,
+            zeta_cap_width=args.most_zeta_cap_width)
         bsz = int(args.scan_block)
         print(f"[run] lax.scan block-stepping: block<={bsz} steps, split at "
               f"diag/snapshot/year boundaries so output cadence matches the "
@@ -10494,6 +10504,7 @@ def main() -> int:
             u_oce=_u_oce, v_oce=_v_oce,
             wind_current_feedback_vfac=_wind_vfac,
             forcing_remap=args.forcing_remap,
+            zeta_cap_width=args.most_zeta_cap_width,
         )
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
@@ -10623,7 +10634,8 @@ def main() -> int:
                     emp=args.emp_freshwater, ramp=ramp,
                     u_oce=_u_oce, v_oce=_v_oce,
                     wind_current_feedback_vfac=_wind_vfac,
-                    forcing_remap=args.forcing_remap)
+                    forcing_remap=args.forcing_remap,
+                    zeta_cap_width=args.most_zeta_cap_width)
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
             state = model.step(state, dt, surface_forcing=sf,
                                t_seconds=_t_sec)
@@ -10639,7 +10651,8 @@ def main() -> int:
                     emp=args.emp_freshwater, ramp=ramp,
                     u_oce=_u_oce, v_oce=_v_oce,
                     wind_current_feedback_vfac=_wind_vfac,
-                    forcing_remap=args.forcing_remap)
+                    forcing_remap=args.forcing_remap,
+                    zeta_cap_width=args.most_zeta_cap_width)
             if ice_resp is not None:
                 # ONE shared, mask-aware partition (coupler.ocean_forcing):
                 # open-water stress/evap/heat/SW x f_open=(1-A) at the SINGLE
