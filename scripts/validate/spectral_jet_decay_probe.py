@@ -79,7 +79,7 @@ def band_diagnostics(lat, lon, u, v, p_hpa, spec_levels, band=BAND_HPA,
     for r in range(rows.size):
         idx = np.where(inv == r)[0]
         idx = idx[np.argsort(lon[idx])]
-        c = math.cos(rows[r])
+        c = math.cos(float(lat[idx[0]]))  # exact row latitude, not the rounded key
         for f in (u, v):
             _, P = zonal_power_spectrum(f[idx][:, spec_levels].T, 1.0, detrend=False)
             spec += c * 0.5 * np.asarray(P)
