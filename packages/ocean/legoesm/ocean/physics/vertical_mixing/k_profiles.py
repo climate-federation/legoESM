@@ -1321,11 +1321,33 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 T_data.shape[:-1] + (z_coord.n_levels - 1,),
                 catke_cfg.minimum_tke, dtype=T_data.dtype,
             )
+        # core-0029: N^2 as Oceananigans' CATKE sees it, the local buoyancy gradient g (alpha dT/dz - beta dS/dz)
+        # (SeawaterBuoyancy ∂z_b), here by evaluating both cells of an interface at the upper cell's pressure
+        # ("adiabatic", eos.compute_buoyancy_frequency_adiabatic). The in-situ difference ("insitu_signed", the
+        # earlier behaviour) carries the compressibility of seawater, about +4e-5 s^-2 near the surface, which
+        # makes a mixed layer look stratified and a weak inversion look stable.
+        _n2_mode = getattr(catke_cfg, "n2_mode", "adiabatic")
+        if _n2_mode not in ("adiabatic", "insitu_signed"):
+            raise ValueError(
+                "CATKEConfig.n2_mode must be 'adiabatic' or 'insitu_signed', "
+                f"got {_n2_mode!r}")
+        _n2_kw = {}
+        if _n2_mode == "adiabatic":
+            from legoesm.ocean.eos import (
+                compute_hydrostatic_pressure, maybe_partial_h_actual,
+            )
+            _n2_kw = dict(
+                p_cell=compute_hydrostatic_pressure(
+                    rho, state.eta.data, z_coord.dz_ref, J,
+                    constants_config.rho_0, constants_config.g,
+                    h_actual=maybe_partial_h_actual(state, z_coord)),
+                dz_ref=z_coord.dz_ref, jacobian=J, eos_fn=eos_fn)
         K_u, K_c, tke_new = catke_vertical_mixing(
             u_data, v_data, T_data, S_data, rho, dz_half,
             depth_iface, hab_iface, H_col,
             tke_old=_seed, Jb=Jb, u_star=u_star, dt=dt_tke, cfg=catke_cfg,
             rho_0=constants_config.rho_0, g=constants_config.g,
+            n2_mode=_n2_mode, **_n2_kw,
         )
         # Return (K_v = tracer = K_c, A_v = momentum = K_u, tke_new).
         return K_c, K_u, tke_new

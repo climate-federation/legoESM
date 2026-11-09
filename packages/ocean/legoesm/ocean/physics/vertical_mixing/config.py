@@ -133,6 +133,7 @@ __param_spec__ = {
             "maximum_tracer_diffusivity": "numerics: cap",
             "maximum_tke_diffusivity": "numerics: cap",
             "surface_buoyancy_flux_shortwave": "switch (string): whether the penetrating shortwave enters the surface buoyancy flux; not a number to fit",
+            "n2_mode": "switch (string): how N^2 is formed (local buoyancy gradient or in-situ difference); not a number to fit",
         },
         "params": {
             "c_surface_shear": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) mixing length", "shape": None},
@@ -1115,6 +1116,12 @@ class CATKEConfig(NamedTuple):
     # NumericalEarth leaves all shortwave out even where most is absorbed in the top cell. The regional driver uses
     # skin fraction 0, where the split is exact.
     surface_buoyancy_flux_shortwave: str = "exclude"
+    # N^2 for CATKE (core-0029). Oceananigans' CATKE uses the local buoyancy gradient ∂z_b = g (alpha ∂zT - beta ∂zS)
+    # (SeawaterBuoyancy), with no compressibility term. "adiabatic" (default) evaluates both cells of an interface
+    # at the upper cell's pressure (eos.compute_buoyancy_frequency_adiabatic), which is that local gradient for any
+    # EOS. "insitu_signed" keeps the earlier behaviour: the difference of in-situ densities, biased stable by the
+    # compressibility of seawater (about +4e-5 s^-2 near the surface with Wright).
+    n2_mode: str = "adiabatic"
 
 
 class EPBLConfig(NamedTuple):
