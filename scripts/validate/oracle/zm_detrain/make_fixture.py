@@ -53,7 +53,7 @@ def main():
         fin, fout = Path(tmp) / "in.txt", Path(tmp) / "out.txt"
         with open(fin, "w") as f:
             f.write(f"{ncol} {nlev}\n")
-            wr(f, [C.L_f, C.g])
+            wr(f, [C.L_f, C.g])  # latent-ok: CAM6 ZM oracle constant
             for c in range(ncol):
                 wr(f, T[c]); wr(f, dlf[c]); wr(f, pdel[c])
         r = subprocess.run([a.driver, str(fin), str(fout)],
@@ -70,7 +70,7 @@ def main():
     gfortran = subprocess.run(["gfortran", "--version"], capture_output=True,
                               text=True).stdout.split("\n")[0]
     meta = dict(oracle=ORACLE, compiler=gfortran,
-                constants=dict(latice=C.L_f, gravit=C.g, cpair=C.c_pd),
+                constants=dict(latice=C.L_f, gravit=C.g, cpair=C.c_pd),  # latent-ok: CAM6 ZM oracle constant
                 inputs=str(SRC.relative_to(SRC.parents[3])),
                 inputs_sha256=hashlib.sha256(SRC.read_bytes()).hexdigest())
     np.savez_compressed(a.out, meta=json.dumps(meta), names=src["names"],

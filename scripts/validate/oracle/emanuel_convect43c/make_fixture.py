@@ -59,7 +59,7 @@ def write_input(path, c, qs, cbmf_in, iddoff, c_l):
 
     ncol, nd = c["T"].shape
     lines = [
-        f"{k.c_pd!r} {k.c_pv!r} {c_l!r} {k.R_v!r} {k.R_d!r} {k.L_v!r} {k.g!r} "
+        f"{k.c_pd!r} {k.c_pv!r} {c_l!r} {k.R_v!r} {k.R_d!r} {k.L_v!r} {k.g!r} "  # latent-ok: Emanuel oracle constant
         f"{COEFFR!r} {COEFFS!r} {iddoff} {ICOLD}",
         f"{ncol} {nd} {nd - 1} {DT!r}",
     ]
@@ -172,7 +172,7 @@ def main():
         cross_check="CliMT/climt 3ebe9427 climt/_lib/emanuel/convect43c.f90",
         gfortran=gf,
         flags="-O2 -fno-fast-math -fdefault-real-8 -fdefault-double-8",
-        constants=dict(cpd=k.c_pd, cpv=k.c_pv, cl=c_l, rv=k.R_v, rd=k.R_d, lv0=k.L_v, g=k.g),
+        constants=dict(cpd=k.c_pd, cpv=k.c_pv, cl=c_l, rv=k.R_v, rd=k.R_d, lv0=k.L_v, g=k.g),  # latent-ok: Emanuel oracle constant
         coeffr=COEFFR,
         coeffs=COEFFS,
         ipbl=0,

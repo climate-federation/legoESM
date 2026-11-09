@@ -284,9 +284,10 @@ def test_climateeval_hook_names_tas_not_produced_under_none(monkeypatch):
         assert (got == ["tas", "tasmin", "tasmax"]) is want, sbs
 
 
-# mynn25 (WRF port) dropped in R3: the compiled pipeline refuses it (P6)
+# mynn25 (WRF port, R3) and ysu: the compiled pipeline refuses them
+# (R3 P6; test_ysu_route::test_driver_pipeline_refuses_ysu).
 @pytest.mark.parametrize("turb", ["louis", "tke", "smagorinsky",
-                                  "holtslag_boville", "ysu", "edmf",
+                                  "holtslag_boville", "edmf",
                                   "clubb_lite", "clubb"])
 def test_every_scheme_takes_a_zero_lower_boundary_condition(turb):
     """The mechanism "none" relies on, scheme by scheme: with zero prescribed

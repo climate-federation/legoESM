@@ -84,8 +84,9 @@ def _adapter(a, dt, n_c=0.0, **kw):
     return thompson_microphysics(T, qv, hyd, p, ph, None, None, dt, **kw), (T, qv, hyd)
 
 
-def _port(a, dt):
-    return thompson_wrf_step(*(a[k] for k in _FIN), float(dt), n_sed_max=_N_SED)
+def _port(a, dt, cloud_sed_to_rain=ThompsonConfig().cloud_sedimentation_to_precip):
+    return thompson_wrf_step(*(a[k] for k in _FIN), float(dt), n_sed_max=_N_SED,
+                             cloud_sed_to_rain=cloud_sed_to_rain)
 
 
 def test_adapter_reproduces_port_state_and_precip(case):
@@ -261,6 +262,49 @@ def test_host_water_budget_equals_the_ports_own(case):
             + ref.pptrain + ref.pptsnow + ref.pptgraul + ref.pptice)
     scale = float(jnp.max(jnp.sum(q0 * dpg, axis=-1)))
     assert float(jnp.max(jnp.abs(host - port))) <= 1e-10 * scale   # V4b
+
+
+def _port_residual(a, dt, cloud_sed_to_rain):
+    """Column water change on the port's own masses rho_p*dz plus its surface
+    precipitation [kg/m^2]: zero for a closed budget."""
+    sp = ("qv", "qc", "qi", "qr", "qs", "qg")
+    ref = _port(a, dt, cloud_sed_to_rain)
+    m = thompson_air_density(a["T"], a["p"], a["qv"]) * a["dz"]
+    return ref, (jnp.sum((sum(getattr(ref, k) for k in sp) - sum(a[k] for k in sp)) * m,
+                         axis=-1)
+                 + ref.pptrain + ref.pptsnow + ref.pptgraul + ref.pptice)
+
+
+def _bottom_cloud(qc0=3.0e-4):
+    """The 'cols' set with only cloud water, ``qc0`` in the lowest three
+    levels, and w = 0 so WRF's low-level cloud settling runs (the oracle sets
+    hold no cloud there)."""
+    f = dict(np.load(_FIX))
+    a = {v: jnp.asarray(f[f"cols_in_{v}"]) for v in _FIN}
+    z = jnp.zeros_like(a["qc"])
+    a.update(qr=z, qi=z, qs=z, qg=z, ni=z, nr=z, w=z, qc=z.at[:, :3].set(qc0))
+    return a
+
+
+def test_cloud_sedimentation_counts_as_rain():
+    """Default (user 2026-11-09): the cloud water WRF lets settle out of the
+    lowest level, and books nowhere, is surface rain.  WRF-exact loses it."""
+    dt = 300.0
+    a = _bottom_cloud()
+    ref_on, res_on = _port_residual(a, dt, True)
+    ref_off, res_off = _port_residual(a, dt, False)
+    added = np.asarray(ref_on.pptrain - ref_off.pptrain)
+    s = added > 0.0
+    assert s.sum() >= 3                                    # not vacuous
+    # measured max |res| / added: 1.7e-4 (other processes, ~1e-7 kg/m^2)
+    assert np.all(np.abs(np.asarray(res_on))[s] <= 1.0e-3 * added[s])
+    assert np.all(np.abs(np.asarray(res_off)[s] + added[s]) <= 1.0e-3 * added[s])
+    # the adapter reaches both settings through its config
+    out_on, _ = _adapter(a, dt)
+    out_off, _ = _adapter(a, dt, config=ThompsonConfig(cloud_sedimentation_to_precip=False))
+    assert _rel(out_on.precipitation * dt, ref_on.pptrain) <= _TOL
+    assert _rel(out_off.precipitation * dt, ref_off.pptrain) <= _TOL
+    assert ThompsonConfig().cloud_sedimentation_to_precip is True
 
 
 def test_bridges_refuse_thompson_without_the_full_registry():

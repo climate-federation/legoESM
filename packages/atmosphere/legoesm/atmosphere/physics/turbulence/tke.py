@@ -1,64 +1,29 @@
-"""Prognostic TKE, Mellor-Yamada-2.5-INSPIRED k-l turbulence closure.
+"""``turbulence="tke"``: the WRF v4.8.0 MYJ PBL (Mellor-Yamada-Janjic level 2.5).
 
-.. warning::
+The kernel :func:`tke_turbulence` runs the oracle-tested column port
+:func:`legoesm.atmosphere.physics.turbulence.myj_wrf.myjpbl_column`
+(``tests/atmosphere/hydrostatic/unit/test_myj_oracle.py``) on every column.
+It replaces the earlier MY2.5-INSPIRED k-l closure (constant Ck and Pr_t),
+which the F4 audit scored C-structural.
 
-   **NOT-YET-FAITHFUL to the selected oracle.**  The oracle for ``tke`` is
-   WRF v4.8.0 MYJ (``phys/module_bl_myjpbl.F``).  Its faithful JAX port is
-   :func:`legoesm.atmosphere.physics.turbulence.myj_wrf.myjpbl_column`
-   (oracle-tested in ``tests/atmosphere/hydrostatic/unit/test_myj_oracle.py``).
-   :func:`tke_turbulence` below is the older closure and is what every lane
-   still runs: no lane yet supplies the MYJ column state (the MYJSFC surface
-   exchange coefficients and surface values, carried TKE in MYJ's units,
-   cloud water/ice), and routing a lane to the port is a separate change.
+Host glue, not part of the oracle (declared departures):
 
-Carries a prognostic turbulent kinetic energy (TKE) equation and
-derives eddy diffusivities from TKE and a mixing length:
-
-    Km = Ck * l * sqrt(max(TKE, tke_min))
-    Kh = Km / Pr_t
-
-TKE budget:
-    de/dt = Km * S^2 - Kh * N^2 - Ce * e^{3/2} / l + rho^-1 d/dz[rho Km de/dz]
-
-Dissipation is treated semi-implicitly for stability.
-
-References
-----------
-- Mellor, G. L., & Yamada, T. (1982). Development of a turbulence closure
-  model for geophysical fluid problems. Rev. Geophys., 20, 851-875.
-
-Faithfulness to Mellor-Yamada (1982) level 2.5
-----------------------------------------------
-This is a MY2.5-INSPIRED k-l closure, NOT the literal level-2.5 scheme: it carries the
-prognostic TKE budget but REPLACES MY2.5's defining algebraic stability functions with
-constant coefficients.
-MY2.5-STRUCTURED (faithful forms):
-  * the prognostic TKE (``e = q²/2``) budget SKELETON — shear production ``Km·S²``,
-    buoyancy ``−Kh·N²``, and dissipation ``∝ e^{3/2}/l`` — matches the Mellor-Yamada
-    level-2.5 ``q²/2`` budget (the transport term uses ``Km`` not MY's ``Kq``; see below);
-  * the k-l eddy viscosity ``Km ∝ l·√e`` has MY's ``Km = l·q·Sm`` form (``q = √(2e)``, so
-    ``Ck = √2·Sm_eff`` for a constant effective ``Sm``);
-  * the dissipation ``ε = Ce·e^{3/2}/l`` is MY's ``ε = q³/(B1·l)`` (``Ce = 2^{3/2}/B1
-    ≈ 0.17``; default 0.19).
-DEPARTURES from MY2.5 (the defining level-2.5 physics, simplified):
-  * **CONSTANT Ck replaces the algebraic momentum stability function Sm(GM, GH)** — the
-    single defining feature of level 2.5 (``Sm`` depends on BOTH the shear ``GM`` and the
-    buoyancy ``GH = −l²N²/q²``).  ``Km = Ck·l·√e`` therefore scales the SAME way at every
-    Richardson number; at FIXED ``e`` and ``l`` it is INDEPENDENT of the stratification
-    ``N²`` (MY2.5's ``Sm`` decreases with stability).  (Over a prognostic run ``N²`` still
-    changes later ``Km`` INDIRECTLY, through its buoyancy effect on ``e``.)
-  * **CONSTANT Pr_t = 0.33 sets a fixed ``Kh/Km = 1/Pr_t ≈ 3.03``** — MY2.5's ratio
-    ``Sh(GM, GH)/Sm(GM, GH)`` is stability-dependent (and its NEUTRAL value is only
-    ``Sh/Sm = A2 / [A1(1−3C1)] ≈ 0.74/0.70 ≈ 1.06``, not ≈3), so ``Pr_t = 0.33`` is this
-    scheme's own fixed choice, NOT the MY value.
-  * **TKE is diffused with ``Km``, not MY's separate TKE diffusivity ``Kq = l·q·Sq``**
-    (``Sq ≈ 0.20``) — the transport term ``ρ⁻¹∂z(ρ Km ∂z e)`` uses the momentum ``Km``.
-  * **fixed asymptotic mixing length** ``l = κz/(1 + κz/l_max)`` with a CONSTANT
-    ``l_max`` — MY's diagnostic length is likewise Blackadar-like near the wall but with
-    an integral, turbulence-dependent asymptote ``l0 = 0.1·∫q z dz / ∫q dz``.
-  * **numerics** (not MY): the semi-implicit dissipation linearization
-    ``ε ≈ Ce·√e_n·e_{n+1}/l`` (stability + AD-safe) and the ``tke_min`` floor.
-Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_tke_faithful.py``.
+* **Surface exchange from the lane's own surface layer, not MYJSFC.**  The
+  lane's bulk fluxes (``surface_fluxes_at_lowest_level``, the same call the
+  previous closure made) are handed to MYJPBL as MYJSFC-shaped inputs, built
+  so that MYJ's implicit surface term reproduces them at the input state:
+  ``AKMS = AKHS = ustar^2/|V_1|``, ``THZ0 = TH_1 + F_theta/(rho_1 AKHS)``,
+  ``QZ0 = q_1 + F_q/(rho_1 AKHS)`` on the water path (``XLAND = 2``, so MYJ
+  uses THZ0/QZ0 directly), ``UZ0 = U_1 + tau_x/(rho_1 AKMS)`` (likewise V),
+  ``CT = 0``; where ``|V_1|`` or ``ustar`` is exactly zero the exchange
+  coefficient is ``_AK_CALM_M_S`` so prescribed fluxes still enter.
+  ``rho_1`` is MYJ's own density.
+  The heat flux carries the latent-enthalpy correction, as before.
+* **Vapour only.**  The kernel receives no condensate, so qc = qi = 0 and THE
+  = theta (MYJ would otherwise mix cloud water/ice and use THE).
+* ``Km``/``Kh`` diagnostics: MYJ's interface coefficients times its own
+  layer depth (``EXCH_H``), averaged to full levels; ``Kh_iface`` exports
+  the interface values.  ``h_pbl`` is MYJ's PBLH.
 """
 
 from __future__ import annotations
@@ -67,38 +32,28 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import (
-    buoyancy_coefficient,
-    exner_function,
-    mixing_length,
-    virtual_temperature,
-)
+from legoesm.atmosphere.physics._shared import half_to_full, half_to_iface_zero_ends
 from legoesm.atmosphere.physics.turbulence.config import TKEConfig
+from legoesm.atmosphere.physics.turbulence.myj_wrf import myjpbl_column
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
-from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     latent_enthalpy_correction,
-    surface_moisture_flux,
-    compute_surface_fluxes,
     surface_fluxes_at_lowest_level,
-)
-from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
-    implicit_vertical_diffusion,
-    implicit_vertical_diffusion_theta,
+    surface_moisture_flux,
 )
 
+
+# Exchange coefficient [m/s] used where the lowest-level wind or u* is exactly zero, so
+# prescribed surface fluxes still enter MYJ (vote Z12).
+_AK_CALM_M_S = 1e-3
 
 __physics_contract__ = {
     "summary": (
-        "Prognostic-TKE (Mellor-Yamada-2.5-INSPIRED k-l closure) turbulence: "
-        "advances a turbulent-kinetic-energy budget (shear production, "
-        "buoyancy, dissipation, diffusion), sets K_m = Ck l sqrt(max(TKE, "
-        "tke_min)) with a CONSTANT Ck (in place of MY2.5's algebraic "
-        "Sm(GM, GH) stability function) and K_h = K_m/Pr_t with a constant "
-        "Pr_t, then applies implicit vertical diffusion with surface-flux BCs."
+        "turbulence='tke': WRF v4.8.0 MYJ PBL column core (myj_wrf) driven by "
+        "the lane's bulk surface fluxes; prognostic TKE carry."
     ),
     "inputs": {
-        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg (specific)",
         "tke": "m^2/s^2", "p_full": "Pa", "p_half": "Pa",
         "z_full": "m", "z_half": "m", "T_sfc": "K", "q_sfc": "kg/kg",
         "rho": "kg/m^3", "dt": "s",
@@ -109,21 +64,16 @@ __physics_contract__ = {
         "ustar": "m/s", "h_pbl": "m", "tke_new": "m^2/s^2",
     },
     "sign_convention": (
-        "Down-gradient mixing: du_dt ~ (1/rho) d/dz(rho Km du/dz); Km, Kh >= 0; "
-        "TKE >= tke_min with shear production Km S^2 >= 0, buoyancy -Kh N^2 "
-        "(a sink in stable stratification), and dissipation Ce TKE^{3/2}/l "
-        ">= 0. shflx, lhflx positive UPWARD and injected as the lower boundary "
-        "condition (a source), so the resolved column budget is NOT closed. "
-        "z increases upward; level index -1 is the surface."
+        "z up; level index -1 is the surface (arrays top-down, as every "
+        "lane); shflx, lhflx positive UPWARD, entering as MYJ's implicit "
+        "surface exchange (a source), so the column budget is NOT closed."
     ),
     "conserves": ["none"],
     "differentiable": True,
-    "reference": "Mellor & Yamada (1982), Rev. Geophys. 20, 851-875",
+    "reference": "Janjic (2002) NCEP Office Note 437; WRF v4.8.0 phys/module_bl_myjpbl.F",
     "idealized_test": (
-        "tests/atmosphere/hydrostatic/unit/test_turbulence.py: TKE stays "
-        ">= tke_min; a neutral no-shear column has zero production and "
-        "buoyancy so TKE decays by dissipation; Km = Ck l sqrt(max(TKE, "
-        "tke_min)) >= 0."
+        "tests/atmosphere/hydrostatic/unit/test_myj_oracle.py (oracle match); "
+        "tests/atmosphere/hydrostatic/unit/test_turbulence.py (lane adapter)"
     ),
 }
 
@@ -144,149 +94,65 @@ def tke_turbulence(
     dt: float,
     config: TKEConfig,
 ) -> tuple[TurbulenceOutput, jax.Array]:
-    """Compute turbulence tendencies using prognostic TKE.
-
-    Parameters
-    ----------
-    u, v : jax.Array
-        Wind components at full levels [m/s], shape (ncol, nlev).
-    T : jax.Array
-        Temperature at full levels [K], shape (ncol, nlev).
-    q_v : jax.Array
-        Water vapor mixing ratio [kg/kg], shape (ncol, nlev).
-    tke : jax.Array
-        Turbulent kinetic energy [m^2/s^2], shape (ncol, nlev).
-    p_full : jax.Array
-        Pressure at full levels [Pa], shape (ncol, nlev).
-    p_half : jax.Array
-        Pressure at half levels [Pa], shape (ncol, nlev+1).
-    z_full : jax.Array
-        Height at full levels [m], shape (ncol, nlev).
-    z_half : jax.Array
-        Height at half levels [m], shape (ncol, nlev+1).
-    T_sfc : jax.Array
-        Surface temperature [K], shape (ncol,).
-    q_sfc : jax.Array
-        Surface saturation mixing ratio [kg/kg], shape (ncol,).
-    rho : jax.Array
-        Air density at full levels [kg/m^3], shape (ncol, nlev).
-    dt : float
-        Time step [s].
-    config : TKEConfig
-
-    Returns
-    -------
-    TurbulenceOutput
-        Turbulence tendencies and diagnostics.
-    tke_new : jax.Array
-        Updated TKE [m^2/s^2], shape (ncol, nlev).
-    """
+    """MYJ turbulence tendencies; level arrays ``(ncol, nlev)`` top-down
+    (index -1 at the surface), ``p_half``/``z_half`` ``(ncol, nlev+1)``.
+    Returns the output and the new TKE [m^2/s^2]."""
     ncol, nlev = T.shape
-    tke = jnp.maximum(tke, config.tke_min)
-
-    # Half-level quantities
-    dz_half = jnp.abs(z_full[:, :-1] - z_full[:, 1:])  # (ncol, nlev-1)
-    dz_half = jnp.clip(dz_half, 1.0, None)
-
-    # Mixing length at full levels: l = kappa * z / (1 + kappa * z / l_max)
-    l_mix = mixing_length(z_full, config.l_mix_max)  # (ncol, nlev)
-
-    # Eddy diffusivities at full levels
-    sqrt_tke = jnp.sqrt(tke)
-    Km_full = config.Ck * l_mix * sqrt_tke
-    Kh_full = Km_full / config.Pr_t
-
-    # Eddy diffusivities at half-levels (average adjacent full levels)
-    Km_half = 0.5 * (Km_full[:, :-1] + Km_full[:, 1:])  # (ncol, nlev-1)
-    Kh_half = 0.5 * (Kh_full[:, :-1] + Kh_full[:, 1:])
-
-    # --- TKE budget ---
-    # Shear production at half-levels
-    du_dz = (u[:, :-1] - u[:, 1:]) / dz_half
-    dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
-    S2_half = du_dz ** 2 + dv_dz ** 2  # (ncol, nlev-1)
-
-    # Brunt-Väisälä at half-levels (canonical inverse-Exner + shared
-    # buoyancy-coefficient helpers; clips kept at the call sites).
-    exner_pref = 1.0 / exner_function(p_full)
-    theta_v = virtual_temperature(T, q_v) * exner_pref
-    theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
-    dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
-    N2_half = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
-
-    # Interpolate S2 and N2 to full levels.  Single ``concatenate`` of
-    # the centered interior with the two endpoint half-values lowers
-    # to one HLO op vs the previous ``zeros + 3 .at[].set`` triple
-    # scatter (3 wasted scatter ops per field, fired every TKE step).
-    S2_interior = 0.5 * (S2_half[:, :-1] + S2_half[:, 1:])
-    S2 = jnp.concatenate(
-        [S2_half[:, :1], S2_interior, S2_half[:, -1:]], axis=1,
-    )
-    N2_interior = 0.5 * (N2_half[:, :-1] + N2_half[:, 1:])
-    N2 = jnp.concatenate(
-        [N2_half[:, :1], N2_interior, N2_half[:, -1:]], axis=1,
-    )
-
-    # Production and buoyancy at full levels
-    shear_prod = Km_full * S2        # P = Km * S^2
-    buoyancy = -Kh_full * N2         # B = -Kh * N^2
-
-    # Dissipation: semi-implicit linearization
-    # epsilon = Ce * e^{3/2} / l ≈ Ce * e^{1/2}_n * e_{n+1} / l
-    # This makes dissipation linear in the new TKE for stability
-    l_mix_safe = jnp.clip(l_mix, 1.0, None)
-    diss_coeff = config.Ce * sqrt_tke / l_mix_safe  # [1/s]
-
-    # TKE diffusion using implicit solver
-    dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
-    dz_layer = jnp.clip(dz_layer, 1.0, None)
-
-    # Diffuse TKE (no surface flux for TKE).  Pin the surface_flux dtype
-    # to the column dtype so ``rhs.at[:, -1].add(...)`` inside the
-    # tridiagonal solve does not see an x64-default zero clashing with
-    # the f32 state.
-    tke_diffused = implicit_vertical_diffusion(
-        tke, Km_half, rho, dz_layer, dz_half, dt,
-        surface_flux=jnp.zeros(ncol, dtype=tke.dtype),
-    )
-
-    # Semi-implicit TKE update:
-    # tke_new = (tke_diffused + dt * (P + B)) / (1 + dt * diss_coeff)
-    tke_new = (tke_diffused + dt * (shear_prod + buoyancy)) / (1.0 + dt * diss_coeff)
-    tke_new = jnp.maximum(tke_new, config.tke_min)
-
-    # --- Apply diffusion to u, v, T, q_v ---
-    # Surface fluxes
+    if nlev < 4:
+        raise ValueError(f"turbulence='tke' (MYJ) needs at least 4 levels, got {nlev}")
+    f = lambda x: x[..., ::-1]                              # top-down <-> MYJ bottom-up
     tau_x, tau_y, shflx, lhflx, ustar = surface_fluxes_at_lowest_level(
         u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
         T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
-
-    sflx_u = tau_x
-    sflx_v = tau_y
     sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)
-    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
     sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
-
-    u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
-    v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
-    T_new = implicit_vertical_diffusion_theta(
-        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T,
-    )
-    q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
-
-    h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
-
+    exner = (p_full / constants.p_ref) ** (constants.R_d / constants.c_pd)
+    th = T / exner
+    q1 = q_v[:, -1]
+    p608 = constants.R_v / constants.R_d - 1.0                # MYJ's P608
+    rho1 = p_full[:, -1] / (constants.R_d * T[:, -1] * (1. + p608 * q1))
+    w2 = u[:, -1] ** 2 + v[:, -1] ** 2
+    calm = (w2 <= 0.0) | (ustar <= 0.0)                     # exact zero only
+    wspd = jnp.sqrt(jnp.where(calm, 1.0, w2))               # no sqrt'(0) in the VJP
+    ak = jnp.where(calm, _AK_CALM_M_S, ustar * ustar / wspd)
+    rak = 1.0 / (rho1 * ak)
+    thz0 = th[:, -1] + sflx_T / exner[:, -1] * rak
+    qz0 = q1 + sflx_q * rak
+    # stress ON the atmosphere = -rho1 AKMS (V1 - VZ0), so this VZ0 reproduces the lane's vector
+    uz0 = u[:, -1] + tau_x * rak
+    vz0 = v[:, -1] + tau_y * rak
+    psfc = p_half[:, -1]
+    zero = jnp.zeros_like(thz0)
+    cols = dict(
+        dt=jnp.full((ncol,), dt, T.dtype), ht=z_half[:, -1],
+        dz=f(z_half[:, :-1] - z_half[:, 1:]), pmid=f(p_full), pint=f(p_half),
+        th=f(th), t=f(T), exner=f(exner), qv=f(q_v / (1. - q_v)),
+        qcw=jnp.zeros_like(T), qci=jnp.zeros_like(T), u=f(u), v=f(v), tke=f(tke),
+        ustar=ustar, akhs=ak, akms=ak, thz0=thz0, qz0=qz0, uz0=uz0, vz0=vz0, ct=zero,
+        chklowq=jnp.ones_like(thz0), elflx=lhflx,
+        tsk=thz0 / (constants.p_ref / psfc) ** (constants.R_d / constants.c_pd),
+        qsfc=qz0, xland=jnp.full_like(thz0, 2.0), snow=zero, sice=zero)
+    out = jax.vmap(lambda c: myjpbl_column(**c, cfg=config.myj))(cols)
+    # MYJ's surface term is implicit: it exchanges against the UPDATED lowest level, so
+    # the water the column gains is not exactly sflx_q.  Report what it applied
+    # (MYJ adds no other water) so surface and atmosphere budgets agree.
+    dq_v_dt = f(out.dqdt)                                   # MYJ's own specific-humidity DQDT
+    evap_applied = jnp.sum(dq_v_dt * (p_half[:, 1:] - p_half[:, :-1]), axis=1) / constants.g
+    from legoesm.thermo import charged_latent_heat
+    lhflx = lhflx + charged_latent_heat(config.surface.bulk_scheme, T_sfc) * (evap_applied - sflx_q)
+    kh_iface = f(out.exch_h)                                # top-down interior interfaces
+    km_iface = f(out.exch_m)
     output = TurbulenceOutput(
-        du_dt=(u_new - u) / dt,
-        dv_dt=(v_new - v) / dt,
-        dT_dt=(T_new - T) / dt,
-        dq_v_dt=(q_new - q_v) / dt,
-        Km=Km_full,
-        Kh=Kh_full,
+        du_dt=f(out.rublten),
+        dv_dt=f(out.rvblten),
+        dT_dt=f(out.rthblten) * exner,
+        dq_v_dt=dq_v_dt,
+        Km=half_to_full(km_iface),
+        Kh=half_to_full(kh_iface),
         shflx=shflx,
-        lhflx=lhflx, evap_sfc=sflx_q,
+        lhflx=lhflx, evap_sfc=evap_applied,
         ustar=ustar,
-        h_pbl=h_pbl,
+        h_pbl=out.pblh,
+        Kh_iface=half_to_iface_zero_ends(kh_iface),
     )
-
-    return output, tke_new
+    return output, f(out.tke)

@@ -178,6 +178,7 @@ def handback_surface_boundary(
     T_land: jnp.ndarray,
     sst: jnp.ndarray,
     emissivity: "float | jnp.ndarray",
+    emissivity_land: "float | jnp.ndarray",
     lw_emit_ice_lake: jnp.ndarray,
     emissivity_ice: jnp.ndarray,
     emissivity_lake: jnp.ndarray,
@@ -191,7 +192,9 @@ def handback_surface_boundary(
 
     Open water is what the four tiles leave, ``f_ow = 1 - f_land - f_ice -
     f_lake``.  Albedo and emissivity are area blends; the emitted longwave is
-    the land and open-water emission at their own skin this step plus the ice
+    the land emission at its radiating pair ``(T_land, emissivity_land)`` (the
+    multilayer land's radiating surface, tier-5 U11-1) and the open-water
+    emission at the SST this step, plus the ice
     and lake emission the coupler debits for this window (``lw_emit_ice_lake``,
     per grid cell).  ``T_rad`` is the single temperature with
     ``eps_eff * sigma * T_rad^4`` equal to that emission, so a solver given
@@ -205,10 +208,11 @@ def handback_surface_boundary(
     ice/lake emission is never zero (vote V15).
     """
     f_ow = 1.0 - f_land - f_ice - f_lake
-    eps_eff = (emissivity * (f_land + f_ow) + f_ice * emissivity_ice
-               + f_lake * emissivity_lake)
+    eps_eff = (emissivity_land * f_land + emissivity * f_ow
+               + f_ice * emissivity_ice + f_lake * emissivity_lake)
     sb = constants.sigma_sb
-    emit = (emissivity * sb * (f_land * T_land ** 4 + f_ow * sst ** 4)
+    emit = (sb * (emissivity_land * f_land * T_land ** 4
+                  + emissivity * f_ow * sst ** 4)
             + lw_emit_ice_lake)
     x = emit / (sb * eps_eff)
     pos = x > 0.0
@@ -232,6 +236,7 @@ def handback_tile_radiation(
     albedo_land: "float | jnp.ndarray",
     T_land: jnp.ndarray,
     emissivity: "float | jnp.ndarray",
+    emissivity_land: "float | jnp.ndarray",
     lw_emit_ice_lake: jnp.ndarray,
     albedo_ice: jnp.ndarray,
     albedo_lake: jnp.ndarray,
@@ -257,7 +262,8 @@ def handback_tile_radiation(
     return dict(
         ow_sw_net=(sw_net - f_land * sw_down * (1.0 - albedo_land)
                    - f_ice * sw_ice - f_lake * sw_lake),
-        ow_lw_net=(lw_net - f_land * emissivity * (lw_down - sb * T_land ** 4)
+        ow_lw_net=(lw_net
+                   - f_land * emissivity_land * (lw_down - sb * T_land ** 4)
                    - f_ice * lw_ice - f_lake * lw_lake + lw_emit_ice_lake),
         booked_sw_net_ice=sw_ice,
         booked_lw_abs_ice=lw_ice,

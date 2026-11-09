@@ -28,6 +28,14 @@ from legoesm.atmosphere.physics.microphysics.output import (
 from legoesm.thermo import saturation_specific_humidity
 
 
+def _sq_prev(T, q_v, p_half, moisten=0.0):
+    """Sundqvist gscond carry: the previous step's state, with q_v lower by
+    the fraction ``moisten`` (a moistening other-process tendency; 0 = no
+    tendency, the fresh-start behaviour)."""
+    return {"zc_T_prev": T, "zc_q_v_prev": q_v * (1.0 - moisten),
+            "zc_p_s_prev": p_half[:, -1]}
+
+
 def test_sundqvist_water_closes_on_dp_over_g_not_rho_dz():
     """Tier-2 decision R9/C12: the layer mass is the oracle's del/g = dp/g, so
     the column water budget closes in the pressure coordinate even when the
@@ -36,7 +44,7 @@ def test_sundqvist_water_closes_on_dp_over_g_not_rho_dz():
     q_v = saturation_specific_humidity(T, p_full)
     hydro = hydro._replace(q_r=jnp.zeros_like(hydro.q_r).at[..., 8:12].set(5e-4))
     out = sundqvist_microphysics(
-        T, q_v, hydro, p_full, p_half, 1.2 * rho, dz, 300.0, SundqvistConfig(), cell_area=1.0e10)
+        T, q_v, hydro, p_full, p_half, 1.2 * rho, dz, 300.0, SundqvistConfig(), cell_area=1.0e10, prev_state=_sq_prev(T, q_v, p_half))
     dp = p_half[:, 1:] - p_half[:, :-1]
     tend = jnp.sum((out.dq_v_dt + out.dq_c_dt + out.dq_r_dt) * dp, axis=1) / constants.g
     imbalance = float(jnp.max(jnp.abs(tend + out.precipitation)))
@@ -44,33 +52,9 @@ def test_sundqvist_water_closes_on_dp_over_g_not_rho_dz():
     assert imbalance < 1e-12 * max(float(jnp.max(out.precipitation)), 1.0), imbalance
 
 
-def test_sundqvist_precpd_runs_on_pre_condensation_state():
-    """R17 (precpd on the post-condensation state, the oracle's gscond ->
-    precpd order) is deferred to the gscond port (user 2026-10-27): with the
-    condensation surrogate's overshoot the post-condensation column is below
-    rh_crit and precpd re-evaporates its own production.  Until then precpd
-    sees the pre-step T and q_v, and condensation adds on top."""
-    from legoesm.atmosphere.physics.microphysics.sundqvist import (
-        diagnose_sundqvist_process_rates, gfs_area_weight, zhao_carr_precpd)
-    T, q_v, hydro, p_full, p_half, rho, dz = _make_column(
-        T_sfc=290.0, q_c_val=1e-3, supersaturated=True)
-    cfg = SundqvistConfig()
-    dt = 300.0
-    cond = diagnose_sundqvist_process_rates(
-        T, q_v, hydro, p_full, p_half, rho, dz, dt, cfg, cell_area=1.0e10).condensation
-    assert float(jnp.max(cond)) > 0.0
-    zc = zhao_carr_precpd(
-        T, q_v, hydro.q_c + cond * dt, p_full,
-        (p_half[:, 1:] - p_half[:, :-1]) / constants.g, dt, cfg,
-        wk1=gfs_area_weight(jnp.full(T.shape[:1], 1.0e10)))
-    out = sundqvist_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, cfg, cell_area=1.0e10)
-    np.testing.assert_allclose(
-        np.asarray(T + out.dT_dt * dt),
-        np.asarray(zc.T + constants.L_v * cond * dt / constants.c_pd),
-        rtol=1e-13, atol=0.0)
-    np.testing.assert_allclose(np.asarray(q_v + out.dq_v_dt * dt),
-                               np.asarray(zc.q_v - cond * dt),
-                               rtol=1e-12, atol=1e-18)
+# test_sundqvist_precpd_runs_on_pre_condensation_state was removed with the
+# condensation surrogate: precpd now runs on the post-gscond state, pinned by
+# the gscond -> precpd oracle chain in test_sundqvist_zhao_carr_oracle.py.
 
 
 def test_sundqvist_release_constants_default_to_the_oracle():
@@ -132,7 +116,8 @@ def _call_scheme(name, T, q_v, hydro, p_full, p_half, rho, dz, dt=300.0):
                                      config=KesslerConfig())
     elif name == "sundqvist":
         return sundqvist_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt,
-                                       config=SundqvistConfig(), cell_area=1.0e10)
+                                       config=SundqvistConfig(), cell_area=1.0e10,
+                                       prev_state=_sq_prev(T, q_v, p_half, 0.01))
     elif name == "seifert_beheng":
         return seifert_beheng_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt,
                                             config=SeifertBehengConfig())
@@ -164,7 +149,8 @@ def test_all_outputs_finite(scheme):
         val = getattr(out, fname)
         if val is None:        # optional field (e.g. dN_s_dt for single-moment)
             continue
-        assert jnp.all(jnp.isfinite(val)), f"{scheme}: {fname} has NaN/Inf"
+        for v in (val.values() if isinstance(val, dict) else (val,)):  # carry dict
+            assert jnp.all(jnp.isfinite(v)), f"{scheme}: {fname} has NaN/Inf"
 
 
 # ============================================================================
@@ -529,110 +515,9 @@ def test_freezing_releases_latent_heat_of_fusion(scheme, call):
     )
 
 
-# ============================================================================
-# Sundqvist condensation magnitude: target is q_sat, not RH_crit * q_sat
-# ============================================================================
-
-def test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat():
-    """Sundqvist must drive q_v toward q_sat, NOT toward RH_crit * q_sat.
-
-    Pre-fix bug (line 63 of sundqvist.py): the condensation formula was
-        condensation = f * max(q_v - RH_crit * q_sat, 0.0) / dt
-    which removed any vapor above 0.8*q_sat in one step.  At RH=1.0
-    this dropped RH to ~0.80 in a single 300-s call — physically wrong
-    (should drop AT MOST to 1.0, since there is no supersaturation to
-    remove); at RH=0.95 it still over-condensed to ~0.81.
-
-    Post-fix: target is ``q_sat`` and only the supersaturation
-    (``q_v - q_sat``) is removed.  The smooth ``f = sigmoid(s * (RH -
-    RH_crit))`` gate is preserved as the *onset* control for partial-
-    cloud-fraction subgrid variance, but the *target* is the
-    thermodynamic equilibrium ``q_sat``.
-
-    Cross-scheme contract: at RH=1.0 (saturated, not super) and a
-    realistic q_c ~ 1e-4, Sundqvist must remove at most ``(q_v -
-    q_sat) * dt`` of vapor — i.e., zero.  (Kessler is not compared here:
-    it is the faithful ESCOMP kessler_run port, whose KW78 Tetens q_sat is
-    not legoESM's saturation curve, so "RH = 1" by this curve is not
-    saturated for it.)
-    """
-    ncol, nlev = 1, 5
-    T = jnp.full((ncol, nlev), 290.0)
-    p_full = jnp.full((ncol, nlev), 8e4)
-    p_half = jnp.broadcast_to(
-        jnp.linspace(7e4, 9e4, nlev + 1)[None, :], (ncol, nlev + 1),
-    )
-    rho = p_full / (constants.R_d * T)
-    dz = jnp.full((ncol, nlev), 1000.0)
-    q_sat = saturation_specific_humidity(T, p_full)
-    q_c = jnp.full((ncol, nlev), 1e-4)
-    hydro = HydrometeorState(
-        q_c=q_c, q_r=jnp.zeros_like(q_c),
-        q_i=jnp.zeros_like(q_c), q_s=jnp.zeros_like(q_c),
-        q_g=jnp.zeros_like(q_c),
-        N_c=1e8 * jnp.ones_like(q_c), N_r=jnp.zeros_like(q_c),
-        N_i=jnp.zeros_like(q_c),
-    )
-    dt = 300.0
-    cfg = SundqvistConfig()
-
-    # Case 1: RH = 1.0 exactly (saturated, no supersat to remove).
-    q_v_sat = q_sat.copy()
-    out_s = sundqvist_microphysics(
-        T, q_v_sat, hydro, p_full, p_half, rho, dz, dt, cfg, cell_area=1.0e10)
-    # Vapor removed must be at most ``q_v - q_sat`` * f_smooth.
-    # At RH=1, q_v - q_sat = 0, so the only allowed removal is
-    # float-roundoff from ``saturation_specific_humidity``.  Pre-fix this
-    # assertion fired with dq_v_dt ≈ -1e-5 → 3e-3 kg/kg per step (RH
-    # dropped 1.00 → 0.80); post-fix it's ~1e-9 kg/kg (f32 rounding).
-    # The 1e-7 tolerance is six orders of magnitude below the pre-fix
-    # bug magnitude and well above f32 ULP.
-    dqv_per_step = float(jnp.max(jnp.abs(out_s.dq_v_dt))) * dt
-    assert dqv_per_step < 1e-7, (
-        f"Sundqvist over-condenses at RH=1.0 with q_c=1e-4: "
-        f"|dq_v_dt| * dt = {dqv_per_step:.3e} kg/kg.  "
-        f"Pre-fix bug: condensation target was RH_crit*q_sat=0.8*q_sat "
-        f"(legoesm #316-followup); post-fix target is q_sat so "
-        f"saturated columns are left alone."
-    )
-    # Use a 1e-7
-    # / dt tendency floor (≡ 3e-10 kg/kg/s at dt=300 s) so f32
-    # roundoff in saturation_specific_humidity doesn't trip the test
-    # while the pre-fix bug (|dq_v_dt|·dt ≈ 3e-3) is caught with
-    # six orders of magnitude of margin.
-    atol_tend = 1e-7 / dt
-    assert bool(jnp.all(jnp.abs(out_s.dq_v_dt) < atol_tend)), (
-        f"Sundqvist removes vapor at exactly RH=1.0 (no supersat): "
-        f"max(|dq_v_dt|)={float(jnp.max(jnp.abs(out_s.dq_v_dt))):.3e}"
-    )
-
-    # Case 2: RH = 0.95 (sub-saturated but above RH_crit=0.8).  No
-    # supersat → no condensation.  Pre-fix Sundqvist would still
-    # over-condense and drop RH to ~0.81.
-    q_v_sub = 0.95 * q_sat
-    out_s_sub = sundqvist_microphysics(
-        T, q_v_sub, hydro, p_full, p_half, rho, dz, dt, cfg, cell_area=1.0e10)
-    rh_after = float(
-        (q_v_sub[0, 0] + out_s_sub.dq_v_dt[0, 0] * dt) / q_sat[0, 0]
-    )
-    assert rh_after > 0.94, (
-        f"Sundqvist over-condensed in subsaturated column (RH=0.95 → "
-        f"RH_after={rh_after:.3f}).  No supersat to remove — q_v must "
-        f"stay close to 0.95*q_sat."
-    )
-
-    # Case 3: RH = 1.20 (supersaturated).  Supersat removal must
-    # bring RH back to ~1.0 (within sigmoid smoothing).
-    q_v_super = 1.20 * q_sat
-    out_s_super = sundqvist_microphysics(
-        T, q_v_super, hydro, p_full, p_half, rho, dz, dt, cfg, cell_area=1.0e10)
-    rh_after_super = float(
-        (q_v_super[0, 0] + out_s_super.dq_v_dt[0, 0] * dt) / q_sat[0, 0]
-    )
-    assert 0.99 < rh_after_super < 1.01, (
-        f"Sundqvist failed to remove supersaturation at RH=1.20 → "
-        f"RH_after={rh_after_super:.3f} (expected ~1.0)."
-    )
+# test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat pinned the removed
+# surrogate's target; gscond's condensation is pinned by
+# tests/atmosphere/microphysics/unit/test_sundqvist_gscond_oracle.py.
 
 
 # ============================================================================
@@ -652,7 +537,7 @@ def test_sundqvist_column_water_budget_closes():
     q_sat = saturation_specific_humidity(T, p_full)
     q_v = q_sat
     out = sundqvist_microphysics(
-        T, q_v, hydro, p_full, p_half, rho, dz, 300.0, SundqvistConfig(), cell_area=1.0e10)
+        T, q_v, hydro, p_full, p_half, rho, dz, 300.0, SundqvistConfig(), cell_area=1.0e10, prev_state=_sq_prev(T, q_v, p_half))
     dp = p_half[:, 1:] - p_half[:, :-1]
     col_water_tend = jnp.sum(
         (out.dq_v_dt + out.dq_c_dt + out.dq_r_dt) * dp, axis=1,
@@ -691,7 +576,7 @@ def test_sundqvist_drains_incoming_qr_to_precipitation():
 
     dt = 300.0
     out = sundqvist_microphysics(
-        T, q_v_sub, hydro_with_qr, p_full, p_half, rho, dz, dt, SundqvistConfig(), cell_area=1.0e10)
+        T, q_v_sub, hydro_with_qr, p_full, p_half, rho, dz, dt, SundqvistConfig(), cell_area=1.0e10, prev_state=_sq_prev(T, q_v_sub, p_half))
     q_r_after = q_r_in + out.dq_r_dt * dt
     # q_r must drain to zero in one step (modulo float round-off).
     max_qr_residual = float(jnp.max(jnp.abs(q_r_after)))
@@ -1191,7 +1076,7 @@ def test_sundqvist_sbk89_grad_finite_at_zero_precip():
     def objective(q_c):
         h = hydro._replace(q_c=q_c)
         out = sundqvist_microphysics(
-            T, q_v, h, p_full, p_half, rho, dz, 300.0, SundqvistConfig(), cell_area=1.0e10)
+            T, q_v, h, p_full, p_half, rho, dz, 300.0, SundqvistConfig(), cell_area=1.0e10, prev_state=_sq_prev(T, q_v, p_half))
         return jnp.sum(out.precipitation) + jnp.sum(out.dq_c_dt)
 
     g = jax.grad(objective)(jnp.zeros_like(hydro.q_c))

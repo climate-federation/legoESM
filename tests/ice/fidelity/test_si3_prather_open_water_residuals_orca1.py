@@ -59,7 +59,8 @@ def _port(f, *, sharpness=math.inf):
     contents, _, n = advect_si3_prather_2d(
         si3_prather_pack_intensives(x, area), tuple(jnp.asarray(m) for m in f["MOM"]), u, v, area, wet, DT,
         dx=jnp.asarray(f["e1v"]), dy=jnp.asarray(f["e2u"]), ice_step_index=int(KT), nn_fsbc=int(NN_FSBC),
-        halo_width=H, ice_volume_index=TR.index("v_i"), concentration_index=TR.index("a_i"), subcycles=int(ICYCLE))
+        halo_width=H, ice_volume_index=TR.index("v_i"), concentration_index=TR.index("a_i"), subcycles=int(ICYCLE),
+        limit_sharpness_scale=math.inf)  # NEMO hard limiter (oracle)
     raw = si3_prather_unpack_intensives(contents, area, wet)
     cor, res = apply_si3_prather_source_corrections(
         x, raw, tracer_names=TR, nlay_i=3, nlay_s=3, cell_area_m2=1.0, halo_width=H, ponds_active=False,

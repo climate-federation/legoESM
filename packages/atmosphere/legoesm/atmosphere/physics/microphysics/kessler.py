@@ -10,7 +10,8 @@ Every formula, coefficient and operation order is the oracle's:
   the rain terminal velocity, recomputed after every subcycle) until the
   elapsed time is within 1e-5 s of ``dt``;
 * per subcycle: upstream mass-weighted rain sedimentation over the distance
-  between level centres (half that distance at the top level), the
+  between level centres (half that distance at the top level; the default
+  departs from this, see DEPARTURE below), the
   Klemp-Wilhelmson (1978) autoconversion + semi-implicit collection
   (eqs. 2.13a,b), the KW78 eq. 2.11 Tetens saturation mixing ratio, the
   Durran-Klemp (1983) one-step saturation adjustment ``max(prod, -q_c)``
@@ -42,7 +43,30 @@ switch argument); it equals the oracle exactly as ``sharpness -> inf``.
 KNOWN GAP AT THE DEFAULT (``saturation_sharpness = 100``, unchanged pending a
 user decision): ``k x`` is far from the hard limit for |x| ~ 1e-3, so the
 default adjusts only about half the excess per subcycle and can leave
-NEGATIVE cloud water (-1.3e-4 kg/kg on the oracle fixture columns).  The data-dependent subcycle
+NEGATIVE cloud water (-1.3e-4 kg/kg on the oracle fixture columns).
+That negative cloud water is erased by the next subcycle's ``max(q_c -
+qrprod, 0)`` floor, so with more than one CFL subcycle the default CREATES
+water (#2291; spectral bridge, T21, 10 sigma levels, warm column, dt 300 s):
+the column gains 17-19x the surface precipitation, versus a 5.3 % residual at
+the hard limit (``saturation_sharpness`` 1e12) on the same states; with one
+subcycle (dt 30 s) both give 5.4 %.  That remaining ~5 % is the oracle's own
+sedimentation over level-centre spacing (see DEPARTURE below).  Remedies for
+the smooth default (a smooth form that never undershoots ``-q_c``, or
+conservative compensation of the floor increments) change the approved smooth
+form and await a user decision.
+
+DEPARTURE FROM THE ORACLE (user decision 2026-11-09):
+``KesslerConfig.conserving_sedimentation`` (default True) divides the
+sedimentation flux divergence by the layer thickness ``dz`` (full ``dz`` at
+the top) and takes the CFL subcycle limit over the same thickness, every level
+included.  Then sum_k rho dz sed telescopes to minus the surface flux, so the
+column loses exactly the rain it reports (fixture columns at the hard limit:
+<= 4.6e-13 of the rain).  The oracle form (False) reports 1.4-33 % more
+surface rain than leaves the fixture columns, and 7.2 % of the rain in a
+2-day MPAS run (``scripts/validate/mpas_water_closure_stages.py``); False
+reproduces the oracle bit for bit.
+
+The data-dependent subcycle
 count reuses the Morrison sedimentation sub-step machinery unchanged (user
 decision 2026-10-20): a static-length masked ``fori_loop`` whose length is the
 ``MorrisonConfig.sed_cfl_substeps_max`` default, and Morrison's strict error
@@ -135,10 +159,13 @@ __physics_contract__ = {
     "sign_convention": (
         "z up; surface at [:, -1]. Latent heating L_v/c_pd*(condensation - "
         "rain evaporation) (condensation warms). Water moves vapour<->cloud<->"
-        "rain; SURFACE PRECIPITATION (>= 0) removes water from the column. As "
-        "in the oracle, the sedimentation divides by the level-centre spacing "
-        "and the positivity floors are not compensated, so column water is "
-        "not exactly conserved."
+        "rain; SURFACE PRECIPITATION (>= 0) removes water from the column. "
+        "Sedimentation conserves column water + surface rain by default "
+        "(conserving_sedimentation; the oracle's level-centre form, selected "
+        "by False, reports more rain than leaves the column). As in the oracle "
+        "the positivity floors are not "
+        "compensated, so column water is not exactly conserved (the smooth "
+        "default creates water over multiple subcycles, see module docstring)."
     ),
     "conserves": ["none"],
     "differentiable": True,
@@ -169,12 +196,14 @@ def _terminal_velocity(q_r, r, rhalf):
     return _VT_COEFF * rhalf * safe_pow(q_r * r, _VT_EXP)
 
 
-def _cfl_dt(dt_max, vel, dz_c):
-    """``min(dt_max, 0.8 dz_c / V_r)`` over every level but the top, where
-    ``|V_r| > 1e-12`` (the oracle's ``dt0`` update)."""
-    v = vel[:, 1:]
+def _cfl_dt(dt_max, vel, dist):
+    """``min(dt_max, 0.8 dist / V_r)`` where ``|V_r| > 1e-12`` (the oracle's
+    ``dt0`` update).  ``dist`` is the oracle's ``dz_c`` (every level but the
+    top) or the layer thickness (every level); ``vel`` is matched to it from
+    the surface up."""
+    v = vel[:, vel.shape[1] - dist.shape[1]:]
     live = jnp.abs(v) > _VEL_EPS
-    lim = jnp.where(live, _CFL_FRACTION * dz_c / jnp.where(live, v, 1.0),
+    lim = jnp.where(live, _CFL_FRACTION * dist / jnp.where(live, v, 1.0),
                     jnp.inf)
     return jnp.minimum(dt_max, jnp.min(lim, axis=1))
 
@@ -252,6 +281,11 @@ def kessler_step_states(T, q_v, q_c0, q_r0, p_full, rho, dz, dt,
     :func:`kessler_microphysics`.
     """
     _require_oracle_defaults(config)
+    conserving = config.conserving_sedimentation
+    if not isinstance(conserving, bool):
+        raise ValueError(
+            f"KesslerConfig.conserving_sedimentation={conserving!r}: must be a "
+            "static Python bool (it selects the sedimentation divisor).")
     # One working dtype for the loop carry: the inputs' ordinary JAX type
     # promotion, applied once up front (the arithmetic promotes anyway).
     dtype = jnp.result_type(T, q_v, q_c0, q_r0, p_full, rho, dz)
@@ -273,6 +307,13 @@ def kessler_step_states(T, q_v, q_c0, q_r0, p_full, rho, dz, dt,
     z_full = heights_from_layer_dz(dz)[0]
     dz_c = z_full[:, :-1] - z_full[:, 1:]          # centre k-1 above centre k
     dz_top = 0.5 * (z_full[:, 0] - z_full[:, 1])
+    if conserving:
+        # Layer thickness: sum_k rho dz sed telescopes to minus the surface
+        # flux, so the column loses exactly the rain it reports.  The CFL
+        # distance is the same thickness, top level included.
+        div_below, div_top, cfl_dz = dz[:, 1:], dz[:, 0], dz
+    else:
+        div_below, div_top, cfl_dz = dz_c, dz_top, dz_c
     pk = (p_full / constants.p_ref) ** (constants.R_d / cp)
     theta0 = T / pk
     r = _G_CM3_PER_KG_M3 * rho
@@ -283,7 +324,7 @@ def kessler_step_states(T, q_v, q_c0, q_r0, p_full, rho, dz, dt,
 
     q_r_init = jnp.maximum(q_r0, 0.0)
     vel0 = _terminal_velocity(q_r_init, r, rhalf)
-    dt0_init = _cfl_dt(jnp.full((ncol,), dt, dtype=T.dtype), vel0, dz_c)
+    dt0_init = _cfl_dt(jnp.full((ncol,), dt, dtype=T.dtype), vel0, cfl_dz)
 
     def subcycle(_, carry):
         theta, qv, qc, qr, vel, dt0, tc, acc, cond = carry
@@ -292,8 +333,8 @@ def kessler_step_states(T, q_v, q_c0, q_r0, p_full, rho, dz, dt,
         acc_n = acc + rho_sfc[:, 0] * qr[:, -1] * vel[:, -1] * dt0
         # upstream sedimentation (oracle level loop surface -> top-1, top)
         flux = r * qr * vel
-        sed_below = dt0c * (flux[:, :-1] - flux[:, 1:]) / (r[:, 1:] * dz_c)
-        sed_top = -dt0 * qr[:, 0] * vel[:, 0] / dz_top
+        sed_below = dt0c * (flux[:, :-1] - flux[:, 1:]) / (r[:, 1:] * div_below)
+        sed_top = -dt0 * qr[:, 0] * vel[:, 0] / div_top
         sed = jnp.concatenate([sed_top[:, None], sed_below], axis=1)
         # autoconversion + semi-implicit collection (KW78 2.13a,b)
         qrprod = qc - (qc - dt0c * jnp.maximum(k1 * (qc - qc_thr), 0.0)) / (
@@ -321,7 +362,7 @@ def kessler_step_states(T, q_v, q_c0, q_r0, p_full, rho, dz, dt,
         qr_n = jnp.maximum(qr_n - ern, 0.0)
         tc_n = tc + dt0
         vel_n = _terminal_velocity(qr_n, r, rhalf)
-        dt0_n = _cfl_dt(jnp.maximum(dt - tc_n, 0.0), vel_n, dz_c)
+        dt0_n = _cfl_dt(jnp.maximum(dt - tc_n, 0.0), vel_n, cfl_dz)
         cond_n = cond + jnp.maximum(adj, 0.0)
 
         a2 = active[:, None]

@@ -608,6 +608,11 @@ class TestSpectralPEMicrophysicsAD:
             (grid.n_lat, grid.n_lon, nlev),
         )
         q_sat = saturation_mixing_ratio(T_grid, p_full_3d)
+        from types import SimpleNamespace
+        ncol = grid.n_lat * grid.n_lon
+        ps = SimpleNamespace(zc_T_prev=jnp.zeros((ncol, nlev)),
+                             zc_q_v_prev=jnp.zeros((ncol, nlev)),
+                             zc_p_s_prev=jnp.zeros((ncol,)))
 
         def loss(qv_scale):
             qv = qv_scale * q_sat
@@ -620,7 +625,9 @@ class TestSpectralPEMicrophysicsAD:
                     ),
                 },
             )
-            out = physics_fn(state, grid, sigma_coord)
+            # Sundqvist writes its gscond carry: fresh (zero) carry in,
+            # tendencies are the first return.
+            out = physics_fn(state, grid, sigma_coord, phys_state=ps)[0]
             return jnp.sum(out.T_hat.data.real ** 2 + out.T_hat.data.imag ** 2)
 
         g = jax.grad(loss)(jnp.array(0.95))

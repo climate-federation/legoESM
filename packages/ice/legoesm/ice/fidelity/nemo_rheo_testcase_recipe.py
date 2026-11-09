@@ -321,7 +321,9 @@ def build_ice_rheo_card(
         empty_surface_temperature=_periodic_halo(ocean_temperature.T),
         forcing_template=forcing,
         dynamics_config=config,
-        ridging_config=SI3JPL1RidgingConfig(),
+        # Oracle deck: NEMO's hard open-water limits (the smooth model
+        # default differs from NEMO by a documented class-B gap).
+        ridging_config=SI3JPL1RidgingConfig(open_water_limit_sharpness=math.inf),
         initial_state=initial,
         dt_s=_ICE_RHEO_DT_S,
         n_steps=_ICE_RHEO_N_STEPS,
@@ -649,9 +651,11 @@ def _step_ice_rheo_card_impl(
     """Traceable step body with a static NEMO sweep-parity selector."""
 
     forcing = _forcing_for_state(card, state, ice_step_index)
-    dynamics = si3_cgrid_aevp_solver(state.dynamics, forcing, card.metrics, card.dynamics_config)
+    dynamics = si3_cgrid_aevp_solver(
+        state.dynamics, forcing, card.metrics, card.dynamics_config, limit_sharpness_scale=math.inf
+    )
     divergence, deformation = si3_cgrid_deformation(
-        dynamics, forcing, card.metrics, card.dynamics_config
+        dynamics, forcing, card.metrics, card.dynamics_config, limit_sharpness_scale=math.inf
     )
     cell_area = jnp.full_like(dynamics.u_ice_u, _ICE_RHEO_CELL_AREA_M2, dtype=jnp.float64)
     wet = card.forcing_template.tmask_t.astype(bool)
@@ -672,6 +676,7 @@ def _step_ice_rheo_card_impl(
         ice_volume_index=ICE_RHEO_TRACERS.index("v_i"),
         concentration_index=ICE_RHEO_TRACERS.index("a_i"),
         subcycles=card.subcycles,
+        limit_sharpness_scale=math.inf,
     )
     del ignored_subcycles
     contents = si3_prather_unpack_intensives(contents, cell_area, wet)
@@ -686,6 +691,7 @@ def _step_ice_rheo_card_impl(
         ponds_active=card.ponds,
         entry_intensive_contents=state.contents,
         contents_are_intensive=True,
+        negative_area_ramp_width=0.0,  # NEMO hard WHERE(pa_i<0) (icevar.F90:836)
     )
 
     entry_area = _intensive(state.contents, "a_i")

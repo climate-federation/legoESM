@@ -794,10 +794,19 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
         u_f, v_f, T_f, q_f, pack_clubb_moments(m_f), kw["p_full"], kw["p_half"],
         kw["z_full"], kw["z_half"], T_f[:, -1], q_f[:, -1], rho, dt, cfg)
     assert np.all(np.asarray(out.lhflx) == 0.0)          # zero sfc moisture flux
-    hyd = make_zero_hydrometeors(ncol, nlev, dtype=T_f.dtype)   # q_r == 0
+    # q_r == 0; a 5e-4 kg/kg cloud already present so Zhao-Carr's release
+    # fires (gscond condenses only the other-process forcing, not the whole
+    # supersaturation the pre-port surrogate removed in one step).
+    hyd = make_zero_hydrometeors(ncol, nlev, dtype=T_f.dtype)
+    hyd = hyd._replace(q_c=jnp.full_like(T_f, 5e-4))
+    # Sundqvist's gscond condenses what the other processes supplied since its
+    # previous call (CLUBB's own tendency here is ~1e-10 kg/kg per step in the
+    # cloud): a 1 % moistening since the previous step makes it condense.
+    prev = {"zc_T_prev": T_f, "zc_q_v_prev": 0.99 * q_f,
+            "zc_p_s_prev": kw["p_half"][:, -1]}
     mp = sundqvist_microphysics(
         T_f, q_f, hyd, kw["p_full"], kw["p_half"], rho, dz, dt,
-        SundqvistConfig(**_SUNDQVIST_ZC), cell_area=1.0e10)
+        SundqvistConfig(**_SUNDQVIST_ZC), cell_area=1.0e10, prev_state=prev)
 
     mass = np.asarray(rho) * np.asarray(dz)              # kg/m^2, CLUBB's weight
     # sundqvist closes its budget in the Zhao-Carr layer mass dp/g (R9/C12)
@@ -808,19 +817,25 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
     dTm = np.asarray(mp.dT_dt)
     precip = np.asarray(mp.precipitation)                # kg/m^2/s
     assert float(np.max(np.abs(dqr))) == 0.0             # diagnostic-rain: no q_r tracer growth
-    # (a) Non-vacuous: the spun-up column is supersaturated → real condensation.
-    assert float(np.max(dqc)) > 1e-7
-    # (b) Enthalpy: condensation and rain evaporation conserve c_pd*T + L_v*q_v;
-    # the only residual is Zhao-Carr's fusion term (snow sublimation at L_v+L_f,
-    # melting at L_f), which can only cool.
-    # Two-sided: the fusion cooling cannot exceed L_f times the condensate the
-    # step converted to precipitation (only snow can sublimate or melt).
+    # (a) Non-vacuous: real condensation (vapour removed; the cloud's net
+    # change also carries the release, so q_v is the witness).
+    assert float(np.min(dqv_m)) < -1e-7
+    # (b) Enthalpy: liquid condensation and rain evaporation conserve
+    # c_pd*T + L_v*q_v; the residuals are Zhao-Carr's fusion terms: gscond
+    # deposition where its ice-water id is ice heats with L_v+L_f (bounded by
+    # L_f times the condensation); its ice-cloud evaporation, snow sublimation
+    # (L_v+L_f) and melting (L_f) cool.
     resid_h = constants.c_pd * dTm + constants.L_v * dqv_m
-    assert float(np.max(resid_h)) < 1e-10
     rates = diagnose_sundqvist_process_rates(
         T_f, q_f, hyd, kw["p_full"], kw["p_half"], rho, dz, dt,
-        SundqvistConfig(**_SUNDQVIST_ZC), cell_area=1.0e10)
-    fusion_cap = constants.L_f * np.sum(mass_mu * np.asarray(rates.autoconversion), axis=1)
+        SundqvistConfig(**_SUNDQVIST_ZC), cell_area=1.0e10, prev_state=prev)
+    dep_cap = constants.L_f * np.maximum(np.asarray(rates.condensation), 0.0)
+    assert float(np.max(resid_h - dep_cap * (1.0 + 1e-12))) < 1e-10
+    # cooling: snow sublimation/melting (<= L_f x converted condensate) and
+    # gscond's evaporation of ice-id cloud (<= L_f x the evaporated cloud)
+    fusion_cap = constants.L_f * np.sum(mass_mu * (
+        np.asarray(rates.autoconversion)
+        + np.maximum(-np.asarray(rates.condensation), 0.0)), axis=1)
     assert np.all(-np.sum(mass_mu * resid_h, axis=1) <= fusion_cap * (1.0 + 1e-12))
     # (c) Headline: on the same state, CLUBB conserves column water and
     # Sundqvist closes its budget to the surface precip sink, EACH in its own
@@ -874,6 +889,7 @@ def test_clubb_microphysics_chain_is_differentiable():
     dz = jnp.abs(kw["z_half"][:, :-1] - kw["z_half"][:, 1:])
     ncol, nlev = T_f.shape
     hyd = make_zero_hydrometeors(ncol, nlev, dtype=T_f.dtype)
+    hyd = hyd._replace(q_c=jnp.full_like(T_f, 5e-4))   # release fires (see above)
 
     def _run(q_in):
         out, _ = clubb_turbulence_prognostic(
@@ -881,15 +897,19 @@ def test_clubb_microphysics_chain_is_differentiable():
             kw["z_half"], T_f[:, -1], q_in[:, -1], rho, dt, cfg)
         t1 = T_f + dt * out.dT_dt
         q1 = q_in + dt * out.dq_v_dt
+        # gscond's previous-step state: the pre-CLUBB column 1 % drier (a
+        # moistening other-process forcing; CLUBB's own is ~1e-10 per step).
+        prev = {"zc_T_prev": T_f, "zc_q_v_prev": 0.99 * q_in,
+                "zc_p_s_prev": kw["p_half"][:, -1]}
         mp = sundqvist_microphysics(
             t1, q1, hyd, kw["p_full"], kw["p_half"], rho, dz, dt,
-            SundqvistConfig(**_SUNDQVIST_ZC), cell_area=1.0e10)
+            SundqvistConfig(**_SUNDQVIST_ZC), cell_area=1.0e10, prev_state=prev)
         return out, mp
 
     # Forward: the condensation branch is ACTIVE for this column (max on its
     # non-flat side), so a microphysics gradient is not zero-by-construction.
     out0, mp0 = _run(q_f)
-    assert float(jnp.max(mp0.dq_c_dt)) > 1e-7
+    assert float(jnp.min(mp0.dq_v_dt)) < -1e-7      # vapour condenses
     assert float(jnp.max(mp0.precipitation)) > 1e-4
 
     # (1) Aggregate end-to-end smoke check: finite value + finite gradient.

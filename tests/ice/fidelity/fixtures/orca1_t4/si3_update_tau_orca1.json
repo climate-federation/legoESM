@@ -1,0 +1,15 @@
+{
+ "source": "/burg/glab/users/pg2328/oracle_audit/tier4/update/ctl_on/t4_updtau_record_0003.bin (+ t4_updflx tmask1)",
+ "recorder": "nemo_5.0.1/cfgs/ORCA1_T4UPD MY_SRC t4_upd.F90 + iceupdate.F90 hooks",
+ "oracle": "NEMO 5.0.1 SI3 ORCA1, kt 17281, nn_fsbc 96, ln_drgice_imp T",
+ "rank": "0003",
+ "window_interior_i0": 21,
+ "window_interior_j0": 5,
+ "n": 6,
+ "ice_cells": 36,
+ "margin": "1 cell of NEMO interior values",
+ "nn_hls": 2,
+ "legoesm_main": "efa650f75e466a91a7d7c08308d7f3820948b814",
+ "npz_sha256": "29cdbb75b6b4d77a0e33c7c5b89221861990dddac5c81d7f73e7640239b8faa9",
+ "extractor": "/burg/glab/users/pg2328/oracle_audit/si3wire/pr1/make_fixture.py"
+}

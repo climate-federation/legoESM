@@ -173,14 +173,9 @@ def make_physics(
     cld_macmic_num_steps: int = 1,
     surface_bulk_coeffs="default",
     cam6_activation=None,
-    ecrad_ifs_sources=None,
     mynn_initflag=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
-
-    ``ecrad_ifs_sources`` (radiation ``ecrad_ifs``, MPAS only): the TSI, gas
-    and ozone inputs pending the user (votes L12-L14); ``None`` makes the
-    ecrad_ifs radiation build refuse (vote S2a).
 
     The returned function calls each enabled physics module and sums
     their tendencies.
@@ -380,7 +375,6 @@ def make_physics(
             budget_ledger_level_weight=budget_ledger_level_weight,
             surface_bulk_coeffs=surface_bulk_coeffs,
             cam6_activation=cam6_activation,
-            ecrad_ifs_sources=ecrad_ifs_sources,
             mynn_initflag=mynn_initflag)
     else:
         raise ValueError(
@@ -431,6 +425,9 @@ def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
         # The E3SM/CAM Beres convective source reads the lagged
         # ``conv_heating`` carry; unthreaded it would launch nothing.
         or gwd_reads_conv_heating(config.gravity_wave_drag)
+        # Sundqvist's gscond condenses the tendencies since its previous call
+        # (zc_* carry); unthreaded it refuses.
+        or config.microphysics.scheme == "sundqvist"
     )
 
 
@@ -726,7 +723,6 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                cld_macmic_num_steps: int = 1,
                                surface_bulk_coeffs=None,
                                cam6_activation=None,
-                               ecrad_ifs_sources=None,
                                mynn_initflag=None) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
 
@@ -746,11 +742,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     (CAM's ``1/N`` scaling).  On the MPAS/column lane with ZM and CLUBB, ZM's
     detrained condensate is booked by the CLUBB bridge in every sub-step on
     its post-CLUBB state (clubb_intr.F90:2345-2376: liquid/ice ramp, fusion
-    heating, number source).  Departures from CAM: radiation and gravity-wave
-    drag see the PRE-physics state (CAM: post-macmic / post-coupler) exactly
-    as the N=1 parallel split already does; on the other lanes the detrained
-    condensate is booked as liquid with the convective increment before
-    sub-step 1.
+    heating, number source).  After the loop radiation runs on the
+    post-macmic state with this step's cloud carries and its increment (or,
+    on held-radiation steps, the cached heating) is applied, then gravity-wave
+    drag runs on that state: CAM's tphysbc/tphysac order.  On the other lanes
+    the detrained condensate is booked as liquid with the convective
+    increment before sub-step 1.
 
     ``physics_cadence``: ``"off"`` (default, byte-identical to before);
     ``"write"`` additionally stores the full tendency pytree of every call in
@@ -841,7 +838,6 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 cloud_fraction_tracer=(
                     "cloud_fraction_ifs"
                     if config.microphysics.scheme == "ifs_cloudsc" else None),
-                ecrad_ifs_sources=ecrad_ifs_sources,
                 # ecRad: the held-radiation variant runs RADHEATN on the
                 # carry instead of re-adding a held heating (votes L4a/S4a)
                 ecrad_ifs_full_call=need_rad,
@@ -935,7 +931,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 and resolve_warm_rain_scheme(
                     config.microphysics.morrison) == "kk2000_cam6"),
             cam6_activation=cam6_activation)
-        # CAM6 droplet activation writes the CLDO carry (cloud_fraction_old).
+        # CAM6 droplet activation writes the CLDO carry (cloud_fraction_old),
+        # Sundqvist its gscond previous-step carry (zc_*), both as a dict.
         _micro_carry = getattr(_micro_fn, "_writes_phys_state", False)
         tagged_fns.append((_micro_fn, _micro_carry,
                            "cloud_fraction_old" if _micro_carry else None))
@@ -945,7 +942,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     # Macmic group of each module, PARALLEL to ``tagged_fns`` (same append
     # order): "pre" = applied to the intermediate state before the loop
     # (deep convection), "sub" = sub-cycled (turbulence, microphysics),
-    # "once" = evaluated once on the pre-physics state (radiation, GWD).
+    # "once" = evaluated once AFTER the loop, in this order, each on the state
+    # the previous one left (radiation, surface bulk, GWD: CAM tphysbc/tphysac).
     _macmic_group = []
     if config.radiation.scheme != "none":
         _macmic_group.append("once")
@@ -1330,9 +1328,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         return update_physics_state(ps, {**keep, **upd})
 
     def _accumulate_step(fns, groups, state, grid, sigma_coord, phys_state,
-                         forcing, ledger_rows=None):
+                         forcing, ledger_rows=None, held_rad=None):
         """``_accumulate`` (N=1, byte-identical) or the CAM macmic loop (also
-        the IFS CLOUDSC order at N=1: convection, then CLOUDSC once)."""
+        the IFS CLOUDSC order at N=1: convection, then CLOUDSC once).
+
+        ``held_rad``: the cached radiative heating [K/s] on a held-radiation
+        step (radiation not in ``fns``); CAM's radiation_tend applies it to
+        the post-macmic state, so the "once" modules after it see it."""
         if _n_macmic == 1 and not _cloudsc:
             return _accumulate(fns, state, grid, sigma_coord, phys_state,
                                forcing, ledger_rows=ledger_rows)
@@ -1345,16 +1347,18 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                ps, frc,
                                ledger_rows=([r for _, r in fns_rows]
                                             if ledger_rows is not None else None))
-        # Evaluation order: the group holding ``fns[0]`` first, so ``first``
-        # (radiation when configured) is the template exactly as at N=1.
-        # ``first`` is only ever a Field TEMPLATE and, when radiation leads,
-        # the radiative heating; on a sub-led list it is sub-step 1's dt/N
-        # tendency and must not be read quantitatively.
-        acc = None
+        # CAM order (physpkg.F90 tphysbc/tphysac): deep convection, the
+        # macmic loop, THEN radiation on the post-macmic state with this
+        # step's cloud carries (tphysbc 2272-2279), its increment applied,
+        # then gw_tend on that state (tphysac 1496-1500).  Every module is
+        # applied before the next one runs.  Summation order is unchanged: the
+        # group holding ``fns[0]`` is summed first, so ``first`` (radiation
+        # when configured) is the template and the radiative heating exactly
+        # as at N=1; on a sub-led list it is sub-step 1's dt/N tendency and
+        # must not be read quantitatively.
+        parts = []
         state_m = state
         ps_m = phys_state
-        if groups[0] == "once" and sel["once"]:
-            acc = _add_scaled(acc, _run(sel["once"], state, phys_state), 1.0)
         dlf = None
         cloudsc_conv = None
         if sel["pre"]:
@@ -1371,7 +1375,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 if dlf is not None:
                     dlf = dlf.reshape(state.T.data.shape)
                 r_pre = r_pre[:6] + (_upd,) + r_pre[7:]
-            acc = _add_scaled(acc, r_pre, 1.0)
+            parts.append((r_pre, 1.0))
             state_m = _advance_state(state_m, r_pre[0], r_pre[1], r_pre[2],
                                      r_pre[3], r_pre[5], dt)
             # CAM order: clubb_tend_cam reads THIS step's convect_deep_tend
@@ -1398,9 +1402,26 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 state_m = _advance_state(state_m, r_sub[0], r_sub[1], r_sub[2],
                                          r_sub[3], r_sub[5], _dt_sub)
                 ps_m = _carry_within_call(ps_m, r_sub[6])
-                acc = _add_scaled(acc, r_sub, 1.0 / _n_macmic)
-        if groups[0] != "once" and sel["once"]:
-            acc = _add_scaled(acc, _run(sel["once"], state, phys_state), 1.0)
+                parts.append((r_sub, 1.0 / _n_macmic))
+        once = []
+        if _cloudsc:
+            # IFS lane: radiation, turbulence and GWD stay on the start-of-step
+            # state (the IFS order, not CAM's tphysbc/tphysac).
+            if sel["once"]:
+                once.append((_run(sel["once"], state, phys_state), 1.0))
+            sel = {**sel, "once": []}
+        if held_rad is not None and sel["once"]:
+            state_m = state_m._replace(T=state_m.T.replace(
+                data=state_m.T.data + dt * held_rad.reshape(state_m.T.data.shape)))
+        for _fr in sel["once"]:
+            r_o = _run([_fr], state_m, ps_m)
+            state_m = _advance_state(state_m, r_o[0], r_o[1], r_o[2],
+                                     r_o[3], r_o[5], dt)
+            ps_m = _carry_within_call(ps_m, r_o[6])
+            once.append((r_o, 1.0))
+        acc = None
+        for r, w in ((once + parts) if groups[0] == "once" else (parts + once)):
+            acc = _add_scaled(acc, r, w)
         return acc
 
     def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
@@ -1429,7 +1450,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
              precip_accum, sfc_diag_extras, _led) = _accumulate_step(
                 _non_rad_fns, _non_rad_groups, state, grid, sigma_coord,
                 phys_state, forcing,
-                ledger_rows=(_non_rad_rows if _budget_ledger else None))
+                ledger_rows=(_non_rad_rows if _budget_ledger else None),
+                held_rad=cached_rad)
             if cached_rad is not None:
                 # cached_rad is column-shaped (ncol, nlev); restore native layout.
                 dT_dt = dT_dt + cached_rad.reshape(dT_dt.shape)
@@ -1720,17 +1742,22 @@ def _make_spectral_pe_combined(
             *surface_bulk_coeffs), False, None))
     if config.microphysics.scheme != "none":
         # The run's built cloud config: the aist rh ramps are run parameters.
-        tagged_fns.append((make_microphysics_physics(
+        _micro_fn = make_microphysics_physics(
             config.microphysics, "spectral_pe", _dt_sub,
             cloud_config=config.radiation.cloud_config,
-            clubb_config=resolved_clubb_config(config.turbulence)), False, None))
+            clubb_config=resolved_clubb_config(config.turbulence))
+        # Sundqvist writes its gscond previous-step carry (a zc_* dict).
+        _micro_carry = getattr(_micro_fn, "_writes_phys_state", False)
+        tagged_fns.append((_micro_fn, _micro_carry,
+                           "zc_T_prev" if _micro_carry else None))
     if config.gravity_wave_drag.scheme != "none":
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, "spectral_pe", dt), True, "gwd_spectrum"))
 
     # Parallel to ``tagged_fns``: which macmic group each module belongs to.
-    # Mirrors the hydrostatic map — radiation and gravity-wave drag see the
-    # start-of-step state ("once"), convection runs once and advances it
-    # ("pre"), turbulence and microphysics are the sub-cycled pair ("sub").
+    # Mirrors the hydrostatic map — convection runs once and advances the
+    # state ("pre"), turbulence and microphysics are the sub-cycled pair
+    # ("sub"), radiation and gravity-wave drag run after the loop on the
+    # state it left ("once", CAM tphysbc/tphysac).
     _macmic_group = []
     if config.radiation.scheme != "none":
         _macmic_group.append("once")
@@ -1752,6 +1779,13 @@ def _make_spectral_pe_combined(
 
     def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None,
                    return_sfc_precip=False):
+        if (config.turbulence.scheme == "ysu" and forcing is not None
+                and forcing.get("sic") is not None):
+            # R4 votes X8/J7: WRF blends sea ice through a second surface-layer
+            # call per ice fraction, which is not ported.
+            raise ValueError(
+                "turbulence=ysu (WRF surface layer) does not handle sea ice; "
+                "this spectral run's forcing carries a sea-ice field ('sic').")
         if not tagged_fns:
             zero_3d = jnp.zeros_like(state.vor_hat.data)
             zero_2d = jnp.zeros_like(state.lnps_hat.data)
@@ -1901,17 +1935,16 @@ def _make_spectral_pe_combined(
             # and the arena would grow with the sub-cycle count (the
             # si_substeps lesson in neural_gcm_spectral).
             _ckpt = jax.checkpoint(_accumulate, static_argnums=(0,))
-            acc = None
+            parts = []
             state_m = st
             ps_m = ps
-            # Evaluation order: the group holding ``fns[0]`` runs first, so the
-            # Field template (and, when radiation leads, the radiative heating)
-            # is what it is at N=1.
-            if groups[0] == "once" and sel["once"]:
-                acc = _add_scaled(acc, _accumulate(sel["once"], st, ps), 1.0)
+            # CAM order: convection, the macmic loop, then the "once" modules
+            # (radiation, GWD) each on the state the previous one left.  The
+            # group holding ``fns[0]`` is still SUMMED first, so the Field
+            # template is what it is at N=1.
             if sel["pre"]:
                 r_pre = _accumulate(sel["pre"], st, ps)
-                acc = _add_scaled(acc, r_pre, 1.0)
+                parts.append((r_pre, 1.0))
                 state_m = _advance(state_m, r_pre, dt)
                 # CAM order: the macrophysics reads THIS step's convective
                 # output (cmfmc, dlf), so the convective carries are visible
@@ -1941,9 +1974,16 @@ def _make_spectral_pe_combined(
                 for i in range(_n_macmic):
                     for ys in stacked:
                         r_sub = jax.tree.map(lambda leaf: leaf[i], ys)
-                        acc = _add_scaled(acc, r_sub, 1.0 / _n_macmic)
-            if groups[0] != "once" and sel["once"]:
-                acc = _add_scaled(acc, _accumulate(sel["once"], st, ps), 1.0)
+                        parts.append((r_sub, 1.0 / _n_macmic))
+            once = []
+            for _f in sel["once"]:
+                r_o = _accumulate((_f,), state_m, ps_m)
+                state_m = _advance(state_m, r_o, dt)
+                ps_m = _carry_within_call(ps_m, r_o[6])
+                once.append((r_o, 1.0))
+            acc = None
+            for r, w in ((once + parts) if groups[0] == "once" else (parts + once)):
+                acc = _add_scaled(acc, r, w)
             return acc
 
         (vor_hat, div_hat, T_hat, lnps_hat, phis_hat,

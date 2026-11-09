@@ -25,6 +25,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
+from jax.test_util import check_grads  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
@@ -383,9 +384,11 @@ def _random_marine_inputs(n=4096, seed=7):
 def test_ncar_coefficients_match_independent_numpy_mirror():
     theta, q, sst, ssq, wind, _slp = _random_marine_inputs()
     Cd_np, Ch_np, Ce_np, Ub_np = _np_turb_ncar(theta, q, sst, ssq, wind)
+    # The NumPy mirror is NEMO's hard 33 m/s plateau: compare at the hard
+    # limit (cd_cutoff_width=0); the default's gap is pinned in the #2241 tests.
     Cd, Ch, Ce, Ub = ncar_transfer_coefficients(
         jnp.asarray(theta), jnp.asarray(q), jnp.asarray(sst),
-        jnp.asarray(ssq), jnp.asarray(wind))
+        jnp.asarray(ssq), jnp.asarray(wind), cd_cutoff_width=0.0)
     assert np.allclose(np.asarray(Ub), Ub_np, rtol=0, atol=0)
     assert np.allclose(np.asarray(Cd), Cd_np, rtol=1e-12, atol=1e-15)
     assert np.allclose(np.asarray(Ch), Ch_np, rtol=1e-12, atol=1e-15)
@@ -824,3 +827,75 @@ def test_legacy_requires_q_sfc():
             u10=jnp.asarray(1.0), v10=jnp.asarray(0.0),
             T_air_K=jnp.asarray(280.0), q_air=jnp.asarray(0.005),
             T_sfc_K=jnp.asarray(281.0), algo="ly09_2coeff")
+
+
+# --- #2241 RULE 5: the NEMO-parity 33 m/s neutral-drag plateau -------------
+# The production OMIP path (air_sea_fluxes -> ncar_transfer_coefficients ->
+# large_yeager_neutral_cd(nemo_parity=True)) blends the LY09 polynomial into
+# the 2.34e-3 plateau over [33 - w, 33] m/s, w = cd_cutoff_width (default
+# NCAR_CD_CUTOFF_WIDTH = 0.5); 0.0 is NEMO's hard switch.
+
+def test_nemo_parity_cd_hard_limit_matches_nemo_source_exact():
+    """Width 0 reproduces NEMO's cd_n10_ncar (the rounding-exact branch,
+    itself pinned to NEMO) to round-off, eager and under jit, on both sides
+    of U = 33 (the bit-exact claim belongs to nemo_source_exact only)."""
+    from legoesm.core.bulk_flux import large_yeager_neutral_cd as cd
+    U = jnp.asarray([0.25, 5.0, 30.0, 32.5, 32.75, 33.0 - 1e-12, 33.0, 35.0])
+    ref = np.asarray(cd(U, nemo_parity=True, nemo_source_exact=True))
+    hard = lambda u: cd(u, nemo_parity=True, cd_cutoff_width=0.0)  # noqa: E731
+    for got in (hard(U), jax.jit(hard)(U)):
+        np.testing.assert_allclose(np.asarray(got), ref, rtol=1e-15, atol=0.0)
+
+
+# Relative gap of the default vs the hard plateau, (Cd(0.5) - Cd(0)) / Cd(0),
+# per neutral wind [m/s].  Measured 2026-11-07 (#2241); 0 outside the band.
+_CD_GAP = {32.5: 0.0, 32.6: 6.452073249229509e-05, 32.75: 0.0004441758241635477,
+           32.9: 0.0007216142895876101, 33.0: 0.0}
+
+
+@pytest.mark.parametrize("U", sorted(_CD_GAP))
+def test_nemo_parity_cd_default_gap_per_wind(U):
+    from legoesm.core.bulk_flux import large_yeager_neutral_cd as cd
+    u = jnp.asarray(U)
+    hard = cd(u, nemo_parity=True, cd_cutoff_width=0.0)
+    gap = float((cd(u, nemo_parity=True) - hard) / hard)
+    np.testing.assert_allclose(gap, _CD_GAP[U], rtol=1e-6, atol=1e-12)
+
+
+def test_check_grads_omip_drag_through_the_plateau_at_default():
+    """Scheme level: Cd of ncar_transfer_coefficients vs wind in a neutral
+    column (air = sea theta and q, so zeta = 0 and UN10 = wind in every
+    iteration): the hard switch jumps at 33 m/s; the default is C2 there
+    (order 1 at the join, as for the core helper), smooth mid-band."""
+    def cd(u, width=None):
+        return ncar_transfer_coefficients(
+            jnp.asarray([290.0]), jnp.asarray([0.010]), jnp.asarray([290.0]),
+            jnp.asarray([0.010]), jnp.atleast_1d(u), cd_cutoff_width=width)[0][0]
+    check_grads(cd, (jnp.asarray(33.0),), order=1, modes=("fwd", "rev"), eps=1e-4)
+    check_grads(cd, (jnp.asarray(32.75),), order=2, modes=("fwd", "rev"), eps=1e-4)
+    assert float(jax.grad(cd)(jnp.asarray(32.75))) != 0.0
+    with pytest.raises(AssertionError):          # the hard limit is not smooth
+        check_grads(lambda u: cd(u, 0.0), (jnp.asarray(33.0),), order=1,
+                    modes=("rev",), eps=1e-4)
+
+
+def test_omip_cd_cutoff_width_reaches_the_drag():
+    """The keyword is not inert: inside the band the two widths differ."""
+    args = (jnp.asarray([32.75]), jnp.zeros(1), jnp.asarray([290.0]),
+            jnp.asarray([0.010]), jnp.asarray([291.0]))
+    assert float(air_sea_fluxes(*args)[0][0]) != float(
+        air_sea_fluxes(*args, cd_cutoff_width=0.0)[0][0])
+
+
+def test_every_large_yeager_drag_branch_shares_one_polynomial(monkeypatch):
+    """#2242: the legacy (clipped) and NEMO-parity drag branches evaluate the
+    same LY09 polynomial, so a change to it reaches both."""
+    from legoesm.core import bulk_flux as bf
+    U = jnp.array([5.0, 20.0])
+    base_legacy = bf.large_yeager_neutral_cd(U)
+    base_parity = bf.large_yeager_neutral_cd(U, nemo_parity=True)
+    monkeypatch.setattr(bf, "_ly09_cdn_poly", lambda w: jnp.full_like(w, 1.5))
+    np.testing.assert_allclose(bf.large_yeager_neutral_cd(U), 1.5e-3, rtol=1e-15)
+    np.testing.assert_allclose(
+        bf.large_yeager_neutral_cd(U, nemo_parity=True), 1.5e-3, rtol=1e-15)
+    assert not np.allclose(base_legacy, 1.5e-3) and not np.allclose(base_parity, 1.5e-3)

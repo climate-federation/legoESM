@@ -30,6 +30,7 @@ def _bnd_inputs():
         T_land=jnp.array([290.0, 280.0, 280.0, 300.0]),
         sst=jnp.array([275.0, 271.5, 271.5, 285.0]),
         emissivity=EPS,
+        emissivity_land=jnp.array([0.93, 0.96, 0.95, 0.92]),
         lw_emit_ice_lake=jnp.array([50.0, 120.0, 0.0, 80.0]),
         emissivity_ice=jnp.array([0.97, 0.97, 0.97, 0.97]),
         emissivity_lake=jnp.array([0.95, 0.95, 0.95, 0.95]),
@@ -45,9 +46,11 @@ def test_boundary_emits_and_reflects_the_tile_sum():
     b = handback_surface_boundary(**a)
     f_ow = 1.0 - a["f_land"] - a["f_ice"] - a["f_lake"]
     np.testing.assert_allclose(b["f_ow"], f_ow, rtol=0, atol=1e-15)
-    emit = (EPS * SB * (a["f_land"] * a["T_land"] ** 4 + f_ow * a["sst"] ** 4)
+    eL = a["emissivity_land"]
+    emit = (SB * (eL * a["f_land"] * a["T_land"] ** 4
+                  + EPS * f_ow * a["sst"] ** 4)
             + a["lw_emit_ice_lake"])
-    eps = (EPS * (a["f_land"] + f_ow) + a["f_ice"] * a["emissivity_ice"]
+    eps = (eL * a["f_land"] + EPS * f_ow + a["f_ice"] * a["emissivity_ice"]
            + a["f_lake"] * a["emissivity_lake"])
     T = b["T_sfc_rad"]
     np.testing.assert_allclose(b["sfc_emissivity"], eps, rtol=1e-15)
@@ -56,7 +59,7 @@ def test_boundary_emits_and_reflects_the_tile_sum():
     # What a solver given (eps, T) sends up = each tile's emission plus its
     # own reflection (1 - eps_i) * L of the downward longwave L.
     L = 300.0
-    reflect = ((1 - EPS) * (a["f_land"] + f_ow)
+    reflect = ((1 - eL) * a["f_land"] + (1 - EPS) * f_ow
                + a["f_ice"] * (1 - a["emissivity_ice"])
                + a["f_lake"] * (1 - a["emissivity_lake"])) * L
     np.testing.assert_allclose(eps * SB * T ** 4 + (1 - eps) * L,
@@ -265,7 +268,7 @@ def test_radiation_takes_the_tile_emissivity_and_T_rad(monkeypatch):
 
 @pytest.mark.parametrize("scheme,keys,match", [
     ("gray", ("sfc_emissivity", "T_sfc_rad"), "rrtmgp"),
-    ("rrtmgp", ("sfc_emissivity",), "only one"),
+    ("rrtmgp", ("sfc_emissivity",), "needs BOTH"),
 ])
 def test_radiation_refuses_an_incomplete_or_unusable_boundary(
         monkeypatch, scheme, keys, match):
@@ -409,7 +412,8 @@ def _split(a, S, L, sw_net, lw_net):
     from legoesm.forcing.surface_utils import handback_tile_radiation
     return handback_tile_radiation(
         S, L, sw_net, lw_net, a["f_land"], a["f_ice"], a["f_lake"],
-        a["albedo_land"], a["T_land"], a["emissivity"], a["lw_emit_ice_lake"],
+        a["albedo_land"], a["T_land"], a["emissivity"], a["emissivity_land"],
+        a["lw_emit_ice_lake"],
         a["albedo_ice"], a["albedo_lake"], a["emissivity_ice"],
         a["emissivity_lake"])
 

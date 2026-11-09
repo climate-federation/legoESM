@@ -12,15 +12,19 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+import functools
+
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
-    saturation_adjustment,
+    saturation_adjustment as _saturation_adjustment,
     effective_Nc,
     autoconversion_sb,
     accretion,
     self_collection_breakup,
     rain_evaporation,
 )
+
+saturation_adjustment = functools.partial(_saturation_adjustment, l_v=constants.L_v)
 
 
 @pytest.fixture

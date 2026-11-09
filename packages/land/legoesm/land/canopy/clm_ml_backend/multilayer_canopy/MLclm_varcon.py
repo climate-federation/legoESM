@@ -32,7 +32,7 @@ dv0: float = 21.8e-6  # Molecular diffusivity, H2O,  at 0 °C and 1013.25 hPa (m
 dc0: float = 13.8e-6  # Molecular diffusivity, CO2,  at 0 °C and 1013.25 hPa (m2/s)
 from legoesm import constants
 
-lapse_rate: float = constants.g / constants.c_pd  # Dry adiabatic lapse rate (K/m)
+lapse_rate: float = constants.lapse_rate_clmml  # Temperature lapse rate (K/m), MLclm_varcon.F90:26
 
 
 # ---------------------------------------------------------------------------
