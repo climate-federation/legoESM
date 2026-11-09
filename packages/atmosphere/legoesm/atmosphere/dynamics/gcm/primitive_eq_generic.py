@@ -24,7 +24,8 @@ optional lat-lon PPM temperature flux, damping, tracers, the surface-pressure
 post-hook (lat-lon zero-mean, MPAS del-4) and the velocity boundary condition.
 Lat-lon SPMD packed exchanges are not used: the plain operators are called.
 
-Vertical form, an explicit required choice (``vertical_form``, no default):
+Vertical form, chosen by ``vertical_form`` (default ``"as83"``, user decision
+2026-11-09; validated, raises on unknown):
 
 * ``"sb81_theta"`` -- the form above (SB81 ``ln p_k`` PGF, theta-form vertical
   T, omega_ps split).  Not energy-conserving: the upwind theta transport
@@ -104,6 +105,7 @@ class PEOperators(NamedTuple):
 
 
 VERTICAL_FORMS = ("as83", "as83_logmean", "sb81_theta")
+DEFAULT_VERTICAL_FORM = "as83"
 
 
 def _check_vertical_form(vertical_form: str) -> None:
@@ -139,7 +141,8 @@ def primitive_equation_tendencies(
     _check_vertical_form(ops.vertical_form)
     as83 = ops.vertical_form != "sb81_theta"
     if as83 and not hybrid:
-        raise ValueError("the Arakawa-Suarez vertical form needs a hybrid coordinate")
+        raise ValueError("the Arakawa-Suarez vertical form needs a hybrid coordinate; "
+                         "use vertical_form=\"sb81_theta\" on sigma")
     gops = ops.grid_ops
     p_s = jnp.clip(p_s, ops.p_floor, ops.p_ceil)
     if hybrid:
@@ -262,7 +265,7 @@ def latlon_face_metrics(grid: Any, gops: Any) -> tuple[jax.Array, ...]:
 
 
 def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = None, *,
-                        vertical_form: str) -> PEOperators:
+                        vertical_form: str = DEFAULT_VERTICAL_FORM) -> PEOperators:
     """Lat-lon C-grid plug-ins (fields ``(n_lat, n_lon(+1), nlev)``).  The
     Arakawa-Suarez forms use the TRiSK-form kinetic energy and the
     energy-neutral Coriolis term; ``"sb81_theta"`` keeps the current ones."""
@@ -384,7 +387,7 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
 
 
 def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
-                               config: Any = None, *, vertical_form: str,
+                               config: Any = None, *, vertical_form: str = DEFAULT_VERTICAL_FORM,
                                geom_pads: Any = None, dt: Any = None):
     """Drop-in twin of ``cgrid_latlon_hydrostatic_tendencies`` on the shared core:
     ``(du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends)``."""
@@ -406,7 +409,7 @@ def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
 # ============================================================================
 
 def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0.0, *,
-                      vertical_form: str) -> PEOperators:
+                      vertical_form: str = DEFAULT_VERTICAL_FORM) -> PEOperators:
     """MPAS / TRiSK plug-ins (fields ``(nCells|nEdges, nlev)``)."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         mpas_momentum_dissipation,
@@ -500,7 +503,7 @@ def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0
 
 
 def mpas_pe_tendencies(state: Any, mesh: Any, sigma_coord: Any, config: Any = None,
-                       physics_tendency: Any = None, dt: float = 0.0, *, vertical_form: str):
+                       physics_tendency: Any = None, dt: float = 0.0, *, vertical_form: str = DEFAULT_VERTICAL_FORM):
     """Drop-in twin of ``mpas_hydrostatic_tendencies`` on the shared core."""
     if physics_tendency is not None:
         raise ValueError("the shared PE core does not add physics tendencies")

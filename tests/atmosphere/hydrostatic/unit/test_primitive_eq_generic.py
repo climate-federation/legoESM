@@ -528,6 +528,36 @@ def _mpas_fn(kind, form="sb81_theta"):
     return f, (s0.T.data, s0.u.data, s0.p_s.data, s0.tracers["q_v"].data)
 
 
+@pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
+def test_default_vertical_form_is_as83(grid_kind):
+    """No ``vertical_form`` = ``"as83"`` bit-for-bit; on sigma the default raises
+    (no silent fallback to ``"sb81_theta"``)."""
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
+    if grid_kind == "latlon":
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+            CGridLatLonPrimitiveEquationConfig,
+        )
+        grid, cfg = _ll_grid(), CGridLatLonPrimitiveEquationConfig(use_ppm_transport=False)
+        s0 = _ll_state(grid)
+
+        def run(coord, **kw):
+            return g.cgrid_latlon_pe_tendencies(s0, grid, coord, cfg, dt=600.0, **kw)[:3]
+    else:
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
+        mesh, cfg = _mesh(), MPASPrimitiveEquationConfig()
+        s0 = _mpas_state(mesh)
+
+        def run(coord, **kw):
+            t = g.mpas_pe_tendencies(s0, mesh, coord, cfg, dt=600.0, **kw)
+            return t.du_dt.data, t.dT_dt.data, t.dp_s_dt.data
+    assert g.DEFAULT_VERTICAL_FORM == "as83"
+    for a, b in zip(jax.tree_util.tree_leaves(run(_coord("hybrid"))),
+                    jax.tree_util.tree_leaves(run(_coord("hybrid"), vertical_form="as83"))):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    with pytest.raises(ValueError, match="hybrid coordinate"):
+        run(_coord("sigma"))
+
+
 _KIND_FORM = [("sigma", "sb81_theta"), ("hybrid", "sb81_theta"),
               ("hybrid", "as83"), ("hybrid", "as83_logmean")]
 
