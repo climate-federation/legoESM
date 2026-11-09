@@ -423,6 +423,11 @@ class KesslerConfig(NamedTuple):
     hard_saturation_adjustment: bool = False
     hard_sat_adjust_threshold: float = 1.1      # RH trigger q_v > thr*q_sat [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
+    # Rain sedimentation over layer thickness, so column water + surface rain
+    # is conserved (user 2026-11-09).  False = the oracle's level-centre
+    # spacing, which reports 1.4-33 % more surface rain than leaves the
+    # column (fixture columns).  Static.
+    conserving_sedimentation: bool = True
 
 
 class SundqvistConfig(NamedTuple):
