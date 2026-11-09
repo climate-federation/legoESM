@@ -1183,12 +1183,18 @@ SED_CFL_SUBSTEPS_MAX_LIMIT = 1024
 class ThompsonConfig(NamedTuple):
     """WRF v4.8.0 Thompson microphysics (``mp_physics=8``), the faithful port
     :func:`.thompson_wrf.thompson_wrf_step`.  The scheme's constants are the
-    oracle's (``thompson_wrf_tables``); nothing here is tunable."""
+    oracle's (``thompson_wrf_tables``); nothing here is tunable.  One
+    departure from WRF, on by default (user 2026-11-09): see
+    ``cloud_sedimentation_to_precip``."""
     # Static length of the sedimentation sub-step loop: the port runs WRF's own
     # per-species sub-step counts inside it and a column needing more is an
     # error (vote H1a: Morrison's ``sed_cfl_substeps_max`` default, same hard
     # ceiling ``SED_CFL_SUBSTEPS_MAX_LIMIT``).
     sed_substeps_max: int = MorrisonConfig._field_defaults["sed_cfl_substeps_max"]
+    # Cloud water settling out of the lowest level counts as surface rain.
+    # False = WRF v4.8.0, which removes it from the column and books it
+    # nowhere (2.86x the reported rain on the small MPAS test atmosphere).
+    cloud_sedimentation_to_precip: bool = True
 
 
 class P3Config(NamedTuple):
