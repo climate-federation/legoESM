@@ -291,8 +291,9 @@ def test_macmic_hands_dlf_to_every_clubb_substep(monkeypatch):
             dp_s_dt=Field(z2, "dps", ("nCells",)), dphis_dt=Field(z2, "dphis", ("nCells",)),
             dv_dt=None, tracer_tendencies={k: F(v) for k, v in (tr or {}).items()})
 
-    def f_conv(cfg, model_type, dt_, *, defer_detrainment=False):
+    def f_conv(cfg, model_type, dt_, *, defer_detrainment=False, defer_to_cloudsc=False):
         seen["defer"] = defer_detrainment
+        seen["cloudsc"] = defer_to_cloudsc
 
         def fn(state, grid, sigma, phys_state=None):
             return tend(state, dT=jnp.full_like(state.T.data, 1e-5),
@@ -329,6 +330,7 @@ def test_macmic_hands_dlf_to_every_clubb_substep(monkeypatch):
     fn = cmb.make_physics(cfg, model_type="mpas", dt=dt, cld_macmic_num_steps=N)
     out, ps_out = fn(state, None, None, phys_state=ps)
     assert seen["defer"] is True
+    assert seen["cloudsc"] is False
     assert seen["zm"] is cfg.convection.zhang_mcfarlane
     assert len(seen["turb"]) == N
     dts = dt / N
