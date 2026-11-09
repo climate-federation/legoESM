@@ -121,6 +121,24 @@ def test_column_lane_step_applies_the_sponge():
         assert not np.array_equal(x[:, 0], y[:, 0]), f
 
 
+@pytest.mark.parametrize("integrator", ["ssp_rk3", "ssp_rk54"])
+def test_applied_decay_per_mode_is_the_factor(integrator):
+    """End to end: the operators after the sponge are per-mode diagonal, so
+    step(on)/step(off) at a top level is exactly the sponge factor per mode."""
+    on, off = _model(NU_TOP, integrator=integrator), _model(0.0, integrator=integrator)
+    s = _seeded_state(on)
+    a, b = on.step(s, DT), off.step(s, DT)
+    on._ensure_sponge_factor(DT)
+    fac = {"vor_hat": on._sponge_factor, "div_hat": on._sponge_factor,
+           "T_hat": on._sponge_factor_T}
+    for f, fk in fac.items():
+        x, y = np.asarray(getattr(a, f).data), np.asarray(getattr(b, f).data)
+        for k in range(3):
+            live = np.abs(y[:, k]) > 1e-12 * np.abs(y[:, k]).max()
+            np.testing.assert_allclose(x[live, k] / y[live, k],
+                                       np.asarray(fk)[live, k], rtol=1e-9, err_msg=f)
+
+
 def test_refuses_too_few_levels():
     grid = create_gaussian_grid(21)
     m = SpectralPrimitiveEquationModel(
