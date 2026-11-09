@@ -600,6 +600,21 @@ class TestTKE:
         heating = jnp.sum(out.dT_dt * dp, axis=1) / constants.g * constants.c_pd
         np.testing.assert_allclose(np.asarray(heating), np.asarray(out.shflx), rtol=0.1)
 
+    def test_reported_evaporation_is_the_water_the_column_gained(self):
+        """MYJ's implicit surface term exchanges against the updated lowest level,
+        so the column's water gain differs from the bulk flux (~0.5 % at dt 600 s);
+        evap_sfc must report what the column actually gained."""
+        ncol, nlev = 2, 20
+        u, v, T, _, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        q_v = jnp.broadcast_to(jnp.linspace(1e-6, 0.018, nlev)[None, :], T.shape)
+        T_sfc = T[:, -1] + 1.0
+        q_sfc = saturation_mixing_ratio(T_sfc, p_half[:, -1])
+        out, _ = tke_turbulence(u, v, T, q_v, jnp.full((ncol, nlev), 0.2), p_full, p_half,
+                                z_full, z_half, T_sfc, q_sfc, rho, dt=600.0, config=TKEConfig())
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        gained = jnp.sum(out.dq_v_dt * dp, axis=1) / constants.g
+        np.testing.assert_allclose(np.asarray(out.evap_sfc), np.asarray(gained), rtol=1e-10)
+
     def test_prescribed_stress_vector_and_calm_flux_are_delivered(self):
         """A prescribed meridional stress under a purely zonal wind accelerates v
         (MYJ's UZ0/VZ0 carry the direction), and a calm column (u = v = 0)
