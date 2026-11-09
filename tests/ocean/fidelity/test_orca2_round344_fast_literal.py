@@ -178,3 +178,34 @@ def test_real_fast_literal_k0_n1_reverse_equals_forward() -> None:
     assert np.isfinite(np.asarray(reverse))
     assert float(np.abs(np.asarray(forward))) > 0.0
     np.testing.assert_allclose(reverse, forward, rtol=2.0e-12, atol=2.0e-12)
+
+
+@pytest.mark.skipif(not DECK.is_dir(), reason="ORCA2 K0 deck is unavailable")
+def test_k0_surface_programs_compile_once_per_forcing_branch() -> None:
+    """Steps 3-4 reuse the surface programs that steps 1-2 compiled."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="native"))
+    card = bench.build_fast_literal_mode_orca2_k0_card(
+        bulk.build_nemo_orca2_k0_ocean_card(DECK))
+    controls = bench.precompute_step_controls(
+        card, DECK, bench.DEFAULT_CORE_MANIFEST, bench.DEFAULT_ICE_COVER_PATH, 4)
+
+    class IdentityOcean:
+        def step(self, state, dt, **_):
+            return state
+
+    programs = (bulk._nemo_orca2_k0_surface_compiled,
+                bulk._nemo_orca2_k0_next_fraqsr_compiled)
+    state, result, sizes = card.ocean.recipe.initial_state, None, []
+    for kt, control in enumerate(controls, start=1):
+        result = bulk.nemo_orca2_k0_ocean_step(
+            card, state, model=IdentityOcean(), nemo_kt=kt,
+            s0f=control["s0f"], ice_if=control["ice_if"],
+            s0=control["s0_base"] if result is None else result.next_s0,
+            s2=control["s2_base"] if result is None else result.next_s2,
+            chl=control["chl"],
+            geothermal_heat_flux_mwm2=control["geothermal_heat_flux_mwm2"],
+            prior_surface=None if result is None else result.surface,
+        )
+        state = result.ocean
+        sizes.append(tuple(p._cached._cache_size() for p in programs))
+    assert sizes[3] == sizes[1], sizes
