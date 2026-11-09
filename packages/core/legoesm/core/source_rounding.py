@@ -32,6 +32,25 @@ def nemo_source_barrier(value: jax.Array) -> jax.Array:
     return jax.lax.optimization_barrier(jnp.asarray(value))
 
 
+def nemo_source_store(fn, *operands):
+    """Evaluate ``fn(*operands)`` once into a stored array its consumers read.
+
+    XLA CPU fuses an elementwise producer into every consumer kernel and
+    re-evaluates it there; ``optimization_barrier`` does not stop this (it is
+    stripped before fusion).  A conditional's result is a stored buffer, so
+    ``fn`` is evaluated inside both branches of a ``lax.cond`` whose predicate
+    is a runtime value (round-351 store microbench, arm ``c2``).  Both branches
+    are the same ``fn``, so the predicate's value cannot change the result.
+    The predicate reads one element of the first operand, which must be a
+    runtime array: a compile-time-constant predicate is folded away, and the
+    store with it.
+    """
+    # ponytail: under vmap a batched predicate turns the cond into a select
+    # that evaluates both branches; no caller vmaps today.
+    first = jnp.ravel(jax.tree_util.tree_leaves(operands)[0])[0]
+    return jax.lax.cond(jnp.isfinite(first), fn, fn, *operands)
+
+
 def nemo_fortran_sign(magnitude: jax.Array, sign_source: jax.Array) -> jax.Array:
     """NEMO record-build ``SIGN`` semantics, including ``-0``.
 
@@ -59,4 +78,5 @@ __all__ = (
     "nemo_fortran_sign",
     "nemo_source_barrier",
     "nemo_source_round",
+    "nemo_source_store",
 )
