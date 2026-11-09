@@ -1,8 +1,9 @@
 """RBF-FD shallow water through the shared core and the integrator dispatch.
 
 Williamson TC2: h error vs node count (Voronoi levels 3/4/5, 5 days, rk4);
-ssp_rk3 also runs.  TC5: 1-day run at level 4.  Global mass drift is a KNOWN
-Rule 0 defect (no flux form) and is printed, not asserted.  fp64.
+ssp_rk3 also runs.  TC5: 1-day run at level 4.  The mass equation uses the
+conservatively corrected weights, so the mass budget closes to round-off
+(asserted).  fp64.
 """
 
 import math
@@ -30,6 +31,9 @@ TC5_DAYS = 1.0
 CFL = 0.4
 MIN_TC2_ORDER = 2.0
 PERT_MS = 5.0
+# Voted 2026-11-09 (D25 3/3; W4 3/3: per-tendency check against total mass).
+MASS_TEND_RTOL = 1e-13
+MASS_RUN_RTOL = 1e-12
 # Voted 2026-11-09 (3/3): measured 1.008 and -0.37 at level 4.
 HYPER_RATE_RTOL = 0.1
 RANDOM_RATE_TAU = (-1.0, -0.1)
@@ -79,7 +83,7 @@ def _run(state, mesh, h_s, config, dt, days):
 def _tc2(level_nodes, integrator, days):
     xyz, lon, lat, area = level_nodes
     cfg = _config(integrator)
-    mesh = sw.build_mesh(xyz, R, cfg)
+    mesh = sw.build_mesh(xyz, area, R, cfg)
     s0, h_s = sw.williamson2_state(lon, lat, R, cfg.g, cfg.omega)
     dt = _dt(xyz, math.sqrt(W2_GH0), solid_body_rotation_speed(R))
     s1, n_steps, dt = _run(s0, mesh, h_s, cfg, dt, days)
@@ -113,9 +117,9 @@ def test_tc2_other_integrator_runs(nodes):
 
 
 def test_unknown_integrator_raises(nodes):
-    xyz, lon, lat, _ = nodes[3]
+    xyz, lon, lat, area = nodes[3]
     cfg = _config("no_such_integrator")
-    mesh = sw.build_mesh(xyz, R, cfg)
+    mesh = sw.build_mesh(xyz, area, R, cfg)
     s0, h_s = sw.williamson2_state(lon, lat, R, cfg.g, cfg.omega)
     with pytest.raises(ValueError):
         sw.step(s0, mesh, h_s, cfg, 100.0)
@@ -126,9 +130,9 @@ def test_tc2_initial_state_tangent_and_balanced(nodes):
     shrinks with resolution (discretisation error only)."""
     out = []
     for lev in (4, 5):
-        xyz, lon, lat, _ = nodes[lev]
+        xyz, lon, lat, area = nodes[lev]
         cfg = _config("rk4")
-        mesh = sw.build_mesh(xyz, R, cfg)
+        mesh = sw.build_mesh(xyz, area, R, cfg)
         s0, h_s = sw.williamson2_state(lon, lat, R, cfg.g, cfg.omega)
         xu = xyz / jnp.linalg.norm(xyz, axis=-1, keepdims=True)
         radial = s0.ux * xu[:, 0] + s0.uy * xu[:, 1] + s0.uz * xu[:, 2]
@@ -140,9 +144,9 @@ def test_tc2_initial_state_tangent_and_balanced(nodes):
 def test_tendency_check_grads_and_jit(nodes):
     # TC5 plus an unbalanced rotational perturbation (voted 3/3), so every
     # tendency component is O(its own scale), not a balance residual.
-    xyz, lon, lat, _ = nodes[3]
+    xyz, lon, lat, area = nodes[3]
     cfg = _config("rk4")
-    mesh = sw.build_mesh(xyz, R, cfg)
+    mesh = sw.build_mesh(xyz, area, R, cfg)
     s0, h_s = sw.williamson5_state(lon, lat, R, cfg.g, cfg.omega)
     xu = xyz / jnp.linalg.norm(xyz, axis=-1, keepdims=True)
     gpsi = jax.vmap(jax.grad(lambda x: (x[0] ** 3 - 3 * x[0] * x[1] ** 2) * x[2]))(xu)
@@ -168,7 +172,7 @@ def test_tendency_check_grads_and_jit(nodes):
 def test_tc5_short_run(nodes):
     xyz, lon, lat, area = nodes[4]
     cfg = _config("rk4")
-    mesh = sw.build_mesh(xyz, R, cfg)
+    mesh = sw.build_mesh(xyz, area, R, cfg)
     s0, h_s = sw.williamson5_state(lon, lat, R, cfg.g, cfg.omega)
     dt = _dt(xyz, math.sqrt(cfg.g * W5_H0_M), W5_UBAR_MS)
     s1, n_steps, dt = _run(s0, mesh, h_s, cfg, dt, TC5_DAYS)
@@ -197,7 +201,7 @@ def test_hyperviscosity_damps_with_expected_rate(nodes):
     part of the single-Laplacian error (41x the tiny smooth-mode rate here)."""
     xyz, _, _, area = nodes[4]
     cfg = _config("rk4")
-    mesh = sw.build_mesh(xyz, R, cfg)
+    mesh = sw.build_mesh(xyz, area, R, cfg)
     ops = rbffd_sw_operators(mesh, cfg)
     xu = xyz / jnp.linalg.norm(xyz, axis=-1, keepdims=True)
     y = (xu[:, 0] ** 3 - 3 * xu[:, 0] * xu[:, 1] ** 2) * xu[:, 2]
@@ -219,3 +223,27 @@ def test_hyperviscosity_damps_with_expected_rate(nodes):
                 assert abs(rate / expected_rate - 1.0) <= HYPER_RATE_RTOL, rate / expected_rate
             else:
                 assert RANDOM_RATE_TAU[0] <= rate * cfg.hyperviscosity_tau_s <= RANDOM_RATE_TAU[1]
+
+
+@pytest.mark.parametrize("case", ["tc2", "tc5"])
+def test_mass_budget_closes(nodes, case):
+    """Rule 0: no mass sources or sinks, so in - out - d(storage) = -d(storage)
+    must vanish to round-off, per tendency and over the run (level 4)."""
+    xyz, lon, lat, area = nodes[4]
+    cfg = _config("rk4")
+    mesh = sw.build_mesh(xyz, area, R, cfg)
+    if case == "tc2":
+        s0, h_s = sw.williamson2_state(lon, lat, R, cfg.g, cfg.omega)
+        dt, days = _dt(xyz, math.sqrt(W2_GH0), solid_body_rotation_speed(R)), TC2_DAYS
+    else:
+        s0, h_s = sw.williamson5_state(lon, lat, R, cfg.g, cfg.omega)
+        dt, days = _dt(xyz, math.sqrt(cfg.g * W5_H0_M), W5_UBAR_MS), TC5_DAYS
+    dh = sw.tendency(s0, mesh, h_s, cfg).h
+    rate = abs(float(jnp.sum(area * dh))) * 86400.0 / float(sw.total_mass(s0.h, area))
+    print(f"{case} level 4 mass tendency per day / mass {rate:.3e}")
+    assert rate <= MASS_TEND_RTOL
+    s1, _, _ = _run(s0, mesh, h_s, cfg, dt, days)
+    m0, m1 = sw.total_mass(s0.h, area), sw.total_mass(s1.h, area)
+    print(f"{case} level 4 rel mass change {float((m1 - m0) / m0):.3e}")
+    assert abs(float((m1 - m0) / m0)) <= MASS_RUN_RTOL
+

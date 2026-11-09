@@ -381,7 +381,9 @@ class RBFFDOperators:
     """:class:`CollocatedOperators` over an RBF-FD mesh: every operator is
     the signed weighted neighbour sum of the mesh's one stencil table (one per
     Cartesian component), plus the Laplace-Beltrami operator for
-    hyperviscosity.
+    hyperviscosity.  ``divergence`` and ``laplacian_mass`` use the mesh's
+    conservatively corrected weights; ``gradient``, ``vorticity`` and
+    ``laplacian`` the uncorrected ones.
 
     The sum is applied in the scatter-add form of arXiv 2610.25484 Listing 9
     (gather, then ``segment_sum`` onto the target rows) rather than
@@ -404,7 +406,8 @@ class RBFFDOperators:
         return tuple(self._apply(c, phi) for c in self._mesh.grad)
 
     def divergence(self, ux: Any, uy: Any, uz: Any) -> Any:
-        dx, dy, dz = self._mesh.grad
+        """Conservative: ``sum(area * div) = 0`` for tangent fields."""
+        dx, dy, dz = self._mesh.div
         return self._apply(dx, ux) + self._apply(dy, uy) + self._apply(dz, uz)
 
     def vorticity(self, ux: Any, uy: Any, uz: Any) -> Any:
@@ -416,6 +419,10 @@ class RBFFDOperators:
 
     def laplacian(self, phi: Any) -> Any:
         return self._apply(self._mesh.lap, phi)
+
+    def laplacian_mass(self, phi: Any) -> Any:
+        """Conservative Laplacian: ``sum(area * lap) = 0`` for every field."""
+        return self._apply(self._mesh.lap_mass, phi)
 
 
 def rbffd_operators(mesh: Any) -> RBFFDOperators:

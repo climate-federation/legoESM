@@ -241,9 +241,10 @@ def rbffd_sw_operators(mesh: Any, config: Any) -> SWOperators:
     relative vorticity, ``Lap**k`` hyperviscosity on ``h`` and each Cartesian
     velocity component, and projection of the tendency onto the tangent plane.
 
-    Not mass conserving: the collocated divergence has no discrete flux form,
-    so global mass drifts by truncation error, well above round-off (measured
-    TC5 ~3e-6 per day at 2562 nodes; not fixed).
+    Mass conserving to round-off: the mass equation uses the conservatively
+    corrected divergence and Laplacian (``sum(area * dh/dt) = 0`` for tangent
+    velocity), with ``area`` the quadrature weights the mesh was built with.
+    See the mesh docstring for the known accuracy limit of that divergence.
     """
     grid_ops = rbffd_operators(mesh)
     nx, ny, nz = mesh.normal
@@ -252,7 +253,7 @@ def rbffd_sw_operators(mesh: Any, config: Any) -> SWOperators:
     length2 = rbffd_grid_scale_length2(mesh)
     sign = (-1.0) ** (k + 1)
 
-    def hyper(phi):
+    def hyper(phi, lap=grid_ops.laplacian):
         # (-1)^(k+1) gamma Lap^k, gamma = length2^k / tau: the grid-scale mode
         # e-folds in tau.  Scaled per stage so every stage is O(phi) (fp32 range).
         # KNOWN: on a smooth l=4 mode (642-10242 nodes, k=4) the stacked
@@ -260,11 +261,12 @@ def rbffd_sw_operators(mesh: Any, config: Any) -> SWOperators:
         # pointwise result is 41-371x the tiny (~1e-8/tau) intended rate; the
         # area-weighted rate matches to 1-4 %, and that noise is itself damped.
         for _ in range(k):
-            phi = length2 * grid_ops.laplacian(phi)
+            phi = length2 * lap(phi)
         return sign * phi / config.hyperviscosity_tau_s
 
     def mass_tendency(h, vel):
-        return -grid_ops.divergence(*(h * u for u in vel)) + hyper(h)
+        return (-grid_ops.divergence(*(h * u for u in vel))
+                + hyper(h, grid_ops.laplacian_mass))
 
     def vorticity_term(vel, h, dvel):
         ux, uy, uz = vel

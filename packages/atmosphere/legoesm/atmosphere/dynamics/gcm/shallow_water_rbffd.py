@@ -7,9 +7,11 @@ with the RBF-FD plug-ins; time stepping goes through
 :func:`legoesm.timestepping.dispatch.dispatch_integrator`, so any registered
 integrator is selectable via ``config.integrator``.
 
-KNOWN DEFECT (Rule 0): the collocated divergence is not in flux form, so the
-global mass ``sum(area * h)`` drifts; it is measured by
-:func:`total_mass` and reported, not fixed.
+Global mass ``sum(area * h)`` (:func:`total_mass`) is conserved to round-off
+when ``area`` is the quadrature weight the mesh was built with: the mass
+equation uses polynomial-preserving conservatively corrected divergence and
+Laplacian weights (known limits in
+:class:`legoesm.grids.neighbour_connectivity.RBFFDMesh`).
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ class RBFFDShallowWaterConfig(NamedTuple):
     poly_degree: int = 4
     hyperviscosity_order: int = 4
     hyperviscosity_tau_s: float = 21600.0
+    conservation_refine_steps: int = 3
 
 
 def voronoi_nodes(vmesh: Any):
@@ -70,11 +73,12 @@ def voronoi_nodes(vmesh: Any):
     return xyz, lon, lat, jnp.asarray(vmesh.areaCell, jnp.float64)
 
 
-def build_mesh(xyz: Any, radius: float, config: RBFFDShallowWaterConfig):
-    """RBF-FD mesh from node positions ``xyz (n_nodes, 3)``."""
-    return rbffd_sphere_mesh(xyz, radius, n=config.stencil_size,
+def build_mesh(xyz: Any, area: Any, radius: float, config: RBFFDShallowWaterConfig):
+    """RBF-FD mesh from node positions ``xyz (n_nodes, 3)`` and node areas."""
+    return rbffd_sphere_mesh(xyz, radius, area, n=config.stencil_size,
                              phs_degree=config.phs_degree,
-                             poly_degree=config.poly_degree)
+                             poly_degree=config.poly_degree,
+                             refine_steps=config.conservation_refine_steps)
 
 
 def tendency(state: RBFFDShallowWaterState, mesh: Any, h_s: jax.Array,
@@ -94,7 +98,7 @@ def step(state: RBFFDShallowWaterState, mesh: Any, h_s: jax.Array,
 
 
 def total_mass(h: jax.Array, area: jax.Array) -> jax.Array:
-    """``sum(area * h)`` [m^3] with node areas ``area`` (e.g. Voronoi cells)."""
+    """``sum(area * h)`` [m^3]; conserved for ``area`` = the mesh's areas."""
     return jnp.sum(area * h)
 
 
