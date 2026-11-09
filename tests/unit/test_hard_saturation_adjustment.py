@@ -541,15 +541,17 @@ def test_experiment_float_overrides_thread_and_raise():
 
 
 def test_all_guarded_configs_carry_the_fields():
-    """Every scheme in HARD_SAT_GUARD_SCHEMES -- now including the Sundqvist
-    diagnostic scheme and the ML emulator -- carries the three fields with the
-    SAME defaults.  seifert_beheng left the list: it runs gSAM's exact
-    satadj_liquid (HARD_SAT_GUARD_EXEMPT) and refuses the fields."""
+    """Every scheme in HARD_SAT_GUARD_SCHEMES carries the three fields with the
+    SAME defaults.  seifert_beheng and sundqvist left the list for
+    HARD_SAT_GUARD_EXEMPT: they run their oracle's exact condensation (gSAM
+    satadj_liquid; ccpp zhaocarr_gscond) and refuse the fields."""
     from legoesm.atmosphere.physics.microphysics.config import (
-        HARD_SAT_GUARD_SCHEMES, MicrophysicsConfig,
+        HARD_SAT_GUARD_EXEMPT, HARD_SAT_GUARD_SCHEMES, MicrophysicsConfig,
     )
     top = MicrophysicsConfig()
-    assert len(HARD_SAT_GUARD_SCHEMES) == 4   # kessler, seifert_beheng, thompson: exempt (faithful ports)
+    # kessler, seifert_beheng, thompson, sundqvist: exempt (faithful ports)
+    assert set(HARD_SAT_GUARD_SCHEMES) == {"ml_emulator", "morrison", "p3"}
+    assert {"kessler", "seifert_beheng", "thompson", "sundqvist"} <= set(HARD_SAT_GUARD_EXEMPT)
     for name in HARD_SAT_GUARD_SCHEMES:
         cfg = getattr(top, name)
         assert cfg.hard_saturation_adjustment is False, name
