@@ -885,3 +885,17 @@ def test_omip_cd_cutoff_width_reaches_the_drag():
             jnp.asarray([0.010]), jnp.asarray([291.0]))
     assert float(air_sea_fluxes(*args)[0][0]) != float(
         air_sea_fluxes(*args, cd_cutoff_width=0.0)[0][0])
+
+
+def test_every_large_yeager_drag_branch_shares_one_polynomial(monkeypatch):
+    """#2242: the legacy (clipped) and NEMO-parity drag branches evaluate the
+    same LY09 polynomial, so a change to it reaches both."""
+    from legoesm.core import bulk_flux as bf
+    U = jnp.array([5.0, 20.0])
+    base_legacy = bf.large_yeager_neutral_cd(U)
+    base_parity = bf.large_yeager_neutral_cd(U, nemo_parity=True)
+    monkeypatch.setattr(bf, "_ly09_cdn_poly", lambda w: jnp.full_like(w, 1.5))
+    np.testing.assert_allclose(bf.large_yeager_neutral_cd(U), 1.5e-3, rtol=1e-15)
+    np.testing.assert_allclose(
+        bf.large_yeager_neutral_cd(U, nemo_parity=True), 1.5e-3, rtol=1e-15)
+    assert not np.allclose(base_legacy, 1.5e-3) and not np.allclose(base_parity, 1.5e-3)
