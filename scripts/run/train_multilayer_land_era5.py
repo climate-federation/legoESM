@@ -918,6 +918,40 @@ def _drop_nan_grad_cells(data: dict, p: dict) -> np.ndarray:
     return np.asarray(keep, dtype=int)
 
 
+def _drop_nan_grad_cells_bisect(data: dict, p: dict, chunk: int = 50) -> np.ndarray:
+    """Two-leaf mode: keep the cells whose loss gradient is finite, found by
+    bisection (a finite gradient over a group certifies every cell in it, since a
+    non-finite cell contribution propagates), so the cost is ~ncol/chunk gradients
+    plus a few per bad cell instead of one per cell.  The per-cell norm cap of
+    ``_drop_nan_grad_cells`` is not applied: huge-but-finite gradients are bounded
+    by the training clip."""
+    gfn = jax.jit(lambda q, d: jax.value_and_grad(lambda qq: loss_ml(qq, d)[0])(q))
+
+    def ok(idx):
+        val, g = gfn(p, _select_cells(data, idx))
+        return bool(jnp.isfinite(val)) and all(
+            bool(jnp.all(jnp.isfinite(v))) for v in g.values())
+    n = int(data["lat"].shape[0])
+    bad, stack = [], [np.arange(i, min(i + chunk, n)) for i in range(0, n, chunk)]
+    while stack:
+        idx = stack.pop()
+        if ok(idx):
+            continue
+        if idx.size == 1:
+            bad.append(int(idx[0]))
+        else:
+            stack += [idx[: idx.size // 2], idx[idx.size // 2:]]
+    keep = np.setdiff1d(np.arange(n), bad)
+    print(f"# pre-filter (bisection): dropped {len(bad)}/{n} cells with a non-finite "
+          f"gradient: {sorted(bad)}", flush=True)
+    # The group test is not a proof for a loss with shared normalisers: confirm
+    # on the whole kept set, and refuse rather than train on a NaN start.
+    if not ok(keep):
+        raise SystemExit("pre-filter: the kept cells still give a non-finite loss "
+                         "gradient; per-cell screening needed")
+    return keep
+
+
 def _split_cells(data: dict, frac: float, seed: int):
     """Random train/test split of the sampled cells -> (train_data, test_data).  Uses
     seed+1 so the split is independent of the cell-sampling RNG (seed)."""
@@ -1047,7 +1081,8 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
     # no cell is pathological, so --no-prefilter skips it and leans on the per-step
     # gradient sanitisation + best-checkpoint instead.
     if prefilter:
-        keep = _drop_nan_grad_cells(data, p)    # exclude NaN-backward cells (logged)
+        keep = (_drop_nan_grad_cells_bisect(data, p) if _SURFACE_SCHEME == "two_leaf"
+                else _drop_nan_grad_cells(data, p))    # exclude NaN-backward cells (logged)
         if keep.size < int(data["lat"].shape[0]):
             data = _select_cells(data, keep)
     # Mini-batch SGD: a single full-grid (~5k-cell) gradient is dominated by the global
@@ -1422,14 +1457,21 @@ def main():
     # reuse it so a GPU full-grid run trains on the CLEAN set without the slow per-cell
     # scan.  Filtering happens BEFORE the train/test split so both partitions are clean.
     prefilter = not args.no_prefilter
+    # Two-leaf start point, resolved ONCE on the full cell set so the pre-filter
+    # certifies the same parameters training starts from.
+    tl_p0 = tl_init_params(data) if two_leaf else None
+    if two_leaf and args.init_json:
+        with open(args.init_json) as f:
+            tl_p0.update({k: jnp.asarray(_inv_ext(np.asarray(v, float), k))
+                          for k, v in json.load(f).items() if k in tl_p0})
     if args.keep_file and os.path.exists(args.keep_file):
         keep = np.load(args.keep_file)
         data = _select_cells(data, keep); prefilter = False
         print(f"# loaded {keep.size} keep-cells from {args.keep_file} (skip per-cell filter)",
               flush=True)
     elif args.keep_file:
-        keep = _drop_nan_grad_cells(
-            data, tl_init_params(data) if two_leaf else init_ext_params())
+        keep = (_drop_nan_grad_cells_bisect(data, tl_p0) if two_leaf
+                else _drop_nan_grad_cells(data, init_ext_params()))
         np.save(args.keep_file, keep)
         data = _select_cells(data, keep); prefilter = False
         print(f"# computed + saved {keep.size}/{args.n_sub} keep-cells -> {args.keep_file}",
@@ -1442,11 +1484,7 @@ def main():
               f"seed {args.seed})", flush=True)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     if two_leaf:
-        init_params = tl_init_params(data)
-        if args.init_json:
-            with open(args.init_json) as f:
-                init_params.update({k: jnp.asarray(_inv_ext(np.asarray(v, float), k))
-                                    for k, v in json.load(f).items() if k in init_params})
+        init_params = tl_p0
     elif args.init_json:
         init_params = json_init_params(args.init_json)
         print(f"# warm-start: refining tuned checkpoint {args.init_json}", flush=True)
