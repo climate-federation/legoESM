@@ -223,6 +223,8 @@ _NEW_ICE_THICKNESS = 0.05
 _MAXIMUM_ICE_CONCENTRATION = 0.99999
 # rn_himin: minimum ice thickness of ice_cor's thin-ice rescale (namelist_ice_cfg:39).
 _MINIMUM_ICE_THICKNESS = 0.05
+# hi_max(jpl) = rn_himax: glo2eqv's thickness cap (namelist_ice_ref:46, iceitd.F90:761).
+_MAXIMUM_ICE_THICKNESS = 99.0
 # --- RULE 5 smoothing (user standing rule, 2026-11-04) ---
 # Width [K] of the one-sided C1 blend of hfx_err_dif's two NEMO formulas
 # below T0 (T_su < rt0 vs T_su = rt0); 0.0 = NEMO's hard branch.
@@ -1817,7 +1819,7 @@ def _cor_step(post_do: SI3ColumnArrays, volumes, forcing: SI3SurfaceForcing, dt:
               constants: IceConstantsConfig, switches: SI3SwitchConfig = SI3SwitchConfig()):
     """ice_cor(kt, 2) after ice_thd_do (`icethd.F90:183`, `icecor.F90:64-116` +
     `ice_var_zapsmall`), through the shared jpl = 1 port `si3_ice_cor`, then NEMO's
-    glo2eqv/salprof back to thicknesses (`icevar.F90:285-300,346`; vote Z69).
+    glo2eqv/salprof back to thicknesses (`icevar.F90:283-300,346-360`; votes Z69, Z75).
 
     Smooth mode: forward = the hard correction, gradient from the port's one-sided C1
     limits at sharpness 1/relative_width (straight-through, vote Z66).  Zapped ice,
@@ -1847,18 +1849,29 @@ def _cor_step(post_do: SI3ColumnArrays, volumes, forcing: SI3SurfaceForcing, dt:
         out = apply_si3_jpl1_ice_cor(state, SI3IceCorFluxes(z, z, z), _MAXIMUM_ICE_CONCENTRATION,
                                      forcing.sss, forcing.sst, cfg)
         c = out.state
-        a = c.ice_area
-        has_area = a >= _EPS20
-        pos_v, pos_s = c.ice_volume > 0.0, c.snow_volume > 0.0
+        v = c.ice_volume
+        # glo2eqv (`icevar.F90:283-287`): IF v_i > hi_max*a_i THEN a_i = MIN(1, v_i/hi_max);
+        # smooth: one-sided C1 ramps, width relative_width of hi_max in thickness and of 1
+        # in area (vote Z75); hard at sharpness inf.
+        a0 = c.ice_area
+        if math.isinf(sharpness):
+            a = jnp.where(v > _MAXIMUM_ICE_THICKNESS * a0,
+                          jnp.minimum(1.0, v / _MAXIMUM_ICE_THICKNESS), a0)
+        else:
+            s_area = jnp.where(a0 > 0.0, sharpness / jnp.where(a0 > 0.0, a0, 1.0), math.inf)
+            a = min_c1(max_c1(v / _MAXIMUM_ICE_THICKNESS, a0, s_area), 1.0, sharpness)
+        # NEMO's guards (`icevar.F90:291-300,352-356,384,404`): a_i, v_i, v_s > epsi20;
+        # an ice-free category reads S = rn_simin.
+        has_area, pos_v, pos_s = a > _EPS20, v > _EPS20, c.snow_volume > _EPS20
         n_ice, n_snow = c.ice_enthalpy.shape[-1], c.snow_enthalpy.shape[-1]
-        S_bulk = jnp.where(pos_v, c.salt_content / jnp.where(pos_v, c.ice_volume, 1.0), post_do.S_bulk)
+        S_bulk = jnp.where(pos_v, c.salt_content / jnp.where(pos_v, v, 1.0), _MINIMUM_ICE_SALINITY)
         post = post_do._replace(
             concentration=a,
-            h_ice=out.ice_thickness,
+            h_ice=jnp.where(has_area, v / jnp.where(has_area, a, 1.0), 0.0),
             h_snow=jnp.where(has_area, c.snow_volume / jnp.where(has_area, a, 1.0), 0.0),
             T_surface=c.surface_temperature,
             e_ice=jnp.where(pos_v[..., None], c.ice_enthalpy * n_ice
-                            / jnp.where(pos_v, c.ice_volume, 1.0)[..., None], 0.0),
+                            / jnp.where(pos_v, v, 1.0)[..., None], 0.0),
             e_snow=jnp.where(pos_s[..., None], c.snow_enthalpy * n_snow
                              / jnp.where(pos_s, c.snow_volume, 1.0)[..., None], 0.0),
             S_bulk=S_bulk,

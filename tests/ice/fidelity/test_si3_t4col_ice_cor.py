@@ -79,10 +79,11 @@ def test_do_and_cor_budgets_close(monkeypatch, arm):
         assert np.all(g("wfx_res")[idle] > 0.0)
 
 
-@pytest.mark.parametrize("band", ["thin_ice", "zap"])
+@pytest.mark.parametrize("band", ["thin_ice", "zap", "hi_max", "area_one"])
 def test_cor_soft_pass_check_grads(monkeypatch, band):
-    """Z71/Z73: order-2 check_grads of the correction's soft pass inside each band, FD step
-    1e-3 x band width, tolerances of test_si3_ice_cor_orca1_oracle."""
+    """Z71/Z73/Z75: order-2 check_grads of the correction's soft pass at the centre of each
+    band (ice_cor thin-ice and zap, glo2eqv hi_max and its MIN(1, .)), FD step 1e-3 x band
+    width, tolerances of test_si3_ice_cor_orca1_oracle."""
     st, fz = _state()
     k = int(np.flatnonzero(np.asarray(st.concentration) > 0.0)[0])
     one = lambda x: x[k:k + 1]  # noqa: E731
@@ -92,9 +93,17 @@ def test_cor_soft_pass_check_grads(monkeypatch, band):
     if band == "thin_ice":
         width = bl._MINIMUM_ICE_THICKNESS / 100.0
         v0 = a * (bl._MINIMUM_ICE_THICKNESS - 0.5 * width)
-    else:
+    elif band == "zap":
         width = bl._EPS10 / 100.0
         v0 = jnp.full_like(a, bl._EPS10 - 0.5 * width)
+    elif band == "hi_max":           # glo2eqv thickness cap, ramp a*0.01 in area (Z75)
+        width = a * bl._MAXIMUM_ICE_THICKNESS / 100.0
+        v0 = a * bl._MAXIMUM_ICE_THICKNESS + 0.5 * width
+    else:                            # its MIN(1, .), ramp 0.01 below 1 in area (Z75)
+        a = post.concentration * 0.0 + 0.5
+        post = post._replace(concentration=a)
+        width = jnp.full_like(a, bl._MAXIMUM_ICE_THICKNESS / 100.0)
+        v0 = jnp.full_like(a, bl._MAXIMUM_ICE_THICKNESS * (1.0 - 0.5 / 100.0))
     monkeypatch.setattr(bl, "straight_through", lambda h, s: s)
 
     def raw(v):
@@ -110,3 +119,21 @@ def test_cor_soft_pass_check_grads(monkeypatch, band):
     scale = jnp.where(r0 == 0.0, 1.0, jnp.abs(r0))
     f = lambda x: raw(v0 + width * x) / scale  # noqa: E731
     check_grads(f, (jnp.zeros_like(v0),), order=2, modes=("fwd", "rev"), eps=1e-3, atol=1e-6, rtol=1e-3)
+
+
+def test_back_conversion_follows_glo2eqv():
+    """Codex P2s on fefc976f72: an emptied category reads S = rn_simin (`icevar.F90:352-356`),
+    and v_i > hi_max*a_i resets a_i = MIN(1, v_i/hi_max) (`icevar.F90:283-287`)."""
+    st, fz = _state()
+    thin = st._replace(concentration=jnp.full_like(st.concentration, 5e-13))
+    post, _, vols = bl._do_step(thin, _forcing(fz), DT, K, "5.0.1", switches=SMOOTH, _volumes=True)
+    out, _ = bl._cor_step(post, vols, _forcing(fz), DT, K, switches=SMOOTH)
+    empty = np.asarray(out.concentration) == 0.0
+    assert empty.any() and np.all(np.asarray(out.S_bulk)[empty] == bl._MINIMUM_ICE_SALINITY)
+    a = jnp.full_like(st.concentration, 0.5)                  # h = 197 m (check_grads area_one arm)
+    v = jnp.full_like(a, bl._MAXIMUM_ICE_THICKNESS * (1.0 - 0.5 / 100.0))
+    thick = st._replace(concentration=a)
+    z3 = jnp.zeros_like(st.e_ice)
+    out, _ = bl._cor_step(thick, (a, v, jnp.zeros_like(a), thick.S_bulk * v, z3, z3), _forcing(fz), DT, K,
+                          switches=SMOOTH)
+    np.testing.assert_array_equal(np.asarray(out.concentration), np.asarray(v) / bl._MAXIMUM_ICE_THICKNESS)
