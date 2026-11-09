@@ -2482,6 +2482,8 @@ def test_config_yaml_round_trips_authoritative_values():
     # the raw grid-mean path, which two_region (the old row) would thin.
     assert cfg.cloud_optics_inhomogeneity == "constant"
     assert cfg.cloud_inhomogeneity_factor == 1.0
+    # CAM6 McICA (user decision 2026-09-25): one sampled subcolumn per g-point.
+    assert cfg.cloud_vertical_overlap_optics == "mcica"
     _assert_optics_thinning(cfg, thinned=False)
 
 

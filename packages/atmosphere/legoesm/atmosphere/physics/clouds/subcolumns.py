@@ -119,6 +119,15 @@ _CF_FLOOR = 1.0e-3             # matches clouds.cloud_fraction._INHOM_CF_FLOOR
 # Per-layer McICA shift: irrational slope and step decorrelate layer offsets.
 _SHIFT_LAYER_SLOPE = 2.0 ** 0.5
 _SHIFT_LAYER_STEP = (5.0 ** 0.5 - 1.0) / 2.0
+# With one subcolumn there is no stratification to even out frac(shift*slope),
+# which is not uniform for a uniform shift (measured cover bias 0.026 at
+# cf 0.3, 5 SE); that case takes a uint32 lowbias32 hash of (shift, layer).
+_HASH_SHIFT_BITS = 24
+_HASH_WORD_BITS = 32
+_HASH_GOLDEN = 0x9E3779B9          # splitmix / lowbias32 constants
+_HASH_LAYER = 0x85EBCA6B
+_HASH_MUL1 = 0x7FEB352D
+_HASH_MUL2 = 0x846CA68B
 
 
 @functools.lru_cache(maxsize=32)
@@ -181,11 +190,34 @@ def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT,
     u = jnp.asarray(_stratified_table(int(n_sub), int(nlev)), dtype=cf.dtype)
     u = u[:, None, :]                                   # (n_sub, 1, nlev)
     if shift is not None:
-        k = jnp.arange(nlev, dtype=cf.dtype)
-        off = (jnp.asarray(shift, dtype=cf.dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
-               + k * _SHIFT_LAYER_STEP)                  # (ncol, nlev)
+        if n_sub == 1:
+            off = _hashed_layer_offsets(shift, nlev, cf.dtype, _PERM_SEED)
+        else:
+            k = jnp.arange(nlev, dtype=cf.dtype)
+            off = (jnp.asarray(shift, dtype=cf.dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
+                   + k * _SHIFT_LAYER_STEP)              # (ncol, nlev)
         u = jnp.mod(u + off[None, :, :], 1.0)
     return max_random_mask(u, cf, width=width)
+
+
+def _lowbias32(h):
+    u32 = jnp.uint32
+    h = h ^ (h >> u32(16))
+    h = h * u32(_HASH_MUL1)
+    h = h ^ (h >> u32(15))
+    h = h * u32(_HASH_MUL2)
+    return h ^ (h >> u32(16))
+
+
+def _hashed_layer_offsets(shift, nlev, dtype, seed):
+    """``(ncol, nlev)`` offsets in [0, 1), uniform per layer for a uniform
+    ``shift``; integer arithmetic, so eager and jit give the same bits."""
+    u32 = jnp.uint32
+    q = (jnp.asarray(shift, dtype) * float(1 << _HASH_SHIFT_BITS)).astype(u32)[:, None]
+    k = jnp.arange(nlev, dtype=u32)[None, :]
+    h = _lowbias32(q ^ (u32(seed) * u32(_HASH_GOLDEN) + k * u32(_HASH_LAYER)))
+    return (h >> u32(_HASH_WORD_BITS - _HASH_SHIFT_BITS)).astype(dtype) * (
+        1.0 / (1 << _HASH_SHIFT_BITS))
 
 
 def max_random_mask(u, cloud_fraction, *, width):
