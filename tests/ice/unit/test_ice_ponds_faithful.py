@@ -385,7 +385,7 @@ def test_meltpond_config_defaults():
 # ---------------------------------------------------------------------------
 # SI3-LEV arm (scheme="si3_lev"): PR #2388 review items 7 and 8.
 # ---------------------------------------------------------------------------
-def _si3_lev(shape, *, ncat=None):
+def _si3_lev(shape, *, ncat=None, a_i=None):
     from legoesm.ice.config import SI3PondConfig
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 
@@ -396,7 +396,8 @@ def _si3_lev(shape, *, ncat=None):
         h_snow=f(0.0), T_air=f(273.0), dt=_DT, drainage_timescale=_TAU,
         refreeze_threshold=_T_FREEZE, pond_to_ice_max_area=_MAX_AREA,
         depth_to_area_ratio=_RATIO, scheme="si3_lev",
-        at_i=jnp.full(shape, 0.5, jnp.float64), a_i=f(0.5 if ncat is None else 0.5 / ncat),
+        at_i=jnp.full(shape, 0.5, jnp.float64),
+        a_i=f(a_i if a_i is not None else (0.5 if ncat is None else 0.5 / ncat)),
         h_i=f(1.5), t_su=f(_T_FREEZE), h_il=f(0.0), dh_i_sum=f(-0.02), dh_s_sum=f(0.0),
         sz_i=jnp.full((*full, 1), 5.0), t_i=jnp.full((*full, 1), 270.0),
         namthd_pnd=SI3PondConfig(rn_himin=0.1, rn_apnd_min=0.15, rn_apnd_max=0.85,
@@ -406,13 +407,14 @@ def _si3_lev(shape, *, ncat=None):
     )
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "PR #2388 review item 7 (gentine 2026-11-06): main now refuses this five-category "
-    "step_ponds call (one category per call); this reproduction does not accept a refusal"))
 def test_si3_lev_multicategory_drainage_matches_single_category_total():
     # Five identical categories of area 0.1 drain the same cell water as one of 0.5.
+    # Main's fix is one category per call: the five-category call, which returned
+    # 5x the drainage, is refused, and five per-category calls give the total.
+    with pytest.raises(ValueError, match="one category per call"):
+        _si3_lev((4, 4), ncat=5)
     one = _si3_lev((4, 4))[2] * 0.5
-    five = jnp.sum(_si3_lev((4, 4), ncat=5)[2] * 0.1, axis=-1)
+    five = sum(_si3_lev((4, 4), a_i=0.1)[2] * 0.1 for _ in range(5))
     np.testing.assert_allclose(np.asarray(five), np.asarray(one), rtol=1e-10, atol=0)
 
 

@@ -470,9 +470,7 @@ def test_step_sea_ice_returns_the_o15_corrected_state() -> None:
     np.testing.assert_array_equal(np.asarray(new_state.szv_i)[owned], np.asarray(corrected.szv_i)[owned])
 
 
-@pytest.mark.parametrize("ln_drgice_imp", [False, pytest.param(True, marks=pytest.mark.xfail(strict=True, reason=(
-    "PR #2388 review item 4 (gentine 2026-11-06): main now requires tmask_k1 on the implicit arm "
-    "and this reproduction passes none, so ice_update_tau raises before the gradient")))])
+@pytest.mark.parametrize("ln_drgice_imp", [False, True])
 @pytest.mark.parametrize("field", ["tmod_io", "utau"])
 def test_o16_tau_gradient_is_finite_at_zero_relative_velocity_both_arms(field, ln_drgice_imp) -> None:
     cfg = _config(nn_hls=1)
@@ -486,6 +484,7 @@ def test_o16_tau_gradient_is_finite_at_zero_relative_velocity_both_arms(field, l
             drag_io=jnp.ones(shape) * 0.005, at_i=jnp.ones(shape) * 0.5,
             utau=z, vtau=z, tmod_io=z, taum=jnp.ones((2, 2)),
             utau_oce=z[1:-1, 1:-1], vtau_oce=z[1:-1, 1:-1],
+            tmask_k1=jnp.ones(shape),  # main requires the level-1 mask on the implicit arm
         )
         out = si3_ice_update_tau(inputs, config=cfg, ln_drgice_imp=ln_drgice_imp)
         return jnp.sum(getattr(out, field))
@@ -496,8 +495,9 @@ def test_o16_tau_gradient_is_finite_at_zero_relative_velocity_both_arms(field, l
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "PR #2388 review item 10 (gentine 2026-11-06): main deleted build_si3_orca2_o4_config, "
-    "so this reproduction fails on its import"))
+    "PR #2388 review item 10 (gentine 2026-11-06): main deleted build_si3_orca2_o4_config and no "
+    "main code builds thermo_scheme='si3_orca2_o4' any more (test_si3_public_surface checks the "
+    "builder is gone), so no main path exercises this item; the reproduction fails on its import"))
 def test_built_o4_config_selects_a_scheme_step_sea_ice_accepts() -> None:
     from legoesm.ice.config import build_si3_orca2_o4_config
 

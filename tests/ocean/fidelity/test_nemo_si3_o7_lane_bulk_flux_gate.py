@@ -151,14 +151,12 @@ def test_full_year_gate_and_all_plants() -> None:
             gate.evaluate(plant=plant)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "PR #2388 review item 6 (gentine 2026-11-06, smooth-default ruling 17:12Z): the default melt "
-    "ramp now spans T_freeze-0.01 K..T_freeze with slope -16.5/K mid-ramp, but this reproduction "
-    "evaluates at T_freeze, the ramp end, where the C1 slope is 0"))
 def test_ice_albedo_default_has_a_gradient_across_freezing() -> None:
     # RULE 5 gradient test at the default.  On the committed C1D namelist, bare
-    # 2 m ice under full cloud steps 0.64 -> 0.53 across T_freeze with zero
-    # gradient.  The hard-limit and stored-gap tests need the width field the fix adds.
+    # 2 m ice under full cloud stepped 0.64 -> 0.53 across T_freeze with zero
+    # gradient.  The default melt ramp now spans T_freeze - 0.01 K .. T_freeze
+    # (relative width 0.01 x 1 K); its C1 slope is 0 at both ends, so the test
+    # evaluates mid-ramp, where the old hard switch had zero slope.
     from jax.test_util import check_grads
     from legoesm import constants
     from legoesm.ice import si3_surface
@@ -174,7 +172,7 @@ def test_ice_albedo_default_has_a_gradient_across_freezing() -> None:
             h_ip=one * 0.0, h_il=one * 0.0, cloud_fra=jnp.asarray([1.0]),
             smask0=jnp.asarray([1.0]), config=cfg)[0, 0]
 
-    t0 = jnp.asarray(constants.T_freeze, dtype=jnp.float64)
+    t0 = jnp.asarray(constants.T_freeze - 0.005, dtype=jnp.float64)
     slope = float(jax.grad(albedo)(t0))
     assert np.isfinite(slope) and slope != 0.0
     check_grads(albedo, (t0,), order=1, modes=("rev",), eps=1e-6)
