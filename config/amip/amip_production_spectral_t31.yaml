@@ -18,7 +18,13 @@ discretization: spectral
 column_lane: true           # the spectral dycore is the dynamics operator of the CAM6 column loop
 time_integrator: ssp_rk54   # D5: the self-starting 5-stage SSP-RK (leapfrog refused on this lane);
                             # explicit, no semi-implicit substeps
-dt: 450.0                   # decision A rule (MPAS / duo / lat-lon decks): 0.82 x the generic CFL
+hyperdiff_scale: 0.0625     # spectral del-4 hyperdiffusion: n_max e-folds in 8 h (0.0625 x the factory
+                            # 0.5 h). User delegated, author picked 2026-11-09 from 10-day T31 arms
+                            # (e-folding varied alone; zonal-mean jet day 0->10): 0.5 h -13.8%,
+                            # 2 h -12.0%, 8 h -3.3%, lat-lon-48 +6.5%; 8 h keeps the m 8-20 slope
+                            # (-3.7) at lat-lon's (-3.7) vs -6.2 at 0.5 h. nu*eig_max^2*dt = 0.016,
+                            # far inside the ssp_rk54 limit 5.33. 30-day stability NOT yet run.
+dt: 450.0                  # decision A rule (MPAS / duo / lat-lon decks): 0.82 x the generic CFL
                             # limit 0.8 dx / (390 m/s sqrt 2) on the TRUE T31 quadratic-grid spacing
                             # (417 km, the lat-lon-48 deck's 48 x 96 columns: 605 s -> 496 s), rounded
                             # DOWN to a divisor of 1800 s -> 450 s (user-approved 2026-10-27).
@@ -30,8 +36,8 @@ rad_update_steps: 8         # CAM6 f09: radiation hourly (8 x 450 s); checkpoint
                             # steps, a multiple of 8 (D-REX-1: checkpoints on radiation boundaries)
 # ---- MPAS-dycore rows of the included deck: inert on this dycore, pinned OFF -------
 # (the MPAS deck's sponge / vertical-advection rows are MPAS numerics; the
-# spectral dycore has its own factory-set del-2 hyperdiffusion (0.5 h
-# e-folding at n_max), 2/3 dealiasing truncation and anchored DRY-mass
+# spectral dycore has its own del-4 hyperdiffusion (e-folding at n_max set
+# by hyperdiff_scale above), 2/3 dealiasing truncation and anchored DRY-mass
 # fixer, inherited; the CAM check_energy_fix global energy fixer
 # (energy_fixer: true, inherited) runs on this lane's split step as on the
 # MPAS / lat-lon lanes).  Values below are the code defaults, spelled out so
