@@ -113,3 +113,22 @@ def test_nemo_source_store_keeps_bits_stores_one_copy_and_differentiates() -> No
     for a, b in zip(g_stored, g_plain, strict=True):
         assert np.all(np.isfinite(np.asarray(a))) and float(np.abs(np.asarray(a)).max()) > 0.0
         np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12 * float(np.abs(b).max()))
+
+
+def test_pressure_density_of_every_rk3_stage_is_stored_once() -> None:
+    # compute_frozen_geom_density is what the ORCA2 step calls for each RK3 stage's density.
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import compute_frozen_geom_density
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    mb = _microbench()
+    grid, z_coord = create_latlon_grid(12, 24), create_ocean_z_star(n_levels=6, H_max=4000.0)
+    cfg = LatLonCGridOceanConfig.from_flat(eos="nemo_eos80", eos_depth="geometric")
+    state = rest_state_latlon_cgrid_ocean(grid, z_coord)
+    text = jax.jit(lambda st: compute_frozen_geom_density(st, grid, z_coord, cfg)[2:]).lower(
+        state).compile().as_text()
+    got = mb.copy_summary([text], state.T.data.size)["rho"]
+    # One executed copy, and its twin in the store's never-taken branch.
+    assert (got["copies"], got["partial_kernels"], got["dead_branch_copies"]) == (1, 0, 1)
