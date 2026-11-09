@@ -721,8 +721,8 @@ _WB_CONSUMED_TOP_KEYS = frozenset({
 # (it used to be honoured only via run_weatherbench_campaign.py's
 # --val-windows, so a direct launch trained unscored).
 _WB_METADATA_TOP_KEYS = frozenset({"grid"})
-# Exactly the keys _spectral_pe_config + the dt lookup read from the
-# ``spectral`` block.  ``si_substep`` (typo) silently reverting a deck to the
+# Exactly the keys _spectral_pe_config + the dt / segment_remat lookups read
+# from the ``spectral`` block.  ``si_substep`` (typo) silently reverting a deck to the
 # unstable full step is the same defect class as the inert lr.
 _WB_SPECTRAL_KEYS = frozenset({
     "n_max", "dt", "hyperdiff_coeff", "hyperdiff_order", "time_integrator",

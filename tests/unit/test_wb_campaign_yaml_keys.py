@@ -62,10 +62,12 @@ def test_runtime_cfl_guard_is_wired_into_integrator_factory():
 
 def test_spectral_allowlist_matches_config_fields():
     """Drift gate (GLM review): every spectral-block allowlist entry must be a
-    real SpectralPEConfig field (or the block-level n_max/dt), so a typo in
-    the allowlist itself cannot silently brick or admit a deck key."""
+    real SpectralPEConfig field (or a block-level key the WB builder reads
+    itself: n_max, dt, segment_remat), so a typo in the allowlist itself
+    cannot silently brick or admit a deck key."""
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
     from legoesm.training.scale_build import _WB_SPECTRAL_KEYS
 
-    extra = _WB_SPECTRAL_KEYS - set(SpectralPEConfig._fields) - {"n_max", "dt"}
+    extra = (_WB_SPECTRAL_KEYS - set(SpectralPEConfig._fields)
+             - {"n_max", "dt", "segment_remat"})
     assert not extra, f"allowlist keys that are not config fields: {extra}"

@@ -5933,11 +5933,11 @@ def test_mcfarlane_effgw_oro_flag_flows_to_config():
     default is CAM6's 0.125 and the production deck pins that value."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.mcfarlane_effgw_oro == 0.125
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--mcfarlane-effgw-oro", "0.3",
+        "--dataset", "analytical", "--convection", "tiedtke", "--mcfarlane-effgw-oro", "0.3",
     ]), parser))
     assert cfg.mcfarlane_effgw_oro == 0.3
 
@@ -6026,7 +6026,7 @@ def test_cmip_writer_identity_flags_round_trip_and_keep_defaults():
     import inspect
     from legoesm.io.cmor_output import CFWriter
     parser = build_arg_parser()
-    base = ["--dataset", "analytical"]
+    base = ["--dataset", "analytical", "--convection", "tiedtke"]
     out0 = build_config_from_args(_postprocess_args(
         parser.parse_args(base), parser)).output
     sig = inspect.signature(CFWriter).parameters
@@ -6051,7 +6051,7 @@ def test_cmip_writer_identity_keys_are_deckable(tmp_path):
     parser = build_arg_parser()
     parser.set_defaults(**load_yaml_config(str(deck), parser))
     out = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser)).output
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser)).output
     for field, _flag, val in _CMIP_ID_FLAGS:
         assert getattr(out, field) == val, field
 
@@ -6093,7 +6093,7 @@ def test_climateeval_ids_follow_cmip_flags_unless_given():
     from legoesm.driver.climateeval_hook import maybe_run_climateeval
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--cmip-source-id", "SRC-1-0",
+        ["--dataset", "analytical", "--convection", "tiedtke", "--cmip-source-id", "SRC-1-0",
          "--cmip-variant-label", "r2i1p1f1"]), parser))
     out = cfg.output._replace(
         evaluation=cfg.output.evaluation._replace(enabled=True))
@@ -6115,7 +6115,7 @@ def test_large_yeager_width_flags_default_bit_identical():
     defaults exactly (no new value chosen by the CLI)."""
     from legoesm.driver.config import ExperimentConfig
     parser = build_arg_parser()
-    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]),
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]),
                              parser)
     cfg = build_config_from_args(args)
     for f in _LY_WIDTH_FIELDS:
@@ -6127,7 +6127,7 @@ def test_large_yeager_width_flags_thread_to_config():
     field (0 = AeroBulk hard switch, the reference limit)."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--surface-bulk-scheme", "large_yeager",
         "--turbulence", "holtslag_boville",
         "--surface-large-yeager-neutral-width", "0",
@@ -6145,8 +6145,8 @@ def test_sat_adjust_rh_width_flag_flows_to_config():
         SEGMENT_SAT_ADJUST_RH_WIDTH)
     parser = build_arg_parser()
     cfg_def = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_def.sat_adjust_rh_width == SEGMENT_SAT_ADJUST_RH_WIDTH
     cfg_hard = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--sat-adjust-rh-width", "0.0"]), parser))
+        "--dataset", "analytical", "--convection", "tiedtke", "--sat-adjust-rh-width", "0.0"]), parser))
     assert cfg_hard.sat_adjust_rh_width == 0.0

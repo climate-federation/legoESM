@@ -91,11 +91,11 @@ def test_run_amip_flags_reach_the_config():
         _postprocess_args, build_arg_parser, build_config_from_args)
     p = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(p.parse_args([
-        "--dataset", "analytical", "--land-fraction-source", "era5",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-fraction-source", "era5",
         "--land-fraction-era5-zarr", "s.zarr"]), p))
     assert (cfg.land_fraction_source, cfg.land_fraction_era5_zarr) == ("era5", "s.zarr")
     cfg0 = build_config_from_args(_postprocess_args(
-        p.parse_args(["--dataset", "analytical"]), p))
+        p.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), p))
     assert cfg0.land_fraction_source == "topography"
 
 

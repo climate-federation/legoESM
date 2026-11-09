@@ -46,10 +46,16 @@ def setup():
         "seconds_of_day": jnp.asarray(43200.0),
     }
     pe = SpectralPEConfig(time_integrator="ssp_rk3")
+    # ZM requires a land fraction; production's WB loader always attaches the
+    # regridded ERA5 plane to the rollout grid (scale_build physics _roll:
+    # grid._replace(land_frac=forcing["land_frac"]); build_spectral_forcing
+    # flattens it to (ncol,) float32).  All-ocean here.
+    physics_grid = grid._replace(land_frac=jnp.zeros((ncol,), jnp.float32))
 
     def run(forcing, n_steps=N_STEPS, init=None, **kw):
         return spectral_rollout(
-            state if init is None else init, non_rad, grid, sigma, pe, DT,
+            state if init is None else init, non_rad, physics_grid, sigma,
+            pe, DT,
             n_steps, None, None, forcing_base=forcing, rad_physics_fn=rad,
             rad_update_interval=1, **kw)
 

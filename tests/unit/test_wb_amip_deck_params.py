@@ -424,7 +424,8 @@ def test_aerosol_climatology_averages_the_years_on_the_noleap_clock(
         p_s=jnp.full((grid.n_lat, grid.n_lon), 1e5),
         T=jnp.full((grid.n_lat, grid.n_lon, 4), 250.0))
     sl = SimpleNamespace(sst=np.full((4, 8), 290.0), lat=np.linspace(-80, 80, 4),
-                         lon=np.linspace(0, 315, 8), sfc_shf=None, land_frac=None)
+                         lon=np.linspace(0, 315, 8), sfc_shf=None, land_frac=None,
+                         soil_moisture=None)
     for stamp, want in (("2016-03-01T00", 59.0), ("2016-02-29T06", 58.25),
                         ("2015-12-31T18", 364.75)):
         calls.clear()

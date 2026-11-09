@@ -632,7 +632,8 @@ def test_aimip_zm_lane_runs_on_the_era5_land_fraction_and_refuses_without_it(
 
     def fake_slice(config, time_idx, **kw):
         calls.append(config.load_land_frac)
-        return types.SimpleNamespace(lat=lat, lon=lon, land_frac=lsm, sfc_shf=None)
+        return types.SimpleNamespace(lat=lat, lon=lon, land_frac=lsm, sfc_shf=None,
+                                     soil_moisture=None)
 
     monkeypatch.setattr(e2s, "load_era5_slice", fake_slice)
     grid = create_gaussian_grid(8, dealiasing="quadratic")
@@ -686,6 +687,7 @@ def test_era5_land_fraction_reads_the_callers_store_and_dataset(monkeypatch):
     def fake_slice(config, time_idx, *, ds=None, **kw):
         seen.append((config.zarr_store, config.load_land_frac, ds))
         return types.SimpleNamespace(lat=lat, lon=lon, sfc_shf=None,
+                                     soil_moisture=None,
                                      land_frac=np.zeros((19, 72), np.float32))
 
     monkeypatch.setattr(e2s, "load_era5_slice", fake_slice)

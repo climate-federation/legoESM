@@ -136,6 +136,9 @@ def test_regrid_era5_field_2d_flips_descending_lat():
     class _Grid:  # minimal Gaussian-grid stand-in (radians)
         lat = np.deg2rad(np.array([-45.0, 0.0, 45.0]))
         lon = np.deg2rad(np.array([0.0, 180.0]))
+        # GaussianGrid.grid_lat is lat2d, (n_lat, n_lon) from np.meshgrid(lon,
+        # lat); regrid_2d_to_grid dispatches on its ndim (2 = structured).
+        grid_lat = np.meshgrid(lon, lat)[1]
 
     # ERA5-style N->S latitude with a lat-linear field; after the internal flip
     # + interp the regridded field must increase with (ascending) Gaussian lat.

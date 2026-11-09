@@ -184,26 +184,26 @@ def test_cli_round_trip_bounds_and_cross_checks():
     parser = ra.build_arg_parser()
     def cfg_from(argv):
         return ra.build_config_from_args(ra._postprocess_args(parser.parse_args(argv), parser))
-    base = cfg_from(["--dataset", "analytical"])
+    base = cfg_from(["--dataset", "analytical", "--convection", "tiedtke"])
     assert base.cloud_cap_floor_on is False and base.cloud_cap_floor_q_c is None
-    cfg = cfg_from(["--dataset", "analytical", "--clouds", "xu_randall", "--radiation", "rrtmgp",
+    cfg = cfg_from(["--dataset", "analytical", "--convection", "tiedtke", "--clouds", "xu_randall", "--radiation", "rrtmgp",
                     "--cloud-cap-floor", "--cloud-cap-floor-q-c", "1e-4", "--cloud-cap-floor-lat-deg", "70"])
     assert cfg.cloud_cap_floor_on is True and cfg.cloud_cap_floor_q_c == 1e-4
     for rad in ("rrtmgp", "rrtmg"):                                  # "rrtmg" = the production deck's alias
-        cfg_from(["--dataset", "analytical", "--clouds", "xu_randall", "--radiation", rad,
+        cfg_from(["--dataset", "analytical", "--convection", "tiedtke", "--clouds", "xu_randall", "--radiation", rad,
                   "--cloud-cap-floor"]).validate_strict()
     from legoesm.driver.model_driver import _standalone_cloud_config
     cc = _standalone_cloud_config(cfg, "xu_randall", allow_convective_cloud=True)
     assert cc.cap_floor_on is True and cc.cap_floor_q_c == 1e-4
-    bad = cfg_from(["--dataset", "analytical", "--cloud-cap-floor-cf", "1.5"])
+    bad = cfg_from(["--dataset", "analytical", "--convection", "tiedtke", "--cloud-cap-floor-cf", "1.5"])
     with pytest.raises(Exception, match="cloud_cap_floor_cf"):
         bad.validate_strict()
     for argv in (["--clouds", "none"], ["--clouds", "xu_randall", "--radiation", "gray"]):
-        noop = cfg_from(["--dataset", "analytical", "--cloud-cap-floor", *argv])
+        noop = cfg_from(["--dataset", "analytical", "--convection", "tiedtke", "--cloud-cap-floor", *argv])
         with pytest.raises(ValueError, match="silent no-op"):
             noop.validate_strict()
     aimip = ra._postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--clouds", "xu_randall", "--cloud-cap-floor"]), parser)
+        ["--dataset", "analytical", "--convection", "tiedtke", "--clouds", "xu_randall", "--cloud-cap-floor"]), parser)
     aimip.aimip_classical_checkpoint = "/nonexistent.eqx"
     with pytest.raises(SystemExit, match="aimip-classical-checkpoint"):
         ra._apply_aimip_classical_overrides(aimip)
