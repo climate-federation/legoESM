@@ -71,6 +71,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.thermo import latent_heat_fusion
 from legoesm.thermo import saturation_specific_humidity as _saturation_specific_humidity
 from legoesm.thermo import saturation_specific_humidity_goff_gratch as _qsat_water_goff_gratch
 from legoesm.core.smooth import smooth_min
@@ -1315,7 +1316,7 @@ def morrison_microphysics(
     # 2026-10-20 4a)
     _T_cap = T - constants.L_f * minstsm / constants.c_pd if mg2_snow else T  # latent-ok: MG2 oracle constant (xlf)
     heat_avail = (constants.c_pd * jnp.maximum(_T_cap - constants.T_freeze, 0.0)
-                  / (constants.L_f * jnp.maximum(dt, 1.0e-12)))  # latent-ok: Morrison/MG2 oracle constant
+                  / (latent_heat_fusion(constants.T_freeze) * jnp.maximum(dt, 1.0e-12)))
     if mg2_snow:
         # Under the switch only graupel melts at a rate: melt_ice and
         # melt_snow are zeroed above (ice and snow melt instantly, MG2), so this

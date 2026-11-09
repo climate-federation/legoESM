@@ -244,9 +244,14 @@ def test_ml_emulator_guard_is_exactly_water_neutral_and_actually_fires():
         "with the feature removed, so it proves nothing. Check the wiring."
     )
     np.testing.assert_allclose(d_qc, -d_qv, rtol=1e-12, atol=0.0)
-    # ... and the heating that accompanies it is the matching latent release.
+    # ... and the heating that accompanies it is the matching latent release,
+    # Kirchhoff L_v at the post-emulator temperature the guard solves at.
+    from legoesm.thermo import latent_heat_vaporization
+    T = _column()[0]
+    T_post = np.asarray(T + off.dT_dt * _DT)
     np.testing.assert_allclose(
-        d_T, (constants.L_v / constants.c_pd) * (-d_qv), rtol=1e-12, atol=0.0)
+        d_T, np.asarray(latent_heat_vaporization(T_post)) / constants.c_pd * (-d_qv),
+        rtol=1e-12, atol=0.0)
 
 
 def test_ml_emulator_guard_uses_the_smooth_gate_not_the_eager_hard_gate():

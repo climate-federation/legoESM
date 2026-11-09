@@ -16,6 +16,7 @@ from legoesm.atmosphere.physics.microphysics.output import sedimentation_tendenc
 from legoesm.core.smooth import (sigmoid_switch, smooth_clamp, smooth_max, smooth_min, smooth_relu,
                                  smoothstep_quintic)
 from legoesm.thermo import (
+    latent_heat_fusion,
     latent_heat_sublimation,
     latent_heat_vaporization,
     mixing_ratio_to_specific_humidity,
@@ -2610,7 +2611,7 @@ def snow_melting_psmlt(q_s, N_s, T, p, rho, config, dt=None):
         #   melt·dt·L_f ≤ c_p·(T−T₀)  ⇒  melt ≤ c_p·(T−T₀)/(L_f·dt).
         melt_heat_cap = (
             constants.c_pd * jnp.maximum(T - constants.T_freeze, 0.0)
-            / (constants.L_f * jnp.maximum(dt, 1.0e-12)))  # latent-ok: SAM M2005 oracle constant
+            / (latent_heat_fusion(constants.T_freeze) * jnp.maximum(dt, 1.0e-12)))
         melt = jnp.minimum(melt, melt_heat_cap)
         melt = jnp.minimum(melt, qs_pos / jnp.maximum(dt, 1.0e-12))
     return melt
@@ -2731,7 +2732,7 @@ def graupel_melting_pgmlt(q_g, T, p, rho, config, dt=None, N_g=None):
     if dt is not None:
         melt_heat_cap = (
             constants.c_pd * jnp.maximum(T - constants.T_freeze, 0.0)
-            / (constants.L_f * jnp.maximum(dt, 1.0e-12)))  # latent-ok: SAM M2005 oracle constant
+            / (latent_heat_fusion(constants.T_freeze) * jnp.maximum(dt, 1.0e-12)))
         melt = jnp.minimum(melt, melt_heat_cap)
         melt = jnp.minimum(melt, qg_pos / jnp.maximum(dt, 1.0e-12))
     return melt

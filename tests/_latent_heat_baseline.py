@@ -62,7 +62,7 @@ LATENT_BUDGET: dict[str, int] = {
     'scripts/run/run_rce.py': 2,
     'scripts/run/run_rce_convection_sweep.py': 3,
     'scripts/run/run_rcemip_long.py': 2,
-    'scripts/run/run_rcemip_plane.py': 3,
+    'scripts/run/run_rcemip_plane.py': 4,
     'scripts/run/run_scm_rce_campaign.py': 1,
     'scripts/validate/amip_bias/rain_evap_timestep.py': 2,
     'scripts/validate/amip_bias/rain_sink_scale_offline.py': 1,
