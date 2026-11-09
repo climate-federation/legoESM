@@ -1059,7 +1059,7 @@ def _build_stubs(
     forc_po2 = _pad1(o2_pa)
     forc_solad_col = swskyb_col_jax   # (np_, 3)  direct SW
     forc_solai_grc = swskyd_grc_jax   # (np_, 3)  diffuse SW
-    # CLM MLGetAtmForcing computes thref = tref + (g/cp)*zref itself.
+    # CLM MLGetAtmForcing computes thref = tref + lapse_rate*zref itself.
     # Keep physical T here so that paired correction is applied exactly once.
     forc_t = _pad1(forcing.T_lowest)
     forc_pbot = _pad1(forcing.p_surface)
