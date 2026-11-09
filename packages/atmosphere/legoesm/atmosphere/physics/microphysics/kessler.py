@@ -159,7 +159,9 @@ __physics_contract__ = {
         "by False, reports more rain than leaves the column). As in the oracle "
         "the positivity floors are not "
         "compensated; the bounded smooth saturation adjustment keeps cloud and "
-        "vapour non-negative, so it never triggers them (see module docstring)."
+        "vapour non-negative up to round-off, so it feeds no water into the "
+        "cloud and vapour floors (the rain floor is the oracle's; see module "
+        "docstring)."
     ),
     "conserves": ["none"],
     "differentiable": True,
