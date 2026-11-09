@@ -390,11 +390,27 @@ def test_refusal_guard(turb, conv, gwd, should_raise):
         turbulence = turb
         convection = conv
         gravity_wave_drag = gwd
+        microphysics = "kessler"
 
     if should_raise:
         with pytest.raises(NotImplementedError, match="405"):
             ModelDriver._refuse_stateful_physics_unthreaded(_Cfg())
     else:
+        ModelDriver._refuse_stateful_physics_unthreaded(_Cfg())
+
+
+def test_refusal_guard_covers_sundqvist_microphysics():
+    """Sundqvist's gscond reads its previous-step carry (zc_*); an unthreaded
+    loop must refuse it at run start, not crash inside the scheme."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    class _Cfg:
+        turbulence = "none"
+        convection = "none"
+        gravity_wave_drag = "none"
+        microphysics = "sundqvist"
+
+    with pytest.raises(NotImplementedError, match="microphysics='sundqvist'"):
         ModelDriver._refuse_stateful_physics_unthreaded(_Cfg())
 
 
