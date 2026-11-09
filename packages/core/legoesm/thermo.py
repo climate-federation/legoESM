@@ -231,10 +231,10 @@ def saturation_vapor_pressure_goff(
         term2 = R(5.028 * B(log_temperature_ratio))
         ratio_minus_one = R(temperature_ratio - 1.0)
         inner3 = R(-8.2969 * ratio_minus_one)
-        scale3 = R(1.50475 * tx.pow(10.0, -4.0))
+        scale3 = R(1.50475 * tx.pow(R(10.0), -4.0))  # R: evaluated, not folded by jit
         term3 = R(scale3 * R(1.0 - tx.pow(10.0, inner3)))
         inner4 = R(4.76955 * R(1.0 - rt))
-        scale4 = R(0.42873 * tx.pow(10.0, -3.0))
+        scale4 = R(0.42873 * tx.pow(R(10.0), -3.0))
         term4 = R(scale4 * R(tx.pow(10.0, inner4) - 1.0))
         exponent = R(R(R(R(term1 - term2) + term3) + term4) + 0.78614)
         return R(100.0 * tx.pow(10.0, exponent))
