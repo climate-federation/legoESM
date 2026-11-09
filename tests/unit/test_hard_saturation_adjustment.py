@@ -37,9 +37,14 @@ import pytest
 
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
+import functools
+
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
-    saturation_adjustment,
+    saturation_adjustment as _saturation_adjustment,
 )
+
+# constant-L host (the legacy liquid convention these tests were written for)
+saturation_adjustment = functools.partial(_saturation_adjustment, l_v=constants.L_v)
 
 _L_V = constants.L_v
 _C_PD = constants.c_pd

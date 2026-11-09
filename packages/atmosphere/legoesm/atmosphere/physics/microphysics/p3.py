@@ -1364,7 +1364,8 @@ def p3_microphysics(
             q_sat_post = _qsat_liq(s["T"], p_full)
         rate = hard_saturation_blend(
             jnp.zeros_like(s["q_v"]), s["T"], s["q_v"], p_full, dt, q_sat_post,
-            config.hard_sat_adjust_threshold, config.hard_sat_max_heating_K)
+            config.hard_sat_adjust_threshold, config.hard_sat_max_heating_K,
+            l_over_cp=constants.L_v / constants.c_pd)  # latent-ok: P3 oracle constant (host enthalpy)
         dq_v_dt = dq_v_dt - rate
         dq_c_dt = dq_c_dt + rate
         dT_dt = dT_dt + (constants.L_v / constants.c_pd) * rate

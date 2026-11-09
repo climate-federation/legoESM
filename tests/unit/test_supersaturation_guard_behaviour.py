@@ -377,7 +377,8 @@ def test_guard_positivity_claim_is_exactly_what_the_rate_limit_gives():
                                 -1.0e-4 * jnp.ones((1, 1), dtype=jnp.float64)],
                                axis=1)
     rate = hard_saturation_blend(jnp.zeros_like(q_v_post), T, q_v_post, p,
-                                 _DT, q_sat, 1.1, 5.0)
+                                 _DT, q_sat, 1.1, 5.0,
+                                 l_over_cp=constants.L_v / constants.c_pd)
     r = np.asarray(rate)
     assert r[0, 0] > 0.0, "super-saturated cell was not drained at all"
     # No drain can be manufactured from zero or negative vapour.

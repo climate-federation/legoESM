@@ -1340,6 +1340,7 @@ def _apply_hard_saturation_drain(state, hc, dt, threshold, max_heating_K=5.0):
     """
     from legoesm import constants
     from legoesm.atmosphere.physics.microphysics._warm_rain import (
+        drain_l_over_cp,
         hard_saturation_drain,
     )
     T, p, _, _ = live_thermo(state, hc)
@@ -1386,7 +1387,7 @@ def _apply_hard_saturation_drain(state, hc, dt, threshold, max_heating_K=5.0):
     # real correction is a ~29 % cut to the latent heating, which is a lane
     # re-tuning and out of scope here. See the docstring.
     theta_p = (state.theta_prime.data
-               + (constants.L_v / constants.c_pd) * dq / hc.exner_ref)
+               + drain_l_over_cp(T, False) * dq / hc.exner_ref)
     # Field.replace (dataclass-style), state._replace (NamedTuple) — the two
     # carry DIFFERENT APIs; mixing them up is an AttributeError at the first
     # jit call, not at trace time.

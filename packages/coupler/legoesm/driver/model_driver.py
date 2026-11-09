@@ -1507,8 +1507,8 @@ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_full, dt,
         total water is conserved.
     """
     from legoesm.atmosphere.physics.microphysics._warm_rain import (
+        drain_l_over_cp,
         hard_saturation_drain,
-        mixed_phase_l_over_cp,
         mixed_phase_liquid_fraction,
     )
     if p_full.shape != T.shape:
@@ -1535,15 +1535,15 @@ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_full, dt,
         # (Landing q_c below the LIQUID curve at cold T would re-evaporate, so
         # the ice fraction MUST go to q_i for the drain to stick; the caller
         # seeds N_i for that ice mass.)
-        _l_cp = mixed_phase_l_over_cp(T).astype(T.dtype)
+        _l_cp = drain_l_over_cp(T, True).astype(T.dtype)
         T_new = T + _l_cp * dq
         w_liq = mixed_phase_liquid_fraction(T).astype(q_v.dtype)
         q_c_new = q_c + w_liq * dq
         q_i_new = q_i + (1.0 - w_liq) * dq
     else:
         # Liquid path (ice_curve off, or requested without a cloud-ice
-        # reservoir): condense to q_c with L_v -> c_pd*T + L_v*q_v exact.
-        T_new = T + (constants.L_v / constants.c_pd) * dq
+        # reservoir): condense to q_c with L_v(T0) -> c_pd*T + L_v(T0)*q_v exact.
+        T_new = T + drain_l_over_cp(T, False).astype(T.dtype) * dq
         q_c_new = q_c + dq
         q_i_new = q_i
     q_v_new = q_v - dq

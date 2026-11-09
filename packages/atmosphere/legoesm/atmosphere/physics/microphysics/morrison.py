@@ -573,6 +573,7 @@ def morrison_microphysics(
         hard_threshold=config.hard_sat_adjust_threshold,
         hard_max_heating_K=config.hard_sat_max_heating_K,
         sat_fn=qsat_water_fn,
+        l_v=constants.L_v,  # latent-ok: Morrison/MG2 oracle constant (the host heats with xxlv)
     )
     # CAM6 arrangement: when the turbulence closure already diagnosed this
     # layer's cloud liquid and handed it to the host, MG2 carries NO
@@ -992,8 +993,8 @@ def morrison_microphysics(
         # saturation curve itself. The rh_homo allowance shifts the TARGET the
         # vapour relaxes toward, not dq_sat/dT, and gSAM's M2005 likewise builds
         # ABI from the unscaled qvi (module_mp_graupel.f90).
-        dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)
-        abi = 1.0 + dqsidt * constants.L_s / constants.c_pd
+        dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)  # latent-ok: Morrison/MG2 oracle constant
+        abi = 1.0 + dqsidt * constants.L_s / constants.c_pd  # latent-ok: Morrison/MG2 oracle constant
         epsi = (
             2.0 * jnp.pi / cons12_cbrt
             * rho * dv_vap
@@ -1314,7 +1315,7 @@ def morrison_microphysics(
     # 2026-10-20 4a)
     _T_cap = T - constants.L_f * minstsm / constants.c_pd if mg2_snow else T  # latent-ok: MG2 oracle constant (xlf)
     heat_avail = (constants.c_pd * jnp.maximum(_T_cap - constants.T_freeze, 0.0)
-                  / (constants.L_f * jnp.maximum(dt, 1.0e-12)))
+                  / (constants.L_f * jnp.maximum(dt, 1.0e-12)))  # latent-ok: Morrison/MG2 oracle constant
     if mg2_snow:
         # Under the switch only graupel melts at a rate: melt_ice and
         # melt_snow are zeroed above (ice and snow melt instantly, MG2), so this
@@ -2260,9 +2261,9 @@ def morrison_microphysics(
 
 
     # === LATENT HEATING ===
-    L_v = constants.L_v
-    L_s = constants.L_s
-    L_f = constants.L_f
+    L_v = constants.L_v  # latent-ok: Morrison/MG2 oracle constant
+    L_s = constants.L_s  # latent-ok: Morrison/MG2 oracle constant
+    L_f = constants.L_f  # latent-ok: Morrison/MG2 oracle constant
     c_pd = constants.c_pd
 
     dT_dt = (
@@ -2458,7 +2459,7 @@ def morrison_microphysics(
             _chg, (_q_i_end - (q_i + dq_i_dt * dt)) / dt, 0.0)
         dN_i_dt = dN_i_dt + jnp.where(
             _chg, (_N_i_end - (N_i + dN_i_dt * dt)) / dt, 0.0)
-        dT_dt = dT_dt + constants.L_f * (_frz - _melt) / (constants.c_pd * dt)
+        dT_dt = dT_dt + constants.L_f * (_frz - _melt) / (constants.c_pd * dt)  # latent-ok: Morrison/MG2 oracle constant
         _qc_ice_melt = _melt / dt
         _qc_homog = _dqc - _qc_ice_melt
     if _prog_nc:
