@@ -17009,6 +17009,8 @@ class ModelDriver:
         _conv = getattr(_conv, "scheme", _conv)
         _gwd = getattr(cfg, "gravity_wave_drag", "none")
         _gwd = getattr(_gwd, "scheme", _gwd)
+        _micro = getattr(cfg, "microphysics", "none")
+        _micro = getattr(_micro, "scheme", _micro)
         # Convection: scalar-prognostic (mass_flux/edmf M_c / a_u),
         # profile-prognostic (ZM/KF/Emanuel/Tiedtke/Bechtold read and
         # relax conv_prog_profile — Tiedtke concretely carries updraft
@@ -17023,14 +17025,18 @@ class ModelDriver:
                 or _ct.is_scalar_prognostic
                 or _ct.is_profile_prognostic
                 or _ct.is_stochastic
-                or gwd_carries_spectrum(_gwd)):
+                or gwd_carries_spectrum(_gwd)
+                # Zhao-Carr gscond condenses the tendencies since its
+                # previous call (zc_* carry)
+                or _micro == "sundqvist"):
             raise NotImplementedError(
                 f"turbulence={_turb!r} / convection={_conv!r} / "
-                f"gwd={_gwd!r} carry prognostic physics state, which "
+                f"gwd={_gwd!r} / microphysics={_micro!r} carry prognostic "
+                "physics state, which "
                 "this run loop does not thread between steps yet "
                 "(issue #405) — the carry would silently reseed every "
                 "timestep.  Use a diagnostic scheme (louis / "
-                "holtslag_boville; sbm / kuo / dca; linear GWD), or a "
+                "holtslag_boville; sbm / kuo / dca; linear GWD; kessler), or a "
                 "driver path that threads PhysicsState (the MPAS, "
                 "compiled, and per-step loops)."
             )

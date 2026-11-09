@@ -4216,8 +4216,8 @@ def test_hard_saturation_adjustment_requires_a_guarded_scheme():
     drain early-return before the flag is read) — validate_strict must refuse
     it (codex F3).
 
-    The negative set is now sdm / fast_sbm / none, NOT sundqvist: the guard was
-    made uniform, so Sundqvist and the ML emulator carry it. sdm and fast_sbm
+    The negative set includes sundqvist since its condensation became the ccpp
+    zhaocarr_gscond port (#2434), which has no guard. sdm and fast_sbm
     are exempt on purpose (they integrate the super-saturation relaxation /
     droplet growth law explicitly — see config.HARD_SAT_GUARD_EXEMPT), and
     'none' has no scheme function at all."""
@@ -4227,7 +4227,7 @@ def test_hard_saturation_adjustment_requires_a_guarded_scheme():
     parser = build_arg_parser()
     assert set(HARD_SAT_GUARD_EXEMPT) == {"sdm", "fast_sbm", "none", "kessler",
                                           "seifert_beheng", "thompson",
-                                          "ifs_cloudsc"}
+                                          "ifs_cloudsc", "sundqvist"}
     for micro in sorted(HARD_SAT_GUARD_EXEMPT):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", "--microphysics", micro,
@@ -4246,8 +4246,8 @@ def test_hard_saturation_adjustment_accepted_by_every_guarded_scheme():
     )
     parser = build_arg_parser()
     exposed = [s for s in HARD_SAT_GUARD_SCHEMES
-               if s in {"sundqvist", "morrison", "p3"}]
-    assert len(exposed) == 3, exposed
+               if s in {"morrison", "p3"}]
+    assert len(exposed) == 2, exposed
     for micro in exposed:
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", "--microphysics", micro,
