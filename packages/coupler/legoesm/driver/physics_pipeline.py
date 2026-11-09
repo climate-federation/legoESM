@@ -5845,6 +5845,15 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
     pipeline._turb_energy_field = turbulence_scheme_traits(
         getattr(config, 'turbulence', 'none'),
     ).energy_field
+    if pipeline._turb_energy_field == "sfclay":
+        # R4 vote J4: this pipeline threads only tke/qke through its step and
+        # segment carry; the WRF surface-layer state of turbulence=ysu would
+        # be dropped every step.
+        raise ValueError(
+            "turbulence='ysu' (WRF surface layer + YSU) carries the surface-layer "
+            "state PhysicsState.sfclay, which the driver physics pipeline does "
+            "not thread; select ysu on a lane that threads PhysicsState "
+            "(hydrostatic / MPAS / spectral_pe physics factories).")
     # A GWD scheme threads the prognostic wave-action spectrum when it is
     # ``prognostic_spectral`` OR a '+'-composite that contains it (issue #834).
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import (

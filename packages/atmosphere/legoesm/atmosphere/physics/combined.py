@@ -1776,6 +1776,13 @@ def _make_spectral_pe_combined(
 
     def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None,
                    return_sfc_precip=False):
+        if (config.turbulence.scheme == "ysu" and forcing is not None
+                and forcing.get("sic") is not None):
+            # R4 votes X8/J7: WRF blends sea ice through a second surface-layer
+            # call per ice fraction, which is not ported.
+            raise ValueError(
+                "turbulence=ysu (WRF surface layer) does not handle sea ice; "
+                "this spectral run's forcing carries a sea-ice field ('sic').")
         if not tagged_fns:
             zero_3d = jnp.zeros_like(state.vor_hat.data)
             zero_2d = jnp.zeros_like(state.lnps_hat.data)

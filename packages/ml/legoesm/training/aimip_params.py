@@ -214,7 +214,7 @@ AIMIP_CLASSICAL_CONSTRAINTS: list[ParamConstraint] = (
 # via _spatial_surface_override); "none" has no surface to train.
 _SURFACE_CARRYING_TURBULENCE = frozenset({
     "louis", "tke", "smagorinsky", "mynn25", "clubb_lite", "clubb",
-    "holtslag_boville", "ysu", "edmf"})
+    "holtslag_boville", "edmf"})  # ysu: sfclayrev reads no bulk knobs (vote K8)
 # Surface knobs each bulk scheme reads (core/bulk_flux.py via
 # turbulence/surface_layer.py compute_surface_fluxes), pinned against measured
 # gradients by test_aimip_classical_inert_knobs: the constant law reads only

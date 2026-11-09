@@ -15112,8 +15112,8 @@ class ModelDriver:
                         "fresh seed."
                     )
             # Codex adversarial (#413): the MPAS save writes EVERY
-            # PhysicsState field together (all are concrete arrays —
-            # init_physics_state never leaves one None) AND the
+            # PhysicsState field together (every concrete array; a field the
+            # configuration does not carry is None and never saved) AND the
             # ``physstate_meta_conv_scheme`` tag, all inside one
             # ``if carry is not None`` block.  So the PRESENCE of ANY
             # ``physstate_*`` key — including the meta tag alone — means

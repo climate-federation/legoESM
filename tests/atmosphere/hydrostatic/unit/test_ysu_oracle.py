@@ -30,13 +30,10 @@ import jax.numpy as jnp
 from jax.test_util import check_grads
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import compute_rho
-from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig, YSUConfig
 from legoesm.atmosphere.physics.turbulence.ysu import (
     YSUSurfaceLayer,
     _pbl_weights,
     bl_ysu_run,
-    ysu_turbulence,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -48,8 +45,6 @@ FIXTURE = Path(__file__).resolve().parents[2] / "oracle_fixtures" / "ysu.npz"
 # by round-off (~1e-13); a sharpness of 1e12 leaves such a level half-crossed.
 HARD = dict(pbl_sharpness=1e300, region_sharpness=1e300, ri_sharpness=1e300,
             entrainment_cutoff_sharpness=1e300)
-HARD_CFG = dict(pbl_smooth_sharpness=1e300, blend_pbl_sharpness=1e300,
-                blend_ri_sharpness=1e300, entrainment_cutoff_sharpness=1e300)
 SFC_KEYS = ("br", "psim", "psih", "wspd", "znt", "u10", "v10", "xland")
 
 
@@ -89,25 +84,6 @@ def _kernel(fx, sharp=HARD, dtype=jnp.float64, **over):
     return bl_ysu_run(f["u"], f["v"], f["T"], f["q"], f["p_full"], f["p_half"],
                       f["exner"], f["dz"], f["ust"], f["hfx"], f["qfx"], _sfc(fx, dtype),
                       float(fx["dt"]), **sharp)
-
-
-def _wrapper(fx, cfg_kw, dtype=jnp.float64, wrf=True):
-    """ysu_turbulence on the WRF path with the oracle's surface fluxes
-    prescribed (ustar = sqrt(|tau|/rho_low) reproduces the oracle's ust)."""
-    f = {k: jnp.asarray(fx[f"in_{k}"], dtype) for k in
-         ("u", "v", "T", "q", "p_full", "p_half", "zi")}
-    sfc = SurfaceLayerConfig()._replace(
-        prescribed_shflx_w_m2=jnp.asarray(fx["in_hfx"], dtype),
-        prescribed_lhflx_w_m2=jnp.asarray(fx["in_lhflx"], dtype),
-        prescribed_evap_kg_m2_s=jnp.asarray(fx["in_qfx"], dtype),
-        prescribed_tau_x_pa=jnp.asarray(fx["in_taux"], dtype),
-        prescribed_tau_y_pa=jnp.asarray(fx["in_tauy"], dtype))
-    cfg = YSUConfig()._replace(surface=sfc, **cfg_kw)
-    rho = compute_rho(f["T"], f["p_full"], q_v=f["q"])
-    zm = 0.5 * (f["zi"][:, :-1] + f["zi"][:, 1:])
-    return ysu_turbulence(f["u"], f["v"], f["T"], f["q"], f["p_full"], f["p_half"], zm,
-                          f["zi"], f["T"][:, -1], f["q"][:, -1], rho, float(fx["dt"]), cfg,
-                          surface_layer=_sfc(fx, dtype) if wrf else None)
 
 
 def test_fixture_provenance(fx):
@@ -176,47 +152,6 @@ def test_pbl_top_rounded_onto_level_kpbl_matches_oracle(fx):
     assert max(worst.values()) <= TOL, worst
 
 
-def test_wrapper_wrf_path_matches_oracle(fx):
-    out = _wrapper(fx, HARD_CFG)
-    worst = {
-        "ustar": _err(out.ustar, fx["in_ust"][:, None], True),
-        "h_pbl": _err(out.h_pbl, fx["ora_hpbl"][:, None], True),
-        "Kh": _err(out.Kh, fx["ora_exch_h"], True),
-        "Km": _err(out.Km, fx["ora_exch_m"], True),
-        "du": _err(out.du_dt, fx["ora_du"]),
-        "dv": _err(out.dv_dt, fx["ora_dv"]),
-        "dT": _err(out.dT_dt, fx["ora_dT"]),
-        "dq": _err(out.dq_v_dt, fx["ora_dq"]),
-    }
-    print("ysu_turbulence(surface_layer=...) vs oracle, hard limit", worst)
-    assert max(worst.values()) <= TOL, worst
-
-
-def test_wrf_path_exports_kh_iface(fx):
-    """The WRF path exports Kh_iface like every interface-native scheme: the
-    oracle's exch_h on the interior interfaces, zero at model top and surface."""
-    out = _wrapper(fx, HARD_CFG)
-    k = np.asarray(out.Kh_iface)
-    assert k.shape == (out.Kh.shape[0], out.Kh.shape[1] + 1)
-    np.testing.assert_array_equal(k[:, 0], 0.0)
-    np.testing.assert_array_equal(k[:, -1], 0.0)
-    np.testing.assert_array_equal(k[:, 1:-1], np.asarray(out.Kh)[:, :-1])
-    assert np.max(k) > 0.0
-
-
-def test_surrogate_only_fields_refused_on_wrf_path(fx):
-    with pytest.raises(ValueError, match="Ri_crit"):
-        _wrapper(fx, dict(Ri_crit=0.3))
-    with pytest.raises(ValueError, match="countergrad_coeff"):
-        _wrapper(fx, dict(countergrad_coeff=jnp.asarray(6.5)))
-
-
-def test_wrf_only_fields_refused_on_legacy_path(fx):
-    assert _wrapper(fx, {}, wrf=False).h_pbl.shape == (fx["in_T"].shape[0],)
-    with pytest.raises(ValueError, match="entrainment_cutoff_sharpness"):
-        _wrapper(fx, dict(entrainment_cutoff_sharpness=5.0), wrf=False)
-
-
 def _budgets(fx, dT, dq, du):
     """Column theta-enthalpy and water change minus the surface sensible-heat
     and water flux (the oracle's flux-form solve conserves both), and the
@@ -270,7 +205,7 @@ def test_eager_jit_parity(fx):
 
 
 # ---------------------------------------------------------------------------
-# RULE 5: the smooth default (YSUConfig's four sharpness fields) vs the oracle.
+# RULE 5: the kernel's smooth mode (former YSUConfig sharpness defaults) vs the oracle.
 # The hard limit (1e300) matches the oracle to TOL (tests above); at the
 # default the port differs from the oracle by the per-case gaps below,
 # max |ours - oracle| / max |oracle| per fixture column and field (``_rel``:
@@ -316,11 +251,12 @@ TIE_COLUMNS = ("tibet_deep_mixed", "tibet_deep_mixed_noflux")
 
 
 def _default_sharp():
-    cfg = YSUConfig()
-    return dict(pbl_sharpness=cfg.pbl_smooth_sharpness,
-                region_sharpness=cfg.blend_pbl_sharpness,
-                ri_sharpness=cfg.blend_ri_sharpness,
-                entrainment_cutoff_sharpness=cfg.entrainment_cutoff_sharpness)
+    # The smooth widths the deleted YSUConfig sharpness fields defaulted to
+    # (pbl_smooth_sharpness 20, blend_pbl_sharpness 10, blend_ri_sharpness 100,
+    # entrainment_cutoff_sharpness 2): the kernel's smooth mode, which no lane
+    # selects since R4 (ysu_turbulence runs the hard limit), kept pinned here.
+    return dict(pbl_sharpness=20.0, region_sharpness=10.0, ri_sharpness=100.0,
+                entrainment_cutoff_sharpness=2.0)
 
 
 def _gap_per_column(o, f):

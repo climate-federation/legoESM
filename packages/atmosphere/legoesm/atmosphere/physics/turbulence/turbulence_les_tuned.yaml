@@ -84,14 +84,3 @@ atm.turb.TurbulentEDMFConfig.a_updraft: 0.05171694792
 atm.turb.TurbulentEDMFConfig.entrainment_rate: 0.001894258515
 atm.turb.TurbulentEDMFConfig.l_mix_max: 210.4144629
 
-# --- YSUConfig ---
-atm.turb.YSUConfig.Pr_t: 0.5206585342
-atm.turb.YSUConfig.Ri_crit: 0.1402296414
-atm.turb.YSUConfig.countergrad_coeff: 4.007697695
-atm.turb.YSUConfig.entrainment_ratio: 0.08172546025
-atm.turb.YSUConfig.entrainment_width_frac: 0.09085790307
-atm.turb.YSUConfig.l_mix_max: 157.9892013
-atm.turb.YSUConfig.louis_b: 5.113808996
-atm.turb.YSUConfig.louis_c: 2.375677616
-atm.turb.YSUConfig.louis_d: 6.462860228
-atm.turb.YSUConfig.ws_conv_coeff: 13.9663135

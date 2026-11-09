@@ -64,8 +64,8 @@ CONVECTION_SCHEMES = (
 )
 TURBULENCE_SCHEMES = (
     "smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
-    "holtslag_boville", "ysu", "edmf",
-)
+    "holtslag_boville", "edmf",
+)  # ysu needs surface_type / dx_m the SCM column cannot supply (vote K6)
 
 
 def build_initial_profiles(nlev: int, T_sfc: float):
