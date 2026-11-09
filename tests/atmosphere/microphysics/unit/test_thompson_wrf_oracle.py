@@ -78,7 +78,8 @@ def _step(fx, tag, dt, jit=False):
     from legoesm.atmosphere.physics.microphysics.thompson_wrf import thompson_wrf_step
 
     def f(*a):
-        return thompson_wrf_step(*a, float(dt), n_sed_max=_n_sed_max())
+        return thompson_wrf_step(*a, float(dt), n_sed_max=_n_sed_max(),
+                                 cloud_sed_to_rain=False)
     return (jax.jit(f) if jit else f)(*_inputs(fx, tag))
 
 
@@ -227,13 +228,15 @@ def test_sedimentation_overflow_is_an_error():
     need = int(np.asarray(ok.nstep_required).max())
     assert need > 1
     with pytest.raises(eqx.EquinoxRuntimeError, match="more sub-steps"):
-        thompson_wrf_step(*_inputs(fx, "cols"), 300.0, n_sed_max=need - 1)
+        thompson_wrf_step(*_inputs(fx, "cols"), 300.0, n_sed_max=need - 1,
+                          cloud_sed_to_rain=False)
     # under jit equinox's runtime error surfaces as a JaxRuntimeError
     with pytest.raises((eqx.EquinoxRuntimeError, jax.errors.JaxRuntimeError),
                        match="more sub-steps"):
         jax.block_until_ready(jax.jit(
-            lambda *a: thompson_wrf_step(*a, 300.0, n_sed_max=need - 1))(*_inputs(fx, "cols")))
-    at_max = thompson_wrf_step(*_inputs(fx, "cols"), 300.0, n_sed_max=need)
+            lambda *a: thompson_wrf_step(*a, 300.0, n_sed_max=need - 1,
+                                         cloud_sed_to_rain=False))(*_inputs(fx, "cols")))
+    at_max = thompson_wrf_step(*_inputs(fx, "cols"), 300.0, n_sed_max=need, cloud_sed_to_rain=False)
     assert float(_rel(at_max.T, ok.T).max()) == 0.0
 
 
@@ -264,7 +267,8 @@ for name, tag, dt in (("cols300", "cols", 300.0), ("cols60", "cols", 60.0),
     args = [jnp.asarray(a[v], dtype=dtype) for v in FIN]
     def loss(T, qv, qc, qi, qr, qs, qg, ni, nr):
         o = thompson_wrf_step(T, args[1], args[2], args[3], qv, qc, qi, qr, qs, qg,
-                              ni, nr, dt, n_sed_max=MorrisonConfig().sed_cfl_substeps_max)
+                              ni, nr, dt, n_sed_max=MorrisonConfig().sed_cfl_substeps_max,
+                              cloud_sed_to_rain=False)
         return (jnp.sum(o.T) + 1.0e3 * jnp.sum(o.qv + o.qc + o.qi + o.qr + o.qs + o.qg)
                 + 1.0e-6 * jnp.sum(o.ni + o.nr) + jnp.sum(o.pptrain + o.pptsnow
                                                          + o.pptgraul + o.pptice))
