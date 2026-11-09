@@ -122,8 +122,13 @@ def primitive_equation_tendencies(
 
     dp_face = ops.to_face(dp)
     ctx: Ctx = dict(T=T, vel=vel, p_s=p_s, p_full=p_full, dp=dp, dp_face=dp_face,
-                    L=L, dL=dL, T_face=T_face, hybrid=hybrid, sigma_coord=sigma_coord)
+                    L=L, dL=dL, T_face=T_face, hybrid=hybrid, sigma_coord=sigma_coord,
+                    Phi=Phi)
+    # Each additive term, for budget attribution (unused outputs are dead code under jit).
+    terms: Ctx = {"pgf": dvel}
+    dvel_in = dvel
     dvel = ops.vorticity_term(ctx, dvel)
+    terms["coriolis"] = tuple(a - b for a, b in zip(dvel, dvel_in))
 
     # Raw continuity (no global correction here).
     div_dp = gops.divergence(*(df * v for df, v in zip(dp_face, vel)))
@@ -144,9 +149,10 @@ def primitive_equation_tendencies(
 
     vv_face = ops.to_face(vv)
     ps_face = tuple(f[..., 0] for f in ops.to_face(p_s[..., None]))
-    dvel = tuple(
-        d + vertical_momentum_advection(v, vf, pf, sigma_coord, hybrid, ops.vert_scheme)
-        for d, v, vf, pf in zip(dvel, vel, vv_face, ps_face))
+    terms["vert_mom"] = tuple(
+        vertical_momentum_advection(v, vf, pf, sigma_coord, hybrid, ops.vert_scheme)
+        for v, vf, pf in zip(vel, vv_face, ps_face))
+    dvel = tuple(d + a for d, a in zip(dvel, terms["vert_mom"]))
 
     div_u = gops.divergence(*vel)
     ctx["div_u"] = div_u
@@ -154,9 +160,12 @@ def primitive_equation_tendencies(
         horiz_T = -gops.divergence(*(tf * v for tf, v in zip(T_face, vel))) + T * div_u
     else:
         horiz_T = ops.horizontal_T(ctx)
-    adiabatic = kappa * T * omega_ps / (p_full + _P_EPS)
-    adiabatic = adiabatic + kappa * T * ops.v_dot_grad_L(ctx)
-    dT = horiz_T + vert_T + adiabatic
+    conv_ps = kappa * T * omega_ps / (p_full + _P_EPS)
+    conv_vgl = kappa * T * ops.v_dot_grad_L(ctx)
+    dT = horiz_T + vert_T + (conv_ps + conv_vgl)
+    terms.update(horiz_T=horiz_T, vert_T=vert_T, conv_ps=conv_ps, conv_vgl=conv_vgl,
+                 dps=dps)
+    ctx["terms"] = terms
 
     dvel, dT = ops.dissipation(ctx, dvel, dT)
     tracer_tends = ops.tracers(ctx)
