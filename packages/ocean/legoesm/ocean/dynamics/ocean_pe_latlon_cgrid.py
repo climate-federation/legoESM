@@ -272,9 +272,9 @@ VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE = frozenset(
 # value config.lateral_shlat, dommsk.F90:209-215; 2 = no-slip).
 VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip", "nemo_shlat"})
 # Which land masks the "vector_laplacian" viscosity/biharmonic applies at each
-# level (config.lateral_viscosity_mask_levels): "surface" (default,
-# bit-identical) broadcasts the 2-D surface u/v/vertex masks to every level;
-# "per_level" builds them per level from the partial-cell is_active, as
+# level (config.lateral_viscosity_mask_levels): "surface"
+# broadcasts the 2-D surface u/v/vertex masks to every level;
+# "per_level" (default) builds them per level from the partial-cell is_active, as
 # NEMO uses its 3-D umask/vmask/fmask in dynldf_lev (dommsk.F90:148-153).
 VALID_LATERAL_VISCOSITY_MASK_LEVELS = frozenset({"surface", "per_level"})
 # Lateral-friction CLOSURE selector (config.lateral_friction_scheme): "none"
@@ -3633,12 +3633,12 @@ def _bc_horizontal_viscosity(
             "lateral_viscosity_coefficient_source='nemo_smag_blp'")
     _use_flux_div = _visc_op == "flux_divergence"
     _use_nemo_div_curl = _visc_op == "nemo_div_curl"
-    # Land masks of the vector Laplacian / biharmonic sites below.  "surface"
-    # (default) keeps the 2-D surface masks at every level (bit-identical).
-    # "per_level" uses each level's own wet cells, faces and vertices, as
-    # NEMO's dynldf_lev reads 3-D tmask/umask/vmask/fmask: with 2-D masks a
-    # face or vertex closed at depth by a topographic step stays open.
-    _mask_levels = getattr(config, "lateral_viscosity_mask_levels", "surface")
+    # Land masks of the vector Laplacian / biharmonic sites below.  "per_level"
+    # (default) uses each level's own wet cells, faces and vertices, as NEMO's
+    # dynldf_lev reads 3-D tmask/umask/vmask/fmask.  "surface" keeps the 2-D
+    # surface masks at every level: a face or vertex closed at depth by a
+    # topographic step stays open.
+    _mask_levels = getattr(config, "lateral_viscosity_mask_levels", "per_level")
     if _mask_levels not in VALID_LATERAL_VISCOSITY_MASK_LEVELS:
         raise ValueError(
             "lateral_viscosity_mask_levels must be one of "

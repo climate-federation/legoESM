@@ -933,7 +933,7 @@ def test_only_the_g1_card_selects_the_round8_statements():
     from legoesm.ocean.state import BarotropicConfig
     from legoesm.ocean.vertical import OceanPartialCellCoordinate
     assert ROUND8_SOLVER in BarotropicConfig._fields
-    assert OceanPartialCellCoordinate._fields[-1] == ROUND8_COORDINATE
+    assert OceanPartialCellCoordinate._fields[-3] == ROUND8_COORDINATE
     assert BarotropicConfig._field_defaults[ROUND8_SOLVER] is False
     assert OceanPartialCellCoordinate._field_defaults[ROUND8_COORDINATE] is False
     src = Path(recipe.__file__).read_text()

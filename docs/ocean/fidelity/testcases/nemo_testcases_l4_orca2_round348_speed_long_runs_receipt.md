@@ -22,7 +22,7 @@ also calls the double symbol and converts only the stored result
 (`packages/core/legoesm/core/_scalar_libm.c:4-38`). The existing Python ctypes
 loops remain only as the test oracle. The callbacks still use
 `jax.pure_callback`, `vmap_method="broadcast_all"`, and the existing custom
-JVPs (`packages/core/legoesm/core/transcendentals.py:249-484`).
+JVPs (`packages/core/legoesm/core/transcendentals.py:249-494`).
 
 The round-342 year driver accepts only `libm` or `native`, defaults to `libm`,
 checks output emptiness and clean provenance before card construction, and
@@ -64,7 +64,7 @@ the NEMO recipe, shortwave penetration, lateral mixing, and vertical mixing.
 All enter the eight public functions. Those functions have exactly two libm
 callback sinks: unary `_scalar_libm` and binary `_scalar_libm_binary`; native
 mode enters the corresponding JAX primitive
-(`packages/core/legoesm/core/transcendentals.py:431-546`). Therefore the
+(`packages/core/legoesm/core/transcendentals.py:431-556`). Therefore the
 million-value equality tests cover every function routed by every caller.
 
 ## Verification
@@ -120,7 +120,7 @@ first-round items were dispositioned:
 - **Sonnet + Argon — power dtype:** the libm callback now casts both operands to
   JAX's weak-type-aware result dtype before crossing the callback; native mode
   remains unchanged (`packages/core/legoesm/core/transcendentals.py:367-379`
-  and `:511-522`).
+  and `:521-532`).
 - **Sonnet — routing hook:** the round-16 control now poisons the compiled loop
   result and counts routed elements; its no-op plant fails the test
   (`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round16_discriminator.py:353-407`).
@@ -158,7 +158,7 @@ new claim was measured on `4d86c20135` and `08bc33f0f8` before this follow-up:
   custom JVP; integer libm operands are promoted, and the native branch is
   unchanged. Float32/float64, Python-scalar, integer, `grad`, and `jvp` cases
   are covered (`packages/core/legoesm/core/transcendentals.py:367-379` and
-  `:474-522`; `tests/unit/test_transcendentals.py:147-219`).
+  `:474-532`; `tests/unit/test_transcendentals.py:147-219`).
 - **Argon 3 — REAL, direct-helper scope:** HEAD's public callback path already
   pre-cast its operands, so the callback could not receive the reported mixed
   dtype through that path. Direct calls to both the compiled helper and its

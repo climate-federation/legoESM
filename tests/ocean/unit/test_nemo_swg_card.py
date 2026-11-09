@@ -237,7 +237,7 @@ def test_parameterisation_keeps_shipped_card_digest_byte_identical(card):
     cfg = card.recipe.model_config
     assert cfg.nemo_qsr_stage3_kmm_source_association is True
     assert cfg.vmix_eos_use_config_rho0 is True
-    assert _card_digest(card) == "fc9c61767d9911af"
+    assert _card_digest(card) == "fe1af39bae2bbbc0"  # e3fd562b8 field order: fc9c61767d9911af
 
 
 def test_maddison_geometry_honours_domsiz_and_fixed_wind_period():

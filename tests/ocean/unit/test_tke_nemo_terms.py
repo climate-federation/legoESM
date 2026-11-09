@@ -1832,6 +1832,7 @@ class TestNemoBottomTkeVelocityConvention:
         )
         model._tke_step_entry_p_sh2 = MethodType(shear_spy, model)
         model._tke_bottom_dirichlet = MethodType(bottom_spy, model)
+        model._epbl_vmix = MethodType(LatLonCGridOceanModel._epbl_vmix, model)
 
         with pytest.raises(BottomVelocitySeen) as seen:
             LatLonCGridOceanModel._apply_implicit_vertical_mixing(

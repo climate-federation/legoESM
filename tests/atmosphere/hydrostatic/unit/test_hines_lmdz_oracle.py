@@ -21,6 +21,8 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
+from jax.test_util import check_grads
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -31,6 +33,27 @@ from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
 
 FIXTURE = (Path(__file__).parents[2] / "oracle_fixtures" / "hines_lmdz.npz")
 _TOL = 1e-10  # user-approved oracle-match tolerance (max relative error, fp64)
+
+
+# RULE 5 gap of the smooth default (smooth_sharpness = 100) from the LMDZ record:
+# per column, max over du_dt, dv_dt of max|ours - ref| / max|ref|.  A change of the
+# smooth form or its default width re-measures these in the same PR.
+_SMOOTH_DEFAULT_GAP = {
+    "rockies_winter": 1.8393406003257864e-05,
+    "tibet_summer_stratcrit": 0.019703660532872515,
+    "andes_tropical_tropcrit": 0.0041090183180287985,
+    "antarctic_plateau_inversion": 0.00015431822781600336,
+    "norway_partial_land": 0.0004676193645333525,
+    "ocean_zero_sgh": 0.0012244304098931722,
+    "weak_wind_gate": 0.00357918698456082,
+    "tiny_sgh_gate": 0.0027837758321324984,
+    "alps_strong_jet": 0.00010136180769856143,
+    "real_8116": 0.0006205047369925797,
+    "real_17416": 0.0010956894453331481,
+    "real_33109": 2.8284491705939917e-05,
+    "rest_zero_wind": 0.018505661427469927,
+    "deep_130km": 0.012237344729794037,
+}
 
 
 def _rel(ours, ref):
@@ -104,18 +127,15 @@ def test_hines_column_momentum_telescopes(fix):
         assert abs(t.sum()) <= 1e-12 * np.abs(t).max()
 
 
-def test_hines_smooth_default_close_and_differentiable(fix):
-    """Default (smooth) switch forms: within 5% (V52; measured max 1.85e-2, rest
-    column) of the hard oracle form on every column, and a gradient wrt the wind that
-    is finite, nonzero and matches central finite differences (V53)."""
+def test_hines_smooth_default_gap_per_case_and_differentiable(fix):
+    """Default (smooth) switch forms: each column's mismatch to the LMDZ record equals
+    its stored gap, and the gradient wrt the wind is finite, nonzero and matches
+    central finite differences (V53)."""
     z = fix
-    gaps = []
-    for i in range(len(z["names"])):
-        hard = _column(z, i, HinesConfig(smooth_sharpness=math.inf)).du_dt
-        soft = _column(z, i, HinesConfig()).du_dt
-        gaps.append(_rel(soft, hard))
-    assert max(gaps) < 0.05, dict(zip(z["names"], gaps))
-    assert max(gaps) > 1e-3, "the default must actually be the smooth form"
+    gaps = _errors(z, HinesConfig())
+    assert set(gaps) == set(_SMOOTH_DEFAULT_GAP)
+    for name, stored in _SMOOTH_DEFAULT_GAP.items():
+        assert abs(gaps[name] - stored) <= 1e-6 * stored + 1e-12, (name, gaps[name])
 
     i = 0
     g = lambda k: jnp.asarray(np.asarray(z[k][i], np.float64))[None, :]
@@ -134,6 +154,26 @@ def test_hines_smooth_default_close_and_differentiable(fix):
         e = jnp.zeros_like(u0).at[0, k].set(1e-4)
         fd = (loss(u0 + e) - loss(u0 - e)) / 2e-4
         assert abs(float(fd) / float(grad[0, k]) - 1.0) < 1e-4, k
+
+
+@pytest.mark.parametrize("name", ["tibet_summer_stratcrit", "weak_wind_gate", "rest_zero_wind"])
+def test_hines_default_check_grads_through_switches(fix, name):
+    """RULE 5 gradient test on columns with large gaps, where the smooth switches are
+    active: all levels' wind at once, by directional derivative."""
+    i = [str(n) for n in fix["names"]].index(name)
+    g = lambda k: jnp.asarray(np.asarray(fix[k][i], np.float64))[None, :]
+    nlev = g("p_full").shape[1]
+
+    def drag(u):
+        o = hines_gwd(u, g("v"), g("T"), g("p_full"), g("p_half"),
+                      jnp.zeros((1, nlev)), jnp.zeros((1, nlev + 1)), jnp.ones((1, nlev)),
+                      jnp.asarray([float(fix["lat"][i]) / 180.0 * np.pi]), 1800.0,
+                      HinesConfig(), k_launch=jnp.asarray([nlev - 3]))
+        return jnp.sum(o.du_dt ** 2)
+
+    u0 = g("u") + 0.1
+    assert float(jnp.max(jnp.abs(jax.grad(drag)(u0)))) > 0.0
+    check_grads(drag, (u0,), order=1, modes=("rev",), eps=1e-5, rtol=1e-3, atol=1e-12)
 
 
 def test_hines_fp32_columns_take_fp64_host_pressures():

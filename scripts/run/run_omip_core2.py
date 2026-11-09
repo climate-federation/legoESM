@@ -3038,6 +3038,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             transport="none",
             n_categories=1,
             brine=BrineConfig(enabled=True),
+            core2_precipitation_closure=True,
             # Under-ice transmitted SW owned by the ICE model; the blend
             # passes sw_transmittance_ice=0.0 (same closure as the host).
             sw_transmittance_const=float(args.ice_thermo_sw_trans),
@@ -6590,7 +6591,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    choices=["surface", "per_level"],
                    help="Land masks of the vector-Laplacian lateral viscosity "
                         "at each level. 'surface' applies the 2-D surface "
-                        "masks at every level (config default); 'per_level' "
+                        "masks at every level; 'per_level' (config default) "
                         "uses each level's own wet faces/vertices, as NEMO's "
                         "3-D umask/vmask/fmask. Default (None) preserves the "
                         "config.")
@@ -9276,6 +9277,7 @@ def main() -> int:
             brine=_brine,            # brine-rejection salt flux -> ocean salt_flux
             snow=_snow,
             shortwave_scheme=_ice_sw_scheme,
+            core2_precipitation_closure=True,
             # Ice pays for transmitted SW; the ocean receives it through
             # negative ocean_heat_extraction. The blend's extra transmission
             # stays zero to avoid double counting, for every optics selection.
