@@ -20,6 +20,7 @@ argv: DAYS [default 1], ARM in {full, dyn} (dyn = radiation/turbulence/
 microphysics none), MICRO [kessler], TURB [louis], then key=value
 ExperimentConfig overrides (vertical_coord=... picks the coordinate).
 Usage: JAX_ENABLE_X64=1 python scripts/validate/mpas_water_closure_stages.py 2 full"""
+import ast
 import sys
 import tempfile
 
@@ -39,7 +40,16 @@ DAYS = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
 ARM = sys.argv[2] if len(sys.argv) > 2 else "full"
 MICRO = sys.argv[3] if len(sys.argv) > 3 else "kessler"
 TURB = sys.argv[4] if len(sys.argv) > 4 else "louis"
-EXTRA = dict(kv.split("=", 1) for kv in sys.argv[5:])
+
+
+def _value(text):
+    try:
+        return ast.literal_eval(text)
+    except (ValueError, SyntaxError):
+        return text
+
+
+EXTRA = {k: _value(v) for k, v in (kv.split("=", 1) for kv in sys.argv[5:])}
 VCOORD = EXTRA.pop("vertical_coord", "hybrid")
 DT = 600.0
 phys = dict(radiation="gray", rad_update_steps=1, convection="none",
@@ -47,12 +57,13 @@ phys = dict(radiation="gray", rad_update_steps=1, convection="none",
 if ARM == "dyn":
     phys = dict(radiation="none", convection="none", turbulence="none",
                 microphysics="none")
+phys.update(EXTRA)
 cfg = ExperimentConfig(
     grid=GridConfig(grid_type="mpas", resolution=2, nlev=8,
                     vertical_coord=VCOORD),
     dycore=DycoreConfig(discretization="mpas", dt=DT),
     output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=0),
-    days=DAYS, dataset="analytical", precision="fp64", **phys, **EXTRA)
+    days=DAYS, dataset="analytical", precision="fp64", **phys)
 print("ARM", ARM, "MICRO", MICRO, "TURB", TURB, "VCOORD", VCOORD, "EXTRA", EXTRA, "DAYS", DAYS, "cfg", {k: getattr(cfg, k) for k in phys})
 atm = ModelDriver(cfg, output_dir=tempfile.mkdtemp())
 atm.setup()
