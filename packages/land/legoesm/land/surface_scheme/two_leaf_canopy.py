@@ -70,22 +70,6 @@ TwoLeafCanopyConfig = CanopyConfig
 _DEFAULT_N_PICARD = 6
 _DEFAULT_PICARD_OMEGA = 0.15
 
-# Columns per group in the canopy Newton solve.  Under one vmap every column
-# iterates until the slowest column on the rank stops, so one hard column costs
-# the whole rank up to the iteration cap; groups stop independently.  Pure
-# performance: measured on recorded production batches, iteration counts and
-# converged flags identical, state differs only by rounding (<= 5e-13 K).
-# Size 64 chosen by the user (2026-11-03) from a sweep on the AMIP production
-# deck (2 days from day 360, two repeats; land solve s per call): 1 GPU
-# 64: 15.84, 256: 15.94, 1024: 22.21, one batch: 38.90; 4 GPUs 64: 5.24,
-# 256: 5.38, 1024: 7.23, one batch: 13.20.  A batching count, never a config.
-_CANOPY_SOLVE_GROUP = 64
-# Picard passes after the first order their columns by the previous pass's
-# Newton iterations before grouping, so hard columns share groups.  Pure
-# performance: same per-column solve, results equal to rounding (measured at 8
-# nodes: slowest rank's land solve 515 -> 383 ms, step -2.6 %).
-_SORT_BY_PREV_ITERS = True
-
 # Time constant of the growth-temperature exponential moving average [s].
 # 30 days * 86400 s/day = 2.592e6 s.  At dt = 1800 s, ~76 days reach 95 %
 # of the equilibrium.  Used by the caller (``step_*_land``) to advance
@@ -532,32 +516,26 @@ def compute_two_leaf_canopy_fluxes(
     # A column with no converged solution yet alternates its seed across passes
     # between the caller's seed and the COLD state, so a warm seed that led the
     # solve astray gets a cold retry inside the same call.  The passes run over
-    # every column anyway (in groups), so this costs nothing.  A failed pass still
+    # every column anyway (vmap), so this costs nothing.  A failed pass still
     # relaxes the soil boundary with its cold-state fallback flux (the one the
     # land step accepts if the column ends unsolved); freezing it held desert
     # columns at their start-of-step soil.  Acceptance stays tied to the LAST pass.
     x_conv = jnp.full_like(initial_state, jnp.nan)
-    n_iters = None  # set by each pass; the sort reads the previous pass's
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
         _fallback = initial_state if _picard_iter % 2 == 0 else cold_state
         _seed_k = jnp.where(jnp.all(jnp.isfinite(x_conv), axis=-1, keepdims=True),
                             jnp.nan_to_num(x_conv), _fallback)
-        _args = (_seed_k, bundles_k)
-        if _picard_iter > 0 and _SORT_BY_PREV_ITERS:
-            # Each group iterates until its slowest column stops, so hard
-            # columns scattered over many groups make every group run to the
-            # cap.  Order this pass by the previous pass's iteration counts:
-            # hard columns share groups, the rest stop early.  Same per-column
-            # solve; only group membership changes.
-            _perm = jnp.argsort(n_iters, descending=True)
-            _inv = jnp.argsort(_perm)
-            _args = jax.tree_util.tree_map(lambda a: a[_perm], _args)
-        _out = jax.lax.map(lambda a: _solve_one_col(*a), _args,
-                           batch_size=_CANOPY_SOLVE_GROUP)
-        if _picard_iter > 0 and _SORT_BY_PREV_ITERS:
-            _out = jax.tree_util.tree_map(lambda a: a[_inv], _out)
-        (x_final, n_iters, converged, resid_sq, resid_rel, lam_f, hit_cap) = _out
+        # One batch over every column (user choice 2026-11-09, replacing the
+        # 64-column groups chosen 2026-11-03).  Once the LM step stopped forming
+        # explicit Q (PR 2398) the solve is launch-bound, so one wide batch
+        # beats many narrow ones: AMIP production deck, 4 A100, fp64, 1 day,
+        # 0.242 s/step with groups of 64 vs 0.138 s/step with one batch.
+        # Pure performance: same per-column solve, answers differ by rounding.
+        # Cost: the batch iterates until the rank's slowest column stops, so a
+        # column stuck at the iteration cap holds every column to the cap.
+        (x_final, n_iters, converged, resid_sq, resid_rel, lam_f,
+         hit_cap) = jax.vmap(_solve_one_col)(_seed_k, bundles_k)
         x_conv = jnp.where(converged[:, None], x_final, x_conv)
         # A rejected iterate may be non-finite: evaluate the fluxes of a failed
         # column at the (finite) cold state instead, so no NaN enters a
