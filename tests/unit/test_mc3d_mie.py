@@ -141,3 +141,14 @@ def test_mie_sampled_distribution_matches_phase_lut():
   ref_at = np.interp(ctr, pang, pdf_ref)
   rel_l1 = float(np.sum(np.abs(h - ref_at)) / np.sum(ref_at))
   assert rel_l1 < 0.10
+
+
+def test_lut_load_inside_two_jit_traces_does_not_leak_tracers():
+  """The cache must hold host arrays: loading inside one trace then another
+  raised UnexpectedTracerError when a traced jnp array was cached."""
+  from legoesm.atmosphere.physics.radiation.mc3d import mie
+
+  mie._LUT_CACHE.clear()
+  first = jax.jit(lambda x: mie.load_mie_sampling_lut().phase_cdf.sum() * x)(1.0)
+  second = jax.jit(lambda x: mie.load_mie_sampling_lut().phase_cdf.sum() + x)(0.0)
+  assert float(first) == float(second)
