@@ -734,7 +734,7 @@ def build_si3_orca2_o17_config(card: object) -> SeaIceConfig:
         dynamics="none",
         transport="none",
         thermo_scheme="si3_orca2_o2",
-        si3_switches=SI3_HARD_SWITCHES,
+        si3_switches=card.surface.switches,  # one source: the step computes with card.surface
         ice_constants=card.constants,
         si3_orca2=card.state,
         core2_precipitation_closure=False,

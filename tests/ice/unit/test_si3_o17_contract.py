@@ -81,12 +81,15 @@ def test_card_builder_refuses_untyped_inputs() -> None:
         build_orca2_sas_ice_o17_card(surface=_surface(), thermo_namelist=None)
 
 
-def test_o17_config_is_explicit_and_hard() -> None:
+def test_o17_config_is_explicit_and_reports_the_cards_switches() -> None:
     card = _card()
     cfg = build_si3_orca2_o17_config(card)
     assert cfg.thermo_scheme == "si3_orca2_o2"
     assert (cfg.dynamics, cfg.transport) == ("none", "none")
-    assert cfg.si3_switches == SI3_HARD_SWITCHES
+    assert cfg.si3_switches == card.surface.switches == SI3_HARD_SWITCHES
+    smooth = _surface()
+    assert smooth.switches != SI3_HARD_SWITCHES
+    assert build_si3_orca2_o17_config(_card(smooth)).si3_switches == smooth.switches
     assert cfg.core2_precipitation_closure is False
     assert cfg.si3_o17 is card and cfg.si3_orca2 is card.state
     with pytest.raises(TypeError, match="explicit SI3O17Card"):
