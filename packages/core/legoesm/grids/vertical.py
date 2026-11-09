@@ -33,7 +33,6 @@ References
 from __future__ import annotations
 
 import logging
-import math
 from typing import Callable, NamedTuple
 
 import jax
@@ -748,7 +747,9 @@ def _van_leer_face_values(
     1-D (sigma) or carry the column axes (hybrid pressure).
     """
     from legoesm.core.flux_limiters import (
-        grad_safe_ratio, ratio_grad_floor, van_leer_limiter,
+        grad_safe_ratio,
+        ratio_grad_floor,
+        van_leer_limiter,
     )
 
     nlev = field.shape[-1]
@@ -2216,6 +2217,55 @@ def sb81_halflevel_construction(
     dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
     alpha = 1.0 - (p_half_safe[..., :-1] / dp) * ln_ratio  # (..., nlev)
     return p_half_safe, ln_ratio, alpha
+
+
+def as83_layer_exner(coord, p_s):
+    """Arakawa-Suarez (1983) layer Exner function on a hybrid coordinate.
+
+    ``P_{k+1/2} = (p_{k+1/2}/p_ref)^kappa`` at interfaces and
+    ``pi_k = Delta_k(p P) / ((1 + kappa) Delta_k p)`` per layer, with
+    ``d pi_k / d p_s = (Delta_k(P B) - pi_k Delta_k B) / Delta_k p``
+    (from ``d(pP)/dp = (1 + kappa) P``).  Returns ``(P_half, pi, dpi_dps)``.
+    """
+    kappa = constants.kappa
+    p_half = pressure_from_hybrid(coord, p_s, full=False)          # (..., nlev+1)
+    P = (p_half / coord.p_ref) ** kappa
+    dp = jnp.diff(p_half, axis=-1)
+    pi = jnp.diff(p_half * P, axis=-1) / ((1.0 + kappa) * dp)
+    B = coord.B_half.astype(p_half.dtype)
+    dpi_dps = (jnp.diff(P * B, axis=-1) - pi * jnp.diff(B)) / dp
+    return P, pi, dpi_dps
+
+
+def as83_interface_theta(theta, P_half, pi):
+    """Interface potential temperature ``theta_{k+1/2}`` (AS83 weights
+    ``a_k = (P_{k+1/2} - pi_k) / (pi_{k+1} - pi_k)``), shape ``(..., nlev-1)``.
+    With these weights the hydrostatic relation below makes the column total
+    energy conserved exactly; uniform theta stays uniform."""
+    a = (P_half[..., 1:-1] - pi[..., :-1]) / (pi[..., 1:] - pi[..., :-1])
+    return a * theta[..., :-1] + (1.0 - a) * theta[..., 1:]
+
+
+def as83_geopotential(theta, theta_half, P_half, pi, phis):
+    """Full-level geopotential, ``Phi_K = Phi_s + c_p theta_K (P_{K+1/2} - pi_K)``
+    and ``Phi_k - Phi_{k+1} = c_p theta_{k+1/2} (pi_{k+1} - pi_k)``."""
+    c_p = constants.c_pd
+    phi_bottom = phis + c_p * theta[..., -1] * (P_half[..., -1] - pi[..., -1])
+    inc = c_p * theta_half * (pi[..., 1:] - pi[..., :-1])           # (..., nlev-1)
+    above = jnp.cumsum(inc[..., ::-1], axis=-1)[..., ::-1]           # sum_{j>=k} inc_j
+    return phi_bottom[..., None] + jnp.concatenate(
+        [above, jnp.zeros_like(phi_bottom)[..., None]], axis=-1)
+
+
+def as83_vertical_theta_flux(theta, theta_half, mass_flux):
+    """``dp_k * dtheta_k/dt`` from vertical transport:
+    ``-[F_{k+1/2}(theta_{k+1/2} - theta_k) + F_{k-1/2}(theta_k - theta_{k-1/2})]``,
+    ``F`` the downward interface mass flux (zero at top and bottom)."""
+    F = mass_flux[..., 1:-1]                                         # interior interfaces
+    pad = ((0, 0),) * (F.ndim - 1)
+    lower = jnp.pad(F * (theta_half - theta[..., :-1]), (*pad, (0, 1)))
+    upper = jnp.pad(F * (theta[..., 1:] - theta_half), (*pad, (1, 0)))
+    return -(lower + upper)
 
 
 def sb81_full_level_ln_p(

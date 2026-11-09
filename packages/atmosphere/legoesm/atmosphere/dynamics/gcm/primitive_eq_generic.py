@@ -36,6 +36,10 @@ from legoesm.grids.operator_adapters import latlon_sw_grid_operators, mpas_neigh
 from legoesm.grids.vertical import (
     VERTICAL_ADVECTION_SCHEMES,
     HybridSigmaPressureCoordinate,
+    as83_geopotential,
+    as83_interface_theta,
+    as83_layer_exner,
+    as83_vertical_theta_flux,
     compute_geopotential,
     compute_geopotential_hybrid,
     compute_mass_flux_from_cumsum,
@@ -46,6 +50,7 @@ from legoesm.grids.vertical import (
     sb81_full_level_ln_p,
     vertical_advection,
     vertical_advection_hybrid,
+    vertical_advection_hybrid_sb,
     vertical_advection_theta,
     vertical_advection_theta_hybrid,
 )
@@ -86,6 +91,8 @@ def vertical_momentum_advection(vel: jax.Array, vv_face: jax.Array, ps_face: jax
     """Column vertical advection of one velocity family at its faces (the
     hybrid branch has a single scheme, as in both old cores)."""
     if hybrid:
+        if scheme == "as83":   # centred Simmons-Burridge form: conserves kinetic energy
+            return vertical_advection_hybrid_sb(vel, vv_face, ps_face, sigma_coord)
         return vertical_advection_hybrid(vel, vv_face, ps_face, sigma_coord)
     return vertical_advection(vel, vv_face, sigma_coord, scheme=scheme)
 
@@ -98,13 +105,23 @@ def primitive_equation_tendencies(
     face families with the level axis last."""
     R_d, kappa = constants.R_d, constants.kappa
     hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+    as83 = ops.vert_scheme == "as83"
+    if as83 and not hybrid:
+        raise ValueError("the Arakawa-Suarez vertical form needs a hybrid coordinate")
     gops = ops.grid_ops
     p_s = jnp.clip(p_s, ops.p_floor, ops.p_ceil)
     if hybrid:
         p_full = pressure_from_hybrid(sigma_coord, p_s)
         dp = dp_from_hybrid(sigma_coord, p_s)
-        Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
-        L = sb81_full_level_ln_p(sigma_coord, p_s)            # (..., nlev)
+        if as83:   # Arakawa-Suarez (1983): Exner pi replaces ln p, c_p theta replaces R T
+            P_half, pi, dpi_dps = as83_layer_exner(sigma_coord, p_s)
+            theta = T / pi
+            theta_half = as83_interface_theta(theta, P_half, pi)
+            Phi = as83_geopotential(theta, theta_half, P_half, pi, phis)
+            L = pi
+        else:
+            Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
+            L = sb81_full_level_ln_p(sigma_coord, p_s)            # (..., nlev)
     else:
         p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
         dp = p_s[..., None] * sigma_coord.dsigma.astype(p_s.dtype)
@@ -118,11 +135,14 @@ def primitive_equation_tendencies(
     dB = tuple(g[..., :nlev] for g in grads)
     dL = tuple(g[..., nlev:] for g in grads)
     T_face = ops.to_face(T)
-    dvel = tuple(-(db + R_d * tf * dl) for db, tf, dl in zip(dB, T_face, dL))
+    # PGF coefficient on faces: R_d T_f (ln p form) or c_p theta_f (Exner form)
+    pgf_coef = (tuple(constants.c_pd * f for f in ops.to_face(theta)) if as83
+                else tuple(R_d * f for f in T_face))
+    dvel = tuple(-(db + c * dl) for db, c, dl in zip(dB, pgf_coef, dL))
 
     dp_face = ops.to_face(dp)
     ctx: Ctx = dict(T=T, vel=vel, p_s=p_s, p_full=p_full, dp=dp, dp_face=dp_face,
-                    L=L, dL=dL, T_face=T_face, hybrid=hybrid, sigma_coord=sigma_coord,
+                    L=L, dL=dL, T_face=T_face, pgf_coef=pgf_coef, hybrid=hybrid, sigma_coord=sigma_coord,
                     Phi=Phi)
     # Each additive term, for budget attribution (unused outputs are dead code under jit).
     terms: Ctx = {"pgf": dvel}
@@ -137,7 +157,7 @@ def primitive_equation_tendencies(
     if hybrid:
         dps = -D[..., 0] / sigma_coord.B_range
         vv = compute_mass_flux_from_cumsum(cumsum, D, sigma_coord)
-        vert_T = vertical_advection_theta_hybrid(
+        vert_T = None if as83 else vertical_advection_theta_hybrid(
             T, vv, p_s, sigma_coord, conservative=(ops.vert_scheme == "sb"))
         omega_ps = sigma_coord.B_full * dps[..., None]
     else:
@@ -156,12 +176,20 @@ def primitive_equation_tendencies(
 
     div_u = gops.divergence(*vel)
     ctx["div_u"] = div_u
-    if ops.horizontal_T is None:
-        horiz_T = -gops.divergence(*(tf * v for tf, v in zip(T_face, vel))) + T * div_u
+    if as83:   # mass-weighted theta transport, same face theta as the PGF
+        theta_f = ops.to_face(theta)
+        flux = gops.divergence(*(v * d * t for v, d, t in zip(vel, dp_face, theta_f)))
+        horiz_T = pi * (-flux + theta * div_dp) / dp
+        vert_T = pi * as83_vertical_theta_flux(theta, theta_half, vv) / dp
+        conv_ps = theta * dpi_dps * dps[..., None]
+        conv_vgl = jnp.zeros_like(T)
     else:
-        horiz_T = ops.horizontal_T(ctx)
-    conv_ps = kappa * T * omega_ps / (p_full + _P_EPS)
-    conv_vgl = kappa * T * ops.v_dot_grad_L(ctx)
+        if ops.horizontal_T is None:
+            horiz_T = -gops.divergence(*(tf * v for tf, v in zip(T_face, vel))) + T * div_u
+        else:
+            horiz_T = ops.horizontal_T(ctx)
+        conv_ps = kappa * T * omega_ps / (p_full + _P_EPS)
+        conv_vgl = kappa * T * ops.v_dot_grad_L(ctx)
     dT = horiz_T + vert_T + (conv_ps + conv_vgl)
     terms.update(horiz_T=horiz_T, vert_T=vert_T, conv_ps=conv_ps, conv_vgl=conv_vgl,
                  dps=dps)

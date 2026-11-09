@@ -781,6 +781,8 @@ def _energy_groups(grid_kind, variant="sb_all", seed=3):
         ops = ops._replace(vert_scheme="sb")
     if variant == "sb_all":
         mp.setattr(g, "vertical_advection_hybrid", vt.vertical_advection_hybrid_sb)
+    if variant == "as83":
+        ops = ops._replace(vert_scheme="as83")
     try:
         dvel, dT, dps, _, ctx = g.primitive_equation_tendencies(T, vel, p_s, phis, coord, ops)
     finally:
@@ -798,7 +800,7 @@ def _energy_groups(grid_kind, variant="sb_all", seed=3):
     out = {
         "W_gradPhi": dK(tuple(-x for x in gr(ctx["Phi"]))),
         "W_gradK": dK(tuple(-x for x in gr(KE))),
-        "W_RTgradL": dK(tuple(-constants.R_d * tf * dl for tf, dl in zip(ctx["T_face"], ctx["dL"]))),
+        "W_RTgradL": dK(tuple(-c * dl for c, dl in zip(ctx["pgf_coef"], ctx["dL"]))),
         "W_coriolis": dK(t["coriolis"]), "W_vert_mom": dK(t["vert_mom"]),
         "H_horiz": cp(t["horiz_T"]), "H_vert": cp(t["vert_T"]),
         "H_conv_ps": cp(t["conv_ps"]), "H_conv_vgl": cp(t["conv_vgl"]),
