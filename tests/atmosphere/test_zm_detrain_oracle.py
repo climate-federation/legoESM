@@ -291,7 +291,7 @@ def test_macmic_hands_dlf_to_every_clubb_substep(monkeypatch):
             dp_s_dt=Field(z2, "dps", ("nCells",)), dphis_dt=Field(z2, "dphis", ("nCells",)),
             dv_dt=None, tracer_tendencies={k: F(v) for k, v in (tr or {}).items()})
 
-    def f_conv(cfg, model_type, dt_, *, defer_detrainment=False, defer_to_cloudsc=False):
+    def f_conv(cfg, model_type, dt_, *, defer_detrainment=False, defer_to_cloudsc):
         seen["defer"] = defer_detrainment
         seen["cloudsc"] = defer_to_cloudsc
 
