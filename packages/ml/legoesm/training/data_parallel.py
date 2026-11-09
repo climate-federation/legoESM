@@ -147,6 +147,34 @@ def mpi_rank_size():
         return 0, 1
 
 
+def reduce_validation_loss(total, count, sums, num_processes, *, comm=None):
+    """Global held-out mean ``(loss, {term: mean})`` over the windows that
+    exist, or ``(None, {})`` when no rank scored any.
+
+    A COLLECTIVE: every rank must call it, including an idle one (``count``
+    0, ``sums`` {}) -- returning early on such a rank left the others blocked
+    in the allreduce for the rest of the walltime (GLM). Sum and count are
+    reduced together, so the mean is over real windows, not over ranks.
+    """
+    if num_processes <= 1:
+        if not count:
+            return None, {}
+        return total / count, {k: v / count for k, v in sums.items()}
+    if comm is None:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+    from mpi4py import MPI as _MPI
+    g_total = float(comm.allreduce(float(total), op=_MPI.SUM))
+    g_count = int(comm.allreduce(int(count), op=_MPI.SUM))
+    # An idle rank has no term names of its own: take the union.
+    names = sorted(set().union(*comm.allgather(sorted(sums))))
+    g_sums = {k: float(comm.allreduce(float(sums.get(k, 0.0)), op=_MPI.SUM))
+              for k in names}
+    if g_count == 0:
+        return None, {}
+    return g_total / g_count, {k: v / g_count for k, v in g_sums.items()}
+
+
 def shard_samples(items, process_id, num_processes, *, drop_remainder=True):
     """Contiguous, disjoint, equal split of a sample list across ranks.
 

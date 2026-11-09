@@ -634,3 +634,69 @@ def test_adjoint_window_and_probe_scenes_flags():
     assert "adjoint_steps" not in fp_base and "probe_scenes" not in fp_base
     fp = mod._run_fingerprint(cfg, yml, 200, 12, 240, 1)
     assert fp["adjoint_steps"] == 3 and fp["probe_scenes"] == 48
+
+
+def test_validation_ranks_are_checked_and_logged_before_any_setup(
+        monkeypatch, tmp_path, caplog):
+    """User decisions 2026-11-09: the v9 deck scores its 24 windows on 8 of
+    the 32 training ranks, logged; a deck whose windows do not divide over the
+    job and that names no scoring_ranks is refused right after the deck is
+    read, before the model, optics or training data are built."""
+    import logging
+
+    import legoesm.ml.training as mlt
+
+    def _reached(*a, **k):
+        raise RuntimeError("reached setup past the preflight")
+
+    monkeypatch.setattr(mlt, "TrainingConfig", _reached)
+    deck = "config/wb/campaign/spectral_t63_ngcm_v9.yaml"
+    monkeypatch.setattr(mod, "_mpi_rank_size", lambda: (0, 32))
+    with caplog.at_level(logging.INFO, logger="wb_scale"):
+        with pytest.raises(RuntimeError, match="reached setup"):
+            mod._main(["--config", deck, "--mode", "neural_gcm"])
+    assert "24 windows scored on 8 of 32 ranks (3 each)" in caplog.text
+
+    bare = yaml.safe_load(open(deck))
+    del bare["validation"]["scoring_ranks"]
+    p = tmp_path / "bare.yaml"
+    p.write_text(yaml.safe_dump(bare))
+    with pytest.raises(ValueError, match=r"24 validation windows .* over 32 ranks"):
+        mod._main(["--config", str(p), "--mode", "neural_gcm"])
+
+
+def test_a_one_rank_gate_of_a_v9_deck_skips_validation(monkeypatch, caplog):
+    """Voted 2026-11-09: the gate (required before every launch, usually one
+    rank) never scores, so a deck scoring on 8 ranks must not stop it; the same
+    deck without --gate-only on one rank is still refused."""
+    import logging
+
+    import legoesm.ml.training as mlt
+
+    def _reached(*a, **k):
+        raise RuntimeError("reached setup past the preflight")
+
+    monkeypatch.setattr(mlt, "TrainingConfig", _reached)
+    monkeypatch.setattr(mod, "_mpi_rank_size", lambda: (0, 1))
+    deck = "config/wb/campaign/spectral_t63_ngcm_v9.yaml"
+    with caplog.at_level(logging.INFO, logger="wb_scale"):
+        with pytest.raises(RuntimeError, match="reached setup"):
+            mod._main(["--config", deck, "--mode", "neural_gcm", "--gate-only"])
+    assert "--gate-only: validation skipped (24 windows" in caplog.text
+    with pytest.raises(ValueError, match="scoring_ranks 8 exceeds the job's 1 ranks"):
+        mod._main(["--config", deck, "--mode", "neural_gcm"])
+
+
+@pytest.mark.parametrize("deck", [
+    "spectral_t63_ngcm_v9.yaml", "spectral_t63_ngcm_nolearnedembed_v9.yaml",
+    "spectral_t63_ngcm_lr3e-3_e24.yaml"])
+def test_the_24_window_decks_score_on_8_of_32_ranks(deck):
+    """User 2026-11-09 (option 1): all three 24-window decks score on 8 ranks,
+    3 windows each, on the windows they always validated on."""
+    from legoesm.training import scale_build as sb
+
+    yml = yaml.safe_load(open(f"config/wb/campaign/{deck}"))
+    assert sb.validation_scoring_ranks(yml, 24, 32) == 8
+    spec = {k: v for k, v in sb.wb_validation_spec(yml).items()
+            if k != "scoring_ranks"}
+    assert spec == sb._LEGACY_VALIDATION

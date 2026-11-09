@@ -151,6 +151,15 @@ lr: 3.0e-3
 # Held-out validation scored each epoch: 2014, the test protocol (24 inits
 # every 15 days from 1 Jan; owner 2026-11-01, never the 2020 test year).
 n_val_windows: 24
+# User 2026-11-09: the 24 windows score on 8 of the 32 training ranks (3 each).
+# The block spells out the built-in default protocol (2014, 24 inits, 360 h
+# apart) it validated on before, so the windows are unchanged.
+validation:
+  years:
+  - 2014
+  n_inits: 24
+  init_stride_hours: 360
+  scoring_ranks: 8
 warmup_steps: 500
 weight_decay: 1.0e-5
 grad_clip_norm: 1.0

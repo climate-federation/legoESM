@@ -65,6 +65,33 @@ def test_shards_are_disjoint_and_balanced(monkeypatch):
     assert len(flat) == len(set(flat))                # disjoint
 
 
+@pytest.mark.parametrize("n, nproc", [(24, 32), (24, 5), (7, 2)])
+def test_validation_windows_that_do_not_divide_raise(monkeypatch, n, nproc):
+    """User decision 2026-11-09: the balanced split would drop held-out
+    windows (24 over 32 ranks scored NONE), so it must refuse, naming both
+    counts. Training samples keep drop_remainder (tests above)."""
+    full = [(2014, i, i + 4) for i in range(n)]
+    monkeypatch.setattr(scale_build, "_training_sample_indices",
+                        lambda *a, **k: iter(full))
+    yml = {scale_build._VAL_INITS_KEY: [[2014, 0]]}
+    for rank in (0, nproc - 1):
+        with pytest.raises(ValueError, match=rf"{n} validation windows .* "
+                                             rf"over {nproc} ranks"):
+            scale_build._sharded_indices(None, yml, None, None, None,
+                                         rank, nproc)
+
+
+@pytest.mark.parametrize("n, nproc", [(24, 8), (24, 24), (24, 1)])
+def test_validation_windows_that_divide_are_all_scored(monkeypatch, n, nproc):
+    full = [(2014, i, i + 4) for i in range(n)]
+    monkeypatch.setattr(scale_build, "_training_sample_indices",
+                        lambda *a, **k: iter(full))
+    yml = {scale_build._VAL_INITS_KEY: [[2014, 0]]}
+    seen = [x for r in range(nproc) for x in scale_build._sharded_indices(
+        None, yml, None, None, None, r, nproc)]
+    assert seen == full
+
+
 # ---------------------------------------------------------------------------
 # Fix A: _sample_to_host yields host numpy that round-trips through device_put
 # ---------------------------------------------------------------------------
@@ -122,3 +149,73 @@ def test_loop_device_puts_host_samples():
         num_processes=1)
     assert len(hist) == 2
     assert all(np.isfinite(h) for h in hist)
+
+
+def _val_yml(**val):
+    return {scale_build._VAL_INITS_KEY: [[2014, 0]],
+            "validation": {"years": [2014], "n_inits": 24,
+                           "init_stride_hours": 360, **val}}
+
+
+def test_scoring_ranks_split_every_window_exactly_once(monkeypatch):
+    """User decision 2026-11-09 (v9: 24 windows, 32-rank job, 8 scoring
+    ranks): ranks 0-7 hold 3 windows each, ranks 8-31 none, and the union is
+    the full list once, in order."""
+    full = [(2014, i, i + 4) for i in range(24)]
+    monkeypatch.setattr(scale_build, "_training_sample_indices",
+                        lambda *a, **k: iter(full))
+    yml = _val_yml(scoring_ranks=8)
+    shards = [scale_build._sharded_indices(None, yml, None, None, None, r, 32)
+              for r in range(32)]
+    assert [len(x) for x in shards] == [3] * 8 + [0] * 24
+    assert [x for sh in shards for x in sh] == full
+
+
+def test_the_v9_validation_deck_keeps_its_scoring_ranks(monkeypatch):
+    """The key must survive into the derived validation deck the loader sees
+    (wb_validation_yaml), or the 32-rank job would pass the preflight and die
+    at load."""
+    import yaml
+
+    deck = yaml.safe_load(open("config/wb/campaign/spectral_t63_ngcm_v9.yaml"))
+    val = scale_build.wb_validation_yaml(deck, 24)
+    full = [(2014, i, i + 4) for i in range(24)]
+    monkeypatch.setattr(scale_build, "_training_sample_indices",
+                        lambda *a, **k: iter(full))
+    lens = [len(scale_build._sharded_indices(None, val, None, None, None, r, 32))
+            for r in range(32)]
+    assert lens == [3] * 8 + [0] * 24
+
+
+def test_column_sharded_processes_each_score_every_window(monkeypatch):
+    """Column mode is ONE logical trainer: its processes pass their physical
+    rank with nproc=1 and must all hold the full window list (codex P1)."""
+    full = [(2014, i, i + 4) for i in range(24)]
+    monkeypatch.setattr(scale_build, "_training_sample_indices",
+                        lambda *a, **k: iter(full))
+    for rank in (0, 1, 3):
+        assert scale_build._sharded_indices(
+            None, _val_yml(), None, None, None, rank, 1) == full
+
+
+@pytest.mark.parametrize("key, nproc, msg", [
+    (8, 4, r"scoring_ranks 8 exceeds the job's 4 ranks"),
+    (8, 1, r"scoring_ranks 8 exceeds the job's 1 ranks"),
+    (5, 32, r"24 validation windows do not divide evenly over "
+            r"validation.scoring_ranks 5"),
+    (0, 32, r"positive integer"),
+    (True, 32, r"positive integer"),
+])
+def test_scoring_ranks_contract_is_enforced(key, nproc, msg):
+    """Voted rule: the key must divide the windows and fit the job; a smaller
+    job is an error, never a silent fallback."""
+    with pytest.raises(ValueError, match=msg):
+        scale_build.validation_scoring_ranks(_val_yml(scoring_ranks=key),
+                                             24, nproc)
+
+
+def test_without_the_key_every_rank_scores():
+    assert scale_build.validation_scoring_ranks(_val_yml(), 24, 8) == 8
+    assert scale_build.validation_scoring_ranks(_val_yml(), 24, 1) == 1
+    with pytest.raises(ValueError, match=r"24 validation windows .* over 32 ranks"):
+        scale_build.validation_scoring_ranks(_val_yml(), 24, 32)

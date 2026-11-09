@@ -1234,6 +1234,24 @@ def _main(argv=None):
     from legoesm.training.scale_build import validate_wb_campaign_yaml
     validate_wb_campaign_yaml(yml)
     cfg, _wd, _clip = _resolve_training_keys(cfg, yml)
+    _val_ranks = 0
+    if cfg.gate_only and int(cfg.n_val_windows or 0) > 0:
+        # Voted 2026-11-09 (me, codex; GLM preferred loading them): the gate
+        # never scores, so it neither loads the held-out windows nor checks
+        # their scoring ranks -- a 1-rank gate of a deck that scores on 8 must
+        # not need a --val-windows 0 workaround. The real launch still checks.
+        log.info("--gate-only: validation skipped (%d windows; the gate never "
+                 "scores them)", int(cfg.n_val_windows))
+        cfg = cfg._replace(n_val_windows=0)
+    if int(cfg.n_val_windows or 0) > 0:
+        # Preflight: fail before the model, optics and training data are built
+        # (the loader re-checks on the windows it actually builds).
+        from legoesm.training.scale_build import validation_scoring_ranks
+        _val_ranks = validation_scoring_ranks(yml, int(cfg.n_val_windows), nproc)
+        log.info("validation: %d windows scored on %d of %d ranks (%d each); "
+                 "the other ranks are idle while scoring",
+                 int(cfg.n_val_windows), _val_ranks, nproc,
+                 int(cfg.n_val_windows) // _val_ranks)
     _t_defaults = TrainingConfig()
     weight_decay = _t_defaults.weight_decay if _wd is None else _wd
     grad_clip_norm = _t_defaults.grad_clip_norm if _clip is None else _clip
@@ -1854,13 +1872,9 @@ def _main(argv=None):
     # about what "held out" means.
     val_samples = []
     if int(getattr(cfg, "n_val_windows", 0)) > 0:
-        # The reduction below is unconditional, so a rank with an empty shard is
-        # safe; this only keeps the WARNING visible rather than silent.
-        if nproc > int(cfg.n_val_windows):
-            log.warning(
-                "--val-windows %d with %d ranks: some ranks hold no validation "
-                "samples; the held-out loss is still a global mean over the "
-                "samples that exist.", int(cfg.n_val_windows), nproc)
+        # The windows split exactly over the scoring ranks (the loader raises
+        # otherwise, user decision 2026-11-09); ranks past them hold none and
+        # still join the reduction.
         val_samples = load_era5_samples(
             cfg, _val_yaml(yml, int(cfg.n_val_windows)), grid, sigma,
             rank=rank, nproc=nproc, host_resident=True)
@@ -1885,33 +1899,16 @@ def _main(argv=None):
     _val_place = _device_sample if column_mesh is None else place_sample
 
     def _validation_loss(cur_arr):
-        # EVERY rank reaches the reduction, including one whose validation
-        # shard came out empty: returning early on that rank left the others
-        # blocked in the allreduce for the rest of the walltime (GLM). The
-        # per-rank sum and count are reduced together, so the mean is over the
-        # samples that exist rather than over the ranks that have any.
-        # Returns (mean loss, {term: mean}).
-        if not val_samples and nproc <= 1:
-            return None, {}
+        # Every rank reaches the reduction, idle ones included (it is a
+        # collective). Returns (mean loss, {term: mean}).
+        from legoesm.training.data_parallel import reduce_validation_loss
         total, sums = 0.0, {}
         for _s in val_samples:
             _l, _t = _val_loss(cur_arr, _val_place(_s))
             total += float(_l)
             for _k, _v in _t.items():
                 sums[_k] = sums.get(_k, 0.0) + float(_v)
-        if nproc <= 1:
-            return (total / len(val_samples),
-                    {k: v / len(val_samples) for k, v in sums.items()})
-        from mpi4py import MPI
-        g_total = float(MPI.COMM_WORLD.allreduce(total, op=MPI.SUM))
-        g_count = int(MPI.COMM_WORLD.allreduce(len(val_samples), op=MPI.SUM))
-        if g_count == 0:
-            return None, {}
-        # A rank with an empty shard has no keys of its own: take the union.
-        _names = sorted(set().union(*MPI.COMM_WORLD.allgather(sorted(sums))))
-        g_sums = {k: float(MPI.COMM_WORLD.allreduce(sums.get(k, 0.0), op=MPI.SUM))
-                  for k in _names}
-        return g_total / g_count, {k: v / g_count for k, v in g_sums.items()}
+        return reduce_validation_loss(total, len(val_samples), sums, nproc)
 
     _history_path = os.path.join(cfg.out_dir, "training_history.jsonl")
     _static_h = static if column_mesh is None else jax.device_get(static)

@@ -198,6 +198,45 @@ def wb_validation_yaml(yml: dict, n_windows: int) -> dict:
     return out
 
 
+def validation_scoring_ranks(yml: dict, n_windows: int, nproc: int) -> int:
+    """How many of the run's ``nproc`` ranks score the ``n_windows`` held-out
+    windows; ranks at or above this index hold none and sit idle (they still
+    join the reduction).
+
+    User decisions 2026-11-09: held-out windows are never dropped, so the
+    split must be exact; when they do not divide over every rank, the deck
+    names a subset with ``validation.scoring_ranks`` (v9 decks: 8 ranks x 3 of
+    24 windows on a 32-rank job). Voted rule (me, codex, GLM): an explicit key
+    is a contract -- it must divide the windows and fit the job (a smaller job
+    than the key is an error, never a silent fallback); with no key, every
+    rank scores and the rank count must divide the windows. Errors name both
+    counts.
+    """
+    n, nproc = int(n_windows), max(int(nproc), 1)
+    key = wb_validation_spec(yml).get("scoring_ranks")
+    if key is None:
+        if n % nproc:
+            raise ValueError(
+                f"{n} validation windows do not divide evenly over {nproc} "
+                "ranks; the split would drop some. Name a rank count that "
+                "divides them in validation.scoring_ranks, or change the job's "
+                "rank count or validation.n_inits.")
+        return nproc
+    if isinstance(key, bool) or not isinstance(key, int) or key < 1:
+        raise ValueError(f"validation.scoring_ranks must be a positive integer, "
+                         f"got {key!r}.")
+    if key > nproc:
+        raise ValueError(
+            f"validation.scoring_ranks {key} exceeds the job's {nproc} ranks "
+            f"({n} validation windows). Run on at least {key} ranks, or pass "
+            "--val-windows 0 to skip validation.")
+    if n % key:
+        raise ValueError(
+            f"{n} validation windows do not divide evenly over "
+            f"validation.scoring_ranks {key}; the split would drop some.")
+    return key
+
+
 def _sharded_indices(cfg, yml, times, snaps_per_day, stride, rank, nproc):
     """This rank's contiguous shard of the ``(year, i_ic, i_tg)`` index list.
 
@@ -210,6 +249,18 @@ def _sharded_indices(cfg, yml, times, snaps_per_day, stride, rank, nproc):
     ``idx[p*per:(p+1)*per]``.  Single process -> the full list.
     """
     idx = list(_training_sample_indices(cfg, yml, times, snaps_per_day, stride))
+    if yml is not None and _VAL_INITS_KEY in yml:
+        # Held-out windows: an EXACT split over the scoring ranks (every
+        # window once, none dropped); the remaining ranks get none.
+        k = validation_scoring_ranks(yml, len(idx), nproc)
+        if nproc <= 1:
+            # One logical trainer (incl. column-sharded runs, whose processes
+            # pass their PHYSICAL rank with nproc=1): every process scores all.
+            return idx
+        if rank >= k:
+            return []
+        per = len(idx) // k
+        return idx[rank * per:(rank + 1) * per]
     if nproc <= 1:
         return idx
     per = len(idx) // nproc          # drop_remainder: balanced shards

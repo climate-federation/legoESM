@@ -274,6 +274,9 @@ validation:
   - 2014
   n_inits: 24
   init_stride_hours: 360
+  # User 2026-11-09: 24 windows on the 32-rank job score on 8 ranks (3 each);
+  # the other 24 ranks are idle while scoring. Matches the offline v9 scores.
+  scoring_ranks: 8
 era5_soil_moisture: true
 learned_position_embedding: false
 near_surface_head:
