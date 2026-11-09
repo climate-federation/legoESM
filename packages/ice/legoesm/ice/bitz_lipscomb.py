@@ -145,8 +145,10 @@ class SI3StepTrace(NamedTuple):
     post_temp2: SI3ColumnArrays
     post_do: SI3ColumnArrays
     exit: SI3ColumnArrays
-    # Sum of every stage's exchange contribution (zdf + dh + sal + do).
+    # Sum of every stage's exchange contribution (zdf + dh + sal + do + cor).
     fluxes: SI3ExchangeFluxes | None = None
+    # After ice_cor(kt, 2) (`icethd.F90:183`), before ice aging.
+    post_cor: SI3ColumnArrays | None = None
 
 
 _EPS10 = 1.0e-10
@@ -219,6 +221,10 @@ _OPTION2_UPPER_TRANSITION = 4.5
 _OPTION2_LAYER_SHAPE = (1.0 / 3.0, 1.0, 5.0 / 3.0)
 _NEW_ICE_THICKNESS = 0.05
 _MAXIMUM_ICE_CONCENTRATION = 0.99999
+# rn_himin: minimum ice thickness of ice_cor's thin-ice rescale (namelist_ice_cfg:39).
+_MINIMUM_ICE_THICKNESS = 0.05
+# hi_max(jpl) = rn_himax: glo2eqv's thickness cap (namelist_ice_ref:46, iceitd.F90:761).
+_MAXIMUM_ICE_THICKNESS = 99.0
 # --- RULE 5 smoothing (user standing rule, 2026-11-04) ---
 # Width [K] of the one-sided C1 blend of hfx_err_dif's two NEMO formulas
 # below T0 (T_su < rt0 vs T_su = rt0); 0.0 = NEMO's hard branch.
@@ -1683,7 +1689,8 @@ def _do_step(*args, _st_mode: str = "st", **kw):
 
 def _do_step_impl(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: float,
              constants: IceConstantsConfig, nemo_version: str = "5.0.2",
-             switches: SI3SwitchConfig = SI3SwitchConfig(), _st_mode: str = "hard"):
+             switches: SI3SwitchConfig = SI3SwitchConfig(), _st_mode: str = "hard",
+             _volumes: bool = False):
     """ice_thd_do, jpl = 1, nn_icesal = 2, no frazil (`icethd_do.F90:171-307`).
 
     New ice forms at t_bo with salinity rn_sinew*SSS; its enthalpy and
@@ -1793,7 +1800,90 @@ def _do_step_impl(post_temp2: SI3ColumnArrays, forcing: SI3SurfaceForcing, dt: f
         wfx_opw=-vnew * constants.rho_ice * r1_dt,
         sfx_opw=-vnew * constants.rho_ice * s_new * r1_dt,
     )
-    return post_do, do_fluxes
+    if not _volumes:
+        return post_do, do_fluxes
+    # NEMO's prognostic contents after ice_thd_do (v_i, v_s, sv_i, e_i), handed to
+    # ice_cor before any thickness is formed, so a category emptied of area keeps its
+    # volume for ice_var_zapsmall to return to the ocean (vote Z65).
+    e_out = _upd(new_ice[..., None], e_ice_new, post_temp2.e_ice)
+    v_snow = post_temp2.h_snow * a_old
+    n_ice, n_snow = post_temp2.e_ice.shape[-1], post_temp2.e_snow.shape[-1]
+    volumes = (a_total, v_total, v_snow,
+               _upd(new_ice, v_salt, post_temp2.S_bulk * v_old),
+               e_out * (v_total / n_ice)[..., None],
+               post_temp2.e_snow * (v_snow / n_snow)[..., None])
+    return post_do, do_fluxes, volumes
+
+
+def _cor_step(post_do: SI3ColumnArrays, volumes, forcing: SI3SurfaceForcing, dt: float,
+              constants: IceConstantsConfig, switches: SI3SwitchConfig = SI3SwitchConfig()):
+    """ice_cor(kt, 2) after ice_thd_do (`icethd.F90:183`, `icecor.F90:64-116` +
+    `ice_var_zapsmall`), through the shared jpl = 1 port `si3_ice_cor`, then NEMO's
+    glo2eqv/salprof back to thicknesses (`icevar.F90:283-300,346-360`; votes Z69, Z75).
+
+    Smooth mode: forward = the hard correction, gradient from the port's one-sided C1
+    limits at sharpness 1/relative_width (straight-through, vote Z66).  Zapped ice,
+    snow, salt and heat leave through hfx/wfx/sfx_res (vote Z67); the zapped surface
+    temperature is SST + T0 from forcing.sst, NEMO's sst_m (vote Z68b).
+    """
+    from legoesm import constants as core_constants
+    from legoesm.ice.si3_ice_cor import (SI3IceCorConfig, SI3IceCorFluxes, SI3IceCorState,
+                                         apply_si3_jpl1_ice_cor)
+    if forcing.sst is None:
+        raise ValueError("ice_cor needs forcing.sst (NEMO sst_m) for the zapped surface temperature")
+    a_i, v_i, v_s, salt, e_i, e_s = volumes
+    z = jnp.zeros_like(a_i)
+    state = SI3IceCorState(
+        ice_area=a_i, ice_volume=v_i, snow_volume=v_s, salt_content=salt,
+        age_content=post_do.age_volume, pond_area=z, pond_volume=z, pond_lid_volume=z,
+        snow_enthalpy=e_s, ice_enthalpy=e_i, surface_temperature=post_do.T_surface)
+    rw = switches.relative_width
+
+    def run(sharpness):
+        cfg = SI3IceCorConfig(
+            rn_himin_m=_MINIMUM_ICE_THICKNESS, rn_simin_g_kg=_MINIMUM_ICE_SALINITY,
+            rn_sinew=_NEW_ICE_SALINITY_FRACTION, nn_icesal=2, ponds=False,
+            rho_ice_kg_m3=constants.rho_ice, rho_snow_kg_m3=constants.rho_snow,
+            rho_water_kg_m3=core_constants.rho_water, rt0_k=constants.T0, dt_s=dt,
+            limit_sharpness_scale=sharpness)
+        out = apply_si3_jpl1_ice_cor(state, SI3IceCorFluxes(z, z, z), _MAXIMUM_ICE_CONCENTRATION,
+                                     forcing.sss, forcing.sst, cfg)
+        c = out.state
+        v = c.ice_volume
+        # glo2eqv (`icevar.F90:283-287`): IF v_i > hi_max*a_i THEN a_i = MIN(1, v_i/hi_max);
+        # smooth: one-sided C1 ramps, width relative_width of hi_max in thickness and of 1
+        # in area (vote Z75); hard at sharpness inf.
+        a0 = c.ice_area
+        if math.isinf(sharpness):
+            a = jnp.where(v > _MAXIMUM_ICE_THICKNESS * a0,
+                          jnp.minimum(1.0, v / _MAXIMUM_ICE_THICKNESS), a0)
+        else:
+            s_area = jnp.where(a0 > 0.0, sharpness / jnp.where(a0 > 0.0, a0, 1.0), math.inf)
+            a = min_c1(max_c1(v / _MAXIMUM_ICE_THICKNESS, a0, s_area), 1.0, sharpness)
+        # NEMO's guards (`icevar.F90:291-300,352-356,384,404`): a_i, v_i, v_s > epsi20;
+        # an ice-free category reads S = rn_simin.
+        has_area, pos_v, pos_s = a > _EPS20, v > _EPS20, c.snow_volume > _EPS20
+        n_ice, n_snow = c.ice_enthalpy.shape[-1], c.snow_enthalpy.shape[-1]
+        S_bulk = jnp.where(pos_v, c.salt_content / jnp.where(pos_v, v, 1.0), _MINIMUM_ICE_SALINITY)
+        post = post_do._replace(
+            concentration=a,
+            h_ice=jnp.where(has_area, v / jnp.where(has_area, a, 1.0), 0.0),
+            h_snow=jnp.where(has_area, c.snow_volume / jnp.where(has_area, a, 1.0), 0.0),
+            T_surface=c.surface_temperature,
+            e_ice=jnp.where(pos_v[..., None], c.ice_enthalpy * n_ice
+                            / jnp.where(pos_v, v, 1.0)[..., None], 0.0),
+            e_snow=jnp.where(pos_s[..., None], c.snow_enthalpy * n_snow
+                             / jnp.where(pos_s, c.snow_volume, 1.0)[..., None], 0.0),
+            S_bulk=S_bulk,
+            S_layers=option2_salinity_profile(S_bulk, forcing.sss),
+            age_volume=c.age_content,
+        )
+        f = out.fluxes
+        return post, _zero_fluxes(a)._replace(sfx_res=f.sfx_res, wfx_res=f.wfx_res, hfx_res=f.hfx_res)
+
+    if rw == 0.0:
+        return run(math.inf)
+    return _st_tree(run(math.inf), run(1.0 / rw))
 
 
 def si3_column_step_arrays(state: SI3ColumnArrays,
@@ -1853,14 +1943,15 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     post_sal = post_temp1._replace(S_bulk=S_bulk, S_layers=S_layers)
     post_temp2 = post_sal
 
-    post_do, do_fluxes = _do_step(post_temp2, forcing, dt, constants, nemo_version,
-                                  switches=switches)
+    post_do, do_fluxes, do_volumes = _do_step(post_temp2, forcing, dt, constants, nemo_version,
+                                              switches=switches, _volumes=True)
+    post_cor, cor_fluxes = _cor_step(post_do, do_volumes, forcing, dt, constants, switches=switches)
     fluxes = SI3ExchangeFluxes(*(
-        sum(parts) for parts in zip(zdf_fluxes, dh_fluxes, sal_fluxes, do_fluxes)
+        sum(parts) for parts in zip(zdf_fluxes, dh_fluxes, sal_fluxes, do_fluxes, cor_fluxes)
     ))
-    exit_state = post_do._replace(age_volume=post_do.age_volume + post_do.concentration * dt)
+    exit_state = post_cor._replace(age_volume=post_cor.age_volume + post_cor.concentration * dt)
     return SI3StepTrace(state, post_zdf, post_dh, post_temp1, post_sal,
-                        post_temp2, post_do, exit_state, fluxes)
+                        post_temp2, post_do, exit_state, fluxes, post_cor)
 
 
 __all__ = (
