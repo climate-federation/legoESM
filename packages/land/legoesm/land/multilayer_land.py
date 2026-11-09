@@ -2265,7 +2265,12 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
         # Equal to the air, so any consumer that forms a humidity GRADIENT from
         # this field gets zero.
         q_surface=jnp.asarray(forcing.q_lowest).reshape(-1),
-        lw_up=eps * constants.sigma_sb * T_prev ** 4,
+        # Grey-body upward LW of the exported (T_rad, emissivity) pair: the
+        # emission PLUS the reflected (1 - eps) * La, so the radiation's LW
+        # boundary eps*sigma*T_rad^4 + (1 - eps)*La reproduces this field
+        # (it omitted the reflected term: 14-20 W/m2 off, tier-5 U11-2).
+        lw_up=(eps * constants.sigma_sb * T_prev ** 4
+               + (1.0 - eps) * jnp.asarray(forcing.lw_down).reshape(-1)),
     )
 
     def _hold_response(name, leaf):

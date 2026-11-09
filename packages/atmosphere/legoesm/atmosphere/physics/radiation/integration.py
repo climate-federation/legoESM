@@ -183,6 +183,50 @@ def resolve_prescribed_radiative_bc(forcing, radiation_config, ncol,
     return T_sfc_col, alb_col, emis_col
 
 
+def resolve_land_radiative_bc(forcing, radiation_config, ncol,
+                              T_sfc_col, emis_col):
+    """Apply the land-coupled radiating surface, per column.
+
+    Reads the optional traced forcing pair ``T_sfc_rad`` [K] and
+    ``sfc_emissivity`` [1]: the area blend of the surface tiles' radiating
+    pairs, ``eps * sigma * T_sfc_rad**4 = sum_i f_i * eps_i * sigma *
+    T_rad_i**4`` with ``eps = sum_i f_i * eps_i`` (the coupler's tile-blend
+    rule, ``coupler/tile_fractions.py``).  The solver's upward LW
+    ``eps*sigma*T^4 + (1 - eps)*La`` is then the area sum of the tiles' own
+    grey-body LW, i.e. the LW the land balanced its energy with (tier-5
+    U11-1).  ``forcing["T_sfc"]`` stays the TURBULENT surface temperature.
+
+    Identity when both keys are absent.  Refuses one key without the other
+    (a half-applied blend) and a scheme that takes no per-column emissivity.
+    A prescribed ``sfc_lw_up`` applied afterwards still wins.
+    """
+    if forcing is None:
+        return T_sfc_col, emis_col
+    T_rad = forcing.get("T_sfc_rad")
+    eps = forcing.get("sfc_emissivity")
+    if T_rad is None and eps is None:
+        return T_sfc_col, emis_col
+    if (T_rad is None) != (eps is None):
+        raise ValueError(
+            "the land-coupled radiating surface needs BOTH 'T_sfc_rad' and "
+            "'sfc_emissivity' in the radiation forcing; got only "
+            f"{'T_sfc_rad' if T_rad is not None else 'sfc_emissivity'!r}.")
+    if radiation_config.scheme not in ("rrtmgp", "ecrad_ifs"):
+        raise ValueError(
+            "a per-column surface emissivity (forcing 'T_sfc_rad' / "
+            "'sfc_emissivity', the multilayer land's radiating surface) is "
+            "only consumed by the rrtmgp and ecrad_ifs schemes; radiation "
+            f"scheme is {radiation_config.scheme!r}, which would ignore it "
+            "and break the land LW energy closure.")
+    T_rad = jnp.asarray(T_rad)
+    eps = jnp.asarray(eps)
+    if T_rad.size != ncol or eps.size != ncol:
+        raise ValueError(
+            f"forcing 'T_sfc_rad' / 'sfc_emissivity' have {T_rad.size} / "
+            f"{eps.size} values but this grid has ncol={ncol} columns.")
+    return T_rad.reshape(ncol), eps.reshape(ncol)
+
+
 def _apply_T_sfc_override(T_sfc, override):
     """Apply a per-column ``T_sfc`` override over an arbitrary-shape T_sfc.
 
@@ -1754,6 +1798,10 @@ def _make_hydrostatic_radiation(
                     "forcing carries both a prescribed surface shortwave "
                     "(sfc_sw_up) and open_ocean_frac; the prescribed albedo "
                     "would be overwritten on the direct beam.")
+        # Land-coupled radiating surface (multilayer land, U11-1); a
+        # prescribed LW below still wins.
+        T_sfc_col, _emis_col = resolve_land_radiative_bc(
+            forcing, radiation_config, ncol, T_sfc_col, _emis_col)
         T_sfc_col, _alb_col, _emis_col = resolve_prescribed_radiative_bc(
             forcing, radiation_config, ncol, T_sfc_col, _alb_col, _emis_col)
 
@@ -1891,6 +1939,8 @@ def _make_hydrostatic_radiation(
             # (uniform) albedo has no column axis and stays replicated.
             if _alb_col is not None and _alb_col.ndim > 0:
                 _alb_col = shard_columns(_alb_col, column_mesh)
+            if _emis_col is not None and jnp.ndim(_emis_col) > 0:
+                _emis_col = shard_columns(_emis_col, column_mesh)
             if _ocn_frac_col is not None:
                 _ocn_frac_col = shard_columns(_ocn_frac_col, column_mesh)
             if q_v_col is not None:

@@ -268,10 +268,43 @@ def split_land_columns(idx, n_proc, proc):
     return shares[proc], padded
 
 
+def land_radiating_surface(T_sea, f_land, E_sea, T_rad_land, eps_land):
+    """Radiating surface ``(T_g, eps_g)`` of a sea/land cell (tier-5 U11-1).
+
+    The coupler's tile-blend rule (``coupler/tile_fractions.py``) for two
+    tiles: ``eps_g = (1-f)*E_sea + f*eps_land`` and ``eps_g*sigma*T_g^4 =
+    (1-f)*E_sea*sigma*T_sea^4 + f*eps_land*sigma*T_rad_land^4``, so a solver
+    boundary ``eps_g*sigma*T_g^4 + (1-eps_g)*La`` is EXACTLY the area sum of
+    the two tiles' grey-body upward LW at any La.  Written relative to
+    ``T_sea`` so an ``f == 0`` cell returns ``(T_sea, E_sea)`` bitwise
+    (``E_sea/E_sea == 1``).  No floor: every temperature and emissivity is
+    positive on the domain (vote V7a), so the map is smooth there.
+
+    Formed at the promoted precision of all inputs (a float32 land mask must
+    not round ``(1-f)*E_sea`` before the float64 fields join it) and
+    returned in ``T_sea``'s dtype, the dtype of the cold-start seed, so the
+    forcing pytree keeps one dtype from the first step.
+    """
+    wdt = jnp.result_type(T_sea, f_land, T_rad_land, eps_land)
+    T_s, f, T_l, e_l = (jnp.asarray(x, wdt)
+                        for x in (T_sea, f_land, T_rad_land, eps_land))
+    eps_g = (1.0 - f) * E_sea + f * e_l
+    T_g = T_s * (((1.0 - f) * E_sea + f * e_l * (T_l / T_s) ** 4)
+                 / eps_g) ** 0.25
+    out_dt = jnp.asarray(T_sea).dtype
+    return T_g.astype(out_dt), eps_g.astype(out_dt)
+
+
+# Per-cell fields of the MPAS land step tuple, after the state: T_sfc, albedo,
+# q_surface, shflx, lhflx, surface_mass_flux, stress, held, T_rad, emissivity.
+_LAND_STEP_N_CELL = 10
+
+
 def gather_land_step(run, ncol, padded, proc, allgather):
     """Run this process's share of the land step and rebuild the full output
     on every process (shares from ``split_land_columns``).  ``run()`` returns
-    the land step tuple ``(state, 8 per-cell fields, 5 counts, iter max)``;
+    the land step tuple ``(state, _LAND_STEP_N_CELL per-cell fields, 5 counts,
+    iter max)``;
     every per-column leaf (leading axis ``ncol``) takes each column from the
     process that solved it, counts are summed, the iteration max is maxed.
 
@@ -285,7 +318,7 @@ def gather_land_step(run, ncol, padded, proc, allgather):
         out = run()
         mine = jnp.asarray(padded[proc])
         flat = jnp.asarray(padded.reshape(-1))
-        leaves, tdef = jax.tree_util.tree_flatten(out[:9])
+        leaves, tdef = jax.tree_util.tree_flatten(out[:_LAND_STEP_N_CELL + 1])
         # A leaf that is not per column would keep only this process's
         # share's update and silently differ across processes: refuse it.
         bad = [np.shape(x) for x in leaves
@@ -302,7 +335,8 @@ def gather_land_step(run, ncol, padded, proc, allgather):
         widths = [r.shape[1] for r in rows]
         payload = jax.block_until_ready(
             (jnp.concatenate([r.astype(jnp.float64) for r in rows], axis=1),
-             jnp.stack([jnp.asarray(x, jnp.float64) for x in out[9:]])))
+             jnp.stack([jnp.asarray(x, jnp.float64)
+                        for x in out[_LAND_STEP_N_CELL + 1:]])))
     except Exception as exc:  # noqa: BLE001 - agreed across processes below
         err = exc
     flags = allgather(jnp.asarray(0.0 if err is None else 1.0))
@@ -319,8 +353,9 @@ def gather_land_step(run, ncol, padded, proc, allgather):
         full.append(jnp.asarray(x).at[flat].set(blk.astype(x.dtype)))
         k += w
     g_cnt = jnp.asarray(g_cnt)
-    counts = tuple(jnp.sum(g_cnt[:, i]).astype(jnp.asarray(out[9 + i]).dtype)
-                   for i in range(len(out) - 10))
+    counts = tuple(jnp.sum(g_cnt[:, i]).astype(
+                       jnp.asarray(out[_LAND_STEP_N_CELL + 1 + i]).dtype)
+                   for i in range(len(out) - _LAND_STEP_N_CELL - 2))
     return (tuple(jax.tree_util.tree_unflatten(tdef, full)) + counts
             + (jnp.max(g_cnt[:, -1]).astype(jnp.asarray(out[-1]).dtype),))
 
@@ -1636,11 +1671,14 @@ def coupling_window_from_checkpoint(payload, cpl_k, n_cells):
 
 
 _LAND_HELD_NAMES = ("T_skin", "albedo", "qsfc_last", "qsfc", "shflx", "lhflx",
-                    "evap", "beta")
+                    "evap", "beta", "T_rad", "emis")
 # ``beta`` (R-ex): once the solved-humidity channel is live the loop stops
 # refreshing the traced beta, so it is NOT a function of the restored soil
 # state; without it a restart re-derives it and the restart set differs.
 _LAND_HELD_FLUX = ("qsfc", "shflx", "lhflx", "evap")
+# The land's radiating pair (U11-1): persisted together (vote V8a); a
+# checkpoint written before it existed carries neither.
+_LAND_HELD_RAD = ("T_rad", "emis")
 
 
 def land_window_checkpoint_payload(a2s_sum, n, cz_wsum, w_sum, held):
@@ -1716,7 +1754,8 @@ def land_window_from_checkpoint(payload, land_k, n_cells):
     # needs the skin T and albedo it was solved with.
     _hk = {nm for nm in _LAND_HELD_NAMES if f"land_held_{nm}" in payload}
     if ((_hk and not {"T_skin", "albedo"} <= _hk)
-            or (_hk & set(_LAND_HELD_FLUX)) not in (set(), set(_LAND_HELD_FLUX))):
+            or (_hk & set(_LAND_HELD_FLUX)) not in (set(), set(_LAND_HELD_FLUX))
+            or (_hk & set(_LAND_HELD_RAD)) not in (set(), set(_LAND_HELD_RAD))):
         raise ValueError(
             f"checkpoint carries a partial held land-output set {sorted(_hk)}: "
             "incomplete land cadence state.")
@@ -14257,6 +14296,22 @@ class ModelDriver:
         # phase-2b follow-up (see the port plan).
         _land_ml_on = (bool(getattr(cfg, "use_multilayer_land", False))
                        and self._land_ml_state is not None)
+        # The emissivity radiation gives every column without a per-column
+        # one (rrtmgp and ecrad_ifs both read it): the sea part of the
+        # radiating-surface blend keeps it, so ocean/ice radiate as before
+        # (vote V12a, 3-0).
+        _E_sfc_rad = float(phys_cfg.radiation.rrtmgp.sfc_emissivity)
+        # Only rrtmgp / ecrad_ifs take a per-column emissivity; gray keeps
+        # its scalar boundary and is not closed (vote V11b, 2-1).
+        _land_rad_bc_on = _land_ml_on and _rad_scheme in ("rrtmgp", "ecrad_ifs")
+        if _land_ml_on and not _land_rad_bc_on and _rad_scheme != "none":
+            logger.warning(
+                "  multilayer land with radiation=%r: the radiation takes no "
+                "per-column emissivity, so it emits upward LW from the "
+                "canopy-air temperature at its own scalar emissivity, NOT the "
+                "land's radiating temperature/emissivity -- the land-"
+                "atmosphere longwave exchange does not close on this lane "
+                "(it does with rrtmgp / ecrad_ifs).", _rad_scheme)
         if _land_beta_soil_on and not bool(
                 getattr(cfg, "use_multilayer_land", False)):
             # CONFIG-ONLY test, deliberately: it is the same on every rank, so
@@ -14283,6 +14338,10 @@ class ModelDriver:
         _land_step_fn = None
         _land_T_skin = None            # (nCells,) land skin T of the last step
         _land_albedo_cells = None      # (nCells,) land albedo of the last step
+        # (nCells,) the land's radiating pair of the last step (T_rad, eps):
+        # what its LW_out = eps*sigma*T_rad^4 + (1-eps)*La was solved with.
+        _land_Trad_cells = None
+        _land_emis_cells = None
         _land_beta_fn = None           # jitted land-state -> per-cell beta_soil
         _land_beta_cells = None        # (nCells,) traced beta of the last step
         _land_qsfc_cells = None        # (nCells,) land's solved q_sfc, last step
@@ -14646,6 +14705,14 @@ class ModelDriver:
                             .astype(jnp.int32))
                     if _unconv_mask is not None
                     else jnp.zeros((), jnp.int32))
+                # The land's RADIATING pair (emission-equivalent temperature
+                # and column emissivity) its energy balance closed with:
+                # LW_out = eps*sigma*T_rad^4 + (1 - eps)*La.  The surface
+                # blend hands both to radiation (tier-5 U11-1), so the
+                # atmosphere's upward LW is the one the land lost.
+                _emis = jnp.broadcast_to(
+                    jnp.asarray(resp.emissivity, resp.T_rad.dtype),
+                    resp.T_rad.shape)
                 if _land_pack_on:
                     # Scatter the advanced columns back into the full-grid
                     # state (ocean columns keep their frozen init values,
@@ -14661,12 +14728,12 @@ class ModelDriver:
                                 for o in (
                                     resp.T_sfc, resp.albedo, resp.q_surface,
                                     resp.shflx, resp.lhflx, resp.surface_mass_flux,
-                                    _taumag, _held_f))
+                                    _taumag, _held_f, resp.T_rad, _emis))
                             + (_n_held, _n_held_land, _n_fb_land,
                                _n_fb_rej, _n_unconv_land, _n_iter_max))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
                         resp.shflx, resp.lhflx, resp.surface_mass_flux,
-                        _taumag, _held_f,
+                        _taumag, _held_f, resp.T_rad, _emis,
                         _n_held, _n_held_land, _n_fb_land, _n_fb_rej,
                         _n_unconv_land, _n_iter_max)
               if not _land_none:
@@ -15509,13 +15576,26 @@ class ModelDriver:
         if _land_ml_on and _lw_ck:
             (_land_a2s_sum, _land_a2s_n, _land_cz_wsum, _land_w_sum,
              (_lw_T, _lw_alb, _lw_qlast, _lw_qs, _lw_sh, _lw_lh,
-              _lw_ev, _lw_beta)) = land_window_from_checkpoint(
+              _lw_ev, _lw_beta, _lw_Trad, _lw_emis)) = land_window_from_checkpoint(
                 _lw_ck, _LAND_K,
                 int(jnp.asarray(self.state.p_s.data).reshape(-1).shape[0]))
             if _lw_T is not None:
                 _land_T_skin = self._land_T_skin_last = _lw_T
                 _land_albedo_cells = _lw_alb
                 self._land_qsfc_last = _lw_qlast
+                # A checkpoint written before the radiating pair was
+                # persisted: seed it with the held skin T and the radiation's
+                # own emissivity (vote V2a, 3-0) until the first land call.
+                _land_Trad_cells = _lw_T if _lw_Trad is None else _lw_Trad
+                _land_emis_cells = (
+                    jnp.full_like(_lw_T, _E_sfc_rad) if _lw_emis is None
+                    else _lw_emis)
+                if _lw_Trad is None:
+                    logger.warning(
+                        "  MPAS land window: the checkpoint carries no held "
+                        "land radiating pair (written before it was "
+                        "persisted); radiation uses the held skin T at the "
+                        "radiation emissivity until the first land call.")
             # The flux channel exists only with the land beta handoff; its
             # seeds above are replaced by the held solved values when the
             # checkpoint carries them.
@@ -15941,11 +16021,29 @@ class ModelDriver:
                 # before the first land step (_land_T_skin None) the anchor is
                 # the unmodified SST field (incl. the lapse fallback) — the
                 # cold-start value the land tile itself was initialized from.
-                if (_land_ml_on and _land_T_skin is not None
-                        and "T_sfc" in _forcing):
-                    _forcing["T_sfc"] = (
-                        (1.0 - _f_land_cells) * _forcing["T_sfc"]
-                        + _f_land_cells * _land_T_skin)
+                if _land_ml_on and "T_sfc" in _forcing:
+                    _T_sea = _forcing["T_sfc"]
+                    if _land_T_skin is not None:
+                        _forcing["T_sfc"] = (
+                            (1.0 - _f_land_cells) * _T_sea
+                            + _f_land_cells * _land_T_skin)
+                    # Radiating surface (tier-5 U11-1): the sea part (the
+                    # anchor above, at the radiation's own emissivity, as
+                    # before) blended with the land's radiating pair in
+                    # emission-flux space (land_radiating_surface), so the
+                    # radiation's upward LW is the LW the land balanced its
+                    # energy with.  Before the first land call (cold start): the sea anchor
+                    # at E, exactly today's boundary; the keys are always
+                    # present so the forcing pytree never changes structure.
+                    if _land_rad_bc_on and _land_Trad_cells is None:
+                        _forcing["T_sfc_rad"] = _T_sea
+                        _forcing["sfc_emissivity"] = jnp.full_like(
+                            _T_sea, _E_sfc_rad)
+                    elif _land_rad_bc_on:
+                        (_forcing["T_sfc_rad"],
+                         _forcing["sfc_emissivity"]) = land_radiating_surface(
+                            _T_sea, _f_land_cells, _E_sfc_rad,
+                            _land_Trad_cells, _land_emis_cells)
                 # Interactive land ALBEDO (same one-step lag as the skin T
                 # above): the multilayer tile's end-of-step albedo already
                 # carries the snow brightening and the dry-soil brightening, so
@@ -16197,6 +16295,7 @@ class ModelDriver:
                      _land_albedo_cells, _land_qsfc_step,
                      _land_shflx_step, _land_lhflx_step, _land_evap_step,
                      _land_taumag_step, _land_held_step,
+                     _land_Trad_cells, _land_emis_cells,
                      _land_n_held_step, _land_n_held_land_step,
                      _land_n_fb_step, _land_n_fb_rej_step,
                      _land_n_unconv_step, _land_n_iter_max) = _land_fn(
@@ -16273,7 +16372,8 @@ class ModelDriver:
                          _land_qsfc_cells, _land_shflx_cells,
                          _land_lhflx_cells, _land_evap_cells,
                          _land_beta_cells, _land_taumag_cells,
-                         _land_taumag_valid, _land_taumag_fresh
+                         _land_taumag_valid, _land_taumag_fresh,
+                         _land_Trad_cells, _land_emis_cells
                          ) = _exchange_halo_cell_fields(
                             self._voronoi_layout.halo_exchange,
                             (_land_T_skin, _land_albedo_cells,
@@ -16281,7 +16381,8 @@ class ModelDriver:
                              _land_shflx_cells, _land_lhflx_cells,
                              _land_evap_cells, _land_beta_cells,
                              _land_taumag_cells, _land_taumag_valid,
-                             _land_taumag_fresh))
+                             _land_taumag_fresh,
+                             _land_Trad_cells, _land_emis_cells))
                         self._land_T_skin_last = _land_T_skin
                         self._land_qsfc_last = _land_qsfc_step
                         if _land_taumag_cells is not None:
@@ -16297,7 +16398,8 @@ class ModelDriver:
                     (_land_T_skin, _land_albedo_cells,
                      getattr(self, "_land_qsfc_last", None),
                      _land_qsfc_cells, _land_shflx_cells,
-                     _land_lhflx_cells, _land_evap_cells, _land_beta_cells))
+                     _land_lhflx_cells, _land_evap_cells, _land_beta_cells,
+                     _land_Trad_cells, _land_emis_cells))
                 if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
                     if _ls_seed_win is not None:
                         self._flush_land_stress_counts(
@@ -16852,6 +16954,7 @@ class ModelDriver:
                         "_land_lhflx_cells", "_land_evap_cells",
                         "_land_beta_cells", "_land_taumag_cells",
                         "_land_taumag_valid", "_land_taumag_fresh",
+                        "_land_Trad_cells", "_land_emis_cells",
                         "_land_a2s_sum", "_land_a2s_n", "_land_cz_wsum",
                         "_land_w_sum",
                         *(("_cpl_sums", "_cpl_n") if _CPL_K is not None
