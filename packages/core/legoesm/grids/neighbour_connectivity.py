@@ -9,15 +9,22 @@ grids raise.
 
 MPAS / Voronoi: index tables straight from the mesh connectivity, reproducing
 the TRiSK kernels of :mod:`legoesm.core.operators_voronoi`.
+
+RBF-FD on the sphere (arXiv 2610.25484 App. B, Listings 8-9): every node gets a
+stencil of its ``n`` nearest nodes; polyharmonic-spline + polynomial weights
+for the surface gradient (Cartesian components) and the Laplace-Beltrami
+operator, by the tangent-plane method.  Collocated, so one index table serves
+every operator; the apply is the table gather + neighbour sum.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from legoesm.core.neighbour_ops import Connectivity, NeighbourMesh, offsets, table
 
 
@@ -187,4 +194,139 @@ def mpas_neighbour_mesh(mesh: Any) -> NeighbourMesh:
         area_cell=mesh.areaCell,
         dc_edge=(mesh.dcEdge,),
         area_vertex=mesh.areaTriangle,
+    )
+
+
+# ============================================================================
+# RBF-FD (collocated, sphere)
+# ============================================================================
+
+class RBFFDMesh(NamedTuple):
+    """Collocated RBF-FD operators on a sphere of radius ``radius``.
+
+    ``grad[i]`` is the Cartesian component ``i`` of the surface gradient,
+    ``lap`` the Laplace-Beltrami operator, ``normal`` the outward unit normal
+    ``(nx, ny, nz)`` at every node.  All four share one ``(n, n_nodes)`` table.
+    """
+
+    grad: tuple[Connectivity, Connectivity, Connectivity]
+    lap: Connectivity
+    normal: tuple[jax.Array, jax.Array, jax.Array]
+    radius: float
+
+
+def rbffd_stencils(xyz: Any, n: int) -> np.ndarray:
+    """``(n_nodes, n)`` indices of each node's ``n`` nearest nodes (self first).
+
+    Setup-time (SciPy k-d tree on the positions normalised to the unit
+    sphere); not traced.
+    """
+    from scipy.spatial import cKDTree
+
+    x = np.asarray(xyz, dtype=np.float64)
+    x = x / np.linalg.norm(x, axis=-1, keepdims=True)
+    _, idx = cKDTree(x).query(x, k=n)
+    return np.asarray(idx, dtype=np.int32)
+
+
+def _poly_exponents(degree: int) -> list[tuple[int, int]]:
+    return [(i - j, j) for i in range(degree + 1) for j in range(i + 1)]
+
+
+def phs_planar_weights(xs: jax.Array, *, phs_degree: int,
+                       poly_degree: int) -> jax.Array:
+    """RBF-FD weights at the origin for batched planar stencils (Listing 8).
+
+    ``xs (B, n, 2)`` are stencil points (scaled, centre at the origin);
+    returns ``(B, n, 3)`` weights for ``d/dxi1``, ``d/dxi2`` and the planar
+    Laplacian, from PHS ``r**phs_degree`` augmented with all monomials of total
+    degree ``<= poly_degree``.
+    """
+    m = phs_degree
+    n = xs.shape[1]
+
+    diff = xs[:, :, None, :] - xs[:, None, :, :]
+    a_phs = jnp.sum(diff**2, -1) ** (m / 2)                              # (N, n, n)
+    exps = _poly_exponents(poly_degree)
+    p = jnp.stack([xs[..., 0]**i * xs[..., 1]**j for i, j in exps], -1)  # (N, n, M)
+    n_poly = len(exps)
+    zeros = jnp.zeros((xs.shape[0], n_poly, n_poly), dtype=xs.dtype)
+    lhs = jnp.concatenate([
+        jnp.concatenate([a_phs, p], -1),
+        jnp.concatenate([jnp.swapaxes(p, 1, 2), zeros], -1)], axis=1)
+
+    # Operators applied to phi(|y - x_j|) at y = 0 (the centre).
+    r2 = jnp.sum(xs**2, -1)                                              # (N, n)
+    r_m2 = r2 ** ((m - 2) / 2)
+    rhs_phs = jnp.stack([-m * r_m2 * xs[..., 0], -m * r_m2 * xs[..., 1],
+                         m * m * r_m2], -1)                              # (N, n, 3)
+    rhs_poly = np.zeros((n_poly, 3))
+    for k, (i, j) in enumerate(exps):
+        rhs_poly[k] = [float((i, j) == (1, 0)), float((i, j) == (0, 1)),
+                       2.0 * float((i, j) in ((2, 0), (0, 2)))]
+    rhs = jnp.concatenate([
+        rhs_phs,
+        jnp.broadcast_to(jnp.asarray(rhs_poly, dtype=xs.dtype),
+                         (xs.shape[0], n_poly, 3))], axis=1)
+
+    return jnp.linalg.solve(lhs, rhs)[:, :n, :]
+
+
+def rbffd_sphere_weights(
+    xyz: jax.Array, stencil: Any, *, phs_degree: int, poly_degree: int,
+) -> tuple[jax.Array, jax.Array]:
+    """Tangent-plane RBF-FD weights on the UNIT sphere (differentiable in ``xyz``).
+
+    Each stencil is projected orthogonally onto the tangent plane at its
+    centre; 2-D PHS ``r**phs_degree`` + polynomials of total degree
+    ``poly_degree`` give weights for ``d/dxi1``, ``d/dxi2`` and the planar
+    Laplacian at the centre.  Projection makes the chart metric ``I + O(xi^2)``,
+    so these are the surface derivatives and the Laplace-Beltrami operator at
+    the centre.  Returns ``grad (n_nodes, n, 3)`` (Cartesian components of the
+    surface gradient) and ``lap (n_nodes, n)``.  Divide by the radius
+    (squared for ``lap``) for a sphere of radius ``a``.
+    """
+    m = phs_degree
+    x = xyz / jnp.linalg.norm(xyz, axis=-1, keepdims=True)              # (N, 3)
+    # Tangent frame from the coordinate axis least aligned with the normal.
+    # The axis choice is piecewise constant (zero derivative) and the weights
+    # do not depend on the in-plane rotation of the frame.
+    axis = jax.nn.one_hot(jnp.argmin(jnp.abs(x), axis=-1), 3, dtype=x.dtype)
+    e1 = axis - jnp.sum(axis * x, -1, keepdims=True) * x
+    e1 = e1 / jnp.linalg.norm(e1, axis=-1, keepdims=True)
+    e2 = jnp.cross(x, e1)
+    d = x[jnp.asarray(stencil)] - x[:, None, :]                          # (N, n, 3)
+    xi = jnp.stack([jnp.sum(d * e1[:, None, :], -1),
+                    jnp.sum(d * e2[:, None, :], -1)], axis=-1)           # (N, n, 2)
+    # Scale by the stencil radius (Listing 8); weights are scale-covariant.
+    s = jnp.sqrt(jnp.max(jnp.sum(xi**2, -1), axis=-1))                  # (N,)
+    xs = xi / s[:, None, None]
+    w = phs_planar_weights(xs, phs_degree=m, poly_degree=poly_degree)
+    w1 = w[..., 0] / s[:, None]
+    w2 = w[..., 1] / s[:, None]
+    lap = w[..., 2] / s[:, None] ** 2
+    grad = e1[:, None, :] * w1[..., None] + e2[:, None, :] * w2[..., None]
+    return grad, lap
+
+
+def rbffd_sphere_mesh(
+    xyz: Any, radius: float, *, n: int, phs_degree: int, poly_degree: int,
+) -> RBFFDMesh:
+    """RBF-FD mesh on a sphere of ``radius`` with nodes ``xyz (n_nodes, 3)``."""
+    stencil = rbffd_stencils(xyz, n)
+    x = jnp.asarray(xyz)
+    grad, lap = rbffd_sphere_weights(x, stencil, phs_degree=phs_degree,
+                                     poly_degree=poly_degree)
+    unit = x / jnp.linalg.norm(x, axis=-1, keepdims=True)
+    nb = table(jnp.asarray(stencil.T))
+    one = jnp.ones((1, 1), dtype=x.dtype)
+
+    def conn(w):
+        return Connectivity(nb, one, w.T, one)
+
+    return RBFFDMesh(
+        grad=tuple(conn(grad[..., i] / radius) for i in range(3)),
+        lap=conn(lap / radius**2),
+        normal=(unit[:, 0], unit[:, 1], unit[:, 2]),
+        radius=radius,
     )
