@@ -138,7 +138,10 @@ def _branch_pressure_interpolant(p: Array, p_ref: Array, p_tropo, tropo: int) ->
   size = log_p_ref.shape[0]
   delta = log_p_ref[1] - log_p_ref[0]
   k_tropo = optics_utils.floor_idx(jnp.log(p_tropo) + 0.5 * delta, log_p_ref)
-  own = optics_utils.floor_idx(log_p, log_p_ref)
+  # own-side index and out-of-table rule exactly as ``_pressure_interpolant``
+  below = log_p < log_p_ref[-1]
+  outside = below | (log_p > log_p_ref[0])
+  own = jnp.where(below, size - 2, optics_utils.floor_idx(log_p, log_p_ref))
   if tropo == 0:
     idx_low = jnp.minimum(own, k_tropo - 1)
   else:
@@ -146,10 +149,10 @@ def _branch_pressure_interpolant(p: Array, p_ref: Array, p_tropo, tropo: int) ->
   idx_high = jnp.minimum(idx_low + 1, size - 1)
   lower_reference_vals = log_p_ref[0] + delta * idx_low.astype(log_p_ref.dtype)
   weight2 = (log_p - lower_reference_vals) / delta
-  # signed only where the branch is extended past the tropopause; elsewhere the
-  # original abs (incl. its behaviour beyond the table ends), so own-side cells
-  # are bit-identical to ``_pressure_interpolant``.
-  weight2 = jnp.where(idx_low == own, jnp.abs(weight2), weight2)
+  # signed where the branch is extended past the tropopause or the cell is beyond
+  # the table ends; elsewhere abs, so own-side cells are bit-identical to
+  # ``_pressure_interpolant``.
+  weight2 = jnp.where((idx_low == own) & ~outside, jnp.abs(weight2), weight2)
   return Interpolant(optics_utils.IndexAndWeight(idx_low + tropo, 1.0 - weight2),
                      optics_utils.IndexAndWeight(idx_high + tropo, weight2))
 
