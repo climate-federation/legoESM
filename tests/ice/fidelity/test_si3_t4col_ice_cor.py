@@ -104,7 +104,9 @@ def test_cor_soft_pass_check_grads(monkeypatch, band):
         return jnp.concatenate([out.concentration, out.h_ice, out.S_bulk, jnp.ravel(out.e_ice),
                                 fl.wfx_res, fl.sfx_res, fl.hfx_res])
     # Z73: input in band widths, each output divided by its magnitude at v0, so the
-    # FD step resolves the band without ulp noise from the 3e8 J/m3 enthalpies.
-    scale = jnp.maximum(jnp.abs(raw(v0)), 1e-30)
+    # FD step resolves the band without ulp noise from the 3e8 J/m3 enthalpies; outputs
+    # exactly 0 at v0 keep scale 1 (a 1e-30 floor broke VJP linearity in fp64, Z74).
+    r0 = raw(v0)
+    scale = jnp.where(r0 == 0.0, 1.0, jnp.abs(r0))
     f = lambda x: raw(v0 + width * x) / scale  # noqa: E731
     check_grads(f, (jnp.zeros_like(v0),), order=2, modes=("fwd", "rev"), eps=1e-3, atol=1e-6, rtol=1e-3)
