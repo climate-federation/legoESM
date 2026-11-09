@@ -635,6 +635,10 @@ class SeaIceConfig(NamedTuple):
     # snowfall, and the post-thermo cover reported to the coupler).  Disable
     # only in a NEMO-comparison config that requires the legacy paths.
     core2_precipitation_closure: bool = True
+    # Frozen O17 full-deck composition card.  Kept opaque here to avoid a
+    # config -> dynamics -> config import cycle; the dispatcher checks its
+    # concrete SI3O17Card contract before use.
+    si3_o17: object | None = None
 
 
 from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig  # noqa: E402,F401
@@ -676,7 +680,11 @@ def _validate_si3_orca2_o1_config(config: "SeaIceConfig") -> None:
             "ln_icedyn and ln_icethd must both be False at rung O1 "
             "(icestp.F90:167,199; active dynamics/thermo enter at rungs O4-O16 and O17/C0-C4)"
         )
-    if config.thermo_scheme == "si3_orca2_o2" and orca2_cfg.ln_icedyn:
+    if (
+        config.thermo_scheme == "si3_orca2_o2"
+        and orca2_cfg.ln_icedyn
+        and config.si3_o17 is None
+    ):
         conflicts.append(
             "ln_icedyn must be False on the O2/O15/O16 state-and-finalization entry"
         )
@@ -712,6 +720,28 @@ def build_si3_orca2_o2_config(
         ice_constants=cfg.ice_constants,
         si3_orca2=cfg,
     )
+
+
+def build_si3_orca2_o17_config(card: object) -> SeaIceConfig:
+    """Return the frozen full-production O17 config; no selector is inferred."""
+    from legoesm.ice.si3_o17 import SI3O17Card
+
+    if not isinstance(card, SI3O17Card):
+        raise TypeError("O17 requires an explicit SI3O17Card")
+    if card.core2_precipitation_closure is not False:
+        raise ValueError("O17 freezes core2_precipitation_closure=False")
+    cfg = SeaIceConfig(
+        dynamics="none",
+        transport="none",
+        thermo_scheme="si3_orca2_o2",
+        si3_switches=card.surface.switches,  # one source: the step computes with card.surface
+        ice_constants=card.constants,
+        si3_orca2=card.state,
+        core2_precipitation_closure=False,
+        si3_o17=card,
+    )
+    _validate_si3_orca2_o1_config(cfg)
+    return cfg
 
 
 class SI3LateralMeltConfig(NamedTuple):
