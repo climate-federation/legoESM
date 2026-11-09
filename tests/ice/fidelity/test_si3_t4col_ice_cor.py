@@ -81,7 +81,7 @@ def test_do_and_cor_budgets_close(monkeypatch, arm):
 
 @pytest.mark.parametrize("band", ["thin_ice", "zap"])
 def test_cor_soft_pass_check_grads(monkeypatch, band):
-    """Z71: order-2 check_grads of the correction's soft pass inside each band, FD step
+    """Z71/Z73: order-2 check_grads of the correction's soft pass inside each band, FD step
     1e-3 x band width, tolerances of test_si3_ice_cor_orca1_oracle."""
     st, fz = _state()
     k = int(np.flatnonzero(np.asarray(st.concentration) > 0.0)[0])
@@ -97,10 +97,14 @@ def test_cor_soft_pass_check_grads(monkeypatch, band):
         v0 = jnp.full_like(a, bl._EPS10 - 0.5 * width)
     monkeypatch.setattr(bl, "straight_through", lambda h, s: s)
 
-    def f(v):
+    def raw(v):
         vs = post.h_snow * a
         vols = (a, v, vs, post.S_bulk * v, post.e_ice * (v / 3.0)[..., None], post.e_snow * (vs / 3.0)[..., None])
         out, fl = bl._cor_step(post, vols, fk, DT, K, switches=SMOOTH)
         return jnp.concatenate([out.concentration, out.h_ice, out.S_bulk, jnp.ravel(out.e_ice),
                                 fl.wfx_res, fl.sfx_res, fl.hfx_res])
-    check_grads(f, (v0,), order=2, modes=("fwd", "rev"), eps=1e-3 * width, atol=1e-6, rtol=1e-3)
+    # Z73: input in band widths, each output divided by its magnitude at v0, so the
+    # FD step resolves the band without ulp noise from the 3e8 J/m3 enthalpies.
+    scale = jnp.maximum(jnp.abs(raw(v0)), 1e-30)
+    f = lambda x: raw(v0 + width * x) / scale  # noqa: E731
+    check_grads(f, (jnp.zeros_like(v0),), order=2, modes=("fwd", "rev"), eps=1e-3, atol=1e-6, rtol=1e-3)
