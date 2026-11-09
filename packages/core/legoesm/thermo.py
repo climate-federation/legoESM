@@ -508,8 +508,9 @@ def _mixing_ratio_from_esat(e_sat: jax.Array, p: jax.Array) -> jax.Array:
     # Below 1 it is evaluated in the identical form x - softplus(β(x - 1))/β
     # (softplus(z) = z + softplus(-z)), which does not cancel against 1 when
     # x << 1; at x >= 1 the original form, which does not cancel when x >> 1
-    # (pre-cap x reaches ~1e4 where p < e_sat).  Both branches are the same
-    # function, so the select is smooth.
+    # (pre-cap x reaches ~1e4 where p < e_sat; there the x < 1 form is off by
+    # ~1.6e4 ulp of the result in fp32 and ~3e4 ulp in fp64).  Both branches
+    # are the same function, so the select is smooth.
     return jnp.where(q_sat < 1.0,
                      q_sat - jax.nn.softplus(20.0 * (q_sat - 1.0)) / 20.0,
                      1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat)) / 20.0)
