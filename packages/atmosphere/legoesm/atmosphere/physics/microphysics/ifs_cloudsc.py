@@ -21,10 +21,11 @@ Levels: index 0 = model top (IFS JK=1).  Arrays are ``[ncol, nlev]``.
 Differentiability (user rule, vote V16a/V22a): every traced switch, clip,
 min/max uses ``legoesm.core.smooth`` -- min/max through the C1 positive part
 (exact outside a window of width ``w``), switches through the C1 cubic
-smoothstep centred on the threshold -- with ``w = 0.01*|threshold|`` for a
-nonzero threshold, ``0.01 K`` for every temperature threshold, and
-``0.01*class scale`` for a zero threshold (fractions/ratios 1, water mixing
-ratios ``RLMIN``).  ``hard=True`` (static) gives the oracle's exact
+smoothstep -- with ``w = 0.01 x`` a scale of the switched quantity (user rule;
+the ``_S_*`` block: 2nd percentile over the oracle profiles per class,
+0.01 x std(T) for temperature, 0.01*|threshold| for O(1) ratios).  Threshold
+gates on water and fraction quantities are one-sided on [thr, thr + w]
+(exact at and below the threshold).  ``hard=True`` (static) gives the oracle's exact
 discontinuous forms and is used ONLY by the oracle-match test.  Discrete
 inputs (convection flag, type) and level-index tests stay exact.  The
 species order of the sink truncation (5.2.1) stays the hard sort (V17a).
@@ -758,7 +759,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
 
         # ---- 4.4 rain evaporation (:2271-2378) ----
         zzrh = cfg.rprecrhmax + (1.0 - cfg.rprecrhmax) * zcovpmax / sm.max(_ZEPSEC, 1.0 - za_k, _W_A)
-        zzrh = sm.min(sm.max(zzrh, cfg.rprecrhmax, _W_A), 1.0, _wt(1.0))
+        zzrh = sm.min(sm.max(zzrh, cfg.rprecrhmax, _wt(cfg.rprecrhmax)), 1.0, _wt(1.0))
         zsigk = pap / psurf
         wsg = sm.gt(zsigk, _SIG_RHC, _wt(_SIG_RHC))
         zrhc = sm.sel(wsg, cfg.ramid + (1.0 - cfg.ramid) * ((zsigk - _SIG_RHC) / _SIG_RHC_SPAN) ** 2, cfg.ramid)
@@ -868,7 +869,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
         zqpt = sm.max(zqx[:, NCLDQS] + qr, _ZEPSEC, _W_Q)
         rf = qr / zqpt
         prainfrac = sm.sel(wtop, rf, c["prainfrac"])
-        llrainliq = sm.sel(wtop, sm.on(rf, _RAINFRAC_LIQ_SP, _W_A), c["llrainliq"])
+        llrainliq = sm.sel(wtop, sm.on(rf, _RAINFRAC_LIQ_SP, _wt(_RAINFRAC_LIQ_SP)), c["llrainliq"])
         wcold = wr * sm.lt(T, th.RTT, _W_T)
         zlambda = (RCL_LAM1R / (zrho * _safe_gate(qr, _ZEPSEC))) ** RCL_LAM2R
         ztemp = sm.min(cfg.rcl_fzrab * (T - th.RTT), _FZR_TEMP_CAP, _wt(_FZR_TEMP_CAP))
@@ -930,7 +931,7 @@ def cloudsc(cfg: IFSCloudscConfig, th, x: CloudscInputs, ptsphy, *, hard: bool =
 
         # ---- 4.15 snow sublimation, ISUBLSNOW = 1 (:3252-3318) ----
         zzrh = cfg.rprecrhmax + (1.0 - cfg.rprecrhmax) * zcovpmax / sm.max(_ZEPSEC, 1.0 - za_k, _W_A)
-        zzrh = sm.min(sm.max(zzrh, cfg.rprecrhmax, _W_A), 1.0, _wt(1.0))
+        zzrh = sm.min(sm.max(zzrh, cfg.rprecrhmax, _wt(cfg.rprecrhmax)), 1.0, _wt(1.0))
         zqe = (zqv - za_k * zqsice) / sm.max(_ZEPSEC, 1.0 - za_k, _W_A)
         zqe = sm.max(0.0, sm.min(zqe, zqsice, wbv(zqsice)), _W_V)
         llo1 = (sm.on(zcovpclr, _ZEPSEC, _W_A) * sm.on(zqxfg[NCLDQS], _ZEPSEC, _W_Q)
