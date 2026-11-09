@@ -380,3 +380,48 @@ def test_meltpond_config_defaults():
     assert _CFG.pond_to_ice_max_area == 0.6
     assert _CFG.depth_to_area_ratio == 0.8          # CICE volume->area
     assert _CFG.snow_block_threshold == 5.0e-3      # CICE ~5 mm
+
+
+# ---------------------------------------------------------------------------
+# SI3-LEV arm (scheme="si3_lev"): PR #2388 review items 7 and 8.
+# ---------------------------------------------------------------------------
+def _si3_lev(shape, *, ncat=None):
+    from legoesm.ice.config import SI3PondConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+
+    full = shape if ncat is None else (*shape, ncat)
+    f = lambda v: jnp.full(full, v, jnp.float64)  # noqa: E731
+    return step_ponds(
+        f(0.3), f(0.1), melt_water_m=f(0.0), rain_water_m=f(0.0), ice_mask=f(1.0) > 0.5,
+        h_snow=f(0.0), T_air=f(273.0), dt=_DT, drainage_timescale=_TAU,
+        refreeze_threshold=_T_FREEZE, pond_to_ice_max_area=_MAX_AREA,
+        depth_to_area_ratio=_RATIO, scheme="si3_lev",
+        at_i=jnp.full(shape, 0.5, jnp.float64), a_i=f(0.5 if ncat is None else 0.5 / ncat),
+        h_i=f(1.5), t_su=f(_T_FREEZE), h_il=f(0.0), dh_i_sum=f(-0.02), dh_s_sum=f(0.0),
+        sz_i=jnp.full((*full, 1), 5.0), t_i=jnp.full((*full, 1), 270.0),
+        namthd_pnd=SI3PondConfig(rn_himin=0.1, rn_apnd_min=0.15, rn_apnd_max=0.85,
+                                 rn_pnd_flush=0.1, ln_pnd_lids=True),
+        rho_w=constants.rho_water, gravity=constants.g,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "PR #2388 review item 7 (gentine 2026-11-06): main now refuses this five-category "
+    "step_ponds call (one category per call); this reproduction does not accept a refusal"))
+def test_si3_lev_multicategory_drainage_matches_single_category_total():
+    # Five identical categories of area 0.1 drain the same cell water as one of 0.5.
+    one = _si3_lev((4, 4))[2] * 0.5
+    five = jnp.sum(_si3_lev((4, 4), ncat=5)[2] * 0.1, axis=-1)
+    np.testing.assert_allclose(np.asarray(five), np.asarray(one), rtol=1e-10, atol=0)
+
+
+@pytest.mark.parametrize("shape,layout", [((16,), (16, 1)), ((6, 2, 2), (12, 2))])
+def test_si3_lev_column_and_cube_layouts_match_the_2d_layout_or_refuse(shape, layout):
+    # A (ncol,) or cube (6, n, n) field must give the same drainage as the same
+    # columns laid out 2-D, or be refused; never misread as a category axis.
+    try:
+        got = _si3_lev(shape)[2]
+    except ValueError:
+        return
+    np.testing.assert_array_equal(np.asarray(got).reshape(layout), np.asarray(_si3_lev(layout)[2]))
