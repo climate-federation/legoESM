@@ -1102,6 +1102,7 @@ def create_atmosphere_dycore(
             # the column-split step runs the global energy fixer (F15); the
             # legacy step does not and is refused above with it on
             energy_fixer=bool(dc.energy_fixer and dc.column_lane),
+            sponge_del2_nu_top_m2s=float(dc.spectral_sponge_nu_top_m2s),
         )
         model = SpectralPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma, config=pe_config,

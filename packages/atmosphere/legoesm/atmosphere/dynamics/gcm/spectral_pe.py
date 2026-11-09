@@ -103,6 +103,9 @@ _LNPS_MAX = math.log(2.0e6)
 # precision more than ~10·scale inside the bounds.
 _LNPS_CLIP_SCALE = 0.05
 _COS_LAT_MIN = 1.0e-6
+# --- top sponge profile (CAM-SE dyn_comp.F90, nu_scale_top for ptop > 300 Pa) ---
+# Per-level multipliers of nu_top for levels k = 0 (model top), 1, 2.
+_CAM_SE_NU_SCALE_TOP = (4.0, 2.0, 1.0)
 
 
 def soft_clip_lnps(lnps_raw: jax.Array) -> jax.Array:
@@ -308,6 +311,10 @@ class SpectralPEConfig(NamedTuple):
     # Sponge layer (implicit multiplicative filter at model top)
     sponge_sigma: float = 0.1       # Sigma below which sponge is active (damps above)
     sponge_tau: float = 0.0         # E-folding time at model top [s] (0 = off)
+    # CAM-SE top Laplacian sponge: del2 viscosity nu_top * _CAM_SE_NU_SCALE_TOP[k]
+    # on vor, div and T of the top levels, applied as an implicit post-step
+    # factor exp(-nu_k n(n+1)/a^2 dt).  0 = off (bitwise the old step).
+    sponge_del2_nu_top_m2s: float = 0.0
     # Level-dependent hyperdiffusion scaling (stronger at low pressures)
     hyperdiff_pscale: float = 0.0   # Power-law exponent: nu_k = nu * (p_ref/p_k)^exp (0 = off)
     # Temperature floor (positivity protection)
@@ -1300,7 +1307,9 @@ def apply_sponge_filter(state, sponge_factor, sponge_factor_T):
         ``jnp.where(is_zonal, 1.0, sf)`` cost.  Equals 1.0 at m=0
         and ``sponge_factor[None,:]`` elsewhere.
     """
-    sf = sponge_factor[None, :]  # (1, nlev)
+    # (nlev,) Rayleigh factor, or (n_sh, nlev) when the CAM-SE del2 top
+    # sponge (scale-selective) is folded in.
+    sf = sponge_factor if sponge_factor.ndim == 2 else sponge_factor[None, :]
 
     vor_hat_damped = state.vor_hat.data * sf
     div_hat_damped = state.div_hat.data * sf
@@ -1796,25 +1805,41 @@ class SpectralPrimitiveEquationModel:
         ``jnp.where(is_zonal, 1.0, sf)`` op in
         ``apply_sponge_filter``.
         """
-        if self.config.sponge_tau <= 0:
+        nu_top = self.config.sponge_del2_nu_top_m2s
+        if self.config.sponge_tau <= 0 and nu_top <= 0:
             return
         if self._sponge_factor is not None and self._sponge_dt == dt:
             return
 
-        _hybrid = isinstance(self.sigma_coord, HybridSigmaPressureCoordinate)
-        if _hybrid:
-            sigma_full = self.sigma_coord.A_full + self.sigma_coord.B_full
+        nlev = self.sigma_coord.n_levels
+        if self.config.sponge_tau > 0:
+            _hybrid = isinstance(self.sigma_coord, HybridSigmaPressureCoordinate)
+            if _hybrid:
+                sigma_full = self.sigma_coord.A_full + self.sigma_coord.B_full
+            else:
+                sigma_full = self.sigma_coord.sigma_full
+            self._sponge_factor = compute_sponge_factor(
+                sigma_full, self.config.sponge_sigma, self.config.sponge_tau, dt,
+            )
+            # Per-(n_sh, nlev) factor for T: 1.0 at m=0, sf elsewhere.
+            _is_zonal = (self.grid.ms == 0)[:, None]  # (n_sh, 1) bool
+            self._sponge_factor_T = jnp.where(
+                _is_zonal, 1.0, self._sponge_factor[None, :],
+            )  # (n_sh, nlev)
         else:
-            sigma_full = self.sigma_coord.sigma_full
-
-        self._sponge_factor = compute_sponge_factor(
-            sigma_full, self.config.sponge_sigma, self.config.sponge_tau, dt,
-        )
-        # Per-(n_sh, nlev) factor for T: 1.0 at m=0, sf elsewhere.
-        _is_zonal = (self.grid.ms == 0)[:, None]  # (n_sh, 1) bool
-        self._sponge_factor_T = jnp.where(
-            _is_zonal, 1.0, self._sponge_factor[None, :],
-        )  # (n_sh, nlev)
+            self._sponge_factor = jnp.ones(nlev)
+            self._sponge_factor_T = jnp.ones((self.grid.ls.shape[0], nlev))
+        if nu_top > 0:
+            if nlev < len(_CAM_SE_NU_SCALE_TOP):
+                raise ValueError(
+                    f"sponge_del2_nu_top_m2s needs >= {len(_CAM_SE_NU_SCALE_TOP)} "
+                    f"levels, got {nlev}")
+            scale = jnp.zeros(nlev).at[:len(_CAM_SE_NU_SCALE_TOP)].set(
+                jnp.asarray(_CAM_SE_NU_SCALE_TOP))
+            eig = self.grid.ls * (self.grid.ls + 1) / self.grid.radius ** 2
+            del2 = jnp.exp(-nu_top * scale[None, :] * eig[:, None] * dt)
+            self._sponge_factor = self._sponge_factor[None, :] * del2
+            self._sponge_factor_T = self._sponge_factor_T * del2
         self._sponge_dt = dt
 
     def _ensure_hyperdiff_filter(self, dt: float):

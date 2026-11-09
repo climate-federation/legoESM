@@ -553,6 +553,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "derived for a UNIFORM grid -- measured max "
                              "0.0642 on that run, 15.6x inside it; needs "
                              "nlev>=4).  Default = bit-identical.")
+    parser.add_argument("--spectral-sponge-nu-top-m2s", type=float, default=None,
+                        dest="spectral_sponge_nu_top_m2s",
+                        help="spectral lane CAM-SE top sponge: del2 viscosity [m2/s] "
+                             "x (4, 2, 1) on vor/div/T of the top three levels (0 = off)")
     parser.add_argument("--mpas-sponge-del2-top-layers", type=int, default=None,
                         dest="mpas_sponge_del2_top_layers",
                         help="CAM-style top diffusion sponge: number of top layers whose "
@@ -2890,6 +2894,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             else tuple(args.mpas_vert4_log_form_tracers or ())),
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
+        spectral_sponge_nu_top_m2s=(args.spectral_sponge_nu_top_m2s
+                                    if args.spectral_sponge_nu_top_m2s is not None else 0.0),
         mpas_sponge_del2_top_layers=(args.mpas_sponge_del2_top_layers
                                      if args.mpas_sponge_del2_top_layers is not None else 0),
         mpas_sponge_del2_top_factor=(args.mpas_sponge_del2_top_factor
