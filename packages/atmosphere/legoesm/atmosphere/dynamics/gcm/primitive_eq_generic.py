@@ -39,6 +39,8 @@ Vertical form, an explicit required choice (``vertical_form``, no default):
   not exactly at rest -- the hybrid column quadrature is not isothermal-exact
   (measured on the DCMIP 2-0-0 mountain, hybrid L20: max |dv/dt| 9.1e-6 m/s^2
   MPAS, 1.3e-5 lat-lon; the ``"sb81_theta"`` form: 2e-16 / 2e-15).
+* ``"as83_logmean"`` -- ``"as83"`` with the log-mean face theta (exact for
+  isothermal pairs; same energy identity).
 """
 
 from __future__ import annotations
@@ -55,6 +57,7 @@ from legoesm.grids.vertical import (
     as83_geopotential,
     as83_interface_theta,
     as83_layer_exner,
+    as83_logmean_face_weight,
     as83_vertical_theta_flux,
     compute_geopotential,
     compute_geopotential_hybrid,
@@ -97,9 +100,10 @@ class PEOperators(NamedTuple):
     p_floor: float
     p_ceil: float
     vertical_form: str
+    face_pairs: Callable[[jax.Array], tuple]      # cell -> ((f1, f2) per face family)
 
 
-VERTICAL_FORMS = ("as83", "sb81_theta")
+VERTICAL_FORMS = ("as83", "as83_logmean", "sb81_theta")
 
 
 def _check_vertical_form(vertical_form: str) -> None:
@@ -164,7 +168,12 @@ def primitive_equation_tendencies(
     dL = tuple(g[..., nlev:] for g in grads)
     T_face = ops.to_face(T)
     if as83:
-        theta_f = ops.to_face(theta)
+        if ops.vertical_form == "as83_logmean":
+            theta_f = tuple(
+                as83_logmean_face_weight(p1, p2) * (t1 - t2) + t2
+                for (t1, t2), (p1, p2) in zip(ops.face_pairs(theta), ops.face_pairs(pi)))
+        else:
+            theta_f = ops.to_face(theta)
     # PGF coefficient on faces: R_d T_f (ln p form) or c_p theta_f (Exner form)
     pgf_coef = (tuple(constants.c_pd * f for f in theta_f) if as83
                 else tuple(R_d * f for f in T_face))
@@ -285,6 +294,12 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
     def to_face(f):
         return (interp_cell_to_uface(f), interp_cell_to_vface_halo(f))
 
+    def face_pairs(f):
+        # pole v faces pair a row with itself; their v tendency is zeroed by the wall
+        rows = jnp.arange(grid.n_lat + 1)
+        south, north = jnp.clip(rows - 1, 0, grid.n_lat - 1), jnp.clip(rows, 0, grid.n_lat - 1)
+        return ((f[:, west], f[:, east]), (f[south], f[north]))
+
     def vorticity_term_current(ctx, dvel):
         cor_u, cor_v = absolute_vorticity_coriolis(ctx["vel"][0], ctx["vel"][1], grid)
         return (dvel[0] + cor_u, dvel[1] + cor_v)
@@ -365,7 +380,7 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
         gops_ll, to_face, kinetic_energy,
         vorticity_term, v_dot_grad_L, horizontal_T, dissipation, tracer_fn,
         ps_post, boundary, "upwind", config.p_floor, config.p_ceil,
-        vertical_form)
+        vertical_form, face_pairs)
 
 
 def cgrid_latlon_pe_tendencies(state: Any, grid: Any, sigma_coord: Any,
@@ -475,12 +490,13 @@ def mpas_pe_operators(mesh: Any, config: Any, tracers: Any = None, dt: float = 0
         return dps if d4 is None else dps + d4
 
     _check_vertical_form(vertical_form)
+    c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
     return PEOperators(
         gops, lambda f: (cell_to_edge_avg_3d(f, mesh),),
         lambda vel: kinetic_energy_cell_3d(vel[0], mesh),
         vorticity_term, v_dot_grad_L, None, dissipation, tracer_fn, ps_post,
         lambda dvel: dvel, scheme, config.p_floor, config.p_ceil,
-        vertical_form)
+        vertical_form, lambda f: ((f[c1], f[c2]),))
 
 
 def mpas_pe_tendencies(state: Any, mesh: Any, sigma_coord: Any, config: Any = None,

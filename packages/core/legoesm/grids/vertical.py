@@ -2246,6 +2246,20 @@ def as83_interface_theta(theta, P_half, pi):
     return a * theta[..., :-1] + (1.0 - a) * theta[..., 1:]
 
 
+def as83_logmean_face_weight(pi_1, pi_2):
+    """Weight ``w`` of ``theta_1`` in ``theta_f = w theta_1 + (1 - w) theta_2``
+    such that ``c_p theta_f (pi_2 - pi_1) = c_p T0 ln(pi_2 / pi_1)`` for any
+    isothermal pair ``theta_i = T0 / pi_i`` (log-mean face theta):
+    ``w = [(1 + x) log1p(x) - x] / x^2``, ``x = pi_2/pi_1 - 1``, -> 1/2 at x = 0.
+    Below ``|x| = 1e-4`` its Taylor series (agreeing to round-off) avoids 0/0."""
+    x = pi_2 / pi_1 - 1.0
+    small = jnp.abs(x) < 1e-4
+    xs = jnp.where(small, 1.0, x)
+    closed = ((1.0 + xs) * jnp.log1p(xs) - xs) / (xs * xs)
+    series = 0.5 - x / 6.0 + x * x / 12.0 - x ** 3 / 20.0
+    return jnp.where(small, series, closed)
+
+
 def as83_geopotential(theta, theta_half, P_half, pi, phis):
     """Full-level geopotential, ``Phi_K = Phi_s + c_p theta_K (P_{K+1/2} - pi_K)``
     and ``Phi_k - Phi_{k+1} = c_p theta_{k+1/2} (pi_{k+1} - pi_k)``."""

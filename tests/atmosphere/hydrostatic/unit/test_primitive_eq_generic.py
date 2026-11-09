@@ -528,7 +528,8 @@ def _mpas_fn(kind, form="sb81_theta"):
     return f, (s0.T.data, s0.u.data, s0.p_s.data, s0.tracers["q_v"].data)
 
 
-_KIND_FORM = [("sigma", "sb81_theta"), ("hybrid", "sb81_theta"), ("hybrid", "as83")]
+_KIND_FORM = [("sigma", "sb81_theta"), ("hybrid", "sb81_theta"),
+              ("hybrid", "as83"), ("hybrid", "as83_logmean")]
 
 
 @pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
@@ -601,7 +602,7 @@ def test_gradient_through_100_steps(grid_kind, kind, form):
 # the momentum equation).  dE/dt at one state = jvp of E along the tendency.
 
 _E_NLEV = 20
-_FORMS = ("sb81_theta", "as83")
+_FORMS = ("sb81_theta", "as83", "as83_logmean")
 
 
 def _energy_fn(grid_kind, ops, coord, area, phis):
@@ -781,7 +782,32 @@ def test_variant_930_and_1029(grid_kind, form):
 
 
 # measured max |dv/dt| [m/s^2], isothermal rest over the DCMIP mountain, hybrid L20
-_AS_REST_GAP = {("latlon", "as83"): 1.284e-5, ("mpas", "as83"): 9.093e-6}
+_AS_REST_GAP = {("latlon", "as83"): 1.284e-5, ("latlon", "as83_logmean"): 1.283e-5,
+                ("mpas", "as83"): 9.093e-6, ("mpas", "as83_logmean"): 9.085e-6}
+
+
+def test_logmean_face_weight():
+    """Isothermal pairs: c_p theta_f (pi_2 - pi_1) = c_p T0 ln(pi_2/pi_1) on both
+    sides of the Taylor switch; w = 1/2 at equal pressures; differs from the
+    arithmetic mean (which leaves an O(x^2) error)."""
+    from legoesm.grids.vertical import as83_logmean_face_weight
+    T0, pi1 = 250.0, 0.8
+    for x in (0.0, 3e-5, 9.9e-5, 1.01e-4, 3e-3, 0.2):
+        pi2 = pi1 * (1.0 + x)
+        w = float(as83_logmean_face_weight(jnp.asarray(pi1), jnp.asarray(pi2)))
+        th = w * T0 / pi1 + (1.0 - w) * T0 / pi2
+        if x == 0.0:
+            assert w == 0.5
+            continue
+        xe = pi2 / pi1 - 1.0   # log1p: log(pi2/pi1) itself loses ~eps/x
+        exact = T0 * np.log1p(xe) / (pi1 * xe)
+        assert abs(th / exact - 1.0) < 1e-13, (x, th, exact)
+        arith = 0.5 * T0 * (1.0 / pi1 + 1.0 / pi2)
+        if x >= 3e-3:
+            assert abs(arith / exact - 1.0) > 1e-7
+    a = float(as83_logmean_face_weight(jnp.asarray(1.0), jnp.asarray(1.0 + 0.99999e-4)))
+    b = float(as83_logmean_face_weight(jnp.asarray(1.0), jnp.asarray(1.0 + 1.00001e-4)))
+    assert abs(a - b) < 1e-9   # the two branches meet continuously
 
 
 def test_latlon_face_metrics_match_grid():
