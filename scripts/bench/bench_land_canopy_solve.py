@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Steady-state wall time of one two-leaf canopy call on synthetic columns.
 
-Times the jitted ``compute_two_leaf_canopy_fluxes`` (6 Picard passes, grouped
+Times the jitted ``compute_two_leaf_canopy_fluxes`` (6 Picard passes, batched
 Newton solves) on ``--ncol`` synthetic columns with the production iteration cap,
 excluding compile, and optionally writes a jax.profiler trace of one call.
 Prints the per-call time and a digest of the outputs so two code versions can be
@@ -75,19 +75,12 @@ def main():
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--trace", default=None)
     ap.add_argument("--save", default=None)
-    ap.add_argument("--group", type=int, default=None,
-                    help="override the canopy solve's column group size")
     a = ap.parse_args()
-    if a.group is not None:
-        from legoesm.land.surface_scheme import two_leaf_canopy
-        two_leaf_canopy._CANOPY_SOLVE_GROUP = a.group
-    from legoesm.land.surface_scheme import two_leaf_canopy as _tlc
     rev = subprocess.run(["git", "rev-parse", "--short", "HEAD"], text=True,
                          capture_output=True).stdout.strip()
     dirty = subprocess.run(["git", "status", "--porcelain"], text=True,
                            capture_output=True).stdout.count("\n")
-    print(f"commit {rev} dirty {dirty} jax {jax.__version__} "
-          f"group {_tlc._CANOPY_SOLVE_GROUP}")
+    print(f"commit {rev} dirty {dirty} jax {jax.__version__}")
     call, args = build_call(a.ncol, a.cap)
     t0 = time.perf_counter()
     out = jax.block_until_ready(call(*args))
