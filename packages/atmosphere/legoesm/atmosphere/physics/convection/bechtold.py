@@ -3179,7 +3179,7 @@ def bechtold_convection(
             # +L_f below, so the column enthalpy closes.  OpenIFS heats all of
             # PDMFUP with the temperature blend FOELHMCU (cudtdqn.F90:281), a
             # recorded departure.
-            dT_dt = dT_dt - (constants.L_f / constants.c_pd) * evap_snow_rate_ifs
+            dT_dt = dT_dt - (constants.L_f / constants.c_pd) * evap_snow_rate_ifs  # latent-ok: Bechtold oracle constant
             # Formation-side FREEZING heat (+L_f on the snow-source share:
             # our plume condensed with L_v only) paired with the march's
             # melt COOLING (-L_f, incl. the forced surface fold) — the
