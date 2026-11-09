@@ -126,6 +126,7 @@ _SHIFT_LAYER_STEP = (5.0 ** 0.5 - 1.0) / 2.0
 # (float offsets of large arguments wrapped differently under jit in fp32).
 _INHOM_PERM_SEEDS = (_PERM_SEED + 1, _PERM_SEED + 2)
 _HASH_SHIFT_BITS = 24
+_HASH_WORD_BITS = 32
 _HASH_GOLDEN = 0x9E3779B9          # splitmix / lowbias32 constants
 _HASH_LAYER = 0x85EBCA6B
 _HASH_MUL1 = 0x7FEB352D
@@ -228,7 +229,7 @@ def inhomogeneity_uniforms(n_sub, nlev, shift, dtype):
     out = []
     for seed in _INHOM_PERM_SEEDS:
         h = _lowbias32(q ^ (u32(seed) * u32(_HASH_GOLDEN) + k * u32(_HASH_LAYER)))
-        off = (h >> u32(32 - _HASH_SHIFT_BITS)).astype(dtype) * (1.0 / (1 << _HASH_SHIFT_BITS))
+        off = (h >> u32(_HASH_WORD_BITS - _HASH_SHIFT_BITS)).astype(dtype) * (1.0 / (1 << _HASH_SHIFT_BITS))
         table = jnp.asarray(_stratified_table(int(n_sub), int(nlev), seed), dtype=dtype)
         out.append(jnp.mod(table[:, None, :] + off[None], 1.0))
     return tuple(out)
