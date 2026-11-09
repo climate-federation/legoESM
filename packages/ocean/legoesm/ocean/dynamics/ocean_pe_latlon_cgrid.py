@@ -75,6 +75,13 @@ from legoesm.ocean.state import (
     SurfaceTracerForcing,
 )
 from legoesm import constants
+from legoesm.grids.operator_adapters import latlon_sw_grid_operators
+from legoesm.grids.operators_latlon_cgrid import kinetic_energy_cgrid
+from legoesm.ocean.dynamics.ocean_pe_generic import (
+    OceanPECoeffs,
+    OceanPEOperators,
+    ocean_baroclinic_tendencies,
+)
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     apply_sponge_tracer_relaxation,
     bbl_distributed_drag_face_column,
@@ -6828,3 +6835,149 @@ def _nemo_f_vertex_area(grid, z_coord):
     area = jnp.asarray(grid.area_q)
     e1e2f = jnp.asarray(raw.e1f, area.dtype) * jnp.asarray(raw.e2f, area.dtype)
     return area.at[1:, 1:].set(e1e2f).at[1:, 0].set(e1e2f[:, -1])
+
+
+# ============================================================================
+# Shared-core plug-ins (test-only pilot; see ocean_pe_generic)
+# ============================================================================
+
+# Options handled inline in latlon_cgrid_ocean_baroclinic_tendencies (not in a
+# stage helper the plug-ins call): the pilot refuses any non-default value.
+_PILOT_DEFAULT_ONLY = (
+    "een_nemo_relative_vorticity", "een_e3f_scheme", "coriolis_scheme",
+    "rk3_vector_rhs_nemo_order", "rk3_vector_raw_vmask", "ab2_scope", "backscatter",
+    "zdf_drag_in_matrix", "surface_forcing_implicit", "surface_stress_implicit",
+    "sponge_forcing_implicit", "rk3_stage3_damping_after_geothermal_nemo_order",
+    "zad_qco_evaluation", "physics", "gm_redi", "surface_stress_nemo_fold_vector_sign",
+)
+
+
+def _refuse_outside_pilot(z_coord, config) -> None:
+    def no(msg):
+        raise ValueError(f"latlon_ocean_pe_operators: {msg} is not in the shared-core pilot")
+
+    if not isinstance(z_coord, OceanZStarCoordinate):
+        no(f"coordinate {type(z_coord).__name__} (z* only)")
+    default = LatLonCGridOceanConfig.from_flat()
+    for name in _PILOT_DEFAULT_ONLY:
+        if getattr(config, name) != getattr(default, name):
+            no(f"{name}={getattr(config, name)!r}")
+    if config.momentum_advection != "vector_invariant":
+        no(f"momentum_advection={config.momentum_advection!r}")
+    if config.ke_gradient_scheme not in ("centered", "c2"):
+        no(f"ke_gradient_scheme={config.ke_gradient_scheme!r}")
+    if config.pgf_scheme != "adcroft":
+        no(f"pgf_scheme={config.pgf_scheme!r}")
+    bd = config.bottom_drag
+    if validate_bottom_drag_scheme(str(bd.bottom_drag_scheme)) != "legacy" or (
+            bd.bottom_drag_r > 0 and (bd.bottom_drag_bbl_thickness > 0
+                                      or bd.bottom_drag_bg_velocity > 0)):
+        no("bottom drag other than linear bottom-level drag")
+
+
+def latlon_ocean_pe_operators(state, grid, z_coord, config=None, dt: float = 300.0):
+    """Lat-lon C-grid plug-ins of :func:`.ocean_pe_generic.ocean_baroclinic_tendencies`.
+
+    The Coriolis / PV-flux, D-term, vertical momentum advection, wall filter and
+    lateral viscosity are the model's own stage helpers, called with the
+    arguments the model passes on the default path."""
+    if config is None:
+        config = LatLonCGridOceanConfig.from_flat()
+    _refuse_outside_pilot(z_coord, config)
+    mask = state.land_mask.data
+    u_mask, v_mask = state.u_mask.data, state.v_mask.data
+    u_mask_3d, v_mask_3d = u_mask[..., None], v_mask[..., None]
+    H_bathy = state.H_bathy.data
+    eta_floor = jnp.asarray(config.min_water_column_m, dtype=state.eta.data.dtype) - H_bathy
+    eta_safe = jnp.maximum(state.eta.data, eta_floor) * mask
+    mom_adv = config.momentum_advection
+    vort_sel = config.vorticity_scheme
+
+    def geometry_density():
+        J, h_k, rho_prime, p_prime, _ = _bc_geometry_and_density(
+            eta_safe, H_bathy, z_coord, config, state.T.data, state.S.data, mask, grid,
+            config.rho_0, config.g)
+        return J, h_k, rho_prime, p_prime
+
+    def face_thickness(h_k, vel):
+        h = (min_cell_to_uface(h_k), min_cell_to_vface(h_k, grid))
+        return h, h
+
+    def kinetic_energy(vel):
+        if config.ke_gradient_scheme == "c2":
+            return nemo_c2_kinetic_energy(*vel)
+        return kinetic_energy_cgrid(*vel)
+
+    def momentum_terms(dvel, ctx):
+        (u, v), (u_p, v_p), (h_u, h_v) = ctx.vel, ctx.vel_prime, ctx.h_face
+        du, dv, _, _ = _bc_pv_flux(
+            dvel[0], dvel[1], u, v, h_u, h_v, ctx.h_k, u_mask_3d, v_mask_3d, mask, grid,
+            mom_adv, config.weno_smoothness,
+            enstrophy_metric=config.vortcor_enstrophy_metric,
+            reconstruct_zeta=config.vortcor_reconstruct_zeta,
+            vorticity_scheme=getattr(vort_sel, "scheme", vort_sel),
+            een_q_boundary=config.een_q_boundary,
+            een_fold_image_v=config.een_fold_image_v_row,
+            een_written_order=config.een_vorticity_written_order,
+            een_e3f_scheme=config.een_e3f_scheme,
+            een_metric_weighting=config.een_metric_weighting,
+            een_nemo_top_f_u_halo=config.een_nemo_top_f_u_halo,
+            dz_ref=z_coord.dz_ref,
+            ln_dynvor_msk=getattr(vort_sel, "ln_dynvor_msk", None),
+        )
+        du, dv, _, _ = _bc_dterm(du, dv, u, v, u_mask_3d, v_mask_3d, mask, grid, config,
+                                 mom_adv, 5)
+        du, dv, _, _ = _bc_vertical_momentum_advection(
+            du, dv, u_p, v_p, ctx.w, h_u, h_v, u_mask_3d, v_mask_3d, grid, mom_adv, None,
+            config, False, u_full=u, v_full=v)
+        du, dv = _bc_wall_grid_filter(du, dv, u, v, u_mask_3d, v_mask_3d,
+                                      config.wall_grid_filter_rate_s, mom_adv)
+        du, dv = _bc_horizontal_viscosity(
+            du, dv, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
+            rho_prime=ctx.rho_prime, h_k=ctx.h_k)[:2]
+        return du, dv
+
+    bd = config.bottom_drag
+    coeffs = OceanPECoeffs(config.rho_0, config.K_h, config.K_bih, config.K_v, config.A_v,
+                           config.implicit_vertical_mixing, bd.bottom_drag_r)
+    return OceanPEOperators(
+        grid_ops=latlon_sw_grid_operators(grid),
+        coeffs=coeffs,
+        dz_ref=z_coord.dz_ref,
+        dz_half_ref=z_coord.dz_half_ref,
+        z_coord=z_coord,
+        cell_mask=mask,
+        face_masks=(u_mask_3d, v_mask_3d),
+        face_masks_2d=(u_mask, v_mask),
+        geometry_density=geometry_density,
+        face_thickness=face_thickness,
+        depth_mean_divisor=lambda h_sum: jnp.maximum(h_sum, 1e-10),
+        cell_to_face=lambda f: (interp_cell_to_uface(f), interp_to_v_points(f, grid=grid)),
+        kinetic_energy=kinetic_energy,
+        pgf_correction=lambda grad, ctx: grad,
+        momentum_terms=momentum_terms,
+        finalize=lambda dvel, ctx: (dvel, None),
+    )
+
+
+def latlon_ocean_pe_tendencies(state, grid, z_coord, config=None, sponge=None,
+                               dt: float = 300.0):
+    """Drop-in twin of :func:`latlon_cgrid_ocean_baroclinic_tendencies` on the
+    default path (no physics, surface forcing or NEMO hooks) running the shared
+    core."""
+    ops = latlon_ocean_pe_operators(state, grid, z_coord, config, dt)
+    vel_ref = None if sponge is None else (sponge.u_ref, sponge.v_ref)
+    t = ocean_baroclinic_tendencies((state.u.data, state.v.data), state.T.data,
+                                    state.S.data, ops, sponge=sponge, sponge_vel_ref=vel_ref)
+    H = state.H_bathy.data
+    return LatLonCGridOceanTendencies(
+        du_dt=Field(data=t.dvel[0], name="du_dt", dims=("lat", "lon_u", "level"), units="m/s^2"),
+        dv_dt=Field(data=t.dvel[1], name="dv_dt", dims=("lat_v", "lon", "level"), units="m/s^2"),
+        dT_dt=Field(data=t.dT, name="dT_dt", dims=("lat", "lon", "level"), units="degC/s"),
+        dS_dt=Field(data=t.dS, name="dS_dt", dims=("lat", "lon", "level"), units="PSU/s"),
+        deta_dt=Field(data=t.deta, name="deta_dt", dims=("lat", "lon"), units="m/s"),
+        dH_bathy_dt=Field(data=jnp.zeros_like(H), name="dH_bathy_dt", dims=("lat", "lon"),
+                          units="m/s"),
+        dland_mask_dt=Field(data=jnp.zeros_like(state.land_mask.data), name="dland_mask_dt",
+                            dims=("lat", "lon"), units="1/s"),
+    )

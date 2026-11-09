@@ -275,18 +275,16 @@ def latlon_pe_operators(grid: Any, config: Any, tracers: Any = None, dt: Any = N
         latlon_pole_bc,
         latlon_tracer_tendencies,
     )
-    from legoesm.atmosphere.dynamics.gcm.shallow_water_generic import (
-        cell_winds_cgrid,
-        kinetic_energy_cgrid,
-    )
     from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
         absolute_vorticity_coriolis,
     )
     from legoesm.core.conservation import zero_mean_tendency
     from legoesm.core.operators_fv_latlon_3d import cgrid_fv_scalar_advection_latlon_3d
     from legoesm.grids.operators_latlon_cgrid import (
+        cell_winds_cgrid,
         interp_cell_to_uface,
         interp_cell_to_vface_halo,
+        kinetic_energy_cgrid,
     )
 
     gops_ll = latlon_sw_grid_operators(grid)
