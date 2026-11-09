@@ -16513,15 +16513,13 @@ class ModelDriver:
                 for _ek, _ev in self._mpas_energy_sample(
                         p_s_data, elapsed_day).items():
                     _ts[_ek].append(_ev)
-                # Latest closure the CMOR feed recorded, or NaN before the
-                # first complete diagnostic window.  NaN, never 0: a zero here
-                # reads as "the budget closes", which is the one answer this
-                # series must never invent.
-                _mt = getattr(getattr(self, "diagnostics", None),
-                              "moisture_tracker", None)
-                _ts["moisture_residual"].append(
-                    float(_mt.residual[-1])
-                    if _mt is not None and _mt.residual else float("nan"))
+                # Moisture closure: a NaN placeholder keeps the series aligned
+                # if the guard below breaks first; the CMOR feed further down
+                # records THIS interval's closure and overwrites it (#2171:
+                # reading the tracker here returned the PREVIOUS interval).
+                # NaN, never 0: a zero reads as "the budget closes", which is
+                # the one answer this series must never invent.
+                _ts["moisture_residual"].append(float("nan"))
 
                 # Ice-crystal number telemetry (2026-07-28, century3 day-803
                 # NaN): N_i grew x2/day for 800 days with every CLIMATE
@@ -16702,8 +16700,13 @@ class ModelDriver:
                 # path). This interval feed adds flux means only; state
                 # means were already sampled by the independent hourly hook.
                 if self._mpas_cmip_feed_on:
+                    _mt = getattr(getattr(self, "diagnostics", None),
+                                  "moisture_tracker", None)
+                    _n_mt = len(_mt.residual) if _mt is not None else 0
                     self._feed_mpas_cmip_accumulators(
                         START_DAY + elapsed_day, flux_only=True)
+                    if _mt is not None and len(_mt.residual) > _n_mt:
+                        _ts["moisture_residual"][-1] = float(_mt.residual[-1])
 
             # Coupling window (P5b): sum this step's net surface SW/LW [W/m2,
             # +into surface] and precip [kg/m2/s, +down] as RATES; the step
