@@ -18,10 +18,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+from legoesm.atmosphere.physics.radiation.ecrad_ifs.two_stream import lower_clamp
 from legoesm.atmosphere.physics.radiation.rrtmgp import constants as rc
 from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
 from legoesm.atmosphere.physics.radiation.rrtmgp.rte import monochromatic_two_stream as mts
-from legoesm.core.smooth import smooth_max
 
 __physics_contract__ = {
     "summary": (
@@ -91,6 +91,23 @@ def band_from_g_sw():
     return (bands - 1) % (bands.max() + 1)
 
 
+def _band_edges(lookup, lane):
+    lims = np.asarray(lookup.bnd_lims_wn, np.float64)
+    edges = np.full((lane.max() + 1, 2), np.nan)
+    edges[lane] = lims[np.asarray(lookup.g_point_to_bnd, np.int64)]
+    return edges
+
+
+def band_edges_lw():
+    """RRTMGP LW band edges (cm-1, ``(nband, 2)``), indexed as band_from_g_lw."""
+    return _band_edges(_optics().gas_optics_lw, band_from_g_lw())
+
+
+def band_edges_sw():
+    """RRTMGP SW band edges (cm-1, ``(nband, 2)``), indexed as band_from_g_sw."""
+    return _band_edges(_optics().gas_optics_sw, band_from_g_sw())
+
+
 def _cells(a):
     """(ncol, nlev) top-down -> (ncol, 1, nlev+2) surface-first with halo cells."""
     a = a[:, None, ::-1]
@@ -106,7 +123,8 @@ def gas_optics(pressure_hl, temperature_hl, gas_mmr, skin_temperature, lw_albedo
                solar_irradiance, gravity, min_gas_od_lw, sharpness=100.0):
     """LW and SW gas optics; shapes in ``__physics_contract__``.
 
-    min_gas_od_lw must be a Python float (the smooth width is relative to it).
+    min_gas_od_lw must be a Python float: the od floor is an inactive-exact lower
+    clamp of scale min_gas_od_lw (vote G1), exact wherever od >= the floor.
     """
     lib = _optics()
     p = _cells(0.5 * (pressure_hl[:, :-1] + pressure_hl[:, 1:]))
@@ -120,7 +138,8 @@ def gas_optics(pressure_hl, temperature_hl, gas_mmr, skin_temperature, lw_albedo
     level_t = temperature_hl[:, None, ::-1]
 
     lookup = lib.gas_optics_lw
-    bound = lib.with_all_gpts(True, p, t, molecules, {lookup.idx_gases[k]: v for k, v in vmr.items()})
+    vmr_idx = {lookup.idx_gases[k]: v for k, v in vmr.items()}
+    bound = lib.with_all_gpts(True, p, t, molecules, vmr_idx, sharpness)  # votes G2, G3
 
     def lw_gpoint(igpt):
         tau = bound.compute_lw_optical_properties(p, t, molecules, igpt)["optical_depth"]
@@ -132,7 +151,8 @@ def gas_optics(pressure_hl, temperature_hl, gas_mmr, skin_temperature, lw_albedo
     tau_lw, level, sfc = jax.vmap(lw_gpoint)(jnp.arange(lib.n_gpt_lw))
 
     lookup = lib.gas_optics_sw
-    bound = lib.with_all_gpts(False, p, t, molecules, {lookup.idx_gases[k]: v for k, v in vmr.items()})
+    vmr_idx = {lookup.idx_gases[k]: v for k, v in vmr.items()}
+    bound = lib.with_all_gpts(False, p, t, molecules, vmr_idx, sharpness)
 
     def sw_gpoint(igpt):
         props = bound.compute_sw_optical_properties(p, t, molecules, igpt)
@@ -142,7 +162,7 @@ def gas_optics(pressure_hl, temperature_hl, gas_mmr, skin_temperature, lw_albedo
     incoming = solar_irradiance * jnp.asarray(lib.solar_fraction_by_gpt, tau_sw.dtype)
 
     return GasOptics(
-        od_lw=smooth_max(_top_down(tau_lw), min_gas_od_lw, sharpness / min_gas_od_lw),
+        od_lw=lower_clamp(_top_down(tau_lw), min_gas_od_lw, min_gas_od_lw, sharpness),
         planck_hl=jnp.pi * _top_down(level),
         lw_emission=jnp.pi * jnp.moveaxis(sfc, 0, -1) * (1.0 - lw_albedo),
         od_sw=_top_down(tau_sw),

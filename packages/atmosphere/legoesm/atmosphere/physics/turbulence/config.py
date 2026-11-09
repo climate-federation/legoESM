@@ -32,6 +32,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
+from legoesm.atmosphere.physics.turbulence.myj_wrf import MYJConfig
+
 from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
                                       NCAR_NEUTRAL_WIDTH)
 
@@ -58,7 +60,7 @@ __param_spec__ = {
         },
         "params": {
             # C_eps is the LIVE wp2-dissipation coefficient (diss = C_eps·sqrt(wp2)/l,
-            # clubb_lite.py:238) — the same TKE-dissipation knob as TKEConfig.Ce.
+            # clubb_lite.py:238) (a TKE-dissipation coefficient).
             "C_eps": {"units": "1", "bounds": (0.06, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Mellor & Yamada (1982) TKE dissipation coefficient (wp2 budget)", "shape": None},
             "C_K": {"units": "1", "bounds": (0.1, 1.2), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "CLUBB-lite eddy-diffusivity coefficient (Km = C_K·l·sqrt(wp2))", "shape": None},
             "Pr_t": {"units": "1", "bounds": (0.3, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
@@ -149,14 +151,9 @@ __param_spec__ = {
     "TKEConfig": {
         "scheme_key": "atm.turb.TKEConfig",
         "excluded": {
-            "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "tke_min": "cold-start TKE seed (MYJPBLINIT: EPSQ2); initial condition, not trainable",
         },
-        "params": {
-            "Ce": {"units": "1", "bounds": (0.06, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "MY82-shaped dissipation eps=Ce·TKE^{3/2}/l; scheme-default coefficient (MY 2^{3/2}/B1~0.17)", "shape": None},
-            "Ck": {"units": "1", "bounds": (0.03, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "fixed replacement for MY2.5 Sm(GM,GH); Km=Ck·l·sqrt(max(TKE,tke_min))", "shape": None},
-            "Pr_t": {"units": "1", "bounds": (0.3, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
-            "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
-        },
+        "params": {},
     },
     "TurbulentEDMFConfig": {
         "scheme_key": "atm.turb.TurbulentEDMFConfig",
@@ -184,24 +181,9 @@ __param_spec__ = {
     "YSUConfig": {
         "scheme_key": "atm.turb.YSUConfig",
         "excluded": {
-            "blend_pbl_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "blend_ri_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "entrainment_cutoff_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "pbl_smooth_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
-            "sfc_excess_zfrac": "measurement convention: surface-layer z/h (top of the surface layer) at which w_s is evaluated for the θ_T excess parcel, not a tuned closure",
+            "dx_m": "lane geometry input (grid spacing for the WRF surface layer's Mahrt-Sun subgrid wind), not a closure parameter",
         },
-        "params": {
-            "Pr_t": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
-            "Ri_crit": {"units": "1", "bounds": (0.1, 0.75), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_richardson", "reference": "Hong et al. (2006) YSU critical Richardson number", "shape": None},
-            "countergrad_coeff": {"units": "1", "bounds": (2.0, 19.5), "tunable_tier": 1, "transform": "sigmoid", "category": "countergradient", "reference": "Troen & Mahrt (1986); Hong et al. (2006) YSU nonlocal countergradient coeff b", "shape": None},
-            "entrainment_ratio": {"units": "1", "bounds": (0.05, 0.5), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Hong et al. (2006) prescribed PBL-top entrainment flux ratio (w'th_v')_h = -0.15*(w'th_v')_0", "shape": None, "legacy_name": "entrainment_coeff"},
-            "entrainment_width_frac": {"units": "1", "bounds": (0.05, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Hong et al. (2006) YSU Gaussian entrainment width fraction of h_pbl", "shape": None},
-            "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length (free-atm local-Ri K)", "shape": None},
-            "louis_b": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1982) stability-function coefficient b (YSU free-atm local Ri)", "shape": None},
-            "louis_c": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1982) unstable-branch coefficient c (YSU free-atm local Ri)", "shape": None},
-            "louis_d": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1982) stable-branch sqrt coefficient d (YSU free-atm local Ri)", "shape": None},
-            "ws_conv_coeff": {"units": "1", "bounds": (1.0, 16.0), "tunable_tier": 2, "transform": "sigmoid", "category": "velocity_scale", "reference": "Hong et al. (2006) / Troen & Mahrt (1986) mixed-layer velocity-scale convective coefficient (WRF YSU ~8); default approximate, calibrate vs a convective-BL run", "shape": None},
-        },
+        "params": {},
     },
 }
 
@@ -492,43 +474,23 @@ class LouisConfig(NamedTuple):
 
 
 class TKEConfig(NamedTuple):
-    """Configuration for a prognostic-TKE, Mellor-Yamada-2.5-INSPIRED k-l closure.
-
-    NOTE: this is MY2.5-INSPIRED, not literal level 2.5 — ``Ck`` and ``Pr_t``
-    are CONSTANTS that replace MY2.5's algebraic stability functions
-    ``Sm(GM, GH)`` and the ratio ``Sh(GM, GH)/Sm(GM, GH)`` (which depend on
-    BOTH shear ``GM`` and buoyancy ``GH``; see the tke.py "Faithfulness"
-    section).
+    """Configuration of ``turbulence="tke"``: the WRF v4.8.0 MYJ PBL
+    (``turbulence/myj_wrf.py``; host glue in ``turbulence/tke.py``).
 
     Fields
     ------
-    l_mix_max : float
-        Fixed asymptotic (Blackadar) mixing length [m] (default 100.0):
-        ``l = kappa z / (1 + kappa z / l_mix_max)``. MY's diagnostic length is
-        likewise Blackadar-like near the wall but with an integral,
-        turbulence-dependent asymptote ``l0 = 0.1 integral(q z dz)/integral(q dz)``.
-    Ck : float
-        Constant TKE -> Km coefficient, ``Km = Ck·l·sqrt(max(TKE, tke_min))``
-        (default 0.1). Lumps a constant effective momentum stability coefficient
-        (``Ck = sqrt(2)·Sm_eff``) in place of MY2.5's ``Sm(GM, GH)``.
-    Ce : float
-        TKE dissipation coefficient, ``eps = Ce·TKE^{3/2}/l`` (default 0.19);
-        MY's ``q^3/(B1 l)`` gives ``Ce = 2^{3/2}/B1 ~ 0.17``.
     tke_min : float
-        Minimum TKE [m^2/s^2] (default 1e-6).
-    Pr_t : float
-        Constant turbulent Prandtl number, ``Kh = Km/Pr_t`` (default 0.33, so
-        ``Kh/Km ~ 3``). This is the scheme's own fixed value, NOT the MY ratio
-        (MY's neutral ``Sh/Sm ~ 1.06``); MY2.5's ``Sh/Sm`` is stability-dependent.
+        Cold-start TKE [m^2/s^2] seeded into the carry (default 0.2 =
+        WRF's EPSQ2, which MYJPBLINIT writes into TKE_MYJ).  MYJ floors q^2 =
+        2 TKE at EPSQ2 itself, so this is the initial value, not a floor.
     surface : SurfaceLayerConfig
-        Surface layer parameters.
+        The lane's bulk surface layer whose fluxes drive MYJ.
+    myj : MYJConfig
+        MYJ's smoothing window widths (0 = the oracle's hard switches).
     """
-    l_mix_max: float = 100.0
-    Ck: float = 0.1
-    Ce: float = 0.19
-    tke_min: float = 1e-6
-    Pr_t: float = 0.33
+    tke_min: float = 0.2
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
+    myj: MYJConfig = MYJConfig()
 
 
 class MYNN25Config(NamedTuple):
@@ -715,83 +677,33 @@ class HoltslagBovilleConfig(NamedTuple):
 
 
 class YSUConfig(NamedTuple):
-    """Configuration for YSU (Yonsei University) PBL turbulence scheme.
+    """Configuration for the YSU PBL scheme (WRF v4.8.0 YSU fed by the WRF
+    revised MM5 surface layer, ``ysu.py``).
+
+    WRF YSU and sfclayrev carry no tunable closure coefficients here: their
+    constants are the oracle's (module constants in ``ysu.py`` /
+    ``sfclayrev_wrf.py``).  The legacy-surrogate fields (l_mix_max, Pr_t,
+    entrainment_ratio, entrainment_width_frac, Ri_crit, louis_b/c/d,
+    countergrad_coeff, ws_conv_coeff, sfc_excess_zfrac and the four smooth-
+    switch sharpnesses) were deleted with the surrogate (R4 votes X16/X17).
 
     Fields
     ------
-    l_mix_max : float
-        Maximum mixing length [m] (default 100.0).
-    Pr_t : float
-        Turbulent Prandtl number (default 1.0).
-    entrainment_ratio : float
-        PBL-top entrainment flux ratio ``e_ratio`` in the FREE-CONVECTIVE-limit
-        law ``(w'θ_v')_h = −e_ratio·(w'θ_v')_0`` (default 0.15, the Hong et al.
-        2006 free-convective coefficient).  Full Hong06 scales entrainment by
-        ``w_m³ = w*³ + 5·u*³`` (shear-dependent); this fixed surface-flux fraction
-        is a surrogate.  Applied as a flux-matched diffusivity at the inversion
-        (see ``ysu.py``).  Renamed from ``entrainment_coeff`` (the old Gaussian-K
-        magnitude coefficient, a different quantity).
-    Ri_crit : float
-        Critical Richardson number (default 0.25).
-    pbl_smooth_sharpness : float
-        Sigmoid sharpness for smooth PBL-top detection (default 20.0).
-    louis_b : float
-        Louis (1982) stability-function ``b`` constant
-        (default 5.0).  Used in YSU local-Ri f_stable / f_unstable.
-    louis_c : float
-        Louis (1982) UNSTABLE-branch denominator coefficient
-        (default 5.0).  Multiplies the ``b · l_mix² · sqrt(|Ri|)``
-        denominator term in f_unstable.  The repository's louis.py
-        distinguishes this from louis_d; YSU now follows the same
-        convention.
-    louis_d : float
-        Louis (1982) STABLE-branch sqrt coefficient (a.k.a. ``b'``)
-        (default 5.0).  Appears only in ``sqrt(1 + d · Ri)`` of
-        f_stable.
-    blend_ri_sharpness : float
-        Sigmoid sharpness for stable / unstable blend in
-        Richardson-number space (default 100.0 1/Ri).
-    countergrad_coeff : float
-        Nonlocal countergradient coefficient ``b`` in
-        ``γ_c = b·(w'θ')_0 / (w_*·h)`` (Troen & Mahrt 1986; Hong et
-        al. 2006).  Drives YSU's defining nonlocal upward heat
-        transport in the convective BL (default 6.5).
-    ws_conv_coeff : float
-        Convective coefficient ``c`` in the Hong et al. (2006) mixed-layer
-        velocity scale ``w_s = (u*³ + c·κ·w*³·z/h)^{1/3}`` that sets the
-        K-profile magnitude.  Without it the profile uses bare ``u*`` and
-        the convective mixed layer is under-mixed (default 8.0, WRF-YSU
-        ballpark; approximate — calibrate against a convective-BL run).
-    sfc_excess_zfrac : float
-        Surface-layer height fraction ``z/h`` (default 0.1) at which the
-        mixed-layer velocity scale ``w_s`` is evaluated for the unstable
-        surface-excess parcel temperature ``θ_T = b·(w'θ')_0/w_s`` in the
-        bulk-Richardson PBL-height diagnosis (Troen & Mahrt 1986; Hong et al.
-        2006).  A measurement-convention level (the top of the surface layer),
-        not a tuned closure.
     surface : SurfaceLayerConfig
-        Surface layer parameters.
-    entrainment_cutoff_sharpness : float
-        WRF YSU path only (``surface_layer`` given): sigmoid sharpness
-        [1/entfac] of the entrainment-layer cutoff ``entfac < 4.6`` (default
-        2.0; 1e300 = the oracle's hard cutoff).  Inert on the legacy path.
+        ``z0`` is the land roughness and the water-roughness seed (vote X9);
+        ``prescribed_shflx_w_m2`` + ``prescribed_lhflx_w_m2`` (+ optional
+        ``prescribed_evap_kg_m2_s``) select WRF's scm_force_flux path; a
+        prescribed stress is refused.  The bulk-formula fields are not read.
+    surface_type : {"land", "water"} or None
+        WRF xland for lanes WITHOUT a land fraction (required there, refused
+        where the lane supplies one).  No default (vote X7).
+    dx_m : float or None
+        Grid spacing [m] for lanes WITHOUT cell areas (required there, refused
+        where the lane supplies them).  No default (vote X13).
     """
-    l_mix_max: float = 100.0
-    Pr_t: float = 1.0
-    entrainment_ratio: float = 0.15  # Hong06 (w'th_v')_h = -e_ratio*(w'th_v')_0
-    entrainment_width_frac: float = 0.3  # Gaussian entrainment width as fraction of h_pbl
-    Ri_crit: float = 0.25
-    pbl_smooth_sharpness: float = 20.0
-    louis_b: float = 5.0
-    louis_c: float = 5.0
-    louis_d: float = 5.0
-    blend_ri_sharpness: float = 100.0
-    blend_pbl_sharpness: float = 10.0  # sigmoid sharpness for K-profile->local PBL blend
-    countergrad_coeff: float = 6.5
-    ws_conv_coeff: float = 8.0  # convective coeff in w_s = (u*³ + c·κ·w*³·z/h)^{1/3}
-    sfc_excess_zfrac: float = 0.1  # surface-layer z/h for the θ_T excess parcel
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
-    entrainment_cutoff_sharpness: float = 2.0
+    surface_type: str | None = None
+    dx_m: float | None = None
 
 
 class TurbulentEDMFConfig(NamedTuple):

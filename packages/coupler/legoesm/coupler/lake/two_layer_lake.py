@@ -25,9 +25,38 @@ from legoesm.core.bulk_flux import (
     simple_bulk_fluxes, compute_most_fluxes, large_yeager_widths,
     surface_reference_state)
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.smooth import smoothstep_cubic
 from legoesm.core.surface_energy import surface_radiation_fluxes
 from legoesm.coupler.lake.config import LakeConfig
 from legoesm.coupler.lake.state import LakeState
+
+
+def _frozen_weight(T_epi, config: LakeConfig):
+    """Frozen weight of the lake surface: 1 at or below T_freeze, 0 above.
+
+    KNOWN DIFFERENCE (RULE 5): the reference switch is the hard
+    ``T_epi <= T_freeze``.  The default ramps C1 from 1 at T_freeze to 0 at
+    T_freeze + ``freeze_switch_width_K`` (0.01 K), so only open water inside
+    that band differs; an ice-covered lake (the reservoir pins it exactly at
+    T_freeze) keeps weight 1.  Measured at the default on 1 s steps
+    (tests/unit/test_lake_freeze_switch.py): albedo +0.41 / +0.22 / +0.05 and
+    latent heat flux +2.3 / +1.4 / +0.4 W/m2 at 0.0025 / 0.005 / 0.0075 K
+    above freezing; zero at T_freeze and outside the band.  The gap is
+    one-signed (open water in the band is charged part ice albedo and part
+    L_s) because the band must sit wholly above the pinned T_freeze.
+    ``freeze_switch_width_K = 0.0`` returns the hard boolean switch, bitwise
+    the pre-RULE-5 scheme.
+    """
+    if config.freeze_switch_width_K == 0.0:
+        return T_epi <= config.T_freeze
+    return 1.0 - smoothstep_cubic(
+        (T_epi - config.T_freeze) / config.freeze_switch_width_K)
+
+
+def _phase_blend(f, frozen_value, open_value):
+    if f.dtype == jnp.bool_:
+        return jnp.where(f, frozen_value, open_value)
+    return f * frozen_value + (1.0 - f) * open_value
 
 
 def step_lake(
@@ -49,10 +78,10 @@ def step_lake(
     # Surface humidity: saturated at epilimnion temperature.  Use
     # the ice saturation form when the lake is at or below freezing
     # (frozen-over lakes sublimate, not evaporate).
-    is_frozen = T_epi <= config.T_freeze
+    is_frozen = _frozen_weight(T_epi, config)
     q_sfc_liq = saturation_mixing_ratio(T_epi, forcing.p_surface)
     q_sfc_ice = saturation_mixing_ratio_ice(T_epi, forcing.p_surface)
-    q_sfc = jnp.where(is_frozen, q_sfc_ice, q_sfc_liq)
+    q_sfc = _phase_blend(is_frozen, q_sfc_ice, q_sfc_liq)
 
     # Latent heat: sublimation (L_s) when frozen, vaporization (L_v)
     # otherwise.  ``simple_bulk_fluxes`` and ``compute_most_fluxes``
@@ -68,7 +97,7 @@ def step_lake(
     # q_sat / L_s switch above (not the open-water 0.08).  Keeps the
     # in-step energy budget consistent with the albedo reported to the
     # atmosphere in the response below.
-    albedo_eff = jnp.where(is_frozen, config.albedo_lake_ice, config.albedo_lake)
+    albedo_eff = _phase_blend(is_frozen, config.albedo_lake_ice, config.albedo_lake)
 
     # Bulk fluxes
     rho = forcing.rho_lowest
@@ -105,7 +134,7 @@ def step_lake(
     # Radiation.  A frozen lake reflects like ice/snow, not open water —
     # completes the ``is_frozen`` switch already applied to q_sfc and L_eff.
     # (Diagnostic-only ice: no prognostic thickness yet; upgrade = FLake ice.)
-    albedo_eff = jnp.where(is_frozen, config.albedo_lake_ice, config.albedo_lake)
+    albedo_eff = _phase_blend(is_frozen, config.albedo_lake_ice, config.albedo_lake)
     sw_net, lw_net, lw_up = surface_radiation_fluxes(
         forcing.sw_down, forcing.lw_down, T_epi, albedo_eff,
         config.emissivity_lake,
@@ -245,10 +274,10 @@ def step_lake(
     # response.q_surface reported to the atmosphere was biased high
     # by ~14 % at T = −10 °C (liquid vs ice saturation), feeding the
     # next-step bulk-flux computation a non-physical q_sfc.
-    is_frozen_new = T_epi_new <= config.T_freeze
+    is_frozen_new = _frozen_weight(T_epi_new, config)
     q_sfc_liq_new = saturation_mixing_ratio(T_epi_new, forcing.p_surface)
     q_sfc_ice_new = saturation_mixing_ratio_ice(T_epi_new, forcing.p_surface)
-    q_sfc_new = jnp.where(is_frozen_new, q_sfc_ice_new, q_sfc_liq_new)
+    q_sfc_new = _phase_blend(is_frozen_new, q_sfc_ice_new, q_sfc_liq_new)
 
     # ``jnp.full(shape, scalar, dtype=...)`` lowers to a single
     # ``Broadcast`` HLO op, whereas ``jnp.broadcast_to(jnp.array(scalar), ...)``
@@ -267,8 +296,8 @@ def step_lake(
         # Reported albedo tracks the POST-step phase (like q_surface_new): the
         # atmosphere sees the end-of-step surface next.  (SW absorbed THIS step
         # used the pre-step albedo_eff above — correct for the state it had.)
-        albedo=jnp.where(is_frozen_new, config.albedo_lake_ice,
-                         config.albedo_lake).astype(_t_dtype),
+        albedo=_phase_blend(is_frozen_new, config.albedo_lake_ice,
+                            config.albedo_lake).astype(_t_dtype),
         emissivity=jnp.full(T_epi.shape, config.emissivity_lake, dtype=_t_dtype),
         z0=jnp.full(T_epi.shape, config.z0_lake, dtype=_t_dtype),
         q_surface=q_sfc_new,

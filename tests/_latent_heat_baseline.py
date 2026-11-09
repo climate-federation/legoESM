@@ -37,7 +37,6 @@ LATENT_BUDGET: dict[str, int] = {
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/coupling.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/lagrangian.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/seifert_beheng.py': 1,
-    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sundqvist.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/ml_parameterization.py': 2,
     'packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py': 10,

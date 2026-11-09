@@ -5,7 +5,7 @@ to simulate the float32-only Apple GPU (``mps``) backend.
 """
 
 import warnings
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import jax
 import pytest
@@ -129,41 +129,44 @@ class TestGaussianGridGuard:
                 assert len(guard_warnings) >= 1
 
 
+def _dummy_spectral_grid():
+    # Build dummy grid on CPU (float64 required for spectral grids)
+    cpu = jax.devices("cpu")[0]
+    with jax.default_device(cpu):
+        import jax.numpy as jnp
+        from legoesm.grids.gaussian import GaussianGrid
+        n_sh = 6
+        return GaussianGrid(
+            n_lat=4, n_lon=8, n_max=2, radius=1.0,
+            lat=jnp.zeros(4, dtype=jnp.float64),
+            lon=jnp.zeros(8, dtype=jnp.float64),
+            lat2d=jnp.zeros((4, 8), dtype=jnp.float64),
+            lon2d=jnp.zeros((4, 8), dtype=jnp.float64),
+            cos_lat=jnp.ones(4, dtype=jnp.float64),
+            sin_lat=jnp.zeros(4, dtype=jnp.float64),
+            f=jnp.zeros((4, 8), dtype=jnp.float64),
+            weights=jnp.ones(4, dtype=jnp.float64),
+            Pnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
+            Hnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
+            Pnm_oc2=jnp.zeros((4, n_sh), dtype=jnp.float64),
+            Dnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
+            wPnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
+            wPnm_oc2=jnp.zeros((4, n_sh), dtype=jnp.float64),
+            wDnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
+            n_sh=n_sh,
+            ls=jnp.zeros(n_sh, dtype=jnp.int32),
+            ms=jnp.zeros(n_sh, dtype=jnp.int32),
+            lap=jnp.zeros(n_sh, dtype=jnp.float64),
+            ilap=jnp.zeros(n_sh, dtype=jnp.float64),
+        )
+
+
 class TestSpectralSWModelGuard:
     """Test that SpectralShallowWaterModel.__init__ applies backend guard."""
 
     def test_mps_auto_routes_spectral_to_cpu(self):
         _require_x64()
-        # Build dummy grid on CPU (float64 required for spectral grids)
-        cpu = jax.devices("cpu")[0]
-        with jax.default_device(cpu):
-            import jax.numpy as jnp
-            from legoesm.grids.gaussian import GaussianGrid
-            n_sh = 6
-            dummy_grid = GaussianGrid(
-                n_lat=4, n_lon=8, n_max=2, radius=1.0,
-                lat=jnp.zeros(4, dtype=jnp.float64),
-                lon=jnp.zeros(8, dtype=jnp.float64),
-                lat2d=jnp.zeros((4, 8), dtype=jnp.float64),
-                lon2d=jnp.zeros((4, 8), dtype=jnp.float64),
-                cos_lat=jnp.ones(4, dtype=jnp.float64),
-                sin_lat=jnp.zeros(4, dtype=jnp.float64),
-                f=jnp.zeros((4, 8), dtype=jnp.float64),
-                weights=jnp.ones(4, dtype=jnp.float64),
-                Pnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
-                Hnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
-                Pnm_oc2=jnp.zeros((4, n_sh), dtype=jnp.float64),
-                Dnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
-                wPnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
-                wPnm_oc2=jnp.zeros((4, n_sh), dtype=jnp.float64),
-                wDnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
-                n_sh=n_sh,
-                ls=jnp.zeros(n_sh, dtype=jnp.int32),
-                ms=jnp.zeros(n_sh, dtype=jnp.int32),
-                lap=jnp.zeros(n_sh, dtype=jnp.float64),
-                ilap=jnp.zeros(n_sh, dtype=jnp.float64),
-            )
-
+        dummy_grid = _dummy_spectral_grid()
         # ``place_spectral_grid`` binds ``get_backend`` at import time, so the
         # mps route only triggers when the name in ``parallel.metal`` is also
         # patched (patching ``runtime.backend.get_backend`` alone leaves the
@@ -178,9 +181,9 @@ class TestSpectralSWModelGuard:
 
     def test_cpu_allows_model_creation(self):
         _require_x64()
-        with patch(_RT_GET_BACKEND, return_value="cpu"):
+        with patch(_RT_GET_BACKEND, return_value="cpu"), \
+                patch("legoesm.parallel.metal.get_backend", return_value="cpu"):
             from legoesm.atmosphere.dynamics.gcm.spectral_sw import (
                 SpectralShallowWaterModel,
             )
-            mock_grid = MagicMock()
-            SpectralShallowWaterModel(mock_grid)
+            SpectralShallowWaterModel(_dummy_spectral_grid())

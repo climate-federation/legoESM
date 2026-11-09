@@ -149,12 +149,13 @@ def test_smooth_fp32_finite(fix):
 _W = 0.01
 
 
-@pytest.mark.parametrize("op", ["pos", "max", "min", "abs", "gt", "lt"])
+@pytest.mark.parametrize("op", ["pos", "max", "min", "abs", "gt", "lt", "on", "off"])
 def test_smooth_primitive_c1_and_exact_outside_window(op):
     s, h = M._Sm(False), M._Sm(True)
     f = {"pos": lambda m, x: m.pos(x, _W), "max": lambda m, x: m.max(x, 0.3, _W),
          "min": lambda m, x: m.min(x, 0.3, _W), "abs": lambda m, x: m.abs(x, _W),
-         "gt": lambda m, x: m.gt(x, 0.3, _W), "lt": lambda m, x: m.lt(x, 0.3, _W)}[op]
+         "gt": lambda m, x: m.gt(x, 0.3, _W), "lt": lambda m, x: m.lt(x, 0.3, _W),
+         "on": lambda m, x: m.on(x, 0.3, _W), "off": lambda m, x: m.off(x, 0.3, _W)}[op]
     c = 0.0 if op in ("pos", "abs") else 0.3
     xs = jnp.linspace(c - 3 * _W, c + 3 * _W, 601)
     g = jax.vmap(jax.grad(lambda x: f(s, x)))(xs)
@@ -168,6 +169,9 @@ def test_smooth_primitive_c1_and_exact_outside_window(op):
     assert np.array_equal(np.asarray(f(s, xs))[far], np.asarray(f(h, xs), np.float64)[far])
     vals = np.asarray(f(s, xs))
     assert np.max(np.abs(np.diff(vals))) < 0.1                 # continuous on the sample
+    if op in ("on", "off"):                                    # one-sided: exact at/below the threshold (VC47)
+        below = np.asarray(xs) <= c
+        assert np.array_equal(vals[below], np.asarray(f(h, xs), np.float64)[below])
 
 
 def test_smooth_scheme_gradient_finite_and_matches_fd(fix):
@@ -229,38 +233,43 @@ def test_smooth_close_to_hard(fix, arm):
 
 
 def test_tiny_inactive_rain_fp32_jit(fix):
-    """fp32 + jit, three levels: in-cloud rain far below the 1e-14 gate (2e-25, weight
-    identically 0) must keep every output and the gradient finite (review r4/r5
-    reproducer: the power laws and reciprocals of 4.4/4.9 overflowed on such operands)."""
+    """fp32 + jit, three levels: rain planted inside the one-sided tidy window
+    [rlmin, rlmin + _W_Q] (fractional gate weights; at or below rlmin the window is exact,
+    so a sub-ZEPSEC in-cloud operand is no longer reachable on this path) must keep every
+    output and the gradient finite (review r4/r5 reproducer: the power laws and
+    reciprocals of 4.4/4.9 overflowed on tiny gated operands)."""
     cfg, th, _, _ = T.setup(fix, "base", slice(0, 1))
     cfg = cfg._replace(ncldtop=2)
     z = jnp.zeros((1, 3), jnp.float32)
     col = jnp.zeros(1, jnp.float32)
-    rain = cfg.rlmin - 0.5 * M._wt(cfg.rlmin) + 1e-14
-    c = jnp.zeros((1, 3, 5), jnp.float32).at[0, 2, 2].set(rain)
-    x = M.CloudscInputs(
-        t=z + 270., q=z + 1e-7, a=z + .5, clv=c,
-        tend_t=z, tend_q=z, tend_a=z, tend_cld=jnp.zeros_like(c),
-        pvfl=z, pvfi=z,
-        pap=jnp.array([[20000., 50000., 80000.]], jnp.float32),
-        paph=jnp.array([[10000., 35000., 65000., 95000.]], jnp.float32),
-        plsm=col, ldcum=jnp.zeros(1, dtype=bool),
-        ktype=jnp.zeros(1, dtype=int), peis=col,
-        plu=z, plude=z, pludeli=jnp.zeros((1, 3, 4), jnp.float32),
-        psnde=jnp.zeros((1, 3, 2), jnp.float32), pmfu=z, pmfd=z,
-    )
 
-    def run(e):
-        return M.cloudsc(cfg, th, x._replace(psnde=x.psnde.at[0, 1, 1].set(e)),
-                         3600., hard=False, stages=True)
+    def run(rain, e, hard=False):
+        c = jnp.zeros((1, 3, 5), jnp.float32).at[0, 2, 2].set(rain)
+        x = M.CloudscInputs(
+            t=z + 270., q=z + 1e-7, a=z + .5, clv=c,
+            tend_t=z, tend_q=z, tend_a=z, tend_cld=jnp.zeros_like(c),
+            pvfl=z, pvfi=z,
+            pap=jnp.array([[20000., 50000., 80000.]], jnp.float32),
+            paph=jnp.array([[10000., 35000., 65000., 95000.]], jnp.float32),
+            plsm=col, ldcum=jnp.zeros(1, dtype=bool),
+            ktype=jnp.zeros(1, dtype=int), peis=col,
+            plu=z, plude=z, pludeli=jnp.zeros((1, 3, 4), jnp.float32),
+            psnde=jnp.zeros((1, 3, 2), jnp.float32).at[0, 1, 1].set(e), pmfu=z, pmfd=z,
+        )
+        return M.cloudsc(cfg, th, x, 3600., hard=hard, stages=True)
 
     e0 = jnp.array(1.842477163000922e-14, jnp.float32)
-    out, st = jax.jit(run)(e0)
-    r = st["s42"]["zraincld"][-1, 0]
-    assert 0.0 < float(r) < 1e-24                       # the case is not vacuous
-    assert float(M._Sm(False).gt(r, M._ZEPSEC, M._wt(M._ZEPSEC))) == 0.
-    assert np.isfinite(st["s49"]["zsolqa"]).all()
-    for value in out:
-        assert value.dtype == jnp.float32 and np.isfinite(value).all()
-    g = jax.jit(jax.grad(lambda e: jnp.sum(run(e)[0].tend_t)))(e0)
-    assert np.isfinite(float(g))
+    fwd = jax.jit(run)
+    grd = jax.jit(jax.grad(lambda r, e: jnp.sum(run(r, e)[0].tend_t), argnums=(0, 1)))
+    rs, rh = [], []
+    for f in (1e-3, 0.1, 0.5, 0.9, 1.0):
+        rain = jnp.float32(cfg.rlmin + f * M._W_Q)
+        out, st = fwd(rain, e0)
+        rs.append(float(st["s42"]["zraincld"][-1, 0]))
+        rh.append(float(run(rain, e0, hard=True)[1]["s42"]["zraincld"][-1, 0]))
+        assert np.isfinite(st["s49"]["zsolqa"]).all()
+        for value in out:
+            assert value.dtype == jnp.float32 and np.isfinite(value).all()
+        assert all(np.isfinite(float(g)) for g in grd(rain, e0))
+    # fractional tidy weights reached: smooth keeps some rain, but less than the hard gate
+    assert any(0.0 < r < 0.99 * h for r, h in zip(rs[:-1], rh[:-1]))

@@ -18,19 +18,21 @@ from legoesm.atmosphere.physics.turbulence.les_tuned import (
     scm_turbulence_config,
 )
 
-# The 7 FLAT closures (params land directly on the sub-config). CLUBB is tuned
+# The 6 FLAT closures (params land directly on the sub-config). CLUBB is tuned
 # too but nested (CLUBBParams) — covered by dedicated tests below, not here.
-# mynn25 is the WRF MYNN-EDMF port since R3: no tunables, no tuned values.
+# mynn25 (WRF MYNN-EDMF, R3) and ysu (WRF YSU + WRF surface layer, R4 vote X17)
+# have no tunable coefficients.
 _TUNED_SCHEMES = ["smagorinsky", "louis", "tke", "clubb_lite",
-                  "holtslag_boville", "ysu", "edmf"]
+                  "holtslag_boville", "edmf"]
 
 
 def test_yaml_exists_and_parses():
     # packaged resource resolves (raises if missing); loader validates fully
     _read_tuned_yaml_text(None)
     grouped = load_les_tuned_overrides()
-    # 7 flat scheme classes + CLUBB's nested CLUBBParams = 8 override groups
-    assert len(grouped) == 8
+    # 6 flat scheme classes + CLUBB's nested CLUBBParams = 7 override groups
+    # (MYNN removed in R3; the YSU surrogate fit deleted with it, R4 X17)
+    assert len(grouped) == 7
     assert "CLUBBParams" in grouped        # CLUBB now tuned (nested)
     assert len(grouped["CLUBBParams"]) >= 30
 
@@ -51,14 +53,14 @@ def test_scm_default_applies_tuned_values(scheme):
 
 
 def test_opt_out_is_library_default():
-    plain = scm_turbulence_config("ysu", les_tuned=False)
-    assert plain == TurbulenceConfig(scheme="ysu")
+    plain = scm_turbulence_config("holtslag_boville", les_tuned=False)
+    assert plain == TurbulenceConfig(scheme="holtslag_boville")
 
 
 def test_inactive_schemes_untouched():
     """Only the active scheme's sub-config is spliced; others stay default."""
-    tuned = scm_turbulence_config("ysu")
-    base = TurbulenceConfig(scheme="ysu")
+    tuned = scm_turbulence_config("holtslag_boville")
+    base = TurbulenceConfig(scheme="holtslag_boville")
     assert tuned.louis == base.louis        # a non-active scheme is unchanged
     assert tuned.smagorinsky == base.smagorinsky
 
@@ -110,21 +112,21 @@ def test_typod_class_key_raises(tmp_path):
 
 def test_unknown_field_raises(tmp_path):
     bad = tmp_path / "bad.yaml"
-    bad.write_text("atm.turb.YSUConfig.not_a_field: 0.6\n")
+    bad.write_text("atm.turb.SmagorinskyConfig.not_a_field: 0.6\n")
     with pytest.raises(ValueError, match="no spec'd param"):
         load_les_tuned_overrides(str(bad))
 
 
 def test_out_of_bounds_value_raises(tmp_path):
     bad = tmp_path / "bad.yaml"
-    bad.write_text("atm.turb.YSUConfig.Pr_t: 99.0\n")    # bounds (0.33, 3.0)
+    bad.write_text("atm.turb.SmagorinskyConfig.Pr_t: 99.0\n")    # bounds (0.33, 3.0)
     with pytest.raises(ValueError, match="outside spec bounds"):
         load_les_tuned_overrides(str(bad))
 
 
 def test_non_numeric_value_raises(tmp_path):
     bad = tmp_path / "bad.yaml"
-    bad.write_text("atm.turb.YSUConfig.Pr_t: true\n")    # bool coerces to 1.0 -> reject
+    bad.write_text("atm.turb.SmagorinskyConfig.Pr_t: true\n")    # bool coerces to 1.0 -> reject
     with pytest.raises(ValueError, match="is not a number"):
         load_les_tuned_overrides(str(bad))
 
@@ -155,11 +157,11 @@ def test_write_active_scheme_params_raises_for_untuned_scheme(tmp_path):
     """A scheme absent from the (custom) YAML must raise, not emit nothing."""
     from legoesm.atmosphere.physics.turbulence.les_tuned import (
         write_active_scheme_params)
-    only_ysu = tmp_path / "only_ysu.yaml"
-    only_ysu.write_text("atm.turb.YSUConfig.Pr_t: 0.6\n")
+    only_smag = tmp_path / "only_smag.yaml"
+    only_smag.write_text("atm.turb.SmagorinskyConfig.Pr_t: 0.6\n")
     with pytest.raises(ValueError, match="no tuned entry"):
         write_active_scheme_params("louis", str(tmp_path / "x.yaml"),
-                                   path=str(only_ysu))
+                                   path=str(only_smag))
 
 
 def test_clubb_amip_slice_refused(tmp_path):
@@ -181,8 +183,8 @@ def test_clubb_diagnostic_config_refused():
 
 def test_clubb_missing_clubbparams_raises(tmp_path):
     """CLUBB selected but the YAML has no CLUBBParams -> raise, not silent default."""
-    only_ysu = tmp_path / "only_ysu.yaml"
-    only_ysu.write_text("atm.turb.YSUConfig.Pr_t: 0.6\n")
+    only_smag = tmp_path / "only_smag.yaml"
+    only_smag.write_text("atm.turb.SmagorinskyConfig.Pr_t: 0.6\n")
     turb = TurbulenceConfig(scheme="clubb")
     with pytest.raises(ValueError, match="no CLUBBParams entry"):
-        apply_les_tuned_turbulence(turb, path=str(only_ysu))
+        apply_les_tuned_turbulence(turb, path=str(only_smag))

@@ -47,7 +47,7 @@ def test_spectral_energy_budget():
   incident = jnp.array([300.0, 200.0])
   cfg = MC3DRadiationConfig(photons_per_pixel=3000)
   res = solve_sw_spectral(tau, ssa, g, incident, geom, mu0=1.0, azimuth=0.0,
-                          albedo=0.0, config=cfg, key=jax.random.PRNGKey(0))
+                          albedo=0.0, diffuse_frac=0.0, config=cfg, key=jax.random.PRNGKey(0))
   col_abs = jnp.sum(res.abs_flux, axis=2)               # (nx,ny) per-column abs
   budget = (float(jnp.mean(col_abs)) + float(jnp.mean(res.sfc_abs_flux))
             + float(res.tod_up_flux))
@@ -65,7 +65,7 @@ def test_spectral_beer_lambert_surface_flux():
   incident = jnp.array([400.0])
   cfg = MC3DRadiationConfig(photons_per_pixel=4000)
   res = solve_sw_spectral(tau, ssa, g, incident, geom, mu0=1.0, azimuth=0.0,
-                          albedo=0.0, config=cfg, key=jax.random.PRNGKey(1))
+                          albedo=0.0, diffuse_frac=0.0, config=cfg, key=jax.random.PRNGKey(1))
   expected = 400.0 * np.exp(-tau_tot)
   assert abs(float(jnp.mean(res.sfc_abs_flux)) - expected) < 0.02 * 400.0
 
@@ -84,7 +84,7 @@ def test_two_stream_cross_check_single_slab():
   g = jnp.zeros_like(tau)
   cfg = MC3DRadiationConfig(photons_per_pixel=8000)
   res = solve_sw_spectral(tau, ssa, g, jnp.array([1.0]), geom, mu0=1.0,
-                          azimuth=0.0, albedo=0.0, config=cfg,
+                          azimuth=0.0, albedo=0.0, diffuse_frac=0.0, config=cfg,
                           key=jax.random.PRNGKey(2))
   R_mc = float(res.tod_up_flux)
   T_mc = float(jnp.mean(res.sfc_abs_flux))   # black sfc -> all transmitted absorbed
@@ -112,7 +112,7 @@ def test_horizontal_equivariance_roll():
   ssa = jnp.zeros_like(field)
   g = jnp.zeros_like(field)
   cfg = MC3DRadiationConfig(photons_per_pixel=3000)
-  kw = dict(mu0=1.0, azimuth=0.0, albedo=0.0, config=cfg)
+  kw = dict(mu0=1.0, azimuth=0.0, albedo=0.0, diffuse_frac=0.0, config=cfg)
   r0 = solve_sw_spectral(field, ssa, g, jnp.array([1.0]), geom,
                          key=jax.random.PRNGKey(3), **kw)
   rolled = jnp.roll(field, shift=3, axis=1)
@@ -149,7 +149,7 @@ def test_compute_plane_sw_heating_warms_and_shapes():
   cfg = MC3DRadiationConfig(photons_per_pixel=2000)
   dT, sfc, tod = plane_adapter.compute_plane_sw_heating(
       tau, ssa, g, jnp.array([400.0]), _Grid(), z_half_td, rho,
-      mu0=1.0, albedo=0.0, config=cfg, key=jax.random.PRNGKey(5))
+      mu0=1.0, albedo=0.0, diffuse_frac=0.0, config=cfg, key=jax.random.PRNGKey(5))
   assert dT.shape == (ny, nx, nz)
   assert sfc.shape == (ny, nx)
   assert float(jnp.min(dT)) >= 0.0           # SW absorption only warms

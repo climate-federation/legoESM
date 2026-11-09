@@ -32,7 +32,8 @@ from legoesm.ice.si3_orca2_state import (
     si3_var_agg,
     si3_var_glo2eqv,
 )
-from legoesm.ice.si3_surface import SI3SurfaceConfig, si3_ice_alb
+from legoesm.ice.config import SI3SwitchConfig
+from legoesm.ice.si3_surface import SI3SurfaceConfig, si3_gt, si3_ice_alb, si3_mix
 from legoesm.ice.transport import si3_var_zapsmall
 
 from legoesm import constants as canonical_constants
@@ -174,6 +175,8 @@ class SI3StressInputs(NamedTuple):
     taum: Field
     utau_oce: Field
     vtau_oce: Field
+    # Level-1 T mask; read only by the implicit arm (rCdU_ice, iceupdate.F90:391 in NEMO 5.0.1).
+    tmask_k1: Field | None = None
 
 
 class SI3StressOutputs(NamedTuple):
@@ -183,6 +186,8 @@ class SI3StressOutputs(NamedTuple):
     tmod_io: Field
     utau_oce: Field
     vtau_oce: Field
+    # Implicit ice-ocean top drag (< 0, m/s) on DO_2D(1,1,1,1); None on the explicit arm (NEMO does not set it there).
+    rCdU_ice: Field | None = None
 
 
 class SI3FinalizeForcing(NamedTuple):
@@ -772,17 +777,72 @@ def si3_ice_update_flx(
     surface_config: SI3SurfaceConfig,
     _plant_omit_hfx_res: bool = False,
 ) -> tuple[SI3Fluxes, SI3UpdateFluxOutputs]:
-    """Execute the active production-deck ``ice_update_flx`` arm."""
-    if not config.ln_icethd:
-        raise ValueError("O16 requires resolved ln_icethd=True")
-    if surface_config.ln_cndflx:
-        raise ValueError("O16 owns the resolved ln_cndflx=False arm")
-
+    """Execute the active production-deck ``ice_update_flx`` arm on the ORCA2 state (ice albedo included)."""
     agg = state.aggregated
     eqv = state.equivalent
     h = int(config.nn_hls)
     sl = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
-    at_i_interior = agg.at_i[sl]
+    fluxes_out, outputs = si3_ice_update_flx_columns(
+        at_i=agg.at_i, vt_i=agg.vt_i, vt_s=agg.vt_s, vt_ip=agg.vt_ip, vt_il=agg.vt_il,
+        t_su=state.t_su, fluxes=fluxes, forcing=forcing, config=config,
+        switches=surface_config.switches, ln_cndflx=surface_config.ln_cndflx,
+        _plant_omit_hfx_res=_plant_omit_hfx_res)
+    alb_ice = si3_ice_alb(
+        t_su=state.t_su[sl],
+        h_i=eqv.h_i[sl],
+        h_s=eqv.h_s[sl],
+        a_ip_eff=eqv.a_ip_eff[sl],
+        h_ip=eqv.h_ip[sl],
+        h_il=eqv.h_il[sl],
+        cloud_fra=forcing.cloud_fra,
+        smask0=forcing.smask0,
+        config=surface_config,
+    )
+    return fluxes_out, outputs._replace(alb_ice=alb_ice)
+
+
+def si3_ice_update_flx_columns(
+    *,
+    at_i: Field,
+    vt_i: Field,
+    vt_s: Field,
+    vt_ip: Field,
+    vt_il: Field,
+    t_su: Field,
+    fluxes: SI3Fluxes,
+    forcing: SI3UpdateFluxForcing,
+    config: SI3ORCA2StateConfig,
+    switches: SI3SwitchConfig,
+    ln_cndflx: bool = False,
+    _plant_omit_hfx_res: bool = False,
+) -> tuple[SI3Fluxes, SI3UpdateFluxOutputs]:
+    """``ice_update_flx`` (NEMO 5.0.1 ``iceupdate.F90:84-200``, ``ln_cndflx=F``) on aggregated ice arrays.
+
+    State-free form: the caller passes the category-summed ice fields (``at_i``, ``vt_i``, ``vt_s``,
+    ``vt_ip``, ``vt_il``; ``t_su`` with the category axis) with ``config.nn_hls`` halo cells, so any SI3
+    state carrier can use it (the ORCA2 ``SI3State`` through :func:`si3_ice_update_flx`; the ORCA1
+    ``jpl=1`` column state, ponds off -> ``vt_ip = vt_il = 0``).  ``alb_ice`` is returned as None
+    (the ice albedo is the surface port's, computed by the caller).
+
+    The lead-warming branch (``fhld > 0`` and ``at_i > 0``: ``qsr = (1-frq_m)*(open SW + transmitted SW)``)
+    is NEMO's hard switch at ``switches.relative_width == 0``; otherwise a C1 blend of the two ``qsr``
+    forms over ``relative_width * flux_scale_W_m2`` in ``fhld`` and ``relative_width * ice_switch_scale``
+    in ``at_i`` (RULE 5).  ``qns = qt_oce_ai - qsr``, so the blend moves heat between the solar and
+    non-solar channels and never changes the column total.
+
+    KNOWN DIFFERENCE (RULE 5): on the tier-4 ORCA1 record (NEMO 5.0.1, kt 17281, 108,432 interior cells)
+    the smooth default moves qsr in 3 cells (0 < fhld < 0.01 W/m2 or 0 < at_i < 1e-12) by up to 8.9 W/m2,
+    with qsr + qns unchanged (max difference 0); inside a ramp the gap reaches the full jump between the two
+    NEMO forms.  ``switches=SI3_HARD_SWITCHES`` recovers NEMO.
+    """
+    if not config.ln_icethd:
+        raise ValueError("O16 requires resolved ln_icethd=True")
+    if ln_cndflx:
+        raise ValueError("O16 owns the resolved ln_cndflx=False arm")
+
+    h = int(config.nn_hls)
+    sl = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
+    at_i_interior = at_i[sl]
     qt_atm_oi = sr(forcing.qns_tot + forcing.qsr_tot)
     transmitted = _category_sum(sr(forcing.a_i_b * sr(forcing.qsr_ice - forcing.qtr_ice_bot)))
     zqsr = sr(forcing.qsr_tot - transmitted)
@@ -808,7 +868,10 @@ def si3_ice_update_flx(
     ice_qsr = _category_sum(sr(forcing.a_i_b * forcing.qtr_ice_bot))
     ice_qsr = sr(ice_qsr * one_minus_frq)
     warm_qsr = sr(open_qsr + ice_qsr)
-    qsr = jnp.where((fluxes.fhld > _ZERO) & (at_i_interior > _ZERO), warm_qsr, zqsr)
+    w = switches.relative_width
+    warm = (si3_gt(fluxes.fhld, _ZERO, w * switches.flux_scale_W_m2)
+            * si3_gt(at_i_interior, _ZERO, w * switches.ice_switch_scale))
+    qsr = si3_mix(warm, warm_qsr, zqsr, w)
     qns = sr(qt_oce_ai - qsr)
 
     wfx_sub = sr(fluxes.wfx_snw_sub + fluxes.wfx_ice_sub)
@@ -844,28 +907,14 @@ def si3_ice_update_flx(
     )
 
     snwice_mass, snwice_mass_b, snwice_fmass = si3_update_snwice_mass(
-        vt_i=agg.vt_i,
-        vt_s=agg.vt_s,
-        vt_ip=agg.vt_ip,
-        vt_il=agg.vt_il,
+        vt_i=vt_i,
+        vt_s=vt_s,
+        vt_ip=vt_ip,
+        vt_il=vt_il,
         snwice_mass_prev=forcing.snwice_mass,
         tmask=forcing.tmask,
         config=config,
         is_init=False,
-    )
-    fr_i = agg.at_i
-
-    tn_ice = state.t_su[sl]
-    alb_ice = si3_ice_alb(
-        t_su=state.t_su[sl],
-        h_i=eqv.h_i[sl],
-        h_s=eqv.h_s[sl],
-        a_ip_eff=eqv.a_ip_eff[sl],
-        h_ip=eqv.h_ip[sl],
-        h_il=eqv.h_il[sl],
-        cloud_fra=forcing.cloud_fra,
-        smask0=forcing.smask0,
-        config=surface_config,
     )
     fluxes_out = fluxes._replace(
         wfx_sub=wfx_sub,
@@ -881,9 +930,9 @@ def si3_ice_update_flx(
         wfx_ice=wfx_ice,
         wfx_snw=wfx_snw,
         wfx_pnd=fluxes.wfx_pnd,
-        fr_i=fr_i,
-        tn_ice=tn_ice,
-        alb_ice=alb_ice,
+        fr_i=at_i,
+        tn_ice=t_su[sl],
+        alb_ice=None,
         snwice_mass=snwice_mass,
         snwice_mass_b=snwice_mass_b,
         snwice_fmass=snwice_fmass,
@@ -959,10 +1008,18 @@ def si3_ice_update_tau(
     *,
     config: SI3ORCA2StateConfig,
     ln_drgice_imp: bool,
+    ice_step: bool = True,
 ) -> SI3StressOutputs:
-    """Execute the production-deck ``ice_update_tau`` resolved drag arm."""
-    if config.nn_fsbc != 1:
-        raise ValueError("O16 master record requires resolved nn_fsbc=1")
+    """``ice_update_tau`` (NEMO 5.0.1 ``iceupdate.F90:345-405``; same statements in the 5.0.2 deck).
+
+    ``ice_step`` is NEMO's ``MOD(kt-1, nn_fsbc) == 0`` (a static Python bool, decided by the caller).  True recomputes
+    ``tmod_io`` and ``taum`` and saves ``utau_oce``/``vtau_oce``; False (an ocean step between two ice steps, only
+    possible when ``nn_fsbc > 1``) carries ``inputs.tmod_io``, ``inputs.taum``, ``inputs.utau_oce`` and
+    ``inputs.vtau_oce`` unchanged and redoes only the every-ocean-step blend.  Under ``ln_drgice_imp`` the
+    every-ocean-step block also returns ``rCdU_ice = -tmod_io*at_i*tmask/rho0`` on ``DO_2D(1,1,1,1)`` (the array
+    shrunk by ``nn_hls-1`` per side), the drag the ocean's implicit top friction consumes; the implicit arm
+    requires ``inputs.tmask_k1``.
+    """
     h = int(config.nn_hls)
     if h < 1:
         raise ValueError("ice_update_tau requires at least one halo cell")
@@ -977,36 +1034,54 @@ def si3_ice_update_tau(
         name for name in ("taum", "utau_oce", "vtau_oce")
         if getattr(inputs, name).shape != interior_shape
     )
+    if ln_drgice_imp and inputs.tmask_k1 is None:
+        # zflagi = 0 drops the explicit current term; without the mask there is no rCdU_ice
+        # either, so the drag's ocean-current dependence would be lost silently (vote D7 b).
+        raise ValueError("ice_update_tau ln_drgice_imp=True requires tmask_k1 to form rCdU_ice")
+    if inputs.tmask_k1 is not None and inputs.tmask_k1.shape != full_shape:
+        wrong.append("tmask_k1")
     if wrong:
         raise ValueError("ice_update_tau forcing/config shape mismatch: " + ", ".join(wrong))
     dtype = inputs.u_ice.dtype
     rho0 = jnp.asarray(config.ice_constants.rho_ocean, dtype=dtype)
 
-    zu = sr(sr(inputs.u_ice[1:-1, 1:-1] + inputs.u_ice[:-2, 1:-1]) -
-            sr(inputs.u_oce[1:-1, 1:-1] + inputs.u_oce[:-2, 1:-1]))
-    zv = sr(sr(inputs.v_ice[1:-1, 1:-1] + inputs.v_ice[1:-1, :-2]) -
-            sr(inputs.v_oce[1:-1, 1:-1] + inputs.v_oce[1:-1, :-2]))
-    zmod = sr(_QUARTER * sr(sr(zu * zu) + sr(zv * zv)))
-    tmod_inner = sr(sr(rho0 * inputs.drag_io[1:-1, 1:-1]) * sqrt_zero_subgradient(zmod))
-    tmod_io = inputs.tmod_io.at[1:-1, 1:-1].set(tmod_inner)
-
     sl = (slice(h, -h), slice(h, -h))
     left = (slice(h - 1, -h - 1), slice(h, -h))
     below = (slice(h, -h), slice(h - 1, -h - 1))
-    zu_i = sr(sr(inputs.u_ice[sl] + inputs.u_ice[left]) -
-              sr(inputs.u_oce[sl] + inputs.u_oce[left]))
-    zv_i = sr(sr(inputs.v_ice[sl] + inputs.v_ice[below]) -
-              sr(inputs.v_oce[sl] + inputs.v_oce[below]))
-    zmod_i = sr(_QUARTER * sr(sr(zu_i * zu_i) + sr(zv_i * zv_i)))
     at_i = inputs.at_i[sl]
-    drag_i = inputs.drag_io[sl]
-    taum_ice = sr(sr(sr(at_i * rho0) * drag_i) * zmod_i)
-    taum = sr(sr(sr(_ONE - at_i) * inputs.taum) + taum_ice)
 
-    utau_oce = inputs.utau[sl]
-    vtau_oce = inputs.vtau[sl]
-    # The admitted deck resolves ln_drgice_imp=F, hence zflagi=1.  Keeping the
-    # resolved logical explicit also preserves the already supported implicit arm.
+    if ice_step:
+        # ``IF( MOD( kt-1, nn_fsbc ) == 0 )`` block (:362-385)
+        zu = sr(sr(inputs.u_ice[1:-1, 1:-1] + inputs.u_ice[:-2, 1:-1]) -
+                sr(inputs.u_oce[1:-1, 1:-1] + inputs.u_oce[:-2, 1:-1]))
+        zv = sr(sr(inputs.v_ice[1:-1, 1:-1] + inputs.v_ice[1:-1, :-2]) -
+                sr(inputs.v_oce[1:-1, 1:-1] + inputs.v_oce[1:-1, :-2]))
+        zmod = sr(_QUARTER * sr(sr(zu * zu) + sr(zv * zv)))
+        tmod_inner = sr(sr(rho0 * inputs.drag_io[1:-1, 1:-1]) * sqrt_zero_subgradient(zmod))
+        tmod_io = inputs.tmod_io.at[1:-1, 1:-1].set(tmod_inner)
+
+        zu_i = sr(sr(inputs.u_ice[sl] + inputs.u_ice[left]) -
+                  sr(inputs.u_oce[sl] + inputs.u_oce[left]))
+        zv_i = sr(sr(inputs.v_ice[sl] + inputs.v_ice[below]) -
+                  sr(inputs.v_oce[sl] + inputs.v_oce[below]))
+        zmod_i = sr(_QUARTER * sr(sr(zu_i * zu_i) + sr(zv_i * zv_i)))
+        drag_i = inputs.drag_io[sl]
+        taum_ice = sr(sr(sr(at_i * rho0) * drag_i) * zmod_i)
+        taum = sr(sr(sr(_ONE - at_i) * inputs.taum) + taum_ice)
+        utau_oce = inputs.utau[sl]
+        vtau_oce = inputs.vtau[sl]
+    else:
+        tmod_io = inputs.tmod_io
+        taum = inputs.taum
+        utau_oce = inputs.utau_oce
+        vtau_oce = inputs.vtau_oce
+
+    # every ocean time step (:387-404)
+    rcdu_ice = None
+    if ln_drgice_imp:
+        r1_rho0 = sr(_ONE / rho0)
+        g = (slice(h - 1, full_shape[0] - h + 1), slice(h - 1, full_shape[1] - h + 1))
+        rcdu_ice = sr(sr(sr(-r1_rho0 * tmod_io[g]) * inputs.at_i[g]) * inputs.tmask_k1[g])
     zflagi = _ZERO if ln_drgice_imp else _ONE
     pu = sr(inputs.uu_kbb[sl] + inputs.uu_kbb[left])
     pv = sr(inputs.vv_kbb[sl] + inputs.vv_kbb[below])
@@ -1025,6 +1100,7 @@ def si3_ice_update_tau(
         tmod_io=tmod_io,
         utau_oce=utau_oce,
         vtau_oce=vtau_oce,
+        rCdU_ice=rcdu_ice,
     )
 
 
@@ -1040,6 +1116,7 @@ __all__ = (
     "SI3UpdateFluxOutputs",
     "si3_ice_cor",
     "si3_ice_update_flx",
+    "si3_ice_update_flx_columns",
     "si3_ice_update_tau",
     "si3_o15_step",
     "si3_o16_step",

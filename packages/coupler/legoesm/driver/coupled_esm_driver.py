@@ -1726,7 +1726,7 @@ class CoupledESMDriver:
             q_low = (_qgd[..., -1] if _qgd is not None
                      else jnp.zeros_like(T_low))
         else:
-            q_v = self._atm.q_v
+            q_v = self._atm.current_tracer("q_v")
             p_s = state.p_s.data
             T_low = state.T.data[..., -1]
             if state.v is not None:
@@ -2710,7 +2710,7 @@ class CoupledESMDriver:
                 _qv = (jnp.zeros_like(_f["T"]) if _qv is None
                        else getattr(_qv, "data", _qv))
             else:
-                _ps, _qv = _st.p_s.data, self._atm.q_v
+                _ps, _qv = _st.p_s.data, self._atm.current_tracer("q_v")
             cwv_now = column_water_vapor(
                 _qv, _ps, jnp.asarray(self._atm.sigma.dsigma),
             )
@@ -2767,9 +2767,9 @@ class CoupledESMDriver:
                     # W_atm = column vapour + any CARRIED condensate tracers
                     # (same (1/g) INT q dp mass weighting); each accessor is
                     # None when that species is not carried (dry/kessler).
-                    w_atm = column_water_vapor(self._atm.q_v, p_s, dsig)
+                    w_atm = column_water_vapor(self._atm.current_tracer("q_v"), p_s, dsig)
                     for _qn in ("q_c", "q_r", "q_i", "q_s", "q_g"):
-                        _qx = getattr(self._atm, _qn, None)
+                        _qx = self._atm.current_tracer(_qn)
                         if _qx is not None:
                             w_atm = w_atm + column_water_vapor(_qx, p_s, dsig)
                     # Whole-cell tile weights on the ATM grid: the ice-tile
@@ -2865,8 +2865,8 @@ class CoupledESMDriver:
 
     @property
     def q_v(self):
-        """Atmospheric specific humidity ``q_v`` (stored outside the dycore state)."""
-        return self._atm.q_v
+        """Atmospheric specific humidity ``q_v`` as the running lane holds it."""
+        return self._atm.current_tracer("q_v")
 
     @property
     def ocean_state(self):
