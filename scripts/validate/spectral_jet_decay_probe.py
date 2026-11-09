@@ -11,8 +11,11 @@ exit ("end"), for the 120-200 hPa band:
 dealiases at total wavenumber floor(0.667 * 31) = 20, so zonal m > 20 is zero
 on that lane by construction (a tail band above it reads ~1e-32 on every arm
 and cannot rank them). The same band is used on lat-lon so the two grids are
-compared on the same scales. A spectral grid whose retained cut is below
-``TAIL_M[1]`` is refused.
+compared on the same scales. A spectral model whose retained cut (its own
+grid n_max and dealiasing fraction) is below ``TAIL_M[1]`` is refused. The
+spectrum is taken on the fixed model levels whose reference-pressure
+(p_s = constants.p_ref) value lies in the band, so every call samples the
+same population; jet and KE use each column's own pressure.
 
 Grid must have exact latitude rows (Gaussian / lat-lon). Prints one provenance
 line (git sha, dirty count, argv) first.
@@ -33,11 +36,13 @@ TAIL_M = (16, 20)
 SLOPE_M = (8, 20)
 
 
-def band_diagnostics(lat, lon, u, v, p_hpa, band=BAND_HPA, tail_m=TAIL_M,
-                     slope_m=SLOPE_M) -> dict:
+def band_diagnostics(lat, lon, u, v, p_hpa, spec_levels, band=BAND_HPA,
+                     tail_m=TAIL_M, slope_m=SLOPE_M) -> dict:
     """Band jet / KE / zonal-spectrum numbers from column fields.
 
-    lat, lon: (ncol,) radians; u, v, p_hpa: (ncol, nlev).
+    lat, lon: (ncol,) radians; u, v, p_hpa: (ncol, nlev). Jet and KE use the
+    columns' own pressure; the spectrum uses the fixed level set
+    ``spec_levels`` (same population at every call, every column).
     """
     from legoesm.ocean.diagnostics import zonal_power_spectrum
 
@@ -50,6 +55,9 @@ def band_diagnostics(lat, lon, u, v, p_hpa, band=BAND_HPA, tail_m=TAIL_M,
         raise ValueError("non-finite wind")
     if p.shape != u.shape or v.shape != u.shape or u.ndim != 2 or u.shape[0] != lat.size:
         raise ValueError(f"shape mismatch u {u.shape} v {v.shape} p {p.shape} lat {lat.shape}")
+    spec_levels = np.asarray(spec_levels, dtype=int)
+    if spec_levels.size == 0:
+        raise ValueError("no spectrum levels")
     inb = (p >= band[0]) & (p <= band[1])
     rows, inv = np.unique(np.round(lat, 8), return_inverse=True)
     cnt = np.bincount(inv)
@@ -71,15 +79,11 @@ def band_diagnostics(lat, lon, u, v, p_hpa, band=BAND_HPA, tail_m=TAIL_M,
     for r in range(rows.size):
         idx = np.where(inv == r)[0]
         idx = idx[np.argsort(lon[idx])]
-        for k in range(nk):
-            if not np.all(inb[idx, k]):
-                continue
-            for f in (u, v):
-                _, P = zonal_power_spectrum(f[idx, k][None, :], 1.0, detrend=False)
-                spec += math.cos(rows[r]) * 0.5 * np.asarray(P)
-            wsum += math.cos(rows[r])
-    if wsum == 0.0:
-        raise ValueError("no full latitude row inside the pressure band")
+        c = math.cos(rows[r])
+        for f in (u, v):
+            _, P = zonal_power_spectrum(f[idx][:, spec_levels].T, 1.0, detrend=False)
+            spec += c * 0.5 * np.asarray(P)
+        wsum += c
     spec /= wsum
     eddy = spec[1:].sum()
     m = np.arange(slope_m[0], slope_m[1] + 1)
@@ -96,25 +100,33 @@ def band_diagnostics(lat, lon, u, v, p_hpa, band=BAND_HPA, tail_m=TAIL_M,
     }
 
 
-def retained_zonal_cut(n_max: int) -> int:
-    """Highest total (so zonal) wavenumber the spectral PE state keeps."""
-    from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
-    return int(math.floor(SpectralPEConfig().dealiasing_fraction * n_max))
+def retained_zonal_cut(n_max: int, dealiasing_fraction: float) -> int:
+    """Highest total (so zonal) wavenumber a spectral PE state keeps."""
+    if dealiasing_fraction <= 0:
+        return int(n_max)
+    return int(math.floor(dealiasing_fraction * n_max))
 
 
 def _report(driver, tag):
     import jax
     import jax.numpy as jnp
-    grid = driver.grid
-    n_max = getattr(grid, "n_max", None)
-    if n_max is not None and retained_zonal_cut(n_max) < TAIL_M[1]:
-        raise SystemExit(f"PROBE tail band {TAIL_M} above retained cut "
-                         f"{retained_zonal_cut(n_max)} (n_max {n_max})")
+    from legoesm import constants
+    dyn = driver.model
+    sgrid = getattr(dyn, "grid", None)
+    n_max = getattr(sgrid, "n_max", None)
+    if n_max is not None:
+        cut = retained_zonal_cut(n_max, float(dyn.config.dealiasing_fraction))
+        if cut < TAIL_M[1]:
+            raise SystemExit(f"PROBE tail band {TAIL_M} above retained cut {cut} (n_max {n_max})")
     st = driver.state
     p = np.asarray(jax.vmap(driver.sigma.pressure_at_full)(jnp.asarray(st.p_s.data))) / 100
-    d = band_diagnostics(grid.latCell, grid.lonCell, st.u.data, st.v.data, p)
-    print(f"PROBE {tag} spectrum nlon {d['nlon']} tail_frac_m{TAIL_M[0]}_{TAIL_M[1]}_of_eddy "
-          f"{d['tail_frac']:.4e} slope_m{SLOPE_M[0]}_{SLOPE_M[1]} {d['slope']:.3f}")
+    p_ref = np.asarray(driver.sigma.pressure_at_full(jnp.asarray(constants.p_ref))) / 100
+    lev = np.where((p_ref >= BAND_HPA[0]) & (p_ref <= BAND_HPA[1]))[0]
+    grid = driver.grid
+    d = band_diagnostics(grid.latCell, grid.lonCell, st.u.data, st.v.data, p, lev)
+    print(f"PROBE {tag} spectrum nlon {d['nlon']} levels {lev.tolist()} "
+          f"tail_frac_m{TAIL_M[0]}_{TAIL_M[1]}_of_eddy {d['tail_frac']:.4e} "
+          f"slope_m{SLOPE_M[0]}_{SLOPE_M[1]} {d['slope']:.3f}")
     print(f"PROBE {tag} point_max_u_band {d['point_max_u']:.3f} zonal_max_u_band "
           f"{d['zonal_max_u']:.3f} at lat {d['zonal_max_lat_deg']:.2f} p "
           f"{d['zonal_max_p_hpa']:.1f} ke_band {d['ke_band']:.3f}")

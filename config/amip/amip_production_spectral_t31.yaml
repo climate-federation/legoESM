@@ -18,8 +18,8 @@ discretization: spectral
 column_lane: true           # the spectral dycore is the dynamics operator of the CAM6 column loop
 time_integrator: ssp_rk54   # D5: the self-starting 5-stage SSP-RK (leapfrog refused on this lane);
                             # explicit, no semi-implicit substeps
-hyperdiff_scale: 0.0625     # spectral del-4 hyperdiffusion: n_max e-folds in 8 h (0.0625 x the factory
-                            # 0.5 h). User delegated, author picked 2026-11-09 from 10-day T31 arms
+hyperdiff_scale: 0.0625     # spectral del-4 hyperdiffusion: n_max e-folds in 8 h (coefficient 0.0625 x the
+                            # factory's 0.5 h-e-folding one; the retained cut n=20 e-folds in ~45 h). User delegated, author picked 2026-11-09 from 10-day T31 arms
                             # (e-folding varied alone; zonal-mean jet day 0->10): 0.5 h -13.8%,
                             # 2 h -12.0%, 8 h -3.3%, lat-lon-48 +6.5%; 8 h keeps the m 8-20 slope
                             # (-3.7) at lat-lon's (-3.7) vs -6.2 at 0.5 h. nu*eig_max^2*dt = 0.016,
