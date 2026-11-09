@@ -408,8 +408,13 @@ def hard_saturation_blend(condensation, T, q_v, p_full, dt, q_sat,
 def hard_saturation_drain(T, q_v, p_full, dt,
                           hard_threshold=_DEFAULT_HARD_SAT_THRESHOLD,
                           hard_max_heating_K=_DEFAULT_HARD_SAT_MAX_HEATING_K,
-                          ice_curve=False):
+                          ice_curve=False, l_over_cp=None):
     """HARD-gated hard-saturation DRAIN rate [kg/kg/s] (>= 0).
+
+    ``l_over_cp``: the latent heat / c_pd the CALLER heats with; ``None`` ->
+    :func:`drain_l_over_cp` (Kirchhoff L_v(T0), or the blended ice-curve value).
+    A host with its own convention passes it so the solve, the cap and its
+    heating agree.
 
     The condensation the hard saturation adjustment applies to drain
     super-saturation ONTO the liquid curve -- the entry point for the MPAS
@@ -469,7 +474,8 @@ def hard_saturation_drain(T, q_v, p_full, dt,
               else saturation_specific_humidity)
     if jax.config.jax_enable_x64:
         T64 = T.astype(jnp.float64)
-        l_over_cp = drain_l_over_cp(T64, ice_curve)
+        l_over_cp = (drain_l_over_cp(T64, ice_curve) if l_over_cp is None
+                     else jnp.broadcast_to(jnp.asarray(l_over_cp, jnp.float64), T64.shape))
         q_sat = sat_fn(
             T64, p_full.astype(jnp.float64)).astype(q_v.dtype)
         cond_hard = _hard_saturation_condensation(
@@ -478,7 +484,8 @@ def hard_saturation_drain(T, q_v, p_full, dt,
             q_sat.astype(jnp.float64),
             sat_fn=sat_fn, l_over_cp=l_over_cp).astype(q_v.dtype)
     else:
-        l_over_cp = drain_l_over_cp(T, ice_curve)
+        l_over_cp = (drain_l_over_cp(T, ice_curve) if l_over_cp is None
+                     else jnp.broadcast_to(jnp.asarray(l_over_cp, T.dtype), T.shape))
         q_sat = sat_fn(T, p_full)
         cond_hard = _hard_saturation_condensation(
             T, q_v, p_full, dt, q_sat, sat_fn=sat_fn, l_over_cp=l_over_cp)
