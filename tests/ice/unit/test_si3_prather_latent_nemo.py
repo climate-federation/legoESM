@@ -272,3 +272,54 @@ def test_uniform_array_spacings_match_scalar_path():
     for a, b in zip(array[1], scalar[1]):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
     assert _kernel(3000.0, 3000.0, None)[2] == 1  # scalar CFL path unchanged
+
+
+def test_adv2d_recipe_selects_hard_negative_area_floor():
+    """The NEMO-replication ADV2D wrapper must run zapneg's hard
+    WHERE(pa_i < 0) pa_i = 0 (icevar.F90:836), not the smooth default: a cell
+    with 0 < a_i < ramp width keeps its value bitwise."""
+
+    from types import SimpleNamespace
+
+    from legoesm.ice.fidelity.nemo_adv2d_testcase_recipe import (
+        apply_ice_adv2d_source_corrections,
+    )
+
+    card = SimpleNamespace(dx_m=1.0, dy_m=1.0, nlay_i=3, nlay_s=3, halo_width=_HALO, ponds=False)
+    entry, transported = _tiny_area_case(0.3 * _RAMP_W)
+    out = np.asarray(
+        apply_ice_adv2d_source_corrections(
+            card,
+            jnp.asarray(entry),
+            jnp.asarray(transported),
+            entry_intensive_contents=jnp.asarray(entry),
+            contents_are_intensive=True,
+        )
+    )
+    np.testing.assert_array_equal(out[_IN], _correct(entry, transported, False, 0.0)[_IN])
+
+
+def test_nemo_recipes_pass_hard_negative_area_floor():
+    """Every call of the shared Prather corrections in a NEMO-replication
+    recipe passes negative_area_ramp_width=0.0 explicitly (covers the rheology
+    recipe, whose card needs oracle data)."""
+
+    import ast
+    from pathlib import Path
+
+    import legoesm.ice.fidelity as fidelity
+
+    calls = []
+    for path in sorted(Path(fidelity.__file__).parent.glob("nemo_*recipe*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+                if name == "apply_si3_prather_source_corrections":
+                    width = {kw.arg: kw.value for kw in node.keywords}.get(
+                        "negative_area_ramp_width"
+                    )
+                    calls.append((path.name, node.lineno, width))
+    assert len(calls) >= 3, calls  # adv2d intensive + extensive paths, rheology
+    for name, line, width in calls:
+        assert isinstance(width, ast.Constant) and width.value == 0.0, (name, line)

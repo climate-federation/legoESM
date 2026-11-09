@@ -1008,6 +1008,7 @@ def apply_ice_adv2d_source_corrections(
             ponds_active=card.ponds,
             entry_intensive_contents=entry_intensives,
             contents_are_intensive=True,
+            negative_area_ramp_width=0.0,  # NEMO hard WHERE(pa_i<0) (icevar.F90:836)
         )
         return si3_prather_pack_intensives(corrected, cell_area)
 
@@ -1022,6 +1023,7 @@ def apply_ice_adv2d_source_corrections(
         ponds_active=card.ponds,
         entry_intensive_contents=entry_intensive_contents,
         contents_are_intensive=contents_are_intensive,
+        negative_area_ramp_width=0.0,  # NEMO hard WHERE(pa_i<0) (icevar.F90:836)
     )
 
 
