@@ -185,8 +185,11 @@ def test_new_fields_are_appended_last():
     from legoesm.driver.config import DycoreConfig
     assert MPASPrimitiveEquationConfig._fields[-2:] == (
         "vert4_flux_form_tracers", "vert4_log_form_tracers")
-    assert DycoreConfig._fields[-2:] == (
-        "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers")
+    f = DycoreConfig._fields
+    i = f.index("mpas_vert4_flux_form_tracers")
+    assert f[i:i + 3] == ("mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers",
+                          "spectral_sponge_nu_top_m2s")
+    assert f[-1] == "spectral_sponge_nu_top_m2s"
 
 
 def test_every_builder_forwarding_the_filter_forwards_the_form():

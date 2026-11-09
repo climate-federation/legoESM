@@ -31,9 +31,9 @@ DT = 600.0
 NU_TOP = 2.0e6
 
 
-def _model(nu_top=0.0, tau=0.0):
+def _model(nu_top=0.0, tau=0.0, integrator="ssp_rk3"):
     grid = create_gaussian_grid(21)
-    cfg = SpectralPEConfig(time_integrator="ssp_rk3", spectral_filter_strength=0.0,
+    cfg = SpectralPEConfig(time_integrator=integrator, spectral_filter_strength=0.0,
                            sponge_tau=tau, sponge_del2_nu_top_m2s=nu_top)
     return SpectralPrimitiveEquationModel(
         grid=grid, sigma_coord=create_sigma_coordinate(NLEV), config=cfg)
@@ -56,13 +56,19 @@ def _seeded_state(model):
 def test_factor_is_the_cam_se_del2_profile():
     m = _model(NU_TOP)
     m._ensure_sponge_factor(DT)
-    eig = np.asarray(m.grid.ls * (m.grid.ls + 1)) / m.grid.radius ** 2
+    ls = np.asarray(m.grid.ls)
+    nn1 = ls * (ls + 1.0)
+    a2 = m.grid.radius ** 2
     scale = np.array([4.0, 2.0, 1.0] + [0.0] * (NLEV - 3))
-    want = np.exp(-NU_TOP * scale[None, :] * eig[:, None] * DT)
-    np.testing.assert_allclose(np.asarray(m._sponge_factor), want, rtol=1e-14)
-    np.testing.assert_allclose(np.asarray(m._sponge_factor_T), want, rtol=1e-14)
+    want_T = np.exp(-NU_TOP * scale[None, :] * (nn1 / a2)[:, None] * DT)
+    want_v = np.exp(-NU_TOP * scale[None, :] * (np.maximum(nn1 - 2.0, 0.0) / a2)[:, None] * DT)
+    np.testing.assert_allclose(np.asarray(m._sponge_factor), want_v, rtol=1e-14)
+    np.testing.assert_allclose(np.asarray(m._sponge_factor_T), want_T, rtol=1e-14)
     assert np.all(np.asarray(m._sponge_factor)[:, 3:] == 1.0)
-    assert np.all(np.asarray(m._sponge_factor)[np.asarray(m.grid.ls) == 0] == 1.0)
+    assert np.all(np.asarray(m._sponge_factor_T)[ls == 0] == 1.0)
+    # vector Laplacian: rigid rotation (n = 1 vor/div) is not damped
+    assert np.all(np.asarray(m._sponge_factor)[ls <= 1] == 1.0)
+    assert np.all(np.asarray(m._sponge_factor)[ls == 2, :3] < 1.0)
 
 
 def test_off_keeps_the_old_factors():
@@ -101,6 +107,18 @@ def test_step_damps_only_the_top_three_levels():
         for k in range(3):
             assert np.sum(np.abs(x[:, k]) ** 2) < np.sum(np.abs(y[:, k]) ** 2), (f, k)
     assert np.array_equal(np.asarray(a.lnps_hat.data), np.asarray(b.lnps_hat.data))
+
+
+def test_column_lane_step_applies_the_sponge():
+    from legoesm.atmosphere.dynamics.gcm.spectral_column import SpectralColumnModel
+    on, off = _model(NU_TOP, integrator="ssp_rk54"), _model(0.0, integrator="ssp_rk54")
+    s = _seeded_state(on)
+    a = SpectralColumnModel(on).step(SpectralColumnModel(on).from_bundle(s), DT).native
+    b = SpectralColumnModel(off).step(SpectralColumnModel(off).from_bundle(s), DT).native
+    for f in ("vor_hat", "div_hat", "T_hat"):
+        x, y = np.asarray(getattr(a, f).data), np.asarray(getattr(b, f).data)
+        assert np.array_equal(x[:, 3:], y[:, 3:]), f
+        assert not np.array_equal(x[:, 0], y[:, 0]), f
 
 
 def test_refuses_too_few_levels():

@@ -311,10 +311,6 @@ class SpectralPEConfig(NamedTuple):
     # Sponge layer (implicit multiplicative filter at model top)
     sponge_sigma: float = 0.1       # Sigma below which sponge is active (damps above)
     sponge_tau: float = 0.0         # E-folding time at model top [s] (0 = off)
-    # CAM-SE top Laplacian sponge: del2 viscosity nu_top * _CAM_SE_NU_SCALE_TOP[k]
-    # on vor, div and T of the top levels, applied as an implicit post-step
-    # factor exp(-nu_k n(n+1)/a^2 dt).  0 = off (bitwise the old step).
-    sponge_del2_nu_top_m2s: float = 0.0
     # Level-dependent hyperdiffusion scaling (stronger at low pressures)
     hyperdiff_pscale: float = 0.0   # Power-law exponent: nu_k = nu * (p_ref/p_k)^exp (0 = off)
     # Temperature floor (positivity protection)
@@ -372,6 +368,13 @@ class SpectralPEConfig(NamedTuple):
     # post-step filter's KE removal is a documented omission). DEFAULT ON —
     # disabling it leaves the total-energy budget open, and warns.
     frictional_heating: bool = True
+    # CAM-SE top Laplacian sponge: del2 viscosity nu_top * _CAM_SE_NU_SCALE_TOP[k]
+    # on the winds and T of the top levels, applied as an implicit post-step
+    # factor: T exp(-nu_k n(n+1)/a^2 dt); vor/div exp(-nu_k (n(n+1)-2)/a^2 dt),
+    # the VECTOR Laplacian of the wind (CAM-SE vlaplace_sphere_wk adds 2v/a^2
+    # so rigid rotation, n=1, is not damped).  0 = off (bitwise the old step).
+    # (appended last: positional ABI)
+    sponge_del2_nu_top_m2s: float = 0.0
 
 
 # =============================================================================
@@ -1836,10 +1839,15 @@ class SpectralPrimitiveEquationModel:
                     f"levels, got {nlev}")
             scale = jnp.zeros(nlev).at[:len(_CAM_SE_NU_SCALE_TOP)].set(
                 jnp.asarray(_CAM_SE_NU_SCALE_TOP))
-            eig = self.grid.ls * (self.grid.ls + 1) / self.grid.radius ** 2
-            del2 = jnp.exp(-nu_top * scale[None, :] * eig[:, None] * dt)
-            self._sponge_factor = self._sponge_factor[None, :] * del2
-            self._sponge_factor_T = self._sponge_factor_T * del2
+            nn1 = self.grid.ls * (self.grid.ls + 1)
+            a2 = self.grid.radius ** 2
+            rate = nu_top * scale[None, :] * dt
+            # winds: vector Laplacian, eigenvalue n(n+1)-2 (n=0 vor/div are 0)
+            eig_v = jnp.maximum(nn1 - 2, 0) / a2
+            self._sponge_factor = (self._sponge_factor[None, :]
+                                   * jnp.exp(-rate * eig_v[:, None]))
+            self._sponge_factor_T = (self._sponge_factor_T
+                                     * jnp.exp(-rate * (nn1 / a2)[:, None]))
         self._sponge_dt = dt
 
     def _ensure_hyperdiff_filter(self, dt: float):
