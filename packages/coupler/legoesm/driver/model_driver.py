@@ -12952,23 +12952,9 @@ class ModelDriver:
         # ``_step_jit``; the eager loop below accumulates the per-step ledger
         # and writes ``budget_ledger_columns.npz`` (per-column schema — a
         # deliberately DIFFERENT filename from the FV lane's global-row
-        # ``budget_ledger.npz``) at the diagnostic cadence.  The
-        # historical refusal (SILENTLY-inert flag -> loud refusal -> now a
-        # working path) is retained below only for MPI, where the per-rank
-        # ledger gather is not yet wired.
-        # NOTE: _mpi_world_size EXISTS-but-is-None on the serial lane, so the
-        # getattr default never applies — the `or 1` covers the None.
-        if (bool(getattr(self.config.output, "budget_ledger", False))
-                and ((getattr(self, "_mpi_world_size", 1) or 1) > 1
-                     or getattr(self, "_voronoi_layout", None) is not None)):
-            raise ValueError(
-                "--budget-ledger on the MPAS lane is serial-only for now "
-                "(#1311): the per-column ledger rides model.step's eager "
-                "side-channel, which the cell-partition MPI step bypasses "
-                "(even at -np 1 — the flag would be SILENTLY inert there, "
-                "the exact #1311 failure mode this refusal exists to "
-                "prevent).  Run the serial lane, or drop the flag."
-            )
+        # ``budget_ledger.npz``) at the diagnostic cadence.  The cell-partition
+        # MPI step publishes the same per-step rows (rank-local); the writer
+        # gathers the owned rows to the global mesh (#2171).
         import time
 
         cfg = self.config
@@ -15980,6 +15966,12 @@ class ModelDriver:
                           if _is_phys_step else _mpi_step_held)
                 self.state, _phys_state = _mstep(
                     self.state, DT, _forcing, _phys_state)
+                if _budget_ledger_on:
+                    _ls = getattr(self.model, "_step_ledger", None)
+                    if _ls is not None:
+                        _led_accum = (_ls if _led_accum is None
+                                      else _led_accum + _ls)
+                        _led_nsteps += 1
             else:
                 _pfn = pick_physics_fn(_use_rad, _is_phys_step, physics_fn,
                                        physics_fn_norad, physics_fn_held)
@@ -16580,15 +16572,32 @@ class ModelDriver:
                     if _area_w_led is not None:
                         _area_w_led = np.asarray(
                             _area_w_led, dtype=np.float64).ravel().copy()
+                    if _is_mpas_cell_partitioned(self):
+                        # Owned rows -> global slots (#2171), on every rank
+                        # (collective); the rows and their weights must be the
+                        # same global columns.  Only rank 0 logs and writes.
+                        from legoesm.parallel.voronoi_mpi import (
+                            gather_voronoi_field,
+                        )
+                        _led_part = self._voronoi_layout.partition
+                        _led_rates = np.asarray(gather_voronoi_field(
+                            jnp.asarray(_led_rates), _led_part, "cell"))
+                        if (_area_w_led is not None and _area_w_led.size
+                                == _led_part.n_local_cells):
+                            _area_w_led = np.asarray(gather_voronoi_field(
+                                jnp.asarray(_area_w_led), _led_part, "cell"),
+                                dtype=np.float64)
                     _tot_e = _led_rates.sum(axis=1)[:, 1]     # (ncol,) W/m^2
                     _hot = int(np.argmax(np.abs(_tot_e)))
                     _hot_rows = _led_rates[_hot, :, 1]
                     _hot_row = int(np.argmax(np.abs(_hot_rows)))
-                    logger.info(
-                        "  Ledger: max|column dE/dt|=%.3e W/m^2 at cell %d "
-                        "(top row: %s %.3e; steps=%d)",
-                        _tot_e[_hot], _hot, LEDGER_PROCESSES[_hot_row],
-                        _hot_rows[_hot_row], _led_nsteps)
+                    _led_root = getattr(self, "_mpi_rank", 0) in (0, None)
+                    if _led_root:
+                        logger.info(
+                            "  Ledger: max|column dE/dt|=%.3e W/m^2 at cell "
+                            "%d (top row: %s %.3e; steps=%d)",
+                            _tot_e[_hot], _hot, LEDGER_PROCESSES[_hot_row],
+                            _hot_rows[_hot_row], _led_nsteps)
                     # PER-COLUMN schema, deliberately a DIFFERENT filename
                     # from the FV lane's global-row ``budget_ledger.npz``
                     # (days/rates history): a consumer reading one schema
@@ -16623,7 +16632,7 @@ class ModelDriver:
                             "area_hash48": np.asarray(
                                 _content_hash48(_area_w_led)),
                         }
-                    if self.output_dir is not None:
+                    if _led_root and self.output_dir is not None:
                         np.savez(
                             str(self.output_dir
                                 / "budget_ledger_columns.npz"),
@@ -16633,21 +16642,12 @@ class ModelDriver:
                                 ("water_kg_m2_s", "energy_W_m2")),
                             n_steps=_led_nsteps,
                             day=elapsed_day + START_DAY,
-                            # Rank locality is part of the reduction: under
-                            # cell partitioning these rows would be ONE rank's
-                            # columns, and no weighting makes that a global
-                            # budget.  Today this is always False -- setup
-                            # already REFUSES --budget-ledger whenever the
-                            # world size exceeds one or a Voronoi layout
-                            # exists, which is strictly broader than this
-                            # predicate.  It is stamped anyway because that
-                            # refusal is documented as "serial-only FOR NOW":
-                            # when the ledger gather is wired the artifact
-                            # becomes rank-local, and the reader should refuse
-                            # at that moment rather than print a per-rank
-                            # table as a global one.
-                            cell_partitioned=bool(
-                                _is_mpas_cell_partitioned(self)),
+                            # Rank locality is part of the reduction: a
+                            # file of ONE rank's columns is not a global
+                            # budget, and the reader refuses it.  The rows
+                            # written here are always global (gathered above
+                            # under a cell partition, #2171).
+                            cell_partitioned=False,
                             # The reduction the reader MUST use (#1354).  The
                             # rows are per-column, so a consumer picks the
                             # weighting -- and an unweighted mean is not a

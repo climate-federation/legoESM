@@ -455,6 +455,32 @@ def total_energy_entry_column(p_s, dsigma, *, dT_dt=None, du_dt=None,
     return rate
 
 
+def step_ledger_from_stages(phys_rows, stages, dsigma, dt, *,
+                            level_weight=None):
+    """One MPAS step's per-column ledger ``(nCells, N_LEDGER, 2)``.
+
+    ``stages`` = ``(pre, post_dynamics, post_physics, pre_mass_fix,
+    post_mass_fix, end)`` states of the operator-split step.  ``phys_rows`` are
+    the physics' own per-process rows.  dynamics = RK + the mass fixer; clips =
+    everything between physics and the fixer (filters) plus the floors after
+    it; the physics closure discrepancy is booked to ``other_physics`` so
+    ``sum(rows) == (snap(end) - snap(pre)) / dt`` exactly.  Shared by the
+    serial and the cell-partition MPI step so the two cannot drift.
+    """
+    def _snap(s):
+        water = [s.tracers[k].data for k in LEDGER_WATER_SPECIES
+                 if s.tracers is not None and k in s.tracers]
+        return column_store_snapshot_column(
+            s.p_s.data, dsigma, s.T.data, *water, level_weight=level_weight)
+
+    s_pre, s_dyn, s_phy, s_fix0, s_fix1, s_end = (_snap(s) for s in stages)
+    rows = phys_rows.astype(s_pre.dtype)
+    led = rows.at[:, ROW_DYNAMICS, :].add(
+        ((s_dyn - s_pre) + (s_fix1 - s_fix0)) / dt)
+    led = led.at[:, ROW_CLIPS, :].add(((s_fix0 - s_phy) + (s_end - s_fix1)) / dt)
+    return led.at[:, ROW_OTHER, :].add((s_phy - s_dyn) / dt - rows.sum(axis=1))
+
+
 def zero_ledger_column(n_columns, dtype=jnp.float64):
     """A zeros ``(n_columns, N_LEDGER, 2)`` per-column accumulator seed."""
     return jnp.zeros((n_columns, N_LEDGER, 2), dtype=dtype)
