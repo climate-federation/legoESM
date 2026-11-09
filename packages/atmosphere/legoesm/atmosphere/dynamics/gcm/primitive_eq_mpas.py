@@ -1515,40 +1515,19 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         _led_step = None
         if _led_phys_rows is not None:
             from legoesm.diagnostics.process_ledger import (
-                LEDGER_WATER_SPECIES, ROW_CLIPS, ROW_DYNAMICS, ROW_OTHER,
-                column_store_snapshot_column,
+                step_ledger_from_stages,
             )
-
-            _led_w = self.config.budget_ledger_level_weight
-
-            def _snap(s):
-                water = [s.tracers[k].data for k in LEDGER_WATER_SPECIES
-                         if s.tracers is not None and k in s.tracers]
-                return column_store_snapshot_column(
-                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water,
-                    level_weight=_led_w)
-
-            _s_pre = _snap(state)
-            _s_dyn = _snap(_state_postdyn)
-            _s_phy = _snap(_state_postphys)
-            _s_fix0 = _snap(_state_prefix)
-            _s_fix1 = _snap(_state_postfix)
-            _s_end = _snap(state_new)
-            _led_step = _led_phys_rows.astype(_s_pre.dtype)
-            _led_step = _led_step.at[:, ROW_DYNAMICS, :].add(
-                ((_s_dyn - _s_pre) + (_s_fix1 - _s_fix0)) / dt)
-            _led_step = _led_step.at[:, ROW_CLIPS, :].add(
-                ((_s_fix0 - _s_phy) + (_s_end - _s_fix1)) / dt)
             # Closure residual -> other_physics (the FV residual philosophy):
             # the physics rows are tendency integrals at the PRE-application
             # p_s, while the store snapshots see the applied state — a
             # physics dp_s_dt and the dt² cross-term (dt·dT_dt vs the p_s
-            # change) land nowhere otherwise.  Booking the discrepancy here
-            # makes sum(rows) == (snap(end) − snap(pre))/dt EXACT by
-            # construction, which is the property the closure test pins.
-            _led_step = _led_step.at[:, ROW_OTHER, :].add(
-                (_s_phy - _s_dyn) / dt
-                - _led_phys_rows.astype(_s_pre.dtype).sum(axis=1))
+            # change) land nowhere otherwise.
+            _led_step = step_ledger_from_stages(
+                _led_phys_rows,
+                (state, _state_postdyn, _state_postphys, _state_prefix,
+                 _state_postfix, state_new),
+                self.sigma_coord.dsigma, dt,
+                level_weight=self.config.budget_ledger_level_weight)
 
         # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
         # rounded the mass fixer's float64 back out of the bulk state.

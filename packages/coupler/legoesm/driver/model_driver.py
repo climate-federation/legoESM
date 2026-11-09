@@ -1846,8 +1846,6 @@ def _is_mpas_cell_partitioned(drv) -> bool:
     * :meth:`ModelDriver._create_diagnostics` — give the collector the GLOBAL
       mesh + globally-gathered ``fx`` fields;
     * :meth:`ModelDriver._feed_mpas_cmip_accumulators` — route to the gather;
-    * :meth:`ModelDriver.save_checkpoint` / :meth:`ModelDriver._run_column` — do
-      NOT persist or resume the rank-local per-cell CMOR flux sums.
 
     A module function rather than a method so the diagnostic-feed test doubles
     (plain ``SimpleNamespace`` stand-ins) evaluate it identically to the real
@@ -8095,6 +8093,7 @@ class ModelDriver:
             # each gather (collective); non-root ranks then bail before I/O.
             _land_ml_save = None      # set to the GLOBAL gather under MPI
             _skin_save = None         # ditto for the prognostic ice skin
+            _facc_save = None         # ditto for the CMOR flux interval sums
             if self._voronoi_layout is not None:
                 from legoesm.parallel.voronoi_mpi import gather_voronoi_field
                 part = self._voronoi_layout.partition
@@ -8220,6 +8219,24 @@ class ModelDriver:
                              gather_voronoi_field(jnp.asarray(_v).reshape(-1),
                                                   part, "cell"))
                         for _k, _v in sorted(_lw_save.items())}
+                # Partial CMOR flux interval (#1353, #2171): per-cell sums
+                # gather like the R-ex payload.  The key set is the same on
+                # every rank (every rank steps the same window, and a staged
+                # payload comes from the one checkpoint every rank loaded),
+                # iterated SORTED so the collectives line up.
+                _facc_live = getattr(self, "_mpas_sfc_accum", None)
+                if _facc_live is not None and _facc_live.has_samples():
+                    _facc_src = _facc_live.dump()
+                elif isinstance(self._carry_aux, dict):
+                    _facc_src = {k: v for k, v in self._carry_aux.items()
+                                 if k.startswith("cmor_flux")}
+                else:
+                    _facc_src = {}
+                # Scalars (counts, window identity) stay NumPy: a JAX round
+                # trip with x64 off rounds the start day past the resume
+                # tolerance and the next link would discard the window.
+                _facc_save = {k: (v if np.ndim(v) == 0 else _g_rex(v))
+                              for k, v in sorted(_facc_src.items())}
                 if self._mpi_rank != 0:
                     return
             else:
@@ -8382,25 +8399,15 @@ class ModelDriver:
             # payload from _carry_aux so a no-step re-save cannot strip the
             # partial interval (same rule as the ice skin above).
             #
-            # NOT persisted under a MULTI-rank cell partition: the sums are
-            # per-LOCAL-cell ``(n_local_cells,)`` and are NOT gathered, while
-            # everything else in this checkpoint is global and only rank 0
-            # writes it.  Persisting them would hand every rank of the next
-            # link RANK 0's cells attributed to its own — and because RCB
-            # partitions are near-equal, ``n_local_cells`` often MATCHES, so
-            # the shape guard would pass and the fluxes would be silently
-            # scrambled.  Dropping costs at most ONE partial diagnostic
-            # interval of flux samples per restart, which the reset below
-            # already treats as an accepted, bounded loss.
+            # Under a Voronoi layout (any rank count) the per-cell sums were
+            # gathered to GLOBAL above with the other collectives (#2171);
+            # the rank-local arrays must never be written directly — with
+            # near-equal RCB partitions their length often matches another
+            # rank's, so a shape guard could not catch the scramble.
             _facc = getattr(self, "_mpas_sfc_accum", None)
-            if _is_mpas_cell_partitioned(self):
-                if _facc is not None and _facc.has_samples():
-                    logger.warning(
-                        "  CMOR flux accumulator: NOT persisted (%d-rank cell "
-                        "partition — the per-cell sums are rank-local and "
-                        "ungathered). The next link restarts this diagnostic "
-                        "interval; at most one interval of flux samples is "
-                        "lost.", getattr(self, "_mpi_world_size", 1))
+            if _facc_save is not None:
+                _save.update({_k: np.asarray(_v)
+                              for _k, _v in _facc_save.items()})
             elif _facc is not None and _facc.has_samples():
                 _save.update(_facc.dump())
             elif isinstance(self._carry_aux, dict):
@@ -9604,7 +9611,16 @@ class ModelDriver:
             self._mpas_sfc_accum = None
             for _k in d.files:
                 if _k in _flux_keys:
-                    self._carry_aux[_k] = np.asarray(d[_k])
+                    _a = np.asarray(d[_k])
+                    if _mpi and _a.ndim >= 1:
+                        if _a.shape != (part.nCells_global,):
+                            raise ValueError(
+                                f"MPAS checkpoint {path.name} {_k} shape "
+                                f"{_a.shape} != global mesh "
+                                f"({part.nCells_global},)")
+                        _a = np.asarray(scatter_to_local(
+                            jnp.asarray(_a), part, "cell"))
+                    self._carry_aux[_k] = _a
                 elif _k.startswith("cmor_flux"):
                     raise ValueError(
                         f"checkpoint has unrecognised CMOR flux key {_k!r} "
@@ -13059,23 +13075,9 @@ class ModelDriver:
         # ``_step_jit``; the eager loop below accumulates the per-step ledger
         # and writes ``budget_ledger_columns.npz`` (per-column schema — a
         # deliberately DIFFERENT filename from the FV lane's global-row
-        # ``budget_ledger.npz``) at the diagnostic cadence.  The
-        # historical refusal (SILENTLY-inert flag -> loud refusal -> now a
-        # working path) is retained below only for MPI, where the per-rank
-        # ledger gather is not yet wired.
-        # NOTE: _mpi_world_size EXISTS-but-is-None on the serial lane, so the
-        # getattr default never applies — the `or 1` covers the None.
-        if (bool(getattr(self.config.output, "budget_ledger", False))
-                and ((getattr(self, "_mpi_world_size", 1) or 1) > 1
-                     or getattr(self, "_voronoi_layout", None) is not None)):
-            raise ValueError(
-                "--budget-ledger on the MPAS lane is serial-only for now "
-                "(#1311): the per-column ledger rides model.step's eager "
-                "side-channel, which the cell-partition MPI step bypasses "
-                "(even at -np 1 — the flag would be SILENTLY inert there, "
-                "the exact #1311 failure mode this refusal exists to "
-                "prevent).  Run the serial lane, or drop the flag."
-            )
+        # ``budget_ledger.npz``) at the diagnostic cadence.  The cell-partition
+        # MPI step publishes the same per-step rows (rank-local); the writer
+        # gathers the owned rows to the global mesh (#2171).
         import time
 
         cfg = self.config
@@ -13163,8 +13165,7 @@ class ModelDriver:
                               window_start_day=START_DAY, dt_s=DT)
             if self._mpas_cmip_feed_on else None)
         if isinstance(self._carry_aux, dict):
-            if (self._mpas_sfc_accum is not None
-                    and not _is_mpas_cell_partitioned(self)):
+            if self._mpas_sfc_accum is not None:
                 _n_res = self._mpas_sfc_accum.restore(
                     self._carry_aux, resume_day=START_DAY, dt_s=DT)
                 if _n_res:
@@ -13172,15 +13173,11 @@ class ModelDriver:
                         "  CMOR flux accumulator: resumed a partial diag "
                         "interval from the checkpoint (%d slots)", _n_res)
             else:
-                # Either the feed is OFF for this run, or this is a MULTI-rank
-                # cell partition — where a staged payload is a GLOBAL-length
-                # (serial-written) or RANK-0-local array that this rank must
-                # never adopt as its own cells.  Either way the checkpoint may
-                # carry a partial interval from a feed-ON link: DROP it.
-                # Forwarding it would let a later link resume samples that
-                # skip this link's steps — a wrong interval mean (codex-5) —
-                # or, multi-rank, attribute one rank's cells to another.
-                # Loud: bounded (one diagnostic interval) but real data loss.
+                # The feed is OFF for this run, but the checkpoint may carry a
+                # partial interval from a feed-ON link: DROP it.  Forwarding
+                # it would let a later link resume samples that skip this
+                # link's steps — a wrong interval mean (codex-5).  Loud:
+                # bounded (one diagnostic interval) but real data loss.
                 _stale_flux = [k for k in self._carry_aux
                                if k.startswith("cmor_flux")]
                 if _stale_flux:
@@ -13189,10 +13186,9 @@ class ModelDriver:
                     logger.warning(
                         "  CMOR flux accumulator: DROPPED a partial diag "
                         "interval staged in the checkpoint — the CMOR feed "
-                        "is OFF on this run (cmip_output/monthly_means off) "
-                        "or this is a multi-rank cell partition (the per-cell "
-                        "sums are rank-local), so those samples cannot be "
-                        "continued consistently across this link.")
+                        "is OFF on this run (cmip_output/monthly_means off), "
+                        "so those samples cannot be continued consistently "
+                        "across this link.")
         # Build MPAS-compatible physics via make_physics (same code path as
         # cubed-sphere/lat-lon).  Includes RRTMGP + Held-Suarez forcing
         # when radiation is configured.
@@ -16162,6 +16158,12 @@ class ModelDriver:
                           if _is_phys_step else _mpi_step_held)
                 self.state, _phys_state = _mstep(
                     self.state, DT, _forcing, _phys_state)
+                if _budget_ledger_on:
+                    _ls = getattr(self.model, "_step_ledger", None)
+                    if _ls is not None:
+                        _led_accum = (_ls if _led_accum is None
+                                      else _led_accum + _ls)
+                        _led_nsteps += 1
             else:
                 _pfn = pick_physics_fn(_use_rad, _is_phys_step, physics_fn,
                                        physics_fn_norad, physics_fn_held)
@@ -16707,15 +16709,13 @@ class ModelDriver:
                 for _ek, _ev in self._mpas_energy_sample(
                         p_s_data, elapsed_day).items():
                     _ts[_ek].append(_ev)
-                # Latest closure the CMOR feed recorded, or NaN before the
-                # first complete diagnostic window.  NaN, never 0: a zero here
-                # reads as "the budget closes", which is the one answer this
-                # series must never invent.
-                _mt = getattr(getattr(self, "diagnostics", None),
-                              "moisture_tracker", None)
-                _ts["moisture_residual"].append(
-                    float(_mt.residual[-1])
-                    if _mt is not None and _mt.residual else float("nan"))
+                # Moisture closure: a NaN placeholder keeps the series aligned
+                # if the guard below breaks first; the CMOR feed further down
+                # records THIS interval's closure and overwrites it (#2171:
+                # reading the tracker here returned the PREVIOUS interval).
+                # NaN, never 0: a zero reads as "the budget closes", which is
+                # the one answer this series must never invent.
+                _ts["moisture_residual"].append(float("nan"))
 
                 # Ice-crystal number telemetry (2026-07-28, century3 day-803
                 # NaN): N_i grew x2/day for 800 days with every CLIMATE
@@ -16766,15 +16766,32 @@ class ModelDriver:
                     if _area_w_led is not None:
                         _area_w_led = np.asarray(
                             _area_w_led, dtype=np.float64).ravel().copy()
+                    if _is_mpas_cell_partitioned(self):
+                        # Owned rows -> global slots (#2171), on every rank
+                        # (collective); the rows and their weights must be the
+                        # same global columns.  Only rank 0 logs and writes.
+                        from legoesm.parallel.voronoi_mpi import (
+                            gather_voronoi_field,
+                        )
+                        _led_part = self._voronoi_layout.partition
+                        _led_rates = np.asarray(gather_voronoi_field(
+                            jnp.asarray(_led_rates), _led_part, "cell"))
+                        if (_area_w_led is not None and _area_w_led.size
+                                == _led_part.n_local_cells):
+                            _area_w_led = np.asarray(gather_voronoi_field(
+                                jnp.asarray(_area_w_led), _led_part, "cell"),
+                                dtype=np.float64)
                     _tot_e = _led_rates.sum(axis=1)[:, 1]     # (ncol,) W/m^2
                     _hot = int(np.argmax(np.abs(_tot_e)))
                     _hot_rows = _led_rates[_hot, :, 1]
                     _hot_row = int(np.argmax(np.abs(_hot_rows)))
-                    logger.info(
-                        "  Ledger: max|column dE/dt|=%.3e W/m^2 at cell %d "
-                        "(top row: %s %.3e; steps=%d)",
-                        _tot_e[_hot], _hot, LEDGER_PROCESSES[_hot_row],
-                        _hot_rows[_hot_row], _led_nsteps)
+                    _led_root = getattr(self, "_mpi_rank", 0) in (0, None)
+                    if _led_root:
+                        logger.info(
+                            "  Ledger: max|column dE/dt|=%.3e W/m^2 at cell "
+                            "%d (top row: %s %.3e; steps=%d)",
+                            _tot_e[_hot], _hot, LEDGER_PROCESSES[_hot_row],
+                            _hot_rows[_hot_row], _led_nsteps)
                     # PER-COLUMN schema, deliberately a DIFFERENT filename
                     # from the FV lane's global-row ``budget_ledger.npz``
                     # (days/rates history): a consumer reading one schema
@@ -16809,7 +16826,7 @@ class ModelDriver:
                             "area_hash48": np.asarray(
                                 _content_hash48(_area_w_led)),
                         }
-                    if self.output_dir is not None:
+                    if _led_root and self.output_dir is not None:
                         np.savez(
                             str(self.output_dir
                                 / "budget_ledger_columns.npz"),
@@ -16819,21 +16836,12 @@ class ModelDriver:
                                 ("water_kg_m2_s", "energy_W_m2")),
                             n_steps=_led_nsteps,
                             day=elapsed_day + START_DAY,
-                            # Rank locality is part of the reduction: under
-                            # cell partitioning these rows would be ONE rank's
-                            # columns, and no weighting makes that a global
-                            # budget.  Today this is always False -- setup
-                            # already REFUSES --budget-ledger whenever the
-                            # world size exceeds one or a Voronoi layout
-                            # exists, which is strictly broader than this
-                            # predicate.  It is stamped anyway because that
-                            # refusal is documented as "serial-only FOR NOW":
-                            # when the ledger gather is wired the artifact
-                            # becomes rank-local, and the reader should refuse
-                            # at that moment rather than print a per-rank
-                            # table as a global one.
-                            cell_partitioned=bool(
-                                _is_mpas_cell_partitioned(self)),
+                            # Rank locality is part of the reduction: a
+                            # file of ONE rank's columns is not a global
+                            # budget, and the reader refuses it.  The rows
+                            # written here are always global (gathered above
+                            # under a cell partition, #2171).
+                            cell_partitioned=False,
                             # The reduction the reader MUST use (#1354).  The
                             # rows are per-column, so a consumer picks the
                             # weighting -- and an unweighted mean is not a
@@ -16888,8 +16896,13 @@ class ModelDriver:
                 # path). This interval feed adds flux means only; state
                 # means were already sampled by the independent hourly hook.
                 if self._mpas_cmip_feed_on:
+                    _mt = getattr(getattr(self, "diagnostics", None),
+                                  "moisture_tracker", None)
+                    _n_mt = len(_mt.residual) if _mt is not None else 0
                     self._feed_mpas_cmip_accumulators(
                         START_DAY + elapsed_day, flux_only=True)
+                    if _mt is not None and len(_mt.residual) > _n_mt:
+                        _ts["moisture_residual"][-1] = float(_mt.residual[-1])
 
             # Coupling window (P5b): sum this step's net surface SW/LW [W/m2,
             # +into surface] and precip [kg/m2/s, +down] as RATES; the step

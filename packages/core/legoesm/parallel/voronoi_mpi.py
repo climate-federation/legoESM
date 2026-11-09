@@ -1178,6 +1178,10 @@ def make_voronoi_mpi_step(
         # ocean/land was forced with zero surface flux (the serial path exported
         # it, the MPI bypass did not).
         sfc_diag = (None, None, None)
+        # Budget-ledger stage references (#1311, #2171): name bindings only;
+        # the snapshots are built at the end iff the physics carried rows.
+        _state_postdyn = state_new
+        _led_phys_rows = None
         if physics_fn is not None:
             # Column-local physics needs no neighbor cells -> skip the exchange.
             state_phys_in = (
@@ -1196,6 +1200,7 @@ def make_voronoi_mpi_step(
                 _pt, phys_state_out = _pr[0], _pr[1]
             else:
                 _pt = _pr
+            _led_phys_rows = getattr(_pt, "ledger_rows", None)
             _sw_sfc = getattr(_pt, "sw_net_sfc", None)
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)
@@ -1245,6 +1250,7 @@ def make_voronoi_mpi_step(
         # finalised first, the clamp conserves against the final p_s exactly.
         # (Owned cells + allreduce — correct under the cell partition, unlike
         # the model's internal fixer which would double-count halo cells.)
+        _state_postphys = state_new
         if config.fix_mass:
             _pre_mf = state_new
             state_new = _fix_mass_mpi(
@@ -1267,6 +1273,7 @@ def make_voronoi_mpi_step(
 
         # Floors: temperature and tracer non-negativity (advection is not
         # positive-definite; clamp before tracers feed saturation).
+        _state_postfix = state_new
         if config.T_min > 0:
             T_clipped = jnp.maximum(state_new.T.data, config.T_min)
             state_new = state_new._replace(
@@ -1316,9 +1323,26 @@ def make_voronoi_mpi_step(
         # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
         # dtype (the exact mass correction is load-bearing). No-op wherever
         # storage == accumulate, i.e. every mode except mixed.
+        # Per-column ledger (#2171): column-local, so the rank's rows equal
+        # the serial rows of its cells (halo rows ride along; the writer
+        # gathers the owned ones).  No filter sits between physics and the
+        # fixer on this lane, so post-physics doubles as pre-fixer.
+        _led_step = None
+        if _led_phys_rows is not None:
+            from legoesm.diagnostics.process_ledger import (
+                step_ledger_from_stages,
+            )
+            _led_step = step_ledger_from_stages(
+                _led_phys_rows,
+                (state, _state_postdyn, _state_postphys, _state_postphys,
+                 _state_postfix, state_new),
+                sigma_coord.dsigma, dt,
+                level_weight=getattr(config, "budget_ledger_level_weight",
+                                     None))
+
         return (finalize_to_storage(
                     cast_pytree(state_new, None, "storage")),
-                phys_state_out, sfc_diag)
+                phys_state_out, sfc_diag, _led_step)
 
     logger.info(
         "Voronoi MPI step ready: rank=%d/%d, %d owned cells, %d local cells",
@@ -1340,7 +1364,11 @@ def make_voronoi_mpi_step(
             refuse_unthreaded_stateful_physics(
                 physics_fn, phys_state,
                 where="make_voronoi_mpi_step(return_phys_state=True)")
-            _state_out, _phys_out, _sfc = _step(state, dt, forcing, phys_state)
+            _state_out, _phys_out, _sfc, _led = _step(
+                state, dt, forcing, phys_state)
+            # Same eager-only side channel as the serial model (gh-417).
+            if _led is None or not isinstance(_led, jax.core.Tracer):
+                model._step_ledger = _led
             # Publish the surface-flux diagnostic on the model so ``_run_column``
             # stashes it into ``_carry_aux`` for the coupler — the coupled
             # MPI-voronoi path otherwise forced the ocean/land with zero surface
