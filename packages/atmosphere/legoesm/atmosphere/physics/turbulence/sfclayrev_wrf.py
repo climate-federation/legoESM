@@ -332,7 +332,7 @@ def sfclayrev_run(u1, v1, t1, qv1, p1, dz1, psfc, tsk, xland, mavail, pblh, dx,
     PBL height [m], grid spacing [m]; and the carried ``state``.  Constants are
     legoesm.constants (vote X15).
     """
-    cp, g, r, xlv = constants.c_pd, constants.g, constants.R_d, constants.L_v
+    cp, g, r, xlv = constants.c_pd, constants.g, constants.R_d, constants.L_v  # latent-ok: WRF sfclayrev oracle constant
     rovcp = constants.R_d / constants.c_pd
     karman = constants.kappa_von_karman
     ep1 = constants.R_v / constants.R_d - 1.0

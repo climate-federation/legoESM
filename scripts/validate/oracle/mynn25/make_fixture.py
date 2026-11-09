@@ -67,7 +67,7 @@ def write_constants(path):
     module_model_constants), legoESM values; the three saturation-pressure
     coefficients svp1-3 are USEd but never referenced by MYNN-EDMF."""
     vals = dict(karman=C.kappa_von_karman, g=C.g, p1000mb=C.p_ref, cp=C.c_pd, r_d=C.R_d,
-                r_v=C.R_v, rcp=C.R_d / C.c_pd, xlv=C.L_v, xlf=C.L_f, xls=C.L_s,
+                r_v=C.R_v, rcp=C.R_d / C.c_pd, xlv=C.L_v, xlf=C.L_f, xls=C.L_s,  # latent-ok: WRF MYNN oracle constant
                 svp1=0.0, svp2=0.0, svp3=0.0, p608=C.R_v / C.R_d - 1.0,
                 ep_2=C.R_d / C.R_v, rvovrd=C.R_v / C.R_d, cpv=C.c_pv, cliq=C.c_pw,
                 cice=C.c_pi, svpt0=C.T_freeze)

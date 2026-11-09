@@ -21,7 +21,9 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
+from legoesm.thermo import latent_heat_sublimation, latent_heat_vaporization
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    drain_l_over_cp,
     hard_saturation_drain,
     mixed_phase_l_over_cp,
     mixed_phase_liquid_fraction,
@@ -66,9 +68,9 @@ class TestBlend:
 
     def test_latent_heat_endpoints(self):
         assert float(mixed_phase_l_over_cp(jnp.asarray([200.0]))[0]) == \
-            pytest.approx(constants.L_s / constants.c_pd)
+            pytest.approx(float(latent_heat_sublimation(200.0)) / constants.c_pd)
         assert float(mixed_phase_l_over_cp(jnp.asarray([285.0]))[0]) == \
-            pytest.approx(constants.L_v / constants.c_pd)
+            pytest.approx(float(latent_heat_vaporization(285.0)) / constants.c_pd)
 
 
 class TestDrain:
@@ -170,13 +172,13 @@ class TestDrain:
             assert dT_actual == pytest.approx(cap_K, rel=1e-9), (T_val, dT_actual)
 
     def test_liquid_heating_cap_unchanged(self):
-        """Warm liquid pool still caps ACTUAL heating at exactly L_v/c_pd*dq."""
+        """Warm liquid pool still caps ACTUAL heating at exactly L_v(T)/c_pd*dq."""
         cap_K = 5.0
         T = jnp.full((1, 1), 295.0)
         p = jnp.full((1, 1), 90000.0)
         q_v = jnp.full((1, 1), 0.08)  # huge pool -> cap binds
         rate = hard_saturation_drain(T, q_v, p, DT, 1.1, cap_K)
-        dT_actual = float((constants.L_v / constants.c_pd) * rate[0, 0] * DT)
+        dT_actual = float(drain_l_over_cp(T, False)[0, 0] * rate[0, 0] * DT)
         assert dT_actual == pytest.approx(cap_K, rel=1e-9), dT_actual
 
 
@@ -239,10 +241,11 @@ class TestPoststep:
         # T, q_v, q_c, dq all identical to the liquid path (skip the None q_i).
         for a, b in zip(ice[:3] + ice[4:], liq[:3] + liq[4:]):
             np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
-        # Enthalpy is the LIQUID invariant (L_v), not the blended one.
+        # Enthalpy is the LIQUID invariant (L_v(T0)), not the blended one.
+        l_cp = drain_l_over_cp(T, False)
         np.testing.assert_allclose(
-            np.asarray(ice[0] + (constants.L_v / constants.c_pd) * ice[1]),
-            np.asarray(T + (constants.L_v / constants.c_pd) * q_v), rtol=1e-12)
+            np.asarray(ice[0] + l_cp * ice[1]),
+            np.asarray(T + l_cp * q_v), rtol=1e-12)
         # At cold TTL with no reservoir the liquid drain correctly does nothing
         # (q_v is ice-supersaturated but liquid-SUBsaturated) -- no spurious
         # supercooled-liquid deposition.
@@ -262,7 +265,7 @@ class TestPoststep:
         assert qi2 is None
         np.testing.assert_allclose(
             np.asarray(T2), np.asarray(
-                T + (constants.L_v / constants.c_pd) * dq))
+                T + drain_l_over_cp(T, False) * dq))
 
 
 def _ice_curve_cfg(**overrides):
