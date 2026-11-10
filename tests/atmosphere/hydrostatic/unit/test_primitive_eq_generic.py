@@ -517,9 +517,10 @@ def _mpas_fn(kind, form="sb81_theta"):
 
 
 @pytest.mark.parametrize("grid_kind", ["latlon", "mpas"])
-def test_default_vertical_form_is_as83(grid_kind):
-    """No ``vertical_form`` = ``"as83"`` bit-for-bit; on sigma the default raises
-    (no silent fallback to ``"sb81_theta"``)."""
+def test_no_form_reads_the_config_form(grid_kind):
+    """No ``vertical_form`` = the config's own form, bit-for-bit: sb81_theta from
+    an sb81_theta config (not the old as83 default: the two differ), legacy from
+    a default config, which therefore also runs on sigma."""
     from legoesm.atmosphere.dynamics.gcm import primitive_eq_generic as g
     if grid_kind == "latlon":
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
@@ -528,22 +529,28 @@ def test_default_vertical_form_is_as83(grid_kind):
         grid, cfg = _ll_grid(), CGridLatLonPrimitiveEquationConfig(use_ppm_transport=False)
         s0 = _ll_state(grid)
 
-        def run(coord, **kw):
-            return g.cgrid_latlon_pe_tendencies(s0, grid, coord, cfg, dt=600.0, **kw)[:3]
+        def run(coord, c, **kw):
+            return g.cgrid_latlon_pe_tendencies(s0, grid, coord, c, dt=600.0, **kw)[:3]
     else:
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
         mesh, cfg = _mesh(), MPASPrimitiveEquationConfig()
         s0 = _mpas_state(mesh)
 
-        def run(coord, **kw):
-            t = g.mpas_pe_tendencies(s0, mesh, coord, cfg, dt=600.0, **kw)
+        def run(coord, c, **kw):
+            t = g.mpas_pe_tendencies(s0, mesh, coord, c, dt=600.0, **kw)
             return t.du_dt.data, t.dT_dt.data, t.dp_s_dt.data
-    assert g.DEFAULT_VERTICAL_FORM == "as83"
-    for a, b in zip(jax.tree_util.tree_leaves(run(_coord("hybrid"))),
-                    jax.tree_util.tree_leaves(run(_coord("hybrid"), vertical_form="as83"))):
-        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
-    with pytest.raises(ValueError, match="hybrid coordinate"):
-        run(_coord("sigma"))
+
+    def same(a, b):
+        for x, y in zip(jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b)):
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+    hyb = _coord("hybrid")
+    sb = cfg._replace(vertical_form="sb81_theta")
+    same(run(hyb, sb), run(hyb, sb, vertical_form="sb81_theta"))
+    assert _rel(run(hyb, sb)[1], run(hyb, sb, vertical_form="as83")[1]) > 1e-6
+    assert cfg.vertical_form == "legacy"
+    same(run(hyb, cfg), run(hyb, cfg, vertical_form="legacy"))
+    same(run(_coord("sigma"), cfg), run(_coord("sigma"), cfg, vertical_form="legacy"))
 
 
 _KIND_FORM = [("sigma", "sb81_theta"), ("hybrid", "sb81_theta"),

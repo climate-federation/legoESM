@@ -71,7 +71,8 @@ def _reference_and_split(n_dev=6, subdivision=6, nlev=4, stencil_depth=2,
     # dependence -- a bug, not a tolerance.
     dep_c, dep_e = _build_rim_rings_by_dependency(
         partial(mpas_pe_tendencies, vertical_form=form), sigma, cfg, dt, mesh, partitions,
-        max_lc, max_le)
+        max_lc, max_le,
+        probe_sigma=None if form in ("legacy", "sb81_theta") else standard_hybrid_levels(4))
     for d in range(n_dev):
         struct_c = cell_rim[d] != _WIDE_RING_FAR
         struct_e = edge_rim[d] != _WIDE_RING_FAR

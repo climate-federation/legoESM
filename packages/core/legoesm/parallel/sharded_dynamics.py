@@ -2805,9 +2805,13 @@ def _build_rim_rings_structural(global_mesh, partitions, max_lc, max_le,
 def _build_rim_rings_by_dependency(
     tendency_fn, sigma, cfg, dt,
     global_mesh, partitions, max_lc, max_le,
-    *, n_probe_nlev=4, n_draws=3, seed=0,
+    *, n_probe_nlev=4, n_draws=3, seed=0, probe_sigma=None,
 ):
     """Rim membership by DATA DEPENDENCY, not by a graph-hop heuristic.
+
+    ``probe_sigma``: the probe column's vertical coordinate (its level count
+    replaces ``n_probe_nlev``); ``None`` = a sigma coordinate, as before.  A
+    hybrid one is needed for RHS forms that refuse sigma.
 
     Returns ``(cell_rim, edge_rim)`` with the SAME shape/sentinel contract as
     :func:`_build_rim_rings` (``1`` = rim, ``_WIDE_RING_FAR`` = interior), so
@@ -2841,8 +2845,12 @@ def _build_rim_rings_by_dependency(
     # The rim is a TOPOLOGY property, independent of the vertical resolution,
     # so probe with a cheap column and its OWN matching sigma rather than the
     # run's (whose level count is unrelated and would mismatch the buffers).
-    nlev = int(n_probe_nlev)
-    sigma = create_sigma_coordinate(nlev)
+    if probe_sigma is None:
+        nlev = int(n_probe_nlev)
+        sigma = create_sigma_coordinate(nlev)
+    else:
+        sigma = probe_sigma
+        nlev = len(sigma.dsigma)
     rng = np.random.default_rng(seed)
 
     def _state(u, T, ps, phis):
