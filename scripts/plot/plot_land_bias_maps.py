@@ -46,10 +46,19 @@ def main():
     ap.add_argument("--bulk", default="most")
     ap.add_argument("--days", type=int, default=4)
     ap.add_argument("--out", default="/tmp/land_bias_maps.png")
-    ap.add_argument("--tier", choices=["multilayer", "slab"], default="multilayer",
+    ap.add_argument("--tier", choices=["multilayer", "slab", "two_leaf"],
+                    default="multilayer",
                     help="which calibrator's forward/params the JSON belongs to")
+    ap.add_argument("--amip-config", default=None, help="two_leaf: resolved AMIP config")
+    ap.add_argument("--modis-albedo", default=None, help="two_leaf: MODIS band albedo")
+    ap.add_argument("--cover-year", type=float, default=None, help="two_leaf: cover year")
+    ap.add_argument("--train-log", default=None,
+                    help="two_leaf: training log; its loss curve goes to <out>_loss.png")
     args = ap.parse_args()
 
+    if args.tier == "two_leaf":
+        _two_leaf(args)
+        return
     if args.tier == "slab":
         data = S.load_training_data(args.npz, 100000)             # all land cells
         cp_init = dict(S.constrain(S.init_raw_params()))
@@ -120,6 +129,65 @@ def main():
             plt.colorbar(pc, ax=ax[r, c], fraction=0.03)
     plt.tight_layout(); plt.savefig(args.out, dpi=110)
     print(f"# bias maps -> {args.out}")
+
+
+def _two_leaf(args):
+    """Production (no canopy band albedo, scalar leaf emissivity) vs calibrated on
+    every land cell: skin-T vs ERA5 and snow-free VIS / NIR albedo vs MODIS."""
+    M._SURFACE_SCHEME = "two_leaf"
+    data = M.load_training_data(args.npz, 100000, 0, args.days)
+    data = M.attach_two_leaf(data, args.amip_config, args.modis_albedo, args.cover_year)
+    cal = {k: jnp.asarray(v) for k, v in json.load(open(args.calibrated)).items()}
+    eb = M.tl_per_pft_errors(None, data)
+    ea = M.tl_per_pft_errors(cal, data)
+    w = np.asarray(data["w"])
+    print(f"# all {int(data['lat'].shape[0])} land cells: skin-T RMSE of the annual bias "
+          f"{_wrms(eb['t_bias_cell'], w):.3f} -> {_wrms(ea['t_bias_cell'], w):.3f} K")
+    D = np.load(args.npz)
+    lat1, lon1 = D["lat"], D["lon"]
+    latc = np.rad2deg(np.asarray(data["lat"])); lonc = np.asarray(data["lon"])
+    iy = np.abs(lat1[None, :] - latc[:, None]).argmin(1)
+    ix = np.abs(((lon1[None, :] - lonc[:, None] + 180.0) % 360.0) - 180.0).argmin(1)
+    order = np.argsort(np.where(lon1 > 180.0, lon1 - 360.0, lon1))
+    lon_plot = np.where(lon1 > 180.0, lon1 - 360.0, lon1)[order]
+
+    def to_grid(v):
+        g = np.full((lat1.size, lon1.size), np.nan)
+        g[iy, ix] = v
+        return g[:, order]
+
+    rows = [("skin-T bias vs ERA5 [K]", "t_bias_cell", 8.0),
+            ("VIS albedo bias vs MODIS", "vis_bias_cell", 0.1),
+            ("NIR albedo bias vs MODIS", "nir_bias_cell", 0.15)]
+    fig, ax = plt.subplots(3, 3, figsize=(16, 10.5))
+    for r, (name, key, lim) in enumerate(rows):
+        bi, bc = eb[key], ea[key]
+        gain = np.abs(bi) - np.abs(bc)
+        glim = np.nanpercentile(np.abs(gain), 98) or lim
+        for c, (ttl, v, vl, cm) in enumerate(
+                [("production", bi, lim, "RdBu_r"), ("calibrated", bc, lim, "RdBu_r"),
+                 ("|bias| reduced", gain, glim, "PuOr")]):
+            pc = ax[r, c].pcolormesh(lon_plot, lat1, to_grid(v), cmap=cm,
+                                     vmin=-vl, vmax=vl, shading="nearest")
+            ax[r, c].set_title(f"{name}: {ttl}", fontsize=9)
+            ax[r, c].set_xlim(-180, 180); ax[r, c].set_ylim(-90, 90)
+            plt.colorbar(pc, ax=ax[r, c], fraction=0.03)
+    plt.tight_layout(); plt.savefig(args.out, dpi=110)
+    print(f"# bias maps -> {args.out}")
+    if args.train_log:
+        import re
+        it, loss = [], []
+        for line in open(args.train_log):
+            m = re.match(r"# it\s+(\d+) loss ([0-9.eE+-]+)", line)
+            if m:
+                it.append(int(m.group(1))); loss.append(float(m.group(2)))
+        plt.figure(figsize=(6, 4))
+        plt.plot(it, loss, color="#0072B2", marker="o", ms=3)
+        plt.xlabel("iteration"); plt.ylabel("training loss (full training set)")
+        plt.yscale("log"); plt.grid(alpha=0.3); plt.tight_layout()
+        out = args.out.rsplit(".", 1)[0] + "_loss.png"
+        plt.savefig(out, dpi=110)
+        print(f"# loss curve -> {out}")
 
 
 if __name__ == "__main__":

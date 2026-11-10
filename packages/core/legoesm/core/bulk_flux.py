@@ -314,7 +314,8 @@ def validate_stability_scheme(stability_scheme: str) -> None:
 
 
 def large_yeager_neutral_cd(
-    wind, *, nemo_parity: bool = False, nemo_source_exact: bool = False
+    wind, *, nemo_parity: bool = False, nemo_source_exact: bool = False,
+    cd_cutoff_width: float | None = None,
 ):
     """Large & Yeager (2009) Eq. 6 neutral 10-m drag coefficient ``C_DN``.
 
@@ -330,13 +331,15 @@ def large_yeager_neutral_cd(
     winds.  The canonical drag law shared by the MOST flux solver and the OMIP-2
     air-sea bulk formulas (no per-component re-derivation).
 
-    ``nemo_parity=True`` reproduces NEMO/aerobulk ``cd_n10_ncar`` EXACTLY
-    (sbcblk_algo_ncar.F90): the same polynomial, but (a) a constant cyclone
-    plateau ``2.34e-3`` for ``U >= 33 m/s`` instead of letting the ``U⁶`` term
-    pull the polynomial down, and (b) ONLY the NEMO floor ``Cx_min = 1e-4`` —
+    ``nemo_parity=True`` reproduces NEMO/aerobulk ``cd_n10_ncar``
+    (sbcblk_algo_ncar.F90) at ``cd_cutoff_width=0``: the same polynomial, but
+    (a) a constant cyclone plateau ``2.34e-3`` for ``U >= 33 m/s`` instead of
+    letting the ``U⁶`` term pull the polynomial down (RULE 5 default: blended
+    into the plateau over [32.5, 33] m/s, KNOWN DIFFERENCE up to 7.2e-4
+    relative at 32.9 m/s, #2241), and (b) ONLY the NEMO floor ``Cx_min = 1e-4`` —
     no upper clip, so the calm-wind ``2.7/U`` enhancement (up to ``5.54e-3``
     at the 0.5 m/s floor) is kept.  The two conventions differ only for
-    ``U < ~0.97 m/s`` (where the 3.0e-3 clip binds) and ``U > 33 m/s``.
+    ``U < ~0.97 m/s`` (where the 3.0e-3 clip binds) and ``U > 32.5 m/s``.
 
     ``nemo_parity=True`` applies NO wind floor: NEMO's ``cd_n10_ncar``
     (sbcblk_algo_ncar.F90:242-255) has none, and its caller ``turb_ncar``
@@ -346,6 +349,12 @@ def large_yeager_neutral_cd(
     ORCA1 audit BLK D1: Cd 86% off on 67 cells).  Callers passing
     ``nemo_parity=True`` MUST therefore supply a positive, already-floored
     wind (both ``ncar_transfer_coefficients`` call sites do).
+
+    ``cd_cutoff_width`` (``nemo_parity=True`` only; ``None`` =
+    ``NCAR_CD_CUTOFF_WIDTH``): RULE 5 width [m/s] of the one-sided quintic
+    blend into the 33 m/s plateau, shared with :func:`_cd_n10_ncar` (#2241);
+    ``0.0`` is NEMO's hard switch.  ``nemo_source_exact=True`` keeps the hard
+    switch: that branch exists to reproduce NEMO's rounding bit for bit.
     """
     if nemo_source_exact:
         if not nemo_parity:
@@ -370,14 +379,13 @@ def large_yeager_neutral_cd(
         return R(jnp.maximum(C_DN, 0.1e-3))
 
     U = jnp.asarray(wind)
-    if not nemo_parity:
-        U = jnp.maximum(U, 0.5)
+    if nemo_parity:
+        return _cd_n10_ncar(
+            U, NCAR_CD_CUTOFF_WIDTH if cd_cutoff_width is None else cd_cutoff_width)
+    U = jnp.maximum(U, 0.5)
     C_DN = (
         2.7 / U + 0.142 + U / 13.09 - 3.14807e-10 * U ** 6
     ) * 1e-3
-    if nemo_parity:
-        C_DN = jnp.where(U >= 33.0, 2.34e-3, C_DN)
-        return jnp.maximum(C_DN, 0.1e-3)
     return jnp.clip(C_DN, 0.5e-3, 3.0e-3)
 
 
@@ -2391,14 +2399,26 @@ class NemoSI3IceTurbulent(NamedTuple):
     dqla_ice: jax.Array
 
 
-def nemo_si3_ice_turbulent(ptsu, pslp, rhoa, wndm_ice, Ch_ice, Ce_ice, theta_zu_i, q_zu_i):
+def nemo_si3_ice_turbulent(
+    ptsu, pslp, rhoa, wndm_ice, Ch_ice, Ce_ice, theta_zu_i, q_zu_i, goff_floor_width_K=0.0,
+):
     """``blk_ice_2`` saturation and turbulent statements (``sbcblk.f90:1224-1225,1246-1256``).
 
     Elementwise; a category axis is carried by broadcasting the caller's arrays.
+    ``goff_floor_width_K > 0`` smooths the 180 K saturation floor; 0 is NEMO's source order.
     """
-    from legoesm.thermo import nemo_si3_dq_sat_dt_ice, nemo_si3_q_sat_ice, nemo_theta_exner
+    from legoesm.thermo import (
+        nemo_si3_dq_sat_dt_ice,
+        nemo_si3_q_sat_ice,
+        nemo_si3_saturation_over_ice,
+        nemo_theta_exner,
+    )
 
-    zsq = nemo_si3_q_sat_ice(ptsu, pslp)                                        # :1224
+    if goff_floor_width_K > 0.0:
+        zsq, dq_sat = nemo_si3_saturation_over_ice(ptsu, pslp, goff_floor_width_K)
+    else:
+        zsq = nemo_si3_q_sat_ice(ptsu, pslp)                                    # :1224
+        dq_sat = nemo_si3_dq_sat_dt_ice(ptsu, pslp)
     zsipt = nemo_theta_exner(ptsu, pslp)                                        # :1225
     zzblk = sr(rhoa * wndm_ice)                                                 # :1246
     zztmp1 = sr(sr(zzblk * constants.c_p_air_ice_nemo) * Ch_ice)                # :1249
@@ -2406,7 +2426,6 @@ def nemo_si3_ice_turbulent(ptsu, pslp, rhoa, wndm_ice, Ch_ice, Ce_ice, theta_zu_
     z_dqsb = zztmp1                                                             # :1251
     zztmp1 = sr(sr(zzblk * constants.L_sub_nemo) * Ce_ice)                      # :1254
     qla = sr(zztmp1 * sr(zsq - q_zu_i))                                         # :1255
-    dq_sat = nemo_si3_dq_sat_dt_ice(ptsu, pslp)
     dqla = sr(zztmp1 * dq_sat)                                                  # :1256
     return NemoSI3IceTurbulent(zsq=zsq, zsipt=zsipt, dq_sat=dq_sat, z_qsb=z_qsb, z_dqsb=z_dqsb, qla_ice=qla, dqla_ice=dqla)
 

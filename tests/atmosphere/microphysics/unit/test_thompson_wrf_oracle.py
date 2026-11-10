@@ -78,7 +78,8 @@ def _step(fx, tag, dt, jit=False):
     from legoesm.atmosphere.physics.microphysics.thompson_wrf import thompson_wrf_step
 
     def f(*a):
-        return thompson_wrf_step(*a, float(dt), n_sed_max=_n_sed_max())
+        return thompson_wrf_step(*a, float(dt), n_sed_max=_n_sed_max(),
+                                 cloud_sed_to_rain=False)
     return (jax.jit(f) if jit else f)(*_inputs(fx, tag))
 
 
@@ -164,6 +165,16 @@ def test_fixture_exercises_the_scheme():
     assert neg.sum() == 2 and np.all(fx["cols_dt300_out_qv"][dry][neg] > 0.0)
     for v in ("qcten", "qiten", "qrten", "qsten", "qgten", "nrten", "niten"):
         assert np.count_nonzero(fx[f"cols_dt300_ten_{v}"]) > 20, v
+    # Thompson's own saturation adjustment is exercised: the ice and snow sets
+    # each hold inputs >5% supersaturated over water (margin over the <1% gap
+    # between the Tetens curve here and WRF's own) where the oracle condenses
+    # cloud water (votes V2b, V5a).
+    from legoesm.thermo import saturation_mixing_ratio
+    for tag in ("ice", "snow"):
+        q_sat = np.asarray(saturation_mixing_ratio(
+            jnp.asarray(fx[f"{tag}_in_T"]), jnp.asarray(fx[f"{tag}_in_p"])))
+        ss = fx[f"{tag}_in_qv"] > 1.05 * q_sat
+        assert np.count_nonzero(ss & (fx[f"{tag}_dt300_ten_qcten"] > 0.0)) >= 1, tag
 
 
 # Entries where XLA's fused arithmetic (jit) leaves eager by more than TOL, as
@@ -217,13 +228,15 @@ def test_sedimentation_overflow_is_an_error():
     need = int(np.asarray(ok.nstep_required).max())
     assert need > 1
     with pytest.raises(eqx.EquinoxRuntimeError, match="more sub-steps"):
-        thompson_wrf_step(*_inputs(fx, "cols"), 300.0, n_sed_max=need - 1)
+        thompson_wrf_step(*_inputs(fx, "cols"), 300.0, n_sed_max=need - 1,
+                          cloud_sed_to_rain=False)
     # under jit equinox's runtime error surfaces as a JaxRuntimeError
     with pytest.raises((eqx.EquinoxRuntimeError, jax.errors.JaxRuntimeError),
                        match="more sub-steps"):
         jax.block_until_ready(jax.jit(
-            lambda *a: thompson_wrf_step(*a, 300.0, n_sed_max=need - 1))(*_inputs(fx, "cols")))
-    at_max = thompson_wrf_step(*_inputs(fx, "cols"), 300.0, n_sed_max=need)
+            lambda *a: thompson_wrf_step(*a, 300.0, n_sed_max=need - 1,
+                                         cloud_sed_to_rain=False))(*_inputs(fx, "cols")))
+    at_max = thompson_wrf_step(*_inputs(fx, "cols"), 300.0, n_sed_max=need, cloud_sed_to_rain=False)
     assert float(_rel(at_max.T, ok.T).max()) == 0.0
 
 
@@ -254,7 +267,8 @@ for name, tag, dt in (("cols300", "cols", 300.0), ("cols60", "cols", 60.0),
     args = [jnp.asarray(a[v], dtype=dtype) for v in FIN]
     def loss(T, qv, qc, qi, qr, qs, qg, ni, nr):
         o = thompson_wrf_step(T, args[1], args[2], args[3], qv, qc, qi, qr, qs, qg,
-                              ni, nr, dt, n_sed_max=MorrisonConfig().sed_cfl_substeps_max)
+                              ni, nr, dt, n_sed_max=MorrisonConfig().sed_cfl_substeps_max,
+                              cloud_sed_to_rain=False)
         return (jnp.sum(o.T) + 1.0e3 * jnp.sum(o.qv + o.qc + o.qi + o.qr + o.qs + o.qg)
                 + 1.0e-6 * jnp.sum(o.ni + o.nr) + jnp.sum(o.pptrain + o.pptsnow
                                                          + o.pptgraul + o.pptice))

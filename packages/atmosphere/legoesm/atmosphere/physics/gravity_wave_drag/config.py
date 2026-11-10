@@ -102,8 +102,9 @@ __param_spec__ = {
     "E3SMOrographicConfig": {
         "scheme_key": "atm.gwd.E3SMOrographicConfig",
         "excluded": {
-            "oro_min_wind": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "oro_min_wind": "E3SM orovmin launch threshold, held at the oracle value; with oro_wind_ramp_width > 0 the drag is smooth in it, but it is a protocol constant, not a trained closure",
             "oro_min_h": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "oro_wind_ramp_width": "numerics: smooth-switch width of the U > oro_min_wind launch gate (RULE 5, #2241), same value as LindzenConfig",
             "sgh_default": "default subgrid-orography stddev (default 0 = no oro waves); a per-column boundary input supplied by the dataset, not a trained scalar",
         },
         "params": {
@@ -159,7 +160,7 @@ __param_spec__ = {
             "crit_level_floor": "signed source-projected wind U_proj (NOT a wind magnitude) at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "min_wind_sharpness": "sigmoid sharpness of the smooth min-wind activation; a differentiability/smoothing width, not a closure",
-            "softmin_sharpness": "p of the p-norm smooth min of the saturation cap min(taudmp, tausat); a differentiability/smoothing width, not a closure",
+            "softmin_sharpness": "p of the p-norm smooth min of the saturation cap min(taudmp, tausat) and of the umcfac / tndmax tendency limiters; a differentiability/smoothing width, not a closure",
         },
         "params": {
             # --- orographic launch amplitude / efficiency ---
@@ -332,7 +333,8 @@ class McFarlaneConfig(NamedTuple):
         Exponent p of the p-norm smooth min (default 50.0): the smooth form
         of CAM's ``tau = min(taudmp, tausat)``,
         ``(taudmp^-p + tausat^-p)^(-1/p)`` (the Lindzen form, #2241); never
-        above either stress, exact ``min`` as p -> inf.
+        above either stress, exact ``min`` as p -> inf.  The same p smooths
+        the ``umcfac`` and ``tndmax`` tendency limiters (#2241).
     fcrit2 : float
         Critical Froude number squared (default 1.0, CAM ``fcrit2``).  Used in
         the McFarlane (1987) / E3SM ``gw_oro_src`` displacement-height cap
@@ -521,10 +523,16 @@ class E3SMOrographicConfig(NamedTuple):
     oro_min_wind : float
         Minimum source-level wind for orographic waves [m/s]
         (``orovmin`` in oracle, default 2).
+    oro_wind_ramp_width : float
+        Width [m/s] of the smooth ``U > oro_min_wind`` launch gate (default
+        0.5, RULE 5, #2241; the LindzenConfig form): launch stress times
+        ``smoothstep_quintic((U - oro_min_wind)/w)``.  ``0.0`` is E3SM's hard
+        gate.  The mountain-height gate stays hard (static orography).
     """
     sgh_default: float = 0.0
     oro_min_h: float = 10.0
     oro_min_wind: float = 2.0
+    oro_wind_ramp_width: float = 0.5
 
 
 class E3SMFrontalConfig(NamedTuple):

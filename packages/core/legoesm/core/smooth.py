@@ -213,6 +213,26 @@ def min_c1(a: jax.Array, b: jax.Array, sharpness: float) -> jax.Array:
     return -max_c1(-a, -b, sharpness)
 
 
+@jax.custom_jvp
+def straight_through(hard: jax.Array, soft: jax.Array) -> jax.Array:
+    """Forward value ``hard`` EXACTLY, derivative of ``soft`` (straight-through estimator).
+
+    A ``custom_jvp``: the primal is ``hard`` itself, so ``soft`` is dead code in
+    the forward pass and the compiled forward is the hard one bit for bit,
+    under jit too.  (The arithmetic form ``hard - (sg(soft) - soft)`` is exact
+    eagerly, but under jit on CPU it was measured to differ from ``hard`` at the
+    smallest subnormal snow depth and in the sign of zero downstream, and it
+    propagates a NaN ``soft`` into the forward value.)  The tangent is that of
+    ``soft``; ``hard`` carries none.
+    """
+    return hard
+
+
+@straight_through.defjvp
+def _straight_through_jvp(primals, tangents):
+    return primals[0], tangents[1]
+
+
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
     """Smooth approximation to |x|.
 

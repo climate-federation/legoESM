@@ -42,7 +42,7 @@ from legoesm.core.bulk_flux import (
     validate_bulk_scheme,
 )
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
-from legoesm.core.smooth import max_c1, min_c1, smoothstep_cubic
+from legoesm.core.smooth import max_c1, min_c1
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.latlon import LatLonCGridGeometry, LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh
@@ -92,54 +92,6 @@ from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
 
 # Historical helper default: convergence only unless the caller supplies Cs.
 _NO_SHEAR_RIDGING = 0.0
-
-
-def _sharp(w):
-    """Sharpness ``1/w`` for the core.smooth helpers; ``inf`` (hard) at ``w = 0``."""
-    return jnp.inf if w == 0.0 else 1.0 / w
-
-
-def _si3_ge(x, c, w):
-    """``x >= c`` as 0/1; smooth: C1 ramp over ``[c - w, c]`` (exact 1 at and above ``c``)."""
-    if w == 0.0:
-        return (x >= c).astype(jnp.result_type(x, float))
-    return smoothstep_cubic((x - c + w) / w)
-
-
-def _si3_gt(x, c, w):
-    """``x > c`` as 0/1; smooth: C1 ramp over ``[c, c + w]`` (exact 0 at and below ``c``)."""
-    if w == 0.0:
-        return (x > c).astype(jnp.result_type(x, float))
-    return smoothstep_cubic((x - c) / w)
-
-
-def _si3_mix(weight, a, b, w):
-    """``where(weight, a, b)`` for the hard 0/1 weight (bitwise), linear blend when smooth."""
-    if w == 0.0:
-        return jnp.where(weight == 1.0, a, b)
-    return b + (a - b) * weight
-
-
-def _si3_snow_free(h_snow, w, preserve_subnormal):
-    """1 where ``h_snow == 0`` (NEMO's IEEE test); ramp ``1 - C1(h_snow / w)`` if ``w > 0``.
-
-    ``w = snow_ramp_width_m`` when the ports are smooth, else 0; held at 0.0
-    (hard) pending a user decision (vote X4): the ORCA1 record holds trace
-    snow down to 1.2e-30 m in 355 ice cells, so any ramp width >= 1e-15 m
-    changes their through-ice sunlight by up to 218 W/m2.
-    """
-    if w != 0.0:
-        return 1.0 - smoothstep_cubic(h_snow / w)
-    if preserve_subnormal:
-        # XLA CPU flushes the smallest positive fp64 snow thickness to zero in
-        # floating comparisons.  NEMO's scalar IEEE comparison does not.  A
-        # left shift discards the sign bit and preserves every nonzero payload,
-        # including subnormals; both +0 and -0 remain zero.
-        snow_bits = jax.lax.bitcast_convert_type(h_snow, jnp.uint64)
-        zero = (snow_bits << jnp.uint64(1)) == jnp.uint64(0)
-    else:  # private one-variable ablation; never exposed in SeaIceConfig
-        zero = h_snow == 0.0
-    return zero.astype(jnp.result_type(h_snow, float))
 
 
 def grid_supports_ice_dynamics(grid) -> bool:
@@ -577,7 +529,8 @@ def _si3_step_with_trace(state: SI3ColumnState,
         state.S_layers.data,
         state.age_volume.data,
     )
-    trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants)
+    trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants,
+                                   switches=config.si3_switches)
     out = trace.exit
     new_state = SI3ColumnState(
         concentration=state.concentration.replace(data=out.concentration),
@@ -789,6 +742,13 @@ def _si3_orca2_o1_step_with_trace(
 from legoesm.ice.si3_orca2_state import (  # noqa: E402
     SI3ORCA2O2Forcing,
 )
+from legoesm.ice.si3_surface import (  # noqa: E402
+    si3_ge,
+    si3_gt,
+    si3_mix,
+    si3_sharp,
+    si3_snow_free,
+)
 from legoesm.ice.si3_finalize import (  # noqa: E402
     SI3FinalizeForcing,
     SI3FinalizeResponse,
@@ -845,7 +805,7 @@ def _si3_orca2_o2_step_with_trace(
             *(field[owned] for field in correction.fluxes)
         )
         final = si3_o16_step(
-            forcing.update_state,
+            correction.state,
             update_fluxes,
             forcing.update,
             sss_m=forcing.sss_m,
@@ -854,7 +814,7 @@ def _si3_orca2_o2_step_with_trace(
             _plant_omit_hfx_res=forcing.plant_omit_hfx_res,
         )
         stress = si3_ice_update_tau(
-            forcing.stress,
+            forcing.stress._replace(at_i=final.state.aggregated.at_i),
             config=config.si3_orca2,
             ln_drgice_imp=forcing.ln_drgice_imp,
         )
@@ -898,16 +858,17 @@ def _nemo_si3_ice_albedo(
     two sites as ``icealb.F90:179-182``, so land albedo is 0 as in NEMO.
     Switches (melt flag, thickness pieces) are C1 ramps of width
     ``switches.relative_width x scale``; ``relative_width=0.0`` is NEMO's hard
-    form.  The snow-free test stays hard unless ``snow_ramp_width_m > 0``.
+    form.  The snow-free test is hard in the forward pass; ``snow_ramp_width_m``
+    sets its straight-through surrogate gradient.
     """
     r = switches.relative_width
     t_freeze = constants.T_freeze
-    snow_free = _si3_snow_free(
+    snow_free = si3_snow_free(
         h_snow, switches.snow_ramp_width_m if r > 0.0 else 0.0, _preserve_subnormal_snow
     )
-    melting = _si3_ge(T_surface, t_freeze, r * switches.temperature_scale_K)
+    melting = si3_ge(T_surface, t_freeze, r * switches.temperature_scale_K)
     snow_fraction = h_snow / (h_snow + constants.snow_cover_depth_nemo)
-    bare_thick = _si3_mix(
+    bare_thick = si3_mix(
         snow_free * melting,
         constants.albedo_ice_melt_orca1,
         constants.albedo_ice_dry_orca1,
@@ -926,16 +887,16 @@ def _nemo_si3_ice_albedo(
     bare_thin = constants.albedo_ocean_nemo + (
         constants.albedo_ice_thin_nemo - constants.albedo_ocean_nemo
     ) * inv_thin_break * h_ice
-    is_thin = _si3_ge(-h_ice, -thin_break, r * thin_break)      # h <= thin_break
-    is_mid = _si3_ge(-h_ice, -pivot, r * pivot)                  # h <= pivot
-    bare = _si3_mix(is_thin, bare_thin, _si3_mix(is_mid, bare_mid, bare_thick, r), r)
+    is_thin = si3_ge(-h_ice, -thin_break, r * thin_break)      # h <= thin_break
+    is_mid = si3_ge(-h_ice, -pivot, r * pivot)                  # h <= pivot
+    bare = si3_mix(is_thin, bare_thin, si3_mix(is_mid, bare_mid, bare_thick, r), r)
     snow_dry = constants.albedo_snow_dry_orca1 - (
         constants.albedo_snow_dry_orca1 - bare
     ) * jnp.exp(-h_snow * (1.0 / constants.albedo_snow_decay_dry_nemo))
     snow_melt = constants.albedo_snow_melt_orca1 - (
         constants.albedo_snow_melt_orca1 - bare
     ) * jnp.exp(-h_snow * (1.0 / constants.albedo_snow_decay_melt_nemo))
-    snow = _si3_mix(melting, snow_melt, snow_dry, r)
+    snow = si3_mix(melting, snow_melt, snow_dry, r)
     overcast = (snow_fraction * snow + (1.0 - snow_fraction) * bare) * land_mask
     clear = overcast - (
         constants.albedo_cloud_quad_nemo * overcast * overcast
@@ -1049,7 +1010,7 @@ def _nemo_si3_blk_ice_2(
     emp_total = emp_ocean + emp_ice
     rain_heat = (theta_air - ice_constants.T0) * ice_constants.c_ocean * land_mask
     snow_heat = (
-        (min_c1(theta_air, ice_constants.T0, _sharp(r * switches.temperature_scale_K)) - ice_constants.T0)
+        (min_c1(theta_air, ice_constants.T0, si3_sharp(r * switches.temperature_scale_K)) - ice_constants.T0)
         * ice_constants.c_ice * land_mask
     )
     ocean_heat = sst_celsius * ice_constants.c_ocean * land_mask
@@ -1080,8 +1041,8 @@ def _nemo_si3_blk_ice_2(
         + constants.ice_sw_cloudy_nemo * cloud_fraction
     )
     thin_sw = constants.ice_sw_thin_threshold_nemo
-    is_thin = 1.0 - _si3_ge(h_ice, thin_sw, r * thin_sw)          # h < thin_sw
-    transmission = _si3_mix(
+    is_thin = 1.0 - si3_ge(h_ice, thin_sw, r * thin_sw)          # h < thin_sw
+    transmission = si3_mix(
         is_thin,
         transmission + (1.0 - transmission) * (
             1.0 - h_ice * constants.ice_sw_thin_inverse_nemo
@@ -1089,10 +1050,10 @@ def _nemo_si3_blk_ice_2(
         transmission,
         r,
     )
-    snow_free = _si3_snow_free(
+    snow_free = si3_snow_free(
         h_snow, switches.snow_ramp_width_m if r > 0.0 else 0.0, _preserve_subnormal_snow
     )
-    qtr_ice_top = _si3_mix(snow_free, qsr_ice * transmission, 0.0, r)
+    qtr_ice_top = si3_mix(snow_free, qsr_ice * transmission, 0.0, r)
     return {
         "albedo": albedo,
         "qsr_ice": qsr_ice,
@@ -1200,10 +1161,10 @@ def _nemo_si3_ice_flx_other(
     if hard:
         switch = jnp.where(ice_fraction >= ice_epsilon, land_mask, 0.0)
     else:   # ramp on [epsi10 - w, epsi10]: exact NEMO outside it (X1 scale; GLM review)
-        switch = _si3_ge(
+        switch = si3_ge(
             ice_fraction, ice_epsilon, r * switches.ice_switch_scale
         ) * land_mask
-    ice_floor = max_c1(ice_fraction, ice_epsilon, _sharp(r * switches.ice_switch_scale))
+    ice_floor = max_c1(ice_fraction, ice_epsilon, si3_sharp(r * switches.ice_switch_scale))
     lead_energy = land_mask * dt * (
         (1.0 - ice_fraction_before) * qsr_ocean * frq
         + (1.0 - ice_fraction_before) * qns_ocean
@@ -1213,8 +1174,8 @@ def _nemo_si3_ice_flx_other(
         rho_ocean * c_ocean * ocean_layer_thickness
         * (T_bottom - (sst_celsius + T0))
     ) * land_mask
-    freeze_negative = min_c1(freeze_energy, 0.0, _sharp(energy_w))
-    freeze_positive = max_c1(freeze_energy, 0.0, _sharp(energy_w))
+    freeze_negative = min_c1(freeze_energy, 0.0, si3_sharp(energy_w))
+    freeze_positive = max_c1(freeze_energy, 0.0, si3_sharp(energy_w))
     # sqrt(0) = 0 on land (friction masked) and at zero relative velocity;
     # the inner where keeps the gradient there 0 instead of 0*inf = NaN (V15).
     friction_positive = friction > 0.0
@@ -1226,14 +1187,14 @@ def _nemo_si3_ice_flx_other(
         * constants.ice_ocean_heat_transfer_nemo * friction_velocity
         * ((sst_celsius + T0) - T_bottom)
     )
-    qsb = switch * min_c1(qsb, -freeze_negative / dt / ice_floor, _sharp(flux_w))
-    supercool = _si3_gt(T_bottom - (sst_celsius + T0), 0.0, r * switches.temperature_scale_K)
+    qsb = switch * min_c1(qsb, -freeze_negative / dt / ice_floor, si3_sharp(flux_w))
+    supercool = si3_gt(T_bottom - (sst_celsius + T0), 0.0, r * switches.temperature_scale_K)
     stop_volume = constants.ice_supercool_volume_stop_nemo
-    thick = _si3_ge(ice_volume, stop_volume, r * stop_volume)
+    thick = si3_ge(ice_volume, stop_volume, r * stop_volume)
     stop_supercool = supercool * thick
-    freeze_energy = _si3_mix(stop_supercool, 0.0, freeze_energy, r)
-    freeze_positive = _si3_mix(stop_supercool, 0.0, freeze_positive, r)
-    qsb = _si3_mix(stop_supercool, 0.0, qsb, r)
+    freeze_energy = si3_mix(stop_supercool, 0.0, freeze_energy, r)
+    freeze_positive = si3_mix(stop_supercool, 0.0, freeze_positive, r)
+    qsb = si3_mix(stop_supercool, 0.0, qsb, r)
     if hard:   # NEMO's branch, kept verbatim so hard mode is bitwise (+0.0; codex review)
         cooling = lead_energy - freeze_energy < 0.0
         fhld = jnp.where(
@@ -1243,9 +1204,9 @@ def _nemo_si3_ice_flx_other(
         qlead = jnp.where(cooling, jnp.minimum(0.0, lead_energy - freeze_energy), 0.0)
     else:
         fhld = switch * max_c1(
-            (lead_energy - freeze_positive) / dt / ice_floor, 0.0, _sharp(flux_w)
+            (lead_energy - freeze_positive) / dt / ice_floor, 0.0, si3_sharp(flux_w)
         )
-        qlead = min_c1(lead_energy - freeze_energy, 0.0, _sharp(energy_w))
+        qlead = min_c1(lead_energy - freeze_energy, 0.0, si3_sharp(energy_w))
     if hard:
         ice_speed = 0.5 * jnp.sqrt(
             (u_ice_west + u_ice) * (u_ice_west + u_ice)
@@ -1258,24 +1219,24 @@ def _nemo_si3_ice_flx_other(
             + (v_ice_south + v_ice) * (v_ice_south + v_ice)
         )
         stop_sq = constants.ice_landfast_speed_stop_nemo ** 2
-        slow = _si3_ge(-speed_sq, -stop_sq, r * stop_sq)          # speed <= 5 mm/s
-    full = _si3_ge(ice_fraction, 1.0 - ice_epsilon, r * switches.full_cover_scale)
+        slow = si3_ge(-speed_sq, -stop_sq, r * stop_sq)          # speed <= 5 mm/s
+    full = si3_ge(ice_fraction, 1.0 - ice_epsilon, r * switches.full_cover_scale)
     if lead_cut_version == "5.0.1":
-        packed = _si3_ge(
+        packed = si3_ge(
             ice_fraction, max_ice_fraction - constants.ice_landfast_margin_nemo501,
             r * switches.cut_fraction_scale,
         )
         cut = 1.0 - (1.0 - slow * packed) * (1.0 - full)
     else:
         thick_v = constants.ice_growth_thickness_stop_nemo
-        grown = _si3_ge(ice_volume, thick_v, r * thick_v)
-        packed = _si3_ge(
+        grown = si3_ge(ice_volume, thick_v, r * thick_v)
+        packed = si3_ge(
             ice_fraction, max_ice_fraction - constants.ice_full_cover_margin_nemo,
             r * switches.cut_fraction_scale,
         )
         cut = 1.0 - (1.0 - slow * packed * grown) * (1.0 - full * grown)
     # hard mode assigns +0.0 as NEMO (qlead * 0 would give -0.0)
-    qlead = _si3_mix(cut, 0.0, qlead, r)
+    qlead = si3_mix(cut, 0.0, qlead, r)
     return {"qsb_ice_bot": qsb, "fhld": fhld, "qlead": qlead}
 
 def _bulk_flux_dispatch(
@@ -3284,6 +3245,11 @@ def _thermo_v2(
          - basal_growth_m * config.rho_ice)
         * conc / dt
     )
+    # ``precip_total - precip_snow`` is the rain MASS flux [kg/m^2/s]; gated by
+    # ``has_precipitation`` like the snow path, so no phantom rain is injected.
+    rain_rate = jnp.maximum(
+        forcing.precip_total - forcing.precip_snow, 0.0,
+    ) * jnp.asarray(forcing.has_precipitation, dtype=h_new.dtype)
     if config.ponds.enabled:
         # ``pond_captured_melt_m_liquid`` and ``pond_drain_to_ocean_kg_s``
         # are per-ice-area quantities (pond state is stored relative to
@@ -3293,7 +3259,11 @@ def _thermo_v2(
             pond_captured_melt_m_liquid * constants.rho_water * conc_new / dt
         )
         pond_drain_per_cell = pond_drain_to_ocean_kg_s * conc_new
-        if config.core2_precipitation_closure:
+        if config.ponds.scheme == "si3_lev":
+            # pnd_LEV fills from melt only (icethd_pnd.f90:454); ln_pnd_rain
+            # belongs to the TOPO scheme, so all the rain runs off.
+            rain_runoff_per_cell = rain_rate * conc_new
+        elif config.core2_precipitation_closure:
             # Rain over the ice fraction is collected by the ponds where they
             # can form; the rest runs off (per-ice-area -> per-cell).
             rain_runoff_per_cell = (
@@ -3309,13 +3279,8 @@ def _thermo_v2(
         # ``accumulate_snowfall`` and returns on melt).  Without this the f_ice
         # share of rain vanished from the water budget — the ocean tile only
         # delivers the OPEN-water (f_ocean) precip share (audit HIGH:
-        # precip-on-ice leak).  ``precip_total - precip_snow`` is the rain MASS
-        # flux [kg/m^2/s]; gate by ``has_precipitation`` (like the snow path) so
-        # no phantom rain is injected, and weight by ``conc_new`` so only the
-        # ice-fraction rain is delivered (× f_water in ``blend_tiles`` = f_ice).
-        rain_rate = jnp.maximum(
-            forcing.precip_total - forcing.precip_snow, 0.0,
-        ) * jnp.asarray(forcing.has_precipitation, dtype=h_new.dtype)
+        # precip-on-ice leak).  Weight by ``conc_new`` so only the ice-fraction
+        # rain is delivered (× f_water in ``blend_tiles`` = f_ice).
         rain_runoff_per_cell = rain_rate * conc_new
     # Snow off: snowfall on the ice fraction has no pack to enter, so it goes
     # straight to the ocean (+ve into ocean) and the ocean pays its latent heat

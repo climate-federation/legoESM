@@ -51,7 +51,8 @@ overlap divisions frac >= threshold are centred steps of relative width;
 the lower-fraction clamps and the 1e-6 cover floor are inactive-exact clamps;
 the pair cover max is :func:`max_kink_exact` (exact where the two
 fractions are equal); layer presence cf > 0
-and op >= 0 use :func:`.mcica_generator.step_pos` as the generator does; the
+and op >= 0 use :func:`.mcica_generator.step_pos` (the McICA generator keeps it
+only for op; its cloudy-range presence is exact, part of the sampling); the
 SW night test mu0 < 1e-10 is a band wholly on the night side; the LW
 ssa/asymmetry divisions use :func:`.mcica_solvers.guarded_div`.
 

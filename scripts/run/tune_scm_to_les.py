@@ -13,11 +13,11 @@ the caller-provided base ``TurbulenceConfig`` via ``apply_param_overrides`` (whi
 raises on an unknown field — never a silent no-op), so production ``*Config`` defaults
 are never mutated.
 
-Usage (dry CBL, mynn25)::
+Usage (dry CBL, tke)::
 
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run/tune_scm_to_les.py \\
         --artifact results/les_suite/artifacts/cbl_nieuwstadt__lasd.npz \\
-        --scheme mynn25 --tiers 1 --n-random 12 --dt 10 --nlev 32
+        --scheme tke --tiers 1 --n-random 12 --dt 10 --nlev 32
 """
 from __future__ import annotations
 
@@ -276,9 +276,7 @@ def _cbl_scheme_table():
         LouisConfig,
         MYNN25Config,
         SmagorinskyConfig,
-        TKEConfig,
         TurbulentEDMFConfig,
-        YSUConfig,
     )
 
     # The Q2 closure-order ladder (LES_SUITE.md D3): local → nonlocal → 1.5-order →
@@ -292,8 +290,6 @@ def _cbl_scheme_table():
         "smagorinsky": (SmagorinskyConfig, "atm.turb.SmagorinskyConfig"),   # local
         "louis": (LouisConfig, "atm.turb.LouisConfig"),                     # local
         "holtslag_boville": (HoltslagBovilleConfig, "atm.turb.HoltslagBovilleConfig"),  # nonlocal
-        "ysu": (YSUConfig, "atm.turb.YSUConfig"),                          # nonlocal
-        "tke": (TKEConfig, "atm.turb.TKEConfig"),                          # 1.5-order (k-l)
         "mynn25": (MYNN25Config, "atm.turb.MYNN25Config"),                 # 1.5-order (MYNN)
         "clubb_lite": (CLUBBLiteConfig, "atm.turb.CLUBBLiteConfig"),       # higher-order
         "edmf": (TurbulentEDMFConfig, "atm.turb.TurbulentEDMFConfig"),     # mass-flux
@@ -338,7 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--artifact", type=Path, required=True,
                    help="LES reference artifact (.npz) from run_les_suite.py")
-    p.add_argument("--scheme", default="mynn25", help="turbulence closure to tune")
+    p.add_argument("--scheme", required=True,
+                   help="turbulence closure to tune (no default, vote T4a)")
     p.add_argument("--tiers", type=int, nargs="+", default=[1],
                    help="tunable tiers to include (1=core, 2=extended, 3=aggressive)")
     p.add_argument("--method", choices=("df", "ad", "both"), default="df",

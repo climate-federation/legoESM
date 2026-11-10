@@ -451,8 +451,8 @@ def save_checkpoint(
     # No stale record may pair with the new file: drop it once the new payload
     # is serialised, just before it replaces the old one, and write it after
     # (a serialisation failure keeps the old payload AND its record; a crash
-    # between unlink and replace leaves no record, which loads only where no
-    # frozen/trained classification is needed; codex + GLM 2026-10-29).
+    # between unlink and replace leaves no record, so an AIMIP checkpoint
+    # then refuses to load; codex + GLM 2026-10-29).
     live = model
     model = checkpoint_view(model)
     try:

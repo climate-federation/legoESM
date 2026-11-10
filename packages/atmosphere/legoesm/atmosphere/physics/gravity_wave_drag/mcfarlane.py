@@ -47,13 +47,17 @@ reduce to the CAM hard switch at their limit: ``min_wind_sharpness`` (the
 stress, ``2^(-1/50)`` = 0.986 of both where they are equal at the default
 p = 50), ``crit_level_sharpness`` / ``crit_level_floor``
 (the sign-agreement test of ``ubi`` across the layer).  ``crit_level_floor``
-defaults to CAM's ``c = 0``.  The ``hdsp > 10 m`` gate, ``n2min``, ``taumin``,
-``ubmc2mn`` and the limiters are hard, as in CAM (piecewise smooth; finite
-gradients).  The production smoothing values are NOT the hard limit.
+defaults to CAM's ``c = 0``.  ``softmin_sharpness`` is also p of the same
+p-norm smooth min for the ``umcfac`` and ``tndmax`` tendency limiters (#2241,
+2026-11-07; one knob: GLM + Claude majority, codex preferred a separate field).  The ``hdsp > 10 m`` gate (static
+orography), ``n2min``, ``taumin`` (a 1e-10 Pa jump) and ``ubmc2mn`` are hard,
+as in CAM (piecewise smooth; finite gradients).  The production smoothing values are NOT the hard limit.
 KNOWN DIFFERENCE at the defaults (vs the CAM6 oracle, 14 columns, pinned per
-column in the oracle test): field max-norm relative 3.5e-3 in du/dt, 4.2e-3 in
+column in the oracle test): field max-norm relative 3.7e-3 in du/dt, 4.5e-3 in
 dT/dt, 3.4e-5 in dq/dt; per column up to 2.9e-2 in du/dt and 2.7e-2 in dT/dt
-(column 11).  Measured 2026-10-29 when the smooth min became the p-norm
+(column 11).  Re-measured 2026-11-07 with the smooth limiters (#2241): only
+the limiter column 10 moved (du/dt 3.52e-3 -> 3.66e-3, dT/dt 4.23e-3 ->
+4.46e-3; field max-norm was 3.5e-3 / 4.2e-3).  Measured 2026-10-29 when the smooth min became the p-norm
 (#2241), re-measured on the #2238 merge (``crit_level_floor = 0`` among its
 changes; dq/dt was 1.3e-4 before it, du/dt and dT/dt unchanged); the earlier sigmoid blend, not C1 at taudmp = tausat, gave field
 max-norm 1.2e-2 in du/dt.  The hard limit is every sharpness -> inf (1e12)
@@ -419,10 +423,13 @@ def mcfarlane_gwd(
 
     def tend_step(tau_top, j):
         ubtl = g * (tau[:, j + 1] - tau_top) / dp[:, j]
-        ubtl = jnp.minimum(ubtl, config.umcfac * jnp.abs(0.0 - ubm[:, j]) / dt)
-        gwut = jnp.where((0.0 - ubm[:, j]) >= 0.0, jnp.abs(ubtl), -jnp.abs(ubtl))
-        over = jnp.abs(gwut) > tndmax
-        gwut = gwut * jnp.where(over, tndmax / jnp.where(over, jnp.abs(gwut), 1.0), 1.0)
+        # umcfac and tndmax limiters: the same p-norm smooth min as the
+        # stress cap (#2241), exact min at softmin_sharpness -> inf.
+        ubtl = pnorm_smooth_min(jnp.abs(ubtl), config.umcfac * jnp.abs(0.0 - ubm[:, j]) / dt,
+                                config.softmin_sharpness, 0.0)
+        ubtl = pnorm_smooth_min(ubtl, jnp.full_like(ubtl, tndmax),
+                                config.softmin_sharpness, 0.0)
+        gwut = jnp.where((0.0 - ubm[:, j]) >= 0.0, ubtl, -ubtl)
         # The limited stress divergence is carried to the layer below
         # (CAM "redetermine the effective stress on the interface below").
         tau_below = tau_top + jnp.abs(gwut) * dp[:, j] / g

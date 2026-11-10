@@ -3417,6 +3417,7 @@ def nemo_eos_fzp(S_psu, depth_m=None):
     # Guard inside sqrt as well as outside; retain the exact forward value.
     sr = nemo_source_round
     sal = jnp.asarray(S_psu)
+    sal = sal.astype(jnp.result_type(sal, float))
     sal_abs = jnp.abs(sal)
     nonzero = sal_abs > 0.0
     z1_s0 = sr(

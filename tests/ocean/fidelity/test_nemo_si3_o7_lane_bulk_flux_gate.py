@@ -76,10 +76,12 @@ def test_selector_is_single_orca1_identity() -> None:
 def test_positive_subnormal_snow_uses_nemo_nonzero_branch(monkeypatch) -> None:
     from legoesm import constants
     from legoesm.ice import si3_surface
+    from legoesm.ice.config import SI3_HARD_SWITCHES
 
     data = Path(__file__).parents[2] / "ice/unit/data"
     cfg = si3_surface.SI3SurfaceConfig.from_resolved_namelists(
-        data / "c1d_omip_l3_v2_output.namelist.dyn", data / "c1d_omip_l3_v2_output.namelist.ice")
+        data / "c1d_omip_l3_v2_output.namelist.dyn", data / "c1d_omip_l3_v2_output.namelist.ice",
+    )._replace(switches=SI3_HARD_SWITCHES)
     assert not cfg.ld_pnd_alb
     tiny = jnp.asarray([[np.nextafter(np.float64(0.0), np.float64(1.0))]])
     one = jnp.ones((1, 1))

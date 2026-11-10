@@ -9,7 +9,8 @@ Fixtures are the tier-4 NEMO 5.0.1 ORCA1 extracts used by the oracle tests
   ``fixtures/orca1_t4/si3_smooth_gaps.npz`` (1e-6 relative, 1e-12 absolute floor).  A change to the
   smooth form or a width re-records it with ``SI3_RECORD_GAPS=1`` and states why.
 * Gradients: at a point inside each ramp, jax.grad matches a central finite difference.
-The snow-free test (h_s == 0) stays hard by default (flagged; see sea_ice._si3_snow_free).
+The snow-free test (h_s == 0) is hard in the forward pass; its gradient is a straight-through
+surrogate (test_si3_snow_straight_through.py).
 """
 from __future__ import annotations
 
@@ -185,21 +186,21 @@ def test_goff_floor_ramp_gradient():
     assert float(hard[0]) == float(soft[0]) and float(hard[1]) == float(soft[1])
 
 
-def test_snow_ramp_width_is_a_config_field_held_hard_by_default():
+def test_snow_switch_is_hard_forward_with_a_surrogate_gradient():
     from legoesm.ice.config import SI3SwitchConfig
     lm = _load("si3_land_mask.npz")
     default = SI3SwitchConfig()
-    assert default.snow_ramp_width_m == 0.0
+    assert default.snow_ramp_width_m == 2.0e-4
     b, _ = _cell(lm, "wet_ice", "blk2", lambda fx, i: int(np.argmax((fx["blk2_in:h_s"][i] == 0.0)
                                                                     & (fx["blk2_in:qsr"][i] > 10.0))))
-    ramp = default._replace(snow_ramp_width_m=1.0e-6)
-    h = jnp.asarray(0.5e-6)
+    h = jnp.asarray(0.5e-4)
     qtr = lambda x, sw: _blk(b, switches=sw, h_s=x)["qtr_ice_top"]  # noqa: E731
     assert float(qtr(h, default)) == 0.0              # hard test: any snow blocks transmission
-    assert float(qtr(h, ramp)) > 0.0
-    # relative_width = 0 is NEMO's hard form whatever the snow width
-    assert float(qtr(h, ramp._replace(relative_width=0.0))) == 0.0
-    _fd_check(lambda x: qtr(x, ramp), 0.5e-6, 1e-10)
+    assert float(qtr(jnp.asarray(0.0), default)) > 0.0
+    assert float(qtr(h, default._replace(relative_width=0.0))) == 0.0
+    g = float(jax.grad(lambda x: qtr(x, default))(h))
+    assert np.isfinite(g) and g < 0.0                 # more snow, less sunlight (surrogate)
+    assert float(jax.grad(lambda x: qtr(x, default._replace(snow_ramp_width_m=0.0)))(h)) == 0.0
 
 
 def test_gradients_inside_every_flx_other_ramp():

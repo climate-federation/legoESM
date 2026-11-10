@@ -161,16 +161,27 @@ def rewet_soil_bands(land_params, theta_top: jnp.ndarray,
     """
     bounds = [getattr(land_params, f, None) for f in
               ("ALB_VIS_DRY", "ALB_VIS_SAT", "ALB_NIR_DRY", "ALB_NIR_SAT")]
+    can = [getattr(land_params, f, None) for f in ("ALB_VIS_CAN", "ALB_NIR_CAN")]
+    if any(c is not None for c in can) and not all(c is not None for c in can):
+        raise ValueError("canopy band albedos must be both set or both None")
     if all(b is None for b in bounds):
+        if can[0] is not None:
+            raise ValueError("canopy band albedos need the soil-colour bounds: a "
+                             "prescribed albedo already includes the canopy")
         return land_params
     if any(b is None for b in bounds):
         raise ValueError("soil albedo bounds must be all set or all None, got "
                          f"{[b is not None for b in bounds]}")
-    return land_params._replace(
-        ALB_VIS=wet_soil_albedo(land_params.ALB_VIS_DRY, land_params.ALB_VIS_SAT,
-                                theta_top, config),
-        ALB_NIR=wet_soil_albedo(land_params.ALB_NIR_DRY, land_params.ALB_NIR_SAT,
-                                theta_top, config))
+    vis = wet_soil_albedo(land_params.ALB_VIS_DRY, land_params.ALB_VIS_SAT,
+                          theta_top, config)
+    nir = wet_soil_albedo(land_params.ALB_NIR_DRY, land_params.ALB_NIR_SAT,
+                          theta_top, config)
+    if can[0] is not None:
+        from legoesm.land.canopy.radiative_transfer import canopy_cover
+        cov = canopy_cover(land_params.LAI, land_params.CI)
+        vis = cov * can[0] + (1.0 - cov) * vis
+        nir = cov * can[1] + (1.0 - cov) * nir
+    return land_params._replace(ALB_VIS=vis, ALB_NIR=nir)
 
 
 def soil_albedo_broadband(
