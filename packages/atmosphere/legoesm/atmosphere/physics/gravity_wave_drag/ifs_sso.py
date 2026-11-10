@@ -39,7 +39,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.core.smooth import positive_part_c1, sigmoid_switch, smooth_max
+from legoesm.core.smooth import positive_part_c1, sigmoid_switch, smooth_clamp, smooth_max
 
 __physics_contract__ = {
     "summary": (
@@ -490,7 +490,7 @@ def _column(ph, pf, geo, T, u, v, std, gamma, theta, sig, nktopg, ngwdtop, ngwdl
         """SIGN(MIN(ABS(x), GTENLIM), x)."""
         if cfg.tenlim_width_frac == 0.0:
             return jnp.sign(x) * jnp.minimum(jnp.abs(x), lim)
-        return -jnp.sign(x) * smooth_max(-jnp.abs(x), -lim, 1.0 / (cfg.tenlim_width_frac * lim))
+        return smooth_clamp(x, -lim, lim, 1.0 / (cfg.tenlim_width_frac * lim))
 
     above = kl < ngwdlim
     teu = jnp.where(above, clip(teu), teu)

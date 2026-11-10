@@ -33,6 +33,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.ifs_sso import (
 
 _FIX = Path(__file__).parent / "oracle_fixtures" / "sso_lott_miller_ifs.npz"
 _TOL = 1.0e-12  # oracle bar (max relative error, fp64)
+_SMOOTH_GAP = 0.05  # per-column smooth-vs-hard bar (vote V15a; measured max 0.020)
 _GROUPS = ("L32", "L137", "STRESS")
 _INTS = ("kkcrith", "kcrit", "kkenvh", "kknu", "kknu2")
 
@@ -165,13 +166,40 @@ def test_drag_opposes_low_level_wind(fix):
 
 
 def test_smooth_form_close_to_oracle(fix):
-    """The default (smooth) form stays near the hard oracle form."""
+    """The default (smooth) form stays near the hard oracle form, column by column."""
     for g in _GROUPS:
         hard = _run(fix, "L", g)
         soft = _run(fix, "L", g, IFSSSOConfig())
         for f in ("soteu", "sotev", "sobeta"):
-            assert np.all(np.isfinite(np.asarray(getattr(soft, f))))
-            assert _err(getattr(soft, f), np.asarray(getattr(hard, f))) < 0.05, (g, f)
+            h, s_ = np.asarray(getattr(hard, f)), np.asarray(getattr(soft, f))
+            assert np.all(np.isfinite(s_))
+            m = np.abs(h).max(1)
+            gap = np.abs(s_ - h).max(1) / np.where(m > 0, m, 1.0)
+            assert np.all(gap[m > 0] < _SMOOTH_GAP), (g, f, float(gap.max()))
+            assert np.all(np.abs(s_[m == 0]).max(initial=0.0) < 1e-12), (g, f)
+
+
+def test_smooth_clip_keeps_wind_gradient_at_zero(fix):
+    """d sotev/dv at v = 0 is not lost by the smooth GTENLIM clip (central FD agrees)."""
+    g = "L32"
+    i = _drag_column(fix, g)
+    rg, rd, cpd = _consts(fix, "C", g)
+    lev = _levels(fix, g)
+    a = {k: jnp.asarray(fix[f"{g}_{k}"][i:i + 1], jnp.float64)
+         for k in ("p_half", "p_full", "geo_full", "T", "u", "std", "sigma")}
+    cfg = IFSSSOConfig(gtenlim_m_s2=1.0e-3)
+
+    def f(dv):
+        v = jnp.zeros_like(a["u"]) + dv
+        o = ifs_sso_tendencies(a["p_half"], a["p_full"], a["geo_full"], a["T"], a["u"], v,
+                               a["std"], jnp.asarray([1.0]), jnp.asarray([0.0]), a["sigma"],
+                               lev[i:i + 1, 0], lev[i:i + 1, 1], lev[i:i + 1, 2], cfg, rg, rd, cpd)
+        return jnp.sum(o.sotev)
+
+    gr = float(jax.grad(f)(0.0))
+    fd = (float(f(1e-6)) - float(f(-1e-6))) / 2e-6
+    assert fd != 0.0
+    assert gr == pytest.approx(fd, rel=1e-3)
 
 
 def _drag_column(fix, g="L32"):
