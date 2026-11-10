@@ -315,8 +315,16 @@ def c3_assimilation(
     Vcmax25: jax.Array,
     TgC: jax.Array,
     rjv25: jax.Array | None = None,
+    phi0_ref: jax.Array | None = None,
+    phi0_sandoval: tuple | None = None,
 ) -> LeafAssimilation:
     """Canonical FvCB C3 gross assimilation + dark respiration (Bonan ch. 11).
+
+    ``phi0_ref`` (P-model reference quantum yield, ``PModelConfig.kphio``)
+    selects the P-model light response for J (see the electron-transport
+    block); ``phi0_sandoval = (aridity_index, mgdd0_c)`` selects it with the
+    Sandoval et al. (2026) phi0(T); both ``None`` keeps the CLM PSII form
+    bit-for-bit.
 
     The shared biochemistry kernel behind both :func:`c3_photosynthesis` (net,
     floored) and the big-leaf coupled A-gs solver.  Returns the GROSS co-limited
@@ -347,9 +355,22 @@ def c3_assimilation(
     # Dark respiration (Tjoelker + Atkin), basal at 0.015 * Vcmax25
     Rd = _rd_atkin(Tf, TgC_a, Vcmax25)
 
-    # Electron transport: smaller root of theta_j J^2 - (I + Jmax) J + I Jmax = 0
-    I_PSII = 0.5 * _PHI_PSII * APAR
-    J = _smaller_root_quadratic(_THETA_J, I_PSII, Jmax)
+    if phi0_ref is None and phi0_sandoval is None:
+        # Electron transport (CLM5 / Bonan eq. 11.23-11.24): smaller root of
+        # theta_j J^2 - (I + Jmax) J + I Jmax = 0, I = 0.5 phi_PSII APAR.
+        I_PSII = 0.5 * _PHI_PSII * APAR
+        J = _smaller_root_quadratic(_THETA_J, I_PSII, Jmax)
+    else:
+        # P-model light response (Smith 1937 form used by Wang et al. 2017 for
+        # the Jmax optimum; pyrealm SubdailyPModel, JULES leaf_limits):
+        # J = 4 phi0(T_leaf) I / sqrt(1 + (4 phi0 I / Jmax)^2).  The same
+        # phi0(T) that sized the acclimated capacities (land/p_model.py).
+        from legoesm.land.p_model import phi0_c3, phi0_sandoval as _phi0_s
+        phi0 = (_phi0_s(Tf, *phi0_sandoval) if phi0_sandoval is not None
+                else phi0_c3(Tf, phi0_ref))
+        four_phi_i = 4.0 * phi0 * APAR
+        Jmax_safe = jnp.maximum(Jmax, 1e-9)  # coeff-ok: div-by-zero guard (Jmax -> 0)
+        J = four_phi_i / jnp.sqrt(1.0 + (four_phi_i / Jmax_safe) ** 2)
 
     # Limited rates (Bonan eq. 11.28, 11.29, 11.32)
     Ci_safe = jnp.maximum(Ci, 1e-3)  # coeff-ok: div-by-zero guard on intercellular CO2 (mole fraction)
@@ -378,6 +399,8 @@ def c3_photosynthesis(
     alf: jax.Array,
     TgC: jax.Array,
     rjv25: jax.Array | None = None,
+    phi0_ref: jax.Array | None = None,
+    phi0_sandoval: tuple | None = None,
 ) -> jax.Array:
     """Net assimilation rate for canonical FvCB C3 photosynthesis.
 
@@ -397,7 +420,8 @@ def c3_photosynthesis(
     An : net assimilation rate [umol m-2 s-1], clamped to >= 0
     """
     del Ps, alf  # signature parity; FvCB uses _PHI_PSII and mole-fraction Ci
-    r = c3_assimilation(Tf, Ci, APAR, Vcmax25, TgC, rjv25=rjv25)
+    r = c3_assimilation(Tf, Ci, APAR, Vcmax25, TgC, rjv25=rjv25,
+                        phi0_ref=phi0_ref, phi0_sandoval=phi0_sandoval)
     An = r.a_gross - r.rd
     return jnp.where(An < 0.0, 0.0, An)
 
@@ -482,6 +506,8 @@ def photosynthesis(
     alf: jax.Array,
     TgC: jax.Array,
     rjv25: jax.Array | None = None,
+    phi0_ref: jax.Array | None = None,
+    phi0_sandoval: tuple | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Net AND gross assimilation for a mixed C3/C4 canopy.
 
@@ -517,7 +543,8 @@ def photosynthesis(
     # Use the inner FvCB assimilation (which exposes a_gross + rd) so GROSS GPP
     # can be returned alongside NET An — without changing the single-value
     # c3/c4_photosynthesis wrappers relied on elsewhere.
-    r_c3 = c3_assimilation(Tf, Ci, APAR, Vcmax25_C3, TgC, rjv25=rjv25)
+    r_c3 = c3_assimilation(Tf, Ci, APAR, Vcmax25_C3, TgC, rjv25=rjv25,
+                           phi0_ref=phi0_ref, phi0_sandoval=phi0_sandoval)
     r_c4 = c4_assimilation(Tf, Ci, APAR, Vcmax25_C4)
     # NET assimilation is NOT floored at zero: a respiring leaf (night, hot
     # and dry) returns An = -Rd, so the leaf CO2 diffusion balance has its

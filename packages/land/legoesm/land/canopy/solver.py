@@ -248,6 +248,21 @@ class CanopyForcingBundle(NamedTuple):
     psi50_xylem_mpa: jax.Array | None = None
     ck_xylem: jax.Array | None = None
     gamma_cost: jax.Array | None = None
+    # P-model reference quantum yield (PModelConfig.kphio) as (ncol,), set
+    # only under CanopyConfig.light_response='pmodel_phi0': the C3 kernel's
+    # electron transport then uses J = 4 phi0(T) I / sqrt(1 + (4 phi0 I /
+    # Jmax)^2).  None keeps the CLM PSII light response.  Appended last.
+    phi0_ref: jax.Array | None = None
+    # Sandoval et al. (2026) phi0 inputs (PModelConfig.kphio_method=
+    # 'sandoval' with light_response='pmodel_phi0'): per-column aridity index
+    # and mGDD0 [degC]; None otherwise.  Appended last.
+    phi0_ai: jax.Array | None = None
+    phi0_mgdd0: jax.Array | None = None
+
+
+def _sandoval_of(b: "CanopyForcingBundle") -> tuple | None:
+    """``(aridity_index, mgdd0)`` for the kernel's Sandoval phi0, or None."""
+    return None if b.phi0_ai is None else (b.phi0_ai, b.phi0_mgdd0)
 
 
 def _leaf_hydraulics(x, bundle: CanopyForcingBundle, stomatal_model: str):
@@ -345,11 +360,13 @@ def _canopy_residual(
     An_Sun, _ = photosynthesis(
         T_phot_sun, Ci_Sun, b.APAR_Sun,
         b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC,
-        rjv25=b.rjv25)
+        rjv25=b.rjv25, phi0_ref=b.phi0_ref,
+        phi0_sandoval=_sandoval_of(b))
     An_Sh, _ = photosynthesis(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
         b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC,
-        rjv25=b.rjv25)
+        rjv25=b.rjv25, phi0_ref=b.phi0_ref,
+        phi0_sandoval=_sandoval_of(b))
 
     # ---- Leaf microclimate (FULLY_COUPLED: leaves use canopy air space) ----
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
@@ -481,7 +498,9 @@ def _canopy_residual(
         d_frac = floored_vpd(VPD_c) / b.Ps
         def _an_prime(T, Ci, APAR, Vc3, Vc4):
             f = lambda c: photosynthesis(T, c, APAR, Vc3, Vc4, b.fC4, b.Ps,
-                                         b.alf, b.TgC, rjv25=b.rjv25)[0]
+                                         b.alf, b.TgC, rjv25=b.rjv25,
+                                         phi0_ref=b.phi0_ref,
+                                         phi0_sandoval=_sandoval_of(b))[0]
             return jax.jvp(f, (Ci,), (jnp.ones_like(Ci),))[1]
         foc_Sun = instantaneous_foc(
             hyd_Sun, d_frac,
@@ -583,11 +602,13 @@ def canopy_forward(
     An_Sun, Agross_Sun = photosynthesis(
         T_phot_sun, Ci_Sun, b.APAR_Sun,
         b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC,
-        rjv25=b.rjv25)
+        rjv25=b.rjv25, phi0_ref=b.phi0_ref,
+        phi0_sandoval=_sandoval_of(b))
     An_Sh, Agross_Sh = photosynthesis(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
         b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC,
-        rjv25=b.rjv25)
+        rjv25=b.rjv25, phi0_ref=b.phi0_ref,
+        phi0_sandoval=_sandoval_of(b))
 
     # FULLY_COUPLED: leaves and soil share the canopy air space (Tc, q_c).
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(

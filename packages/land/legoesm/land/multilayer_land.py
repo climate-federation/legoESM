@@ -212,6 +212,7 @@ def step_multilayer_land_with_diagnostics(
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
+    solar_hour: jnp.ndarray | None = None,
 ):
     """Like :func:`step_multilayer_land` but also returns the ``SurfaceFluxOutput``.
 
@@ -229,7 +230,8 @@ def step_multilayer_land_with_diagnostics(
         clm_ml_pft_per_col=clm_ml_pft_per_col,
         clm_ml_vcmaxpft_jax=clm_ml_vcmaxpft_jax,
         clm_ml_g1_medlyn_jax=clm_ml_g1_medlyn_jax,
-        soil_frozen_fraction=soil_frozen_fraction)
+        soil_frozen_fraction=soil_frozen_fraction,
+        solar_hour=solar_hour)
 
 
 def root_zone_beta_soil(
@@ -305,6 +307,7 @@ def step_multilayer_land(
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
+    solar_hour: jnp.ndarray | None = None,
 ) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None]:
     """Step the multi-layer land model forward by ``dt`` seconds.
 
@@ -329,7 +332,8 @@ def step_multilayer_land(
         clm_ml_pft_per_col=clm_ml_pft_per_col,
         clm_ml_vcmaxpft_jax=clm_ml_vcmaxpft_jax,
         clm_ml_g1_medlyn_jax=clm_ml_g1_medlyn_jax,
-        soil_frozen_fraction=soil_frozen_fraction)
+        soil_frozen_fraction=soil_frozen_fraction,
+        solar_hour=solar_hour)
     return new_state, response, carbon_new
 
 
@@ -395,6 +399,7 @@ def _step_multilayer_land_impl(
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
+    solar_hour: jnp.ndarray | None = None,
 ):
     """Internal 4-tuple (new_state, TileResponse, carbon, SurfaceFluxOutput).
 
@@ -1186,6 +1191,15 @@ def _step_multilayer_land_impl(
         # (its own radiative transfer, APAR_Sun / (fSun * LAI)); the schemes
         # without that sunlit/shaded transfer (CLM-ML, simple SEB) still use
         # the incident top-of-canopy PPFD from the shared SW split.
+        if (config.p_model.acclimation == "subdaily_noon"
+                and not isinstance(config.surface_scheme, TwoLeafCanopyConfig)):
+            # The noon-window optimum is sized on the sunlit-leaf absorbed
+            # PAR of the two-leaf transfer (comparable to the JULES top-leaf
+            # light); the other schemes have no such leaf-level light.
+            raise ValueError(
+                "PModelConfig.acclimation='subdaily_noon' is implemented for "
+                "the two-leaf canopy only; got surface scheme "
+                f"{type(config.surface_scheme).__name__}")
         if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
             _ppfd_toc = sunlit_leaf_apar(forcing, lp, LAI_override=LAI_override)
         else:
@@ -1214,6 +1228,9 @@ def _step_multilayer_land_impl(
                        else _phydro_supply.psi_s_mpa),
             rsoil_leaf=(None if _phydro_supply is None
                         else _phydro_supply.rsoil_leaf),
+            # Local solar hour of this step (subdaily_noon only; the driver
+            # supplies it — the land model carries no clock).
+            solar_hour=solar_hour,
         )
     else:
         pmodel_acclim_new = None
@@ -1728,6 +1745,7 @@ def init_multilayer_land_state(
     TgC_init: float | None = None,
     pmodel_co2_init_ppm: float | None = None,
     pmodel_ps_init_pa: float | None = None,
+    pmodel_sandoval_inputs: tuple | None = None,
 ) -> MultiLayerLandState:
     """Create initial multi-layer land state.
 
@@ -1821,6 +1839,8 @@ def init_multilayer_land_state(
             # their cold-start values are PHydroConfig init fields.
             soil_init=((config.phydro.init_psi_s_mpa, config.phydro.init_rsoil_leaf)
                        if config.transpiration_stress == "phydro" else None),
+            # Sandoval kphio: per-column (aridity index, mGDD0) climatology.
+            sandoval_inputs=pmodel_sandoval_inputs,
         )
 
     return MultiLayerLandState(

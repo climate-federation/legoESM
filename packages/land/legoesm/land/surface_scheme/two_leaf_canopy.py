@@ -435,6 +435,31 @@ def compute_two_leaf_canopy_fluxes(
         raise ValueError(
             f"unknown g1_source {cc.g1_source!r}; the Medlyn-slope scheme "
             f"must be one of {VALID_G1_SOURCES}")
+    # C3 electron-transport light response (trace-time backstop of
+    # CanopyConfig.validate()): 'clm' or 'pmodel_phi0' (P-model phi0(T_leaf),
+    # the same phi0 that sizes the acclimated capacities).
+    _light = getattr(cc, "light_response", "clm")
+    from legoesm.land.canopy.config import VALID_LIGHT_RESPONSES
+    if _light not in VALID_LIGHT_RESPONSES:
+        raise ValueError(
+            f"unknown light_response {_light!r}; must be one of "
+            f"{VALID_LIGHT_RESPONSES}")
+    if _light == "pmodel_phi0":
+        if cc.capacity_scheme != "p_model":
+            raise ValueError(
+                "light_response='pmodel_phi0' requires capacity_scheme="
+                f"'p_model' (got {cc.capacity_scheme!r})")
+        if not land_config.p_model.kphio_temp:
+            raise ValueError(
+                "light_response='pmodel_phi0' uses the temperature-dependent "
+                "phi0(T); PModelConfig.kphio_temp=False is not supported")
+    _sandoval = (land_config is not None
+                 and getattr(land_config, "p_model", None) is not None
+                 and land_config.p_model.kphio_method == "sandoval")
+    _sv_inputs = None
+    if _light == "pmodel_phi0" and _sandoval:
+        from legoesm.land.p_model import kphio_inputs_from
+        _sv_inputs = kphio_inputs_from(pmodel_acclim, land_config.p_model)
     rjv25 = None
     chi_opt = None  # P-model optimum ci/ca (C3/C4 blend), seeds the Newton Ci
     dpsi_seed = None  # P-hydro acclimated draw-down, seeds the Newton dpsi
@@ -513,6 +538,17 @@ def compute_two_leaf_canopy_fluxes(
                 Vc3_leaf = _caps.vcmax25_leaf
                 rjv25 = _caps.rjv25
             Vc4_leaf = _caps4.vcmax25_c4_leaf
+        if cc.stomatal_model == "pmodel_chi":
+            # ci = chi(xi) Ca at every step (energy_balance): the per-leaf slot
+            # carries the acclimated / realised xi [Pa^0.5] of each pathway,
+            # NOT a slope, and is not soil-stressed (JULES applies its
+            # moisture factor to net assimilation, not to chi).
+            if _caps is None:
+                raise ValueError("stomatal_model='pmodel_chi' needs the "
+                                 "least-cost capacities (capacity_scheme="
+                                 "'p_model')")
+            m_C3 = _caps.xi_sqrt_pa
+            m_C4 = _caps4.xi_c4_sqrt_pa
         if cc.g1_source == "p_model":
             # Predicted slopes replace the tabulated C3 AND C4 slopes and are
             # stressed by the empirical soil-moisture factor below exactly
@@ -524,17 +560,22 @@ def compute_two_leaf_canopy_fluxes(
             # least-cost chi this is g1 = (xi + g*sqrt(D))/(1 - g), g =
             # Gamma*/ca — the exact inversion, of which the textbook g1 = xi
             # is the Gamma*/ca -> 0 limit.
+            from legoesm.land.p_model import acclim_means
             from legoesm.land.p_model import optimal_chi as _ochi
             from legoesm.land.phydro import slope_for_model
+            # The slope reproduces the optimum's chi at the conditions the
+            # traits were set at: the running means (ema_24h) or the last
+            # noon window (subdaily_noon).
+            _pm_at = acclim_means(pmodel_acclim, land_config.p_model)
             _, _, _, _gs_pa, _ = _ochi(
-                pmodel_acclim.t_mean_K, pmodel_acclim.vpd_mean_pa,
-                pmodel_acclim.co2_mean_ppm, pmodel_acclim.ps_ema,
+                _pm_at.t_mean_K, _pm_at.vpd_mean_pa,
+                _pm_at.co2_mean_ppm, _pm_at.ps_ema,
                 land_config.p_model)
             m_C3 = slope_for_model(
                 cc.stomatal_model, _caps.chi,
-                pmodel_acclim, _gs_pa, d0_leuning_kpa=cc.d0_leuning_kpa)
+                _pm_at, _gs_pa, d0_leuning_kpa=cc.d0_leuning_kpa)
             m_C4 = slope_for_model(
-                cc.stomatal_model, _caps4.chi_c4, pmodel_acclim, _gs_pa,
+                cc.stomatal_model, _caps4.chi_c4, _pm_at, _gs_pa,
                 d0_leuning_kpa=cc.d0_leuning_kpa)
 
     # ---- Soil moisture stress ----
@@ -568,7 +609,9 @@ def compute_two_leaf_canopy_fluxes(
     # least-cost optimum, is stressed like Vcmax at the half-hourly step, so
     # the least-cost arm differs from the baseline only in where its
     # acclimated capacities and slope come from.
-    _slope_stress = fStress_vcmax
+    # Under 'pmodel_chi' the slot carries xi, which the moisture stress does
+    # not scale (it acts on Vcmax, hence on An and gs).
+    _slope_stress = 1.0 if cc.stomatal_model == "pmodel_chi" else fStress_vcmax
     m_eff  = m_C3  * _slope_stress
     # The Ball-Berry INTERCEPT b0 is the cuticular / residual minimum conductance.
     # ``cc.stress_b0`` (static Python bool) controls whether soil-moisture stress
@@ -667,6 +710,16 @@ def compute_two_leaf_canopy_fluxes(
             # broadcast: every bundle leaf is vmapped over columns, so the
             # scalar config float must be (ncol,)
             d0_leuning_kpa=jnp.full(ncol, cc.d0_leuning_kpa),
+            # P-model reference quantum yield for the C3 light response
+            # (light_response='pmodel_phi0'); None = CLM PSII form.
+            phi0_ref=(jnp.full(ncol, land_config.p_model.kphio)
+                      if _light == "pmodel_phi0" and not _sandoval else None),
+            # Sandoval et al. (2026) phi0 for the light response: the same
+            # per-column climatology that sizes the acclimated capacities.
+            phi0_ai=(_sv_inputs[0] if _light == "pmodel_phi0" and _sandoval
+                     else None),
+            phi0_mgdd0=(_sv_inputs[1] if _light == "pmodel_phi0" and _sandoval
+                        else None),
             **_phydro_bundle,
         )
 

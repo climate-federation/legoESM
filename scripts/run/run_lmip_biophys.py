@@ -167,6 +167,8 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         canopy_vcmax_profile=cfg.physics.get("canopy_vcmax_profile", "kn"),
         transpiration_stress=cfg.physics.get(
             "transpiration_stress", "beta_theta"),
+        pmodel_acclimation=cfg.physics.get("pmodel_acclimation", "ema_24h"),
+        canopy_light_response=cfg.physics.get("canopy_light_response", "clm"),
         calibrated_land_physics=bool(
             cfg.physics.get("calibrated_land_physics", False)),
         vc_max25=cfg.physics.get("vc_max25", None),
@@ -473,7 +475,8 @@ def run(args) -> int:
             max_iters=50, tol=1e-2, stomatal_model=args.stomatal_model,
             capacity_scheme=args.canopy_capacity_scheme,
             g1_source=args.canopy_g1_source,
-            vcmax_profile=args.canopy_vcmax_profile).validate()
+            vcmax_profile=args.canopy_vcmax_profile,
+            light_response=getattr(args, "canopy_light_response", "clm")).validate()
     elif args.surface_scheme == "simple_seb":
         surf = SimpleSEBConfig()
     else:
@@ -573,6 +576,10 @@ def run(args) -> int:
             # through init_land_surface_data (which only _replace()s hydraulics).
             thermal=SoilThermalConfig(enable_freeze_thaw=bool(args.enable_freeze_thaw)),
             transpiration_stress=args.transpiration_stress)
+        # P-model acclimation scheme (physics.pmodel_acclimation; validated in
+        # lmip_config): 'ema_24h' or 'subdaily_noon' (Mengoli et al. 2022).
+        base_cfg = base_cfg._replace(p_model=base_cfg.p_model._replace(
+            acclimation=getattr(args, "pmodel_acclimation", "ema_24h")))
         # A land initial condition is only meaningful for the model it was
         # equilibrated under, so a spin-up feeding a calibrated coupled run has to
         # use the same one — including its soil column, which this driver
@@ -797,6 +804,13 @@ def run(args) -> int:
         from legoesm.land.carbon.carbon_cycle import init_carbon_state
         _carbon_state = init_carbon_state((ncol,), config.carbon)
 
+    # Subdaily P-model: column longitudes [deg E] for the local solar hour.
+    _subdaily = (is_multilayer
+                 and getattr(config, "p_model", None) is not None
+                 and config.p_model.acclimation == "subdaily_noon")
+    if _subdaily:
+        from legoesm.land.p_model import local_solar_hour
+        _lon_deg_cols = jnp.asarray(np.rad2deg(np.asarray(lon_rad)).ravel())
     # ----- scan body: (state, tape_accums, revert_count) -> next. -----
     def _step_body(carry, xs):
         state, accums, revert_count = carry
@@ -806,10 +820,15 @@ def run(args) -> int:
         # Multilayer uses the diagnostics variant (4-tuple) so surface_out.gpp is
         # reachable; slab keeps the 3-tuple.  ``is_multilayer`` is static.
         if is_multilayer:
+            # Local mean solar hour per column from the UTC model clock
+            # (doy_t = UTC seconds since the forcing-year start / 86400) and the
+            # column longitude; read only by the subdaily P-model.
+            _solar_t = (local_solar_hour(doy_t * _SEC_PER_DAY, _lon_deg_cols)
+                        if _subdaily else None)
             new_state, resp, _, surf_out = step_fn(
                 state, forcing_t, config, U_MIN, dt,
                 lat=lat_rad, land_params=land_params_t, doy=doy_t,
-                carbon_state=_carbon_state)
+                carbon_state=_carbon_state, solar_hour=_solar_t)
         else:
             new_state, resp, _ = step_fn(
                 state, forcing_t, config, U_MIN, dt,

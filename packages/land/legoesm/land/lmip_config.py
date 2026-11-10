@@ -77,7 +77,7 @@ _GRID_TYPES = ("latlon", "gaussian", "cubed_sphere",
 _LAND_MODES = ("multilayer", "slab")
 _SURFACE_SCHEMES = ("two_leaf_canopy", "simple_seb")
 _BULK_SCHEMES = ("most", "constant")
-_STOMATA_MODELS = ("ball_berry", "medlyn", "phydro")
+_STOMATA_MODELS = ("ball_berry", "medlyn", "phydro", "pmodel_chi")
 # physics.optimality -> the optimality switches it stands for (lmip_config and
 # the EC-site driver share this table; the launcher's --arm maps onto it).
 OPTIMALITY_SWITCHES = {
@@ -274,6 +274,59 @@ def validate_config(data: dict) -> LMIPConfig:
             "P-model switches with land_mode='slab' + surface_scheme="
             "'simple_seb' would be silently inert (the slab config carries no "
             "stomata block); use land_mode='multilayer' or the two-leaf canopy")
+    # P-model instantaneous ci (ci = chi(xi) Ca; JULES stomata_pmodel): the
+    # two-leaf canopy with the P-model capacities and no predicted slope.
+    if physics["stomatal_model"] == "pmodel_chi" and (
+            physics["surface_scheme"] != "two_leaf_canopy"
+            or physics["canopy_capacity_scheme"] != "p_model"
+            or physics["canopy_g1_source"] != "table"):
+        raise ValueError(
+            "physics.stomatal_model='pmodel_chi' needs the two-leaf canopy with "
+            "canopy_capacity_scheme='p_model' and canopy_g1_source='table'")
+    # C3 electron-transport light response: 'clm' (default) or 'pmodel_phi0'
+    # (P-model phi0(T_leaf), the phi0 that sizes the acclimated capacities).
+    physics.setdefault("canopy_light_response", "clm")
+    from legoesm.land.canopy.config import VALID_LIGHT_RESPONSES
+    if physics["canopy_light_response"] not in VALID_LIGHT_RESPONSES:
+        raise ValueError(
+            f"physics.canopy_light_response={physics['canopy_light_response']!r}"
+            f" not in {VALID_LIGHT_RESPONSES}")
+    if physics["canopy_light_response"] == "pmodel_phi0" and (
+            physics["surface_scheme"] != "two_leaf_canopy"
+            or physics["canopy_capacity_scheme"] != "p_model"):
+        raise ValueError(
+            "physics.canopy_light_response='pmodel_phi0' needs the two-leaf "
+            "canopy with canopy_capacity_scheme='p_model'; got surface_scheme="
+            f"{physics['surface_scheme']!r}, canopy_capacity_scheme="
+            f"{physics['canopy_capacity_scheme']!r}")
+    # P-model acclimation scheme: 'ema_24h' (15-day running means of the 24 h
+    # drivers, the original) or 'subdaily_noon' (Mengoli et al. 2022: daily
+    # optimum at the 11:00-13:00 local-solar means, 1/15 memory on the traits).
+    physics.setdefault("pmodel_acclimation", "ema_24h")
+    from legoesm.land.p_model import VALID_ACCLIMATION
+    if physics["pmodel_acclimation"] not in VALID_ACCLIMATION:
+        raise ValueError(
+            f"physics.pmodel_acclimation={physics['pmodel_acclimation']!r} "
+            f"not in {VALID_ACCLIMATION}")
+    if physics["pmodel_acclimation"] == "subdaily_noon":
+        # Refuse every combination where the switch would be inert or would
+        # mix noon-acclimated traits with 24 h conditions (no silent fallback).
+        if not _pm_on:
+            raise ValueError(
+                "physics.pmodel_acclimation='subdaily_noon' without a P-model "
+                "switch (canopy_capacity_scheme / canopy_g1_source = p_model) "
+                "would be silently inert")
+        if (physics["land_mode"] != "multilayer"
+                or physics["surface_scheme"] != "two_leaf_canopy"):
+            raise ValueError(
+                "physics.pmodel_acclimation='subdaily_noon' is implemented for "
+                "land_mode='multilayer' with the two-leaf canopy only; got "
+                f"land_mode={physics['land_mode']!r}, surface_scheme="
+                f"{physics['surface_scheme']!r}")
+        if physics["transpiration_stress"] == "phydro":
+            raise ValueError(
+                "physics.pmodel_acclimation='subdaily_noon' is not wired for "
+                "the P-hydro arm (its optimum uses the 24 h running means)")
     if (physics["canopy_vcmax_profile"] != "kn"
             and physics["surface_scheme"] != "two_leaf_canopy"):
         raise ValueError(
