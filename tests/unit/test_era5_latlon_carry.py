@@ -422,8 +422,12 @@ def test_scale_build_latlon_samples_seed_the_ice_skin():
     src = (Path(__file__).resolve().parents[2] / "packages" / "ml" / "legoesm"
            / "training" / "scale_build.py").read_text()
     tree = ast.parse(src)
+    # The builder calls the converter through ``_to_carry``, which picks the
+    # lat-lon (or cubed-sphere) converter by training core.
+    assert "else era5_to_latlon_carry)" in src
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-             and getattr(n.func, "id", None) == "era5_to_latlon_carry"]
+             and getattr(n.func, "id", None) in ("era5_to_latlon_carry",
+                                                 "_to_carry")]
     assert calls
     for n in calls:
         kws = {k.arg: ast.unparse(k.value) for k in n.keywords if k.arg}

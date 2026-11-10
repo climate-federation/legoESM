@@ -57,11 +57,11 @@ def test_multilayer_land_flags_flow_to_config():
     parser = build_arg_parser()
     # default: slab land (multilayer off)
     cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_off.use_multilayer_land is False
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--land-mask-file", "lsm.nc",
         "--use-multilayer-land",
         "--multilayer-n-layers", "8",
@@ -75,11 +75,11 @@ def test_multilayer_land_flags_flow_to_config():
 def test_land_update_seconds_flows_to_config_and_validates():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_off.land_update_seconds == 0.0
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--land-mask-file", "lsm.nc",
         "--use-multilayer-land",
         "--land-update-seconds", "300",
@@ -102,18 +102,18 @@ def test_hard_saturation_adjustment_flag_flows_to_config():
     parser = build_arg_parser()
     # default OFF: byte-identical smooth microphysics path
     cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_off.hard_saturation_adjustment is False
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--hard-saturation-adjustment",
     ]), parser))
     assert cfg_on.hard_saturation_adjustment is True
 
     # BooleanOptionalAction exposes the explicit --no- off switch.
     cfg_no = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--no-hard-saturation-adjustment",
     ]), parser))
     assert cfg_no.hard_saturation_adjustment is False
@@ -125,18 +125,18 @@ def test_use_clubb_cloud_fraction_flag_flows_to_config():
     parser = build_arg_parser()
     # default OFF: RH grid-scale cloud fraction (byte-identical path)
     cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_off.use_clubb_cloud_fraction is False
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--turbulence", "clubb",
         "--use-clubb-cloud-fraction",
     ]), parser))
     assert cfg_on.use_clubb_cloud_fraction is True
     # explicit negation restores the default (BooleanOptionalAction)
     cfg_neg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--no-use-clubb-cloud-fraction",
     ]), parser))
     assert cfg_neg.use_clubb_cloud_fraction is False
@@ -154,11 +154,11 @@ def test_clubb_prognostic_flag_reaches_the_turbulence_kernel():
 
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_off.clubb_prognostic is False
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--turbulence", "clubb",
         "--clubb-prognostic",
     ]), parser))
@@ -174,7 +174,7 @@ def test_clubb_prognostic_flag_reaches_the_turbulence_kernel():
         materialize_sub_config,
     )
     cfg_diag = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--turbulence", "clubb",
+        "--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "clubb",
     ]), parser))
     diag_tc = materialize_sub_config(turbulence_config_for(cfg_diag))
     assert diag_tc.clubb.prognostic is False
@@ -187,7 +187,7 @@ def test_clubb_prognostic_under_another_closure_is_refused():
 
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--turbulence", "louis",
+        "--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "louis",
         "--clubb-prognostic",
     ]), parser))
     with pytest.raises(ValueError, match="requires turbulence='clubb'"):
@@ -282,7 +282,7 @@ def test_no_use_multilayer_land_overrides_yaml_default():
     parser = build_arg_parser()
     parser.set_defaults(use_multilayer_land=True)  # what a YAML would do
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--no-use-multilayer-land",
+        "--dataset", "analytical", "--convection", "tiedtke", "--no-use-multilayer-land",
     ]), parser))
     assert cfg.use_multilayer_land is False
 
@@ -294,7 +294,7 @@ def test_no_sponge_overrides_yaml_default():
     parser = build_arg_parser()
     parser.set_defaults(sponge_enabled=True)  # what a YAML would do
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--no-sponge",
+        "--dataset", "analytical", "--convection", "tiedtke", "--no-sponge",
     ]), parser))
     assert cfg.sponge_enabled is False
 
@@ -307,7 +307,7 @@ def test_no_surface_tiled_overrides_yaml_default():
     parser = build_arg_parser()
     parser.set_defaults(surface_tiled=True)  # what a YAML would do
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--no-surface-tiled",
+        "--dataset", "analytical", "--convection", "tiedtke", "--no-surface-tiled",
     ]), parser))
     assert cfg.surface_tiled is False
 
@@ -371,11 +371,11 @@ def test_clm_surfdata_path_flows_to_config():
     surfdata NetCDF for the multilayer land)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.clm_surfdata_path == ""
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--clm-surfdata-path", "/data/clm_surfdata.nc",
     ]), parser))
     assert cfg.clm_surfdata_path == "/data/clm_surfdata.nc"
@@ -386,12 +386,12 @@ def test_transient_land_cover_flags_flow_to_config():
     ExperimentConfig (off + empty by default => static single-year cover)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.transient_land_cover is False
     assert cfg_default.land_cover_surfdata == ""
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--land-mask-file", "lsm.nc", "--use-multilayer-land",
         "--transient-land-cover",
         "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
@@ -405,7 +405,7 @@ def test_transient_land_cover_validate_strict_requires_multilayer_and_surfdata()
     without a surfdata path — both would silently no-op the requested LULC."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--land-mask-file", "lsm.nc", "--use-multilayer-land",
         "--transient-land-cover",
         "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
@@ -425,10 +425,10 @@ def test_era5_allow_flat_phis_flows_to_config():
     without surface geopotential (decision C, 2026-10-02)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.era5_allow_flat_phis is False
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--era5-allow-flat-phis"]), parser))
+        "--dataset", "analytical", "--convection", "tiedtke", "--era5-allow-flat-phis"]), parser))
     assert cfg.era5_allow_flat_phis is True
 
 
@@ -438,11 +438,11 @@ def test_land_ic_path_flows_to_config():
     cold-start soil column in a coupled multilayer AMIP run."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.land_ic_path == ""
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--land-ic", "/scratch/land_spinup/land_ic.npz",
     ]), parser))
     assert cfg.land_ic_path == "/scratch/land_spinup/land_ic.npz"
@@ -451,11 +451,11 @@ def test_land_ic_path_flows_to_config():
 def test_snow_albedo_feedback_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_off.snow_albedo_feedback is False
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--snow-albedo-feedback",
+        "--dataset", "analytical", "--convection", "tiedtke", "--snow-albedo-feedback",
     ]), parser))
     assert cfg_on.snow_albedo_feedback is True
 
@@ -465,16 +465,16 @@ def test_moisture_advection_flag_flows_to_config():
     bit-identical legacy path); --moisture-advection turns it on."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.moisture_advection is False   # default off
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--moisture-advection",
+        "--dataset", "analytical", "--convection", "tiedtke", "--moisture-advection",
     ]), parser))
     assert cfg_on.moisture_advection is True
 
     cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--no-moisture-advection",
+        "--dataset", "analytical", "--convection", "tiedtke", "--no-moisture-advection",
     ]), parser))
     assert cfg_off.moisture_advection is False
 
@@ -486,11 +486,11 @@ def test_radiation_column_chunk_flag_flows_to_config():
     column blocks (numerically exact — radiation columns are independent)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.rrtmgp_column_chunk_size == 0
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--radiation-column-chunk", "256",
+        "--dataset", "analytical", "--convection", "tiedtke", "--radiation-column-chunk", "256",
     ]), parser))
     assert cfg.rrtmgp_column_chunk_size == 256
 
@@ -501,11 +501,11 @@ def test_land_gs_max_flag_flows_to_config():
     matches StomataConfig.gs_max; a lower value raises canopy resistance."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.land_gs_max == 0.3
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--land-gs-max", "0.15",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-gs-max", "0.15",
     ]), parser))
     assert cfg.land_gs_max == 0.15
 
@@ -515,7 +515,7 @@ def test_land_gs_max_validate_strict_rejects_nonpositive_or_nonfinite():
     value would zero or NaN the entire land latent-heat flux."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     for bad in (0.0, -0.1, float("nan")):
         with pytest.raises(ValueError, match="land_gs_max"):
             cfg._replace(land_gs_max=bad).validate_strict()
@@ -528,11 +528,11 @@ def test_land_interface_flux_flag_flows_to_config():
     discretization term remains — see _step_slab_land)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.land_interface_flux == "legacy_dual"
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--land-interface-flux", "unified",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-interface-flux", "unified",
         "--turbulence", "holtslag_boville", "--slab-land-active",
         "--topography", "etopo",
     ]), parser))
@@ -543,7 +543,7 @@ def test_land_interface_flux_flag_flows_to_config():
     # 'unified' would silently never step; validate_strict must reject it
     # (codex R2 finding: the tile-presence gate must see through the flag).
     flat = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--land-interface-flux", "unified",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-interface-flux", "unified",
         "--turbulence", "holtslag_boville", "--slab-land-active",
     ]), parser))
     with pytest.raises(ValueError, match="land_interface_flux"):
@@ -551,7 +551,7 @@ def test_land_interface_flux_flag_flows_to_config():
 
     # Unknown value is rejected by argparse choices (before validate_strict).
     with pytest.raises(SystemExit):
-        parser.parse_args(["--dataset", "analytical",
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke",
                            "--land-interface-flux", "both"])
 
 
@@ -560,7 +560,7 @@ def test_land_interface_flux_unified_requires_turbulence():
     no atmosphere-side surface-layer law to unify with)."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--land-interface-flux", "unified",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-interface-flux", "unified",
         "--turbulence", "none", "--slab-land-active",
         "--topography", "etopo",
     ]), parser))
@@ -573,17 +573,17 @@ def test_c_land_flag_flows_to_config():
     config field was silently inert — never threaded to the pipeline)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.C_land == 2.0e5
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--c-land", "5e5",
+        "--dataset", "analytical", "--convection", "tiedtke", "--c-land", "5e5",
     ]), parser))
     assert cfg.C_land == 5.0e5
     cfg.validate_strict()
 
     bad = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--c-land", "0.0",
+        "--dataset", "analytical", "--convection", "tiedtke", "--c-land", "0.0",
     ]), parser))
     with pytest.raises(ValueError, match="C_land"):
         bad.validate_strict()
@@ -594,11 +594,11 @@ def test_land_soil_moisture_init_frac_flag_flows_to_config():
     knob); default 0.5 is byte-identical to the init default."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.land_soil_moisture_init_frac == 0.5
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--land-soil-moisture-init-frac", "0.25",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-soil-moisture-init-frac", "0.25",
     ]), parser))
     assert cfg.land_soil_moisture_init_frac == 0.25
     for bad in (0.0, -0.1, 1.5, float("nan")):
@@ -616,10 +616,10 @@ def test_land_canopy_max_iters_flag_flows_to_config():
     from legoesm.land.canopy.config import CanopyConfig
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.land_canopy_max_iters == 60 == CanopyConfig().max_iters
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--land-canopy-max-iters", "10",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-canopy-max-iters", "10",
     ]), parser))
     assert cfg.land_canopy_max_iters == 10
     for bad in (0, -1, 2.5, True):
@@ -660,10 +660,10 @@ def test_land_surface_scheme_flag_flows_to_config():
     """
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.land_surface_scheme == "two_leaf"
     cfg_ml_default = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--use-multilayer-land",
+        "--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land",
         "--land-mask-file", "lsm.nc",
     ]), parser))
     assert cfg_ml_default.land_surface_scheme == "two_leaf"
@@ -671,7 +671,7 @@ def test_land_surface_scheme_flag_flows_to_config():
     # Canopy schemes require --use-multilayer-land (they run inside the multilayer
     # land tile); the flag round-trips with it set.
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--land-surface-scheme", "two_leaf",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-surface-scheme", "two_leaf",
         "--use-multilayer-land",
     ]), parser))
     assert cfg.land_surface_scheme == "two_leaf"
@@ -680,7 +680,7 @@ def test_land_surface_scheme_flag_flows_to_config():
     # ACCEPT it (the coupled ncol>1 capability gate lives in the driver setup,
     # not here — single-point CLM-ML runs today via run_lmip).
     cfg_clm = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-surface-scheme", "clm_ml",
         "--use-multilayer-land", "--land-mask-file", "lsm.nc",
     ]), parser))
     assert cfg_clm.land_surface_scheme == "clm_ml"
@@ -692,11 +692,11 @@ def test_clm_ml_use_surfdata_pft_flag_flows_to_config():
     mixed-PFT columns handled by the group-by-structure scan).  Default off."""
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_off.clm_ml_use_surfdata_pft is False
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--land-surface-scheme", "clm_ml",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-surface-scheme", "clm_ml",
         "--use-multilayer-land", "--clm-ml-use-surfdata-pft",
     ]), parser))
     assert cfg_on.clm_ml_use_surfdata_pft is True
@@ -707,14 +707,14 @@ def test_canopy_scheme_requires_multilayer_land():
     not a silent drop to the slab land (dispatch-hardening)."""
     parser = build_arg_parser()
     for scheme in ("two_leaf", "clm_ml"):
-        argv = ["--dataset", "analytical", "--land-surface-scheme", scheme]
+        argv = ["--dataset", "analytical", "--convection", "tiedtke", "--land-surface-scheme", scheme]
         with pytest.raises(SystemExit):
             _postprocess_args(parser.parse_args(argv), parser, argv)
     # simple_seb is a no-op on the slab and is NOT gated.  (It is no longer the
     # default — the two-leaf canopy is — but an EXPLICIT canopy request without
     # the tile is still refused, which is what the loop above checks.)
     _postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--land-surface-scheme", "simple_seb",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-surface-scheme", "simple_seb",
     ]), parser)
 
 
@@ -723,13 +723,13 @@ def test_sponge_flags_flow_to_config():
     top-of-atmosphere sponge); default OFF with the config default coeff/base."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.sponge_enabled is False
     assert cfg_default.sponge_coeff_per_day == 2.0
     assert cfg_default.sponge_sigma_top == 0.15
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--sponge",
+        "--dataset", "analytical", "--convection", "tiedtke", "--sponge",
         "--sponge-coeff-per-day", "4.0", "--sponge-sigma-top", "0.2",
     ]), parser))
     assert cfg.sponge_enabled is True
@@ -742,12 +742,12 @@ def test_hard_sat_override_flags_flow_and_validate():
     gate + spec-bounds enforcement (day-137 drain-capacity lever)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.hard_sat_adjust_threshold is None
     assert cfg_default.hard_sat_max_heating_K is None
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--microphysics", "morrison",
+        "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "morrison",
         "--hard-saturation-adjustment",
         "--hard-sat-max-heating-k", "10.0",
         "--hard-sat-adjust-threshold", "1.05",
@@ -758,7 +758,7 @@ def test_hard_sat_override_flags_flow_and_validate():
 
     # Override without the boolean gate -> refused (silently-inert config).
     cfg_nogate = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--microphysics", "morrison",
+        "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "morrison",
         "--hard-sat-max-heating-k", "10.0",
     ]), parser))
     with pytest.raises(ValueError, match="hard_saturation_adjustment=True"):
@@ -766,7 +766,7 @@ def test_hard_sat_override_flags_flow_and_validate():
 
     # Spec bounds enforced.
     cfg_oob = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--microphysics", "morrison",
+        "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "morrison",
         "--hard-saturation-adjustment",
         "--hard-sat-max-heating-k", "80.0",
     ]), parser))
@@ -779,12 +779,12 @@ def test_mpas_land_boundary_flags_flow_to_config():
     surface boundary, 2026-07-23 speckle fix); defaults byte-identical OFF."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.land_lapse_K_per_km == 0.0
     assert cfg_default.land_beta == 1.0
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--grid-type", "voronoi", "--discretization", "mpas",
         "--mpas-land-lapse-k-per-km", "6.5", "--mpas-land-beta", "0.6",
     ]), parser))
@@ -800,11 +800,11 @@ def test_mpas_qv_smoothing_flag_flows_to_config():
     smoothing, 2026-07-23 speckle fix); default byte-identical OFF."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.mpas_qv_smooth_del2_m2s == 0.0
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--grid-type", "voronoi", "--discretization", "mpas",
         "--mpas-qv-smooth-del2-m2s", "2e5",
     ]), parser))
@@ -823,12 +823,12 @@ def test_snow_albedo_ageing_flags_flow_to_config():
     """
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.snow_age_activation_K is None
     assert cfg_default.land_snow_tau_days == 150.0
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--snow-age-activation-K", "5000",
         "--land-snow-tau-days", "60",
     ]), parser))
@@ -843,7 +843,7 @@ def test_land_soil_freeze_thaw_round_trip_and_decks():
     OFF so it still reproduces the arms it exists for."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     parser = build_arg_parser()
-    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    base = ["--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land"]
     cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
     assert cfg0.land_soil_freeze_thaw is False
     cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
@@ -868,7 +868,7 @@ def test_land_soil_ice_impedance_exponent_round_trip_deck_and_range():
     (user 2026-09-28), and a value outside [0, 10] is refused."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     parser = build_arg_parser()
-    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    base = ["--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land"]
     cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
     assert cfg0.land_soil_ice_impedance_exponent == 6.0
     cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
@@ -883,7 +883,7 @@ def test_land_soil_ice_impedance_exponent_round_trip_deck_and_range():
         with pytest.raises(ValueError, match="land_soil_ice_impedance_exponent"):
             cfg.validate_strict()
     slab = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--land-soil-ice-impedance-exponent", "3"]), parser))
+        ["--dataset", "analytical", "--convection", "tiedtke", "--land-soil-ice-impedance-exponent", "3"]), parser))
     with pytest.raises(ValueError, match="requires use_multilayer_land"):
         slab.validate_strict()
 
@@ -891,7 +891,7 @@ def test_land_soil_ice_impedance_exponent_round_trip_deck_and_range():
 def test_land_soil_freeze_thaw_without_multilayer_land_is_refused():
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--land-soil-freeze-thaw"]), parser))
+        ["--dataset", "analytical", "--convection", "tiedtke", "--land-soil-freeze-thaw"]), parser))
     with pytest.raises(ValueError, match="land_soil_freeze_thaw"):
         cfg.validate_strict()
 
@@ -902,7 +902,7 @@ def test_land_canopy_flags_round_trip_and_production_pin():
     values (b0 stressed, interception off)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     parser = build_arg_parser()
-    base = ["--dataset", "analytical", "--use-multilayer-land",
+    base = ["--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land",
             "--land-surface-scheme", "two_leaf"]
     cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
     assert cfg0.land_canopy_stress_b0 is True
@@ -928,7 +928,7 @@ def test_land_canopy_flags_round_trip_and_production_pin():
 def test_land_canopy_flags_without_two_leaf_are_refused(flag):
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--use-multilayer-land",
+        ["--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land",
          "--land-surface-scheme", "simple_seb", flag]), parser))
     with pytest.raises(ValueError, match="two_leaf"):
         cfg.validate_strict()
@@ -939,7 +939,7 @@ def test_land_snow_insulation_round_trip_and_production_deck():
     production deck records it explicitly OFF (user 2026-10-03)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     parser = build_arg_parser()
-    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    base = ["--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land"]
     cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
     assert cfg0.land_snow_insulation is False
     cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
@@ -961,7 +961,7 @@ def test_land_snow_insulation_round_trip_and_production_deck():
 def test_land_snow_insulation_with_clm_ml_canopy_is_refused():
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--use-multilayer-land",
+        ["--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land",
          "--land-snow-insulation"]), parser))._replace(land_surface_scheme="clm_ml")
     with pytest.raises(ValueError, match="land_snow_insulation is not supported"):
         cfg.validate_strict()
@@ -970,7 +970,7 @@ def test_land_snow_insulation_with_clm_ml_canopy_is_refused():
 def test_land_snow_insulation_with_layered_snowpack_is_refused():
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--use-multilayer-land",
+        ["--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land",
          "--land-surface-scheme", "two_leaf", "--land-snow-scheme", "layered",
          "--land-snow-insulation"]), parser))
     with pytest.raises(ValueError, match="carries its own snow heat"):
@@ -980,7 +980,7 @@ def test_land_snow_insulation_with_layered_snowpack_is_refused():
 def test_land_snow_insulation_without_multilayer_land_is_refused():
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--land-snow-insulation"]), parser))
+        ["--dataset", "analytical", "--convection", "tiedtke", "--land-snow-insulation"]), parser))
     with pytest.raises(ValueError, match="land_snow_insulation"):
         cfg.validate_strict()
 
@@ -991,7 +991,7 @@ def test_land_snow_tau_days_out_of_range_is_refused(bad):
     that the value is not a snow-ageing timescale."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--land-snow-tau-days", bad]), parser))
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-snow-tau-days", bad]), parser))
     with pytest.raises(ValueError, match="land_snow_tau_days"):
         cfg.validate_strict()
 
@@ -1015,10 +1015,10 @@ def test_snow_albedo_responds_to_the_ageing_timescale():
 def test_latlon_qv_smooth_flag_flows_to_config():
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg.latlon_qv_smooth_del4_m4s == 0.0
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--latlon-qv-smooth-del4-m4s", "5e13",
+        "--dataset", "analytical", "--convection", "tiedtke", "--latlon-qv-smooth-del4-m4s", "5e13",
     ]), parser))
     assert cfg.latlon_qv_smooth_del4_m4s == 5e13
 
@@ -1029,11 +1029,11 @@ def test_mpas_qv_biharmonic_flag_flows_to_config():
     independent so an arm can move one without the other."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.mpas_qv_smooth_del4_m4s == 0.0
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--grid-type", "voronoi", "--discretization", "mpas",
         "--mpas-qv-smooth-del4-m4s", "3.6e14",
     ]), parser))
@@ -1046,11 +1046,11 @@ def test_mpas_land_beta_soil_flag_flows_to_config():
     default byte-identical OFF, --no- form revertible from a YAML True."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.land_beta_soil is False
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--grid-type", "voronoi", "--discretization", "mpas",
         "--use-multilayer-land", "--mpas-land-beta-soil",
     ]), parser))
@@ -1059,7 +1059,7 @@ def test_mpas_land_beta_soil_flag_flows_to_config():
     parser2 = build_arg_parser()
     parser2.set_defaults(land_beta_soil=True)   # simulates a YAML pin
     cfg_off = build_config_from_args(_postprocess_args(parser2.parse_args([
-        "--dataset", "analytical", "--no-mpas-land-beta-soil",
+        "--dataset", "analytical", "--convection", "tiedtke", "--no-mpas-land-beta-soil",
     ]), parser2))
     assert cfg_off.land_beta_soil is False
     # validate_strict inert-corner guards live in
@@ -1069,12 +1069,12 @@ def test_mpas_land_stress_from_land_flag_flows_to_config():
     from the run's eligibility; --no-... is an explicit off."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.land_stress_from_land is None
     for flag, want in (("--mpas-land-stress-from-land", True),
                        ("--no-mpas-land-stress-from-land", False)):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-            "--dataset", "analytical", flag]), parser))
+            "--dataset", "analytical", "--convection", "tiedtke", flag]), parser))
         assert cfg.land_stress_from_land is want
 
 
@@ -1082,12 +1082,12 @@ def test_mpas_ocean_flux_on_ocean_surface_flag_flows_to_config():
     """--mpas-ocean-flux-on-ocean-surface round-trip; unset = auto (None)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.ocean_flux_on_ocean_surface is None
     for flag, want in (("--mpas-ocean-flux-on-ocean-surface", True),
                        ("--no-mpas-ocean-flux-on-ocean-surface", False)):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-            "--dataset", "analytical", flag]), parser))
+            "--dataset", "analytical", "--convection", "tiedtke", flag]), parser))
         assert cfg.ocean_flux_on_ocean_surface is want
 
 
@@ -1096,7 +1096,7 @@ def test_land_surface_scheme_validate_strict_rejects_unknown():
     a typo must fail early, not silently fall through in model_driver)."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     with pytest.raises(ValueError, match="land_surface_scheme"):
         cfg._replace(land_surface_scheme="two_leff").validate_strict()
 
@@ -1104,11 +1104,11 @@ def test_land_surface_scheme_validate_strict_rejects_unknown():
 def test_orbital_insolation_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_off.orbital_insolation is False
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--orbital-insolation",
+        "--dataset", "analytical", "--convection", "tiedtke", "--orbital-insolation",
     ]), parser))
     assert cfg_on.orbital_insolation is True
 
@@ -1126,12 +1126,12 @@ def test_convective_cloud_boolean_optional_action_can_disable_config_default():
     parser = build_arg_parser()
     # default (no flag): OFF, and flows to the config
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.convective_cloud is False
 
     # explicit --convective-cloud: ON (backward-compatible with the old store_true)
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--convective-cloud",
+        "--dataset", "analytical", "--convection", "tiedtke", "--convective-cloud",
     ]), parser))
     assert cfg_on.convective_cloud is True
 
@@ -1139,9 +1139,9 @@ def test_convective_cloud_boolean_optional_action_can_disable_config_default():
     # can be turned OFF with --no-convective-cloud (impossible under store_true).
     parser2 = build_arg_parser()
     parser2.set_defaults(convective_cloud=True)          # simulates the YAML default
-    assert parser2.parse_args(["--dataset", "analytical"]).convective_cloud is True
+    assert parser2.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]).convective_cloud is True
     cfg_off = build_config_from_args(_postprocess_args(parser2.parse_args([
-        "--dataset", "analytical", "--no-convective-cloud",
+        "--dataset", "analytical", "--convection", "tiedtke", "--no-convective-cloud",
     ]), parser2))
     assert cfg_off.convective_cloud is False
 
@@ -1187,7 +1187,7 @@ def test_build_config_includes_joint_physics_parameterization_flags():
 def test_enable_latlon_spmd_flag_flows_to_config():
     """--enable-latlon-spmd round-trips into ExperimentConfig (default off)."""
     parser = build_arg_parser()
-    base = ["--dataset", "analytical", "--time-var", "month",
+    base = ["--dataset", "analytical", "--convection", "tiedtke", "--time-var", "month",
             "--lat-var", "ylat", "--lon-var", "xlon"]
     cfg_off = build_config_from_args(_postprocess_args(
         parser.parse_args(base), parser))
@@ -1205,7 +1205,7 @@ def test_latlon_spmd_compiled_segments_flag_flows_to_config():
     import pytest
 
     parser = build_arg_parser()
-    base = ["--dataset", "analytical", "--time-var", "month",
+    base = ["--dataset", "analytical", "--convection", "tiedtke", "--time-var", "month",
             "--lat-var", "ylat", "--lon-var", "xlon"]
     cfg_off = build_config_from_args(_postprocess_args(
         parser.parse_args(base), parser))
@@ -1299,7 +1299,7 @@ def test_convection_tiedtke_parses_and_flows_to_config():
 def test_build_config_includes_surfdata_path():
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--land-mask-file", "sftlf.nc",
         "--surfdata", "legoesm_surfdata.nc",
     ])
@@ -1312,14 +1312,14 @@ def test_build_config_includes_surfdata_path():
 
 def test_build_config_surfdata_defaults_empty():
     parser = build_arg_parser()
-    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.surfdata_path == ""
 
 
 def test_surfdata_without_land_mask_warns(capsys):
     parser = build_arg_parser()
-    args = parser.parse_args(["--dataset", "analytical", "--surfdata", "sd.nc"])
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke", "--surfdata", "sd.nc"])
     _postprocess_args(args, parser)
     assert "ignored without --land-mask-file" in capsys.readouterr().out
 
@@ -1339,7 +1339,7 @@ def test_joint_parameterization_requires_mass_flux_and_louis():
 def test_precision_flag_flows_to_config_and_validates():
     parser = build_arg_parser()
     for mode in ("fp32", "fp64", "mixed"):
-        args = parser.parse_args(["--dataset", "analytical",
+        args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke",
                                   "--precision", mode])
         args = _postprocess_args(args, parser)
         cfg = build_config_from_args(args)
@@ -1349,7 +1349,7 @@ def test_precision_flag_flows_to_config_and_validates():
 
 def test_precision_default_is_fp32():
     parser = build_arg_parser()
-    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]),
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]),
                              parser)
     assert build_config_from_args(args).precision == "fp32"
 
@@ -1378,7 +1378,7 @@ def test_spectral_postprocess_promotes_gaussian_grid():
 def test_ic_era5_threads_through_to_config():
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--ic", "era5",
         "--ic-path", "/tmp/era5_test.zarr",
     ])
@@ -1391,7 +1391,7 @@ def test_ic_era5_threads_through_to_config():
 
 def test_ic_default_is_backward_compatible():
     parser = build_arg_parser()
-    args = parser.parse_args(["--dataset", "analytical"])
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
 
@@ -1456,7 +1456,7 @@ def test_surface_tiled_flags_flow_to_config():
     and validate together with --slab-land-active + --turbulence louis."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--surface-bulk-scheme", "coare3",
         "--slab-land-active",
@@ -1477,7 +1477,7 @@ def test_surface_tiled_flags_flow_to_config():
 def test_surface_tiled_defaults_off():
     """Without the flag, tiling is off (byte-identical legacy behaviour)."""
     parser = build_arg_parser()
-    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.surface_tiled is False
 
@@ -1487,7 +1487,7 @@ def test_surface_tiled_unsupported_turbulence_rejected():
     surface_flux tuple (e.g. holtslag_boville) fails strict validation."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--turbulence", "holtslag_boville",
         "--slab-land-active",
         "--surface-tiled",
@@ -1505,7 +1505,7 @@ def test_surface_tiled_accepts_flux_consuming_schemes(scheme):
     CLUBB family (clubb routes it through clubb_step's kinematic interface)."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-mask-file", "land_mask.nc",
         "--turbulence", scheme,
         "--surface-bulk-scheme", "coare3",
         "--slab-land-active",
@@ -1522,7 +1522,7 @@ def test_soil_bucket_flags_flow_to_config():
     and validate together with an active land tile."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--slab-land-active",
         "--land-soil-bucket",
@@ -1551,7 +1551,7 @@ def test_infiltration_params_reject_nan_and_negative():
     a bare ``x < 0`` would let NaN slip through and poison the infiltration cap)."""
     parser = build_arg_parser()
     args = _postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--land-mask-file", "land_mask.nc", "--slab-land-active", "--land-soil-bucket"]),
+        ["--dataset", "analytical", "--convection", "tiedtke", "--land-mask-file", "land_mask.nc", "--slab-land-active", "--land-soil-bucket"]),
         parser)
     base = build_config_from_args(args)
     assert base.validate_strict() is None          # baseline is valid
@@ -1566,7 +1566,7 @@ def test_infiltration_params_reject_nan_and_negative():
 def test_soil_bucket_defaults_off():
     """Without the flag, the bucket is off (byte-identical legacy behaviour)."""
     parser = build_arg_parser()
-    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.land_soil_bucket is False
 
@@ -1575,7 +1575,7 @@ def test_soil_bucket_requires_active_land_rejected():
     """--land-soil-bucket without an active land tile fails strict validation."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--turbulence", "louis",
         "--land-soil-bucket",
     ])
@@ -1589,7 +1589,7 @@ def test_land_stomatal_beta_flag_flows_to_config():
     """--land-stomatal-beta round-trips and validates with the bucket on."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical", "--land-mask-file", "land_mask.nc",
+        "--dataset", "analytical", "--convection", "tiedtke", "--land-mask-file", "land_mask.nc",
         "--turbulence", "louis",
         "--slab-land-active",
         "--land-soil-bucket",
@@ -1603,7 +1603,7 @@ def test_land_stomatal_beta_flag_flows_to_config():
 
 def test_land_stomatal_beta_defaults_off():
     parser = build_arg_parser()
-    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser)
     assert build_config_from_args(args).land_stomatal_beta is False
 
 
@@ -1611,7 +1611,7 @@ def test_land_stomatal_beta_requires_bucket_rejected():
     """--land-stomatal-beta without the bucket (no beta_soil) is rejected."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--turbulence", "louis",
         "--slab-land-active",
         "--land-stomatal-beta",
@@ -1626,7 +1626,7 @@ def test_soil_bucket_rejects_bad_beta_min():
     """beta_min outside (0, 1] is rejected."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--turbulence", "louis",
         "--slab-land-active",
         "--land-soil-bucket",
@@ -1680,7 +1680,7 @@ def test_bechtold_subsidence_solve_flows_to_config():
     the parser (choices) and by validate_strict membership."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "bechtold",
         "--convection", "bechtold",
         "--bechtold-subsidence-solve", "advective",
     ])
@@ -1689,7 +1689,7 @@ def test_bechtold_subsidence_solve_flows_to_config():
     assert cfg.bechtold_subsidence_solve == "advective"
     assert cfg.validate_strict() is None
 
-    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical", "--convection", "bechtold"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.bechtold_subsidence_solve == "implicit_flux"
     with pytest.raises(SystemExit):
@@ -1701,7 +1701,7 @@ def test_bechtold_subsidence_solve_flows_to_config():
 def test_bechtold_cape_threshold_defaults_to_scheme_default():
     """Unset → matches BechtoldConfig.cape_threshold (byte-identical)."""
     parser = build_arg_parser()
-    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.bechtold_cape_threshold == 70.0
 
@@ -1709,7 +1709,7 @@ def test_bechtold_cape_threshold_defaults_to_scheme_default():
 def test_bechtold_cape_threshold_rejects_negative():
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "bechtold",
         "--bechtold-cape-threshold", "-5.0",
     ])
     args = _postprocess_args(args, parser)
@@ -1721,7 +1721,7 @@ def test_bechtold_cape_threshold_rejects_negative():
 def test_issue484_new_amip_flags_flow_to_config():
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--hyperdiff-scale", "1.25",
         "--div-damp-scale", "0.75",
         "--no-conservation-fixer",
@@ -1791,7 +1791,7 @@ def test_tuned_slab_knobs_flow_to_config():
     keep the prior AMIP behaviour (constant / 0 / None / off)."""
     parser = build_arg_parser()
     d = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert d.surface_bulk_scheme == "constant"
     # None = scheme-native gustiness (coare3: 600 m AeroBulk default, others
     # off).  With the default "constant" scheme this is still off.
@@ -1801,7 +1801,7 @@ def test_tuned_slab_knobs_flow_to_config():
     assert d.convective_cloud is False
 
     c = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--surface-bulk-scheme", "coare3",
         "--gustiness-zi", "300",
         "--q-c-diagnostic", "3e-4",
@@ -1848,13 +1848,13 @@ def test_aimip_classical_overrides_force_sundqvist_microphysics(tmp_path):
     parser = build_arg_parser()
     # explicit --microphysics none is the water-trap case the override repairs
     # (the CLI default is now sundqvist under the full-physics policy)
-    args = parser.parse_args(["--dataset", "analytical", "--microphysics", "none",
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "none",
                               "--aimip-classical-checkpoint", ckpt])
     assert args.microphysics == "none"
     out = _apply_aimip_classical_overrides(args)
     # convection is NOT forced: a checkpoint never overrides the config's
-    # scheme (user decision 2026-11-06); none was named, so none is set...
-    assert out.convection is None
+    # scheme (user decision 2026-11-06): the named one is kept...
+    assert out.convection == "tiedtke"
     # ...the rest of the classical scheme set is forced on...
     assert out.turbulence == "louis"
     assert out.gravity_wave_drag == "mcfarlane"
@@ -1881,7 +1881,7 @@ def test_amip_default_physics_all_active():
     convection/microphysics/turbulence/gravity_wave_drag/clouds + radiation."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     for slot in ("convection", "microphysics", "turbulence",
                  "gravity_wave_drag"):
         assert getattr(cfg, slot) != "none", f"{slot} defaulted to none"
@@ -1984,7 +1984,7 @@ def test_aimip_classical_overrides_warn_mpas_backend(tmp_path, capsys):
     a loud warning fires that the trained leaves only apply on the FV path."""
     ckpt = _serialise_aimip_defaults(tmp_path)
     parser = build_arg_parser()
-    args = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi",
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke", "--grid-type", "voronoi",
                               "--discretization", "mpas",
                               "--aimip-classical-checkpoint", ckpt])
     out = _apply_aimip_classical_overrides(args)
@@ -2012,7 +2012,7 @@ def test_aimip_classical_overrides_respect_explicit_microphysics(tmp_path):
     (the trained sundqvist leaves only apply to sundqvist)."""
     ckpt = _serialise_aimip_defaults(tmp_path)
     parser = build_arg_parser()
-    args = parser.parse_args(["--dataset", "analytical",
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke",
                               "--microphysics", "morrison",
                               "--aimip-classical-checkpoint", ckpt])
     out = _apply_aimip_classical_overrides(args)
@@ -2038,7 +2038,7 @@ def test_max_wallclock_seconds_threads_to_config():
     """--max-wallclock-seconds must wire into OutputConfig.max_wallclock_seconds."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--max-wallclock-seconds", "41400",
         "--checkpoint-days", "30",
     ])
@@ -2057,7 +2057,7 @@ def test_slurm_ntasks_1_does_not_trigger_distributed(monkeypatch):
     monkeypatch.delenv("PMI_SIZE", raising=False)
     monkeypatch.delenv("MPI_LOCALNRANKS", raising=False)
     parser = build_arg_parser()
-    args = parser.parse_args(["--dataset", "analytical"])
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"])
     args = _postprocess_args(args, parser)
     assert not args.distributed, "SLURM_NTASKS=1 must not trigger distributed mode"
 
@@ -2069,7 +2069,7 @@ def test_slurm_ntasks_4_triggers_distributed(monkeypatch):
     monkeypatch.delenv("PMI_SIZE", raising=False)
     monkeypatch.delenv("MPI_LOCALNRANKS", raising=False)
     parser = build_arg_parser()
-    args = parser.parse_args(["--dataset", "analytical"])
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"])
     args = _postprocess_args(args, parser)
     assert args.distributed, "SLURM_NTASKS=4 must trigger distributed mode"
 
@@ -2128,7 +2128,7 @@ def test_forcing_activity_solar_constant_label():
 def test_slab_land_active_flag_threads_to_config():
     """--slab-land-active must reach ExperimentConfig.slab_land_active."""
     parser = build_arg_parser()
-    args = parser.parse_args(["--dataset", "analytical", "--slab-land-active"])
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke", "--slab-land-active"])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
     assert cfg.slab_land_active is True
@@ -2137,7 +2137,7 @@ def test_slab_land_active_flag_threads_to_config():
 def test_slab_land_active_default_is_false():
     """slab_land_active must default to False (passive land is the safe default)."""
     parser = build_arg_parser()
-    args = parser.parse_args(["--dataset", "analytical"])
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
     assert cfg.slab_land_active is False
@@ -2147,7 +2147,7 @@ def test_gustiness_zi_threads_to_config():
     """--gustiness-zi and --surface-bulk-scheme must reach ExperimentConfig."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--surface-bulk-scheme", "coare3",
         "--gustiness-zi", "300",
         "--turbulence", "holtslag_boville",
@@ -2168,7 +2168,7 @@ def test_q_c_diagnostic_threads_to_config(value: str):
     """
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--q-c-diagnostic", value,
     ])
     args = _postprocess_args(args, parser)
@@ -2182,12 +2182,12 @@ def test_gustiness_defaults_scheme_native():
     the default "constant" scheme, 600 m built-in for coare3; explicit 0
     forces off.  cloud_q_c_diagnostic stays None = CloudConfig default."""
     parser = build_arg_parser()
-    args = parser.parse_args(["--dataset", "analytical"])
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
     assert cfg.surface_gustiness_zi is None
     assert cfg.cloud_q_c_diagnostic is None
-    args0 = parser.parse_args(["--dataset", "analytical", "--gustiness-zi", "0"])
+    args0 = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke", "--gustiness-zi", "0"])
     cfg0 = build_config_from_args(_postprocess_args(args0, parser))
     assert cfg0.surface_gustiness_zi == 0.0
 
@@ -2198,13 +2198,13 @@ def test_bulk_thermo_convention_flag_flows_to_config():
     (constant L_v / dry c_pd, byte-identical); "aerobulk" = NEMO/AeroBulk
     parity, and passes the validate_strict membership check."""
     parser = build_arg_parser()
-    args = parser.parse_args(["--dataset", "analytical"])
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
     assert cfg.surface_thermo_convention == "legoesm"
 
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--surface-bulk-scheme", "coare3",
         "--turbulence", "holtslag_boville",
         "--bulk-thermo-convention", "aerobulk",
@@ -2220,7 +2220,7 @@ def test_cloud_tuning_flags_thread_to_config():
     strict validation within their bounds."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--rh-crit", "0.83",
         "--cloud-conv-cloud-max", "0.25",
     ])
@@ -2234,7 +2234,7 @@ def test_cloud_tuning_flags_thread_to_config():
 def test_cloud_tuning_flags_default_none():
     """Unset cloud-tuning knobs stay None (scheme defaults, byte-identical)."""
     parser = build_arg_parser()
-    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.cloud_rh_crit is None
     assert cfg.cloud_conv_cloud_max is None
@@ -2244,7 +2244,7 @@ def test_rh_crit_out_of_bounds_rejected():
     """An rh_crit outside (0.5, 0.99) must fail strict validation."""
     parser = build_arg_parser()
     args = _postprocess_args(
-        parser.parse_args(["--dataset", "analytical", "--rh-crit", "1.5"]), parser)
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke", "--rh-crit", "1.5"]), parser)
     cfg = build_config_from_args(args)
     with pytest.raises((ValueError, AssertionError)):
         cfg.validate_strict()
@@ -2261,7 +2261,7 @@ def test_conv_cloud_condensate_flag_resolves_to_cloudconfig():
     parser = build_arg_parser()
     # Explicit flag => ExperimentConfig scalar => resolved (hot-loop) CloudConfig.
     args = _postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--conv-cloud-condensate", "3e-5",
+        "--dataset", "analytical", "--convection", "tiedtke", "--conv-cloud-condensate", "3e-5",
     ]), parser)
     cfg = build_config_from_args(args)
     assert cfg.cloud_conv_cloud_condensate == pytest.approx(3e-5)
@@ -2272,7 +2272,7 @@ def test_conv_cloud_condensate_flag_resolves_to_cloudconfig():
     assert resolved.conv_cloud_condensate == pytest.approx(3e-5)
     # Unset => None scalar => CloudConfig keeps its default anvil condensate.
     cfg_def = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_def.cloud_conv_cloud_condensate is None
     resolved_def = build_cloud_config(
         cfg_def.cloud_scheme,
@@ -2286,7 +2286,7 @@ def test_conv_cloud_condensate_out_of_bounds_rejected():
     """A conv_cloud_condensate outside (1e-5, 1e-3) must fail strict validation."""
     parser = build_arg_parser()
     args = _postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--conv-cloud-condensate", "1e-2",
+        "--dataset", "analytical", "--convection", "tiedtke", "--conv-cloud-condensate", "1e-2",
     ]), parser)
     cfg = build_config_from_args(args)
     with pytest.raises((ValueError, AssertionError)):
@@ -2297,7 +2297,7 @@ def test_subgrid_autoconv_flag_threads_to_config():
     """--subgrid-autoconv round-trips into ExperimentConfig (#613)."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--microphysics", "morrison",
         "--subgrid-autoconv",
     ])
@@ -2310,7 +2310,7 @@ def test_subgrid_autoconv_flag_threads_to_config():
 def test_subgrid_autoconv_defaults_off():
     """Sub-grid warm-rain closure is opt-in (byte-identical legacy default)."""
     parser = build_arg_parser()
-    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.subgrid_autoconversion is False
 
@@ -2320,7 +2320,7 @@ def test_convective_cloud_flag_threads_to_config():
     CMIP slab config config/cmip/cmip_ocean_slab.yaml)."""
     parser = build_arg_parser()
     args = _postprocess_args(
-        parser.parse_args(["--dataset", "analytical", "--convective-cloud"]), parser)
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke", "--convective-cloud"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.convective_cloud is True
 
@@ -2328,7 +2328,7 @@ def test_convective_cloud_flag_threads_to_config():
 def test_convective_cloud_defaults_off():
     """Convective cloud cover is opt-in (byte-identical legacy default)."""
     parser = build_arg_parser()
-    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.convective_cloud is False
 
@@ -2768,8 +2768,8 @@ def test_params_calibration_applies_to_atm_experimentconfig(tmp_path):
         load_params_config,
     )
     parser = build_arg_parser()
-    cfg = build_config_from_args(
-        _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(_AMIP_DUMMY_PATHS + ["--convection", "tiedtke"]), parser))
     p = tmp_path / "params.yaml"
     p.write_text("atm.clouds.CloudConfig.q_c_diagnostic: 3.0e-4\n")
     out = apply_params_to_config(
@@ -2907,7 +2907,7 @@ def test_sundqvist_flags_rejected_on_mpas_spectral():
 def test_evaluate_flags_flow_to_config():
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--cmip-output",
         "--evaluate",
         "--evaluation-suite", "Tier1_sanity_checks", "Tier2_atmosphere_monthly",
@@ -2936,7 +2936,7 @@ def test_evaluate_flags_flow_to_config():
 
 def test_evaluate_defaults_off():
     parser = build_arg_parser()
-    args = parser.parse_args(["--dataset", "analytical"])
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
     assert cfg.output.evaluation.enabled is False
@@ -2947,7 +2947,7 @@ def test_evaluate_default_suites_empty_means_all_tiers():
     then discovers + runs ALL bundled suites (every tier)."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--dataset", "analytical", "--convection", "tiedtke", "--cmip-output", "--evaluate",
         "--evaluation-climateeval-python", sys.executable,
         "--evaluation-data-root-dir", "/tmp",
     ])
@@ -2968,7 +2968,7 @@ def test_evaluate_climateeval_python_unset_rejected():
     validate_strict, before the (multi-hour) run ever starts."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--dataset", "analytical", "--convection", "tiedtke", "--cmip-output", "--evaluate",
         "--evaluation-data-root-dir", "/tmp",
     ])
     args = _postprocess_args(args, parser)
@@ -2981,7 +2981,7 @@ def test_evaluate_climateeval_python_unset_rejected():
 def test_evaluate_climateeval_python_nonexistent_rejected():
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--dataset", "analytical", "--convection", "tiedtke", "--cmip-output", "--evaluate",
         "--evaluation-climateeval-python", "/no/such/interpreter",
         "--evaluation-data-root-dir", "/tmp",
     ])
@@ -2994,7 +2994,7 @@ def test_evaluate_climateeval_python_nonexistent_rejected():
 def test_evaluate_data_root_dir_unset_rejected(tmp_path):
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--dataset", "analytical", "--convection", "tiedtke", "--cmip-output", "--evaluate",
         "--evaluation-climateeval-python", sys.executable,
     ])
     args = _postprocess_args(args, parser)
@@ -3007,7 +3007,7 @@ def test_evaluate_valid_climateeval_config_passes(tmp_path):
     """A real, executable interpreter + a real directory clears validate_strict."""
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--dataset", "analytical", "--convection", "tiedtke", "--cmip-output", "--evaluate",
         "--evaluation-climateeval-python", sys.executable,
         "--evaluation-data-root-dir", str(tmp_path),
     ])
@@ -3020,7 +3020,7 @@ def test_evaluate_climateeval_python_env_var_default(monkeypatch):
     monkeypatch.setenv("LEGOESM_CLIMATEEVAL_PYTHON", "/env/climateeval/bin/python")
     monkeypatch.setenv("LEGOESM_CLIMATEEVAL_DATA_ROOT", "/env/climateeval_data")
     parser = build_arg_parser()
-    args = parser.parse_args(["--dataset", "analytical", "--cmip-output", "--evaluate"])
+    args = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke", "--cmip-output", "--evaluate"])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
     assert cfg.output.evaluation.climateeval_python == "/env/climateeval/bin/python"
@@ -3032,21 +3032,21 @@ def test_cloud_sensitivity_flags_round_trip_and_validate():
     values fail validate_strict (the xu_randall cloud-fraction sensitivity knobs
     for flattening the moisture-driven overcast runaway)."""
     parser = build_arg_parser()
-    d = parser.parse_args(["--dataset", "analytical"])
+    d = parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"])
     assert d.cloud_p_xr is None and d.cloud_alpha_xr is None
     args = _postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--cloud-p-xr", "0.7",
+        ["--dataset", "analytical", "--convection", "tiedtke", "--cloud-p-xr", "0.7",
          "--cloud-alpha-xr", "20"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.cloud_p_xr == 0.7 and cfg.cloud_alpha_xr == 20.0
     # unset -> None (byte-identical: CloudConfig default preserved)
     base = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert base.cloud_p_xr is None and base.cloud_alpha_xr is None
     # both bounds enforced by validate_strict
     for flag, val in [("--cloud-p-xr", "5.0"), ("--cloud-alpha-xr", "5000")]:
         bad = build_config_from_args(_postprocess_args(parser.parse_args(
-            ["--dataset", "analytical", flag, val]), parser))
+            ["--dataset", "analytical", "--convection", "tiedtke", flag, val]), parser))
         with pytest.raises(Exception):
             bad.validate_strict()
 
@@ -3079,11 +3079,11 @@ def test_distributed_mode_flag_flows_to_config():
     (production cs_spmd is config-file-only without this flag)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.distributed_mode == "mpi"
 
     cfg_spmd = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--distributed", "--distributed-mode", "spmd",
     ]), parser))
     assert cfg_spmd.distributed is True
@@ -3095,7 +3095,7 @@ def test_distributed_mode_flag_flows_to_config():
 
     # Unknown mode is an argparse-level refusal (choices).
     with pytest.raises(SystemExit):
-        parser.parse_args(["--dataset", "analytical",
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke",
                            "--distributed-mode", "bogus"])
 
 
@@ -3105,16 +3105,16 @@ def test_moisture_flux_form_flag_flows_to_dycore_config():
     --no-moisture-flux-form explicit off."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.dycore.moisture_flux_form is False   # default off
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--moisture-flux-form",
+        "--dataset", "analytical", "--convection", "tiedtke", "--moisture-flux-form",
     ]), parser))
     assert cfg_on.dycore.moisture_flux_form is True
 
     cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--no-moisture-flux-form",
+        "--dataset", "analytical", "--convection", "tiedtke", "--no-moisture-flux-form",
     ]), parser))
     assert cfg_off.dycore.moisture_flux_form is False
 
@@ -3125,16 +3125,16 @@ def test_mpas_nu_vert4_t_flag_flows_to_dycore_config():
     2Δσ-checkerboard cure).  Production default is ON (nonzero); 0 disables."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.dycore.mpas_nu_vert4_T > 0.0   # cure on by default
 
     cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--mpas-nu-vert4-t", "0",
+        "--dataset", "analytical", "--convection", "tiedtke", "--mpas-nu-vert4-t", "0",
     ]), parser))
     assert cfg_off.dycore.mpas_nu_vert4_T == 0.0
 
     cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--mpas-nu-vert4-t", "5e-6",
+        "--dataset", "analytical", "--convection", "tiedtke", "--mpas-nu-vert4-t", "5e-6",
     ]), parser))
     assert cfg_set.dycore.mpas_nu_vert4_T == pytest.approx(5e-6)
 
@@ -3158,7 +3158,7 @@ def test_multicontroller_requires_enable_latlon_spmd(capsys):
     BEFORE any device work (it is only the route-B transport for that lane)."""
     from scripts.run.run_amip import main
     with pytest.raises(SystemExit):
-        main(["--grid-type", "latlon", "--dataset", "analytical",
+        main(["--grid-type", "latlon", "--dataset", "analytical", "--convection", "tiedtke",
               "--multicontroller"])
     assert "requires --enable-latlon-spmd" in capsys.readouterr().err
 
@@ -3168,11 +3168,11 @@ def test_top_sponge_flags_flow_to_dycore_config():
     round-trip into DycoreConfig; default sponge_coeff=0 keeps the sponge OFF."""
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_off.dycore.sponge_coeff == 0.0          # default OFF
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--sponge-coeff", "1.157e-5",
         "--sponge-width-m", "12000.0",
         "--sponge-shape", "sam_rational",
@@ -3190,11 +3190,11 @@ def test_sb81_omega_conversion_flag_flows_to_dycore_config():
     legacy arithmetic form."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.dycore.sb81_omega_conversion is True   # default ON
 
     cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--no-sb81-omega-conversion",
+        "--dataset", "analytical", "--convection", "tiedtke", "--no-sb81-omega-conversion",
     ]), parser))
     assert cfg_off.dycore.sb81_omega_conversion is False
 
@@ -3204,17 +3204,17 @@ def test_budget_ledger_flag_flows_to_output_config():
     round-trips into OutputConfig; default OFF = byte-identical model."""
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_off.output.budget_ledger is False   # default OFF
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--budget-ledger",
+        "--dataset", "analytical", "--convection", "tiedtke", "--budget-ledger",
     ]), parser))
     assert cfg_on.output.budget_ledger is True
 
     # BooleanOptionalAction: a YAML-true value stays CLI-overridable.
     cfg_neg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--no-budget-ledger",
+        "--dataset", "analytical", "--convection", "tiedtke", "--no-budget-ledger",
     ]), parser))
     assert cfg_neg.output.budget_ledger is False
 
@@ -3246,11 +3246,11 @@ def test_bechtold_conv_top_pa_flows_to_config():
     plume-termination stability cap); default 15000 Pa (150 hPa)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "bechtold"]), parser))
     assert cfg_default.bechtold_conv_top_pa == 15000.0
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "bechtold",
         "--bechtold-conv-top-pa", "12000",
     ]), parser))
     assert cfg.bechtold_conv_top_pa == 12000.0
@@ -3274,13 +3274,13 @@ def test_convective_precip_split_round_trips():
     ExperimentConfig (the physical Sundqvist autoconversion selector)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.convective_precip_split == "constant"
     assert cfg_default.autoconv_q_c_crit == 5.0e-4
     assert cfg_default.autoconv_pe_max == 0.9
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--convection", "bechtold",
         "--convective-precip-split", "autoconversion",
         "--autoconv-q-c-crit", "8e-4",
@@ -3293,7 +3293,7 @@ def test_convective_precip_split_round_trips():
     # an unknown selector is rejected at parse time (argparse choices)
     with pytest.raises(SystemExit):
         parser.parse_args([
-            "--dataset", "analytical",
+            "--dataset", "analytical", "--convection", "tiedtke",
             "--convective-precip-split", "garbage",
         ])
 
@@ -3400,11 +3400,11 @@ def test_cloud_inhomogeneity_factor_round_trips():
     round-trips into ExperimentConfig; default None => CloudConfig default."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--cloud-inhomogeneity-factor", "0.7",
+        "--dataset", "analytical", "--convection", "tiedtke", "--cloud-inhomogeneity-factor", "0.7",
     ]), parser))
     assert cfg.cloud_inhomogeneity_factor == 0.7
     d = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert d.cloud_inhomogeneity_factor is None
 
 
@@ -3424,7 +3424,7 @@ def test_cloud_optics_inhomogeneity_round_trips_and_threads():
     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--cloud-optics-inhomogeneity", "two_region", "--cloud-fsd", "0.8",
     ]), parser))
     assert cfg.cloud_optics_inhomogeneity == "two_region"
@@ -3437,7 +3437,7 @@ def test_cloud_optics_inhomogeneity_round_trips_and_threads():
     assert cc.cloud_fsd == 0.8
     # default: 'constant' scheme + None fsd => CloudConfig defaults
     d = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert d.cloud_optics_inhomogeneity == "constant"
     assert d.cloud_fsd is None
     dcc = build_cloud_config(d.cloud_scheme,
@@ -3464,7 +3464,7 @@ def test_cloud_saturation_scheme_round_trips_and_threads():
     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--cloud-saturation-scheme", "mixed_phase",
     ]), parser))
     assert cfg.cloud_saturation_scheme == "mixed_phase"
@@ -3475,7 +3475,7 @@ def test_cloud_saturation_scheme_round_trips_and_threads():
     # 2026-09-17 (the 'liquid' curve made cold cloud impossible: at 230 K /
     # 900 hPa ice-saturated air reads RH 0.662 against rh_crit 0.85).
     d = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert d.cloud_saturation_scheme == "mixed_phase"
     assert build_cloud_config(
         d.cloud_scheme,
@@ -3496,11 +3496,11 @@ def test_louis_cloudtop_entrainment_efficiency_flows_to_config():
     structural AMIP albedo fix). Single knob: default 0.0 = off."""
     parser = build_arg_parser()
     cfg0 = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg0.louis_cloudtop_entrainment_efficiency == 0.0
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--cloudtop-entrainment-efficiency", "0.35",
+        "--dataset", "analytical", "--convection", "tiedtke", "--cloudtop-entrainment-efficiency", "0.35",
     ]), parser))
     assert cfg.louis_cloudtop_entrainment_efficiency == 0.35
 
@@ -3512,13 +3512,13 @@ def test_louis_cloudtop_entrainment_threads_into_louis_config():
     from legoesm.driver.physics_pipeline import turbulence_config_for
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--turbulence", "louis",
+        "--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "louis",
         "--cloudtop-entrainment-efficiency", "0.4",
     ]), parser))
     assert turbulence_config_for(cfg).louis.cloudtop_entrainment_efficiency == 0.4
 
     cfg0 = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--turbulence", "louis",
+        "--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "louis",
     ]), parser))
     assert turbulence_config_for(cfg0).louis.cloudtop_entrainment_efficiency == 0.0
 
@@ -3539,12 +3539,12 @@ def test_diagnostic_condensate_scheme_flows_to_config():
     ExperimentConfig (default 'constant' == byte-identical legacy floor)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.cloud_diagnostic_condensate_scheme == "constant"
     assert cfg_default.cloud_adiabatic_lwc_rate is None
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--clouds", "sundqvist",
         "--diagnostic-condensate-scheme", "adiabatic",
         "--adiabatic-lwc-rate", "2.0e-6",
@@ -3717,17 +3717,17 @@ def test_enable_tiled_dycore_flag_flows_to_config():
     import pytest
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_off.enable_tiled_dycore is False
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--enable-tiled-dycore",
+        "--dataset", "analytical", "--convection", "tiedtke", "--enable-tiled-dycore",
     ]), parser))
     assert cfg_on.enable_tiled_dycore is True
     cfg_on.validate_strict()   # default grid = cubed_sphere -> legal
 
     cfg_bad = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--grid-type", "latlon",
+        "--dataset", "analytical", "--convection", "tiedtke", "--grid-type", "latlon",
         "--enable-tiled-dycore",
     ]), parser))
     with pytest.raises(ValueError, match="cubed_sphere"):
@@ -3741,13 +3741,13 @@ def test_explicit_zero_sic_scale_and_sst_offset_preserved():
     replaced by the fallback default (1.0 / 0.0)."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--sic-scale", "0.0", "--sst-offset", "0.0",
+        "--dataset", "analytical", "--convection", "tiedtke", "--sic-scale", "0.0", "--sst-offset", "0.0",
     ]), parser))
     assert cfg.sic_scale == 0.0
     assert cfg.sst_offset == 0.0
     # The default path still yields the fallbacks.
     cfg_def = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_def.sic_scale == 1.0 and cfg_def.sst_offset == 0.0
 
 
@@ -3759,12 +3759,13 @@ def test_preset_dataset_defaults_and_override():
     preset config, which used to be dropped by ``_replace(path, T_ice)``."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "cobe", "--forcing-path", "/tmp/cobe.nc",
+        "--dataset", "cobe", "--forcing-path", "/tmp/cobe.nc", "--convection", "tiedtke",
     ]), parser))
     assert cfg.sic_scale == 0.01          # cobe percent -> fraction (preset default)
     assert cfg.sst_offset == 0.0          # cobe already Kelvin
     cfg0 = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "cobe", "--forcing-path", "/tmp/cobe.nc", "--sic-scale", "0",
+        "--convection", "tiedtke",
     ]), parser))
     assert cfg0.sic_scale == 0.0          # explicit no-ice override honored
 
@@ -4094,41 +4095,41 @@ def test_truncation_conflicting_grid_or_discretization_errors():
     parser = build_arg_parser()
     with pytest.raises(SystemExit):
         _postprocess_args(parser.parse_args([
-            "--dataset", "analytical", "--truncation", "42",
+            "--dataset", "analytical", "--convection", "tiedtke", "--truncation", "42",
             "--grid-type", "latlon",
         ]), parser)
     with pytest.raises(SystemExit):
         _postprocess_args(parser.parse_args([
-            "--dataset", "analytical", "--truncation", "42",
+            "--dataset", "analytical", "--convection", "tiedtke", "--truncation", "42",
             "--discretization", "mpas",
         ]), parser)
     # An explicit value EQUAL to the production default also conflicts (the
     # None-sentinel default makes it distinguishable from unset).
     with pytest.raises(SystemExit):
         _postprocess_args(parser.parse_args([
-            "--dataset", "analytical", "--truncation", "42",
+            "--dataset", "analytical", "--convection", "tiedtke", "--truncation", "42",
             "--grid-type", "cubed_sphere",
         ]), parser)
     with pytest.raises(SystemExit):
         _postprocess_args(parser.parse_args([
-            "--dataset", "analytical", "--discretization", "spectral",
+            "--dataset", "analytical", "--convection", "tiedtke", "--discretization", "spectral",
             "--grid-type", "latlon",
         ]), parser)
     # Bare --truncation still auto-configures the spectral pair.
     args = _postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--truncation", "42",
+        "--dataset", "analytical", "--convection", "tiedtke", "--truncation", "42",
     ]), parser)
     assert args.grid_type == "gaussian"
     assert args.discretization == "spectral"
     assert args.resolution == 42
     # Explicit-but-agreeing choices also pass.
     args = _postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--truncation", "42",
+        "--dataset", "analytical", "--convection", "tiedtke", "--truncation", "42",
         "--grid-type", "gaussian", "--discretization", "spectral",
     ]), parser)
     assert args.grid_type == "gaussian"
     # Bare defaults resolve to the production pair.
-    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]),
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]),
                              parser)
     assert args.grid_type == "cubed_sphere"
     assert args.discretization == "centered"
@@ -4140,17 +4141,17 @@ def test_explicit_zero_p_top_and_stretching_survive():
     reject it loudly); the bare default still yields 200.0/2.0."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--p-top", "0", "--stretching", "0",
+        "--dataset", "analytical", "--convection", "tiedtke", "--p-top", "0", "--stretching", "0",
     ]), parser))
     assert cfg.grid.p_top_Pa == 0.0
     assert cfg.grid.stretching == 0.0
     cfg_def = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_def.grid.p_top_Pa == 200.0
     assert cfg_def.grid.stretching == 2.0
 
 
-def test_restart_still_requires_forcing_path_for_real_data():
+def test_restart_still_requires_forcing_path_for_real_data(capsys):
     """--restart-from does NOT exempt --forcing-path for a real dataset: forcing
     is not in the checkpoint and setup() loads it before the checkpoint, so the
     old exemption only deferred the failure to a confusing deep error
@@ -4159,16 +4160,18 @@ def test_restart_still_requires_forcing_path_for_real_data():
     with pytest.raises(SystemExit):
         _postprocess_args(parser.parse_args([
             "--dataset", "custom", "--restart-from", "/tmp/ckpt.zarr",
+            "--convection", "tiedtke",
         ]), parser)
+    assert "--forcing-path required" in capsys.readouterr().err
     # analytical needs no forcing file even on restart.
     args = _postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--restart-from", "/tmp/ckpt.zarr",
+        "--dataset", "analytical", "--convection", "tiedtke", "--restart-from", "/tmp/ckpt.zarr",
     ]), parser)
     assert args.restart_from == "/tmp/ckpt.zarr"
     # real dataset WITH a forcing path is fine.
     args = _postprocess_args(parser.parse_args([
         "--dataset", "custom", "--restart-from", "/tmp/ckpt.zarr",
-        "--forcing-path", "/tmp/sst.nc",
+        "--forcing-path", "/tmp/sst.nc", "--convection", "tiedtke",
     ]), parser)
     assert args.forcing_path == "/tmp/sst.nc"
 
@@ -4226,12 +4229,12 @@ def test_hard_sat_override_flags_flow_to_config():
     defaults None keep the per-scheme __param_spec__ values."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.hard_sat_adjust_threshold is None
     assert cfg_default.hard_sat_max_heating_K is None
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--microphysics", "morrison",
+        "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "morrison",
         "--hard-saturation-adjustment",
         "--hard-sat-adjust-threshold", "1.2",
         "--hard-sat-max-heating-k", "10.0",
@@ -4247,7 +4250,7 @@ def test_hard_sat_override_without_gate_is_refused():
     validate_strict must refuse it."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--microphysics", "morrison",
+        "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "morrison",
         "--hard-sat-max-heating-k", "10.0",
     ]), parser))
     with pytest.raises(ValueError, match="hard_sat_max_heating_K"):
@@ -4262,7 +4265,7 @@ def test_hard_sat_override_bounds_enforced():
             (["--hard-sat-adjust-threshold", "0.9"], "hard_sat_adjust_threshold"),
             (["--hard-sat-max-heating-k", "100.0"], "hard_sat_max_heating_K")):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-            "--dataset", "analytical", "--microphysics", "morrison",
+            "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "morrison",
             "--hard-saturation-adjustment", *flags,
         ]), parser))
         with pytest.raises(ValueError, match=match):
@@ -4289,7 +4292,7 @@ def test_hard_saturation_adjustment_requires_a_guarded_scheme():
                                           "ifs_cloudsc", "sundqvist"}
     for micro in sorted(HARD_SAT_GUARD_EXEMPT):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-            "--dataset", "analytical", "--microphysics", micro,
+            "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", micro,
             "--hard-saturation-adjustment",
         ]), parser))
         with pytest.raises(ValueError, match="carrying the guard"):
@@ -4309,7 +4312,7 @@ def test_hard_saturation_adjustment_accepted_by_every_guarded_scheme():
     assert len(exposed) == 2, exposed
     for micro in exposed:
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-            "--dataset", "analytical", "--microphysics", micro,
+            "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", micro,
             "--hard-saturation-adjustment",
         ]), parser))
         cfg.validate_strict()   # must NOT raise
@@ -4319,12 +4322,12 @@ def test_morrison_flavor_round_trips():
     """--morrison-flavor sam round-trips into ExperimentConfig; default mg."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--microphysics", "morrison",
+        "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "morrison",
         "--morrison-flavor", "sam",
     ]), parser))
     assert cfg.morrison_flavor == "sam"
     d = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert d.morrison_flavor == "mg"
 
 
@@ -4333,12 +4336,12 @@ def test_morrison_ice_snow_d_auto_round_trips():
     default unset (None = the flavor's DCS)."""
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--microphysics", "morrison",
+        "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "morrison",
         "--morrison-ice-snow-d-auto", "3.0e-4",
     ]), parser))
     assert cfg.morrison_ice_snow_d_auto == 3.0e-4
     d = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert d.morrison_ice_snow_d_auto is None
 
 
@@ -4348,10 +4351,10 @@ def test_morrison_flavor_yaml_route():
     parser = build_arg_parser()
     parser.set_defaults(morrison_flavor="sam", microphysics="morrison")
     cfg = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg.morrison_flavor == "sam"
     cfg_cli = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--morrison-flavor", "mg",
+        "--dataset", "analytical", "--convection", "tiedtke", "--morrison-flavor", "mg",
     ]), parser))
     assert cfg_cli.morrison_flavor == "mg"
 
@@ -4634,7 +4637,7 @@ def test_sub_daily_diag_days_round_trips_and_never_disables_the_check():
 
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--diag-days", "0.01",
+        "--dataset", "analytical", "--convection", "tiedtke", "--diag-days", "0.01",
     ]), parser))
     assert cfg.output.diag_days == pytest.approx(0.01)
 
@@ -4653,7 +4656,7 @@ def test_sub_daily_diag_days_round_trips_and_never_disables_the_check():
 
     # The integer default is unchanged.
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.output.diag_days == pytest.approx(5.0)
 
 
@@ -4822,14 +4825,14 @@ def test_cloud_cover_condensate_q_ref_round_trip_and_bounds():
     default = scheme default, off); out-of-range refused by validate_strict."""
     parser = build_arg_parser()
     base = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert base.cloud_cover_condensate_q_ref is None
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--cloud-cover-condensate-q-ref", "3e-5"]),
+        ["--dataset", "analytical", "--convection", "tiedtke", "--cloud-cover-condensate-q-ref", "3e-5"]),
         parser))
     assert cfg.cloud_cover_condensate_q_ref == 3.0e-5
     bad = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--cloud-cover-condensate-q-ref", "0.5"]),
+        ["--dataset", "analytical", "--convection", "tiedtke", "--cloud-cover-condensate-q-ref", "0.5"]),
         parser))
     with pytest.raises(Exception, match="cloud_cover_condensate_q_ref"):
         bad.validate_strict()
@@ -4862,7 +4865,7 @@ def test_surface_height_and_saline_flags_round_trip():
 
     parser = build_arg_parser()
     default_cfg = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical", "--turbulence", "louis"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "louis"]), parser))
     # CLI defaults are None = the scheme's own value: the real level height
     # is True at SurfaceLayerConfig (the production default, one place); the
     # sea-water humidity resolves to on where the lane can honour it.
@@ -4873,7 +4876,7 @@ def test_surface_height_and_saline_flags_round_trip():
     assert turbulence_config_for(default_cfg).louis.surface.z_ref_model_level is True
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--turbulence", "louis",
+        "--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "louis",
         "--surface-bulk-scheme", "coare3",
         "--surface-z-ref-model-level", "--surface-ocean-q-sfc-saline",
     ]), parser))
@@ -4974,12 +4977,12 @@ def test_persistent_dgrid_flag_flows_to_config_1028():
     """
     parser = build_arg_parser()
     off = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
     ]), parser))
     assert off.dycore.persistent_dgrid is False
 
     on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--persistent-dgrid",
+        "--dataset", "analytical", "--convection", "tiedtke", "--persistent-dgrid",
     ]), parser))
     assert on.dycore.persistent_dgrid is True
 
@@ -4987,7 +4990,7 @@ def test_persistent_dgrid_flag_flows_to_config_1028():
     parser2 = build_arg_parser()
     parser2.set_defaults(persistent_dgrid=True)
     back_off = build_config_from_args(_postprocess_args(parser2.parse_args([
-        "--dataset", "analytical", "--no-persistent-dgrid",
+        "--dataset", "analytical", "--convection", "tiedtke", "--no-persistent-dgrid",
     ]), parser2))
     assert back_off.dycore.persistent_dgrid is False
 
@@ -5003,16 +5006,16 @@ def test_clubb_trop_cloud_top_press_reaches_the_turbulence_kernel():
     from legoesm.driver.physics_pipeline import turbulence_config_for
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
+        ["--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "clubb"]), parser))
     assert cfg_off.clubb_trop_cloud_top_press is None
     tc_off = turbulence_config_for(cfg_off)
     assert resolved_clubb_config(tc_off).trop_cloud_top_press == 100.0
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--turbulence", "clubb",
+        ["--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "clubb",
          "--clubb-trop-cloud-top-press", "15000"]), parser))
     assert turbulence_config_for(cfg_on).clubb.trop_cloud_top_press == 15000.0
     cfg_bad = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--turbulence", "louis",
+        ["--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "louis",
          "--clubb-trop-cloud-top-press", "15000"]), parser))
     with pytest.raises(ValueError, match="requires turbulence='clubb'"):
         turbulence_config_for(cfg_bad)
@@ -5027,21 +5030,21 @@ def test_clubb_q_flux_scale_reaches_the_turbulence_kernel():
     from legoesm.driver.physics_pipeline import turbulence_config_for
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
+        ["--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "clubb"]), parser))
     assert cfg_off.clubb_q_flux_scale is None
     from legoesm.atmosphere.physics.turbulence.integration import materialize_sub_config
     tc_off = materialize_sub_config(turbulence_config_for(cfg_off)).clubb
     assert (tc_off.q_flux_scale, tc_off.q_flux_scale_sigma_lo,
             tc_off.q_flux_scale_sigma_hi) == (1.0, 0.0, 1.0)
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--turbulence", "clubb",
+        ["--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "clubb",
          "--clubb-q-flux-scale", "2.5",
          "--clubb-q-flux-scale-sigma-band", "0.8", "0.95"]), parser))
     tc_on = turbulence_config_for(cfg_on).clubb
     assert (tc_on.q_flux_scale, tc_on.q_flux_scale_sigma_lo,
             tc_on.q_flux_scale_sigma_hi) == (2.5, 0.8, 0.95)
     cfg_bad = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--turbulence", "louis",
+        ["--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "louis",
          "--clubb-q-flux-scale", "2.5",
          "--clubb-q-flux-scale-sigma-band", "0.8", "0.95"]), parser))
     with pytest.raises(ValueError, match="requires turbulence='clubb'"):
@@ -5072,7 +5075,7 @@ def test_clubb_q_flux_scale_validate_strict_refuses_bad_band_scheme_and_prognost
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     parser = build_arg_parser()
     base = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
+        ["--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "clubb"]), parser))
     base._replace(clubb_q_flux_scale=2.5,
                   clubb_q_flux_scale_sigma_band=(0.8, 0.95)).validate_strict()
     # A YAML-style list band is accepted by validate_strict (normalised by value).
@@ -5107,7 +5110,7 @@ def test_clubb_trop_cloud_top_press_validate_strict_bounds_and_scheme():
     FV 'none' early return) and refuses non-physical pressures."""
     parser = build_arg_parser()
     base = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
+        ["--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "clubb"]), parser))
     base._replace(clubb_trop_cloud_top_press=15000.0).validate_strict()
     for bad in (-1.0, float("nan"), float("inf"), 1.0e9):
         with pytest.raises(ValueError, match="clubb_trop_cloud_top_press"):
@@ -5131,11 +5134,11 @@ def test_clubb_liquid_partition_flag_reaches_the_turbulence_kernel():
 
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_off.clubb_liquid_partition is False
 
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical",
+        "--dataset", "analytical", "--convection", "tiedtke",
         "--turbulence", "clubb",
         "--clubb-prognostic",
         "--clubb-liquid-partition",
@@ -5146,7 +5149,7 @@ def test_clubb_liquid_partition_flag_reaches_the_turbulence_kernel():
     # ... and the default really is the other value on the same lane, so the
     # assertion above cannot pass by the sub-config defaulting True.
     cfg_plain = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--turbulence", "clubb",
+        "--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "clubb",
         "--clubb-prognostic",
     ]), parser))
     plain_tc = materialize_sub_config(turbulence_config_for(cfg_plain))
@@ -5164,14 +5167,14 @@ def test_clubb_liquid_partition_requires_clubb_and_the_prognostic_path():
 
     parser = build_arg_parser()
     wrong_closure = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--turbulence", "louis",
+        "--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "louis",
         "--clubb-liquid-partition",
     ]), parser))
     with pytest.raises(ValueError, match="requires turbulence='clubb'"):
         turbulence_config_for(wrong_closure)
 
     diagnostic = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--turbulence", "clubb",
+        "--dataset", "analytical", "--convection", "tiedtke", "--turbulence", "clubb",
         "--clubb-liquid-partition",
     ]), parser))
     with pytest.raises(ValueError, match="requires clubb_prognostic=True"):
@@ -5485,7 +5488,7 @@ def test_land_snow_scheme_and_emissivity_round_trip_and_decks():
     layered pack is an open user decision)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     parser = build_arg_parser()
-    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    base = ["--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land"]
     cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
     assert cfg0.land_snow_scheme == "bulk"
     cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
@@ -5511,7 +5514,7 @@ def test_land_snow_scheme_and_emissivity_round_trip_and_decks():
 def test_land_snow_options_refused_when_invalid(argv, match):
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical"] + argv), parser))
+        ["--dataset", "analytical", "--convection", "tiedtke"] + argv), parser))
     with pytest.raises(ValueError, match=match):
         cfg.validate_strict()
 
@@ -5536,14 +5539,14 @@ def test_tiedtke_refuses_surrogate_precip_knobs(over):
 def test_corner_fill_flag_round_trip_and_production_pin(capsys):
     parser = build_arg_parser()
     default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert default.dycore.corner_fill == "avg"
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--corner-fill", "fv3_bgrid_xdir"]), parser))
+        ["--dataset", "analytical", "--convection", "tiedtke", "--corner-fill", "fv3_bgrid_xdir"]), parser))
     assert cfg.dycore.corner_fill == "fv3_bgrid_xdir"
     cfg.validate_strict()
     with pytest.raises(SystemExit):
-        parser.parse_args(["--dataset", "analytical", "--corner-fill", "fv3_bgrid"])
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke", "--corner-fill", "fv3_bgrid"])
     assert "invalid choice" in capsys.readouterr().err
     from pathlib import Path
     from legoesm.driver.run_config_yaml import load_yaml_config
@@ -5635,18 +5638,18 @@ def test_mpas_land_params_refresh_flag_flows_to_config():
     --no- form reaches the config, and a YAML false pin is honoured."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.land_params_refresh is True
 
     cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--no-mpas-land-params-refresh",
+        "--dataset", "analytical", "--convection", "tiedtke", "--no-mpas-land-params-refresh",
     ]), parser))
     assert cfg_off.land_params_refresh is False
 
     parser2 = build_arg_parser()
     parser2.set_defaults(land_params_refresh=False)   # simulates a YAML pin
     cfg_pin = build_config_from_args(_postprocess_args(parser2.parse_args([
-        "--dataset", "analytical"]), parser2))
+        "--dataset", "analytical", "--convection", "tiedtke"]), parser2))
     assert cfg_pin.land_params_refresh is False
 
 
@@ -5656,7 +5659,7 @@ def test_land_canopy_snow_masking_round_trip_and_refusal():
     where it would be inert, validation refuses it."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     parser = build_arg_parser()
-    base = ["--dataset", "analytical", "--use-multilayer-land",
+    base = ["--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land",
             "--snow-albedo-feedback"]
     cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
     assert cfg0.land_canopy_snow_masking is False
@@ -5674,7 +5677,7 @@ def test_land_canopy_snow_masking_round_trip_and_refusal():
     assert prod_on.land_canopy_snow_masking is True
     prod_on.validate_strict()
     bad = build_config_from_args(_postprocess_args(parser.parse_args(
-        ["--dataset", "analytical", "--land-canopy-snow-masking"]), parser))
+        ["--dataset", "analytical", "--convection", "tiedtke", "--land-canopy-snow-masking"]), parser))
     with pytest.raises(ValueError, match="land_canopy_snow_masking"):
         bad.validate_strict()
 
@@ -5682,11 +5685,11 @@ def test_land_canopy_snow_masking_round_trip_and_refusal():
 def test_land_canopy_smoothing_widths_round_trip_and_validate():
     parser = build_arg_parser()
     cfg0 = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg0.land_canopy_rh_cap_smoothing_width is None
     assert cfg0.land_canopy_zeta_cap_smoothing_width is None
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--use-multilayer-land",
+        "--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land",
         "--land-surface-scheme", "two_leaf",
         "--land-canopy-rh-cap-smoothing-width", "0.02",
         "--land-canopy-zeta-cap-smoothing-width", "0.03"]), parser))
@@ -5726,7 +5729,7 @@ def test_production_deck_names_both_canopy_smoothing_widths():
 def test_land_canopy_most_n_iters_round_trip_and_validate():
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--use-multilayer-land",
+        "--dataset", "analytical", "--convection", "tiedtke", "--use-multilayer-land",
         "--land-surface-scheme", "two_leaf", "--land-canopy-most-n-iters", "7"]), parser))
     assert cfg.land_canopy_most_n_iters == 7
     for bad, match in ((cfg._replace(land_canopy_most_n_iters=0), "most_n_iters"),
@@ -5740,7 +5743,7 @@ def test_forcing_hold_outside_file_years_round_trips_and_defaults_off():
     raises unless --forcing-hold-outside-file-years opts in; the flag reaches
     ExperimentConfig and the driver's ozone / aerosol forcing configs."""
     parser = build_arg_parser()
-    base = ["--dataset", "analytical"]
+    base = ["--dataset", "analytical", "--convection", "tiedtke"]
     off = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
     on = build_config_from_args(_postprocess_args(parser.parse_args(
         base + ["--forcing-hold-outside-file-years"]), parser))
@@ -5754,19 +5757,19 @@ def test_mpas_vert4_flux_form_tracers_flag_flows_to_dycore_config():
     flag means none."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.dycore.mpas_vert4_flux_form_tracers == ()
     cfg_none = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--mpas-vert4-flux-form-tracers"]), parser))
+        "--dataset", "analytical", "--convection", "tiedtke", "--mpas-vert4-flux-form-tracers"]), parser))
     assert cfg_none.dycore.mpas_vert4_flux_form_tracers == ()
     # The pre-2026-10-15 spelling (flux flag alone) now overlaps the log default:
     # a hard error that names the flag to add (user decision by vote 2026-10-15).
     old = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--mpas-vert4-flux-form-tracers", "q_v"]), parser))
+        "--dataset", "analytical", "--convection", "tiedtke", "--mpas-vert4-flux-form-tracers", "q_v"]), parser))
     with pytest.raises(ValueError, match=r"--mpas-vert4-log-form-tracers with no names"):
         old.validate_strict()
     cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--mpas-vert4-flux-form-tracers", "q_v",
+        "--dataset", "analytical", "--convection", "tiedtke", "--mpas-vert4-flux-form-tracers", "q_v",
         "--mpas-vert4-log-form-tracers"]), parser))
     assert cfg_set.dycore.mpas_vert4_flux_form_tracers == ("q_v",)
     cfg_set.validate_strict()
@@ -5784,7 +5787,7 @@ def test_mpas_vert4_log_form_tracers_flag_flows_to_dycore_config():
     overlap with the flux-form list are refused at validation."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.dycore.mpas_vert4_log_form_tracers == ("q_v",)
     assert cfg_default.dycore.mpas_vert4_flux_form_tracers == ()
     cfg_default.validate_strict()
@@ -5792,7 +5795,7 @@ def test_mpas_vert4_log_form_tracers_flag_flows_to_dycore_config():
     assert DycoreConfig().mpas_vert4_log_form_tracers == ("q_v",)
     assert DycoreConfig().mpas_vert4_flux_form_tracers == ()
     cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--mpas-vert4-flux-form-tracers",
+        "--dataset", "analytical", "--convection", "tiedtke", "--mpas-vert4-flux-form-tracers",
         "--mpas-vert4-log-form-tracers", "q_v"]), parser))
     assert cfg_set.dycore.mpas_vert4_log_form_tracers == ("q_v",)
     assert cfg_set.dycore.mpas_vert4_flux_form_tracers == ()
@@ -5824,7 +5827,8 @@ def test_production_deck_selects_log_form_vapour_filter():
     assert cfg.dycore.mpas_vert4_flux_form_tracers == ()
 
 
-_DRY_BASE = ["--grid-type", "latlon", "--dataset", "analytical", "--dry-run"]
+_DRY_BASE = ["--grid-type", "latlon", "--dataset", "analytical", "--convection", "tiedtke",
+             "--dry-run"]
 
 
 def test_dry_run_reports_missing_input_and_returns_1(tmp_path, capsys):

@@ -500,11 +500,11 @@ def test_experiment_config_cli_and_threading():
     for flag, want in (("--morrison-warm-rain-incloud", True),
                        ("--no-morrison-warm-rain-incloud", False)):
         c = build_config_from_args(_postprocess_args(parser.parse_args([
-            "--dataset", "analytical", "--microphysics", "morrison", flag]),
+            "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "morrison", flag]),
             parser))
         assert c.morrison_warm_rain_incloud is want
     c = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical"]), parser))
+        "--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert c.morrison_warm_rain_incloud is False
 
 

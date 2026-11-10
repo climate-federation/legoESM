@@ -330,10 +330,10 @@ def test_cli_round_trip():
     )
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert cfg_default.hard_sat_ice_curve is False
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--grid-type", "mpas",
+        "--dataset", "analytical", "--convection", "tiedtke", "--grid-type", "mpas",
         "--microphysics", "morrison",
         "--hard-saturation-adjustment", "--hard-sat-ice-curve",
     ]), parser))

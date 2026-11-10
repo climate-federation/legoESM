@@ -147,11 +147,11 @@ def test_cli_and_config_round_trip():
     )
     parser = build_arg_parser()
     off = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--dataset", "analytical"]), parser))
+        parser.parse_args(["--dataset", "analytical", "--convection", "tiedtke"]), parser))
     assert off.homogeneous_ice_nucleation is False
 
     on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--microphysics", "morrison",
+        "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "morrison",
         "--homogeneous-ice-nucleation",
     ]), parser))
     assert on.homogeneous_ice_nucleation is True

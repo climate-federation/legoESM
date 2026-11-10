@@ -294,7 +294,7 @@ def test_flat_field_validation_cli_and_deck():
     assert thread_morrison_scalars(ExperimentConfig(), "morrison", base) is base
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--microphysics", "morrison",
+        "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "morrison",
         "--morrison-mg2-drop-readjust-log-width", "0.0"]), parser))
     assert cfg.morrison_mg2_drop_readjust_log_width == 0.0
     amip = ROOT / "config/amip"

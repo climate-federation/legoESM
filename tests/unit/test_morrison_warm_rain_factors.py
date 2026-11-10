@@ -212,7 +212,7 @@ def test_cli_round_trip_and_production_deck_selects_the_mg2_law():
     from legoesm.driver.run_config_yaml import load_yaml_config
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--microphysics", "morrison",
+        "--dataset", "analytical", "--convection", "tiedtke", "--microphysics", "morrison",
         "--morrison-autocon-fact", "0.3", "--morrison-accre-enhan-fact", "1.5",
         "--morrison-warm-rain-scheme", "kk2000"]), parser))
     assert (cfg.morrison_autocon_fact, cfg.morrison_accre_enhan_fact,
