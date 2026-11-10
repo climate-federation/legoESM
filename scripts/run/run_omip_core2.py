@@ -5259,10 +5259,15 @@ def _build_atm_to_surface_core2(forc, ramp=1.0):
 
 
 _HOST_JIT = {}   # patch 7: jitted call-site wrappers (bbl, ice step), keyed by name / ice dt
+_HOST_JIT_SET = {"bbl", "ice", "overlap"}   # resolved from --host-jit in main()
+
+
+def _host_jit_on(name):
+    return name in _HOST_JIT_SET
 
 
 def _ice_apply_ew_overlap(ice_pytree):
-    return (_ice_apply_ew_overlap_eager if _HOST_JIT_OFF[0] else _ice_apply_ew_overlap_jit)(ice_pytree)
+    return (_ice_apply_ew_overlap_jit if _host_jit_on('overlap') else _ice_apply_ew_overlap_eager)(ice_pytree)
 
 
 _HOST_JIT_OFF = [False]   # set from args.no_host_jit in main()
@@ -7639,8 +7644,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     from legoesm.ocean.biogeochemistry.omip_hooks import add_arguments as _bgc_add_args
     _bgc_add_args(p)
     p.add_argument("--no-host-jit", action="store_true",
-                   help="Run the BBL post-step, the sea-ice step and the seam re-slaving eagerly "
-                        "(pre-patch-7 behaviour). Default: jax.jit-wrapped call sites.")
+                   help="Alias of --host-jit none.")
+    p.add_argument("--host-jit", default="all",
+                   help="Which host-side call sites to jax.jit: 'all' (default), 'none', or a comma list "
+                        "of bbl,ice,overlap.")
     p.add_argument("--ice-substeps", type=int, default=1,
                    help="Sub-step the prognostic sea ice: call step_sea_ice N times with dt/N per ocean "
                         "step (ocean-side inputs held fixed; fluxes averaged). Default 1.")
@@ -7657,6 +7664,11 @@ def main() -> int:
     p = _build_arg_parser()
     args = p.parse_args()
     _HOST_JIT_OFF[0] = bool(getattr(args, 'no_host_jit', False))
+    _hj = "none" if args.no_host_jit else str(getattr(args, "host_jit", "all")).strip().lower()
+    _HOST_JIT_SET.clear()
+    _HOST_JIT_SET.update({"bbl", "ice", "overlap"} if _hj == "all" else
+                         set() if _hj == "none" else {x.strip() for x in _hj.split(",") if x.strip()})
+    print(f"[host-jit] jitted call sites: {sorted(_HOST_JIT_SET) or 'none'}", flush=True)
     _validate_omip_redi_selection(
         args.redi_coefficient, args.gm_slope_positions, args.gm_slope_scheme,
         args.gm_treguier, args.gm_kappa_min, args.no_gm_redi, args.redi_aht0,
@@ -9309,7 +9321,7 @@ def main() -> int:
         "restart_branch_from_different_config",
         # operator-split BGC (omip_hooks): outside the ocean state; its own sidecar
         "biogeo", "pco2_atm", "bgc_init_dir", "bgc_k_bg", "bgc_diag_every_days", "bgc_every",
-        "no_host_jit",
+        "no_host_jit", "host_jit",
         "marbl_ic", "marbl_forcing", "marbl_batch_size", "marbl_n_iter",
     })
     # Path-valued args are normalised before hashing so an equivalent relative
@@ -10495,8 +10507,8 @@ def main() -> int:
                     return step_sea_ice(st, atm, sst, uo, vo, _cfg, U_min=0.0, dt=_dt, grid=_grid,
                                         ocean_freezing_temperature_K=tfreeze, q_open_top=qopen,
                                         ocean_dz_top_m=_dz)
-                _HOST_JIT[("ice", _dt_ice)] = _ice_eager if args.no_host_jit else jax.jit(_ice_eager)
-                print(f"[host-jit] sea-ice step {'EAGER' if args.no_host_jit else 'jitted'} "
+                _HOST_JIT[("ice", _dt_ice)] = jax.jit(_ice_eager) if _host_jit_on("ice") else _ice_eager
+                print(f"[host-jit] sea-ice step {'jitted' if _host_jit_on('ice') else 'EAGER'} "
                       f"(dt_ice={_dt_ice:.0f} s)", flush=True)
             _ice_fn = _HOST_JIT[("ice", _dt_ice)]
             _ice_args = (_ice_kw["ocean_freezing_temperature_K"], _ice_kw["q_open_top"])
@@ -11037,9 +11049,9 @@ def main() -> int:
             else:
                 from legoesm.ocean.physics.bbl_adv import apply_bbl_adv_step
                 if "bbl" not in _HOST_JIT:
-                    _HOST_JIT["bbl"] = (apply_bbl_adv_step if args.no_host_jit else
-                                        jax.jit(apply_bbl_adv_step,
-                                                static_argnames=("dt", "gamma_s", "rho_0", "nlev")))
+                    _HOST_JIT["bbl"] = (jax.jit(apply_bbl_adv_step,
+                                                static_argnames=("dt", "gamma_s", "rho_0", "nlev"))
+                                        if _host_jit_on("bbl") else apply_bbl_adv_step)
                 state = _HOST_JIT["bbl"](
                     state, bbl_geom, float(dt),
                     gamma_s=float(args.bbl_gamma_s),
