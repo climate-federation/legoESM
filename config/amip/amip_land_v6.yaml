@@ -49,3 +49,7 @@ multilayer_soil_depth: 6.375
 land_ic: results/land/land_spinup_v6/restart_1979_d000h00.npz
 land_stomatal_beta: false
 snow_albedo_feedback: true
+# Convection named explicitly (user decision 2026-11-10): zhang_mcfarlane, the
+# MPAS default (user decision 2026-11-06); this overlay targets the MPAS AMIP
+# mesh. Runs before 2026-11-06 used tiedtke. Refused on cubed_sphere/latlon.
+convection: zhang_mcfarlane

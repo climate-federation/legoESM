@@ -2375,6 +2375,9 @@ def test_config_yaml_loads_all_keys_are_valid_dests(cfg_file):
 _STRICT_FAILING_DECKS = {
     "amip_land_calibrated.yaml":
         "land overlay, not a standalone deck: no grid, so it lands on the default lane",
+    "amip_land_v6.yaml":
+        "land overlay for the MPAS mesh naming zhang_mcfarlane (user decision "
+        "2026-11-10), refused on the default cubed-sphere lane",
     "amip_campaign_mpas.yaml":
         "campaign deck: land_update_seconds/land_calibrated_physics without multilayer land",
     "amip_aug13_control.yaml":
@@ -2403,6 +2406,31 @@ def test_config_yaml_builds_and_validates_strict(cfg_file):
         with pytest.raises(ValueError, match="Invalid ExperimentConfig"):
             cfg.validate_strict()
     else:
+        cfg.validate_strict()
+
+
+@pytest.mark.parametrize("grid", ["cubed_sphere", "latlon"])
+@pytest.mark.parametrize("deck", ["amip_land_calibrated.yaml", "amip_land_v6.yaml"])
+def test_mpas_land_overlays_are_refused_off_mpas_with_a_clear_error(deck, grid):
+    """The two AMIP land overlays name zhang_mcfarlane, the MPAS default (user
+    decision 2026-11-10); on the cubed-sphere and lat-lon pipeline lanes its
+    convective momentum transport would be discarded, so validate_strict
+    refuses them and says why."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from scripts.run.run_amip import _resolve_land_model
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), parser)
+    assert keys["convection"] == "zhang_mcfarlane"
+    parser.set_defaults(**keys, _config_keys=frozenset(keys))
+    argv = _AMIP_DUMMY_PATHS + ["--grid-type", grid,
+                                "--clm-surfdata-path", "/dummy/surfdata.nc",
+                                "--land-mask-file", "/dummy/lsm.nc"]
+    args = parser.parse_args(argv)
+    _resolve_land_model(args, parser, argv)
+    cfg = build_config_from_args(_postprocess_args(args, parser, argv))
+    with pytest.raises(ValueError, match=(
+            r"convection='zhang_mcfarlane' computes convective momentum "
+            r"transport \(CMT on\), which the PhysicsPipeline lane")):
         cfg.validate_strict()
 
 
