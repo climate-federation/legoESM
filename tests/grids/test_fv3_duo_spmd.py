@@ -882,3 +882,24 @@ def test_ring_barrier_vjp_matches_flat_blend(btab, kind):
                 vring((jax.device_put(cx, sh), jax.device_put(cy, sh))))
     assert np.array_equal(ggx, rgx), np.abs(ggx - rgx).max()
     assert np.array_equal(ggy, rgy), np.abs(ggy - rgy).max()
+
+
+def test_ring_allflux_accepts_numpy_operands(btab, monkeypatch):
+    """The flat allflux blend takes NumPy operands; the ring path must
+    too (it updates the selected slots with .at, a jax-only method)."""
+    from jax.sharding import Mesh
+
+    import legoesm.grids.fv3_duo_halos as halos
+    from legoesm.grids.fv3_duo_spmd import build_ring_comm
+
+    nslot = 4 + btab.nq
+    rng = np.random.default_rng(89)
+    afx = rng.standard_normal((6, btab.npx, btab.n, nslot))
+    afy = rng.standard_normal((6, btab.n, btab.npx, nslot))
+    rx, ry = (np.asarray(a) for a in
+              halos.average_allflux_shared_edges(afx, afy, btab))
+    mesh = Mesh(np.array(_devices_or_skip(2)), ("face",))
+    monkeypatch.setattr(btab, "ring_comm", build_ring_comm(btab, mesh))
+    gx, gy = (np.asarray(a) for a in
+              halos.average_allflux_shared_edges(afx, afy, btab))
+    assert np.array_equal(gx, rx) and np.array_equal(gy, ry)

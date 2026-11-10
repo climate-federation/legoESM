@@ -651,9 +651,8 @@ def make_ring_barrier(tab, kind: str, mesh):
 
     def _body(x_local, y_local):
         trail = x_local.shape[3:]
-        flat = []
-        for arr, (s0, s1), bi in zip((x_local, y_local), shapes, bidx):
-            flat.append(arr.reshape((g, s0 * s1, -1)))
+        flat = [arr.reshape((g, s0 * s1, -1))
+                for arr, (s0, s1) in zip((x_local, y_local), shapes)]
         tt = flat[0].shape[-1]
         payload = jnp.concatenate(
             [a[:, bi, :] for a, bi in zip(flat, bidx)], axis=1)  # (g,nb,T)
@@ -755,11 +754,14 @@ class DuoRingComm:
         return self._avg_b(xb6, yb6)
 
     def average_allflux_shared_edges(self, afx6, afy6):
-        """The C-grid blend over the selected slots only (delp, temp,
-        tracers); slots 2 (w) and 3 (q_con) come back untouched."""
+        """The C-grid blend over ``tab.allflux_slots`` only (delp, temp,
+        tracers); w and q_con (Fortran iq 2 and 3, slot indices 1 and 2)
+        come back untouched."""
         from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
         require_uniform_float_jax("average_allflux_shared_edges",
                                   {"afx6": afx6, "afy6": afy6})
+        import jax.numpy as jnp
+        afx6, afy6 = jnp.asarray(afx6), jnp.asarray(afy6)
         nslot = 4 + self._nq
         if afx6.shape[-1] != nslot or afy6.shape[-1] != nslot:
             raise ValueError(
@@ -2633,33 +2635,6 @@ class DuoTileComm:
 
     def ext_vector_cgrid_allk(self, uc6k, vc6k):
         return self._cgrid_allk(uc6k, vc6k)
-
-    def average_shared_edge_cgrid(self, fx6, fy6):
-        from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
-        require_uniform_float_jax("average_shared_edge_cgrid",
-                                  {"fx6": fx6, "fy6": fy6})
-        return self._avg_c(fx6, fy6)
-
-    def average_shared_edge_bgrid(self, xb6, yb6):
-        from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
-        require_uniform_float_jax("average_shared_edge_bgrid",
-                                  {"xb6": xb6, "yb6": yb6})
-        return self._avg_b(xb6, yb6)
-
-    def average_allflux_shared_edges(self, afx6, afy6):
-        """The C-grid blend over the selected slots only (delp, temp,
-        tracers); slots 2 (w) and 3 (q_con) come back untouched."""
-        from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
-        require_uniform_float_jax("average_allflux_shared_edges",
-                                  {"afx6": afx6, "afy6": afy6})
-        nslot = 4 + self._nq
-        if afx6.shape[-1] != nslot or afy6.shape[-1] != nslot:
-            raise ValueError(
-                f"average_allflux_shared_edges: slot axis "
-                f"{afx6.shape[-1]}/{afy6.shape[-1]} != 4+nq = {nslot}")
-        sel = self._allflux_slots
-        ax, ay = self._avg_c(afx6[..., sel], afy6[..., sel])
-        return afx6.at[..., sel].set(ax), afy6.at[..., sel].set(ay)
 
 
 def build_tile_comm(tab, mesh) -> DuoTileComm:
