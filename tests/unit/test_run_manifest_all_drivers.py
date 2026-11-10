@@ -298,6 +298,57 @@ def test_fesom_forced_writes_manifest_before_the_loop(tmp_path, monkeypatch):
 
 
 
+def test_fesom_forced_window_means_with_accumulation_on(tmp_path, monkeypatch):
+    """--state-accumulate on the fesom forced lane: the day-1 snapshot carries
+    the window means of T and S over the 48 steps, trimmed to the mesh's real
+    levels.  Step k sets T = k, S = 2k, so the means are 24.5 and 49.0 exactly
+    (integer sums and dyadic quotients in fp64)."""
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+    import numpy as np
+
+    import legoesm.ocean.coupler as coupler_mod
+    import legoesm.ocean.forcing as forcing_mod
+    import scripts.run.run_fesom_core2 as fesom_core2
+    from scripts.run import run_omip_core2
+
+    nod, nl = 3, 4
+    monkeypatch.setattr(forcing_mod, "load_core2_nyf", lambda **kw:
+                        SimpleNamespace(u10=np.zeros((4, nod))))
+    monkeypatch.setattr(coupler_mod, "compute_omip2_surface_forcing",
+                        lambda *a, **kw: SimpleNamespace())
+    monkeypatch.setattr(run_omip_core2, "_record_final_state_digest",
+                        lambda *a, **kw: None)
+    snaps = {}
+    monkeypatch.setattr(fesom_core2, "write_snapshot",
+                        lambda out, tag, inner, mesh, extra=None:
+                        snaps.__setitem__(tag, extra))
+
+    def _state(k):
+        return SimpleNamespace(inner=SimpleNamespace(
+            T=jnp.full((nod, nl), float(k)), S=jnp.full((nod, nl), 2.0 * k),
+            hnode=jnp.full((nod, nl), 10.0)))
+
+    model = _SteppingModel()
+    model.mesh = SimpleNamespace(
+        Z=-np.arange(1.0, nl), depth=-np.full(nod, 100.0), nl=nl,
+        node_layer_mask=np.ones((nod, nl - 1), dtype=bool))
+    counter = iter(range(1, 10_000))
+    model.step = lambda state, dt, **kw: _state(next(counter))
+    args = run_omip_core2._build_arg_parser().parse_args([
+        "--grid", "fesom", "--fesom-mesh-dir", "/m", "--output", str(tmp_path),
+        "--no-emp", "--dt", "1800", "--years", str(1.0 / 365.0),
+        "--snapshot-every-days", "1", "--forcing-ramp-days", "0",
+        "--state-accumulate"])
+    grid = SimpleNamespace(lat=np.zeros(nod), lon=np.zeros(nod))
+    run_omip_core2.run_fesom_forced_loop(args, grid, None, model, _state(0))
+    extra = snaps["day0001"]
+    for name, want in (("T_mean", 24.5), ("S_mean", 49.0), ("T_mean_hw", 24.5)):
+        assert extra[name].shape == (nod, nl - 1), name
+        np.testing.assert_array_equal(extra[name], np.full((nod, nl - 1), want))
+
+
 def test_fesom_b1_records_the_final_state_digest(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
