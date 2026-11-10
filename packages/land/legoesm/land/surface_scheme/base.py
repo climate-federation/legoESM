@@ -62,6 +62,11 @@ class SurfaceFluxOutput(NamedTuple):
     # the two-leaf canopy, single leaf for SimpleSEB), scaled by the escape
     # probability fesc.  Passive diagnostic — no feedback into the land state.
     sif: jax.Array | None = None
+    # Last CERTIFIED canopy Newton solution per column, (ncol, n_state) in the
+    # solver's own variable order, NaN where this column has never converged.
+    # A warm-start cache for the next call only; None for every scheme that
+    # does not run the two-leaf closure.
+    canopy_x: jax.Array | None = None
 
     # ---- Canopy-specific diagnostics (None for SimpleSEB) ----
     Tf_Sun: jax.Array | None = None        # sunlit leaf T [K]

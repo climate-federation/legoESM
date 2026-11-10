@@ -52,6 +52,7 @@ from legoesm.land.canopy.stability import (
 from legoesm.land.phydro import PhydroSupply
 from legoesm.land.canopy.solver import (
     CanopyForcingBundle, solve_canopy_closure, canopy_forward,
+    canopy_state_admissible,
 )
 from legoesm.land.canopy.energy_balance import soil_surface_evap_resistance
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
@@ -76,6 +77,45 @@ TwoLeafCanopyConfig = CanopyConfig
 # original ``canopy_land.py`` implementation (n=6, ω=0.15).
 _DEFAULT_N_PICARD = 6
 _DEFAULT_PICARD_OMEGA = 0.15
+
+# Columns per group in the canopy Newton solve (ported from legoESM main
+# 4310f02248, #2330).  Under one vmap every column iterates until the slowest
+# column stops, so one hard column costs the whole batch up to the iteration
+# cap; groups stop independently.  Pure performance: same per-column solve,
+# results equal to rounding.  64 is upstream's choice from a group-size sweep
+# on the AMIP production deck (GPU).  A batching count, never a config.
+_CANOPY_SOLVE_GROUP = 64
+# Picard passes after the first order their columns by the previous pass's
+# Newton iterations before grouping, so hard columns share groups.
+_SORT_BY_PREV_ITERS = True
+
+
+def canopy_solve_batching(column_sharded: bool = False) -> tuple[int | None, bool]:
+    """``(group size or None for one batch, sort by previous iterations?)``.
+
+    Measured on the 2 deg LMIP run with the leafless-column fix (user decision
+    2026-11-10):
+
+    * GPU (one or several devices): ONE batch per device.  Per hourly step on
+      one A100: one batch 0.73 s, groups of 1024 1.0 s, groups of 64 5.7 s --
+      the GPU is latency-bound (mean utilisation ~4 %), so sequential groups
+      cost more than idle lanes.  With columns sharded across GPUs (higher
+      resolution), each device takes its block as one batch.
+    * CPU, one device: groups of 64 sorted by previous iterations (upstream);
+      the sort lets the many quickly converging columns stop early.
+    * CPU, several devices (columns sharded by --column-devices): one batch per
+      device and NO sort -- the global sort gathers every column into one
+      place and the groups then run in sequence, which made the 90-device run
+      ~40x slower (24 steps: 208 s -> 2 h 27 min).
+
+    Decided at trace time from the default backend and the run layout
+    (``CanopyConfig.column_sharded``, set by the driver when it shards the
+    columns) -- not from the device count, since a CPU host can expose several
+    devices to a run that does not shard (codex round 16/17).
+    """
+    if jax.default_backend() != "cpu" or column_sharded:
+        return None, False
+    return _CANOPY_SOLVE_GROUP, _SORT_BY_PREV_ITERS
 
 # Time constant of the growth-temperature exponential moving average [s].
 # 30 days * 86400 s/day = 2.592e6 s.  At dt = 1800 s, ~76 days reach 95 %
@@ -286,6 +326,7 @@ def compute_two_leaf_canopy_fluxes(
     soil_surface_relsat: jnp.ndarray | None = None,
     fwet: jnp.ndarray | None = None,
     pmodel_acclim=None,  # PModelAcclimState | None (land/p_model.py)
+    canopy_seed: jnp.ndarray | None = None,  # (ncol, n_state) warm start; see below
     phydro_supply=None,  # PhydroSupply | None (land/phydro.py)
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
@@ -680,7 +721,28 @@ def compute_two_leaf_canopy_fluxes(
     if cc.stomatal_model == "phydro":
         # The two draw-down unknowns start at the acclimated optimum's.
         _x0 += [dpsi_seed, dpsi_seed]
-    initial_state = jnp.stack(_x0, axis=-1)  # (ncol, 6) or (ncol, 8)
+    cold_state = jnp.stack(_x0, axis=-1)  # (ncol, 6) or (ncol, 8)
+
+    # ---- Warm start (numerical cache; ported from legoESM main 57e4c45b6a
+    # with the root certificate of 46bab7a21c) ----
+    # ``canopy_seed`` is the previous timestep's LAST CERTIFIED solution,
+    # carried by the caller.  A column whose seed is not finite (never solved,
+    # or the last solve failed) or lies outside the physical box a root may
+    # occupy falls back to the cold start above.  The seed is sanitised BEFORE
+    # the select: ``where`` evaluates both branches, and a NaN in the discarded
+    # one would poison a reverse-mode tangent.  The solve's adjoint returns a
+    # zero cotangent for its seed, but the residual has spurious roots, so
+    # seed admissibility (and the certificate on every converged solve) is
+    # what keeps a far-off seed from leading a column to one of them.
+    # A seed of a different width (a state built under the other stomatal
+    # model: 8 unknowns under P-hydro, 6 otherwise) is not a seed for this
+    # solve; the cache is ignored (cold start), never reshaped.
+    if canopy_seed is None or canopy_seed.shape[-1] != cold_state.shape[-1]:
+        initial_state = cold_state
+    else:
+        _seed = jnp.asarray(canopy_seed, cold_state.dtype)
+        _ok = canopy_state_admissible(_seed)[:, None]
+        initial_state = jnp.where(_ok, jnp.nan_to_num(_seed), cold_state)
 
     def _bcast(v):
         if hasattr(v, "shape") and v.shape == (ncol,):
@@ -751,12 +813,43 @@ def compute_two_leaf_canopy_fluxes(
     omega    = getattr(cc, "picard_omega", _DEFAULT_PICARD_OMEGA)
     Ts_bc_k = Ts_old
 
+    # Each Picard pass RESEEDS from the previous pass's certified solution
+    # instead of restarting cold (successive passes differ only in Ts_bc, which
+    # the relaxation moves by a fraction of a kelvin).  Only a CONVERGED pass
+    # seeds the next one: a failed solve's last iterate is not a root.  A
+    # column with no converged solution yet alternates its seed between the
+    # caller's seed and the cold state across passes, so a warm seed that led
+    # the solve astray gets a cold retry inside the same call.  ``x_conv`` holds
+    # the last certified solution per column (NaN until one exists); after the
+    # loop it is the cache handed back to the caller.  The columns are solved in
+    # groups of _CANOPY_SOLVE_GROUP, ordered (after the first pass) by the
+    # previous pass's iteration counts so hard columns share groups.
+    x_conv = jnp.full_like(initial_state, jnp.nan)
+    n_iters = None
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
-        x_final, n_iters, converged = jax.vmap(_solve_one_col)(
-            initial_state, bundles_k)
+        _fallback = initial_state if _picard_iter % 2 == 0 else cold_state
+        _seed_k = jnp.where(jnp.all(jnp.isfinite(x_conv), axis=-1, keepdims=True),
+                            jnp.nan_to_num(x_conv), _fallback)
+        _args = (_seed_k, bundles_k)
+        _group, _sort = canopy_solve_batching(
+            bool(getattr(cc, "column_sharded", False)))
+        _sorted = _picard_iter > 0 and _sort and _group is not None
+        if _sorted:
+            _perm = jnp.argsort(n_iters, descending=True)
+            _inv = jnp.argsort(_perm)
+            _args = jax.tree_util.tree_map(lambda a: a[_perm], _args)
+        if _group is None:
+            _out = jax.vmap(_solve_one_col)(*_args)
+        else:
+            _out = jax.lax.map(lambda a: _solve_one_col(*a), _args,
+                               batch_size=_group)
+        if _sorted:
+            _out = jax.tree_util.tree_map(lambda a: a[_inv], _out)
+        x_final, n_iters, converged = _out
+        x_conv = jnp.where(converged[:, None], x_final, x_conv)
         if _DUMP_UNSOLVED_DIR:
-            _dump_unsolved(bundles_k, initial_state, x_final, n_iters, converged)
+            _dump_unsolved(bundles_k, _seed_k, x_final, n_iters, converged)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
@@ -915,6 +1008,9 @@ def compute_two_leaf_canopy_fluxes(
         # the caller decides what to do with the column; it must not simply
         # spend them.  Carried from the LAST Picard pass.
         converged=converged,
+        # Warm-start cache for the NEXT call: the last certified solve per
+        # column (NaN where this column has never converged).
+        canopy_x=x_conv,
         f_veg=f_veg,
         fSun=fSun,
         Ts_solve=Ts_cvg,

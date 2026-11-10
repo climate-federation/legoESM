@@ -254,3 +254,27 @@ def test_clm_ml_canopy_state_checkpoint_refused_loudly():
         _land_soil_dz=lambda: np.zeros(6, dtype=np.float64), config=_cfg())
     with pytest.raises(NotImplementedError, match="canopy_state"):
         ModelDriver._checkpoint_carry_aux(src)
+
+
+def test_canopy_cache_is_neither_written_nor_required(tmp_path):
+    """The two-leaf canopy warm-start cache (canopy_x) is a numerical cache:
+    the coupled checkpoint does not write it, and a checkpoint without it (any
+    checkpoint written before the field existed) restores into a template that
+    carries it, keeping the template's (cold, all-NaN) cache."""
+    saved = _state(1.0)._replace(canopy_x=np.full((4, 6), 5.0, np.float32))
+    src = SimpleNamespace(
+        _carry_aux={}, _land_ml_state=saved,
+        _double_moment_step_inputs=lambda: {},
+        _land_soil_dz=lambda: np.zeros(6, dtype=np.float64),
+        config=SimpleNamespace(convection="none"),
+    )
+    aux = ModelDriver._checkpoint_carry_aux(src)
+    assert "land_ml_canopy_x" not in aux
+    np.savez(tmp_path / "c.npz", **aux)
+    loaded = dict(np.load(tmp_path / "c.npz"))
+    template = _state(99.0)._replace(canopy_x=np.full((4, 6), np.nan, np.float32))
+    dst = SimpleNamespace(_check_land_soil_dz=lambda dz: None,
+                          _carry_aux=loaded, _land_ml_state=template)
+    ModelDriver._restore_land_ml_from_carry_aux(dst)
+    np.testing.assert_allclose(dst._land_ml_state.T_soil, saved.T_soil)
+    assert np.all(np.isnan(np.asarray(dst._land_ml_state.canopy_x)))

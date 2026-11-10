@@ -37,6 +37,7 @@ from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.boundary_data.ec_site import read_ec_site_driver, ECSiteDriver
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.multilayer_land import (
+    finite_check_view,
     init_multilayer_land_state,
     step_multilayer_land_with_diagnostics,
     two_leaf_capacity_diagnostics,
@@ -610,7 +611,7 @@ def _prognostic_fluxes(d: ECSiteDriver,
         # to; that step is taken unguarded and every later step is guarded.
         if (jax.tree_util.tree_structure(new_state)
                 == jax.tree_util.tree_structure(state)):
-            reverted = _any_nonfinite(new_state)
+            reverted = _any_nonfinite(finite_check_view(new_state))
             # Revert EVERY array leaf (int topology included) so a rolled-back
             # step cannot leave a hybrid of old float prognostics + new integer
             # counters; only non-array leaves (None) are carried unchanged.
@@ -622,7 +623,7 @@ def _prognostic_fluxes(d: ECSiteDriver,
             # There is no same-shape previous state to revert to, so a poisoned
             # cold-start state would become the "old" state and every later
             # rollback would restore NaNs forever.  Guard it explicitly instead.
-            if bool(_any_nonfinite(new_state)):
+            if bool(_any_nonfinite(finite_check_view(new_state))):
                 raise FloatingPointError(
                     "CLM-ML cold-start step produced a non-finite land state; "
                     "the vertical structure or first flux solve failed. Check "

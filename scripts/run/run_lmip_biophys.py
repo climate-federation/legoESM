@@ -65,6 +65,7 @@ from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.stomata import StomataConfig
 from legoesm import constants
 from legoesm.land.multilayer_land import (
+    finite_check_view,
     step_multilayer_land,
     step_multilayer_land_with_diagnostics,
     init_multilayer_land_state,
@@ -529,7 +530,8 @@ def run(args) -> int:
             capacity_scheme=args.canopy_capacity_scheme,
             g1_source=args.canopy_g1_source,
             vcmax_profile=args.canopy_vcmax_profile,
-            light_response=getattr(args, "canopy_light_response", "clm")).validate()
+            light_response=getattr(args, "canopy_light_response", "clm"),
+            column_sharded=int(getattr(args, "column_devices", 1)) > 1).validate()
     elif args.surface_scheme == "simple_seb":
         surf = SimpleSEBConfig()
     else:
@@ -1049,7 +1051,8 @@ def run(args) -> int:
         # PASS/FAIL.  The reverted step's diagnostics are untrustworthy, so mask
         # them to NaN; ``reverted`` (0/1) is tape-able as a per-cell failure-rate
         # map and ``revert_count`` accumulates a per-cell total for the summary.
-        reverted = _nonfinite_per_col(new_state, ncol)          # (ncol,) bool
+        # (the canopy warm-start cache is NaN by design: finite_check_view)
+        reverted = _nonfinite_per_col(finite_check_view(new_state), ncol)  # (ncol,) bool
         def _revert(n, o):
             if getattr(n, "ndim", 0) < 1 or n.shape[0] != ncol:
                 return n

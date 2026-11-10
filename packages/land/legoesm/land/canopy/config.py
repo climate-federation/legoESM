@@ -302,6 +302,12 @@ class CanopyConfig(NamedTuple):
     # acclimated Vcmax/Jmax (JULES leaf_limits; pyrealm SubdailyPModel).
     # Requires capacity_scheme='p_model'.
     light_response: str = "clm"           # "clm" | "pmodel_phi0"
+    # --- Run layout (appended last; not physics) ---
+    # True when the driver splits the columns across devices (run_lmip_biophys
+    # --column-devices > 1): the canopy then solves each device's block as one
+    # batch with no global sort (surface_scheme.two_leaf_canopy.
+    # canopy_solve_batching).  Results are unchanged to round-off.
+    column_sharded: bool = False
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.

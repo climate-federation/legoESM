@@ -117,6 +117,36 @@ _LM_LAMBDA_DOWN = 3.0       # [-] damping decay after a good step
 _LM_RHO_BAD, _LM_RHO_GOOD = 0.25, 0.75   # [-] Nielsen gain-ratio thresholds
 _LM_RTOL, _LM_ATOL = 1.0e-8, 1.0e-12     # [-] on the SQUARED residual norm
 
+# --- Root certificate (numerics; containment thresholds, not tunable physics) --
+# Ported from legoESM main 46bab7a21c with the warm start it protects.  The
+# relative gate above (residual reduced 1e8x from the SEED) cannot certify a
+# root on its own: from a far-off warm-start seed the seed residual is huge and
+# the gate admits a residual of O(10) K, and the residual also has spurious
+# fixed points far outside the range its saturation / radiation formulae are
+# valid in (measured upstream 2026-09-29: leaf roots at 462, 891, 2300 and
+# -1301 K, q_c = -0.11 kg/kg).  Cached as the next step's seed, such a state
+# perpetuated itself (upstream AMIP: ~200-320 of 20709 columns with leaf
+# temperatures of 13-5655 K).  A converged state must therefore also sit inside
+# a broad physical box and below an absolute residual ceiling.  Cold-started
+# solves reach n_sq ~1e-7..1e-9; the relative gate allows <~1e-4.
+_ROOT_T_MIN_K = 150.0      # [K] below any terrestrial leaf / canopy air
+_ROOT_T_MAX_K = 360.0      # [K] above any terrestrial leaf / canopy air
+_ROOT_QC_MIN = -1.0e-10    # [kg/kg] q_c >= 0 up to round-off at the dry boundary
+_ROOT_NSQ_MAX = 1.0e-2     # [-] absolute ceiling on the scaled squared residual
+# (The humidity residual row is multiplied by 1e3 in _canopy_residual, the same
+# scaling as upstream's f_scale = 1e-3 on that row, so the ceiling is upstream's.)
+
+
+def canopy_state_admissible(x: jax.Array) -> jax.Array:
+    """True where ``x[..., :6]`` = [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c] (plus
+    any trailing P-hydro unknowns) is a finite state inside the physical box a
+    canopy root may occupy.  Containment, not a full physical check: Ci is only
+    required finite (upstream found no garbage state with an out-of-range Ci)."""
+    T = x[..., jnp.array([0, 1, 4])]
+    return (jnp.all(jnp.isfinite(x), axis=-1)
+            & jnp.all((T >= _ROOT_T_MIN_K) & (T <= _ROOT_T_MAX_K), axis=-1)
+            & (x[..., 5] >= _ROOT_QC_MIN))
+
 # Characteristic increment of each unknown, in its own units:
 #   [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c] = [K, K, umol/mol, umol/mol, K, kg/kg]
 # The solver previously CLAMPED every component to the same +/-5, which is 5 K on
@@ -749,6 +779,35 @@ def solve_canopy_closure(
 # Implicit-function-theorem Newton solver
 # ---------------------------------------------------------------------------
 
+def damped_lm_step(J_z, resid, lam):
+    """Damped Levenberg-Marquardt step, via QR of the augmented system.
+
+    Solves  min || [J ; sqrt(lam) I] dz - [-F ; 0] ||.  Stacking the damping as
+    extra ROWS keeps the conditioning at the Jacobian's own, where forming the
+    normal equations would square it -- fatal here in single precision at a
+    condition number of ~1e5.  Returns ``(dz, ||F + J dz||^2)``: the reduction
+    the local linear model predicts, from the model residual rather than a
+    normal-equations quadratic, so it cannot disagree with the step taken.
+
+    Q^T rhs is applied from the packed Householder reflectors
+    (``qr(mode="raw")``), never forming Q (ported from legoESM main 0e6e65a4f9,
+    #2398: forming Q was most of the canopy solve's cost; answers change at
+    fp64 rounding only).  R is the upper triangle of the same factor.
+    """
+    n = resid.shape[0]
+    aug = jnp.vstack([J_z, jnp.sqrt(lam) * jnp.eye(n, dtype=J_z.dtype)])
+    rhs = jnp.concatenate([-resid, jnp.zeros(n, resid.dtype)])
+    packed, taus = jnp.linalg.qr(aug, mode="raw")
+    h = packed.T                                   # (m, n): R above, reflectors below
+    qt_rhs = rhs
+    for k in range(n):
+        v = jnp.concatenate([jnp.zeros(k, h.dtype), jnp.ones(1, h.dtype), h[k + 1:, k]])
+        qt_rhs = qt_rhs - taus[k] * jnp.dot(v, qt_rhs) * v
+    dz = jax.scipy.linalg.solve_triangular(jnp.triu(h[:n, :]), qt_rhs[:n], lower=False)
+    pred_resid = resid + J_z @ dz
+    return dz, jnp.sum(pred_resid * pred_resid)
+
+
 def _make_implicit_newton_solver(
     LE_module: str,
     stomatal_model: str,
@@ -821,24 +880,14 @@ def _make_implicit_newton_solver(
             """Residual and Jacobian in SCALED variables (z = x / xscale)."""
             return F(x), Jac(x) * xscale              # columns scaled
 
-        def _step(J_z, resid, lam):
-            """Damped step, via QR of the augmented system.
+        _step = damped_lm_step
 
-            Solves  min || [J ; sqrt(lam) I] dz - [-F ; 0] ||.  Stacking the
-            damping as extra ROWS keeps the conditioning at the Jacobian's own,
-            where forming the normal equations would square it -- fatal here in
-            single precision at a condition number of ~1e5.
-            """
-            n = resid.shape[0]
-            aug = jnp.vstack([J_z, jnp.sqrt(lam) * jnp.eye(n)])
-            rhs = jnp.concatenate([-resid, jnp.zeros(n, resid.dtype)])
-            q, r = jnp.linalg.qr(aug)
-            dz = jax.scipy.linalg.solve_triangular(r, q.T @ rhs, lower=False)
-            # Reduction the local linear model predicts for ||F||^2, computed
-            # from the model residual rather than from a normal-equations
-            # quadratic, so it cannot disagree with the step actually taken.
-            pred_resid = resid + J_z @ dz
-            return dz, jnp.sum(pred_resid * pred_resid)
+        def _certified(x, n_sq, n_sq_0):
+            """Root certificate: the relative reduction from the seed, an
+            absolute ceiling and the physical box (see _ROOT_* above)."""
+            return ((n_sq <= (_LM_ATOL + _LM_RTOL * n_sq_0))
+                    & (n_sq <= _ROOT_NSQ_MAX)
+                    & canopy_state_admissible(x))
 
         def cond(state):
             _, _, _, _, _, _, done = state
@@ -921,13 +970,13 @@ def _make_implicit_newton_solver(
             # backward pass a point that is not a root and unmask a gradient
             # that must be zeroed.  A stalled column instead leaves the loop by
             # the damping ceiling, with converged False.
-            converged = n_sq_new <= (_LM_ATOL + _LM_RTOL * n_sq_0)
+            converged = _certified(x, n_sq_new, n_sq_0)
             done = converged | (lam >= _LM_LAMBDA_MAX) | (i + 1 >= max_iters)
             return (x, resid, J_z, n_sq_new, lam, i + 1, done)
 
         resid_0, J_z_0 = _res_jac(x0)
         n_sq_0 = jnp.sum(resid_0 * resid_0)
-        conv_0 = n_sq_0 <= _LM_ATOL
+        conv_0 = (n_sq_0 <= _LM_ATOL) & canopy_state_admissible(x0)
         x_final, _r, _j, _n, _lam, n_iters, _done = jax.lax.while_loop(
             cond, body,
             (x0, resid_0, J_z_0, n_sq_0, jnp.asarray(_LM_LAMBDA_0, x0.dtype),
@@ -935,7 +984,7 @@ def _make_implicit_newton_solver(
         # Recompute the flag on the returned iterate so what the caller reads is
         # a statement about the state it is handed, not about a loop variable.
         resid_f = F(x_final)
-        converged = jnp.sum(resid_f * resid_f) <= (_LM_ATOL + _LM_RTOL * n_sq_0)
+        converged = _certified(x_final, jnp.sum(resid_f * resid_f), n_sq_0)
         return x_final, n_iters, converged
 
     @jax.custom_vjp
