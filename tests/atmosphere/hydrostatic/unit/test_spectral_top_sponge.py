@@ -180,3 +180,19 @@ def test_cli_round_trip():
     assert build_config_from_args(args).dycore.spectral_sponge_nu_top_m2s == 1.25e5
     args = build_arg_parser().parse_args([])
     assert build_config_from_args(args).dycore.spectral_sponge_nu_top_m2s == 0.0
+
+
+def test_production_deck_resolves_8h_and_the_sponge():
+    import os
+    import sys
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), *[os.pardir] * 4)
+    sys.path.insert(0, os.path.join(root, "scripts", "run"))
+    from run_amip import build_arg_parser, build_config_from_args
+    deck = os.path.join(root, "config", "amip", "amip_production_spectral_t31.yaml")
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(deck, parser, example_keys=""))
+    d = build_config_from_args(parser.parse_args([])).dycore
+    assert d.spectral_sponge_nu_top_m2s == 1.16e6
+    assert d.hyperdiff_scale == 0.0625
+    assert d.discretization == "spectral"

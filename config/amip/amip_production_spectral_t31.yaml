@@ -23,7 +23,16 @@ hyperdiff_scale: 0.0625     # spectral del-4 hyperdiffusion: n_max e-folds in 8 
                             # (e-folding varied alone; zonal-mean jet day 0->10): 0.5 h -13.8%,
                             # 2 h -12.0%, 8 h -3.3%, lat-lon-48 +6.5%; 8 h keeps the m 8-20 slope
                             # (-3.7) at lat-lon's (-3.7) vs -6.2 at 0.5 h. nu*eig_max^2*dt = 0.016,
-                            # far inside the ssp_rk54 limit 5.33. 30-day stability NOT yet run.
+                            # far inside the ssp_rk54 limit 5.33. 30 days alone: the top-level wind
+                            # ran away (daily max 114 -> 202 m/s, eddies), hence the sponge below.
+spectral_sponge_nu_top_m2s: 1.16e6  # CAM-SE top Laplacian sponge (nu_top x 4/2/1 on winds and T of
+                            # the top 3 levels; winds by the vector Laplacian). User 2026-11-09:
+                            # 8 h + a CAM-style top sponge (reverses the 10-27 "no top sponge" row
+                            # for this deck). Strength = the MPAS deck's own del2 rule
+                            # 3e-3 dx^2/dt at T31 (dx 417 km, dt 450 s), ~9x CAM-SE's 1.25e5.
+                            # 30-day T31 gate (max wind <= 140 m/s every day, days 20-30 trend
+                            # <= 0; voted 3-0): 1.16e6 max 105, trend -0.5 m/s/day PASS;
+                            # CAM-faithful 1.25e5 max 152, +4.0 m/s/day FAIL; no sponge 202, +4.7.
 dt: 450.0                  # decision A rule (MPAS / duo / lat-lon decks): 0.82 x the generic CFL
                             # limit 0.8 dx / (390 m/s sqrt 2) on the TRUE T31 quadratic-grid spacing
                             # (417 km, the lat-lon-48 deck's 48 x 96 columns: 605 s -> 496 s), rounded
@@ -43,8 +52,9 @@ rad_update_steps: 8         # CAM6 f09: radiation hourly (8 x 450 s); checkpoint
 # MPAS / lat-lon lanes).  Values below are the code defaults, spelled out so
 # no row rests on a default.  User 2026-10-27: no div-4 damping on this
 # dycore (the lat-lon-48 deck runs CAM-FV ldiv4, mpas_div_damp4_scale 1.0,
-# so the cross-grid ledger has ONE row that differs) and no top sponge
-# (sponge_tau 0 stands).
+# so the cross-grid ledger has ONE row that differs).  The 10-27 "no top
+# sponge" row is superseded 2026-11-09 by spectral_sponge_nu_top_m2s above
+# (the Rayleigh sponge_tau stays 0).
 mpas_sponge_del2_top_layers: 0
 mpas_sponge_del2_top_factor: 1.0
 mpas_vert_advection_scheme: upwind
