@@ -178,3 +178,32 @@ def test_monthly_writer_emits_ozone_tracer_and_column(tmp_path):
         with netCDF4.Dataset(path) as ds:
             assert ds[var].units == units
             np.testing.assert_allclose(np.asarray(ds[var][:]), val, rtol=1e-6)
+
+
+def test_transport_undershoot_keeps_global_ozone_mass():
+    """The post-transport positivity stage borrows for o3_ifs instead of
+    clamping, so an undershoot creates no ozone (codex review 5, vote V11a)."""
+    from legoesm.core.conservation import apply_water_positivity
+    o3 = jnp.asarray([[2e-6, -5e-7, 1e-6], [3e-6, 1e-6, -2e-7]])
+    dp = jnp.asarray([[1e3, 2e3, 3e3], [1e3, 2e3, 3e3]])
+    area = jnp.asarray([1.0, 2.0])
+    out, _ = apply_water_positivity({"o3_ifs": o3}, None, dp, conservative=True,
+                                    energy_consistent=False, area=area)
+    mass = lambda q: float(((q * dp).sum(-1) * area).sum())  # noqa: E731
+    assert float(out["o3_ifs"].min()) >= 0.0
+    assert mass(out["o3_ifs"]) == pytest.approx(mass(o3), rel=1e-12)
+
+
+def test_packaged_top_seed_is_positive_everywhere():
+    """Vote Y1a measured claim: on the shipped coefficients the model-top
+    overhead column k6 - k1*(p_full - p_half)/g is positive in every month and
+    latitude (4.0e-5 .. 1.2e-4 kg/m2)."""
+    sig = make_cam6_l32_levels()
+    ps = jnp.asarray([constants.p_atm_std], jnp.float64)
+    pf = np.asarray(sig.pressure_at_full(ps)).reshape(-1)
+    ph = np.asarray(sig.pressure_at_half(ps)).reshape(-1)
+    with np.load(oc.CARIOLLE_FILE) as d:
+        k = np.asarray(d["coef"], np.float64)              # (12, 7, nlev, nlat)
+    seed = k[:, 5, 0] - k[:, 0, 0] * (pf[0] - ph[0]) / constants.g
+    assert seed.min() > 0.0
+

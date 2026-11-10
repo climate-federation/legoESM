@@ -82,6 +82,12 @@ class OzoneCariolleConfig(NamedTuple):
     # --- numerics (RULE 5) ---
     t_clamp_width_K: float = 0.01
     floor_rel_width: float = 0.01
+    # --- model top (vote Y1a): start the overhead column at the climatological
+    # column above the top half-level, k6 - k1*(p_full - p_half)/g, not at 0.
+    # KNOWN DIFFERENCE: O3CHEM starts at 0 at IFS's ~0.01 hPa top, where that
+    # column is ~0; above our 3.6 hPa top it is 4e-5..1.2e-4 kg/m2 (2-6 DU),
+    # and 0 biased top-level ozone by ~8%. False = the oracle's literal form.
+    seed_overhead_column: bool = True
     # --- switch: carry the o3_ifs tracer (MPAS column lane only) ---
     enabled: bool = False
 
@@ -117,7 +123,9 @@ def cariolle_tendency(o3, T, p_full, p_half, coef, dt,
         return co3 + dp * anex / g, anex
 
     xs = (o3.T, tt.T, jnp.moveaxis(k, 1, 0), rapp.T, delp.T)
-    _, anex = jax.lax.scan(level, jnp.zeros(o3.shape[0], o3.dtype), xs)
+    co3_top = (k[:, 0, 5] - k[:, 0, 0] * delps[:, 0] / g
+               if cfg.seed_overhead_column else jnp.zeros(o3.shape[0], o3.dtype))
+    _, anex = jax.lax.scan(level, co3_top.astype(o3.dtype), xs)
     return (anex.T - o3) / dt
 
 

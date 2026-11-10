@@ -46,7 +46,10 @@ _GROUPS = ("L32", "L137", "STRESS")
 _DTS = (450, 3600)
 _HARD_WMS = IFSWMSConfig(n2_floor_rel_width=0.0, speed_width_m_s=0.0,
                          saturation_rel_width=0.0, deposit_rel_width=0.0)
-_HARD_O3 = OzoneCariolleConfig(t_clamp_width_K=0.0, floor_rel_width=0.0)
+_HARD_O3 = OzoneCariolleConfig(t_clamp_width_K=0.0, floor_rel_width=0.0,
+                               seed_overhead_column=False)
+# RULE 5 gap = smoothing only; the model-top seed (vote Y1a) is its own test.
+_SMOOTH_O3 = OzoneCariolleConfig(seed_overhead_column=False)
 
 
 @pytest.fixture(scope="module")
@@ -253,7 +256,8 @@ def _default_gaps(fix):
         dudt, dvdt, _, _ = _wms(fix, "L", g, 450, IFSWMSConfig())
         out[f"{g}_wms_dudt"] = np.asarray(dudt) - fix[f"L_{g}_wms_dt450_PTENU"]
         out[f"{g}_wms_dvdt"] = np.asarray(dvdt) - fix[f"L_{g}_wms_dt450_PTENV"]
-        o3 = cariolle_tendency(a("PO3"), a("T"), a("p_full"), a("p_half"), a("PKOZO"), 450.0)
+        o3 = cariolle_tendency(a("PO3"), a("T"), a("p_full"), a("p_half"), a("PKOZO"), 450.0,
+                               cfg=_SMOOTH_O3)
         out[f"{g}_o3"] = np.asarray(o3) - fix[f"L_{g}_o3_dt450_PTENO3"]
         mx = methox_tendency(a("q_methox"), a("p_full"))
         out[f"{g}_methox"] = np.asarray(mx) - fix[f"L_{g}_methox_rq0_PTENQ"]
@@ -349,3 +353,23 @@ def test_wired_wms_refused_on_factory_lanes():
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import make_gwd_physics
     with pytest.raises(ValueError, match="MPAS column lane"):
         make_gwd_physics(GravityWaveDragConfig(scheme="mcfarlane+ifs_wms"), "hydrostatic", 300.0)
+
+
+def test_overhead_column_seed_at_model_top(fix):
+    """Vote Y1a: the top level sees the climatological column above the top
+    half-level; its tendency moves by exactly k7 * seed / rapp vs the seed-0
+    oracle form (hard switches, so no smoothing enters the difference)."""
+    assert OzoneCariolleConfig().seed_overhead_column
+    g = _GROUPS[0]
+    a = lambda k: jnp.asarray(fix[f"{g}_{k}"])
+    k, pf, ph, dt = a("PKOZO"), a("p_full"), a("p_half"), 450.0
+    on = cariolle_tendency(a("PO3"), a("T"), pf, ph, k, dt,
+                           cfg=_HARD_O3._replace(seed_overhead_column=True))
+    off = cariolle_tendency(a("PO3"), a("T"), pf, ph, k, dt, cfg=_HARD_O3)
+    gg = constants.g
+    seed = k[:, 0, 5] - k[:, 0, 0] * (pf[:, 0] - ph[:, 0]) / gg
+    rapp = 1.0 - dt * (k[:, 0, 2] + k[:, 0, 6] * (pf[:, 0] - ph[:, 0]) / gg)
+    np.testing.assert_allclose(np.asarray(on[:, 0] - off[:, 0]),
+                               np.asarray(k[:, 0, 6] * seed / rapp),
+                               rtol=1e-9, atol=1e-30)
+

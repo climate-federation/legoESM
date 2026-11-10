@@ -60,8 +60,9 @@ def test_gaussian_latitudes_and_deck_pressures_match_packaged_file():
     assert lat[0] > 0 > lat[-1] and np.allclose(lat, -lat[::-1])
     from legoesm.atmosphere.physics.radiation import ozone_cariolle as oc
     with np.load(oc.CARIOLLE_FILE) as d:
-        np.testing.assert_array_equal(m.deck_standard_pressures("cam_l32"),
-                                      d["p_std_full"])
+        # fp32- vs fp64-built pressures differ by 5.5e-8 (vote X1a)
+        np.testing.assert_allclose(m.deck_standard_pressures("cam_l32"),
+                                   d["p_std_full"], rtol=1e-6, atol=0)
         np.testing.assert_allclose(lat, d["lat_deg"], rtol=0, atol=1e-12)
     with pytest.raises(SystemExit):
         m.deck_standard_pressures("hybrid")
