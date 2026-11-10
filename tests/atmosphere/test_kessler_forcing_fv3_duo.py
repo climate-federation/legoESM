@@ -246,7 +246,7 @@ def test_bridge_refuses_fewer_than_three_tracers(duo_bundle):
     assert KESSLER_TRACER_SLOTS == ("q_v", "q_c", "q_r")
 
 
-@pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
+@pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: the bounded smooth switch at saturation_sharpness=100 (width 1% of q_vs) is not the hard limit; passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
 def test_dry_columns_are_a_no_op(duo_bundle):
     """No vapour, no cloud, no rain -> zero tendency everywhere (a sign or
     layout slip would show up as spurious heating on a dry column)."""
