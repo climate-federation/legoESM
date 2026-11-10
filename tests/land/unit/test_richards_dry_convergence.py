@@ -6,7 +6,7 @@ former solver (10 undamped Picard iterations, last iterate accepted) cycled
 there without converging and returned a top-layer head of 3e4-6e4 m, theta
 1.5-2.6 (theta_sat 0.39), creating 4-7 mm of water in one step.  On current
 code the post-solve water take-back removes that water again (from the layers
-below), but the spike in the top layer remains.
+below).  Stepping in theta with the hydrostatic ceiling removes the spike too.
 """
 
 from __future__ import annotations
@@ -30,14 +30,9 @@ _DZ = (0.002932551319648094, 0.005865102639296188, 0.011730205278592375,
 _DT = 1800.0
 _HYDRO = SoilHydraulicsConfig(theta_r=0.1, theta_sat=0.39, alpha_vg=5.9,
                               n_vg=1.48, K_sat=3.64e-06)
-# The unmodified van Genuchten curve and no dry-layer theta step: the solver these
-# columns were recorded under.  Tests of the unconverged-column paths use it, since
-# the current defaults converge the recorded columns.
-_LEGACY_HYDRO = _HYDRO._replace(vg_air_entry_m=0.0)
-
-
-def _legacy(rc):
-    return rc._replace(se_switch=0.0, c_switch_per_m=0.0)
+# The unconverged-column path is exercised by capping the Picard iterations;
+# ``converged`` is asserted False as the control.
+_N_UNCONVERGED = 2
 
 # Converges in 15 damped iterations.
 _COL_A = dict(
@@ -89,10 +84,9 @@ def _solve(col, richards_config, hydro=_HYDRO):
 
 
 def _former():
-    # Former iteration settings (10 undamped iterations).  Main's post-loop
-    # water take-back still runs, so this is not the historical solver; the
-    # spike survives it on these columns.
-    return _legacy(MultiLayerLandConfig().richards)._replace(max_iter=10, max_dse_per_iter=1e9)
+    # Former iteration settings (10 undamped iterations) on the current
+    # theta-stepping core: not the historical solver.
+    return MultiLayerLandConfig().richards._replace(max_iter=10, max_dse_per_iter=1e9)
 
 
 def test_production_config_converges_and_conserves_on_dry_top_layer():
@@ -103,29 +97,30 @@ def test_production_config_converges_and_conserves_on_dry_top_layer():
     assert abs(residual) < 1e-7  # m of water
 
 
-def test_unconverged_column_is_flagged_without_a_spike():
-    out, residual = _solve(_COL_B, _legacy(MultiLayerLandConfig().richards), _LEGACY_HYDRO)
-    assert not bool(out.converged[0])
+def test_formerly_unconverged_column_now_converges_without_a_spike():
+    """Column B stayed unconverged for 30 damped psi iterations; with the
+    update applied in theta (richards.py) it converges, with no spike and a
+    closed budget."""
+    out, residual = _solve(_COL_B, MultiLayerLandConfig().richards)
+    assert bool(out.converged[0])
     assert float(out.theta_new[0, 0]) <= 0.39
     assert float(out.psi_new[0, 0]) < 0.0
-    # The unconverged iterate lost 3.4e-5 m; the post-solve correction returns it.
     assert abs(residual) < 1e-12  # m
     assert abs(float(out.water_created[0])) < 1e-12
 
 
-def test_former_undamped_ten_iterations_spike_on_these_columns():
-    """The recorded columns do bite: the former iteration settings still spike.
-
-    Main's take-back now closes the water budget of the spiked step (measured
-    residual ~1e-17 m on both columns) by draining the layers below, so the
-    defect left is the spike itself: a positive top-layer head of 3e4-6e4 m
-    and theta 1.5-2.6 against theta_sat 0.39.
+def test_former_undamped_ten_iterations_no_longer_spike_on_these_columns():
+    """The recorded columns bit the psi-stepping solver: 10 undamped
+    iterations returned a top-layer head of 3e4-6e4 m and theta 1.5-2.6
+    against theta_sat 0.39 (the take-back closed the budget by draining the
+    layers below, the spike itself remained).  Stepping in theta with the
+    hydrostatic ceiling removes the spike at the former settings too: the
+    top layer stays below saturation and under no positive head.
     """
     for col in (_COL_A, _COL_B):
-        out, _ = _solve(col, _former(), _LEGACY_HYDRO)
-        assert not bool(out.converged[0])
-        assert float(out.theta_new[0, 0]) > 1.0
-        assert float(out.psi_new[0, 0]) > 1e4
+        out, _ = _solve(col, _former())
+        assert float(out.theta_new[0, 0]) <= 0.39
+        assert float(out.psi_new[0, 0]) < 0.0
 
 
 def test_float32_gradient_finite_through_converged_frozen_columns():
@@ -187,34 +182,62 @@ _COL_C = dict(
     pond=0.004164217237920083)
 
 
-def test_unreturnable_deficit_goes_back_to_the_pond():
-    col = _COL_C
-    rc = _legacy(MultiLayerLandConfig().richards)
+def _solve_ponded(col, rc, hydro=_HYDRO):
+    # Recorded water content; on another curve the head is that curve's own
+    # (psi_from_theta inverts the elastic branch above theta_sat too).
+    theta = np.asarray(col["theta"])
+    psi = (np.asarray(col["psi"]) if hydro is _HYDRO
+           else np.asarray(psi_from_theta(jnp.asarray(theta), hydro)))
     out = solve_richards(
-        jnp.asarray([col["psi"]]), jnp.asarray([col["theta"]]), make_soil_grid_custom(_DZ),
-        _LEGACY_HYDRO, rc, jnp.asarray([col["flux_top"]]), jnp.asarray([col["sink"]]), _DT,
+        jnp.asarray([psi]), jnp.asarray([theta]), make_soil_grid_custom(_DZ),
+        hydro, rc, jnp.asarray([col["flux_top"]]), jnp.asarray([col["sink"]]), _DT,
         surface_water=jnp.asarray([col["pond"]]))
-    assert not bool(out.converged[0])
     dz = np.asarray(_DZ)
-    # in - out - d(storage) over soil + pond, drainage and overland runoff [m]
-    residual = (np.asarray(out.theta_new[0]) @ dz - np.asarray(col["theta"]) @ dz
+    # in - out - d(storage) over soil + pond, drainage and overland runoff [m],
+    # from the outputs alone (independent of the solver's own water_created).
+    residual = (np.asarray(out.theta_new[0]) @ dz - theta @ dz
                 + float(out.surface_water[0]) - col["pond"]
                 - (col["flux_top"] - np.asarray(col["sink"]) @ dz) * _DT
                 + (float(out.runoff_surface[0]) + float(out.runoff_subsurface[0]))
                 / constants.rho_water * _DT
                 - float(out.refill[0]))
+    return out, residual
+
+
+def test_unconverged_ponded_column_closes_its_budget_on_the_theta_path():
+    """Main's theta-stepping update conserves every iterate (its excess cascade
+    moves water into the pond iterate), so an unconverged column closes without
+    the post-solve deficit return (measured: the return is <= 3e-17 m here)."""
+    rc = MultiLayerLandConfig().richards._replace(max_iter=_N_UNCONVERGED)
+    out, residual = _solve_ponded(_COL_C, rc)
+    assert not bool(out.converged[0])
+    assert abs(residual) < 1e-12
+    assert abs(float(out.water_created[0])) < 1e-12
+
+
+# PDI keeps the psi update (approximate inverse, no per-iterate cascade): there an
+# unconverged ponded column loses ~0.8 mm that only the post-solve deficit return
+# puts back.  Removing the return or counting it twice moves the residual by that
+# amount, so these tests fail on either.
+_PDI = _HYDRO._replace(retention_curve="pdi")
+
+
+def test_unreturnable_deficit_goes_back_to_the_pond():
+    rc = MultiLayerLandConfig().richards._replace(max_iter=_N_UNCONVERGED)
+    out, residual = _solve_ponded(_COL_C, rc, _PDI)
+    assert not bool(out.converged[0])
     assert abs(residual) < 1e-12
     assert abs(float(out.water_created[0])) < 1e-12
     assert 0.0 < float(out.surface_water[0]) <= rc.pond_max
 
 
 def test_returned_deficit_above_pond_max_spills_to_runoff():
-    col = _COL_C
-    rc = _legacy(MultiLayerLandConfig().richards)._replace(pond_max=0.001)
-    out = solve_richards(
-        jnp.asarray([col["psi"]]), jnp.asarray([col["theta"]]), make_soil_grid_custom(_DZ),
-        _LEGACY_HYDRO, rc, jnp.asarray([col["flux_top"]]), jnp.asarray([col["sink"]]), _DT,
-        surface_water=jnp.asarray([col["pond"]]))
-    assert float(out.surface_water[0]) <= rc.pond_max
+    # Measured: the pond ends at 3.33 mm without the return and 4.15 mm with it,
+    # so a 4 mm cap spills only because of the returned deficit.
+    rc = MultiLayerLandConfig().richards._replace(max_iter=_N_UNCONVERGED, pond_max=0.004)
+    out, residual = _solve_ponded(_COL_C, rc, _PDI)
+    assert not bool(out.converged[0])
+    assert abs(float(out.surface_water[0]) - rc.pond_max) < 1e-15   # pond held at the cap
     assert float(out.runoff_surface[0]) > 0.0
+    assert abs(residual) < 1e-12
     assert abs(float(out.water_created[0])) < 1e-12

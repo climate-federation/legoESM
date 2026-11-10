@@ -62,8 +62,10 @@ def _run_turbulence(scheme, state=None, grid=None, sigma=None, **kwargs):
     return tend
 
 
+# ysu carries the WRF surface-layer state and needs a threaded PhysicsState
+# (tests/atmosphere/hydrostatic/unit/test_ysu_route.py covers its lane).
 ALL_SCHEMES = ["smagorinsky", "louis", "tke", "clubb_lite",
-               "holtslag_boville", "ysu", "edmf"]
+               "holtslag_boville", "edmf"]
 
 
 # ============================================================================

@@ -557,6 +557,16 @@ class CanopyLandParams(NamedTuple):
     hbot_dom: jax.Array | None = None
     pft_dom: jax.Array | None = None
 
+    # ---- Canopy band albedo and leaf emissivity (per-column; optional) ----
+    # Snow-free band albedo of the vegetation itself.  When set (with the
+    # soil-colour bounds), ``soil_albedo.rewet_soil_bands`` blends it with the
+    # wet soil bands by canopy cover, ``cov*CAN + (1-cov)*SOIL``.  ``None`` keeps
+    # the soil-colour bands alone (byte-identical to before these fields).
+    ALB_VIS_CAN: jax.Array | None = None
+    ALB_NIR_CAN: jax.Array | None = None
+    # Leaf longwave emissivity; ``None`` uses the scheme's scalar ``epsf``.
+    epsf: jax.Array | None = None
+
 
 # NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface
 # scheme of ``MultiLayerLandConfig`` (and, in Phase 3b, ``LandConfig``):

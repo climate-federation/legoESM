@@ -414,7 +414,7 @@ def thompson_air_density(T, p, qv):
 
 
 def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt,
-                      *, n_sed_max: int) -> ThompsonWRFStep:
+                      *, n_sed_max: int, cloud_sed_to_rain: bool) -> ThompsonWRFStep:
     """One WRF v4.8.0 ``mp_gt_driver`` column step (``mp_physics=8``).
 
     Arrays are ``(ncol, nz)``, level 0 = bottom, oracle units (module docstring).
@@ -422,6 +422,9 @@ def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt,
     ``dt > 120 s`` warm-riming branch).  ``n_sed_max`` is the static length of
     the sedimentation sub-step loop; the result equals the oracle's only while
     every column's required count (``nstep_required``) is ``<= n_sed_max``.
+    ``cloud_sed_to_rain`` adds the cloud water settling out of the lowest
+    level to ``pptrain``; ``False`` is the oracle, which drops it (WRF removes
+    it from ``qc`` and books it nowhere, so the column loses that water).
     """
     dtype = T.dtype
     # dt may be traced (the coupled pipeline jits it): no Python float (X1a)
@@ -471,6 +474,7 @@ def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt,
     qv_l = jnp.maximum(_QV_MIN, qv)
     pres = p
     rho = W.EPS_WRF * pres / (W.R_DRY * temp * (qv_l + W.EPS_WRF))
+    rho_in = rho
 
     L_qc = qc > R1
     rc = jnp.where(L_qc, qc * rho, R1)
@@ -1286,6 +1290,10 @@ def thompson_wrf_step(T, p, dz, w, qv, qc, qi, qr, qs, qg, ni, nr, dt,
     c_body = (kidx <= ksed_c[:, None]) & any_c
     qcten = jnp.where(c_body, qcten + (sed_c_up - sed_c) * odzq * orho, qcten)
     ncten = jnp.where(c_body, ncten + (sed_n_up - sed_n) * odzq * orho, ncten)
+    if cloud_sed_to_rain:
+        # the lowest level's loss [kg/kg dry] on the input density, the basis
+        # of the caller's layer masses rho_in*dz (sed_c uses the adjusted rho)
+        pptrain = pptrain + sed_c[:, 0] * dt * orho[:, 0] * rho_in[:, 0]
 
     # ---------------- instant melt / freeze ------------------
     xri = jnp.maximum(0.0, qi1d + qiten * dt)

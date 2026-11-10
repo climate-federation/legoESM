@@ -135,6 +135,7 @@ def _argv_federates(argv: list[str]) -> bool:
 if "--multicontroller" not in sys.argv:
     maybe_init_jax_distributed(federate=_argv_federates(sys.argv))
 
+from legoesm.atmosphere.physics.turbulence.config import refuse_retired_turbulence
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
@@ -806,6 +807,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tau-pole", type=float,
                         default=_EXPERIMENT_DEFAULTS.tau_pole,
                         help="Gray-radiation polar optical depth")
+    parser.add_argument(
+        "--ecrad-ifs-aerosol-file", type=str, default="",
+        help=("radiation='ecrad_ifs': the IFS CAMS 2D aerosol climatology "
+              "(aerosol_cams_climatology_43R3a.nc); required for ecrad_ifs."))
     parser.add_argument("--ozone-source", type=str, default="standard",
                         choices=["standard", "analytical", "mls", "none"])
     parser.add_argument("--ozone-forcing", type=str, default="inline",
@@ -1058,10 +1063,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["constant", "two_region"], default="constant",
                         help="Sub-grid cloud-optics inhomogeneity scheme: "
                              "'constant' (Cahalan scalar chi, legacy default) or "
-                             "'two_region' (TAU-DEPENDENT Shonk-Hogan 2008 optic "
-                             "that breaks the plane-parallel tau-saturation a "
-                             "scalar cannot -- a thick cloud is reduced MORE than "
-                             "a thin one).")
+                             "'two_region' (ecRad 49r1 McICA gamma-PDF scaling of "
+                             "each max_random subcolumn cell; needs "
+                             "--cloud-vertical-overlap-optics max_random).")
     parser.add_argument("--cloud-vertical-overlap-optics",
                         dest="cloud_vertical_overlap_optics",
                         choices=["none", "max_random", "mcica"], default="none",
@@ -1115,8 +1119,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "0.0 %% cover against 35-40 %% observed.")
     parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
                         help="Fractional std-dev of in-cloud water for the "
-                             "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
-                             "=> thinner leaking sub-column => lower albedo). "
+                             "two_region optic [0,1] (Shonk-Hogan ~0.75; width "
+                             "of the gamma PDF of the subcolumn cells). "
                              "None=CloudConfig default 0.75.")
     parser.add_argument("--use-clubb-cloud-fraction",
                         action=argparse.BooleanOptionalAction, default=False,
@@ -1232,16 +1236,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Air-entry head [m] of the modified van Genuchten soil "
                              "retention curve (Vogel et al. 2001); <= 0, 0 = the "
                              "classic curve. Default -0.02.")
-    parser.add_argument("--land-soil-richards-se-switch",
-                        dest="land_soil_richards_se_switch", type=float,
-                        default=_EXPERIMENT_DEFAULTS.land_soil_richards_se_switch,
-                        help="Richards dry-layer switch: a layer below this effective "
-                             "saturation steps in water content. [0, 1); default 0.01.")
-    parser.add_argument("--land-soil-richards-c-switch-per-m",
-                        dest="land_soil_richards_c_switch_per_m", type=float,
-                        default=_EXPERIMENT_DEFAULTS.land_soil_richards_c_switch_per_m,
-                        help="Richards dry-layer switch: a layer below this moisture "
-                             "capacity [1/m] steps in water content. >= 0; default 1e-5.")
     parser.add_argument("--land-canopy-stress-b0", dest="land_canopy_stress_b0",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_canopy_stress_b0,
@@ -2794,6 +2788,7 @@ def _resolve_land_model(args, parser=None, argv=None):
 
 DRY_RUN_CONFIG_INPUTS = (
     "ic_path", "forcing_path", "sic_path", "ozone_file", "ghg_file",
+    "ecrad_ifs_aerosol_file",
     "solar_file", "aerosol_file", "aerosol_ccn_file", "volcanic_aerosol_file",
     "topography", "land_mask_path", "albedo_land_path",
     "subgrid_orography_path", "land_ic_path", "clm_surfdata_path",
@@ -2844,6 +2839,7 @@ def _default_discretization_for_grid(grid_type: str) -> str:
 
 
 def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+    refuse_retired_turbulence(args.turbulence, "run_amip --turbulence")
     # Defensive boundary: --grid-type/--discretization carry a None sentinel
     # default (explicitness tracking for the --truncation conflict guard in
     # _postprocess_args). A caller that skips _postprocess_args must still get
@@ -3014,6 +3010,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         ozone_file=args.ozone_file,
         ghg_forcing=args.ghg_forcing,
         ghg_file=args.ghg_file,
+        ecrad_ifs_aerosol_file=args.ecrad_ifs_aerosol_file,
         solar_source=args.solar_source,
         solar_file=args.solar_file,
         solar_tsi_var=args.solar_tsi_var,
@@ -3095,8 +3092,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_snow_emissivity=args.land_snow_emissivity,
         land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
         land_soil_vg_air_entry_m=args.land_soil_vg_air_entry_m,
-        land_soil_richards_se_switch=args.land_soil_richards_se_switch,
-        land_soil_richards_c_switch_per_m=args.land_soil_richards_c_switch_per_m,
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
         land_canopy_snow_masking=args.land_canopy_snow_masking,

@@ -495,6 +495,10 @@ def _thomas(dt, rkh, rho, s, z, rkct=None):
 
     sm = jnp.moveaxis(s[..., 1:L - 1], -1, 0)
     srcm = jnp.moveaxis(src, -1, 0)
+    # carry in the promoted dtype of the sweep (a float32 species against float64
+    # metrics would otherwise change the scan carry's dtype after one step)
+    ct = jnp.result_type(cm1, rs1, dtoz, rkh, cr, rho, s, src)
+    cm1, rs1 = cm1.astype(ct), rs1.astype(ct)
     _, (cmr, rsr) = lax.scan(fwd, (cm1, rs1),
                              (dtoz[1:], rkh[:-1], rkh[1:], cr[:-1], rho[1:L - 1], sm, srcm))
     cm = jnp.concatenate([cm1[None], cmr])
@@ -551,6 +555,8 @@ class MYJOutput(NamedTuple):
     tke: jnp.ndarray
     el: jnp.ndarray          # EL_MYJ, bottom-up, 0 at k = 1
     exch_h: jnp.ndarray      # bottom-up, k = 1..L-1
+    exch_m: jnp.ndarray      # momentum analogue of EXCH_H (AKM*DELTAZ; not an oracle output)
+    dqdt: jnp.ndarray        # DQDT, specific-humidity tendency before the RQVBLTEN conversion (not an oracle output)
     pblh: jnp.ndarray
     kpbl: jnp.ndarray
     mixht: jnp.ndarray
@@ -584,6 +590,7 @@ def myjpbl_column(dt, ht, dz, pmid, pint, th, t, exner, qv, qcw, qci, u, v, tke,
     kpbl = L - lpbl + 1
     deltaz = 0.5 * (z[:L - 1] - z[2:])                      # at MYJ K = 1..L-1
     exch_h = f(akh * deltaz)                                # bottom-up k = 1..L-1
+    exch_m = f(akm * deltaz)
     q2 = vdifq(dt, q2, el, z)
     q2 = _mx(q2, _EPSQ2, cfg.width_q2_m2_s2)
     tke_out = 0.5 * f(q2)
@@ -617,7 +624,8 @@ def myjpbl_column(dt, ht, dz, pmid, pint, th, t, exner, qv, qcw, qci, u, v, tke,
     rthblten = (thnew - th) * rdt
     qold = qv / (1. + qv)
     qnew = f(qk2)
-    rqvblten = (qnew - qold) * rdt / (1. - qnew) ** 2
+    dqdt = (qnew - qold) * rdt
+    rqvblten = dqdt / (1. - qnew) ** 2
     rqcblten = (f(qcwk2) - qcw) * rdt
     rqiblten = (f(qcik2) - qci) * rdt
     # --- momentum ---
@@ -627,4 +635,4 @@ def myjpbl_column(dt, ht, dz, pmid, pint, th, t, exner, qv, qcw, qci, u, v, tke,
     rublten = (f(uv[0]) - u) * rdt
     rvblten = (f(uv[1]) - v) * rdt
     return MYJOutput(rublten, rvblten, rthblten, rqvblten, rqcblten, rqiblten, tke_out,
-                     el_myj, exch_h, pblh, kpbl, mixht, ct_out, thz0, qz0, qsfc)
+                     el_myj, exch_h, exch_m, dqdt, pblh, kpbl, mixht, ct_out, thz0, qz0, qsfc)

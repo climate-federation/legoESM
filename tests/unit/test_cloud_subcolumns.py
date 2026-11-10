@@ -19,6 +19,7 @@ from legoesm.atmosphere.physics.clouds.subcolumns import (
     subcolumn_paths,
 )
 from legoesm.diagnostics.cloud_overlap import maximum_random_overlap
+from legoesm.atmosphere.physics.clouds import subcolumns as sub
 
 NLEV = 30
 
@@ -368,3 +369,33 @@ def test_validate_strict_accepts_mcica():
     # Column-loop lane: the compiled pipeline refuses McICA (composable P1).
     ExperimentConfig(cloud_vertical_overlap_optics="mcica",
                      dycore=DycoreConfig(discretization="mpas")).validate_strict()
+
+
+def test_draws_with_two_or_more_subcolumns_are_unchanged():
+    """n_sub >= 2 keeps the float per-layer offset bit for bit (production McICA)."""
+    ncol, nlev, n_sub = 64, 12, 8
+    shift = jnp.asarray(np.random.default_rng(7).random(ncol))
+    cf = jnp.asarray(np.random.default_rng(8).random((ncol, nlev)))
+    k = jnp.arange(nlev, dtype=cf.dtype)
+    off = shift[:, None] * (1.0 + k * sub._SHIFT_LAYER_SLOPE) + k * sub._SHIFT_LAYER_STEP
+    u = jnp.mod(jnp.asarray(sub._stratified_table(n_sub, nlev), cf.dtype)[:, None, :] + off[None], 1.0)
+    np.testing.assert_array_equal(
+        np.asarray(sub.generate_subcolumns(cf, n_sub, shift=shift, width=0.0)),
+        np.asarray(sub.max_random_mask(u, cf, width=0.0)))
+
+
+def test_single_subcolumn_hashed_offsets_are_jit_stable():
+    shift = jnp.asarray(np.random.default_rng(9).random(32))
+    f = lambda s: sub._hashed_layer_offsets(s, 20, jnp.float32, sub._PERM_SEED)  # noqa: E731
+    np.testing.assert_array_equal(np.asarray(jax.jit(f)(shift)), np.asarray(f(shift)))
+
+
+def test_single_subcolumn_cover_is_unbiased_per_layer():
+    """One subcolumn has no stratification, so each layer's offset must itself
+    be uniform: before the hashed offset, the worst isolated layer's cover was
+    off by 0.026 at cf 0.3 (5 SE); measured after, 0.0093 (SE 0.0051)."""
+    ncol, nlev, cf0 = 8192, 36, 0.3
+    shift = jnp.asarray(np.random.default_rng(0).random(ncol))
+    cf = jnp.asarray(np.tile((np.arange(nlev) % 2 == 0) * cf0, (ncol, 1)))
+    m = np.asarray(generate_subcolumns(cf, 1, shift=shift, width=0.0)).mean(axis=(0, 1))[::2]
+    assert np.abs(m - cf0).max() < 0.015

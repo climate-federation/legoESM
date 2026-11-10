@@ -533,6 +533,8 @@ VALID_MICROPHYSICS = (
     "ifs_cloudsc",
 )
 
+_CLUBB_LITE_WARNED = False  # one stand-in warning per process
+
 VALID_TURBULENCE = (
     "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
     "holtslag_boville", "ysu", "edmf", "none",
@@ -824,6 +826,10 @@ class ExperimentConfig(NamedTuple):
     ozone_file: str = ""
     ghg_forcing: str = "constant"       # constant, external
     ghg_file: str = ""
+    # radiation='ecrad_ifs' aerosols: the IFS CAMS 2D column-mass
+    # climatology (48r1 aerosol_cams_climatology_43R3a.nc, declared departure
+    # A2a; user 2026-11-04 item 3).  Required for ecrad_ifs (vote C2a).
+    ecrad_ifs_aerosol_file: str = ""
 
     # Solar
     solar_source: str = "constant"      # constant, file, spectral_file
@@ -925,8 +931,8 @@ class ExperimentConfig(NamedTuple):
     # albedo. None => CloudConfig default 1.0 (homogeneous, no change).
     cloud_inhomogeneity_factor: float | None = None
     # Sub-grid cloud-optics inhomogeneity scheme: "constant" (Cahalan scalar,
-    # legacy/byte-identical) or "two_region" (tau-dependent Shonk-Hogan optic
-    # that breaks the plane-parallel tau-saturation). cloud_fsd = fractional
+    # legacy/byte-identical) or "two_region" (ecRad McICA gamma scaling per
+    # max_random subcolumn cell). cloud_fsd = fractional
     # std-dev of in-cloud water for two_region (Shonk-Hogan ~0.75).
     cloud_optics_inhomogeneity: str = "constant"
     cloud_fsd: float | None = None
@@ -1396,14 +1402,10 @@ class ExperimentConfig(NamedTuple):
     # land_soil_freeze_thaw; 6 = CLM5 (user 2026-09-28), 0 = no impedance.
     land_soil_ice_impedance_exponent: float = 6.0
     # Soil-water numerics of the multilayer land (user 2026-10-14), stated here so
-    # the run records them: the air-entry head [m] of the modified van Genuchten
-    # retention curve (Vogel et al. 2001; <= 0, 0 = the classic curve), and the
-    # Richards dry-layer primary-variable switch thresholds (a layer below this
-    # effective saturation, or below this moisture capacity [1/m], steps in theta;
-    # 0 and 0 = switch off).  Defaults are the land library's.
+    # the run records it: the air-entry head [m] of the modified van Genuchten
+    # retention curve (Vogel et al. 2001; <= 0, 0 = the classic curve).  Default is
+    # the land library's.
     land_soil_vg_air_entry_m: float = -0.02
-    land_soil_richards_se_switch: float = 0.01
-    land_soil_richards_c_switch_per_m: float = 1e-5
     # Two-leaf canopy (land_surface_scheme="two_leaf"): whether soil-moisture
     # stress also down-regulates the Ball-Berry intercept b0
     # (TwoLeafCanopyConfig.stress_b0). Library default True (both stressed);
@@ -2310,6 +2312,13 @@ class ExperimentConfig(NamedTuple):
         # for bit-comparison and for the documented MSE-vs-water trade-off.
         import logging as _logging
         _wlog = _logging.getLogger(__name__)
+        global _CLUBB_LITE_WARNED
+        if self.turbulence == "clubb_lite" and not _CLUBB_LITE_WARNED:
+            from legoesm.atmosphere.physics.turbulence.config import (
+                CLUBB_LITE_STANDIN_NOTE,
+            )
+            _wlog.warning(CLUBB_LITE_STANDIN_NOTE)
+            _CLUBB_LITE_WARNED = True
         if not d.mpas_conservative_tracer_clamp:
             _wlog.warning(
                 "NON-CONSERVING form selected: "
@@ -2720,13 +2729,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "land_soil_ice_impedance_exponent must be finite in [0, 10] "
                 f"(its declared range), got {self.land_soil_ice_impedance_exponent}")
-        for _f in ("land_soil_vg_air_entry_m", "land_soil_richards_se_switch",
-                   "land_soil_richards_c_switch_per_m"):
-            if getattr(self, _f) != type(self)._field_defaults[_f] and not self.use_multilayer_land:
-                errors.append(f"{_f} requires use_multilayer_land: only the multilayer "
-                              "soil solves Richards — the knob would be silently inert.")
-        # One legal range per parameter: the land library's own checks.
-        from legoesm.land.richards import check_switch_thresholds
+        _f = "land_soil_vg_air_entry_m"
+        if getattr(self, _f) != type(self)._field_defaults[_f] and not self.use_multilayer_land:
+            errors.append(f"{_f} requires use_multilayer_land: only the multilayer "
+                          "soil solves Richards — the knob would be silently inert.")
+        # One legal range per parameter: the land library's own check.
         from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, saturation_head
         try:
             saturation_head(SoilHydraulicsConfig(
@@ -2734,12 +2741,6 @@ class ExperimentConfig(NamedTuple):
                 vg_air_entry_m=self.land_soil_vg_air_entry_m))
         except ValueError as exc:
             errors.append(f"land_soil_vg_air_entry_m: {exc}")
-        try:
-            check_switch_thresholds(self.land_soil_richards_se_switch,
-                                    self.land_soil_richards_c_switch_per_m)
-        except ValueError as exc:
-            errors.append(f"land_soil_richards_se_switch / "
-                          f"land_soil_richards_c_switch_per_m: {exc}")
         if ((self.land_canopy_interception or not self.land_canopy_stress_b0)
                 and not (self.use_multilayer_land
                          and self.land_surface_scheme == "two_leaf")):
@@ -2915,8 +2916,10 @@ class ExperimentConfig(NamedTuple):
                 f"radiation must be one of {_valid_radiation}, "
                 f"got {self.radiation!r}"
             )
-        # ecRad 49r1 (votes L2a, L20a): the MPAS column lane only, and its
-        # aerosols are OFF, so an aerosol forcing would be silently ignored.
+        # ecRad 49r1 (votes L2a, L20a, M7a): the MPAS column lane only; the
+        # lane's aerosol forcing does not reach it; TSI, ozone and GHG come
+        # from the input4MIPs files (user 2026-11-04), so any other source
+        # would feed it silently.
         if self.radiation == "ecrad_ifs":
             if not self.column_loop_lane:
                 errors.append(
@@ -2926,10 +2929,35 @@ class ExperimentConfig(NamedTuple):
                     "refuse it")
             if self.aerosol_forcing != "off":
                 errors.append(
-                    "radiation='ecrad_ifs' runs with aerosols OFF (the CAMS "
-                    "climatology files are pending); aerosol_forcing="
+                    "radiation='ecrad_ifs' does not read the lane's aerosol "
+                    "forcing: its aerosols are the IFS CAMS climatology in "
+                    "ecrad_ifs_aerosol_file; aerosol_forcing="
                     f"{self.aerosol_forcing!r} would be silently ignored, "
                     "set it to 'off'")
+            if not self.ecrad_ifs_aerosol_file:
+                errors.append(
+                    "radiation='ecrad_ifs' needs ecrad_ifs_aerosol_file (the "
+                    "IFS CAMS 2D aerosol climatology, "
+                    "aerosol_cams_climatology_43R3a.nc); ecRad runs with "
+                    "aerosols on")
+            for _f, _v in (("ozone_forcing", self.ozone_forcing),
+                           ("ghg_forcing", self.ghg_forcing)):
+                if _v != "external":
+                    errors.append(
+                        f"radiation='ecrad_ifs' reads the input4MIPs {_f} "
+                        f"file; {_f}={_v!r} would feed it another source, "
+                        "set it to 'external'")
+            if self.solar_source not in ("file", "spectral_file"):
+                errors.append(
+                    "radiation='ecrad_ifs' reads the input4MIPs TSI; "
+                    f"solar_source={self.solar_source!r} would feed it the "
+                    "static configured constant, set 'file' or "
+                    "'spectral_file'")
+            if self.experiment:
+                errors.append(
+                    "radiation='ecrad_ifs' does not take the CMIP-experiment "
+                    f"GHG trajectory (experiment={self.experiment!r}); it "
+                    "reads the ghg_file")
         _valid_cloud_schemes = VALID_CLOUD_SCHEMES
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(

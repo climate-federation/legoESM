@@ -284,3 +284,42 @@ def test_a_window_the_feed_did_not_record_drops_the_tendency_baseline():
     # Only on the not-recorded branch: an unconditional drop would erase
     # the baseline after every recorded window and no closure would survive.
     assert src[publish:drop].split("\n")[-2].strip() == "else:"
+
+
+@pytest.mark.slow
+def test_the_series_row_carries_this_intervals_closure(tmp_path, monkeypatch):
+    """The time-series row written at a diagnostic step must hold the closure
+    the CMOR feed records at THAT step, not the previous interval's (#2171).
+
+    The feed is wrapped to stamp a distinct value per call; the row must
+    carry it.  Read before the feed, the row would hold the previous stamp
+    (or NaN for the first window)."""
+    from legoesm.driver.config import (
+        DycoreConfig, ExperimentConfig, GridConfig, OutputConfig)
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=3, nlev=20,
+                        vertical_coord="hybrid"),
+        dycore=DycoreConfig(discretization="mpas", dt=300.0),
+        output=OutputConfig(output_dir="", diag_days=1, cmip_output=True,
+                            monthly_means=True, cmip_resolution_deg=10.0),
+        days=2, dataset="analytical", radiation="gray", convection="none",
+        turbulence="none", precision="fp64", distributed=False,
+    )
+    d = ModelDriver(cfg, output_dir=str(tmp_path))
+    d.setup()
+    real = ModelDriver._feed_mpas_cmip_accumulators
+    stamps = []
+
+    def feed(self, day, **kw):
+        real(self, day, **kw)
+        if kw.get("flux_only"):
+            stamps.append(1000.0 + len(stamps))
+            self.diagnostics.moisture_tracker.residual.append(stamps[-1])
+    monkeypatch.setattr(ModelDriver, "_feed_mpas_cmip_accumulators", feed)
+    d.run()
+
+    assert len(stamps) == 2, f"expected two diagnostic windows, fed {len(stamps)}"
+    (ts_path,) = list(tmp_path.rglob("timeseries.npz"))
+    with np.load(ts_path) as z:
+        series = np.asarray(z["moisture_residual"])
+    np.testing.assert_array_equal(series[-2:], stamps)

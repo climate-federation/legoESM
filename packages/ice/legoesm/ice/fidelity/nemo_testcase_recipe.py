@@ -8,6 +8,8 @@ float32 NetCDF input shipped by NEMO before promoting the live state to fp64.
 
 from __future__ import annotations
 
+import math
+
 import hashlib
 import json
 from pathlib import Path
@@ -403,6 +405,7 @@ def step_ice_adv1d_card(
         ice_volume_index=ICE_ADV1D_TRACERS.index("v_i"),
         concentration_index=ICE_ADV1D_TRACERS.index("a_i"),
         subcycles=_ICE_ADV1D_PRATHER_SUBCYCLES,
+        limit_sharpness_scale=math.inf,
     )
     return apply_ice_adv1d_zapsmall(card, state, contents, moments)
 

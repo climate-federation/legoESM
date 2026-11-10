@@ -49,7 +49,9 @@ DEPARTURES / NUMERICS (NOT the pure closed form; documented, some canaried):
     is masked (finite reverse-mode gradient); canaried via K(psi=0)==K_sat.
   * the S_s elastic-storage branch in ``theta_from_psi``/``moisture_capacity``
     (theta = theta_sat + S_s*theta_sat*(psi - h) for psi >= h, h =
-    ``saturation_head``: 0, the vG air-entry head, or CH psi_sat) is a ParFlow/CliMA
+    ``saturation_head``: the curve's air-entry head where it has one -- vG
+    ``vg_air_entry_m``, Clapp-Hornberger/Campbell ``psi_sat``, Brooks-Corey
+    ``psi_b`` -- and 0 otherwise) is a ParFlow/CliMA
     change-of-variable near saturation, NOT a retention-curve term.
   * PDI (Peters-Durner-Iden 2015) and Lu (2016) are APPROXIMATE: faithful SWRC
     but a VG inverse for psi(theta) and a simplified film conductivity (see the
@@ -607,15 +609,26 @@ def lu_C(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
 # ==========================================================================
 
 def saturation_head(config: SoilHydraulicsConfig):
-    """Matric potential [m] at and above which the soil is saturated: the
-    air-entry head for van Genuchten, psi_sat for Clapp-Hornberger / Campbell
-    (whose curve is flat at theta_sat from psi_sat up), 0 for the other curves."""
-    if config.retention_curve in ("clapp_hornberger", "campbell"):
-        # The elastic branch and its capacity start where the curve saturates; with
-        # them at 0 the band [psi_sat, 0) had flat theta but a positive capacity, and
-        # ponded saturated columns stopped early and lost 1-10 mm per step.
+    """Matric potential [m] at and above which the configured curve is saturated
+    (theta = theta_sat): the air-entry head for van Genuchten
+    (``vg_air_entry_m``, 0 = the classic curve), ``psi_sat`` for
+    Clapp-Hornberger / Campbell, ``psi_b`` for Brooks-Corey, 0 for the others.
+
+    The elastic (specific-storage) branch of :func:`theta_from_psi` and
+    :func:`moisture_capacity` starts HERE, not at 0, so that theta(psi) is
+    strictly increasing and invertible through saturation.  Between air entry
+    and 0 the sharp-air-entry curves are flat (theta = theta_sat); a capacity
+    taken from the unsaturated branch there (the Se=1 value of
+    ``clapp_hornberger_C``, ~0.36 1/m against an elastic 4e-5) let the Richards
+    linear system store water the state could not hold, ~1 mm per iteration out
+    of a saturated top layer under rain, and ponded saturated columns stopped
+    early and lost 1-10 mm per step."""
+    curve = config.retention_curve
+    if curve == "clapp_hornberger" or curve == "campbell":
         return config.psi_sat
-    if config.retention_curve != "van_genuchten":
+    if curve == "brooks_corey":
+        return config.psi_b
+    if curve != "van_genuchten":
         return 0.0
     # 0.0 is the classic (unmodified) curve; NaN/inf would silently poison every
     # mask that compares against the head.
@@ -628,9 +641,9 @@ def saturation_head(config: SoilHydraulicsConfig):
 def theta_from_psi(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     """Compute theta from psi using the configured retention curve.
 
-    Above saturation (psi >= h = saturation_head(config): the air-entry head for
-    van Genuchten, psi_sat for Clapp-Hornberger / Campbell, 0 otherwise) the column
-    stores additional water ELASTICALLY (specific storage):
+    From the saturation head up (:func:`saturation_head`: the vG air-entry
+    head, psi_sat for Clapp-Hornberger / Campbell, psi_b for Brooks-Corey, 0
+    otherwise) the column stores additional water ELASTICALLY (specific storage):
     theta = theta_sat + S_s*theta_sat*(psi - h).  This is the
     ParFlow / CliMA-Land "change of variable near saturation": psi is the primary
     variable everywhere and the capacity dtheta/dpsi = S_s*theta_sat stays > 0 at
@@ -653,46 +666,40 @@ def theta_from_psi(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarra
     else:
         raise ValueError(f"Unknown retention curve: {curve}")
     # Specific-storage branch (psi >= saturation head): the integral of the elastic
-    # capacity S_s*theta_sat added in ``moisture_capacity``.  Zero below saturation
-    # so a very dry psi never drives theta below theta_r.
+    # capacity ``moisture_capacity`` returns there.  Zero below saturation so a
+    # very dry psi never drives theta below theta_r.
     h_sat = saturation_head(config)
     return theta + jnp.where(psi >= h_sat,
                              config.S_s * config.theta_sat * (psi - h_sat), 0.0)
 
 
 def psi_from_theta(theta: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
-    """Compute psi from theta using the configured retention curve."""
+    """Compute psi from theta using the configured retention curve.
+
+    From theta_sat up this is the inverse of the elastic branch of
+    :func:`theta_from_psi`, psi = h + (theta - theta_sat)/(S_s*theta_sat) with
+    h = :func:`saturation_head`, so the two are inverses through saturation."""
     curve = config.retention_curve
     if curve == "van_genuchten":
-        h_e = saturation_head(config)
-        psi = van_genuchten_psi(theta, config, h_e)
-        if h_e == 0.0:
-            return psi
-        # Complete inverse: theta >= theta_sat is the elastic branch
-        # theta = theta_sat + S_s*theta_sat*(psi - h_e); with no elastic storage
-        # (S_s = 0) saturation is the single head h_e.
-        ss = config.S_s * config.theta_sat
-        has_ss = ss > 0.0
-        psi_el = h_e + (theta - config.theta_sat) / jnp.where(has_ss, ss, 1.0)
-        return jnp.where(theta >= config.theta_sat,
-                         jnp.where(has_ss, psi_el, h_e), psi)
+        psi = van_genuchten_psi(theta, config, saturation_head(config))
     elif curve == "clapp_hornberger" or curve == "campbell":
-        # Complete inverse, elastic branch included (as for van Genuchten above);
-        # the power-law inverse gives psi_sat at theta_sat.
-        h = saturation_head(config)
-        ss = config.S_s * config.theta_sat
-        has_ss = ss > 0.0
-        psi_el = h + (theta - config.theta_sat) / jnp.where(has_ss, ss, 1.0)
-        return jnp.where(theta >= config.theta_sat, jnp.where(has_ss, psi_el, h),
-                         clapp_hornberger_psi(theta, config))
+        psi = clapp_hornberger_psi(theta, config)
     elif curve == "brooks_corey":
-        return brooks_corey_psi(theta, config)
+        psi = brooks_corey_psi(theta, config)
     elif curve == "pdi":
-        return pdi_psi(theta, config)
+        psi = pdi_psi(theta, config)
     elif curve == "lu":
-        return lu_psi(theta, config)
+        psi = lu_psi(theta, config)
     else:
         raise ValueError(f"Unknown retention curve: {curve}")
+    # Complete inverse: theta >= theta_sat is the elastic branch
+    # theta = theta_sat + S_s*theta_sat*(psi - h); with no elastic storage
+    # (S_s = 0) saturation is the single head h.
+    h = saturation_head(config)
+    ss = config.S_s * config.theta_sat
+    has_ss = ss > 0.0
+    psi_el = h + (theta - config.theta_sat) / jnp.where(has_ss, ss, 1.0)
+    return jnp.where(theta >= config.theta_sat, jnp.where(has_ss, psi_el, h), psi)
 
 
 def hydraulic_conductivity(psi: jnp.ndarray, theta: jnp.ndarray,
@@ -723,21 +730,16 @@ def moisture_capacity(psi: jnp.ndarray, theta: jnp.ndarray,
     if curve == "van_genuchten":
         C = van_genuchten_C(psi, config, saturation_head(config))
     elif curve == "clapp_hornberger" or curve == "campbell":
-        # The raw power-law capacity at Se = 1 is not the slope of the curve, which
-        # is flat from psi_sat up: only the elastic term below applies there.
-        C = jnp.where(psi >= saturation_head(config), 0.0, clapp_hornberger_C(theta, config))
+        C = clapp_hornberger_C(theta, config)
     elif curve == "pdi":
         C = pdi_C(psi, config)
     elif curve == "lu":
         C = lu_C(psi, config)
     elif curve == "brooks_corey":
-        # Brooks-Corey: finite-difference the RAW retention curve.  Using
-        # theta_from_psi here would double-count the elastic S_s*theta_sat term
-        # (theta_from_psi adds S_s*theta_sat*psi for psi>=0, and the block below
-        # adds S_s*theta_sat again) -> C ~= 2*S_s*theta_sat at saturation,
-        # inconsistent with dtheta/dpsi and the mixed-form Picard mass balance.
-        # Every other scheme (van_genuchten_C, clapp_hornberger_C, pdi_C, lu_C)
-        # differentiates the raw curve, so the S_s term is supplied exactly once.
+        # Brooks-Corey: finite-difference the RAW retention curve, not
+        # theta_from_psi, whose elastic branch the where() below supplies on its
+        # own from air entry up.  Every other scheme (van_genuchten_C,
+        # clapp_hornberger_C, pdi_C, lu_C) differentiates the raw curve too.
         eps = 1e-4  # coeff-ok: finite-difference / safety epsilon
         theta_p = brooks_corey_theta(psi + eps, config)
         theta_m = brooks_corey_theta(psi - eps, config)
@@ -745,15 +747,14 @@ def moisture_capacity(psi: jnp.ndarray, theta: jnp.ndarray,
     else:
         raise ValueError(f"Unknown retention curve: {curve}")
 
-    # Elastic specific storage ABOVE saturation (psi >= saturation_head) — the derivative of the
-    # theta_from_psi specific-storage branch.  Conditional (not unconditional) so it
-    # stays CONSISTENT with theta: d/dpsi[theta_sat + S_s*theta_sat*(psi - h)] = S_s*
-    # theta_sat for psi >= h, and 0 below (where the retention-curve capacity governs).
-    # This is what keeps C > 0 at saturation (van_genuchten_C -> 0 there) without
-    # making theta inconsistent with C in the unsaturated zone (the mass-balance
-    # error the mixed-form Picard would otherwise carry).
-    C = C + jnp.where(psi >= saturation_head(config), config.S_s * config.theta_sat, 0.0)
-    return C
+    # Elastic specific storage from the saturation head up -- the derivative of
+    # the theta_from_psi specific-storage branch, and the ONLY capacity there, so
+    # C stays CONSISTENT with theta: d/dpsi[theta_sat + S_s*theta_sat*(psi - h)]
+    # = S_s*theta_sat for psi >= h, the curve's own capacity below.  This keeps
+    # C > 0 at saturation (van_genuchten_C -> 0 there) and replaces the
+    # Clapp-Hornberger Se=1 value on the flat band [psi_sat, 0], where theta does
+    # not move with psi at all (see saturation_head).
+    return jnp.where(psi >= saturation_head(config), config.S_s * config.theta_sat, C)
 
 
 def interblock_K(

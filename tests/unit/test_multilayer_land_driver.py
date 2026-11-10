@@ -1162,8 +1162,7 @@ def test_soil_water_numerics_reach_the_mpas_land_and_the_run_record(monkeypatch,
         multilayer_n_layers=cal["soil_grid"].n_layers,
         multilayer_soil_depth=cal["soil_grid"].total_depth,
     )
-    cfg = base._replace(land_soil_vg_air_entry_m=-0.05, land_soil_richards_se_switch=0.02,
-                        land_soil_richards_c_switch_per_m=2e-5)
+    cfg = base._replace(land_soil_vg_air_entry_m=-0.05)
     cfg.validate_strict()
     _LOADER_HEADS.clear()
     drv = ModelDriver(cfg, output_dir=tmp_path / "arm")
@@ -1173,11 +1172,9 @@ def test_soil_water_numerics_reach_the_mpas_land_and_the_run_record(monkeypatch,
     lc = drv.physics.land_ml_cfg
     assert lc.hydraulics.retention_curve == "van_genuchten"
     assert np.ndim(lc.hydraulics.alpha_vg) == 2          # the baked per-column map survives
-    assert (lc.hydraulics.vg_air_entry_m, lc.richards.se_switch,
-            lc.richards.c_switch_per_m) == (-0.05, 0.02, 2e-5)
+    assert lc.hydraulics.vg_air_entry_m == -0.05
     rec = json.loads((tmp_path / "arm" / "experiment_config.json").read_text())
-    assert (rec["land_soil_vg_air_entry_m"], rec["land_soil_richards_se_switch"],
-            rec["land_soil_richards_c_switch_per_m"]) == (-0.05, 0.02, 2e-5)
+    assert rec["land_soil_vg_air_entry_m"] == -0.05
 
 
 def test_canopy_b0_stress_and_interception_reach_the_mpas_land(monkeypatch, tmp_path):

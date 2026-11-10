@@ -214,7 +214,7 @@ def test_clm_warm_reference_geometry_is_traceable_and_correction_once():
     np.testing.assert_allclose(out.dz_profile[1:, 4], (heights[1:] - jnp.array([4., 6.])) / 2)
     np.testing.assert_array_equal(out.zw_profile[:, :3], ml.zw_profile[:, :3])
     assert out.zw_profile.shape == ml.zw_profile.shape
-    np.testing.assert_allclose(lapse_rate, constants.g / constants.c_pd, rtol=1e-14)
+    np.testing.assert_allclose(lapse_rate, constants.lapse_rate_clmml, rtol=1e-14)
 
     from legoesm.land.canopy.config import CLMMLCanopyConfig
     _ensure_clm_initialized()
@@ -240,5 +240,5 @@ def test_clm_warm_step_uses_new_height_and_one_temperature_correction():
     ml = new.mlcanopy
     np.testing.assert_allclose(ml.zref_forcing[1], 62.)
     np.testing.assert_allclose(ml.zw_profile[1, ml.ncan_canopy[1]], 62.)
-    np.testing.assert_allclose(ml.thref_forcing[1], 295. + constants.g / constants.c_pd * 62.)
+    np.testing.assert_allclose(ml.thref_forcing[1], 295. + constants.lapse_rate_clmml * 62.)
     assert ml.zw_profile.shape == old.mlcanopy.zw_profile.shape

@@ -59,6 +59,7 @@ from legoesm.core.column_stepping import (
 )
 from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
 from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+from legoesm.atmosphere.physics.turbulence.config import refuse_retired_turbulence
 from legoesm.atmosphere.physics.microphysics.integration import (
     make_microphysics_physics,
     min_tracer_slots,
@@ -587,6 +588,14 @@ class SingleColumnModel:
         # ``physics_fn`` was built from a single validated
         # ``physics_config`` (which only ``create`` can enforce).
         self._built_by_create = bool(_built_by_create)
+        # Direct construction cannot inspect ``physics_fn``; the config is the
+        # only record of the scheme it was built from, so it is required.
+        if physics_config is None:
+            raise ValueError(
+                "SingleColumnModel: pass the physics_config physics_fn was "
+                "built from, or route through SingleColumnModel.create.")
+        refuse_retired_turbulence(
+            physics_config.turbulence.scheme, "SingleColumnModel")
         if time_integrator not in TIME_INTEGRATORS:
             raise ValueError(
                 f"Unknown time_integrator: {time_integrator!r}. "
@@ -612,6 +621,12 @@ class SingleColumnModel:
                     "microphysics_substeps > 1 is currently supported only "
                     "with time_integrator='forward_euler'."
                 )
+            if getattr(microphysics_fn, "_writes_phys_state", False):
+                raise ValueError(
+                    "microphysics_substeps > 1 cannot thread a microphysics "
+                    "carry (Sundqvist's gscond previous-step state, CAM6's "
+                    "CLDO): the reference calls the scheme once per physics "
+                    "step.  Use microphysics_substeps=1.")
         step_fn_obj = TIME_INTEGRATORS[time_integrator]
         if forcing is not None:
             validate_forcing(forcing)
@@ -772,6 +787,15 @@ class SingleColumnModel:
                     "keep the flux on the column-tendency channel."
                 )
             return
+        if turb.scheme == "ysu" and not forcing.flux_to_closure:
+            raise ValueError(
+                "SCMForcing.prescribe='fluxes' with turbulence='ysu' needs "
+                "flux_to_closure=True: the WRF surface layer (sfclayrev) "
+                "computes its own heat and moisture flux and ignores "
+                "Ch_neutral, so a column-tendency injection would be "
+                "double-counted.  Set flux_to_closure=True (WRF's "
+                "scm_force_flux path) or drop prescribe='fluxes'."
+            )
         scheme_sub = getattr(turb, turb.scheme, None)
         if scheme_sub is None:
             return
@@ -853,7 +877,7 @@ class SingleColumnModel:
         # the same combinations as the RK paths until a proper coupled
         # AB2 lands (Phase D codex iter-1 medium finding).
         stateful_turb = physics_config.turbulence.scheme in (
-            "tke", "mynn25", "clubb_lite", "clubb", "edmf"
+            "tke", "mynn25", "clubb_lite", "clubb", "edmf", "ysu"
         )
         # Schemes that *read* the previous ``conv_prog_profile`` or
         # ``conv_stoch_state`` — and therefore must not be advanced
