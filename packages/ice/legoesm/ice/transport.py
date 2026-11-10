@@ -2296,7 +2296,7 @@ def advect_si3_prather_2d(
     for subcycle_index in range(1, subcycles + 1):
         area = cell_area
         cycle_entry = out
-        x_first =((ice_step_index - 1) // nn_fsbc) % 2 == ((subcycle_index - 1) % 2)
+        x_first = ((ice_step_index - 1) // nn_fsbc) % 2 == ((subcycle_index - 1) % 2)
         if x_first:
             out, out_moments, area = _si3_prather_x_substep(
                 out,

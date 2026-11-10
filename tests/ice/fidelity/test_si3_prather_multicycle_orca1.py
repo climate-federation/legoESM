@@ -14,6 +14,7 @@ NEMO's own selector (``icedyn_adv_pra.F90:124-126``) runs icycle 2 and 3; NEMO c
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -137,6 +138,9 @@ def _misses(arm, X, ato, res):
 def test_fixture_provenance_and_cycle_counts():
     meta = json.loads(Path(str(_FIX) + ".json").read_text())
     assert meta["oracle"].startswith("NEMO 5.0.1")
+    root = Path(__file__).resolve().parents[3]
+    for key, rel in meta["producer_scripts"].items():   # the committed producers are the bytes that made it
+        assert hashlib.sha256((root / rel).read_bytes()).hexdigest() == meta["producer_sha256"][key], rel
     assert [int(FX[f"{a}_scalars"][3]) for a in ARMS] == [2, 3]
     assert int(FX["fold_scalars"][3]) == 3
     for arm in ARMS:   # every ledger binds on the scored cells (the fix is exercised, not a null case)

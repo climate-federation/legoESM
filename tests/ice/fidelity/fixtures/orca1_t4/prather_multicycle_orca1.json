@@ -24,17 +24,25 @@
    "windowed_equals_full_orca_run": "bitwise"
   }
  },
- "legoesm_sha": "10570df88b4a2c9a221c0f0f893c4204329a002c",
+ "legoesm_sha": "7250cdeaf41c3a92de962840ded4261d962ef8d3 (+ working tree of this commit)",
  "window": {
   "W": 20,
   "M": 7
  },
- "extractor": "si3dyn_fix/PM/extract.py",
+ "extractor": "scripts/validate/ice_fidelity/si3_prather_multicycle_extract.py",
  "fold": {
   "record": "/burg/glab/users/pg2328/oracle_audit/si3dyn_fix/PM/cyc3",
   "icycle": 3,
   "rows": "global extended rows 319..334",
   "scored": "2 fold-halo rows + 4 interior rows below them, interior columns",
   "band_equals_full_run": "bitwise on scored rows"
+ },
+ "producer_scripts": {
+  "extract": "scripts/validate/ice_fidelity/si3_prather_multicycle_extract.py",
+  "score": "scripts/validate/ice_fidelity/si3_prather_multicycle_score.py"
+ },
+ "producer_sha256": {
+  "extract": "b6a6a1126f7fbbf5059413be4289a5f9a6e086d701c4569222e260a69f5bebc7",
+  "score": "57782c3a9623c00e905b9e5436fc26b4a53d7376de4dfe0e218a68210fadda9f"
  }
 }
