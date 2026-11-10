@@ -92,6 +92,46 @@ from pathlib import Path
 
 import numpy as np
 
+# Length of one NEMO output record in run days, measured from
+# time_counter_bounds on 2026-09-15: record k is the mean over days 5k..5k+5.
+NEMO_RECORD_DAYS = 5
+
+
+def check_oracle_record(expect_day, nemo_time_idx, n_time, nemo_month=None):
+    """Stop unless the oracle record selected is the one ending on ``expect_day``.
+
+    The snapshot check in ``main`` pins OUR day.  Nothing pinned the ORACLE's:
+    ``--nemo-time-idx`` defaults to the LAST record, so a card that forgot to
+    pass it scored day 30 against NEMO's day 90 and the difference was reported
+    as a regression (2026-09-19).  Caller states the day it expects, this says
+    whether the record agrees.  No expectation given, or the monthly-file path
+    selected instead, means there is nothing to check.
+    """
+    if expect_day is None or nemo_month:
+        return
+    q = float(expect_day) / NEMO_RECORD_DAYS
+    # A day that is not a record boundary has NO record ending on it, and
+    # rounding to the nearest one turns a typo into a plausible wrong score:
+    # day 27 would round to record 4, whose window ends on day 25 (GLM).
+    if abs(q - round(q)) > 1e-9:
+        lo = int(q) * NEMO_RECORD_DAYS
+        raise SystemExit(
+            f"FATAL: --expect-day {float(expect_day):g} is not a multiple of "
+            f"{NEMO_RECORD_DAYS} days, so no oracle record ends on it. The "
+            f"records either side end on days {lo} and {lo + NEMO_RECORD_DAYS}. "
+            f"Score a day that is a multiple of {NEMO_RECORD_DAYS}.")
+    want = int(round(q)) - 1
+    got = nemo_time_idx if nemo_time_idx >= 0 else n_time + nemo_time_idx
+    if got == want:
+        return
+    raise SystemExit(
+        f"FATAL: --expect-day {float(expect_day):g} wants NEMO record {want} "
+        f"(0-based), the mean over run days {want * NEMO_RECORD_DAYS} to "
+        f"{(want + 1) * NEMO_RECORD_DAYS}, but --nemo-time-idx "
+        f"{nemo_time_idx} resolves to record {got} of {n_time}, the mean over "
+        f"days {got * NEMO_RECORD_DAYS} to {(got + 1) * NEMO_RECORD_DAYS}. "
+        f"Pass --nemo-time-idx {want}.")
+
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
@@ -100,6 +140,7 @@ sys.path.insert(0, str(_HERE.parents[1]))  # scripts/validate
 from compare_omip_nemo import (  # noqa: E402
     _band_breakdown,
     _load_legoesm,
+    require_window,
     _load_nemo,
     _wstats,
     regrid_curv_to_latlon,
@@ -367,9 +408,19 @@ def _coastal_mask(ocean, n_cells):
     return ocean & grown
 
 
-def _lego_mld(L):
+def _lego_mld(L, use_mean=False):
     """Density-threshold MLD of a legoESM snapshot, or None if the snapshot
-    predates the saved MLD geometry.  Same convention as compare_omip_nemo."""
+    predates the saved MLD geometry.  Same convention as compare_omip_nemo.
+    In window-mean mode only the driver's mld_mean is acceptable (None if
+    absent -> the caller SKIPS MLD loudly); MLD(mean state) is never computed."""
+    if use_mean:
+        return (None if L.get("mld_mean") is None
+                else np.asarray(L["mld_mean"], dtype=np.float64))
+    if L.get("mld_mean") is not None:
+        # --use-mean-fields: the driver's window-mean MLD (same threshold,
+        # --mld-accumulate), NOT the MLD of the mean state -- the diagnostic is
+        # nonlinear, and NEMO's mldr10_1 is a mean of MLDs.
+        return np.asarray(L["mld_mean"], dtype=np.float64)
     if L.get("z_center_ref") is None or L.get("H_bathy") is None:
         return None
     from legoesm.ocean.diagnostics import mixed_layer_depth
@@ -476,6 +527,12 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--tripole", type=Path, required=True)
+    p.add_argument("--use-mean-fields", action="store_true",
+                   help="score the driver's --state-accumulate/--mld-accumulate "
+                        "WINDOW MEANS (T_mean, S_mean, T_mean_hw, S_mean_hw, "
+                        "mld_mean) instead of the instantaneous snapshot -- the "
+                        "statistic NEMO's 5-day files hold. Refuses snapshots "
+                        "that lack them.")
     p.add_argument("--mpas", type=Path, required=True)
     p.add_argument("--nemo-gridt", type=Path, required=True)
     p.add_argument("--nemo-month", type=int, default=None,
@@ -553,10 +610,38 @@ def main() -> int:
     tgt_lat = -90.0 + a.res_deg / 2.0 + a.res_deg * np.arange(int(180.0 / a.res_deg))
     tgt_lon = a.res_deg / 2.0 + a.res_deg * np.arange(int(360.0 / a.res_deg))
 
-    T = _load_legoesm(a.tripole)
-    M = _load_legoesm(a.mpas)
+    if a.use_mean_fields and a.nemo_month is not None:
+        raise SystemExit("--use-mean-fields scores 5-day window means against one 5-day "
+                         "NEMO record; not defined against --nemo-month (drop one)")
+    T = _load_legoesm(a.tripole, use_mean=a.use_mean_fields)
+    M = _load_legoesm(a.mpas, use_mean=a.use_mean_fields)
     N = _load_nemo(a.nemo_gridt, a.nemo_time_idx, month=a.nemo_month)
-    X = [_load_legoesm(pth) for pth in a.also_mask]
+    # The snapshot check above pins OUR day.  Nothing pinned the ORACLE's until
+    # now: --nemo-time-idx defaults to the LAST record, so a card that forgot
+    # to pass it scored day 30 against NEMO's day 90 and reported the result as
+    # a regression (2026-09-19).  When the caller states the day it expects, the
+    # record must be the one that ENDS on it, and a mismatch stops the job
+    # instead of printing into a log nobody reads.  USER-AUTHORISED this session.
+    # ARMED BY DEFAULT (2026-09-20, user-authorised). --expect-day was opt-in
+    # and only 5 of the 105 cards that score against NEMO passed it, so the
+    # gate was inert for the other 100 -- including the card whose inherited
+    # --nemo-time-idx default scored day 30 against NEMO's day 90 and reported
+    # it as a regression. The snapshots already CARRY their day, and the block
+    # above has just derived it, so nothing needs to be passed: when the caller
+    # states no expected day, the snapshots' own day is used. A caller that
+    # genuinely wants a different record still has --nemo-month, which
+    # check_oracle_record exempts.
+    _expect = a.expect_day
+    if _expect is None and len(known) == 1:
+        _expect = next(iter(known))
+        print(f"[oracle-record] gate armed from the snapshots' own day "
+              f"({_expect:g}); no --expect-day was given")
+    check_oracle_record(_expect, a.nemo_time_idx, N["n_time"], a.nemo_month)
+    X = [_load_legoesm(pth, use_mean=a.use_mean_fields) for pth in a.also_mask]
+    fields_mode = require_window(T, a.use_mean_fields, what="tripole")
+    for _nm, _L in [("MPAS", M)] + [(f"also-mask {p}", x) for p, x in zip(a.also_mask, X)]:
+        require_window(_L, a.use_mean_fields, what=_nm)
+    print(f"[fields] {fields_mode}")
     print(f"[load] tripole {T['sst'].shape}  MPAS {M['sst'].shape}  "
           f"NEMO {N['sst'].shape} ({N['n_time']} records)"
           + "".join(f"  mask-only {x['sst'].shape}" for x in X))
@@ -626,7 +711,7 @@ def main() -> int:
             f"--label-tripole and --label-mpas are both {lab_a!r}; the report "
             "keys would collide and one arm's scores would overwrite the "
             "other's.")
-    report = {
+    report = {"fields_mode": fields_mode,
         "generated_by": str(_HERE),
         "git_sha": _git_sha(_HERE.parents[3]),
         "label_a": lab_a, "label_b": lab_b,
@@ -680,18 +765,22 @@ def main() -> int:
               ("SSS", sssT, sssM, sssN, "psu", area, sssX)]
 
     # --- MLD (density threshold, matched to NEMO mldr10_1) -------------------
-    mldT_raw, mldM_raw = _lego_mld(T), _lego_mld(M)
-    mldX_raw = [_lego_mld(x) for x in X]
+    mldT_raw, mldM_raw = _lego_mld(T, a.use_mean_fields), _lego_mld(M, a.use_mean_fields)
+    mldX_raw = [_lego_mld(x, a.use_mean_fields) for x in X]
     if N.get("mld") is None:
         print("[MLD] SKIPPED: NEMO grid_T has no mldr10_1")
     elif mldT_raw is None or mldM_raw is None:
         which = [n for n, v in (("tripole", mldT_raw), ("MPAS", mldM_raw)) if v is None]
-        print(f"[MLD] SKIPPED: snapshot(s) {which} lack z_center_ref/H_bathy")
+        print(f"[MLD] SKIPPED: snapshot(s) {which} lack "
+              + ("mld_mean (run the driver with --mld-accumulate; MLD of the mean "
+                 "state is not computed)" if a.use_mean_fields else "z_center_ref/H_bathy"))
     elif any(v is None for v in mldX_raw):
         # A mask-only source that cannot supply an MLD footprint would leave
         # the MLD cell set different from the pair run it is meant to match.
-        raise SystemExit("FATAL: an --also-mask snapshot lacks z_center_ref/"
-                         "H_bathy, so the MLD footprint cannot be shared")
+        raise SystemExit("FATAL: an --also-mask snapshot lacks "
+                         + ("mld_mean (run it with --mld-accumulate)" if a.use_mean_fields
+                            else "z_center_ref/H_bathy")
+                         + ", so the MLD footprint cannot be shared")
     else:
         mldT, ocTm = regrid_curv_to_latlon(np.nan_to_num(mldT_raw, nan=0.0),
                                            T["lat"], T["lon"],
@@ -720,7 +809,9 @@ def main() -> int:
         report["mld_note"] = (
             f"MLD scored on its own coverage intersection ({int(mld_ok.sum())} "
             f"cells vs {n_common} for SST/SSS); dsigma=0.01 to match NEMO mldr10_1; "
-            "snapshot-state MLD, NOT a seasonal-mean MLD.")
+            + ("window-mean of per-step MLDs (mld_mean), as mldr10_1 is."
+               if a.use_mean_fields else
+               "snapshot-state MLD, NOT a seasonal-mean MLD."))
         _mld_area = (np.cos(np.deg2rad(tgt_lat))[:, None]
                      * np.ones_like(tgt_lon)[None, :]) * mld_ok
         fields.append(("MLD", mldT, mldM, mldN, "m", _mld_area, mldX))
@@ -808,8 +899,14 @@ def main() -> int:
 
     # Row availability from the common OCEAN mask, before any per-field
     # finite dropout, so the zonal gate measures real loss of support.
+    if a.nemo_month:
+        when = f"month-{a.nemo_month} mean"
+    else:
+        rec = a.nemo_time_idx if a.nemo_time_idx >= 0 else N["n_time"] + a.nemo_time_idx
+        when = (f"days {rec * NEMO_RECORD_DAYS}-{(rec + 1) * NEMO_RECORD_DAYS} mean"
+                if a.use_mean_fields else f"day {(rec + 1) * NEMO_RECORD_DAYS}")
     _plot3(out, tgt_lat, tgt_lon, plot_fields, a.label_tripole,
-           a.label_mpas, ocean.sum(axis=1))
+           a.label_mpas, ocean.sum(axis=1), when)
 
     # allow_nan=False: bare NaN is not valid JSON and reads like a number to a
     # downstream parser.  _wstats returns a NaN correlation for a constant or
@@ -820,7 +917,13 @@ def main() -> int:
     return 0
 
 
-def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m, avail_row):
+_LONG_NAME = {"SST": "Sea surface temperature", "SSS": "Sea surface salinity",
+              "MLD": "Mixed-layer depth (0.01 kg m$^{-3}$ from 10 m)"}
+_UNIT_TXT = {"degC": "°C", "psu": "psu", "m": "m"}
+_NEMO_LAB = "NEMO 5.0.1 eORCA1"
+
+
+def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m, avail_row, when=""):
     """Per field: 5-panel maps (trp | MPAS | NEMO | trp-NEMO | MPAS-NEMO) and a
     combined 3-way zonal-mean + zonal-bias figure."""
     import matplotlib
@@ -839,20 +942,21 @@ def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m, avail_row):
         dstack = np.concatenate([(Tm - Nm)[finite], (Mm - Nm)[finite]])
         dmax = float(np.percentile(np.abs(dstack), 99))
         fig, ax = plt.subplots(1, 5, figsize=(28, 4))
-        panels = [(Tm, f"{lab_t} {name}", "RdYlBu_r", vmin, vmax),
-                  (Mm, f"{lab_m} {name}", "RdYlBu_r", vmin, vmax),
-                  (Nm, f"NEMO {name}", "RdYlBu_r", vmin, vmax),
-                  (Tm - Nm, f"{lab_t} - NEMO", "RdBu_r", -dmax, dmax),
-                  (Mm - Nm, f"{lab_m} - NEMO", "RdBu_r", -dmax, dmax)]
+        longn, u = _LONG_NAME.get(name, name), _UNIT_TXT.get(unit, unit)
+        panels = [(Tm, f"(a) {lab_t}", "RdYlBu_r", vmin, vmax),
+                  (Mm, f"(b) {lab_m}", "RdYlBu_r", vmin, vmax),
+                  (Nm, f"(c) {_NEMO_LAB} (reference)", "RdYlBu_r", vmin, vmax),
+                  (Tm - Nm, f"(d) {lab_t} minus NEMO", "RdBu_r", -dmax, dmax),
+                  (Mm - Nm, f"(e) {lab_m} minus NEMO", "RdBu_r", -dmax, dmax)]
         for axi, (dat, ttl, cm, lo, hi) in zip(ax, panels):
             im = axi.pcolormesh(tgt_lon, tgt_lat, dat, vmin=lo, vmax=hi,
                                 cmap=cm, shading="auto")
-            axi.set_title(ttl, fontsize=10)
+            axi.set_title(ttl, fontsize=11)
+            axi.set_xlabel("longitude (°E)"); axi.set_ylabel("latitude (°N)")
             axi.axhline(_ARCTIC_LAT_N, color="k", lw=0.5, ls=":")
-            plt.colorbar(im, ax=axi, shrink=0.85)
-        fig.suptitle(f"{name} [{unit}] — {lab_t} / {lab_m} / NEMO "
-                     f"(colour limits = 1-99th pct of the common cells)",
-                     fontsize=13)
+            plt.colorbar(im, ax=axi, shrink=0.85, label=u)
+        fig.suptitle(f"{longn} ({u}), {when}: legoESM ocean on two grids vs {_NEMO_LAB}, "
+                     f"CORE-II normal-year forcing, from rest", fontsize=13)
         fig.tight_layout()
         fig.savefig(out / f"{name}_maps3.png", dpi=95)
         plt.close(fig)
@@ -883,18 +987,20 @@ def _plot3(out, tgt_lat, tgt_lon, plot_fields, lab_t, lab_m, avail_row):
         a0 = ax[0][j]
         a0.plot(zT, tgt_lat, label=lab_t, lw=1.4)
         a0.plot(zM, tgt_lat, label=lab_m, lw=1.4, ls="--")
-        a0.plot(zN, tgt_lat, label="NEMO", lw=1.8, color="k")
-        a0.set_title(f"zonal-mean {name} [{unit}]")
-        a0.set_ylabel("latitude"); a0.legend(fontsize=8); a0.grid(alpha=0.3)
+        longn, u = _LONG_NAME.get(name, name), _UNIT_TXT.get(unit, unit)
+        a0.plot(zN, tgt_lat, label=_NEMO_LAB, lw=1.8, color="k")
+        a0.set_title(f"Zonal-mean {longn.lower()} ({u})")
+        a0.set_ylabel("latitude (°N)"); a0.set_xlabel(u); a0.legend(fontsize=8); a0.grid(alpha=0.3)
         a1 = ax[1][j]
-        a1.plot(zT - zN, tgt_lat, label=f"{lab_t} - NEMO", lw=1.4)
-        a1.plot(zM - zN, tgt_lat, label=f"{lab_m} - NEMO", lw=1.4, ls="--")
-        a1.plot(zT - zM, tgt_lat, label=f"{lab_t} - {lab_m}", lw=1.0, color="g")
+        a1.plot(zT - zN, tgt_lat, label=f"{lab_t} minus NEMO", lw=1.4)
+        a1.plot(zM - zN, tgt_lat, label=f"{lab_m} minus NEMO", lw=1.4, ls="--")
+        a1.plot(zT - zM, tgt_lat, label=f"{lab_t} minus {lab_m}", lw=1.0, color="g")
         a1.axvline(0.0, color="k", lw=0.8)
         a1.axhline(_ARCTIC_LAT_N, color="r", lw=0.6, ls=":")
-        a1.set_title(f"zonal-mean bias {name} [{unit}]")
-        a1.set_ylabel("latitude"); a1.legend(fontsize=8); a1.grid(alpha=0.3)
-    fig.suptitle("Three-way zonal means and biases (common cells only)", fontsize=14)
+        a1.set_title(f"Zonal-mean {longn.lower()} difference ({u})")
+        a1.set_ylabel("latitude (°N)"); a1.set_xlabel(u); a1.legend(fontsize=8); a1.grid(alpha=0.3)
+    fig.suptitle(f"Zonal means and differences, {when}: legoESM ({lab_t}, {lab_m}) vs {_NEMO_LAB}, "
+                 "CORE-II normal-year forcing (ocean cells common to all three)", fontsize=14)
     fig.tight_layout()
     fig.savefig(out / "zonal_3way.png", dpi=110)
     plt.close(fig)

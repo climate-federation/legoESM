@@ -252,7 +252,8 @@ def _fesom_lane_args(tmp_path):
     return _fesom_args(
         output=str(tmp_path), dt=1800.0, smoke=False, years=1.0 / 365.0,
         snapshot_every_days=0, forcing_path=None, forcing_ramp_days=0.0,
-        sss_restore=False, sw_rgb_chl=False, nemo_monthly_init=None)
+        sss_restore=False, sw_rgb_chl=False, nemo_monthly_init=None,
+        state_accumulate=False, mld_accumulate=False)
 
 
 class _SteppingModel:
@@ -294,6 +295,7 @@ def test_fesom_forced_writes_manifest_before_the_loop(tmp_path, monkeypatch):
         run_omip_core2.run_fesom_forced_loop(
             _fesom_lane_args(tmp_path), grid, None, _SteppingModel(), None)
     assert _manifest(tmp_path / "run_manifest.json")
+
 
 
 def test_fesom_b1_records_the_final_state_digest(tmp_path, monkeypatch):

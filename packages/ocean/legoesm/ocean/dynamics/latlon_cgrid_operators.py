@@ -1677,6 +1677,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
     vertex_mask: jnp.ndarray | None = None,
+    h_vtx: jnp.ndarray | None = None,
     thickness_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
                               jnp.ndarray, jnp.ndarray, jnp.ndarray] | None = None,
     metric_reciprocal_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
@@ -1811,14 +1812,24 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     # Historical single-thickness path remains unchanged for non-WS callers.
     # The NEMO identity path supplies the six distinct operands read by
     # dynldf_lev.f90:123,127-129,135,139.
+    # ``h_vtx`` override: the min-rule gives e3f = 0 at every coastal F point
+    # (a dry neighbour has h = 0), which silently zeroes zcur there and turns a
+    # no-slip fmask (rn_shlat=2) back into free-slip. NEMO's e3f_0 at a coastal
+    # F point is the min of the four e3t_0 INCLUDING the land cells' filled
+    # values (domain_cfg: 389099/389099 coastal F points), so a caller running
+    # no-slip passes that thickness here.
     if thickness_operands is None:
         e3t_kbb = h_k
         e3u_kbb = min_cell_to_uface(h_k)
         e3v_kbb = min_cell_to_vface(h_k, grid)
-        e3f_live = min_cell_to_vertex(h_k, grid)
+        e3f_live = (min_cell_to_vertex(h_k, grid) if h_vtx is None
+                    else h_vtx)
         e3u_kmm = e3u_kbb
         e3v_kmm = e3v_kbb
     else:
+        if h_vtx is not None:
+            raise ValueError(
+                "h_vtx and thickness_operands both supply e3f; pass one")
         (e3t_kbb, e3u_kbb, e3v_kbb, e3f_live,
          e3u_kmm, e3v_kmm) = thickness_operands
 

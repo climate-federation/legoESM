@@ -47,21 +47,47 @@ YEARS=$($PY -c "print(${TARGET}/365.0)")
 # also carries NEMO's initial-condition time blend, so it writes beside both.
 OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faithtint_d${DAYS}}
 echo "DAYS=$DAYS LEG=$LEG TARGET=$TARGET YEARS=$YEARS OUT=$OUT"
+# The run's stdout used to go straight into "tail -40", which buffers the whole
+# leg and then discards all but the last forty lines.  Everything the driver
+# says about what it RESOLVED -- the A_h profile it built, the viscosity each
+# schedule segment applies, the forcing paths -- fires in the first minutes and
+# was therefore unreadable, so the half-viscosity defect ran a whole campaign
+# with its own log line printing the correct diagnosis into a pipe nobody could
+# read.  Keep the full log on disk beside the output; tail still goes to the
+# SLURM file so the job summary is unchanged.
+mkdir -p $OUT
+# NEMO runs no Smagorinsky at all -- its lateral momentum viscosity is read
+# entirely from eddy_viscosity_3D.nc (nn_ahm_ijk_t = -30) -- while this card
+# adds one and ramps it down mid-run.  The two knobs below let an arm turn
+# that term off without touching any other flag; the DEFAULTS ARE THE CARD'S
+# OWN VALUES, so an unparameterised submission runs exactly what it always
+# ran.  Both columns must move together: --C-smag-lap sets the value the
+# schedule's first segment inherits before day 0.
+# user 2026-10-06: card = baseline run trp_vadv_d30 (no Smagorinsky, as in NEMO; user 2026-09-27)
+CSMAG=${CSMAG:-0}
+VSCHED=${VSCHED:-0:1e4:0,8:1e4:0,16:1e4:0}
+echo "CSMAG=$CSMAG VSCHED=$VSCHED"
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
-  --C-smag-lap 3.0 --smag-cfl-safety 0.125 \
+  --C-smag-lap $CSMAG --smag-cfl-safety 0.125 \
   --A-h 2e4 --A-h-profile-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc \
-  --visc-schedule '0:1e4:3.0,8:1e4:1.5,16:1e4:0.5' \
+  --visc-schedule "$VSCHED" --lateral-side-bc no_slip \
+  --vertical-momentum-scheme nemo_advective `# user-adopted vertical momentum (prod since trp_vadv_d30)` \
+  --ke-gradient-scheme hollingsworth `# user 2026-09-28: Hollingsworth KE on prod` \
+  --state-accumulate --mld-accumulate `# 5-day window means, as NEMO writes and the scorer reads` \
   --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 \
   --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff \
+  --barotropic-slow-forcing-depth-evaluation min_rule_live `# user 2026-10-05: old method; NEMO average is ~99% inert under implicit CN (needs split-explicit + carried mode)` \
   --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
+  --freshwater-closure real_freshwater --sss-restore-channel water_flux --sss-restore-normalization live_s \
   --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --ice-lead-freeze-source nemo_qlead \
   --years $YEARS --snapshot-every-days 5 --diag-every-days 1 \
-  --tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate \
+  --tracer-advection superbee --runoff-depth-nemo-ini --runoff-spread-passes 8 --river-mouth-restoring-gate \
   --bottom-drag-scheme nemo_quadratic \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
+  --iwm-n2-mode nemo_bn2 --iwm-n2-eos-form teos10 `# user 2026-10-06: NEMO zdfiwm reads bn2 (zdfiwm.F90:185-211), stated explicitly` \
   --dm2dc --isf --isf-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc \
   --bbl-adv --woa-init \
   --woa-t /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_t_woa57_annual.nc \
@@ -73,8 +99,11 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --nemo-init-tint \
   --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc \
   --tripole-vmix tke --ice-init $NEMOIN/Ice_initialization.nc \
-  --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
-  --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-coeff 70 \
+  --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 4 --tke-prognostic \
+  --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-scheme nemo_ustar \
+  --tke-langmuir-rhs-coupling nemo_pre_solve `# user 2026-10-06: NEMO Langmuir/dissipation RHS order (zdftke.F90:367,419)` \
+  --tke-shear-production nemo_face_native_nbb2 --tke-shear-avm-weighting nemo_face --tke-prandtl-mode nemo_ri `# user 2026-10-12 (1): NEMO zdf_sh2 neighbour-summed avm (zdfsh2.F90:78-94) + nn_pdl=1 Prandtl on p_sh2 (zdftke.F90:381-400), all three grids` \
+  --convection enhanced_diffusion --convection-K-conv 100 --convection-K-bg 0 --convection-n2-mode nemo_bn2 --convection-n2-eos teos10 --convection-trigger hard --convection-n2-threshold=-1e-12 --convection-evd-composition nemo_replace `# user 2026-10-12 (3b): NEMO zdfevd on every grid -- ln_zdfevd=T rn_evd=100 nn_evdm=0, zdfevd.F90:107-110` \
   --gateway-transports --mle --mle-ce 0.06 --kprofile-snapshots \
   `# ---- THE FOUR ADOPTED SETS, and nothing else, appended ----` \
   --ice-freeze-scheme unesco \
@@ -84,6 +113,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --redi-coefficient nemo21 --redi-aht0 900 \
   --ice-exchange nemo_si3 --ice-snow bulk --ice-snow-flooding on \
   --forcing-time-interp linear --chl-remap nemo_scrip \
+  --forcing-remap nemo_weights `# user 2026-10-13 "1": NEMO wind remap (bicubic u10/v10, bilinear rest), same point method on every grid` \
   `# ---- wet domain = the oracle's: the Great Lakes, Caspian and Lake Victoria` \
   `# (207 cells wet in mesh_mask.nc, land in NEMO's domain_cfg) become land ----` \
   --nemo-domain-mask \
@@ -92,7 +122,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   `# are potential temperature and PRACTICAL salinity.` \
   --restart-save $OUT/restart_leg$LEG.npz \
   $([ "$LEG" = 2 ] && echo "--restart-from $OUT/restart_leg1.npz") \
-  --output $OUT 2>&1 | tail -40
+  --output $OUT 2>&1 | tee $OUT/run.log | tail -40
 echo "=== card exit: $? ==="
 echo "OUT=$OUT"
 echo DONE

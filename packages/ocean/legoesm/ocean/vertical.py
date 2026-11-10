@@ -1530,12 +1530,17 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    # NEMO e3f_0 at the vertex stagger (domain_cfg), the coastal zcur
+    # thickness of lateral_viscosity_file_coastal="nemo_fmask".
+    nemo_e3f_0: jnp.ndarray | None = None
     # NEMO ldf_dyn_init's READ coefficient (nn_ahm_ijk_t = -30,
     # ldfdyn.f90:348-353): the whole 3-D lateral momentum viscosity, already
     # exchanged and masked as that routine leaves it.  ``nemo_ldf_ahmt`` is on
-    # the T grid, ``nemo_ldf_ahmf`` on legoESM's vertex layout.  Only the
-    # lateral_viscosity_coefficient_source="nemo_ahm_3d_file" arm reads them;
-    # every other card leaves them None and is bit-identical.
+    # the T grid (* tmask), ``nemo_ldf_ahmf`` on the model's vertex stagger
+    # (* fmask; on the OMIP cards the rn_shlat fmask, so a coastal F point
+    # carries 2*ahmf for no-slip).  Read by the lat-lon
+    # lateral_viscosity_coefficient_source="nemo_ahm_3d_file" arm and by the
+    # MPAS NEMO-viscosity operator; every other card leaves them None.
     nemo_ldf_ahmt: jnp.ndarray | None = None
     nemo_ldf_ahmf: jnp.ndarray | None = None; nemo_r3t_stored_product: bool = False  # card-selected, see _nemo_r3t_product  # noqa: E501,E702
     # Card-selected: the WS-RK3 stage faces read NEMO's raw face mesh
@@ -2772,6 +2777,9 @@ def adaptive_implicit_vertical_momentum_advection(
     cu_max: float = _AIMP_CU_MAX,
     face_active: jnp.ndarray | None = None,
     explicit_scheme: str = "upwind",
+    w_area_half: jnp.ndarray | None = None,
+    face_area: jnp.ndarray | None = None,
+    bottom_face_mask_mode: str = "min_rule",
 ) -> jnp.ndarray:
     """Adaptive-implicit vertical momentum advection (Shchepetkin 2015).
 
@@ -2840,9 +2848,20 @@ def adaptive_implicit_vertical_momentum_advection(
         tend_exp = nemo_up3_vertical_momentum_advection(
             u, w_exp, h, face_active=face_active,
         )
+    elif explicit_scheme == "nemo_advective":
+        # NEMO ln_dynadv_vec + ln_zad_Aimp: dynzad (centered advective, full u)
+        # on the explicit share of the e1e2t-weighted w; the implicit share
+        # goes to the upwind solve below, as dynzdf does with wi.
+        if w_area_half is None or face_area is None:
+            raise ValueError(
+                "explicit_scheme='nemo_advective' needs w_area_half and face_area")
+        tend_exp = nemo_advective_vertical_momentum_advection(
+            u, (1.0 - zcff) * w_area_half, h, face_area, face_active=face_active,
+            bottom_face_mask_mode=bottom_face_mask_mode,
+        )
     else:
         raise ValueError(
-            "explicit_scheme must be 'upwind' or 'nemo_up3', got "
+            "explicit_scheme must be 'upwind', 'nemo_up3' or 'nemo_advective', got "
             f"{explicit_scheme!r}")
     u_exp = u + dt * tend_exp
 

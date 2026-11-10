@@ -4733,6 +4733,7 @@ class LatLonCGridOceanModel:
             VALID_LATERAL_VISCOSITY_OPERATOR,
             VALID_LATERAL_VISCOSITY_E3_WEIGHTING,
             VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE,
+            VALID_LATERAL_VISCOSITY_FILE_COASTAL,
             VALID_CORIOLIS_SCHEME,
             VALID_AB2_SCOPE,
             VALID_WENO_SMOOTHNESS,
@@ -4858,6 +4859,19 @@ class LatLonCGridOceanModel:
                 "selects where THAT operator's ahmt/ahmf come from); got "
                 f"lateral_viscosity_operator={config.lateral_viscosity_operator!r}",
             )
+        _file_coastal = getattr(config, "lateral_viscosity_file_coastal", "four_cell")
+        if _file_coastal not in VALID_LATERAL_VISCOSITY_FILE_COASTAL:
+            raise ValueError(
+                f"lateral_viscosity_file_coastal must be one of "
+                f"{sorted(VALID_LATERAL_VISCOSITY_FILE_COASTAL)}, "
+                f"got {_file_coastal!r}",
+            )
+        if _file_coastal != "four_cell" and _ahm_src != "nemo_ahm_3d_file":
+            raise ValueError(
+                "lateral_viscosity_file_coastal != 'four_cell' requires "
+                "lateral_viscosity_coefficient_source='nemo_ahm_3d_file'; got "
+                f"{_ahm_src!r}",
+            )
         _vert_mom_scheme = getattr(
             config, "vertical_momentum_scheme", "upwind_perturbation")
         if _vert_mom_scheme not in VALID_VERTICAL_MOMENTUM_SCHEME:
@@ -4927,7 +4941,17 @@ class LatLonCGridOceanModel:
         # in-tendency vertical momentum advection ENTIRELY with an upwind
         # backward-Euler solve at the step level, so an explicit-stage
         # option here would be a silent no-op.  Fail fast rather than mislead.
-        if (_vert_mom_scheme in ("centered_full", "nemo_advective")
+        # nemo_advective IS supported: the step-level adaptive stage takes it
+        # as its explicit part (NEMO ln_dynadv_vec + ln_zad_Aimp).
+        if (_vert_mom_scheme == "nemo_advective"
+                and getattr(config, "adaptive_implicit_vertadv", False)
+                and config.barotropic.barotropic_solver == "implicit_unsplit"):
+            raise ValueError(
+                "vertical_momentum_scheme='nemo_advective' with "
+                "adaptive_implicit_vertadv=True is not threaded through the "
+                "implicit_unsplit step (it skips the adaptive stage), so dynzad "
+                "would never be applied. Use barotropic_solver='implicit_cn'.")
+        if (_vert_mom_scheme == "centered_full"
                 and getattr(config, "adaptive_implicit_vertadv", False)):
             raise ValueError(
                 f"vertical_momentum_scheme={_vert_mom_scheme!r} is "
@@ -10440,6 +10464,35 @@ class LatLonCGridOceanModel:
                 v_adv = adaptive_implicit_vertical_momentum_advection(
                     v_3d, w_v_half, h_v_old, dt,
                     face_active=v_face_active, explicit_scheme="nemo_up3")
+            elif _vertical_scheme == "nemo_advective":
+                # NEMO dynzad on the FULL velocity with e1e2t-weighted w at the
+                # faces (same construction as the in-tendency nemo_advective
+                # branch); Courant split from the plain face w.
+                _area_w = _grid.area_T[..., jnp.newaxis] * w_baro
+                _zad_mask = getattr(_cfg_b, "zad_bottom_face_mask", "min_rule")
+                u_adv = adaptive_implicit_vertical_momentum_advection(
+                    u_3d, w_u_half, h_u_old, dt,
+                    face_active=u_face_active, explicit_scheme="nemo_advective",
+                    bottom_face_mask_mode=_zad_mask,
+                    w_area_half=interp_cell_to_uface(_area_w),
+                    face_area=(_grid.dx_u * _grid.dy_u)[..., jnp.newaxis])
+                v_adv = adaptive_implicit_vertical_momentum_advection(
+                    v_3d, w_v_half, h_v_old, dt,
+                    face_active=v_face_active, explicit_scheme="nemo_advective",
+                    bottom_face_mask_mode=_zad_mask,
+                    w_area_half=interp_cell_to_vface(_area_w, _grid),
+                    face_area=(_grid.dx_v * _grid.dy_v)[..., jnp.newaxis])
+                # The advective form has a non-zero column integral, and this
+                # stage runs AFTER the barotropic solve (NEMO feeds dynzad's
+                # depth mean to dynspg_ts). Remove the stage's depth-mean
+                # change so transport stays consistent with eta.
+                def _keep_depth_mean(new, old, h, act):
+                    hw = h * act
+                    d = jnp.sum((new - old) * hw, -1, keepdims=True) / jnp.maximum(
+                        jnp.sum(hw, -1, keepdims=True), 1e-10)
+                    return new - d * act
+                u_adv = _keep_depth_mean(u_adv, u_3d, h_u_old, u_face_active)
+                v_adv = _keep_depth_mean(v_adv, v_3d, h_v_old, v_face_active)
             else:
                 u_adv = adaptive_implicit_vertical_momentum_advection(
                     u_3d - U_bar, w_u_half, h_u_old, dt,
@@ -11942,7 +11995,9 @@ class LatLonCGridOceanModel:
                     nemo_tracer_content_rhs=_nemo_ws_tracer_content_rhs,
                     nemo_aimp_momentum_w_u=_nemo_ws_aimp_momentum_w_u,
                     nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v,
-                    z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+                    z_coord=z_coord, config=config, iwm_fields=iwm_fields,
+                    trd_callback=getattr(self, "_trd_callback", None),
+                    col_callback=getattr(self, "_col_callback", None))
                 if _return_live_stage_operands:
                     (state_new, tke_new,
                      _nemo_ws_live_tke_entry,
@@ -13818,6 +13873,8 @@ class LatLonCGridOceanModel:
         nemo_aimp_momentum_w_u=None,
         nemo_aimp_momentum_w_v=None,
         z_coord=None, config=None, iwm_fields=None,
+        trd_callback=None,
+        col_callback=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -13935,6 +13992,7 @@ class LatLonCGridOceanModel:
                 "momentum-only call (return_tke must be False).")
         tke_new = None
         _tke_coeff_new = None
+        _tke_budget_box = [] if col_callback is not None else None
         _tke_entry_used = None
         _tke_statement_trace_used = None
         _tke_shear_face_metrics_used = None
@@ -14227,6 +14285,7 @@ class LatLonCGridOceanModel:
                         self._nemo_ws_test_hooks.tke_rhs_intermediate),
                     seos_cfg=_cfg_b.eos_nemo_seos,
                     return_salt_K=_salt_literal_here,
+                    tke_budget_out=_tke_budget_box,
                 )
                 if _salt_literal_here:
                     K_v_cell, A_v_cell, tke_new, K_s_literal = _kprof
@@ -14479,6 +14538,7 @@ class LatLonCGridOceanModel:
                     jnp.zeros_like(_trace_heat_K) if K33_iso is None
                     else K33_iso.astype(state.T.data.dtype))
             K_v_cell = K_v_cell.astype(state.T.data.dtype)
+            _K_trd = K_v_cell   # pre-K33/ddm/mask: NEMO avt minus avt_evd
             if K33_iso is not None:
                 # Fold the vertical isoneutral diffusivity K_33 into the implicit
                 # tracer solve (Veros core/isoneutral/diffusion.py:154). K_33 ≥ 0 at
@@ -15286,6 +15346,13 @@ class LatLonCGridOceanModel:
                                   else mask_3d > 0.5)
             T_new = jnp.where(_tracer_apply_mask, T_new, state.T.data)
             S_new = jnp.where(_tracer_apply_mask, S_new, state.S.data)
+            if trd_callback is not None:
+                # Read-only diagnostic: this solve's own temperature change,
+                # NEMO's ttrd_zdf (implicit vertical diffusion incl. the K33
+                # diagonal); handed to a host accumulator, state untouched.
+                from jax.experimental import io_callback
+                io_callback(trd_callback, None, (T_new - T_solve_in) / dt,
+                            _K_trd, ordered=True)
         if do_momentum:
             if _zdf_momentum_observer is not None:
                 jax.debug.callback(
@@ -15312,6 +15379,20 @@ class LatLonCGridOceanModel:
             if return_momentum_budget_split:
                 v_no_stress = jnp.where(
                     _v_apply_mask, v_no_stress, state.v.data)
+            if col_callback is not None and do_tracers:
+                # Read-only diagnostic: post-solve column state, assembled
+                # solve coefficients, and the updated TKE (NaN in Mode B and in
+                # the post-mixing lane, whose TKE is solved after this point).
+                from jax.experimental import io_callback
+                _e_col = (tke_new.tke_new if hasattr(tke_new, "tke_new")
+                          else tke_new)
+                if _e_col is None:
+                    _e_col = jnp.full_like(A_v_cell, jnp.nan)
+                _bud = _tke_budget_box[0] if _tke_budget_box else None
+                if _bud is None:
+                    _bud = (jnp.full_like(A_v_cell, jnp.nan),) * 4
+                io_callback(col_callback, None, T_new, S_new, u_new, v_new,
+                            _K_trd, A_v_cell, _e_col, *_bud, ordered=True)
             if self._tke_realized_kdiss_active() and (
                     return_K_diss_v or (K_diss_v_w is None and do_tracers)):
                 # Realized implicit-friction dissipation K_diss_v (Veros
@@ -16350,13 +16431,26 @@ class LatLonCGridOceanModel:
         # "frozen" still crosses the seam.  Chosen over re-pinning after the
         # call because the pin values are locals of _step_impl — recomputing
         # them at the _step_jitted call site would duplicate the pin logic.
+        # The TKE closure's carried state (en, avm_k/avt_k, dissl, surface avm)
+        # is column-local, but the seam face u[:,1] and the face-summed avm of
+        # zdf_sh2 read the halo column, so an unslaved halo carries its own
+        # TKE history into the physical seam column (measured: halo-vs-twin
+        # en differed by up to 7e-2 m2/s2 after 2 days).
+        tke_fields = {
+            name: f.replace(data=_ovl_cell(f.data))
+            for name in ("tke", "tke_avm", "tke_avt", "tke_dissl",
+                         "tke_avm_surface")
+            if (f := getattr(state, name, None)) is not None
+        }
         if getattr(self.config, "prescribed_flow", None) is not None:
             return state._replace(
                 T=state.T.replace(data=_ovl_cell(state.T.data)),
                 S=state.S.replace(data=_ovl_cell(state.S.data)),
+                **tke_fields,
             )
 
         return state._replace(
+            **tke_fields,
             T=state.T.replace(data=_ovl_cell(state.T.data)),
             S=state.S.replace(data=_ovl_cell(state.S.data)),
             eta=state.eta.replace(data=_ovl_cell(state.eta.data)),

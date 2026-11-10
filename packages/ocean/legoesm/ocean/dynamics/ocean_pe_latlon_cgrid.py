@@ -102,6 +102,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     nemo_ldf_lap_viscosity_e3_cgrid,
     nemo_smagorinsky_bilaplacian_coefficients_cgrid,
     nemo_smagorinsky_bilaplacian_tendency_e3_cgrid,
+    min_cell_to_vertex,
     flux_divergence_viscosity_cgrid,
     no_slip_sidedrag_cgrid,
     interp_cell_to_uface,
@@ -266,6 +267,11 @@ VALID_LATERAL_VISCOSITY_E3_WEIGHTING = frozenset({"off", "nemo_e3"})
 # eddy_viscosity_3D.nc and carried by the card (ldfdyn.f90:311-322,348-353).
 VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE = frozenset(
     {"nemo_ldf_c2d", "nemo_constant", "nemo_ahm_3d_file", "nemo_smag_blp"})
+# Coastal closure of the "nemo_ahm_3d_file" coefficient
+# (config.lateral_viscosity_file_coastal): "four_cell" (default) or
+# "nemo_fmask" (ahmf carries NEMO's rn_shlat fmask; per-level face masks and
+# NEMO e3f_0 at coastal F points).
+VALID_LATERAL_VISCOSITY_FILE_COASTAL = frozenset({"four_cell", "nemo_fmask"})
 # Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
 # at walls), MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall
 # side-drag), or NEMO's rn_shlat ("nemo_shlat": coastal vorticity points take the
@@ -1930,6 +1936,52 @@ def nemo_qco_wzv_operands(
 _nemo_qco_zad_operands = nemo_qco_wzv_operands
 
 
+def hollingsworth_kinetic_energy(u, v, grid):
+    """NEMO nkeg_HW kinetic energy at T-points (dynkeg.F90, nn_dynkeg=1).
+
+    u: (n_lat, n_lon+1, nlev); v: (n_lat+1, n_lon, nlev). Tripole-fold aware.
+    """
+    # u shape (n_lat, n_lon+1, nlev) — u(i-1,j) = u[:, :-1, :], u(i,j) = u[:, 1:, :]
+    u_l = u[:, :-1, :]                                  # (n_lat, n_lon, nlev)
+    u_r = u[:, 1:, :]
+    # j±1 with Neumann (edge) BC at south/north walls
+    u_l_jm1 = jnp.concatenate([u_l[:1], u_l[:-1]], axis=0)
+    u_l_jp1 = jnp.concatenate([u_l[1:], u_l[-1:]], axis=0)
+    u_r_jm1 = jnp.concatenate([u_r[:1], u_r[:-1]], axis=0)
+    u_r_jp1 = jnp.concatenate([u_r[1:], u_r[-1:]], axis=0)
+    # Tripole: the row above the top row is the u-sign-flipped fold
+    # partner (NEMO lbc_lnk 'U',-1), not a repeat of the top row.
+    _nmask_hw = north_fold_mask(grid)
+    if fold_is_local(grid) or _nmask_hw is not None:
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T, fold_perm_u, fold_row,
+        )
+        _f = grid.fold
+        _u_ghost = fold_row(
+            fold_ghost_source_T(u, _f), fold_perm_u(_f),
+            _f.vector_sign_u, _f.perm_T.shape[0])      # (1, n_lon+1, nlev)
+        _u_jp1 = apply_north_fold(
+            jnp.concatenate([u[1:], u[-1:]], axis=0), _u_ghost, grid,
+            north_mask=_nmask_hw)
+        u_l_jp1 = _u_jp1[:, :-1, :]
+        u_r_jp1 = _u_jp1[:, 1:, :]
+    # v shape (n_lat+1, n_lon, nlev) — v(i,j-1) = v[:-1, :, :], v(i,j) = v[1:, :, :]
+    v_s = v[:-1, :, :]                                  # (n_lat, n_lon, nlev)
+    v_n = v[1:, :, :]
+    # i±1 periodic in longitude (jnp.roll matches existing convention)
+    v_s_im1 = jnp.roll(v_s, shift=+1, axis=1)
+    v_s_ip1 = jnp.roll(v_s, shift=-1, axis=1)
+    v_n_im1 = jnp.roll(v_n, shift=+1, axis=1)
+    v_n_ip1 = jnp.roll(v_n, shift=-1, axis=1)
+    zu = 8.0 * (u_l ** 2 + u_r ** 2) \
+         + (u_l_jm1 + u_l_jp1) ** 2 \
+         + (u_r_jm1 + u_r_jp1) ** 2
+    zv = 8.0 * (v_s ** 2 + v_n ** 2) \
+         + (v_s_im1 + v_s_ip1) ** 2 \
+         + (v_n_im1 + v_n_ip1) ** 2
+    return (zu + zv) / 48.0
+
+
 def _nemo_qco_gdept_z0(t_depth, stretch, eta):
     """NEMO ``gdept_z0 = gdept_0*(1+r3t) - ssh`` source association.
 
@@ -2089,29 +2141,7 @@ def _bc_ke_and_pressure_gradients(
         #   gradient near sloping bathymetry. Required for stable
         #   stratified flow on Mercator grids over realistic topography.
         if config.ke_gradient_scheme == "hollingsworth":
-            # u shape (n_lat, n_lon+1, nlev) — u(i-1,j) = u[:, :-1, :], u(i,j) = u[:, 1:, :]
-            u_l = u[:, :-1, :]                                  # (n_lat, n_lon, nlev)
-            u_r = u[:, 1:, :]
-            # j±1 with Neumann (edge) BC at south/north walls
-            u_l_jm1 = jnp.concatenate([u_l[:1], u_l[:-1]], axis=0)
-            u_l_jp1 = jnp.concatenate([u_l[1:], u_l[-1:]], axis=0)
-            u_r_jm1 = jnp.concatenate([u_r[:1], u_r[:-1]], axis=0)
-            u_r_jp1 = jnp.concatenate([u_r[1:], u_r[-1:]], axis=0)
-            # v shape (n_lat+1, n_lon, nlev) — v(i,j-1) = v[:-1, :, :], v(i,j) = v[1:, :, :]
-            v_s = v[:-1, :, :]                                  # (n_lat, n_lon, nlev)
-            v_n = v[1:, :, :]
-            # i±1 periodic in longitude (jnp.roll matches existing convention)
-            v_s_im1 = jnp.roll(v_s, shift=+1, axis=1)
-            v_s_ip1 = jnp.roll(v_s, shift=-1, axis=1)
-            v_n_im1 = jnp.roll(v_n, shift=+1, axis=1)
-            v_n_ip1 = jnp.roll(v_n, shift=-1, axis=1)
-            zu = 8.0 * (u_l ** 2 + u_r ** 2) \
-                 + (u_l_jm1 + u_l_jp1) ** 2 \
-                 + (u_r_jm1 + u_r_jp1) ** 2
-            zv = 8.0 * (v_s ** 2 + v_n ** 2) \
-                 + (v_s_im1 + v_s_ip1) ** 2 \
-                 + (v_n_im1 + v_n_ip1) ** 2
-            KE = (zu + zv) / 48.0
+            KE = hollingsworth_kinetic_energy(u, v, grid)
         elif config.ke_gradient_scheme == "centered":
             u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
             v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
@@ -3631,6 +3661,31 @@ def _bc_horizontal_viscosity(
         raise ValueError(
             "NEMO Smagorinsky coefficient override requires "
             "lateral_viscosity_coefficient_source='nemo_smag_blp'")
+    _file_coastal = getattr(config, "lateral_viscosity_file_coastal", "four_cell")
+    if _file_coastal not in VALID_LATERAL_VISCOSITY_FILE_COASTAL:
+        raise ValueError(
+            "lateral_viscosity_file_coastal must be one of "
+            f"{sorted(VALID_LATERAL_VISCOSITY_FILE_COASTAL)}, got {_file_coastal!r}")
+    if _file_coastal != "four_cell" and _ahm_source != "nemo_ahm_3d_file":
+        raise ValueError(
+            "lateral_viscosity_file_coastal != 'four_cell' requires "
+            "lateral_viscosity_coefficient_source='nemo_ahm_3d_file'; got "
+            f"{_ahm_source!r}")
+    _file_nemo_fmask = _file_coastal == "nemo_fmask"
+    if (_file_nemo_fmask
+            and getattr(config, "lateral_side_bc", "free_slip") == "nemo_shlat"):
+        # Both carry NEMO's rn_shlat f-mask (read ahmf x fmask, and the
+        # vorticity vertex mask); together they would apply it twice.
+        raise ValueError(
+            "lateral_viscosity_file_coastal='nemo_fmask' and "
+            "lateral_side_bc='nemo_shlat' both apply NEMO's rn_shlat f-mask; "
+            "select one.")
+    if (getattr(z_coord, "nemo_ldf_ahmt", None) is not None
+            and _ahm_source != "nemo_ahm_3d_file"):
+        raise ValueError(
+            "the coordinate carries NEMO's read eddy_viscosity_3D coefficient "
+            "(z_coord.nemo_ldf_ahmt) but lateral_viscosity_coefficient_source="
+            f"{_ahm_source!r} would ignore it; select 'nemo_ahm_3d_file'.")
     _use_flux_div = _visc_op == "flux_divergence"
     _use_nemo_div_curl = _visc_op == "nemo_div_curl"
     # Land masks of the vector Laplacian / biharmonic sites below.  "per_level"
@@ -3692,6 +3747,15 @@ def _bc_horizontal_viscosity(
             uu, vv, grid, mask=_vl_mask, u_mask=_vl_u_mask,
             v_mask=_vl_v_mask, vertex_mask=_vl_vertex_mask)
 
+    # lateral_viscosity_file_coastal="nemo_fmask": the read coefficient IS the
+    # Laplacian magnitude with the boundary condition in its fmask, so A_h
+    # must be 0 (it would otherwise also drive the scalar no-slip side drag).
+    if _file_nemo_fmask and config.lateral_viscosity.A_h != 0.0:
+        raise ValueError(
+            "lateral_viscosity_file_coastal='nemo_fmask' takes the Laplacian "
+            "magnitude and wall condition from the read ahmt/ahmf, so "
+            "lateral_viscosity.A_h must be 0 (got "
+            f"A_h={config.lateral_viscosity.A_h!r}).")
     if _use_nemo_div_curl and _ahm_source == "nemo_smag_blp":
         lv = config.lateral_viscosity
         if (lv.A_h != 0.0 or lv.B_h != 0.0 or lv.C_smag <= 0.0
@@ -3750,7 +3814,8 @@ def _bc_horizontal_viscosity(
             diag_Cs_smag_u, diag_Cs_smag_v)
         du_dt = du_dt + diag_Cs_smag_u
         dv_dt = dv_dt + diag_Cs_smag_v
-    elif _use_nemo_div_curl and config.lateral_viscosity.A_h > 0:
+    elif _use_nemo_div_curl and (_file_nemo_fmask
+                                 or config.lateral_viscosity.A_h > 0):
         # NEMO dyn_ldf_lev_lap: coefficient ahmt(T)/ahmf(F) = ½·rn_Uv·MAX(e1,e2)
         # EMBEDDED inside div/curl (node 14). ``A_h`` here is NEMO's A_h_base =
         # ½·rn_Uv·R·Δλ (the DINO builder), so ½·rn_Uv = A_h / (R·Δλ). This branch
@@ -3781,7 +3846,7 @@ def _bc_horizontal_viscosity(
                 "K_diss_h diagnostic consumes a LATITUDE profile and would "
                 "silently broadcast it. Not wired."
             )
-        if (_ahm_source == "nemo_ahm_3d_file"
+        if (_ahm_source == "nemo_ahm_3d_file" and not _file_nemo_fmask
                 and getattr(config, "lateral_side_bc", "free_slip") != "free_slip"):
             raise ValueError(
                 "lateral_viscosity_coefficient_source='nemo_ahm_3d_file' "
@@ -3848,6 +3913,16 @@ def _bc_horizontal_viscosity(
         # (default) keeps the existing horizontal-metrics-only div/curl
         # BIT-IDENTICAL; "nemo_e3" restores NEMO's e3u/e3v/e3f weighting,
         # dynldf_lev_rot_scheme.h90:22-29,41,51).
+        _nl_umask, _nl_vmask, _nl_hvtx = u_mask, v_mask, None
+        _nl_thickness_operands = ldf_thickness_operands
+        if _file_nemo_fmask:
+            # NEMO: ahmf already * fmask (0 land / 1 wet / rn_shlat coast), so
+            # the vertex mask must not zero the coastal F points; per-level
+            # face masks stand in for umask/vmask(jk) inside div/curl.
+            _visc_vmask = (_ahmf > 0.0).astype(u.dtype)
+            _fm3u, _fm3v = compute_face_masks_3d(z_coord.is_active, grid)
+            _nl_umask = _fm3u.astype(u.dtype)
+            _nl_vmask = _fm3v.astype(v.dtype)
         if _e3_weighting == "nemo_e3":
             if h_k is None:
                 raise ValueError(
@@ -3868,20 +3943,43 @@ def _bc_horizontal_viscosity(
                 _r1f = nemo_qco_r1_area_f(_raw, grid, u.dtype)
                 _r1f = jnp.concatenate([_r1f[:1], _r1f], axis=0)
                 _r1_e1e2f = jnp.concatenate([_r1f[:, -1:], _r1f], axis=1)
+            if _file_nemo_fmask:
+                # interior F: min-rule (== e3f_0 at all 3660598 wet F points of
+                # domain_cfg); coastal F: NEMO's static e3f_0. ponytail: the
+                # coastal value skips the z-star stretch (|eta|/H <~ 1e-3).
+                _e3f0 = getattr(z_coord, "nemo_e3f_0", None)
+                if _e3f0 is None:
+                    raise ValueError(
+                        "NEMO eddy_viscosity_3D path with nemo_e3 weighting "
+                        "needs z_coord.nemo_e3f_0 for the coastal zcur.")
+                _e3f_coast = _e3f0.astype(h_k.dtype)
+                if ldf_thickness_operands is None:
+                    _nl_hvtx = jnp.where(_vm3 > 0.0,
+                                         min_cell_to_vertex(h_k, grid),
+                                         _e3f_coast)
+                else:
+                    # The stage bundle already carries e3f (slot 3); put the
+                    # coastal e3f_0 into that slot instead of a second h_vtx.
+                    _ops = list(ldf_thickness_operands)
+                    _ops[3] = jnp.where(_vm3 > 0.0, _ops[3], _e3f_coast)
+                    _nl_thickness_operands = tuple(_ops)
             diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_e3_cgrid(
                 u, v, grid, _ahmt, _ahmf, h_k,
-                mask=mask, u_mask=u_mask, v_mask=v_mask,
-                vertex_mask=_visc_vmask,
-                thickness_operands=ldf_thickness_operands,
+                mask=mask, u_mask=_nl_umask, v_mask=_nl_vmask,
+                vertex_mask=_visc_vmask, h_vtx=_nl_hvtx,
+                thickness_operands=_nl_thickness_operands,
                 metric_reciprocal_operands=ldf_metric_reciprocal_operands,
+                # nemo_fmask keeps the where-style zeta*(ahmf>0) mask
+                # (vertex mask set above), exactly as the OMIP path ran.
                 coefficient_fmask_already_applied=(
-                    _ahm_source == "nemo_ahm_3d_file"),
+                    _ahm_source == "nemo_ahm_3d_file" and not _file_nemo_fmask),
                 stored_r1_e1e2f=_r1_e1e2f,
                 nemo_fold_rows=config.nemo_ldf_fold_rows)
         else:
             diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
                 u, v, grid, _ahmt, _ahmf,
-                mask=mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=_visc_vmask)
+                mask=mask, u_mask=_nl_umask, v_mask=_nl_vmask,
+                vertex_mask=_visc_vmask)
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         if _want_kdiss_flux:
             # cell-centre ahmt for the K_diss_h coefficient field. APPROXIMATION:

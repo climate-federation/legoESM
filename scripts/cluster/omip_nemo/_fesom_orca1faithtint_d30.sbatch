@@ -68,8 +68,9 @@ ROOT=${ROOT:-/burg-archive/glab/users/pg2328/_omip_run3}; cd $ROOT || exit 1
 HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$PIN" ] || { echo "FATAL: HEAD $HEAD != pinned $PIN"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
-echo "fesom_jax: $(git -C /burg-archive/glab/users/pg2328/fesom_jax_repo log --oneline -1)"
-export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')/burg-archive/glab/users/pg2328/fesom_jax_repo:$ROOT:$ROOT/scripts/validate"
+# fesom_jax = local branch legoesm/nemo-vmom (main + NEMO vertical momentum option, efebc73); never pushed upstream
+echo "fesom_jax: $(git -C /burg-archive/glab/users/pg2328/_wt_fesomjax_vmom log --oneline -1)"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')/burg-archive/glab/users/pg2328/_wt_fesomjax_vmom:$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/fesom_orca1faithtint_d30}
@@ -96,9 +97,15 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --dm2dc --sw-rgb-chl \
   --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --ice-lead-freeze-source nemo_qlead \
-  --fesom-vmix legoesm_tke --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 \
+  --fesom-vmix legoesm_tke --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 4 \
   --tke-prognostic --tke-kappa-convention veros_sqrte \
-  --ice-init $NEMOIN/Ice_initialization.nc --ice-ocean-heat-coeff 70 \
+  --tke-langmuir-rhs-coupling nemo_pre_solve `# user 2026-10-06: NEMO Langmuir/dissipation RHS order (zdftke.F90:367,419)` \
+  --tke-shear-avm-weighting nemo_face --tke-prandtl-mode nemo_ri `# user 2026-10-12 (1): NEMO zdf_sh2 neighbour-summed avm (zdfsh2.F90:78-94) + nn_pdl=1 Prandtl on p_sh2 (zdftke.F90:381-400), all three grids` \
+  --convection enhanced_diffusion --convection-K-conv 100 --convection-K-bg 0 --convection-n2-mode nemo_bn2 --convection-n2-eos teos10 --convection-trigger hard --convection-n2-threshold=-1e-12 --convection-evd-composition nemo_replace `# user 2026-10-12 (3b): NEMO zdfevd on every grid -- ln_zdfevd=T rn_evd=100 nn_evdm=0, zdfevd.F90:107-110` \
+  --vertical-momentum-scheme nemo_advective `# user 2026-10-06: NEMO vertical momentum advection (dynzad.F90), as tripole and MPAS` \
+  --ice-init $NEMOIN/Ice_initialization.nc --ice-ocean-heat-scheme nemo_ustar \
+  --nemo-ldf-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc --lateral-side-bc no_slip \
+  --state-accumulate --mld-accumulate `# 5-day window means, as NEMO writes and the scorer reads` \
   --sss-restore --sss-restore-channel water_flux \
   --sss-restore-normalization live_s \
   --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
@@ -106,11 +113,13 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc \
   --runoff --river-mouth-restoring-gate \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
-  --forcing-ramp-days 5 \
+  --iwm-n2-mode nemo_bn2 --iwm-n2-eos-form teos10 `# user 2026-10-06: NEMO zdfiwm reads bn2 (zdfiwm.F90:185-211), stated explicitly` \
+  --forcing-ramp-days 0 `# user 2026-10-06: card = baseline run fesom_base1001_d30` \
   `# ---- the adopted sets the FESOM lane wires ----` \
   --ice-exchange nemo_si3 \
   --forcing-time-interp linear \
-  --dt 1800 --years 0.0822 --snapshot-every-days 5 \
+  --forcing-remap nemo_weights `# user 2026-10-13 "1": NEMO wind remap (bicubic u10/v10, bilinear rest), same point method on every grid` \
+  --dt 900 --years 0.0822 --snapshot-every-days 5 \
   --output $OUT 2>&1 | tail -20
 run_rc=${PIPESTATUS[0]}
 echo "=== run rc=$run_rc"
