@@ -299,10 +299,11 @@ def test_fesom_forced_writes_manifest_before_the_loop(tmp_path, monkeypatch):
 
 
 def test_fesom_forced_window_means_with_accumulation_on(tmp_path, monkeypatch):
-    """--state-accumulate on the fesom forced lane: the day-1 snapshot carries
-    the window means of T and S over the 48 steps, trimmed to the mesh's real
-    levels.  Step k sets T = k, S = 2k, so the means are 24.5 and 49.0 exactly
-    (integer sums and dyadic quotients in fp64)."""
+    """--state-accumulate on the fesom forced lane: each daily snapshot carries
+    the window means of T and S over its 48 steps, trimmed to the mesh's real
+    levels.  Step k sets T = k, S = 2k and thickness 10 (k odd) or 30 (k even),
+    so the plain and thickness-weighted means differ and a second window
+    checks the reset; all values are exact (integer sums, dyadic quotients)."""
     from types import SimpleNamespace
 
     import jax.numpy as jnp
@@ -328,7 +329,7 @@ def test_fesom_forced_window_means_with_accumulation_on(tmp_path, monkeypatch):
     def _state(k):
         return SimpleNamespace(inner=SimpleNamespace(
             T=jnp.full((nod, nl), float(k)), S=jnp.full((nod, nl), 2.0 * k),
-            hnode=jnp.full((nod, nl), 10.0)))
+            hnode=jnp.full((nod, nl), 10.0 if k % 2 else 30.0)))
 
     model = _SteppingModel()
     model.mesh = SimpleNamespace(
@@ -338,15 +339,17 @@ def test_fesom_forced_window_means_with_accumulation_on(tmp_path, monkeypatch):
     model.step = lambda state, dt, **kw: _state(next(counter))
     args = run_omip_core2._build_arg_parser().parse_args([
         "--grid", "fesom", "--fesom-mesh-dir", "/m", "--output", str(tmp_path),
-        "--no-emp", "--dt", "1800", "--years", str(1.0 / 365.0),
+        "--no-emp", "--dt", "1800", "--years", str(2.0 / 365.0),
         "--snapshot-every-days", "1", "--forcing-ramp-days", "0",
         "--state-accumulate"])
     grid = SimpleNamespace(lat=np.zeros(nod), lon=np.zeros(nod))
     run_omip_core2.run_fesom_forced_loop(args, grid, None, model, _state(0))
-    extra = snaps["day0001"]
-    for name, want in (("T_mean", 24.5), ("S_mean", 49.0), ("T_mean_hw", 24.5)):
-        assert extra[name].shape == (nod, nl - 1), name
-        np.testing.assert_array_equal(extra[name], np.full((nod, nl - 1), want))
+    for day, wants in (("day0001", (24.5, 49.0, 24.75)),
+                       ("day0002", (72.5, 145.0, 72.75))):
+        for name, want in zip(("T_mean", "S_mean", "T_mean_hw"), wants):
+            got = snaps[day][name]
+            assert got.shape == (nod, nl - 1), (day, name)
+            np.testing.assert_array_equal(got, np.full((nod, nl - 1), want))
 
 
 def test_fesom_b1_records_the_final_state_digest(tmp_path, monkeypatch):
