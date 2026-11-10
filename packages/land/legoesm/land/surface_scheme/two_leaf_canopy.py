@@ -535,8 +535,8 @@ def compute_two_leaf_canopy_fluxes(
                             jnp.nan_to_num(x_conv), _fallback)
         # One batch over every column by default (solve_group 0; user choice
         # 2026-11-09, replacing the 64-column groups chosen 2026-11-03).  Once
-        # the LM step stopped forming explicit Q (PR 2398) the solve is launch-bound, so one wide batch
-        # beats many narrow ones: AMIP production deck, 4 A100, fp64, 1 day,
+        # the LM step stopped forming explicit Q (PR 2398) the solve is
+        # launch-bound, so one wide batch beats many narrow ones: AMIP production deck, 4 A100, fp64, 1 day,
         # 0.242 s/step with groups of 64 vs 0.138 s/step with one batch.
         # Pure performance: same per-column solve, answers differ by rounding.
         # Cost: the batch iterates until the rank's slowest column stops, so a
