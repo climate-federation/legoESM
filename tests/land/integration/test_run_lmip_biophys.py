@@ -744,3 +744,49 @@ def test_sandoval_kphio_and_params_block_reach_the_global_run(tmp_path):
         _run_config(mod, cfg_bad, tmp_path / "bad")
 
 
+def test_column_sharded_run_matches_the_unsharded_run(tmp_path):
+    """--column-devices 4 (four forced CPU devices) splits the 32 columns into
+    blocks; columns are independent, so the result equals the unsharded run to
+    round-off: machine precision on the first steps, and growing only through
+    the iterative canopy solver (measured <= 3e-8 relative over 48 steps)."""
+    import os
+    import subprocess
+    import sys
+    import yaml
+    import xarray as xr
+    from legoesm.land.lmip_config import validate_config
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    cfg = validate_config({
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+                    "bulk_scheme": "most", "canopy_capacity_scheme": "p_model",
+                    "canopy_g1_source": "table", "stomatal_model": "pmodel_chi",
+                    "pmodel_acclimation": "subdaily_noon",
+                    "canopy_light_response": "pmodel_phi0"},
+        "forcing": {"source": "synthetic", "data_dir": "",
+                    "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": str(sd)},
+        "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
+        "output": {"tapes": [{"name": "step", "freq": "step", "average": "inst",
+                              "vars": ["GPP", "lhflx", "shflx", "T_sfc"]}]},
+    }).raw
+    p = tmp_path / "c.yaml"; p.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    outs = {}
+    for n in (1, 4):
+        env = dict(os.environ, JAX_PLATFORMS="cpu", JAX_ENABLE_X64="1",
+                   XLA_FLAGS=f"--xla_force_host_platform_device_count={n}")
+        out = tmp_path / f"d{n}"
+        r = subprocess.run([sys.executable, str(_DRIVER), "--config", str(p),
+                            "--output-dir", str(out), "--column-devices", str(n)],
+                           env=env, capture_output=True, text=True, timeout=1500)
+        assert r.returncode == 0, r.stderr[-3000:]
+        if n == 4:
+            assert "column sharding: 32 columns over 4 devices" in r.stdout
+        outs[n] = xr.open_dataset(out / "lmip_biophys.step.nc")
+    for v in ("GPP", "lhflx", "shflx", "T_sfc"):
+        a, b = outs[1][v].values, outs[4][v].values
+        scale = np.max(np.abs(a)) + 1e-30
+        assert np.max(np.abs(a[:3] - b[:3])) / scale < 1e-12, v
+        assert np.max(np.abs(a - b)) / scale < 1e-6, v
+
+

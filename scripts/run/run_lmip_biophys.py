@@ -253,6 +253,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         # CLI overrides the config here for chaining ergonomics.
         restart_from=cli_args.restart_from or cfg.restart.get("from", ""),
         pmodel_cold_restart=bool(getattr(cli_args, "pmodel_cold_restart", False)),
+        column_devices=int(getattr(cli_args, "column_devices", 1)),
         output_config="",                        # embedded output block is used directly
         _cfg_output_tapes=cfg.output,            # -> load_output_config indirection below
         _cfg_luc=cfg.raw.get("land_use_change") or {},   # E_LUC bookkeeping block
@@ -890,6 +891,19 @@ def run(args) -> int:
     if _subdaily:
         from legoesm.land.p_model import local_solar_hour
         _lon_deg_cols = jnp.asarray(np.rad2deg(np.asarray(lon_rad)).ravel())
+    # Optional column sharding (a run-time layout choice, not physics): the
+    # carry and each year's forcing are split along the column axis, so XLA
+    # runs one block of independent columns per device.
+    _col_mesh = None
+    _n_coldev = int(getattr(args, "column_devices", 1))
+    if _n_coldev > 1:
+        from legoesm.parallel.column_shard import create_column_mesh, shard_column_tree
+        if jax.device_count() < _n_coldev:
+            raise SystemExit(
+                f"--column-devices {_n_coldev} but JAX sees {jax.device_count()} "
+                "device(s); on CPU set XLA_FLAGS=--xla_force_host_platform_device_count"
+                f"={_n_coldev} before starting")
+        _col_mesh = create_column_mesh(_n_coldev)
     # ----- scan body: (state, tape_accums, revert_count) -> next. -----
     def _step_body(carry, xs):
         state, accums, revert_count = carry
@@ -1193,6 +1207,12 @@ def run(args) -> int:
 
     steps_done = 0
     revert_count = jnp.zeros(ncol)                  # per-cell NaN-revert tally
+    if _col_mesh is not None:
+        # Column axis by layout: state (ncol, ...), tapes (n_slots, ncol).
+        state, revert_count = shard_column_tree(
+            (state, revert_count), _col_mesh, ncol, axis=0)
+        tape_accums = shard_column_tree(tape_accums, _col_mesh, ncol, axis=1)
+        print(f"column sharding: {ncol} columns over {_n_coldev} devices")
     for k, (year, mask) in enumerate(year_masks):
         # Year-local model times: the year's forcing clock resets to 0 at Jan 1.
         tq_year = tq[mask]
@@ -1204,6 +1224,8 @@ def run(args) -> int:
             prefix=args.prefix, suffix=args.suffix,
             k_neighbors=args.k_neighbors, allow_synthetic=allow_syn,
             **({"co2_ppmv": co2_by_year[year]} if co2_by_year else {}))
+        if _col_mesh is not None:
+            forcing_year = shard_column_tree(forcing_year, _col_mesh, ncol, axis=1)
         doy_year = jnp.asarray(tq_year / _SEC_PER_DAY)
         # Transient cover: broadcast this chunk's calendar year across its steps as
         # a TRACED scan input (not a Python constant baked into the closure) so
@@ -1313,6 +1335,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="allow resuming a P-model-active run from a restart "
                          "written before the acclimation state existed (an "
                          "explicit, recorded reset; refused otherwise).")
+    ap.add_argument("--column-devices", type=int, default=1,
+                    dest="column_devices",
+                    help="split the columns across this many JAX devices "
+                         "(columns are independent, so results are unchanged; "
+                         "on CPU set XLA_FLAGS=--xla_force_host_platform_device_count"
+                         "=N and give the job N cores).  Must divide the column "
+                         "count.  1 = no sharding.")
     ap.add_argument("--restart-from", default="",
                     help="override the config's restart.from field — the most "
                          "common per-run change (chained warm starts)")

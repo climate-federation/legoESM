@@ -292,3 +292,54 @@ class TestGrayRadiationOnColumnMesh:
             _crop(out.heating_rate), np.asarray(ref.heating_rate),
             rtol=1.0e-12, atol=1.0e-14,
         )
+
+
+# ---------------------------------------------------------------------------
+# shard_column_tree (multi-device: a subprocess with 4 forced host devices)
+# ---------------------------------------------------------------------------
+
+
+def test_shard_column_tree_shards_the_column_axis_on_four_host_devices():
+    """Each leaf is split along its first axis of length ncol (state (ncol, k),
+    forcing (n_steps, ncol)); leaves without one are replicated; values are
+    unchanged; a device count that does not divide ncol is refused."""
+    import os
+    import subprocess
+    import sys
+    code = r'''
+import jax, jax.numpy as jnp, numpy as np
+from legoesm.parallel.column_shard import create_column_mesh, shard_column_tree
+assert jax.device_count() == 4, jax.device_count()
+mesh = create_column_mesh(4)
+ncol = 12
+spec = lambda a: tuple(a.sharding.spec)
+# Column-leading tree (state); a (ncol,) leaf and a per-layer table.
+st = {"T": jnp.arange(ncol * 3.0).reshape(ncol, 3), "w": jnp.arange(1.0 * ncol),
+      "table": jnp.arange(7.0), "scalar": jnp.asarray(2.0), "meta": "x"}
+o = shard_column_tree(st, mesh, ncol, axis=0)
+assert spec(o["T"])[:1] == ("col",) and spec(o["w"]) == ("col",), (spec(o["T"]), spec(o["w"]))
+assert all(s is None for s in spec(o["table"])) and o["meta"] == "x"
+for k in ("T", "w", "table", "scalar"):
+    np.testing.assert_array_equal(np.asarray(o[k]), np.asarray(st[k]))
+assert o["T"].addressable_shards[0].data.shape == (3, 3)
+# Tape-like tree with AS MANY SLOTS AS COLUMNS: (n_slots, ncol) must split on
+# columns (axis 1), and the per-slot count (n_slots,) must be replicated.
+tp = {"count": jnp.arange(1.0 * ncol), "GPP": jnp.arange(1.0 * ncol * ncol).reshape(ncol, ncol)}
+o = shard_column_tree(tp, mesh, ncol, axis=1)
+assert spec(o["GPP"])[:2] == (None, "col"), spec(o["GPP"])
+assert all(s is None for s in spec(o["count"])), spec(o["count"])
+assert o["GPP"].addressable_shards[0].data.shape == (ncol, 3)
+np.testing.assert_array_equal(np.asarray(o["GPP"]), np.asarray(tp["GPP"]))
+try:
+    shard_column_tree({"a": jnp.zeros(10)}, mesh, 10)
+except ValueError as e:
+    assert "not divisible" in str(e)
+else:
+    raise AssertionError("ncol=10 over 4 devices was accepted")
+print("OK")
+'''
+    env = dict(os.environ, XLA_FLAGS="--xla_force_host_platform_device_count=4",
+               JAX_PLATFORMS="cpu")
+    r = subprocess.run([sys.executable, "-c", code], env=env,
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0 and r.stdout.strip().endswith("OK"), r.stderr[-2000:]
