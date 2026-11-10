@@ -615,6 +615,83 @@ def create_cubed_sphere_cdgrid(
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.
 
+    The metrics are always computed in float64, whatever ``jax_enable_x64``
+    says, then cast back to 32-bit when x64 is off: built in float32, the
+    corner gradient matrix is wrong at the polar face centre (off-diagonal
+    2.7e-5 vs 7e-10 at C768) and the pole blows up within ~100 steps.
+    """
+    if jax.config.jax_enable_x64:
+        return _build_cubed_sphere_cdgrid(
+            base, omega, metric_dtype, gnomonic, fv3_native_angles)
+    with jax.enable_x64(True):
+        base64 = _base_with_float64_positions(base)
+        cd = _build_cubed_sphere_cdgrid(
+            base64, omega, metric_dtype, gnomonic, fv3_native_angles)
+        cd = jax.tree.map(_to_32bit, cd)
+    return cd._replace(base=base)
+
+
+_POSITION_MATCH_TOL = 1e-4
+
+_POSITION_FIELDS = ("lon", "lat", "cos_lat", "sin_lat", "x_cart", "y_cart", "z_cart")
+
+
+def _base_with_float64_positions(base):
+    """Upcast ``base`` and swap in cell positions regenerated in float64.
+
+    Upcasting float32 positions keeps their rounding, which near the poles
+    grows with resolution (corner gradient matrix off 1.3% at C768). The
+    positions depend only on ``n`` and the gnomonic form, so they are rebuilt
+    in float64 and checked against ``base`` (all six faces, or the one face a
+    single-face panel matches); a base built another way (stretched, shifted)
+    is refused instead of silently upcast.
+    """
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+    up = jax.tree.map(
+        lambda x: x.astype(jnp.float64)
+        if hasattr(x, "dtype") and x.dtype == jnp.float32 else x, base)
+    regen = create_cubed_sphere(base.n, gnomonic=base.gnomonic_form)
+    n_faces = base.lat.shape[0]
+    candidates = [slice(0, 6)] if n_faces == 6 else (
+        [slice(f, f + 1) for f in range(6)] if n_faces == 1 else [])
+
+    def mismatch(faces):
+        return max(float(jnp.max(jnp.abs(
+            getattr(regen, k)[faces].astype(jnp.float32) - getattr(base, k))))
+            for k in ("x_cart", "y_cart", "z_cart"))
+
+    errs = [(mismatch(faces), faces) for faces in candidates]
+    if not errs or min(e for e, _ in errs) > _POSITION_MATCH_TOL:
+        raise ValueError(
+            f"create_cubed_sphere_cdgrid: the {n_faces}-face base grid does not "
+            f"match the standard C{base.n} {base.gnomonic_form} grid "
+            f"(mismatch {min((e for e, _ in errs), default=float('nan')):.2e}), "
+            "so its positions cannot be rebuilt in float64. Build the C/D grid "
+            "with JAX_ENABLE_X64=1 for a non-standard base.")
+    faces = min(errs, key=lambda t: t[0])[1]
+    return up._replace(**{k: getattr(regen, k)[faces] for k in _POSITION_FIELDS})
+
+
+def _to_32bit(x):
+    if not hasattr(x, "dtype"):
+        return x
+    if x.dtype == jnp.float64:
+        return x.astype(jnp.float32)
+    if x.dtype == jnp.int64:
+        return x.astype(jnp.int32)
+    return x
+
+
+def _build_cubed_sphere_cdgrid(
+    base: CubedSphereGrid,
+    omega: float | None = None,
+    metric_dtype=None,
+    gnomonic: str = "auto",
+    fv3_native_angles: bool = False,
+) -> CubedSphereCDGrid:
+    """Body of :func:`create_cubed_sphere_cdgrid` (see there for the precision).
+
     Parameters
     ----------
     base : CubedSphereGrid
