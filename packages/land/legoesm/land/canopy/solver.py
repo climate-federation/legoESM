@@ -84,6 +84,16 @@ from legoesm.land.canopy.energy_balance import (
 # the old hard ``where(fSun < 0.05, ...)`` kink).
 _ANCHOR_FSUN_CENTER = 0.08   # [-] tanh centre in sunlit fraction
 _ANCHOR_FSUN_WIDTH  = 0.03   # [-] tanh transition half-width
+# Leaf area at or below which a column has NO leaves (ice sheet, barren
+# ground, a fully leafless season): numerical zero, not a physics threshold.
+_LEAFLESS_LAI = 1.0e-6       # [m2/m2]
+
+
+def leafless_mask(LAI):
+    """True where a column has no leaves (LAI <= _LEAFLESS_LAI): the single
+    definition shared by the canopy solve, its reported fluxes and the
+    canopy diagnostics (SIF) in ``surface_scheme.two_leaf_canopy``."""
+    return LAI <= _LEAFLESS_LAI
 
 # --- Damped-least-squares canopy solve (numerics; never tunable) ------------
 # WHY NOT PLAIN NEWTON.  A small share of columns -- hot, bright and CALM --
@@ -447,6 +457,22 @@ def _canopy_residual(
             rah_below, raw_soil_evap, b.fStress_soil,
             b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
+    # ---- Leafless column: no leaf exchange with the canopy air ----
+    # With no leaves the leaf energy balance's implied temperature is not a
+    # physical state (its tiny leaf conductance multiplies an unbounded
+    # temperature), and it injected ~0.35 W m-2 of sensible heat and the same
+    # latent sink into the canopy air (measured at LAI = 0).  The canopy air
+    # exchanges with the ground and the atmosphere only.
+    leafless = leafless_mask(b.LAI)
+    Tf_Sun_new = jnp.where(leafless, Tc, Tf_Sun_new)
+    Tf_Sh_new = jnp.where(leafless, Tc, Tf_Sh_new)
+    gs_Sun = jnp.where(leafless, 0.0, gs_Sun)
+    gs_Sh = jnp.where(leafless, 0.0, gs_Sh)
+    # Wet-leaf evaporation has its own pathway (fwet / Rb, independent of gs):
+    # intercepted water left on a column whose leaf area has gone to zero must
+    # not reach the canopy air either (codex round 12).
+    fwet_leaf = jnp.where(leafless, 0.0, b.fwet)
+
     # ---- Canopy air update (FULLY_COUPLED: soil included) ----
     Tc_new, q_c_new = canopy_air_update(
         b.Ta, b.q_atm,
@@ -455,7 +481,7 @@ def _canopy_residual(
         Rb_Sun, Rb_Sh,
         rah_above, raw_above,
         rah_below, raw_soil_evap,
-        b.fStress_soil, b.Ps, fwet=b.fwet)
+        b.fStress_soil, b.Ps, fwet=fwet_leaf)
 
     # ---- Sunlit-leaf anchor when fSun is too small for two-leaf split ----
     # When ``fSun`` is small, ``Rb_Sun = rb / (LAI · fSun)`` is large, the
@@ -512,11 +538,25 @@ def _canopy_residual(
     res_Ci_Sun = (anchor_weight * (Ci_Sun - Ci_Sh)
                   + (1.0 - anchor_weight) * bal_Sun)
 
+    # ---- Leafless column: the leaf unknowns lose their equations ----
+    # With no leaves every leaf flux is zero (conductances and absorbed
+    # radiation scale with the leaf area), so the two leaf-temperature and two
+    # Ci rows carry no information: the Jacobian is singular there, the leaf
+    # temperatures drift without bound and the column never certifies
+    # (measured at 2 deg: 49-55 % of ice-sheet and 17-36 % of barren column
+    # solves unconverged, against 3-4 % of vegetated ones).  Where the column
+    # has no leaves those rows become identities -- leaf temperature = canopy
+    # air, Ci = Ca (no assimilation, no draw-down) -- and the ground /
+    # canopy-air / atmosphere balance (Tc, q_c rows) is solved exactly as
+    # before.  Pins variables that have no physical meaning on a leafless
+    # column; changes no flux.  (Both classes are empty here, unlike the
+    # sunlit-fraction anchor below, where the empty class takes the active
+    # class's state.)
     rows = [
-        res_Tf_Sun,
-        Tf_Sh  - Tf_Sh_new,
-        res_Ci_Sun,
-        bal_Sh,
+        jnp.where(leafless, Tf_Sun - Tc, res_Tf_Sun),
+        jnp.where(leafless, Tf_Sh - Tc, Tf_Sh - Tf_Sh_new),
+        jnp.where(leafless, Ci_Sun - b.Ca, res_Ci_Sun),
+        jnp.where(leafless, Ci_Sh - b.Ca, bal_Sh),
         Tc     - Tc_new,
         (q_c   - q_c_new) * 1e3,   # scale humidity residual
     ]
@@ -569,8 +609,11 @@ def _canopy_residual(
         # keeps it differentiable at the origin.
         kkt_Sun = _kkt_fischer_burmeister(2.0 * b.gamma_cost * x[6], -foc_Sun)
         kkt_Sh = _kkt_fischer_burmeister(2.0 * b.gamma_cost * x[7], -foc_Sh)
-        rows += [_FOC_ROW_SCALE * (w_dpsi * anchor_dpsi + (1.0 - w_dpsi) * kkt_Sun),
-                 _FOC_ROW_SCALE * kkt_Sh]
+        rows += [_FOC_ROW_SCALE * jnp.where(
+                     leafless, 2.0 * b.gamma_cost * x[6],
+                     w_dpsi * anchor_dpsi + (1.0 - w_dpsi) * kkt_Sun),
+                 _FOC_ROW_SCALE * jnp.where(
+                     leafless, 2.0 * b.gamma_cost * x[7], kkt_Sh)]
     return jnp.array(rows)
 
 
@@ -704,6 +747,22 @@ def canopy_forward(
             rah_below, raw_soil_evap, b.fStress_soil,
             b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
+    # A leafless column (ice sheet, barren ground) has no leaf fluxes.  The
+    # leaf energy balance still returns an equal and opposite H / LE pair from
+    # the per-leaf minimum conductance (measured +-0.17 W m-2 per class at
+    # LAI = 0), which the canopy-air budget never supplied (its leaf
+    # conductance gs/(gs Rb + 1) ~ 4e-8 m/s there): report exactly zero.
+    _leafy = jnp.where(leafless_mask(bundle.LAI), 0.0, 1.0)
+    LE_Sun, LE_Sh = LE_Sun * _leafy, LE_Sh * _leafy
+    H_Sun, H_Sh = H_Sun * _leafy, H_Sh * _leafy
+    LE_wet_Sun, LE_wet_Sh = LE_wet_Sun * _leafy, LE_wet_Sh * _leafy
+    gs_Sun, gs_Sh = gs_Sun * _leafy, gs_Sh * _leafy
+    # Leaf net radiation too, so the reported energy closure has no leaf
+    # source left without its balancing fluxes (0 < LAI <= _LEAFLESS_LAI).
+    Rn_Sun, Rn_Sh = Rn_Sun * _leafy, Rn_Sh * _leafy
+    # ...and leaf carbon uptake (it feeds GPP and SIF downstream).
+    An_Sun, An_Sh = An_Sun * _leafy, An_Sh * _leafy
+    Agross_Sun, Agross_Sh = Agross_Sun * _leafy, Agross_Sh * _leafy
     return dict(
         An_Sun=An_Sun, An_Sh=An_Sh,
         Agross_Sun=Agross_Sun, Agross_Sh=Agross_Sh,

@@ -841,6 +841,136 @@ canopy integration. Under (b), LE rises with GPP (DE-Hai +8.9, US-MMS
 where it was over-estimated (daily H NSE 0.48, 0.13, 0.09 vs 0.43, −0.04,
 −0.09 under (a)) at the cost of LE.
 
+### 4.16 The cost of a global run, and where it goes
+
+The global comparison (2° CRU-JRA, 16,200 columns of which 7,955 carry land,
+hourly steps, 2000–2005) turned out to be limited by computing cost, not by
+the P-model. On one LOTUS core a step costs about 80 s, i.e. 3.5–5 ms per
+column-step, the same as a single flux-site column: running many columns
+together buys no saving per column on CPU. Six years would take ~1,200 h. For
+comparison, the JULES runs cost ~21 µs per land point and half-hourly step per
+core, about 200 times less.
+
+The time is in the canopy closure. Per step the two-leaf canopy solves six
+coupled unknowns (sunlit and shaded leaf temperature and Ci, canopy-air
+temperature and humidity) by damped Newton iteration, inside six outer passes
+that couple it to the soil temperature. An iteration profile of every column,
+every pass (24 steps from 1 January and from 30 June 2000) shows:
+
+* the median land column converges in 5 iterations, but 10–14 % of land
+  solves reach the 50-iteration cap and 18–21 % end unconverged; under one
+  vectorised batch the whole batch then runs to the cap;
+* ocean columns (no land, stepped all the same) cost ~29 iterations each;
+* the six outer passes each restart cold, so passes 2–6 cost as much as pass 1;
+* the unconverged solves are where there are no leaves: 49–55 % of
+  ice-sheet and 17–36 % of barren solves, against 3–4 % of vegetated ones
+  (§4.18); Antarctica alone was 55–73 % of all unconverged solves and 42–50 %
+  of all iterations.
+
+Two layout options were measured. More XLA threads in one process help
+little (about 2.1× at 8 cores, 2.4× at 32). Splitting the independent columns
+across CPU devices (`--column-devices N`, columns sharded by
+`legoesm.parallel.column_shard`; results identical to round-off, tested) gives
+6.4 s per step on 90 cores, about 12×. On one A100 a step costs ~5.9 s, and
+four A100s give no further gain.
+
+### 4.17 Porting the upstream canopy-solver speed-ups
+
+legoESM main has three canopy-solver improvements that this branch predates
+(it forked on 31 August): applying the QR factor from packed reflectors in
+the Newton step (#2398), warm-starting the closure from the previous step's
+solution together with a root certificate that rejects non-physical roots
+(57e4c45b6a, 46bab7a21c), and solving columns in groups of 64 sorted by their
+previous iteration count (#2330). They were ported as separate changes, with
+the restart files carrying the warm-start cache and the drivers' NaN guards
+taught that the cache is NaN where a column has never converged.
+
+One finding matters for anyone running on CPU: the grouped, sorted solve was
+designed for a single GPU, and with columns sharded across CPU devices it made
+the run ~40 times slower (24 steps: 208 s → 2 h 27 min on 90 cores). Sorting
+by iteration count gathers every column into one place, undoing the
+sharding, and the groups then run in sequence.
+
+With the leafless-column change (§4.18) the balance shifts on GPU too: once
+ice-sheet and barren columns stop running to the iteration cap, one wide batch
+is fastest. Per hourly step on one A100: one batch 0.73 s, groups of 1,024
+1.0 s, groups of 64 5.7 s; the GPU is latency-bound (mean utilisation ~4 %,
+2.7 of 40 GB), so sequential groups cost more than idle lanes, and splitting
+the 2° columns over four GPUs did not help. The batching is therefore chosen
+by platform (`canopy_solve_batching`, user decision 2026-11-10): one batch per
+device on GPU and on column-sharded CPU; sorted groups of 64 only on a single
+CPU device. Splitting over several GPUs is left for higher resolutions, where
+each device carries enough work. GPU and CPU results agree to round-off
+(daily GPP and latent heat, 99th percentile ~10⁻¹⁰).
+
+### 4.18 No leaf physics where there are no leaves
+
+**Why.** The two-leaf canopy solved leaf equations on every land column,
+including those with no leaves at all: ice sheets (glacier-dominated cells,
+LAI = 0 by construction) and barren ground. With no leaf area every leaf flux
+vanishes (absorbed radiation and conductance scale with leaf area), so the two
+leaf-temperature and two Ci equations carry no information. The Jacobian is
+singular there (smallest singular value 10⁻²–10⁻¹), the leaf temperatures
+drift without bound (to ~370 K in a probe of an ice column), and the column
+never certifies a root. This, not cold or snow as such, is why the ice sheets
+dominated the non-convergence and the cost (table below; iterations and
+unconverged share per column-pass, 2° grid, January / July).
+
+| Surface | Columns | Unconverged | Mean iterations |
+| --- | --- | --- | --- |
+| Ice sheet (glacier-dominated) | 2,059 | 49–55 % | 30–35 |
+| No vegetation, not ice (LAI 0 all year) | 95 | 17–36 % | 27–32 |
+| Sparse (LAI < 0.1 that month) | 990–2,140 | 18–24 % | 20–23 |
+| Vegetated (LAI ≥ 0.1) | 3,660–4,810 | 3–4 % | 6–7 |
+
+The same probe exposed a small physical artefact: on a leafless column each
+leaf class carried an equal and opposite sensible and latent flux of
+0.17 W m⁻² (dew forming on leaves that do not exist). It came from the
+implied temperature of the leaf energy balance which, multiplied by the
+vanishing leaf conductance, still exchanged heat and vapour with the canopy
+air; the column's sensible heat to the atmosphere exceeded the ground's by
+exactly that amount.
+
+**What changed.** Where LAI ≤ 10⁻⁶ (a numerical zero, `leafless_mask`):
+
+* the leaf unknowns lose their equations: leaf temperature = canopy-air
+  temperature and Ci = Ca (the state of a leaf that takes up no CO2; any
+  fixed value gives the same fluxes); under P-hydro the leaf water-potential
+  draw-downs are zero;
+* leaves exchange no heat or vapour with the canopy air, including the
+  wet-leaf (intercepted-water) pathway;
+* the reported leaf sensible, latent and wet-leaf fluxes, conductance, net
+  radiation, assimilation and the light passed to SIF are zero.
+
+The ground, canopy-air and atmosphere balance is solved exactly as before, so
+bare soil and ice keep their full surface energy balance: soil temperature,
+soil evaporation with its surface resistance and moisture limit, sensible and
+ground heat, and radiation. The canopy-air node remains, as the near-surface
+air through which the ground exchanges with the forcing height.
+
+**Evidence.** Single-column probes (ice by night and day, hot and wet bare
+soil) now certify in 2 iterations, where they ran to the 50–60-iteration cap.
+Tests pin that the leaf state is fixed and the leaf fluxes are zero; that on
+a leafless column all of the ground's sensible heat reaches the atmosphere
+(ρc_p (T_c − T_a)/r_ah equals the ground's H to the solver tolerance; it was
+off by 0.35 W m⁻² before); that the ground energy balance closes; that wet
+leaves add no vapour; that the gradient of the ground's sensible heat stays
+finite; and that vegetated (LAI 3) and sparse (LAI 10⁻³) columns are
+bit-identical to the unchanged equations. Each of the five switches was
+removed in turn and each removal fails at least one test. Codex reviewed the
+change over four rounds (12–15): it found the wet-leaf pathway, the leaf net
+radiation and carbon uptake just above zero leaf area, and the light passed to
+SIF, all now covered; its concern that the 150–360 K admissibility box could
+reject hot bare ground was withdrawn (the canopy air lies below the ground
+skin, whose hottest retrieved value is ~344 K).
+
+**Consequences and limits.** ci/ca reads 1 on leafless columns, and the
+P-model traits are still advanced there (they feed nothing when LAI = 0): both
+should be excluded from trait maps (LAI > 0). Sparse vegetation
+(0 < LAI < 0.1) is unaffected by this change and still fails to converge in
+about a fifth of its solves; that is a separate solver issue, recorded here
+and not yet addressed.
+
 ## 5. Plan: one hypothesis per step
 
 Each step changes one aspect of the formulation, is introduced as an option

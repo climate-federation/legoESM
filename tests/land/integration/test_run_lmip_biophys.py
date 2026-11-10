@@ -790,3 +790,60 @@ def test_column_sharded_run_matches_the_unsharded_run(tmp_path):
         assert np.max(np.abs(a - b)) / scale < 1e-6, v
 
 
+def test_ci_ca_is_taped_only_where_the_canopy_has_leaves(tmp_path):
+    """Leafless steps (here: bare columns, LAI 0) are treated like night in the
+    Ci/Ca tape: ci_ca_*_day and leafy_day_frac are 0 there, while on vegetated
+    columns leafy_day_frac equals day_frac and the daytime ci/ca is
+    physiological (typically well below 1), not the pinned Ci = Ca of a
+    leafless column."""
+    import yaml
+    import xarray as xr
+    from legoesm.land.lmip_config import validate_config
+    mod = _load_driver()
+    nlat, nlon, nlev = 8, 16, 7
+    lat = np.linspace(-85, 85, nlat); lon = np.linspace(0, 337.5, nlon)
+    pft = np.zeros((1, N_PFT_CLM5, nlat, nlon))
+    bare = np.zeros((nlat, nlon), bool); bare[:, : nlon // 2] = True
+    pft[0, 0][bare] = 100.0                      # bare-ground PFT
+    pft[0, 4][~bare] = 100.0
+    lai = np.zeros((12, N_PFT_CLM5, nlat, nlon)); lai[:, 4] = 4.0
+    soil = lambda v: np.full((nlev, nlat, nlon), v)
+    sd = tmp_path / "sd.nc"
+    write_surfdata(
+        str(sd), lat=lat, lon=lon, soil_dz=np.full(nlev, 0.2),
+        sand_pct=soil(40.0), clay_pct=soil(20.0), organic=soil(5.0),
+        bulk_density=soil(1300.0), soil_color=np.full((nlat, nlon), 8.0),
+        year=np.array([2015.0]), f_land=np.full((1, nlat, nlon), 100.0),
+        f_lake=np.zeros((1, nlat, nlon)), f_glacier=np.zeros((1, nlat, nlon)),
+        pft_frac=pft, monthly_lai=lai, monthly_sai=np.zeros_like(lai),
+        monthly_height_top=np.zeros_like(lai), monthly_height_bot=np.zeros_like(lai))
+    cfg = validate_config({
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+                    "bulk_scheme": "most", "optimality": "least_cost"},
+        "forcing": {"source": "synthetic", "data_dir": "",
+                    "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": str(sd)},
+        "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
+        "output": {"tapes": [{"name": "step", "freq": "step", "average": "inst",
+                              "vars": ["ci_ca_sun_day", "ci_ca_shade_day", "day_frac",
+                                       "leafy_day_frac", "LAI"]}]},
+    }).raw
+    p = tmp_path / "c.yaml"; p.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    assert _run_config(mod, p, tmp_path / "out") == 0
+    ds = xr.open_dataset(tmp_path / "out" / "lmip_biophys.step.nc")
+    lai_t = ds["LAI"].values
+    leafless = lai_t <= 1e-6
+    assert leafless.any() and (~leafless).any()
+    day, lday = ds["day_frac"].values, ds["leafy_day_frac"].values
+    assert np.all(lday[leafless] == 0.0)
+    np.testing.assert_array_equal(lday[~leafless], day[~leafless])
+    for v in ("ci_ca_sun_day", "ci_ca_shade_day"):
+        c = ds[v].values
+        assert np.all(c[leafless] == 0.0), v
+        # Physiological by day: a respiring leaf at dawn/dusk (An < 0) sits
+        # slightly above Ca, so the bound is the solver's 1.5 Ca ceiling, and
+        # the typical (median) value is well below 1, unlike the pinned 1.
+        leafy_day = (~leafless) & (day == 1.0)
+        assert leafy_day.any(), v
+        assert np.all(c[leafy_day] <= 1.5) and np.median(c[leafy_day]) < 0.9, v

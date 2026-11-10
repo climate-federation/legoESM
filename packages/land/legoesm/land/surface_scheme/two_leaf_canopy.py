@@ -52,7 +52,7 @@ from legoesm.land.canopy.stability import (
 from legoesm.land.phydro import PhydroSupply
 from legoesm.land.canopy.solver import (
     CanopyForcingBundle, solve_canopy_closure, canopy_forward,
-    canopy_state_admissible,
+    canopy_state_admissible, leafless_mask,
 )
 from legoesm.land.canopy.energy_balance import soil_surface_evap_resistance
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
@@ -910,9 +910,14 @@ def compute_two_leaf_canopy_fluxes(
     if cc.sif is not None:
         T_phot_Sun = Ta if cc.use_ta_for_photosynthesis else Tf_Sun
         T_phot_Sh  = Ta if cc.use_ta_for_photosynthesis else Tf_Sh
+        # A leafless column has no leaves to fluoresce: its light enters with
+        # zero weight (An is already zero there; the yield alone is not).
+        _leafy_sif = jnp.where(leafless_mask(LAI), 0.0, 1.0)
         sif_out = two_leaf_canopy_sif(
-            An_Sun, x_final[:, 2], co2_compensation_point(T_phot_Sun), sw_rt.APAR_Sun,
-            An_Sh, x_final[:, 3], co2_compensation_point(T_phot_Sh), sw_rt.APAR_Sh,
+            An_Sun, x_final[:, 2], co2_compensation_point(T_phot_Sun),
+            sw_rt.APAR_Sun * _leafy_sif,
+            An_Sh, x_final[:, 3], co2_compensation_point(T_phot_Sh),
+            sw_rt.APAR_Sh * _leafy_sif,
             cc.sif)
     else:
         sif_out = None
@@ -1011,6 +1016,7 @@ def compute_two_leaf_canopy_fluxes(
         # Warm-start cache for the NEXT call: the last certified solve per
         # column (NaN where this column has never converged).
         canopy_x=x_conv,
+        lai_canopy=LAI,
         f_veg=f_veg,
         fSun=fSun,
         Ts_solve=Ts_cvg,

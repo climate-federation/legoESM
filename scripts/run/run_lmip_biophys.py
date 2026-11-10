@@ -64,6 +64,7 @@ from legoesm.land.canopy import CanopyConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.stomata import StomataConfig
 from legoesm import constants
+from legoesm.land.canopy.solver import leafless_mask
 from legoesm.land.multilayer_land import (
     finite_check_view,
     step_multilayer_land,
@@ -324,12 +325,16 @@ _VAR_META = {
     "pmodel_g1":      {"long_name": "C3 stomatal slope fed to the canopy kernel, after any "
                                     "water-stress factor (Medlyn g1 under stomatal_model=medlyn)",
                        "units": "kPa 0.5"},
-    "ci_ca_sun_day":  {"long_name": "sunlit-leaf solved Ci/Ca times the daytime flag; "
-                                    "daytime mean = mean(ci_ca_sun_day) / mean(day_frac)",
+    "ci_ca_sun_day":  {"long_name": "sunlit-leaf solved Ci/Ca times the leafy-daytime flag; "
+                                    "daytime mean = mean(ci_ca_sun_day) / mean(leafy_day_frac)",
                        "units": "1"},
-    "ci_ca_shade_day": {"long_name": "shaded-leaf solved Ci/Ca times the daytime flag; "
-                                     "daytime mean = mean(ci_ca_shade_day) / mean(day_frac)",
+    "ci_ca_shade_day": {"long_name": "shaded-leaf solved Ci/Ca times the leafy-daytime flag; "
+                                     "daytime mean = mean(ci_ca_shade_day) / mean(leafy_day_frac)",
                         "units": "1"},
+    "leafy_day_frac": {"long_name": "daytime-with-leaves flag (cos zenith > 0 and canopy "
+                                    "leaf area above the leafless threshold); its mean is "
+                                    "the leafy daytime fraction of the averaging window",
+                       "units": "1"},
     "day_frac":       {"long_name": "daytime flag (cos zenith > 0); its mean is the "
                                     "daytime fraction of the averaging window",
                        "units": "1"},
@@ -1015,12 +1020,21 @@ def run(args) -> int:
                                          else surf_out.dpsi_sun_mpa)
             values["phydro_dpsi_shade"] = (_nan if surf_out.dpsi_sh_mpa is None
                                            else surf_out.dpsi_sh_mpa)
-            # Solved Ci/Ca of every arm, daytime only: a tape mean of the
-            # product divided by the mean of the flag is the daytime mean.
+            # Solved Ci/Ca of every arm, by day and only where the canopy has
+            # leaves: a tape mean of the product divided by the mean of
+            # ``leafy_day_frac`` is the daytime leafy mean.  Leafless steps (ice
+            # sheet, barren ground, a leafless season or a buried canopy) are
+            # treated like night: their Ci = Ca is a pinned value, not a
+            # physiological one (user decision 2026-11-10).  The flag follows
+            # the leaf area the canopy solved with (after any override).
             _day = (forcing_t.cos_zenith > 0.0).astype(surf_out.ci_ca_sun.dtype)
-            values["ci_ca_sun_day"] = surf_out.ci_ca_sun * _day
-            values["ci_ca_shade_day"] = surf_out.ci_ca_sh * _day
+            _lai_c = (surf_out.lai_canopy if surf_out.lai_canopy is not None
+                      else lai_diag)
+            _leafy_day = _day * jnp.where(leafless_mask(_lai_c), 0.0, 1.0)
+            values["ci_ca_sun_day"] = surf_out.ci_ca_sun * _leafy_day
+            values["ci_ca_shade_day"] = surf_out.ci_ca_sh * _leafy_day
             values["day_frac"] = _day
+            values["leafy_day_frac"] = _leafy_day
         _pm_state = getattr(new_state, "pmodel_acclim", None)
         if _pm_state is not None:
             from legoesm.land.p_model import acclimated_capacities as _acc

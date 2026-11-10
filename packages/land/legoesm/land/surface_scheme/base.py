@@ -67,6 +67,11 @@ class SurfaceFluxOutput(NamedTuple):
     # A warm-start cache for the next call only; None for every scheme that
     # does not run the two-leaf closure.
     canopy_x: jax.Array | None = None
+    # Leaf area the canopy actually solved with, (ncol,), after any override
+    # (e.g. snow burial); None for schemes without a two-leaf canopy.  Lets a
+    # driver tell leafless steps from leafy ones with the canopy's own
+    # ``canopy.solver.leafless_mask``.
+    lai_canopy: jax.Array | None = None
 
     # ---- Canopy-specific diagnostics (None for SimpleSEB) ----
     Tf_Sun: jax.Array | None = None        # sunlit leaf T [K]
