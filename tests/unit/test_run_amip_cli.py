@@ -4200,13 +4200,15 @@ def test_build_config_resolves_voronoi_discretization_without_postprocess():
 def test_truncation_only_triggers_spectral_fallback():
     """--truncation N without --discretization spectral must still fall back
     off prognostic schemes (postprocess resolves discretization='spectral'
-    BEFORE the fallback runs; the old order made this a silent no-op)."""
+    BEFORE the fallback runs; the old order made this a silent no-op).
+    Convection is never swapped (user decision 2026-11-06, b659aa5caf): with
+    none named the spectral lane runs its default zhang_mcfarlane."""
     p = build_arg_parser()
     argv = ["--truncation", "21"]
     args = _postprocess_args(p.parse_args(argv), p)
     assert args.discretization == "spectral"
     args = _apply_spectral_scheme_fallback(args, argv, p)
-    assert args.convection == "sbm"
+    assert args.convection == "zhang_mcfarlane"
     assert args.gravity_wave_drag == "rayleigh"
 
 

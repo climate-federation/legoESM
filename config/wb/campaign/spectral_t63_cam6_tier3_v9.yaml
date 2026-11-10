@@ -287,6 +287,10 @@ classical:
     atm.turb.CLUBBConfig:
       prognostic: true
     atm.micro.MorrisonConfig:
+      # Named explicitly (user decision 2026-11-10): the training lane's
+      # classical factory pins kk2000 for Morrison, so this deck always ran
+      # kk2000 (measured), not the mg flavour's unset default kk2000_cam6.
+      warm_rain_scheme: kk2000
       warm_rain_incloud: true
       nc_from_aerosol: true
       hard_saturation_adjustment: false
