@@ -9,6 +9,8 @@ replace only the surface-stress association or the five rheology outputs.
 
 from __future__ import annotations
 
+import math
+
 import argparse
 import importlib.util
 import json
@@ -22,8 +24,8 @@ import numpy as np
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ice import ridging as ridging_module
 from legoesm.ice.dynamics import SI3CGridAEVPState, si3_cgrid_aevp_solver
-from legoesm.ice.fidelity import nemo_rheo_testcase_recipe as recipe
-from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
+from legoesm.ice.fidelity import nemo_rheo_testcase_recipe_lane as recipe
+from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import (
     ICE_RHEO_TRACERS,
     _forcing_for_state,
     build_ice_rheo_card,
@@ -268,7 +270,7 @@ def _dynamics_rows(card, state, target: dict[str, np.ndarray]) -> list[dict[str,
     forcing = _forcing_for_state(card, state, ENTRY_STEP)
     result = jax.jit(
         lambda dynamics, applied: si3_cgrid_aevp_solver(
-            dynamics, applied, card.metrics, card.dynamics_config
+            dynamics, applied, card.metrics, card.dynamics_config, limit_sharpness_scale=math.inf
         )
     )(state.dynamics, forcing)
     jax.block_until_ready(result)
@@ -344,10 +346,8 @@ def run_probe(
     with netCDF4.Dataset(root / "mesh_mask.nc") as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in rung34.MESH_FIELDS}
     with netCDF4.Dataset(root / "output.init_ice.nc") as dataset:
-        from legoesm import constants
-
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
-    card = build_ice_rheo_card(entry, mesh, ocean_temperature_k)
+        sst_m = np.asarray(dataset["sst"][0])
+    card = build_ice_rheo_card(entry, mesh, sst_m)
     state = card.initial_state._replace(moments=trajectory._restart_moments(entry_restart, card))
     candidate = _compiled_step(card, state)
 
@@ -365,7 +365,7 @@ def run_probe(
 
     setup_header, setup = round13._read_setup(setup_path)
     require(setup_header["kt"] == TARGET_STEP, "setup clock mismatch")
-    exact_target_card = build_ice_rheo_card(target, mesh, ocean_temperature_k)
+    exact_target_card = build_ice_rheo_card(target, mesh, sst_m)
     exact_setup_rows = _setup_rows(
         exact_target_card, exact_target_card.initial_state, setup, "setup.exact_oracle_entry"
     )

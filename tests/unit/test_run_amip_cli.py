@@ -247,12 +247,13 @@ def test_convective_precip_efficiency_cli_wiring_929():
     ]), parser))
     assert cfg_bech0.convective_precip_efficiency == 0.0
 
-    # Tiedtke still reaches the config.
-    cfg_tied = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--convection", "tiedtke",
-        "--convective-precip-efficiency", "0.5",
-    ]), parser))
-    assert cfg_tied.convective_precip_efficiency == 0.5
+    # Tiedtke (WRF port) closes its own precipitation: the knob is refused
+    # (it would be silently inert), vote V14.
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--convection", "tiedtke",
+            "--convective-precip-efficiency", "0.5",
+        ]), parser)
 
 
 def test_convective_precip_efficiency_rejected_for_non_massflux_929():
@@ -620,8 +621,11 @@ def test_land_canopy_max_iters_flag_flows_to_config():
     # the calibrated decks (land_calibrated_physics) accept any cap: the cap
     # is a solver setting, not one of the values the tables were fitted under
     cfg._replace(land_canopy_max_iters=10).validate_strict()
-    src = inspect.getsource(ModelDriver._setup_multilayer_land)
-    assert "max_iters=int(self.config.land_canopy_max_iters)" in src
+    from legoesm.driver.model_driver import build_multilayer_land_tile
+    assert "build_multilayer_land_tile(" in inspect.getsource(
+        ModelDriver._setup_multilayer_land)
+    src = inspect.getsource(build_multilayer_land_tile)
+    assert "max_iters=int(config.land_canopy_max_iters)" in src
     # ... and the calibration applied right after it must not put 60 back
     from legoesm.land.config import (
         MultiLayerLandConfig, apply_biophysics_lmip_two_leaf,
@@ -1779,12 +1783,16 @@ def test_aimip_classical_checkpoint_flag():
 
 
 def _serialise_aimip_defaults(tmp_path):
-    """Write a default AIMIPClassicalParams checkpoint for the override tests."""
+    """Write a default AIMIPClassicalParams checkpoint for the override tests,
+    with the knob-range record the loader requires (as the trainers write it)."""
     import equinox as eqx
+    from legoesm.ml.checkpoint_io import write_knob_record
     from legoesm.training.aimip_params import AIMIPClassicalParams
 
     ckpt = tmp_path / "epoch_defaults.eqx"
-    eqx.tree_serialise_leaves(str(ckpt), AIMIPClassicalParams.from_defaults())
+    params = AIMIPClassicalParams.from_defaults()
+    eqx.tree_serialise_leaves(str(ckpt), params)
+    write_knob_record(params, ckpt)
     return str(ckpt)
 
 
@@ -2487,6 +2495,8 @@ def test_config_yaml_round_trips_authoritative_values():
     # the raw grid-mean path, which two_region (the old row) would thin.
     assert cfg.cloud_optics_inhomogeneity == "constant"
     assert cfg.cloud_inhomogeneity_factor == 1.0
+    # CAM6 McICA (user decision 2026-09-25): one sampled subcolumn per g-point.
+    assert cfg.cloud_vertical_overlap_optics == "mcica"
     _assert_optics_thinning(cfg, thinned=False)
 
 
@@ -2494,9 +2504,11 @@ def _assert_optics_thinning(cfg, *, thinned: bool):
     """Build the lane's cloud config from ``cfg`` and measure the thinning.
 
     A saturated, cloudy, warm column: with no inhomogeneity factor the liquid
-    water path handed to radiation is EXACTLY ``q_c * dp / g``; two_region at
-    fsd 1.0 thins it.  Asserting the effect, not the field, is what makes the
-    production pin non-vacuous against a renamed or ignored selector.
+    water path handed to radiation is EXACTLY ``q_c * dp / g``.  two_region
+    thins per subcolumn cell in the radiation lane, so here it must leave the
+    path raw and REFUSE a caller that does not apply that scaling.  Asserting
+    the effect, not the field, is what makes the production pin non-vacuous
+    against a renamed or ignored selector.
     """
     import jax.numpy as jnp
     from legoesm import constants
@@ -2519,20 +2531,25 @@ def _assert_optics_thinning(cfg, *, thinned: bool):
     q_v = jnp.full((1, 4), 8.0e-3)
     q_c = jnp.full((1, 4), 4.0e-4)
     p_half = jnp.array([[65000.0, 75000.0, 85000.0, 92500.0, 97500.0]])
-    props = compute_cloud_properties(
-        T=T, p_full=p_full, q_v=q_v, dp=dp, config=cloud_cfg, q_cloud=q_c,
-        q_ice=jnp.zeros_like(q_c),
-        cloud_fraction_override=jnp.full((1, 4), 0.5),
-        # cam6_clubb's tropopause switch needs these; harmless to the others.
-        lat=jnp.zeros((1,)), p_half=p_half,
-        # cam6_clubb's aist top cut reads the run's resolved CLUBB config.
-        clubb_config=resolved_clubb_config(turbulence_config_for(cfg)))
+    def props(**kw):
+        return compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp, config=cloud_cfg, q_cloud=q_c,
+            q_ice=jnp.zeros_like(q_c),
+            cloud_fraction_override=jnp.full((1, 4), 0.5),
+            # cam6_clubb's tropopause switch needs these; harmless to the others.
+            lat=jnp.zeros((1,)), p_half=p_half,
+            # cam6_clubb's aist top cut reads the run's resolved CLUBB config.
+            clubb_config=resolved_clubb_config(turbulence_config_for(cfg)), **kw)
     raw = q_c * dp / constants.g
-    ratio = float(jnp.sum(props.lwp) / jnp.sum(raw))
     if thinned:
-        assert ratio < 0.95, f"expected two_region thinning, got ratio {ratio}"
+        assert cloud_cfg.cloud_optics_inhomogeneity == "two_region"
+        with pytest.raises(ValueError, match="two_region"):
+            props()
+        p = props(subcolumn_inhomogeneity=True)
     else:
-        assert ratio == 1.0, f"expected NO thinning, got ratio {ratio}"
+        p = props()
+    ratio = float(jnp.sum(p.lwp) / jnp.sum(raw))
+    assert ratio == 1.0, f"expected the raw path, got ratio {ratio}"
 
 
 def test_sundqvist_l36_deck_still_round_trips():
@@ -2588,7 +2605,7 @@ def test_sundqvist_l36_deck_still_round_trips():
         turbulence_config_for(cfg)).liquid_partition is False
     assert _resolve_microphysics(cfg)[1].liquid_from_closure is False
     # Old configuration KEEPS the in-cloud inhomogeneity thinning (user
-    # decision 2026-09-25): two_region at fsd 1.0, and it measurably thins.
+    # decision 2026-09-25): two_region at fsd 1.0, now the subcolumn lane's.
     assert cfg.cloud_optics_inhomogeneity == "two_region"
     assert cfg.cloud_fsd == 1.0
     _assert_optics_thinning(cfg, thinned=True)
@@ -4159,8 +4176,10 @@ def test_spectral_fallback_rejects_dependent_option_silent_noop():
     it must error instead of accept-then-ignore (codex r2)."""
     p = build_arg_parser()
     argv = ["--truncation", "21", "--convective-precip-efficiency", "0.5"]
-    args = _postprocess_args(p.parse_args(argv), p)
+    # (the default convection, tiedtke, now refuses the knob already in
+    # _postprocess_args; either refusal is the required loud error)
     with pytest.raises(SystemExit):
+        args = _postprocess_args(p.parse_args(argv), p)
         _apply_spectral_scheme_fallback(args, argv, p)
 
 
@@ -4219,8 +4238,8 @@ def test_hard_saturation_adjustment_requires_a_guarded_scheme():
     drain early-return before the flag is read) — validate_strict must refuse
     it (codex F3).
 
-    The negative set is now sdm / fast_sbm / none, NOT sundqvist: the guard was
-    made uniform, so Sundqvist and the ML emulator carry it. sdm and fast_sbm
+    The negative set includes sundqvist since its condensation became the ccpp
+    zhaocarr_gscond port (#2434), which has no guard. sdm and fast_sbm
     are exempt on purpose (they integrate the super-saturation relaxation /
     droplet growth law explicitly — see config.HARD_SAT_GUARD_EXEMPT), and
     'none' has no scheme function at all."""
@@ -4229,7 +4248,8 @@ def test_hard_saturation_adjustment_requires_a_guarded_scheme():
     )
     parser = build_arg_parser()
     assert set(HARD_SAT_GUARD_EXEMPT) == {"sdm", "fast_sbm", "none", "kessler",
-                                          "seifert_beheng"}
+                                          "seifert_beheng", "thompson",
+                                          "ifs_cloudsc", "sundqvist"}
     for micro in sorted(HARD_SAT_GUARD_EXEMPT):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", "--microphysics", micro,
@@ -4248,8 +4268,8 @@ def test_hard_saturation_adjustment_accepted_by_every_guarded_scheme():
     )
     parser = build_arg_parser()
     exposed = [s for s in HARD_SAT_GUARD_SCHEMES
-               if s in {"sundqvist", "morrison", "thompson", "p3"}]
-    assert len(exposed) == 4, exposed
+               if s in {"morrison", "p3"}]
+    assert len(exposed) == 2, exposed
     for micro in exposed:
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", "--microphysics", micro,
@@ -5459,43 +5479,21 @@ def test_land_snow_options_refused_when_invalid(argv, match):
         cfg.validate_strict()
 
 
-def test_convective_buoyancy_death_memory_reaches_tiedtke_config():
-    """--convective-buoyancy-death-memory must reach the Tiedtke scheme config
-    the kernel is built from, not stop at ExperimentConfig."""
-    from legoesm.driver.physics_pipeline import _resolve_convection
-
-    parser = build_arg_parser()
-    base = ["--grid", "gaussian", "--resolution", "21",
-            "--convection", "tiedtke"]
-    cfg_off = build_config_from_args(_postprocess_args(
-        parser.parse_args(base), parser))
-    cfg_on = build_config_from_args(_postprocess_args(
-        parser.parse_args(base + ["--convective-buoyancy-death-memory"]),
-        parser))
-    assert cfg_on.convective_buoyancy_death_memory is True
-    assert _resolve_convection(cfg_off)[1].buoyancy_death_memory is False
-    assert _resolve_convection(cfg_on)[1].buoyancy_death_memory is True
-
-
-@pytest.mark.parametrize("scheme", ["bechtold", "kain_fritsch", "sbm"])
-def test_buoyancy_death_memory_refused_off_tiedtke_in_python_config(scheme):
-    """A config built in Python (no CLI) must refuse the flag with any scheme
-    that does not read it, exactly as the CLI does."""
+@pytest.mark.parametrize("over", [
+    {"convective_precip_split": "autoconversion"},
+    {"convective_precip_efficiency": 0.5},
+])
+def test_tiedtke_refuses_surrogate_precip_knobs(over):
+    """The WRF Tiedtke port closes its own precipitation; the surrogate's
+    rain-split knobs would be silently inert with it (vote V14)."""
     from legoesm.driver.config import ExperimentConfig
-    cfg = ExperimentConfig(convection=scheme,
-                           convective_buoyancy_death_memory=True)
-    with pytest.raises(ValueError, match="convective_buoyancy_death_memory"):
+    cfg = ExperimentConfig(convection="tiedtke", **over)
+    with pytest.raises(ValueError, match="closes its own"):
         cfg.validate_strict()
-    # control: the same scheme with the flag at its default is not refused for it
-    try:
-        cfg._replace(convective_buoyancy_death_memory=False).validate_strict()
+    try:   # control: the same knob on Bechtold is not refused for it
+        cfg._replace(convection="bechtold").validate_strict()
     except ValueError as e:
-        assert "convective_buoyancy_death_memory" not in str(e)
-    # and Tiedtke with the flag on is not refused for it
-    try:
-        cfg._replace(convection="tiedtke").validate_strict()
-    except ValueError as e:
-        assert "convective_buoyancy_death_memory" not in str(e)
+        assert "closes its own" not in str(e)
 
 
 def test_corner_fill_flag_round_trip_and_production_pin(capsys):

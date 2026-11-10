@@ -415,22 +415,30 @@ def test_swap_convection_schemes(conv_scheme):
     conv = ConvectionConfig(scheme=conv_scheme)
     if conv_scheme == "zhang_mcfarlane":  # the SCM column has no land fraction
         conv = conv._replace(zhang_mcfarlane=conv.zhang_mcfarlane._replace(land_fraction="none"))
+    extra = {}
+    if conv_scheme == "tiedtke":
+        # WRF port reads the lagged turbulence q_v tendency / surface flux and
+        # detrains cloud ice: needs a turbulence scheme and a q_i carrier
+        extra = dict(turbulence=TurbulenceConfig(scheme="louis"),
+                     microphysics=MicrophysicsConfig(scheme="thompson"))
     cfg = _baseline_cfg(
         radiation=RadiationConfig(scheme="gray", diurnal_cycle=False),
-        convection=conv,
+        convection=conv, **extra,
     )
     _run_and_assert_stable(cfg)
 
 
 @pytest.mark.parametrize(
     "turb_scheme",
-    ["smagorinsky", "louis", "tke", "mynn25",
+    # mynn25 (WRF port) needs q_c / cell area: tests/unit/test_mynn_lanes.py
+    ["smagorinsky", "louis", "tke",
      "holtslag_boville", "ysu", "edmf"],
 )
 def test_swap_turbulence_schemes(turb_scheme):
-    cfg = _baseline_cfg(
-        turbulence=TurbulenceConfig(scheme=turb_scheme),
-    )
+    turb = TurbulenceConfig(scheme=turb_scheme)
+    if turb_scheme == "ysu":  # the SCM column has no land fraction / cell area
+        turb = turb._replace(ysu=turb.ysu._replace(surface_type="land", dx_m=1.0e5))
+    cfg = _baseline_cfg(turbulence=turb)
     _run_and_assert_stable(cfg)
 
 
@@ -451,6 +459,18 @@ def test_swap_microphysics_schemes(micro_scheme):
             _run_and_assert_stable(cfg)
         return
     _run_and_assert_stable(cfg)
+
+
+def test_thompson_runs_with_microphysics_substeps():
+    """Vote U13a: the substepped path hands WRF Thompson the prescribed w
+    (it refused for lack of w before)."""
+    cfg = _baseline_cfg(microphysics=MicrophysicsConfig(scheme="thompson"))
+    scm = SingleColumnModel.create(
+        physics_config=cfg, nlev=_RCE_NLEV, dt=_RCE_DT,
+        T_profile=_tropical_T_profile(), q_v_profile=_tropical_qv_profile(),
+        latitude_deg=0.0, microphysics_substeps=2)
+    final, _ = scm.run(nsteps=2)
+    assert jnp.all(jnp.isfinite(final.T.data))
 
 
 @pytest.mark.parametrize(
@@ -524,3 +544,19 @@ def test_sundqvist_runs_on_a_column_that_declares_its_cell_area():
     _run_and_assert_stable(
         _baseline_cfg(microphysics=MicrophysicsConfig(scheme="sundqvist")),
         cell_area_m2=RCE_CELL_AREA_M2)
+
+
+def test_prescribed_surface_flux_case_runs_and_warms_the_lowest_level():
+    """A prescribe='fluxes' case (Wangara-style kinematic surface fluxes)
+    runs: the dynamics hand-off strips the surface flux with prescribe='none'
+    instead of leaving a 'fluxes' forcing with no flux, which the forcing
+    validator refuses."""
+    from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
+    forcing = SCMForcing(prescribe="fluxes", w_th_s=lambda t: jnp.asarray(0.1))
+    scm = SingleColumnModel.create(
+        physics_config=_baseline_cfg(), nlev=_RCE_NLEV, dt=_RCE_DT,
+        T_profile=_tropical_T_profile(), q_v_profile=_tropical_qv_profile(),
+        latitude_deg=0.0, forcing=forcing)
+    T0 = scm.state.T.data[0, 0, 0, -1]
+    final, _ = scm.run(nsteps=2)
+    assert float(final.T.data[0, 0, 0, -1]) > float(T0)

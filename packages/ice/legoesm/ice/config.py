@@ -14,6 +14,22 @@ from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
                                       NCAR_NEUTRAL_WIDTH)
 
 __param_spec__ = {
+    "SI3SwitchConfig": {
+        "scheme_key": "ice.si3_switches",
+        "excluded": {
+            "relative_width": "numerics: smoothing width of the RULE 5 ramps, not a closure",
+            "temperature_scale_K": "numerics: ramp width scale",
+            "flux_scale_W_m2": "numerics: ramp width scale",
+            "ice_switch_scale": "numerics: ramp width scale",
+            "cut_fraction_scale": "numerics: ramp width scale",
+            "full_cover_scale": "numerics: ramp width scale",
+            "snow_ramp_width_m": "numerics: surrogate-gradient width; forward value stays NEMO's hard test",
+            "thickness_scale_m": "numerics: ramp width scale",
+            "salinity_scale": "numerics: ramp width scale",
+            "melt_point_scale_K": "numerics: ramp width scale",
+        },
+        "params": {},
+    },
     "SI3ThermoConfig": {
         "scheme_key": "ice.si3_thermo",
         "excluded": {
@@ -270,27 +286,27 @@ class RidgingConfig(NamedTuple):
 
 
 class MeltPondConfig(NamedTuple):
-    """CESM-style melt-pond configuration.
+    """Melt-pond configuration for CESM default or SI3 ``pnd_LEV`` branch.
 
     Tracks pond area fraction (relative to ice area) and mean depth
-    per category.  Pond water is sourced from surface melt and
-    rainfall on bare ice; drains via simple linear Darcy parameter to
-    the ocean.  Pond freezing returns water to bulk ice volume.
+    per category.  When ``scheme == 'cesm'``, pond water is sourced from
+    surface melt and rainfall on bare ice and drains via linear Darcy;
+    when ``scheme == 'si3_lev'``, ``step_ponds`` dispatches to SI3
+    ``pnd_LEV`` in ``icethd_pnd.f90:369-550`` with explicit ``namthd_pnd``.
     """
     enabled: bool = False
     refreeze_threshold: float = constants.T_freeze  # Air T below which ponds refreeze [K]
-    # Smoothing half-width [K] for the refreeze ramp around the
-    # threshold (keeps the refreeze response differentiable — see
-    # step_ponds).  Smaller → sharper, CICE-like cutoff.
+    # Smoothing half-width [K] for the refreeze ramp around the threshold
+    # (keeps the refreeze response differentiable — see step_ponds).
     refreeze_width_K: float = 0.5
     drainage_timescale_s: float = 86400.0  # Drainage e-folding time [s] (1 day)
     pond_to_ice_max_area: float = 0.6    # Cap pond fraction per category
     depth_to_area_ratio: float = 0.8     # Volume → area conversion (CICE)
-    # Minimum snow depth that blocks pond formation [m].  Snow
-    # thinner than this is treated as transparent to surface melt
-    # water so deposition / patchy snow does not lock out pond
-    # capture.  CICE uses ~5 mm.
+    # Minimum snow depth that blocks pond formation [m], ~5 mm in CICE.
+    # Thinner snow is treated as transparent to surface melt water.
     snow_block_threshold: float = 5.0e-3
+    scheme: str = "cesm"                 # "cesm" or "si3_lev"
+    namthd_pnd: SI3PondConfig | None = None
 
 
 class SI3ThermoConfig(NamedTuple):
@@ -311,13 +327,13 @@ class SI3ThermoConfig(NamedTuple):
     flushing: bool = True
     ponds: bool = False
     lateral_melt: bool = False
-
+    namthd_da: SI3LateralMeltConfig | None = None  # lateral_melt=True needs it
 
 def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
     """Reject unsupported SI3 selector mixtures before any tendency runs."""
 
     if config.thermo_scheme != "si3_bl99":
-        return
+        return _validate_si3_orca2_o1_config(config) or _validate_si3_lev_pond_config(config)
     wanted = SI3ThermoConfig()
     if config.si3 != wanted:
         raise ValueError(
@@ -343,6 +359,46 @@ def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
         raise ValueError("invalid SI3 C1D identity: " + "; ".join(conflicts))
 
 
+def validate_si3_lane_thermo_config(config: "SeaIceConfig") -> "SeaIceConfig":
+    """Resolve and validate the SI3 lane identity used by its literal step."""
+
+    if config.thermo_scheme != "si3_bl99":
+        raise ValueError("the SI3 lane requires thermo_scheme='si3_bl99'")
+    if config.si3.lateral_melt and config.si3.namthd_da is None:
+        config = config._replace(
+            si3=config.si3._replace(
+                namthd_da=_SI3_NAMELIST_ICE_REF_DEFAULTS["namthd_da"]
+            )
+        )
+    if not config.si3.lateral_melt and config.si3.namthd_da is not None:
+        config = config._replace(si3=config.si3._replace(namthd_da=None))
+    wanted = SI3ThermoConfig(
+        lateral_melt=config.si3.lateral_melt,
+        namthd_da=config.si3.namthd_da,
+    )
+    if config.si3 != wanted:
+        raise ValueError(
+            "the SI3 lane supports only the resolved source-literal "
+            f"identity {wanted!r}; got {config.si3!r}"
+        )
+    if config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG:
+        raise ValueError(
+            "the SI3 lane requires the NEMO 5.0.2 phycst/EOS constant set"
+        )
+    conflicts = []
+    if config.n_categories != 1:
+        conflicts.append("n_categories must be 1")
+    if config.ponds.enabled:
+        conflicts.append("ponds.enabled must be False")
+    if config.ridging.enabled:
+        conflicts.append("ridging is inert in the C1D thermodynamic column")
+    if config.dynamics != "none" or config.transport != "none":
+        conflicts.append("dynamics and transport must both be 'none' in C1D")
+    if conflicts:
+        raise ValueError("invalid SI3 lane C1D identity: " + "; ".join(conflicts))
+    return config
+
+
 def validate_si3_bulk_config(config: "SeaIceConfig") -> None:
     """Reject mixtures outside the ORCA1 constant-coefficient ice identity.
 
@@ -360,12 +416,51 @@ def validate_si3_bulk_config(config: "SeaIceConfig") -> None:
         conflicts.append("Cd_ice=Ch_ice=Ce_ice must be ORCA1's 1e-3")
     if config.emissivity_ice != constants.emissivity_ice_nemo:
         conflicts.append("emissivity_ice must be NEMO sbc_phy emiss_i")
+    if any(not width >= 0.0 for width in config.si3_switches):
+        conflicts.append("si3_switches widths and scales must be >= 0")
     if config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG:
         conflicts.append("NEMO SI3 physical-constant set is required")
     if config.n_categories != 1 or config.ponds.enabled:
         conflicts.append("only jpl=1 with ln_pnd=.false. is certified")
     if conflicts:
         raise ValueError("invalid NEMO SI3 bulk identity: " + "; ".join(conflicts))
+
+
+class SI3SwitchConfig(NamedTuple):
+    """C1 ramp widths of the SI3 surface ports (RULE 5; ``sea_ice._nemo_si3_*``, ``si3_surface``).
+
+    Each ramp is ``relative_width x scale`` wide; ``relative_width = 0.0`` is
+    NEMO's hard form.  The ports have no driver lane yet, so only the Goff
+    floor (``bulk_scheme="nemo_si3_constant"``) reads this from a run today.
+
+    KNOWN DIFFERENCE (RULE 5): NEMO's switches are hard; the smooth default
+    differs from it by at most 0.034 W/m2 in qsr and 3.1e-4 in albedo over the
+    tier-4 ORCA1 record, per case in ``si3_smooth_gaps.npz``; mass terms do not
+    change.  ``relative_width = 0.0`` recovers NEMO.
+    """
+
+    relative_width: float = 0.01         # [-] user rule 2026-10-27
+    temperature_scale_K: float = 1.0     # [K] votes W3-W8
+    flux_scale_W_m2: float = 1.0         # [W/m2]; heat contents use dt x this
+    # Fraction scales set by the tier-4 ORCA1 budget sweep (votes X1-X2): with
+    # scale 1 the ramps moved qsb/fhld/qlead in hundreds of cells by O(100 W/m2).
+    ice_switch_scale: float = 1.0e-10    # [-] epsi10
+    cut_fraction_scale: float = 1.0e-3   # [-] qlead landfast "packed" cut
+    full_cover_scale: float = 1.0e-10    # [-] epsi10
+    # Snow-free test h_s == 0 [m]: the forward value is NEMO's hard test in
+    # every mode (user ruling 3a); in smooth mode the gradient is that of the
+    # surrogate 1 - C1(h_s / width) (straight-through).  0.0 = no surrogate
+    # (zero gradient).  2e-4 m = 0.01 x snow_cover_depth_nemo (vote Y1).
+    snow_ramp_width_m: float = 2.0e-4
+    # SI3 column port (bitz_lipscomb, sweep votes Z1-Z20): thickness floors and
+    # the BL99 minimum conduction thickness, salinity bounds, and the
+    # melting-point bounds of ice temperature (vote Z17: 1e-3 K at 0.01).
+    thickness_scale_m: float = 1.0e-3    # [m]
+    salinity_scale: float = 1.0          # [g/kg]
+    melt_point_scale_K: float = 0.1      # [K]
+
+
+SI3_HARD_SWITCHES = SI3SwitchConfig(relative_width=0.0)
 
 
 class SeaIceConfig(NamedTuple):
@@ -522,6 +617,7 @@ class SeaIceConfig(NamedTuple):
     # way, and this comment replaces two claims that could not both be true.
     thermo_scheme: str = "zero_layer"
     si3: SI3ThermoConfig = SI3ThermoConfig()
+    si3_switches: SI3SwitchConfig = SI3SwitchConfig()
     ice_constants: IceConstantsConfig = IceConstantsConfig()
     # NEMO distinguishes the Dalton (Ce) and Stanton (Ch) coefficients even
     # when ORCA1 makes them equal.
@@ -533,3 +629,207 @@ class SeaIceConfig(NamedTuple):
     large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
     large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
     large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
+    # Optional ORCA2 5-category 10+5-layer SI3 state configuration (`thermo_scheme='si3_orca2_o1'`).
+    si3_orca2: SI3ORCA2StateConfig | None = None
+    # Select CORE-II's exact precipitation closure (pond runoff, untracked
+    # snowfall, and the post-thermo cover reported to the coupler).  Disable
+    # only in a NEMO-comparison config that requires the legacy paths.
+    core2_precipitation_closure: bool = True
+    # Frozen O17 full-deck composition card.  Kept opaque here to avoid a
+    # config -> dynamics -> config import cycle; the dispatcher checks its
+    # concrete SI3O17Card contract before use.
+    si3_o17: object | None = None
+
+
+from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig  # noqa: E402,F401
+
+
+def _validate_si3_orca2_o1_config(config: "SeaIceConfig") -> None:
+    """Validate rung-O1 ORCA2 SI3 configuration (`thermo_scheme='si3_orca2_o1'`)."""
+    if config.thermo_scheme not in {"si3_orca2_o1", "si3_orca2_o2"}:
+        return
+    if config.thermo_scheme == "si3_orca2_o2" and config.si3_orca2 is None:
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o2' requires an explicit "
+            "SI3ORCA2StateConfig; O2 does not infer deck values"
+        )
+    orca2_cfg = (
+        config.si3_orca2
+        if config.si3_orca2 is not None
+        else SI3ORCA2StateConfig()
+    )
+    if not isinstance(orca2_cfg, SI3ORCA2StateConfig):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o1' requires config.si3_orca2 to be "
+            "SI3ORCA2StateConfig or None"
+        )
+    if (
+        config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG
+        or orca2_cfg.ice_constants != NEMO_SI3_CONSTANTS_CONFIG
+    ):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o1' requires the NEMO 5.0.2 phycst/EOS "
+            "constant set on both SeaIceConfig.ice_constants and "
+            "SI3ORCA2StateConfig.ice_constants"
+        )
+    conflicts = []
+    if config.thermo_scheme == "si3_orca2_o1" and (
+        orca2_cfg.ln_icedyn or orca2_cfg.ln_icethd
+    ):
+        conflicts.append(
+            "ln_icedyn and ln_icethd must both be False at rung O1 "
+            "(icestp.F90:167,199; active dynamics/thermo enter at rungs O4-O16 and O17/C0-C4)"
+        )
+    if (
+        config.thermo_scheme == "si3_orca2_o2"
+        and orca2_cfg.ln_icedyn
+        and config.si3_o17 is None
+    ):
+        conflicts.append(
+            "ln_icedyn must be False on the O2/O15/O16 state-and-finalization entry"
+        )
+    if config.dynamics != "none" or config.transport != "none":
+        conflicts.append("dynamics and transport must both be 'none' at rung O1")
+    if conflicts:
+        raise ValueError("invalid SI3 ORCA2 O1 identity: " + "; ".join(conflicts))
+
+
+def build_si3_orca2_o1_config(
+    si3_orca2: SI3ORCA2StateConfig | None = None,
+) -> SeaIceConfig:
+    """Return the rung-O1 ORCA2 SI3 state/restart/aggregation `SeaIceConfig`."""
+    cfg = si3_orca2 if si3_orca2 is not None else SI3ORCA2StateConfig()
+    return SeaIceConfig(
+        thermo_scheme="si3_orca2_o1",
+        si3_switches=SI3_HARD_SWITCHES,
+        ice_constants=cfg.ice_constants,
+        si3_orca2=cfg,
+    )
+
+
+def build_si3_orca2_o2_config(
+    si3_orca2: SI3ORCA2StateConfig,
+) -> SeaIceConfig:
+    """Return the rung-O2 ORCA2 SI3 scalar initial state + SSH `SeaIceConfig`."""
+    if not isinstance(si3_orca2, SI3ORCA2StateConfig):
+        raise TypeError("O2 requires an explicit SI3ORCA2StateConfig")
+    cfg = si3_orca2
+    return SeaIceConfig(
+        thermo_scheme="si3_orca2_o2",
+        si3_switches=SI3_HARD_SWITCHES,
+        ice_constants=cfg.ice_constants,
+        si3_orca2=cfg,
+    )
+
+
+def build_si3_orca2_o17_config(card: object) -> SeaIceConfig:
+    """Return the frozen full-production O17 config; no selector is inferred."""
+    from legoesm.ice.si3_o17 import SI3O17Card
+
+    if not isinstance(card, SI3O17Card):
+        raise TypeError("O17 requires an explicit SI3O17Card")
+    if card.core2_precipitation_closure is not False:
+        raise ValueError("O17 freezes core2_precipitation_closure=False")
+    cfg = SeaIceConfig(
+        dynamics="none",
+        transport="none",
+        thermo_scheme="si3_orca2_o2",
+        si3_switches=card.surface.switches,  # one source: the step computes with card.surface
+        ice_constants=card.constants,
+        si3_orca2=card.state,
+        core2_precipitation_closure=False,
+        si3_o17=card,
+    )
+    _validate_si3_orca2_o1_config(cfg)
+    return cfg
+
+
+class SI3LateralMeltConfig(NamedTuple):
+    """Resolved ``&namthd_da`` values read by ``ice_thd_da``."""
+
+    rn_beta: float
+    rn_dmin: float
+
+
+_SI3_NAMELIST_ICE_REF_DEFAULTS = {
+    # NEMO 5.0.2 cfgs/SHARED/namelist_ice_ref:179,183.
+    "namthd_da": SI3LateralMeltConfig(rn_beta=1.0, rn_dmin=8.0),
+}
+
+
+class SI3PondConfig(NamedTuple):
+    """``&namthd_pnd`` values read by ``ice_thd_pnd`` (``namelist_ice_ref:223-227``); no defaults."""
+
+    rn_himin: float
+    rn_apnd_min: float
+    rn_apnd_max: float
+    rn_pnd_flush: float
+    ln_pnd_lids: bool
+
+
+def _validate_si3_lev_pond_config(config: "SeaIceConfig") -> None:
+    """Reject combining ``ponds.scheme='si3_lev'`` with stages that do not yet carry ``a_ip, v_ip[, v_il]`` (``pond_area, pond_depth[, h_il]``) as NEMO does."""
+    if not config.ponds.enabled:
+        if config.ponds.scheme != "cesm":
+            raise ValueError(
+                "config.ponds.scheme must be 'cesm' when config.ponds.enabled is False"
+            )
+        return
+    if config.ponds.scheme not in ("cesm", "si3_lev"):
+        raise ValueError(
+            f"Unknown MeltPondConfig.scheme={config.ponds.scheme!r}; expected 'cesm' or 'si3_lev'"
+        )
+    if config.ponds.scheme == "cesm":
+        if config.ponds.namthd_pnd is not None:
+            raise ValueError(
+                "step_ponds(scheme='cesm') does not accept namthd_pnd; "
+                "set MeltPondConfig.scheme='si3_lev'"
+            )
+        return
+    if not isinstance(config.ponds.namthd_pnd, SI3PondConfig):
+        raise ValueError(
+            "step_ponds(scheme='si3_lev') requires MeltPondConfig.namthd_pnd "
+            "to be an explicit SI3PondConfig; no defaults"
+        )
+    if config.itd_remap not in ("simple", "lipscomb2001", "none"):
+        raise ValueError(
+            f"Unknown config.itd_remap={config.itd_remap!r}; expected "
+            "'simple', 'lipscomb2001', or 'none'."
+        )
+    pnd_qty = (
+        "a_ip, v_ip, v_il (pond_area, pond_depth, h_il)"
+        if config.ponds.namthd_pnd.ln_pnd_lids
+        else "a_ip, v_ip (pond_area, pond_depth)"
+    )
+    missing_stages: list[str] = []
+    if config.dynamics != "none" or config.transport != "none":
+        missing_stages.append(
+            f"advection (dynamics={config.dynamics!r}, transport={config.transport!r}; "
+            f"does not carry {pnd_qty} as NEMO rung O4 Prather advection ice_dyn_adv_pra does)"
+        )
+    if config.n_categories > 1 and config.itd_remap != "none":
+        if config.itd_remap != "lipscomb2001":
+            missing_stages.append(
+                f"ITD remap (itd_remap={config.itd_remap!r}; does not carry {pnd_qty} as NEMO rung O13 ice_itd_rem does)"
+            )
+        elif config.si3_orca2 is None:
+            missing_stages.append(
+                "exact O13 ITD remap (requires explicit config.si3_orca2 for "
+                "jpl/nn_icesal/HFN bounds; deck values are not inferred)"
+            )
+    elif config.n_categories == 1 and config.itd_remap == "lipscomb2001":
+        missing_stages.append(
+            f"ITD remap (itd_remap={config.itd_remap!r}; does not carry {pnd_qty} as NEMO rung O13 ice_itd_rem does)"
+        )
+    if config.ridging.enabled:
+        missing_stages.append(
+            f"ridging (ridging.enabled=True; does not carry {pnd_qty} as NEMO rung O6 ice_dyn_rdgrft does)"
+        )
+    if missing_stages:
+        raise ValueError(
+            f"MeltPondConfig(scheme='si3_lev', ln_pnd_lids={config.ponds.namthd_pnd.ln_pnd_lids}) "
+            f"cannot be combined with stages that do not yet carry {pnd_qty} as NEMO does; "
+            "missing stage(s): " + "; ".join(missing_stages) + ". Run thermodynamics-only O12 "
+            "composition (dynamics='none', transport='none', ridging.enabled=False, and "
+            f"itd_remap='none' when n_categories > 1) until rungs O4/O6/O13 carry {pnd_qty}."
+        )

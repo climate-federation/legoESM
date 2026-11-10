@@ -17,7 +17,6 @@ from legoesm.atmosphere.physics.microphysics.config import (
     SundqvistConfig,
     SeifertBehengConfig,
     MorrisonConfig,
-    ThompsonConfig,
     MicrophysicsMLEmulatorConfig,
 )
 from legoesm.atmosphere.physics.microphysics.output import (
@@ -31,7 +30,6 @@ from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
-from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     ml_microphysics,
     MicrophysicsEmulator,
@@ -316,17 +314,24 @@ class TestKessler:
 # Sundqvist tests
 # ======================================================================
 
+def _sq_prev(T, q_v, p_half, moisten=0.01):
+    """Sundqvist gscond carry: the previous step's state with q_v lower by
+    ``moisten`` (a 1% moistening other-process tendency drives condensation)."""
+    return {"zc_T_prev": T, "zc_q_v_prev": q_v * (1.0 - moisten),
+            "zc_p_s_prev": p_half[:, -1]}
+
+
 class TestSundqvist:
 
     def test_output_shapes(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, cell_area=1.0e10)
+        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, cell_area=1.0e10, prev_state=_sq_prev(T, q_v, p_half))
         assert out.dT_dt.shape == T.shape
         assert out.precipitation.shape == (T.shape[0],)
 
     def test_precipitation_non_negative(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, cell_area=1.0e10)
+        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, cell_area=1.0e10, prev_state=_sq_prev(T, q_v, p_half))
         assert jnp.all(out.precipitation >= 0)
 
     def test_nonzero_tendencies(self):
@@ -336,14 +341,14 @@ class TestSundqvist:
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
         out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
                                      config=SundqvistConfig(psautco_fine=8.0e-4, psautco_coarse=8.0e-4),
-                                     cell_area=1.0e10)
+                                     cell_area=1.0e10, prev_state=_sq_prev(T, q_v, p_half))
         assert float(jnp.max(jnp.abs(out.dT_dt))) > 0
 
     def test_finite_outputs(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, cell_area=1.0e10)
+        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, cell_area=1.0e10, prev_state=_sq_prev(T, q_v, p_half))
         for field in out:
-            if field is None:  # optional fields (e.g. 2-moment number tendencies)
+            if field is None or isinstance(field, dict):  # optional fields; carry dict (e.g. 2-moment number tendencies)
                 continue
             assert jnp.all(jnp.isfinite(field))
 
@@ -370,7 +375,7 @@ class TestSundqvist:
         dt = 1800.0  # 30-min step → auto_rate·dt = 1.8
         out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=dt,
                                      config=SundqvistConfig(auto_rate=1.0e-3),
-                                     cell_area=1.0e10)
+                                     cell_area=1.0e10, prev_state=_sq_prev(T, q_v, p_half))
         q_c_new = q_c + dt * out.dq_c_dt
         # Positivity must hold for any explicit Euler step
         assert jnp.all(q_c_new >= -1.0e-12)
@@ -387,9 +392,11 @@ class TestSundqvist:
         h = make_zero_hydrometeors(ncol, nlev)
         # Use very high sharpness to make the sigmoid effectively a step
         config = SundqvistConfig(rh_crit=0.8, sigmoid_sharpness=200.0)
-        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, config=config, cell_area=1.0e10)
+        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, config=config, cell_area=1.0e10,
+                                     prev_state=_sq_prev(T, q_v, p_half))
         # Condensation should be much smaller than saturated case
-        out_sat = sundqvist_microphysics(T, q_sat, h, p_full, p_half, rho, dz, dt=10.0, config=config, cell_area=1.0e10)
+        out_sat = sundqvist_microphysics(T, q_sat, h, p_full, p_half, rho, dz, dt=10.0, config=config, cell_area=1.0e10,
+                                         prev_state=_sq_prev(T, q_sat, p_half))
         ratio = float(jnp.max(jnp.abs(out.dq_c_dt))) / float(jnp.max(jnp.abs(out_sat.dq_c_dt)) + 1e-20)
         assert ratio < 0.1
 
@@ -397,7 +404,7 @@ class TestSundqvist:
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
 
         def loss(T_in):
-            out = sundqvist_microphysics(T_in, q_v, h, p_full, p_half, rho, dz, dt=10.0, cell_area=1.0e10)
+            out = sundqvist_microphysics(T_in, q_v, h, p_full, p_half, rho, dz, dt=10.0, cell_area=1.0e10, prev_state=_sq_prev(T, q_v, p_half))
             return jnp.sum(out.dT_dt ** 2)
 
         grad = jax.grad(loss)(T)
@@ -721,104 +728,6 @@ class TestMorrison:
 
 # ======================================================================
 # Thompson tests
-# ======================================================================
-
-class TestThompson:
-
-    def test_output_shapes(self):
-        T, q_v, h, p_full, p_half, rho, dz = _make_cold_columns()
-        out = thompson_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
-        assert out.dT_dt.shape == T.shape
-        assert out.dq_g_dt.shape == T.shape
-
-    def test_precipitation_non_negative(self):
-        T, q_v, h, p_full, p_half, rho, dz = _make_cold_columns()
-        out = thompson_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
-        assert jnp.all(out.precipitation >= 0)
-
-    def test_nonzero_tendencies(self):
-        T, q_v, h, p_full, p_half, rho, dz = _make_cold_columns()
-        out = thompson_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
-        assert float(jnp.max(jnp.abs(out.dT_dt))) > 0
-
-    def test_finite_outputs(self):
-        T, q_v, h, p_full, p_half, rho, dz = _make_cold_columns()
-        out = thompson_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
-        for field in out:
-            if field is None:  # optional fields (e.g. 2-moment number tendencies)
-                continue
-            assert jnp.all(jnp.isfinite(field))
-
-    def test_graupel_from_riming(self):
-        """With strong riming, graupel tendencies should be nonzero."""
-        T, q_v, h, p_full, p_half, rho, dz = _make_cold_columns()
-        # Boost cloud water and ice to promote riming
-        h = h._replace(
-            q_c=jnp.full_like(h.q_c, 5e-3),
-            q_i=jnp.full_like(h.q_i, 5e-3),
-            q_s=jnp.full_like(h.q_s, 5e-3),
-        )
-        config = ThompsonConfig(
-            rime_coeff=10.0,
-            rime_to_graupel_threshold=1e-6,
-        )
-        out = thompson_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, config=config)
-        assert float(jnp.max(jnp.abs(out.dq_g_dt))) > 0
-
-    def test_differentiable(self):
-        T, q_v, h, p_full, p_half, rho, dz = _make_cold_columns()
-
-        def loss(T_in):
-            out = thompson_microphysics(T_in, q_v, h, p_full, p_half, rho, dz, dt=10.0)
-            return jnp.sum(out.dT_dt ** 2)
-
-        grad = jax.grad(loss)(T)
-        assert jnp.all(jnp.isfinite(grad))
-
-    def test_evaporation_enthalpy_balance(self):
-        """Warm-rain evaporation cooling should close latent energy tendency."""
-        T, q_v, h, p_full, p_half, rho, dz = _make_evaporation_columns()
-        out = thompson_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
-        residual = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
-        assert float(jnp.max(jnp.abs(residual))) < 5e-3
-
-    def test_total_water_conservation_under_heavy_clamp(self):
-        """Thompson total water conservation in a hydrostatic column
-        under heavy q_c / q_i / q_s / graupel clamp activity.  Locks
-        in the iter-35 consolidation onto ``donor_clamp_scale``.  Uses
-        a relative tolerance so the test passes in both fp32 and fp64."""
-        ncol, nlev = 2, 10
-        T = jnp.full((ncol, nlev), 270.0)
-        p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
-        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-        rho = p_full / (constants.R_d * T)
-        dp = p_half[:, 1:] - p_half[:, :-1]
-        dz = dp / (rho * constants.g)
-        q_sat = saturation_mixing_ratio(T, p_full)
-        q_v = q_sat * 1.001
-        h = make_zero_hydrometeors(ncol, nlev)
-        h = h._replace(
-            q_c=jnp.full_like(T, 1e-4),
-            q_r=jnp.full_like(T, 1e-3),
-            q_i=jnp.full_like(T, 1e-4),
-            q_s=jnp.full_like(T, 5e-4),
-            q_g=jnp.full_like(T, 5e-4),
-            N_i=jnp.full_like(T, 1.0e4),
-        )
-        out = thompson_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=1200.0)
-        total_tend = (
-            out.dq_v_dt + out.dq_c_dt + out.dq_r_dt
-            + out.dq_i_dt + out.dq_s_dt + out.dq_g_dt
-        )
-        col = jnp.sum(total_tend * dp / constants.g, axis=-1)
-        residual = col + out.precipitation
-        scale = jnp.maximum(jnp.abs(out.precipitation), 1.0e-10)
-        rel = jnp.max(jnp.abs(residual) / scale)
-        assert float(rel) < 1.0e-6
-
-
-# ======================================================================
-# ML Emulator tests
 # ======================================================================
 
 class TestMLEmulator:

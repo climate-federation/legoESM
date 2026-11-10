@@ -36,22 +36,28 @@ from legoesm.grids.vertical import make_hybrid_levels
 
 NLEV = 8
 DT = 600.0
+# tiedtke (WRF port) has its own contract (pure-sigma omega, dynamics and
+# lagged turbulence inputs, cloud ice): test_tiedtke_pipeline_matches_bridge.
 PROFILE_SCHEMES = (
-    "tiedtke", "zhang_mcfarlane", "kain_fritsch", "emanuel", "bechtold",
+    "zhang_mcfarlane", "kain_fritsch", "emanuel", "bechtold",
 )
 
 
 @pytest.fixture(scope="module")
 def setup():
+    return _make_setup(NLEV)
+
+
+def _make_setup(nlev):
     grid = create_cubed_sphere(4)
-    sigma = make_hybrid_levels(NLEV)
+    sigma = make_hybrid_levels(nlev)
     s2 = grid.grid_lat.shape
-    s3 = (*s2, NLEV)
+    s3 = (*s2, nlev)
     rng = np.random.default_rng(0)
     # Moist, conditionally unstable tropical-ish column (index -1 = surface)
-    Tprof = 300.0 - 60.0 * np.linspace(0, 1, NLEV)[::-1]
+    Tprof = 300.0 - 60.0 * np.linspace(0, 1, nlev)[::-1]
     T = jnp.asarray(np.broadcast_to(Tprof, s3).copy() + rng.normal(0, 0.3, s3))
-    qprof = 18e-3 * np.exp(-3 * np.linspace(0, 1, NLEV)[::-1])
+    qprof = 18e-3 * np.exp(-3 * np.linspace(0, 1, nlev)[::-1])
     q_v = jnp.asarray(np.broadcast_to(qprof, s3) * (1 + 0.05 * rng.normal(0, 1, s3)))
     u = jnp.asarray(8.0 * np.sin(2 * np.asarray(grid.grid_lon))[..., None]
                     * np.ones(s3))
@@ -196,7 +202,7 @@ class TestCarryAndFiring:
         assert bool(jnp.all(jnp.isfinite(out2.conv_prog)))
 
     @pytest.mark.parametrize(
-        "scheme", ["tiedtke", "zhang_mcfarlane", "kain_fritsch", "bechtold"],
+        "scheme", ["zhang_mcfarlane", "kain_fritsch", "bechtold"],
     )
     def test_scheme_fires_on_unstable_column(self, setup, scheme):
         grid, sigma, f, _ = setup
@@ -261,62 +267,57 @@ class TestMicrophysicsWiring:
         assert float(jnp.max(jnp.abs(out.dT_dt))) > 0.0
 
 
-def _tiedtke_step_pe(grid, sigma, f, precip_efficiency):
-    """One tiedtke pipeline step with a given convective rain-split efficiency
-    (microphysics='none', so surface precip == the in-updraft convective rain)."""
-    config = ExperimentConfig(
-        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
-        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
-        convection="tiedtke", radiation="none", microphysics="none",
-        convective_precip_efficiency=precip_efficiency,
-    )
-    config.validate_strict()
-    pipe = build_physics_pipeline(grid, sigma, config)
-    return pipe.physics_step_no_rad(
-        f["T"], f["p_s"], f["q_v"], f["q_c"], f["q_r"], None,
-        f["u"], f["v"], f["sst"], f["sic"], f["lat"], DT,
-        f["z3"], f["z2"], f["z2"], f["z2"], f["z2"], f["z2"])
+def test_tiedtke_pipeline_matches_bridge():
+    """WRF Tiedtke through the driver pipeline and through the hydrostatic
+    bridge, on the same columns and inputs (pure-sigma coordinate: the port's
+    omega is diagnosed by sigma continuity): heating, drying and the cumulus
+    friction the pipeline now applies to the resolved winds agree to
+    round-off, and the scheme fires (heating and CMT non-zero)."""
+    from legoesm.grids.vertical import create_sigma_coordinate
+    # 30 levels: the 8-level module column never triggers the WRF scheme
+    # (its lowest layer is ~1 km deep; probed, ldcum=0 for every forcing)
+    NLEV = 30
+    grid, _, f, state = _make_setup(NLEV)
+    sigma = create_sigma_coordinate(NLEV, sigma_top=0.02)
+    s3 = f["T"].shape
+    ncol = int(np.prod(f["p_s"].shape))
+    lev = jnp.arange(NLEV) >= NLEV - 4               # low-level convergence
+    dqdyn = jnp.broadcast_to(jnp.where(lev, 3.0e-8, 0.0), s3)
+    turb = jnp.zeros(s3)
+    evap = jnp.full(f["p_s"].shape, 3.0e-5)
+    z3 = f["z3"]
 
+    def step(scheme):
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
+            dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+            convection=scheme, radiation="none", microphysics="none",
+            turbulence="louis",   # tiedtke reads its lagged qvpblten / qfx
+        )
+        config.validate_strict()
+        pipe = build_physics_pipeline(grid, sigma, config)
+        return pipe.physics_step_no_rad(
+            f["T"], f["p_s"], f["q_v"], f["q_c"], f["q_r"], None,
+            f["u"], f["v"], f["sst"], f["sic"], f["lat"], DT,
+            z3, f["z2"], f["z2"], f["z2"], f["z2"], f["z2"], q_i=z3,
+            dq_v_dt_dyn=dqdyn, turb_dq_v_prev=turb, evap_sfc_prev=evap)
 
-def test_convective_rain_reaches_surface_precip_832(setup):
-    """#832: Tiedtke SPLITS detrained condensate via ``precip_efficiency`` into
-    anvil cloud (``dq_c_conv_dt`` -> q_c) and in-updraft RAIN (``dq_r_conv_dt``).
-    The pipeline previously consumed ONLY ``dq_c_conv_dt``, so the rain fraction
-    vanished from the water budget (surface precip near zero) while its
-    condensation latent heat stayed in ``dT_dt`` -> the upper-tropospheric warm
-    drift #832 reports.  The fix (a) wires ``ExperimentConfig.
-    convective_precip_efficiency`` into ``TiedtkeConfig.precip_efficiency`` (the
-    field was dead) and (b) precipitates the in-updraft rain in the pipeline.
-
-    ``microphysics='none'``, so the ONLY possible surface precip is that
-    convective rain.  With the split ON it must be positive; with it OFF (the
-    legacy path) it is identically zero (the rain is trapped in q_c) — pinning
-    BOTH directions so the test is non-vacuous.
-    """
-    grid, sigma, f, _state = setup
-
-    out = _tiedtke_step_pe(grid, sigma, f, 0.7)
-    precip = np.asarray(out.precip)
-    assert np.all(np.isfinite(precip)), "convective-rain precip has non-finite cells"
-    total = float(np.sum(np.maximum(precip, 0.0)))
-    assert total > 0.0, (
-        "tiedtke in-updraft rain (dq_r_conv_dt) did not reach surface precip with "
-        "precip_efficiency=0.7 + microphysics='none' — the #832 dropped tendency "
-        "(or the dead convective_precip_efficiency wiring) is back"
-    )
-    # Physical rate, not a blow-up: a single convecting column << ~86 mm/day.
-    assert float(np.max(precip)) < 1.0e-3, (
-        f"convective-rain precip unphysically large: max={float(np.max(precip)):.3e}"
-    )
-
-    # Split OFF (precip_efficiency=0): no rain species is produced, so with
-    # microphysics='none' the convective condensate is trapped in q_c and surface
-    # precip is identically zero — the legacy behaviour, byte-preserved.
-    out0 = _tiedtke_step_pe(grid, sigma, f, 0.0)
-    assert float(np.sum(np.maximum(np.asarray(out0.precip), 0.0))) == 0.0, (
-        "with precip_efficiency=0 the convective rain split must be OFF (no "
-        "dq_r_conv_dt), so surface precip stays zero under microphysics='none'"
-    )
+    base, out = step("none"), step("tiedtke")
+    bridge_fn = make_convection_physics(
+        ConvectionConfig(scheme="tiedtke"), model_type="hydrostatic", dt=DT)
+    st = state._replace(tracers={**state.tracers,
+                                 "q_i": Field(z3, name="q_i", dims=state.T.dims)})
+    ps = SimpleNamespace(conv_prog_profile=jnp.zeros((ncol, NLEV)),
+                         dyn_tendency_qv=dqdyn, turb_tendency_qv=turb,
+                         evap_sfc=evap)
+    res = bridge_fn(st, grid, sigma, ps)
+    tend = res[0] if isinstance(res, tuple) else res
+    for pipe_x, bridge_x in ((out.dT_dt - base.dT_dt, tend.dT_dt.data),
+                             (out.du_dt - base.du_dt, tend.du_dt.data),
+                             (out.dv_dt - base.dv_dt, tend.dv_dt.data)):
+        scale = float(jnp.max(jnp.abs(bridge_x)))
+        assert scale > 0.0, "tiedtke did not fire / no cumulus friction"
+        assert float(jnp.max(jnp.abs(pipe_x - bridge_x))) <= 1e-12 + 1e-9 * scale
 
 
 def _bechtold_step_pe(grid, sigma, f, precip_efficiency):
@@ -454,3 +455,95 @@ def test_pipeline_stateless_gwd_composite_runs_and_sums(setup):
     du_composite = out_c.du_dt - out_n.du_dt
     du_sum = (out_h.du_dt - out_n.du_dt) + (out_m.du_dt - out_n.du_dt)
     assert jnp.allclose(du_composite, du_sum, atol=1e-10)
+
+
+@pytest.mark.parametrize("scheme,ccn", [("thompson", False), ("morrison", False),
+                                        ("p3", False), ("seifert_beheng", False),
+                                        ("morrison", True)])
+def test_pipeline_numbers_match_bridge(scheme, ccn):
+    """Each double-moment scheme through the driver pipeline and through the
+    hydrostatic bridge on the same columns: the pipeline converts its
+    per-mass N_c/N_r carry to the schemes' per-volume numbers and back, as
+    the bridge does, so the rain-number tendency agrees and is non-zero
+    (thompson: vote Y1b; the others fed the raw carry until this fix).
+    thompson also refuses a carry without the full registry (vote Y2a)."""
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig,
+        MorrisonConfig,
+    )
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        make_microphysics_physics,
+    )
+    NLEV = 30
+    grid, _, f, state = _make_setup(NLEV)
+    sigma = create_sigma_coordinate(NLEV, sigma_top=0.02)
+    z3 = f["z3"]
+    # A saturated 20-level rain layer (rain survives the step, so the number
+    # response is non-linear in N_r and a wrong conversion does not cancel)
+    # with a non-zero droplet number (vote U2a).
+    from legoesm.thermo import saturation_mixing_ratio
+    low = jnp.arange(NLEV) >= NLEV - 20
+    q_v = jnp.where(low, saturation_mixing_ratio(
+        f["T"], sigma.sigma_full * f["p_s"][..., None]), f["q_v"])
+    q_c = jnp.broadcast_to(jnp.where(low, 1.0e-4, 0.0), z3.shape)
+    q_r = jnp.broadcast_to(jnp.where(low, 3.0e-4, 0.0), z3.shape)
+    n_r = jnp.broadcast_to(jnp.where(low, 2.0e4, 0.0), z3.shape)   # per kg
+    n_c = jnp.broadcast_to(jnp.where(low, 1.0e8, 0.0), z3.shape)   # per kg
+    config = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        convection="none", radiation="none", microphysics=scheme,
+        # morrison's default warm rain needs CLUBB's relvar (not on this lane)
+        **({"morrison_warm_rain_scheme": "kk2000"} if scheme == "morrison" else {}),
+        # aerosol-CCN specified N_c: already per volume, must pass through
+        # unconverted on both lanes (GLM review)
+        **({"nc_from_aerosol": True, "aerosol_forcing": "external"} if ccn else {}),
+    )
+    config.validate_strict()
+    pipe = build_physics_pipeline(grid, sigma, config)
+
+    def step(**kw):
+        return pipe.physics_step_no_rad(
+            f["T"], f["p_s"], q_v, q_c, q_r, None,
+            f["u"], f["v"], f["sst"], f["sic"], f["lat"], DT,
+            z3, f["z2"], f["z2"], f["z2"], f["z2"], f["z2"], **kw)
+
+    ncol = int(np.prod(f["p_s"].shape))
+    # non-uniform per-layer AOD, column 0.3 (GLM final review)
+    w_aod = jnp.linspace(0.2, 1.8, NLEV)
+    aod = jnp.broadcast_to(0.3 * w_aod / jnp.sum(w_aod), (ncol, NLEV))
+    full = dict(q_i=z3, q_s=z3, q_g=z3, N_c=n_c, N_r=n_r, N_i=z3,
+                **({"aerosol_od": aod} if ccn else {}))
+    out = step(**full)
+    bridge = make_microphysics_physics(
+        MicrophysicsConfig(scheme=scheme,
+                           morrison=MorrisonConfig(warm_rain_scheme="kk2000",
+                                                   nc_from_aerosol=ccn)),
+        model_type="hydrostatic", dt=DT)
+    d3 = state.T.dims
+    tr = {k: Field(x, name=k, dims=d3) for k, x in (
+        ("q_v", q_v), ("q_c", q_c), ("q_r", q_r), ("q_i", z3),
+        ("q_s", z3), ("q_g", z3), ("N_c", n_c), ("N_r", n_r), ("N_i", z3))}
+    tend = bridge(state._replace(tracers=tr), grid, sigma,
+                  forcing={"aerosol_od": aod} if ccn else None)
+    for pipe_x, ref, what in (
+            (out.dN_r_dt, tend.tracer_tendencies["N_r"].data, "dN_r"),
+            (out.dq_r_dt, tend.tracer_tendencies["q_r"].data, "dq_r"),
+            (out.dq_c_dt, tend.tracer_tendencies["q_c"].data, "dq_c"),
+            (out.precip, tend.precip.data, "precip")):
+        scale = float(jnp.max(jnp.abs(ref)))
+        assert scale > 0.0, f"no {what}"
+        assert float(jnp.max(jnp.abs(pipe_x - ref))) <= 1e-9 * scale, what
+    if ccn:      # the activated number actually drives the answer
+        tend0 = bridge(state._replace(tracers=tr), grid, sigma,
+                       forcing={"aerosol_od": 3.0 * aod})
+        assert not np.allclose(np.asarray(tend0.tracer_tendencies["q_c"].data),
+                               np.asarray(out.dq_c_dt), rtol=1e-6, atol=0.0)
+        out3 = step(**{**full, "aerosol_od": 3.0 * aod})   # and on the pipeline
+        np.testing.assert_allclose(np.asarray(out3.dq_c_dt),
+                                   np.asarray(tend0.tracer_tendencies["q_c"].data),
+                                   rtol=1e-9, atol=1e-30)
+    if scheme == "thompson":
+        with pytest.raises(ValueError, match="N_i"):
+            step(**{**full, "N_i": None})

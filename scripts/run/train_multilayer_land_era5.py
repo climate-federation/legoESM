@@ -170,6 +170,14 @@ _LAM_LEBIAS_MON = 0.3
 # huge-but-finite gradient would otherwise dominate the global-norm clip.  See
 # _drop_nan_grad_cells.
 _GRAD_NORM_CAP = 1.0e6
+# Land surface scheme fitted: "simple_seb" (the baked tables' scheme, built here) or
+# "two_leaf" (the production AMIP tile, built by the driver's own constructor).
+_SURFACE_SCHEME = "simple_seb"
+# Two-leaf mode: weight of the leaf-emissivity prior (mean over PFTs of the squared
+# departure from the scheme's scalar epsf, in units of 0.01).  Emissivity is weakly
+# identifiable from skin temperature; codex/GLM/Claude vote 2026-11-07 (median of 30/10/1).
+_LAM_EPS = 10.0
+_EPS_PRIOR_UNIT = 0.01
 
 
 # --------------------------------------------------------------------------- #
@@ -239,7 +247,11 @@ BOUNDS_EXT = dict(
     elev_sw_grad=(0.0, 1.2e-4),     # SW-down elevation gradient [1/m] (thinner air aloft)
     elev_lw_lapse=(0.0, 6.0e-2),    # LW-down elevation lapse [W/m2/m] (colder air aloft)
     glac_ice_alb=(0.15, 0.45),      # exposed ablation-zone glacier-ice albedo (dark ice)
-    snow_zenith=(0.0, 0.6))         # BATS solar-zenith snow brightening weight (gap 3)
+    snow_zenith=(0.0, 0.6),         # BATS solar-zenith snow brightening weight (gap 3)
+    # --- Two-leaf canopy mode (--surface-scheme two_leaf), dominant-PFT per column ---
+    pft_can_vis=(0.02, 0.15),       # snow-free canopy visible band albedo
+    pft_can_nir=(0.15, 0.45),       # snow-free canopy near-infrared band albedo
+    pft_epsf=(0.94, 0.99))          # leaf longwave emissivity
 
 
 def constrain_ext(p: dict) -> dict:
@@ -561,6 +573,203 @@ def forward_ml(cp, data):
     return Tsum / spm, Asum / jnp.maximum(Wsum, 1e-6), W_sm, Lsum / spm
 
 
+# --------------------------------------------------------------------------- #
+# Two-leaf canopy mode: the PRODUCTION AMIP land tile                         #
+# --------------------------------------------------------------------------- #
+# The land config, per-column canopy parameters and prescribed carbon state come
+# from the driver's own constructor (``build_multilayer_land_tile``) applied to a
+# resolved AMIP ``experiment_config.json``, and the seasonal canopy parameters from
+# the production per-step updater at each month's mid-day.  Trainable: per-PFT
+# snow-free canopy band albedo (VIS, NIR) and leaf emissivity, mapped to columns by
+# the DOMINANT PFT (the production LAI / Vcmax convention).  Albedo target: MODIS
+# snow-free band albedo (EXTPAR ALUVD / ALNID) at the sample point, glacier cells
+# excluded.  The config's per-column arrays ride the data dict (so mini-batches
+# slice them); its static leaves live here.
+_TL_CFG = {}
+
+
+def _tl_split_cfg(cfg, cfg_minus_one, ncol: int) -> list:
+    """Per-column leaves = those whose leading length follows the column count
+    (compared with the same tile built on one column fewer), so a static table
+    that happens to have ``ncol`` rows is never sliced."""
+    leaves, treedef = jax.tree_util.tree_flatten(cfg)
+    other, treedef2 = jax.tree_util.tree_flatten(cfg_minus_one)
+    if treedef != treedef2:
+        raise ValueError("land tile config structure depends on the column count")
+    col = [i for i, (x, y) in enumerate(zip(leaves, other))
+           if getattr(x, "ndim", 0) >= 1 and x.shape[0] == ncol
+           and getattr(y, "ndim", 0) >= 1 and y.shape[0] == ncol - 1]
+    _TL_CFG.update(treedef=treedef, leaves=leaves, col=col,
+                   epsf=float(cfg.surface_scheme.epsf))
+    return [jnp.asarray(leaves[i]) for i in col]
+
+
+def _tl_cfg(cols):
+    leaves = list(_TL_CFG["leaves"])
+    for i, a in zip(_TL_CFG["col"], cols):
+        leaves[i] = a
+    return jax.tree_util.tree_unflatten(_TL_CFG["treedef"], leaves)
+
+
+def _modis_at(path: str, lat_rad, lon_deg):
+    """MODIS snow-free (VIS, NIR) band albedo (12, ncol) at the 0.25 deg cell holding
+    each sample point; fill values -> NaN."""
+    import xarray as xr
+    with xr.open_dataset(path) as ds:
+        lat = np.asarray(ds["lat"]); lon = np.asarray(ds["lon"]) % 360.0
+        i = np.abs(lat[:, None] - np.rad2deg(lat_rad)[None, :]).argmin(0)
+        d = np.abs(lon[:, None] - (np.asarray(lon_deg) % 360.0)[None, :])
+        j = np.minimum(d, 360.0 - d).argmin(0)
+        out = []
+        for k in ("ALUVD", "ALNID"):
+            a = np.asarray(ds[k].values, dtype=np.float64)[:, i, j] / 100.0
+            out.append(np.where((a > 0.0) & (a < 1.0), a, np.nan))
+    return out
+
+
+def attach_two_leaf(data: dict, amip_config: str, modis_path: str,
+                    cover_year: float) -> dict:
+    from types import SimpleNamespace
+    from legoesm.driver.config import load_experiment_config
+    from legoesm.driver.model_driver import build_multilayer_land_tile
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+    cfgx = load_experiment_config(amip_config)
+    lat = np.asarray(data["lat"]); lon = np.deg2rad(np.asarray(data["lon"]))
+    ncol = lat.size
+    if ncol < 2:
+        raise SystemExit("two-leaf mode needs at least 2 land cells")
+    area = np.asarray(data["cell_area"])
+    tile = build_multilayer_land_tile(
+        cfgx, lat, lon, SimpleNamespace(latCell=lat, lonCell=lon, grid_area=area))
+    if not isinstance(tile["cfg"].surface_scheme, TwoLeafCanopyConfig):
+        raise SystemExit(f"{amip_config} does not run the two-leaf canopy")
+    tile_m1 = build_multilayer_land_tile(
+        cfgx, lat[:-1], lon[:-1],
+        SimpleNamespace(latCell=lat[:-1], lonCell=lon[:-1], grid_area=area[:-1]))
+    smap = tile["surface_map"]
+    fg = np.asarray(smap["glacier_frac"])
+    upd = tile["params_update_factory"]()
+    lps = [upd(jnp.full(ncol, 0.2), jnp.asarray(float(_MONTH_DOY[m])),
+               jnp.asarray(float(cover_year)))[0] for m in range(12)]
+    lp12 = jax.tree.map(lambda *xs: jnp.stack(xs), *lps)
+    dom = np.asarray(lps[0].pft_dom).astype(int)
+    vis, nir = _modis_at(modis_path, lat, np.asarray(data["lon"]))
+    ok = np.isfinite(vis) & np.isfinite(nir) & (fg == 0.0)[None, :]
+    data = dict(data)
+    # The tile's own surface map (the resolved config's CLM surfdata) for every
+    # field the two-leaf forward and loss read; production's dominant PFT for the
+    # per-PFT terms.
+    data.update(
+        fg=jnp.asarray(fg), fc=jnp.asarray(np.asarray(smap["theta_fc"])),
+        dom_onehot=jnp.asarray(np.eye(_N_PFT)[dom]),
+        rz_w=jnp.asarray(_root_zone_weights(tile["cfg"].soil_grid)),
+        tl_cfg_cols=_tl_split_cfg(tile["cfg"], tile_m1["cfg"], ncol),
+        tl_carbon=tile["carbon"],
+        tl_lp=lp12, tl_dom=jnp.asarray(np.eye(_N_PFT)[dom]),
+        alb_vis_t=jnp.asarray(np.where(ok, vis, 0.0)),
+        alb_nir_t=jnp.asarray(np.where(ok, nir, 0.0)),
+        alb_ok_tl=jnp.asarray(ok.astype(np.float64)))
+    return data
+
+
+def tl_init_params(data: dict) -> dict:
+    """Canopy band albedo starts at the dominant-PFT mean of today's soil bands
+    (so the first iterate is near the production albedo), clipped into the bounds;
+    a PFT dominant nowhere takes the all-cell mean.  Leaf emissivity starts at the
+    scheme's scalar value."""
+    oh = np.asarray(data["tl_dom"])
+    out = {}
+    for key, band in (("pft_can_vis", "ALB_VIS"), ("pft_can_nir", "ALB_NIR")):
+        b = np.asarray(getattr(data["tl_lp"], band)).mean(0)
+        n = oh.sum(0)
+        m = np.where(n > 0, (oh * b[:, None]).sum(0) / np.maximum(n, 1), b.mean())
+        out[key] = jnp.asarray(_inv_ext(m, key))
+    out["pft_epsf"] = jnp.asarray(_inv_ext(np.full(_N_PFT, _TL_CFG["epsf"]), "pft_epsf"))
+    return out
+
+
+def forward_tl(cp, data):
+    """Monthly T_sfc, all-sky albedo, root-zone water, latent heat and the
+    snow-free VIS / NIR band albedo (12, ncol).  ``cp=None`` runs production
+    (no canopy band albedo, scalar leaf emissivity)."""
+    from legoesm.land.soil_albedo import rewet_soil_bands
+    n = data["lat"].shape[0]
+    cfg = _tl_cfg(data["tl_cfg_cols"])
+    hyd = cfg.hydraulics
+    cs0 = data["tl_carbon"]
+    lp12 = data["tl_lp"]
+    if cp is not None:
+        dom = data["tl_dom"]
+        b12 = lambda v: jnp.broadcast_to(v, (12, n))
+        lp12 = lp12._replace(ALB_VIS_CAN=b12(dom @ cp["pft_can_vis"]),
+                             ALB_NIR_CAN=b12(dom @ cp["pft_can_nir"]),
+                             epsf=b12(dom @ cp["pft_epsf"]))
+    lp_ann = jax.tree.map(lambda x: x.mean(0), lp12)
+    st0 = init_multilayer_land_state(n, cfg, T_init=280.0)
+    st0 = jax.tree.map(lambda x: x.astype(jnp.float64), st0)
+    theta0 = jnp.clip(data["fc"].astype(jnp.float64),
+                      hyd.theta_r[:, 0] + 1e-3, hyd.theta_sat[:, 0] - 1e-3)
+    theta_col = jnp.broadcast_to(theta0[:, None], st0.theta_soil.shape)
+    st0 = st0._replace(
+        T_soil=jnp.broadcast_to(data["t0"].astype(jnp.float64)[:, None], st0.T_soil.shape),
+        theta_soil=theta_col, psi_soil=psi_from_theta(theta_col, hyd))
+    nh, spm, dt = _NH, _SPM, _DT
+    fstack = jax.tree.map(lambda *xs: jnp.stack(xs), *data["forc"])
+    nstep = 12 * spm
+    f64 = lambda t: jax.tree.map(
+        lambda x: x.astype(jnp.float64)
+        if jnp.issubdtype(jnp.asarray(x).dtype, jnp.floating) else x, t)
+
+    def step(s, f, lp):
+        s2, r, _ = step_multilayer_land(s, f, cfg, 1.0, dt, lat=data["lat"], doy=15.0,
+                                        land_params=lp, carbon_state=cs0)
+        return f64(s2), r
+
+    f_ann = jax.tree.map(lambda x: x.mean((0, 1)), fstack)
+
+    @jax.checkpoint
+    def eq_body(s, _):
+        return step(s, f_ann, lp_ann)[0], None
+    st, _ = jax.lax.scan(eq_body, st0, None, length=_EQ_STEPS)
+    deep = st.theta_soil[:, _FREEZE_FROM:]
+    deep_psi = st.psi_soil[:, _FREEZE_FROM:]
+    rz_w = data["rz_w"]
+    W_sm = (st.theta_soil[:, :rz_w.shape[0]] * rz_w).sum(1) / rz_w.sum()
+    # Snow-free band albedo at the pinned top-layer water, through the land
+    # step's own band construction (rewet + canopy blend, no snow layering).
+    sf = rewet_soil_bands(lp12, st.theta_soil[:, 0])
+
+    @jax.checkpoint
+    def body(carry, k):
+        s, Tsum, Asum, Wsum, Lsum = carry
+        month = k // spm; hour = k % nh
+        f = jax.tree.map(lambda x: x[month, hour], fstack)
+        s2, r = step(s, f, jax.tree.map(lambda x: x[month], lp12))
+        s2 = s2._replace(
+            theta_soil=s2.theta_soil.at[:, _FREEZE_FROM:].set(deep),
+            psi_soil=s2.psi_soil.at[:, _FREEZE_FROM:].set(deep_psi))
+        _sw_w = jnp.maximum(f.sw_down, 0.0)
+        return (s2, Tsum.at[month].add(r.T_sfc), Asum.at[month].add(r.albedo * _sw_w),
+                Wsum.at[month].add(_sw_w), Lsum.at[month].add(r.lhflx)), None
+
+    z = lambda: jnp.zeros((12, n), dtype=st.T_soil.dtype)
+    (st, _, _, _, _), _ = jax.lax.scan(body, (st, z(), z(), z(), z()), jnp.arange(nstep))
+    (st, Tsum, Asum, Wsum, Lsum), _ = jax.lax.scan(
+        body, (st, z(), z(), z(), z()), jnp.arange(nstep))
+    return (Tsum / spm, Asum / jnp.maximum(Wsum, 1e-6), W_sm, Lsum / spm,
+            sf.ALB_VIS, sf.ALB_NIR)
+
+
+def _tl_albedo_mse(Av, An, data):
+    aw = data["w"][None, :] * data["alb_wt"] * data["alb_ok_tl"]
+    se = (Av - data["alb_vis_t"]) ** 2 + (An - data["alb_nir_t"]) ** 2
+    return 0.5 * jnp.sum(aw * se) / jnp.maximum(jnp.sum(aw), 1e-12)
+
+
+def _tl_eps_prior(cp):
+    return jnp.mean(((cp["pft_epsf"] - _TL_CFG["epsf"]) / _EPS_PRIOR_UNIT) ** 2)
+
+
 def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_tbias=None,
             lam_le=None, lam_tbias_mon=None, lam_lebias_mon=None):
     # weights default to the module globals (CLI-tunable) so the jitted
@@ -574,7 +783,11 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_
     lam_tbias_mon = _LAM_TBIAS_MON if lam_tbias_mon is None else lam_tbias_mon
     lam_lebias_mon = _LAM_LEBIAS_MON if lam_lebias_mon is None else lam_lebias_mon
     cp = constrain_ext(p)
-    T, A, W, L = forward_ml(cp, data)
+    two_leaf = _SURFACE_SCHEME == "two_leaf"
+    if two_leaf:
+        T, A, W, L, Av, An = forward_tl(cp, data)
+    else:
+        T, A, W, L = forward_ml(cp, data)
     w = data["w"][None, :]
     tmse = jnp.sum(w * (T - data["skt"]) ** 2) / jnp.sum(w) / 12
     # Albedo MSE is INSOLATION-weighted (area w x monthly SW): a polar-night month-cell
@@ -582,9 +795,12 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_
     # not enter the fit.  Falls back to uniform monthly weight if alb_wt is absent.
     # Broadcast to (12, ncol) so the numerator sum (over months x cells) matches the
     # denominator sum — else the uniform fallback under-counts the denominator 12x.
-    _awt = (w * data["alb_wt"] if "alb_wt" in data
-            else jnp.broadcast_to(w, A.shape))
-    amse = jnp.sum(_awt * (A - data["alb"]) ** 2) / jnp.maximum(jnp.sum(_awt), 1e-12)
+    if two_leaf:
+        amse = _tl_albedo_mse(Av, An, data)
+    else:
+        _awt = (w * data["alb_wt"] if "alb_wt" in data
+                else jnp.broadcast_to(w, A.shape))
+        amse = jnp.sum(_awt * (A - data["alb"]) ** 2) / jnp.maximum(jnp.sum(_awt), 1e-12)
     # soil moisture: model root-zone equilibrium vs ERA5 annual-mean swvl (0-28cm).
     # FINITE-MASKED: a diverged forward (NaN W) or a missing target must not poison the
     # loss/gradient via a NaN that survives the lam_sm weight (codex: 0*NaN == NaN).
@@ -633,6 +849,8 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_
     loss = (tmse + lam_alb * amse + lam_pft * ppft + lam_amp * samp + lam_sm * smse
             + lam_tbias * gbias ** 2 + lam_le * lemse
             + lam_tbias_mon * tbias_mon + lam_lebias_mon * lebias_mon)
+    if two_leaf:
+        loss = loss + _LAM_EPS * _tl_eps_prior(cp)
     return loss, (tmse, amse, ppft, samp, smse, gbias, lemse, tbias_mon, lebias_mon)
 
 
@@ -649,8 +867,13 @@ def _select_cells(data: dict, idx) -> dict:
     for k, v in data.items():
         if k == "forc":
             out[k] = [jax.tree.map(lambda x: x[:, idx], f) for f in v]
-        elif k in ("skt", "alb", "alb_wt", "le"):   # (12, ncol) monthly targets/weights
+        elif k in ("skt", "alb", "alb_wt", "le",       # (12, ncol) monthly targets/weights
+                   "alb_vis_t", "alb_nir_t", "alb_ok_tl"):
             out[k] = v[:, idx]
+        elif k == "tl_lp":                              # (12, ncol) monthly params
+            out[k] = jax.tree.map(lambda x: x[:, idx], v)
+        elif k in ("tl_cfg_cols", "tl_carbon"):         # per-column leaves, axis 0
+            out[k] = jax.tree.map(lambda x: x[idx], v)
         elif k == "rz_w":
             out[k] = v
         else:
@@ -715,8 +938,77 @@ def _metrics(cp: dict, data: dict):
     return tr, tb, ar, ab
 
 
+def tl_per_pft_errors(cp, data) -> dict:
+    """Two-leaf mode: per-cell annual skin-T bias and per dominant PFT the monthly
+    skin-T RMSE / bias and the MODIS VIS / NIR albedo RMSE (glacier and fill cells
+    out of the albedo).  ``cp=None`` = production."""
+    T, _, _, _, Av, An = jax.jit(forward_tl)(cp, data)
+    w = np.asarray(data["w"]); oh = np.asarray(data["tl_dom"])
+    dT = np.asarray(T - data["skt"])                                  # (12, ncol)
+    ok = np.asarray(data["alb_ok_tl"])
+    dv = (np.asarray(Av) - np.asarray(data["alb_vis_t"])) * ok
+    dn = (np.asarray(An) - np.asarray(data["alb_nir_t"])) * ok
+    rows = {}
+    for p in range(_N_PFT):
+        c = oh[:, p] > 0
+        if not c.any():
+            continue
+        wc = w[c]; okc = ok[:, c] * wc[None, :]
+        nalb = max(float(okc.sum()), 1e-12)
+        rows[p] = dict(
+            n=int(c.sum()),
+            t_rmse=float(np.sqrt((wc * dT[:, c] ** 2).sum() / wc.sum() / 12)),
+            t_bias=float((wc * dT[:, c]).sum() / wc.sum() / 12),
+            vis_rmse=float(np.sqrt((okc * dv[:, c] ** 2).sum() / nalb)),
+            nir_rmse=float(np.sqrt((okc * dn[:, c] ** 2).sum() / nalb)))
+    return dict(rows=rows, t_bias_cell=dT.mean(0),
+                vis_bias_cell=np.where(ok.sum(0) > 0, dv.sum(0) / np.maximum(ok.sum(0), 1), np.nan),
+                nir_bias_cell=np.where(ok.sum(0) > 0, dn.sum(0) / np.maximum(ok.sum(0), 1), np.nan))
+
+
+def fd_check(p: dict, data: dict, key: str, idx: int,
+             hs=(1e-2, 1e-3, 1e-4)) -> float:
+    """Ratio of the analytic loss gradient to central finite differences for one
+    raw-parameter component (should be ~1 and stable in h), with the per-term
+    finite differences so a mismatch can be located."""
+    names = ("tmse", "amse", "ppft", "samp", "smse", "gbias", "lemse", "tbias_mon",
+             "lebias_mon")
+    vg = jax.jit(jax.value_and_grad(lambda q: loss_ml(q, data), has_aux=True))
+    fl = jax.jit(lambda q: loss_ml(q, data))
+    (_, aux0), g = vg(p)
+    ga = float(g[key][idx])
+    gt = jax.jit(jax.grad(lambda q: loss_ml(q, data)[1][0]))(p)
+    print(f"# FD check {key}[{idx}]: analytic {ga:.6e} (tmse part {float(gt[key][idx]):.6e})",
+          flush=True)
+    ratio = float("nan")
+    for h in hs:
+        e = jnp.zeros_like(p[key]).at[idx].set(h)
+        lp, ap = fl({**p, key: p[key] + e})
+        lm, am = fl({**p, key: p[key] - e})
+        fd = (float(lp) - float(lm)) / (2 * h)
+        terms = " ".join(f"{n}={(float(a) - float(b)) / (2 * h):.3e}"
+                         for n, a, b in zip(names, ap, am))
+        ratio = ga / fd if fd else float("nan")
+        print(f"#   h={h:g}: FD {fd:.6e} ratio {ratio:.6f} | d/dp {terms}", flush=True)
+    return ratio
+
+
 def _report_test(tuned: dict, test_data: dict):
-    """Held-out generalisation: initial (CLM5) vs trained, on cells NEVER trained on."""
+    """Held-out generalisation: initial (CLM5) vs trained, on cells NEVER trained on.
+    Two-leaf mode: production vs trained, per dominant PFT."""
+    if _SURFACE_SCHEME == "two_leaf":
+        b = tl_per_pft_errors(None, test_data)["rows"]
+        a = tl_per_pft_errors({k: jnp.asarray(v) for k, v in tuned.items()},
+                              test_data)["rows"]
+        print(f"# HELD-OUT TEST ({int(test_data['lat'].shape[0])} cells), production -> "
+              "trained, per dominant PFT:", flush=True)
+        print("#  pft    n  skinT-RMSE K   skinT-bias K   VIS-RMSE        NIR-RMSE", flush=True)
+        for p in sorted(b):
+            print(f"#  {p:3d} {b[p]['n']:4d}  {b[p]['t_rmse']:5.2f}->{a[p]['t_rmse']:5.2f}"
+                  f"   {b[p]['t_bias']:+5.2f}->{a[p]['t_bias']:+5.2f}"
+                  f"   {b[p]['vis_rmse']:.4f}->{a[p]['vis_rmse']:.4f}"
+                  f"   {b[p]['nir_rmse']:.4f}->{a[p]['nir_rmse']:.4f}", flush=True)
+        return
     ti, tbi, ai, abi = _metrics(constrain_ext(init_ext_params()), test_data)
     tc, tbc, ac, abc = _metrics({k: jnp.asarray(v) for k, v in tuned.items()}, test_data)
     print(f"# HELD-OUT TEST ({int(test_data['lat'].shape[0])} cells, never trained):",
@@ -731,6 +1023,8 @@ def _inactive_keys() -> set:
     set (strict no-inert-parameters rule; everything left must carry gradient, gated
     by ``assert_no_inert`` on the first training step).  They are still baked into
     the config (frozen at init) so the forward and the saved JSON are complete."""
+    if _SURFACE_SCHEME == "two_leaf":
+        return set()            # the trainable set is exactly the two-leaf keys
     ks = {"pft_ch"} if _BULK_SCHEME == "most" else {"pft_z0"}
     if not _STOMATA_ON:
         ks |= {"pft_vcmax", "pft_g1", "pft_lcma"}
@@ -878,7 +1172,15 @@ def load_training_data(diurnal_npz: str, n_sub: int, seed: int = 0,
                                              replace=False)
     g = lambda k: D[k].reshape(12, nh, -1)[:, :, lidx][:, :, sub]       # (12, nh, ncol)
     _hours = np.asarray(D["hours"]) if "hours" in D else None
-    return _pack(g, latc[sub], cmap, sub, lonc=lonc[sub], hours=_hours, nh=nh)
+    data = _pack(g, latc[sub], cmap, sub, lonc=lonc[sub], hours=_hours, nh=nh)
+    # area [m2] of the regular lat-lon box each sampled point stands for
+    dlat = np.deg2rad(abs(float(lat1[1] - lat1[0])))
+    dlon = np.deg2rad(abs(float(lon1[1] - lon1[0])))
+    phi = np.asarray(data["lat"])
+    hi = np.clip(phi + dlat / 2, -np.pi / 2, np.pi / 2)
+    lo = np.clip(phi - dlat / 2, -np.pi / 2, np.pi / 2)
+    data["cell_area"] = jnp.asarray(constants.R_earth ** 2 * dlon * (np.sin(hi) - np.sin(lo)))
+    return data
 
 
 # --- Solar geometry (gap 3: real diurnal cos(zenith) for the zenith snow albedo) ---
@@ -901,6 +1203,15 @@ def _solar_cos_zenith(lat_rad, lon_deg, hours_utc, month) -> np.ndarray:
     mu = (np.sin(lat_rad)[None, :] * np.sin(delta)
           + np.cos(lat_rad)[None, :] * np.cos(delta) * np.cos(H))
     return np.maximum(mu, 0.0)
+
+
+def _root_zone_weights(soil_grid_cfg) -> np.ndarray:
+    """Each soil layer's overlap [m] with the top 0.28 m, so the model's depth-weighted
+    theta matches the ERA5 0-28 cm target on the same grid."""
+    grid = make_soil_grid(soil_grid_cfg)
+    dz = np.asarray(grid.dz); bot = np.cumsum(dz)
+    ov = np.clip(0.28 - (bot - dz), 0.0, dz)
+    return ov[:int((ov > 1e-9).sum())]
 
 
 def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
@@ -954,19 +1265,14 @@ def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
         sm = ((7.0 * sm1 + 21.0 * sm2) / 28.0).mean(0)       # (ncol,)
     except KeyError:
         sm = np.full(latc.shape[0], np.nan)
-    # model root-zone weights: each soil layer's overlap with the top 0.28 m, so the
-    # model's depth-weighted theta matches the ERA5 0-28cm target on the same grid.
-    _grid = make_soil_grid(SoilGridConfig(n_layers=_N_LAYERS, total_depth=_SOIL_DEPTH_M,
-                                          growth_factor=_SOIL_GROWTH))
-    _dz = np.asarray(_grid.dz); _bot = np.cumsum(_dz)
-    _ov = np.clip(0.28 - (_bot - _dz), 0.0, _dz)              # layer∩[0,0.28m]
-    _K = int((_ov > 1e-9).sum())
+    rz_w = _root_zone_weights(SoilGridConfig(
+        n_layers=_N_LAYERS, total_depth=_SOIL_DEPTH_M, growth_factor=_SOIL_GROWTH))
     # per-cell longitude [deg], SAME (subsampled/permuted) order as every other
     # field — plotters must use this, not a re-derived unpermuted index map
     lon = lonc if lonc is not None else np.zeros_like(latc)
     data = dict(forc=forc, lat=jnp.asarray(latc), lon=jnp.asarray(lon),
                 pft=jnp.asarray(pft),
-                sm=jnp.asarray(sm), rz_w=jnp.asarray(_ov[:_K]),
+                sm=jnp.asarray(sm), rz_w=jnp.asarray(rz_w),
                 fg=jnp.asarray(np.asarray(cmap["glacier_frac"])[sub]),
                 wp=jnp.asarray(np.asarray(cmap["theta_wp"])[sub]),
                 fc=jnp.asarray(np.asarray(cmap["theta_fc"])[sub]),
@@ -990,6 +1296,7 @@ def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
 
 def main():
     global _BULK_SCHEME, _STOMATA_ON, _ELEV_BANDS_ON, _LAM_AMP, _LAM_SM, _LAM_PFT, _LAM_ALB
+    global _SURFACE_SCHEME, _LAM_EPS
     global _LAM_TBIAS, _LAM_LE, _LAM_TBIAS_MON, _LAM_LEBIAS_MON
     jax.config.update("jax_enable_x64", True)
     ap = argparse.ArgumentParser(description=__doc__)
@@ -1069,7 +1376,28 @@ def main():
                          "results/land_tuned_allgaps.json), inverse-constrained to raw "
                          "and layered over the baked defaults; overrides --init-from so a "
                          "re-tune REFINES the current best instead of the baked prior")
+    ap.add_argument("--surface-scheme", choices=["simple_seb", "two_leaf"],
+                    default=_SURFACE_SCHEME,
+                    help="'two_leaf' fits per-PFT canopy band albedo + leaf emissivity "
+                         "of the PRODUCTION AMIP land tile (needs --amip-config, "
+                         "--modis-albedo, --cover-year)")
+    ap.add_argument("--amip-config", default=None,
+                    help="resolved AMIP experiment_config.json the land tile is built from")
+    ap.add_argument("--modis-albedo", default=None,
+                    help="MODIS monthly snow-free band albedo (EXTPAR ALUVD/ALNID, %%)")
+    ap.add_argument("--cover-year", type=float, default=None,
+                    help="land-cover year for the seasonal canopy parameters")
+    ap.add_argument("--fd-check", nargs="+", default=None, metavar="KEY:IDX",
+                    help="before training, compare the analytic gradient of each "
+                         "KEY:IDX raw-parameter component with a central difference")
+    ap.add_argument("--lam-eps", type=float, default=_LAM_EPS,
+                    help="two-leaf: weight of the leaf-emissivity prior")
     args = ap.parse_args()
+    _SURFACE_SCHEME, _LAM_EPS = args.surface_scheme, args.lam_eps
+    two_leaf = _SURFACE_SCHEME == "two_leaf"
+    if two_leaf and None in (args.amip_config, args.modis_albedo, args.cover_year):
+        raise SystemExit("--surface-scheme two_leaf needs --amip-config, "
+                         "--modis-albedo and --cover-year")
     _BULK_SCHEME, _STOMATA_ON = args.bulk, not args.no_stomata
     _ELEV_BANDS_ON = args.elev_bands
     _LAM_AMP = args.lam_amp
@@ -1081,6 +1409,8 @@ def main():
     _LAM_PFT = args.lam_pft
     _LAM_ALB = args.lam_alb
     data = load_training_data(args.diurnal_npz, args.n_sub, args.seed, args.days)
+    if two_leaf:
+        data = attach_two_leaf(data, args.amip_config, args.modis_albedo, args.cover_year)
     # A missing LE field must not silently degrade the dual target to skin-T-only
     # (codex): the all-NaN fallback zeroes the LE term through the finite-mask.
     if _LAM_LE > 0.0 and not bool(np.isfinite(np.asarray(data["le"])).any()):
@@ -1098,7 +1428,8 @@ def main():
         print(f"# loaded {keep.size} keep-cells from {args.keep_file} (skip per-cell filter)",
               flush=True)
     elif args.keep_file:
-        keep = _drop_nan_grad_cells(data, init_ext_params())
+        keep = _drop_nan_grad_cells(
+            data, tl_init_params(data) if two_leaf else init_ext_params())
         np.save(args.keep_file, keep)
         data = _select_cells(data, keep); prefilter = False
         print(f"# computed + saved {keep.size}/{args.n_sub} keep-cells -> {args.keep_file}",
@@ -1110,13 +1441,24 @@ def main():
               f"{int(test_data['lat'].shape[0])} test (holdout {args.holdout:.0%}, "
               f"seed {args.seed})", flush=True)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    if args.init_json:
+    if two_leaf:
+        init_params = tl_init_params(data)
+        if args.init_json:
+            with open(args.init_json) as f:
+                init_params.update({k: jnp.asarray(_inv_ext(np.asarray(v, float), k))
+                                    for k, v in json.load(f).items() if k in init_params})
+    elif args.init_json:
         init_params = json_init_params(args.init_json)
         print(f"# warm-start: refining tuned checkpoint {args.init_json}", flush=True)
     else:
         init_params = baked_init_params() if args.init_from == "baked" else None
         if init_params is not None:
             print("# warm-start: refining the production baked multilayer params", flush=True)
+    if args.fd_check:
+        p0 = init_params if init_params is not None else init_ext_params()
+        for kk in args.fd_check:
+            k, i = kk.split(":")
+            fd_check(p0, data, k, int(i))
     tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out, clip=args.clip,
                   prefilter=prefilter, batch=args.batch, init_params=init_params)
     with open(args.out, "w") as f:

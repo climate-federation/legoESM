@@ -170,6 +170,69 @@ def positive_part_c1(x: jax.Array, sharpness: float) -> jax.Array:
     return jnp.where(hard, jnp.maximum(x, 0.0), smooth)
 
 
+def smooth_min_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
+    """C1 min(a, b), EXACT outside ``|a - b| >= width/2``; ``width = 0`` is ``jnp.minimum``.
+
+    Inside the band ``y = a - b + width/2`` in ``(0, width)`` it is
+    ``a - y**2 / (2 width)``: monotone in ``a`` (slope ``1 - y/width``), never
+    above ``min(a, b)`` and at most ``width/8`` below it (at ``a = b``).
+    Unlike ``x - positive_part_c1(x - b)`` it does not overshoot ``b``.
+    """
+    if width == 0:
+        return jnp.minimum(a, b)
+    y = a - b + 0.5 * width
+    inside = a - y * y / (2.0 * width)
+    return jnp.where(y <= 0.0, a, jnp.where(y >= width, b + 0.0 * a, inside))
+
+
+def smooth_max_c1(a: jax.Array, b: jax.Array, width: float) -> jax.Array:
+    """C1 max(a, b): ``-smooth_min_c1(-a, -b, width)``; ``width = 0`` is ``jnp.maximum``."""
+    if width == 0:
+        return jnp.maximum(a, b)
+    return -smooth_min_c1(-a, -b, width)
+
+
+def max_c1(a: jax.Array, b: jax.Array, sharpness: float) -> jax.Array:
+    """C1 ``max(a, b)`` that is EXACTLY ``a`` for ``a - b >= 1/s`` and ``b`` for ``a <= b``.
+
+    ``b + positive_part_c1(a - b, s)`` inside the band ``0 < a - b < 1/s``;
+    outside it the hard operand is returned unchanged (bitwise), so a floor
+    or cap that is inactive by more than ``1/s`` costs nothing.  Never above
+    ``max(a, b)``.  Exactly ``jnp.maximum`` at ``sharpness = inf``.
+    """
+    if _hard(sharpness):
+        return jnp.maximum(a, b)
+    d = a - b
+    return jnp.where(d * sharpness >= 1.0, a, b + positive_part_c1(d, sharpness))
+
+
+def min_c1(a: jax.Array, b: jax.Array, sharpness: float) -> jax.Array:
+    """C1 ``min(a, b)``, exact outside the band ``0 < b - a < 1/s``: ``-max_c1(-a, -b, s)``."""
+    if _hard(sharpness):
+        return jnp.minimum(a, b)
+    return -max_c1(-a, -b, sharpness)
+
+
+@jax.custom_jvp
+def straight_through(hard: jax.Array, soft: jax.Array) -> jax.Array:
+    """Forward value ``hard`` EXACTLY, derivative of ``soft`` (straight-through estimator).
+
+    A ``custom_jvp``: the primal is ``hard`` itself, so ``soft`` is dead code in
+    the forward pass and the compiled forward is the hard one bit for bit,
+    under jit too.  (The arithmetic form ``hard - (sg(soft) - soft)`` is exact
+    eagerly, but under jit on CPU it was measured to differ from ``hard`` at the
+    smallest subnormal snow depth and in the sign of zero downstream, and it
+    propagates a NaN ``soft`` into the forward value.)  The tangent is that of
+    ``soft``; ``hard`` carries none.
+    """
+    return hard
+
+
+@straight_through.defjvp
+def _straight_through_jvp(primals, tangents):
+    return primals[0], tangents[1]
+
+
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
     """Smooth approximation to |x|.
 

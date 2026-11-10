@@ -14,7 +14,7 @@ import pytest
 
 from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
-from legoesm.ice.config import SeaIceConfig
+from legoesm.ice.config import SI3PondConfig, SeaIceConfig
 from legoesm.ice.sea_ice import _thermo_v2
 
 SHAPE = (1, 1)
@@ -42,6 +42,32 @@ def _run(cfg, forcing, h_snow0=0.0, h0=2.0, conc0=0.9):
         full(0.0), full(0.0), forcing,
         full(constants.T_freeze_ocean), cfg, 1.0, DT,
     )
+
+
+def _run_lev(cfg, forcing, h_snow0=0.0):
+    full = lambda v: jnp.full(SHAPE, v)  # noqa: E731
+    return _thermo_v2(
+        full(2.0), full(265.0), full(0.9), full(h_snow0), full(5.0),
+        full(0.2), full(0.1), forcing,
+        full(constants.T_freeze_ocean), cfg, 1.0, DT, h_il=full(0.0),
+    )
+
+
+@pytest.mark.parametrize("closure", [False, True])
+@pytest.mark.parametrize("has_precip", [0.0, 1.0])
+@pytest.mark.parametrize("h_snow0", [0.0, 0.3])
+def test_level_ponds_take_no_rain_so_it_all_runs_off(closure, has_precip, h_snow0):
+    """``pnd_LEV`` fills from melt only (icethd_pnd.f90:454): rain leaves pond state alone."""
+    base = SeaIceConfig(core2_precipitation_closure=closure)
+    pond = SI3PondConfig(rn_himin=0.1, rn_apnd_min=0.15, rn_apnd_max=0.85, rn_pnd_flush=0.1, ln_pnd_lids=True)
+    cfg = base._replace(ponds=base.ponds._replace(enabled=True, scheme="si3_lev", namthd_pnd=pond))
+    rain = 2.0e-4
+    wet = _run_lev(cfg, _forcing(rain, 0.0, has_precip), h_snow0)
+    dry = _run_lev(cfg, _forcing(0.0, 0.0, has_precip), h_snow0)
+    for key in ("pond_area", "pond_depth", "h_il"):
+        assert float(wet[key][0, 0]) == float(dry[key][0, 0]), key
+    d_fw = float(wet["freshwater_to_ocean"][0, 0] - dry["freshwater_to_ocean"][0, 0])
+    assert d_fw == pytest.approx(rain * has_precip * float(wet["conc"][0, 0]), rel=1e-10, abs=1e-18)
 
 
 def _pond_kg_per_cell(out):

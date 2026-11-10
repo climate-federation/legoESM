@@ -1157,6 +1157,31 @@ class PhysicsPipeline:
             return_water=return_water,
         )
 
+    def _resolved_omega(self, u, v, p_s, ncol, nlev, winds_on_t_grid, who):
+        """Resolved omega [Pa/s, (ncol, nlev)] by full sigma continuity, for
+        the WRF ports (Tiedtke's omega, Thompson's w); refuses what it cannot
+        diagnose (staggered winds, hybrid coordinate, grid without a
+        divergence operator)."""
+        from legoesm.atmosphere.physics.convection.integration import (
+            diagnose_omega_columns_hydrostatic,
+        )
+        from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+        if not winds_on_t_grid:
+            raise ValueError(f"{who} needs cell-centre winds (omega)")
+        if isinstance(self._sigma_coord, HybridSigmaPressureCoordinate):
+            raise ValueError(
+                f"{who} needs omega, which is diagnosed by PURE-sigma "
+                "continuity; a hybrid coordinate would get a wrong omega")
+        omega = (None if self._grid is None else
+                 diagnose_omega_columns_hydrostatic(
+                     u, v, p_s, self._grid, self._sigma_coord, ncol, nlev,
+                     full_continuity=True))
+        if omega is None:
+            raise ValueError(
+                f"{who} needs the resolved pressure velocity, diagnosed on "
+                "the cubed-sphere and lat-lon grids only")
+        return omega
+
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
                             sw_up_toa, lw_up_toa, sw_down_toa,
@@ -1171,8 +1196,19 @@ class PhysicsPipeline:
                             tke=None, qke=None, gwd_spectrum=None,
                             w_land=None, snow=None, land_ml=None,
                             land_ml_params=None, cloud_fraction=None,
-                            T_ice_skin=None, cell_area=None):
+                            T_ice_skin=None, cell_area=None,
+                            dq_v_dt_dyn=None, turb_dq_v_prev=None,
+                            evap_sfc_prev=None, mynn_initflag=None):
         """Convection + microphysics + BL exchange with held radiation.
+
+        ``mynn_initflag`` (static bool, turbulence='mynn25' only): True on the
+        run's cold-start step (WRF MYNN-EDMF initflag), False on every other
+        (votes M3/N4/R1); fixed by :meth:`build_step_unified`.
+
+        ``dq_v_dt_dyn`` (this step's dynamics q_v tendency, grid shape) and
+        ``turb_dq_v_prev`` / ``evap_sfc_prev`` (the previous step's turbulence
+        q_v tendency and surface water flux) are WRF Tiedtke's ``qvften``,
+        ``qvpblten`` and ``qfx``; read only by ``convection='tiedtke'``.
 
         ``T_ice_skin`` (optional, per column, grid shape) replaces the scalar
         ``T_ice`` in every surface-temperature blend: the prognostic ice skin.
@@ -1271,6 +1307,7 @@ class PhysicsPipeline:
             diagnose_w_grid_columns_hydrostatic,
         )
         from legoesm.atmosphere.physics._shared import (
+            compute_heights_from_sigma,
             compute_moisture_convergence,
             moisture_convergence_supported,
         )
@@ -1570,37 +1607,58 @@ class PhysicsPipeline:
                     dt=dt, config=_conv_cfg,
                     u=u_conv_col, v=v_conv_col,
                 )
+            elif self._conv_scheme == "tiedtke":
+                # WRF Tiedtke port (same inputs as the hydrostatic bridge):
+                # qvften = this step's dynamics q_v tendency from the caller;
+                # qvpblten / qfx = the previous step's turbulence (it runs
+                # after convection here) riding the segment carry.
+                if (dq_v_dt_dyn is None or turb_dq_v_prev is None
+                        or evap_sfc_prev is None):
+                    raise ValueError(
+                        "convection='tiedtke' needs dq_v_dt_dyn, "
+                        "turb_dq_v_prev and evap_sfc_prev; this caller "
+                        "supplies "
+                        f"{[n for n, v in (('dq_v_dt_dyn', dq_v_dt_dyn), ('turb_dq_v_prev', turb_dq_v_prev), ('evap_sfc_prev', evap_sfc_prev)) if v is None]} "
+                        "as None")
+                _omega = self._resolved_omega(
+                    u, v, p_s, ad.ncol, nlev, _winds_on_t_grid,
+                    "convection='tiedtke'")
+                _z_full, _ = compute_heights_from_sigma(
+                    T_col, p_half_col, q_v_col)
+                conv_out, conv_prog_out = self.convection_fn(
+                    T_col, q_v_col, p_full_col, p_half_col,
+                    u_conv_col, v_conv_col, dt,
+                    geopotential=constants.g * _z_full,
+                    omega=_omega.astype(T_col.dtype),
+                    dq_v_dt_dyn=ad.flatten_3d(dq_v_dt_dyn),
+                    dq_v_dt_pbl=ad.flatten_3d(turb_dq_v_prev),
+                    surface_moisture_flux=ad.flatten_2d(evap_sfc_prev),
+                    land_frac=(ad.flatten_2d(self.f_land)
+                               if self.f_land is not None else None),
+                    sigma=jnp.broadcast_to(
+                        self._sigma_coord.sigma_full,
+                        (ad.ncol, nlev)).astype(T_col.dtype),
+                )
             elif _ctr.is_cmt_capable:
-                if _ctr.is_mc_consumer:
-                    # Tiedtke: CMT winds + moisture convergence.
-                    conv_out, conv_prog_out = self.convection_fn(
-                        T=T_col, q_v=q_v_col,
-                        p_full=p_full_col, p_half=p_half_col,
-                        u=u_conv_col, v=v_conv_col,
-                        conv_prog_profile=conv_prog,
-                        dt=dt, config=_conv_cfg,
-                        moisture_convergence=mc_col,
-                    )
-                else:
-                    # Zhang-McFarlane (CAM6): CMT winds, no MC kwarg; the
-                    # land fraction selects the c0 autoconversion
-                    # coefficient; the previous step's cloud-fraction carry
-                    # (CLUBB's PDF cloud fraction, None otherwise -> CAM's
-                    # (1 - cldfrc) = 1) feeds the rain evaporation; the
-                    # 40 hPa cap is fixed from the REFERENCE interfaces.
-                    conv_out, conv_prog_out = self.convection_fn(
-                        T=T_col, q_v=q_v_col,
-                        p_full=p_full_col, p_half=p_half_col,
-                        u=u_conv_col, v=v_conv_col,
-                        conv_prog_profile=conv_prog,
-                        dt=dt, config=_conv_cfg,
-                        land_frac=(
-                            ad.flatten_2d(self.f_land)
-                            if self.f_land is not None else None),
-                        cld_frac=(None if cloud_fraction is None
-                                  else cloud_fraction.reshape(T_col.shape)),
-                        pref_edge=self.sigma_half * constants.p_ref,
-                    )
+                # Zhang-McFarlane (CAM6): CMT winds, no MC kwarg; the
+                # land fraction selects the c0 autoconversion
+                # coefficient; the previous step's cloud-fraction carry
+                # (CLUBB's PDF cloud fraction, None otherwise -> CAM's
+                # (1 - cldfrc) = 1) feeds the rain evaporation; the
+                # 40 hPa cap is fixed from the REFERENCE interfaces.
+                conv_out, conv_prog_out = self.convection_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    u=u_conv_col, v=v_conv_col,
+                    conv_prog_profile=conv_prog,
+                    dt=dt, config=_conv_cfg,
+                    land_frac=(
+                        ad.flatten_2d(self.f_land)
+                        if self.f_land is not None else None),
+                    cld_frac=(None if cloud_fraction is None
+                              else cloud_fraction.reshape(T_col.shape)),
+                    pref_edge=self.sigma_half * constants.p_ref,
+                )
             elif _ctr.is_w_grid_consumer:
                 # Kain-Fritsch: resolved-w trigger.
                 conv_out, conv_prog_out = self.convection_fn(
@@ -1697,9 +1755,14 @@ class PhysicsPipeline:
             from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
             q_c_col = ad.flatten_3d(q_c)
             q_r_col = ad.flatten_3d(q_r)
-            rho_col = p_full_col / (constants.R_d * T_col)
-            dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
-            dz_col = dp_col / (rho_col * constants.g)
+            # the column bridges' moist (virtual-temperature) density and
+            # layer thickness (vote U1a; this lane used the dry p/(R_d T))
+            from legoesm.atmosphere.physics._shared import (
+                compute_layer_dz,
+                compute_rho,
+            )
+            rho_col = compute_rho(T_col, p_full_col, q_v_col)
+            dz_col = compute_layer_dz(T_col, p_half_col, q_v_col)
             _z = jnp.zeros_like(q_c_col)
             # Aerosol-CCN specified droplet number: under specified-Nc
             # (``predict_Nc=False`` — the N_c carry slot exists for
@@ -1786,12 +1849,50 @@ class PhysicsPipeline:
                 )
             else:
                 _sq_kw = self._sundqvist_kwargs(ad, q_i, cell_area)
+                from legoesm.atmosphere.physics._shared import (
+                    diagnose_grid_w_from_omega,
+                )
+                from legoesm.atmosphere.physics.microphysics.config import (
+                    ThompsonConfig,
+                )
+                from legoesm.atmosphere.physics.microphysics.integration import (
+                    number_per_mass_to_per_volume,
+                    number_per_volume_to_per_mass,
+                    require_thompson_tracers,
+                )
+                if isinstance(self.micro_config, ThompsonConfig):
+                    # the column bridges' full-registry refusal (vote W1a/Y2a)
+                    require_thompson_tracers("thompson", [
+                        k for k, x in (("q_v", q_v), ("q_c", q_c),
+                                       ("q_r", q_r), ("q_i", q_i),
+                                       ("q_s", q_s), ("q_g", q_g),
+                                       ("N_c", N_c), ("N_r", N_r),
+                                       ("N_i", N_i)) if x is not None])
+                    # WRF Thompson reads the resolved w (votes H2/J6)
+                    _sq_kw["w"] = diagnose_grid_w_from_omega(
+                        self._resolved_omega(
+                            u, v, p_s, ad.ncol, nlev, _winds_on_t_grid,
+                            "microphysics='thompson'"),
+                        T_col, p_full_col, q_v_col)
+                # The per-mass N_c/N_r carry <-> every scheme's per-volume
+                # numbers, with the column bridges' moist density (the
+                # bridges always did this; this lane fed the carry raw to
+                # every scheme but thompson).  The aerosol-CCN N_c is
+                # already per volume (as the bridges' activated field).
+                _rho_n = rho_col
+                hydrometeors = hydrometeors._replace(
+                    N_c=(hydrometeors.N_c if _nc_aer_specified else
+                         number_per_mass_to_per_volume(hydrometeors.N_c, _rho_n)),
+                    N_r=number_per_mass_to_per_volume(hydrometeors.N_r, _rho_n))
                 micro_out = self.micro_fn(
                     T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
                     p_full=p_full_col, p_half=p_half_col,
                     rho=rho_col, dz=dz_col, dt=dt,
                     config=self.micro_config, **_sq_kw,
                 )
+                micro_out = micro_out._replace(
+                    dN_c_dt=number_per_volume_to_per_mass(micro_out.dN_c_dt, _rho_n),
+                    dN_r_dt=number_per_volume_to_per_mass(micro_out.dN_r_dt, _rho_n))
             dT_dt_micro = ad.unflatten_3d(micro_out.dT_dt)
             dq_v_dt_micro = ad.unflatten_3d(micro_out.dq_v_dt)
             dq_c_dt = ad.unflatten_3d(micro_out.dq_c_dt)
@@ -1844,7 +1945,8 @@ class PhysicsPipeline:
             # detrained precipitation handed to the rain/snow species stays
             # in the column (IFS PSNDE)
             for _detr in (getattr(conv_out, "dq_r_detr_dt", None),
-                          getattr(conv_out, "dq_s_detr_dt", None)):
+                          getattr(conv_out, "dq_s_detr_dt", None),
+                          getattr(conv_out, "dq_i_conv_dt", None)):
                 if _detr is not None:
                     _bl_conv_q = _bl_conv_q + ad.unflatten_3d(_detr)
             _bl_conv = ledger_entry(_bl_conv_q, dT_dt_conv, p_s, _bl_dsigma,
@@ -1867,6 +1969,13 @@ class PhysicsPipeline:
         # column water removed equals the added precip (mass-conserving).
         if _ctr.detrains_to_cloud:
             dq_c_dt = dq_c_dt + dq_c_dt_conv
+            _dqi_conv = getattr(conv_out, "dq_i_conv_dt", None)
+            if _dqi_conv is not None:
+                if q_i is None:
+                    raise ValueError(
+                        "convection detrains cloud ice (WRF Tiedtke) but this "
+                        "run carries no q_i species")
+                dq_i_dt = dq_i_dt + ad.unflatten_3d(_dqi_conv)
             # #832: mass-flux schemes (bechtold/tiedtke) SPLIT the detrained
             # condensate by ``precip_efficiency``: ``dq_c_conv_dt`` = anvil cloud
             # (added to q_c above -> microphysics next step) and ``dq_r_conv_dt``
@@ -2064,6 +2173,11 @@ class PhysicsPipeline:
         # Momentum tendencies from turbulence and GWD
         du_dt = jnp.zeros(shape_3d, dtype=_sd)
         dv_dt = jnp.zeros(shape_3d, dtype=_sd)
+        if self._conv_scheme == "tiedtke":
+            # WRF Tiedtke cumulus friction (cududv, RUCUTEN/RVCUTEN) acts on
+            # the resolved winds, as in WRF.
+            du_dt = du_dt + ad.unflatten_3d(conv_out.du_dt_conv)
+            dv_dt = dv_dt + ad.unflatten_3d(conv_out.dv_dt_conv)
 
         # Prescribed surface MOMENTUM flux, bulk path: the coupler/ERA5 stress
         # ON THE ATMOSPHERE [Pa] accelerates the lowest layer — the sign
@@ -2222,19 +2336,35 @@ class PhysicsPipeline:
                 # codex review).  Seed via ``init_physics_state`` and
                 # feed the ``PhysicsOutput`` value back each step.
                 _energy_in = tke if self._turb_energy_field == "tke" else qke
+                _mynn = _is_mynn_kernel(self.turbulence_fn)
+                # WRF MYNN-EDMF carries (qke, qsq, el) packed (vote N1)
+                _e_shape = ((ad.ncol, 3, nlev) if _mynn else (ad.ncol, nlev))
                 if (_energy_in is None
-                        or tuple(_energy_in.shape) != (ad.ncol, nlev)):
+                        or tuple(_energy_in.shape) != _e_shape):
                     raise ValueError(
                         f"turbulence scheme carries prognostic "
                         f"{self._turb_energy_field!r} but the caller "
                         "passed "
                         f"{None if _energy_in is None else tuple(_energy_in.shape)} "
-                        f"(expected {(ad.ncol, nlev)}) — the carry would "
+                        f"(expected {_e_shape}) — the carry would "
                         "silently reseed every step (issue #405/#413). "
                         "Seed it with init_physics_state and thread the "
                         "updated PhysicsOutput value back."
                     )
                 _turb_kwargs[self._turb_energy_field] = _energy_in
+                if _mynn:
+                    # vote N5: moist density and moist hydrostatic heights
+                    # (this lane hands the other kernels dry ones; codex R3 r7)
+                    from legoesm.atmosphere.physics._shared import (
+                        compute_heights_from_sigma, compute_rho)
+                    _zf_m, _zh_m = compute_heights_from_sigma(
+                        T_col, p_half_col, q_v=q_v_col)
+                    _turb_kwargs.update(
+                        rho=compute_rho(T_col, p_full_col, q_v=q_v_col),
+                        z_full=_zf_m, z_half=_zh_m)
+                    _turb_kwargs.update(self._mynn_kwargs(
+                        ad, nlev, u, v, p_s, T_col, p_full_col, q_v_col, q_c,
+                        q_i, cell_area, _winds_on_t_grid, mynn_initflag))
                 turb_out, _energy_new = self.turbulence_fn(**_turb_kwargs)
                 if self._turb_energy_field == "tke":
                     tke_out = _energy_new
@@ -2246,6 +2376,11 @@ class PhysicsPipeline:
             dv_dt = dv_dt + ad.unflatten_3d(turb_out.dv_dt)
             dT_dt = dT_dt + ad.unflatten_3d(turb_out.dT_dt)
             dq_v_dt = dq_v_dt + ad.unflatten_3d(turb_out.dq_v_dt)
+            if _is_mynn_kernel(self.turbulence_fn):
+                # WRF MYNN-EDMF condensate (vote N6); q_i None = no ice
+                dq_c_dt = dq_c_dt + ad.unflatten_3d(turb_out.dq_c_dt)
+                if turb_out.dq_i_dt is not None:
+                    dq_i_dt = dq_i_dt + ad.unflatten_3d(turb_out.dq_i_dt)
             if getattr(turb_out, 'shflx', None) is not None:
                 shflx = ad.unflatten_2d(turb_out.shflx)
             if getattr(turb_out, 'lhflx', None) is not None:
@@ -2268,8 +2403,15 @@ class PhysicsPipeline:
         if self.budget_ledger:
             from legoesm.diagnostics.process_ledger import ledger_entry
             if turb_out is not None:
+                # every water species this lane applied: mynn25 also moves
+                # condensate (routed above), no other kernel's is routed here
+                _dq_turb = turb_out.dq_v_dt
+                if _is_mynn_kernel(self.turbulence_fn):
+                    _dq_turb = _dq_turb + turb_out.dq_c_dt
+                    if turb_out.dq_i_dt is not None:
+                        _dq_turb = _dq_turb + turb_out.dq_i_dt
                 _bl_turb = ledger_entry(
-                    ad.unflatten_3d(turb_out.dq_v_dt),
+                    ad.unflatten_3d(_dq_turb),
                     ad.unflatten_3d(turb_out.dT_dt),
                     p_s, _bl_dsigma, area=self._ledger_area)
             else:
@@ -2582,7 +2724,59 @@ class PhysicsPipeline:
                 turb_out.cloud_fraction if turb_out is not None else None),
             budget_ledger=_bl_out,
             sed_substeps_required=_sed_req,
+            turb_dq_v_dt=(
+                ad.unflatten_3d(turb_out.dq_v_dt)
+                if self._conv_scheme == "tiedtke" and turb_out is not None
+                else None),
         )
+
+    def _mynn_kwargs(self, ad, nlev, u, v, p_s, T_col, p_full_col, q_v_col,
+                     q_c, q_i, cell_area, winds_on_t_grid, initflag):
+        """WRF MYNN-EDMF lane inputs on the pipeline (as the hydrostatic
+        bridge's ``mynn_lane_kwargs``): w from full sigma-continuity omega,
+        q_c (required), q_i (None = no ice), dx from the cell area, xland
+        from the land fraction (None = water), the static initflag."""
+        from legoesm.atmosphere.physics.convection.integration import (
+            diagnose_omega_columns_hydrostatic)
+        from legoesm.atmosphere.physics._shared import (
+            diagnose_grid_w_from_omega)
+        from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+        if not isinstance(initflag, bool):
+            raise ValueError(
+                "turbulence='mynn25' needs build_step_unified(mynn_initflag="
+                f"True/False); got {initflag!r}")
+        if q_c is None:
+            raise ValueError(
+                "turbulence='mynn25' returns a cloud-water tendency; this "
+                "pipeline call carries no q_c")
+        if not winds_on_t_grid:
+            raise ValueError(
+                "turbulence='mynn25' needs cell-centre winds for omega")
+        if isinstance(self._sigma_coord, HybridSigmaPressureCoordinate):
+            raise ValueError(
+                "turbulence='mynn25' needs w, diagnosed by PURE-sigma "
+                "continuity; a hybrid coordinate would get a wrong omega")
+        omega = (None if self._grid is None else
+                 diagnose_omega_columns_hydrostatic(
+                     u, v, p_s, self._grid, self._sigma_coord, ad.ncol, nlev,
+                     full_continuity=True))
+        if omega is None:
+            raise ValueError(
+                "turbulence='mynn25' needs the resolved vertical velocity, "
+                "diagnosed on the cubed-sphere and lat-lon grids only")
+        area = self.grid_area if cell_area is None else cell_area
+        if area is None:
+            raise ValueError(
+                "turbulence='mynn25' needs the grid-cell area (dx)")
+        return dict(
+            w=diagnose_grid_w_from_omega(omega, T_col, p_full_col,
+                                         q_v_col).astype(T_col.dtype),
+            q_c=ad.flatten_3d(q_c),
+            q_i=None if q_i is None else ad.flatten_3d(q_i),
+            cell_area=ad.flatten_2d(jnp.asarray(area)),
+            land_frac=(None if self.f_land is None
+                       else ad.flatten_2d(jnp.asarray(self.f_land))),
+            initflag=initflag)
 
     def _toa_insolation(self, lat, lon, day_of_year, seconds_of_day, s_0):
         """Prescribed TOA incident shortwave [W/m^2] — the incoming solar the
@@ -3260,7 +3454,7 @@ class PhysicsPipeline:
 
     def build_step_unified(self, static_need_rad: bool | None = None,
                            rad_stop_gradient: bool = False,
-                           jit: bool = True):
+                           jit: bool = True, mynn_initflag=None):
         """Build a JIT-compiled unified physics step with radiation sub-cycling.
 
         ``rad_stop_gradient`` (radiation-as-forcing): wrap the radiation core's
@@ -3325,6 +3519,18 @@ class PhysicsPipeline:
             cond for callers that still gate radiation inline.
         """
         pipeline = self
+        # turbulence='mynn25': the cold-start build (True) or every other
+        # step (False), REQUIRED; any other scheme must not get it (N4/R1).
+        if _is_mynn_kernel(self.turbulence_fn):
+            if not isinstance(mynn_initflag, bool):
+                raise ValueError(
+                    "turbulence='mynn25' needs build_step_unified("
+                    "mynn_initflag=True) for the cold-start step and False "
+                    f"for every other; got {mynn_initflag!r}")
+        elif mynn_initflag is not None:
+            raise ValueError(
+                "mynn_initflag is the mynn25 cold-start switch; this "
+                "pipeline does not run mynn25")
 
         def step_unified(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
                          sst, sic, lat, lon,
@@ -3358,7 +3564,8 @@ class PhysicsPipeline:
                          conv_precip=None, land_ml=None, w_land=None,
                          snow=None, land_ml_params=None, cloud_fraction=None,
                          conv_precip_frozen=None, ice_T_skin=None,
-                         cell_area=None):
+                         cell_area=None, dq_v_dt_dyn=None,
+                         turb_dq_v_prev=None, evap_sfc_prev=None):
 
             if pipeline.ice_skin_prognostic and ice_T_skin is None:
                 raise ValueError(
@@ -3469,9 +3676,11 @@ class PhysicsPipeline:
                     sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     cell_area=cell_area,
+                    dq_v_dt_dyn=dq_v_dt_dyn, turb_dq_v_prev=turb_dq_v_prev,
+                    evap_sfc_prev=evap_sfc_prev,
                     w_land=w_land, snow=snow, land_ml=land_ml,
                     land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
-                    T_ice_skin=ice_T_skin,
+                    T_ice_skin=ice_T_skin, mynn_initflag=mynn_initflag,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match.
@@ -3540,9 +3749,11 @@ class PhysicsPipeline:
                     sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     cell_area=cell_area,
+                    dq_v_dt_dyn=dq_v_dt_dyn, turb_dq_v_prev=turb_dq_v_prev,
+                    evap_sfc_prev=evap_sfc_prev,
                     w_land=w_land, snow=snow, land_ml=land_ml,
                     land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
-                    T_ice_skin=ice_T_skin,
+                    T_ice_skin=ice_T_skin, mynn_initflag=mynn_initflag,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -3916,8 +4127,24 @@ def _build_rrtmgp_radiation_fn(config):
     return radiation_fn, {"scheme": rrtmg_config, "orbit": orbit}
 
 
+def _build_ecrad_ifs_radiation_fn(config):
+    """``radiation='ecrad_ifs'`` runs on the MPAS column lane's combined
+    physics only (vote L2a); the compiled pipeline is built at setup on every
+    lane, so it gets a radiation_fn that REFUSES when called rather than a
+    silent substitute."""
+    del config
+
+    def radiation_fn(*args, **kwargs):
+        raise ValueError(
+            "radiation='ecrad_ifs' is not wired into the compiled physics "
+            "pipeline; it runs on the MPAS column lane only (vote L2a).")
+
+    return radiation_fn, None
+
+
 # Map radiation scheme names to builder functions.
 _RADIATION_BUILDERS: dict[str, callable] = {
+    "ecrad_ifs": _build_ecrad_ifs_radiation_fn,  # MPAS lane only; refuses here
     "none": _build_none_radiation_fn,  # explicit zero-radiation (was silently rrtmgp)
     "gray": _build_gray_radiation_fn,
     "rrtmgp": _build_rrtmgp_radiation_fn,
@@ -4061,7 +4288,9 @@ def convection_config_for(config, grid_dx_m=None):
         return cc
     leaf = _fill_bechtold_dx(scheme, leaf, grid_dx_m)
     cc = cc._replace(**{scheme: leaf})
-    if getattr(leaf, "enable_cmt", False) and _is_mpas_grid(config):
+    # WRF Tiedtke always runs cumulus friction (no enable_cmt knob).
+    if ((getattr(leaf, "enable_cmt", False) or scheme == "tiedtke")
+            and _is_mpas_grid(config)):
         # The MPAS bridge reconstructs winds only on this explicit switch;
         # any scheme whose CMT resolved ON for an MPAS run asks for it
         # (Bechtold via _resolve_enable_cmt; Zhang-McFarlane / Tiedtke via
@@ -4272,13 +4501,6 @@ def _resolve_convection(config):
                 transport_cloud_tracers=config.zm_transport_cloud_tracers,
                 **_zm_set)
 
-        # Tiedtke plume buoyancy-death memory (ExperimentConfig /
-        # --convective-buoyancy-death-memory, Tiedtke-only per the CLI guard).
-        if scheme == "tiedtke":
-            conv_config = conv_config._replace(
-                buoyancy_death_memory=bool(getattr(
-                    config, "convective_buoyancy_death_memory", False)))
-
         # Convective precip-split SCHEME (Bechtold / Tiedtke expose
         # ``precip_split_scheme`` + the autoconv params).  "autoconversion"
         # replaces the constant ``precip_efficiency`` with the PHYSICAL
@@ -4300,11 +4522,11 @@ def _resolve_convection(config):
             if not hasattr(conv_config, "precip_split_scheme"):
                 # A requested non-constant split on a scheme that cannot honour
                 # it must fail loudly, not silently run constant physics (codex
-                # MED). Only bechtold/tiedtke expose the plume q_c_u it needs.
+                # MED). Only bechtold exposes the plume q_c_u it needs.
                 raise ValueError(
                     f"convective_precip_split={_split!r} requires a convection "
-                    "scheme with the physical autoconversion split (bechtold or "
-                    f"tiedtke); scheme {scheme!r} does not support it")
+                    "scheme with the physical autoconversion split (bechtold); "
+                    f"scheme {scheme!r} does not support it")
             conv_config = conv_config._replace(precip_split_scheme=_split)
 
     _check_pipeline_convection_supported(scheme, conv_config)
@@ -4403,7 +4625,15 @@ def moisture_registry_for(scheme_name: str, scheme_config=None):
     column model's slot list, so both carry the same names in the same
     order (the duo's q_<i> is a slot index)."""
     from legoesm.core.tracers import (
-        make_full_moisture_registry, make_moisture_registry)
+        TracerInfo, TracerRegistry, make_full_moisture_registry,
+        make_moisture_registry)
+    if scheme_name == "ifs_cloudsc":
+        # IFS CLOUDSC carries a prognostic, advected cloud fraction (vote
+        # VC18a): the full nine in FV3 water order, then the fraction as a
+        # passenger.  Only for this scheme; every other registry unchanged.
+        return TracerRegistry(tracers=make_full_moisture_registry().tracers + (
+            TracerInfo("cloud_fraction_ifs", "1", True, True,
+                       "IFS prognostic cloud fraction"),))
     warm = make_moisture_registry()
     need = required_microphysics_tracer_slots(scheme_name, scheme_config)
     if need > warm.n_tracers:
@@ -5086,6 +5316,14 @@ def turbulence_config_for(config):
     return apply_surface_flux_config(tc, config)
 
 
+def _is_mynn_kernel(fn):
+    """Is ``fn`` the WRF MYNN-EDMF lane kernel (turbulence='mynn25')?
+    Deferred import: this module keeps atmosphere imports function-scope."""
+    from legoesm.atmosphere.physics.turbulence.mynn_wrf_adapter import (
+        mynn_wrf_turbulence)
+    return fn is mynn_wrf_turbulence
+
+
 def _resolve_turbulence(config):
     """Resolve turbulence kernel and config from ExperimentConfig.
 
@@ -5094,7 +5332,6 @@ def _resolve_turbulence(config):
     scheme = getattr(config, 'turbulence', 'none')
     if scheme == "none":
         return None, None
-
     from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
 
     tc = turbulence_config_for(config)
@@ -5153,11 +5390,10 @@ def gwd_config_for(config):
         effgw_oro=float(getattr(config, "mcfarlane_effgw_oro",
                                 gc.mcfarlane.effgw_oro)),
     )
-    # Hines (non-orographic) launch amplitude + saturation flux cap.
+    # Hines (non-orographic) launch rms wind + launch pressure.
     hn = gc.hines._replace(
         total_rms_wind=float(getattr(config, "hines_total_rms_wind",
                                      gc.hines.total_rms_wind)),
-        Fmax=float(getattr(config, "hines_Fmax", gc.hines.Fmax)),
         launch_p=float(config.hines_launch_p),
     )
     fr = gc.e3sm_cam.frontal._replace(
@@ -5609,6 +5845,15 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
     pipeline._turb_energy_field = turbulence_scheme_traits(
         getattr(config, 'turbulence', 'none'),
     ).energy_field
+    if pipeline._turb_energy_field == "sfclay":
+        # R4 vote J4: this pipeline threads only tke/qke through its step and
+        # segment carry; the WRF surface-layer state of turbulence=ysu would
+        # be dropped every step.
+        raise ValueError(
+            "turbulence='ysu' (WRF surface layer + YSU) carries the surface-layer "
+            "state PhysicsState.sfclay, which the driver physics pipeline does "
+            "not thread; select ysu on a lane that threads PhysicsState "
+            "(hydrostatic / MPAS / spectral_pe physics factories).")
     # A GWD scheme threads the prognostic wave-action spectrum when it is
     # ``prognostic_spectral`` OR a '+'-composite that contains it (issue #834).
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import (

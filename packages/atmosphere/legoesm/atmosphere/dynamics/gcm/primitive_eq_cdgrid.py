@@ -1632,6 +1632,19 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         state = cast_pytree(state, None, "compute")
         cdgrid = self.cdgrid
 
+        # Process-coupled lane (physics inside the RK stages): physics'
+        # dynamics-tendency consumers read the dynamics-only tendency at
+        # step start (cell centre, same arrays as the cc view's T / q_v).
+        if (physics_fn is not None and phys_state is not None
+                and state.tracers is not None and "q_v" in state.tracers):
+            _dyn = fv3_hydrostatic_tendencies(
+                state, self.grid, self.sigma_coord, cdgrid, self.config,
+                physics_tendency=None, physics_tendency_cc=None,
+                dt_actual=dt)
+            phys_state = phys_state._replace(
+                dyn_tendency_T=_dyn.dT_dt.data,
+                dyn_tendency_qv=_dyn.tracer_tendencies["q_v"].data)
+
         def _eval_physics(s_cc):
             """Physics with the step-input carry (4-arg contract when
             a carry is threaded; legacy 3-arg call otherwise)."""

@@ -32,18 +32,11 @@ def _read(rel: str) -> str:
     return (ra.repo_root() / rel).read_text(encoding="utf-8")
 
 
-def test_hines_headline_discloses_single_bulk_amplitude():
-    """hines.py must crisply state it is a single-bulk-amplitude WKB scheme,
-    not the full Hines (1997) Doppler-spread spectrum."""
+def test_hines_headline_names_its_oracle_and_departures():
+    """hines.py must name the LMDZ code it ports and list where it departs."""
     src = _read(_HINES)
-    assert "single-bulk-amplitude WKB" in src, (
-        "hines.py headline must crisply state it is a single-bulk-amplitude "
-        "WKB scheme, not the full Hines Doppler-spread spectrum."
-    )
-    assert ("NOT** the full Hines" in src) or ("NOT the full Hines" in src), (
-        "hines.py must explicitly say it is NOT the full Hines (1997) "
-        "Doppler-spread spectrum."
-    )
+    assert "LMDZ6 trunk r5891" in src and "hines_gwd.f90" in src
+    assert "Departures from the oracle" in src
 
 
 def test_ysu_documents_hong06_entrainment():

@@ -9,6 +9,8 @@ replay for its registered internal statement boundaries.
 
 from __future__ import annotations
 
+import math
+
 import argparse
 import hashlib
 import importlib.util
@@ -22,13 +24,11 @@ import jax.numpy as jnp
 import netCDF4
 import numpy as np
 from legoesm.ice.dynamics import SI3CGridAEVPState, si3_cgrid_aevp_solver
-from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
+from legoesm.ice.fidelity.nemo_rheo_testcase_recipe_lane import (
     _forcing_for_state,
     build_ice_rheo_card,
 )
 from legoesm.ocean.fidelity.provenance import worktree_stamp
-
-from legoesm import constants
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 PROBE_ROOT = Path(
@@ -374,8 +374,8 @@ def run_probe(
     with netCDF4.Dataset(mesh_path) as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in MESH_FIELDS}
     with netCDF4.Dataset(init_path) as dataset:
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
-    card = build_ice_rheo_card(frame, mesh, ocean_temperature_k)
+        sst_m = np.asarray(dataset["sst"][0])
+    card = build_ice_rheo_card(frame, mesh, sst_m)
     require(card.dynamics_config.n_subcycles == N_SUBCYCLES, "aEVP subcycle count drift")
     require(str(card.initial_state.contents.dtype) == "float64", "card contents are not fp64")
 
@@ -473,6 +473,7 @@ def run_probe(
             applied_forcing,
             card.metrics,
             card.dynamics_config,
+            limit_sharpness_scale=math.inf,
         )
     )
     production = solve(jax_state, jax_forcing)

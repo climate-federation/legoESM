@@ -87,8 +87,20 @@ def test_turbulence_scheme_traits_match_seeding():
         seeded = {
             "tke": bool(np.any(np.asarray(ps.tke) > 0)),
             "qke": bool(np.any(np.asarray(ps.qke) > 0)),
+            "sfclay": ps.sfclay is not None,
         }
-        if traits.carries_energy:
+        if traits.energy_field == "sfclay":
+            # WRF cold start [ust, mol, znt, hfx, qfx, pblh] = [1e-4, 0, z0, 0, 0, 0]
+            z0 = cfg.turbulence.ysu.surface.z0
+            want = np.tile([1.0e-4, 0.0, z0, 0.0, 0.0, 0.0], (4, 1))
+            np.testing.assert_array_equal(np.asarray(ps.sfclay), want)
+            assert not seeded["tke"] and not seeded["qke"], scheme
+        elif scheme == "mynn25":
+            # WRF MYNN-EDMF: packed (qke, qsq, el), zero seed that the
+            # cold-start step overwrites (R3 votes N1/N3)
+            assert np.asarray(ps.qke).shape == (4, 3, 3)
+            assert not seeded["qke"] and not seeded["tke"]
+        elif traits.carries_energy:
             assert seeded[traits.energy_field], (
                 f"{scheme}: traits say energy in {traits.energy_field!r} "
                 "but init_physics_state seeded it zero"
@@ -101,6 +113,8 @@ def test_turbulence_scheme_traits_match_seeding():
             assert not seeded["tke"] and not seeded["qke"], (
                 f"{scheme}: diagnostic scheme must not seed an energy carry"
             )
+        if traits.energy_field != "sfclay":
+            assert not seeded["sfclay"], f"{scheme}: must not seed the sfclay carry"
 
 
 def test_mpas_step_threads_seeded_carry():
@@ -113,7 +127,6 @@ def test_mpas_step_threads_seeded_carry():
         MPASPrimitiveEquationConfig,
     )
     from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
-    from legoesm.atmosphere.physics.combined import make_physics
 
     mesh = create_voronoi_mesh(3)
     sigma = create_sigma_coordinate(8)
@@ -122,23 +135,19 @@ def test_mpas_step_threads_seeded_carry():
     state = held_suarez_init_mpas(mesh, sigma)
 
     cfg = _tke_physics_config()
-    # model_type="mpas" — the driver's own call (model_driver.py:3067);
-    # MPAS states carry edge-normal u with v=None, which the
-    # "hydrostatic" pipeline would dereference.
-    physics_fn = make_physics(cfg, model_type="mpas", dt=1.0)
+    # Toy +1 carry, not real MYJ: this rest state sits in MYJ's
+    # no-turbulence regime, which resets q2 to EPSQ2 every call (WRF
+    # PRODQ2), so a real-scheme seed is erased whatever the loop does.
+    physics_fn = _toy_carry_physics_fn()
     ncol = int(state.T.data.shape[0])
     nlev = int(state.T.data.shape[1])
     seed = init_physics_state(ncol, nlev, cfg)
 
     # The issue-405 property is MEMORY: the carry fed in must shape the
-    # carry coming out.  From a rest state TKE has zero shear production
-    # and at dt=300 s the dissipation term removes any perturbation in a
-    # single step (both branches legitimately floor at tke_min), so the
-    # step uses dt=1 s — the perturbed column must then SURVIVE the step
-    # iff the scheme actually consumed the input carry.
-    # Same dynamics state, two different input carries -> outputs must
-    # differ, and the perturbed column must remember its perturbation.
-    seed_pert = seed._replace(tke=seed.tke.at[0, :].set(1e-2))
+    # carry coming out.  Same dynamics state, two different input
+    # carries -> outputs must differ, and the perturbed column must
+    # remember its perturbation.
+    seed_pert = seed._replace(tke=seed.tke.at[0, :].add(1.0))
 
     _ = model.step(state, 1.0, physics_fn=physics_fn, phys_state=seed)
     ps_a = model._phys_state
@@ -179,7 +188,7 @@ def _toy_carry_physics_fn():
     """
     from legoesm.core.state import HydrostaticTendencies
 
-    def physics_fn(hs, grid, sigma_coord, phys_state=None):
+    def physics_fn(hs, grid, sigma_coord, phys_state=None, **_):
         zero = HydrostaticTendencies(
             du_dt=hs.u.replace(data=jnp.zeros_like(hs.u.data)),
             dv_dt=(None if hs.v is None
@@ -230,20 +239,19 @@ def _mpas_setup(n=3, nlev=8):
 
 
 def test_cdgrid_step_threads_seeded_carry():
-    """CDGrid PE step with real TKE turbulence: output carry depends on
-    the input carry (memory), perturbation survives, chained steps keep
-    it — mirror of the MPAS memory test (issue #413 lift)."""
-    from legoesm.atmosphere.physics.combined import make_physics
-
+    """CDGrid PE step: output carry depends on the input carry (memory),
+    perturbation survives, chained steps keep it — mirror of the MPAS
+    memory test (issue #413 lift)."""
     model, state, sigma = _cdgrid_setup()
     cfg = _tke_physics_config()
-    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=1.0)
+    # Toy +1 carry: MYJ floors q2 in this no-turbulence rest state.
+    physics_fn = _toy_carry_physics_fn()
 
     shp = state.T.data.shape           # (6, n, n, nlev)
     ncol = shp[0] * shp[1] * shp[2]
     nlev = shp[3]
     seed = init_physics_state(ncol, nlev, cfg)
-    seed_pert = seed._replace(tke=seed.tke.at[0, :].set(1e-2))
+    seed_pert = seed._replace(tke=seed.tke.at[0, :].add(1.0))
 
     _ = model.step(state, 1.0, physics_fn=physics_fn, phys_state=seed)
     ps_a = model._phys_state
@@ -322,7 +330,7 @@ def test_latlon_step_threads_seeded_carry():
 
     cfg = _tke_physics_config()
     seed = init_physics_state(n_lat * n_lon, nlev, cfg)
-    seed_pert = seed._replace(tke=seed.tke.at[0, :].set(1e-2))
+    seed_pert = seed._replace(tke=seed.tke.at[0, :].add(1.0))
     fn = _toy_carry_physics_fn()
 
     _ = model.step_with_physics(state, 600.0, physics_fn=fn,
@@ -376,11 +384,27 @@ def test_refusal_guard(turb, conv, gwd, should_raise):
         turbulence = turb
         convection = conv
         gravity_wave_drag = gwd
+        microphysics = "kessler"
 
     if should_raise:
         with pytest.raises(NotImplementedError, match="405"):
             ModelDriver._refuse_stateful_physics_unthreaded(_Cfg())
     else:
+        ModelDriver._refuse_stateful_physics_unthreaded(_Cfg())
+
+
+def test_refusal_guard_covers_sundqvist_microphysics():
+    """Sundqvist's gscond reads its previous-step carry (zc_*); an unthreaded
+    loop must refuse it at run start, not crash inside the scheme."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    class _Cfg:
+        turbulence = "none"
+        convection = "none"
+        gravity_wave_drag = "none"
+        microphysics = "sundqvist"
+
+    with pytest.raises(NotImplementedError, match="microphysics='sundqvist'"):
         ModelDriver._refuse_stateful_physics_unthreaded(_Cfg())
 
 
@@ -417,7 +441,9 @@ def test_driver_loops_thread_and_persist_stateful_carries(
     the default seed under identical dynamics."""
     from legoesm.driver.model_driver import ModelDriver
 
-    cfg = _stateful_driver_config()
+    # edmf, not tke: MYJ resets q2 to its floor in this stable rest state
+    # (WRF PRODQ2 no-turbulence branch), erasing any seed whatever the loop does.
+    cfg = _stateful_driver_config(turbulence="edmf")
     driver = ModelDriver(cfg, output_dir=tmp_path / "a")
     driver.setup()
     status = driver.run(compiled=compiled)
@@ -663,6 +689,11 @@ def test_pipeline_refuses_dropped_active_carry():
         PhysicsConfig(turbulence=TurbulenceConfig(scheme="clubb_lite")))
     assert not physics_config_requires_phys_state(
         PhysicsConfig(turbulence=TurbulenceConfig(scheme="louis")))
+    # Sundqvist's gscond reads its previous-step carry (zc_*).
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    assert physics_config_requires_phys_state(PhysicsConfig(
+        turbulence=TurbulenceConfig(scheme="louis"),
+        microphysics=MicrophysicsConfig(scheme="sundqvist")))
 
 
 def test_sharded_wrapper_refuses_stateful_physics():
@@ -707,16 +738,18 @@ def test_integrate_mixin_refuses_and_threads_carry():
 
     shp = state.T.data.shape
     seed = init_physics_state(shp[0] * shp[1] * shp[2], shp[3], cfg)
-    # Rest state at the TKE floor is a fixed point — memory is pinned by
-    # comparing two DIFFERENT seeds under identical dynamics (a
-    # reseeding loop would erase the difference).
+    # Threading uses the toy +1 carry: MYJ floors q2 in this
+    # no-turbulence rest state, erasing any real-scheme seed.
+    toy = _toy_carry_physics_fn()
     _ = model.integrate(
-        state, duration=2.0, dt=1.0, physics_fn=fn, phys_state=seed)
+        state, duration=2.0, dt=1.0, physics_fn=toy, phys_state=seed)
     ps_a = model._phys_state
     assert ps_a is not None
-    seed_pert = seed._replace(tke=seed.tke.at[0, :].set(1e-2))
+    np.testing.assert_allclose(np.asarray(ps_a.tke), np.asarray(seed.tke) + 2.0,
+                               rtol=0, atol=0)
+    seed_pert = seed._replace(tke=seed.tke.at[0, :].add(1.0))
     _ = model.integrate(
-        state, duration=2.0, dt=1.0, physics_fn=fn, phys_state=seed_pert)
+        state, duration=2.0, dt=1.0, physics_fn=toy, phys_state=seed_pert)
     ps_b = model._phys_state
     assert not np.array_equal(np.asarray(ps_b.tke), np.asarray(ps_a.tke)), (
         "integrate() final carry is independent of the seeded carry — "

@@ -44,7 +44,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.core.smooth import smooth_clamp, smooth_min
+from legoesm.core import transcendentals
+from legoesm.core.source_rounding import nemo_source_round as sr
+from legoesm.core.smooth import max_c1, smooth_clamp, smooth_min
 
 
 # Tetens/Bolton coefficients of ``saturation_vapor_pressure`` (named so that a
@@ -489,9 +491,12 @@ def _mixing_ratio_from_esat(e_sat: jax.Array, p: jax.Array) -> jax.Array:
     364 Pa model top the cap at r = 1 binds, and after ``q = r/(1 + r)``
     q_sat is 30 % below CAM ``svp_to_qsat``; r and q go negative where the
     true r falls below the offset (on the audit's 0.05 K grid: only at
-    p >= 7e4 Pa, warmest such point 152.4 K; the cutoff depends on p).  In fp32 the cap cancels catastrophically:
-    where q_sat < 1e-5 the error vs the unsmoothed formula has median 1.4 %
-    and max 87 %.  CAM instead returns q = 1 when p <= e_s; CLUBB returns
+    p >= 7e4 Pa, warmest such point 152.4 K; the cutoff depends on p).  The cap
+    is evaluated in its cancellation-free form, so fp32 reproduces the smooth
+    formula to 6e-8 relative for q_sat in 1e-9..1e-5 (the earlier
+    ``1 - softplus(...)`` form lost up to 300 % there); the remaining fp32 error
+    vs the unsmoothed formula is the -1.03e-10 offset itself (median 1e-3,
+    max 0.10 on that range).  CAM instead returns q = 1 when p <= e_s; CLUBB returns
     r = epsilon when p - e_s < 1.
     """
     # Smooth floor on denominator: preserves gradients near e_sat ≈ p
@@ -501,8 +506,16 @@ def _mixing_ratio_from_esat(e_sat: jax.Array, p: jax.Array) -> jax.Array:
     q_sat = constants.epsilon * e_sat / denom
     # Smooth cap at 1.0 kg/kg: prevents singularity at low-pressure levels
     # while allowing gradients to flow (unlike hard jnp.minimum).
-    # Uses LogSumExp smooth-min: 1 - softplus(β(1 - x))/β with β = 20.
-    return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat)) / 20.0
+    # Uses LogSumExp smooth-min min_β(x, 1) = 1 - softplus(β(1 - x))/β, β = 20.
+    # Below 1 it is evaluated in the identical form x - softplus(β(x - 1))/β
+    # (softplus(z) = z + softplus(-z)), which does not cancel against 1 when
+    # x << 1; at x >= 1 the original form, which does not cancel when x >> 1
+    # (pre-cap x reaches ~1e4 where p < e_sat; there the x < 1 form is off by
+    # ~1.6e4 ulp of the result in fp32 and ~3e4 ulp in fp64).  Both branches
+    # are the same function, so the select is smooth.
+    return jnp.where(q_sat < 1.0,
+                     q_sat - jax.nn.softplus(20.0 * (q_sat - 1.0)) / 20.0,
+                     1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat)) / 20.0)
 
 
 def saturation_mixing_ratio_goff(
@@ -636,22 +649,83 @@ def saturation_specific_humidity_cam_table(T: jax.Array, p: jax.Array, *,
     return _specific_humidity_from_esat_cam(es, p, cap_sharpness=cap_sharpness)
 
 
+# Compile-time intrinsic folds of NEMO PARAMETERs (gfortran/MPFR, correctly rounded; glibc agrees).
+_NEMO_LN10 = float.fromhex("0x1.26bb1bbb55516p+1")        # LOG(10._wp), sbc_phy.f90:724,726
+_NEMO_GOFF_ICE_D = float.fromhex("0x1.9258f81f79246p-1")  # rDg_i = LOG10(6.1071_wp), sbc_phy.f90:90
+
+
+def _nemo_reps0() -> float:
+    return constants.R_d / constants.R_v_nemo                                  # sbc_phy.f90:46
+
+
+def nemo_theta_exner(pta, ppa):
+    """``theta_exner_sclr``: ``pta * ( rpref / ppa ) ** rgamma_dry`` (``sbc_phy.f90:350``)."""
+    rgamma_dry = constants.R_gas_molar / (constants.M_dry_air * constants.c_p_dry_air_nemo)  # sbc_phy.f90:54
+    return sr(pta * sr(transcendentals.pow(sr(constants.p_ref / ppa), rgamma_dry)))
+
+
+def nemo_si3_e_sat_ice(ptak):
+    """``e_sat_ice_sclr`` (``sbc_phy.f90:689-694``), NEMO source order."""
+    rtt0 = constants.T_triple_nemo
+    zta = jnp.where(constants.T_goff_floor_nemo > ptak, constants.T_goff_floor_nemo, ptak)  # MAX(ptak, 180)
+    ztmp = sr(rtt0 / zta)
+    zle = sr(constants.goff_ice_A_nemo * sr(ztmp - 1.0))
+    zle = sr(zle + sr(constants.goff_ice_B_nemo * sr(transcendentals.log10(ztmp))))
+    # Materialized divisor: XLA otherwise rewrites x / constant as x * (1 / constant).
+    zle = sr(zle + sr(constants.goff_ice_C_nemo * sr(1.0 - sr(zta / sr(jnp.asarray(rtt0))))))
+    zle = sr(zle + _NEMO_GOFF_ICE_D)
+    return sr(100.0 * sr(transcendentals.pow(10.0, zle)))
+
+
+def nemo_si3_q_sat_ice(pta, ppa):
+    """``q_sat_sclr(..., l_ice=.TRUE.)`` (``sbc_phy.f90:760,764``)."""
+    reps0 = _nemo_reps0()
+    ze_s = nemo_si3_e_sat_ice(pta)
+    return sr(sr(reps0 * ze_s) / sr(ppa - sr((1.0 - reps0) * ze_s)))
+
+
+def nemo_si3_dq_sat_dt_ice(pta, ppa):
+    """``dq_sat_dt_ice_sclr`` with ``de_sat_dt_ice_sclr`` (``sbc_phy.f90:722-726,798-803``)."""
+    reps0, rtt0 = _nemo_reps0(), constants.T_triple_nemo
+    ze_s = nemo_si3_e_sat_ice(pta)
+    zta = jnp.where(constants.T_goff_floor_nemo > pta, constants.T_goff_floor_nemo, pta)
+    zde = sr(-(constants.goff_ice_A_nemo * rtt0) / sr(zta * zta))
+    zde = sr(zde - sr(constants.goff_ice_B_nemo / sr(zta * _NEMO_LN10)))
+    zde = sr(zde - constants.goff_ice_C_nemo / rtt0)
+    zde_s_dt = sr(sr(_NEMO_LN10 * zde) * nemo_si3_e_sat_ice(zta))
+    ztmp = sr(sr((reps0 - 1.0) * ze_s) + ppa)
+    return sr(sr(sr(reps0 * ppa) * zde_s_dt) / sr(ztmp * ztmp))
+
+
 def nemo_si3_saturation_over_ice(
     T: jax.Array,
     p: jax.Array,
+    floor_width_K: float,
 ) -> tuple[jax.Array, jax.Array]:
-    """NEMO 5.0.2 Goff-ice specific humidity and analytic ``dq/dT``.
+    """NEMO Goff-ice ``(q_sat, dq_sat/dT)`` with a selectable smooth floor.
 
     The cited line numbers match NEMO 5.0.1, which is the version the
     tier-2 oracle audit ran (fp64: 8.2e-14 max relative on q_sat, 1.6e-13
     on dq/dT); 5.0.2 itself was not run.
 
-    This is the literal operation order of ``sbc_phy.F90:665-711,727-790``.
-    It intentionally does not use the smooth generic mixing-ratio conversion:
+    At ``floor_width_K = 0`` this is the literal operation order of
+    ``sbc_phy.F90:665-711,727-790``; a positive width smooths the 180 K floor
+    and scales ``dq/dT`` by the ramp slope.  It intentionally does not use the smooth generic mixing-ratio conversion:
     that would be a different formula at an oracle boundary.  Returns
     ``(q_sat, dq_sat_dT)`` and remains JIT/reverse-mode compatible.
     """
-    zta = jnp.maximum(jnp.asarray(T), constants.T_goff_floor_nemo)
+    # NEMO's MAX(T, 180 K) floor as a C1 ramp of width floor_width_K (exact
+    # outside 180..180+width K; 0.0 = NEMO's hard MAX).
+    T = jnp.asarray(T)
+    if floor_width_K == 0.0:
+        zta = max_c1(T, constants.T_goff_floor_nemo, jnp.inf)
+        dzta_dT = 1.0   # NEMO returns d/dT at the floored temperature
+    else:
+        # smooth mode: carry the ramp's slope into dq_sat/dT (1 above the band)
+        zta, dzta_dT = jax.jvp(
+            lambda t: max_c1(t, constants.T_goff_floor_nemo, 1.0 / floor_width_K),
+            (T,), (jnp.ones_like(T),),
+        )
     ztmp = constants.T_triple_nemo / zta
     zle = (
         constants.goff_ice_A_nemo * (ztmp - 1.0)
@@ -669,7 +743,7 @@ def nemo_si3_saturation_over_ice(
         - constants.goff_ice_C_nemo / constants.T_triple_nemo
     )
     de_sat_dT = jnp.log(10.0) * zde * e_sat
-    dq_sat_dT = eps * p * de_sat_dT / (denom * denom)
+    dq_sat_dT = eps * p * de_sat_dT / (denom * denom) * dzta_dT
     return q_sat, dq_sat_dT
 
 

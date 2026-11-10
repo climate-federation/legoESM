@@ -59,10 +59,12 @@ def _port(f, *, sharpness=math.inf):
     contents, _, n = advect_si3_prather_2d(
         si3_prather_pack_intensives(x, area), tuple(jnp.asarray(m) for m in f["MOM"]), u, v, area, wet, DT,
         dx=jnp.asarray(f["e1v"]), dy=jnp.asarray(f["e2u"]), ice_step_index=int(KT), nn_fsbc=int(NN_FSBC),
-        halo_width=H, ice_volume_index=TR.index("v_i"), concentration_index=TR.index("a_i"), subcycles=int(ICYCLE))
+        halo_width=H, ice_volume_index=TR.index("v_i"), concentration_index=TR.index("a_i"), subcycles=int(ICYCLE),
+        limit_sharpness_scale=math.inf)  # NEMO hard limiter (oracle)
     raw = si3_prather_unpack_intensives(contents, area, wet)
     cor, res = apply_si3_prather_source_corrections(
-        x, raw, tracer_names=TR, nlay_i=3, nlay_s=3, cell_area_m2=1.0, halo_width=H,
+        x, raw, tracer_names=TR, nlay_i=3, nlay_s=3, cell_area_m2=1.0, halo_width=H, ponds_active=False,
+        negative_area_ramp_width=0.0,
         entry_intensive_contents=x, contents_are_intensive=True, dt_s=DT, return_residual_fluxes=True)
     ato = si3_prather_open_water(
         jnp.asarray(f["ato_i"]), x[..., TR.index("a_i")], cor[..., TR.index("a_i")], u, v,
@@ -219,7 +221,7 @@ def test_gradient_through_prather_and_ledgers_is_finite():
             concentration_index=TR.index("a_i"), subcycles=1)
         raw = si3_prather_unpack_intensives(contents, a0, wet)
         cor, res = apply_si3_prather_source_corrections(
-            x, raw, tracer_names=TR, nlay_i=3, nlay_s=3, cell_area_m2=1.0, halo_width=H,
+            x, raw, tracer_names=TR, nlay_i=3, nlay_s=3, cell_area_m2=1.0, halo_width=H, ponds_active=False,
             entry_intensive_contents=x, contents_are_intensive=True, dt_s=DT, return_residual_fluxes=True)
         ato = si3_prather_open_water(jnp.asarray(f["ato_i"]), x[..., TR.index("a_i")], cor[..., TR.index("a_i")],
                                      u, jnp.asarray(f["v_ice"]), dy_u=jnp.asarray(f["e2u"]),
@@ -240,7 +242,8 @@ def test_gradient_through_prather_and_ledgers_is_finite():
 def test_default_output_unchanged_and_dt_required():
     f = _window(1)
     x = jnp.asarray(f["X"])
-    kw = dict(tracer_names=TR, nlay_i=3, nlay_s=3, cell_area_m2=1.0, halo_width=H, entry_intensive_contents=x,
+    kw = dict(tracer_names=TR, nlay_i=3, nlay_s=3, cell_area_m2=1.0, halo_width=H, ponds_active=False,
+              entry_intensive_contents=x,
               contents_are_intensive=True)
     plain = apply_si3_prather_source_corrections(x, x * 1.01, **kw)
     with_res, _ = apply_si3_prather_source_corrections(x, x * 1.01, dt_s=DT, return_residual_fluxes=True, **kw)
@@ -269,7 +272,7 @@ def test_zapneg_volume_ledgers_synthetic():
     x[6, 2, TR.index("v_i")] = -1.0e-3
     xj = jnp.asarray(x)
     cor, res = apply_si3_prather_source_corrections(
-        xj, xj, tracer_names=TR, nlay_i=3, nlay_s=3, cell_area_m2=1.0, halo_width=H,
+        xj, xj, tracer_names=TR, nlay_i=3, nlay_s=3, cell_area_m2=1.0, halo_width=H, ponds_active=True,
         entry_intensive_contents=xj, contents_are_intensive=True, dt_s=DT, return_residual_fluxes=True)
     expected = {2: 0.01, 3: (-0.001 + 0.003), 4: -0.002}
     for row, vol in expected.items():

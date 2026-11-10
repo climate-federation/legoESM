@@ -195,8 +195,15 @@ class TestTurbulenceSchemes:
 
     def test_ysu(self):
         state, grid, sigma = _make_hydrostatic_setup()
-        cfg = _none_config(turbulence=TurbulenceConfig(scheme="ysu"))
-        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        # ysu carries the WRF surface-layer state (PhysicsState.sfclay) and
+        # needs the land/water flag where the grid has no land fraction.
+        from legoesm.atmosphere.physics.physics_state import init_physics_state
+        from legoesm.atmosphere.physics.turbulence.config import YSUConfig
+        cfg = _none_config(turbulence=TurbulenceConfig(
+            scheme="ysu", ysu=YSUConfig(surface_type="land")))
+        ps = init_physics_state(state.T.data.size // sigma.n_levels, sigma.n_levels, cfg)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma,
+                                                             phys_state=ps)
         _check_tendencies(tend, "turbulence/ysu")
 
     def test_edmf(self):
@@ -275,6 +282,13 @@ class TestMicrophysicsSchemes:
 
     def test_thompson(self):
         state, grid, sigma = _make_hydrostatic_setup()
+        # the WRF port needs the full registry (votes W1a/Y3a): zeros, the
+        # values the bridge used to zero-fill on this dry state
+        from legoesm.core.tracers import make_full_moisture_registry
+        z = jnp.zeros_like(state.T.data)
+        state = state._replace(tracers={
+            n: Field(data=z, name=n, dims=state.T.dims, units="")
+            for n in make_full_moisture_registry().names})
         cfg = _none_config(microphysics=MicrophysicsConfig(scheme="thompson"))
         tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "microphysics/thompson")
@@ -371,5 +385,10 @@ class TestFullPhysicsCombinations:
             microphysics=MicrophysicsConfig(scheme="sundqvist"),
             gravity_wave_drag=GravityWaveDragConfig(scheme="lindzen"),
         )
-        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        # Sundqvist (and TKE) carry state: thread a cold-start PhysicsState.
+        from legoesm.atmosphere.physics.physics_state import init_physics_state
+        ncol = int(state.T.data.size // state.T.data.shape[-1])
+        ps = init_physics_state(ncol, state.T.data.shape[-1], cfg)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(
+            state, grid, sigma, phys_state=ps)
         _check_tendencies(tend, "advanced_stack")

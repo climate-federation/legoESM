@@ -32,16 +32,19 @@ drv = _load_driver()
 # --- scheme coverage --------------------------------------------------------
 
 def test_scheme_list_matches_the_dispatch():
-    """Every selectable closure except 'none' and the retired clubb_lite."""
+    """Every selectable closure except 'none', the untunable WRF ports 'tke' (MYJ)
+    and 'ysu' (WRF YSU, R4 vote X17), and the retired clubb_lite is a candidate."""
     import inspect
 
     from legoesm.atmosphere.physics.turbulence import integration
     src = inspect.getsource(integration.get_turbulence_fn)
     for scheme in drv.TURBULENCE_SCHEMES:
         assert f'"{scheme}"' in src, f"{scheme} not in get_turbulence_fn"
-    assert "none" not in drv.TURBULENCE_SCHEMES
+    assert "none" not in drv.TURBULENCE_SCHEMES and "ysu" not in drv.TURBULENCE_SCHEMES
+    # mynn25 dropped in R3 (WRF port: no SCM-LES inputs, no tunables)
+    assert "tke" not in drv.TURBULENCE_SCHEMES
     assert "clubb_lite" not in drv.TURBULENCE_SCHEMES
-    assert len(drv.TURBULENCE_SCHEMES) == 8
+    assert len(drv.TURBULENCE_SCHEMES) == 5
 
 
 @pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)
@@ -92,9 +95,9 @@ def test_arms_differ_only_in_turbulence():
 
 def test_arm_check_catches_a_non_turbulence_difference():
     configs = {s: drv.build_physics_config(s, prescribed_fluxes=False)
-               for s in ("louis", "ysu")}
-    bad = configs["ysu"]
-    configs["ysu"] = bad._replace(
+               for s in ("louis", "holtslag_boville")}
+    bad = configs["holtslag_boville"]
+    configs["holtslag_boville"] = bad._replace(
         radiation=bad.radiation._replace(scheme="gray")
     )
     with pytest.raises(RuntimeError, match="would not be controlled"):
@@ -172,7 +175,7 @@ def test_clubb_targets_the_nested_params_tuple():
     assert cfg.turbulence.clubb is not None
 
 
-@pytest.mark.parametrize("scheme", ["louis", "ysu", "clubb"])
+@pytest.mark.parametrize("scheme", ["louis", "holtslag_boville", "clubb"])
 def test_apply_trainable_params_actually_moves_a_parameter(scheme):
     """Non-vacuous: a no-op _apply_trainable_params must FAIL this.
 
@@ -206,7 +209,7 @@ def test_apply_trainable_params_actually_moves_a_parameter(scheme):
     assert out.radiation == cfg.radiation
 
 
-@pytest.mark.parametrize("scheme", ["louis", "tke"])
+@pytest.mark.parametrize("scheme", ["louis", "holtslag_boville"])
 def test_bounds_hold_at_initialization(scheme):
     drv._assert_strict_bounds(drv._initial_params(scheme, "extended"))
 
@@ -385,16 +388,6 @@ def test_scheme_keys_are_all_atmospheric():
             assert key.startswith("atm.turb."), (scheme, key)
 
 
-def test_ocean_tke_config_really_does_collide():
-    """Proves the guard is not vacuous: the collision it defends against
-    exists in the registry right now."""
-    from legoesm.training.param_collector import build_registry
-    keys = {m.scheme_key for m in build_registry()
-            if m.config_class == "TKEConfig"}
-    assert len(keys) > 1, "expected an atm/ocean TKEConfig name collision"
-    assert any(not k.startswith("atm.turb.") for k in keys)
-
-
 # --- CLUBB: prognostic path makes most parameters live ----------------------
 
 def test_clubb_defaults_to_the_prognostic_path():
@@ -449,21 +442,17 @@ def test_the_derived_set_catches_what_the_old_list_missed():
 
 
 def test_the_dead_check_covers_every_scheme_not_just_clubb():
-    """It is not CLUBB-specific, and MYNN-2.5 has dead fields too.
-
-    ``C4`` is documented dead (NN09 sets it to zero and the port does not read
-    it) and ``tke_min`` is declared but unused. Both are already excluded from
-    ``__param_spec__``, so neither reaches the tuner -- but the check must SEE
-    them, or it is only ever going to notice CLUBB.
+    """It is not CLUBB-specific.  (Its MYNN-2.5 surrogate example -- dead
+    ``C4``/``tke_min`` -- went with the surrogate in R3; mynn25 is now the WRF
+    port and no longer a tuner scheme.)
     """
     from legoesm.atmosphere.physics.turbulence import config as turb_config
 
-    assert drv._dead_params_for("mynn25") == {"C4", "tke_min"}
     # Schemes whose every field is consumed must come back EMPTY -- the
     # assertion that fails loudly if the resolver ever returns everything,
     # which would silently freeze the whole model.
-    for scheme in ("ysu", "louis", "edmf", "holtslag_boville",
-                   "smagorinsky", "tke"):
+    for scheme in ("louis", "edmf", "holtslag_boville",
+                   "smagorinsky"):
         got = drv._dead_params_for(scheme)
         assert got == frozenset(), f"{scheme}: unexpected dead fields {got}"
         assert turb_config is not None

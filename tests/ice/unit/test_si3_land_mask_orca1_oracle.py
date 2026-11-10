@@ -58,7 +58,9 @@ def _sec(fx, prefix):
 
 
 def _blk(fx, mask=None):
+    from legoesm import constants
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+    from legoesm.ice.config import SI3_HARD_SWITCHES
     from legoesm.ice.sea_ice import _nemo_si3_blk_ice_2
     i = {k: jnp.asarray(v) for k, v in _sec(fx, "blk2_in").items()}
     return _nemo_si3_blk_ice_2(
@@ -67,18 +69,23 @@ def _blk(fx, mask=None):
         precip=i["precip"], snow=i["snow"], qsr=i["qsr"], rho_air=i["rhoa"], wind=i["wndm_ice"],
         Ch=i["Ch_ice"], Ce=i["Ce_ice"], ice_fraction_before=i["at_i_b"], category_fraction_before=i["a_i_b"],
         sst_celsius=i["sst_m"], qns_ocean=i["qns_oce"], qsr_ocean=i["qsr_oce"], emp_ocean_raw=i["emp"],
-        land_mask=i["smask0"] if mask is None else mask, ice_constants=NEMO_SI3_CONSTANTS_CONFIG)
+        precip_factor=constants.precip_factor_orca1, evap_factor=constants.evap_factor_orca1,
+        snow_blow_exponent=constants.snow_blow_exponent_orca1,
+        land_mask=i["smask0"] if mask is None else mask, ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        switches=SI3_HARD_SWITCHES)
 
 
 def _alb(fx, mask=None, **arrays):
+    from legoesm.ice.config import SI3_HARD_SWITCHES
     from legoesm.ice.sea_ice import _nemo_si3_ice_albedo
     i = {k: jnp.asarray(v) for k, v in _sec(fx, "alb_in").items()}
     i.update(arrays)
     return _nemo_si3_ice_albedo(i["t_su"], i["h_i"], i["h_s"], i["cloud_fra"],
-                                land_mask=i["smask0"] if mask is None else mask)
+                                land_mask=i["smask0"] if mask is None else mask, switches=SI3_HARD_SWITCHES)
 
 
 def _flx(fx, mask=None, **arrays):
+    from legoesm.ice.config import SI3_HARD_SWITCHES
     from legoesm.ice.sea_ice import _nemo_si3_ice_flx_other
     i = {k: jnp.asarray(v) for k, v in _sec(fx, "flx_in").items()}
     i.update(arrays)
@@ -90,7 +97,8 @@ def _flx(fx, mask=None, **arrays):
         frq=i["frq_m"], qsr_ocean=i["qsr_oce"], qns_ocean=i["qns_oce"], qemp_ocean=i["qemp_oce"],
         ocean_layer_thickness=i["e3t_m"], sst_celsius=i["sst_m"], T_bottom=i["t_bo"], dt=s["rDt_ice"],
         rho_ocean=s["rho0"], c_ocean=s["rcp"], T0=s["rt0"], ice_epsilon=1.0e-10,
-        max_ice_fraction=i["rn_amax_2d"], land_mask=i["smask0"] if mask is None else mask)
+        max_ice_fraction=i["rn_amax_2d"], lead_cut_version="5.0.1", switches=SI3_HARD_SWITCHES,
+        land_mask=i["smask0"] if mask is None else mask)
 
 
 def test_fixture_has_land_and_wet_cells(fx):

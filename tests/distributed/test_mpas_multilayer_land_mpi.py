@@ -229,22 +229,50 @@ def _bitwise_equal(a, b) -> bool:
             and a.tobytes() == b.tobytes())
 
 
-def _column_leaves(state, ncol):
-    """Land leaves whose LEADING axis is the column axis, by name.
+def _leaf_name(path):
+    return ".".join(str(getattr(k, "name", getattr(k, "key", getattr(k, "idx", k))))
+                    for k in path)
 
-    Leaves that are None (optional sub-models off) or carry a different leading
-    length (the 1-based CLM canopy leaves) are returned separately rather than
-    dropped silently -- a comparison that quietly skipped the field under test
-    would prove nothing.
+
+def _column_leaves(state, ncol):
+    """Land leaves that are per-column, by dotted path name.
+
+    Two per-column layouts exist: 0-based ``(ncol, ...)`` and the CLM-ML
+    canopy's 1-based ``(ncol + 1, ...)`` (row 0 is an unused pad).  The 1-based
+    leaves are returned with row 0 stripped, under ``<name>[1:]``, so they are
+    compared column for column like every other leaf (#2171).  Nested leaves
+    (the ``canopy_state`` pytree) are walked, not skipped.  Leaves that are
+    None or not per-column are returned separately rather than dropped
+    silently -- a comparison that quietly skipped the field under test would
+    prove nothing.
     """
     per_col, other = {}, {}
-    for name, v in state._asdict().items():
+    leaves, _ = jax.tree_util.tree_flatten_with_path(
+        state, is_leaf=lambda x: x is None)
+    for path, v in leaves:
+        name = _leaf_name(path)
         if v is None:
             other[name] = None
             continue
         a = np.asarray(v)
-        (per_col if a.ndim >= 1 and a.shape[0] == ncol else other)[name] = a
+        if a.ndim >= 1 and a.shape[0] == ncol:
+            per_col[name] = a
+        elif a.ndim >= 1 and a.shape[0] == ncol + 1:
+            per_col[name + "[1:]"] = a[1:]
+        else:
+            other[name] = a
     return per_col, other
+
+
+def _slice_columns(x, gids, ncol):
+    """Cut one global land leaf to the columns *gids*; 1-based leaves keep row 0."""
+    if getattr(x, "ndim", 0) < 1:
+        return x
+    if x.shape[0] == ncol:
+        return x[gids]
+    if x.shape[0] == ncol + 1:
+        return jnp.concatenate([x[:1], x[1:][gids]], axis=0)
+    return x
 
 
 def _stamp_columns(state, ncol):
@@ -332,6 +360,30 @@ def _compare(ref, d):
     return diffs, sorted(ref_other), spread, atm
 
 
+def test_ladder_compares_the_1based_canopy_leaves_column_for_column():
+    """The CLM-ML canopy keeps its per-column fields 1-based (row 0 unused).
+    The ladder must compare them, nested inside ``canopy_state``, and slice
+    them to a rank's columns without moving the pad row (#2171)."""
+    from legoesm.land.canopy.state import CanopyState
+    ncol = 5
+    gids = np.array([3, 0, 4])
+    soil = jnp.arange(ncol, dtype=jnp.float64)
+    tleaf = jnp.concatenate([jnp.array([-1.0]), 10.0 + jnp.arange(ncol)])
+    state = {"T_soil": soil,
+             "canopy_state": CanopyState(mlcanopy={"tleaf": tleaf})}
+    cols, other = _column_leaves(state, ncol)
+    assert "canopy_state.mlcanopy.tleaf[1:]" in cols, (
+        f"the 1-based canopy leaf is not compared; other leaves: {sorted(other)}")
+    np.testing.assert_array_equal(cols["canopy_state.mlcanopy.tleaf[1:]"],
+                                  10.0 + np.arange(ncol))
+    local = jax.tree_util.tree_map(lambda x: _slice_columns(x, gids, ncol), state)
+    loc_cols, _ = _column_leaves(local, len(gids))
+    np.testing.assert_array_equal(loc_cols["canopy_state.mlcanopy.tleaf[1:]"],
+                                  cols["canopy_state.mlcanopy.tleaf[1:]"][gids])
+    assert float(local["canopy_state"].mlcanopy["tleaf"][0]) == -1.0
+
+
+
 @pytest.mark.parametrize("scheme", ["simple_seb", "two_leaf"])
 def test_land_advance_on_the_voronoi_partition_is_bit_exact(scheme):
     """Identical forcing, sliced by the Voronoi partition: advance must commute.
@@ -388,8 +440,7 @@ def test_land_advance_on_the_voronoi_partition_is_bit_exact(scheme):
     # identically is what isolates the claim under test here.
     start_serial = ref_d._land_ml_state
     start_local = jax.tree_util.tree_map(
-        lambda x: x[local_gids] if getattr(x, "ndim", 0) >= 1
-        and x.shape[0] == ncol else x, start_serial)
+        lambda x: _slice_columns(x, local_gids, ncol), start_serial)
     # Non-vacuity: the slice must actually reorder something.
     assert not np.array_equal(
         np.asarray(start_local.T_soil)[:n_owned],

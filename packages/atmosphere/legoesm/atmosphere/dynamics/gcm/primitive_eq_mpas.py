@@ -39,6 +39,7 @@ from legoesm.core.precision import cast_pytree, finalize_to_storage
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
+    with_dyn_tendencies,
     MPAS_SFC_DIAG_EXTRA_KEYS,
     MPASHydrostaticState,
     MPASHydrostaticTendencies,
@@ -866,10 +867,12 @@ def mpas_hydrostatic_tendencies(
         omega_ps = sigma_coord.sigma_full * dp_s_dt[:, None]
 
     # Surface pressure hyperdiffusion: -nu * del2(del2(p_s))
+    _dps_del4 = None
     if config.nu_del4_ps > 0:
         del2_ps = divergence_cell(gradient_edge(p_s, mesh), mesh)
         del4_ps = divergence_cell(gradient_edge(del2_ps, mesh), mesh)
-        dp_s_dt = dp_s_dt - config.nu_del4_ps * del4_ps
+        _dps_del4 = -config.nu_del4_ps * del4_ps
+        dp_s_dt = dp_s_dt + _dps_del4
 
     # Vertical advection of u: approximate via edge-averaged sigma-dot
     if _hybrid:
@@ -962,6 +965,15 @@ def mpas_hydrostatic_tendencies(
                 lambda qk: vertical_advection(
                     qk, sigma_dot, sigma_coord, scheme=_vert_scheme),
                 in_axes=-1, out_axes=-1)(q)
+        if _dps_del4 is not None:
+            # The p_s hyperdiffusion moves layer mass dB_k * _dps_del4 that no
+            # tracer flux accompanies; count it as dry air so each tracer's
+            # layer mass q*dp is unchanged: dq = -q dB_k _dps_del4 / dp_k.
+            # Without this it removed ~0.009 mm/day of water at res 6.
+            _dB = (sigma_coord.dB if _hybrid else sigma_coord.dsigma).astype(p_s.dtype)
+            _dp_c = sigma_coord.layer_thickness_dp(p_s)
+            _dp_c = jnp.where(_dp_c != 0, _dp_c, 1.0)  # halo padding (p_s = 0)
+            dq = dq - q * (_dB * _dps_del4[:, None] / _dp_c)[..., None]
         # #930 vertical checkerboard damper on TRACERS (same operator + rate
         # as the T filter above).  The 2026-07-23 moist-AMIP blowup forensics
         # (Tibetan-plateau cell, ±140 K 2Δσ T zigzag with 66 g/kg q_v pooling
@@ -1336,6 +1348,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         _state_postdyn = state_new
         _led_phys_rows = None
         if physics_fn is not None:
+            phys_state = with_dyn_tendencies(phys_state, state, state_new, dt)
             _pr = physics_fn(state_new, self.mesh, self.sigma_coord,
                              phys_state=phys_state, forcing=forcing)
             if type(_pr) is tuple:
@@ -1502,40 +1515,19 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         _led_step = None
         if _led_phys_rows is not None:
             from legoesm.diagnostics.process_ledger import (
-                LEDGER_WATER_SPECIES, ROW_CLIPS, ROW_DYNAMICS, ROW_OTHER,
-                column_store_snapshot_column,
+                step_ledger_from_stages,
             )
-
-            _led_w = self.config.budget_ledger_level_weight
-
-            def _snap(s):
-                water = [s.tracers[k].data for k in LEDGER_WATER_SPECIES
-                         if s.tracers is not None and k in s.tracers]
-                return column_store_snapshot_column(
-                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water,
-                    level_weight=_led_w)
-
-            _s_pre = _snap(state)
-            _s_dyn = _snap(_state_postdyn)
-            _s_phy = _snap(_state_postphys)
-            _s_fix0 = _snap(_state_prefix)
-            _s_fix1 = _snap(_state_postfix)
-            _s_end = _snap(state_new)
-            _led_step = _led_phys_rows.astype(_s_pre.dtype)
-            _led_step = _led_step.at[:, ROW_DYNAMICS, :].add(
-                ((_s_dyn - _s_pre) + (_s_fix1 - _s_fix0)) / dt)
-            _led_step = _led_step.at[:, ROW_CLIPS, :].add(
-                ((_s_fix0 - _s_phy) + (_s_end - _s_fix1)) / dt)
             # Closure residual -> other_physics (the FV residual philosophy):
             # the physics rows are tendency integrals at the PRE-application
             # p_s, while the store snapshots see the applied state — a
             # physics dp_s_dt and the dt² cross-term (dt·dT_dt vs the p_s
-            # change) land nowhere otherwise.  Booking the discrepancy here
-            # makes sum(rows) == (snap(end) − snap(pre))/dt EXACT by
-            # construction, which is the property the closure test pins.
-            _led_step = _led_step.at[:, ROW_OTHER, :].add(
-                (_s_phy - _s_dyn) / dt
-                - _led_phys_rows.astype(_s_pre.dtype).sum(axis=1))
+            # change) land nowhere otherwise.
+            _led_step = step_ledger_from_stages(
+                _led_phys_rows,
+                (state, _state_postdyn, _state_postphys, _state_prefix,
+                 _state_postfix, state_new),
+                self.sigma_coord.dsigma, dt,
+                level_weight=self.config.budget_ledger_level_weight)
 
         # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
         # rounded the mass fixer's float64 back out of the bulk state.

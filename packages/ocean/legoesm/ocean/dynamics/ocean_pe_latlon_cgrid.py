@@ -126,6 +126,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_vertex_mask,
     compute_face_masks_3d,
     per_level_viscosity_masks,
+    nemo_shlat_vertex_mask,
     nemo_hpg_sco_literal_cgrid,
     density_jacobian_pgf_smc03_x,
     density_jacobian_pgf_smc03_y,
@@ -266,12 +267,14 @@ VALID_LATERAL_VISCOSITY_E3_WEIGHTING = frozenset({"off", "nemo_e3"})
 VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE = frozenset(
     {"nemo_ldf_c2d", "nemo_constant", "nemo_ahm_3d_file", "nemo_smag_blp"})
 # Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
-# at walls) or MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall side-drag).
-VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip"})
+# at walls), MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall
+# side-drag), or NEMO's rn_shlat ("nemo_shlat": coastal vorticity points take the
+# value config.lateral_shlat, dommsk.F90:209-215; 2 = no-slip).
+VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip", "nemo_shlat"})
 # Which land masks the "vector_laplacian" viscosity/biharmonic applies at each
-# level (config.lateral_viscosity_mask_levels): "surface" (default,
-# bit-identical) broadcasts the 2-D surface u/v/vertex masks to every level;
-# "per_level" builds them per level from the partial-cell is_active, as
+# level (config.lateral_viscosity_mask_levels): "surface"
+# broadcasts the 2-D surface u/v/vertex masks to every level;
+# "per_level" (default) builds them per level from the partial-cell is_active, as
 # NEMO uses its 3-D umask/vmask/fmask in dynldf_lev (dommsk.F90:148-153).
 VALID_LATERAL_VISCOSITY_MASK_LEVELS = frozenset({"surface", "per_level"})
 # Lateral-friction CLOSURE selector (config.lateral_friction_scheme): "none"
@@ -3630,12 +3633,12 @@ def _bc_horizontal_viscosity(
             "lateral_viscosity_coefficient_source='nemo_smag_blp'")
     _use_flux_div = _visc_op == "flux_divergence"
     _use_nemo_div_curl = _visc_op == "nemo_div_curl"
-    # Land masks of the vector Laplacian / biharmonic sites below.  "surface"
-    # (default) keeps the 2-D surface masks at every level (bit-identical).
-    # "per_level" uses each level's own wet cells, faces and vertices, as
-    # NEMO's dynldf_lev reads 3-D tmask/umask/vmask/fmask: with 2-D masks a
-    # face or vertex closed at depth by a topographic step stays open.
-    _mask_levels = getattr(config, "lateral_viscosity_mask_levels", "surface")
+    # Land masks of the vector Laplacian / biharmonic sites below.  "per_level"
+    # (default) uses each level's own wet cells, faces and vertices, as NEMO's
+    # dynldf_lev reads 3-D tmask/umask/vmask/fmask.  "surface" keeps the 2-D
+    # surface masks at every level: a face or vertex closed at depth by a
+    # topographic step stays open.
+    _mask_levels = getattr(config, "lateral_viscosity_mask_levels", "per_level")
     if _mask_levels not in VALID_LATERAL_VISCOSITY_MASK_LEVELS:
         raise ValueError(
             "lateral_viscosity_mask_levels must be one of "
@@ -3654,6 +3657,24 @@ def _bc_horizontal_viscosity(
             per_level_viscosity_masks(
                 z_coord.is_active, grid, mask, u_mask, v_mask, vertex_mask,
                 u.dtype))
+    # NEMO's lateral momentum BC (rn_shlat) lives in the VALUE of its f-mask:
+    # a coastal vorticity point with any wet adjacent face takes rn_shlat
+    # (dommsk.F90:209-215; 2 = no-slip), applied once to the vorticity.  It
+    # needs NEMO's per-level masks and replaces the MITgcm side drag.
+    if getattr(config, "lateral_side_bc", "free_slip") == "nemo_shlat":
+        if _mask_levels != "per_level":
+            raise ValueError(
+                "lateral_side_bc='nemo_shlat' requires "
+                "lateral_viscosity_mask_levels='per_level' (NEMO's f-mask "
+                f"is built per level); got {_mask_levels!r}")
+        _shlat = float(getattr(config, "lateral_shlat", 2.0))
+        if not _shlat >= 0.0:
+            raise ValueError(
+                f"lateral_shlat must be >= 0 (NEMO dom_msk stops), got {_shlat!r}")
+        if _vl_vertex_mask is None:
+            _vl_vertex_mask = compute_vertex_mask(_vl_mask, grid=grid)
+        _vl_vertex_mask = nemo_shlat_vertex_mask(
+            _vl_vertex_mask, _vl_u_mask, _vl_v_mask, _shlat, grid=grid)
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
 
     def _biharmonic_op(uu, vv):

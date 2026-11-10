@@ -30,15 +30,20 @@ UNREACHABLE_SCHEMES = {
         "while _require_full_physics_for_amip would count it ACTIVE -- i.e. "
         "silently disabled microphysics that PASSES the full-physics guard. "
         "Excluding it is protective. Wiring it needs a checkpoint flag first.",
-    ("run_amip", "clouds", "resolved"):
-        "SAM's CRM convention (cloud fraction = 1 wherever condensate > 0); "
-        "raises without explicit q_cloud/q_ice from microphysics. Not a C48 "
-        "GCM scheme -- it belongs to the plane/CRM lane, not AMIP.",
+    # ("run_amip", "clouds", "resolved") REMOVED (vote VC31): run_amip now
+    # offers --clouds resolved, restricted to --microphysics ifs_cloudsc
+    # (CLOUDSC's advected cloud fraction + grid-mean condensate); every other
+    # microphysics is refused in run_amip's own argument check.
     ("run_coupled", "radiation", "none"):
         "With radiation off a coupled run gets no solar heating of the "
         "surface or the ocean, so the coupled climate has no energy source; "
         "main's run_coupled refused it and the shared parser (P5a) keeps "
         "that refusal.",
+    ("run_coupled", "radiation", "ecrad_ifs"):
+        "OpenIFS ecRad runs on the MPAS column lane only; the coupled loop is "
+        "not verified to carry its between-call state (PhysicsState."
+        "ecrad_carry) or McICA seed clock, so run_coupled refuses it, also "
+        "from a deck (vote R1a, test_run_coupled_refuses_ecrad_ifs).",
     ("run_coupled", "surface_bulk_scheme", "none"):
         "No surface bulk fluxes means no air-sea exchange, so nothing drives "
         "the ocean; run_coupled refuses it (test_surface_bulk_none).",

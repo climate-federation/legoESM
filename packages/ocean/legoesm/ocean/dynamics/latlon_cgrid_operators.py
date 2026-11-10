@@ -46,6 +46,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     lat_ends_are_poles,  # noqa: F401 — re-export for ocean dynamics call sites
     pad_ns_scalar,
     fold_row,
+    fold_perm_f,
     fold_ghost_source_T,
     pad_ns_vector_v,
     pad_lon_cgrid,
@@ -4341,6 +4342,47 @@ def per_level_viscosity_masks(
     if vertex_mask is not None:
         vx3 = vx3 * jnp.asarray(vertex_mask, dtype)[..., jnp.newaxis]
     return cell, um3, vm3, vx3
+
+
+def nemo_shlat_vertex_mask(
+    vertex_mask: jnp.ndarray,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+    shlat: float,
+    grid=None,
+) -> jnp.ndarray:
+    """NEMO's f-mask with the lateral momentum boundary condition rn_shlat.
+
+    dommsk.F90:209-215: where the free-slip f-mask is 0,
+    ``fmask = rn_shlat * MIN(1, MAX(umask(i,j), umask(i,j+1), vmask(i,j),
+    vmask(i+1,j)))`` -- a coastal vorticity point next to any wet face takes
+    rn_shlat (0 free slip, 2 no slip).  NEMO f(i,j) is vertex [j+1, i+1] here,
+    so its four faces are u[r-1, c], u[r, c], v[r, c-1], v[r, c].  The
+    neighbours come through the backend-dispatched pads (MPI cuts see the
+    neighbour rank).  As NEMO's lbc_lnk(fmask, 'F') after the change, a
+    tripolar fold row is then re-filled from its fold partners (the same
+    mapping compute_vertex_mask uses).  Masks are static geometry, so the hard
+    MAX/MIN carry no gradient.  2-D or per-level (trailing level axis) masks.
+    Rows at a physical (non-fold) latitude end stay as the vector Laplacian
+    treats them: the curl is zero on those wall rows, so no rn_shlat stress
+    reaches a wet cell in the array's first or last row.
+    """
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    vx = jnp.asarray(vertex_mask)
+    u_pad = pad_with_pole_bc_lat(jnp.asarray(u_mask, vx.dtype), halo=1,
+                                 south_value=0.0, north_value=0.0)
+    v_pad = pad_lon_cgrid(jnp.asarray(v_mask, vx.dtype), halo=1)
+    adj = jnp.maximum(jnp.maximum(u_pad[:-1], u_pad[1:]),
+                      jnp.maximum(v_pad[:, :-1], v_pad[:, 1:]))
+    coast = jnp.asarray(shlat, vx.dtype) * jnp.minimum(adj, 1.0)
+    full = jnp.where(vx == 0.0, coast, vx)
+    nmask = north_fold_mask(grid)
+    if grid is not None and (fold_is_local(grid) or nmask is not None):
+        fold = grid.fold
+        north = fold_row(full[-2:-1], fold_perm_f(fold), 1.0,
+                         fold.perm_T.shape[0])
+        full = apply_north_fold(full, north, grid, north_mask=nmask)
+    return full
 
 
 def _nemo_hpg_sco_literal_cgrid_impl(
