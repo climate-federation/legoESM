@@ -1,0 +1,40 @@
+{
+ "oracle": "NEMO 5.0.1 SI3 ice_dyn_adv_pra, cfg ORCA1_T4DYN (eORCA1, 32 ranks, nn_hls 2, F-pivot), build job 11022552, kt 17281 = nit000, rDt_ice 14400 s, nn_fsbc 96, jpl 1, nn_icesal 2, ln_pnd F",
+ "arms": {
+  "cyc2": {
+   "record": "/burg/glab/users/pg2328/oracle_audit/si3dyn_fix/PM/cyc2",
+   "icycle": 2,
+   "restart_delay_cflice": 1.0,
+   "window_ext_origin": [
+    278,
+    70
+   ],
+   "inner_cells_main_misses": 18,
+   "windowed_equals_full_orca_run": "bitwise"
+  },
+  "cyc3": {
+   "record": "/burg/glab/users/pg2328/oracle_audit/si3dyn_fix/PM/cyc3",
+   "icycle": 3,
+   "restart_delay_cflice": 2.0,
+   "window_ext_origin": [
+    322,
+    74
+   ],
+   "inner_cells_main_misses": 20,
+   "windowed_equals_full_orca_run": "bitwise"
+  }
+ },
+ "legoesm_sha": "10570df88b4a2c9a221c0f0f893c4204329a002c",
+ "window": {
+  "W": 20,
+  "M": 7
+ },
+ "extractor": "si3dyn_fix/PM/extract.py",
+ "fold": {
+  "record": "/burg/glab/users/pg2328/oracle_audit/si3dyn_fix/PM/cyc3",
+  "icycle": 3,
+  "rows": "global extended rows 319..334",
+  "scored": "2 fold-halo rows + 4 interior rows below them, interior columns",
+  "band_equals_full_run": "bitwise on scored rows"
+ }
+}

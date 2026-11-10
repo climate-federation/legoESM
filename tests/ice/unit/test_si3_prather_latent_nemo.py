@@ -302,24 +302,41 @@ def test_adv2d_recipe_selects_hard_negative_area_floor():
 def test_nemo_recipes_pass_hard_negative_area_floor():
     """Every call of the shared Prather corrections in a NEMO-replication
     recipe passes negative_area_ramp_width=0.0 explicitly (covers the rheology
-    recipe, whose card needs oracle data)."""
+    recipe, whose card needs oracle data).  A shared composition may forward its
+    own ``negative_area_ramp_width`` parameter (vote V8 a); every recipe call of
+    such a composition (``advect_si3_prather_with_cycle_corrections``) must then
+    pass the literal 0.0 itself."""
 
     import ast
     from pathlib import Path
 
     import legoesm.ice.fidelity as fidelity
 
+    gated = ("apply_si3_prather_source_corrections", "advect_si3_prather_with_cycle_corrections")
     calls = []
+
+    def visit(node, params, fname):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            own = {a.arg for a in node.args.args + node.args.kwonlyargs}
+            params = params | own
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name in gated:
+                width = {kw.arg: kw.value for kw in node.keywords}.get("negative_area_ramp_width")
+                calls.append((fname, node.lineno, name, width, "negative_area_ramp_width" in params))
+        for child in ast.iter_child_nodes(node):
+            visit(child, params, fname)
+
     for path in sorted(Path(fidelity.__file__).parent.glob("nemo_*recipe*.py")):
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.Call):
-                func = node.func
-                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-                if name == "apply_si3_prather_source_corrections":
-                    width = {kw.arg: kw.value for kw in node.keywords}.get(
-                        "negative_area_ramp_width"
-                    )
-                    calls.append((path.name, node.lineno, width))
-    assert len(calls) >= 3, calls  # adv2d intensive + extensive paths, rheology
-    for name, line, width in calls:
-        assert isinstance(width, ast.Constant) and width.value == 0.0, (name, line)
+        visit(ast.parse(path.read_text()), frozenset(), path.name)
+    assert len(calls) >= 4, calls  # adv2d intensive + extensive paths, rheology, cycled composition
+    for fname, line, name, width, forwarding_allowed in calls:
+        literal_hard = isinstance(width, ast.Constant) and width.value == 0.0
+        forwarded = (
+            name == "apply_si3_prather_source_corrections"
+            and forwarding_allowed
+            and isinstance(width, ast.Name)
+            and width.id == "negative_area_ramp_width"
+        )
+        assert literal_hard or forwarded, (fname, line, name)
