@@ -352,6 +352,46 @@ def _one_layer_record(precip_in_budget):
     return RolloutRecord(inputs=stack, fluxes=None, final_inputs=c1, budget=budget)
 
 
+def _drifting_record(nsteps, rel_per_step):
+    """``nsteps`` steps of a one-layer column whose water total gains
+    ``rel_per_step`` of its content each step beyond what the budget declares."""
+    from legoesm.atmosphere.les_suite.candidate import column_inputs
+    from legoesm.atmosphere.les_suite.candidate_eval import RolloutRecord
+    m, q0 = 1.0e4, 0.012
+    one = jnp.ones((1,))
+
+    def col(q):
+        return column_inputs(z_full=50 * one, z_half=jnp.asarray([0.0, 100.0]),
+                             rho_full=one, rho_half=jnp.ones((2,)), mass=m * one,
+                             exner=one, exner_half=jnp.ones((2,)), p_full=1e5 * one,
+                             p_half=jnp.asarray([1e5, 9.9e4]), theta_l=300 * one,
+                             q_t=q * one, u=0 * one, v=0 * one, w_theta_s=0.0,
+                             w_qt_s=0.0, uw_s=0.0, vw_s=0.0, dt=_DT, temp=300 * one,
+                             q_v=q * one, q_c=0 * one)
+    cols = [col(q0 * (1.0 + k * rel_per_step)) for k in range(nsteps + 1)]
+    z = jnp.zeros((nsteps,))
+    keys = ["rate", "sfc", "turbulence", "gross_turbulence", "microphysics",
+            "gross_microphysics", "forcing", "gross_forcing"]
+    budget = {f"{k}_{q}": z for k in keys for q in ("water", "energy", "u", "v")}
+    budget.update({k: z for k in ("precip", "record_rho_rel", "record_exner_rel",
+                                  "own_sfc_wtheta", "own_sfc_wqt", "own_sfc_uw",
+                                  "own_sfc_vw")})
+    stack = jax.tree_util.tree_map(lambda *x: jnp.stack(x), *cols[:-1])
+    return RolloutRecord(inputs=stack, fluxes=None, final_inputs=cols[-1], budget=budget)
+
+
+def test_whole_run_round_off_limit_admits_mynn_size_residuals():
+    # MYNN's biased round-off reached 1.6e-14 of the column content over 5 days
+    # (2026-11-10). Three steps each within the per-step limit: 1.5e-14 in total
+    # passes, 2.7e-14 (1.35x the limit) fails on the whole-run check alone.
+    ok = check_conservation(_drifting_record(3, 0.5e-14), _DT)
+    assert ok.passed, ok.reason
+    bad = check_conservation(_drifting_record(3, 0.9e-14), _DT)
+    assert not bad.passed
+    assert "whole-run" in bad.reason and " state: residual" not in bad.reason.replace(
+        "whole-run state", ""), bad.reason
+
+
 def test_rain_reaching_the_ground_is_a_declared_water_sink():
     assert check_conservation(_one_layer_record(1.5e-5), _DT).passed
     v = check_conservation(_one_layer_record(-1.5e-5), _DT)

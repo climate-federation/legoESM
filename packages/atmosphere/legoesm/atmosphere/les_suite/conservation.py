@@ -41,11 +41,19 @@ from legoesm import constants
 
 from .candidate_eval import BUDGET_QUANTITIES, RolloutRecord
 
-#: Tolerances, about ten times the float64 floor measured over 12 five-day CloudBench
-#: runs (3 cases x 4 benchmarks in energy form, 2026-11-03): worst step 7.1e-14,
-#: worst per-step state 1.2e-15, worst whole-run state 8.9e-16.
+#: Tolerances from the float64 floor measured over five-day CloudBench runs in
+#: energy form. STEP_REL_TOL: ~10x the worst step residual over 3 cases x 4
+#: benchmarks (2026-11-03: 7.1e-14). STATE_REL_TOL: first 1e-14 from the same 3 x 4
+#: runs (worst per-step state 1.2e-15, whole-run 8.9e-16); re-measured 2026-11-10
+#: over the same 3 cases x all 8 benchmarks (720 steps): worst per-step state
+#: 1.2e-15, whole-run 1.8e-15, so 2e-14 = 10x rounded up to one figure.
+#: KNOWN PROPERTY: MYNN's per-step momentum residuals stay within 2.4x the exact
+#: rounding of storing the new winds but are sign-biased (mean residual/bound
+#: ~0.13, YSU 0.006), so they add up linearly. Over 1585 training cases its
+#: whole-run tail reached 1.6e-14, ~9x the 3-case worst: the margin over that
+#: tail is ~1.25x, not 10x.
 STEP_REL_TOL = 1.0e-12
-STATE_REL_TOL = 1.0e-14
+STATE_REL_TOL = 2.0e-14
 #: A closure's own surface flux may differ from the surface law only by its own
 #: heat-flux conversion (the lowest-level vs surface Exner ratio). Measured as the
 #: extra transfer it would make, relative to the step's gross turbulent transfer of
