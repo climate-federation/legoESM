@@ -32,8 +32,8 @@ drv = _load_driver()
 # --- scheme coverage --------------------------------------------------------
 
 def test_scheme_list_matches_the_dispatch():
-    """Every selectable closure except 'none' and the untunable WRF ports 'tke' (MYJ)
-    and 'ysu' (WRF YSU, R4 vote X17) is a candidate."""
+    """Every selectable closure except 'none', the untunable WRF ports 'tke' (MYJ)
+    and 'ysu' (WRF YSU, R4 vote X17), and the retired clubb_lite is a candidate."""
     import inspect
 
     from legoesm.atmosphere.physics.turbulence import integration
@@ -43,7 +43,8 @@ def test_scheme_list_matches_the_dispatch():
     assert "none" not in drv.TURBULENCE_SCHEMES and "ysu" not in drv.TURBULENCE_SCHEMES
     # mynn25 dropped in R3 (WRF port: no SCM-LES inputs, no tunables)
     assert "tke" not in drv.TURBULENCE_SCHEMES
-    assert len(drv.TURBULENCE_SCHEMES) == 6
+    assert "clubb_lite" not in drv.TURBULENCE_SCHEMES
+    assert len(drv.TURBULENCE_SCHEMES) == 5
 
 
 @pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)
@@ -451,7 +452,7 @@ def test_the_dead_check_covers_every_scheme_not_just_clubb():
     # assertion that fails loudly if the resolver ever returns everything,
     # which would silently freeze the whole model.
     for scheme in ("louis", "edmf", "holtslag_boville",
-                   "smagorinsky", "clubb_lite"):
+                   "smagorinsky"):
         got = drv._dead_params_for(scheme)
         assert got == frozenset(), f"{scheme}: unexpected dead fields {got}"
         assert turb_config is not None

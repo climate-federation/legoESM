@@ -73,7 +73,8 @@ def test_scm_direct_construction_needs_both_builds():
         SingleColumnModel(
             physics_fn=scm.physics_fn, state=scm.state,
             phys_state=scm.phys_state, grid=scm.grid,
-            sigma_coord=scm.sigma_coord, dt=60.0)
+            sigma_coord=scm.sigma_coord, dt=60.0,
+            physics_config=_cfg())
 
 
 def test_make_physics_refuses_mynn25_without_or_with_wrong_flag():
@@ -149,4 +150,5 @@ def test_scm_direct_construction_refuses_multistage_integrator():
         SingleColumnModel(
             physics_fn=scm.physics_fn, physics_fn_init=scm.physics_fn_init,
             state=scm.state, phys_state=scm.phys_state, grid=scm.grid,
-            sigma_coord=scm.sigma_coord, dt=60.0, time_integrator="rk2")
+            sigma_coord=scm.sigma_coord, dt=60.0,
+            physics_config=_cfg(), time_integrator="rk2")

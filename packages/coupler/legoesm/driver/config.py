@@ -533,6 +533,8 @@ VALID_MICROPHYSICS = (
     "ifs_cloudsc",
 )
 
+_CLUBB_LITE_WARNED = False  # one stand-in warning per process
+
 VALID_TURBULENCE = (
     "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
     "holtslag_boville", "ysu", "edmf", "none",
@@ -929,8 +931,8 @@ class ExperimentConfig(NamedTuple):
     # albedo. None => CloudConfig default 1.0 (homogeneous, no change).
     cloud_inhomogeneity_factor: float | None = None
     # Sub-grid cloud-optics inhomogeneity scheme: "constant" (Cahalan scalar,
-    # legacy/byte-identical) or "two_region" (tau-dependent Shonk-Hogan optic
-    # that breaks the plane-parallel tau-saturation). cloud_fsd = fractional
+    # legacy/byte-identical) or "two_region" (ecRad McICA gamma scaling per
+    # max_random subcolumn cell). cloud_fsd = fractional
     # std-dev of in-cloud water for two_region (Shonk-Hogan ~0.75).
     cloud_optics_inhomogeneity: str = "constant"
     cloud_fsd: float | None = None
@@ -2305,6 +2307,13 @@ class ExperimentConfig(NamedTuple):
         # for bit-comparison and for the documented MSE-vs-water trade-off.
         import logging as _logging
         _wlog = _logging.getLogger(__name__)
+        global _CLUBB_LITE_WARNED
+        if self.turbulence == "clubb_lite" and not _CLUBB_LITE_WARNED:
+            from legoesm.atmosphere.physics.turbulence.config import (
+                CLUBB_LITE_STANDIN_NOTE,
+            )
+            _wlog.warning(CLUBB_LITE_STANDIN_NOTE)
+            _CLUBB_LITE_WARNED = True
         if not d.mpas_conservative_tracer_clamp:
             _wlog.warning(
                 "NON-CONSERVING form selected: "

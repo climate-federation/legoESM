@@ -46,7 +46,7 @@ for CASES in "bomex" "wangara"; do
   $PY scripts/run/run_scm_les_turbulence_tuning.py \
       --cases "$CASES:$R/les_ref/$CASES" \
       --outdir "$R/scm_les_turbulence/_clubb_grad_$CASES" \
-      --nlev 48 --steps 2 --schemes clubb,clubb_lite \
+      --nlev 48 --steps 2 --schemes clubb \
       --joint-aggregation default_relative --surface-flux-to-closure \
       2>&1 | grep -Ev "^E[0-9]{4}|slow_operation|XLA has|If you|^$"
 done

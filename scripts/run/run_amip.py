@@ -135,6 +135,7 @@ def _argv_federates(argv: list[str]) -> bool:
 if "--multicontroller" not in sys.argv:
     maybe_init_jax_distributed(federate=_argv_federates(sys.argv))
 
+from legoesm.atmosphere.physics.turbulence.config import refuse_retired_turbulence
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
@@ -1062,10 +1063,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["constant", "two_region"], default="constant",
                         help="Sub-grid cloud-optics inhomogeneity scheme: "
                              "'constant' (Cahalan scalar chi, legacy default) or "
-                             "'two_region' (TAU-DEPENDENT Shonk-Hogan 2008 optic "
-                             "that breaks the plane-parallel tau-saturation a "
-                             "scalar cannot -- a thick cloud is reduced MORE than "
-                             "a thin one).")
+                             "'two_region' (ecRad 49r1 McICA gamma-PDF scaling of "
+                             "each max_random subcolumn cell; needs "
+                             "--cloud-vertical-overlap-optics max_random).")
     parser.add_argument("--cloud-vertical-overlap-optics",
                         dest="cloud_vertical_overlap_optics",
                         choices=["none", "max_random", "mcica"], default="none",
@@ -1119,8 +1119,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "0.0 %% cover against 35-40 %% observed.")
     parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
                         help="Fractional std-dev of in-cloud water for the "
-                             "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
-                             "=> thinner leaking sub-column => lower albedo). "
+                             "two_region optic [0,1] (Shonk-Hogan ~0.75; width "
+                             "of the gamma PDF of the subcolumn cells). "
                              "None=CloudConfig default 0.75.")
     parser.add_argument("--use-clubb-cloud-fraction",
                         action=argparse.BooleanOptionalAction, default=False,
@@ -2834,6 +2834,7 @@ def _default_discretization_for_grid(grid_type: str) -> str:
 
 
 def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+    refuse_retired_turbulence(args.turbulence, "run_amip --turbulence")
     # Defensive boundary: --grid-type/--discretization carry a None sentinel
     # default (explicitness tracking for the --truncation conflict guard in
     # _postprocess_args). A caller that skips _postprocess_args must still get
