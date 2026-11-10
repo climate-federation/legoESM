@@ -30,6 +30,13 @@ from legoesm.ocean.vertical import create_ocean_z_star
 
 TEND_RTOL = 1e-13
 JIT_RTOL = 1e-12
+NO_LATERAL = dict(K_h=0.0, K_bih=0.0)
+# all_on dT/dS shift, core vs model, max|new-old|/max|old| (measured on PBS): the
+# core's lateral diffusion is thickness weighted, the models' is not.
+LATERAL_SHIFT = {("latlon", "dT_dt"): 1.8371864066963238e-07,
+                 ("latlon", "dS_dt"): 7.28375099276871e-08,
+                 ("mpas", "dT_dt"): 5.700068429009425e-08,
+                 ("mpas", "dS_dt"): 2.0672873015807817e-08}
 BUDGET_RTOL = 1e-13
 DT = 300.0
 LL_ALL_ON = dict(K_h=1.0e3, K_bih=1.0e13, implicit_vertical_mixing=False, A_v=1.0e-2,
@@ -124,7 +131,8 @@ def _latlon_case(grid, z_coord, cname):
     if cname == "c2":
         return state, LatLonCGridOceanConfig.from_flat(ke_gradient_scheme="c2"), None
     sponge = _sponge(state.T.data, state.S.data, (state.u.data, state.v.data), 3)
-    return state, LatLonCGridOceanConfig.from_flat(**LL_ALL_ON), sponge
+    kw = dict(LL_ALL_ON, **(NO_LATERAL if cname == "no_lateral" else {}))
+    return state, LatLonCGridOceanConfig.from_flat(**kw), sponge
 
 
 def _mpas_case(mesh, z_coord, cname):
@@ -134,32 +142,43 @@ def _mpas_case(mesh, z_coord, cname):
     if cname in ("smc03", "ahh08"):   # partial-cell PGF schemes: inactive on z*
         return state, MPASOceanConfig(pgf_scheme=cname), None
     sponge = _sponge(state.T.data, state.S.data, (state.u.data,), 4)
-    return state, MPASOceanConfig(**MPAS_ALL_ON), sponge
+    kw = dict(MPAS_ALL_ON, **(NO_LATERAL if cname == "no_lateral" else {}))
+    return state, MPASOceanConfig(**kw), sponge
 
 
 # ------------------------------------------------------------ live oracle
 
-@pytest.mark.parametrize("cname", ["default", "c2", "all_on"])
+def _check_oracle(new, old, fields, cname, kind):
+    # all_on: dT/dS intentionally differ (thickness-weighted lateral diffusion,
+    # user decision); the shift is pinned.  no_lateral keeps the dT/dS oracle
+    # for explicit vertical diffusion + sponge.
+    if cname in ("all_on", "no_lateral"):   # the tracer terms are active
+        for f in ("dT_dt", "dS_dt"):
+            assert float(jnp.max(jnp.abs(getattr(old, f).data))) > 0.0, f
+    for f in fields:
+        if cname == "all_on" and f in ("dT_dt", "dS_dt"):
+            a, b = np.asarray(getattr(new, f).data), np.asarray(getattr(old, f).data)
+            shift = np.max(np.abs(a - b)) / np.max(np.abs(b))
+            np.testing.assert_allclose(shift, LATERAL_SHIFT[kind, f], rtol=1e-6)
+        else:
+            _close(getattr(new, f).data, getattr(old, f).data, f)
+
+
+@pytest.mark.parametrize("cname", ["default", "c2", "no_lateral", "all_on"])
 def test_latlon_matches_model_tendency(grid, z_coord, cname):
     state, cfg, sponge = _latlon_case(grid, z_coord, cname)
     new = ll.latlon_ocean_pe_tendencies(state, grid, z_coord, cfg, sponge=sponge, dt=DT)
     old = ll.latlon_cgrid_ocean_baroclinic_tendencies(state, grid, z_coord, cfg,
                                                       sponge=sponge, dt=DT)
-    for f in ("du_dt", "dv_dt", "dT_dt", "dS_dt", "deta_dt"):
-        _close(getattr(new, f).data, getattr(old, f).data, f)
-    if cname == "all_on":   # every unified term is active in this case
-        assert float(jnp.max(jnp.abs(old.dT_dt.data))) > 0.0
+    _check_oracle(new, old, ("du_dt", "dv_dt", "dT_dt", "dS_dt", "deta_dt"), cname, "latlon")
 
 
-@pytest.mark.parametrize("cname", ["default", "smc03", "ahh08", "all_on"])
+@pytest.mark.parametrize("cname", ["default", "smc03", "ahh08", "no_lateral", "all_on"])
 def test_mpas_matches_model_tendency(mesh, z_coord, cname):
     state, cfg, sponge = _mpas_case(mesh, z_coord, cname)
     new = mp.mpas_ocean_pe_tendencies(state, mesh, z_coord, cfg, sponge=sponge)
     old = mp.mpas_ocean_baroclinic_tendencies(state, mesh, z_coord, cfg, sponge=sponge)
-    for f in ("du_dt", "dT_dt", "dS_dt", "deta_dt", "F_slow_u"):
-        _close(getattr(new, f).data, getattr(old, f).data, f)
-    if cname == "all_on":
-        assert float(jnp.max(jnp.abs(old.dT_dt.data))) > 0.0
+    _check_oracle(new, old, ("du_dt", "dT_dt", "dS_dt", "deta_dt", "F_slow_u"), cname, "mpas")
 
 
 # ---------------------------------------------------------------- budgets
@@ -190,8 +209,8 @@ def test_volume_budget_closes(kind, grid, mesh, z_coord):
 @pytest.mark.parametrize("kind", ["latlon", "mpas"])
 def test_tracer_budgets_close(kind, grid, mesh, z_coord):
     """Heat and salt: the vertical diffusion conserves sum_k(h dT) per column;
-    the lateral operator conserves sum(area dT); the sponge adds exactly its
-    explicit source."""
+    the thickness-weighted lateral operator conserves sum(area h dT); the
+    sponge adds exactly its explicit source."""
     state, ops, sponge, vel, area = _ops(kind, grid, mesh, z_coord, "all_on")
     J, h_k, _, _ = ops.geometry_density()
     c = ops.coeffs
@@ -201,11 +220,12 @@ def test_tracer_budgets_close(kind, grid, mesh, z_coord):
         col = jnp.sum(vd * h_k, axis=-1)
         assert float(jnp.max(jnp.abs(col))) <= BUDGET_RTOL * float(
             jnp.max(jnp.sum(jnp.abs(vd * h_k), axis=-1)))
-        fm = ops.face_masks
-        lap = gen.masked_laplacian(q, ops.grid_ops, fm, m3)
-        gross = float(jnp.sum(jnp.abs(lap) * area[..., None]))
-        assert gross > 0.0
-        assert abs(float(jnp.sum(lap * area[..., None]))) <= BUDGET_RTOL * gross
+        h_face, _ = ops.face_thickness(h_k, vel)
+        lap = gen.thickness_weighted_laplacian(q, ops.grid_ops, h_face, ops.face_masks,
+                                               h_k, m3)
+        w = lap * h_k * area[..., None]
+        assert float(jnp.sum(jnp.abs(w))) > 0.0
+        assert abs(float(jnp.sum(w))) <= BUDGET_RTOL * float(jnp.sum(jnp.abs(w)))
     t = gen.ocean_baroclinic_tendencies(vel, state.T.data, state.S.data, ops, sponge=sponge)
     t0 = gen.ocean_baroclinic_tendencies(vel, state.T.data, state.S.data, ops)
     src = sponge.gamma[..., None] * (sponge.T_ref - state.T.data) * m3
@@ -213,20 +233,20 @@ def test_tracer_budgets_close(kind, grid, mesh, z_coord):
     assert float(jnp.max(jnp.abs(resid))) <= BUDGET_RTOL * float(jnp.max(jnp.abs(src * area[..., None])))
 
 
-# Measured on the all_on fixtures: |sum(area h dT_lateral)| / sum|area h dT_lateral|.
-# KNOWN DEFECT (both grids, pre-existing): the lateral tracer diffusion is not
-# thickness weighted, so the heat content sum(area h T) is not conserved when
-# h varies.  The test asserts the leak is present (a fix must update it); the
-# fix is a design decision.
+# Thickness-weighted lateral diffusion (Laplacian + biharmonic) closes heat and
+# salt where h varies (z* with a random eta).  Before the fix the models' form
+# leaked 1.6e-6 (lat-lon) / 5.3e-6 (MPAS) of the gross on these fixtures.
 @pytest.mark.parametrize("kind", ["latlon", "mpas"])
-def test_lateral_diffusion_heat_leak_is_pinned(kind, grid, mesh, z_coord):
-    state, ops, _, _, area = _ops(kind, grid, mesh, z_coord, "all_on")
+def test_lateral_diffusion_conserves_heat_and_salt(kind, grid, mesh, z_coord):
+    state, ops, _, vel, area = _ops(kind, grid, mesh, z_coord, "all_on")
     _, h_k, _, _ = ops.geometry_density()
-    lap = gen.masked_laplacian(state.T.data, ops.grid_ops, ops.face_masks,
-                               ops.cell_mask[..., None])
-    w = lap * h_k * area[..., None]
-    leak = abs(float(jnp.sum(w))) / float(jnp.sum(jnp.abs(w)))
-    assert leak > 1e3 * BUDGET_RTOL, leak
+    assert float(jnp.max(h_k) - jnp.min(jnp.where(ops.cell_mask[..., None] > 0, h_k, jnp.inf))) > 0
+    lateral_only = ops._replace(coeffs=ops.coeffs._replace(implicit_vertical_mixing=True))
+    t = gen.ocean_baroclinic_tendencies(vel, state.T.data, state.S.data, lateral_only)
+    for d in (t.dT, t.dS):
+        w = d * h_k * area[..., None]
+        assert float(jnp.sum(jnp.abs(w))) > 0.0
+        assert abs(float(jnp.sum(w))) <= BUDGET_RTOL * float(jnp.sum(jnp.abs(w)))
 
 
 # --------------------------------------------------------------- AD / jit

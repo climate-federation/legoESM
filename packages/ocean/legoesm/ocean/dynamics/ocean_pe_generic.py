@@ -11,9 +11,11 @@ C-grid and the MPAS / TRiSK mesh::
     du/dt   = -grad(KE + p'/rho_0) [+ partial-cell PGF correction]
               + per-grid momentum terms + bottom drag      -> finalize
               + d/dz(A_v du'/dz) + sponge
-    dT/dt   = K_h lap(T) - K_bih lap(lap(T)) + d/dz(K_v dT/dz) + sponge
+    dT/dt   = K_h L(T) - K_bih L(L(T)) + d/dz(K_v dT/dz) + sponge
 
-``lap(q) = mask_cell div(mask_face grad q)`` and ``div`` / ``grad`` are the B2
+``L(q) = mask_cell div(h_face mask_face grad q) / h`` (thickness weighted, so
+``sum(area h dq)`` closes to round-off where ``h`` varies; ``h_face`` is the
+continuity face thickness) and ``div`` / ``grad`` are the B2
 operator contract (:mod:`legoesm.grids.operator_protocol`).  Vertical
 diffusion is explicit only when ``implicit_vertical_mixing`` is off.
 
@@ -33,9 +35,10 @@ KNOWN DIFFERENCES between the grids, kept as plug-ins (voted): continuity face
 thickness (lat-lon MIN of the two cells, MPAS MEAN on z*) and the depth-mean
 divisor floor (lat-lon ``1e-10``, MPAS ``max(H, min_water_column_m)``).
 
-KNOWN DEFECT (pre-existing on both grids, measured in the tests): the
-horizontal tracer diffusion is not thickness weighted, so it does not conserve
-``sum(area h T)`` when ``h`` varies between cells.
+KNOWN DIFFERENCE from both models (user decision, measured in the tests): the
+models' lateral tracer diffusion ``K mask_cell div(mask_face grad q)`` is not
+thickness weighted and leaks heat and salt where ``h`` varies; the core uses
+the thickness-weighted form ``L`` above.
 """
 
 from __future__ import annotations
@@ -131,11 +134,14 @@ def baroclinic_split(vel: Faces, h_face: Faces, face_masks_2d: Faces,
     return tuple(out)
 
 
-def masked_laplacian(q: jax.Array, grid_ops: Any, face_masks: Faces,
-                     cell_mask: jax.Array) -> jax.Array:
-    """``mask_cell div(mask_face grad q)`` for ``q`` of shape ``(*cells, ncol)``."""
+def thickness_weighted_laplacian(q: jax.Array, grid_ops: Any, h_face: Faces,
+                                 face_masks: Faces, h: jax.Array,
+                                 cell_mask: jax.Array) -> jax.Array:
+    """``mask_cell div(h_face mask_face grad q) / max(h, floor)`` for ``q`` of
+    shape ``(*cells, ncol)``; ``sum(area h L(q))`` telescopes to zero."""
     grad = _as_tuple(grid_ops.gradient(q))
-    return grid_ops.divergence(*(g * m for g, m in zip(grad, face_masks))) * cell_mask
+    flux = grid_ops.divergence(*(hf * g * m for hf, g, m in zip(h_face, grad, face_masks)))
+    return flux / jnp.maximum(h, THICKNESS_FLOOR_M) * cell_mask
 
 
 def vertical_diffusion(q: jax.Array, coeff: float, dz_ref: jax.Array,
@@ -199,16 +205,24 @@ def ocean_baroclinic_tendencies(vel: Faces, T: jax.Array, S: jax.Array,
     # Tracers: horizontal Laplacian / biharmonic on the (T, S) stack.
     tr = jnp.stack([T, S], axis=-1)
     flat = tr.reshape(*tr.shape[:-2], -1)
-    # Flat column index is 2 k + tracer; a level-broadcast mask (last dim 1) stays.
-    fm_rep = tuple(m if m.shape[-1] == 1 else jnp.repeat(m, 2, axis=-1)
-                   for m in ops.face_masks)
     dflat = jnp.zeros_like(flat)
     if c.K_h > 0 or c.K_bih > 0:
-        lap = masked_laplacian(flat, gops, fm_rep, cell_mask_3d)
+        # Flat column index is 2 k + tracer; a level-broadcast mask (last dim 1) stays.
+        def rep(a):
+            return a if a.shape[-1] == 1 else jnp.repeat(a, 2, axis=-1)
+
+        hf_rep = tuple(rep(a) for a in h_face)
+        fm_rep = tuple(rep(m) for m in ops.face_masks)
+        h_rep = rep(h_k)
+
+        def lap(q):
+            return thickness_weighted_laplacian(q, gops, hf_rep, fm_rep, h_rep, cell_mask_3d)
+
+        lap1 = lap(flat)
         if c.K_h > 0:
-            dflat = dflat + c.K_h * lap
+            dflat = dflat + c.K_h * lap1
         if c.K_bih > 0:
-            dflat = dflat - c.K_bih * masked_laplacian(lap, gops, fm_rep, cell_mask_3d)
+            dflat = dflat - c.K_bih * lap(lap1)
     dtr = dflat.reshape(tr.shape)
     if not c.implicit_vertical_mixing:
         dtr = dtr + jax.vmap(
