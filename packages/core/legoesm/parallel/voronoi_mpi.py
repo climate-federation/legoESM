@@ -927,7 +927,7 @@ def make_voronoi_mpi_step(
     # class as the passed-in instance (``type(model)``) — so this substrate
     # ``parallel`` module never imports the atmosphere component yet still drives
     # the exact MPAS tendency the global model would.  ``.tendencies(state)``
-    # forwards to ``mpas_hydrostatic_tendencies(state, mesh, sigma_coord, config)``
+    # forwards to ``mpas_model_tendencies(state, mesh, sigma_coord, config)``
     # with the matching defaults (physics_tendency=None, dt=0.0).
     local_model = type(model)(local_mesh, sigma_coord, config)
     # The floors' conserving tracer clamp weights columns by THIS

@@ -125,11 +125,11 @@ def _tracer_state():
 
 def test_dycore_selects_flux_form_per_tracer():
     """The dycore must route ONLY the named tracers through the flux form."""
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import mpas_hydrostatic_tendencies
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     mesh, coord, cfg, state = _tracer_state()
-    base = mpas_hydrostatic_tendencies(state, mesh, coord, cfg, None, 0.0)
-    sel = mpas_hydrostatic_tendencies(
-        state, mesh, coord, cfg._replace(vert4_flux_form_tracers=("q_v",)), None, 0.0)
+    base = mpas_pe_tendencies(state, mesh, coord, cfg, None, 0.0, vertical_form="legacy")
+    sel = mpas_pe_tendencies(
+        state, mesh, coord, cfg._replace(vert4_flux_form_tracers=("q_v",)), None, 0.0, vertical_form="legacy")
     qv = state.tracers["q_v"].data
     expect = (vertical_del4_tracer_tendency_flux(qv, NU, coord.dsigma)
               - vertical_del4_T_tendency(qv, NU, coord.dsigma))
@@ -144,11 +144,11 @@ def test_dycore_selects_flux_form_per_tracer():
 def test_name_absent_from_state_is_skipped():
     """A selected name the state does not carry is unused (the q_v default on a
     tracer state without q_v must not crash); results equal the empty selection."""
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import mpas_hydrostatic_tendencies
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     mesh, coord, cfg, state = _tracer_state()
-    base = mpas_hydrostatic_tendencies(state, mesh, coord, cfg, None, 0.0)
-    sel = mpas_hydrostatic_tendencies(
-        state, mesh, coord, cfg._replace(vert4_flux_form_tracers=("q_i",)), None, 0.0)
+    base = mpas_pe_tendencies(state, mesh, coord, cfg, None, 0.0, vertical_form="legacy")
+    sel = mpas_pe_tendencies(
+        state, mesh, coord, cfg._replace(vert4_flux_form_tracers=("q_i",)), None, 0.0, vertical_form="legacy")
     for k in ("q_v", "q_c"):
         np.testing.assert_array_equal(np.asarray(sel.tracer_tendencies[k].data),
                                       np.asarray(base.tracer_tendencies[k].data))
@@ -159,34 +159,35 @@ def test_name_absent_from_state_is_skipped():
 def test_unknown_tracer_name_raises(names):
     """Typos (and a string split into characters by tuple()) raise in the dycore,
     which every lane that builds the config goes through."""
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import mpas_hydrostatic_tendencies
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     mesh, coord, cfg, state = _tracer_state()
     with pytest.raises(ValueError, match="unknown tracer names"):
-        mpas_hydrostatic_tendencies(
-            state, mesh, coord, cfg._replace(vert4_flux_form_tracers=names), None, 0.0)
+        mpas_pe_tendencies(
+            state, mesh, coord, cfg._replace(vert4_flux_form_tracers=names), None, 0.0, vertical_form="legacy")
 
 
 @pytest.mark.parametrize("names", [("qv",), tuple("q_v")])
 def test_unknown_tracer_name_raises_with_the_filter_off(names):
     """The typo guard does not depend on the filter running: nu_vert4_T = 0 and
     a dry state (no tracers) must still refuse a misspelled name."""
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import mpas_hydrostatic_tendencies
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     mesh, coord, cfg, state = _tracer_state()
     off = cfg._replace(nu_vert4_T=0.0, vert4_flux_form_tracers=names)
     with pytest.raises(ValueError, match="unknown tracer names"):
-        mpas_hydrostatic_tendencies(state, mesh, coord, off, None, 0.0)
+        mpas_pe_tendencies(state, mesh, coord, off, None, 0.0, vertical_form="legacy")
     with pytest.raises(ValueError, match="unknown tracer names"):
-        mpas_hydrostatic_tendencies(state._replace(tracers=None), mesh, coord, off, None, 0.0)
+        mpas_pe_tendencies(state._replace(tracers=None), mesh, coord, off, None, 0.0, vertical_form="legacy")
 
 
 def test_new_fields_are_appended_last():
-    """Positional ABI: the new fields sit at the end of both NamedTuples."""
+    """Positional ABI: the new fields sit at the end of both NamedTuples,
+    followed only by the later-appended ``vertical_form``."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
     from legoesm.driver.config import DycoreConfig
-    assert MPASPrimitiveEquationConfig._fields[-2:] == (
-        "vert4_flux_form_tracers", "vert4_log_form_tracers")
-    assert DycoreConfig._fields[-2:] == (
-        "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers")
+    assert MPASPrimitiveEquationConfig._fields[-3:] == (
+        "vert4_flux_form_tracers", "vert4_log_form_tracers", "vertical_form")
+    assert DycoreConfig._fields[-3:] == (
+        "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers", "vertical_form")
 
 
 def test_every_builder_forwarding_the_filter_forwards_the_form():

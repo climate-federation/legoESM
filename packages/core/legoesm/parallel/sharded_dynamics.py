@@ -3758,8 +3758,8 @@ def make_voronoi_sharded_step(
     # atmosphere component (federation: legoesm-core stays standalone-installable).
     # The free function is needed (not ``.tendencies``) because each device runs
     # it on its own rank-local, traced mesh.
-    mpas_hydrostatic_tendencies = getattr(model, "sharded_tendency_fn", None)
-    if mpas_hydrostatic_tendencies is None:
+    mpas_tendency_fn = getattr(model, "sharded_tendency_fn", None)
+    if mpas_tendency_fn is None:
         raise TypeError(
             f"{type(model).__name__} does not expose a 'sharded_tendency_fn' "
             f"staticmethod; the multi-device Voronoi sharder needs the free "
@@ -4140,7 +4140,7 @@ def make_voronoi_sharded_step(
                         "yet; the interior/rim core is dry-only")
                 _sub_mesh = jax.tree.map(lambda x: x[0], rim_sl[0])
                 du_o, dT_o, dps_o = interior_rim_tendency(
-                    mpas_hydrostatic_tendencies, sigma, cfg, dt_val,
+                    mpas_tendency_fn, sigma, cfg, dt_val,
                     u_shard, T_shard, ps_shard, phis_shard,
                     u_local, T_local, ps_local, phis_local,
                     my_mesh, _sub_mesh,
@@ -4174,13 +4174,13 @@ def make_voronoi_sharded_step(
                            staggering="cell"),
                 tracers=tracers_local,
             )
-            tend = mpas_hydrostatic_tendencies(
+            tend = mpas_tendency_fn(
                 local_state, my_mesh, sigma, cfg, dt=dt_val,
                 fence_pv_flux=True,
             )
 
             # Owned shards only.  Tracer ADVECTION tendencies ride back
-            # in the same packed wire order (mpas_hydrostatic_tendencies
+            # in the same packed wire order (mpas_tendency_fn
             # always returns tracer_tendencies for a tracered state).
             if tkeys:
                 dq_owned = jnp.concatenate(
@@ -4361,7 +4361,7 @@ def make_voronoi_sharded_step(
                     s = _refill(s)
                 keep_c = (_owned_c | (cell_ring <= thr))[:, None]
                 keep_e = (_owned_e | (edge_ring <= thr))[:, None]
-                tend = mpas_hydrostatic_tendencies(
+                tend = mpas_tendency_fn(
                     s, my_mesh, sigma, cfg, dt=dt_val,
                     fence_pv_flux=True,
                 )

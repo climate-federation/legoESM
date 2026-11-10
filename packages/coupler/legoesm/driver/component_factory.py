@@ -1169,6 +1169,7 @@ def create_atmosphere_dycore(
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (no-op under the borrow)
             # Sigma-lane vertical advection scheme (see DycoreConfig).
             vert_advection_scheme=dc.mpas_vert_advection_scheme,
+            vertical_form=dc.vertical_form,
             sponge_del2_top_layers=int(dc.mpas_sponge_del2_top_layers),
             sponge_del2_top_factor=float(dc.mpas_sponge_del2_top_factor),
             # Divergence-selective biharmonic damping (CAM-FV ldiv4).  The
@@ -1586,6 +1587,7 @@ def create_atmosphere_dycore(
             # own per-row 0.01*area_row^2/dt (NOT diff.div_damp4, whose
             # smallest-cell / dx_min^2 value is wrong on a lat-lon grid).
             nu_div4_scale=dc.mpas_div_damp4_scale,
+            vertical_form=dc.vertical_form,
         )
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)

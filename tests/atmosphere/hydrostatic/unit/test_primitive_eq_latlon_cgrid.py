@@ -10,10 +10,10 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonPrimitiveEquationModel,
     CGridLatLonPrimitiveEquationConfig,
     CGridLatLonHydrostaticState,
-    cgrid_latlon_hydrostatic_tendencies,
     hydrostatic_to_cgrid,
     cgrid_to_hydrostatic,
 )
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
 from legoesm.atmosphere.forcing.idealized.held_suarez import (
     held_suarez_init_latlon,
     held_suarez_forcing_latlon,
@@ -72,7 +72,7 @@ class TestShapes:
 
     def test_tendency_shapes(self, grid, sigma):
         state = _make_rest_state(grid, sigma)
-        du, dv, dT, dps, _ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        du, dv, dT, dps, _ = cgrid_latlon_pe_tendencies(state, grid, sigma, vertical_form="legacy")
         n_lat, n_lon = grid.n_lat, grid.n_lon
         nlev = sigma.n_levels
         assert du.shape == (n_lat, n_lon + 1, nlev)
@@ -89,7 +89,7 @@ class TestRestState:
 
     def test_tendencies_finite(self, grid, sigma):
         state = _make_rest_state(grid, sigma)
-        du, dv, dT, dps, _ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        du, dv, dT, dps, _ = cgrid_latlon_pe_tendencies(state, grid, sigma, vertical_form="legacy")
         assert jnp.all(jnp.isfinite(du))
         assert jnp.all(jnp.isfinite(dv))
         assert jnp.all(jnp.isfinite(dT))
@@ -97,13 +97,13 @@ class TestRestState:
 
     def test_wind_tendencies_zero(self, grid, sigma):
         state = _make_rest_state(grid, sigma)
-        du, dv, _, _, _ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        du, dv, _, _, _ = cgrid_latlon_pe_tendencies(state, grid, sigma, vertical_form="legacy")
         assert jnp.allclose(du, 0.0, atol=1e-8)
         assert jnp.allclose(dv, 0.0, atol=1e-8)
 
     def test_ps_tendency_zero(self, grid, sigma):
         state = _make_rest_state(grid, sigma)
-        _, _, _, dps, _ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        _, _, _, dps, _ = cgrid_latlon_pe_tendencies(state, grid, sigma, vertical_form="legacy")
         assert jnp.allclose(dps, 0.0, atol=1e-10)
 
 
@@ -135,7 +135,7 @@ class TestAdiabaticCorrection:
         phis = jnp.zeros((n_lat, n_lon))
         state = CGridLatLonHydrostaticState(u=u, v=v, T=T, p_s=p_s, phis=phis)
 
-        _, _, dT, _, _ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        _, _, dT, _, _ = cgrid_latlon_pe_tendencies(state, grid, sigma, vertical_form="legacy")
 
         # The κ T v·∇(ln p_s) term should be nonzero where u * d(ln p_s)/dx ≠ 0
         max_dT = float(jnp.max(jnp.abs(dT)))
@@ -148,7 +148,7 @@ class TestAdiabaticCorrection:
         (grad(ln p_s) = 0), so dT/dt comes only from advection+omega terms.
         """
         state = _make_rest_state(grid, sigma)
-        _, _, dT_rest, _, _ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        _, _, dT_rest, _, _ = cgrid_latlon_pe_tendencies(state, grid, sigma, vertical_form="legacy")
         # Rest state with uniform T and p_s → dT/dt = 0
         assert jnp.allclose(dT_rest, 0.0, atol=1e-8)
 
@@ -616,7 +616,7 @@ class TestHybridCoordinate:
             p_s=jnp.full((n_lat, n_lon), 1.0e5),
             phis=jnp.zeros((n_lat, n_lon)),
         )
-        du, dv, dT, dps, _ = cgrid_latlon_hydrostatic_tendencies(state, grid, hybrid)
+        du, dv, dT, dps, _ = cgrid_latlon_pe_tendencies(state, grid, hybrid, vertical_form="legacy")
         assert jnp.all(jnp.isfinite(du))
         assert jnp.allclose(du, 0.0, atol=1e-6)
 
@@ -645,8 +645,8 @@ class TestHybridCoordinate:
         phis = jnp.zeros((n_lat, n_lon))
         state = CGridLatLonHydrostaticState(
             u=u, v=v, T=T, p_s=p_s, phis=phis)
-        _, _, _, dps, _ = cgrid_latlon_hydrostatic_tendencies(
-            state, grid, hybrid)
+        _, _, _, dps, _ = cgrid_latlon_pe_tendencies(
+            state, grid, hybrid, vertical_form="legacy")
         max_dps = float(jnp.max(jnp.abs(dps)))
         assert max_dps > 1e-4, (
             f"dp_s/dt should be nonzero with sloping p_s in hybrid coords "
@@ -857,14 +857,14 @@ class TestConvergencePE:
         )
 
         state_32 = _make_rest_state(grid, sigma)
-        _, _, dT_32, _, _ = cgrid_latlon_hydrostatic_tendencies(state_32, grid, sigma)
+        _, _, dT_32, _, _ = cgrid_latlon_pe_tendencies(state_32, grid, sigma, vertical_form="legacy")
         l2_32 = float(jnp.sqrt(
             jnp.sum(dT_32**2 * grid.area[:, :, None])
             / (grid.total_area * sigma.n_levels)
         ))
 
         state_64 = _make_rest_state(fine_grid, sigma)
-        _, _, dT_64, _, _ = cgrid_latlon_hydrostatic_tendencies(state_64, fine_grid, sigma)
+        _, _, dT_64, _, _ = cgrid_latlon_pe_tendencies(state_64, fine_grid, sigma, vertical_form="legacy")
         l2_64 = float(jnp.sqrt(
             jnp.sum(dT_64**2 * fine_grid.area[:, :, None])
             / (fine_grid.total_area * sigma.n_levels)
@@ -887,7 +887,7 @@ class TestPoleRegionAccuracy:
         """Near-pole tendency magnitudes should not blow up relative to mid-latitudes."""
         hs = held_suarez_init_latlon(grid, sigma)
         state = hydrostatic_to_cgrid(hs, grid)
-        du, dv, dT, dps, _ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        du, dv, dT, dps, _ = cgrid_latlon_pe_tendencies(state, grid, sigma, vertical_form="legacy")
 
         # Compare max |dT| at poles (first/last 2 rows) vs mid-latitudes
         n_lat = grid.n_lat
@@ -907,7 +907,7 @@ class TestPoleRegionAccuracy:
         """Surface pressure tendency should be zonally symmetric at poles."""
         hs = held_suarez_init_latlon(grid, sigma)
         state = hydrostatic_to_cgrid(hs, grid)
-        _, _, _, dps, _ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        _, _, _, dps, _ = cgrid_latlon_pe_tendencies(state, grid, sigma, vertical_form="legacy")
 
         # First and last latitude rows of dp_s/dt should be nearly uniform
         dps_south = dps[0, :]
@@ -966,8 +966,8 @@ class TestSigmaContinuityFluxForm:
         state = CGridLatLonHydrostaticState(
             u=u, v=v, T=T, p_s=p_s, phis=phis)
 
-        _, _, _, dps, _ = cgrid_latlon_hydrostatic_tendencies(
-            state, grid, sigma)
+        _, _, _, dps, _ = cgrid_latlon_pe_tendencies(
+            state, grid, sigma, vertical_form="legacy")
 
         # dp_s/dt should be nonzero (nonzero wind + sloping p_s)
         max_dps = float(jnp.max(jnp.abs(dps)))
@@ -982,8 +982,8 @@ class TestSigmaContinuityFluxForm:
         div(p_s * v) = p_s * div(v) when p_s is constant.
         """
         state = _make_rest_state(grid, sigma)
-        _, _, _, dps, _ = cgrid_latlon_hydrostatic_tendencies(
-            state, grid, sigma)
+        _, _, _, dps, _ = cgrid_latlon_pe_tendencies(
+            state, grid, sigma, vertical_form="legacy")
         assert jnp.allclose(dps, 0.0, atol=1e-10)
 
 
@@ -1104,8 +1104,8 @@ class TestTopSponge:
         """sponge_coeff=0 (default) is bit-for-bit the no-sponge tendency."""
         state = self._uniform_wind_state(grid, sigma)
         cfg_off = CGridLatLonPrimitiveEquationConfig(sponge_coeff=0.0)
-        du0, dv0, *_ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma, cfg_off)
-        du_def, dv_def, *_ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        du0, dv0, *_ = cgrid_latlon_pe_tendencies(state, grid, sigma, cfg_off, vertical_form="legacy")
+        du_def, dv_def, *_ = cgrid_latlon_pe_tendencies(state, grid, sigma, vertical_form="legacy")
         assert jnp.array_equal(du0, du_def)
         assert jnp.array_equal(dv0, dv_def)
 
@@ -1117,10 +1117,10 @@ class TestTopSponge:
         cfg_off = CGridLatLonPrimitiveEquationConfig(sponge_coeff=0.0)
         cfg_on = CGridLatLonPrimitiveEquationConfig(
             sponge_coeff=1.0 / 86400.0, sponge_width_m=10000.0)
-        du_off, dv_off, *_ = cgrid_latlon_hydrostatic_tendencies(
-            state, grid, sigma, cfg_off)
-        du_on, dv_on, *_ = cgrid_latlon_hydrostatic_tendencies(
-            state, grid, sigma, cfg_on)
+        du_off, dv_off, *_ = cgrid_latlon_pe_tendencies(
+            state, grid, sigma, cfg_off, vertical_form="legacy")
+        du_on, dv_on, *_ = cgrid_latlon_pe_tendencies(
+            state, grid, sigma, cfg_on, vertical_form="legacy")
 
         d_du = du_on - du_off        # == -k(z) * u,  (n_lat, n_lon+1, nlev)
         # SIGN: u = +20 > 0 -> sponge tendency is <= 0 everywhere (toward rest).
@@ -1155,8 +1155,8 @@ class TestTopSponge:
 
         def sponge_only_loss(u):
             s = state._replace(u=u)
-            du_on, *_ = cgrid_latlon_hydrostatic_tendencies(s, grid, hyb, cfg_on)
-            du_off, *_ = cgrid_latlon_hydrostatic_tendencies(s, grid, hyb, cfg_off)
+            du_on, *_ = cgrid_latlon_pe_tendencies(s, grid, hyb, cfg_on, vertical_form="legacy")
+            du_off, *_ = cgrid_latlon_pe_tendencies(s, grid, hyb, cfg_off, vertical_form="legacy")
             return jnp.sum((du_on - du_off) ** 2)   # == sum((k(z)*u)^2), sponge-only
 
         g = jax.grad(sponge_only_loss)(state.u)
@@ -1188,17 +1188,17 @@ class TestHyperdiffusion:
     def _del4_part(self, state, grid, sigma, nu=None):
         on = CGridLatLonPrimitiveEquationConfig(nu_del4=nu or self.NU4)
         off = CGridLatLonPrimitiveEquationConfig()
-        t_on = cgrid_latlon_hydrostatic_tendencies(
-            state, grid, sigma, on, dt=self.DT)
-        t_off = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma, off)
+        t_on = cgrid_latlon_pe_tendencies(
+            state, grid, sigma, on, dt=self.DT, vertical_form="legacy")
+        t_off = cgrid_latlon_pe_tendencies(state, grid, sigma, off, vertical_form="legacy")
         return [a - b for a, b in zip(t_on[:4], t_off[:4])]
 
     def test_off_is_byte_identical(self, grid, sigma):
         state = self._checkerboard_state(grid, sigma)
-        a = cgrid_latlon_hydrostatic_tendencies(
+        a = cgrid_latlon_pe_tendencies(
             state, grid, sigma, CGridLatLonPrimitiveEquationConfig(nu_del4=0.0),
-            dt=self.DT)
-        b = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+            dt=self.DT, vertical_form="legacy")
+        b = cgrid_latlon_pe_tendencies(state, grid, sigma, vertical_form="legacy")
         for x, y in zip(a[:4], b[:4]):
             assert jnp.array_equal(x, y)
 
@@ -1206,7 +1206,7 @@ class TestHyperdiffusion:
         state = _make_rest_state(grid, sigma)
         cfg = CGridLatLonPrimitiveEquationConfig(nu_del4=self.NU4)
         with pytest.raises(ValueError, match="requires"):
-            cgrid_latlon_hydrostatic_tendencies(state, grid, sigma, cfg)
+            cgrid_latlon_pe_tendencies(state, grid, sigma, cfg, vertical_form="legacy")
 
     def test_damps_zonal_checkerboard_at_the_del4_rate(self, grid, sigma):
         """A lon-alternating u and T decay at nu*(4/dx^2)^2 on an equatorial
@@ -1299,8 +1299,8 @@ class TestDivergenceDamping4:
     def _div4_part(self, state, grid, sigma, scale=1.0, dt=None):
         dt = self.DT if dt is None else dt
         on = CGridLatLonPrimitiveEquationConfig(nu_div4_scale=scale)
-        t_on = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma, on, dt=dt)
-        t_off = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        t_on = cgrid_latlon_pe_tendencies(state, grid, sigma, on, dt=dt, vertical_form="legacy")
+        t_off = cgrid_latlon_pe_tendencies(state, grid, sigma, vertical_form="legacy")
         return [a - b for a, b in zip(t_on[:4], t_off[:4])]
 
     def _checkerboard(self, grid, sigma, amp=1.0):
@@ -1329,10 +1329,10 @@ class TestDivergenceDamping4:
 
     def test_off_is_byte_identical(self, grid, sigma):
         state = self._checkerboard(grid, sigma)
-        a = cgrid_latlon_hydrostatic_tendencies(
+        a = cgrid_latlon_pe_tendencies(
             state, grid, sigma,
-            CGridLatLonPrimitiveEquationConfig(nu_div4_scale=0.0), dt=self.DT)
-        b = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+            CGridLatLonPrimitiveEquationConfig(nu_div4_scale=0.0), dt=self.DT, vertical_form="legacy")
+        b = cgrid_latlon_pe_tendencies(state, grid, sigma, vertical_form="legacy")
         for x, y in zip(a[:4], b[:4]):
             assert jnp.array_equal(x, y)
         # control: the same state with the damping ON does differ
@@ -1341,8 +1341,8 @@ class TestDivergenceDamping4:
     def test_requires_dt(self, grid, sigma):
         cfg = CGridLatLonPrimitiveEquationConfig(nu_div4_scale=1.0)
         with pytest.raises(ValueError, match="requires"):
-            cgrid_latlon_hydrostatic_tendencies(
-                _make_rest_state(grid, sigma), grid, sigma, cfg)
+            cgrid_latlon_pe_tendencies(
+                _make_rest_state(grid, sigma), grid, sigma, cfg, vertical_form="legacy")
 
     def test_nondivergent_flow_gets_zero_tendency(self, grid, sigma):
         """A zonally uniform zonal jet has an exactly-zero discrete divergence,

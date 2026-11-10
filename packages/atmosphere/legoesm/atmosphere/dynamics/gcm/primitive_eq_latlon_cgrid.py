@@ -54,6 +54,9 @@ from legoesm.grids.operators_latlon_cgrid import (
     cell_to_cgrid_winds,
     pad_lon_cgrid,
 )
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import (
+    cgrid_latlon_pe_tendencies,
+)
 from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     absolute_vorticity_coriolis,
     nu_del4_row_profiles,
@@ -254,6 +257,11 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # the poles, built from the pole cell it is ~1000x too weak.  0.0
     # (default) is OFF and byte-identical; needs ``dt`` in the tendency.
     nu_div4_scale: float = 0.0
+    # Shared PE core vertical form (``primitive_eq_generic.VERTICAL_FORMS``).
+    # "legacy" (default) runs :func:`latlon_legacy_pe_tendencies`, this lane's
+    # pre-core body, unchanged; the driver fills it from
+    # ``DycoreConfig.vertical_form``.  Appended at the tuple END.
+    vertical_form: str = "legacy"
 
 
 # CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same
@@ -543,7 +551,7 @@ def latlon_dissipation(du_dt, dv_dt, dT_dt, u, v, T, p_s, grid, sigma_coord,
     if config.nu_del4 > 0.0:
         if dt is None:
             raise ValueError(
-                "cgrid_latlon_hydrostatic_tendencies: nu_del4 > 0 requires "
+                "latlon_legacy_pe_tendencies: nu_del4 > 0 requires "
                 "the dt argument (the per-row pole stability cap needs it).")
         nu_u, nu_v = nu_del4_row_profiles(
             grid, config.nu_del4, config.nu_del4_cfl_frac, dt)
@@ -567,7 +575,7 @@ def latlon_dissipation(du_dt, dv_dt, dT_dt, u, v, T, p_s, grid, sigma_coord,
     if config.nu_div4_scale > 0.0:
         if dt is None:
             raise ValueError(
-                "cgrid_latlon_hydrostatic_tendencies: nu_div4_scale > 0 "
+                "latlon_legacy_pe_tendencies: nu_div4_scale > 0 "
                 "requires the dt argument (the coefficient is 0.01*area^2/dt).")
         D = divergence_cgrid(u, v, grid, lat_pad=_lat_pad)
         nu_row = (config.nu_div4_scale * CAM_DIV4_RATE
@@ -637,7 +645,7 @@ def latlon_pole_bc(dv_dt, config):
     return dv_dt
 
 
-def cgrid_latlon_hydrostatic_tendencies(
+def latlon_legacy_pe_tendencies(
     state: CGridLatLonHydrostaticState,
     grid: LatLonGrid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
@@ -647,6 +655,13 @@ def cgrid_latlon_hydrostatic_tendencies(
     dt=None,
 ):
     """Compute hydrostatic PE tendencies on the lat-lon C-grid.
+
+    The shared PE core's ``"legacy"`` vertical form on this grid (call it
+    through ``primitive_eq_generic.cgrid_latlon_pe_tendencies``); TEMPORARY,
+    kept for comparability, retired after the A/B.  KNOWN DEFECTS: #930 (the
+    split vertical temperature transport leaves a 2dz dry-adiabat residual)
+    and the in-tendency ``T_min`` floor (a hard clip: not conserving, not
+    smooth).
 
     Supports both pure sigma and hybrid sigma-pressure vertical coordinates.
 
@@ -1190,8 +1205,9 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         return jnp.sum(ps_dry.astype(acc) * _grid.area.astype(acc))
 
     def tendencies(self, state: CGridLatLonHydrostaticState):
-        return cgrid_latlon_hydrostatic_tendencies(
+        return cgrid_latlon_pe_tendencies(
             state, self.grid, self.sigma_coord, self.config, dt=self.dt,
+            vertical_form=self.config.vertical_form,
         )
 
     # ------------------------------------------------------------------
@@ -1289,7 +1305,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
         ``geom_pads``: optional ``(lat_pad, lat_pad_pole, cos_lat_pad)``
         precomputed stage-invariant geometry pads for the band grid,
-        forwarded to :func:`cgrid_latlon_hydrostatic_tendencies` (SPMD
+        forwarded to :func:`cgrid_latlon_pe_tendencies` (SPMD
         band step only; ``None`` everywhere else — byte-identical).
 
         OPERATOR-SPLIT physics (user decision 2026-09-28, the MPAS-lane
@@ -1323,9 +1339,9 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         state_c = cast_pytree(state, None, "compute")
 
         def tendency_fn(s):
-            du, dv, dT, dps, dq = cgrid_latlon_hydrostatic_tendencies(
+            du, dv, dT, dps, dq = cgrid_latlon_pe_tendencies(
                 s, grid, sigma_coord, self.config, geom_pads=geom_pads,
-                dt=dt,
+                dt=dt, vertical_form=self.config.vertical_form,
             )
 
             # Polar filter: damp high-frequency modes near poles for

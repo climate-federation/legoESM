@@ -60,6 +60,7 @@ from legoesm.core.operators_voronoi import (
     cell_to_edge_avg_3d,
     apvm_correction_3d,
 )
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.grids.vertical import (
     SigmaCoordinate,
@@ -233,6 +234,11 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # (``vertical_del4_tracer_tendency_log``).  Must not overlap
     # ``vert4_flux_form_tracers``.  Empty = unused (bit-identical).
     vert4_log_form_tracers: tuple = ()
+    # Shared PE core vertical form (``primitive_eq_generic.VERTICAL_FORMS``).
+    # "legacy" (default) runs :func:`mpas_legacy_pe_tendencies`, this lane's
+    # pre-core body, unchanged; the driver fills it from
+    # ``DycoreConfig.vertical_form``.  Appended at the tuple END.
+    vertical_form: str = "legacy"
 
 
 # ============================================================================
@@ -242,7 +248,7 @@ class MPASPrimitiveEquationConfig(NamedTuple):
 class ThermoTerms(NamedTuple):
     """The three constituents of the dry thermodynamic tendency, as assembled.
 
-    Diagnostic only: returned by :func:`mpas_hydrostatic_tendencies` when it is
+    Diagnostic only: returned by :func:`mpas_legacy_pe_tendencies` when it is
     called with ``return_thermo_terms=True``, which no production path does.
     ``horiz_adv + horiz_diff + vert_adv + adiabatic_ps`` is the thermodynamic
     tendency before the vertical del4 filter and before physics are added, so a
@@ -625,7 +631,7 @@ def mpas_tracer_tendencies(tracers, u_3d, mesh, sigma_coord, config, _hybrid,
     return tracer_tends_out
 
 
-def mpas_hydrostatic_tendencies(
+def mpas_legacy_pe_tendencies(
     state: MPASHydrostaticState,
     mesh: VoronoiMesh,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
@@ -636,6 +642,12 @@ def mpas_hydrostatic_tendencies(
     fence_pv_flux: bool = False,
 ) -> MPASHydrostaticTendencies | tuple[MPASHydrostaticTendencies, "ThermoTerms"]:
     """Compute tendencies for the hydrostatic PE on an MPAS mesh.
+
+    The shared PE core's ``"legacy"`` vertical form on this grid (call it
+    through ``primitive_eq_generic.mpas_pe_tendencies``); TEMPORARY, kept for
+    comparability, retired after the A/B.  KNOWN DEFECT: #1029 (the analytic
+    ``B p_s / p`` hybrid pressure-gradient factor leaves a spurious wind
+    tendency in a resting atmosphere over terrain).
 
     Parameters
     ----------
@@ -1090,6 +1102,16 @@ def _vertical_advection_edge(
 # Model class
 # ============================================================================
 
+def mpas_model_tendencies(state, mesh, sigma_coord, config, physics_tendency=None,
+                          dt=0.0, *, return_thermo_terms=False, fence_pv_flux=False):
+    """The model's tendency RHS: the shared PE core with ``config.vertical_form``
+    (the multi-device sharder calls it with a rank-local mesh and the config)."""
+    return mpas_pe_tendencies(
+        state, mesh, sigma_coord, config, physics_tendency, dt,
+        vertical_form=config.vertical_form, return_thermo_terms=return_thermo_terms,
+        fence_pv_flux=fence_pv_flux)
+
+
 class MPASPrimitiveEquationModel(IntegrationMixin):
     """Hydrostatic primitive equation model on an MPAS Voronoi mesh.
 
@@ -1107,7 +1129,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
     #: legoesm-core free of an upward atmosphere dependency.  (The ``.tendencies``
     #: method binds ``self.mesh``; the sharder needs the per-device mesh, so it
     #: needs the unbound function.)
-    sharded_tendency_fn = staticmethod(mpas_hydrostatic_tendencies)
+    sharded_tendency_fn = staticmethod(mpas_model_tendencies)
 
     def __init__(
         self,
@@ -1172,7 +1194,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         dt: float = 0.0,
         physics_tendency: MPASHydrostaticTendencies | None = None,
     ) -> MPASHydrostaticTendencies:
-        return mpas_hydrostatic_tendencies(
+        return mpas_model_tendencies(
             state, self.mesh, self.sigma_coord, self.config,
             physics_tendency=physics_tendency, dt=dt,
         )
@@ -1307,7 +1329,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         # --- 1. Dynamics: RK-integrate dynamics-only tendencies (physics OFF;
         #        tracer ADVECTION stays in the dynamics, mass-consistently). ---
         def dyn_tendency_fn(s):
-            tend = mpas_hydrostatic_tendencies(
+            tend = mpas_model_tendencies(
                 s, self.mesh, self.sigma_coord, self.config,
                 physics_tendency=None, dt=dt,
             )

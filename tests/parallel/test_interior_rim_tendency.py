@@ -26,10 +26,10 @@ jax.config.update("jax_enable_x64", True)
 
 
 def _reference_and_split(n_dev=6, subdivision=6, nlev=4, stencil_depth=2,
-                         halo_depth=4, nu4=0.0, n_rounds=3):
+                         halo_depth=4, nu4=0.0, n_rounds=3, form="legacy"):
     from legoesm.core.field import Field
     from legoesm.core.state import MPASHydrostaticState
-    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.parallel.voronoi_partition import (
         build_local_mesh, reorder_voronoi_for_sharding,
@@ -39,9 +39,12 @@ def _reference_and_split(n_dev=6, subdivision=6, nlev=4, stencil_depth=2,
         _build_rim_rings_by_dependency, _build_rim_rings_structural,
         _build_voronoi_partition_infra, interior_rim_tendency,
     )
+    from functools import partial
+
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-        MPASPrimitiveEquationConfig, mpas_hydrostatic_tendencies,
+        MPASPrimitiveEquationConfig,
     )
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
 
     mesh = create_voronoi_mesh(subdivision_level=subdivision)
     mesh = reorder_voronoi_for_sharding(mesh, n_dev, method="metis")
@@ -49,7 +52,9 @@ def _reference_and_split(n_dev=6, subdivision=6, nlev=4, stencil_depth=2,
      _owner) = _build_voronoi_partition_infra(mesh, n_dev,
                                               halo_depth=halo_depth)
 
-    sigma = create_sigma_coordinate(nlev)
+    # the Arakawa-Suarez forms are hybrid-only
+    sigma = create_sigma_coordinate(nlev) if form in ("legacy", "sb81_theta") \
+        else standard_hybrid_levels(nlev)
     cfg = (MPASPrimitiveEquationConfig(nu_del4=nu4, nu_del4_ps=nu4)
            if nu4 > 0 else MPASPrimitiveEquationConfig())
     dt = 100.0
@@ -65,7 +70,7 @@ def _reference_and_split(n_dev=6, subdivision=6, nlev=4, stencil_depth=2,
     # structural connectivity union or its round count missed a real
     # dependence -- a bug, not a tolerance.
     dep_c, dep_e = _build_rim_rings_by_dependency(
-        mpas_hydrostatic_tendencies, sigma, cfg, dt, mesh, partitions,
+        partial(mpas_pe_tendencies, vertical_form=form), sigma, cfg, dt, mesh, partitions,
         max_lc, max_le)
     for d in range(n_dev):
         struct_c = cell_rim[d] != _WIDE_RING_FAR
@@ -127,15 +132,15 @@ def _reference_and_split(n_dev=6, subdivision=6, nlev=4, stencil_depth=2,
                        staggering="cell"),
             tracers=None,
         )
-        ref = mpas_hydrostatic_tendencies(ref_state, local_mesh, sigma, cfg,
-                                          dt=dt)
+        ref = mpas_pe_tendencies(ref_state, local_mesh, sigma, cfg,
+                                 dt=dt, vertical_form=form)
         ref_du = np.asarray(ref.du_dt.data[:n_oe])
         ref_dT = np.asarray(ref.dT_dt.data[:n_oc])
         ref_dps = np.asarray(ref.dp_s_dt.data[:n_oc])
 
         # Split: interior pass sees ONLY the owned rows + the wrong pad.
         du, dT, dps = interior_rim_tendency(
-            mpas_hydrostatic_tendencies, sigma, cfg, dt,
+            partial(mpas_pe_tendencies, vertical_form=form), sigma, cfg, dt,
             u_g[le][:n_oe], T_g[lc][:n_oc], ps_g[lc][:n_oc], phis_g[lc][:n_oc],
             u_full, T_full, ps_full, phis_full,
             local_mesh, plan["sub_mesh"],
@@ -151,11 +156,13 @@ def _reference_and_split(n_dev=6, subdivision=6, nlev=4, stencil_depth=2,
         pytest.skip("no device carried a non-empty rim on this fixture")
 
 
-@pytest.mark.parametrize("nu4,n_rounds", [
-    (0.0, 3),      # bare dry core: 2-hop stencil, 3 incidence rounds cover it
-    (1e16, 5),     # production hyperdiffusion (del4): 4 incidence hops, +1 margin
+@pytest.mark.parametrize("nu4,n_rounds,form", [
+    (0.0, 3, "legacy"),      # bare dry core: 2-hop stencil, 3 incidence rounds cover it
+    (1e16, 5, "legacy"),     # production hyperdiffusion (del4): 4 incidence hops, +1 margin
+    (0.0, 3, "sb81_theta"),  # the shared-core forms on the halo-overlap lane
+    (0.0, 3, "as83"),
 ])
-def test_interior_rim_equals_single_pass(nu4, n_rounds):
+def test_interior_rim_equals_single_pass(nu4, n_rounds, form):
     # float64; the only allowed difference is stencil-sum re-association
     # between the submesh order and the local-mesh order. The del4 case is the
     # production configuration (component_factory sets nu_del4>0); n_rounds is
@@ -165,7 +172,7 @@ def test_interior_rim_equals_single_pass(nu4, n_rounds):
     tol = 1e-8
     any_checked = False
     for (d, du, dT, dps, ref_du, ref_dT, ref_dps) in _reference_and_split(
-            nu4=nu4, n_rounds=n_rounds):
+            nu4=nu4, n_rounds=n_rounds, form=form):
         any_checked = True
         assert np.all(np.isfinite(du)) and np.all(np.isfinite(dT)), (
             f"device {d}: non-finite tendency leaked from the pad")
