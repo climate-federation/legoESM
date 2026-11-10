@@ -132,6 +132,8 @@ class IFSWMSConfig(NamedTuple):
     speed_width_m_s: float = 0.01
     saturation_rel_width: float = 0.01
     deposit_rel_width: float = 0.01
+    # --- lane geometry (set at build time from the vertical coordinate) ---
+    launch_level: int = 0      # SUGWWMS NLAUNCHL(1), 1-based; 0 = unset (refused)
 
 
 def wms_launch_level(stpre) -> int:
@@ -373,3 +375,67 @@ def wms_heating(u, v, dudt, dvdt, dt: float, c_pd: float = constants.c_pd):
     ``-(u dudt + v dvdt + 0.5 dt (dudt^2 + dvdt^2)) / c_pd``, so that
     ``c_pd dT = -(KE(u + dt dudt) - KE(u))`` exactly per unit mass."""
     return -(u * dudt + v * dvdt + 0.5 * dt * (dudt * dudt + dvdt * dvdt)) * (1.0 / c_pd)
+
+
+def wms_carry_shape(ncol: int, nlev: int) -> tuple:
+    """GWD carry of the lane kernel: ``[:, :nlev, 0/1]`` the retained u/v
+    tendencies (callpar YDVARS%NOGW), ``[:, nlev, 0]`` the time [s] since the
+    last recompute at the start of the step."""
+    return (ncol, nlev + 1, 2)
+
+
+_FIRST_CALL_ELAPSED_S = 1.0e30   # seed: exceeds any interval, so step 1 recomputes
+
+
+def wms_carry_seed(ncol: int, nlev: int, dtype=None):
+    """Seed so the first step recomputes (callpar.F90:1340 NSTEP == NSTART)."""
+    c = jnp.zeros(wms_carry_shape(ncol, nlev), dtype=dtype)
+    return c.at[:, nlev, 0].set(_FIRST_CALL_ELAPSED_S)
+
+
+def ifs_wms_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
+                config: IFSWMSConfig, spectrum_in, *, cell_area=None,
+                g: float = constants.g, c_pd: float = constants.c_pd,
+                radius: float = constants.R_earth):
+    """GWD lane kernel for the WMS scheme (callpar.F90:1337-1361).
+
+    Recomputes :func:`wms_drag` when the time since the last call reaches
+    GTPHYGWWMS (and on the first step), otherwise re-applies the retained
+    u/v tendencies carried in ``spectrum_in`` (:func:`wms_carry_shape`).
+    Heating every step from the current winds, energy-exact for the step
+    (:func:`wms_heating`, vote V11b).  ``cell_area`` [m2] gives PGAW (A17).
+    Precipitation is not passed: unused at NGAUSS = 2 (vote G4).
+    Returns ``(GWDOutput, carry_out)``."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+    if config.launch_level < 2:
+        raise ValueError("ifs_wms: IFSWMSConfig.launch_level is unset; the lane "
+                         "builder sets it from the vertical coordinate (SUGWWMS).")
+    if cell_area is None:
+        raise ValueError("ifs_wms needs the per-column cell area (PGAW, A17); "
+                         "this lane does not supply it.")
+    ncol, nlev = u.shape
+    gt = wms_call_interval(float(dt))
+    elapsed = spectrum_in[:, nlev, 0]
+    pgaw = cell_area / (4.0 * math.pi * radius * radius)
+
+    def _recompute(_):
+        du, dv, _, _ = wms_drag(T, u, v, p_full, p_half, g * z_full, lat, pgaw,
+                                launch_level=config.launch_level, dt_gw=gt,
+                                cfg=config, g=g, c_pd=c_pd, radius=radius)
+        return du, dv
+
+    def _keep(_):
+        return spectrum_in[:, :nlev, 0], spectrum_in[:, :nlev, 1]
+
+    # one recompute decision per call (all columns share the model clock)
+    due = elapsed[0] >= gt - 0.5 * dt
+    du, dv = jax.lax.cond(due, _recompute, _keep, None)
+    new_elapsed = jnp.where(due, dt, elapsed + dt)
+    carry = jnp.concatenate(
+        [jnp.stack([du, dv], axis=-1),
+         jnp.stack([new_elapsed, jnp.zeros_like(new_elapsed)], axis=-1)[:, None, :]],
+        axis=1)
+    dT = wms_heating(u, v, du, dv, dt, c_pd=c_pd)
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    eps = jnp.sum(c_pd * dT * dp, axis=1) / g
+    return GWDOutput(du_dt=du, dv_dt=dv, dT_dt=dT, eps_gwd=eps, dq_dt=None), carry

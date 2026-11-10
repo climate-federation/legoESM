@@ -54,6 +54,7 @@ __param_spec__ = {
         "scheme_key": "atm.chem.MethoxConfig",
         "excluded": {
             "q_lim_kg_kg": "forcing-derived: set from surface CH4 by methox_q_lim (updrgas), not tuned",
+            "ch4_vmr_constant": "forcing: the constant-GHG run's CH4 mole fraction (radiation's), not tuned",
             "qlim_gate_rel_width": "numerics: RULE 5 smoothing width (vote V7), 0 = oracle hard form",
         },
         "params": {},
@@ -83,6 +84,12 @@ class MethoxConfig(NamedTuple):
     q_lim_kg_kg: float = _RQLIM_CONST
     # --- numerics (RULE 5) ---
     qlim_gate_rel_width: float = 0.01
+    # --- lane (make_methox_physics) ---
+    enabled: bool = False
+    # Constant-GHG run (ghg_forcing='constant'): the CH4 mole fraction
+    # radiation uses (ch4_ppbv).  None = external GHG: CH4 must come from the
+    # per-step forcing, and its absence is an error (retro-vote R5a).
+    ch4_vmr_constant: float | None = None
 
 
 def methox_q_lim(ch4_vmr):
@@ -118,3 +125,42 @@ def methox_tendency(q, p_full, cfg: MethoxConfig = MethoxConfig()):
     tdays_ph = jnp.where(p <= _P_TOP_PH, _TAU_TOP_PH_DAYS,
                          1.0 / (jnp.exp(zarg) - _PHOTO_OFFSET))
     return ten - jnp.where(ph, q / (_SECONDS_PER_DAY * tdays_ph), 0.0)
+
+
+def make_methox_physics(cfg: MethoxConfig):
+    """MPAS-lane physics module: METHOX water-vapour tendency on the
+    pre-physics vapour (parallel split, DEPARTURE M1a from callpar's
+    sequential update) with RQLIM from the CH4 radiation reads this step
+    (``forcing["ghg_vmr"]["ch4"]``, UPDRGAS LMETHOX_TIMEVAR, vote M2a)."""
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticTendencies
+
+    def physics_fn(state, mesh, sigma_coord, forcing=None):
+        ghg = None if forcing is None else forcing.get("ghg_vmr")
+        if cfg.ch4_vmr_constant is not None:
+            ch4 = cfg.ch4_vmr_constant
+        elif ghg is not None and "ch4" in ghg:
+            ch4 = ghg["ch4"]
+        else:
+            raise ValueError("ifs_methox: external GHG forcing carries no CH4 "
+                             "this step")
+        T = state.T.data
+        q_v = state.tracers["q_v"].data
+        p_full = sigma_coord.pressure_at_full(state.p_s.data).reshape(T.shape)
+        dq = methox_tendency(q_v, p_full, cfg._replace(
+            q_lim_kg_kg=methox_q_lim(jnp.asarray(ch4, q_v.dtype))))
+        zero = jnp.zeros_like
+        return HydrostaticTendencies(
+            du_dt=state.u.replace(data=zero(state.u.data), name="du_dt_methox"),
+            dv_dt=(None if state.v is None
+                   else state.v.replace(data=zero(state.v.data), name="dv_dt_methox")),
+            dT_dt=state.T.replace(data=zero(T), name="dT_dt_methox"),
+            dp_s_dt=state.p_s.replace(data=zero(state.p_s.data), name="dp_s_dt_methox"),
+            dphis_dt=state.phis.replace(data=zero(state.phis.data), name="dphis_dt_methox"),
+            tracer_tendencies={"q_v": Field(data=dq, name="dq_v_dt_methox",
+                                            dims=state.T.dims, units="kg/kg/s")},
+        )
+
+    physics_fn._wants_forcing = True
+    physics_fn.reset_state = lambda: None
+    return physics_fn

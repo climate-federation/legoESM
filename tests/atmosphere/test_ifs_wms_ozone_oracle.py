@@ -299,3 +299,53 @@ def test_methox_jits_with_traced_q_lim(fix):
 if __name__ == "__main__":
     np.savez_compressed(_GAP_FILE, **_default_gaps(dict(np.load(_FIX))))
     print("wrote", _GAP_FILE)
+
+
+def test_wired_wms_kernel_matches_oracle_and_retains(fix):
+    """Wired path (vote G2a): the GWD dispatch's ifs_wms kernel reproduces the
+    oracle (hard widths) on its first call, re-applies the retained tendency
+    until GTPHYGWWMS has elapsed, then recomputes; heating every step; the
+    composite with mcfarlane threads the same carry."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        get_gwd_fn, gwd_carry_seed, gwd_carry_shape,
+    )
+    g = "L137"
+    a = lambda k: jnp.asarray(fix[f"{g}_{k}"])
+    lev = wms_launch_level(fix[f"{g}_stpre"])
+    gcfg = GravityWaveDragConfig(scheme="ifs_wms",
+                                 ifs_wms=_HARD_WMS._replace(launch_level=lev))
+    name, fn, sub = get_gwd_fn(gcfg)
+    assert name == "ifs_wms"
+    ncol, nlev = fix[f"{g}_T"].shape
+    carry = gwd_carry_seed(gcfg, ncol, nlev)
+    assert carry.shape == gwd_carry_shape(gcfg, ncol, nlev)
+    area = jnp.asarray(fix[f"L_{g}_pgaw"]) * 4.0 * math.pi * constants.R_earth ** 2
+    z = a("geo_full") / constants.g
+    dt = 450.0
+    args = (a("u"), a("v"), a("T"), a("p_full"), a("p_half"), z, z, None, a("lat"), dt, sub)
+    out1, carry = fn(*args, carry, cell_area=area)
+    assert _err(out1.du_dt, fix[f"L_{g}_wms_dt450_PTENU"]) <= _TOL
+    assert _err(out1.dv_dt, fix[f"L_{g}_wms_dt450_PTENV"]) <= _TOL
+    np.testing.assert_array_equal(np.asarray(out1.dT_dt),
+                                  np.asarray(wms_heating(a("u"), a("v"), out1.du_dt, out1.dv_dt, dt)))
+    u2 = a("u") * 1.2          # sheared state (WMS is Galilean-invariant to a uniform shift)
+    n_keep = int(wms_call_interval(dt) / dt) - 1
+    for _ in range(n_keep):
+        out, carry = fn(u2, *args[1:], carry, cell_area=area)
+        np.testing.assert_array_equal(np.asarray(out.du_dt), np.asarray(out1.du_dt))
+    out, carry = fn(u2, *args[1:], carry, cell_area=area)   # interval reached
+    assert _err(out.du_dt, np.asarray(out1.du_dt)) > 1e-6
+    # composite threads the same carry and adds the orographic member
+    ccfg = gcfg._replace(scheme="mcfarlane+ifs_wms")
+    _, cfn, csub = get_gwd_fn(ccfg)
+    assert gwd_carry_shape(ccfg, ncol, nlev) == carry.shape
+    with pytest.raises(ValueError, match="cell area"):
+        fn(*args, gwd_carry_seed(gcfg, ncol, nlev))
+
+
+def test_wired_wms_refused_on_factory_lanes():
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import make_gwd_physics
+    with pytest.raises(ValueError, match="MPAS column lane"):
+        make_gwd_physics(GravityWaveDragConfig(scheme="mcfarlane+ifs_wms"), "hydrostatic", 300.0)
