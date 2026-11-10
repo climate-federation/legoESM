@@ -39,10 +39,47 @@
  },
  "producer_scripts": {
   "extract": "scripts/validate/ice_fidelity/si3_prather_multicycle_extract.py",
-  "score": "scripts/validate/ice_fidelity/si3_prather_multicycle_score.py"
+  "score": "scripts/validate/ice_fidelity/si3_prather_multicycle_score.py",
+  "spread": "scripts/validate/ice_fidelity/si3_prather_multicycle_spread.py",
+  "seed": "scripts/validate/ice_fidelity/si3_prather_multicycle_seed.py",
+  "seed_run": "scripts/validate/ice_fidelity/si3_prather_multicycle_seed_run.sh"
  },
  "producer_sha256": {
   "extract": "b6a6a1126f7fbbf5059413be4289a5f9a6e086d701c4569222e260a69f5bebc7",
-  "score": "57782c3a9623c00e905b9e5436fc26b4a53d7376de4dfe0e218a68210fadda9f"
- }
+  "score": "57782c3a9623c00e905b9e5436fc26b4a53d7376de4dfe0e218a68210fadda9f",
+  "spread": "0682b3208af622c5335a42e24c0c6235a8ae825a36604bb6532ce17bbfd75c37",
+  "seed": "987a06260095e6731d1315450956c16d52efb6fb72137dcd75de26f368a114c4",
+  "seed_run": "71ee4eee61416e0b47a6e1e8242a6deefab750bcec99b59a919141c7f4c0ddb9"
+ },
+ "spread_4seed": {
+  "cyc2": {
+   "v_i": 2.2487587255459154e-13,
+   "v_s": 5.51609433628522e-11,
+   "a_i": 3.1333229789420066e-14,
+   "oa_i": 2.2850168984875875e-13,
+   "e_s_l01": 9.21655058110773e-11,
+   "e_s_l02": 4.7329493635946566e-11,
+   "e_s_l03": 4.8558658292520196e-11,
+   "e_i_l01": 1.3654763848649518e-13,
+   "e_i_l02": 2.3837435270843884e-13,
+   "e_i_l03": 2.4452929340617616e-13,
+   "szv_i_l01": 2.2510151320089492e-13,
+   "ato_i": 3.7535025935778306e-08
+  },
+  "cyc3": {
+   "v_i": 1.8846776538004036e-13,
+   "v_s": 1.3023332498822544e-10,
+   "a_i": 4.0625592749507043e-14,
+   "oa_i": 3.842430606085422e-13,
+   "e_s_l01": 9.744900535493529e-11,
+   "e_s_l02": 9.744678129884745e-11,
+   "e_s_l03": 1.0164462293984506e-10,
+   "e_i_l01": 2.0807875806524336e-13,
+   "e_i_l02": 3.3363190989510547e-13,
+   "e_i_l03": 3.010912888944838e-13,
+   "szv_i_l01": 3.59125812696892e-13,
+   "ato_i": 1.192412150421855e-07
+  }
+ },
+ "spread_4seed_definition": "max over seeds 0-3 (shared perturb.py, 1 ulp on every recorded input, zeros held) of max rel(seed, base) on the ice region of the full ORCA1 domain"
 }
