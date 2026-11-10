@@ -338,3 +338,24 @@ def test_adam_reduces_loss():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_bisection_prefilter_compiles_one_probe_shape(monkeypatch):
+    """Bisection probes are padded to one shape: the stub loss traces once for the
+    probes plus once for the unpadded kept-set check, and the poisoned cell is found."""
+    import jax.numpy as jnp
+    import numpy as np
+    import scripts.run.train_multilayer_land_era5 as M
+
+    traces = []
+
+    def stub_loss(q, d):
+        traces.append(d["lat"].shape)
+        poison = jnp.where(d["lat"] == 13.0, jnp.nan, 1.0)
+        return jnp.sum(q["a"] * d["lat"] * poison), None
+
+    monkeypatch.setattr(M, "loss_ml", stub_loss)
+    data = {"lat": jnp.arange(20.0)}
+    keep = M._drop_nan_grad_cells_bisect(data, {"a": jnp.asarray(1.0)}, chunk=8)
+    assert 13 not in keep and keep.size == 19
+    assert len(set(traces)) == 2, traces

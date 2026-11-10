@@ -918,7 +918,7 @@ def _drop_nan_grad_cells(data: dict, p: dict) -> np.ndarray:
     return np.asarray(keep, dtype=int)
 
 
-def _drop_nan_grad_cells_bisect(data: dict, p: dict, chunk: int = 50) -> np.ndarray:
+def _drop_nan_grad_cells_bisect(data: dict, p: dict, chunk: int = 300) -> np.ndarray:
     """Two-leaf mode: keep the cells whose loss gradient is finite, found by
     bisection (a finite gradient over a group certifies every cell in it, since a
     non-finite cell contribution propagates), so the cost is ~ncol/chunk gradients
@@ -927,8 +927,13 @@ def _drop_nan_grad_cells_bisect(data: dict, p: dict, chunk: int = 50) -> np.ndar
     by the training clip."""
     gfn = jax.jit(lambda q, d: jax.value_and_grad(lambda qq: loss_ml(qq, d)[0])(q))
 
-    def ok(idx):
-        val, g = gfn(p, _select_cells(data, idx))
+    def ok(idx, pad=True):
+        # Pad every group to ``chunk`` cells by repeating its own members so every
+        # probe has one shape and compiles once (each new shape cost ~18 min of XLA
+        # compile).  Repeats keep the cell set but reweight it unevenly, so the
+        # verdict is a screen, not a proof; the unpadded kept-set check below backs it.
+        sel = np.resize(idx, chunk) if pad else idx
+        val, g = gfn(p, _select_cells(data, sel))
         return bool(jnp.isfinite(val)) and all(
             bool(jnp.all(jnp.isfinite(v))) for v in g.values())
     n = int(data["lat"].shape[0])
@@ -946,7 +951,7 @@ def _drop_nan_grad_cells_bisect(data: dict, p: dict, chunk: int = 50) -> np.ndar
           f"gradient: {sorted(bad)}", flush=True)
     # The group test is not a proof for a loss with shared normalisers: confirm
     # on the whole kept set, and refuse rather than train on a NaN start.
-    if not ok(keep):
+    if not ok(keep, pad=False):
         raise SystemExit("pre-filter: the kept cells still give a non-finite loss "
                          "gradient; per-cell screening needed")
     return keep
@@ -1150,6 +1155,11 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
         if score is not None and np.isfinite(score) and score < best_l:
             best_l, best_p = score, p
         upd, state = opt.update(g, state); p = optax.apply_updates(p, upd)
+        if ckpt_path:     # latest iterate every step: warm-start via --init-json after a
+            # timeout (params only: Adam moments, sampler position and best-so-far reset)
+            with open(ckpt_path + ".latest.tmp", "w") as f:
+                json.dump(_params_dict({**p, **frozen}), f, indent=2)
+            os.replace(ckpt_path + ".latest.tmp", ckpt_path + ".latest.json")
         if log:
             print(f"# it {it:3d} loss {score:.3f} T-RMSE {float(jnp.sqrt(tm)):.3f} "
                   f"T-bias {float(gb):+.3f} T-mbias {float(jnp.sqrt(tbm)):.3f} "
