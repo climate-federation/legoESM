@@ -31,6 +31,13 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.clouds.CloudConfig.q_cloud_resolved_ref',
     'atm.clouds.CloudConfig.r_eff_ice',
     'atm.clouds.CloudConfig.r_eff_liq',
+    # atm.gwd: IFSSSOConfig (4) + IFSTOFDConfig (1) -- OpenIFS 49r1 SSO/TOFD
+    # port; wired with the IFS VDF lane (joint implicit solve), vote V6a/V12a.
+    'atm.gwd.IFSSSOConfig.gfrcrit',
+    'atm.gwd.IFSSSOConfig.gkdrag',
+    'atm.gwd.IFSSSOConfig.gkwake',
+    'atm.gwd.IFSSSOConfig.grcrit',
+    'atm.gwd.IFSTOFDConfig.tofd_alpha',
     # atm.pblh: PBLHeightConfig (1)
     'atm.pblh.PBLHeightConfig.Ri_crit',
     # atm.rad: GrayRadiationConfig — none: every gray param is tier 0
