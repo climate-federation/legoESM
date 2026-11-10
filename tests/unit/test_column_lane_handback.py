@@ -666,6 +666,7 @@ def test_restart_is_bitwise_mid_window_and_on_the_boundary(
             np.testing.assert_array_equal(eB[k], eC[k])
 
 
+@pytest.mark.usefixtures("allow_version_drift")  # hand-built checkpoint, no manifest beside it
 def test_restart_refuses_a_handback_window_without_its_sums(tmp_path,
                                                             monkeypatch):
     import glob
