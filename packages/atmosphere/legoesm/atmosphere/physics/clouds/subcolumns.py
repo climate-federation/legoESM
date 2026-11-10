@@ -165,9 +165,15 @@ def _shifted_uniforms(n_sub, nlev, shift, dtype, seed=_PERM_SEED):
     u = jnp.asarray(_stratified_table(int(n_sub), int(nlev), seed), dtype=dtype)
     u = u[:, None, :]                                   # (n_sub, 1, nlev)
     if shift is not None:
-        k = jnp.arange(nlev, dtype=dtype)
-        off = (jnp.asarray(shift, dtype=dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
-               + k * _SHIFT_LAYER_STEP)                  # (ncol, nlev)
+        if n_sub == 1:
+            # One subcolumn has no stratification to even out frac(shift*slope),
+            # which is not uniform for a uniform shift (measured cover bias
+            # 0.026 at cf 0.3, 5 SE): hash (shift, layer) instead.
+            off = _hashed_layer_offsets(shift, nlev, dtype, seed)
+        else:
+            k = jnp.arange(nlev, dtype=dtype)
+            off = (jnp.asarray(shift, dtype=dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
+                   + k * _SHIFT_LAYER_STEP)              # (ncol, nlev)
         u = jnp.mod(u + off[None, :, :], 1.0)
     return u
 
@@ -214,6 +220,18 @@ def _lowbias32(h):
     return h ^ (h >> u32(16))
 
 
+def _hashed_layer_offsets(shift, nlev, dtype, seed):
+    """``(ncol, nlev)`` offsets in [0, 1), uniform per layer for a uniform
+    ``shift``: uint32 lowbias32 hash of (column shift, seed, layer), so eager
+    and jit give the same bits within a dtype."""
+    u32 = jnp.uint32
+    q = (jnp.asarray(shift, dtype) * float(1 << _HASH_SHIFT_BITS)).astype(u32)[:, None]
+    k = jnp.arange(nlev, dtype=u32)[None, :]
+    h = _lowbias32(q ^ (u32(seed) * u32(_HASH_GOLDEN) + k * u32(_HASH_LAYER)))
+    return (h >> u32(_HASH_WORD_BITS - _HASH_SHIFT_BITS)).astype(dtype) * (
+        1.0 / (1 << _HASH_SHIFT_BITS))
+
+
 def inhomogeneity_uniforms(n_sub, nlev, shift, dtype):
     """``(rand_inhom1, rand_inhom2)``, each ``(n_sub, ncol or 1, nlev)``.
 
@@ -222,14 +240,10 @@ def inhomogeneity_uniforms(n_sub, nlev, shift, dtype):
     given dtype; the shift's own resolution (fp32: ~1/128) still bounds how
     many distinct columns there are, as for the mask.
     """
-    u32 = jnp.uint32
-    q = (jnp.zeros((1,), dtype) if shift is None else jnp.asarray(shift, dtype))
-    q = (q * float(1 << _HASH_SHIFT_BITS)).astype(u32)[:, None]          # (ncol, 1)
-    k = jnp.arange(nlev, dtype=u32)[None, :]
+    s = jnp.zeros((1,), dtype) if shift is None else shift
     out = []
     for seed in _INHOM_PERM_SEEDS:
-        h = _lowbias32(q ^ (u32(seed) * u32(_HASH_GOLDEN) + k * u32(_HASH_LAYER)))
-        off = (h >> u32(_HASH_WORD_BITS - _HASH_SHIFT_BITS)).astype(dtype) * (1.0 / (1 << _HASH_SHIFT_BITS))
+        off = _hashed_layer_offsets(s, nlev, dtype, seed)
         table = jnp.asarray(_stratified_table(int(n_sub), int(nlev), seed), dtype=dtype)
         out.append(jnp.mod(table[:, None, :] + off[None], 1.0))
     return tuple(out)
