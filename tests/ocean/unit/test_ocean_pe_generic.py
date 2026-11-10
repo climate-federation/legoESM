@@ -1,7 +1,7 @@
 """Shared ocean baroclinic core: live-oracle regression, budgets, AD and jit.
 
-The oracle is each model's own tendency function at the same state and
-config.  The per-grid momentum block (PV flux, advection, viscosity) is the
+The oracle is each model's original tendency code (the lanes the shared core
+does not serve still run it) at the same state and config.  The per-grid momentum block (PV flux, advection, viscosity) is the
 model's own code in both, so the oracle tests the unified terms: continuity
 and w, -grad(KE + p'/rho_0), drag, explicit vertical mixing, tracer diffusion
 and the sponge.  Tolerances (fp64, voted): oracle tendencies 1e-13 relative to the
@@ -168,8 +168,7 @@ def _check_oracle(new, old, fields, cname, kind):
 def test_latlon_matches_model_tendency(grid, z_coord, cname):
     state, cfg, sponge = _latlon_case(grid, z_coord, cname)
     new = ll.latlon_ocean_pe_tendencies(state, grid, z_coord, cfg, sponge=sponge, dt=DT)
-    old = ll.latlon_cgrid_ocean_baroclinic_tendencies(state, grid, z_coord, cfg,
-                                                      sponge=sponge, dt=DT)
+    old = ll._latlon_tendencies_outside_core(state, grid, z_coord, cfg, sponge=sponge, dt=DT)
     _check_oracle(new, old, ("du_dt", "dv_dt", "dT_dt", "dS_dt", "deta_dt"), cname, "latlon")
 
 
@@ -177,7 +176,7 @@ def test_latlon_matches_model_tendency(grid, z_coord, cname):
 def test_mpas_matches_model_tendency(mesh, z_coord, cname):
     state, cfg, sponge = _mpas_case(mesh, z_coord, cname)
     new = mp.mpas_ocean_pe_tendencies(state, mesh, z_coord, cfg, sponge=sponge)
-    old = mp.mpas_ocean_baroclinic_tendencies(state, mesh, z_coord, cfg, sponge=sponge)
+    old = mp._mpas_tendencies_outside_core(state, mesh, z_coord, cfg, sponge=sponge)
     _check_oracle(new, old, ("du_dt", "dT_dt", "dS_dt", "deta_dt", "F_slow_u"), cname, "mpas")
 
 
@@ -289,15 +288,137 @@ def test_refuses_outside_pilot(grid, mesh, z_coord):
                dict(bottom_drag_r=1e-3, bottom_drag_bbl_thickness=10.0),
                dict(bottom_drag_scheme="nemo_quadratic"), dict(pgf_scheme="smc03"),
                dict(surface_stress_nemo_fold_vector_sign=True)):
-        with pytest.raises(ValueError, match="not in the shared-core pilot"):
+        with pytest.raises(ValueError, match="not on the shared core"):
             ll.latlon_ocean_pe_operators(state, grid, z_coord,
                                          LatLonCGridOceanConfig.from_flat(**kw))
     ms = _mpas_state(mesh, z_coord)
     for kw in (dict(pgf_scheme="zero"), dict(pgf_scheme="typo"),
                dict(bottom_drag_scheme="nemo_quadratic")):
-        with pytest.raises(ValueError, match="not in the pilot"):
+        with pytest.raises(ValueError, match="not on the shared core"):
             mp.mpas_ocean_pe_operators(ms, mesh, z_coord, MPASOceanConfig(**kw))
     sponge_mp = _sponge(ms.T.data, ms.S.data, (ms.u.data,), 5)
     full_rank = sponge_mp._replace(gamma=jnp.ones_like(ms.T.data) * 1e-5)
     with pytest.raises(ValueError, match="full-rank"):
         mp.mpas_ocean_pe_tendencies(ms, mesh, z_coord, MPASOceanConfig(), sponge=full_rank)
+
+
+# ------------------------------------------------- routing of the real models
+
+def _gyre_physics():
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.surface_forcing.config import (
+        PrescribedForcingConfig,
+        SurfaceForcingConfig,
+    )
+    return OceanPhysicsConfig(surface_forcing=SurfaceForcingConfig(
+        scheme="prescribed",
+        prescribed=PrescribedForcingConfig(wind_profile="single_gyre", tau_max=0.1)))
+
+
+def test_latlon_routing_and_physics_oracle(grid, z_coord):
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    state, _ = _latlon_state(grid, z_coord)
+    phys = _gyre_physics()   # lat-lon: lateral mixing lives in the dynamics, not physics
+    phys = phys._replace(lateral_mixing=phys.lateral_mixing._replace(scheme="none"))
+    cfg = LatLonCGridOceanConfig.from_flat(physics=phys, **dict(LL_ALL_ON, **NO_LATERAL))
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
+    kw = dict(physics_fn=model._physics_fn, dt=DT)
+    routed = ll.latlon_cgrid_ocean_baroclinic_tendencies(state, grid, z_coord, cfg, **kw)
+    twin = ll.latlon_ocean_pe_tendencies(state, grid, z_coord, cfg, dt=DT,
+                                         physics_fn=model._physics_fn)
+    old = ll._latlon_tendencies_outside_core(state, grid, z_coord, cfg, **kw)
+    for f in ("du_dt", "dv_dt", "dT_dt", "dS_dt", "deta_dt"):
+        np.testing.assert_array_equal(np.asarray(getattr(routed, f).data),
+                                      np.asarray(getattr(twin, f).data))
+    for f in ("du_dt", "dv_dt", "dT_dt", "dS_dt", "deta_dt"):
+        _close(getattr(routed, f).data, getattr(old, f).data, f)
+    # A NEMO option keeps the original code.
+    flux = cfg._replace(momentum_advection="flux_form")
+    a = ll.latlon_cgrid_ocean_baroclinic_tendencies(state, grid, z_coord, flux, **kw)
+    b = ll._latlon_tendencies_outside_core(state, grid, z_coord, flux, **kw)
+    np.testing.assert_array_equal(np.asarray(a.dT_dt.data), np.asarray(b.dT_dt.data))
+
+
+def test_mpas_routing_physics_freshwater_oracle(mesh, z_coord):
+    from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+    from legoesm.ocean.freshwater import zero_freshwater
+    state = _mpas_state(mesh, z_coord)
+    cfg = MPASOceanConfig(physics=_gyre_physics(), **dict(MPAS_ALL_ON, **NO_LATERAL))
+    model = MPASOceanModel(mesh, z_coord, cfg)
+    n = state.T.data.shape[0]
+    fw = zero_freshwater(n)._replace(precip=jnp.full((n,), 1e-4))
+    kw = dict(freshwater=fw, physics_fn=model._physics_fn)
+    routed = mp.mpas_ocean_baroclinic_tendencies(state, mesh, z_coord, cfg, **kw)
+    old = mp._mpas_tendencies_outside_core(state, mesh, z_coord, cfg, **kw)
+    for f in ("du_dt", "dT_dt", "dS_dt", "deta_dt", "F_slow_u"):
+        _close(getattr(routed, f).data, getattr(old, f).data, f)
+    assert float(jnp.max(jnp.abs(old.dS_dt.data))) > 0.0
+
+
+def test_latlon_momentum_only_routing_oracle(grid, z_coord):
+    """Staged momentum sub-steps (momentum_only) route to the core and match
+    the original code on every field (both skip the tracer diffusion and both
+    still apply the physics / forcing sources)."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    state, _ = _latlon_state(grid, z_coord)
+    phys = _gyre_physics()
+    phys = phys._replace(lateral_mixing=phys.lateral_mixing._replace(scheme="none"))
+    cfg = LatLonCGridOceanConfig.from_flat(physics=phys, **LL_ALL_ON)
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
+    kw = dict(dt=DT, momentum_only=True, physics_fn=model._physics_fn)
+    routed = ll.latlon_cgrid_ocean_baroclinic_tendencies(state, grid, z_coord, cfg, **kw)
+    old = ll._latlon_tendencies_outside_core(state, grid, z_coord, cfg, **kw)
+    assert float(jnp.max(jnp.abs(routed.du_dt.data))) > 0.0
+    assert float(jnp.max(jnp.abs(old.dT_dt.data))) > 0.0   # sources reach dT
+    for f in ("du_dt", "dv_dt", "dT_dt", "dS_dt", "deta_dt"):
+        _close(getattr(routed, f).data, getattr(old, f).data, f)
+
+
+@pytest.mark.parametrize("kind", ["latlon", "mpas"])
+def test_lateral_on_routing_matches_original_at_uniform_thickness(kind, grid, mesh, z_coord):
+    """eta = 0 makes h horizontally uniform, where the thickness-weighted
+    lateral diffusion equals the original form: the routed public call then
+    matches the original code on every field with lateral mixing ON."""
+    if kind == "latlon":
+        state, _ = _latlon_state(grid, z_coord)
+        state = state._replace(eta=state.eta.replace(data=jnp.zeros_like(state.eta.data)))
+        cfg = LatLonCGridOceanConfig.from_flat(**LL_ALL_ON)
+        routed = ll.latlon_cgrid_ocean_baroclinic_tendencies(state, grid, z_coord, cfg, dt=DT)
+        old = ll._latlon_tendencies_outside_core(state, grid, z_coord, cfg, dt=DT)
+        fields = ("du_dt", "dv_dt", "dT_dt", "dS_dt", "deta_dt")
+    else:
+        state = _mpas_state(mesh, z_coord)
+        state = state._replace(eta=state.eta.replace(data=jnp.zeros_like(state.eta.data)))
+        cfg = MPASOceanConfig(**MPAS_ALL_ON)
+        routed = mp.mpas_ocean_baroclinic_tendencies(state, mesh, z_coord, cfg)
+        old = mp._mpas_tendencies_outside_core(state, mesh, z_coord, cfg)
+        fields = ("du_dt", "dT_dt", "dS_dt", "deta_dt", "F_slow_u")
+    assert float(jnp.max(jnp.abs(old.dT_dt.data))) > 0.0
+    for f in fields:
+        _close(getattr(routed, f).data, getattr(old, f).data, f)
+
+
+@pytest.mark.parametrize("kind", ["latlon", "mpas"])
+def test_routed_public_tendency_conserves_volume_heat_salt(kind, grid, mesh, z_coord):
+    """The real models' public tendency (routed, lateral + explicit vertical
+    mixing on, no sponge / physics) closes volume, heat and salt."""
+    state, ops, _, _, area = _ops(kind, grid, mesh, z_coord, "all_on")
+    cfg = (_latlon_case if kind == "latlon" else _mpas_case)(
+        grid if kind == "latlon" else mesh, z_coord, "all_on")[1]
+    t = (ll.latlon_cgrid_ocean_baroclinic_tendencies(state, grid, z_coord, cfg, dt=DT)
+         if kind == "latlon" else mp.mpas_ocean_baroclinic_tendencies(state, mesh, z_coord, cfg))
+    _, h_k, _, _ = ops.geometry_density()
+    for d in (t.dT_dt.data, t.dS_dt.data):
+        w = d * h_k * area[..., None]
+        assert float(jnp.sum(jnp.abs(w))) > 0.0
+        assert abs(float(jnp.sum(w))) <= BUDGET_RTOL * float(jnp.sum(jnp.abs(w)))
+    deta = t.deta_dt.data * area
+    assert float(jnp.sum(jnp.abs(deta))) > 0.0
+    assert abs(float(jnp.sum(deta))) <= BUDGET_RTOL * float(jnp.sum(jnp.abs(deta)))
+
+
+def test_mpas_operators_reject_unknown_freshwater_closure(mesh, z_coord):
+    ms = _mpas_state(mesh, z_coord)
+    with pytest.raises(ValueError, match="freshwater_closure must be one of"):
+        mp.mpas_ocean_pe_operators(ms, mesh, z_coord,
+                                   MPASOceanConfig()._replace(freshwater_closure="typo"))

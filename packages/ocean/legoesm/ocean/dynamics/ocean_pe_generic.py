@@ -1,8 +1,9 @@
 """Ocean baroclinic tendencies written once over the grid operator contract.
 
-Boussinesq z* ocean, split-explicit (test-only pilot: the models still run
-their own tendencies).  One form per unified term, shared by the lat-lon
-C-grid and the MPAS / TRiSK mesh::
+Boussinesq z* ocean, split-explicit.  The models' public tendency functions
+run this core on their default z* path (other options keep their original
+code).  One form per unified term, shared by the lat-lon C-grid and the
+MPAS / TRiSK mesh::
 
     div_k   = div(h_face u mask_face)                      continuity per level
     w       = diagnose_w_from_flux_div(div_k)               vertical velocity
@@ -103,6 +104,11 @@ class OceanPEOperators(NamedTuple):
     pgf_correction: Callable[[Faces, OceanPEContext], Faces]
     momentum_terms: Callable[[Faces, OceanPEContext], Faces]
     finalize: Callable[[Faces, OceanPEContext], tuple[Faces, Any]]
+    # Physics pipeline / surface forcing / freshwater, after explicit vertical
+    # mixing and before the sponge: (dvel, dT, dS, ctx) -> (dvel, dT, dS, info).
+    sources: Callable[..., tuple] | None = None
+    # Mid-operator halo refresh of the biharmonic's inner field (MPAS MPI).
+    refresh_cells: Callable[[jax.Array], jax.Array] | None = None
 
 
 class OceanPETendencies(NamedTuple):
@@ -111,6 +117,7 @@ class OceanPETendencies(NamedTuple):
     dS: jax.Array
     deta: jax.Array
     extra: Any          # per-grid finalize output (MPAS: F_slow per edge)
+    sources_info: Any = None   # what the sources plug-in returned
 
 
 def _as_tuple(x: Any) -> tuple:
@@ -168,13 +175,16 @@ def bottom_drag(vel: Faces, j_face: Faces, dz_bottom: jax.Array, r: float,
 
 def ocean_baroclinic_tendencies(vel: Faces, T: jax.Array, S: jax.Array,
                                 ops: OceanPEOperators, sponge: Any = None,
-                                sponge_vel_ref: Faces | None = None) -> OceanPETendencies:
+                                sponge_vel_ref: Faces | None = None,
+                                tracers: bool = True) -> OceanPETendencies:
     """Baroclinic tendencies ``(dvel, dT, dS, deta, extra)`` on any grid.
 
     ``vel`` is a tuple of face-velocity families ``(*faces, nlev)``; ``T`` and
     ``S`` are ``(*cells, nlev)``.  ``sponge`` (optional ``SpongeForcing``)
     relaxes T and S; ``sponge_vel_ref`` (one reference or ``None`` per velocity
-    family) adds ``gamma_face (ref - u)`` with ``sponge.gamma`` horizontal."""
+    family) adds ``gamma_face (ref - u)`` with ``sponge.gamma`` horizontal.
+    ``tracers=False`` (staged momentum sub-steps) skips the lateral and
+    vertical tracer diffusion (as the lat-lon model's ``momentum_only``)."""
     c = ops.coeffs
     gops = ops.grid_ops
     cell_mask_3d = ops.cell_mask[..., None]
@@ -206,7 +216,7 @@ def ocean_baroclinic_tendencies(vel: Faces, T: jax.Array, S: jax.Array,
     tr = jnp.stack([T, S], axis=-1)
     flat = tr.reshape(*tr.shape[:-2], -1)
     dflat = jnp.zeros_like(flat)
-    if c.K_h > 0 or c.K_bih > 0:
+    if tracers and (c.K_h > 0 or c.K_bih > 0):
         # Flat column index is 2 k + tracer; a level-broadcast mask (last dim 1) stays.
         def rep(a):
             return a if a.shape[-1] == 1 else jnp.repeat(a, 2, axis=-1)
@@ -222,14 +232,19 @@ def ocean_baroclinic_tendencies(vel: Faces, T: jax.Array, S: jax.Array,
         if c.K_h > 0:
             dflat = dflat + c.K_h * lap1
         if c.K_bih > 0:
-            dflat = dflat - c.K_bih * lap(lap1)
+            inner = lap1 if ops.refresh_cells is None else ops.refresh_cells(lap1)
+            dflat = dflat - c.K_bih * lap(inner)
     dtr = dflat.reshape(tr.shape)
-    if not c.implicit_vertical_mixing:
+    if tracers and not c.implicit_vertical_mixing:
         dtr = dtr + jax.vmap(
             lambda q: vertical_diffusion(q, c.K_v, ops.dz_ref, ops.dz_half_ref,
                                          jacobian[..., None]),
             in_axes=-1, out_axes=-1)(tr)
     dT, dS = dtr[..., 0], dtr[..., 1]
+
+    info = None
+    if ops.sources is not None:
+        dvel, dT, dS, info = ops.sources(dvel, dT, dS, ctx)
 
     if sponge is not None:
         dT, dS = apply_sponge_tracer_relaxation(dT, dS, T, S, sponge, mask=None,
@@ -244,4 +259,4 @@ def ocean_baroclinic_tendencies(vel: Faces, T: jax.Array, S: jax.Array,
                          for d, u, ref, gf in zip(dvel, vel, sponge_vel_ref, g_face))
 
     dvel = tuple(d * m for d, m in zip(dvel, ops.face_masks))
-    return OceanPETendencies(dvel, dT * cell_mask_3d, dS * cell_mask_3d, deta, extra)
+    return OceanPETendencies(dvel, dT * cell_mask_3d, dS * cell_mask_3d, deta, extra, info)

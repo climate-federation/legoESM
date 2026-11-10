@@ -107,7 +107,48 @@ def mpas_ocean_baroclinic_tendencies(
     halo_refresh=None,
     term_diagnostics: bool = False,
 ) -> MPASOceanTendencies:
-    """Compute baroclinic (slow) tendencies for MPAS ocean.
+    """Baroclinic (slow) tendencies of the MPAS ocean.
+
+    z* configurations run on the shared core
+    (:func:`mpas_ocean_pe_tendencies`, thickness-weighted lateral tracer
+    diffusion); partial cells, ``pgf_scheme="zero"``, non-linear / BBL /
+    background-velocity bottom drag and ``term_diagnostics`` run the original
+    code (:func:`_mpas_tendencies_outside_core`).  KNOWN DEFECT: that original
+    code's lateral tracer diffusion is not thickness weighted and leaks heat
+    and salt where the layer thickness varies (5.3e-6 of the gross on the
+    shared-core test fixture).
+    """
+    # Dispatch hardening (#1484 codex): this is a PUBLIC entrypoint, so a typo
+    # must not fall through the "not in (none, real_freshwater)" test and
+    # silently run the virtual-salt closure. The constructor validates too;
+    # this is the direct-call path.
+    _VALID_FW = ("none", "virtual_salt_flux", "real_freshwater")
+    if config.freshwater_closure not in _VALID_FW:
+        raise ValueError(
+            f"freshwater_closure must be one of {_VALID_FW}, got "
+            f"{config.freshwater_closure!r} (mpas_ocean_baroclinic_tendencies)")
+    if not term_diagnostics and _outside_shared_core(z_coord, config) is None:
+        return mpas_ocean_pe_tendencies(
+            state, mesh, z_coord, config, freshwater=freshwater, physics_fn=physics_fn,
+            surface_forcing=surface_forcing, sponge=sponge, halo_refresh=halo_refresh)
+    return _mpas_tendencies_outside_core(
+        state, mesh, z_coord, config, freshwater, physics_fn, surface_forcing, sponge,
+        halo_refresh, term_diagnostics)
+
+
+def _mpas_tendencies_outside_core(
+    state: MPASOceanState,
+    mesh,
+    z_coord: OceanZStarCoordinate,
+    config: MPASOceanConfig = MPASOceanConfig(),
+    freshwater: FreshwaterForcing | None = None,
+    physics_fn=None,
+    surface_forcing=None,
+    sponge=None,
+    halo_refresh=None,
+    term_diagnostics: bool = False,
+) -> MPASOceanTendencies:
+    """Original MPAS baroclinic tendencies (lanes outside the shared core).
 
     Parameters
     ----------
@@ -131,15 +172,6 @@ def mpas_ocean_baroclinic_tendencies(
     -------
     MPASOceanTendencies
     """
-    # Dispatch hardening (#1484 codex): this is a PUBLIC entrypoint, so a typo
-    # must not fall through the "not in (none, real_freshwater)" test below and
-    # silently run the virtual-salt closure. The constructor validates too;
-    # this is the direct-call path.
-    _VALID_FW = ("none", "virtual_salt_flux", "real_freshwater")
-    if config.freshwater_closure not in _VALID_FW:
-        raise ValueError(
-            f"freshwater_closure must be one of {_VALID_FW}, got "
-            f"{config.freshwater_closure!r} (mpas_ocean_baroclinic_tendencies)")
     g = config.g
     rho_0 = config.rho_0
 
@@ -744,6 +776,78 @@ def mpas_ocean_baroclinic_tendencies(
     # freshwater, and the z-star tracer step conserves h*S while the column
     # stretches, so a VSF on top is a spurious salt source NEMO does not
     # have.  The genuine surface_forcing.salt_flux pathway is untouched.
+    dT_dt_3d, dS_dt_3d = mpas_ocean_freshwater_salt_sources(
+        dT_dt_3d, dS_dt_3d, T_3d, S_3d, h_k, mask, mesh, config, freshwater,
+        surface_forcing, halo_refresh)
+
+    # ---- Sponge layer relaxation ----
+    # Cast sponge arrays to state dtype to prevent float64 promotion when
+    # the precision policy stores state in float32 (crashes barotropic scan).
+    if sponge is not None:
+        dT_dt_3d, dS_dt_3d = apply_sponge_tracer_relaxation(
+            dT_dt_3d, dS_dt_3d, T_3d, S_3d, sponge, mask=mask,
+            expand_gamma_axis=-1,
+        )
+        # Edge velocity sponge (if reference velocity provided).
+        # EXT-N1 guard (mirrors ocean_pe_latlon_cgrid._bc_sponge_relaxation):
+        # a full-rank (per-cell, z-varying) gamma supports TRACER relaxation
+        # only.  The momentum sponge below averages gamma to edges and then
+        # broadcasts over the vertical with ``gamma_edge[:, None]``; a
+        # ``(nCells, nlev)`` gamma would silently broadcast to
+        # ``(nEdges, nlev, nlev)`` (a wrong-shaped momentum increment) instead.
+        # Static shapes ⇒ trace-time error, never a silently wrong broadcast.
+        if sponge.u_ref is not None:
+            if sponge.gamma.ndim == T_3d.ndim:
+                raise ValueError(
+                    "3-D (full-rank per-cell) SpongeForcing.gamma supports "
+                    "tracer relaxation only; u_ref requires a 1-D "
+                    "(nCells,) horizontal gamma (the MPAS momentum sponge "
+                    "averages gamma to edges and broadcasts over the "
+                    "vertical).")
+            _dt = T_3d.dtype
+            gamma_edge = 0.5 * (sponge.gamma.astype(_dt)[c1] + sponge.gamma.astype(_dt)[c2])
+            gamma_edge_3d = gamma_edge[:, jnp.newaxis]
+            du_dt_3d = du_dt_3d + gamma_edge_3d * (sponge.u_ref.astype(_dt) - u_3d) * edge_mask[:, jnp.newaxis]
+
+    if term_diagnostics:
+        # Debug-only: the momentum tendency split by operator (masked as in
+        # du_dt_full). Static Python flag, so the production trace is untouched.
+        return MPASOceanTendencies(
+            du_dt=Field(data=du_dt_3d, name="du_dt",
+                        dims=("nEdges", "nlev"), units="m/s²"),
+            dT_dt=Field(data=dT_dt_3d, name="dT_dt",
+                        dims=("nCells", "nlev"), units="degC/s"),
+            dS_dt=Field(data=dS_dt_3d, name="dS_dt",
+                        dims=("nCells", "nlev"), units="PSU/s"),
+            deta_dt=Field(data=deta_dt, name="deta_dt",
+                          dims=("nCells",), units="m/s"),
+            F_slow_u=Field(data=F_slow_u, name="F_slow_u",
+                           dims=("nEdges",), units="m/s²"),
+        ), {"grad_B": -grad_B * edge_mask_3d, "pv_flux": pv_flux * edge_mask_3d,
+            "visc": visc * edge_mask_3d, "vert_adv_u": vert_adv_u * edge_mask_3d,
+            "du_dt_full": du_dt_full, "w_e": w_e, "h_e_3d": h_e_3d}
+    return MPASOceanTendencies(
+        du_dt=Field(data=du_dt_3d, name="du_dt",
+                    dims=("nEdges", "nlev"), units="m/s²"),
+        dT_dt=Field(data=dT_dt_3d, name="dT_dt",
+                    dims=("nCells", "nlev"), units="degC/s"),
+        dS_dt=Field(data=dS_dt_3d, name="dS_dt",
+                    dims=("nCells", "nlev"), units="PSU/s"),
+        deta_dt=Field(data=deta_dt, name="deta_dt",
+                      dims=("nCells",), units="m/s"),
+        F_slow_u=Field(data=F_slow_u, name="F_slow_u",
+                       dims=("nEdges",), units="m/s²"),
+    )
+
+
+
+
+def mpas_ocean_freshwater_salt_sources(dT_dt_3d, dS_dt_3d, T_3d, S_3d, h_k, mask, mesh,
+                                       config, freshwater=None, surface_forcing=None,
+                                       halo_refresh=None):
+    """Virtual-salt freshwater closure (+ its temperature twin) and the real
+    surface salt-mass flux of the MPAS ocean tendency (pure move from
+    :func:`mpas_ocean_baroclinic_tendencies`).  Returns ``(dT_dt_3d, dS_dt_3d)``."""
     if (freshwater is not None
             and config.freshwater_closure not in ("none", "real_freshwater")):
         # When ``normalize_freshwater`` is on, remove the global area-mean of the
@@ -887,67 +991,7 @@ def mpas_ocean_baroclinic_tendencies(
             jnp.asarray(_sf_salt, dS_dt_3d.dtype), h_k[:, 0], config.rho_0,
         )
         dS_dt_3d = dS_dt_3d.at[:, 0].add(dS_salt * mask)
-
-    # ---- Sponge layer relaxation ----
-    # Cast sponge arrays to state dtype to prevent float64 promotion when
-    # the precision policy stores state in float32 (crashes barotropic scan).
-    if sponge is not None:
-        dT_dt_3d, dS_dt_3d = apply_sponge_tracer_relaxation(
-            dT_dt_3d, dS_dt_3d, T_3d, S_3d, sponge, mask=mask,
-            expand_gamma_axis=-1,
-        )
-        # Edge velocity sponge (if reference velocity provided).
-        # EXT-N1 guard (mirrors ocean_pe_latlon_cgrid._bc_sponge_relaxation):
-        # a full-rank (per-cell, z-varying) gamma supports TRACER relaxation
-        # only.  The momentum sponge below averages gamma to edges and then
-        # broadcasts over the vertical with ``gamma_edge[:, None]``; a
-        # ``(nCells, nlev)`` gamma would silently broadcast to
-        # ``(nEdges, nlev, nlev)`` (a wrong-shaped momentum increment) instead.
-        # Static shapes ⇒ trace-time error, never a silently wrong broadcast.
-        if sponge.u_ref is not None:
-            if sponge.gamma.ndim == T_3d.ndim:
-                raise ValueError(
-                    "3-D (full-rank per-cell) SpongeForcing.gamma supports "
-                    "tracer relaxation only; u_ref requires a 1-D "
-                    "(nCells,) horizontal gamma (the MPAS momentum sponge "
-                    "averages gamma to edges and broadcasts over the "
-                    "vertical).")
-            _dt = T_3d.dtype
-            gamma_edge = 0.5 * (sponge.gamma.astype(_dt)[c1] + sponge.gamma.astype(_dt)[c2])
-            gamma_edge_3d = gamma_edge[:, jnp.newaxis]
-            du_dt_3d = du_dt_3d + gamma_edge_3d * (sponge.u_ref.astype(_dt) - u_3d) * edge_mask[:, jnp.newaxis]
-
-    if term_diagnostics:
-        # Debug-only: the momentum tendency split by operator (masked as in
-        # du_dt_full). Static Python flag, so the production trace is untouched.
-        return MPASOceanTendencies(
-            du_dt=Field(data=du_dt_3d, name="du_dt",
-                        dims=("nEdges", "nlev"), units="m/s²"),
-            dT_dt=Field(data=dT_dt_3d, name="dT_dt",
-                        dims=("nCells", "nlev"), units="degC/s"),
-            dS_dt=Field(data=dS_dt_3d, name="dS_dt",
-                        dims=("nCells", "nlev"), units="PSU/s"),
-            deta_dt=Field(data=deta_dt, name="deta_dt",
-                          dims=("nCells",), units="m/s"),
-            F_slow_u=Field(data=F_slow_u, name="F_slow_u",
-                           dims=("nEdges",), units="m/s²"),
-        ), {"grad_B": -grad_B * edge_mask_3d, "pv_flux": pv_flux * edge_mask_3d,
-            "visc": visc * edge_mask_3d, "vert_adv_u": vert_adv_u * edge_mask_3d,
-            "du_dt_full": du_dt_full, "w_e": w_e, "h_e_3d": h_e_3d}
-    return MPASOceanTendencies(
-        du_dt=Field(data=du_dt_3d, name="du_dt",
-                    dims=("nEdges", "nlev"), units="m/s²"),
-        dT_dt=Field(data=dT_dt_3d, name="dT_dt",
-                    dims=("nCells", "nlev"), units="degC/s"),
-        dS_dt=Field(data=dS_dt_3d, name="dS_dt",
-                    dims=("nCells", "nlev"), units="PSU/s"),
-        deta_dt=Field(data=deta_dt, name="deta_dt",
-                      dims=("nCells",), units="m/s"),
-        F_slow_u=Field(data=F_slow_u, name="F_slow_u",
-                       dims=("nEdges",), units="m/s²"),
-    )
-
-
+    return dT_dt_3d, dS_dt_3d
 
 def mpas_ocean_geometry_and_density(state, mesh, z_coord, config):
     """Layer thickness, Jacobian, density anomaly and the land-filled
@@ -1281,28 +1325,40 @@ def _vertical_diffusion(field_3d, dz_half, dz, jacobian, coeff, is_edge, mesh):
 
 
 # ============================================================================
-# Shared-core plug-ins (test-only pilot; see ocean_pe_generic)
+# Shared-core plug-ins (see ocean_pe_generic)
 # ============================================================================
 
-def _refuse_outside_pilot(z_coord, config) -> None:
+def _outside_shared_core(z_coord, config) -> str | None:
+    """Why this configuration does not run on the shared core (None if it does)."""
     if not isinstance(z_coord, OceanZStarCoordinate):
-        raise ValueError(f"mpas_ocean_pe_operators: coordinate {type(z_coord).__name__} "
-                         "is not in the pilot (z* only)")
+        return f"coordinate {type(z_coord).__name__} (z* only)"
     # On z* the adcroft / smc03 / ahh08 corrections are inactive in the model
     # (they act on partial cells only), so all three equal "centered" there.
     if config.pgf_scheme not in ("centered", "adcroft", "smc03", "ahh08"):
-        raise ValueError(f"mpas_ocean_pe_operators: pgf_scheme={config.pgf_scheme!r} "
-                         "is not in the pilot")
+        return f"pgf_scheme={config.pgf_scheme!r}"
     if validate_bottom_drag_scheme(str(config.bottom_drag_scheme)) != "legacy" or (
             config.bottom_drag_r > 0 and (config.bottom_drag_bbl_thickness > 0
                                           or config.bottom_drag_bg_velocity > 0)):
-        raise ValueError("mpas_ocean_pe_operators: bottom drag other than linear "
-                         "bottom-level drag is not in the pilot")
+        return "bottom drag other than linear bottom-level drag"
+    return None
 
 
-def mpas_ocean_pe_operators(state, mesh, z_coord, config=MPASOceanConfig()):
+def mpas_ocean_pe_operators(state, mesh, z_coord, config=MPASOceanConfig(), *,
+                            freshwater=None, physics_fn=None, surface_forcing=None,
+                            halo_refresh=None):
     """MPAS / TRiSK plug-ins of :func:`.ocean_pe_generic.ocean_baroclinic_tendencies`."""
-    _refuse_outside_pilot(z_coord, config)
+    # Dispatch hardening (#1484 codex): this is a PUBLIC entrypoint, so a typo
+    # must not fall through the "not in (none, real_freshwater)" test and
+    # silently run the virtual-salt closure. The constructor validates too;
+    # this is the direct-call path.
+    _VALID_FW = ("none", "virtual_salt_flux", "real_freshwater")
+    if config.freshwater_closure not in _VALID_FW:
+        raise ValueError(
+            f"freshwater_closure must be one of {_VALID_FW}, got "
+            f"{config.freshwater_closure!r} (mpas_ocean_pe_operators)")
+    reason = _outside_shared_core(z_coord, config)
+    if reason is not None:
+        raise ValueError(f"mpas_ocean_pe_operators: {reason} is not on the shared core")
     c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
     mask = state.land_mask.data
     edge_mask = mask[c1] * mask[c2]
@@ -1323,7 +1379,7 @@ def mpas_ocean_pe_operators(state, mesh, z_coord, config=MPASOceanConfig()):
         u_3d = ctx.vel[0]
         h_e = ctx.h_face_metric[0]
         pv_flux = mpas_ocean_pv_flux(u_3d, ctx.h_k, h_e, z_coord, mesh, config)
-        visc = mpas_ocean_momentum_viscosity(u_3d, mesh, config)
+        visc = mpas_ocean_momentum_viscosity(u_3d, mesh, config, halo_refresh)
         vert_adv = flux_form_vertical_momentum_advection(
             ctx.vel_prime[0], 0.5 * (ctx.w[c1] + ctx.w[c2]), h_e)
         return ((dvel[0] + pv_flux + visc + vert_adv) * edge_mask_3d,)
@@ -1333,6 +1389,18 @@ def mpas_ocean_pe_operators(state, mesh, z_coord, config=MPASOceanConfig()):
         H_e = depth_mean_divisor(jnp.sum(h_e, axis=1))
         F_slow_u = jnp.sum(dvel[0] * h_e, axis=1) / H_e * edge_mask
         return ((dvel[0] - F_slow_u[:, None]) * edge_mask_3d,), F_slow_u
+
+    def sources(dvel, dT, dS, ctx):
+        du = dvel[0]
+        if physics_fn is not None:
+            phys = physics_fn(state, mesh, z_coord, surface_forcing)
+            du = du + phys.du_dt.data * edge_mask_3d
+            dT = dT + phys.dT_dt.data
+            dS = dS + phys.dS_dt.data
+        dT, dS = mpas_ocean_freshwater_salt_sources(
+            dT, dS, state.T.data, state.S.data, ctx.h_k, mask, mesh, config,
+            freshwater, surface_forcing, halo_refresh)
+        return (du,), dT, dS, None
 
     coeffs = OceanPECoeffs(config.rho_0, config.K_h, config.K_bih, config.K_v, config.A_v,
                            config.implicit_vertical_mixing, config.bottom_drag_r)
@@ -1353,13 +1421,19 @@ def mpas_ocean_pe_operators(state, mesh, z_coord, config=MPASOceanConfig()):
         pgf_correction=lambda grad, ctx: grad,
         momentum_terms=momentum_terms,
         finalize=finalize,
+        sources=sources,
+        refresh_cells=(None if halo_refresh is None
+                       else (lambda f: halo_refresh.cells(f)[0])),
     )
 
 
-def mpas_ocean_pe_tendencies(state, mesh, z_coord, config=MPASOceanConfig(), sponge=None):
-    """Drop-in twin of :func:`mpas_ocean_baroclinic_tendencies` running the
-    shared core: serial only (no halo refresh), no freshwater or physics."""
-    ops = mpas_ocean_pe_operators(state, mesh, z_coord, config)
+def mpas_ocean_pe_tendencies(state, mesh, z_coord, config=MPASOceanConfig(), *,
+                             freshwater=None, physics_fn=None, surface_forcing=None,
+                             sponge=None, halo_refresh=None):
+    """MPAS ocean baroclinic tendencies on the shared core."""
+    ops = mpas_ocean_pe_operators(state, mesh, z_coord, config, freshwater=freshwater,
+                                  physics_fn=physics_fn, surface_forcing=surface_forcing,
+                                  halo_refresh=halo_refresh)
     vel_ref = None if sponge is None or sponge.u_ref is None else (sponge.u_ref,)
     t = ocean_baroclinic_tendencies((state.u.data,), state.T.data, state.S.data, ops,
                                     sponge=sponge, sponge_vel_ref=vel_ref)
