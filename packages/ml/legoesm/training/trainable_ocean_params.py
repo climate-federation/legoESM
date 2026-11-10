@@ -70,6 +70,52 @@ GEOMETRIC_TRAINABLE: tuple[OceanParamSpec, ...] = (
 )
 
 
+# Ocean-WB arm (c): lat-lon C-grid dynamics knobs (LatLonCGridOceanConfig flat
+# names).  Limits approved by the user 2026-11-10 (table sent by the ocean-WB
+# agent); tier 2; sigmoid between the limits, in log10 space where the range
+# spans more than a decade.  ``default`` is the run_omip 1-degree lat-lon deck
+# value the trainer starts from -- NOT the code default, which is 0 (= term off)
+# for B_h, C_smag_lap, K_h, bottom_drag_r and bottom_drag_bg_velocity.
+LATLON_DYNAMICS_TRAINABLE: tuple[OceanParamSpec, ...] = (
+    # Laplacian momentum viscosity [m2/s]; NEMO ORCA1 2e4, Munk layer ~2.7e4 at
+    # 1 deg (lower); upper 2.5x the deck value (judgement)
+    OceanParamSpec(ParamConstraint("A_h", 1e4, 5e5, "sigmoid"),
+                   log_space=True, default=2e5),
+    # biharmonic momentum viscosity [m4/s]; Griffies & Hallberg (2000)
+    # grid-Reynolds scaling ~1e12-1e13 at 1 deg (upper); lower judgement
+    OceanParamSpec(ParamConstraint("B_h", 1e9, 1e13, "sigmoid"),
+                   log_space=True, default=5e9),
+    # Laplacian Smagorinsky coefficient [1]; Smagorinsky (1963),
+    # Griffies & Hallberg (2000); one decade -> linear
+    OceanParamSpec(ParamConstraint("C_smag_lap", 0.05, 0.5, "sigmoid"),
+                   log_space=False, default=0.15),
+    # lateral tracer diffusivity [m2/s]; NEMO ORCA1 1e3,
+    # Danabasoglu & McWilliams (1995)
+    OceanParamSpec(ParamConstraint("K_h", 200.0, 3000.0, "sigmoid"),
+                   log_space=True, default=1000.0),
+    # background vertical viscosity [m2/s]; NEMO rn_avm0 1.2e-4,
+    # Large et al. (1994) KPP 1e-4
+    OceanParamSpec(ParamConstraint("A_v", 1e-5, 5e-3, "sigmoid"),
+                   log_space=True, default=1e-3),
+    # background vertical diffusivity [m2/s]; Ledwell et al. (1993) 1e-5,
+    # Munk (1966) 1e-4, Polzin et al. (1997) up to 1e-3
+    OceanParamSpec(ParamConstraint("K_v", 1e-6, 5e-4, "sigmoid"),
+                   log_space=True, default=1e-4),
+    # bottom drag velocity scale [m/s]; MITgcm linear drag 1e-4..1e-3,
+    # NEMO Cd 1e-3
+    OceanParamSpec(ParamConstraint("bottom_drag_r", 1e-4, 1e-2, "sigmoid"),
+                   log_space=True, default=2.5e-3),
+    # unresolved bottom speed [m/s]; NEMO ~0.05, MOM6 DRAG_BG_VEL 0.05-0.1
+    OceanParamSpec(ParamConstraint("bottom_drag_bg_velocity", 0.01, 0.3, "sigmoid"),
+                   log_space=True, default=0.1),
+)
+
+# Numerical stabilisers: FIXED, never trained (user decision 2026-11-10).
+LATLON_FIXED_STABILISERS: tuple[str, ...] = ("A_h_floor", "B_h_barotropic")
+assert not set(LATLON_FIXED_STABILISERS) & {
+    s.constraint.name for s in LATLON_DYNAMICS_TRAINABLE}
+
+
 def _bounds_in_opt_space(spec: OceanParamSpec) -> tuple[float, float]:
     c = spec.constraint
     if spec.log_space:
@@ -136,6 +182,21 @@ class TrainableOceanParams(eqx.Module):
         (eager construction), never inside a trace on this output.
         """
         return base._replace(**self.as_dict())
+
+
+    def to_latlon_config(self, base):
+        """Project onto a :class:`LatLonCGridOceanConfig` by flat field name.
+
+        The lat-lon step gates its terms with ``is_active`` so traced values
+        flow; refuses the fixed numerical stabilisers."""
+        vals = self.as_dict()
+        bad = sorted(set(vals) & set(LATLON_FIXED_STABILISERS))
+        if bad:
+            raise ValueError(f"{bad} are fixed numerical stabilisers, never trained")
+        extra = sorted(set(vals) - set(names(LATLON_DYNAMICS_TRAINABLE)))
+        if extra:
+            raise ValueError(f"{extra} are not approved lat-lon trainables")
+        return base.replace_flat(**vals)
 
 
 def names(specs=GEOMETRIC_TRAINABLE) -> tuple[str, ...]:

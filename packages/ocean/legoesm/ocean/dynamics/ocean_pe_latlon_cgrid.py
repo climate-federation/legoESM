@@ -39,6 +39,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.param_overrides import is_active, is_traced
 from legoesm.core.field import Field
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid
@@ -2414,7 +2415,7 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
     tracer_flat = tracer_stack.reshape(n_lat_t, n_lon_t, nlev_t * n_tracers)
 
     horiz_flat = jnp.zeros_like(tracer_flat)
-    if config.K_h > 0 and config.K_bih > 0:
+    if is_active(config.K_h) and is_active(config.K_bih):
         # Both Laplacian and biharmonic active: bilaplacian's *inner*
         # ∇² is identical to the K_h Laplacian, so compute ∇²(tracer_flat)
         # ONCE and feed it to both branches.  Saves one full
@@ -2425,11 +2426,11 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
         horiz_flat = horiz_flat - config.K_bih * laplacian_cgrid(
             _lap_tr, grid, mask=mask,
         )
-    elif config.K_h > 0:
+    elif is_active(config.K_h):
         horiz_flat = horiz_flat + config.K_h * laplacian_cgrid(
             tracer_flat, grid, mask=mask,
         )
-    elif config.K_bih > 0:
+    elif is_active(config.K_bih):
         horiz_flat = horiz_flat - config.K_bih * bilaplacian_cgrid(
             tracer_flat, grid, mask=mask,
         )
@@ -2443,7 +2444,7 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
     #
     # Skipped when ``implicit_vertical_mixing`` is enabled — the
     # K_v floor is folded into the implicit K profile in the model step.
-    if (config.K_v > 0 and nlev_t >= 2
+    if (is_active(config.K_v) and nlev_t >= 2
             and not getattr(config, "implicit_vertical_mixing", False)):
         jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)  # (n_lat, n_lon, 1)
         dz_actual_loc = z_coord.dz_ref * jac_v           # (n_lat, n_lon, nlev)
@@ -3574,7 +3575,7 @@ def _bc_horizontal_viscosity(
         _lv = config.lateral_viscosity
         _has_reduction = (_lv.A_h_eq_boost < 1.0
                           or _lv.A_h_lat_profile is not None)
-        if _has_reduction and _lv.A_h_floor > 0.0 and _lv.A_h > 0:
+        if _has_reduction and is_active(_lv.A_h_floor) and is_active(_lv.A_h):
             _fr = _lv.A_h_floor / _lv.A_h
             return jnp.maximum(s_u, _fr), jnp.maximum(s_v, _fr)
         return s_u, s_v
@@ -3694,8 +3695,8 @@ def _bc_horizontal_viscosity(
 
     if _use_nemo_div_curl and _ahm_source == "nemo_smag_blp":
         lv = config.lateral_viscosity
-        if (lv.A_h != 0.0 or lv.B_h != 0.0 or lv.C_smag <= 0.0
-                or lv.C_smag_lap != 0.0 or lv.C_leith != 0.0):
+        if ((is_traced(lv.A_h) or lv.A_h != 0.0) or (is_traced(lv.B_h) or lv.B_h != 0.0) or lv.C_smag <= 0.0
+                or (is_traced(lv.C_smag_lap) or lv.C_smag_lap != 0.0) or lv.C_leith != 0.0):
             raise ValueError(
                 "lateral_viscosity_coefficient_source='nemo_smag_blp' "
                 "requires A_h=B_h=C_smag_lap=C_leith=0 and C_smag>0")
@@ -3750,7 +3751,7 @@ def _bc_horizontal_viscosity(
             diag_Cs_smag_u, diag_Cs_smag_v)
         du_dt = du_dt + diag_Cs_smag_u
         dv_dt = dv_dt + diag_Cs_smag_v
-    elif _use_nemo_div_curl and config.lateral_viscosity.A_h > 0:
+    elif _use_nemo_div_curl and is_active(config.lateral_viscosity.A_h):
         # NEMO dyn_ldf_lev_lap: coefficient ahmt(T)/ahmf(F) = ½·rn_Uv·MAX(e1,e2)
         # EMBEDDED inside div/curl (node 14). ``A_h`` here is NEMO's A_h_base =
         # ½·rn_Uv·R·Δλ (the DINO builder), so ½·rn_Uv = A_h / (R·Δλ). This branch
@@ -3761,14 +3762,14 @@ def _bc_horizontal_viscosity(
         if (config.lateral_viscosity.A_h_eq_boost != 1.0
                 or config.lateral_viscosity.A_h_lat_profile is not None
                 or config.lateral_viscosity.A_h_cap_boost > 1.0
-                or config.lateral_viscosity.A_h_floor > 0.0):
+                or is_active(config.lateral_viscosity.A_h_floor)):
             raise ValueError(
                 "lateral_viscosity_operator='nemo_div_curl' embeds NEMO's "
                 "ahmt/ahmf = ½·rn_Uv·MAX(e1,e2) coefficient and does not support "
                 "A_h_eq_boost / A_h_cap_boost / A_h_floor (vector-Laplacian "
                 "extensions). Set them to their defaults."
             )
-        if config.lateral_viscosity.B_h > 0:
+        if is_active(config.lateral_viscosity.B_h):
             raise ValueError(
                 "lateral_viscosity_operator='nemo_div_curl' implements only the "
                 "harmonic Laplacian (NEMO ln_dynldf_lap); B_h biharmonic is not "
@@ -3893,14 +3894,14 @@ def _bc_horizontal_viscosity(
             _ah_scale_center = _ahmt
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
-    elif _use_flux_div and config.lateral_viscosity.A_h > 0:
+    elif _use_flux_div and is_active(config.lateral_viscosity.A_h):
         # Veros component-wise harmonic friction (``flux_divergence_viscosity_cgrid``)
         # applies the cos(lat) A_h scaling INSIDE the flux (Veros
         # ``enable_hor_friction_cos_scaling`` / ``hor_friction_cosPower``).  The
         # legoESM-specific A_h boosts (eq / polar-cap) and the A_h_floor are NOT part
         # of Veros's harmonic friction, so reject those combinations rather than
         # silently ignoring them (they would change answers without effect here).
-        if config.lateral_viscosity.A_h_eq_boost != 1.0 or config.lateral_viscosity.A_h_lat_profile is not None or config.lateral_viscosity.A_h_cap_boost > 1.0 or config.lateral_viscosity.A_h_floor > 0.0:
+        if config.lateral_viscosity.A_h_eq_boost != 1.0 or config.lateral_viscosity.A_h_lat_profile is not None or config.lateral_viscosity.A_h_cap_boost > 1.0 or is_active(config.lateral_viscosity.A_h_floor):
             raise ValueError(
                 "lateral_viscosity_operator='flux_divergence' (Veros harmonic "
                 "friction) does not support A_h_eq_boost / A_h_cap_boost / A_h_floor "
@@ -3938,7 +3939,7 @@ def _bc_horizontal_viscosity(
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
-        if config.lateral_viscosity.B_h > 0:
+        if is_active(config.lateral_viscosity.B_h):
             # Biharmonic matched to the operator family (component for
             # flux_divergence — MITgcm-faithful + stable; vector otherwise).
             bilap_u, bilap_v = _biharmonic_op(u, v)
@@ -3953,7 +3954,7 @@ def _bc_horizontal_viscosity(
                 diag_Bh_bilap_u, diag_Bh_bilap_v)
             du_dt = du_dt + diag_Bh_bilap_u
             dv_dt = dv_dt + diag_Bh_bilap_v
-    elif config.lateral_viscosity.A_h > 0 and config.lateral_viscosity.B_h > 0:
+    elif is_active(config.lateral_viscosity.A_h) and is_active(config.lateral_viscosity.B_h):
         # Both A_h Laplacian and B_h biharmonic active: the biharmonic's
         # *inner* vector Laplacian is identical to the explicit A_h
         # vector Laplacian, so compute ∇²(u, v) ONCE and feed it to
@@ -3967,7 +3968,7 @@ def _bc_horizontal_viscosity(
             mask=_vl_mask, u_mask=_vl_u_mask, v_mask=_vl_v_mask,
             vertex_mask=_vl_vertex_mask)
         if config.lateral_viscosity.A_h_lat_scaling:
-            _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if config.lateral_viscosity.A_h_floor > 0 else 0.0
+            _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if is_active(config.lateral_viscosity.A_h_floor) else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
                 grid, power=config.lateral_viscosity.A_h_cos_power, floor=_floor)
             if config.lateral_viscosity.A_h_eq_boost != 1.0:
@@ -4036,13 +4037,13 @@ def _bc_horizontal_viscosity(
         diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
         du_dt = du_dt + diag_Bh_bilap_u
         dv_dt = dv_dt + diag_Bh_bilap_v
-    elif config.lateral_viscosity.A_h > 0:
+    elif is_active(config.lateral_viscosity.A_h):
         vlap_u, vlap_v = vector_laplacian_cgrid(
             u, v, grid,
             mask=_vl_mask, u_mask=_vl_u_mask, v_mask=_vl_v_mask,
             vertex_mask=_vl_vertex_mask)
         if config.lateral_viscosity.A_h_lat_scaling:
-            _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if config.lateral_viscosity.A_h_floor > 0 else 0.0
+            _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if is_active(config.lateral_viscosity.A_h_floor) else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
                 grid, power=config.lateral_viscosity.A_h_cos_power, floor=_floor)
             if config.lateral_viscosity.A_h_eq_boost != 1.0:
@@ -4097,7 +4098,7 @@ def _bc_horizontal_viscosity(
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
-    elif (config.lateral_viscosity.B_h > 0
+    elif (is_active(config.lateral_viscosity.B_h)
           or getattr(config.lateral_viscosity, "B_h_gamma0", 0.0) > 0):
         _validate_biharmonic_gamma0(config.lateral_viscosity, grid)
         if getattr(config.lateral_viscosity, "B_h_gamma0", 0.0) > 0:
@@ -4147,7 +4148,7 @@ def _bc_horizontal_viscosity(
             f"lateral_side_bc must be one of {sorted(VALID_LATERAL_SIDE_BC)}, "
             f"got {_side_bc!r}"
         )
-    if _side_bc == "no_slip" and config.lateral_viscosity.A_h > 0:
+    if _side_bc == "no_slip" and is_active(config.lateral_viscosity.A_h):
         if config.lateral_viscosity.A_h_eq_boost != 1.0:
             # codex 9430935 MAJOR-3: the side-drag takes a SCALAR A_h and
             # would silently ignore the equatorial shaping -- refuse rather
@@ -4175,7 +4176,7 @@ def _bc_horizontal_viscosity(
         du_dt = du_dt + diag_Cs_smag_u
         dv_dt = dv_dt + diag_Cs_smag_v
 
-    if config.lateral_viscosity.C_smag_lap > 0:  # #501: nested LateralViscosityConfig
+    if is_active(config.lateral_viscosity.C_smag_lap):  # #501: nested LateralViscosityConfig
         # Laplacian Smagorinsky: flow-adaptive viscosity via the
         # energy-stable stress-tensor operator.  A_smag = (C·dx)²·|D|
         # at both h-points (cell centers) and q-points (vertices).
@@ -4533,8 +4534,8 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
     _scheme = validate_bottom_drag_scheme(
         str(getattr(config.bottom_drag, "bottom_drag_scheme", "legacy")))
     _nemo_drag = _scheme != "legacy"
-    u_bg = float(getattr(config.bottom_drag, "bottom_drag_bg_velocity", 0.0))
-    if config.bottom_drag.bottom_drag_r > 0 or _nemo_drag:
+    u_bg = getattr(config.bottom_drag, "bottom_drag_bg_velocity", 0.0)
+    if is_active(config.bottom_drag.bottom_drag_r) or _nemo_drag:
         # Drag acts on the full velocity (not perturbation) — the ocean
         # floor sees the total flow.  Consistent with MPAS and MOM6.
         # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
@@ -4590,7 +4591,7 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
         # quadratic Cd · |u| at |u| ≫ u_bg (production-equivalent
         # to MOM6 OM4's `BOTTOMDRAGLAW="quadratic"` with `DRAG_BG_VEL`).
         # u_bg=0 → exactly the legacy linear formula (bit-exact path).
-        elif u_bg > 0.0:
+        elif is_active(u_bg):
             Cd_eq = config.bottom_drag.bottom_drag_r / u_bg
             r_eff_u = Cd_eq * jnp.sqrt(u * u + u_bg * u_bg)
             r_eff_v = Cd_eq * jnp.sqrt(v * v + u_bg * u_bg)
@@ -4673,7 +4674,7 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
             dz_bot_u = z_coord.dz_ref[-1] * jnp.maximum(interp_cell_to_uface(J), 1e-10)
             dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(interp_to_v_points(J, grid=grid), 1e-10)
             # Capture only at the bottom level; zeros elsewhere.
-            _r_is_3d = u_bg > 0.0 or _nemo_drag
+            _r_is_3d = is_active(u_bg) or _nemo_drag
             r_eff_u_bot = r_eff_u[..., -1] if _r_is_3d else r_eff_u
             r_eff_v_bot = r_eff_v[..., -1] if _r_is_3d else r_eff_v
             diag_botdrag_u = diag_botdrag_u.at[..., -1].set(
@@ -4697,7 +4698,7 @@ def _bc_explicit_vertical_viscosity(du_dt, dv_dt, u_prime, v_prime, u, J, z_coor
     # K profile downstream and applied unconditionally-stable.  The
     # KPP / Richardson / Constant scheme branches above are already
     # ``apply_diffusion=False`` in that mode.
-    if (config.A_v > 0
+    if (is_active(config.A_v)
             and u.shape[-1] >= 2
             and not getattr(config, "implicit_vertical_mixing", False)):
         jac_v_u = jnp.maximum(interp_cell_to_uface(J)[..., jnp.newaxis], 1e-10)

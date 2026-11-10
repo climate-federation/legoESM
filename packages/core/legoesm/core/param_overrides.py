@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import jax
 
-__all__ = ("apply_param_overrides",)
+__all__ = ("apply_param_overrides", "is_traced", "is_active")
 
 
 def apply_param_overrides(config_obj, field_values: dict[str, jax.Array]):
@@ -38,3 +38,24 @@ def apply_param_overrides(config_obj, field_values: dict[str, jax.Array]):
             f"{type(config_obj).__name__} has no field(s) {bad}; known: {list(fields)}"
         )
     return config_obj._replace(**field_values)
+
+
+def is_traced(x) -> bool:
+    """True iff ``x`` is a JAX tracer (a config leaf being trained)."""
+    return isinstance(x, jax.core.Tracer)
+
+
+def is_active(x) -> bool:
+    """Static gate for a term whose coefficient may be a trained (traced) leaf.
+
+    A static value keeps the historical ``x > 0`` branch choice, so production
+    (Python-float configs) is unchanged.  A traced value always takes the ACTIVE
+    branch: the term is built and the gradient flows.  For terms linear in the
+    coefficient a traced 0 then contributes exactly 0; for ratio knobs (e.g. a
+    floor divided by the coefficient, a drag law divided by a background speed)
+    a traced 0 is unsupported -- trainers keep such leaves strictly positive
+    through their constraint transform, and inactive knobs stay out of the
+    trainable set.
+    """
+    return is_traced(x) or bool(x > 0)
+

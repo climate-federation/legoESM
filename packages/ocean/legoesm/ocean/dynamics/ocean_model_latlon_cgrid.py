@@ -28,6 +28,7 @@ import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.precision import cast_pytree
+from legoesm.core.param_overrides import is_active
 from legoesm.grids.latlon import (
     LatLonGrid,
     compute_v_face_coords,
@@ -4283,7 +4284,7 @@ class LatLonCGridOceanModel:
                     "rk3_stage3_tracer_krhs_nemo_order: the written stage-3 "
                     "Krhs term list does not yet carry tra_bbc")
             _after_ldf = config.rk3_stage3_geothermal_after_ldf_nemo_order
-            _has_ldf = (config.K_h > 0.0 or config.K_bih > 0.0
+            _has_ldf = (is_active(config.K_h) or is_active(config.K_bih)
                         or config.gm_redi is not None)
             if _has_ldf and not _after_ldf:
                 raise ValueError(
@@ -4458,7 +4459,7 @@ class LatLonCGridOceanModel:
         # some terms and 3-D for others (the 2-D x–z oracle has none of them).
         if getattr(config, "meridionally_flat", False):
             _ungated = []
-            _visc_on = (config.lateral_viscosity.A_h > 0.0 or config.lateral_viscosity.B_h > 0.0
+            _visc_on = (is_active(config.lateral_viscosity.A_h) or is_active(config.lateral_viscosity.B_h)
                         or getattr(config.lateral_viscosity, "C_smag", 0.0) > 0.0)
             if _visc_on and config.lateral_viscosity_operator == "flux_divergence":
                 _ungated.append(
@@ -7558,7 +7559,7 @@ class LatLonCGridOceanModel:
         #   ∂U_bar/∂t |_diss = -ν₄ · ∇⁴ U_bar.
         # MOM6/HIM BIHARMONIC_BAROTROPIC analog.  No-op at default
         # ``B_h_barotropic = 0`` (bit-exact backward compat).
-        if getattr(_cfg_b.lateral_viscosity, "B_h_barotropic", 0.0) > 0.0:
+        if is_active(getattr(_cfg_b.lateral_viscosity, "B_h_barotropic", 0.0)):
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                 vector_bilaplacian_cgrid, biharmonic_scaling_factor,
             )
@@ -14190,8 +14191,8 @@ class LatLonCGridOceanModel:
                     _tke_p_sh2 = _tke_p_sh2_result
                 _kprof = compute_vertical_K_profiles(
                     cc_state, _zc, surface_forcing, physics_config,
-                    A_v_background=float(_cfg_b.A_v),
-                    K_v_background=float(_cfg_b.K_v),
+                    A_v_background=_cfg_b.A_v,
+                    K_v_background=_cfg_b.K_v,
                     eos_fn=_vmix_eos_fn,
                     tke_old=tke_old,
                     dt_tke=(tke_rn_dt if (
@@ -14264,8 +14265,8 @@ class LatLonCGridOceanModel:
             else:
                 K_v_cell, A_v_cell = compute_vertical_K_profiles(
                     cc_state, _zc, surface_forcing, physics_config,
-                    A_v_background=float(_cfg_b.A_v),
-                    K_v_background=float(_cfg_b.K_v),
+                    A_v_background=_cfg_b.A_v,
+                    K_v_background=_cfg_b.K_v,
                     eos_fn=_vmix_eos_fn,
                     # ePBL's per-timestep energy budget takes the same step
                     # dt CATKE gets above (dt_mom: leapfrog 2*dt, dt on the

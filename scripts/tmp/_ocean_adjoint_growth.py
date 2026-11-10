@@ -204,6 +204,9 @@ for name in CANDIDATES:
         tb = [l for l in traceback.format_exception(e) if "packages/" in l]
         trace_result[name] = f"{type(e).__name__} @ {tb[-1].strip().split(', in ')[0] if tb else '?'}"
     print(f"trace {name}={v0:g}: {trace_result[name]}", flush=True)
+if os.environ.get("PROBE_MODE") == "trace":
+    print("TRACE_DONE", sum(v == "traces" for v in trace_result.values()), "/", len(trace_result), flush=True)
+    raise SystemExit(0)
 
 
 def make_loss(n_days, tg, W, kind):
@@ -236,6 +239,82 @@ def make_loss(n_days, tg, W, kind):
                 + term(pe, te, "eta")) / 5.0
     return loss
 
+
+if os.environ.get("PROBE_MODE") == "tlm":
+    # Phase-1b: where does the tangent-linear model grow?  Forward-mode JVP carried step by
+    # step next to a nonlinear twin (state + eps*d) from the same unit random T0 direction d.
+    # TLM growing while the twin stays small => the linearisation of some operator is unstable
+    # (non-smooth op), not the physics.  Per step and field: L2, max|.|, flat argmax.
+    TLM_DAYS = int(os.environ.get("TLM_DAYS", "12"))
+    EPS = float(os.environ.get("TLM_EPS", "1e-2"))
+    leaves, tdef = jax.tree_util.tree_flatten(state)
+    isf = [jnp.issubdtype(jnp.asarray(x).dtype, jnp.inexact) for x in leaves]
+
+    def split(s):
+        lv = jax.tree_util.tree_leaves(s)
+        return [x for x, f in zip(lv, isf) if f], [x for x, f in zip(lv, isf) if not f]
+
+    def merge(fl, ot):
+        fi, oi = iter(fl), iter(ot)
+        return jax.tree_util.tree_unflatten(tdef, [next(fi) if f else next(oi) for f in isf])
+
+    f_step = step_fn(model)
+    rng = np.random.default_rng(0)
+    d = rng.standard_normal(state.T.data.shape) * (wet3 > 0)
+    d = jnp.asarray(d / np.linalg.norm(d))
+    fl0, ot0 = split(state)
+    tl0 = [jnp.zeros_like(x) for x in fl0]
+    t_full = merge(tl0, ot0)
+    t_full = t_full._replace(T=t_full.T.replace(data=d))
+    tl0, _ = split(t_full)
+    sp = state._replace(T=state.T.replace(data=state.T.data + EPS * d))
+    FIELDS = ("T", "S", "u", "v", "eta")
+
+    def stats(x):
+        a = jnp.abs(x)
+        return jnp.stack([jnp.sqrt(jnp.sum(x * x)), jnp.max(a), jnp.argmax(a).astype(x.dtype)])
+
+    def body(c, _):
+        fl, ot, tl, sp = c
+        def g(fl_):
+            o = f_step(merge(fl_, ot))
+            a, b = split(o)
+            return a, b
+        fl1, tl1, ot1 = jax.jvp(g, (fl,), (tl,), has_aux=True)
+        sp1 = f_step(sp)
+        s1, t1 = merge(fl1, ot1), merge(tl1, ot1)
+        st = jnp.stack([stats(getattr(t1, k).data) for k in FIELDS]
+                       + [stats((getattr(sp1, k).data - getattr(s1, k).data) / EPS) for k in FIELDS])
+        return (fl1, ot1, tl1, sp1), st
+
+    @jax.jit
+    def run_day(c):
+        return jax.lax.scan(body, c, None, length=STEPS_PER_DAY)
+
+    c = (fl0, ot0, tl0, sp)
+    hist = []
+    for dday in range(TLM_DAYS):
+        c, st = run_day(c)
+        st = np.asarray(st)
+        hist.append(st)
+        for k, nm in enumerate(FIELDS):
+            print(f"day {dday + 1} {nm}: tlm L2 {st[-1, k, 0]:.3e} max {st[-1, k, 1]:.3e} at "
+                  f"{np.unravel_index(int(st[-1, k, 2]), getattr(state, nm).data.shape)} | twin L2 "
+                  f"{st[-1, 5 + k, 0]:.3e} max {st[-1, 5 + k, 1]:.3e} at "
+                  f"{np.unravel_index(int(st[-1, 5 + k, 2]), getattr(state, nm).data.shape)}", flush=True)
+    np.save(OUT.with_suffix(".npy"), np.concatenate(hist, 0))
+    _sha = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip()
+    _dirty = bool(subprocess.run(["git", "-C", str(REPO), "status", "--porcelain"],
+                                 capture_output=True, text=True).stdout.strip())
+    OUT.write_text(json.dumps({"mode": "tlm", "nlev": NLEV, "dt": DT, "date0": str(DATE0),
+                               "days": TLM_DAYS, "eps": EPS, "argv": ARGV, "commit": _sha,
+                               "dirty": _dirty, "npy": str(OUT.with_suffix(".npy")),
+                               "layout": "(step, 10, 3): rows T,S,u,v,eta tangent then the "
+                                         "same five for the nonlinear twin / eps; cols "
+                                         "L2, max|.|, flat argmax"}, indent=1))
+    print("TLM_DONE", flush=True)
+    raise SystemExit(0)
 
 commit = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 dirty = subprocess.run(["git", "-C", str(REPO), "status", "--porcelain"], capture_output=True, text=True).stdout.strip()

@@ -31,6 +31,7 @@ import numpy as np
 from legoesm import constants
 from legoesm.core.profile_metrics import safe_sqrt
 from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.param_overrides import is_active
 from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type compat
 from legoesm.grids.halo_latlon import (
     get_meridionally_periodic, lat_faces_from_north, meridional_periodicity)
@@ -2462,7 +2463,7 @@ def laplacian_scaling_factor(
     cos_u, cos_v = _cos_lat_uv(grid)
     scale_u = cos_u ** power
     scale_v = cos_v ** power
-    if floor > 0:
+    if is_active(floor):
         scale_u = jnp.maximum(scale_u, floor)
         scale_v = jnp.maximum(scale_v, floor)
     return scale_u, scale_v
