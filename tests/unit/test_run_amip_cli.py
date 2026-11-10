@@ -1774,12 +1774,16 @@ def test_aimip_classical_checkpoint_flag():
 
 
 def _serialise_aimip_defaults(tmp_path):
-    """Write a default AIMIPClassicalParams checkpoint for the override tests."""
+    """Write a default AIMIPClassicalParams checkpoint for the override tests,
+    with the knob-range record the loader requires (as the trainers write it)."""
     import equinox as eqx
+    from legoesm.ml.checkpoint_io import write_knob_record
     from legoesm.training.aimip_params import AIMIPClassicalParams
 
     ckpt = tmp_path / "epoch_defaults.eqx"
-    eqx.tree_serialise_leaves(str(ckpt), AIMIPClassicalParams.from_defaults())
+    params = AIMIPClassicalParams.from_defaults()
+    eqx.tree_serialise_leaves(str(ckpt), params)
+    write_knob_record(params, ckpt)
     return str(ckpt)
 
 
