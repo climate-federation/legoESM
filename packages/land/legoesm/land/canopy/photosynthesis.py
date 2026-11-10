@@ -185,7 +185,14 @@ def _smaller_root_quadratic(theta: float, A: jax.Array, B: jax.Array,
     """
     s = A + B
     disc = s * s - 4.0 * theta * A * B
-    return (s - jnp.sqrt(jnp.maximum(disc, eps))) / (2.0 * theta)
+    # For A, B >= 0 and 0 < theta <= 1 both roots are >= 0, so the floor only
+    # removes the guard's own artefact: with A = B = 0 (e.g. a polar-night leaf
+    # whose acclimated Vcmax is zero, in the dark) the guarded sqrt returns
+    # -sqrt(eps)/(2 theta) instead of 0.  One-sided (where root < 0), not
+    # jnp.maximum: an exact zero root (A = 0 < B, e.g. dark electron transport)
+    # keeps its unfloored derivative instead of maximum's half-gradient tie.
+    root = (s - jnp.sqrt(jnp.maximum(disc, eps))) / (2.0 * theta)
+    return jnp.where(root < 0.0, 0.0, root)
 
 
 def _delta_s_vcmax(TgC_a: jax.Array) -> jax.Array:

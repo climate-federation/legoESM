@@ -327,6 +327,34 @@ def validate_config(data: dict) -> LMIPConfig:
             raise ValueError(
                 "physics.pmodel_acclimation='subdaily_noon' is not wired for "
                 "the P-hydro arm (its optimum uses the 24 h running means)")
+    # Intrinsic quantum yield phi0: 'temperature' (Bernacchi-type phi0(T), the
+    # original) or 'sandoval' (Sandoval et al. 2026: phi0 peak from the aridity
+    # index, thermal breadth from mGDD0).  Sandoval needs the climatological
+    # inputs file, surfdata.sandoval_file (scripts/data/build_sandoval_inputs.py).
+    physics.setdefault("pmodel_kphio_method", "temperature")
+    from legoesm.land.p_model import VALID_KPHIO_METHODS
+    if physics["pmodel_kphio_method"] not in VALID_KPHIO_METHODS:
+        raise ValueError(
+            f"physics.pmodel_kphio_method={physics['pmodel_kphio_method']!r} "
+            f"not in {VALID_KPHIO_METHODS}")
+    _sv_file = (data.get("surfdata") or {}).get("sandoval_file") or ""
+    if not isinstance(_sv_file, str):
+        raise ValueError(
+            f"surfdata.sandoval_file must be a path string (got {_sv_file!r})")
+    if physics["pmodel_kphio_method"] == "sandoval":
+        if not _pm_on or physics["land_mode"] != "multilayer":
+            raise ValueError(
+                "physics.pmodel_kphio_method='sandoval' needs a P-model switch "
+                "(canopy_capacity_scheme / canopy_g1_source = p_model) on "
+                "land_mode='multilayer'; otherwise it would be silently inert")
+        if not _sv_file:
+            raise ValueError(
+                "physics.pmodel_kphio_method='sandoval' needs "
+                "surfdata.sandoval_file (aridity index + mGDD0 climatology)")
+    elif _sv_file:
+        raise ValueError(
+            "surfdata.sandoval_file is given but physics.pmodel_kphio_method="
+            f"{physics['pmodel_kphio_method']!r}; the file would be inert")
     if (physics["canopy_vcmax_profile"] != "kn"
             and physics["surface_scheme"] != "two_leaf_canopy"):
         raise ValueError(
@@ -498,6 +526,19 @@ def validate_config(data: dict) -> LMIPConfig:
     from legoesm.land.surface_data.datasets import validate_land_cover_dataset
     surfdata.setdefault("land_cover_dataset", "clm5")
     validate_land_cover_dataset(surfdata["land_cover_dataset"])
+    surfdata["sandoval_file"] = _sv_file
+
+    # Tuned scheme parameters ({param_collector qualified name: value}), the
+    # same calibration layer as run_lmip --params, but carried IN the config so
+    # the run is recorded by one file.  Keys and bounds are validated against
+    # the parameter registry when the driver applies them (unknown / tier-0 /
+    # out-of-bounds raise there); here only the shape is checked.
+    params = data.get("params") or {}
+    if not isinstance(params, dict) or not all(isinstance(k, str) for k in params):
+        raise ValueError(
+            "params must be a mapping of 'scheme_key.field' -> value "
+            f"(got {params!r})")
+    data["params"] = params
 
     # E_LUC land-use-change bookkeeping (optional block; scheme fail-fast here,
     # the numeric knobs are validated by validate_luc_config at run entry).

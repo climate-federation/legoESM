@@ -118,6 +118,55 @@ def grid_latlon_rad(grid):
     return jnp.asarray(lat.ravel()), jnp.asarray(lon.ravel())
 
 
+def sandoval_inputs_on_grid(path: str, grid) -> tuple[np.ndarray, np.ndarray]:
+    """Sandoval et al. (2026) phi0 inputs ``(aridity_index, mgdd0_c)``, each
+    ``(ncol,)`` in the surfdata column order, from a regular lat-lon
+    climatology file (``lat``, ``lon`` [deg], ``aridity_index``, ``mgdd0``;
+    NaN off land; scripts/data/build_sandoval_inputs.py writes one).
+
+    Each model cell takes the area-weighted mean over its land source cells
+    (NaN-aware conservative regrid).  The aridity index is averaged in log
+    space (a geometric mean): phi0 depends on AI through (1 + AI^4.09), so an
+    arithmetic mean over a cell that spans a desert edge would be set by its
+    driest sub-cell.  mGDD0 is averaged arithmetically (it is a temperature).
+    Model cells with no land source cell (open ocean, small islands) take the
+    nearest filled model cell, so the field is finite everywhere; their value
+    only matters if the land fraction admits them.  Regular lat-lon model
+    grids only: anything else raises.
+    """
+    import xarray as xr
+    from legoesm.grids.regridding import conservative_regrid_latlon
+    from legoesm.coupler.grid_remap import nearest_column_map
+    if not (hasattr(grid, "lat2d") and hasattr(grid, "lon2d")
+            and np.ndim(grid.lat) == 1 and np.ndim(grid.lon) == 1):
+        raise ValueError(
+            "sandoval_inputs_on_grid: regular lat-lon model grids only "
+            f"(got {type(grid).__name__})")
+    with xr.open_dataset(path) as ds:
+        src_lat = np.asarray(ds["lat"].values, np.float64)
+        src_lon = np.asarray(ds["lon"].values, np.float64)
+        ai = np.asarray(ds["aridity_index"].values, np.float64)
+        mg = np.asarray(ds["mgdd0"].values, np.float64)
+    if np.any(ai[np.isfinite(ai)] <= 0.0):
+        raise ValueError(f"{path}: aridity_index must be > 0 on land")
+    tgt_lat = np.rad2deg(np.asarray(grid.lat, np.float64))
+    tgt_lon = np.rad2deg(np.asarray(grid.lon, np.float64))
+    ai_c = np.exp(conservative_regrid_latlon(np.log(ai), src_lat, src_lon,
+                                             tgt_lat, tgt_lon)).ravel()
+    mg_c = conservative_regrid_latlon(mg, src_lat, src_lon,
+                                      tgt_lat, tgt_lon).ravel()
+    filled = np.isfinite(ai_c) & np.isfinite(mg_c)
+    if not filled.any():
+        raise ValueError(f"{path}: no land source cell overlaps the model grid")
+    lat_c, lon_c = (np.asarray(a) for a in grid_latlon_rad(grid))
+    gap = ~filled
+    if gap.any():
+        src = np.flatnonzero(filled)[nearest_column_map(
+            lat_c[filled], lon_c[filled], lat_c[gap], lon_c[gap])]
+        ai_c[gap], mg_c[gap] = ai_c[src], mg_c[src]
+    return ai_c, mg_c
+
+
 def build_model_times(start_doy: float, dt: float, n_steps: int, *, synthetic: bool):
     """Model step times in seconds since the forcing-year start.
 
@@ -168,6 +217,9 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         transpiration_stress=cfg.physics.get(
             "transpiration_stress", "beta_theta"),
         pmodel_acclimation=cfg.physics.get("pmodel_acclimation", "ema_24h"),
+        pmodel_kphio_method=cfg.physics.get("pmodel_kphio_method", "temperature"),
+        sandoval_file=cfg.surfdata.get("sandoval_file", ""),
+        params=dict(cfg.raw.get("params") or {}),
         canopy_light_response=cfg.physics.get("canopy_light_response", "clm"),
         calibrated_land_physics=bool(
             cfg.physics.get("calibrated_land_physics", False)),
@@ -487,11 +539,13 @@ def run(args) -> int:
     # beta amip_sota disabled for over-transpiration, #730); the two-leaf canopy
     # ignores it (it has its own leaf conductance).  Only override a scalar the
     # user actually set (None -> land default / per-PFT surfdata value).
-    # The two-leaf P-hydro option ("phydro") has no big-leaf counterpart, and
-    # the two-leaf canopy never reads this config: leave the StomataConfig
-    # default in that case instead of naming a scheme the big leaf lacks.
+    # The two-leaf P-hydro ("phydro") and P-model ci ("pmodel_chi") options
+    # have no big-leaf counterpart, and the two-leaf canopy never reads this
+    # config: leave the StomataConfig default in those cases instead of naming
+    # a scheme the big leaf lacks (lmip_config restricts both to the canopy).
+    _two_leaf_only = ("phydro", "pmodel_chi")
     _stom = {"enabled": bool(args.stomata_enabled)}
-    if args.stomatal_model != "phydro":
+    if args.stomatal_model not in _two_leaf_only:
         _stom["stomata_model"] = args.stomatal_model
     if args.surface_scheme == "simple_seb":
         # simple_seb: the P-model switches live on the big-leaf StomataConfig.
@@ -502,6 +556,10 @@ def run(args) -> int:
     if args.gs_max is not None:
         _stom["gs_max"] = float(args.gs_max)
     if args.g1 is not None:
+        if args.stomatal_model in _two_leaf_only:
+            raise ValueError(
+                f"--g1 with physics.stomatal_model={args.stomatal_model!r} would "
+                "be silently inert (that scheme reads no stomatal slope); drop it.")
         if args.canopy_g1_source == "p_model":
             raise ValueError(
                 "--g1 with physics.canopy_g1_source=p_model would be silently "
@@ -578,8 +636,11 @@ def run(args) -> int:
             transpiration_stress=args.transpiration_stress)
         # P-model acclimation scheme (physics.pmodel_acclimation; validated in
         # lmip_config): 'ema_24h' or 'subdaily_noon' (Mengoli et al. 2022).
+        # Quantum-yield form (physics.pmodel_kphio_method): 'temperature' or
+        # 'sandoval' (inputs from surfdata.sandoval_file, mapped below).
         base_cfg = base_cfg._replace(p_model=base_cfg.p_model._replace(
-            acclimation=getattr(args, "pmodel_acclimation", "ema_24h")))
+            acclimation=getattr(args, "pmodel_acclimation", "ema_24h"),
+            kphio_method=getattr(args, "pmodel_kphio_method", "temperature")))
         # A land initial condition is only meaningful for the model it was
         # equilibrated under, so a spin-up feeding a calibrated coupled run has to
         # use the same one — including its soil column, which this driver
@@ -600,6 +661,15 @@ def run(args) -> int:
         raise ValueError(
             f"unknown land_mode {args.land_mode!r} (expected 'multilayer' or 'slab')")
     base_cfg = resolve_land_config(args.land_mode, base_cfg)
+    if getattr(args, "params", None):
+        # The config's ``params:`` block: the shared calibration loader
+        # validates every key against the parameter registry (unknown, tier-0
+        # and out-of-bounds values raise) and splices it into the matching
+        # nested *Config — the same route as run_lmip / run_ec_site --params.
+        from legoesm.driver.run_config_yaml import apply_params_to_config
+        base_cfg = apply_params_to_config(
+            base_cfg, args.params, driver="run_lmip_biophys")
+        print(f"params: {args.params}")
     is_multilayer = (args.land_mode == "multilayer")
 
     config, _params_nominal, gsd = init_land_surface_data(
@@ -692,6 +762,13 @@ def run(args) -> int:
         co2_by_year = {}
         print("CO2: constant default (no forcing.co2_file)")
     _co2_init = co2_by_year.get(year_masks[0][0])
+    # Sandoval phi0 climatology (aridity index, mGDD0) on the model columns.
+    _sv_inputs = None
+    if getattr(args, "pmodel_kphio_method", "temperature") == "sandoval":
+        _sv_inputs = sandoval_inputs_on_grid(args.sandoval_file, grid)
+        print(f"Sandoval inputs: {args.sandoval_file} | AI median "
+              f"{np.median(_sv_inputs[0]):.3g}, mGDD0 median "
+              f"{np.median(_sv_inputs[1]):.3g} degC")
 
     # T0 seed for cold-start soil temperature: stage just the first year's
     # first step (one AtmToSurface slice, ~100 KB) and extract T_lowest[0].
@@ -755,7 +832,8 @@ def run(args) -> int:
             # cold-start template, as model_driver and run_land_spinup do.
             state = merge_land_restart_into_template(
                 loaded, init_multilayer_land_state(
-                    ncol, config, T_init=288.0, pmodel_co2_init_ppm=_co2_init),
+                    ncol, config, T_init=288.0, pmodel_co2_init_ppm=_co2_init,
+                    pmodel_sandoval_inputs=_sv_inputs),
                 allow_pmodel_cold_start=bool(
                     getattr(args, "pmodel_cold_restart", False)))
             print(f"restart: loaded state from {args.restart_from} "
@@ -763,7 +841,8 @@ def run(args) -> int:
                   f"steps_completed={restart_meta['n_steps_completed']})")
         else:
             state = init_multilayer_land_state(
-                ncol, config, T_init=288.0, pmodel_co2_init_ppm=_co2_init)
+                ncol, config, T_init=288.0, pmodel_co2_init_ppm=_co2_init,
+                pmodel_sandoval_inputs=_sv_inputs)
             state = state._replace(T_soil=jnp.broadcast_to(T0[:, None], state.T_soil.shape))
 
     update_land_params = make_step_land_params_updater(

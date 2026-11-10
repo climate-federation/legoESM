@@ -522,6 +522,15 @@ def test_calibrated_land_rejects_a_contradicting_config(tmp_path):
     ("baseline", {"stomatal_model": "medlyn"}),
     ("least_cost", {"optimality": "least_cost"}),
     ("phydro", {"optimality": "phydro"}),
+    ("least_cost_subdaily", {"optimality": "least_cost",
+                             "pmodel_acclimation": "subdaily_noon"}),
+    # The upgraded P-model of the global comparison (sub-daily acclimation,
+    # P-model phi0 in electron transport, ci from the acclimated xi).
+    ("pmodel_chi_subdaily", {"canopy_capacity_scheme": "p_model",
+                             "canopy_g1_source": "table",
+                             "stomatal_model": "pmodel_chi",
+                             "pmodel_acclimation": "subdaily_noon",
+                             "canopy_light_response": "pmodel_phi0"}),
 ])
 def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
     """The three arms of the global comparison (prescribed / least-cost with
@@ -591,7 +600,19 @@ def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
         assert np.all(np.isnan(n_rub))
     else:
         assert np.all((chi > 0.0) & (chi <= 1.0))
-        assert np.nanmin(n_rub) > 0.0
+        # Leaf N follows the acclimated capacity.  Under sub-daily acclimation
+        # a polar-night column (here 67.5 N in January) sees no noon light, so
+        # its optimum Vcmax25 - and with it the Rubisco N - is exactly 0, as in
+        # pyrealm (coordination: Vcmax proportional to absorbed light); the
+        # 24 h running means never reach zero.
+        # (The N tape is taken from the post-step state, the Vcmax tape from
+        # the traits the canopy used in the step, so on the step a window
+        # closes they can differ; compare N with latitude, not with that tape.)
+        lat = ds["lat"].values
+        assert np.nanmin(n_rub) >= 0.0
+        assert np.all(n_rub[:, np.abs(lat) < 60.0, :] > 0.0)
+        if extra.get("pmodel_acclimation", "ema_24h") == "ema_24h":
+            assert np.nanmin(n_rub) > 0.0
     if arm == "phydro":
         assert np.all(psil <= ds["pmodel_psi_soil"].values + 1e-9)
         np.testing.assert_allclose(ds["pmodel_vcmax25"].values,
@@ -662,3 +683,64 @@ def test_co2_file_reaches_photosynthesis(tmp_path):
     assert np.nansum(out[600.0]["GPP"].values) > np.nansum(out[300.0]["GPP"].values)
     assert not np.allclose(out[600.0]["pmodel_chi"].values,
                            out[300.0]["pmodel_chi"].values, equal_nan=True)
+
+
+def test_sandoval_kphio_and_params_block_reach_the_global_run(tmp_path):
+    """physics.pmodel_kphio_method='sandoval' (inputs from surfdata.sandoval_file)
+    and a config ``params:`` block both change the simulated GPP of the global
+    driver, so neither can be silently inert; an unknown parameter is refused."""
+    import yaml
+    import xarray as xr
+    from legoesm.land.lmip_config import validate_config
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    lat = np.arange(-89.75, 90.0, 0.5); lon = np.arange(-179.75, 180.0, 0.5)
+    ny, nx = lat.size, lon.size
+    sv = tmp_path / "sv.nc"
+    xr.Dataset({"aridity_index": (("lat", "lon"), np.full((ny, nx), 3.0)),
+                "mgdd0": (("lat", "lon"), np.full((ny, nx), 12.0))},
+               coords={"lat": lat, "lon": lon}).to_netcdf(sv)
+
+    def run(name, physics_extra, surf_extra=None, params=None):
+        cfg = {
+            "grid": {"type": "latlon", "resolution": 4},
+            "physics": {"land_mode": "multilayer",
+                        "surface_scheme": "two_leaf_canopy", "bulk_scheme": "most",
+                        "canopy_capacity_scheme": "p_model",
+                        "canopy_g1_source": "table",
+                        "stomatal_model": "pmodel_chi",
+                        "pmodel_acclimation": "subdaily_noon",
+                        "canopy_light_response": "pmodel_phi0",
+                        "canopy_vcmax_profile": "coordination", **physics_extra},
+            "forcing": {"source": "synthetic", "data_dir": "",
+                        "year_start": 2000, "year_end": 2000},
+            "surfdata": {"path": str(sd), **(surf_extra or {})},
+            "time": {"dt": 3600.0, "n_steps": 48, "start_doy": 0.0},
+            "output": {"tapes": [{"name": "step", "freq": "step",
+                                  "average": "inst", "vars": ["GPP"]}]},
+        }
+        if params is not None:
+            cfg["params"] = params
+        cfg = validate_config(cfg).raw
+        p = tmp_path / f"{name}.yaml"
+        p.write_text(yaml.safe_dump(cfg, sort_keys=False))
+        out = tmp_path / name
+        assert _run_config(mod, p, out) == 0
+        return np.asarray(xr.open_dataset(out / "lmip_biophys.step.nc")["GPP"].values)
+
+    base = run("temp", {})
+    sand = run("sand", {"pmodel_kphio_method": "sandoval"},
+               {"sandoval_file": str(sv)})
+    frac = run("frac", {}, params={"land.two_leaf_canopy.vcmax_light_frac": 0.5})
+    for g in (base, sand, frac):
+        assert np.all(np.isfinite(g)) and g.max() > 0.0
+    assert np.max(np.abs(sand - base)) > 1e-3 * base.max()
+    assert np.max(np.abs(frac - base)) > 1e-3 * base.max()
+    cfg_bad = tmp_path / "bad.yaml"
+    raw = yaml.safe_load((tmp_path / "frac.yaml").read_text())
+    raw["params"] = {"land.two_leaf_canopy.no_such_field": 1.0}
+    cfg_bad.write_text(yaml.safe_dump(raw, sort_keys=False))
+    with pytest.raises(SystemExit, match="unknown parameter"):
+        _run_config(mod, cfg_bad, tmp_path / "bad")
+
+
