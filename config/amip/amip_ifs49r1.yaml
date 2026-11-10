@@ -55,6 +55,26 @@ zm_detrain_number_width_kgkg_s: null
 # spectrum (SSI_frac not read, M2), CCN 900/50 (LERADS=F arm, L25), lane orbit
 # (L17), broadband albedo/emissivity in every band (L10/L11), no ozone above
 # the model top (L18), 48r1 aerosol files (A2a, below).
+# --- gravity-wave drag (votes G1-G5, oracle_audit/ifs_port/wms_ozone/VOTES.md) --
+# OpenIFS 49r1 WMS non-orographic drag (Warner-McIntyre-Scinocca, launch 450 hPa
+# standard pressure, recomputed every GTPHYGWWMS = 1 h with the retained u/v
+# tendencies carried and re-applied every step) added to the inherited CAM6
+# orographic member until the IFS SSO port lands (G1, recorded interim).
+# DEPARTURE V11b: WMS heating is energy-exact for the applied step.
+gravity_wave_drag: mcfarlane+ifs_wms
+
+# OpenIFS 49r1 methane oxidation + photolysis stratospheric water source
+# (METHOX, LEMETHOX=T); limit RQLIM from the run's CH4 as radiation reads it
+# (UPDRGAS LMETHOX_TIMEVAR, vote M2a).  DEPARTURE M1a: evaluated on the
+# pre-physics vapour like every other process of this pipeline.
+ifs_methox: true
+
+# OpenIFS 49r1 Cariolle ozone chemistry (O3CHEM, HLO) on an advected o3_ifs
+# tracer: TRACER ONLY, ecRad keeps the input4MIPs ozone (user, 2026-11-10).
+# DEPARTURE: 48r1 T63 L137 coefficients (no public 49r1 set), interpolated in
+# ln(standard pressure) to L32; cold start from k1 at the start date.
+ifs_ozone_chem: true
+
 radiation: ecrad_ifs
 aerosol_forcing: "off"          # the lane's aerosol forcing never reaches ecRad (M6)
 # ecRad aerosols ON (user 2026-11-04 item 3, votes C1-C12): the IFS 49r1

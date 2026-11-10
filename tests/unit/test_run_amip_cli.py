@@ -6109,3 +6109,35 @@ def test_large_yeager_width_flags_thread_to_config():
     assert cfg.surface_large_yeager_neutral_width == 0.0
     assert cfg.surface_large_yeager_dthv_width == 0.02
     assert cfg.surface_large_yeager_cd_cutoff_width == 0.25
+
+
+def test_ifs_methox_round_trips():
+    """--ifs-methox reaches ExperimentConfig, the pipeline switch and the AMIP
+    flat round-trip."""
+    from legoesm.driver.config import ExperimentConfig
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--ifs-methox"]), parser))
+    assert on.ifs_methox is True
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical"]), parser))
+    assert off.ifs_methox is False
+    for flag in (True, False):
+        cfg = ExperimentConfig(ifs_methox=flag)
+        assert ExperimentConfig.from_amip_config(cfg.to_amip_config()).ifs_methox is flag
+
+
+def test_ifs_ozone_chem_round_trips():
+    """--ifs-ozone-chem reaches ExperimentConfig and the AMIP round-trip."""
+    from legoesm.driver.config import ExperimentConfig
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--ifs-ozone-chem"]), parser))
+    assert on.ifs_ozone_chem is True
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical"]), parser))
+    assert off.ifs_ozone_chem is False
+    for flag in (True, False):
+        cfg = ExperimentConfig(ifs_ozone_chem=flag)
+        assert ExperimentConfig.from_amip_config(
+            cfg.to_amip_config()).ifs_ozone_chem is flag

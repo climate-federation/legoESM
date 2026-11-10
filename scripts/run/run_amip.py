@@ -1527,6 +1527,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Bechtold fields may differ from their defaults. "
                              "Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent}.")
+    parser.add_argument("--ifs-methox",
+                        dest="ifs_methox",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.ifs_methox,
+                        help="OpenIFS 49r1 methane-oxidation water source "
+                             "(METHOX) with the run's CH4. Default "
+                             f"{_EXPERIMENT_DEFAULTS.ifs_methox}.")
+    parser.add_argument("--ifs-ozone-chem",
+                        dest="ifs_ozone_chem",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.ifs_ozone_chem,
+                        help="OpenIFS 49r1 Cariolle ozone chemistry on an "
+                             "advected o3_ifs tracer (not fed to radiation). "
+                             "Default "
+                             f"{_EXPERIMENT_DEFAULTS.ifs_ozone_chem}.")
     parser.add_argument("--bechtold-use-ifs-subcloud-evap",
                         dest="bechtold_use_ifs_subcloud_evap",
                         action=argparse.BooleanOptionalAction,
@@ -3290,6 +3305,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
         bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
         bechtold_use_ifs_ascent=args.bechtold_use_ifs_ascent,
+        ifs_methox=args.ifs_methox,
+        ifs_ozone_chem=args.ifs_ozone_chem,
         bechtold_use_ifs_subcloud_evap=args.bechtold_use_ifs_subcloud_evap,
         bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
         bechtold_dx_m=args.bechtold_dx_m,
