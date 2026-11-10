@@ -205,8 +205,11 @@ def _compiled_libm_path() -> Path:
         _run_checked(command, "build")
         digest = _sha256_path(temporary)
         temporary_checksum.write_text(digest + "\n", encoding="ascii")
-        os.replace(temporary, shared_object)
+        # Checksum first: readers key on the .so, so a crash between the two
+        # publishes leaves no .so and the next call rebuilds; .so-first left a
+        # checksum-less .so that refused every later load.
         os.replace(temporary_checksum, checksum_path)
+        os.replace(temporary, shared_object)
     except Exception:
         if "temporary" in locals():
             temporary.unlink(missing_ok=True)
