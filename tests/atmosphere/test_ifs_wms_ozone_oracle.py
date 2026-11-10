@@ -363,6 +363,9 @@ def test_overhead_column_seed_at_model_top(fix):
     g = _GROUPS[0]
     a = lambda k: jnp.asarray(fix[f"{g}_{k}"])
     k, pf, ph, dt = a("PKOZO"), a("p_full"), a("p_half"), 450.0
+    # the fixture's top k6 is 0; use a value inside the shipped range
+    # (1.3e-4..2.8e-4 kg/m2) so dropping k6 from the seed fails
+    k = k.at[:, 0, 5].set(2e-4)
     on = cariolle_tendency(a("PO3"), a("T"), pf, ph, k, dt,
                            cfg=_HARD_O3._replace(seed_overhead_column=True))
     off = cariolle_tendency(a("PO3"), a("T"), pf, ph, k, dt, cfg=_HARD_O3)
