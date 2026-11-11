@@ -5377,6 +5377,36 @@ def test_cam6_duo_deck_resolves_to_the_mpas_deck_outside_grid_intrinsic_rows():
         assert mpas[k] * mpas["dycore.dt"] == duo[k] * duo["dycore.dt"], k
 
 
+_DUO_C48_OWN_ROWS = frozenset({
+    "grid.resolution", "dycore.dt", "physics_update_steps", "rad_update_steps",
+    "land_ic_path",
+})
+
+
+def test_duo_c48_deck_differs_from_the_c24_duo_deck_only_in_resolution_rows():
+    import yaml
+    from legoesm.driver.config import migrate_renamed_keys
+    amip = _repo_root() / "config" / "amip"
+    own = migrate_renamed_keys(yaml.safe_load(
+        (amip / "amip_production_fv3duo_c48.yaml").read_text()))
+    assert own.get("include") == "amip_production_fv3duo_c24.yaml"
+    own_dests = ({k.split(".")[-1] for k in _DUO_C48_OWN_ROWS} - {"land_ic_path"}
+                 | {"land_ic"})
+    extra = set(own) - {"include"} - own_dests
+    assert not extra, f"C48 duo deck sets rows that are not its own: {sorted(extra)}"
+    c24 = _resolved_deck_fields(amip / "amip_production_fv3duo_c24.yaml")
+    c48 = _resolved_deck_fields(amip / "amip_production_fv3duo_c48.yaml")
+    differ = {k for k in c24.keys() | c48.keys()
+              if repr(c24.get(k, "<absent>")) != repr(c48.get(k, "<absent>"))}
+    stray = {k: (c24.get(k, "<absent>"), c48.get(k, "<absent>"))
+             for k in sorted(differ - _DUO_C48_OWN_ROWS)}
+    assert not stray, f"C48 duo deck differs from C24 outside resolution rows: {stray}"
+    assert {"grid.resolution", "land_ic_path"} <= differ
+    assert c48["grid.resolution"] == 48
+    for k in ("physics_update_steps", "rad_update_steps"):
+        assert c24[k] * c24["dycore.dt"] == c48[k] * c48["dycore.dt"], k
+
+
 def test_argv_distributed_mode_matches_the_parser_and_config_default():
     """The import-time federation decision reads argv by hand (before the
     driver config can be imported); it must agree with argparse on every
