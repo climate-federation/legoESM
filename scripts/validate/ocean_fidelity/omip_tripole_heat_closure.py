@@ -27,11 +27,22 @@ Window pairing: the accumulator adds the COMPLETED state of every step and
 the forcing applied over it, so snapshot k's flux means cover exactly the
 steps between snapshot k-1 and snapshot k.
 
+Each term is converted to heat-content units with the constants its step
+uses: geothermal heats with constants.rho_ocean/c_sw, the ISF step with the
+run's rho_0 and constants.c_p_seawater, while content uses the manifest
+rho_0/c_sw.  The ISF month is taken per step exactly as the driver does
+(``_runoff_month_idx``: day = step*dt/86400, NOLEAP month ends, side=right).
+
 Controls built in (a failing control is fatal, never a warning):
-* the reconstructed reference interfaces must equal the snapshot's
-  ``z_interface_ref`` (proves the vertical file and constructor match);
-* every window must carry ``q_net_mean`` and a step count equal to the step
-  difference of its two snapshots.
+* the snapshots must carry ``z_interface_ref`` (--kprofile-snapshots) and the
+  reconstructed reference interfaces must equal it;
+* every window must carry ``q_net_mean``, a step count equal to the step
+  difference of its two snapshots, and a finite positive duration equal to
+  its day difference;
+* configurations that change heat outside these terms (prescribed-ice
+  freezing relaxation, WOA nudging, geothermal map) are refused.
+
+Exit 1 when any window's |residual| exceeds --max-residual-wm2.
 
 fp64 throughout; NaN anywhere is fatal.
 """
@@ -59,7 +70,8 @@ import numpy as np  # noqa: E402
 from legoesm import constants  # noqa: E402
 
 _SEC_PER_DAY = 86400.0
-_SNAP_RE = re.compile(r"snapshot_day(\d{4})\.npz$")
+_SNAP_RE = re.compile(r"snapshot_(day\d{4}|final)\.npz$")
+_MONTH_END = np.cumsum([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
 
 
 def _fatal_nonfinite(name, arr):
@@ -114,8 +126,16 @@ def geothermal_power(snap, flux_wm2):
     return float(flux_wm2 * (snap["cell_area"] * wet_col).sum())
 
 
-def isf_latent_power(fwf_month, area, L_fus):
-    return float(-(fwf_month * area).sum() * L_fus)
+def isf_latent_power(fwf, area, L_fus):
+    return float(-(fwf * area).sum() * L_fus)
+
+
+def step_month_weights(step_a, step_b, dt):
+    """Fraction of the window's steps in each calendar month (driver rule)."""
+    steps = np.arange(int(step_a) + 1, int(step_b) + 1)
+    months = np.searchsorted(_MONTH_END, (steps * dt / _SEC_PER_DAY) % 365.0,
+                             side="right")
+    return np.bincount(months, minlength=12)[:12] / steps.size
 
 
 def fwbudget_net_sv(run_log, day_lo, day_hi):
@@ -130,7 +150,7 @@ def fwbudget_net_sv(run_log, day_lo, day_hi):
 
 
 def close_windows(snaps, z_coord_for, rho_0, c_p, flux_geo_wm2, isf_fwf_for,
-                  L_fus, run_log=None):
+                  L_fus, run_log=None, geo_scale=1.0, isf_scale=1.0):
     """Per-window closure records for consecutive snapshots (list of dicts)."""
     rows = []
     for a, b in zip(snaps[:-1], snaps[1:]):
@@ -144,6 +164,11 @@ def close_windows(snaps, z_coord_for, rho_0, c_p, flux_geo_wm2, isf_fwf_for,
                              f"accumulator holds {n_steps} steps, snapshots "
                              f"differ by {dstep}")
         dt_win = float(b["flux_mean_window_s"])
+        span = (float(b["time_days"]) - float(a["time_days"])) * _SEC_PER_DAY
+        if not (np.isfinite(dt_win) and dt_win > 0.0
+                and abs(dt_win - span) <= 1e-6 * span):
+            raise SystemExit(f"FATAL: window ending day {float(b['time_days'])}: "
+                             f"duration {dt_win} s != snapshot span {span} s")
         H_a, _ = heat_content(a, z_coord_for(a), rho_0, c_p)
         H_b, _ = heat_content(b, z_coord_for(b), rho_0, c_p)
         dHdt = (H_b - H_a) / dt_win
@@ -151,10 +176,13 @@ def close_windows(snaps, z_coord_for, rho_0, c_p, flux_geo_wm2, isf_fwf_for,
         _fatal_nonfinite("q_net_mean", q)
         wet = b["land_mask"] > 0.5
         Q_qnet = float((q * b["cell_area"] * wet).sum())
-        Q_geo = geothermal_power(b, flux_geo_wm2)
-        Q_isf = (0.0 if isf_fwf_for is None
-                 else isf_latent_power(isf_fwf_for(a, b), b["cell_area"], L_fus))
+        Q_geo = geo_scale * geothermal_power(b, flux_geo_wm2)
+        Q_isf = (0.0 if isf_fwf_for is None else isf_scale * isf_latent_power(
+            isf_fwf_for(a, b, dt_win / n_steps), b["cell_area"], L_fus))
         resid = dHdt - (Q_qnet + Q_geo + Q_isf)
+        if not np.isfinite(resid):
+            raise SystemExit(f"FATAL: non-finite residual, window ending day "
+                             f"{float(b['time_days'])}")
         A = wet_area(b)
         row = {"day_start": float(a["time_days"]), "day_end": float(b["time_days"]),
                "n_steps": n_steps, "window_s": dt_win,
@@ -196,6 +224,8 @@ def parse_args(argv=None):
     p.add_argument("--run-dir", required=True)
     p.add_argument("--domain-cfg", required=True,
                    help="NEMO vertical file the run read (e3t_1d, gdept_1d)")
+    p.add_argument("--max-residual-wm2", type=float, required=True,
+                   help="gate: fail when any window's |residual| exceeds this")
     p.add_argument("--json-out", default=None)
     return p.parse_args(argv)
 
@@ -207,6 +237,9 @@ def main(argv=None) -> int:
     manifest, rargs, rho_0, c_p = _manifest_args(run_dir)
     if getattr(rargs, "geothermal_map", None):
         raise SystemExit("FATAL: --geothermal-map runs are not supported (constant flux only)")
+    if rargs.ice_thermo or float(rargs.nudge_woa_tau_days) > 0.0:
+        raise SystemExit("FATAL: --ice-thermo freezing relaxation / WOA nudging change "
+                         "heat outside the closed terms; not supported")
     from legoesm.ocean.physics.geothermal import GeothermalConfig
     flux_geo = 0.0
     if rargs.geothermal:
@@ -218,20 +251,26 @@ def main(argv=None) -> int:
         gdept_1d = (np.asarray(ds["gdept_1d"]).squeeze().astype(np.float64)
                     if "gdept_1d" in ds else None)
 
-    paths = sorted(run_dir.glob("snapshot_day*.npz"),
-                   key=lambda p: int(_SNAP_RE.search(p.name).group(1)))
-    if len(paths) < 2:
-        raise SystemExit("FATAL: need at least two snapshot_dayNNNN.npz files")
-    snaps = [load_snapshot(p) for p in paths]
+    by_step = {}
+    for p in sorted(run_dir.glob("snapshot_*.npz")):
+        if _SNAP_RE.search(p.name):
+            s = load_snapshot(p)
+            by_step.setdefault(int(s["step"]), (p, s))   # final == last day: keep one
+    paths = [by_step[k][0] for k in sorted(by_step)]
+    snaps = [by_step[k][1] for k in sorted(by_step)]
+    if len(snaps) < 2:
+        raise SystemExit("FATAL: need at least two snapshots at distinct steps")
 
     def z_coord_for(s):
         zs, pc = build_z_coord(e3t_1d, gdept_1d, s["H_bathy"])
         zi = s.get("z_interface_ref")
-        if zi is not None:
-            rec = np.abs(np.asarray(zs.z_half_ref, dtype=np.float64)[1:-1])
-            if rec.shape != zi.shape or not np.allclose(rec, zi, rtol=0, atol=1e-9):
-                raise SystemExit("FATAL: reconstructed interfaces != snapshot "
-                                 "z_interface_ref (wrong --domain-cfg?)")
+        if zi is None:
+            raise SystemExit("FATAL: snapshot lacks z_interface_ref (run without "
+                             "--kprofile-snapshots); geometry cannot be checked")
+        rec = np.abs(np.asarray(zs.z_half_ref, dtype=np.float64)[1:-1])
+        if rec.shape != zi.shape or not np.allclose(rec, zi, rtol=0, atol=1e-9):
+            raise SystemExit("FATAL: reconstructed interfaces != snapshot "
+                             "z_interface_ref (wrong --domain-cfg?)")
         return pc
 
     isf_fwf_for = None
@@ -240,20 +279,20 @@ def main(argv=None) -> int:
         s0 = snaps[0]
         isf = load_isf_spe_forcing(rargs.isf_forcing_file, _snap_lat(paths[0]),
                                    _snap_lon(paths[0]), land_mask=s0["land_mask"])
-        month_end = np.cumsum([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
+        fwf12 = np.asarray(isf.fwf, dtype=np.float64)
 
-        def isf_fwf_for(sa, sb):
-            # Window covers days (start, end]; one calendar month (NOLEAP) only.
-            m0 = int(np.searchsorted(month_end, float(sa["time_days"]) % 365.0, side="right"))
-            m1 = int(np.searchsorted(month_end, (float(sb["time_days"]) - 1e-9) % 365.0, side="right"))
-            if m0 != m1:
-                raise SystemExit(f"FATAL: window ending day {float(sb['time_days'])} "
-                                 "spans two ISF months")
-            return np.asarray(isf.fwf[m0], dtype=np.float64)
+        def isf_fwf_for(sa, sb, dt):
+            w = step_month_weights(sa["step"], sb["step"], dt)
+            return np.tensordot(w, fwf12, axes=1)
 
+    # Content units: rho_0*c_sw (manifest).  Geothermal heats with
+    # rho_ocean*c_sw (library), the ISF step with rho_0*c_p_seawater.
+    geo_scale = rho_0 * c_p / (float(constants.rho_ocean) * float(constants.c_sw))
+    isf_scale = c_p / float(constants.c_p_seawater)
     rows = close_windows(snaps, z_coord_for, rho_0, c_p, flux_geo, isf_fwf_for,
                          float(constants.L_fus_isf_nemo),
-                         run_log=run_dir / "run.log")
+                         run_log=run_dir / "run.log",
+                         geo_scale=geo_scale, isf_scale=isf_scale)
     out = {"run_dir": str(run_dir), "git_sha": _git_sha(),
            "run_git_sha": manifest.get("legoESM", {}).get("commit"),
            "domain_cfg": a.domain_cfg, "rho_0": rho_0, "c_sw": c_p,
@@ -265,10 +304,16 @@ def main(argv=None) -> int:
               f"geo {r['Q_geothermal_W']:.3e}  isf {r['Q_isf_latent_W']:.3e}  "
               f"residual {r['residual_Wm2']:+.4f} W/m2 "
               f"({r['residual_pct_of_qnet'] if r['residual_pct_of_qnet'] is None else round(r['residual_pct_of_qnet'], 3)} % of q_net); "
-              f"fw-enthalpy est {r.get('fw_enthalpy_estimate_Wm2')} W/m2")
+              f"fw-enthalpy est (order of magnitude; raw pre-normalisation net) {r.get('fw_enthalpy_estimate_Wm2')} W/m2")
+    worst = max(abs(r["residual_Wm2"]) for r in rows)
+    out["max_residual_wm2_gate"] = a.max_residual_wm2
+    out["worst_abs_residual_wm2"] = worst
+    out["verdict"] = "PASS" if worst <= a.max_residual_wm2 else "FAIL"
     if a.json_out:
         Path(a.json_out).write_text(json.dumps(out, indent=1))
-    return 0
+    print(f"[closure] worst |residual| {worst:.4f} W/m2 vs gate "
+          f"{a.max_residual_wm2} W/m2: {out['verdict']}")
+    return 0 if out["verdict"] == "PASS" else 1
 
 
 def _snap_lat(path):
