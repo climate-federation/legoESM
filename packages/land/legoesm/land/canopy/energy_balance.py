@@ -194,6 +194,9 @@ def canopy_met_variables(
 
 # --- Ci range of the empirical stomatal models' diffusion closure ---
 _CI_EMPIRICAL_MIN_FRAC = 0.5   # [-] floor of the diffusion Ci, as a fraction of Ca (C3 operating range)
+# Width of the smooth max(gs_open, b0) of stomatal_model='pmodel_chi'
+# [mol m-2 s-1]: small against daytime gs (~0.1-0.5) and comparable to b0.
+_PMODEL_CHI_SWITCH_MOL = 1.0e-3  # coeff-ok: numerics smoothing width
 _CI_EMPIRICAL_MAX_FRAC = 1.5   # [-] ceiling; above Ca so a respiring leaf (An < 0) reaches its physical Ci
 
 
@@ -259,6 +262,35 @@ def _compute_gs_and_ci(
             An, VPD_kPa, Ca, co2_compensation_point(Tf), m, d0_leuning_kpa, b0)
     elif stomatal_model == "ball_berry":
         gs_mol = ball_berry_gs(An, RH_c, Ca, m, b0)
+    elif stomatal_model == "pmodel_chi":
+        # P-model instantaneous ci (JULES stomata_pmodel / pyrealm
+        # SubdailyPModel step 8): ci = chi * Ca with chi from the acclimated
+        # (lagged) xi [Pa^0.5, carried in the slope slot ``m``], the current
+        # canopy-air VPD (same 50 Pa floor as Medlyn) and Gamma*(T_leaf) of the
+        # host kernel; gs is diagnosed so the diffusion equation returns that
+        # ci: gs = 1.6 An / (Ca (1 - chi)).  Closed stomata (An <= 0 or gs
+        # below it) take the residual conductance b0, JULES's glmin rule.
+        from legoesm.land.p_model import chi_core
+        chi = chi_core(m, co2_compensation_point(Tf) / Ca,
+                       jnp.sqrt(jnp.maximum(VPD_c, 50.0)))  # coeff-ok: 50 Pa VPD floor (as Medlyn)
+        gs_open = (DIFFUSIVITY_RATIO_H2O_CO2 * An
+                   / (Ca * jnp.maximum(1.0 - chi, 1e-3)))  # coeff-ok: 1-chi floor (numerics)
+        # Smooth max(gs_open, b0) with width w = _PMODEL_CHI_SWITCH_MOL:
+        # JULES's switch is hard; the kink raised canopy-Newton
+        # non-convergence in the site runs (codex review round 1; measured,
+        # docs/land/pmodel_pyrealm_alignment_plan.md 4.13).  Exact bounds of
+        # the departure from max(gs_open, b0):
+        #   0 < gs - max(gs_open, b0) <= w ln 2, the maximum (w ln 2 =
+        #   6.9e-4 mol m-2 s-1) at gs_open = b0, decaying as
+        #   w exp(-|gs_open - b0| / w) away from it (< 5e-8 for
+        #   |gs_open - b0| >= 10 w).
+        # Hence for An > 0, ci >= chi Ca > 0 always, with
+        #   0 <= ci - chi Ca <= (1 - chi) Ca (gs - gs_open) / gs_open
+        # (relative ~1e-6 at gs_open = b0 + 10 w for b0 = 0.01); a closed
+        # leaf with b0 = 0
+        # (stress_b0, full stress) gets w ln 2 rather than _GS_MIN_MOL.
+        gs_mol = b0 + _PMODEL_CHI_SWITCH_MOL * jax.nn.softplus(
+            (gs_open - b0) / _PMODEL_CHI_SWITCH_MOL)
     elif stomatal_model == "phydro":
         # Hydraulic supply at the class's draw-down (the canopy Newton's
         # extra unknown): gs_w = LAI_class * E_leaf(dpsi) / D, plus the
@@ -273,7 +305,7 @@ def _compute_gs_and_ci(
         raise ValueError(
             f"unknown stomatal_model {stomatal_model!r}; the stomatal "
             "conductance scheme must be one of "
-            "{'ball_berry', 'medlyn', 'leuning', 'phydro'}")
+            "{'ball_berry', 'medlyn', 'leuning', 'phydro', 'pmodel_chi'}")
 
     # Minimum cuticular conductance: keep gs > 0 even at full water stress with
     # the legacy ``stress_b0=True`` (m = b0 = 0), otherwise the leaf gs/Ci/An
@@ -283,7 +315,13 @@ def _compute_gs_and_ci(
     gs_mol = jnp.maximum(gs_mol, _GS_MIN_MOL)
 
     Ci = Ca - DIFFUSIVITY_RATIO_H2O_CO2 * An / jnp.maximum(gs_mol, 1e-9)
-    if stomatal_model != "phydro":
+    if stomatal_model == "pmodel_chi":
+        # No 0.5 Ca floor: with gs >= gs_open the open-leaf ci is >= chi Ca > 0
+        # (chi < 0.5 is normal for C4 and for cool-acclimated leaves in dry
+        # air; the floor would break ci = chi Ca there).  Keep the 1.5 Ca cap
+        # for respiring leaves, as for the empirical models.
+        Ci = jnp.minimum(Ci, _CI_EMPIRICAL_MAX_FRAC * Ca)
+    elif stomatal_model != "phydro":
         # The empirical models' Ci equation is this diffusion value (the
         # canopy residual equates the Ci unknown to it).  Clip to the C3
         # operating range: floor 0.5 Ca, ceiling 1.5 Ca so a respiring leaf

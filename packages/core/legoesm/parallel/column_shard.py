@@ -47,6 +47,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 __all__ = (
     "create_column_mesh",
     "shard_columns",
+    "shard_column_tree",
     "replicate",
     "pad_to_shardable",
 )
@@ -138,3 +139,36 @@ def shard_columns(field: jax.Array, mesh: Mesh) -> jax.Array:
 def replicate(field: jax.Array, mesh: Mesh) -> jax.Array:
     """Place ``field`` replicated across every device in ``mesh``."""
     return jax.device_put(field, NamedSharding(mesh, P()))
+
+
+def shard_column_tree(tree, mesh: Mesh, ncol: int, axis: int = 0):
+    """Place every array leaf of ``tree`` with its column axis sharded.
+
+    The caller names the column axis of the tree's layout (``axis``: 0 for a
+    state ``(ncol, ...)``, 1 for forcing ``(n_steps, ncol)`` or tape
+    accumulators ``(n_slots, ncol)``).  A leaf is sharded on ``axis`` when it
+    has that axis and its length is ``ncol``; every other array leaf (a
+    per-slot count, a scalar, a per-layer table) is replicated.  The axis is
+    given, not inferred, because another dimension can equal ``ncol`` (e.g. 32
+    tape slots on a 32-column grid).  ``ncol`` must be divisible by the mesh
+    size, so no padding is needed and shapes are kept.  Non-array leaves pass
+    through unchanged.
+    """
+    n_dev = mesh.shape["col"]
+    if ncol % n_dev:
+        raise ValueError(
+            f"ncol={ncol} is not divisible by the {n_dev} column devices; "
+            "choose a device count that divides it")
+
+    def place(leaf):
+        shape = getattr(leaf, "shape", None)
+        if shape is None or not hasattr(leaf, "dtype"):
+            return leaf
+        if len(shape) <= axis or shape[axis] != ncol:
+            return jax.device_put(leaf, NamedSharding(mesh, P()))
+        spec = [None] * len(shape)
+        spec[axis] = "col"
+        return jax.device_put(leaf, NamedSharding(mesh, P(*spec)))
+
+    return jax.tree_util.tree_map(place, tree)
+

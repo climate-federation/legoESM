@@ -212,6 +212,7 @@ def step_multilayer_land_with_diagnostics(
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
+    solar_hour: jnp.ndarray | None = None,
 ):
     """Like :func:`step_multilayer_land` but also returns the ``SurfaceFluxOutput``.
 
@@ -229,7 +230,8 @@ def step_multilayer_land_with_diagnostics(
         clm_ml_pft_per_col=clm_ml_pft_per_col,
         clm_ml_vcmaxpft_jax=clm_ml_vcmaxpft_jax,
         clm_ml_g1_medlyn_jax=clm_ml_g1_medlyn_jax,
-        soil_frozen_fraction=soil_frozen_fraction)
+        soil_frozen_fraction=soil_frozen_fraction,
+        solar_hour=solar_hour)
 
 
 def root_zone_beta_soil(
@@ -305,6 +307,7 @@ def step_multilayer_land(
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
+    solar_hour: jnp.ndarray | None = None,
 ) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None]:
     """Step the multi-layer land model forward by ``dt`` seconds.
 
@@ -329,7 +332,8 @@ def step_multilayer_land(
         clm_ml_pft_per_col=clm_ml_pft_per_col,
         clm_ml_vcmaxpft_jax=clm_ml_vcmaxpft_jax,
         clm_ml_g1_medlyn_jax=clm_ml_g1_medlyn_jax,
-        soil_frozen_fraction=soil_frozen_fraction)
+        soil_frozen_fraction=soil_frozen_fraction,
+        solar_hour=solar_hour)
     return new_state, response, carbon_new
 
 
@@ -395,6 +399,7 @@ def _step_multilayer_land_impl(
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
+    solar_hour: jnp.ndarray | None = None,
 ):
     """Internal 4-tuple (new_state, TileResponse, carbon, SurfaceFluxOutput).
 
@@ -660,6 +665,9 @@ def _step_multilayer_land_impl(
             LAI_override=LAI_override,
             fwet=_fwet_pre,
             pmodel_acclim=state.pmodel_acclim,
+            # Warm start: the previous step's last certified canopy solution
+            # (None on a state that does not carry the cache -> cold start).
+            canopy_seed=state.canopy_x,
             # Bare-soil evaporation efficiency = TWO complementary top-layer
             # limiters, applied as a beta conductance efficiency in the canopy
             # soil energy balance (both tie evaporation to the fast-drying
@@ -1186,6 +1194,15 @@ def _step_multilayer_land_impl(
         # (its own radiative transfer, APAR_Sun / (fSun * LAI)); the schemes
         # without that sunlit/shaded transfer (CLM-ML, simple SEB) still use
         # the incident top-of-canopy PPFD from the shared SW split.
+        if (config.p_model.acclimation == "subdaily_noon"
+                and not isinstance(config.surface_scheme, TwoLeafCanopyConfig)):
+            # The noon-window optimum is sized on the sunlit-leaf absorbed
+            # PAR of the two-leaf transfer (comparable to the JULES top-leaf
+            # light); the other schemes have no such leaf-level light.
+            raise ValueError(
+                "PModelConfig.acclimation='subdaily_noon' is implemented for "
+                "the two-leaf canopy only; got surface scheme "
+                f"{type(config.surface_scheme).__name__}")
         if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
             _ppfd_toc = sunlit_leaf_apar(forcing, lp, LAI_override=LAI_override)
         else:
@@ -1214,6 +1231,9 @@ def _step_multilayer_land_impl(
                        else _phydro_supply.psi_s_mpa),
             rsoil_leaf=(None if _phydro_supply is None
                         else _phydro_supply.rsoil_leaf),
+            # Local solar hour of this step (subdaily_noon only; the driver
+            # supplies it — the land model carries no clock).
+            solar_hour=solar_hour,
         )
     else:
         pmodel_acclim_new = None
@@ -1266,6 +1286,18 @@ def _step_multilayer_land_impl(
         pmodel_acclim=(jax.tree.map(_match, pmodel_acclim_new,
                                     state.pmodel_acclim)
                        if state.pmodel_acclim is not None else None),
+        # Canopy warm-start cache.  Carried ONLY when the incoming state already
+        # carries it, so the pytree structure is invariant under a lax.scan;
+        # ``surface_out.canopy_x`` is None for every non-two-leaf scheme.
+        canopy_x=((_match(surface_out.canopy_x, state.canopy_x)
+                   if surface_out.canopy_x.shape == state.canopy_x.shape
+                   # width mismatch (state built under the other stomatal
+                   # model): keep the incoming cache, so the carry's shape
+                   # never changes
+                   else state.canopy_x)
+                  if (state.canopy_x is not None
+                      and getattr(surface_out, "canopy_x", None) is not None)
+                  else None),
     )
 
     # --- Post-step surface state for coupler ---
@@ -1536,24 +1568,28 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
         dtype = getattr(leaf, "dtype", None)
         return dtype is not None and jnp.issubdtype(dtype, jnp.inexact)
 
-    def _col_bad(leaf):
-        """Per-column non-finiteness of one (ncol, ...) array leaf."""
+    def _col_bad(leaf, test=lambda a: ~jnp.isfinite(a)):
+        """Per-column ``any(test)`` of one (ncol, ...) array leaf."""
         arr = jnp.asarray(leaf)
         if arr.ndim == 0 or arr.shape[0] != ncol:
             return jnp.zeros(ncol, dtype=bool)
         flat = arr.reshape(ncol, -1)
-        return jnp.any(~jnp.isfinite(flat), axis=-1)
+        return jnp.any(test(flat), axis=-1)
 
-    def _any_bad(tree):
+    def _any_bad(tree, test=lambda a: ~jnp.isfinite(a)):
         # Over tree LEAVES, so a nested carrier (the CLM-ML canopy state) is
         # inspected too, not just the top-level fields.
         acc = jnp.zeros(ncol, dtype=bool)
         for leaf in jax.tree.leaves(tree):
             if _is_float_leaf(leaf):
-                acc = acc | _col_bad(leaf)
+                acc = acc | _col_bad(leaf, test)
         return acc
 
-    bad = _any_bad(new_state) | _any_bad(response)
+    # The canopy warm-start cache is NaN by design where a column has never
+    # converged ("cold start"), so NaN there is not a failure; Inf is.
+    bad = (_any_bad(new_state._replace(canopy_x=None))
+           | _any_bad(new_state.canopy_x, jnp.isinf)
+           | _any_bad(response))
     # Physical plausibility of the closure's answer, in place of its own
     # convergence flag.  That flag is the adjoint's tolerance (squared residual
     # below 1e-12 + 1e-8 of the start), which a stalled but ordinary column
@@ -1728,6 +1764,7 @@ def init_multilayer_land_state(
     TgC_init: float | None = None,
     pmodel_co2_init_ppm: float | None = None,
     pmodel_ps_init_pa: float | None = None,
+    pmodel_sandoval_inputs: tuple | None = None,
 ) -> MultiLayerLandState:
     """Create initial multi-layer land state.
 
@@ -1821,6 +1858,8 @@ def init_multilayer_land_state(
             # their cold-start values are PHydroConfig init fields.
             soil_init=((config.phydro.init_psi_s_mpa, config.phydro.init_rsoil_leaf)
                        if config.transpiration_stress == "phydro" else None),
+            # Sandoval kphio: per-column (aridity index, mGDD0) climatology.
+            sandoval_inputs=pmodel_sandoval_inputs,
         )
 
     return MultiLayerLandState(
@@ -1840,7 +1879,27 @@ def init_multilayer_land_state(
         # Dry canopy at start; carried only when interception is configured.
         W_canopy=(jnp.zeros(ncol) if config.interception is not None else None),
         pmodel_acclim=pmodel_acclim,
+        # Canopy warm-start cache, allocated as "no converged solution yet"
+        # (all NaN) for the scheme that has a Newton closure to seed.  It must
+        # be ALLOCATED here, not filled on the first step: a lax.scan carry
+        # cannot change pytree structure.  Width 8 under P-hydro (two draw-down
+        # unknowns), 6 otherwise.
+        canopy_x=(jnp.full((ncol, 8 if config.surface_scheme.stomatal_model == "phydro"
+                            else 6), jnp.nan, dtype=T_soil.dtype)
+                  if (isinstance(config.surface_scheme, TwoLeafCanopyConfig)
+                      and not isinstance(config.surface_scheme, CLMMLCanopyConfig))
+                  else None),
     )
+
+
+def finite_check_view(state: MultiLayerLandState) -> MultiLayerLandState:
+    """``state`` as a driver's non-finite guard should see it: the canopy
+    warm-start cache is NaN by design where a column has never converged, so
+    its NaN entries read as 0 (Inf is kept, and still trips the guard)."""
+    cx = getattr(state, "canopy_x", None)
+    if cx is None:
+        return state
+    return state._replace(canopy_x=jnp.where(jnp.isnan(cx), 0.0, cx))
 
 
 def aridity_theta_init(rh_surface, theta_wp, theta_fc):

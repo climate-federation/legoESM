@@ -458,3 +458,30 @@ def test_pmodel_restart_never_silently_cold_starts(tmp_path):
     np.testing.assert_array_equal(
         np.asarray(merged2.pmodel_acclim.vpd_mean_pa),
         np.asarray(loaded2.pmodel_acclim.vpd_mean_pa))
+
+
+def test_canopy_warm_start_cache_round_trips_and_merges(tmp_path):
+    """The two-leaf canopy warm-start cache (NaN = never converged) is saved,
+    loaded and grafted onto the template, NaNs included, so a chained run seeds
+    its first resumed step as the uninterrupted run would; an archive without
+    the cache leaves the template's (all-NaN, cold) cache in place."""
+    from legoesm.land.restart import merge_land_restart_into_template
+    cx = np.full((_NCOL, 6), np.nan)
+    cx[1:3] = 290.0 + np.arange(12.0).reshape(2, 6)
+    st = _fake_state(seed=2)._replace(canopy_x=jnp.asarray(cx))
+    save_land_restart(tmp_path / "r.npz", st, land_mode="multilayer",
+                      t_end_s=3600.0, n_steps_completed=1)
+    st2, _ = load_land_restart(tmp_path / "r.npz", expected_land_mode="multilayer",
+                               expected_ncol=_NCOL, expected_n_layers=_NLAY)
+    np.testing.assert_array_equal(np.asarray(st2.canopy_x), cx)
+    template = _fake_state(seed=3)._replace(canopy_x=jnp.full((_NCOL, 6), jnp.nan))
+    merged = merge_land_restart_into_template(st2, template)
+    np.testing.assert_array_equal(np.asarray(merged.canopy_x), cx)
+    # Archive without the cache -> the template's cold cache is kept.
+    save_land_restart(tmp_path / "old.npz", _fake_state(seed=2), land_mode="multilayer",
+                      t_end_s=3600.0, n_steps_completed=1)
+    old, _ = load_land_restart(tmp_path / "old.npz", expected_land_mode="multilayer",
+                               expected_ncol=_NCOL, expected_n_layers=_NLAY)
+    assert old.canopy_x is None
+    merged_old = merge_land_restart_into_template(old, template)
+    assert np.all(np.isnan(np.asarray(merged_old.canopy_x)))

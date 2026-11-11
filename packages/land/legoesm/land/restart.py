@@ -70,6 +70,11 @@ _MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
     # Intercepted canopy-water store (present iff interception is enabled); real
     # mass, so it must round-trip or the warm start leaks it.
     "W_canopy",
+    # Two-leaf canopy warm-start cache (last certified Newton solution, NaN =
+    # never converged).  Not prognostic, but persisted so a chained run seeds
+    # its first resumed step exactly as the uninterrupted run would; an archive
+    # without it (or a template without the cache) keeps the template's value.
+    "canopy_x",
 )
 
 

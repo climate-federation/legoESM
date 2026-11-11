@@ -84,6 +84,16 @@ from legoesm.land.canopy.energy_balance import (
 # the old hard ``where(fSun < 0.05, ...)`` kink).
 _ANCHOR_FSUN_CENTER = 0.08   # [-] tanh centre in sunlit fraction
 _ANCHOR_FSUN_WIDTH  = 0.03   # [-] tanh transition half-width
+# Leaf area at or below which a column has NO leaves (ice sheet, barren
+# ground, a fully leafless season): numerical zero, not a physics threshold.
+_LEAFLESS_LAI = 1.0e-6       # [m2/m2]
+
+
+def leafless_mask(LAI):
+    """True where a column has no leaves (LAI <= _LEAFLESS_LAI): the single
+    definition shared by the canopy solve, its reported fluxes and the
+    canopy diagnostics (SIF) in ``surface_scheme.two_leaf_canopy``."""
+    return LAI <= _LEAFLESS_LAI
 
 # --- Damped-least-squares canopy solve (numerics; never tunable) ------------
 # WHY NOT PLAIN NEWTON.  A small share of columns -- hot, bright and CALM --
@@ -116,6 +126,36 @@ _LM_LAMBDA_UP = 4.0         # [-] damping growth after a rejected step
 _LM_LAMBDA_DOWN = 3.0       # [-] damping decay after a good step
 _LM_RHO_BAD, _LM_RHO_GOOD = 0.25, 0.75   # [-] Nielsen gain-ratio thresholds
 _LM_RTOL, _LM_ATOL = 1.0e-8, 1.0e-12     # [-] on the SQUARED residual norm
+
+# --- Root certificate (numerics; containment thresholds, not tunable physics) --
+# Ported from legoESM main 46bab7a21c with the warm start it protects.  The
+# relative gate above (residual reduced 1e8x from the SEED) cannot certify a
+# root on its own: from a far-off warm-start seed the seed residual is huge and
+# the gate admits a residual of O(10) K, and the residual also has spurious
+# fixed points far outside the range its saturation / radiation formulae are
+# valid in (measured upstream 2026-09-29: leaf roots at 462, 891, 2300 and
+# -1301 K, q_c = -0.11 kg/kg).  Cached as the next step's seed, such a state
+# perpetuated itself (upstream AMIP: ~200-320 of 20709 columns with leaf
+# temperatures of 13-5655 K).  A converged state must therefore also sit inside
+# a broad physical box and below an absolute residual ceiling.  Cold-started
+# solves reach n_sq ~1e-7..1e-9; the relative gate allows <~1e-4.
+_ROOT_T_MIN_K = 150.0      # [K] below any terrestrial leaf / canopy air
+_ROOT_T_MAX_K = 360.0      # [K] above any terrestrial leaf / canopy air
+_ROOT_QC_MIN = -1.0e-10    # [kg/kg] q_c >= 0 up to round-off at the dry boundary
+_ROOT_NSQ_MAX = 1.0e-2     # [-] absolute ceiling on the scaled squared residual
+# (The humidity residual row is multiplied by 1e3 in _canopy_residual, the same
+# scaling as upstream's f_scale = 1e-3 on that row, so the ceiling is upstream's.)
+
+
+def canopy_state_admissible(x: jax.Array) -> jax.Array:
+    """True where ``x[..., :6]`` = [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c] (plus
+    any trailing P-hydro unknowns) is a finite state inside the physical box a
+    canopy root may occupy.  Containment, not a full physical check: Ci is only
+    required finite (upstream found no garbage state with an out-of-range Ci)."""
+    T = x[..., jnp.array([0, 1, 4])]
+    return (jnp.all(jnp.isfinite(x), axis=-1)
+            & jnp.all((T >= _ROOT_T_MIN_K) & (T <= _ROOT_T_MAX_K), axis=-1)
+            & (x[..., 5] >= _ROOT_QC_MIN))
 
 # Characteristic increment of each unknown, in its own units:
 #   [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c] = [K, K, umol/mol, umol/mol, K, kg/kg]
@@ -248,6 +288,21 @@ class CanopyForcingBundle(NamedTuple):
     psi50_xylem_mpa: jax.Array | None = None
     ck_xylem: jax.Array | None = None
     gamma_cost: jax.Array | None = None
+    # P-model reference quantum yield (PModelConfig.kphio) as (ncol,), set
+    # only under CanopyConfig.light_response='pmodel_phi0': the C3 kernel's
+    # electron transport then uses J = 4 phi0(T) I / sqrt(1 + (4 phi0 I /
+    # Jmax)^2).  None keeps the CLM PSII light response.  Appended last.
+    phi0_ref: jax.Array | None = None
+    # Sandoval et al. (2026) phi0 inputs (PModelConfig.kphio_method=
+    # 'sandoval' with light_response='pmodel_phi0'): per-column aridity index
+    # and mGDD0 [degC]; None otherwise.  Appended last.
+    phi0_ai: jax.Array | None = None
+    phi0_mgdd0: jax.Array | None = None
+
+
+def _sandoval_of(b: "CanopyForcingBundle") -> tuple | None:
+    """``(aridity_index, mgdd0)`` for the kernel's Sandoval phi0, or None."""
+    return None if b.phi0_ai is None else (b.phi0_ai, b.phi0_mgdd0)
 
 
 def _leaf_hydraulics(x, bundle: CanopyForcingBundle, stomatal_model: str):
@@ -345,11 +400,13 @@ def _canopy_residual(
     An_Sun, _ = photosynthesis(
         T_phot_sun, Ci_Sun, b.APAR_Sun,
         b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC,
-        rjv25=b.rjv25)
+        rjv25=b.rjv25, phi0_ref=b.phi0_ref,
+        phi0_sandoval=_sandoval_of(b))
     An_Sh, _ = photosynthesis(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
         b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC,
-        rjv25=b.rjv25)
+        rjv25=b.rjv25, phi0_ref=b.phi0_ref,
+        phi0_sandoval=_sandoval_of(b))
 
     # ---- Leaf microclimate (FULLY_COUPLED: leaves use canopy air space) ----
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
@@ -400,6 +457,22 @@ def _canopy_residual(
             rah_below, raw_soil_evap, b.fStress_soil,
             b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
+    # ---- Leafless column: no leaf exchange with the canopy air ----
+    # With no leaves the leaf energy balance's implied temperature is not a
+    # physical state (its tiny leaf conductance multiplies an unbounded
+    # temperature), and it injected ~0.35 W m-2 of sensible heat and the same
+    # latent sink into the canopy air (measured at LAI = 0).  The canopy air
+    # exchanges with the ground and the atmosphere only.
+    leafless = leafless_mask(b.LAI)
+    Tf_Sun_new = jnp.where(leafless, Tc, Tf_Sun_new)
+    Tf_Sh_new = jnp.where(leafless, Tc, Tf_Sh_new)
+    gs_Sun = jnp.where(leafless, 0.0, gs_Sun)
+    gs_Sh = jnp.where(leafless, 0.0, gs_Sh)
+    # Wet-leaf evaporation has its own pathway (fwet / Rb, independent of gs):
+    # intercepted water left on a column whose leaf area has gone to zero must
+    # not reach the canopy air either (codex round 12).
+    fwet_leaf = jnp.where(leafless, 0.0, b.fwet)
+
     # ---- Canopy air update (FULLY_COUPLED: soil included) ----
     Tc_new, q_c_new = canopy_air_update(
         b.Ta, b.q_atm,
@@ -408,7 +481,7 @@ def _canopy_residual(
         Rb_Sun, Rb_Sh,
         rah_above, raw_above,
         rah_below, raw_soil_evap,
-        b.fStress_soil, b.Ps, fwet=b.fwet)
+        b.fStress_soil, b.Ps, fwet=fwet_leaf)
 
     # ---- Sunlit-leaf anchor when fSun is too small for two-leaf split ----
     # When ``fSun`` is small, ``Rb_Sun = rb / (LAI · fSun)`` is large, the
@@ -465,11 +538,25 @@ def _canopy_residual(
     res_Ci_Sun = (anchor_weight * (Ci_Sun - Ci_Sh)
                   + (1.0 - anchor_weight) * bal_Sun)
 
+    # ---- Leafless column: the leaf unknowns lose their equations ----
+    # With no leaves every leaf flux is zero (conductances and absorbed
+    # radiation scale with the leaf area), so the two leaf-temperature and two
+    # Ci rows carry no information: the Jacobian is singular there, the leaf
+    # temperatures drift without bound and the column never certifies
+    # (measured at 2 deg: 49-55 % of ice-sheet and 17-36 % of barren column
+    # solves unconverged, against 3-4 % of vegetated ones).  Where the column
+    # has no leaves those rows become identities -- leaf temperature = canopy
+    # air, Ci = Ca (no assimilation, no draw-down) -- and the ground /
+    # canopy-air / atmosphere balance (Tc, q_c rows) is solved exactly as
+    # before.  Pins variables that have no physical meaning on a leafless
+    # column; changes no flux.  (Both classes are empty here, unlike the
+    # sunlit-fraction anchor below, where the empty class takes the active
+    # class's state.)
     rows = [
-        res_Tf_Sun,
-        Tf_Sh  - Tf_Sh_new,
-        res_Ci_Sun,
-        bal_Sh,
+        jnp.where(leafless, Tf_Sun - Tc, res_Tf_Sun),
+        jnp.where(leafless, Tf_Sh - Tc, Tf_Sh - Tf_Sh_new),
+        jnp.where(leafless, Ci_Sun - b.Ca, res_Ci_Sun),
+        jnp.where(leafless, Ci_Sh - b.Ca, bal_Sh),
         Tc     - Tc_new,
         (q_c   - q_c_new) * 1e3,   # scale humidity residual
     ]
@@ -481,7 +568,9 @@ def _canopy_residual(
         d_frac = floored_vpd(VPD_c) / b.Ps
         def _an_prime(T, Ci, APAR, Vc3, Vc4):
             f = lambda c: photosynthesis(T, c, APAR, Vc3, Vc4, b.fC4, b.Ps,
-                                         b.alf, b.TgC, rjv25=b.rjv25)[0]
+                                         b.alf, b.TgC, rjv25=b.rjv25,
+                                         phi0_ref=b.phi0_ref,
+                                         phi0_sandoval=_sandoval_of(b))[0]
             return jax.jvp(f, (Ci,), (jnp.ones_like(Ci),))[1]
         foc_Sun = instantaneous_foc(
             hyd_Sun, d_frac,
@@ -520,8 +609,11 @@ def _canopy_residual(
         # keeps it differentiable at the origin.
         kkt_Sun = _kkt_fischer_burmeister(2.0 * b.gamma_cost * x[6], -foc_Sun)
         kkt_Sh = _kkt_fischer_burmeister(2.0 * b.gamma_cost * x[7], -foc_Sh)
-        rows += [_FOC_ROW_SCALE * (w_dpsi * anchor_dpsi + (1.0 - w_dpsi) * kkt_Sun),
-                 _FOC_ROW_SCALE * kkt_Sh]
+        rows += [_FOC_ROW_SCALE * jnp.where(
+                     leafless, 2.0 * b.gamma_cost * x[6],
+                     w_dpsi * anchor_dpsi + (1.0 - w_dpsi) * kkt_Sun),
+                 _FOC_ROW_SCALE * jnp.where(
+                     leafless, 2.0 * b.gamma_cost * x[7], kkt_Sh)]
     return jnp.array(rows)
 
 
@@ -583,11 +675,13 @@ def canopy_forward(
     An_Sun, Agross_Sun = photosynthesis(
         T_phot_sun, Ci_Sun, b.APAR_Sun,
         b.Vcmax25_Sun, b.Vcmax25_C4Sun, b.fC4, b.Ps, b.alf, b.TgC,
-        rjv25=b.rjv25)
+        rjv25=b.rjv25, phi0_ref=b.phi0_ref,
+        phi0_sandoval=_sandoval_of(b))
     An_Sh, Agross_Sh = photosynthesis(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
         b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC,
-        rjv25=b.rjv25)
+        rjv25=b.rjv25, phi0_ref=b.phi0_ref,
+        phi0_sandoval=_sandoval_of(b))
 
     # FULLY_COUPLED: leaves and soil share the canopy air space (Tc, q_c).
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
@@ -653,6 +747,22 @@ def canopy_forward(
             rah_below, raw_soil_evap, b.fStress_soil,
             b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
+    # A leafless column (ice sheet, barren ground) has no leaf fluxes.  The
+    # leaf energy balance still returns an equal and opposite H / LE pair from
+    # the per-leaf minimum conductance (measured +-0.17 W m-2 per class at
+    # LAI = 0), which the canopy-air budget never supplied (its leaf
+    # conductance gs/(gs Rb + 1) ~ 4e-8 m/s there): report exactly zero.
+    _leafy = jnp.where(leafless_mask(bundle.LAI), 0.0, 1.0)
+    LE_Sun, LE_Sh = LE_Sun * _leafy, LE_Sh * _leafy
+    H_Sun, H_Sh = H_Sun * _leafy, H_Sh * _leafy
+    LE_wet_Sun, LE_wet_Sh = LE_wet_Sun * _leafy, LE_wet_Sh * _leafy
+    gs_Sun, gs_Sh = gs_Sun * _leafy, gs_Sh * _leafy
+    # Leaf net radiation too, so the reported energy closure has no leaf
+    # source left without its balancing fluxes (0 < LAI <= _LEAFLESS_LAI).
+    Rn_Sun, Rn_Sh = Rn_Sun * _leafy, Rn_Sh * _leafy
+    # ...and leaf carbon uptake (it feeds GPP and SIF downstream).
+    An_Sun, An_Sh = An_Sun * _leafy, An_Sh * _leafy
+    Agross_Sun, Agross_Sh = Agross_Sun * _leafy, Agross_Sh * _leafy
     return dict(
         An_Sun=An_Sun, An_Sh=An_Sh,
         Agross_Sun=Agross_Sun, Agross_Sh=Agross_Sh,
@@ -728,6 +838,35 @@ def solve_canopy_closure(
 # Implicit-function-theorem Newton solver
 # ---------------------------------------------------------------------------
 
+def damped_lm_step(J_z, resid, lam):
+    """Damped Levenberg-Marquardt step, via QR of the augmented system.
+
+    Solves  min || [J ; sqrt(lam) I] dz - [-F ; 0] ||.  Stacking the damping as
+    extra ROWS keeps the conditioning at the Jacobian's own, where forming the
+    normal equations would square it -- fatal here in single precision at a
+    condition number of ~1e5.  Returns ``(dz, ||F + J dz||^2)``: the reduction
+    the local linear model predicts, from the model residual rather than a
+    normal-equations quadratic, so it cannot disagree with the step taken.
+
+    Q^T rhs is applied from the packed Householder reflectors
+    (``qr(mode="raw")``), never forming Q (ported from legoESM main 0e6e65a4f9,
+    #2398: forming Q was most of the canopy solve's cost; answers change at
+    fp64 rounding only).  R is the upper triangle of the same factor.
+    """
+    n = resid.shape[0]
+    aug = jnp.vstack([J_z, jnp.sqrt(lam) * jnp.eye(n, dtype=J_z.dtype)])
+    rhs = jnp.concatenate([-resid, jnp.zeros(n, resid.dtype)])
+    packed, taus = jnp.linalg.qr(aug, mode="raw")
+    h = packed.T                                   # (m, n): R above, reflectors below
+    qt_rhs = rhs
+    for k in range(n):
+        v = jnp.concatenate([jnp.zeros(k, h.dtype), jnp.ones(1, h.dtype), h[k + 1:, k]])
+        qt_rhs = qt_rhs - taus[k] * jnp.dot(v, qt_rhs) * v
+    dz = jax.scipy.linalg.solve_triangular(jnp.triu(h[:n, :]), qt_rhs[:n], lower=False)
+    pred_resid = resid + J_z @ dz
+    return dz, jnp.sum(pred_resid * pred_resid)
+
+
 def _make_implicit_newton_solver(
     LE_module: str,
     stomatal_model: str,
@@ -800,24 +939,14 @@ def _make_implicit_newton_solver(
             """Residual and Jacobian in SCALED variables (z = x / xscale)."""
             return F(x), Jac(x) * xscale              # columns scaled
 
-        def _step(J_z, resid, lam):
-            """Damped step, via QR of the augmented system.
+        _step = damped_lm_step
 
-            Solves  min || [J ; sqrt(lam) I] dz - [-F ; 0] ||.  Stacking the
-            damping as extra ROWS keeps the conditioning at the Jacobian's own,
-            where forming the normal equations would square it -- fatal here in
-            single precision at a condition number of ~1e5.
-            """
-            n = resid.shape[0]
-            aug = jnp.vstack([J_z, jnp.sqrt(lam) * jnp.eye(n)])
-            rhs = jnp.concatenate([-resid, jnp.zeros(n, resid.dtype)])
-            q, r = jnp.linalg.qr(aug)
-            dz = jax.scipy.linalg.solve_triangular(r, q.T @ rhs, lower=False)
-            # Reduction the local linear model predicts for ||F||^2, computed
-            # from the model residual rather than from a normal-equations
-            # quadratic, so it cannot disagree with the step actually taken.
-            pred_resid = resid + J_z @ dz
-            return dz, jnp.sum(pred_resid * pred_resid)
+        def _certified(x, n_sq, n_sq_0):
+            """Root certificate: the relative reduction from the seed, an
+            absolute ceiling and the physical box (see _ROOT_* above)."""
+            return ((n_sq <= (_LM_ATOL + _LM_RTOL * n_sq_0))
+                    & (n_sq <= _ROOT_NSQ_MAX)
+                    & canopy_state_admissible(x))
 
         def cond(state):
             _, _, _, _, _, _, done = state
@@ -900,13 +1029,13 @@ def _make_implicit_newton_solver(
             # backward pass a point that is not a root and unmask a gradient
             # that must be zeroed.  A stalled column instead leaves the loop by
             # the damping ceiling, with converged False.
-            converged = n_sq_new <= (_LM_ATOL + _LM_RTOL * n_sq_0)
+            converged = _certified(x, n_sq_new, n_sq_0)
             done = converged | (lam >= _LM_LAMBDA_MAX) | (i + 1 >= max_iters)
             return (x, resid, J_z, n_sq_new, lam, i + 1, done)
 
         resid_0, J_z_0 = _res_jac(x0)
         n_sq_0 = jnp.sum(resid_0 * resid_0)
-        conv_0 = n_sq_0 <= _LM_ATOL
+        conv_0 = (n_sq_0 <= _LM_ATOL) & canopy_state_admissible(x0)
         x_final, _r, _j, _n, _lam, n_iters, _done = jax.lax.while_loop(
             cond, body,
             (x0, resid_0, J_z_0, n_sq_0, jnp.asarray(_LM_LAMBDA_0, x0.dtype),
@@ -914,7 +1043,7 @@ def _make_implicit_newton_solver(
         # Recompute the flag on the returned iterate so what the caller reads is
         # a statement about the state it is handed, not about a loop variable.
         resid_f = F(x_final)
-        converged = jnp.sum(resid_f * resid_f) <= (_LM_ATOL + _LM_RTOL * n_sq_0)
+        converged = _certified(x_final, jnp.sum(resid_f * resid_f), n_sq_0)
         return x_final, n_iters, converged
 
     @jax.custom_vjp

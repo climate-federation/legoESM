@@ -52,6 +52,7 @@ from legoesm.land.canopy.stability import (
 from legoesm.land.phydro import PhydroSupply
 from legoesm.land.canopy.solver import (
     CanopyForcingBundle, solve_canopy_closure, canopy_forward,
+    canopy_state_admissible, leafless_mask,
 )
 from legoesm.land.canopy.energy_balance import soil_surface_evap_resistance
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
@@ -76,6 +77,45 @@ TwoLeafCanopyConfig = CanopyConfig
 # original ``canopy_land.py`` implementation (n=6, ω=0.15).
 _DEFAULT_N_PICARD = 6
 _DEFAULT_PICARD_OMEGA = 0.15
+
+# Columns per group in the canopy Newton solve (ported from legoESM main
+# 4310f02248, #2330).  Under one vmap every column iterates until the slowest
+# column stops, so one hard column costs the whole batch up to the iteration
+# cap; groups stop independently.  Pure performance: same per-column solve,
+# results equal to rounding.  64 is upstream's choice from a group-size sweep
+# on the AMIP production deck (GPU).  A batching count, never a config.
+_CANOPY_SOLVE_GROUP = 64
+# Picard passes after the first order their columns by the previous pass's
+# Newton iterations before grouping, so hard columns share groups.
+_SORT_BY_PREV_ITERS = True
+
+
+def canopy_solve_batching(column_sharded: bool = False) -> tuple[int | None, bool]:
+    """``(group size or None for one batch, sort by previous iterations?)``.
+
+    Measured on the 2 deg LMIP run with the leafless-column fix (user decision
+    2026-11-10):
+
+    * GPU (one or several devices): ONE batch per device.  Per hourly step on
+      one A100: one batch 0.73 s, groups of 1024 1.0 s, groups of 64 5.7 s --
+      the GPU is latency-bound (mean utilisation ~4 %), so sequential groups
+      cost more than idle lanes.  With columns sharded across GPUs (higher
+      resolution), each device takes its block as one batch.
+    * CPU, one device: groups of 64 sorted by previous iterations (upstream);
+      the sort lets the many quickly converging columns stop early.
+    * CPU, several devices (columns sharded by --column-devices): one batch per
+      device and NO sort -- the global sort gathers every column into one
+      place and the groups then run in sequence, which made the 90-device run
+      ~40x slower (24 steps: 208 s -> 2 h 27 min).
+
+    Decided at trace time from the default backend and the run layout
+    (``CanopyConfig.column_sharded``, set by the driver when it shards the
+    columns) -- not from the device count, since a CPU host can expose several
+    devices to a run that does not shard (codex round 16/17).
+    """
+    if jax.default_backend() != "cpu" or column_sharded:
+        return None, False
+    return _CANOPY_SOLVE_GROUP, _SORT_BY_PREV_ITERS
 
 # Time constant of the growth-temperature exponential moving average [s].
 # 30 days * 86400 s/day = 2.592e6 s.  At dt = 1800 s, ~76 days reach 95 %
@@ -286,6 +326,7 @@ def compute_two_leaf_canopy_fluxes(
     soil_surface_relsat: jnp.ndarray | None = None,
     fwet: jnp.ndarray | None = None,
     pmodel_acclim=None,  # PModelAcclimState | None (land/p_model.py)
+    canopy_seed: jnp.ndarray | None = None,  # (ncol, n_state) warm start; see below
     phydro_supply=None,  # PhydroSupply | None (land/phydro.py)
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
@@ -435,6 +476,31 @@ def compute_two_leaf_canopy_fluxes(
         raise ValueError(
             f"unknown g1_source {cc.g1_source!r}; the Medlyn-slope scheme "
             f"must be one of {VALID_G1_SOURCES}")
+    # C3 electron-transport light response (trace-time backstop of
+    # CanopyConfig.validate()): 'clm' or 'pmodel_phi0' (P-model phi0(T_leaf),
+    # the same phi0 that sizes the acclimated capacities).
+    _light = getattr(cc, "light_response", "clm")
+    from legoesm.land.canopy.config import VALID_LIGHT_RESPONSES
+    if _light not in VALID_LIGHT_RESPONSES:
+        raise ValueError(
+            f"unknown light_response {_light!r}; must be one of "
+            f"{VALID_LIGHT_RESPONSES}")
+    if _light == "pmodel_phi0":
+        if cc.capacity_scheme != "p_model":
+            raise ValueError(
+                "light_response='pmodel_phi0' requires capacity_scheme="
+                f"'p_model' (got {cc.capacity_scheme!r})")
+        if not land_config.p_model.kphio_temp:
+            raise ValueError(
+                "light_response='pmodel_phi0' uses the temperature-dependent "
+                "phi0(T); PModelConfig.kphio_temp=False is not supported")
+    _sandoval = (land_config is not None
+                 and getattr(land_config, "p_model", None) is not None
+                 and land_config.p_model.kphio_method == "sandoval")
+    _sv_inputs = None
+    if _light == "pmodel_phi0" and _sandoval:
+        from legoesm.land.p_model import kphio_inputs_from
+        _sv_inputs = kphio_inputs_from(pmodel_acclim, land_config.p_model)
     rjv25 = None
     chi_opt = None  # P-model optimum ci/ca (C3/C4 blend), seeds the Newton Ci
     dpsi_seed = None  # P-hydro acclimated draw-down, seeds the Newton dpsi
@@ -513,6 +579,17 @@ def compute_two_leaf_canopy_fluxes(
                 Vc3_leaf = _caps.vcmax25_leaf
                 rjv25 = _caps.rjv25
             Vc4_leaf = _caps4.vcmax25_c4_leaf
+        if cc.stomatal_model == "pmodel_chi":
+            # ci = chi(xi) Ca at every step (energy_balance): the per-leaf slot
+            # carries the acclimated / realised xi [Pa^0.5] of each pathway,
+            # NOT a slope, and is not soil-stressed (JULES applies its
+            # moisture factor to net assimilation, not to chi).
+            if _caps is None:
+                raise ValueError("stomatal_model='pmodel_chi' needs the "
+                                 "least-cost capacities (capacity_scheme="
+                                 "'p_model')")
+            m_C3 = _caps.xi_sqrt_pa
+            m_C4 = _caps4.xi_c4_sqrt_pa
         if cc.g1_source == "p_model":
             # Predicted slopes replace the tabulated C3 AND C4 slopes and are
             # stressed by the empirical soil-moisture factor below exactly
@@ -524,17 +601,22 @@ def compute_two_leaf_canopy_fluxes(
             # least-cost chi this is g1 = (xi + g*sqrt(D))/(1 - g), g =
             # Gamma*/ca — the exact inversion, of which the textbook g1 = xi
             # is the Gamma*/ca -> 0 limit.
+            from legoesm.land.p_model import acclim_means
             from legoesm.land.p_model import optimal_chi as _ochi
             from legoesm.land.phydro import slope_for_model
+            # The slope reproduces the optimum's chi at the conditions the
+            # traits were set at: the running means (ema_24h) or the last
+            # noon window (subdaily_noon).
+            _pm_at = acclim_means(pmodel_acclim, land_config.p_model)
             _, _, _, _gs_pa, _ = _ochi(
-                pmodel_acclim.t_mean_K, pmodel_acclim.vpd_mean_pa,
-                pmodel_acclim.co2_mean_ppm, pmodel_acclim.ps_ema,
+                _pm_at.t_mean_K, _pm_at.vpd_mean_pa,
+                _pm_at.co2_mean_ppm, _pm_at.ps_ema,
                 land_config.p_model)
             m_C3 = slope_for_model(
                 cc.stomatal_model, _caps.chi,
-                pmodel_acclim, _gs_pa, d0_leuning_kpa=cc.d0_leuning_kpa)
+                _pm_at, _gs_pa, d0_leuning_kpa=cc.d0_leuning_kpa)
             m_C4 = slope_for_model(
-                cc.stomatal_model, _caps4.chi_c4, pmodel_acclim, _gs_pa,
+                cc.stomatal_model, _caps4.chi_c4, _pm_at, _gs_pa,
                 d0_leuning_kpa=cc.d0_leuning_kpa)
 
     # ---- Soil moisture stress ----
@@ -568,7 +650,9 @@ def compute_two_leaf_canopy_fluxes(
     # least-cost optimum, is stressed like Vcmax at the half-hourly step, so
     # the least-cost arm differs from the baseline only in where its
     # acclimated capacities and slope come from.
-    _slope_stress = fStress_vcmax
+    # Under 'pmodel_chi' the slot carries xi, which the moisture stress does
+    # not scale (it acts on Vcmax, hence on An and gs).
+    _slope_stress = 1.0 if cc.stomatal_model == "pmodel_chi" else fStress_vcmax
     m_eff  = m_C3  * _slope_stress
     # The Ball-Berry INTERCEPT b0 is the cuticular / residual minimum conductance.
     # ``cc.stress_b0`` (static Python bool) controls whether soil-moisture stress
@@ -637,7 +721,28 @@ def compute_two_leaf_canopy_fluxes(
     if cc.stomatal_model == "phydro":
         # The two draw-down unknowns start at the acclimated optimum's.
         _x0 += [dpsi_seed, dpsi_seed]
-    initial_state = jnp.stack(_x0, axis=-1)  # (ncol, 6) or (ncol, 8)
+    cold_state = jnp.stack(_x0, axis=-1)  # (ncol, 6) or (ncol, 8)
+
+    # ---- Warm start (numerical cache; ported from legoESM main 57e4c45b6a
+    # with the root certificate of 46bab7a21c) ----
+    # ``canopy_seed`` is the previous timestep's LAST CERTIFIED solution,
+    # carried by the caller.  A column whose seed is not finite (never solved,
+    # or the last solve failed) or lies outside the physical box a root may
+    # occupy falls back to the cold start above.  The seed is sanitised BEFORE
+    # the select: ``where`` evaluates both branches, and a NaN in the discarded
+    # one would poison a reverse-mode tangent.  The solve's adjoint returns a
+    # zero cotangent for its seed, but the residual has spurious roots, so
+    # seed admissibility (and the certificate on every converged solve) is
+    # what keeps a far-off seed from leading a column to one of them.
+    # A seed of a different width (a state built under the other stomatal
+    # model: 8 unknowns under P-hydro, 6 otherwise) is not a seed for this
+    # solve; the cache is ignored (cold start), never reshaped.
+    if canopy_seed is None or canopy_seed.shape[-1] != cold_state.shape[-1]:
+        initial_state = cold_state
+    else:
+        _seed = jnp.asarray(canopy_seed, cold_state.dtype)
+        _ok = canopy_state_admissible(_seed)[:, None]
+        initial_state = jnp.where(_ok, jnp.nan_to_num(_seed), cold_state)
 
     def _bcast(v):
         if hasattr(v, "shape") and v.shape == (ncol,):
@@ -667,6 +772,16 @@ def compute_two_leaf_canopy_fluxes(
             # broadcast: every bundle leaf is vmapped over columns, so the
             # scalar config float must be (ncol,)
             d0_leuning_kpa=jnp.full(ncol, cc.d0_leuning_kpa),
+            # P-model reference quantum yield for the C3 light response
+            # (light_response='pmodel_phi0'); None = CLM PSII form.
+            phi0_ref=(jnp.full(ncol, land_config.p_model.kphio)
+                      if _light == "pmodel_phi0" and not _sandoval else None),
+            # Sandoval et al. (2026) phi0 for the light response: the same
+            # per-column climatology that sizes the acclimated capacities.
+            phi0_ai=(_sv_inputs[0] if _light == "pmodel_phi0" and _sandoval
+                     else None),
+            phi0_mgdd0=(_sv_inputs[1] if _light == "pmodel_phi0" and _sandoval
+                        else None),
             **_phydro_bundle,
         )
 
@@ -698,12 +813,43 @@ def compute_two_leaf_canopy_fluxes(
     omega    = getattr(cc, "picard_omega", _DEFAULT_PICARD_OMEGA)
     Ts_bc_k = Ts_old
 
+    # Each Picard pass RESEEDS from the previous pass's certified solution
+    # instead of restarting cold (successive passes differ only in Ts_bc, which
+    # the relaxation moves by a fraction of a kelvin).  Only a CONVERGED pass
+    # seeds the next one: a failed solve's last iterate is not a root.  A
+    # column with no converged solution yet alternates its seed between the
+    # caller's seed and the cold state across passes, so a warm seed that led
+    # the solve astray gets a cold retry inside the same call.  ``x_conv`` holds
+    # the last certified solution per column (NaN until one exists); after the
+    # loop it is the cache handed back to the caller.  The columns are solved in
+    # groups of _CANOPY_SOLVE_GROUP, ordered (after the first pass) by the
+    # previous pass's iteration counts so hard columns share groups.
+    x_conv = jnp.full_like(initial_state, jnp.nan)
+    n_iters = None
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
-        x_final, n_iters, converged = jax.vmap(_solve_one_col)(
-            initial_state, bundles_k)
+        _fallback = initial_state if _picard_iter % 2 == 0 else cold_state
+        _seed_k = jnp.where(jnp.all(jnp.isfinite(x_conv), axis=-1, keepdims=True),
+                            jnp.nan_to_num(x_conv), _fallback)
+        _args = (_seed_k, bundles_k)
+        _group, _sort = canopy_solve_batching(
+            bool(getattr(cc, "column_sharded", False)))
+        _sorted = _picard_iter > 0 and _sort and _group is not None
+        if _sorted:
+            _perm = jnp.argsort(n_iters, descending=True)
+            _inv = jnp.argsort(_perm)
+            _args = jax.tree_util.tree_map(lambda a: a[_perm], _args)
+        if _group is None:
+            _out = jax.vmap(_solve_one_col)(*_args)
+        else:
+            _out = jax.lax.map(lambda a: _solve_one_col(*a), _args,
+                               batch_size=_group)
+        if _sorted:
+            _out = jax.tree_util.tree_map(lambda a: a[_inv], _out)
+        x_final, n_iters, converged = _out
+        x_conv = jnp.where(converged[:, None], x_final, x_conv)
         if _DUMP_UNSOLVED_DIR:
-            _dump_unsolved(bundles_k, initial_state, x_final, n_iters, converged)
+            _dump_unsolved(bundles_k, _seed_k, x_final, n_iters, converged)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
@@ -764,9 +910,14 @@ def compute_two_leaf_canopy_fluxes(
     if cc.sif is not None:
         T_phot_Sun = Ta if cc.use_ta_for_photosynthesis else Tf_Sun
         T_phot_Sh  = Ta if cc.use_ta_for_photosynthesis else Tf_Sh
+        # A leafless column has no leaves to fluoresce: its light enters with
+        # zero weight (An is already zero there; the yield alone is not).
+        _leafy_sif = jnp.where(leafless_mask(LAI), 0.0, 1.0)
         sif_out = two_leaf_canopy_sif(
-            An_Sun, x_final[:, 2], co2_compensation_point(T_phot_Sun), sw_rt.APAR_Sun,
-            An_Sh, x_final[:, 3], co2_compensation_point(T_phot_Sh), sw_rt.APAR_Sh,
+            An_Sun, x_final[:, 2], co2_compensation_point(T_phot_Sun),
+            sw_rt.APAR_Sun * _leafy_sif,
+            An_Sh, x_final[:, 3], co2_compensation_point(T_phot_Sh),
+            sw_rt.APAR_Sh * _leafy_sif,
             cc.sif)
     else:
         sif_out = None
@@ -862,6 +1013,10 @@ def compute_two_leaf_canopy_fluxes(
         # the caller decides what to do with the column; it must not simply
         # spend them.  Carried from the LAST Picard pass.
         converged=converged,
+        # Warm-start cache for the NEXT call: the last certified solve per
+        # column (NaN where this column has never converged).
+        canopy_x=x_conv,
+        lai_canopy=LAI,
         f_veg=f_veg,
         fSun=fSun,
         Ts_solve=Ts_cvg,

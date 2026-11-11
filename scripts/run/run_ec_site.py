@@ -37,6 +37,7 @@ from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.boundary_data.ec_site import read_ec_site_driver, ECSiteDriver
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.multilayer_land import (
+    finite_check_view,
     init_multilayer_land_state,
     step_multilayer_land_with_diagnostics,
     two_leaf_capacity_diagnostics,
@@ -525,7 +526,9 @@ def _prognostic_fluxes(d: ECSiteDriver,
                        canopy_config: TwoLeafCanopyConfig | CLMMLCanopyConfig,
                        land_config: MultiLayerLandConfig, U_min: float,
                        nudge_tau_days: float = 0.0, clmml_sai: float = _CLMML_SAI,
-                       diag: dict | None = None):
+                       diag: dict | None = None,
+                       sandoval_inputs: tuple | None = None,
+                       noon_clock: float | None = None):
     """Integrate the FULL multilayer land forward in time (``lax.scan``).
 
     ``diag`` (two-leaf only): when a dict is passed it is filled with per-step
@@ -575,7 +578,8 @@ def _prognostic_fluxes(d: ECSiteDriver,
     theta_init = float(np.clip(th0[0], theta_r + 1e-3, theta_sat - 1e-3))
     state0 = init_multilayer_land_state(
         1, land_config, T_init=T_init, theta_init=theta_init,
-        TgC_init=T_init - constants.T_freeze)
+        TgC_init=T_init - constants.T_freeze,
+        pmodel_sandoval_inputs=sandoval_inputs)
 
     # Static nudging weight (dt and tau are compile-time constants -> no retrace).
     nudge_alpha = (min(d.dt_s / (nudge_tau_days * 86400.0), 1.0)
@@ -597,16 +601,17 @@ def _prognostic_fluxes(d: ECSiteDriver,
     _want_diag = diag is not None and not is_clmml
 
     def _scan_step(state, xs):
-        forcing_t, params_t, doy_t, theta_obs_t = xs
+        forcing_t, params_t, doy_t, theta_obs_t, solar_t = xs
         new_state, _resp, _carbon, out = step_multilayer_land_with_diagnostics(
             state, forcing_t, land_config, U_min, d.dt_s,
-            lat=lat_arg, carbon_state=None, doy=doy_t, land_params=params_t)
+            lat=lat_arg, carbon_state=None, doy=doy_t, land_params=params_t,
+            solar_hour=solar_t)
         # The CLM-ML cold-start step grows the carry (canopy_state None ->
         # CanopyState), so there is no same-structure previous state to revert
         # to; that step is taken unguarded and every later step is guarded.
         if (jax.tree_util.tree_structure(new_state)
                 == jax.tree_util.tree_structure(state)):
-            reverted = _any_nonfinite(new_state)
+            reverted = _any_nonfinite(finite_check_view(new_state))
             # Revert EVERY array leaf (int topology included) so a rolled-back
             # step cannot leave a hybrid of old float prognostics + new integer
             # counters; only non-array leaves (None) are carried unchanged.
@@ -618,7 +623,7 @@ def _prognostic_fluxes(d: ECSiteDriver,
             # There is no same-shape previous state to revert to, so a poisoned
             # cold-start state would become the "old" state and every later
             # rollback would restore NaNs forever.  Guard it explicitly instead.
-            if bool(_any_nonfinite(new_state)):
+            if bool(_any_nonfinite(finite_check_view(new_state))):
                 raise FloatingPointError(
                     "CLM-ML cold-start step produced a non-finite land state; "
                     "the vertical structure or first flux solve failed. Check "
@@ -675,7 +680,10 @@ def _prognostic_fluxes(d: ECSiteDriver,
 
     params = (_clmml_land_params(d.canopy_params, clmml_sai) if is_clmml
               else d.canopy_params)
-    xs = (d.forcing, params, d.doy, jnp.asarray(d.theta_soil))
+    # Local solar hour per step: only the subdaily P-model reads it.
+    _solar = (jnp.asarray(_site_solar_hour(d, noon_clock))
+              if land_config.p_model.acclimation == "subdaily_noon" else None)
+    xs = (d.forcing, params, d.doy, jnp.asarray(d.theta_soil), _solar)
     if _want_diag:
         run = jax.jit(lambda s0, x: jax.lax.scan(_scan_step, s0, x))
         _final, (gpp, le, h, ts, reverted, ts_soil, swc_soil, ustar, dg) = run(state0, xs)
@@ -780,6 +788,98 @@ def _write_output(out_dir: str, d: ECSiteDriver, model: dict,
     return path
 
 
+def _site_sandoval_inputs(d: ECSiteDriver) -> tuple[float, float]:
+    """Site climatology for the Sandoval et al. (2026) quantum yield.
+
+    Computed once from the FULL site record (user decision 2026-11-07: site
+    forcing; the JULES site ancillaries are the cross-check):
+
+    * mGDD0 [degC]: mean of the daily-mean air temperatures of all days with
+      a daily mean above 0 degC (the JULES ``make_mgdd0`` definition, here on
+      the driver's local days).
+    * aridity index = sum(PET) / sum(P) over the whole days of the record,
+      PET from daily Priestley-Taylor (``priestley_taylor_pet_rate``) with net
+      radiation estimated from the forcing as
+      ``(1 - albedo) SW + emissivity (LW_in - sigma T_air^4)``; broadband
+      albedo = mean of the driver's VIS and NIR albedos; air temperature
+      stands in for the unobserved surface temperature.
+    """
+    from legoesm.land.carbon.climate_features import priestley_taylor_pet_rate
+    if d.clock_hour is None:
+        raise ValueError("Sandoval site inputs need ECSiteDriver.clock_hour")
+    ch = np.asarray(d.clock_hour)
+    day = np.concatenate([[0], np.cumsum(np.diff(ch) < 0.0)])
+    n_per = np.bincount(day)
+    full = n_per == int(round(86400.0 / float(d.dt_s)))   # whole days only
+    keep = full[day]
+    g = lambda a: np.asarray(a, dtype=np.float64).ravel()  # noqa: E731
+    f, cp = d.forcing, d.canopy_params
+    t = g(f.T_lowest)
+    alb = 0.5 * (g(cp.ALB_VIS) + g(cp.ALB_NIR))
+    rn = ((1.0 - alb) * g(f.sw_down)
+          + g(cp.emissivity) * (g(f.lw_down) - constants.sigma_sb * t ** 4))
+    mean_day = lambda a: (np.bincount(day, weights=a) / n_per)[full]  # noqa: E731
+    t_day, rn_day, p_day = mean_day(t), mean_day(rn), mean_day(g(f.p_surface))
+    warm = t_day > constants.T_freeze
+    if not warm.any():
+        raise ValueError("site record has no day above 0 degC; mGDD0 undefined")
+    mgdd0 = float(np.mean(t_day[warm] - constants.T_freeze))
+    pet = float(np.sum(priestley_taylor_pet_rate(rn_day, t_day, p_day)))
+    prec = float(np.sum(np.bincount(day, weights=g(f.precip_total))[full]
+                        / n_per[full]))
+    if prec <= 0.0:
+        raise ValueError("site record has no precipitation; AI undefined")
+    ai = pet / prec
+    print(f"  p_model: Sandoval site inputs from forcing ({int(full.sum())} days): "
+          f"aridity index PET/P = {ai:.3f}, mGDD0 = {mgdd0:.2f} degC")
+    return ai, mgdd0
+
+
+def _site_solar_hour(d: ECSiteDriver, noon_clock: float | None = None) -> np.ndarray:
+    """Local solar hour of each step, shape ``(n_time, 1)``.
+
+    The driver clock (FLUXNET: local standard time) differs from local solar
+    time by a site-constant offset (longitude against the time-zone meridian;
+    the equation of time, +-16 min, is neglected as in the JULES lon/15
+    convention).  The offset is read from the forcing's own solar geometry:
+    the clock time at which the record-mean cos(zenith) peaks, refined by a
+    parabola through the peak slot and its neighbours, is solar noon.  The
+    noon acclimation window is thus centred on the radiation the canopy sees.
+    """
+    if d.clock_hour is None:
+        raise ValueError(
+            "subdaily P-model acclimation needs the driver's clock hour "
+            "(ECSiteDriver.clock_hour is None)")
+    if noon_clock is not None:
+        # Offset already estimated from the FULL record (run_site does this
+        # before any slicing, so short windows need not sample every slot).
+        return np.mod(np.asarray(d.clock_hour) - noon_clock + 12.0, 24.0)[:, None]
+    return np.mod(np.asarray(d.clock_hour) - _site_noon_clock(d) + 12.0, 24.0)[:, None]
+
+
+def _site_noon_clock(d: ECSiteDriver) -> float:
+    """Clock time [h] of solar noon from the record-mean cos(zenith) peak."""
+    dt_h = float(d.dt_s) / 3600.0
+    n_slot = int(round(24.0 / dt_h))
+    slot = np.floor(np.asarray(d.clock_hour) / dt_h + 1e-9).astype(int) % n_slot
+    cz = np.asarray(d.forcing.cos_zenith, dtype=np.float64).ravel()
+    cnt = np.bincount(slot, minlength=n_slot)
+    if np.any(cnt == 0):
+        raise ValueError("driver does not sample every time-of-day slot; "
+                         "cannot locate solar noon")
+    mean_cz = np.bincount(slot, weights=cz, minlength=n_slot) / cnt
+    slot_clock = np.bincount(slot, weights=np.asarray(d.clock_hour),
+                             minlength=n_slot) / cnt
+    k = int(np.argmax(mean_cz))
+    y0, y1, y2 = mean_cz[k - 1], mean_cz[k], mean_cz[(k + 1) % n_slot]
+    curv = y0 - 2.0 * y1 + y2
+    delta = 0.5 * (y0 - y2) / curv if curv < 0.0 else 0.0
+    noon_clock = slot_clock[k] + delta * dt_h
+    print(f"  p_model: solar noon at clock {noon_clock:.2f} h "
+          f"(offset {noon_clock - 12.0:+.2f} h)")
+    return float(noon_clock)
+
+
 def _slice_driver(d: ECSiteDriver, start: int, k: int) -> ECSiteDriver:
     """``[start : start+k]`` timestep view of a driver (quick runs / smoke test)."""
     sl = slice(start, start + k)
@@ -792,6 +892,7 @@ def _slice_driver(d: ECSiteDriver, start: int, k: int) -> ECSiteDriver:
         obs={kk: vv[sl] for kk, vv in d.obs.items()},
         met_filled=(None if d.met_filled is None else d.met_filled[sl]),
         soil_filled=(None if d.soil_filled is None else d.soil_filled[sl]),
+        clock_hour=(None if d.clock_hour is None else d.clock_hour[sl]),
     )
 
 
@@ -872,7 +973,12 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              canopy_stomatal_model: str | None = None,
              transpiration_stress: str = "beta_theta",
              vcmax_profile: str = "kn",
-             params_path: str | None = None) -> dict:
+             params_path: str | None = None,
+             pmodel_acclimation: str | None = None,
+             light_response: str = "clm",
+             kphio_method: str | None = None,
+             sandoval_ai: float | None = None,
+             sandoval_mgdd0: float | None = None) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     if canopy not in ("two_leaf", "clmml"):
@@ -933,6 +1039,26 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         # mutates CLM module globals per step and cannot be vmapped.
         raise ValueError("--canopy clmml requires --mode prognostic")
     d = read_ec_site_driver(driver_nc)
+    # Solar noon of the site from the FULL record, before any slicing.
+    _noon_clock = (_site_noon_clock(d)
+                   if pmodel_acclimation == "subdaily_noon" else None)
+    # Sandoval climatology from the FULL record, before any slicing; or the
+    # values given explicitly (e.g. the JULES site ancillaries), both or none.
+    if (sandoval_ai is None) != (sandoval_mgdd0 is None):
+        raise ValueError("give both sandoval_ai and sandoval_mgdd0, or neither")
+    if sandoval_ai is not None and kphio_method != "sandoval":
+        raise ValueError("sandoval_ai/sandoval_mgdd0 given without "
+                         "kphio_method='sandoval'; they would be inert")
+    _sv_inputs = None
+    if kphio_method == "sandoval":
+        _sv_forcing = _site_sandoval_inputs(d)
+        if sandoval_ai is not None:
+            _sv_inputs = (float(sandoval_ai), float(sandoval_mgdd0))
+            print(f"  p_model: Sandoval inputs GIVEN: aridity index "
+                  f"{_sv_inputs[0]:.3f}, mGDD0 {_sv_inputs[1]:.2f} degC "
+                  f"(forcing estimate {_sv_forcing[0]:.3f}, {_sv_forcing[1]:.2f})")
+        else:
+            _sv_inputs = _sv_forcing
     # C3 leaf Vcmax25 fed to the PRESCRIBED-capacity lane.  The driver value is
     # time-varying where the site file carries it; ``mean`` / ``lookup`` replace
     # it with a constant so the baseline has no site-specific seasonal input.
@@ -998,7 +1124,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         canopy_config = TwoLeafCanopyConfig(
             max_iters=30, stress_b0=stress_b0,
             capacity_scheme=capacity_scheme, g1_source=g1_source,
-            vcmax_profile=vcmax_profile,
+            vcmax_profile=vcmax_profile, light_response=light_response,
             **({"stomatal_model": canopy_stomatal_model}
                if canopy_stomatal_model is not None else {})).validate()
     elif canopy == "clmml":
@@ -1041,6 +1167,17 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     if transpiration_stress != "beta_theta":
         land_config = land_config._replace(
             transpiration_stress=transpiration_stress)
+    if kphio_method is not None:
+        # P-model C3 quantum yield: 'temperature' (kphio x Bernacchi) or
+        # 'sandoval' (Sandoval et al. 2026; site AI and mGDD0 below).
+        land_config = land_config._replace(p_model=land_config.p_model._replace(
+            kphio_method=kphio_method))
+    if pmodel_acclimation is not None:
+        # P-model acclimation scheme (land/p_model.py): 'ema_24h' (24 h
+        # running means, the default) or 'subdaily_noon' (Mengoli et al.
+        # 2022 noon-window optimum with a daily trait memory).
+        land_config = land_config._replace(p_model=land_config.p_model._replace(
+            acclimation=pmodel_acclimation))
     if params_path:
         # Same calibration layer as the MIP drivers (run_lmip): the shared
         # loader validates each key against the parameter registry
@@ -1113,11 +1250,15 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
                 t_init_K=jnp.mean(fz.T_lowest),
                 ps_init_pa=jnp.mean(fz.p_surface),
                 cfg=land_config.p_model,
-                co2_init_ppm=jnp.mean(fz.co2_ppmv))
+                co2_init_ppm=jnp.mean(fz.co2_ppmv),
+                sandoval_inputs=_sv_inputs)
             _traj_post = acclim_trajectory(
                 _init, T_K=fz.T_lowest, ppfd=_ppfd, vpd_pa=_vpd,
                 co2_ppm=fz.co2_ppmv, ps_pa=fz.p_surface,
-                cfg=land_config.p_model, dt=float(d.dt_s))
+                cfg=land_config.p_model, dt=float(d.dt_s),
+                solar_hour=(jnp.asarray(_site_solar_hour(d, _noon_clock))
+                            if land_config.p_model.acclimation
+                            == "subdaily_noon" else None))
             # PRE-step alignment (parity with the prognostic lane, which
             # evaluates capacities from the state BEFORE advancing it):
             # step i uses the state after step i-1; step 0 uses the init.
@@ -1159,7 +1300,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     else:
         gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _prognostic_fluxes(
             d, canopy_config, land_config, u_min, nudge_tau_days=nudge_tau_days,
-            clmml_sai=clmml_sai, diag=_diag)
+            clmml_sai=clmml_sai, diag=_diag, sandoval_inputs=_sv_inputs,
+            noon_clock=_noon_clock)
     # Trim the spin-up window from BOTH the model arrays and the driver ``d``
     # (obs/valid/provenance) so scoring, output and provenance all cover the
     # evaluation window only, while the carried soil state that reaches it was
@@ -1420,8 +1562,40 @@ def main() -> int:
                     help="two-leaf canopy Vcmax25 depth profile: 'kn' "
                          "(default nitrogen profile) or 'coordination' "
                          "(fraction of the diffuse-light envelope)")
+    ap.add_argument("--canopy-light-response", default="clm",
+                    choices=["clm", "pmodel_phi0"],
+                    dest="canopy_light_response",
+                    help="two-leaf C3 electron-transport light response: "
+                         "'clm' (default; CLM5 theta=0.7, PSII yield 0.85) or "
+                         "'pmodel_phi0' (J = 4 phi0(T_leaf) I / sqrt(1 + "
+                         "(4 phi0 I / Jmax)^2) with the P-model phi0; needs "
+                         "--optimality least_cost / capacity p_model)")
+    ap.add_argument("--pmodel-kphio-method", default=None,
+                    choices=["temperature", "sandoval"],
+                    dest="pmodel_kphio_method",
+                    help="P-model C3 quantum yield: 'temperature' (unset = "
+                         "config default; kphio x Bernacchi 2003) or "
+                         "'sandoval' (Sandoval et al. 2026; aridity index and "
+                         "mGDD0 computed from the full site record)")
+    ap.add_argument("--sandoval-ai", type=float, default=None,
+                    help="with --pmodel-kphio-method sandoval: aridity index "
+                         "PET/P to use instead of the site-forcing estimate "
+                         "(give with --sandoval-mgdd0)")
+    ap.add_argument("--sandoval-mgdd0", type=float, default=None,
+                    help="with --pmodel-kphio-method sandoval: mGDD0 [degC] "
+                         "to use instead of the site-forcing estimate")
+    ap.add_argument("--pmodel-acclimation", default=None,
+                    choices=["ema_24h", "subdaily_noon"],
+                    dest="pmodel_acclimation",
+                    help="P-model acclimation (with --optimality least_cost / "
+                         "capacity p_model): 'ema_24h' (unset = config "
+                         "default; optimum at 15-day running means of the "
+                         "24 h drivers) or 'subdaily_noon' (optimum at each "
+                         "day's 11:00-13:00 local-solar means, 1/15 daily "
+                         "memory on the traits; Mengoli et al. 2022)")
     ap.add_argument("--canopy-stomatal-model", default=None,
-                    choices=["ball_berry", "medlyn", "leuning", "phydro"],
+                    choices=["ball_berry", "medlyn", "leuning", "phydro",
+                             "pmodel_chi"],
                     dest="canopy_stomatal_model",
                     help="two-leaf stomatal conductance model (unset keeps the "
                          "config default ball_berry; required as 'medlyn' for "
@@ -1467,6 +1641,10 @@ def main() -> int:
                  clmml_turbulence=args.clmml_turbulence,
                  clmml_stomatal=args.clmml_stomatal,
                  clmml_vcmax25=args.clmml_vcmax25,
+                 pmodel_acclimation=args.pmodel_acclimation,
+                 light_response=args.canopy_light_response,
+                 kphio_method=args.pmodel_kphio_method,
+                 sandoval_ai=args.sandoval_ai, sandoval_mgdd0=args.sandoval_mgdd0,
                  plant_wilting_point=args.plant_wilting_point,
                  spinup_steps=args.spinup_steps,
                  interception=args.interception,

@@ -66,7 +66,9 @@ _O_THETA_IP_C3 = 0.95
 def _smaller_root(theta, A, B):
     """Independent smaller root of theta x^2 - (A+B) x + A B = 0."""
     s = A + B
-    return (s - math.sqrt(max(s * s - 4.0 * theta * A * B, 1e-12))) / (2.0 * theta)
+    # Both roots are >= 0 for A, B >= 0: the floor removes the eps guard's
+    # -sqrt(eps)/(2 theta) artefact when A = B = 0 (production does the same).
+    return max((s - math.sqrt(max(s * s - 4.0 * theta * A * B, 1e-12))) / (2.0 * theta), 0.0)
 
 
 def _fvcb_c3_oracle(Tf, Ci, APAR, Vcmax25, TgC):
@@ -138,17 +140,17 @@ def test_c3_rubisco_michaelis_o2_is_live(monkeypatch):
 
 def test_c3_compensation_point_zero_gross_at_ci_equals_gamma_star():
     """At Ci = Gamma* both Ac and Aj numerators (Ci-Gamma*) vanish, so a_gross
-    collapses to zero — down to the smaller-root sqrt(eps=1e-12) co-limitation
-    guard (|A| ~ sqrt(1e-12)/(2 theta) < 1e-6).  The UN-CLIPPED net A-Rd is then
-    ~ -Rd (the public c3_photosynthesis floors this to An=0).  The production
-    a_gross matches the independent oracle (same guard) to within abs=1e-12."""
+    collapses to exactly zero (the smaller root is floored at 0, removing the
+    sqrt(eps=1e-12) guard's -sqrt(eps)/(2 theta) artefact).  The UN-CLIPPED net
+    A-Rd is then -Rd (the public c3_photosynthesis floors this to An=0).  The
+    production a_gross matches the independent oracle to within abs=1e-12."""
     Tf, APAR, Vcmax25, TgC = 298.15, 1500.0, 60.0, 20.0
     Gs = float(photo.co2_compensation_point(jnp.array(Tf)))
     r = c3_assimilation(jnp.array(Tf), jnp.array(Gs), jnp.array(APAR),
                         jnp.array(Vcmax25), jnp.array(TgC))
     a_o, _ = _fvcb_c3_oracle(Tf, Gs, APAR, Vcmax25, TgC)
     assert float(r.a_gross) == pytest.approx(a_o, rel=0.0, abs=1e-12)   # within the shared eps guard
-    assert abs(float(r.a_gross)) < 1e-6                        # gross ~0 at Ci=Gamma*
+    assert float(r.a_gross) == 0.0                             # gross 0 at Ci=Gamma*
     assert float(r.rd) > 0.0
     # The public net rate floors the ~ -Rd un-clipped value to exactly 0.
     An = float(photo.c3_photosynthesis(

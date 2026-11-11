@@ -840,6 +840,13 @@ def _validate_number_convention(payload, tracer_names) -> None:
         )
 
 
+# MultiLayerLandState fields that are numerical CACHES, not prognostic state
+# (ported from legoESM main): never written to a coupled checkpoint and never
+# required by one, so a checkpoint written before the field existed still
+# restores (the cache cold-starts, as the warm-start design allows).
+_LAND_ML_CACHE_FIELDS = ("canopy_x",)
+
+
 class ModelDriver:
     """Top-level simulation driver.
 
@@ -1161,7 +1168,7 @@ class ModelDriver:
                 # Optional fields (TgC, surface_water) may be None — np.asarray
                 # would pickle a 0-d object array into the npz and crash the
                 # load-side jnp.asarray. Skip; restore only replaces saved keys.
-                if _v is None:
+                if _v is None or _f in _LAND_ML_CACHE_FIELDS:
                     continue
                 if _f == "pmodel_acclim":
                     # NamedTuple pytree: np.asarray would stack it into a
@@ -1318,8 +1325,9 @@ class ModelDriver:
                 f"current MultiLayerLandState fields are {sorted(valid)}")
         expected = {f for f in template._fields
                     if getattr(template, f) is not None
-                    and f != "pmodel_acclim"}
-        got = set(popped)
+                    and f != "pmodel_acclim"
+                    and f not in _LAND_ML_CACHE_FIELDS}
+        got = set(popped) - set(_LAND_ML_CACHE_FIELDS)
         if got != expected:
             raise ValueError(
                 "land_ml checkpoint field set does not match the current "

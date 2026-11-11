@@ -450,3 +450,129 @@ def test_optimality_wrapper_fills_the_switches_and_refuses_disagreement():
         validate_config(cfg)
     cfg = copy.deepcopy(base); cfg["physics"].update(OPTIMALITY_SWITCHES["phydro"])
     assert validate_config(cfg).physics["canopy_capacity_scheme"] == "phydro"
+
+
+def test_pmodel_acclimation_key_defaults_validates_and_refuses_inert_use():
+    """physics.pmodel_acclimation defaults to the original 24 h scheme; the
+    subdaily scheme is accepted only where it acts (a P-model switch on the
+    multilayer two-leaf canopy, not the P-hydro arm)."""
+    import copy
+    from legoesm.land.lmip_config import validate_config
+    base = {
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+                    "bulk_scheme": "most", "optimality": "least_cost"},
+        "forcing": {"source": "synthetic", "data_dir": "", "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": "x.nc"},
+        "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
+        "output": {"tapes": [{"name": "d", "freq": "daily", "average": "mean", "vars": ["GPP"]}]},
+    }
+    assert validate_config(copy.deepcopy(base)).physics["pmodel_acclimation"] == "ema_24h"
+    ok = copy.deepcopy(base); ok["physics"]["pmodel_acclimation"] = "subdaily_noon"
+    assert validate_config(ok).physics["pmodel_acclimation"] == "subdaily_noon"
+    bad = copy.deepcopy(base); bad["physics"]["pmodel_acclimation"] = "noon"
+    with pytest.raises(ValueError, match="pmodel_acclimation"):
+        validate_config(bad)
+    inert = copy.deepcopy(base); inert["physics"].pop("optimality")
+    inert["physics"]["pmodel_acclimation"] = "subdaily_noon"
+    with pytest.raises(ValueError, match="silently inert"):
+        validate_config(inert)
+    ph = copy.deepcopy(base); ph["physics"]["optimality"] = "phydro"
+    ph["physics"]["pmodel_acclimation"] = "subdaily_noon"
+    with pytest.raises(ValueError, match="P-hydro"):
+        validate_config(ph)
+    seb = copy.deepcopy(base); seb["physics"]["surface_scheme"] = "simple_seb"
+    seb["physics"].pop("optimality")
+    seb["physics"].update(canopy_capacity_scheme="p_model", stomata_enabled=True,
+                          pmodel_acclimation="subdaily_noon")
+    with pytest.raises(ValueError, match="two-leaf canopy only"):
+        validate_config(seb)
+
+
+def test_canopy_light_response_key_defaults_and_refuses_without_pmodel():
+    import copy
+    from legoesm.land.lmip_config import validate_config
+    base = {
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+                    "bulk_scheme": "most", "optimality": "least_cost"},
+        "forcing": {"source": "synthetic", "data_dir": "", "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": "x.nc"},
+        "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
+        "output": {"tapes": [{"name": "d", "freq": "daily", "average": "mean", "vars": ["GPP"]}]},
+    }
+    assert validate_config(copy.deepcopy(base)).physics["canopy_light_response"] == "clm"
+    ok = copy.deepcopy(base); ok["physics"]["canopy_light_response"] = "pmodel_phi0"
+    assert validate_config(ok).physics["canopy_light_response"] == "pmodel_phi0"
+    bad = copy.deepcopy(base); bad["physics"]["canopy_light_response"] = "smith"
+    with pytest.raises(ValueError, match="canopy_light_response"):
+        validate_config(bad)
+    nopm = copy.deepcopy(base); nopm["physics"].pop("optimality")
+    nopm["physics"]["canopy_light_response"] = "pmodel_phi0"
+    with pytest.raises(ValueError, match="canopy_capacity_scheme='p_model'"):
+        validate_config(nopm)
+
+
+def test_pmodel_chi_stomatal_model_requires_pmodel_capacities_and_no_slope():
+    import copy
+    from legoesm.land.lmip_config import validate_config
+    base = {
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+                    "bulk_scheme": "most", "stomatal_model": "pmodel_chi",
+                    "canopy_capacity_scheme": "p_model", "canopy_g1_source": "table"},
+        "forcing": {"source": "synthetic", "data_dir": "", "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": "x.nc"},
+        "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
+        "output": {"tapes": [{"name": "d", "freq": "daily", "average": "mean", "vars": ["GPP"]}]},
+    }
+    assert validate_config(copy.deepcopy(base)).physics["stomatal_model"] == "pmodel_chi"
+    bad = copy.deepcopy(base); bad["physics"]["canopy_g1_source"] = "p_model"
+    with pytest.raises(ValueError, match="pmodel_chi|g1_source"):
+        validate_config(bad)
+    bad2 = copy.deepcopy(base); bad2["physics"]["canopy_capacity_scheme"] = "prescribed"
+    with pytest.raises(ValueError, match="pmodel_chi"):
+        validate_config(bad2)
+
+
+def test_sandoval_kphio_needs_its_file_and_the_file_needs_sandoval():
+    import copy
+    base = {
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+                    "bulk_scheme": "most", "optimality": "least_cost"},
+        "forcing": {"source": "synthetic", "data_dir": "", "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": "x.nc"},
+        "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
+        "output": {"tapes": [{"name": "d", "freq": "daily", "average": "mean", "vars": ["GPP"]}]},
+    }
+    c = validate_config(copy.deepcopy(base))
+    assert c.physics["pmodel_kphio_method"] == "temperature"
+    assert c.surfdata["sandoval_file"] == ""
+    ok = copy.deepcopy(base); ok["physics"]["pmodel_kphio_method"] = "sandoval"
+    ok["surfdata"]["sandoval_file"] = "sv.nc"
+    assert validate_config(ok).surfdata["sandoval_file"] == "sv.nc"
+    nofile = copy.deepcopy(base); nofile["physics"]["pmodel_kphio_method"] = "sandoval"
+    with pytest.raises(ValueError, match="sandoval_file"):
+        validate_config(nofile)
+    inert = copy.deepcopy(base); inert["surfdata"]["sandoval_file"] = "sv.nc"
+    with pytest.raises(ValueError, match="inert"):
+        validate_config(inert)
+    nopm = copy.deepcopy(base); nopm["physics"].pop("optimality")
+    nopm["physics"]["pmodel_kphio_method"] = "sandoval"
+    nopm["surfdata"]["sandoval_file"] = "sv.nc"
+    with pytest.raises(ValueError, match="silently inert"):
+        validate_config(nopm)
+    typo = copy.deepcopy(base); typo["physics"]["pmodel_kphio_method"] = "sandovl"
+    with pytest.raises(ValueError, match="pmodel_kphio_method"):
+        validate_config(typo)
+
+
+def test_params_block_defaults_empty_and_must_be_a_mapping():
+    assert validate_config(_minimal()).raw["params"] == {}
+    c = _minimal(); c["params"] = {"land.two_leaf_canopy.vcmax_light_frac": 1.0}
+    assert validate_config(c).raw["params"] == {
+        "land.two_leaf_canopy.vcmax_light_frac": 1.0}
+    bad = _minimal(); bad["params"] = [1.0]
+    with pytest.raises(ValueError, match="params must be a mapping"):
+        validate_config(bad)

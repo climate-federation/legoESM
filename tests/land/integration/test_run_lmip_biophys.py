@@ -522,6 +522,15 @@ def test_calibrated_land_rejects_a_contradicting_config(tmp_path):
     ("baseline", {"stomatal_model": "medlyn"}),
     ("least_cost", {"optimality": "least_cost"}),
     ("phydro", {"optimality": "phydro"}),
+    ("least_cost_subdaily", {"optimality": "least_cost",
+                             "pmodel_acclimation": "subdaily_noon"}),
+    # The upgraded P-model of the global comparison (sub-daily acclimation,
+    # P-model phi0 in electron transport, ci from the acclimated xi).
+    ("pmodel_chi_subdaily", {"canopy_capacity_scheme": "p_model",
+                             "canopy_g1_source": "table",
+                             "stomatal_model": "pmodel_chi",
+                             "pmodel_acclimation": "subdaily_noon",
+                             "canopy_light_response": "pmodel_phi0"}),
 ])
 def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
     """The three arms of the global comparison (prescribed / least-cost with
@@ -591,7 +600,19 @@ def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
         assert np.all(np.isnan(n_rub))
     else:
         assert np.all((chi > 0.0) & (chi <= 1.0))
-        assert np.nanmin(n_rub) > 0.0
+        # Leaf N follows the acclimated capacity.  Under sub-daily acclimation
+        # a polar-night column (here 67.5 N in January) sees no noon light, so
+        # its optimum Vcmax25 - and with it the Rubisco N - is exactly 0, as in
+        # pyrealm (coordination: Vcmax proportional to absorbed light); the
+        # 24 h running means never reach zero.
+        # (The N tape is taken from the post-step state, the Vcmax tape from
+        # the traits the canopy used in the step, so on the step a window
+        # closes they can differ; compare N with latitude, not with that tape.)
+        lat = ds["lat"].values
+        assert np.nanmin(n_rub) >= 0.0
+        assert np.all(n_rub[:, np.abs(lat) < 60.0, :] > 0.0)
+        if extra.get("pmodel_acclimation", "ema_24h") == "ema_24h":
+            assert np.nanmin(n_rub) > 0.0
     if arm == "phydro":
         assert np.all(psil <= ds["pmodel_psi_soil"].values + 1e-9)
         np.testing.assert_allclose(ds["pmodel_vcmax25"].values,
@@ -662,3 +683,167 @@ def test_co2_file_reaches_photosynthesis(tmp_path):
     assert np.nansum(out[600.0]["GPP"].values) > np.nansum(out[300.0]["GPP"].values)
     assert not np.allclose(out[600.0]["pmodel_chi"].values,
                            out[300.0]["pmodel_chi"].values, equal_nan=True)
+
+
+def test_sandoval_kphio_and_params_block_reach_the_global_run(tmp_path):
+    """physics.pmodel_kphio_method='sandoval' (inputs from surfdata.sandoval_file)
+    and a config ``params:`` block both change the simulated GPP of the global
+    driver, so neither can be silently inert; an unknown parameter is refused."""
+    import yaml
+    import xarray as xr
+    from legoesm.land.lmip_config import validate_config
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    lat = np.arange(-89.75, 90.0, 0.5); lon = np.arange(-179.75, 180.0, 0.5)
+    ny, nx = lat.size, lon.size
+    sv = tmp_path / "sv.nc"
+    xr.Dataset({"aridity_index": (("lat", "lon"), np.full((ny, nx), 3.0)),
+                "mgdd0": (("lat", "lon"), np.full((ny, nx), 12.0))},
+               coords={"lat": lat, "lon": lon}).to_netcdf(sv)
+
+    def run(name, physics_extra, surf_extra=None, params=None):
+        cfg = {
+            "grid": {"type": "latlon", "resolution": 4},
+            "physics": {"land_mode": "multilayer",
+                        "surface_scheme": "two_leaf_canopy", "bulk_scheme": "most",
+                        "canopy_capacity_scheme": "p_model",
+                        "canopy_g1_source": "table",
+                        "stomatal_model": "pmodel_chi",
+                        "pmodel_acclimation": "subdaily_noon",
+                        "canopy_light_response": "pmodel_phi0",
+                        "canopy_vcmax_profile": "coordination", **physics_extra},
+            "forcing": {"source": "synthetic", "data_dir": "",
+                        "year_start": 2000, "year_end": 2000},
+            "surfdata": {"path": str(sd), **(surf_extra or {})},
+            "time": {"dt": 3600.0, "n_steps": 48, "start_doy": 0.0},
+            "output": {"tapes": [{"name": "step", "freq": "step",
+                                  "average": "inst", "vars": ["GPP"]}]},
+        }
+        if params is not None:
+            cfg["params"] = params
+        cfg = validate_config(cfg).raw
+        p = tmp_path / f"{name}.yaml"
+        p.write_text(yaml.safe_dump(cfg, sort_keys=False))
+        out = tmp_path / name
+        assert _run_config(mod, p, out) == 0
+        return np.asarray(xr.open_dataset(out / "lmip_biophys.step.nc")["GPP"].values)
+
+    base = run("temp", {})
+    sand = run("sand", {"pmodel_kphio_method": "sandoval"},
+               {"sandoval_file": str(sv)})
+    frac = run("frac", {}, params={"land.two_leaf_canopy.vcmax_light_frac": 0.5})
+    for g in (base, sand, frac):
+        assert np.all(np.isfinite(g)) and g.max() > 0.0
+    assert np.max(np.abs(sand - base)) > 1e-3 * base.max()
+    assert np.max(np.abs(frac - base)) > 1e-3 * base.max()
+    cfg_bad = tmp_path / "bad.yaml"
+    raw = yaml.safe_load((tmp_path / "frac.yaml").read_text())
+    raw["params"] = {"land.two_leaf_canopy.no_such_field": 1.0}
+    cfg_bad.write_text(yaml.safe_dump(raw, sort_keys=False))
+    with pytest.raises(SystemExit, match="unknown parameter"):
+        _run_config(mod, cfg_bad, tmp_path / "bad")
+
+
+def test_column_sharded_run_matches_the_unsharded_run(tmp_path):
+    """--column-devices 4 (four forced CPU devices) splits the 32 columns into
+    blocks; columns are independent, so the result equals the unsharded run to
+    round-off: machine precision on the first steps, and growing only through
+    the iterative canopy solver (measured <= 3e-8 relative over 48 steps)."""
+    import os
+    import subprocess
+    import sys
+    import yaml
+    import xarray as xr
+    from legoesm.land.lmip_config import validate_config
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    cfg = validate_config({
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+                    "bulk_scheme": "most", "canopy_capacity_scheme": "p_model",
+                    "canopy_g1_source": "table", "stomatal_model": "pmodel_chi",
+                    "pmodel_acclimation": "subdaily_noon",
+                    "canopy_light_response": "pmodel_phi0"},
+        "forcing": {"source": "synthetic", "data_dir": "",
+                    "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": str(sd)},
+        "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
+        "output": {"tapes": [{"name": "step", "freq": "step", "average": "inst",
+                              "vars": ["GPP", "lhflx", "shflx", "T_sfc"]}]},
+    }).raw
+    p = tmp_path / "c.yaml"; p.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    outs = {}
+    for n in (1, 4):
+        env = dict(os.environ, JAX_PLATFORMS="cpu", JAX_ENABLE_X64="1",
+                   XLA_FLAGS=f"--xla_force_host_platform_device_count={n}")
+        out = tmp_path / f"d{n}"
+        r = subprocess.run([sys.executable, str(_DRIVER), "--config", str(p),
+                            "--output-dir", str(out), "--column-devices", str(n)],
+                           env=env, capture_output=True, text=True, timeout=1500)
+        assert r.returncode == 0, r.stderr[-3000:]
+        if n == 4:
+            assert "column sharding: 32 columns over 4 devices" in r.stdout
+        outs[n] = xr.open_dataset(out / "lmip_biophys.step.nc")
+    for v in ("GPP", "lhflx", "shflx", "T_sfc"):
+        a, b = outs[1][v].values, outs[4][v].values
+        scale = np.max(np.abs(a)) + 1e-30
+        assert np.max(np.abs(a[:3] - b[:3])) / scale < 1e-12, v
+        assert np.max(np.abs(a - b)) / scale < 1e-6, v
+
+
+def test_ci_ca_is_taped_only_where_the_canopy_has_leaves(tmp_path):
+    """Leafless steps (here: bare columns, LAI 0) are treated like night in the
+    Ci/Ca tape: ci_ca_*_day and leafy_day_frac are 0 there, while on vegetated
+    columns leafy_day_frac equals day_frac and the daytime ci/ca is
+    physiological (typically well below 1), not the pinned Ci = Ca of a
+    leafless column."""
+    import yaml
+    import xarray as xr
+    from legoesm.land.lmip_config import validate_config
+    mod = _load_driver()
+    nlat, nlon, nlev = 8, 16, 7
+    lat = np.linspace(-85, 85, nlat); lon = np.linspace(0, 337.5, nlon)
+    pft = np.zeros((1, N_PFT_CLM5, nlat, nlon))
+    bare = np.zeros((nlat, nlon), bool); bare[:, : nlon // 2] = True
+    pft[0, 0][bare] = 100.0                      # bare-ground PFT
+    pft[0, 4][~bare] = 100.0
+    lai = np.zeros((12, N_PFT_CLM5, nlat, nlon)); lai[:, 4] = 4.0
+    soil = lambda v: np.full((nlev, nlat, nlon), v)
+    sd = tmp_path / "sd.nc"
+    write_surfdata(
+        str(sd), lat=lat, lon=lon, soil_dz=np.full(nlev, 0.2),
+        sand_pct=soil(40.0), clay_pct=soil(20.0), organic=soil(5.0),
+        bulk_density=soil(1300.0), soil_color=np.full((nlat, nlon), 8.0),
+        year=np.array([2015.0]), f_land=np.full((1, nlat, nlon), 100.0),
+        f_lake=np.zeros((1, nlat, nlon)), f_glacier=np.zeros((1, nlat, nlon)),
+        pft_frac=pft, monthly_lai=lai, monthly_sai=np.zeros_like(lai),
+        monthly_height_top=np.zeros_like(lai), monthly_height_bot=np.zeros_like(lai))
+    cfg = validate_config({
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+                    "bulk_scheme": "most", "optimality": "least_cost"},
+        "forcing": {"source": "synthetic", "data_dir": "",
+                    "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": str(sd)},
+        "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
+        "output": {"tapes": [{"name": "step", "freq": "step", "average": "inst",
+                              "vars": ["ci_ca_sun_day", "ci_ca_shade_day", "day_frac",
+                                       "leafy_day_frac", "LAI"]}]},
+    }).raw
+    p = tmp_path / "c.yaml"; p.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    assert _run_config(mod, p, tmp_path / "out") == 0
+    ds = xr.open_dataset(tmp_path / "out" / "lmip_biophys.step.nc")
+    lai_t = ds["LAI"].values
+    leafless = lai_t <= 1e-6
+    assert leafless.any() and (~leafless).any()
+    day, lday = ds["day_frac"].values, ds["leafy_day_frac"].values
+    assert np.all(lday[leafless] == 0.0)
+    np.testing.assert_array_equal(lday[~leafless], day[~leafless])
+    for v in ("ci_ca_sun_day", "ci_ca_shade_day"):
+        c = ds[v].values
+        assert np.all(c[leafless] == 0.0), v
+        # Physiological by day: a respiring leaf at dawn/dusk (An < 0) sits
+        # slightly above Ca, so the bound is the solver's 1.5 Ca ceiling, and
+        # the typical (median) value is well below 1, unlike the pinned 1.
+        leafy_day = (~leafless) & (day == 1.0)
+        assert leafy_day.any(), v
+        assert np.all(c[leafy_day] <= 1.5) and np.median(c[leafy_day]) < 0.9, v
