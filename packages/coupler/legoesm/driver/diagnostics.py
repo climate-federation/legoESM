@@ -1015,7 +1015,9 @@ class DiagnosticCollector:
             p_full,
             jnp.reshape(q_v, (ncol, nlev)),
             dp,
-            self._cloud_config_for(cloud_fraction),
+            # Cover only: the in-cloud optic never moves the fraction.
+            self._cloud_config_for(cloud_fraction)._replace(
+                cloud_optics_inhomogeneity="constant", cloud_inhomogeneity_factor=1.0),
             q_cloud=jnp.reshape(q_c, (ncol, nlev)),
             q_ice=q_ice_col,
             **self._cam6_cloud_kwargs(
@@ -1750,6 +1752,7 @@ class DiagnosticCollector:
         zg=None,
         tos=None,
         wap=None,
+        o3=None,
         flux_interval_days=None,
         include_state=True,
     ) -> bool:
@@ -1971,6 +1974,7 @@ class DiagnosticCollector:
         tas_field = None if tas is None else np.asarray(tas, dtype=_f64)
         ts_field = None if ts is None else np.asarray(ts, dtype=_f64)
         q_v_np = None if q_v is None else np.asarray(q_v, dtype=_f64)
+        o3_np = None if o3 is None else np.asarray(o3, dtype=_f64)
         q_c_np = None if q_c is None else np.asarray(q_c, dtype=_f64)
         q_i_np = None if q_i is None else np.asarray(q_i, dtype=_f64)
         u_east_np = None if u_east is None else np.asarray(u_east, dtype=_f64)
@@ -2037,6 +2041,7 @@ class DiagnosticCollector:
             ("tos", tos_np, (_ncol,)),
             ("zg", zg_np, (_ncol, _nlev)),
             ("q_v", q_v_np, (_ncol, _nlev)),
+            ("o3", o3_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
             ("u_east", u_east_np, (_ncol, _nlev)),
@@ -2123,6 +2128,15 @@ class DiagnosticCollector:
                 r = self._regrid_to_latlon_2d(cwv_field)
                 if r is not None:
                     fields_2d['prw'] = r
+            if include_state and o3_np is not None:
+                # IFS Cariolle ozone tracer column [DU] (vote O3a): the same
+                # column integral as prw, over kg/m2 per Dobson unit.
+                toz = np.asarray(column_water_vapor(
+                    o3_np, p_s_np, self.dsigma, dp=self._dp(p_s_np))) / (
+                    _c.DU_molec_m2 * _c.M_o3 / _c.N_A)
+                r = self._regrid_to_latlon_2d(toz)
+                if r is not None:
+                    fields_2d['toz_ifs'] = r
             # Total cloud cover: the SAME shared reduction the cube/lat-lon
             # ``collect`` path uses, so the MPAS lane cannot report a
             # different cloud cover for an identical state.  Skipped (not
@@ -2241,6 +2255,7 @@ class DiagnosticCollector:
                 # continuity guess made downstream from monthly-mean winds.
                 ('wap', None if wap is None else np.asarray(wap)),
                 ('zg', zg_np),
+                ('o3_ifs', o3_np),
             ):
                 if _src is None or not include_state:
                     continue

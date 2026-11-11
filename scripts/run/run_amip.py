@@ -135,6 +135,7 @@ def _argv_federates(argv: list[str]) -> bool:
 if "--multicontroller" not in sys.argv:
     maybe_init_jax_distributed(federate=_argv_federates(sys.argv))
 
+from legoesm.atmosphere.physics.turbulence.config import refuse_retired_turbulence
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
@@ -1063,10 +1064,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["constant", "two_region"], default="constant",
                         help="Sub-grid cloud-optics inhomogeneity scheme: "
                              "'constant' (Cahalan scalar chi, legacy default) or "
-                             "'two_region' (TAU-DEPENDENT Shonk-Hogan 2008 optic "
-                             "that breaks the plane-parallel tau-saturation a "
-                             "scalar cannot -- a thick cloud is reduced MORE than "
-                             "a thin one).")
+                             "'two_region' (ecRad 49r1 McICA gamma-PDF scaling of "
+                             "each max_random subcolumn cell; needs "
+                             "--cloud-vertical-overlap-optics max_random).")
     parser.add_argument("--cloud-vertical-overlap-optics",
                         dest="cloud_vertical_overlap_optics",
                         choices=["none", "max_random", "mcica"], default="none",
@@ -1120,8 +1120,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "0.0 %% cover against 35-40 %% observed.")
     parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
                         help="Fractional std-dev of in-cloud water for the "
-                             "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
-                             "=> thinner leaking sub-column => lower albedo). "
+                             "two_region optic [0,1] (Shonk-Hogan ~0.75; width "
+                             "of the gamma PDF of the subcolumn cells). "
                              "None=CloudConfig default 0.75.")
     parser.add_argument("--use-clubb-cloud-fraction",
                         action=argparse.BooleanOptionalAction, default=False,
@@ -1535,6 +1535,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Bechtold fields may differ from their defaults. "
                              "Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent}.")
+    parser.add_argument("--ifs-methox",
+                        dest="ifs_methox",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.ifs_methox,
+                        help="OpenIFS 49r1 methane-oxidation water source "
+                             "(METHOX) with the run's CH4. Default "
+                             f"{_EXPERIMENT_DEFAULTS.ifs_methox}.")
+    parser.add_argument("--ifs-ozone-chem",
+                        dest="ifs_ozone_chem",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.ifs_ozone_chem,
+                        help="OpenIFS 49r1 Cariolle ozone chemistry on an "
+                             "advected o3_ifs tracer (not fed to radiation). "
+                             "Default "
+                             f"{_EXPERIMENT_DEFAULTS.ifs_ozone_chem}.")
     parser.add_argument("--bechtold-use-ifs-subcloud-evap",
                         dest="bechtold_use_ifs_subcloud_evap",
                         action=argparse.BooleanOptionalAction,
@@ -2848,6 +2863,7 @@ def _default_discretization_for_grid(grid_type: str) -> str:
 
 
 def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+    refuse_retired_turbulence(args.turbulence, "run_amip --turbulence")
     # Defensive boundary: --grid-type/--discretization carry a None sentinel
     # default (explicitness tracking for the --truncation conflict guard in
     # _postprocess_args). A caller that skips _postprocess_args must still get
@@ -3303,6 +3319,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
         bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
         bechtold_use_ifs_ascent=args.bechtold_use_ifs_ascent,
+        ifs_methox=args.ifs_methox,
+        ifs_ozone_chem=args.ifs_ozone_chem,
         bechtold_use_ifs_subcloud_evap=args.bechtold_use_ifs_subcloud_evap,
         bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
         bechtold_dx_m=args.bechtold_dx_m,

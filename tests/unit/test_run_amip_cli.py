@@ -1446,7 +1446,16 @@ def test_surface_tiled_unsupported_turbulence_rejected():
         cfg.validate_strict()
 
 
-@pytest.mark.parametrize("scheme", ["louis", "clubb_lite", "clubb"])
+def test_run_amip_refuses_retired_clubb_lite():
+    """clubb_lite is the LES-correction campaign's stand-in only."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "clubb_lite"]), parser)
+    with pytest.raises(ValueError, match="'clubb'"):
+        build_config_from_args(args)
+
+
+@pytest.mark.parametrize("scheme", ["louis", "clubb"])
 def test_surface_tiled_accepts_flux_consuming_schemes(scheme):
     """--surface-tiled validates with EVERY kernel that accepts the injected
     tiled surface_flux=(tau_x, tau_y, shflx, lhflx, ustar) BC: louis and the
@@ -1774,12 +1783,16 @@ def test_aimip_classical_checkpoint_flag():
 
 
 def _serialise_aimip_defaults(tmp_path):
-    """Write a default AIMIPClassicalParams checkpoint for the override tests."""
+    """Write a default AIMIPClassicalParams checkpoint for the override tests,
+    with the knob-range record the loader requires (as the trainers write it)."""
     import equinox as eqx
+    from legoesm.ml.checkpoint_io import write_knob_record
     from legoesm.training.aimip_params import AIMIPClassicalParams
 
     ckpt = tmp_path / "epoch_defaults.eqx"
-    eqx.tree_serialise_leaves(str(ckpt), AIMIPClassicalParams.from_defaults())
+    params = AIMIPClassicalParams.from_defaults()
+    eqx.tree_serialise_leaves(str(ckpt), params)
+    write_knob_record(params, ckpt)
     return str(ckpt)
 
 
@@ -2482,6 +2495,8 @@ def test_config_yaml_round_trips_authoritative_values():
     # the raw grid-mean path, which two_region (the old row) would thin.
     assert cfg.cloud_optics_inhomogeneity == "constant"
     assert cfg.cloud_inhomogeneity_factor == 1.0
+    # CAM6 McICA (user decision 2026-09-25): one sampled subcolumn per g-point.
+    assert cfg.cloud_vertical_overlap_optics == "mcica"
     _assert_optics_thinning(cfg, thinned=False)
 
 
@@ -2489,9 +2504,11 @@ def _assert_optics_thinning(cfg, *, thinned: bool):
     """Build the lane's cloud config from ``cfg`` and measure the thinning.
 
     A saturated, cloudy, warm column: with no inhomogeneity factor the liquid
-    water path handed to radiation is EXACTLY ``q_c * dp / g``; two_region at
-    fsd 1.0 thins it.  Asserting the effect, not the field, is what makes the
-    production pin non-vacuous against a renamed or ignored selector.
+    water path handed to radiation is EXACTLY ``q_c * dp / g``.  two_region
+    thins per subcolumn cell in the radiation lane, so here it must leave the
+    path raw and REFUSE a caller that does not apply that scaling.  Asserting
+    the effect, not the field, is what makes the production pin non-vacuous
+    against a renamed or ignored selector.
     """
     import jax.numpy as jnp
     from legoesm import constants
@@ -2514,20 +2531,25 @@ def _assert_optics_thinning(cfg, *, thinned: bool):
     q_v = jnp.full((1, 4), 8.0e-3)
     q_c = jnp.full((1, 4), 4.0e-4)
     p_half = jnp.array([[65000.0, 75000.0, 85000.0, 92500.0, 97500.0]])
-    props = compute_cloud_properties(
-        T=T, p_full=p_full, q_v=q_v, dp=dp, config=cloud_cfg, q_cloud=q_c,
-        q_ice=jnp.zeros_like(q_c),
-        cloud_fraction_override=jnp.full((1, 4), 0.5),
-        # cam6_clubb's tropopause switch needs these; harmless to the others.
-        lat=jnp.zeros((1,)), p_half=p_half,
-        # cam6_clubb's aist top cut reads the run's resolved CLUBB config.
-        clubb_config=resolved_clubb_config(turbulence_config_for(cfg)))
+    def props(**kw):
+        return compute_cloud_properties(
+            T=T, p_full=p_full, q_v=q_v, dp=dp, config=cloud_cfg, q_cloud=q_c,
+            q_ice=jnp.zeros_like(q_c),
+            cloud_fraction_override=jnp.full((1, 4), 0.5),
+            # cam6_clubb's tropopause switch needs these; harmless to the others.
+            lat=jnp.zeros((1,)), p_half=p_half,
+            # cam6_clubb's aist top cut reads the run's resolved CLUBB config.
+            clubb_config=resolved_clubb_config(turbulence_config_for(cfg)), **kw)
     raw = q_c * dp / constants.g
-    ratio = float(jnp.sum(props.lwp) / jnp.sum(raw))
     if thinned:
-        assert ratio < 0.95, f"expected two_region thinning, got ratio {ratio}"
+        assert cloud_cfg.cloud_optics_inhomogeneity == "two_region"
+        with pytest.raises(ValueError, match="two_region"):
+            props()
+        p = props(subcolumn_inhomogeneity=True)
     else:
-        assert ratio == 1.0, f"expected NO thinning, got ratio {ratio}"
+        p = props()
+    ratio = float(jnp.sum(p.lwp) / jnp.sum(raw))
+    assert ratio == 1.0, f"expected the raw path, got ratio {ratio}"
 
 
 def test_sundqvist_l36_deck_still_round_trips():
@@ -2583,7 +2605,7 @@ def test_sundqvist_l36_deck_still_round_trips():
         turbulence_config_for(cfg)).liquid_partition is False
     assert _resolve_microphysics(cfg)[1].liquid_from_closure is False
     # Old configuration KEEPS the in-cloud inhomogeneity thinning (user
-    # decision 2026-09-25): two_region at fsd 1.0, and it measurably thins.
+    # decision 2026-09-25): two_region at fsd 1.0, now the subcolumn lane's.
     assert cfg.cloud_optics_inhomogeneity == "two_region"
     assert cfg.cloud_fsd == 1.0
     _assert_optics_thinning(cfg, thinned=True)
@@ -6087,6 +6109,38 @@ def test_large_yeager_width_flags_thread_to_config():
     assert cfg.surface_large_yeager_neutral_width == 0.0
     assert cfg.surface_large_yeager_dthv_width == 0.02
     assert cfg.surface_large_yeager_cd_cutoff_width == 0.25
+
+
+def test_ifs_methox_round_trips():
+    """--ifs-methox reaches ExperimentConfig, the pipeline switch and the AMIP
+    flat round-trip."""
+    from legoesm.driver.config import ExperimentConfig
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--ifs-methox"]), parser))
+    assert on.ifs_methox is True
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical"]), parser))
+    assert off.ifs_methox is False
+    for flag in (True, False):
+        cfg = ExperimentConfig(ifs_methox=flag)
+        assert ExperimentConfig.from_amip_config(cfg.to_amip_config()).ifs_methox is flag
+
+
+def test_ifs_ozone_chem_round_trips():
+    """--ifs-ozone-chem reaches ExperimentConfig and the AMIP round-trip."""
+    from legoesm.driver.config import ExperimentConfig
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--ifs-ozone-chem"]), parser))
+    assert on.ifs_ozone_chem is True
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical"]), parser))
+    assert off.ifs_ozone_chem is False
+    for flag in (True, False):
+        cfg = ExperimentConfig(ifs_ozone_chem=flag)
+        assert ExperimentConfig.from_amip_config(
+            cfg.to_amip_config()).ifs_ozone_chem is flag
 
 
 def test_bechtold_snow_refill_width_round_trip():

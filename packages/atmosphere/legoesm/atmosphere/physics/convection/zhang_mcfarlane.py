@@ -370,5 +370,5 @@ def cam6_detrain_condensate(T: jax.Array, dlf: jax.Array,
         4.0 * _DETRAIN_PI * _DETRAIN_R_LIQ_M**3 * _DETRAIN_RHO_LIQ)
     dN_i = 3.0 * (dlf_pos * dum1) / (
         4.0 * _DETRAIN_PI * _DETRAIN_R_ICE_M**3 * _DETRAIN_RHO_ICE)
-    dT = dlf * dum1 * constants.L_f / constants.c_pd
+    dT = dlf * dum1 * constants.L_f / constants.c_pd  # latent-ok: CAM6 ZM oracle constant
     return dT, dq_c, dq_i, dN_c, dN_i

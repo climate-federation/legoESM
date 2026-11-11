@@ -38,6 +38,8 @@ _EXPECTED_DIFF = {
     # under it, and ecRad's own CAMS aerosol climatology
     "radiation", "aerosol_forcing", "rrtmgp_overhead_layer",
     "ecrad_ifs_aerosol_file",
+    # WMS non-orographic drag + METHOX (wms_ozone votes G1, M1-M2)
+    "gravity_wave_drag", "ifs_methox", "ifs_ozone_chem",
 }
 
 
@@ -109,3 +111,11 @@ def test_run_amip_refuses_resolved_clouds_without_cloudsc(micro):
                       "--microphysics", micro])
     with pytest.raises(SystemExit):
         run_amip._postprocess_args(a, p, [])
+
+
+def test_deck_selects_wms_drag_and_methox():
+    """Votes G1a/M2a: composite CAM6 orographic + 49r1 WMS, METHOX on."""
+    cfg = _cfg(_IFS)
+    assert cfg.gravity_wave_drag == "mcfarlane+ifs_wms"
+    assert cfg.ifs_methox is True
+    assert cfg.ifs_ozone_chem is True

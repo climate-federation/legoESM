@@ -38,7 +38,7 @@ echo "  rc=$?"
 echo "=== end to end: one scored case still runs ==="
 $PY scripts/run/run_scm_les_turbulence_tuning.py \
     --cases "cbl:$LES_REF_DIR/cbl" --outdir /tmp/merge_smoke_$SLURM_JOB_ID \
-    --nlev 48 --skip-tuning --schemes clubb_lite,louis \
+    --nlev 48 --skip-tuning --schemes louis \
     --surface-flux-to-closure 2>&1 \
   | grep -vE "slow_operation|^E[0-9]{4}|XLA has|If you|^$" | tail -12
 echo "  rc=$?"

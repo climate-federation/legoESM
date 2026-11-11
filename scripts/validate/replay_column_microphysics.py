@@ -107,12 +107,12 @@ def replay_cells(state, cells, cfg, dt, *, perturb_key=None,
     perturbation attribution).
     """
     import jax.numpy as jnp
-    from legoesm import constants
     from legoesm.atmosphere.physics._shared import (
         compute_layer_dz,
         compute_rho,
     )
     from legoesm.atmosphere.physics.microphysics._warm_rain import (
+        drain_l_over_cp,
         hard_saturation_drain,
     )
     from legoesm.atmosphere.physics.microphysics.morrison import (
@@ -191,7 +191,7 @@ def replay_cells(state, cells, cfg, dt, *, perturb_key=None,
     _count_nonfinite("drain_dq", dq_drain, ledger)
     res["drain_max_dq_g_kg"] = float(np.max(dq_drain) * 1e3)
     res["drain_max_heating_K"] = float(
-        np.max(dq_drain) * constants.L_v / constants.c_pd)
+        np.max(dq_drain * np.asarray(drain_l_over_cp(T_j, False))))
 
     res["nonfinite"] = [{"field": k, "count": n} for k, n in ledger]
     res["deltas"] = deltas

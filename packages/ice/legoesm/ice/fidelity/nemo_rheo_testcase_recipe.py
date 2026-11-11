@@ -691,6 +691,7 @@ def _step_ice_rheo_card_impl(
         ponds_active=card.ponds,
         entry_intensive_contents=state.contents,
         contents_are_intensive=True,
+        negative_area_ramp_width=0.0,  # NEMO hard WHERE(pa_i<0) (icevar.F90:836)
     )
 
     entry_area = _intensive(state.contents, "a_i")

@@ -47,6 +47,7 @@ from legoesm.land.surface_scheme import TwoLeafCanopyConfig
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.multilayer_land import (
     init_multilayer_land_state, step_multilayer_land_with_diagnostics)
+from legoesm.thermo import latent_heat_vaporization
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 from run_ec_site import (  # noqa: E402
@@ -154,7 +155,7 @@ def run_evaluation(site: str, out_path: str, driver_dir: str,
 
     obs = {k: np.asarray(d.obs[k]).ravel()[sl] for k in d.obs}
     # Energy-balance-closure-corrected turbulent fluxes (FLUXNET ET_CORR/H_CORR);
-    # ET_CORR is mm/day -> W/m2 via L_v/86400.  Mask only clearly-corrupt DAYTIME
+    # ET_CORR is mm/day -> W/m2 via L_v(TA)/86400 at the site air temperature.  Mask only clearly-corrupt DAYTIME
     # closure ratios (ET>1) so nighttime (ratio undefined at ET~0) is not masked.
     raw = xr.open_dataset(nc)
     def rawslice(name):
@@ -170,7 +171,9 @@ def run_evaluation(site: str, out_path: str, driver_dir: str,
     hcorr = _inrange(rawslice("H_CORR"), _H_RANGE_W_M2)
     ratio = np.where(et > 1.0, etc / np.maximum(et, 1e-6), np.nan)
     bad = np.isfinite(ratio) & ((ratio < 0.3) | (ratio > 3.0))
-    le_obs_corr = np.where(bad, np.nan, etc) * constants.L_v / 86400.0
+    ta_kelvin = np.asarray(d.forcing.T_lowest).ravel()[sl]
+    le_obs_corr = (np.where(bad, np.nan, etc)
+                   * np.asarray(latent_heat_vaporization(ta_kelvin)) / 86400.0)
     h_obs_corr = np.where(bad, np.nan, hcorr)
 
     ds = xr.Dataset(

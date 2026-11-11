@@ -317,8 +317,8 @@ def condensation_growth_coeff_G(
     faithful to the published closed-form S_max derivation.
     """
     vapor_term = constants.rho_water * constants.R_v * T / (e_s * constants.D_vapor)
-    thermal_term = (constants.rho_water * constants.L_v / (constants.k_air * T)
-                    * (constants.L_v / (constants.R_v * T) - 1.0))
+    thermal_term = (constants.rho_water * constants.L_v / (constants.k_air * T)  # latent-ok: CAM6 ndrop/ARG oracle constant
+                    * (constants.L_v / (constants.R_v * T) - 1.0))  # latent-ok: CAM6 ndrop/ARG oracle constant
     return 1.0 / (vapor_term + thermal_term)
 
 
@@ -349,12 +349,12 @@ def arg_max_supersaturation(
 
     A = kohler_curvature_A(T)                                     # F
     # alpha [1/m]: gravitational settling of supersaturation.
-    alpha = (constants.g * constants.L_v
+    alpha = (constants.g * constants.L_v  # latent-ok: CAM6 ndrop/ARG oracle constant
              / (constants.c_pd * constants.R_v * T ** 2.0)
              - constants.g / (constants.R_d * T))
     # gamma [m^3/kg]: change in supersaturation per unit condensed water.
     gamma = (constants.R_v * T / e_s
-             + constants.epsilon * constants.L_v ** 2.0
+             + constants.epsilon * constants.L_v ** 2.0  # latent-ok: CAM6 ndrop/ARG oracle constant
              / (constants.c_pd * p * T))
     G = condensation_growth_coeff_G(T, e_s)                       # F
 
@@ -707,7 +707,7 @@ def cam6_activate_single_updraft(wbar, tair, rhoair, na, volume, hygro, sigmag,
     t0 = constants.T_ref_cam6_activation
     aten = cam6_aten()
     rhoh2o = constants.rho_water
-    latvap, rh2o = constants.L_v, constants.R_v
+    latvap, rh2o = constants.L_v, constants.R_v  # latent-ok: CAM6 ndrop/ARG oracle constant
 
     pres = constants.R_d * rhoair * tair
     diff0 = (_CAM6_DIFF0_COEFF * (_CAM6_P0_PA / pres)
