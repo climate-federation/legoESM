@@ -61,7 +61,7 @@ def test_silent_where_zonal_line_already_best():
 
 @pytest.mark.parametrize("over", [dict(), dict(n_lat=1536), dict(nlev=40),
                                   dict(mode="weak"), dict(A_h_from_mesh=False),
-                                  dict(backend="cpu")])
+                                  dict(backend="cpu"), dict(dt=1200.0)])
 def test_unmeasured_outside_table(over):
     n = 96 if not over else 128
     assert "unmeasured" in advise(n, "float32", JAC, **over)

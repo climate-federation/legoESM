@@ -253,7 +253,7 @@ ADVISORY_RATIO = 0.95
 
 def tripole_solver_advisory(*, tripole, mode, n_lat, n_lon, nlev, A_h_from_mesh,
                             n_devices, precision, variant, precond, iters,
-                            backend="gpu"):
+                            backend="gpu", dt=600.0):
     """One-line hint when the other measured tripole solver is faster here, else None.
 
     Advisory only. Outside the measured grid/counts/precisions: "unmeasured"
@@ -264,7 +264,8 @@ def tripole_solver_advisory(*, tripole, mode, n_lat, n_lon, nlev, A_h_from_mesh,
     if not tripole or current is None:
         return None
     row = TRIPOLE_SOLVER_RATIO.get(precision, {})
-    if ((mode, n_lat, n_lon, nlev, A_h_from_mesh) != ("strong", 3072, 4352, 75, True)
+    if ((mode, n_lat, n_lon, nlev, A_h_from_mesh, dt)
+            != ("strong", 3072, 4352, 75, True, 600.0)
             or backend != "gpu" or n_devices not in row):
         return (f"[solver advisory] {current}: unmeasured for this grid / "
                 f"{n_devices} devices / {precision} / {backend}.")
@@ -540,7 +541,7 @@ def main() -> int:
         nlev=args.nlev, A_h_from_mesh=args.A_h_from_mesh, n_devices=args.n_devices,
         precision=_prec_label, variant=args.pcg_variant, precond=args.pcg_precond,
         iters=args.pcg_fixed_iters,
-        backend=jax.default_backend())
+        backend=jax.default_backend(), dt=args.dt)
     if _advice and jax.process_index() == 0:
         print(_advice, flush=True)
 
