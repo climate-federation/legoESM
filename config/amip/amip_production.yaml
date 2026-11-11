@@ -317,6 +317,9 @@ zm_capelmt: 70.0            # deep-convection CAPE threshold [J/kg]
 # CAM's hard switch), read by the CLUBB macmic sub-step's detrainment booking.
 zm_detrain_phase_width_K: 0.1              # liquid/ice ramp corners [K]
 zm_detrain_number_width_kgkg_s: 1.0e-12    # max(0, dlf) in the number source [kg/kg/s]
+# ZM trigger width (RULE 5; value = the scheme default; 0 = CAM's hard switch):
+# the closure mass flux ramps from 0 at zm_capelmt to CAM's at zm_capelmt + width.
+zm_trigger_width_J_kg: 10.0
 zm_transport_cloud_tracers: true  # ZM convtran of carried cloud/precip water + numbers (CAM6)
 
 # ---- turbulence ---------------------------------------------------------------

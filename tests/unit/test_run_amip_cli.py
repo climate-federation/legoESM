@@ -2634,6 +2634,7 @@ _SMOOTH_BECHTOLD_LEAF_PRE2249 = {
     'parcel_dq': 0.001, 'precip_efficiency': 0.8,
     'precip_split_scheme': 'constant', 'rain_vapor_sink': 'formation',
     'rhebc_land': 0.75, 'rhebc_land_deep': 0.7, 'rprcon': 0.0014,
+    'snow_refill_width_kg_m2_s': 1e-08,
     'stochastic_amplitude': 0.5, 'stochastic_decorrelation': 7200.0,
     'subcloud_evap_scale': 1.0, 'subsidence_solve': 'implicit_flux',
     'tau_M_u_relax': 1800.0, 'tau_bl': 3600.0, 'theta_implicit': 1.0,
@@ -6224,3 +6225,44 @@ def test_ifs_ozone_chem_round_trips():
         cfg = ExperimentConfig(ifs_ozone_chem=flag)
         assert ExperimentConfig.from_amip_config(
             cfg.to_amip_config()).ifs_ozone_chem is flag
+
+
+def test_bechtold_snow_refill_width_round_trip():
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-snow-refill-width-kg-m2-s", "0.0"]), parser))
+    assert cfg.bechtold_snow_refill_width_kg_m2_s == 0.0
+    assert _resolve_convection(cfg)[1].snow_refill_width_kg_m2_s == 0.0
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_snow_refill_width_kg_m2_s is None
+    assert (_resolve_convection(d)[1].snow_refill_width_kg_m2_s
+            == BechtoldConfig().snow_refill_width_kg_m2_s)
+    for bad in (-1.0, float("nan"), 1.0e-40, True):
+        with pytest.raises(ValueError, match="bechtold_snow_refill_width_kg_m2_s"):
+            ExperimentConfig(convection="bechtold",
+                             bechtold_snow_refill_width_kg_m2_s=bad).validate_strict()
+    with pytest.raises(ValueError, match="bechtold_snow_refill_width_kg_m2_s"):
+        ExperimentConfig(convection="zhang_mcfarlane",
+                         bechtold_snow_refill_width_kg_m2_s=1e-8).validate_strict()
+
+
+def test_sundqvist_deck_names_the_snow_refill_width():
+    import pathlib
+    import yaml
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    path = (pathlib.Path(__file__).resolve().parents[2] / "config" / "amip"
+            / "amip_sundqvist_l36.yaml")
+    deck = yaml.safe_load(path.read_text())
+    assert (deck["bechtold_snow_refill_width_kg_m2_s"]
+            == BechtoldConfig().snow_refill_width_kg_m2_s)
+    # the row reaches the config through the real loader
+    p = build_arg_parser()
+    p.set_defaults(**load_yaml_config(path, p))
+    cfg = build_config_from_args(p.parse_args([]))
+    assert cfg.bechtold_snow_refill_width_kg_m2_s == 1.0e-8

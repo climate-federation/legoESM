@@ -659,6 +659,13 @@ ZM_WIDTH_FIELDS = {
     "zm_detrain_phase_width_K": "detrain_phase_width_K",
     "zm_detrain_number_width_kgkg_s": "detrain_number_width_kgkg_s",
 }
+# Flat ExperimentConfig scalar -> ZhangMcFarlaneConfig RULE 5 width of the
+# cape > capelmt trigger, read wherever convection == zhang_mcfarlane.  Excluded
+# from __param_spec__; the one legal range is
+# zhang_mcfarlane.validate_trigger_width.  None = the scheme default.
+ZM_TRIGGER_FIELDS = {
+    "zm_trigger_width_J_kg": "trigger_width_J_kg",
+}
 CLUBB_SCALAR_FIELDS = {
     "clubb_c14": "C14",
     "clubb_c8": "C8",
@@ -2196,6 +2203,14 @@ class ExperimentConfig(NamedTuple):
     # solve, 0 = one batch per GPU (same placement and None semantics as
     # land_canopy_most_n_iters; the production deck names it).
     land_canopy_solve_group: int | None = None
+    # ZhangMcFarlaneConfig.trigger_width_J_kg (ZM_TRIGGER_FIELDS): RULE 5 width
+    # of the deep-convection trigger [J/kg]; 0 = CAM's hard switch.  None = the
+    # scheme default; the production deck names it.
+    zm_trigger_width_J_kg: float | None = None
+    # BechtoldConfig.snow_refill_width_kg_m2_s: RULE 5 width of the legacy
+    # Bechtold sub-cloud snow refill [kg/m^2/s]; 0 = the oracle's hard switch.
+    # None = the scheme default; decks running legacy Bechtold name it.
+    bechtold_snow_refill_width_kg_m2_s: float | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -3268,6 +3283,30 @@ class ExperimentConfig(NamedTuple):
                 if not _ok:
                     errors.append(f"{_f} must be a number in [{_lo}, {_hi}] "
                                   f"(the scheme's __param_spec__), got {_v!r}")
+        if self.bechtold_snow_refill_width_kg_m2_s is not None:
+            if self.convection != "bechtold":
+                errors.append("bechtold_snow_refill_width_kg_m2_s is a Bechtold "
+                              f"field; got convection={self.convection!r}")
+            from legoesm.core.smooth import validate_smoothing_width
+            try:
+                validate_smoothing_width("bechtold_snow_refill_width_kg_m2_s",
+                                         self.bechtold_snow_refill_width_kg_m2_s)
+            except ValueError as exc:
+                errors.append(str(exc))
+        for _f in ZM_TRIGGER_FIELDS:
+            _v = getattr(self, _f)
+            if _v is None:
+                continue
+            if self.convection != "zhang_mcfarlane":
+                errors.append(f"{_f} is a Zhang-McFarlane field; got "
+                              f"convection={self.convection!r}")
+            from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+                validate_trigger_width,
+            )
+            try:
+                validate_trigger_width(_v)
+            except ValueError as exc:
+                errors.append(f"{_f}: {exc}")
         _zw = {f: getattr(self, f) for f in ZM_WIDTH_FIELDS
                if getattr(self, f) is not None}
         if _zw:

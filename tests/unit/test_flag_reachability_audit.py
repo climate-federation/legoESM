@@ -69,6 +69,7 @@ from legoesm.driver.config import (
     DycoreConfig,
     GridConfig,
     ZM_SCALAR_FIELDS,
+    ZM_TRIGGER_FIELDS,
     ZM_WIDTH_FIELDS,
     ExperimentConfig,
 )
@@ -226,6 +227,7 @@ def _reads(fn, _seen: set[str] | None = None) -> set[str]:
 _CFG_NAMES = ("config", "cfg")
 _FIELD_TABLES = {"ZM_SCALAR_FIELDS": ZM_SCALAR_FIELDS,
                  "ZM_WIDTH_FIELDS": ZM_WIDTH_FIELDS,
+                 "ZM_TRIGGER_FIELDS": ZM_TRIGGER_FIELDS,
                  "CLUBB_SCALAR_FIELDS": CLUBB_SCALAR_FIELDS}
 
 

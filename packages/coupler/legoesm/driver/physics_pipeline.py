@@ -4317,9 +4317,11 @@ def mean_grid_spacing_m(grid):
 def _zm_overrides(config):
     """ZM leaf overrides from the flat zm_* scalars; refuses them when the run
     does not select zhang_mcfarlane (they would be silently inert)."""
-    from legoesm.driver.config import ZM_SCALAR_FIELDS, ZM_WIDTH_FIELDS
+    from legoesm.driver.config import (
+        ZM_SCALAR_FIELDS, ZM_TRIGGER_FIELDS, ZM_WIDTH_FIELDS,
+    )
 
-    table = {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS}
+    table = {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS}
     given = [f for f in table if getattr(config, f, None) is not None]
     if given and config.convection != "zhang_mcfarlane":
         raise ValueError(
@@ -4340,6 +4342,14 @@ def _zm_overrides(config):
         validate_detrain_widths(*(widths.get(leaf, getattr(
             ZhangMcFarlaneConfig(), leaf)) for leaf in ZM_WIDTH_FIELDS.values()))
         out.update({k: float(v) for k, v in widths.items()})
+    for f in given:
+        if f in ZM_TRIGGER_FIELDS:
+            from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+                validate_trigger_width,
+            )
+            v = getattr(config, f)
+            validate_trigger_width(v)
+            out[ZM_TRIGGER_FIELDS[f]] = float(v)
     return out
 
 
@@ -4472,6 +4482,11 @@ def _resolve_convection(config):
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe
+        _w = config.bechtold_snow_refill_width_kg_m2_s
+        if _w is not None:
+            from legoesm.core.smooth import validate_smoothing_width
+            validate_smoothing_width("bechtold_snow_refill_width_kg_m2_s", _w)
+            _bechtold_kwargs["snow_refill_width_kg_m2_s"] = float(_w)
         conv_config = BechtoldConfig(**_bechtold_kwargs)
     else:
         cc = ConvectionConfig(scheme=scheme)

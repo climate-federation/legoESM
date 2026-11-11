@@ -32,6 +32,7 @@ _EXPECTED_DIFF = {
     "cloud_cam6_rhmaxis",
     "zm_c0_lnd", "zm_c0_ocn", "zm_ke", "zm_dmpdz", "zm_tau", "zm_capelmt",
     "zm_detrain_phase_width_K", "zm_detrain_number_width_kgkg_s",
+    "zm_trigger_width_J_kg",
     # ecRad 49r1 radiation (votes L1, L18, L20, C2/C3): the scheme, the lane
     # aerosol row it never reads, the RRTMGP-only overhead layer that errors
     # under it, and ecRad's own CAMS aerosol climatology

@@ -140,6 +140,7 @@ from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
     ZM_SCALAR_FIELDS,
+    ZM_TRIGGER_FIELDS,
     ZM_WIDTH_FIELDS,
     VALID_TURBULENCE,
     DycoreConfig,
@@ -1161,6 +1162,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                                  "booking (0 = CAM's hard switch; MPAS ZM + "
                                  "CLUBB with cld_macmic_num_steps>=2 only). "
                                  "Default: the scheme's own value.")
+    for _f, _leaf in ZM_TRIGGER_FIELDS.items():
+        parser.add_argument("--" + _f.replace("_", "-"), type=float,
+                            default=None, dest=_f,
+                            help=f"ZhangMcFarlaneConfig.{_leaf}: RULE 5 width "
+                                 "[J/kg] of the cape > capelmt deep-convection "
+                                 "trigger (0 = CAM's hard switch). Default: the "
+                                 "scheme's own value.")
     parser.add_argument("--clubb-q-flux-scale", type=float, default=None,
                         dest="clubb_q_flux_scale",
                         help="Moisture-only multiplier on CLUBB's q_v eddy "
@@ -1596,6 +1604,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(openifs cuflxn.F90 FOEALFCU wet-bulb split, "
                              "RTAUMEL melt; FOLD variant). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_snow_melt}.")
+    parser.add_argument("--bechtold-snow-refill-width-kg-m2-s", type=float,
+                        default=None, dest="bechtold_snow_refill_width_kg_m2_s",
+                        help="BechtoldConfig.snow_refill_width_kg_m2_s: RULE 5 "
+                             "width [kg/m^2/s] of the sub-cloud snow refill "
+                             "(0 = the oracle's hard switch). Default: the "
+                             "scheme's own value.")
     parser.add_argument("--bechtold-use-ifs-capdcycl",
                         dest="bechtold_use_ifs_capdcycl",
                         action=argparse.BooleanOptionalAction,
@@ -3056,7 +3070,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         **{_f: getattr(args, _f)
-           for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS,
+           for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS, **ZM_TRIGGER_FIELDS,
                       **CLUBB_SCALAR_FIELDS}},
         clubb_q_flux_scale=args.clubb_q_flux_scale,
         clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)
@@ -3336,6 +3350,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
+        bechtold_snow_refill_width_kg_m2_s=args.bechtold_snow_refill_width_kg_m2_s,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,
