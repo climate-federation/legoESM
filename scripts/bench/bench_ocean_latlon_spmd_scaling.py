@@ -271,8 +271,8 @@ def tripole_solver_advisory(*, tripole, mode, n_lat, n_lon, nlev, A_h_from_mesh,
     if r >= ADVISORY_RATIO:
         return None
     other = "zline80sr" if current == "jacobi200" else "jacobi200"
-    return (f"[solver advisory] {other} measured {100 * (1 - r):.0f}% faster than "
-            f"{current} at {n_devices} devices {precision} (jobs 28880268/28844608); "
+    return (f"[solver advisory] {other} measured {100 * (1 - r):.0f}% less step time "
+            f"than {current} at {n_devices} devices {precision} (jobs 28880268/28844608); "
             f"TRIPOLE_SOLVER={other} to switch.")
 
 
@@ -532,8 +532,6 @@ def main() -> int:
         nlev=args.nlev, A_h_from_mesh=args.A_h_from_mesh, n_devices=args.n_devices,
         precision=_prec_label, variant=args.pcg_variant, precond=args.pcg_precond,
         iters=args.pcg_fixed_iters)
-    if _advice and os.environ.get("SLURM_PROCID", "0") == "0":
-        print(_advice, flush=True)
 
     if args.multicontroller:
         # MUST run before any other JAX use (backend init). Shared helper:
@@ -541,6 +539,8 @@ def main() -> int:
         # SLURM/OMPI auto-detect or PALS mpi4py bootstrap.
         from legoesm.parallel.early_init import init_multicontroller_distributed
         init_multicontroller_distributed(args.coordinator)
+    if _advice and jax.process_index() == 0:
+        print(_advice, flush=True)
 
     from legoesm.ocean.dynamics.sharded_ocean_step import (
         make_sharded_ocean_step,

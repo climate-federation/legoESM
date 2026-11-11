@@ -94,6 +94,7 @@ run_arm() {
     return 0
   fi
   local tag="${lane}_${mode}_${res//:/k}_d${nd}_x${x64}"
+  [[ "$lane" == tripole && "${TRIPOLE_SOLVER:-jacobi200}" != jacobi200 ]] && tag+="_${TRIPOLE_SOLVER}"
   if grep -q '"valid": true' "$OUTDIR/${tag}.jsonl" 2>/dev/null; then echo "[have] $tag"; return 0; fi
   rm -f "$OUTDIR/${tag}.jsonl"
   export JAX_ENABLE_X64="$x64"
