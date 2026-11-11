@@ -66,10 +66,18 @@ def test_shapes_types_and_no_momentum_source():
         assert jnp.all(jnp.isfinite(out.tracer_tendencies[k].data))
 
 
-@pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
-def test_supersaturated_condenses_and_heats():
+# RULE 5 record (x64 SLURM 2026-11-11): at the default the bounded smooth
+# saturation switch moves 5.7693781852e-08 kg/kg/s of vapour into cloud in the
+# subsaturated column (its ln2*q_vs/k residual); 0 at the hard limit.
+DEFAULT_GAP_DRY_COLUMN_DQV = 5.7693781852e-08
+
+
+@pytest.mark.parametrize("hard", [True, False], ids=["hard_limit", "default"])
+def test_supersaturated_condenses_and_heats(hard):
+    from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
+    cfg = KesslerConfig(saturation_sharpness=1.0e30) if hard else None
     state, sigma = _make_state()
-    out = make_kessler_forcing_mpas(dt=300.0)(state, None, sigma)
+    out = make_kessler_forcing_mpas(dt=300.0, config=cfg)(state, None, sigma)
     dqv = out.tracer_tendencies["q_v"].data
     dqc = out.tracer_tendencies["q_c"].data
     dT = out.dT_dt.data
@@ -79,8 +87,13 @@ def test_supersaturated_condenses_and_heats():
     assert jnp.all(dqc[0] >= -1e-12)
     cond_mask = dqv[0] < -1e-12
     assert jnp.all(dT[0][cond_mask] > 0.0)
-    # Bone-dry column 1: essentially no condensation.
-    assert jnp.allclose(dqv[1], 0.0, atol=1e-12)
+    # Subsaturated column: no condensation at the hard limit; the recorded
+    # smooth-switch residual at the default.
+    if hard:
+        assert jnp.allclose(dqv[1], 0.0, atol=1e-12)
+    else:
+        assert abs(float(jnp.max(jnp.abs(dqv[1]))) - DEFAULT_GAP_DRY_COLUMN_DQV) <= (
+            1e-6 * DEFAULT_GAP_DRY_COLUMN_DQV + 1e-12)
 
 
 def test_conserves_total_water_at_zero_hydrometeors():

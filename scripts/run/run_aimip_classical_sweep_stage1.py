@@ -89,9 +89,9 @@ SWEEP_SPACE = {
         "zhang_mcfarlane", "kain_fritsch", "emanuel", "bechtold",
     ],  # 9 alternatives + baseline tiedtke
     "aimip_turbulence": [
-        "tke", "smagorinsky", "clubb_lite",
+        "tke", "smagorinsky",
         "holtslag_boville", "ysu", "edmf",
-    ],  # 6 alternatives + baseline louis
+    ],  # 5 alternatives + baseline louis
     "aimip_gwd": [
         "lindzen", "rayleigh", "hines", "prognostic_spectral",
     ],  # 4 alternatives + baseline mcfarlane (skip ml_emulator)

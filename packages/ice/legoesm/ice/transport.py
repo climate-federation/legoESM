@@ -21,7 +21,8 @@ All functions are JAX-compatible (differentiable, JIT-friendly).
 from __future__ import annotations
 
 import math
-from typing import cast
+from collections.abc import Callable
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -2200,8 +2201,20 @@ def advect_si3_prather_2d(
     subcycles: int | None = None,
     north_fold: str = "none",
     limit_sharpness_scale: float = SI3_PRA_DEFAULT_LIMIT_SHARPNESS_SCALE,
-) -> tuple[jnp.ndarray, SI3PratherMoments, int]:
+    cycle_hook: Callable[..., tuple[jnp.ndarray, Any]] | None = None,
+    cycle_carry: Any = None,
+) -> tuple[jnp.ndarray, SI3PratherMoments, int] | tuple[jnp.ndarray, SI3PratherMoments, int, Any]:
     """SI3 Prather x/y split for the shipped single-category ICE_ADV2D card.
+
+    ``cycle_hook`` (optional) runs NEMO's per-cycle corrections INSIDE each
+    advection cycle ``jt``, after the advection and the ice-thickness Hbig and
+    before the halo refresh, as NEMO 5.0.1 orders them within ``DO jt = 1, icycle``
+    (``icedyn_adv_pra.F90:142,405-411,421,424-429,435``).  It is called as
+    ``cycle_hook(cycle_entry, transported, carry, subcycle_index=jt,
+    subcycle_dt=rDt_ice/icycle, ihls=ihls)`` with the packed contents at the start
+    and end of the cycle and must return ``(contents, carry)``; with a hook the
+    function returns ``(contents, moments, subcycles, carry)``.  ``None`` (default)
+    keeps the previous behaviour and return arity.
 
     ``north_fold`` selects the halo refresh after each ``jt``: ``"none"`` = the bi-periodic
     ICE_ADV2D halo; ``"orca_f_pivot"`` = NEMO 5.0.1 ``lbc_lnk`` on an ORCA F-pivot grid (E-W
@@ -2282,6 +2295,7 @@ def advect_si3_prather_2d(
 
     for subcycle_index in range(1, subcycles + 1):
         area = cell_area
+        cycle_entry = out
         x_first = ((ice_step_index - 1) // nn_fsbc) % 2 == ((subcycle_index - 1) % 2)
         if x_first:
             out, out_moments, area = _si3_prather_x_substep(
@@ -2382,6 +2396,14 @@ def advect_si3_prather_2d(
                 )
             )
         )
+        if cycle_hook is not None:
+            # icedyn_adv_pra.F90:405-411 (Hbig_pra, Hsnow_pra), :421 (ice_var_zapneg) and
+            # :424-429 (open water) all sit inside DO jt = 1, icycle (:142), before the
+            # lbc_lnk at :435.
+            out, cycle_carry = cycle_hook(
+                cycle_entry, out, cycle_carry,
+                subcycle_index=subcycle_index, subcycle_dt=subcycle_dt, ihls=ihls,
+            )
         # The shipped root ICE_ADV2D domain is bi-periodic.  NEMO refreshes
         # contents and all five moments after every `jt` at
         # icedyn_adv_pra.F90:432-479.
@@ -2405,6 +2427,8 @@ def advect_si3_prather_2d(
                 SI3PratherMoments,
                 tuple(_si3_periodic_halo_xy(value, halo_width) for value in out_moments),
             )
+    if cycle_hook is not None:
+        return out, out_moments, subcycles, cycle_carry
     return out, out_moments, subcycles
 
 

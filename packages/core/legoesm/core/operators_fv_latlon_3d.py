@@ -28,12 +28,12 @@ from legoesm.grids.latlon import LatLonGrid
 # PPM reconstruction — native 3D
 # ==============================================================================
 
-def _ppm_reconstruct_lon_3d(q_pad_h2, limiter=True):
+def _ppm_reconstruct_lon_3d(q_pad_h3, limiter=True):
     """PPM reconstruction in longitude for all levels at once.
 
     Parameters
     ----------
-    q_pad_h2 : jax.Array, shape (n_lat+4, n_lon+4, nlev)
+    q_pad_h3 : jax.Array, shape (n_lat+6, n_lon+6, nlev)
     limiter : bool
 
     Returns
@@ -41,14 +41,17 @@ def _ppm_reconstruct_lon_3d(q_pad_h2, limiter=True):
     q_left, q_right : each shape (n_lat, n_lon+1, nlev)
     """
     # Strip latitude halo, keep longitude halo
-    q = q_pad_h2[2:-2, :, :]  # (n_lat, n_lon+4, nlev)
+    q = q_pad_h3[3:-3, :, :]  # (n_lat, n_lon+6, nlev)
 
-    # axis -2 is longitude (n_lon+4) — ppm_edge_values operates here
-    q_hat = ppm_edge_values(q)  # (n_lat, n_lon+3, nlev)
+    # axis -2 is longitude — ppm_edge_values operates here.
+    # halo=3: the outermost edges are 2nd-order and are dropped, so every face
+    # state (incl. the limiter on the outermost used cells) is 4th-order and
+    # identical on both sides of the periodic seam and of any parallel cut.
+    q_hat = ppm_edge_values(q)[:, 1:-1, :]  # (n_lat, n_lon+3, nlev)
 
     a_L = q_hat[:, :-1, :]   # (n_lat, n_lon+2, nlev)
     a_R = q_hat[:, 1:, :]
-    q_c = q[:, 1:-1, :]      # (n_lat, n_lon+2, nlev)
+    q_c = q[:, 2:-2, :]      # (n_lat, n_lon+2, nlev)
 
     if limiter:
         a_L, a_R = ppm_limit(q_c, a_L, a_R)
@@ -59,12 +62,12 @@ def _ppm_reconstruct_lon_3d(q_pad_h2, limiter=True):
     return q_left, q_right
 
 
-def _ppm_reconstruct_lat_3d(q_pad_h2, limiter=True):
+def _ppm_reconstruct_lat_3d(q_pad_h3, limiter=True):
     """PPM reconstruction in latitude for all levels at once.
 
     Parameters
     ----------
-    q_pad_h2 : jax.Array, shape (n_lat+4, n_lon+4, nlev)
+    q_pad_h3 : jax.Array, shape (n_lat+6, n_lon+6, nlev)
     limiter : bool
 
     Returns
@@ -72,16 +75,19 @@ def _ppm_reconstruct_lat_3d(q_pad_h2, limiter=True):
     q_left, q_right : each shape (n_lat+1, n_lon, nlev)
     """
     # Strip longitude halo, keep latitude halo
-    q = q_pad_h2[:, 2:-2, :]  # (n_lat+4, n_lon, nlev)
+    q = q_pad_h3[:, 3:-3, :]  # (n_lat+6, n_lon, nlev)
 
     # Native axis-0 sweep — the moveaxis round-trip here was the
     # LL2048@64 trace's largest compute-kernel family
     # (input_transpose_fusion, 370 us/step; codex consult 2026-08-11).
-    q_hat = ppm_edge_values_axis0(q)  # (n_lat+3, n_lon, nlev)
+    # halo=3: the outermost edges are 2nd-order and are dropped, so every face
+    # state (incl. the limiter on the outermost used cells) is 4th-order and
+    # identical on both sides of the periodic seam and of any parallel cut.
+    q_hat = ppm_edge_values_axis0(q)[1:-1]  # (n_lat+3, n_lon, nlev)
 
     a_L = q_hat[:-1, :, :]   # (n_lat+2, n_lon, nlev)
     a_R = q_hat[1:, :, :]
-    q_c = q[1:-1, :, :]      # (n_lat+2, n_lon, nlev)
+    q_c = q[2:-2, :, :]      # (n_lat+2, n_lon, nlev)
 
     if limiter:
         a_L, a_R = ppm_limit(q_c, a_L, a_R)
@@ -124,8 +130,10 @@ def fv_flux_divergence_latlon_3d(
     R = grid.radius
     dlon = grid.dlon
 
-    # Pad all fields with halo=2, once for all levels
-    q_pad = pad_halo_latlon_3d(q_3d, halo=2)
+    if q_3d.shape[0] < 3:
+        raise ValueError(f"lat-lon PPM needs n_lat >= 3 (halo=3); got {q_3d.shape[0]}.")
+    # Scalar halo=3 for PPM (see _ppm_reconstruct_lon_3d); velocities need 2.
+    q_pad = pad_halo_latlon_3d(q_3d, halo=3)
     u_pad, v_pad = pad_halo_vector_latlon_3d(u_3d, v_3d, halo=2)
 
     # --- Longitude flux ---
@@ -222,13 +230,15 @@ def cgrid_fv_flux_divergence_latlon_3d(
     R = grid.radius
     dlon = grid.dlon
 
-    # Pad scalar with halo=2 for PPM reconstruction (all levels at once).
+    if q_3d.shape[0] < 3:
+        raise ValueError(f"lat-lon PPM needs n_lat >= 3 (halo=3); got {q_3d.shape[0]}.")
+    # Pad scalar with halo=3 for PPM reconstruction (all levels at once).
     # ``q_pad`` lets the caller supply a pre-padded field so several
     # PPM-advected scalars ride ONE grouped halo exchange (the lat-lon
-    # packing work, 2026-08-04): shape must be the halo=2 fold-family
-    # pad of ``q_3d`` — i.e. exactly ``pad_halo_latlon_3d(q_3d, halo=2)``.
+    # packing work, 2026-08-04): shape must be the halo=3 fold-family
+    # pad of ``q_3d`` — i.e. exactly ``pad_halo_latlon_3d(q_3d, halo=3)``.
     if q_pad is None:
-        q_pad = pad_halo_latlon_3d(q_3d, halo=2)
+        q_pad = pad_halo_latlon_3d(q_3d, halo=3)
 
     # --- Longitude flux ---
     q_L_lon, q_R_lon = _ppm_reconstruct_lon_3d(q_pad, limiter)  # (n_lat, n_lon+1, nlev)

@@ -521,21 +521,28 @@ def compute_two_leaf_canopy_fluxes(
     # land step accepts if the column ends unsolved); freezing it held desert
     # columns at their start-of-step soil.  Acceptance stays tied to the LAST pass.
     x_conv = jnp.full_like(initial_state, jnp.nan)
+    # Columns per batch (0 = all of them in one vmap): a batch iterates until
+    # its slowest column stops; see CanopyConfig.solve_group.
+    def _solve_all(args):
+        if cc.solve_group == 0:
+            return jax.vmap(_solve_one_col)(*args)
+        return jax.lax.map(lambda a: _solve_one_col(*a), args,
+                           batch_size=cc.solve_group)
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
         _fallback = initial_state if _picard_iter % 2 == 0 else cold_state
         _seed_k = jnp.where(jnp.all(jnp.isfinite(x_conv), axis=-1, keepdims=True),
                             jnp.nan_to_num(x_conv), _fallback)
-        # One batch over every column (user choice 2026-11-09, replacing the
-        # 64-column groups chosen 2026-11-03).  Once the LM step stopped forming
-        # explicit Q (PR 2398) the solve is launch-bound, so one wide batch
-        # beats many narrow ones: AMIP production deck, 4 A100, fp64, 1 day,
+        # One batch over every column by default (solve_group 0; user choice
+        # 2026-11-09, replacing the 64-column groups chosen 2026-11-03).  Once
+        # the LM step stopped forming explicit Q (PR 2398) the solve is
+        # launch-bound, so one wide batch beats many narrow ones: AMIP production deck, 4 A100, fp64, 1 day,
         # 0.242 s/step with groups of 64 vs 0.138 s/step with one batch.
         # Pure performance: same per-column solve, answers differ by rounding.
         # Cost: the batch iterates until the rank's slowest column stops, so a
         # column stuck at the iteration cap holds every column to the cap.
-        (x_final, n_iters, converged, resid_sq, resid_rel, lam_f,
-         hit_cap) = jax.vmap(_solve_one_col)(_seed_k, bundles_k)
+        _out = _solve_all((_seed_k, bundles_k))
+        (x_final, n_iters, converged, resid_sq, resid_rel, lam_f, hit_cap) = _out
         x_conv = jnp.where(converged[:, None], x_final, x_conv)
         # A rejected iterate may be non-finite: evaluate the fluxes of a failed
         # column at the (finite) cold state instead, so no NaN enters a

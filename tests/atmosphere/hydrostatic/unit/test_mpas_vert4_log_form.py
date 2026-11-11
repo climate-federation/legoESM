@@ -137,13 +137,13 @@ def test_flux_form_without_mobility_is_unchanged():
 def test_dycore_routes_log_tracers_and_refuses_overlap():
     """The dycore sends ONLY the named tracer through the log form and refuses a
     tracer named in both form lists."""
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import mpas_hydrostatic_tendencies
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     from tests.atmosphere.hydrostatic.unit.test_mpas_vert4_flux_form import _tracer_state
     mesh, coord, cfg, state = _tracer_state()
-    base = mpas_hydrostatic_tendencies(
-        state, mesh, coord, cfg._replace(vert4_flux_form_tracers=("q_v",)), None, 0.0)
-    sel = mpas_hydrostatic_tendencies(
-        state, mesh, coord, cfg._replace(vert4_log_form_tracers=("q_v",)), None, 0.0)
+    base = mpas_pe_tendencies(
+        state, mesh, coord, cfg._replace(vert4_flux_form_tracers=("q_v",)), None, 0.0, vertical_form="legacy")
+    sel = mpas_pe_tendencies(
+        state, mesh, coord, cfg._replace(vert4_log_form_tracers=("q_v",)), None, 0.0, vertical_form="legacy")
     qv = state.tracers["q_v"].data
     expect = (vertical_del4_tracer_tendency_log(qv, NU, coord.dsigma)
               - vertical_del4_tracer_tendency_flux(qv, NU, coord.dsigma))
@@ -154,15 +154,15 @@ def test_dycore_routes_log_tracers_and_refuses_overlap():
     np.testing.assert_array_equal(np.asarray(sel.tracer_tendencies["q_c"].data),
                                   np.asarray(base.tracer_tendencies["q_c"].data))
     with pytest.raises(ValueError, match="each tracer takes one filter form"):
-        mpas_hydrostatic_tendencies(state, mesh, coord, cfg._replace(
-            vert4_flux_form_tracers=("q_v",), vert4_log_form_tracers=("q_v",)), None, 0.0)
+        mpas_pe_tendencies(state, mesh, coord, cfg._replace(
+            vert4_flux_form_tracers=("q_v",), vert4_log_form_tracers=("q_v",)), None, 0.0, vertical_form="legacy")
     with pytest.raises(ValueError, match="unknown tracer names"):
-        mpas_hydrostatic_tendencies(state, mesh, coord, cfg._replace(
-            vert4_log_form_tracers=("qv",)), None, 0.0)
+        mpas_pe_tendencies(state, mesh, coord, cfg._replace(
+            vert4_log_form_tracers=("qv",)), None, 0.0, vertical_form="legacy")
     with pytest.raises(ValueError, match="each tracer takes one filter form"):     # filter off
-        mpas_hydrostatic_tendencies(state, mesh, coord, cfg._replace(
+        mpas_pe_tendencies(state, mesh, coord, cfg._replace(
             nu_vert4_T=0.0, vert4_flux_form_tracers=("q_v",),
-            vert4_log_form_tracers=("q_v",)), None, 0.0)
+            vert4_log_form_tracers=("q_v",)), None, 0.0, vertical_form="legacy")
 
 
 @pytest.mark.parametrize("pattern", [
@@ -189,14 +189,14 @@ def test_worst_contrast_outflow_is_bounded(pattern):
 def test_form_checks_run_on_a_state_without_tracers():
     """The log-name and overlap checks sit in the dycore's entry validator, so a
     dry state (no tracers) with the filter off still refuses a bad selection."""
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import mpas_hydrostatic_tendencies
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
     from tests.atmosphere.hydrostatic.unit.test_mpas_vert4_flux_form import _tracer_state
     mesh, coord, cfg, state = _tracer_state()
     dry = state._replace(tracers=None)
     off = cfg._replace(nu_vert4_T=0.0)
     with pytest.raises(ValueError, match="each tracer takes one filter form"):
-        mpas_hydrostatic_tendencies(dry, mesh, coord, off._replace(
-            vert4_flux_form_tracers=("q_v",), vert4_log_form_tracers=("q_v",)), None, 0.0)
+        mpas_pe_tendencies(dry, mesh, coord, off._replace(
+            vert4_flux_form_tracers=("q_v",), vert4_log_form_tracers=("q_v",)), None, 0.0, vertical_form="legacy")
     with pytest.raises(ValueError, match="vert4_log_form_tracers: unknown tracer names"):
-        mpas_hydrostatic_tendencies(dry, mesh, coord, off._replace(
-            vert4_log_form_tracers=("qv",)), None, 0.0)
+        mpas_pe_tendencies(dry, mesh, coord, off._replace(
+            vert4_log_form_tracers=("qv",)), None, 0.0, vertical_form="legacy")

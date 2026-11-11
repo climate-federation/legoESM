@@ -30,7 +30,7 @@ from pathlib import Path
 from legoesm.core.param_overrides import apply_param_overrides
 
 from . import config as _turb_config
-from .config import TurbulenceConfig
+from .config import TurbulenceConfig, refuse_retired_turbulence
 
 _log = logging.getLogger(__name__)
 
@@ -281,6 +281,7 @@ def scm_turbulence_config(
     ``les_tuned=False`` (or splice your own values afterwards). ``overrides`` for
     a NON-active scheme survive, since tuning only touches the active one.
     """
+    refuse_retired_turbulence(scheme, "scm_turbulence_config")
     turb = TurbulenceConfig(scheme=scheme, **overrides)
     if not les_tuned:
         return turb

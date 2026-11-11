@@ -422,6 +422,12 @@ class DycoreConfig(NamedTuple):
     # Default ("q_v",) since 2026-10-15 (user decision after the 30/60-day pair
     # against the flux form); amip_production.yaml also pins it explicitly.
     mpas_vert4_log_form_tracers: tuple = ("q_v",)
+    # Vertical form of the shared hydrostatic PE core on the lat-lon C-grid and
+    # MPAS lanes (``primitive_eq_generic.VERTICAL_FORMS``).  "legacy" (default)
+    # is each lane's pre-core tendency, unchanged: TEMPORARY, retired after the
+    # A/B; it carries #930 (lat-lon), #1029 (MPAS) and the lat-lon 50 K floor.
+    # validate_strict refuses any other form off those two lanes.
+    vertical_form: str = "legacy"
 
 
 class EvaluationConfig(NamedTuple):
@@ -533,6 +539,8 @@ VALID_MICROPHYSICS = (
     "ifs_cloudsc",
 )
 
+_CLUBB_LITE_WARNED = False  # one stand-in warning per process
+
 VALID_TURBULENCE = (
     "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
     "holtslag_boville", "ysu", "edmf", "none",
@@ -546,7 +554,7 @@ VALID_CLOUD_SCHEMES = ("none", "sundqvist", "xu_randall", "resolved", "cam6_club
 # (e.g. "hines+mcfarlane"); validate_strict splits on "+" before membership.
 VALID_GWD = (
     "rayleigh", "lindzen", "mcfarlane", "hines",
-    "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
+    "prognostic_spectral", "e3sm_cam", "ml_emulator", "ifs_wms", "none",
 )
 
 def parse_gwd_spec(value: str) -> str:
@@ -1291,7 +1299,7 @@ class ExperimentConfig(NamedTuple):
     # snow-albedo feedback SOTA AMIP land has.  Requires an active land tile.
     # Off (default) ⇒ static vegetation albedo (byte-identical legacy path).
     snow_albedo_feedback: bool = False
-    gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, none
+    gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, ifs_wms, none
 
     # Conservation
     fix_moisture: bool = False
@@ -1672,6 +1680,12 @@ class ExperimentConfig(NamedTuple):
     # epsilon_shallow, cape_qadv_weight reach it, every other Bechtold field
     # must stay at its default).  Mirrors BechtoldConfig.use_ifs_ascent.
     bechtold_use_ifs_ascent: bool = False
+    # OpenIFS 49r1 METHOX stratospheric water source (methane oxidation +
+    # photolysis, methane_oxidation.py); limit from the run's CH4 (vote M2a).
+    ifs_methox: bool = False
+    # OpenIFS 49r1 Cariolle ozone chemistry on an advected o3_ifs tracer
+    # (tracer only: radiation keeps its own ozone; user 2026-11-10).
+    ifs_ozone_chem: bool = False
     # IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475).  Default
     # ON (2026-07-16, validated: codex x3 + gray-RCE A/B + C24 AMIP A/B);
     # mirrors BechtoldConfig.use_ifs_subcloud_evap (fallbacks match).
@@ -2178,6 +2192,10 @@ class ExperimentConfig(NamedTuple):
     # droplet size reset in the sedimentation fall speeds (prognostic droplet
     # number only); 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
     morrison_mg2_drop_sed_reset_log_width: float = 0.01
+    # CanopyConfig.solve_group: columns per batch of the two-leaf canopy Newton
+    # solve, 0 = one batch per GPU (same placement and None semantics as
+    # land_canopy_most_n_iters; the production deck names it).
+    land_canopy_solve_group: int | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -2275,6 +2293,21 @@ class ExperimentConfig(NamedTuple):
                     "advects its cloud_fraction_ifs tracer; the compiled "
                     "cube/lat-lon and spectral lanes do not carry it "
                     "(follow-up)")
+        if not self.column_loop_lane:
+            if "ifs_wms" in self.gravity_wave_drag.split("+"):
+                # Worded without the field name: the lane depends on other
+                # flags, so parse_gwd_spec's single-flag probe must not fire.
+                errors.append(
+                    "ifs_wms drag runs only on the MPAS column lane, which "
+                    "carries its retained wind tendencies")
+            if self.ifs_methox:
+                errors.append(
+                    "ifs_methox runs only on the MPAS column lane")
+        if self.ifs_ozone_chem and (not self.column_loop_lane
+                                    or bool(self.dycore.column_lane)):
+            errors.append(
+                "ifs_ozone_chem runs only on the MPAS dycore lane, which "
+                "carries the o3_ifs tracer (not the FV3-duo column lane)")
         if self.land_fraction_source not in ("topography", "era5", "zero"):
             errors.append(
                 f"land_fraction_source must be topography, era5 or zero, got "
@@ -2305,6 +2338,13 @@ class ExperimentConfig(NamedTuple):
         # for bit-comparison and for the documented MSE-vs-water trade-off.
         import logging as _logging
         _wlog = _logging.getLogger(__name__)
+        global _CLUBB_LITE_WARNED
+        if self.turbulence == "clubb_lite" and not _CLUBB_LITE_WARNED:
+            from legoesm.atmosphere.physics.turbulence.config import (
+                CLUBB_LITE_STANDIN_NOTE,
+            )
+            _wlog.warning(CLUBB_LITE_STANDIN_NOTE)
+            _CLUBB_LITE_WARNED = True
         if not d.mpas_conservative_tracer_clamp:
             _wlog.warning(
                 "NON-CONSERVING form selected: "
@@ -4247,6 +4287,37 @@ class ExperimentConfig(NamedTuple):
                 f"to give {_both} the flux form, also set the log-form list without "
                 "them (CLI: --mpas-vert4-log-form-tracers with no names; YAML: "
                 "mpas_vert4_log_form_tracers: [])")
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import VERTICAL_FORMS
+        if d.vertical_form not in VERTICAL_FORMS:
+            errors.append(f"dycore.vertical_form must be one of {VERTICAL_FORMS}, "
+                          f"got {d.vertical_form!r}")
+        elif d.vertical_form != "legacy":
+            from legoesm.driver.component_factory import driver_solver_name
+            _solver = driver_solver_name(self)
+            if _solver not in ("latlon_cgrid_primitive_equations",
+                               "mpas_primitive_equations"):
+                errors.append(
+                    f"dycore.vertical_form={d.vertical_form!r} is only wired into "
+                    "the lat-lon C-grid and MPAS hydrostatic dycores; on solver "
+                    f"{_solver!r} it would be silently inert.  Leave it at 'legacy'.")
+            if d.vertical_form.startswith("as83"):
+                if g.vertical_coord == "sigma":
+                    errors.append(
+                        f"dycore.vertical_form={d.vertical_form!r} needs a hybrid "
+                        "vertical coordinate (the sigma lid moves); use 'sb81_theta' "
+                        "or 'legacy' on vertical_coord='sigma'.")
+                if (_solver == "latlon_cgrid_primitive_equations"
+                        and self.enable_latlon_spmd):
+                    errors.append(
+                        f"dycore.vertical_form={d.vertical_form!r} is not band-aware "
+                        "on lat-lon: the lat-band SPMD lane takes 'legacy' or "
+                        "'sb81_theta'.")
+            # no serial-parity test of a shared-core form on these two lanes yet
+            if (_solver == "latlon_cgrid_primitive_equations"
+                    and (self.distributed or self.enable_tiled_dycore)):
+                errors.append(
+                    f"dycore.vertical_form={d.vertical_form!r} is untested on the "
+                    "lat-lon MPI and 2-D tiled lanes; they take 'legacy'.")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
@@ -4526,10 +4597,12 @@ class ExperimentConfig(NamedTuple):
         _rhw = self.land_canopy_rh_cap_smoothing_width
         _zw = self.land_canopy_zeta_cap_smoothing_width
         _mi = self.land_canopy_most_n_iters
-        if _rhw is not None or _zw is not None or _mi is not None:
+        _sg = self.land_canopy_solve_group
+        if (_rhw is not None or _zw is not None or _mi is not None
+                or _sg is not None):
             if self.land_surface_scheme != "two_leaf" or not self.use_multilayer_land:
                 errors.append(
-                    "land_canopy_* (smoothing widths / most_n_iters) set but "
+                    "land_canopy_* (smoothing widths / most_n_iters / solve_group) set but "
                     f"land_surface_scheme={self.land_surface_scheme!r}, use_multilayer_land="
                     f"{self.use_multilayer_land!r}: only the two-leaf canopy of the "
                     "multilayer land reads them, so the value would be inert")
@@ -4541,7 +4614,8 @@ class ExperimentConfig(NamedTuple):
                                     {"rh_cap_smoothing_width": float(_rhw)}),
                                  **({} if _zw is None else
                                     {"zeta_cap_smoothing_width": float(_zw)}),
-                                 **({} if _mi is None else {"most_n_iters": _mi})
+                                 **({} if _mi is None else {"most_n_iters": _mi}),
+                                 **({} if _sg is None else {"solve_group": _sg})
                                  ).validate()
                 except ValueError as exc:
                     errors.append(f"land_canopy_*: {exc}")
@@ -4921,7 +4995,7 @@ class ExperimentConfig(NamedTuple):
         # module the composite path does not carry and are NOT composable.
         _composable_stateless = ("rayleigh", "lindzen", "mcfarlane", "hines",
                                  "e3sm_cam")
-        _composable_stateful = ("prognostic_spectral",)
+        _composable_stateful = ("prognostic_spectral", "ifs_wms")
         _composable = _composable_stateless + _composable_stateful
         _gwd_parts = self.gravity_wave_drag.split("+")
         if len(_gwd_parts) > 1:
@@ -5350,6 +5424,8 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'bechtold_use_ifs_cape_closure', True),
             bechtold_use_ifs_ascent=getattr(
                 amip_cfg, 'bechtold_use_ifs_ascent', False),
+            ifs_methox=getattr(amip_cfg, 'ifs_methox', False),
+            ifs_ozone_chem=getattr(amip_cfg, 'ifs_ozone_chem', False),
             bechtold_use_ifs_subcloud_evap=getattr(
                 amip_cfg, 'bechtold_use_ifs_subcloud_evap', True),
             bechtold_use_ifs_inplume_precip=getattr(
@@ -5532,6 +5608,8 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_rh_min=self.bechtold_downdraft_rh_min,
             bechtold_use_ifs_cape_closure=self.bechtold_use_ifs_cape_closure,
             bechtold_use_ifs_ascent=self.bechtold_use_ifs_ascent,
+            ifs_methox=self.ifs_methox,
+            ifs_ozone_chem=self.ifs_ozone_chem,
             bechtold_use_ifs_subcloud_evap=self.bechtold_use_ifs_subcloud_evap,
             bechtold_use_ifs_inplume_precip=self.bechtold_use_ifs_inplume_precip,
             bechtold_dx_m=self.bechtold_dx_m,

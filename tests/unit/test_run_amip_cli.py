@@ -1446,7 +1446,16 @@ def test_surface_tiled_unsupported_turbulence_rejected():
         cfg.validate_strict()
 
 
-@pytest.mark.parametrize("scheme", ["louis", "clubb_lite", "clubb"])
+def test_run_amip_refuses_retired_clubb_lite():
+    """clubb_lite is the LES-correction campaign's stand-in only."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "clubb_lite"]), parser)
+    with pytest.raises(ValueError, match="'clubb'"):
+        build_config_from_args(args)
+
+
+@pytest.mark.parametrize("scheme", ["louis", "clubb"])
 def test_surface_tiled_accepts_flux_consuming_schemes(scheme):
     """--surface-tiled validates with EVERY kernel that accepts the injected
     tiled surface_flux=(tau_x, tau_y, shflx, lhflx, ustar) BC: louis and the
@@ -3151,6 +3160,76 @@ def test_sb81_omega_conversion_flag_flows_to_dycore_config():
         "--dataset", "analytical", "--no-sb81-omega-conversion",
     ]), parser))
     assert cfg_off.dycore.sb81_omega_conversion is False
+
+
+def test_vertical_form_flag_flows_to_dycore_config():
+    """--vertical-form round-trips into DycoreConfig (default "legacy"); an
+    unknown form, or a non-legacy form off the lat-lon / MPAS hydrostatic
+    lanes, fails validate_strict."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.vertical_form == "legacy"
+    cfg_as83 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--grid-type", "mpas", "--discretization",
+        "mpas", "--vertical-form", "as83",
+    ]), parser))
+    assert cfg_as83.dycore.vertical_form == "as83"
+    cfg_as83.validate_strict()
+    with pytest.raises(ValueError, match="vertical_form must be one of"):
+        cfg_as83._replace(dycore=cfg_as83.dycore._replace(
+            vertical_form="bogus")).validate_strict()
+    cube = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--grid-type", "cubed_sphere",
+        "--discretization", "cdgrid", "--vertical-form", "as83",
+    ]), parser))
+    with pytest.raises(ValueError, match="vertical_form='as83' is only wired"):
+        cube.validate_strict()
+    sig = cfg_as83._replace(grid=cfg_as83.grid._replace(vertical_coord="sigma"))
+    with pytest.raises(ValueError, match="needs a hybrid"):
+        sig.validate_strict()
+    band = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--grid-type", "latlon", "--discretization",
+        "latlon_cgrid", "--vertical-form", "as83",
+    ]), parser))
+    band.validate_strict()
+    with pytest.raises(ValueError, match="not band-aware"):
+        band._replace(enable_latlon_spmd=True).validate_strict()
+    with pytest.raises(ValueError, match="untested on the lat-lon MPI"):
+        band._replace(dycore=band.dycore._replace(vertical_form="sb81_theta"),
+                      enable_tiled_dycore=True).validate_strict()
+
+
+@pytest.mark.parametrize("grid_type,discretization,grid_args", [
+    ("latlon", "latlon_cgrid", ("latlon", 16)),
+    ("mpas", "mpas", ("mpas", 2)),
+])
+def test_factory_threads_vertical_form_into_the_dycore(grid_type, discretization,
+                                                       grid_args):
+    """--vertical-form reaches the built lat-lon / MPAS dycore's config."""
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    from legoesm.grids.factory import create_grid
+    from legoesm.grids.vertical import standard_hybrid_levels
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--grid-type", grid_type, "--discretization",
+        discretization, "--vertical-form", "sb81_theta",
+    ]), parser))
+    model = create_atmosphere_dycore(cfg, create_grid(*grid_args), standard_hybrid_levels(8))
+    assert model.config.vertical_form == "sb81_theta"
+
+
+@pytest.mark.parametrize("deck", ["amip_production.yaml", "amip_production_latlon48.yaml"])
+def test_production_decks_select_legacy_vertical_form(deck):
+    """Both production AMIP decks set the PE vertical form to "legacy"
+    explicitly (the latlon deck by inclusion of the MPAS base), mapped onto the
+    parser dest that the flag test carries into DycoreConfig."""
+    from pathlib import Path
+
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    keys = load_yaml_config(
+        Path(__file__).resolve().parents[2] / "config" / "amip" / deck, build_arg_parser())
+    assert keys["vertical_form"] == "legacy"
 
 
 def test_budget_ledger_flag_flows_to_output_config():
@@ -5675,6 +5754,19 @@ def test_production_deck_names_both_canopy_smoothing_widths():
     assert cfg.land_canopy_rh_cap_smoothing_width == d.rh_cap_smoothing_width
     assert cfg.land_canopy_zeta_cap_smoothing_width == d.zeta_cap_smoothing_width
     assert cfg.land_canopy_most_n_iters == d.most_n_iters == 10
+    assert cfg.land_canopy_solve_group == d.solve_group == 0
+
+
+def test_land_canopy_solve_group_round_trip_and_validate():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--use-multilayer-land",
+        "--land-surface-scheme", "two_leaf", "--land-canopy-solve-group", "64"]), parser))
+    assert cfg.land_canopy_solve_group == 64
+    for bad, match in ((cfg._replace(land_canopy_solve_group=-1), "solve_group"),
+                       (cfg._replace(land_surface_scheme="simple_seb"), "inert")):
+        with pytest.raises(ValueError, match=match):
+            bad.validate_strict()
 
 
 def test_land_canopy_most_n_iters_round_trip_and_validate():
@@ -6100,3 +6192,35 @@ def test_large_yeager_width_flags_thread_to_config():
     assert cfg.surface_large_yeager_neutral_width == 0.0
     assert cfg.surface_large_yeager_dthv_width == 0.02
     assert cfg.surface_large_yeager_cd_cutoff_width == 0.25
+
+
+def test_ifs_methox_round_trips():
+    """--ifs-methox reaches ExperimentConfig, the pipeline switch and the AMIP
+    flat round-trip."""
+    from legoesm.driver.config import ExperimentConfig
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--ifs-methox"]), parser))
+    assert on.ifs_methox is True
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical"]), parser))
+    assert off.ifs_methox is False
+    for flag in (True, False):
+        cfg = ExperimentConfig(ifs_methox=flag)
+        assert ExperimentConfig.from_amip_config(cfg.to_amip_config()).ifs_methox is flag
+
+
+def test_ifs_ozone_chem_round_trips():
+    """--ifs-ozone-chem reaches ExperimentConfig and the AMIP round-trip."""
+    from legoesm.driver.config import ExperimentConfig
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--ifs-ozone-chem"]), parser))
+    assert on.ifs_ozone_chem is True
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical"]), parser))
+    assert off.ifs_ozone_chem is False
+    for flag in (True, False):
+        cfg = ExperimentConfig(ifs_ozone_chem=flag)
+        assert ExperimentConfig.from_amip_config(
+            cfg.to_amip_config()).ifs_ozone_chem is flag

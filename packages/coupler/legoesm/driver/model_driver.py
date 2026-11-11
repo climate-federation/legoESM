@@ -2072,6 +2072,9 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
     _mi = getattr(config, "land_canopy_most_n_iters", None)
     if _mi is not None:
         _w_over["most_n_iters"] = int(_mi)
+    _sg = getattr(config, "land_canopy_solve_group", None)
+    if _sg is not None:
+        _w_over["solve_group"] = int(_sg)
     if _w_over:
         from legoesm.land.canopy.config import CanopyConfig as _CanopyCfg
         if not isinstance(cfg.surface_scheme, _CanopyCfg):
@@ -2082,10 +2085,11 @@ def build_multilayer_land_tile(config, lat_rad, lon_rad, surfdata_grid):
             surface_scheme=cfg.surface_scheme._replace(**_w_over).validate())
     if isinstance(cfg.surface_scheme, TwoLeafCanopyConfig):
         logger.info("  land canopy smoothing widths: RH cap %.3g, zeta cap %.3g; "
-                    "MOST iterations %d",
+                    "MOST iterations %d; solve group %d (0 = one batch)",
                     cfg.surface_scheme.rh_cap_smoothing_width,
                     cfg.surface_scheme.zeta_cap_smoothing_width,
-                    cfg.surface_scheme.most_n_iters)
+                    cfg.surface_scheme.most_n_iters,
+                    cfg.surface_scheme.solve_group)
     # One-layer snow thermal node, same placement and reason.
     _sn = bool(config.land_snow_insulation)
     cfg = cfg._replace(thermal=cfg.thermal._replace(snow_insulation=_sn))
@@ -2386,6 +2390,14 @@ class ModelDriver:
         self.tracers: dict[str, jax.Array] = {}
         self.tracer_registry: TracerRegistry = moisture_registry_for(
             config.microphysics, registry_scheme_config(config))
+        if getattr(config, "ifs_ozone_chem", False):
+            # IFS Cariolle ozone (tracer only), a passenger after the water
+            # slots like cloud_fraction_ifs.
+            from legoesm.core.tracers import TracerInfo
+            self.tracer_registry = TracerRegistry(
+                tracers=self.tracer_registry.tracers + (TracerInfo(
+                    "o3_ifs", "kg/kg", True, True,
+                    "IFS Cariolle prognostic ozone"),))
         validate_microphysics_tracer_slots(
             config.microphysics,
             self.tracer_registry.n_tracers,
@@ -9444,6 +9456,16 @@ class ModelDriver:
                     f"which this run carries (microphysics='ifs_cloudsc'); "
                     f"restart from a checkpoint written with it or start "
                     f"cold.")
+            # Same rule for the IFS Cariolle ozone tracer (vote O5a).
+            if (self._column_model() is None
+                    and "o3_ifs" in self.tracer_registry.names
+                    and ("tracer_names" not in d
+                         or "o3_ifs" not in [str(n) for n in d["tracer_names"]]
+                         or "trc_o3_ifs" not in d.files)):
+                raise ValueError(
+                    f"MPAS checkpoint {path.name} has no o3_ifs, which this "
+                    f"run carries (ifs_ozone_chem); restart from a checkpoint "
+                    f"written with it or start cold.")
             # Restore moisture tracers (moist MPAS runs); absent ⇒ dry restart.
             # (column lane: the tracers are the bundle's own q slots, already
             # in the view built above)
@@ -11202,9 +11224,12 @@ class ModelDriver:
             # reads (votes VC24, VC40)
             _cam6_carry = dict(
                 cloud_fraction=state.tracers["cloud_fraction_ifs"].data)
+        _o3_kw = ({"o3": state.tracers["o3_ifs"].data}
+                  if "o3_ifs" in (getattr(state, "tracers", None) or {}) else {})
         return dict(
             T=state.T.data,
             p_s=state.p_s.data,
+            **_o3_kw,
             lat_deg=lat_deg,
             **_cam6_carry,
             q_v=q_v,
@@ -13193,6 +13218,8 @@ class ModelDriver:
         # cubed-sphere/lat-lon).  Includes RRTMGP + Held-Suarez forcing
         # when radiation is configured.
         from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+        from legoesm.atmosphere.physics.methane_oxidation import MethoxConfig
+        from legoesm.atmosphere.physics.radiation.ozone_cariolle import OzoneCariolleConfig
         from legoesm.atmosphere.physics.radiation.config import RadiationConfig
         from legoesm.atmosphere.physics.convection.config import ConvectionConfig
         from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
@@ -13433,6 +13460,13 @@ class ModelDriver:
             turbulence=turbulence_config_for(cfg),
             microphysics=_micro_cfg,
             gravity_wave_drag=gwd_config_for(cfg),
+            # IFS METHOX: the CH4 radiation reads -- the per-step forcing
+            # under ghg_forcing='external', ch4_ppbv under 'constant' (R5a).
+            methox=MethoxConfig(
+                enabled=bool(cfg.ifs_methox),
+                ch4_vmr_constant=(cfg.ch4_ppbv * 1e-9
+                                  if cfg.ghg_forcing == "constant" else None)),
+            cariolle=OzoneCariolleConfig(enabled=bool(cfg.ifs_ozone_chem)),
         )
         self._record_resolved_physics(
             convection=phys_cfg.convection,
@@ -13780,6 +13814,35 @@ class ModelDriver:
                 "the restart day -- bitwise only if that reconstruction is "
                 "exact.", _DAY_ORIGIN)
         self._clock_day_origin = _DAY_ORIGIN
+        # IFS Cariolle ozone (tracer only; radiation keeps its own ozone):
+        # monthly coefficients on this run's columns, refreshed daily below
+        # on the radiation calendar (votes C3a, P1a); a cold start sets the
+        # tracer to k1 at the start day (C4a).
+        _cariolle_monthly = None
+        if cfg.ifs_ozone_chem:
+            from legoesm.atmosphere.physics.radiation.ozone_cariolle import (
+                CARIOLLE_TRACER, cariolle_daily_coefficients,
+                load_cariolle_coefficients)
+            # (a later function-local import makes the name local here too)
+            from legoesm.forcing.time_utils import daily_forcing_bucket
+            _trc0 = self.state.tracers[CARIOLLE_TRACER]
+            _car_lat = np.rad2deg(np.asarray(self._owned_p_s_and_lat()[1])).reshape(-1)
+            if _car_lat.size != _trc0.data.shape[0]:
+                raise ValueError(
+                    f"ifs_ozone_chem: {_car_lat.size} column latitudes for "
+                    f"{_trc0.data.shape[0]} tracer columns")
+            _cariolle_monthly = load_cariolle_coefficients(
+                self.sigma.pressure_at_full(
+                    jnp.asarray([constants.p_atm_std], jnp.float64)),
+                _car_lat)
+            if start_step == 0 and self._loaded_checkpoint_step_day is None:
+                _k1 = cariolle_daily_coefficients(
+                    _cariolle_monthly, self._calendar_for_radiation(
+                        float(daily_forcing_bucket(_DAY_ORIGIN)))[0])[..., 0]
+                self.state = self.state._replace(tracers={
+                    **self.state.tracers,
+                    CARIOLLE_TRACER: _trc0.replace(
+                        data=jnp.asarray(_k1, _trc0.data.dtype))})
         physics_fn_norad = (_build_physics(phys_cfg, need_rad=False)
                             if _subcycle_rad else None)
         # turbulence='mynn25': the cold-start builds for the ONE peeled
@@ -15758,7 +15821,8 @@ class ModelDriver:
             # silently freeze. SST re-sampling below stays gated on _sst_forcing.
             if (_sst_forcing or _ext_forcing or _solar_ext
                     or self._segment_callback is not None
-                    or _cam6_act is not None):
+                    or _cam6_act is not None
+                    or _cariolle_monthly is not None):
                 # Anchored on the ABSOLUTE step from the run's day-0 origin:
                 # ``START_DAY + step*DT`` rounds differently from the unbroken
                 # run's ``0 + (start_step+step)*DT`` (1 ulp at step 219 of a
@@ -15937,6 +16001,13 @@ class ModelDriver:
                             _forcing_daily["ghg_vmr"] = {
                                 k: jnp.asarray(v) for k, v in _ghg.items()
                             }
+                    if _cariolle_monthly is not None and _new_day:
+                        _forcing_daily["cariolle_coef"] = jnp.asarray(
+                            cariolle_daily_coefficients(
+                                _cariolle_monthly,
+                                self._calendar_for_radiation(
+                                    _force_day_canonical)[0]),
+                            self.state.T.data.dtype)
                     if _solar_ext and _new_day:
                         # Same canonical-day sampling as SST/ozone
                         # (FIX_RESTART_TIME: bit-exact restart continuation).

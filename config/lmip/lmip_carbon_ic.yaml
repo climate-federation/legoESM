@@ -48,3 +48,5 @@ carbon_scheme: differland
 carbon_ic: data/land_carbon_ic/global_carbon_ic.npz
 
 snow_albedo_feedback: true
+# Two-leaf canopy Newton solve in one batch per GPU (AMIP production value).
+land_canopy_solve_group: 0

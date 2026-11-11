@@ -14,3 +14,5 @@ soil_texture: loam
 veg_type: c3_grass
 carbon_scheme: none
 snow_albedo_feedback: true
+# Two-leaf canopy Newton solve in one batch per GPU (AMIP production value).
+land_canopy_solve_group: 0

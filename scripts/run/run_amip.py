@@ -135,6 +135,7 @@ def _argv_federates(argv: list[str]) -> bool:
 if "--multicontroller" not in sys.argv:
     maybe_init_jax_distributed(federate=_argv_federates(sys.argv))
 
+from legoesm.atmosphere.physics.turbulence.config import refuse_retired_turbulence
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
@@ -421,6 +422,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "hybrid lat-lon C-grid — discretization-consistent with the "
              "geopotential and ln p^SB gradients (#1029). Default ON; "
              "--no-sb81-omega-conversion selects the legacy arithmetic form.",
+    )
+    parser.add_argument(
+        "--vertical-form", default=_DYCORE_DEFAULTS.vertical_form,
+        help="Vertical form of the shared hydrostatic PE core on the lat-lon "
+             "C-grid and MPAS lanes.  'legacy' (default) is each lane's pre-core "
+             "tendency, unchanged (temporary; carries #930 on lat-lon, #1029 on "
+             "MPAS and the lat-lon 50 K floor); 'as83' is Arakawa-Suarez 1983 "
+             "(energy-conserving, hybrid only); 'sb81_theta' the SB81 theta form.  "
+             "Checked against the core's list by validate_strict.",
     )
     # Task #25: JIT compile bloat at production scale.  The inline
     # SSP-RK3 calls tendency_fn 3× sequentially → XLA inlines three
@@ -1272,6 +1282,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Two-leaf canopy: fixed-point iterations of the "
                              "above-canopy Monin-Obukhov solve. Default: the "
                              "land CanopyConfig value.")
+    parser.add_argument("--land-canopy-solve-group",
+                        dest="land_canopy_solve_group", type=int,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_solve_group,
+                        help="Two-leaf canopy: columns per batch of the Newton "
+                             "solve, 0 = one batch per GPU. Default: the land "
+                             "CanopyConfig value.")
     parser.add_argument("--land-snow-insulation", dest="land_snow_insulation",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_snow_insulation,
@@ -1526,6 +1542,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Bechtold fields may differ from their defaults. "
                              "Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent}.")
+    parser.add_argument("--ifs-methox",
+                        dest="ifs_methox",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.ifs_methox,
+                        help="OpenIFS 49r1 methane-oxidation water source "
+                             "(METHOX) with the run's CH4. Default "
+                             f"{_EXPERIMENT_DEFAULTS.ifs_methox}.")
+    parser.add_argument("--ifs-ozone-chem",
+                        dest="ifs_ozone_chem",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.ifs_ozone_chem,
+                        help="OpenIFS 49r1 Cariolle ozone chemistry on an "
+                             "advected o3_ifs tracer (not fed to radiation). "
+                             "Default "
+                             f"{_EXPERIMENT_DEFAULTS.ifs_ozone_chem}.")
     parser.add_argument("--bechtold-use-ifs-subcloud-evap",
                         dest="bechtold_use_ifs_subcloud_evap",
                         action=argparse.BooleanOptionalAction,
@@ -2833,6 +2864,7 @@ def _default_discretization_for_grid(grid_type: str) -> str:
 
 
 def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+    refuse_retired_turbulence(args.turbulence, "run_amip --turbulence")
     # Defensive boundary: --grid-type/--discretization carry a None sentinel
     # default (explicitness tracking for the --truncation conflict guard in
     # _postprocess_args). A caller that skips _postprocess_args must still get
@@ -2913,6 +2945,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_scale_height_m=args.sponge_scale_height_m,
         # #1029 ω-side SB81 conversion (default ON; --no-sb81-omega-conversion = legacy).
         sb81_omega_conversion=args.sb81_omega_conversion,
+        vertical_form=args.vertical_form,
         # Task #25: time integrator selection.
         time_integrator=args.time_integrator,
     )
@@ -3180,6 +3213,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
         land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,
         land_canopy_most_n_iters=args.land_canopy_most_n_iters,
+        land_canopy_solve_group=args.land_canopy_solve_group,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None
@@ -3288,6 +3322,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
         bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
         bechtold_use_ifs_ascent=args.bechtold_use_ifs_ascent,
+        ifs_methox=args.ifs_methox,
+        ifs_ozone_chem=args.ifs_ozone_chem,
         bechtold_use_ifs_subcloud_evap=args.bechtold_use_ifs_subcloud_evap,
         bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
         bechtold_dx_m=args.bechtold_dx_m,
