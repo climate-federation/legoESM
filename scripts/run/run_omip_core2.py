@@ -6603,12 +6603,20 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
         _lm = np.asarray(state.land_mask.data, dtype=np.float64)
         _ic = np.asarray(ice_state.concentration.data, dtype=np.float64)
         _ih = np.asarray(ice_state.h_ice.data, dtype=np.float64)
+        _s = getattr(ice_state, "S_ice", None)
+        _is = None if _s is None else np.asarray(_s.data, dtype=np.float64)
         if _ic.ndim > _lm.ndim:  # multi-category: aggregate (n/a in this runner)
-            _vol = (_ic * _ih).sum(axis=-1)
+            _vc = _ic * _ih
+            _vol = _vc.sum(axis=-1)
+            if _is is not None:   # volume-weighted, so S_ice*c*h keeps the salt
+                _is = np.where(_vol > 0.0, (_vc * _is).sum(axis=-1)
+                               / np.maximum(_vol, 1.0e-30), 0.0)
             _ic = _ic.sum(axis=-1)
             _ih = np.where(_ic > 0.0, _vol / np.maximum(_ic, 1.0e-12), 0.0)
         save_kw["ice_concentration"] = _ic * _lm
         save_kw["ice_thickness"] = _ih * _lm
+        if _is is not None:
+            save_kw["ice_salinity"] = _is * _lm
     # MPAS has no separate v field; the scorer reads T/S/land_mask/lat_T/lon_T only.
     if getattr(state, "v", None) is not None:
         save_kw["v"] = np.asarray(state.v.data)

@@ -171,3 +171,30 @@ def test_cyclic_overlap_columns_are_counted_once():
     b["T"][:, 0] += 5.0                     # a change seen only in a halo copy
     [row] = _close([drop_cyclic_overlap(a), drop_cyclic_overlap(b)])
     assert abs(row["residual_Wm2"]) < 1e-9 * (Q + GEO)
+
+
+def _salty_pair(ice_gain_kg_per_m2):
+    """Ocean S drops by exactly the salt that moves into 1 m of ice."""
+    from legoesm import constants
+    a, b = _pair(Q)
+    for s in (a, b):
+        s["S"] = np.full_like(s["T"], 35.0)
+        s["ice_concentration"] = np.full((NY, NX), 0.5)
+        s["ice_thickness"] = np.full((NY, NX), 1.0)
+        s["ice_salinity"] = np.full((NY, NX), 4.0)
+    dS_ice = 1.0e3 * ice_gain_kg_per_m2 / (constants.rho_ice * 0.5 * 1.0)
+    b["ice_salinity"] += dS_ice
+    b["S"] -= 1.0e3 * ice_gain_kg_per_m2 / (RHO * H)
+    return a, b
+
+
+def test_salt_moving_into_ice_is_conserved():
+    [row] = _close(list(_salty_pair(0.2)))
+    assert abs(row["salt_rel_change"]) < 1e-14
+
+
+def test_salt_created_in_ice_is_flagged():
+    a, b = _salty_pair(0.2)
+    b["ice_salinity"] += 1.0                  # ice salt with no ocean debit
+    [row] = _close([a, b])
+    assert row["salt_rel_change"] > 1e-6

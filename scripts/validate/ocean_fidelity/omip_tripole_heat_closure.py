@@ -96,7 +96,8 @@ def drop_cyclic_overlap(snap):
 
 
 def load_snapshot(path):
-    keys = ("T", "eta", "H_bathy", "land_mask", "cell_area", "step",
+    keys = ("T", "S", "eta", "H_bathy", "land_mask", "cell_area", "step",
+            "ice_concentration", "ice_thickness", "ice_salinity",
             "time_days", "z_interface_ref", "q_net_mean", "flux_mean_n_steps",
             "flux_mean_window_s")
     with np.load(path) as z:
@@ -126,13 +127,27 @@ def heat_content(snap, z_coord, rho_0, c_p):
 
     def _f(a):
         return SimpleNamespace(data=a)
-    state = SimpleNamespace(T=_f(snap["T"]), S=_f(np.zeros_like(snap["T"])),
+    state = SimpleNamespace(T=_f(snap["T"]), S=_f(snap.get("S", np.zeros_like(snap["T"]))),
                             eta=_f(snap["eta"]), H_bathy=_f(snap["H_bathy"]),
                             land_mask=_f(snap["land_mask"]))
     tb = compute_tracer_budget(state, z_coord, grid_type="tripole",
                                grid=SimpleNamespace(area=snap["cell_area"]),
                                rho_0=rho_0, c_p=c_p)
-    return tb.heat_content, tb.volume
+    return tb.heat_content, tb.volume, tb.salt_mass
+
+
+def total_salt_kg(snap, z_coord, rho_0, c_p):
+    """Ocean + sea-ice salt [kg].  None when the snapshot lacks S or ice
+    salinity.  Every external water flux on the card (P-E, runoff, ISF,
+    restoring through water) carries no salt, so this is conserved."""
+    if "S" not in snap or "ice_salinity" not in snap:
+        return None
+    _, _, ocean = heat_content(snap, z_coord, rho_0, c_p)
+    wet = snap["land_mask"] > 0.5
+    ice = float(constants.rho_ice) * float(
+        (snap["ice_salinity"] * snap["ice_concentration"] * snap["ice_thickness"]
+         * snap["cell_area"] * wet).sum())
+    return (ocean + ice) * 1.0e-3     # PSU ~ g/kg -> kg
 
 
 def wet_area(snap):
@@ -176,8 +191,10 @@ def close_windows(snaps, z_coord_for, rho_0, c_p, flux_geo_wm2, isf_fwf_for,
                 and abs(dt_win - span) <= 1e-6 * span):
             raise SystemExit(f"FATAL: window ending day {float(b['time_days'])}: "
                              f"duration {dt_win} s != snapshot span {span} s")
-        H_a, _ = heat_content(a, z_coord_for(a), rho_0, c_p)
-        H_b, _ = heat_content(b, z_coord_for(b), rho_0, c_p)
+        zc_a, zc_b = z_coord_for(a), z_coord_for(b)
+        H_a, _, _ = heat_content(a, zc_a, rho_0, c_p)
+        H_b, _, _ = heat_content(b, zc_b, rho_0, c_p)
+        salt_a, salt_b = total_salt_kg(a, zc_a, rho_0, c_p), total_salt_kg(b, zc_b, rho_0, c_p)
         dHdt = (H_b - H_a) / dt_win
         q = b["q_net_mean"]
         _fatal_nonfinite("q_net_mean", q)
@@ -197,7 +214,9 @@ def close_windows(snaps, z_coord_for, rho_0, c_p, flux_geo_wm2, isf_fwf_for,
                "Q_isf_latent_W": Q_isf, "residual_W": resid,
                "residual_Wm2": resid / A,
                "residual_pct_of_qnet": (100.0 * resid / abs(Q_qnet)
-                                        if Q_qnet != 0.0 else None)}
+                                        if Q_qnet != 0.0 else None),
+               "salt_rel_change": (None if salt_a is None or salt_b is None
+                                   else (salt_b - salt_a) / salt_a)}
         rows.append(row)
     return rows
 
@@ -226,6 +245,9 @@ def parse_args(argv=None):
                    help="NEMO vertical file the run read (e3t_1d, gdept_1d)")
     p.add_argument("--max-residual-wm2", type=float, required=True,
                    help="gate: fail when any window's |residual| exceeds this")
+    p.add_argument("--max-salt-rel", type=float, default=None,
+                   help="gate: fail when any window's |relative change of ocean+ice "
+                        "salt| exceeds this (requires ice_salinity in the snapshots)")
     p.add_argument("--json-out", default=None)
     return p.parse_args(argv)
 
@@ -312,11 +334,21 @@ def main(argv=None) -> int:
               f"dH/dt {r['dHdt_W']:.4e} W  q_net {r['Q_qnet_W']:.4e}  "
               f"geo {r['Q_geothermal_W']:.3e}  isf {r['Q_isf_latent_W']:.3e}  "
               f"residual {r['residual_Wm2']:+.4f} W/m2 "
-              f"({r['residual_pct_of_qnet'] if r['residual_pct_of_qnet'] is None else round(r['residual_pct_of_qnet'], 3)} % of q_net)")
+              f"({r['residual_pct_of_qnet'] if r['residual_pct_of_qnet'] is None else round(r['residual_pct_of_qnet'], 3)} % of q_net); "
+              f"ocean+ice salt rel change {r['salt_rel_change']}")
     worst = max(abs(r["residual_Wm2"]) for r in rows)
     out["max_residual_wm2_gate"] = a.max_residual_wm2
     out["worst_abs_residual_wm2"] = worst
-    out["verdict"] = "PASS" if worst <= a.max_residual_wm2 else "FAIL"
+    ok = worst <= a.max_residual_wm2
+    if a.max_salt_rel is not None:
+        if any(r["salt_rel_change"] is None for r in rows):
+            raise SystemExit("FATAL: --max-salt-rel needs S and ice_salinity in every snapshot")
+        worst_salt = max(abs(r["salt_rel_change"]) for r in rows)
+        out["max_salt_rel_gate"] = a.max_salt_rel
+        out["worst_abs_salt_rel"] = worst_salt
+        print(f"[closure] worst |salt change| {worst_salt:.3e} (relative) vs gate {a.max_salt_rel}")
+        ok = ok and worst_salt <= a.max_salt_rel
+    out["verdict"] = "PASS" if ok else "FAIL"
     if a.json_out:
         Path(a.json_out).write_text(json.dumps(out, indent=1))
     print(f"[closure] worst |residual| {worst:.4f} W/m2 vs gate "
