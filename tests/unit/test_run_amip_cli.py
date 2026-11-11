@@ -2634,6 +2634,7 @@ _SMOOTH_BECHTOLD_LEAF_PRE2249 = {
     'parcel_dq': 0.001, 'precip_efficiency': 0.8,
     'precip_split_scheme': 'constant', 'rain_vapor_sink': 'formation',
     'rhebc_land': 0.75, 'rhebc_land_deep': 0.7, 'rprcon': 0.0014,
+    'snow_refill_width_kg_m2_s': 1e-08,
     'stochastic_amplitude': 0.5, 'stochastic_decorrelation': 7200.0,
     'subcloud_evap_scale': 1.0, 'subsidence_solve': 'implicit_flux',
     'tau_M_u_relax': 1800.0, 'tau_bl': 3600.0, 'theta_implicit': 1.0,
