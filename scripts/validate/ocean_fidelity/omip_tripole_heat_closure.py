@@ -348,6 +348,8 @@ def main(argv=None) -> int:
     if a.max_salt_rel is not None:
         if any(r["salt_rel_change"] is None for r in rows):
             raise SystemExit("FATAL: --max-salt-rel needs S and ice_salinity in every snapshot")
+        _fatal_nonfinite("salt_rel_change",
+                         np.array([r["salt_rel_change"] for r in rows]))
         worst_salt = max(abs(r["salt_rel_change"]) for r in rows)
         out["max_salt_rel_gate"] = a.max_salt_rel
         out["worst_abs_salt_rel"] = worst_salt
