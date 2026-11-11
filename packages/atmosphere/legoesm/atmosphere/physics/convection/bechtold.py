@@ -71,6 +71,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.smooth import positive_part_c1, validate_smoothing_width
 from legoesm.thermo import saturation_mixing_ratio, saturation_specific_humidity
 from legoesm.atmosphere.physics._shared import (
     compute_rho,
@@ -1212,7 +1213,9 @@ def ifs_subcloud_rain_evaporation(
     rhebc_land_val: float = _IFS_RHEBC_LAND,
     rhebc_land_deep_val: float = _IFS_RHEBC_LAND_DEEP,
     rmfcfl: float = 1.0,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+    *,
+    snow_refill_width: float,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     r"""IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475).
 
     Oracle recurrence, marched DOWNWARD (both the IFS ``JK`` and our level
@@ -1312,9 +1315,18 @@ def ifs_subcloud_rain_evaporation(
     fluxes (``ZDENOM``, :484-488).  A snow flux overdrawn by melt plus its
     share is refilled from the rain (:493-495); the oracle keeps ``PDPMEL``
     and moves the water, the port books the same fluxes as a reduced
-    effective melt, so its fusion-heat bookkeeping stays exact.  That refill
-    is a hard ``max`` on traced state, like the march's other clips (RULE 5
-    gap, recorded).
+    effective melt, so its fusion-heat bookkeeping stays exact.
+
+    KNOWN DIFFERENCE (RULE 5): the refill ``max(-snow_left, 0)`` is the C1
+    one-sided ``positive_part_c1`` of width ``snow_refill_width`` [kg/m^2/s]
+    (static float; 0 = the oracle's hard switch,
+    ``BechtoldConfig.snow_refill_width_kg_m2_s``, default 1e-8).  It is
+    exactly the oracle for ``snow_left >= 0`` (no overdraft: snow-free
+    columns, fully melted layers) and for overdrafts deeper than the width;
+    inside ``0 < -snow_left < width`` it refills up to ``4/27 width`` too
+    little, so the snow flux passed down can dip below 0 by that much
+    (1.5e-9 kg/m^2/s at the default; water is conserved).  Measured per case
+    in tests/unit/test_bechtold.py (``_REFILL_GAP``).
     """
     _dtype = jnp.result_type(q_v, q_sat_env, dq_r_conv_dt, below_lcl)
     g = constants.g
@@ -1411,10 +1423,12 @@ def ifs_subcloud_rain_evaporation(
         evap_s = jnp.where(zrfl > _IFS_EVAP_FLUX_TINY,
                            evap_k * snow_top / zrfl_safe, 0.0)
         snow_left = snow_top - melt_k - evap_s + (1.0 - alpha_k) * src_k
-        melt_k = melt_k - jnp.maximum(-snow_left, 0.0)
+        over = positive_part_c1(
+            -snow_left, math.inf if snow_refill_width == 0 else 1.0 / snow_refill_width)
+        melt_k = melt_k - over
         rain_out = (flux_top - (evap_k - evap_s) + melt_k
                     + alpha_k * src_k).astype(_dtype)
-        snow_out = jnp.maximum(snow_left, 0.0).astype(_dtype)
+        snow_out = (snow_left + over).astype(_dtype)
         return (rain_out, snow_out), (evap_k, melt_k, evap_s)
 
     ncol = q_v.shape[0]
@@ -2218,6 +2232,8 @@ def bechtold_convection(
             "(the shallow target is applied through the IFS closure's "
             "class blend); enable both or neither."
         )
+    validate_smoothing_width("BechtoldConfig snow_refill_width_kg_m2_s",
+                             config.snow_refill_width_kg_m2_s)
     if config.use_ifs_snow_melt and not config.use_ifs_subcloud_evap:
         raise ValueError(
             "use_ifs_snow_melt requires use_ifs_subcloud_evap=True (the "
@@ -3171,6 +3187,7 @@ def bechtold_convection(
                 evap_scale=config.subcloud_evap_scale,
                 rhebc_land_val=config.rhebc_land,
                 rhebc_land_deep_val=config.rhebc_land_deep,
+                snow_refill_width=config.snow_refill_width_kg_m2_s,
             ))
         dT_dt = dT_dt - (constants.L_v / constants.c_pd) * evap_rate_ifs
         dq_v_dt = dq_v_dt + evap_rate_ifs

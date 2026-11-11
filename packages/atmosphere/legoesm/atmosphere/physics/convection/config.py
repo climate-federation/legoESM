@@ -52,6 +52,7 @@ __param_spec__ = {
     "BechtoldConfig": {
         "scheme_key": "atm.conv.BechtoldConfig",
         "excluded": {
+            "snow_refill_width_kg_m2_s": "numerics: RULE 5 width of the sub-cloud snow refill max(-snow_left, 0) (cuflxn.F90:493-495; 0 = the oracle's hard switch)",
             "ifs_shallow_supply_width_w_m2": "smoothing width of the faithful-chain max(ZDHPBL, 0) shallow supply ramp (RULE 5 differentiable form), not a tunable",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger gate",
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
@@ -1567,6 +1568,10 @@ class BechtoldConfig(NamedTuple):
     # Default True since 2026-07-17 (RCE A/B: T-drift 0.052 -> 0.026 K/day;
     # AMIP stable).
     use_ifs_snow_melt: bool = True
+    # RULE 5 width [kg/m^2/s] of the snow refill in that march (cuflxn.F90:
+    # 493-495, an overdrawn snow flux topped up from the rain): a one-sided C1
+    # positive part; 0 = the oracle's hard switch.  Default voted 2026-11-10.
+    snow_refill_width_kg_m2_s: float = 1.0e-8
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0

@@ -2189,6 +2189,10 @@ class ExperimentConfig(NamedTuple):
     # of the deep-convection trigger [J/kg]; 0 = CAM's hard switch.  None = the
     # scheme default; the production deck names it.
     zm_trigger_width_J_kg: float | None = None
+    # BechtoldConfig.snow_refill_width_kg_m2_s: RULE 5 width of the legacy
+    # Bechtold sub-cloud snow refill [kg/m^2/s]; 0 = the oracle's hard switch.
+    # None = the scheme default; decks running legacy Bechtold name it.
+    bechtold_snow_refill_width_kg_m2_s: float | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -3239,6 +3243,16 @@ class ExperimentConfig(NamedTuple):
                 if not _ok:
                     errors.append(f"{_f} must be a number in [{_lo}, {_hi}] "
                                   f"(the scheme's __param_spec__), got {_v!r}")
+        if self.bechtold_snow_refill_width_kg_m2_s is not None:
+            if self.convection != "bechtold":
+                errors.append("bechtold_snow_refill_width_kg_m2_s is a Bechtold "
+                              f"field; got convection={self.convection!r}")
+            from legoesm.core.smooth import validate_smoothing_width
+            try:
+                validate_smoothing_width("bechtold_snow_refill_width_kg_m2_s",
+                                         self.bechtold_snow_refill_width_kg_m2_s)
+            except ValueError as exc:
+                errors.append(str(exc))
         for _f in ZM_TRIGGER_FIELDS:
             _v = getattr(self, _f)
             if _v is None:

@@ -6087,3 +6087,37 @@ def test_large_yeager_width_flags_thread_to_config():
     assert cfg.surface_large_yeager_neutral_width == 0.0
     assert cfg.surface_large_yeager_dthv_width == 0.02
     assert cfg.surface_large_yeager_cd_cutoff_width == 0.25
+
+
+def test_bechtold_snow_refill_width_round_trip():
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-snow-refill-width-kg-m2-s", "0.0"]), parser))
+    assert cfg.bechtold_snow_refill_width_kg_m2_s == 0.0
+    assert _resolve_convection(cfg)[1].snow_refill_width_kg_m2_s == 0.0
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_snow_refill_width_kg_m2_s is None
+    assert (_resolve_convection(d)[1].snow_refill_width_kg_m2_s
+            == BechtoldConfig().snow_refill_width_kg_m2_s)
+    for bad in (-1.0, float("nan"), 1.0e-40, True):
+        with pytest.raises(ValueError, match="bechtold_snow_refill_width_kg_m2_s"):
+            ExperimentConfig(convection="bechtold",
+                             bechtold_snow_refill_width_kg_m2_s=bad).validate_strict()
+    with pytest.raises(ValueError, match="bechtold_snow_refill_width_kg_m2_s"):
+        ExperimentConfig(convection="zhang_mcfarlane",
+                         bechtold_snow_refill_width_kg_m2_s=1e-8).validate_strict()
+
+
+def test_sundqvist_deck_names_the_snow_refill_width():
+    import pathlib
+    import yaml
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+    deck = yaml.safe_load((pathlib.Path(__file__).resolve().parents[2] / "config"
+                           / "amip" / "amip_sundqvist_l36.yaml").read_text())
+    assert (deck["bechtold_snow_refill_width_kg_m2_s"]
+            == BechtoldConfig().snow_refill_width_kg_m2_s)

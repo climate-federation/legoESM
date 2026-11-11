@@ -1853,8 +1853,7 @@ def test_ifs_subcloud_evap_analytic_fortran_mirror():
         evap_rate, rain_scale, _, _ = ifs_subcloud_rain_evaporation(
             jnp.asarray(q), jnp.asarray(qsat), jnp.asarray(p_half),
             jnp.asarray(dp), jnp.asarray(dq_r), jnp.asarray(below),
-            jnp.asarray(rh_b), jnp.asarray(rh_t), jnp.asarray(dw_case), dt,
-        )
+            jnp.asarray(rh_b), jnp.asarray(rh_t), jnp.asarray(dw_case), dt, snow_refill_width=0.0)
         got_evap = np.asarray(evap_rate) * dp / g       # back to kg/m2/s
         # tol keyed on the JAX compute dtype (np promotion above would
         # always report float64 even when the scan ran in fp32).
@@ -1885,7 +1884,7 @@ def test_ifs_subcloud_evap_rh_break_and_conservation():
 
     def run(q):
         e, sc, _, _ = ifs_subcloud_rain_evaporation(
-            q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
+            q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt, snow_refill_width=0.0)
         return e, sc
 
     # wetter than the 0.92 break everywhere below cloud: ~no evaporation.
@@ -2002,7 +2001,7 @@ def test_ifs_subcloud_evap_fractional_gate_is_convex_blend():
     def evap_with_gate(g_mid):
         below = jnp.asarray([[0.0, g_mid, 0.0]])        # only the middle layer
         e, _, _, _ = ifs_subcloud_rain_evaporation(
-            q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
+            q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt, snow_refill_width=0.0)
         return float(e[0, 1] * dp[0, 1] / constants.g)
 
     e_full = evap_with_gate(1.0)
@@ -2834,14 +2833,14 @@ def test_ifs_land_rhebc_blend_and_toggle():
     rh_b, rh_t = jnp.array([0.9]), jnp.array([0.7])
     dw = jnp.array([1.0])
     e_oc, _, _, _ = ifs_subcloud_rain_evaporation(
-        q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt)
+        q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt, snow_refill_width=0.0)
     e_oc2, _, _, _ = ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
-        land_frac=None)
+        land_frac=None, snow_refill_width=0.0)
     assert jnp.array_equal(e_oc, e_oc2), "None land_frac must be inert"
     e_land, _, _, _ = ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
-        land_frac=jnp.array([1.0]))
+        land_frac=jnp.array([1.0]), snow_refill_width=0.0)
     # deep land break 0.70 < ocean 0.85: the ZRMIN bound releases LESS water
     # before the break is hit => land evaporates LESS OR EQUAL here.
     assert float(jnp.sum(e_land)) <= float(jnp.sum(e_oc)) + 1e-18
@@ -2903,7 +2902,7 @@ def test_ifs_snow_melt_march_oracle_pin():
     dw = jnp.array([1.0])
     e, sc, melt, _ = ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, dt,
-        snow_melt=True, T=T, p_full=pf)
+        snow_melt=True, T=T, p_full=pf, snow_refill_width=0.0)
     # hand march (saturated => t_wet = T; alpha=0 at T<=tf, else FOEALFCU(T))
     from legoesm.atmosphere.physics.convection.bechtold import (
         _ifs_liquid_fraction_cu)
@@ -2989,9 +2988,9 @@ def test_ifs_snow_melt_same_layer_melt_does_not_evaporate():
     args = (q, qsat, p_half, dp, dq_r, below, jnp.array([0.9]), jnp.array([0.8]),
             jnp.array([1.0]), dt)
     e, _, melt, e_s = ifs_subcloud_rain_evaporation(
-        *args, snow_melt=True, T=T, p_full=pf)
+        *args, snow_melt=True, T=T, p_full=pf, snow_refill_width=0.0)
     e_cold, _, melt_cold, _ = ifs_subcloud_rain_evaporation(
-        *args, snow_melt=True, T=T.at[0, 1].set(tf - 2.0), p_full=pf)
+        *args, snow_melt=True, T=T.at[0, 1].set(tf - 2.0), p_full=pf, snow_refill_width=0.0)
     assert float(melt[0, 1]) > 0.0 and float(melt_cold[0, 1]) == 0.0
     # layer 1 sublimates the entering snow, melt or no melt
     assert float(e[0, 1]) > 0.0
@@ -3329,12 +3328,90 @@ def test_ifs_subcloud_evaporation_takes_snow_too():
     kw = dict(T=T, p_full=pf)
     e_snow, _, melt, e_s = ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, 600.0,
-        snow_melt=True, **kw)
+        snow_melt=True, **kw, snow_refill_width=0.0)
     e_rain, _, _, e_s_rain = ifs_subcloud_rain_evaporation(
         q, qsat, p_half, dp, dq_r, below, rh_b, rh_t, dw, 600.0,
-        snow_melt=False, **kw)
+        snow_melt=False, **kw, snow_refill_width=0.0)
     assert float(jnp.sum(e_snow)) > 0.0
     np.testing.assert_allclose(e_snow, e_rain, rtol=1e-12, atol=0.0)
     np.testing.assert_allclose(e_s, e_snow, rtol=1e-12, atol=0.0)
     assert float(jnp.max(jnp.abs(e_s_rain))) == 0.0
     assert float(jnp.max(jnp.abs(melt[:, :-1]))) == 0.0
+
+
+# --- snow refill width (RULE 5) -----------------------------------------------
+# Layer-1 relative humidity per case.  Case 0: layer 1 sublimates and keeps
+# snow; case 1: it melts all the snow and is too moist to sublimate (snow_left
+# = 0, no overdraft); cases 2-4: it melts all the snow AND sublimates 4e-9,
+# 1.6e-9 and 8e-9 kg/m^2/s of it, so the snow is overdrawn and refilled from
+# the rain (cuflxn.F90:493-495), inside or near the 1e-8 band.
+_REFILL_RH = (0.3, 0.999, 0.85 - 5e-6, 0.85 - 2e-6, 0.85 - 1e-5)
+_REFILL_WIDTH = 1.0e-8
+# melt into layer 1 [kg/m^2/s] at the hard limit
+_REFILL_MELT1_HARD = (6.982851622164351e-05, 8.158137334083883e-04,
+                      8.158096543397212e-04, 8.158121017809213e-04,
+                      8.158055752710542e-04)
+# per case, max|default - hard| / max|hard| over the column
+_REFILL_GAP = {
+    "melt": (0.0, 0.0, 2.9214669281351651e-06, 2.3343266304575804e-06,
+             5.6541533416988448e-07),
+    "e_snow": (0.0, 0.0, 0.19281681725694713, 0.3851638940255532,
+               0.01865870602760872),
+}
+
+
+def _refill_column(width, rh1=None):
+    tf = constants.T_freeze
+    rh = jnp.array(_REFILL_RH) if rh1 is None else rh1
+    n = rh.shape[0]
+    T = jnp.tile(jnp.array([[tf - 10.0, tf + 6.0, tf + 8.0, tf + 10.0]]), (n, 1))
+    p_half = jnp.tile(jnp.array([[400e2, 600e2, 800e2, 920e2, 1000e2]]), (n, 1))
+    pf = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    qsat = jnp.full((n, 4), 8e-3)
+    q = (qsat * 0.3).at[:, 1].set(qsat[:, 1] * rh)
+    dq_r = jnp.zeros((n, 4)).at[:, 0].set(4e-7)
+    out = ifs_subcloud_rain_evaporation(
+        q, qsat, p_half, dp, dq_r, jnp.ones((n, 4)), jnp.full((n,), 0.9),
+        jnp.full((n,), 0.8), jnp.ones((n,)), 600.0, snow_melt=True, T=T,
+        p_full=pf, snow_refill_width=width)
+    return out, dp
+
+
+def test_snow_refill_hard_limit_is_the_oracle_melt():
+    (_, _, melt, e_s), dp = _refill_column(0.0)
+    np.testing.assert_allclose(np.asarray(melt[:, 1] * dp[:, 1]) / constants.g,
+                               _REFILL_MELT1_HARD, rtol=1e-12, atol=0.0)
+    # overdraft cases: melt + sublimation use exactly the entering snow
+    snow_in = 4e-7 * float(dp[0, 0]) / constants.g
+    used = np.asarray((melt[2:, 1] + e_s[2:, 1]) * dp[2:, 1]) / constants.g
+    np.testing.assert_allclose(used, snow_in, rtol=1e-12)
+
+
+def test_snow_refill_default_gap_per_case():
+    assert BechtoldConfig().snow_refill_width_kg_m2_s == _REFILL_WIDTH
+    (e0, _, m0, s0), _ = _refill_column(0.0)
+    (e1, _, m1, s1), _ = _refill_column(_REFILL_WIDTH)
+    np.testing.assert_array_equal(np.asarray(e1), np.asarray(e0))
+    for name, a0, a1 in (("melt", m0, m1), ("e_snow", s0, s1)):
+        a0, a1 = np.asarray(a0), np.asarray(a1)
+        gap = np.max(np.abs(a1 - a0), axis=1) / np.max(np.abs(a0), axis=1)
+        np.testing.assert_allclose(gap, _REFILL_GAP[name], rtol=1e-6, atol=1e-12,
+                                   err_msg=name)
+
+
+def test_snow_refill_gradient_at_default_width():
+    """Through the refill (case 2 sits inside the band): finite, non-zero,
+    and not the hard path's derivative."""
+    from jax.test_util import check_grads
+
+    def melt1(rh, width):
+        (_, _, m, _), dp = _refill_column(width, jnp.reshape(rh, (1,)))
+        return m[0, 1] * dp[0, 1] / constants.g * 1e4
+
+    rh = jnp.asarray(_REFILL_RH[2])
+    check_grads(lambda r: melt1(r, _REFILL_WIDTH), (rh,), order=1,
+                modes=("rev",), eps=1e-7)
+    g = float(jax.grad(lambda r: melt1(r, _REFILL_WIDTH))(rh))
+    g_hard = float(jax.grad(lambda r: melt1(r, 0.0))(rh))
+    assert np.isfinite(g) and g != 0.0 and g != g_hard, (g, g_hard)

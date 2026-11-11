@@ -1574,6 +1574,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(openifs cuflxn.F90 FOEALFCU wet-bulb split, "
                              "RTAUMEL melt; FOLD variant). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_snow_melt}.")
+    parser.add_argument("--bechtold-snow-refill-width-kg-m2-s", type=float,
+                        default=None, dest="bechtold_snow_refill_width_kg_m2_s",
+                        help="BechtoldConfig.snow_refill_width_kg_m2_s: RULE 5 "
+                             "width [kg/m^2/s] of the sub-cloud snow refill "
+                             "(0 = the oracle's hard switch). Default: the "
+                             "scheme's own value.")
     parser.add_argument("--bechtold-use-ifs-capdcycl",
                         dest="bechtold_use_ifs_capdcycl",
                         action=argparse.BooleanOptionalAction,
@@ -3309,6 +3315,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
+        bechtold_snow_refill_width_kg_m2_s=args.bechtold_snow_refill_width_kg_m2_s,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,

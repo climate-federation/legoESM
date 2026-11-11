@@ -4482,6 +4482,11 @@ def _resolve_convection(config):
         )
         if _pe is not None:
             _bechtold_kwargs["precip_efficiency"] = _pe
+        _w = config.bechtold_snow_refill_width_kg_m2_s
+        if _w is not None:
+            from legoesm.core.smooth import validate_smoothing_width
+            validate_smoothing_width("bechtold_snow_refill_width_kg_m2_s", _w)
+            _bechtold_kwargs["snow_refill_width_kg_m2_s"] = float(_w)
         conv_config = BechtoldConfig(**_bechtold_kwargs)
     else:
         cc = ConvectionConfig(scheme=scheme)

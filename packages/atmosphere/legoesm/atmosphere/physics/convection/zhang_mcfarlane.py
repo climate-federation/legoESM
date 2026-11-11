@@ -50,6 +50,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.smooth import validate_smoothing_width
 from legoesm.atmosphere.physics.convection._zm_cam6 import (
     Q_MIN_VAPOR,
     convtran,
@@ -292,18 +293,9 @@ def zhang_mcfarlane_convection(
 
 
 def validate_trigger_width(w) -> None:
-    """The one legal range of ``trigger_width_J_kg``: 0 (CAM's hard switch) or
-    in [sqrt(t), 1/sqrt(t)], t = finfo(float32).tiny, the numerics bound of
-    :func:`validate_detrain_widths` (below it the ramp's slope ``1/width``
-    overflows float32 and the gradient turns NaN).  Booleans are refused (a
-    YAML ``false`` would read as the hard switch); so is anything that is not
-    a plain number, since the width selects a static branch."""
-    lo = math.sqrt(float(jnp.finfo(jnp.float32).tiny))
-    if (isinstance(w, bool) or not isinstance(w, (int, float))
-            or not (w == 0 or lo <= w <= 1.0 / lo)):
-        raise ValueError(
-            "ZhangMcFarlaneConfig trigger_width_J_kg must be 0 (CAM's hard "
-            f"switch) or in [{lo:.3e}, {1.0 / lo:.3e}]; got {w!r}.")
+    """The one legal range of ``trigger_width_J_kg`` (0 = CAM's hard switch):
+    :func:`legoesm.core.smooth.validate_smoothing_width`."""
+    validate_smoothing_width("ZhangMcFarlaneConfig trigger_width_J_kg", w)
 
 
 def validate_detrain_widths(w_T, w_n) -> None:
