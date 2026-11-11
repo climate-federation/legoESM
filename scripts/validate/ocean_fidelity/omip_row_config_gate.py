@@ -3,10 +3,13 @@
 A row's run must differ from the previous adopted run in exactly the voted
 scheme group.  This compares two ``run_manifest.json`` files of the same leg:
 
-* the command lines, parsed with the runner's own argument parser, so
-  spelling and defaults do not matter; per-run paths (``--output``,
+* the command lines, each parsed with the runner's argument parser AS OF
+  THAT RUN'S COMMIT (``git show <commit>:scripts/run/run_omip_core2.py``),
+  so spelling does not matter and a default that changed between the two
+  commits shows up as a difference; per-run paths (``--output``,
   ``--restart-save``, ``--restart-from``) are ignored;
-* the flattened ``resolved_config``, minus ``output_path``.
+* the flattened ``resolved_config`` (a key present on one side only is a
+  difference, empty sections included), minus ``output_path``.
 
 It exits 0 only when the option differences are exactly ``--expect``
 (``dest=value`` pairs), the resolved-config differences all match an
@@ -19,13 +22,30 @@ import argparse
 import fnmatch
 import json
 import shlex
+import subprocess
 import sys
+import types
+from pathlib import Path
 
 PER_RUN_DESTS = {"output", "restart_save", "restart_from"}
+RUNNER = "scripts/run/run_omip_core2.py"
+_ABSENT = object()
+
+
+def parser_at(commit):
+    """The runner's argument parser as it was at ``commit``."""
+    src = subprocess.run(["git", "show", f"{commit}:{RUNNER}"], check=True,
+                         capture_output=True, text=True).stdout
+    mod = types.ModuleType(f"_core2_at_{commit[:12]}")
+    mod.__file__ = str(Path(RUNNER).resolve())
+    exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+    return mod._build_arg_parser()
 
 
 def _flatten(d, pre=""):
     if isinstance(d, dict):
+        if not d and pre:
+            return {pre: {}}
         out = {}
         for k, v in d.items():
             out.update(_flatten(v, f"{pre}.{k}" if pre else str(k)))
@@ -47,11 +67,12 @@ def _parse_expect(items):
     return out
 
 
-def gate(base, cand, parser, expect, allow_config):
+def gate(base, cand, parser_base, parser_cand, expect, allow_config):
     problems = []
-    ob, oc = _options(base, parser), _options(cand, parser)
-    diff = {k: (ob.get(k), oc.get(k)) for k in sorted(set(ob) | set(oc))
-            if ob.get(k) != oc.get(k)}
+    ob, oc = _options(base, parser_base), _options(cand, parser_cand)
+    diff = {k: (ob.get(k, _ABSENT), oc.get(k, _ABSENT))
+            for k in sorted(set(ob) | set(oc))
+            if ob.get(k, _ABSENT) != oc.get(k, _ABSENT)}
     for k, (vb, vc) in diff.items():
         if k not in expect:
             problems.append(f"option {k}: {vb!r} -> {vc!r} (not in the row)")
@@ -63,10 +84,12 @@ def gate(base, cand, parser, expect, allow_config):
     fb = _flatten(base["config"]["resolved_config"])
     fc = _flatten(cand["config"]["resolved_config"])
     for k in sorted(set(fb) | set(fc)):
-        if k == "output_path" or fb.get(k) == fc.get(k):
+        vb, vc = fb.get(k, _ABSENT), fc.get(k, _ABSENT)
+        if k == "output_path" or vb == vc:
             continue
         if not any(fnmatch.fnmatch(k, g) for g in allow_config):
-            problems.append(f"config {k}: {fb.get(k)!r} -> {fc.get(k)!r}")
+            show = lambda v: "<absent>" if v is _ABSENT else repr(v)  # noqa: E731
+            problems.append(f"config {k}: {show(vb)} -> {show(vc)}")
     return diff, problems
 
 
@@ -79,10 +102,11 @@ def main(argv=None):
     p.add_argument("--allow-config", nargs="*", default=[],
                    help="resolved_config key globs the row may change")
     a = p.parse_args(argv)
-    from scripts.run.run_omip_core2 import _build_arg_parser
     base = json.load(open(a.baseline))
     cand = json.load(open(a.candidate))
-    diff, problems = gate(base, cand, _build_arg_parser(), _parse_expect(a.expect),
+    pb = parser_at(base["legoESM"]["commit"])
+    pc = parser_at(cand["legoESM"]["commit"])
+    diff, problems = gate(base, cand, pb, pc, _parse_expect(a.expect),
                           a.allow_config)
     for k, (vb, vc) in diff.items():
         print(f"[row-gate] option {k}: {vb!r} -> {vc!r}")
