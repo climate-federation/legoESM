@@ -1225,14 +1225,17 @@ def test_canopy_smoothing_widths_survive_the_calibration(monkeypatch, tmp_path):
         land_canopy_rh_cap_smoothing_width=0.02,
         land_canopy_zeta_cap_smoothing_width=0.03,
         land_canopy_most_n_iters=7,
+        land_canopy_solve_group=64,
     )
     d = CanopyConfig()
-    assert (d.rh_cap_smoothing_width, d.zeta_cap_smoothing_width, d.most_n_iters) != (0.02, 0.03, 7)
+    assert (d.rh_cap_smoothing_width, d.zeta_cap_smoothing_width, d.most_n_iters,
+            d.solve_group) != (0.02, 0.03, 7, 64)
     base.validate_strict()
     drv = ModelDriver(base, output_dir=tmp_path / "w")
     drv.setup()
     ss = drv.physics.land_ml_cfg.surface_scheme
-    assert (ss.rh_cap_smoothing_width, ss.zeta_cap_smoothing_width, ss.most_n_iters) == (0.02, 0.03, 7)
+    assert (ss.rh_cap_smoothing_width, ss.zeta_cap_smoothing_width, ss.most_n_iters,
+            ss.solve_group) == (0.02, 0.03, 7, 64)
 
 
 def test_pipeline_land_tile_gets_moist_lowest_level_density(monkeypatch, tmp_path):
