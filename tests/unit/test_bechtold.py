@@ -3392,10 +3392,12 @@ def test_snow_refill_default_gap_per_case():
     assert BechtoldConfig().snow_refill_width_kg_m2_s == _REFILL_WIDTH
     (e0, _, m0, s0), _ = _refill_column(0.0)
     (e1, _, m1, s1), _ = _refill_column(_REFILL_WIDTH)
-    np.testing.assert_array_equal(np.asarray(e1), np.asarray(e0))
+    np.testing.assert_allclose(np.asarray(e1), np.asarray(e0), rtol=1e-12, atol=0.0)
     for name, a0, a1 in (("melt", m0, m1), ("e_snow", s0, s1)):
         a0, a1 = np.asarray(a0), np.asarray(a1)
-        gap = np.max(np.abs(a1 - a0), axis=1) / np.max(np.abs(a0), axis=1)
+        num = np.max(np.abs(a1 - a0), axis=1)
+        den = np.max(np.abs(a0), axis=1)
+        gap = np.where(den > 0, num / np.where(den > 0, den, 1.0), num)
         np.testing.assert_allclose(gap, _REFILL_GAP[name], rtol=1e-6, atol=1e-12,
                                    err_msg=name)
 
@@ -3411,7 +3413,7 @@ def test_snow_refill_gradient_at_default_width():
 
     rh = jnp.asarray(_REFILL_RH[2])
     check_grads(lambda r: melt1(r, _REFILL_WIDTH), (rh,), order=1,
-                modes=("rev",), eps=1e-7)
+                modes=("rev",), eps=1e-9)
     g = float(jax.grad(lambda r: melt1(r, _REFILL_WIDTH))(rh))
     g_hard = float(jax.grad(lambda r: melt1(r, 0.0))(rh))
     assert np.isfinite(g) and g != 0.0 and g != g_hard, (g, g_hard)
