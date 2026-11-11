@@ -2446,7 +2446,9 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
               f"seam wet cells {int(_wet[:, 0].sum())}/{int(_wet[:, 1].sum())}")
     if nemo_geometry == "domain_cfg":
         # NEMO's own cells (domzgr.F90:141-142): bottom_level + e3t_0 of the
-        # bottom cell (may exceed e3t_1d) + 3-D e3w_0, no thin-cell snap.
+        # bottom cell (may exceed e3t_1d), no thin-cell snap.  ORCA1's
+        # key_vco_1d3d makes e3w_0 the 1-D e3w_1d in every column
+        # (domzgr_substitute.h90:71-76).
         import xarray as xr
         from legoesm.core.precision import resolve_dtype as _resolve_dtype
         from legoesm.grids.tripole import mesh_file_list
@@ -2458,11 +2460,11 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         with xr.open_dataset(mesh_file_list(mesh_path)[0]) as _m:
             _lat = np.squeeze(np.asarray(_m["gphit"].values, dtype=np.float64))
             _lon = np.squeeze(np.asarray(_m["glamt"].values, dtype=np.float64))
-        n_wet, bot_e3t, e3w_0, _ = read_domain_cfg_geometry(
+        n_wet, bot_e3t, e3w_1d = read_domain_cfg_geometry(
             nemo_domain_cfg, _lat, _lon)
         if ew_cyclic_overlap:
-            n_wet, bot_e3t, e3w_0 = (_ew_overlap_fill(x)
-                                     for x in (n_wet, bot_e3t, e3w_0))
+            n_wet, bot_e3t = _ew_overlap_fill(n_wet), _ew_overlap_fill(bot_e3t)
+        n_wet, bot_e3t = pad_mask_bathy_south(n_wet, bot_e3t, n_pad)
         if not np.array_equal(n_wet > 0, land_mask > 0.5):
             raise ValueError(
                 f"--nemo-geometry domain_cfg: wet columns of {nemo_domain_cfg} "
@@ -2471,7 +2473,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         _dt = _resolve_dtype(None, "storage")
         z_coord = create_full_step_coordinate(
             z_coord, n_wet - 1, bottom_thickness=bot_e3t)._replace(
-            nemo_e3w_0=jnp.asarray(e3w_0, dtype=_dt),
+            nemo_e3w_0=jnp.asarray(np.broadcast_to(
+                e3w_1d, n_wet.shape + e3w_1d.shape), dtype=_dt),
             nemo_e3w_mesh_reference=True)
         H_bathy = np.asarray(z_coord.h_partial, dtype=np.float64).sum(axis=-1)
         model = LatLonCGridOceanModel(grid, z_coord, config)
@@ -6712,6 +6715,11 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
     if z_coord is not None and getattr(z_coord, "z_half_ref", None) is not None:
         zh = np.asarray(z_coord.z_half_ref)              # (nlev+1,), <=0
         save_kw["z_center_ref"] = np.abs(0.5 * (zh[:-1] + zh[1:]))   # (nlev,) positive
+    if z_coord is not None and getattr(z_coord, "bottom_level", None) is not None:
+        # A bottom cell thicker than its reference level puts the next
+        # level's centre above the floor; the MLD wet mask needs the real
+        # deepest wet level, not only z_center_ref < H_bathy.
+        save_kw["bottom_level"] = np.asarray(z_coord.bottom_level)
     # Caller-supplied diagnostic arrays (``--kprofile-snapshots`` writes the
     # closure's viscosity and diffusivity here).  Kept as EXTRA keys so an old
     # reader ignores them and an old snapshot still loads.
@@ -6938,9 +6946,14 @@ def _mld_now(state, z_coord):
     Hb = getattr(state.H_bathy, "data", state.H_bathy)
     mask = getattr(state.land_mask, "data", state.land_mask)
     wet = ((z_c[(None,) * jnp.ndim(Hb) + (slice(None),)] < Hb[..., None])
-           & (mask[..., None] > 0.5)).astype(T.dtype)
+           & (mask[..., None] > 0.5))
+    bl = getattr(z_coord, "bottom_level", None)
+    if bl is not None:
+        # Thick bottom cells (--nemo-geometry domain_cfg) put the next
+        # level's centre above the floor; that level is not wet.
+        wet = wet & (jnp.arange(z_c.shape[0]) <= jnp.asarray(bl)[..., None])
     return mixed_layer_depth(T, S, z_c, delta_sigma=0.01,
-                             wet_mask=wet, bottom_depth=Hb)
+                             wet_mask=wet.astype(T.dtype), bottom_depth=Hb)
 
 
 def _snapshot_extra(args, model, state, sf, dt, z_coord, flux_acc):

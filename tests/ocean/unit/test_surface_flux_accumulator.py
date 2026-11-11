@@ -399,3 +399,40 @@ def test_velocity_window_means_are_plain_means_on_their_own_staggering():
     acc.add(None, state=SimpleNamespace(T=SimpleNamespace(data=np.ones((1, 1, 1))),
                                         S=SimpleNamespace(data=np.ones((1, 1, 1)))))
     assert "u_mean" not in acc.drain()
+
+
+def _thick_bottom_column():
+    import jax.numpy as jnp
+    z_half = jnp.arange(5, dtype=jnp.float64) * 10.0             # 0..40 m
+    # Two wet levels; the bottom cell spans 10-35 m, thicker than its 10 m
+    # reference, so level 2's centre (25 m) lies above the 35 m floor.
+    T = jnp.broadcast_to(jnp.array([20.0, 20.0, 5.0, 5.0]), (1, 1, 4))
+    S = jnp.full((1, 1, 4), 35.0)
+    return z_half, T, S, jnp.full((1, 1), 35.0), jnp.ones((1, 1)), jnp.array([[1]])
+
+
+def test_the_online_mld_ignores_a_dry_level_above_a_thick_bottom_cell():
+    from legoesm.ocean.diagnostics import mixed_layer_depth
+    z_half, T, S, Hb, mask, bl = _thick_bottom_column()
+    state = SimpleNamespace(T=T, S=S, H_bathy=Hb, land_mask=mask)
+    z_c = np.abs(0.5 * (np.asarray(z_half)[:-1] + np.asarray(z_half)[1:]))
+    got = _driver()._mld_now(state, SimpleNamespace(z_half_ref=z_half, bottom_level=bl))
+    wet2 = np.array([1.0, 1.0, 0.0, 0.0])[None, None, :]
+    want = mixed_layer_depth(T, S, z_c, delta_sigma=0.01, wet_mask=wet2, bottom_depth=Hb)
+    wrong = _driver()._mld_now(state, SimpleNamespace(z_half_ref=z_half))
+    np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-12)
+    assert abs(float(np.asarray(wrong).ravel()[0]) - float(np.asarray(got).ravel()[0])) > 1.0
+
+
+def test_the_scorer_mld_ignores_a_dry_level_above_a_thick_bottom_cell():
+    from scripts.validate.ocean_fidelity.compare_three_way_nemo import _lego_mld
+    z_half, T, S, Hb, mask, bl = _thick_bottom_column()
+    z_c = np.abs(0.5 * (np.asarray(z_half)[:-1] + np.asarray(z_half)[1:]))
+    L = {"T3d": np.asarray(T), "S3d": np.asarray(S), "H_bathy": np.asarray(Hb),
+         "z_center_ref": z_c, "mask": np.asarray(mask), "bottom_level": np.asarray(bl)}
+    online = _driver()._mld_now(
+        SimpleNamespace(T=T, S=S, H_bathy=Hb, land_mask=mask),
+        SimpleNamespace(z_half_ref=z_half, bottom_level=bl))
+    np.testing.assert_allclose(_lego_mld(L), np.asarray(online), rtol=1e-12)
+    L.pop("bottom_level")
+    assert abs(float(_lego_mld(L).ravel()[0]) - float(np.asarray(online).ravel()[0])) > 1.0

@@ -427,7 +427,10 @@ def _lego_mld(L, use_mean=False):
     z_c = np.asarray(L["z_center_ref"], dtype=np.float64)
     Hb = np.asarray(L["H_bathy"], dtype=np.float64)
     wet = ((z_c[(None,) * Hb.ndim + (slice(None),)] < Hb[..., None])
-           & (L["mask"][..., None] > 0.5)).astype(np.float64)
+           & (L["mask"][..., None] > 0.5))
+    if L.get("bottom_level") is not None:   # thick bottom cells: next level dry
+        wet &= np.arange(z_c.size) <= np.asarray(L["bottom_level"])[..., None]
+    wet = wet.astype(np.float64)
     return np.asarray(mixed_layer_depth(L["T3d"], L["S3d"], z_c,
                                         delta_sigma=0.01, wet_mask=wet,
                                         bottom_depth=Hb))

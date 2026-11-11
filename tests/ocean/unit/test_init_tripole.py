@@ -273,22 +273,19 @@ def test_read_domain_cfg_geometry_places_nemo_cells_in_the_mesh_frame(tmp_path):
                     np.full((3, 4), 40.0)])
     e3t[2, 0, 2] = 77.0                            # a thick bottom cell (kb=3)
     e3t[1, 0, 3] = 13.0                            # a thin bottom cell (kb=2)
-    e3w = e3t + 0.5
     e3w_1d = np.array([9.0, 15.0, 30.0])
     xr.Dataset({
         "bottom_level": (("y", "x"), kb.astype(np.int32)),
         "gphit": (("y", "x"), lat[inner]), "glamt": (("y", "x"), lon[inner]),
-        "e3t_0": (("z", "y", "x"), e3t), "e3w_0": (("z", "y", "x"), e3w),
+        "e3t_0": (("z", "y", "x"), e3t),
         "e3w_1d": (("z",), e3w_1d),
     }).to_netcdf(tmp_path / "domain_cfg.nc", engine="scipy")
 
-    n_wet, bot, e3w_0, e1d = read_domain_cfg_geometry(
+    n_wet, bot, e1d = read_domain_cfg_geometry(
         str(tmp_path / "domain_cfg.nc"), lat, lon)
     np.testing.assert_array_equal(n_wet[inner], kb)
     assert n_wet[:, 0].sum() == 0 and n_wet[-1].sum() == 0
     assert bot[0, 3] == 77.0 and bot[0, 4] == 13.0   # inner (0,2),(0,3)
     assert bot[0, 1] == 0.0                          # land
     assert bot[1, 1] == 40.0                         # kb=3 -> e3t_0[2]
-    np.testing.assert_array_equal(e3w_0[0, 3], e3w[:, 0, 2])
-    np.testing.assert_array_equal(e3w_0[-1, 2], e3w_1d)   # outside the frame
     np.testing.assert_array_equal(e1d, e3w_1d)

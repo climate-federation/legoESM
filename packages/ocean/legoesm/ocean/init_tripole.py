@@ -124,14 +124,17 @@ def read_domain_cfg_geometry(domain_cfg_path, lat_deg, lon_deg):
     """NEMO's own 3-D wet geometry from ``domain_cfg.nc``, in the mesh frame.
 
     NEMO reads ``bottom_level`` (wet levels per column) and the 3-D
-    ``e3t_0``/``e3w_0`` scale factors from this file (``domzgr.F90:141-142``),
-    so these are the cells the oracle actually runs.  Cells outside the inner
-    frame (cyclic halo columns, north-fold row) come back dry with the 1-D
-    ``e3w_1d`` ladder; the caller fills the cyclic halo.
+    ``e3t_0`` scale factors from this file (``domzgr.F90:141-142``), so these
+    are the cells the oracle actually runs.  ORCA1 is built with
+    ``key_vco_1d3d``, under which the W thickness and both depth ladders are
+    the 1-D ``e3w_1d``/``gdept_1d``/``gdepw_1d`` (``domzgr_substitute.h90:
+    71-76``), so only the 1-D ``e3w_1d`` is returned for them.  Cells outside
+    the inner frame (cyclic halo columns, north-fold row) come back dry; the
+    caller fills the cyclic halo.
 
-    Returns ``(n_wet, bottom_e3t, e3w_0, e3w_1d)``: ``n_wet`` (n_lat, n_lon)
-    int (0 = land), ``bottom_e3t`` the bottom wet cell's ``e3t_0`` (0 on
-    land), ``e3w_0`` (n_lat, n_lon, n_levels), ``e3w_1d`` (n_levels,).
+    Returns ``(n_wet, bottom_e3t, e3w_1d)``: ``n_wet`` (n_lat, n_lon) int
+    (0 = land), ``bottom_e3t`` the bottom wet cell's ``e3t_0`` (0 on land),
+    ``e3w_1d`` (n_levels,).
     """
     import xarray as xr
     with xr.open_dataset(domain_cfg_path, mask_and_scale=False) as ds:
@@ -139,10 +142,9 @@ def read_domain_cfg_geometry(domain_cfg_path, lat_deg, lon_deg):
         dlat = _squeeze2d(np.asarray(ds["gphit"].values, dtype=np.float64))
         dlon = _squeeze2d(np.asarray(ds["glamt"].values, dtype=np.float64))
         e3t = np.asarray(ds["e3t_0"].values, dtype=np.float64)
-        e3w = np.asarray(ds["e3w_0"].values, dtype=np.float64)
         e3w_1d = np.asarray(ds["e3w_1d"].values, dtype=np.float64).ravel()
     while e3t.ndim > 3:
-        e3t, e3w = e3t[0], e3w[0]
+        e3t = e3t[0]
     lat = np.asarray(lat_deg, dtype=np.float64)
     j0, i0 = nemo_domain_offset(lat, np.asarray(lon_deg, dtype=np.float64),
                                 dlat, dlon, domain_cfg_path)
@@ -152,9 +154,7 @@ def read_domain_cfg_geometry(domain_cfg_path, lat_deg, lon_deg):
     n_wet[j0:j0 + nj, i0:i0 + ni] = kb
     bottom_e3t = np.zeros(lat.shape)
     bottom_e3t[j0 + jj, i0 + ii] = e3t[kb[jj, ii] - 1, jj, ii]
-    e3w_0 = np.broadcast_to(e3w_1d, lat.shape + e3w_1d.shape).copy()
-    e3w_0[j0:j0 + nj, i0:i0 + ni] = np.moveaxis(e3w, 0, -1)
-    return n_wet, bottom_e3t, e3w_0, e3w_1d
+    return n_wet, bottom_e3t, e3w_1d
 
 
 # Enclosed seas the observed IC cannot fill (PHC3 has no profile at any depth

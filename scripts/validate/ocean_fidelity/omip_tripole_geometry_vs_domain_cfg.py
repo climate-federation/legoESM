@@ -8,7 +8,9 @@ coordinate with the runner's own functions and counts, over NEMO's inner
 domain, the columns whose wet-level count differs, the largest bottom-cell
 thickness error, and checks that the cyclic halo columns copy their partners.
 It also checks the T ladder the domain_cfg geometry uses (``e3_to_depth_1d``
-of ``e3w_1d``, ``depth_e3.F90:125-130``) against the mesh file's ``gdept_1d``.
+of ``e3w_1d``, ``depth_e3.F90:125-130``) against the mesh file's ``gdept_1d``
+(ORCA1's ``key_vco_1d3d`` keeps W thickness and depths 1-D, so no 3-D ladder
+is compared), and that z* layers still sum to H + eta.
 
 Exits 1 when ``--expect-domain-cfg-exact`` is given and the domain_cfg
 geometry differs from NEMO anywhere.
@@ -94,7 +96,7 @@ def main(argv=None):
     pc, _, _ = make_partial_cell(zc, H, land, min_levels=a.min_levels)
     print(f"[geom] mesh_mask (card today): {compare(pc, j0, i0, kb, e3t_0)}")
 
-    n_wet, bot, e3w_0, _ = read_domain_cfg_geometry(a.domain_cfg, lat, lon)
+    n_wet, bot, _ = read_domain_cfg_geometry(a.domain_cfg, lat, lon)
     n_wet, bot = _ew_overlap_fill(n_wet), _ew_overlap_fill(bot)
     if not np.array_equal(n_wet > 0, land > 0.5):
         print("[geom] FAIL: domain_cfg wet columns != masked mesh wet columns")
@@ -102,6 +104,13 @@ def main(argv=None):
     pcd = create_full_step_coordinate(zc, n_wet - 1, bottom_thickness=bot)
     r = compare(pcd, j0, i0, kb, e3t_0)
     print(f"[geom] domain_cfg: {r}")
+    from legoesm.ocean.vertical import compute_layer_thickness
+    Hd = np.asarray(pcd.h_partial).sum(axis=-1)
+    eta = np.where(Hd > 0, 0.5, 0.0)
+    h = np.asarray(compute_layer_thickness(eta, Hd, pcd))
+    wet = Hd > 0
+    print(f"[geom] z* closure, eta=0.5 m: max|sum h - (H+eta)| "
+          f"{np.abs(h.sum(-1) - (Hd + eta))[wet].max():.3e} m")
     if a.expect_domain_cfg_exact and (r["columns_differ"]
                                       or r["max_abs_bottom_dz_m"] > 0.0
                                       or not r["halo_copies_partner"]):
