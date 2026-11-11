@@ -140,8 +140,8 @@ def test_geometric_depth_pressure_density_is_stored() -> None:
 
 def test_bn2_alpha_beta_is_stored() -> None:
     """NEMO rab (alpha/beta) inside bn2 goes through nemo_source_store
-    (eos.compute_buoyancy_frequency_nemo_bn2); without the store this compiled
-    program has no conditional."""
+    (eos.compute_buoyancy_frequency_nemo_bn2) when source-rounded, and only
+    then; without the store this compiled program has no conditional."""
     from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
 
     shape = (5, 7, 6)
@@ -149,25 +149,32 @@ def test_bn2_alpha_beta_is_stored() -> None:
     s = jnp.linspace(31.0, 37.5, np.prod(shape), dtype=jnp.float64).reshape(shape)
     gdept = jnp.linspace(5.0, 4000.0, shape[-1], dtype=jnp.float64)
     gdepw = 0.5 * (gdept[1:] + gdept[:-1])
-    text = jax.jit(lambda t_, s_: compute_buoyancy_frequency_nemo_bn2(
-        t_, s_, gdept, gdepw, eos_form="eos80", e3w_source="depth_difference",
-        source_rounded=True)).lower(t, s).compile().as_text()
-    assert " conditional(" in text
+
+    def text(source_rounded):
+        return jax.jit(lambda t_, s_: compute_buoyancy_frequency_nemo_bn2(
+            t_, s_, gdept, gdepw, eos_form="eos80", e3w_source="depth_difference",
+            source_rounded=source_rounded)).lower(t, s).compile().as_text()
+
+    assert " conditional(" in text(True)
+    assert " conditional(" not in text(False)
 
 
 def test_r3t_stretch_is_stored() -> None:
-    """NEMO (1 + r3t) goes through nemo_source_store (eos.nemo_r3t_stretch);
-    without the store this compiled program has no conditional."""
-    from legoesm.ocean.eos import nemo_r3t_stretch
-    from legoesm.ocean.vertical import create_ocean_z_star
+    """NEMO (1 + r3t) goes through nemo_source_store (eos.nemo_r3t_stretch)
+    with the card's source-rounded r3t product, and only then; without the
+    store this compiled program has no conditional."""
+    from types import SimpleNamespace
 
-    z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    from legoesm.ocean.eos import nemo_r3t_stretch
+
     eta = jnp.linspace(-0.5, 0.5, 35, dtype=jnp.float64).reshape(5, 7)
     h = jnp.linspace(0.0, 4000.0, 35, dtype=jnp.float64).reshape(5, 7)
-    for evaluation in ("quotient", "nemo_reciprocal"):
+    for stored_product in (True, False):
+        z_coord = SimpleNamespace(linear_free_surface=False,
+                                  nemo_r3t_stored_product=stored_product)
         text = jax.jit(lambda e, b: nemo_r3t_stretch(
-            z_coord, e, b, evaluation=evaluation)).lower(eta, h).compile().as_text()
-        assert " conditional(" in text, evaluation
+            z_coord, e, b, evaluation="nemo_reciprocal")).lower(eta, h).compile().as_text()
+        assert (" conditional(" in text) is stored_product
 
 
 def test_neumann_fill_mask_terms_are_stored_for_a_runtime_mask() -> None:

@@ -802,10 +802,13 @@ def compute_buoyancy_frequency_nemo_bn2(
         # eos_init loads (rdeltaS 20 vs 32, r1_S0 1/40 vs 0.875/35.16504).
         # Stored once: otherwise XLA CPU re-evaluates this polynomial inside
         # every N2 consumer kernel of the ORCA2 step (3.59 copies, M10).
-        alpha, beta = nemo_source_store(
-            lambda t, s, d: nemo_roquet_alpha_beta(
-                t, s, d, eos_form=eos_form, source_rounded=source_rounded),
-            T, S, eos_gdept)
+        # Only when source-rounded: an unrounded polynomial can be contracted
+        # differently once stored (GYRE's bits moved).
+        def rab(t, s, d):
+            return nemo_roquet_alpha_beta(
+                t, s, d, eos_form=eos_form, source_rounded=source_rounded)
+        alpha, beta = (nemo_source_store(rab, T, S, eos_gdept)
+                       if source_rounded else rab(T, S, eos_gdept))
     else:
         if source_rounded:
             raise ValueError(
@@ -1007,8 +1010,12 @@ def nemo_r3t_stretch(
         return jnp.maximum(1.0 + r3t, 1.0e-6)
 
     # Stored once: otherwise XLA CPU re-evaluates r3t inside every 3-D
-    # consumer kernel of the ORCA2 step (about 100 kernels).
-    return nemo_source_store(stretch, jnp.asarray(eta), jnp.asarray(H_bathy))
+    # consumer kernel of the ORCA2 step (about 100 kernels).  Only with the
+    # source-rounded product: an unrounded one can be contracted differently
+    # once stored (TSUNAMI's bits moved).
+    eta, H_bathy = jnp.asarray(eta), jnp.asarray(H_bathy)
+    return (nemo_source_store(stretch, eta, H_bathy) if stored_product
+            else stretch(eta, H_bathy))
 
 
 def nemo_r3t_rk3_stage1_stretch(

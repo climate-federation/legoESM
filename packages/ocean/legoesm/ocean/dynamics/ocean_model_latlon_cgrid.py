@@ -11007,9 +11007,13 @@ class LatLonCGridOceanModel:
             )
             # Stored once: otherwise XLA CPU re-evaluates this density inside
             # each of the MLE depth/buoyancy reductions (5 grid copies, M10).
-            _mle_rhop = nemo_source_store(
-                lambda t, s: _mle_eos(t, s, jnp.zeros_like(t)),
-                _T_stage2, _S_stage2)
+            # Only the source-rounded NEMO polynomials keep their bits stored.
+            def _mle_rhop_fn(t, s):
+                return _mle_eos(t, s, jnp.zeros_like(t))
+            _mle_rhop = (
+                nemo_source_store(_mle_rhop_fn, _T_stage2, _S_stage2)
+                if _cfg_b.eos in ("nemo_eos80", "nemo_teos10")
+                else _mle_rhop_fn(_T_stage2, _S_stage2))
             _mle_n2 = jnp.zeros(
                 (*_T_stage2.shape[:-1], _T_stage2.shape[-1] - 1),
                 dtype=_T_stage2.dtype,
