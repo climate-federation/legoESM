@@ -46,9 +46,12 @@ TR = ("v_i", "v_s", "a_i", "oa_i", "e_s_l01", "e_s_l02", "e_s_l03", "e_i_l01", "
 KEEP = ("v_i", "v_s", "a_i", "oa_i", "e_s_l01", "e_s_l02", "e_s_l03", "e_i_l01", "e_i_l02", "e_i_l03", "szv_i_l01")
 RES = ("wfx_res", "hfx_res", "sfx_res")
 ARMS = ("cyc2", "cyc3")
-# Pass rules (votes T1 c, T2 a): state and open water rel <= 1e-6 on the scored cells (provisional: no per-arm seed
-# spread yet, and the icycle-1 20-seed spread of the advected snow fields is 4.1e-9; measured error ~6e-11, the
-# once-after composition O(1)); ledgers absolute <= 1e-12 x the arm's largest |NEMO ledger| on the scored cells.
+# Pass rules.  Vote T5 b: state and open water, per field and arm, rel <= 2 x NEMO's measured 4-seed 1-ulp spread
+# (stored in the fixture json, ``spread_4seed``; spreads 1e-12..1.2e-7, port errors <= 6.2e-11, the once-after
+# composition O(1)).  Vote T2 a: ledgers absolute <= 1e-12 x the arm's largest |NEMO ledger| on the scored cells.
+# Vote T1 c: the fold-band moments rel <= 1e-6.
+SPREAD = json.loads(Path(str(_FIX) + ".json").read_text())["spread_4seed"]
+SPREAD_FACTOR = 2.0
 REL_TOL = 1e-6
 LEDGER_ABS = 1e-12
 
@@ -150,8 +153,14 @@ def test_fixture_provenance_and_cycle_counts():
 @pytest.mark.parametrize("arm", ARMS)
 def test_corrections_inside_every_cycle_match_nemo(arm):
     X, ato, res = _per_cycle(arm)
-    state, ow, led = _misses(arm, X, ato, res)
-    assert state <= REL_TOL and ow <= REL_TOL and led <= LEDGER_ABS, (state, ow, led)
+    X, ato = np.asarray(X), np.asarray(ato)
+    for i, t in enumerate(KEEP):
+        rel = _rel(_inner(X)[..., TR.index(t)], FX[f"{arm}_nemo_X"][..., i]).max()
+        assert rel <= SPREAD_FACTOR * SPREAD[arm][t], (arm, t, rel, SPREAD[arm][t])
+    rel = _rel(_inner(ato), FX[f"{arm}_nemo_ato_i"]).max()
+    assert rel <= SPREAD_FACTOR * SPREAD[arm]["ato_i"], (arm, rel, SPREAD[arm]["ato_i"])
+    _, _, led = _misses(arm, X, ato, res)
+    assert led <= LEDGER_ABS, led
 
 
 @pytest.mark.parametrize("arm", ARMS)
