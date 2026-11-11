@@ -9,15 +9,23 @@ grids raise.
 
 MPAS / Voronoi: index tables straight from the mesh connectivity, reproducing
 the TRiSK kernels of :mod:`legoesm.core.operators_voronoi`.
+
+RBF-FD on the sphere (arXiv 2610.25484 App. B, Listings 8-9): every node gets a
+stencil of its ``n`` nearest nodes; polyharmonic-spline + polynomial weights
+for the surface gradient (Cartesian components) and the Laplace-Beltrami
+operator, by the tangent-plane method, plus conservatively corrected copies
+of the divergence and Laplacian for the mass equation.  Collocated, so one index table serves
+every operator; the apply is the table gather + neighbour sum.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from legoesm.core.neighbour_ops import Connectivity, NeighbourMesh, offsets, table
 
 
@@ -187,4 +195,290 @@ def mpas_neighbour_mesh(mesh: Any) -> NeighbourMesh:
         area_cell=mesh.areaCell,
         dc_edge=(mesh.dcEdge,),
         area_vertex=mesh.areaTriangle,
+    )
+
+
+# ============================================================================
+# RBF-FD (collocated, sphere)
+# ============================================================================
+
+class RBFFDMesh(NamedTuple):
+    """Collocated RBF-FD operators on a sphere of radius ``radius``.
+
+    ``grad[i]`` is the Cartesian component ``i`` of the surface gradient,
+    ``lap`` the Laplace-Beltrami operator, ``normal`` the outward unit normal
+    ``(nx, ny, nz)`` at every node.  ``div`` and ``lap_mass`` are the same
+    operators with the polynomial-preserving conservative correction
+    (:func:`polynomial_preserving_correction`): ``sum(area * div(F)) = 0`` for
+    every tangent field ``F`` and ``sum(area * lap_mass(phi)) = 0`` for every
+    ``phi``, to round-off.  All share one ``(n, n_nodes)`` table.
+
+    Known limits: the connectivities hold the neighbour layer's closure-based
+    index tables, so the mesh cannot be passed as a ``jax.jit`` argument (close
+    over it instead), as for the lat-lon and MPAS neighbour meshes; ``div`` and
+    ``lap_mass`` come from a host-side sparse solve, so no derivative with
+    respect to the node positions or areas flows through the correction.
+    """
+
+    grad: tuple[Connectivity, Connectivity, Connectivity]
+    lap: Connectivity
+    div: tuple[Connectivity, Connectivity, Connectivity]
+    lap_mass: Connectivity
+    normal: tuple[jax.Array, jax.Array, jax.Array]
+    radius: float
+
+
+def rbffd_stencils(xyz: Any, n: int) -> np.ndarray:
+    """``(n_nodes, n)`` indices of each node's ``n`` nearest nodes (self first).
+
+    Setup-time (SciPy k-d tree on the positions normalised to the unit
+    sphere); not traced.
+    """
+    from scipy.spatial import cKDTree
+
+    x = np.asarray(xyz, dtype=np.float64)
+    x = x / np.linalg.norm(x, axis=-1, keepdims=True)
+    _, idx = cKDTree(x).query(x, k=n)
+    return np.asarray(idx, dtype=np.int32)
+
+
+def _poly_exponents(degree: int) -> list[tuple[int, int]]:
+    return [(i - j, j) for i in range(degree + 1) for j in range(i + 1)]
+
+
+def phs_planar_weights(xs: jax.Array, *, phs_degree: int,
+                       poly_degree: int) -> jax.Array:
+    """RBF-FD weights at the origin for batched planar stencils (Listing 8).
+
+    ``xs (B, n, 2)`` are stencil points (scaled, centre at the origin);
+    returns ``(B, n, 3)`` weights for ``d/dxi1``, ``d/dxi2`` and the planar
+    Laplacian, from PHS ``r**phs_degree`` augmented with all monomials of total
+    degree ``<= poly_degree``.
+    """
+    m = phs_degree
+    n = xs.shape[1]
+
+    diff = xs[:, :, None, :] - xs[:, None, :, :]
+    a_phs = jnp.sum(diff**2, -1) ** (m / 2)                              # (N, n, n)
+    exps = _poly_exponents(poly_degree)
+    p = polynomial_matrix(xs, poly_degree)                               # (N, n, M)
+    n_poly = len(exps)
+    zeros = jnp.zeros((xs.shape[0], n_poly, n_poly), dtype=xs.dtype)
+    lhs = jnp.concatenate([
+        jnp.concatenate([a_phs, p], -1),
+        jnp.concatenate([jnp.swapaxes(p, 1, 2), zeros], -1)], axis=1)
+
+    # Operators applied to phi(|y - x_j|) at y = 0 (the centre).
+    r2 = jnp.sum(xs**2, -1)                                              # (N, n)
+    r_m2 = r2 ** ((m - 2) / 2)
+    rhs_phs = jnp.stack([-m * r_m2 * xs[..., 0], -m * r_m2 * xs[..., 1],
+                         m * m * r_m2], -1)                              # (N, n, 3)
+    rhs_poly = np.zeros((n_poly, 3))
+    for k, (i, j) in enumerate(exps):
+        rhs_poly[k] = [float((i, j) == (1, 0)), float((i, j) == (0, 1)),
+                       2.0 * float((i, j) in ((2, 0), (0, 2)))]
+    rhs = jnp.concatenate([
+        rhs_phs,
+        jnp.broadcast_to(jnp.asarray(rhs_poly, dtype=xs.dtype),
+                         (xs.shape[0], n_poly, 3))], axis=1)
+
+    return jnp.linalg.solve(lhs, rhs)[:, :n, :]
+
+
+def rbffd_tangent_coordinates(xyz: Any, stencil: Any, xp: Any = jnp):
+    """Per-stencil tangent frame and projected coordinates on the unit sphere.
+
+    Returns ``e1, e2 (N, 3)`` (orthonormal tangent frame at each centre),
+    ``xs (N, n, 2)`` (stencil projected orthogonally onto the tangent plane,
+    scaled by the stencil radius) and that radius ``s (N,)``.  ``xp`` is the
+    array namespace (``numpy`` for host float64 independent of JAX x64).
+    """
+    x = xyz / xp.linalg.norm(xyz, axis=-1, keepdims=True)               # (N, 3)
+    # Tangent frame from the coordinate axis least aligned with the normal.
+    # The axis choice is piecewise constant (zero derivative) and the weights
+    # do not depend on the in-plane rotation of the frame.
+    axis = xp.eye(3, dtype=x.dtype)[xp.argmin(xp.abs(x), axis=-1)]
+    e1 = axis - xp.sum(axis * x, -1, keepdims=True) * x
+    e1 = e1 / xp.linalg.norm(e1, axis=-1, keepdims=True)
+    e2 = xp.cross(x, e1)
+    d = x[xp.asarray(stencil)] - x[:, None, :]                           # (N, n, 3)
+    xi = xp.stack([xp.sum(d * e1[:, None, :], -1),
+                   xp.sum(d * e2[:, None, :], -1)], axis=-1)             # (N, n, 2)
+    # Scale by the stencil radius (Listing 8); weights are scale-covariant.
+    s = xp.sqrt(xp.max(xp.sum(xi**2, -1), axis=-1))                     # (N,)
+    return e1, e2, xi / s[:, None, None], s
+
+
+def polynomial_matrix(xs: Any, poly_degree: int, xp: Any = jnp) -> Any:
+    """``(B, n, M)`` monomials of total degree ``<= poly_degree`` at ``xs``."""
+    return xp.stack([xs[..., 0]**i * xs[..., 1]**j
+                     for i, j in _poly_exponents(poly_degree)], -1)
+
+
+def rbffd_sphere_weights(
+    xyz: jax.Array, stencil: Any, *, phs_degree: int, poly_degree: int,
+) -> tuple[jax.Array, jax.Array]:
+    """Tangent-plane RBF-FD weights on the UNIT sphere (differentiable in ``xyz``).
+
+    Each stencil is projected orthogonally onto the tangent plane at its
+    centre; 2-D PHS ``r**phs_degree`` + polynomials of total degree
+    ``poly_degree`` give weights for ``d/dxi1``, ``d/dxi2`` and the planar
+    Laplacian at the centre.  Projection makes the chart metric ``I + O(xi^2)``,
+    so these are the surface derivatives and the Laplace-Beltrami operator at
+    the centre.  Returns ``grad (n_nodes, n, 3)`` (Cartesian components of the
+    surface gradient) and ``lap (n_nodes, n)``.  Divide by the radius
+    (squared for ``lap``) for a sphere of radius ``a``.
+    """
+    e1, e2, xs, s = rbffd_tangent_coordinates(xyz, stencil)
+    w = phs_planar_weights(xs, phs_degree=phs_degree, poly_degree=poly_degree)
+    w1 = w[..., 0] / s[:, None]
+    w2 = w[..., 1] / s[:, None]
+    lap = w[..., 2] / s[:, None] ** 2
+    grad = e1[:, None, :] * w1[..., None] + e2[:, None, :] * w2[..., None]
+    return grad, lap
+
+
+def conservative_column_correction(
+    w: jax.Array, stencil: Any, area: jax.Array, normal: jax.Array | None = None,
+) -> jax.Array:
+    """Minimal-norm change of the stencil weights ``w (n_nodes, n[, 3])`` so the
+    area-weighted column sums vanish: ``sum_i area_i w~_ij = 0`` for a scalar
+    operator, or only its component tangent to ``normal_j`` for a vector
+    (surface-derivative) operator, since ``int grad_s(phi) dA`` is normal.
+
+    ``w~_ij = w_ij - area_i t_j / sum_{i: j in stencil(i)} area_i^2`` with
+    ``t_j`` the (tangential part of the) column sum.  Used to remove the small
+    residual of :func:`polynomial_preserving_correction`; on its own it moves
+    every weight by ~1/n (the column sums are O(1)), which ruins accuracy.
+    """
+    idx = jnp.asarray(stencil)
+    n_nodes = idx.shape[0]
+    a = area[:, None]
+    q = jax.ops.segment_sum(jnp.broadcast_to(a**2, idx.shape).ravel(), idx.ravel(),
+                            num_segments=n_nodes)
+    if w.ndim == 2:
+        t = jax.ops.segment_sum((a * w).ravel(), idx.ravel(), num_segments=n_nodes)
+        return w - a * (t / q)[idx]
+    col = jax.ops.segment_sum((a[..., None] * w).reshape(-1, 3), idx.ravel(),
+                              num_segments=n_nodes)
+    t = col - jnp.sum(col * normal, -1, keepdims=True) * normal
+    return w - a[..., None] * (t / q[:, None])[idx]
+
+
+def polynomial_preserving_correction(
+    w: Any, stencil: Any, xyz: Any, area: Any, *, poly_degree: int,
+    refine_steps: int,
+) -> tuple[jax.Array, float]:
+    """Conservative weights that keep every row exact on its polynomials.
+
+    Minimises ``sum_i ||delta_i||^2`` subject to ``P_i^T delta_i = 0`` (row ``i``
+    stays exact on the degree-``<= poly_degree`` polynomials of its tangent
+    plane) and the column condition of :func:`conservative_column_correction`.
+    Lagrange: ``delta_i = -area_i Pi_i lambda[S_i]`` with ``Pi_i`` the projector
+    off ``span(P_i)``, and ``M lambda = t``, ``M = sum_i area_i^2 E_i^T Pi_i E_i``.
+    A vector (surface-derivative) operator ``w (N, n, 3)`` is corrected in each
+    row's tangent frame (both tangent derivatives stay exact) with the
+    tangential column condition in each column's frame (``2N`` unknowns).
+    Scalar case: ``M`` annihilates constants and so does every ``Pi_i``, so
+    ``lambda_0 = 0`` is pinned (``delta`` is the same for every solution).
+
+    Solved on the host at setup: sparse LU (SciPy) plus ``refine_steps`` steps
+    of iterative refinement; the remaining residual is removed by
+    :func:`conservative_column_correction`.  Returns the weights and the
+    relative residual ``||M lambda - t|| / ||t||``.
+
+    KNOWN LIMITS: (1) the result is a constant for JAX, so derivatives with
+    respect to the node positions and areas do not flow through the correction
+    (derivatives with respect to the fields the weights act on are exact).
+    (2) Accuracy: the corrected divergence's max-norm error converges at order
+    4.4 (642 -> 2562 nodes) then 1.5 (2562 -> 10242), against 4.0 / 3.9
+    uncorrected; even with LU and refinement the solve residual grows with
+    node count, 8e-12 / 8e-10 / 9e-10 (divergence) and 3e-11 / 1.5e-9 / 4.6e-9
+    (Laplacian) at 642 / 2562 / 10242 nodes, and rows stay polynomial-exact
+    only to 1e-10 / 6e-9 / 2.5e-8 relative.  Cause: the correction system is
+    ill-conditioned (inferred, condition number not measured).  Williamson TC2 keeps order 4.0
+    and error 1.3e-7 at 10242 nodes.
+    """
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import splu
+
+    idx = np.asarray(stencil)
+    n_nodes, n = idx.shape
+    e1, e2, xs, _ = rbffd_tangent_coordinates(
+        np.asarray(xyz, dtype=np.float64), idx, xp=np)
+    q, _ = np.linalg.qr(polynomial_matrix(xs, poly_degree, xp=np))
+    pi = np.eye(n)[None] - q @ np.swapaxes(q, 1, 2)                    # (N, n, n)
+    area = np.asarray(area, dtype=np.float64)
+    a = area / area.mean()                                              # delta is invariant
+    w_np = np.asarray(w, dtype=np.float64)
+
+    def solve(blocks, var_idx, t, pin):
+        rows = np.repeat(var_idx, var_idx.shape[1], axis=1).ravel()
+        cols = np.tile(var_idx, (1, var_idx.shape[1])).ravel()
+        m = sp.csc_matrix((blocks.ravel(), (rows, cols)), shape=(t.size, t.size))
+        keep = np.arange(t.size) != pin if pin is not None else slice(None)
+        mk = m[keep][:, keep].tocsc()
+        lu = splu(mk)
+        lam = np.zeros_like(t)
+        lam[keep] = lu.solve(t[keep])
+        for _ in range(refine_steps):
+            lam[keep] += lu.solve(t[keep] - mk @ lam[keep])
+        return lam, float(np.linalg.norm(m @ lam - t) / np.linalg.norm(t))
+
+    if w_np.ndim == 2:
+        t = np.zeros(n_nodes)
+        np.add.at(t, idx, a[:, None] * w_np)
+        t -= t.mean()
+        lam, resid = solve((a**2)[:, None, None] * pi, idx, t, pin=0)
+        out = w_np - a[:, None] * np.einsum("bkl,bl->bk", pi, lam[idx])
+        return conservative_column_correction(
+            jnp.asarray(out), stencil, jnp.asarray(area)), resid
+
+    # g[i, k, a, b] = e_a(i) . e_b(S_i[k]) maps column-frame multipliers to row frame.
+    ei = np.stack([e1, e2], 1)                                           # (N, 2, 3)
+    g = np.einsum("iax,ikbx->ikab", ei, ei[idx])
+    blocks = (a**2)[:, None, None, None, None] * np.einsum(
+        "ikab,ikl,ilac->ikblc", g, pi, g)                                 # (N, n, 2, n, 2)
+    var_idx = (2 * idx[:, :, None] + np.arange(2)).reshape(n_nodes, 2 * n)
+    col = np.zeros((n_nodes, 3))
+    np.add.at(col, idx, a[:, None, None] * w_np)
+    t = np.einsum("jax,jx->ja", ei, col).ravel()
+    lam, resid = solve(blocks.reshape(n_nodes, 2 * n, 2 * n), var_idx, t, pin=None)
+    c = np.einsum("ikab,ikb->ika", g, lam.reshape(n_nodes, 2)[idx])     # row-frame
+    c = np.einsum("ikl,ila->ika", pi, c)
+    out = w_np - a[:, None, None] * np.einsum("ika,iax->ikx", c, ei)
+    normal = np.cross(e1, e2)
+    return conservative_column_correction(
+        jnp.asarray(out), stencil, jnp.asarray(area), jnp.asarray(normal)), resid
+
+
+def rbffd_sphere_mesh(
+    xyz: Any, radius: float, area: Any, *, n: int, phs_degree: int, poly_degree: int,
+    refine_steps: int,
+) -> RBFFDMesh:
+    """RBF-FD mesh on a sphere of ``radius`` with nodes ``xyz (n_nodes, 3)`` and
+    node quadrature weights ``area (n_nodes,)`` (the weights mass is measured
+    with, e.g. Voronoi cell areas)."""
+    stencil = rbffd_stencils(xyz, n)
+    x = jnp.asarray(xyz)
+    area = jnp.asarray(area, dtype=x.dtype)
+    grad, lap = rbffd_sphere_weights(x, stencil, phs_degree=phs_degree,
+                                     poly_degree=poly_degree)
+    unit = x / jnp.linalg.norm(x, axis=-1, keepdims=True)
+    kw = dict(poly_degree=poly_degree, refine_steps=refine_steps)
+    div, _ = polynomial_preserving_correction(grad, stencil, x, area, **kw)
+    lap_mass, _ = polynomial_preserving_correction(lap, stencil, x, area, **kw)
+    nb = table(jnp.asarray(stencil.T))
+    one = jnp.ones((1, 1), dtype=x.dtype)
+
+    def conn(w):
+        return Connectivity(nb, one, w.T, one)
+
+    return RBFFDMesh(
+        grad=tuple(conn(grad[..., i] / radius) for i in range(3)),
+        lap=conn(lap / radius**2),
+        div=tuple(conn(div[..., i] / radius) for i in range(3)),
+        lap_mass=conn(lap_mass / radius**2),
+        normal=(unit[:, 0], unit[:, 1], unit[:, 2]),
+        radius=radius,
     )

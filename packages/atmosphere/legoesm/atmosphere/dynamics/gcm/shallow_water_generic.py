@@ -18,20 +18,28 @@ The grid-specific numerics stay plug-ins
 flux divergence), kinetic energy, the Coriolis / PV-flux term, viscosity and the
 velocity boundary condition.
 
-This is the tendency of both :class:`.shallow_water_latlon_cgrid.CGridLatLonShallowWaterModel`
-and :class:`.shallow_water_mpas.MPASShallowWaterModel`.  Known limits: the
+This is the tendency of :class:`.shallow_water_latlon_cgrid.CGridLatLonShallowWaterModel`,
+:class:`.shallow_water_mpas.MPASShallowWaterModel` and the RBF-FD collocated
+model (:mod:`.shallow_water_rbffd`; Cartesian 3-vector velocity, the radial
+component removed by the ``boundary`` plug-in).  Known limits: the
 lat-lon and MPAS vorticity terms still compute their own curl (the contract's
 ``vorticity`` is not routed into them).
 """
 
 from __future__ import annotations
 
+import math
+
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
-from legoesm.grids.operator_adapters import latlon_sw_grid_operators, mpas_neighbour_operators
+from legoesm.grids.operator_adapters import (
+    latlon_sw_grid_operators,
+    mpas_neighbour_operators,
+    rbffd_operators,
+)
 
 Edge = tuple[jax.Array, ...]
 
@@ -214,3 +222,65 @@ def mpas_shallow_water_tendencies(state: Any, mesh: Any, config: Any = None, dt:
         dh_dt=state.h.replace(data=dh, name="dh_dt", units="m/s"),
         du_dt=state.u.replace(data=du, name="du_dt", units="m/s^2"),
     )
+
+
+# ============================================================================
+# RBF-FD collocated plug-ins (Cartesian 3-vector velocity)
+# ============================================================================
+
+def rbffd_grid_scale_length2(mesh: Any) -> float:
+    """``(h_mean / pi)**2`` with ``h_mean = sqrt(4 pi a^2 / n_nodes)``: inverse
+    squared wavenumber of the grid-scale mode."""
+    n_nodes = mesh.normal[0].shape[0]
+    h_mean = mesh.radius * math.sqrt(4.0 * math.pi / n_nodes)
+    return (h_mean / math.pi) ** 2
+
+
+def rbffd_sw_operators(mesh: Any, config: Any) -> SWOperators:
+    """RBF-FD plug-ins: flux-form mass tendency, vector-invariant Coriolis +
+    relative vorticity, ``Lap**k`` hyperviscosity on ``h`` and each Cartesian
+    velocity component, and projection of the tendency onto the tangent plane.
+
+    Mass conserving to round-off: the mass equation uses the conservatively
+    corrected divergence and Laplacian (``sum(area * dh/dt) = 0`` for tangent
+    velocity), with ``area`` the quadrature weights the mesh was built with.
+    See the mesh docstring for the known accuracy limit of that divergence.
+    """
+    grid_ops = rbffd_operators(mesh)
+    nx, ny, nz = mesh.normal
+    f = 2.0 * config.omega * nz
+    k = config.hyperviscosity_order
+    length2 = rbffd_grid_scale_length2(mesh)
+    sign = (-1.0) ** (k + 1)
+
+    def hyper(phi, lap=grid_ops.laplacian):
+        # (-1)^(k+1) gamma Lap^k, gamma = length2^k / tau: the grid-scale mode
+        # e-folds in tau.  Scaled per stage so every stage is O(phi) (fp32 range).
+        # KNOWN: on a smooth l=4 mode (642-10242 nodes, k=4) the stacked
+        # Laplacians amplify the grid-scale part of their error, so the
+        # pointwise result is 41-371x the tiny (~1e-8/tau) intended rate; the
+        # area-weighted rate matches to 1-4 %, and that noise is itself damped.
+        for _ in range(k):
+            phi = length2 * lap(phi)
+        return sign * phi / config.hyperviscosity_tau_s
+
+    def mass_tendency(h, vel):
+        return (-grid_ops.divergence(*(h * u for u in vel))
+                + hyper(h, grid_ops.laplacian_mass))
+
+    def vorticity_term(vel, h, dvel):
+        ux, uy, uz = vel
+        q = grid_ops.vorticity(ux, uy, uz) + f
+        n_cross_u = (ny * uz - nz * uy, nz * ux - nx * uz, nx * uy - ny * ux)
+        return tuple(dv - q * c for dv, c in zip(dvel, n_cross_u))
+
+    def dissipation(vel, dvel):
+        return tuple(dv + hyper(u) for dv, u in zip(dvel, vel))
+
+    def boundary(dvel):
+        radial = nx * dvel[0] + ny * dvel[1] + nz * dvel[2]
+        return tuple(dv - radial * n for dv, n in zip(dvel, (nx, ny, nz)))
+
+    return SWOperators(grid_ops, mass_tendency,
+                       lambda vel: 0.5 * sum(u * u for u in vel),
+                       vorticity_term, dissipation, boundary)
