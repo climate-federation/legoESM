@@ -76,6 +76,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --vertical-momentum-scheme nemo_advective `# user-adopted vertical momentum (prod since trp_vadv_d30)` \
   --ke-gradient-scheme hollingsworth `# user 2026-09-28: Hollingsworth KE on prod` \
   --state-accumulate --mld-accumulate `# 5-day window means, as NEMO writes and the scorer reads` \
+  --flux-accumulate `# window-mean applied q_net/sw/tau in each snapshot, for the heat-closure gate; prognostics bitwise unchanged` \
   --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 \
   --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff \
   --barotropic-slow-forcing-depth-evaluation min_rule_live `# user 2026-10-05: old method; NEMO average is ~99% inert under implicit CN (needs split-explicit + carried mode)` \
