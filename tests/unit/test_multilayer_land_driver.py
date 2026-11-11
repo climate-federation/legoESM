@@ -1142,9 +1142,9 @@ def test_soil_freeze_thaw_reaches_the_land_the_mpas_run_builds(monkeypatch, tmp_
 
 
 def test_soil_water_numerics_reach_the_mpas_land_and_the_run_record(monkeypatch, tmp_path):
-    """The air-entry head and the Richards dry-layer switch thresholds must
-    survive the bake (which rebuilds ``hydraulics`` from the CLM map with library
-    defaults) and be written to the run's resolved config."""
+    """The air-entry head must survive the bake (which rebuilds ``hydraulics``
+    from the CLM map with library defaults) and be written to the run's
+    resolved config."""
     import json
     from legoesm.driver.config import DycoreConfig, GridConfig
     from legoesm.land.config import biophysics_lmip_two_leaf_setup

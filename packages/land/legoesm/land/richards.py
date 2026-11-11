@@ -765,8 +765,8 @@ def solve_richards(
     else:
         runoff_subsurface = jnp.zeros_like(flux_top)  # dtype-matched (codex)
 
-    # Convert runoff from m/s of water to kg/m2/s
-    runoff_surface_kgm2s = runoff_surface * constants.rho_water
+    # Convert runoff from m/s of water to kg/m2/s (surface: after the pond
+    # return below)
     runoff_subsurface_kgm2s = runoff_subsurface * constants.rho_water
 
     # Column water budget of the imposed fluxes (pond + soil storage) [m]; > 0 =

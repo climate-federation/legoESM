@@ -22,6 +22,24 @@ Differentiability notes
   by ``jnp.where`` with safe denominators.
 * ``int(np.sum(has_pai))`` replaced by ``jnp.sum(has_pai)`` with a JAX
   safe floor to avoid division by zero.
+
+KNOWN DEFECT (user decision 2026-11-11: kept, recorded)
+-------------------------------------------------------
+The canopy-water store ``h2ocan_profile`` updated here sets leaf wetness and
+feeds wet-leaf evaporation, but no land water budget counts it.  The legoESM
+land step routes every exchange it makes to the soil as well:
+
+* intercepted rain also reaches the soil in full (the land step does not see
+  the throughfall split);
+* leaf dew and the canopy-air condensation of the dew limit also reach the soil,
+  through the net latent flux;
+* wet-leaf evaporation drawn from the store is also charged to the soil.
+
+So the store is a shadow of water the soil already holds, and land + atmosphere
+water closes without it: 1e-13 kg m-2 per step on a humid night, while the store
+gained 0.104 kg m-2 over 7 night steps (probe of 2026-11-11, pinned in
+``tests/land/unit/test_clm_ml_dew_budget.py``).  Making it a real store means
+routing all of these through it and none of them to the soil.
 """
 
 from __future__ import annotations

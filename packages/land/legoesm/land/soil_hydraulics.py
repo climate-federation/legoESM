@@ -172,6 +172,14 @@ class SoilHydraulicsConfig(NamedTuple):
     # infinite d(theta)/d(psi) slope of n < 2 soils at saturation, on which the
     # Richards Picard solve cycles.  Applies to retention_curve="van_genuchten" only;
     # 0.0 = the unmodified curve.
+    #
+    # RULE 5 EXCEPTION (signed off by the user 2026-11-11): the switch at h_e
+    # (theta and K flatten, the capacity jumps to the elastic value) stays HARD.
+    # A C2 smoothstep blend over [h_e - w, h_e] was built and measured: with its
+    # bisection + Newton band inverse it made the Richards solve 5-8x slower
+    # (4096 columns: 128 -> 675 ms fp64, 63 -> 497 ms fp32), and its inverse
+    # missed theta(psi(theta)) by 3.5e-7 on an n = 4 soil.  Follow-up: a smooth
+    # form with a closed-form inverse.
     vg_air_entry_m: float = -0.02  # [m]
 
 
