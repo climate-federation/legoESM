@@ -1,0 +1,285 @@
+#!/usr/bin/env python
+"""Global heat-closure gate for a tripole OMIP run (conservation gate, P6).
+
+For each pair of consecutive snapshots of a run made with --flux-accumulate,
+compares the change of global ocean heat content with the heat the run
+applied over that window:
+
+    residual = dH/dt - (Q_qnet + Q_geothermal + Q_isf_latent)        [W]
+
+* dH: rho_0 * c_sw * sum(T * h * area * wet) at both window ends, through
+  ``legoesm.ocean.budgets.compute_tracer_budget`` with the run's own
+  thickness: NEMO e3t_1d -> z* (``create_z_star_from_thicknesses``) ->
+  partial cells from the snapshot's H_bathy (``create_partial_cell_coordinate``)
+  -> eta stretch (``compute_layer_thickness``), as run_omip_core2 builds it.
+* Q_qnet: window-mean APPLIED q_net (snapshot ``q_net_mean``) x area; q_net
+  already carries the SSS-restoring heat and the ice blending.
+* Q_geothermal: the constant seafloor flux over wet columns (post-step BC).
+* Q_isf_latent: -fwf * L_fus_isf over the ice-shelf melt cells.
+
+NOT closed, reported as an ESTIMATE: freshwater enthalpy (P-E, runoff,
+restoring and melt water entering/leaving at their own temperature under
+real freshwater + z*).  The run saves no window-mean freshwater fields; the
+estimate is the window mean of run.log's raw global [fwbudget] net (Sv) x
+rho_water x c_sw x global-mean SST, i.e. the global-mean part only.
+
+Window pairing: the accumulator adds the COMPLETED state of every step and
+the forcing applied over it, so snapshot k's flux means cover exactly the
+steps between snapshot k-1 and snapshot k.
+
+Controls built in (a failing control is fatal, never a warning):
+* the reconstructed reference interfaces must equal the snapshot's
+  ``z_interface_ref`` (proves the vertical file and constructor match);
+* every window must carry ``q_net_mean`` and a step count equal to the step
+  difference of its two snapshots.
+
+fp64 throughout; NaN anywhere is fatal.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[3])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+import jax  # noqa: E402
+
+jax.config.update("jax_enable_x64", True)
+
+import numpy as np  # noqa: E402
+
+from legoesm import constants  # noqa: E402
+
+_SEC_PER_DAY = 86400.0
+_SNAP_RE = re.compile(r"snapshot_day(\d{4})\.npz$")
+
+
+def _fatal_nonfinite(name, arr):
+    if not np.all(np.isfinite(arr)):
+        raise SystemExit(f"FATAL: non-finite values in {name}")
+
+
+def load_snapshot(path):
+    keys = ("T", "eta", "H_bathy", "land_mask", "cell_area", "step",
+            "time_days", "z_interface_ref", "q_net_mean", "flux_mean_n_steps",
+            "flux_mean_window_s")
+    with np.load(path) as z:
+        out = {k: np.asarray(z[k], dtype=np.float64) for k in keys if k in z.files}
+    for k in ("T", "eta", "H_bathy", "land_mask", "cell_area"):
+        if k not in out:
+            raise SystemExit(f"FATAL: {path} lacks {k}")
+        _fatal_nonfinite(f"{path}:{k}", out[k])
+    return out
+
+
+def build_z_coord(e3t_1d, gdept_1d, H_bathy):
+    from legoesm.ocean.vertical import (
+        create_partial_cell_coordinate,
+        create_z_star_from_thicknesses,
+    )
+    zs = create_z_star_from_thicknesses(
+        np.asarray(e3t_1d, dtype=np.float64), gdept_1d,
+        nemo_e3w_source="depth_difference")
+    return zs, create_partial_cell_coordinate(zs, np.asarray(H_bathy))
+
+
+def heat_content(snap, z_coord, rho_0, c_p):
+    from legoesm.ocean.budgets import compute_tracer_budget
+
+    def _f(a):
+        return SimpleNamespace(data=a)
+    state = SimpleNamespace(T=_f(snap["T"]), S=_f(np.zeros_like(snap["T"])),
+                            eta=_f(snap["eta"]), H_bathy=_f(snap["H_bathy"]),
+                            land_mask=_f(snap["land_mask"]))
+    tb = compute_tracer_budget(state, z_coord, grid_type="tripole",
+                               grid=SimpleNamespace(area=snap["cell_area"]),
+                               rho_0=rho_0, c_p=c_p)
+    return tb.heat_content, tb.volume
+
+
+def wet_area(snap):
+    return float((snap["cell_area"] * (snap["land_mask"] > 0.5)).sum())
+
+
+def geothermal_power(snap, flux_wm2):
+    wet_col = (snap["land_mask"] > 0.5) & (snap["H_bathy"] > 0.0)
+    return float(flux_wm2 * (snap["cell_area"] * wet_col).sum())
+
+
+def isf_latent_power(fwf_month, area, L_fus):
+    return float(-(fwf_month * area).sum() * L_fus)
+
+
+def fwbudget_net_sv(run_log, day_lo, day_hi):
+    """Mean raw global P-E+R+ice [Sv] over (day_lo, day_hi] from run.log."""
+    vals = []
+    pat = re.compile(r"\[fwbudget\] step=\d+ day=([\d.]+) .*net\(P-E\+R\+ice\)=([-+\d.eE]+) Sv")
+    for line in Path(run_log).read_text().splitlines():
+        m = pat.search(line)
+        if m and day_lo < float(m.group(1)) <= day_hi:
+            vals.append(float(m.group(2)))
+    return (float(np.mean(vals)) if vals else None), len(vals)
+
+
+def close_windows(snaps, z_coord_for, rho_0, c_p, flux_geo_wm2, isf_fwf_for,
+                  L_fus, run_log=None):
+    """Per-window closure records for consecutive snapshots (list of dicts)."""
+    rows = []
+    for a, b in zip(snaps[:-1], snaps[1:]):
+        if "q_net_mean" not in b:
+            raise SystemExit(f"FATAL: window ending day {b['time_days']} has no "
+                             "q_net_mean (run without --flux-accumulate)")
+        n_steps = int(b["flux_mean_n_steps"])
+        dstep = int(b["step"]) - int(a["step"])
+        if n_steps != dstep:
+            raise SystemExit(f"FATAL: window ending day {float(b['time_days'])}: "
+                             f"accumulator holds {n_steps} steps, snapshots "
+                             f"differ by {dstep}")
+        dt_win = float(b["flux_mean_window_s"])
+        H_a, _ = heat_content(a, z_coord_for(a), rho_0, c_p)
+        H_b, _ = heat_content(b, z_coord_for(b), rho_0, c_p)
+        dHdt = (H_b - H_a) / dt_win
+        q = b["q_net_mean"]
+        _fatal_nonfinite("q_net_mean", q)
+        wet = b["land_mask"] > 0.5
+        Q_qnet = float((q * b["cell_area"] * wet).sum())
+        Q_geo = geothermal_power(b, flux_geo_wm2)
+        Q_isf = (0.0 if isf_fwf_for is None
+                 else isf_latent_power(isf_fwf_for(a, b), b["cell_area"], L_fus))
+        resid = dHdt - (Q_qnet + Q_geo + Q_isf)
+        A = wet_area(b)
+        row = {"day_start": float(a["time_days"]), "day_end": float(b["time_days"]),
+               "n_steps": n_steps, "window_s": dt_win,
+               "dHdt_W": dHdt, "Q_qnet_W": Q_qnet, "Q_geothermal_W": Q_geo,
+               "Q_isf_latent_W": Q_isf, "residual_W": resid,
+               "residual_Wm2": resid / A,
+               "residual_pct_of_qnet": (100.0 * resid / abs(Q_qnet)
+                                        if Q_qnet != 0.0 else None)}
+        if run_log is not None:
+            net_sv, n = fwbudget_net_sv(run_log, row["day_start"], row["day_end"])
+            sst = float((b["T"][..., 0] * b["cell_area"] * wet).sum() / A)
+            row["fw_enthalpy_estimate_Wm2"] = (
+                None if net_sv is None else
+                net_sv * 1e6 * constants.rho_water * c_p * sst / A)
+            row["fw_enthalpy_n_lines"] = n
+        rows.append(row)
+    return rows
+
+
+def _manifest_args(run_dir):
+    m = json.loads((Path(run_dir) / "run_manifest.json").read_text())
+    from scripts.run.run_omip_core2 import _build_arg_parser
+    argv = shlex.split(m["run"]["command_line"])[1:]
+    args = _build_arg_parser().parse_args(argv)
+    consts = m["config"]["resolved_config"]["runtime_config"]["constants"]
+    return m, args, float(consts["rho_0"]), float(consts["c_sw"])
+
+
+def _git_sha():
+    try:
+        return subprocess.run(["git", "-C", _PROJECT_ROOT, "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+    except Exception:
+        return None
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--domain-cfg", required=True,
+                   help="NEMO vertical file the run read (e3t_1d, gdept_1d)")
+    p.add_argument("--json-out", default=None)
+    return p.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    a = parse_args(argv)
+    import xarray as xr
+    run_dir = Path(a.run_dir)
+    manifest, rargs, rho_0, c_p = _manifest_args(run_dir)
+    if getattr(rargs, "geothermal_map", None):
+        raise SystemExit("FATAL: --geothermal-map runs are not supported (constant flux only)")
+    from legoesm.ocean.physics.geothermal import GeothermalConfig
+    flux_geo = 0.0
+    if rargs.geothermal:
+        flux_geo = (float(rargs.geothermal_flux_wm2)
+                    if rargs.geothermal_flux_wm2 is not None
+                    else float(GeothermalConfig().flux_wm2))
+    with xr.open_dataset(a.domain_cfg, decode_times=False) as ds:
+        e3t_1d = np.asarray(ds["e3t_1d"]).squeeze().astype(np.float64)
+        gdept_1d = (np.asarray(ds["gdept_1d"]).squeeze().astype(np.float64)
+                    if "gdept_1d" in ds else None)
+
+    paths = sorted(run_dir.glob("snapshot_day*.npz"),
+                   key=lambda p: int(_SNAP_RE.search(p.name).group(1)))
+    if len(paths) < 2:
+        raise SystemExit("FATAL: need at least two snapshot_dayNNNN.npz files")
+    snaps = [load_snapshot(p) for p in paths]
+
+    def z_coord_for(s):
+        zs, pc = build_z_coord(e3t_1d, gdept_1d, s["H_bathy"])
+        zi = s.get("z_interface_ref")
+        if zi is not None:
+            rec = np.abs(np.asarray(zs.z_half_ref, dtype=np.float64)[1:-1])
+            if rec.shape != zi.shape or not np.allclose(rec, zi, rtol=0, atol=1e-9):
+                raise SystemExit("FATAL: reconstructed interfaces != snapshot "
+                                 "z_interface_ref (wrong --domain-cfg?)")
+        return pc
+
+    isf_fwf_for = None
+    if getattr(rargs, "isf", False) and rargs.isf_forcing_file:
+        from legoesm.ocean.forcing.isf_spe import load_isf_spe_forcing
+        s0 = snaps[0]
+        isf = load_isf_spe_forcing(rargs.isf_forcing_file, _snap_lat(paths[0]),
+                                   _snap_lon(paths[0]), land_mask=s0["land_mask"])
+        month_end = np.cumsum([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
+
+        def isf_fwf_for(sa, sb):
+            # Window covers days (start, end]; one calendar month (NOLEAP) only.
+            m0 = int(np.searchsorted(month_end, float(sa["time_days"]) % 365.0, side="right"))
+            m1 = int(np.searchsorted(month_end, (float(sb["time_days"]) - 1e-9) % 365.0, side="right"))
+            if m0 != m1:
+                raise SystemExit(f"FATAL: window ending day {float(sb['time_days'])} "
+                                 "spans two ISF months")
+            return np.asarray(isf.fwf[m0], dtype=np.float64)
+
+    rows = close_windows(snaps, z_coord_for, rho_0, c_p, flux_geo, isf_fwf_for,
+                         float(constants.L_fus_isf_nemo),
+                         run_log=run_dir / "run.log")
+    out = {"run_dir": str(run_dir), "git_sha": _git_sha(),
+           "run_git_sha": manifest.get("legoESM", {}).get("commit"),
+           "domain_cfg": a.domain_cfg, "rho_0": rho_0, "c_sw": c_p,
+           "geothermal_flux_wm2": flux_geo, "snapshots": [p.name for p in paths],
+           "windows": rows}
+    for r in rows:
+        print(f"[closure] day {r['day_start']:6.2f}->{r['day_end']:6.2f}: "
+              f"dH/dt {r['dHdt_W']:.4e} W  q_net {r['Q_qnet_W']:.4e}  "
+              f"geo {r['Q_geothermal_W']:.3e}  isf {r['Q_isf_latent_W']:.3e}  "
+              f"residual {r['residual_Wm2']:+.4f} W/m2 "
+              f"({r['residual_pct_of_qnet'] if r['residual_pct_of_qnet'] is None else round(r['residual_pct_of_qnet'], 3)} % of q_net); "
+              f"fw-enthalpy est {r.get('fw_enthalpy_estimate_Wm2')} W/m2")
+    if a.json_out:
+        Path(a.json_out).write_text(json.dumps(out, indent=1))
+    return 0
+
+
+def _snap_lat(path):
+    with np.load(path) as z:
+        return np.asarray(z["lat_T"], dtype=np.float64)
+
+
+def _snap_lon(path):
+    with np.load(path) as z:
+        return np.asarray(z["lon_T"], dtype=np.float64)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
