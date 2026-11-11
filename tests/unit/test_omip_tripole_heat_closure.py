@@ -198,3 +198,10 @@ def test_salt_created_in_ice_is_flagged():
     b["ice_salinity"] += 1.0                  # ice salt with no ocean debit
     [row] = _close([a, b])
     assert row["salt_rel_change"] > 1e-6
+
+
+def test_nonfinite_salt_is_fatal():
+    a, b = _salty_pair(0.2)
+    b["ice_salinity"][3, 3] = np.nan
+    with pytest.raises(SystemExit, match="non-finite"):
+        _close([a, b])

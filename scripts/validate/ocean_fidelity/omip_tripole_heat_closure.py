@@ -139,7 +139,10 @@ def heat_content(snap, z_coord, rho_0, c_p):
 def total_salt_kg(snap, z_coord, rho_0, c_p):
     """Ocean + sea-ice salt [kg].  None when the snapshot lacks S or ice
     salinity.  Every external water flux on the card (P-E, runoff, ISF,
-    restoring through water) carries no salt, so this is conserved."""
+    restoring through water) carries no salt, so this is conserved up to
+    the ice-shelf melt: virtual dilution in the melt band plus column-wide
+    eta stretching leave a drift set by band-vs-column salinity, bounded
+    above by the whole melt salt (~1.4e-8 per 5-day window on eORCA1)."""
     if "S" not in snap or "ice_salinity" not in snap:
         return None
     _, _, ocean = heat_content(snap, z_coord, rho_0, c_p)
@@ -147,7 +150,9 @@ def total_salt_kg(snap, z_coord, rho_0, c_p):
     ice = float(constants.rho_ice) * float(
         (snap["ice_salinity"] * snap["ice_concentration"] * snap["ice_thickness"]
          * snap["cell_area"] * wet).sum())
-    return (ocean + ice) * 1.0e-3     # PSU ~ g/kg -> kg
+    total = (ocean + ice) * 1.0e-3     # PSU ~ g/kg -> kg
+    _fatal_nonfinite("ocean+ice salt", total)
+    return total
 
 
 def wet_area(snap):
