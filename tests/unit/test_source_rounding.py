@@ -132,3 +132,71 @@ def test_geometric_depth_pressure_density_is_stored() -> None:
         lambda st: compute_frozen_geom_density(st, grid, z_coord, cfg)[2:]
     ).lower(state).compile().as_text()
     assert "conditional" in text
+
+
+def test_bn2_alpha_beta_is_stored() -> None:
+    """NEMO rab (alpha/beta) inside bn2 goes through nemo_source_store
+    (eos.compute_buoyancy_frequency_nemo_bn2); without the store this compiled
+    program has no conditional."""
+    from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
+
+    shape = (5, 7, 6)
+    t = jnp.linspace(-1.5, 29.0, np.prod(shape), dtype=jnp.float64).reshape(shape)
+    s = jnp.linspace(31.0, 37.5, np.prod(shape), dtype=jnp.float64).reshape(shape)
+    gdept = jnp.linspace(5.0, 4000.0, shape[-1], dtype=jnp.float64)
+    gdepw = 0.5 * (gdept[1:] + gdept[:-1])
+    text = jax.jit(lambda t_, s_: compute_buoyancy_frequency_nemo_bn2(
+        t_, s_, gdept, gdepw, eos_form="eos80", e3w_source="depth_difference",
+        source_rounded=True)).lower(t, s).compile().as_text()
+    assert " conditional(" in text
+
+
+def test_r3t_stretch_is_stored() -> None:
+    """NEMO (1 + r3t) goes through nemo_source_store (eos.nemo_r3t_stretch);
+    without the store this compiled program has no conditional."""
+    from legoesm.ocean.eos import nemo_r3t_stretch
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    eta = jnp.linspace(-0.5, 0.5, 35, dtype=jnp.float64).reshape(5, 7)
+    h = jnp.linspace(0.0, 4000.0, 35, dtype=jnp.float64).reshape(5, 7)
+    for evaluation in ("quotient", "nemo_reciprocal"):
+        text = jax.jit(lambda e, b: nemo_r3t_stretch(
+            z_coord, e, b, evaluation=evaluation)).lower(eta, h).compile().as_text()
+        assert " conditional(" in text, evaluation
+
+
+def test_mle_density_is_stored(monkeypatch) -> None:
+    """The MLE density of the through-FCT route goes through nemo_source_store
+    in the step (ocean_model_latlon_cgrid ... _step_impl); traced on the GYRE
+    lane card with ORCA2's L5 MLE."""
+    import sys
+
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as om
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_gyre_zco_lane_certified_card,
+        orca2_l5_mle,
+    )
+
+    callers = []
+    store = om.nemo_source_store
+
+    def recording_store(fn, *operands):
+        callers.append(sys._getframe(1).f_code.co_name)
+        return store(fn, *operands)
+
+    monkeypatch.setattr(om, "nemo_source_store", recording_store)
+    prev = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        card = build_gyre_zco_lane_certified_card()
+        base = card.recipe.model_config
+        cfg = base._replace(physics=base.physics._replace(
+            mle=orca2_l5_mle()._replace(through_fct=True, nemo_association=True)))
+        model = om.LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
+        state = model._seed_tke_preclosure_carry(card.recipe.initial_state)
+        jax.eval_shape(lambda st: model._step_jitted(st, card.dt_s), state)
+    finally:
+        set_policy(prev)
+    assert "_step_impl" in callers
