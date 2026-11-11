@@ -113,3 +113,50 @@ def test_isf_month_follows_the_driver_rule():
     a step ending exactly on day 31 already belongs to February."""
     w = step_month_weights(31 * 48 - 2, 31 * 48 + 2, 1800.0)
     assert w[0] == pytest.approx(0.25) and w[1] == pytest.approx(0.75)
+
+
+def _run_dir(tmp_path, q_saved, extra_flags="", z_iface=(100.0, 400.0)):
+    """Minimal run directory the CLI reads: manifest, vertical file, run.log,
+    two day snapshots on a 3-level 1000 m ladder (flat bottom, eta = 0)."""
+    import json
+
+    import xarray as xr
+    e3t = np.array([100.0, 300.0, 600.0])
+    xr.Dataset({"e3t_1d": ("z", e3t)}).to_netcdf(tmp_path / "domain_cfg.nc")
+    cmd = ("scripts/run/run_omip_core2.py --grid tripole --partial-cell "
+           "--nemo-vertical --snapshot-every-days 5 --geothermal "
+           f"--geothermal-flux-wm2 {GEO} " + extra_flags)
+    (tmp_path / "run_manifest.json").write_text(json.dumps({
+        "run": {"command_line": cmd}, "legoESM": {"commit": "x"},
+        "config": {"resolved_config": {"runtime_config": {
+            "constants": {"rho_0": RHO, "c_sw": CP}}}}}))
+    (tmp_path / "run.log").write_text("")
+    a, b = _pair(q_saved)
+    for tag, s in (("day0005", a), ("day0010", b)):
+        s["z_interface_ref"] = np.asarray(z_iface)
+        np.savez(tmp_path / f"snapshot_{tag}.npz", **s)
+    return tmp_path
+
+
+def _cli(run_dir, gate):
+    from omip_tripole_heat_closure import main
+    return main(["--run-dir", str(run_dir), "--domain-cfg",
+                 str(run_dir / "domain_cfg.nc"), "--max-residual-wm2", str(gate)])
+
+
+def test_cli_passes_a_closing_run(tmp_path):
+    assert _cli(_run_dir(tmp_path, Q), 1e-6) == 0
+
+
+def test_cli_fails_a_planted_residual(tmp_path):
+    assert _cli(_run_dir(tmp_path, 2.0 * Q), 1e-6) == 1
+
+
+def test_cli_refuses_an_unclosed_heat_source(tmp_path):
+    with pytest.raises(SystemExit, match="freeze-floor"):
+        _cli(_run_dir(tmp_path, Q, extra_flags="--freeze-floor"), 1e-6)
+
+
+def test_cli_refuses_a_geometry_mismatch(tmp_path):
+    with pytest.raises(SystemExit, match="z_interface_ref"):
+        _cli(_run_dir(tmp_path, Q, z_iface=(100.0, 450.0)), 1e-6)
