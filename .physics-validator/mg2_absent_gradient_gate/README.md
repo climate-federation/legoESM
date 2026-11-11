@@ -22,13 +22,13 @@ random direction.  Instruments: `scripts/validate/production_ad_map.py`
 
 32-step window (one hour, two physics calls), GPU: AD -9.9e84 vs FD -8.0e6.
 The per-step adjoint record (identity custom_vjp tap writing max|cotangent|
-per state leaf into a `jax.ref`, `logs/mpas_seg_stash-0-28780080.txt`)
+per state leaf into a `jax.ref`, `runs/mpas_seg_stash-0-28780080.txt`)
 puts the whole amplification inside ONE call: the step-16 physics step
 (x1.5e86, landing on cloud ice q_i).  Dynamics steps change the adjoint by
 <= 10 % per step.
 
 Same physics call, bit-identical inputs (state saved to .npz, sha256 digest
-printed and matched), both backends (`logs/mpas_x_*`):
+printed and matched), both backends (`runs/mpas_x_*`):
 
 | state \ backend | GPU AD | CPU AD | FD (both) |
 |---|---|---|---|
@@ -43,7 +43,7 @@ inside the 2nd and 3rd Morrison calls (x2e87, x2e31), on the snow number
 N_s at cells where N_s == 0.  Per-equation reverse pass of each Morrison
 call (`eqn_trace`: forward and reverse one jaxpr equation at a time; summed
 per-equation gradient == `jax.grad` to roundoff on every leaf;
-`logs/mpas_eqns_micro-0-28877034.txt`): the largest single-equation gains are
+`runs/mpas_eqns_micro-0-28877034.txt`): the largest single-equation gains are
 the MG2 conservation limiters, ratios (available/dt + sources) / sink, at
 stocks and sinks of 1e-223 .. 1e-291 -- far below MG2_QSMALL = 1e-18:
 
@@ -80,7 +80,7 @@ step-16 jump equals the CPU's pre-fix profile (1.820e12) to 4 digits.
 
 The remaining 10-27 % one-call mismatch is not this defect: the entry gate
 leaves that AD identical to 7 digits.  CLUBB alone showed AD/FD = 6.1 at the
-default FD step; an FD step sweep (`logs/mpas_kink_*`) converges to AD to
+default FD step; an FD step sweep (`runs/mpas_kink_*`) converges to AD to
 5 digits (1.0000 at 1e-4 and 1e-5 of the default step), i.e. a kink in the
 temperature direction, not an adjoint error.  The one-call mismatch was not
 swept (PLAUSIBLE: the same FD artefact).
@@ -110,7 +110,7 @@ swept (PLAUSIBLE: the same FD artefact).
 - Not covered: tiny intermediates created inside one Morrison call (only the
   two named limiters gate those), and N_s where q_s >= qsmall but N_s ~ 0:
   d/d N_s at Morrison call 1 is still 2.5e92 at such a cell
-  (`logs/mpas_gate_phys16-0-28897363.txt`).  It did not affect the 32-step
+  (`runs/mpas_gate_phys16-0-28897363.txt`).  It did not affect the 32-step
   window (which differentiates T and q_v); a loss on N_s would see it.
 - The q_i cotangent entering step 16 is still 9.7e15 (CPU had the same
   before any fix).
