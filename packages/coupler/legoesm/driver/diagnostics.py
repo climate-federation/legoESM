@@ -744,7 +744,7 @@ class DiagnosticCollector:
         import jax.numpy as jnp
         return jnp.asarray(p_s)[..., None] * jnp.asarray(self.dsigma)
 
-    def _interp_to_plev19(self, field_3d, p_s) -> np.ndarray | None:
+    def _interp_to_plev19(self, field_3d, p_s, bracket=None) -> np.ndarray | None:
         """Interpolate a 3-D field from model levels to CMIP6 plev19.
 
         Parameters
@@ -753,12 +753,24 @@ class DiagnosticCollector:
             Field on model levels.
         p_s : array, shape (...)
             Surface pressure [Pa].
+        bracket : tuple, optional
+            ``_plev19_bracket(p_s)`` for this same *p_s*; pass it to reuse one
+            bracket across several fields of one sample (bit-identical).
 
         Returns (..., 19) numpy array on CMIP6 standard pressure levels,
         or None if sigma_full is not available.
         """
-        p_s_np = np.asarray(p_s)
+        if bracket is None:
+            bracket = self._plev19_bracket(p_s)
+        idx_lo, idx_hi, alpha = bracket
         field_np = np.asarray(field_3d)
+        f_lo = np.take_along_axis(field_np, idx_lo, axis=-1)
+        f_hi = np.take_along_axis(field_np, idx_hi, axis=-1)
+        return f_lo + alpha * (f_hi - f_lo)
+
+    def _plev19_bracket(self, p_s):
+        """Per-column bracketing levels and log-p weights of plev19 for *p_s*."""
+        p_s_np = np.asarray(p_s)
 
         # Model pressure at each level, from the ACTUAL vertical coordinate:
         # p_k = A_k p_ref + B_k p_s (hybrid) or sigma_k p_s (pure sigma).
@@ -795,15 +807,13 @@ class DiagnosticCollector:
         idx_hi = np.clip(idx_hi, 1, p_model.shape[-1] - 1)
         idx_lo = idx_hi - 1
 
-        f_lo = np.take_along_axis(field_np, idx_lo, axis=-1)
-        f_hi = np.take_along_axis(field_np, idx_hi, axis=-1)
         lp_lo = np.take_along_axis(log_p_model, idx_lo, axis=-1)
         lp_hi = np.take_along_axis(log_p_model, idx_hi, axis=-1)
 
         log_pt = log_plev.reshape((1,) * p_s_np.ndim + (n_target,))
         denom = np.where(lp_hi == lp_lo, 1.0, lp_hi - lp_lo)
         alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
-        return f_lo + alpha * (f_hi - f_lo)
+        return idx_lo, idx_hi, alpha
 
     def _tas_2m(self, state, q_v, sst, sic, T_ice, u_low=None, v_low=None,
                 *, T_land=None, q_land=None, land_fraction=None):
@@ -2244,6 +2254,8 @@ class DiagnosticCollector:
             # 3-D fields: model levels → plev19, then regrid.  The plev
             # interpolation is column-wise and works unchanged on native
             # (nCells, nlev) with p_s (nCells,).
+            _bracket = (self._plev19_bracket(p_s_np) if include_state
+                        else None)
             for _name, _src in (
                 ('ta', T_np),
                 ('hus', q_v_np),
@@ -2259,7 +2271,7 @@ class DiagnosticCollector:
             ):
                 if _src is None or not include_state:
                     continue
-                _plev = self._interp_to_plev19(_src, p_s_np)
+                _plev = self._interp_to_plev19(_src, p_s_np, _bracket)
                 if _plev is None:
                     continue
                 r = self._regrid_to_latlon_3d(_plev)
