@@ -48,8 +48,8 @@ from legoesm import constants
 from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     CGridLatLonShallowWaterConfig,
     CGridLatLonShallowWaterState,
-    cgrid_latlon_sw_tendencies,
 )
+from legoesm.atmosphere.dynamics.gcm.shallow_water_generic import cgrid_latlon_sw_tendencies
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.grids.latlon import create_regional_latlon_grid
 
