@@ -106,7 +106,8 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-from legoesm.atmosphere.les_suite.candidate import half_level_average, surface_stress
+from legoesm.atmosphere.les_suite.candidate import (half_level_average, has_surface_law,
+                                                    surface_stress)
 from legoesm.atmosphere.les_suite.scm_coupling import saturation_adjust
 from legoesm.core.bulk_flux import psi_m
 from legoesm.timestepping.tridiagonal import thomas_solve
@@ -400,8 +401,7 @@ def init_aux(inputs):
     s2_sfc = (x.u[0] ** 2 + x.v[0] ** 2) / (zf[0] * jnp.log(zf[0] / x.z0_m)) ** 2
     # a column with a surface law passes its stress: u*/(kappa z_1) from it (PI 2026-11-11)
     _, _, ust_law = surface_stress(x, 0.0, 0.0, 0.0)
-    s2_sfc = jnp.where(jnp.isfinite(x.uw_s) & jnp.isfinite(x.vw_s),
-                       (ust_law / (KAPPA * zf[0])) ** 2, s2_sfc)
+    s2_sfc = jnp.where(has_surface_law(x), (ust_law / (KAPPA * zf[0])) ** 2, s2_sfc)
     # full level 0 sits at z_1: the log-law shear there is exactly u*/(kappa z_1)
     s2_full = jnp.concatenate([jnp.reshape(s2_sfc, (1,)), _avg(s2_int), s2_int[-1:]])
     n2_full = jnp.concatenate([n2_int[:1], _avg(n2_int), n2_int[-1:]])

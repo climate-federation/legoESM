@@ -90,7 +90,8 @@ Deviations from the hypothesis text (all also listed in the round record)
 from __future__ import annotations
 
 import jax.numpy as jnp
-from legoesm.atmosphere.les_suite.candidate import half_level_average
+from legoesm.atmosphere.les_suite.candidate import (half_level_average, has_surface_law,
+                                                    surface_stress)
 from legoesm.atmosphere.les_suite.scm_coupling import saturation_adjust
 from legoesm.atmosphere.physics.turbulence.pbl_height import (
     PBLHeightConfig,
@@ -216,6 +217,11 @@ def _operator(params, inputs):
 
     # Velocity scales.
     c_s, u_star = _surface_drag(inputs, b_s)
+    # a column with a surface law passes its stress: u* from it, applied explicitly
+    # at the surface instead of the implicit drag (PI 2026-11-11)
+    uw_law, vw_law, u_star = surface_stress(inputs, 0.0, 0.0, u_star)
+    tau_law = inputs.rho_half[0] * jnp.stack([uw_law, vw_law])
+    c_s = jnp.where(has_surface_law(inputs), 0.0, c_s)
     wc3 = _V_FLOOR ** 3 * _p_delta(b_s * h / _V_FLOOR ** 3)
     a3 = (wc3 + _V_FLOOR ** 3) ** (1.0 / 3.0)
     wcf2 = a3 ** 2                                        # w_c^2 + v_f^2
@@ -229,7 +235,8 @@ def _operator(params, inputs):
     dzf = zf[1:] - zf[:-1]
     n2 = g * (thvu[1:] - thvu[:-1]) / (0.5 * (thvu[1:] + thvu[:-1]) * dzf)
     return dict(a_n=a_n, a_p=a_p, c_l=c_l, c_st=c_st, tri=tri, z0=z0, b_s=b_s, h=h,
-                c_s=c_s, u_star=u_star, wc2=wc2, v02=v02, v0=v0, n2=n2, dzf=dzf,
+                c_s=c_s, u_star=u_star, tau_law=tau_law, wc2=wc2, v02=v02, v0=v0, n2=n2,
+                dzf=dzf,
                 thvu=thvu, n=n, dtype=dtype)
 
 
@@ -290,8 +297,9 @@ def _rotation_coeff(a_p, u, v):
     return a_p * cross / jnp.sqrt(s2[:, None] * s2[None, :])
 
 
-def _implicit_momentum(r, rb, inputs, c_s):
-    """Backward Euler of the coupled (u, v) exchange + rotation + implicit drag.
+def _implicit_momentum(r, rb, inputs, c_s, tau_law):
+    """Backward Euler of the coupled (u, v) exchange + rotation + implicit drag
+    (``tau_law``: an explicit mass-weighted surface stress, zero without a law).
     Returns (G_u, G_v, G_rot_u, G_rot_v) (n+1,) mass-weighted, top exactly 0."""
     m, dt = inputs.mass, inputs.dt
     n = m.shape[0]
@@ -302,15 +310,17 @@ def _implicit_momentum(r, rb, inputs, c_s):
     gv_mat = jnp.concatenate([b_b, b_r - c_s * e00], axis=1)
     a = jnp.diag(jnp.concatenate([m, m])) + dt * jnp.concatenate(
         [_div(gu_mat), _div(gv_mat)], axis=0)
-    x = jnp.linalg.solve(a, jnp.concatenate([m * inputs.u, m * inputs.v]))
+    e0 = (jnp.arange(n) == 0).astype(m.dtype)
+    x = jnp.linalg.solve(a, jnp.concatenate([m * inputs.u + dt * e0 * tau_law[0],
+                                             m * inputs.v + dt * e0 * tau_law[1]]))
     u_new, v_new = x[:n], x[n:]
     zero = jnp.zeros((1,), m.dtype)
 
     def pack(g0, g):
         return jnp.concatenate([jnp.reshape(g0, (1,)), g[1:n], zero])
 
-    g_u = pack(-c_s * u_new[0], gu_mat @ x)
-    g_v = pack(-c_s * v_new[0], gv_mat @ x)
+    g_u = pack(-c_s * u_new[0] + tau_law[0], gu_mat @ x)
+    g_v = pack(-c_s * v_new[0] + tau_law[1], gv_mat @ x)
     g_rot_u = pack(zero[0], -(b_b @ v_new))
     g_rot_v = pack(zero[0], b_b @ u_new)
     return g_u, g_v, g_rot_u, g_rot_v
@@ -325,7 +335,7 @@ def _solve(params, inputs, aux):
                             rho_h[0] * inputs.w_theta_s, dt)
     g_q = _implicit_scalar(r, inputs.q_t, m, ones_c, ones_h, rho_h[0] * inputs.w_qt_s, dt)
     rb = r * _rotation_coeff(o["a_p"], inputs.u, inputs.v)
-    g_u, g_v, g_ru, g_rv = _implicit_momentum(r, rb, inputs, o["c_s"])
+    g_u, g_v, g_ru, g_rv = _implicit_momentum(r, rb, inputs, o["c_s"], o["tau_law"])
     return o, diag, (g_th, g_q, g_u, g_v, g_ru, g_rv)
 
 

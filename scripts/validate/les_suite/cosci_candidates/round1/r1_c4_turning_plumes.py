@@ -60,7 +60,9 @@ from jax import lax
 from legoesm.atmosphere.les_suite.candidate import (
     absorb_top,
     half_level_average,
+    has_surface_law,
     ke_dissipation_heating,
+    surface_stress,
 )
 from legoesm.atmosphere.les_suite.scm_coupling import saturation_adjust
 from legoesm.core.bulk_flux import psi_m as most_psi_m
@@ -348,8 +350,14 @@ def _solve(p, inp, aux):
     hp_new = 2.0 * jnp.sum(z_i * Mt * dzi) / (jnp.sum(Mt * dzi) + M_EPS * HP_LEN_M)
     Ws = jnp.cbrt(Bp * aux["h_p"] + W_FLOOR ** 3)
     zeta = -kap * z1 * B_s / aux["u_star"] ** 3
-    CD = _drag_coef(inp.sfc_drag_most, z1, inp.z0_m, zeta)
+    # a column with a surface law passes its stress, applied explicitly at the surface
+    # instead of this drag (PI 2026-11-11); such a column records no wall-drag law, so
+    # the unused own branch gets a finite placeholder (no NaN through its gradient)
+    has_law = has_surface_law(inp)
+    CD = _drag_coef(jnp.where(has_law, 1.0, inp.sfc_drag_most), z1, inp.z0_m, zeta)
     c_s = CD * jnp.sqrt(U[0] ** 2 + V[0] ** 2 + (p["beta_g"] * Ws) ** 2 + U_EPS ** 2)
+    c_s = jnp.where(has_law, 0.0, c_s)
+    uw_law, vw_law, _ = surface_stress(inp, 0.0, 0.0, 0.0)
 
     # (1) one implicit solve per field (batched): K + compensating flux implicit
     Mnet = Mt - Dt
@@ -368,7 +376,8 @@ def _solve(p, inp, aux):
     Upw, Umw, Pm = Up * wh, Um * wh, Pm * wh
     GUm = jax.vmap(_pad0)(G + Umw)
     GUp = jax.vmap(_pad0)(G + Upw)
-    sfc = jnp.stack([rho_h[0] * wth_s * inp.exner_half[0], rho_h[0] * wq_s, zero, zero])
+    sfc = jnp.stack([rho_h[0] * wth_s * inp.exner_half[0], rho_h[0] * wq_s,
+                     zero + rho_h[0] * uw_law, zero + rho_h[0] * vw_law])
     Pm_full = jnp.concatenate([sfc[:, None], Pm, jnp.zeros((4, 1), th.dtype)], axis=1)
     a = -dt * GUm[:, :-1]
     cc = -dt * GUp[:, 1:]
@@ -384,8 +393,8 @@ def _solve(p, inp, aux):
     top = jnp.zeros((1,), th.dtype)
     Fth = jnp.concatenate([jnp.reshape(wth_s, (1,)), F_int[0], top])
     Fq = jnp.concatenate([jnp.reshape(wq_s, (1,)), F_int[1], top])
-    Fu = jnp.concatenate([-c_s * X1[2, 0] * one, F_int[2], top])
-    Fv = jnp.concatenate([-c_s * X1[3, 0] * one, F_int[3], top])
+    Fu = jnp.concatenate([(-c_s * X1[2, 0] + uw_law) * one, F_int[2], top])
+    Fv = jnp.concatenate([(-c_s * X1[3, 0] + vw_law) * one, F_int[3], top])
 
     # (6) TKE: implicit diffusion, Patankar sinks
     Um_, Vm_ = 0.5 * (U + X1[2]), 0.5 * (V + X1[3])

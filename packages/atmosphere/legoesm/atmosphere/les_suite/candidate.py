@@ -73,12 +73,17 @@ def owned_fluxes(kind: str, flux_a, flux_b) -> dict:
     raise ValueError(f"kind must be one of {KINDS}, got {kind!r}")
 
 
+def has_surface_law(inputs):
+    """True where the column passes a surface-law stress (finite ``uw_s``/``vw_s``)."""
+    return jnp.isfinite(inputs.uw_s) & jnp.isfinite(inputs.vw_s)
+
+
 def surface_stress(inputs, own_uw, own_vw, own_u_star):
     """``(uw, vw, u_star)`` a ``"both"`` candidate uses at the surface: the stress the
     column passes in (a column with a surface law, e.g. CloudBench; PI 2026-11-11) with
     ``u_star = |tau|^(1/2)``, else (``uw_s``/``vw_s`` NaN) the candidate's own values
     unchanged. Double-where keeps the root's gradient finite at zero stress."""
-    has = jnp.isfinite(inputs.uw_s) & jnp.isfinite(inputs.vw_s)
+    has = has_surface_law(inputs)
     uw = jnp.where(has, inputs.uw_s, 0.0)
     vw = jnp.where(has, inputs.vw_s, 0.0)
     tau2 = uw * uw + vw * vw

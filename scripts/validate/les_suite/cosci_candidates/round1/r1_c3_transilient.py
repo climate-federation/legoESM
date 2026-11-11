@@ -104,6 +104,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import logsumexp
+from legoesm.atmosphere.les_suite.candidate import has_surface_law, surface_stress
 from legoesm.atmosphere.les_suite.scm_coupling import saturation_adjust
 from legoesm.core.bulk_flux import psi_m
 
@@ -235,6 +236,8 @@ def kernel(params, inputs):
     _x, g0 = _up_gate(b_up, K_EPS, zh[-1], p["a_b"], dK, dzl, dzc)
     zb = depth(g0)
     ust = kap * jnp.sqrt(u1sq + U_REG ** 2) / jnp.log(z1 / z0)
+    # a column with a surface law passes its stress: u* from it (PI 2026-11-11)
+    ust = surface_stress(inputs, 0.0, 0.0, ust)[2]
     w_l = jnp.zeros_like(zb)
     for _ in range(N_FP):                     # static trip count, no traced branching
         b_s = p["zeta_s"] * (ust ** 3 + U_REG ** 3) / (kap * zb)
@@ -244,12 +247,16 @@ def kernel(params, inputs):
         _x, g = _up_gate(b_up, K0, zb, p["a_b"], dK, dzl, dzc)
         zb_new = depth(g)
         ust, _ = _ustar(u1sq, w_l_new, b0, ust, z1, z0, p["beta_g"])
+        ust = surface_stress(inputs, 0.0, 0.0, ust)[2]
         zb, w_l = zb_new, w_l_new
 
     K0 = 0.5 * w_l ** 2 + K_EPS
     x, g = _up_gate(b_up, K0, zb, p["a_b"], dK, dzl, dzc)
     u_eff = jnp.sqrt(u1sq + (p["beta_g"] * w_l) ** 2 + U_REG ** 2)   # as in _ustar
     c_s = ust ** 2 / u_eff                   # kinematic drag coefficient [m s^-1]
+    # on a surface-law column the passed stress is applied explicitly, no implicit drag
+    tau_law = jnp.stack(surface_stress(inputs, 0.0, 0.0, 0.0)[:2])
+    c_s = jnp.where(has_surface_law(inputs), 0.0, c_s)
 
     top = jnp.arange(n) == n - 1
     S = jnp.where(top, 0.0, jnp.exp(-p["c_d"] * (z - z[0]) / zb) * g)
@@ -291,6 +298,7 @@ def kernel(params, inputs):
     # W_REG^2 keeps the sqrt derivative finite where softplus underflows to 0
     w_p = jnp.sqrt(2.0 * K0 * dK * jax.nn.softplus(x / dK) + W_REG ** 2)
     return dict(B0=b0, Z_b=zb, u_star=ust, w_L=w_l, K0=K0, U_eff=u_eff, c_s=c_s,
+                tau_law=tau_law,
                 x=x, S=S, P=P, A=A, chi=1.0 - A, M_L=M_L, M=M, R=R, D=D, Rj=Rj,
                 Km=Km, Kh=Kh, Ri=Ri, w_p=w_p)
 
@@ -340,9 +348,10 @@ def fluxes(params, inputs, aux):
     g_w = _flux_matrix(k, params["C_u"], k["Km"], inputs)
     drag = jnp.zeros((n, n), dt_).at[0, 0].set(rh[0] * k["c_s"])
     phi_w = jnp.stack([inputs.u, inputs.v], axis=1)
-    new_w = jnp.linalg.solve(jnp.diag(m) - dt * (dv_ @ g_w - drag), m[:, None] * phi_w)
+    new_w = jnp.linalg.solve(jnp.diag(m) - dt * (dv_ @ g_w - drag),
+                             m[:, None] * phi_w + dt * e_0[:, None] * rh[0] * k["tau_law"])
     fw = (g_w @ new_w) / rh[1:n, None]
-    tau = -k["c_s"] * new_w[0]                                       # (2,) kinematic
+    tau = -k["c_s"] * new_w[0] + k["tau_law"]                        # (2,) kinematic
 
     def assemble(surface, interior):
         return jnp.concatenate([jnp.reshape(surface, (1,)).astype(dt_), interior, zero])

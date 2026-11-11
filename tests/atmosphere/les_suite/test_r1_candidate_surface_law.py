@@ -22,7 +22,7 @@ _UW, _VW = -0.09, 0.02
 N = 16
 
 
-def _column(uw_s, vw_s, z0_m=1e-3):
+def _column(uw_s, vw_s, z0_m=1e-3, sfc_drag_most=1.0):
     z_half = jnp.linspace(0.0, 1600.0, N + 1)
     z_full = 0.5 * (z_half[1:] + z_half[:-1])
     rho_full = 1.2 * jnp.exp(-z_full / 8000.0)
@@ -36,7 +36,7 @@ def _column(uw_s, vw_s, z0_m=1e-3):
         theta_l=300.0 + 0.004 * jnp.maximum(z_full - 600.0, 0.0),
         q_t=0.01 - 2e-6 * z_full, u=5.0 + 0.002 * z_full, v=jnp.sin(z_full / 300.0),
         w_theta_s=0.05, w_qt_s=1e-4, uw_s=uw_s, vw_s=vw_s, dt=600.0,
-        z0_m=z0_m, z0h_m=z0_m, sfc_drag_most=1.0)
+        z0_m=z0_m, z0h_m=z0_m, sfc_drag_most=sfc_drag_most)
 
 
 def _run(name, inp, params=None):
@@ -51,7 +51,11 @@ def _leaves(tree):
 
 
 EXPLICIT = ["r1_c1_wave_kernel", "r1_c1_wave_kernel_mem", "r1_c2_third_moment",
-            "r1_l2_pc_edmf"]
+            "r1_l2_pc_edmf", "r1_c3_transilient", "r1_codex_pressure_turning_trans",
+            "r1_c4_turning_plumes"]
+#: what enters each candidate ONLY through its own surface law: roughness, except for
+#: the codex candidate, whose mixing lengths also read z0 (its stability function then)
+_OWN_LAW_KNOB = {"r1_codex_pressure_turning_trans": "psi_m"}
 
 
 @pytest.mark.parametrize("name", EXPLICIT)
@@ -61,13 +65,17 @@ def test_candidate_uses_the_passed_stress(name):
 
 
 @pytest.mark.parametrize("name", EXPLICIT)
-def test_law_column_ignores_the_candidates_own_surface_layer(name):
-    """Roughness enters each of these candidates only through its own surface law, so
-    on a law column every flux and the new aux must not depend on it: any own u* or
-    stress still used downstream (plume launch, zeta, TKE production, cold start)
-    would show here."""
+def test_law_column_ignores_the_candidates_own_surface_layer(name, monkeypatch):
+    """On a law column every flux and the new aux must not depend on what enters only
+    the candidate's own surface law: any own u*, stress or drag still used downstream
+    (plume launch, zeta, TKE production, cold start, implicit drag) would show here."""
     a = _leaves(_run(name, _column(_UW, _VW, z0_m=1e-3)))
-    b = _leaves(_run(name, _column(_UW, _VW, z0_m=0.1)))
+    if _OWN_LAW_KNOB.get(name) == "psi_m":
+        import legoesm.core.bulk_flux as bf
+        monkeypatch.setattr(bf, "psi_m", lambda zeta, *a, **k: 0.0 * zeta + 0.3)
+        b = _leaves(_run(name, _column(_UW, _VW, z0_m=1e-3)))
+    else:
+        b = _leaves(_run(name, _column(_UW, _VW, z0_m=0.1)))
     for x, y in zip(a, b, strict=True):
         np.testing.assert_array_equal(x, y)
 
@@ -92,7 +100,7 @@ def test_nan_stress_keeps_the_own_law_bit_identically(name, monkeypatch):
 @pytest.mark.parametrize("name", EXPLICIT)
 def test_gradient_through_a_law_column_is_finite(name):
     cand = cmod.load_candidate(_R1 / f"{name}.py")
-    inp = _column(_UW, _VW)
+    inp = _column(_UW, _VW, sfc_drag_most=jnp.nan)   # as CloudBench: no wall-drag record
     p0 = cand.default_params()
 
     def loss(p):
