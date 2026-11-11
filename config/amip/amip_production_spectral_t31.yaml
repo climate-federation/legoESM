@@ -32,7 +32,11 @@ spectral_sponge_nu_top_m2s: 1.16e6  # CAM-SE top Laplacian sponge (nu_top x 4/2/
                             # 3e-3 dx^2/dt at T31 (dx 417 km, dt 450 s), ~9x CAM-SE's 1.25e5.
                             # 30-day T31 gate (max wind <= 140 m/s every day, days 20-30 trend
                             # <= 0; voted 3-0): 1.16e6 max 105, trend -0.5 m/s/day PASS;
-                            # CAM-faithful 1.25e5 max 152, +4.0 m/s/day FAIL; no sponge 202, +4.7.
+                            # 3.6e5 max 126, +3.0 FAIL; CAM-faithful 1.25e5 max 152, +4.0 FAIL;
+                            # no sponge 202, +4.7. Adopted by the user 2026-11-10. 90-day check
+                            # (criteria pre-registered): max 107.8, days 60-90 trend -0.29, tail
+                            # share 7.3e-3 vs 1.03e-2 at day 0: PASS. Cost: the 3.6 hPa zonal-mean
+                            # jet is 38 m/s at day 30 (81 without the sponge).
 dt: 450.0                  # decision A rule (MPAS / duo / lat-lon decks): 0.82 x the generic CFL
                             # limit 0.8 dx / (390 m/s sqrt 2) on the TRUE T31 quadratic-grid spacing
                             # (417 km, the lat-lon-48 deck's 48 x 96 columns: 605 s -> 496 s), rounded
