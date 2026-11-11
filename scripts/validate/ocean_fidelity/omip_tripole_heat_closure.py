@@ -17,11 +17,12 @@ applied over that window:
 * Q_geothermal: the constant seafloor flux over wet columns (post-step BC).
 * Q_isf_latent: -fwf * L_fus_isf over the ice-shelf melt cells.
 
-NOT closed, reported as an ESTIMATE: freshwater enthalpy (P-E, runoff,
-restoring and melt water entering/leaving at their own temperature under
-real freshwater + z*).  The run saves no window-mean freshwater fields; the
-estimate is the window mean of run.log's raw global [fwbudget] net (Sv) x
-rho_water x c_sw x global-mean SST, i.e. the global-mean part only.
+NOT closed: freshwater heat outside q_net.  In the model (freshwater.py,
+the entry-heat rule) P-E and restoring water enter at 0 degC, so their heat
+is inside q_net; runoff enters at max(SST, 0) and ice meltwater at SST, and
+those two carry heat this probe cannot see (the run saves no runoff/ice
+freshwater fields).  Their size (~0.1 W/m2 global for ~1 Sv runoff + ~1.5 Sv
+ice melt) is stated as the unmatched term, not computed.
 
 Window pairing: the accumulator adds the COMPLETED state of every step and
 the forcing applied over it, so snapshot k's flux means cover exactly the
@@ -140,19 +141,8 @@ def step_month_weights(step_a, step_b, dt):
     return np.bincount(months, minlength=12)[:12] / steps.size
 
 
-def fwbudget_net_sv(run_log, day_lo, day_hi):
-    """Mean raw global P-E+R+ice [Sv] over (day_lo, day_hi] from run.log."""
-    vals = []
-    pat = re.compile(r"\[fwbudget\] step=\d+ day=([\d.]+) .*net\(P-E\+R\+ice\)=([-+\d.eE]+) Sv")
-    for line in Path(run_log).read_text().splitlines():
-        m = pat.search(line)
-        if m and day_lo < float(m.group(1)) <= day_hi:
-            vals.append(float(m.group(2)))
-    return (float(np.mean(vals)) if vals else None), len(vals)
-
-
 def close_windows(snaps, z_coord_for, rho_0, c_p, flux_geo_wm2, isf_fwf_for,
-                  L_fus, run_log=None, geo_scale=1.0, isf_scale=1.0):
+                  L_fus, geo_scale=1.0, isf_scale=1.0):
     """Per-window closure records for consecutive snapshots (list of dicts)."""
     rows = []
     for a, b in zip(snaps[:-1], snaps[1:]):
@@ -193,13 +183,6 @@ def close_windows(snaps, z_coord_for, rho_0, c_p, flux_geo_wm2, isf_fwf_for,
                "residual_Wm2": resid / A,
                "residual_pct_of_qnet": (100.0 * resid / abs(Q_qnet)
                                         if Q_qnet != 0.0 else None)}
-        if run_log is not None:
-            net_sv, n = fwbudget_net_sv(run_log, row["day_start"], row["day_end"])
-            sst = float((b["T"][..., 0] * b["cell_area"] * wet).sum() / A)
-            row["fw_enthalpy_estimate_Wm2"] = (
-                None if net_sv is None else
-                net_sv * 1e6 * constants.rho_water * c_p * sst / A)
-            row["fw_enthalpy_n_lines"] = n
         rows.append(row)
     return rows
 
@@ -301,7 +284,6 @@ def main(argv=None) -> int:
     isf_scale = c_p / float(constants.c_p_seawater)
     rows = close_windows(snaps, z_coord_for, rho_0, c_p, flux_geo, isf_fwf_for,
                          float(constants.L_fus_isf_nemo),
-                         run_log=run_dir / "run.log",
                          geo_scale=geo_scale, isf_scale=isf_scale)
     out = {"run_dir": str(run_dir), "git_sha": _git_sha(),
            "run_git_sha": manifest.get("legoESM", {}).get("commit"),
@@ -313,8 +295,7 @@ def main(argv=None) -> int:
               f"dH/dt {r['dHdt_W']:.4e} W  q_net {r['Q_qnet_W']:.4e}  "
               f"geo {r['Q_geothermal_W']:.3e}  isf {r['Q_isf_latent_W']:.3e}  "
               f"residual {r['residual_Wm2']:+.4f} W/m2 "
-              f"({r['residual_pct_of_qnet'] if r['residual_pct_of_qnet'] is None else round(r['residual_pct_of_qnet'], 3)} % of q_net); "
-              f"fw-enthalpy est (order of magnitude; raw pre-normalisation net) {r.get('fw_enthalpy_estimate_Wm2')} W/m2")
+              f"({r['residual_pct_of_qnet'] if r['residual_pct_of_qnet'] is None else round(r['residual_pct_of_qnet'], 3)} % of q_net)")
     worst = max(abs(r["residual_Wm2"]) for r in rows)
     out["max_residual_wm2_gate"] = a.max_residual_wm2
     out["worst_abs_residual_wm2"] = worst
