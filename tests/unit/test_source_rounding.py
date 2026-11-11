@@ -166,6 +166,24 @@ def test_r3t_stretch_is_stored() -> None:
         assert " conditional(" in text, evaluation
 
 
+def test_neumann_fill_mask_terms_are_stored_for_a_runtime_mask() -> None:
+    """neumann_fill_cgrid stores each pass's mask-only terms (one conditional
+    per pass) when the mask is a runtime array; a compile-time-constant mask
+    folds them, and the store with them."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
+
+    rng = np.random.default_rng(1)
+    mask = jnp.asarray((rng.random((12, 16)) > 0.3).astype(np.float64))
+    f = jnp.asarray(rng.random((12, 16, 5)))
+    runtime = jax.jit(lambda f_, m_: neumann_fill_cgrid(f_, m_))
+    constant = jax.jit(lambda f_: neumann_fill_cgrid(f_, mask))
+    assert runtime.lower(f, mask).compile().as_text().count(" conditional(") == 3
+    assert " conditional(" not in constant.lower(f).compile().as_text()
+    np.testing.assert_array_equal(
+        np.asarray(runtime(f, mask))[np.asarray(mask) > 0.5],
+        np.asarray(f)[np.asarray(mask) > 0.5])
+
+
 def test_mle_density_is_stored(monkeypatch) -> None:
     """The MLE density of the through-FCT route goes through nemo_source_store
     in the step (ocean_model_latlon_cgrid ... _step_impl); traced on the GYRE
