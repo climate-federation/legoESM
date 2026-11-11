@@ -21,8 +21,14 @@ NOT closed: freshwater heat outside q_net.  In the model (freshwater.py,
 the entry-heat rule) P-E and restoring water enter at 0 degC, so their heat
 is inside q_net; runoff enters at max(SST, 0) and ice meltwater at SST, and
 those two carry heat this probe cannot see (the run saves no runoff/ice
-freshwater fields).  Their size (~0.1 W/m2 global for ~1 Sv runoff + ~1.5 Sv
-ice melt) is stated as the unmatched term, not computed.
+freshwater fields); so does the global freshwater-normalisation correction,
+which joins the top-cell remainder entering at SST.  Runoff uses a smooth
+max(SST, 0).  Their size (~0.1 W/m2 global for ~1 Sv runoff + ~1.5 Sv ice
+melt; the normalisation term is the removed global mean x SST) is stated as
+the unmatched term, not computed.
+
+--ew-cyclic-overlap runs store NEMO's two halo columns as copies; every sum
+here counts each ocean column once (``drop_cyclic_overlap``).
 
 Window pairing: the accumulator adds the COMPLETED state of every step and
 the forcing applied over it, so snapshot k's flux means cover exactly the
@@ -78,6 +84,15 @@ _MONTH_END = np.cumsum([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
 def _fatal_nonfinite(name, arr):
     if not np.all(np.isfinite(arr)):
         raise SystemExit(f"FATAL: non-finite values in {name}")
+
+
+def drop_cyclic_overlap(snap):
+    """--ew-cyclic-overlap stores NEMO's two halo columns (0 == nx-2,
+    nx-1 == 1); count each ocean column once by masking the copies."""
+    lm = snap["land_mask"].copy()
+    lm[:, 0] = 0.0
+    lm[:, -1] = 0.0
+    return {**snap, "land_mask": lm}
 
 
 def load_snapshot(path):
@@ -251,6 +266,8 @@ def main(argv=None) -> int:
             by_step.setdefault(int(s["step"]), (p, s))   # final == last day: keep one
     paths = [by_step[k][0] for k in sorted(by_step)]
     snaps = [by_step[k][1] for k in sorted(by_step)]
+    if rargs.ew_cyclic_overlap:
+        snaps = [drop_cyclic_overlap(s) for s in snaps]
     if len(snaps) < 2:
         raise SystemExit("FATAL: need at least two snapshots at distinct steps")
 

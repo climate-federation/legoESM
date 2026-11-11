@@ -160,3 +160,14 @@ def test_cli_refuses_an_unclosed_heat_source(tmp_path):
 def test_cli_refuses_a_geometry_mismatch(tmp_path):
     with pytest.raises(SystemExit, match="z_interface_ref"):
         _cli(_run_dir(tmp_path, Q, z_iface=(100.0, 450.0)), 1e-6)
+
+
+def test_cyclic_overlap_columns_are_counted_once():
+    from omip_tripole_heat_closure import drop_cyclic_overlap
+    a, b = _pair(Q)
+    for s in (a, b):
+        s["T"][:, -1] = s["T"][:, 1]
+        s["T"][:, 0] = s["T"][:, -2]
+    b["T"][:, 0] += 5.0                     # a change seen only in a halo copy
+    [row] = _close([drop_cyclic_overlap(a), drop_cyclic_overlap(b)])
+    assert abs(row["residual_Wm2"]) < 1e-9 * (Q + GEO)
