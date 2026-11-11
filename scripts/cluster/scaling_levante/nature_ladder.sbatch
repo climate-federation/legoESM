@@ -153,7 +153,14 @@ run_arm() {
       # cells at dt 600 s (user decision 2026-10-19).
       # 200 fixed PCG iterations: 16-GPU f32 accuracy sweep on this grid, 60 left
       # 360x the converged residual; 200 is within 10x in f32 (user decision 2026-10-21, both precisions).
-      args+=(--tripole --nlev 75 --A-h-from-mesh --pcg-fixed-iters 200)
+      # TRIPOLE_SOLVER: jacobi200 (default) | zline80sr (zonal_line M80 + single_reduce,
+      # faster only at some GPU counts; the bench prints an advisory from its measured table).
+      case "${TRIPOLE_SOLVER:-jacobi200}" in
+        jacobi200) args+=(--tripole --nlev 75 --A-h-from-mesh --pcg-fixed-iters 200) ;;
+        zline80sr) args+=(--tripole --nlev 75 --A-h-from-mesh --pcg-fixed-iters 80
+                          --pcg-precond zonal_line --pcg-variant single_reduce) ;;
+        *) echo "TRIPOLE_SOLVER=$TRIPOLE_SOLVER: must be jacobi200 or zline80sr" >&2; exit 1 ;;
+      esac
       if [[ "$mode" == strong ]]; then
         args+=(--mode strong --n-lat "$res" --n-lon "$NLON_TRIPOLE")
       else
