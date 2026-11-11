@@ -2721,8 +2721,8 @@ def compute_sam_oceflx_fluxes(
     clamps hol to [-10, 10]; on ``variant="cesm"`` that clamp is the smooth C2
     cap (``zeta_cap_width``, default the shared 2, i.e. identical for
     |hol| <= 8; 0 = the source clamp, matched to 1e-10 on the CIME fixture).
-    Measured (scripts/tmp/probe_cesm_cap.py, z_bot 10 m, SST 290 K, wind
-    0.5-15 m/s x air-sea dT -10..+10 K, RH 0.6-0.95): 3.6-4.1 % of states move,
+    Measured (pinned in tests/core/test_shr_flux_atmocn_oracle.py, z_bot 10 m,
+    SST 290 K, wind 0.5-15 m/s x air-sea dT -10..+10 K, RH 0.6-0.95): 3.6-4.1 % of states move,
     all at winds <= 3.6 m/s; largest change 5.7 % in stress, 5.1 % in sensible
     and 5.5 % in latent heat, 2.8 % in u* (3 m/s, dT +8 K).  Per-state gaps on
     the fixture: tests/core/oracle_fixtures/shr_flux_atmocn_hol_cap_gap.npz.

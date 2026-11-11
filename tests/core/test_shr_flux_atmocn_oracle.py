@@ -31,6 +31,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
+import pytest  # noqa: E402
 import numpy as np  # noqa: E402
 
 from jax.test_util import check_grads  # noqa: E402
@@ -210,11 +211,50 @@ def test_check_grads_hol_cap_at_default():
     assert float(jax.grad(f)(t0)) != 0.0
 
 
+def _sweep(rh):
+    """Production-like sweep: z_bot 10 m, SST 290 K, wind 0.5-15 m/s x air-sea
+    dT -10..+10 K at relative humidity ``rh``; (states moved, max relative
+    change of tau, SH, LH, u*) of the default cap vs the source clamp."""
+    from legoesm.thermo import saturation_mixing_ratio
+    U, DT = np.meshgrid(np.linspace(0.5, 15.0, 146), np.linspace(-10.0, 10.0, 201))
+    U, DT = U.ravel(), DT.ravel()
+    n = U.size
+    ts = jnp.full(n, 290.0)
+    th = ts + jnp.asarray(DT)
+    p = jnp.full(n, 101325.0)
+    qs, qa = 0.98 * saturation_mixing_ratio(ts, p), rh * saturation_mixing_ratio(th, p)
+    out = [compute_sam_oceflx_fluxes(jnp.asarray(U), jnp.zeros(n), th, qa, ts, qs,
+                                     jnp.full(n, 1.2), z_bot=10.0, t_bot=th, variant="cesm",
+                                     zeta_cap_width=w) for w in (MOST_ZETA_CAP_WIDTH, 0.0)]
+    moved = np.zeros(n, bool)
+    rels = []
+    for i in (0, 2, 3, 4):
+        a, b = np.asarray(out[0][i]), np.asarray(out[1][i])
+        moved |= a != b
+        rels.append(float(np.max(np.abs(a - b) / np.maximum(np.abs(b), 1e-3 * np.abs(b).max()))))
+    return int(moved.sum()), rels, float(U[moved].max())
+
+
+# Recorded KNOWN DIFFERENCE (compute_sam_oceflx_fluxes docstring), per RH.
+_SWEEP = {0.6: (1048, 3.3), 0.8: (1131, 3.5), 0.95: (1208, 3.6)}
+
+
+@pytest.mark.parametrize("rh", sorted(_SWEEP))
+def test_hol_cap_size_on_the_production_like_sweep(rh):
+    moved, rels, umax = _sweep(rh)
+    assert (moved, round(umax, 6)) == _SWEEP[rh]
+    assert max(rels) <= 0.058 and max(rels) > 0.04, rels
+
+
 def test_sam_lane_keeps_the_clamp_and_production_resolves_to_the_smooth_cap():
     d = _fixture()
     j = {k: jnp.asarray(d[k]) for k in d.files if k.startswith(("in_", "oracle_"))}
     args = (j["in_ubot"], j["in_vbot"], j["in_thbot"], j["in_qbot"], j["in_ts"],
             j["oracle_ssq"], j["in_rbot"])
+    kw = dict(z_bot=j["in_zbot"], t_bot=j["in_tbot"], variant="cesm")
+    for a, b in zip(compute_sam_oceflx_fluxes(*args, **kw),
+                    compute_sam_oceflx_fluxes(*args, **kw, zeta_cap_width=MOST_ZETA_CAP_WIDTH)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))  # CESM default = smooth
     for a, b in zip(compute_sam_oceflx_fluxes(*args, z_bot=j["in_zbot"]),
                     compute_sam_oceflx_fluxes(*args, z_bot=j["in_zbot"], zeta_cap_width=0.0)):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
