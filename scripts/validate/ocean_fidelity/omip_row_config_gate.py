@@ -7,7 +7,7 @@ scheme group.  This compares two ``run_manifest.json`` files of the same leg:
   THAT RUN'S COMMIT (``git show <commit>:scripts/run/run_omip_core2.py``),
   so spelling does not matter and a default that changed between the two
   commits shows up as a difference; per-run paths (``--output``,
-  ``--restart-save``, ``--restart-from``) are ignored;
+  ``--restart-save``, ``--restart-from``) compare by presence only;
 * the flattened ``resolved_config`` (a key present on one side only is a
   difference, empty sections included), minus ``output_path``.
 
@@ -55,8 +55,10 @@ def _flatten(d, pre=""):
 
 def _options(manifest, parser):
     argv = manifest["run"]["argv"]
-    return {k: v for k, v in vars(parser.parse_args(argv[1:])).items()
-            if k not in PER_RUN_DESTS}
+    # Per-run paths compare by presence only: starting from a restart (or
+    # saving one) is part of the run, where the file lives is not.
+    return {k: (v is not None if k in PER_RUN_DESTS else v)
+            for k, v in vars(parser.parse_args(argv[1:])).items()}
 
 
 def _parse_expect(items):

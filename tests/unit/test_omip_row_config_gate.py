@@ -27,6 +27,7 @@ ROW = {"nemo_geometry": "domain_cfg"}
 
 def test_exact_row_passes_and_paths_are_ignored(parser):
     base = _manifest()
+    base["run"]["argv"] += ["--restart-from", "/a/r.npz"]
     cand = _manifest(["--nemo-geometry", "domain_cfg"], out="/b")
     cand["run"]["argv"] += ["--restart-from", "/b/r.npz"]
     diff, problems = gate(base, cand, parser, parser, ROW, [])
@@ -98,3 +99,9 @@ def test_parser_at_reads_the_runner_of_a_commit():
     assert p.parse_args([]).nemo_geometry == "mesh_mask"
     old = parser_at("159773865e")               # before --nemo-geometry existed
     assert "nemo_geometry" not in vars(old.parse_args([]))
+
+
+def test_a_restart_on_one_side_only_fails(parser):
+    cand = _manifest(["--nemo-geometry", "domain_cfg", "--restart-from", "/b/r.npz"])
+    _, problems = gate(_manifest(), cand, parser, parser, ROW, [])
+    assert any("restart_from" in m for m in problems)
