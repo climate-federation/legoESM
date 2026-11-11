@@ -143,7 +143,6 @@ class TestKessler:
         q_c_new = hyd.q_c + dt * out.dq_c_dt
         assert jnp.all(q_c_new >= -1e-12)
 
-    @pytest.mark.xfail(strict=True, reason="Faithful ESCOMP kessler_run sediments over level-centre spacing and floors negatives, so column water is not conserved against rho*dz (oracle residual reproduced to round-off); pending user decision (Kessler port PR, ASK 2)")
     def test_conservation_total_water(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
         out = kessler_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1200.0)
@@ -195,16 +194,27 @@ class TestKessler:
         assert jnp.isfinite(g)
         assert g > 0.0  # more autoconversion -> more rain produced
 
-    @pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: the bounded smooth switch at saturation_sharpness=100 (width 1% of q_vs) is not the hard limit; passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
-    def test_idealized_subsaturated_no_condensation(self):
+    # RULE 5 record (x64 SLURM 2026-11-11): max |dT_dt|, |dq_v_dt|, |P| at the
+    # default on the rh=0.5 column (the bounded smooth switch's residual);
+    # zero at the hard limit.
+    DEFAULT_GAP_SUBSAT = (8.638727896e-09, 3.4701365754e-12, 0.0)
+
+    @pytest.mark.parametrize("hard", [True, False], ids=["hard_limit", "default"])
+    def test_idealized_subsaturated_no_condensation(self, hard):
         """Clear subsaturated column with no hydrometeors -> ~zero tendency."""
+        from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
+        cfg = KesslerConfig(saturation_sharpness=1.0e30) if hard else KesslerConfig()
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=0.5)
         hyd = hyd._replace(q_c=jnp.zeros_like(hyd.q_c),
                            q_r=jnp.zeros_like(hyd.q_r))
-        out = kessler_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1200.0)
-        assert jnp.max(jnp.abs(out.dT_dt)) < 1e-12
-        assert jnp.max(jnp.abs(out.dq_v_dt)) < 1e-12
-        assert jnp.max(jnp.abs(out.precipitation)) < 1e-12
+        out = kessler_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1200.0, cfg)
+        got = [float(jnp.max(jnp.abs(x))) for x in
+               (out.dT_dt, out.dq_v_dt, out.precipitation)]
+        if hard:
+            assert max(got) < 1e-12
+        else:
+            np.testing.assert_allclose(got, self.DEFAULT_GAP_SUBSAT, rtol=1e-6,
+                                       atol=1e-12)
 
     def test_jit_matches_eager(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
