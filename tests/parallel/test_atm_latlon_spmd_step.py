@@ -78,7 +78,7 @@ def _mesh():
     return jax.sharding.Mesh(np.array(jax.devices()[:N_DEV]), axis_names=("lat",))
 
 
-def _model_and_state(use_polar_filter: bool):
+def _model_and_state(use_polar_filter: bool, vertical_form: str = "legacy"):
     grid = create_latlon_grid(
         n_lat=N_LAT, n_lon=N_LON, radius=constants.R_earth,
         omega=constants.Omega)
@@ -88,6 +88,7 @@ def _model_and_state(use_polar_filter: bool):
         use_polar_filter=use_polar_filter,
         use_ppm_transport=True,
         time_integrator="ssp_rk3",
+        vertical_form=vertical_form,
     )
     model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg)
     rng = np.random.default_rng(31337)
@@ -120,24 +121,23 @@ def _cut_adjacent_lat_rows():
     return rows
 
 
-def _serial_and_band_tendency(use_polar_filter):
-    """Serial ``cgrid_latlon_hydrostatic_tendencies`` and the N-band shard_map
+def _serial_and_band_tendency(use_polar_filter, form="legacy"):
+    """Serial ``cgrid_latlon_pe_tendencies`` (legacy form) and the N-band shard_map
     body's tendency, gathered to global. Returns ((du,dv,dT,dps)_serial,
     (du,dv,dT,dps)_band) with dv/band-dv as full-length v-face arrays."""
     from jax.sharding import NamedSharding, PartitionSpec as P
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-        cgrid_latlon_hydrostatic_tendencies)
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
     from legoesm.parallel.latlon_spmd import (
         latlon_band_perms, reconstruct_vface_lower, to_vface_lower,
         activate_latlon_spmd_halo, deactivate_latlon_spmd_halo)
     from legoesm.parallel.shard_map_compat import shard_map
 
     mesh = _mesh()
-    model, state = _model_and_state(use_polar_filter)
+    model, state = _model_and_state(use_polar_filter, form)
     grid, sigma, cfg = model.grid, model.sigma_coord, model.config
 
-    du_s, dv_s, dT_s, dps_s, _ = cgrid_latlon_hydrostatic_tendencies(
-        state, grid, sigma, cfg)
+    du_s, dv_s, dT_s, dps_s, _ = cgrid_latlon_pe_tendencies(
+        state, grid, sigma, cfg, vertical_form=form)
     serial = tuple(np.asarray(x) for x in (du_s, dv_s, dT_s, dps_s))
 
     band_grids = build_band_grids_atm(grid, N_DEV)
@@ -152,8 +152,8 @@ def _serial_and_band_tendency(use_polar_filter):
         r = jax.lax.axis_index("lat")
         bg = template._replace(**{n: st[n][r] for n in afn})
         vf = reconstruct_vface_lower(sl.v, "lat", perm_north)
-        du, dv, dT, dps, _ = cgrid_latlon_hydrostatic_tendencies(
-            sl._replace(v=vf), bg, sigma, cfg)
+        du, dv, dT, dps, _ = cgrid_latlon_pe_tendencies(
+            sl._replace(v=vf), bg, sigma, cfg, vertical_form=form)
         return du, to_vface_lower(dv), dT, dps
 
     sc = shard_state_atm_latlon(state, mesh)
@@ -177,14 +177,15 @@ def _serial_and_band_tendency(use_polar_filter):
     return serial, (du_b, dv_b, dT_b, dps_b)
 
 
+@pytest.mark.parametrize("form", ["legacy", "sb81_theta"])
 @pytest.mark.parametrize("use_polar_filter", [False, True])
-def test_atm_latlon_spmd_tendency_matches_serial(use_polar_filter):
+def test_atm_latlon_spmd_tendency_matches_serial(use_polar_filter, form):
     """RIGOROUS decomposition gate: the single-tendency band reconstruction is
     BIT-EXACT for momentum + continuity and round-off tight for the halo=3
     limited FV PPM T advection on every row (see module docstring). RK-stage-independent, so it isolates the decomposition from the
     downstream propagation tested below."""
     (du_s, dv_s, dT_s, dps_s), (du_b, dv_b, dT_b, dps_b) = \
-        _serial_and_band_tendency(use_polar_filter)
+        _serial_and_band_tendency(use_polar_filter, form)
 
     # The zero north-pole cap re-appended to dv_b (the band drops the shared
     # north v-face row) is only valid because BOTH serial and band zero the
@@ -217,12 +218,13 @@ def test_atm_latlon_spmd_tendency_matches_serial(use_polar_filter):
         err_msg="dT_dt diverged from serial — a band-cut PPM or decomposition bug.")
 
 
+@pytest.mark.parametrize("form", ["legacy", "sb81_theta"])
 @pytest.mark.parametrize("use_polar_filter", [False, True])
-def test_atm_latlon_spmd_step_matches_serial(use_polar_filter):
+def test_atm_latlon_spmd_step_matches_serial(use_polar_filter, form):
     """Integrated full-step gate through the PUBLIC make_sharded interface. Over
     a few RK3 steps the band trajectory matches serial to fp64 round-off."""
     mesh = _mesh()
-    model, state = _model_and_state(use_polar_filter)
+    model, state = _model_and_state(use_polar_filter, form)
     dt = 100.0
     n_steps = 3
 
@@ -253,6 +255,43 @@ def test_atm_latlon_spmd_step_matches_serial(use_polar_filter):
                 f"fp64 round-off — a real band-decomposition "
                 f"bug (Coriolis/v-face interp at cuts, band geometry, mass "
                 f"denominator, or v-face reconstruction)."))
+
+
+@pytest.mark.parametrize("form", ["as83", "as83_logmean"])
+def test_atm_latlon_spmd_refuses_non_band_aware_forms(form):
+    """The Arakawa-Suarez lat-lon plug-ins are not band-aware: under the
+    lat-band halo backend the core refuses them instead of running wrong."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
+    from legoesm.grids.vertical import standard_hybrid_levels
+    from legoesm.parallel.latlon_spmd import (
+        activate_latlon_spmd_halo, deactivate_latlon_spmd_halo)
+    mesh = _mesh()
+    model, state = _model_and_state(False)
+    activate_latlon_spmd_halo(mesh)
+    try:
+        with pytest.raises(ValueError, match="not band-aware"):
+            cgrid_latlon_pe_tendencies(state, model.grid, standard_hybrid_levels(NLEV),
+                                       model.config, vertical_form=form)
+    finally:
+        deactivate_latlon_spmd_halo()
+
+
+def test_atm_latlon_packed_exchange_refused_off_legacy(monkeypatch):
+    """The opt-in packed exchange lives in the legacy body only: with it armed,
+    a shared-core form refuses rather than silently not packing."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
+    from legoesm.parallel.latlon_spmd import (
+        activate_latlon_spmd_halo, deactivate_latlon_spmd_halo)
+    mesh = _mesh()
+    model, state = _model_and_state(False)
+    monkeypatch.setenv("LEGOESM_LATLON_PACKED_EXCHANGE", "1")
+    activate_latlon_spmd_halo(mesh)
+    try:
+        with pytest.raises(ValueError, match="packed"):
+            cgrid_latlon_pe_tendencies(state, model.grid, model.sigma_coord,
+                                       model.config, vertical_form="sb81_theta")
+    finally:
+        deactivate_latlon_spmd_halo()
 
 
 def test_replicate_leaf_multiprocess_branch_matches_device_put():

@@ -27,9 +27,10 @@ from legoesm.atmosphere.standard_atmosphere import (
 )
 from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-    cgrid_latlon_hydrostatic_tendencies, hydrostatic_to_cgrid,
+    hydrostatic_to_cgrid,
     CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
 )
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import cgrid_latlon_pe_tendencies
 
 
 def _q_v_from_T(T, sigma, p_s, rh_init=0.7):
@@ -182,8 +183,8 @@ class TestStandardZonalWind:
         st = held_suarez_init_latlon(g, sigma, T_init=300.0)
 
         def max_dv(state):
-            _, dv, _, _, _ = cgrid_latlon_hydrostatic_tendencies(
-                hydrostatic_to_cgrid(state, g), g, sigma)
+            _, dv, _, _, _ = cgrid_latlon_pe_tendencies(
+                hydrostatic_to_cgrid(state, g), g, sigma, vertical_form="legacy")
             return float(jnp.max(jnp.abs(dv)))
 
         unbal = max_dv(st._replace(T=st.T.replace(data=T)))

@@ -55,6 +55,10 @@ resolution: 6               # 40962 cells (~1.1 deg) ~ CAM6 f09 (0.9x1.25)
 nlev: 32                    # CAM6: the L32 hybrid table (cam_vcoords_L32_c180105)
 vertical_coord: cam_l32     # CAM6: hyai/hybi verbatim, p_top 2.255 hPa
 discretization: mpas
+vertical_form: legacy        # shared PE core form: each lane's pre-core tendency,
+                             # unchanged, so runs stay comparable (user 2026-11-09);
+                             # carries #1029 here and #930 + the 50 K floor on the
+                             # lat-lon deck that includes this file; A/B pending
 dt: 112.5
 precision: fp64
 corner_fill: avg                     # cube-vertex halo fill; inert on MPAS,
