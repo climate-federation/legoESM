@@ -2509,6 +2509,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "cold condensate to cloud ice). Fixes the "
                              "TTL ice-supersaturation vapour bias. Requires "
                              "--hard-saturation-adjustment.")
+    parser.add_argument("--sea-ice-flux-split",
+                        action=_BoolOneSpelling, default=False,
+                        dest="sea_ice_flux_split",
+                        help="MPAS lane: evaluate the surface exchange "
+                             "separately over ice and open water in partly "
+                             "ice-covered cells and drive the prognostic ice "
+                             "skin with the ice tile's own fluxes. Needs the "
+                             "prognostic ice skin, RRTMGP radiation and the "
+                             "land's heat fluxes handed to the boundary "
+                             "layer. Default off.")
     parser.add_argument("--ice-skin-prognostic", "--mpas-ice-skin-prognostic",
                         action=_BoolOneSpelling, default=None,
                         dest="ice_skin_prognostic",
@@ -3346,6 +3356,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.mcfarlane_effgw_oro if args.mcfarlane_effgw_oro is not None
             else _EXPERIMENT_DEFAULTS.mcfarlane_effgw_oro),
         ice_skin_prognostic=args.ice_skin_prognostic,
+        sea_ice_flux_split=bool(args.sea_ice_flux_split),
         ice_thickness_m=(
             args.ice_thickness_m
             if args.ice_thickness_m is not None

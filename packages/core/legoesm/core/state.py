@@ -193,6 +193,12 @@ class HydrostaticTendencies(NamedTuple):
     # when a precipitating module does not (the sum would be incomplete).
     # Appended LAST so no field index moves.
     precip_frozen: Field | None = None
+    # Sensible / latent heat flux of the SEA-ICE tile alone [W/m^2, positive
+    # upward], published by the turbulence only when the ice / open-water
+    # exchange is split (sea_ice_flux_split); the prognostic ice skin reads
+    # them.  shflx_sfc / lhflx_sfc stay the cell means.  Appended LAST.
+    shflx_ice: Field | None = None
+    lhflx_ice: Field | None = None
 
 
 # Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH
@@ -231,6 +237,10 @@ MPAS_SFC_DIAG_EXTRA_KEYS = (
     # slot 14: the FROZEN part of the slot-2 precip [kg/m2/s] (F29): the
     # interactive land's snowfall.  Appended at the END, no index moves.
     "precip_frozen",
+    # slots 15/16: the sea-ice tile's own sensible / latent heat flux
+    # [W/m2, +up] (sea_ice_flux_split), read by the prognostic ice skin.
+    # Appended at the END, no index moves.
+    "shflx_ice", "lhflx_ice",
 )
 
 # Extras the MPI producer deliberately leaves EMPTY (published as None at their

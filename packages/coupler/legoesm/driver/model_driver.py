@@ -13323,6 +13323,18 @@ class ModelDriver:
             microphysics=_micro_cfg,
             gravity_wave_drag=gwd_config_for(cfg),
         )
+        _ice_rad_emis = None
+        if bool(getattr(cfg, "sea_ice_flux_split", False)):
+            # The ice tile's longwave balance uses the emissivity the
+            # radiation solve on THIS lane uses (its config value; the driver
+            # hands it no per-call emissivity), so the rebuilt ice-tile
+            # longwave and the atmosphere's surface longwave agree.
+            if _rad_scheme != "rrtmgp":
+                raise ValueError(
+                    "sea_ice_flux_split rebuilds the ice-tile longwave from "
+                    "the RRTMGP surface emissivity; radiation="
+                    f"{cfg.radiation!r} is not supported with it.")
+            _ice_rad_emis = float(phys_cfg.radiation.rrtmgp.sfc_emissivity)
         self._record_resolved_physics(
             convection=phys_cfg.convection,
             microphysics=phys_cfg.microphysics,
@@ -13904,6 +13916,14 @@ class ModelDriver:
                         and self.get_sst_sic is not None)
         _sic_day = None            # (nCells,) ice fraction of the last forcing day
         _ice_skin_on = bool(getattr(cfg, "ice_skin_prognostic", False))
+        # Separate ice / open-water surface exchange in partly ice-covered
+        # cells (validate_strict: needs the prognostic skin and the land-flux
+        # handoff the split bulk call lives in).
+        _ice_split_on = bool(getattr(cfg, "sea_ice_flux_split", False))
+        if _ice_split_on and not _ice_skin_on:
+            raise ValueError(
+                "sea_ice_flux_split needs ice_skin_prognostic=True (it "
+                "splits the fluxes that drive the ice skin).")
         if _ice_skin_on and not _sst_forcing:
             raise ValueError(
                 "ice_skin_prognostic needs the prescribed SST/SIC "
@@ -14024,6 +14044,14 @@ class ModelDriver:
                 _dst["T_sfc"] = _blend_T_sfc(_sst, _sic)
                 if _ocean_sfc_on:
                     _dst["T_sfc_ocean"] = _ocean_ice_T_sfc(_sst, _sic)
+                if _ice_split_on:
+                    # The two tiles of the non-land surface, as the cover and
+                    # the ice-minus-sea contrast of the SAME blend written
+                    # above (skin read at call time, like the anchors).
+                    _dst["sea_ice_frac"] = jnp.asarray(_sic).reshape(-1)
+                    _dst["T_ice_minus_sea"] = (
+                        self._ice_T_skin.reshape(-1)
+                        - jnp.asarray(_sst).reshape(-1))
 
             # (The former ``_compute_T_sfc(day)`` wrapper — a one-line
             # ``_blend_T_sfc(*get_sst_sic(day))`` — was inlined at its single
@@ -14258,6 +14286,9 @@ class ModelDriver:
         print(f"  Non-land surface fluxes evaluated on: "
               f"{'OCEAN/ICE surface' if _ocean_sfc_on else 'land-blended surface'}"
               f" (ocean_flux_on_ocean_surface={_ocean_sfc_on})")
+        print(f"  Sea-ice cells, ice and open water exchange: "
+              f"{'SEPARATE (ice skin driven by its own fluxes)' if _ice_split_on else 'one blended surface'}"
+              f" (sea_ice_flux_split={_ice_split_on})")
         print(f"  Land surface stress to the boundary layer: "
               f"{'LAND MODEL' if _land_stress_on else 'atmosphere bulk law'} "
               f"(land_stress_from_land="
@@ -16074,7 +16105,33 @@ class ModelDriver:
                                         and _sd[0] is not None) else None)
                 _lwn = (_sd[1].data if (_sd is not None and len(_sd) > 1
                                         and _sd[1] is not None) else None)
-                if _swn is not None and _lwn is not None:
+                if _ice_split_on:
+                    # Ice-tile energy balance: the ice's OWN turbulent loss
+                    # (exported by the split bulk call) and its own radiation,
+                    # rebuilt from the downwelling fluxes with the ice albedo
+                    # and the skin temperature -- not the cell-mean fluxes,
+                    # which charge the lead's heat loss to the ice.
+                    # Signs: radiative terms +into the surface, turbulent
+                    # +upward (advance_ice_skin's convention).
+                    def _sd_data(_k):
+                        _i = _sfc_diag_slot(_k)
+                        return (_sd[_i].data.reshape(-1)
+                                if (_sd is not None and len(_sd) > _i
+                                    and _sd[_i] is not None) else None)
+                    _swd, _lwd = _sd_data("sw_down_sfc"), _sd_data("lw_down_sfc")
+                    _sh_i, _lh_i = _sd_data("shflx_ice"), _sd_data("lhflx_ice")
+                    if not any(_x is None for _x in (_swd, _lwd, _sh_i, _lh_i)):
+                        _sk = self._ice_T_skin.reshape(-1)
+                        self._ice_T_skin = advance_ice_skin(
+                            self._ice_T_skin,
+                            _swd * (1.0 - _ice_albedo_now()),
+                            _ice_rad_emis * (
+                                _lwd - constants.sigma_sb * _sk ** 4),
+                            _sh_i, _lh_i,
+                            _ice_sic_cur, dt_s=DT, h_ice_m=_h_ice,
+                            melt_cap_width_K=float(
+                                cfg.ice_skin_melt_cap_width_K))
+                elif _swn is not None and _lwn is not None:
                     self._ice_T_skin = advance_ice_skin(
                         self._ice_T_skin, _swn, _lwn,
                         (_sd[6].data if len(_sd) > 6 and _sd[6] is not None

@@ -2302,6 +2302,13 @@ class ExperimentConfig(NamedTuple):
     # (morrison_warm_rain_incloud).  Defaults equal the leaf (True = MG2).
     morrison_mg2_snow_accretes_ice: bool = True
     morrison_mg2_ice_sed_clear_air_sublimation: bool = True
+    # MPAS lane, partly ice-covered sea cells: evaluate the surface exchange
+    # separately over the ice and the open water (each on its own surface
+    # temperature) and drive the prognostic ice skin with the ICE tile's
+    # turbulent fluxes and its own radiation, instead of the cell mean (which
+    # charges the open water's heat loss to the ice).  The atmosphere receives
+    # the cover-weighted sum.  Checked by sea_ice_flux_split_eligibility.
+    sea_ice_flux_split: bool = False
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -5243,6 +5250,13 @@ class ExperimentConfig(NamedTuple):
                     "non-land fraction's surface fluxes from the land's, but "
                     f"{_why}. Leave it unset (auto) or false.")
 
+        if self.sea_ice_flux_split:
+            _ok, _why = sea_ice_flux_split_eligibility(self)
+            if not _ok:
+                errors.append(
+                    "sea_ice_flux_split=True separates the ice and open-water "
+                    f"surface exchange in sea-ice cells, but {_why}.")
+
         if self.land_stress_from_land is True:
             _ok, _why = land_stress_eligibility(self)
             if not _ok:
@@ -6039,6 +6053,30 @@ def ocean_flux_surface_eligibility(cfg) -> tuple[bool, str]:
                        "fraction (land_stress_from_land unset or true, "
                        "eligible); otherwise the ocean-surface stress covers "
                        "the land too")
+    return True, ""
+
+
+def sea_ice_flux_split_eligibility(cfg) -> tuple[bool, str]:
+    """Is ``sea_ice_flux_split=True`` live in ``cfg``?
+    ``(eligible, reason_if_not)``: the prognostic ice skin it drives, the
+    RRTMGP radiation its ice-tile longwave is rebuilt from, and the land's
+    own heat fluxes handed to the boundary layer (prescribed or from the
+    interactive land), which is where the split exchange lives."""
+    if cfg.ice_skin_prognostic is False:
+        return False, ("ice_skin_prognostic is off (the split drives the "
+                       "prognostic ice skin)")
+    if cfg.radiation not in ("rrtmg", "rrtmgp"):
+        return False, (f"radiation={cfg.radiation!r}: the ice-tile longwave "
+                       "is rebuilt from the RRTMGP surface emissivity")
+    _presc = bool(cfg.land_prescribed_flux_file) and (
+        cfg.land_prescribed_channels in ("ts_lh", "ts_fluxes"))
+    if not _presc:
+        _ok, _why = land_flux_handoff_eligibility(cfg)
+        if not _ok:
+            return False, (
+                "the land's heat fluxes are not handed to the boundary "
+                "layer (no prescribed land fluxes with channels ts_lh / "
+                f"ts_fluxes, and {_why}); it would be silently inert")
     return True, ""
 
 

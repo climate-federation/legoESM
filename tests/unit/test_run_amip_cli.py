@@ -1081,6 +1081,19 @@ def test_mpas_ocean_flux_on_ocean_surface_flag_flows_to_config():
         assert cfg.ocean_flux_on_ocean_surface is want
 
 
+def test_sea_ice_flux_split_flag_flows_to_config():
+    """--sea-ice-flux-split round-trip; unset = off."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.sea_ice_flux_split is False
+    for flag, want in (("--sea-ice-flux-split", True),
+                       ("--no-sea-ice-flux-split", False)):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", flag]), parser))
+        assert cfg.sea_ice_flux_split is want
+
+
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
