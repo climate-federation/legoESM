@@ -240,6 +240,84 @@ def make_loss(n_days, tg, W, kind):
     return loss
 
 
+if os.environ.get("PROBE_MODE") == "adjsweep":
+    # Phase-1c (forward-mode is impossible: the step contains custom_vjp ops).  Reverse sweep
+    # day by day: cotangent of the day-N smooth loss (squared error vs ORAS5 day N) pulled back
+    # one day at a time through the SAME production step; per day and field: L2, max|.|, flat
+    # argmax of the cotangent.  Beside it, a nonlinear twin (T0 + eps*d) gives the finite-
+    # perturbation growth per day.  Adjoint growing while the twin stays small => the
+    # linearisation of some operator is unstable, not the physics.
+    N = int(os.environ.get("ADJ_DAYS", "12"))
+    EPS = float(os.environ.get("TLM_EPS", "1e-2"))
+    leaves, tdef = jax.tree_util.tree_flatten(state)
+    isf = [jnp.issubdtype(jnp.asarray(x).dtype, jnp.inexact) for x in leaves]
+
+    def split(s_):
+        lv = jax.tree_util.tree_leaves(s_)
+        return [x for x, f in zip(lv, isf) if f], [x for x, f in zip(lv, isf) if not f]
+
+    def merge(fl, ot):
+        fi, oi = iter(fl), iter(ot)
+        return jax.tree_util.tree_unflatten(tdef, [next(fi) if f else next(oi) for f in isf])
+
+    f_step = step_fn(model)
+
+    @jax.jit
+    def day(s_):
+        @jax.checkpoint
+        def stp(c, _):
+            return f_step(c), None
+        return jax.lax.scan(stp, s_, None, length=STEPS_PER_DAY)[0]
+
+    FIELDS = ("T", "S", "u", "v", "eta")
+    rng = np.random.default_rng(0)
+    d = rng.standard_normal(state.T.data.shape) * (wet3 > 0)
+    d = jnp.asarray(d / np.linalg.norm(d))
+    traj, sp = [state], state._replace(T=state.T.replace(data=state.T.data + EPS * d))
+    twin = []
+    for k in range(N):
+        traj.append(day(traj[-1]))
+        sp = day(sp)
+        row = []
+        for nm in FIELDS:
+            x = np.asarray((getattr(sp, nm).data - getattr(traj[-1], nm).data) / EPS)
+            row.append([float(np.sqrt((x * x).sum())), float(np.abs(x).max()), int(np.abs(x).argmax())])
+        twin.append(row)
+        print(f"fwd day {k + 1}: twin T L2 {row[0][0]:.3e} u L2 {row[2][0]:.3e} "
+              f"maxT {np.asarray(traj[-1].T.data).max():.2f}", flush=True)
+    tg, tv = oras5(N)
+    W = weights({kk: tv[kk] & ic_val[kk] for kk in tv})
+    sw = {kk: float(jnp.sum(W[kk])) for kk in W}
+
+    def final_loss(fl):
+        s_ = merge(fl, split(traj[-1])[1])
+        return sum(jnp.sum(W[kk] * ((getattr(s_, kk).data - tg[kk]) / STD[kk]) ** 2) / sw[kk]
+                   for kk in ("T", "S", "u", "v")) / 4.0
+
+    cot = jax.grad(final_loss)(split(traj[-1])[0])
+    adj = []
+    for k in range(N - 1, -1, -1):
+        ot = split(traj[k])[1]
+        _, vjp = jax.vjp(lambda fl: split(day(merge(fl, ot)))[0], split(traj[k])[0])
+        cot = list(vjp(cot)[0])
+        c_full = merge(cot, ot)
+        row = []
+        for nm in FIELDS:
+            x = np.asarray(getattr(c_full, nm).data)
+            row.append([float(np.sqrt((x * x).sum())), float(np.abs(x).max()), int(np.abs(x).argmax())])
+        adj.append([k] + row)
+        locs = {nm: np.unravel_index(row[i][2], getattr(state, nm).data.shape) for i, nm in enumerate(FIELDS)}
+        print(f"adj at day {k}: " + " ".join(f"{nm} L2 {row[i][0]:.3e} max {row[i][1]:.3e} @{locs[nm]}"
+                                            for i, nm in enumerate(FIELDS)), flush=True)
+    _sha = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip()
+    OUT.write_text(json.dumps({"mode": "adjsweep", "nlev": NLEV, "dt": DT, "date0": str(DATE0),
+                               "days": N, "eps": EPS, "argv": ARGV, "commit": _sha,
+                               "fields": FIELDS, "cols": ["L2", "max", "flat_argmax"],
+                               "twin": twin, "adjoint_by_day": adj}, indent=1))
+    print("ADJSWEEP_DONE", flush=True)
+    raise SystemExit(0)
+
 if os.environ.get("PROBE_MODE") == "tlm":
     # Phase-1b: where does the tangent-linear model grow?  Forward-mode JVP carried step by
     # step next to a nonlinear twin (state + eps*d) from the same unit random T0 direction d.
