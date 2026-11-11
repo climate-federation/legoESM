@@ -422,6 +422,12 @@ class DycoreConfig(NamedTuple):
     # Default ("q_v",) since 2026-10-15 (user decision after the 30/60-day pair
     # against the flux form); amip_production.yaml also pins it explicitly.
     mpas_vert4_log_form_tracers: tuple = ("q_v",)
+    # Vertical form of the shared hydrostatic PE core on the lat-lon C-grid and
+    # MPAS lanes (``primitive_eq_generic.VERTICAL_FORMS``).  "legacy" (default)
+    # is each lane's pre-core tendency, unchanged: TEMPORARY, retired after the
+    # A/B; it carries #930 (lat-lon), #1029 (MPAS) and the lat-lon 50 K floor.
+    # validate_strict refuses any other form off those two lanes.
+    vertical_form: str = "legacy"
 
 
 class EvaluationConfig(NamedTuple):
@@ -2193,6 +2199,10 @@ class ExperimentConfig(NamedTuple):
     # droplet size reset in the sedimentation fall speeds (prognostic droplet
     # number only); 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
     morrison_mg2_drop_sed_reset_log_width: float = 0.01
+    # CanopyConfig.solve_group: columns per batch of the two-leaf canopy Newton
+    # solve, 0 = one batch per GPU (same placement and None semantics as
+    # land_canopy_most_n_iters; the production deck names it).
+    land_canopy_solve_group: int | None = None
     # ZhangMcFarlaneConfig.trigger_width_J_kg (ZM_TRIGGER_FIELDS): RULE 5 width
     # of the deep-convection trigger [J/kg]; 0 = CAM's hard switch.  None = the
     # scheme default; the production deck names it.
@@ -4316,6 +4326,37 @@ class ExperimentConfig(NamedTuple):
                 f"to give {_both} the flux form, also set the log-form list without "
                 "them (CLI: --mpas-vert4-log-form-tracers with no names; YAML: "
                 "mpas_vert4_log_form_tracers: [])")
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import VERTICAL_FORMS
+        if d.vertical_form not in VERTICAL_FORMS:
+            errors.append(f"dycore.vertical_form must be one of {VERTICAL_FORMS}, "
+                          f"got {d.vertical_form!r}")
+        elif d.vertical_form != "legacy":
+            from legoesm.driver.component_factory import driver_solver_name
+            _solver = driver_solver_name(self)
+            if _solver not in ("latlon_cgrid_primitive_equations",
+                               "mpas_primitive_equations"):
+                errors.append(
+                    f"dycore.vertical_form={d.vertical_form!r} is only wired into "
+                    "the lat-lon C-grid and MPAS hydrostatic dycores; on solver "
+                    f"{_solver!r} it would be silently inert.  Leave it at 'legacy'.")
+            if d.vertical_form.startswith("as83"):
+                if g.vertical_coord == "sigma":
+                    errors.append(
+                        f"dycore.vertical_form={d.vertical_form!r} needs a hybrid "
+                        "vertical coordinate (the sigma lid moves); use 'sb81_theta' "
+                        "or 'legacy' on vertical_coord='sigma'.")
+                if (_solver == "latlon_cgrid_primitive_equations"
+                        and self.enable_latlon_spmd):
+                    errors.append(
+                        f"dycore.vertical_form={d.vertical_form!r} is not band-aware "
+                        "on lat-lon: the lat-band SPMD lane takes 'legacy' or "
+                        "'sb81_theta'.")
+            # no serial-parity test of a shared-core form on these two lanes yet
+            if (_solver == "latlon_cgrid_primitive_equations"
+                    and (self.distributed or self.enable_tiled_dycore)):
+                errors.append(
+                    f"dycore.vertical_form={d.vertical_form!r} is untested on the "
+                    "lat-lon MPI and 2-D tiled lanes; they take 'legacy'.")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
@@ -4595,10 +4636,12 @@ class ExperimentConfig(NamedTuple):
         _rhw = self.land_canopy_rh_cap_smoothing_width
         _zw = self.land_canopy_zeta_cap_smoothing_width
         _mi = self.land_canopy_most_n_iters
-        if _rhw is not None or _zw is not None or _mi is not None:
+        _sg = self.land_canopy_solve_group
+        if (_rhw is not None or _zw is not None or _mi is not None
+                or _sg is not None):
             if self.land_surface_scheme != "two_leaf" or not self.use_multilayer_land:
                 errors.append(
-                    "land_canopy_* (smoothing widths / most_n_iters) set but "
+                    "land_canopy_* (smoothing widths / most_n_iters / solve_group) set but "
                     f"land_surface_scheme={self.land_surface_scheme!r}, use_multilayer_land="
                     f"{self.use_multilayer_land!r}: only the two-leaf canopy of the "
                     "multilayer land reads them, so the value would be inert")
@@ -4610,7 +4653,8 @@ class ExperimentConfig(NamedTuple):
                                     {"rh_cap_smoothing_width": float(_rhw)}),
                                  **({} if _zw is None else
                                     {"zeta_cap_smoothing_width": float(_zw)}),
-                                 **({} if _mi is None else {"most_n_iters": _mi})
+                                 **({} if _mi is None else {"most_n_iters": _mi}),
+                                 **({} if _sg is None else {"solve_group": _sg})
                                  ).validate()
                 except ValueError as exc:
                     errors.append(f"land_canopy_*: {exc}")

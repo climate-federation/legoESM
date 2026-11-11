@@ -65,7 +65,8 @@ def _need_multi_device(n: int):
 
 
 def _build(*, moist: bool, reorder_for: int = 2,
-           time_integrator: str = "ssp_rk3"):
+           time_integrator: str = "ssp_rk3", hybrid: bool = False,
+           vertical_form: str = "legacy"):
     """Reordered mesh + config + model + (moist) BCW initial state.
 
     The mesh is reordered for ``reorder_for``-way sharding on BOTH the
@@ -76,7 +77,7 @@ def _build(*, moist: bool, reorder_for: int = 2,
         MPASPrimitiveEquationConfig,
         MPASPrimitiveEquationModel,
     )
-    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.parallel.voronoi_partition import (
         reorder_voronoi_for_sharding,
@@ -86,11 +87,12 @@ def _build(*, moist: bool, reorder_for: int = 2,
 
     mesh = create_voronoi_mesh(subdivision_level=_SUBDIV)
     mesh = reorder_voronoi_for_sharding(mesh, reorder_for)
-    sigma = create_sigma_coordinate(_NLEV)
+    sigma = standard_hybrid_levels(_NLEV) if hybrid else create_sigma_coordinate(_NLEV)
     cfg = MPASPrimitiveEquationConfig(
         nu_del4=1e16, nu_del4_ps=1e16,
         fix_mass=True, pv_scheme="energy",
         time_integrator=time_integrator,
+        vertical_form=vertical_form,
     )
     model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
     state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True,
@@ -496,6 +498,23 @@ class TestNativeFullProductionParity:
             "rk4 and ssp_rk3 references are identical — the integrator "
             "gate is vacuous"
         )
+
+
+    @pytest.mark.parametrize("form", ["as83", "as83_logmean", "sb81_theta"])
+    def test_vertical_form_matches_serial(self, form):
+        """Every shared-core vertical form runs the sharded step (with the
+        PV-flux fence) to the serial step's answer, on a hybrid coordinate,
+        and differs from the legacy form (non-vacuous)."""
+        _need_multi_device(2)
+        mesh, _, _, model, state0 = _build(moist=False, hybrid=True,
+                                           vertical_form=form)
+        ref = model.step(state0, _DT)
+        step, _dc = _make_sharded_step(mesh, model, 2)
+        _assert_state_close(step(state0, _DT), ref, moist=False, label=form)
+        _, _, _, legacy, _ = _build(moist=False, hybrid=True)
+        du = np.max(np.abs(np.asarray(ref.u.data)
+                           - np.asarray(legacy.step(state0, _DT).u.data)))
+        assert du > 1e-10, f"{form} and legacy agree: the form gate is vacuous"
 
 
 # ===========================================================================

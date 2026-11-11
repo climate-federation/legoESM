@@ -424,6 +424,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "geopotential and ln p^SB gradients (#1029). Default ON; "
              "--no-sb81-omega-conversion selects the legacy arithmetic form.",
     )
+    parser.add_argument(
+        "--vertical-form", default=_DYCORE_DEFAULTS.vertical_form,
+        help="Vertical form of the shared hydrostatic PE core on the lat-lon "
+             "C-grid and MPAS lanes.  'legacy' (default) is each lane's pre-core "
+             "tendency, unchanged (temporary; carries #930 on lat-lon, #1029 on "
+             "MPAS and the lat-lon 50 K floor); 'as83' is Arakawa-Suarez 1983 "
+             "(energy-conserving, hybrid only); 'sb81_theta' the SB81 theta form.  "
+             "Checked against the core's list by validate_strict.",
+    )
     # Task #25: JIT compile bloat at production scale.  The inline
     # SSP-RK3 calls tendency_fn 3× sequentially → XLA inlines three
     # copies of the entire tendency pipeline.  Folding the 3 stages
@@ -1281,6 +1290,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Two-leaf canopy: fixed-point iterations of the "
                              "above-canopy Monin-Obukhov solve. Default: the "
                              "land CanopyConfig value.")
+    parser.add_argument("--land-canopy-solve-group",
+                        dest="land_canopy_solve_group", type=int,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_solve_group,
+                        help="Two-leaf canopy: columns per batch of the Newton "
+                             "solve, 0 = one batch per GPU. Default: the land "
+                             "CanopyConfig value.")
     parser.add_argument("--land-snow-insulation", dest="land_snow_insulation",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_snow_insulation,
@@ -2944,6 +2959,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_scale_height_m=args.sponge_scale_height_m,
         # #1029 ω-side SB81 conversion (default ON; --no-sb81-omega-conversion = legacy).
         sb81_omega_conversion=args.sb81_omega_conversion,
+        vertical_form=args.vertical_form,
         # Task #25: time integrator selection.
         time_integrator=args.time_integrator,
     )
@@ -3211,6 +3227,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
         land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,
         land_canopy_most_n_iters=args.land_canopy_most_n_iters,
+        land_canopy_solve_group=args.land_canopy_solve_group,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None

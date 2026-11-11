@@ -387,9 +387,9 @@ class TestMPASFusedTendencies:
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-            mpas_hydrostatic_tendencies,
             MPASPrimitiveEquationConfig,
         )
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
         from legoesm.core.state import MPASHydrostaticState
         from legoesm.core.field import Field
 
@@ -414,7 +414,7 @@ class TestMPASFusedTendencies:
         config = MPASPrimitiveEquationConfig(
             nu_del4=1e14, pv_scheme="energy")
 
-        tend = mpas_hydrostatic_tendencies(state, mesh, sigma, config)
+        tend = mpas_pe_tendencies(state, mesh, sigma, config, vertical_form="legacy")
 
         assert jnp.all(jnp.isfinite(tend.du_dt.data))
         assert jnp.all(jnp.isfinite(tend.dT_dt.data))

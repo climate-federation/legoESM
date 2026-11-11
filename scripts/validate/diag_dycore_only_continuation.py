@@ -78,7 +78,7 @@ def water_tendency_terms(state, model):
     from legoesm.core.operators_voronoi import (
         cell_to_edge_avg_3d, divergence_cell_3d)
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-        mpas_hydrostatic_tendencies)
+        mpas_model_tendencies)
     from legoesm.atmosphere.dynamics.gcm.tracer_transport_mpas import (
         tracer_horizontal_advection)
     mesh, sc, cfg = model.mesh, model.sigma_coord, model.config
@@ -95,7 +95,7 @@ def water_tendency_terms(state, model):
         return float(jnp.sum(area[:, None, None] * rate) / constants.g * day_per_area)
 
     def total_rate(c):
-        t = mpas_hydrostatic_tendencies(state, mesh, sc, c)
+        t = mpas_model_tendencies(state, mesh, sc, c)
         dq = jnp.stack([t.tracer_tendencies[k].data for k in names], axis=-1)
         return glob(dp[..., None] * dq + q * (dB * t.dp_s_dt.data[:, None])[..., None]), t
 
@@ -188,10 +188,10 @@ def main():
 
     if a.thermo_terms:
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-            mpas_hydrostatic_tendencies,
+            mpas_model_tendencies,
         )
         m = driver.model
-        _, th = mpas_hydrostatic_tendencies(
+        _, th = mpas_model_tendencies(
             state, m.mesh, m.sigma_coord, m.config, return_thermo_terms=True)
         day = 86400.0
         cols = [("horiz_adv", th.horiz_adv), ("horiz_diff", th.horiz_diff),

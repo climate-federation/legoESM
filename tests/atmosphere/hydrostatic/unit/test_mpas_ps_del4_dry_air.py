@@ -13,7 +13,9 @@ import numpy as np
 import pytest
 
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
-    MPASPrimitiveEquationConfig, mpas_hydrostatic_tendencies)
+    MPASPrimitiveEquationConfig,
+)
+from legoesm.atmosphere.dynamics.gcm.primitive_eq_generic import mpas_pe_tendencies
 from legoesm.core.field import Field
 from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
 from legoesm.grids.voronoi import create_voronoi_mesh
@@ -52,7 +54,7 @@ def _dB(coord, ps):
 def _tracer_mass_rates(state, mesh, coord, nu):
     """Global d/dt of sum(area*q*dp) per tracer, and its gross del4 scale."""
     cfg = MPASPrimitiveEquationConfig(fix_mass=False, nu_del4_ps=nu)
-    t = mpas_hydrostatic_tendencies(state, mesh, coord, cfg)
+    t = mpas_pe_tendencies(state, mesh, coord, cfg, vertical_form="legacy")
     ps = state.p_s.data
     dp = coord.layer_thickness_dp(ps)
     dB = _dB(coord, ps)
@@ -102,7 +104,7 @@ def test_air_mass_still_filtered_and_gradient_finite():
         s = state._replace(tracers={**state.tracers,
                                     "q_v": state.tracers["q_v"].replace(data=qv)})
         cfg = MPASPrimitiveEquationConfig(fix_mass=False, nu_del4_ps=NU)
-        return jnp.sum(mpas_hydrostatic_tendencies(s, mesh, coord, cfg)
+        return jnp.sum(mpas_pe_tendencies(s, mesh, coord, cfg, vertical_form="legacy")
                        .tracer_tendencies["q_v"].data ** 2)
 
     g = jax.grad(loss)(state.tracers["q_v"].data)
