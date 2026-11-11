@@ -116,8 +116,9 @@ def test_nemo_source_store_keeps_bits_and_gradient_and_compiles_a_stored_branch(
 
 def test_geometric_depth_pressure_density_is_stored() -> None:
     """The NEMO EOS-80 geometric-depth density read by the pressure gradient goes
-    through nemo_source_store (ocean_pe_latlon_cgrid._bc_geometry_and_density);
-    without the store this compiled program has no conditional."""
+    through nemo_source_store (ocean_pe_latlon_cgrid._bc_geometry_and_density):
+    one conditional more than the in-situ arm, which has no such store (the
+    land-mask fills store their mask terms in both arms)."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import compute_frozen_geom_density
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
@@ -126,12 +127,15 @@ def test_geometric_depth_pressure_density_is_stored() -> None:
 
     grid = create_latlon_grid(12, 24)
     z_coord = create_ocean_z_star(n_levels=6, H_max=4000.0)
-    cfg = LatLonCGridOceanConfig.from_flat(eos="nemo_eos80", eos_depth="geometric")
     state = rest_state_latlon_cgrid_ocean(grid, z_coord)
-    text = jax.jit(
-        lambda st: compute_frozen_geom_density(st, grid, z_coord, cfg)[2:]
-    ).lower(state).compile().as_text()
-    assert "conditional" in text
+
+    def conditionals(eos_depth):
+        cfg = LatLonCGridOceanConfig.from_flat(eos="nemo_eos80", eos_depth=eos_depth)
+        return jax.jit(
+            lambda st: compute_frozen_geom_density(st, grid, z_coord, cfg)[2:]
+        ).lower(state).compile().as_text().count(" conditional(")
+
+    assert conditionals("geometric") - conditionals("insitu") == 1
 
 
 def test_bn2_alpha_beta_is_stored() -> None:
