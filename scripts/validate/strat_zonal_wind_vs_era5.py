@@ -29,6 +29,8 @@ ARCO_ERA5_37 = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zar
 def top_level_pressures_pa(meta_vgrid, levels, p_ref):
     a_half, b_half = np.asarray(meta_vgrid[0]), np.asarray(meta_vgrid[1])
     levels = np.asarray(levels, dtype=int)
+    if levels.min() < 0:
+        raise ValueError("levels must be non-negative top-down indices")
     if np.any(b_half[: levels.max() + 2] != 0.0):
         raise ValueError("requested levels are not pure-pressure (B_half != 0)")
     return 0.5 * (a_half[levels] + a_half[levels + 1]) * p_ref
@@ -62,11 +64,18 @@ def compare(model_zm, era_zm, lat_deg):
         row = {"rms": float(rms[k])}
         for tag, z in (("model", model_zm[:, k]), ("era5", era_zm[:, k])):
             for hemi, m in (("nh", lat_deg > 0), ("sh", lat_deg < 0)):
-                i = int(np.argmax(np.abs(z) * m))
+                idx = np.flatnonzero(m)
+                i = int(idx[np.argmax(np.abs(z[idx]))])
                 row[f"{tag}_{hemi}_max"] = float(z[i])
                 row[f"{tag}_{hemi}_lat"] = float(lat_deg[i])
         out.append(row)
     return out
+
+
+def checkpoint_datetime(start_year, day):
+    """The checkpoint's ``day`` already counts from January 1 of start_year
+    (it includes start_day), so the instant is Jan 1 + day."""
+    return datetime(int(start_year), 1, 1) + timedelta(days=float(day))
 
 
 def era5_zonal_mean(src, when, p_dst_pa, lat_dst_deg):
@@ -112,8 +121,7 @@ def main(argv=None):
             raise ValueError("grid rows are not latitude circles")
         p_pa = top_level_pressures_pa(z["meta_vgrid"], a.levels, constants.p_ref)
         mzm = model_zonal_mean(z["u"], lat2d.shape[0], lat2d.shape[1], a.levels)
-        when = datetime(int(cfg["start_year"]), 1, 1) + timedelta(
-            days=float(cfg["start_day"]) + float(z["day"]))
+        when = checkpoint_datetime(cfg["start_year"], z["day"])
         ezm = era5_zonal_mean(a.src, when, p_pa, lat)
         for k, row in zip(a.levels, compare(mzm, ezm, lat)):
             print(f"STRAT {name} {when:%Y-%m-%d} lev {k} p {p_pa[a.levels.index(k)] / 100:.2f} hPa "

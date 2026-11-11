@@ -6,8 +6,10 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, os.pardir, "scripts", "validate"))
+from datetime import datetime  # noqa: E402
+
 from strat_zonal_wind_vs_era5 import (  # noqa: E402
-    compare, interp_logp, model_zonal_mean, top_level_pressures_pa)
+    checkpoint_datetime, compare, interp_logp, model_zonal_mean, top_level_pressures_pa)
 
 
 def test_top_level_pressures_and_refusal():
@@ -16,6 +18,13 @@ def test_top_level_pressures_and_refusal():
     np.testing.assert_allclose(top_level_pressures_pa([a, b], [0, 1], 1e5), [350.0, 750.0])
     with pytest.raises(ValueError, match="pure-pressure"):
         top_level_pressures_pa([a, b], [2], 1e5)
+    with pytest.raises(ValueError, match="non-negative"):
+        top_level_pressures_pa([a, b], [-1], 1e5)
+
+
+def test_checkpoint_date_is_jan1_plus_day():
+    assert checkpoint_datetime(1979, 30.0) == datetime(1979, 1, 31)
+    assert checkpoint_datetime(1979, 59.5) == datetime(1979, 3, 1, 12)
 
 
 def test_zonal_mean_rows_are_latitude():
@@ -45,3 +54,14 @@ def test_compare_zero_on_equal_and_picks_hemisphere_extrema():
     assert (r["model_sh_max"], r["model_sh_lat"]) == (10.0, -20.0)
     r2 = compare(zm + 2.0, zm, lat)[0]
     assert r2["rms"] == pytest.approx(2.0)
+
+
+def test_hemisphere_pick_stays_in_hemisphere_and_rms_is_cos_weighted():
+    lat = np.array([-60.0, 0.0, 60.0])
+    zm = np.array([[-30.0], [0.0], [0.0]])
+    r = compare(zm, zm, lat)[0]
+    assert r["model_nh_lat"] == 60.0 and r["model_nh_max"] == 0.0
+    bump = np.array([[0.0], [3.0], [0.0]])
+    w = np.cos(np.deg2rad(lat))
+    want = np.sqrt(w[1] * 9.0 / w.sum())
+    assert compare(zm + bump, zm, lat)[0]["rms"] == pytest.approx(want)
