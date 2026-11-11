@@ -252,7 +252,8 @@ ADVISORY_RATIO = 0.95
 
 
 def tripole_solver_advisory(*, tripole, mode, n_lat, n_lon, nlev, A_h_from_mesh,
-                            n_devices, precision, variant, precond, iters):
+                            n_devices, precision, variant, precond, iters,
+                            backend="gpu"):
     """One-line hint when the other measured tripole solver is faster here, else None.
 
     Advisory only. Outside the measured grid/counts/precisions: "unmeasured"
@@ -264,9 +265,9 @@ def tripole_solver_advisory(*, tripole, mode, n_lat, n_lon, nlev, A_h_from_mesh,
         return None
     row = TRIPOLE_SOLVER_RATIO.get(precision, {})
     if ((mode, n_lat, n_lon, nlev, A_h_from_mesh) != ("strong", 3072, 4352, 75, True)
-            or n_devices not in row):
+            or backend != "gpu" or n_devices not in row):
         return (f"[solver advisory] {current}: unmeasured for this grid / "
-                f"{n_devices} devices / {precision}.")
+                f"{n_devices} devices / {precision} / {backend}.")
     r = row[n_devices] if current == "jacobi200" else 1.0 / row[n_devices]
     if r >= ADVISORY_RATIO:
         return None
@@ -527,11 +528,6 @@ def main() -> int:
     _prec_label = "mixed" if _ocean_mixed else (
         "float64" if jax.config.jax_enable_x64 else "float32")
     _storage_bytes = np.dtype(get_policy().storage).itemsize
-    _advice = tripole_solver_advisory(
-        tripole=args.tripole, mode=args.mode, n_lat=args.n_lat, n_lon=args.n_lon,
-        nlev=args.nlev, A_h_from_mesh=args.A_h_from_mesh, n_devices=args.n_devices,
-        precision=_prec_label, variant=args.pcg_variant, precond=args.pcg_precond,
-        iters=args.pcg_fixed_iters)
 
     if args.multicontroller:
         # MUST run before any other JAX use (backend init). Shared helper:
@@ -539,6 +535,12 @@ def main() -> int:
         # SLURM/OMPI auto-detect or PALS mpi4py bootstrap.
         from legoesm.parallel.early_init import init_multicontroller_distributed
         init_multicontroller_distributed(args.coordinator)
+    _advice = tripole_solver_advisory(
+        tripole=args.tripole, mode=args.mode, n_lat=args.n_lat, n_lon=args.n_lon,
+        nlev=args.nlev, A_h_from_mesh=args.A_h_from_mesh, n_devices=args.n_devices,
+        precision=_prec_label, variant=args.pcg_variant, precond=args.pcg_precond,
+        iters=args.pcg_fixed_iters,
+        backend=jax.default_backend())
     if _advice and jax.process_index() == 0:
         print(_advice, flush=True)
 
