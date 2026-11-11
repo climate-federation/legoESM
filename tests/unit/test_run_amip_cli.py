@@ -6181,6 +6181,6 @@ def test_sundqvist_deck_names_the_snow_refill_width():
     # the row reaches the scheme through the real loader
     p = build_arg_parser()
     p.set_defaults(**load_yaml_config(path, p))
-    cfg = build_config_from_args(_postprocess_args(p.parse_args([]), p))
+    cfg = build_config_from_args(p.parse_args([]))
     assert cfg.bechtold_snow_refill_width_kg_m2_s == 1.0e-8
     assert _resolve_convection(cfg)[1].snow_refill_width_kg_m2_s == 1.0e-8
