@@ -2624,6 +2624,7 @@ def compute_sam_oceflx_fluxes(
     z_diag: float = 2.0,
     t_bot: jnp.ndarray | None = None,
     return_wind_speed: bool = False,
+    zeta_cap_width: float | None = None,
 ) -> tuple[jnp.ndarray, ...]:
     """SAM ocean surface fluxes — faithful port of ``oceflx.f90`` (CESM1).
 
@@ -2715,6 +2716,17 @@ def compute_sam_oceflx_fluxes(
         Latent heat flux [W/m²] (positive upward = surface moister).
     ustar : array
         Friction velocity [m/s].
+
+    KNOWN DIFFERENCE (RULE 5, user-approved, CESM lane only): the source
+    clamps hol to [-10, 10]; on ``variant="cesm"`` that clamp is the smooth C2
+    cap (``zeta_cap_width``, default the shared 2, i.e. identical for
+    |hol| <= 8; 0 = the source clamp, matched to 1e-10 on the CIME fixture).
+    Measured (scripts/tmp/probe_cesm_cap.py, z_bot 10 m, SST 290 K, wind
+    0.5-15 m/s x air-sea dT -10..+10 K, RH 0.6-0.95): 3.6-4.1 % of states move,
+    all at winds <= 3.6 m/s; largest change 5.7 % in stress, 5.1 % in sensible
+    and 5.5 % in latent heat, 2.8 % in u* (3 m/s, dT +8 K).  Per-state gaps on
+    the fixture: tests/core/oracle_fixtures/shr_flux_atmocn_hol_cap_gap.npz.
+    The SAM lane keeps the source clamp unless a width is passed.
     """
     if variant not in ("sam", "cesm"):
         raise ValueError(
@@ -2722,6 +2734,13 @@ def compute_sam_oceflx_fluxes(
     karman = KAPPA
     eps_v = 1.0 / constants.epsilon - 1.0
     z_ref = 10.0
+    # zeta_cap_width None: the shared smooth cap on the CESM lane, the source's
+    # hard clamp on the (byte-identical) SAM lane; an explicit value applies to
+    # either.
+    if zeta_cap_width is None:
+        cap_width = 0.0 if variant == "sam" else MOST_ZETA_CAP_WIDTH
+    else:
+        cap_width = zeta_cap_width
     umin = 1.0 if variant == "sam" else minwind
     _cdn = _sam_cdn if variant == "sam" else _cesm_cdn
     if n_iter is None:
@@ -2804,11 +2823,10 @@ def compute_sam_oceflx_fluxes(
             * (t_star / theta_atm + q_star / (1.0 / eps_v + q_atm))
             / jnp.maximum(u_star ** 2, 1e-12)
         )
-        # jnp.clip (not sign*min(abs)) clamps hol to [-10, 10] with the SAME
-        # forward values but a SMOOTH, nonzero gradient in (-10, 10): the old
-        # sign*min(abs) form has a zero-gradient flat spot at hol=0 (neutral)
-        # that severs d(flux)/d(state) sensitivity there under jax.grad.
-        hol = jnp.clip(hol, -10.0, 10.0)
+        # The source clamps hol to [-10, 10]; here that is the smooth C2 cap
+        # (width 0 = the clamp, as jnp.clip: no zero-gradient flat spot at
+        # hol = 0 unlike sign*min(abs)).
+        hol = _zeta_cap(hol, cap_width, _MOST_ZETA_CAP)
         stable = jnp.where(hol >= 0.0, 1.0, 0.0)
         xsq = jnp.maximum(jnp.sqrt(jnp.abs(1.0 - 16.0 * hol)), 1.0)
         xqq = jnp.sqrt(xsq)

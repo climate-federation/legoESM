@@ -211,6 +211,7 @@ def compute_surface_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
             variant="cesm", t_bot=t_bot, **_ws,
+            zeta_cap_width=config.most_zeta_cap_width,
         )
         return _apply_prescribed_scalar_fluxes(
             config, tau_x, tau_y, shflx, lhflx, ustar, rho) + tuple(_w)
@@ -629,6 +630,7 @@ def _single_tile_flux(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_bot=(config.z_ref if z_ref is None else z_ref),
             variant="cesm", t_bot=t_bot,
+            zeta_cap_width=config.most_zeta_cap_width,
         )
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         return compute_most_fluxes(

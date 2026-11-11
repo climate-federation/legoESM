@@ -319,3 +319,41 @@ def test_oracle_solvers_and_2m_diagnostic_use_the_cap_width(monkeypatch, scheme)
     assert len(oracle_sites) >= 3, seen      # solver zeta_u/zeta_t + 2 m shift
     assert all(w == 1.234 for w in oracle_sites), seen
     assert all(w == 0.0 for w, a in seen if not a), seen
+
+
+def test_cesm_lane_width_reaches_surface_layer_coupler_and_tas(monkeypatch):
+    import ast
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    from legoesm.atmosphere.physics.turbulence.surface_layer import compute_surface_fluxes
+    from legoesm.coupler.config import CouplerConfig
+    from legoesm.coupler.coupler import ocean_tile_response
+    from legoesm.core.coupling_fields import AtmToSurface
+
+    seen = []
+    real = bf._zeta_cap
+    monkeypatch.setattr(bf, "_zeta_cap",
+                        lambda z, w, *a: (seen.append(w), real(z, w, *a))[1])
+    x = [jnp.full(3, v) for v in (4.0, 0.0, 290.0, 0.008, 296.0, 0.011, 1.2)]
+    compute_surface_fluxes(*x, SurfaceLayerConfig(bulk_scheme="large_yeager_cesm",
+                                                  most_zeta_cap_width=1.234), t_bot=x[2])
+    assert seen and all(w == 1.234 for w in seen), seen
+    seen.clear()
+    shape = (2, 3)
+    full = lambda v: jnp.full(shape, v)  # noqa: E731
+    forcing = AtmToSurface(
+        sw_down=full(200.0), lw_down=full(300.0), precip_total=jnp.zeros(shape),
+        precip_snow=jnp.zeros(shape), T_lowest=full(270.0), q_lowest=full(0.002),
+        u_lowest=full(3.0), v_lowest=full(0.5), p_lowest=full(95000.0),
+        p_surface=full(101325.0), rho_lowest=full(1.2), cos_zenith=full(0.5),
+        co2_ppmv=jnp.asarray(400.0), has_radiation=jnp.asarray(1.0),
+        has_precipitation=jnp.asarray(1.0))
+    ocean_tile_response(forcing, full(285.0), jnp.zeros(shape), jnp.zeros(shape),
+                        CouplerConfig(bulk_scheme="large_yeager_cesm", most_zeta_cap_width=1.234))
+    assert seen and all(w == 1.234 for w in seen), seen
+    diag = ast.parse((REPO / "packages/coupler/legoesm/driver/diagnostics.py").read_text())
+    kws = [ast.unparse(k.value) for c in ast.walk(diag) if isinstance(c, ast.Call)
+           and getattr(c.func, "id", None) in ("compute_sam_oceflx_fluxes", "compute_most_fluxes")
+           for k in c.keywords if k.arg in ("zeta_cap_width", "most_zeta_cap_width")]
+    assert kws == ["self.surface_most_zeta_cap_width"] * 2, kws
+    drv = (REPO / "packages/coupler/legoesm/driver/model_driver.py").read_text()
+    assert '"surface_most_zeta_cap_width", MOST_ZETA_CAP_WIDTH)' in drv
