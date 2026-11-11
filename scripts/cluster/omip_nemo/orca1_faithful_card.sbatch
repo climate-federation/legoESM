@@ -118,6 +118,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   `# ---- wet domain = the oracle's: the Great Lakes, Caspian and Lake Victoria` \
   `# (207 cells wet in mesh_mask.nc, land in NEMO's domain_cfg) become land ----` \
   --nemo-domain-mask \
+  --nemo-geometry domain_cfg `# ROW 1: NEMO domain_cfg cells (bottom_level, bottom e3t_0, gdept_1d/e3w_1d ladders), no thin-cell snap` \
   `# EOS stays wright: --eos nemo_teos10 is REFUSED because NEMO's TEOS-10` \
   `# takes Conservative Temperature and ABSOLUTE salinity while our tracers` \
   `# are potential temperature and PRACTICAL salinity.` \
