@@ -228,3 +228,29 @@ def test_layer_thickness_uses_the_one_shared_stretch(zref):
     stale = np.asarray(coord.h_partial) * (
         (np.asarray(ssh) + np.asarray(ht_0)) / np.asarray(ht_0))[..., None]
     assert np.any(stale != got)
+
+
+def test_bottom_thickness_taken_as_given_even_above_the_reference(zref):
+    # eORCA1's deepest wet cell can be thicker than its reference level.
+    bl = jnp.array([2, 4, -1])
+    bt = np.array([50.0, 1000.0, 0.0])            # 1000 > dz_ref[4] = 680
+    zc = create_full_step_coordinate(zref, bl, bottom_thickness=bt)
+    h = np.asarray(zc.h_partial)
+    np.testing.assert_array_equal(h[0], [10.0, 30.0, 50.0, 0.0, 0.0])
+    np.testing.assert_array_equal(h[1], [10.0, 30.0, 80.0, 200.0, 1000.0])
+    np.testing.assert_array_equal(h[2], np.zeros(5))
+    np.testing.assert_array_equal(np.asarray(zc.bottom_level), [2, 4, -1])
+
+
+def test_bottom_thickness_none_keeps_full_cells(zref):
+    bl = jnp.array([2, 4, -1])
+    a = create_full_step_coordinate(zref, bl)
+    b = create_full_step_coordinate(zref, bl, bottom_thickness=None)
+    np.testing.assert_array_equal(np.asarray(a.h_partial), np.asarray(b.h_partial))
+
+
+@pytest.mark.parametrize("bt", [np.array([0.0, 5.0]), np.array([np.nan, 5.0]),
+                                np.array([5.0, 5.0, 5.0])])
+def test_bottom_thickness_refuses_bad_values(zref, bt):
+    with pytest.raises(ValueError, match="bottom_thickness"):
+        create_full_step_coordinate(zref, jnp.array([1, 3]), bottom_thickness=bt)

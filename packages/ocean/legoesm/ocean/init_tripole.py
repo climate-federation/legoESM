@@ -78,23 +78,8 @@ def mask_to_nemo_domain(land_mask, lat_deg, lon_deg, domain_cfg_path, *,
             f"domain_cfg frame {top.shape} is larger than the mesh frame "
             f"{mask.shape}; it must be the mesh's inner domain")
 
-    def _agrees(j0, i0):
-        sl = lat[j0:j0 + nj, i0:i0 + ni]
-        sn = lon[j0:j0 + nj, i0:i0 + ni]
-        if sl.shape != top.shape:
-            return False
-        dphi = np.abs(sl - dlat)
-        dlam = np.abs((sn - dlon + 180.0) % 360.0 - 180.0)
-        return bool(np.all(dphi < coord_tol_deg) and np.all(dlam < coord_tol_deg))
-
-    offset = next(((j0, i0) for j0 in range(ny - nj + 1)
-                   for i0 in range(nx - ni + 1) if _agrees(j0, i0)), None)
-    if offset is None:
-        raise ValueError(
-            f"no offset places the domain_cfg frame {top.shape} inside the mesh "
-            f"frame {mask.shape} with coordinates agreeing to {coord_tol_deg} deg; "
-            f"{domain_cfg_path} is not the domain_cfg of this mesh")
-    j0, i0 = offset
+    j0, i0 = nemo_domain_offset(lat, lon, dlat, dlon, domain_cfg_path,
+                                coord_tol_deg=coord_tol_deg)
     inner = mask[j0:j0 + nj, i0:i0 + ni]
     nemo_wet = top > 0
     ours_wet = inner > 0.5
@@ -106,6 +91,70 @@ def mask_to_nemo_domain(land_mask, lat_deg, lon_deg, domain_cfg_path, *,
           f"but dry for NEMO -> LAND; {n_dry_here_wet_there} cells dry in the "
           f"mesh but wet for NEMO (left dry: no bathymetry for them)")
     return mask
+
+
+def nemo_domain_offset(lat, lon, dlat, dlon, domain_cfg_path, *,
+                       coord_tol_deg: float = 1e-3):
+    """``(j0, i0)`` placing domain_cfg's inner frame ``dlat``/``dlon`` inside
+    the mesh frame ``lat``/``lon``: the first offset where every |dlat|,
+    |dlon| is below ``coord_tol_deg``.  Refuses to guess (``ValueError``)."""
+    nj, ni = dlat.shape
+    ny, nx = lat.shape
+
+    def _agrees(j0, i0):
+        sl = lat[j0:j0 + nj, i0:i0 + ni]
+        sn = lon[j0:j0 + nj, i0:i0 + ni]
+        if sl.shape != dlat.shape:
+            return False
+        dphi = np.abs(sl - dlat)
+        dlam = np.abs((sn - dlon + 180.0) % 360.0 - 180.0)
+        return bool(np.all(dphi < coord_tol_deg) and np.all(dlam < coord_tol_deg))
+
+    offset = next(((j0, i0) for j0 in range(ny - nj + 1)
+                   for i0 in range(nx - ni + 1) if _agrees(j0, i0)), None)
+    if offset is None:
+        raise ValueError(
+            f"no offset places the domain_cfg frame {dlat.shape} inside the mesh "
+            f"frame {lat.shape} with coordinates agreeing to {coord_tol_deg} deg; "
+            f"{domain_cfg_path} is not the domain_cfg of this mesh")
+    return offset
+
+
+def read_domain_cfg_geometry(domain_cfg_path, lat_deg, lon_deg):
+    """NEMO's own 3-D wet geometry from ``domain_cfg.nc``, in the mesh frame.
+
+    NEMO reads ``bottom_level`` (wet levels per column) and the 3-D
+    ``e3t_0``/``e3w_0`` scale factors from this file (``domzgr.F90:141-142``),
+    so these are the cells the oracle actually runs.  Cells outside the inner
+    frame (cyclic halo columns, north-fold row) come back dry with the 1-D
+    ``e3w_1d`` ladder; the caller fills the cyclic halo.
+
+    Returns ``(n_wet, bottom_e3t, e3w_0, e3w_1d)``: ``n_wet`` (n_lat, n_lon)
+    int (0 = land), ``bottom_e3t`` the bottom wet cell's ``e3t_0`` (0 on
+    land), ``e3w_0`` (n_lat, n_lon, n_levels), ``e3w_1d`` (n_levels,).
+    """
+    import xarray as xr
+    with xr.open_dataset(domain_cfg_path, mask_and_scale=False) as ds:
+        kb = _squeeze2d(np.asarray(ds["bottom_level"].values)).astype(np.int64)
+        dlat = _squeeze2d(np.asarray(ds["gphit"].values, dtype=np.float64))
+        dlon = _squeeze2d(np.asarray(ds["glamt"].values, dtype=np.float64))
+        e3t = np.asarray(ds["e3t_0"].values, dtype=np.float64)
+        e3w = np.asarray(ds["e3w_0"].values, dtype=np.float64)
+        e3w_1d = np.asarray(ds["e3w_1d"].values, dtype=np.float64).ravel()
+    while e3t.ndim > 3:
+        e3t, e3w = e3t[0], e3w[0]
+    lat = np.asarray(lat_deg, dtype=np.float64)
+    j0, i0 = nemo_domain_offset(lat, np.asarray(lon_deg, dtype=np.float64),
+                                dlat, dlon, domain_cfg_path)
+    nj, ni = kb.shape
+    jj, ii = np.nonzero(kb > 0)
+    n_wet = np.zeros(lat.shape, dtype=np.int64)
+    n_wet[j0:j0 + nj, i0:i0 + ni] = kb
+    bottom_e3t = np.zeros(lat.shape)
+    bottom_e3t[j0 + jj, i0 + ii] = e3t[kb[jj, ii] - 1, jj, ii]
+    e3w_0 = np.broadcast_to(e3w_1d, lat.shape + e3w_1d.shape).copy()
+    e3w_0[j0:j0 + nj, i0:i0 + ni] = np.moveaxis(e3w, 0, -1)
+    return n_wet, bottom_e3t, e3w_0, e3w_1d
 
 
 # Enclosed seas the observed IC cannot fill (PHC3 has no profile at any depth

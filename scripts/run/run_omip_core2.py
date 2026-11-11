@@ -1957,7 +1957,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   freeze_floor=None, freezing=None, ew_cyclic_overlap=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
                   mle=None, dz_ref_override=None, t_depth_ref_override=None,
-                  attach_nemo_ladders=False,
+                  attach_nemo_ladders=False, nemo_geometry="mesh_mask",
                   bottom_drag_scheme=None, bottom_drag_cd0=None,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
@@ -2444,7 +2444,41 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         print(f"[setup] EW cyclic-overlap ON (ORCA tripole seam): halo cols "
               f"filled col0<-col{n_lon-2}, col{n_lon-1}<-col1; "
               f"seam wet cells {int(_wet[:, 0].sum())}/{int(_wet[:, 1].sum())}")
-    if partial_cell:
+    if nemo_geometry == "domain_cfg":
+        # NEMO's own cells (domzgr.F90:141-142): bottom_level + e3t_0 of the
+        # bottom cell (may exceed e3t_1d) + 3-D e3w_0, no thin-cell snap.
+        import xarray as xr
+        from legoesm.core.precision import resolve_dtype as _resolve_dtype
+        from legoesm.grids.tripole import mesh_file_list
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.init_tripole import read_domain_cfg_geometry
+        from legoesm.ocean.vertical import create_full_step_coordinate
+        with xr.open_dataset(mesh_file_list(mesh_path)[0]) as _m:
+            _lat = np.squeeze(np.asarray(_m["gphit"].values, dtype=np.float64))
+            _lon = np.squeeze(np.asarray(_m["glamt"].values, dtype=np.float64))
+        n_wet, bot_e3t, e3w_0, _ = read_domain_cfg_geometry(
+            nemo_domain_cfg, _lat, _lon)
+        if ew_cyclic_overlap:
+            n_wet, bot_e3t, e3w_0 = (_ew_overlap_fill(x)
+                                     for x in (n_wet, bot_e3t, e3w_0))
+        if not np.array_equal(n_wet > 0, land_mask > 0.5):
+            raise ValueError(
+                f"--nemo-geometry domain_cfg: wet columns of {nemo_domain_cfg} "
+                f"differ from the mesh mask in {int(np.sum((n_wet > 0) != (land_mask > 0.5)))} "
+                "columns")
+        _dt = _resolve_dtype(None, "storage")
+        z_coord = create_full_step_coordinate(
+            z_coord, n_wet - 1, bottom_thickness=bot_e3t)._replace(
+            nemo_e3w_0=jnp.asarray(e3w_0, dtype=_dt),
+            nemo_e3w_mesh_reference=True)
+        H_bathy = np.asarray(z_coord.h_partial, dtype=np.float64).sum(axis=-1)
+        model = LatLonCGridOceanModel(grid, z_coord, config)
+        print(f"[setup] --nemo-geometry domain_cfg: {int((n_wet > 0).sum())} wet "
+              f"columns, {int((bot_e3t > np.asarray(z_coord.dz_ref)[np.maximum(n_wet - 1, 0)]).sum())} "
+              "bottom cells thicker than their reference level")
+    elif partial_cell:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
         )
@@ -7253,6 +7287,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "cells) that mesh_mask.nc keeps wet. Applies to "
                         "every grid built from the NEMO mesh (tripole, "
                         "mpas, latlon_bathy, cubed_sphere); not fesom.")
+    p.add_argument("--nemo-geometry", choices=("mesh_mask", "domain_cfg"),
+                   default="mesh_mask",
+                   help="Tripole 3-D cell geometry. mesh_mask (default): "
+                        "column depth from the mesh file + the thin-cell snap. "
+                        "domain_cfg: NEMO's own cells from --nemo-domain-cfg "
+                        "(bottom_level, bottom e3t_0, 3-D e3w_0, T ladder by "
+                        "e3_to_depth), no snap. Needs --grid tripole "
+                        "--partial-cell --nemo-vertical --nemo-domain-mask.")
     p.add_argument("--nemo-domain-cfg", type=str, default=None,
                    help="domain_cfg.nc for --nemo-domain-mask (default: the "
                         "ORCA1 domain_cfg).")
@@ -9186,6 +9228,20 @@ def main() -> int:
             "mpas applies it to the eORCA source mask/bathy BEFORE the Voronoi "
             "regrid (removes the imported ~73E seam). It is WRONG on a regular "
             f"period-nx lat-lon / cube grid. Got --grid {args.grid!r}.")
+    if args.nemo_geometry == "domain_cfg":
+        _need = [f for f, ok in (("--grid tripole", args.grid == "tripole"),
+                                 ("--partial-cell", args.partial_cell),
+                                 ("--nemo-vertical", args.nemo_vertical),
+                                 ("--nemo-domain-mask", args.nemo_domain_mask),
+                                 ("--bathy-smoothing-passes 0",
+                                  not args.bathy_smoothing_passes),
+                                 ("no --flat-bottom", not args.flat_bottom),
+                                 ("--nemo-vertical-file == --nemo-domain-cfg",
+                                  (args.nemo_vertical_file or _NEMO_DOMAIN_CFG)
+                                  == (args.nemo_domain_cfg or _NEMO_DOMAIN_CFG)))
+                 if not ok]
+        if _need:
+            raise ValueError(f"--nemo-geometry domain_cfg needs {', '.join(_need)}")
     if args.tripole_vmix != "none" and args.grid != "tripole":
         raise ValueError(
             "--tripole-vmix wires the vertical-mixing closure onto the "
@@ -9437,6 +9493,14 @@ def main() -> int:
         # found that --nemo-vertical alone left t_depth_ref=None, so the
         # option was still unreachable after it was given a CLI flag).
         _nemo_t_depth = _load_nemo_gdept_1d(_vfile)
+        if _nemo_t_depth is None and args.nemo_geometry == "domain_cfg":
+            # domain_cfg carries no gdept_1d; NEMO derives it from e3w_1d
+            # (depth_e3.F90:125-130).
+            import xarray as xr
+            from legoesm.ocean.fidelity.nemo_dino_mesh import e3_to_depth_1d
+            with xr.open_dataset(_vfile, decode_times=False) as _ds:
+                _e3w_1d = np.asarray(_ds["e3w_1d"].values, dtype=np.float64).ravel()
+            _nemo_t_depth, _ = e3_to_depth_1d(_nemo_dz, _e3w_1d)
         if _nemo_t_depth is not None and _nemo_t_depth.size != _nemo_dz.size:
             raise ValueError(
                 f"{_vfile}: gdept_1d has {_nemo_t_depth.size} levels but "
@@ -9533,6 +9597,7 @@ def main() -> int:
             mle=mle_cfg, dz_ref_override=_nemo_dz,
             t_depth_ref_override=_nemo_t_depth,
             attach_nemo_ladders=(args.tke_step_evaluation == "nemo_literal"),
+            nemo_geometry=args.nemo_geometry,
             bottom_drag_scheme=args.bottom_drag_scheme,
             bottom_drag_cd0=args.bottom_drag_cd0,
             bottom_drag_cdmax=args.bottom_drag_cdmax,
