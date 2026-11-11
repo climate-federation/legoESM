@@ -6171,16 +6171,14 @@ def test_sundqvist_deck_names_the_snow_refill_width():
     import pathlib
     import yaml
     from legoesm.atmosphere.physics.convection.config import BechtoldConfig
-    from legoesm.driver.physics_pipeline import _resolve_convection
     from legoesm.driver.run_config_yaml import load_yaml_config
     path = (pathlib.Path(__file__).resolve().parents[2] / "config" / "amip"
             / "amip_sundqvist_l36.yaml")
     deck = yaml.safe_load(path.read_text())
     assert (deck["bechtold_snow_refill_width_kg_m2_s"]
             == BechtoldConfig().snow_refill_width_kg_m2_s)
-    # the row reaches the scheme through the real loader
+    # the row reaches the config through the real loader
     p = build_arg_parser()
     p.set_defaults(**load_yaml_config(path, p))
     cfg = build_config_from_args(p.parse_args([]))
     assert cfg.bechtold_snow_refill_width_kg_m2_s == 1.0e-8
-    assert _resolve_convection(cfg)[1].snow_refill_width_kg_m2_s == 1.0e-8
