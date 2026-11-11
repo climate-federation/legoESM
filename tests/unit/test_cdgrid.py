@@ -3584,7 +3584,8 @@ def test_polar_gradient_matrix_built_in_float64_with_x64_off(n):
 
     c = n // 2
     with jax.enable_x64(True):
-        ref = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+        ref = create_cubed_sphere_cdgrid(
+            create_cubed_sphere(n, dtype=jnp.float64))
     with jax.enable_x64(False):
         got = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
     leaks = [k for k, v in got._asdict().items()
@@ -3607,6 +3608,28 @@ def test_nonstandard_base_refused_with_x64_off():
         with pytest.raises(ValueError, match="does not match the standard"):
             create_cubed_sphere_cdgrid(stretched)
 
+
+
+def test_metric_gradient_flows_through_base_positions_with_x64_off():
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+    with jax.enable_x64(False):
+        base = create_cubed_sphere(8)
+        g = jax.grad(lambda lat: jnp.sum(create_cubed_sphere_cdgrid(
+            base._replace(lat=lat)).grad_c00))(base.lat)
+    assert bool(jnp.all(jnp.isfinite(g)))
+    assert float(jnp.max(jnp.abs(g))) > 0.0
+
+
+def test_half_precision_base_refused_with_x64_off():
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+    with jax.enable_x64(False):
+        base = create_cubed_sphere(8, dtype=jnp.float16)
+        with pytest.raises(ValueError, match="must be float32"):
+            create_cubed_sphere_cdgrid(base)
 
 if __name__ == "__main__":
     unittest.main()

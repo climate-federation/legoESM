@@ -644,33 +644,49 @@ def _base_with_float64_positions(base):
     positions depend only on ``n`` and the gnomonic form, so they are rebuilt
     in float64 and checked against ``base`` (all six faces, or the one face a
     single-face panel matches); a base built another way (stretched, shifted)
-    is refused instead of silently upcast.
+    is refused instead of silently upcast. Gradients still flow through the
+    caller's positions; the match check is skipped while they are traced.
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
 
+    if base.x_cart.dtype != jnp.float32:
+        raise ValueError(
+            "create_cubed_sphere_cdgrid: with x64 off the base grid must be "
+            f"float32, got {base.x_cart.dtype}")
     up = jax.tree.map(
         lambda x: x.astype(jnp.float64)
         if hasattr(x, "dtype") and x.dtype == jnp.float32 else x, base)
-    regen = create_cubed_sphere(base.n, gnomonic=base.gnomonic_form)
+    regen = create_cubed_sphere(
+        base.n, gnomonic=base.gnomonic_form, dtype=jnp.float64)
     n_faces = base.lat.shape[0]
     candidates = [slice(0, 6)] if n_faces == 6 else (
         [slice(f, f + 1) for f in range(6)] if n_faces == 1 else [])
+    traced = any(isinstance(getattr(base, k), jax.core.Tracer)
+                 for k in _POSITION_FIELDS)
 
     def mismatch(faces):
         return max(float(jnp.max(jnp.abs(
             getattr(regen, k)[faces].astype(jnp.float32) - getattr(base, k))))
             for k in ("x_cart", "y_cart", "z_cart"))
 
-    errs = [(mismatch(faces), faces) for faces in candidates]
-    if not errs or min(e for e, _ in errs) > _POSITION_MATCH_TOL:
-        raise ValueError(
-            f"create_cubed_sphere_cdgrid: the {n_faces}-face base grid does not "
-            f"match the standard C{base.n} {base.gnomonic_form} grid "
-            f"(mismatch {min((e for e, _ in errs), default=float('nan')):.2e}), "
-            "so its positions cannot be rebuilt in float64. Build the C/D grid "
-            "with JAX_ENABLE_X64=1 for a non-standard base.")
-    faces = min(errs, key=lambda t: t[0])[1]
-    return up._replace(**{k: getattr(regen, k)[faces] for k in _POSITION_FIELDS})
+    if traced and n_faces == 6:
+        faces = slice(0, 6)
+    else:
+        errs = [(mismatch(f), f) for f in candidates] if not traced else []
+        if not errs or min(e for e, _ in errs) > _POSITION_MATCH_TOL:
+            raise ValueError(
+                f"create_cubed_sphere_cdgrid: the {n_faces}-face base grid "
+                f"does not match the standard C{base.n} {base.gnomonic_form} "
+                "grid (mismatch "
+                f"{min((e for e, _ in errs), default=float('nan')):.2e}), so "
+                "its positions cannot be rebuilt in float64. Build the C/D "
+                "grid with JAX_ENABLE_X64=1 for a non-standard or traced "
+                "single-face base.")
+        faces = min(errs, key=lambda t: t[0])[1]
+    return up._replace(**{
+        k: getattr(regen, k)[faces]
+        + (getattr(up, k) - jax.lax.stop_gradient(getattr(up, k)))
+        for k in _POSITION_FIELDS})
 
 
 def _to_32bit(x):
