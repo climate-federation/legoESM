@@ -25,7 +25,8 @@ Contract
 ``fluxes(params, inputs, aux) -> ((wtheta_l, wq_t), (u'w', v'w'), aux_new)``, each
 (n+1,). ``aux = (e, h_p)``: TKE at full levels (n,) [m^2/s^2] and the active plume
 depth (scalar) [m] lagged one step (used only by the gustiness term). The plume is
-diagnosed fresh every step. ``inputs.uw_s/vw_s`` are never read.
+diagnosed fresh every step. ``inputs.uw_s/vw_s`` replace the own stress when
+finite (a column with a surface law, PI 2026-11-11), else are not read.
 
 Conservation: theta_l, q_t, u, v move only through the returned interface fluxes; the
 harness converts them with -d(rho F)/dm, so column totals change by exactly the
@@ -105,7 +106,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-from legoesm.atmosphere.les_suite.candidate import half_level_average
+from legoesm.atmosphere.les_suite.candidate import half_level_average, surface_stress
 from legoesm.atmosphere.les_suite.scm_coupling import saturation_adjust
 from legoesm.core.bulk_flux import psi_m
 from legoesm.timestepping.tridiagonal import thomas_solve
@@ -225,9 +226,10 @@ def _most(p, x, h_p, thv, a_th, a_q):
     ust = KAPPA * u_eff / denom(jnp.zeros_like(u_eff))
     for _ in range(N_MOST_ITERS):   # static count: no data-dependent control flow
         ust = (1.0 - MOST_RELAX) * ust + MOST_RELAX * KAPPA * u_eff / denom(zeta_of(ust))
+    # a column with a surface law passes its stress, which replaces this law (PI 2026-11-11)
+    tau_u, tau_v, ust = surface_stress(x, -ust ** 2 * x.u[0] / u_eff,
+                                       -ust ** 2 * x.v[0] / u_eff, ust)
     zeta = bounded(zeta_of(ust))
-    tau_u = -ust ** 2 * x.u[0] / u_eff
-    tau_v = -ust ** 2 * x.v[0] / u_eff
     return ust, tau_u, tau_v, zeta, f_bs
 
 
@@ -396,6 +398,10 @@ def init_aux(inputs):
     n2_int = constants.g / _avg(thv) * _grad(thv, dzh)
     s2_int = _grad(x.u, dzh) ** 2 + _grad(x.v, dzh) ** 2
     s2_sfc = (x.u[0] ** 2 + x.v[0] ** 2) / (zf[0] * jnp.log(zf[0] / x.z0_m)) ** 2
+    # a column with a surface law passes its stress: u*/(kappa z_1) from it (PI 2026-11-11)
+    _, _, ust_law = surface_stress(x, 0.0, 0.0, 0.0)
+    s2_sfc = jnp.where(jnp.isfinite(x.uw_s) & jnp.isfinite(x.vw_s),
+                       (ust_law / (KAPPA * zf[0])) ** 2, s2_sfc)
     # full level 0 sits at z_1: the log-law shear there is exactly u*/(kappa z_1)
     s2_full = jnp.concatenate([jnp.reshape(s2_sfc, (1,)), _avg(s2_int), s2_int[-1:]])
     n2_full = jnp.concatenate([n2_int[:1], _avg(n2_int), n2_int[-1:]])

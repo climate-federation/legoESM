@@ -140,7 +140,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-from legoesm.atmosphere.les_suite.candidate import absorb_top
+from legoesm.atmosphere.les_suite.candidate import absorb_top, surface_stress
 from legoesm.atmosphere.les_suite.scm_coupling import saturation_adjust
 from legoesm.core.bulk_flux import psi_m
 from legoesm.timestepping.tridiagonal import thomas_solve
@@ -281,8 +281,9 @@ def fluxes_with_mass_flux(params, inputs, e, mass_flux_hook=None):
         return kap * Ug / den
 
     ustar = jax.lax.fori_loop(0, _N_USTAR_ITERS, _ustar_iter, kap * Ug / ln_z)
-    uw_s = -ustar ** 2 * inp.u[0] / Ug
-    vw_s = -ustar ** 2 * inp.v[0] / Ug
+    # a column with a surface law passes its stress, which replaces this law (PI 2026-11-11)
+    uw_s, vw_s, ustar = surface_stress(inp, -ustar ** 2 * inp.u[0] / Ug,
+                                       -ustar ** 2 * inp.v[0] / Ug, ustar)
     G_c = _g_inf(p["L_c"] * kap * Bs / (ustar ** 3 + _U_REG ** 3))   # = g_inf(-L_c/L)
     sigma_w = _SIGMA_W_PREF * jnp.cbrt(
         ustar ** 3 + kap * z1 * _B_D * jax.nn.softplus(Bs / _B_D))

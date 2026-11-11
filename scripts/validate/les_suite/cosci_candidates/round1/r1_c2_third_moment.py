@@ -13,7 +13,8 @@ Contract (packages/atmosphere/legoesm/atmosphere/les_suite/candidate.py)
   momentum fluxes u'w', v'w' are [m2/s2].
 * Index 0: w'theta_l' = inputs.w_theta_s and w'q_t' = inputs.w_qt_s, bit-exact.
   u'w', v'w' = this candidate's own surface stress, -u*^2 (U_1, V_1)/U_eff (drag,
-  opposite to the first-level wind). inputs.uw_s / vw_s are never read.
+  opposite to the first-level wind). inputs.uw_s / vw_s replace it when finite
+  (a column with a surface law, PI 2026-11-11), else are not read.
 * Index n is exactly 0 for all four fluxes. The momentum flux profile goes through
   ``absorb_top`` (cos^2 taper from Z_ABSORB_FRAC * z_top to the lid), so any
   momentum reaching the top is deposited in the mean flow in flux form.
@@ -127,7 +128,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from legoesm import constants
-from legoesm.atmosphere.les_suite.candidate import absorb_top, substepped
+from legoesm.atmosphere.les_suite.candidate import absorb_top, substepped, surface_stress
 from legoesm.atmosphere.physics._shared import buoyancy_coefficient, virtual_temperature
 from legoesm.core.bulk_flux import psi_m
 from legoesm.timestepping.tridiagonal import thomas_solve
@@ -315,8 +316,8 @@ def _fluxes_one_step(params, inputs, aux):
         zeta = -kappa * z1 * b_s / (ust ** 3 + U_REG ** 3)
         d_log = log_z - psi(zeta) + psi(zeta * z0 / z1)
         ust = kappa * u_eff / (D_MIN * jax.nn.softplus(d_log / D_MIN))
-    fu0 = -ust ** 2 * u1 / u_eff
-    fv0 = -ust ** 2 * v1 / u_eff
+    # a column with a surface law passes its stress, which replaces this law (PI 2026-11-11)
+    fu0, fv0, _ = surface_stress(inputs, -ust ** 2 * u1 / u_eff, -ust ** 2 * v1 / u_eff, ust)
 
     # surface plume state (inflow of the sweep)
     pp_0, _ = _split(-(aux["F_u"][0] * u1 + aux["F_v"][0] * v1) / z1, B0)

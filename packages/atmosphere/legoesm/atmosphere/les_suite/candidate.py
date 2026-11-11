@@ -20,7 +20,9 @@ and ``flux_b`` the pair ``(u'w', v'w')``. Index 0 is the surface interface and m
 equal the prescribed surface flux in ``inputs`` exactly, except the surface stress of
 a ``"both"`` candidate, which the candidate computes itself (the baseline's
 turbulence is computed and subtracted whole, so no surface stress is handed over and
-``inputs.uw_s``/``vw_s`` are NaN for that kind); index ``n`` is the model top and must be zero
+``inputs.uw_s``/``vw_s`` are NaN for that kind) — on a column with a surface law
+(CloudBench) ``uw_s``/``vw_s`` carry the law's stress and the candidate uses it (see
+:func:`surface_stress`); index ``n`` is the model top and must be zero
 (use :func:`absorb_top` to deposit a top-reaching wave flux into the mean flow
 inside the column). ``params`` values are traced scalars, so ``jax.grad`` reaches
 them. The operator may be implicit in time internally (``inputs.dt`` is given):
@@ -69,6 +71,23 @@ def owned_fluxes(kind: str, flux_a, flux_b) -> dict:
             raise ValueError('a "both" candidate returns ((wtheta, wqt), (uw, vw), aux)')
         return {"wtheta": flux_a[0], "wqt": flux_a[1], "uw": flux_b[0], "vw": flux_b[1]}
     raise ValueError(f"kind must be one of {KINDS}, got {kind!r}")
+
+
+def surface_stress(inputs, own_uw, own_vw, own_u_star):
+    """``(uw, vw, u_star)`` a ``"both"`` candidate uses at the surface: the stress the
+    column passes in (a column with a surface law, e.g. CloudBench; PI 2026-11-11) with
+    ``u_star = |tau|^(1/2)``, else (``uw_s``/``vw_s`` NaN) the candidate's own values
+    unchanged. Double-where keeps the root's gradient finite at zero stress."""
+    has = jnp.isfinite(inputs.uw_s) & jnp.isfinite(inputs.vw_s)
+    uw = jnp.where(has, inputs.uw_s, 0.0)
+    vw = jnp.where(has, inputs.vw_s, 0.0)
+    tau2 = uw * uw + vw * vw
+    pos = tau2 > 0.0
+    u_star = jnp.where(pos, jnp.where(pos, tau2, 1.0) ** 0.25, 0.0)
+    return (jnp.where(has, uw, own_uw), jnp.where(has, vw, own_vw),
+            jnp.where(has, u_star, own_u_star))
+
+
 #: Heat-flux conversions the harness offers. ``theta``: the flux moves mass-weighted
 #: θ_l (what every roster closure and the LES conserve; column enthalpy is NOT
 #: conserved). ``enthalpy``: the flux is converted with the interface Exner function
