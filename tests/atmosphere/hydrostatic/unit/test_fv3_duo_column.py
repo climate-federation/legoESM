@@ -509,12 +509,7 @@ def test_driver_column_lane_is_the_closed_lane_bitwise(tmp_path):
                       do_pert=True)["state"]["pt"])).max() > 0.0
 
 
-# max |column - closed| / peak per field after the run with Kessler on (x64
-# SLURM 2026-11-11), the same at the default and the hard limit.
-KESSLER_LANE_GAP = {"u": 8.641287134e-08, "v": 8.6492047376e-08,
-                    "pt": 1.8958674573e-08, "delp": 2.0664498255e-09}
-
-
+@pytest.mark.xfail(strict=True, reason="OPEN FINDING (#2405, measured x64 2026-11-11): with Kessler on, the column and closed lanes end 8.6e-8 (u, v), 1.9e-8 (pt), 2.1e-9 (delp) of peak apart, IDENTICALLY at the default and at the hard limit, so this is lane plumbing, not the smooth saturation switch; the docstring premise that Kessler is exactly zero on these columns no longer holds. Dry mass agrees to 1.6e-13.")
 def test_driver_column_lane_kessler_equals_the_closed_lane(tmp_path):
     """Kessler through the MPAS lane's own physics package on the column
     model vs the closed lane's bridge, same IC, same dt: the two runs
@@ -525,26 +520,12 @@ def test_driver_column_lane_kessler_equals_the_closed_lane(tmp_path):
     step, no fixer); the physics identity is the M2 rung.  The dry-mass
     drift is the dycore's own on both lanes (the moist arm creates ~7e-7
     of global water per step under pure advection -- a closed-lane
-    finding), so it is asserted EQUAL between the lanes, not zero.
-
-    RECORDED GAP (x64 SLURM 2026-11-11): with Kessler on, the two lanes'
-    end states differ by the per-field fractions of peak in
-    ``KESSLER_LANE_GAP`` -- identical at the default and at the hard limit
-    (sharpness 1e30), so this is NOT the smooth saturation switch: the
-    "tendency exactly zero" premise above no longer holds on these columns
-    and the lanes' Kessler plumbing differs at ~1e-7.  Open finding; the dry
-    mass still agrees (1.6e-13)."""
+    finding), so it is asserted EQUAL between the lanes, not zero."""
     col = _run_driver(tmp_path / "col", microphysics="kessler",
                       surface_bulk_scheme="none")
     closed = _run_driver(tmp_path / "closed", column=False,
                          microphysics="kessler")
-    win = {"u": (slice(None), CI, CE), "v": (slice(None), CE, CI)}
-    for k, want in KESSLER_LANE_GAP.items():
-        w = win.get(k, (slice(None), CI, CI))
-        x = np.asarray(col.state.native["state"][k][w])
-        y = np.asarray(closed.state["state"][k][w])
-        got = float(np.abs(x - y).max() / np.abs(y).max())
-        assert abs(got - want) <= 1e-6 * want + 1e-12, (k, got, want)
+    _assert_bundle_equal(col.state.native, closed.state, rel=1e-12)
     area = np.asarray(col.model.mesh.areaCell).reshape(6, N, N)
 
     def dry_mass(bb):
