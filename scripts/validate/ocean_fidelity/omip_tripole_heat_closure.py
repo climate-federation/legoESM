@@ -93,6 +93,8 @@ def load_snapshot(path):
 
 
 def build_z_coord(e3t_1d, gdept_1d, H_bathy):
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy(PrecisionPolicy.fp64())   # the runner's default; ladders round in fp64
     from legoesm.ocean.vertical import (
         create_partial_cell_coordinate,
         create_z_star_from_thicknesses,
@@ -237,9 +239,17 @@ def main(argv=None) -> int:
     manifest, rargs, rho_0, c_p = _manifest_args(run_dir)
     if getattr(rargs, "geothermal_map", None):
         raise SystemExit("FATAL: --geothermal-map runs are not supported (constant flux only)")
-    if rargs.ice_thermo or float(rargs.nudge_woa_tau_days) > 0.0:
-        raise SystemExit("FATAL: --ice-thermo freezing relaxation / WOA nudging change "
-                         "heat outside the closed terms; not supported")
+    if (rargs.ice_thermo or rargs.freeze_floor
+            or float(rargs.nudge_woa_tau_days) > 0.0):
+        raise SystemExit("FATAL: --ice-thermo freezing relaxation, --freeze-floor or "
+                         "WOA nudging change heat outside the closed terms; not supported")
+    if not (rargs.partial_cell and rargs.nemo_vertical) or rargs.fp32:
+        raise SystemExit("FATAL: only --partial-cell --nemo-vertical fp64 tripole runs "
+                         "are supported (the geometry reconstructed here)")
+    if any(run_dir.glob("snapshot_year*.npz")) or (
+            float(rargs.snapshot_every_days) != int(rargs.snapshot_every_days)):
+        raise SystemExit("FATAL: annual or fractional-day snapshots also drain the flux "
+                         "means; only whole-day snapshots are supported")
     from legoesm.ocean.physics.geothermal import GeothermalConfig
     flux_geo = 0.0
     if rargs.geothermal:

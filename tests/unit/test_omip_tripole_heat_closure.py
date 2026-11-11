@@ -78,20 +78,27 @@ def test_missing_flux_means_is_fatal():
 
 
 def test_partial_bottom_and_nonzero_eta_close_through_the_run_geometry():
-    """Thickness via the run's constructors: e3t ladder -> partial bottom
-    cell (H=800 in a 1000 m ladder) -> eta stretch (eta=+0.5 m)."""
+    """Thickness via the run's constructors (e3t ladder -> partial bottom cell,
+    H=800 in a 1000 m ladder -> eta stretch) against the analytic form
+    h_k = h_partial_k * (H + eta) / H, with eta and every level's T changing."""
     e3t = np.array([100.0, 300.0, 600.0])
-    Hb, eta = 800.0, 0.5
-    h_top = 100.0 * (Hb + eta) / Hb          # top cell, partial-cell z* stretch
+    h_partial = np.array([100.0, 300.0, 400.0])
+    Hb = 800.0
     a = _snap(5.0, 2880, 10.0)
     b = _snap(10.0, 5760, 10.0, q=Q)
-    b["T"][..., 0] += Q * DT_WIN / (RHO * CP * h_top)   # heat lands in the top cell
-    for s in (a, b):
+    a["T"][...] = np.array([12.0, 8.0, 3.0])
+    b["T"][...] = np.array([12.3, 8.1, 3.7])          # bottom cell moves most
+    for s, eta in ((a, 0.5), (b, -0.2)):
         s["H_bathy"][:] = Hb
         s["eta"][:] = eta
+    def content(s):
+        h = h_partial * (Hb + s["eta"][0, 0]) / Hb
+        return RHO * CP * float((s["T"][0, 0] * h).sum())
+    q_exact = (content(b) - content(a)) / DT_WIN       # per m2 of column
+    b["q_net_mean"][:] = q_exact
     zc = lambda s: build_z_coord(e3t, None, s["H_bathy"])[1]  # noqa: E731
     [row] = close_windows([a, b], zc, RHO, CP, 0.0, None, 3.34e5)
-    assert abs(row["residual_Wm2"]) < 1e-9 * Q
+    assert abs(row["residual_Wm2"]) < 1e-9 * abs(q_exact)
 
 
 def test_duration_must_match_the_snapshot_span():
