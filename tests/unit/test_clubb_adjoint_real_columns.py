@@ -137,3 +137,26 @@ def test_clubb_vjp_matches_finite_differences(case, clubb_dt):
         return f0(T0 + 0.1 * a, q0 * (1.0 + 1.0e-3 * b), z0 + 1.0 * c)
     zeros = (jnp.zeros_like(T0), jnp.zeros_like(q0), jnp.zeros_like(z0))
     check_grads(jax.jit(f), zeros, order=1, modes=("rev",))
+
+
+def test_clubb_gradient_stores_carries_not_iteration_residuals(case):
+    """Reverse mode remats each CLUBB sub-step and each bounded-loop
+    iteration: the stacked residuals per column of those loops stay at the
+    carry's size.  Measured on this fixture (two sub-steps): 2.25 and
+    0.27 MB/column without the remat, 0.014 and 0.04 with it; the bound sits
+    between."""
+    import sys
+    sys.path.insert(0, str(_ROOT / "scripts" / "validate"))
+    import production_ad_map as pam
+    cfg, fixed, (T0, q0, z0) = case
+    f = _fn(cfg._replace(clubb_dt=300.0), fixed)
+
+    def loss(T):
+        return sum(jnp.sum(a) for a in jax.tree_util.tree_leaves(f(T, q0, z0)))
+    rows = pam.loop_census(jax.grad(loss), T0, top=0)
+    ncol = T0.shape[0]
+    mine = [r for r in rows if r["src"].split(" ")[-1] in (
+        "(clubb_turbulence_prognostic)", "(_bounded_while)")]
+    assert {r["length"] for r in mine} >= {2, 31}
+    for r in mine:
+        assert r["stacked_mib"] * 2**20 / ncol <= 0.1e6, r
