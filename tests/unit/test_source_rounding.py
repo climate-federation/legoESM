@@ -190,15 +190,26 @@ def test_neumann_fill_mask_terms_are_stored_for_a_runtime_mask() -> None:
     constant = jax.jit(lambda f_: neumann_fill_cgrid(f_, mask))
     assert runtime.lower(f, mask).compile().as_text().count(" conditional(") == 3
     assert " conditional(" not in constant.lower(f).compile().as_text()
-    np.testing.assert_array_equal(
-        np.asarray(runtime(f, mask))[np.asarray(mask) > 0.5],
-        np.asarray(f)[np.asarray(mask) > 0.5])
+    # Every cell, land included, against a NumPy transcription of the fill
+    # (local backend: both latitude ends are poles, longitude periodic).
+    ref, m = np.asarray(f).copy(), np.asarray(mask).copy()
+    for _ in range(3):
+        nbrs = [(np.concatenate([a[:1], a[:-1]]), np.concatenate([a[1:], a[-1:]]),
+                 np.roll(a, 1, axis=1), np.roll(a, -1, axis=1)) for a in (ref, m)]
+        count = sum(nbrs[1])
+        fill = (m < 0.5) & (count > 0.0)
+        avg = sum(fv * mv[..., None] for fv, mv in zip(*nbrs)) / np.maximum(count, 1.0)[..., None]
+        ref, m = np.where(fill[..., None], avg, ref), np.where(fill, 1.0, m)
+    assert np.count_nonzero(np.asarray(mask) < 0.5) > 0
+    np.testing.assert_allclose(np.asarray(runtime(f, mask)), ref, rtol=1e-14, atol=0.0)
 
 
-def test_mle_density_is_stored(monkeypatch) -> None:
+@pytest.mark.parametrize("eos, stored", [("nemo_eos80", True), ("nemo_seos", False)])
+def test_mle_density_is_stored(monkeypatch, eos, stored) -> None:
     """The MLE density of the through-FCT route goes through nemo_source_store
-    in the step (ocean_model_latlon_cgrid ... _step_impl); traced on the GYRE
-    lane card with ORCA2's L5 MLE."""
+    in the step (ocean_model_latlon_cgrid ... _step_impl) for the source-rounded
+    NEMO polynomial, and not for an unrounded EOS; traced on the GYRE lane card
+    with ORCA2's L5 MLE."""
     import sys
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -221,11 +232,11 @@ def test_mle_density_is_stored(monkeypatch) -> None:
         set_policy(PrecisionPolicy.fp64())
         card = build_gyre_zco_lane_certified_card()
         base = card.recipe.model_config
-        cfg = base._replace(physics=base.physics._replace(
+        cfg = base._replace(eos=eos, physics=base.physics._replace(
             mle=orca2_l5_mle()._replace(through_fct=True, nemo_association=True)))
         model = om.LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
         state = model._seed_tke_preclosure_carry(card.recipe.initial_state)
         jax.eval_shape(lambda st: model._step_jitted(st, card.dt_s), state)
     finally:
         set_policy(prev)
-    assert "_step_impl" in callers
+    assert ("_step_impl" in callers) is stored
