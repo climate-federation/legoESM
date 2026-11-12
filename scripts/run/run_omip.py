@@ -2646,9 +2646,11 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         if regrid_weights is not None:
             print(f"  JRA55 regrid: {cache_n_lat}×{cache_n_lon} cache → model cell centres "
                   "(conservative; cache centres are offset from the model's)")
-        # Build 2-D lat/lon (in radians) for cos_zenith / atm_to_surface.
-        lat_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lat))[:, None])
-        lon_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lon))[None, :])
+        # 2-D lat/lon in radians for cos_zenith / atm_to_surface.  ``grid.lat``/``grid.lon``
+        # are ALREADY radians (create_latlon_grid); converting them again put every lat-lon
+        # cell inside 1.6 deg of the equator and 6.3 deg east of Greenwich for the sun angle.
+        lat_2d = jnp.asarray(np.asarray(grid.lat, dtype=np.float64)[:, None])
+        lon_2d = jnp.asarray(np.asarray(grid.lon, dtype=np.float64)[None, :])
 
     # Coupler config: LY09 bulk flux with ALL THREE reference heights at 10 m
     # -- the JRA55-do convention.  ``tas``, ``huss`` and ``uas`` in the
