@@ -469,7 +469,11 @@ land_soil_init: aridity
 # Land starting state: the res-6 spun-up soil water/snow (soil_ic_mpas6.npz) with
 # soil TEMPERATURE replaced by ERA5 1979-01-01 00 UTC stl1-4 on non-glacier land
 # (glaciers keep the spin-up). Built by scripts/data/regrid_land_ic.py
-# --era5-soil-t; provenance is in the file's metadata. data/ is gitignored:
+# --target-grid mpas --target-resolution 6 --target-clm-surfdata <the run's
+# CLM surfdata> (soil water carried as relative wetness between dry floor and
+# saturation, rebuilt on this run's soil, user 2026-11-12), then
+# --era5-soil-t; file md5 46541ce8bf5bc989f39de36b2ce39811; provenance is in
+# the file's metadata. data/ is gitignored:
 # stage the file in the launch directory.
 land_ic: data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101.npz
 
