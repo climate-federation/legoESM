@@ -38,6 +38,9 @@ _EXPECTED_DIFF = {
     # under it, and ecRad's own CAMS aerosol climatology
     "radiation", "aerosol_forcing", "rrtmgp_overhead_layer",
     "ecrad_ifs_aerosol_file",
+    # RRTMGP gas-table set: production selects "full"; ecRad reads neither
+    # set and validate_strict refuses "full" under it (2026-11-12)
+    "rrtmgp_gas_tables",
     # WMS non-orographic drag + METHOX (wms_ozone votes G1, M1-M2)
     "gravity_wave_drag", "ifs_methox", "ifs_ozone_chem",
 }

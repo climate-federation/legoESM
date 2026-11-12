@@ -84,6 +84,7 @@ aerosol_forcing: "off"          # the lane's aerosol forcing never reaches ecRad
 # in oracles/openifs_data_48r1/PROVENANCE.md), refreshed per forcing day.
 ecrad_ifs_aerosol_file: /burg/glab/users/pg2328/oracles/openifs_data_48r1/ifsdata_ecrad/aerosol_cams_climatology_43R3a.nc
 rrtmgp_overhead_layer: false    # RRTMGP-only row (validate_strict error); L18
+rrtmgp_gas_tables: reduced       # RRTMGP-only row (validate_strict error with ecrad_ifs)
 
 # --- production rows INERT under ifs_cloudsc + CUMASTRN (left as inherited) --
 # Morrison: morrison_flavor, morrison_do_graupel, morrison_autocon_fact,
