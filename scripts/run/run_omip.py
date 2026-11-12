@@ -3083,6 +3083,11 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         - tile_resp.lhflx
     )
 
+    # Route runoff exactly as the block / scan lanes do (static replacement, then the dry-to-wet
+    # plan): this single-step path used to hand the raw cache runoff to the ocean.
+    slc = slc._replace(friver=_route_runoff_stack(
+        slc.friver[None], jra55_state.get("runoff_map"),
+        static=jra55_state.get("runoff_static"))[0])
     fw = jra55_to_freshwater(slc, tile_resp.lhflx, evap=tile_resp.surface_mass_flux)
     sf = OceanSurfaceForcing(
         sw_down=atm.sw_down,
