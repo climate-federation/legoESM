@@ -32,7 +32,7 @@ conservation residual.
 
 ## Recorded results (2026-11-12)
 
-The three reproducible cases were rerun on the current legoESM stack at the
+The four reproducible cases were rerun on the current legoESM stack at the
 revision recorded in each manifest (`docs/wave/evidence/waden_20261112/`).
 float32, CPU, `JAX_ENABLE_X64=1`; the initial reference field only.
 
@@ -47,10 +47,12 @@ The direct WADEN public-rollout comparison is at float32 round-off over the
 full trajectory: tp1.1 is bit-identical, tp1.2 differs by 1.1e-07 (SWH
 relative L2) and 1.6e-07 (spectrum), tp1.4 by 1.8e-08 and 7.1e-08, tp2.1 by
 2.2e-06 and 3.7e-08. These are descriptive; they carry no newly invented
-pass tolerance. A float64 rerun closes tp1.2 and tp1.4 at 3e-16..9e-16
-relative. tp2.1 is 2.4e-08 (SWH) and 1.9e-14 (spectrum): the spectrum is at
-round-off, and the SWH residual is the `4 sqrt(m0)` diagnostic amplifying the
-lowest-m0 cells, not a trajectory divergence. No new gate is introduced.
+pass tolerance. The float64 manifests are committed alongside the float32 ones
+(`docs/wave/evidence/waden_20261112/fp64_tp1_2.json`, `fp64_tp1_4.json`,
+`fp64_tp2_1.json`). They close tp1.2 and tp1.4 at 3e-16..9e-16 relative.
+tp2.1 is 2.4e-08 (SWH) and 1.9e-14 (spectrum): the spectrum is at round-off,
+and the SWH residual is the `4 sqrt(m0)` diagnostic amplifying the lowest-m0
+cells, not a trajectory divergence. No new gate is introduced.
 
 The committed manifests record the code revision, environment (CPU, x64,
 default backend), resolved configuration with named fields, input SHA256s and
@@ -80,7 +82,10 @@ request the bundle `legoesm-wave-ww3-inputs-20261111.tar.gz` (SHA256
 that digest and extract it into an empty `ww3-inputs` directory; a usable
 bundle must contain all four `ww3_tp*/input` directories. A public
 redistribution location and data provenance/licensing record must be supplied
-before describing this as independently accessible public evidence.
+before describing this as independently accessible public evidence. The
+`reference_revision` field in the case configs is the legacy archive identity
+inherited from the source example (`b80fdce6...`); it resolves in no inspected
+checkout and is recorded as a declared label, not as a verified commit.
 
 From a checkout with the workspace installed:
 
@@ -88,6 +93,7 @@ From a checkout with the workspace installed:
 python scripts/experiment/install_federation.py --all --extras dev
 mkdir -p ww3-inputs
 tar -xzf /path/to/legoesm-wave-ww3-inputs-20261111.tar.gz -C ww3-inputs
+WW3_ROOT=ww3-inputs
 for case in tp1_1 tp1_2 tp1_4 tp2_1; do
   JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python -m scripts.validate.validate_wave_ww3 \
     --config "scripts/validate/wave_fidelity/configs/${case}.json" \

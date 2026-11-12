@@ -195,8 +195,14 @@ def run_case(config_path, data_root, output, dtype_name, waden_root=None):
     root = Path(__file__).resolve().parents[2]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True).strip()
-    inputs = sorted((Path(data_root)/config["data_directory"]/"input").glob("*"))
-    hashes = {str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs if p.is_file()}
+    # Hash only the files load_case actually reads: hashing every file in the
+    # directory made a differing WW3 log look like a data mismatch.
+    input_folder = Path(data_root)/config["data_directory"]/"input"
+    used_inputs = [input_folder/config["grid_file"]]
+    for pattern in config["spectrum_files"]:
+        used_inputs.extend(sorted(input_folder.glob(pattern)))
+    hashes = {str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in used_inputs if p.is_file()}
     manifest = dict(case=config["case"], config=config, resolved_config=_plain(wave_config),
                     legoesm_revision=revision, tracked_or_untracked_changes=dirty,
                     waden_revision=WADEN_REVISION, reference=case["provenance"], input_sha256=hashes,
