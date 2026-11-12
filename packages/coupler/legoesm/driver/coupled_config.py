@@ -195,6 +195,33 @@ class CoupledConfig(NamedTuple):
     ocean_restore_sst_tau_days: float = 0.0   # surface T relaxation [days]
     ocean_restore_sss_tau_days: float = 0.0   # surface S relaxation [days]
 
+    # --- Spectral wave component (optional) ---------------------------------
+    # ``wave_mode`` is "off" (default; every existing run is byte-identical) or
+    # "active".  Active requires a dynamic 3-D ocean (the depth/mask come from
+    # its H_bathy/land_mask), a WaveConfig, and converted NeuralSWM weights.
+    # The component is stepped once per coupling_dt with the neutral 10 m wind
+    # derived from the coupler's stress and roughness; its surface Stokes-drift
+    # magnitude is remapped to the ocean grid and consumed by KPP when
+    # KPPConfig.enable_langmuir is set.  ``wave_config`` is a
+    # ``legoesm.wave.WaveConfig`` (kept as ``object`` here so importing the
+    # coupler config does not import the wave package).
+    wave_mode: str = "off"
+    wave_config: object = None
+    wave_weights_path: str = ""
+    # Run the dynamic ocean's KPP vertical-mixing pipeline with the Langmuir
+    # enhancement, which consumes the wave component's surface Stokes drift
+    # (``OceanSurfaceForcing.u_stokes``).  Default False keeps the lat-lon
+    # ocean on its legacy constant-diffusion stack (byte-identical); True
+    # attaches the KPP pipeline the tripole/OMIP builder already uses.
+    kpp_langmuir: bool = False
+
+    def validate_strict(self) -> None:
+        """Reject an unknown wave mode before the wave component is built."""
+        if self.wave_mode not in ("off", "active"):
+            raise ValueError(
+                "CoupledConfig.wave_mode must be 'off' or 'active'; "
+                f"got {self.wave_mode!r}")
+
 
 # ============================================================================
 # Preset factories

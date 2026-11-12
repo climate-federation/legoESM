@@ -90,3 +90,52 @@ def test_differentiable():
         return jnp.mean(out.K_v)
     g = jax.grad(loss)(0.2)
     assert jnp.isfinite(g)
+
+
+def test_implicit_k_profile_path_reads_u_stokes_from_surface_forcing():
+    """The K-profile composer (the coupled driver's implicit path) forwards
+    ``OceanSurfaceForcing.u_stokes`` into KPP; dropping the pass-through makes
+    the two runs identical."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        compute_vertical_K_profiles,
+    )
+    from legoesm.ocean.state import OceanSurfaceForcing
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    grid = create_latlon_grid(n_lat=8, n_lon=12)
+    z = create_ocean_z_star(n_levels=5, H_max=4000.0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0)
+    # This composer path expects cell-centre velocities (C-grid faces here).
+    u_c = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
+    v_c = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
+    state = state._replace(
+        u=state.u.replace(data=u_c), v=state.v.replace(data=v_c))
+
+    defaults = OceanPhysicsConfig()
+    cfg = defaults._replace(
+        vertical_mixing=VerticalMixingConfig(
+            scheme="kpp", kpp=KPPConfig(K_conv=1.0, enable_langmuir=True)),
+        lateral_mixing=defaults.lateral_mixing._replace(scheme="none"),
+        surface_forcing=defaults.surface_forcing._replace(scheme="none"),
+        convection=defaults.convection._replace(scheme="none"),
+        shortwave_penetration=None,
+    )
+    shape = (8, 12)
+    tau = jnp.full(shape, 0.1, dtype=jnp.float64)
+
+    def run(u_stokes):
+        sf = OceanSurfaceForcing(
+            tau_x=tau, tau_y=jnp.zeros_like(tau), u_stokes=u_stokes)
+        return compute_vertical_K_profiles(state, z, sf, cfg)
+
+    K_default, A_default = run(None)
+    K_stokes, A_stokes = run(jnp.full(shape, 0.01, dtype=jnp.float64))
+    assert jnp.all(jnp.isfinite(K_stokes))
+    assert jnp.max(jnp.abs(K_stokes - K_default)) > 1e-6
+    assert jnp.max(jnp.abs(A_stokes - A_default)) > 1e-6

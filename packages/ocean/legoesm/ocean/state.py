@@ -377,6 +377,12 @@ class OceanSurfaceForcing(NamedTuple):
     # ``* 1.e-3`` conversion rather than pre-converting outside the model.
     utau_u_native: object = None       # jnp.ndarray | None [Pa], NEMO utauU at U faces
     vtau_v_native: object = None       # jnp.ndarray | None [Pa], NEMO vtauV at V faces
+    u_stokes: object = None
+    # Surface Stokes-drift MAGNITUDE [m/s] from a coupled wave component, on
+    # the ocean grid.  Consumed by the KPP Langmuir enhancement
+    # (``KPPConfig.enable_langmuir``): La_t = sqrt(u_star / u_stokes).
+    # ``None`` leaves the existing uniform ``langmuir_number_default``
+    # fallback untouched, so runs without a wave component are unchanged.
 
 
 class OceanConfig(NamedTuple):

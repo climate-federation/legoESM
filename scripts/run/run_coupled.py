@@ -723,6 +723,26 @@ def build_parser():
                              "off. Closes the air-sea budget only with the "
                              "prognostic 3D ocean; the slab/two-layer ocean "
                              "computes its own fluxes.")
+    # --- spectral wave component (optional) ----------------------------
+    parser.add_argument("--wave-mode", choices=["off", "active"], default="off",
+                        help="Coupled spectral wave component "
+                             "(CoupledConfig.wave_mode). Default off. 'active' "
+                             "requires --wave-config and --wave-weights and a "
+                             "dynamic 3-D ocean (depth/mask come from it).")
+    parser.add_argument("--wave-config", default="",
+                        help="JSON run deck for the wave component (grid, time "
+                             "steps, physics switches, network shape). See "
+                             "legoesm.wave.WaveConfig.from_json.")
+    parser.add_argument("--wave-weights", default="",
+                        help="Converted NeuralSWM weights (.npz) from "
+                             "scripts/data/convert_neuralswm_checkpoint.py.")
+    parser.add_argument("--kpp-langmuir", action="store_true",
+                        help="Enable the Langmuir enhancement on the dynamic "
+                             "ocean's EXISTING KPP vertical-mixing stack, "
+                             "consuming the wave component's surface Stokes "
+                             "drift. Requires --ocean dynamic and an ocean "
+                             "card that already selects KPP; a card with no "
+                             "KPP stack is refused, not upgraded silently.")
     # SLAB-only (LandConfig.runoff_scheme). topmodel = SIMTOP sub-grid saturated
     # fraction + topographic baseflow (Niu 2005 / CLM4.5); it is implemented and
     # param-spec'd but was unreachable -- land_scheme_overrides built
@@ -1308,6 +1328,19 @@ def main(argv=None, *, build_only=False):
     # explicit value is idempotent). Unset -> keep the preset's land choice.
     if args.land_scheme is not None:
         overrides.update(land_scheme_overrides(args.land_scheme))
+
+    if args.kpp_langmuir and args.ocean != "dynamic":
+        parser.error("--kpp-langmuir requires --ocean dynamic")
+    overrides["kpp_langmuir"] = args.kpp_langmuir
+
+    if args.wave_mode != "off":
+        if not args.wave_config or not args.wave_weights:
+            parser.error(
+                "--wave-mode active requires --wave-config and --wave-weights")
+        from legoesm.wave import WaveConfig
+        overrides["wave_mode"] = args.wave_mode
+        overrides["wave_config"] = WaveConfig.from_json(args.wave_config)
+        overrides["wave_weights_path"] = args.wave_weights
 
     coupled_cfg = PRESETS[args.preset](**overrides)
     # Runoff resolves against the EFFECTIVE land config (preset OR --land-scheme).

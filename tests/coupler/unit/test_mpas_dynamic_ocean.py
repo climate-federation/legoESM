@@ -32,7 +32,7 @@ _H_MAX = 4000.0
 _T_SFC_MEAN = 293.0          # K
 
 
-def _build_mpas_driver(level=2):
+def _build_mpas_driver(level=2, *, kpp_langmuir=False):
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.driver.coupled_esm_driver import CoupledESMDriver
     from legoesm.driver.coupled_config import CoupledConfig
@@ -41,6 +41,7 @@ def _build_mpas_driver(level=2):
     cfg = CoupledConfig(
         ocean_mode="dynamic", ocean_ic="rest",
         ocean_nlev=_NLEV, ocean_H_max_m=_H_MAX, ocean_dt_s=300.0,
+        kpp_langmuir=kpp_langmuir,
     )
     drv = CoupledESMDriver.__new__(CoupledESMDriver)
     drv.coupled_cfg = cfg
@@ -62,6 +63,12 @@ class TestMPASDynamicOcean(unittest.TestCase):
         # The two coupled-run overlays on the proven OMIP recipe.
         self.assertEqual(cfg.physics.surface_forcing.scheme, "none")
         self.assertTrue(cfg.normalize_freshwater)
+
+    def test_kpp_langmuir_reaches_the_mpas_card(self):
+        """The flag must enable Langmuir on the NEMO-match KPP stack."""
+        drv, _ = _build_mpas_driver(kpp_langmuir=True)
+        kpp = drv._ocean_model.config.physics.vertical_mixing.kpp
+        self.assertTrue(kpp.enable_langmuir)
 
     def test_cold_start_ic_finite_and_all_ocean(self):
         drv, mesh = _build_mpas_driver()

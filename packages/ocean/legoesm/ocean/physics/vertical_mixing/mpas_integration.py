@@ -368,11 +368,13 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
     B_f, Q_sfc_T, Q_sfc_S = _mpas_surface_buoyancy_flux(
         q_net, fw, salt, T_3d, S_3d, eos_fn=eos_fn, constants_config=constants_config)
 
+    u_stokes = getattr(surface_forcing, "u_stokes", None) if surface_forcing else None
     kpp_out = kpp_vertical_mixing(
         u_east_w, v_north_w, T_w, S_w,
         rho, eta, z_coord, J, cfg,
         tau_x=tau_x, tau_y=tau_y, B_f=B_f,
         Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
+        u_stokes=u_stokes,
         eos_fn=eos_fn,
         # The run's gravity, so the boundary-layer depth criterion and the
         # density it is applied to rest on the same constant.
