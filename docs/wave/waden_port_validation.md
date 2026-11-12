@@ -51,8 +51,9 @@ pass tolerance. The float64 manifests are committed alongside the float32 ones
 (`docs/wave/evidence/waden_20261112/fp64_tp1_2.json`, `fp64_tp1_4.json`,
 `fp64_tp2_1.json`). They close tp1.2 and tp1.4 at 3e-16..9e-16 relative.
 tp2.1 is 2.4e-08 (SWH) and 1.9e-14 (spectrum): the spectrum is at round-off,
-and the SWH residual is the `4 sqrt(m0)` diagnostic amplifying the lowest-m0
-cells, not a trajectory divergence. No new gate is introduced.
+and the SWH residual is the SWH functional's `1/(2 sqrt(m0))` sensitivity
+amplifying cell-local spectral round-off (both sides use the same moments
+routine), not a trajectory divergence. No new gate is introduced.
 
 The committed manifests record the code revision, environment (CPU, x64,
 default backend), resolved configuration with named fields, input SHA256s and
