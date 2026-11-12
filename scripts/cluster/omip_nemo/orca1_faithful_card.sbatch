@@ -124,7 +124,10 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --restart-save $OUT/restart_leg$LEG.npz \
   $([ "$LEG" = 2 ] && echo "--restart-from $OUT/restart_leg1.npz") \
   --output $OUT 2>&1 | tee $OUT/run.log | tail -40
-RC=$?   # pipefail: the driver's status, not tail's
+ST=("${PIPESTATUS[@]}")   # driver | tee | tail
+# The driver's own status when it failed; otherwise a tee/tail failure (an
+# unwritten run.log) still fails the job.
+RC=${ST[0]}; [ "$RC" = 0 ] && RC=$(( ST[1] ? ST[1] : ST[2] ))
 echo "=== card exit: $RC ==="
 echo "OUT=$OUT"
 echo DONE
